@@ -33,14 +33,20 @@ pub struct RoomManager {
 /// Owns both the original local state and the exclusive audio permission.
 /// Cancellation and task panic follow the same asynchronous release barrier.
 pub(super) struct ModeLease {
+    restoration: Option<ModeRestoration>,
+    pub completion: watch::Receiver<bool>,
+    pub receiver: super::receiver::ReceiverRegistry,
+}
+// Recovery data has no asynchronous Drop of its own. Runtime cancellation can
+// discard a recovery task without recursively spawning another recovery task.
+struct ModeRestoration {
     state: Arc<AppState>,
     active: Arc<AtomicBool>,
     saved: Option<LocalResume>,
     local_resume: SharedLocalResume,
     audio: Option<vmusic_audio::actor::ExclusiveAudio>,
     done: watch::Sender<bool>,
-    pub completion: watch::Receiver<bool>,
-    pub receiver: Arc<std::sync::Mutex<Option<super::receiver::ReceiverHandle>>>,
+    receiver: super::receiver::ReceiverRegistry,
 }
 impl ModeLease {
     async fn enter(
@@ -65,9 +71,13 @@ impl ModeLease {
                         .is_some_and(|id| id == &p.track_id)
                 })
                 .map(|p| p.position_ms)
-                .unwrap_or(snap.position_ms)
-        } else {
+                .unwrap_or(0)
+        } else if cursor.and_then(|index| queue.get(index)) == snap.track_id.as_ref() {
             snap.position_ms
+        } else {
+            // A newer load can optimistically select B while the actor still
+            // owns A. Its elapsed position must never become B's restore seek.
+            0
         };
         let saved = (queue, cursor, position);
         state.cancel_prepared_playback().await;
@@ -87,18 +97,26 @@ impl ModeLease {
         let (done, completion) = watch::channel(false);
         *cleanup.lock().unwrap_or_else(|e| e.into_inner()) = Some(completion.clone());
         *local_resume.lock().unwrap_or_else(|e| e.into_inner()) = Some(saved.clone());
+        let receiver = super::receiver::ReceiverRegistry::default();
+        active.store(true, Ordering::Release);
         let mut guard = Self {
-            state: state.clone(),
-            active,
-            local_resume,
-            saved: Some(saved),
-            audio: None,
-            done,
+            restoration: Some(ModeRestoration {
+                state: state.clone(),
+                active,
+                local_resume,
+                saved: Some(saved),
+                audio: None,
+                done,
+                receiver: receiver.clone(),
+            }),
             completion,
-            receiver: Arc::default(),
+            receiver,
         };
-        guard.active.store(true, Ordering::Release);
-        guard.audio = Some(
+        guard
+            .restoration
+            .as_mut()
+            .expect("new lease owns restoration")
+            .audio = Some(
             state
                 .audio
                 .acquire_exclusive()
@@ -111,19 +129,21 @@ impl ModeLease {
         Ok(guard)
     }
     pub async fn finish(mut self) {
-        self.restore().await;
-    }
-    async fn restore(&mut self) {
-        let receiver = self
-            .receiver
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take();
-        if let Some(receiver) = receiver {
-            close_receiver(receiver).await;
+        if let Some(restoration) = &mut self.restoration {
+            restoration.restore().await;
         }
-        if let Some((queue, cursor, position)) = self.saved.take() {
+    }
+}
+impl ModeRestoration {
+    async fn restore(&mut self) {
+        self.receiver.begin_close();
+        let _ = self.receiver.close_current().await;
+        if self.saved.is_some() {
             let _commit = self.state.play_commit.lock().await;
+            let mut queue_state = self.state.queue.lock().await;
+            let mut cursor_state = self.state.cursor.lock().await;
+            let mut pending_state = self.state.pending_restore_seek.lock().await;
+            let (queue, cursor, position) = self.saved.take().expect("restoration is serialized");
             let pending =
                 cursor
                     .and_then(|i| queue.get(i))
@@ -131,9 +151,9 @@ impl ModeLease {
                         track_id: track_id.clone(),
                         position_ms: position,
                     });
-            *self.state.queue.lock().await = queue;
-            *self.state.cursor.lock().await = cursor;
-            *self.state.pending_restore_seek.lock().await = pending;
+            *queue_state = queue;
+            *cursor_state = cursor;
+            *pending_state = pending;
             self.state.publish(crate::state::WsEvent::QueueChanged);
             self.local_resume
                 .lock()
@@ -147,28 +167,15 @@ impl ModeLease {
 }
 impl Drop for ModeLease {
     fn drop(&mut self) {
-        if self.saved.is_none() {
+        let Some(mut recovery) = self.restoration.take().filter(|r| r.saved.is_some()) else {
             return;
-        }
-        let mut recovery = Self {
-            state: self.state.clone(),
-            active: self.active.clone(),
-            saved: self.saved.take(),
-            local_resume: self.local_resume.clone(),
-            audio: self.audio.take(),
-            done: self.done.clone(),
-            completion: self.completion.clone(),
-            receiver: self.receiver.clone(),
         };
-        tokio::spawn(async move {
-            recovery.restore().await;
-        });
-    }
-}
-pub(super) async fn close_receiver(receiver: super::receiver::ReceiverHandle) {
-    let completion = receiver.clone();
-    if receiver.shutdown().await.is_err() {
-        let _ = completion.wait_closed().await;
+        recovery.receiver.begin_close();
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                recovery.restore().await;
+            });
+        }
     }
 }
 impl Default for RoomManager {
@@ -764,6 +771,187 @@ mod tests {
         state.audio.shutdown();
         let _ = thread.join();
     }
+
+    #[tokio::test]
+    async fn entering_room_during_optimistic_track_selection_does_not_misbind_position() {
+        let (state, thread) = crate::state::tests::playback_state().await;
+        let state = Arc::new(state);
+        state
+            .audio
+            .load("fixture-a.wav", Some("a".into()))
+            .await
+            .unwrap();
+        state.audio.seek(60_000).await.unwrap();
+        *state.queue.lock().await = vec!["a".into(), "b".into()];
+        // B has been selected while the asynchronous B load is still pending;
+        // the audio owner still reports A's sixty-second position.
+        *state.cursor.lock().await = Some(1);
+        let lease = ModeLease::enter(
+            state.clone(),
+            state.room.active.clone(),
+            &state.room.cleanup,
+            state.room.local_resume.clone(),
+        )
+        .await
+        .unwrap();
+        lease.finish().await;
+        assert_eq!(
+            *state.pending_restore_seek.lock().await,
+            Some(crate::state::PendingRestore {
+                track_id: "b".into(),
+                position_ms: 0
+            })
+        );
+        assert!(!state.audio.snapshot().playing);
+        state.audio.shutdown();
+        thread.join().unwrap();
+    }
+    #[tokio::test]
+    async fn normal_host_end_restores_local_mode_and_forgets_saved_guest_membership() {
+        use super::super::credentials::{ProfileSecrets, RecentRoom};
+        use vmusic_lan::{
+            client,
+            server::{Inbound, RoomServer},
+        };
+        let identity = vmusic_lan::tls::HostIdentity::generate().unwrap();
+        let room_id = uuid::Uuid::new_v4();
+        let (server, mut inbound) = RoomServer::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            room_id,
+            uuid::Uuid::new_v4(),
+            &identity,
+            Default::default(),
+        )
+        .await
+        .unwrap();
+        let invitation = server.transport.invite(Default::default()).unwrap();
+        let paired = client::pair(
+            server.address,
+            server.fingerprint,
+            room_id,
+            &invitation,
+            "guest",
+        )
+        .await
+        .unwrap();
+        let descriptor = RecentRoom {
+            version: 1,
+            address: server.address,
+            fingerprint: server.fingerprint.hex(),
+            room_id,
+            member_id: paired.member_id,
+            name: "guest".into(),
+            listen: false,
+        };
+        let backend = Arc::new(crate::secrets::MemoryStore::default());
+        let profile = std::env::temp_dir().join(format!("room-end-{}", uuid::Uuid::new_v4()));
+        let secrets = ProfileSecrets::new(&profile, backend);
+        let responder = tokio::spawn(async move {
+            while let Some(event) = inbound.recv().await {
+                if let Inbound::Request { reply, .. } = event {
+                    let _ =
+                        reply.send(json!({"ok":true,"result":{"permissions":{"listen":false}}}));
+                }
+            }
+        });
+        let (state, audio_thread) = resume_test_state().await;
+        let lease = ModeLease::enter(
+            state.clone(),
+            state.room.active.clone(),
+            &state.room.cleanup,
+            state.room.local_resume.clone(),
+        )
+        .await
+        .unwrap();
+        let session = super::super::guest::start_session(
+            state.clone(),
+            descriptor,
+            paired.credential,
+            secrets.clone(),
+            lease,
+            state.room.projection.clone(),
+            state.room.active.clone(),
+        )
+        .await
+        .unwrap();
+        assert!(secrets.saved_room().await.unwrap().is_some());
+        server.shutdown().await;
+        tokio::time::timeout(std::time::Duration::from_secs(3), session.done)
+            .await
+            .unwrap_or_else(|e| {
+                panic!(
+                    "guest did not finish: {e}; projection={}",
+                    state.room.snapshot()
+                )
+            })
+            .unwrap();
+        assert!(!state.room.is_active());
+        assert_eq!(state.room.snapshot()["mode"], "local");
+        assert!(secrets.saved_room().await.unwrap().is_none());
+        state.audio.shutdown();
+        audio_thread.join().unwrap();
+        responder.await.unwrap();
+    }
+    #[test]
+    fn runtime_shutdown_drops_pending_mode_recovery_without_rescheduling_itself() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (state, audio) = runtime.block_on(resume_test_state());
+        let lease = runtime
+            .block_on(ModeLease::enter(
+                state.clone(),
+                state.room.active.clone(),
+                &state.room.cleanup,
+                state.room.local_resume.clone(),
+            ))
+            .unwrap();
+        let completion = lease.completion.clone();
+        let commit = runtime.block_on(state.play_commit.lock());
+        runtime.block_on(async move {
+            drop(lease);
+            tokio::task::yield_now().await;
+        });
+        assert!(!*completion.borrow());
+        // Recovery is blocked on the real commit lock when Tokio cancels it.
+        // A Drop that spawned another ModeLease would recurse here.
+        drop(runtime);
+        drop(commit);
+        assert!(!state.audio.exclusively_owned());
+        state.audio.shutdown();
+        audio.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn dropping_mode_lease_seals_native_creation_before_scheduling_recovery() {
+        let (state, thread) = resume_test_state().await;
+        let lease = ModeLease::enter(
+            state.clone(),
+            state.room.active.clone(),
+            &state.room.cleanup,
+            state.room.local_resume.clone(),
+        )
+        .await
+        .unwrap();
+        let registry = lease.receiver.clone();
+        let mut completion = lease.completion.clone();
+        let commit = state.play_commit.lock().await;
+        drop(lease);
+        // Recovery cannot acquire the commit lock yet. Native creation must
+        // already be sealed by synchronous Drop, before that task can run.
+        assert!(registry.is_closing());
+        assert!(!*completion.borrow());
+        assert!(state.audio.exclusively_owned());
+        drop(commit);
+        while !*completion.borrow_and_update() {
+            completion.changed().await.unwrap();
+        }
+        assert!(!state.audio.exclusively_owned());
+        state.audio.shutdown();
+        thread.join().unwrap();
+    }
+
     #[tokio::test]
     async fn leave_waits_for_cancelled_startup_even_before_a_session_is_published() {
         let (state, thread) = crate::state::tests::playback_state().await;

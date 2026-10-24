@@ -7,7 +7,7 @@ use super::presentation::{
     Boundaries, Boundary, MixSettings, MixerTimeline, PresentationCatalog, PresentedTrack,
 };
 use super::producer::{FailureStage, Producer, ProducerEvent, Source};
-use super::receiver::{self, ReceiverEvent, ReceiverHandle};
+use super::receiver::{self, ReceiverEvent, ReceiverHandle, ReceiverRegistry};
 use super::resources::SharedLibrary;
 use crate::state::AppState;
 use serde_json::{json, Value};
@@ -126,7 +126,7 @@ struct Owner {
     local: Option<ReceiverHandle>,
     local_identity: StreamIdentity,
     local_events: mpsc::Receiver<ReceiverEvent>,
-    receiver_lease: Arc<std::sync::Mutex<Option<ReceiverHandle>>>,
+    receiver_registry: ReceiverRegistry,
     output: OutputSettings,
     preferences: super::output_preferences::Preferences,
     output_preparing: bool,
@@ -248,7 +248,6 @@ pub(crate) async fn start(
         let (_sender, events) = mpsc::channel(1);
         (None, events)
     };
-    *lease.receiver.lock().unwrap_or_else(|e| e.into_inner()) = local.clone();
     let cleanup = lease.completion.clone();
     let chat_transport = server.transport.clone();
     let notify = Arc::new(move |value: Value| {
@@ -306,7 +305,7 @@ pub(crate) async fn start(
         local,
         local_identity,
         local_events,
-        receiver_lease: lease.receiver.clone(),
+        receiver_registry: lease.receiver.clone(),
         output,
         preferences,
         output_preparing: false,
@@ -338,13 +337,11 @@ pub(crate) async fn start(
             owner.publish().await;
         }
         // No UI lifetime participates in these native output leases.
-        if let Some(receiver) = owner.local.take() {
-            let completion = receiver.clone();
-            if let Err(error) = receiver.shutdown().await {
-                owner.error = Some(error.to_string());
-                owner.publish().await;
-                let _ = completion.wait_closed().await;
-            }
+        owner.receiver_registry.begin_close();
+        owner.local.take();
+        if let Err(error) = owner.receiver_registry.close_current().await {
+            owner.error = Some(error.to_string());
+            owner.publish().await;
         }
         owner.server.transport.end();
         drop(owner.advertisement.take());
@@ -566,17 +563,14 @@ impl Owner {
                     return Ok(());
                 }
                 self.output_preparing = true;
-                let previous = self.local.take();
+                self.local.take();
                 self.endpoints.remove(&OWNER);
                 let options = output_options(&settings, &self.clock, self.format.sample_rate);
                 let clock = self.clock.clone();
                 let identity = self.local_identity;
-                let registry = self.receiver_lease.clone();
+                let registry = self.receiver_registry.clone();
                 self.jobs.spawn(async move {
-                    if let Some(previous) = previous {
-                        super::manager::close_receiver(previous).await;
-                    }
-                    *registry.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                    let _ = registry.close_current().await;
                     let result = if enabled {
                         receiver::spawn(options, identity, clock, registry)
                             .await
@@ -3090,7 +3084,7 @@ pub(super) mod join_retry_tests {
                 session_id: Uuid::new_v4(),
             },
             local_events,
-            receiver_lease: Arc::new(std::sync::Mutex::new(None)),
+            receiver_registry: ReceiverRegistry::default(),
             output: OutputSettings::default(),
             output_preparing: false,
             dsp: DspParams::default(),

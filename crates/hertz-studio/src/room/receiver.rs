@@ -222,6 +222,7 @@ enum Command {
     Pcm(Pcm),
     Mapping(ClockMapping),
     Volume(f32),
+    TestOutput(oneshot::Sender<Result<(), ReceiverError>>),
 }
 
 struct Envelope {
@@ -377,12 +378,20 @@ impl ReceiverHandle {
         self.status.borrow().clone()
     }
 
+    pub async fn test_output(&self) -> Result<(), ReceiverError> {
+        let (reply, response) = oneshot::channel();
+        self.send(Command::TestOutput(reply))?;
+        tokio::time::timeout(Duration::from_secs(1), response)
+            .await
+            .map_err(|_| ReceiverError::Output("test output request timed out".into()))?
+            .map_err(|_| ReceiverError::Closed)?
+    }
+
     /// Stops this entire session, including other handle clones. Success means
     /// the native output was dropped on its owner thread, so an exclusive
     /// device lease may be released. A timeout must not be treated as release.
     pub async fn shutdown(self) -> Result<(), ReceiverError> {
-        self._lease.shutdown.store(true, Ordering::Release);
-        self.disconnect();
+        self.request_shutdown();
         tokio::time::timeout(Duration::from_secs(3), self.wait_closed())
             .await
             .map_err(|_| ReceiverError::Output("native output shutdown timed out".into()))?
@@ -395,19 +404,109 @@ impl ReceiverHandle {
         }
         Ok(())
     }
+
+    fn request_shutdown(&self) {
+        self._lease.shutdown.store(true, Ordering::Release);
+        self.disconnect();
+    }
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct ReceiverRegistry {
+    state: Arc<Mutex<RegistryState>>,
+}
+
+#[derive(Default)]
+struct RegistryState {
+    closing: bool,
+    current: Option<ReceiverHandle>,
+}
+
+impl ReceiverRegistry {
+    #[cfg(test)]
+    pub(super) fn is_closing(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .closing
+    }
+
+    /// Permanently prevents new native workers before lifecycle recovery is
+    /// scheduled. Registration holds this same short, synchronous lock through
+    /// native thread creation, so recovery cannot overlook an escaping worker.
+    pub fn begin_close(&self) {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        state.closing = true;
+        if let Some(receiver) = &state.current {
+            receiver.request_shutdown();
+        }
+    }
+
+    fn register(
+        &self,
+        receiver: &ReceiverHandle,
+        start_worker: impl FnOnce() -> Result<(), ReceiverError>,
+    ) -> Result<(), ReceiverError> {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        if state.closing {
+            return Err(ReceiverError::Closed);
+        }
+        if state.current.is_some() {
+            return Err(ReceiverError::Invalid("previous receiver has not closed"));
+        }
+        // Publish before starting: unwinding in thread creation must also leave
+        // the native completion barrier owned by lifecycle recovery.
+        state.current = Some(receiver.clone());
+        if let Err(error) = start_worker() {
+            state.current = None;
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// Retains the completion handle in the registry throughout every await.
+    /// Cancelling a reconfiguration or recovery cannot discard its barrier.
+    /// This can close one worker for replacement without reopening a registry
+    /// permanently sealed by begin_close().
+    pub async fn close_current(&self) -> Result<(), ReceiverError> {
+        let receiver = self
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .current
+            .clone();
+        let Some(receiver) = receiver else {
+            return Ok(());
+        };
+        let result = receiver.clone().shutdown().await;
+        if result.is_err() {
+            let _ = receiver.wait_closed().await;
+        }
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        // Another closer may have finished A and registered B while this
+        // closer was suspended. Only A's completion permits removing A.
+        if state
+            .current
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(&current._lease, &receiver._lease))
+        {
+            state.current = None;
+        }
+        result
+    }
 }
 
 /// `OutputOptions.clock_origin` is normalized to the supplied shared clock.
 /// CPAL never crosses an await or thread boundary. Initialization errors are
-/// returned before the handle is published. A replacement session uses a new
-/// spawn after the prior worker's completion barrier. `registry` is populated
-/// before the first await, so an owning lifecycle guard can close and await
-/// the worker even when initialization itself is cancelled.
+/// returned before the caller receives a handle. A replacement session uses a
+/// new spawn after the prior worker's completion barrier. The lifecycle registry
+/// atomically owns the worker before it can escape, including during cancelled
+/// initialization, and rejects creation once restoration has started.
 pub(crate) async fn spawn(
     mut options: OutputOptions,
     identity: StreamIdentity,
     clock: MonotonicClock,
-    registry: Arc<Mutex<Option<ReceiverHandle>>>,
+    registry: ReceiverRegistry,
 ) -> Result<(ReceiverHandle, mpsc::Receiver<ReceiverEvent>), ReceiverError> {
     validate_options(&options)?;
     options.clock_origin = clock.origin();
@@ -454,123 +553,125 @@ pub(crate) async fn spawn(
         }),
     };
     let (initialized, init_rx) = oneshot::channel();
-    std::thread::Builder::new()
-        .name("lan-presentation".into())
-        .spawn(move || {
-            // Declared before the engine, therefore dropped after CPAL on
-            // normal return and unwinding alike.
-            let _done = WorkerDone(done_tx);
-            let output = match ScheduledOutput::open(options) {
-                Ok(output) => output,
-                Err(error) => {
-                    let _ = initialized.send(Err(ReceiverError::Output(error.to_string())));
+    registry.register(&handle, || {
+        std::thread::Builder::new()
+            .name("lan-presentation".into())
+            .spawn(move || {
+                // Declared before the engine, therefore dropped after CPAL on
+                // normal return and unwinding alike.
+                let _done = WorkerDone(done_tx);
+                let output = match ScheduledOutput::open(options) {
+                    Ok(output) => output,
+                    Err(error) => {
+                        let _ = initialized.send(Err(ReceiverError::Output(error.to_string())));
+                        return;
+                    }
+                };
+                // CPAL may choose a supported rate different from the preference.
+                // The receiver's memory/duration proof applies to this actual rate.
+                if !(8_000..=192_000).contains(&output.format().sample_rate) {
+                    let _ = initialized.send(Err(ReceiverError::Output(
+                        "actual device rate is outside 8kHz..192kHz receiver policy".into(),
+                    )));
                     return;
                 }
-            };
-            // CPAL may choose a supported rate different from the preference.
-            // The receiver's memory/duration proof applies to this actual rate.
-            if !(8_000..=192_000).contains(&output.format().sample_rate) {
-                let _ = initialized.send(Err(ReceiverError::Output(
-                    "actual device rate is outside 8kHz..192kHz receiver policy".into(),
-                )));
-                return;
-            }
-            let output = NativeOutput {
-                output,
-                emergency: Arc::clone(&emergency),
-                generation: Arc::clone(&generation),
-                armed_generation: Arc::clone(&armed_generation),
-                trip: Arc::clone(&trip),
-                invalidated: Arc::clone(&invalidated),
-                disconnected: Arc::clone(&disconnected),
-                shutdown: Arc::clone(&shutdown),
-            };
-            output.publish_emergency();
-            let mut engine = Engine::new(output, identity, budget);
-            status_tx.send_replace(engine.status(0));
-            if initialized.send(Ok(())).is_err() {
-                return;
-            }
-            let mut last_status = 0;
-            let mut active_generation = 0;
-            while !shutdown.load(Ordering::Acquire) {
-                let mut outgoing = Vec::new();
-                if disconnected.load(Ordering::Acquire) && engine.connected {
-                    engine.connected = false;
-                    engine.fail("session disconnected", &mut outgoing);
+                let output = NativeOutput {
+                    output,
+                    emergency: Arc::clone(&emergency),
+                    generation: Arc::clone(&generation),
+                    armed_generation: Arc::clone(&armed_generation),
+                    trip: Arc::clone(&trip),
+                    invalidated: Arc::clone(&invalidated),
+                    disconnected: Arc::clone(&disconnected),
+                    shutdown: Arc::clone(&shutdown),
+                };
+                output.publish_emergency();
+                let mut engine = Engine::new(output, identity, budget);
+                status_tx.send_replace(engine.status(0));
+                if initialized.send(Ok(())).is_err() {
+                    return;
                 }
-                if trip.swap(false, Ordering::AcqRel) {
-                    engine.fail("receiver ingress backpressure", &mut outgoing);
-                    active_generation = generation.load(Ordering::Acquire);
-                    armed_generation.store(active_generation, Ordering::Release);
-                }
-                if invalidated.swap(false, Ordering::AcqRel) {
-                    engine.fail(
-                        "receiver invalidated; fresh future join required",
-                        &mut outgoing,
-                    );
-                    active_generation = generation.load(Ordering::Acquire);
-                    armed_generation.store(active_generation, Ordering::Release);
-                }
-                for _ in 0..8 {
-                    if disconnected.load(Ordering::Acquire)
-                        || trip.load(Ordering::Acquire)
-                        || invalidated.load(Ordering::Acquire)
-                    {
-                        break;
+                let mut last_status = 0;
+                let mut active_generation = 0;
+                while !shutdown.load(Ordering::Acquire) {
+                    let mut outgoing = Vec::new();
+                    if disconnected.load(Ordering::Acquire) && engine.connected {
+                        engine.connected = false;
+                        engine.fail("session disconnected", &mut outgoing);
                     }
-                    let Ok(envelope) = inbox.try_recv() else {
-                        break;
-                    };
-                    if envelope.generation != active_generation {
-                        continue;
+                    if trip.swap(false, Ordering::AcqRel) {
+                        engine.fail("receiver ingress backpressure", &mut outgoing);
+                        active_generation = generation.load(Ordering::Acquire);
+                        armed_generation.store(active_generation, Ordering::Release);
                     }
-                    let command = envelope.command;
+                    if invalidated.swap(false, Ordering::AcqRel) {
+                        engine.fail(
+                            "receiver invalidated; fresh future join required",
+                            &mut outgoing,
+                        );
+                        active_generation = generation.load(Ordering::Acquire);
+                        armed_generation.store(active_generation, Ordering::Release);
+                    }
+                    for _ in 0..8 {
+                        if disconnected.load(Ordering::Acquire)
+                            || trip.load(Ordering::Acquire)
+                            || invalidated.load(Ordering::Acquire)
+                        {
+                            break;
+                        }
+                        let Ok(envelope) = inbox.try_recv() else {
+                            break;
+                        };
+                        if envelope.generation != active_generation {
+                            continue;
+                        }
+                        let command = envelope.command;
+                        let faults = engine.faults;
+                        engine.command(clock.now_ns(), command, &mut outgoing);
+                        if engine.faults != faults {
+                            active_generation = revoke_generation(&generation, active_generation);
+                            armed_generation.store(active_generation, Ordering::Release);
+                            break;
+                        }
+                    }
+                    let now = clock.now_ns();
                     let faults = engine.faults;
-                    engine.command(clock.now_ns(), command, &mut outgoing);
+                    engine.tick(now, &mut outgoing);
                     if engine.faults != faults {
                         active_generation = revoke_generation(&generation, active_generation);
                         armed_generation.store(active_generation, Ordering::Release);
+                    }
+                    let status = engine.status(now);
+                    status_tx.send_replace(status.clone());
+                    if now.saturating_sub(last_status) >= 250_000_000 {
+                        // Status is lossy and coalesced in watch. Protocol actions are
+                        // not lossy: failure to deliver one revokes audio authorization.
+                        let _ = events.try_send(ReceiverEvent::Status(Box::new(status)));
+                        last_status = now;
+                    }
+                    for event in outgoing {
+                        if events.try_send(event).is_err() {
+                            engine.fail("receiver event consumer stalled", &mut Vec::new());
+                            engine.connected = false;
+                            status_tx.send_replace(engine.status(now));
+                            break;
+                        }
+                    }
+                    if !engine.connected {
                         break;
                     }
+                    std::thread::sleep(TICK);
                 }
-                let now = clock.now_ns();
-                let faults = engine.faults;
-                engine.tick(now, &mut outgoing);
-                if engine.faults != faults {
-                    active_generation = revoke_generation(&generation, active_generation);
-                    armed_generation.store(active_generation, Ordering::Release);
+                if let Some(output) = engine.output.as_mut() {
+                    output.mute();
                 }
-                let status = engine.status(now);
-                status_tx.send_replace(status.clone());
-                if now.saturating_sub(last_status) >= 250_000_000 {
-                    // Status is lossy and coalesced in watch. Protocol actions are
-                    // not lossy: failure to deliver one revokes audio authorization.
-                    let _ = events.try_send(ReceiverEvent::Status(Box::new(status)));
-                    last_status = now;
-                }
-                for event in outgoing {
-                    if events.try_send(event).is_err() {
-                        engine.fail("receiver event consumer stalled", &mut Vec::new());
-                        engine.connected = false;
-                        status_tx.send_replace(engine.status(now));
-                        break;
-                    }
-                }
-                if !engine.connected {
-                    break;
-                }
-                std::thread::sleep(TICK);
-            }
-            if let Some(output) = engine.output.as_mut() {
-                output.mute();
-            }
-            engine.connected = false;
-            status_tx.send_replace(engine.status(clock.now_ns()));
-            drop(engine);
-        })
-        .map_err(|error| ReceiverError::Output(error.to_string()))?;
-    *registry.lock().unwrap_or_else(|error| error.into_inner()) = Some(handle.clone());
+                engine.connected = false;
+                status_tx.send_replace(engine.status(clock.now_ns()));
+                drop(engine);
+            })
+            .map(|_| ())
+            .map_err(|error| ReceiverError::Output(error.to_string()))
+    })?;
     init_rx.await.map_err(|_| ReceiverError::Closed)??;
     Ok((handle, event_rx))
 }
@@ -633,7 +734,7 @@ trait DeviceOutput {
         period: f64,
     ) -> Result<(), OutputError>;
     fn mute(&mut self);
-    fn unmute(&mut self);
+    fn unmute(&mut self, start: u64);
     fn silence_from(&mut self, local_ns: u64);
     fn volume(&mut self, volume: f32) -> Result<(), OutputError>;
 }
@@ -698,13 +799,13 @@ impl DeviceOutput for NativeOutput {
     fn mute(&mut self) {
         self.output.mute();
     }
-    fn unmute(&mut self) {
+    fn unmute(&mut self, start: u64) {
         let _guard = self
             .emergency
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         if self.authorized() {
-            self.output.unmute();
+            self.output.unmute_at(start);
         }
     }
     fn volume(&mut self, volume: f32) -> Result<(), OutputError> {
@@ -734,8 +835,8 @@ impl DeviceOutput for ScheduledOutput {
     fn mute(&mut self) {
         self.mute();
     }
-    fn unmute(&mut self) {
-        self.unmute();
+    fn unmute(&mut self, start: u64) {
+        self.unmute_at(start);
     }
     fn volume(&mut self, volume: f32) -> Result<(), OutputError> {
         self.set_local_volume(volume)
@@ -1056,7 +1157,7 @@ impl Epoch {
                 if output.telemetry().muted {
                     // Only an accepted Commit reaches here. The queue's
                     // deadlines keep this unmute silent until the future join.
-                    output.unmute();
+                    output.unmute(start);
                     if let Some(boundary) = silence_from {
                         output.silence_from(boundary);
                     }
@@ -1129,6 +1230,7 @@ struct Engine<D: DeviceOutput> {
     previous_underrun: u64,
     previous_late: u64,
     played_frame: u64,
+    test_until: Option<u64>,
 }
 
 impl<D: DeviceOutput> Engine<D> {
@@ -1197,6 +1299,7 @@ impl<D: DeviceOutput> Engine<D> {
             previous_underrun: 0,
             previous_late: 0,
             played_frame: 0,
+            test_until: None,
         }
     }
 
@@ -1206,6 +1309,7 @@ impl<D: DeviceOutput> Engine<D> {
             output.mute();
         }
         self.current = None;
+        self.test_until = None;
         self.preparing = None;
         self.intent = None;
         self.suspension = None;
@@ -1224,7 +1328,8 @@ impl<D: DeviceOutput> Engine<D> {
     }
 
     fn output_ready(&self, now: u64) -> bool {
-        self.connected
+        self.test_until.is_none()
+            && self.connected
             && self
                 .device_lead()
                 .is_some_and(|lead| lead <= MAX_DEVICE_LEAD_NS)
@@ -1261,8 +1366,61 @@ impl<D: DeviceOutput> Engine<D> {
             .saturating_add(HORIZON_NS + SUBMIT_MARGIN_NS)
     }
 
+    fn start_test_output(&mut self, now: u64) -> Result<(), ReceiverError> {
+        // A local diagnostic never replaces a room epoch. A concurrently
+        // arriving authorized Prepare cancels it before installing its plan.
+        if self.current.is_some()
+            || self.preparing.is_some()
+            || self.intent.is_some()
+            || self.suspension.is_some()
+            || !self.output_ready(now)
+        {
+            return Err(ReceiverError::Invalid(
+                "pause playback and wait for the output clock before testing",
+            ));
+        }
+        let start = now
+            .checked_add(self.lead(now))
+            .ok_or(ReceiverError::Invalid("test time overflow"))?;
+        let output = self.output.as_mut().ok_or(ReceiverError::Closed)?;
+        let format = output.format();
+        let period = output.telemetry().ns_per_frame;
+        let frames = format.sample_rate as usize / 4;
+        let end = start
+            .checked_add((frames as f64 * period).round() as u64)
+            .ok_or(ReceiverError::Invalid("test time overflow"))?;
+        let ramp = (format.sample_rate as usize / 200).max(1);
+        let mut samples = Vec::with_capacity(frames * usize::from(format.channels));
+        for frame in 0..frames {
+            let envelope = (frame.min(frames - 1 - frame) as f32 / ramp as f32).min(1.0);
+            let phase = frame as f64 * period * 1e-9 * 440.0 * std::f64::consts::TAU;
+            let sample = phase.sin() as f32 * 0.031_622_775 * envelope;
+            samples.extend(std::iter::repeat_n(sample, usize::from(format.channels)));
+        }
+        output.unmute(start);
+        output.silence_from(end);
+        if let Err(error) = output.write(start, &samples, now, period) {
+            output.mute();
+            return Err(ReceiverError::Output(error.to_string()));
+        }
+        self.test_until = Some(end);
+        Ok(())
+    }
+
     fn command(&mut self, now: u64, command: Command, events: &mut Vec<ReceiverEvent>) {
         match command {
+            Command::TestOutput(reply) => {
+                if !reply.is_closed() {
+                    let result = self.start_test_output(now);
+                    let started = result.is_ok();
+                    if reply.send(result).is_err() && started {
+                        self.test_until = None;
+                        if let Some(output) = self.output.as_mut() {
+                            output.mute();
+                        }
+                    }
+                }
+            }
             Command::Volume(volume) => {
                 self.volume = volume;
                 if let Some(output) = self.output.as_mut() {
@@ -1286,6 +1444,11 @@ impl<D: DeviceOutput> Engine<D> {
                 self.mapping = Some(mapping);
             }
             Command::Prepare(identity, plan) if self.connected && identity == self.identity => {
+                if self.test_until.take().is_some() {
+                    if let Some(output) = self.output.as_mut() {
+                        output.mute();
+                    }
+                }
                 self.prepare(now, plan, events)
             }
             Command::Commit {
@@ -1766,6 +1929,20 @@ impl<D: DeviceOutput> Engine<D> {
     }
 
     fn tick(&mut self, now: u64, events: &mut Vec<ReceiverEvent>) {
+        if let Some(until) = self.test_until {
+            let healthy = self.output.as_ref().is_some_and(|output| {
+                let t = output.telemetry();
+                t.clock_status == ClockStatus::Valid && !t.device_error
+            });
+            if now >= until || !healthy {
+                if let Some(output) = self.output.as_mut() {
+                    output.mute();
+                }
+                self.test_until = None;
+            } else {
+                return;
+            }
+        }
         if self.suspension.is_some_and(|(_, _, local, _)| now >= local) {
             let (epoch, _, _, _) = self.suspension.take().unwrap();
             let intent = self.intent.take();
@@ -1979,3 +2156,152 @@ impl<D: DeviceOutput> Engine<D> {
 #[cfg(test)]
 #[path = "receiver_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod registry_tests {
+    use super::*;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::task::{Context, Waker};
+
+    fn pending_worker() -> (ReceiverHandle, watch::Sender<bool>) {
+        let (commands, _inbox) = mpsc::channel(1);
+        let (_status, status) = watch::channel(ReceiverStatus {
+            identity: StreamIdentity {
+                room_id: uuid::Uuid::nil(),
+                instance_id: uuid::Uuid::nil(),
+                session_id: uuid::Uuid::nil(),
+            },
+            connected: true,
+            output_ready: false,
+            current_epoch: None,
+            preparing_epoch: None,
+            network_clock: None,
+            output: None,
+            binding: None,
+            buffered_input_frames: 0,
+            played_frame: 0,
+            underrun_frames: 0,
+            discarded_blocks: 0,
+            last_error: None,
+        });
+        let (done_tx, done) = watch::channel(false);
+        let emergency = Arc::new(Mutex::new(None));
+        (
+            ReceiverHandle {
+                commands,
+                trip: Arc::new(AtomicBool::new(false)),
+                invalidated: Arc::new(AtomicBool::new(false)),
+                generation: Arc::new(AtomicU64::new(0)),
+                emergency: emergency.clone(),
+                disconnected: Arc::new(AtomicBool::new(false)),
+                budget: Arc::new(Budget::default()),
+                status,
+                done,
+                _lease: Arc::new(Lease {
+                    shutdown: Arc::new(AtomicBool::new(false)),
+                    emergency,
+                }),
+            },
+            done_tx,
+        )
+    }
+
+    fn pending(future: Pin<&mut impl Future>) -> bool {
+        future
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending()
+    }
+
+    #[tokio::test]
+    async fn restoration_cannot_miss_a_native_worker_during_registration_or_cancelled_close() {
+        struct NativeOutput(Arc<AtomicBool>);
+        impl Drop for NativeOutput {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::Release);
+            }
+        }
+        let registry = ReceiverRegistry::default();
+        let (receiver, done) = pending_worker();
+        let shutdown = receiver._lease.shutdown.clone();
+        let output_live = Arc::new(AtomicBool::new(false));
+        let live = output_live.clone();
+        let (started_tx, started) = std::sync::mpsc::channel();
+        let (publish_tx, publish) = std::sync::mpsc::channel();
+        let (drop_tx, drop_output) = std::sync::mpsc::channel();
+        let registering = registry.clone();
+        let registration = std::thread::spawn(move || {
+            let mut worker = None;
+            let result = registering.register(&receiver, || {
+                worker = Some(std::thread::spawn(move || {
+                    let _done = WorkerDone(done);
+                    live.store(true, Ordering::Release);
+                    let _output = NativeOutput(live);
+                    started_tx.send(()).unwrap();
+                    drop_output.recv_timeout(Duration::from_secs(5)).unwrap();
+                }));
+                // Keep native creation/publication in flight while restoration
+                // tries to seal the registry from another thread.
+                publish.recv_timeout(Duration::from_secs(5)).unwrap();
+                Ok(())
+            });
+            (result, worker.unwrap())
+        });
+        started.recv_timeout(Duration::from_secs(5)).unwrap();
+        let closing = registry.clone();
+        let (close_tx, close_attempt) = std::sync::mpsc::channel();
+        let closer = std::thread::spawn(move || {
+            close_tx.send(closing.state.try_lock().is_err()).unwrap();
+            closing.begin_close();
+        });
+        let registration_holds_gate = close_attempt.recv_timeout(Duration::from_secs(5)).unwrap();
+        publish_tx.send(()).unwrap();
+        let (result, worker) = registration.join().unwrap();
+        result.unwrap();
+        closer.join().unwrap();
+        assert!(registration_holds_gate);
+        assert!(registry.is_closing());
+        assert!(shutdown.load(Ordering::Acquire));
+        assert!(output_live.load(Ordering::Acquire));
+
+        let mut close = Box::pin(registry.close_current());
+        assert!(pending(close.as_mut()));
+        drop(close); // Tokio can cancel the host's reconfiguration here.
+        let mut recovery = Box::pin(registry.close_current());
+        assert!(pending(recovery.as_mut()));
+        assert!(output_live.load(Ordering::Acquire));
+        drop_tx.send(()).unwrap();
+        worker.join().unwrap();
+        recovery.await.unwrap();
+        assert!(!output_live.load(Ordering::Acquire));
+
+        let (replacement, _done) = pending_worker();
+        assert!(matches!(
+            registry.register(&replacement, || panic!("closed registry started a worker")),
+            Err(ReceiverError::Closed)
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_stale_closer_cannot_remove_a_replacement_workers_completion_barrier() {
+        let registry = ReceiverRegistry::default();
+        let (first, first_done) = pending_worker();
+        registry.register(&first, || Ok(())).unwrap();
+        let mut closing_first = Box::pin(registry.close_current());
+        let mut stale_closer = Box::pin(registry.close_current());
+        assert!(pending(closing_first.as_mut()));
+        assert!(pending(stale_closer.as_mut()));
+        first_done.send_replace(true);
+        closing_first.await.unwrap();
+
+        let (second, second_done) = pending_worker();
+        registry.register(&second, || Ok(())).unwrap();
+        stale_closer.await.unwrap();
+        registry.begin_close();
+        assert!(second._lease.shutdown.load(Ordering::Acquire));
+        let mut closing_second = Box::pin(registry.close_current());
+        assert!(pending(closing_second.as_mut()));
+        second_done.send_replace(true);
+        closing_second.await.unwrap();
+    }
+}

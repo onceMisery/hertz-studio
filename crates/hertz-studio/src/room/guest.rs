@@ -3,7 +3,7 @@
 use super::contract::*;
 use super::credentials::{CredentialError, ProfileSecrets, RecentRoom};
 use super::manager::{Envelope, Session};
-use super::receiver::{self, ReceiverEvent, ReceiverHandle};
+use super::receiver::{self, ReceiverEvent, ReceiverHandle, ReceiverRegistry};
 use crate::state::AppState;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -33,13 +33,14 @@ struct Guest {
     events: ClientEvents,
     receiver: Option<ReceiverHandle>,
     receiver_events: mpsc::Receiver<ReceiverEvent>,
-    receiver_lease: Arc<std::sync::Mutex<Option<ReceiverHandle>>>,
+    receiver_registry: ReceiverRegistry,
     output: OutputSettings,
     preferences: super::output_preferences::Preferences,
     projection: Arc<RwLock<Value>>,
     remote: Value,
     next_request: u64,
     pending: HashMap<u64, Pending>,
+    diagnostics: tokio::task::JoinSet<()>,
     error: Option<String>,
 }
 fn error(e: impl std::fmt::Display) -> RoomError {
@@ -167,6 +168,7 @@ pub(super) async fn start_session(
     let (_receiver_tx, receiver_events) = mpsc::channel(1);
     let cleanup = lease.completion.clone();
     let mut guest = Guest {
+        diagnostics: tokio::task::JoinSet::new(),
         recent: Default::default(),
         mode,
         output_enabled: descriptor.listen,
@@ -178,7 +180,7 @@ pub(super) async fn start_session(
         events,
         receiver: None,
         receiver_events,
-        receiver_lease: lease.receiver.clone(),
+        receiver_registry: lease.receiver.clone(),
         output,
         preferences,
         projection,
@@ -195,6 +197,10 @@ pub(super) async fn start_session(
         'session: loop {
             guest.reconfigure = false;
             let result = guest.run(&mut local, &mut stopped).await;
+            guest.terminated |= matches!(
+                &*guest.events.state.borrow(),
+                ConnectionState::Closed { terminal: true, .. }
+            );
             guest.finish_pending();
             if *stopped.borrow() || *guest.shutdown.borrow() || guest.terminated {
                 if guest.terminated {
@@ -212,13 +218,8 @@ pub(super) async fn start_session(
                 );
             }
             guest.publish("reconnecting");
-            if let Some(receiver) = guest.receiver.take() {
-                super::manager::close_receiver(receiver).await;
-            }
-            *guest
-                .receiver_lease
-                .lock()
-                .unwrap_or_else(|e| e.into_inner()) = None;
+            guest.receiver.take();
+            let _ = guest.receiver_registry.close_current().await;
             guest.connection.handle.close();
             let mut attempts = 0u32;
             loop {
@@ -281,7 +282,7 @@ pub(super) async fn start_session(
                                 options(&opening_settings, guest.connection.handle.clock()),
                                 guest.connection.handle.identity,
                                 guest.connection.handle.clock(),
-                                guest.receiver_lease.clone(),
+                                guest.receiver_registry.clone(),
                             );
                             match guest.while_offline(&mut local, &mut stopped, opening).await {
                                 Some(Ok((receiver, events))) => {
@@ -290,7 +291,7 @@ pub(super) async fn start_session(
                                         || guest.output.latency_correction_ms
                                             != opening_settings.latency_correction_ms
                                     {
-                                        super::manager::close_receiver(receiver).await;
+                                        let _ = guest.receiver_registry.close_current().await;
                                         guest.connection.handle.close();
                                         continue 'session;
                                     }
@@ -323,9 +324,9 @@ pub(super) async fn start_session(
                 }
             }
         }
-        if let Some(receiver) = guest.receiver.take() {
-            super::manager::close_receiver(receiver).await;
-        }
+        guest.receiver_registry.begin_close();
+        guest.receiver.take();
+        let _ = guest.receiver_registry.close_current().await;
         guest.finish_pending();
         guest.connection.handle.close();
         if *stopped.borrow() || guest.terminated {
@@ -439,16 +440,39 @@ impl Guest {
         stopped: &mut watch::Receiver<bool>,
     ) -> RoomResult<()> {
         let mut tick = tokio::time::interval(Duration::from_millis(500));
-        self.request(PeerRequest::Snapshot, None)?;
+        let mut closing = matches!(
+            &*self.events.state.borrow(),
+            ConnectionState::Closing { .. }
+        );
+        if let ConnectionState::Closed { reason, terminal } = &*self.events.state.borrow() {
+            self.terminated = *terminal;
+            return Err(error(reason));
+        }
+        if closing {
+            if let Some(receiver) = &self.receiver {
+                receiver.invalidate();
+            }
+        } else {
+            self.request(PeerRequest::Snapshot, None)?;
+        }
         loop {
             tokio::select! {
-                biased;
                 _=stopped.changed()=>break,
+                _=self.diagnostics.join_next(),if !self.diagnostics.is_empty()=>{},
                 _=self.shutdown.changed()=>break,
-                _=self.events.state.changed()=>{if let ConnectionState::Closed{reason,terminal}=&*self.events.state.borrow(){self.terminated=*terminal;return Err(error(reason));}},
+                changed=self.events.state.changed()=>{
+                    match &*self.events.state.borrow() {
+                        ConnectionState::Closed{reason,terminal}=>{self.terminated = *terminal;return Err(error(reason));},
+                        ConnectionState::Closing{..}=>{closing=true;if let Some(receiver)=&self.receiver{receiver.invalidate();}},
+                        ConnectionState::Connected=>{},
+                    }
+                    if changed.is_err(){return Err(error("连接状态通道已关闭"));}
+                    if closing {self.finish_pending();self.publish("reconnecting");}
+                },
                 _=self.events.mapping.changed()=>{if let Some(mapping)=*self.events.mapping.borrow(){if let Some(receiver)=&self.receiver{receiver.mapping(mapping).map_err(error)?;}}},
-                event=self.receiver_events.recv(),if self.receiver.is_some()=>{let Some(event)=event else{return Err(error("原生接收线程已停止"))};match event{ReceiverEvent::Ready{epoch,plan_id}=>self.connection.handle.send(ControlFrame::Ready{epoch:Counter(epoch),plan_id:Counter(plan_id)}).map_err(error)?,ReceiverEvent::Resync{reason}=>self.connection.handle.send(ControlFrame::Resync{reason}).map_err(error)?,ReceiverEvent::Status(status)=>{self.connection.handle.output_status(OutputStatus{ready:status.output_ready,played_frame:status.played_frame,underrun_frames:status.underrun_frames});}}},
+                event=self.receiver_events.recv(),if self.receiver.is_some()=>{let Some(event)=event else{return Err(error("原生接收线程已停止"))};if closing {continue;}match event{ReceiverEvent::Ready{epoch,plan_id}=>self.connection.handle.send(ControlFrame::Ready{epoch:Counter(epoch),plan_id:Counter(plan_id)}).map_err(error)?,ReceiverEvent::Resync{reason}=>self.connection.handle.send(ControlFrame::Resync{reason}).map_err(error)?,ReceiverEvent::Status(status)=>{self.connection.handle.output_status(OutputStatus{ready:status.output_ready,played_frame:status.played_frame,underrun_frames:status.underrun_frames});}}},
                 _=tick.tick()=>{
+                    if closing {self.publish("reconnecting");continue;}
                     if !self.pending.values().any(|p|p.snapshot){self.request(PeerRequest::Snapshot,None)?;}
                     let expired=self.pending.iter().filter_map(|(id,p)|(p.at.elapsed()>Duration::from_secs(5)).then_some(*id)).collect::<Vec<_>>();
                     for id in expired{if let Some(pending)=self.pending.remove(&id){if let Some(reply)=pending.reply{let _=reply.send(Err(RoomError::new("room_outcome_unknown","操作结果尚未确定，请查询操作状态")));}}}
@@ -457,6 +481,7 @@ impl Guest {
                 },
                 frame=self.events.control.recv()=>{
                     let Some(frame)=frame else{return Err(error("控制连接关闭"))};
+                    if closing && !matches!(frame, ControlFrame::End { .. }) {continue;}
                     match frame{
                         ControlFrame::Prepare{plan}=>{if let Some(receiver)=&self.receiver{receiver.prepare(self.connection.handle.identity,plan).map_err(error)?;}},
                         ControlFrame::Commit{epoch,plan_id,effective_at}=>{if let Some(receiver)=&self.receiver{receiver.commit(self.connection.handle.identity,epoch.0,plan_id.0,effective_at.0).map_err(error)?;}},
@@ -472,11 +497,25 @@ impl Guest {
                         _=>{},
                     }
                 },
-                block=self.events.audio.recv(),if self.receiver.is_some()=>{let Some(block)=block else{return Err(error("音频连接关闭"))};if let Some(receiver)=&self.receiver{receiver.pcm(block.into_block()).map_err(error)?;}},
+                block=self.events.audio.recv(),if self.receiver.is_some()=>{
+                    let Some(block)=block else{return Err(error("音频连接关闭"))};
+                    if closing {continue;}
+                    if let Some(receiver)=&self.receiver{receiver.pcm(block.into_block()).map_err(error)?;}
+                },
                 text=self.events.chat.recv()=>{self.recent.notification(&text);self.publish("guest");},
                 envelope=local.recv()=>{
                     let Some(envelope)=envelope else{break};
+                    if closing {self.offline_request(envelope);continue;}
                     match envelope.request{
+                        LocalRequest::TestOutput=>{
+                            let receiver=self.receiver.clone().filter(|_|self.diagnostics.is_empty() && self.remote["playing"]==false && self.remote["scheduled"].is_null() && self.remote["pending"].is_null());
+                            if let Some(receiver)=receiver {
+                                self.diagnostics.spawn(async move {
+                                    let result=receiver.test_output().await.map_err(error).map(|()|json!({"state":"applied"}));
+                                    let _=envelope.reply.send(result);
+                                });
+                            } else { let _=envelope.reply.send(Err(RoomError::invalid("请先暂停播放并启用本机输出"))); }
+                        },
                         LocalRequest::Peer{request}=>{
                             if self.pending.len()>=8{let _=envelope.reply.send(Err(RoomError::new("room_busy","等待中的请求过多")));}else if let Err(e)=self.request(request,Some(envelope.reply)){self.error=Some(e.message);}
                         },
@@ -487,8 +526,8 @@ impl Guest {
                                 if enabled && settings.device_id==self.output.device_id && settings.latency_correction_ms==self.output.latency_correction_ms {
                                     if let Some(receiver)=&self.receiver{receiver.set_volume(settings.volume).map_err(error)?;self.output=settings;self.preferences.save(&self.output);self.publish("guest");return Ok(json!({"state":"applied"}));}
                                 }
-                                if let Some(receiver)=self.receiver.take(){super::manager::close_receiver(receiver).await;}
-                                *self.receiver_lease.lock().unwrap_or_else(|e|e.into_inner())=None;
+                                self.receiver.take();
+                                let _=self.receiver_registry.close_current().await;
                                 self.output=settings;self.preferences.save(&self.output);self.output_enabled=enabled;self.output_fault=false;
                                 self.reconfigure=true;
                                 self.publish("guest");Ok(json!({"state":"applied"}))
