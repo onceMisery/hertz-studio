@@ -74,6 +74,7 @@ fn prime<T>(lock: &Mutex<T>) {
 struct Deck {
     samples: Mutex<VecDeque<f32>>,
     frames_played: AtomicU64,
+    gain_db: AtomicU32,
     decode_error: AtomicBool,
     eof: AtomicBool,
 }
@@ -83,6 +84,7 @@ impl Deck {
         let deck = Self {
             samples: Mutex::new(VecDeque::with_capacity(1 << 16)),
             frames_played: AtomicU64::new(0),
+            gain_db: AtomicU32::new(0.0f32.to_bits()),
             decode_error: AtomicBool::new(false),
             eof: AtomicBool::new(false),
         };
@@ -350,6 +352,15 @@ pub struct RenderCore {
     pending_load: Option<PendingLoad>,
 }
 
+/// Exact boundaries within one pull, relative to its first output frame.
+/// The caller maps these frame offsets onto its own presentation timeline.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct RenderReport {
+    pub source_frames: usize,
+    pub transition_frame: Option<usize>,
+    pub contended: bool,
+}
+
 /// Interleaved floating-point output format, fixed for a loaded timeline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RenderFormat {
@@ -381,6 +392,82 @@ impl RenderOutput {
 }
 
 impl RenderCore {
+    /// Prepare a continuous room stream. Resampling can prevent a claim of
+    /// sample-exact source gaplessness, but does not require a silent boundary.
+    pub fn prepare_next_with_gain(
+        &mut self,
+        next: NextTrack,
+        gain_db: f32,
+    ) -> Result<PrepareResult, AudioError> {
+        self.prepare_next_impl(next, gain_db, true)
+    }
+    /// Control-thread observation used to preserve an already rendered overlap.
+    /// It is never called by the audio callback.
+    pub fn prepared_next_started(&self) -> bool {
+        self.shared
+            .next
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|next| next.mixed_frames > 0)
+    }
+    /// Update the prepared deck at the same control boundary as the current
+    /// deck, without replacing its decoder or changing an overlap in progress.
+    pub fn set_prepared_next_gain(&mut self, gain_db: f32) -> Result<(), AudioError> {
+        if !gain_db.is_finite() {
+            return Err(AudioError::Other("non-finite prepared track gain".into()));
+        }
+        if let Some(next) = self.shared.next.lock().unwrap().as_ref() {
+            next.deck
+                .gain_db
+                .store(gain_db.clamp(-24.0, 12.0).to_bits(), Ordering::Relaxed);
+        }
+        Ok(())
+    }
+    /// The control owner may update an overlap that has not emitted any PCM.
+    /// An overlap in progress keeps its original duration.
+    pub fn set_prepared_next_crossfade(&mut self, ms: u64) {
+        if let Some(next) = self
+            .shared
+            .next
+            .lock()
+            .unwrap()
+            .as_mut()
+            .filter(|next| next.mixed_frames == 0)
+        {
+            next.request.crossfade_ms = ms.min(8_000);
+            next.overlap_frames = None;
+        }
+    }
+    fn prepare_next_impl(
+        &mut self,
+        mut next: NextTrack,
+        gain_db: f32,
+        continuous: bool,
+    ) -> Result<PrepareResult, AudioError> {
+        if !gain_db.is_finite() {
+            return Err(AudioError::BackendInit("non-finite track gain".into()));
+        }
+        let gain_db = gain_db.clamp(-24.0, 12.0);
+        self.clear_next();
+        // This entry deliberately accepts only a complete file. Network I/O
+        // and cache warming remain the service's responsibility.
+        next.crossfade_ms = next.crossfade_ms.min(8_000);
+        let path = uri_to_path(&next.uri);
+        if !path.is_file() || path.extension().is_some_and(|ext| ext == "part") {
+            return Ok(PrepareResult::Bypassed {
+                reason: "next complete file is unavailable".into(),
+            });
+        }
+        let ext = path.extension().and_then(|ext| ext.to_str());
+        let file = File::open(&path).map_err(|e| AudioError::DecodeFailed(e.to_string()))?;
+        let (opened, info) = open_media(
+            MediaSourceStream::new(Box::new(file), Default::default()),
+            ext,
+        )?;
+        self.prepare_opened_with_gain(opened, info, next, gain_db, continuous)
+    }
+
     /// Create a renderer without enumerating or opening any audio device.
     /// Transport, decoding and events use the same [`AudioBackend`] contract as
     /// local playback. The caller owns the output clock and calls [`Self::render`]
@@ -423,7 +510,45 @@ impl RenderCore {
     /// or waits for a lock. Only one output consumer may pull this timeline.
     /// Only complete frames consume PCM; any incomplete trailing frame is silent.
     pub fn render(&self, data: &mut [f32]) {
-        write_samples(data, &self.shared, self.output_channels as usize);
+        self.render_report(data);
+    }
+
+    pub fn render_report(&self, data: &mut [f32]) -> RenderReport {
+        write_samples(data, &self.shared, self.output_channels as usize)
+    }
+
+    /// Stops immediately after a deck promotion. Only `source_frames` are output;
+    /// callers discard the silent tail and prepare the next deck before pulling.
+    pub fn render_until_transition(&self, data: &mut [f32]) -> RenderReport {
+        write_samples_mode(data, &self.shared, self.output_channels as usize, true)
+    }
+
+    /// Worker-side readiness probe; never call from a realtime callback.
+    pub fn buffered_frames(&self) -> usize {
+        self.shared
+            .current_deck()
+            .samples
+            .lock()
+            .map(|samples| samples.len() / usize::from(self.output_channels))
+            .unwrap_or(0)
+    }
+
+    pub fn prepared_next_ready(&self, minimum_frames: usize) -> bool {
+        self.shared
+            .next
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_none_or(|next| {
+                next.deck.decode_error.load(Ordering::Acquire)
+                    || next.deck.eof.load(Ordering::Acquire)
+                    || next.deck.samples.lock().unwrap().len() / usize::from(self.output_channels)
+                        >= minimum_frames
+            })
+    }
+
+    pub fn decoded_eof(&self) -> bool {
+        self.shared.current_deck().eof.load(Ordering::Acquire)
     }
 
     /// Actual current-deck position in output frames, without rounding.
@@ -538,11 +663,24 @@ impl RenderCore {
         Ok(())
     }
 
+    #[cfg(test)]
     fn prepare_opened(
         &mut self,
         opened: OpenedReader,
         info: MediaInfo,
         request: NextTrack,
+    ) -> Result<PrepareResult, AudioError> {
+        let gain_db = f32::from_bits(self.shared.current_deck().gain_db.load(Ordering::Relaxed));
+        self.prepare_opened_with_gain(opened, info, request, gain_db, false)
+    }
+
+    fn prepare_opened_with_gain(
+        &mut self,
+        opened: OpenedReader,
+        info: MediaInfo,
+        request: NextTrack,
+        gain_db: f32,
+        continuous: bool,
     ) -> Result<PrepareResult, AudioError> {
         self.clear_next();
         if matches!(
@@ -558,7 +696,8 @@ impl RenderCore {
                 reason: "source is already changing or fading out".into(),
             });
         }
-        if request.crossfade_ms == 0
+        if !continuous
+            && request.crossfade_ms == 0
             && (self.source_rate != Some(self.output_rate)
                 || info.sample_rate != Some(self.output_rate))
         {
@@ -567,7 +706,10 @@ impl RenderCore {
                     .into(),
             });
         }
-        if request.crossfade_ms == 0 && !(self.gapless_supported && opened.gapless_supported) {
+        if !continuous
+            && request.crossfade_ms == 0
+            && !(self.gapless_supported && opened.gapless_supported)
+        {
             return Ok(PrepareResult::Bypassed {
                 reason:
                     "sample-exact gapless requires verified delay/padding handling for both sources"
@@ -576,6 +718,7 @@ impl RenderCore {
         }
         let gapless_supported = opened.gapless_supported;
         let deck = Arc::new(Deck::new());
+        deck.gain_db.store(gain_db.to_bits(), Ordering::Relaxed);
         let stop = Arc::new(AtomicBool::new(false));
         let seek_to = Arc::new(Mutex::new(None));
         let ctl = DecoderCtl {
@@ -929,28 +1072,40 @@ fn overlap_gains(frame: u64, frames: u64) -> (f32, f32) {
 
 /// Concatenate or mix before EQ and the final output limiter. A promotion is
 /// recorded after the last outgoing frame, never on the actor's timer.
-fn render_decks(data: &mut [f32], shared: &Shared, channels: usize) -> (usize, bool) {
+fn render_decks(
+    data: &mut [f32],
+    shared: &Shared,
+    channels: usize,
+    stop_at_transition: bool,
+) -> (usize, bool, Option<usize>) {
     let Ok(mut prepared) = shared.next.try_lock() else {
-        return (0, true);
+        return (0, true, None);
     };
     // Reserve notification capacity before consuming either source. Contention
     // produces an underrun, never a source switch whose event can be lost.
     let mut notification = if prepared.is_some() {
         match shared.next_event.try_lock() {
             Ok(slot) if slot.is_none() => Some(slot),
-            _ => return (0, true),
+            _ => return (0, true, None),
         }
     } else {
         None
     };
     let Ok(mut current) = shared.deck.try_lock() else {
-        return (0, true);
+        return (0, true, None);
     };
     let mut copied = 0;
+    let mut transition_frame = None;
     while copied + channels <= data.len() {
         let Ok(mut outgoing) = current.samples.try_lock() else {
-            return (copied, true);
+            return (copied, true, transition_frame);
         };
+        let preamp = f32::from_bits(shared.dsp_gain_db.load(Ordering::Relaxed));
+        let deck_gain = |deck: &Deck| {
+            let db = f32::from_bits(deck.gain_db.load(Ordering::Relaxed));
+            10.0f32.powf(((preamp + db).clamp(-24.0, 18.0) - preamp) / 20.0)
+        };
+        let outgoing_gain = deck_gain(&current);
         let eof = current.eof.load(Ordering::Acquire);
         let Some(next) = prepared.as_mut() else {
             let count = ((data.len() - copied).min(outgoing.len()) / channels) * channels;
@@ -958,7 +1113,7 @@ fn render_decks(data: &mut [f32], shared: &Shared, channels: usize) -> (usize, b
                 .iter_mut()
                 .zip(outgoing.drain(..count))
             {
-                *target = sample;
+                *target = sample * outgoing_gain;
             }
             current
                 .frames_played
@@ -967,7 +1122,7 @@ fn render_decks(data: &mut [f32], shared: &Shared, channels: usize) -> (usize, b
             break;
         };
         let Ok(mut incoming) = next.deck.samples.try_lock() else {
-            return (copied, true);
+            return (copied, true, transition_frame);
         };
         if next.deck.decode_error.load(Ordering::Acquire)
             || (eof && outgoing.is_empty() && incoming.is_empty())
@@ -985,6 +1140,7 @@ fn render_decks(data: &mut [f32], shared: &Shared, channels: usize) -> (usize, b
             });
             continue;
         }
+        let incoming_gain = deck_gain(&next.deck);
         let mut promote = false;
         let start_copied = copied;
         let start_mixed = next.mixed_frames;
@@ -998,7 +1154,12 @@ fn render_decks(data: &mut [f32], shared: &Shared, channels: usize) -> (usize, b
                 let wanted = ms_to_frames(
                     next.request.crossfade_ms,
                     shared.output_rate.load(Ordering::Relaxed),
-                );
+                )
+                .min(if stop_at_transition {
+                    (incoming.len() / channels / 2) as u64
+                } else {
+                    u64::MAX
+                });
                 if wanted > 0 && remain <= wanted && incoming.len() / channels >= remain as usize {
                     next.overlap_frames = Some(remain);
                 }
@@ -1017,7 +1178,7 @@ fn render_decks(data: &mut [f32], shared: &Shared, channels: usize) -> (usize, b
                 } else {
                     0.0
                 };
-                data[copied + channel] = old * a + new * b;
+                data[copied + channel] = old * outgoing_gain * a + new * incoming_gain * b;
             }
             copied += channels;
             if mix {
@@ -1039,6 +1200,7 @@ fn render_decks(data: &mut [f32], shared: &Shared, channels: usize) -> (usize, b
         drop(incoming);
         drop(outgoing);
         if promote {
+            transition_frame = Some(copied / channels);
             let next = prepared.take().unwrap();
             let retired = std::mem::replace(&mut *current, next.deck);
             **notification.as_mut().unwrap() = Some(RenderEvent::Transitioned {
@@ -1047,6 +1209,9 @@ fn render_decks(data: &mut [f32], shared: &Shared, channels: usize) -> (usize, b
                 gapless_supported: next.gapless_supported,
                 retired,
             });
+            if stop_at_transition {
+                break;
+            }
         } else {
             if exhausted {
                 let next = prepared.take().unwrap();
@@ -1058,14 +1223,22 @@ fn render_decks(data: &mut [f32], shared: &Shared, channels: usize) -> (usize, b
             break;
         }
     }
-    (copied, false)
+    (copied, false, transition_frame)
 }
-fn write_samples(data: &mut [f32], shared: &Shared, channels: usize) {
+fn write_samples(data: &mut [f32], shared: &Shared, channels: usize) -> RenderReport {
+    write_samples_mode(data, shared, channels, false)
+}
+fn write_samples_mode(
+    data: &mut [f32],
+    shared: &Shared,
+    channels: usize,
+    stop_at_transition: bool,
+) -> RenderReport {
     // No complete output frame was requested. This is not a source underrun:
     // leave the deck, DSP and transport envelope untouched for both callers.
     if data.len() < channels {
         data.fill(0.0);
-        return;
+        return RenderReport::default();
     }
     // Paused means "stop consuming", not "play silence we already decoded":
     // draining the queue here would keep the sound going and keep advancing
@@ -1076,11 +1249,19 @@ fn write_samples(data: &mut [f32], shared: &Shared, channels: usize) {
         for sample in data.iter_mut() {
             *sample = 0.0;
         }
-        return;
+        return RenderReport::default();
     }
 
     let volume = f32::from_bits(shared.volume.load(Ordering::Relaxed));
-    let (copied, contended) = render_decks(data, shared, channels.max(1));
+    let (copied, contended, transition_frame) =
+        render_decks(data, shared, channels.max(1), stop_at_transition);
+    let data = if stop_at_transition && transition_frame.is_some() {
+        let (used, tail) = data.split_at_mut(copied);
+        tail.fill(0.0);
+        used
+    } else {
+        data
+    };
 
     // 频谱 tap：淡变前信号（舞台可视化不随淡出塌陷）。cheap, bounded, and
     // skipped entirely under contention.
@@ -1161,6 +1342,11 @@ fn write_samples(data: &mut [f32], shared: &Shared, channels: usize) {
     // 缓冲欠载：没填满的部分补 0，不能把上一轮回调的残留样本播出去。
     for sample in data.iter_mut().skip(copied) {
         *sample = 0.0;
+    }
+    RenderReport {
+        source_frames: copied / channels,
+        transition_frame,
+        contended,
     }
 }
 
@@ -1320,12 +1506,14 @@ impl AudioBackend for RenderCore {
         for (i, g) in params.eq_gains_db.iter().enumerate() {
             self.shared.eq_gains[i].store(g.clamp(-12.0, 12.0).to_bits(), Ordering::Relaxed);
         }
-        // 增益上限 +18 dB：RG 归一化补偿合理范围；限幅器在链尾兜底。
-        let total_db =
-            params.preamp_db.clamp(-24.0, 12.0) + params.track_gain_db.clamp(-24.0, 12.0);
-        self.shared
-            .dsp_gain_db
-            .store(total_db.clamp(-24.0, 18.0).to_bits(), Ordering::Relaxed);
+        self.shared.current_deck().gain_db.store(
+            params.track_gain_db.clamp(-24.0, 12.0).to_bits(),
+            Ordering::Relaxed,
+        );
+        self.shared.dsp_gain_db.store(
+            params.preamp_db.clamp(-24.0, 12.0).to_bits(),
+            Ordering::Relaxed,
+        );
         self.sync_dsp_context();
         Ok(())
     }
@@ -1337,24 +1525,9 @@ impl AudioBackend for RenderCore {
         Ok(())
     }
 
-    fn prepare_next(&mut self, mut next: NextTrack) -> Result<PrepareResult, AudioError> {
-        self.clear_next();
-        // This entry deliberately accepts only a complete file. Network I/O
-        // and cache warming remain the service's responsibility.
-        next.crossfade_ms = next.crossfade_ms.min(8_000);
-        let path = uri_to_path(&next.uri);
-        if !path.is_file() || path.extension().is_some_and(|ext| ext == "part") {
-            return Ok(PrepareResult::Bypassed {
-                reason: "next complete file is unavailable".into(),
-            });
-        }
-        let ext = path.extension().and_then(|ext| ext.to_str());
-        let file = File::open(&path).map_err(|e| AudioError::DecodeFailed(e.to_string()))?;
-        let (opened, info) = open_media(
-            MediaSourceStream::new(Box::new(file), Default::default()),
-            ext,
-        )?;
-        self.prepare_opened(opened, info, next)
+    fn prepare_next(&mut self, next: NextTrack) -> Result<PrepareResult, AudioError> {
+        let gain = f32::from_bits(self.shared.current_deck().gain_db.load(Ordering::Relaxed));
+        self.prepare_next_impl(next, gain, false)
     }
 
     fn clear_next(&mut self) {
@@ -3326,6 +3499,68 @@ mod tests {
         assert!(matches!(truncated, AudioError::DecodeFailed(_)));
     }
 
+    #[test]
+    fn deck_normalization_is_applied_before_overlap_and_promotion_stops_pull() {
+        let (opened, info) = open_pcm(&[4096; 80], 8_000, 1);
+        let mut renderer = decoded_opened_fixture(opened, info, 8_000, 1);
+        renderer
+            .set_dsp(vmusic_core::DspParams {
+                track_gain_db: -6.0,
+                ..Default::default()
+            })
+            .unwrap();
+        let (opened, info) = open_pcm(&[8192; 160], 8_000, 1);
+        renderer
+            .prepare_opened_with_gain(
+                opened,
+                info,
+                NextTrack {
+                    uri: "memory.wav".into(),
+                    track_id: "second".into(),
+                    generation: 1,
+                    crossfade_ms: 5,
+                },
+                -12.0,
+                true,
+            )
+            .unwrap();
+        wait_for_prepared(&renderer);
+        renderer.shared.playing.store(true, Ordering::Relaxed);
+        renderer
+            .shared
+            .fade_gain
+            .store(1.0f32.to_bits(), Ordering::Relaxed);
+        renderer.shared.fade_frames.store(0, Ordering::Relaxed);
+        let mut pcm = [9.0; 200];
+        let report = renderer.render_until_transition(&mut pcm);
+        assert_eq!(report.source_frames, 80);
+        assert_eq!(report.transition_frame, Some(80));
+        let old = 0.125 * 10.0f32.powf(-6.0 / 20.0);
+        let new = 0.25 * 10.0f32.powf(-12.0 / 20.0);
+        for (i, sample) in pcm[..80].iter().enumerate() {
+            let expected = if i < 40 {
+                old
+            } else {
+                let (a, b) = overlap_gains((i - 40) as u64, 40);
+                old * a + new * b
+            };
+            assert!(
+                (sample - expected).abs() < 1e-6,
+                "frame {i}: {sample} vs {expected}"
+            );
+        }
+        assert!(pcm[80..].iter().all(|v| *v == 0.0));
+        assert_eq!(renderer.position_frames(), 40);
+        assert!(matches!(
+            renderer.take_next_event(),
+            Some(NextEvent::Transitioned { .. })
+        ));
+        let mut tail = [0.0; 120];
+        let report = renderer.render_until_transition(&mut tail);
+        assert_eq!(report.source_frames, 120);
+        assert!(tail.iter().all(|v| (*v - new).abs() < 1e-6));
+    }
+
     fn prepare_pcm(
         backend: &mut RenderCore,
         samples: &[i16],
@@ -3659,7 +3894,9 @@ mod tests {
         wait_for_prepared(&backend);
         backend.shared.playing.store(true, Ordering::Relaxed);
         let mut out = vec![0.0; 8004];
-        write_samples(&mut out, &backend.shared, 1);
+        let report = write_samples(&mut out, &backend.shared, 1);
+        assert_eq!(report.source_frames, 8004);
+        assert_eq!(report.transition_frame, Some(8000));
         for (i, sample) in out[..8000].iter().enumerate() {
             assert!(
                 (*sample - i as f32 / 32768.0).abs() < 1e-6,
