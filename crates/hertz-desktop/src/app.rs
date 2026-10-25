@@ -33,6 +33,8 @@ const POLL_ERROR: Duration = Duration::from_secs(1);
 const SAVE_DEBOUNCE: Duration = Duration::from_millis(400);
 const STALE_AFTER: Duration = Duration::from_secs(3);
 const PREVIEW_LEASE: Duration = Duration::from_secs(15);
+/// 页面每 2 s 心跳；可见状态下超过这个时间没有有效心跳就按渲染停摆重建。
+const HEARTBEAT_STALE: Duration = Duration::from_secs(10);
 
 static LOG_SEQ: AtomicU64 = AtomicU64::new(0);
 
@@ -79,6 +81,7 @@ struct WallpaperSurface {
     webview: wry::WebView,
     monitor: native::WallpaperMonitor,
     zoom: f64,
+    eval_failures: AtomicU64,
 }
 
 impl WallpaperSurface {
@@ -87,9 +90,21 @@ impl WallpaperSurface {
     }
 
     fn eval(&self, script: &str) {
-        if let Err(error) = self.webview.evaluate_script(script) {
-            log(&format!("wallpaper evaluate_script failed: {error}"));
+        match self.webview.evaluate_script(script) {
+            Ok(()) => self.eval_failures.store(0, Ordering::Relaxed),
+            Err(error) => {
+                self.eval_failures.fetch_add(1, Ordering::Relaxed);
+                log(&format!("wallpaper evaluate_script failed: {error}"));
+            }
         }
+    }
+
+    fn eval_failures(&self) -> u64 {
+        self.eval_failures.load(Ordering::Relaxed)
+    }
+
+    fn reset_eval_failures(&self) {
+        self.eval_failures.store(0, Ordering::Relaxed);
     }
 
     fn apply_feed(&self, snapshot: &WallpaperSnapshot) {
@@ -259,6 +274,8 @@ struct App {
     wallpaper_page_ready: bool,
     wallpaper_last: Option<WallpaperSnapshot>,
     wallpaper_feed_logged: bool,
+    wallpaper_heartbeat_at: Option<Instant>,
+    wallpaper_heartbeat_ticks: u64,
     wallpaper_visible: bool,
     wallpaper_hidden: bool,
     wallpaper_forced: bool,
@@ -482,8 +499,10 @@ impl App {
         self.wallpaper_visible = visible;
         if visible {
             surface.start(self.config.wallpaper.fps);
+            self.wallpaper_heartbeat_at = Some(Instant::now());
         } else {
             surface.stop();
+            self.wallpaper_heartbeat_at = None;
         }
     }
 
@@ -538,18 +557,35 @@ impl App {
             ));
             return;
         }
+        if let Some((ticks, mounted, lost)) = parse_wallpaper_heartbeat(event) {
+            if mounted && !lost {
+                self.wallpaper_heartbeat_at = Some(Instant::now());
+                self.wallpaper_heartbeat_ticks = ticks;
+            }
+            return;
+        }
         match event {
             "wallpaper_dom_ready" => {
                 log("wallpaper page dom ready");
                 self.wallpaper_page_ready = true;
+                self.wallpaper_heartbeat_at = Some(Instant::now());
+                self.wallpaper_heartbeat_ticks = 0;
+                if let Some(surface) = self.wallpaper.as_ref() {
+                    surface.reset_eval_failures();
+                }
             }
             "wallpaper_ready" => {
                 log("wallpaper page mounted");
                 self.wallpaper_page_ready = true;
+                self.wallpaper_heartbeat_at = Some(Instant::now());
+                if let Some(surface) = self.wallpaper.as_ref() {
+                    surface.reset_eval_failures();
+                }
             }
             "wallpaper_mount_failed" => {
                 log("wallpaper page mount failed");
                 self.wallpaper_page_ready = false;
+                self.wallpaper_heartbeat_at = None;
             }
             other => log(&format!("unknown wallpaper page event: {other}")),
         }
@@ -595,6 +631,7 @@ impl App {
         self.wallpaper = None;
         self.wallpaper_page_ready = false;
         self.wallpaper_visible = false;
+        self.wallpaper_heartbeat_at = None;
         self.wallpaper_generation = self.wallpaper_generation.wrapping_add(1);
         match create_wallpaper(
             target,
@@ -832,6 +869,7 @@ impl App {
         self.wallpaper_generation = self.wallpaper_generation.wrapping_add(1);
         self.wallpaper_page_ready = false;
         self.wallpaper_visible = false;
+        self.wallpaper_heartbeat_at = None;
     }
 
     fn switch_source(
@@ -1040,6 +1078,9 @@ impl App {
     }
 
     fn handle_preview_page(&mut self, event: &str) {
+        if event.starts_with("wallpaper_heartbeat ") {
+            return;
+        }
         if event == "wallpaper_mount_failed" {
             log("wallpaper preview page mount failed");
             self.close_preview();
@@ -1464,6 +1505,10 @@ impl App {
                 "enabled": self.config.wallpaper.enabled || self.wallpaper_forced,
                 "visible": self.wallpaper_visible,
                 "pageReady": self.wallpaper_page_ready,
+                "pageTicks": self.wallpaper_heartbeat_ticks,
+                "heartbeatAgeMs": self
+                    .wallpaper_heartbeat_at
+                    .map(|at| at.elapsed().as_millis() as u64),
                 "hidden": self.wallpaper_hidden,
                 "revision": self.config.revision,
                 "fps": self.config.wallpaper.fps,
@@ -1544,6 +1589,28 @@ impl App {
             } else {
                 self.reconcile_wallpaper_geometry(target);
             }
+            if self.wallpaper_visible && self.wallpaper_page_ready {
+                let stalled = self
+                    .wallpaper_heartbeat_at
+                    .is_some_and(|at| at.elapsed() > HEARTBEAT_STALE);
+                let eval_failed = self
+                    .wallpaper
+                    .as_ref()
+                    .is_some_and(|surface| surface.eval_failures() >= 3);
+                if stalled || eval_failed {
+                    log(if stalled {
+                        "wallpaper page heartbeat stalled; recovering"
+                    } else {
+                        "wallpaper WebView eval failed repeatedly; recovering"
+                    });
+                    self.wallpaper_heartbeat_at = None;
+                    self.wallpaper = None;
+                    self.wallpaper_page_ready = false;
+                    self.wallpaper_visible = false;
+                    self.wallpaper_generation = self.wallpaper_generation.wrapping_add(1);
+                    self.recover_wallpaper(target);
+                }
+            }
             self.ensure_on_screen();
             if now.duration_since(self.last_update) > STALE_AFTER && self.last_snapshot.is_some() {
                 self.last_snapshot = None;
@@ -1613,6 +1680,7 @@ impl App {
                 self.wallpaper = None;
                 self.wallpaper_page_ready = false;
                 self.wallpaper_visible = false;
+                self.wallpaper_heartbeat_at = None;
                 self.wallpaper_generation = self.wallpaper_generation.wrapping_add(1);
                 self.recover_wallpaper(target);
                 return;
@@ -1993,6 +2061,8 @@ pub(crate) fn run() -> Result<()> {
         wallpaper_page_ready: false,
         wallpaper_last: None,
         wallpaper_feed_logged: false,
+        wallpaper_heartbeat_at: None,
+        wallpaper_heartbeat_ticks: 0,
         wallpaper_visible: false,
         wallpaper_hidden: false,
         wallpaper_forced,
@@ -2194,6 +2264,16 @@ fn spawn_feed(
         .ok();
 }
 
+fn parse_wallpaper_heartbeat(event: &str) -> Option<(u64, bool, bool)> {
+    let mut parts = event
+        .strip_prefix("wallpaper_heartbeat ")?
+        .split_whitespace();
+    let ticks = parts.next()?.parse().ok()?;
+    let mounted = parts.next()? == "1";
+    let lost = parts.next()? == "1";
+    Some((ticks, mounted, lost))
+}
+
 fn monitor_geometry_changed(
     left: &native::WallpaperMonitor,
     right: &native::WallpaperMonitor,
@@ -2313,6 +2393,7 @@ fn create_wallpaper(
         webview,
         monitor,
         zoom,
+        eval_failures: AtomicU64::new(0),
     })
 }
 
@@ -2690,6 +2771,24 @@ mod tests {
             dpi: 144,
             primary: true,
         }
+    }
+
+    #[test]
+    fn heartbeat_parses_render_progress() {
+        assert_eq!(
+            parse_wallpaper_heartbeat("wallpaper_heartbeat 42 1 0"),
+            Some((42, true, false))
+        );
+        assert_eq!(
+            parse_wallpaper_heartbeat("wallpaper_heartbeat 42 0 0"),
+            Some((42, false, false))
+        );
+        assert_eq!(
+            parse_wallpaper_heartbeat("wallpaper_heartbeat 42 1 1"),
+            Some((42, true, true))
+        );
+        assert_eq!(parse_wallpaper_heartbeat("wallpaper_dom_ready"), None);
+        assert_eq!(parse_wallpaper_heartbeat("wallpaper_heartbeat x 1 0"), None);
     }
 
     #[test]

@@ -255,7 +255,7 @@ W1-A 先实现 `GET /v1/wallpaper/snapshot`，不实现 `/v1/wallpaper/events` W
 
 已实现：`hertz-desktop` 的壁纸场景页（registry 相机 + `applyFeed`）、WorkerW 目标屏 surface（完整显示器矩形）、混合 DPI WebView 缩放补偿、目标屏选择（设置页）、500 ms feed 线程、全屏/会话/息屏停绘、托盘“显示壁纸”开关（用户隐藏时隐藏 WebView，露出系统壁纸）、壁纸设置页（启用/目标屏/帧率/跟随音乐）、15 s 预览租约与预览窗口、应用 revision 与运行时启停、Explorer 重启自动恢复（存活检测 + 3 次/120 s 预算 + 托盘重新挂载）、主应用管理通道（服务端 `/v1/desktop/control` + app 设置行 + 宿主 pipe）、多来源切换（配置 schema v2、按 profile 独立域、设置页来源列表与候选）与事件流（`GET /v1/wallpaper/events`，旧服务自动回退轮询），以及 `wallpaper.enabled`（默认关闭）与 `--wallpaper` 运行开关。隔离 mock 快照端到端已记录 page ready / mounted / feed ok；设置页经 WebView2 CDP 验证预览、应用、live surface 与 feed；真实 Explorer 重启验证 page/scene 重新挂载；96/144 混合 DPI 在第二屏实机验证。
 
-W1-B 的功能件已齐，单屏拓扑重排已在 W3 首片接上；W1-C 的安装升级、真实双发行版服务、长稳与共存验收未做。同时挂多块屏、多屏整机预算仍属 W3。宿主托盘已提供开机启动开关（`launch_at_login`）；运行中的旧服务需重建/重启后才提供新路由、新 UI 资源、`wallpaper-key` 与快照/事件端点。
+W1-B 的功能件已齐，单屏拓扑重排已在 W3 首片接上，W1-C 的渲染失联恢复首片已实现；W1-C 的安装升级、真实双发行版服务、长稳与共存验收未做。同时挂多块屏、多屏整机预算仍属 W3。宿主托盘已提供开机启动开关（`launch_at_login`）；运行中的旧服务需重建/重启后才提供新路由、新 UI 资源、`wallpaper-key` 与快照/事件端点。
 
 #### W1-B 设置与预览首片（2026-10-24）
 
@@ -296,6 +296,13 @@ W1-B 的功能件已齐，单屏拓扑重排已在 W3 首片接上；W1-C 的安
 - 重排不重置配置、场景参数或质量偏好；只有重挂失败才丢弃当前 surface，进入现有 3 次/120 s 恢复预算。
 - 实机验证：目标 `DISPLAY5` 1920×1080@96 at (510,-1080) → 1600×900@59 at (510,-900) → 恢复；子窗从 `510,-1080..2430,0` 变为 `510,-900..2110,0` 再恢复，`zoom=0.667` 保持，页面仍为 ready，第二屏截图显示场景填满新尺寸。证据在 `output/desk-w0/w1b-reflow-*`。
 - 边界：只验证了位置/分辨率变化，DPI 变化与横竖屏切换尚未实机覆盖；同时挂多块屏、逐屏实例上限与整机预算仍属 W3 后续。
+
+#### W1-C 渲染失联恢复首片（2026-10-25）
+
+- 场景页渲染循环每 2 s 上报 `wallpaper_heartbeat <ticks> <mounted> <lost>`；宿主只在壁纸可见且页面 ready 时检查，超过 10 s 没有有效心跳视为渲染停摆。
+- 壁纸 feed 每 250 ms 调用页面 `evaluate_script`；页面就绪后连续 3 次失败视为 WebView 控制器/渲染进程失效。两条路径都丢弃当前 surface，清空页面代际，再走统一的 3 次/120 s 恢复预算；旧页面迟到 IPC 仍按 generation 丢弃。
+- 状态增加 `pageTicks` 与 `heartbeatAgeMs`，便于从管理通道确认页面是否仍在推进。
+- 验证：隔离宿主杀掉自己的 WebView2 进程树后，2.6 s 内连续 eval 失败触发恢复，0.4 s 重建成功，新的 dom ready/mounted 出现，`pageTicks` 恢复递增且 surface 仍启用（8/8 checks）。心跳停顿分支有解析单测；尚未通过冻结页面单独验证 10 s 心跳超时的实际时序。
 
 #### W1-B 多屏与混合 DPI 首片（2026-10-24）
 
