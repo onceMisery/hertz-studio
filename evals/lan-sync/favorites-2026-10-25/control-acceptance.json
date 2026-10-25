@@ -1,0 +1,26 @@
+{
+  "binary_sha256": "1dd4a33f99d6304118c7ade98392636a5e8c031a8f3f3914f307ff09adab7826",
+  "platform": "Windows-11-10.0.26200-SP0",
+  "passed": true,
+  "checks": [
+    "duplicate queue occurrences retain identity; duplicate, mismatched, removed and stale writes are atomic",
+    "public room-code admission stays unauthenticated until approval; rejection, approval revocation and atomic consumption round-trip over TLS",
+    "discovery publication can be disabled and direct invitations can be revoked before pairing",
+    "independent profiles, pinned TLS pairing, restricted shared library and queue",
+    "real member attribution, occurrence-bound idempotent votes and host-owned authoritative ranking",
+    "legacy local playback rejects room-mode writes",
+    "native chat persists and returns exact plain text",
+    "structured song chat is durable, resource-scoped and idempotent",
+    "server rechecks revoked playback permission",
+    "explicit guest leave restores silent local mode",
+    "host End restores the connected guest to silent local mode",
+    "host service shutdown drains End, forgets ended guest membership and removes discovery before exit"
+  ],
+  "native_output_tested": false,
+  "output_binding": null,
+  "duration_seconds": 0,
+  "requested_output_device": null,
+  "samples": [],
+  "sample_retention": "Last 600 observations; every observation is checked during the run.",
+  "limits": "Single Windows machine / two processes when run locally. No acoustic or cross-OS claim."
+}
