@@ -81,6 +81,7 @@ ui_assets! {
     "/stage-particles.js", JS => const STAGE_PARTICLES_JS: &str = edition_ui!("stage-particles.js");
     "/stage-particles-gl.js", JS => const STAGE_PARTICLES_GL_JS: &str = edition_ui!("stage-particles-gl.js");
     "/themes.js", JS => const THEMES_JS: &str = edition_ui!("themes.js");
+    "/theme-picker.js", JS => const THEME_PICKER_JS: &str = edition_ui!("theme-picker.js");
     "/anime-interactions.js", JS => const ANIME_INTERACTIONS_JS: &str = edition_ui!("anime-interactions.js");
     "/shelf.js", JS => const SHELF_JS: &str = edition_ui!("shelf.js");
     "/pl-covers.js", JS => const PL_COVERS_JS: &str = edition_ui!("pl-covers.js");

@@ -323,7 +323,7 @@ function checkSkinEntry() {
   ok(/document\.body\.appendChild\(menu\)/.test(APP)
     && /\.top-more-menu\s*\{[^}]*position:\s*fixed/.test(styleTop),
     '「更多工具」弹层也搬出顶栏（实测命中是 #stage）');
-  ok(/document\.body\.appendChild\(ui\.themeMenu\)/.test(APP)
+  ok(/document\.body\.appendChild\(menu\)/.test(read(path.join(WEB, 'theme-picker.js')))
     && /\.theme-menu\s*\{[^}]*position:\s*fixed/.test(read(path.join(WEB, 'stage.css'))),
     '主题色弹层保持搬出顶栏（另两颗的判据来源）');
 }

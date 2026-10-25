@@ -24,9 +24,10 @@ async function main() {
       return route.fulfill({ contentType: file.endsWith('.css') ? 'text/css' : 'text/html', body });
     });
     await page.goto('http://room-theme.test/');
-    for (const file of ['themes.js', 'favorites.js', 'room-workspace.js', 'room-view.js', 'room.js']) await page.addScriptTag({ content: source(file) });
+    for (const file of ['themes.js', 'theme-picker.js', 'favorites.js', 'room-workspace.js', 'room-view.js', 'room.js']) await page.addScriptTag({ content: source(file) });
     await page.evaluate(async () => {
       Theme.init();
+      ThemePicker.bind(document.querySelector('#theme-btn'));
       document.querySelectorAll('.view').forEach(node => { node.hidden = node.id !== 'view-favorites'; });
       window.__appends = 0;
       window.HertzRoom = { activateFavorite: async () => { window.__appends++; } };
@@ -72,10 +73,16 @@ async function main() {
       HertzRoom.init({ root: document.querySelector('#view-room'), transport, confirm: async () => true });
       await HertzRoom.onViewEnter();
     });
-    const theme = page.getByRole('combobox', { name: '主题色', exact: true });
+    const theme = page.locator('#view-room').getByRole('button', { name: '切换主题色', exact: true });
+    const menu = page.getByRole('listbox', { name: '主题色列表', exact: true });
+    const choose = async id => {
+      await theme.click();
+      await menu.locator('[data-theme-id="' + id + '"]').click();
+      assert.equal(await theme.getAttribute('aria-expanded'), 'false');
+    };
     for (const width of [1440, 1024, 700, 390, 360]) {
       await page.setViewportSize({ width, height: width === 360 ? 800 : width < 700 ? 844 : 1000 });
-      await theme.selectOption('orbit-fog');
+      await choose('orbit-fog');
       await page.waitForTimeout(500);
       const light = await page.evaluate(() => {
         const root = document.querySelector('#view-room'), primary = root.querySelector('.primary');
@@ -84,11 +91,20 @@ async function main() {
       assert.equal(light.bg, 'rgb(228, 230, 238)', 'room inherits light Theme background: ' + JSON.stringify(light));
       assert.equal(light.ink, 'rgb(255, 255, 255)', 'primary button uses global accent ink');
       await page.evaluate(() => Theme.apply('mineral'));
-      assert.equal(await theme.inputValue(), 'mineral', 'global changes sync room immediately');
-      await theme.focus();
-      await page.keyboard.press('ArrowDown'); await page.keyboard.press('Tab');
-      assert.equal(await page.evaluate(() => Theme.current().id), await theme.inputValue(), 'native keyboard selection applies Theme');
+      await theme.click();
+      assert.equal(await menu.locator('[aria-selected="true"]').getAttribute('data-theme-id'), 'mineral', 'global changes sync room immediately');
+      const box = await menu.boundingBox();
+      assert.ok(box.x >= 0 && box.x + box.width <= width && box.y >= 0, 'shared popup stays inside viewport at ' + width);
+      await page.keyboard.press('ArrowDown'); await page.keyboard.press('Enter');
+      assert.equal(await theme.evaluate(node => node === document.activeElement), true, 'selection restores trigger focus');
       assert.ok(await theme.isVisible());
+      const output = path.resolve(__dirname, '../output/playwright'); fs.mkdirSync(output, { recursive: true });
+      if (width === 1440 || width === 390) {
+        await theme.click();
+        await page.screenshot({ path: path.join(output, 'room-theme-button-' + width + '.png') });
+        await page.keyboard.press('Escape');
+        assert.equal(await theme.evaluate(node => node === document.activeElement), true, 'Escape restores trigger focus');
+      }
       assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'room fits ' + width);
       if (width < 700) {
         const controls = await page.locator('.room-play-button').boundingBox(), nav = await page.locator('.room-mobile-navigation').boundingBox();
@@ -100,13 +116,30 @@ async function main() {
       }
     }
     await page.evaluate(() => { Theme.register({ id: 'room-custom', name: '扩展自定义配色', tokens: { '--bg': '#18232a', '--accent': '#aadeef' } }); });
-    await theme.focus();
-    await theme.selectOption('room-custom');
+    await choose('room-custom');
     assert.equal(await page.evaluate(() => localStorage.getItem('vmusic.theme.v2')), 'room-custom', 'room uses existing global persistence');
     await page.evaluate(async () => { window.__snapshot = { mode: 'local' }; await HertzRoom.onViewEnter(); });
-    assert.ok(await theme.isVisible(), 'unjoined lobby has a theme selector');
-    assert.equal(await theme.inputValue(), 'room-custom', 'lobby remount retains global theme');
-    console.log('Room theme browser: inherited colors, bidirectional sync, custom themes, keyboard, lobby, responsive geometry and LAN favorite actions passed.');
+    assert.ok(await theme.isVisible(), 'unjoined lobby has a palette button');
+    await theme.click();
+    assert.equal(await menu.locator('[aria-selected="true"]').getAttribute('data-theme-id'), 'room-custom', 'lobby remount retains global theme');
+    await page.keyboard.press('Tab');
+    assert.equal(await menu.isVisible(), false, 'Tab closes the popup');
+    await theme.click();
+    await page.locator('#view-room h1').click();
+    assert.equal(await menu.isVisible(), false, 'outside click closes the popup');
+    await page.evaluate(() => { document.body.classList.remove('room-view'); document.querySelector('#view-room').hidden = true; });
+    const outer = page.locator('#theme-btn');
+    await outer.click();
+    assert.equal(await menu.locator('[aria-selected="true"]').getAttribute('data-theme-id'), 'room-custom', 'application uses the same selected theme and menu');
+    await menu.locator('[data-theme-id="orbit-fog"]').click();
+    assert.equal(await page.evaluate(() => Theme.current().id), 'orbit-fog');
+    await page.evaluate(() => { document.body.classList.add('room-view'); document.querySelector('#view-room').hidden = false; });
+    await theme.click();
+    assert.equal(await menu.locator('[aria-selected="true"]').getAttribute('data-theme-id'), 'orbit-fog', 'outer selection appears in room');
+    await page.evaluate(() => HertzRoom.destroy());
+    assert.equal(await menu.isVisible(), false, 'destroy closes the shared menu');
+    assert.equal(await page.locator('#theme-menu').count(), 1, 'single menu owner');
+    console.log('Room theme browser: shared palette buttons/menu, inherited colors, bidirectional sync, custom themes, keyboard, lifecycle, lobby, responsive geometry and LAN favorite actions passed.');
   } finally { await browser.close(); }
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

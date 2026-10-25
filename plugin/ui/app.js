@@ -5674,25 +5674,7 @@ const Theme = window.Theme;
 // var(--bg)（当前主题的底色），漏传不会报错，只会让所有样本变成同一个颜色 ——
 // scripts/check-css-tokens.js 有断言盯着这两个别名，别只改这里。
 function themeDotStyle(theme) {
-  return `--t-bg:${theme.tokens['--bg']};--t-accent:${theme.tokens['--accent']};--t-accent-2:${theme.tokens['--accent-2']}`;
-}
-
-function renderThemeMenu() {
-  if (!Theme || !ui.themeMenu) return;
-  const current = Theme.current();
-  ui.themeMenu.innerHTML = '';
-  Theme.list().forEach((theme) => {
-    const btn = document.createElement('button');
-    btn.className = 'theme-item';
-    btn.type = 'button';
-    btn.setAttribute('role', 'option');
-    btn.setAttribute('aria-selected', String(current && theme.id === current.id));
-    btn.innerHTML = `<span class="theme-dot" style="${themeDotStyle(theme)}"></span>
-      <span class="theme-meta"><span class="theme-name"></span></span>`;
-    btn.querySelector('.theme-name').textContent = theme.name;
-    btn.onclick = () => { applyTheme(theme.id); closeThemeMenu(); };
-    ui.themeMenu.appendChild(btn);
-  });
+  return window.ThemePicker.themeDotStyle(theme);
 }
 
 function renderThemeSettings() {
@@ -5731,18 +5713,12 @@ function applyTheme(id) {
   if (Stage && typeof Stage.retint === 'function') Stage.retint();
 }
 
-function closeThemeMenu() {
-  if (!ui.themeMenu) return;
-  ui.themeMenu.hidden = true;
-  if (ui.themeBtn) ui.themeBtn.setAttribute('aria-expanded', 'false');
-}
-
 // 菜单挂在 <body> 上，位置只能自己算：默认与按钮右对齐、落在按钮下方；
 // 下方放不下就翻到上方，右边超出视口就向左收。
 /// 顶栏弹层的通用定位：右对齐按钮，下方放不下就翻上去，最后夹进视口。
 ///
 /// 三个入口（主题色 / 界面皮肤 / 更多工具）都得把弹层搬出 .topbar 才压得住后面
-/// 那些玻璃面板（顶栏自己就是层叠上下文，见 positionThemeMenu 上方注释），而搬
+/// 那些玻璃面板（顶栏自己就是层叠上下文，见 theme-picker.js），而搬
 /// 出来之后 CSS 的 top/right 就都不成立了，位置只能由 JS 按按钮矩形算。
 function positionAnchoredMenu(btn, menu, fallbackW) {
   if (!btn || !menu || menu.hidden) return;
@@ -5766,10 +5742,6 @@ function positionAnchoredMenu(btn, menu, fallbackW) {
   menu.style.top = `${Math.round(top)}px`;
 }
 
-function positionThemeMenu() {
-  positionAnchoredMenu(ui.themeBtn, ui.themeMenu, 232);
-}
-
 /// 顶栏弹层的互斥广播：三个入口（主题色 / 界面皮肤 / 更多工具）的按钮 onclick
 /// 都 stopPropagation，彼此那套「点外部就关」的 document 监听收不到对方的按钮
 /// 点击，两个面板会叠着开。约定 topbar:popup —— 谁开谁喊一声，其余弹层听见
@@ -5780,47 +5752,13 @@ function broadcastTopbarPopup(id) {
   } catch (e) { /* 老浏览器没有 CustomEvent 构造器 */ }
 }
 
-function setThemeMenuOpen(open) {
-  if (!ui.themeMenu) return;
-  ui.themeMenu.hidden = !open;
-  if (ui.themeBtn) ui.themeBtn.setAttribute('aria-expanded', String(open));
-  if (open) {
-    positionThemeMenu();
-    broadcastTopbarPopup('theme');
-  }
-}
-
 function initTheme() {
   if (!Theme) return;
   Theme.init();
-  Theme.onChange(() => { renderThemeMenu(); renderThemeSettings(); });
-  renderThemeMenu();
+  Theme.onChange(renderThemeSettings);
   renderThemeSettings();
-
-  if (ui.themeBtn && ui.themeMenu) {
-    // 关键一步：把菜单从 .topbar 的层叠上下文里搬出来。留在原处的话，
-    // 后面那些带 backdrop-filter 的玻璃面板（.column / .stage）会整块盖住它。
-    document.body.appendChild(ui.themeMenu);
-
-    ui.themeBtn.onclick = (e) => {
-      e.stopPropagation();
-      setThemeMenuOpen(ui.themeMenu.hidden);
-    };
-    document.addEventListener('click', (e) => {
-      // 用 contains 而不是 ===：按钮里有个 svg，点图标时 target 是 svg，
-      // 严格相等判断会漏掉，导致点按钮先关又立刻被 onclick 打开。
-      if (!ui.themeMenu.hidden && !ui.themeMenu.contains(e.target) && !ui.themeBtn.contains(e.target)) {
-        closeThemeMenu();
-      }
-    });
-    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeThemeMenu(); });
-    // 窗口尺寸变化时菜单可能变得越界，跟随重算
-    window.addEventListener('resize', () => { if (!ui.themeMenu.hidden) positionThemeMenu(); });
-    // 别的顶栏弹层开了就收起（见 broadcastTopbarPopup 上方注释）
-    document.addEventListener('topbar:popup', (e) => {
-      if (e.detail && e.detail.id !== 'theme' && !ui.themeMenu.hidden) closeThemeMenu();
-    });
-  }
+  window.ThemePicker.configure({ apply: applyTheme });
+  if (ui.themeBtn) window.ThemePicker.bind(ui.themeBtn);
   if (ui.setTheme) ui.setTheme.onchange = () => applyTheme(ui.setTheme.value);
 }
 

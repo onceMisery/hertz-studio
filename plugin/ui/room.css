@@ -51,8 +51,8 @@ html[data-skin] body.room-view #view-room { padding:0 !important; border-radius:
 #view-room .room-sub { color:var(--muted); font-size:13px; line-height:1.65; margin:8px 0 16px; overflow-wrap:anywhere; }
 #view-room .room-header .room-sub { margin:0; }
 #view-room .room-header-actions { min-width:0; display:flex; align-items:center; gap:12px; flex-wrap:wrap; justify-content:flex-end; }
-#view-room .room-theme-field { display:grid; gap:4px; width:180px; max-width:100%; margin:0; color:var(--muted); font-size:11px; }
-#view-room .room-theme-select { width:100%; min-width:0; min-height:44px; border:1px solid var(--field-border); border-radius:12px; padding:8px 10px; color:var(--text); background:var(--panel-solid); cursor:pointer; }
+#view-room .room-theme-picker { flex:none; }
+#view-room .room-theme-button { width:44px; height:44px; }
 #view-room .room-health { border:1px solid var(--line); color:var(--muted); background:transparent; border-radius:30px; font-size:12px; }
 #view-room .room-health.healthy { color:var(--ok); border-color:color-mix(in srgb, var(--ok) 35%, transparent); background:color-mix(in srgb, var(--ok) 7%, transparent); }
 #view-room .room-page-title { font-size:18px; font-weight:600; margin:0 0 20px; }
@@ -207,8 +207,7 @@ html[data-skin] body.room-view #view-room { padding:0 !important; border-radius:
   #view-room .room-sidebar { display:none; }
   #view-room .room-content { position:relative; padding:22px 18px calc(105px + env(safe-area-inset-bottom,0px)); }
   /* Share the return row so theme access never pushes playback below the fold. */
-  #view-room .room-theme-field { position:absolute; top:22px; right:18px; display:flex; align-items:center; width:170px; gap:7px; font-size:10px; white-space:nowrap; }
-  #view-room .room-theme-select { flex:1; width:auto; font-size:11px; }
+  #view-room .room-theme-picker { position:absolute; top:22px; right:18px; }
   #view-room .room-header { gap:12px; margin-bottom:22px; }
   #view-room .room-header h1 { font-size:22px; margin:9px 0; }
   #view-room .room-header .room-kicker { font-size:10px; }
@@ -232,7 +231,7 @@ html[data-skin] body.room-view #view-room { padding:0 !important; border-radius:
      details remain below it instead of competing with the album artwork. */
   #view-room[data-room-page=play] .room-mobile-back { margin-bottom:4px; }
   #view-room[data-room-page=play] .room-content { padding-top:14px; }
-  #view-room[data-room-page=play] .room-theme-field { top:14px; }
+  #view-room[data-room-page=play] .room-theme-picker { top:14px; }
   #view-room[data-room-page=play] .room-header { margin-bottom:12px; }
   #view-room[data-room-page=play] .room-header .room-kicker { display:none; }
   #view-room[data-room-page=play] .room-page-title { position:absolute; width:1px; height:1px; margin:0; overflow:hidden; clip-path:inset(50%); }

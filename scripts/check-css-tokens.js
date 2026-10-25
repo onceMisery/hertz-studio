@@ -86,7 +86,7 @@ const THEME_SAMPLE_CONTRACT = {
   must: ['background-image', 'background-clip'],
   boxes: ['content-box', 'padding-box'],
   producer: {
-    file: 'app.js',
+    file: 'theme-picker.js',
     fn: 'themeDotStyle',
     aliases: { '--t-bg': '--bg', '--t-accent': '--accent', '--t-accent-2': '--accent-2' },
   },

@@ -24,7 +24,7 @@ class Node {
 const walk = node => [node, ...node.children.flatMap(walk)];
 function deferred() { let resolve, reject; const promise = new Promise((a, b) => { resolve = a; reject = b; }); return { promise, resolve, reject }; }
 async function settle() { for (let i = 0; i < 40; i++) await Promise.resolve(); }
-function fixture(theme) {
+function fixture(themePicker) {
   const favoriteStore = new Set();
   const root = new Node('main'), calls = [], hooks = new Map(), chromeEvents = [];
   let now = Date.now(), confirmation = async () => true;
@@ -55,7 +55,7 @@ function fixture(theme) {
   };
   const context = { document: { createElement: tag => new Node(tag), hidden: false }, Date: FixtureDate, TextEncoder, URL, Blob, Option: function (text, value) { const n = new Node('option'); n.textContent = text; n.value = value; return n; }, navigator: {}, setInterval: () => 1, clearInterval() {}, setTimeout() {}, matchMedia: () => ({ matches: true }) };
   context.window = context;
-  if (theme) context.Theme = theme;
+  if (themePicker) context.ThemePicker = themePicker;
   context.HertzRoomTransport = { create: () => ({ render() {}, notice() {}, destroy() {}, setWorkspaceVisible: value => chromeEvents.push(value) }) };
   vm.createContext(context);
   sources.forEach(({ name, source }) => vm.runInContext(source, context, { filename: name }));
@@ -86,26 +86,24 @@ async function applicantFixture() {
 }
 async function main() {
   {
-    const themes = [{ id: 'mineral', name: '矿石黑' }, { id: 'light', name: '浅色' }], listeners = [];
-    let selected = themes[0];
-    const theme = { list: () => themes, current: () => selected, onChange: fn => listeners.push(fn), apply(id) { selected = themes.find(t => t.id === id); listeners.forEach(fn => fn(selected)); } };
-    const f = fixture(theme); await settle();
-    const selector = () => walk(f.root).find(n => n.className === 'room-theme-select');
-    assert.equal(selector().attrs['aria-label'], '主题色');
-    assert.equal(selector().value, 'mineral');
-    selector().value = 'light'; selector().onchange();
-    assert.equal(theme.current().id, 'light', 'room selects the same global Theme owner');
-    theme.apply('mineral');
-    assert.equal(selector().value, 'mineral', 'outer theme changes immediately update room selector');
-    themes.push({ id: 'custom', name: '自定义配色' }); selector().onfocus();
-    assert.equal(selector().children.at(-1).value, 'custom', 'late registered themes appear before user selection');
+    const bindings = new Set();
+    let destroyed = 0;
+    const picker = {
+      bind(button) { bindings.add(button); return { destroy() { bindings.delete(button); destroyed++; } }; },
+      close() {}
+    };
+    const f = fixture(picker); await settle();
+    const button = () => walk(f.root).find(n => n.className === 'iconbtn room-theme-button');
+    assert.equal(button().attrs['aria-label'], '切换主题色');
+    assert.equal(button().children[0].children[0].attrs.href, '#i-palette', 'same palette symbol as the application');
+    assert.equal(bindings.size, 1, 'room delegates to shared picker');
     f.set({ mode: 'local' }); await f.poll();
-    assert.ok(selector(), 'theme entry is present in the unjoined lobby');
-    assert.equal(listeners.length, 1, 'remounts retain one app-lifetime subscription');
-    theme.apply('custom'); assert.equal(selector().value, 'custom');
+    assert.ok(button(), 'lobby retains palette button');
+    assert.equal(bindings.size, 1, 'workspace replacement releases previous trigger');
     assert.equal(f.calls.some(call => /theme/i.test(call.action)), false, 'themes never issue room operations');
-    const oldSelector = selector(); f.api.destroy(); theme.apply('light');
-    assert.equal(oldSelector.value, 'custom', 'destroyed workspace releases its theme binding');
+    f.api.destroy();
+    assert.equal(bindings.size, 0, 'destroy releases shared picker binding');
+    assert.ok(destroyed >= 2);
   }
   {
   const targetKey = 'ab'.repeat(32), hostPin = 'cd'.repeat(32), lanRef = hostPin + ':' + targetKey;
