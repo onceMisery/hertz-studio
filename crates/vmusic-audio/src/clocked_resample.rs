@@ -15,10 +15,10 @@
 //! 时序口径：产生输出帧需要 `half = TAPS/2` 帧输入前视（lookahead），输出
 //! 帧 y 对应输入时间轴上的绝对相位 pos（从 0 起）。滤波器对阶跃脉冲的峰值
 //! 落在 pos = 脉冲帧号处（见脉冲回归）；`reset` 后从相位 0 重新开始，预热
-//! 策略（用静音填充转换历史）由接收端调度决定，不在这里隐含。
+//! 策略由接收端调度决定；晚入可用 `prime_history` 提供真实的过去源帧。
 
 /// 每输出帧访问的输入帧数（偶数；前视 = TAPS/2）。
-const TAPS: usize = 128;
+const TAPS: usize = 256;
 /// 相位子表密度：相邻子相位之间线性插值。
 const SUBPHASES: usize = 1024;
 /// 内部历史容量（输入帧）。超过即调用方生产过快，明确溢出而不是丢弃。
@@ -28,7 +28,7 @@ const COMPACT_THRESHOLD: usize = 2048;
 /// 瞬时变比每输出帧的最大变化量。500ppm ≈ 1 秒内平滑达成。
 const MAX_RATIO_STEP_PER_FRAME: f64 = 1.5e-8;
 
-pub const ALGORITHM: &str = "clocked-sinc-taps128-sub1024-bh4-cutoff095-slew1e8-v1";
+pub const ALGORITHM: &str = "clocked-sinc-taps256-sub1024-bh4-cutoff095-slew1e8-v2";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum State {
@@ -55,6 +55,8 @@ pub enum Error {
     NonFinite,
     #[error("clocked history overflow: caller produced faster than consumed")]
     Overflow,
+    #[error("clocked history can only be primed before processing")]
+    Started,
 }
 
 /// 可变比流式转换器。通道交错布局，与 [`crate::resample::Converter`] 一致。
@@ -93,8 +95,9 @@ impl ClockedConverter {
             return Err(Error::Format);
         }
         let half = TAPS / 2;
-        // 下变换时截止必须压到输出奈奎斯特（输入域 0.5×out/in），否则混叠。
-        let c = 0.95 * f64::min(1.0, 0.5 * f64::from(output_rate) / f64::from(input_rate));
+        // build_table 的 sin(πcu)/(πu) 中 c 以输入奈奎斯特归一化，
+        // 下变换时对应 out/in；不能再乘 0.5，否则同率也会砍掉一半通带。
+        let c = 0.95 * f64::min(1.0, f64::from(output_rate) / f64::from(input_rate));
         let table = build_table(c, half);
         let mut buf = Vec::with_capacity(HISTORY_CAP * channels);
         buf.resize(half * channels, 0.0);
@@ -123,7 +126,7 @@ impl ClockedConverter {
         self.ratio
     }
 
-    /// 目标漂移（ppm）。正值表示接收端设备时钟偏快，需要更多输入帧/输出帧。
+    /// 目标变比修正（ppm）。正值表示每个输出帧需要更多输入帧。
     pub fn set_drift_ppm(&mut self, ppm: f64) {
         let clamped = ppm.clamp(-5000.0, 5000.0);
         self.target_ratio = self.nominal_ratio * (1.0 + clamped * 1e-6);
@@ -137,6 +140,32 @@ impl ClockedConverter {
     /// 已消耗/已产生的累计帧数（重置于 `reset`）。
     pub fn counts(&self) -> (u64, u64) {
         (self.consumed, self.produced)
+    }
+
+    /// Source position of the next output sample, relative to the first
+    /// post-join input frame. This is the phase accumulated by the converter,
+    /// including ratio slew; callers can compare it with mapped device time.
+    pub fn source_phase(&self) -> f64 {
+        self.pos
+    }
+
+    /// Replace the initial history with exactly `lookahead_frames()` real
+    /// interleaved source frames immediately preceding phase zero. This does
+    /// not consume input, produce output, or change phase. At media frame zero
+    /// the default zero history is valid; a shorter media prefix must be
+    /// explicitly zero-padded by the caller. No allocation is performed.
+    pub fn prime_history(&mut self, history: &[f32]) -> Result<(), Error> {
+        if self.consumed != 0 || self.produced != 0 {
+            return Err(Error::Started);
+        }
+        if history.len() != self.half * self.channels {
+            return Err(Error::Alignment);
+        }
+        if history.iter().any(|value| !value.is_finite()) {
+            return Err(Error::NonFinite);
+        }
+        self.buf.copy_from_slice(history);
+        Ok(())
     }
 
     /// 丢弃转换历史，从相位 0 重新开始（换代际/重同步用）。
@@ -334,6 +363,37 @@ mod tests {
     }
 
     #[test]
+    fn real_history_matches_an_already_running_converter_at_join() {
+        let input = sine(0.1, 48_000, 1379.0, 2);
+        let join = 512;
+        let mut continuous = ClockedConverter::new(48_000, 48_000, 2).unwrap();
+        let mut reference = vec![0.0; 2048 * 2];
+        continuous.process(&input, &mut reference).unwrap();
+        let mut joined = ClockedConverter::new(48_000, 48_000, 2).unwrap();
+        let history = joined.lookahead_frames() as usize;
+        joined
+            .prime_history(&input[(join - history) * 2..join * 2])
+            .unwrap();
+        assert_eq!(joined.counts(), (0, 0));
+        assert_eq!(joined.source_phase(), 0.0);
+        let mut output = vec![0.0; 1024 * 2];
+        joined.process(&input[join * 2..], &mut output).unwrap();
+        assert_eq!(output, reference[join * 2..(join + 1024) * 2]);
+        assert_eq!(joined.source_phase(), 1024.0);
+        assert_eq!(
+            joined.prime_history(&vec![0.0; history * 2]),
+            Err(Error::Started)
+        );
+        joined.reset();
+        assert_eq!(joined.prime_history(&[0.0]), Err(Error::Alignment));
+        assert_eq!(
+            joined.prime_history(&vec![f32::NAN; history * 2]),
+            Err(Error::NonFinite)
+        );
+        joined.prime_history(&vec![0.0; history * 2]).unwrap();
+    }
+
+    #[test]
     fn rejects_unsupported_formats() {
         assert_eq!(
             ClockedConverter::new(0, 48_000, 2).unwrap_err(),
@@ -381,6 +441,25 @@ mod tests {
         }
     }
 
+    /// 覆盖可听高频和较低 Nyquist 的 90%，防止只测 1kHz 漏掉通带被截半。
+    #[test]
+    fn audible_passband_survives_equal_up_and_down_conversion() {
+        for (src, dst) in [
+            (48_000, 48_000),
+            (44_100, 48_000),
+            (48_000, 44_100),
+            (96_000, 48_000),
+            (48_000, 96_000),
+        ] {
+            for freq in [1000.0, 10_000.0, 18_000.0, f64::from(src.min(dst)) * 0.45] {
+                let mut c = ClockedConverter::new(src, dst, 1).unwrap();
+                let out = run(&mut c, &sine(0.5, src, freq, 1), 1);
+                let gain = db(amplitude(&out, 1, freq, dst));
+                assert!(gain.abs() <= 0.1, "{src}->{dst} {freq}Hz: {gain}dB");
+            }
+        }
+    }
+
     /// 超出输出奈奎斯特的音调按截止频率抑制（混叠候选线在探针里记录）。
     #[test]
     fn aliasing_is_suppressed_on_downconvert() {
@@ -391,8 +470,8 @@ mod tests {
             let alias = (freq - (freq / 48_000.0).round() * 48_000.0).abs();
             let level = db(amplitude(&out, 1, alias, 48_000));
             assert!(
-                level < -70.0,
-                "{freq}Hz 折到 {alias}Hz: {level} dB 高于 -70dB"
+                level < -90.0,
+                "{freq}Hz 折到 {alias}Hz: {level} dB 高于 -90dB"
             );
         }
     }
@@ -506,7 +585,7 @@ mod tests {
         let mut c = ClockedConverter::new(48_000, 48_000, 1).unwrap();
         // 只喂不取：灌满历史（首次 process 产出受输出缓冲限制）。
         let mut out = vec![0.0f32; 0];
-        let big = vec![0.0f32; HISTORY_CAP - 64];
+        let big = vec![0.0f32; HISTORY_CAP - TAPS / 2];
         assert!(c.process(&big, &mut out).is_ok());
         let more = vec![0.0f32; 128];
         assert_eq!(c.process(&more, &mut out).unwrap_err(), Error::Overflow);

@@ -34,6 +34,7 @@
 <link rel="stylesheet" href="online.css">
 <link rel="stylesheet" href="podcasts.css">
 <link rel="stylesheet" href="home-dashboard.css">
+<link rel="stylesheet" href="room.css">
 <!-- 主题工作室：壁纸背景层与壁纸画廊。排在 style.css 之后（同特异性整块胜出），
      与 online.css 同一层次——都是"在既有布局之上再铺一层"的模块。 -->
 <link rel="stylesheet" href="theme-studio.css">
@@ -463,6 +464,9 @@
       <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-heart"/></svg>
       <span>收藏</span>
       <em id="fav-badge" class="rail-badge" hidden>0</em>
+    </button>
+    <button class="rail-item" data-view="room" aria-label="局域网一起听">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-headphones"/></svg><span>一起听</span>
     </button>
     <div class="rail-spacer"></div>
     <button class="rail-item" data-view="settings" aria-label="设置">
@@ -980,6 +984,7 @@
     </div>
 
     <!-- 队列 -->
+    <div class="view" id="view-room" hidden aria-label="局域网一起听"></div>
     <div class="view" id="view-queue" hidden>
       <div class="col-head">
         <div class="col-head-left"><h1 class="col-title">播放队列</h1><span class="count" id="queue-count">0 首</span></div>
@@ -2302,6 +2307,7 @@
 <script defer src="skins/skin.heijiao.js"></script>
 <script defer src="skins/skin.orbit.js"></script>
 <script defer src="themes.js"></script>
+<script defer src="theme-picker.js"></script>
 <script defer src="anime-interactions.js"></script>
 <script defer src="perf-probe.js"></script>
 <script defer src="stage.js"></script>
@@ -2339,6 +2345,10 @@
      CreativeStage.applyIntent；排在编排层之后、工坊之前。 -->
 <script defer src="creative-prompt.js"></script>
 <script defer src="ai-ledger.js"></script>
+<script defer src="room-transport.js"></script>
+<script defer src="room-workspace.js"></script>
+<script defer src="room-view.js"></script>
+<script defer src="room.js"></script>
 <script defer src="workshop.js"></script>
 <!-- 节拍电影相机：纯时间轴 + 驱动（消费 /v1/stage/beatmap） -->
 <script defer src="stage-cinema.js"></script>

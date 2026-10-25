@@ -150,6 +150,16 @@ async fn parse(content: Arc<str>, format: String) -> ApiResult<LyricDocument> {
         .map_err(|_| internal("歌词解析工作失败"))?
         .map_err(parse_error)
 }
+/// Checked reads preserve malformed/over-limit errors for bounded resource APIs.
+pub(crate) fn parse_saved_checked(content: &str) -> ApiResult<LyricDocument> {
+    let without_bom = content.trim_start_matches('\u{feff}');
+    if without_bom.trim_start().starts_with('{') {
+        candidates::decode_saved(without_bom)
+    } else {
+        vmusic_lyrics::parse_import(content, "auto").map_err(parse_error)
+    }
+}
+
 /// Legacy stored LRC remains tolerant; XML is checked with no fallback to LRC.
 pub(crate) fn parse_saved(content: &str) -> LyricDocument {
     if content.trim_start().starts_with('{') {

@@ -1,0 +1,85 @@
+{
+  "captured_at": "2026-10-24T19:55:14.543717+00:00",
+  "checks": [
+    {
+      "name": "cargo-test-standard",
+      "command": "cargo test --workspace",
+      "passed": 1011,
+      "failed": 0,
+      "ignored": 5,
+      "ignored_details": [
+        "test online::ccmixter::tests::live_search_respects_keywords_and_numeric_details ... ignored, requires access to the public ccMixter API",
+        "test online::search_pressure::sustained_shared_search_budget ... ignored, explicit mixed HTTP/RPC/aggregate pressure probe; optional long mode; no external network",
+        "test podcasts::tests::live_chinese_directory_feeds_and_public_audio_ranges ... ignored, 访问 Apple 目录、三份真实中文 RSS，并只读取音频的第一个 Range 块",
+        "test podcasts::tests::live_overseas_directory_feed_and_audio_range ... ignored, 访问海外 Apple 目录、NPR RSS，并只读取音频第一个 Range 块",
+        "test room::chat::tests::rollback_writer_process ... ignored, subprocess fixture for rollback recovery"
+      ]
+    },
+    {
+      "name": "clippy-standard",
+      "command": "cargo clippy --workspace --all-targets -- -D warnings",
+      "passed": true
+    },
+    {
+      "name": "cargo-test-full",
+      "command": "cargo test --workspace --features hertz-studio/full,dbx-plugin-hertz/full",
+      "passed": 1168,
+      "failed": 0,
+      "ignored": 7,
+      "ignored_details": [
+        "test online::ccmixter::tests::live_search_respects_keywords_and_numeric_details ... ignored, requires access to the public ccMixter API",
+        "test online::migu::protocol_tests::live_public_migu_contract ... ignored, read-only public Migu acceptance; run explicitly with network access",
+        "test online::qq::tests::probe_daily_candidates_with_cred ... ignored",
+        "test online::search_pressure::sustained_shared_search_budget ... ignored, explicit mixed HTTP/RPC/aggregate pressure probe; optional long mode; no external network",
+        "test podcasts::tests::live_chinese_directory_feeds_and_public_audio_ranges ... ignored, 访问 Apple 目录、三份真实中文 RSS，并只读取音频的第一个 Range 块",
+        "test podcasts::tests::live_overseas_directory_feed_and_audio_range ... ignored, 访问海外 Apple 目录、NPR RSS，并只读取音频第一个 Range 块",
+        "test room::chat::tests::rollback_writer_process ... ignored, subprocess fixture for rollback recovery"
+      ]
+    },
+    {
+      "name": "clippy-full",
+      "command": "cargo clippy --workspace --all-targets --features hertz-studio/full,dbx-plugin-hertz/full -- -D warnings",
+      "passed": true
+    },
+    {
+      "name": "frontend",
+      "command": "node scripts/check-frontend.js",
+      "passed_steps": 64,
+      "failed_steps": 0,
+      "default_live_checks": "107 skipped by default; dedicated real-browser acceptance is recorded separately."
+    },
+    {
+      "name": "fmt",
+      "command": "CI-owned workspace packages: cargo fmt -p hertz-studio -p vmusic-core -p vmusic-audio -p vmusic-lan -p vmusic-store -p vmusic-library -p vmusic-lyrics -p vmusic-beats -p dbx-plugin-hertz -- --check",
+      "passed": true
+    },
+    {
+      "name": "assets",
+      "command": "node scripts/check-assets.js",
+      "passed": 1094,
+      "failed": 0
+    },
+    {
+      "name": "adrs",
+      "command": "node scripts/check-adrs.js",
+      "passed": 316,
+      "failed": 0
+    },
+    {
+      "name": "api-routes",
+      "command": "node scripts/api-routes.js --check",
+      "routes": 161,
+      "passed": true
+    },
+    {
+      "name": "diff-check",
+      "command": "git diff --check",
+      "passed": true
+    }
+  ],
+  "notes": [
+    "Rust full suites ran before final JS/CSS-only corrections; final frontend and binary-bound integration checks ran after corrections.",
+    "An initial Standard suite run hit an existing AI usage test race; a complete rerun passed. No unrelated AI code changed.",
+    "No remote CI matrix or cross-platform native hardware execution was observed."
+  ]
+}

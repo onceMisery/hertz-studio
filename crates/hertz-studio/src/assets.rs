@@ -51,6 +51,11 @@ macro_rules! ui_assets {
 }
 
 ui_assets! {
+    "/room-transport.js", JS => const ROOM_TRANSPORT_JS: &str = edition_ui!("room-transport.js");
+    "/room-workspace.js", JS => const ROOM_WORKSPACE_JS: &str = edition_ui!("room-workspace.js");
+    "/room-view.js", JS => const ROOM_VIEW_JS: &str = edition_ui!("room-view.js");
+    "/room.js", JS => const ROOM_JS: &str = edition_ui!("room.js");
+    "/room.css", CSS => const ROOM_CSS: &str = edition_ui!("room.css");
     "/host.js", JS => const HOST_JS: &str = edition_ui!("host.js");
     "/dialogs.js", JS => const DIALOGS_JS: &str = edition_ui!("dialogs.js");
     "/search-history.js", JS => const SEARCH_HISTORY_JS: &str = edition_ui!("search-history.js");
@@ -76,6 +81,7 @@ ui_assets! {
     "/stage-particles.js", JS => const STAGE_PARTICLES_JS: &str = edition_ui!("stage-particles.js");
     "/stage-particles-gl.js", JS => const STAGE_PARTICLES_GL_JS: &str = edition_ui!("stage-particles-gl.js");
     "/themes.js", JS => const THEMES_JS: &str = edition_ui!("themes.js");
+    "/theme-picker.js", JS => const THEME_PICKER_JS: &str = edition_ui!("theme-picker.js");
     "/anime-interactions.js", JS => const ANIME_INTERACTIONS_JS: &str = edition_ui!("anime-interactions.js");
     "/shelf.js", JS => const SHELF_JS: &str = edition_ui!("shelf.js");
     "/pl-covers.js", JS => const PL_COVERS_JS: &str = edition_ui!("pl-covers.js");

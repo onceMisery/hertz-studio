@@ -73,6 +73,7 @@ fn max_step(data: &[f32], channels: usize) -> f32 {
 
 fn main() {
     let mut quality = Vec::new();
+    let mut passband = Vec::new();
     let mut performance = Vec::new();
 
     // 通带增益：速率组合 × 漂移。
@@ -98,6 +99,26 @@ fn main() {
                 "realTimeFactor": seconds / 3.0,
                 "gain1000HzDb": gain,
             }));
+        }
+    }
+
+    // 通带：覆盖可听高频及较低 Nyquist 的 90%，避免 1kHz 测幅掩盖截止错误。
+    for (src, dst) in [
+        (48_000, 48_000),
+        (44_100, 48_000),
+        (48_000, 44_100),
+        (96_000, 48_000),
+        (48_000, 96_000),
+    ] {
+        for frequency in [1000.0, 10_000.0, 18_000.0, f64::from(src.min(dst)) * 0.45] {
+            let mut converter = ClockedConverter::new(src, dst, 1).unwrap();
+            let (out, _) = run(&mut converter, &input(src, frequency, 1, 1.0), 1);
+            let gain = db(amplitude(&out, 1, frequency, dst));
+            passband.push(json!({
+                "inputRate": src, "outputRate": dst, "frequencyHz": frequency,
+                "gainDb": gain, "requiredMaxAbsGainDb": 0.1,
+            }));
+            assert!(gain.abs() <= 0.1, "{src}->{dst} {frequency}Hz: {gain}dB");
         }
     }
 
@@ -133,7 +154,7 @@ fn main() {
     println!(
         "{}",
         serde_json::to_string_pretty(&json!({
-            "schemaVersion": 1,
+            "schemaVersion": 2,
             "algorithm": ALGORITHM,
             "os": std::env::consts::OS,
             "arch": std::env::consts::ARCH,
@@ -142,6 +163,7 @@ fn main() {
             "sourceHash": hash(include_bytes!("../src/clocked_resample.rs")),
             "lockHash": hash(include_bytes!("../../../Cargo.lock")),
             "performance": performance,
+            "passband": passband,
             "quality": quality,
             "ratioStepMaxStepUp": step_up,
             "ratioStepMaxStepDown": step_down,

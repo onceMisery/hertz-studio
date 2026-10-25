@@ -474,6 +474,87 @@ function selectFavoriteTab(ui, kind) {
   ui.favTabs.onclick({ target: { closest: () => ({ dataset: { favKind: kind } }) } });
 }
 
+async function checkLanFavorites() {
+  section('收藏：局域网引用、期望状态与异步状态隔离');
+  const pin = 'ab'.repeat(32), target = 'cd'.repeat(32), ref = pin + ':' + target;
+  const gate = deferred(), membershipGate = deferred();
+  let writes = [], membership = [], waitMembership = false;
+  const transport = {
+    beginPlaybackIntent() { return 1; }, isPlaybackIntent() { return true; },
+    async get() { return { favorites: [], total: 0, counts: { track: 0, radio: 0 } }; },
+    async post(path, body) {
+      if (path.endsWith('/toggle')) { writes.push(body); return gate.promise; }
+      membership.push(body); return waitMembership ? membershipGate.promise : { ids: [] };
+    },
+  };
+  const s = makeSandbox(transport), F = s.sandbox.Favorites;
+  const input = { kind: 'track', source: 'lan', ref_id: ref, title: 'Shared', cover: 'blob:ephemeral' };
+  const one = F.attachHeart(makeEl(), input), two = F.attachHeart(makeEl(), input);
+  eq(one.attrs['aria-pressed'], 'mixed', '读取前明确标记收藏状态待确认');
+  F.state.owned.add(F.identity('track', 'lan', ref));
+  const first = F.toggle(input), duplicate = F.toggle(input);
+  eq(writes.length, 1, '两个视图连点同一身份只写一次');
+  eq(writes[0].favorited, true, '未知且有旧红心缓存时，点击加入仍明确写 true');
+  eq(writes[0].cover, null, '不持久化 LAN 封面 capability');
+  eq(one.disabled && two.disabled, true, '同一身份的所有红心等待同一写入');
+  gate.resolve({ favorited: true }); await Promise.all([first, duplicate]); await ticks();
+  eq(one.attrs['aria-pressed'], 'true', '成功后第一处确认收藏');
+  eq(two.attrs['aria-pressed'], 'true', '成功后另一处同步确认收藏');
+  waitMembership = true;
+  const staleRead = F.syncMembership('track', 'lan', [ref]);
+  transport.post = async (path, body) => { if (path.endsWith('/toggle')) { writes.push(body); return { favorited: body.favorited }; } return membershipGate.promise; };
+  await F.toggle({ ...input, favorited: false });
+  membershipGate.resolve({ ids: [ref] }); await staleRead;
+  eq(F.has('track', 'lan', ref), false, '较晚返回的旧 membership 不覆盖新的取消收藏');
+  eq(two.attrs['aria-pressed'], 'false', '取消收藏跨视图一致');
+
+  let committedWrites = 0;
+  const unknownTransport = {
+    async get() { return { favorites: [], total: 0 }; },
+    async post(path) { if (path.endsWith('/toggle')) { committedWrites++; throw new Error('network timeout after commit'); } return { ids: [ref] }; },
+  };
+  const unknown = makeSandbox(unknownTransport), U = unknown.sandbox.Favorites;
+  const unknownHeart = U.attachHeart(makeEl(), input);
+  await U.toggle(input);
+  eq(committedWrites, 1, '不自动重放结果未知的收藏写入');
+  eq(U.has('track', 'lan', ref), true, '结果未知后查询服务端 membership 恢复真实已提交状态');
+  eq(unknownHeart.attrs['aria-pressed'], 'true', '确认结果以后才恢复确定红心');
+  unknownTransport.post = async () => { throw new Error('offline'); };
+  await U.syncMembership('track', 'lan', [ref]);
+  eq(unknownHeart.attrs['aria-pressed'], 'mixed', '失败读取不把旧状态伪装成已确认状态');
+
+  const oldWrite = deferred(); let alive = true, callbacks = 0;
+  unknownTransport.post = async () => oldWrite.promise;
+  const late = U.toggle({ ...input, isCurrent: () => alive }, () => callbacks++);
+  const priorToasts = unknown.spies.toasts.length;
+  alive = false; oldWrite.resolve({ favorited: true }); await late;
+  eq(callbacks, 0, '旧会话迟到写入不触发新会话回调');
+  eq(unknown.spies.toasts.length, priorToasts, '旧会话迟到响应不在新会话报成功');
+
+  const page = [favorite('local-one', 'local'), favorite(ref, 'lan'), favorite('online-one', 'netease')];
+  const mixed = makeSandbox(makeTransport([{ match: path => path.startsWith('/v1/favorites?'), reply: { favorites: page, total: page.length } }]));
+  const M = mixed.sandbox.Favorites; M.init(); await M.load();
+  let queued = [];
+  mixed.sandbox.HertzRoom = { activateFavorite: async favorite => queued.push(favorite) };
+  mixed.ui.favList.children[1]._click(); await ticks();
+  eq(queued.length, 1, '局域网收藏点击通过房间队列入口处理');
+  eq(mixed.spies.radio.length, 0, '局域网收藏不能走在线播放');
+  eq(mixed.ui.favList.children[1].querySelector('.t-actions').children[1].title, '加入当前房间队列', '收藏行动明确标注为加入队列');
+  for (const outcome of ['success', 'failure']) {
+    const activationGate = deferred(); let context = 'room-a';
+    mixed.sandbox.HertzRoom = { operationContext: () => context, activateFavorite: () => activationGate.promise };
+    const prior = mixed.spies.toasts.length;
+    mixed.ui.favList.children[1]._click(); await ticks();
+    context = 'room-b';
+    if (outcome === 'success') activationGate.resolve({ state: 'applied' }); else activationGate.reject(new Error('late old room error'));
+    await ticks();
+    eq(mixed.spies.toasts.length, prior, '切换房间后不显示旧队列操作的迟到' + outcome + '提示');
+  }
+  await M.playFavorites();
+  eq(mixed.spies.queues[0].ids.join(','), 'local-one,online:netease:online-one', '全部播放跳过 LAN 引用并保留本地在线路径');
+  ok(mixed.spies.toasts.some(item => /已跳过 1 首局域网收藏/.test(item.msg)), '全部播放明确告知跳过的局域网收藏');
+}
+
 async function checkFavoritesPagination() {
   section('收藏：201 条、分页失败与原页重试');
   const items = Array.from({ length: 201 }, (_, i) => favorite(i));
@@ -1109,6 +1190,7 @@ async function checkDailyAutoSettle() {
 (async function main() {
   await checkFavorites();
   await checkFavoritesPagination();
+  await checkLanFavorites();
   await checkDaily();
   await checkDailyOnline();
   await checkDailyOnlineDegraded();

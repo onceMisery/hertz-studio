@@ -1,0 +1,182 @@
+{
+  "captured_at": "2026-10-24T18:18:13.721424+00:00",
+  "checks": [
+    {
+      "name": "tests-standard",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace"
+      ],
+      "exit_code": 0,
+      "seconds": 123.98,
+      "passed": 996,
+      "failed": 0,
+      "ignored": 5
+    },
+    {
+      "name": "tests-full",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace",
+        "--features",
+        "hertz-studio/full,dbx-plugin-hertz/full"
+      ],
+      "exit_code": 0,
+      "seconds": 162.77,
+      "passed": 1153,
+      "failed": 0,
+      "ignored": 7
+    },
+    {
+      "name": "clippy-standard",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": 0,
+      "seconds": 31.05
+    },
+    {
+      "name": "clippy-full",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--features",
+        "hertz-studio/full,dbx-plugin-hertz/full",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": 0,
+      "seconds": 26.95
+    },
+    {
+      "name": "fmt-final",
+      "command": [
+        "cargo",
+        "fmt",
+        "-p",
+        "hertz-studio",
+        "-p",
+        "vmusic-core",
+        "-p",
+        "vmusic-audio",
+        "-p",
+        "vmusic-lan",
+        "-p",
+        "vmusic-store",
+        "-p",
+        "vmusic-library",
+        "-p",
+        "vmusic-lyrics",
+        "-p",
+        "vmusic-beats",
+        "-p",
+        "dbx-plugin-hertz",
+        "--",
+        "--check"
+      ],
+      "exit_code": 0,
+      "seconds": 1.66
+    },
+    {
+      "name": "resample-probe-build",
+      "command": [
+        "cargo",
+        "build",
+        "--release",
+        "-p",
+        "vmusic-audio",
+        "--example",
+        "clocked_resample_probe"
+      ],
+      "exit_code": 0,
+      "seconds": 27.94
+    },
+    {
+      "name": "resample-current",
+      "command": [
+        "C:\\Users\\miracle\\.codex\\worktrees\\lan-listening-delivery\\hertz-studio\\target\\release\\examples\\clocked_resample_probe.exe"
+      ],
+      "exit_code": 0,
+      "seconds": 1.44
+    }
+  ],
+  "ignored_tests": {
+    "standard": [
+      [
+        "online::ccmixter::tests::live_search_respects_keywords_and_numeric_details",
+        "requires access to the public ccMixter API"
+      ],
+      [
+        "online::search_pressure::sustained_shared_search_budget",
+        "explicit mixed HTTP/RPC/aggregate pressure probe; optional long mode; no external network"
+      ],
+      [
+        "podcasts::tests::live_chinese_directory_feeds_and_public_audio_ranges",
+        "访问 Apple 目录、三份真实中文 RSS，并只读取音频的第一个 Range 块"
+      ],
+      [
+        "podcasts::tests::live_overseas_directory_feed_and_audio_range",
+        "访问海外 Apple 目录、NPR RSS，并只读取音频第一个 Range 块"
+      ],
+      [
+        "room::chat::tests::rollback_writer_process",
+        "subprocess fixture for rollback recovery"
+      ]
+    ],
+    "full": [
+      [
+        "online::ccmixter::tests::live_search_respects_keywords_and_numeric_details",
+        "requires access to the public ccMixter API"
+      ],
+      [
+        "online::migu::protocol_tests::live_public_migu_contract",
+        "read-only public Migu acceptance; run explicitly with network access"
+      ],
+      [
+        "online::qq::tests::probe_daily_candidates_with_cred",
+        ""
+      ],
+      [
+        "online::search_pressure::sustained_shared_search_budget",
+        "explicit mixed HTTP/RPC/aggregate pressure probe; optional long mode; no external network"
+      ],
+      [
+        "podcasts::tests::live_chinese_directory_feeds_and_public_audio_ranges",
+        "访问 Apple 目录、三份真实中文 RSS，并只读取音频的第一个 Range 块"
+      ],
+      [
+        "podcasts::tests::live_overseas_directory_feed_and_audio_range",
+        "访问海外 Apple 目录、NPR RSS，并只读取音频第一个 Range 块"
+      ],
+      [
+        "room::chat::tests::rollback_writer_process",
+        "subprocess fixture for rollback recovery"
+      ]
+    ]
+  },
+  "final_native_build": {
+    "command": [
+      "cargo",
+      "build",
+      "-p",
+      "hertz-studio",
+      "--bin",
+      "hertz-studio"
+    ],
+    "exit_code": 0,
+    "edition": "Standard",
+    "log_sha256": "8c11d4e821dab7faf093335d30a3802856dd202997d1be8a3c067ff0019dd23a",
+    "scope": "Rebuilt after workspace tests; native/control and final plugin EOF reports bind this exact resulting service binary."
+  }
+}

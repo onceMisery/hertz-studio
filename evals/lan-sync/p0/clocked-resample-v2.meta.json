@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "capturedAt": "2026-10-24T01:31:08.0342856Z",
+  "command": "cargo run --release -p vmusic-audio --example clocked_resample_probe",
+  "compiler": "rustc 1.98.1 (48a229cea 2026-09-01)\nbinary: rustc\ncommit-hash: 48a229ceaefd4985c50990b14116b6d856af0985\ncommit-date: 2026-09-01\nhost: x86_64-pc-windows-msvc\nrelease: 1.98.1\nLLVM version: 22.1.8",
+  "osRelease": "Microsoft Windows NT 10.0.26200.0",
+  "architecture": "X64",
+  "gitHead": "b639faea6d77a0209d7d55a2a610385b47f08041",
+  "workspaceDirty": true,
+  "executable": "target/release/examples/clocked_resample_probe.exe",
+  "executableHash": "b273d5079a606fb13ee1d6ced085030af72f42794c6e302bb76270b47922ad38",
+  "reportHash": "ae8b77262f5877182c7f847269189be16f19ea02aa89c16735f71904afcba1a0",
+  "sourceHashes": {
+    "crates/vmusic-audio/src/clocked_resample.rs": "e70a9e14a793046616ba742bd7c10be9ebeebc9b15cf5f7a8b650b6e5a7fd5f7",
+    "crates/vmusic-audio/examples/clocked_resample_probe.rs": "0456ea14b4e189478e28c566febf68cff671a09013a68d379a87f635ebb9b214",
+    "crates/vmusic-audio/Cargo.toml": "012672f92bcff7caaa89e9d1e711c03f9887a6e261e44a215fcf38cd3da64381",
+    "Cargo.lock": "bb0a816c3561c4d0ad6569aee2b944b0cfd12cc4cad7e1560ddae41b85b8d3bb"
+  },
+  "syntheticOnly": true,
+  "releaseEligible": false,
+  "notes": "2026-10-24 review 修复复测；只证明本次 Windows 单机配置，未包含两机、macOS/Linux、真实 DAC/声学同步"
+}

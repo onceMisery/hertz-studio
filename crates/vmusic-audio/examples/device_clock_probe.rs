@@ -18,6 +18,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::sync::{Arc, Mutex};
+use vmusic_audio::output_clock::{ClockObservation, ClockStatus, OutputClock};
 
 #[derive(Clone, Copy)]
 struct CallbackSample {
@@ -93,6 +94,7 @@ fn main() {
     let mut seconds = 5.0f64;
     let mut rate_wanted = 48_000u32;
     let mut device_substring: Option<String> = None;
+    let mut trace_path = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -108,8 +110,9 @@ fn main() {
             "--device" => {
                 device_substring = args.next();
             }
+            "--trace" => trace_path = args.next().map(std::path::PathBuf::from),
             other => {
-                eprintln!("未知参数 {other}；支持 --seconds/--rate/--device");
+                eprintln!("未知参数 {other}；支持 --seconds/--rate/--device/--trace");
                 std::process::exit(1);
             }
         }
@@ -173,6 +176,55 @@ fn main() {
     let inner = collector.inner.lock().unwrap();
     let samples = &inner.samples;
     let total_frames: u64 = samples.iter().map(|s| s.frames as u64).sum();
+
+    // Offline replay keeps diagnostic allocation and formatting out of the
+    // callback. The optional trace contains only monotonic timestamps, frame
+    // counts and estimator readings; it never includes a service profile.
+    if let Some(path) = trace_path {
+        let mut clock = OutputClock::new(rate, 0).expect("sample rate");
+        let mut valid = false;
+        let mut failures = 0;
+        let mut first_failure_state = None;
+        let mut trace = Vec::with_capacity(samples.len());
+        for (index, sample) in samples.iter().enumerate() {
+            let observation = (|| {
+                Some(ClockObservation {
+                    callback_ns: u64::try_from(sample.callback_ns?).ok()?,
+                    playback_ns: u64::try_from(sample.playback_ns?).ok()?,
+                    local_ns: 1_000_000_000u64.checked_add(u64::try_from(sample.host_ns).ok()?)?,
+                    frames: sample.frames,
+                })
+            })();
+            let before = first_failure_state.is_none().then(|| format!("{clock:?}"));
+            let reading = clock.observe(observation);
+            if valid && reading.status != ClockStatus::Valid {
+                failures += 1;
+                if first_failure_state.is_none() {
+                    first_failure_state = Some(json!({"index":index,"before":before}));
+                }
+            }
+            valid = reading.status == ClockStatus::Valid;
+            trace.push(json!({
+                "callback_ns": observation.map(|o|o.callback_ns),
+                "playback_ns": observation.map(|o|o.playback_ns),
+                "local_ns": observation.map(|o|o.local_ns),
+                "frames": sample.frames,
+                "status":format!("{:?}",reading.status),
+                "first_frame_local_ns":reading.first_frame_local_ns,
+                "device_clock_ppm":reading.device_clock_ppm,
+                "uncertainty_ns":reading.uncertainty_ns,
+                "fault_count":reading.fault_count,
+                "last_fault":reading.last_fault.map(|fault|json!({"kind":format!("{:?}",fault.kind),"value":fault.value})),
+            }));
+        }
+        let trace = json!({"sample_rate":rate,"failures":failures,"first_failure":first_failure_state,"samples":trace});
+        std::fs::write(&path, serde_json::to_vec(&trace).expect("serialize trace"))
+            .expect("write trace");
+        eprintln!(
+            "Clock replay: {failures} failures; trace={}",
+            path.display()
+        );
+    }
 
     // 时间戳回归（duration_since 为 None 或负增量）。
     let mut playback_regressions = 0usize;

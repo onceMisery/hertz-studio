@@ -1,0 +1,390 @@
+{
+  "passed": true,
+  "service_sha256": "1dd4a33f99d6304118c7ade98392636a5e8c031a8f3f3914f307ff09adab7826",
+  "stages": {
+    "create": {
+      "created": true,
+      "originalRailVisible": false
+    },
+    "share": {
+      "shared": 3,
+      "queueRows": 3,
+      "coverVisible": false
+    },
+    "join": {
+      "guestJoined": true,
+      "highEntropyInvitationNotLogged": true
+    },
+    "collaboration": {
+      "textChat": true,
+      "occurrenceVote": true,
+      "typedSongChat": true,
+      "hostVoteOrdering": true
+    },
+    "playback": {
+      "nativeMuted": true,
+      "coverVisible": true,
+      "guestJoined": true
+    },
+    "favorites": {
+      "passed": true,
+      "checks": [
+        "host room heart reuses local favorite identity",
+        "guest heart saves private LAN favorite with no ephemeral cover",
+        "player, repeated queue occurrences and library share one personal heart",
+        "personal favorite adds through the active room queue",
+        "lost response after real Host commit: reclick blocked, original receipt query resolves without replay",
+        "request lost before Host: missing receipt, cancel/confirmed local abandonment, next deliberate append succeeds",
+        "unfavorite in main application synchronizes room hearts on return"
+      ],
+      "unhandledPageErrors": [],
+      "networkFaultsInjected": [
+        "drop response after real commit",
+        "drop request before delivery"
+      ]
+    },
+    "theme": {
+      "passed": true,
+      "checks": [
+        "room selector uses global dark/light palette without local token overrides",
+        "foreground primary controls, active navigation and selector finish painting the selected semantic colors",
+        "outer app theme entry and room entry update the same global choice",
+        "small-screen theme selector supports keyboard, 44px touch target and viewport bounds",
+        "registered custom theme uses the existing catalog and token owner",
+        "global theme persistence survives refresh with room state intact"
+      ],
+      "themeScope": "local user global application appearance; no Host/network mutation"
+    },
+    "layout": {
+      "passed": true,
+      "measurements": [
+        {
+          "width": 1440,
+          "height": 1000,
+          "page": "lobby",
+          "rootWidth": 1440,
+          "scrollWidth": 1440,
+          "bodyWidth": 1440,
+          "bodyScroll": 1440,
+          "focusedHeading": true
+        },
+        {
+          "width": 1440,
+          "height": 1000,
+          "page": "play",
+          "rootWidth": 1440,
+          "scrollWidth": 1440,
+          "bodyWidth": 1440,
+          "bodyScroll": 1440,
+          "focusedHeading": true
+        },
+        {
+          "width": 1440,
+          "height": 1000,
+          "page": "collaborate",
+          "rootWidth": 1440,
+          "scrollWidth": 1440,
+          "bodyWidth": 1440,
+          "bodyScroll": 1440,
+          "focusedHeading": true
+        },
+        {
+          "width": 1440,
+          "height": 1000,
+          "page": "invite",
+          "rootWidth": 1440,
+          "scrollWidth": 1440,
+          "bodyWidth": 1440,
+          "bodyScroll": 1440,
+          "focusedHeading": true
+        },
+        {
+          "width": 1440,
+          "height": 1000,
+          "page": "settings",
+          "rootWidth": 1440,
+          "scrollWidth": 1440,
+          "bodyWidth": 1440,
+          "bodyScroll": 1440,
+          "focusedHeading": true
+        },
+        {
+          "width": 1280,
+          "height": 900,
+          "page": "lobby",
+          "rootWidth": 1280,
+          "scrollWidth": 1280,
+          "bodyWidth": 1280,
+          "bodyScroll": 1280,
+          "focusedHeading": true
+        },
+        {
+          "width": 1280,
+          "height": 900,
+          "page": "play",
+          "rootWidth": 1280,
+          "scrollWidth": 1280,
+          "bodyWidth": 1280,
+          "bodyScroll": 1280,
+          "focusedHeading": true
+        },
+        {
+          "width": 1280,
+          "height": 900,
+          "page": "collaborate",
+          "rootWidth": 1280,
+          "scrollWidth": 1280,
+          "bodyWidth": 1280,
+          "bodyScroll": 1280,
+          "focusedHeading": true
+        },
+        {
+          "width": 1280,
+          "height": 900,
+          "page": "invite",
+          "rootWidth": 1280,
+          "scrollWidth": 1280,
+          "bodyWidth": 1280,
+          "bodyScroll": 1280,
+          "focusedHeading": true
+        },
+        {
+          "width": 1280,
+          "height": 900,
+          "page": "settings",
+          "rootWidth": 1280,
+          "scrollWidth": 1280,
+          "bodyWidth": 1280,
+          "bodyScroll": 1280,
+          "focusedHeading": true
+        },
+        {
+          "width": 1024,
+          "height": 768,
+          "page": "lobby",
+          "rootWidth": 1024,
+          "scrollWidth": 1024,
+          "bodyWidth": 1024,
+          "bodyScroll": 1024,
+          "focusedHeading": true
+        },
+        {
+          "width": 1024,
+          "height": 768,
+          "page": "play",
+          "rootWidth": 1024,
+          "scrollWidth": 1024,
+          "bodyWidth": 1024,
+          "bodyScroll": 1024,
+          "focusedHeading": true
+        },
+        {
+          "width": 1024,
+          "height": 768,
+          "page": "collaborate",
+          "rootWidth": 1024,
+          "scrollWidth": 1024,
+          "bodyWidth": 1024,
+          "bodyScroll": 1024,
+          "focusedHeading": true
+        },
+        {
+          "width": 1024,
+          "height": 768,
+          "page": "invite",
+          "rootWidth": 1024,
+          "scrollWidth": 1024,
+          "bodyWidth": 1024,
+          "bodyScroll": 1024,
+          "focusedHeading": true
+        },
+        {
+          "width": 1024,
+          "height": 768,
+          "page": "settings",
+          "rootWidth": 1024,
+          "scrollWidth": 1024,
+          "bodyWidth": 1024,
+          "bodyScroll": 1024,
+          "focusedHeading": true
+        },
+        {
+          "width": 390,
+          "height": 844,
+          "page": "lobby",
+          "rootWidth": 390,
+          "scrollWidth": 390,
+          "bodyWidth": 390,
+          "bodyScroll": 390,
+          "focusedHeading": true
+        },
+        {
+          "width": 390,
+          "height": 844,
+          "page": "play",
+          "rootWidth": 390,
+          "scrollWidth": 390,
+          "bodyWidth": 390,
+          "bodyScroll": 390,
+          "focusedHeading": true
+        },
+        {
+          "width": 390,
+          "height": 844,
+          "page": "collaborate",
+          "rootWidth": 390,
+          "scrollWidth": 390,
+          "bodyWidth": 390,
+          "bodyScroll": 390,
+          "focusedHeading": true
+        },
+        {
+          "width": 390,
+          "height": 844,
+          "page": "invite",
+          "rootWidth": 390,
+          "scrollWidth": 390,
+          "bodyWidth": 390,
+          "bodyScroll": 390,
+          "focusedHeading": true
+        },
+        {
+          "width": 390,
+          "height": 844,
+          "page": "settings",
+          "rootWidth": 390,
+          "scrollWidth": 390,
+          "bodyWidth": 390,
+          "bodyScroll": 390,
+          "focusedHeading": true
+        },
+        {
+          "width": 360,
+          "height": 800,
+          "page": "lobby",
+          "rootWidth": 360,
+          "scrollWidth": 360,
+          "bodyWidth": 360,
+          "bodyScroll": 360,
+          "focusedHeading": true
+        },
+        {
+          "width": 360,
+          "height": 800,
+          "page": "play",
+          "rootWidth": 360,
+          "scrollWidth": 360,
+          "bodyWidth": 360,
+          "bodyScroll": 360,
+          "focusedHeading": true
+        },
+        {
+          "width": 360,
+          "height": 800,
+          "page": "collaborate",
+          "rootWidth": 360,
+          "scrollWidth": 360,
+          "bodyWidth": 360,
+          "bodyScroll": 360,
+          "focusedHeading": true
+        },
+        {
+          "width": 360,
+          "height": 800,
+          "page": "invite",
+          "rootWidth": 360,
+          "scrollWidth": 360,
+          "bodyWidth": 360,
+          "bodyScroll": 360,
+          "focusedHeading": true
+        },
+        {
+          "width": 360,
+          "height": 800,
+          "page": "settings",
+          "rootWidth": 360,
+          "scrollWidth": 360,
+          "bodyWidth": 360,
+          "bodyScroll": 360,
+          "focusedHeading": true
+        },
+        {
+          "width": 844,
+          "height": 390,
+          "page": "lobby",
+          "rootWidth": 844,
+          "scrollWidth": 844,
+          "bodyWidth": 844,
+          "bodyScroll": 844,
+          "focusedHeading": true
+        },
+        {
+          "width": 844,
+          "height": 390,
+          "page": "play",
+          "rootWidth": 844,
+          "scrollWidth": 844,
+          "bodyWidth": 844,
+          "bodyScroll": 844,
+          "focusedHeading": true
+        },
+        {
+          "width": 844,
+          "height": 390,
+          "page": "collaborate",
+          "rootWidth": 844,
+          "scrollWidth": 844,
+          "bodyWidth": 844,
+          "bodyScroll": 844,
+          "focusedHeading": true
+        },
+        {
+          "width": 844,
+          "height": 390,
+          "page": "invite",
+          "rootWidth": 844,
+          "scrollWidth": 844,
+          "bodyWidth": 844,
+          "bodyScroll": 844,
+          "focusedHeading": true
+        },
+        {
+          "width": 844,
+          "height": 390,
+          "page": "settings",
+          "rootWidth": 844,
+          "scrollWidth": 844,
+          "bodyWidth": 844,
+          "bodyScroll": 844,
+          "focusedHeading": true
+        }
+      ],
+      "draftRetained": true,
+      "returnPreservesRoom": true,
+      "compactTransportOwnership": true,
+      "keyboardChatSend": true,
+      "pageErrors": [],
+      "mobileAudioClaim": false
+    }
+  },
+  "browser": "155.0.8059.85",
+  "limits": "Real service HTTP/TLS with two local profiles; Chromium responsive layouts only, not mobile native audio or cross-machine acoustics. Preview output is muted.",
+  "screenshots": {
+    "docs/images/listening-workspace-favorites/desktop-play.png": "8cba744f2989ec38ba6158a55de67393cdc86ee3228204d46d878af2fb374b2c",
+    "docs/images/listening-workspace-favorites/desktop-collaborate.png": "9682240c4e26455f643bee2ca21694b24a87881931111bdb01eeec0394b85a33",
+    "docs/images/listening-workspace-favorites/desktop-invite.png": "24455430b1c5be90bb2a683ccfca778d9ec1cc45f6bfb5a90840b01fe5d7cc77",
+    "docs/images/listening-workspace-favorites/mobile-play.png": "8ad1b85c26d89f80ca79ab6858972ddd7a4b174915f7a7a39d30918c4f7c9910",
+    "docs/images/listening-workspace-favorites/mobile-chat.png": "c14826aef92dea458c09568af306f6b52c5f0683dad5a5bcea4dd28c92cacd55",
+    "docs/images/listening-workspace-favorites/mobile-lobby.png": "8b83b69379409cb79ff8595b36a161d8c0ca8ec7dab9a7c0bb56c50703f6a40c",
+    "docs/images/listening-workspace-favorites/mobile-queue.png": "b85c467efc4b3b52d7be6714bef0f108280b522fd2114331bd7e38a5e34843dc",
+    "docs/images/listening-workspace-favorites/desktop-light.png": "0c132fc265645ec228fe75cdfa84f313d497ee7a52247defc15c96889829ad67",
+    "docs/images/listening-workspace-favorites/mobile-light.png": "d9bc85b7bfd1916f0bdf44b14ca5cf663348b9d4726275520930a484b75c7030",
+    "docs/images/listening-workspace-favorites/application-light.png": "b3a2690a34246ea193895d1bb3250057fceb2d63d132e0c371b15bffe7fa3a62",
+    "docs/images/listening-workspace-favorites/personal-favorites.png": "aff9fb0a37272833a5578eb5e7cf77b8cd799046b6039ae96e25d39d3a3ef0e3"
+  },
+  "capture_recheck": {
+    "foreground_tabs": true,
+    "primary_control_paint_asserted": true,
+    "reason": "Background-tab CSS transitions had not painted the selected colors in an initial capture; active-tab reproduction converged normally."
+  }
+}

@@ -75,6 +75,7 @@ pub async fn pause(state: &Arc<AppState>, client_op: Option<&str>) -> RpcResult 
 
 pub async fn stop(state: &Arc<AppState>) -> RpcResult {
     let commit = state.play_commit.lock().await;
+    state.require_local_playback()?;
     state.cancel_prepared_playback().await;
     state
         .play_generation
@@ -151,6 +152,7 @@ pub async fn volume(state: &Arc<AppState>, body: &Value, client_op: Option<&str>
 pub async fn mode(state: &Arc<AppState>, body: &Value) -> RpcResult {
     let request: ModeRequest = body_as(body)?;
     let commit = state.play_commit.lock().await;
+    state.require_local_playback()?;
     state.cancel_prepared_playback().await;
     state
         .play_generation
@@ -186,7 +188,7 @@ pub async fn load(state: &Arc<AppState>, body: &Value) -> RpcResult {
         .iter()
         .position(|id| *id == request.track_id)
         .unwrap_or(0);
-    let (generation, _, _) = state.set_queue(queue, Some(index)).await;
+    let (generation, _, _) = state.set_queue(queue, Some(index)).await?;
     state
         .play_index_for(index, Some(generation), PlayTrigger::Pick)
         .await?;
@@ -219,7 +221,7 @@ pub async fn set_queue(state: &Arc<AppState>, body: &Value) -> RpcResult {
             .and_then(|track_id| request.queue.iter().position(|id| id == track_id)),
         _ => None,
     };
-    state.set_queue(request.queue.clone(), index).await;
+    state.set_queue(request.queue.clone(), index).await?;
     Ok(Reply::ok(json!({ "queue": request.queue, "index": index })))
 }
 
@@ -240,6 +242,8 @@ pub async fn overlay_lyric(state: &Arc<AppState>) -> RpcResult {
 
 /// 更新 DSP 并即时下发到音频后端；交叉淡化同步换装/尾淡出时长。
 pub async fn set_dsp(state: &Arc<AppState>, body: &Value) -> RpcResult {
+    let _room_commit = state.play_commit.lock().await;
+    state.require_local_playback()?;
     let request: DspUpdate = body_as(body)?;
     let settings = vmusic_store::settings::get_all(&state.db)
         .await
@@ -299,7 +303,6 @@ pub async fn set_dsp(state: &Arc<AppState>, body: &Value) -> RpcResult {
         .ok();
     state.audio.set_crossfade(config.crossfade_ms).await.ok();
     {
-        let _commit = state.play_commit.lock().await;
         state.cancel_prepared_playback().await;
     }
     state.schedule_prepare_next();

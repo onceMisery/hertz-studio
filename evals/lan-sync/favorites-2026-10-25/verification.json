@@ -1,0 +1,83 @@
+{
+  "captured_at": "2026-10-25T02:14:15.896293+00:00",
+  "checks": [
+    {
+      "name": "cargo-test-standard",
+      "command": "cargo test --locked --workspace",
+      "suites": 27,
+      "passed": 1028,
+      "failed": 0,
+      "ignored": 7,
+      "ignored_tests": [
+        "online::ccmixter::tests::live_search_respects_keywords_and_numeric_details",
+        "online::search_pressure::sustained_shared_search_budget",
+        "podcasts::tests::live_chinese_directory_feeds_and_public_audio_ranges",
+        "podcasts::tests::live_overseas_directory_feed_and_audio_range",
+        "room::chat::tests::rollback_writer_process",
+        "scheduled_output::wasapi::tests::injected_native_fault_resets_the_real_grid_and_preserves_its_revoke_generation",
+        "scheduled_output::wasapi::tests::native_default_device_stays_muted_advances_clock_and_joins"
+      ]
+    },
+    {
+      "name": "clippy-standard",
+      "command": "cargo clippy --locked --workspace --all-targets -- -D warnings",
+      "passed": true
+    },
+    {
+      "name": "cargo-test-full",
+      "command": "cargo test --locked --workspace --features hertz-studio/full,dbx-plugin-hertz/full",
+      "suites": 27,
+      "passed": 1185,
+      "failed": 0,
+      "ignored": 9,
+      "ignored_tests": [
+        "online::ccmixter::tests::live_search_respects_keywords_and_numeric_details",
+        "online::migu::protocol_tests::live_public_migu_contract",
+        "online::qq::tests::probe_daily_candidates_with_cred",
+        "online::search_pressure::sustained_shared_search_budget",
+        "podcasts::tests::live_chinese_directory_feeds_and_public_audio_ranges",
+        "podcasts::tests::live_overseas_directory_feed_and_audio_range",
+        "room::chat::tests::rollback_writer_process",
+        "scheduled_output::wasapi::tests::injected_native_fault_resets_the_real_grid_and_preserves_its_revoke_generation",
+        "scheduled_output::wasapi::tests::native_default_device_stays_muted_advances_clock_and_joins"
+      ]
+    },
+    {
+      "name": "clippy-full",
+      "command": "cargo clippy --locked --workspace --all-targets --features hertz-studio/full,dbx-plugin-hertz/full -- -D warnings",
+      "passed": true
+    },
+    {
+      "name": "frontend",
+      "command": "node scripts/check-frontend.js",
+      "passed_steps": 64,
+      "failed_steps": 0,
+      "default_live_checks": "108 skipped by default; separate real-browser report follows."
+    },
+    {
+      "name": "fmt",
+      "command": "cargo fmt (the nine CI-owned packages) -- --check",
+      "passed": true
+    },
+    {
+      "name": "adrs",
+      "command": "node scripts/check-adrs.js",
+      "passed": 316,
+      "failed": 0
+    },
+    {
+      "name": "isolated-theme-browser",
+      "command": "node scripts/check-room-theme-browser.js",
+      "passed": true,
+      "log_sha256": "d3f7bda590224d4cba11f1ebd1c2441b7b54faa2b1b0043218af48a4e868e5fe",
+      "limits": "Production DOM/CSS/Theme with isolated stub transport; five skins and responsive sizes."
+    }
+  ],
+  "notes": [
+    "Windows local verification only; no remote CI matrix was observed.",
+    "Standard/Full test suites and Clippy ran after source freeze; final acceptance reports bind the built Standard service SHA.",
+    "Ignored live external APIs and subprocess fixtures are excluded from passed counts.",
+    "Two native WASAPI failures on the prior CPAL-timestamp build are retained unchanged with their own binary SHA. The final native report covers the replacement native clock implementation, not the failed baseline.",
+    "Same-machine native acceptance does not measure cross-device acoustic synchronization, other operating systems, or eight-hour stability."
+  ]
+}

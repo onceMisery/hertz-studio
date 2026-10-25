@@ -1,0 +1,29 @@
+{
+  "source_commit": "f067160b90b5b24d2f1596ebc02e4d017d4b2085",
+  "passed": true,
+  "scope": "Native scheduled WASAPI clock, durable Receiver grants, local volume FIFO and explicit acceptance device selection",
+  "reviews": [
+    {
+      "role": "independent specification review",
+      "agent": "native_clock_spec_final",
+      "verdict": "Passed after Volume recovery correction; no remaining P1/P2"
+    },
+    {
+      "role": "independent code quality and integration review",
+      "agent": "native_clock_quality_final",
+      "verdict": "Approved; no Critical or Important finding"
+    }
+  ],
+  "resolved_findings": [
+    "A complete native Invalid/Reset/warmup/Valid cycle between Receiver ticks revokes all old PCM and plans using a lifetime clock-fault counter",
+    "Producer grants and the consumer's current clock reading prevent stale PCM from being enabled during conversion-time recovery",
+    "Accepted local Volume commands retain the existing bounded FIFO order across media generation changes; actual zero gain is verified after recovery",
+    "Explicit --output-device selection no longer waits for a healthy default endpoint before selecting the requested endpoint"
+  ],
+  "targeted_verification": {
+    "audio_unit_tests": {"passed": 140, "failed": 0, "ignored": 2},
+    "receiver_tests_after_volume_fix": {"passed": 47, "failed": 0},
+    "realtek_injected_native_reset": {"passed": 1, "failed": 0, "submitted_before": 5376, "submitted_after": 1056, "discarded_old_pcm_frames": 480, "fault_count_after_valid": 1, "remained_muted": true, "stale_grant_refused": true}
+  },
+  "limits": "Reviews were read-only. Hardware reset was a test-only injection through the actual WASAPI render transaction; no production fault switch exists. The final binary-bound sustained acceptance is recorded separately. No cross-platform or acoustic claim."
+}

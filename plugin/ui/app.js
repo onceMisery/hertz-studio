@@ -45,6 +45,7 @@ const ui = {
     // 每日推荐：一级目的地，容器在 index.html，菜单项由 daily-view.js 注入。
     daily: $('view-daily'),
     queue: $('view-queue'),
+    room: $('view-room'),
     favorites: $('view-favorites'),
     settings: $('view-settings'),
   },
@@ -2185,6 +2186,7 @@ function syncBufferingIndicator(active, pct) {
 }
 
 function applySnapshot(snap) {
+  if (window.HertzRoom && HertzRoom.active()) return;
   if (Object.prototype.hasOwnProperty.call(snap, 'buffering')) {
     syncBufferingIndicator(snap.buffering, snap.pct);
   }
@@ -5323,7 +5325,9 @@ async function loadDevices() {
 
 function setView(name, options) {
   if (state.view === 'online' && name !== 'online' && window.Online) Online.cancelSearch();
+  if (state.view === 'room' && name !== 'room' && window.HertzRoom) window.HertzRoom.onViewExit();
   state.view = name;
+  document.body.classList.toggle('room-view', name === 'room');
   for (const [key, el] of Object.entries(ui.views)) el.hidden = key !== name;
   ui.rail.querySelectorAll('.rail-item').forEach((b) => b.classList.toggle('active', b.dataset.view === name));
   if (ui.settingsEntry) {
@@ -5335,6 +5339,7 @@ function setView(name, options) {
     if (window.TopSearch && window.TopSearch.onOnlineViewEnter) window.TopSearch.onOnlineViewEnter();
     if (!(options && options.historyOnly) && window.Online) window.Online.onViewEnter();
   }
+  if (name === 'room' && window.HertzRoom) window.HertzRoom.onViewEnter();
   if (name === 'podcasts' && window.Podcasts) window.Podcasts.onViewEnter();
   // 设置页里的诊断日志大小是「现在有多少内容」：不进页面就不刷新，用户开着
   // 日志录了一晚上，这里还停在「还没有内容」，等于把功能自己的状态说错了。
@@ -5676,25 +5681,7 @@ const Theme = window.Theme;
 // var(--bg)（当前主题的底色），漏传不会报错，只会让所有样本变成同一个颜色 ——
 // scripts/check-css-tokens.js 有断言盯着这两个别名，别只改这里。
 function themeDotStyle(theme) {
-  return `--t-bg:${theme.tokens['--bg']};--t-accent:${theme.tokens['--accent']};--t-accent-2:${theme.tokens['--accent-2']}`;
-}
-
-function renderThemeMenu() {
-  if (!Theme || !ui.themeMenu) return;
-  const current = Theme.current();
-  ui.themeMenu.innerHTML = '';
-  Theme.list().forEach((theme) => {
-    const btn = document.createElement('button');
-    btn.className = 'theme-item';
-    btn.type = 'button';
-    btn.setAttribute('role', 'option');
-    btn.setAttribute('aria-selected', String(current && theme.id === current.id));
-    btn.innerHTML = `<span class="theme-dot" style="${themeDotStyle(theme)}"></span>
-      <span class="theme-meta"><span class="theme-name"></span></span>`;
-    btn.querySelector('.theme-name').textContent = theme.name;
-    btn.onclick = () => { applyTheme(theme.id); closeThemeMenu(); };
-    ui.themeMenu.appendChild(btn);
-  });
+  return window.ThemePicker.themeDotStyle(theme);
 }
 
 function renderThemeSettings() {
@@ -5733,18 +5720,12 @@ function applyTheme(id) {
   if (Stage && typeof Stage.retint === 'function') Stage.retint();
 }
 
-function closeThemeMenu() {
-  if (!ui.themeMenu) return;
-  ui.themeMenu.hidden = true;
-  if (ui.themeBtn) ui.themeBtn.setAttribute('aria-expanded', 'false');
-}
-
 // 菜单挂在 <body> 上，位置只能自己算：默认与按钮右对齐、落在按钮下方；
 // 下方放不下就翻到上方，右边超出视口就向左收。
 /// 顶栏弹层的通用定位：右对齐按钮，下方放不下就翻上去，最后夹进视口。
 ///
 /// 三个入口（主题色 / 界面皮肤 / 更多工具）都得把弹层搬出 .topbar 才压得住后面
-/// 那些玻璃面板（顶栏自己就是层叠上下文，见 positionThemeMenu 上方注释），而搬
+/// 那些玻璃面板（顶栏自己就是层叠上下文，见 theme-picker.js），而搬
 /// 出来之后 CSS 的 top/right 就都不成立了，位置只能由 JS 按按钮矩形算。
 function positionAnchoredMenu(btn, menu, fallbackW) {
   if (!btn || !menu || menu.hidden) return;
@@ -5768,10 +5749,6 @@ function positionAnchoredMenu(btn, menu, fallbackW) {
   menu.style.top = `${Math.round(top)}px`;
 }
 
-function positionThemeMenu() {
-  positionAnchoredMenu(ui.themeBtn, ui.themeMenu, 232);
-}
-
 /// 顶栏弹层的互斥广播：三个入口（主题色 / 界面皮肤 / 更多工具）的按钮 onclick
 /// 都 stopPropagation，彼此那套「点外部就关」的 document 监听收不到对方的按钮
 /// 点击，两个面板会叠着开。约定 topbar:popup —— 谁开谁喊一声，其余弹层听见
@@ -5782,47 +5759,13 @@ function broadcastTopbarPopup(id) {
   } catch (e) { /* 老浏览器没有 CustomEvent 构造器 */ }
 }
 
-function setThemeMenuOpen(open) {
-  if (!ui.themeMenu) return;
-  ui.themeMenu.hidden = !open;
-  if (ui.themeBtn) ui.themeBtn.setAttribute('aria-expanded', String(open));
-  if (open) {
-    positionThemeMenu();
-    broadcastTopbarPopup('theme');
-  }
-}
-
 function initTheme() {
   if (!Theme) return;
   Theme.init();
-  Theme.onChange(() => { renderThemeMenu(); renderThemeSettings(); });
-  renderThemeMenu();
+  Theme.onChange(renderThemeSettings);
   renderThemeSettings();
-
-  if (ui.themeBtn && ui.themeMenu) {
-    // 关键一步：把菜单从 .topbar 的层叠上下文里搬出来。留在原处的话，
-    // 后面那些带 backdrop-filter 的玻璃面板（.column / .stage）会整块盖住它。
-    document.body.appendChild(ui.themeMenu);
-
-    ui.themeBtn.onclick = (e) => {
-      e.stopPropagation();
-      setThemeMenuOpen(ui.themeMenu.hidden);
-    };
-    document.addEventListener('click', (e) => {
-      // 用 contains 而不是 ===：按钮里有个 svg，点图标时 target 是 svg，
-      // 严格相等判断会漏掉，导致点按钮先关又立刻被 onclick 打开。
-      if (!ui.themeMenu.hidden && !ui.themeMenu.contains(e.target) && !ui.themeBtn.contains(e.target)) {
-        closeThemeMenu();
-      }
-    });
-    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeThemeMenu(); });
-    // 窗口尺寸变化时菜单可能变得越界，跟随重算
-    window.addEventListener('resize', () => { if (!ui.themeMenu.hidden) positionThemeMenu(); });
-    // 别的顶栏弹层开了就收起（见 broadcastTopbarPopup 上方注释）
-    document.addEventListener('topbar:popup', (e) => {
-      if (e.detail && e.detail.id !== 'theme' && !ui.themeMenu.hidden) closeThemeMenu();
-    });
-  }
+  window.ThemePicker.configure({ apply: applyTheme });
+  if (ui.themeBtn) window.ThemePicker.bind(ui.themeBtn);
   if (ui.setTheme) ui.setTheme.onchange = () => applyTheme(ui.setTheme.value);
 }
 
@@ -5969,6 +5912,7 @@ function probeImage(url, timeoutMs = 8000) {
 // ---------------------------------------------------------------------------
 
 function updateMediaSessionMetadata(track, artUrl) {
+  if (window.HertzRoom && HertzRoom.active()) return;
   if (!('mediaSession' in navigator)) return;
   try {
     navigator.mediaSession.metadata = new window.MediaMetadata({
@@ -5981,6 +5925,7 @@ function updateMediaSessionMetadata(track, artUrl) {
 }
 
 function syncMediaSession() {
+  if (window.HertzRoom && HertzRoom.active()) return HertzRoom.syncMediaSession();
   if (!('mediaSession' in navigator)) return;
   const duration = playbackDuration(state.snapshot);
   const playbackState = !state.snapshot.track_id || state.stopped
@@ -6029,6 +5974,7 @@ function bindMediaSession() {
 let seekRequestEpoch = 0;
 
 async function seekTo(ms) {
+  if (window.HertzRoom && HertzRoom.active()) return HertzRoom.playback('seek', { instance_id: HertzRoom.snapshot().track_instance_id, position_ms: String(Math.max(0, Math.round(ms))) });
   if (!state.snapshot.track_id || !Number.isFinite(ms)) return;
   const epoch = ++seekRequestEpoch;
   const intent = PlaybackIntent.generation;
@@ -6050,7 +5996,7 @@ async function seekTo(ms) {
 }
 
 async function seekRelative(deltaSec) {
-  const base = !window.HertzCapsuleOnly && Stage ? Stage.position() : state.snapshot.position_ms || 0;
+  const base = window.HertzRoom && HertzRoom.active() ? Number(HertzRoom.snapshot().position_ms || 0) : !window.HertzCapsuleOnly && Stage ? Stage.position() : state.snapshot.position_ms || 0;
   await seekTo(base + deltaSec * 1000);
 }
 
@@ -6081,7 +6027,7 @@ function setVolumeFromInput() {
         do {
           sent = volumeTarget;
           try {
-            await transport.post('/v1/player/volume', { volume: sent });
+            if (window.HertzRoom && HertzRoom.active()) await HertzRoom.localVolume(sent); else await transport.post('/v1/player/volume', { volume: sent });
           } catch (error) {
             toast(errText('调整音量失败', error), 'error');
           }
@@ -6534,6 +6480,7 @@ function initPalette() {
     { id: 'view-podcasts', group: '导航', title: '转到：播客', keywords: 'podcast 播客 RSS', run: () => setView('podcasts') },
     { id: 'view-playlists', group: '导航', title: '转到：歌单', keywords: 'playlist 歌单', run: () => setView('playlists') },
     { id: 'view-daily', group: '导航', title: '转到：每日推荐', keywords: 'daily 推荐 每日', run: () => setView('daily') },
+    { id: 'view-room', group: '导航', title: '转到：局域网一起听', keywords: 'room lan 一起听 同步 房间', run: () => setView('room') },
     { id: 'view-queue', group: '导航', title: '转到：播放队列', keywords: 'queue 队列', run: () => setView('queue') },
     { id: 'view-favorites', group: '导航', title: '转到：收藏', keywords: 'favorite 收藏 红心', run: () => setView('favorites') },
     { id: 'view-settings', group: '导航', title: '转到：设置', keywords: 'settings 设置', run: () => setView('settings') },
@@ -7004,6 +6951,16 @@ function onlineItemId(t) {
   return 'online:' + src + ':' + key;
 }
 
+// Room favorites are durable personal references, never online playback IDs.
+function lanFavoriteSourceItem(f, index) {
+  return { id: f.id || 'track:lan:' + f.ref_id, sourceKey: 'favorites', source: 'lan', ref: f.ref_id,
+    index, badge: index + 1, title: f.title || '未知曲目', artist: f.artist || '未知艺术家',
+    duration: Number(f.duration_ms) || null, cover: null, current: false, playing: false, progress: 0 };
+}
+function isLanSourceItem(item) {
+  return !!item && (item.source === 'lan' || item.favSource === 'lan' || (item.raw && item.raw.source === 'lan') || String(item.id || '').startsWith('online:lan:') || String(item.raw && item.raw.id || '').startsWith('online:lan:'));
+}
+
 /// 每日推荐项。已按当前 mode（online/local）选源并截断到 LIMIT。
 function dailySourceItems() {
   const DV = window.DailyView;
@@ -7021,7 +6978,7 @@ function favoriteSourceItems() {
   const F = window.Favorites;
   const items = (F && F.state ? F.state.items : []) || [];
   return items.map((f, i) => {
-    const base = f.kind === 'radio'
+    const base = f.source === 'lan' ? lanFavoriteSourceItem(f, i) : f.kind === 'radio'
       ? onlineSourceItem({
         id: f.ref_id,
         source: f.source,
@@ -7112,7 +7069,7 @@ function queueForSourceItem(item) {
   const def = viewSourceDef(state.view);
   const list = (def ? def.items() : []) || [];
   const ids = list
-    .filter((x) => x && !x.isPlaylist && !String(x.id).startsWith('online:'))
+    .filter((x) => x && !isLanSourceItem(x) && !x.isPlaylist && x.favKind !== 'radio' && !String(x.id).startsWith('online:'))
     .map((x) => x.id);
   if (ids.includes(item.id)) return ids;
   // 兜底：源里凑不出一条纯本地队列（在线源 / 收藏电台），退回播放队列。
@@ -7127,6 +7084,7 @@ function queueForSourceItem(item) {
 /// 那一推拿到的是**歌单记录**，`raw.id` 是平台歌单 id —— 发出去就是拿歌单 id
 /// 当曲目 id 去取流，必 404，而且服务端只会回「暂无可用音频」这种误导话术。
 function playOnlineItem(item, list) {
+  if (isLanSourceItem(item)) return playSourceItem(item, list);
   const Online = window.Online;
   if (!Online || typeof Online.playAll !== 'function') {
     toast('在线播放还没准备好', 'error');
@@ -7136,10 +7094,12 @@ function playOnlineItem(item, list) {
     ? list
     : (((viewSourceDef(state.view) || {}).items || (() => []))());
   // 传整份同源列表：playAll 从 tracks[index] 开播，之后 next/prev 才有意义。
-  const tracks = source.map((x) => x.raw || x).filter((x) => x && x.id);
+  const skippedLan = source.filter(isLanSourceItem).length;
+  const tracks = source.filter((x) => x && !isLanSourceItem(x) && !x.isPlaylist && x.favKind !== 'radio' && x.source !== 'local').map((x) => x.raw || x).filter((x) => x && x.id && x.source !== 'lan');
   const at = tracks.findIndex((x) => onlineItemId(x) === item.id);
   if (at >= 0) {
     Online.playAll(tracks, at);
+    if (skippedLan) toast('已跳过 ' + skippedLan + ' 首局域网收藏；连接原房主后可逐首加入共同队列');
     return;
   }
   // 列表里找不到被点的那一项时，只播它自己 —— 退回 index 0 会播成**另一首歌**，
@@ -7190,6 +7150,11 @@ function playSourceItem(item, list) {
   // 播放队列那一份已经带好了 id，直接走队列路径（顺序播放语义要对）。
   if (item.queueItem) {
     playQueueIndex(item.index);
+    return;
+  }
+  if (isLanSourceItem(item)) {
+    if (window.Favorites && window.Favorites.activate) return window.Favorites.activate({ kind: item.favKind || 'track', source: 'lan', ref_id: item.favRefId || item.ref, title: item.title });
+    toast('收藏模块尚未准备好，请刷新后重试', 'error');
     return;
   }
   // 电台收藏：整盘载入，不是一首。
@@ -7353,7 +7318,7 @@ function initBarVisibility() {
   sync();
 }
 
-function post(path) { return transport.post(path, {}).catch((err) => toast(errText('操作失败', err), 'error')); }
+function post(path) { const action = path.match(/^\/v1\/player\/(play|pause|stop|next|previous)$/); if (action && window.HertzRoom && HertzRoom.active()) return HertzRoom.playback(action[1]); return transport.post(path, {}).catch((err) => toast(errText('操作失败', err), 'error')); }
 
 // ---------------------------------------------------------------------------
 // 创意舞台
@@ -7387,6 +7352,7 @@ function initCreative() {
 let playbackCommandEpoch = 0;
 
 async function setPlayback(action) {
+  if (window.HertzRoom && HertzRoom.active()) return HertzRoom.playback(action);
   const epoch = ++playbackCommandEpoch;
   if (action === 'stop') seekRequestEpoch += 1;
   const previous = state.snapshot;
@@ -7417,6 +7383,7 @@ async function setPlayback(action) {
 }
 
 function togglePlay() {
+  if (window.HertzRoom && HertzRoom.active()) return HertzRoom.playback('toggle');
   return setPlayback(state.snapshot.playing ? 'pause' : 'play');
 }
 
@@ -7452,6 +7419,7 @@ function isNpOpen() {
 }
 
 function openNowPlaying() {
+  if (window.HertzRoom && HertzRoom.active()) { setView('room'); return; }
   np.scrim.hidden = false;
   np.modal.hidden = false;
   if (window.NowPlaying) NowPlaying.open();
@@ -8047,6 +8015,22 @@ async function startApp() {
   // 落盘的在线元数据先喂回内存：队列行第一帧就能显示真名字，不用等补取。
   if (window.Online && window.Online.seedFromStore) window.Online.seedFromStore();
   transport = await chooseTransport();
+  if (window.HertzRoom) window.HertzRoom.init({
+    root: ui.views.room, transport, confirm: message => modal().confirm(message),
+    onReturn: () => setView('library'),
+    onNavigate: name => { if (name === 'library' || name === 'favorites') setView(name); },
+    onModeChange(active) {
+      cancelSeek(); clearSleepTimer(true); closeNowPlaying();
+      if (window.Stage3D) Stage3D.close();
+      if (active) document.title = '一起听 · hertz-studio';
+      else {
+        mediaSessionStateKey = ''; documentTitleCache = '';
+        if (state.current) updateMediaSessionMetadata(state.current, Stage && Stage.coverUrl());
+        transport.get('/v1/state').then(applySnapshot).catch(() => {});
+        restoreQueue();
+      }
+    }
+  });
   // 两种 surface（工作台 tab / 浮动胶囊）都要挂；放在分支之前，别藏在 tab 那条路里。
   if (transport.kind === 'dbx') bindDbxCloseHook();
   if (window.HertzCapsuleOnly) return startFloatingCapsule();

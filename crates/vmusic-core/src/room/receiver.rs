@@ -37,6 +37,8 @@ pub enum DiscardReason {
 pub enum CommitIgnoreReason {
     SessionMismatch,
     NotPreparing,
+    /// Format+Plan 尚未齐备，或尚未对该计划 Ready。
+    NotReady,
     /// Commit 携带的计划 ID 与准备中计划不符：改锚点/边界必须换计划 ID
     /// 并重新 Ready，不能在 Commit 里偷偷改期。
     PlanMismatch,
@@ -133,6 +135,7 @@ pub enum GateAction {
 #[derive(Clone, Copy)]
 struct Unmatched {
     epoch: u64,
+    sequence: u64,
     frame_index: u64,
     frame_count: u32,
     arrived_ns: Nanos,
@@ -143,7 +146,9 @@ struct EpochBuffer {
     /// 下一块应从该帧开始（过时块被丢弃时同样推进它）。
     expected_next: u64,
     buffered_frames: u32,
-    seq_high: u64,
+    seq_high: Option<u64>,
+    /// 已呈现范围的右开边界，包含欠载静音；独立于收包连续性。
+    presented_until: u64,
 }
 
 impl EpochBuffer {
@@ -151,7 +156,8 @@ impl EpochBuffer {
         Self {
             expected_next: join_frame,
             buffered_frames: 0,
-            seq_high: 0,
+            seq_high: None,
+            presented_until: join_frame,
         }
     }
 
@@ -167,25 +173,31 @@ impl EpochBuffer {
         if frame_count == 0 {
             return Err(DiscardReason::InvalidBlock);
         }
-        if self.seq_high > 0 && sequence <= self.seq_high {
+        if self.seq_high.is_some_and(|high| sequence <= high) {
             return Err(DiscardReason::InvalidBlock);
         }
-        if self.buffered_frames > 0 && frame_index != self.expected_next {
+        if self.seq_high.is_some() && frame_index != self.expected_next {
             return Err(DiscardReason::InvalidBlock);
         }
         if frame_index < self.expected_next {
             return Err(DiscardReason::InvalidBlock);
         }
-        // 首块允许从任意帧开始（晚加入不从 0 重播）。
-        if self.buffered_frames == 0 {
-            self.expected_next = frame_index;
-        }
-        self.seq_high = sequence;
-        self.expected_next = frame_index + u64::from(frame_count);
-        if due_until.is_some_and(|due| self.expected_next <= due) {
+        let end = frame_index
+            .checked_add(u64::from(frame_count))
+            .ok_or(DiscardReason::InvalidBlock)?;
+        let cutoff = due_until.unwrap_or(0).max(self.presented_until);
+        // 丢掉已经过去的前缀，包括尚未出队的旧缓冲；不把晚到样本追播。
+        let retained =
+            u64::from(self.buffered_frames).min(self.expected_next.saturating_sub(cutoff));
+        let new_frames = end.saturating_sub(frame_index.max(cutoff));
+        let total =
+            u32::try_from(retained + new_frames).map_err(|_| DiscardReason::InvalidBlock)?;
+        self.seq_high = Some(sequence);
+        self.expected_next = end;
+        self.buffered_frames = total;
+        if new_frames == 0 {
             return Ok(false);
         }
-        self.buffered_frames += frame_count;
         Ok(true)
     }
 
@@ -222,15 +234,17 @@ impl Preparing {
     }
 
     fn complete(&self) -> bool {
-        self.format.is_some() && self.plan.is_some()
+        self.format
+            .is_some_and(|f| f.sample_rate > 0 && f.channels > 0)
+            && self.plan.is_some()
     }
 }
 
 /// 接收端音频门禁。确定性：同输入同输出。
 pub struct ReceiverGate {
     session: u64,
-    /// 当前代际的帧时长（纳秒），由其 Format 决定，切换时更新。
-    frame_ns: u64,
+    /// 保留采样率，用有理数换算期限，避免截断单帧纳秒带来的累计漂移。
+    sample_rate: u32,
     /// (epoch, plan_id, anchor, buffer)。
     current: Option<(u64, u64, Nanos, EpochBuffer)>,
     preparing: Option<Preparing>,
@@ -250,7 +264,7 @@ impl ReceiverGate {
     pub fn new(device_lead_ns: Nanos, match_timeout_ns: Nanos, unmatched_bound: u32) -> Self {
         Self {
             session: 0,
-            frame_ns: 0,
+            sample_rate: 0,
             current: None,
             preparing: None,
             intent: None,
@@ -273,10 +287,11 @@ impl ReceiverGate {
     /// 当前已过呈现期限的帧号（不含，即 T_present(f) ≤ now 的 f 上界+1）。
     fn due_until(&self, now: Nanos) -> Option<u64> {
         let (_, _, anchor, _) = self.current.as_ref()?;
-        if now <= *anchor {
+        if now < *anchor {
             return Some(0);
         }
-        Some(((now - anchor) / self.frame_ns.max(1)) + 1)
+        let due = u128::from(now - anchor) * u128::from(self.sample_rate) / 1_000_000_000 + 1;
+        Some(due.min(u128::from(u64::MAX)) as u64)
     }
 
     pub fn input(&mut self, now: Nanos, event: GateInput) -> Vec<GateAction> {
@@ -289,7 +304,7 @@ impl ReceiverGate {
                 self.intent = None;
                 self.unmatched.clear();
                 self.unmatched_frames = 0;
-                self.frame_ns = 0;
+                self.sample_rate = 0;
                 vec![GateAction::Resync { to: None }]
             }
             GateInput::Disconnect => {
@@ -308,16 +323,29 @@ impl ReceiverGate {
                 if session != self.session {
                     return Vec::new();
                 }
-                self.set_preparing_slot(epoch, |p| p.format = Some(format));
-                self.complete_ready(epoch)
+                self.set_preparing_slot(epoch, |p| {
+                    if p.format != Some(format) {
+                        p.format = Some(format);
+                        p.ready_sent = false;
+                    }
+                });
+                self.complete_ready(now, epoch)
             }
             GateInput::Plan { session, plan } => {
                 if session != self.session {
                     return Vec::new();
                 }
                 let epoch = plan.epoch;
-                self.set_preparing_slot(epoch, |p| p.plan = Some(plan));
-                self.complete_ready(epoch)
+                self.set_preparing_slot(epoch, |p| {
+                    if p.plan != Some(plan) {
+                        p.plan = Some(plan);
+                        p.ready_sent = false;
+                        if p.buffer.seq_high.is_none() {
+                            p.buffer = EpochBuffer::from_join(plan.join_frame);
+                        }
+                    }
+                });
+                self.complete_ready(now, epoch)
             }
             GateInput::Pcm {
                 session,
@@ -338,6 +366,17 @@ impl ReceiverGate {
     /// Format/Plan 落位：同代际补槽；准备槽空或未提交时开新槽（未提交的
     /// 旧准备被新代际取代）；已有未生效 Commit 时进意图槽。
     fn set_preparing_slot(&mut self, epoch: u64, fill: impl FnOnce(&mut Preparing)) {
+        // 已发布计划的描述不可改写；相同重发无需重新 Ready。
+        if self
+            .preparing
+            .as_ref()
+            .is_some_and(|p| p.epoch == epoch && p.commit.is_some())
+        {
+            return;
+        }
+        if self.current_epoch().is_some_and(|current| epoch <= current) {
+            return;
+        }
         let target = if self.preparing.as_ref().is_some_and(|p| p.epoch == epoch) {
             &mut self.preparing
         } else if self.preparing.as_ref().is_some_and(|p| p.commit.is_none()) {
@@ -362,18 +401,49 @@ impl ReceiverGate {
 
     /// Format+Plan 齐备且未发过 Ready：对准备中计划恰好发一次。意图代际
     /// （已有未生效 Commit）不 Ready，晋升后才发。
-    fn complete_ready(&mut self, epoch: u64) -> Vec<GateAction> {
-        let mut ready: Option<GateAction> = None;
+    fn complete_ready(&mut self, now: Nanos, epoch: u64) -> Vec<GateAction> {
+        let mut actions = Vec::new();
+        let resync_to = self.current_epoch();
         if let Some(p) = &mut self.preparing {
             if p.epoch == epoch && p.complete() && !p.ready_sent {
+                // 匹配完成即离开 unmatched：不能等到起播时再按匹配超时丢掉。
+                // 保留原序号，并逐块报告校验失败，避免损坏后续收包水位。
+                let mut keep = Vec::new();
+                let mut timed_out = false;
+                for block in std::mem::take(&mut self.unmatched) {
+                    if block.epoch != epoch {
+                        keep.push(block);
+                        continue;
+                    }
+                    let result = if now.saturating_sub(block.arrived_ns) > self.match_timeout_ns {
+                        timed_out = true;
+                        Err(DiscardReason::UnmatchedTimeout)
+                    } else {
+                        p.buffer
+                            .accept(block.sequence, block.frame_index, block.frame_count, None)
+                    };
+                    match result {
+                        Ok(true) => {}
+                        Ok(false) => actions.push(GateAction::DiscardPcm {
+                            epoch,
+                            reason: DiscardReason::PastDeadline,
+                        }),
+                        Err(reason) => actions.push(GateAction::DiscardPcm { epoch, reason }),
+                    }
+                }
+                self.unmatched = keep;
+                self.unmatched_frames = self.unmatched.iter().map(|u| u.frame_count).sum();
+                if timed_out {
+                    actions.push(GateAction::Resync { to: resync_to });
+                }
                 p.ready_sent = true;
-                ready = Some(GateAction::Ready {
+                actions.push(GateAction::Ready {
                     epoch,
                     plan_id: p.plan.unwrap().plan_id,
                 });
             }
         }
-        ready.into_iter().collect()
+        actions
     }
 
     fn input_pcm(
@@ -391,28 +461,37 @@ impl ReceiverGate {
                 reason: DiscardReason::SessionMismatch,
             }];
         }
-        let due = self.due_until(now);
+        // Settle the presentation debt before a new arrival trims its late
+        // prefix. Previously accept() also trimmed older, on-time buffered
+        // frames, so an input between two timer ticks manufactured a gap.
+        // These actions describe only the elapsed interval, never future audio.
+        let mut actions = Vec::new();
+        let presentation_now = self
+            .preparing
+            .as_ref()
+            .and_then(|p| p.commit)
+            .map_or(now, |at| now.min(at.saturating_sub(1)));
+        if self.current_epoch() == Some(epoch) {
+            self.present_current(presentation_now, &mut actions);
+        }
+        let due = self.due_until(presentation_now);
         // 当前已提交代际。
         if let Some((current_epoch, _, _, buffer)) = &mut self.current {
             if *current_epoch == epoch {
-                return match buffer.accept(sequence, frame_index, frame_count, due) {
-                    Ok(true) => Vec::new(),
-                    Ok(false) => vec![GateAction::DiscardPcm {
+                match buffer.accept(sequence, frame_index, frame_count, due) {
+                    Ok(true) => {}
+                    Ok(false) => actions.push(GateAction::DiscardPcm {
                         epoch,
                         reason: DiscardReason::PastDeadline,
-                    }],
-                    Err(reason) => vec![GateAction::DiscardPcm { epoch, reason }],
-                };
+                    }),
+                    Err(reason) => actions.push(GateAction::DiscardPcm { epoch, reason }),
+                }
+                return actions;
             }
         }
         // 准备中代际（含已收 Commit、等生效的未来帧）。
         if let Some(p) = &mut self.preparing {
-            if p.epoch == epoch {
-                if p.buffer.buffered_frames == 0 {
-                    if let Some(plan) = p.plan {
-                        p.buffer = EpochBuffer::from_join(plan.join_frame);
-                    }
-                }
+            if p.epoch == epoch && p.complete() {
                 return match p.buffer.accept(sequence, frame_index, frame_count, None) {
                     Ok(_) => Vec::new(),
                     Err(reason) => vec![GateAction::DiscardPcm { epoch, reason }],
@@ -444,6 +523,7 @@ impl ReceiverGate {
         // 未来代际，先到：有界暂存等 Format/Plan。
         self.unmatched.push(Unmatched {
             epoch,
+            sequence,
             frame_index,
             frame_count,
             arrived_ns: now,
@@ -486,6 +566,21 @@ impl ReceiverGate {
             return vec![GateAction::CommitIgnored {
                 reason: CommitIgnoreReason::PlanMismatch,
             }];
+        }
+        if !p.complete() || !p.ready_sent {
+            return vec![GateAction::CommitIgnored {
+                reason: CommitIgnoreReason::NotReady,
+            }];
+        }
+        if let Some(committed_at) = p.commit {
+            // 同一 Commit 幂等；重复消息不能改写已发布的生效边界。
+            return if committed_at == effective_at {
+                Vec::new()
+            } else {
+                vec![GateAction::CommitIgnored {
+                    reason: CommitIgnoreReason::PlanMismatch,
+                }]
+            };
         }
         // 声卡提交期限：必须在 effective_at − device_lead 之前收到。
         if now.saturating_add(self.device_lead_ns) > effective_at {
@@ -535,7 +630,7 @@ impl ReceiverGate {
             .and_then(|p| p.commit)
             .is_some_and(|effective_at| now >= effective_at);
         if switch {
-            let mut p = self.preparing.take().unwrap();
+            let p = self.preparing.take().unwrap();
             let plan = p.plan.unwrap();
             let format = p.format.unwrap();
             let actions_switch = GateAction::EpochSwitch {
@@ -543,69 +638,57 @@ impl ReceiverGate {
                 to: p.epoch,
                 at: p.commit.unwrap(),
             };
-            // 并入等匹配阶段攒下的该代际 PCM（只收 join 起点连续的部分）。
-            if p.buffer.buffered_frames == 0 {
-                let blocks: Vec<(u64, u32)> = self
-                    .unmatched
-                    .iter()
-                    .filter(|u| u.epoch == p.epoch)
-                    .map(|u| (u.frame_index, u.frame_count))
-                    .collect();
-                self.unmatched.retain(|u| u.epoch != p.epoch);
-                for (frame_index, frame_count) in blocks {
-                    let _ = p.buffer.accept(u64::MAX, frame_index, frame_count, None);
-                }
-            }
-            self.frame_ns = 1_000_000_000 / u64::from(format.sample_rate.max(1));
+            self.sample_rate = format.sample_rate;
             self.current = Some((p.epoch, plan.plan_id, plan.anchor_ns, p.buffer));
             actions.push(actions_switch);
             // 意图代际晋升为准备代际；齐备则补发 Ready。
             if let Some(intent) = self.intent.take() {
-                let ready = intent.complete() && !intent.ready_sent;
                 let epoch = intent.epoch;
-                let plan_id = intent.plan.map(|plan| plan.plan_id);
-                let mut promoted = intent;
-                if ready {
-                    promoted.ready_sent = true;
-                }
-                self.preparing = Some(promoted);
-                if ready {
-                    actions.push(GateAction::Ready {
-                        epoch,
-                        plan_id: plan_id.unwrap_or(0),
-                    });
-                }
+                self.preparing = Some(intent);
+                actions.extend(self.complete_ready(now, epoch));
             }
             // 同拍继续按呈现时间出帧（新代际可能已有到期帧）。
         }
         // 3) 按呈现时间出帧：到期帧送声卡，缺口记欠载（受控静音）。
+        self.present_current(now, &mut actions);
+        actions
+    }
+
+    fn present_current(&mut self, now: Nanos, actions: &mut Vec<GateAction>) {
         let due_now = self.due_until(now);
         if let Some((epoch, _, _, buffer)) = &mut self.current {
             if let Some(due_until) = due_now {
-                let cursor = buffer.cursor();
+                let cursor = buffer.presented_until;
+                let data_start = buffer.cursor().max(cursor);
                 let data_end = buffer.expected_next;
-                let due = due_until.min(data_end);
-                if due > cursor {
-                    let frames = (due - cursor).min(u64::from(u32::MAX)) as u32;
-                    actions.push(GateAction::Play {
-                        epoch: *epoch,
-                        frames,
-                    });
-                    buffer.consume(frames);
-                }
-                if due_until > data_end {
-                    let starved =
-                        (due_until - data_end.max(cursor)).min(u64::from(u32::MAX)) as u32;
-                    if starved > 0 {
-                        actions.push(GateAction::Underrun {
-                            epoch: *epoch,
-                            frames: starved,
+                let gap_end = due_until.min(data_start).max(cursor);
+                let play_end = due_until.min(data_end).max(gap_end);
+                // 首块可能从未来帧开始：先静音缺口，再播放已有帧，最后静音尾部。
+                for (play, mut frames) in [
+                    (false, gap_end - cursor),
+                    (true, play_end - gap_end),
+                    (false, due_until.saturating_sub(play_end)),
+                ] {
+                    while frames > 0 {
+                        let count = frames.min(u64::from(u32::MAX)) as u32;
+                        actions.push(if play {
+                            buffer.consume(count);
+                            GateAction::Play {
+                                epoch: *epoch,
+                                frames: count,
+                            }
+                        } else {
+                            GateAction::Underrun {
+                                epoch: *epoch,
+                                frames: count,
+                            }
                         });
+                        frames -= u64::from(count);
                     }
                 }
+                buffer.presented_until = cursor.max(due_until);
             }
         }
-        actions
     }
 }
 
@@ -949,6 +1032,342 @@ mod tests {
                 epoch: 9,
                 reason: DiscardReason::UnmatchedOverflow
             }]
+        );
+    }
+
+    fn prepared(rate: u32) -> ReceiverGate {
+        let mut gate = gate();
+        gate.input(
+            0,
+            GateInput::Format {
+                session: 7,
+                epoch: 1,
+                format: FormatDesc {
+                    format_id: 1,
+                    sample_rate: rate,
+                    channels: 2,
+                },
+            },
+        );
+        gate.input(0, plan(1, 10, 1_000 * MS, 0));
+        gate
+    }
+
+    fn played(actions: &[GateAction]) -> u64 {
+        actions
+            .iter()
+            .map(|a| match a {
+                GateAction::Play { frames, .. } => u64::from(*frames),
+                _ => 0,
+            })
+            .sum()
+    }
+
+    #[test]
+    fn early_blocks_keep_sequences_and_merge_before_live_pcm() {
+        // 三种交错：两个描述均未到、只到 Format、只到 Plan。
+        for prefix in 0..3 {
+            let mut gate = gate();
+            if prefix == 1 {
+                gate.input(0, format(1));
+            }
+            if prefix == 2 {
+                gate.input(0, plan(1, 10, 1_000 * MS, 0));
+            }
+            gate.input(0, pcm(1, 1, 0, 20));
+            gate.input(0, pcm(1, 2, 20, 20));
+            if prefix != 1 {
+                gate.input(5 * MS, format(1));
+            }
+            if prefix != 2 {
+                gate.input(5 * MS, plan(1, 10, 1_000 * MS, 0));
+            }
+            assert!(gate.input(10 * MS, pcm(1, 3, 40, 20)).is_empty());
+            gate.input(10 * MS, commit(1, 10, 1_000 * MS));
+            assert_eq!(played(&gate.advance(1_059 * MS)), 60);
+            assert!(gate.input(1_059 * MS, pcm(1, 4, 60, 20)).is_empty());
+            assert_eq!(played(&gate.advance(1_079 * MS)), 20);
+        }
+    }
+
+    #[test]
+    fn cached_invalid_sequence_is_reported_without_poisoning_live_watermark() {
+        let mut gate = gate();
+        gate.input(0, pcm(1, 1, 0, 20));
+        gate.input(0, pcm(1, 1, 20, 20));
+        gate.input(0, format(1));
+        let actions = gate.input(0, plan(1, 10, 1_000 * MS, 0));
+        assert!(actions.contains(&GateAction::DiscardPcm {
+            epoch: 1,
+            reason: DiscardReason::InvalidBlock,
+        }));
+        assert!(gate.input(0, pcm(1, 2, 20, 20)).is_empty());
+    }
+
+    #[test]
+    fn matched_pcm_does_not_expire_while_waiting_for_commit_boundary() {
+        let mut gate = gate();
+        gate.input(0, pcm(1, 1, 0, 40));
+        gate.input(5 * MS, format(1));
+        gate.input(5 * MS, plan(1, 10, 1_000 * MS, 0));
+        // 匹配已完成，500ms 超时不再适用。
+        assert!(gate.advance(600 * MS).is_empty());
+        gate.input(600 * MS, commit(1, 10, 1_000 * MS));
+        assert_eq!(played(&gate.advance(1_039 * MS)), 40);
+    }
+
+    #[test]
+    fn matching_after_timeout_drops_expired_blocks_and_resyncs() {
+        let mut gate = gate();
+        gate.input(0, pcm(1, 1, 0, 40));
+        gate.input(600 * MS, format(1));
+        let actions = gate.input(600 * MS, plan(1, 10, 1_000 * MS, 0));
+        assert!(actions.contains(&GateAction::DiscardPcm {
+            epoch: 1,
+            reason: DiscardReason::UnmatchedTimeout,
+        }));
+        assert!(actions.contains(&GateAction::Resync { to: None }));
+        gate.input(600 * MS, commit(1, 10, 1_000 * MS));
+        assert_eq!(played(&gate.advance(1_039 * MS)), 0);
+    }
+
+    #[test]
+    fn commit_without_format_is_rejected_until_ready() {
+        let mut gate = gate();
+        gate.input(0, plan(1, 10, 1_000 * MS, 0));
+        assert_eq!(
+            gate.input(0, commit(1, 10, 1_000 * MS)),
+            vec![GateAction::CommitIgnored {
+                reason: CommitIgnoreReason::NotReady
+            },]
+        );
+        assert!(gate.advance(1_000 * MS).is_empty());
+        gate.input(1_000 * MS, format(1));
+        gate.input(1_000 * MS, pcm(1, 1, 0, 100));
+        assert!(
+            gate.advance(1_050 * MS).is_empty(),
+            "旧 Commit 不得在 Format 到达后复活"
+        );
+        gate.input(1_050 * MS, commit(1, 10, 1_200 * MS));
+        assert_eq!(
+            gate.advance(1_200 * MS)[0],
+            GateAction::EpochSwitch {
+                from: None,
+                to: 1,
+                at: 1_200 * MS,
+            }
+        );
+    }
+
+    #[test]
+    fn committed_descriptors_and_boundary_are_frozen() {
+        let mut gate = prepared(1000);
+        gate.input(0, pcm(1, 1, 0, 100));
+        gate.input(0, commit(1, 10, 1_000 * MS));
+        // 相同消息幂等，冲突描述/生效时刻不得修改已提交计划。
+        assert!(gate.input(10 * MS, plan(1, 10, 1_000 * MS, 0)).is_empty());
+        gate.input(10 * MS, plan(1, 11, 2_000 * MS, 500));
+        gate.input(
+            10 * MS,
+            GateInput::Format {
+                session: 7,
+                epoch: 1,
+                format: FormatDesc {
+                    format_id: 2,
+                    sample_rate: 48_000,
+                    channels: 1,
+                },
+            },
+        );
+        assert!(gate.input(10 * MS, commit(1, 10, 1_000 * MS)).is_empty());
+        assert_eq!(
+            gate.input(10 * MS, commit(1, 10, 2_000 * MS)),
+            vec![GateAction::CommitIgnored {
+                reason: CommitIgnoreReason::PlanMismatch
+            },]
+        );
+        assert_eq!(played(&gate.advance(1_010 * MS)), 11);
+        // 当前代际的重复描述也不能再建立新的准备槽。
+        gate.input(1_010 * MS, plan(1, 11, 2_000 * MS, 0));
+        assert_eq!(gate.preparing_epoch(), None);
+    }
+
+    #[test]
+    fn deadlines_use_exact_rate_over_ten_minutes() {
+        for rate in [44_100, 48_000, 96_000, 192_000] {
+            let mut gate = prepared(rate);
+            gate.input(0, pcm(1, 1, 0, rate * 700));
+            gate.input(0, commit(1, 10, 1_000 * MS));
+            assert_eq!(
+                played(&gate.advance(601_000 * MS)),
+                u64::from(rate) * 600 + 1
+            );
+            assert!(gate.advance(601_000 * MS).is_empty());
+        }
+    }
+
+    #[test]
+    fn frame_zero_is_due_at_anchor_but_not_before() {
+        let mut gate = prepared(48_000);
+        gate.input(0, pcm(1, 1, 0, 100));
+        gate.input(0, commit(1, 10, 900 * MS));
+        assert_eq!(played(&gate.advance(999 * MS)), 0);
+        assert_eq!(played(&gate.advance(1_000 * MS)), 1);
+    }
+
+    #[test]
+    fn silence_advances_cursor_and_late_prefix_is_never_replayed() {
+        let mut gate = prepared(1000);
+        gate.input(0, pcm(1, 1, 0, 100));
+        gate.input(0, commit(1, 10, 1_000 * MS));
+        assert_eq!(
+            gate.advance(1_200 * MS),
+            vec![
+                GateAction::EpochSwitch {
+                    from: None,
+                    to: 1,
+                    at: 1_000 * MS
+                },
+                GateAction::Play {
+                    epoch: 1,
+                    frames: 100
+                },
+                GateAction::Underrun {
+                    epoch: 1,
+                    frames: 101
+                },
+            ]
+        );
+        assert!(gate.advance(1_200 * MS).is_empty());
+        assert_eq!(
+            gate.advance(1_210 * MS),
+            vec![GateAction::Underrun {
+                epoch: 1,
+                frames: 10
+            }]
+        );
+        // 100..250 的迟到块只保留 211..250，不能播放已经静音呈现的前缀。
+        assert!(gate.input(1_210 * MS, pcm(1, 2, 100, 150)).is_empty());
+        assert!(gate.advance(1_210 * MS).is_empty());
+        assert_eq!(
+            gate.advance(1_249 * MS),
+            vec![GateAction::Play {
+                epoch: 1,
+                frames: 39
+            }]
+        );
+        assert!(gate.advance(1_249 * MS).is_empty());
+    }
+
+    #[test]
+    fn future_first_block_preserves_gap_as_silence() {
+        let mut gate = prepared(1000);
+        gate.input(0, pcm(1, 1, 50, 50));
+        gate.input(0, commit(1, 10, 1_000 * MS));
+        let actions = gate.advance(1_099 * MS);
+        assert_eq!(
+            &actions[1..],
+            &[
+                GateAction::Underrun {
+                    epoch: 1,
+                    frames: 50
+                },
+                GateAction::Play {
+                    epoch: 1,
+                    frames: 50
+                },
+            ]
+        );
+        assert!(gate.advance(1_099 * MS).is_empty());
+    }
+
+    #[test]
+    fn on_time_pcm_between_timer_ticks_preserves_already_buffered_audio() {
+        let mut gate = prepared(1000);
+        gate.input(0, pcm(1, 1, 0, 100));
+        gate.input(0, commit(1, 10, 1_000 * MS));
+        assert_eq!(played(&gate.advance(1_000 * MS)), 1);
+        // No timer tick between 1000 and 1020 ms. Frames 1..21 were
+        // already buffered on time; receiving 100..200 must not erase them.
+        let arrival = gate.input(1_020 * MS, pcm(1, 2, 100, 100));
+        assert_eq!(
+            arrival,
+            vec![GateAction::Play {
+                epoch: 1,
+                frames: 20
+            }]
+        );
+        assert_eq!(
+            gate.advance(1_039 * MS),
+            vec![GateAction::Play {
+                epoch: 1,
+                frames: 19
+            }]
+        );
+        assert_eq!(played(&gate.advance(1_199 * MS)), 160);
+    }
+
+    #[test]
+    fn late_pcm_between_ticks_reports_real_gap_without_replaying_late_prefix() {
+        let mut gate = prepared(1000);
+        gate.input(0, pcm(1, 1, 0, 20));
+        gate.input(0, commit(1, 10, 1_000 * MS));
+        gate.advance(1_000 * MS);
+        assert_eq!(
+            gate.input(1_030 * MS, pcm(1, 2, 20, 40)),
+            vec![
+                GateAction::Play {
+                    epoch: 1,
+                    frames: 19
+                },
+                GateAction::Underrun {
+                    epoch: 1,
+                    frames: 11
+                },
+            ]
+        );
+        assert!(gate.advance(1_030 * MS).is_empty());
+        assert_eq!(
+            gate.advance(1_059 * MS),
+            vec![GateAction::Play {
+                epoch: 1,
+                frames: 29
+            }]
+        );
+    }
+
+    #[test]
+    fn pcm_arrival_after_pending_switch_cannot_present_old_epoch_past_its_boundary() {
+        let mut gate = prepared(1000);
+        gate.input(0, pcm(1, 1, 0, 100));
+        gate.input(0, commit(1, 10, 1_000 * MS));
+        gate.advance(1_000 * MS);
+        gate.input(1_000 * MS, format(2));
+        gate.input(1_000 * MS, plan(2, 11, 1_100 * MS, 0));
+        gate.input(1_000 * MS, pcm(2, 1, 0, 100));
+        gate.input(1_000 * MS, commit(2, 11, 1_100 * MS));
+        // A command batch can deliver old PCM before the timer handles the
+        // already due switch. Its accounting stops immediately before it.
+        assert_eq!(
+            gate.input(1_110 * MS, pcm(1, 2, 100, 20)),
+            vec![GateAction::Play {
+                epoch: 1,
+                frames: 99
+            }]
+        );
+        assert_eq!(
+            gate.advance(1_110 * MS),
+            vec![
+                GateAction::EpochSwitch {
+                    from: Some(1),
+                    to: 2,
+                    at: 1_100 * MS
+                },
+                GateAction::Play {
+                    epoch: 2,
+                    frames: 11
+                },
+            ]
         );
     }
 }

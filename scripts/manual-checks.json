@@ -71,6 +71,14 @@
       "purpose": "浏览器类检查的前置自检：node scripts/check-browser-preflight.js"
     },
     {
+      "script": "check-butterfly-browser.cjs",
+      "purpose": "Real Chromium butterfly-vortex renderer and application integration using an isolated fixture."
+    },
+    {
+      "script": "check-butterfly-stage.cjs",
+      "purpose": "Offline butterfly-vortex geometry, phase transitions, timing and deterministic stage contracts."
+    },
+    {
       "script": "check-capsule-browser.js",
       "purpose": "Source-only layout regression; no running service or native DBX host required."
     },
@@ -265,6 +273,10 @@
     {
       "script": "check-reactor-browser.js",
       "purpose": "!/usr/bin/env node"
+    },
+    {
+      "script": "check-room-theme-browser.js",
+      "purpose": "Isolated production Theme/DOM/CSS browser check for shared room themes and LAN favorite actions. Stub transport; no service, credentials or audio device."
     },
     {
       "script": "check-search-browser.js",

@@ -132,7 +132,7 @@ mod tests {
     #[tokio::test]
     async fn a_failed_first_page_preserves_the_existing_prepared_queue() {
         let (state, handle) = playback_state().await;
-        state.set_queue(vec!["kept".into()], Some(0)).await;
+        state.set_queue(vec!["kept".into()], Some(0)).await.unwrap();
         let err = state
             .prepare_online_play(
                 request("new"),
@@ -314,15 +314,17 @@ pub(crate) struct PreparedOnlinePlay {
 
 impl AppState {
     /// Reserve before the first remote await; a delayed first page cannot replace a newer intent.
-    async fn reserve_online_intent(&self) -> usize {
+    async fn reserve_online_intent(&self) -> ApiResult<usize> {
         let _commit = self.play_commit.lock().await;
+        self.require_local_playback()?;
         self.cancel_prepared_playback().await;
         // The old collection still owns the current queue until a successful
         // first page replaces it through set_queue_locked. Failed preparation
         // must not remove its refill cursor or invalidate an in-flight page.
-        self.play_generation
+        Ok(self
+            .play_generation
             .fetch_add(1, Ordering::Relaxed)
-            .saturating_add(1)
+            .saturating_add(1))
     }
 
     async fn prepare_online_play<F>(
@@ -364,7 +366,7 @@ impl AppState {
         if request.collection.is_none() && tracks.iter().any(|t| t.id.trim().is_empty()) {
             return Err(bad_request("tracks 中存在缺少 id 的曲目"));
         }
-        let reservation = self.reserve_online_intent().await;
+        let reservation = self.reserve_online_intent().await?;
         let collection = if let Some(coll) = request.collection {
             let result = first_page.await;
             // Stale errors must be as harmless as stale successes.
@@ -404,6 +406,7 @@ impl AppState {
             .map(|t| online::virtual_id(&source, &t.id))
             .collect();
         let _commit = self.play_commit.lock().await;
+        self.require_local_playback()?;
         if self.play_generation.load(Ordering::Relaxed) != reservation {
             return Ok(None);
         }

@@ -15,6 +15,8 @@ full = ["dep:aes", "dep:cbc", "dep:num-bigint", "dep:num-traits"]
 [dependencies]
 vmusic-core = { workspace = true }
 vmusic-audio = { workspace = true }
+vmusic-lan = { workspace = true }
+zeroize = "1"
 vmusic-store = { workspace = true }
 vmusic-library = { workspace = true }
 vmusic-lyrics = { workspace = true }
@@ -42,6 +44,7 @@ toml = { workspace = true }
 uuid = { workspace = true }
 getrandom = { workspace = true }
 sha2 = { workspace = true }
+hmac = "0.12"
 unicode-normalization = "0.1"
 rmcp = { workspace = true }
 fslock = { workspace = true }

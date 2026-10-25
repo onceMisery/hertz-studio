@@ -1,0 +1,1583 @@
+{
+  "binary_sha256": "790f77ea4605b1074c60f64b859208fa22a5a70d4e9ba258ed80c746fd9159d2",
+  "platform": "Windows-11-10.0.26200-SP0",
+  "passed": false,
+  "error": "{'elapsed_seconds': 12.211, 'playing': True, 'instance': '10', 'position_ms': '4293', 'mode': 'guest', 'epoch': None, 'error': 'presentation clock unavailable: gate=device_timestamps_missing, value=0, capture_span_ns=3400, callback_age_ns=Some(5929000), network_age_ns=Some(792961050)', 'played_frame': '571406', 'underrun_frames': '0', 'input_frames': 0, 'ready': True, 'clock': {'converged': True, 'drift_ppm': -1.5486204838089686, 'rtt_ns': '298700', 'uncertainty_ns': '201494'}, 'device': {'clock_fault_count': '2', 'clock_status': 'Valid', 'clock_uncertainty_ns': '487013', 'device_clock_ppm': 0.0, 'last_clock_fault': {'kind': 'PhaseResidualNs', 'value': 22000472.760623932}, 'muted': True, 'queued_frames': 0, 'timestamp_capability': 'BackendEstimate'}, 'resync_count': '1', 'last_resync_reason': 'presentation clock unavailable: gate=device_timestamps_missing, value=0, capture_span_ns=3400, callback_age_ns=Some(5929000), network_age_ns=Some(792961050)'}",
+  "states": [
+    {
+      "mode": "host",
+      "playing": true,
+      "position_ms": "4581",
+      "pending": null,
+      "scheduled": null,
+      "error": null,
+      "local_error": null,
+      "output": {
+        "enabled": false,
+        "preferences_error": null,
+        "settings": {
+          "calibration_binding": null,
+          "device_id": null,
+          "latency_correction_ms": 0,
+          "volume": 1.0
+        }
+      }
+    },
+    {
+      "mode": "guest",
+      "playing": true,
+      "position_ms": "4620",
+      "pending": null,
+      "scheduled": null,
+      "error": null,
+      "local_error": null,
+      "output": {
+        "binding": {
+          "backend": "WASAPI",
+          "channels": 2,
+          "configuration": "cpal-default/f32/default-buffer",
+          "device": "扬声器 (Realtek(R) Audio)",
+          "sample_rate": 48000
+        },
+        "buffered_input_frames": 0,
+        "clock": {
+          "converged": true,
+          "drift_ppm": -1.5486204838089686,
+          "rtt_ns": "298700",
+          "uncertainty_ns": "201494"
+        },
+        "connected": true,
+        "current_epoch": null,
+        "desired_enabled": true,
+        "device": {
+          "clock_fault_count": "5",
+          "clock_status": "Invalid",
+          "clock_uncertainty_ns": "3009198",
+          "device_clock_ppm": 0.0,
+          "last_clock_fault": {
+            "kind": "PhaseResidualNs",
+            "value": 38876348.95833206
+          },
+          "muted": true,
+          "queued_frames": 0,
+          "timestamp_capability": "BackendEstimate"
+        },
+        "discarded_blocks": "32",
+        "enabled": true,
+        "error": "presentation clock unavailable: gate=device_timestamps_missing, value=0, capture_span_ns=13600, callback_age_ns=Some(3645500), network_age_ns=Some(325125650)",
+        "last_resync_reason": "presentation clock unavailable: gate=device_timestamps_missing, value=0, capture_span_ns=13600, callback_age_ns=Some(3645500), network_age_ns=Some(325125650)",
+        "output_session_id": "8f07537e-8d76-45d9-967b-56acb9795172",
+        "played_frame": "571406",
+        "preferences_error": null,
+        "preparing_epoch": "2",
+        "ready": false,
+        "resync_count": "2",
+        "settings": {
+          "calibration_binding": null,
+          "device_id": null,
+          "latency_correction_ms": 0,
+          "volume": 0.0
+        },
+        "underrun_frames": "0"
+      }
+    }
+  ],
+  "samples": [
+    {
+      "elapsed_seconds": 0.145,
+      "playing": true,
+      "instance": "9",
+      "position_ms": "340",
+      "mode": "guest",
+      "epoch": "2",
+      "error": null,
+      "played_frame": "6930",
+      "underrun_frames": "0",
+      "input_frames": 17872,
+      "ready": true,
+      "clock": {
+        "converged": true,
+        "drift_ppm": -8.776815165059977,
+        "rtt_ns": "326700",
+        "uncertainty_ns": "213353"
+      },
+      "device": {
+        "clock_fault_count": "1",
+        "clock_status": "Valid",
+        "clock_uncertainty_ns": "214578",
+        "device_clock_ppm": 13.330940982658745,
+        "last_clock_fault": {
+          "kind": "PlaybackRegressionNs",
+          "value": -2600300.0
+        },
+        "muted": false,
+        "queued_frames": 4459,
+        "timestamp_capability": "BackendEstimate"
+      },
+      "resync_count": "0",
+      "last_resync_reason": null
+    },
+    {
+      "elapsed_seconds": 0.442,
+      "playing": true,
+      "instance": "9",
+      "position_ms": "592",
+      "mode": "guest",
+      "epoch": "2",
+      "error": null,
+      "played_frame": "30930",
+      "underrun_frames": "0",
+      "input_frames": 17990,
+      "ready": true,
+      "clock": {
+        "converged": true,
+        "drift_ppm": -8.776815165059977,
+        "rtt_ns": "326700",
+        "uncertainty_ns": "213353"
+      },
+      "device": {
+        "clock_fault_count": "1",
+        "clock_status": "Valid",
+        "clock_uncertainty_ns": "287882",
+        "device_clock_ppm": 13.330940982658745,
+        "last_clock_fault": {
+          "kind": "PlaybackRegressionNs",
+          "value": -2600300.0
+        },
+        "muted": false,
+        "queued_frames": 4334,
+        "timestamp_capability": "BackendEstimate"
+      },
+      "resync_count": "0",
+      "last_resync_reason": null
+    },
+    {
+      "elapsed_seconds": 0.721,
+      "playing": true,
+      "instance": "9",
+      "position_ms": "843",
+      "mode": "guest",
+      "epoch": "2",
+      "error": null,
+      "played_frame": "30930",
+      "underrun_frames": "0",
+      "input_frames": 17990,
+      "ready": true,
+      "clock": {
+        "converged": true,
+        "drift_ppm": -8.776815165059977,
+        "rtt_ns": "326700",
+        "uncertainty_ns": "213353"
+      },
+      "device": {
+        "clock_fault_count": "1",
+        "clock_status": "Valid",
+        "clock_uncertainty_ns": "287882",
+        "device_clock_ppm": 13.330940982658745,
+        "last_clock_fault": {
+          "kind": "PlaybackRegressionNs",
+          "value": -2600300.0
+        },
+        "muted": false,
+        "queued_frames": 4334,
+        "timestamp_capability": "BackendEstimate"
+      },
+      "resync_count": "0",
+      "last_resync_reason": null
+    },
+    {
+      "elapsed_seconds": 1.017,
+      "playing": true,
+      "instance": "9",
+      "position_ms": "1123",
+      "mode": "guest",
+      "epoch": "2",
+      "error": null,
+      "played_frame": "54930",
+      "underrun_frames": "0",
+      "input_frames": 17956,
+      "ready": true,
+      "clock": {
+        "converged": true,
+        "drift_ppm": -4.3880327300959925,
+        "rtt_ns": "326700",
+        "uncertainty_ns": "514883"
+      },
+      "device": {
+        "clock_fault_count": "1",
+        "clock_status": "Valid",
+        "clock_uncertainty_ns": "187486",
+        "device_clock_ppm": -7.973492389456993,
+        "last_clock_fault": {
+          "kind": "PlaybackRegressionNs",
+          "value": -2600300.0
+        },
+        "muted": false,
+        "queued_frames": 4407,
+        "timestamp_capability": "BackendEstimate"
+      },
+      "resync_count": "0",
+      "last_resync_reason": null
+    },
+    {
+      "elapsed_seconds": 1.293,
+      "playing": true,
+      "instance": "9",
+      "position_ms": "1383",
+      "mode": "guest",
+      "epoch": "2",
+      "error": null,
+      "played_frame": "54930",
+      "underrun_frames": "0",
+      "input_frames": 17956,
+      "ready": true,
+      "clock": {
+        "converged": true,
+        "drift_ppm": -4.3880327300959925,
+        "rtt_ns": "326700",
+        "uncertainty_ns": "514883"
+      },
+      "device": {
+        "clock_fault_count": "1",
+        "clock_status": "Valid",
+        "clock_uncertainty_ns": "187486",
+        "device_clock_ppm": -7.973492389456993,
+        "last_clock_fault": {
+          "kind": "PlaybackRegressionNs",
+          "value": -2600300.0
+        },
+        "muted": false,
+        "queued_frames": 4407,
+        "timestamp_capability": "BackendEstimate"
+      },
+      "resync_count": "0",
+      "last_resync_reason": null
+    },
+    {
+      "elapsed_seconds": 1.555,
+      "playing": true,
+      "instance": "9",
+      "position_ms": "1645",
+      "mode": "guest",
+      "epoch": "2",
+      "error": null,
+      "played_frame": "78930",
+      "underrun_frames": "0",
+      "input_frames": 18337,
+      "ready": true,
+      "clock": {
+        "converged": true,
+        "drift_ppm": -4.3880327300959925,
+        "rtt_ns": "326700",
+        "uncertainty_ns": "514883"
+      },
+      "device": {
+        "clock_fault_count": "1",
+        "clock_status": "Valid",
+        "clock_uncertainty_ns": "178717",
+        "device_clock_ppm": -7.973492389456993,
+        "last_clock_fault": {
+          "kind": "PlaybackRegressionNs",
+          "value": -2600300.0
+        },
+        "muted": false,
+        "queued_frames": 4577,
+        "timestamp_capability": "BackendEstimate"
+      },
+      "resync_count": "0",
+      "last_resync_reason": null
+    },
+    {
+      "elapsed_seconds": 1.818,
+      "playing": true,
+      "instance": "9",
+      "position_ms": "1924",
+      "mode": "guest",
+      "epoch": "2",
+      "error": null,
+      "played_frame": "78930",
+      "underrun_frames": "0",
+      "input_frames": 18337,
+      "ready": true,
+      "clock": {
+        "converged": true,
+        "drift_ppm": -4.3880327300959925,
+        "rtt_ns": "326700",
+        "uncertainty_ns": "514883"
+      },
+      "device": {
+        "clock_fault_count": "1",
+        "clock_status": "Valid",
+        "clock_uncertainty_ns": "178717",
+        "device_clock_ppm": -7.973492389456993,
+        "last_clock_fault": {
+          "kind": "PlaybackRegressionNs",
+          "value": -2600300.0
+        },
+        "muted": false,
+        "queued_frames": 4577,
+        "timestamp_capability": "BackendEstimate"
+      },
+      "resync_count": "0",
+      "last_resync_reason": null
+    },
+    {
+      "elapsed_seconds": 2.069,
+      "playing": true,
+      "instance": "9",
+      "position_ms": "2174",
+      "mode": "guest",
+      "epoch": "2",
+      "error": null,
+      "played_frame": "102929",
+      "underrun_frames": "0",
+      "input_frames": 17236,
+      "ready": true,
+      "clock": {
+        "converged": true,
+        "drift_ppm": -2.62525847983907,
+        "rtt_ns": "326700",
+        "uncertainty_ns": "218659"
+      },
+      "device": {
+        "clock_fault_count": "1",
+        "clock_status": "Valid",
+        "clock_uncertainty_ns": "173549",
+        "device_clock_ppm": 76.95973842158921,
+        "last_clock_fault": {
+          "kind": "PlaybackRegressionNs",
+          "value": -2600300.0
+        },
+        "muted": false,
+        "queued_frames": 4401,
+        "timestamp_capability": "BackendEstimate"
+      },
+      "resync_count": "0",
+      "last_resync_reason": null
+    },
+    {
+      "elapsed_seconds": 2.33,
+      "playing": true,
+      "instance": "9",
+      "position_ms": "2437",
+      "mode": "guest",
+      "epoch": "2",
+      "error": null,
+      "played_frame": "102929",
+      "underrun_frames": "0",
+      "input_frames": 17236,
+      "ready": true,
+      "clock": {
+        "converged": true,
+        "drift_ppm": -2.62525847983907,
+        "rtt_ns": "326700",
+        "uncertainty_ns": "218659"
+      },
+      "device": {
+        "clock_fault_count": "1",
+        "clock_status": "Valid",
+        "clock_uncertainty_ns": "173549",
+        "device_clock_ppm": 76.95973842158921,
+        "last_clock_fault": {
+          "kind": "PlaybackRegressionNs",
+          "value": -2600300.0
+        },
+        "muted": false,
+        "queued_frames": 4401,
+        "timestamp_capability": "BackendEstimate"
+      },
+      "resync_count": "0",
+      "last_resync_reason": null
+    },
+    {
+      "elapsed_seconds": 2.597,
+      "playing": true,
+      "instance": "9",
+      "position_ms": "2700",
+      "mode": "guest",
+      "epoch": "2",
+      "error": null,
+      "played_frame": "126447",
+      "underrun_frames": "0",
+      "input_frames": 17724,
+      "ready": true,
+      "clock": {
+        "converged": true,
+        "drift_ppm": -2.62525847983907,
+        "rtt_ns": "326700",
+        "uncertainty_ns": "218659"
+      },
+      "device": {
+        "clock_fault_count": "1",
+        "clock_status": "Valid",
+        "clock_uncertainty_ns": "217812",
+        "device_clock_ppm": 76.95973842158921,
+        "last_clock_fault": {
+          "kind": "PlaybackRegressionNs",
+          "value": -2600300.0
+        },
+        "muted": false,
+        "queued_frames": 4709,
+        "timestamp_capability": "BackendEstimate"
+      },
+      "resync_count": "0",
+      "last_resync_reason": null
+    },
+    {
+      "elapsed_seconds": 2.839,
+      "playing": true,
+      "instance": "9",
+      "position_ms": "2960",
+      "mode": "guest",
+      "epoch": "2",
+      "error": null,
+      "played_frame": "126447",
+      "underrun_frames": "0",
+      "input_frames": 17724,
+      "ready": true,
+      "clock": {
+        "converged": true,
+        "drift_ppm": -2.62525847983907,
+        "rtt_ns": "326700",
+        "uncertainty_ns": "218659"
+      },
+      "device": {
+        "clock_fault_count": "1",
+        "clock_status": "Valid",
+        "clock_uncertainty_ns": "217812",
+        "device_clock_ppm": 76.95973842158921,
+        "last_clock_fault": {
+          "kind": "PlaybackRegressionNs",
+          "value": -2600300.0
+        },
+        "muted": false,
+        "queued_frames": 4709,
+        "timestamp_capability": "BackendEstimate"
+      },
+      "resync_count": "0",
+      "last_resync_reason": null
+    },
+    {
+      "elapsed_seconds": 3.079,
+      "playing": true,
+      "instance": "9",
+      "position_ms": "3225",
+      "mode": "guest",
+      "epoch": "2",
+      "error": null,
+      "played_frame": "150446",
+      "underrun_frames": "0",
+      "input_frames": 17890,
+      "ready": true,
+      "clock": {
+        "converged": true,
+        "drift_ppm": -2.62525847983907,
+        "rtt_ns": "326700",
+        "uncertainty_ns": "218659"
+      },
+      "device": {
+        "clock_fault_count": "1",
+        "clock_status": "Valid",
+        "clock_uncertainty_ns": "152164",
+        "device_clock_ppm": -13.750776415855093,
+        "last_clock_fault": {
+          "kind": "PlaybackRegressionNs",
+          "value": -2600300.0
+        },
+        "muted": false,
+        "queued_frames": 4488,
+        "timestamp_capability": "BackendEstimate"
+      },
+      "resync_count": "0",
+      "last_resync_reason": null
+    },
+    {
+      "elapsed_seconds": 3.346,
+      "playing": true,
+      "instance": "9",
+      "position_ms": "3505",
+      "mode": "guest",
+      "epoch": "2",
+      "error": null,
+      "played_frame": "150446",
+      "underrun_frames": "0",
+      "input_frames": 17890,
+      "ready": true,
+      "clock": {
+        "converged": true,
+        "drift_ppm": -2.62525847983907,
+        "rtt_ns": "326700",
+        "uncertainty_ns": "218659"
+      },
+      "device": {
+        "clock_fault_count": "1",
+        "clock_status": "Valid",
+        "clock_uncertainty_ns": "152164",
+        "device_clock_ppm": -13.750776415855093,
+        "last_clock_fault": {
+          "kind": "PlaybackRegressionNs",
+          "value": -2600300.0
+        },
+        "muted": false,
+        "queued_frames": 4488,
+        "timestamp_capability": "BackendEstimate"
+      },
+      "resync_count": "0",
+      "last_resync_reason": null
+    },
+    {
+      "elapsed_seconds": 3.632,
+      "playing": true,
+      "instance": "9",
+      "position_ms": "3786",
+      "mode": "guest",
+      "epoch": "2",
+      "error": null,
+      "played_frame": "174446",
+      "underrun_frames": "0",
+      "input_frames": 17203,
+      "ready": true,
+      "clock": {
+        "converged": true,
+        "drift_ppm": -3.0300471734085788,
+        "rtt_ns": "298700",
+        "uncertainty_ns": "197543"
+      },
+      "device": {
+        "clock_fault_count": "1",
+        "clock_status": "Valid",
+        "clock_uncertainty_ns": "253942",
+        "device_clock_ppm": -13.750776415855093,
+        "last_clock_fault": {
+          "kind": "PlaybackRegressionNs",
+          "value": -2600300.0
+        },
+        "muted": false,
+        "queued_frames": 4372,
+        "timestamp_capability": "BackendEstimate"
+      },
+      "resync_count": "0",
+      "last_resync_reason": null
+    },
+    {
+      "elapsed_seconds": 3.911,
+      "playing": true,
+      "instance": "9",
+      "position_ms": "4064",
+      "mode": "guest",
+      "epoch": "2",
+      "error": null,
+      "played_frame": "198446",
+      "underrun_frames": "0",
+      "input_frames": 17791,
+      "ready": true,
+      "clock": {
+        "converged": true,
+        "drift_ppm": -3.0373663714116446,
+        "rtt_ns": "298700",
+        "uncertainty_ns": "197549"
+      },
+      "device": {
+        "clock_fault_count": "1",
+        "clock_status": "Valid",
+        "clock_uncertainty_ns": "281786",
+        "device_clock_ppm": 10.320215691583812,
+        "last_clock_fault": {
+          "kind": "PlaybackRegressionNs",
+          "value": -2600300.0
+        },
+        "muted": false,
+        "queued_frames": 4502,
+        "timestamp_capability": "BackendEstimate"
+      },
+      "resync_count": "0",
+      "last_resync_reason": null
+    },
+    {
+      "elapsed_seconds": 4.203,
+      "playing": true,
+      "instance": "9",
+      "position_ms": "4342",
+      "mode": "guest",
+      "epoch": "2",
+      "error": null,
+      "played_frame": "198446",
+      "underrun_frames": "0",
+      "input_frames": 17791,
+      "ready": true,
+      "clock": {
+        "converged": true,
+        "drift_ppm": -3.0373663714116446,
+        "rtt_ns": "298700",
+        "uncertainty_ns": "197549"
+      },
+      "device": {
+        "clock_fault_count": "1",
+        "clock_status": "Valid",
+        "clock_uncertainty_ns": "281786",
+        "device_clock_ppm": 10.320215691583812,
+        "last_clock_fault": {
+          "kind": "PlaybackRegressionNs",
+          "value": -2600300.0
+        },
+        "muted": false,
+        "queued_frames": 4502,
+        "timestamp_capability": "BackendEstimate"
+      },
+      "resync_count": "0",
+      "last_resync_reason": null
+    },
+    {
+      "elapsed_seconds": 4.461,
+      "playing": true,
+      "instance": "9",
+      "position_ms": "4598",
+      "mode": "guest",
+      "epoch": "2",
+      "error": null,
+      "played_frame": "222926",
+      "underrun_frames": "0",
+      "input_frames": 18227,
+      "ready": true,
+      "clock": {
+        "converged": true,
+        "drift_ppm": -3.0373663714116446,
+        "rtt_ns": "298700",
+        "uncertainty_ns": "197549"
+      },
+      "device": {
+        "clock_fault_count": "1",
+        "clock_status": "Valid",
+        "clock_uncertainty_ns": "158622",
+        "device_clock_ppm": 10.320215691583812,
+        "last_clock_fault": {
+          "kind": "PlaybackRegressionNs",
+          "value": -2600300.0
+        },
+        "muted": false,
+        "queued_frames": 4684,
+        "timestamp_capability": "BackendEstimate"
+      },
+      "resync_count": "0",
+      "last_resync_reason": null
+    },
+    {
+      "elapsed_seconds": 4.714,
+      "playing": true,
+      "instance": "9",
+      "position_ms": "4862",
+      "mode": "guest",
+      "epoch": "2",
+      "error": null,
+      "played_frame": "222926",
+      "underrun_frames": "0",
+      "input_frames": 18227,
+      "ready": true,
+      "clock": {
+        "converged": true,
+        "drift_ppm": -3.0373663714116446,
+        "rtt_ns": "298700",
+        "uncertainty_ns": "197549"
+      },
+      "device": {
+        "clock_fault_count": "1",
+        "clock_status": "Valid",
+        "clock_uncertainty_ns": "158622",
+        "device_clock_ppm": 10.320215691583812,
+        "last_clock_fault": {
+          "kind": "PlaybackRegressionNs",
+          "value": -2600300.0
+        },
+        "muted": false,
+        "queued_frames": 4684,
+        "timestamp_capability": "BackendEstimate"
+      },
+      "resync_count": "0",
+      "last_resync_reason": null
+    },
+    {
+      "elapsed_seconds": 4.975,
+      "playing": true,
+      "instance": "9",
+      "position_ms": "5143",
+      "mode": "guest",
+      "epoch": "2",
+      "error": null,
+      "played_frame": "246927",
+      "underrun_frames": "0",
+      "input_frames": 17195,
+      "ready": true,
+      "clock": {
+        "converged": true,
+        "drift_ppm": -4.060448088480072,
+        "rtt_ns": "298700",
+        "uncertainty_ns": "201730"
+      },
+      "device": {
+        "clock_fault_count": "1",
+        "clock_status": "Valid",
+        "clock_uncertainty_ns": "296180",
+        "device_clock_ppm": -75.99447817641104,
+        "last_clock_fault": {
+          "kind": "PlaybackRegressionNs",
+          "value": -2600300.0
+        },
+        "muted": false,
+        "queued_frames": 4418,
+        "timestamp_capability": "BackendEstimate"
+      },
+      "resync_count": "0",
+      "last_resync_reason": null
+    },
+    {
+      "elapsed_seconds": 5.227,
+      "playing": true,
+      "instance": "9",
+      "position_ms": "5405",
+      "mode": "guest",
+      "epoch": "2",
+      "error": null,
+      "played_frame": "246927",
+      "underrun_frames": "0",
+      "input_frames": 17195,
+      "ready": true,
+      "clock": {
+        "converged": true,
+        "drift_ppm": -4.060448088480072,
+        "rtt_ns": "298700",
+        "uncertainty_ns": "201730"
+      },
+      "device": {
+        "clock_fault_count": "1",
+        "clock_status": "Valid",
+        "clock_uncertainty_ns": "296180",
+        "device_clock_ppm": -75.99447817641104,
+        "last_clock_fault": {
+          "kind": "PlaybackRegressionNs",
+          "value": -2600300.0
+        },
+        "muted": false,
+        "queued_frames": 4418,
+        "timestamp_capability": "BackendEstimate"
+      },
+      "resync_count": "0",
+      "last_resync_reason": null
+    },
+    {
+      "elapsed_seconds": 5.495,
+      "playing": true,
+      "instance": "9",
+      "position_ms": "5665",
+      "mode": "guest",
+      "epoch": "2",
+      "error": null,
+      "played_frame": "270448",
+      "underrun_frames": "0",
+      "input_frames": 17683,
+      "ready": true,
+      "clock": {
+        "converged": true,
+        "drift_ppm": -4.060448088480072,
+        "rtt_ns": "298700",
+        "uncertainty_ns": "201730"
+      },
+      "device": {
+        "clock_fault_count": "1",
+        "clock_status": "Valid",
+        "clock_uncertainty_ns": "241842",
+        "device_clock_ppm": -75.99447817641104,
+        "last_clock_fault": {
+          "kind": "PlaybackRegressionNs",
+          "value": -2600300.0
+        },
+        "muted": false,
+        "queued_frames": 4597,
+        "timestamp_capability": "BackendEstimate"
+      },
+      "resync_count": "0",
+      "last_resync_reason": null
+    },
+    {
+      "elapsed_seconds": 5.759,
+      "playing": true,
+      "instance": "9",
+      "position_ms": "5926",
+      "mode": "guest",
+      "epoch": "2",
+      "error": null,
+      "played_frame": "270448",
+      "underrun_frames": "0",
+      "input_frames": 17683,
+      "ready": true,
+      "clock": {
+        "converged": true,
+        "drift_ppm": -4.060448088480072,
+        "rtt_ns": "298700",
+        "uncertainty_ns": "201730"
+      },
+      "device": {
+        "clock_fault_count": "1",
+        "clock_status": "Valid",
+        "clock_uncertainty_ns": "241842",
+        "device_clock_ppm": -75.99447817641104,
+        "last_clock_fault": {
+          "kind": "PlaybackRegressionNs",
+          "value": -2600300.0
+        },
+        "muted": false,
+        "queued_frames": 4597,
+        "timestamp_capability": "BackendEstimate"
+      },
+      "resync_count": "0",
+      "last_resync_reason": null
+    },
+    {
+      "elapsed_seconds": 6.058,
+      "playing": true,
+      "instance": "9",
+      "position_ms": "6179",
+      "mode": "guest",
+      "epoch": "2",
+      "error": null,
+      "played_frame": "294449",
+      "underrun_frames": "0",
+      "input_frames": 18038,
+      "ready": true,
+      "clock": {
+        "converged": true,
+        "drift_ppm": -4.060448088480072,
+        "rtt_ns": "298700",
+        "uncertainty_ns": "201730"
+      },
+      "device": {
+        "clock_fault_count": "1",
+        "clock_status": "Valid",
+        "clock_uncertainty_ns": "136485",
+        "device_clock_ppm": 61.808698119225625,
+        "last_clock_fault": {
+          "kind": "PlaybackRegressionNs",
+          "value": -2600300.0
+        },
+        "muted": false,
+        "queued_frames": 4496,
+        "timestamp_capability": "BackendEstimate"
+      },
+      "resync_count": "0",
+      "last_resync_reason": null
+    },
+    {
+      "elapsed_seconds": 6.334,
+      "playing": true,
+      "instance": "9",
+      "position_ms": "6441",
+      "mode": "guest",
+      "epoch": "2",
+      "error": null,
+      "played_frame": "294449",
+      "underrun_frames": "0",
+      "input_frames": 18038,
+      "ready": true,
+      "clock": {
+        "converged": true,
+        "drift_ppm": -4.060448088480072,
+        "rtt_ns": "298700",
+        "uncertainty_ns": "201730"
+      },
+      "device": {
+        "clock_fault_count": "1",
+        "clock_status": "Valid",
+        "clock_uncertainty_ns": "136485",
+        "device_clock_ppm": 61.808698119225625,
+        "last_clock_fault": {
+          "kind": "PlaybackRegressionNs",
+          "value": -2600300.0
+        },
+        "muted": false,
+        "queued_frames": 4496,
+        "timestamp_capability": "BackendEstimate"
+      },
+      "resync_count": "0",
+      "last_resync_reason": null
+    },
+    {
+      "elapsed_seconds": 6.647,
+      "playing": true,
+      "instance": "9",
+      "position_ms": "6694",
+      "mode": "guest",
+      "epoch": "2",
+      "error": null,
+      "played_frame": "318927",
+      "underrun_frames": "0",
+      "input_frames": 17879,
+      "ready": true,
+      "clock": {
+        "converged": true,
+        "drift_ppm": -3.260434089928745,
+        "rtt_ns": "298700",
+        "uncertainty_ns": "200621"
+      },
+      "device": {
+        "clock_fault_count": "1",
+        "clock_status": "Valid",
+        "clock_uncertainty_ns": "115654",
+        "device_clock_ppm": 61.808698119225625,
+        "last_clock_fault": {
+          "kind": "PlaybackRegressionNs",
+          "value": -2600300.0
+        },
+        "muted": false,
+        "queued_frames": 4601,
+        "timestamp_capability": "BackendEstimate"
+      },
+      "resync_count": "0",
+      "last_resync_reason": null
+    },
+    {
+      "elapsed_seconds": 6.927,
+      "playing": true,
+      "instance": "9",
+      "position_ms": "6954",
+      "mode": "guest",
+      "epoch": "2",
+      "error": null,
+      "played_frame": "342446",
+      "underrun_frames": "0",
+      "input_frames": 17723,
+      "ready": true,
+      "clock": {
+        "converged": true,
+        "drift_ppm": -3.260434089928745,
+        "rtt_ns": "298700",
+        "uncertainty_ns": "200621"
+      },
+      "device": {
+        "clock_fault_count": "1",
+        "clock_status": "Valid",
+        "clock_uncertainty_ns": "181026",
+        "device_clock_ppm": 39.00291134462108,
+        "last_clock_fault": {
+          "kind": "PlaybackRegressionNs",
+          "value": -2600300.0
+        },
+        "muted": false,
+        "queued_frames": 4731,
+        "timestamp_capability": "BackendEstimate"
+      },
+      "resync_count": "0",
+      "last_resync_reason": null
+    },
+    {
+      "elapsed_seconds": 7.198,
+      "playing": true,
+      "instance": "9",
+      "position_ms": "7217",
+      "mode": "guest",
+      "epoch": "2",
+      "error": null,
+      "played_frame": "342446",
+      "underrun_frames": "0",
+      "input_frames": 17723,
+      "ready": true,
+      "clock": {
+        "converged": true,
+        "drift_ppm": -3.260434089928745,
+        "rtt_ns": "298700",
+        "uncertainty_ns": "200621"
+      },
+      "device": {
+        "clock_fault_count": "1",
+        "clock_status": "Valid",
+        "clock_uncertainty_ns": "181026",
+        "device_clock_ppm": 39.00291134462108,
+        "last_clock_fault": {
+          "kind": "PlaybackRegressionNs",
+          "value": -2600300.0
+        },
+        "muted": false,
+        "queued_frames": 4731,
+        "timestamp_capability": "BackendEstimate"
+      },
+      "resync_count": "0",
+      "last_resync_reason": null
+    },
+    {
+      "elapsed_seconds": 7.499,
+      "playing": true,
+      "instance": "9",
+      "position_ms": "7483",
+      "mode": "guest",
+      "epoch": "2",
+      "error": null,
+      "played_frame": "366445",
+      "underrun_frames": "0",
+      "input_frames": 17219,
+      "ready": true,
+      "clock": {
+        "converged": true,
+        "drift_ppm": -2.4805754785024883,
+        "rtt_ns": "298700",
+        "uncertainty_ns": "324687"
+      },
+      "device": {
+        "clock_fault_count": "1",
+        "clock_status": "Valid",
+        "clock_uncertainty_ns": "215731",
+        "device_clock_ppm": 39.00291134462108,
+        "last_clock_fault": {
+          "kind": "PlaybackRegressionNs",
+          "value": -2600300.0
+        },
+        "muted": false,
+        "queued_frames": 4646,
+        "timestamp_capability": "BackendEstimate"
+      },
+      "resync_count": "0",
+      "last_resync_reason": null
+    },
+    {
+      "elapsed_seconds": 7.784,
+      "playing": true,
+      "instance": "9",
+      "position_ms": "7746",
+      "mode": "guest",
+      "epoch": "2",
+      "error": null,
+      "played_frame": "366445",
+      "underrun_frames": "0",
+      "input_frames": 17219,
+      "ready": true,
+      "clock": {
+        "converged": true,
+        "drift_ppm": -2.4805754785024883,
+        "rtt_ns": "298700",
+        "uncertainty_ns": "324687"
+      },
+      "device": {
+        "clock_fault_count": "1",
+        "clock_status": "Valid",
+        "clock_uncertainty_ns": "215731",
+        "device_clock_ppm": 39.00291134462108,
+        "last_clock_fault": {
+          "kind": "PlaybackRegressionNs",
+          "value": -2600300.0
+        },
+        "muted": false,
+        "queued_frames": 4646,
+        "timestamp_capability": "BackendEstimate"
+      },
+      "resync_count": "0",
+      "last_resync_reason": null
+    },
+    {
+      "elapsed_seconds": 8.1,
+      "playing": true,
+      "instance": "10",
+      "position_ms": "6",
+      "mode": "guest",
+      "epoch": "2",
+      "error": null,
+      "played_frame": "390445",
+      "underrun_frames": "0",
+      "input_frames": 18426,
+      "ready": true,
+      "clock": {
+        "converged": true,
+        "drift_ppm": -2.7579724779056143,
+        "rtt_ns": "298700",
+        "uncertainty_ns": "197302"
+      },
+      "device": {
+        "clock_fault_count": "1",
+        "clock_status": "Valid",
+        "clock_uncertainty_ns": "221114",
+        "device_clock_ppm": -24.756081262067298,
+        "last_clock_fault": {
+          "kind": "PlaybackRegressionNs",
+          "value": -2600300.0
+        },
+        "muted": false,
+        "queued_frames": 4456,
+        "timestamp_capability": "BackendEstimate"
+      },
+      "resync_count": "0",
+      "last_resync_reason": null
+    },
+    {
+      "elapsed_seconds": 8.364,
+      "playing": true,
+      "instance": "10",
+      "position_ms": "545",
+      "mode": "guest",
+      "epoch": "2",
+      "error": null,
+      "played_frame": "390445",
+      "underrun_frames": "0",
+      "input_frames": 18426,
+      "ready": true,
+      "clock": {
+        "converged": true,
+        "drift_ppm": -2.7579724779056143,
+        "rtt_ns": "298700",
+        "uncertainty_ns": "197302"
+      },
+      "device": {
+        "clock_fault_count": "1",
+        "clock_status": "Valid",
+        "clock_uncertainty_ns": "221114",
+        "device_clock_ppm": -24.756081262067298,
+        "last_clock_fault": {
+          "kind": "PlaybackRegressionNs",
+          "value": -2600300.0
+        },
+        "muted": false,
+        "queued_frames": 4456,
+        "timestamp_capability": "BackendEstimate"
+      },
+      "resync_count": "0",
+      "last_resync_reason": null
+    },
+    {
+      "elapsed_seconds": 8.641,
+      "playing": true,
+      "instance": "10",
+      "position_ms": "822",
+      "mode": "guest",
+      "epoch": "2",
+      "error": null,
+      "played_frame": "414445",
+      "underrun_frames": "0",
+      "input_frames": 17652,
+      "ready": true,
+      "clock": {
+        "converged": true,
+        "drift_ppm": -2.7579724779056143,
+        "rtt_ns": "298700",
+        "uncertainty_ns": "197302"
+      },
+      "device": {
+        "clock_fault_count": "1",
+        "clock_status": "Valid",
+        "clock_uncertainty_ns": "324063",
+        "device_clock_ppm": -24.756081262067298,
+        "last_clock_fault": {
+          "kind": "PlaybackRegressionNs",
+          "value": -2600300.0
+        },
+        "muted": false,
+        "queued_frames": 4611,
+        "timestamp_capability": "BackendEstimate"
+      },
+      "resync_count": "0",
+      "last_resync_reason": null
+    },
+    {
+      "elapsed_seconds": 8.941,
+      "playing": true,
+      "instance": "10",
+      "position_ms": "1102",
+      "mode": "guest",
+      "epoch": "2",
+      "error": null,
+      "played_frame": "438445",
+      "underrun_frames": "0",
+      "input_frames": 18533,
+      "ready": true,
+      "clock": {
+        "converged": true,
+        "drift_ppm": -2.7579724779056143,
+        "rtt_ns": "298700",
+        "uncertainty_ns": "197302"
+      },
+      "device": {
+        "clock_fault_count": "1",
+        "clock_status": "Valid",
+        "clock_uncertainty_ns": "526772",
+        "device_clock_ppm": 30.011961243969765,
+        "last_clock_fault": {
+          "kind": "PlaybackRegressionNs",
+          "value": -2600300.0
+        },
+        "muted": false,
+        "queued_frames": 4382,
+        "timestamp_capability": "BackendEstimate"
+      },
+      "resync_count": "0",
+      "last_resync_reason": null
+    },
+    {
+      "elapsed_seconds": 9.237,
+      "playing": true,
+      "instance": "10",
+      "position_ms": "1364",
+      "mode": "guest",
+      "epoch": "2",
+      "error": null,
+      "played_frame": "438445",
+      "underrun_frames": "0",
+      "input_frames": 18533,
+      "ready": true,
+      "clock": {
+        "converged": true,
+        "drift_ppm": -2.7579724779056143,
+        "rtt_ns": "298700",
+        "uncertainty_ns": "197302"
+      },
+      "device": {
+        "clock_fault_count": "1",
+        "clock_status": "Valid",
+        "clock_uncertainty_ns": "526772",
+        "device_clock_ppm": 30.011961243969765,
+        "last_clock_fault": {
+          "kind": "PlaybackRegressionNs",
+          "value": -2600300.0
+        },
+        "muted": false,
+        "queued_frames": 4382,
+        "timestamp_capability": "BackendEstimate"
+      },
+      "resync_count": "0",
+      "last_resync_reason": null
+    },
+    {
+      "elapsed_seconds": 9.538,
+      "playing": true,
+      "instance": "10",
+      "position_ms": "1643",
+      "mode": "guest",
+      "epoch": "2",
+      "error": null,
+      "played_frame": "462924",
+      "underrun_frames": "0",
+      "input_frames": 18521,
+      "ready": true,
+      "clock": {
+        "converged": true,
+        "drift_ppm": -1.8323231446522685,
+        "rtt_ns": "298700",
+        "uncertainty_ns": "357152"
+      },
+      "device": {
+        "clock_fault_count": "1",
+        "clock_status": "Valid",
+        "clock_uncertainty_ns": "475656",
+        "device_clock_ppm": 30.011961243969765,
+        "last_clock_fault": {
+          "kind": "PlaybackRegressionNs",
+          "value": -2600300.0
+        },
+        "muted": false,
+        "queued_frames": 4516,
+        "timestamp_capability": "BackendEstimate"
+      },
+      "resync_count": "0",
+      "last_resync_reason": null
+    },
+    {
+      "elapsed_seconds": 9.822,
+      "playing": true,
+      "instance": "10",
+      "position_ms": "1893",
+      "mode": "guest",
+      "epoch": "2",
+      "error": null,
+      "played_frame": "462924",
+      "underrun_frames": "0",
+      "input_frames": 18521,
+      "ready": true,
+      "clock": {
+        "converged": true,
+        "drift_ppm": -1.8323231446522685,
+        "rtt_ns": "298700",
+        "uncertainty_ns": "357152"
+      },
+      "device": {
+        "clock_fault_count": "1",
+        "clock_status": "Valid",
+        "clock_uncertainty_ns": "475656",
+        "device_clock_ppm": 30.011961243969765,
+        "last_clock_fault": {
+          "kind": "PlaybackRegressionNs",
+          "value": -2600300.0
+        },
+        "muted": false,
+        "queued_frames": 4516,
+        "timestamp_capability": "BackendEstimate"
+      },
+      "resync_count": "0",
+      "last_resync_reason": null
+    },
+    {
+      "elapsed_seconds": 10.093,
+      "playing": true,
+      "instance": "10",
+      "position_ms": "2144",
+      "mode": "guest",
+      "epoch": "2",
+      "error": null,
+      "played_frame": "486924",
+      "underrun_frames": "0",
+      "input_frames": 18005,
+      "ready": true,
+      "clock": {
+        "converged": true,
+        "drift_ppm": -0.9176478019869482,
+        "rtt_ns": "298700",
+        "uncertainty_ns": "241935"
+      },
+      "device": {
+        "clock_fault_count": "1",
+        "clock_status": "Valid",
+        "clock_uncertainty_ns": "944873",
+        "device_clock_ppm": -23.152639946011355,
+        "last_clock_fault": {
+          "kind": "PlaybackRegressionNs",
+          "value": -2600300.0
+        },
+        "muted": false,
+        "queued_frames": 4530,
+        "timestamp_capability": "BackendEstimate"
+      },
+      "resync_count": "0",
+      "last_resync_reason": null
+    },
+    {
+      "elapsed_seconds": 10.393,
+      "playing": true,
+      "instance": "10",
+      "position_ms": "2424",
+      "mode": "guest",
+      "epoch": "2",
+      "error": null,
+      "played_frame": "510445",
+      "underrun_frames": "0",
+      "input_frames": 17813,
+      "ready": true,
+      "clock": {
+        "converged": true,
+        "drift_ppm": -0.9176478019869482,
+        "rtt_ns": "298700",
+        "uncertainty_ns": "241935"
+      },
+      "device": {
+        "clock_fault_count": "1",
+        "clock_status": "Valid",
+        "clock_uncertainty_ns": "2315074",
+        "device_clock_ppm": -23.152639946011355,
+        "last_clock_fault": {
+          "kind": "PlaybackRegressionNs",
+          "value": -2600300.0
+        },
+        "muted": false,
+        "queued_frames": 4498,
+        "timestamp_capability": "BackendEstimate"
+      },
+      "resync_count": "0",
+      "last_resync_reason": null
+    },
+    {
+      "elapsed_seconds": 10.686,
+      "playing": true,
+      "instance": "10",
+      "position_ms": "2704",
+      "mode": "guest",
+      "epoch": "2",
+      "error": null,
+      "played_frame": "510445",
+      "underrun_frames": "0",
+      "input_frames": 17813,
+      "ready": true,
+      "clock": {
+        "converged": true,
+        "drift_ppm": -0.9176478019869482,
+        "rtt_ns": "298700",
+        "uncertainty_ns": "241935"
+      },
+      "device": {
+        "clock_fault_count": "1",
+        "clock_status": "Valid",
+        "clock_uncertainty_ns": "2315074",
+        "device_clock_ppm": -23.152639946011355,
+        "last_clock_fault": {
+          "kind": "PlaybackRegressionNs",
+          "value": -2600300.0
+        },
+        "muted": false,
+        "queued_frames": 4703,
+        "timestamp_capability": "BackendEstimate"
+      },
+      "resync_count": "0",
+      "last_resync_reason": null
+    },
+    {
+      "elapsed_seconds": 10.981,
+      "playing": true,
+      "instance": "10",
+      "position_ms": "2981",
+      "mode": "guest",
+      "epoch": "2",
+      "error": null,
+      "played_frame": "534445",
+      "underrun_frames": "0",
+      "input_frames": 18431,
+      "ready": true,
+      "clock": {
+        "converged": true,
+        "drift_ppm": -1.3055138763720175,
+        "rtt_ns": "298700",
+        "uncertainty_ns": "201763"
+      },
+      "device": {
+        "clock_fault_count": "1",
+        "clock_status": "Valid",
+        "clock_uncertainty_ns": "1357802",
+        "device_clock_ppm": -27.32810692096521,
+        "last_clock_fault": {
+          "kind": "PlaybackRegressionNs",
+          "value": -2600300.0
+        },
+        "muted": false,
+        "queued_frames": 4648,
+        "timestamp_capability": "BackendEstimate"
+      },
+      "resync_count": "0",
+      "last_resync_reason": null
+    },
+    {
+      "elapsed_seconds": 11.258,
+      "playing": true,
+      "instance": "10",
+      "position_ms": "3242",
+      "mode": "guest",
+      "epoch": "2",
+      "error": null,
+      "played_frame": "534445",
+      "underrun_frames": "0",
+      "input_frames": 18431,
+      "ready": true,
+      "clock": {
+        "converged": true,
+        "drift_ppm": -1.3055138763720175,
+        "rtt_ns": "298700",
+        "uncertainty_ns": "201763"
+      },
+      "device": {
+        "clock_fault_count": "1",
+        "clock_status": "Valid",
+        "clock_uncertainty_ns": "1357802",
+        "device_clock_ppm": -27.32810692096521,
+        "last_clock_fault": {
+          "kind": "PlaybackRegressionNs",
+          "value": -2600300.0
+        },
+        "muted": false,
+        "queued_frames": 4648,
+        "timestamp_capability": "BackendEstimate"
+      },
+      "resync_count": "0",
+      "last_resync_reason": null
+    },
+    {
+      "elapsed_seconds": 11.576,
+      "playing": true,
+      "instance": "10",
+      "position_ms": "3504",
+      "mode": "guest",
+      "epoch": "2",
+      "error": null,
+      "played_frame": "558926",
+      "underrun_frames": "0",
+      "input_frames": 18420,
+      "ready": true,
+      "clock": {
+        "converged": true,
+        "drift_ppm": -1.3055138763720175,
+        "rtt_ns": "298700",
+        "uncertainty_ns": "201763"
+      },
+      "device": {
+        "clock_fault_count": "1",
+        "clock_status": "Valid",
+        "clock_uncertainty_ns": "484581",
+        "device_clock_ppm": -27.32810692096521,
+        "last_clock_fault": {
+          "kind": "PlaybackRegressionNs",
+          "value": -2600300.0
+        },
+        "muted": false,
+        "queued_frames": 4480,
+        "timestamp_capability": "BackendEstimate"
+      },
+      "resync_count": "0",
+      "last_resync_reason": null
+    },
+    {
+      "elapsed_seconds": 11.847,
+      "playing": true,
+      "instance": "10",
+      "position_ms": "3765",
+      "mode": "guest",
+      "epoch": "2",
+      "error": null,
+      "played_frame": "558926",
+      "underrun_frames": "0",
+      "input_frames": 18420,
+      "ready": true,
+      "clock": {
+        "converged": true,
+        "drift_ppm": -1.3055138763720175,
+        "rtt_ns": "298700",
+        "uncertainty_ns": "201763"
+      },
+      "device": {
+        "clock_fault_count": "1",
+        "clock_status": "Valid",
+        "clock_uncertainty_ns": "484581",
+        "device_clock_ppm": -27.32810692096521,
+        "last_clock_fault": {
+          "kind": "PlaybackRegressionNs",
+          "value": -2600300.0
+        },
+        "muted": false,
+        "queued_frames": 4480,
+        "timestamp_capability": "BackendEstimate"
+      },
+      "resync_count": "0",
+      "last_resync_reason": null
+    },
+    {
+      "elapsed_seconds": 12.211,
+      "playing": true,
+      "instance": "10",
+      "position_ms": "4293",
+      "mode": "guest",
+      "epoch": null,
+      "error": "presentation clock unavailable: gate=device_timestamps_missing, value=0, capture_span_ns=3400, callback_age_ns=Some(5929000), network_age_ns=Some(792961050)",
+      "played_frame": "571406",
+      "underrun_frames": "0",
+      "input_frames": 0,
+      "ready": true,
+      "clock": {
+        "converged": true,
+        "drift_ppm": -1.5486204838089686,
+        "rtt_ns": "298700",
+        "uncertainty_ns": "201494"
+      },
+      "device": {
+        "clock_fault_count": "2",
+        "clock_status": "Valid",
+        "clock_uncertainty_ns": "487013",
+        "device_clock_ppm": 0.0,
+        "last_clock_fault": {
+          "kind": "PhaseResidualNs",
+          "value": 22000472.760623932
+        },
+        "muted": true,
+        "queued_frames": 0,
+        "timestamp_capability": "BackendEstimate"
+      },
+      "resync_count": "1",
+      "last_resync_reason": "presentation clock unavailable: gate=device_timestamps_missing, value=0, capture_span_ns=3400, callback_age_ns=Some(5929000), network_age_ns=Some(792961050)"
+    }
+  ]
+}

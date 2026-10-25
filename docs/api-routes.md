@@ -11,7 +11,7 @@ node scripts/api-routes.js --check  # 只校验，不一致则退出码 1（CI �
 <!-- api-routes:begin -->
 <!-- 由 `node scripts/api-routes.js` 生成，勿手改；`--check` 会校验是否与源码一致。 -->
 
-REST 路由表共 166 个「方法 + 路径」（`crates/hertz-studio/src/routes.rs` 的 136 条 `.route()`），另有 `main.rs` 挂的 6 条路由与 127 条内嵌静态资源路由。
+REST 路由表共 168 个「方法 + 路径」（`crates/hertz-studio/src/routes.rs` 的 137 条 `.route()`），另有 `main.rs` 挂的 6 条路由与 133 条内嵌静态资源路由。
 
 | 方法 | 路径 |
 | --- | --- |
@@ -149,6 +149,8 @@ REST 路由表共 166 个「方法 + 路径」（`crates/hertz-studio/src/routes
 | DELETE | `/v1/remote/roots/{id}` |
 | GET | `/v1/remote/roots/{id}/browse` |
 | POST | `/v1/remote/roots/{id}/import` |
+| GET | `/v1/room` |
+| POST | `/v1/room` |
 | GET | `/v1/settings` |
 | PUT | `/v1/settings` |
 | GET | `/v1/stage/beatmap` |
@@ -185,6 +187,38 @@ REST 路由表共 166 个「方法 + 路径」（`crates/hertz-studio/src/routes
 `main.rs` 上另有：GET `/ws`，GET `/wallpapers/{name}`，GET `/platform-icons/{name}`，GET `/space-scene-preview/{name}`，GET `/`，POST `/v1/auth/session`。
 
 <!-- api-routes:end -->
+
+## 房间队列与退出合同
+
+本机 `POST /v1/room` 与插件 RPC 共用同一房间应用合同；LAN 受限通道使用线协议 **v3**，握手与 PCM 拒绝 v1/v2。邀请链接的 `hertz-listen:v1:` 是独立封装版本。
+
+替换队列时使用 `{"action":"peer","request":{"action":"queue","operation_id":"7","expected_revision":"12","items":[{"instance_id":"31","resource_id":"<UUID>"},{"instance_id":null,"resource_id":"<UUID>"}]}}`。从 `queue_page` 读取的保留项必须原样携带 `instance_id` 与 `resource_id`；新增项显式传 `instance_id: null`，由 Host 分配新身份。相同资源可以出现多次，各有不同实例。重复使用实例、实例与资源不符、已删除或其它房间的实例会返回 `room_invalid`；过期 revision 返回 `revision_conflict`。拒绝时不改变队列或 revision。旧 `resources: [UUID]` 合同不再接受，调用方不能自行猜测重复项身份。
+
+播控、队列等写请求不自动重试。未知播控结果使用原 `operation_id` 查询 `{"action":"peer","request":{"action":"operation","operation_id":"7"}}`。投影包含本机成员的 `member_id`；同一 `(room_id, instance_id, member_id)` 在新 `session_id` 上仍查询原操作，换房或成员后不沿用。
+
+队列投票使用 `peer.vote {operation_id, expected_revision, instance_id, voted}`，房主排序使用 `peer.queue_order {operation_id, expected_revision, mode: "manual" | "votes"}`。条目投影的点歌人、票数和 `voted_by_me` 是只读信息；替换队列时仅提交 `instance_id/resource_id`。排序只改变可变未来后缀，保留当前播放和已冻结前缀。
+
+歌曲聊天使用 `peer.chat_song {operation_id, resource_id}`，与 `chat_send` 共用独立聊天操作命名空间。分配序号从 `peer.chat_history.next_operation_id` 取得下界，并保持本机单调递增；控制序号从 `peer.snapshot.next_operation_id` 取得。歌曲卡片的元数据按当前分享权限解析，撤销后 `song: null`，不得缓存旧投影继续提供操作。
+
+## 房间歌曲的个人收藏
+
+`SharedTrack.favorite_key` 为可选的 64 位十六进制稳定引用，由持久房主身份的独立派生密钥生成；它不包含路径、本地库主键或读取授权。当前 `resource_id` 仍是会话分享资源，不能作为长期收藏键。房主本机快照的 `favorite_local_ids` 将稳定引用映射到原本地库 ID，仅供本机复用 local 收藏；该映射不进入任何 LAN peer 快照。接收端本机快照的 `fingerprint` 取自原生连接固定的证书身份，不能信任远端自行声明的来源。
+
+个人收藏仍使用 `/v1/favorites` 存储与权限边界，接收端写 `kind: "track", source: "lan", ref_id: "<64位房主指纹>:<64位favorite_key>"`。不保存临时封面 URL；已获准的文字快照可保留到用户取消收藏。`/v1/favorites/toggle` 显式传 `favorited: true | false` 表示目标态，重复提交相同目标不会反转。写结果未知时只显示待确认，刷新 membership 后再决定下一动作。
+
+从收藏点歌先调用 `peer.resolve_favorites {keys: ["<favorite_key>"]}`，单次 1–32 个引用，需当前队列权限。限制与共享分页对齐，使长元数据响应仍在单条传输预算内。只返回当前仍共享的 `tracks` 及分享 `revision`；不存在／撤销分享的引用不会返回歌曲。前端先核对当前房主指纹，再通过现有队列写命令加入当前资源；收藏本身不授权读取或播控。此请求是 wire v3 的增量只读能力；缺少 `favorite_key` 的旧投影不开放收藏入口，不改变 PCM 或既有请求语义。
+
+## 房间发现、申请与邀请
+
+`create.discoverable` 默认 `true`；房主 `discoverable {enabled}` 控制 mDNS 发布生命周期。快照的 `discoverable` 是配置意图，`discovery_available` 是当前发布状态，两者不能混为一谈。关闭发布仍可用已核验的地址和邀请加入。
+
+公开的八位 `admission.room_code` 仅用于查找和申请。申请端调用 `apply {address, fingerprint, room_id, room_code, name}`，取得 `application_id/applicant_secret`；查询使用 `admission_status {address, fingerprint, room_id, application_id, applicant_secret}`。原生服务固定证书指纹，申请凭据只保留在页面控制器内存，不写浏览器存储、URL或日志。批准前没有成员身份、PCM、控制、聊天或资源读取权。
+
+房主 `admission_review {application_id, approve, permissions}` 批准或拒绝，`admission_revoke {application_id}` 撤销尚未消费的批准。状态可为 `pending/rejected/approved/consumed`；`approved` 仅向持有申请秘密的查询返回一次性邀请，`consumed` 返回实际 `member_id`。批准重新给予五分钟消费窗口，不能用最初申请的本地倒计时删除已批准记录。查询失败不代表批准被撤销；加入结果不确定时先查状态，禁止自动重放 Join。已消费申请应在成员管理中移除成员，审批撤销不能替代成员撤权。
+
+直接邀请返回无秘密的 `invitation_id`，房主或签发成员可用 `revoke_invitation {invitation_id}` 撤销未消费邀请。邀请消费与成员权限是独立生命周期。成员须持有 `permissions.invite` 才可签发，且只能授予自己当前的基础收听、读聊与发言权限；不能转授队列、播控、房间音量或邀请权。房主快照的邀请列表不包含邀请秘密。
+
+`POST /v1/system/shutdown` 先返回退出受理，再启动与 Ctrl-C 相同的关闭流程：阻止新 Create/Join/Resume，取消尚未完成的房间启动，等待 Host End、输出租约和模式恢复，再停 audio actor 并删除发现文件。嵌入宿主使用公开的 `AppState::shutdown().await` 等待同一屏障。Guest 服务退出保留最近房间凭据，显式离开或 Host End 会清除凭据。
 
 ## 播客目录搜索
 

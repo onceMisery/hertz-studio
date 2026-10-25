@@ -89,6 +89,8 @@ pub enum AudioEvent {
 type Reply<T> = oneshot::Sender<T>;
 
 enum Command {
+    EnterExclusive(Reply<Result<(), AudioError>>),
+    LeaveExclusive,
     Load {
         uri: String,
         track_id: Option<String>,
@@ -154,9 +156,56 @@ pub struct AudioHandle {
     /// 真正装配成功的那个后端的名字，由 actor 在 init 握手时送回。配置里的
     /// `audio.backend` 只是「请求」，空值或拼错时它跟跑起来的东西不是一回事。
     backend: &'static str,
+    ingress: std::sync::Arc<std::sync::Mutex<bool>>,
+}
+
+/// Exclusive device ownership for a room. Acquisition is ordered after all
+/// previously accepted commands and drops the old backend (including its CPAL
+/// stream). Dropping the lease restores an idle local backend, never playback.
+pub struct ExclusiveAudio {
+    handle: AudioHandle,
+}
+
+impl Drop for ExclusiveAudio {
+    fn drop(&mut self) {
+        let mut owned = self
+            .handle
+            .ingress
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _ = self.handle.tx.send(Command::LeaveExclusive);
+        *owned = false;
+    }
 }
 
 impl AudioHandle {
+    pub fn exclusively_owned(&self) -> bool {
+        *self.ingress.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub async fn acquire_exclusive(&self) -> Result<ExclusiveAudio, AudioError> {
+        let (reply, result) = oneshot::channel();
+        {
+            let mut owned = self.ingress.lock().unwrap_or_else(|e| e.into_inner());
+            if *owned {
+                return Err(AudioError::Other(
+                    "audio is owned by a listening room".into(),
+                ));
+            }
+            self.tx
+                .send(Command::EnterExclusive(reply))
+                .map_err(|_| AudioError::Other("audio actor is not running".into()))?;
+            *owned = true;
+        }
+        // Keep the guard across await: cancellation queues LeaveExclusive too.
+        let lease = ExclusiveAudio {
+            handle: self.clone(),
+        };
+        result
+            .await
+            .unwrap_or_else(|_| Err(AudioError::Other("actor gone".into())))?;
+        Ok(lease)
+    }
     pub fn backend_name(&self) -> &'static str {
         self.backend
     }
@@ -318,6 +367,10 @@ impl AudioHandle {
     }
 
     fn send(&self, cmd: Command) -> Result<(), AudioError> {
+        let owned = self.ingress.lock().unwrap_or_else(|e| e.into_inner());
+        if *owned && !matches!(cmd, Command::Devices(_)) {
+            return Err(AudioError::Other("room_mode_requires_room_command".into()));
+        }
         self.tx
             .send(cmd)
             .map_err(|_| AudioError::Other("audio actor is not running".into()))
@@ -359,6 +412,7 @@ pub async fn spawn(kind: BackendKind) -> Result<(AudioHandle, JoinHandle<()>), A
                 events,
                 control_events: std::sync::Arc::new(std::sync::Mutex::new(Some(control_rx))),
                 backend,
+                ingress: Default::default(),
             },
             handle,
         )),
@@ -409,9 +463,16 @@ fn run(
     // 生命周期里只有第一首歌自然结束会发 Ended——在线整盘的自动接力只会成功
     // 一次（apply 用返回值告知本 tick 是否发生了换装/停止）。
     let mut ended_emitted = false;
+    let mut restore_dsp = vmusic_core::DspParams::default();
+    let mut restore_crossfade = 0;
 
     loop {
         let command = rx.recv_timeout(TICK);
+        match &command {
+            Ok(Command::SetDsp(params, _)) => restore_dsp = *params,
+            Ok(Command::SetCrossfade(ms, _)) => restore_crossfade = *ms,
+            _ => {}
+        }
         if command.as_ref().is_ok_and(|command| {
             command.cancels_next()
                 || matches!(command, Command::PrepareNext(next, _) if next.generation == state.generation)
@@ -429,6 +490,40 @@ fn run(
         }
         match command {
             Ok(Command::Shutdown) | Err(RecvTimeoutError::Disconnected) => break,
+            Ok(Command::EnterExclusive(reply)) => {
+                // Assignment drops the old native stream on its owner thread.
+                backend = Box::new(NullBackend::new());
+                state.track_id = None;
+                state.position_ms = 0;
+                state.duration_ms = None;
+                state.playing = false;
+                state.generation = state.generation.saturating_add(1);
+                ended_emitted = true;
+                publish(&snapshot, &state);
+                let _ = reply.send(Ok(()));
+            }
+            Ok(Command::LeaveExclusive) => {
+                backend =
+                    restore_idle_backend(kind, &state, &events, restore_dsp, restore_crossfade);
+                ended_emitted = true;
+            }
+            Ok(Command::SelectDevice(id, reply)) if backend.name() == "unavailable" => {
+                let mut requested = state.clone();
+                requested.device = id.clone();
+                let restored =
+                    restore_idle_backend(kind, &requested, &events, restore_dsp, restore_crossfade);
+                let result = if restored.name() == "unavailable" {
+                    Err(AudioError::Other(
+                        "selected output device is unavailable".into(),
+                    ))
+                } else {
+                    backend = restored;
+                    state.device = id;
+                    Ok(())
+                };
+                publish(&snapshot, &state);
+                let _ = reply.send(result);
+            }
             Ok(cmd) => match apply(&mut *backend, &mut state, &snapshot, cmd) {
                 Ok(source_reset) => {
                     if source_reset {
@@ -503,6 +598,93 @@ fn run(
 }
 
 /// 把当前状态发布到共享快照。
+// A failed native-device restore is explicit and recoverable. It never accepts
+// a source or claims playback; a later SelectDevice reconstructs the backend.
+struct UnavailableOutput;
+impl AudioBackend for UnavailableOutput {
+    fn name(&self) -> &'static str {
+        "unavailable"
+    }
+    fn devices(&self) -> Result<Vec<DeviceInfo>, AudioError> {
+        #[cfg(feature = "playback")]
+        {
+            crate::scheduled_output::enumerate_output_devices()
+        }
+        #[cfg(not(feature = "playback"))]
+        Ok(Vec::new())
+    }
+    fn select_device(&mut self, _: Option<&str>) -> Result<(), AudioError> {
+        Err(Self::error())
+    }
+    fn load(&mut self, _: &str) -> Result<vmusic_core::MediaInfo, AudioError> {
+        Err(Self::error())
+    }
+    fn play(&mut self) -> Result<(), AudioError> {
+        Err(Self::error())
+    }
+    fn pause(&mut self) -> Result<(), AudioError> {
+        Ok(())
+    }
+    fn stop(&mut self) -> Result<(), AudioError> {
+        Ok(())
+    }
+    fn seek(&mut self, _: u64) -> Result<(), AudioError> {
+        Err(Self::error())
+    }
+    fn set_volume(&mut self, _: f32) -> Result<(), AudioError> {
+        Ok(())
+    }
+    fn position_ms(&self) -> u64 {
+        0
+    }
+    fn duration_ms(&self) -> Option<u64> {
+        None
+    }
+    fn finished(&self) -> bool {
+        false
+    }
+    fn spectrum(&self, _: &mut [f32]) -> bool {
+        false
+    }
+}
+impl UnavailableOutput {
+    fn error() -> AudioError {
+        AudioError::Other("selected output device is unavailable".into())
+    }
+}
+
+fn restore_idle_backend(
+    kind: BackendKind,
+    state: &PlayerSnapshot,
+    _events: &broadcast::Sender<AudioEvent>,
+    dsp: vmusic_core::DspParams,
+    crossfade_ms: u64,
+) -> Box<dyn AudioBackend> {
+    let mut backend: Box<dyn AudioBackend> = match kind {
+        #[cfg(feature = "playback")]
+        BackendKind::Cpal => match CpalBackend::new() {
+            Ok(backend) => Box::new(backend),
+            Err(error) => {
+                let _ = _events.send(AudioEvent::Error(error.to_string()));
+                Box::new(UnavailableOutput)
+            }
+        },
+        BackendKind::Null => Box::new(NullBackend::new()),
+    };
+    let _ = backend.set_volume(state.volume);
+    let _ = backend.set_dsp(dsp);
+    let _ = backend.set_crossfade(crossfade_ms);
+    if let Some(device) = state.device.as_deref() {
+        if let Err(error) = backend.select_device(Some(device)) {
+            let _ = _events.send(AudioEvent::Error(error.to_string()));
+            // Losing an explicitly selected device never authorizes output on
+            // a different device. Selection can be retried by the local UI.
+            return Box::new(UnavailableOutput);
+        }
+    }
+    backend
+}
+
 ///
 /// **必须早于命令回执**：`Handle::set_volume()` 之类返回后调用方往往会立刻读
 /// `Handle::snapshot()`，而回执只保证「命令已应用」、不保证「已发布」——
@@ -637,6 +819,9 @@ fn apply(
     cmd: Command,
 ) -> Result<bool, AudioError> {
     match cmd {
+        Command::EnterExclusive(_) | Command::LeaveExclusive => {
+            unreachable!("ownership handled by actor")
+        }
         Command::Load {
             uri,
             track_id,
@@ -796,6 +981,27 @@ fn apply(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn exclusive_lease_fences_clones_and_restores_only_idle_playback() {
+        let (audio, actor) = spawn(BackendKind::Null).await.unwrap();
+        audio.load("first.wav", Some("first".into())).await.unwrap();
+        audio.play().await.unwrap();
+        let clone = audio.clone();
+        let lease = audio.acquire_exclusive().await.unwrap();
+        assert!(audio.exclusively_owned());
+        assert!(!audio.snapshot().playing);
+        assert!(audio.snapshot().track_id.is_none());
+        assert!(clone.load("other.wav", Some("other".into())).await.is_err());
+        assert!(clone.play().await.is_err());
+        assert!(clone.acquire_exclusive().await.is_err());
+        drop(lease);
+        assert!(!audio.exclusively_owned());
+        audio.load("after.wav", Some("after".into())).await.unwrap();
+        assert!(!audio.snapshot().playing);
+        audio.shutdown();
+        actor.join().unwrap();
+    }
 
     /// NullBackend 的位置来自墙上时钟，而 actor 只在 `TICK`(20ms) 边界上把
     /// `backend.position_ms()` 抄进快照。所以「睡固定时长后立刻断言位置」会卡在

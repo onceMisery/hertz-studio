@@ -1,0 +1,30 @@
+{
+  "source_commit": "4e9893c0fc5ff6d2384cb2a97a09c0e781bb040a",
+  "passed": true,
+  "registration_followup": {
+    "commit": "8f414b9c42c82c8aba43f015e8da0569add04bab",
+    "change": "Register the existing isolated browser script in manual-checks.json; LIVE discovery remains automatic",
+    "spec_review": "room_theme_spec_review: Passed; no missing wiring",
+    "quality_review": "room_theme_quality_review: Approved; exactly one accurate registration",
+    "verification": "check-frontend.js:64 passed/0 failed; check-scripts.js:219 entries passed"
+  },
+  "scope": "Room and application share global Theme; in-room selector; LAN favorite visibility and source badge fixes",
+  "reviews": [
+    {
+      "role": "independent specification review",
+      "agent": "room_theme_spec_review",
+      "verdict": "Passed; no actionable gaps found"
+    },
+    {
+      "role": "independent code quality review",
+      "agent": "room_theme_quality_review",
+      "verdict": "Approved; no Critical or Important issues found"
+    }
+  ],
+  "verification": [
+    "check-room-ui.js",
+    "check-favorites.js:207/207",
+    "check-room-theme-browser.js:production DOM/CSS, real Theme, isolated stub transport"
+  ],
+  "limits": "Static browser fixtures do not replace final binary-bound browser acceptance, native audio or exhaustive contrast measurements for every theme."
+}

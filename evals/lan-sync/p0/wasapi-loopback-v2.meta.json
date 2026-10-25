@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "capturedAt": "2026-10-24T01:30:52.0222380Z",
+  "command": "cargo run --release --offline --bin wasapi-probe -- --seconds 6 (in tools/lan-probe)",
+  "compiler": "rustc 1.98.1 (48a229cea 2026-09-01)\nbinary: rustc\ncommit-hash: 48a229ceaefd4985c50990b14116b6d856af0985\ncommit-date: 2026-09-01\nhost: x86_64-pc-windows-msvc\nrelease: 1.98.1\nLLVM version: 22.1.8",
+  "osRelease": "Microsoft Windows NT 10.0.26200.0",
+  "architecture": "X64",
+  "gitHead": "b639faea6d77a0209d7d55a2a610385b47f08041",
+  "workspaceDirty": true,
+  "executable": "tools/lan-probe/target/release/wasapi-probe.exe",
+  "executableHash": "3365af99e278cf1a68ffa50913bc4928cb534af5d9c18cce1a9f7d673f6d2e5a",
+  "reportHash": "f81a912f1ea0358b2c25d96dc02768ccaae9fad35cff8d8375783f989de4fe5d",
+  "sourceHashes": {
+    "tools/lan-probe/src/bin/wasapi-probe.rs": "f939270f9dd81b3fcd1f10e7cb2c9d5e66eb83f76e18c529337861663127565b",
+    "tools/lan-probe/Cargo.toml": "ab98ddc0f5175e89db233ef4edff50230e4868abed669380623d71e9c9ff4217",
+    "tools/lan-probe/Cargo.lock": "88d011efb58efe438f688f31497a5a60c30fbfc430bc75af27dd071eb45ceb03"
+  },
+  "syntheticOnly": true,
+  "releaseEligible": false,
+  "notes": "2026-10-24 review 修复复测；只证明本次 Windows 单机配置，未包含两机、macOS/Linux、真实 DAC/声学同步"
+}
