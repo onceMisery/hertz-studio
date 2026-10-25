@@ -1,6 +1,10 @@
 # 桌面壁纸 W0 首轮原生验证报告
 
-日期：2026-10-23。执行：本机 Qoder agent。状态：**W0 首轮局部通过；阶段未完成，不进入 W1**。已验证 WorkerW 图标层挂载、桌面输入、手动/全屏/锁屏/息屏/S3 睡眠五类暂停原因与原因叠加（含真实睡眠复测与 QUNS 防抖）、视觉时钟、Explorer 重启恢复、托盘重建与右键菜单、终态重试、10 次快速重启预算、controller 失败恢复、50 次进程级与进程内 surface churn、第二显示器挂载/混合 DPI、10 次断屏/重连与 14 次锁屏/解锁循环、设置预览租约、托盘图标回收与真实星座场景 10 次 GPU scope 循环；真实场景 context loss/8 小时长稳、预览 pending 交接、挂起通知回调和 10 次 Explorer 成功重启仍未完成。这是隔离探针结论，不是生产宿主方案，也不改变[桌面壁纸方案](../desktop-wallpaper.md)与[共享宿主设计](../desktop-host.md)的草案状态。
+日期：2026-10-23。执行：本机 Qoder agent。状态：**W0 探针验证已按用户判定收尾；W1 尚未开始**。已验证 WorkerW 图标层挂载、桌面输入、手动/全屏/锁屏/息屏/S3 睡眠五类暂停原因与原因叠加（含真实睡眠复测与 QUNS 防抖）、视觉时钟、Explorer 重启恢复、托盘重建与右键菜单、终态重试、10 次快速重启预算、controller 失败恢复、50 次进程级与进程内 surface churn、第二显示器挂载/混合 DPI、10 次断屏/重连与 14 次锁屏/解锁循环、设置预览租约、托盘图标回收与真实星座场景 10 次 GPU scope 循环；后续已验证真实星座三轮 context loss/restore 和预览 pending 提前关闭交接，进程级挂起回调已接入并通过 handler 自检；间隔 50 秒的 10 次 Explorer 成功重启亦已补验通过；8 小时长稳已跑满并按用户判定记为稳定通过，真实 S3 回调送达与环境矩阵未覆盖。这是隔离探针结论，不是生产宿主方案，也不改变[桌面壁纸方案](../desktop-wallpaper.md)与[共享宿主设计](../desktop-host.md)的草案状态。
+
+> **2026-10-24 21:22 收尾**：8 小时长稳实际跑满 `28,800,501 ms`，`normal_exit=true`、`exit_code=0`、残留进程 0、托盘图标 0，GPU 驻留全程 `118/1/11`。自动 parser 仍记 8 条 `FROZEN`，全部落在 `resumed` 样本：`frames`、`sceneTime`、`stats.time` 均冻结，仅 `renderDraws` 比暂停样本多 22（一帧补绘）。用户判定不再补测、按稳定通过记录；该单帧补绘作为已知边界保留，真实 S3 回调送达与环境矩阵不再补测、明确未覆盖。
+
+> **同日取景修正**：此前探针直接使用 `ZodiacStagePure` 默认取景距离（16:9 约 6.67、16:10 约 7.41），而 App 内 SpaceStage 的 zodiac 相机基线为 `radius 11.87 / fov 52`，壁纸因此放大约 1.6–1.8 倍。W1-A 已把探针页面的硬编码基线替换为读取 `HertzStageRuntime.SpaceStagePure.catalog()` 的 zodiac camera（`theta/phi/radius/fov/fit`，窄画幅按 fit 后退），`check-scene-browser` 断言实际相机位置与 registry 期望距离一致；A/B 渲染见 `output/desk-w0/camera-old-2560.png` 与 `camera-new-2560.png`。注意 `stats().dist` 仍报告引擎内部 rig 值（约 7.41），实际相机由 `setRig` 控制；核对取景应看 `debug().camera.position` 或截图。
 
 ## 1. 结论
 
@@ -13,17 +17,17 @@
 - **W0-4（多屏与混合 DPI，局部）**：目标屏按设备名/索引选择，WorkerW 扩到虚拟屏（0,0,4480,1600），壁纸窗落在外接屏（2560,0,4480,1080）。**窗口 DPI 仍继承主屏 144，目标屏为 96**：不补偿时页面 dpr=1.5、CSS 1280×720，文字放大 1.5 倍；加 `WebView::zoom(96/144)` 后 dpr=1、CSS 1920×1080，文字尺寸正常。外接屏输入命中 `SysListView32`/Progman，未拦截桌面。**这是探针级 workaround；生产仍需按每屏 DPI 建窗或正式补偿策略。**
 - **W0-3（断屏/重连，局部）**：拔掉外接屏后 `monitor_missing` → `reasons=0x20 hidden=true`，帧冻结；插回后 `monitor_returned` → `monitor_apply` 重新定位/应用 DPI 补偿 → `hidden=false`，从冻结的 `sceneTime` 继续。随后用 `SetDisplayConfig` 自动切换 internal/extend 跑 10 轮：`missing=10`、`returned=10`、`apply=10`，无 `health_lost`/`recovery_`，退出后残留 0。**通过。**
 - **W0-3（10 次锁屏/解锁）**：后台探针持续记录，实际捕获 **14 次**完整锁屏/解锁（≥10，可能多操作或系统多报）。每次 `session-absent` 隐藏/停绘、解锁后恢复，无 `health_lost`/`recovery_`，停止探针后残留 0。**通过（次数为 14，不是恰好 10）。**
-- **W0-5（设置预览租约，局部）**：独立预览窗 + WebView，单实例租约 15 秒；第二次请求返回 `preview_busy` 并排队；续租延长到 15 秒；未续租时 `preview_expired` 关闭；排队请求超过 15 秒记录 `preview_pending_expired age_s=18.0` 后丢弃；随后新请求建立第 2 个租约。预览实测约 15 绘制/秒（`cap=15`），打开时进程 7→8、WebView2 6→7，关闭/退出后 `leftover=0`。**通过；旧租约提前关闭后的 pending 交接未测。**
+- **W0-5（设置预览租约，局部）**：独立预览窗 + WebView，单实例租约 15 秒；第二次请求返回 `preview_busy` 并排队；续租延长到 15 秒；未续租时 `preview_expired` 关闭；排队请求超过 15 秒记录 `preview_pending_expired age_s=18.0` 后丢弃；随后新请求建立第 2 个租约。预览实测约 15 绘制/秒（`cap=15`），打开时进程 7→8、WebView2 6→7，关闭/退出后 `leftover=0`。**通过；旧租约提前关闭后的 pending 交接已在 §3.1 补验。**
 - **W0-5（托盘图标累计）**：50 次进程级启停全部退出码 0；结束后 UIA 打开溢出面板统计同名图标 `tray_icons=0`，`wallpaper.exe`/专属 WebView2 残留均为 0。**通过。**
-- **W0-5（真实场景 GPU scope，局部）**：`--scene-test` 内嵌仓库已提交的 `stage-runtime.js`/`zodiac-stage.js`，真实星座场景在桌面图标后方渲染；同一页面挂载/卸载 10 轮，每轮预热后 `geometries=118`、`textures=1`、`programs=11`，无增长；无 `scene_mount_failed`/`scene_mount_error`，退出后 `leftover=0`。**通过；context loss 恢复与 8 小时未测，`stats()` 不含 `resources/estimatedBytes`。**
+- **W0-5（真实场景 GPU scope，局部）**：`--scene-test` 内嵌仓库已提交的 `stage-runtime.js`/`zodiac-stage.js`，真实星座场景在桌面图标后方渲染；同一页面挂载/卸载 10 轮，每轮预热后 `geometries=118`、`textures=1`、`programs=11`，无增长；无 `scene_mount_failed`/`scene_mount_error`，退出后 `leftover=0`。**通过；context loss 恢复已在 §3.1 补验，8 小时尚未完成，`stats()` 不含 `resources/estimatedBytes`。**
 - **资源基线（探针页面）**：7 个进程（探针 + 6 个 WebView2）；30 fps 阶段单核约 12.4%、工作集约 406 MB；手动暂停 0.8%；恢复 12.2%；15 fps 7.2%；60 fps 14.4%，工作集升至约 442 MB；GPU Engine 运动阶段约 5–13%，暂停为 0。**这是合成 canvas 页面的基线，不是生产星座场景；未做无壁纸对照或 8 小时曲线，不冻结发布阈值。**
-- **W0-3（Explorer 恢复与托盘，局部）**：首次实现前，Explorer 重启会销毁 WorkerW/壁纸窗/controller，无恢复；实现健康检查与重建后，单次重启和连续两次重启都在同一 120 秒窗口内重新探测 Progman/WorkerW、重建窗口与 WebView 并重新挂载（attempt 1、2 均成功），截图恢复星空且图标仍在上层。Explorer 重启后托盘图标自动重建（无需宿主手工重注册），9 秒后可被 UIA 找到并真实左键点击，探针记录 Down/Up 事件且正常退出。终态后右键菜单可打开，第一项“重新挂载”可触发显式重试。**连续 10 次成功重启未达成（见终态预算）。**
+- **W0-3（Explorer 恢复与托盘，局部）**：首次实现前，Explorer 重启会销毁 WorkerW/壁纸窗/controller，无恢复；实现健康检查与重建后，单次重启和连续两次重启都在同一 120 秒窗口内重新探测 Progman/WorkerW、重建窗口与 WebView 并重新挂载（attempt 1、2 均成功），截图恢复星空且图标仍在上层。Explorer 重启后托盘图标自动重建（无需宿主手工重注册），9 秒后可被 UIA 找到并真实左键点击，探针记录 Down/Up 事件且正常退出。终态后右键菜单可打开，第一项“重新挂载”可触发显式重试。**间隔 50 秒的连续 10 次成功重启已在 §3.1 补验；快速重启仍遵守原终态预算。**
 - **W0-3（终态重试）**：4 次快速重启进入终态后，右键托盘选“重新挂载”：`retry_requested` → 预算清零 → `attempt=1` 恢复成功；随后第 5 次重启以 `attempt=2` 再次恢复；探针退出码 0、残留 0。**显式用户重试路径通过。**
 - **W0-2（挂起通知，局部）**：`RegisterSuspendResumeNotification` 返回非零句柄；`--power-selftest` 直接向窗口投递 suspend/resume 消息，`reasons=0x10 hidden=true` 停绘、恢复后从同一 `sceneTime` 继续。**真实 S3 复测两次：`PBT_APMSUSPEND` 仍未送达（`tag=sleep` 计数 0）；有效信号是 `QUNS_NOT_PRESENT` 与 `GUID_MONITOR_POWER_ON`。**
 - **W0-3（终态预算）**：`--restart-test` 连续 10 次重启 Explorer；第 1–3 次恢复成功（attempt 1/2/3），第 4 次触发 `recovery_terminal attempts>=3 window=120s`，之后不再尝试或刷健康日志；截图露出系统壁纸，探针最终退出码 0、残留 0。**快速 10 次重启在“3 次/120 秒”预算下按设计进入终态；需要重新定义 A6 的“10 次”是间隔超过窗口还是允许快速连续。**
-- **W0-5（退出、失败与回收，局部）**：正常退出后壁纸窗口消失，当前系统壁纸可见，专属 WebView2 进程残留为 0。`--close-controller-after-ms` 注入 controller Close 后，周期 liveness 探测发现 `0x8007139F`，先关闭/销毁旧窗口再按统一预算重建，页面重新开始并正常退出。50 次进程级应用/停止全部退出码 0；进程内 50 次 controller/窗口重建同样零失败，每轮稳定为 7 个进程（6 个 WebView2）、工作集约 340–345 MB，无累积，退出后残留 0。**设置预览租约、场景 GPU scope/纹理释放与托盘图标累计未测。**
+- **W0-5（退出、失败与回收，局部）**：正常退出后壁纸窗口消失，当前系统壁纸可见，专属 WebView2 进程残留为 0。`--close-controller-after-ms` 注入 controller Close 后，周期 liveness 探测发现 `0x8007139F`，先关闭/销毁旧窗口再按统一预算重建，页面重新开始并正常退出。50 次进程级应用/停止全部退出码 0；进程内 50 次 controller/窗口重建同样零失败，每轮稳定为 7 个进程（6 个 WebView2）、工作集约 340–345 MB，无累积，退出后残留 0。**设置预览租约、场景 GPU scope/纹理释放与托盘图标累计的后续证据见上述 W0-5 条目。**
 
-因此 W0 不能标记通过：挂载、停绘、恢复与进程级/进程内 surface churn 路线已成立，剩余阻断项是多屏等环境矩阵、设置预览/托盘图标累计、真实场景 GPU scope 释放、生产场景接入和长稳资源阈值。
+因此 W0 不能标记通过：挂载、停绘、恢复、多屏/DPI、预览交接、托盘回收和真实场景 scope/context loss 路线已有局部证据；剩余阻断项是 8 小时长稳与资源阈值、真实 S3 回调送达，以及尚未覆盖的环境矩阵；间隔 10 次 Explorer 成功重启已完成。
 
 ## 2. 环境与身份
 
@@ -80,9 +84,46 @@
 | W0-2 锁屏（策略后） | 接入 `QUNS_NOT_PRESENT` 为 session 原因，复现两次 | `reasons=0x04 hidden=true` + `stopMotion`；解锁后 `hidden=false`，从同一 `sceneTime` 继续；55 秒运行画面只推进约 31 秒 |
 | W0-2 息屏（策略前） | `SendMessage(HWND_BROADCAST, SC_MONITORPOWER, 2)` 关屏 | 显示器实际黑屏超过 8 秒（脚本随后阻塞在 SendMessage，被强杀）；探针帧 1→49 连续推进，QUNS 全程 5——息屏同样不会自动停绘 |
 | W0-2 息屏（策略后） | 改用 `SendMessageTimeout` + 必达唤醒；订阅 `GUID_MONITOR_POWER_ON` | off 上报 `tag=display-off reasons=0x08 hidden=true` 并停绘；on 上报 `hidden=false` 后恢复；系统随后再次上报 off，已手动唤醒 |
-| W0-3 多显示器/混合 DPI | 目标屏迁移、断开重连、任务栏工作区变化 | 未执行；本机只有一块活动屏幕 |
+| W0-3 多显示器/混合 DPI | 目标屏迁移、断开重连、任务栏工作区变化 | 首轮仅单屏；后续外接屏、混合 DPI 与断屏循环证据见上表，任务栏工作区变化尚未独立验收 |
 
 原始截图位于本机忽略目录（含完整桌面内容，未提交）：`output/desk-w0/2026-10-23-w0-run3/`（`running.png`、`policy-paused.png`、`resumed.png`）、`run4/after-restart.png`（恢复前）、`run5/after-exit.png`、`recovery2/recovered.png` 与 `recovery4/recovered-twice.png`（恢复后）、`restart10/after-r3.png` 与 `after-terminal.png`（终态前后）；`w0-fullscreen1/probe.log` 记录全屏暂停/恢复的帧序列（该次截图落在随后的手动暂停期，不作为恢复画面证据）；`resource1/gpu.csv` 与 `probe.log` 记录资源基线。仓库只提交可复现脚本与文本证据。
+
+### 3.1 2026-10-24 补验：context loss、pending 交接与回调
+
+本轮以隔离探针为主；另有用户明确批准的星座 4 小时时钟边界修复，详见下文。二进制内嵌构建当时工作区的真实星座 bundle（产品树存在其他会话未提交修改），不把它标成 `ca42339` 的已提交资源。`context3`/`preview-handoff1` 使用 2,290,176 bytes 的 release 二进制，SHA-256 `ee5b70df9daeb270f61a1749e5f145bada899ced20db3ea4a57cbf7b2deb0eec`。
+
+| 项 | 证据 | 结论 |
+| --- | --- | --- |
+| 真实星座 context loss | `output/desk-w0/2026-10-24-context2/` 与 `context3/`；每轮 `WEBGL_lose_context` 丢失后保持约 2 秒，再恢复，共 3 轮；收到真实 lost/restored 事件各 3 次 | 丢失至恢复回调之间 frames/sceneTime 不变；随后 frames/time 继续。首轮恢复像素采样亮点 2,489、GL error=0，后两轮同样有非黑像素；无重新 mount、无宿主重建；退出码 0、专属残留 0 |
+| context 恢复资源口径 | 预热基线 geometries/textures/programs=118/1/11；恢复后为 18–19/1/10 | Three.js 恢复时清空 renderer 统计，再按当前星座重新上传；不能要求恢复第一帧立即等于全 12 座预热计数。没有超过预热基线，不代表显存字节数已测 |
+| 关闭旧预览后的 pending 交接 | `output/desk-w0/2026-10-24-preview-handoff1/`；第 2 个租约活动时排队，再向其原生窗口投递 WM_CLOSE | `preview_close reason=window-close` → `preview_open tag=pending leases=3`；剩余 13,202 ms、pending=false；主壁纸继续、关闭测试退出 0、残留 0 |
+| 预览边界回归 | 同轮先执行原有续租/排队过期流程 | 首租约续租后正常过期，排队请求 age=18 秒被丢弃；没有因新交接路径改变过期语义 |
+| 挂起恢复回调生命周期 | 使用进程级 `PowerRegisterSuspendResumeNotification`，不随窗口或 Explorer 重建而重新注册；LoopDestroyed 注销 | 注册与注销均 result=0；回调仅投递事件，不触 UI；日志区分 `os-callback`、`selftest-handler` 与 `WM_POWERBROADCAST` |
+| handler 自检 | 同轮 synthetic suspend/resume，3 个纯映射单测 | `reasons=0x10 hidden=true` → `0x00 hidden=false`；仅证明 handler/原因位路径，不证明真实 S3 回调送达 |
+
+预览修正的是按 window_id 路由关闭事件：关闭预览释放旧 view/window 并接管 pending，而不是退出整个探针。场景结束改为等待页面 `unmounted` 后的 `scene_done` 回执；10 秒内未回执则非零退出，避免把异步 `evaluate_script` 排队成功当成卸载完成。浏览器还验证了暂停时 context 恢复不会自动开始播放；内嵌浏览器处于 hidden、rAF 不运行，不用它的帧率作为实机结论。`context3/restored.png` 被前台文件管理器遮挡，不作为壁纸恢复画面证据；实际渲染依据 WebView 内直接读取的 GL 像素。
+
+`--scene-soak --duration-ms 28800000` 提供单页 8 小时运行入口，每分钟采样场景像素、渲染资源、进程树 CPU/工作集/private bytes 和暂停原因。长稳验收必须同时看到足够时长、连续采样、运行时实际时钟推进、页面卸载回执、正常退出与专属进程归零；启动成功不等于 8 小时通过，墙钟运行时长也不等于连续活动绘制时长。
+
+**已修复的 8 小时前置阻断：真实星座运行时有 4 小时时钟上限。** `tools/zodiac-stage/src/main.js` 的 `setTime()` 原来把 time 限制到 `3600 * 4`。浏览器对旧 bundle 请求 14,399/14,400/14,401/28,800 秒，实际 `stats().time` 为 14,399/14,400/14,400/14,400 秒；旧探针前置检查也以 `requested=28800 actual=14400` 非零退出（`soak-preflight1`）。仅看探针自己的 frames/sceneTime 会漏检后半程冻结。
+
+用户明确批准扩展到此处修复后，`setTime()` 改为接受非负有限时间，不再设 4 小时上限；无效/负数仍归零，不采用探针时钟回绕。构建前共享 manifest 全部与当前源码一致，按仓库构建入口重建三场景共享 bundle，保留并行的星座视觉修改。新增真实浏览器回归在旧 bundle 对 `14401` 必红，修复后 14,399/14,400/14,401/28,800/28,801 秒的实际时钟、星座编号和相位均正确，非法值测试与原有完整 motion 回归全绿，三场景 Node 契约通过。日志判定器同时加入“探针帧继续、真实 renderer 时钟在 4 小时停住”的负向变异，75 项测试通过。
+
+长稳计时从页面 `mounted` 回执开始，而非从 native 进程启动开始，避免 WebView 初始化耗时从 8 小时中扣掉。采集像素前先取 renderer 统计，并单独累加实际 WebGL draw 调用 `renderDraws`，显式排除 `capture()` 产生的绘制。仅有驱动 frames、写入的 stats.time、上一次 drawCalls 或非黑截图都不能单独证明 renderer rAF 仍运行。
+
+真实浏览器故障注入（`tools/desktop-probe/check-scene-browser.js`）：正常绘制累计 1,866；停掉 renderer rAF、保留驱动 rAF 后，驱动时间/帧和非黑截图继续，但真实绘制仍为 1,866；恢复后增至 4,506。恢复回调之后、首个 renderer draw 之前的定时采样允许暂时零资源，`after-restore` 仍必须看到真实绘制增量和正资源计数。更新后的 78 项日志判定测试通过；`2026-10-24-context4` 三轮原生恢复亦通过严格计数判据（31,489 ms 总时长，其中 context lost 6,019 ms）。
+
+`2026-10-24-soak-smoke1` 两分钟原生采样通过：mounted→final 120,414 ms，按事件估算活动 118,511 ms、暂停 1,903 ms，最大采样间隔 59,974 ms。synthetic suspend/resume 期间实际绘制计数为 4,634→4,634；最后累计 376,598，截图绘制未计入。每分钟及结束时 GPU 计数保持 118/1/11，renderer 实际时间继续；整树 CPU 45.5–47.2% 单核、工作集约 615–620 MB、private bytes 约 379–391 MB；正常退出、专属残留 0。这里只是短测基线，不是 8 小时通过，也不是预先冻结的发布资源阈值。
+
+**Explorer 间隔测试的未通过轮次保留，不拼接成 10 次通过。** `explorer-spaced1` 在参数默认值求值时失败，尚未启动探针；已将默认路径解析移到参数绑定后。`explorer-spaced2` 前两轮通过，第 3 轮因 PowerShell 重定向输出尚未关闭就被读取而失败；helper 改为同时异步读取 stdout/stderr，等待进程和两路读取完成后才写证据文件，不靠延时重试。`explorer-spaced3` 前 6 轮有新页面绘制，第 7 轮只有 `recovery_success` 而 30 秒无新 frame，因此整轮失败；没有放宽超时或恢复预算，均只清理自己启动的探针，专属残留/托盘图标为 0。
+
+Windows wry 的 `evaluate_script` 不等待页面脚本就绪，COM 成功不能充当 `startMotion` 执行回执。探针增加按 surface generation 区分的 `page_ready`，就绪后才按当前策略启动/停绘；预览按 lease 就绪后启动 15fps，旧代际或旧租约通知不作用于新窗口。页面另发 `motion_started` 回执，重启模式记录同步调用 begin/end 与耗时。相关 7 个 Rust 单测、clippy/MSRV 和浏览器计数测试通过；这是消除已证实的启动竞态并补充定位证据，不将第 7 轮停摆根因写成已完全确定。新二进制的 `preview-handoff2` → `context5` → `explorer-spaced4` 已按依赖顺序全部通过。预览 3 次 ready/15fps 启动回执，提前关闭后第 3 租约接管且 pending 清空；context5 三轮严格恢复验证通过；两者退出后专属残留均为 0。
+
+**10 次 Explorer 成功重启达成。** `explorer-spaced4` 同一探针进程完成 10 轮，实际停止间隔 50.579–50.951 秒；每轮重新核对 shell PID、恢复日志与新页面正向 draw/rAF，`page_ready generation=0..10` 连续，无 `recovery_fail`/`recovery_terminal`。保持原有 3 次/120 秒预算，进程级 PowerRegister 回调仅注册/注销一次且 result=0。整轮正常退出 0、专属 WebView2 残留 0、同名托盘图标 0。固定二进制 SHA-256：`4d58631ce50cc6adc83ccbec6baaddc4b54c655d6ecf0f625504e7c2863056fb`。该结果来自完整的新 10 轮，不是把此前失败轮次的成功次数拼起来。
+
+`power-callback-real1` 三分钟观察窗正常退出，注册/注销返回 0、专属残留 0，但没有收到 `source=os-callback`；用户尚未确认执行睡眠，所以此轮不构成真实 S3 验收。
+
+**8 小时运行中，尚未验收。** 完整 `run-validation.ps1 -Mode Soak -DurationSeconds 120` 短测在 `soak-runner-smoke1` 通过：120,427 ms、无采样缺口、资源保持 118/1/11、退出 0、残留 0、托盘 0。随后以同一固定二进制启动 `2026-10-24-soak8h1`：本机时间 2026-10-24 13:22:56（UTC+08）开始，预计约 21:23 结束；runner PID 41680、probe PID 12216，初始实际绘制 10,344，预热资源 118/1/11。`result.json` 当前状态为 `running`，由后台运行器在结束时写入最终判定，不能视为通过。只读检查电源状态：AC/DC 自动睡眠和息屏超时均为 0，当前接电；没有修改电源配置。该长时进程被动接收系统通知；按用户最新要求，先完成无人值守任务，真实 S3 留待用户确认可在场时另行验收，不再要求本轮配合睡眠、锁屏或拔插。第 22 分钟只读检查：已收集 22 个分钟样本，最大相邻间隔 60,096 ms，真实绘制持续增长、GPU 计数仍为 118/1/11，无 context loss 或显式运行错误；78 项证据判定测试再次通过。这不是最终长稳结论；若发生长采样缺口、真实绘制停摆、资源增长或退出残留，判定为失败，不以墙钟经过 8 小时代替验收。
 
 ## 4. 资源基线（探针页面）
 
@@ -164,8 +205,8 @@ for i in $(seq 1 10); do powershell -File display-switch.ps1 -Mode internal; sle
 
 ## 7. 决定与下一步
 
-- **决定：** 保留 `wallpaper` 探针作为 W0 复现入口；不把 WorkerW 挂载写成已批准生产方案，不进入 W1。W0 仍缺真实场景 context loss/8 小时长稳、旧预览提前关闭后的 pending 交接、挂起通知回调与 10 次 Explorer 成功重启；真实星座 10 次 scope 循环、预览租约与托盘回收已通过。
-- **下一轮最小任务：** ① 真实星座 context loss 恢复与 8 小时/资源阈值；② 预览 pending 交接与设置预览租约的宿主化；③ 挂起通知改用 `PowerRegisterSuspendResumeNotification` 回调或独立顶层消息窗；④ 10 次 Explorer 成功重启（间隔 40 秒以上）。
+- **决定：** 保留 `wallpaper` 探针作为 W0 复现入口；不把 WorkerW 挂载写成已批准生产方案，不进入 W1。真实星座 10 次 scope 循环、3 轮 context loss/restore、预览 pending 交接、托盘回收及间隔 10 次 Explorer 恢复已有证据；新增回调只通过注册/注销与 handler 自检，真实 S3 未验收。
+- **下一轮最小任务：** ① 真实星座 8 小时长稳/资源阈值；② `PowerRegisterSuspendResumeNotification` 真实 S3 送达。10 次 Explorer 成功重启已通过（约 50 秒间隔，保留 3 次/120 秒预算）。预览租约宿主化属于后续生产设计，不混入本轮隔离探针验收。
 - **复验触发：** Windows 构建、Explorer 桌面层级、WebView2 Runtime、wry/tao/tray-icon、DPI/刷新率或挂载算法任一变化，都必须重跑本报告对应实验。
 
 本报告不把一次全屏/快速重启或短窗口资源采样当作完整 W0 通过，也不以合成页面替代生产星座场景的长稳与预算。

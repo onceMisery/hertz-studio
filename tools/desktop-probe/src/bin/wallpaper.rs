@@ -21,6 +21,7 @@ fn main() {
 #[cfg(windows)]
 mod wallpaper {
     use std::error::Error;
+    use std::ffi::c_void;
     use std::fs::{self, OpenOptions};
     use std::io::Write;
     use std::path::PathBuf;
@@ -47,10 +48,12 @@ mod wallpaper {
         TH32CS_SNAPPROCESS,
     };
     use windows_sys::Win32::System::Power::{
-        RegisterPowerSettingNotification, RegisterSuspendResumeNotification, POWERBROADCAST_SETTING,
+        PowerRegisterSuspendResumeNotification, PowerUnregisterSuspendResumeNotification,
+        RegisterPowerSettingNotification, DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS, HPOWERNOTIFY,
+        POWERBROADCAST_SETTING,
     };
     use windows_sys::Win32::System::ProcessStatus::{
-        GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
+        GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX,
     };
     use windows_sys::Win32::System::SystemServices::GUID_MONITOR_POWER_ON;
     use windows_sys::Win32::System::Threading::{
@@ -70,13 +73,14 @@ mod wallpaper {
         GetClassNameW, GetCursorPos, GetParent, GetSystemMetrics, GetWindow, GetWindowLongPtrW,
         GetWindowRect, IsWindow, IsWindowVisible, PostMessageW, SendMessageTimeoutW, SetCursorPos,
         SetParent, SetWindowLongPtrW, SetWindowPos, ShowWindow, WindowFromPoint,
-        DEVICE_NOTIFY_WINDOW_HANDLE, GA_ROOT, GWLP_WNDPROC, GWL_EXSTYLE, GWL_STYLE, GW_CHILD,
-        GW_HWNDNEXT, HWND_BOTTOM, PBT_APMRESUMEAUTOMATIC, PBT_APMRESUMESUSPEND, PBT_APMSUSPEND,
-        PBT_POWERSETTINGCHANGE, SMTO_NORMAL, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
-        SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
-        SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_SHOW, WM_POWERBROADCAST, WNDPROC, WS_CAPTION,
-        WS_CHILD, WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX,
-        WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU, WS_THICKFRAME,
+        DEVICE_NOTIFY_CALLBACK, DEVICE_NOTIFY_WINDOW_HANDLE, GA_ROOT, GWLP_WNDPROC, GWL_EXSTYLE,
+        GWL_STYLE, GW_CHILD, GW_HWNDNEXT, HWND_BOTTOM, PBT_APMRESUMEAUTOMATIC,
+        PBT_APMRESUMESUSPEND, PBT_APMSUSPEND, PBT_POWERSETTINGCHANGE, SMTO_NORMAL,
+        SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+        SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW,
+        SW_SHOW, WM_POWERBROADCAST, WNDPROC, WS_CAPTION, WS_CHILD, WS_EX_APPWINDOW,
+        WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU,
+        WS_THICKFRAME,
     };
     use wry::{WebViewBuilder, WebViewExtWindows};
 
@@ -153,6 +157,7 @@ window.startMotion = function (fps) {
   motion.lastTick = 0;
   motion.paused = false;
   if (!motion.raf) motion.raf = requestAnimationFrame(loop);
+  if (window.ipc) window.ipc.postMessage(JSON.stringify({kind: 'motion_started', cap: fps}));
 };
 window.stopMotion = function () {
   if (motion.raf) cancelAnimationFrame(motion.raf);
@@ -182,6 +187,7 @@ window.seekSong = function (ms) {
   if (window.ipc) window.ipc.postMessage(JSON.stringify({kind: 'seek', songPosition: ms, sceneTime: Math.round(motion.sceneTime)}));
 };
 document.addEventListener('mousedown', function () { if (window.ipc) window.ipc.postMessage('click'); });
+if (window.ipc) window.ipc.postMessage('page_ready');
 </script></body></html>"#;
 
     const SCENE_RUNTIME: &str = include_str!("../../../../plugin/ui/vendor/stage-runtime.js");
@@ -199,20 +205,50 @@ canvas{display:block;width:100%;height:100%}
 (function () {
   'use strict';
   var host = document.getElementById('host');
-  var canvas = null, mounted = false, raf = 0, last = 0, lastDraw = 0, lastReport = 0;
-  var sceneTime = 0, frames = 0, cap = 30;
+  var canvas = null, mounted = false, raf = 0, last = 0, lastDraw = 0;
+  var sceneTime = 0, frames = 0, renderDraws = 0, cap = 30, enabled = true;
+  var lost = false, lossCount = 0, restoreCount = 0, restoreTimer = 0, capturing = false;
+  ['drawArrays', 'drawElements', 'drawArraysInstanced', 'drawElementsInstanced'].forEach(function (name) {
+    var original = WebGL2RenderingContext.prototype[name];
+    WebGL2RenderingContext.prototype[name] = function () {
+      if (this.canvas === canvas && !capturing && !this.isContextLost()) renderDraws++;
+      return original.apply(this, arguments);
+    };
+  });
   var bands = new Float32Array(64);
   function ipc(message) { if (window.ipc) window.ipc.postMessage(message); }
-  function stats() {
-    try { return window.ZodiacStagePure.stats(); } catch (_) { return null; }
+  function stats() { return window.ZodiacStagePure.stats(); }
+  function pixels() {
+    if (!mounted || lost) return null;
+    var capture;
+    capturing = true;
+    try { capture = window.ZodiacStagePure.capture(); } finally { capturing = false; }
+    if (!capture) return null;
+    var gl = canvas.getContext('webgl2');
+    var row = new Uint8Array(capture.width * 4), bright = 0, hash = 2166136261;
+    for (var y = 1; y < 10; y++) {
+      gl.readPixels(0, Math.floor(capture.height * y / 10), capture.width, 1, gl.RGBA, gl.UNSIGNED_BYTE, row);
+      for (var x = 0; x < row.length; x += 4) {
+        if (Math.max(row[x], row[x + 1], row[x + 2]) > 32) bright++;
+        hash = Math.imul(hash ^ row[x], 16777619);
+        hash = Math.imul(hash ^ row[x + 1], 16777619);
+        hash = Math.imul(hash ^ row[x + 2], 16777619);
+      }
+    }
+    return { bright: bright, hash: hash >>> 0, width: capture.width, height: capture.height,
+      error: gl.getError(), lost: gl.isContextLost() };
   }
-  function report(tag) {
+  function report(tag, withPixels) {
+    var beforeCapture = stats();
+    var sample = withPixels && enabled ? pixels() : null;
     ipc(JSON.stringify({ kind: 'scene', tag: tag, mounted: mounted, frames: frames,
-      sceneTime: Math.round(sceneTime), stats: stats() }));
+      elapsedMs: Math.round(performance.now()), timestamp: Date.now(), enabled: enabled,
+      sceneTime: Math.round(sceneTime), renderDraws: renderDraws, lost: lost, lossCount: lossCount, restoreCount: restoreCount,
+      pixels: sample, stats: beforeCapture }));
   }
   function loop(now) {
     raf = requestAnimationFrame(loop);
-    if (!mounted) return;
+    if (!mounted || lost) return;
     if (!last) last = now;
     var dt = Math.min(100, now - last); last = now; sceneTime += dt;
     if (now - lastDraw >= 1000 / cap - 0.5) {
@@ -221,13 +257,58 @@ canvas{display:block;width:100%;height:100%}
       window.ZodiacStagePure.setTime({ time: sceneTime / 1000, playing: true });
       frames++;
     }
-    if (now - lastReport >= 1000) { lastReport = now; report('frame'); }
   }
   function startLoop(fps) {
     cap = fps || cap;
-    if (!raf) { last = 0; raf = requestAnimationFrame(loop); }
+    if (!raf && enabled && !lost) { last = 0; raf = requestAnimationFrame(loop); }
   }
   function stopLoop() { if (raf) cancelAnimationFrame(raf); raf = 0; }
+  function onLost(event) {
+    event.preventDefault();
+    lost = true; lossCount++;
+    stopLoop();
+    window.ZodiacStagePure.setTime({ time: sceneTime / 1000, playing: false });
+    report('context-lost');
+  }
+  function onRestored() {
+    lost = false; restoreCount++;
+    window.ZodiacStagePure.setTime({ time: sceneTime / 1000, playing: enabled });
+    startLoop(cap);
+    report('context-restored');
+  }
+  // 取景必须与 App 内 SpaceStage 的 zodiac 场景同源：读 registry 的 camera 基线，
+  // 不再复制 radius/fov 常量；窄画幅按 registry 的 fit 框后退。
+  function applySceneCamera() {
+    var runtime = window.HertzStageRuntime;
+    var catalog = runtime && runtime.SpaceStagePure && runtime.SpaceStagePure.catalog
+      ? runtime.SpaceStagePure.catalog() : null;
+    var def = null;
+    if (catalog) {
+      for (var i = 0; i < catalog.length; i++) {
+        if (catalog[i] && catalog[i].id === 'zodiac') { def = catalog[i]; break; }
+      }
+    }
+    var camera = def && def.camera;
+    if (!camera || !(camera.radius > 0) || !(camera.fov > 0)) {
+      ipc(JSON.stringify({ kind: 'scene_registry_error' }));
+      return false;
+    }
+    var tan = Math.tan(camera.fov * Math.PI / 360);
+    var aspect = Math.max(0.01, innerWidth / innerHeight);
+    var fit = camera.fit;
+    var fitDistance = fit
+      ? Math.max(fit.halfWidth / tan / aspect, fit.halfHeight / tan)
+      : 0;
+    var look = camera.lookAt || [0, 0, 0];
+    window.ZodiacStagePure.setRig({
+      yaw: camera.theta || 0,
+      pitch: camera.phi || 0,
+      dist: Math.max(camera.radius, fitDistance),
+      fov: camera.fov,
+      tx: look[0], ty: look[1], tz: look[2],
+    }, { external: true });
+    return true;
+  }
   function mount() {
     if (mounted) return true;
     canvas = document.createElement('canvas');
@@ -244,51 +325,161 @@ canvas{display:block;width:100%;height:100%}
       ipc(JSON.stringify({ kind: 'scene_mount_failed' }));
       return false;
     }
+    canvas.addEventListener('webglcontextlost', onLost);
+    canvas.addEventListener('webglcontextrestored', onRestored);
     window.ZodiacStagePure.resize(innerWidth, innerHeight);
-    try { window.ZodiacStagePure.setPrefs({ field: true, interactive: false }); } catch (_) {}
-    mounted = true; sceneTime = 0; frames = 0; last = 0; lastDraw = 0; lastReport = 0;
+    if (!applySceneCamera()) {
+      window.ZodiacStagePure.unmount();
+      canvas.remove();
+      canvas = null;
+      ipc(JSON.stringify({ kind: 'scene_mount_failed' }));
+      return false;
+    }
+    window.ZodiacStagePure.setPrefs({ field: true, interactive: false });
+    mounted = true; lost = false; sceneTime = 0; frames = 0; renderDraws = 0; last = 0; lastDraw = 0;
     report('mounted');
+    ipc('scene_mounted');
     return true;
   }
   function unmount() {
+    clearTimeout(restoreTimer);
     stopLoop();
     if (!mounted) return;
     report('before_unmount');
-    try { window.ZodiacStagePure.unmount(); } catch (error) {
-      ipc(JSON.stringify({ kind: 'scene_unmount_error', error: String(error) }));
-    }
+    canvas.removeEventListener('webglcontextlost', onLost);
+    canvas.removeEventListener('webglcontextrestored', onRestored);
+    window.ZodiacStagePure.unmount();
     mounted = false;
-    if (canvas) { canvas.remove(); canvas = null; }
+    canvas.remove(); canvas = null;
     report('unmounted');
   }
   window.startMotion = function (fps) {
+    enabled = true;
     startLoop(fps);
-    try { window.ZodiacStagePure.setTime({ time: sceneTime / 1000, playing: true }); } catch (_) {}
+    window.ZodiacStagePure.setTime({ time: sceneTime / 1000, playing: !lost });
+    report('resumed');
   };
   window.stopMotion = function () {
+    enabled = false;
     stopLoop();
-    try { window.ZodiacStagePure.setTime({ time: sceneTime / 1000, playing: false }); } catch (_) {}
+    window.ZodiacStagePure.setTime({ time: sceneTime / 1000, playing: false });
+    report('paused');
   };
   window.sceneCycle = function (n) { unmount(); if (mount()) startLoop(cap); report('cycle:' + n); };
-  window.sceneUnmount = function () { unmount(); };
-  addEventListener('resize', function () { if (mounted) window.ZodiacStagePure.resize(innerWidth, innerHeight); });
-  if (mount()) startLoop(30);
+  window.sceneLoseContext = function () {
+    report('before-loss', true);
+    var gl = canvas.getContext('webgl2'), extension = gl && gl.getExtension('WEBGL_lose_context');
+    if (!extension || lost) {
+      ipc(JSON.stringify({ kind: 'scene_context_error', error: 'context loss unavailable or already lost' }));
+      return;
+    }
+    canvas.addEventListener('webglcontextlost', function () {
+      restoreTimer = setTimeout(function () { extension.restoreContext(); }, 2000);
+    }, { once: true });
+    extension.loseContext();
+  };
+  window.sceneSample = function (tag) { report(tag, true); };
+  window.sceneFinish = function () {
+    clearInterval(reporter);
+    report('final', true);
+    unmount();
+    ipc('scene_done');
+  };
+  addEventListener('error', function (event) {
+    ipc(JSON.stringify({ kind: 'scene_error', error: event.message }));
+  });
+  addEventListener('unhandledrejection', function (event) {
+    ipc(JSON.stringify({ kind: 'scene_error', error: String(event.reason) }));
+  });
+  addEventListener('resize', function () { if (mounted) { window.ZodiacStagePure.resize(innerWidth, innerHeight); applySceneCamera(); } });
+  var reporter = setInterval(function () { report('frame', __SAMPLE_PIXELS__); }, __REPORT_MS__);
+  if (mount()) {
+    if (__CHECK_CLOCK__) {
+      var requested = __DURATION_SECONDS__;
+      window.ZodiacStagePure.setTime({ time: requested, playing: false });
+      var actual = stats().time;
+      window.ZodiacStagePure.setTime({ time: 0, playing: false });
+      ipc(JSON.stringify({ kind: 'scene_clock_check', requested: requested, actual: actual }));
+      if (Math.abs(actual - requested) > 0.001) {
+        ipc(JSON.stringify({ kind: 'scene_clock_error', requested: requested, actual: actual }));
+        clearInterval(reporter);
+        unmount();
+        ipc('scene_failed');
+        return;
+      }
+    }
+    ipc('page_ready');
+  }
 })();
 </script></body></html>"#;
 
-    fn scene_page() -> String {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum SceneMode {
+        Off,
+        Scope,
+        Context,
+        Soak,
+    }
+
+    fn scene_page(mode: SceneMode, duration_ms: u64) -> String {
         SCENE_PAGE_TEMPLATE
+            .replace(
+                "__CHECK_CLOCK__",
+                if mode == SceneMode::Soak {
+                    "true"
+                } else {
+                    "false"
+                },
+            )
+            .replace(
+                "__DURATION_SECONDS__",
+                &(duration_ms as f64 / 1000.0).to_string(),
+            )
             .replace("__RUNTIME__", SCENE_RUNTIME)
             .replace("__SHIM__", SCENE_SHIM)
+            .replace(
+                "__REPORT_MS__",
+                if mode == SceneMode::Soak {
+                    "60000"
+                } else {
+                    "1000"
+                },
+            )
+            .replace(
+                "__SAMPLE_PIXELS__",
+                if mode == SceneMode::Soak {
+                    "true"
+                } else {
+                    "false"
+                },
+            )
     }
 
     enum UserEvent {
         Tick(u8),
         Check,
+        PageReady { generation: u32 },
+        PreviewReady { lease: u32 },
+        SceneMounted,
+        SceneFinished,
+        SceneFailed,
         CloseController,
-        EnvChange { reason: u8, on: bool },
+        EnvChange { reason: u8, on: bool, event: u32 },
+        PowerNotification { event: u32, synthetic: bool },
         Tray(TrayIconEvent),
         Menu(MenuEvent),
+    }
+
+    fn accept_page_ready(page_generation: u32, page_ready: &mut bool, generation: u32) -> bool {
+        if generation != page_generation {
+            return false;
+        }
+        *page_ready = true;
+        true
+    }
+
+    fn accept_preview_ready(preview_exists: bool, preview_lease_count: u32, lease: u32) -> bool {
+        preview_exists && lease == preview_lease_count
     }
 
     const REASON_MANUAL: u8 = 1 << 0;
@@ -302,10 +493,57 @@ canvas{display:block;width:100%;height:100%}
     static ORIGINAL_WNDPROC: AtomicIsize = AtomicIsize::new(0);
     static EVENT_PROXY: OnceLock<EventLoopProxy<UserEvent>> = OnceLock::new();
 
+    struct SuspendResumeRegistration {
+        handle: HPOWERNOTIFY,
+        _parameters: Box<DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS>,
+        evidence: Evidence,
+    }
+
+    impl SuspendResumeRegistration {
+        fn register(evidence: &Evidence) -> Option<Self> {
+            let mut parameters = Box::new(DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS {
+                Callback: Some(power_notification_callback),
+                Context: std::ptr::null_mut(),
+            });
+            let mut handle = std::ptr::null_mut();
+            // The Box keeps the subscription address stable until unregister; no window is borrowed.
+            let result = unsafe {
+                PowerRegisterSuspendResumeNotification(
+                    DEVICE_NOTIFY_CALLBACK,
+                    (&mut *parameters as *mut DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS).cast(),
+                    &mut handle,
+                )
+            };
+            evidence.log(format!(
+                "register_power source=PowerRegisterSuspendResumeNotification scope=process result={result} handle={handle:p}"
+            ));
+            if result != 0 {
+                return None;
+            }
+            Some(Self {
+                handle: handle as HPOWERNOTIFY,
+                _parameters: parameters,
+                evidence: evidence.clone(),
+            })
+        }
+    }
+
+    impl Drop for SuspendResumeRegistration {
+        fn drop(&mut self) {
+            // Subscription storage remains alive through unregister; the proxy is process-static.
+            let result = unsafe { PowerUnregisterSuspendResumeNotification(self.handle) };
+            self.evidence.log(format!(
+                "unregister_power source=PowerUnregisterSuspendResumeNotification scope=process result={result} handle={:#x}",
+                self.handle
+            ));
+        }
+    }
+
     #[derive(Clone)]
     struct TreeSample {
         cpu_100ns: u64,
         working_set: u64,
+        private_bytes: u64,
         processes: usize,
         webview_processes: usize,
         pids: Vec<u32>,
@@ -420,8 +658,14 @@ canvas{display:block;width:100%;height:100%}
         pending_preview: Option<Instant>,
         preview_test: bool,
         preview_lease_count: u32,
-        scene_test: bool,
+        scene_mode: SceneMode,
+        scene_finishing: Option<Instant>,
+        soak_started: Option<Instant>,
+        soak_duration: Duration,
+        last_resource_sample: Instant,
         page_html: String,
+        page_generation: u32,
+        page_ready: bool,
         cpu_mark: Option<(String, Instant, TreeSample)>,
         last_liveness: Instant,
     }
@@ -432,6 +676,11 @@ canvas{display:block;width:100%;height:100%}
         }
 
         fn eval(&self, tag: &str, script: &str) {
+            if !self.page_ready {
+                self.evidence
+                    .log(format!("eval tag={tag} skipped=page-loading"));
+                return;
+            }
             match self.view.evaluate_script(script) {
                 Ok(()) => self.evidence.log(format!("eval tag={tag} ok")),
                 Err(error) => self.evidence.log(format!("eval tag={tag} error={error}")),
@@ -633,7 +882,22 @@ canvas{display:block;width:100%;height:100%}
             if alive && parent == self.workerw && workerw_alive {
                 if self.last_liveness.elapsed() >= Duration::from_secs(2) {
                     self.last_liveness = Instant::now();
-                    if let Err(error) = self.view.evaluate_script("1") {
+                    let started = self.restart_test.then(Instant::now);
+                    if started.is_some() {
+                        self.evidence.log(format!(
+                            "liveness_eval_begin generation={} ready={}",
+                            self.page_generation, self.page_ready
+                        ));
+                    }
+                    let result = self.view.evaluate_script("1");
+                    if let Some(started) = started {
+                        self.evidence.log(format!(
+                            "liveness_eval_end generation={} elapsed_ms={} result={result:?}",
+                            self.page_generation,
+                            started.elapsed().as_millis()
+                        ));
+                    }
+                    if let Err(error) = result {
                         self.evidence.log(format!("liveness_lost error={error}"));
                         self.recover(target);
                     }
@@ -692,7 +956,17 @@ canvas{display:block;width:100%;height:100%}
         }
 
         fn check_fullscreen(&mut self) {
+            let started = self.restart_test.then(Instant::now);
+            if started.is_some() {
+                self.evidence.log("quns_query_begin");
+            }
             let state = query_notification_state();
+            if let Some(started) = started {
+                self.evidence.log(format!(
+                    "quns_query_end elapsed_ms={} state={state}",
+                    started.elapsed().as_millis()
+                ));
+            }
             self.sample_notification_state(state);
         }
 
@@ -736,6 +1010,10 @@ canvas{display:block;width:100%;height:100%}
                 sample.pids,
                 sample.cpu_100ns / 10_000,
                 sample.working_set as f64 / (1024.0 * 1024.0)
+            ));
+            self.evidence.log(format!(
+                "memory tag={tag} private_mb={:.1}",
+                sample.private_bytes as f64 / (1024.0 * 1024.0)
             ));
             self.cpu_mark = Some((tag.to_string(), Instant::now(), sample));
         }
@@ -841,7 +1119,14 @@ canvas{display:block;width:100%;height:100%}
                 std::thread::sleep(Duration::from_millis(200));
             }
             self.last_liveness = Instant::now();
-            let new_window = match WindowBuilder::new()
+            let new_generation = self.page_generation + 1;
+            let window_started = self.restart_test.then(Instant::now);
+            if window_started.is_some() {
+                self.evidence.log(format!(
+                    "recovery_window_begin attempt={attempt} generation={new_generation}"
+                ));
+            }
+            let new_window = WindowBuilder::new()
                 .with_title("Hertz DESK-W0 wallpaper probe")
                 .with_inner_size(PhysicalSize::new(
                     self.screen_w as u32,
@@ -857,8 +1142,14 @@ canvas{display:block;width:100%;height:100%}
                 .with_focused(false)
                 .with_skip_taskbar(true)
                 .with_undecorated_shadow(false)
-                .build(target)
-            {
+                .build(target);
+            if let Some(started) = window_started {
+                self.evidence.log(format!(
+                    "recovery_window_end attempt={attempt} generation={new_generation} elapsed_ms={} ok={}",
+                    started.elapsed().as_millis(), new_window.is_ok()
+                ));
+            }
+            let new_window = match new_window {
                 Ok(window) => window,
                 Err(error) => {
                     self.evidence
@@ -894,20 +1185,54 @@ canvas{display:block;width:100%;height:100%}
             }
             let clicks = self.clicks.clone();
             let evidence = self.evidence.clone();
-            let log_prefix = if self.scene_test { "scene_js" } else { "js" };
-            let new_view = match WebViewBuilder::new()
+            let log_prefix = if self.scene_mode != SceneMode::Off {
+                "scene_js"
+            } else {
+                "js"
+            };
+            let view_started = self.restart_test.then(Instant::now);
+            if view_started.is_some() {
+                self.evidence.log(format!(
+                    "recovery_view_begin attempt={attempt} generation={new_generation}"
+                ));
+            }
+            let new_view = WebViewBuilder::new()
                 .with_html(self.page_html.clone())
                 .with_background_color((8, 16, 31, 255))
                 .with_ipc_handler(move |request| {
                     let body = request.body();
                     if body == "click" {
                         clicks.fetch_add(1, Ordering::SeqCst);
+                    } else if body == "page_ready" {
+                        if let Some(proxy) = EVENT_PROXY.get() {
+                            let _ = proxy.send_event(UserEvent::PageReady {
+                                generation: new_generation,
+                            });
+                        }
+                    } else if body == "scene_done"
+                        || body == "scene_failed"
+                        || body == "scene_mounted"
+                    {
+                        if let Some(proxy) = EVENT_PROXY.get() {
+                            let event = match body.as_str() {
+                                "scene_done" => UserEvent::SceneFinished,
+                                "scene_mounted" => UserEvent::SceneMounted,
+                                _ => UserEvent::SceneFailed,
+                            };
+                            let _ = proxy.send_event(event);
+                        }
                     } else {
                         evidence.log(format!("{log_prefix} {body}"));
                     }
                 })
-                .build(&new_window)
-            {
+                .build(&new_window);
+            if let Some(started) = view_started {
+                self.evidence.log(format!(
+                    "recovery_view_end attempt={attempt} generation={new_generation} elapsed_ms={} ok={}",
+                    started.elapsed().as_millis(), new_view.is_ok()
+                ));
+            }
+            let new_view = match new_view {
                 Ok(view) => view,
                 Err(error) => {
                     self.evidence
@@ -928,20 +1253,19 @@ canvas{display:block;width:100%;height:100%}
             }
             let old_window = std::mem::replace(&mut self.window, new_window);
             let old_view = std::mem::replace(&mut self.view, new_view);
+            // Publish the installed view's identity before handling queued ready events.
+            self.page_generation = new_generation;
+            self.page_ready = false;
             std::mem::forget(old_window);
             std::mem::forget(old_view);
             self.workerw = workerw;
+            // Native visibility applies now; JS policy waits for this generation's ready.
             if self.policy_hidden {
                 let result = unsafe { self.view.controller().SetIsVisible(false) };
-                self.eval("recover-policy-stop", "window.stopMotion()");
                 self.evidence
                     .log(format!("recovery_policy hidden=true controller={result:?}"));
             } else {
                 let result = unsafe { self.view.controller().SetIsVisible(true) };
-                self.eval(
-                    "recover-motion",
-                    &format!("window.startMotion({})", self.current_fps),
-                );
                 self.evidence.log(format!(
                     "recovery_policy hidden=false controller={result:?}"
                 ));
@@ -986,11 +1310,18 @@ canvas{display:block;width:100%;height:100%}
             };
             let hwnd = window.hwnd() as HWND;
             let evidence = self.evidence.clone();
+            let lease = self.preview_lease_count + 1;
             let view = match WebViewBuilder::new()
                 .with_html(PAGE)
                 .with_background_color((8, 16, 31, 255))
                 .with_ipc_handler(move |request| {
-                    evidence.log(format!("preview_js {}", request.body()));
+                    if request.body() == "page_ready" {
+                        if let Some(proxy) = EVENT_PROXY.get() {
+                            let _ = proxy.send_event(UserEvent::PreviewReady { lease });
+                        }
+                    } else {
+                        evidence.log(format!("preview_js {}", request.body()));
+                    }
                 })
                 .build(&window)
             {
@@ -1004,7 +1335,6 @@ canvas{display:block;width:100%;height:100%}
                     return;
                 }
             };
-            let _ = view.evaluate_script("window.startMotion(15)");
             let now = Instant::now();
             self.preview = Some(Preview {
                 view,
@@ -1012,7 +1342,8 @@ canvas{display:block;width:100%;height:100%}
                 opened_at: now,
                 lease_until: now + Duration::from_secs(15),
             });
-            self.preview_lease_count += 1;
+            // Commit the lease with the installed preview before consuming queued IPC.
+            self.preview_lease_count = lease;
             let after = sample_process_tree();
             self.evidence.log(format!(
                 "preview_open tag={tag} hwnd={} leases={} lease_s=15 processes={}->{} webview={}->{}",
@@ -1119,7 +1450,7 @@ canvas{display:block;width:100%;height:100%}
         }
 
         fn tick(&mut self, n: u8, target: &EventLoopWindowTarget<UserEvent>) -> bool {
-            if self.scene_test {
+            if self.scene_mode != SceneMode::Off {
                 match n {
                     0 => {
                         self.state("mounted");
@@ -1129,19 +1460,23 @@ canvas{display:block;width:100%;height:100%}
                     1 => {
                         self.state("settled");
                         self.start_cpu("scene");
+                        self.eval("scene-baseline", "window.sceneSample('baseline')");
                     }
-                    2..=11 => {
+                    2..=11 if self.scene_mode == SceneMode::Scope => {
                         self.eval("scene-cycle", &format!("window.sceneCycle({n})"));
                     }
-                    12 => {
-                        self.finish_cpu("scene");
-                        self.eval("scene-unmount", "window.sceneUnmount()");
-                        self.stopping = true;
-                        self.state("done");
-                        self.evidence.marker("done");
-                        return true;
+                    2 | 4 | 6 if self.scene_mode == SceneMode::Context => {
+                        self.eval("scene-context-loss", "window.sceneLoseContext()");
                     }
-                    _ => {}
+                    3 | 5 | 7 if self.scene_mode == SceneMode::Context => {
+                        self.eval("scene-context-check", "window.sceneSample('after-restore')");
+                    }
+                    _ => {
+                        self.finish_cpu("scene");
+                        self.stopping = true;
+                        self.scene_finishing = Some(Instant::now());
+                        self.eval("scene-finish", "window.sceneFinish()");
+                    }
                 }
                 return false;
             }
@@ -1157,7 +1492,21 @@ canvas{display:block;width:100%;height:100%}
                     3 => self.renew_preview(),
                     4 => self.log_preview_state("after-expiry"),
                     5 => self.open_preview(target, "third"),
-                    6 => {
+                    6 => self.open_preview(target, "handoff-request"),
+                    7 => {
+                        if let Some(preview) = &self.preview {
+                            unsafe {
+                                PostMessageW(
+                                    preview.window.hwnd() as HWND,
+                                    windows_sys::Win32::UI::WindowsAndMessaging::WM_CLOSE,
+                                    0,
+                                    0,
+                                );
+                            }
+                        }
+                    }
+                    8 => self.log_preview_state("after-handoff"),
+                    9 => {
                         self.pending_preview = None;
                         self.close_preview(target, "test-end");
                         self.stopping = true;
@@ -1226,8 +1575,10 @@ canvas{display:block;width:100%;height:100%}
                         self.start_cpu("fps30");
                     }
                     self.state("running");
-                    self.probe_input("desktop-point");
-                    self.evidence.marker("input-tested");
+                    if !self.restart_test {
+                        self.probe_input("desktop-point");
+                        self.evidence.marker("input-tested");
+                    }
                 }
                 2 => {
                     self.finish_cpu("fps30");
@@ -1288,7 +1639,7 @@ canvas{display:block;width:100%;height:100%}
         let mut monitor_index = 0usize;
         let mut dpi_compensate = false;
         let mut preview_test = false;
-        let mut scene_test = false;
+        let mut scene_mode = SceneMode::Off;
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
             match arg.as_str() {
@@ -1305,7 +1656,16 @@ canvas{display:block;width:100%;height:100%}
                 }
                 "--dpi-compensate" => dpi_compensate = true,
                 "--preview-test" => preview_test = true,
-                "--scene-test" => scene_test = true,
+                "--scene-test" | "--scene-context-test" | "--scene-soak" => {
+                    if scene_mode != SceneMode::Off {
+                        return Err("scene modes are mutually exclusive".into());
+                    }
+                    scene_mode = match arg.as_str() {
+                        "--scene-test" => SceneMode::Scope,
+                        "--scene-context-test" => SceneMode::Context,
+                        _ => SceneMode::Soak,
+                    };
+                }
                 "--restart-test" => restart_test = true,
                 "--power-selftest" => power_selftest = true,
                 "--cycle-test" => cycle_test = true,
@@ -1324,10 +1684,15 @@ canvas{display:block;width:100%;height:100%}
                 other => return Err(format!("unknown argument: {other}").into()),
             }
         }
-        if [restart_test, cycle_test, preview_test, scene_test]
-            .iter()
-            .filter(|mode| **mode)
-            .count()
+        if [
+            restart_test,
+            cycle_test,
+            preview_test,
+            scene_mode != SceneMode::Off,
+        ]
+        .iter()
+        .filter(|mode| **mode)
+        .count()
             > 1
         {
             return Err(
@@ -1338,8 +1703,11 @@ canvas{display:block;width:100%;height:100%}
         if !monitor_device.is_empty() && monitor_index > 0 {
             return Err("--monitor-device and --monitor-index are mutually exclusive".into());
         }
-        let page_html = if scene_test {
-            scene_page()
+        if duration_ms < 10_000 && scene_mode == SceneMode::Soak {
+            return Err("--duration-ms must be at least 10000 for timed modes".into());
+        }
+        let page_html = if scene_mode != SceneMode::Off {
+            scene_page(scene_mode, duration_ms)
         } else {
             PAGE.to_string()
         };
@@ -1350,7 +1718,7 @@ canvas{display:block;width:100%;height:100%}
             None => std::process::exit(3),
         };
         evidence.log(format!(
-            "probe=desk-w0 source={source} pid={} restart_test={restart_test} cycle_test={cycle_test} cycles={cycles} duration_ms={duration_ms} power_selftest={power_selftest} close_controller_after_ms={close_controller_after_ms} monitor_device={monitor_device} monitor_index={monitor_index} dpi_compensate={dpi_compensate} preview_test={preview_test} scene_test={scene_test} webview2_user_data={}",
+            "probe=desk-w0 source={source} pid={} restart_test={restart_test} cycle_test={cycle_test} cycles={cycles} duration_ms={duration_ms} power_selftest={power_selftest} close_controller_after_ms={close_controller_after_ms} monitor_device={monitor_device} monitor_index={monitor_index} dpi_compensate={dpi_compensate} preview_test={preview_test} scene_mode={scene_mode:?} webview2_user_data={}",
             std::process::id(),
             out.join("webview2").display()
         ));
@@ -1385,6 +1753,10 @@ canvas{display:block;width:100%;height:100%}
         let event_loop = event_loop_builder.build();
         let proxy = event_loop.create_proxy();
         let _ = EVENT_PROXY.set(proxy.clone());
+        let mut power_registration = Some(
+            SuspendResumeRegistration::register(&evidence)
+                .ok_or("power callback registration failed")?,
+        );
         if close_controller_after_ms > 0 {
             let proxy = proxy.clone();
             std::thread::spawn(move || {
@@ -1520,7 +1892,11 @@ canvas{display:block;width:100%;height:100%}
         let clicks = Arc::new(AtomicUsize::new(0));
         let clicks_view = clicks.clone();
         let evidence_view = evidence.clone();
-        let log_prefix = if scene_test { "scene_js" } else { "js" };
+        let log_prefix = if scene_mode != SceneMode::Off {
+            "scene_js"
+        } else {
+            "js"
+        };
         let view = WebViewBuilder::new()
             .with_html(page_html.clone())
             .with_background_color((8, 16, 31, 255))
@@ -1528,6 +1904,20 @@ canvas{display:block;width:100%;height:100%}
                 let body = request.body();
                 if body == "click" {
                     clicks_view.fetch_add(1, Ordering::SeqCst);
+                } else if body == "page_ready" {
+                    if let Some(proxy) = EVENT_PROXY.get() {
+                        let _ = proxy.send_event(UserEvent::PageReady { generation: 0 });
+                    }
+                } else if body == "scene_done" || body == "scene_failed" || body == "scene_mounted"
+                {
+                    if let Some(proxy) = EVENT_PROXY.get() {
+                        let event = match body.as_str() {
+                            "scene_done" => UserEvent::SceneFinished,
+                            "scene_mounted" => UserEvent::SceneMounted,
+                            _ => UserEvent::SceneFailed,
+                        };
+                        let _ = proxy.send_event(event);
+                    }
                 } else {
                     evidence_view.log(format!("{log_prefix} {body}"));
                 }
@@ -1546,29 +1936,13 @@ canvas{display:block;width:100%;height:100%}
         }
 
         if power_selftest {
-            let hwnd_selftest = hwnd as usize;
-            let evidence_selftest = evidence.clone();
-            std::thread::spawn(move || {
+            evidence.log("power_selftest source=selftest-handler synthetic=true coverage=handler-only os_callback_tested=false schedule_ms=3000,5000");
+            std::thread::spawn(|| {
+                let started = Instant::now();
                 std::thread::sleep(Duration::from_secs(3));
-                evidence_selftest.log("selftest_post_suspend");
-                unsafe {
-                    PostMessageW(
-                        hwnd_selftest as HWND,
-                        WM_POWERBROADCAST,
-                        PBT_APMSUSPEND as usize,
-                        0,
-                    )
-                };
-                std::thread::sleep(Duration::from_secs(2));
-                evidence_selftest.log("selftest_post_resume");
-                unsafe {
-                    PostMessageW(
-                        hwnd_selftest as HWND,
-                        WM_POWERBROADCAST,
-                        PBT_APMRESUMEAUTOMATIC as usize,
-                        0,
-                    )
-                };
+                send_power_notification(PBT_APMSUSPEND, true);
+                std::thread::sleep(Duration::from_secs(5).saturating_sub(started.elapsed()));
+                send_power_notification(PBT_APMRESUMEAUTOMATIC, true);
             });
         }
 
@@ -1623,21 +1997,35 @@ canvas{display:block;width:100%;height:100%}
             pending_preview: None,
             preview_test,
             preview_lease_count: 0,
-            scene_test,
+            scene_mode,
+            scene_finishing: None,
+            soak_started: None,
+            soak_duration: Duration::from_millis(duration_ms),
+            last_resource_sample: Instant::now(),
             page_html,
+            page_generation: 0,
+            page_ready: false,
             cpu_mark: None,
             last_liveness: Instant::now(),
         };
 
         let _ticker = {
             let proxy = proxy.clone();
-            let schedule: Vec<u64> = if scene_test {
+            let schedule: Vec<u64> = if scene_mode == SceneMode::Scope {
                 vec![
                     0, 5_000, 7_000, 9_000, 11_000, 13_000, 15_000, 17_000, 19_000, 21_000, 23_000,
                     25_000, 28_000,
                 ]
+            } else if scene_mode == SceneMode::Context {
+                vec![
+                    0, 5_000, 7_000, 13_000, 15_000, 21_000, 23_000, 29_000, 32_000,
+                ]
+            } else if scene_mode == SceneMode::Soak {
+                vec![0, 5_000]
             } else if preview_test {
-                vec![0, 2_000, 5_000, 8_000, 24_000, 26_000, 30_000]
+                vec![
+                    0, 2_000, 5_000, 8_000, 24_000, 26_000, 28_000, 30_000, 32_000, 35_000,
+                ]
             } else if cycle_test {
                 (0..=(cycles as u64 + 1))
                     .map(|index| index * 1_000)
@@ -1673,26 +2061,113 @@ canvas{display:block;width:100%;height:100%}
         event_loop.run(move |event, event_loop_target, control_flow| {
             *control_flow = ControlFlow::Wait;
             match event {
+                Event::LoopDestroyed => {
+                    drop(power_registration.take());
+                }
                 Event::UserEvent(UserEvent::Tick(n)) => {
                     if probe.tick(n, event_loop_target) {
                         *control_flow = ControlFlow::Exit;
                     }
                 }
                 Event::UserEvent(UserEvent::CloseController) => probe.close_controller(),
+                Event::UserEvent(UserEvent::PageReady { generation }) => {
+                    if accept_page_ready(probe.page_generation, &mut probe.page_ready, generation) {
+                        probe.evidence.log(format!("page_ready generation={generation}"));
+                        if probe.policy_hidden {
+                            probe.eval("page-ready-stop", "window.stopMotion()");
+                        } else {
+                            probe.eval(
+                                "page-ready-start",
+                                &format!("window.startMotion({})", probe.current_fps),
+                            );
+                        }
+                    } else {
+                        probe.evidence.log(format!(
+                            "page_ready_ignored generation={generation} current_generation={}",
+                            probe.page_generation
+                        ));
+                    }
+                }
+                Event::UserEvent(UserEvent::PreviewReady { lease }) => {
+                    if accept_preview_ready(probe.preview.is_some(), probe.preview_lease_count, lease) {
+                        if let Some(preview) = &probe.preview {
+                            probe.evidence.log(format!("preview_ready lease={lease}"));
+                            match preview.view.evaluate_script("window.startMotion(15)") {
+                                Ok(()) => probe.evidence.log(format!(
+                                    "eval tag=preview-motion lease={lease} ok"
+                                )),
+                                Err(error) => probe.evidence.log(format!(
+                                    "eval tag=preview-motion lease={lease} error={error}"
+                                )),
+                            }
+                        }
+                    } else {
+                        probe.evidence.log(format!(
+                            "preview_ready_ignored lease={lease} current_lease={} active={}",
+                            probe.preview_lease_count, probe.preview.is_some()
+                        ));
+                    }
+                }
+                Event::UserEvent(UserEvent::SceneMounted) => {
+                    if probe.scene_mode == SceneMode::Soak {
+                        probe.soak_started.get_or_insert_with(Instant::now);
+                    }
+                }
+                Event::UserEvent(UserEvent::SceneFailed) => {
+                    probe.stopping = true;
+                    probe.evidence.log("scene_failed");
+                    *control_flow = ControlFlow::ExitWithCode(1);
+                }
+                Event::UserEvent(UserEvent::SceneFinished) => {
+                    if probe.scene_finishing.take().is_some() {
+                        probe.evidence.log("scene_complete");
+                        probe.state("done");
+                        probe.evidence.marker("done");
+                        *control_flow = ControlFlow::Exit;
+                    }
+                }
                 Event::UserEvent(UserEvent::Check) => {
+                    if !probe.stopping && probe.soak_started.is_some_and(|started| started.elapsed() >= probe.soak_duration) {
+                        probe.tick(2, event_loop_target);
+                    }
+                    if probe.scene_finishing.is_some_and(|started| started.elapsed() > Duration::from_secs(10)) {
+                        probe.evidence.log("scene_finish_timeout");
+                        *control_flow = ControlFlow::ExitWithCode(1);
+                    }
                     probe.check_health(event_loop_target);
-                    if !probe.recovery.terminal {
+                    if !probe.stopping && !probe.recovery.terminal {
                         probe.check_fullscreen();
                     }
                     probe.check_preview(event_loop_target);
+                    if probe.scene_mode == SceneMode::Soak && !probe.stopping
+                        && probe.last_resource_sample.elapsed() >= Duration::from_secs(60)
+                    {
+                        probe.last_resource_sample = Instant::now();
+                        probe.finish_cpu("scene-interval");
+                        probe.start_cpu("scene-interval");
+                        probe.evidence.log(format!("scene_policy reasons={:#04x} hidden={}", probe.policy_reasons, probe.policy_hidden));
+                    }
                 }
-                Event::UserEvent(UserEvent::EnvChange { reason, on }) => {
+                Event::UserEvent(UserEvent::EnvChange { reason, on, event }) => {
+                    probe.evidence.log(format!(
+                        "power_notification event={event:#x} source=WM_POWERBROADCAST synthetic=false reason={reason:#04x} on={on}"
+                    ));
                     let tag = match reason {
                         REASON_DISPLAY_OFF => "display-off",
-                        REASON_SLEEP => "sleep",
+                        REASON_SLEEP => "sleep-window",
                         _ => "environment",
                     };
                     probe.set_reason(reason, on, tag);
+                }
+                Event::UserEvent(UserEvent::PowerNotification { event, synthetic }) => {
+                    let source = if synthetic { "selftest-handler" } else { "os-callback" };
+                    let sleep = power_event_sleep_state(event);
+                    probe.evidence.log(format!(
+                        "power_notification event={event:#x} source={source} synthetic={synthetic} sleep={sleep:?}"
+                    ));
+                    if let Some(on) = sleep {
+                        probe.set_reason(REASON_SLEEP, on, "sleep-callback");
+                    }
                 }
                 Event::UserEvent(UserEvent::Tray(event)) => {
                     probe.evidence.log(format!("tray_event={event:?}"));
@@ -1708,11 +2183,16 @@ canvas{display:block;width:100%;height:100%}
                     }
                 }
                 Event::WindowEvent {
+                    window_id,
                     event: WindowEvent::CloseRequested,
                     ..
                 } => {
-                    probe.stopping = true;
-                    *control_flow = ControlFlow::Exit;
+                    if probe.preview.as_ref().is_some_and(|preview| preview.window.id() == window_id) {
+                        probe.close_preview(event_loop_target, "window-close");
+                    } else if window_id == probe.window.id() {
+                        probe.stopping = true;
+                        *control_flow = ControlFlow::Exit;
+                    }
                 }
                 _ => {}
             }
@@ -1980,6 +2460,7 @@ canvas{display:block;width:100%;height:100%}
         let pids = descendants(&processes, root);
         let mut cpu_100ns = 0u64;
         let mut working_set = 0u64;
+        let mut private_bytes = 0u64;
         let mut webview_processes = 0usize;
         let mut per_process = Vec::new();
         for (pid, _, name) in &processes {
@@ -2003,12 +2484,18 @@ canvas{display:block;width:100%;height:100%}
                     cpu_100ns += cpu;
                     per_process.push((*pid, name.clone(), cpu));
                 }
-                let mut counters = PROCESS_MEMORY_COUNTERS {
-                    cb: std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
+                let mut counters = PROCESS_MEMORY_COUNTERS_EX {
+                    cb: std::mem::size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32,
                     ..Default::default()
                 };
-                if GetProcessMemoryInfo(handle, &mut counters, counters.cb) != 0 {
+                if GetProcessMemoryInfo(
+                    handle,
+                    &mut counters as *mut _ as *mut PROCESS_MEMORY_COUNTERS,
+                    counters.cb,
+                ) != 0
+                {
                     working_set += counters.WorkingSetSize as u64;
+                    private_bytes += counters.PrivateUsage as u64;
                 }
                 CloseHandle(handle);
             }
@@ -2016,6 +2503,7 @@ canvas{display:block;width:100%;height:100%}
         TreeSample {
             cpu_100ns,
             working_set,
+            private_bytes,
             processes: pids.len(),
             webview_processes,
             pids,
@@ -2075,6 +2563,29 @@ canvas{display:block;width:100%;height:100%}
         ((time.dwHighDateTime as u64) << 32) | time.dwLowDateTime as u64
     }
 
+    fn power_event_sleep_state(event: u32) -> Option<bool> {
+        match event {
+            PBT_APMSUSPEND => Some(true),
+            PBT_APMRESUMEAUTOMATIC | PBT_APMRESUMESUSPEND => Some(false),
+            _ => None,
+        }
+    }
+
+    fn send_power_notification(event: u32, synthetic: bool) {
+        if let Some(proxy) = EVENT_PROXY.get() {
+            let _ = proxy.send_event(UserEvent::PowerNotification { event, synthetic });
+        }
+    }
+
+    unsafe extern "system" fn power_notification_callback(
+        _context: *const c_void,
+        event: u32,
+        _setting: *const c_void,
+    ) -> u32 {
+        send_power_notification(event, false);
+        0
+    }
+
     fn install_power_hook(hwnd: HWND, evidence: &Evidence) {
         let original = unsafe { GetWindowLongPtrW(hwnd, GWLP_WNDPROC) };
         ORIGINAL_WNDPROC.store(original, Ordering::SeqCst);
@@ -2085,16 +2596,15 @@ canvas{display:block;width:100%;height:100%}
                 &GUID_MONITOR_POWER_ON,
                 DEVICE_NOTIFY_WINDOW_HANDLE,
             );
-            let suspend = RegisterSuspendResumeNotification(hwnd as _, DEVICE_NOTIFY_WINDOW_HANDLE);
             evidence.log(format!(
-                "register_power monitor_handle={monitor} suspend_resume_handle={suspend}"
+                "register_power source=RegisterPowerSettingNotification delivery=WM_POWERBROADCAST monitor_handle={monitor}"
             ));
         }
     }
 
-    fn send_env_change(reason: u8, on: bool) {
+    fn send_env_change(reason: u8, on: bool, event: u32) {
         if let Some(proxy) = EVENT_PROXY.get() {
-            let _ = proxy.send_event(UserEvent::EnvChange { reason, on });
+            let _ = proxy.send_event(UserEvent::EnvChange { reason, on, event });
         }
     }
 
@@ -2105,10 +2615,11 @@ canvas{display:block;width:100%;height:100%}
         lparam: isize,
     ) -> isize {
         if msg == WM_POWERBROADCAST {
-            match wparam as u32 {
-                PBT_APMSUSPEND => send_env_change(REASON_SLEEP, true),
+            let event = wparam as u32;
+            match event {
+                PBT_APMSUSPEND => send_env_change(REASON_SLEEP, true, event),
                 PBT_APMRESUMEAUTOMATIC | PBT_APMRESUMESUSPEND => {
-                    send_env_change(REASON_SLEEP, false)
+                    send_env_change(REASON_SLEEP, false, event)
                 }
                 PBT_POWERSETTINGCHANGE => {
                     let setting = &*(lparam as *const POWERBROADCAST_SETTING);
@@ -2120,7 +2631,7 @@ canvas{display:block;width:100%;height:100%}
                         && actual.data4 == expected.data4
                     {
                         let value = *(setting.Data.as_ptr() as *const u32);
-                        send_env_change(REASON_DISPLAY_OFF, value == 0);
+                        send_env_change(REASON_DISPLAY_OFF, value == 0, event);
                     }
                 }
                 _ => {}
@@ -2209,5 +2720,69 @@ canvas{display:block;width:100%;height:100%}
             }
         }
         Ok(Icon::from_rgba(rgba, SIZE, SIZE)?)
+    }
+
+    #[cfg(test)]
+    mod ready_tests {
+        use super::*;
+
+        #[test]
+        fn initial_page_ready_opens_eval_gate() {
+            let mut ready = false;
+            assert!(accept_page_ready(0, &mut ready, 0));
+            assert!(ready);
+        }
+
+        #[test]
+        fn loading_page_accepts_only_its_installed_generation() {
+            let mut ready = false;
+            // A ready queued during build cannot mark the old view ready.
+            assert!(!accept_page_ready(6, &mut ready, 7));
+            assert!(!ready);
+            // After replacement, a late ready from the old view is also ignored.
+            assert!(!accept_page_ready(7, &mut ready, 6));
+            assert!(!ready);
+            assert!(accept_page_ready(7, &mut ready, 7));
+            assert!(ready);
+        }
+
+        #[test]
+        fn stale_ready_does_not_clear_current_ready() {
+            let mut ready = true;
+            assert!(!accept_page_ready(7, &mut ready, 6));
+            assert!(ready);
+        }
+
+        #[test]
+        fn preview_ready_requires_an_installed_matching_lease() {
+            assert!(!accept_preview_ready(false, 0, 0));
+            assert!(!accept_preview_ready(false, 1, 1));
+            assert!(!accept_preview_ready(false, 1, 2));
+            assert!(!accept_preview_ready(true, 1, 2));
+            assert!(!accept_preview_ready(true, 2, 1));
+            assert!(accept_preview_ready(true, 2, 2));
+        }
+    }
+
+    #[cfg(test)]
+    mod power_tests {
+        use super::*;
+
+        #[test]
+        fn suspend_sets_sleep_reason() {
+            assert_eq!(power_event_sleep_state(PBT_APMSUSPEND), Some(true));
+        }
+
+        #[test]
+        fn resume_clears_sleep_reason() {
+            assert_eq!(power_event_sleep_state(PBT_APMRESUMEAUTOMATIC), Some(false));
+            assert_eq!(power_event_sleep_state(PBT_APMRESUMESUSPEND), Some(false));
+        }
+
+        #[test]
+        fn unrelated_event_does_not_change_sleep_reason() {
+            assert_eq!(power_event_sleep_state(PBT_POWERSETTINGCHANGE), None);
+            assert_eq!(power_event_sleep_state(u32::MAX), None);
+        }
     }
 }

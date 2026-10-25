@@ -233,6 +233,30 @@ W1 不承诺普通窗口部分遮挡的逐像素裁剪，也不承诺远程桌�
 
 本地 native feed 读取该钥匙，JS 页面不读取文件、不拿播放器完整令牌，也不持有只读钥匙。原生桥将数据转为无凭据消息交给内嵌页面；来源不在受信内嵌 origin 的页面不得接收桥或命令。
 
+#### W1-A 冻结：首版只做快照轮询（2026-10-24）
+
+W1-A 先实现 `GET /v1/wallpaper/snapshot`，不实现 `/v1/wallpaper/events` WS；事件推送留到 W1-B。原生 feed 500 ms 轮询，不新建第二份播放/频谱 owner。W1-A 只交付契约与宿主 feed，探针场景仍只做环境动画；把 feed 接入场景在 W1-B 完成。
+
+| 项 | 冻结值 |
+| --- | --- |
+| 凭据 | 数据目录 `wallpaper-key`（64 hex，删文件重启轮换）；请求头 `Authorization: Wallpaper <key>`；只放行该 GET |
+| discovery | `vmusicd.json` 增加 `wallpaper_protocol: 1`；缺失/不匹配时停止音乐桥，不扫描端口 |
+| 快照 | `protocol:1`、`timing:"presentation_applied"`、`server{session,edition,version}`、`seq`、`valid`、`playing`、`positionMs`、`durationMs`、`generation`、`spectrum{bands[64],energy,ageMs}` |
+| 频谱 | 64 个有限值，范围 0..1；`energy` 为均值；服务端最后一帧超过 1 s 归零 |
+| 新鲜度 | 客户端 500 ms 内原样、500–1000 ms 线性衰减、之后归零；没有频谱帧也归零 |
+| 暂停/无曲 | `playing:false` 时不插值位置，频谱按 `ageMs` 衰减；环境动画继续 |
+| 断连 | HTTP 失败、发现失效或会话变化时丢弃快照，不保留旧位置插值；按有界退避重读发现 |
+| 迟到/重复 | 同一 session 内 `seq` 必须严格递增，否则 `wallpaper_stale_snapshot` |
+| 隐私 | 不含曲名、路径、账号、封面；W2 再单独评审 |
+
+客户端错误码冻结为：`discovery_missing`、`discovery_invalid`、`edition_mismatch`、`wallpaper_protocol_missing`、`wallpaper_protocol_mismatch`、`wallpaper_key_missing`、`wallpaper_key_invalid`、`wallpaper_http_error`、`wallpaper_session_changed`、`wallpaper_stale_snapshot`、`wallpaper_invalid_snapshot`。服务端对越权一律 401，不回显钥匙。
+
+#### W1-B 首片进度（2026-10-24）
+
+已实现：`hertz-desktop` 的壁纸场景页（registry 相机 + `applyFeed`）、WorkerW 主屏 surface、500 ms feed 线程、全屏/会话/息屏停绘，以及 `wallpaper.enabled`（默认关闭）与 `--wallpaper` 运行开关。隔离 mock 快照端到端已记录 page ready / mounted / feed ok。
+
+未实现，当前不能标记 W1-B 完成：托盘与设置页、预览租约、自启、多 profile/发行版切换、Explorer 重启恢复、多屏/混合 DPI、事件 WS。当前壁纸只挂主屏，且运行中的旧服务需重建/重启后才提供 `wallpaper-key` 与快照端点。
+
 ### 8.2 数据与流量约定
 
 W1 帧数据包括协议版本、发行版、绑定 profile 身份、当前服务 session、递增序号、有效性、播放标志、歌曲位置、64 个有限频谱数值和能量。频谱归一化到约定范围，非法值拒绝，不传 PCM、文件路径、账号或整张曲库。

@@ -303,6 +303,14 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/v1/stage/pitch", post(stage_pitch))
         // OBS 歌词输出：「正在播放」歌词+播放态快照，轮询驱动 /overlay 浮层页。
         .route("/v1/overlay/lyric", get(overlay_lyric))
+        // 独立形态的桌面歌词组件启动入口；组件固定来自服务同目录，不接受路径参数。
+        .route("/v1/desktop/lyrics/launch", post(launch_desktop_lyrics))
+        .route(
+            "/v1/desktop/lyrics/control",
+            post(desktop_lyrics_control).layer(axum::extract::DefaultBodyLimit::max(
+                DESKTOP_CONTROL_BODY_BYTES,
+            )),
+        )
         .layer(middleware::from_fn_with_state(state.clone(), require_token));
 
     // 受限能力门面（技术路线 §5.4）：专用 Authorization header + 独立路由组，
@@ -312,10 +320,29 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/v1/ai/capabilities/call", post(ai_capabilities_call))
         .layer(middleware::from_fn_with_state(state.clone(), require_grant));
 
+    // 桌面歌词只读桥：独立钥匙、独立路由组，够不到主 token 组与受限门面。
+    let desktop_lyrics = Router::new()
+        .route("/v1/desktop-lyrics/snapshot", get(desktop_lyrics_snapshot))
+        .route("/v1/desktop-lyrics/document", get(desktop_lyrics_document))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_desktop_lyrics_key,
+        ));
+
+    // 壁纸只读桥：独立钥匙、独立路由组；只放行壁纸快照。
+    let wallpaper = Router::new()
+        .route("/v1/wallpaper/snapshot", get(wallpaper_snapshot))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_wallpaper_key,
+        ));
+
     Router::new()
         .route("/v1/health", get(health))
         .merge(api)
         .merge(ai_restricted)
+        .merge(desktop_lyrics)
+        .merge(wallpaper)
 }
 
 // ---------------------------------------------------------------------------
@@ -491,6 +518,68 @@ fn overlay_key_allows(path: &str) -> bool {
     path == "/v1/overlay/lyric" || (path.starts_with("/v1/tracks/") && path.ends_with("/cover"))
 }
 
+/// 桌面歌词钥匙只开两条只读 GET；主 WS、播放、设置、曲库、AI 一律不放行。
+fn desktop_lyrics_key_allows(path: &str) -> bool {
+    matches!(
+        path,
+        "/v1/desktop-lyrics/snapshot" | "/v1/desktop-lyrics/document"
+    )
+}
+
+/// 壁纸钥匙只开一条只读 GET；主 WS、播放、设置、曲库、AI 与歌词文档一律不放行。
+fn wallpaper_key_allows(path: &str) -> bool {
+    path == "/v1/wallpaper/snapshot"
+}
+
+/// 桌面歌词的原生宿主鉴权。用独立 `Authorization: Desktop <key>`，
+/// 不和 Bearer token、浮层钥匙或受限 grant 混用。
+async fn require_desktop_lyrics_key(
+    State(state): State<Arc<AppState>>,
+    request: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    if request.method() != axum::http::Method::GET
+        || !desktop_lyrics_key_allows(request.uri().path())
+    {
+        return unauthorized().into_response();
+    }
+    let presented = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Desktop "))
+        .map(str::trim);
+    match presented {
+        Some(key) if !state.desktop_lyrics_key.is_empty() && key == state.desktop_lyrics_key => {
+            next.run(request).await
+        }
+        _ => unauthorized().into_response(),
+    }
+}
+
+/// 壁纸的原生宿主鉴权。`Authorization: Wallpaper <key>` 与其余凭据互不通用。
+async fn require_wallpaper_key(
+    State(state): State<Arc<AppState>>,
+    request: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    if request.method() != axum::http::Method::GET || !wallpaper_key_allows(request.uri().path()) {
+        return unauthorized().into_response();
+    }
+    let presented = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Wallpaper "))
+        .map(str::trim);
+    match presented {
+        Some(key) if !state.wallpaper_key.is_empty() && key == state.wallpaper_key => {
+            next.run(request).await
+        }
+        _ => unauthorized().into_response(),
+    }
+}
+
 /// 从查询串里取出某个参数的值。
 ///
 /// 不做 percent-decode：token 是两个 `Uuid::simple()` 拼出来的纯小写十六进制，
@@ -550,6 +639,129 @@ pub(crate) fn overlay_key_payload(state: &AppState) -> ApiResult<serde_json::Val
 
 async fn get_overlay_key(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
     Ok(Json(overlay_key_payload(&state)?))
+}
+
+const DESKTOP_CONTROL_BODY_BYTES: usize = 2 * 1024;
+const DESKTOP_CONTROL_COMMANDS: &[&str] = &[
+    "status",
+    "lock",
+    "unlock",
+    "show",
+    "hide",
+    "locate",
+    "layout",
+    "secondary",
+    "font",
+    "opacity",
+    "quit",
+];
+
+#[derive(Deserialize)]
+pub(crate) struct DesktopControlRequest {
+    command: String,
+    #[serde(default)]
+    value: Option<serde_json::Value>,
+}
+
+/// 把播放器的明确动作转给正在运行的原生宿主；宿主不在时如实返回 503。
+async fn desktop_lyrics_control(
+    Json(request): Json<DesktopControlRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if !DESKTOP_CONTROL_COMMANDS.contains(&request.command.as_str()) {
+        return Err(bad_request("不支持的桌面歌词命令"));
+    }
+    let payload = serde_json::json!({
+        "command": request.command,
+        "value": request.value,
+    });
+    let result = tokio::task::spawn_blocking(move || crate::desktop_control::send(payload))
+        .await
+        .map_err(|error| internal(format!("桌面歌词控制任务失败：{error}")))?;
+    match result {
+        Ok(response) => Ok(Json(response)),
+        Err(error) => {
+            let message = format!("{error:#}");
+            let code = if message.contains("未运行") {
+                "desktop_not_running"
+            } else {
+                "desktop_unavailable"
+            };
+            Err(ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                code,
+                message,
+            ))
+        }
+    }
+}
+
+/// 启动同目录的桌面歌词宿主。组件缺失时明确拒绝，不从 PATH 猜。
+async fn launch_desktop_lyrics(
+    State(state): State<Arc<AppState>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let exe = std::env::current_exe().map_err(|error| internal(error.to_string()))?;
+    let Some(dir) = exe.parent() else {
+        return Err(internal("无法定位服务所在目录".to_string()));
+    };
+    let host = dir.join(if cfg!(windows) {
+        "hertz-desktop.exe"
+    } else {
+        "hertz-desktop"
+    });
+    if !host.is_file() {
+        return Err(ApiError::new(
+            StatusCode::NOT_FOUND,
+            "desktop_component_missing",
+            format!(
+                "未找到桌面歌词组件 {}；请安装与本服务匹配的桌面组件",
+                host.display()
+            ),
+        ));
+    }
+    let mut command = std::process::Command::new(&host);
+    command.arg("--data-dir").arg(&state.data_dir);
+    command.arg("--locate");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // 组件是 GUI 进程；开发构建的 console 也不要弹出来。
+        command.creation_flags(0x0800_0000);
+    }
+    command
+        .spawn()
+        .map_err(|error| internal(format!("启动桌面歌词失败：{error}")))?;
+    // 已有宿主时新进程会因单实例退出；给正在运行的那个补一次 locate。
+    // 新宿主由 `--locate` 自己显示，这条晚到的命令只是幂等补充。
+    std::thread::spawn(|| {
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        let _ = crate::desktop_control::send(serde_json::json!({ "command": "locate" }));
+    });
+    Ok(Json(serde_json::json!({ "started": true })))
+}
+
+/// 桌面歌词轻量快照：500 ms 轮询用，永不等待取词。
+async fn desktop_lyrics_snapshot(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    Json(crate::desktop_lyrics::snapshot(&state).await)
+}
+
+/// 壁纸只读快照：播放真值 + 最新一帧 64 段频谱；不含曲名、路径或账号。
+async fn wallpaper_snapshot(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    Json(crate::wallpaper::snapshot(&state))
+}
+
+#[derive(Deserialize)]
+pub(crate) struct DesktopDocumentQuery {
+    key: String,
+}
+
+/// 桌面歌词完整文档：documentKey 与当前文档不符时返回 409，不串曲。
+async fn desktop_lyrics_document(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<DesktopDocumentQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(
+        crate::desktop_lyrics::document(&state, &query.key).await?,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -4478,8 +4690,9 @@ mod tests {
     }
 
     use super::{
-        lyrics_user_offset, overlay_key_allows, pick_index, playlist_scope, public_https_url,
-        qr_session, query_param, safe_cover_id,
+        desktop_lyrics_key_allows, lyrics_user_offset, overlay_key_allows, pick_index,
+        playlist_scope, public_https_url, qr_session, query_param, safe_cover_id,
+        wallpaper_key_allows, DESKTOP_CONTROL_COMMANDS,
     };
 
     /// 每曲偏移对在线曲同样有效：键就是播放侧的曲目身份（虚拟 id
@@ -4506,6 +4719,122 @@ mod tests {
             .unwrap();
         assert_eq!(lyrics_user_offset(&state, "t-local").await, 400);
         assert_eq!(lyrics_user_offset(&state, &vid).await, -1200);
+    }
+
+    #[test]
+    fn desktop_control_commands_are_an_explicit_allowlist() {
+        for command in [
+            "status",
+            "lock",
+            "unlock",
+            "show",
+            "hide",
+            "locate",
+            "layout",
+            "secondary",
+            "font",
+            "opacity",
+            "quit",
+        ] {
+            assert!(
+                DESKTOP_CONTROL_COMMANDS.contains(&command),
+                "{command} 应在白名单里"
+            );
+        }
+        for command in ["exec", "open", "shell", "config", "reload", ""] {
+            assert!(!DESKTOP_CONTROL_COMMANDS.contains(&command));
+        }
+    }
+
+    #[test]
+    fn desktop_key_only_opens_the_two_lyrics_read_paths() {
+        assert!(desktop_lyrics_key_allows("/v1/desktop-lyrics/snapshot"));
+        assert!(desktop_lyrics_key_allows("/v1/desktop-lyrics/document"));
+        for path in [
+            "/v1/overlay/lyric",
+            "/v1/state",
+            "/v1/player/play",
+            "/ws",
+            "/v1/desktop-lyrics/snapshot/extra",
+            "/v1/desktop-lyrics",
+            "/v1/wallpaper/snapshot",
+        ] {
+            assert!(
+                !desktop_lyrics_key_allows(path),
+                "{path} 不该被桌面钥匙放行"
+            );
+        }
+    }
+
+    #[test]
+    fn wallpaper_key_only_opens_the_wallpaper_snapshot() {
+        assert!(wallpaper_key_allows("/v1/wallpaper/snapshot"));
+        for path in [
+            "/v1/desktop-lyrics/snapshot",
+            "/v1/desktop-lyrics/document",
+            "/v1/overlay/lyric",
+            "/v1/state",
+            "/v1/player/play",
+            "/ws",
+            "/v1/wallpaper/snapshot/extra",
+            "/v1/wallpaper",
+        ] {
+            assert!(!wallpaper_key_allows(path), "{path} 不该被壁纸钥匙放行");
+        }
+    }
+
+    #[tokio::test]
+    async fn wallpaper_route_requires_its_own_key() {
+        let (mut state, handle) = crate::state::tests::playback_state().await;
+        let wallpaper_key = "a".repeat(64);
+        let lyrics_key = "b".repeat(64);
+        state.wallpaper_key = wallpaper_key.clone();
+        state.desktop_lyrics_key = lyrics_key.clone();
+        let state = std::sync::Arc::new(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let app = super::router(state.clone()).with_state(state.clone());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+
+        let allowed = client
+            .get(format!("{base}/v1/wallpaper/snapshot"))
+            .header("Authorization", format!("Wallpaper {wallpaper_key}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(allowed.status(), 200);
+        let body: serde_json::Value = allowed.json().await.unwrap();
+        assert_eq!(body["protocol"], crate::wallpaper::PROTOCOL);
+        assert_eq!(
+            body["spectrum"]["bands"].as_array().unwrap().len(),
+            crate::wallpaper::BANDS
+        );
+
+        for (path, scheme, key) in [
+            ("/v1/wallpaper/snapshot", "Desktop", lyrics_key.as_str()),
+            (
+                "/v1/desktop-lyrics/snapshot",
+                "Wallpaper",
+                wallpaper_key.as_str(),
+            ),
+            ("/v1/state", "Wallpaper", wallpaper_key.as_str()),
+        ] {
+            let denied = client
+                .get(format!("{base}{path}"))
+                .header("Authorization", format!("{scheme} {key}"))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(denied.status(), 401, "{scheme} 不该打开 {path}");
+        }
+
+        server.abort();
+        let _ = server.await;
+        state.audio.shutdown();
+        handle.join().unwrap();
     }
 
     #[test]

@@ -67,6 +67,7 @@ jobs:
         run: >-
           cargo fmt
           -p hertz-studio
+          -p hertz-desktop
           -p vmusic-core
           -p vmusic-audio
           -p vmusic-store

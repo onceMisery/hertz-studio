@@ -523,7 +523,7 @@ pwsh -File scripts/smoke.ps1 7899 # Windows
 
 路线图按**用户获得的完整结果**排序，不按模块排序。一句话概括当前状态：**代码走在了验收前面**——
 「当前没有需要在缺少真实环境时继续新增的主线功能」是功能核对结论，不等于发布条件已经满足。
-每条的真实状态以[路线图进度](docs/roadmap-progress.md)（核对 2026-10-21）为准，范围与依赖见
+每条的真实状态以[路线图进度](docs/roadmap-progress.md)（最新增量 2026-10-23）为准，范围与依赖见
 [产品路线图](docs/product-roadmap.md)，设计基线见[技术实施方案](docs/technical-roadmap.md)，
 发布门槛见[发布验收矩阵](docs/release-validation.md)。现行契约见对应 [ADR](docs/adr/README.md)及路线最新修订；[架构复核记录](docs/architecture-review.md)保留历史评审依据，不能覆盖后续明确决定。未决冲突需记录并复核。
 
@@ -549,9 +549,9 @@ pwsh -File scripts/smoke.ps1 7899 # Windows
 | S1 重采样 | 固定参数流式 sinc 已实现并有离线验证；真实声卡、长时间听测与其它 OS 待验 | [audio-resampling.md](docs/audio-resampling.md) |
 | 音频格式与错误边界 | 13 种扩展名，四件不同的事（检查 / 标签 / 解码 / 出声）写明并如实上报 | [audio-format-support.md](docs/audio-format-support.md) |
 | S2–S4 音频二期 | 升采样、参数 EQ、卷积 IR、EBU R128、真峰值限幅、噪声整形、交叉馈送、饱和，以及 Windows WASAPI 独占输出——排期在 R0–R6 之外 | 待音频专项重新定序 |
-| W0–W3 桌面壁纸 | 产品目标已选定，**方案待评审、尚未实施** | [desktop-wallpaper.md](docs/desktop-wallpaper.md) |
-| L0–L3 桌面歌词 | 透明置顶、锁定穿透、托盘恢复与只读歌词同步的设计已成稿（首版 Windows 11 x64）；与壁纸拟共用可选的 `hertz-desktop.exe`。**设计草案待评审、尚未实施** | [desktop-lyrics.md](docs/desktop-lyrics.md) |
-| 桌面公共契约与原生验证 | 单实例、来源切换、配置/应用状态、IPC、自启与部署统一设计；L0/W0 各有实验和退出条件，**尚未实施/实测** | [共享宿主](docs/desktop-host.md) · [原生验证计划](docs/plans/2026-10-23-desktop-native-validation.md) |
+| W0–W3 桌面壁纸 | W0 稳定通过；W1-A 相机 registry/只读快照契约已实现；W1-B 首片已接主屏 WorkerW surface 与 feed，设置/托盘/恢复/多屏未做 | [desktop-wallpaper.md](docs/desktop-wallpaper.md) |
+| L0–L3 桌面歌词 | **L1 首版已实现**：服务端只读快照/文档桥、Windows 透明置顶与锁定穿透、托盘恢复、播放器启动与解锁定位、本机管理通道；L1-C 发布验收、DBX 入口与多 profile 切换未做 | [desktop-lyrics.md](docs/desktop-lyrics.md) |
+| 桌面公共契约与原生验证 | 单实例、来源切换、配置/应用状态、IPC、自启与部署统一设计；L0/W0 已有实机探针结果，L1 首版按本契约落地；本机管理通道已通，来源切换与发布验收仍未完成 | [共享宿主](docs/desktop-host.md) · [原生验证计划](docs/plans/2026-10-23-desktop-native-validation.md) |
 | 创意舞台二期（P8） | 基频轨迹已能本地分析与只读查看；工程、模板、分享码、视频导出已落地，人工视觉与音乐质量验收未做 | [pitch-track.md](docs/pitch-track.md) · [stage-projects.md](docs/stage-projects.md) · [stage-templates.md](docs/stage-templates.md) · [orchestration-art.md](docs/orchestration-art.md) · [video-export.md](docs/video-export.md) |
 | 星座场景视觉 | 逐座造型、配色与动效按文档调过一轮，可拖拽环绕、滚轮缩放、双击复位 | [zodiac-visual-tuning.md](docs/zodiac-visual-tuning.md) |
 | 搜索性能基线 | 五万曲本机 P95 与受控上游时延有基线，不替代真实来源 / 弱网 / 弱机验收 | [search-performance.md](docs/search-performance.md) |

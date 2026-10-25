@@ -70,6 +70,8 @@ pub async fn boot(
     config: Config,
     token: String,
     overlay_key: String,
+    desktop_lyrics_key: String,
+    wallpaper_key: String,
 ) -> anyhow::Result<Booted> {
     let data_dir = absolute_data_dir(&data_dir)?;
     let db = vmusic_store::open(&data_dir).await?;
@@ -149,6 +151,9 @@ pub async fn boot(
         data_dir: data_dir.clone(),
         token: token.clone(),
         overlay_key: overlay_key.clone(),
+        desktop_lyrics_key: desktop_lyrics_key.clone(),
+        wallpaper_key: wallpaper_key.clone(),
+        wallpaper: Default::default(),
         events,
         queue: Default::default(),
         cursor: Default::default(),
@@ -187,6 +192,7 @@ pub async fn boot(
         exiting: tokio::sync::watch::channel(false).0,
         pending_restore_seek: Default::default(),
         overlay_lyric: Default::default(),
+        desktop_lyrics: Default::default(),
         listen: Default::default(),
         scrobble: Default::default(),
         relay_tried: Default::default(),

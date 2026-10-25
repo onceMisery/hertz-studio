@@ -770,6 +770,13 @@ pub struct AppState {
     /// 分开是因为它会被粘进 OBS 的配置：权限只到「GET + 浮层歌词 + 曲目封面」。
     /// 插件形态（stdio）没有 HTTP 通道，填空串即可。
     pub overlay_key: String,
+    /// 桌面歌词只读钥匙。原生宿主从数据目录直接读取；权限只到两条桌面歌词 GET。
+    /// 插件形态（stdio）没有 HTTP 通道，填空串即可。
+    pub desktop_lyrics_key: String,
+    /// 壁纸只读钥匙。与桌面歌词钥匙分开轮换；只放行壁纸快照。
+    pub wallpaper_key: String,
+    /// 最新一帧壁纸频谱；由既有 AudioEvent::Spectrum 消费方写入。
+    pub(crate) wallpaper: crate::wallpaper::Wallpaper,
     pub events: broadcast::Sender<WsEvent>,
     /// Ordered list of track ids the "next / previous" buttons walk through.
     pub queue: Mutex<Vec<String>>,
@@ -874,6 +881,8 @@ pub struct AppState {
     /// 等于每秒打两次上游歌词接口、本地曲每次重开音频文件读标签。换曲
     /// 自然失效；同一曲播放中导入新歌词要等换曲才反映（OBS 场景可接受）。
     pub(crate) overlay_lyric: Mutex<Option<(String, vmusic_core::LyricDocument)>>,
+    /// 桌面歌词的只读快照/文档缓存；轻量快照不等待取词。
+    pub(crate) desktop_lyrics: crate::desktop_lyrics::DesktopLyrics,
     /// 短写幂等表（见 [`crate::idempotency`]）：带 `clientOperationId` 的播控
     /// 命令在 10 分钟窗口内按 `(principal, operation, clientOperationId)` 去重。
     pub(crate) short_writes: crate::idempotency::ShortWriteStore,
@@ -4248,7 +4257,10 @@ pub fn spawn_event_pump(state: Arc<AppState>) {
                     // 听歌打卡计时：纯内存累积，结算才 detach 网络任务。
                     state.observe_listen(&snap).await;
                 }
-                AudioEvent::Spectrum(bands) => state.publish(WsEvent::Spectrum { bands }),
+                AudioEvent::Spectrum(bands) => {
+                    state.wallpaper.observe_spectrum(&bands);
+                    state.publish(WsEvent::Spectrum { bands });
+                }
                 AudioEvent::Ended {
                     generation,
                     track_id,
@@ -4329,6 +4341,13 @@ pub async fn write_discovery(state: &AppState, port: u16) -> anyhow::Result<Path
         token: String,
         version: String,
         protocol_version: u32,
+        edition: &'static str,
+        data_dir: String,
+        server_instance_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        desktop_lyrics_protocol: Option<u32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        wallpaper_protocol: Option<u32>,
     }
     let body = Discovery {
         pid: std::process::id(),
@@ -4336,6 +4355,12 @@ pub async fn write_discovery(state: &AppState, port: u16) -> anyhow::Result<Path
         token: state.token.clone(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         protocol_version: PROTOCOL_VERSION,
+        edition: crate::edition::NAME,
+        data_dir: state.data_dir.to_string_lossy().into_owned(),
+        server_instance_id: state.server_instance_id.clone(),
+        desktop_lyrics_protocol: (!state.desktop_lyrics_key.is_empty())
+            .then_some(crate::desktop_lyrics::PROTOCOL),
+        wallpaper_protocol: (!state.wallpaper_key.is_empty()).then_some(crate::wallpaper::PROTOCOL),
     };
     let path = state.data_dir.join("vmusicd.json");
     tokio::fs::write(&path, serde_json::to_vec_pretty(&body)?).await?;
@@ -4372,6 +4397,9 @@ pub(crate) mod tests {
             data_dir: PathBuf::new(),
             token: String::new(),
             overlay_key: String::new(),
+            desktop_lyrics_key: String::new(),
+            wallpaper_key: String::new(),
+            wallpaper: Default::default(),
             events: broadcast::channel(16).0,
             queue: Default::default(),
             cursor: Default::default(),
@@ -4417,6 +4445,7 @@ pub(crate) mod tests {
             exiting: tokio::sync::watch::channel(false).0,
             pending_restore_seek: Default::default(),
             overlay_lyric: Default::default(),
+            desktop_lyrics: Default::default(),
             listen: Default::default(),
             scrobble: Default::default(),
             relay_tried: Default::default(),
@@ -6686,5 +6715,28 @@ pub(crate) mod tests {
         assert_eq!(state.audio.snapshot().volume, 0.4);
         state.audio.shutdown();
         handle.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn discovery_advertises_wallpaper_protocol_only_with_key() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("hertz-discovery-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (mut state, handle) = playback_state().await;
+        state.data_dir = dir.clone();
+        state.wallpaper_key = "a".repeat(64);
+        let path = write_discovery(&state, 4321).await.unwrap();
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(value["port"], 4321);
+        assert_eq!(value["wallpaper_protocol"], crate::wallpaper::PROTOCOL);
+        assert_eq!(value["desktop_lyrics_protocol"], serde_json::Value::Null);
+        state.audio.shutdown();
+        handle.join().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
