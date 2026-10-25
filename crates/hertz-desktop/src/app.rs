@@ -496,13 +496,20 @@ impl App {
             && self.config.wallpaper.fps > 0
             && !self.wallpaper_hidden
             && self.policy.renderable();
+        let was_visible = self.wallpaper_visible;
         self.wallpaper_visible = visible;
         if visible {
             surface.start(self.config.wallpaper.fps);
-            self.wallpaper_heartbeat_at = Some(Instant::now());
+            // 只在重新变为可见时给宽限；feed 每 250 ms 调本函数，不能把心跳
+            // 时间一直刷新，否则页面停摆永远不会被判超时。
+            if !was_visible {
+                self.wallpaper_heartbeat_at = Some(Instant::now());
+            }
         } else {
             surface.stop();
-            self.wallpaper_heartbeat_at = None;
+            if was_visible {
+                self.wallpaper_heartbeat_at = None;
+            }
         }
     }
 
@@ -2403,14 +2410,15 @@ fn create_settings(
 ) -> Result<SettingsSurface> {
     let window = WindowBuilder::new()
         .with_title("Hertz 壁纸设置")
-        .with_inner_size(PhysicalSize::new(520, 520))
-        .with_resizable(false)
+        .with_inner_size(tao::dpi::LogicalSize::new(520.0, 640.0))
+        .with_min_inner_size(tao::dpi::LogicalSize::new(320.0, 420.0))
+        .with_resizable(true)
         .with_visible(true)
         .build(target)?;
     let page_proxy = proxy.clone();
     let webview = WebViewBuilder::new()
         .with_html(settings_html())
-        .with_background_color((11, 17, 26, 255))
+        .with_background_color((20, 20, 19, 255))
         .with_ipc_handler(move |request| {
             let body = request.body();
             if body.len() <= 8192 {

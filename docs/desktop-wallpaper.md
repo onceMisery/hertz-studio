@@ -300,9 +300,10 @@ W1-B 的功能件已齐，单屏拓扑重排已在 W3 首片接上，W1-C 的渲
 #### W1-C 渲染失联恢复首片（2026-10-25）
 
 - 场景页渲染循环每 2 s 上报 `wallpaper_heartbeat <ticks> <mounted> <lost>`；宿主只在壁纸可见且页面 ready 时检查，超过 10 s 没有有效心跳视为渲染停摆。
+- 心跳宽限只在可见性从 false→true 时给一次；feed 每 250 ms 的 `recompute_wallpaper` 不刷新心跳时间（早期实现每拍重置，导致 10 s 超时永远不会触发）。
 - 壁纸 feed 每 250 ms 调用页面 `evaluate_script`；页面就绪后连续 3 次失败视为 WebView 控制器/渲染进程失效。两条路径都丢弃当前 surface，清空页面代际，再走统一的 3 次/120 s 恢复预算；旧页面迟到 IPC 仍按 generation 丢弃。
 - 状态增加 `pageTicks` 与 `heartbeatAgeMs`，便于从管理通道确认页面是否仍在推进。
-- 验证：隔离宿主杀掉自己的 WebView2 进程树后，2.6 s 内连续 eval 失败触发恢复，0.4 s 重建成功，新的 dom ready/mounted 出现，`pageTicks` 恢复递增且 surface 仍启用（8/8 checks）。心跳停顿分支有解析单测；尚未通过冻结页面单独验证 10 s 心跳超时的实际时序。
+- 验证：隔离宿主杀掉自己的 WebView2 进程树后，2.6 s 内连续 eval 失败触发恢复，0.4 s 重建成功，新的 dom ready/mounted 出现，`pageTicks` 恢复递增且 surface 仍启用（8/8 checks）。10 s 心跳超时分支有解析单测；冻结页面的端到端时序测试在本机连续跑崩溃用例后遇到 WebView2 新建页面 `E_INVALIDARG`，未能稳定完成，不记为已验收。
 
 #### W1-B 多屏与混合 DPI 首片（2026-10-24）
 
