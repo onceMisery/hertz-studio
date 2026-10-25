@@ -78,6 +78,7 @@ struct WallpaperSurface {
     window: Window,
     webview: wry::WebView,
     monitor: native::WallpaperMonitor,
+    zoom: f64,
 }
 
 impl WallpaperSurface {
@@ -119,6 +120,41 @@ impl WallpaperSurface {
     fn stop(&self) {
         self.eval("window.hertzWallpaper && window.hertzWallpaper.stop();");
         self.set_visible(false);
+    }
+
+    fn apply_zoom(&mut self, target_dpi: u32) -> Result<()> {
+        let window_dpi = native::window_dpi(self.hwnd()).max(1);
+        let zoom = f64::from(target_dpi) / f64::from(window_dpi);
+        if (zoom - self.zoom).abs() > 0.001 {
+            self.webview
+                .zoom(zoom)
+                .map_err(|error| anyhow::anyhow!("应用壁纸 DPI 缩放失败：{error}"))?;
+            self.zoom = zoom;
+        }
+        Ok(())
+    }
+
+    /// 拓扑变化后原地重挂到新的显示器矩形。WorkerW 是 Progman 的子窗，
+    /// mount_wallpaper 会按新的虚拟屏原点重算父层与子窗位置。
+    fn reflow(&mut self, monitor: native::WallpaperMonitor) -> Result<()> {
+        native::mount_wallpaper(self.hwnd(), &monitor)?;
+        self.apply_zoom(monitor.dpi)?;
+        let child_rect = native::window_rect(self.hwnd())
+            .map(|rect| (rect.left, rect.top, rect.right, rect.bottom));
+        let parent_rect = native::parent_window_rect(self.hwnd())
+            .map(|rect| (rect.left, rect.top, rect.right, rect.bottom));
+        log(&format!(
+            "wallpaper reflow name={} rect={},{} {}x{} dpi={} zoom={:.3} child={child_rect:?} parent={parent_rect:?}",
+            monitor.name,
+            monitor.left,
+            monitor.top,
+            monitor.width,
+            monitor.height,
+            monitor.dpi,
+            self.zoom
+        ));
+        self.monitor = monitor;
+        Ok(())
     }
 }
 
@@ -1506,20 +1542,7 @@ impl App {
                 log("wallpaper surface lost; recovering");
                 self.recover_wallpaper(target);
             } else {
-                let target_missing = self.wallpaper.as_ref().is_some_and(|surface| {
-                    !native::wallpaper_monitors()
-                        .iter()
-                        .any(|monitor| monitor.name == surface.monitor.name)
-                });
-                if target_missing != self.wallpaper_monitor_missing {
-                    self.wallpaper_monitor_missing = target_missing;
-                    if target_missing {
-                        log("wallpaper target monitor missing");
-                    } else {
-                        log("wallpaper target monitor returned");
-                    }
-                    self.recompute_wallpaper();
-                }
+                self.reconcile_wallpaper_geometry(target);
             }
             self.ensure_on_screen();
             if now.duration_since(self.last_update) > STALE_AFTER && self.last_snapshot.is_some() {
@@ -1548,6 +1571,58 @@ impl App {
                 self.send_config();
             }
         }
+    }
+
+    fn reconcile_wallpaper_geometry(&mut self, target: &EventLoopWindowTarget<UserEvent>) {
+        let Some(surface) = self.wallpaper.as_ref() else {
+            return;
+        };
+        let name = surface.monitor.name.clone();
+        let Some(monitor) = native::wallpaper_monitors()
+            .into_iter()
+            .find(|monitor| monitor.name == name)
+        else {
+            if !self.wallpaper_monitor_missing {
+                self.wallpaper_monitor_missing = true;
+                log("wallpaper target monitor missing");
+                self.recompute_wallpaper();
+            }
+            return;
+        };
+        if self.wallpaper_monitor_missing {
+            self.wallpaper_monitor_missing = false;
+            log("wallpaper target monitor returned");
+        }
+        let geometry_changed = monitor_geometry_changed(&surface.monitor, &monitor);
+        let window_dpi = native::window_dpi(surface.hwnd()).max(1);
+        let desired_zoom = f64::from(monitor.dpi) / f64::from(window_dpi);
+        let zoom_changed = (desired_zoom - surface.zoom).abs() > 0.001;
+        if !geometry_changed && !zoom_changed {
+            return;
+        }
+        if geometry_changed {
+            log(&format!(
+                "wallpaper monitor geometry changed name={} rect={},{} {}x{} dpi={}",
+                monitor.name, monitor.left, monitor.top, monitor.width, monitor.height, monitor.dpi
+            ));
+            let Some(surface) = self.wallpaper.as_mut() else {
+                return;
+            };
+            if let Err(error) = surface.reflow(monitor) {
+                log(&format!("wallpaper reflow failed: {error:#}"));
+                self.wallpaper = None;
+                self.wallpaper_page_ready = false;
+                self.wallpaper_visible = false;
+                self.wallpaper_generation = self.wallpaper_generation.wrapping_add(1);
+                self.recover_wallpaper(target);
+                return;
+            }
+        } else if let Some(surface) = self.wallpaper.as_mut() {
+            if let Err(error) = surface.apply_zoom(monitor.dpi) {
+                log(&format!("wallpaper zoom sync failed: {error:#}"));
+            }
+        }
+        self.recompute_wallpaper();
     }
 
     fn ensure_on_screen(&mut self) {
@@ -2119,6 +2194,17 @@ fn spawn_feed(
         .ok();
 }
 
+fn monitor_geometry_changed(
+    left: &native::WallpaperMonitor,
+    right: &native::WallpaperMonitor,
+) -> bool {
+    left.left != right.left
+        || left.top != right.top
+        || left.width != right.width
+        || left.height != right.height
+        || left.dpi != right.dpi
+}
+
 fn profile_options(
     current: &Profile,
     config: &Config,
@@ -2226,6 +2312,7 @@ fn create_wallpaper(
         window,
         webview,
         monitor,
+        zoom,
     })
 }
 
@@ -2591,6 +2678,34 @@ mod tests {
             data_dir: PathBuf::from(dir),
             edition: "full".into(),
         }
+    }
+
+    fn monitor() -> native::WallpaperMonitor {
+        native::WallpaperMonitor {
+            name: r"\\.\DISPLAY1".into(),
+            left: 0,
+            top: 0,
+            width: 2560,
+            height: 1600,
+            dpi: 144,
+            primary: true,
+        }
+    }
+
+    #[test]
+    fn monitor_geometry_changes_trigger_reflow() {
+        let base = monitor();
+        assert!(!monitor_geometry_changed(&base, &base.clone()));
+        let mut resized = base.clone();
+        resized.width = 1920;
+        resized.height = 1080;
+        assert!(monitor_geometry_changed(&base, &resized));
+        let mut moved = base.clone();
+        moved.left = -1920;
+        assert!(monitor_geometry_changed(&base, &moved));
+        let mut dpi = base.clone();
+        dpi.dpi = 96;
+        assert!(monitor_geometry_changed(&base, &dpi));
     }
 
     #[test]

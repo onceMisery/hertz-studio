@@ -12,7 +12,8 @@
 - 主应用管理通道（2026-10-25）：服务端新增 `/v1/desktop/control` 与 `/v1/desktop/wallpaper/launch`，宿主 pipe 支持 wallpaper status/settings/toggle/show/hide/retry/preview/close/renew/apply；app 设置页新增桌面壁纸入口（DBX 隐藏）。消息模式命名管道逐项通过，服务端白名单与前端资源检查通过；未在重建后的应用实例做整页人工验收。
 - 多来源切换（2026-10-25）：桌面配置升到 schema v2（activeProfile + 最多 8 个 profile 的独立歌词/壁纸域，schema v1 原地迁移），宿主 pipe 新增 `profile-switch`，设置页新增来源选择；主应用打开壁纸设置时把自身数据目录作为候选。切换保存成功后才清空旧歌词/频谱、递增来源代际并重启 feed，旧代际迟到事件丢弃。隔离 mock 双来源 31/31 通过，包含 v1 迁移、A/B 域隔离、设置页切换、旧服务回退、慢请求代际丢弃、非法路径拒绝与 revision 不变；未在正式服务、真实双发行版安装或登录自启场景验收。
 - 壁纸事件流（2026-10-25）：新增 `GET /v1/wallpaper/events`（同一 `wallpaper-key` 请求头），首发完整快照，之后把现有播放/频谱广播合并为最多 4 Hz 的完整快照并保留 1 s 心跳；宿主优先 WS，旧服务 404 时回退 500 ms 轮询，重连按 1/2/4/8/16/30 s 退避。真实 Standard 服务上鉴权/首发/心跳/宿主 surface 12/12 通过，旧服务回退在双来源 mock 中 31/31 通过；W1-C 安装升级、真实双发行版与长稳未验。
-- 边界：W1-B 功能件已齐（目标屏 surface、混合 DPI、快照+事件 feed、托盘/设置页/预览租约、Explorer 恢复、主应用管理通道、多来源切换、事件流）；W1-C 发布验收与 W3 多屏同时运行未做。未重启正在运行的 Hertz 实例，未做真实音乐/声卡验收；W1-A 不等于 W1 完成。
+- 单屏拓扑重排（2026-10-25）：宿主每秒按稳定设备名重枚举目标屏；矩形/DPI/位置变化时原地重挂 WorkerW 子窗并重算 WebView zoom，重挂失败才进入统一恢复预算。真实 `DISPLAY5` 1920×1080@96 at (510,-1080) → 1600×900@59 at (510,-900) → 恢复 12/12 通过，子窗矩形与第二屏截图跟随变化且页面保持 ready；DPI 变化、横竖屏与多屏同时运行未验。
+- 边界：W1-B 功能件已齐（目标屏 surface、混合 DPI、快照+事件 feed、托盘/设置页/预览租约、Explorer 恢复、主应用管理通道、多来源切换、事件流），W3 单屏拓扑重排已接；W1-C 发布验收与 W3 多屏同时运行未做。未重启正在运行的 Hertz 实例，未做真实音乐/声卡验收；W1-A 不等于 W1 完成。
 
 > 2026-10-23 增量盘点：最新 `origin/master` 为 `2f2765c`。已核对该提交的 [CI](https://github.com/onceMisery/hertz-studio/actions/runs/39815799925) 13 个 job 与 [release 构建](https://github.com/onceMisery/hertz-studio/actions/runs/39815999209) 13 个 job 全部成功；三 OS/双发行版自动化与构建不再仅为“已配置、远端未核对”。产物安装、真实声音/账号/模型和正式目标 MCP 客户端仍须分别验收。近期顺序、任务完成标准与容量建议见[下一阶段开发任务](./plans/2026-10-23-next-development.md)，证据边界见[发布矩阵增量](./release-validation.md#2026-10-23-远端自动化与构建增量)。下文保留原有功能核对和历史验证记录。
 
