@@ -276,6 +276,9 @@ struct App {
     wallpaper_feed_logged: bool,
     wallpaper_heartbeat_at: Option<Instant>,
     wallpaper_heartbeat_ticks: u64,
+    wallpaper_heartbeat_draws: u64,
+    wallpaper_fps_sample: Option<(Instant, u64)>,
+    wallpaper_measured_fps: Option<f64>,
     wallpaper_visible: bool,
     wallpaper_hidden: bool,
     wallpaper_forced: bool,
@@ -446,6 +449,34 @@ impl App {
         self.recompute_visibility();
     }
 
+    fn reset_wallpaper_heartbeat(&mut self) {
+        self.wallpaper_heartbeat_at = None;
+        self.wallpaper_fps_sample = None;
+        self.wallpaper_measured_fps = None;
+    }
+
+    fn reset_wallpaper_page_stats(&mut self) {
+        self.wallpaper_heartbeat_ticks = 0;
+        self.wallpaper_heartbeat_draws = 0;
+        self.reset_wallpaper_heartbeat();
+    }
+
+    fn sample_wallpaper_fps(&mut self, now: Instant, draws: u64) {
+        let Some((at, last)) = self.wallpaper_fps_sample else {
+            self.wallpaper_fps_sample = Some((now, draws));
+            return;
+        };
+        if draws < last {
+            self.wallpaper_fps_sample = Some((now, draws));
+            self.wallpaper_measured_fps = None;
+            return;
+        }
+        if let Some(fps) = fps_from_draws(draws - last, now.duration_since(at)) {
+            self.wallpaper_measured_fps = Some(fps);
+            self.wallpaper_fps_sample = Some((now, draws));
+        }
+    }
+
     fn recompute_visibility(&mut self) {
         let visible = self.config.lyrics.enabled && self.policy.visible();
         if visible == self.visible {
@@ -504,11 +535,13 @@ impl App {
             // 时间一直刷新，否则页面停摆永远不会被判超时。
             if !was_visible {
                 self.wallpaper_heartbeat_at = Some(Instant::now());
+                self.wallpaper_fps_sample = Some((Instant::now(), self.wallpaper_heartbeat_draws));
+                self.wallpaper_measured_fps = None;
             }
         } else {
             surface.stop();
             if was_visible {
-                self.wallpaper_heartbeat_at = None;
+                self.reset_wallpaper_heartbeat();
             }
         }
     }
@@ -564,10 +597,13 @@ impl App {
             ));
             return;
         }
-        if let Some((ticks, mounted, lost)) = parse_wallpaper_heartbeat(event) {
+        if let Some((ticks, draws, mounted, lost)) = parse_wallpaper_heartbeat(event) {
             if mounted && !lost {
-                self.wallpaper_heartbeat_at = Some(Instant::now());
+                let now = Instant::now();
+                self.wallpaper_heartbeat_at = Some(now);
                 self.wallpaper_heartbeat_ticks = ticks;
+                self.wallpaper_heartbeat_draws = draws;
+                self.sample_wallpaper_fps(now, draws);
             }
             return;
         }
@@ -575,8 +611,12 @@ impl App {
             "wallpaper_dom_ready" => {
                 log("wallpaper page dom ready");
                 self.wallpaper_page_ready = true;
-                self.wallpaper_heartbeat_at = Some(Instant::now());
+                let now = Instant::now();
                 self.wallpaper_heartbeat_ticks = 0;
+                self.wallpaper_heartbeat_draws = 0;
+                self.wallpaper_heartbeat_at = Some(now);
+                self.wallpaper_fps_sample = Some((now, 0));
+                self.wallpaper_measured_fps = None;
                 if let Some(surface) = self.wallpaper.as_ref() {
                     surface.reset_eval_failures();
                 }
@@ -584,7 +624,12 @@ impl App {
             "wallpaper_ready" => {
                 log("wallpaper page mounted");
                 self.wallpaper_page_ready = true;
-                self.wallpaper_heartbeat_at = Some(Instant::now());
+                let now = Instant::now();
+                self.wallpaper_heartbeat_ticks = 0;
+                self.wallpaper_heartbeat_draws = 0;
+                self.wallpaper_heartbeat_at = Some(now);
+                self.wallpaper_fps_sample = Some((now, 0));
+                self.wallpaper_measured_fps = None;
                 if let Some(surface) = self.wallpaper.as_ref() {
                     surface.reset_eval_failures();
                 }
@@ -592,7 +637,7 @@ impl App {
             "wallpaper_mount_failed" => {
                 log("wallpaper page mount failed");
                 self.wallpaper_page_ready = false;
-                self.wallpaper_heartbeat_at = None;
+                self.reset_wallpaper_page_stats();
             }
             other => log(&format!("unknown wallpaper page event: {other}")),
         }
@@ -638,7 +683,7 @@ impl App {
         self.wallpaper = None;
         self.wallpaper_page_ready = false;
         self.wallpaper_visible = false;
-        self.wallpaper_heartbeat_at = None;
+        self.reset_wallpaper_page_stats();
         self.wallpaper_generation = self.wallpaper_generation.wrapping_add(1);
         match create_wallpaper(
             target,
@@ -876,7 +921,7 @@ impl App {
         self.wallpaper_generation = self.wallpaper_generation.wrapping_add(1);
         self.wallpaper_page_ready = false;
         self.wallpaper_visible = false;
-        self.wallpaper_heartbeat_at = None;
+        self.reset_wallpaper_page_stats();
     }
 
     fn switch_source(
@@ -1525,6 +1570,61 @@ impl App {
                 "previewActive": self.preview.is_some(),
                 "monitorMissing": self.wallpaper_monitor_missing,
             },
+            "diagnostics": {
+                "pauseReasons": wallpaper_pause_reasons(
+                    self.config.wallpaper.enabled || self.wallpaper_forced,
+                    self.wallpaper_hidden,
+                    self.wallpaper_monitor_missing,
+                    self.wallpaper.is_some(),
+                    self.wallpaper_page_ready,
+                    &self.policy,
+                ),
+                "fps": {
+                    "configured": self.config.wallpaper.fps,
+                    "effective": if self.wallpaper_visible { self.config.wallpaper.fps } else { 0 },
+                    "measured": if self.wallpaper_visible
+                        && self
+                            .wallpaper_heartbeat_at
+                            .is_some_and(|at| at.elapsed() < Duration::from_secs(5))
+                    {
+                        self.wallpaper_measured_fps
+                    } else {
+                        None
+                    },
+                },
+                "page": {
+                    "ready": self.wallpaper_page_ready,
+                    "ticks": self.wallpaper_heartbeat_ticks,
+                    "draws": self.wallpaper_heartbeat_draws,
+                    "heartbeatAgeMs": self
+                        .wallpaper_heartbeat_at
+                        .map(|at| at.elapsed().as_millis() as u64),
+                    "evalFailures": self
+                        .wallpaper
+                        .as_ref()
+                        .map(|surface| surface.eval_failures())
+                        .unwrap_or(0),
+                    "zoom": self.wallpaper.as_ref().map(|surface| surface.zoom),
+                },
+                "monitor": self.wallpaper.as_ref().map(|surface| {
+                    serde_json::json!({
+                        "name": surface.monitor.name,
+                        "left": surface.monitor.left,
+                        "top": surface.monitor.top,
+                        "width": surface.monitor.width,
+                        "height": surface.monitor.height,
+                        "dpi": surface.monitor.dpi,
+                    })
+                }),
+                "recovery": {
+                    "attempts": self.wallpaper_recovery_attempts.len(),
+                    "terminal": self.wallpaper_recovery_terminal,
+                },
+                "feed": {
+                    "hasSnapshot": self.wallpaper_last.is_some(),
+                    "lastSeq": self.wallpaper_last.as_ref().map(|snapshot| snapshot.seq),
+                },
+            },
         })
     }
 
@@ -1610,7 +1710,7 @@ impl App {
                     } else {
                         "wallpaper WebView eval failed repeatedly; recovering"
                     });
-                    self.wallpaper_heartbeat_at = None;
+                    self.reset_wallpaper_page_stats();
                     self.wallpaper = None;
                     self.wallpaper_page_ready = false;
                     self.wallpaper_visible = false;
@@ -1687,7 +1787,7 @@ impl App {
                 self.wallpaper = None;
                 self.wallpaper_page_ready = false;
                 self.wallpaper_visible = false;
-                self.wallpaper_heartbeat_at = None;
+                self.reset_wallpaper_page_stats();
                 self.wallpaper_generation = self.wallpaper_generation.wrapping_add(1);
                 self.recover_wallpaper(target);
                 return;
@@ -2070,6 +2170,9 @@ pub(crate) fn run() -> Result<()> {
         wallpaper_feed_logged: false,
         wallpaper_heartbeat_at: None,
         wallpaper_heartbeat_ticks: 0,
+        wallpaper_heartbeat_draws: 0,
+        wallpaper_fps_sample: None,
+        wallpaper_measured_fps: None,
         wallpaper_visible: false,
         wallpaper_hidden: false,
         wallpaper_forced,
@@ -2271,14 +2374,59 @@ fn spawn_feed(
         .ok();
 }
 
-fn parse_wallpaper_heartbeat(event: &str) -> Option<(u64, bool, bool)> {
+fn parse_wallpaper_heartbeat(event: &str) -> Option<(u64, u64, bool, bool)> {
     let mut parts = event
         .strip_prefix("wallpaper_heartbeat ")?
         .split_whitespace();
     let ticks = parts.next()?.parse().ok()?;
+    let draws = parts.next()?.parse().ok()?;
     let mounted = parts.next()? == "1";
     let lost = parts.next()? == "1";
-    Some((ticks, mounted, lost))
+    Some((ticks, draws, mounted, lost))
+}
+
+fn fps_from_draws(draws_delta: u64, elapsed: Duration) -> Option<f64> {
+    let millis = elapsed.as_millis();
+    if draws_delta == 0 || millis < 1000 {
+        return None;
+    }
+    Some(draws_delta as f64 * 1000.0 / millis as f64)
+}
+
+fn wallpaper_pause_reasons(
+    enabled: bool,
+    hidden: bool,
+    monitor_missing: bool,
+    has_surface: bool,
+    page_ready: bool,
+    policy: &Policy,
+) -> Vec<&'static str> {
+    let mut reasons = Vec::new();
+    if !enabled {
+        reasons.push("disabled");
+    }
+    if hidden {
+        reasons.push("hidden");
+    }
+    if monitor_missing {
+        reasons.push("monitorMissing");
+    }
+    if enabled && !has_surface {
+        reasons.push("noSurface");
+    }
+    if has_surface && !page_ready {
+        reasons.push("pageNotReady");
+    }
+    if policy.fullscreen {
+        reasons.push("fullscreen");
+    }
+    if policy.session_unavailable {
+        reasons.push("sessionUnavailable");
+    }
+    if policy.display_off {
+        reasons.push("displayOff");
+    }
+    reasons
 }
 
 fn monitor_geometry_changed(
@@ -2606,7 +2754,7 @@ fn default_profile() -> Profile {
 
 fn page_html() -> String {
     format!(
-        "<!doctype html><html><head><meta charset=\"utf-8\">\
+        "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\"><title>Hertz 桌面歌词</title>\
 <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\
 <style>{}</style></head><body class=\"unlocked\">{}</body>\
 <script>{}</script></html>",
@@ -2784,19 +2932,74 @@ mod tests {
     #[test]
     fn heartbeat_parses_render_progress() {
         assert_eq!(
-            parse_wallpaper_heartbeat("wallpaper_heartbeat 42 1 0"),
-            Some((42, true, false))
+            parse_wallpaper_heartbeat("wallpaper_heartbeat 42 30 1 0"),
+            Some((42, 30, true, false))
         );
         assert_eq!(
-            parse_wallpaper_heartbeat("wallpaper_heartbeat 42 0 0"),
-            Some((42, false, false))
+            parse_wallpaper_heartbeat("wallpaper_heartbeat 42 30 0 0"),
+            Some((42, 30, false, false))
         );
         assert_eq!(
-            parse_wallpaper_heartbeat("wallpaper_heartbeat 42 1 1"),
-            Some((42, true, true))
+            parse_wallpaper_heartbeat("wallpaper_heartbeat 42 30 1 1"),
+            Some((42, 30, true, true))
         );
         assert_eq!(parse_wallpaper_heartbeat("wallpaper_dom_ready"), None);
-        assert_eq!(parse_wallpaper_heartbeat("wallpaper_heartbeat x 1 0"), None);
+        assert_eq!(
+            parse_wallpaper_heartbeat("wallpaper_heartbeat x 30 1 0"),
+            None
+        );
+    }
+
+    #[test]
+    fn measured_fps_uses_draw_deltas() {
+        assert_eq!(fps_from_draws(60, Duration::from_secs(2)), Some(30.0));
+        assert_eq!(fps_from_draws(0, Duration::from_secs(2)), None);
+        assert_eq!(fps_from_draws(10, Duration::from_millis(500)), None);
+    }
+
+    fn running_policy() -> Policy {
+        Policy {
+            locked: false,
+            user_hidden: false,
+            fullscreen: false,
+            session_unavailable: false,
+            display_off: false,
+            no_content: false,
+        }
+    }
+
+    #[test]
+    fn pause_reasons_report_each_gate() {
+        let running = running_policy();
+        assert!(wallpaper_pause_reasons(true, false, false, true, true, &running).is_empty());
+        assert_eq!(
+            wallpaper_pause_reasons(false, false, false, false, false, &running),
+            vec!["disabled"]
+        );
+        assert_eq!(
+            wallpaper_pause_reasons(true, true, false, true, true, &running),
+            vec!["hidden"]
+        );
+        assert_eq!(
+            wallpaper_pause_reasons(true, false, true, false, false, &running),
+            vec!["monitorMissing", "noSurface"]
+        );
+        assert_eq!(
+            wallpaper_pause_reasons(true, false, false, false, false, &running),
+            vec!["noSurface"]
+        );
+        assert_eq!(
+            wallpaper_pause_reasons(true, false, false, true, false, &running),
+            vec!["pageNotReady"]
+        );
+        let mut paused = running_policy();
+        paused.fullscreen = true;
+        paused.session_unavailable = true;
+        paused.display_off = true;
+        assert_eq!(
+            wallpaper_pause_reasons(true, false, false, true, true, &paused),
+            vec!["fullscreen", "sessionUnavailable", "displayOff"]
+        );
     }
 
     #[test]

@@ -5,7 +5,7 @@
   var ZERO = new Float32Array(BANDS);
   var host = document.getElementById('host');
   var canvas = null, mounted = false, raf = 0, last = 0, lastDraw = 0;
-  var sceneTime = 0, cap = 30, enabled = true, lost = false, error = null, ticks = 0, lastHeartbeat = 0;
+  var sceneTime = 0, cap = 30, enabled = true, lost = false, error = null, ticks = 0, draws = 0, lastHeartbeat = 0;
   var feed = { valid: false, playing: false, bands: new Float32Array(BANDS),
     energy: 0, ageMs: null, receivedAt: null };
 
@@ -70,7 +70,7 @@
     ticks++;
     if (now - lastHeartbeat >= 2000) {
       lastHeartbeat = now;
-      notify('wallpaper_heartbeat ' + ticks + ' ' + (mounted ? 1 : 0) + ' ' + (lost ? 1 : 0));
+      notify('wallpaper_heartbeat ' + ticks + ' ' + draws + ' ' + (mounted ? 1 : 0) + ' ' + (lost ? 1 : 0));
     }
     if (!mounted || lost) return;
     if (!last) last = now;
@@ -81,6 +81,7 @@
     sceneTime += dt;
     if (now - lastDraw >= 1000 / cap - 0.5) {
       lastDraw = now;
+      draws++;
       window.ZodiacStagePure.setAudio({ bands: effectiveBands(now), onset: false });
       window.ZodiacStagePure.setTime({ time: sceneTime / 1000, playing: scenePlaying() });
     }
@@ -219,6 +220,7 @@
       mounted: mounted,
       error: error,
       ticks: ticks,
+      draws: draws,
       sceneTime: Math.round(sceneTime),
       valid: feed.valid,
       playing: feed.playing,
