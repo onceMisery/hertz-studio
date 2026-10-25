@@ -92,7 +92,14 @@ impl WallpaperSurface {
         self.eval("window.hertzWallpaper && window.hertzWallpaper.applyFeed(null);");
     }
 
+    fn set_visible(&self, visible: bool) {
+        if let Err(error) = self.webview.set_visible(visible) {
+            log(&format!("wallpaper set_visible({visible}) failed: {error}"));
+        }
+    }
+
     fn start(&self, fps: u8) {
+        self.set_visible(true);
         self.eval(&format!(
             "window.hertzWallpaper && window.hertzWallpaper.start({fps});"
         ));
@@ -100,15 +107,18 @@ impl WallpaperSurface {
 
     fn stop(&self) {
         self.eval("window.hertzWallpaper && window.hertzWallpaper.stop();");
+        self.set_visible(false);
     }
 }
 
 struct TrayActions {
     toggle: CheckMenuItem,
     autostart: CheckMenuItem,
+    wallpaper_toggle: Option<CheckMenuItem>,
     toggle_id: String,
     locate_id: String,
     autostart_id: String,
+    wallpaper_toggle_id: Option<String>,
     quit_id: String,
 }
 
@@ -318,15 +328,19 @@ impl App {
     }
 
     fn recompute_wallpaper(&mut self) {
+        let Some(surface) = self.wallpaper.as_ref() else {
+            return;
+        };
+        // 页面就绪前不能把 WebView2 隐藏：隐藏会让页面不加载，dom_ready 永远不来。
+        if !self.wallpaper_page_ready {
+            return;
+        }
         let visible = (self.config.wallpaper.enabled || self.wallpaper_forced)
             && self.config.wallpaper.fps > 0
             && !self.wallpaper_hidden
             && self.policy.renderable();
         self.wallpaper_visible = visible;
-        let Some(surface) = self.wallpaper.as_ref() else {
-            return;
-        };
-        if visible && self.wallpaper_page_ready {
+        if visible {
             surface.start(self.config.wallpaper.fps);
         } else {
             surface.stop();
@@ -451,6 +465,9 @@ impl App {
         if let Some(actions) = self.tray_actions.as_ref() {
             actions.toggle.set_checked(!self.policy.user_hidden);
             actions.autostart.set_checked(self.config.launch_at_login);
+            if let Some(toggle) = actions.wallpaper_toggle.as_ref() {
+                toggle.set_checked(!self.wallpaper_hidden);
+            }
         }
     }
 
@@ -565,6 +582,15 @@ impl App {
                     self.send_source();
                 }
             }
+            self.sync_tray();
+        } else if actions
+            .wallpaper_toggle_id
+            .as_deref()
+            .is_some_and(|toggle| toggle == id)
+        {
+            self.wallpaper_hidden = !self.wallpaper_hidden;
+            log(&format!("wallpaper_hidden={}", self.wallpaper_hidden));
+            self.recompute_wallpaper();
             self.sync_tray();
         } else if id == actions.quit_id {
             log("quit from tray");
@@ -926,22 +952,30 @@ impl App {
         let toggle = CheckMenuItem::new("显示歌词", true, !self.policy.user_hidden, None);
         let locate = MenuItem::new("解锁并定位", true, None);
         let autostart = CheckMenuItem::new("开机启动", true, self.config.launch_at_login, None);
+        let wallpaper_toggle = self
+            .wallpaper
+            .as_ref()
+            .map(|_| CheckMenuItem::new("显示壁纸", true, !self.wallpaper_hidden, None));
         let quit = MenuItem::new("退出桌面歌词", true, None);
-        menu.append_items(&[
-            &toggle,
-            &PredefinedMenuItem::separator(),
-            &locate,
-            &autostart,
-            &PredefinedMenuItem::separator(),
-            &quit,
-        ])?;
+        let separator_after_toggle = PredefinedMenuItem::separator();
+        let separator_before_wallpaper = PredefinedMenuItem::separator();
+        let separator_before_quit = PredefinedMenuItem::separator();
+        menu.append_items(&[&toggle, &separator_after_toggle, &locate, &autostart])?;
+        if let Some(wallpaper) = wallpaper_toggle.as_ref() {
+            menu.append(&separator_before_wallpaper)?;
+            menu.append(wallpaper)?;
+        }
+        menu.append(&separator_before_quit)?;
+        menu.append(&quit)?;
         let actions = TrayActions {
             toggle_id: toggle.id().0.clone(),
             autostart_id: autostart.id().0.clone(),
+            wallpaper_toggle_id: wallpaper_toggle.as_ref().map(|item| item.id().0.clone()),
             locate_id: locate.id().0.clone(),
             quit_id: quit.id().0.clone(),
             toggle,
             autostart,
+            wallpaper_toggle,
         };
         let tray = TrayIconBuilder::new()
             .with_menu(Box::new(menu))

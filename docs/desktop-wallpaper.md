@@ -253,9 +253,9 @@ W1-A 先实现 `GET /v1/wallpaper/snapshot`，不实现 `/v1/wallpaper/events` W
 
 #### W1-B 首片进度（2026-10-24）
 
-已实现：`hertz-desktop` 的壁纸场景页（registry 相机 + `applyFeed`）、WorkerW 主屏 surface、500 ms feed 线程、全屏/会话/息屏停绘，以及 `wallpaper.enabled`（默认关闭）与 `--wallpaper` 运行开关。隔离 mock 快照端到端已记录 page ready / mounted / feed ok。
+已实现：`hertz-desktop` 的壁纸场景页（registry 相机 + `applyFeed`）、WorkerW 主屏 surface、500 ms feed 线程、全屏/会话/息屏停绘、托盘“显示壁纸”开关（用户隐藏时隐藏 WebView，露出系统壁纸），以及 `wallpaper.enabled`（默认关闭）与 `--wallpaper` 运行开关。隔离 mock 快照端到端已记录 page ready / mounted / feed ok。
 
-未实现，当前不能标记 W1-B 完成：托盘与设置页、预览租约、自启、多 profile/发行版切换、Explorer 重启恢复、多屏/混合 DPI、事件 WS。当前壁纸只挂主屏，且运行中的旧服务需重建/重启后才提供 `wallpaper-key` 与快照端点。
+未实现，当前不能标记 W1-B 完成：完整设置页与预览租约、自启、多 profile/发行版切换、Explorer 重启恢复、多屏/混合 DPI、事件 WS。当前壁纸只挂主屏，且运行中的旧服务需重建/重启后才提供 `wallpaper-key` 与快照端点。
 
 ### 8.2 数据与流量约定
 
