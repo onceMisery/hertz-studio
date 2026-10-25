@@ -16,6 +16,8 @@ struct FakeOutput {
     ppm: f64,
     cancel_diagnostic_on_write: Option<oneshot::Receiver<Result<(), ReceiverError>>>,
     telemetry_clock: Option<Rc<Cell<u64>>>,
+    clock_fault_count: u64,
+    fault_on_unmute: bool,
 }
 
 impl FakeOutput {
@@ -33,6 +35,8 @@ impl FakeOutput {
             ppm: 0.0,
             cancel_diagnostic_on_write: None,
             telemetry_clock: None,
+            clock_fault_count: 0,
+            fault_on_unmute: false,
         }
     }
 
@@ -69,6 +73,7 @@ impl DeviceOutput for FakeOutput {
         t.last_callback_local_ns = Some(callback);
         t.last_presentation_local_ns = Some(callback + 20 * MS);
         t.device_clock_ppm = self.ppm;
+        t.clock_fault_count = self.clock_fault_count;
         t.ns_per_frame = 1e9 / (f64::from(self.format().sample_rate) * (1.0 + self.ppm * 1e-6));
         t
     }
@@ -105,8 +110,17 @@ impl DeviceOutput for FakeOutput {
     fn mute(&mut self) {
         self.queue.mute();
     }
-    fn unmute(&mut self, start: u64) {
+    fn unmute(&mut self, start: u64, clock_fault_count: u64) -> Result<(), OutputError> {
+        if self.fault_on_unmute {
+            self.fault_on_unmute = false;
+            self.clock_fault_count += 1;
+            self.queue.mute();
+        }
+        if self.clock_fault_count != clock_fault_count {
+            return Err(OutputError::ClockChanged);
+        }
         self.queue.unmute_at(start);
+        Ok(())
     }
     fn volume(&mut self, volume: f32) -> Result<(), OutputError> {
         self.queue.set_local_volume(volume)
@@ -706,6 +720,106 @@ fn missing_fresh_clock_and_expired_commit_cannot_unmute() {
 }
 
 #[test]
+fn recovered_clock_fault_retires_old_plans_even_when_invalid_was_never_observed() {
+    for command_first in [false, true] {
+        let mut engine = engine();
+        let original = plan(1, 10, 400 * MS, 0);
+        prepare(&mut engine, original.clone());
+        feed(&mut engine, 1, 0, 30_000);
+        commit(&mut engine, 0, &original);
+        tick(&mut engine, 350 * MS);
+        assert!(engine.output.as_ref().unwrap().telemetry().queued_frames > 0);
+        // A committed preparation also holds a deferred third intent. Neither
+        // may survive a native reset that completes between Receiver ticks.
+        prepare(&mut engine, plan(2, 11, 900 * MS, 0));
+        assert!(engine.intent.is_some());
+        let output = engine.output.as_mut().unwrap();
+        output.queue.mute();
+        output.clock_fault_count = 1;
+        output.valid = true; // Invalid -> native Reset -> eight warmups already finished
+        output.now = 360 * MS;
+        let snapshot = engine.observe(|| 360 * MS);
+        assert_eq!(snapshot.telemetry.unwrap().clock_status, ClockStatus::Valid);
+        assert!(!engine.status(snapshot).output_ready);
+        let mut events = Vec::new();
+        if command_first {
+            engine.command(
+                snapshot,
+                Command::Commit {
+                    identity: identity(),
+                    epoch: 1,
+                    plan_id: 10,
+                    effective_at: 400 * MS,
+                },
+                &mut events,
+            );
+        } else {
+            engine.tick(snapshot, &mut events);
+        }
+        assert!(matches!(events.as_slice(), [ReceiverEvent::Resync { .. }]));
+        assert!(engine.current.is_none() && engine.preparing.is_none() && engine.intent.is_none());
+        assert_eq!(engine.gate.current_epoch(), None);
+        assert_eq!(engine.acknowledged_clock_fault_count, 1);
+        assert!(engine.output.as_ref().unwrap().telemetry().muted);
+        assert_eq!(engine.output.as_ref().unwrap().telemetry().queued_frames, 0);
+        assert!(tick(&mut engine, 370 * MS).is_empty());
+        assert!(commit(&mut engine, 370 * MS, &original).is_empty());
+        assert!(engine.preparing.is_none());
+        assert!(engine.output.as_ref().unwrap().telemetry().muted);
+
+        // Only a new token and a future boundary can authorize the recovered
+        // generation. Old Commit/Prepare replays cannot restore its PCM.
+        let fresh = plan(2, 12, 900 * MS, 0);
+        let mut events = Vec::new();
+        engine.command(
+            engine.observe(|| 370 * MS),
+            Command::Prepare(identity(), fresh.clone()),
+            &mut events,
+        );
+        feed(&mut engine, 2, 0, 10_000);
+        tick(&mut engine, 370 * MS);
+        assert!(engine.preparing.as_ref().unwrap().ready);
+        assert!(engine.output.as_ref().unwrap().telemetry().muted);
+        assert!(commit(&mut engine, 370 * MS, &fresh).is_empty());
+        assert!(tick(&mut engine, 800 * MS).is_empty());
+        assert!(engine.output.as_ref().unwrap().telemetry().queued_frames > 0);
+        assert!(!engine.output.as_ref().unwrap().telemetry().muted);
+    }
+}
+
+#[test]
+fn fault_recovered_during_conversion_cannot_unmute_the_old_committed_plan() {
+    let mut engine = engine();
+    let original = plan(1, 10, 400 * MS, 0);
+    prepare(&mut engine, original.clone());
+    feed(&mut engine, 1, 0, 30_000);
+    commit(&mut engine, 0, &original);
+    engine.output.as_mut().unwrap().fault_on_unmute = true;
+    let events = tick(&mut engine, 350 * MS);
+    assert!(matches!(events.as_slice(), [ReceiverEvent::Resync { .. }]));
+    assert_eq!(engine.acknowledged_clock_fault_count, 1);
+    assert!(engine.current.is_none() && engine.preparing.is_none());
+    assert!(engine.output.as_ref().unwrap().telemetry().muted);
+    assert_eq!(engine.output.as_ref().unwrap().telemetry().queued_frames, 0);
+}
+
+#[test]
+fn reopened_output_acknowledges_its_own_counter_origin() {
+    let mut old = engine();
+    old.output.as_mut().unwrap().clock_fault_count = 7;
+    assert_eq!(tick(&mut old, 0).len(), 1);
+    assert_eq!(old.acknowledged_clock_fault_count, 7);
+    drop(old);
+    // Production reopen is a new worker/Engine after the old completion
+    // barrier, not replacement of an output under an existing Engine.
+    let mut reopened = engine();
+    assert_eq!(reopened.acknowledged_clock_fault_count, 0);
+    assert!(tick(&mut reopened, 0).is_empty());
+    reopened.output.as_mut().unwrap().clock_fault_count = 1;
+    assert_eq!(tick(&mut reopened, 0).len(), 1);
+}
+
+#[test]
 fn commit_cannot_move_the_plan_boundary_and_third_epoch_has_no_pcm() {
     let mut engine = engine();
     let first = plan(1, 10, 400 * MS, 0);
@@ -1001,6 +1115,120 @@ fn internal_fault_does_not_revoke_commands_after_explicit_invalidation() {
     generation.store(6, Ordering::Release);
     assert_eq!(revoke_generation(&generation, 5), 6);
     assert_eq!(generation.load(Ordering::Acquire), 6);
+}
+
+fn queued_handle(engine: &Engine<FakeOutput>) -> (ReceiverHandle, mpsc::Receiver<Envelope>) {
+    let (commands, inbox) = mpsc::channel(COMMAND_CAPACITY);
+    let (_status, status) = watch::channel(engine.status(engine.observe(|| 0)));
+    let (_done, done) = watch::channel(false);
+    let emergency = Arc::new(Mutex::new(None));
+    (
+        ReceiverHandle {
+            commands,
+            trip: Arc::new(AtomicBool::new(false)),
+            invalidated: Arc::new(AtomicBool::new(false)),
+            generation: Arc::new(AtomicU64::new(0)),
+            emergency: emergency.clone(),
+            disconnected: Arc::new(AtomicBool::new(false)),
+            budget: engine.budget.clone(),
+            status,
+            done,
+            _lease: Arc::new(Lease {
+                shutdown: Arc::new(AtomicBool::new(false)),
+                emergency,
+            }),
+        },
+        inbox,
+    )
+}
+
+#[test]
+fn accepted_volume_survives_native_fault_before_dispatch_and_silences_fresh_pcm() {
+    let mut engine = engine();
+    let original = plan(1, 10, 400 * MS, 0);
+    prepare(&mut engine, original.clone());
+    feed(&mut engine, 1, 0, 30_000);
+    commit(&mut engine, 0, &original);
+    let (handle, mut inbox) = queued_handle(&engine);
+    // The caller may persist zero after this succeeds. Native recovery finishes
+    // before dispatch, so the volume command itself first discovers the fault.
+    handle.set_volume(0.0).unwrap();
+    engine.output.as_mut().unwrap().clock_fault_count = 1;
+    let mut events = Vec::new();
+    let command = inbox.try_recv().unwrap().into_command(0).unwrap();
+    engine.command(engine.observe(|| 0), command, &mut events);
+    assert!(matches!(events.as_slice(), [ReceiverEvent::Resync { .. }]));
+    assert!(engine.preparing.is_none());
+    assert_eq!(engine.volume, 0.0);
+
+    let fresh = plan(2, 11, 900 * MS, 0);
+    prepare(&mut engine, fresh.clone());
+    feed(&mut engine, 2, 0, 10_000);
+    commit(&mut engine, 0, &fresh);
+    assert!(tick(&mut engine, 800 * MS).is_empty());
+    let output = engine.output.as_mut().unwrap();
+    assert!(!output.telemetry().muted);
+    assert!(output
+        .render(900 * MS, 480)
+        .iter()
+        .all(|sample| *sample == 0.0));
+    assert_eq!(output.telemetry().played_frames, 480);
+}
+
+#[test]
+fn accepted_volumes_keep_fifo_order_when_media_generations_are_revoked() {
+    for cause in ["internal fault", "invalidate", "backpressure"] {
+        let mut engine = engine();
+        let (handle, mut inbox) = queued_handle(&engine);
+        handle
+            .prepare(identity(), plan(1, 10, 400 * MS, 0))
+            .unwrap();
+        handle.set_volume(0.75).unwrap();
+        handle.set_volume(0.0).unwrap();
+        let mut events = Vec::new();
+        let active = match cause {
+            "internal fault" => {
+                engine.fail(cause, &mut events);
+                revoke_generation(&handle.generation, 0)
+            }
+            "invalidate" => {
+                handle.invalidate();
+                engine.fail(cause, &mut events);
+                handle.generation.load(Ordering::Acquire)
+            }
+            "backpressure" => {
+                while handle.commands.capacity() > 0 {
+                    handle.mapping(mapping(0, 0.0)).unwrap();
+                }
+                assert!(matches!(
+                    handle.set_volume(1.0),
+                    Err(ReceiverError::Capacity)
+                ));
+                assert!(handle.trip.load(Ordering::Acquire));
+                engine.fail(cause, &mut events);
+                handle.generation.load(Ordering::Acquire)
+            }
+            _ => unreachable!(),
+        };
+        let mut applied = Vec::new();
+        while let Ok(envelope) = inbox.try_recv() {
+            if let Some(command) = envelope.into_command(active) {
+                engine.command(engine.observe(|| 0), command, &mut events);
+                applied.push(engine.volume);
+            }
+        }
+        assert_eq!(applied, [0.75, 0.0], "{cause}");
+        assert!(engine.preparing.is_none(), "old media remains revoked");
+        // Verify the actual consumer gain, not merely Engine's stored value.
+        let output = engine.output.as_mut().unwrap();
+        output.queue.unmute_at(10 * MS);
+        output.queue.write_at(10 * MS, &[1.0; 960], 0).unwrap();
+        assert!(output
+            .render(10 * MS, 480)
+            .iter()
+            .all(|sample| *sample == 0.0));
+        assert_eq!(output.telemetry().played_frames, 480);
+    }
 }
 
 #[tokio::test]
@@ -1798,7 +2026,18 @@ fn converting_different_wire_packet_sizes_produces_identical_continuous_audio() 
         let epoch = engine.preparing.as_mut().unwrap();
         for _ in 0..64 {
             epoch
-                .submit(output, mapping(0, 0.0), 0, 1500 * MS, None, None)
+                .submit(
+                    output,
+                    mapping(0, 0.0),
+                    OutputSnapshot {
+                        telemetry: Some(output.telemetry()),
+                        observed_at: 0,
+                        capture_span_ns: 0,
+                    },
+                    1500 * MS,
+                    None,
+                    None,
+                )
                 .unwrap();
         }
         let frames = epoch.output_frames;

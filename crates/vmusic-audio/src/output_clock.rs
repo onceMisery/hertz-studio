@@ -40,6 +40,9 @@ pub enum ClockFaultKind {
     BackendRatePpm,
     CombinedRatePpm,
     InvalidPresentationNs,
+    DevicePositionRegression,
+    DeviceUnderrun,
+    InvalidDeviceSample,
 }
 
 impl ClockFaultKind {
@@ -57,6 +60,9 @@ impl ClockFaultKind {
             10 => Self::BackendRatePpm,
             11 => Self::CombinedRatePpm,
             12 => Self::InvalidPresentationNs,
+            13 => Self::DevicePositionRegression,
+            14 => Self::DeviceUnderrun,
+            15 => Self::InvalidDeviceSample,
             _ => return None,
         })
     }
@@ -151,9 +157,16 @@ impl OutputClock {
         })
     }
 
-    fn invalidate(&mut self, kind: ClockFaultKind, value: f64) -> ClockReading {
+    pub(crate) fn invalidate(&mut self, kind: ClockFaultKind, value: f64) -> ClockReading {
         self.fault_count = self.fault_count.saturating_add(1);
         self.last_fault = Some(ClockFault { kind, value });
+        self.restart_observations();
+        self.reading(None)
+    }
+
+    /// A real native stream Reset starts a new device frame grid. Keep the
+    /// lifetime revoke generation and diagnostic while discarding old fits.
+    pub(crate) fn restart_observations(&mut self) {
         self.anchor = None;
         self.previous = None;
         self.window = None;
@@ -165,7 +178,6 @@ impl OutputClock {
         self.invalid = true;
         self.period_ns = self.nominal_period;
         self.host_ratio = 1.0;
-        self.reading(None)
     }
 
     fn reading(&self, presentation_ns: Option<u64>) -> ClockReading {
@@ -184,6 +196,11 @@ impl OutputClock {
             fault_count: self.fault_count,
             last_fault: self.last_fault,
         }
+    }
+
+    #[cfg(any(windows, test))]
+    pub(crate) fn pending(&self) -> ClockReading {
+        self.reading(None)
     }
 
     fn observe_rate_envelope(&mut self, minimum: ClockObservation) -> f64 {

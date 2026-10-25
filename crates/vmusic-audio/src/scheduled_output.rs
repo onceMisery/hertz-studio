@@ -18,13 +18,20 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+#[cfg(not(windows))]
+use cpal::traits::StreamTrait;
+use cpal::traits::{DeviceTrait, HostTrait};
 use vmusic_core::AudioError;
 
-use crate::output_clock::{
-    ClockFault, ClockFaultKind, ClockObservation, ClockReading, ClockStatus, OutputClock,
-};
+use crate::output_clock::{ClockFault, ClockFaultKind, ClockReading, ClockStatus};
+#[cfg(any(not(windows), test))]
+use crate::output_clock::{ClockObservation, OutputClock};
 use crate::RenderFormat;
+
+#[cfg(windows)]
+mod wasapi;
+#[cfg(any(windows, test))]
+mod wasapi_clock;
 
 pub const MAX_BUFFERED_NS: u64 = 3_000_000_000;
 pub const MAX_QUEUE_BYTES: usize = 8 * 1024 * 1024;
@@ -82,6 +89,8 @@ pub struct OutputOptions {
 pub enum TimestampCapability {
     /// CPAL backend presentation timestamp; it may be a driver/buffer estimate.
     BackendEstimate,
+    /// WASAPI IAudioClock position/frequency paired with its native QPC sample.
+    NativeDeviceClock,
     /// The embedding adapter supplies presentation time to the queue directly.
     External,
 }
@@ -105,7 +114,7 @@ pub struct OutputTelemetry {
     pub last_clock_fault: Option<ClockFault>,
     pub ns_per_frame: f64,
     pub last_presentation_local_ns: Option<u64>,
-    /// CPAL callback entry observation in the same origin domain. It advances
+    /// Native render/callback entry observation in the same origin domain. It advances
     /// while muted, so a worker can check freshness before enabling playback.
     /// External adapters using `render` directly do not supply this observation.
     pub last_callback_local_ns: Option<u64>,
@@ -135,6 +144,8 @@ pub enum OutputError {
     Interrupted,
     #[error("scheduled PCM run has ended; clear before starting another run")]
     RunEnded,
+    #[error("device clock generation changed; fresh future plan required")]
+    ClockChanged,
 }
 
 /// Presentation time for the first output frame; subsequent frames advance by
@@ -168,6 +179,9 @@ struct Shared {
     ppm_bits: AtomicU64,
     uncertainty: AtomicU64,
     clock_fault_count: AtomicU64,
+    /// The producer's explicit clock-generation grant. A recovered callback
+    /// cannot play PCM authorized before its latest lifetime clock fault.
+    authorized_clock_fault_count: AtomicU64,
     clock_fault_kind: AtomicU32,
     clock_fault_value: AtomicU64,
     presentation: AtomicU64,
@@ -518,6 +532,7 @@ impl ScheduledPcmQueue {
             ppm_bits: AtomicU64::new(0.0f64.to_bits()),
             uncertainty: AtomicU64::new(0),
             clock_fault_count: AtomicU64::new(0),
+            authorized_clock_fault_count: AtomicU64::new(0),
             clock_fault_kind: AtomicU32::new(0),
             clock_fault_value: AtomicU64::new(0),
             presentation: AtomicU64::new(u64::MAX),
@@ -796,7 +811,37 @@ impl ScheduledPcmQueue {
     /// planned silence even if it races the worker's first PCM publication.
     /// Missing PCM at/after the deadline still counts as a real underrun.
     pub fn unmute_at(&mut self, first_frame_local_ns: u64) {
+        let clock_fault_count = self.shared.clock_fault_count.load(Ordering::Acquire);
+        self.enable_at(first_frame_local_ns, clock_fault_count);
+    }
+
+    /// Enable only the clock generation acknowledged by the presentation
+    /// owner. Admission checks plus the consumer's generation grant close the
+    /// race where a device fault recovers during conversion or queue control.
+    pub fn unmute_at_clock_generation(
+        &mut self,
+        first_frame_local_ns: u64,
+        clock_fault_count: u64,
+    ) -> Result<(), OutputError> {
+        if self.shared.device_error.load(Ordering::Acquire) {
+            return Err(OutputError::DeviceError);
+        }
+        if self.shared.clock_fault_count.load(Ordering::Acquire) != clock_fault_count {
+            return Err(OutputError::ClockChanged);
+        }
+        self.enable_at(first_frame_local_ns, clock_fault_count);
+        if self.shared.clock_fault_count.load(Ordering::Acquire) != clock_fault_count {
+            self.mute();
+            return Err(OutputError::ClockChanged);
+        }
+        Ok(())
+    }
+
+    fn enable_at(&mut self, first_frame_local_ns: u64, clock_fault_count: u64) {
         self.clear();
+        self.shared
+            .authorized_clock_fault_count
+            .store(clock_fault_count, Ordering::Release);
         self.shared
             .silence_until
             .store(first_frame_local_ns, Ordering::Release);
@@ -833,6 +878,33 @@ impl ScheduledPcmQueue {
 }
 
 impl PresentationConsumer {
+    /// The callback holds the current clock reading even if its publication is
+    /// racing the worker. Compare that reading with the producer's explicit
+    /// generation grant before touching PCM; checking published status alone
+    /// would miss a complete Invalid/warmup/Valid cycle between owner ticks.
+    fn render_clocked(
+        &mut self,
+        output: &mut [f32],
+        reading: ClockReading,
+        callback_local_ns: Option<u64>,
+    ) {
+        let authorized = self
+            .shared
+            .authorized_clock_fault_count
+            .load(Ordering::Acquire)
+            == reading.fault_count;
+        self.render(
+            output,
+            authorized
+                .then_some(reading.first_frame_local_ns)
+                .flatten()
+                .map(|first_frame_local_ns| PresentationTime {
+                    first_frame_local_ns,
+                    ns_per_frame: reading.ns_per_frame,
+                }),
+        );
+        self.publish_clock(reading, callback_local_ns);
+    }
     fn publish_clock(&self, reading: ClockReading, callback_local_ns: Option<u64>) {
         self.shared.clock_sequence.fetch_add(1, Ordering::AcqRel);
         self.shared
@@ -1080,7 +1152,10 @@ impl PresentationConsumer {
 /// CPAL stream owned by the receiver worker. Create, control and drop it on that
 /// worker; no async runtime or audio actor is involved.
 pub struct ScheduledOutput {
+    #[cfg(not(windows))]
     stream: Option<cpal::Stream>,
+    #[cfg(windows)]
+    stream: Option<wasapi::NativeStream>,
     queue: ScheduledPcmQueue,
     clock_origin: Instant,
     binding: OutputBinding,
@@ -1098,6 +1173,14 @@ impl ScheduledOutput {
                 "invalid scheduled output options".into(),
             ));
         }
+        #[cfg(windows)]
+        return wasapi::open(options);
+        #[cfg(not(windows))]
+        Self::open_cpal(options)
+    }
+
+    #[cfg(not(windows))]
+    fn open_cpal(options: OutputOptions) -> Result<Self, AudioError> {
         let host = cpal::default_host();
         let device = if let Some(id) = options.device_id.as_deref() {
             host.output_devices()
@@ -1188,16 +1271,7 @@ impl ScheduledOutput {
                         })
                     })();
                     let reading = clock.observe(observation);
-                    consumer.render(
-                        data,
-                        reading
-                            .first_frame_local_ns
-                            .map(|first_frame_local_ns| PresentationTime {
-                                first_frame_local_ns,
-                                ns_per_frame: reading.ns_per_frame,
-                            }),
-                    );
-                    consumer.publish_clock(reading, observation.map(|value| value.local_ns));
+                    consumer.render_clocked(data, reading, observation.map(|value| value.local_ns));
                 },
                 move |_error| {
                     errors.muted.store(true, Ordering::Release);
@@ -1281,6 +1355,14 @@ impl ScheduledOutput {
     pub fn unmute_at(&mut self, first_frame_local_ns: u64) {
         self.queue.unmute_at(first_frame_local_ns);
     }
+    pub fn unmute_at_clock_generation(
+        &mut self,
+        first_frame_local_ns: u64,
+        clock_fault_count: u64,
+    ) -> Result<(), OutputError> {
+        self.queue
+            .unmute_at_clock_generation(first_frame_local_ns, clock_fault_count)
+    }
     pub fn silence_from(&mut self, local_ns: u64) {
         self.queue.silence_from(local_ns);
     }
@@ -1308,6 +1390,93 @@ impl Drop for ScheduledOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn healthy_clocked_callbacks_accept_the_initial_generation_grant() {
+        for capability in [
+            TimestampCapability::BackendEstimate,
+            TimestampCapability::NativeDeviceClock,
+        ] {
+            let (mut queue, mut consumer) = ScheduledPcmQueue::with_capability(
+                RenderFormat {
+                    sample_rate: 48_000,
+                    channels: 2,
+                },
+                capability,
+            )
+            .unwrap();
+            queue.unmute_at(10_000_000);
+            queue.write_at(10_000_000, &[0.5; 960], 0).unwrap();
+            let mut output = [f32::NAN; 960];
+            consumer.render_clocked(
+                &mut output,
+                ClockReading {
+                    status: ClockStatus::Valid,
+                    first_frame_local_ns: Some(10_000_000),
+                    ns_per_frame: 1e9 / 48_000.0,
+                    device_clock_ppm: 0.0,
+                    uncertainty_ns: 100,
+                    fault_count: 0,
+                    last_fault: None,
+                },
+                Some(0),
+            );
+            assert!(output.iter().all(|sample| *sample == 0.5));
+            let telemetry = queue.telemetry();
+            assert!(!telemetry.muted);
+            assert_eq!(telemetry.played_frames, 480);
+            assert_eq!(telemetry.timestamp_capability, capability);
+        }
+    }
+
+    #[test]
+    fn recovered_callback_cannot_play_a_stale_clock_generation_grant() {
+        let (mut queue, mut consumer) = ScheduledPcmQueue::with_capability(
+            RenderFormat {
+                sample_rate: 48_000,
+                channels: 2,
+            },
+            TimestampCapability::NativeDeviceClock,
+        )
+        .unwrap();
+        queue.unmute_at_clock_generation(10_000_000, 0).unwrap();
+        queue.write_at(10_000_000, &[0.5; 960], 0).unwrap();
+        // Simulate the strongest race: the owner enabled generation zero just
+        // before the callback publishes a recovered generation-one reading.
+        let mut reading = ClockReading {
+            status: ClockStatus::Valid,
+            first_frame_local_ns: Some(10_000_000),
+            ns_per_frame: 1e9 / 48_000.0,
+            device_clock_ppm: 0.0,
+            uncertainty_ns: 100,
+            fault_count: 1,
+            last_fault: Some(ClockFault {
+                kind: ClockFaultKind::PhaseResidualNs,
+                value: 30_000_000.0,
+            }),
+        };
+        let mut output = [f32::NAN; 960];
+        consumer.render_clocked(&mut output, reading, Some(0));
+        assert!(output.iter().all(|sample| *sample == 0.0));
+        assert!(queue.telemetry().muted);
+        assert_eq!(queue.telemetry().clock_status, ClockStatus::Valid);
+        assert_eq!(queue.telemetry().clock_fault_count, 1);
+        assert_eq!(queue.telemetry().queued_frames, 0);
+        assert_eq!(
+            queue.unmute_at_clock_generation(20_000_000, 0),
+            Err(OutputError::ClockChanged)
+        );
+        reading.first_frame_local_ns = Some(20_000_000);
+        consumer.render_clocked(&mut output, reading, Some(10_000_000));
+        assert!(output.iter().all(|sample| *sample == 0.0));
+        queue.unmute_at_clock_generation(30_000_000, 1).unwrap();
+        queue
+            .write_at(30_000_000, &[0.75; 960], 20_000_000)
+            .unwrap();
+        reading.first_frame_local_ns = Some(30_000_000);
+        consumer.render_clocked(&mut output, reading, Some(20_000_000));
+        assert!(output.iter().all(|sample| *sample == 0.75));
+    }
 
     #[test]
     fn correction_requires_exact_device_stream_binding() {

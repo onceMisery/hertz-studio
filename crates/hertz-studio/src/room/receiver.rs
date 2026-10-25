@@ -232,6 +232,16 @@ struct Envelope {
     command: Command,
 }
 
+impl Envelope {
+    fn into_command(self, active_generation: u64) -> Option<Command> {
+        // Volume is a local output setting, not media authorization. Retain
+        // its original position in the same bounded FIFO across revocations;
+        // a successful set_volume must not be undone by dropping its envelope.
+        (self.generation == active_generation || matches!(self.command, Command::Volume(_)))
+            .then_some(self.command)
+    }
+}
+
 type Emergency = Arc<Mutex<Option<EmergencyMute>>>;
 
 fn emergency_mute(emergency: &Emergency) {
@@ -626,10 +636,9 @@ pub(crate) async fn spawn(
                         let Ok(envelope) = inbox.try_recv() else {
                             break;
                         };
-                        if envelope.generation != active_generation {
+                        let Some(command) = envelope.into_command(active_generation) else {
                             continue;
-                        }
-                        let command = envelope.command;
+                        };
                         let faults = engine.faults;
                         let snapshot = engine.observe(|| clock.now_ns());
                         engine.command(snapshot, command, &mut outgoing);
@@ -751,7 +760,7 @@ trait DeviceOutput {
         period: f64,
     ) -> Result<(), OutputError>;
     fn mute(&mut self);
-    fn unmute(&mut self, start: u64);
+    fn unmute(&mut self, start: u64, clock_fault_count: u64) -> Result<(), OutputError>;
     fn silence_from(&mut self, local_ns: u64);
     fn volume(&mut self, volume: f32) -> Result<(), OutputError>;
 }
@@ -841,13 +850,16 @@ impl DeviceOutput for NativeOutput {
     fn mute(&mut self) {
         self.output.mute();
     }
-    fn unmute(&mut self, start: u64) {
+    fn unmute(&mut self, start: u64, clock_fault_count: u64) -> Result<(), OutputError> {
         let _guard = self
             .emergency
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         if self.authorized() {
-            self.output.unmute_at(start);
+            self.output
+                .unmute_at_clock_generation(start, clock_fault_count)
+        } else {
+            Err(OutputError::Muted)
         }
     }
     fn volume(&mut self, volume: f32) -> Result<(), OutputError> {
@@ -893,8 +905,8 @@ impl DeviceOutput for ScheduledOutput {
     fn mute(&mut self) {
         self.mute();
     }
-    fn unmute(&mut self, start: u64) {
-        self.unmute_at(start);
+    fn unmute(&mut self, start: u64, clock_fault_count: u64) -> Result<(), OutputError> {
+        self.unmute_at_clock_generation(start, clock_fault_count)
     }
     fn volume(&mut self, volume: f32) -> Result<(), OutputError> {
         self.set_local_volume(volume)
@@ -1112,7 +1124,7 @@ impl Epoch {
         &mut self,
         output: &mut D,
         mapping: ClockMapping,
-        now: u64,
+        snapshot: OutputSnapshot,
         horizon: u64,
         end_host_ns: Option<u64>,
         silence_from: Option<u64>,
@@ -1120,8 +1132,16 @@ impl Epoch {
         if !self.committed {
             return Ok(());
         }
+        let now = snapshot.observed_at;
+        let clock_fault_count = snapshot
+            .telemetry
+            .ok_or("device clock snapshot missing")?
+            .clock_fault_count;
         let format = output.format();
         let telemetry = output.telemetry();
+        if telemetry.clock_fault_count != clock_fault_count {
+            return Err(OutputError::ClockChanged.to_string());
+        }
         let mut cursor = output
             .clocked_cursor(self.next_output_ns, telemetry.ns_per_frame)
             .map_err(|error| error.to_string())?;
@@ -1218,7 +1238,9 @@ impl Epoch {
                 if output.telemetry().muted {
                     // Only an accepted Commit reaches here. The queue's
                     // deadlines keep this unmute silent until the future join.
-                    output.unmute(start);
+                    output
+                        .unmute(start, clock_fault_count)
+                        .map_err(|error| error.to_string())?;
                     if let Some(boundary) = silence_from {
                         output.silence_from(boundary);
                     }
@@ -1297,6 +1319,10 @@ struct Engine<D: DeviceOutput> {
     discarded: u64,
     previous_underrun: u64,
     previous_late: u64,
+    /// Durable acknowledgment within this owned output's lifetime. A reopened
+    /// output always creates a new Engine and initializes a fresh baseline;
+    /// counters from distinct native sessions are never compared.
+    acknowledged_clock_fault_count: u64,
     played_frame: u64,
     test_until: Option<u64>,
 }
@@ -1368,6 +1394,7 @@ impl<D: DeviceOutput> Engine<D> {
     }
     fn new(mut output: D, identity: StreamIdentity, budget: Arc<Budget>) -> Self {
         output.mute();
+        let acknowledged_clock_fault_count = output.telemetry().clock_fault_count;
         let mut gate = ReceiverGate::new(SUBMIT_MARGIN_NS, 500_000_000, GATE_UNMATCHED_FRAME_LIMIT);
         gate.input(
             0,
@@ -1397,6 +1424,7 @@ impl<D: DeviceOutput> Engine<D> {
             discarded: 0,
             previous_underrun: 0,
             previous_late: 0,
+            acknowledged_clock_fault_count,
             played_frame: 0,
             test_until: None,
         }
@@ -1438,6 +1466,29 @@ impl<D: DeviceOutput> Engine<D> {
         }
     }
 
+    /// Invalid is transient: a native reset and warmup may finish while this
+    /// worker is descheduled. Its lifetime fault counter is the durable revoke
+    /// token. Acknowledge once, retire every old plan/PCM epoch, and let only a
+    /// newly received future Prepare/Commit authorize the recovered output.
+    fn acknowledge_clock_generation(
+        &mut self,
+        snapshot: OutputSnapshot,
+        events: &mut Vec<ReceiverEvent>,
+    ) -> bool {
+        let Some(telemetry) = snapshot.telemetry else {
+            return true;
+        };
+        if telemetry.clock_fault_count == self.acknowledged_clock_fault_count {
+            return true;
+        }
+        self.acknowledged_clock_fault_count = telemetry.clock_fault_count;
+        self.fail(
+            "device clock discontinuity; fresh future plan required",
+            events,
+        );
+        false
+    }
+
     fn output_ready(&self, snapshot: OutputSnapshot) -> bool {
         self.output_unavailable(snapshot).is_none()
     }
@@ -1454,6 +1505,9 @@ impl<D: DeviceOutput> Engine<D> {
         let Some(t) = snapshot.telemetry else {
             return Some(("device_timestamps_missing", 0));
         };
+        if t.clock_fault_count != self.acknowledged_clock_fault_count {
+            return Some(("device_clock_generation", t.clock_fault_count));
+        }
         let (Some(presentation), Some(seen)) =
             (t.last_presentation_local_ns, t.last_callback_local_ns)
         else {
@@ -1549,7 +1603,9 @@ impl<D: DeviceOutput> Engine<D> {
             let sample = phase.sin() as f32 * 0.031_622_775 * envelope;
             samples.extend(std::iter::repeat_n(sample, usize::from(format.channels)));
         }
-        output.unmute(start);
+        output
+            .unmute(start, self.acknowledged_clock_fault_count)
+            .map_err(|error| ReceiverError::Output(error.to_string()))?;
         if let Err(error) = output.write_finite(start, &samples, now, period) {
             output.mute();
             return Err(ReceiverError::Output(error.to_string()));
@@ -1564,6 +1620,11 @@ impl<D: DeviceOutput> Engine<D> {
         command: Command,
         events: &mut Vec<ReceiverEvent>,
     ) {
+        if !self.acknowledge_clock_generation(snapshot, events)
+            && !matches!(command, Command::Volume(_))
+        {
+            return;
+        }
         let now = snapshot.observed_at;
         match command {
             Command::TestOutput(reply) => {
@@ -2145,6 +2206,9 @@ impl<D: DeviceOutput> Engine<D> {
     }
 
     fn tick(&mut self, snapshot: OutputSnapshot, events: &mut Vec<ReceiverEvent>) {
+        if !self.acknowledge_clock_generation(snapshot, events) {
+            return;
+        }
         let now = snapshot.observed_at;
         if let Some(until) = self.test_until {
             let healthy = snapshot
@@ -2308,7 +2372,7 @@ impl<D: DeviceOutput> Engine<D> {
                     current.submit(
                         output,
                         mapping,
-                        now,
+                        snapshot,
                         horizon.min(boundary),
                         stop.map(|(_, host)| host),
                         silence_from,
@@ -2335,7 +2399,7 @@ impl<D: DeviceOutput> Engine<D> {
                     preparing.submit(
                         output,
                         mapping,
-                        now,
+                        snapshot,
                         horizon.min(silence_from.unwrap_or(u64::MAX)),
                         self.suspension.map(|(_, _, _, host)| host),
                         silence_from,
@@ -2351,7 +2415,12 @@ impl<D: DeviceOutput> Engine<D> {
             Ok::<_, String>(())
         })();
         if let Err(reason) = result {
-            self.fail(&reason, events);
+            // Conversion can span a complete native recovery. Recheck its
+            // durable generation before classifying the failed admission.
+            let latest = self.observe(|| now);
+            if self.acknowledge_clock_generation(latest, events) {
+                self.fail(&reason, events);
+            }
         } else if !successor_has_pcm
             && self
                 .preparing

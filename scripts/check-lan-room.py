@@ -168,7 +168,7 @@ def fixtures(directory):
         path.with_suffix(".lrc").write_text("[00:00.00]LAN fixture\n[00:03.00]Shared timeline\n", encoding="utf-8")
 
 
-def verify(host, guest, music, native, duration, samples):
+def verify(host, guest, music, native, duration, samples, output_device=None):
     checks = []
     host.call("/v1/library/scan", {"root": str(music)})
     tracks = wait_for(lambda: (lambda rows: rows if len(rows) == 3 else None)(
@@ -275,9 +275,9 @@ def verify(host, guest, music, native, duration, samples):
     assert not host.room()["discovery_available"]
     checks.append("discovery publication can be disabled and direct invitations can be revoked before pairing")
     invitation = host.room({"action": "invite", "permissions": permissions})["invitation"]
-    guest.room({"action": "join", "invitation": invitation, "name": "Acceptance desktop", "listen": native})
+    guest.room({"action": "join", "invitation": invitation, "name": "Acceptance desktop", "listen": native and output_device is None})
     wait_for(guest.connected, "guest connected with current permissions", 20)
-    if native:
+    if native and output_device is None:
         wait_for(lambda: guest.connected() and guest.room().get("output", {}).get("ready"), "native device and clocks", 20)
     assert guest.peer(action="library", offset=0, limit=32)["tracks"] == library
     checks.append("independent profiles, pinned TLS pairing, restricted shared library and queue")
@@ -339,10 +339,15 @@ def verify(host, guest, music, native, duration, samples):
     output = None
     transitions = set()
     if native:
-        wait_for(lambda: guest.room().get("output", {}).get("ready"), "native device and clocks", 20)
         settings = guest.room()["output"]["settings"]
         settings["volume"] = 0
+        if output_device is not None:
+            settings["device_id"] = output_device
         guest.room({"action": "output", "settings": settings, "enabled": True})
+        def selected_ready():
+            output = guest.room().get("output", {})
+            return output.get("ready") and (output_device is None or output.get("binding", {}).get("device") == output_device)
+        wait_for(selected_ready, "selected native device clock", 20)
         guest.room({"action": "test_output"})
         time.sleep(.6)
         wait_for(lambda: guest.room()["output"].get("ready"), "clock after native diagnostic")
@@ -501,7 +506,7 @@ def verify(host, guest, music, native, duration, samples):
     assert not (host.directory / "vmusicd.json").exists()
     checks.append("host service shutdown drains End, forgets ended guest membership and removes discovery before exit")
     return {"checks": checks, "native_output_tested": native, "output_binding": output,
-            "duration_seconds": duration if native else 0, "samples": list(samples),
+            "duration_seconds": duration if native else 0, "requested_output_device": output_device, "samples": list(samples),
             "sample_retention": "Last 600 observations; every observation is checked during the run.",
             "limits": "Single Windows machine / two processes when run locally. No acoustic or cross-OS claim."}
 
@@ -511,10 +516,13 @@ def main():
     parser.add_argument("--binary", type=Path, required=True)
     parser.add_argument("--native-output", action="store_true")
     parser.add_argument("--duration", type=int, default=60)
+    parser.add_argument("--output-device", help="Exact output device name; requires --native-output and never changes the system default")
     parser.add_argument("--report", type=Path)
     args = parser.parse_args()
     if args.duration < 26 or args.duration > 28800:
         parser.error("--duration must be between 26 and 28800 seconds")
+    if args.output_device is not None and not args.native_output:
+        parser.error("--output-device requires --native-output")
     binary = args.binary.resolve(strict=True)
     apps = []
     samples = deque(maxlen=600)
@@ -531,7 +539,7 @@ def main():
                 profile.mkdir()
                 apps.append(App(executable, profile))
             fixtures(directory / "music")
-            result = {**identity, "passed": True, **verify(*apps, directory / "music", args.native_output, args.duration, samples)}
+            result = {**identity, "passed": True, **verify(*apps, directory / "music", args.native_output, args.duration, samples, args.output_device)}
             if args.report:
                 args.report.parent.mkdir(parents=True, exist_ok=True)
                 args.report.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

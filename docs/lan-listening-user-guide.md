@@ -58,17 +58,19 @@ Linux 接收端需要可用的 Secret Service，例如已解锁的 GNOME Keyring
 
 房间与 Hertz 主界面共用主题色。可在工作区标题区的“主题色”选择器切换内置或已注册的自定义主题；大厅、桌面和窄屏均可操作，选择立即同步到主界面并沿用原有主题保存设置。主界面更换主题也会立即更新房间。桌面播放页使用大封面和成员／队列侧栏；队列与聊天并排。窄屏切换为大封面播放页、队列／聊天分段和底部导航。受限成员的操作按服务器授权禁用。返回 Hertz 保持健康房间连接，并恢复紧凑房间播控；重新进入工作区时隐藏重复播放栏。只有“离开房间”或房主“结束房间”才会结束对应会话。
 
-以下为最终构建中两个独立成员的实际界面，歌曲及封面使用程序生成的测试夹具。手机截图是桌面浏览器的窄屏布局验收，不代表手机已具备独立连接或原生音频接收能力。网络对时读数不能作为两台扬声器的声学同步误差。
+以下为本轮构建中两个独立成员的实际界面，歌曲及封面使用程序生成的测试夹具。小屏截图是桌面浏览器的窄屏布局验收，不代表手机已具备独立连接或原生音频接收能力。网络对时读数不能作为两台扬声器的声学同步误差。
 
-![桌面房间播放](images/listening-workspace/desktop-play.png)
+![桌面房间播放](images/listening-workspace-favorites/desktop-play.png)
 
-![桌面共同队列与歌曲卡片聊天](images/listening-workspace/desktop-collaborate.png)
+![桌面共同队列与歌曲卡片聊天](images/listening-workspace-favorites/desktop-collaborate.png)
 
-![手机播放布局](images/listening-workspace/mobile-play.png)
+![窄屏播放布局](images/listening-workspace-favorites/mobile-play.png)
 
-![手机聊天布局](images/listening-workspace/mobile-chat.png)
+![窄屏聊天布局](images/listening-workspace-favorites/mobile-chat.png)
 
-大厅、邀请与队列的其余截图见 [界面目录](images/listening-workspace)。邀请截图已遮盖一次性能力与二维码。
+![房间与主界面共用浅色主题](images/listening-workspace-favorites/desktop-light.png)
+
+大厅、邀请、个人收藏与窄屏浅色主题的其余截图见 [界面目录](images/listening-workspace-favorites)。邀请截图已遮盖一次性能力与二维码；[上一轮截图](images/listening-workspace)仅保留为历史记录。
 
 用户于 2026-10-25 确认本版支持电脑局域网房间及小屏布局适配；手机独立客户端、远程入口和音频接收不在本版范围，互联网好友／公共目录／异地连接留待后续接入。
 
@@ -119,8 +121,16 @@ Windows 原生设备验收会打开默认声卡，并将接收端本机音量设
 python scripts/check-lan-room.py --binary target/debug/hertz-studio.exe --native-output --duration 120 --report output/lan-native.json
 ```
 
+可通过 `--output-device` 指定“本机输出”列出的完整设备名，不修改系统默认设备；显式选择时不会先等待默认声卡就绪：
+
+```powershell
+python scripts/check-lan-room.py --binary target/debug/hertz-studio.exe --native-output --output-device '扬声器 (Realtek(R) Audio)' --duration 120 --report output/lan-native-realtek.json
+```
+
+Windows 房间输出使用原生 WASAPI 的设备呈现位置与配对 QPC，不再使用 CPAL 0.15 的可写空间时间戳。累计时钟故障代际会撤销旧播放计划；设备实际 Stop/Reset/Start 并恢复时钟后，仍需新的未来 Prepare/Commit 才能出声。旧设备配置的延迟校准不会自动沿用到新后端。其它平台保持各自后端能力门禁。
+
 脚本记录二进制 SHA-256、平台、设备绑定、时钟/缓冲和失败时最后状态，不记录邀请与凭据；观测记录有界。可设置 `--duration 28800` 进行八小时运行。两进程同机通过只说明对应软件和设备路径通过，不能外推为两台电脑或其它操作系统的声学精度结果。
 
 验收状态以实际报告为准：三平台构建矩阵与跨机声学、多通道同钟采集、八端压力、八小时真机长稳是不同项目。虚拟设备长时回归不替代真实设备记录。实际设备排队延迟过大或时间戳无效时，应修正设备配置或换设备，不能通过扩大缓冲、关闭门禁来伪造同步成功。
 
-维护与扩展时先查 [ADR-0011](adr/0011-lan-rendering-and-output-ownership.md)：业务队列、共同渲染、原生设备网格与凭据各有唯一归属。新增传输能力需要升级握手契约，新增设备后端需要提供同样的呈现时钟和取消语义；前端入口不能另建播放器绕过房间裁决。最终构建身份、验收命令与硬件待测项见[本轮工作区交付记录](../evals/lan-sync/workspace-2026-10-25/README.md)；[上轮交付记录](../evals/lan-sync/delivery-2026-10-25/README.md)保留历史证据。
+维护与扩展时先查 [ADR-0011](adr/0011-lan-rendering-and-output-ownership.md)：业务队列、共同渲染、原生设备网格与凭据各有唯一归属。新增传输能力需要升级握手契约，新增设备后端需要提供同样的呈现时钟和取消语义；前端入口不能另建播放器绕过房间裁决。最终构建身份、验收命令与硬件待测项见[本轮主题、收藏与原生时钟交付记录](../evals/lan-sync/favorites-2026-10-25/README.md)；[工作区交付记录](../evals/lan-sync/workspace-2026-10-25/README.md)与[更早交付记录](../evals/lan-sync/delivery-2026-10-25/README.md)保留历史证据。
