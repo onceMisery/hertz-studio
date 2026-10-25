@@ -476,6 +476,15 @@ pub(crate) fn window_rect(hwnd: HWND) -> Option<RECT> {
     (ok != 0).then_some(rect)
 }
 
+pub(crate) fn parent_window_rect(hwnd: HWND) -> Option<RECT> {
+    let parent = unsafe { GetParent(hwnd) };
+    if parent.is_null() {
+        None
+    } else {
+        window_rect(parent)
+    }
+}
+
 pub(crate) fn target_fullscreen(hwnd: HWND) -> bool {
     let foreground = unsafe { GetForegroundWindow() };
     if foreground.is_null() || foreground == hwnd {
@@ -809,8 +818,23 @@ pub(crate) fn mount_wallpaper(hwnd: HWND, monitor: &WallpaperMonitor) -> Result<
     let vh = unsafe {
         GetSystemMetrics(windows_sys::Win32::UI::WindowsAndMessaging::SM_CYVIRTUALSCREEN)
     };
+    // WorkerW 是 Progman 的子窗：SetWindowPos 用的是父窗口坐标。负虚拟屏
+    // 原点（显示器在上方/左侧）时必须减去 Progman 的屏幕原点，否则整层会
+    // 再偏移一屏。
+    let progman_rect =
+        window_rect(progman).ok_or_else(|| anyhow::anyhow!("读取 Progman 矩形失败"))?;
+    let worker_x = vx - progman_rect.left;
+    let worker_y = vy - progman_rect.top;
     unsafe {
-        SetWindowPos(workerw, HWND_BOTTOM, vx, vy, vw, vh, SWP_NOACTIVATE);
+        SetWindowPos(
+            workerw,
+            HWND_BOTTOM,
+            worker_x,
+            worker_y,
+            vw,
+            vh,
+            SWP_NOACTIVATE,
+        );
         strip_title_bar(hwnd);
         install_wallpaper_style(hwnd);
         SetParent(hwnd, workerw);

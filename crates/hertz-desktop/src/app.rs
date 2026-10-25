@@ -1868,6 +1868,10 @@ fn create_wallpaper(
         .build(target)?;
     let hwnd = window.hwnd() as HWND;
     native::mount_wallpaper(hwnd, &monitor)?;
+    let child_rect =
+        native::window_rect(hwnd).map(|rect| (rect.left, rect.top, rect.right, rect.bottom));
+    let parent_rect =
+        native::parent_window_rect(hwnd).map(|rect| (rect.left, rect.top, rect.right, rect.bottom));
     let window_dpi = native::window_dpi(hwnd);
     let zoom = f64::from(monitor.dpi) / f64::from(window_dpi.max(1));
     let page_proxy = proxy.clone();
@@ -1891,7 +1895,7 @@ fn create_wallpaper(
         .load_html(&wallpaper_html())
         .map_err(|error| anyhow::anyhow!("加载壁纸页面失败：{error}"))?;
     log(&format!(
-        "wallpaper target name={} rect={},{} {}x{} dpi={} window_dpi={window_dpi} zoom={zoom:.3}",
+        "wallpaper target name={} rect={},{} {}x{} dpi={} window_dpi={window_dpi} zoom={zoom:.3} child={child_rect:?} parent={parent_rect:?}",
         monitor.name, monitor.left, monitor.top, monitor.width, monitor.height, monitor.dpi
     ));
     Ok(WallpaperSurface {
