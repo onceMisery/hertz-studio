@@ -1,0 +1,27 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><style>
+:root{color-scheme:dark;font:13px/1.5 "Segoe UI",sans-serif;color:#e8f2ff;background:#0b111a}
+body{margin:0;padding:22px}
+h1{margin:0 0 16px;font-size:17px;font-weight:600}
+.field{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:10px 0;border-bottom:1px solid #1c2836}
+.field label{color:#c4d4e6}
+.field select,.field input[type=number]{background:#111b27;color:#e8f2ff;border:1px solid #26374a;border-radius:6px;padding:5px 8px}
+.actions{display:flex;gap:8px;margin-top:20px}
+button{flex:1;border:1px solid #2b4864;border-radius:7px;background:#13263a;color:#e8f2ff;padding:8px 10px;cursor:pointer}
+button.primary{background:#1a6fb0;border-color:#2f8fd8}
+button:disabled{opacity:.45;cursor:default}
+#status{margin-top:16px;min-height:38px;color:#8fa8bf;white-space:pre-wrap}
+#status.error{color:#ff9c9c}
+</style></head><body>
+<h1>Hertz 壁纸</h1>
+<div class="field"><label for="enabled">启用桌面壁纸</label><input id="enabled" type="checkbox"></div>
+<div class="field"><label for="fps">帧率上限</label><select id="fps"><option value="15">15 fps</option><option value="30">30 fps</option><option value="60">60 fps</option></select></div>
+<div class="field"><label for="music">跟随音乐频谱</label><input id="music" type="checkbox"></div>
+<div class="actions">
+  <button id="preview">预览</button>
+  <button id="apply" class="primary">应用</button>
+  <button id="close">关闭</button>
+</div>
+<div id="status">正在读取桌面宿主状态…</div>
+<script>__SETTINGS__</script>
+</body></html>

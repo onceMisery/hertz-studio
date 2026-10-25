@@ -253,9 +253,16 @@ W1-A 先实现 `GET /v1/wallpaper/snapshot`，不实现 `/v1/wallpaper/events` W
 
 #### W1-B 首片进度（2026-10-24）
 
-已实现：`hertz-desktop` 的壁纸场景页（registry 相机 + `applyFeed`）、WorkerW 主屏 surface、500 ms feed 线程、全屏/会话/息屏停绘、托盘“显示壁纸”开关（用户隐藏时隐藏 WebView，露出系统壁纸），以及 `wallpaper.enabled`（默认关闭）与 `--wallpaper` 运行开关。隔离 mock 快照端到端已记录 page ready / mounted / feed ok。
+已实现：`hertz-desktop` 的壁纸场景页（registry 相机 + `applyFeed`）、WorkerW 主屏 surface、500 ms feed 线程、全屏/会话/息屏停绘、托盘“显示壁纸”开关（用户隐藏时隐藏 WebView，露出系统壁纸）、壁纸设置页（启用/帧率/跟随音乐）、15 s 预览租约与预览窗口、应用 revision 与运行时启停，以及 `wallpaper.enabled`（默认关闭）与 `--wallpaper` 运行开关。隔离 mock 快照端到端已记录 page ready / mounted / feed ok；设置页经 WebView2 CDP 验证预览、应用、live surface 与 feed。
 
-未实现，当前不能标记 W1-B 完成：完整设置页与预览租约、自启、多 profile/发行版切换、Explorer 重启恢复、多屏/混合 DPI、事件 WS。当前壁纸只挂主屏，且运行中的旧服务需重建/重启后才提供 `wallpaper-key` 与快照端点。
+未实现，当前不能标记 W1-B 完成：主应用侧的宿主管理 IPC、自启、多 profile/发行版切换、Explorer 重启恢复、多屏/混合 DPI、事件 WS。当前壁纸只挂主屏，且运行中的旧服务需重建/重启后才提供 `wallpaper-key` 与快照端点。
+
+#### W1-B 设置与预览首片（2026-10-24）
+
+- 托盘“壁纸设置”打开 520×520 设置页；可改启用、15/30/60 fps、跟随音乐，点“预览”打开 960×540 场景预览窗口。
+- 预览租约 15 s，设置窗口打开期间自动续租；同一时间只有一个预览；关闭设置、应用或超时都会关闭预览。
+- “应用”校验当前配置 revision 后保存，运行时创建/销毁 WorkerW surface、重建托盘并更新 feed 响应；失败显示错误，不静默改配置。
+- 当前页面 IPC 只属于宿主设置页；主应用通过服务端转发命令的宿主管理 IPC 与自启/恢复/多屏/事件 WS 仍未完成。
 
 ### 8.2 数据与流量约定
 
