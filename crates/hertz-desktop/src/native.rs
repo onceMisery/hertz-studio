@@ -36,17 +36,17 @@ use windows_sys::Win32::UI::Shell::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallWindowProcW, CreateWindowExW, DefWindowProcW, DispatchMessageW, EnumChildWindows,
-    FindWindowExW, FindWindowW, GetClassNameW, GetForegroundWindow, GetMessageW, GetSystemMetrics,
-    GetWindowLongPtrW, GetWindowRect, GetWindowThreadProcessId, IsWindow, IsZoomed, RegisterClassW,
-    RegisterWindowMessageW, SendMessageTimeoutW, SetForegroundWindow, SetLayeredWindowAttributes,
-    SetParent, SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, HWND_BOTTOM,
-    HWND_TOPMOST, LWA_ALPHA, MSG, PBT_APMRESUMEAUTOMATIC, PBT_APMRESUMESUSPEND, PBT_APMSUSPEND,
-    PBT_POWERSETTINGCHANGE, SMTO_NORMAL, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-    SWP_NOZORDER, SWP_SHOWWINDOW, SW_HIDE, SW_SHOW, SW_SHOWNOACTIVATE, WM_NCHITTEST,
-    WM_POWERBROADCAST, WM_WTSSESSION_CHANGE, WNDCLASSW, WNDPROC, WS_CAPTION, WS_CHILD,
-    WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_EX_TRANSPARENT, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU, WS_THICKFRAME,
-    WTS_SESSION_LOCK, WTS_SESSION_LOGOFF, WTS_SESSION_LOGON, WTS_SESSION_UNLOCK,
+    FindWindowExW, FindWindowW, GetClassNameW, GetForegroundWindow, GetMessageW, GetParent,
+    GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, GetWindowThreadProcessId, IsWindow,
+    IsZoomed, RegisterClassW, RegisterWindowMessageW, SendMessageTimeoutW, SetForegroundWindow,
+    SetLayeredWindowAttributes, SetParent, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+    TranslateMessage, HWND_BOTTOM, HWND_TOPMOST, LWA_ALPHA, MSG, PBT_APMRESUMEAUTOMATIC,
+    PBT_APMRESUMESUSPEND, PBT_APMSUSPEND, PBT_POWERSETTINGCHANGE, SMTO_NORMAL, SWP_FRAMECHANGED,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_HIDE, SW_SHOW,
+    SW_SHOWNOACTIVATE, WM_NCHITTEST, WM_POWERBROADCAST, WM_WTSSESSION_CHANGE, WNDCLASSW, WNDPROC,
+    WS_CAPTION, WS_CHILD, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU,
+    WS_THICKFRAME, WTS_SESSION_LOCK, WTS_SESSION_LOGOFF, WTS_SESSION_LOGON, WTS_SESSION_UNLOCK,
 };
 
 static CLICK_THROUGH: AtomicBool = AtomicBool::new(false);
@@ -696,10 +696,17 @@ pub(crate) fn primary_screen_size() -> (i32, i32) {
 pub(crate) fn mount_wallpaper(hwnd: HWND) -> Result<()> {
     const REQUEST_WORKERW: u32 = 0x052C;
     let class = to_wide("Progman");
-    let progman = unsafe { FindWindowW(class.as_ptr(), std::ptr::null()) };
-    if progman.is_null() {
-        bail!("找不到 Progman");
-    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    let progman = loop {
+        let progman = unsafe { FindWindowW(class.as_ptr(), std::ptr::null()) };
+        if !progman.is_null() {
+            break progman;
+        }
+        if std::time::Instant::now() >= deadline {
+            bail!("找不到 Progman");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    };
     let mut result = 0usize;
     unsafe {
         SendMessageTimeoutW(
@@ -712,8 +719,15 @@ pub(crate) fn mount_wallpaper(hwnd: HWND) -> Result<()> {
             &mut result,
         );
     }
-    let workerw =
-        find_wallpaper_workerw(progman).ok_or_else(|| anyhow::anyhow!("找不到 WorkerW 壁纸层"))?;
+    let workerw = loop {
+        if let Some(workerw) = find_wallpaper_workerw(progman) {
+            break workerw;
+        }
+        if std::time::Instant::now() >= deadline {
+            bail!("找不到 WorkerW 壁纸层");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    };
     let vx =
         unsafe { GetSystemMetrics(windows_sys::Win32::UI::WindowsAndMessaging::SM_XVIRTUALSCREEN) };
     let vy =
@@ -745,6 +759,15 @@ pub(crate) fn mount_wallpaper(hwnd: HWND) -> Result<()> {
         ShowWindow(hwnd, SW_SHOW);
     }
     Ok(())
+}
+
+/// Explorer 重启后 WorkerW/子窗口会一起消失；恢复前先核对窗口仍挂在 WorkerW 下。
+pub(crate) fn wallpaper_alive(hwnd: HWND) -> bool {
+    if unsafe { IsWindow(hwnd) } == 0 {
+        return false;
+    }
+    let parent = unsafe { GetParent(hwnd) };
+    !parent.is_null() && class_name(parent) == "WorkerW"
 }
 
 fn find_wallpaper_workerw(progman: HWND) -> Option<HWND> {

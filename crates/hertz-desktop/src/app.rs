@@ -36,7 +36,7 @@ static LOG_SEQ: AtomicU64 = AtomicU64::new(0);
 pub(crate) enum UserEvent {
     Feed(Box<Result<crate::feed::FeedUpdate, String>>),
     WallpaperFeed(Box<Result<WallpaperSnapshot, FeedError>>),
-    WallpaperPage(String),
+    WallpaperPage(u64, String),
     SettingsPage(String),
     PreviewPage(String),
     Tick,
@@ -72,11 +72,15 @@ impl Policy {
 }
 
 struct WallpaperSurface {
-    _window: Window,
+    window: Window,
     webview: wry::WebView,
 }
 
 impl WallpaperSurface {
+    fn hwnd(&self) -> HWND {
+        self.window.hwnd() as HWND
+    }
+
     fn eval(&self, script: &str) {
         if let Err(error) = self.webview.evaluate_script(script) {
             log(&format!("wallpaper evaluate_script failed: {error}"));
@@ -180,6 +184,7 @@ struct TrayActions {
     autostart_id: String,
     settings_id: String,
     wallpaper_toggle_id: Option<String>,
+    wallpaper_retry_id: Option<String>,
     quit_id: String,
 }
 
@@ -216,6 +221,9 @@ struct App {
     wallpaper_hidden: bool,
     wallpaper_forced: bool,
     wallpaper_feed_started: bool,
+    wallpaper_generation: u64,
+    wallpaper_recovery_attempts: Vec<Instant>,
+    wallpaper_recovery_terminal: bool,
     settings: Option<SettingsSurface>,
     preview: Option<PreviewSurface>,
     proxy: EventLoopProxy<UserEvent>,
@@ -395,6 +403,9 @@ impl App {
         let Some(surface) = self.wallpaper.as_ref() else {
             return;
         };
+        if !native::wallpaper_alive(surface.hwnd()) {
+            return;
+        }
         // 页面就绪前不能把 WebView2 隐藏：隐藏会让页面不加载，dom_ready 永远不来。
         if !self.wallpaper_page_ready {
             return;
@@ -454,7 +465,14 @@ impl App {
         self.recompute_wallpaper();
     }
 
-    fn handle_wallpaper_page(&mut self, event: &str) {
+    fn handle_wallpaper_page(&mut self, generation: u64, event: &str) {
+        if generation != self.wallpaper_generation {
+            log(&format!(
+                "ignore stale wallpaper page generation={generation} current={}",
+                self.wallpaper_generation
+            ));
+            return;
+        }
         match event {
             "wallpaper_dom_ready" => {
                 log("wallpaper page dom ready");
@@ -480,6 +498,59 @@ impl App {
             }
         }
         self.recompute_wallpaper();
+    }
+
+    fn recover_wallpaper(&mut self, target: &EventLoopWindowTarget<UserEvent>) {
+        if !(self.config.wallpaper.enabled || self.wallpaper_forced) {
+            return;
+        }
+        if self
+            .wallpaper
+            .as_ref()
+            .is_some_and(|surface| native::wallpaper_alive(surface.hwnd()))
+        {
+            return;
+        }
+        let now = Instant::now();
+        self.wallpaper_recovery_attempts
+            .retain(|attempt| now.duration_since(*attempt) < Duration::from_secs(120));
+        if self.wallpaper_recovery_terminal {
+            log("wallpaper recovery terminal; waiting for explicit retry");
+            return;
+        }
+        if self.wallpaper_recovery_attempts.len() >= 3 {
+            self.wallpaper_recovery_terminal = true;
+            log("wallpaper recovery terminal attempts>=3 window=120s");
+            self.send_settings_status(Some("壁纸挂载失败，请从托盘重新挂载"), None);
+            return;
+        }
+        self.wallpaper_recovery_attempts.push(now);
+        let attempt = self.wallpaper_recovery_attempts.len();
+        log(&format!("wallpaper recovery begin attempt={attempt}"));
+        self.wallpaper = None;
+        self.wallpaper_page_ready = false;
+        self.wallpaper_visible = false;
+        self.wallpaper_generation = self.wallpaper_generation.wrapping_add(1);
+        match create_wallpaper(target, self.proxy.clone(), self.wallpaper_generation) {
+            Ok(surface) => {
+                self.wallpaper = Some(surface);
+                log(&format!("wallpaper recovery success attempt={attempt}"));
+            }
+            Err(error) => {
+                log(&format!(
+                    "wallpaper recovery fail attempt={attempt} error={error:#}"
+                ));
+                self.send_settings_status(Some(&format!("壁纸挂载失败：{error}")), None);
+            }
+        }
+        self.rebuild_tray();
+    }
+
+    fn retry_wallpaper(&mut self, target: &EventLoopWindowTarget<UserEvent>) {
+        log("wallpaper retry requested");
+        self.wallpaper_recovery_terminal = false;
+        self.wallpaper_recovery_attempts.clear();
+        self.recover_wallpaper(target);
     }
 
     fn current_wallpaper_candidate(&self) -> WallpaperCandidate {
@@ -617,9 +688,20 @@ impl App {
             return;
         }
         self.wallpaper_forced = false;
+        self.wallpaper_recovery_terminal = false;
+        self.wallpaper_recovery_attempts.clear();
         if candidate.enabled {
+            if self
+                .wallpaper
+                .as_ref()
+                .is_some_and(|surface| !native::wallpaper_alive(surface.hwnd()))
+            {
+                self.wallpaper = None;
+                self.wallpaper_page_ready = false;
+            }
             if self.wallpaper.is_none() {
-                match create_wallpaper(target, self.proxy.clone()) {
+                self.wallpaper_generation = self.wallpaper_generation.wrapping_add(1);
+                match create_wallpaper(target, self.proxy.clone(), self.wallpaper_generation) {
                     Ok(surface) => self.wallpaper = Some(surface),
                     Err(error) => {
                         log(&format!("wallpaper enable failed: {error:#}"));
@@ -647,6 +729,7 @@ impl App {
             }
         } else {
             self.wallpaper = None;
+            self.wallpaper_generation = self.wallpaper_generation.wrapping_add(1);
             self.wallpaper_page_ready = false;
             self.wallpaper_visible = false;
         }
@@ -913,6 +996,12 @@ impl App {
             log(&format!("wallpaper_hidden={}", self.wallpaper_hidden));
             self.recompute_wallpaper();
             self.sync_tray();
+        } else if actions
+            .wallpaper_retry_id
+            .as_deref()
+            .is_some_and(|retry| retry == id)
+        {
+            self.retry_wallpaper(target);
         } else if id == actions.quit_id {
             log("quit from tray");
             self.flush_save();
@@ -1037,7 +1126,7 @@ impl App {
         })
     }
 
-    fn handle_native(&mut self, event: NativeEvent) {
+    fn handle_native(&mut self, event: NativeEvent, target: &EventLoopWindowTarget<UserEvent>) {
         match event {
             NativeEvent::TaskbarCreated => {
                 log("explorer restarted; rebuilding tray");
@@ -1050,6 +1139,7 @@ impl App {
                 }
                 self.recompute_visibility();
                 self.rebuild_tray();
+                self.recover_wallpaper(target);
             }
             NativeEvent::SessionUnavailable(unavailable) => {
                 if self.policy.session_unavailable != unavailable {
@@ -1070,7 +1160,7 @@ impl App {
         }
     }
 
-    fn tick(&mut self) {
+    fn tick(&mut self, target: &EventLoopWindowTarget<UserEvent>) {
         self.flush_save();
         let now = Instant::now();
         if self.settings.is_some() {
@@ -1093,6 +1183,14 @@ impl App {
                 log(&format!("fullscreen={fullscreen}"));
                 self.recompute_visibility();
                 self.recompute_wallpaper();
+            }
+            if self
+                .wallpaper
+                .as_ref()
+                .is_some_and(|surface| !native::wallpaper_alive(surface.hwnd()))
+            {
+                log("wallpaper surface lost; recovering");
+                self.recover_wallpaper(target);
             }
             self.ensure_on_screen();
             if now.duration_since(self.last_update) > STALE_AFTER && self.last_snapshot.is_some() {
@@ -1285,10 +1383,13 @@ impl App {
         let toggle = CheckMenuItem::new("显示歌词", true, !self.policy.user_hidden, None);
         let locate = MenuItem::new("解锁并定位", true, None);
         let autostart = CheckMenuItem::new("开机启动", true, self.config.launch_at_login, None);
+        let wallpaper_enabled =
+            self.wallpaper.is_some() || self.config.wallpaper.enabled || self.wallpaper_forced;
         let wallpaper_toggle = self
             .wallpaper
             .as_ref()
             .map(|_| CheckMenuItem::new("显示壁纸", true, !self.wallpaper_hidden, None));
+        let wallpaper_retry = wallpaper_enabled.then(|| MenuItem::new("重新挂载壁纸", true, None));
         let settings = MenuItem::new("壁纸设置", true, None);
         let quit = MenuItem::new("退出桌面歌词", true, None);
         let separator_after_toggle = PredefinedMenuItem::separator();
@@ -1302,6 +1403,9 @@ impl App {
             menu.append(&separator_before_wallpaper)?;
             menu.append(wallpaper)?;
         }
+        if let Some(retry) = wallpaper_retry.as_ref() {
+            menu.append(retry)?;
+        }
         menu.append(&separator_before_quit)?;
         menu.append(&quit)?;
         let actions = TrayActions {
@@ -1309,6 +1413,7 @@ impl App {
             autostart_id: autostart.id().0.clone(),
             settings_id: settings.id().0.clone(),
             wallpaper_toggle_id: wallpaper_toggle.as_ref().map(|item| item.id().0.clone()),
+            wallpaper_retry_id: wallpaper_retry.as_ref().map(|item| item.id().0.clone()),
             locate_id: locate.id().0.clone(),
             quit_id: quit.id().0.clone(),
             toggle,
@@ -1424,7 +1529,7 @@ pub(crate) fn run() -> Result<()> {
         })?;
 
     let wallpaper = if config.wallpaper.enabled || wallpaper_forced {
-        match create_wallpaper(&event_loop, proxy.clone()) {
+        match create_wallpaper(&event_loop, proxy.clone(), 1) {
             Ok(surface) => Some(surface),
             Err(error) => {
                 log(&format!("wallpaper unavailable: {error:#}"));
@@ -1475,6 +1580,9 @@ pub(crate) fn run() -> Result<()> {
         wallpaper_hidden: false,
         wallpaper_forced,
         wallpaper_feed_started: false,
+        wallpaper_generation: 1,
+        wallpaper_recovery_attempts: Vec::new(),
+        wallpaper_recovery_terminal: false,
         settings: None,
         preview: None,
         proxy: proxy.clone(),
@@ -1536,16 +1644,18 @@ pub(crate) fn run() -> Result<()> {
             Event::UserEvent(UserEvent::WallpaperFeed(result)) => {
                 app.handle_wallpaper_feed(*result)
             }
-            Event::UserEvent(UserEvent::WallpaperPage(body)) => app.handle_wallpaper_page(&body),
+            Event::UserEvent(UserEvent::WallpaperPage(generation, body)) => {
+                app.handle_wallpaper_page(generation, &body)
+            }
             Event::UserEvent(UserEvent::SettingsPage(body)) => {
                 app.handle_settings_page(&body, target)
             }
             Event::UserEvent(UserEvent::PreviewPage(body)) => app.handle_preview_page(&body),
-            Event::UserEvent(UserEvent::Tick) => app.tick(),
+            Event::UserEvent(UserEvent::Tick) => app.tick(target),
             Event::UserEvent(UserEvent::Page(body)) => app.page_command(&body),
             Event::UserEvent(UserEvent::Tray(event)) => app.handle_tray(event),
             Event::UserEvent(UserEvent::Menu(event)) => app.handle_menu(&event.id.0, target),
-            Event::UserEvent(UserEvent::Native(event)) => app.handle_native(event),
+            Event::UserEvent(UserEvent::Native(event)) => app.handle_native(event, target),
             Event::UserEvent(UserEvent::Pipe(request)) => {
                 let response = app.handle_pipe_request(&request.body);
                 let _ = request.reply.send(response);
@@ -1633,6 +1743,7 @@ fn validate_candidate(candidate: &WallpaperCandidate) -> Result<(), &'static str
 fn create_wallpaper(
     target: &EventLoopWindowTarget<UserEvent>,
     proxy: EventLoopProxy<UserEvent>,
+    generation: u64,
 ) -> Result<WallpaperSurface> {
     let (width, height) = native::primary_screen_size();
     let window = WindowBuilder::new()
@@ -1655,15 +1766,12 @@ fn create_wallpaper(
         .with_ipc_handler(move |request| {
             let body = request.body();
             if body.starts_with("wallpaper") {
-                let _ = page_proxy.send_event(UserEvent::WallpaperPage(body.clone()));
+                let _ = page_proxy.send_event(UserEvent::WallpaperPage(generation, body.clone()));
             }
         })
         .build(&window)
         .map_err(|error| anyhow::anyhow!("创建壁纸 WebView 失败：{error}"))?;
-    Ok(WallpaperSurface {
-        _window: window,
-        webview,
-    })
+    Ok(WallpaperSurface { window, webview })
 }
 
 fn create_settings(
