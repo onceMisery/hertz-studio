@@ -22,6 +22,7 @@ struct Pending {
     snapshot: bool,
 }
 struct Guest {
+    host_fingerprint: String,
     member_id: uuid::Uuid,
     recent: super::recent_chat::RecentChat,
     mode: ConnectionMode,
@@ -169,6 +170,7 @@ pub(super) async fn start_session(
     let (_receiver_tx, receiver_events) = mpsc::channel(1);
     let cleanup = lease.completion.clone();
     let mut guest = Guest {
+        host_fingerprint: fingerprint.hex(),
         member_id: descriptor.member_id,
         diagnostics: tokio::task::JoinSet::new(),
         recent: Default::default(),
@@ -555,6 +557,9 @@ impl Guest {
             value = json!({});
         }
         value["mode"] = json!(mode);
+        // A remote snapshot cannot choose the identity of persisted references.
+        value["fingerprint"] = json!(self.host_fingerprint);
+        value.as_object_mut().unwrap().remove("favorite_local_ids");
         value["room_id"] = json!(self.connection.handle.identity.room_id);
         value["instance_id"] = json!(self.connection.handle.identity.instance_id);
         value["member_id"] = json!(self.member_id);

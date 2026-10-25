@@ -2684,6 +2684,7 @@ button:focus-visible, [role="button"]:focus-visible,
   background: rgba(0, 245, 212, 0.12);
 }
 .track .t-actions .fav-act.is-on { opacity: 1; }
+.track .t-actions .fav-room-append { width:auto; min-height:44px; padding:0 9px; font-size:11px; white-space:nowrap; }
 .fav-act.is-on:hover { background: rgba(0, 245, 212, 0.2); }
 
 .fav-tabs { display: flex; gap: var(--sp-3); margin: 0 0 var(--sp-5); }

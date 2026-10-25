@@ -260,7 +260,7 @@ pub(crate) async fn start(
         let topic = value["topic"].as_str().unwrap_or("chat_gap").to_owned();
         let _ = chat_transport.notify_chat(&ControlFrame::Notification { topic, body: value });
     });
-    let library = SharedLibrary::default();
+    let library = SharedLibrary::with_reference_secret(identity.private_key_der());
     let (chat, chat_error) = match super::chat::ChatService::open_with_library(
         &state.data_dir,
         room,
@@ -2598,6 +2598,13 @@ impl Owner {
                 self.publish().await;
                 return Ok(json!({"state":"applied"}));
             }
+            PeerRequest::ResolveFavorites { keys } => {
+                self.check_access(member, session, |p| p.queue)?;
+                let tracks = self.library.resolve_favorites(&keys).await?;
+                return Ok(
+                    json!({"tracks":tracks,"revision":self.library.revision().await.to_string()}),
+                );
+            }
             PeerRequest::Library {
                 offset,
                 limit,
@@ -3205,6 +3212,7 @@ impl Owner {
         value["member_id"] = json!(OWNER);
         value["address"] = json!(self.server.address);
         value["fingerprint"] = json!(self.server.fingerprint.hex());
+        value["favorite_local_ids"] = json!(self.library.local_favorite_ids().await);
         value["output"] = output_json(self.local.as_ref(), &self.output);
         value["next_operation_id"] = json!(self
             .high_water
@@ -3348,6 +3356,7 @@ pub(super) mod join_retry_tests {
                     track_id: "a".into(),
                     view: Some(super::super::resources::SharedTrack {
                         resource_id: Uuid::new_v4(),
+                        favorite_key: None,
                         title: "Already distributed".into(),
                         artist: None,
                         album: None,

@@ -207,6 +207,9 @@ jobs:
       - name: LAN room control and lifecycle integration
         if: steps.smoke.outcome == 'success'
         run: python3 scripts/check-lan-room.py --binary target/debug/hertz-studio --report output/lan-control.json
+      - name: LAN personal favorites and sharing authorization
+        if: steps.smoke.outcome == 'success'
+        run: python3 scripts/check-lan-favorites.py --binary target/debug/hertz-studio --report output/lan-favorites.json
       - name: DBX plugin sidecar protocol
         id: sidecar
         if: steps.smoke.outcome == 'success'

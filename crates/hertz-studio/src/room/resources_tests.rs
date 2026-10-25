@@ -112,6 +112,69 @@ fn error<T>(result: RoomResult<T>, code: &str) {
 }
 
 #[tokio::test]
+async fn favorites_survive_room_recreation_but_never_restore_a_revoked_capability() {
+    let f = Fixture::new().await;
+    f.track("private-library-track").await;
+    let identity = vmusic_lan::tls::HostIdentity::generate().unwrap();
+    let restored = vmusic_lan::tls::HostIdentity::from_der(
+        identity.certificate_der().to_vec(),
+        identity.private_key_der().to_vec(),
+    )
+    .unwrap();
+    let first = SharedLibrary::with_reference_secret(identity.private_key_der());
+    let initial = f
+        .share(&first, &["private-library-track", "private-library-track"])
+        .await;
+    let key = initial[0].favorite_key.clone().unwrap();
+    assert_eq!(
+        initial.len(),
+        1,
+        "queue occurrences share a favorite identity"
+    );
+    assert_eq!(
+        first.local_favorite_ids().await[&key],
+        "private-library-track"
+    );
+    let wire = serde_json::to_string(&initial[0]).unwrap();
+    assert!(!wire.contains("private-library-track"));
+    assert!(!wire.contains(&f.base.to_string_lossy().to_string()));
+    f.share(&first, &[]).await;
+    assert!(first
+        .resolve_favorites(std::slice::from_ref(&key))
+        .await
+        .unwrap()
+        .is_empty());
+    error(
+        first.source(&f.state, initial[0].resource_id).await,
+        "room_denied",
+    );
+    let reshared = f.share(&first, &["private-library-track"]).await;
+    assert_eq!(reshared[0].favorite_key.as_deref(), Some(key.as_str()));
+    assert_ne!(reshared[0].resource_id, initial[0].resource_id);
+    let recreated = SharedLibrary::with_reference_secret(restored.private_key_der());
+    let next = f.share(&recreated, &["private-library-track"]).await;
+    assert_eq!(next[0].favorite_key, initial[0].favorite_key);
+    assert_ne!(next[0].resource_id, initial[0].resource_id);
+    let other = SharedLibrary::with_reference_secret(
+        vmusic_lan::tls::HostIdentity::generate()
+            .unwrap()
+            .private_key_der(),
+    );
+    let other_view = f.share(&other, &["private-library-track"]).await;
+    assert_ne!(other_view[0].favorite_key, initial[0].favorite_key);
+    assert!(other.resolve_favorites(&[key]).await.unwrap().is_empty());
+    assert!(first
+        .resolve_favorites(&vec!["a".repeat(64); 32])
+        .await
+        .is_ok());
+    error(
+        first.resolve_favorites(&vec!["a".repeat(64); 33]).await,
+        "room_invalid",
+    );
+    f.finish().await;
+}
+
+#[tokio::test]
 async fn explicit_capabilities_are_bounded_deduplicated_and_replaced_atomically() {
     let f = Fixture::new().await;
     let library = SharedLibrary::default();

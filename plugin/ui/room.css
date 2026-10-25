@@ -82,6 +82,11 @@ html[data-skin] body.room-view #view-room { padding:0 !important; border-radius:
 #view-room .room-player-controls .btn:last-child { width:auto; background:transparent; color:var(--rw-muted); }
 #view-room .room-player-quick { display:flex; align-items:center; justify-content:space-between; gap:14px; margin:22px 0; }
 #view-room .room-player-quick .btn { font-size:11px; padding:8px 11px; }
+#view-room .room-favorite { display:inline-flex; align-items:center; justify-content:center; width:44px; height:44px; min-width:44px; min-height:44px; opacity:1; border:1px solid var(--rw-border); border-radius:12px; color:var(--rw-muted); background:transparent; }
+#view-room .room-favorite svg { width:20px; height:20px; fill:currentColor; }
+#view-room .room-favorite.is-on { color:#f69bce; background:#d762b81a; }
+#view-room .room-favorite[aria-pressed="mixed"] { border-style:dashed; }
+#view-room .room-song-favorite { flex:0 0 44px; }
 #view-room .room-player-volume { display:grid; grid-template-columns:auto minmax(45px,100px); align-items:center; gap:9px; color:var(--rw-muted); font-size:11px; }
 #view-room .room-precise-seek { color:var(--rw-muted); font-size:12px; margin-bottom:15px; }
 #view-room summary { cursor:pointer; min-height:44px; }
@@ -240,7 +245,7 @@ html[data-skin] body.room-view #view-room { padding:0 !important; border-radius:
   #view-room .room-player-controls .btn { width:52px; height:52px; }
   #view-room .room-player-controls .room-play-button { width:74px; height:74px; }
   #view-room .room-player-controls .btn:last-child { width:44px; }
-  #view-room .room-player-quick { gap:8px; }
+  #view-room .room-player-quick { gap:8px; flex-wrap:wrap; }
   #view-room .room-player-volume { display:flex; flex:1; justify-content:center; font-size:10px; }
   #view-room .room-player-volume input { max-width:75px; }
   #view-room .room-player-quick .btn { font-size:10px; padding:7px 9px; }

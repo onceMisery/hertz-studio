@@ -2851,6 +2851,17 @@ pub(crate) fn favorite_target(
     if ref_id.is_empty() {
         return Err(bad_request("缺少 ref_id"));
     }
+    if source == "lan"
+        && (kind != vmusic_core::FavoriteKind::Track
+            || ref_id.len() != 129
+            || ref_id.as_bytes()[64] != b':'
+            || !ref_id
+                .bytes()
+                .enumerate()
+                .all(|(i, b)| i == 64 || b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+    {
+        return Err(bad_request("局域网收藏需要固定的房主指纹与歌曲引用"));
+    }
     Ok((kind, source, ref_id))
 }
 
@@ -2882,7 +2893,12 @@ pub(crate) async fn favorite_meta(
         artist: clean(body.artist.as_ref()),
         album: clean(body.album.as_ref()),
         duration_ms: body.duration_ms,
-        cover: clean(body.cover.as_ref()),
+        // LAN cover URLs are live capabilities, never durable favorite metadata.
+        cover: if source == "lan" {
+            None
+        } else {
+            clean(body.cover.as_ref())
+        },
     };
     if kind == vmusic_core::FavoriteKind::Track && source == "local" && body.title.is_none() {
         if let Some(t) = vmusic_store::get_track(db, &ref_id.to_string())

@@ -2,6 +2,7 @@
 //! Explicit room resource capabilities. Internal paths never cross this module.
 use super::contract::{RoomError, RoomResult};
 use crate::state::AppState;
+use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -13,6 +14,7 @@ use uuid::Uuid;
 use vmusic_core::{Track, TrackSource};
 
 const MAX_SHARED: usize = 2000;
+const MAX_FAVORITE_RESOLUTION: usize = 32;
 const MAX_RESOURCE_BYTES: usize = 2 * 1024 * 1024;
 const CHUNK_BYTES: usize = 24 * 1024;
 const CACHE_ENTRIES: usize = 8;
@@ -21,6 +23,9 @@ const CACHE_TTL: Duration = Duration::from_secs(60);
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SharedTrack {
     pub resource_id: Uuid,
+    /// Durable reference only; it never grants access to a shared resource.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub favorite_key: Option<String>,
     pub title: String,
     pub artist: Option<String>,
     pub album: Option<String>,
@@ -50,8 +55,13 @@ struct CachedResource {
     mime: &'static str,
     created: Instant,
 }
-#[derive(Clone, Default)]
-pub struct SharedLibrary(Arc<RwLock<Library>>);
+#[derive(Clone)]
+pub struct SharedLibrary(Arc<RwLock<Library>>, Arc<zeroize::Zeroizing<[u8; 32]>>);
+impl Default for SharedLibrary {
+    fn default() -> Self {
+        Self::with_reference_secret(Uuid::new_v4().as_bytes())
+    }
+}
 /// Immutable result of file/DB validation. Only the room owner may install it.
 pub(super) struct PreparedLibrary {
     expected_revision: u64,
@@ -84,6 +94,61 @@ fn label(s: &str) -> String {
     out
 }
 impl SharedLibrary {
+    /// The host supplies its profile-persisted identity, never a room secret.
+    pub(super) fn with_reference_secret(secret: &[u8]) -> Self {
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret).expect("HMAC accepts all key lengths");
+        mac.update(b"hertz/lan-favorite-reference/v1");
+        let key: [u8; 32] = mac.finalize().into_bytes().into();
+        Self(
+            Arc::new(RwLock::new(Library::default())),
+            Arc::new(zeroize::Zeroizing::new(key)),
+        )
+    }
+    fn favorite_key(&self, track: &str) -> String {
+        let mut mac = Hmac::<Sha256>::new_from_slice(self.1.as_ref().as_ref())
+            .expect("HMAC accepts all key lengths");
+        mac.update(track.as_bytes());
+        format!("{:x}", mac.finalize().into_bytes())
+    }
+    /// Local projection only: private library IDs must never enter peer views.
+    pub async fn local_favorite_ids(&self) -> BTreeMap<String, String> {
+        self.0
+            .read()
+            .await
+            .entries
+            .values()
+            .filter_map(|entry| {
+                entry
+                    .view
+                    .favorite_key
+                    .as_ref()
+                    .map(|key| (key.clone(), entry.track_id.clone()))
+            })
+            .collect()
+    }
+    pub async fn resolve_favorites(&self, keys: &[String]) -> RoomResult<Vec<SharedTrack>> {
+        if keys.is_empty()
+            || keys.len() > MAX_FAVORITE_RESOLUTION
+            || keys
+                .iter()
+                .any(|key| key.len() != 64 || !key.bytes().all(|b| b.is_ascii_hexdigit()))
+        {
+            return Err(RoomError::invalid("收藏引用无效或超过32首"));
+        }
+        let library = self.0.read().await;
+        Ok(library
+            .entries
+            .values()
+            .filter(|entry| {
+                entry
+                    .view
+                    .favorite_key
+                    .as_ref()
+                    .is_some_and(|key| keys.contains(key))
+            })
+            .map(|entry| entry.view.clone())
+            .collect())
+    }
     pub(super) async fn prepare_replace(
         &self,
         state: &AppState,
@@ -107,6 +172,7 @@ impl SharedLibrary {
             let resource_id = previous.get(&id).copied().unwrap_or_else(Uuid::new_v4);
             let view = SharedTrack {
                 resource_id,
+                favorite_key: Some(self.favorite_key(&id)),
                 title: label(&track.title),
                 artist: track.artist.as_deref().map(label),
                 album: track.album.as_deref().map(label),

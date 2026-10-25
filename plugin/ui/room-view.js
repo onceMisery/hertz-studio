@@ -128,6 +128,7 @@
         vote.disabled = !p.queue || !q.votable; vote.title = !q.votable ? '当前播放与已冻结的音频前缀不能投票' : !p.queue ? '房主未授权编辑队列' : '每位成员可为此队列实例投一票';
         vote.setAttribute('aria-pressed', String(!!q.voted_by_me)); row.append(vote);
       }
+      if (t) api.attachFavorite(row, t);
       if (p.chat_send && t) row.append(button('分享歌曲', () => api.shareSong(q.resource_id)));
       if (p.transport) row.append(button('播放', () => playback('pick', { instance_id: q.instance_id })));
       if (p.queue) {
@@ -140,7 +141,7 @@
     });
   }
   function formatTime(ms) { const value = Math.max(0, Number(ms || 0)); return Math.floor(value / 60000) + ':' + String(Math.floor(value / 1000) % 60).padStart(2, '0'); }
-  function drawLibrary(items) { items.forEach(t => metadata.set(t.resource_id, t)); refs.library.replaceChildren(); if (!items.length) refs.library.append(h('p', 'room-empty', api.snapshot().mode === 'host' ? '先在“分享本地歌曲”中选择歌曲。' : '等待房主分享歌曲。')); items.forEach(t => { const row = h('div', 'room-track'); const label = h('div'); label.append(h('strong', '', t.title), h('small', 'room-sub', t.artist || '未知歌手')); row.append(label); if ((api.snapshot().permissions || {}).queue) row.append(button('加入队列', () => appendResource(t.resource_id))); if ((api.snapshot().permissions || {}).chat_send) row.append(button('分享歌曲', () => api.shareSong(t.resource_id))); refs.library.append(row); }); }
+  function drawLibrary(items) { items.forEach(t => metadata.set(t.resource_id, t)); refs.library.replaceChildren(); if (!items.length) refs.library.append(h('p', 'room-empty', api.snapshot().mode === 'host' ? '先在“分享本地歌曲”中选择歌曲。' : '等待房主分享歌曲。')); items.forEach(t => { const row = h('div', 'room-track'); const label = h('div'); label.append(h('strong', '', t.title), h('small', 'room-sub', t.artist || '未知歌手')); row.append(label); api.attachFavorite(row, t); if ((api.snapshot().permissions || {}).queue) row.append(button('加入队列', () => appendResource(t.resource_id))); if ((api.snapshot().permissions || {}).chat_send) row.append(button('分享歌曲', () => api.shareSong(t.resource_id))); refs.library.append(row); }); }
   function drawMembers() {
     const snapshot = api.snapshot();
     const count = snapshot.online_count == null ? (snapshot.members || []).length : snapshot.online_count;
@@ -242,11 +243,12 @@
     seekLine.append(refs.position, refs.progress, refs.duration); now.append(seekLine);
     const controls = h('div', 'room-player-controls'); refs.prev = button('上一首', () => playback('previous')); refs.play = button('播放', () => playback(api.snapshot().playing ? 'pause' : 'play'), 'primary room-play-button'); refs.next = button('下一首', () => playback('next')); refs.stop = button('停止', () => playback('stop')); iconButton(refs.prev, 'prev', '上一首'); iconButton(refs.next, 'next', '下一首'); iconButton(refs.stop, 'stop', '停止'); controls.append(refs.prev, refs.play, refs.next, refs.stop); now.append(controls);
     const quick = h('div', 'room-player-quick');
+    refs.songFavorite = h('div', 'room-song-favorite'); quick.append(refs.songFavorite);
     refs.quickMode = button('列表循环', () => api.cycleMode());
     const volumeLabel = h('label', 'room-player-volume', '本机音量'); refs.quickVolume = h('input'); refs.quickVolume.type = 'range'; refs.quickVolume.min = 0; refs.quickVolume.max = 100; refs.quickVolume.step = 1; refs.quickVolume.setAttribute('aria-label', '本机音量'); refs.quickVolume.onchange = () => run(() => api.localVolume(Number(refs.quickVolume.value) / 100)); volumeLabel.append(refs.quickVolume); quick.append(refs.quickMode, volumeLabel, navigationButton('共同队列', () => go('collaborate'))); now.append(quick);
     const precise = h('details', 'room-precise-seek'); precise.append(h('summary', '', '精确跳转'));
     const precisionLine = h('div', 'room-toolbar'); refs.seek = field(precisionLine, '跳转位置（秒）', 'number', 0); refs.seek.min = 0; refs.seekButton = button('跳转', () => playback('seek', { instance_id: api.snapshot().track_instance_id, position_ms: String(Math.max(0, Math.trunc(Number(refs.seek.value) * 1000))) })); precisionLine.append(refs.seekButton); precise.append(precisionLine); now.append(precise);
-    refs.operations = h('div', 'room-operations'); refs.lyrics = h('div', 'room-lyrics'); refs.lyrics.setAttribute('aria-label', '同步歌词'); now.append(refs.operations, refs.lyrics);
+    refs.operations = h('div', 'room-operations'); refs.queueOperations = h('div', 'room-operations'); refs.lyrics = h('div', 'room-lyrics'); refs.lyrics.setAttribute('aria-label', '同步歌词'); now.append(refs.operations, refs.queueOperations, refs.lyrics);
     const sync = h('div', 'room-sync-summary'); refs.connection = h('span', 'room-chip'); refs.format = h('span', 'room-chip'); sync.append(refs.connection, refs.format, navigationButton('查看同步与输出详情', () => go('settings'))); now.append(sync);
     refs.memberStrip = h('div', 'room-member-strip'); refs.activity = h('ol', 'room-activity'); now.append(refs.memberStrip, refs.activity);
     const aside = h('aside', 'room-play-aside'), memberPreview = section(aside, '房间成员'); refs.memberPreview = h('div', 'room-members-preview'); memberPreview.append(refs.memberPreview, navigationButton('查看全部成员', () => go('settings')));

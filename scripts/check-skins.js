@@ -2585,7 +2585,53 @@ function checkHeijiaoSkin() {
     '最窄断点把卡片下限压到 132px（一屏放得下几张）');
 }
 
+function checkLanFavoriteSourceDispatch() {
+  section('收藏来源：皮肤与封面墙保留局域网引用');
+  const ref = 'ab'.repeat(32) + ':' + 'cd'.repeat(32);
+  const favorites = [
+    { id: 'track:local:local-one', kind: 'track', source: 'local', ref_id: 'local-one', title: 'Local' },
+    { id: 'track:lan:' + ref, kind: 'track', source: 'lan', ref_id: ref, title: 'LAN snapshot', artist: 'LAN artist', cover: 'blob:must-not-use' },
+    { id: 'track:netease:online-one', kind: 'track', source: 'netease', ref_id: 'online-one', title: 'Online' },
+  ];
+  const roomActivations = [], onlinePlays = [], localPlays = [], notices = [];
+  let adapted = [];
+  const sandbox = {
+    window: {
+      Favorites: { state: { items: favorites }, activate: favorite => roomActivations.push(favorite) },
+      Online: { state: { source: 'netease' }, safeCoverUrl: value => value, playAll: (tracks, at) => onlinePlays.push({ tracks, at }) },
+    },
+    state: { snapshot: {}, view: 'favorites', queue: [] },
+    transport: { coverUrl: id => '/cover/' + id, post: (url, body) => localPlays.push({ url, body }) },
+    toast: message => notices.push(message),
+    viewSourceDef: () => ({ items: () => adapted }),
+  };
+  vm.createContext(sandbox);
+  const adapters = APP.slice(APP.indexOf('function localSourceItem('), APP.indexOf('function playlistSourceItems('));
+  const dispatcher = APP.slice(APP.indexOf('function queueForSourceItem('), APP.indexOf('function drillIntoPlaylist('));
+  vm.runInContext(adapters + '\n' + dispatcher, sandbox);
+  adapted = sandbox.favoriteSourceItems();
+  eq(adapted.length, 3, '所有收藏仍可展示，包含局域网收藏');
+  eq(adapted[1].source, 'lan', '封面墙项目保留局域网来源');
+  eq(adapted[1].id, favorites[1].id, '项目身份沿用收藏身份，未伪造在线虚拟 ID');
+  eq(adapted[1].title, 'LAN snapshot', '持久化标题仍可展示');
+  eq(adapted[1].cover, null, '封面墙不使用局域网旧封面 capability');
+  sandbox.playSourceItem(adapted[1], adapted);
+  eq(roomActivations.length, 1, '皮肤单项激活走同一个 Favorites.activate 入口');
+  eq(roomActivations[0].ref_id, ref, '分派保留完整房主与稳定歌曲身份');
+  eq(localPlays.length + onlinePlays.length, 0, '局域网单项不进入本地或在线播放');
+  sandbox.playSourceItem(adapted[0], adapted);
+  eq(localPlays[0].body.queue.join(','), 'local-one', '本地收藏上下文队列排除 LAN 引用');
+  sandbox.playSourceItem(adapted[2], adapted);
+  eq(onlinePlays[0].tracks.length, 1, '混合收藏墙只把可在线播放的曲目交给 Online');
+  eq(onlinePlays[0].tracks[0].id, 'online-one', '在线播放保留真实平台曲目身份');
+  ok(notices.some(message => /已跳过 1 首局域网收藏/.test(message)), '混合收藏在线播放告知跳过的局域网引用');
+  const legacy = { id: 'online:lan:' + ref, source: 'lan', favSource: 'lan', favRefId: ref };
+  sandbox.playOnlineItem(adapted[2], adapted.concat(legacy));
+  ok(onlinePlays.at(-1).tracks.every(track => track.source !== 'lan' && !String(track.id).startsWith('online:lan:')), '旧虚拟 LAN 形式也无法混入在线集合');
+}
+
 (function main() {
+  checkLanFavoriteSourceDispatch();
   checkCatalog();
   checkLifecycleAndHost();
   checkExtensibility();

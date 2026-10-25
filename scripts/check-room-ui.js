@@ -6,25 +6,28 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
-const sources = ['room-workspace.js', 'room-view.js', 'room.js'].map(name => ({ name, source: fs.readFileSync(path.join(__dirname, '../plugin/ui', name), 'utf8') }));
+const sources = ['favorites.js', 'room-workspace.js', 'room-view.js', 'room.js'].map(name => ({ name, source: fs.readFileSync(path.join(__dirname, '../plugin/ui', name), 'utf8') }));
 class Node {
-  constructor(tag) { this.tagName = tag; this.children = []; this.value = ''; this.dataset = {}; this._text = ''; this.style = { setProperty() {} }; this.classList = { toggle() {}, add() {}, remove() {} }; }
+  constructor(tag) { this.tagName = tag; this.children = []; this.value = ''; this.dataset = {}; this._text = ''; this.attrs = {}; this.style = { setProperty() {} }; this.classList = { toggle() {}, add() {}, remove() {} }; }
   set textContent(text) { this._text = String(text); this.children = []; }
   get textContent() { return this._text + this.children.map(n => n.textContent).join(''); }
   append(...nodes) { this.children.push(...nodes); }
+  insertBefore(node, before) { const index = before ? this.children.indexOf(before) : this.children.length; this.children.splice(index, 0, node); return node; }
   prepend(...nodes) { this.children.unshift(...nodes); }
   focus() {}
   remove() {}
   replaceChildren(...nodes) { this._text = ''; this.children = nodes; }
-  setAttribute() {}
+  setAttribute(key, value) { this.attrs[key] = String(value); }
+  getAttribute(key) { return this.attrs[key]; }
   addEventListener() {}
 }
 const walk = node => [node, ...node.children.flatMap(walk)];
 function deferred() { let resolve, reject; const promise = new Promise((a, b) => { resolve = a; reject = b; }); return { promise, resolve, reject }; }
 async function settle() { for (let i = 0; i < 40; i++) await Promise.resolve(); }
 function fixture() {
+  const favoriteStore = new Set();
   const root = new Node('main'), calls = [], hooks = new Map(), chromeEvents = [];
-  let now = Date.now();
+  let now = Date.now(), confirmation = async () => true;
   class FixtureDate extends Date { static now() { return now; } }
   let snapshot = { mode: 'host', room_id: 'room', instance_id: 'instance', session_id: 's1', member_id: 'owner', revision: '1', sharing_revision: '1', next_operation_id: '1', next_chat_operation_id: '1', permissions: { transport: true, chat_read: true, chat_send: true }, output: {}, queue: [], members: [] };
   const history = Array.from({ length: 450 }, (_, i) => ({ message_id: String(i + 1), name: 'Guest', text: 'Message ' + (i + 1), received_at_ms: '0' }));
@@ -32,10 +35,13 @@ function fixture() {
   const transport = {
     async get(url) { return url === '/v1/room' ? structuredClone(snapshot) : { tracks: [] }; },
     async post(url, body) {
-      const request = body.action === 'peer' ? body.request : body;
+      const request = url === '/v1/favorites/membership' ? { ...body, action: 'favorite_membership' } : url === '/v1/favorites/toggle' ? { ...body, action: 'favorite_write' } : body.action === 'peer' ? body.request : body;
       calls.push(structuredClone(request));
       if (hooks.has(request.action)) return hooks.get(request.action)(request);
       switch (request.action) {
+        case 'favorite_membership': return { ids: request.ids.filter(id => favoriteStore.has(request.source + ':' + id)) };
+        case 'favorite_write': favoriteStore[request.favorited ? 'add' : 'delete'](request.source + ':' + request.ref_id); return { favorited: request.favorited };
+        case 'queue': return { state: 'applied' };
         case 'library': return { revision: snapshot.sharing_revision, tracks: [] };
         case 'queue_page': return { revision: snapshot.revision, queue: [], tracks: [] };
         case 'chat_history': {
@@ -52,15 +58,18 @@ function fixture() {
   context.HertzRoomTransport = { create: () => ({ render() {}, notice() {}, destroy() {}, setWorkspaceVisible: value => chromeEvents.push(value) }) };
   vm.createContext(context);
   sources.forEach(({ name, source }) => vm.runInContext(source, context, { filename: name }));
-  context.HertzRoom.init({ root, transport, confirm: async () => true });
+  context.VMusicTransport = transport;
+  context.Favorites.bind({ ui: {}, state: { view: 'room' }, toast() {}, errText: (prefix, error) => prefix + error.message });
+  context.HertzRoom.init({ root, transport, confirm: message => confirmation(message) });
   const nodes = () => walk(root);
   return {
-    api: context.HertzRoom, calls, hooks, root, chromeEvents, history,
+    api: context.HertzRoom, favorites: context.Favorites, calls, hooks, root, chromeEvents, history,
     button: (text, scope) => { const parent = scope ? nodes().filter(n => n.className === scope).at(-1) : root; assert.ok(parent, scope || 'root'); const n = walk(parent).find(n => n.tagName === 'button' && n.textContent === text); assert.ok(n, text); return n; },
     field: label => { const n = nodes().find(n => n.tagName === 'label' && n._text === label); assert.ok(n, label); return n.children[0]; },
     chat: () => nodes().find(n => n.tagName === 'ol' && n.className === 'room-chat'),
     form: () => nodes().find(n => n.tagName === 'form'),
     set: patch => { snapshot = { ...snapshot, ...patch }; },
+    setConfirm: fn => { confirmation = fn; },
     advance: milliseconds => { now += milliseconds; },
     async poll() { await context.HertzRoom.onViewEnter(); await settle(); }
   };
@@ -75,6 +84,167 @@ async function applicantFixture() {
   return f;
 }
 async function main() {
+  {
+  const targetKey = 'ab'.repeat(32), hostPin = 'cd'.repeat(32), lanRef = hostPin + ':' + targetKey;
+  const song = { resource_id: 'ephemeral-resource', favorite_key: targetKey, title: 'Shared favorite', artist: 'Artist' };
+  const hostFavorite = fixture(); await settle();
+  hostFavorite.hooks.set('library', async () => ({ revision: '2', tracks: [song] }));
+  hostFavorite.hooks.set('queue_page', async () => ({ revision: '2', queue: [{ instance_id: '1', resource_id: song.resource_id }, { instance_id: '2', resource_id: song.resource_id }], tracks: [song] }));
+  hostFavorite.set({ revision: '2', sharing_revision: '2', fingerprint: hostPin, favorite_local_ids: { [targetKey]: 'original-local-track' }, current_track: song });
+  await hostFavorite.poll();
+  const hostHearts = walk(hostFavorite.root).filter(node => node.className === 't-act fav-act');
+  assert.equal(hostHearts.length, 4, 'player, duplicate queue occurrences, and shared library expose favorites');
+  await hostHearts[0].onclick({ stopPropagation() {} }); await settle();
+  const hostWrite = hostFavorite.calls.find(call => call.action === 'favorite_write');
+  assert.equal(hostWrite.source, 'local', 'host favorites reuse its existing local store identity');
+  assert.equal(hostWrite.ref_id, 'original-local-track');
+  assert.equal(hostWrite.favorited, true);
+  assert.ok(hostHearts.every(heart => heart.attrs['aria-pressed'] === 'true'), 'all views and occurrences reflect one confirmed favorite');
+  hostFavorite.api.destroy();
+
+  const guestFavorite = fixture(); await settle();
+  guestFavorite.hooks.set('library', async () => ({ revision: '2', tracks: [song] }));
+  guestFavorite.set({ mode: 'guest', revision: '2', sharing_revision: '2', fingerprint: hostPin, favorite_local_ids: { [targetKey]: 'untrusted-local-id' }, permissions: { queue: true }, current_track: song });
+  await guestFavorite.poll();
+  const guestHeart = walk(guestFavorite.root).find(node => node.className === 't-act fav-act');
+  await guestHeart.onclick({ stopPropagation() {} }); await settle();
+  const guestWrite = guestFavorite.calls.find(call => call.action === 'favorite_write');
+  assert.equal(guestWrite.source, 'lan'); assert.equal(guestWrite.ref_id, lanRef);
+  assert.equal(guestWrite.cover, null, 'live cover capabilities never enter durable favorites');
+  assert.doesNotMatch(JSON.stringify(guestWrite), /ephemeral-resource|untrusted-local-id/);
+  const favorite = { source: 'lan', ref_id: lanRef };
+  guestFavorite.hooks.set('resolve_favorites', async () => ({ tracks: [song] }));
+  await guestFavorite.api.activateFavorite(favorite);
+  let queueWrites = guestFavorite.calls.filter(call => call.action === 'queue');
+  assert.equal(queueWrites.length, 1); assert.equal(queueWrites[0].items[0].resource_id, song.resource_id);
+  assert.equal(queueWrites[0].items[0].instance_id, null, 'activating a durable favorite allocates a fresh queue occurrence');
+  guestFavorite.set({ mode: 'reconnecting' });
+  await assert.rejects(guestFavorite.api.activateFavorite(favorite), /离线|重连/);
+  guestFavorite.set({ mode: 'guest', permissions: {} });
+  await assert.rejects(guestFavorite.api.activateFavorite(favorite), /授权/);
+  guestFavorite.set({ permissions: { queue: true }, fingerprint: 'ef'.repeat(32) });
+  await assert.rejects(guestFavorite.api.activateFavorite(favorite), /来源不同/);
+  guestFavorite.set({ fingerprint: hostPin });
+  guestFavorite.hooks.set('resolve_favorites', async () => ({ tracks: [] }));
+  await assert.rejects(guestFavorite.api.activateFavorite(favorite), /撤销.*分享/);
+  guestFavorite.hooks.set('resolve_favorites', async () => ({ tracks: [song] }));
+  guestFavorite.hooks.set('queue', async () => { throw Object.assign(new Error('timeout'), { code: 'room_outcome_unknown' }); });
+  let unknownQueueError;
+  await assert.rejects(guestFavorite.api.activateFavorite(favorite), error => { unknownQueueError = error; return /结果未确认/.test(error.message); });
+  await guestFavorite.poll();
+  queueWrites = guestFavorite.calls.filter(call => call.action === 'queue');
+  assert.equal(queueWrites.length, 2, 'polling does not replay an uncertain favorite queue write');
+  const originalUnknown = queueWrites.at(-1);
+  assert.equal(unknownQueueError.operation_id, originalUnknown.operation_id, 'uncertain queue errors retain their original operation identity');
+  assert.equal(unknownQueueError.owner, guestFavorite.api.operationContext());
+  const resolveCount = guestFavorite.calls.filter(call => call.action === 'resolve_favorites').length;
+  await assert.rejects(guestFavorite.api.activateFavorite(favorite), /原队列操作结果未确认/);
+  assert.equal(guestFavorite.calls.filter(call => call.action === 'queue').length, 2, 'reclick after unknown cannot append again');
+  assert.equal(guestFavorite.calls.filter(call => call.action === 'resolve_favorites').length, resolveCount, 'unknown gate applies before another favorite resolution');
+  guestFavorite.hooks.set('operation', async () => { throw Object.assign(new Error('missing outcome'), { code: 'operation_unknown', status: 422 }); });
+  await guestFavorite.button('查询原队列操作结果').onclick();
+  await assert.rejects(guestFavorite.api.activateFavorite(favorite), /原队列操作结果未确认/);
+  guestFavorite.hooks.set('operation', async request => { assert.equal(request.operation_id, originalUnknown.operation_id, 'query reads the original operation instead of allocating a fresh write'); return { state: 'applied' }; });
+  await guestFavorite.button('查询原队列操作结果').onclick();
+  assert.equal(guestFavorite.calls.filter(call => call.action === 'queue').length, 2, 'querying a committed append never replays it');
+  assert.equal(walk(guestFavorite.root).some(node => node.tagName === 'button' && node.textContent === '查询原队列操作结果'), false, 'confirmed original outcome clears its pending receipt');
+
+  const delayedResolution = deferred();
+  guestFavorite.hooks.set('resolve_favorites', () => delayedResolution.promise);
+  guestFavorite.hooks.set('queue', async () => ({ state: 'applied' }));
+  const resolvingAppend = guestFavorite.api.activateFavorite(favorite); await settle();
+  await assert.rejects(guestFavorite.api.activateFavorite(favorite), /正在处理原队列操作/);
+  assert.equal(guestFavorite.calls.filter(call => call.action === 'queue').length, 2, 'pending reference resolution reserves the queue operation before any write');
+  delayedResolution.resolve({ tracks: [song] }); await resolvingAppend;
+  assert.equal(guestFavorite.calls.filter(call => call.action === 'queue').length, 3, 'late reference resolution after a double click still appends only once');
+  guestFavorite.hooks.set('resolve_favorites', async () => ({ tracks: [song] }));
+  const delayedWrite = deferred();
+  guestFavorite.hooks.set('queue', () => delayedWrite.promise);
+  const pendingAppend = guestFavorite.api.activateFavorite(favorite); await settle();
+  await assert.rejects(guestFavorite.api.activateFavorite(favorite), /正在处理原队列操作/);
+  assert.equal(guestFavorite.calls.filter(call => call.action === 'queue').length, 4, 'double click while a write is pending produces one new queue write');
+  delayedWrite.resolve({ state: 'applied' }); await pendingAppend;
+  assert.equal(guestFavorite.calls.filter(call => call.action === 'queue').length, 4);
+  const late = deferred(); guestFavorite.hooks.set('resolve_favorites', () => late.promise);
+  const staleActivation = guestFavorite.api.activateFavorite(favorite); await settle();
+  guestFavorite.set({ room_id: 'different-room', member_id: 'different-member' }); await guestFavorite.poll();
+  late.resolve({ tracks: [song] });
+  await assert.rejects(staleActivation, /会话已改变/);
+  assert.equal(guestFavorite.calls.filter(call => call.action === 'queue').length, 4, 'late resolution cannot write to another membership');
+  guestFavorite.hooks.set('resolve_favorites', async () => ({ tracks: [song] }));
+  const abandonedWrite = deferred(); guestFavorite.hooks.set('queue', () => abandonedWrite.promise);
+  const oldMembershipWrite = guestFavorite.api.activateFavorite(favorite); await settle();
+  guestFavorite.set({ room_id: 'newest-room', member_id: 'newest-member' }); await guestFavorite.poll();
+  const newestWrite = deferred(); guestFavorite.hooks.set('queue', () => newestWrite.promise);
+  const newestMembershipWrite = guestFavorite.api.activateFavorite(favorite); await settle();
+  abandonedWrite.resolve({ state: 'applied' });
+  await assert.rejects(oldMembershipWrite, /会话已改变/);
+  await assert.rejects(guestFavorite.api.activateFavorite(favorite), /正在处理原队列操作/, 'late old success cannot clear the newer membership receipt');
+  newestWrite.resolve({ state: 'applied' }); await newestMembershipWrite;
+  guestFavorite.set({ mode: 'local' });
+  await assert.rejects(guestFavorite.api.activateFavorite(favorite), /连接.*原房主/);
+  assert.equal(guestFavorite.favorites.has('track', 'lan', lanRef), true, 'leaving preserves the personal favorite snapshot');
+  guestFavorite.api.destroy();
+
+  }
+  {
+    const f = fixture(); await settle();
+    const targetKey = 'ab'.repeat(32), hostPin = 'cd'.repeat(32);
+    const favorite = { source: 'lan', ref_id: hostPin + ':' + targetKey };
+    const song = { resource_id: 'recoverable-resource', favorite_key: targetKey, title: 'Recoverable favorite' };
+    const abandonLabel = '放弃这次待确认队列操作';
+    const hasAbandon = () => walk(f.root).some(node => node.tagName === 'button' && node.textContent === abandonLabel);
+    const writes = () => f.calls.filter(call => call.action === 'queue');
+    f.set({ mode: 'guest', fingerprint: hostPin, permissions: { queue: true } }); await f.poll();
+    const resolving = deferred(); f.hooks.set('resolve_favorites', () => resolving.promise);
+    const sending = deferred(); f.hooks.set('queue', () => sending.promise);
+    const first = f.api.activateFavorite(favorite); await settle();
+    assert.equal(hasAbandon(), false, 'a preparing queue operation cannot be abandoned');
+    resolving.resolve({ tracks: [song] }); await settle();
+    assert.equal(writes().length, 1);
+    assert.equal(hasAbandon(), false, 'a sending queue operation cannot be abandoned');
+    sending.resolve({ state: 'applied' }); await first;
+
+    f.hooks.set('resolve_favorites', async () => ({ tracks: [song] }));
+    f.hooks.set('queue', async () => { throw Object.assign(new Error('timeout'), { code: 'room_outcome_unknown' }); });
+    await assert.rejects(f.api.activateFavorite(favorite), /结果未确认/);
+    const unknownWrite = writes().at(-1);
+    f.hooks.set('operation', async () => { throw Object.assign(new Error('expired outcome'), { code: 'operation_unknown', status: 422 }); });
+    await f.button('查询原队列操作结果').onclick();
+    assert.equal(hasAbandon(), true, 'a missing or expired result can be explicitly abandoned');
+    let confirmationText;
+    f.setConfirm(async message => { confirmationText = message; return false; });
+    await f.button(abandonLabel).onclick();
+    assert.match(confirmationText, /可能已经生效.*检查共同队列/);
+    assert.match(confirmationText, /不会撤销或重放/);
+    assert.equal(hasAbandon(), true, 'cancel retains the original receipt');
+    await assert.rejects(f.api.activateFavorite(favorite), /原队列操作结果未确认/);
+    assert.equal(writes().length, 2, 'cancel and a blocked click cannot replay a queue write');
+    f.setConfirm(async () => true);
+    await f.button(abandonLabel).onclick();
+    assert.equal(hasAbandon(), false, 'confirmation clears only the local pending receipt');
+    assert.equal(writes().length, 2, 'abandon never sends or replays a queue write');
+    assert.match(f.root.textContent, /已放弃本机待确认记录.*可能已经生效/);
+    f.hooks.set('queue', async () => ({ state: 'applied' }));
+    await f.api.activateFavorite(favorite);
+    assert.equal(writes().length, 3, 'the next intentional append sends one fresh operation');
+    assert.notEqual(writes().at(-1).operation_id, unknownWrite.operation_id);
+
+    f.hooks.set('queue', async () => { throw Object.assign(new Error('timeout'), { code: 'room_outcome_unknown' }); });
+    await assert.rejects(f.api.activateFavorite(favorite), /结果未确认/);
+    const confirming = deferred(); f.setConfirm(() => confirming.promise);
+    const abandoningOldOwner = f.button(abandonLabel).onclick(); await settle();
+    f.set({ room_id: 'another-room', member_id: 'another-member' }); await f.poll();
+    await assert.rejects(f.api.activateFavorite(favorite), /结果未确认/);
+    const newestWrite = writes().at(-1);
+    confirming.resolve(true); await abandoningOldOwner;
+    assert.equal(hasAbandon(), true, 'late confirmation cannot clear the new membership receipt');
+    await assert.rejects(f.api.activateFavorite(favorite), /原队列操作结果未确认/);
+    assert.equal(writes().length, 5, 'owner changes and late confirmation never replay an operation');
+    assert.equal(writes().at(-1).operation_id, newestWrite.operation_id);
+    f.setConfirm(async () => true); await f.button(abandonLabel).onclick();
+    f.api.destroy();
+  }
   for (const [action, className, errorCode] of [['queue_page', 'room-queue', 'room_denied'], ['library', 'room-list', 'storage']]) {
     const projection = fixture(); await settle();
     const initialCalls = projection.calls.length;

@@ -44,6 +44,7 @@ toml = { workspace = true }
 uuid = { workspace = true }
 getrandom = { workspace = true }
 sha2 = { workspace = true }
+hmac = "0.12"
 unicode-normalization = "0.1"
 rmcp = { workspace = true }
 fslock = { workspace = true }

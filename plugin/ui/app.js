@@ -7006,6 +7006,16 @@ function onlineItemId(t) {
   return 'online:' + src + ':' + key;
 }
 
+// Room favorites are durable personal references, never online playback IDs.
+function lanFavoriteSourceItem(f, index) {
+  return { id: f.id || 'track:lan:' + f.ref_id, sourceKey: 'favorites', source: 'lan', ref: f.ref_id,
+    index, badge: index + 1, title: f.title || '未知曲目', artist: f.artist || '未知艺术家',
+    duration: Number(f.duration_ms) || null, cover: null, current: false, playing: false, progress: 0 };
+}
+function isLanSourceItem(item) {
+  return !!item && (item.source === 'lan' || item.favSource === 'lan' || (item.raw && item.raw.source === 'lan') || String(item.id || '').startsWith('online:lan:') || String(item.raw && item.raw.id || '').startsWith('online:lan:'));
+}
+
 /// 每日推荐项。已按当前 mode（online/local）选源并截断到 LIMIT。
 function dailySourceItems() {
   const DV = window.DailyView;
@@ -7023,7 +7033,7 @@ function favoriteSourceItems() {
   const F = window.Favorites;
   const items = (F && F.state ? F.state.items : []) || [];
   return items.map((f, i) => {
-    const base = f.kind === 'radio'
+    const base = f.source === 'lan' ? lanFavoriteSourceItem(f, i) : f.kind === 'radio'
       ? onlineSourceItem({
         id: f.ref_id,
         source: f.source,
@@ -7114,7 +7124,7 @@ function queueForSourceItem(item) {
   const def = viewSourceDef(state.view);
   const list = (def ? def.items() : []) || [];
   const ids = list
-    .filter((x) => x && !x.isPlaylist && !String(x.id).startsWith('online:'))
+    .filter((x) => x && !isLanSourceItem(x) && !x.isPlaylist && x.favKind !== 'radio' && !String(x.id).startsWith('online:'))
     .map((x) => x.id);
   if (ids.includes(item.id)) return ids;
   // 兜底：源里凑不出一条纯本地队列（在线源 / 收藏电台），退回播放队列。
@@ -7129,6 +7139,7 @@ function queueForSourceItem(item) {
 /// 那一推拿到的是**歌单记录**，`raw.id` 是平台歌单 id —— 发出去就是拿歌单 id
 /// 当曲目 id 去取流，必 404，而且服务端只会回「暂无可用音频」这种误导话术。
 function playOnlineItem(item, list) {
+  if (isLanSourceItem(item)) return playSourceItem(item, list);
   const Online = window.Online;
   if (!Online || typeof Online.playAll !== 'function') {
     toast('在线播放还没准备好', 'error');
@@ -7138,10 +7149,12 @@ function playOnlineItem(item, list) {
     ? list
     : (((viewSourceDef(state.view) || {}).items || (() => []))());
   // 传整份同源列表：playAll 从 tracks[index] 开播，之后 next/prev 才有意义。
-  const tracks = source.map((x) => x.raw || x).filter((x) => x && x.id);
+  const skippedLan = source.filter(isLanSourceItem).length;
+  const tracks = source.filter((x) => x && !isLanSourceItem(x) && !x.isPlaylist && x.favKind !== 'radio' && x.source !== 'local').map((x) => x.raw || x).filter((x) => x && x.id && x.source !== 'lan');
   const at = tracks.findIndex((x) => onlineItemId(x) === item.id);
   if (at >= 0) {
     Online.playAll(tracks, at);
+    if (skippedLan) toast('已跳过 ' + skippedLan + ' 首局域网收藏；连接原房主后可逐首加入共同队列');
     return;
   }
   // 列表里找不到被点的那一项时，只播它自己 —— 退回 index 0 会播成**另一首歌**，
@@ -7192,6 +7205,11 @@ function playSourceItem(item, list) {
   // 播放队列那一份已经带好了 id，直接走队列路径（顺序播放语义要对）。
   if (item.queueItem) {
     playQueueIndex(item.index);
+    return;
+  }
+  if (isLanSourceItem(item)) {
+    if (window.Favorites && window.Favorites.activate) return window.Favorites.activate({ kind: item.favKind || 'track', source: 'lan', ref_id: item.favRefId || item.ref, title: item.title });
+    toast('收藏模块尚未准备好，请刷新后重试', 'error');
     return;
   }
   // 电台收藏：整盘载入，不是一首。

@@ -193,6 +193,14 @@ REST 路由表共 161 个「方法 + 路径」（`crates/hertz-studio/src/routes
 
 歌曲聊天使用 `peer.chat_song {operation_id, resource_id}`，与 `chat_send` 共用独立聊天操作命名空间。分配序号从 `peer.chat_history.next_operation_id` 取得下界，并保持本机单调递增；控制序号从 `peer.snapshot.next_operation_id` 取得。歌曲卡片的元数据按当前分享权限解析，撤销后 `song: null`，不得缓存旧投影继续提供操作。
 
+## 房间歌曲的个人收藏
+
+`SharedTrack.favorite_key` 为可选的 64 位十六进制稳定引用，由持久房主身份的独立派生密钥生成；它不包含路径、本地库主键或读取授权。当前 `resource_id` 仍是会话分享资源，不能作为长期收藏键。房主本机快照的 `favorite_local_ids` 将稳定引用映射到原本地库 ID，仅供本机复用 local 收藏；该映射不进入任何 LAN peer 快照。接收端本机快照的 `fingerprint` 取自原生连接固定的证书身份，不能信任远端自行声明的来源。
+
+个人收藏仍使用 `/v1/favorites` 存储与权限边界，接收端写 `kind: "track", source: "lan", ref_id: "<64位房主指纹>:<64位favorite_key>"`。不保存临时封面 URL；已获准的文字快照可保留到用户取消收藏。`/v1/favorites/toggle` 显式传 `favorited: true | false` 表示目标态，重复提交相同目标不会反转。写结果未知时只显示待确认，刷新 membership 后再决定下一动作。
+
+从收藏点歌先调用 `peer.resolve_favorites {keys: ["<favorite_key>"]}`，单次 1–32 个引用，需当前队列权限。限制与共享分页对齐，使长元数据响应仍在单条传输预算内。只返回当前仍共享的 `tracks` 及分享 `revision`；不存在／撤销分享的引用不会返回歌曲。前端先核对当前房主指纹，再通过现有队列写命令加入当前资源；收藏本身不授权读取或播控。此请求是 wire v3 的增量只读能力；缺少 `favorite_key` 的旧投影不开放收藏入口，不改变 PCM 或既有请求语义。
+
 ## 房间发现、申请与邀请
 
 `create.discoverable` 默认 `true`；房主 `discoverable {enabled}` 控制 mDNS 发布生命周期。快照的 `discoverable` 是配置意图，`discovery_available` 是当前发布状态，两者不能混为一谈。关闭发布仍可用已核验的地址和邀请加入。

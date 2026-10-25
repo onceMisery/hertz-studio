@@ -84,6 +84,9 @@ pub enum PeerRequest {
         #[serde(default)]
         revision: Option<Counter>,
     },
+    ResolveFavorites {
+        keys: Vec<String>,
+    },
     QueuePage {
         offset: usize,
         limit: usize,
