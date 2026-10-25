@@ -1,0 +1,56 @@
+{
+  "merge_commit": "d19c3c1",
+  "feature_commit": "9925810",
+  "target_branch": "codex/roadmap-next-steps-20261023",
+  "rust_tests": {
+    "merged": {
+      "passed": 1056,
+      "failed": 0,
+      "ignored": 7,
+      "suites": 28,
+      "log_sha256": "9586c6fd3f9266a5db7a41263d95b0eb66b11d2ee013f42201db4abd7d441940"
+    },
+    "restored_working_tree": {
+      "passed": 1056,
+      "failed": 0,
+      "ignored": 7,
+      "suites": 28,
+      "log_sha256": "6ea2784d659e30fce773e3da396ae17ee75468045cb69795dd08af3a277fa564"
+    }
+  },
+  "rust_command": "cargo test --locked --workspace --target-dir D:\\code\\github\\hertz-studio\\target-lan-delivery-merge",
+  "rust_environment": {
+    "CARGO_PROFILE_DEV_DEBUG": "0",
+    "CARGO_PROFILE_TEST_DEBUG": "0",
+    "CARGO_INCREMENTAL": "0"
+  },
+  "frontend_clean_merge": {
+    "passed_steps": 64,
+    "failed_steps": 0,
+    "live_skipped": 108
+  },
+  "restored_scope": [
+    "room controller",
+    "embedded asset registry 1104/1104",
+    "shared palette browser geometry, theme sync, persistence, keyboard and lifecycle"
+  ],
+  "personal_changes": {
+    "original_files": 58,
+    "preservation_report": "output/lan-merge-preservation-20261025/restore-results.json",
+    "snapshot": "output/lan-merge-preservation-20261025",
+    "unresolved": 0,
+    "parallel_changes_preserved": true
+  },
+  "cleanup": {
+    "archived_and_removed_worktree": "C:\\Users\\miracle\\.codex\\worktrees\\lan-listening-delivery\\hertz-studio",
+    "removed_cargo_targets": [
+      "worktree target (122.5 GiB)",
+      "worktree target-resource-harness (2.3 GiB)",
+      "worktree target/receiver-harness-build (1.2 GiB)",
+      "target-lan-delivery-merge (2.5 GiB)"
+    ],
+    "worktree_path_exists": false,
+    "temporary_target_exists": false
+  },
+  "limits": "Windows UI integration; service smoke uses null audio. No new acoustic or macOS/Linux hardware claim. Frontend aggregate belongs to the clean merge; existing parallel work remains uncommitted. Prior C-drive run failed for disk space and primary-target attempt encountered the running user executable; isolated D-drive runs passed. Existing primary target and user service were preserved."
+}
