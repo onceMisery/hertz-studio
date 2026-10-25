@@ -2685,6 +2685,21 @@ button:focus-visible, [role="button"]:focus-visible,
 }
 .track .t-actions .fav-act.is-on { opacity: 1; }
 .track .t-actions .fav-room-append { width:auto; min-height:44px; padding:0 9px; font-size:11px; white-space:nowrap; }
+/* A LAN source is text, not a 20px platform icon. Its explicit queue action
+   remains visible without hover and reserves room beside the favorite button. */
+.fav-row.fav-lan { height:auto; min-height:var(--row-h); grid-template-columns:30px 40px minmax(0,1fr) minmax(0,.62fr) 88px 52px 156px; }
+.fav-lan .fav-source-text { width:auto; height:auto; min-height:24px; padding:2px 8px; white-space:nowrap; color:var(--accent-ink); background:var(--accent); }
+#view-favorites .fav-lan .t-quality { display:block; }
+.track.fav-lan .t-actions { opacity:1; gap:6px; }
+.track.fav-lan .t-actions .t-act { min-width:44px; min-height:44px; }
+.track.fav-lan .t-actions .fav-room-append { border:1px solid var(--line-strong); color:var(--text); background:var(--panel-2); }
+@media(max-width:1000px) {
+  .fav-row.fav-lan { height:auto; min-height:var(--row-h); grid-template-columns:28px 40px minmax(0,1fr) 56px; padding-block:10px; }
+  .fav-lan .t-album { display:none; }
+  .fav-lan .t-quality { display:block; grid-column:3; grid-row:2; justify-self:start; }
+  .fav-lan .t-dur { grid-column:4; grid-row:1; }
+  .track.fav-lan .t-actions { grid-column:3 / -1; grid-row:3; justify-content:flex-start; flex-wrap:wrap; }
+}
 .fav-act.is-on:hover { background: rgba(0, 245, 212, 0.2); }
 
 .fav-tabs { display: flex; gap: var(--sp-3); margin: 0 0 var(--sp-5); }

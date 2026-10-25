@@ -4,6 +4,13 @@
   'use strict';
   const titles = { lobby: '一起听大厅', play: '房间播放', invite: '邀请一起听', collaborate: '共同队列与聊天', settings: '成员与设置' };
   const symbols = { lobby: 'home', play: 'headphones', invite: 'user', collaborate: 'queue', settings: 'settings' };
+  // Theme.onChange is app-lifetime; retain only the current workspace binding.
+  let themeOwner, refreshTheme;
+  function watchTheme() {
+    if (!global.Theme || themeOwner === global.Theme) return;
+    themeOwner = global.Theme;
+    if (typeof themeOwner.onChange === 'function') themeOwner.onChange(() => { if (refreshTheme) refreshTheme(); });
+  }
   function icon(name) {
     const make = tag => document.createElementNS ? document.createElementNS('http://www.w3.org/2000/svg', tag) : document.createElement(tag);
     const svg = make('svg'), use = make('use'); svg.setAttribute('class', 'room-icon'); svg.setAttribute('viewBox', '0 0 24 24'); svg.setAttribute('aria-hidden', 'true'); svg.setAttribute('focusable', 'false'); use.setAttribute('href', '#i-' + name); svg.append(use); return svg;
@@ -46,6 +53,27 @@
       refs.pageTitle = h('h2', 'room-page-title', titles[page]); refs.pageTitle.tabIndex = -1;
       refs.roomSummary = h('p', 'room-sub', '与同一网络里的电脑分享音乐'); heading.append(refs.roomEyebrow, refs.title, refs.roomSummary);
       const headerActions = h('div', 'room-header-actions');
+      const themeField = h('label', 'room-theme-field', '主题色');
+      const themeSelect = h('select', 'room-theme-select'); themeSelect.setAttribute('aria-label', '主题色');
+      themeField.append(themeSelect); headerActions.append(themeField);
+      let themeSignature = '';
+      function syncTheme() {
+        const owner = global.Theme;
+        themeField.hidden = !owner || typeof owner.list !== 'function' || typeof owner.apply !== 'function';
+        if (themeField.hidden) return;
+        const themes = owner.list(), selected = typeof owner.current === 'function' && owner.current();
+        const signature = JSON.stringify(themes.map(theme => [theme.id, theme.name]));
+        if (signature !== themeSignature) {
+          themeSelect.replaceChildren();
+          themes.forEach(theme => { const option = h('option', '', theme.name); option.value = theme.id; themeSelect.append(option); });
+          themeSignature = signature;
+        }
+        if (selected) themeSelect.value = selected.id;
+      }
+      refreshTheme = syncTheme; watchTheme(); syncTheme();
+      themeSelect.onchange = () => { if (global.Theme && typeof global.Theme.apply === 'function') global.Theme.apply(themeSelect.value); };
+      // Registered custom themes also become available before the next room poll.
+      themeSelect.onfocus = syncTheme;
       refs.health = button('查看输出详情', () => navigate('settings', true), 'room-health');
       refs.inviteNav = button('+ 邀请一起听', () => navigate('invite', true), 'primary'); headerActions.append(refs.health, refs.inviteNav);
       header.append(heading, headerActions); content.append(header, refs.pageTitle);
@@ -64,7 +92,9 @@
       navigate(page);
       return {
         pages, navigate,
+        destroy() { if (refreshTheme === syncTheme) refreshTheme = null; },
         render(snapshot) {
+          syncTheme();
           const active = snapshot.mode !== 'local', output = snapshot.output || {};
           refs.title.textContent = active ? snapshot.name || '一起听房间' : '发现此刻的同频';
           refs.roomEyebrow.textContent = active ? snapshot.mode === 'host' ? '房主 · 房间进行中' : snapshot.mode === 'guest' ? '已加入房间' : '正在恢复房间连接' : 'HERTZ / LISTEN TOGETHER';

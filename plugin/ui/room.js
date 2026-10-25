@@ -214,6 +214,7 @@
     const draft = preservePage && refs.chatInput ? refs.chatInput.value : '';
     const preservedReceipt = preservePage && chatReceipt && chatReceipt.owner === operationOwner() ? chatReceipt : null;
     mountedSession = roomSession; metadata.clear(); selection.clear(); chatReceipt = preservedReceipt; chatUnknown = preservedReceipt ? preservedReceipt.id : null; chatSending = null; chatSongPending = preservedReceipt && preservedReceipt.songTitle || null; resetChat(); chatLoading = null;
+    if (workspace && workspace.destroy) workspace.destroy();
     mounted = key; favoriteSignature = ''; memberSignature = ''; queueSignature = ''; librarySignature = ''; resourceGeneration++; resourceKey = ''; resourceSignature = ''; lyrics = []; if (coverUrl) URL.revokeObjectURL(coverUrl); coverUrl = ''; root.replaceChildren(); Object.keys(refs).forEach(k => delete refs[k]);
     invitationExpires = 0; invitationId = '';
     workspace = global.HertzRoomWorkspace.create(root, { h, button, refs, active: key === 'active', onReturn, onNavigate });
@@ -546,6 +547,6 @@
     operationContext: operationOwner,
     syncMediaSession,
     async localVolume(volume) { const o = snap.output || {}; if (!o.enabled) throw new Error('请先启用房间本机输出'); const result = await command({ action: 'output', enabled: true, settings: { ...(o.settings || {}), volume } }); await poll(true); return result; },
-    destroy() { lifecycle++; resourceGeneration++; if (coverUrl) URL.revokeObjectURL(coverUrl); coverUrl = ''; if (timer) clearInterval(timer); timer = 0; if (chrome) chrome.destroy(); if (refs.invitation) refs.invitation.value = ''; if (refs.invitationQr) refs.invitationQr.replaceChildren(); invitationId = ''; invitationExpires = 0; root = null; workspace = null; view = null; messages = []; playbackPending = null; queuePending = null; chatReceipt = null; chatUnknown = null; chatSending = null; chatSongPending = null; admissionRequest = null; }
+    destroy() { if (workspace && workspace.destroy) workspace.destroy(); lifecycle++; resourceGeneration++; if (coverUrl) URL.revokeObjectURL(coverUrl); coverUrl = ''; if (timer) clearInterval(timer); timer = 0; if (chrome) chrome.destroy(); if (refs.invitation) refs.invitation.value = ''; if (refs.invitationQr) refs.invitationQr.replaceChildren(); invitationId = ''; invitationExpires = 0; root = null; workspace = null; view = null; messages = []; playbackPending = null; queuePending = null; chatReceipt = null; chatUnknown = null; chatSending = null; chatSongPending = null; admissionRequest = null; }
   };
 })(window);

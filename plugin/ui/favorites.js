@@ -341,7 +341,7 @@
 
   function row(f) {
     var el = document.createElement('div');
-    el.className = 'track fav-row';
+    el.className = 'track fav-row' + (f.source === 'lan' ? ' fav-lan' : '');
     el.tabIndex = 0;
     el.setAttribute('role', 'button');
     el.innerHTML =
@@ -371,6 +371,7 @@
     if (!tag) {
       tag = document.createElement('span');
       tag.className = 'src-badge';
+      if (f.source === 'lan') tag.classList.add('fav-source-text');
       tag.textContent = f.source === 'local' ? '本地' : f.source === 'lan' ? '局域网' : f.source;
     }
     quality.appendChild(tag);
