@@ -126,6 +126,8 @@ WebView2 优先使用已安装的 Evergreen Runtime，组件自身内嵌壁纸�
 
 壁纸、歌词与宿主设置页由同一组件管理专属 WebView2 environment，数据目录与普通浏览器、DBX 和播放器网页隔离；不借用它们的 profile。内嵌页面使用受控本地 origin，拒绝外部页面导航和任意本地文件读取，不向 JS 暴露通用原生命令执行接口。environment 的创建、关闭、进程归属与缓存边界由共用原生实验验证；关闭壁纸不关闭仍启用的歌词。
 
+壁纸页与预览页整页走宿主自定义协议 `hertz://localhost/wallpaper.html`（wry 映射为 `http://hertz.localhost/`，即上面那个受控本地 origin），只为这一个路径返回页面，其余路径 404，不当通用文件服务。两条已实测的禁区：WebView2 的 `NavigateToString` 约 2 MB 上限会被内联的舞台运行时越过；`file://` 页面收不到 `window.ipc`，页面回报的 `wallpaper_dom_ready` 静默丢失，表现为 surface 已挂载却永远不进入 ready 与心跳。
+
 两个发行版使用同一共享构建流程和 UI 资源注册来源，不能手工维护第二份 Three.js bundle 或资产清单。生产构建需检验组件、服务与共享场景资源的版本/hash；新增 Windows 依赖不能使 Linux/macOS 的原工作区检查被迫编译原生宿主。
 
 ### 5.1 运行架构

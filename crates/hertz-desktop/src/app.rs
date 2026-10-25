@@ -3,6 +3,7 @@
 
 //! 桌面歌词宿主：窗口、托盘、来源线程与可见性策略。
 
+use std::borrow::Cow;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -19,6 +20,7 @@ use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuIt
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::UI::WindowsAndMessaging::{SetWindowPos, HWND_TOPMOST, SWP_NOACTIVATE};
+use wry::http::{header, Request, Response};
 use wry::WebViewBuilder;
 
 use crate::config::{self, Config, Layout, Profile, Secondary};
@@ -2497,6 +2499,8 @@ fn create_wallpaper(
             .or_else(|| monitors.first().cloned())
             .ok_or_else(|| anyhow::anyhow!("没有可用显示器"))?
     };
+    let page: Arc<[u8]> = Arc::from(wallpaper_html().into_bytes());
+    let page_bytes = page.len();
     let window = WindowBuilder::new()
         .with_title("Hertz wallpaper")
         .with_inner_size(PhysicalSize::new(
@@ -2521,7 +2525,11 @@ fn create_wallpaper(
     let zoom = f64::from(monitor.dpi) / f64::from(window_dpi.max(1));
     let page_proxy = proxy.clone();
     let webview = WebViewBuilder::new()
-        .with_url("about:blank")
+        .with_custom_protocol(
+            WALLPAPER_PROTOCOL.to_string(),
+            wallpaper_page_response(page),
+        )
+        .with_url(WALLPAPER_PAGE_URL)
         .with_background_color((3, 4, 5, 255))
         .with_ipc_handler(move |request| {
             let body = request.body();
@@ -2536,11 +2544,8 @@ fn create_wallpaper(
             .zoom(zoom)
             .map_err(|error| anyhow::anyhow!("应用壁纸 DPI 缩放失败：{error}"))?;
     }
-    webview
-        .load_html(&wallpaper_html())
-        .map_err(|error| anyhow::anyhow!("加载壁纸页面失败：{error}"))?;
     log(&format!(
-        "wallpaper target name={} rect={},{} {}x{} dpi={} window_dpi={window_dpi} zoom={zoom:.3} child={child_rect:?} parent={parent_rect:?}",
+        "wallpaper target name={} rect={},{} {}x{} dpi={} window_dpi={window_dpi} zoom={zoom:.3} page_bytes={page_bytes} child={child_rect:?} parent={parent_rect:?}",
         monitor.name, monitor.left, monitor.top, monitor.width, monitor.height, monitor.dpi
     ));
     Ok(WallpaperSurface {
@@ -2584,6 +2589,7 @@ fn create_preview(
     fps: u8,
     music_response: bool,
 ) -> Result<PreviewSurface> {
+    let page: Arc<[u8]> = Arc::from(wallpaper_html().into_bytes());
     let window = WindowBuilder::new()
         .with_title("Hertz 壁纸预览")
         .with_inner_size(PhysicalSize::new(960, 540))
@@ -2592,7 +2598,11 @@ fn create_preview(
         .build(target)?;
     let page_proxy = proxy.clone();
     let webview = WebViewBuilder::new()
-        .with_html(wallpaper_html())
+        .with_custom_protocol(
+            WALLPAPER_PROTOCOL.to_string(),
+            wallpaper_page_response(page),
+        )
+        .with_url(WALLPAPER_PAGE_URL)
         .with_background_color((3, 4, 5, 255))
         .with_ipc_handler(move |request| {
             let body = request.body();
@@ -2617,6 +2627,34 @@ fn settings_html() -> String {
         "__SETTINGS__",
         include_str!("../assets/wallpaper-settings.js"),
     )
+}
+
+/// 壁纸页内联的舞台运行时是 MB 级：NavigateToString 有 ~2 MB 上限，file:// 又收不到
+/// window.ipc，所以整页走自定义协议（wry 会映射到 http://hertz.localhost/）。
+const WALLPAPER_PROTOCOL: &str = "hertz";
+const WALLPAPER_PAGE_PATH: &str = "/wallpaper.html";
+const WALLPAPER_PAGE_URL: &str = "hertz://localhost/wallpaper.html";
+
+fn wallpaper_page_response(
+    page: Arc<[u8]>,
+) -> impl Fn(&str, Request<Vec<u8>>) -> Response<Cow<'static, [u8]>> + Send + Sync + 'static {
+    move |_id, request| {
+        // 该 origin 只提供壁纸页本身，其他路径不给内容，避免变成通用文件服务。
+        let page_here = request.uri().path() == WALLPAPER_PAGE_PATH;
+        let mut response = Response::new(if page_here {
+            Cow::Owned(page.to_vec())
+        } else {
+            Cow::Borrowed(&[] as &[u8])
+        });
+        if !page_here {
+            *response.status_mut() = wry::http::StatusCode::NOT_FOUND;
+        }
+        response.headers_mut().insert(
+            header::CONTENT_TYPE,
+            header::HeaderValue::from_static("text/html; charset=utf-8"),
+        );
+        response
+    }
 }
 
 fn wallpaper_html() -> String {
@@ -3044,5 +3082,18 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn inlined_pages_stay_inside_the_navigate_to_string_limit() {
+        // 只有这两个页面还整页走 NavigateToString（WebView2 上限约 2 MB，壁纸页已改走自定义协议）；
+        // 谁把 MB 级资源内联进来就会在这里失败，而不是让 surface 静默挂不上。
+        for (name, page) in [("lyrics", page_html()), ("settings", settings_html())] {
+            assert!(
+                page.len() < 256 * 1024,
+                "{name} 页面 {} 字节，逼近 NavigateToString 上限",
+                page.len()
+            );
+        }
     }
 }
