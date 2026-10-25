@@ -221,7 +221,7 @@ W1 不承诺普通窗口部分遮挡的逐像素裁剪，也不承诺远程桌�
 
 新增专用只读能力，从既有播放状态和频谱广播派生数据，不创建第二份 FFT 或第二个播放状态 owner。现有 OBS `overlay-key` 只允许歌词与封面；主 `/ws` 使用原鉴权，均不能直接宣称为已具备的壁纸频谱通道。
 
-建议的 HTTP/WS 形状如下，均为新增草案，不是当前公开 API：
+已实现的 HTTP/WS 形状如下，仍不是公开 API：
 
 | 入口 | 权限与行为 |
 | --- | --- |
@@ -235,7 +235,7 @@ W1 不承诺普通窗口部分遮挡的逐像素裁剪，也不承诺远程桌�
 
 #### W1-A 冻结：首版只做快照轮询（2026-10-24）
 
-W1-A 先实现 `GET /v1/wallpaper/snapshot`，不实现 `/v1/wallpaper/events` WS；事件推送留到 W1-B。原生 feed 500 ms 轮询，不新建第二份播放/频谱 owner。W1-A 只交付契约与宿主 feed，探针场景仍只做环境动画；把 feed 接入场景在 W1-B 完成。
+W1-A 先实现 `GET /v1/wallpaper/snapshot`，不实现 `/v1/wallpaper/events` WS；事件推送留到 W1-B（W1-B 已实现，见下文“事件流”）。原生 feed 500 ms 轮询，不新建第二份播放/频谱 owner。W1-A 只交付契约与宿主 feed，探针场景仍只做环境动画；把 feed 接入场景在 W1-B 完成。
 
 | 项 | 冻结值 |
 | --- | --- |
@@ -249,13 +249,13 @@ W1-A 先实现 `GET /v1/wallpaper/snapshot`，不实现 `/v1/wallpaper/events` W
 | 迟到/重复 | 同一 session 内 `seq` 必须严格递增，否则 `wallpaper_stale_snapshot` |
 | 隐私 | 不含曲名、路径、账号、封面；W2 再单独评审 |
 
-客户端错误码冻结为：`discovery_missing`、`discovery_invalid`、`edition_mismatch`、`wallpaper_protocol_missing`、`wallpaper_protocol_mismatch`、`wallpaper_key_missing`、`wallpaper_key_invalid`、`wallpaper_http_error`、`wallpaper_session_changed`、`wallpaper_stale_snapshot`、`wallpaper_invalid_snapshot`。服务端对越权一律 401，不回显钥匙。
+客户端错误码冻结为：`discovery_missing`、`discovery_invalid`、`edition_mismatch`、`wallpaper_protocol_missing`、`wallpaper_protocol_mismatch`、`wallpaper_key_missing`、`wallpaper_key_invalid`、`wallpaper_http_error`、`wallpaper_events_error`、`wallpaper_events_unavailable`、`wallpaper_session_changed`、`wallpaper_stale_snapshot`、`wallpaper_invalid_snapshot`。服务端对越权一律 401，不回显钥匙。
 
 #### W1-B 首片进度（2026-10-24）
 
-已实现：`hertz-desktop` 的壁纸场景页（registry 相机 + `applyFeed`）、WorkerW 目标屏 surface（完整显示器矩形）、混合 DPI WebView 缩放补偿、目标屏选择（设置页）、500 ms feed 线程、全屏/会话/息屏停绘、托盘“显示壁纸”开关（用户隐藏时隐藏 WebView，露出系统壁纸）、壁纸设置页（启用/目标屏/帧率/跟随音乐）、15 s 预览租约与预览窗口、应用 revision 与运行时启停、Explorer 重启自动恢复（存活检测 + 3 次/120 s 预算 + 托盘重新挂载）、主应用管理通道（服务端 `/v1/desktop/control` + app 设置行 + 宿主 pipe）、多来源切换（配置 schema v2、按 profile 独立域、设置页来源列表与候选），以及 `wallpaper.enabled`（默认关闭）与 `--wallpaper` 运行开关。隔离 mock 快照端到端已记录 page ready / mounted / feed ok；设置页经 WebView2 CDP 验证预览、应用、live surface 与 feed；真实 Explorer 重启验证 page/scene 重新挂载；96/144 混合 DPI 在第二屏实机验证。
+已实现：`hertz-desktop` 的壁纸场景页（registry 相机 + `applyFeed`）、WorkerW 目标屏 surface（完整显示器矩形）、混合 DPI WebView 缩放补偿、目标屏选择（设置页）、500 ms feed 线程、全屏/会话/息屏停绘、托盘“显示壁纸”开关（用户隐藏时隐藏 WebView，露出系统壁纸）、壁纸设置页（启用/目标屏/帧率/跟随音乐）、15 s 预览租约与预览窗口、应用 revision 与运行时启停、Explorer 重启自动恢复（存活检测 + 3 次/120 s 预算 + 托盘重新挂载）、主应用管理通道（服务端 `/v1/desktop/control` + app 设置行 + 宿主 pipe）、多来源切换（配置 schema v2、按 profile 独立域、设置页来源列表与候选）与事件流（`GET /v1/wallpaper/events`，旧服务自动回退轮询），以及 `wallpaper.enabled`（默认关闭）与 `--wallpaper` 运行开关。隔离 mock 快照端到端已记录 page ready / mounted / feed ok；设置页经 WebView2 CDP 验证预览、应用、live surface 与 feed；真实 Explorer 重启验证 page/scene 重新挂载；96/144 混合 DPI 在第二屏实机验证。
 
-未实现，当前不能标记 W1-B 完成：事件 WS；同时挂多块屏、分辨率/DPI 拓扑变化后的自动重排仍属 W3。宿主托盘已提供开机启动开关（`launch_at_login`）；运行中的旧服务需重建/重启后才提供新路由、新 UI 资源、`wallpaper-key` 与快照端点。
+W1-B 的功能件已齐；W1-C 的安装升级、真实双发行版服务、长稳与共存验收未做。同时挂多块屏、分辨率/DPI 拓扑变化后的自动重排仍属 W3。宿主托盘已提供开机启动开关（`launch_at_login`）；运行中的旧服务需重建/重启后才提供新路由、新 UI 资源、`wallpaper-key` 与快照/事件端点。
 
 #### W1-B 设置与预览首片（2026-10-24）
 
@@ -280,7 +280,15 @@ W1-A 先实现 `GET /v1/wallpaper/snapshot`，不实现 `/v1/wallpaper/events` W
 - 切换前校验发行版为 full/standard/custom、数据目录为存在的绝对路径；持久保存成功后才清空旧歌词、播放锚与频谱，递增来源代际并重启歌词/壁纸 feed。目标 profile 的 enabled 与样式在切换后应用；新来源不继承另一 profile 的启用状态。
 - 主应用启动壁纸设置时，服务端把本实例的 `dataDir` 与发行版作为候选传给宿主；已有宿主绑定其他来源时，用户在设置页显式选择后切换，不会被静默改绑。
 - “来源已保存”与“壁纸挂载失败”分开报告：切换已落盘但 surface 创建失败时保留新绑定与错误，不静默回退旧来源。
-- 验证：隔离 mock 双来源 30/30 通过，包含 v1 迁移、A/B 域隔离、设置页切换、自定义目录候选、慢请求跨切换的旧代际丢弃、非法路径拒绝与 revision 不变。尚未在正式服务、真实双发行版安装或登录自启场景验收。
+- 验证：隔离 mock 双来源 31/31 通过，包含 v1 迁移、A/B 域隔离、设置页切换、自定义目录候选、旧服务回退、慢请求跨切换的旧代际丢弃、非法路径拒绝与 revision 不变。尚未在正式服务、真实双发行版安装或登录自启场景验收。
+
+#### W1-B 事件流（2026-10-25）
+
+- `GET /v1/wallpaper/events` 使用同一把 `wallpaper-key` 的 `Authorization: Wallpaper <key>` 请求头升级 WS；握手前由壁纸路由组鉴权，越权 401。旧服务没有该入口时返回 404，宿主回退到原来的 500 ms 快照轮询。
+- 首发一条完整快照（字段与 `GET /v1/wallpaper/snapshot` 相同），之后只把现有播放/频谱广播标脏，最多每 250 ms 合并发送一帧完整快照；无事件时 1 s 心跳推进 `seq` 与 `ageMs`。不新开 FFT、播放 owner 或频谱订阅。
+- 慢客户端由 `send` 背压和 broadcast 的 `Lagged` 合并处理：只保留“需要新快照”的事实，不排队重放旧频谱；断连后按 1/2/4/8/16/30 s 有界退避重连，收到有效快照后重置。
+- 宿主仍执行同一套校验：协议/时间语义/服务会话/`seq` 严格递增/64 段有限频谱；旧连接迟到帧与旧来源代际事件都不能覆盖新快照。
+- 验证：服务端 `wallpaper_events_stream_starts_with_a_snapshot` 单测；真实 Standard 服务上 WS 鉴权、首发快照、心跳推进 `seq`、无钥匙拒绝，以及宿主 `wallpaper events connected`/feed ok/WorkerW surface 全部通过；旧服务 404 回退轮询在双来源 mock 中通过（31/31）。
 
 #### W1-B 多屏与混合 DPI 首片（2026-10-24）
 

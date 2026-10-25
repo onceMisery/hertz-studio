@@ -24,7 +24,9 @@ use wry::WebViewBuilder;
 use crate::config::{self, Config, Layout, Profile, Secondary};
 use crate::feed::{Document, Feed, Snapshot};
 use crate::native::{self, NativeEvent};
-use crate::wallpaper_feed::{Feed as WallpaperFeed, FeedError, Snapshot as WallpaperSnapshot};
+use crate::wallpaper_feed::{
+    Feed as WallpaperFeed, FeedError, Snapshot as WallpaperSnapshot, ERR_EVENTS_UNAVAILABLE,
+};
 
 const POLL_IDLE: Duration = Duration::from_millis(500);
 const POLL_ERROR: Duration = Duration::from_secs(1);
@@ -2322,22 +2324,86 @@ fn spawn_wallpaper_feed(
                     return;
                 }
             };
+            let mut backoff = Duration::from_secs(1);
             loop {
                 if stop.load(Ordering::Relaxed) {
                     break;
                 }
-                let result = feed.poll();
-                let failed = result.is_err();
-                if proxy
-                    .send_event(UserEvent::WallpaperFeed(generation, Box::new(result)))
-                    .is_err()
-                {
+                let mut received = false;
+                let result = feed.subscribe(|snapshot| {
+                    if !received {
+                        log(&format!("wallpaper events connected seq={}", snapshot.seq));
+                    }
+                    received = true;
+                    proxy
+                        .send_event(UserEvent::WallpaperFeed(generation, Box::new(Ok(snapshot))))
+                        .is_ok()
+                        && !stop.load(Ordering::Relaxed)
+                });
+                if stop.load(Ordering::Relaxed) {
                     break;
                 }
-                std::thread::sleep(if failed { POLL_ERROR } else { POLL_IDLE });
+                match result {
+                    Ok(()) => break,
+                    Err(error) if error.code == ERR_EVENTS_UNAVAILABLE => {
+                        log("wallpaper events unavailable; falling back to snapshot polling");
+                        poll_wallpaper_feed(&mut feed, &proxy, generation, &stop);
+                        break;
+                    }
+                    Err(error) => {
+                        log(&format!("wallpaper events {error}"));
+                        let _ = proxy
+                            .send_event(UserEvent::WallpaperFeed(generation, Box::new(Err(error))));
+                    }
+                }
+                if received {
+                    backoff = Duration::from_secs(1);
+                }
+                if !sleep_interruptible(backoff, &stop) {
+                    break;
+                }
+                backoff = (backoff * 2).min(Duration::from_secs(30));
             }
         })
         .ok();
+}
+
+fn poll_wallpaper_feed(
+    feed: &mut WallpaperFeed,
+    proxy: &EventLoopProxy<UserEvent>,
+    generation: u64,
+    stop: &AtomicBool,
+) {
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
+        let result = feed.poll();
+        let failed = result.is_err();
+        if proxy
+            .send_event(UserEvent::WallpaperFeed(generation, Box::new(result)))
+            .is_err()
+        {
+            break;
+        }
+        if !sleep_interruptible(if failed { POLL_ERROR } else { POLL_IDLE }, stop) {
+            break;
+        }
+    }
+}
+
+fn sleep_interruptible(duration: Duration, stop: &AtomicBool) -> bool {
+    let deadline = Instant::now() + duration;
+    while Instant::now() < deadline {
+        if stop.load(Ordering::Relaxed) {
+            return false;
+        }
+        let remaining = deadline
+            .saturating_duration_since(Instant::now())
+            .min(Duration::from_millis(100));
+        std::thread::sleep(remaining);
+    }
+    !stop.load(Ordering::Relaxed)
 }
 
 fn spawn_ticker(proxy: EventLoopProxy<UserEvent>) {

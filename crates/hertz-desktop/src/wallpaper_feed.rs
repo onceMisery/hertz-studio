@@ -3,12 +3,18 @@
 
 //! 壁纸只读 feed：播放时钟 + 最新 64 段频谱。
 //!
-//! 只认当前 profile 的 `vmusicd.json`、`wallpaper-key` 与
-//! `GET /v1/wallpaper/snapshot`；不接触主 token、歌词钥匙或播放控制。
-//! 快照不含曲名、路径、账号和封面。断连由调用方清空；暂停不插值；
-//! 频谱按 500 ms 开始衰减、1 s 归零。
+//! 只认当前 profile 的 `vmusicd.json`、`wallpaper-key` 与壁纸只读桥；
+//! 不接触主 token、歌词钥匙或播放控制。首选 `GET /v1/wallpaper/events`
+//! 事件流，旧服务没有该入口时回退到 500 ms 快照轮询。快照不含曲名、路径、
+//! 账号和封面。断连由调用方清空；暂停不插值；频谱按 500 ms 开始衰减、1 s 归零。
+
+use std::io;
+use std::net::{SocketAddr, TcpStream};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use tungstenite::client::IntoClientRequest;
+use tungstenite::http::header::AUTHORIZATION;
 
 use crate::bridge;
 use crate::config::Profile;
@@ -24,9 +30,15 @@ pub(crate) const ERR_PROTOCOL_MISMATCH: &str = "wallpaper_protocol_mismatch";
 pub(crate) const ERR_KEY_MISSING: &str = "wallpaper_key_missing";
 pub(crate) const ERR_KEY_INVALID: &str = "wallpaper_key_invalid";
 pub(crate) const ERR_HTTP: &str = "wallpaper_http_error";
+pub(crate) const ERR_EVENTS: &str = "wallpaper_events_error";
+pub(crate) const ERR_EVENTS_UNAVAILABLE: &str = "wallpaper_events_unavailable";
 pub(crate) const ERR_SESSION_CHANGED: &str = "wallpaper_session_changed";
 pub(crate) const ERR_STALE: &str = "wallpaper_stale_snapshot";
 pub(crate) const ERR_INVALID: &str = "wallpaper_invalid_snapshot";
+
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
+/// 服务端最多 1 s 心跳一次；读超时说明连接已死，交给重连退避。
+const READ_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[derive(Clone, Debug)]
 pub(crate) struct FeedError {
@@ -127,7 +139,7 @@ impl Feed {
         })
     }
 
-    pub(crate) fn poll(&mut self) -> Result<Snapshot, FeedError> {
+    fn prepare(&self) -> Result<(bridge::Discovery, String), FeedError> {
         let discovery_path = self.profile.data_dir.join("vmusicd.json");
         if !discovery_path.is_file() {
             return Err(FeedError::new(
@@ -179,22 +191,15 @@ impl Feed {
         }
         let key = bridge::read_key(&self.profile.data_dir, "wallpaper-key", "壁纸")
             .map_err(|error| FeedError::new(ERR_KEY_INVALID, error.to_string()))?;
-        let base = format!("http://127.0.0.1:{}", discovery.port);
-        let snapshot: Snapshot = bridge::get_json(
-            &self.client,
-            &base,
-            "/v1/wallpaper/snapshot",
-            "Wallpaper",
-            &key,
-        )
-        .map_err(|error| FeedError::new(ERR_HTTP, error.to_string()))?;
-        validate(&snapshot)?;
+        Ok((discovery, key))
+    }
 
-        if discovery
-            .server_instance_id
-            .as_deref()
-            .is_some_and(|session| session != snapshot.server.session)
-        {
+    fn accept_snapshot(
+        &mut self,
+        snapshot: &Snapshot,
+        discovery_session: Option<&str>,
+    ) -> Result<(), FeedError> {
+        if discovery_session.is_some_and(|session| session != snapshot.server.session.as_str()) {
             self.session = None;
             self.last_seq = None;
             return Err(FeedError::new(
@@ -212,8 +217,126 @@ impl Feed {
         }
         self.session = Some(snapshot.server.session.clone());
         self.last_seq = Some(snapshot.seq);
+        Ok(())
+    }
+
+    pub(crate) fn poll(&mut self) -> Result<Snapshot, FeedError> {
+        let (discovery, key) = self.prepare()?;
+        let base = format!("http://127.0.0.1:{}", discovery.port);
+        let snapshot: Snapshot = bridge::get_json(
+            &self.client,
+            &base,
+            "/v1/wallpaper/snapshot",
+            "Wallpaper",
+            &key,
+        )
+        .map_err(|error| FeedError::new(ERR_HTTP, error.to_string()))?;
+        validate(&snapshot)?;
+        self.accept_snapshot(&snapshot, discovery.server_instance_id.as_deref())?;
         Ok(snapshot)
     }
+
+    /// 订阅事件流直到断连；每收到一帧完整快照回调一次。
+    /// 返回 `Ok(())` 只表示回调要求停止，断连/协议错误都以 `FeedError` 返回。
+    pub(crate) fn subscribe(
+        &mut self,
+        mut on_snapshot: impl FnMut(Snapshot) -> bool,
+    ) -> Result<(), FeedError> {
+        let (discovery, key) = self.prepare()?;
+        let address = SocketAddr::from(([127, 0, 0, 1], discovery.port));
+        let stream = TcpStream::connect_timeout(&address, CONNECT_TIMEOUT)
+            .map_err(|error| FeedError::new(ERR_EVENTS, format!("连接壁纸事件失败：{error}")))?;
+        stream
+            .set_read_timeout(Some(READ_TIMEOUT))
+            .map_err(|error| {
+                FeedError::new(ERR_EVENTS, format!("设置壁纸事件超时失败：{error}"))
+            })?;
+        stream
+            .set_write_timeout(Some(READ_TIMEOUT))
+            .map_err(|error| {
+                FeedError::new(ERR_EVENTS, format!("设置壁纸事件超时失败：{error}"))
+            })?;
+        let request = events_request(discovery.port, &key)?;
+        let (mut socket, _) = tungstenite::client(request, stream).map_err(map_handshake)?;
+        loop {
+            let message = socket.read().map_err(map_socket_error)?;
+            match message {
+                tungstenite::Message::Text(text) => {
+                    let snapshot: Snapshot =
+                        serde_json::from_str(text.as_str()).map_err(|error| {
+                            FeedError::new(ERR_INVALID, format!("壁纸事件快照无法解析：{error}"))
+                        })?;
+                    validate(&snapshot)?;
+                    self.accept_snapshot(&snapshot, discovery.server_instance_id.as_deref())?;
+                    if !on_snapshot(snapshot) {
+                        return Ok(());
+                    }
+                }
+                tungstenite::Message::Ping(payload) => {
+                    let _ = socket.send(tungstenite::Message::Pong(payload));
+                }
+                tungstenite::Message::Close(_) => {
+                    return Err(FeedError::new(ERR_EVENTS, "壁纸事件连接已关闭"));
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+fn events_request(port: u16, key: &str) -> Result<tungstenite::http::Request<()>, FeedError> {
+    let uri: tungstenite::http::Uri = format!("ws://127.0.0.1:{port}/v1/wallpaper/events")
+        .parse()
+        .map_err(|error| FeedError::new(ERR_EVENTS, format!("壁纸事件地址无效：{error}")))?;
+    let mut request = uri
+        .into_client_request()
+        .map_err(|error| FeedError::new(ERR_EVENTS, format!("构造壁纸事件请求失败：{error}")))?;
+    let value = tungstenite::http::HeaderValue::from_str(&format!("Wallpaper {key}"))
+        .map_err(|error| FeedError::new(ERR_EVENTS, format!("壁纸事件凭据无效：{error}")))?;
+    request.headers_mut().insert(AUTHORIZATION, value);
+    Ok(request)
+}
+
+fn map_handshake(
+    error: tungstenite::handshake::HandshakeError<
+        tungstenite::handshake::client::ClientHandshake<TcpStream>,
+    >,
+) -> FeedError {
+    use tungstenite::handshake::HandshakeError;
+    match error {
+        HandshakeError::Failure(tungstenite::Error::Http(response))
+            if response.status().as_u16() == 401 =>
+        {
+            FeedError::new(ERR_KEY_INVALID, "壁纸事件鉴权失败")
+        }
+        HandshakeError::Failure(tungstenite::Error::Http(response))
+            if matches!(response.status().as_u16(), 404 | 405) =>
+        {
+            FeedError::new(
+                ERR_EVENTS_UNAVAILABLE,
+                "Hertz 服务不支持壁纸事件流；使用快照轮询",
+            )
+        }
+        HandshakeError::Failure(error) => {
+            FeedError::new(ERR_EVENTS, format!("壁纸事件握手失败：{error}"))
+        }
+        HandshakeError::Interrupted(_) => FeedError::new(ERR_EVENTS, "壁纸事件握手被中断"),
+    }
+}
+
+fn map_socket_error(error: tungstenite::Error) -> FeedError {
+    let message = match error {
+        tungstenite::Error::Io(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+            ) =>
+        {
+            "等待壁纸事件超时".to_string()
+        }
+        other => format!("壁纸事件连接中断：{other}"),
+    };
+    FeedError::new(ERR_EVENTS, message)
 }
 
 fn validate(snapshot: &Snapshot) -> Result<(), FeedError> {
@@ -390,6 +513,124 @@ mod tests {
             let _ = socket.write_all(response.as_bytes());
         });
         (port, handle)
+    }
+
+    fn serve_ws(bodies: Vec<String>) -> (u16, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut socket = tungstenite::accept(stream).unwrap();
+            for body in bodies {
+                if socket
+                    .send(tungstenite::Message::Text(body.into()))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            let _ = socket.close(None);
+            let _ = socket.flush();
+        });
+        (port, handle)
+    }
+
+    fn serve_status(status: &'static str) -> (u16, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut request = [0u8; 4096];
+            let _ = socket.read(&mut request);
+            let response =
+                format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            let _ = socket.write_all(response.as_bytes());
+        });
+        (port, handle)
+    }
+
+    #[test]
+    fn events_request_uses_wallpaper_authorization() {
+        let request = events_request(1234, "abc").unwrap();
+        assert_eq!(request.uri().path(), "/v1/wallpaper/events");
+        assert_eq!(request.uri().port_u16(), Some(1234));
+        assert_eq!(
+            request
+                .headers()
+                .get("authorization")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "Wallpaper abc"
+        );
+        assert!(request.headers().contains_key("sec-websocket-key"));
+    }
+
+    #[test]
+    fn events_stream_reads_monotonic_snapshots() {
+        let dir = temp_dir();
+        std::fs::create_dir_all(&dir.0).unwrap();
+        let (port, server) = serve_ws(vec![json(&snapshot(3)), json(&snapshot(4))]);
+        let profile = make_profile(&dir, Some(PROTOCOL), true, port);
+        let mut feed = Feed::new(profile).unwrap();
+        let mut seqs = Vec::new();
+        let error = feed
+            .subscribe(|value| {
+                seqs.push(value.seq);
+                true
+            })
+            .unwrap_err();
+        assert_eq!(seqs, vec![3, 4]);
+        assert_eq!(error.code, ERR_EVENTS);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn events_stream_rejects_replayed_sequence() {
+        let dir = temp_dir();
+        std::fs::create_dir_all(&dir.0).unwrap();
+        let (port, server) = serve_ws(vec![json(&snapshot(2)), json(&snapshot(1))]);
+        let profile = make_profile(&dir, Some(PROTOCOL), true, port);
+        let mut feed = Feed::new(profile).unwrap();
+        let mut seqs = Vec::new();
+        let error = feed
+            .subscribe(|value| {
+                seqs.push(value.seq);
+                true
+            })
+            .unwrap_err();
+        assert_eq!(seqs, vec![2]);
+        assert_eq!(error.code, ERR_STALE);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn events_stream_rejects_other_session() {
+        let dir = temp_dir();
+        std::fs::create_dir_all(&dir.0).unwrap();
+        let mut value = snapshot(1);
+        value.server.session = "other".into();
+        let (port, server) = serve_ws(vec![json(&value)]);
+        let profile = make_profile(&dir, Some(PROTOCOL), true, port);
+        let mut feed = Feed::new(profile).unwrap();
+        let error = feed.subscribe(|_| true).unwrap_err();
+        assert_eq!(error.code, ERR_SESSION_CHANGED);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn events_endpoint_missing_falls_back_to_polling() {
+        let dir = temp_dir();
+        std::fs::create_dir_all(&dir.0).unwrap();
+        let (port, server) = serve_status("404 Not Found");
+        let profile = make_profile(&dir, Some(PROTOCOL), true, port);
+        let mut feed = Feed::new(profile).unwrap();
+        let error = feed.subscribe(|_| true).unwrap_err();
+        assert_eq!(error.code, ERR_EVENTS_UNAVAILABLE);
+        server.join().unwrap();
     }
 
     #[test]

@@ -8,17 +8,23 @@
 //! 曲名、路径、账号和封面不进入该协议；W2 再单独评审。
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use axum::extract::ws::{Message, WebSocket};
 use serde_json::{json, Value};
+use tokio::sync::broadcast::error::RecvError;
 
-use crate::state::AppState;
+use crate::state::{AppState, WsEvent};
 
 pub(crate) const PROTOCOL: u32 = 1;
 pub(crate) const BANDS: usize = 64;
 /// 最后一帧超过这个时长后，快照不再回放旧频谱。
 const SPECTRUM_MAX_AGE: Duration = Duration::from_millis(1000);
+/// 事件合并窗口：频谱/播放事件只标脏，最多每 250 ms 发一帧完整快照。
+const EVENT_PUSH_INTERVAL: Duration = Duration::from_millis(250);
+/// 没有新事件时也按 1 s 心跳推进 seq 与 ageMs，避免客户端把连接判死。
+const EVENT_HEARTBEAT: Duration = Duration::from_secs(1);
 
 struct SpectrumFrame {
     bands: [f32; BANDS],
@@ -107,6 +113,45 @@ impl Wallpaper {
 
 pub(crate) fn snapshot(state: &AppState) -> Value {
     state.wallpaper.snapshot(state)
+}
+
+/// 壁纸事件流：首发完整快照，之后把现有播放/频谱广播合并成最多 4 Hz 的
+/// 完整快照，空转时 1 s 心跳。不新开 FFT 或播放 owner，慢客户端由 send
+/// 背压与 broadcast 的 Lagged 合并处理，旧事件不排队重放。
+pub(crate) async fn events(state: Arc<AppState>, mut socket: WebSocket) {
+    let initial = snapshot(&state).to_string();
+    if socket.send(Message::Text(initial.into())).await.is_err() {
+        return;
+    }
+    let mut source = state.events.subscribe();
+    let mut ticker = tokio::time::interval_at(
+        tokio::time::Instant::now() + EVENT_PUSH_INTERVAL,
+        EVENT_PUSH_INTERVAL,
+    );
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut dirty = false;
+    let mut last_sent = Instant::now();
+    loop {
+        tokio::select! {
+            _ = ticker.tick() => {
+                if dirty || last_sent.elapsed() >= EVENT_HEARTBEAT {
+                    let text = snapshot(&state).to_string();
+                    if socket.send(Message::Text(text.into())).await.is_err() {
+                        break;
+                    }
+                    dirty = false;
+                    last_sent = Instant::now();
+                }
+            }
+            event = source.recv() => match event {
+                Ok(WsEvent::State(_)) | Ok(WsEvent::Spectrum { .. }) => dirty = true,
+                Ok(_) => {}
+                Err(RecvError::Lagged(_)) => dirty = true,
+                Err(RecvError::Closed) => break,
+            },
+        }
+    }
+    let _ = socket.send(Message::Close(None)).await;
 }
 
 #[cfg(test)]

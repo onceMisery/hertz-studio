@@ -370,9 +370,10 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
             require_desktop_lyrics_key,
         ));
 
-    // 壁纸只读桥：独立钥匙、独立路由组；只放行壁纸快照。
+    // 壁纸只读桥：独立钥匙、独立路由组；只放行快照与事件流。
     let wallpaper = Router::new()
         .route("/v1/wallpaper/snapshot", get(wallpaper_snapshot))
+        .route("/v1/wallpaper/events", get(wallpaper_events))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             require_wallpaper_key,
@@ -567,9 +568,9 @@ fn desktop_lyrics_key_allows(path: &str) -> bool {
     )
 }
 
-/// 壁纸钥匙只开一条只读 GET；主 WS、播放、设置、曲库、AI 与歌词文档一律不放行。
+/// 壁纸钥匙只开两条只读 GET；主 WS、播放、设置、曲库、AI 与歌词文档一律不放行。
 fn wallpaper_key_allows(path: &str) -> bool {
-    path == "/v1/wallpaper/snapshot"
+    matches!(path, "/v1/wallpaper/snapshot" | "/v1/wallpaper/events")
 }
 
 /// 桌面歌词的原生宿主鉴权。用独立 `Authorization: Desktop <key>`，
@@ -833,6 +834,13 @@ async fn desktop_lyrics_snapshot(State(state): State<Arc<AppState>>) -> Json<ser
 /// 壁纸只读快照：播放真值 + 最新一帧 64 段频谱；不含曲名、路径或账号。
 async fn wallpaper_snapshot(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     Json(crate::wallpaper::snapshot(&state))
+}
+
+async fn wallpaper_events(
+    ws: axum::extract::ws::WebSocketUpgrade,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| crate::wallpaper::events(state, socket))
 }
 
 #[derive(Deserialize)]
@@ -5007,8 +5015,9 @@ mod tests {
     }
 
     #[test]
-    fn wallpaper_key_only_opens_the_wallpaper_snapshot() {
+    fn wallpaper_key_only_opens_the_wallpaper_bridge() {
         assert!(wallpaper_key_allows("/v1/wallpaper/snapshot"));
+        assert!(wallpaper_key_allows("/v1/wallpaper/events"));
         for path in [
             "/v1/desktop-lyrics/snapshot",
             "/v1/desktop-lyrics/document",
@@ -5071,6 +5080,60 @@ mod tests {
             assert_eq!(denied.status(), 401, "{scheme} 不该打开 {path}");
         }
 
+        server.abort();
+        let _ = server.await;
+        state.audio.shutdown();
+        handle.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn wallpaper_events_stream_starts_with_a_snapshot() {
+        let (mut state, handle) = crate::state::tests::playback_state().await;
+        let wallpaper_key = "a".repeat(64);
+        state.wallpaper_key = wallpaper_key.clone();
+        let session = state.server_instance_id().to_string();
+        let state = std::sync::Arc::new(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let app = super::router(state.clone()).with_state(state.clone());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let first = tokio::task::spawn_blocking(move || {
+            use std::time::Duration;
+            use tungstenite::client::IntoClientRequest;
+
+            let uri: tungstenite::http::Uri = format!("ws://127.0.0.1:{port}/v1/wallpaper/events")
+                .parse()
+                .unwrap();
+            let mut request = uri.into_client_request().unwrap();
+            request.headers_mut().insert(
+                "authorization",
+                tungstenite::http::HeaderValue::from_str(&format!("Wallpaper {wallpaper_key}"))
+                    .unwrap(),
+            );
+            let address = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+            let stream =
+                std::net::TcpStream::connect_timeout(&address, Duration::from_secs(2)).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let (mut socket, response) = tungstenite::client(request, stream).unwrap();
+            assert_eq!(response.status().as_u16(), 101);
+            match socket.read().unwrap() {
+                tungstenite::Message::Text(text) => text.as_str().to_string(),
+                other => panic!("壁纸事件首帧不是文本快照：{other:?}"),
+            }
+        })
+        .await
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&first).unwrap();
+        assert_eq!(value["protocol"], crate::wallpaper::PROTOCOL);
+        assert_eq!(
+            value["spectrum"]["bands"].as_array().unwrap().len(),
+            crate::wallpaper::BANDS
+        );
+        assert_eq!(value["server"]["session"], session);
         server.abort();
         let _ = server.await;
         state.audio.shutdown();
