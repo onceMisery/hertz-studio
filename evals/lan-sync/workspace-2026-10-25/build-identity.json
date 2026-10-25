@@ -163,8 +163,11 @@
     "two-machine/cross-OS acoustic measurement using one capture clock",
     "8 audio endpoints and 8-hour real-device endurance",
     "real-device sleep/wake, hot-unplug and network recovery matrix",
-    "mobile connection/audio implementation",
-    "internet identity/friends/directory and remote connection",
     "personal favorites for room-shared tracks"
-  ]
+  ],
+  "scope_confirmed_2026_10_25": {
+    "current": "Desktop LAN listening and small-screen responsive layout",
+    "out_of_scope": "Standalone mobile client, remote mobile connection and mobile audio",
+    "deferred": "Internet identity, friends, directory and remote listening"
+  }
 }
