@@ -1,12 +1,12 @@
 {
-  "startedAt": "2026-10-24T16:39:19.976Z",
+  "startedAt": "2026-10-25T04:07:33.481Z",
   "binary": {
-    "path": "D:/target/rss-reader/release/hertz-studio.exe",
-    "sha256": "6639aa0d293e913b2ac183b3f9d8e1f9ca9128040319af40fe0fcf94a45bf4c8"
+    "path": "D:/code/github/hertz-studio/target/release/hertz-studio.exe",
+    "sha256": "083d8377ad2440d149501229ba963a1759d9582e65c11faaebe9c53d8029de24"
   },
   "service": {
-    "dataDir": "C:\\Users\\miracle\\AppData\\Local\\Temp\\hertz-reader-real-ERUrVu",
-    "base": "http://127.0.0.1:2295"
+    "dataDir": "C:\\Users\\miracle\\AppData\\Local\\Temp\\hertz-reader-real-YWtFcp",
+    "base": "http://127.0.0.1:3715"
   },
   "feeds": [
     {
@@ -15,22 +15,22 @@
       "expect": "feed",
       "preview": {
         "status": 200,
-        "ms": 1951
+        "ms": 1524
       },
       "title": "OpenAI News",
       "previewEntries": 10,
       "scanTruncated": false,
-      "subscribeMs": 1511,
+      "subscribeMs": 587,
       "entryCount": 30,
       "hasCursor": true,
       "entriesWithContent": 0,
       "ttlMerged": {
-        "fetched_at": 1792859963,
+        "fetched_at": 1792901255,
         "not_modified": false,
         "synced": 0
       },
       "forcedRefresh": {
-        "fetched_at": 1792859964,
+        "fetched_at": 1792901256,
         "not_modified": false,
         "synced": 1318
       },
@@ -44,7 +44,7 @@
       "expect": "feed",
       "preview": {
         "status": 200,
-        "ms": 365
+        "ms": 339
       },
       "title": "cs.AI updates on arXiv.org",
       "previewEntries": 0,
@@ -58,22 +58,22 @@
       "expect": "feed",
       "preview": {
         "status": 200,
-        "ms": 1277
+        "ms": 1199
       },
       "title": "Hacker News - Newest: \"AI\"",
       "previewEntries": 10,
       "scanTruncated": false,
-      "subscribeMs": 255,
+      "subscribeMs": 245,
       "entryCount": 20,
       "hasCursor": false,
       "entriesWithContent": 0,
       "ttlMerged": {
-        "fetched_at": 1792859966,
+        "fetched_at": 1792901258,
         "not_modified": false,
         "synced": 0
       },
       "forcedRefresh": {
-        "fetched_at": 1792859966,
+        "fetched_at": 1792901258,
         "not_modified": true,
         "synced": 0
       },
@@ -87,22 +87,22 @@
       "expect": "feed",
       "preview": {
         "status": 200,
-        "ms": 1064
+        "ms": 1080
       },
       "title": "A List Apart: The Full Feed",
       "previewEntries": 10,
       "scanTruncated": false,
-      "subscribeMs": 365,
+      "subscribeMs": 494,
       "entryCount": 20,
       "hasCursor": false,
       "entriesWithContent": 0,
       "ttlMerged": {
-        "fetched_at": 1792859967,
+        "fetched_at": 1792901260,
         "not_modified": false,
         "synced": 0
       },
       "forcedRefresh": {
-        "fetched_at": 1792859968,
+        "fetched_at": 1792901260,
         "not_modified": true,
         "synced": 0
       },
@@ -111,38 +111,32 @@
       "ok": true
     },
     {
-      "name": "Claude Code Releases",
-      "url": "https://github.com/anthropics/claude-code/releases.atom",
+      "name": "TechCrunch",
+      "url": "https://techcrunch.com/feed/",
       "expect": "feed",
       "preview": {
         "status": 200,
-        "ms": 867
+        "ms": 750
       },
-      "title": "Release notes from claude-code",
+      "title": "TechCrunch",
       "previewEntries": 10,
       "scanTruncated": false,
-      "subscribeMs": 103,
-      "entryCount": 10,
+      "subscribeMs": 300,
+      "entryCount": 20,
       "hasCursor": false,
-      "entriesWithContent": 10,
-      "detailMs": 1,
-      "contentStatus": "cached",
-      "contentBytes": 4225,
-      "imgTags": 0,
-      "links": 0,
-      "imageKeys": 0,
+      "entriesWithContent": 0,
       "ttlMerged": {
-        "fetched_at": 1792859969,
+        "fetched_at": 1792901261,
         "not_modified": false,
         "synced": 0
       },
       "forcedRefresh": {
-        "fetched_at": 1792859969,
+        "fetched_at": 1792901261,
         "not_modified": true,
         "synced": 0
       },
-      "unreadBefore": 10,
-      "unreadAfterRead": 9,
+      "unreadBefore": 20,
+      "unreadAfterRead": 19,
       "ok": true
     },
     {
@@ -151,22 +145,22 @@
       "expect": "feed",
       "preview": {
         "status": 200,
-        "ms": 145
+        "ms": 151
       },
       "title": "少数派",
       "previewEntries": 10,
       "scanTruncated": false,
-      "subscribeMs": 66,
+      "subscribeMs": 47,
       "entryCount": 10,
       "hasCursor": false,
       "entriesWithContent": 0,
       "ttlMerged": {
-        "fetched_at": 1792859969,
+        "fetched_at": 1792901261,
         "not_modified": false,
         "synced": 0
       },
       "forcedRefresh": {
-        "fetched_at": 1792859969,
+        "fetched_at": 1792901261,
         "not_modified": false,
         "synced": 10
       },
@@ -180,22 +174,22 @@
       "expect": "feed",
       "preview": {
         "status": 200,
-        "ms": 99
+        "ms": 160
       },
       "title": "IT之家",
       "previewEntries": 10,
       "scanTruncated": false,
-      "subscribeMs": 38,
+      "subscribeMs": 60,
       "entryCount": 30,
       "hasCursor": true,
       "entriesWithContent": 0,
       "ttlMerged": {
-        "fetched_at": 1792859969,
+        "fetched_at": 1792901262,
         "not_modified": false,
         "synced": 0
       },
       "forcedRefresh": {
-        "fetched_at": 1792859969,
+        "fetched_at": 1792901262,
         "not_modified": true,
         "synced": 0
       },
@@ -209,34 +203,28 @@
       "expect": "feed",
       "preview": {
         "status": 200,
-        "ms": 218
+        "ms": 225
       },
       "title": "FreeBuf网络安全行业门户",
       "previewEntries": 10,
       "scanTruncated": false,
-      "subscribeMs": 159,
+      "subscribeMs": 160,
       "entryCount": 20,
       "hasCursor": false,
       "entriesWithContent": 20,
       "detailMs": 1,
       "contentStatus": "cached",
-      "contentBytes": 137,
-      "imgTags": 1,
+      "contentBytes": 208,
+      "imgTags": 0,
       "links": 0,
-      "imageKeys": 1,
-      "imageProxy": {
-        "status": 200,
-        "ms": 81,
-        "contentType": "image/jpeg",
-        "bytes": 123705
-      },
+      "imageKeys": 0,
       "ttlMerged": {
-        "fetched_at": 1792859970,
+        "fetched_at": 1792901262,
         "not_modified": false,
         "synced": 0
       },
       "forcedRefresh": {
-        "fetched_at": 1792859970,
+        "fetched_at": 1792901262,
         "not_modified": false,
         "synced": 20
       },
@@ -250,22 +238,22 @@
       "expect": "feed",
       "preview": {
         "status": 200,
-        "ms": 1632
+        "ms": 1301
       },
       "title": "Google DeepMind News",
       "previewEntries": 10,
       "scanTruncated": false,
-      "subscribeMs": 514,
+      "subscribeMs": 298,
       "entryCount": 30,
       "hasCursor": true,
       "entriesWithContent": 0,
       "ttlMerged": {
-        "fetched_at": 1792859972,
+        "fetched_at": 1792901264,
         "not_modified": false,
         "synced": 0
       },
       "forcedRefresh": {
-        "fetched_at": 1792859972,
+        "fetched_at": 1792901264,
         "not_modified": true,
         "synced": 0
       },
@@ -279,28 +267,28 @@
       "expect": "feed",
       "preview": {
         "status": 200,
-        "ms": 904
+        "ms": 665
       },
       "title": "This Week in Rust",
       "previewEntries": 4,
       "scanTruncated": false,
-      "subscribeMs": 127,
+      "subscribeMs": 175,
       "entryCount": 4,
       "hasCursor": false,
       "entriesWithContent": 4,
-      "detailMs": 1,
+      "detailMs": 2,
       "contentStatus": "cached",
       "contentBytes": 45303,
       "imgTags": 0,
       "links": 286,
       "imageKeys": 0,
       "ttlMerged": {
-        "fetched_at": 1792859973,
+        "fetched_at": 1792901265,
         "not_modified": false,
         "synced": 0
       },
       "forcedRefresh": {
-        "fetched_at": 1792859973,
+        "fetched_at": 1792901265,
         "not_modified": true,
         "synced": 0
       },
@@ -315,7 +303,7 @@
       "previewRetried": true,
       "preview": {
         "status": 504,
-        "ms": 8007
+        "ms": 8003
       },
       "errorCode": "upstream_timeout",
       "errorMessage": "阅读源请求超时，请稍后重试"
@@ -327,7 +315,7 @@
       "previewRetried": true,
       "preview": {
         "status": 504,
-        "ms": 8017
+        "ms": 8006
       },
       "errorCode": "upstream_timeout",
       "errorMessage": "阅读源请求超时，请稍后重试"
@@ -338,7 +326,7 @@
       "expect": "error",
       "preview": {
         "status": 502,
-        "ms": 956
+        "ms": 649
       },
       "errorCode": "upstream_rejected",
       "errorMessage": "阅读源返回 HTTP 404"
@@ -348,6 +336,6 @@
     "subscriptions": 10,
     "allStored": true
   },
-  "finishedAt": "2026-10-24T16:40:10.835Z",
+  "finishedAt": "2026-10-25T04:08:22.202Z",
   "result": "passed"
 }

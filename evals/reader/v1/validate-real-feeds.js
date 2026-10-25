@@ -20,7 +20,7 @@ const FEEDS = [
   { name: 'arXiv cs.AI', url: 'https://rss.arxiv.org/rss/cs.AI', expect: 'feed', allowEmpty: true },
   { name: 'Hacker News AI', url: 'https://hnrss.org/newest?q=AI', expect: 'feed' },
   { name: 'A List Apart', url: 'https://alistapart.com/main/feed/', expect: 'feed' },
-  { name: 'Claude Code Releases', url: 'https://github.com/anthropics/claude-code/releases.atom', expect: 'feed' },
+  { name: 'TechCrunch', url: 'https://techcrunch.com/feed/', expect: 'feed' },
   { name: '少数派', url: 'https://sspai.com/feed', expect: 'feed' },
   { name: 'IT之家', url: 'https://www.ithome.com/rss/', expect: 'feed' },
   { name: 'FreeBuf', url: 'https://www.freebuf.com/feed', expect: 'feed' },

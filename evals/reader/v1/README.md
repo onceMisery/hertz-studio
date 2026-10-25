@@ -31,6 +31,11 @@
 | Hacker News AI | 20 | 仅摘要 | — | **304**（ETag 生效） |
 | A List Apart | 20 | 仅摘要 | — | **304** |
 | Claude Code Releases (Atom) | 10 | 10 篇 cached（4.1 KiB） | — | **304** |
+
+> 2026-10-25 复验（合并进 `codex/roadmap-next-steps-20261023` 之后，`f240871` 构建的 release）：
+> 全部用例重跑通过。期间本机到 `github.com` 的链路劣化为完全不可达（curl 3×10s 超时），
+> 原 Atom 源 Claude Code Releases 以 `upstream_timeout`/`upstream_rejected` 如实失败且不落库；
+> 验证集把该源换成同日探测可达的 TechCrunch，其余不变。Atom 形态覆盖由 This Week in Rust 保持。
 | 少数派 | 10 | 仅摘要 | — | synced=10（源无 ETag，全量合并） |
 | IT之家 | 30 | 仅摘要 | — | **304** |
 | FreeBuf | 20 | 20 篇 cached | 1 键 → 代理 200，123 KB/81 ms | synced=20 |
