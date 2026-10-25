@@ -71,6 +71,13 @@ const ui = {
   setLyricOffsetDown: $('set-lyric-offset-down'),
   setLyricOffsetUp: $('set-lyric-offset-up'),
   setLyricOffsetReset: $('set-lyric-offset-reset'),
+  setDesktopLyricsRow: $('set-desktop-lyrics-row'),
+  setDesktopLyricsOpen: $('set-desktop-lyrics-open'),
+  setDesktopLyricsLocate: $('set-desktop-lyrics-locate'),
+  setWallpaperRow: $('set-wallpaper-row'),
+  setWallpaperSettings: $('set-wallpaper-settings'),
+  setWallpaperToggle: $('set-wallpaper-toggle'),
+  setWallpaperNote: $('set-wallpaper-note'),
   setLyricStaff: $('set-lyric-staff'),
   setLyricStaffPattern: $('set-lyric-staff-pattern'),
   setLyricStaffNote: $('set-lyric-staff-note'),
@@ -8999,6 +9006,66 @@ async function startApp() {
     };
   }
   // 歌词设置：偏移步进 100ms（±2000 封顶），正则改完失焦即存。
+  // 桌面歌词是独立 Windows 组件：DBX 形态没有桌面入口，也不该在这里催用户安装。
+  if (ui.setDesktopLyricsRow) {
+    ui.setDesktopLyricsRow.style.display =
+      window.hertzHost && window.hertzHost.isDbx ? 'none' : '';
+  }
+  if (ui.setWallpaperRow) {
+    ui.setWallpaperRow.style.display =
+      window.hertzHost && window.hertzHost.isDbx ? 'none' : '';
+  }
+  if (ui.setWallpaperNote) {
+    ui.setWallpaperNote.style.display =
+      window.hertzHost && window.hertzHost.isDbx ? 'none' : '';
+  }
+  if (ui.setDesktopLyricsOpen) {
+    ui.setDesktopLyricsOpen.onclick = () => {
+      transport.post('/v1/desktop/lyrics/launch', {})
+        .then(() => toast('已启动桌面歌词'))
+        .catch((err) => toast(errText('启动桌面歌词失败', err), 'error'));
+    };
+  }
+  if (ui.setDesktopLyricsLocate) {
+    ui.setDesktopLyricsLocate.onclick = () => {
+      transport.post('/v1/desktop/lyrics/control', { command: 'locate' })
+        .then(() => toast('已定位桌面歌词'))
+        .catch((err) => toast(errText('定位桌面歌词失败', err), 'error'));
+    };
+  }
+  const wallpaperControl = (command, value) => {
+    const post = () => transport.post('/v1/desktop/control', { command, value }).then((result) => {
+      if (result && result.ok === false) throw new Error(result.message || result.error || '桌面宿主返回错误');
+      return result;
+    });
+    return post().catch((err) => {
+      if (err.code !== 'desktop_not_running') throw err;
+      return transport.post('/v1/desktop/wallpaper/launch', {})
+        .then(() => new Promise((resolve) => setTimeout(resolve, 600)))
+        .then(post);
+    });
+  };
+  if (ui.setWallpaperSettings) {
+    ui.setWallpaperSettings.onclick = () => {
+      transport.post('/v1/desktop/wallpaper/launch', {})
+        .then(() => toast('已打开桌面壁纸设置'))
+        .catch((err) => toast(errText('打开桌面壁纸设置失败', err), 'error'));
+    };
+  }
+  if (ui.setWallpaperToggle) {
+    ui.setWallpaperToggle.onclick = () => {
+      wallpaperControl('wallpaper-toggle')
+        .then((result) => {
+          const wallpaper = result && result.wallpaper;
+          if (!wallpaper || !wallpaper.enabled) {
+            toast('桌面壁纸未启用，请先在壁纸设置中开启');
+            return;
+          }
+          toast(wallpaper.hidden ? '已隐藏桌面壁纸' : '已显示桌面壁纸');
+        })
+        .catch((err) => toast(errText('切换桌面壁纸失败', err), 'error'));
+    };
+  }
   ui.setLyricOffsetDown.onclick = () => saveLyricSettings({ global_lyric_offset_ms: Math.max(-2000, globalLyricOffsetMs() - 100) });
   ui.setLyricOffsetUp.onclick = () => saveLyricSettings({ global_lyric_offset_ms: Math.min(2000, globalLyricOffsetMs() + 100) });
   ui.setLyricOffsetReset.onclick = () => saveLyricSettings({ global_lyric_offset_ms: 0 });

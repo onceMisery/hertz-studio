@@ -306,7 +306,17 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         // 独立形态的桌面歌词组件启动入口；组件固定来自服务同目录，不接受路径参数。
         .route("/v1/desktop/lyrics/launch", post(launch_desktop_lyrics))
         .route(
+            "/v1/desktop/wallpaper/launch",
+            post(launch_desktop_wallpaper),
+        )
+        .route(
             "/v1/desktop/lyrics/control",
+            post(desktop_lyrics_control).layer(axum::extract::DefaultBodyLimit::max(
+                DESKTOP_CONTROL_BODY_BYTES,
+            )),
+        )
+        .route(
+            "/v1/desktop/control",
             post(desktop_lyrics_control).layer(axum::extract::DefaultBodyLimit::max(
                 DESKTOP_CONTROL_BODY_BYTES,
             )),
@@ -654,6 +664,16 @@ const DESKTOP_CONTROL_COMMANDS: &[&str] = &[
     "font",
     "opacity",
     "quit",
+    "wallpaper-status",
+    "wallpaper-settings",
+    "wallpaper-toggle",
+    "wallpaper-show",
+    "wallpaper-hide",
+    "wallpaper-retry",
+    "wallpaper-preview",
+    "wallpaper-preview-close",
+    "wallpaper-preview-renew",
+    "wallpaper-apply",
 ];
 
 #[derive(Deserialize)]
@@ -668,7 +688,7 @@ async fn desktop_lyrics_control(
     Json(request): Json<DesktopControlRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
     if !DESKTOP_CONTROL_COMMANDS.contains(&request.command.as_str()) {
-        return Err(bad_request("不支持的桌面歌词命令"));
+        return Err(bad_request("不支持的桌面控制命令"));
     }
     let payload = serde_json::json!({
         "command": request.command,
@@ -695,9 +715,23 @@ async fn desktop_lyrics_control(
     }
 }
 
-/// 启动同目录的桌面歌词宿主。组件缺失时明确拒绝，不从 PATH 猜。
+/// 启动同目录的桌面宿主。组件缺失时明确拒绝，不从 PATH 猜。
 async fn launch_desktop_lyrics(
     State(state): State<Arc<AppState>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    launch_desktop_host(&state, &["--locate"], "locate")
+}
+
+async fn launch_desktop_wallpaper(
+    State(state): State<Arc<AppState>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    launch_desktop_host(&state, &["--settings"], "wallpaper-settings")
+}
+
+fn launch_desktop_host(
+    state: &AppState,
+    extra_args: &[&str],
+    followup: &str,
 ) -> ApiResult<Json<serde_json::Value>> {
     let exe = std::env::current_exe().map_err(|error| internal(error.to_string()))?;
     let Some(dir) = exe.parent() else {
@@ -713,14 +747,16 @@ async fn launch_desktop_lyrics(
             StatusCode::NOT_FOUND,
             "desktop_component_missing",
             format!(
-                "未找到桌面歌词组件 {}；请安装与本服务匹配的桌面组件",
+                "未找到桌面组件 {}；请安装与本服务匹配的桌面组件",
                 host.display()
             ),
         ));
     }
     let mut command = std::process::Command::new(&host);
     command.arg("--data-dir").arg(&state.data_dir);
-    command.arg("--locate");
+    for arg in extra_args {
+        command.arg(arg);
+    }
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -729,12 +765,12 @@ async fn launch_desktop_lyrics(
     }
     command
         .spawn()
-        .map_err(|error| internal(format!("启动桌面歌词失败：{error}")))?;
-    // 已有宿主时新进程会因单实例退出；给正在运行的那个补一次 locate。
-    // 新宿主由 `--locate` 自己显示，这条晚到的命令只是幂等补充。
-    std::thread::spawn(|| {
+        .map_err(|error| internal(format!("启动桌面组件失败：{error}")))?;
+    // 已有宿主时新进程会因单实例退出；给正在运行的那个补一次幂等命令。
+    let followup = followup.to_string();
+    std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(400));
-        let _ = crate::desktop_control::send(serde_json::json!({ "command": "locate" }));
+        let _ = crate::desktop_control::send(serde_json::json!({ "command": followup }));
     });
     Ok(Json(serde_json::json!({ "started": true })))
 }
@@ -4743,6 +4779,23 @@ mod tests {
         }
         for command in ["exec", "open", "shell", "config", "reload", ""] {
             assert!(!DESKTOP_CONTROL_COMMANDS.contains(&command));
+        }
+        for command in [
+            "wallpaper-status",
+            "wallpaper-settings",
+            "wallpaper-toggle",
+            "wallpaper-show",
+            "wallpaper-hide",
+            "wallpaper-retry",
+            "wallpaper-preview",
+            "wallpaper-preview-close",
+            "wallpaper-preview-renew",
+            "wallpaper-apply",
+        ] {
+            assert!(
+                DESKTOP_CONTROL_COMMANDS.contains(&command),
+                "{command} 应在桌面控制白名单里"
+            );
         }
     }
 

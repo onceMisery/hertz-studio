@@ -253,9 +253,9 @@ W1-A 先实现 `GET /v1/wallpaper/snapshot`，不实现 `/v1/wallpaper/events` W
 
 #### W1-B 首片进度（2026-10-24）
 
-已实现：`hertz-desktop` 的壁纸场景页（registry 相机 + `applyFeed`）、WorkerW 目标屏 surface（完整显示器矩形）、混合 DPI WebView 缩放补偿、目标屏选择（设置页）、500 ms feed 线程、全屏/会话/息屏停绘、托盘“显示壁纸”开关（用户隐藏时隐藏 WebView，露出系统壁纸）、壁纸设置页（启用/目标屏/帧率/跟随音乐）、15 s 预览租约与预览窗口、应用 revision 与运行时启停、Explorer 重启自动恢复（存活检测 + 3 次/120 s 预算 + 托盘重新挂载），以及 `wallpaper.enabled`（默认关闭）与 `--wallpaper` 运行开关。隔离 mock 快照端到端已记录 page ready / mounted / feed ok；设置页经 WebView2 CDP 验证预览、应用、live surface 与 feed；真实 Explorer 重启验证 page/scene 重新挂载。
+已实现：`hertz-desktop` 的壁纸场景页（registry 相机 + `applyFeed`）、WorkerW 目标屏 surface（完整显示器矩形）、混合 DPI WebView 缩放补偿、目标屏选择（设置页）、500 ms feed 线程、全屏/会话/息屏停绘、托盘“显示壁纸”开关（用户隐藏时隐藏 WebView，露出系统壁纸）、壁纸设置页（启用/目标屏/帧率/跟随音乐）、15 s 预览租约与预览窗口、应用 revision 与运行时启停、Explorer 重启自动恢复（存活检测 + 3 次/120 s 预算 + 托盘重新挂载）、主应用管理通道（服务端 `/v1/desktop/control` + app 设置行 + 宿主 pipe），以及 `wallpaper.enabled`（默认关闭）与 `--wallpaper` 运行开关。隔离 mock 快照端到端已记录 page ready / mounted / feed ok；设置页经 WebView2 CDP 验证预览、应用、live surface 与 feed；真实 Explorer 重启验证 page/scene 重新挂载；96/144 混合 DPI 在第二屏实机验证。
 
-未实现，当前不能标记 W1-B 完成：主应用侧的宿主管理 IPC、自启、多 profile/发行版切换、事件 WS；同时挂多块屏、分辨率/DPI 拓扑变化后的自动重排仍属 W3。混合 DPI 已在第二屏实机验证（见下）；运行中的旧服务也需重建/重启后才提供 `wallpaper-key` 与快照端点。
+未实现，当前不能标记 W1-B 完成：多 profile/发行版切换、事件 WS；同时挂多块屏、分辨率/DPI 拓扑变化后的自动重排仍属 W3。宿主托盘已提供开机启动开关（`launch_at_login`）；运行中的旧服务需重建/重启后才提供新路由、新 UI 资源、`wallpaper-key` 与快照端点。
 
 #### W1-B 设置与预览首片（2026-10-24）
 
@@ -263,7 +263,15 @@ W1-A 先实现 `GET /v1/wallpaper/snapshot`，不实现 `/v1/wallpaper/events` W
 - 预览租约 15 s，设置窗口打开期间自动续租；同一时间只有一个预览；关闭设置、应用或超时都会关闭预览。
 - “应用”校验当前配置 revision 后保存，运行时创建/销毁 WorkerW surface、重建托盘并更新 feed 响应；目标屏变化会重建 surface；失败显示错误，不静默改配置。
 - 设置页可选目标显示器；列表来自宿主的完整显示器矩形（设备名、物理尺寸、DPI、主屏标记），选择结果保存到 `wallpaper.monitor`。
-- 当前页面 IPC 只属于宿主设置页；主应用通过服务端转发命令的宿主管理 IPC 与自启/事件 WS 仍未完成。
+- 设置页自身走宿主页面 IPC；主应用入口走服务端 `/v1/desktop/control` 转发到宿主 pipe，见下。
+
+#### W1-B 主应用管理通道（2026-10-25）
+
+- 服务端新增 `POST /v1/desktop/control`（保留 `/v1/desktop/lyrics/control` 兼容）和 `POST /v1/desktop/wallpaper/launch`；命令白名单包含 `wallpaper-status/settings/toggle/show/hide/retry/preview/preview-close/preview-renew/apply`。
+- 启动路由以 `--settings` 拉起宿主，并在 400 ms 后补一次 `wallpaper-settings`，兼容已有宿主单实例退出的情况。
+- 宿主 pipe 返回统一 `status_json`：壁纸 enabled/visible/hidden/revision/fps/musicResponse/monitor、settingsOpen、previewActive、monitorMissing；apply 失败返回明确 error/message。
+- 主应用设置页新增“桌面壁纸：壁纸设置 / 显示隐藏”；DBX 形态隐藏该入口。按钮经服务端控制路由，宿主未启动时自动拉起并重试一次。
+- 验证：消息模式命名管道逐项通过 status/toggle/show/settings/preview/close/apply enable/disable/hide/show/retry；服务端命令白名单、前端资源 1054/1054 与 JS 语法通过。尚未在重建后的应用实例里做整页人工验收。
 
 #### W1-B 多屏与混合 DPI 首片（2026-10-24）
 

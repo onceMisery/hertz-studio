@@ -671,7 +671,7 @@ impl App {
         &mut self,
         target: &EventLoopWindowTarget<UserEvent>,
         candidate: &WallpaperCandidate,
-    ) {
+    ) -> Result<(), String> {
         if let Some(preview) = self.preview.as_mut() {
             preview.fps = candidate.fps;
             preview.music_response = candidate.music_response;
@@ -687,8 +687,7 @@ impl App {
                     preview.clear_feed();
                 }
             }
-            self.send_settings_status(None, Some("预览已刷新"));
-            return;
+            return Ok(());
         }
         match create_preview(
             target,
@@ -699,11 +698,11 @@ impl App {
             Ok(preview) => {
                 log("wallpaper preview opened");
                 self.preview = Some(preview);
-                self.send_settings_status(None, Some("预览已打开"));
+                Ok(())
             }
             Err(error) => {
                 log(&format!("wallpaper preview failed: {error:#}"));
-                self.send_settings_status(Some(&format!("预览失败：{error}")), None);
+                Err(format!("预览失败：{error}"))
             }
         }
     }
@@ -722,14 +721,12 @@ impl App {
         candidate: &WallpaperCandidate,
         expected_revision: u64,
         target: &EventLoopWindowTarget<UserEvent>,
-    ) {
+    ) -> Result<(), String> {
         if let Err(error) = validate_candidate(candidate) {
-            self.send_settings_status(Some(error), None);
-            return;
+            return Err(error.to_string());
         }
         if expected_revision != self.config.revision {
-            self.send_settings_status(Some("设置已变化，请重新打开设置后重试"), None);
-            return;
+            return Err("设置已变化，请重新打开设置后重试".into());
         }
         let previous = self.config.clone();
         self.config.wallpaper.enabled = candidate.enabled;
@@ -739,8 +736,7 @@ impl App {
         self.config.revision = previous.revision.saturating_add(1);
         if let Err(error) = config::save(&self.config) {
             self.config = previous;
-            self.send_settings_status(Some(&format!("保存设置失败：{error:#}")), None);
-            return;
+            return Err(format!("保存设置失败：{error:#}"));
         }
         self.wallpaper_forced = false;
         self.wallpaper_recovery_terminal = false;
@@ -778,8 +774,7 @@ impl App {
                         log(&format!("wallpaper enable failed: {error:#}"));
                         self.config = previous;
                         let _ = config::save(&self.config);
-                        self.send_settings_status(Some(&format!("启用壁纸失败：{error}")), None);
-                        return;
+                        return Err(format!("启用壁纸失败：{error}"));
                     }
                 }
             }
@@ -807,7 +802,7 @@ impl App {
         self.close_preview();
         self.recompute_wallpaper();
         self.rebuild_tray();
-        self.send_settings_status(None, Some("已应用"));
+        Ok(())
     }
 
     fn handle_settings_page(&mut self, body: &str, target: &EventLoopWindowTarget<UserEvent>) {
@@ -834,7 +829,10 @@ impl App {
                     self.send_settings_status(Some(error), None);
                     return;
                 }
-                self.open_preview(target, &candidate);
+                match self.open_preview(target, &candidate) {
+                    Ok(()) => self.send_settings_status(None, Some("预览已打开")),
+                    Err(error) => self.send_settings_status(Some(&error), None),
+                }
             }
             "preview-renew" => self.renew_preview(),
             "apply" => {
@@ -846,7 +844,10 @@ impl App {
                     self.send_settings_status(Some("缺少设置修订号"), None);
                     return;
                 };
-                self.apply_wallpaper_settings(&candidate, expected_revision, target);
+                match self.apply_wallpaper_settings(&candidate, expected_revision, target) {
+                    Ok(()) => self.send_settings_status(None, Some("已应用")),
+                    Err(error) => self.send_settings_status(Some(&error), None),
+                }
             }
             "close" => self.close_settings(),
             other => self.send_settings_status(Some(&format!("未知设置命令：{other}")), None),
@@ -1091,14 +1092,72 @@ impl App {
         }
     }
 
-    fn handle_pipe_request(&mut self, request: &serde_json::Value) -> serde_json::Value {
+    fn handle_pipe_request(
+        &mut self,
+        request: &serde_json::Value,
+        target: &EventLoopWindowTarget<UserEvent>,
+    ) -> serde_json::Value {
         let command = request
             .get("command")
             .and_then(|value| value.as_str())
             .unwrap_or("");
+        log(&format!("control command={command}"));
         let value = request.get("value");
         match command {
-            "status" => {}
+            "status" | "wallpaper-status" => {}
+            "wallpaper-settings" => self.open_settings(target),
+            "wallpaper-toggle" => {
+                self.wallpaper_hidden = !self.wallpaper_hidden;
+                log(&format!("wallpaper_hidden={}", self.wallpaper_hidden));
+                self.recompute_wallpaper();
+                self.sync_tray();
+            }
+            "wallpaper-show" => {
+                self.wallpaper_hidden = false;
+                self.recompute_wallpaper();
+                self.sync_tray();
+            }
+            "wallpaper-hide" => {
+                self.wallpaper_hidden = true;
+                self.recompute_wallpaper();
+                self.sync_tray();
+            }
+            "wallpaper-retry" => self.retry_wallpaper(target),
+            "wallpaper-preview-close" => self.close_preview(),
+            "wallpaper-preview-renew" => self.renew_preview(),
+            "wallpaper-preview" => {
+                let candidate = match serde_json::from_value::<WallpaperCandidate>(
+                    value.cloned().unwrap_or(serde_json::Value::Null),
+                ) {
+                    Ok(candidate) => candidate,
+                    Err(_) => return pipe_error("invalid_value"),
+                };
+                if let Err(error) = validate_candidate(&candidate) {
+                    return pipe_error_detail("invalid_value", error);
+                }
+                if let Err(error) = self.open_preview(target, &candidate) {
+                    return pipe_error_detail("wallpaper_preview_failed", error);
+                }
+            }
+            "wallpaper-apply" => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct ApplyRequest {
+                    expected_revision: u64,
+                    config: WallpaperCandidate,
+                }
+                let apply = match serde_json::from_value::<ApplyRequest>(
+                    value.cloned().unwrap_or(serde_json::Value::Null),
+                ) {
+                    Ok(apply) => apply,
+                    Err(_) => return pipe_error("invalid_value"),
+                };
+                if let Err(error) =
+                    self.apply_wallpaper_settings(&apply.config, apply.expected_revision, target)
+                {
+                    return pipe_error_detail("wallpaper_apply_failed", error);
+                }
+            }
             "lock" => {
                 if self.tray.is_none() {
                     return pipe_error("tray_unavailable");
@@ -1193,6 +1252,13 @@ impl App {
                 "visible": self.wallpaper_visible,
                 "pageReady": self.wallpaper_page_ready,
                 "hidden": self.wallpaper_hidden,
+                "revision": self.config.revision,
+                "fps": self.config.wallpaper.fps,
+                "musicResponse": self.config.wallpaper.music_response,
+                "monitor": self.config.wallpaper.monitor,
+                "settingsOpen": self.settings.is_some(),
+                "previewActive": self.preview.is_some(),
+                "monitorMissing": self.wallpaper_monitor_missing,
             },
         })
     }
@@ -1704,7 +1770,9 @@ pub(crate) fn run() -> Result<()> {
     }
     if args.preview {
         let candidate = app.current_wallpaper_candidate();
-        app.open_preview(&event_loop, &candidate);
+        if let Err(error) = app.open_preview(&event_loop, &candidate) {
+            log(&format!("wallpaper preview start failed: {error}"));
+        }
     }
 
     if app.config.wallpaper.enabled || app.wallpaper_forced {
@@ -1749,7 +1817,7 @@ pub(crate) fn run() -> Result<()> {
             Event::UserEvent(UserEvent::Menu(event)) => app.handle_menu(&event.id.0, target),
             Event::UserEvent(UserEvent::Native(event)) => app.handle_native(event, target),
             Event::UserEvent(UserEvent::Pipe(request)) => {
-                let response = app.handle_pipe_request(&request.body);
+                let response = app.handle_pipe_request(&request.body, target);
                 let _ = request.reply.send(response);
             }
             Event::UserEvent(UserEvent::Quit) => *control_flow = ControlFlow::Exit,
@@ -1789,6 +1857,10 @@ pub(crate) fn run() -> Result<()> {
 
 fn pipe_error(code: &str) -> serde_json::Value {
     serde_json::json!({ "ok": false, "error": code })
+}
+
+fn pipe_error_detail(code: &str, message: impl Into<String>) -> serde_json::Value {
+    serde_json::json!({ "ok": false, "error": code, "message": message.into() })
 }
 
 fn install_global_handlers(proxy: EventLoopProxy<UserEvent>) {
