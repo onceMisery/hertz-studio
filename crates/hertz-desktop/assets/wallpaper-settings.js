@@ -3,7 +3,15 @@
   var revision = 0;
   var previewActive = false;
   var dirty = false;
+  var profiles = [];
+  var currentProfile = null;
   var $ = id => document.getElementById(id);
+
+  function profileKey(profile) {
+    if (!profile) return '';
+    var path = String(profile.dataDir || '').replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
+    return String(profile.edition || '').toLowerCase() + '|' + path;
+  }
 
   function send(command, extra) {
     if (!window.ipc || !window.ipc.postMessage) return;
@@ -24,6 +32,41 @@
     return (monitors || []).find(monitor => monitor.primary) || (monitors || [])[0] || null;
   }
 
+  function renderProfiles(list, current, forceCurrent) {
+    if (Array.isArray(list)) profiles = list.slice();
+    if (current) {
+      currentProfile = current;
+      if (!profiles.some(profile => profileKey(profile) === profileKey(current))) {
+        profiles.unshift(current);
+      }
+    }
+    var select = $('profile');
+    var previous = select.value;
+    select.innerHTML = '';
+    profiles.forEach(function (profile) {
+      var option = document.createElement('option');
+      option.value = profileKey(profile);
+      option.textContent = String(profile.edition || '?') + ' · ' + profile.dataDir;
+      select.appendChild(option);
+    });
+    var preferred = forceCurrent && currentProfile
+      ? profileKey(currentProfile)
+      : previous || (currentProfile ? profileKey(currentProfile) : '');
+    if (profiles.some(profile => profileKey(profile) === preferred)) select.value = preferred;
+    if (!select.value && profiles.length) select.selectedIndex = 0;
+    updateProfilePath();
+  }
+
+  function selectedProfile() {
+    var key = $('profile').value;
+    return profiles.find(profile => profileKey(profile) === key) || null;
+  }
+
+  function updateProfilePath() {
+    var profile = selectedProfile();
+    $('profile-path').textContent = profile ? profile.dataDir : '';
+  }
+
   function status(text, error) {
     var node = $('status');
     node.textContent = text;
@@ -33,6 +76,7 @@
   function applyStatus(payload) {
     if (!payload) return;
     revision = payload.revision || 0;
+    renderProfiles(payload.profiles, payload.profile, payload.message === '已切换来源');
     if (Array.isArray(payload.monitors)) {
       const current = $('monitor').value;
       $('monitor').innerHTML = '';
@@ -50,13 +94,13 @@
       const fallback = primaryMonitor(payload.monitors);
       $('monitor').value = current || (fallback ? fallback.name : '');
     }
-    if (payload.config && (!dirty || payload.message === '已应用')) {
+    if (payload.config && (!dirty || payload.message === '已应用' || payload.message === '已切换来源')) {
       $('enabled').checked = !!payload.config.enabled;
       $('fps').value = String(payload.config.fps || 30);
       $('music').checked = !!payload.config.musicResponse;
       const fallback = primaryMonitor(payload.monitors);
       $('monitor').value = payload.config.monitor || (fallback ? fallback.name : '');
-      dirty = payload.message === '已应用' ? false : dirty;
+      dirty = payload.message === '已应用' || payload.message === '已切换来源' ? false : dirty;
     }
     previewActive = !!payload.previewActive;
     if (payload.error) status(payload.error, true);
@@ -68,6 +112,19 @@
 
   ['enabled', 'fps', 'music', 'monitor'].forEach(function (id) {
     $(id).addEventListener('change', function () { dirty = true; });
+  });
+  $('profile').addEventListener('change', updateProfilePath);
+  $('switch-source').addEventListener('click', function () {
+    var profile = selectedProfile();
+    if (!profile) {
+      status('没有可切换的来源', true);
+      return;
+    }
+    if (currentProfile && profileKey(profile) === profileKey(currentProfile)) {
+      status('已经是当前来源', false);
+      return;
+    }
+    send('switch-source', { profile: profile, expectedRevision: revision });
   });
   $('preview').addEventListener('click', function () {
     send('preview', { config: form() });

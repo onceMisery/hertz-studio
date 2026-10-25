@@ -4,7 +4,8 @@
 //! 桌面歌词宿主：窗口、托盘、来源线程与可见性策略。
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -34,8 +35,8 @@ const PREVIEW_LEASE: Duration = Duration::from_secs(15);
 static LOG_SEQ: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) enum UserEvent {
-    Feed(Box<Result<crate::feed::FeedUpdate, String>>),
-    WallpaperFeed(Box<Result<WallpaperSnapshot, FeedError>>),
+    Feed(u64, Box<Result<crate::feed::FeedUpdate, String>>),
+    WallpaperFeed(u64, Box<Result<WallpaperSnapshot, FeedError>>),
     WallpaperPage(u64, String),
     SettingsPage(String),
     PreviewPage(String),
@@ -223,12 +224,15 @@ struct App {
     wallpaper_visible: bool,
     wallpaper_hidden: bool,
     wallpaper_forced: bool,
-    wallpaper_feed_started: bool,
+    source_generation: u64,
+    lyrics_feed_stop: Arc<AtomicBool>,
+    wallpaper_feed_stop: Option<Arc<AtomicBool>>,
     wallpaper_generation: u64,
     wallpaper_recovery_attempts: Vec<Instant>,
     wallpaper_recovery_terminal: bool,
     wallpaper_monitor_missing: bool,
     settings: Option<SettingsSurface>,
+    settings_candidate: Option<Profile>,
     preview: Option<PreviewSurface>,
     proxy: EventLoopProxy<UserEvent>,
 }
@@ -625,6 +629,15 @@ impl App {
                 "musicResponse": self.config.wallpaper.music_response,
                 "monitor": self.config.wallpaper.monitor,
             },
+            "profile": {
+                "dataDir": self.profile.data_dir.to_string_lossy(),
+                "edition": self.profile.edition,
+            },
+            "profiles": profile_options(
+                &self.profile,
+                &self.config,
+                self.settings_candidate.as_ref(),
+            ),
             "monitors": monitors,
             "previewActive": self.preview.is_some(),
             "error": error,
@@ -658,6 +671,7 @@ impl App {
     fn close_settings(&mut self) {
         self.close_preview();
         self.settings = None;
+        self.settings_candidate = None;
     }
 
     fn close_preview(&mut self) {
@@ -716,6 +730,159 @@ impl App {
         self.send_settings_status(None, None);
     }
 
+    fn ensure_wallpaper_feed(&mut self) {
+        if self.wallpaper_feed_stop.is_some() {
+            return;
+        }
+        let stop = Arc::new(AtomicBool::new(false));
+        spawn_wallpaper_feed(
+            self.profile.clone(),
+            self.proxy.clone(),
+            self.source_generation,
+            stop.clone(),
+        );
+        self.wallpaper_feed_stop = Some(stop);
+    }
+
+    fn stop_wallpaper_feed(&mut self) {
+        if let Some(stop) = self.wallpaper_feed_stop.take() {
+            stop.store(true, Ordering::Relaxed);
+        }
+    }
+
+    fn ensure_wallpaper_surface(
+        &mut self,
+        target: &EventLoopWindowTarget<UserEvent>,
+        monitor: Option<&str>,
+    ) -> Result<()> {
+        let monitors = native::wallpaper_monitors();
+        let resolved_name = monitor.map(str::to_string).or_else(|| {
+            monitors
+                .iter()
+                .find(|monitor| monitor.primary)
+                .map(|monitor| monitor.name.clone())
+        });
+        let monitor_changed = self
+            .wallpaper
+            .as_ref()
+            .is_some_and(|surface| Some(surface.monitor.name.as_str()) != resolved_name.as_deref());
+        if monitor_changed
+            || self
+                .wallpaper
+                .as_ref()
+                .is_some_and(|surface| !native::wallpaper_alive(surface.hwnd()))
+        {
+            self.wallpaper = None;
+            self.wallpaper_page_ready = false;
+        }
+        if self.wallpaper.is_none() {
+            self.wallpaper_generation = self.wallpaper_generation.wrapping_add(1);
+            let surface = create_wallpaper(
+                target,
+                self.proxy.clone(),
+                self.wallpaper_generation,
+                monitor,
+            )?;
+            self.wallpaper = Some(surface);
+        }
+        Ok(())
+    }
+
+    fn drop_wallpaper_surface(&mut self) {
+        self.stop_wallpaper_feed();
+        self.wallpaper = None;
+        self.wallpaper_generation = self.wallpaper_generation.wrapping_add(1);
+        self.wallpaper_page_ready = false;
+        self.wallpaper_visible = false;
+    }
+
+    fn switch_source(
+        &mut self,
+        profile: Profile,
+        expected_revision: u64,
+        target: &EventLoopWindowTarget<UserEvent>,
+    ) -> Result<(), String> {
+        if expected_revision != self.config.revision {
+            return Err("设置已变化，请重新打开设置后重试".into());
+        }
+        let profile = config::normalize_profile(profile).map_err(|error| format!("{error:#}"))?;
+        if config::same_profile(&self.profile, &profile) {
+            return Err("已经是当前来源".into());
+        }
+        let mut next = self.config.clone();
+        next.activate_profile(profile.clone())
+            .map_err(|error| format!("{error:#}"))?;
+        next.revision = self.config.revision.saturating_add(1);
+        config::save(&next).map_err(|error| format!("保存设置失败：{error:#}"))?;
+        self.config = next;
+        self.profile = profile;
+        self.source_generation = self.source_generation.wrapping_add(1);
+        self.lyrics_feed_stop.store(true, Ordering::Relaxed);
+        self.lyrics_feed_stop = Arc::new(AtomicBool::new(false));
+        spawn_feed(
+            self.profile.clone(),
+            self.proxy.clone(),
+            self.source_generation,
+            self.lyrics_feed_stop.clone(),
+        );
+        self.stop_wallpaper_feed();
+        self.wallpaper_last = None;
+        self.wallpaper_feed_logged = false;
+        if let Some(surface) = self.wallpaper.as_ref() {
+            surface.clear_feed();
+        }
+        if let Some(preview) = self.preview.as_ref() {
+            preview.clear_feed();
+        }
+        self.last_update = Instant::now();
+        self.last_feed_error = None;
+        self.last_warning = None;
+        self.last_snapshot = None;
+        self.current_track = None;
+        self.current_document_key = None;
+        self.current_document = None;
+        self.policy.no_content = true;
+        self.source_state = "waiting";
+        self.source_message = Some(format!("正在连接 Hertz {} 服务", self.profile.edition));
+        self.send_document();
+        self.send_snapshot();
+        self.send_source();
+        self.policy.locked = self.config.lyrics.locked;
+        native::set_locked(self.hwnd(), self.policy.locked);
+        self.send_config();
+        self.eval(&format!(
+            "window.hertzLyrics && window.hertzLyrics.setLocked({});",
+            self.config.lyrics.locked
+        ));
+        self.place(true);
+        self.recompute_visibility();
+        self.sync_tray();
+        let mut surface_error = None;
+        if self.config.wallpaper.enabled || self.wallpaper_forced {
+            let monitor = self.config.wallpaper.monitor.clone();
+            if let Err(error) = self.ensure_wallpaper_surface(target, monitor.as_deref()) {
+                log(&format!(
+                    "wallpaper enable after source switch failed: {error:#}"
+                ));
+                surface_error = Some(format!("来源已保存，但壁纸挂载失败：{error}"));
+            }
+            self.ensure_wallpaper_feed();
+        } else {
+            self.drop_wallpaper_surface();
+        }
+        self.wallpaper_recovery_terminal = false;
+        self.wallpaper_recovery_attempts.clear();
+        self.recompute_wallpaper();
+        self.rebuild_tray();
+        log(&format!(
+            "source switched edition={} data_dir={}",
+            self.profile.edition,
+            self.profile.data_dir.display()
+        ));
+        self.send_settings_status(surface_error.as_deref(), Some("已切换来源"));
+        Ok(())
+    }
+
     fn apply_wallpaper_settings(
         &mut self,
         candidate: &WallpaperCandidate,
@@ -742,46 +909,14 @@ impl App {
         self.wallpaper_recovery_terminal = false;
         self.wallpaper_recovery_attempts.clear();
         if candidate.enabled {
-            let monitors = native::wallpaper_monitors();
-            let resolved_name = candidate.monitor.clone().or_else(|| {
-                monitors
-                    .iter()
-                    .find(|monitor| monitor.primary)
-                    .map(|monitor| monitor.name.clone())
-            });
-            let monitor_changed = self.wallpaper.as_ref().is_some_and(|surface| {
-                Some(surface.monitor.name.as_str()) != resolved_name.as_deref()
-            });
-            if monitor_changed
-                || self
-                    .wallpaper
-                    .as_ref()
-                    .is_some_and(|surface| !native::wallpaper_alive(surface.hwnd()))
+            if let Err(error) = self.ensure_wallpaper_surface(target, candidate.monitor.as_deref())
             {
-                self.wallpaper = None;
-                self.wallpaper_page_ready = false;
+                log(&format!("wallpaper enable failed: {error:#}"));
+                self.config = previous;
+                let _ = config::save(&self.config);
+                return Err(format!("启用壁纸失败：{error}"));
             }
-            if self.wallpaper.is_none() {
-                self.wallpaper_generation = self.wallpaper_generation.wrapping_add(1);
-                match create_wallpaper(
-                    target,
-                    self.proxy.clone(),
-                    self.wallpaper_generation,
-                    candidate.monitor.as_deref(),
-                ) {
-                    Ok(surface) => self.wallpaper = Some(surface),
-                    Err(error) => {
-                        log(&format!("wallpaper enable failed: {error:#}"));
-                        self.config = previous;
-                        let _ = config::save(&self.config);
-                        return Err(format!("启用壁纸失败：{error}"));
-                    }
-                }
-            }
-            if !self.wallpaper_feed_started {
-                spawn_wallpaper_feed(self.profile.clone(), self.proxy.clone());
-                self.wallpaper_feed_started = true;
-            }
+            self.ensure_wallpaper_feed();
             if let Some(surface) = self.wallpaper.as_ref() {
                 if self.wallpaper_page_ready {
                     if candidate.music_response {
@@ -794,10 +929,7 @@ impl App {
                 }
             }
         } else {
-            self.wallpaper = None;
-            self.wallpaper_generation = self.wallpaper_generation.wrapping_add(1);
-            self.wallpaper_page_ready = false;
-            self.wallpaper_visible = false;
+            self.drop_wallpaper_surface();
         }
         self.close_preview();
         self.recompute_wallpaper();
@@ -814,6 +946,8 @@ impl App {
             config: Option<WallpaperCandidate>,
             #[serde(default)]
             expected_revision: Option<u64>,
+            #[serde(default)]
+            profile: Option<Profile>,
         }
         let Ok(command) = serde_json::from_str::<Command>(body) else {
             self.send_settings_status(Some("设置请求格式无效"), None);
@@ -847,6 +981,19 @@ impl App {
                 match self.apply_wallpaper_settings(&candidate, expected_revision, target) {
                     Ok(()) => self.send_settings_status(None, Some("已应用")),
                     Err(error) => self.send_settings_status(Some(&error), None),
+                }
+            }
+            "switch-source" => {
+                let Some(profile) = command.profile else {
+                    self.send_settings_status(Some("缺少目标来源"), None);
+                    return;
+                };
+                let Some(expected_revision) = command.expected_revision else {
+                    self.send_settings_status(Some("缺少设置修订号"), None);
+                    return;
+                };
+                if let Err(error) = self.switch_source(profile, expected_revision, target) {
+                    self.send_settings_status(Some(&error), None);
                 }
             }
             "close" => self.close_settings(),
@@ -1105,7 +1252,16 @@ impl App {
         let value = request.get("value");
         match command {
             "status" | "wallpaper-status" => {}
-            "wallpaper-settings" => self.open_settings(target),
+            "wallpaper-settings" => {
+                if let Some(profile) = value
+                    .and_then(|value| value.get("profile"))
+                    .and_then(|value| serde_json::from_value::<Profile>(value.clone()).ok())
+                    .and_then(|profile| config::normalize_profile(profile).ok())
+                {
+                    self.settings_candidate = Some(profile);
+                }
+                self.open_settings(target);
+            }
             "wallpaper-toggle" => {
                 self.wallpaper_hidden = !self.wallpaper_hidden;
                 log(&format!("wallpaper_hidden={}", self.wallpaper_hidden));
@@ -1156,6 +1312,25 @@ impl App {
                     self.apply_wallpaper_settings(&apply.config, apply.expected_revision, target)
                 {
                     return pipe_error_detail("wallpaper_apply_failed", error);
+                }
+            }
+            "profile-switch" => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct SwitchRequest {
+                    expected_revision: u64,
+                    profile: Profile,
+                }
+                let switch = match serde_json::from_value::<SwitchRequest>(
+                    value.cloned().unwrap_or(serde_json::Value::Null),
+                ) {
+                    Ok(switch) => switch,
+                    Err(_) => return pipe_error("invalid_value"),
+                };
+                if let Err(error) =
+                    self.switch_source(switch.profile, switch.expected_revision, target)
+                {
+                    return pipe_error_detail("profile_switch_failed", error);
                 }
             }
             "lock" => {
@@ -1610,7 +1785,7 @@ pub(crate) fn run() -> Result<()> {
     };
     let mut config = config::load()?;
     config.sanitize();
-    let profile = args
+    let mut profile = args
         .data_dir
         .take()
         .map(|data_dir| Profile {
@@ -1620,10 +1795,18 @@ pub(crate) fn run() -> Result<()> {
         .or_else(|| config.active_profile.clone())
         .or_else(config::detect_profile)
         .unwrap_or_else(default_profile);
-    if config.active_profile.as_ref() != Some(&profile) {
-        config.active_profile = Some(profile.clone());
-        if let Err(error) = config::save(&config) {
-            log(&format!("save initial profile failed: {error:#}"));
+    match config.activate_profile(profile.clone()) {
+        Ok(true) => {
+            if let Err(error) = config::save(&config) {
+                log(&format!("save initial profile failed: {error:#}"));
+            }
+        }
+        Ok(false) => {}
+        Err(error) => {
+            log(&format!("activate initial profile failed: {error:#}"));
+            if let Some(active) = config.active_profile.clone() {
+                profile = active;
+            }
         }
     }
     let wallpaper_forced = args.wallpaper;
@@ -1736,12 +1919,15 @@ pub(crate) fn run() -> Result<()> {
         wallpaper_visible: false,
         wallpaper_hidden: false,
         wallpaper_forced,
-        wallpaper_feed_started: false,
+        source_generation: 1,
+        lyrics_feed_stop: Arc::new(AtomicBool::new(false)),
+        wallpaper_feed_stop: None,
         wallpaper_generation: 1,
         wallpaper_recovery_attempts: Vec::new(),
         wallpaper_recovery_terminal: false,
         wallpaper_monitor_missing: false,
         settings: None,
+        settings_candidate: None,
         preview: None,
         proxy: proxy.clone(),
     };
@@ -1776,10 +1962,14 @@ pub(crate) fn run() -> Result<()> {
     }
 
     if app.config.wallpaper.enabled || app.wallpaper_forced {
-        spawn_wallpaper_feed(app.profile.clone(), proxy.clone());
-        app.wallpaper_feed_started = true;
+        app.ensure_wallpaper_feed();
     }
-    spawn_feed(app.profile.clone(), proxy.clone());
+    spawn_feed(
+        app.profile.clone(),
+        proxy.clone(),
+        app.source_generation,
+        app.lyrics_feed_stop.clone(),
+    );
     spawn_ticker(proxy.clone());
     let pipe_proxy = proxy.clone();
     if let Err(error) = crate::pipe::start(move |request| {
@@ -1797,12 +1987,28 @@ pub(crate) fn run() -> Result<()> {
     event_loop.run(move |event, target, control_flow| {
         *control_flow = ControlFlow::Wait;
         match event {
-            Event::UserEvent(UserEvent::Feed(result)) => match *result {
-                Ok(update) => app.handle_update(update),
-                Err(message) => app.handle_feed_error(message),
-            },
-            Event::UserEvent(UserEvent::WallpaperFeed(result)) => {
-                app.handle_wallpaper_feed(*result)
+            Event::UserEvent(UserEvent::Feed(generation, result)) => {
+                if generation == app.source_generation {
+                    match *result {
+                        Ok(update) => app.handle_update(update),
+                        Err(message) => app.handle_feed_error(message),
+                    }
+                } else {
+                    log(&format!(
+                        "ignore stale lyrics feed generation={generation} current={}",
+                        app.source_generation
+                    ));
+                }
+            }
+            Event::UserEvent(UserEvent::WallpaperFeed(generation, result)) => {
+                if generation == app.source_generation {
+                    app.handle_wallpaper_feed(*result);
+                } else {
+                    log(&format!(
+                        "ignore stale wallpaper feed generation={generation} current={}",
+                        app.source_generation
+                    ));
+                }
             }
             Event::UserEvent(UserEvent::WallpaperPage(generation, body)) => {
                 app.handle_wallpaper_page(generation, &body)
@@ -1874,27 +2080,71 @@ fn install_global_handlers(proxy: EventLoopProxy<UserEvent>) {
     }));
 }
 
-fn spawn_feed(profile: Profile, proxy: EventLoopProxy<UserEvent>) {
+fn spawn_feed(
+    profile: Profile,
+    proxy: EventLoopProxy<UserEvent>,
+    generation: u64,
+    stop: Arc<AtomicBool>,
+) {
     std::thread::Builder::new()
         .name("hertz-desktop-feed".into())
         .spawn(move || {
             let mut feed = match Feed::new(profile) {
                 Ok(feed) => feed,
                 Err(error) => {
-                    let _ = proxy.send_event(UserEvent::Feed(Box::new(Err(format!("{error:#}")))));
+                    let _ = proxy.send_event(UserEvent::Feed(
+                        generation,
+                        Box::new(Err(format!("{error:#}"))),
+                    ));
                     return;
                 }
             };
             loop {
+                if stop.load(Ordering::Relaxed) {
+                    break;
+                }
                 let update = feed.poll().map_err(|error| format!("{error:#}"));
                 let failed = update.is_err();
-                if proxy.send_event(UserEvent::Feed(Box::new(update))).is_err() {
+                if proxy
+                    .send_event(UserEvent::Feed(generation, Box::new(update)))
+                    .is_err()
+                {
                     break;
                 }
                 std::thread::sleep(if failed { POLL_ERROR } else { POLL_IDLE });
             }
         })
         .ok();
+}
+
+fn profile_options(
+    current: &Profile,
+    config: &Config,
+    candidate: Option<&Profile>,
+) -> Vec<serde_json::Value> {
+    let mut profiles = vec![current.clone()];
+    for profile in config
+        .known_profiles()
+        .into_iter()
+        .chain(config::detect_profiles())
+        .chain(candidate.cloned())
+    {
+        if !profiles
+            .iter()
+            .any(|known| config::same_profile(known, &profile))
+        {
+            profiles.push(profile);
+        }
+    }
+    profiles
+        .into_iter()
+        .map(|profile| {
+            serde_json::json!({
+                "dataDir": profile.data_dir.to_string_lossy(),
+                "edition": profile.edition,
+            })
+        })
+        .collect()
 }
 
 fn validate_candidate(candidate: &WallpaperCandidate) -> Result<(), &'static str> {
@@ -2056,7 +2306,12 @@ fn wallpaper_html() -> String {
         .replace("__SCENE__", include_str!("../assets/wallpaper-scene.js"))
 }
 
-fn spawn_wallpaper_feed(profile: Profile, proxy: EventLoopProxy<UserEvent>) {
+fn spawn_wallpaper_feed(
+    profile: Profile,
+    proxy: EventLoopProxy<UserEvent>,
+    generation: u64,
+    stop: Arc<AtomicBool>,
+) {
     std::thread::Builder::new()
         .name("hertz-wallpaper-feed".into())
         .spawn(move || {
@@ -2068,10 +2323,13 @@ fn spawn_wallpaper_feed(profile: Profile, proxy: EventLoopProxy<UserEvent>) {
                 }
             };
             loop {
+                if stop.load(Ordering::Relaxed) {
+                    break;
+                }
                 let result = feed.poll();
                 let failed = result.is_err();
                 if proxy
-                    .send_event(UserEvent::WallpaperFeed(Box::new(result)))
+                    .send_event(UserEvent::WallpaperFeed(generation, Box::new(result)))
                     .is_err()
                 {
                     break;
@@ -2255,5 +2513,45 @@ fn init_log() {
     let path = config::log_path();
     if std::fs::metadata(&path).is_ok_and(|meta| meta.len() > 1024 * 1024) {
         let _ = std::fs::remove_file(&path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn profile(dir: &str) -> Profile {
+        Profile {
+            data_dir: PathBuf::from(dir),
+            edition: "full".into(),
+        }
+    }
+
+    #[test]
+    fn profile_options_include_saved_and_candidate_sources() {
+        let current = profile(r"C:\profiles\a");
+        let saved = profile(r"C:\profiles\b");
+        let candidate = Profile {
+            data_dir: PathBuf::from(r"C:\profiles\c"),
+            edition: "standard".into(),
+        };
+        let mut config = config::Config::default();
+        config.activate_profile(saved).unwrap();
+        let options = profile_options(&current, &config, Some(&candidate));
+        let dirs: Vec<String> = options
+            .iter()
+            .map(|option| option["dataDir"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(dirs[0], r"C:\profiles\a");
+        assert!(dirs.contains(&r"C:\profiles\b".to_string()));
+        assert!(dirs.contains(&r"C:\profiles\c".to_string()));
+        let deduped = profile_options(&current, &config, Some(&current));
+        assert_eq!(
+            deduped
+                .iter()
+                .filter(|option| option["dataDir"] == r"C:\profiles\a")
+                .count(),
+            1
+        );
     }
 }

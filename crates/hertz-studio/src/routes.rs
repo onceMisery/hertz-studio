@@ -705,6 +705,7 @@ const DESKTOP_CONTROL_COMMANDS: &[&str] = &[
     "wallpaper-preview-close",
     "wallpaper-preview-renew",
     "wallpaper-apply",
+    "profile-switch",
 ];
 
 #[derive(Deserialize)]
@@ -750,19 +751,33 @@ async fn desktop_lyrics_control(
 async fn launch_desktop_lyrics(
     State(state): State<Arc<AppState>>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    launch_desktop_host(&state, &["--locate"], "locate")
+    launch_desktop_host(&state, &["--locate"], "locate", None)
 }
 
 async fn launch_desktop_wallpaper(
     State(state): State<Arc<AppState>>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    launch_desktop_host(&state, &["--settings"], "wallpaper-settings")
+    // 把本实例的来源作为候选交给宿主设置页：已有宿主绑定别的 profile 时，
+    // 用户能在列表里看到当前应用的数据目录并显式切换，而不是被静默改绑。
+    let candidate = serde_json::json!({
+        "profile": {
+            "dataDir": state.data_dir.to_string_lossy(),
+            "edition": crate::edition::NAME,
+        }
+    });
+    launch_desktop_host(
+        &state,
+        &["--settings"],
+        "wallpaper-settings",
+        Some(candidate),
+    )
 }
 
 fn launch_desktop_host(
     state: &AppState,
     extra_args: &[&str],
     followup: &str,
+    followup_value: Option<serde_json::Value>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let exe = std::env::current_exe().map_err(|error| internal(error.to_string()))?;
     let Some(dir) = exe.parent() else {
@@ -801,7 +816,11 @@ fn launch_desktop_host(
     let followup = followup.to_string();
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(400));
-        let _ = crate::desktop_control::send(serde_json::json!({ "command": followup }));
+        let mut payload = serde_json::json!({ "command": followup });
+        if let Some(value) = followup_value {
+            payload["value"] = value;
+        }
+        let _ = crate::desktop_control::send(payload);
     });
     Ok(Json(serde_json::json!({ "started": true })))
 }
@@ -4958,6 +4977,7 @@ mod tests {
             "wallpaper-preview-close",
             "wallpaper-preview-renew",
             "wallpaper-apply",
+            "profile-switch",
         ] {
             assert!(
                 DESKTOP_CONTROL_COMMANDS.contains(&command),

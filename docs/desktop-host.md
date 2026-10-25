@@ -1,6 +1,6 @@
 # HertzDesktop 共享宿主设计
 
-日期：2026-10-23。状态：契约已成稿，L1 首版按本文件落地；本机管理通道已支持状态/锁定/显示/定位/样式/退出，来源切换、多 profile、全局快捷键与 L1-C 发布验收仍未完成。本文收敛[桌面歌词](./desktop-lyrics.md)与[桌面壁纸](./desktop-wallpaper.md)已有的共同设计，原生选型以 L0/W0 实测为依据。
+日期：2026-10-23。状态：契约已成稿，L1 首版按本文件落地；本机管理通道已支持状态/锁定/显示/定位/样式/退出与 `activeProfile` 切换（配置 schema v2，按 profile 保存歌词/壁纸域），全局快捷键与 L1-C 发布验收仍未完成。本文收敛[桌面歌词](./desktop-lyrics.md)与[桌面壁纸](./desktop-wallpaper.md)已有的共同设计，原生选型以 L0/W0 实测为依据。
 
 ## 1. 文档边界与唯一归属
 
@@ -30,7 +30,7 @@
 
 区分三种身份：持久的服务 profile 身份、每次服务启动的 session、宿主当前绑定的内存代际。profile 以发行版与规范 DataDir 对应的服务身份确认；端口、PID、程序文件名不能替代来源身份。宿主绑定代际只用于作废旧来源异步工作，不替代音频 actor 的播放 generation。
 
-现有 `vmusicd.json` 只有 pid、port、token、version、protocol_version，尚不具备完整桌面绑定协议。复用它需要版本化补充身份和一致读取约定；不能直接视为新 feed 已可安全发现，也不能为了桌面功能要求开启外部 AI/MCP。
+现有 `vmusicd.json` 已补充 `edition`、`data_dir`、`server_instance_id` 与歌词/壁纸只读协议字段；宿主用这些字段核对来源，钥匙仍只由原生层读取。宿主在发现记录缺失或身份不符时停止音乐桥，不从端口扫描或另一发行版自动补齐。
 
 来源切换作为一次显式配置提交，按以下顺序完成：
 
@@ -44,7 +44,7 @@
 
 ## 4. 配置提交与实际运行分离
 
-宿主唯一配置建议位于 `%LOCALAPPDATA%/Hertz/Desktop/config.json`。配置包含 `schemaVersion`、单调递增 revision、`launchAtLogin`、可选恢复快捷键、activeProfile 和各 profile 的独立 lyrics/wallpaper 域；合计最多 64 KiB、8 个 profile。凭据、完整音频 URL、运行期暂停原因与歌词正文不写入配置。
+宿主唯一配置位于 `%LOCALAPPDATA%/Hertz/Desktop/config.json`。配置包含 `schemaVersion`、单调递增 revision、`launchAtLogin`、可选恢复快捷键、activeProfile 和各 profile 的独立 lyrics/wallpaper 域；合计最多 64 KiB、8 个 profile。凭据、完整音频 URL、运行期暂停原因与歌词正文不写入配置。当前实现为 schema v2，加载 schema v1 时把顶层歌词/壁纸域迁入当时的 activeProfile，迁移失败不覆盖原文件。
 
 达到 profile/容量上限时拒绝新增并提示用户整理，不自动丢弃当前来源或已保存配置。只实现有明确旧版本输入与回退证据的迁移，不用默认值覆盖未识别字段后宣称兼容。
 

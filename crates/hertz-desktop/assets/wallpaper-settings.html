@@ -3,10 +3,14 @@
 :root{color-scheme:dark;font:13px/1.5 "Segoe UI",sans-serif;color:#e8f2ff;background:#0b111a}
 body{margin:0;padding:22px}
 h1{margin:0 0 16px;font-size:17px;font-weight:600}
+h2{margin:18px 0 4px;font-size:13px;font-weight:600;color:#c4d4e6;text-transform:uppercase;letter-spacing:.04em}
 .field{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:10px 0;border-bottom:1px solid #1c2836}
 .field label{color:#c4d4e6}
 .field select,.field input[type=number]{background:#111b27;color:#e8f2ff;border:1px solid #26374a;border-radius:6px;padding:5px 8px}
+.field select{max-width:300px}
+.path{max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#8fa8bf;font-size:12px}
 .actions{display:flex;gap:8px;margin-top:20px}
+.actions.source{margin-top:12px}
 button{flex:1;border:1px solid #2b4864;border-radius:7px;background:#13263a;color:#e8f2ff;padding:8px 10px;cursor:pointer}
 button.primary{background:#1a6fb0;border-color:#2f8fd8}
 button:disabled{opacity:.45;cursor:default}
@@ -14,6 +18,11 @@ button:disabled{opacity:.45;cursor:default}
 #status.error{color:#ff9c9c}
 </style></head><body>
 <h1>Hertz 壁纸</h1>
+<h2>来源</h2>
+<div class="field"><label for="profile">当前来源</label><select id="profile"></select></div>
+<div class="field"><label>数据目录</label><span class="path" id="profile-path"></span></div>
+<div class="actions source"><button id="switch-source">切换来源</button></div>
+<h2>壁纸</h2>
 <div class="field"><label for="enabled">启用桌面壁纸</label><input id="enabled" type="checkbox"></div>
 <div class="field"><label for="monitor">目标显示器</label><select id="monitor"></select></div>
 <div class="field"><label for="fps">帧率上限</label><select id="fps"><option value="15">15 fps</option><option value="30">30 fps</option><option value="60">60 fps</option></select></div>

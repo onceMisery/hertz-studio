@@ -253,9 +253,9 @@ W1-A 先实现 `GET /v1/wallpaper/snapshot`，不实现 `/v1/wallpaper/events` W
 
 #### W1-B 首片进度（2026-10-24）
 
-已实现：`hertz-desktop` 的壁纸场景页（registry 相机 + `applyFeed`）、WorkerW 目标屏 surface（完整显示器矩形）、混合 DPI WebView 缩放补偿、目标屏选择（设置页）、500 ms feed 线程、全屏/会话/息屏停绘、托盘“显示壁纸”开关（用户隐藏时隐藏 WebView，露出系统壁纸）、壁纸设置页（启用/目标屏/帧率/跟随音乐）、15 s 预览租约与预览窗口、应用 revision 与运行时启停、Explorer 重启自动恢复（存活检测 + 3 次/120 s 预算 + 托盘重新挂载）、主应用管理通道（服务端 `/v1/desktop/control` + app 设置行 + 宿主 pipe），以及 `wallpaper.enabled`（默认关闭）与 `--wallpaper` 运行开关。隔离 mock 快照端到端已记录 page ready / mounted / feed ok；设置页经 WebView2 CDP 验证预览、应用、live surface 与 feed；真实 Explorer 重启验证 page/scene 重新挂载；96/144 混合 DPI 在第二屏实机验证。
+已实现：`hertz-desktop` 的壁纸场景页（registry 相机 + `applyFeed`）、WorkerW 目标屏 surface（完整显示器矩形）、混合 DPI WebView 缩放补偿、目标屏选择（设置页）、500 ms feed 线程、全屏/会话/息屏停绘、托盘“显示壁纸”开关（用户隐藏时隐藏 WebView，露出系统壁纸）、壁纸设置页（启用/目标屏/帧率/跟随音乐）、15 s 预览租约与预览窗口、应用 revision 与运行时启停、Explorer 重启自动恢复（存活检测 + 3 次/120 s 预算 + 托盘重新挂载）、主应用管理通道（服务端 `/v1/desktop/control` + app 设置行 + 宿主 pipe）、多来源切换（配置 schema v2、按 profile 独立域、设置页来源列表与候选），以及 `wallpaper.enabled`（默认关闭）与 `--wallpaper` 运行开关。隔离 mock 快照端到端已记录 page ready / mounted / feed ok；设置页经 WebView2 CDP 验证预览、应用、live surface 与 feed；真实 Explorer 重启验证 page/scene 重新挂载；96/144 混合 DPI 在第二屏实机验证。
 
-未实现，当前不能标记 W1-B 完成：多 profile/发行版切换、事件 WS；同时挂多块屏、分辨率/DPI 拓扑变化后的自动重排仍属 W3。宿主托盘已提供开机启动开关（`launch_at_login`）；运行中的旧服务需重建/重启后才提供新路由、新 UI 资源、`wallpaper-key` 与快照端点。
+未实现，当前不能标记 W1-B 完成：事件 WS；同时挂多块屏、分辨率/DPI 拓扑变化后的自动重排仍属 W3。宿主托盘已提供开机启动开关（`launch_at_login`）；运行中的旧服务需重建/重启后才提供新路由、新 UI 资源、`wallpaper-key` 与快照端点。
 
 #### W1-B 设置与预览首片（2026-10-24）
 
@@ -272,6 +272,15 @@ W1-A 先实现 `GET /v1/wallpaper/snapshot`，不实现 `/v1/wallpaper/events` W
 - 宿主 pipe 返回统一 `status_json`：壁纸 enabled/visible/hidden/revision/fps/musicResponse/monitor、settingsOpen、previewActive、monitorMissing；apply 失败返回明确 error/message。
 - 主应用设置页新增“桌面壁纸：壁纸设置 / 显示隐藏”；DBX 形态隐藏该入口。按钮经服务端控制路由，宿主未启动时自动拉起并重试一次。
 - 验证：消息模式命名管道逐项通过 status/toggle/show/settings/preview/close/apply enable/disable/hide/show/retry；服务端命令白名单、前端资源 1054/1054 与 JS 语法通过。尚未在重建后的应用实例里做整页人工验收。
+
+#### W1-B 多来源切换（2026-10-25）
+
+- 配置升到 schema v2：`activeProfile` 加最多 8 个 profile 的独立歌词/壁纸域；schema v1 配置在加载时原地迁移（顶层域归入当时的 `activeProfile`），超限、重复来源或坏配置拒绝改写。
+- 宿主 pipe 新增 `profile-switch`（`expectedRevision` + `profile{dataDir,edition}`）；设置页新增“来源”选择与“切换来源”。列表只来自已保存来源、两个规范数据目录和主应用本次传入的候选，不从端口扫描。
+- 切换前校验发行版为 full/standard/custom、数据目录为存在的绝对路径；持久保存成功后才清空旧歌词、播放锚与频谱，递增来源代际并重启歌词/壁纸 feed。目标 profile 的 enabled 与样式在切换后应用；新来源不继承另一 profile 的启用状态。
+- 主应用启动壁纸设置时，服务端把本实例的 `dataDir` 与发行版作为候选传给宿主；已有宿主绑定其他来源时，用户在设置页显式选择后切换，不会被静默改绑。
+- “来源已保存”与“壁纸挂载失败”分开报告：切换已落盘但 surface 创建失败时保留新绑定与错误，不静默回退旧来源。
+- 验证：隔离 mock 双来源 30/30 通过，包含 v1 迁移、A/B 域隔离、设置页切换、自定义目录候选、慢请求跨切换的旧代际丢弃、非法路径拒绝与 revision 不变。尚未在正式服务、真实双发行版安装或登录自启场景验收。
 
 #### W1-B 多屏与混合 DPI 首片（2026-10-24）
 
