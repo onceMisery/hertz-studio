@@ -257,7 +257,7 @@ W1-A 先实现 `GET /v1/wallpaper/snapshot`，不实现 `/v1/wallpaper/events` W
 
 已实现：`hertz-desktop` 的壁纸场景页（registry 相机 + `applyFeed`）、WorkerW 目标屏 surface（完整显示器矩形）、混合 DPI WebView 缩放补偿、目标屏选择（设置页）、500 ms feed 线程、全屏/会话/息屏停绘、托盘“显示壁纸”开关（用户隐藏时隐藏 WebView，露出系统壁纸）、壁纸设置页（启用/目标屏/帧率/跟随音乐）、15 s 预览租约与预览窗口、应用 revision 与运行时启停、Explorer 重启自动恢复（存活检测 + 3 次/120 s 预算 + 托盘重新挂载）、主应用管理通道（服务端 `/v1/desktop/control` + app 设置行 + 宿主 pipe）、多来源切换（配置 schema v2、按 profile 独立域、设置页来源列表与候选）与事件流（`GET /v1/wallpaper/events`，旧服务自动回退轮询），以及 `wallpaper.enabled`（默认关闭）与 `--wallpaper` 运行开关。隔离 mock 快照端到端已记录 page ready / mounted / feed ok；设置页经 WebView2 CDP 验证预览、应用、live surface 与 feed；真实 Explorer 重启验证 page/scene 重新挂载；96/144 混合 DPI 在第二屏实机验证。
 
-W1-B 的功能件已齐，单屏拓扑重排已在 W3 首片接上，W1-C 的渲染失联恢复首片已实现；W1-C 的安装升级、真实双发行版服务、长稳与共存验收未做。同时挂多块屏、多屏整机预算仍属 W3。宿主托盘已提供开机启动开关（`launch_at_login`）；运行中的旧服务需重建/重启后才提供新路由、新 UI 资源、`wallpaper-key` 与快照/事件端点。
+W1-B 的功能件已齐，单屏拓扑重排已在 W3 首片接上，W1-C 的渲染失联恢复、诊断投影、真实双发行版服务与 live/预览共存已验收；W1-C 只剩安装升级与多小时长稳。同时挂多块屏、多屏整机预算仍属 W3。宿主托盘已提供开机启动开关（`launch_at_login`）；运行中的旧服务需重建/重启后才提供新路由、新 UI 资源、`wallpaper-key` 与快照/事件端点。
 
 #### W1-B 设置与预览首片（2026-10-24）
 
@@ -305,7 +305,21 @@ W1-B 的功能件已齐，单屏拓扑重排已在 W3 首片接上，W1-C 的渲
 - 心跳宽限只在可见性从 false→true 时给一次；feed 每 250 ms 的 `recompute_wallpaper` 不刷新心跳时间（早期实现每拍重置，导致 10 s 超时永远不会触发）。
 - 壁纸 feed 每 250 ms 调用页面 `evaluate_script`；页面就绪后连续 3 次失败视为 WebView 控制器/渲染进程失效。两条路径都丢弃当前 surface，清空页面代际，再走统一的 3 次/120 s 恢复预算；旧页面迟到 IPC 仍按 generation 丢弃。
 - `status_json.diagnostics` 暴露暂停原因、FPS 与运行事实：`pauseReasons`（`disabled/hidden/monitorMissing/noSurface/pageNotReady/fullscreen/sessionUnavailable/displayOff`）、`fps{configured,effective,measured}`、`page{ready,ticks,draws,heartbeatAgeMs,evalFailures,zoom}`、`monitor{name,left,top,width,height,dpi}`、`recovery{attempts,terminal}`、`feed{hasSnapshot,lastSeq}`。`measured` 由 draw 增量除以至少 1 s 的心跳间隔得到；不可见或心跳超过 5 s 时返回 `null`，`effective` 在停绘时为 0。
-- 验证：隔离宿主杀掉自己的 WebView2 进程树后，2.6 s 内连续 eval 失败触发恢复，0.4 s 重建成功，新的 dom ready/mounted 出现，`pageTicks` 恢复递增且 surface 仍启用（8/8 checks）。无壁纸页的宿主诊断投影 12/12 通过：禁用/隐藏暂停原因、FPS 字段、空 monitor/recovery/feed 与状态大小均符合预期。10 s 心跳超时分支有解析单测；冻结页面的端到端时序测试在本机连续跑崩溃用例后遇到 WebView2 新建页面 `E_INVALIDARG`，未能稳定完成，不记为已验收。
+- 验证：隔离宿主杀掉自己的 WebView2 进程树后，2.6 s 内连续 eval 失败触发恢复，0.4 s 重建成功，新的 dom ready/mounted 出现，`pageTicks` 恢复递增且 surface 仍启用（8/8 checks）。无壁纸页的宿主诊断投影 12/12 通过：禁用/隐藏暂停原因、FPS 字段、空 monitor/recovery/feed 与状态大小均符合预期。10 s 心跳超时分支已补冻结页面端到端验收（9/9）：用 CDP 替换页面的 `requestAnimationFrame` 让它不出帧但仍响应，宿主只由心跳判停；当天早些时候挡住这条用例的 `E_INVALIDARG` 根因见[壁纸页供给通道](#壁纸页供给通道2026-10-25)，不是 WebView2 运行时状态。
+
+#### 壁纸页供给通道（2026-10-25）
+
+- 现象：新建壁纸页稳定失败 `加载壁纸页面失败：WebView2 error: 0x80070057`（E_INVALIDARG），而 WorkerW 挂载、feed、状态管道都正常；先前记为「本机 WebView2 运行时卡住，需重启」，实为误判——本机自 10-23 起未重启，只换掉页面供给方式就恢复。
+- 根因：壁纸页整页用 `NavigateToString` 内联，该 API 约 2 MB 上限；并行的舞台改动把内联的 `plugin/ui/vendor/stage-runtime.js` 从 1.077 MB 增到 1.681 MB、整页 1.69 MB 越线。变异证明：同一份 exe 只把内联 runtime 换回 1.077 MB 版本即 `pageReady`，四种 `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` 组合（无参数/两个调试端口/其它参数）都同样失败或同样通过，与调试端口和杀进程史无关。
+- 中途方案落盘 `file://` 不可用：页面正常加载、`window.ipc` 与 `chrome.webview` 都在、场景运行时已注入，但 file:// 文档的 postMessage 到不了宿主（CDP 手动 post 也收不到），症状是表面已挂载却永不进入 ready 与心跳，比直接报错更难发现。
+- 现方案：壁纸页与预览页整页由宿主自定义协议 `hertz://localhost/wallpaper.html` 供给（wry 映射为 `http://hertz.localhost/`，仍是受控本地 origin，IPC 可用且没有尺寸悬崖）；页面每个 surface 构造一次并以 `Arc<[u8]>` 交给协议处理器，该 origin 只为这一条路径返回页面、其余路径 404，避免变成通用文件服务；`wallpaper target` 日志补 `page_bytes`。仍走 `NavigateToString` 的只剩歌词页与设置页，由单测钉在 256 KiB 以内。
+- 验收（真实 1.69 MB 页面）：四种启动参数组合全部 pageReady；崩溃恢复 8/8；冻结页面心跳停摆 9/9；预览/设置/来源切换/事件流/目标屏回归同步通过；真机壁纸页诊断拿到 `draws=112 measured=27.4 ticks=643 zoom=0.667`。证据在 `output/desk-w0/w1c-ab-*`、`w1c-fileurl-*`、`log2_summary.txt`。
+
+#### W1-C 双发行版服务与双表面共存（2026-10-25）
+
+- 同一份宿主分别连 Standard（`target/debug`，默认特征）与 Full（`--features full`，隔离在 `target/full-cargo/debug`）服务，逐项对齐：discovery 的 `edition` 与 `wallpaper_protocol: 1`、`wallpaper-key` 为 64 hex、`GET /v1/wallpaper/snapshot` 带钥匙 200 且 64 段、不带钥匙 401、宿主 WS `wallpaper events connected`、feed 快照、页面实际绘制与 `measured` FPS。两版各 12/12 通过，实测 `standard 27.43 / full 27.40`、同目标屏 `DISPLAY5`、`zoom=0.667`；壁纸契约不需要按发行版分支。
+- 双表面共存是协议改造后的新边界：live 壁纸与设置页预览同时挂载，两个 WebView 各持一份 `hertz` 协议处理器，都能取到页面并 mounted；预览打开期间 live 继续出帧，关闭预览后预览页面释放、live 不受影响，全程没有恢复或 eval 失败记录（11/11）。
+- 边界：Full 侧是 debug 特征构建，release 产物的壁纸契约未单独再跑（双版本 release 构建与哈希见发布矩阵）；真实安装/升级路径（换 exe、`launch_at_login` 指向新路径、旧服务需重启才提供新路由）与多小时长稳仍未做。
 
 #### W1-B 多屏与混合 DPI 首片（2026-10-24）
 
