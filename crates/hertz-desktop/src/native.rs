@@ -30,7 +30,7 @@ use windows_sys::Win32::System::RemoteDesktop::{
     WTSRegisterSessionNotification, NOTIFY_FOR_THIS_SESSION,
 };
 use windows_sys::Win32::System::SystemServices::GUID_CONSOLE_DISPLAY_STATE;
-use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
+use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, GetDpiForWindow, MDT_EFFECTIVE_DPI};
 use windows_sys::Win32::UI::Shell::{
     SHQueryUserNotificationState, QUNS_PRESENTATION_MODE, QUNS_RUNNING_D3D_FULL_SCREEN,
 };
@@ -333,6 +333,88 @@ pub(crate) fn monitors() -> Vec<WorkArea> {
         )
     };
     output
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct WallpaperMonitor {
+    pub(crate) name: String,
+    pub(crate) left: i32,
+    pub(crate) top: i32,
+    pub(crate) width: i32,
+    pub(crate) height: i32,
+    pub(crate) dpi: u32,
+    pub(crate) primary: bool,
+}
+
+pub(crate) fn wallpaper_monitors() -> Vec<WallpaperMonitor> {
+    unsafe extern "system" fn callback(
+        monitor: HMONITOR,
+        _hdc: HDC,
+        _rect: *mut RECT,
+        data: LPARAM,
+    ) -> i32 {
+        let output = &mut *(data as *mut Vec<WallpaperMonitor>);
+        if let Some(monitor) = wallpaper_monitor_from_monitor(monitor) {
+            output.push(monitor);
+        }
+        1
+    }
+    let mut output = Vec::new();
+    unsafe {
+        EnumDisplayMonitors(
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            Some(callback),
+            &mut output as *mut Vec<WallpaperMonitor> as LPARAM,
+        )
+    };
+    output
+}
+
+fn wallpaper_monitor_from_monitor(monitor: HMONITOR) -> Option<WallpaperMonitor> {
+    if monitor.is_null() {
+        return None;
+    }
+    let mut info = MONITORINFOEXW::default();
+    info.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
+    let ok = unsafe {
+        GetMonitorInfoW(
+            monitor,
+            &mut info as *mut MONITORINFOEXW as *mut MONITORINFO,
+        )
+    };
+    if ok == 0 {
+        return None;
+    }
+    let end = info
+        .szDevice
+        .iter()
+        .position(|value| *value == 0)
+        .unwrap_or(info.szDevice.len());
+    let name = String::from_utf16_lossy(&info.szDevice[..end]);
+    let mut dpi_x = 96u32;
+    let mut dpi_y = 96u32;
+    let dpi_ok = unsafe { GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) };
+    let dpi = if dpi_ok >= 0 { dpi_x } else { 96 };
+    let rect = info.monitorInfo.rcMonitor;
+    Some(WallpaperMonitor {
+        name,
+        left: rect.left,
+        top: rect.top,
+        width: rect.right - rect.left,
+        height: rect.bottom - rect.top,
+        dpi,
+        primary: info.monitorInfo.dwFlags & 1 != 0,
+    })
+}
+
+pub(crate) fn window_dpi(hwnd: HWND) -> u32 {
+    let dpi = unsafe { GetDpiForWindow(hwnd) };
+    if dpi == 0 {
+        96
+    } else {
+        dpi
+    }
 }
 
 fn area_from_monitor(monitor: HMONITOR) -> Option<WorkArea> {
@@ -681,19 +763,8 @@ pub(crate) fn acquire_single_instance() -> Option<HANDLE> {
     }
 }
 
-pub(crate) fn primary_screen_size() -> (i32, i32) {
-    unsafe {
-        (
-            GetSystemMetrics(windows_sys::Win32::UI::WindowsAndMessaging::SM_CXSCREEN),
-            GetSystemMetrics(windows_sys::Win32::UI::WindowsAndMessaging::SM_CYSCREEN),
-        )
-    }
-}
-
-/// 把窗口挂到 Explorer 的 WorkerW 图标层之后。
-///
-/// W1-B 首片只支持主屏；目标屏/混合 DPI 的多屏挂载沿用 W0 探针的后续工作。
-pub(crate) fn mount_wallpaper(hwnd: HWND) -> Result<()> {
+/// 把窗口挂到 Explorer 的 WorkerW 图标层之后，并放到指定显示器的完整矩形。
+pub(crate) fn mount_wallpaper(hwnd: HWND, monitor: &WallpaperMonitor) -> Result<()> {
     const REQUEST_WORKERW: u32 = 0x052C;
     let class = to_wide("Progman");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
@@ -738,10 +809,6 @@ pub(crate) fn mount_wallpaper(hwnd: HWND) -> Result<()> {
     let vh = unsafe {
         GetSystemMetrics(windows_sys::Win32::UI::WindowsAndMessaging::SM_CYVIRTUALSCREEN)
     };
-    let screen_w =
-        unsafe { GetSystemMetrics(windows_sys::Win32::UI::WindowsAndMessaging::SM_CXSCREEN) };
-    let screen_h =
-        unsafe { GetSystemMetrics(windows_sys::Win32::UI::WindowsAndMessaging::SM_CYSCREEN) };
     unsafe {
         SetWindowPos(workerw, HWND_BOTTOM, vx, vy, vw, vh, SWP_NOACTIVATE);
         strip_title_bar(hwnd);
@@ -750,10 +817,10 @@ pub(crate) fn mount_wallpaper(hwnd: HWND) -> Result<()> {
         SetWindowPos(
             hwnd,
             HWND_BOTTOM,
-            -vx,
-            -vy,
-            screen_w,
-            screen_h,
+            monitor.left - vx,
+            monitor.top - vy,
+            monitor.width,
+            monitor.height,
             SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_FRAMECHANGED,
         );
         ShowWindow(hwnd, SW_SHOW);

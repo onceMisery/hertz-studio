@@ -74,6 +74,7 @@ impl Policy {
 struct WallpaperSurface {
     window: Window,
     webview: wry::WebView,
+    monitor: native::WallpaperMonitor,
 }
 
 impl WallpaperSurface {
@@ -173,6 +174,8 @@ struct WallpaperCandidate {
     enabled: bool,
     fps: u8,
     music_response: bool,
+    #[serde(default)]
+    monitor: Option<String>,
 }
 
 struct TrayActions {
@@ -224,6 +227,7 @@ struct App {
     wallpaper_generation: u64,
     wallpaper_recovery_attempts: Vec<Instant>,
     wallpaper_recovery_terminal: bool,
+    wallpaper_monitor_missing: bool,
     settings: Option<SettingsSurface>,
     preview: Option<PreviewSurface>,
     proxy: EventLoopProxy<UserEvent>,
@@ -406,6 +410,25 @@ impl App {
         if !native::wallpaper_alive(surface.hwnd()) {
             return;
         }
+        if !native::wallpaper_monitors()
+            .iter()
+            .any(|monitor| monitor.name == surface.monitor.name)
+        {
+            if !self.wallpaper_monitor_missing {
+                log(&format!(
+                    "wallpaper target monitor missing; stop name={}",
+                    surface.monitor.name
+                ));
+                self.wallpaper_monitor_missing = true;
+            }
+            surface.stop();
+            self.wallpaper_visible = false;
+            return;
+        }
+        if self.wallpaper_monitor_missing {
+            log("wallpaper target monitor returned");
+            self.wallpaper_monitor_missing = false;
+        }
         // 页面就绪前不能把 WebView2 隐藏：隐藏会让页面不加载，dom_ready 永远不来。
         if !self.wallpaper_page_ready {
             return;
@@ -531,7 +554,12 @@ impl App {
         self.wallpaper_page_ready = false;
         self.wallpaper_visible = false;
         self.wallpaper_generation = self.wallpaper_generation.wrapping_add(1);
-        match create_wallpaper(target, self.proxy.clone(), self.wallpaper_generation) {
+        match create_wallpaper(
+            target,
+            self.proxy.clone(),
+            self.wallpaper_generation,
+            self.config.wallpaper.monitor.as_deref(),
+        ) {
             Ok(surface) => {
                 self.wallpaper = Some(surface);
                 log(&format!("wallpaper recovery success attempt={attempt}"));
@@ -558,6 +586,7 @@ impl App {
             enabled: self.config.wallpaper.enabled,
             fps: self.config.wallpaper.fps,
             music_response: self.config.wallpaper.music_response,
+            monitor: self.config.wallpaper.monitor.clone(),
         }
     }
 
@@ -565,13 +594,38 @@ impl App {
         let Some(settings) = self.settings.as_ref() else {
             return;
         };
+        let monitors: Vec<serde_json::Value> = native::wallpaper_monitors()
+            .into_iter()
+            .map(|monitor| {
+                let label = format!(
+                    "{} · {}×{} · {} DPI{}",
+                    monitor.name.trim_start_matches("\\\\.\\"),
+                    monitor.width,
+                    monitor.height,
+                    monitor.dpi,
+                    if monitor.primary { " · 主屏" } else { "" }
+                );
+                serde_json::json!({
+                    "name": monitor.name,
+                    "label": label,
+                    "primary": monitor.primary,
+                    "left": monitor.left,
+                    "top": monitor.top,
+                    "width": monitor.width,
+                    "height": monitor.height,
+                    "dpi": monitor.dpi,
+                })
+            })
+            .collect();
         let payload = serde_json::json!({
             "revision": self.config.revision,
             "config": {
                 "enabled": self.config.wallpaper.enabled,
                 "fps": self.config.wallpaper.fps,
                 "musicResponse": self.config.wallpaper.music_response,
+                "monitor": self.config.wallpaper.monitor,
             },
+            "monitors": monitors,
             "previewActive": self.preview.is_some(),
             "error": error,
             "message": message,
@@ -681,6 +735,7 @@ impl App {
         self.config.wallpaper.enabled = candidate.enabled;
         self.config.wallpaper.fps = candidate.fps;
         self.config.wallpaper.music_response = candidate.music_response;
+        self.config.wallpaper.monitor = candidate.monitor.clone();
         self.config.revision = previous.revision.saturating_add(1);
         if let Err(error) = config::save(&self.config) {
             self.config = previous;
@@ -691,17 +746,33 @@ impl App {
         self.wallpaper_recovery_terminal = false;
         self.wallpaper_recovery_attempts.clear();
         if candidate.enabled {
-            if self
-                .wallpaper
-                .as_ref()
-                .is_some_and(|surface| !native::wallpaper_alive(surface.hwnd()))
+            let monitors = native::wallpaper_monitors();
+            let resolved_name = candidate.monitor.clone().or_else(|| {
+                monitors
+                    .iter()
+                    .find(|monitor| monitor.primary)
+                    .map(|monitor| monitor.name.clone())
+            });
+            let monitor_changed = self.wallpaper.as_ref().is_some_and(|surface| {
+                Some(surface.monitor.name.as_str()) != resolved_name.as_deref()
+            });
+            if monitor_changed
+                || self
+                    .wallpaper
+                    .as_ref()
+                    .is_some_and(|surface| !native::wallpaper_alive(surface.hwnd()))
             {
                 self.wallpaper = None;
                 self.wallpaper_page_ready = false;
             }
             if self.wallpaper.is_none() {
                 self.wallpaper_generation = self.wallpaper_generation.wrapping_add(1);
-                match create_wallpaper(target, self.proxy.clone(), self.wallpaper_generation) {
+                match create_wallpaper(
+                    target,
+                    self.proxy.clone(),
+                    self.wallpaper_generation,
+                    candidate.monitor.as_deref(),
+                ) {
                     Ok(surface) => self.wallpaper = Some(surface),
                     Err(error) => {
                         log(&format!("wallpaper enable failed: {error:#}"));
@@ -1191,6 +1262,21 @@ impl App {
             {
                 log("wallpaper surface lost; recovering");
                 self.recover_wallpaper(target);
+            } else {
+                let target_missing = self.wallpaper.as_ref().is_some_and(|surface| {
+                    !native::wallpaper_monitors()
+                        .iter()
+                        .any(|monitor| monitor.name == surface.monitor.name)
+                });
+                if target_missing != self.wallpaper_monitor_missing {
+                    self.wallpaper_monitor_missing = target_missing;
+                    if target_missing {
+                        log("wallpaper target monitor missing");
+                    } else {
+                        log("wallpaper target monitor returned");
+                    }
+                    self.recompute_wallpaper();
+                }
             }
             self.ensure_on_screen();
             if now.duration_since(self.last_update) > STALE_AFTER && self.last_snapshot.is_some() {
@@ -1529,7 +1615,12 @@ pub(crate) fn run() -> Result<()> {
         })?;
 
     let wallpaper = if config.wallpaper.enabled || wallpaper_forced {
-        match create_wallpaper(&event_loop, proxy.clone(), 1) {
+        match create_wallpaper(
+            &event_loop,
+            proxy.clone(),
+            1,
+            config.wallpaper.monitor.as_deref(),
+        ) {
             Ok(surface) => Some(surface),
             Err(error) => {
                 log(&format!("wallpaper unavailable: {error:#}"));
@@ -1583,6 +1674,7 @@ pub(crate) fn run() -> Result<()> {
         wallpaper_generation: 1,
         wallpaper_recovery_attempts: Vec::new(),
         wallpaper_recovery_terminal: false,
+        wallpaper_monitor_missing: false,
         settings: None,
         preview: None,
         proxy: proxy.clone(),
@@ -1744,12 +1836,29 @@ fn create_wallpaper(
     target: &EventLoopWindowTarget<UserEvent>,
     proxy: EventLoopProxy<UserEvent>,
     generation: u64,
+    monitor_name: Option<&str>,
 ) -> Result<WallpaperSurface> {
-    let (width, height) = native::primary_screen_size();
+    let monitors = native::wallpaper_monitors();
+    let monitor = if let Some(name) = monitor_name {
+        monitors
+            .into_iter()
+            .find(|monitor| monitor.name == name)
+            .ok_or_else(|| anyhow::anyhow!("目标显示器不存在：{name}"))?
+    } else {
+        monitors
+            .iter()
+            .find(|monitor| monitor.primary)
+            .cloned()
+            .or_else(|| monitors.first().cloned())
+            .ok_or_else(|| anyhow::anyhow!("没有可用显示器"))?
+    };
     let window = WindowBuilder::new()
         .with_title("Hertz wallpaper")
-        .with_inner_size(PhysicalSize::new(width.max(1) as u32, height.max(1) as u32))
-        .with_position(PhysicalPosition::new(0, 0))
+        .with_inner_size(PhysicalSize::new(
+            monitor.width.max(1) as u32,
+            monitor.height.max(1) as u32,
+        ))
+        .with_position(PhysicalPosition::new(monitor.left, monitor.top))
         .with_decorations(false)
         .with_resizable(false)
         .with_visible(false)
@@ -1758,10 +1867,12 @@ fn create_wallpaper(
         .with_undecorated_shadow(false)
         .build(target)?;
     let hwnd = window.hwnd() as HWND;
-    native::mount_wallpaper(hwnd)?;
+    native::mount_wallpaper(hwnd, &monitor)?;
+    let window_dpi = native::window_dpi(hwnd);
+    let zoom = f64::from(monitor.dpi) / f64::from(window_dpi.max(1));
     let page_proxy = proxy.clone();
     let webview = WebViewBuilder::new()
-        .with_html(wallpaper_html())
+        .with_url("about:blank")
         .with_background_color((3, 4, 5, 255))
         .with_ipc_handler(move |request| {
             let body = request.body();
@@ -1771,7 +1882,23 @@ fn create_wallpaper(
         })
         .build(&window)
         .map_err(|error| anyhow::anyhow!("创建壁纸 WebView 失败：{error}"))?;
-    Ok(WallpaperSurface { window, webview })
+    if (zoom - 1.0).abs() > 0.001 {
+        webview
+            .zoom(zoom)
+            .map_err(|error| anyhow::anyhow!("应用壁纸 DPI 缩放失败：{error}"))?;
+    }
+    webview
+        .load_html(&wallpaper_html())
+        .map_err(|error| anyhow::anyhow!("加载壁纸页面失败：{error}"))?;
+    log(&format!(
+        "wallpaper target name={} rect={},{} {}x{} dpi={} window_dpi={window_dpi} zoom={zoom:.3}",
+        monitor.name, monitor.left, monitor.top, monitor.width, monitor.height, monitor.dpi
+    ));
+    Ok(WallpaperSurface {
+        window,
+        webview,
+        monitor,
+    })
 }
 
 fn create_settings(

@@ -253,16 +253,24 @@ W1-A 先实现 `GET /v1/wallpaper/snapshot`，不实现 `/v1/wallpaper/events` W
 
 #### W1-B 首片进度（2026-10-24）
 
-已实现：`hertz-desktop` 的壁纸场景页（registry 相机 + `applyFeed`）、WorkerW 主屏 surface、500 ms feed 线程、全屏/会话/息屏停绘、托盘“显示壁纸”开关（用户隐藏时隐藏 WebView，露出系统壁纸）、壁纸设置页（启用/帧率/跟随音乐）、15 s 预览租约与预览窗口、应用 revision 与运行时启停、Explorer 重启自动恢复（存活检测 + 3 次/120 s 预算 + 托盘重新挂载），以及 `wallpaper.enabled`（默认关闭）与 `--wallpaper` 运行开关。隔离 mock 快照端到端已记录 page ready / mounted / feed ok；设置页经 WebView2 CDP 验证预览、应用、live surface 与 feed；真实 Explorer 重启验证 page/scene 重新挂载。
+已实现：`hertz-desktop` 的壁纸场景页（registry 相机 + `applyFeed`）、WorkerW 目标屏 surface（完整显示器矩形）、混合 DPI WebView 缩放补偿、目标屏选择（设置页）、500 ms feed 线程、全屏/会话/息屏停绘、托盘“显示壁纸”开关（用户隐藏时隐藏 WebView，露出系统壁纸）、壁纸设置页（启用/目标屏/帧率/跟随音乐）、15 s 预览租约与预览窗口、应用 revision 与运行时启停、Explorer 重启自动恢复（存活检测 + 3 次/120 s 预算 + 托盘重新挂载），以及 `wallpaper.enabled`（默认关闭）与 `--wallpaper` 运行开关。隔离 mock 快照端到端已记录 page ready / mounted / feed ok；设置页经 WebView2 CDP 验证预览、应用、live surface 与 feed；真实 Explorer 重启验证 page/scene 重新挂载。
 
-未实现，当前不能标记 W1-B 完成：主应用侧的宿主管理 IPC、自启、多 profile/发行版切换、多屏/混合 DPI、事件 WS。当前壁纸只挂主屏，且运行中的旧服务需重建/重启后才提供 `wallpaper-key` 与快照端点。
+未实现，当前不能标记 W1-B 完成：主应用侧的宿主管理 IPC、自启、多 profile/发行版切换、事件 WS；同时挂多块屏、分辨率/DPI 拓扑变化后的自动重排仍属 W3。当前环境只枚举到主屏，混合 DPI 的实机复测（96/144 → 0.667）仍需外接屏；运行中的旧服务也需重建/重启后才提供 `wallpaper-key` 与快照端点。
 
 #### W1-B 设置与预览首片（2026-10-24）
 
 - 托盘“壁纸设置”打开 520×520 设置页；可改启用、15/30/60 fps、跟随音乐，点“预览”打开 960×540 场景预览窗口。
 - 预览租约 15 s，设置窗口打开期间自动续租；同一时间只有一个预览；关闭设置、应用或超时都会关闭预览。
-- “应用”校验当前配置 revision 后保存，运行时创建/销毁 WorkerW surface、重建托盘并更新 feed 响应；失败显示错误，不静默改配置。
-- 当前页面 IPC 只属于宿主设置页；主应用通过服务端转发命令的宿主管理 IPC 与自启/多屏/事件 WS 仍未完成。
+- “应用”校验当前配置 revision 后保存，运行时创建/销毁 WorkerW surface、重建托盘并更新 feed 响应；目标屏变化会重建 surface；失败显示错误，不静默改配置。
+- 设置页可选目标显示器；列表来自宿主的完整显示器矩形（设备名、物理尺寸、DPI、主屏标记），选择结果保存到 `wallpaper.monitor`。
+- 当前页面 IPC 只属于宿主设置页；主应用通过服务端转发命令的宿主管理 IPC 与自启/事件 WS 仍未完成。
+
+#### W1-B 多屏与混合 DPI 首片（2026-10-24）
+
+- 宿主枚举每块显示器的完整矩形、设备名、有效 DPI 与主屏标记；默认主屏，用户可在设置页选择单块目标屏。
+- 壁纸窗口作为 WorkerW 子窗放在目标屏完整矩形（不受任务栏工作区裁剪）；WebView 缩放因子为目标 DPI / 窗口 DPI，页面按目标屏 CSS 尺寸首次布局。
+- 目标屏消失时停绘并保留窗口；重新出现后恢复绘制。分辨率/DPI 拓扑变化后的自动重排、同时挂多块屏仍未实现（W3）。
+- 当前机器只枚举到 `DISPLAY1 2560×1600@144`，已验证目标屏选择、完整矩形、`zoom=1.000`、page/scene/feed；W0 探针曾在 96/144 混合 DPI 上验证 `0.667` 补偿，但生产宿主路径需接第二块屏后复测。
 
 #### W1-B Explorer 重启恢复（2026-10-24）
 

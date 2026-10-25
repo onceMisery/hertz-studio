@@ -16,7 +16,12 @@
       enabled: !!$('enabled').checked,
       fps: Number($('fps').value),
       musicResponse: !!$('music').checked,
+      monitor: $('monitor').value || null,
     };
+  }
+
+  function primaryMonitor(monitors) {
+    return (monitors || []).find(monitor => monitor.primary) || (monitors || [])[0] || null;
   }
 
   function status(text, error) {
@@ -28,10 +33,29 @@
   function applyStatus(payload) {
     if (!payload) return;
     revision = payload.revision || 0;
+    if (Array.isArray(payload.monitors)) {
+      const current = $('monitor').value;
+      $('monitor').innerHTML = '';
+      payload.monitors.forEach(function (monitor) {
+        const option = document.createElement('option');
+        option.value = monitor.name;
+        option.textContent = monitor.label;
+        option.dataset.left = String(monitor.left);
+        option.dataset.top = String(monitor.top);
+        option.dataset.width = String(monitor.width);
+        option.dataset.height = String(monitor.height);
+        option.dataset.dpi = String(monitor.dpi);
+        $('monitor').appendChild(option);
+      });
+      const fallback = primaryMonitor(payload.monitors);
+      $('monitor').value = current || (fallback ? fallback.name : '');
+    }
     if (payload.config && (!dirty || payload.message === '已应用')) {
       $('enabled').checked = !!payload.config.enabled;
       $('fps').value = String(payload.config.fps || 30);
       $('music').checked = !!payload.config.musicResponse;
+      const fallback = primaryMonitor(payload.monitors);
+      $('monitor').value = payload.config.monitor || (fallback ? fallback.name : '');
       dirty = payload.message === '已应用' ? false : dirty;
     }
     previewActive = !!payload.previewActive;
@@ -42,7 +66,7 @@
     $('preview').textContent = previewActive ? '刷新预览' : '预览';
   }
 
-  ['enabled', 'fps', 'music'].forEach(function (id) {
+  ['enabled', 'fps', 'music', 'monitor'].forEach(function (id) {
     $(id).addEventListener('change', function () { dirty = true; });
   });
   $('preview').addEventListener('click', function () {
