@@ -56,6 +56,9 @@ num-traits = "0.2"
 uuid = { version = "1", features = ["v4"] }
 getrandom = "0.3"
 sha2 = "0.10"
+# 阅读领域解析 RSS pubDate（RFC 2822）与 Atom updated（RFC 3339）；
+# 只开解析所需 feature，不引入格式化与时区数据库。
+time = { version = "0.3", default-features = false, features = ["std", "parsing"] }
 rmcp = { version = "3.5.1", features = ["server", "transport-io"] }
 fslock = "0.2"
 walkdir = "2"

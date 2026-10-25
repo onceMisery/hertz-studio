@@ -275,6 +275,10 @@
       "purpose": "!/usr/bin/env node"
     },
     {
+      "script": "check-reader-browser.js",
+      "purpose": "Shipped reader UI in real Chrome with deterministic transport: unread badges, entry reading, client-side XSS hardening, deferred image proxy via data-URL envelope, read/star PUT persistence, filters, cursor pagination, subscribe/unsubscribe/delete confirmation and narrow layout. No real feeds or network."
+    },
+    {
       "script": "check-room-theme-browser.js",
       "purpose": "Isolated production Theme/DOM/CSS browser check for shared room themes and LAN favorite actions. Stub transport; no service, credentials or audio device."
     },

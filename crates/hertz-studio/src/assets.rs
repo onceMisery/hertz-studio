@@ -144,6 +144,7 @@ ui_assets! {
     "/search-session.js", JS => const SEARCH_SESSION_JS: &str = edition_ui!("search-session.js");
     "/online.js", JS => const ONLINE_JS: &str = edition_ui!("online.js");
     "/podcasts.js", JS => const PODCASTS_JS: &str = edition_ui!("podcasts.js");
+    "/reader.js", JS => const READER_JS: &str = edition_ui!("reader.js");
     "/online-playlists.js", JS => const ONLINE_PLAYLISTS_JS: &str = edition_ui!("online-playlists.js");
     "/online-playlist-view.js", JS => const ONLINE_PLAYLIST_VIEW_JS: &str = edition_ui!("online-playlist-view.js");
     "/topsearch.js", JS => const TOPSEARCH_JS: &str = edition_ui!("topsearch.js");
@@ -167,6 +168,7 @@ ui_assets! {
     "/stanza/stanza-starborn.css", CSS => const STANZA_STARBORN_CSS: &str = edition_ui!("stanza/stanza-starborn.css");
     "/online.css", CSS => const ONLINE_CSS: &str = edition_ui!("online.css");
     "/podcasts.css", CSS => const PODCASTS_CSS: &str = edition_ui!("podcasts.css");
+    "/reader.css", CSS => const READER_CSS: &str = edition_ui!("reader.css");
     "/theme-studio.css", CSS => const THEME_STUDIO_CSS: &str = edition_ui!("theme-studio.css");
     "/anime-ui.css", CSS => const ANIME_UI_CSS: &str = edition_ui!("anime-ui.css");
     "/anime-stage.css", CSS => const ANIME_STAGE_CSS: &str = edition_ui!("anime-stage.css");

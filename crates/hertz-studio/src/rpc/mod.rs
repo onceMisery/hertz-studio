@@ -37,6 +37,7 @@ pub mod online;
 pub mod playback;
 pub mod playlists;
 pub mod podcasts;
+pub mod reader;
 pub mod recommend;
 pub mod remote;
 
@@ -462,6 +463,26 @@ impl Rpc {
             }
             (Op::Delete, ["v1", "podcasts", "subscriptions", id]) => {
                 podcasts::unsubscribe(state, id).await
+            }
+
+            // --- RSS 图文阅读 ---
+            (Op::Post, ["v1", "reader", "preview"]) => reader::preview(state, body).await,
+            (Op::Get, ["v1", "reader", "subscriptions"]) => reader::subscriptions(state).await,
+            (Op::Post, ["v1", "reader", "subscriptions"]) => reader::subscribe(state, body).await,
+            (Op::Delete, ["v1", "reader", "subscriptions", id]) => {
+                reader::unsubscribe(state, id).await
+            }
+            (Op::Delete, ["v1", "reader", "feeds", id]) => reader::delete_feed(state, id).await,
+            (Op::Post, ["v1", "reader", "feeds", id, "refresh"]) => {
+                reader::refresh(state, id, body).await
+            }
+            (Op::Get, ["v1", "reader", "entries"]) => reader::entries(state, query).await,
+            (Op::Get, ["v1", "reader", "entries", id]) => reader::entry_detail(state, id).await,
+            (Op::Put, ["v1", "reader", "entries", id, "state"]) => {
+                reader::set_state(state, id, body).await
+            }
+            (Op::Get, ["v1", "reader", "entries", id, "images", key]) => {
+                reader::entry_image(state, id, key).await
             }
 
             // --- 在线曲库（代理）---

@@ -244,6 +244,31 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
             "/v1/podcasts/subscriptions/{id}",
             axum::routing::delete(podcast_unsubscribe),
         )
+        // RSS 图文阅读（reader 领域）：与播客分开订阅管理（方案 B）。
+        .route("/v1/reader/preview", post(reader_preview))
+        .route(
+            "/v1/reader/subscriptions",
+            get(reader_subscriptions).post(reader_subscribe),
+        )
+        .route(
+            "/v1/reader/subscriptions/{id}",
+            axum::routing::delete(reader_unsubscribe),
+        )
+        .route(
+            "/v1/reader/feeds/{id}",
+            axum::routing::delete(reader_delete_feed),
+        )
+        .route("/v1/reader/feeds/{id}/refresh", post(reader_refresh))
+        .route("/v1/reader/entries", get(reader_entries))
+        .route("/v1/reader/entries/{id}", get(reader_entry_detail))
+        .route(
+            "/v1/reader/entries/{id}/state",
+            axum::routing::put(reader_entry_state),
+        )
+        .route(
+            "/v1/reader/entries/{id}/images/{key}",
+            get(reader_entry_image),
+        )
         // 在线曲库：搜索与试听地址都由服务端代发，浏览器绕不开第三方接口的
         // CORS 与 Referer 校验。
         .route("/v1/online/sources", get(online_sources))
@@ -3859,6 +3884,123 @@ async fn podcast_unsubscribe(
         crate::podcasts::unsubscribe(&online_ctx(&state), &id).await,
     )?;
     Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+// --- RSS 图文阅读（reader 领域）---
+
+async fn reader_preview(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<crate::reader::ReaderPreviewRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let preview = tagged(
+        "reader",
+        crate::reader::preview(&online_ctx(&state), &body.feed_url).await,
+    )?;
+    Ok(Json(serde_json::json!({ "preview": preview })))
+}
+
+async fn reader_subscriptions(
+    State(state): State<Arc<AppState>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let feeds = tagged(
+        "reader",
+        crate::reader::subscriptions(&online_ctx(&state)).await,
+    )?;
+    Ok(Json(serde_json::json!({ "feeds": feeds })))
+}
+
+async fn reader_subscribe(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<crate::reader::ReaderSubscribeRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let feed = tagged(
+        "reader",
+        crate::reader::subscribe(&online_ctx(&state), &body.feed_url).await,
+    )?;
+    Ok(Json(serde_json::json!({ "feed": feed })))
+}
+
+async fn reader_unsubscribe(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    tagged(
+        "reader",
+        crate::reader::unsubscribe(&online_ctx(&state), &id).await,
+    )?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn reader_delete_feed(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    tagged(
+        "reader",
+        crate::reader::delete_feed(&online_ctx(&state), &id).await,
+    )?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn reader_refresh(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+    Json(body): Json<crate::reader::ReaderRefreshRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let result = tagged(
+        "reader",
+        crate::reader::refresh(&online_ctx(&state), &id, body.force).await,
+    )?;
+    Ok(Json(serde_json::json!({ "result": result })))
+}
+
+async fn reader_entries(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<crate::reader::ReaderEntriesQuery>,
+) -> ApiResult<Json<crate::reader::EntryPage>> {
+    tagged(
+        "reader",
+        crate::reader::entries(&online_ctx(&state), &q).await,
+    )
+    .map(Json)
+}
+
+async fn reader_entry_detail(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let entry = tagged(
+        "reader",
+        crate::reader::entry_detail(&online_ctx(&state), &id).await,
+    )?;
+    Ok(Json(serde_json::json!({ "entry": entry })))
+}
+
+async fn reader_entry_state(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+    Json(body): Json<crate::reader::ReaderEntryStateRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    tagged(
+        "reader",
+        crate::reader::set_state(&online_ctx(&state), &id, body.is_read, body.starred).await,
+    )?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// 阅读图片代理：只放行该文章清洗时登记过的键。抓取与封面同手法
+/// （HTTPS、image/* content-type、6 MiB 流式限额），不做像素解码（spec §11）。
+async fn reader_entry_image(
+    State(state): State<Arc<AppState>>,
+    AxumPath((id, key)): AxumPath<(String, String)>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let url = crate::reader::image_target(&online_ctx(&state), &id, &key).await?;
+    let url = public_https_url(&url)?;
+    let (bytes, content_type) = fetch_remote_image(&url).await?;
+    Ok(Json(serde_json::json!({
+        "data": crate::rpc::encode_base64(&bytes),
+        "content_type": content_type,
+    })))
 }
 
 /// 音源清单：id、显示名、分类、是否支持 cookie、当前是否已登录。

@@ -41,6 +41,7 @@ const ui = {
     library: $('view-library'),
     online: $('view-online'),
     podcasts: $('view-podcasts'),
+    reader: $('view-reader'),
     playlists: $('view-playlists'),
     // 每日推荐：一级目的地，容器在 index.html，菜单项由 daily-view.js 注入。
     daily: $('view-daily'),
@@ -5341,6 +5342,7 @@ function setView(name, options) {
   }
   if (name === 'room' && window.HertzRoom) window.HertzRoom.onViewEnter();
   if (name === 'podcasts' && window.Podcasts) window.Podcasts.onViewEnter();
+  if (name === 'reader' && window.Reader) window.Reader.onViewEnter();
   // 设置页里的诊断日志大小是「现在有多少内容」：不进页面就不刷新，用户开着
   // 日志录了一晚上，这里还停在「还没有内容」，等于把功能自己的状态说错了。
   if (name === 'settings') loadDiagnostics();
@@ -7459,7 +7461,14 @@ function syncNpSnapshot(snap) {
 
 const CAPSULE_KEY = 'vmusic.capsule.minimized';
 const CAPSULE_POS_KEY = 'vmusic.capsule.pos';
+// Full 发行版打包时会把插件 ID 改写成 io.github.oncemisery.hertz-studio.full，
+// 写死的贡献点在那边会被宿主当成别家的贡献点拒掉。宿主 init 下发的 contributionId
+// 就是本实例所在的工作台贡献点，两种发行版都对；没有桥（独立形态）时用 Standard 的值兜底。
 const PLAYER_WORKBENCH = 'io.github.oncemisery.hertz-studio.player';
+function playerWorkbench() {
+  const bridge = window.dbxPlugin;
+  return (bridge && bridge.contributionId) || PLAYER_WORKBENCH;
+}
 // 拖拽与点击的位移阈值：小于它算「点了一下」（展开），大于才算拖。
 const CAPSULE_DRAG_PX = 4;
 // 页内最小化态：离边多远开始吸附；20 与默认外边距同值，吸上之后正好落回默认位。
@@ -7838,7 +7847,7 @@ function initCapsuleControls() {
     const floating = floatingApi();
     if (!floating) return Promise.resolve(null);
     return floating
-      .open({ contributionId: PLAYER_WORKBENCH, title: '正在播放', width: 268, height: 55 })
+      .open({ contributionId: playerWorkbench(), title: '正在播放', width: 268, height: 55 })
       .catch((err) => {
         console.warn('[hertz] 打开浮动胶囊失败：', err);
         return null;
@@ -7856,7 +7865,7 @@ function initCapsuleControls() {
       // 必须等转发落地再关自己：窗口一销毁，还在路上的那次转发就没人送了，用户点了
       // 展开却什么也没开出来。
       Promise.allSettled([
-        window.dbxPlugin.openWorkbench(PLAYER_WORKBENCH, {}, { target: 'tab' }),
+        window.dbxPlugin.openWorkbench(playerWorkbench(), {}, { target: 'tab' }),
         transport.post('/v1/ui/notice', { action: 'expand-capsule' }),
       ]).then(() => {
         const floating = floatingApi();
@@ -9224,6 +9233,7 @@ async function startApp() {
   if (window.Podcasts) window.Podcasts.bind({
     play: (tracks, index) => Online.playAll(tracks, index), seek: seekTo, toast,
   });
+  if (window.Reader) window.Reader.bind({ toast });
   // 扫码登录模块（web/online-login.js）：放在 Online.init 之后，头像 URL
   // 归一化要用它挂出的 safeCoverUrl。init() 负责在启动阶段就把顶栏头像按
   // 服务端持久化的选择恢复出来（以前只有打开登录弹窗才恢复）。

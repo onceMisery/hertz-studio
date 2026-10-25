@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 
 use reqwest::Url;
-use roxmltree::{Document, Node, ParsingOptions};
+use roxmltree::Node;
 use sha1::{Digest, Sha1};
 
 use super::{
@@ -11,7 +11,10 @@ use super::{
     MAX_FEED_BYTES, MAX_XML_NODES,
 };
 use crate::error::{ApiError, ApiResult};
+use crate::feed_xml::{child, parse_document, text};
 use crate::online::OnlineTrack;
+
+pub(super) use crate::feed_xml::plain_text;
 
 pub(super) fn invalid_feed() -> ApiError {
     ApiError::new(
@@ -44,11 +47,6 @@ pub(super) fn show_id(feed_url: &Url) -> String {
     digest(&["podcast-show-v1", feed_url.as_str()])
 }
 
-fn child<'a, 'input>(node: Node<'a, 'input>, tag: &str) -> Option<Node<'a, 'input>> {
-    node.children()
-        .find(|n| n.is_element() && n.tag_name().name() == tag)
-}
-
 fn itunes<'a, 'input>(node: Node<'a, 'input>, tag: &str) -> Option<Node<'a, 'input>> {
     node.children().find(|n| {
         n.is_element()
@@ -61,21 +59,6 @@ fn itunes<'a, 'input>(node: Node<'a, 'input>, tag: &str) -> Option<Node<'a, 'inp
                 )
             )
     })
-}
-
-fn text(node: Node<'_, '_>) -> String {
-    let mut out = String::new();
-    for part in node
-        .descendants()
-        .filter(|n| n.is_text())
-        .filter_map(|n| n.text())
-    {
-        if !out.is_empty() {
-            out.push(' ');
-        }
-        out.push_str(part);
-    }
-    out
 }
 
 fn field(node: Node<'_, '_>, tag: &str, limit: usize) -> String {
@@ -202,96 +185,8 @@ fn duration_ms(value: &str) -> u64 {
         .unwrap_or(0)
 }
 
-/// roxmltree 会在 nodes_limit 生效前按原始 '<'/'=' 预分配，并在单标签内线性查重属性。
-/// 这里只检查资源形状，跳过 CDATA/注释/PI；合法性、实体和命名空间语义仍由 XML 库处理。
-fn preflight_xml(xml: &str) -> ApiResult<()> {
-    const MAX_ATTRIBUTES_PER_TAG: usize = 128;
-    const MAX_DEPTH: usize = 64;
-    const MAX_NAMESPACES_IN_SCOPE: usize = 64;
-    const MAX_NAMESPACE_DECLARATIONS: usize = 4096;
-
-    let mut nodes = 0u32;
-    let mut attributes = 0u32;
-    for byte in xml.bytes() {
-        nodes += u32::from(byte == b'<');
-        attributes += u32::from(byte == b'=');
-        if nodes > MAX_XML_NODES || attributes > MAX_XML_NODES {
-            return Err(invalid_feed());
-        }
-    }
-
-    let mut scopes = Vec::with_capacity(MAX_DEPTH);
-    let mut total_namespaces = 0usize;
-    let mut remaining = xml;
-    while let Some(start) = remaining.find('<') {
-        remaining = &remaining[start..];
-        if remaining.starts_with("<![CDATA[") {
-            let end = remaining.find("]]>").ok_or_else(invalid_feed)?;
-            remaining = &remaining[end + 3..];
-            continue;
-        }
-        if remaining.starts_with("<!--") {
-            let end = remaining.find("-->").ok_or_else(invalid_feed)?;
-            remaining = &remaining[end + 3..];
-            continue;
-        }
-        if remaining.starts_with("<?") {
-            let end = remaining.find("?>").ok_or_else(invalid_feed)?;
-            remaining = &remaining[end + 2..];
-            continue;
-        }
-        if remaining.starts_with("<!") {
-            return Err(invalid_feed()); // DTD 与实体声明不属于公开 RSS 支持范围。
-        }
-        let mut quote = None;
-        let mut count = 0;
-        let mut end = None;
-        for (index, byte) in remaining.bytes().enumerate().skip(1) {
-            if quote.is_some() {
-                if quote == Some(byte) {
-                    quote = None;
-                }
-                continue;
-            }
-            match byte {
-                b'\'' | b'"' => quote = Some(byte),
-                b'=' => {
-                    count += 1;
-                    if count > MAX_ATTRIBUTES_PER_TAG {
-                        return Err(invalid_feed());
-                    }
-                }
-                b'>' => {
-                    end = Some(index);
-                    break;
-                }
-                _ => {}
-            }
-        }
-        let end = end.ok_or_else(invalid_feed)?;
-        let tag = &remaining[..=end];
-        if tag.starts_with("</") {
-            scopes.pop().ok_or_else(invalid_feed)?;
-        } else {
-            // 保守统计标签中的 xmlns 标记，避免继承命名空间的累计复制放大。
-            let declarations = tag.matches("xmlns").count();
-            total_namespaces += declarations;
-            let in_scope = scopes.last().copied().unwrap_or(0) + declarations;
-            if in_scope > MAX_NAMESPACES_IN_SCOPE
-                || total_namespaces > MAX_NAMESPACE_DECLARATIONS
-                || scopes.len() >= MAX_DEPTH
-            {
-                return Err(invalid_feed());
-            }
-            if !tag[..end].trim_end().ends_with('/') {
-                scopes.push(in_scope);
-            }
-        }
-        remaining = &remaining[end + 1..];
-    }
-    Ok(())
-}
-
+/// roxmltree 会在 nodes_limit 生效前按原始 '<'/'=' 预分配，并在单标签内线性查重属性；
+/// 字节级预算预检已上移到 `feed_xml`，这里仅保留播客的预算值与错误映射。
 pub(super) fn parse_feed(
     feed_url: &Url,
     document_url: &Url,
@@ -301,16 +196,7 @@ pub(super) fn parse_feed(
         return Err(feed_too_large());
     }
     let xml = std::str::from_utf8(bytes).map_err(|_| invalid_feed())?;
-    preflight_xml(xml)?;
-    let document = Document::parse_with_options(
-        xml.trim_start_matches('\u{feff}'),
-        ParsingOptions {
-            allow_dtd: false,
-            nodes_limit: MAX_XML_NODES,
-            ..ParsingOptions::default()
-        },
-    )
-    .map_err(|_| invalid_feed())?;
+    let document = parse_document(xml, MAX_XML_NODES).map_err(|_| invalid_feed())?;
     let root = document.root_element();
     let (channel, atom) = match root.tag_name().name() {
         "rss" => (child(root, "channel").ok_or_else(invalid_feed)?, false),
@@ -400,99 +286,4 @@ pub(super) fn parse_feed(
     }
     show.episode_count = episodes.len();
     Ok(ParsedFeed { show, episodes })
-}
-
-/// 输出只能当纯文本显示。去掉常见 HTML 标记与脚本/样式，折叠空白，并按字符限长。
-pub(super) fn plain_text(input: &str, max_chars: usize) -> String {
-    let mut output = String::new();
-    let mut hidden: Option<String> = None;
-    let mut remaining = input;
-    let mut count = 0;
-    let mut space = false;
-    let mut scan_tags = true;
-    while !remaining.is_empty() && count < max_chars {
-        if scan_tags && remaining.starts_with('<') {
-            let after = &remaining[1..];
-            if let Some(end) = after.find('>') {
-                let tag = after[..end].trim();
-                let closing = tag.starts_with('/');
-                let name = tag
-                    .trim_start_matches('/')
-                    .split(|c: char| c.is_whitespace() || c == '/')
-                    .next()
-                    .unwrap_or("")
-                    .to_ascii_lowercase();
-                if matches!(name.as_str(), "script" | "style") {
-                    if closing && hidden.as_deref() == Some(name.as_str()) {
-                        hidden = None;
-                    } else if !closing {
-                        hidden = Some(name);
-                    }
-                }
-                remaining = &after[end + 1..];
-                space = !output.is_empty();
-                continue;
-            }
-            // 后缀里已不存在 '>'，不能对每个 '<' 重复扫描同一大段文本。
-            if hidden.is_some() {
-                break;
-            }
-            scan_tags = false;
-        }
-        let mut character = remaining.chars().next().unwrap();
-        let mut consumed = character.len_utf8();
-        if character == '&' {
-            if let Some(end) = remaining
-                .as_bytes()
-                .iter()
-                .take(16)
-                .position(|b| *b == b';')
-            {
-                if let Some(decoded) = entity(&remaining[1..end]) {
-                    character = decoded;
-                    consumed = end + 1;
-                }
-            }
-        }
-        remaining = &remaining[consumed..];
-        if hidden.is_some() {
-            continue;
-        }
-        if character.is_whitespace() || character.is_control() {
-            space = !output.is_empty();
-            continue;
-        }
-        if space && count + 1 < max_chars {
-            output.push(' ');
-            count += 1;
-        }
-        space = false;
-        if count < max_chars {
-            output.push(character);
-            count += 1;
-        }
-    }
-    output
-}
-
-fn entity(value: &str) -> Option<char> {
-    match value {
-        "amp" => Some('&'),
-        "lt" => Some('<'),
-        "gt" => Some('>'),
-        "quot" => Some('"'),
-        "apos" => Some('\''),
-        "nbsp" => Some(' '),
-        _ => {
-            let number = if let Some(hex) = value
-                .strip_prefix("#x")
-                .or_else(|| value.strip_prefix("#X"))
-            {
-                u32::from_str_radix(hex, 16).ok()?
-            } else {
-                value.strip_prefix('#')?.parse().ok()?
-            };
-            char::from_u32(number)
-        }
-    }
 }

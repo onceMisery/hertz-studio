@@ -33,6 +33,7 @@
 <link rel="stylesheet" href="stanza/stanza-starborn.css">
 <link rel="stylesheet" href="online.css">
 <link rel="stylesheet" href="podcasts.css">
+<link rel="stylesheet" href="reader.css">
 <link rel="stylesheet" href="home-dashboard.css">
 <link rel="stylesheet" href="room.css">
 <!-- 主题工作室：壁纸背景层与壁纸画廊。排在 style.css 之后（同特异性整块胜出），
@@ -451,6 +452,10 @@
       <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-headphones"/></svg>
       <span>播客</span>
     </button>
+    <button class="rail-item" data-view="reader" aria-label="阅读">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-rss"/></svg>
+      <span>阅读</span>
+    </button>
     <button class="rail-item" data-view="playlists" aria-label="歌单">
       <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-playlist"/></svg>
       <span>歌单</span>
@@ -715,6 +720,51 @@
       </div>
     </div>
     <!-- /播客 -->
+    <!-- 阅读 -->
+    <div class="view" id="view-reader" hidden>
+      <div class="col-head">
+        <div class="col-head-left">
+          <h2 class="col-title">阅读</h2>
+          <span id="reader-count" class="count">博客与新闻 · 公开 RSS/Atom</span>
+        </div>
+        <div class="col-tools">
+          <button id="reader-refresh" class="btn" type="button">刷新当前源</button>
+        </div>
+      </div>
+      <div class="reader-layout">
+        <aside class="reader-feeds">
+          <form id="reader-add" class="reader-add">
+            <input id="reader-add-url" type="url" placeholder="粘贴 RSS/Atom 地址…" maxlength="2048" required autocomplete="off" aria-label="订阅源地址">
+            <button class="btn primary" type="submit">订阅</button>
+          </form>
+          <ul id="reader-feed-list" class="reader-feed-list" role="list"></ul>
+        </aside>
+        <section class="reader-list-pane" aria-label="文章列表">
+          <p id="reader-status" class="reader-status" role="status" aria-live="polite"></p>
+          <div class="reader-toolbar" aria-label="文章筛选">
+            <button type="button" class="btn active" data-reader-filter="all" aria-pressed="true">全部</button>
+            <button type="button" class="btn" data-reader-filter="unread" aria-pressed="false">未读</button>
+            <button type="button" class="btn" data-reader-filter="starred" aria-pressed="false">收藏</button>
+          </div>
+          <ul id="reader-entry-list" class="reader-entry-list" role="list"></ul>
+          <button id="reader-more" class="btn reader-more" type="button" hidden>加载更多文章</button>
+        </section>
+        <article class="reader-article" aria-label="正文">
+          <div id="reader-entry-head" class="reader-entry-head" hidden>
+            <h2 id="reader-entry-title"></h2>
+            <p id="reader-entry-meta" class="reader-entry-meta"></p>
+            <div class="reader-entry-actions">
+              <button id="reader-star" class="btn" type="button">☆ 收藏</button>
+              <a id="reader-open-original" class="btn" target="_blank" rel="noopener noreferrer" hidden>打开原文</a>
+              <button id="reader-load-images" class="btn" type="button" hidden>加载本文图片</button>
+            </div>
+          </div>
+          <p id="reader-entry-status" class="reader-status" role="status" aria-live="polite"></p>
+          <div id="reader-content" class="reader-content" hidden></div>
+        </article>
+      </div>
+    </div>
+    <!-- /阅读 -->
     <div class="view" id="view-online" hidden>
       <div class="col-head">
         <div class="col-head-left">
@@ -2533,6 +2583,7 @@
 <script defer src="search-session.js"></script>
 <script defer src="online.js"></script>
 <script defer src="podcasts.js"></script>
+<script defer src="reader.js"></script>
 <script defer src="online-playlists.js"></script>
 <script defer src="online-playlist-view.js"></script>
 <script defer src="topsearch.js"></script>
