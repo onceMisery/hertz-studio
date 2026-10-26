@@ -1072,7 +1072,13 @@ async fn kill_during_transaction(profile: &Profile) {
         .stdout(std::process::Stdio::null())
         .spawn()
         .unwrap();
-    for _ in 0..500 {
+    // 就绪信号来自子进程：它得冷启动一份测试二进制、跑 migration、seed 500 条、BEGIN IMMEDIATE
+    // 之后才写 crash-ready。本机整条路径约 0.2 秒，但套件并发时（Windows 那次整套件 166.8 秒）
+    // 500×10ms 的墙钟会挤不进，所以按 30 秒 deadline 等，并把等待时长与子进程状态写进超时信息，
+    // 下次再抖就分得清是「慢」还是「死」。
+    let started = tokio::time::Instant::now();
+    let deadline = started + Duration::from_secs(30);
+    loop {
         if profile.0.join("crash-ready").exists() {
             child.kill().unwrap();
             child.wait().unwrap();
@@ -1081,11 +1087,19 @@ async fn kill_during_transaction(profile: &Profile) {
         if let Some(status) = child.try_wait().unwrap() {
             panic!("crash fixture exited early: {status}");
         }
+        if tokio::time::Instant::now() >= deadline {
+            let elapsed = started.elapsed();
+            let pid = child.id();
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!(
+                "crash fixture did not reach an active write transaction after {} ms (pid {pid:?}, profile {})",
+                elapsed.as_millis(),
+                profile.0.display()
+            );
+        }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    let _ = child.kill();
-    let _ = child.wait();
-    panic!("crash fixture did not reach an active write transaction");
 }
 
 async fn seeded_profile_for_crash(profile: &Profile, room: Uuid) {
