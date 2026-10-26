@@ -178,6 +178,7 @@ const ui = {
   scanToggle: $('scan-toggle'),
   scanPanel: $('scan-panel'),
   scanRoot: $('scan-root'),
+  scanPick: $('scan-pick'),
   scanBtn: $('scan-btn'),
   scanBar: $('scan-bar'),
   scanLabel: $('scan-label'),
@@ -8780,6 +8781,23 @@ async function startApp() {
   // 轻空态条上的同名按钮：同一件事，另一个入口（在线推荐来源下列表区那行提示）。
   const emptyStripScan = $('empty-strip-scan');
   if (emptyStripScan) emptyStripScan.onclick = () => { ui.scanPanel.hidden = false; ui.scanRoot.focus(); };
+  // 对话框开在服务端那一侧（曲库读的就是那台机器的磁盘），用户停在上面的时间没有
+  // 上界，所以这条请求单独给 5 分钟，不走 15 秒默认超时。「取消」和「弹不出对话框」
+  // 在后端是同一个 cancelled，界面上不区分——手填输入框一直是退路。
+  ui.scanPick.onclick = async () => {
+    ui.scanPick.disabled = true;
+    try {
+      const picked = await transport.post('/v1/library/roots/pick', {}, { timeoutMs: 300000 });
+      if (picked && picked.path) ui.scanRoot.value = picked.path;
+    } catch (err) {
+      // 这个平台的构建没编译原生对话框（Linux）：入口留着只会反复撞同一堵墙，
+      // 按 capability_unsupported 的既有约定收起按钮，只留手填。
+      if (err.code === 'capability_unsupported') ui.scanPick.hidden = true;
+      else toast(errText('选择目录失败，可直接填写路径', err), 'error');
+    } finally {
+      ui.scanPick.disabled = false;
+    }
+  };
   ui.scanBtn.onclick = startScan;
   ui.scanCancel.onclick = async () => {
     ui.scanCancel.disabled = true;
@@ -9238,6 +9256,11 @@ async function startApp() {
   // 归一化要用它挂出的 safeCoverUrl。init() 负责在启动阶段就把顶栏头像按
   // 服务端持久化的选择恢复出来（以前只有打开登录弹窗才恢复）。
   if (window.OnlineLogin) window.OnlineLogin.init();
+  // 在线歌单网格/歌单架：模块自己在 DOMContentLoaded 也会拉一次，但插件形态下
+  // 那一刻 transport 还是 ServerTransport（chooseTransport 在本函数上方才 await
+  // 完成），首请求必然打空且不会重试——表现就是「重启后登录态还在，歌单架空了」。
+  // transport 定形后补拉一次，把它盖回真实数据；首发已经成功时不重复打接口。
+  if (window.OnlinePlaylists && !window.OnlinePlaylists.loaded()) window.OnlinePlaylists.init();
   // 在线歌单两层界面（web/online-playlist-view.js）：同样是先注入宿主再 init。
   // 宿主只给三样它自己造不出来的东西：层切换、音源能力位、队列写入。
   if (window.OnlinePlaylistView) {
