@@ -68,6 +68,17 @@
           ? "次行：罗马音"
           : "次行：下一句";
     els.secondaryBtn.style.display = config.layout === "single" ? "none" : "";
+    document.getElementById("font-value").textContent = `${config.fontSize}px`;
+    document.getElementById("opacity-value").textContent = `${Math.round(config.opacity * 100)}%`;
+    const limits = {
+      "font-down": config.fontSize <= 18,
+      "font-up": config.fontSize >= 72,
+      "opacity-down": config.opacity <= 0.25,
+      "opacity-up": config.opacity >= 1,
+    };
+    Object.keys(limits).forEach((command) => {
+      document.querySelector(`[data-cmd="${command}"]`).disabled = limits[command];
+    });
     setLocked(config.locked);
     render();
     updateLoop();
@@ -77,6 +88,7 @@
     state.locked = Boolean(locked);
     document.body.classList.toggle("locked", state.locked);
     document.body.classList.toggle("unlocked", !state.locked);
+    if (state.locked) document.getElementById("lyric-options").open = false;
     scheduleRender();
   }
 
@@ -383,6 +395,7 @@
 
   function setNotice(text) {
     const next = text || "";
+    document.getElementById("shell").classList.toggle("is-empty", Boolean(next));
     if (els.notice.textContent !== next) {
       els.notice.textContent = next;
     }
@@ -482,5 +495,18 @@
   });
 
   document.addEventListener("contextmenu", (event) => event.preventDefault());
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      const options = document.getElementById("lyric-options");
+      if (options.open) {
+        options.open = false;
+        options.querySelector("summary").focus();
+      }
+    }
+  });
+  document.addEventListener("pointerdown", (event) => {
+    const options = document.getElementById("lyric-options");
+    if (!options.contains(event.target)) options.open = false;
+  });
   ipc({ cmd: "ready" });
 })();

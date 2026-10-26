@@ -1,21 +1,23 @@
 <div id="shell">
-  <div id="toolbar">
-    <div id="drag" title="拖动歌词">⠿</div>
-    <button id="lock" data-cmd="lock">锁定</button>
-    <button id="layout" data-cmd="layout">单行</button>
-    <button id="secondary-btn" data-cmd="secondary">次行：下一句</button>
-    <button data-cmd="font-down">A−</button>
-    <button data-cmd="font-up">A+</button>
-    <button data-cmd="width-down">窄</button>
-    <button data-cmd="width-up">宽</button>
-    <button data-cmd="opacity-down">淡</button>
-    <button data-cmd="opacity-up">浓</button>
-    <button data-cmd="hide">隐藏</button>
-    <button data-cmd="quit">退出</button>
+  <div id="toolbar" aria-label="桌面歌词工具">
+    <button id="drag" title="按住拖动歌词窗口" aria-label="拖动歌词窗口">⠿</button>
+    <button id="lock" data-cmd="lock" title="锁定后鼠标可穿透；在 Hertz 托盘菜单中解锁">锁定</button>
+    <details id="lyric-options">
+      <summary title="调整歌词显示与外观">样式</summary>
+      <div class="options-panel" aria-label="歌词样式">
+        <div class="option-row"><span>显示</span><div><button id="layout" data-cmd="layout">单行</button><button id="secondary-btn" data-cmd="secondary">次行：下一句</button></div></div>
+        <div class="option-row"><span>字号 <output id="font-value"></output></span><div><button data-cmd="font-down" aria-label="缩小字号">A−</button><button data-cmd="font-up" aria-label="放大字号">A+</button></div></div>
+        <div class="option-row"><span>窗口宽度</span><div><button data-cmd="width-down" aria-label="缩窄歌词窗口">窄</button><button data-cmd="width-up" aria-label="加宽歌词窗口">宽</button></div></div>
+        <div class="option-row"><span>不透明度 <output id="opacity-value"></output></span><div><button data-cmd="opacity-down" aria-label="降低不透明度">−</button><button data-cmd="opacity-up" aria-label="提高不透明度">+</button></div></div>
+        <div class="option-row option-exit"><span>关闭歌词和壁纸</span><button data-cmd="quit">退出桌面组件</button></div>
+      </div>
+    </details>
+    <span class="toolbar-hint">锁定后可从托盘找回</span>
+    <button data-cmd="hide" title="隐藏歌词，可从 Hertz 托盘菜单找回">隐藏</button>
   </div>
   <div id="stage">
     <div id="current" class="line current"></div>
     <div id="secondary" class="line secondary"></div>
-    <div id="notice" class="notice"></div>
+    <div id="notice" class="notice" role="status" aria-live="polite"></div>
   </div>
 </div>

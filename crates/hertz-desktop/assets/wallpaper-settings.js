@@ -5,6 +5,7 @@
   var dirty = false;
   var profiles = [];
   var currentProfile = null;
+  var ready = false;
   var $ = id => document.getElementById(id);
 
   function profileKey(profile) {
@@ -46,7 +47,10 @@
     profiles.forEach(function (profile) {
       var option = document.createElement('option');
       option.value = profileKey(profile);
-      option.textContent = String(profile.edition || '?') + ' · ' + profile.dataDir;
+      var directory = String(profile.dataDir || '').replace(/[\\/]+$/, '').split(/[\\/]/).pop();
+      var edition = profile.edition === 'standard' ? 'Standard' : profile.edition === 'full' ? 'Full' : String(profile.edition || '?');
+      option.textContent = edition + ' · ' + directory;
+      option.title = profile.dataDir;
       select.appendChild(option);
     });
     var preferred = forceCurrent && currentProfile
@@ -65,6 +69,34 @@
   function updateProfilePath() {
     var profile = selectedProfile();
     $('profile-path').textContent = profile ? profile.dataDir : '';
+    $('profile-path').title = profile ? profile.dataDir : '';
+    $('profile').title = profile ? profile.dataDir : '';
+    var canSwitch = ready && profile && profileKey(profile) !== profileKey(currentProfile);
+    $('switch-source').disabled = !canSwitch;
+    document.querySelector('.source-actions').hidden = !canSwitch;
+  }
+
+  function syncControls() {
+    ['profile', 'enabled', 'monitor', 'fps', 'music', 'preview'].forEach(function (id) {
+      $(id).disabled = !ready;
+    });
+    $('apply').disabled = !ready || !dirty;
+    $('settings-state').textContent = !ready ? '读取中' : dirty ? '未应用修改' : '已保存';
+    $('settings-state').dataset.dirty = String(dirty);
+    updateProfilePath();
+  }
+
+  function selectMonitor(name) {
+    if (!name) return;
+    var select = $('monitor');
+    if (!Array.from(select.options).some(option => option.value === name)) {
+      var missing = document.createElement('option');
+      missing.value = name;
+      missing.textContent = name + '（未连接）';
+      select.appendChild(missing);
+    }
+    select.value = name;
+    select.title = select.selectedOptions[0] ? select.selectedOptions[0].textContent : '';
   }
 
   function status(text, error) {
@@ -92,26 +124,33 @@
         $('monitor').appendChild(option);
       });
       const fallback = primaryMonitor(payload.monitors);
-      $('monitor').value = current || (fallback ? fallback.name : '');
+      selectMonitor(current || (fallback ? fallback.name : ''));
     }
     if (payload.config && (!dirty || payload.message === '已应用' || payload.message === '已切换来源')) {
       $('enabled').checked = !!payload.config.enabled;
       $('fps').value = String(payload.config.fps || 30);
       $('music').checked = !!payload.config.musicResponse;
       const fallback = primaryMonitor(payload.monitors);
-      $('monitor').value = payload.config.monitor || (fallback ? fallback.name : '');
-      dirty = payload.message === '已应用' || payload.message === '已切换来源' ? false : dirty;
+      selectMonitor(payload.config.monitor || (fallback ? fallback.name : ''));
+      if (!payload.error && (payload.message === '已应用' || payload.message === '已切换来源')) dirty = false;
     }
+    ready = ready || !!payload.config;
     previewActive = !!payload.previewActive;
     if (payload.error) status(payload.error, true);
     else if (payload.message) status(payload.message, false);
-    else if (previewActive) status('预览中；关闭设置或应用后结束预览。', false);
-    else status('修改后先预览，再应用。', false);
-    $('preview').textContent = previewActive ? '刷新预览' : '预览';
+    else if (previewActive) status('正在预览，尚未保存。应用或关闭设置可结束预览。', false);
+    else if (ready) status(dirty ? '有未应用的修改，可先预览效果。' : '设置已保存；预览不会修改已保存的设置。', false);
+    $('preview').textContent = previewActive ? '刷新预览' : '预览效果';
+    syncControls();
   }
 
   ['enabled', 'fps', 'music', 'monitor'].forEach(function (id) {
-    $(id).addEventListener('change', function () { dirty = true; });
+    $(id).addEventListener('change', function () {
+      dirty = true;
+      if (id === 'monitor') selectMonitor($('monitor').value);
+      status('有未应用的修改，可先预览效果。', false);
+      syncControls();
+    });
   });
   $('profile').addEventListener('change', updateProfilePath);
   $('switch-source').addEventListener('click', function () {
