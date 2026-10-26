@@ -3313,6 +3313,30 @@ pub(super) mod join_retry_tests {
         assert!(!retry.requested);
     }
 
+    /// `inbound` 一条通道同时承载控制帧（Heartbeat / Ready / AudioAttached）和生命周期帧，
+    /// 而连接死亡时谁先谁后取决于调度：Linux 与 macOS 上实测会有一帧抢在 `Disconnected` 前面。
+    /// 按位置读就会把要读的那一帧挤掉（表现是 join 或 leave 少记一条），所以读到目标 kind 为止，
+    /// 途中的每一帧照常交给 `network`，不跳过宿主状态机。
+    async fn network_until(
+        owner: &mut Owner,
+        inbound: &mut mpsc::Receiver<Inbound>,
+        want: impl Fn(&Inbound) -> bool,
+    ) {
+        loop {
+            let Some(frame) = inbound.recv().await else {
+                panic!("inbound closed before the expected frame arrived");
+            };
+            let reached = want(&frame);
+            owner
+                .network(frame)
+                .await
+                .expect("network rejected the frame");
+            if reached {
+                return;
+            }
+        }
+    }
+
     async fn playing_owner() -> (
         Owner,
         std::thread::JoinHandle<()>,
@@ -3696,7 +3720,10 @@ pub(super) mod join_retry_tests {
         )
         .await
         .unwrap();
-        owner.network(inbound.recv().await.unwrap()).await.unwrap();
+        network_until(&mut owner, &mut inbound, |e| {
+            matches!(e, Inbound::Connected { .. })
+        })
+        .await;
         let identity = connection.handle.identity;
         let permissions = owner
             .server
@@ -3744,7 +3771,10 @@ pub(super) mod join_retry_tests {
         );
         let activity_len = owner.collaboration.activity.len();
         connection.shutdown().await;
-        owner.network(inbound.recv().await.unwrap()).await.unwrap();
+        network_until(&mut owner, &mut inbound, |e| {
+            matches!(e, Inbound::Disconnected { .. })
+        })
+        .await;
         owner.advance(owner.clock.now_ns()).await.unwrap();
         let (reconnected, _events) = vmusic_lan::client::ClientConnection::connect(
             owner.server.address,
@@ -3755,7 +3785,10 @@ pub(super) mod join_retry_tests {
         )
         .await
         .unwrap();
-        owner.network(inbound.recv().await.unwrap()).await.unwrap();
+        network_until(&mut owner, &mut inbound, |e| {
+            matches!(e, Inbound::Connected { .. })
+        })
+        .await;
         assert_eq!(
             owner
                 .peer(
