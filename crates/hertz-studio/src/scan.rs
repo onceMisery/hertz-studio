@@ -43,6 +43,41 @@ fn standard_path(path: PathBuf) -> PathBuf {
     path
 }
 
+/// 让服务端所在机器用自己的原生文件夹对话框选目录，省掉手抄路径。
+///
+/// 用户取消与「对话框弹不出来」（服务跑在无桌面会话的机器上）在 rfd 里都是
+/// `None`，这里只能一并报成未选择——界面上手填输入框始终是退路。
+/// 选择目录失败的原因。
+#[derive(Debug)]
+pub enum PickError {
+    /// 这个平台的构建里没有原生对话框可用（理由见根 Cargo.toml 的 rfd 注释）。
+    Unsupported,
+    /// 选完到读目录之间，目录本身出了问题。
+    Path(String),
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+pub async fn pick_root() -> Result<Option<String>, PickError> {
+    let picked = rfd::AsyncFileDialog::new()
+        .set_title("选择音乐目录")
+        .pick_folder()
+        .await;
+    let Some(handle) = picked else { return Ok(None) };
+    let path = handle.path().to_path_buf();
+    let root = tokio::task::spawn_blocking(move || normalize_root(&path))
+        .await
+        .map_err(|e| PickError::Path(e.to_string()))?
+        .map_err(PickError::Path)?;
+    Ok(Some(root.to_string_lossy().into_owned()))
+}
+
+/// Linux 的 XDG 门户依赖会撞破 workspace 的 1.88 MSRV，所以这一侧不编译对话框，
+/// 前端拿到 `capability_unsupported` 后按既有约定隐藏入口。
+#[cfg(not(any(windows, target_os = "macos")))]
+pub async fn pick_root() -> Result<Option<String>, PickError> {
+    Err(PickError::Unsupported)
+}
+
 /// Reserve before spawning: a successful response always owns the scan.
 pub async fn start(state: Arc<AppState>, root: PathBuf) -> Result<(), String> {
     start_job(ScanJob::from_state(&state), root, false).await

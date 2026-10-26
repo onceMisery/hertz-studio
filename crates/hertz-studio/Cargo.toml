@@ -67,6 +67,10 @@ rmcp = { workspace = true, features = ["client"] }
 tokio = { workspace = true, features = ["process"] }
 tungstenite = { version = "0.28", default-features = false, features = ["handshake"] }
 
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
+# 原生文件夹对话框只在 Windows / macOS 编译，理由见根 Cargo.toml 的 rfd 注释。
+rfd = { workspace = true }
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "=0.61.2", features = [
   "Win32_Foundation",

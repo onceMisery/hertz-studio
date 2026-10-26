@@ -379,6 +379,7 @@ impl Rpc {
             // --- 曲库：扫描根目录与进度 ---
             (Op::Get, ["v1", "library", "roots"]) => library::library_roots(state).await,
             (Op::Post, ["v1", "library", "roots"]) => library::add_library_root(state, body).await,
+            (Op::Post, ["v1", "library", "roots", "pick"]) => library::pick_root().await,
             (Op::Put, ["v1", "library", "roots"]) => {
                 library::update_library_root(state, body).await
             }

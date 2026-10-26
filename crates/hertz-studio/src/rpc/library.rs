@@ -285,6 +285,19 @@ pub async fn library_roots(state: &Arc<AppState>) -> RpcResult {
     Ok(Reply::ok(json!({ "roots": roots })))
 }
 
+/// 与 HTTP 版 `/v1/library/roots/pick` 同语义：对话框开在 sidecar 这一侧，
+/// 也就是插件宿主所在的机器。
+pub async fn pick_root() -> RpcResult {
+    match scan::pick_root().await {
+        Ok(Some(path)) => Ok(Reply::ok(json!({ "path": path }))),
+        Ok(None) => Ok(Reply::ok(json!({ "cancelled": true }))),
+        Err(scan::PickError::Unsupported) => Err(ApiError::capability_unsupported(
+            "这台机器上的服务没有原生文件夹对话框，请直接填写路径",
+        )),
+        Err(scan::PickError::Path(error)) => Err(bad_request(error)),
+    }
+}
+
 pub async fn add_library_root(state: &Arc<AppState>, body: &Value) -> RpcResult {
     let request: LibraryRootRequest = body_as(body)?;
     let enabled = request.enabled.unwrap_or(true);

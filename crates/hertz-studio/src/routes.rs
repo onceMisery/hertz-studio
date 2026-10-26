@@ -183,6 +183,7 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
                 .put(update_library_root)
                 .delete(remove_library_root),
         )
+        .route("/v1/library/roots/pick", post(pick_library_root))
         .route("/v1/playlists", get(list_playlists).post(create_playlist))
         .route("/v1/playlists/import-m3u", post(import_m3u_route))
         .route("/v1/backup", get(export_backup))
@@ -2553,6 +2554,19 @@ async fn library_roots(State(state): State<Arc<AppState>>) -> ApiResult<Json<ser
 pub(crate) struct LibraryRootRequest {
     pub(crate) path: String,
     pub(crate) enabled: Option<bool>,
+}
+
+/// 弹服务端本机的原生文件夹对话框——曲库扫描读的就是这一侧的磁盘。
+/// 只回路径不写库：选完仍由用户在界面上确认「添加并自动同步」。
+async fn pick_library_root() -> ApiResult<Json<serde_json::Value>> {
+    match scan::pick_root().await {
+        Ok(Some(path)) => Ok(Json(serde_json::json!({ "path": path }))),
+        Ok(None) => Ok(Json(serde_json::json!({ "cancelled": true }))),
+        Err(scan::PickError::Unsupported) => Err(ApiError::capability_unsupported(
+            "这台机器上的服务没有原生文件夹对话框，请直接填写路径",
+        )),
+        Err(scan::PickError::Path(error)) => Err(bad_request(error)),
+    }
 }
 
 async fn add_library_root(
