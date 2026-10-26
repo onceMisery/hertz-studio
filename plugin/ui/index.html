@@ -511,6 +511,7 @@
       <div class="scan-panel" id="scan-panel" hidden>
         <div class="scan-row">
           <input id="scan-root" type="text" placeholder="音乐目录，例如 D:\Music" autocomplete="off" aria-describedby="scan-format-note">
+          <button id="scan-pick" class="btn" type="button">选目录…</button>
           <button id="scan-btn" class="btn primary">添加并自动同步</button>
           <button id="scan-cancel" class="btn" type="button" hidden>取消扫描</button>
         </div>
@@ -728,15 +729,17 @@
           <span id="reader-count" class="count">博客与新闻 · 公开 RSS/Atom</span>
         </div>
         <div class="col-tools">
-          <button id="reader-refresh" class="btn" type="button">刷新当前源</button>
+          <button id="reader-refresh" class="btn" type="button" disabled title="选择一个订阅源后刷新">刷新当前源</button>
         </div>
       </div>
       <div class="reader-layout">
-        <aside class="reader-feeds">
+        <aside class="reader-feeds" aria-label="订阅源">
+          <h3 class="reader-pane-title">我的订阅</h3>
           <form id="reader-add" class="reader-add">
             <input id="reader-add-url" type="url" placeholder="粘贴 RSS/Atom 地址…" maxlength="2048" required autocomplete="off" aria-label="订阅源地址">
             <button class="btn primary" type="submit">订阅</button>
           </form>
+          <button id="reader-all" class="reader-all active" type="button" aria-pressed="true">全部订阅<span id="reader-total" class="reader-unread" hidden></span></button>
           <ul id="reader-feed-list" class="reader-feed-list" role="list"></ul>
         </aside>
         <section class="reader-list-pane" aria-label="文章列表">
@@ -749,17 +752,24 @@
           <ul id="reader-entry-list" class="reader-entry-list" role="list"></ul>
           <button id="reader-more" class="btn reader-more" type="button" hidden>加载更多文章</button>
         </section>
-        <article class="reader-article" aria-label="正文">
+        <article class="reader-article" aria-label="正文" aria-busy="false">
+          <button id="reader-back" class="btn reader-back" type="button">← 返回文章列表</button>
+          <div id="reader-welcome" class="reader-welcome">
+            <svg viewBox="0 0 48 48" width="48" height="48" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M24 12c-5-4-13-5-18-3v28c6-2 12-1 18 3 6-4 12-5 18-3V9c-5-2-13-1-18 3Zm0 0v28M12 17c3 0 5 1 7 2m-7 6c3 0 5 1 7 2m10-8c2-1 4-2 7-2m-7 10c2-1 4-2 7-2"/></svg>
+            <h3>选择一篇文章开始阅读</h3>
+            <p>订阅你喜欢的博客与新闻，留在这里慢慢读。<br>正文图片在你选择后加载。</p>
+          </div>
           <div id="reader-entry-head" class="reader-entry-head" hidden>
-            <h2 id="reader-entry-title"></h2>
+            <h2 id="reader-entry-title" tabindex="-1"></h2>
             <p id="reader-entry-meta" class="reader-entry-meta"></p>
             <div class="reader-entry-actions">
-              <button id="reader-star" class="btn" type="button">☆ 收藏</button>
+              <button id="reader-star" class="btn" type="button" aria-pressed="false">☆ 收藏</button>
               <a id="reader-open-original" class="btn" target="_blank" rel="noopener noreferrer" hidden>打开原文</a>
               <button id="reader-load-images" class="btn" type="button" hidden>加载本文图片</button>
             </div>
           </div>
           <p id="reader-entry-status" class="reader-status" role="status" aria-live="polite"></p>
+          <button id="reader-retry" class="btn reader-retry" type="button" hidden>重试加载正文</button>
           <div id="reader-content" class="reader-content" hidden></div>
         </article>
       </div>
@@ -2114,13 +2124,9 @@
   <div class="sc-results" id="sc-results" role="listbox" aria-label="搜索结果" hidden></div>
   <p class="sc-status" id="sc-status" role="status" aria-live="polite"></p>
 
-  <!-- 语境分段：普通舞台（CSS 变量旋钮）/ 真3D 舞台（Stage3D 偏好即时生效）。
-       打开时自动跟随当前舞台状态，也可手动互切；两套内容互斥显示。 -->
-  <div class="sc-context" id="sc-context" role="tablist" aria-label="舞台语境">
-    <button type="button" class="sc-seg-btn is-on" id="sc-context-flat" role="tab" aria-selected="true">普通舞台</button>
-    <button type="button" class="sc-seg-btn" id="sc-context-3d" role="tab" aria-selected="false">真3D 舞台</button>
-  </div>
-
+  <!-- 两套语境互斥，由 stage-control.js 跟随当前舞台自动切换：二维舞台只出
+       二维场景与滤镜；三维舞台只出来源/镜头偏好。不做手动互切，避免两个
+       场景池在同一屏里混着选。 -->
   <div class="sc-body" id="sc-body">
     <!-- 分组与滑块由 stage.js 依据 SCHEMA 生成，避免 20 组 markup 手写错漏 -->
   </div>
@@ -2444,6 +2450,20 @@
     <div class="sp-zodiac-cycle" aria-hidden="true"><span class="sp-zodiac-ticks" id="sp-zodiac-ticks"></span><span>12 SIGNS</span></div>
     <p class="sp-zodiac-hint">拖拽环绕&nbsp;&nbsp;·&nbsp;&nbsp;悬停主星&nbsp;&nbsp;·&nbsp;&nbsp;按住蓄能&nbsp;&nbsp;·&nbsp;&nbsp;双击复位</p>
   </aside>
+  <aside class="sp-phoenix-hud" id="sp-phoenix-hud" aria-live="polite" aria-label="凤凰涅槃" data-phase="flight" hidden>
+    <div class="sp-phoenix-plaque">
+      <p class="sp-phoenix-kicker"><span>PHOENIX RITE</span><span id="sp-phoenix-phase">翱翔</span></p>
+      <h2>凤凰涅槃</h2>
+      <p class="sp-phoenix-latin">NIRVANA</p>
+      <i class="sp-phoenix-rule" aria-hidden="true"></i>
+      <p class="sp-phoenix-meta" id="sp-phoenix-meta">烈焰加身 · 长空翱翔</p>
+    </div>
+    <div class="sp-phoenix-rite" aria-hidden="true">
+      <span class="sp-phoenix-charge"><i id="sp-phoenix-charge-fill"></i></span>
+      <span class="sp-phoenix-pips" id="sp-phoenix-pips"><i></i><i></i><i></i></span>
+    </div>
+    <p class="sp-phoenix-hint" id="sp-phoenix-hint">点击凤凰 · 唤来涅槃</p>
+  </aside>
   <div class="sp-zodiac-star" id="sp-zodiac-star" hidden>
     <span class="sp-zodiac-star-kicker">MAIN STAR</span>
     <strong id="sp-zodiac-star-name"></strong>
@@ -2542,6 +2562,17 @@
     <h2>播放队列 <button class="sp-head-btn" id="sp-playlist-close" aria-label="收起队列"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-close"/></svg></button></h2>
     <div id="sp-playlist-body"></div>
   </aside>
+  <div id="sp-warp" class="sp-warp" aria-hidden="true" hidden>
+    <div class="sp-warp-space">
+      <div class="sp-warp-depth">
+        <div class="sp-warp-gates" id="sp-warp-gates"></div>
+        <div class="sp-warp-stars" id="sp-warp-stars"></div>
+        <i class="sp-warp-swirl"></i>
+        <i class="sp-warp-glow"></i>
+      </div>
+    </div>
+    <span class="sp-warp-copy"><b>SPACE FOLD</b><em>正在进入三维空间</em></span>
+  </div>
   <p id="sp-loading" class="sp-loading" role="status" hidden>正在加载场景</p>
   <div id="sp-failure" class="sp-failure" role="alert" hidden><p id="sp-error-message"></p><button id="sp-retry" type="button">重试</button><button id="sp-failure-home" type="button">返回首页</button></div>
 </div>

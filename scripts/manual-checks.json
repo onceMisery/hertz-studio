@@ -251,6 +251,14 @@
       "purpose": "!/usr/bin/env node"
     },
     {
+      "script": "check-phoenix-stage.cjs",
+      "purpose": "Node 契约：凤凰时间轴/36 秒演出/质量池/凝卵与破壳/指针蓄火/减少动态与资源释放。"
+    },
+    {
+      "script": "check-phoenix-browser.cjs",
+      "purpose": "真实浏览器 + 隔离服务：四段构图、火焰/蛋壳像素、低画质预算、完整应用鼠标/触摸/相机与竖屏。"
+    },
+    {
       "script": "check-qf-nav-visual.js",
       "purpose": "清风「本地选项卡」（顶部胶囊主菜单）改版后的浏览器实测。"
     },
