@@ -62,7 +62,9 @@ pub async fn pick_root() -> Result<Option<String>, PickError> {
         .set_title("选择音乐目录")
         .pick_folder()
         .await;
-    let Some(handle) = picked else { return Ok(None) };
+    let Some(handle) = picked else {
+        return Ok(None);
+    };
     let path = handle.path().to_path_buf();
     let root = tokio::task::spawn_blocking(move || normalize_root(&path))
         .await
