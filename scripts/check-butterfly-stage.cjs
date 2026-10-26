@@ -258,6 +258,53 @@ function timelineContract(timeline) {
     } finally { f.close(); }
   }
 
+  for (const mode of ['butterfly', 'swarm', 'vortex']) {
+    const f = fixture('low', { performance: mode });
+    try {
+      f.update(0);
+      const flames = f.scene.getObjectByName('butterfly-flames'), embers = f.scene.getObjectByName('butterfly-embers');
+      assert.ok(flames?.isInstancedMesh && embers?.isPoints, 'small butterflies own attached flames and embers');
+      assert.equal(flames.visible, mode === 'vortex', `${mode}: flames only appear in the closing vortex`);
+      assert.equal(embers.visible, mode === 'vortex', `${mode}: embers only appear in the closing vortex`);
+      near(flames.material.uniforms.uFire.value, mode === 'vortex' ? 1 : 0, `${mode}: fire intensity follows the performance`);
+      assert.equal(flames.material.uniforms, embers.material.uniforms, 'fire layers share the frozen scene clock and interaction field');
+      const pool = geometryPool(f.scene);
+      for (const quality of ['low', 'medium', 'high', 'low']) {
+        f.instance.setQuality(PROFILES[quality]);
+        assert.equal(flames.count, f.stats().butterflies, 'flames follow the active butterfly count');
+        assert.equal(embers.geometry.instanceCount, f.stats().butterflies, 'embers follow the active butterfly count');
+        expectSamePool(f.scene, pool);
+      }
+      f.update(1, { reduced: true, sceneTime: 0, dynamicDt: 0 });
+      const frozen = snapshot(f.scene);
+      f.update(2, { reduced: true, sceneTime: 0, dynamicDt: 0, time: 999, bands: { bass: 1, mid: 1, treble: 1 } });
+      assert.deepEqual(snapshot(f.scene), frozen, `${mode}: fire stays frozen in reduced motion`);
+    } finally { f.close(); }
+  }
+
+  const interactive = fixture('low', { performance: 'vortex' });
+  try {
+    for (let i = 0; i <= 240; i++) interactive.update(i);
+    expectPhase(interactive.stats(), states.vortex, 'interaction fixture settles in the vortex', .05);
+    const still = interactive.stats();
+    near(still.stir, 0, 'vortex starts without a hand-driven twist');
+    for (let i = 241; i <= 360; i++) interactive.update(i, { pointer: { active: true, down: false, dragging: false, x: Math.sin(i * .15) * .4, y: Math.cos(i * .12) * .3 } });
+    near(interactive.stats().stir, 0, 'hovering across the vortex does not spin it');
+    for (let i = 361; i <= 480; i++) interactive.update(i, { pointer: { active: true, down: true, dragging: false, x: .18, y: .12 } });
+    assert.ok(interactive.stats().charge > .8, 'holding without dragging charges the vortex: ' + interactive.stats().charge);
+    near(interactive.stats().stir, 0, 'holding still never adds stir');
+    for (let i = 481; i <= 570; i++) {
+      const angle = (i - 481) * .16, radius = .24 + (i - 481) * .001;
+      interactive.update(i, { pointer: { active: true, down: false, dragging: true, x: Math.cos(angle) * radius, y: Math.sin(angle) * radius } });
+    }
+    assert.ok(Math.abs(interactive.stats().stir) > .3, 'dragging around the center twists the vortex: ' + interactive.stats().stir);
+    const beforeClick = interactive.stats().bursts;
+    interactive.update(571, { pointer: { active: true, down: false, dragging: false, x: .2, y: .08, click: { serial: 1, x: .2, y: .08 } } });
+    assert.equal(interactive.stats().bursts, beforeClick + 1, 'a new click releases one shockwave at the vortex');
+    for (let i = 572; i < 600; i++) interactive.update(i, { pointer: { active: true, down: false, dragging: false, x: .2, y: .08, click: { serial: 1, x: .2, y: .08 } } });
+    assert.equal(interactive.stats().bursts, beforeClick + 1, 'repeating the click serial cannot release another shockwave');
+  } finally { interactive.close(); }
+
   const staticScene = fixture();
   try {
     staticScene.update(0, { reduced: true });
@@ -342,6 +389,7 @@ function timelineContract(timeline) {
       newClickResponse ||= fresh > old + EPS;
     }
     assert.ok(newClickResponse, 'a genuinely new serial can trigger another response');
+    assert.equal(single.stats().bursts, 0, 'the opening phases keep their original click burst without the vortex shockwave');
 
     // The host freezes sceneTime/dynamicDt, but its wall clock and live inputs continue.
     // One reduced frame may zero interaction uniforms; every subsequent frame must be stable.
@@ -362,5 +410,5 @@ function timelineContract(timeline) {
     assert.notDeepEqual(snapshot(single.scene), frozen, 'normal motion resumes after reduced mode is released');
   } finally { repeated.close(); single.close(); }
 
-  console.log(`Butterfly stage checks passed: timeline, 36s/60fps dt clock, fixed modes, quality pools, pointer/audio, click envelope, reduced motion, ${lifecycles} lifecycles.`);
+  console.log(`Butterfly stage checks passed: timeline, 36s/60fps dt clock, fixed modes, quality pools, pointer/audio, click envelope, hands-on stirring/charge/shock, reduced motion, ${lifecycles} lifecycles.`);
 })().catch(error => { console.error(error); process.exitCode = 1; });

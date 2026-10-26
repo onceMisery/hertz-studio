@@ -103,16 +103,24 @@ function galaxyTexture(THREE, width) {
     for (let x = 0; x < width; x++) {
       const u = (x + .5) / width, theta = u * Math.PI * 2;
       const dx = -Math.cos(theta) * sinPhi, dz = Math.sin(theta) * sinPhi;
-      const broad = fbm(u, v, 12), detail = fbm(u, v + .37, 48);
+      const broad = fbm(u, v, 12);
+      const detail = fbm(u + (broad - .5) * .045, v + .37, 64);
       const latitude = (.52 * dx + .84 * dy + .16 * dz) / normalLength + .20;
-      const band = Math.exp(-Math.pow(latitude + (broad - .5) * .24, 2) * 38);
-      const lane = 1 - Math.pow(clamp((detail - .30) / .36), 1.3) * .94;
-      const dust = band * (.25 + broad * .9) * lane * (.68 + grain() * .64);
-      const core = band * Math.pow(detail, 3) * .11;
+      const warped = latitude + (broad - .5) * .32;
+      const band = Math.exp(-warped * warped * 62);
+      const longitude = Math.atan2(Math.sin((u - .72) * Math.PI * 2), Math.cos((u - .72) * Math.PI * 2));
+      const bulge = Math.exp(-longitude * longitude * 1.7 - warped * warped * 96);
+      const rift = Math.exp(-Math.pow((warped + .016 + (detail - .5) * .24) / .022, 2));
+      const branch = Math.exp(-Math.pow((warped - .07 + (broad - .5) * .23 + (detail - .5) * .10) / .012, 2));
+      const extinction = (1 - rift * .94) * (1 - branch * .70);
+      const cloud = Math.pow(clamp((detail - .32) / .34), 1.6);
+      const dust = band * (.28 + broad * .9) * (.35 + cloud) * extinction * (.76 + grain() * .48);
+      const core = bulge * (.32 + cloud * .7) * extinction;
+      const knots = band * Math.pow(clamp((detail - .52) * 5), 2) * .12;
       const k = (y * width + x) * 4;
-      pixels[k] = Math.round(255 * (dust * .125 + core));
-      pixels[k + 1] = Math.round(255 * (dust * .080 + core * .83));
-      pixels[k + 2] = Math.round(255 * (dust * .142 + core * .95));
+      pixels[k] = Math.round(255 * clamp(dust * .22 + core * .36 + knots));
+      pixels[k + 1] = Math.round(255 * clamp(dust * .16 + core * .29 + knots * .25));
+      pixels[k + 2] = Math.round(255 * clamp(dust * .32 + core * .21 + knots * .62));
       pixels[k + 3] = 255;
     }
   }
@@ -523,7 +531,7 @@ const SHELL_FRAG = [
   '  vec3 n = normalize(vNormal);',
   '  float graze = pow(1.0 - abs(dot(n, normalize(vView))), 2.4);',
   '  float lam = dot(n, uKeyDir) * 0.5 + 0.5;',
-  '  vec3 col = uColor * vTone * (0.06 + 0.34 * pow(lam, 2.6)) + uRim * graze * 1.25;',
+  '  vec3 col = uColor * vTone * (0.006 + 0.034 * pow(lam, 2.6)) + uRim * graze * 0.125;',
   '  gl_FragColor = vec4(col, min(uOpacity * (0.42 + graze * 3.1), 1.0));',
   '}',
 ].join('\n');
@@ -688,29 +696,37 @@ const AURA_RING_FRAG = [
   'uniform float uOnset;',
   'uniform float uCharge;',
   'uniform float uSeed;',
+  'uniform float uBearing;',
+  'uniform float uAttention;',
   'uniform vec3 uColorA;',
   'uniform vec3 uColorB;',
   'varying vec2 vUv;',
+  'float stroke(float r,float at,float width) {',
+  '  float aa=max(fwidth(r),0.0006);',
+  '  return 1.0-smoothstep(width,width+aa,abs(r-at));',
+  '}',
   'void main() {',
   '  vec2 p = vUv*2.0-1.0;',
   '  float r = length(p);',
-  '  if (r > 1.0) discard;',
   '  float a = atan(p.y,p.x);',
-  '  float edge = smoothstep(0.055,0.0,abs(r-0.94));',
-  '  float inner = smoothstep(0.030,0.0,abs(r-0.80));',
-  '  float hair = smoothstep(0.014,0.0,abs(r-0.62));',
-  // 分段虚线：外环顺时针、中环逆时针，转动方向错开才有机械星环的层次。
-  '  float dash = smoothstep(0.15,0.95,sin(a*24.0+uTime*(1.35+uSeed)+uSeed*6.283));',
-  '  float dash2 = smoothstep(0.25,0.95,sin(a*16.0-uTime*(1.05+uSeed*.6)));',
-  '  float bands = edge*(0.75+0.55*dash)+inner*(0.35+0.45*dash2)+hair*0.24;',
-  '  float ticks = pow(max(0.0,sin(a*44.0+uTime*1.7+uSeed*4.0)),18.0)',
-  '    *smoothstep(0.98,0.66,r)*(1.0-smoothstep(0.66,0.52,r));',
-  '  float sweep = pow(max(0.0,cos(a-uTime*(0.9+uSeed*.4))),64.0)*smoothstep(1.0,0.45,r);',
-  '  float alpha = (bands*0.65+ticks*0.55+sweep*0.85)*uOpacity;',
-  '  alpha = clamp(alpha*(0.65+uBass*0.55+uOnset*0.5+uCharge*0.85),0.0,1.0);',
-  '  vec3 col = mix(uColorA,uColorB,0.5+0.5*sin(a*2.0+uTime*0.4+uSeed*3.0));',
-  '  col *= 0.85+uCharge*.5;',
-  '  gl_FragColor = vec4(col,alpha);',
+  '  float phase = a-uTime*(0.055+uSeed*.018);',
+  '  float segment = step(.15,fract(phase/6.283185*12.0));',
+  '  float core = stroke(r,.968,.0013)+stroke(r,.803,.0008)*.40;',
+  '  float track = stroke(r,.922,.0017)*segment;',
+  '  float tickAngle = abs(fract(phase/6.283185*96.0+.5)-.5);',
+  '  float aa = max(fwidth(phase)*15.28,.008);',
+  '  float ticks = (1.0-smoothstep(.028,.028+aa,tickAngle))',
+  '    *smoothstep(.837,.844,r)*(1.0-smoothstep(.872,.879,r));',
+  '  float major = pow(max(0.0,cos(phase*12.0)),240.0)',
+  '    *smoothstep(.846,.852,r)*(1.0-smoothstep(.902,.908,r));',
+  '  float runner = pow(max(0.0,cos(a-uTime*.26-uSeed*2.1)),180.0);',
+  '  float attention = pow(max(0.0,cos(a-uBearing)),24.0)*uAttention;',
+  '  float halo = exp(-pow((r-.968)/.009,2.0))*.12;',
+  '  float alpha = (core*.62+track*.48+ticks*.42+major*.55+halo)',
+  '    *(1.0+runner*2.8+attention*1.5)*uOpacity;',
+  '  alpha *= .85+uBass*.20+uOnset*.25+uCharge*.8;',
+  '  vec3 col = mix(uColorA,uColorB,clamp(runner*.75+attention*.65+uCharge*.3,0.0,1.0));',
+  '  gl_FragColor = vec4(col,clamp(alpha,0.0,1.0));',
   '}',
 ].join('\n');
 
@@ -791,6 +807,33 @@ const AURA_ORBIT_FRAG = [
   '}',
 ].join('\n');
 
+const SCANNER_FRAG = `
+  uniform float uTime;
+  uniform float uOpacity;
+  uniform float uLock;
+  uniform float uCharge;
+  uniform float uSurge;
+  varying vec2 vUv;
+  float stroke(float r,float at,float width) {
+    float aa=max(fwidth(r),.003);
+    return 1.0-smoothstep(width,width+aa,abs(r-at));
+  }
+  void main() {
+    vec2 p=(vUv-.5)*2.0;
+    float r=length(p), a=atan(p.y,p.x);
+    float brackets=stroke(r,.74,.012)*step(.45,abs(sin(a*2.0)));
+    float track=stroke(r,.92,.005)*.24;
+    float progress=stroke(r,.92,.019)*step(fract(a/6.283185+.25),uCharge)*step(.001,uCharge);
+    float ticks=pow(max(0.0,cos(a*32.0)),32.0)*stroke(r,.83,.015)*.35;
+    float cross=(1.0-smoothstep(.006,.014,min(abs(p.x),abs(p.y))))
+      *smoothstep(.12,.16,r)*(1.0-smoothstep(.22,.26,r));
+    float echo=stroke(r,.32+fract(uTime*.24)*.28,.008)*(1.0-fract(uTime*.24))*.28;
+    vec3 col=mix(vec3(.28,.80,1.0),vec3(1.0,.80,.45),max(uLock*.85,uCharge));
+    float alpha=(brackets+track+progress+ticks+cross*.5+echo)*uOpacity*(.72+uCharge*.28+uSurge*.35);
+    gl_FragColor=vec4(col,clamp(alpha,0.0,1.0));
+  }
+`;
+
 function makeAuraRingMaterial(THREE, seed) {
   return new THREE.ShaderMaterial({
     uniforms: {
@@ -798,6 +841,7 @@ function makeAuraRingMaterial(THREE, seed) {
       uOpacity: { value: 0 },
       uBass: { value: 0 }, uOnset: { value: 0 }, uCharge: { value: 0 },
       uSeed: { value: seed },
+      uBearing: { value: 0 }, uAttention: { value: 0 },
       uColorA: { value: new THREE.Color(1, 1, 1) },
       uColorB: { value: new THREE.Color(1, 1, 1) },
     },
@@ -1184,19 +1228,22 @@ export function createWorld(THREE, scene, opts) {
   figureGroup.name = 'zodiac-sculpture';
   root.add(figureGroup);
 
-  // —— 2c) 游戏化能量场：三层倾斜星环 + 力场地面 + 轨道星尘 ——
-  // 星环共享一张平面几何，只有材质各自持种子；力场地面单独挂在 scene 上，
-  // 不随造型微摆（它是「场地」，不是「造型的一部分」）。
   const auraGroup = new THREE.Group();
   auraGroup.name = 'zodiac-aura';
   root.add(auraGroup);
-  const ringGeo = new THREE.PlaneGeometry(1, 1);
+  const ringGeo = new THREE.RingGeometry(.78, 1, 256, 4);
+  const ringPositions = ringGeo.getAttribute('position');
+  for (let i = 0; i < ringPositions.count; i++) {
+    const radius = Math.hypot(ringPositions.getX(i), ringPositions.getY(i));
+    ringPositions.setZ(i, Math.sin((radius - .78) / .22 * Math.PI) * .024);
+  }
+  ringGeo.computeVertexNormals();
   const ringMats = [];
   const ringMeshes = [];
   const RING_RIGS = [
-    { scale: 11.6, x: 1.22, y: 0.15, z: 0.18, seed: 0.35 },
-    { scale: 8.8, x: 0.48, y: -0.72, z: -0.30, seed: 1.60 },
-    { scale: 6.4, x: -0.58, y: 0.40, z: 0.62, seed: 2.85 },
+    { scale: 5.9, x: 1.08, y: 0.16, z: -0.26, seed: 0.35 },
+    { scale: 5.05, x: 0.28, y: -0.64, z: 0.32, seed: 1.60 },
+    { scale: 4.2, x: -0.52, y: 0.46, z: 0.62, seed: 2.85 },
   ];
   for (let i = 0; i < RING_RIGS.length; i += 1) {
     const rig = RING_RIGS[i];
@@ -1204,7 +1251,7 @@ export function createWorld(THREE, scene, opts) {
     const mesh = new THREE.Mesh(ringGeo, mat);
     mesh.frustumCulled = false;
     mesh.renderOrder = -86 + i;
-    mesh.position.set(0, 0, -1.55 - i * .14);
+    mesh.position.set(0, 0, -.25 - i * .12);
     mesh.rotation.set(rig.x, rig.y, rig.z);
     mesh.scale.setScalar(rig.scale);
     auraGroup.add(mesh);
@@ -1511,6 +1558,23 @@ export function createWorld(THREE, scene, opts) {
   discs.renderOrder = 12;
   figureGroup.add(discs);
 
+  const scannerGeo = new THREE.PlaneGeometry(2, 2);
+  const scannerMat = new THREE.ShaderMaterial({
+    uniforms: { uTime: { value: 0 }, uOpacity: { value: 0 }, uLock: { value: 0 },
+      uCharge: { value: 0 }, uSurge: { value: 0 } },
+    vertexShader: AURA_RING_VERT, fragmentShader: SCANNER_FRAG,
+    transparent: true, depthWrite: false, depthTest: false, blending: THREE.AdditiveBlending,
+    side: THREE.DoubleSide,
+  });
+  const scanner = new THREE.Mesh(scannerGeo, scannerMat);
+  scanner.name = 'zodiac-scanner';
+  scanner.visible = false; scanner.renderOrder = 25; scanner.frustumCulled = false;
+  figureGroup.add(scanner);
+  disposables.push(scannerGeo, scannerMat);
+  const scannerTarget = new THREE.Vector3(), scannerWorld = new THREE.Vector3();
+  const scannerRotation = new THREE.Quaternion();
+  let scannerMix = 0;
+
   const pulseUniforms = { uLife: { value: 1 }, uPixel: { value: 1 }, uColor: { value: new THREE.Color('#ffffff') } };
   const pulseGeo = new THREE.RingGeometry(.84, 1, 64, 1);
   const pulseMat = new THREE.ShaderMaterial({
@@ -1621,7 +1685,10 @@ export function createWorld(THREE, scene, opts) {
     const idx = ((i % SIGN_COUNT) + SIGN_COUNT) % SIGN_COUNT;
     if (idx === current) return ZODIAC[idx];
     current = idx;
-    hoverNode = -1; pulseLife = 1; pulse.visible = false; sparks.visible = false;
+    hoverNode = -1; hoverMix = 0; pulseLife = 1; pulse.visible = false; sparks.visible = false;
+    scanner.visible = false; scannerMix = 0;
+    scannerMat.uniforms.uLock.value = 0;
+    scannerMat.uniforms.uCharge.value = 0;
     shapeMat.uniforms.uBurst.value = 0;
     shapeMat.uniforms.uBurstAge.value = 1;
     shapeMat.uniforms.uPointerAmount.value = 0;
@@ -1639,22 +1706,15 @@ export function createWorld(THREE, scene, opts) {
     hazeMat.uniforms.uTint.value.copy(color.haze);
     nodeMat.uniforms.uTint.value.copy(color.node);
     discMat.uniforms.uColor.value.copy(color.star);
-    // 能量场跟座次换色：外环用星芯色、内环用副色，地面用冷色压低亮度，
-    // 轨道星尘在星芯色与副色之间渐变 —— 十二座各有自己的「能量签名」。
-    const ringPalette = [
-      [color.star, color.cool],
-      [color.secondary, color.star],
-      [color.particleRim, color.secondary],
-    ];
     ringMats.forEach((material, k) => {
-      const pair = ringPalette[k] || ringPalette[0];
-      material.uniforms.uColorA.value.copy(pair[0]);
-      material.uniforms.uColorB.value.copy(pair[1]);
+      material.uniforms.uColorA.value.setRGB(.30 + k * .055, .68 + k * .035, .86);
+      material.uniforms.uColorB.value.copy(color.star);
+      material.uniforms.uAttention.value = 0;
     });
-    gridMat.uniforms.uColorA.value.copy(color.cool).multiplyScalar(.58);
-    gridMat.uniforms.uColorB.value.copy(color.secondary).multiplyScalar(.42);
-    orbitMat.uniforms.uColorA.value.copy(color.star);
-    orbitMat.uniforms.uColorB.value.copy(color.secondary);
+    gridMat.uniforms.uColorA.value.setRGB(.24, .55, .68);
+    gridMat.uniforms.uColorB.value.setRGB(.36, .43, .58);
+    orbitMat.uniforms.uColorA.value.setRGB(.58, .80, .94);
+    orbitMat.uniforms.uColorB.value.copy(color.star);
     charge = 0;
     surge = 0;
     pulsePower = 1;
@@ -1791,8 +1851,8 @@ export function createWorld(THREE, scene, opts) {
     surge = reduced ? 0 : damp(surge, 0, .34, uiDt);
     parallaxX = reduced ? 0 : damp(parallaxX, allowPointer ? pointer.x : 0, .18, uiDt);
     parallaxY = reduced ? 0 : damp(parallaxY, allowPointer ? pointer.y : 0, .18, uiDt);
-    root.position.set(parallaxX * .12, parallaxY * .08, 0);
-    dustGroup.position.set(-parallaxX * .28, -parallaxY * .16, 0);
+    root.position.set(parallaxX * .19, parallaxY * .12, 0);
+    dustGroup.position.set(-parallaxX * .50, -parallaxY * .28, 0);
 
     // 造型自转改成「以播放时间为唯一输入」的微摆：seek 到任意时刻画面一致，
     // 暂停时冻结；微摆展示立体侧面，同时保持剪影可识别。幅度比早期版本更大：
@@ -1804,7 +1864,7 @@ export function createWorld(THREE, scene, opts) {
     root.scale.setScalar(state === 'gather' ? breathe * (0.92 + k * 0.08) : breathe);
 
     const pointerStrength = clamp(Number(c.pointerStrength ?? 1), 0, 2);
-    const localPointer = allowPointer && pointerStrength > 0 ? localFromPointer(pointer, c.camera) : null;
+    const localPointer = allowPointer ? localFromPointer(pointer, c.camera) : null;
     const amount = shapeMat.uniforms.uPointerAmount;
     amount.value = reduced ? 0 : damp(amount.value, localPointer ? pointerStrength : 0, .12, uiDt);
     if (localPointer) shapeMat.uniforms.uPointer.value.copy(localPointer);
@@ -1823,6 +1883,27 @@ export function createWorld(THREE, scene, opts) {
     discMat.uniforms.uHoverIndex.value = hoverNode;
     hoverMix = damp(hoverMix, hoverNode >= 0 ? 1 : 0, .09, uiDt);
     discMat.uniforms.uHoverMix.value = hoverMix;
+
+    const scannerActive = !!(allowPointer && localPointer && figureOpacity(state, k) > .05);
+    scannerMix = scannerActive ? damp(scannerMix, 1, .08, uiDt) : 0;
+    if (scannerActive) {
+      const line = lines[current];
+      if (hovered) scannerTarget.set(line.x[hoverNode], line.y[hoverNode], line.z[hoverNode]);
+      else scannerTarget.copy(localPointer);
+      if (!scanner.visible) scanner.position.copy(scannerTarget);
+      else scanner.position.lerp(scannerTarget, 1 - Math.exp(-uiDt / .045));
+      figureGroup.getWorldQuaternion(scannerRotation).invert();
+      scanner.quaternion.copy(scannerRotation).multiply(c.camera.quaternion);
+      scanner.getWorldPosition(scannerWorld);
+      const pixelScale = 2 * scannerWorld.distanceTo(c.camera.position) * Math.tan(c.camera.fov * Math.PI / 360) / Math.max(1, c.height);
+      scanner.scale.setScalar(pixelScale * (42 - hoverMix * 8 - charge * 5) / root.scale.x);
+    }
+    scanner.visible = scannerActive;
+    scannerMat.uniforms.uTime.value = effectTime;
+    scannerMat.uniforms.uOpacity.value = scannerMix;
+    scannerMat.uniforms.uLock.value = hoverMix;
+    scannerMat.uniforms.uCharge.value = charge;
+    scannerMat.uniforms.uSurge.value = surge;
 
     if (pointer && pointer.click && pointer.click.serial !== lastClickSerial) {
       lastClickSerial = pointer.click.serial;
@@ -1859,7 +1940,7 @@ export function createWorld(THREE, scene, opts) {
     hazeMat.uniforms.uTime.value = time;
     // 体积面罩：它自己几乎不发光（回归线把面罩的自发光量卡在上限），存在感
     // 全部来自遮挡 —— 背景星与背壳星尘被它挡住，加上逐面明暗勾出的侧壁。
-    meshMat.uniforms.uOpacity.value = 0.05 * figAlpha;
+    meshMat.uniforms.uOpacity.value = 0.62 * figAlpha;
     meshMat.uniforms.uKeyDir.value.copy(shapeMat.uniforms.uKeyDir.value);
     edgeCoreMat.opacity = 0.28 * figAlpha;
     edgeHaloMat.opacity = (0.075 + bass * 0.035) * figAlpha;
@@ -1886,17 +1967,22 @@ export function createWorld(THREE, scene, opts) {
     grid.visible = auraVisible && gridAllowed;
     skyMat.uniforms.uTime.value = effectTime;
     gridMat.uniforms.uTime.value = effectTime;
-    gridMat.uniforms.uOpacity.value = 0.34 * figAlpha;
+    gridMat.uniforms.uOpacity.value = 0.14 * figAlpha;
     gridMat.uniforms.uBass.value = reduced ? 0 : bass;
     gridMat.uniforms.uOnset.value = reduced ? 0 : onset;
     gridMat.uniforms.uCharge.value = charge;
     for (let i = 0; i < ringMats.length; i += 1) {
       const material = ringMats[i], mesh = ringMeshes[i], rig = RING_RIGS[i];
       material.uniforms.uTime.value = effectTime;
-      material.uniforms.uOpacity.value = (0.32 + i * 0.05) * figAlpha;
+      material.uniforms.uOpacity.value = (0.70 - i * 0.08) * figAlpha;
       material.uniforms.uBass.value = reduced ? 0 : bass;
       material.uniforms.uOnset.value = reduced ? 0 : onset;
       material.uniforms.uCharge.value = charge;
+      material.uniforms.uAttention.value = scannerMix;
+      if (scannerActive) {
+        mesh.worldToLocal(pickVec.copy(scannerWorld));
+        material.uniforms.uBearing.value = Math.atan2(pickVec.y, pickVec.x);
+      }
       if (reduced) {
         mesh.rotation.set(rig.x, rig.y, rig.z);
         mesh.scale.setScalar(rig.scale);
@@ -1911,7 +1997,7 @@ export function createWorld(THREE, scene, opts) {
       }
     }
     orbitMat.uniforms.uTime.value = effectTime;
-    orbitMat.uniforms.uOpacity.value = figAlpha * (reduced ? 0.35 : 0.90);
+    orbitMat.uniforms.uOpacity.value = figAlpha * (reduced ? 0.22 : 0.48);
     orbitMat.uniforms.uBass.value = reduced ? 0 : bass;
     orbitMat.uniforms.uOnset.value = reduced ? 0 : onset;
     orbitMat.uniforms.uCharge.value = charge;
@@ -1957,7 +2043,8 @@ export function createWorld(THREE, scene, opts) {
       constellationSegments: current < 0 ? 0 : lines[current].segments,
       figureAlpha: Math.round(figAlpha * 1000) / 1000,
       sky: true,
-      layers: 21,
+      layers: 22,
+      scannerActive: scanner.visible,
       charge: Math.round(charge * 1000) / 1000,
       surge: Math.round(surge * 1000) / 1000,
       auraRings: RING_COUNTS[activeQuality] || 3,

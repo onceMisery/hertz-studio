@@ -18,11 +18,11 @@ async function renderContract(browser) {
     canvas.getContext = (type, ...args) => { const value = original(type, ...args); if (/webgl/.test(type)) window.gl = value; return value; };
     window.host = SpaceStagePure.create(canvas, { qualityMode: 'medium', deviceTier: 'high' });
     await host.select('butterfly-vortex'); host.resize(innerWidth, innerHeight);
-    window.clock = 0;
+    window.clock = 0; window.pointerSerial = 0;
     window.draw = (extra = {}) => {
       clock += 100;
       host.frame({ now: clock, sceneTime: clock / 1000, time: clock / 1000, dt: 0, dynamicDt: 0, playing: true,
-        bands: { bass: 0, mid: 0, treble: 0 }, pointer: { active: false, click: { serial: 0, x: 0, y: 0 } }, ...extra });
+        bands: { bass: 0, mid: 0, treble: 0 }, pointer: { active: false, click: { serial: pointerSerial, x: 0, y: 0 } }, ...extra });
       const pixels = new Uint8Array(gl.drawingBufferWidth * gl.drawingBufferHeight * 4);
       gl.readPixels(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
       let hash = 2166136261, lit = 0;
@@ -30,6 +30,13 @@ async function renderContract(browser) {
         const value = pixels[i] + pixels[i + 1] + pixels[i + 2]; hash = Math.imul(hash ^ value, 16777619); if (value > 60) lit++;
       }
       return { hash: hash >>> 0, lit };
+    };
+    window.tick = (count, pointer) => {
+      for (let i = 0; i < count; i++) {
+        clock += 16;
+        host.frame({ now: clock, sceneTime: clock / 1000, time: clock / 1000, dt: .016, dynamicDt: .016, playing: true,
+          bands: { bass: .35, mid: .22, treble: .15 }, pointer });
+      }
     };
   });
   const signals = await page.evaluate(() => {
@@ -60,6 +67,27 @@ async function renderContract(browser) {
     await page.screenshot({ path: path.join(output, mode + '.png') });
   }
   assert.equal(new Set(Object.values(phases).map(p => p.pixels.hash)).size, 3, 'three performance modes render distinct compositions');
+  const hand = await page.evaluate(() => {
+    const idle = draw();
+    tick(90, { active: true, down: true, dragging: false, x: .16, y: .1, click: { serial: 0, x: .16, y: .1 } });
+    const held = { pixels: draw(), stats: host.stats().sceneStats.primary };
+    for (let i = 0; i < 90; i++) {
+      const angle = i * .16;
+      tick(1, { active: true, down: false, dragging: true, x: Math.cos(angle) * .3, y: Math.sin(angle) * .3, click: { serial: 0, x: 0, y: 0 } });
+    }
+    const dragged = { pixels: draw(), stats: host.stats().sceneStats.primary };
+    tick(1, { active: true, down: false, dragging: false, x: .2, y: .08, click: { serial: 1, x: .2, y: .08 } });
+    tick(6, { active: true, down: false, dragging: false, x: .2, y: .08, click: { serial: 1, x: .2, y: .08 } });
+    pointerSerial = 1;
+    const clicked = { pixels: draw(), stats: host.stats().sceneStats.primary };
+    return { idle, held, dragged, clicked };
+  });
+  assert.ok(hand.held.stats.charge > .8, 'holding the pointer inhales the vortex');
+  assert.ok(Math.abs(hand.dragged.stats.stir) > .3, 'dragging around the center stirs the vortex');
+  assert.equal(hand.clicked.stats.bursts, hand.dragged.stats.bursts + 1, 'clicking at the vortex releases one shockwave');
+  assert.notEqual(hand.held.pixels.hash, hand.idle.hash, 'charging changes actual vortex pixels');
+  assert.notEqual(hand.clicked.pixels.hash, hand.dragged.pixels.hash, 'click feedback changes actual vortex pixels');
+  await page.screenshot({ path: path.join(output, 'hand-vortex.png') });
   const reduced = await page.evaluate(() => {
     const first = draw({ reduced: true, dynamicDt: 0 });
     const second = draw({ reduced: true, dynamicDt: 0, time: 300, sceneTime: 300, bands: { bass: .9, mid: .7, treble: .8 }, pointer: { active: true, x: -.8, y: .9, click: { serial: 99, x: -.8, y: .9 } } });
@@ -84,6 +112,69 @@ async function renderContract(browser) {
   assert.deepEqual(errors, [], 'no shader or runtime errors');
   await page.close();
   return { signals, phases, reduced, portrait };
+}
+
+async function fireContract(browser) {
+  const { buildSync } = require(path.join(root, 'tools/space-stage/node_modules/esbuild'));
+  const bundled = buildSync({ stdin: { contents: `
+    import * as THREE from 'three';
+    import { createScope } from './src/scope.js';
+    import { createButterflyVortex } from './src/scenes/butterfly-vortex.js';
+    window.fireModules = { THREE, createScope, createButterflyVortex };
+  `, resolveDir: path.join(root, 'tools/space-stage') }, bundle: true, format: 'iife', write: false });
+  const page = await browser.newPage({ viewport: { width: 1280, height: 720 } }), errors = [];
+  page.on('pageerror', e => errors.push(e.message));
+  page.on('console', m => { if (m.type() === 'error') errors.push(m.text()); });
+  try {
+    await page.setContent('<body style="margin:0"><canvas></canvas></body>');
+    await page.addScriptTag({ content: bundled.outputFiles[0].text });
+    const evidence = await page.evaluate(() => {
+      const { THREE, createScope, createButterflyVortex } = fireModules;
+      const renderer = new THREE.WebGLRenderer({ canvas: document.querySelector('canvas') });
+      renderer.setSize(1280, 720);
+      const scene = new THREE.Scene(), camera = new THREE.PerspectiveCamera(48, 1280 / 720, .05, 900), scope = createScope();
+      camera.position.set(0, .5, 17); camera.lookAt(0, .5, 0);
+      const instance = createButterflyVortex({ THREE, scene, camera, renderer, scope,
+        params: { performance: 'vortex', density: 1 }, quality: { mode: 'low', density: .4 }, services: {} });
+      instance.resize(1280, 720);
+      const flames = scene.getObjectByName('butterfly-flames'), embers = scene.getObjectByName('butterfly-embers');
+      const uniforms = flames.material.uniforms, gl = renderer.getContext();
+      const pixels = () => {
+        renderer.render(scene, camera);
+        const data = new Uint8Array(1280 * 720 * 4);
+        gl.readPixels(0, 0, 1280, 720, gl.RGBA, gl.UNSIGNED_BYTE, data);
+        return data;
+      };
+      const difference = (a, b) => { let changed = 0; for (let i = 0; i < a.length; i += 4) if (Math.abs(a[i] - b[i]) + Math.abs(a[i + 1] - b[i + 1]) + Math.abs(a[i + 2] - b[i + 2]) > 12) changed++; return changed; };
+      const frame = { dt: .1, bands: { bass: 0, mid: 0, treble: 0 } };
+      for (let i = 0; i < 65; i++) instance.update(frame);
+      const burning = pixels(), counts = { ...renderer.info.render };
+      uniforms.uFire.value = 0;
+      const unlit = pixels();
+      uniforms.uFire.value = 1; flames.visible = false;
+      const noFlames = pixels();
+      flames.visible = true; embers.visible = false;
+      const noEmbers = pixels();
+      embers.visible = true;
+      const frozen = pixels();
+      instance.update({ ...frame, reduced: true, time: 999 });
+      const freezeDifference = difference(frozen, pixels());
+      uniforms.uTime.value += .35;
+      const motionDifference = difference(frozen, pixels());
+      const result = { firePixels: difference(burning, unlit), flamePixels: difference(burning, noFlames),
+        emberPixels: difference(burning, noEmbers), freezeDifference, motionDifference, counts };
+      instance.dispose(); scope.dispose(); renderer.dispose();
+      return result;
+    });
+    assert.ok(evidence.firePixels > 500, 'burning changes actual small-butterfly pixels');
+    assert.ok(evidence.flamePixels > 100, 'the outer flame layer contributes visible pixels');
+    assert.ok(evidence.emberPixels > 20, 'attached ember trails contribute visible pixels');
+    assert.equal(evidence.freezeDifference, 0, 'burning freezes in reduced motion');
+    assert.ok(evidence.motionDifference > 100, 'fire and butterflies animate when the clock advances');
+    assert.ok(evidence.counts.calls <= 40 && evidence.counts.points <= 12000 && evidence.counts.triangles <= 80000, 'burning respects low-quality GPU budgets');
+    assert.deepEqual(errors, [], 'fire layers compile and render without WebGL errors');
+    return evidence;
+  } finally { await page.close(); }
 }
 
 async function appContract(browser) {
@@ -166,8 +257,9 @@ async function appContract(browser) {
     args: ['--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--disable-features=LocalNetworkAccessChecks,LocalNetworkAccessChecksWebSockets'] });
   try {
     const rendered = await renderContract(browser);
+    const fire = await fireContract(browser);
     const app = await appContract(browser);
-    fs.writeFileSync(path.join(output, 'evidence.json'), JSON.stringify({ renderer: 'software WebGL2', hardwareFps: 'unmeasured', rendered, app }, null, 2));
-    console.log('Butterfly browser checks passed: three compositions, actual audio/pointer pixels, disabled controls, frozen pixels, real app mouse/touch/camera, portrait and cleanup. Hardware FPS unmeasured.');
+    fs.writeFileSync(path.join(output, 'evidence.json'), JSON.stringify({ renderer: 'software WebGL2', hardwareFps: 'unmeasured', rendered, fire, app }, null, 2));
+    console.log('Butterfly browser checks passed: three compositions, attached flame/ember pixels, low-quality fire budget, actual audio/pointer pixels, disabled controls, frozen pixels, real app mouse/touch/camera, portrait and cleanup. Hardware FPS unmeasured.');
   } finally { await browser.close(); }
 })().catch(error => { console.error(error); process.exitCode = 1; });

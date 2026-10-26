@@ -19,7 +19,7 @@ async function main() {
   const fixture = await startFixture();
   process.env.VMUSIC_DATA_DIR = fixture.dataDir;
   const browser = await chromium.launch({ channel: process.env.PLAYWRIGHT_CHANNEL || 'chrome', headless: true,
-    args: ['--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--disable-features=LocalNetworkAccessChecks,LocalNetworkAccessChecksWebSockets'] });
+    args: ['--enable-unsafe-swiftshader', '--disable-features=LocalNetworkAccessChecks,LocalNetworkAccessChecksWebSockets'] });
   const errors = [], report = {};
   try {
     const context = await browser.newContext({ viewport: { width: 1707, height: 898 }, deviceScaleFactor: 1 });
@@ -50,10 +50,13 @@ async function main() {
     await page.waitForFunction(() => window.Space3D && document.getElementById('space3d').dataset.spReady === '1');
     await page.evaluate(() => {
       const original = Stage.presentation.bind(Stage);
+      window.zodiacMotionPlaying = true;
       Stage.presentation = () => ({ ...original(), track: { id: 'zodiac-observatory', title: 'Starlight', artist: 'Hertz Studio' },
-        playing: true, position: 7000, duration: 240000, cover: '' });
+        playing: window.zodiacMotionPlaying, position: 7000, duration: 240000, cover: '' });
       Stage.spectrum = () => new Float32Array(64).fill(.12);
-      Space3D.configure({ ...Space3D.preferences(), sceneSource: 'zodiac', lyrics: false, cinema: false });
+      const prefs = Space3D.preferences();
+      Space3D.configure({ ...prefs, sceneSource: 'zodiac', lyrics: false, cinema: false,
+        sceneStates: { ...prefs.sceneStates, zodiac: SpaceStagePure.normalizeState('zodiac', { params: { sign: 'aries' } }) } });
       Space3D.open('zodiac');
     });
     await page.waitForFunction(() => Space3D.stats().renderer?.state === 'ready');
@@ -67,6 +70,9 @@ async function main() {
     await page.screenshot({ path: path.join(output, 'shower.png') });
     await page.waitForTimeout(300);
     await page.screenshot({ path: path.join(output, 'stage.png') });
+    await page.evaluate(() => { window.zodiacMotionPlaying = false; });
+    await page.mouse.move(850, 600);
+    await page.waitForFunction(() => !Space3D.stats().renderer.sceneStats.primary.playing);
     const ready = await page.evaluate(() => {
       const hud = document.getElementById('sp-zodiac-hud');
       const primary = Space3D.stats().renderer.sceneStats.primary;
@@ -103,8 +109,17 @@ async function main() {
     const currentTarget = await page.evaluate(index => Space3D.stats().renderer.sceneStats.primary.stars.find(star => star.index === index), target.index);
     await page.mouse.move(currentTarget.px, currentTarget.py);
     await page.waitForTimeout(250);
+    report.beforeClick = await page.evaluate(({ x, y, index }) => ({ target: { x, y },
+      hitElement: document.elementFromPoint(x, y)?.className,
+      projected: Space3D.stats().renderer.sceneStats.primary.stars.find(star => star.index === index),
+      hover: Space3D.stats().renderer.sceneStats.primary.hover }), { x: currentTarget.px, y: currentTarget.py, index: target.index });
     await page.mouse.click(currentTarget.px, currentTarget.py);
-    await page.waitForFunction(() => document.getElementById('sp-zodiac-star').classList.contains('is-pinned'));
+    try {
+      await page.waitForFunction(() => document.getElementById('sp-zodiac-star').classList.contains('is-pinned'), null, { timeout: 3000 });
+    } catch (error) {
+      console.error(JSON.stringify({ beforeClick: report.beforeClick, afterClick: await page.evaluate(() => Space3D.stats().renderer.sceneStats.primary) }));
+      throw error;
+    }
     const pinned = await page.evaluate(() => ({ pinned: document.getElementById('sp-zodiac-star').classList.contains('is-pinned'),
       name: document.getElementById('sp-zodiac-star-name').textContent }));
     report.pinned = pinned;
@@ -112,6 +127,35 @@ async function main() {
     await page.mouse.move(100, 700);
     await page.waitForTimeout(2900);
     assert.equal(await page.evaluate(() => document.getElementById('sp-zodiac-star').hidden), true, 'pinned card expires');
+
+    await page.mouse.move(1210, 520);
+    await page.mouse.down();
+    await page.waitForFunction(() => Space3D.stats().renderer.sceneStats.primary.charge >= .98);
+    await page.waitForFunction(() => document.querySelector('.sp-zodiac-hint').textContent.includes('蓄能完成'));
+    report.charge = await page.evaluate(() => ({ value: Space3D.stats().renderer.sceneStats.primary.charge,
+      scanner: Space3D.stats().renderer.sceneStats.primary.scannerActive,
+      hint: document.querySelector('.sp-zodiac-hint').textContent }));
+    assert.equal(report.charge.scanner, true, 'holding shows the spatial charge scanner');
+    await page.screenshot({ path: path.join(output, 'charge.png') });
+    await page.mouse.up();
+    await page.waitForFunction(() => Space3D.stats().renderer.sceneStats.primary.surge > .5);
+    await page.waitForTimeout(1500);
+    const beforeDrag = await page.evaluate(() => Space3D.stats().camera);
+    await page.mouse.move(1150, 550);
+    await page.mouse.down();
+    await page.mouse.move(1300, 580, { steps: 12 });
+    await page.waitForFunction(previous => Space3D.stats().camera.world.y !== previous, beforeDrag.world.y);
+    const dragged = await page.evaluate(() => ({ camera: Space3D.stats().camera, scanner: Space3D.stats().renderer.sceneStats.primary.scannerActive }));
+    await page.mouse.up();
+    assert.notEqual(dragged.camera.world.y, beforeDrag.world.y, 'drag rotates the rendered world-space camera pose');
+    assert.equal(dragged.scanner, false, 'dragging gives pointer ownership to the camera');
+    await page.mouse.wheel(0, -160);
+    await page.waitForTimeout(400);
+    const zoomed = await page.evaluate(() => Space3D.stats().camera);
+    assert.notEqual(zoomed.radius, dragged.camera.radius, 'wheel changes the actual stage camera distance');
+    await page.mouse.dblclick(1200, 530);
+    await page.waitForTimeout(700);
+    report.camera = { before: beforeDrag, dragged: dragged.camera, zoomed };
 
     const parallax = await (async () => {
       await page.mouse.move(850, 500);
@@ -171,6 +215,18 @@ async function main() {
     assert.ok(mobile.width > 40 && mobile.top < 160 && mobile.right <= 390, 'mobile HUD stays inside the viewport');
     assert.equal(mobile.overflow, false, 'mobile stage has no horizontal overflow');
     await page.screenshot({ path: path.join(output, 'mobile.png') });
+    await page.mouse.move(150, 95);
+    await page.waitForFunction(() => !Space3D.stats().renderer.sceneStats.primary.scannerActive);
+    const touch = await context.newCDPSession(page);
+    await touch.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: 180, y: 430 }] });
+    await page.waitForFunction(() => Space3D.stats().renderer.sceneStats.primary.charge >= .98, null, { timeout: 5000 });
+    report.touch = await page.evaluate(() => ({ charge: Space3D.stats().renderer.sceneStats.primary.charge,
+      scanner: Space3D.stats().renderer.sceneStats.primary.scannerActive }));
+    assert.equal(report.touch.scanner, true, 'first touch activates the scanner without a preceding mouse move');
+    await page.screenshot({ path: path.join(output, 'touch-charge.png') });
+    await touch.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    await page.waitForFunction(() => Space3D.stats().renderer.sceneStats.primary.surge > .5);
+    await touch.detach();
     await page.setViewportSize({ width: 1707, height: 898 });
     await page.waitForTimeout(300);
     await page.evaluate(() => Space3D.setSource('coast'));

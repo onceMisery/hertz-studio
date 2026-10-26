@@ -33,7 +33,7 @@ async function main() {
       const camera = new THREE.PerspectiveCamera(42, 1440 / 900, .1, 300);
       const world = createWorld(THREE, scene, { quality: 'high' });
       world.setSign(4);
-      window.draw = (time, context = {}, yaw = 0, shellOpacity = null) => {
+      window.draw = (time, context = {}, yaw = 0, surfaceEmission = null) => {
         camera.position.set(Math.sin(yaw) * 10, 0, Math.cos(yaw) * 10);
         camera.lookAt(0, 0, 0);
         world.update(time, { state: 'hold', k: 1, cameraPos: camera.position, ...context });
@@ -50,11 +50,17 @@ async function main() {
         // Remove scene rotation so pixel differences measure shader motion only.
         scene.children.forEach(o => { if (o.isGroup) o.rotation.set(0, 0, 0); });
         scene.children.forEach(o => { if (o.isMesh && o.material.uniforms?.uTime) o.material.uniforms.uTime.value = 0; });
-        // 面罩的不透明度每帧由引擎写回，测它自己的发光量要在写回之后再覆盖。
-        if (shellOpacity !== null) scene.traverse(o => { if (o.isMesh && o.renderOrder === -90) o.material.opacity = shellOpacity; });
+        const surfaceColors = [];
+        if (surfaceEmission !== null) scene.traverse(o => {
+          if (o.isMesh && o.renderOrder === -90) for (const name of ['uColor', 'uRim']) {
+            const color = o.material.uniforms[name].value;
+            surfaceColors.push([color, color.clone()]); color.multiplyScalar(surfaceEmission);
+          }
+        });
         renderer.render(scene, camera);
         const gl = renderer.getContext(), pixels = new Uint8Array(1440 * 900 * 4);
         gl.readPixels(0, 0, 1440, 900, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+        surfaceColors.forEach(([color, original]) => color.copy(original));
         return pixels;
       };
       window.compare = (a, b) => {
@@ -150,20 +156,29 @@ async function main() {
       }
       const sky = scene.children.find(o => o.isMesh && o.renderOrder === -1000);
       const texture = sky.material.uniforms.uGalaxy.value;
+      let peak = 0, warm = 0, cool = 0;
+      const data = texture.image.data;
+      for (let i = 0; i < data.length; i += 4) {
+        peak = Math.max(peak, data[i], data[i + 1], data[i + 2]);
+        if (data[i] > 40 && data[i] > data[i + 2] * 1.05) warm++;
+        if (data[i + 2] > 25 && data[i + 2] > data[i] * 1.2) cool++;
+      }
       let disposed = false;
       texture.addEventListener('dispose', () => { disposed = true; });
       window.galaxyDisposed = () => disposed;
-      return { stars, dust, dark, pixels: pixels.length/4, width: texture.image.width };
+      return { stars, dust, dark, pixels: pixels.length/4, width: texture.image.width, peak, warm, cool };
     });
     assert.ok(galaxy.stars > 2000, 'Milky Way must have dense photographic pinpoints: ' + JSON.stringify(galaxy));
     assert.ok(galaxy.dust > 10000 && galaxy.dust < galaxy.pixels*.5, 'Lavender dust must remain localized');
-    assert.ok(galaxy.dark > galaxy.pixels*.5, 'Most of the sky must remain near black');
+    assert.ok(galaxy.dark > galaxy.pixels*.5, 'Most of the sky must remain near black: ' + JSON.stringify(galaxy));
     assert.equal(galaxy.width, 2048, 'High quality must use a detailed, pre-baked dust texture');
+    assert.ok(galaxy.peak > 90, 'The galactic core must have localized highlights, not a flat dim wash');
+    assert.ok(galaxy.warm > 1000 && galaxy.cool > 10000, 'Warm core and cool dust must both occupy visible areas');
     const starlight = await page.evaluate(() => {
       const full = draw(5.2);
       let surface;
       scene.traverse(o => { if (o.isMesh && o.renderOrder === -90) surface = o; });
-      // 把面罩调到全透明（仍然写深度）：差值只剩它自己发出的光。
+      // Keep absorption unchanged so the difference measures emission, not the sky behind it.
       const emission = draw(5.2, {}, 0, 0);
       surface.visible = false;
       const dustOnly = draw(5.2);
