@@ -567,6 +567,7 @@ pwsh -File scripts/smoke.ps1 7899 # Windows
 | W0–W3 桌面壁纸 | W0 稳定通过；W1-A 相机 registry/只读快照契约已实现；W1-B 首片已接 WorkerW 目标屏 surface、混合 DPI（第二屏 96/144 实测）、快照+事件 feed、托盘、设置页、15 秒预览租约、Explorer 重启恢复、主应用管理通道与多 profile/发行版切换；W3 单屏拓扑重排、WebView 失联恢复与诊断投影已接；W1-C 安装升级验收与多屏同时运行未做 | [desktop-wallpaper.md](docs/desktop-wallpaper.md) |
 | L0–L3 桌面歌词 | **L1 首版已实现**：服务端只读快照/文档桥、Windows 透明置顶与锁定穿透、托盘恢复、播放器启动与解锁定位、本机管理通道；L1-C 发布验收与 DBX 入口未做 | [desktop-lyrics.md](docs/desktop-lyrics.md) |
 | 桌面公共契约与原生验证 | 单实例、来源切换、配置/应用状态、IPC、自启与部署统一设计；L0/W0 已有实机探针结果，L1 首版按本契约落地；本机管理通道与来源切换已通，发布验收仍未完成 | [共享宿主](docs/desktop-host.md) · [原生验证计划](docs/plans/2026-10-23-desktop-native-validation.md) |
+| LAN-L 局域网一起听 | 房主统一渲染、接收端按设备时钟同步；含受限配对/撤权、旧播控入口模式门禁，以及互动弹幕的独立有界存储。**设计提案待评审、尚未实施**，不依赖桌面专项 | [lan-listening.md](docs/lan-listening.md) |
 | 创意舞台二期（P8） | 基频轨迹已能本地分析与只读查看；工程、模板、分享码、视频导出已落地，人工视觉与音乐质量验收未做 | [pitch-track.md](docs/pitch-track.md) · [stage-projects.md](docs/stage-projects.md) · [stage-templates.md](docs/stage-templates.md) · [orchestration-art.md](docs/orchestration-art.md) · [video-export.md](docs/video-export.md) |
 | 星座场景视觉 | 逐座造型、配色与动效按文档调过一轮，可拖拽环绕、滚轮缩放、双击复位 | [zodiac-visual-tuning.md](docs/zodiac-visual-tuning.md) |
 | 搜索性能基线 | 五万曲本机 P95 与受控上游时延有基线，不替代真实来源 / 弱网 / 弱机验收 | [search-performance.md](docs/search-performance.md) |
@@ -577,7 +578,7 @@ pwsh -File scripts/smoke.ps1 7899 # Windows
 | DBX 上架 | 规则出处、字段填法与当前提交状态 | [dbx-store-submission.md](docs/dbx-store-submission.md) |
 | 参考与可行性评估 | VCPChat 对照、自研舞台引擎可行性、技术方案的独立评估（结论已回写进上面两份路线图） | [vcpchat-reference-assessment.md](docs/vcpchat-reference-assessment.md) · [stage-engine-feasibility.md](docs/stage-engine-feasibility.md) · [technical-roadmap-assessment.md](docs/technical-roadmap-assessment.md) |
 
-明确**不做**的也写在路线图里，免得被当成待办：云同步 / 多用户 / 远程 MCP、在线热加载
+明确**不做**的也写在路线图里，免得被当成待办：云同步 / 云端多用户账号体系 / 远程 MCP、在线热加载
 SVG/GLSL/JS、新增皮肤与新增平台、通用 agent、动态代码生成、向量库、完整 DSP 图、
 用模型直接改当前舞台、时间轴式 StageIntent（按 `unsupported_timeline` 拒绝）。
 
