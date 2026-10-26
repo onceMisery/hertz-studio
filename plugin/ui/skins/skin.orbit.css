@@ -185,6 +185,17 @@
 [data-skin="orbit"] .orbit-rig .disc.is-empty { background-image: none; }
 [data-skin="orbit"] .orbit-rig .disc { filter: none; }
 [data-skin="orbit"] body.is-playing .orbit-rig .disc { animation-play-state: running; }
+/* stage.css 的低性能降级会 !important 停掉所有 .disc 旋转（那是为经典舞台的
+   大面积模糊定的）。星轨的唱片旋转只是一次合成器 transform，停了皮肤就只剩
+   一张静图；这里接回来，但明确让减少动效的两条通道继续赢。 */
+@media (prefers-reduced-motion: no-preference) {
+  [data-skin="orbit"] body.stage-lowfx:not(.reduce-motion) .orbit-rig .disc {
+    animation: orbit-spin 5.5s linear infinite paused !important;
+  }
+  [data-skin="orbit"] body.stage-lowfx.is-playing:not(.reduce-motion) .orbit-rig .disc {
+    animation-play-state: running !important;
+  }
+}
 [data-skin="orbit"] .orbit-rig .disc::before {
   content: ""; position: absolute; inset: 0; border: 0; border-radius: 50%;
   background: conic-gradient(from 20deg, transparent 8%, var(--record-glint) 14%, transparent 22% 55%, var(--record-glint) 64%, transparent 72%),
