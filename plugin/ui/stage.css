@@ -975,8 +975,7 @@ body.reduce-motion .stage-ctl, body.reduce-motion .sc-cell { transition: none; }
 .sc-pill:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 /* 分段选择：一体框内的互斥段，当前段 accent 字色 + 10% 底。
-   语境切换、来源切换、封面布局、歌词字体、舞台主题共用这一套。 */
-.sc-context,
+   来源切换、封面布局、歌词字体、舞台主题共用这一套。 */
 .sc-seg {
   display: flex;
   border-radius: 11px;
@@ -984,7 +983,6 @@ body.reduce-motion .stage-ctl, body.reduce-motion .sc-cell { transition: none; }
   overflow: hidden;
   background: var(--panel);
 }
-.sc-context { margin: 0 12px 8px; flex: none; }
 .sc-seg-btn {
   flex: 1;
   min-height: 34px;

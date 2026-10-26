@@ -37,6 +37,18 @@
   // -------------------------------------------------------------------------
   var SCHEMA = [
     {
+      id: 'stage',
+      title: '二维舞台场景',
+      items: [],
+      selects: [
+        {
+          key: 'stagePreset', label: '场景主题', def: 'venue', wide: true,
+          aliases: ['主题', '预设', '场景', '舞台样式', '二维'],
+          options: [['venue', '第一现场 · 舞台'], ['diorama', '纸雕剧场'], ['tempo', '节拍律动'], ['still', '静帧']]
+        }
+      ]
+    },
+    {
       id: 'lens',
       title: '镜头光学',
       items: [
@@ -141,13 +153,6 @@
           aliases: ['滤镜', '开关', '特效', '启用'] },
         { key: 'intensity', label: '滤镜强度', min: 0, max: 200, step: 1, unit: '%', def: 100, wide: true,
           aliases: ['强度', '总强度', '浓度'] }
-      ],
-      selects: [
-        {
-          key: 'stagePreset', label: '舞台主题', def: 'venue',
-          aliases: ['主题', '预设', '场景', '舞台样式'],
-          options: [['venue', '第一现场 · 舞台'], ['diorama', '纸雕剧场'], ['tempo', '节拍律动'], ['still', '静帧']]
-        }
       ]
     }
   ];
@@ -157,8 +162,8 @@
   //
   // 与上面的 SCHEMA 是两条完全独立的管线：这里的控件不进 values/els/撤销栈，
   // 也不落 localStorage —— 状态属主是 Stage3D 的偏好表（preferences() 读、
-  // configure()+save() 写，写完即时生效并由宿主落库）。语境分段只决定面板
-  // 显示哪套内容；打开时自动跟随当前舞台状态，也可手动互切。
+  // configure()+save() 写，写完即时生效并由宿主落库）。语境跟随当前舞台自动
+  // 切换：二维舞台只出二维场景，三维舞台只出来源偏好，不做手动互切。
   // -------------------------------------------------------------------------
   var SCHEMA_3D = {
     sources: [
@@ -171,7 +176,6 @@
   };
 
   var context = 'flat';   // 'flat' = 普通舞台旋钮 | '3d' = 真3D 偏好
-  var pinned3D = false;   // 手动切到真3D 后，本次打开期间不再被自动检测拉回
 
   function stage3D() { return window.Stage3D || null; }
 
@@ -203,27 +207,11 @@
     if (S3 && S3.save) S3.save();
   }
 
-  function setContext(next, pinned) {
-    context = next === '3d' ? '3d' : 'flat';
-    if (pinned) pinned3D = true;
-    paintContext();
-    if (context === '3d') render3D();
-  }
-
   function paintContext() {
     var panel = $('stage-ctl');
     if (!panel) return;
     var flat = context === 'flat';
     panel.classList.toggle('is-3d', !flat);
-    var bFlat = $('sc-context-flat'), b3d = $('sc-context-3d');
-    if (bFlat) {
-      bFlat.classList.toggle('is-on', flat);
-      bFlat.setAttribute('aria-selected', String(flat));
-    }
-    if (b3d) {
-      b3d.classList.toggle('is-on', !flat);
-      b3d.setAttribute('aria-selected', String(!flat));
-    }
     var body = $('sc-body'), body3d = $('sc-3d-body');
     if (body) body.hidden = !flat;
     if (body3d) body3d.hidden = flat;
@@ -235,6 +223,16 @@
     if (sub) sub.textContent = flat
       ? '调节舞台渲染、镜头与全局滤镜参数'
       : '实时调节三维舞台的来源、镜头与当前来源专属参数';
+  }
+
+  // 舞台切换时（进/出 Stage3D）语境跟着走：否则二维舱会悬在三维画面上，
+  // 三维来源也会在二维首屏里出现。只认 class/aria 变化，不额外占帧循环。
+  function followStage() {
+    var next = detectContext();
+    if (next === context) return;
+    context = next;
+    paintContext();
+    if (context === '3d') render3D();
   }
 
   function el3d(tag, cls, text) {
@@ -365,7 +363,7 @@
     });
     secSrc.appendChild(srcSeg.node);
     secSrc.appendChild(el3d('div', 'sc-note',
-      '普通舞台来源（创意编排 / 动画绘景）用舞台设置或「普通舞台」语境调整。'));
+      '这里只调三维舞台来源；二维舞台的场景与滤镜归二维控制舱，两边不共用来源清单。'));
     host.appendChild(secSrc);
 
     // —— 镜头与画面 ——
@@ -945,7 +943,7 @@
     // 下拉 → 分段药丸（本表面前的选项都 ≤5 个）：与真3D 语境同一套语言，
     // 当前项 accent 高亮；push() 的取值语义不变。
     var cell = document.createElement('div');
-    cell.className = 'sc-cell';
+    cell.className = 'sc-cell' + (it.wide ? ' is-wide' : '');
     var id = 'sc-' + groupId + '-' + it.key;
     var head = document.createElement('label');
     head.className = 'sc-label';
@@ -1104,14 +1102,10 @@
     }
     if (want) {
       // 语境跟随当前舞台状态：三维舞台开着且来源是 3D 场景 → 真3D 语境，
-      // 否则普通舞台。手动切换（pinned3D）在本次打开期间优先于自动检测。
-      if (!pinned3D) {
-        context = detectContext();
-        paintContext();
-        if (context === '3d') render3D();
-      }
-    } else {
-      pinned3D = false;
+      // 否则二维舞台。没有手动互切。
+      context = detectContext();
+      paintContext();
+      if (context === '3d') render3D();
     }
   }
 
@@ -1169,11 +1163,13 @@
         else if (sch) sch.focus();
       }
     });
-    // 语境分段：手动切换后本次打开期间不再自动跟随。
-    var ctxFlat = $('sc-context-flat');
-    if (ctxFlat) ctxFlat.addEventListener('click', function () { setContext('flat', true); });
-    var ctx3d = $('sc-context-3d');
-    if (ctx3d) ctx3d.addEventListener('click', function () { setContext('3d', true); });
+    // 舞台进/出三维时语境自动跟随；舱没开时不必重组。
+    var stageRoot = $('stage3d');
+    if (stageRoot && typeof MutationObserver === 'function') {
+      new MutationObserver(function () {
+        if (open) followStage();
+      }).observe(stageRoot, { attributes: true, attributeFilter: ['class', 'aria-hidden'] });
+    }
     // 三维舞台的偏好被别处改了（头部按钮 / 自带设置面板），开着舱就重织真3D 面。
     // 正在 3D 面板里拖控件时跳过——重织会掐断拖动。
     document.addEventListener('stage:control', function () {

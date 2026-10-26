@@ -87,21 +87,31 @@ async function main() {
     assert.ok(after > 0 && after < 2, '写回值在 clamp 域内');
     pass('滑块真实拖动写回偏好表');
 
-    // —— 语境互切 ——
-    await page.click('#sc-context-flat');
-    await page.waitForTimeout(400);
-    assert.equal(await page.evaluate(() => StageControl.context()), 'flat', '切回普通舞台语境');
+    // —— 语境跟随舞台：没有手动互切，退出三维就回二维 ——
+    assert.equal(await page.evaluate(() => !!document.getElementById('sc-context-3d')), false,
+      '舱内没有手动「三维舞台」分段');
+    await page.evaluate(() => Stage3D.close());
+    await page.waitForFunction(() => !Stage3D.isActive());
+    await page.waitForTimeout(500);
+    assert.equal(await page.evaluate(() => StageControl.context()), 'flat',
+      '退出三维后舱自动回到二维语境');
     const flat = await page.evaluate(() => ({
       pills: document.querySelectorAll('#sc-body .sc-pill').length,
       oldSwitch: document.querySelectorAll('.sc-switch').length,
+      presets: [...document.querySelectorAll('#sc-body .sc-seg-btn')].map((b) => b.textContent.trim()),
     }));
     assert.ok(flat.pills >= 5, '开关已换成药丸');
     assert.equal(flat.oldSwitch, 0, '旧小开关无残留');
+    assert.ok(flat.presets.includes('第一现场 · 舞台') && flat.presets.includes('纸雕剧场'),
+      '二维首屏仍有二维舞台场景');
     await page.screenshot({ path: path.join(output, 'flat-context.png') });
-    pass('普通舞台语境：药丸语言落地、无旧控件残骸');
+    pass('二维语境：场景预设与药丸都在，三维来源不出现');
 
-    await page.evaluate(() => StageControl.open());
-    await page.waitForTimeout(1200);
+    await page.evaluate(() => Stage3D.open());
+    await page.waitForFunction(() => Stage3D.isActive());
+    await page.waitForTimeout(700);
+    assert.equal(await page.evaluate(() => StageControl.context()), '3d',
+      '重新进入三维后舱自动回到三维语境');
     await page.screenshot({ path: path.join(output, '3d-context.png') });
   } finally {
     if (errors.length) console.log('页面错误：\n' + errors.join('\n'));
