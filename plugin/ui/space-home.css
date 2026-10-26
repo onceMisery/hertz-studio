@@ -213,7 +213,7 @@
 .sh-track-status[hidden] { display: none; }
 .sh-track.has-error .sh-track-status { color: var(--danger,#f38b8b); }
 .sh-track.is-loading .sh-track-meta, .sh-track.has-error .sh-track-meta { display: none; }
-.space-home { transition: transform .3s var(--sp-ease),opacity .3s; transform-origin: 50% 45%; }
+.space-home { transition: transform .3s var(--sp-ease),opacity .35s var(--sh-ease),visibility .35s; transform-origin: 50% 45%; }
 .sp:has(.sh-panel-layer:not([hidden])) .space-home { transform: perspective(1400px) translateZ(-32px); opacity: .72; }
 @keyframes sh-track-load { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion:reduce) { .space-home,.sh-panel .sh-track { transition: none; } .sp:has(.sh-panel-layer:not([hidden])) .space-home { transform: none; } .sh-track.is-loading .sh-track-cue::after { animation: none; } }

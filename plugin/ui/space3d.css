@@ -258,6 +258,7 @@ body.space3d-open #toast { z-index: 100; border-radius: 8px; }
 @media (max-width: 420px) { .sp-progress { width: 88px; } .sp-bar .sp-tbtn { width: 30px; height: 34px; } }
 .sp.sp-idle { cursor: none; }
 .sp.sp-idle .sp-fab { opacity: 0; }
+.sp.sp-home-idle #sp-home { opacity: 0; visibility: hidden; pointer-events: none; }
 .sp-bar, .sp-fab, .sp-head-btn { transition: opacity var(--dur-base, 0.2s) var(--sp-ease), transform var(--dur-base, 0.2s) var(--sp-ease); }
 
 /* —— 场景宿主层 —— */
