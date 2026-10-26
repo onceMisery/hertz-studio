@@ -17,6 +17,7 @@
     epoch: 0,
     detailEpoch: 0,
     current: null,
+    selectedId: null,
     imagesLoaded: false,
   };
 
@@ -68,6 +69,8 @@
     var button = document.createElement('button');
     button.type = 'button';
     button.className = 'reader-feed-main';
+    button.title = feed.title || feed.feed_url;
+    if (st.currentFeed === feed.id) button.setAttribute('aria-current', 'true');
     var title = document.createElement('span');
     title.className = 'reader-feed-title';
     title.textContent = feed.title || feed.feed_url;
@@ -112,6 +115,15 @@
     list.textContent = '';
     var subscribed = st.feeds.filter(function (feed) { return feed.subscribed; });
     var kept = st.feeds.filter(function (feed) { return !feed.subscribed; });
+    var unread = subscribed.reduce(function (sum, feed) { return sum + (feed.unread || 0); }, 0);
+    $('reader-count').textContent = subscribed.length + ' 个订阅 · ' + unread + ' 篇未读';
+    $('reader-all').classList.toggle('active', !st.currentFeed);
+    $('reader-all').setAttribute('aria-pressed', String(!st.currentFeed));
+    $('reader-total').textContent = unread > 99 ? '99+' : String(unread);
+    $('reader-total').hidden = !unread;
+    var current = findFeed(st.currentFeed);
+    $('reader-refresh').disabled = !current || !current.subscribed;
+    $('reader-refresh').title = current && current.subscribed ? '刷新「' + (current.title || current.feed_url) + '」' : '选择一个订阅源后刷新';
     if (!subscribed.length && !kept.length) {
       var empty = document.createElement('li');
       empty.className = 'reader-feed-empty';
@@ -129,6 +141,10 @@
   }
 
   async function addFeed(url) {
+    var submit = $('reader-add').querySelector('button');
+    if (submit.disabled) return;
+    submit.disabled = true;
+    submit.textContent = '订阅中…';
     status('正在读取订阅源…');
     try {
       var data = await T.post('/v1/reader/subscriptions', { feed_url: url }, { timeoutMs: 30000 });
@@ -141,6 +157,9 @@
     } catch (error) {
       status('');
       toast(describeError(error));
+    } finally {
+      submit.disabled = false;
+      submit.textContent = '订阅';
     }
   }
 
@@ -176,7 +195,7 @@
     if (feed && feed.subscribed) {
       T.post('/v1/reader/feeds/' + feedId + '/refresh', { force: false }, { timeoutMs: 30000 })
         .then(function () { return loadFeeds(); })
-        .then(function () { return loadEntries(true); })
+        .then(function () { if (st.currentFeed === feedId) return loadEntries(true); })
         .catch(function (error) {
           var detail = error && error.error;
           if (detail && detail.code === 'reader_busy') return;
@@ -196,6 +215,9 @@
 
   async function loadEntries(reset) {
     var epoch = ++st.epoch;
+    $('reader-entry-list').setAttribute('aria-busy', 'true');
+    $('reader-more').disabled = true;
+    if (reset) status('正在加载文章…');
     try {
       var data = await T.get(entriesQuery(reset), { timeoutMs: 15000 });
       if (epoch !== st.epoch) return;
@@ -205,16 +227,22 @@
     } catch (error) {
       if (epoch === st.epoch) status(describeError(error));
       return;
+    } finally {
+      if (epoch === st.epoch) {
+        $('reader-entry-list').setAttribute('aria-busy', 'false');
+        $('reader-more').disabled = false;
+      }
     }
     renderEntries();
   }
 
   function entryRow(item) {
     var li = document.createElement('li');
-    li.className = 'reader-entry' + (item.is_read ? '' : ' unread') + (item.starred ? ' starred' : '');
+    li.className = 'reader-entry' + (item.is_read ? '' : ' unread') + (item.starred ? ' starred' : '') + (st.selectedId === item.id ? ' active' : '');
     var button = document.createElement('button');
     button.type = 'button';
     button.className = 'reader-entry-main';
+    if (st.selectedId === item.id) button.setAttribute('aria-current', 'true');
     var title = document.createElement('span');
     title.className = 'reader-entry-title';
     title.textContent = item.title;
@@ -235,6 +263,7 @@
     star.className = 'btn reader-entry-star';
     star.textContent = item.starred ? '★' : '☆';
     star.setAttribute('aria-label', item.starred ? '取消收藏' : '收藏');
+    star.setAttribute('aria-pressed', String(!!item.starred));
     star.addEventListener('click', function () { return toggleStar(item); });
     li.appendChild(star);
     return li;
@@ -242,14 +271,16 @@
 
   function renderEntries() {
     var list = $('reader-entry-list');
+    var scrollTop = list.scrollTop;
     list.textContent = '';
     if (!st.items.length) {
       var empty = document.createElement('li');
       empty.className = 'reader-entry-empty';
-      empty.textContent = st.filter === 'all' ? '这个视图还没有文章。' : '没有符合筛选的文章。';
+      empty.textContent = st.filter === 'unread' ? '未读文章已读完。' : st.filter === 'starred' ? '还没有收藏文章，点击文章旁的星标即可收藏。' : '这里还没有文章。添加订阅源，或选择一个源刷新。';
       list.appendChild(empty);
     }
     st.items.forEach(function (item) { list.appendChild(entryRow(item)); });
+    list.scrollTop = scrollTop;
     $('reader-more').hidden = !st.cursor;
   }
 
@@ -274,7 +305,17 @@
 
   async function openEntry(id) {
     var epoch = ++st.detailEpoch;
+    st.selectedId = id;
+    st.current = null;
     st.imagesLoaded = false;
+    $('view-reader').classList.add('reader-reading');
+    document.querySelector('.reader-article').setAttribute('aria-busy', 'true');
+    document.querySelector('.reader-article').scrollTop = 0;
+    $('reader-welcome').hidden = true;
+    $('reader-entry-head').hidden = true;
+    $('reader-content').hidden = true;
+    $('reader-retry').hidden = true;
+    renderEntries();
     entryStatus('正在加载正文…');
     try {
       var data = await T.get('/v1/reader/entries/' + id, { timeoutMs: 20000 });
@@ -282,9 +323,15 @@
       st.current = data.entry;
       entryStatus('');
       renderEntry();
+      $('reader-entry-title').focus({ preventScroll: true });
       if (!st.current.is_read) markRead(st.current);
     } catch (error) {
-      if (epoch === st.detailEpoch) entryStatus(describeError(error));
+      if (epoch === st.detailEpoch) {
+        entryStatus(describeError(error));
+        $('reader-retry').hidden = false;
+      }
+    } finally {
+      if (epoch === st.detailEpoch) document.querySelector('.reader-article').setAttribute('aria-busy', 'false');
     }
   }
 
@@ -321,10 +368,26 @@
       var holder = document.createElement('div');
       holder.innerHTML = content;
       sanitizeTree(holder);
+      var images = holder.querySelectorAll('img');
+      images.forEach(function (img) {
+        var key = img.getAttribute('src') || '';
+        if (/^[0-9a-f]{32}$/.test(key)) img.dataset.readerImageKey = key;
+        img.removeAttribute('src');
+        img.removeAttribute('width');
+        img.removeAttribute('height');
+        img.dataset.readerAlt = img.alt || '正文图片';
+        img.alt = img.dataset.readerAlt + ' · 图片尚未加载';
+        img.hidden = true;
+        img.classList.add('reader-image-pending');
+        var placeholder = document.createElement('span');
+        placeholder.className = 'reader-image-placeholder';
+        placeholder.textContent = img.alt;
+        img.after(placeholder);
+      });
       box.appendChild(holder);
-      var images = box.querySelectorAll('img');
       $('reader-load-images').hidden = images.length === 0;
       $('reader-load-images').textContent = '加载本文图片（' + images.length + '）';
+      $('reader-load-images').disabled = false;
       if (entry.content_status === 'truncated') {
         entryStatus('正文超过单篇上限已截断，完整内容请打开原文。');
       }
@@ -363,25 +426,45 @@
       original.removeAttribute('href');
     }
     $('reader-star').textContent = entry.starred ? '★ 已收藏' : '☆ 收藏';
+    $('reader-star').setAttribute('aria-pressed', String(!!entry.starred));
   }
 
   async function loadImages() {
     var entry = st.current;
     if (!entry || st.imagesLoaded) return;
     st.imagesLoaded = true;
+    var epoch = st.detailEpoch;
+    var button = $('reader-load-images');
+    button.disabled = true;
+    button.textContent = '正在加载图片…';
     var box = $('reader-content');
-    var images = box.querySelectorAll('img');
-    images.forEach(function (img) {
-      var key = img.getAttribute('src') || '';
-      if (!/^[0-9a-f]{32}$/.test(key)) return;
-      T.get('/v1/reader/entries/' + entry.id + '/images/' + key, { timeoutMs: 45000 })
-        .then(function (data) {
+    var images = Array.from(box.querySelectorAll('img.reader-image-pending'));
+    var failed = 0;
+    await Promise.all(images.map(function (img) {
+      var key = img.dataset.readerImageKey || '';
+      if (!key) { failed += 1; return; }
+      return T.get('/v1/reader/entries/' + entry.id + '/images/' + key, { timeoutMs: 45000 })
+        .then(async function (data) {
           img.src = 'data:' + (data.content_type || 'image/jpeg') + ';base64,' + data.data;
+          await img.decode();
+          img.alt = img.dataset.readerAlt;
+          img.hidden = false;
+          img.classList.remove('reader-image-pending');
+          var placeholder = img.nextElementSibling;
+          if (placeholder && placeholder.classList.contains('reader-image-placeholder')) placeholder.remove();
         })
         .catch(function () {
-          img.alt = '图片加载失败';
+          failed += 1;
+          img.removeAttribute('src');
+          img.alt = img.dataset.readerAlt + ' · 加载失败';
+          var placeholder = img.nextElementSibling;
+          if (placeholder && placeholder.classList.contains('reader-image-placeholder')) placeholder.textContent = img.alt;
         });
-    });
+    }));
+    if (epoch !== st.detailEpoch) return;
+    st.imagesLoaded = !failed;
+    button.disabled = !failed;
+    button.textContent = failed ? failed + ' 张图片未加载，点击重试' : '图片已加载';
   }
 
   // 客户端兜底清洗：服务端已经 ammonia 白名单清洗，这里再把节点树过一遍，
@@ -481,6 +564,14 @@
       if (st.current) toggleStar(st.current);
     });
     $('reader-load-images').addEventListener('click', loadImages);
+    $('reader-all').addEventListener('click', function () { openFeed(null); });
+    $('reader-retry').addEventListener('click', function () { if (st.selectedId) openEntry(st.selectedId); });
+    $('reader-back').addEventListener('click', function () {
+      $('view-reader').classList.remove('reader-reading');
+      var selected = $('reader-entry-list').querySelector('[aria-current="true"]');
+      var target = selected || document.querySelector('[data-reader-filter].active');
+      if (target) target.focus({ preventScroll: true });
+    });
   }
 
   function onViewEnter() {

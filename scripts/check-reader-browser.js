@@ -22,7 +22,9 @@ async function main() {
   try {
     const page = await browser.newPage({ viewport: { width: 1180, height: 860 } });
     const errors = [];
+    const requests = [];
     page.on('pageerror', err => errors.push(err.message));
+    page.on('request', request => requests.push(request.url()));
     await page.route('https://fixture.test/**', route => route.fulfill({ contentType: 'text/html', body: '<!doctype html><html><body></body></html>' }));
     await page.goto('https://fixture.test');
     await page.setContent(html.slice(start, end));
@@ -84,7 +86,7 @@ async function main() {
             const parts = path.split('/');
             const id = parts[4], tail = parts[5] || '';
             if (tail === 'images') {
-              return { data: 'R0lGODlhAQABAAAAACw=', content_type: 'image/gif' };
+              return { data: 'R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', content_type: 'image/gif' };
             }
             if (id === entryId('1')) {
               return { entry: { id, feed_id: 'a'.repeat(40), title: '图文正文一篇', author: '作者甲',
@@ -162,11 +164,14 @@ async function main() {
         safeLink: Array.from(box.querySelectorAll('a')).some(a => a.getAttribute('href') === 'https://ok.example.com/src'
           && a.getAttribute('rel') === 'noopener noreferrer' && a.getAttribute('target') === '_blank'),
         imageSrc: (box.querySelector('img') || {}).getAttribute ? box.querySelector('img').getAttribute('src') : null,
+        imageKey: box.querySelector('img').dataset.readerImageKey,
       };
     });
     assert.deepEqual(contentAudit, {
-      scripts: 0, onclick: 0, javascriptLinks: 0, safeLink: true, imageSrc: 'ab'.repeat(16),
-    }, 'client sanitizer strips scripts, inline handlers and javascript: links, keeps image keys');
+      scripts: 0, onclick: 0, javascriptLinks: 0, safeLink: true, imageSrc: null, imageKey: 'ab'.repeat(16),
+    }, 'client sanitizer strips unsafe content; deferred image keys stay outside src');
+    assert.equal(requests.some(url => url.includes(imageKey)), false, 'unloaded image keys never become browser requests');
+    assert.equal(await page.locator('.reader-entry.active [aria-current="true"]').count(), 1, 'current article remains identifiable in the list');
     await page.waitForFunction(() => (window.states[window.entryId('1')] || {}).is_read === true);
     await page.waitForFunction(() => {
       const badge = document.querySelector('.reader-feed .reader-unread');
@@ -174,9 +179,30 @@ async function main() {
     }, null, { timeout: 5000 });
     assert.equal(await page.evaluate(() => calls.some(c => c[0] === 'GET' && c[1].includes('/images/'))), false,
       'images stay unloaded until the user asks');
+    await page.evaluate(() => {
+      const get = VMusicTransport.get;
+      let fail = 2;
+      VMusicTransport.get = async function (url, ...args) {
+        if (url.includes('/images/') && fail) {
+          fail -= 1;
+          if (fail) throw new Error('测试：图片暂时不可用');
+          return { data: 'not-an-image', content_type: 'image/png' };
+        }
+        return get.call(this, url, ...args);
+      };
+    });
+    await page.locator('#reader-load-images').click();
+    await page.waitForFunction(() => document.querySelector('#reader-load-images').textContent.includes('点击重试'));
+    assert.equal(await page.locator('#reader-content img').isVisible(), false, 'failed image retains the readable placeholder');
+    await page.locator('#reader-load-images').click();
+    await page.waitForFunction(() => document.querySelector('#reader-load-images').textContent.includes('点击重试'));
+    assert.equal(await page.locator('#reader-content img').isVisible(), false, 'decode failures stay retryable without showing a broken image');
     await page.locator('#reader-load-images').click();
     await page.waitForFunction(() => (document.querySelector('#reader-content img') || {}).src
       && document.querySelector('#reader-content img').src.startsWith('data:image/gif'));
+    await page.waitForFunction(() => document.querySelector('#reader-load-images').textContent === '图片已加载');
+    assert.equal(await page.locator('#reader-content img').isVisible(), true);
+    assert.equal(await page.locator('.reader-image-placeholder').count(), 0);
     // 仅摘要条目：展示摘要说明与原文入口。
     await page.locator('.reader-entry-main').filter({ hasText: '仅摘要条目' }).first().click();
     await page.waitForFunction(() => document.querySelector('#reader-content').textContent.includes('只有摘要内容'));
@@ -215,10 +241,43 @@ async function main() {
       'local data deletion asks for confirmation');
     const out = path.join(root, 'output', 'reader-browser');
     fs.mkdirSync(out, { recursive: true });
+    await page.locator('.reader-feed-main').filter({ hasText: '技术快报' }).click();
+    await page.waitForFunction(() => document.querySelectorAll('.reader-entry').length === 2);
+    await page.locator('.reader-entry-main').filter({ hasText: '图文正文一篇' }).click();
+    await page.waitForFunction(() => !document.querySelector('#reader-content').hidden);
     await page.screenshot({ path: path.join(out, 'desktop.png') });
     await page.setViewportSize({ width: 390, height: 844 });
+    assert.equal(await page.locator('.reader-entry-list').isVisible(), false, 'compact reading gives the article the available width');
+    assert.equal(await page.locator('#reader-back').isVisible(), true, 'compact reader offers a visible return action');
+    assert.equal(await page.locator('#reader-entry-title').isVisible(), true);
     await page.screenshot({ path: path.join(out, 'mobile.png') });
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), 'no horizontal overflow on narrow screens');
+    await page.locator('#reader-back').click();
+    assert.equal(await page.locator('.reader-entry-list').isVisible(), true);
+    assert.equal(await page.locator('.reader-entry.active .reader-entry-main').evaluate(el => el === document.activeElement), true,
+      'return restores keyboard focus to the selected article');
+    await page.screenshot({ path: path.join(out, 'mobile-list.png') });
+    // A failed detail request must hide the previous article and remain recoverable.
+    await page.evaluate(() => {
+      const get = VMusicTransport.get;
+      let fail = true;
+      VMusicTransport.get = async function (url, ...args) {
+        if (url === '/v1/reader/entries/' + entryId('2') && fail) { fail = false; throw new Error('测试：正文暂时不可用'); }
+        return get.call(this, url, ...args);
+      };
+    });
+    await page.locator('.reader-entry-main').filter({ hasText: '仅摘要条目' }).click();
+    await page.locator('#reader-retry').waitFor();
+    assert.equal(await page.locator('#reader-content').isVisible(), false, 'failed selection cannot display the previous article');
+    await page.locator('#reader-retry').click();
+    await page.waitForFunction(() => !document.querySelector('#reader-content').hidden);
+    assert.match(await page.locator('#reader-content').textContent(), /只有摘要内容/);
+    await page.setViewportSize({ width: 1180, height: 860 });
+    await page.addScriptTag({ content: read('themes.js') });
+    await page.evaluate(() => Theme.apply('chaoxi-day'));
+    // Capture the settled theme, after the shared controls' color transitions.
+    await page.waitForTimeout(300);
+    await page.screenshot({ path: path.join(out, 'desktop-light.png') });
     assert.deepEqual(errors, []);
     console.log('Reader Chrome: unread badges, entry reading, client-side XSS hardening, deferred image proxy, '
       + 'read/star persistence, filters, cursor pagination, subscribe/unsubscribe/delete and narrow layout passed.');
