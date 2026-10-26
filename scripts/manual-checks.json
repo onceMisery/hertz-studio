@@ -3,6 +3,14 @@
   "note": "check-* scripts that are deliberate manual/browser/diagnostic entry points. New unregistered check-* files fail scripts/check-scripts.js until they are either registered in check-frontend.js / a workflow or added here.",
   "scripts": [
     {
+      "script": "check-desktop-settings-browser.js",
+      "purpose": "Isolated Chrome verification of desktop settings drafts, preview lifecycle, conflicts, presets and narrow layouts."
+    },
+    {
+      "script": "check-desktop-settings-native.js",
+      "purpose": "Windows native/WebView2 acceptance with an isolated config: positioning rollback, wallpaper preview, WorkerW lifecycle and revision conflicts."
+    },
+    {
       "script": "check-3d-browser.js",
       "purpose": "/v1/auth/ticket 是 WS 凭据的一次性签发（3b3dc52 起 openSocket 每连必签），"
     },
@@ -287,6 +295,10 @@
       "purpose": "Shipped reader UI in real Chrome with deterministic transport: unread badges, entry reading, client-side XSS hardening, deferred image proxy via data-URL envelope, read/star PUT persistence, filters, cursor pagination, subscribe/unsubscribe/delete confirmation and narrow layout. No real feeds or network."
     },
     {
+      "script": "check-room-player-browser.js",
+      "purpose": "Offline real-browser room player: five skins, light/dark themes, responsive expand/collapse, keyboard, return navigation, playback permissions and lifecycle."
+    },
+    {
       "script": "check-room-theme-browser.js",
       "purpose": "Isolated production Theme/DOM/CSS browser check for shared room themes and LAN favorite actions. Stub transport; no service, credentials or audio device."
     },
@@ -341,6 +353,10 @@
     {
       "script": "check-space-floating-browser.js",
       "purpose": "浏览器手工验收（原文件未写说明）"
+    },
+    {
+      "script": "check-space-home-idle-browser.js",
+      "purpose": "首页卡片指针闲置自动收起：移动重置延时、淡出后 inert 且搜索/导航仍可见、离开视口即收、重入恢复、面板与键盘焦点阻止收起、切页与重开归零、触屏不收起。隔离服务 + 真实 Chrome。"
     },
     {
       "script": "check-space-home-stage-browser.js",

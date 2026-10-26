@@ -9,6 +9,7 @@ description = "Bounded native room transport, clock estimation and protocol"
 
 [dependencies]
 base64 = { workspace = true }
+png = "0.18.1"
 mdns-sd = "0.15"
 if-addrs = "0.14"
 subtle = "2"

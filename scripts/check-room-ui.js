@@ -15,25 +15,28 @@ class Node {
   insertBefore(node, before) { const index = before ? this.children.indexOf(before) : this.children.length; this.children.splice(index, 0, node); return node; }
   prepend(...nodes) { this.children.unshift(...nodes); }
   focus() {}
+  showModal() { this.open = true; }
+  close() { this.open = false; }
   remove() {}
   replaceChildren(...nodes) { this._text = ''; this.children = nodes; }
   setAttribute(key, value) { this.attrs[key] = String(value); }
   getAttribute(key) { return this.attrs[key]; }
   addEventListener() {}
+  querySelectorAll(selector) { return walk(this).filter(node => (node.className || '').split(/\s+/).includes(selector.slice(1))); }
 }
 const walk = node => [node, ...node.children.flatMap(walk)];
 function deferred() { let resolve, reject; const promise = new Promise((a, b) => { resolve = a; reject = b; }); return { promise, resolve, reject }; }
 async function settle() { for (let i = 0; i < 40; i++) await Promise.resolve(); }
 function fixture(themePicker) {
   const favoriteStore = new Set();
-  const root = new Node('main'), calls = [], hooks = new Map(), chromeEvents = [];
+  const root = new Node('main'), calls = [], reads = [], hooks = new Map(), chromeEvents = [], copied = [];
   let now = Date.now(), confirmation = async () => true;
   class FixtureDate extends Date { static now() { return now; } }
   let snapshot = { mode: 'host', room_id: 'room', instance_id: 'instance', session_id: 's1', member_id: 'owner', revision: '1', sharing_revision: '1', next_operation_id: '1', next_chat_operation_id: '1', permissions: { transport: true, chat_read: true, chat_send: true }, output: {}, queue: [], members: [] };
   const history = Array.from({ length: 450 }, (_, i) => ({ message_id: String(i + 1), name: 'Guest', text: 'Message ' + (i + 1), received_at_ms: '0' }));
   snapshot.recent_chat = { history_revision: '1', messages: history.slice(-16) };
   const transport = {
-    async get(url) { return url === '/v1/room' ? structuredClone(snapshot) : { tracks: [] }; },
+    async get(url) { reads.push(url); if (url === '/v1/room' && hooks.has('snapshot')) return hooks.get('snapshot')(); return url === '/v1/room' ? structuredClone(snapshot) : { tracks: [] }; },
     async post(url, body) {
       const request = url === '/v1/favorites/membership' ? { ...body, action: 'favorite_membership' } : url === '/v1/favorites/toggle' ? { ...body, action: 'favorite_write' } : body.action === 'peer' ? body.request : body;
       calls.push(structuredClone(request));
@@ -53,8 +56,9 @@ function fixture(themePicker) {
       }
     }
   };
-  const context = { document: { createElement: tag => new Node(tag), hidden: false }, Date: FixtureDate, TextEncoder, URL, Blob, Option: function (text, value) { const n = new Node('option'); n.textContent = text; n.value = value; return n; }, navigator: {}, setInterval: () => 1, clearInterval() {}, setTimeout() {}, matchMedia: () => ({ matches: true }) };
+  const context = { document: { createElement: tag => new Node(tag), hidden: false }, Date: FixtureDate, TextEncoder, URL, Blob, atob, Option: function (text, value) { const n = new Node('option'); n.textContent = text; n.value = value; return n; }, navigator: {}, setInterval: () => 1, clearInterval() {}, setTimeout() {}, matchMedia: () => ({ matches: true }) };
   context.window = context;
+  context.HertzClipboard = { write: async value => copied.push(value) };
   if (themePicker) context.ThemePicker = themePicker;
   context.HertzRoomTransport = { create: () => ({ render() {}, notice() {}, destroy() {}, setWorkspaceVisible: value => chromeEvents.push(value) }) };
   vm.createContext(context);
@@ -64,9 +68,9 @@ function fixture(themePicker) {
   context.HertzRoom.init({ root, transport, confirm: message => confirmation(message) });
   const nodes = () => walk(root);
   return {
-    api: context.HertzRoom, favorites: context.Favorites, calls, hooks, root, chromeEvents, history,
-    button: (text, scope) => { const parent = scope ? nodes().filter(n => n.className === scope).at(-1) : root; assert.ok(parent, scope || 'root'); const n = walk(parent).find(n => n.tagName === 'button' && n.textContent === text); assert.ok(n, text); return n; },
-    field: label => { const n = nodes().find(n => n.tagName === 'label' && n._text === label); assert.ok(n, label); return n.children[0]; },
+    api: context.HertzRoom, favorites: context.Favorites, calls, reads, hooks, root, chromeEvents, history, copied,
+    button: (text, scope) => { const parents = scope ? nodes().filter(n => n.className === scope) : [root]; assert.ok(parents.length, scope || 'root'); const n = parents.flatMap(walk).find(n => n.tagName === 'button' && n.textContent === text); assert.ok(n, text); return n; },
+    field: (label, scope) => { const n = walk(scope || root).find(n => n.tagName === 'label' && n._text === label); assert.ok(n, label); return n.children[0]; },
     chat: () => nodes().find(n => n.tagName === 'ol' && n.className === 'room-chat'),
     form: () => nodes().find(n => n.tagName === 'form'),
     set: patch => { snapshot = { ...snapshot, ...patch }; },
@@ -82,9 +86,165 @@ async function applicantFixture() {
   f.hooks.set('apply', async () => ({ application_id: 'application-one', applicant_secret: 'fixture-applicant-secret', state: 'pending', expires_in_seconds: 300 }));
   await f.button('发现房间与网卡').onclick();
   await f.button('申请加入').onclick();
+  const applicationDialog = walk(f.root).find(node => node.tagName === 'dialog' && node.attrs['aria-labelledby'] === 'room-entry-title-apply');
+  f.field('你的昵称', applicationDialog).value = '申请听众';
+  const applying = f.button('提交申请').onclick(); await settle();
+  assert.equal(f.calls.some(call => call.action === 'apply'), false, 'application waits for inline fingerprint confirmation');
+  await f.button('已核对，继续').onclick(); await applying;
   return f;
 }
 async function main() {
+  {
+    const f = fixture(); await settle(); f.set({ mode: 'local' }); await f.poll();
+    const dialog = walk(f.root).find(node => node.tagName === 'dialog' && node.attrs['aria-labelledby'] === 'room-entry-title-join');
+    const invitation = 'hertz-listen:v1:eyJhZGRyZXNzIjoiMTkyLjAuMi4xMDoxNzAwMCIsImZpbmdlcnByaW50IjoiYWFiYiJ9';
+    await f.button('使用邀请加入').onclick();
+    f.field('你的昵称', dialog).value = '超时听众';
+    const inviteField = f.field('邀请或 8 位查找码', dialog); inviteField.value = invitation; inviteField.oninput();
+    f.hooks.set('join', async () => { throw Object.assign(new Error('network timeout'), { code: 'timeout', status: 504 }); });
+    const joining = f.button('加入房间').onclick(); await settle();
+    await f.button('已核对，继续').onclick(); await joining;
+    const originalJoin = f.calls.find(call => call.action === 'join');
+    assert.equal(originalJoin.invitation, invitation, 'full-invite join submits the verified token');
+    assert.equal(f.button('加入房间').disabled, true, 'unknown join disables the original write');
+    assert.match(f.root.textContent, /加入结果尚未确认/);
+    await walk(dialog).find(node => node.tagName === 'button' && node.textContent === '关闭').onclick();
+    assert.equal(dialog.open, false);
+    await f.button('使用邀请加入').onclick();
+    assert.equal(f.field('邀请或 8 位查找码', dialog).value, invitation, 'closing and reopening keeps the uncertain invitation draft');
+    assert.equal(f.button('加入房间').disabled, true, 'reopening never clears uncertain join protection');
+    const writes = f.calls.length, reads = f.reads.length;
+    await f.button('查看加入结果').onclick();
+    assert.ok(f.reads.length > reads && f.reads.slice(reads).every(url => url === '/v1/room'), 'join status uses only authoritative snapshot GETs');
+    assert.equal(f.calls.length, writes, 'checking an unknown join sends no command');
+    await f.button('加入房间').onclick();
+    assert.equal(f.calls.filter(call => call.action === 'join').length, 1, 'even invoking the old join handler cannot replay a consumed invitation');
+    assert.equal(f.button('加入房间').disabled, true, 'local snapshot does not prove the original join failed');
+    f.api.destroy();
+  }
+  for (const queueUnknown of [false, true]) {
+    const f = fixture(); await settle(); f.set({ mode: 'local' }); await f.poll();
+    const selected = [{ id: 'selected-local', source: 'local', title: 'Selected song' }];
+    f.hooks.set('create', async () => { f.set({ mode: 'host', session_id: 'selected-host', permissions: { queue: true } }); return { mode: 'host' }; });
+    f.hooks.set('share', async request => {
+      assert.deepEqual(Array.from(request.track_ids), ['selected-local'], 'starting from a selection shares exactly those local IDs');
+      return { tracks: [{ resource_id: 'selected-resource', favorite_key: 'selected-key' }], favorite_local_ids: { 'selected-key': 'selected-local' } };
+    });
+    if (queueUnknown) f.hooks.set('queue', async () => { throw Object.assign(new Error('timeout'), { code: 'room_outcome_unknown' }); });
+    await f.api.startFromTracks(selected);
+    assert.equal(f.calls.some(call => call.action === 'share'), false, 'the create draft requires explicit creation');
+    f.field('局域网网卡').value = '192.0.2.10';
+    f.field('你的昵称').value = '选曲房主';
+    await f.button('创建房间').onclick(); await settle();
+    assert.equal(f.calls.filter(call => call.action === 'create').length, 1);
+    assert.equal(f.calls.filter(call => call.action === 'share').length, 1);
+    assert.deepEqual(f.calls.find(call => call.action === 'queue').items, [{ instance_id: null, resource_id: 'selected-resource' }]);
+    assert.equal(f.calls.some(call => call.action === 'playback'), false, 'creating with selected tracks does not start playback');
+    assert.equal(f.api.active(), true, 'the created room remains available after selection processing');
+    await f.poll();
+    assert.equal(f.calls.filter(call => call.action === 'queue').length, 1, 'polling never replays selection queue writes');
+    if (queueUnknown) {
+      await assert.rejects(f.api.startFromTracks(selected), /待确认/);
+      await f.button('继续添加选中的歌曲').onclick();
+      assert.equal(f.calls.filter(call => call.action === 'share').length, 1, 'uncertain queue results never re-share selected tracks');
+      assert.equal(f.calls.filter(call => call.action === 'queue').length, 1, 'uncertain queue results never append the selection twice');
+      const staleContinue = f.button('继续添加选中的歌曲');
+      f.hooks.set('operation', async () => ({ state: { status: 'applied' } }));
+      await f.button('查询原队列操作结果').onclick();
+      assert.equal(staleContinue.hidden, true, 'confirmed original success retires its source selection');
+      await staleContinue.onclick();
+      assert.equal(f.calls.filter(call => call.action === 'queue').length, 1, 'even a stale Continue callback cannot replay a confirmed selection');
+    }
+    f.api.destroy();
+  }
+  {
+    const f = fixture(); await settle();
+    const old = deferred(), firstCover = 'data:image/png;base64,YQ==', nextCover = 'data:image/png;base64,Yg==';
+    f.hooks.set('room_profile', () => old.promise);
+    f.set({ mode: 'guest', room_cover_revision: 'first-cover' }); await f.poll(); await f.poll();
+    assert.equal(f.calls.filter(call => call.action === 'room_profile').length, 1, 'unchanged snapshots share a single cover read');
+    f.hooks.set('room_profile', async () => ({ room_id: 'room', revision: 'next-cover', cover: nextCover }));
+    f.set({ room_cover_revision: 'next-cover' }); await f.poll();
+    old.resolve({ room_id: 'room', revision: 'first-cover', cover: firstCover }); await settle();
+    assert.ok(walk(f.root).some(node => node.tagName === 'img' && node.src === nextCover), 'new cover remains visible after old read completes');
+    assert.ok(!walk(f.root).some(node => node.tagName === 'img' && node.src === firstCover));
+    const reads = f.calls.filter(call => call.action === 'room_profile').length;
+    await f.poll(); assert.equal(f.calls.filter(call => call.action === 'room_profile').length, reads, 'confirmed cover is cached across polls');
+    f.set({ room_cover_revision: null }); await f.poll();
+    assert.ok(!walk(f.root).some(node => node.tagName === 'img' && node.src === nextCover), 'cover removal clears member artwork');
+  }
+  {
+    const f = fixture(); await settle();
+    f.setConfirm(async () => false);
+    await f.button('结束并退出').onclick();
+    assert.equal(f.calls.filter(call => call.action === 'leave').length, 0, 'cancelled host exit never sends leave');
+    f.setConfirm(async () => true);
+    f.hooks.set('leave', async () => { throw new Error('exit rejected'); });
+    await f.button('结束并退出').onclick();
+    assert.ok(f.root.textContent.includes('exit rejected'), 'exit failure is visible');
+    assert.ok(f.button('结束并退出'), 'exit failure keeps the host room');
+    f.hooks.set('leave', async () => { f.set({ mode: 'local' }); return { mode: 'local' }; });
+    await f.button('结束并退出').onclick();
+    assert.equal(f.root.dataset.roomPage, 'lobby', 'confirmed host exit returns to lobby');
+  }
+  {
+    const f = fixture(); await settle(); f.set({ mode: 'guest' }); await f.poll();
+    const pending = deferred(); f.hooks.set('leave', () => pending.promise);
+    const exit = f.button('离开房间').onclick(); await settle();
+    await f.button('离开房间').onclick();
+    assert.equal(f.calls.filter(call => call.action === 'leave').length, 1, 'duplicate exit is suppressed');
+    f.set({ mode: 'host', room_id: 'replacement', instance_id: 'new-instance', session_id: 'new-session' }); await f.poll();
+    pending.resolve({ mode: 'local' }); await exit; await settle();
+    assert.ok(f.button('结束并退出'), 'late exit response cannot close a replacement room');
+  }
+  {
+    const f = fixture(); await settle();
+    const oldPoll = deferred(); f.hooks.set('snapshot', () => oldPoll.promise);
+    const poll = f.api.onViewEnter(); await settle();
+    f.hooks.set('leave', async () => { f.set({ mode: 'local' }); return { mode: 'local' }; });
+    await f.button('结束并退出').onclick();
+    oldPoll.resolve({ mode: 'host', room_id: 'room', instance_id: 'instance', member_id: 'owner', session_id: 's1' });
+    await poll; await settle();
+    assert.equal(f.root.dataset.roomPage, 'lobby', 'a poll started before confirmed exit cannot resurrect the old room');
+  }
+  {
+    const f = fixture(); await settle();
+    const key = 'ab'.repeat(32), song = { resource_id: 'online-resource', favorite_key: key, title: 'Online song' };
+    const track = { source: 'ccmixter', id: 'song:with:colon', title: song.title, playable: true, ref: { license: 'fixture' } };
+    f.set({ permissions: { queue: true, transport: true } }); await f.poll();
+    f.hooks.set('share_online', async request => {
+      assert.equal(request.tracks[0].ref.license, 'fixture', 'provider reference survives sharing');
+      f.set({ sharing_revision: '2', favorite_local_ids: { [key]: 'online:ccmixter:song:with:colon' }, shared_track_ids: ['online:ccmixter:song:with:colon'], current_track: song });
+      return { tracks: [song], favorite_local_ids: { [key]: 'online:ccmixter:song:with:colon' } };
+    });
+    f.hooks.set('library', async () => ({ revision: '2', tracks: [song] }));
+    await f.api.addOnline([track]); await settle(); await f.poll();
+    const write = f.calls.find(call => call.action === 'queue');
+    assert.equal(write.items[0].resource_id, song.resource_id);
+    assert.equal(write.items[0].instance_id, null, 'online append uses the same instance allocator');
+    const heart = walk(f.root).find(node => node.className === 't-act fav-act');
+    assert.ok(heart, 'shared online songs expose favorites');
+    await heart.onclick({ stopPropagation() {} }); await settle();
+    const favorite = f.calls.find(call => call.action === 'favorite_write');
+    assert.equal(favorite.source, 'ccmixter', 'host online favorite keeps the platform identity');
+    assert.equal(favorite.ref_id, 'song:with:colon');
+    f.set({ mode: 'guest' }); await f.poll();
+    await assert.rejects(f.api.addOnline([track]), /房主分享/);
+    f.set({ mode: 'local' }); await f.poll();
+    await assert.rejects(f.api.addOnline([track]), /先.*创建房间/);
+    assert.equal(f.calls.filter(call => call.action === 'share_online').length, 1, 'guest and local states cannot mutate room shares');
+    f.api.destroy();
+  }
+  {
+    const f = fixture(); await settle();
+    const songs = Array.from({ length: 66 }, (_, index) => ({ resource_id: 'resource-' + index, favorite_key: String(index).padStart(64, '0'), title: 'Online page ' + index }));
+    f.hooks.set('library', async request => ({ revision: '2', tracks: songs.slice(request.offset, request.offset + request.limit) }));
+    f.set({ sharing_revision: '2', favorite_local_ids: Object.fromEntries(songs.map((song, index) => [song.favorite_key, 'online:ccmixter:' + index])) });
+    await f.poll(); await settle();
+    assert.ok(f.calls.some(call => call.action === 'library' && call.offset === 64 && call.limit === 64), 'sharing manager follows the server page limit beyond 64 tracks');
+    assert.equal(walk(f.root).filter(node => node.className === 'room-local-item').length, 66, 'every shared online song can be revoked');
+    f.api.destroy();
+  }
   {
     const bindings = new Set();
     let destroyed = 0;
@@ -269,7 +429,7 @@ async function main() {
   for (const [action, className, errorCode] of [['queue_page', 'room-queue', 'room_denied'], ['library', 'room-list', 'storage']]) {
     const projection = fixture(); await settle();
     const initialCalls = projection.calls.length;
-    const notice = () => walk(projection.root).find(node => node.className === 'room-notice');
+    const notice = () => walk(walk(projection.root).find(node => node.className === 'room-workspace')).find(node => /(^| )room-notice( |$)/.test(node.className || ''));
     let attempts = 0;
     projection.hooks.set(action, async () => {
       if (++attempts === 1) throw Object.assign(new Error('队列已更新，请重新读取'), { code: 'revision_conflict', status: 409 });
@@ -297,7 +457,7 @@ async function main() {
   writeConflict.hooks.set('queue', async () => { throw Object.assign(new Error('Write revision conflict'), { code: 'revision_conflict', status: 409 }); });
   writeConflict.set({ revision: '2', queue_count: 1, permissions: { queue: true } }); await writeConflict.poll();
   await writeConflict.button('移除').onclick();
-  assert.equal(walk(writeConflict.root).find(node => node.className === 'room-notice').textContent, 'Write revision conflict', 'user write conflicts remain visible');
+  assert.ok(walk(writeConflict.root).some(node => node.className === 'room-notice' && !node.hidden && node.textContent === 'Write revision conflict'), 'user write conflicts remain visible');
   await writeConflict.poll();
   assert.equal(writeConflict.calls.filter(call => call.action === 'queue').length, 1, 'polling never replays a conflicted write');
   writeConflict.api.destroy();
@@ -360,7 +520,8 @@ async function main() {
   navigation.api.navigate('settings'); navigation.api.navigate('collaborate');
   assert.equal(navigation.calls.length, beforeNavigation, 'page navigation never sends room writes');
   navigation.set({ session_id: 's2' }); await navigation.poll();
-  assert.equal(navigation.root.dataset.roomPage, 'collaborate', 'same-member reconnect keeps selected page');
+  assert.equal(navigation.root.dataset.roomPage, 'play', 'collaborate intent stays on the listening scene after reconnect');
+  assert.equal(navigation.root.dataset.roomAside, 'queue', 'collaborate intent opens the queue aside');
   assert.equal(navigation.field('说点什么（最多 200 字）').value, 'Unsent draft', 'same-member reconnect preserves an unsent draft');
   navigation.api.onViewExit();
   assert.equal(navigation.chromeEvents.at(-1), false, 'returning to Hertz restores compact room controls');
@@ -521,10 +682,10 @@ async function main() {
   assert.equal(f.calls.find(c => c.action === 'operation').operation_id, sent.operation_id, 'query uses the original playback ID');
 
   const invitation = deferred(); f.hooks.set('invite', () => invitation.promise);
-  const pendingInvite = f.button('生成邀请').onclick(); await settle();
+  const pendingInvite = f.button('生成并复制邀请').onclick(); await settle();
   f.set({ session_id: 's2' }); await f.poll();
   invitation.resolve({ invitation: 'OLD-SESSION-SECRET' }); await pendingInvite;
-  assert.equal(f.field('一次性邀请（五分钟有效）').value, '', 'late invitation cannot write into a new session');
+  assert.equal(f.field('一次性邀请').value, '', 'late invitation cannot write into a new session');
 
   const send = deferred(); f.hooks.set('chat_send', () => send.promise);
   f.field('说点什么（最多 200 字）').value = 'Old session';
@@ -547,11 +708,13 @@ async function main() {
   assert.equal(f.field('说点什么（最多 200 字）').disabled, true);
   f.api.destroy();
   const body = new Node('body'), seeks = [];
-  const transportContext = { document: { body, createElement: tag => new Node(tag) } };
+  const transportContext = { document: { body, createElement: tag => new Node(tag), addEventListener() {}, removeEventListener() {} } };
   transportContext.window = transportContext;
   vm.createContext(transportContext);
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../plugin/ui/room-workspace.js'), 'utf8'), transportContext);
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../plugin/ui/room-transport.js'), 'utf8'), transportContext);
-  const bar = transportContext.HertzRoomTransport.create({ seek: (...args) => seeks.push(args) });
+  const playbackActions = []; let opened = 0;
+  const bar = transportContext.HertzRoomTransport.create({ seek: (...args) => seeks.push(args), open: () => opened++, playback: action => playbackActions.push(action) });
   const trackSnapshot = (id, duration) => ({ mode: 'host', track_instance_id: id, current_track: { duration_ms: duration }, permissions: { transport: true } });
   bar.render(trackSnapshot('A', 100000));
   bar.setWorkspaceVisible(true);
@@ -566,6 +729,34 @@ async function main() {
   assert.equal(seeks.length, 0, 'a track change cancels an old seek gesture');
   seek.value = 500; seek.oninput(); seek.onchange();
   assert.deepEqual(seeks, [['B', 100000]], 'same-track seek uses the gesture duration');
-  console.log('Room UI: background projection recovery, admission retries, queue instance identity, reconnect receipts, history and session isolation passed.');
+  const collapse = walk(body).find(n => n.getAttribute('aria-controls') === 'room-global-player');
+  assert.equal(collapse.getAttribute('aria-expanded'), 'true');
+  collapse.onclick();
+  assert.equal(collapse.getAttribute('aria-expanded'), 'false', 'collapse changes presentation');
+  assert.equal(seeks.length, 1, 'collapse never seeks or stops playback');
+  assert.deepEqual(playbackActions, [], 'collapse sends no playback operations');
+  bar.render(trackSnapshot('B', 200000));
+  assert.equal(collapse.getAttribute('aria-expanded'), 'false', 'polling retains collapsed state');
+  bar.setWorkspaceVisible(true); bar.render(trackSnapshot('B', 200000));
+  assert.equal(body.children[0].hidden, true, 'collapsed player stays hidden in the room');
+  bar.setWorkspaceVisible(false);
+  assert.equal(body.children[0].hidden, false);
+  assert.equal(collapse.getAttribute('aria-expanded'), 'false', 'returning to the app preserves collapse');
+  const returnButton = walk(body).find(n => n.className === 'room-global-return');
+  returnButton.onclick();
+  assert.equal(opened, 1, 'explicit room shortcut delegates to room navigation');
+  const toggle = walk(body).find(n => n.getAttribute('aria-label') === '播放');
+  toggle.onclick();
+  assert.deepEqual(playbackActions, ['toggle'], 'mini player reuses room playback');
+  bar.render({ ...trackSnapshot('B', 200000), mode: 'reconnecting' });
+  assert.equal(toggle.disabled, true, 'reconnect disables mini player transport');
+  bar.setPlaybackUncertain(true); bar.render(trackSnapshot('B', 200000));
+  assert.equal(toggle.disabled, true, 'uncertain receipt also gates mini player');
+  returnButton.onclick(); assert.equal(opened, 2, 'navigation remains available when playback is uncertain');
+  bar.render({ mode: 'local' });
+  assert.equal(body.children[0].hidden, true, 'leaving the room removes the mini player');
+  bar.render(trackSnapshot('C', 300000));
+  assert.equal(collapse.getAttribute('aria-expanded'), 'true', 'a new room starts expanded');
+  console.log('Room UI: selected-track creation/no replay, background projection recovery, inline admission verification/retries, queue instance identity, reconnect receipts, history and session isolation passed.');
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

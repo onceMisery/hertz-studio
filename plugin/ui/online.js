@@ -355,6 +355,25 @@
     return node;
   }
 
+  function roomButton(tracks, label) {
+    if (!window.HertzRoom) return null;
+    var songs = tracks.filter(function (track) { return track.playable; });
+    var button = document.createElement('button');
+    button.type = 'button'; button.className = label ? 'btn' : 't-act';
+    button.title = label || '加入一起听'; button.setAttribute('aria-label', button.title);
+    if (label) button.textContent = label;
+    else button.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-headphones"/></svg>';
+    button.disabled = !songs.length;
+    button.onclick = async function (event) {
+      event.stopPropagation(); if (button.disabled) return;
+      button.disabled = true;
+      try { await window.HertzRoom.addOnline(songs); H.toast('已加入一起听共同队列'); }
+      catch (error) { H.toast(error.message || '加入一起听失败', 'error'); }
+      finally { button.disabled = !songs.length; }
+    };
+    return button;
+  }
+
   function buildRow(track, activate) {
     var row = document.createElement('div');
     // 无试听地址：整行置灰。只禁用按钮不够，行点击也必须失效。
@@ -426,6 +445,9 @@
       if (anchorNode) plActions.insertBefore(plBtn, anchorNode);
       else plActions.appendChild(plBtn);
     }
+
+    var roomBtn = roomButton([track]);
+    if (roomBtn) row.querySelector('.t-actions').appendChild(roomBtn);
 
     var btn = row.querySelector('[data-act="preview"]');
     btn.disabled = disabled;
@@ -2171,6 +2193,7 @@
     playCollection: playCollection,
     // 行工厂：歌单抽屉复用同一套标记/VIP/置灰，activate 由调用方注入。
     row: buildRow,
+    roomButton: roomButton,
     loadSources: loadSources,
     // 账号探测错误分流（A6）：会话状态有三态，不能把「这次没探出结果」说成
     // 「这台没登录」。只有服务端明确的授权断言算未登录；上游 5xx / 超时 /

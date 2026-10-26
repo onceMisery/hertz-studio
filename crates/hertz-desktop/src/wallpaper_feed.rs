@@ -73,7 +73,18 @@ pub(crate) struct Snapshot {
     pub(crate) duration_ms: Option<u64>,
     pub(crate) generation: String,
     pub(crate) spectrum: Spectrum,
+    #[serde(default)]
+    pub(crate) space: Option<SpacePresentation>,
     pub(crate) timing: String,
+}
+
+/// 三维空间当前场景的窄投影；旧服务没有这个字段时保持 None，壁纸按固定场景工作。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SpacePresentation {
+    pub(crate) scene: String,
+    #[serde(default)]
+    pub(crate) params: serde_json::Value,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -371,6 +382,14 @@ fn validate(snapshot: &Snapshot) -> Result<(), FeedError> {
     if !snapshot.spectrum.energy.is_finite() || !(0.0..=1.0).contains(&snapshot.spectrum.energy) {
         return Err(invalid("频谱能量非有限或越界"));
     }
+    if let Some(space) = snapshot.space.as_ref() {
+        if space.scene.trim().is_empty() {
+            return Err(invalid("三维空间场景为空"));
+        }
+        if !space.params.is_object() {
+            return Err(invalid("三维空间参数不是对象"));
+        }
+    }
     Ok(())
 }
 
@@ -402,6 +421,7 @@ mod tests {
                 energy: 0.5,
                 age_ms: Some(0),
             },
+            space: None,
             timing: "presentation_applied".into(),
         }
     }
@@ -447,6 +467,35 @@ mod tests {
         value.valid = true;
         value.position_ms = 59_800;
         assert_eq!(value.interpolated_position_ms(500), Some(60_000));
+    }
+
+    #[test]
+    fn space_presentation_is_optional_and_validated() {
+        let mut value = snapshot(1);
+        value.space = Some(SpacePresentation {
+            scene: "butterfly-vortex".into(),
+            params: serde_json::json!({ "speed": 1.0 }),
+        });
+        validate(&value).unwrap();
+        let decoded: Snapshot = serde_json::from_str(&json(&value)).unwrap();
+        assert_eq!(decoded.space.unwrap().scene, "butterfly-vortex");
+
+        let mut legacy: serde_json::Value = serde_json::from_str(&json(&snapshot(2))).unwrap();
+        legacy.as_object_mut().unwrap().remove("space");
+        let decoded: Snapshot = serde_json::from_value(legacy).unwrap();
+        assert!(decoded.space.is_none());
+        validate(&decoded).unwrap();
+
+        value.space = Some(SpacePresentation {
+            scene: " ".into(),
+            params: serde_json::json!({}),
+        });
+        assert_eq!(validate(&value).unwrap_err().code, ERR_INVALID);
+        value.space = Some(SpacePresentation {
+            scene: "coast".into(),
+            params: serde_json::json!([]),
+        });
+        assert_eq!(validate(&value).unwrap_err().code, ERR_INVALID);
     }
 
     struct TempDir(PathBuf);

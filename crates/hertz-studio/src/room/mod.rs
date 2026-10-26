@@ -8,6 +8,7 @@ mod history_writer;
 mod host;
 mod host_jobs;
 mod manager;
+mod online_source;
 mod output_preferences;
 mod presentation;
 pub(crate) mod producer;

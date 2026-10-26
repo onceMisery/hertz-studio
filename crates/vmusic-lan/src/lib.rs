@@ -6,6 +6,7 @@ pub mod client;
 pub mod clock;
 pub mod discovery;
 pub mod invitation;
+pub mod lobby;
 pub mod members;
 mod notifications;
 pub use notifications::Notifications as ChatNotifications;

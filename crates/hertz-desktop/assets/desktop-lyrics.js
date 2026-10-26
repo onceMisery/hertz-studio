@@ -6,8 +6,12 @@
     current: document.getElementById("current"),
     secondary: document.getElementById("secondary"),
     notice: document.getElementById("notice"),
-    layout: document.getElementById("layout"),
-    secondaryBtn: document.getElementById("secondary-btn"),
+    styleButton: document.getElementById("style-open"),
+    optionsPanel: document.getElementById("options-panel"),
+    optionsDone: document.getElementById("options-done"),
+    secondaryCell: document.getElementById("secondary-cell"),
+    fontValue: document.getElementById("font-value"),
+    opacityValue: document.getElementById("opacity-value"),
   };
   const ipc = (payload) => {
     try {
@@ -24,7 +28,6 @@
     locked: false,
     active: true,
     source: "waiting",
-    sourceMessage: "",
     groups: null,
     anchor: null,
     confirmed: false,
@@ -42,6 +45,7 @@
     lineTiming: null,
     raf: 0,
     lastPaint: 0,
+    optionsOpen: false,
   };
 
   function trackId(snapshot) {
@@ -60,16 +64,20 @@
     root.style.setProperty("--outline-width", `${config.outlineWidth}px`);
     root.style.setProperty("--opacity", String(config.opacity));
     document.body.dataset.layout = config.layout;
-    els.layout.textContent = config.layout === "double" ? "单行" : "双行";
-    els.secondaryBtn.textContent =
-      config.secondary === "translation"
-        ? "次行：译文"
-        : config.secondary === "romanization"
-          ? "次行：罗马音"
-          : "次行：下一句";
-    els.secondaryBtn.style.display = config.layout === "single" ? "none" : "";
-    document.getElementById("font-value").textContent = `${config.fontSize}px`;
-    document.getElementById("opacity-value").textContent = `${Math.round(config.opacity * 100)}%`;
+    const layout = config.layout === "single" ? "single" : "double";
+    document.querySelectorAll("[data-layout]").forEach((button) => {
+      button.setAttribute("aria-pressed", String(button.dataset.layout === layout));
+    });
+    const secondary = config.secondary || "next";
+    document.querySelectorAll("[data-secondary]").forEach((button) => {
+      button.setAttribute(
+        "aria-pressed",
+        String(button.dataset.secondary === secondary),
+      );
+    });
+    els.secondaryCell.hidden = layout === "single";
+    els.fontValue.textContent = `${config.fontSize}px`;
+    els.opacityValue.textContent = `${Math.round(config.opacity * 100)}%`;
     const limits = {
       "font-down": config.fontSize <= 18,
       "font-up": config.fontSize >= 72,
@@ -88,13 +96,31 @@
     state.locked = Boolean(locked);
     document.body.classList.toggle("locked", state.locked);
     document.body.classList.toggle("unlocked", !state.locked);
-    if (state.locked) document.getElementById("lyric-options").open = false;
+    if (state.locked) setOptionsOpen(false, false);
     scheduleRender();
+  }
+
+  function setOptionsOpen(open, restoreFocus = true) {
+    if (state.optionsOpen === open) return;
+    state.optionsOpen = open;
+    document.body.classList.toggle("options-open", open);
+    els.optionsPanel.hidden = !open;
+    els.styleButton.setAttribute("aria-expanded", String(open));
+    if (open) {
+      stopLoop();
+      els.optionsPanel.scrollTop = 0;
+      els.optionsPanel.focus({ preventScroll: true });
+    } else {
+      if (restoreFocus) els.styleButton.focus({ preventScroll: true });
+      render();
+      updateLoop();
+    }
   }
 
   function setActive(active) {
     state.active = Boolean(active);
     if (!state.active) {
+      setOptionsOpen(false, false);
       stopLoop();
       return;
     }
@@ -105,7 +131,6 @@
   function setSource(payload) {
     if (!payload) return;
     state.source = payload.state || "error";
-    state.sourceMessage = payload.message || "";
     if (state.source !== "ok") {
       state.document = null;
       state.groups = null;
@@ -251,18 +276,14 @@
 
   function placeholder() {
     const snapshot = state.snapshot;
-    if (state.source === "waiting") {
-      return state.sourceMessage || "等待 Hertz 服务";
-    }
-    if (state.source === "error") {
-      return state.sourceMessage || "歌词来源不可用";
-    }
-    if (!snapshot) return "等待 Hertz 服务";
+    if (state.source === "waiting") return "正在连接 Hertz 服务";
+    if (state.source === "error") return "暂无歌词";
+    if (!snapshot) return "正在连接 Hertz 服务";
     if (!snapshot.track) return "暂无播放";
     const status = snapshot.lyrics ? snapshot.lyrics.status : "idle";
     if (status === "loading") return "正在读取歌词";
     if (status === "too_large") return "桌面歌词暂不支持此文档";
-    if (status === "error") return "歌词读取失败，稍后重试";
+    if (status === "error") return "暂无歌词";
     if (status === "empty") return "暂无歌词";
     if (status === "ready") return "正在读取歌词";
     return "暂无歌词";
@@ -426,29 +447,24 @@
     });
   }
 
+  function canAnimate() {
+    return Boolean(
+      state.active &&
+        !state.optionsOpen &&
+        state.snapshot &&
+        state.snapshot.playing &&
+        !state.snapshot.buffering &&
+        state.confirmed &&
+        state.document,
+    );
+  }
+
   function updateLoop() {
-    if (
-      !state.active ||
-      !state.snapshot ||
-      !state.snapshot.playing ||
-      state.snapshot.buffering ||
-      !state.confirmed ||
-      !state.document ||
-      state.raf
-    ) {
-      if (
-        state.raf &&
-        (!state.active ||
-          !state.snapshot ||
-          !state.snapshot.playing ||
-          state.snapshot.buffering ||
-          !state.confirmed)
-      ) {
-        stopLoop();
-      }
+    if (!canAnimate()) {
+      stopLoop();
       return;
     }
-    state.raf = requestAnimationFrame(loop);
+    if (!state.raf) state.raf = requestAnimationFrame(loop);
   }
 
   function loop(now) {
@@ -494,19 +510,32 @@
     });
   });
 
+  els.styleButton.addEventListener("click", () => {
+    setOptionsOpen(!state.optionsOpen);
+  });
+  els.optionsDone.addEventListener("click", () => setOptionsOpen(false));
+
+  document.querySelectorAll("[data-layout]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const value = button.dataset.layout;
+      if (state.config && state.config.layout === value) return;
+      ipc({ cmd: "layout", text: value });
+    });
+  });
+  document.querySelectorAll("[data-secondary]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const value = button.dataset.secondary;
+      if (state.config && state.config.secondary === value) return;
+      ipc({ cmd: "secondary", text: value });
+    });
+  });
+
   document.addEventListener("contextmenu", (event) => event.preventDefault());
   document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") {
-      const options = document.getElementById("lyric-options");
-      if (options.open) {
-        options.open = false;
-        options.querySelector("summary").focus();
-      }
+    if (event.key === "Escape" && state.optionsOpen) {
+      event.preventDefault();
+      setOptionsOpen(false);
     }
-  });
-  document.addEventListener("pointerdown", (event) => {
-    const options = document.getElementById("lyric-options");
-    if (!options.contains(event.target)) options.open = false;
   });
   ipc({ cmd: "ready" });
 })();

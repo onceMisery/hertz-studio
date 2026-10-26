@@ -71,6 +71,7 @@ pub enum QueueOrder {
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PeerRequest {
     Snapshot,
+    RoomProfile,
     Invite,
     RevokeInvitation {
         invitation_id: Uuid,
@@ -83,6 +84,8 @@ pub enum PeerRequest {
         limit: usize,
         #[serde(default)]
         revision: Option<Counter>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        query: Option<String>,
     },
     ResolveFavorites {
         keys: Vec<String>,
@@ -175,6 +178,10 @@ pub enum LocalRequest {
     Resume,
     Create {
         name: String,
+        #[serde(default = "default_host_name")]
+        host_name: String,
+        #[serde(default)]
+        cover: Option<String>,
         address: std::net::SocketAddr,
         sample_rate: u32,
         local_output: bool,
@@ -209,6 +216,9 @@ pub enum LocalRequest {
         application_id: Uuid,
     },
     Leave,
+    RoomCover {
+        cover: Option<String>,
+    },
     Invite {
         permissions: Permissions,
     },
@@ -220,6 +230,9 @@ pub enum LocalRequest {
     },
     Share {
         track_ids: Vec<String>,
+    },
+    ShareOnline {
+        tracks: Vec<super::online_source::OnlineSong>,
     },
     Permissions {
         member_id: Uuid,
@@ -251,11 +264,60 @@ pub enum LocalRequest {
 fn default_discoverable() -> bool {
     true
 }
+fn default_host_name() -> String {
+    "房主".into()
+}
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn room_cover_is_optional_at_creation_and_host_local_only() {
+        let request: super::LocalRequest = serde_json::from_value(serde_json::json!({
+            "action":"create","name":"room","address":"127.0.0.1:0","sample_rate":48000,"local_output":false
+        })).unwrap();
+        assert!(matches!(
+            request,
+            super::LocalRequest::Create { cover: None, .. }
+        ));
+        assert!(serde_json::from_value::<super::LocalRequest>(
+            serde_json::json!({"action":"room_cover","cover":null})
+        )
+        .is_ok());
+        assert!(serde_json::from_value::<super::PeerRequest>(
+            serde_json::json!({"action":"room_cover","cover":null})
+        )
+        .is_err());
+    }
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn library_search_is_optional_and_omitted_for_older_hosts() {
+        let old = json!({"action":"library","offset":0,"limit":32,"revision":null});
+        let parsed: PeerRequest = serde_json::from_value(old.clone()).unwrap();
+        assert!(matches!(parsed, PeerRequest::Library { query: None, .. }));
+        assert_eq!(serde_json::to_value(parsed).unwrap(), old);
+
+        let mut search = old;
+        search["query"] = json!("夜航");
+        let parsed: PeerRequest = serde_json::from_value(search.clone()).unwrap();
+        assert_eq!(serde_json::to_value(parsed).unwrap(), search);
+    }
+
+    #[test]
+    fn create_accepts_a_host_nickname_and_preserves_older_clients() {
+        let mut value = json!({"action":"create","name":"room","address":"127.0.0.1:0","sample_rate":48000,"local_output":false});
+        let LocalRequest::Create { host_name, .. } = serde_json::from_value(value.clone()).unwrap()
+        else {
+            panic!("create request")
+        };
+        assert_eq!(host_name, "房主");
+        value["host_name"] = json!("夜航听众");
+        let LocalRequest::Create { host_name, .. } = serde_json::from_value(value).unwrap() else {
+            panic!("create request")
+        };
+        assert_eq!(host_name, "夜航听众");
+    }
 
     #[test]
     fn discoverability_preserves_old_create_requests_and_is_host_local_only() {

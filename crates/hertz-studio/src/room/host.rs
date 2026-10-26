@@ -95,6 +95,8 @@ struct Owner {
     server: RoomServer,
     clock: MonotonicClock,
     name: String,
+    host_name: String,
+    cover: Option<String>,
     format: AudioFormat,
     library: SharedLibrary,
     chat: Option<super::chat::ChatService>,
@@ -179,6 +181,8 @@ fn output_options(
 }
 pub(super) struct HostOptions {
     pub name: String,
+    pub host_name: String,
+    pub cover: Option<String>,
     pub address: SocketAddr,
     pub sample_rate: u32,
     pub local_output: bool,
@@ -193,11 +197,24 @@ pub(crate) async fn start(
 ) -> RoomResult<Session> {
     let HostOptions {
         name,
+        host_name,
+        cover,
         address,
         sample_rate,
         local_output,
         discoverable,
     } = options;
+    if cover
+        .as_deref()
+        .is_some_and(|c| !vmusic_lan::lobby::valid_cover(c))
+    {
+        return Err(RoomError::invalid(
+            "房间封面须为 512px 以内、24 KiB 以内的有效 PNG 缩略图",
+        ));
+    }
+    vmusic_lan::members::validate_name(&host_name)
+        .map_err(|_| RoomError::invalid("昵称须为 1–32 个字符，不能包含控制字符"))?;
+    let host_name = host_name.trim().to_owned();
     if name.trim().is_empty()
         || name.len() > 128
         || name.chars().count() > 64
@@ -287,6 +304,8 @@ pub(crate) async fn start(
         server,
         clock,
         name,
+        host_name,
+        cover,
         format,
         library,
         chat,
@@ -348,6 +367,7 @@ pub(crate) async fn start(
         advertisement,
         discoverable,
     };
+    owner.sync_lobby_profile()?;
     owner.publish().await;
     let (commands, rx) = mpsc::channel(32);
     let (stop, stopped) = watch::channel(false);
@@ -394,11 +414,26 @@ fn wall_ms() -> u64 {
         .min(u128::from(u64::MAX)) as u64
 }
 impl Owner {
+    fn cover_revision(&self) -> Option<String> {
+        use sha2::Digest;
+        self.cover
+            .as_ref()
+            .map(|cover| format!("{:x}", sha2::Sha256::digest(cover.as_bytes())))
+    }
+    fn sync_lobby_profile(&self) -> RoomResult<()> {
+        self.server
+            .transport
+            .set_lobby_profile(self.discoverable.then(|| vmusic_lan::lobby::LobbyProfile {
+                room_id: self.local_identity.room_id,
+                cover: self.cover.clone(),
+            }))
+            .map_err(transport_error)
+    }
     fn requester(&self, member: Uuid) -> super::collaboration::Requester {
         super::collaboration::Requester {
             member_id: member,
             name: if member == OWNER {
-                "房主".into()
+                self.host_name.clone()
             } else {
                 self.server
                     .transport
@@ -678,7 +713,7 @@ impl Owner {
                 });
                 Ok(())
             }
-            LocalRequest::Share { track_ids } => {
+            request @ (LocalRequest::Share { .. } | LocalRequest::ShareOnline { .. }) => {
                 if self.mutation_preparing
                     || self.candidate.is_some()
                     || self.scheduled.is_some()
@@ -697,9 +732,19 @@ impl Owner {
                 let library_revision = library.revision().await;
                 let state = self.state.clone();
                 self.jobs.spawn(async move {
-                    let result = host_jobs::bounded(library.prepare_replace(&state, track_ids))
-                        .await
-                        .map(PreparedAction::Share);
+                    let result = host_jobs::bounded(async {
+                        match request {
+                            LocalRequest::Share { track_ids } => {
+                                library.prepare_replace(&state, track_ids).await
+                            }
+                            LocalRequest::ShareOnline { tracks } => {
+                                library.prepare_add_online(tracks).await
+                            }
+                            _ => unreachable!(),
+                        }
+                    })
+                    .await
+                    .map(PreparedAction::Share);
                     Completion::Request {
                         member: OWNER,
                         session: None,
@@ -884,6 +929,7 @@ impl Owner {
                         PreparedAction::Share(prepared)=>{
                             if revision!=self.scheduler.revision().0||self.candidate.is_some()||self.scheduled.is_some(){return Err(RoomError::new("revision_conflict","准备期间房间状态已改变，分享范围未提交"))}
                             let views=self.library.commit_replace(prepared).await?;
+                            self.library.remember_online_metadata(&self.state).await;
                             self.scheduler.control_changed().ok_or_else(RoomError::exhausted)?;
                             // Already distributed PCM remains immutable. Revoke
                             // future starts immediately, then suspend this prefix
@@ -903,7 +949,7 @@ impl Owner {
                             }
                             if revoked {self.internal(Playback::Pause).await?;}
                             else {self.prepare_successor().await?;}
-                            self.publish().await;Ok(json!({"tracks":views,"revision":self.scheduler.revision().0.to_string()}))
+                            self.publish().await;Ok(json!({"tracks":views,"revision":self.scheduler.revision().0.to_string(),"favorite_local_ids":self.library.local_favorite_ids().await}))
                         },
                     }
                 }.await;
@@ -1734,14 +1780,14 @@ impl Owner {
         let loudness_mode = self.loudness_mode.clone();
         self.candidate.as_mut().unwrap().loading = true;
         let task = self.jobs.spawn(async move {
-            let result = host_jobs::bounded(host_jobs::source(
+            let result = host_jobs::source(
                 state,
                 library,
                 track,
                 target.track.0,
                 target.position_ms,
                 loudness_mode.clone(),
-            ))
+            )
             .await;
             Completion::Source {
                 epoch,
@@ -2093,9 +2139,7 @@ impl Owner {
         self.next_job = token.checked_add(1).ok_or_else(RoomError::exhausted)?;
         self.successor_tokens.insert(epoch, token);
         let task = self.jobs.spawn(async move {
-            let result =
-                host_jobs::bounded(host_jobs::source(state, library, track, instance, 0, mode))
-                    .await;
+            let result = host_jobs::source(state, library, track, instance, 0, mode).await;
             Completion::Successor {
                 epoch,
                 current,
@@ -2432,7 +2476,7 @@ impl Owner {
         if member == OWNER {
             return super::chat::ChatAccess {
                 member,
-                name: "房主".into(),
+                name: self.host_name.clone(),
                 active: Arc::new(|| true),
                 read: Arc::new(|| true),
                 send: Arc::new(|| true),
@@ -2561,6 +2605,11 @@ impl Owner {
                     .to_string());
                 return Ok(snapshot);
             }
+            PeerRequest::RoomProfile => {
+                return Ok(
+                    json!({"room_id":self.local_identity.room_id,"revision":self.cover_revision(),"cover":self.cover}),
+                );
+            }
             PeerRequest::Invite => {
                 self.check_access(member, session, |p| p.invite)?;
                 let issued = if member == OWNER {
@@ -2609,17 +2658,22 @@ impl Owner {
                 offset,
                 limit,
                 revision,
+                query,
             } => {
-                let current_revision = self.library.revision().await;
+                let query = query.as_deref().unwrap_or("");
+                if query.chars().count() > 128 || query.chars().any(char::is_control) {
+                    return Err(RoomError::invalid("搜索词最多128个字符，不含控制字符"));
+                }
+                let (current_revision, total, views) =
+                    self.library.search_page(offset, limit, query).await;
                 if revision.is_some_and(|revision| revision.0 != current_revision) {
                     return Err(RoomError::new(
                         "revision_conflict",
                         "分享列表已更新，请重新读取",
                     ));
                 }
-                let views = self.library.views().await;
                 return Ok(
-                    json!({"total":views.len(),"offset":offset,"revision":current_revision.to_string(),"tracks":views.into_iter().skip(offset).take(limit.clamp(1,64)).collect::<Vec<_>>()}),
+                    json!({"total":total,"offset":offset,"revision":current_revision.to_string(),"tracks":views}),
                 );
             }
             PeerRequest::QueuePage {
@@ -2975,6 +3029,25 @@ impl Owner {
     }
     async fn local_request(&mut self, request: LocalRequest) -> RoomResult<Value> {
         match request {
+            LocalRequest::RoomCover { cover } => {
+                if cover
+                    .as_deref()
+                    .is_some_and(|c| !vmusic_lan::lobby::valid_cover(c))
+                {
+                    return Err(RoomError::invalid("封面无效或过大，请重新选择图片"));
+                }
+                // Validate and publish before replacing the host's confirmed artwork.
+                self.server
+                    .transport
+                    .set_lobby_profile(self.discoverable.then(|| vmusic_lan::lobby::LobbyProfile {
+                        room_id: self.local_identity.room_id,
+                        cover: cover.clone(),
+                    }))
+                    .map_err(transport_error)?;
+                self.cover = cover;
+                self.publish().await;
+                Ok(json!({"state":"applied"}))
+            }
             LocalRequest::Discoverable { enabled } => {
                 if enabled && self.advertisement.is_none() {
                     self.advertisement = Some(
@@ -2992,6 +3065,7 @@ impl Owner {
                     self.advertisement.take();
                 }
                 self.discoverable = enabled;
+                self.sync_lobby_profile()?;
                 self.publish().await;
                 Ok(json!({"state":"applied"}))
             }
@@ -3187,11 +3261,13 @@ impl Owner {
                 "rtt_ns":null,"acoustic_error_ms":null,"buffer_percent":null})
         }).collect::<Vec<_>>();
         let local = self.local.as_ref().map(|r| r.status());
-        members.insert(0, json!({"id":OWNER,"name":"房主","permissions":owner_permissions(),"connected":true,"owner":true,
+        members.insert(0, json!({"id":OWNER,"name":self.host_name,"permissions":owner_permissions(),"connected":true,"owner":true,
             "audio":self.local.is_some(),"ready":local.as_ref().is_some_and(|s|s.output_ready),
             "committed":local.as_ref().is_some_and(|s|s.current_epoch.is_some()),"last_output_age_ms":null,
             "rtt_ns":null,"acoustic_error_ms":null,"buffer_percent":null}));
         json!({"collaboration":{"queue_order":self.collaboration.order,"activity":self.collaboration.activity},
+            "library_search":true,
+            "room_cover_revision":self.cover_revision(),
             "started_at_ms":self.started_at_ms.to_string(),"elapsed_ms":(now/1_000_000).to_string(),
             "member_capacity":vmusic_lan::members::MAX_MEMBERS+1,"audio_capacity":vmusic_lan::members::MAX_AUDIO_OUTPUTS,
             "online_count":members.iter().filter(|m|m["connected"]==true).count(),"members":members,"current_track":current_track,"mode":"room","room_id":self.local_identity.room_id,"instance_id":self.local_identity.instance_id,"name":self.name,"revision":self.scheduler.revision().0.to_string(),"sharing_revision":self.library.revision().await.to_string(),"host_time_ns":now.to_string(),"playing":playing,"track_instance_id":instance.to_string(),"position_ms":position.to_string(),"queue":queue,"queue_count":tracks.len(),"tracks":self.library.views().await.into_iter().take(16).collect::<Vec<_>>(),"shared_count":self.library.views().await.len(),"format":self.format,"volume":self.volume,"pending_mix":self.mixer.pending.as_ref().and_then(|p|self.mixer.outcome(p.id)),"play_mode":self.mode,"dsp":self.dsp,"crossfade_ms":self.crossfade_ms,"loudness_mode":self.loudness_mode,"permissions":permissions,"pending":self.candidate.as_ref().map(|c|json!({"epoch":c.wire.epoch,"plan_id":c.wire.plan_id,"effective_at":c.wire.anchor_ns,"ready":c.ready,"prepared":c.prepared})),"scheduled":self.scheduled.as_ref().map(|s|json!({"epoch":s.plan.epoch,"plan_id":s.plan.plan_id,"effective_at":s.plan.anchor_ns})),"chat":self.chat.as_ref().map(|c|c.status.borrow().clone()),"chat_error":self.chat_error,"error":self.error})
@@ -3225,6 +3301,7 @@ impl Owner {
         value["shared_track_ids"] = json!(self.library.local_ids().await);
         value["discovery_available"] = json!(self.advertisement.is_some());
         value["discoverable"] = json!(self.discoverable);
+        value["room_cover"] = json!(self.cover);
         value["invitations"] = json!(self.server.transport.invitation_views());
         value["admission"] = json!({"room_code":self.server.transport.room_code(),"pending":self.server.transport.admission_views(),"capacity":vmusic_lan::admission::MAX_APPLICATIONS});
         value["sleep_timer_remaining_seconds"] =
@@ -3399,6 +3476,8 @@ pub(super) mod join_retry_tests {
             server,
             clock,
             name: "Share boundary test".into(),
+            host_name: "测试房主".into(),
+            cover: None,
             format,
             library: SharedLibrary::default(),
             chat: None,
@@ -3480,6 +3559,176 @@ pub(super) mod join_retry_tests {
         owner.server.shutdown().await;
         owner.state.audio.shutdown();
         audio.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn library_search_advertises_support_and_validates_query_and_revision() {
+        let (mut owner, audio, _render, _inbound) = playing_owner().await;
+        let snapshot = owner.peer_snapshot(owner_permissions()).await;
+        assert_eq!(snapshot["library_search"], true);
+        let revision = owner.library.revision().await;
+        for query in [None, Some("夜".repeat(128)), Some("   ".into())] {
+            let page = owner
+                .peer(
+                    OWNER,
+                    None,
+                    owner_permissions(),
+                    PeerRequest::Library {
+                        offset: 0,
+                        limit: 64,
+                        revision: Some(Counter(revision)),
+                        query,
+                    },
+                    None,
+                )
+                .await
+                .unwrap();
+            assert_eq!(page["total"], 0);
+            assert_eq!(page["revision"], revision.to_string());
+        }
+        for query in [
+            "夜".repeat(129),
+            "query\n".into(),
+            "\0".into(),
+            "\tsearch".into(),
+        ] {
+            let error = owner
+                .peer(
+                    OWNER,
+                    None,
+                    owner_permissions(),
+                    PeerRequest::Library {
+                        offset: 0,
+                        limit: 64,
+                        revision: None,
+                        query: Some(query),
+                    },
+                    None,
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(error.code, "room_invalid");
+        }
+        let error = owner
+            .peer(
+                OWNER,
+                None,
+                owner_permissions(),
+                PeerRequest::Library {
+                    offset: 0,
+                    limit: 64,
+                    revision: Some(Counter(revision + 1)),
+                    query: None,
+                },
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "revision_conflict");
+        assert_eq!(owner.library.revision().await, revision);
+        finish_owner(owner, audio).await;
+    }
+
+    #[tokio::test]
+    async fn host_nickname_is_shared_by_members_chat_and_queue_attribution() {
+        let (owner, audio, _render, _inbound) = playing_owner().await;
+        assert_eq!(owner.requester(OWNER).name, "测试房主");
+        assert_eq!(owner.chat_access(OWNER, None).name, "测试房主");
+        let snapshot = owner.peer_snapshot(owner_permissions()).await;
+        assert_eq!(snapshot["members"][0]["name"], "测试房主");
+        finish_owner(owner, audio).await;
+    }
+
+    #[tokio::test]
+    async fn room_cover_changes_are_confirmed_public_only_when_discoverable() {
+        let (mut owner, audio, _render, _inbound) = playing_owner().await;
+        let cover = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNoaGgAAAMEAYFL09IQAAAAAElFTkSuQmCC".to_owned();
+        let track = owner.peer_snapshot(owner_permissions()).await["current_track"].clone();
+        owner.discoverable = true;
+        owner
+            .local_request(LocalRequest::RoomCover {
+                cover: Some(cover.clone()),
+            })
+            .await
+            .unwrap();
+        let snapshot = owner.peer_snapshot(owner_permissions()).await;
+        assert!(
+            snapshot.get("room_cover").is_none(),
+            "frequent snapshots do not carry image bytes"
+        );
+        assert!(snapshot["room_cover_revision"].is_string());
+        let member_profile = owner
+            .peer(
+                OWNER,
+                None,
+                owner_permissions(),
+                PeerRequest::RoomProfile,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(member_profile["cover"], cover);
+        assert_eq!(
+            owner.peer_snapshot(owner_permissions()).await["current_track"],
+            track
+        );
+        let public = vmusic_lan::client::lobby_profile(
+            owner.server.address,
+            owner.server.fingerprint,
+            owner.local_identity.room_id,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(public.cover.as_deref(), Some(cover.as_str()));
+        assert!(owner
+            .local_request(LocalRequest::RoomCover {
+                cover: Some("invalid".into())
+            })
+            .await
+            .is_err());
+        assert_eq!(
+            owner.cover.as_deref(),
+            Some(cover.as_str()),
+            "failed validation preserves confirmed artwork"
+        );
+        owner
+            .local_request(LocalRequest::Discoverable { enabled: false })
+            .await
+            .unwrap();
+        assert!(vmusic_lan::client::lobby_profile(
+            owner.server.address,
+            owner.server.fingerprint,
+            owner.local_identity.room_id
+        )
+        .await
+        .unwrap()
+        .is_none());
+        assert_eq!(
+            owner.cover.as_deref(),
+            Some(cover.as_str()),
+            "hiding discovery retains artwork for later"
+        );
+        let member_profile = owner
+            .peer(
+                OWNER,
+                None,
+                owner_permissions(),
+                PeerRequest::RoomProfile,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            member_profile["cover"], cover,
+            "joined members can view room artwork when public discovery is disabled"
+        );
+        owner
+            .local_request(LocalRequest::RoomCover { cover: None })
+            .await
+            .unwrap();
+        assert!(owner.peer_snapshot(owner_permissions()).await["room_cover_revision"].is_null());
+        finish_owner(owner, audio).await;
     }
 
     #[tokio::test]
@@ -3933,6 +4182,7 @@ pub(super) mod join_retry_tests {
                 token: 1,
                 library_revision: 0,
                 result: Ok(Source {
+                    media: None,
                     path: Default::default(),
                     instance: 2,
                     position_ms: 0,

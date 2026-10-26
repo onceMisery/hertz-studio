@@ -2,17 +2,7 @@
   <div id="toolbar" aria-label="桌面歌词工具">
     <button id="drag" title="按住拖动歌词窗口" aria-label="拖动歌词窗口">⠿</button>
     <button id="lock" data-cmd="lock" title="锁定后鼠标可穿透；在 Hertz 托盘菜单中解锁">锁定</button>
-    <details id="lyric-options">
-      <summary title="调整歌词显示与外观">样式</summary>
-      <div class="options-panel" aria-label="歌词样式">
-        <div class="option-row"><span>显示</span><div><button id="layout" data-cmd="layout">单行</button><button id="secondary-btn" data-cmd="secondary">次行：下一句</button></div></div>
-        <div class="option-row"><span>字号 <output id="font-value"></output></span><div><button data-cmd="font-down" aria-label="缩小字号">A−</button><button data-cmd="font-up" aria-label="放大字号">A+</button></div></div>
-        <div class="option-row"><span>窗口宽度</span><div><button data-cmd="width-down" aria-label="缩窄歌词窗口">窄</button><button data-cmd="width-up" aria-label="加宽歌词窗口">宽</button></div></div>
-        <div class="option-row"><span>不透明度 <output id="opacity-value"></output></span><div><button data-cmd="opacity-down" aria-label="降低不透明度">−</button><button data-cmd="opacity-up" aria-label="提高不透明度">+</button></div></div>
-        <div class="option-row option-exit"><span>关闭歌词和壁纸</span><button data-cmd="quit">退出桌面组件</button></div>
-      </div>
-    </details>
-    <span class="toolbar-hint">锁定后可从托盘找回</span>
+    <button id="style-open" aria-haspopup="dialog" aria-expanded="false" aria-controls="options-panel" title="调整歌词显示与外观">样式</button>
     <button data-cmd="hide" title="隐藏歌词，可从 Hertz 托盘菜单找回">隐藏</button>
   </div>
   <div id="stage">
@@ -20,4 +10,54 @@
     <div id="secondary" class="line secondary"></div>
     <div id="notice" class="notice" role="status" aria-live="polite"></div>
   </div>
+  <section id="options-panel" role="dialog" aria-modal="true" aria-labelledby="options-title" tabindex="-1" hidden>
+    <header class="options-head">
+      <h2 id="options-title">歌词样式</h2>
+      <button id="options-done" class="options-done" title="返回歌词">完成</button>
+    </header>
+    <div class="options-grid">
+      <div class="option-cell">
+        <span class="option-label">布局</span>
+        <div class="segmented" role="group" aria-label="歌词行数">
+          <button type="button" data-layout="single" aria-pressed="false">单行</button>
+          <button type="button" data-layout="double" aria-pressed="false">双行</button>
+        </div>
+      </div>
+      <div class="option-cell" id="secondary-cell">
+        <span class="option-label">次行</span>
+        <div class="segmented" role="group" aria-label="次行内容">
+          <button type="button" data-secondary="next" aria-pressed="false">下一句</button>
+          <button type="button" data-secondary="translation" aria-pressed="false">译文</button>
+          <button type="button" data-secondary="romanization" aria-pressed="false">罗马音</button>
+        </div>
+      </div>
+      <div class="option-cell">
+        <span class="option-label">字号</span>
+        <div class="stepper">
+          <button type="button" data-cmd="font-down" aria-label="缩小字号">A−</button>
+          <output id="font-value"></output>
+          <button type="button" data-cmd="font-up" aria-label="放大字号">A+</button>
+        </div>
+      </div>
+      <div class="option-cell">
+        <span class="option-label">不透明度</span>
+        <div class="stepper">
+          <button type="button" data-cmd="opacity-down" aria-label="降低不透明度">−</button>
+          <output id="opacity-value"></output>
+          <button type="button" data-cmd="opacity-up" aria-label="提高不透明度">+</button>
+        </div>
+      </div>
+      <div class="option-cell">
+        <span class="option-label">窗口宽度</span>
+        <div class="stepper">
+          <button type="button" data-cmd="width-down" aria-label="缩窄歌词窗口">窄</button>
+          <button type="button" data-cmd="width-up" aria-label="加宽歌词窗口">宽</button>
+        </div>
+      </div>
+    </div>
+    <footer class="options-foot">
+      <span class="options-hint">锁定后可从 Hertz 托盘找回</span>
+      <button type="button" data-cmd="quit" class="option-quit">退出桌面歌词</button>
+    </footer>
+  </section>
 </div>

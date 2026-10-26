@@ -23,8 +23,8 @@ use windows_sys::Win32::System::Power::{
     SYSTEM_POWER_STATUS,
 };
 use windows_sys::Win32::System::Registry::{
-    RegCloseKey, RegDeleteValueW, RegOpenKeyExW, RegSetValueExW, HKEY_CURRENT_USER, KEY_SET_VALUE,
-    REG_SZ,
+    RegCloseKey, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
+    HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_SET_VALUE, REG_SZ,
 };
 use windows_sys::Win32::System::RemoteDesktop::{
     WTSRegisterSessionNotification, NOTIFY_FOR_THIS_SESSION,
@@ -553,6 +553,47 @@ pub(crate) fn on_ac_power() -> bool {
         return true;
     }
     status.ACLineStatus != 0
+}
+
+pub(crate) fn autostart_enabled() -> Result<bool> {
+    let subkey = to_wide("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
+    let mut key = std::ptr::null_mut();
+    let status = unsafe {
+        RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            subkey.as_ptr(),
+            0,
+            KEY_QUERY_VALUE,
+            &mut key,
+        )
+    };
+    if status == 2 {
+        return Ok(false);
+    }
+    if status != 0 {
+        bail!("读取开机启动项失败（{status}）");
+    }
+    let name = to_wide("HertzDesktop");
+    let mut kind = 0;
+    let mut bytes = 0;
+    let status = unsafe {
+        RegQueryValueExW(
+            key,
+            name.as_ptr(),
+            std::ptr::null(),
+            &mut kind,
+            std::ptr::null_mut(),
+            &mut bytes,
+        )
+    };
+    unsafe { RegCloseKey(key) };
+    if status == 2 {
+        return Ok(false);
+    }
+    if status != 0 {
+        bail!("读取开机启动项失败（{status}）");
+    }
+    Ok(kind == REG_SZ && bytes > 2)
 }
 
 pub(crate) fn set_autostart(enabled: bool) -> Result<()> {

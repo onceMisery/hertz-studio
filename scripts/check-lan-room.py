@@ -336,6 +336,20 @@ def verify(host, guest, music, native, duration, samples, output_device=None):
     assert len(songs) == 1 and songs[0]["song"]["resource_id"] == first
     assert "path" not in songs[0]["song"]
     checks.append("structured song chat is durable, resource-scoped and idempotent")
+    # The host profile starts with a deterministic online cache fixture. This
+    # covers the public API and real pinned TLS without platform credentials.
+    shared = host.room({"action": "share_online", "tracks": [{
+        "source": "ccmixter", "id": "acceptance-online", "title": "Online acceptance fixture",
+        "artist": "Fixture", "album": None, "duration_ms": 8000, "cover": None, "ref": {},
+    }]})
+    online = next(track for track in shared["tracks"] if track["title"] == "Online acceptance fixture")
+    peer_library = guest.peer(action="library", offset=0, limit=32)["tracks"]
+    assert len(peer_library) == 4 and online in peer_library
+    assert shared["favorite_local_ids"][online["favorite_key"]] == "online:ccmixter:acceptance-online"
+    assert "favorite_local_ids" not in guest.peer(action="snapshot")
+    guest_control("queue", items=[new_item(online["resource_id"])] + [new_item(track["resource_id"]) for track in library])
+    assert host.peer(action="queue_page", offset=0, limit=32)["queue"][0]["resource_id"] == online["resource_id"]
+    checks.append("host shares cached online song; account-free guest sees restricted metadata and queues a mixed online/local program")
     output = None
     transitions = set()
     if native:
@@ -357,6 +371,7 @@ def verify(host, guest, music, native, duration, samples, output_device=None):
         time.sleep(1.2)
         host.play("play")
         wait_for(lambda: host.room().get("playing"), "first committed playback", 8)
+        wait_for(lambda: (host.room().get("current_track") or {}).get("resource_id") == online["resource_id"], "cached online song reaches presentation", 8)
         wait_for(lambda: guest.room()["output"].get("current_epoch"), "native audible epoch", 8)
         output = guest.room()["output"]["binding"]
         start = time.monotonic()
@@ -469,6 +484,9 @@ def verify(host, guest, music, native, duration, samples, output_device=None):
         guest.room({"action": "output", "settings": settings, "enabled": False})
         wait_for(lambda: not host.room().get("playing"), "last audio output grace halts playback", 10)
         checks.append("scheduled pause, paused queue reorder, resume and last-output halt")
+    host.room({"action": "share", "track_ids": [track["id"] for track in tracks]})
+    assert online not in guest.peer(action="library", offset=0, limit=32)["tracks"]
+    checks.append("online sharing revokes through the same authoritative share replacement")
     member = guest.room()["member_id"]
     permissions["transport"] = False
     host.room({"action": "permissions", "member_id": member, "permissions": permissions})
@@ -514,6 +532,7 @@ def verify(host, guest, music, native, duration, samples, output_device=None):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", type=Path, required=True)
+    parser.add_argument("--guest-binary", type=Path, help="Optional different guest edition for compatibility coverage")
     parser.add_argument("--native-output", action="store_true")
     parser.add_argument("--duration", type=int, default=60)
     parser.add_argument("--output-device", help="Exact output device name; requires --native-output and never changes the system default")
@@ -524,21 +543,28 @@ def main():
     if args.output_device is not None and not args.native_output:
         parser.error("--output-device requires --native-output")
     binary = args.binary.resolve(strict=True)
+    guest_binary = args.guest_binary.resolve(strict=True) if args.guest_binary else binary
     apps = []
     samples = deque(maxlen=600)
     identity = {"binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(), "platform": platform.platform()}
+    identity["guest_binary_sha256"] = hashlib.sha256(guest_binary.read_bytes()).hexdigest()
     with tempfile.TemporaryDirectory(prefix="hertz-lan-acceptance-") as temporary:
         directory = Path(temporary)
         # Windows locks running executables; verify a copy so rebuilding the
         # workspace remains possible while the acceptance run owns its process.
         executable = directory / binary.name
         shutil.copy2(binary, executable)
+        guest_executable = directory / ("guest-" + guest_binary.name)
+        shutil.copy2(guest_binary, guest_executable)
+        fixtures(directory / "music")
+        cache = directory / "host" / "cache" / "online"
+        cache.mkdir(parents=True)
+        shutil.copy2(directory / "music" / "LAN fixture 1.wav", cache / "ccmixter-acceptance-online-standard.wav")
         try:
-            for name in ["host", "guest"]:
+            for name, app_binary in [("host", executable), ("guest", guest_executable)]:
                 profile = directory / name
-                profile.mkdir()
-                apps.append(App(executable, profile))
-            fixtures(directory / "music")
+                profile.mkdir(exist_ok=True)
+                apps.append(App(app_binary, profile))
             result = {**identity, "passed": True, **verify(*apps, directory / "music", args.native_output, args.duration, samples, args.output_device)}
             if args.report:
                 args.report.parent.mkdir(parents=True, exist_ok=True)

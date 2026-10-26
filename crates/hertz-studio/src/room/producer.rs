@@ -25,9 +25,10 @@ fn frames_at(plan: &Plan, at: u64) -> Result<u64, String> {
     .map_err(|_| "room timeline overflow".into())
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Source {
     pub path: PathBuf,
+    pub media: Option<vmusic_audio::render::PreparedMedia>,
     pub instance: u64,
     pub position_ms: u64,
     pub track_gain_db: f32,
@@ -441,10 +442,15 @@ impl Worker {
                         channels: plan.format.channels,
                     })
                     .map_err(|e| e.to_string())?;
-                    renderer
-                        .load(source.path.to_str().ok_or("non-Unicode source path")?)
-                        .map_err(|_| "shared local track cannot be decoded")?;
-                    if source.position_ms > 0 {
+                    let prepositioned = source.media.is_some();
+                    match source.media {
+                        Some(media) => renderer.load_prepared(media),
+                        None => {
+                            renderer.load(source.path.to_str().ok_or("non-Unicode source path")?)
+                        }
+                    }
+                    .map_err(|_| "shared track cannot be decoded")?;
+                    if source.position_ms > 0 && !prepositioned {
                         renderer
                             .seek(source.position_ms)
                             .map_err(|e| e.to_string())?;
@@ -532,19 +538,23 @@ impl Worker {
                                 if let Some(gain) = g.gain_overrides.get(&source.instance) {
                                     source.track_gain_db = *gain;
                                 }
-                                let result = renderer
-                                    .prepare_next_with_gain(
-                                        NextTrack {
-                                            uri: source.path.to_string_lossy().into_owned(),
-                                            track_id: source.instance.to_string(),
-                                            generation: g.instance,
-                                            crossfade_ms: g
-                                                .crossfade_override
-                                                .unwrap_or(crossfade_ms),
-                                        },
+                                let next = NextTrack {
+                                    uri: source.path.to_string_lossy().into_owned(),
+                                    track_id: source.instance.to_string(),
+                                    generation: g.instance,
+                                    crossfade_ms: g.crossfade_override.unwrap_or(crossfade_ms),
+                                };
+                                let result = match source.media {
+                                    Some(media) => renderer.prepare_next_media_with_gain(
+                                        media,
+                                        next,
                                         source.track_gain_db,
-                                    )
-                                    .map_err(|e| e.to_string())?;
+                                    ),
+                                    None => {
+                                        renderer.prepare_next_with_gain(next, source.track_gain_db)
+                                    }
+                                }
+                                .map_err(|e| e.to_string())?;
                                 if let vmusic_core::PrepareResult::Bypassed { reason } = result {
                                     return Err(format!("next track unavailable: {reason}"));
                                 }
@@ -909,6 +919,7 @@ mod tests {
                     },
                 },
                 source: Some(Source {
+                    media: None,
                     path: fixture.0.clone(),
                     instance: 1,
                     position_ms: 0,
@@ -1110,6 +1121,7 @@ mod tests {
         let c = wave(48_000, 48_000);
         let (mut worker, mut received, _retire) = prepared_worker(&a);
         let source = |fixture: &Fixture, instance| Source {
+            media: None,
             path: fixture.0.clone(),
             instance,
             position_ms: 0,
@@ -1209,6 +1221,7 @@ mod tests {
             .apply(Command::Next {
                 epoch: 1,
                 source: Some(Source {
+                    media: None,
                     path: b.0.clone(),
                     instance: 2,
                     position_ms: 0,
@@ -1277,6 +1290,7 @@ mod tests {
                 },
             };
             let source = |f: &Fixture, instance| Source {
+                media: None,
                 path: f.0.clone(),
                 instance,
                 position_ms: 0,

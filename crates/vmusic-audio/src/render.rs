@@ -391,7 +391,81 @@ impl RenderOutput {
     }
 }
 
+/// A probed source that can be installed without doing input I/O on the render
+/// owner. The service prepares network sources on its blocking worker pool.
+pub struct PreparedMedia {
+    opened: OpenedReader,
+    info: MediaInfo,
+}
+impl std::fmt::Debug for PreparedMedia {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PreparedMedia")
+            .field("info", &self.info)
+            .finish_non_exhaustive()
+    }
+}
+impl PreparedMedia {
+    pub fn open(source: Box<dyn AudioSource>, ext: Option<&str>) -> Result<Self, AudioError> {
+        let (opened, info) = open_media(
+            MediaSourceStream::new(
+                Box::new(DynMediaSource { inner: source }),
+                Default::default(),
+            ),
+            ext,
+        )?;
+        Ok(Self { opened, info })
+    }
+    pub fn open_interruptible(
+        source: Box<dyn AudioSource>,
+        ext: Option<&str>,
+        stop: Arc<AtomicBool>,
+    ) -> Result<Self, AudioError> {
+        let mut media = Self::open(source, ext)?;
+        media.opened.input_stop = Some(stop);
+        Ok(media)
+    }
+    /// Performs source I/O before handing ownership to the render thread.
+    pub fn seek(&mut self, position_ms: u64) -> Result<(), AudioError> {
+        let position_ms = position_ms.min(self.info.duration_ms.unwrap_or(u64::MAX));
+        let time = Time::new(position_ms / 1000, (position_ms % 1000) as f64 / 1000.0);
+        let sought = self
+            .opened
+            .reader
+            .seek(
+                SeekMode::Accurate,
+                SeekTo::Time {
+                    time,
+                    track_id: Some(self.opened.track_id),
+                },
+            )
+            .map_err(|error| AudioError::DecodeFailed(format!("seek failed: {error}")))?;
+        self.opened.decoder.reset();
+        self.opened.initial_position = Some((position_ms, sought.required_ts));
+        Ok(())
+    }
+}
+
 impl RenderCore {
+    pub fn load_prepared(&mut self, source: PreparedMedia) -> Result<MediaInfo, AudioError> {
+        self.install_opened(source.opened, source.info)
+    }
+    pub fn prepare_next_media_with_gain(
+        &mut self,
+        source: PreparedMedia,
+        next: NextTrack,
+        gain_db: f32,
+    ) -> Result<PrepareResult, AudioError> {
+        if !gain_db.is_finite() {
+            return Err(AudioError::Other("non-finite track gain".into()));
+        }
+        self.prepare_opened_with_gain(
+            source.opened,
+            source.info,
+            next,
+            gain_db.clamp(-24.0, 12.0),
+            true,
+        )
+    }
     /// Prepare a continuous room stream. Resampling can prevent a claim of
     /// sample-exact source gaplessness, but does not require a silent boundary.
     pub fn prepare_next_with_gain(
@@ -637,12 +711,21 @@ impl RenderCore {
 
     /// 起一个解码线程消费 `opened`。立即换装与 pending 换装共用。
     fn spawn_now(&mut self, opened: OpenedReader) -> Result<(), AudioError> {
+        if let Some((position_ms, _)) = opened.initial_position {
+            self.shared.current_deck().frames_played.store(
+                ms_to_frames(position_ms, self.output_rate),
+                Ordering::Relaxed,
+            );
+        }
         self.gapless_supported = opened.gapless_supported;
         self.shared
             .current_deck()
             .eof
             .store(false, Ordering::Release);
-        let stop = Arc::new(AtomicBool::new(false));
+        let stop = opened
+            .input_stop
+            .clone()
+            .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
         let seek_to = Arc::new(Mutex::new(None));
         let ctl = DecoderCtl {
             stop: stop.clone(),
@@ -719,7 +802,10 @@ impl RenderCore {
         let gapless_supported = opened.gapless_supported;
         let deck = Arc::new(Deck::new());
         deck.gain_db.store(gain_db.to_bits(), Ordering::Relaxed);
-        let stop = Arc::new(AtomicBool::new(false));
+        let stop = opened
+            .input_stop
+            .clone()
+            .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
         let seek_to = Arc::new(Mutex::new(None));
         let ctl = DecoderCtl {
             stop: stop.clone(),
@@ -813,6 +899,15 @@ impl RenderCore {
         mss: MediaSourceStream,
         ext: Option<&str>,
     ) -> Result<MediaInfo, AudioError> {
+        let (opened, info) = open_media(mss, ext)?;
+        self.install_opened(opened, info)
+    }
+
+    fn install_opened(
+        &mut self,
+        opened: OpenedReader,
+        info: MediaInfo,
+    ) -> Result<MediaInfo, AudioError> {
         let was_playing = self.shared.playing.load(Ordering::Relaxed);
         // 播放中且仍有可闻增益才需要「先淡出再换装」；暂停态、或尾段淡出
         // 已把增益压到 0（自然播完自动接下一首）则立即换装，避免两首之间
@@ -820,7 +915,6 @@ impl RenderCore {
         let audible = was_playing
             && (self.shared.fade_active()
                 || f32::from_bits(self.shared.fade_gain.load(Ordering::Relaxed)) > 0.001);
-        let (opened, info) = open_media(mss, ext)?;
         let duration_ms = info.duration_ms;
 
         if audible {
@@ -1771,6 +1865,7 @@ fn decode_loop_opened(
         mut reader,
         mut decoder,
         track_id,
+        initial_position,
         ..
     } = opened;
 
@@ -1789,7 +1884,7 @@ fn decode_loop_opened(
     // stop 位被外部置上。其余跳出（含解码致命错、下载断开的 BrokenPipe）才算早夭。
     let mut natural_eof = false;
     let mut interrupted = false;
-    let mut discard_until = None;
+    let mut discard_until = initial_position.map(|(_, timestamp)| timestamp);
 
     while !stop.load(Ordering::Relaxed) {
         if let Some(SeekRequest {
@@ -2077,6 +2172,8 @@ fn open_media(
         .map_err(media_open_error)?;
 
     let opened = OpenedReader {
+        input_stop: None,
+        initial_position: None,
         reader: probed.format,
         decoder,
         track_id,
@@ -2092,6 +2189,8 @@ fn open_media(
 }
 
 struct OpenedReader {
+    input_stop: Option<Arc<AtomicBool>>,
+    initial_position: Option<(u64, u64)>,
     reader: Box<dyn FormatReader>,
     decoder: Box<dyn symphonia::core::codecs::Decoder>,
     track_id: u32,
@@ -3291,6 +3390,8 @@ mod tests {
         };
         (
             OpenedReader {
+                input_stop: None,
+                initial_position: None,
                 reader: Box::new(reader),
                 decoder: Box::new(decoder),
                 track_id: 1,

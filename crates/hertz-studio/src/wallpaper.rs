@@ -111,15 +111,48 @@ impl Wallpaper {
     }
 }
 
-pub(crate) fn snapshot(state: &AppState) -> Value {
-    state.wallpaper.snapshot(state)
+pub(crate) async fn snapshot(state: &AppState) -> Value {
+    let mut value = state.wallpaper.snapshot(state);
+    value["space"] = space_presentation(state).await;
+    value
+}
+
+/// 三维空间当前场景的窄投影：只带场景 id 和该场景参数，不带账号、曲目或整份设置。
+async fn space_presentation(state: &AppState) -> Value {
+    let value = vmusic_store::settings::get(&state.db, "space3d")
+        .await
+        .ok()
+        .flatten();
+    value
+        .as_ref()
+        .map(space_presentation_from)
+        .unwrap_or(Value::Null)
+}
+
+fn space_presentation_from(value: &Value) -> Value {
+    let Some(scene) = value.get("sceneSource").and_then(Value::as_str) else {
+        return Value::Null;
+    };
+    if scene.is_empty() {
+        return Value::Null;
+    }
+    let params = value
+        .get("sceneStates")
+        .and_then(|states| states.get(scene))
+        .and_then(|state| state.get("params"))
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    if !params.is_object() {
+        return Value::Null;
+    }
+    json!({ "scene": scene, "params": params })
 }
 
 /// 壁纸事件流：首发完整快照，之后把现有播放/频谱广播合并成最多 4 Hz 的
 /// 完整快照，空转时 1 s 心跳。不新开 FFT 或播放 owner，慢客户端由 send
 /// 背压与 broadcast 的 Lagged 合并处理，旧事件不排队重放。
 pub(crate) async fn events(state: Arc<AppState>, mut socket: WebSocket) {
-    let initial = snapshot(&state).to_string();
+    let initial = snapshot(&state).await.to_string();
     if socket.send(Message::Text(initial.into())).await.is_err() {
         return;
     }
@@ -135,7 +168,7 @@ pub(crate) async fn events(state: Arc<AppState>, mut socket: WebSocket) {
         tokio::select! {
             _ = ticker.tick() => {
                 if dirty || last_sent.elapsed() >= EVENT_HEARTBEAT {
-                    let text = snapshot(&state).to_string();
+                    let text = snapshot(&state).await.to_string();
                     if socket.send(Message::Text(text.into())).await.is_err() {
                         break;
                     }
@@ -161,7 +194,7 @@ mod tests {
     #[tokio::test]
     async fn idle_snapshot_is_valid_but_silent() {
         let (state, handle) = crate::state::tests::playback_state().await;
-        let value = snapshot(&state);
+        let value = snapshot(&state).await;
         assert_eq!(value["protocol"], PROTOCOL);
         assert_eq!(value["timing"], "presentation_applied");
         assert_eq!(value["valid"], true);
@@ -170,8 +203,9 @@ mod tests {
         assert_eq!(value["spectrum"]["bands"].as_array().unwrap().len(), BANDS);
         assert_eq!(value["spectrum"]["energy"], 0.0);
         assert_eq!(value["spectrum"]["ageMs"], Value::Null);
+        assert_eq!(value["space"], Value::Null);
         let first = value["seq"].as_u64().unwrap();
-        assert!(snapshot(&state)["seq"].as_u64().unwrap() > first);
+        assert!(snapshot(&state).await["seq"].as_u64().unwrap() > first);
         state.audio.shutdown();
         handle.join().unwrap();
     }
@@ -184,7 +218,7 @@ mod tests {
         input[1] = 3.0;
         input[2] = -1.0;
         state.wallpaper.observe_spectrum(&input);
-        let value = snapshot(&state);
+        let value = snapshot(&state).await;
         let bands = value["spectrum"]["bands"].as_array().unwrap();
         assert_eq!(bands.len(), BANDS);
         assert_eq!(bands[0], 0.5);
@@ -200,7 +234,7 @@ mod tests {
     async fn short_spectrum_is_zero_padded_and_expires() {
         let (state, handle) = crate::state::tests::playback_state().await;
         state.wallpaper.observe_spectrum(&[0.25, 0.5]);
-        let value = snapshot(&state);
+        let value = snapshot(&state).await;
         let bands = value["spectrum"]["bands"].as_array().unwrap();
         assert_eq!(bands[0], 0.25);
         assert_eq!(bands[1], 0.5);
@@ -208,7 +242,7 @@ mod tests {
         assert_eq!(bands[BANDS - 1], 0.0);
 
         state.wallpaper.age_spectrum(Duration::from_millis(1100));
-        let expired = snapshot(&state);
+        let expired = snapshot(&state).await;
         assert!(expired["spectrum"]["ageMs"].as_u64().unwrap() >= 1000);
         assert!(expired["spectrum"]["bands"]
             .as_array()
@@ -218,5 +252,79 @@ mod tests {
         assert_eq!(expired["spectrum"]["energy"], 0.0);
         state.audio.shutdown();
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn space_presentation_uses_current_scene_and_its_params() {
+        let value = json!({
+            "sceneSource": "butterfly-vortex",
+            "sceneStates": {
+                "butterfly-vortex": { "params": { "speed": 1.2, "performance": "auto" } },
+                "coast": { "params": { "tod": 0.4 } }
+            }
+        });
+        assert_eq!(
+            space_presentation_from(&value),
+            json!({
+                "scene": "butterfly-vortex",
+                "params": { "speed": 1.2, "performance": "auto" }
+            })
+        );
+    }
+
+    #[test]
+    fn space_presentation_is_null_without_a_scene_or_valid_params() {
+        assert_eq!(space_presentation_from(&json!({})), Value::Null);
+        assert_eq!(
+            space_presentation_from(&json!({ "sceneSource": "" })),
+            Value::Null
+        );
+        assert_eq!(
+            space_presentation_from(&json!({
+                "sceneSource": "coast",
+                "sceneStates": { "coast": { "params": [] } }
+            })),
+            Value::Null
+        );
+        assert_eq!(
+            space_presentation_from(&json!({ "sceneSource": "coast" })),
+            json!({ "scene": "coast", "params": {} })
+        );
+    }
+
+    #[tokio::test]
+    async fn snapshot_reads_the_current_space_scene_from_settings() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("hertz-wallpaper-space-{stamp}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = vmusic_store::open(&dir).await.unwrap();
+        let (state, handle) = crate::state::tests::playback_state_with_db(db).await;
+        vmusic_store::settings::set(
+            &state.db,
+            "space3d",
+            &json!({
+                "sceneSource": "phoenix-vortex",
+                "sceneStates": {
+                    "phoenix-vortex": { "params": { "speed": 0.9 } },
+                    "coast": { "params": { "tod": 0.5 } }
+                }
+            }),
+        )
+        .await
+        .unwrap();
+
+        let value = snapshot(&state).await;
+        assert_eq!(value["space"]["scene"], "phoenix-vortex");
+        assert_eq!(value["space"]["params"]["speed"], 0.9);
+        assert!(value["space"]["params"].get("tod").is_none());
+
+        state.audio.shutdown();
+        handle.join().unwrap();
+        state.db.close().await;
+        drop(state);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

@@ -94,6 +94,9 @@ impl ModeLease {
             load.active = None;
         }
         state.play_generation.fetch_add(1, Ordering::AcqRel);
+        // Local download registration uses the same commit lock. No stale
+        // resolver can recreate a .part after the room takes ownership.
+        state.cancel_all_downloads().await;
         let (done, completion) = watch::channel(false);
         *cleanup.lock().unwrap_or_else(|e| e.into_inner()) = Some(completion.clone());
         *local_resume.lock().unwrap_or_else(|e| e.into_inner()) = Some(saved.clone());
@@ -316,8 +319,56 @@ impl RoomManager {
                     .map_err(|_| RoomError::new("room_discovery", "无法读取网卡"))?;
                 let discovery = vmusic_lan::discovery::Discovery::start().ok();
                 tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+                let mut rooms: Vec<_> = discovery
+                    .as_ref()
+                    .map(|d| d.candidates())
+                    .unwrap_or_default()
+                    .into_iter()
+                    .take(64)
+                    .collect();
+                {
+                    use futures::StreamExt as _;
+                    let jobs: Vec<_> = rooms
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, r)| {
+                            r.lobby_profile && r.version == vmusic_lan::protocol::VERSION
+                        })
+                        .map(|(index, room)| (index, room.clone()))
+                        .collect();
+                    let fetches = futures::stream::iter(jobs)
+                        .map(|(index, room)| async move {
+                            if let Ok(pin) = vmusic_lan::tls::Fingerprint::parse(&room.fingerprint)
+                            {
+                                for address in room.addresses.into_iter().take(2) {
+                                    if let Ok(Ok(Some(profile))) = tokio::time::timeout(
+                                        std::time::Duration::from_millis(700),
+                                        vmusic_lan::client::lobby_profile(
+                                            address,
+                                            pin,
+                                            room.room_id,
+                                        ),
+                                    )
+                                    .await
+                                    {
+                                        return (index, profile.cover);
+                                    }
+                                }
+                            }
+                            (index, None)
+                        })
+                        .buffer_unordered(4);
+                    futures::pin_mut!(fetches);
+                    // Slow or old peers must not block finding the other rooms.
+                    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+                    while let Ok(Some((index, cover))) =
+                        tokio::time::timeout_at(deadline, fetches.next()).await
+                    {
+                        rooms[index].cover = cover;
+                    }
+                }
                 Ok(
-                    json!({"interfaces":interfaces,"rooms":discovery.as_ref().map(|d|d.candidates()).unwrap_or_default(),"discovery_available":discovery.is_some()}),
+                    json!({"interfaces":interfaces,"rooms":rooms,"discovery_available":discovery.is_some()}),
                 )
             }
             LocalRequest::Apply {
@@ -381,6 +432,8 @@ impl RoomManager {
             }
             LocalRequest::Create {
                 name,
+                host_name,
+                cover,
                 address,
                 sample_rate,
                 local_output,
@@ -402,6 +455,8 @@ impl RoomManager {
                         state.clone(),
                         super::host::HostOptions {
                             name,
+                            host_name,
+                            cover,
                             address,
                             sample_rate,
                             local_output,
@@ -1028,6 +1083,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn room_entry_cancels_registered_local_downloads_before_reusing_cache() {
+        let (mut state, audio) = crate::state::tests::playback_state().await;
+        let dir =
+            std::env::temp_dir().join(format!("hertz-mode-download-{}", uuid::Uuid::new_v4()));
+        state.data_dir = dir.clone();
+        let state = Arc::new(state);
+        let dl = crate::online::progressive::start(
+            "ccmixter",
+            state.online_cache_dir(),
+            "ccmixter-test-standard".into(),
+            vec![],
+            None,
+            state.cache_index.clone(),
+        )
+        .unwrap();
+        let abort = dl.abort.clone();
+        let part = dl.part_path.clone();
+        state.downloads.lock().await.insert(
+            "ccmixter-test-standard".into(),
+            crate::state::DlEntry {
+                dl,
+                role: crate::state::DlRole::Playback,
+            },
+        );
+        let lease = ModeLease::enter(
+            state.clone(),
+            state.room.active.clone(),
+            &state.room.cleanup,
+            state.room.local_resume.clone(),
+        )
+        .await
+        .unwrap();
+        assert!(abort.load(Ordering::Relaxed));
+        assert!(state.downloads.lock().await.is_empty());
+        assert!(!part.exists());
+        lease.finish().await;
+        state.audio.shutdown();
+        audio.join().unwrap();
+        tokio::fs::remove_dir_all(dir).await.unwrap();
+    }
+
+    #[tokio::test]
     async fn dropping_mode_lease_seals_native_creation_before_scheduling_recovery() {
         let (state, thread) = resume_test_state().await;
         let lease = ModeLease::enter(
@@ -1148,6 +1245,8 @@ mod tests {
         for request in [
             LocalRequest::Create {
                 name: "closed".into(),
+                host_name: "房主".into(),
+                cover: None,
                 address: "127.0.0.1:0".parse().unwrap(),
                 sample_rate: 48_000,
                 local_output: false,

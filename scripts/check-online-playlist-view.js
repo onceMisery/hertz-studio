@@ -193,6 +193,13 @@ function makeSandbox(opts) {
       spies.rows.push(row);
       return row;
     },
+    roomButton(tracks, label) {
+      const button = makeEl(); button.textContent = label;
+      button.onclick = () => { spies.shared = tracks.slice(); };
+      spies.roomButtons = spies.roomButtons || [];
+      spies.roomButtons.push({ tracks: tracks.slice(), label, button });
+      return button;
+    },
     safeCoverUrl(u) { return u || null; },
     // 缩略图改写：这里按网易云 CDN 的真实规则实现，卡片封面才测得出来。
     rowCoverUrl(u, px) {
@@ -260,6 +267,15 @@ function detailBody(tracks, total) {
 // ---------------------------------------------------------------------------
 
 (async function main() {
+  section('在线歌单复用一起听入口且只提交当前已加载曲目');
+  {
+    const env = makeSandbox({ transport: makeTransport(() => detailBody([T('1', 'A'), T('2', 'B')], 5)) });
+    env.view.open('netease', 'P1', 'arrange'); await ticks();
+    const bulk = env.spies.roomButtons.filter(item => item.label === '已加载歌曲加入一起听').at(-1);
+    ok(!!bulk, '详情层显示已加载歌曲加入一起听');
+    eq(bulk.tracks.length, 2, '不把尚未加载的整单歌曲算入分享');
+    bulk.button.onclick(); eq(env.spies.shared[0].id, '1', '歌曲引用交回公共一起听入口');
+  }
   section('层级：网格层与详情层的进出');
   {
     const env = makeSandbox({ transport: makeTransport(() => detailBody([T('1', 'A')], 1)) });

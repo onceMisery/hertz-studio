@@ -208,13 +208,21 @@ REST 路由表共 180 个「方法 + 路径」（`crates/hertz-studio/src/routes
 
 播控、队列等写请求不自动重试。未知播控结果使用原 `operation_id` 查询 `{"action":"peer","request":{"action":"operation","operation_id":"7"}}`。投影包含本机成员的 `member_id`；同一 `(room_id, instance_id, member_id)` 在新 `session_id` 上仍查询原操作，换房或成员后不沿用。
 
+共享曲库搜索使用 `peer.library {offset, limit, revision?, query?}`：`query` 可省略，空白表示全部已分享歌曲；按歌曲、歌手、专辑作忽略大小写的子串匹配，去掉首尾空格后搜索，不读取房主未分享的本地曲库。原始搜索词最多 128 个 Unicode 字符且不含控制字符，否则返回 `room_invalid`。`limit` 限制为 1–64，`offset` 针对筛选结果，响应为 `{total, offset, revision, tracks}`；`total` 是全部匹配数，`revision` 是分享版本的十进制字符串，与本页来自同一授权快照。后续页带相同 `query` 与 `revision`，分享范围变化返回 `revision_conflict`，应重新从第一页读取。改变搜索词也从第一页开始。
+
+本机房主与 LAN peer 快照顶层的 `library_search: true` 声明此增量只读能力，不改变 wire v3。旧房主不提供该字段，调用方必须禁用完整搜索并省略 `query`（包括 `query: null`），以保持原有分页兼容；不能把已加载页的筛选称为完整搜索。
+
 队列投票使用 `peer.vote {operation_id, expected_revision, instance_id, voted}`，房主排序使用 `peer.queue_order {operation_id, expected_revision, mode: "manual" | "votes"}`。条目投影的点歌人、票数和 `voted_by_me` 是只读信息；替换队列时仅提交 `instance_id/resource_id`。排序只改变可变未来后缀，保留当前播放和已冻结前缀。
 
 歌曲聊天使用 `peer.chat_song {operation_id, resource_id}`，与 `chat_send` 共用独立聊天操作命名空间。分配序号从 `peer.chat_history.next_operation_id` 取得下界，并保持本机单调递增；控制序号从 `peer.snapshot.next_operation_id` 取得。歌曲卡片的元数据按当前分享权限解析，撤销后 `song: null`，不得缓存旧投影继续提供操作。
 
 ## 房间歌曲的个人收藏
 
-`SharedTrack.favorite_key` 为可选的 64 位十六进制稳定引用，由持久房主身份的独立派生密钥生成；它不包含路径、本地库主键或读取授权。当前 `resource_id` 仍是会话分享资源，不能作为长期收藏键。房主本机快照的 `favorite_local_ids` 将稳定引用映射到原本地库 ID，仅供本机复用 local 收藏；该映射不进入任何 LAN peer 快照。接收端本机快照的 `fingerprint` 取自原生连接固定的证书身份，不能信任远端自行声明的来源。
+房主本机可发送 `{"action":"share_online","tracks":[{"source":"ccmixter","id":"<平台ID>","title":"<标题>","artist":null,"album":null,"duration_ms":null,"cover":null,"ref":{}}]}` 到 `POST /v1/room`。此请求只供本机房主，校验注册音源和元数据后原子追加／去重共享资源，保留原本地分享，不触发音频下载；1–2000 首，总分享不超过 2000。`ref` 保留平台解析引用。响应包含受限 `tracks` 和仅房主可见的 `favorite_local_ids`，调用方据此映射平台身份与 `resource_id`，再走现有 `peer.queue` 加入新实例。
+
+在线分享的撤销使用现有 `share.track_ids` 替换范围；已显式分享的 `online:<source>:<id>` 可与本地主键一起保留，未经分享的在线 ID 不可凭空加入。接收端不接收平台引用、直链或本机路径。房主收藏映射中的在线 ID 应拆为原平台 `source/ref_id`，本地 ID 继续使用 local。
+
+`SharedTrack.favorite_key` 为可选的 64 位十六进制稳定引用，由持久房主身份的独立派生密钥生成；它不包含路径、本地库主键或读取授权。当前 `resource_id` 仍是会话分享资源，不能作为长期收藏键。房主本机快照的 `favorite_local_ids` 将稳定引用映射到原曲目 ID，仅供本机复用 local 或原在线平台收藏；该映射不进入任何 LAN peer 快照。接收端本机快照的 `fingerprint` 取自原生连接固定的证书身份，不能信任远端自行声明的来源。
 
 个人收藏仍使用 `/v1/favorites` 存储与权限边界，接收端写 `kind: "track", source: "lan", ref_id: "<64位房主指纹>:<64位favorite_key>"`。不保存临时封面 URL；已获准的文字快照可保留到用户取消收藏。`/v1/favorites/toggle` 显式传 `favorited: true | false` 表示目标态，重复提交相同目标不会反转。写结果未知时只显示待确认，刷新 membership 后再决定下一动作。
 

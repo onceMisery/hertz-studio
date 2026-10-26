@@ -834,7 +834,7 @@ async fn desktop_lyrics_snapshot(State(state): State<Arc<AppState>>) -> Json<ser
 
 /// 壁纸只读快照：播放真值 + 最新一帧 64 段频谱；不含曲名、路径或账号。
 async fn wallpaper_snapshot(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    Json(crate::wallpaper::snapshot(&state))
+    Json(crate::wallpaper::snapshot(&state).await)
 }
 
 async fn wallpaper_events(

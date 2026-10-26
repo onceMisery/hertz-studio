@@ -95,6 +95,10 @@ pub enum TransportError {
 #[derive(Deserialize)]
 #[serde(tag = "channel", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Handshake {
+    LobbyProfile {
+        version: u16,
+        room_id: Uuid,
+    },
     Apply {
         version: u16,
         room_id: Uuid,
@@ -191,6 +195,7 @@ struct Inner {
     stop: watch::Sender<bool>,
     clock: MonotonicClock,
     memory: Arc<MemoryBudget>,
+    lobby: Mutex<Option<crate::lobby::LobbyProfile>>,
 }
 #[derive(Clone)]
 pub struct Transport {
@@ -231,6 +236,7 @@ impl RoomServer {
             stop,
             clock,
             memory: MemoryBudget::new(GLOBAL_BYTES),
+            lobby: Mutex::new(None),
         });
         let transport = Transport {
             inner: inner.clone(),
@@ -312,6 +318,23 @@ impl Drop for RoomServer {
     }
 }
 impl Transport {
+    /// Only the application host publishes this optional, explicitly public profile.
+    pub fn set_lobby_profile(
+        &self,
+        profile: Option<crate::lobby::LobbyProfile>,
+    ) -> Result<(), TransportError> {
+        if profile.as_ref().is_some_and(|p| {
+            p.room_id != self.inner.room_id
+                || p.cover
+                    .as_deref()
+                    .is_some_and(|cover| !crate::lobby::valid_cover(cover))
+        }) {
+            return Err(TransportError::Wire);
+        }
+        *self.inner.lobby.lock().unwrap_or_else(|e| e.into_inner()) = profile;
+        Ok(())
+    }
+
     pub fn admission_views(&self) -> Vec<crate::admission::ApplicationView> {
         self.inner
             .state
@@ -487,6 +510,11 @@ impl Transport {
         Ok(())
     }
     pub fn end(&self) {
+        self.inner
+            .lobby
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
         let mut state = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
         state.members.end();
         state.admissions.end();
@@ -611,6 +639,17 @@ impl Transport {
 
 async fn handle(inner: Arc<Inner>, mut socket: Socket, request: Handshake, source: SocketAddr) {
     match request {
+        Handshake::LobbyProfile { version, room_id }
+            if version == VERSION && room_id == inner.room_id =>
+        {
+            let profile = inner
+                .lobby
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            let response = serde_json::json!({"type":"lobby_profile","profile":profile});
+            let _ = send_text(&mut socket, response.to_string()).await;
+        }
         Handshake::Apply {
             version,
             room_id,

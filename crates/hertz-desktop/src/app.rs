@@ -5,6 +5,7 @@
 
 use std::borrow::Cow;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -19,7 +20,9 @@ use tao::window::{Window, WindowBuilder};
 use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use windows_sys::Win32::Foundation::HWND;
-use windows_sys::Win32::UI::WindowsAndMessaging::{SetWindowPos, HWND_TOPMOST, SWP_NOACTIVATE};
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    SetWindowPos, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOSIZE,
+};
 use wry::http::{header, Request, Response};
 use wry::WebViewBuilder;
 
@@ -45,7 +48,6 @@ pub(crate) enum UserEvent {
     WallpaperFeed(u64, Box<Result<WallpaperSnapshot, FeedError>>),
     WallpaperPage(u64, String),
     SettingsPage(String),
-    PreviewPage(String),
     Tick,
     Page(String),
     Tray(TrayIconEvent),
@@ -117,6 +119,22 @@ impl WallpaperSurface {
         }
     }
 
+    fn apply_config(&self, source: &str, scene: &str, music_response: bool) {
+        if let Ok(payload) = serde_json::to_string(&serde_json::json!({
+            "source": source,
+            "scene": scene,
+            "musicResponse": music_response,
+            "allowed": config::WALLPAPER_SCENES
+                .iter()
+                .map(|(id, _)| *id)
+                .collect::<Vec<_>>(),
+        })) {
+            self.eval(&format!(
+                "window.hertzWallpaper && window.hertzWallpaper.applyConfig({payload});"
+            ));
+        }
+    }
+
     fn clear_feed(&self) {
         self.eval("window.hertzWallpaper && window.hertzWallpaper.applyFeed(null);");
     }
@@ -177,7 +195,7 @@ impl WallpaperSurface {
 
 struct SettingsSurface {
     window: Window,
-    webview: wry::WebView,
+    webview: Rc<wry::WebView>,
 }
 
 impl SettingsSurface {
@@ -189,17 +207,26 @@ impl SettingsSurface {
 }
 
 struct PreviewSurface {
-    window: Window,
-    webview: wry::WebView,
+    webview: Rc<wry::WebView>,
     fps: u8,
     music_response: bool,
+    source: String,
+    scene: String,
     ready: bool,
     lease_until: Instant,
 }
 
+struct PositionEdit {
+    lyrics: config::LyricsConfig,
+    user_hidden: bool,
+}
+
 impl PreviewSurface {
     fn eval(&self, script: &str) {
-        if let Err(error) = self.webview.evaluate_script(script) {
+        let script = serde_json::to_string(script).unwrap_or_default();
+        if let Err(error) = self.webview.evaluate_script(&format!(
+            "window.hertzWallpaperSettings && window.hertzWallpaperSettings.evalPreview({script});"
+        )) {
             log(&format!("preview evaluate_script failed: {error}"));
         }
     }
@@ -214,6 +241,22 @@ impl PreviewSurface {
 
     fn clear_feed(&self) {
         self.eval("window.hertzWallpaper && window.hertzWallpaper.applyFeed(null);");
+    }
+
+    fn apply_config(&self) {
+        if let Ok(payload) = serde_json::to_string(&serde_json::json!({
+            "source": self.source,
+            "scene": self.scene,
+            "musicResponse": self.music_response,
+            "allowed": config::WALLPAPER_SCENES
+                .iter()
+                .map(|(id, _)| *id)
+                .collect::<Vec<_>>(),
+        })) {
+            self.eval(&format!(
+                "window.hertzWallpaper && window.hertzWallpaper.applyConfig({payload});"
+            ));
+        }
     }
 
     fn start(&self) {
@@ -232,6 +275,10 @@ struct WallpaperCandidate {
     music_response: bool,
     #[serde(default)]
     monitor: Option<String>,
+    #[serde(default = "config::default_wallpaper_source")]
+    source: String,
+    #[serde(default = "config::default_wallpaper_scene")]
+    scene: String,
 }
 
 struct TrayActions {
@@ -293,7 +340,11 @@ struct App {
     wallpaper_monitor_missing: bool,
     settings: Option<SettingsSurface>,
     settings_candidate: Option<Profile>,
+    settings_tab: String,
+    settings_navigation: u64,
     preview: Option<PreviewSurface>,
+    position_edit: Option<PositionEdit>,
+    placed_position: Option<(i32, i32)>,
     proxy: EventLoopProxy<UserEvent>,
 }
 
@@ -549,6 +600,11 @@ impl App {
     }
 
     fn handle_wallpaper_feed(&mut self, result: Result<WallpaperSnapshot, FeedError>) {
+        let previous_space = self
+            .wallpaper_last
+            .as_ref()
+            .and_then(|snapshot| snapshot.space.as_ref())
+            .map(|space| space.scene.clone());
         match result {
             Ok(snapshot) => {
                 if !self.wallpaper_feed_logged {
@@ -560,19 +616,13 @@ impl App {
                 }
                 self.wallpaper_last = Some(snapshot.clone());
                 if let Some(surface) = self.wallpaper.as_ref() {
-                    if self.config.wallpaper.music_response && self.wallpaper_page_ready {
+                    if self.wallpaper_page_ready {
                         surface.apply_feed(&snapshot);
-                    } else if !self.config.wallpaper.music_response {
-                        surface.clear_feed();
                     }
                 }
                 if let Some(preview) = self.preview.as_ref() {
                     if preview.ready {
-                        if preview.music_response {
-                            preview.apply_feed(&snapshot);
-                        } else {
-                            preview.clear_feed();
-                        }
+                        preview.apply_feed(&snapshot);
                     }
                 }
             }
@@ -587,6 +637,14 @@ impl App {
                     preview.clear_feed();
                 }
             }
+        }
+        let next_space = self
+            .wallpaper_last
+            .as_ref()
+            .and_then(|snapshot| snapshot.space.as_ref())
+            .map(|space| space.scene.clone());
+        if self.settings.is_some() && previous_space != next_space {
+            self.send_settings_status(None, None);
         }
         self.recompute_wallpaper();
     }
@@ -644,11 +702,16 @@ impl App {
             other => log(&format!("unknown wallpaper page event: {other}")),
         }
         if self.wallpaper_page_ready {
+            if let Some(surface) = self.wallpaper.as_ref() {
+                surface.apply_config(
+                    &self.config.wallpaper.source,
+                    &self.config.wallpaper.scene,
+                    self.config.wallpaper.music_response,
+                );
+            }
             if let Some(snapshot) = self.wallpaper_last.as_ref() {
                 if let Some(surface) = self.wallpaper.as_ref() {
-                    if self.config.wallpaper.music_response {
-                        surface.apply_feed(snapshot);
-                    }
+                    surface.apply_feed(snapshot);
                 }
             }
         }
@@ -720,6 +783,8 @@ impl App {
             fps: self.config.wallpaper.fps,
             music_response: self.config.wallpaper.music_response,
             monitor: self.config.wallpaper.monitor.clone(),
+            source: self.config.wallpaper.source.clone(),
+            scene: self.config.wallpaper.scene.clone(),
         }
     }
 
@@ -757,7 +822,18 @@ impl App {
                 "fps": self.config.wallpaper.fps,
                 "musicResponse": self.config.wallpaper.music_response,
                 "monitor": self.config.wallpaper.monitor,
+                "source": self.config.wallpaper.source,
+                "scene": self.config.wallpaper.scene,
             },
+            "scenes": config::WALLPAPER_SCENES
+                .iter()
+                .map(|(id, label)| serde_json::json!({ "id": id, "label": label }))
+                .collect::<Vec<_>>(),
+            "spaceScene": self
+                .wallpaper_last
+                .as_ref()
+                .and_then(|snapshot| snapshot.space.as_ref())
+                .map(|space| space.scene.clone()),
             "profile": {
                 "dataDir": self.profile.data_dir.to_string_lossy(),
                 "edition": self.profile.edition,
@@ -769,6 +845,12 @@ impl App {
             ),
             "monitors": monitors,
             "previewActive": self.preview.is_some(),
+            "lyricsConfig": self.position_edit.as_ref().map(|edit| &edit.lyrics).unwrap_or(&self.config.lyrics),
+            "runtime": self.status_json(),
+            "launchAtLogin": native::autostart_enabled().ok(),
+            "positionEditing": self.position_edit.is_some(),
+            "sourceMessage": self.source_message,
+            "navigationRequest": { "id": self.settings_navigation, "tab": self.settings_tab },
             "error": error,
             "message": message,
         });
@@ -781,6 +863,7 @@ impl App {
         if let Some(settings) = self.settings.as_ref() {
             native::raise(settings.window.hwnd() as HWND);
             native::focus(settings.window.hwnd() as HWND);
+            self.sync_settings_feed();
             self.send_settings_status(None, None);
             return;
         }
@@ -788,6 +871,7 @@ impl App {
             Ok(settings) => {
                 log("wallpaper settings opened");
                 self.settings = Some(settings);
+                self.sync_settings_feed();
                 self.send_settings_status(None, None);
             }
             Err(error) => {
@@ -798,13 +882,18 @@ impl App {
     }
 
     fn close_settings(&mut self) {
+        let _ = self.finish_position_edit(false);
         self.close_preview();
         self.settings = None;
         self.settings_candidate = None;
+        self.sync_settings_feed();
     }
 
     fn close_preview(&mut self) {
         if self.preview.take().is_some() {
+            if let Some(settings) = self.settings.as_ref() {
+                settings.eval("window.hertzWallpaperSettings && window.hertzWallpaperSettings.unmountPreview();");
+            }
             log("wallpaper preview closed");
             self.send_settings_status(None, Some("预览已关闭"));
         }
@@ -818,36 +907,34 @@ impl App {
         if let Some(preview) = self.preview.as_mut() {
             preview.fps = candidate.fps;
             preview.music_response = candidate.music_response;
+            preview.source = candidate.source.clone();
+            preview.scene = candidate.scene.clone();
             preview.lease_until = Instant::now() + PREVIEW_LEASE;
-            preview.start();
-            let ready = preview.ready;
-            if ready {
-                if preview.music_response {
-                    if let Some(snapshot) = self.wallpaper_last.as_ref() {
-                        preview.apply_feed(snapshot);
-                    }
+            if preview.ready {
+                preview.apply_config();
+                if let Some(snapshot) = self.wallpaper_last.as_ref() {
+                    preview.apply_feed(snapshot);
                 } else {
                     preview.clear_feed();
                 }
+                preview.start();
             }
             return Ok(());
         }
-        match create_preview(
-            target,
-            self.proxy.clone(),
-            candidate.fps,
-            candidate.music_response,
-        ) {
-            Ok(preview) => {
-                log("wallpaper preview opened");
-                self.preview = Some(preview);
-                Ok(())
-            }
-            Err(error) => {
-                log(&format!("wallpaper preview failed: {error:#}"));
-                Err(format!("预览失败：{error}"))
-            }
-        }
+        self.open_settings(target);
+        let settings = self.settings.as_ref().ok_or("无法打开桌面设置")?;
+        self.preview = Some(PreviewSurface {
+            webview: settings.webview.clone(),
+            fps: candidate.fps,
+            music_response: candidate.music_response,
+            source: candidate.source.clone(),
+            scene: candidate.scene.clone(),
+            ready: false,
+            lease_until: Instant::now() + PREVIEW_LEASE,
+        });
+        settings
+            .eval("window.hertzWallpaperSettings && window.hertzWallpaperSettings.mountPreview();");
+        Ok(())
     }
 
     fn renew_preview(&mut self) {
@@ -876,6 +963,14 @@ impl App {
     fn stop_wallpaper_feed(&mut self) {
         if let Some(stop) = self.wallpaper_feed_stop.take() {
             stop.store(true, Ordering::Relaxed);
+        }
+    }
+
+    fn sync_settings_feed(&mut self) {
+        if self.settings.is_some() || self.config.wallpaper.enabled || self.wallpaper_forced {
+            self.ensure_wallpaper_feed();
+        } else {
+            self.stop_wallpaper_feed();
         }
     }
 
@@ -932,6 +1027,9 @@ impl App {
         expected_revision: u64,
         target: &EventLoopWindowTarget<UserEvent>,
     ) -> Result<(), String> {
+        if self.position_edit.is_some() {
+            return Err("请先完成或取消位置调整".into());
+        }
         if expected_revision != self.config.revision {
             return Err("设置已变化，请重新打开设置后重试".into());
         }
@@ -945,6 +1043,7 @@ impl App {
         next.revision = self.config.revision.saturating_add(1);
         config::save(&next).map_err(|error| format!("保存设置失败：{error:#}"))?;
         self.config = next;
+        self.close_preview();
         self.profile = profile;
         self.source_generation = self.source_generation.wrapping_add(1);
         self.lyrics_feed_stop.store(true, Ordering::Relaxed);
@@ -1000,6 +1099,7 @@ impl App {
         } else {
             self.drop_wallpaper_surface();
         }
+        self.sync_settings_feed();
         self.wallpaper_recovery_terminal = false;
         self.wallpaper_recovery_attempts.clear();
         self.recompute_wallpaper();
@@ -1018,18 +1118,31 @@ impl App {
         candidate: &WallpaperCandidate,
         expected_revision: u64,
         target: &EventLoopWindowTarget<UserEvent>,
+        lyrics: Option<config::LyricsConfig>,
     ) -> Result<(), String> {
+        if self.position_edit.is_some() {
+            return Err("请先完成或取消位置调整".into());
+        }
         if let Err(error) = validate_candidate(candidate) {
             return Err(error.to_string());
         }
-        if expected_revision != self.config.revision {
-            return Err("设置已变化，请重新打开设置后重试".into());
+        if self.save_due.is_some() || expected_revision != self.config.revision {
+            return Err("设置已在其他位置变化；草稿已保留，请放弃修改后重新读取".into());
         }
         let previous = self.config.clone();
+        if let Some(lyrics) = lyrics {
+            if lyrics.locked && self.tray.is_none() {
+                return Err("托盘不可用，暂时无法锁定歌词".into());
+            }
+            self.config.lyrics = lyrics;
+            self.config.sanitize();
+        }
         self.config.wallpaper.enabled = candidate.enabled;
         self.config.wallpaper.fps = candidate.fps;
         self.config.wallpaper.music_response = candidate.music_response;
         self.config.wallpaper.monitor = candidate.monitor.clone();
+        self.config.wallpaper.source = candidate.source.clone();
+        self.config.wallpaper.scene = candidate.scene.clone();
         self.config.revision = previous.revision.saturating_add(1);
         if let Err(error) = config::save(&self.config) {
             self.config = previous;
@@ -1048,11 +1161,14 @@ impl App {
             }
             self.ensure_wallpaper_feed();
             if let Some(surface) = self.wallpaper.as_ref() {
+                surface.apply_config(
+                    &self.config.wallpaper.source,
+                    &self.config.wallpaper.scene,
+                    self.config.wallpaper.music_response,
+                );
                 if self.wallpaper_page_ready {
-                    if candidate.music_response {
-                        if let Some(snapshot) = self.wallpaper_last.as_ref() {
-                            surface.apply_feed(snapshot);
-                        }
+                    if let Some(snapshot) = self.wallpaper_last.as_ref() {
+                        surface.apply_feed(snapshot);
                     } else {
                         surface.clear_feed();
                     }
@@ -1062,9 +1178,71 @@ impl App {
             self.drop_wallpaper_surface();
         }
         self.close_preview();
+        self.sync_settings_feed();
         self.recompute_wallpaper();
+        self.policy.locked = self.config.lyrics.locked;
+        native::set_locked(self.hwnd(), self.policy.locked);
+        self.send_config();
+        self.place(true);
+        self.recompute_visibility();
         self.rebuild_tray();
         Ok(())
+    }
+
+    fn begin_position_edit(&mut self) -> Result<(), String> {
+        if self.position_edit.is_some() {
+            return Ok(());
+        }
+        if self.save_due.is_some() {
+            self.save_due = Some(Instant::now());
+            self.flush_save();
+        }
+        self.position_edit = Some(PositionEdit {
+            lyrics: self.config.lyrics.clone(),
+            user_hidden: self.policy.user_hidden,
+        });
+        self.config.lyrics.enabled = true;
+        self.config.lyrics.locked = false;
+        self.policy.locked = false;
+        self.policy.user_hidden = false;
+        native::set_locked(self.hwnd(), false);
+        self.send_config();
+        self.place(true);
+        self.recompute_visibility();
+        native::focus(self.hwnd());
+        self.sync_tray();
+        Ok(())
+    }
+
+    fn finish_position_edit(&mut self, commit: bool) -> Result<(), String> {
+        let Some(edit) = self.position_edit.take() else {
+            return Ok(());
+        };
+        let moved = self.config.lyrics.clone();
+        self.config.lyrics = edit.lyrics;
+        self.policy.user_hidden = edit.user_hidden;
+        let previous = self.config.clone();
+        if commit {
+            self.config.lyrics.anchor_x = moved.anchor_x;
+            self.config.lyrics.anchor_y = moved.anchor_y;
+            self.config.lyrics.monitor = moved.monitor;
+            self.config.revision = self.config.revision.saturating_add(1);
+        }
+        let result = if commit {
+            config::save(&self.config).map_err(|error| format!("保存位置失败：{error:#}"))
+        } else {
+            Ok(())
+        };
+        if result.is_err() {
+            self.config = previous;
+        }
+        self.policy.locked = self.config.lyrics.locked;
+        native::set_locked(self.hwnd(), self.policy.locked);
+        self.send_config();
+        self.place(true);
+        self.recompute_visibility();
+        self.sync_tray();
+        result
     }
 
     fn handle_settings_page(&mut self, body: &str, target: &EventLoopWindowTarget<UserEvent>) {
@@ -1078,13 +1256,92 @@ impl App {
             expected_revision: Option<u64>,
             #[serde(default)]
             profile: Option<Profile>,
+            #[serde(default)]
+            lyrics: Option<config::LyricsConfig>,
+            #[serde(default)]
+            event: Option<String>,
+            #[serde(default)]
+            enabled: Option<bool>,
         }
         let Ok(command) = serde_json::from_str::<Command>(body) else {
             self.send_settings_status(Some("设置请求格式无效"), None);
             return;
         };
+        if self.position_edit.is_some()
+            && !matches!(
+                command.cmd.as_str(),
+                "ready"
+                    | "status"
+                    | "preview-event"
+                    | "preview-renew"
+                    | "preview-close"
+                    | "position-begin"
+                    | "position-done"
+                    | "position-cancel"
+                    | "close"
+            )
+        {
+            self.send_settings_status(Some("请先完成或取消位置调整"), None);
+            return;
+        }
         match command.cmd.as_str() {
             "ready" | "status" => self.send_settings_status(None, None),
+            "preview-event" => {
+                if let Some(event) = command.event {
+                    self.handle_preview_page(&event);
+                }
+            }
+            "preview-close" => self.close_preview(),
+            "position-begin" => {
+                let result = self.begin_position_edit();
+                self.send_settings_status(
+                    result.as_ref().err().map(String::as_str),
+                    Some("拖动桌面歌词后，返回此处完成或取消"),
+                );
+            }
+            "position-done" | "position-cancel" => {
+                let result = self.finish_position_edit(command.cmd == "position-done");
+                self.send_settings_status(
+                    result.as_ref().err().map(String::as_str),
+                    Some("位置调整已结束"),
+                );
+            }
+            "autostart" => {
+                let enable = command.enabled.unwrap_or(false);
+                let previous = self.config.clone();
+                let previous_native =
+                    native::autostart_enabled().unwrap_or(previous.launch_at_login);
+                let result = native::set_autostart(enable).and_then(|_| {
+                    self.config.launch_at_login = enable;
+                    self.config.revision = self.config.revision.saturating_add(1);
+                    config::save(&self.config)
+                });
+                if result.is_err() {
+                    self.config = previous;
+                    let _ = native::set_autostart(previous_native);
+                }
+                self.sync_tray();
+                let error = result
+                    .err()
+                    .map(|error| format!("开机启动设置失败：{error:#}"));
+                self.send_settings_status(error.as_deref(), None);
+            }
+            "wallpaper-retry" => {
+                self.retry_wallpaper(target);
+                self.send_settings_status(None, None);
+            }
+            "wallpaper-show" => {
+                self.wallpaper_hidden = false;
+                self.recompute_wallpaper();
+                self.sync_tray();
+                self.send_settings_status(None, None);
+            }
+            "lyrics-show" => {
+                self.policy.user_hidden = false;
+                self.recompute_visibility();
+                self.sync_tray();
+                self.send_settings_status(None, None);
+            }
             "preview" => {
                 let candidate = command
                     .config
@@ -1108,7 +1365,12 @@ impl App {
                     self.send_settings_status(Some("缺少设置修订号"), None);
                     return;
                 };
-                match self.apply_wallpaper_settings(&candidate, expected_revision, target) {
+                match self.apply_wallpaper_settings(
+                    &candidate,
+                    expected_revision,
+                    target,
+                    command.lyrics,
+                ) {
                     Ok(()) => self.send_settings_status(None, Some("已应用")),
                     Err(error) => self.send_settings_status(Some(&error), None),
                 }
@@ -1138,6 +1400,7 @@ impl App {
         if event == "wallpaper_mount_failed" {
             log("wallpaper preview page mount failed");
             self.close_preview();
+            self.send_settings_status(Some("场景预览加载失败，请重试或选择其他场景"), None);
             return;
         }
         let Some(preview) = self.preview.as_mut() else {
@@ -1146,14 +1409,13 @@ impl App {
         match event {
             "wallpaper_dom_ready" | "wallpaper_ready" => {
                 preview.ready = true;
-                preview.start();
-                if preview.music_response {
-                    if let Some(snapshot) = self.wallpaper_last.as_ref() {
-                        preview.apply_feed(snapshot);
-                    }
+                preview.apply_config();
+                if let Some(snapshot) = self.wallpaper_last.as_ref() {
+                    preview.apply_feed(snapshot);
                 } else {
                     preview.clear_feed();
                 }
+                preview.start();
             }
             other => log(&format!("unknown preview page event: {other}")),
         }
@@ -1161,9 +1423,6 @@ impl App {
 
     fn set_locked(&mut self, locked: bool) {
         if locked && self.tray.is_none() {
-            self.source_state = "error";
-            self.source_message = Some("托盘未就绪，暂时不能锁定".into());
-            self.send_source();
             log("refuse lock: tray unavailable");
             return;
         }
@@ -1200,6 +1459,9 @@ impl App {
     }
 
     fn schedule_save(&mut self) {
+        if self.position_edit.is_some() {
+            return;
+        }
         self.save_due = Some(Instant::now() + SAVE_DEBOUNCE);
     }
 
@@ -1239,6 +1501,10 @@ impl App {
             log("ignore malformed page command");
             return;
         };
+        if self.position_edit.is_some() && !matches!(command.cmd.as_str(), "ready" | "drag" | "log")
+        {
+            return;
+        }
         match command.cmd.as_str() {
             "ready" => {
                 self.page_ready = true;
@@ -1255,22 +1521,31 @@ impl App {
                 let _ = self.window.drag_window();
             }
             "layout" => {
-                self.config.lyrics.layout = match self.config.lyrics.layout {
-                    Layout::Double => Layout::Single,
-                    Layout::Single => Layout::Double,
+                let Some(layout) =
+                    layout_choice(command.text.as_deref(), self.config.lyrics.layout)
+                else {
+                    log(&format!("ignore unknown layout: {:?}", command.text));
+                    return;
                 };
-                self.send_config();
-                self.place(true);
-                self.schedule_save();
+                if layout != self.config.lyrics.layout {
+                    self.config.lyrics.layout = layout;
+                    self.send_config();
+                    self.place(true);
+                    self.schedule_save();
+                }
             }
             "secondary" => {
-                self.config.lyrics.secondary = match self.config.lyrics.secondary {
-                    Secondary::Next => Secondary::Translation,
-                    Secondary::Translation => Secondary::Romanization,
-                    Secondary::Romanization => Secondary::Next,
+                let Some(secondary) =
+                    secondary_choice(command.text.as_deref(), self.config.lyrics.secondary)
+                else {
+                    log(&format!("ignore unknown secondary: {:?}", command.text));
+                    return;
                 };
-                self.send_config();
-                self.schedule_save();
+                if secondary != self.config.lyrics.secondary {
+                    self.config.lyrics.secondary = secondary;
+                    self.send_config();
+                    self.schedule_save();
+                }
             }
             "font" => {
                 if let Some(delta) = command.value {
@@ -1315,6 +1590,13 @@ impl App {
         let Some(actions) = self.tray_actions.as_ref() else {
             return;
         };
+        if self.position_edit.is_some()
+            && id != actions.settings_id
+            && id != actions.locate_id
+            && id != actions.quit_id
+        {
+            return;
+        }
         if id == actions.toggle_id {
             self.policy.user_hidden = !self.policy.user_hidden;
             self.recompute_visibility();
@@ -1356,6 +1638,7 @@ impl App {
             self.retry_wallpaper(target);
         } else if id == actions.quit_id {
             log("quit from tray");
+            let _ = self.finish_position_edit(false);
             self.flush_save();
             let _ = self.proxy.send_event(UserEvent::Quit);
         }
@@ -1383,9 +1666,28 @@ impl App {
             .unwrap_or("");
         log(&format!("control command={command}"));
         let value = request.get("value");
+        if self.position_edit.is_some()
+            && !matches!(
+                command,
+                "status" | "wallpaper-status" | "wallpaper-settings" | "quit"
+            )
+        {
+            return pipe_error_detail(
+                "position_edit_active",
+                "请在桌面歌词与壁纸设置中完成或取消位置调整",
+            );
+        }
         match command {
             "status" | "wallpaper-status" => {}
             "wallpaper-settings" => {
+                if let Some(tab) = value
+                    .and_then(|value| value.get("tab"))
+                    .and_then(|tab| tab.as_str())
+                    .filter(|tab| matches!(*tab, "wallpaper" | "lyrics" | "runtime"))
+                {
+                    self.settings_tab = tab.to_string();
+                    self.settings_navigation = self.settings_navigation.wrapping_add(1);
+                }
                 if let Some(profile) = value
                     .and_then(|value| value.get("profile"))
                     .and_then(|value| serde_json::from_value::<Profile>(value.clone()).ok())
@@ -1441,9 +1743,12 @@ impl App {
                     Ok(apply) => apply,
                     Err(_) => return pipe_error("invalid_value"),
                 };
-                if let Err(error) =
-                    self.apply_wallpaper_settings(&apply.config, apply.expected_revision, target)
-                {
+                if let Err(error) = self.apply_wallpaper_settings(
+                    &apply.config,
+                    apply.expected_revision,
+                    target,
+                    None,
+                ) {
                     return pipe_error_detail("wallpaper_apply_failed", error);
                 }
             }
@@ -1524,6 +1829,7 @@ impl App {
                 self.schedule_save();
             }
             "quit" => {
+                let _ = self.finish_position_edit(false);
                 self.flush_save();
                 let proxy = self.proxy.clone();
                 std::thread::spawn(move || {
@@ -1545,6 +1851,7 @@ impl App {
             "userHidden": self.policy.user_hidden,
             "visible": self.visible,
             "source": self.source_state,
+            "positionEditing": self.position_edit.is_some(),
             "policy": {
                 "fullscreen": self.policy.fullscreen,
                 "sessionUnavailable": self.policy.session_unavailable,
@@ -1568,6 +1875,8 @@ impl App {
                 "fps": self.config.wallpaper.fps,
                 "musicResponse": self.config.wallpaper.music_response,
                 "monitor": self.config.wallpaper.monitor,
+                "source": self.config.wallpaper.source,
+                "scene": self.config.wallpaper.scene,
                 "settingsOpen": self.settings.is_some(),
                 "previewActive": self.preview.is_some(),
                 "monitorMissing": self.wallpaper_monitor_missing,
@@ -1667,11 +1976,6 @@ impl App {
     fn tick(&mut self, target: &EventLoopWindowTarget<UserEvent>) {
         self.flush_save();
         let now = Instant::now();
-        if self.settings.is_some() {
-            if let Some(preview) = self.preview.as_mut() {
-                preview.lease_until = now + PREVIEW_LEASE;
-            }
-        }
         if self
             .preview
             .as_ref()
@@ -1681,6 +1985,7 @@ impl App {
         }
         if now.duration_since(self.last_check) >= Duration::from_secs(1) {
             self.last_check = now;
+            self.send_settings_status(None, None);
             let fullscreen = native::target_fullscreen(self.hwnd());
             if fullscreen != self.policy.fullscreen {
                 self.policy.fullscreen = fullscreen;
@@ -1863,8 +2168,16 @@ impl App {
         };
         let available_x = (area.width() - width).max(0);
         let available_y = (area.height() - height).max(0);
-        let x = area.left + (f64::from(available_x) * anchor_x).round() as i32;
-        let y = area.top + (f64::from(available_y) * anchor_y).round() as i32;
+        let mut x = area.left + (f64::from(available_x) * anchor_x).round() as i32;
+        let mut y = area.top + (f64::from(available_y) * anchor_y).round() as i32;
+        if self.position_edit.is_some() {
+            (x, y) = bounded_lyrics_position(x, y, width, height, &area);
+            self.config.lyrics.anchor_x = f64::from(x - area.left) / f64::from(available_x.max(1));
+            self.config.lyrics.anchor_y = f64::from(y - area.top) / f64::from(available_y.max(1));
+        }
+        // WM_MOVE is delivered after SetWindowPos returns; the synchronous
+        // `placing` flag alone cannot distinguish our own placement from a drag.
+        self.placed_position = Some((x, y));
         self.placing = true;
         unsafe {
             SetWindowPos(
@@ -1920,14 +2233,28 @@ impl App {
             return;
         }
         let hwnd = self.hwnd();
-        let Some(rect) = native::window_rect(hwnd) else {
+        let Some(mut rect) = native::window_rect(hwnd) else {
             return;
         };
+        if self.placed_position == Some((rect.left, rect.top)) {
+            return;
+        }
         let Some(area) = native::work_area_for_window(hwnd) else {
             return;
         };
         let width = rect.right - rect.left;
         let height = rect.bottom - rect.top;
+        if self.position_edit.is_some() {
+            let (x, y) = bounded_lyrics_position(rect.left, rect.top, width, height, &area);
+            if (x, y) != (rect.left, rect.top) {
+                self.placed_position = Some((x, y));
+                unsafe {
+                    SetWindowPos(hwnd, HWND_TOPMOST, x, y, 0, 0, SWP_NOACTIVATE | SWP_NOSIZE);
+                }
+                rect.left = x;
+                rect.top = y;
+            }
+        }
         if area.width() <= width || area.height() <= height {
             return;
         }
@@ -1971,7 +2298,7 @@ impl App {
             .as_ref()
             .map(|_| CheckMenuItem::new("显示壁纸", true, !self.wallpaper_hidden, None));
         let wallpaper_retry = wallpaper_enabled.then(|| MenuItem::new("重新挂载壁纸", true, None));
-        let settings = MenuItem::new("壁纸设置", true, None);
+        let settings = MenuItem::new("桌面歌词与壁纸", true, None);
         let quit = MenuItem::new("退出桌面歌词", true, None);
         let separator_after_toggle = PredefinedMenuItem::separator();
         let separator_before_settings = PredefinedMenuItem::separator();
@@ -2187,7 +2514,11 @@ pub(crate) fn run() -> Result<()> {
         wallpaper_monitor_missing: false,
         settings: None,
         settings_candidate: None,
+        settings_tab: "wallpaper".into(),
+        settings_navigation: 0,
         preview: None,
+        position_edit: None,
+        placed_position: None,
         proxy: proxy.clone(),
     };
     app.policy.locked = app.config.lyrics.locked;
@@ -2275,7 +2606,6 @@ pub(crate) fn run() -> Result<()> {
             Event::UserEvent(UserEvent::SettingsPage(body)) => {
                 app.handle_settings_page(&body, target)
             }
-            Event::UserEvent(UserEvent::PreviewPage(body)) => app.handle_preview_page(&body),
             Event::UserEvent(UserEvent::Tick) => app.tick(target),
             Event::UserEvent(UserEvent::Page(body)) => app.page_command(&body),
             Event::UserEvent(UserEvent::Tray(event)) => app.handle_tray(event),
@@ -2302,14 +2632,9 @@ pub(crate) fn run() -> Result<()> {
                     .is_some_and(|settings| settings.window.id() == window_id)
                     && matches!(&event, WindowEvent::CloseRequested)
                 {
-                    app.close_settings();
-                } else if app
-                    .preview
-                    .as_ref()
-                    .is_some_and(|preview| preview.window.id() == window_id)
-                    && matches!(&event, WindowEvent::CloseRequested)
-                {
-                    app.close_preview();
+                    if let Some(settings) = app.settings.as_ref() {
+                        settings.eval("window.hertzWallpaperSettings && window.hertzWallpaperSettings.requestClose();");
+                    }
                 }
             }
             Event::LoopDestroyed => {
@@ -2326,6 +2651,32 @@ fn pipe_error(code: &str) -> serde_json::Value {
 
 fn pipe_error_detail(code: &str, message: impl Into<String>) -> serde_json::Value {
     serde_json::json!({ "ok": false, "error": code, "message": message.into() })
+}
+
+fn layout_choice(text: Option<&str>, current: Layout) -> Option<Layout> {
+    match text {
+        Some("single") => Some(Layout::Single),
+        Some("double") => Some(Layout::Double),
+        None => Some(match current {
+            Layout::Double => Layout::Single,
+            Layout::Single => Layout::Double,
+        }),
+        Some(_) => None,
+    }
+}
+
+fn secondary_choice(text: Option<&str>, current: Secondary) -> Option<Secondary> {
+    match text {
+        Some("next") => Some(Secondary::Next),
+        Some("translation") => Some(Secondary::Translation),
+        Some("romanization") => Some(Secondary::Romanization),
+        None => Some(match current {
+            Secondary::Next => Secondary::Translation,
+            Secondary::Translation => Secondary::Romanization,
+            Secondary::Romanization => Secondary::Next,
+        }),
+        Some(_) => None,
+    }
 }
 
 fn install_global_handlers(proxy: EventLoopProxy<UserEvent>) {
@@ -2374,6 +2725,31 @@ fn spawn_feed(
             }
         })
         .ok();
+}
+
+fn bounded_lyrics_position(
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    area: &native::WorkArea,
+) -> (i32, i32) {
+    let inset = (16.0 * area.scale()).round() as i32;
+    fn snap(value: i32, min: i32, max: i32, distance: i32) -> i32 {
+        if value <= min + distance {
+            min
+        } else if value >= max - distance {
+            max
+        } else {
+            value.clamp(min, max)
+        }
+    }
+    let left = area.left + inset;
+    let top = area.top + inset;
+    (
+        snap(x, left, (area.right - width - inset).max(left), inset),
+        snap(y, top, (area.bottom - height - inset).max(top), inset),
+    )
 }
 
 fn parse_wallpaper_heartbeat(event: &str) -> Option<(u64, u64, bool, bool)> {
@@ -2476,6 +2852,12 @@ fn validate_candidate(candidate: &WallpaperCandidate) -> Result<(), &'static str
     if !matches!(candidate.fps, 15 | 30 | 60) {
         return Err("帧率只能是 15/30/60");
     }
+    if !matches!(candidate.source.as_str(), "follow" | "fixed") {
+        return Err("壁纸来源只能是跟随三维空间或固定场景");
+    }
+    if !config::wallpaper_scene_allowed(&candidate.scene) {
+        return Err("不支持的壁纸场景");
+    }
     Ok(())
 }
 
@@ -2561,16 +2943,47 @@ fn create_settings(
     target: &EventLoopWindowTarget<UserEvent>,
     proxy: EventLoopProxy<UserEvent>,
 ) -> Result<SettingsSurface> {
+    let area = native::primary_work_area();
+    let (width, height) = area
+        .map(|area| {
+            (
+                (f64::from(area.width()) / area.scale() - 48.0).clamp(320.0, 1120.0),
+                (f64::from(area.height()) / area.scale() - 64.0).clamp(420.0, 740.0),
+            )
+        })
+        .unwrap_or((1120.0, 740.0));
     let window = WindowBuilder::new()
-        .with_title("Hertz 壁纸设置")
-        .with_inner_size(tao::dpi::LogicalSize::new(520.0, 640.0))
+        .with_title("桌面歌词与壁纸")
+        .with_inner_size(tao::dpi::LogicalSize::new(width, height))
         .with_min_inner_size(tao::dpi::LogicalSize::new(320.0, 420.0))
         .with_resizable(true)
         .with_visible(true)
         .build(target)?;
     let page_proxy = proxy.clone();
+    let settings_page = settings_html().into_bytes();
+    let wallpaper_page = wallpaper_html().into_bytes();
     let webview = WebViewBuilder::new()
-        .with_html(settings_html())
+        .with_custom_protocol(WALLPAPER_PROTOCOL.to_string(), move |_id, request| {
+            if let Some(file) = request.uri().path().strip_prefix("/scene-thumbnails/") {
+                let image = scene_thumbnail(file);
+                return Response::builder()
+                    .status(if image.is_some() { 200 } else { 404 })
+                    .header(header::CONTENT_TYPE, "image/jpeg")
+                    .body(Cow::Borrowed(image.unwrap_or_default()))
+                    .unwrap();
+            }
+            let page = match request.uri().path() {
+                "/settings.html" => Some(&settings_page),
+                WALLPAPER_PAGE_PATH => Some(&wallpaper_page),
+                _ => None,
+            };
+            Response::builder()
+                .status(if page.is_some() { 200 } else { 404 })
+                .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+                .body(Cow::Owned(page.cloned().unwrap_or_default()))
+                .unwrap()
+        })
+        .with_url("hertz://localhost/settings.html")
         .with_background_color((20, 20, 19, 255))
         .with_ipc_handler(move |request| {
             let body = request.body();
@@ -2580,46 +2993,35 @@ fn create_settings(
         })
         .build(&window)
         .map_err(|error| anyhow::anyhow!("创建设置 WebView 失败：{error}"))?;
-    Ok(SettingsSurface { window, webview })
+    Ok(SettingsSurface {
+        window,
+        webview: Rc::new(webview),
+    })
 }
 
-fn create_preview(
-    target: &EventLoopWindowTarget<UserEvent>,
-    proxy: EventLoopProxy<UserEvent>,
-    fps: u8,
-    music_response: bool,
-) -> Result<PreviewSurface> {
-    let page: Arc<[u8]> = Arc::from(wallpaper_html().into_bytes());
-    let window = WindowBuilder::new()
-        .with_title("Hertz 壁纸预览")
-        .with_inner_size(PhysicalSize::new(960, 540))
-        .with_resizable(true)
-        .with_visible(true)
-        .build(target)?;
-    let page_proxy = proxy.clone();
-    let webview = WebViewBuilder::new()
-        .with_custom_protocol(
-            WALLPAPER_PROTOCOL.to_string(),
-            wallpaper_page_response(page),
-        )
-        .with_url(WALLPAPER_PAGE_URL)
-        .with_background_color((3, 4, 5, 255))
-        .with_ipc_handler(move |request| {
-            let body = request.body();
-            if body.starts_with("wallpaper") {
-                let _ = page_proxy.send_event(UserEvent::PreviewPage(body.clone()));
-            }
-        })
-        .build(&window)
-        .map_err(|error| anyhow::anyhow!("创建预览 WebView 失败：{error}"))?;
-    Ok(PreviewSurface {
-        window,
-        webview,
-        fps,
-        music_response,
-        ready: false,
-        lease_until: Instant::now() + PREVIEW_LEASE,
-    })
+fn scene_thumbnail(file: &str) -> Option<&'static [u8]> {
+    match file {
+        "zodiac.jpg" => Some(include_bytes!("../assets/scene-thumbnails/zodiac.jpg")),
+        "coast.jpg" => Some(include_bytes!("../assets/scene-thumbnails/coast.jpg")),
+        "butterfly-vortex.jpg" => Some(include_bytes!(
+            "../assets/scene-thumbnails/butterfly-vortex.jpg"
+        )),
+        "phoenix-vortex.jpg" => Some(include_bytes!(
+            "../assets/scene-thumbnails/phoenix-vortex.jpg"
+        )),
+        "reactor.jpg" => Some(include_bytes!("../assets/scene-thumbnails/reactor.jpg")),
+        "particle-silk.jpg" => Some(include_bytes!(
+            "../assets/scene-thumbnails/particle-silk.jpg"
+        )),
+        "gravity-sphere.jpg" => Some(include_bytes!(
+            "../assets/scene-thumbnails/gravity-sphere.jpg"
+        )),
+        "warp-tunnel.jpg" => Some(include_bytes!("../assets/scene-thumbnails/warp-tunnel.jpg")),
+        "prism-galaxy.jpg" => Some(include_bytes!(
+            "../assets/scene-thumbnails/prism-galaxy.jpg"
+        )),
+        _ => None,
+    }
 }
 
 fn settings_html() -> String {
@@ -2968,6 +3370,45 @@ mod tests {
     }
 
     #[test]
+    fn position_edit_boundary_uses_monitor_dpi_and_snaps_inside_work_area() {
+        let area = native::WorkArea {
+            name: "left".into(),
+            left: -1920,
+            top: 0,
+            right: 0,
+            bottom: 1080,
+            dpi: 144,
+            primary: false,
+        };
+        assert_eq!(
+            bounded_lyrics_position(-5000, -100, 900, 200, &area),
+            (-1896, 24)
+        );
+        assert_eq!(
+            bounded_lyrics_position(1000, 2000, 900, 200, &area),
+            (-924, 856)
+        );
+        assert_eq!(
+            bounded_lyrics_position(-1400, 300, 900, 200, &area),
+            (-1400, 300)
+        );
+        assert_eq!(
+            bounded_lyrics_position(-1880, 40, 900, 200, &area),
+            (-1896, 24)
+        );
+    }
+
+    #[test]
+    fn all_wallpaper_scenes_have_a_bundled_static_reference() {
+        for (id, _) in config::WALLPAPER_SCENES {
+            let image = scene_thumbnail(&format!("{id}.jpg")).expect("scene thumbnail");
+            assert!(image.starts_with(&[0xff, 0xd8, 0xff]));
+            assert!(image.len() > 1000);
+        }
+        assert!(scene_thumbnail("../config.json").is_none());
+    }
+
+    #[test]
     fn heartbeat_parses_render_progress() {
         assert_eq!(
             parse_wallpaper_heartbeat("wallpaper_heartbeat 42 30 1 0"),
@@ -3095,5 +3536,41 @@ mod tests {
                 page.len()
             );
         }
+    }
+
+    #[test]
+    fn lyric_layout_commands_accept_explicit_values_and_keep_toggle_fallback() {
+        assert_eq!(
+            layout_choice(Some("single"), Layout::Double),
+            Some(Layout::Single)
+        );
+        assert_eq!(
+            layout_choice(Some("double"), Layout::Single),
+            Some(Layout::Double)
+        );
+        assert_eq!(layout_choice(None, Layout::Double), Some(Layout::Single));
+        assert_eq!(layout_choice(None, Layout::Single), Some(Layout::Double));
+        assert_eq!(layout_choice(Some("triple"), Layout::Double), None);
+    }
+
+    #[test]
+    fn lyric_secondary_commands_accept_explicit_values_and_keep_toggle_fallback() {
+        assert_eq!(
+            secondary_choice(Some("translation"), Secondary::Next),
+            Some(Secondary::Translation)
+        );
+        assert_eq!(
+            secondary_choice(Some("romanization"), Secondary::Translation),
+            Some(Secondary::Romanization)
+        );
+        assert_eq!(
+            secondary_choice(None, Secondary::Next),
+            Some(Secondary::Translation)
+        );
+        assert_eq!(
+            secondary_choice(None, Secondary::Romanization),
+            Some(Secondary::Next)
+        );
+        assert_eq!(secondary_choice(Some("unknown"), Secondary::Next), None);
     }
 }

@@ -3,7 +3,6 @@
 
 //! Shared server state, the event bus and the playback queue.
 
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -523,8 +522,8 @@ pub(crate) enum DlRole {
 
 /// 下载注册表里的一个条目：下载器本体 + 它当前承担的角色。
 pub(crate) struct DlEntry {
-    dl: crate::online::progressive::Download,
-    role: DlRole,
+    pub(crate) dl: crate::online::progressive::Download,
+    pub(crate) role: DlRole,
 }
 
 /// 缓存快路径一次提交尝试的三分结果（坏缓存自愈用）。
@@ -1055,7 +1054,7 @@ impl AppState {
     /// 这首在线曲已缓存的文件：先按请求档位，未命中再逐级向下（见
     /// [`crate::online::cache::CacheIndex::find_best`]）。返回的档位是**文件
     /// 自己名字里那档**，播放标注必须用它而不是请求档位。
-    async fn find_online_cached(
+    pub(crate) async fn find_online_cached(
         &self,
         source: &str,
         id: &str,
@@ -1208,7 +1207,12 @@ impl AppState {
 
     /// 记下平台给的响度标签。条目不存在就什么都不做 —— 不为了存一个增益
     /// 捏一条没有标题的元数据（那会让播放历史退化成平台 id）。
-    async fn store_online_rg(&self, track_id: &str, gain: Option<f64>, peak: Option<f64>) {
+    pub(crate) async fn store_online_rg(
+        &self,
+        track_id: &str,
+        gain: Option<f64>,
+        peak: Option<f64>,
+    ) {
         if gain.is_none() && peak.is_none() {
             return;
         }
@@ -1847,11 +1851,16 @@ impl AppState {
             key = key
         );
 
-        // 进入即收口下载注册表：他键条目一律移除（在跑的 cancel，已完成的
-        // 惰性 drop——去删一个已随 rename 消失的 .part 没有意义）；同键条目
-        // 按角色分流——Prefetch 取得所有权直接接管（下载不白跑），Playback
-        // 说明上一代播放仍在途，cancel 后由新一代重开。
-        let takeover: Option<crate::online::progressive::Download> = {
+        // 与模式切换互斥地收口注册表。预取接管只取视图，所有权留在
+        // 注册表中，房间进入可立即取消；旧播放条目取消后由本代重开。
+        let takeover = {
+            let _commit = self.play_commit.lock().await;
+            if !self.attempt_alive(gen, index, &track_id).await {
+                return Ok(PlayOutcome {
+                    committed: false,
+                    actual_quality: None,
+                });
+            }
             let mut map = self.downloads.lock().await;
             let others: Vec<String> = map.keys().filter(|k| k.as_str() != key).cloned().collect();
             for k in others {
@@ -1870,7 +1879,17 @@ impl AppState {
                     None
                 }
                 Some(entry) => match entry.role {
-                    DlRole::Prefetch => Some(entry.dl),
+                    DlRole::Prefetch => {
+                        let view = entry.dl.view();
+                        map.insert(
+                            key.clone(),
+                            DlEntry {
+                                dl: entry.dl,
+                                role: DlRole::Playback,
+                            },
+                        );
+                        Some(view)
+                    }
                     DlRole::Playback => {
                         entry.dl.cancel();
                         None
@@ -1937,7 +1956,7 @@ impl AppState {
 
         // 同键预取在跑则 owned 接管（此时请求侧的 info 根本不存在，档位只能
         // 从下载视图反查）；否则现场取流并新开渐进式下载。
-        let (dl, actual) = if let Some(dl) = takeover {
+        let (view, actual) = if let Some(view) = takeover {
             crate::diaglog!(
                 "download.takeover",
                 idx = index,
@@ -1945,7 +1964,7 @@ impl AppState {
                 key = key,
                 from = "prefetch"
             );
-            (dl, None)
+            (view, None)
         } else {
             let ctx = crate::online::Ctx::new(self.db.clone());
             let resolved = self
@@ -2007,15 +2026,40 @@ impl AppState {
             self.store_online_rg(&track_id, info.rg_gain_db, info.rg_peak)
                 .await;
             let duration_ms = self.online_duration_ms(&track_id).await;
-            match crate::online::progressive::start(
-                &source,
-                dir.clone(),
-                key.clone(),
-                ladder,
-                duration_ms,
-                self.cache_index.clone(),
-            ) {
-                Ok(dl) => (dl, actual),
+            let started = {
+                let _commit = self.play_commit.lock().await;
+                if !self.attempt_alive(gen, index, &track_id).await {
+                    return Ok(PlayOutcome {
+                        committed: false,
+                        actual_quality: None,
+                    });
+                }
+                let mut downloads = self.downloads.lock().await;
+                if let Some(old) = downloads.remove(&key) {
+                    old.dl.cancel();
+                }
+                crate::online::progressive::start(
+                    &source,
+                    dir.clone(),
+                    key.clone(),
+                    ladder,
+                    duration_ms,
+                    self.cache_index.clone(),
+                )
+                .map(|dl| {
+                    let view = dl.view();
+                    downloads.insert(
+                        key.clone(),
+                        DlEntry {
+                            dl,
+                            role: DlRole::Playback,
+                        },
+                    );
+                    view
+                })
+            };
+            match started {
+                Ok(view) => (view, actual),
                 Err(e) => {
                     crate::diaglog!(
                         "download.start_fail",
@@ -2032,27 +2076,6 @@ impl AppState {
                 }
             }
         };
-
-        // 播放流程持视图轮询；Download 所有权注册进 map，随代际可被中止/接管。
-        // entry 原子落槽：开头摘同键与此处之间隔着取流 await，双击/并发预取
-        // 可能已重新塞进同键条目——先 cancel 旧的再插入，槽位必须归本播放
-        // 流程持有的这个 dl（后面靠 key 摘它做 cancel/join）。
-        let view = dl.view();
-        match self.downloads.lock().await.entry(key.clone()) {
-            Entry::Vacant(v) => {
-                v.insert(DlEntry {
-                    dl,
-                    role: DlRole::Playback,
-                });
-            }
-            Entry::Occupied(mut o) => {
-                o.get().dl.cancel();
-                o.insert(DlEntry {
-                    dl,
-                    role: DlRole::Playback,
-                });
-            }
-        }
 
         // 等预读阈值：每轮一个 200ms tick，轮间复核代际——用户切走立刻摘条目
         // 并 cancel，旧代际的等待再也拖不住新一代（修 B3）。
@@ -2499,11 +2522,22 @@ impl AppState {
     }
 
     /// 中止全部在途下载并清空注册表（切到本地曲/换队预留时调用）。
-    /// 短锁内 drain：cancel 只是置 AtomicBool + 删 .part，不 await。
+    /// 短锁内 drain，全部 abort 后在锁外回收，避免模式切换重用未退出任务的路径。
     pub(crate) async fn cancel_all_downloads(&self) {
-        let mut map = self.downloads.lock().await;
-        for (_, entry) in map.drain() {
-            entry.dl.cancel();
+        let downloads: Vec<_> = self
+            .downloads
+            .lock()
+            .await
+            .drain()
+            .map(|(_, entry)| entry.dl)
+            .collect();
+        for dl in &downloads {
+            dl.cancel();
+        }
+        // All tasks have been aborted before awaiting; this cannot wait for
+        // upstream I/O. Join before room preparation may reuse these paths.
+        for dl in downloads {
+            let _ = dl.join().await;
         }
     }
 
@@ -3026,6 +3060,7 @@ impl AppState {
     /// 命中时，后台预热下一首（注册表最多同时 1 个，由切歌取消逻辑保证）。
     /// 任何失败都只 debug 日志——预取绝不影响正在听的曲。
     async fn spawn_prefetch(&self) {
+        let generation = self.play_generation.load(Ordering::Relaxed);
         let mode = self.audio.snapshot().mode;
         let queue = self.queue.lock().await.clone();
         let len = queue.len();
@@ -3082,6 +3117,16 @@ impl AppState {
         else {
             return;
         };
+        let _commit = self.play_commit.lock().await;
+        if self.require_local_playback().is_err()
+            || self.play_generation.load(Ordering::Relaxed) != generation
+        {
+            return;
+        }
+        let mut downloads = self.downloads.lock().await;
+        if downloads.contains_key(&key) {
+            return;
+        }
         match crate::online::progressive::start(
             &source,
             dir,
@@ -3092,24 +3137,13 @@ impl AppState {
         ) {
             Ok(dl) => {
                 self.watch_prefetch_completion(dl.view());
-                // entry 原子落槽：前面的 contains_key 检查与这里之间隔着
-                // 取流 await，并发预取/播放接管可能已占下同键槽位——先 cancel
-                // 旧的再插入本次预取。
-                match self.downloads.lock().await.entry(key) {
-                    Entry::Vacant(v) => {
-                        v.insert(DlEntry {
-                            dl,
-                            role: DlRole::Prefetch,
-                        });
-                    }
-                    Entry::Occupied(mut o) => {
-                        o.get().dl.cancel();
-                        o.insert(DlEntry {
-                            dl,
-                            role: DlRole::Prefetch,
-                        });
-                    }
-                }
+                downloads.insert(
+                    key,
+                    DlEntry {
+                        dl,
+                        role: DlRole::Prefetch,
+                    },
+                );
             }
             Err(e) => tracing::debug!("预取启动失败: {}", e.message),
         }

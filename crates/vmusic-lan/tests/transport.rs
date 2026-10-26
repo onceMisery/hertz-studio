@@ -18,6 +18,111 @@ async fn control(events: &mut ClientEvents) -> ControlFrame {
         .unwrap()
 }
 
+#[tokio::test]
+async fn lobby_artwork_is_public_bounded_pinned_and_never_pairs_a_member() {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    use vmusic_lan::lobby::{LobbyProfile, COVER_PREFIX};
+    let host = HostIdentity::generate().unwrap();
+    let room = Uuid::new_v4();
+    let (server, mut inbound) = RoomServer::bind(
+        "127.0.0.1:0".parse().unwrap(),
+        room,
+        Uuid::new_v4(),
+        &host,
+        MonotonicClock::default(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        client::lobby_profile(server.address, server.fingerprint, room)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let mut png = Vec::new();
+    {
+        let encoder = png::Encoder::new(&mut png, 2, 2);
+        encoder
+            .write_header()
+            .unwrap()
+            .write_image_data(&[128; 4])
+            .unwrap();
+    }
+    let cover = format!("{COVER_PREFIX}{}", STANDARD.encode(png));
+    server
+        .transport
+        .set_lobby_profile(Some(LobbyProfile {
+            room_id: room,
+            cover: Some(cover.clone()),
+        }))
+        .unwrap();
+    let profile = client::lobby_profile(server.address, server.fingerprint, room)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(profile.cover.as_deref(), Some(cover.as_str()));
+    assert_eq!(
+        serde_json::to_value(profile)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert!(server.transport.members().is_empty());
+    assert!(inbound.try_recv().is_err());
+    assert!(
+        client::lobby_profile(server.address, server.fingerprint, Uuid::new_v4())
+            .await
+            .is_err()
+    );
+    assert!(client::lobby_profile(
+        server.address,
+        vmusic_lan::tls::Fingerprint::of(b"wrong"),
+        room
+    )
+    .await
+    .is_err());
+    assert!(server
+        .transport
+        .set_lobby_profile(Some(LobbyProfile {
+            room_id: room,
+            cover: Some("data:image/png;base64,bm90IHBuZw==".into())
+        }))
+        .is_err());
+    assert_eq!(
+        client::lobby_profile(server.address, server.fingerprint, room)
+            .await
+            .unwrap()
+            .unwrap()
+            .cover,
+        Some(cover)
+    );
+    server.transport.set_lobby_profile(None).unwrap();
+    assert!(
+        client::lobby_profile(server.address, server.fingerprint, room)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let invitation = server.transport.invite(Permissions::default()).unwrap();
+    client::pair(
+        server.address,
+        server.fingerprint,
+        room,
+        &invitation,
+        "real member",
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        server.transport.members().len(),
+        1,
+        "only normal invitation pairing grants membership"
+    );
+    server.shutdown().await;
+}
+
 type PeerSocket =
     tokio_tungstenite::WebSocketStream<tokio_rustls::server::TlsStream<tokio::net::TcpStream>>;
 

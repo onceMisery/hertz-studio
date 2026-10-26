@@ -112,6 +112,180 @@ fn error<T>(result: RoomResult<T>, code: &str) {
 }
 
 #[tokio::test]
+async fn shared_library_search_matches_metadata_and_immediately_honors_revocation() {
+    let f = Fixture::new().await;
+    let library = SharedLibrary::default();
+    for (id, title, artist, album) in [
+        ("title-id", "Midnight Voyage", None, None),
+        ("artist-id", "Another Song", Some("Voyage Ensemble"), None),
+        ("album-id", "Final Song", None, Some("VOYAGE 夜航")),
+        (
+            "private-id",
+            "Voyage Private",
+            Some("Voyage"),
+            Some("Voyage"),
+        ),
+    ] {
+        let mut track = f.track(id).await;
+        track.title = title.into();
+        track.artist = artist.map(String::from);
+        track.album = album.map(String::from);
+        vmusic_store::upsert_track(&f.state.db, &track)
+            .await
+            .unwrap();
+    }
+    let shared = f
+        .share(&library, &["title-id", "artist-id", "album-id"])
+        .await;
+    let revision = library.revision().await;
+    let (found_revision, total, tracks) = library.search_page(0, 64, "  vOyAgE  ").await;
+    assert_eq!((found_revision, total, tracks.len()), (revision, 3, 3));
+    assert_eq!(
+        tracks.iter().map(|t| t.resource_id).collect::<Vec<_>>(),
+        shared.iter().map(|t| t.resource_id).collect::<Vec<_>>()
+    );
+    assert_eq!(library.search_page(0, 64, "夜航").await.1, 1);
+    for private in ["Private", "title-id", "audio-", "unmatched"] {
+        assert_eq!(library.search_page(0, 64, private).await.1, 0);
+    }
+
+    f.share(&library, &["artist-id"]).await;
+    let (new_revision, total, tracks) = library.search_page(0, 64, "voyage").await;
+    assert!(new_revision > revision);
+    assert_eq!(total, 1);
+    assert_eq!(tracks[0].title, "Another Song");
+    assert_eq!(library.search_page(0, 64, "Midnight").await.1, 0);
+    f.share(&library, &[]).await;
+    assert_eq!(library.search_page(0, 64, "voyage").await.1, 0);
+    f.finish().await;
+}
+
+#[tokio::test]
+async fn shared_library_search_paginates_the_filtered_snapshot_with_a_bounded_page() {
+    let library = SharedLibrary::default();
+    let songs = (0..70)
+        .map(|i| super::super::online_source::OnlineSong {
+            source: "ccmixter".into(),
+            id: format!("page-{i}"),
+            title: format!("{} {i}", if i < 67 { "Match" } else { "Other" }),
+            artist: None,
+            album: None,
+            cover: None,
+            duration_ms: None,
+            track_ref: serde_json::json!({}),
+        })
+        .collect();
+    let prepared = library.prepare_add_online(songs).await.unwrap();
+    library.commit_replace(prepared).await.unwrap();
+    let (revision, total, all) = library.search_page(0, usize::MAX, "match").await;
+    assert_eq!((total, all.len()), (67, 64));
+    let (page_revision, page_total, tail) = library.search_page(64, 64, "match").await;
+    assert_eq!((page_revision, page_total, tail.len()), (revision, 67, 3));
+    let joined = all
+        .iter()
+        .chain(&tail)
+        .map(|t| t.resource_id)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        joined
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        67
+    );
+    let (page_revision, page_total, page) = library.search_page(2, 3, "match").await;
+    assert_eq!((page_revision, page_total, page.len()), (revision, 67, 3));
+    assert_eq!(
+        page.iter().map(|t| t.resource_id).collect::<Vec<_>>(),
+        joined[2..5]
+    );
+    assert!(library.search_page(67, 64, "match").await.2.is_empty());
+    assert!(library
+        .search_page(usize::MAX, 64, "match")
+        .await
+        .2
+        .is_empty());
+    assert_eq!(library.search_page(0, 0, "match").await.2.len(), 1);
+    assert_eq!(library.search_page(0, 64, "   ").await.1, 70);
+    assert_eq!(
+        library.revision().await,
+        revision,
+        "reads do not change sharing revision"
+    );
+}
+
+#[tokio::test]
+async fn online_shares_mix_with_local_tracks_without_fetching_and_revoke_normally() {
+    let f = Fixture::new().await;
+    let local = f.track("local-before-online").await;
+    let library = SharedLibrary::default();
+    f.share(&library, &[&local.id]).await;
+    let song = super::super::online_source::OnlineSong {
+        source: "ccmixter".into(),
+        id: "not-a-local-file".into(),
+        title: "Shared online".into(),
+        artist: Some("Artist".into()),
+        album: None,
+        cover: None,
+        duration_ms: Some(180_000),
+        track_ref: serde_json::json!({}),
+    };
+    let prepared = library
+        .prepare_add_online(vec![song.clone(), song.clone()])
+        .await
+        .unwrap();
+    assert_eq!(
+        library.views().await.len(),
+        1,
+        "preparation cannot publish a share"
+    );
+    let views = library.commit_replace(prepared).await.unwrap();
+    assert_eq!(views.len(), 2);
+    let online = views
+        .iter()
+        .find(|view| view.title == "Shared online")
+        .unwrap();
+    let key = online.favorite_key.clone().unwrap();
+    assert_eq!(library.local_favorite_ids().await[&key], song.virtual_id());
+    assert_eq!(
+        library.source(&f.state, online.resource_id).await.unwrap(),
+        (song.virtual_id(), PathBuf::new()),
+        "queue validation does not download or treat an online ID as a local path"
+    );
+    let serialized = serde_json::to_string(online).unwrap();
+    assert!(
+        !serialized.contains("online:")
+            && !serialized.contains("path")
+            && !serialized.contains("ref\"")
+    );
+    let before = library.revision().await;
+    let mut invalid = song.clone();
+    invalid.source = "unregistered".into();
+    error(
+        library.prepare_add_online(vec![invalid]).await,
+        "room_invalid",
+    );
+    assert_eq!(library.revision().await, before);
+    let prepared = library
+        .prepare_replace(&f.state, vec![local.id, song.virtual_id()])
+        .await
+        .unwrap();
+    library.commit_replace(prepared).await.unwrap();
+    assert_eq!(
+        library.resource_for(&song.virtual_id()).await,
+        Some(online.resource_id)
+    );
+    let prepared = library.prepare_replace(&f.state, vec![]).await.unwrap();
+    library.commit_replace(prepared).await.unwrap();
+    error(
+        library.source(&f.state, online.resource_id).await,
+        "room_denied",
+    );
+    assert!(library.resolve_favorites(&[key]).await.unwrap().is_empty());
+    f.finish().await;
+}
+
+#[tokio::test]
 async fn favorites_survive_room_recreation_but_never_restore_a_revoked_capability() {
     let f = Fixture::new().await;
     f.track("private-library-track").await;

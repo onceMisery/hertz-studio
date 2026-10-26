@@ -412,6 +412,38 @@ pub async fn admission_status(
         Response::Rejected => Err(ClientError::Pairing),
     }
 }
+/// Public artwork exchange over the same pinned, bounded room transport.
+pub async fn lobby_profile(
+    address: SocketAddr,
+    fingerprint: Fingerprint,
+    room_id: Uuid,
+) -> Result<Option<crate::lobby::LobbyProfile>, ClientError> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Response {
+        r#type: String,
+        profile: Option<crate::lobby::LobbyProfile>,
+    }
+    let response = admission_exchange(
+        address,
+        fingerprint,
+        serde_json::json!({"channel":"lobby_profile","version":VERSION,"room_id":room_id}),
+    )
+    .await?;
+    let response: Response = serde_json::from_str(&response).map_err(|_| ClientError::Protocol)?;
+    if response.r#type != "lobby_profile"
+        || response.profile.as_ref().is_some_and(|p| {
+            p.room_id != room_id
+                || p.cover
+                    .as_deref()
+                    .is_some_and(|c| !crate::lobby::valid_cover(c))
+        })
+    {
+        return Err(ClientError::Protocol);
+    }
+    Ok(response.profile)
+}
+
 async fn admission_exchange(
     address: SocketAddr,
     fingerprint: Fingerprint,

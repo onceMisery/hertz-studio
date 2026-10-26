@@ -83,6 +83,34 @@ pub(crate) struct WallpaperConfig {
     pub(crate) fps: u8,
     pub(crate) music_response: bool,
     pub(crate) monitor: Option<String>,
+    pub(crate) source: String,
+    pub(crate) scene: String,
+}
+
+/// 壁纸运行时能直接渲染、且不依赖封面/歌词/频谱队列的场景。
+/// 顺序就是设置页下拉的顺序；id 与 SpaceStagePure registry 一致。
+pub(crate) const WALLPAPER_SCENES: &[(&str, &str)] = &[
+    ("zodiac", "星座"),
+    ("coast", "海岸公路"),
+    ("butterfly-vortex", "蝶舞星涡"),
+    ("phoenix-vortex", "凤凰涅槃"),
+    ("reactor", "粒子反应堆"),
+    ("particle-silk", "粒子绸带"),
+    ("gravity-sphere", "引力星球"),
+    ("warp-tunnel", "折跃隧道"),
+    ("prism-galaxy", "棱镜星系"),
+];
+
+pub(crate) fn default_wallpaper_source() -> String {
+    "follow".into()
+}
+
+pub(crate) fn default_wallpaper_scene() -> String {
+    "zodiac".into()
+}
+
+pub(crate) fn wallpaper_scene_allowed(scene: &str) -> bool {
+    WALLPAPER_SCENES.iter().any(|(id, _)| *id == scene)
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -126,6 +154,8 @@ impl Default for WallpaperConfig {
             fps: 30,
             music_response: true,
             monitor: None,
+            source: default_wallpaper_source(),
+            scene: default_wallpaper_scene(),
         }
     }
 }
@@ -276,6 +306,12 @@ fn sanitize_wallpaper(wallpaper: &mut WallpaperConfig) {
         .take()
         .map(|monitor| monitor.trim().to_string())
         .filter(|monitor| !monitor.is_empty());
+    if !matches!(wallpaper.source.as_str(), "follow" | "fixed") {
+        wallpaper.source = default_wallpaper_source();
+    }
+    if !wallpaper_scene_allowed(&wallpaper.scene) {
+        wallpaper.scene = default_wallpaper_scene();
+    }
 }
 
 fn valid_color(value: &str) -> bool {
@@ -645,5 +681,31 @@ mod tests {
     fn unsupported_schema_is_rejected() {
         let value = serde_json::json!({ "schemaVersion": 99 });
         assert!(parse_config(value.to_string().as_bytes()).is_err());
+    }
+
+    #[test]
+    fn wallpaper_scene_defaults_to_follow_and_sanitizes_unknown_values() {
+        let mut value = serde_json::to_value(WallpaperConfig::default()).unwrap();
+        assert_eq!(value["source"], "follow");
+        assert_eq!(value["scene"], "zodiac");
+        value.as_object_mut().unwrap().remove("source");
+        value.as_object_mut().unwrap().remove("scene");
+        let defaults: WallpaperConfig = serde_json::from_value(value).unwrap();
+        assert_eq!(defaults.source, "follow");
+        assert_eq!(defaults.scene, "zodiac");
+
+        let mut invalid: WallpaperConfig = serde_json::from_value(serde_json::json!({
+            "enabled": false,
+            "fps": 30,
+            "musicResponse": true,
+            "source": "something",
+            "scene": "cover-sphere"
+        }))
+        .unwrap();
+        sanitize_wallpaper(&mut invalid);
+        assert_eq!(invalid.source, "follow");
+        assert_eq!(invalid.scene, "zodiac");
+        assert!(wallpaper_scene_allowed("butterfly-vortex"));
+        assert!(!wallpaper_scene_allowed("cover-sphere"));
     }
 }

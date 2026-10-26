@@ -107,6 +107,7 @@ impl Advertisement {
                 ("port", &port),
                 ("room_code", code.as_str()),
                 ("fingerprint", fingerprint.as_str()),
+                ("lobby_profile", "v1"),
             ];
             let info = ServiceInfo::new(
                 SERVICE_TYPE,
@@ -146,6 +147,8 @@ pub struct Candidate {
     pub room_code: String,
     /// A discovery claim, not authority: callers must confirm the host pin.
     pub fingerprint: String,
+    pub lobby_profile: bool,
+    pub cover: Option<String>,
 }
 pub struct Discovery {
     daemon: ServiceDaemon,
@@ -266,6 +269,8 @@ fn candidate(info: &mdns_sd::ResolvedService) -> Option<Candidate> {
         addresses,
         room_code: room_code.to_owned(),
         fingerprint,
+        lobby_profile: info.get_property_val_str("lobby_profile") == Some("v1"),
+        cover: None,
     })
 }
 #[cfg(test)]

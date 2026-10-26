@@ -38,6 +38,7 @@ pub struct SharedTrack {
 struct Entry {
     track_id: String,
     path: PathBuf,
+    online: Option<super::online_source::OnlineSong>,
     view: SharedTrack,
 }
 #[derive(Default)]
@@ -56,7 +57,11 @@ struct CachedResource {
     created: Instant,
 }
 #[derive(Clone)]
-pub struct SharedLibrary(Arc<RwLock<Library>>, Arc<zeroize::Zeroizing<[u8; 32]>>);
+pub struct SharedLibrary(
+    Arc<RwLock<Library>>,
+    Arc<zeroize::Zeroizing<[u8; 32]>>,
+    Arc<super::online_source::OnlineSources>,
+);
 impl Default for SharedLibrary {
     fn default() -> Self {
         Self::with_reference_secret(Uuid::new_v4().as_bytes())
@@ -102,6 +107,7 @@ impl SharedLibrary {
         Self(
             Arc::new(RwLock::new(Library::default())),
             Arc::new(zeroize::Zeroizing::new(key)),
+            Arc::default(),
         )
     }
     fn favorite_key(&self, track: &str) -> String {
@@ -155,16 +161,33 @@ impl SharedLibrary {
         ids: Vec<String>,
     ) -> RoomResult<PreparedLibrary> {
         if ids.len() > MAX_SHARED {
-            return Err(RoomError::invalid("最多共享2000首本地歌曲"));
+            return Err(RoomError::invalid("最多共享2000首歌曲"));
         }
-        let (expected_revision, previous) = {
+        let (expected_revision, previous, previous_entries) = {
             let library = self.0.read().await;
-            (library.revision, library.by_track.clone())
+            (
+                library.revision,
+                library.by_track.clone(),
+                library.entries.clone(),
+            )
         };
         let mut entries = BTreeMap::new();
         let mut by_track = HashMap::new();
         for id in ids {
             if by_track.contains_key(&id) {
+                continue;
+            }
+            if crate::online::split_virtual_id(&id).is_some() {
+                let resource = previous
+                    .get(&id)
+                    .ok_or_else(|| RoomError::invalid("请先从在线列表将歌曲加入一起听"))?;
+                let entry = previous_entries
+                    .get(resource)
+                    .filter(|e| e.online.is_some())
+                    .ok_or_else(RoomError::denied)?
+                    .clone();
+                entries.insert(*resource, entry);
+                by_track.insert(id, *resource);
                 continue;
             }
             let track = local_track(state, &id).await?;
@@ -186,6 +209,7 @@ impl SharedLibrary {
                 Entry {
                     track_id: id.clone(),
                     path,
+                    online: None,
                     view,
                 },
             );
@@ -196,6 +220,102 @@ impl SharedLibrary {
             entries,
             by_track,
         })
+    }
+
+    pub(super) async fn prepare_add_online(
+        &self,
+        songs: Vec<super::online_source::OnlineSong>,
+    ) -> RoomResult<PreparedLibrary> {
+        if songs.is_empty() || songs.len() > MAX_SHARED {
+            return Err(RoomError::invalid("请选择1至2000首在线歌曲"));
+        }
+        for song in &songs {
+            song.validate()?;
+        }
+        let library = self.0.read().await;
+        let mut prepared = PreparedLibrary {
+            expected_revision: library.revision,
+            entries: library.entries.clone(),
+            by_track: library.by_track.clone(),
+        };
+        for song in songs {
+            let id = song.virtual_id();
+            let resource = prepared
+                .by_track
+                .get(&id)
+                .copied()
+                .unwrap_or_else(Uuid::new_v4);
+            let view = SharedTrack {
+                resource_id: resource,
+                favorite_key: Some(self.favorite_key(&id)),
+                title: label(&song.title),
+                artist: song.artist.as_deref().map(label),
+                album: song.album.as_deref().map(label),
+                duration_ms: song.duration_ms,
+                sample_rate: None,
+                channels: None,
+                has_cover: song.cover.is_some(),
+            };
+            prepared.entries.insert(
+                resource,
+                Entry {
+                    track_id: id.clone(),
+                    path: PathBuf::new(),
+                    online: Some(song),
+                    view,
+                },
+            );
+            prepared.by_track.insert(id, resource);
+        }
+        if prepared.entries.len() > MAX_SHARED {
+            return Err(RoomError::invalid("最多共享2000首歌曲"));
+        }
+        Ok(prepared)
+    }
+
+    pub(super) async fn remember_online_metadata(&self, state: &AppState) {
+        let songs: Vec<_> = self
+            .0
+            .read()
+            .await
+            .entries
+            .values()
+            .filter_map(|e| e.online.clone())
+            .collect();
+        for song in songs {
+            state
+                .remember_online_meta(
+                    song.virtual_id(),
+                    crate::state::OnlineMetaSnap {
+                        title: song.title,
+                        artist: song.artist,
+                        album: song.album,
+                        duration_ms: song.duration_ms,
+                        cover: song.cover,
+                        rg_gain_db: None,
+                        rg_peak: None,
+                        origin: None,
+                    },
+                )
+                .await;
+        }
+    }
+
+    pub(super) async fn prepare_online(
+        &self,
+        state: &Arc<AppState>,
+        resource: Uuid,
+        position_ms: u64,
+    ) -> RoomResult<Option<vmusic_audio::render::PreparedMedia>> {
+        let (entry, revision) = self.authorized_source(state, resource).await?;
+        let Some(song) = entry.online else {
+            return Ok(None);
+        };
+        let media = self.2.prepare(state, &song, position_ms).await?;
+        if self.authorized_source(state, resource).await?.1 != revision {
+            return Err(RoomError::denied());
+        }
+        Ok(Some(media))
     }
     pub(super) async fn commit_replace(
         &self,
@@ -233,6 +353,35 @@ impl SharedLibrary {
             .map(|e| e.view.clone())
             .collect()
     }
+    /// Search only authorized, shared metadata; revision and page use one lock.
+    pub(super) async fn search_page(
+        &self,
+        offset: usize,
+        limit: usize,
+        query: &str,
+    ) -> (u64, usize, Vec<SharedTrack>) {
+        let library = self.0.read().await;
+        let query = query.trim().to_lowercase();
+        let matches = library.entries.values().filter(|entry| {
+            let track = &entry.view;
+            query.is_empty()
+                || [
+                    Some(track.title.as_str()),
+                    track.artist.as_deref(),
+                    track.album.as_deref(),
+                ]
+                .into_iter()
+                .flatten()
+                .any(|value| value.to_lowercase().contains(&query))
+        });
+        let total = matches.clone().count();
+        let tracks = matches
+            .skip(offset)
+            .take(limit.clamp(1, 64))
+            .map(|entry| entry.view.clone())
+            .collect();
+        (library.revision, total, tracks)
+    }
     pub async fn view(&self, id: Uuid) -> Option<SharedTrack> {
         self.0.read().await.entries.get(&id).map(|e| e.view.clone())
     }
@@ -264,8 +413,16 @@ impl SharedLibrary {
                 library.revision,
             )
         };
-        let track = local_track(state, &entry.track_id).await?;
-        let actual = local_path(&track).await?;
+        let actual = if let Some(song) = &entry.online {
+            song.validate()?;
+            if song.virtual_id() != entry.track_id {
+                return Err(RoomError::denied());
+            }
+            PathBuf::new()
+        } else {
+            let track = local_track(state, &entry.track_id).await?;
+            local_path(&track).await?
+        };
         let library = self.0.read().await;
         if library.revision != revision
             || actual != entry.path
@@ -287,7 +444,12 @@ impl SharedLibrary {
         expected_revision: Option<String>,
     ) -> RoomResult<ResourceChunk> {
         let (entry, revision) = self.authorized_source(state, id).await?;
-        let Entry { track_id, path, .. } = entry;
+        let Entry {
+            track_id,
+            path,
+            online,
+            ..
+        } = entry;
         if offset > 0 {
             let library = self.0.read().await;
             if library.revision != revision {
@@ -305,19 +467,52 @@ impl SharedLibrary {
                 .ok_or_else(|| RoomError::new("resource_expired", "资源快照已失效，请从头加载"))?;
             return resource.chunk(offset);
         }
-        let (bytes, mime) = match kind {
-            ResourceKind::Lyrics => {
-                // Use only the local lyric reader. It never invokes online
-                // accounts or turns a client string into a filesystem path.
-                // SQL limits the content before transferring it into Rust.
-                let row:Option<(Option<String>,i64)>=sqlx::query_as("SELECT CASE WHEN length(CAST(content AS BLOB))<=? THEN content ELSE NULL END,offset_ms FROM track_lyrics WHERE track_id=?")
-                    .bind(MAX_RESOURCE_BYTES as i64).bind(&track_id).fetch_optional(&state.db).await.map_err(|_|RoomError::storage())?;
-                if row.as_ref().is_some_and(|r| r.0.is_none()) {
-                    return Err(RoomError::invalid("导入歌词超过资源限额"));
+        let (bytes, mime) = if let Some(song) = online {
+            match kind {
+                ResourceKind::Lyrics => {
+                    let body = crate::routes::online_lyric_body(state, &song.source, &song.id)
+                        .await
+                        .map_err(super::online_source::error)?;
+                    (
+                        serde_json::to_vec(&body).map_err(|_| RoomError::storage())?,
+                        "application/json",
+                    )
                 }
-                let saved_offset = row.as_ref().map(|r| r.1).unwrap_or(0);
-                let mut doc =
-                    if let Some(content) = row.and_then(|r| r.0).filter(|s| !s.trim().is_empty()) {
+                ResourceKind::Cover => {
+                    let url = crate::routes::public_https_url(
+                        song.cover
+                            .as_deref()
+                            .ok_or_else(|| RoomError::invalid("歌曲没有封面"))?,
+                    )
+                    .map_err(super::online_source::error)?;
+                    let (bytes, mime) = crate::routes::fetch_remote_image(&url)
+                        .await
+                        .map_err(super::online_source::error)?;
+                    let mime = match mime.split(';').next().unwrap_or("").trim() {
+                        "image/jpeg" => "image/jpeg",
+                        "image/png" => "image/png",
+                        "image/webp" => "image/webp",
+                        "image/gif" => "image/gif",
+                        _ => return Err(RoomError::invalid("封面格式不受支持")),
+                    };
+                    (bytes, mime)
+                }
+            }
+        } else {
+            match kind {
+                ResourceKind::Lyrics => {
+                    // Use only the local lyric reader. It never invokes online
+                    // accounts or turns a client string into a filesystem path.
+                    // SQL limits the content before transferring it into Rust.
+                    let row:Option<(Option<String>,i64)>=sqlx::query_as("SELECT CASE WHEN length(CAST(content AS BLOB))<=? THEN content ELSE NULL END,offset_ms FROM track_lyrics WHERE track_id=?")
+                    .bind(MAX_RESOURCE_BYTES as i64).bind(&track_id).fetch_optional(&state.db).await.map_err(|_|RoomError::storage())?;
+                    if row.as_ref().is_some_and(|r| r.0.is_none()) {
+                        return Err(RoomError::invalid("导入歌词超过资源限额"));
+                    }
+                    let saved_offset = row.as_ref().map(|r| r.1).unwrap_or(0);
+                    let mut doc = if let Some(content) =
+                        row.and_then(|r| r.0).filter(|s| !s.trim().is_empty())
+                    {
                         crate::lyrics::parse_saved_checked(&content).map_err(lyric_error)?
                     } else {
                         let source = path.clone();
@@ -347,46 +542,47 @@ impl SharedLibrary {
                             },
                         }
                     };
-                doc.offset_ms = doc.offset_ms.saturating_add(saved_offset);
-                vmusic_lyrics::apply_offset(&mut doc);
-                (
-                    serde_json::to_vec(&doc).map_err(|_| RoomError::storage())?,
-                    "application/json",
-                )
-            }
-            ResourceKind::Cover => {
-                if track_id.len() > 128
-                    || !track_id
-                        .bytes()
-                        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-                {
-                    return Err(RoomError::denied());
+                    doc.offset_ms = doc.offset_ms.saturating_add(saved_offset);
+                    vmusic_lyrics::apply_offset(&mut doc);
+                    (
+                        serde_json::to_vec(&doc).map_err(|_| RoomError::storage())?,
+                        "application/json",
+                    )
                 }
-                let mut found = None;
-                for (ext, mime) in [
-                    ("jpg", "image/jpeg"),
-                    ("jpeg", "image/jpeg"),
-                    ("png", "image/png"),
-                    ("webp", "image/webp"),
-                ] {
-                    let file = state.cover_dir().join(format!("{track_id}.{ext}"));
-                    if tokio::fs::try_exists(&file).await.unwrap_or(false) {
-                        // A cover cache symlink must not escape its cache.
-                        let root = tokio::fs::canonicalize(state.cover_dir())
-                            .await
-                            .map_err(|_| RoomError::denied())?;
-                        let file = tokio::fs::canonicalize(file)
-                            .await
-                            .map_err(|_| RoomError::denied())?;
-                        if !file.starts_with(root) {
-                            return Err(RoomError::denied());
-                        }
-                        let bytes = read_bounded(&file).await?;
-                        found = Some((bytes, mime));
-                        break;
+                ResourceKind::Cover => {
+                    if track_id.len() > 128
+                        || !track_id
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+                    {
+                        return Err(RoomError::denied());
                     }
+                    let mut found = None;
+                    for (ext, mime) in [
+                        ("jpg", "image/jpeg"),
+                        ("jpeg", "image/jpeg"),
+                        ("png", "image/png"),
+                        ("webp", "image/webp"),
+                    ] {
+                        let file = state.cover_dir().join(format!("{track_id}.{ext}"));
+                        if tokio::fs::try_exists(&file).await.unwrap_or(false) {
+                            // A cover cache symlink must not escape its cache.
+                            let root = tokio::fs::canonicalize(state.cover_dir())
+                                .await
+                                .map_err(|_| RoomError::denied())?;
+                            let file = tokio::fs::canonicalize(file)
+                                .await
+                                .map_err(|_| RoomError::denied())?;
+                            if !file.starts_with(root) {
+                                return Err(RoomError::denied());
+                            }
+                            let bytes = read_bounded(&file).await?;
+                            found = Some((bytes, mime));
+                            break;
+                        }
+                    }
+                    found.ok_or_else(|| RoomError::invalid("歌曲没有可共享封面"))?
                 }
-                found.ok_or_else(|| RoomError::invalid("歌曲没有可共享封面"))?
             }
         };
         if bytes.len() > MAX_RESOURCE_BYTES || offset > bytes.len() {

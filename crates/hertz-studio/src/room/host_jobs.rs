@@ -96,14 +96,43 @@ pub(super) async fn source(
     position_ms: u64,
     mode: String,
 ) -> RoomResult<Source> {
+    let budget = if crate::online::split_virtual_id(&track).is_some() {
+        20
+    } else {
+        5
+    };
+    tokio::time::timeout(
+        std::time::Duration::from_secs(budget),
+        prepare_source(state, library, track, instance, position_ms, mode),
+    )
+    .await
+    .map_err(|_| {
+        RoomError::new(
+            "room_preparation_timeout",
+            "歌曲准备超时，操作未提交，请重试",
+        )
+    })?
+}
+async fn prepare_source(
+    state: Arc<AppState>,
+    library: SharedLibrary,
+    track: String,
+    instance: u64,
+    position_ms: u64,
+    mode: String,
+) -> RoomResult<Source> {
     let resource = library
         .resource_for(&track)
         .await
         .ok_or_else(RoomError::denied)?;
     let (_, path) = library.source(&state, resource).await?;
+    let media = library
+        .prepare_online(&state, resource, position_ms)
+        .await?;
     let track_gain_db = gain(&state, &track, &mode).await;
     Ok(Source {
         path,
+        media,
         instance,
         position_ms,
         track_gain_db,

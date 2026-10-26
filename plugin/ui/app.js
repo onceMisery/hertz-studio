@@ -4381,11 +4381,19 @@ function initDetailSortable() {
 // 右键菜单：把后端已有、旧 UI 没接的能力接到曲目上
 // ---------------------------------------------------------------------------
 
+async function startListeningWith(tracks) {
+  if (!window.HertzRoom) return;
+  setView('room');
+  try { await HertzRoom.startFromTracks(tracks); }
+  catch (error) { toast(errText('一起听', error), 'error'); }
+}
+
 function openContextMenu(track, anchor, event) {
   ui.menu.innerHTML = '';
   const items = [
     { label: '播放', run: () => playFromList(track.id) },
     { label: queueAddLabel(), run: () => queueAddTrack(track.id) },
+    { label: window.HertzRoom && HertzRoom.active() ? '加入当前一起听房间' : '从这首歌发起一起听', run: () => startListeningWith([track]) },
     { label: '复制文件路径', run: () => copyText(track.path) },
     { sep: true },
     { label: '加入歌单', children: state.playlists.length
@@ -8854,6 +8862,7 @@ async function startApp() {
   ui.plDetailBack.onclick = () => closeDetail();
   ui.plDetailPlay.onclick = () => { if (detailPlaylistId) playPlaylist(detailPlaylistId); };
   ui.plDetailQueue.onclick = () => { const p = currentDetailPl(); if (p) queuePlaylistNext(p.id); };
+  const playlistRoom = $('pl-detail-room'); if (playlistRoom) playlistRoom.onclick = () => startListeningWith(detailTracks);
   ui.plDetailRename.onclick = () => { const p = currentDetailPl(); if (p) renamePlaylist(p); };
   ui.plDetailDelete.onclick = () => { const p = currentDetailPl(); if (p) deletePlaylist(p); };
   initDetailSortable();
@@ -9032,9 +9041,9 @@ async function startApp() {
   }
   if (ui.setDesktopLyricsOpen) {
     ui.setDesktopLyricsOpen.onclick = () => {
-      transport.post('/v1/desktop/lyrics/launch', {})
-        .then(() => toast('已启动桌面歌词'))
-        .catch((err) => toast(errText('启动桌面歌词失败', err), 'error'));
+      wallpaperControl('wallpaper-settings', { tab: 'lyrics' })
+        .then(() => toast('已打开桌面歌词设置'))
+        .catch((err) => toast(errText('打开桌面歌词设置失败', err), 'error'));
     };
   }
   if (ui.setDesktopLyricsLocate) {
@@ -9058,8 +9067,8 @@ async function startApp() {
   };
   if (ui.setWallpaperSettings) {
     ui.setWallpaperSettings.onclick = () => {
-      transport.post('/v1/desktop/wallpaper/launch', {})
-        .then(() => toast('已打开桌面壁纸设置'))
+      wallpaperControl('wallpaper-settings', { tab: 'wallpaper' })
+        .then(() => toast('已打开桌面歌词与壁纸'))
         .catch((err) => toast(errText('打开桌面壁纸设置失败', err), 'error'));
     };
   }
