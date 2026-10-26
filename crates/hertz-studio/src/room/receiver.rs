@@ -114,6 +114,8 @@ struct Reservation {
 }
 
 impl Reservation {
+    // 弃用理由同 vmusic-lan/src/buffer.rs 的 reserve：新 stable 改名 try_update，MSRV 1.88 还没稳定。
+    #[allow(deprecated)] // MSRV 1.88 还没有 try_update
     fn acquire(budget: &Arc<Budget>, block: &PcmBlock) -> Result<Self, ReceiverError> {
         let frames = block.frame_count() as usize;
         let bytes = block.byte_len();
@@ -165,6 +167,7 @@ impl Reservation {
         (frames as u64 * 1_000_000_000).div_ceil(u64::from(rate))
     }
 
+    #[allow(deprecated)] // MSRV 1.88 还没有 try_update，理由见 vmusic-lan/src/buffer.rs
     fn match_format(&mut self, rate: u32) -> Result<(), ReceiverError> {
         // Called only after validating and matching the immutable epoch format.
         // Unknown PCM is repriced downward. If a queued block outlives the

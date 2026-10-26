@@ -30,6 +30,12 @@ impl MemoryBudget {
     pub fn used(&self) -> usize {
         self.used.load(Ordering::Acquire)
     }
+    // 新 stable 把 `fetch_update` 改名成 `try_update` 并标了弃用，但 `try_update` 在 MSRV 1.88
+    // 仍是 unstable feature `atomic_try_update`（`rustc +1.88.0` 报 E0658），而 1.88 这条下界是刻意
+    // 守住的（见根 Cargo.toml 与 rfd 只挂 Windows/macOS 的理由）。CI 的 test 作业跑 stable 且
+    // -D warnings，msrv 作业跑 1.88，所以这里只能容忍弃用，而不是换成手写 CAS 循环。
+    // rust-version 一旦越过 try_update 的稳定版本，把这里和 room/receiver.rs 的四处调用一起换掉。
+    #[allow(deprecated)] // MSRV 1.88 还没有 try_update
     pub(crate) fn reserve(self: &Arc<Self>, bytes: usize) -> Result<Reservation, BufferError> {
         self.used
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
