@@ -24,6 +24,7 @@ pub(super) const PREVIEWS: &[(&str, &[u8])] = &[
     ("lyric-sonnet.jpg", include_bytes!("../../../plugin/ui/space-scene-preview/lyric-sonnet.jpg")),
     ("lyric-tempera.jpg", include_bytes!("../../../plugin/ui/space-scene-preview/lyric-tempera.jpg")),
     ("particle-silk.jpg", include_bytes!("../../../plugin/ui/space-scene-preview/particle-silk.jpg")),
+    ("phoenix-vortex.jpg", include_bytes!("../../../plugin/ui/space-scene-preview/phoenix-vortex.jpg")),
     ("prism-galaxy.jpg", include_bytes!("../../../plugin/ui/space-scene-preview/prism-galaxy.jpg")),
     ("reactor.jpg", include_bytes!("../../../plugin/ui/space-scene-preview/reactor.jpg")),
     ("resonant-rings.jpg", include_bytes!("../../../plugin/ui/space-scene-preview/resonant-rings.jpg")),

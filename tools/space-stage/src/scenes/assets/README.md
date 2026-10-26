@@ -1,0 +1,9 @@
+# Phoenix artwork
+
+`phoenix-reference.png` is a transparent cutout of the reference image supplied by the user for the phoenix stage on 2026-10-25. The dark background, decorative ring and watermark area are outside the subject cutout. The hero preserves the entire approved painting and its original proportions on a shallow relief mesh, with the same artwork used for the distant flock. This is an articulated 2.5D reference image, not a complete anatomical 3D reconstruction. The rejected procedural bird and its repeated feather texture have been removed. Flying and hatching use the same reference mesh; flight must not narrow the neck/tail or remap individual feathers.
+
+The source image's rights remain with its respective rights holder. The MIT license on the rendering/build code does not relicense the artwork.
+
+The current choreography keeps the hero centered and upright, with a clear shoulder-driven wingbeat approximately every 2.4 seconds and a delayed feather-tip recovery. The breast and crown stay stable, and tail motion remains subtle. Between 6 and 16 seconds it progressively dissolves from wing/tail tips toward the breast and crown. Fledglings use the same release field and emerge from opaque points on that painting, following the same wing deformation as the hero. There is no automatic circling, banking, retreat into depth or flight wake. The user can still drag the camera. Gathering, egg formation and rebirth retain the 36-second cycle.
+
+Edit the PNG, then run `python tools/space-stage/build-phoenix-art.py` (Pillow required) to regenerate `phoenix-reference-data.js`. The packed RGB palette and soft alpha plane are decoded locally and synchronously only when the scene is created. No network or image-generation service is used at runtime. Both hero and flock share this one texture within their scene scope.
