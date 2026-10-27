@@ -1074,6 +1074,19 @@ html:is([data-look="glass"], [data-look="cel"])[data-skin="heijiao"] .topbar {
   display: inline-block;
 }
 
+/* LAN favorites expose a text action, so place their controls in a full card
+   row instead of the artwork's icon-only corner capsule. */
+[data-skin="heijiao"] .track.fav-lan {
+  grid-template-columns:minmax(0,1fr) auto;
+  grid-template-areas:"art art" "main main" "album album" "qual dur" "act act";
+}
+[data-skin="heijiao"] .track.fav-lan .t-actions {
+  position:static; grid-area:act; justify-content:flex-start; flex-wrap:wrap; background:transparent;
+}
+[data-skin="heijiao"] .track.fav-lan .t-actions .t-act { display:inline-flex; }
+[data-skin="heijiao"] .track.fav-lan .t-quality { grid-area:qual; }
+[data-skin="heijiao"] .track.fav-lan .t-dur { grid-area:dur; }
+
 /* 正在播放：不再是一根左侧竖条（卡片没有左边），改成边框染品牌色。 */
 [data-skin="heijiao"] .track.active {
   border-color: var(--brand);

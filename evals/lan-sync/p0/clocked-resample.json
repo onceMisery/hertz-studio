@@ -1,0 +1,177 @@
+{
+  "algorithm": "clocked-sinc-taps128-sub1024-bh4-cutoff095-slew1e8-v1",
+  "arch": "x86_64",
+  "cpu": "Intel64 Family 6 Model 186 Stepping 2, GenuineIntel",
+  "debugAssertions": false,
+  "lockHash": "bb0a816c3561c4d0ad6569aee2b944b0cfd12cc4cad7e1560ddae41b85b8d3bb",
+  "os": "windows",
+  "performance": [
+    {
+      "audioSecondsPerRun": 3.0,
+      "gain1000HzDb": -0.0007939198635090433,
+      "inputRate": 48000,
+      "outputRate": 48000,
+      "ppm": 0.0,
+      "processSeconds": 0.0172349,
+      "realTimeFactor": 0.005744966666666667
+    },
+    {
+      "audioSecondsPerRun": 3.0,
+      "gain1000HzDb": -0.0008199787319067219,
+      "inputRate": 48000,
+      "outputRate": 48000,
+      "ppm": -500.0,
+      "processSeconds": 0.017385,
+      "realTimeFactor": 0.005795000000000001
+    },
+    {
+      "audioSecondsPerRun": 3.0,
+      "gain1000HzDb": -0.0003390734526902142,
+      "inputRate": 48000,
+      "outputRate": 48000,
+      "ppm": 500.0,
+      "processSeconds": 0.0198145,
+      "realTimeFactor": 0.006604833333333333
+    },
+    {
+      "audioSecondsPerRun": 3.0,
+      "gain1000HzDb": -0.0002388292143102467,
+      "inputRate": 44100,
+      "outputRate": 48000,
+      "ppm": 0.0,
+      "processSeconds": 0.017628,
+      "realTimeFactor": 0.005876
+    },
+    {
+      "audioSecondsPerRun": 3.0,
+      "gain1000HzDb": -0.000549488079210978,
+      "inputRate": 44100,
+      "outputRate": 48000,
+      "ppm": -500.0,
+      "processSeconds": 0.0173973,
+      "realTimeFactor": 0.005799100000000001
+    },
+    {
+      "audioSecondsPerRun": 3.0,
+      "gain1000HzDb": 0.0001337211253526651,
+      "inputRate": 44100,
+      "outputRate": 48000,
+      "ppm": 500.0,
+      "processSeconds": 0.0175604,
+      "realTimeFactor": 0.005853466666666667
+    },
+    {
+      "audioSecondsPerRun": 3.0,
+      "gain1000HzDb": -0.0007726166012592445,
+      "inputRate": 48000,
+      "outputRate": 44100,
+      "ppm": 0.0,
+      "processSeconds": 0.0163695,
+      "realTimeFactor": 0.0054564999999999995
+    },
+    {
+      "audioSecondsPerRun": 3.0,
+      "gain1000HzDb": -0.0008264638226736919,
+      "inputRate": 48000,
+      "outputRate": 44100,
+      "ppm": -500.0,
+      "processSeconds": 0.0158937,
+      "realTimeFactor": 0.0052979
+    },
+    {
+      "audioSecondsPerRun": 3.0,
+      "gain1000HzDb": -0.00025131367938106673,
+      "inputRate": 48000,
+      "outputRate": 44100,
+      "ppm": 500.0,
+      "processSeconds": 0.0163629,
+      "realTimeFactor": 0.0054543
+    },
+    {
+      "audioSecondsPerRun": 3.0,
+      "gain1000HzDb": 0.0007976731972804965,
+      "inputRate": 96000,
+      "outputRate": 48000,
+      "ppm": 0.0,
+      "processSeconds": 0.0174397,
+      "realTimeFactor": 0.005813233333333333
+    },
+    {
+      "audioSecondsPerRun": 3.0,
+      "gain1000HzDb": 3.1820822172522834e-6,
+      "inputRate": 96000,
+      "outputRate": 48000,
+      "ppm": -500.0,
+      "processSeconds": 0.017598,
+      "realTimeFactor": 0.005866
+    },
+    {
+      "audioSecondsPerRun": 3.0,
+      "gain1000HzDb": 0.00017032221613156077,
+      "inputRate": 96000,
+      "outputRate": 48000,
+      "ppm": 500.0,
+      "processSeconds": 0.0182702,
+      "realTimeFactor": 0.006090066666666667
+    },
+    {
+      "audioSecondsPerRun": 3.0,
+      "gain1000HzDb": -0.0007978245071828159,
+      "inputRate": 48000,
+      "outputRate": 96000,
+      "ppm": 0.0,
+      "processSeconds": 0.0349117,
+      "realTimeFactor": 0.011637233333333332
+    },
+    {
+      "audioSecondsPerRun": 3.0,
+      "gain1000HzDb": -0.0008500917992398398,
+      "inputRate": 48000,
+      "outputRate": 96000,
+      "ppm": -500.0,
+      "processSeconds": 0.035848,
+      "realTimeFactor": 0.011949333333333333
+    },
+    {
+      "audioSecondsPerRun": 3.0,
+      "gain1000HzDb": -0.0007156462982419167,
+      "inputRate": 48000,
+      "outputRate": 96000,
+      "ppm": 500.0,
+      "processSeconds": 0.038593,
+      "realTimeFactor": 0.012864333333333334
+    }
+  ],
+  "quality": [
+    {
+      "aliasDb": -151.06837027034024,
+      "aliasFrequencyHz": 21000.0,
+      "inputFrequencyHz": 27000.0,
+      "inputRate": 96000,
+      "outputRate": 48000,
+      "requiredMaxAliasDb": -90
+    },
+    {
+      "aliasDb": -151.1585866488536,
+      "aliasFrequencyHz": 18000.0,
+      "inputFrequencyHz": 30000.0,
+      "inputRate": 96000,
+      "outputRate": 48000,
+      "requiredMaxAliasDb": -90
+    },
+    {
+      "aliasDb": -135.41875917789758,
+      "aliasFrequencyHz": 8000.0,
+      "inputFrequencyHz": 40000.0,
+      "inputRate": 96000,
+      "outputRate": 48000,
+      "requiredMaxAliasDb": -90
+    }
+  ],
+  "ratioStepMaxStepDown": 0.13086821138858795,
+  "ratioStepMaxStepUp": 0.13087156414985657,
+  "realSoundCardVerified": false,
+  "schemaVersion": 1,
+  "sourceHash": "f5646c23208d40089fa88111416c1c25178a09ac97f5d72487d47ca2d77a1660",
+  "steadyStateMaxStep": 0.13052618503570557
+}

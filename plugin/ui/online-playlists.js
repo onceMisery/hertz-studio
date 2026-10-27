@@ -78,16 +78,24 @@
 
   // ── 音源清单与账号区 ─────────────────────────────────────────────────────
 
+  var sourcesEpoch = 0;
+  /// 启动补拉用：已经拿到清单就不要再打一遍（独立形态的首发通常已经成功）。
+  function hasSources() { return state.sources.length > 0; }
   async function loadSources() {
+    var epoch = ++sourcesEpoch;
     var data;
     try {
       data = await tr().get('/v1/online/sources');
     } catch (e) {
+      if (epoch !== sourcesEpoch) return;
       // 清单都拿不到：账号区给一句实话，不伪造「暂不支持」卡片。
       el('op-accounts').innerHTML =
         '<div class="hint">音源清单加载失败，稍后重试。</div>';
       return;
     }
+    // 启动期可能先后发起两次（DOMContentLoaded 与 app.js 在 transport 定形后
+    // 的补拉）。迟到的那次只许作废自己，不能把后到的真实清单盖成错误/旧状态。
+    if (epoch !== sourcesEpoch) return;
     state.sources = (data.sources || []).filter(function (s) {
       var caps = s.caps || [];
       // 任一登录/账号能力即显示账号卡：酷狗当前只有扫码+cookie，没有歌单能力，
@@ -596,6 +604,7 @@
   window.OnlinePlaylists = {
     refresh: refresh,
     init: loadSources,
+    loaded: hasSources,
     all: allPlaylists,
     open: openPlaylistById,
     play: playPlaylistById,

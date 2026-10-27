@@ -102,6 +102,12 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         )
         .route("/v1/ai/budget-guard/reset", post(ai_budget_guard_reset))
         .route("/v1/state", get(get_state))
+        .route(
+            "/v1/room",
+            get(crate::room::api::snapshot)
+                .post(crate::room::api::command)
+                .layer(axum::extract::DefaultBodyLimit::max(64 * 1024)),
+        )
         .route("/v1/player/load", post(load))
         .route("/v1/player/play", post(play))
         .route("/v1/player/pause", post(pause))
@@ -177,6 +183,7 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
                 .put(update_library_root)
                 .delete(remove_library_root),
         )
+        .route("/v1/library/roots/pick", post(pick_library_root))
         .route("/v1/playlists", get(list_playlists).post(create_playlist))
         .route("/v1/playlists/import-m3u", post(import_m3u_route))
         .route("/v1/backup", get(export_backup))
@@ -237,6 +244,31 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route(
             "/v1/podcasts/subscriptions/{id}",
             axum::routing::delete(podcast_unsubscribe),
+        )
+        // RSS 图文阅读（reader 领域）：与播客分开订阅管理（方案 B）。
+        .route("/v1/reader/preview", post(reader_preview))
+        .route(
+            "/v1/reader/subscriptions",
+            get(reader_subscriptions).post(reader_subscribe),
+        )
+        .route(
+            "/v1/reader/subscriptions/{id}",
+            axum::routing::delete(reader_unsubscribe),
+        )
+        .route(
+            "/v1/reader/feeds/{id}",
+            axum::routing::delete(reader_delete_feed),
+        )
+        .route("/v1/reader/feeds/{id}/refresh", post(reader_refresh))
+        .route("/v1/reader/entries", get(reader_entries))
+        .route("/v1/reader/entries/{id}", get(reader_entry_detail))
+        .route(
+            "/v1/reader/entries/{id}/state",
+            axum::routing::put(reader_entry_state),
+        )
+        .route(
+            "/v1/reader/entries/{id}/images/{key}",
+            get(reader_entry_image),
         )
         // 在线曲库：搜索与试听地址都由服务端代发，浏览器绕不开第三方接口的
         // CORS 与 Referer 校验。
@@ -303,6 +335,24 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/v1/stage/pitch", post(stage_pitch))
         // OBS 歌词输出：「正在播放」歌词+播放态快照，轮询驱动 /overlay 浮层页。
         .route("/v1/overlay/lyric", get(overlay_lyric))
+        // 独立形态的桌面歌词组件启动入口；组件固定来自服务同目录，不接受路径参数。
+        .route("/v1/desktop/lyrics/launch", post(launch_desktop_lyrics))
+        .route(
+            "/v1/desktop/wallpaper/launch",
+            post(launch_desktop_wallpaper),
+        )
+        .route(
+            "/v1/desktop/lyrics/control",
+            post(desktop_lyrics_control).layer(axum::extract::DefaultBodyLimit::max(
+                DESKTOP_CONTROL_BODY_BYTES,
+            )),
+        )
+        .route(
+            "/v1/desktop/control",
+            post(desktop_lyrics_control).layer(axum::extract::DefaultBodyLimit::max(
+                DESKTOP_CONTROL_BODY_BYTES,
+            )),
+        )
         .layer(middleware::from_fn_with_state(state.clone(), require_token));
 
     // 受限能力门面（技术路线 §5.4）：专用 Authorization header + 独立路由组，
@@ -312,10 +362,30 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/v1/ai/capabilities/call", post(ai_capabilities_call))
         .layer(middleware::from_fn_with_state(state.clone(), require_grant));
 
+    // 桌面歌词只读桥：独立钥匙、独立路由组，够不到主 token 组与受限门面。
+    let desktop_lyrics = Router::new()
+        .route("/v1/desktop-lyrics/snapshot", get(desktop_lyrics_snapshot))
+        .route("/v1/desktop-lyrics/document", get(desktop_lyrics_document))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_desktop_lyrics_key,
+        ));
+
+    // 壁纸只读桥：独立钥匙、独立路由组；只放行快照与事件流。
+    let wallpaper = Router::new()
+        .route("/v1/wallpaper/snapshot", get(wallpaper_snapshot))
+        .route("/v1/wallpaper/events", get(wallpaper_events))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_wallpaper_key,
+        ));
+
     Router::new()
         .route("/v1/health", get(health))
         .merge(api)
         .merge(ai_restricted)
+        .merge(desktop_lyrics)
+        .merge(wallpaper)
 }
 
 // ---------------------------------------------------------------------------
@@ -491,6 +561,68 @@ fn overlay_key_allows(path: &str) -> bool {
     path == "/v1/overlay/lyric" || (path.starts_with("/v1/tracks/") && path.ends_with("/cover"))
 }
 
+/// 桌面歌词钥匙只开两条只读 GET；主 WS、播放、设置、曲库、AI 一律不放行。
+fn desktop_lyrics_key_allows(path: &str) -> bool {
+    matches!(
+        path,
+        "/v1/desktop-lyrics/snapshot" | "/v1/desktop-lyrics/document"
+    )
+}
+
+/// 壁纸钥匙只开两条只读 GET；主 WS、播放、设置、曲库、AI 与歌词文档一律不放行。
+fn wallpaper_key_allows(path: &str) -> bool {
+    matches!(path, "/v1/wallpaper/snapshot" | "/v1/wallpaper/events")
+}
+
+/// 桌面歌词的原生宿主鉴权。用独立 `Authorization: Desktop <key>`，
+/// 不和 Bearer token、浮层钥匙或受限 grant 混用。
+async fn require_desktop_lyrics_key(
+    State(state): State<Arc<AppState>>,
+    request: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    if request.method() != axum::http::Method::GET
+        || !desktop_lyrics_key_allows(request.uri().path())
+    {
+        return unauthorized().into_response();
+    }
+    let presented = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Desktop "))
+        .map(str::trim);
+    match presented {
+        Some(key) if !state.desktop_lyrics_key.is_empty() && key == state.desktop_lyrics_key => {
+            next.run(request).await
+        }
+        _ => unauthorized().into_response(),
+    }
+}
+
+/// 壁纸的原生宿主鉴权。`Authorization: Wallpaper <key>` 与其余凭据互不通用。
+async fn require_wallpaper_key(
+    State(state): State<Arc<AppState>>,
+    request: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    if request.method() != axum::http::Method::GET || !wallpaper_key_allows(request.uri().path()) {
+        return unauthorized().into_response();
+    }
+    let presented = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Wallpaper "))
+        .map(str::trim);
+    match presented {
+        Some(key) if !state.wallpaper_key.is_empty() && key == state.wallpaper_key => {
+            next.run(request).await
+        }
+        _ => unauthorized().into_response(),
+    }
+}
+
 /// 从查询串里取出某个参数的值。
 ///
 /// 不做 percent-decode：token 是两个 `Uuid::simple()` 拼出来的纯小写十六进制，
@@ -550,6 +682,181 @@ pub(crate) fn overlay_key_payload(state: &AppState) -> ApiResult<serde_json::Val
 
 async fn get_overlay_key(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
     Ok(Json(overlay_key_payload(&state)?))
+}
+
+const DESKTOP_CONTROL_BODY_BYTES: usize = 2 * 1024;
+const DESKTOP_CONTROL_COMMANDS: &[&str] = &[
+    "status",
+    "lock",
+    "unlock",
+    "show",
+    "hide",
+    "locate",
+    "layout",
+    "secondary",
+    "font",
+    "opacity",
+    "quit",
+    "wallpaper-status",
+    "wallpaper-settings",
+    "wallpaper-toggle",
+    "wallpaper-show",
+    "wallpaper-hide",
+    "wallpaper-retry",
+    "wallpaper-preview",
+    "wallpaper-preview-close",
+    "wallpaper-preview-renew",
+    "wallpaper-apply",
+    "profile-switch",
+];
+
+#[derive(Deserialize)]
+pub(crate) struct DesktopControlRequest {
+    command: String,
+    #[serde(default)]
+    value: Option<serde_json::Value>,
+}
+
+/// 把播放器的明确动作转给正在运行的原生宿主；宿主不在时如实返回 503。
+async fn desktop_lyrics_control(
+    Json(request): Json<DesktopControlRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if !DESKTOP_CONTROL_COMMANDS.contains(&request.command.as_str()) {
+        return Err(bad_request("不支持的桌面控制命令"));
+    }
+    let payload = serde_json::json!({
+        "command": request.command,
+        "value": request.value,
+    });
+    let result = tokio::task::spawn_blocking(move || crate::desktop_control::send(payload))
+        .await
+        .map_err(|error| internal(format!("桌面歌词控制任务失败：{error}")))?;
+    match result {
+        Ok(response) => Ok(Json(response)),
+        Err(error) => {
+            let message = format!("{error:#}");
+            let code = if message.contains("未运行") {
+                "desktop_not_running"
+            } else {
+                "desktop_unavailable"
+            };
+            Err(ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                code,
+                message,
+            ))
+        }
+    }
+}
+
+/// 启动同目录的桌面宿主。组件缺失时明确拒绝，不从 PATH 猜。
+async fn launch_desktop_lyrics(
+    State(state): State<Arc<AppState>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    launch_desktop_host(&state, &["--locate"], "locate", None)
+}
+
+async fn launch_desktop_wallpaper(
+    State(state): State<Arc<AppState>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    // 把本实例的来源作为候选交给宿主设置页：已有宿主绑定别的 profile 时，
+    // 用户能在列表里看到当前应用的数据目录并显式切换，而不是被静默改绑。
+    let candidate = serde_json::json!({
+        "profile": {
+            "dataDir": state.data_dir.to_string_lossy(),
+            "edition": crate::edition::NAME,
+        }
+    });
+    launch_desktop_host(
+        &state,
+        &["--settings"],
+        "wallpaper-settings",
+        Some(candidate),
+    )
+}
+
+fn launch_desktop_host(
+    state: &AppState,
+    extra_args: &[&str],
+    followup: &str,
+    followup_value: Option<serde_json::Value>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let exe = std::env::current_exe().map_err(|error| internal(error.to_string()))?;
+    let Some(dir) = exe.parent() else {
+        return Err(internal("无法定位服务所在目录".to_string()));
+    };
+    let host = dir.join(if cfg!(windows) {
+        "hertz-desktop.exe"
+    } else {
+        "hertz-desktop"
+    });
+    if !host.is_file() {
+        return Err(ApiError::new(
+            StatusCode::NOT_FOUND,
+            "desktop_component_missing",
+            format!(
+                "未找到桌面组件 {}；请安装与本服务匹配的桌面组件",
+                host.display()
+            ),
+        ));
+    }
+    let mut command = std::process::Command::new(&host);
+    command.arg("--data-dir").arg(&state.data_dir);
+    for arg in extra_args {
+        command.arg(arg);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // 组件是 GUI 进程；开发构建的 console 也不要弹出来。
+        command.creation_flags(0x0800_0000);
+    }
+    command
+        .spawn()
+        .map_err(|error| internal(format!("启动桌面组件失败：{error}")))?;
+    // 已有宿主时新进程会因单实例退出；给正在运行的那个补一次幂等命令。
+    let followup = followup.to_string();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        let mut payload = serde_json::json!({ "command": followup });
+        if let Some(value) = followup_value {
+            payload["value"] = value;
+        }
+        let _ = crate::desktop_control::send(payload);
+    });
+    Ok(Json(serde_json::json!({ "started": true })))
+}
+
+/// 桌面歌词轻量快照：500 ms 轮询用，永不等待取词。
+async fn desktop_lyrics_snapshot(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    Json(crate::desktop_lyrics::snapshot(&state).await)
+}
+
+/// 壁纸只读快照：播放真值 + 最新一帧 64 段频谱；不含曲名、路径或账号。
+async fn wallpaper_snapshot(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    Json(crate::wallpaper::snapshot(&state).await)
+}
+
+async fn wallpaper_events(
+    ws: axum::extract::ws::WebSocketUpgrade,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| crate::wallpaper::events(state, socket))
+}
+
+#[derive(Deserialize)]
+pub(crate) struct DesktopDocumentQuery {
+    key: String,
+}
+
+/// 桌面歌词完整文档：documentKey 与当前文档不符时返回 409，不串曲。
+async fn desktop_lyrics_document(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<DesktopDocumentQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(
+        crate::desktop_lyrics::document(&state, &query.key).await?,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -1029,6 +1336,7 @@ async fn pause(
 
 async fn stop(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
     let commit = state.play_commit.lock().await;
+    state.require_local_playback()?;
     state.cancel_prepared_playback().await;
     state
         .play_generation
@@ -1130,7 +1438,7 @@ async fn load(
         .iter()
         .position(|id| *id == body.track_id)
         .unwrap_or(0);
-    let (generation, _, _) = state.set_queue(queue, Some(index)).await;
+    let (generation, _, _) = state.set_queue(queue, Some(index)).await?;
     state
         .play_index_for(index, Some(generation), PlayTrigger::Pick)
         .await?;
@@ -1177,7 +1485,7 @@ async fn set_queue(
             .and_then(|track_id| body.queue.iter().position(|id| id == track_id)),
         _ => None,
     };
-    state.set_queue(body.queue.clone(), index).await;
+    state.set_queue(body.queue.clone(), index).await?;
     Ok(Json(serde_json::json!({
         "queue": body.queue,
         "index": index,
@@ -1241,6 +1549,7 @@ async fn mode(
     Json(body): Json<ModeRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let commit = state.play_commit.lock().await;
+    state.require_local_playback()?;
     state.cancel_prepared_playback().await;
     state
         .play_generation
@@ -1281,6 +1590,8 @@ async fn set_dsp(
     State(state): State<Arc<AppState>>,
     Json(body): Json<DspUpdate>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    let _room_commit = state.play_commit.lock().await;
+    state.require_local_playback()?;
     let settings = vmusic_store::settings::get_all(&state.db)
         .await
         .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
@@ -1340,7 +1651,6 @@ async fn set_dsp(
         .ok();
     state.audio.set_crossfade(cfg.crossfade_ms).await.ok();
     {
-        let _commit = state.play_commit.lock().await;
         state.cancel_prepared_playback().await;
     }
     state.schedule_prepare_next();
@@ -2246,6 +2556,19 @@ pub(crate) struct LibraryRootRequest {
     pub(crate) enabled: Option<bool>,
 }
 
+/// 弹服务端本机的原生文件夹对话框——曲库扫描读的就是这一侧的磁盘。
+/// 只回路径不写库：选完仍由用户在界面上确认「添加并自动同步」。
+async fn pick_library_root() -> ApiResult<Json<serde_json::Value>> {
+    match scan::pick_root().await {
+        Ok(Some(path)) => Ok(Json(serde_json::json!({ "path": path }))),
+        Ok(None) => Ok(Json(serde_json::json!({ "cancelled": true }))),
+        Err(scan::PickError::Unsupported) => Err(ApiError::capability_unsupported(
+            "这台机器上的服务没有原生文件夹对话框，请直接填写路径",
+        )),
+        Err(scan::PickError::Path(error)) => Err(bad_request(error)),
+    }
+}
+
 async fn add_library_root(
     State(state): State<Arc<AppState>>,
     Json(body): Json<LibraryRootRequest>,
@@ -2842,6 +3165,17 @@ pub(crate) fn favorite_target(
     if ref_id.is_empty() {
         return Err(bad_request("缺少 ref_id"));
     }
+    if source == "lan"
+        && (kind != vmusic_core::FavoriteKind::Track
+            || ref_id.len() != 129
+            || ref_id.as_bytes()[64] != b':'
+            || !ref_id
+                .bytes()
+                .enumerate()
+                .all(|(i, b)| i == 64 || b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+    {
+        return Err(bad_request("局域网收藏需要固定的房主指纹与歌曲引用"));
+    }
     Ok((kind, source, ref_id))
 }
 
@@ -2873,7 +3207,12 @@ pub(crate) async fn favorite_meta(
         artist: clean(body.artist.as_ref()),
         album: clean(body.album.as_ref()),
         duration_ms: body.duration_ms,
-        cover: clean(body.cover.as_ref()),
+        // LAN cover URLs are live capabilities, never durable favorite metadata.
+        cover: if source == "lan" {
+            None
+        } else {
+            clean(body.cover.as_ref())
+        },
     };
     if kind == vmusic_core::FavoriteKind::Track && source == "local" && body.title.is_none() {
         if let Some(t) = vmusic_store::get_track(db, &ref_id.to_string())
@@ -3586,6 +3925,123 @@ async fn podcast_unsubscribe(
         crate::podcasts::unsubscribe(&online_ctx(&state), &id).await,
     )?;
     Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+// --- RSS 图文阅读（reader 领域）---
+
+async fn reader_preview(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<crate::reader::ReaderPreviewRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let preview = tagged(
+        "reader",
+        crate::reader::preview(&online_ctx(&state), &body.feed_url).await,
+    )?;
+    Ok(Json(serde_json::json!({ "preview": preview })))
+}
+
+async fn reader_subscriptions(
+    State(state): State<Arc<AppState>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let feeds = tagged(
+        "reader",
+        crate::reader::subscriptions(&online_ctx(&state)).await,
+    )?;
+    Ok(Json(serde_json::json!({ "feeds": feeds })))
+}
+
+async fn reader_subscribe(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<crate::reader::ReaderSubscribeRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let feed = tagged(
+        "reader",
+        crate::reader::subscribe(&online_ctx(&state), &body.feed_url).await,
+    )?;
+    Ok(Json(serde_json::json!({ "feed": feed })))
+}
+
+async fn reader_unsubscribe(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    tagged(
+        "reader",
+        crate::reader::unsubscribe(&online_ctx(&state), &id).await,
+    )?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn reader_delete_feed(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    tagged(
+        "reader",
+        crate::reader::delete_feed(&online_ctx(&state), &id).await,
+    )?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn reader_refresh(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+    Json(body): Json<crate::reader::ReaderRefreshRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let result = tagged(
+        "reader",
+        crate::reader::refresh(&online_ctx(&state), &id, body.force).await,
+    )?;
+    Ok(Json(serde_json::json!({ "result": result })))
+}
+
+async fn reader_entries(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<crate::reader::ReaderEntriesQuery>,
+) -> ApiResult<Json<crate::reader::EntryPage>> {
+    tagged(
+        "reader",
+        crate::reader::entries(&online_ctx(&state), &q).await,
+    )
+    .map(Json)
+}
+
+async fn reader_entry_detail(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let entry = tagged(
+        "reader",
+        crate::reader::entry_detail(&online_ctx(&state), &id).await,
+    )?;
+    Ok(Json(serde_json::json!({ "entry": entry })))
+}
+
+async fn reader_entry_state(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+    Json(body): Json<crate::reader::ReaderEntryStateRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    tagged(
+        "reader",
+        crate::reader::set_state(&online_ctx(&state), &id, body.is_read, body.starred).await,
+    )?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// 阅读图片代理：只放行该文章清洗时登记过的键。抓取与封面同手法
+/// （HTTPS、image/* content-type、6 MiB 流式限额），不做像素解码（spec §11）。
+async fn reader_entry_image(
+    State(state): State<Arc<AppState>>,
+    AxumPath((id, key)): AxumPath<(String, String)>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let url = crate::reader::image_target(&online_ctx(&state), &id, &key).await?;
+    let url = public_https_url(&url)?;
+    let (bytes, content_type) = fetch_remote_image(&url).await?;
+    Ok(Json(serde_json::json!({
+        "data": crate::rpc::encode_base64(&bytes),
+        "content_type": content_type,
+    })))
 }
 
 /// 音源清单：id、显示名、分类、是否支持 cookie、当前是否已登录。
@@ -4478,8 +4934,9 @@ mod tests {
     }
 
     use super::{
-        lyrics_user_offset, overlay_key_allows, pick_index, playlist_scope, public_https_url,
-        qr_session, query_param, safe_cover_id,
+        desktop_lyrics_key_allows, lyrics_user_offset, overlay_key_allows, pick_index,
+        playlist_scope, public_https_url, qr_session, query_param, safe_cover_id,
+        wallpaper_key_allows, DESKTOP_CONTROL_COMMANDS,
     };
 
     /// 每曲偏移对在线曲同样有效：键就是播放侧的曲目身份（虚拟 id
@@ -4506,6 +4963,195 @@ mod tests {
             .unwrap();
         assert_eq!(lyrics_user_offset(&state, "t-local").await, 400);
         assert_eq!(lyrics_user_offset(&state, &vid).await, -1200);
+    }
+
+    #[test]
+    fn desktop_control_commands_are_an_explicit_allowlist() {
+        for command in [
+            "status",
+            "lock",
+            "unlock",
+            "show",
+            "hide",
+            "locate",
+            "layout",
+            "secondary",
+            "font",
+            "opacity",
+            "quit",
+        ] {
+            assert!(
+                DESKTOP_CONTROL_COMMANDS.contains(&command),
+                "{command} 应在白名单里"
+            );
+        }
+        for command in ["exec", "open", "shell", "config", "reload", ""] {
+            assert!(!DESKTOP_CONTROL_COMMANDS.contains(&command));
+        }
+        for command in [
+            "wallpaper-status",
+            "wallpaper-settings",
+            "wallpaper-toggle",
+            "wallpaper-show",
+            "wallpaper-hide",
+            "wallpaper-retry",
+            "wallpaper-preview",
+            "wallpaper-preview-close",
+            "wallpaper-preview-renew",
+            "wallpaper-apply",
+            "profile-switch",
+        ] {
+            assert!(
+                DESKTOP_CONTROL_COMMANDS.contains(&command),
+                "{command} 应在桌面控制白名单里"
+            );
+        }
+    }
+
+    #[test]
+    fn desktop_key_only_opens_the_two_lyrics_read_paths() {
+        assert!(desktop_lyrics_key_allows("/v1/desktop-lyrics/snapshot"));
+        assert!(desktop_lyrics_key_allows("/v1/desktop-lyrics/document"));
+        for path in [
+            "/v1/overlay/lyric",
+            "/v1/state",
+            "/v1/player/play",
+            "/ws",
+            "/v1/desktop-lyrics/snapshot/extra",
+            "/v1/desktop-lyrics",
+            "/v1/wallpaper/snapshot",
+        ] {
+            assert!(
+                !desktop_lyrics_key_allows(path),
+                "{path} 不该被桌面钥匙放行"
+            );
+        }
+    }
+
+    #[test]
+    fn wallpaper_key_only_opens_the_wallpaper_bridge() {
+        assert!(wallpaper_key_allows("/v1/wallpaper/snapshot"));
+        assert!(wallpaper_key_allows("/v1/wallpaper/events"));
+        for path in [
+            "/v1/desktop-lyrics/snapshot",
+            "/v1/desktop-lyrics/document",
+            "/v1/overlay/lyric",
+            "/v1/state",
+            "/v1/player/play",
+            "/ws",
+            "/v1/wallpaper/snapshot/extra",
+            "/v1/wallpaper",
+        ] {
+            assert!(!wallpaper_key_allows(path), "{path} 不该被壁纸钥匙放行");
+        }
+    }
+
+    #[tokio::test]
+    async fn wallpaper_route_requires_its_own_key() {
+        let (mut state, handle) = crate::state::tests::playback_state().await;
+        let wallpaper_key = "a".repeat(64);
+        let lyrics_key = "b".repeat(64);
+        state.wallpaper_key = wallpaper_key.clone();
+        state.desktop_lyrics_key = lyrics_key.clone();
+        let state = std::sync::Arc::new(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let app = super::router(state.clone()).with_state(state.clone());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+
+        let allowed = client
+            .get(format!("{base}/v1/wallpaper/snapshot"))
+            .header("Authorization", format!("Wallpaper {wallpaper_key}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(allowed.status(), 200);
+        let body: serde_json::Value = allowed.json().await.unwrap();
+        assert_eq!(body["protocol"], crate::wallpaper::PROTOCOL);
+        assert_eq!(
+            body["spectrum"]["bands"].as_array().unwrap().len(),
+            crate::wallpaper::BANDS
+        );
+
+        for (path, scheme, key) in [
+            ("/v1/wallpaper/snapshot", "Desktop", lyrics_key.as_str()),
+            (
+                "/v1/desktop-lyrics/snapshot",
+                "Wallpaper",
+                wallpaper_key.as_str(),
+            ),
+            ("/v1/state", "Wallpaper", wallpaper_key.as_str()),
+        ] {
+            let denied = client
+                .get(format!("{base}{path}"))
+                .header("Authorization", format!("{scheme} {key}"))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(denied.status(), 401, "{scheme} 不该打开 {path}");
+        }
+
+        server.abort();
+        let _ = server.await;
+        state.audio.shutdown();
+        handle.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn wallpaper_events_stream_starts_with_a_snapshot() {
+        let (mut state, handle) = crate::state::tests::playback_state().await;
+        let wallpaper_key = "a".repeat(64);
+        state.wallpaper_key = wallpaper_key.clone();
+        let session = state.server_instance_id().to_string();
+        let state = std::sync::Arc::new(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let app = super::router(state.clone()).with_state(state.clone());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let first = tokio::task::spawn_blocking(move || {
+            use std::time::Duration;
+            use tungstenite::client::IntoClientRequest;
+
+            let uri: tungstenite::http::Uri = format!("ws://127.0.0.1:{port}/v1/wallpaper/events")
+                .parse()
+                .unwrap();
+            let mut request = uri.into_client_request().unwrap();
+            request.headers_mut().insert(
+                "authorization",
+                tungstenite::http::HeaderValue::from_str(&format!("Wallpaper {wallpaper_key}"))
+                    .unwrap(),
+            );
+            let address = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+            let stream =
+                std::net::TcpStream::connect_timeout(&address, Duration::from_secs(2)).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let (mut socket, response) = tungstenite::client(request, stream).unwrap();
+            assert_eq!(response.status().as_u16(), 101);
+            match socket.read().unwrap() {
+                tungstenite::Message::Text(text) => text.as_str().to_string(),
+                other => panic!("壁纸事件首帧不是文本快照：{other:?}"),
+            }
+        })
+        .await
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&first).unwrap();
+        assert_eq!(value["protocol"], crate::wallpaper::PROTOCOL);
+        assert_eq!(
+            value["spectrum"]["bands"].as_array().unwrap().len(),
+            crate::wallpaper::BANDS
+        );
+        assert_eq!(value["server"]["session"], session);
+        server.abort();
+        let _ = server.await;
+        state.audio.shutdown();
+        handle.join().unwrap();
     }
 
     #[test]

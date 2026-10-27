@@ -67,8 +67,10 @@ jobs:
         run: >-
           cargo fmt
           -p hertz-studio
+          -p hertz-desktop
           -p vmusic-core
           -p vmusic-audio
+          -p vmusic-lan
           -p vmusic-store
           -p vmusic-library
           -p vmusic-lyrics
@@ -203,6 +205,12 @@ jobs:
       - name: Library and filesystem integration
         if: steps.smoke.outcome == 'success'
         run: python3 scripts/check-library-api.py --maintenance
+      - name: LAN room control and lifecycle integration
+        if: steps.smoke.outcome == 'success'
+        run: python3 scripts/check-lan-room.py --binary target/debug/hertz-studio --report output/lan-control.json
+      - name: LAN personal favorites and sharing authorization
+        if: steps.smoke.outcome == 'success'
+        run: python3 scripts/check-lan-favorites.py --binary target/debug/hertz-studio --report output/lan-favorites.json
       - name: DBX plugin sidecar protocol
         id: sidecar
         if: steps.smoke.outcome == 'success'
@@ -218,8 +226,10 @@ jobs:
         run: |
           cargo build -p dbx-plugin-hertz
           node scripts/check-plugin-sidecar.js 2>&1 | tee sidecar.log
+          python3 scripts/check-plugin-room-shutdown.py --plugin target/debug/dbx-plugin-hertz --service target/debug/hertz-studio --report output/lan-e2e/plugin-eof-acceptance-standard.json 2>&1 | tee -a sidecar.log
           cargo build -p dbx-plugin-hertz --features full
           HERTZ_EDITION=full node scripts/check-plugin-sidecar.js 2>&1 | tee -a sidecar.log
+          python3 scripts/check-plugin-room-shutdown.py --plugin target/debug/dbx-plugin-hertz --service target/debug/hertz-studio --report output/lan-e2e/plugin-eof-acceptance-full.json 2>&1 | tee -a sidecar.log
         env:
           VMUSIC_BACKEND: "null"
       # 临时诊断（定位完与 test job 那处一起撤）：这一步红时只有「exit code 1」，
@@ -238,3 +248,10 @@ jobs:
           )"
           echo "::error title=sidecar failed on ubuntu-latest::${body}"
           exit 1
+      - name: Save plugin EOF lifecycle reports
+        if: always() && steps.sidecar.outcome != 'skipped'
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugin-eof-lifecycle
+          path: output/lan-e2e/plugin-eof-acceptance-*.json
+          if-no-files-found: ignore

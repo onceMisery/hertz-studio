@@ -1,8 +1,34 @@
 # 路线图实施状态
 
-核对日期：2026-10-21。对应 [产品路线图](./product-roadmap.md) 和 [技术实施方案](./technical-roadmap.md)。本文件记录当前源码与实际验证，不改写原路线范围；**路线图尚未全部完成**。
+核对日期：2026-10-21；最新增量：2026-10-24。对应 [产品路线图](./product-roadmap.md) 和 [技术实施方案](./technical-roadmap.md)。本文件记录当前源码与实际验证，不改写原路线范围；**路线图尚未全部完成**。
 
-当前开发停点：已核对搜索、歌词候选、MCP 授权与播控、舞台草稿、持久任务、provider/凭据、评测入口和工程/导出主线的现有代码，未发现需要在缺少真实环境时继续新增的明确主线功能。此结论是功能实现核对，不是全部异常、平台、模型质量或发布条件已经验收。
+## W1-A 壁纸共享契约增量（2026-10-24）
+
+- 相机：W0 探针改读 `HertzStageRuntime.SpaceStagePure.catalog()` 的 zodiac camera（`theta/phi/radius/fov/fit`），移除 `11.87` 硬编码；窄画幅按 registry 的 fit 框后退。`tools/desktop-probe/check-scene-browser.js` 断言实际相机位置与 registry 期望距离一致；A/B 渲染见 `output/desk-w0/camera-old-2560.png` 与 `camera-new-2560.png`。
+- 服务端：新增独立 `wallpaper-key`（`Authorization: Wallpaper <key>`）、`GET /v1/wallpaper/snapshot` 与 discovery `wallpaper_protocol`；快照的 64 段频谱来自既有 `AudioEvent::Spectrum` 的最新一帧，不新建 FFT 或播放 owner。只读路由/越权/频谱边界/discovery 共 6 项定向测试通过。
+- 宿主：从 `hertz-desktop/feed.rs` 抽出 `bridge` 共享 discovery、窄凭据与本机只读 HTTP；新增 `wallpaper_feed`，冻结错误码及 500 ms 衰减、1 s 归零、暂停不插值、断连丢弃语义；`--wallpaper-feed-test` 可对绑定 profile 轮询。7 项定向测试通过。
+- W1-B 首片（2026-10-24）：新增 `crates/hertz-desktop/assets/wallpaper-scene.*` 场景页，读 registry 相机并接受 `applyFeed`（500 ms/1 s 衰减、暂停/断连回环境动画、`positionMs` 不驱动视觉时钟）；`hertz-desktop` 新增 `wallpaper` 配置、WorkerW 目标屏 surface（完整显示器矩形）、混合 DPI 缩放补偿、目标屏选择、feed 线程、全屏/会话/息屏停绘、托盘“显示壁纸/重新挂载壁纸”、壁纸设置页（启用/目标屏/帧率/跟随音乐）、15 s 预览租约、页面 generation 与 Explorer 重启恢复（存活检测、3 次/120 s 预算、显式重试）以及 `--wallpaper` 运行开关。隔离 mock 快照端到端记录 `wallpaper page dom ready`、`wallpaper page mounted`、`wallpaper feed ok`；设置页经 WebView2 CDP 验证预览、应用、live surface 与 feed；真实 Explorer 重启后 page ready/mounted 各从 1 增至 2 次，`wallpaper recovery success attempt=1`。
+- 多屏/DPI：宿主枚举完整显示器矩形/设备名/DPI，设置页可选单块目标屏。2026-10-25 第二屏实机验证：`DISPLAY1 2560×1600@144` + `DISPLAY5 1920×1080@96`（510,-1080），目标屏 `zoom=0.667`，子窗 `510,-1080..2430,0`、WorkerW `0,-1080..2560,1600`，page/mounted/feed 与第二屏截图均通过。修复负虚拟屏原点下 WorkerW 的 Progman 相对坐标（否则整层再偏移一屏）。同时挂多块屏与拓扑变化自动重排仍属 W3。
+- 主应用管理通道（2026-10-25）：服务端新增 `/v1/desktop/control` 与 `/v1/desktop/wallpaper/launch`，宿主 pipe 支持 wallpaper status/settings/toggle/show/hide/retry/preview/close/renew/apply；app 设置页新增桌面壁纸入口（DBX 隐藏）。消息模式命名管道逐项通过，服务端白名单与前端资源检查通过；未在重建后的应用实例做整页人工验收。
+- 多来源切换（2026-10-25）：桌面配置升到 schema v2（activeProfile + 最多 8 个 profile 的独立歌词/壁纸域，schema v1 原地迁移），宿主 pipe 新增 `profile-switch`，设置页新增来源选择；主应用打开壁纸设置时把自身数据目录作为候选。切换保存成功后才清空旧歌词/频谱、递增来源代际并重启 feed，旧代际迟到事件丢弃。隔离 mock 双来源 31/31 通过，包含 v1 迁移、A/B 域隔离、设置页切换、旧服务回退、慢请求代际丢弃、非法路径拒绝与 revision 不变；未在正式服务、真实双发行版安装或登录自启场景验收。
+- 壁纸事件流（2026-10-25）：新增 `GET /v1/wallpaper/events`（同一 `wallpaper-key` 请求头），首发完整快照，之后把现有播放/频谱广播合并为最多 4 Hz 的完整快照并保留 1 s 心跳；宿主优先 WS，旧服务 404 时回退 500 ms 轮询，重连按 1/2/4/8/16/30 s 退避。真实 Standard 服务上鉴权/首发/心跳/宿主 surface 12/12 通过，旧服务回退在双来源 mock 中 31/31 通过；W1-C 安装升级与长稳未验，真实双发行版见下条。
+- 单屏拓扑重排（2026-10-25）：宿主每秒按稳定设备名重枚举目标屏；矩形/DPI/位置变化时原地重挂 WorkerW 子窗并重算 WebView zoom，重挂失败才进入统一恢复预算。真实 `DISPLAY5` 1920×1080@96 at (510,-1080) → 1600×900@59 at (510,-900) → 恢复 12/12 通过，子窗矩形与第二屏截图跟随变化且页面保持 ready；DPI 变化、横竖屏与多屏同时运行未验。
+- 渲染失联恢复（2026-10-25）：场景页每 2 s 上报页面心跳（ticks/draws/mounted/lost）；宿主在可见时 10 s 无有效心跳，或页面就绪后连续 3 次 `evaluate_script` 失败时，丢弃 surface 并按统一 3 次/120 s 预算重建。心跳宽限只在可见性切换时给一次，feed 每 250 ms 的 recompute 不再刷新它（修掉每拍重置导致超时永不触发的问题）。`status_json.diagnostics` 暴露暂停原因、`fps{configured,effective,measured}`、`page{ready,ticks,draws,heartbeatAgeMs,evalFailures,zoom}`、monitor/recovery/feed 事实；measured 按 draw 增量/≥1 s 计算。隔离宿主杀掉自己的 WebView2 进程树后 8/8 通过：2.6 s 触发、0.4 s 重建、ticks 恢复；无壁纸页的诊断投影 12/12 通过。10 s 心跳超时的冻结页面端到端测试当时被 `E_INVALIDARG` 挡住，根因见下条，补齐后 9/9 通过。
+- 壁纸页供给通道（2026-10-25）：`E_INVALIDARG` 不是 WebView2 运行时卡死（本机未重启过也能复现/修好），而是壁纸页整页 `NavigateToString` 越过该 API 约 2 MB 上限——并行改动把内联的 `plugin/ui/vendor/stage-runtime.js` 从 1.08 MB 增到 1.68 MB、整页 1.69 MB，此后每次新建壁纸页稳定失败；只把内联 runtime 换回 1.08 MB 版本即恢复，与调试端口参数和杀进程史无关。改试落盘 `file://` 走不通：页面正常加载、`window.ipc` 也在，但 file:// 文档的 postMessage 到不了宿主（CDP 手动 post 同样收不到），表现为 surface 已挂载却永不进入 ready 与心跳。最终壁纸页与预览页整页改走宿主自定义协议 `hertz://localhost/wallpaper.html`（wry 映射为 `http://hertz.localhost/`），该 origin 只为这一个路径返回页面、其余路径 404，创建日志补 `page_bytes`。真实 1.69 MB 页面验收：4 种启动参数组合全部 pageReady；崩溃恢复 8/8；心跳停摆 9/9（10 s 超时分支首次端到端命中，且确认触发源是心跳不是 eval 失败）；诊断投影在真机壁纸页拿到 `draws=112 measured=27.4 ticks=643 zoom=0.667`；预览/设置/来源切换/事件流/目标屏回归同步通过。留在 NavigateToString 上的只有歌词页与设置页，加单测把它们钉在 256 KiB 以内。
+- 双发行版与双表面共存（2026-10-25）：同一份宿主分别连 Standard（默认特征）与 Full（`--features full`，隔离到 `target/full-cargo`）服务，逐项对齐 discovery 的 `edition`/`wallpaper_protocol`、64 hex `wallpaper-key`、快照带钥匙 200 与 64 段、不带钥匙 401、宿主 WS 连接、feed 快照、页面实际绘制与 measured FPS——两版各 12/12、实测 `standard 27.43 / full 27.40`、`zoom=0.667`，壁纸契约不需要按发行版分支。live 壁纸与设置页预览同时挂载：两个 WebView 各持一份 `hertz` 协议处理器都能取到页面并 mounted，预览打开期间 live 继续出帧，关闭后预览页面释放且 live 不受影响，全程无恢复/eval 失败（11/11）。边界：Full 用 debug 特征构建，release 产物的壁纸契约未单独再跑；真实安装/升级路径与多小时长稳未做。
+- 边界：W1-B 功能件已齐（目标屏 surface、混合 DPI、快照+事件 feed、托盘/设置页/预览租约、Explorer 恢复、主应用管理通道、多来源切换、事件流），W3 单屏拓扑重排与 W1-C 渲染失联恢复首片已接；W1-C 安装升级/长稳与 W3 多屏同时运行未做。未重启正在运行的 Hertz 实例，未做真实音乐/声卡验收；W1-A 不等于 W1 完成。
+
+> 2026-10-23 增量盘点：最新 `origin/master` 为 `2f2765c`。已核对该提交的 [CI](https://github.com/onceMisery/hertz-studio/actions/runs/39815799925) 13 个 job 与 [release 构建](https://github.com/onceMisery/hertz-studio/actions/runs/39815999209) 13 个 job 全部成功；三 OS/双发行版自动化与构建不再仅为“已配置、远端未核对”。产物安装、真实声音/账号/模型和正式目标 MCP 客户端仍须分别验收。近期顺序、任务完成标准与容量建议见[下一阶段开发任务](./plans/2026-10-23-next-development.md)，证据边界见[发布矩阵增量](./release-validation.md#2026-10-23-远端自动化与构建增量)。下文保留原有功能核对和历史验证记录。
+
+> 同日设计文档复核：新增[共享桌面宿主设计](./desktop-host.md)与[L0/W0 原生验证计划](./plans/2026-10-23-desktop-native-validation.md)，歌词/壁纸方案统一共同规则并修正固定离场暂停事实；[ADR-0010](./adr/0010-ai-drafts-and-retention.md)回写已实施的成功事务与 token-only 边界。仅为文档补齐，没有新增桌面代码或原生验收结果；设计准备度见近期计划 §5。
+
+> 2026-10-23 维护与候选增量：MAINT-01 将 `ViewerGuard`、离场宽限武装与 `pause_if_alone` 搬入 `state/viewers.rs`，`depart_pause_only_fires_for_the_last_viewer`、慢加载离场与最后连接断开反例保留；Standard `state::tests` 58/58、Full 64/64，两版 `ai::facade::tests` 各 9/9，`node scripts/check-player-races.js` 9 项通过。MAINT-02 只把 jobs 回归测试搬到 `ai/jobs/tests.rs`，搬前搬后 `--list` 均为 72 项，两版各 72/72，格式与 Clippy 通过。REL-01 在同一源码提交构建 Standard/Full 独立程序与 DBX 包共四份 Windows x64 候选，身份与 SHA-256 见[发布矩阵候选表](./release-validation.md#2026-10-23-windows-021-验收候选本机构建)。候选未安装/启动，PLAY-01、MCP-01、真实声音、正式客户端与模型仍待验，本轮未发起 provider 请求。
+
+> 同日 LAN-L 方案：新增[局域网一起听](./lan-listening.md)，固定房主统一渲染 + 原生接收端、PCM 传输、受限配对/撤权、全部播控入口的模式门禁，以及互动弹幕默认 10,000 条/7 天/64MiB 的独立有界存储。文档完成方案审查与修订，**未实施、未构建、未实机测量**；P0 前不计入 R0–R6 完成度，也不改变当前开发停点。
+
+> 同日 DESK-L0 首轮：隔离探针在本机 Windows 11 x64 / WebView2 155 上验证 windowed WebView2 + layered 顶层可透明无边框、非激活置顶、锁定穿透、解锁恢复输入与 50 次显隐循环；tao 0.37.1 的去边框需手动补偿，纯样式与禁用窗口两条路径失败。L0-3/4/6、真实托盘点击、启停/controller 失败未执行，**L0 阶段未完成，不进入 L1**；报告与明暗截图见[DESK-L0 报告](./plans/2026-10-23-desk-l0-report.md)。
+
+当前开发停点：已核对搜索、歌词候选、MCP 授权与播控、舞台草稿、持久任务、provider/凭据、评测入口和工程/导出主线的现有代码，未发现需要在缺少真实环境时继续新增的明确主线功能（新增的局域网一起听仍是待评审设计，未进入实现）。此结论是功能实现核对，不是全部异常、平台、模型质量或发布条件已经验收。
 
 按用户当前要求，没有可用 API key 时不发起云请求，也不为重复受控结果继续运行测试；用量和费用统计不作为功能门槛。后续应先取得具体的功能失败证据，或具备真实模型、账号、DBX、声卡/GPU、其他 OS 与候选发行环境后完成对应验收。原路线中的这些待验项继续保留，不能将“当前可结束编码”记为“路线图全部完成”。
 

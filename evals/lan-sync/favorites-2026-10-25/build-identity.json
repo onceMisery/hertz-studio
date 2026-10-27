@@ -1,0 +1,206 @@
+{
+  "source_commit": "8f414b9c42c82c8aba43f015e8da0569add04bab",
+  "baseline": "8b79c25",
+  "branch": "codex/lan-listening-delivery",
+  "service_edition": "Standard",
+  "service_binary": "target/debug/hertz-studio.exe",
+  "service_sha256": "1dd4a33f99d6304118c7ade98392636a5e8c031a8f3f3914f307ff09adab7826",
+  "compiler": "rustc 1.98.1 (48a229cea 2026-09-01)\nbinary: rustc\ncommit-hash: 48a229ceaefd4985c50990b14116b6d856af0985\ncommit-date: 2026-09-01\nhost: x86_64-pc-windows-msvc\nrelease: 1.98.1\nLLVM version: 22.1.8",
+  "cargo": "cargo 1.98.1 (797e8a9bc 2026-08-05)",
+  "source_hashes": {
+    ".github/workflows/ci.yml": {
+      "sha256": "7f7ee56d1c585921e8467b1159082df514b488d79639a9bf3cc03c40f9617269",
+      "sha256_git_blob": "74bb735f0102b7936a9bc1a543feff26ccdb38fc2cf7b8d81f09d24cd23ba083",
+      "sha256_lf": "74bb735f0102b7936a9bc1a543feff26ccdb38fc2cf7b8d81f09d24cd23ba083"
+    },
+    "Cargo.lock": {
+      "sha256": "734f2f9a94ae0f9cd25ae5aa58d995c4a4fd1aa6f31f85b75e63ddf2db956d2f",
+      "sha256_git_blob": "734f2f9a94ae0f9cd25ae5aa58d995c4a4fd1aa6f31f85b75e63ddf2db956d2f",
+      "sha256_lf": "734f2f9a94ae0f9cd25ae5aa58d995c4a4fd1aa6f31f85b75e63ddf2db956d2f"
+    },
+    "crates/hertz-studio/Cargo.toml": {
+      "sha256": "1c33f0911fe20de9e0d2a0f39cfc1476122383f55efb69ecf1dfde05a8e2125f",
+      "sha256_git_blob": "b6ed06bca495c1272c4df6d53e5490fbc27224dc0e2cb036736f961e28bb7f85",
+      "sha256_lf": "b6ed06bca495c1272c4df6d53e5490fbc27224dc0e2cb036736f961e28bb7f85"
+    },
+    "crates/hertz-studio/src/room/contract.rs": {
+      "sha256": "9ef3b2902822bad81e8aa9dbb80fa4bd37a43f0594b38627ca5e246edbe6b35d",
+      "sha256_git_blob": "9ef3b2902822bad81e8aa9dbb80fa4bd37a43f0594b38627ca5e246edbe6b35d",
+      "sha256_lf": "9ef3b2902822bad81e8aa9dbb80fa4bd37a43f0594b38627ca5e246edbe6b35d"
+    },
+    "crates/hertz-studio/src/room/guest.rs": {
+      "sha256": "3ccc6de784fe9dc302c9075b5cb3be59946febb3f11680dc839a6d7b912e311f",
+      "sha256_git_blob": "a65c6a1e73bb0871d65cdb072280ee9cbcba6d029ef75090d042b2d3a6ba54ce",
+      "sha256_lf": "a65c6a1e73bb0871d65cdb072280ee9cbcba6d029ef75090d042b2d3a6ba54ce"
+    },
+    "crates/hertz-studio/src/room/host.rs": {
+      "sha256": "2d1914a56cbf94dfd6aa5664368f04d827d8cd26fb41b3f16a6d8859a845b407",
+      "sha256_git_blob": "2d1914a56cbf94dfd6aa5664368f04d827d8cd26fb41b3f16a6d8859a845b407",
+      "sha256_lf": "2d1914a56cbf94dfd6aa5664368f04d827d8cd26fb41b3f16a6d8859a845b407"
+    },
+    "crates/hertz-studio/src/room/receiver.rs": {
+      "sha256": "c7f4261aca1d9d5acfbbfc2d904c384e0de1a614b6af522b0843a105c3a7d2cd",
+      "sha256_git_blob": "c7f4261aca1d9d5acfbbfc2d904c384e0de1a614b6af522b0843a105c3a7d2cd",
+      "sha256_lf": "c7f4261aca1d9d5acfbbfc2d904c384e0de1a614b6af522b0843a105c3a7d2cd"
+    },
+    "crates/hertz-studio/src/room/receiver_tests.rs": {
+      "sha256": "3a6c9921d04f58aeaee0a42925c8de5f83e268d05d1dbed9fc1116e580f4b094",
+      "sha256_git_blob": "3a6c9921d04f58aeaee0a42925c8de5f83e268d05d1dbed9fc1116e580f4b094",
+      "sha256_lf": "3a6c9921d04f58aeaee0a42925c8de5f83e268d05d1dbed9fc1116e580f4b094"
+    },
+    "crates/hertz-studio/src/room/resources.rs": {
+      "sha256": "c99efa350e2a93a283df28bd74f0198ed08a317c45594ffcfc1842de39802433",
+      "sha256_git_blob": "c99efa350e2a93a283df28bd74f0198ed08a317c45594ffcfc1842de39802433",
+      "sha256_lf": "c99efa350e2a93a283df28bd74f0198ed08a317c45594ffcfc1842de39802433"
+    },
+    "crates/hertz-studio/src/room/resources_tests.rs": {
+      "sha256": "9e42d0e8c33ab53e0618724d12ba4421eab4c589f230e077e2792f4261e0ee25",
+      "sha256_git_blob": "9e42d0e8c33ab53e0618724d12ba4421eab4c589f230e077e2792f4261e0ee25",
+      "sha256_lf": "9e42d0e8c33ab53e0618724d12ba4421eab4c589f230e077e2792f4261e0ee25"
+    },
+    "crates/hertz-studio/src/routes.rs": {
+      "sha256": "042ef3bf0dd5254b848c3fc9d5e849e84a72243d44426c1bdd12bc997bb538d7",
+      "sha256_git_blob": "042ef3bf0dd5254b848c3fc9d5e849e84a72243d44426c1bdd12bc997bb538d7",
+      "sha256_lf": "042ef3bf0dd5254b848c3fc9d5e849e84a72243d44426c1bdd12bc997bb538d7"
+    },
+    "crates/vmusic-audio/Cargo.toml": {
+      "sha256": "d2c19ab17b7bb5388ba7d1fc68d61055d81e19edbc6a0a970faab3002fdbdd38",
+      "sha256_git_blob": "b101c4598391451343f514283c8e635ab17d7b96dafa7177c9ab30e8c957cc9f",
+      "sha256_lf": "b101c4598391451343f514283c8e635ab17d7b96dafa7177c9ab30e8c957cc9f"
+    },
+    "crates/vmusic-audio/src/output_clock.rs": {
+      "sha256": "8300f228226452ab31fd780ea8bd1a2e29abf019588edd3f9663772f5e34cd64",
+      "sha256_git_blob": "8300f228226452ab31fd780ea8bd1a2e29abf019588edd3f9663772f5e34cd64",
+      "sha256_lf": "8300f228226452ab31fd780ea8bd1a2e29abf019588edd3f9663772f5e34cd64"
+    },
+    "crates/vmusic-audio/src/scheduled_output.rs": {
+      "sha256": "e85bd2b30f6574ce7dfcf300cd6e57ab3336195c8e14c783f9979bf536ed096e",
+      "sha256_git_blob": "e85bd2b30f6574ce7dfcf300cd6e57ab3336195c8e14c783f9979bf536ed096e",
+      "sha256_lf": "e85bd2b30f6574ce7dfcf300cd6e57ab3336195c8e14c783f9979bf536ed096e"
+    },
+    "crates/vmusic-audio/src/scheduled_output/wasapi.rs": {
+      "sha256": "ea151da9bfabeff2e8619385807f0368c1540a336811866b2d130bad5e046d2a",
+      "sha256_git_blob": "ea151da9bfabeff2e8619385807f0368c1540a336811866b2d130bad5e046d2a",
+      "sha256_lf": "ea151da9bfabeff2e8619385807f0368c1540a336811866b2d130bad5e046d2a"
+    },
+    "crates/vmusic-audio/src/scheduled_output/wasapi_clock.rs": {
+      "sha256": "5674fae6e439b8de1fcf73b718cb93e8cac8061d5e4a434715b09cd95515fd8c",
+      "sha256_git_blob": "5674fae6e439b8de1fcf73b718cb93e8cac8061d5e4a434715b09cd95515fd8c",
+      "sha256_lf": "5674fae6e439b8de1fcf73b718cb93e8cac8061d5e4a434715b09cd95515fd8c"
+    },
+    "docs/adr/0011-lan-rendering-and-output-ownership.md": {
+      "sha256": "56631bb53b65a39a8c85e384900284807bd04229629781f121bd3a12e5f7de28",
+      "sha256_git_blob": "9bfa3a445b55b39d9197996bef64ac7329fe33ef2cfdd73e7850fef7ff055585",
+      "sha256_lf": "9bfa3a445b55b39d9197996bef64ac7329fe33ef2cfdd73e7850fef7ff055585"
+    },
+    "docs/api-routes.md": {
+      "sha256": "983da516ee7b806278c145a99be1d89a523db95aa3f87c3699fe824e91716cc9",
+      "sha256_git_blob": "983da516ee7b806278c145a99be1d89a523db95aa3f87c3699fe824e91716cc9",
+      "sha256_lf": "983da516ee7b806278c145a99be1d89a523db95aa3f87c3699fe824e91716cc9"
+    },
+    "docs/lan-listening-user-guide.md": {
+      "sha256": "64ab1fe63d718022ef250563b6628d8885adb915633f1cedfae9a039b50448bf",
+      "sha256_git_blob": "ec405086daee554486f379cf31886f6db1cf152528322fd6232aafde8059c2ba",
+      "sha256_lf": "ec405086daee554486f379cf31886f6db1cf152528322fd6232aafde8059c2ba"
+    },
+    "docs/lan-listening.md": {
+      "sha256": "f6e9837dfd903f1d4eb8d5baa0c718aea2c5b8a91fb6390c1bd8126ac6efa1f1",
+      "sha256_git_blob": "c7bc5d34f7650cd9036316ca8a7a66327b494a25c80315837ca9fcdd6bd1f7ca",
+      "sha256_lf": "c7bc5d34f7650cd9036316ca8a7a66327b494a25c80315837ca9fcdd6bd1f7ca"
+    },
+    "docs/plans/2026-10-25-listening-workspace-design.md": {
+      "sha256": "4bd8d441b964f56fb5de893882e366a97a48cd22bdbc3c6f37fd30239298ee33",
+      "sha256_git_blob": "ffb7aa1fe192104c6cb8d948c7639568d8daab339f9e46301aa789de9a3e3590",
+      "sha256_lf": "ffb7aa1fe192104c6cb8d948c7639568d8daab339f9e46301aa789de9a3e3590"
+    },
+    "evals/lan-sync/workspace-2026-10-25/README.md": {
+      "sha256": "d1889df8959806da7bd7ae791717be4560c5557f8af6d1ab30cf7e4478ab1046",
+      "sha256_git_blob": "cee2b7d4159831f71df9133490b84a977e85b53372a29ffcfb100d0d8c81b775",
+      "sha256_lf": "cee2b7d4159831f71df9133490b84a977e85b53372a29ffcfb100d0d8c81b775"
+    },
+    "plugin/ui/app.js": {
+      "sha256": "63962f23279c053ccc8213ddca427aea6261046bc7f05304f58a713c04658820",
+      "sha256_git_blob": "5574f1c7ba5281c020bf9adf62d526dbf0d6be2a2c02546ea3e99c007c369197",
+      "sha256_lf": "5574f1c7ba5281c020bf9adf62d526dbf0d6be2a2c02546ea3e99c007c369197"
+    },
+    "plugin/ui/favorites.js": {
+      "sha256": "b4c1ffac40dbc808da59f5e7f6b2a31ffe8bc08cbc24fe656617ba14a30bad2b",
+      "sha256_git_blob": "61676396fbe83bb971758b060c3cb3995c0e199328fbca1b310ef3d044f815f8",
+      "sha256_lf": "61676396fbe83bb971758b060c3cb3995c0e199328fbca1b310ef3d044f815f8"
+    },
+    "plugin/ui/room-view.js": {
+      "sha256": "9040197353d564f1307b0f405315a6245f401078358ca7339ab94e1ea148d6e2",
+      "sha256_git_blob": "d80d8fbbf2b2ea3196f7024d0bfe013e69b04a97372603c6769c2fe1e5f9e8b9",
+      "sha256_lf": "d80d8fbbf2b2ea3196f7024d0bfe013e69b04a97372603c6769c2fe1e5f9e8b9"
+    },
+    "plugin/ui/room-workspace.js": {
+      "sha256": "9bcdb725335b0a0130d51c7c1cda190eb1ca7997839d8ae89a77f12ee5fb3417",
+      "sha256_git_blob": "9bcdb725335b0a0130d51c7c1cda190eb1ca7997839d8ae89a77f12ee5fb3417",
+      "sha256_lf": "9bcdb725335b0a0130d51c7c1cda190eb1ca7997839d8ae89a77f12ee5fb3417"
+    },
+    "plugin/ui/room.css": {
+      "sha256": "29ec50ff99c9bb2c9594515f44a1de32d2ca8a2740acdb5bb2f800e52874c9c2",
+      "sha256_git_blob": "a00f9d58080fff34282cc66685ec4dea7e2da8f040f7593303599389e15e778c",
+      "sha256_lf": "a00f9d58080fff34282cc66685ec4dea7e2da8f040f7593303599389e15e778c"
+    },
+    "plugin/ui/room.js": {
+      "sha256": "09a4e1420245901f293eca64b52d47553c8903932e86b87aa5e462ba8582e5dc",
+      "sha256_git_blob": "5b8b15e14ae96714b877c87c306b6215723cffba1fe6e3586ddd1fe60fccc0be",
+      "sha256_lf": "5b8b15e14ae96714b877c87c306b6215723cffba1fe6e3586ddd1fe60fccc0be"
+    },
+    "plugin/ui/skins/skin.heijiao.css": {
+      "sha256": "c35a94428fba35f1da0ad5e1a23f97d66e10494edce0ba2b15bfed0d1cd2846d",
+      "sha256_git_blob": "42ce327ed27b8ad8aab83f15d4f4f6e444f2f5001d99734f576433088af34bdb",
+      "sha256_lf": "42ce327ed27b8ad8aab83f15d4f4f6e444f2f5001d99734f576433088af34bdb"
+    },
+    "plugin/ui/style.css": {
+      "sha256": "05f7f9206ad54c7d1e711066f230ea84965419b500b14235807bedaadff88067",
+      "sha256_git_blob": "e766f150226f40a1ce54f8f4291d2096a88225dadc9fd4fee2aa8ab40b9fe1e7",
+      "sha256_lf": "e766f150226f40a1ce54f8f4291d2096a88225dadc9fd4fee2aa8ab40b9fe1e7"
+    },
+    "scripts/check-favorites.js": {
+      "sha256": "7d8a833f48b853fefcbc74b7b30e9950cb6a1df37afdf90ca45a68b9364be3ff",
+      "sha256_git_blob": "c2bf121e577f88cf7b8101defaa50a66c11945fc37e40593cda5e62ab5aebac0",
+      "sha256_lf": "c2bf121e577f88cf7b8101defaa50a66c11945fc37e40593cda5e62ab5aebac0"
+    },
+    "scripts/check-lan-favorites.py": {
+      "sha256": "d90c6dbef2cdde1989ec29cd70ccc0d01cb26d6543b630f17c9599901552036d",
+      "sha256_git_blob": "d90c6dbef2cdde1989ec29cd70ccc0d01cb26d6543b630f17c9599901552036d",
+      "sha256_lf": "d90c6dbef2cdde1989ec29cd70ccc0d01cb26d6543b630f17c9599901552036d"
+    },
+    "scripts/check-lan-room.py": {
+      "sha256": "a53a52a3ce3c124b8ad4652ddfdf9df4ab7e0fa733d538aa5634ee4c6662548d",
+      "sha256_git_blob": "1c51f3e83e7b0c81598859bae26fc7d89c061ef07c9f946d22b3b18459f11712",
+      "sha256_lf": "1c51f3e83e7b0c81598859bae26fc7d89c061ef07c9f946d22b3b18459f11712"
+    },
+    "scripts/check-room-theme-browser.js": {
+      "sha256": "771ffc0ddace2833116a02235eb2477b986f273bdcbdad559d6b6ce406a69e42",
+      "sha256_git_blob": "771ffc0ddace2833116a02235eb2477b986f273bdcbdad559d6b6ce406a69e42",
+      "sha256_lf": "771ffc0ddace2833116a02235eb2477b986f273bdcbdad559d6b6ce406a69e42"
+    },
+    "scripts/check-room-ui.js": {
+      "sha256": "19f4597d1cba99c5911a5bb4eab83b38bfc2144f798aa394284f7593ff472bae",
+      "sha256_git_blob": "76ed396b2f2e8c01f078f92c7ee9b3ee45019fd6b03339eab102c3f8054b85de",
+      "sha256_lf": "76ed396b2f2e8c01f078f92c7ee9b3ee45019fd6b03339eab102c3f8054b85de"
+    },
+    "scripts/check-skins.js": {
+      "sha256": "a8e9ada186d57ebc99885ddf604ab26ab603b0ed6e5ed559cbf2d52441eb494f",
+      "sha256_git_blob": "5307ea559d55df531b5fb7589d5d0ebc9e6bc9ffc521a81e64b947f99656840b",
+      "sha256_lf": "5307ea559d55df531b5fb7589d5d0ebc9e6bc9ffc521a81e64b947f99656840b"
+    },
+    "scripts/manual-checks.json": {
+      "sha256": "0c72e2202a9a56ee0ac6b73b8b2dd6cef78c4f51fc4360cb271c8141a40421cf",
+      "sha256_git_blob": "5bb9b5080a02291626eb29d0198f7ddf3e4f3fbfd46e9a2f03a45656eb148d3f",
+      "sha256_lf": "5bb9b5080a02291626eb29d0198f7ddf3e4f3fbfd46e9a2f03a45656eb148d3f"
+    }
+  },
+  "source_hash_formats": {
+    "sha256": "Current worktree raw bytes, including checkout line endings",
+    "sha256_git_blob": "Exact git show source_commit:path bytes",
+    "sha256_lf": "Git blob with CRLF normalized to LF"
+  },
+  "plugins": {
+    "standard": "11f4c205986428d598910b4bdd3d00c4e1a9ececc99cb43390e564df37f428cb",
+    "full": "5bfb7613d02f106971cdd5b2753da11878d2ddffb02483989e192f6eff48f038"
+  }
+}

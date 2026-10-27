@@ -118,6 +118,71 @@ async function main() {
     assert.equal(report.pointer.reducedClick.changed, 0, 'reduced motion disables pointer impulses');
     assert.ok(report.pointer.dragging.changed < 10, 'camera dragging does not deform the particles');
 
+    report.observatory = await page.evaluate(() => {
+      const { world, scene, draw, read, compare, renderer } = silkTest;
+      const scanner = scene.getObjectByName('zodiac-scanner');
+      if (!scanner) return { exists: false };
+      world.setSign(4);
+      for (let i = 0; i < 90; i++) draw({ pointer: null }, false, 5.2, false);
+      draw({}, false);
+      const target = world.stats().stars[0];
+      const pointer = { active: true, x: target.x, y: target.y, down: false, dragging: false };
+      const scannerPixels = () => {
+        const visible = [];
+        scene.traverse(o => { if (o.isMesh || o.isPoints) { visible.push([o, o.visible]); o.visible = o === scanner && scanner.visible; } });
+        const pixels = read();
+        visible.forEach(([o, value]) => { o.visible = value; });
+        return pixels;
+      };
+      const empty = scannerPixels();
+      for (let i = 0; i < 90; i++) draw({ pointer }, false, 5.2, false);
+      draw({ pointer }, false);
+      const hovered = scannerPixels(), locked = scanner.material.uniforms.uLock.value;
+      const hover = compare(empty, hovered);
+      for (let i = 0; i < 60; i++) draw({ pointer: { ...pointer, down: true } }, false, 5.2, false);
+      draw({ pointer: { ...pointer, down: true } }, false);
+      const charge = world.stats().charge, charged = compare(hovered, scannerPixels());
+      const release = draw({ pointer: { ...pointer, click: { serial: 9001, x: pointer.x, y: pointer.y } } }, false);
+      const surge = world.stats().surge;
+      for (let i = 0; i < 100; i++) draw({ pointer }, false, 5.2, false);
+      const released = compare(release, draw({ pointer }, false));
+      draw({ pointer: { ...pointer, dragging: true } }, false);
+      const draggingHidden = !scanner.visible;
+      draw({ reduced: true, pointer }, false);
+      const reducedHidden = !scanner.visible;
+      for (let i = 0; i < 90; i++) draw({ pointer: { ...pointer, down: true } }, false, 5.2, false);
+      const chargedBeforeSign = scanner.visible && world.stats().charge === 1;
+      world.setSign(5);
+      const signReset = chargedBeforeSign && !scanner.visible && world.stats().charge === 0;
+      const rings = scene.getObjectByName('zodiac-aura').children;
+      const geometry = rings[0].geometry, positions = geometry.getAttribute('position');
+      let minRadius = Infinity, minZ = Infinity, maxZ = -Infinity;
+      for (let i = 0; i < positions.count; i++) {
+        minRadius = Math.min(minRadius, Math.hypot(positions.getX(i), positions.getY(i)));
+        minZ = Math.min(minZ, positions.getZ(i)); maxZ = Math.max(maxZ, positions.getZ(i));
+      }
+      for (const quality of ['low', 'medium', 'high']) world.setQuality(quality);
+      const pooled = rings.every(ring => ring.geometry === geometry);
+      world.setSign(4);
+      for (let i = 0; i < 90; i++) draw({ pointer: null }, false, 5.2, false);
+      draw({}, false);
+      return { exists: true, hover, locked, charge, charged, surge, released, draggingHidden, reducedHidden,
+        signReset, minRadius, thickness: maxZ - minZ, pooled, geometries: renderer.info.memory.geometries };
+    });
+    assert.equal(report.observatory.exists, true, 'observatory has a world-space scanner');
+    assert.ok(report.observatory.hover.changed > 60, 'hover paints a visible scanner, not only an internal flag');
+    assert.ok(report.observatory.locked > .9, 'scanner locks onto a projected main star');
+    assert.equal(report.observatory.charge, 1, 'holding fills the charge meter');
+    assert.ok(report.observatory.charged.changed > 40, 'charge progress visibly changes scanner pixels');
+    assert.ok(report.observatory.surge > .9 && report.observatory.released.changed > 200, 'release produces a visible impulse that decays');
+    assert.equal(report.observatory.draggingHidden, true, 'camera drag immediately removes the scanner');
+    assert.equal(report.observatory.reducedHidden, true, 'reduced motion immediately removes the scanner');
+    assert.equal(report.observatory.signReset, true, 'switching signs clears scanner and charge');
+    assert.ok(report.observatory.minRadius > .7, 'instrument rings use annular geometry, not full-screen alpha planes');
+    assert.ok(report.observatory.thickness > .01, 'instrument rings have a curved physical cross-section');
+    assert.equal(report.observatory.pooled, true, 'all instrument rings reuse their geometry across quality changes');
+    console.log(JSON.stringify(report.observatory));
+
     report.palettes = await page.evaluate(() => {
       const { world, draw, hues, renderer } = silkTest, palettes = [];
       for (let sign = 0; sign < 12; sign++) { world.setSign(sign); palettes.push(hues(draw()).visible); }

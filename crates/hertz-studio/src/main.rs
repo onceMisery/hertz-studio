@@ -193,9 +193,21 @@ async fn run(args: Args) -> anyhow::Result<()> {
     // 浮层那把钥匙权限窄得多（只读浮层与封面），所以可以出现在要粘进 OBS 的
     // URL 里；token 不行。见 load_or_create_overlay_key 的注释。
     let overlay_key = load_or_create_overlay_key(&data_dir).await?;
+    // 桌面歌词只读钥匙：原生宿主按数据目录定位并读取；只放行两条只读 GET。
+    let desktop_lyrics_key = load_or_create_desktop_lyrics_key(&data_dir).await?;
+    // 壁纸只读钥匙：与歌词钥匙独立轮换；只放行壁纸快照。
+    let wallpaper_key = load_or_create_wallpaper_key(&data_dir).await?;
 
     // `booted` 必须活到 main 结束：它持有音频 actor 的线程句柄。
-    let booted = bootstrap::boot(data_dir, boot_config, token.clone(), overlay_key).await?;
+    let booted = bootstrap::boot(
+        data_dir,
+        boot_config,
+        token.clone(),
+        overlay_key,
+        desktop_lyrics_key,
+        wallpaper_key,
+    )
+    .await?;
     let state = booted.state.clone();
     let config = &booted.config;
 
@@ -307,17 +319,18 @@ async fn run(args: Args) -> anyhow::Result<()> {
         .with_graceful_shutdown(async move {
             // Ctrl-C 与首页那颗退出钮走同一条收尾（`POST /v1/system/shutdown`
             // 拉 watch），两条入口不许一个干净一个留半截状态。
-            tokio::select! {
-                _ = tokio::signal::ctrl_c() => {}
-                changed = exiting.changed() => {
-                    if changed.is_err() {
-                        return;
+            if !*exiting.borrow() {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    changed = exiting.changed() => {
+                        if changed.is_err() {
+                            return;
+                        }
                     }
                 }
             }
             tracing::info!("shutting down");
-            shutdown_state.audio.shutdown();
-            state::remove_discovery(&shutdown_state.data_dir).await;
+            shutdown_state.shutdown().await;
             // 只摘自己发布的那份：未持锁的第二个进程（共用 DataDir、另一端口）
             // 退出时不能把持锁进程的对接入口删掉。
             if ai_discovery_published {
@@ -829,6 +842,22 @@ async fn load_or_create_token(data_dir: &std::path::Path) -> anyhow::Result<Stri
 /// 不必换 token（换 token 会踢掉所有已连上的客户端）。
 async fn load_or_create_overlay_key(data_dir: &std::path::Path) -> anyhow::Result<String> {
     load_or_create_secret(&data_dir.join("overlay-key")).await
+}
+
+/// 桌面歌词只读钥匙：只交给本机同一用户的原生宿主。
+///
+/// 原生层直接读这个文件；内嵌页面只收到无凭据数据，启动 URL 与日志都不带它。
+/// 真泄露时删掉文件重启即可轮换，不必换全权 token。
+async fn load_or_create_desktop_lyrics_key(data_dir: &std::path::Path) -> anyhow::Result<String> {
+    load_or_create_secret(&data_dir.join("desktop-lyrics-key")).await
+}
+
+/// 壁纸只读钥匙：只交给绑定 profile 的原生宿主。
+///
+/// 与桌面歌词钥匙分开：删掉 `wallpaper-key` 重启即可单独轮换，不必把歌词
+/// 组件一起踢掉。内嵌页面同样只收到无凭据数据。
+async fn load_or_create_wallpaper_key(data_dir: &std::path::Path) -> anyhow::Result<String> {
+    load_or_create_secret(&data_dir.join("wallpaper-key")).await
 }
 
 /// 读一个长期凭据文件，没有就生成一个（两个 `Uuid::simple()` 拼成，256 位）。

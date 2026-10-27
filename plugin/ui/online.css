@@ -285,7 +285,7 @@ html.qr-modal-open .app{visibility:hidden}
   .search-source-status{padding:8px;gap:7px}
   .search-source-status{flex-wrap:wrap}
   .search-source-status .btn{margin-left:auto}
-  #view-online .search-results .online-row{grid-template-columns:36px minmax(0,1fr) 44px;
+  #view-online .online-row{grid-template-columns:36px minmax(0,1fr) 44px;
     grid-template-areas:"art main main" "quality quality duration" "actions actions actions";
     gap:6px;padding:10px 8px;min-height:108px}
   #view-online .online-row .t-index,#view-online .online-row .t-album{display:none}

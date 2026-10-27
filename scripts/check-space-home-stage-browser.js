@@ -43,10 +43,12 @@ async function main() {
     await page.waitForFunction(()=>window.Space3D&&document.getElementById('space3d').dataset.spReady==='1');
     await page.locator('#space3d-entry').click();
     assert.equal(await page.evaluate(()=>Space3D.stats().page),'home');
+    assert.equal(await page.evaluate(()=>!document.getElementById('sp-warp').hidden),true,'entry transition covers scene setup');
     await page.waitForFunction(()=>Space3D.stats().renderer?.state==='ready');
     assert.equal(await page.locator('#sp-canvas canvas').count(),1,'home floats above the live stage');
     assert.equal(await page.evaluate(()=>Space3D.sourceId()),'coast','invalid old source normalized despite migration marker');
     await page.waitForFunction(()=>getComputedStyle(document.getElementById('space3d')).opacity==='1');
+    await page.waitForFunction(()=>document.getElementById('sp-warp').hidden,null,{timeout:10000});
     await page.evaluate(()=>{
       const saved=Space3D.preferences();
       for(const [sceneSource,field,expected] of [['creative','orb','spectrum-sphere'],['immersive','orb','gravity-sphere'],

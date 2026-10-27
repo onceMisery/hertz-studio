@@ -2,6 +2,8 @@
 
 状态：生效（2026-10-08）
 
+2026-10-25 补充：单机契约继续适用；原生局域网房间把共享 RenderCore 的渲染边界与房间呈现边界分开，业务队列仍归 AppState。房间模式门禁、设备网格与输出退休顺序见 [ADR-0011](0011-lan-rendering-and-output-ownership.md)，不能用提前渲染事件代替房间呈现提交。
+
 ## 决定
 
 队列仍由 AppState 持有。集合首页、补页、播放准备都先预留意图，再异步读取，提交时复核；HTTP/RPC 共用 `online_play.rs`。补页会话和播放代际不同：切到本集合另一曲不取消补页，替换整个队列才取消。
@@ -18,7 +20,7 @@
 
 | 数值 | 现在是多少 | 定义在哪 | 改它要一起改什么 |
 | --- | --- | --- | --- |
-| 暂停/停止短淡出毫秒 | 200 | `crates/vmusic-audio/src/cpal_backend.rs::FADE_OUT_MS` | transport 时序与回调样本测试，不能随歌曲重叠时长变化 |
+| 暂停/停止短淡出毫秒 | 200 | `crates/vmusic-audio/src/render.rs::FADE_OUT_MS` | transport 时序与回调样本测试，不能随歌曲重叠时长变化 |
 | 在线歌单窗口启用条数 | 120 | `plugin/ui/online-playlist-view.js::WINDOW_THRESHOLD` | 实际 DOM/渲染耗时、末项点击及键盘焦点测试 |
 | 集合续载上限 | 2000 | `crates/hertz-studio/src/collection.rs::LOAD_CAP` | 必须显示容量边界，不能把被截断的集合宣称已全部准备 |
 | 节拍等待重取次数 | 8 | `plugin/ui/stage-cinema.js::WAIT_RETRIES` | 预算不足时无任务事件的恢复路径、换曲作废和到限回退 |

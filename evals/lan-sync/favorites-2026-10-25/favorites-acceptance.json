@@ -1,0 +1,19 @@
+{
+  "binary_sha256": "1dd4a33f99d6304118c7ade98392636a5e8c031a8f3f3914f307ff09adab7826",
+  "platform": "Windows-11-10.0.26200-SP0",
+  "limits": "Isolated loopback HTTP/TLS, null audio and in-memory test credentials. Guest DB restart and same-process room recreation; persistent host-key reconstruction is covered by Rust tests.",
+  "passed": true,
+  "checks": [
+    "native projection supplies pinned host identity; public metadata excludes host paths and original track IDs",
+    "host room target uses the existing local favorite identity without duplication",
+    "guest personal favorite is private, desired-state idempotent and excludes ephemeral cover capabilities",
+    "favorite resolves to currently authorized resource; repeated queue occurrences share one personal favorite",
+    "revoked sharing removes live resolution and rejects old resource; reshare preserves bookmark with a fresh capability",
+    "personal favorite does not grant queue permission or lose stored metadata after permission revocation",
+    "bounded reference resolution and malformed LAN favorite rejection",
+    "guest service restart preserves the SQLite favorite and resolves after fresh authenticated join",
+    "room recreation retains host-scoped favorite identity while replacing session resource IDs",
+    "another host sharing the same music cannot resolve the original host's favorite identity",
+    "repeated un-favorite is idempotent and cannot mutate the host's personal favorites"
+  ]
+}

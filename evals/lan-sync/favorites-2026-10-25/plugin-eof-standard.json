@@ -1,0 +1,10 @@
+{
+  "plugin_sha256": "11f4c205986428d598910b4bdd3d00c4e1a9ececc99cb43390e564df37f428cb",
+  "service_sha256": "1dd4a33f99d6304118c7ade98392636a5e8c031a8f3f3914f307ff09adab7826",
+  "passed": true,
+  "checks": [
+    "second discovery proves the first RPC is still in flight at stdin EOF",
+    "sidecar exits normally after Host shutdown even while an SDK worker retains Plugin",
+    "guest receives terminal End, restores silent local mode and forgets ended membership"
+  ]
+}

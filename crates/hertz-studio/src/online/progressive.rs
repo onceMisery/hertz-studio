@@ -161,7 +161,10 @@ impl Inner {
     /// [`Self::wait_for`] 的无限等待不同，本调用必然在 ~200ms 内返回，
     /// 播放流程因而能在每轮之间插入代际复核，及时中止被切歌顶掉的下载。
     fn poll_prebuffer(&self, abort: &AtomicBool) -> Result<bool, WaitError> {
-        let want = prebuffer_target(self.total());
+        self.poll_prebuffer_bytes(abort, prebuffer_target(self.total()))
+    }
+
+    fn poll_prebuffer_bytes(&self, abort: &AtomicBool, want: u64) -> Result<bool, WaitError> {
         let mut g = self.downloaded.lock().unwrap();
         if abort.load(Ordering::Relaxed) {
             return Err(WaitError::Aborted);
@@ -196,6 +199,28 @@ pub struct HttpMediaSource {
     pos: u64,
     inner: Arc<Inner>,
     abort: Arc<AtomicBool>,
+}
+
+pub(crate) struct FileMediaSource(File);
+impl FileMediaSource {
+    pub(crate) fn open(path: &Path) -> io::Result<Self> {
+        File::open(path).map(Self)
+    }
+}
+impl Read for FileMediaSource {
+    fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+        self.0.read(bytes)
+    }
+}
+impl Seek for FileMediaSource {
+    fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
+        self.0.seek(position)
+    }
+}
+impl vmusic_core::AudioSource for FileMediaSource {
+    fn media_len(&self) -> Option<u64> {
+        self.0.metadata().ok().map(|m| m.len())
+    }
 }
 
 impl HttpMediaSource {
@@ -354,6 +379,79 @@ pub struct DownloadView {
 }
 
 impl DownloadView {
+    /// Room startup uses a short time budget instead of a fraction of the song.
+    /// Metadata-at-tail containers are still detected before opening a decoder.
+    pub(crate) async fn room_prebuffer_tick(
+        &self,
+        duration_ms: Option<u64>,
+    ) -> Result<bool, String> {
+        let bitrate = self.inner.bitrate().or_else(|| {
+            let duration = duration_ms.filter(|d| *d > 0)?;
+            Some(self.inner.total()?.saturating_mul(8000) / duration)
+        });
+        let want = bitrate
+            .map(|bps| (bps.saturating_mul(1500) / 8000).clamp(64 * 1024, 384 * 1024))
+            .unwrap_or(FLUSH_STEP);
+        let inner = self.inner.clone();
+        let abort = self.abort.clone();
+        tokio::task::spawn_blocking(move || {
+            inner
+                .poll_prebuffer_bytes(&abort, want)
+                .map_err(|e| match e {
+                    WaitError::Aborted => "download aborted".into(),
+                    WaitError::Failed(m) => m,
+                })
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+
+    pub(crate) async fn media_source(
+        &self,
+        stop: Arc<AtomicBool>,
+    ) -> io::Result<Box<dyn vmusic_core::AudioSource>> {
+        loop {
+            if let Some(path) = self.completed_path() {
+                return Ok(Box::new(FileMediaSource::open(&path)?));
+            }
+            match HttpMediaSource::open(&self.part_path, self.inner.clone(), stop.clone()) {
+                Ok(source) => return Ok(Box::new(source)),
+                // Final rename precedes async index registration/publication.
+                // Wait outside the renderer until its completed path is visible.
+                Err(error) if error.kind() == io::ErrorKind::NotFound && !self.is_finished() => {
+                    self.prebuffer_tick().await.map_err(io::Error::other)?;
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                Err(error) => {
+                    return self.completed_path().map_or(Err(error), |path| {
+                        Ok(Box::new(FileMediaSource::open(&path)?)
+                            as Box<dyn vmusic_core::AudioSource>)
+                    })
+                }
+            }
+        }
+    }
+
+    pub(crate) async fn needs_full_download(&self) -> Result<bool, String> {
+        use std::io::Read;
+        let view = self.clone();
+        tokio::task::spawn_blocking(move || {
+            if view.completed_path().is_some() {
+                return Ok(false);
+            }
+            let mut head = vec![0; 256 * 1024];
+            let mut file = match File::open(&view.part_path) {
+                Ok(file) => file,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(true),
+                Err(error) => return Err(error.to_string()),
+            };
+            let n = file.read(&mut head).map_err(|e| e.to_string())?;
+            Ok(plan_mode(&head[..n]).0 == StreamMode::WaitFull)
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+
     pub(crate) fn completed_path(&self) -> Option<PathBuf> {
         self.inner.completed_path.lock().unwrap().clone()
     }
@@ -807,11 +905,14 @@ pub fn start(
                         relabel_key(&key2, duration_ms, written),
                         ext
                     ));
-                    let renamed = match tokio::fs::rename(&part_path, &final_path).await {
-                        Ok(()) => true,
+                    // Keep final path mutation inside this task, so abort/join
+                    // also fences it before another mode reuses the .part.
+                    match std::fs::rename(&part_path, &final_path) {
+                        Ok(()) => {}
                         Err(_) => {
-                            let ok = matches!(tokio::fs::metadata(&final_path).await, Ok(m) if m.len() > 1024);
-                            let _ = tokio::fs::remove_file(&part_path).await;
+                            let ok =
+                                matches!(std::fs::metadata(&final_path), Ok(m) if m.len() > 1024);
+                            let _ = std::fs::remove_file(&part_path);
                             if !ok {
                                 crate::diaglog!(
                                     "download.fail",
@@ -822,7 +923,6 @@ pub fn start(
                                 );
                                 return Err("落盘缓存失败".to_string());
                             }
-                            false
                         }
                     };
                     crate::diaglog!(
@@ -833,9 +933,7 @@ pub fn start(
                         file = final_path.file_name().unwrap_or_default().to_string_lossy()
                     );
                     index.note_written(&final_path).await;
-                    if renamed {
-                        *inner.completed_path.lock().unwrap() = Some(final_path.clone());
-                    }
+                    *inner.completed_path.lock().unwrap() = Some(final_path.clone());
                     inner.finish();
                     return Ok(final_path);
                 }

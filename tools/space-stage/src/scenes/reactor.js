@@ -6,8 +6,9 @@ import { createParticlePointer, particlePointerShader } from './particle-pointer
 const TAU = Math.PI * 2;
 const DEFAULT_HUE = 187 / 360;
 const MORPH_SECONDS = 1.6, HUE_TAU = .42, SHOT_TAU = .6, SHOT_DELAY = .18, PULSE_SECONDS = .9, HUE_WAIT = .6, MAX_NODES = 24;
-// The accent is reserved for amber; only the primary hue follows the track.
-const ACCENT_HUE = 45 / 360;
+// Amber stays the house accent. The other two hues sit a third of the wheel away on either
+// side, so even amber or cyan tracks keep distinct warm/cool families instead of one wash.
+const ACCENT_HUE = 45 / 360, SECONDARY_SHIFT = .335, TERTIARY_SHIFT = .67;
 export const SHELLS = Object.freeze([
   Object.freeze({ id: 'torus', label: '环面' }), Object.freeze({ id: 'sphere', label: '球壳' }),
   Object.freeze({ id: 'gyro', label: '双环' }), Object.freeze({ id: 'helix', label: '螺旋' })
@@ -115,8 +116,8 @@ function createHueSampler(ctx, onReady) {
 const cloudVertex = `
 attribute vec4 aSeed;
 uniform float uTime,uEnergy,uBurst,uPixel,uMorph,uScatter,uSize,uShellWeights[4];
-uniform vec3 uBurstPoint,uColorA,uColorB,uColorC;
-varying vec3 vColor;varying float vAlpha;
+uniform vec3 uBurstPoint,uColorA,uColorB,uColorC,uColorD;
+varying vec3 vColor;varying vec3 vHalo;varying float vAlpha;
 ${particlePointerShader}
 const float TAU=6.2831853;
 vec3 shell(float k,vec4 s){
@@ -143,10 +144,25 @@ vec3 shell(float k,vec4 s){
  return center+vec3(cos(a)*cos(v),sin(v)*.8,sin(a)*cos(v))*tube;
 }
 vec3 shellTint(float k,vec4 s,float slot){
- if(k<.5)return slot<.08?uColorC:slot<.46?uColorB:uColorA;
- if(k<1.5){float band=floor(s.y*9.0);vec3 c=mod(band,2.0)<.5?uColorA:uColorB;return mod(band,5.0)<.5?mix(c,uColorC,.3):c;}
- if(k<2.5)return s.z<.55?(slot<.3?uColorB:uColorA):uColorC;
- return s.z<.5?uColorA:uColorC;
+ if(k<.5){
+  if(slot<.045)return uColorC;
+  if(slot<.18)return uColorD;
+  if(slot<.55)return mix(uColorB,uColorA,slot);
+  return uColorA;
+ }
+ if(k<1.5){
+  float band=mod(floor(s.y*9.0),6.0);
+  if(band<1.0)return uColorD;
+  if(band<2.8)return uColorA;
+  if(band<4.0)return uColorB;
+  if(band<5.2)return mix(uColorD,uColorA,.55);
+  return uColorC;
+ }
+ if(k<2.5){
+  if(s.z<.55)return slot<.32?uColorD:slot<.68?uColorB:uColorA;
+  return slot<.2?uColorC:uColorD;
+ }
+ return s.z<.5?(slot<.14?uColorC:slot<.62?uColorA:uColorB):(slot<.38?uColorD:uColorB);
 }
 void main(){
  vec3 p=shell(0.0,aSeed)*uShellWeights[0]+shell(1.0,aSeed)*uShellWeights[1]
@@ -158,20 +174,27 @@ void main(){
  vec3 d=p-uBurstPoint;p+=normalize(d+vec3(.001))*uBurst*exp(-length(d)*.55)*1.4;
  p=indentParticle(p);
  vec4 view=modelViewMatrix*vec4(p,1.0);gl_Position=projectionMatrix*view;
- float size=.7+pow(fract(aSeed.x*13.17+aSeed.y*7.31),3.0)*2.8;
+ float size=.8+pow(fract(aSeed.x*13.17+aSeed.y*7.31),3.0)*3.2;
  float shellScale=uShellWeights[0]+uShellWeights[1]*.78+uShellWeights[2]*1.16+uShellWeights[3]*.9;
- gl_PointSize=clamp(size*uSize*uPixel*shellScale*(22.0/max(.5,-view.z))*(1.0+uEnergy*.7),1.0,14.0);
+ gl_PointSize=clamp(size*uSize*uPixel*shellScale*(22.0/max(.5,-view.z))*(1.0+uEnergy*.85),1.0,15.0);
  float slot=fract(aSeed.x*7.31+aSeed.z*3.17);
  vec3 tint=shellTint(0.0,aSeed,slot)*uShellWeights[0]+shellTint(1.0,aSeed,slot)*uShellWeights[1]
           +shellTint(2.0,aSeed,slot)*uShellWeights[2]+shellTint(3.0,aSeed,slot)*uShellWeights[3];
- vColor=tint*(.72+fract(aSeed.y*5.7)*.28);
- float pulse=sin(aSeed.x*20.0+uTime*1.4);vAlpha=(.38+.62*pulse*pulse)*(uShellWeights[0]*.96+uShellWeights[1]*.68+uShellWeights[2]+uShellWeights[3]*.84);
+ float heat=pow(max(0.0,1.0-length(p)/4.4),3.0);
+ float travel=.5+.5*sin(aSeed.x*TAU*2.0+uTime*1.15+p.y*1.4);
+ tint=mix(tint,uColorC,travel*travel*.13*(.35+uEnergy));
+ vColor=tint*(.72+fract(aSeed.y*5.7)*.28+heat*.22);
+ vHalo=mix(uColorD,uColorC,clamp((slot-.58)*2.3,0.0,.8));
+ vHalo=mix(vHalo,uColorB,slot*.22+heat*.18);
+ float pulse=sin(aSeed.x*20.0+uTime*1.4);vAlpha=(.42+.58*pulse*pulse)*(uShellWeights[0]*.96+uShellWeights[1]*.68+uShellWeights[2]+uShellWeights[3]*.84);
 }`;
 const cloudFragment = `
-varying vec3 vColor;varying float vAlpha;
+varying vec3 vColor;varying vec3 vHalo;varying float vAlpha;
 void main(){vec2 p=gl_PointCoord-.5;float d=length(p);if(d>.5)discard;
  float core=smoothstep(.18,0.0,d),glow=smoothstep(.5,.05,d);
- gl_FragColor=vec4(vColor*(glow+core*1.8),(glow*.68+core)*vAlpha);
+ vec3 color=mix(vHalo,vColor,.28+core*.72);
+ color+=vColor*core*.55;
+ gl_FragColor=vec4(color*(glow*1.08+core*1.6),(glow*.78+core)*vAlpha);
  #include <colorspace_fragment>
 }`;
 const glowVertex = `varying vec2 vUv;void main(){vUv=uv;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0);}`;
@@ -187,10 +210,11 @@ attribute vec3 aColor;attribute float aSize;uniform float uFocal;varying vec3 vC
 void main(){vColor=aColor;vec4 mv=modelViewMatrix*vec4(position,1.0);gl_Position=projectionMatrix*mv;
  gl_PointSize=clamp(aSize*uFocal/max(.5,-mv.z),2.0,96.0);}`;
 const nodeFragment = `
-varying vec3 vColor;
+uniform vec3 uHalo;varying vec3 vColor;
 void main(){float d=length(gl_PointCoord-.5);if(d>.5)discard;
  float core=smoothstep(.2,0.0,d),glow=smoothstep(.5,0.0,d);
- gl_FragColor=vec4(vColor*(glow*.8+core*1.6),glow*.55+core);
+ vec3 color=mix(uHalo,vColor,core*.82+glow*.35);
+ gl_FragColor=vec4(color*(glow*.8+core*1.6),glow*.55+core);
  #include <colorspace_fragment>
 }`;
 
@@ -203,7 +227,7 @@ export function createReactor(ctx) {
   const previousFog = ctx.scene.fog;
   ctx.scene.fog = new T.FogExp2(0x030405, .03);
   ctx.scope.defer(() => { ctx.scene.fog = previousFog || null; });
-  const colorA = new T.Color(), colorB = new T.Color(), colorC = new T.Color(), colorDim = new T.Color(), white = new T.Color(1, 1, 1);
+  const colorA = new T.Color(), colorB = new T.Color(), colorC = new T.Color(), colorD = new T.Color(), colorDim = new T.Color(), white = new T.Color(1, 1, 1);
   const additive = (material, extra = {}) => own(ctx, new material({ transparent: true, depthWrite: false, blending: T.AdditiveBlending, ...extra }));
 
   const COUNT = 9000, positions = new Float32Array(COUNT * 3), seeds = new Float32Array(COUNT * 4);
@@ -221,7 +245,7 @@ export function createReactor(ctx) {
   const shellWeights = new Float32Array([1, 0, 0, 0]), fromWeights = shellWeights.slice(), toWeights = shellWeights.slice();
   const uniforms = { ...pointer.uniforms, uTime: { value: 0 }, uEnergy: { value: .35 }, uBurst: { value: 0 }, uPixel: { value: 1 },
     uShellWeights: { value: shellWeights }, uMorph: { value: 1 }, uScatter: { value: 0 }, uSize: { value: 1 },
-    uBurstPoint: { value: new T.Vector3() }, uColorA: { value: colorA }, uColorB: { value: colorB }, uColorC: { value: colorC } };
+    uBurstPoint: { value: new T.Vector3() }, uColorA: { value: colorA }, uColorB: { value: colorB }, uColorC: { value: colorC }, uColorD: { value: colorD } };
   const cloud = new T.Points(cloudGeometry, own(ctx, new T.ShaderMaterial({ uniforms, vertexShader: cloudVertex, fragmentShader: cloudFragment,
     transparent: true, depthWrite: false, blending: T.AdditiveBlending })));
   cloud.frustumCulled = false; cloudGroup.add(cloud);
@@ -237,7 +261,10 @@ export function createReactor(ctx) {
   const coreMaterial = own(ctx, new T.MeshBasicMaterial({ wireframe: true, transparent: true, opacity: .3 }));
   const core = new T.Mesh(own(ctx, new T.IcosahedronGeometry(1.32, 2)), coreMaterial); world.add(core);
   const innerMaterial = own(ctx, new T.MeshBasicMaterial({ wireframe: true, transparent: true, opacity: .72 }));
-  const innerCore = new T.Mesh(own(ctx, new T.IcosahedronGeometry(.72, 1)), innerMaterial); world.add(innerCore);
+  const innerGeometry = own(ctx, new T.IcosahedronGeometry(.72, 1));
+  const innerCore = new T.Mesh(innerGeometry, innerMaterial); world.add(innerCore);
+  const midMaterial = own(ctx, new T.MeshBasicMaterial({ wireframe: true, transparent: true, opacity: .27 }));
+  const midCore = new T.Mesh(innerGeometry, midMaterial); midCore.scale.setScalar(1.48); world.add(midCore);
   const shockMaterial = additive(T.MeshBasicMaterial, { opacity: 0, side: T.DoubleSide });
   const shockwave = new T.Mesh(own(ctx, new T.RingGeometry(2.9, 2.96, 128)), shockMaterial); shockwave.position.z = 1.4; world.add(shockwave);
 
@@ -249,17 +276,17 @@ export function createReactor(ctx) {
       points.push(new T.Vector3(Math.cos(angle) * radius, Math.sin(angle * (2 + ring % 2)) * .12, Math.sin(angle) * radius));
     }
     const line = new T.LineLoop(own(ctx, new T.BufferGeometry().setFromPoints(points)), additive(T.LineBasicMaterial, { opacity: .14 + ring * .025 }));
-    line.userData.base = [(ring - 3) * .16, ring * .38, ring * .13]; line.userData.accent = ring % 3 === 0;
+    line.userData.base = [(ring - 3) * .16, ring * .38, ring * .13];
     rings.push(line); world.add(line);
   }
 
   const tickGroup = new T.Group(); world.add(tickGroup);
-  const tickLines = [[], []];
+  const tickLines = [[], [], []];
   for (let i = 0; i < 180; i++) {
     const angle = i / 180 * TAU, inner = 5.35, outer = inner + (i % 15 === 0 ? .5 : i % 5 === 0 ? .26 : .11);
-    tickLines[i % 15 === 0 ? 1 : 0].push(Math.cos(angle) * inner, 0, Math.sin(angle) * inner, Math.cos(angle) * outer, 0, Math.sin(angle) * outer);
+    tickLines[i % 15 === 0 ? 2 : i % 5 === 0 ? 1 : 0].push(Math.cos(angle) * inner, 0, Math.sin(angle) * inner, Math.cos(angle) * outer, 0, Math.sin(angle) * outer);
   }
-  const tickMaterials = tickLines.map(() => additive(T.LineBasicMaterial, { opacity: .4 }));
+  const tickMaterials = tickLines.map((_, i) => additive(T.LineBasicMaterial, { opacity: [.28, .36, .46][i] }));
   tickLines.forEach((list, i) => {
     const geometry = own(ctx, new T.BufferGeometry()); geometry.setAttribute('position', new T.Float32BufferAttribute(list, 3));
     tickGroup.add(new T.LineSegments(geometry, tickMaterials[i]));
@@ -301,7 +328,7 @@ export function createReactor(ctx) {
   nodeGeometry.setAttribute('aColor', new T.BufferAttribute(nodeColors, 3));
   nodeGeometry.setAttribute('aSize', new T.BufferAttribute(nodeSizes, 1));
   nodeGeometry.setDrawRange(0, 0);
-  const nodeUniforms = { uFocal: { value: 700 } };
+  const nodeUniforms = { uFocal: { value: 700 }, uHalo: { value: new T.Color() } };
   const nodes = new T.Points(nodeGeometry, own(ctx, new T.ShaderMaterial({ uniforms: nodeUniforms, vertexShader: nodeVertex, fragmentShader: nodeFragment,
     transparent: true, depthWrite: false, blending: T.AdditiveBlending })));
   nodes.frustumCulled = false; world.add(nodes);
@@ -318,18 +345,25 @@ export function createReactor(ctx) {
   function density() { cloudGeometry.setDrawRange(0, Math.floor(COUNT * qualityDensity(profile) * (params.density ?? 1))); dustGeometry.setDrawRange(0, Math.floor(DUST * qualityDensity(profile))); }
   density();
   function palette(hue) {
-    colorA.setHSL(((hue % 1) + 1) % 1, .9, .66);
-    colorB.setHSL(((hue + .12) % 1 + 1) % 1, .85, .62);
-    colorC.setHSL(ACCENT_HUE, .95, .67);
-    colorDim.setHSL(((hue % 1) + 1) % 1, .55, .26);
-    coreMaterial.color.copy(colorA).lerp(white, .35); innerMaterial.color.copy(colorC);
-    shockMaterial.color.copy(colorC); scanMaterialA.color.copy(colorA); scanMaterialB.color.copy(colorC);
-    beamMaterial.color.copy(colorA).multiplyScalar(.6); pillarMaterial.color.copy(colorDim);
-    rings.forEach(line => line.material.color.copy(line.userData.accent ? colorC : colorA));
-    tickMaterials[0].color.copy(colorA); tickMaterials[1].color.copy(colorC);
-    dustMaterial.color.copy(colorDim).lerp(white, .25); gridMaterial.color.copy(colorDim);
-    padMaterial.color.copy(colorA); padAccentMaterial.color.copy(colorC);
-    coreGlow.material.uniforms.uColor.value.copy(colorA).multiplyScalar(.55); accentGlow.material.uniforms.uColor.value.copy(colorC);
+    const primary = ((hue % 1) + 1) % 1;
+    colorA.setHSL(primary, .96, .6);
+    colorB.setHSL((primary + SECONDARY_SHIFT) % 1, .92, .53);
+    colorC.setHSL(ACCENT_HUE, 1, .62);
+    colorD.setHSL((primary + TERTIARY_SHIFT) % 1, .95, .55);
+    colorDim.setHSL(primary, .62, .24);
+    coreMaterial.color.copy(colorA).lerp(white, .35);
+    midMaterial.color.copy(colorD).lerp(white, .18);
+    innerMaterial.color.copy(colorC);
+    shockMaterial.color.copy(colorC); scanMaterialA.color.copy(colorA); scanMaterialB.color.copy(colorD);
+    beamMaterial.color.copy(colorA).lerp(colorD, .35).multiplyScalar(.7); pillarMaterial.color.copy(colorDim);
+    const tones = [colorA, colorD, colorB, colorC];
+    rings.forEach((line, i) => line.material.color.copy(tones[i % tones.length]));
+    tickMaterials[0].color.copy(colorA); tickMaterials[1].color.copy(colorD); tickMaterials[2].color.copy(colorC);
+    dustMaterial.color.copy(colorDim).lerp(colorD, .35); gridMaterial.color.copy(colorDim);
+    padMaterial.color.copy(colorA); padAccentMaterial.color.copy(colorD);
+    coreGlow.material.uniforms.uColor.value.copy(colorA).multiplyScalar(.55); accentGlow.material.uniforms.uColor.value.copy(colorD);
+    nodeUniforms.uHalo.value.copy(colorD).lerp(colorC, .16);
+    ctx.scene.fog?.color.copy(colorDim).multiplyScalar(.55);
   }
   function hueOf(id) { return sampler.hue(id); }
   function retarget(next, reduced, preview) {
@@ -488,6 +522,7 @@ export function createReactor(ctx) {
       cloud.rotation.z = t * .035;
       core.rotation.set(t * .18, -t * .22, t * .08);
       innerCore.scale.setScalar(1 + beat * .12); innerCore.rotation.set(-t * .36, t * .48, 0);
+      midCore.rotation.set(t * .23, -t * .31, t * .09); midCore.scale.setScalar(1.48 + beat * .18);
       shockwave.scale.setScalar(.45 + shock * 2.1); shockMaterial.opacity = shock < 1 ? (1 - shock) * .42 : 0;
       tickGroup.rotation.y = -t * .03;
       const scan = .5 + .5 * Math.sin(t * .5);

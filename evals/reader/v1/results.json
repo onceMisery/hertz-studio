@@ -1,0 +1,341 @@
+{
+  "startedAt": "2026-10-25T04:07:33.481Z",
+  "binary": {
+    "path": "D:/code/github/hertz-studio/target/release/hertz-studio.exe",
+    "sha256": "083d8377ad2440d149501229ba963a1759d9582e65c11faaebe9c53d8029de24"
+  },
+  "service": {
+    "dataDir": "C:\\Users\\miracle\\AppData\\Local\\Temp\\hertz-reader-real-YWtFcp",
+    "base": "http://127.0.0.1:3715"
+  },
+  "feeds": [
+    {
+      "name": "OpenAI News",
+      "url": "https://openai.com/news/rss.xml",
+      "expect": "feed",
+      "preview": {
+        "status": 200,
+        "ms": 1524
+      },
+      "title": "OpenAI News",
+      "previewEntries": 10,
+      "scanTruncated": false,
+      "subscribeMs": 587,
+      "entryCount": 30,
+      "hasCursor": true,
+      "entriesWithContent": 0,
+      "ttlMerged": {
+        "fetched_at": 1792901255,
+        "not_modified": false,
+        "synced": 0
+      },
+      "forcedRefresh": {
+        "fetched_at": 1792901256,
+        "not_modified": false,
+        "synced": 1318
+      },
+      "unreadBefore": 1318,
+      "unreadAfterRead": 1317,
+      "ok": true
+    },
+    {
+      "name": "arXiv cs.AI",
+      "url": "https://rss.arxiv.org/rss/cs.AI",
+      "expect": "feed",
+      "preview": {
+        "status": 200,
+        "ms": 339
+      },
+      "title": "cs.AI updates on arXiv.org",
+      "previewEntries": 0,
+      "scanTruncated": false,
+      "emptySource": true,
+      "ok": true
+    },
+    {
+      "name": "Hacker News AI",
+      "url": "https://hnrss.org/newest?q=AI",
+      "expect": "feed",
+      "preview": {
+        "status": 200,
+        "ms": 1199
+      },
+      "title": "Hacker News - Newest: \"AI\"",
+      "previewEntries": 10,
+      "scanTruncated": false,
+      "subscribeMs": 245,
+      "entryCount": 20,
+      "hasCursor": false,
+      "entriesWithContent": 0,
+      "ttlMerged": {
+        "fetched_at": 1792901258,
+        "not_modified": false,
+        "synced": 0
+      },
+      "forcedRefresh": {
+        "fetched_at": 1792901258,
+        "not_modified": true,
+        "synced": 0
+      },
+      "unreadBefore": 20,
+      "unreadAfterRead": 19,
+      "ok": true
+    },
+    {
+      "name": "A List Apart",
+      "url": "https://alistapart.com/main/feed/",
+      "expect": "feed",
+      "preview": {
+        "status": 200,
+        "ms": 1080
+      },
+      "title": "A List Apart: The Full Feed",
+      "previewEntries": 10,
+      "scanTruncated": false,
+      "subscribeMs": 494,
+      "entryCount": 20,
+      "hasCursor": false,
+      "entriesWithContent": 0,
+      "ttlMerged": {
+        "fetched_at": 1792901260,
+        "not_modified": false,
+        "synced": 0
+      },
+      "forcedRefresh": {
+        "fetched_at": 1792901260,
+        "not_modified": true,
+        "synced": 0
+      },
+      "unreadBefore": 20,
+      "unreadAfterRead": 19,
+      "ok": true
+    },
+    {
+      "name": "TechCrunch",
+      "url": "https://techcrunch.com/feed/",
+      "expect": "feed",
+      "preview": {
+        "status": 200,
+        "ms": 750
+      },
+      "title": "TechCrunch",
+      "previewEntries": 10,
+      "scanTruncated": false,
+      "subscribeMs": 300,
+      "entryCount": 20,
+      "hasCursor": false,
+      "entriesWithContent": 0,
+      "ttlMerged": {
+        "fetched_at": 1792901261,
+        "not_modified": false,
+        "synced": 0
+      },
+      "forcedRefresh": {
+        "fetched_at": 1792901261,
+        "not_modified": true,
+        "synced": 0
+      },
+      "unreadBefore": 20,
+      "unreadAfterRead": 19,
+      "ok": true
+    },
+    {
+      "name": "少数派",
+      "url": "https://sspai.com/feed",
+      "expect": "feed",
+      "preview": {
+        "status": 200,
+        "ms": 151
+      },
+      "title": "少数派",
+      "previewEntries": 10,
+      "scanTruncated": false,
+      "subscribeMs": 47,
+      "entryCount": 10,
+      "hasCursor": false,
+      "entriesWithContent": 0,
+      "ttlMerged": {
+        "fetched_at": 1792901261,
+        "not_modified": false,
+        "synced": 0
+      },
+      "forcedRefresh": {
+        "fetched_at": 1792901261,
+        "not_modified": false,
+        "synced": 10
+      },
+      "unreadBefore": 10,
+      "unreadAfterRead": 9,
+      "ok": true
+    },
+    {
+      "name": "IT之家",
+      "url": "https://www.ithome.com/rss/",
+      "expect": "feed",
+      "preview": {
+        "status": 200,
+        "ms": 160
+      },
+      "title": "IT之家",
+      "previewEntries": 10,
+      "scanTruncated": false,
+      "subscribeMs": 60,
+      "entryCount": 30,
+      "hasCursor": true,
+      "entriesWithContent": 0,
+      "ttlMerged": {
+        "fetched_at": 1792901262,
+        "not_modified": false,
+        "synced": 0
+      },
+      "forcedRefresh": {
+        "fetched_at": 1792901262,
+        "not_modified": true,
+        "synced": 0
+      },
+      "unreadBefore": 60,
+      "unreadAfterRead": 59,
+      "ok": true
+    },
+    {
+      "name": "FreeBuf",
+      "url": "https://www.freebuf.com/feed",
+      "expect": "feed",
+      "preview": {
+        "status": 200,
+        "ms": 225
+      },
+      "title": "FreeBuf网络安全行业门户",
+      "previewEntries": 10,
+      "scanTruncated": false,
+      "subscribeMs": 160,
+      "entryCount": 20,
+      "hasCursor": false,
+      "entriesWithContent": 20,
+      "detailMs": 1,
+      "contentStatus": "cached",
+      "contentBytes": 208,
+      "imgTags": 0,
+      "links": 0,
+      "imageKeys": 0,
+      "ttlMerged": {
+        "fetched_at": 1792901262,
+        "not_modified": false,
+        "synced": 0
+      },
+      "forcedRefresh": {
+        "fetched_at": 1792901262,
+        "not_modified": false,
+        "synced": 20
+      },
+      "unreadBefore": 20,
+      "unreadAfterRead": 19,
+      "ok": true
+    },
+    {
+      "name": "DeepMind Blog",
+      "url": "https://deepmind.google/blog/rss.xml",
+      "expect": "feed",
+      "preview": {
+        "status": 200,
+        "ms": 1301
+      },
+      "title": "Google DeepMind News",
+      "previewEntries": 10,
+      "scanTruncated": false,
+      "subscribeMs": 298,
+      "entryCount": 30,
+      "hasCursor": true,
+      "entriesWithContent": 0,
+      "ttlMerged": {
+        "fetched_at": 1792901264,
+        "not_modified": false,
+        "synced": 0
+      },
+      "forcedRefresh": {
+        "fetched_at": 1792901264,
+        "not_modified": true,
+        "synced": 0
+      },
+      "unreadBefore": 100,
+      "unreadAfterRead": 99,
+      "ok": true
+    },
+    {
+      "name": "This Week in Rust",
+      "url": "https://this-week-in-rust.org/atom.xml",
+      "expect": "feed",
+      "preview": {
+        "status": 200,
+        "ms": 665
+      },
+      "title": "This Week in Rust",
+      "previewEntries": 4,
+      "scanTruncated": false,
+      "subscribeMs": 175,
+      "entryCount": 4,
+      "hasCursor": false,
+      "entriesWithContent": 4,
+      "detailMs": 2,
+      "contentStatus": "cached",
+      "contentBytes": 45303,
+      "imgTags": 0,
+      "links": 286,
+      "imageKeys": 0,
+      "ttlMerged": {
+        "fetched_at": 1792901265,
+        "not_modified": false,
+        "synced": 0
+      },
+      "forcedRefresh": {
+        "fetched_at": 1792901265,
+        "not_modified": true,
+        "synced": 0
+      },
+      "unreadBefore": 4,
+      "unreadAfterRead": 3,
+      "ok": true
+    },
+    {
+      "name": "V2EX",
+      "url": "https://www.v2ex.com/index.xml",
+      "expect": "error",
+      "previewRetried": true,
+      "preview": {
+        "status": 504,
+        "ms": 8003
+      },
+      "errorCode": "upstream_timeout",
+      "errorMessage": "阅读源请求超时，请稍后重试"
+    },
+    {
+      "name": "LinuxDo",
+      "url": "https://linux.do/latest.rss",
+      "expect": "error",
+      "previewRetried": true,
+      "preview": {
+        "status": 504,
+        "ms": 8006
+      },
+      "errorCode": "upstream_timeout",
+      "errorMessage": "阅读源请求超时，请稍后重试"
+    },
+    {
+      "name": "非 RSS 地址",
+      "url": "https://example.com/feed",
+      "expect": "error",
+      "preview": {
+        "status": 502,
+        "ms": 649
+      },
+      "errorCode": "upstream_rejected",
+      "errorMessage": "阅读源返回 HTTP 404"
+    }
+  ],
+  "checks": {
+    "subscriptions": 10,
+    "allStored": true
+  },
+  "finishedAt": "2026-10-25T04:08:22.202Z",
+  "result": "passed"
+}

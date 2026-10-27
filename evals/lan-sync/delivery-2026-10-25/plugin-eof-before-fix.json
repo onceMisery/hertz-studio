@@ -1,0 +1,6 @@
+{
+  "plugin_sha256": "722d299110313044eeb3f26ed2b67716ebd8bd0412d2a422c0870f54ecc4ac3b",
+  "service_sha256": "a082e0f216d503310ed17090a8e2c5c0f2c21a23f037689fc8375d0b64409406",
+  "passed": false,
+  "error": "timed out: EOF with an in-flight worker drains terminal End"
+}

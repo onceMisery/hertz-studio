@@ -1,0 +1,1394 @@
+{
+  "captured_at": "2026-10-24T18:26:26.684655+00:00",
+  "source_commit": "e315d55b1fd53a0fe4cc6d3a9ac61b685bb5cf4c",
+  "branch": "codex/lan-listening-delivery",
+  "source_hashes": {
+    ".github/workflows/ci.yml": {
+      "sha256": "9582347a5078fd600733e0f72fc2537e1beb0265d359ead18681d5d875d583a0",
+      "sha256_lf": "a1449c00394ccfccc7972f06978f7ef49e0debc1691cb7306f34d8ee96270622"
+    },
+    "Cargo.lock": {
+      "sha256": "b11a39371b6ca1a998c24ea2432dac4f390aff9ab60cf5de3a78dc28a08b57dd",
+      "sha256_lf": "b11a39371b6ca1a998c24ea2432dac4f390aff9ab60cf5de3a78dc28a08b57dd"
+    },
+    "Cargo.toml": {
+      "sha256": "7923710281ea728c326146b57e7aa94a830c50b876a9c3443f79b56b4e5f5e2f",
+      "sha256_lf": "55525c56a854dfab46d02518142746a00877de275bad95721b8c6ddc5234d81d"
+    },
+    "build-support/edition-ui.rs": {
+      "sha256": "44f4bbe0e3c981d6d4b02d5a67896a31188ee8d7622477e64d05948fa0969921",
+      "sha256_lf": "8474fdce636d9c88d1ec5aa8d30977fa7498c5031db5e5d1ba862128b61b140b"
+    },
+    "crates/hertz-studio/Cargo.toml": {
+      "sha256": "aa9e492edacfc252b90cda3c1d6470cf99973595143eb73ffdb903f3aaf69f26",
+      "sha256_lf": "eb45178d5f8c2ade1d1c54228361cf96e4936039be852dbda3fc2ab7366d5813"
+    },
+    "crates/hertz-studio/build.rs": {
+      "sha256": "3605fe8b01b2261d8111c241bba2175b4c7a7075edbcb728988490892978433b",
+      "sha256_lf": "3a93ddfc80952ac80b3ef554f08cb64ccf94f5cfb0576b723b36bbe02d4b214b"
+    },
+    "crates/hertz-studio/src/ai/capability.rs": {
+      "sha256": "9323f73e3783e931a7f7077593692e71d1d89a8594cbe6c44fbe4333086e0506",
+      "sha256_lf": "c501fd07ec55b87e80b7224ab1d906a8ea48e509750f4f7d6eb6d2b4125e755b"
+    },
+    "crates/hertz-studio/src/ai/contract.rs": {
+      "sha256": "84f0621f07a794fcb47b96231f4e0bd4ee8e623dcd0ee53a71c2c6200490746f",
+      "sha256_lf": "3da100d6a6a5b68fedc2180f328ba83d4c169bd08f9ab2c2954a5c617cb9338d"
+    },
+    "crates/hertz-studio/src/ai/credential.rs": {
+      "sha256": "083949e32a837c16e1c7080edd840052bec70cf4e0e7cab51584269bdcc67121",
+      "sha256_lf": "660fd66d65b5108243c5542a81a95ccd7603d40241039eff10bedda7452dcc99"
+    },
+    "crates/hertz-studio/src/ai/emotion.rs": {
+      "sha256": "839dccc2e3984a711b7167c27edb70506535fa862b8f6937ef4b033c5642abc2",
+      "sha256_lf": "0f41081eb9bc2cf86fdd1b74fa19c809d59696a333ad66eeefe48da84079a997"
+    },
+    "crates/hertz-studio/src/ai/evaluation.rs": {
+      "sha256": "1da266090f869080ab00939b386866c031e0f1f53a345852817b50b122aa37b0",
+      "sha256_lf": "8cf9b962a451ce00dc33ed08055e1643a4b7b774a72fdfcb6f4ccb34e20ea048"
+    },
+    "crates/hertz-studio/src/ai/facade.rs": {
+      "sha256": "b550e05bb98e37c6ec1f421e11b1ffa305165fd44d42773b6d2ffb109575b4e5",
+      "sha256_lf": "b550e05bb98e37c6ec1f421e11b1ffa305165fd44d42773b6d2ffb109575b4e5"
+    },
+    "crates/hertz-studio/src/ai/jobs.rs": {
+      "sha256": "6998b6ca17aa29356ddee7bd0925ba1b8fe822e708dc235953960986b4f72975",
+      "sha256_lf": "ef1435b22e032085368f7025adf154fd897e1cd852ae788297346143d4422173"
+    },
+    "crates/hertz-studio/src/ai/jobs/tests.rs": {
+      "sha256": "1e1321fa7053ab027666621dd90382562e44de612f20706eadd0cba5f16a20e8",
+      "sha256_lf": "ced917bf0842405d168513d8877c0d0c892b03482af237df07c38400f9fe1839"
+    },
+    "crates/hertz-studio/src/ai/ledger.rs": {
+      "sha256": "2956d0208af7bb3a624be01acd15802f10d4fd6051e82aeabc519dbd662ae3bb",
+      "sha256_lf": "9520ca6d0a1f7d3c5f887a4a72b44b04497195ce0525d8b8dc83632c3db9716c"
+    },
+    "crates/hertz-studio/src/ai/lock.rs": {
+      "sha256": "e7ec7b07d25cbaaa5583eb4d84283bc923e800ed9d96733d070064e7838283e0",
+      "sha256_lf": "72e44be8db58df0b44850fadae527f0dc58f23db57fbcae893549fce35e4f44b"
+    },
+    "crates/hertz-studio/src/ai/mcp/adapter.rs": {
+      "sha256": "14c995ee7cef1a30a8a87a80b316f41086e7ff019cc2c9366811e8edd4214477",
+      "sha256_lf": "14c995ee7cef1a30a8a87a80b316f41086e7ff019cc2c9366811e8edd4214477"
+    },
+    "crates/hertz-studio/src/ai/mcp/discovery.rs": {
+      "sha256": "d1e55ad9c046d82a15e4a8f3cff09d45484d9791dfb0ab5796ea3e173d477d0f",
+      "sha256_lf": "3504d178d1b48a17d0e3c2bdc844a3c6526611debd96a7c62c65eb40c4d6fe3b"
+    },
+    "crates/hertz-studio/src/ai/mcp/mod.rs": {
+      "sha256": "3bc1dd44812b13af1eb61969b7edc7a8cfa3130e06002ccaae2a3d10f867f414",
+      "sha256_lf": "5fd778940f5857cc161ee38a9a107c16b041a58ba713d705b7873201af7af520"
+    },
+    "crates/hertz-studio/src/ai/mcp/server.rs": {
+      "sha256": "0da82f90f75a5f145b07e1a339ad5c84dfe2585dd11f4bc26c7d5aeb66d0cc74",
+      "sha256_lf": "46cb378056ff820ed1925885cabd526ced8e7aac6830d7627abea3f332221785"
+    },
+    "crates/hertz-studio/src/ai/mcp/transport.rs": {
+      "sha256": "b3760fc9d1c9c689833717c20c4d872f33eff5c5a351ee1896518976f22e3819",
+      "sha256_lf": "749ca8b1e70c8e975eec1e11731f220d148f63ac05aa05d089e1d222d981d534"
+    },
+    "crates/hertz-studio/src/ai/mod.rs": {
+      "sha256": "d72aa54614c8603de69844845ffe2e32e02d749939c2028e20bab2219637ea96",
+      "sha256_lf": "d2192a5a943a31138b977076670000ce28d78966757cbcf0d9dd8ccd0a276e0c"
+    },
+    "crates/hertz-studio/src/ai/provider.rs": {
+      "sha256": "1acb2f11b055540cd167f7de6a16c9a630a211901d3a35855216fc51fc58716e",
+      "sha256_lf": "a60d5b32b2447f11f8f79c38ee80d7d1527951c56cbb97bbad204345c6094fcd"
+    },
+    "crates/hertz-studio/src/ai/stage-contract/stage-contract.json": {
+      "sha256": "4a05eadd8b73122d7536b2760be2e6a7c9da8168c04516f820db119f2f30bf53",
+      "sha256_lf": "4a05eadd8b73122d7536b2760be2e6a7c9da8168c04516f820db119f2f30bf53"
+    },
+    "crates/hertz-studio/src/ai/stepfun.rs": {
+      "sha256": "7c52417f1c40ac6b9654634755177d8538f3f08e0bed23cc943597d1580da23b",
+      "sha256_lf": "fe0674c354f8e3293b1f17c8119394ada1a3c6ed65093f226c18fc4357fd455f"
+    },
+    "crates/hertz-studio/src/ai/strict_json.rs": {
+      "sha256": "ef33578d93ddcbfd7c4f8fb85aae06cb242321b3180d07a26121d4eb3580b0e6",
+      "sha256_lf": "0ef9810ceaf42cfec7cf060641062b3d5040f54c1ece0cc8b9a3a2090e70d465"
+    },
+    "crates/hertz-studio/src/ai/usage.rs": {
+      "sha256": "558d55f8b0d677e25564784d48e41b93fc387635ca5fe527a9ce0e00e008f9e9",
+      "sha256_lf": "371acf24dd44fcaf1ee0bca097301b58241d97c6718af12807c4ed2213adca11"
+    },
+    "crates/hertz-studio/src/assets.rs": {
+      "sha256": "4167fcbc03efd8b87c526d3f92d6f5f032c65b6a43526b51d68866983bd4e45d",
+      "sha256_lf": "88af394f992c8f28f750401f014a6f25d399ccabc02f7ffec18f8a57589d4dc6"
+    },
+    "crates/hertz-studio/src/bootstrap.rs": {
+      "sha256": "ea51be74e5fb66ff0bdf19a0d4cf3029833bfaa7fb0a6e5fb0d39b682837b357",
+      "sha256_lf": "ea51be74e5fb66ff0bdf19a0d4cf3029833bfaa7fb0a6e5fb0d39b682837b357"
+    },
+    "crates/hertz-studio/src/collection.rs": {
+      "sha256": "c0250133081e0b48c5a67f2d7da8d0ceb9afab922640f7449b474b4406b2cdda",
+      "sha256_lf": "c0250133081e0b48c5a67f2d7da8d0ceb9afab922640f7449b474b4406b2cdda"
+    },
+    "crates/hertz-studio/src/complete.rs": {
+      "sha256": "95f357ce84f4573ab103aeb178964d946a456c7cad7f9629f0290889f5f9b6f8",
+      "sha256_lf": "ecd9b67a0a9c0bf13631c5364b1a81a9b93d40b8cb0a09701390f63cd8069701"
+    },
+    "crates/hertz-studio/src/config.rs": {
+      "sha256": "c9110245fba34b31d5cf68d960416823733c6f24ab80bd3bf4b732abf7eaefa0",
+      "sha256_lf": "7e4255a4e129f8d18bff7b1eebaa43928224d85d3056fd6c7fdfd7285c25fc8f"
+    },
+    "crates/hertz-studio/src/daily.rs": {
+      "sha256": "23c65fa566db2094bed7c15d4a347c02c432ea8012f718411de49fe6eaaaada6",
+      "sha256_lf": "942177f6e7ec597d3a0ce53b51ee028149cbbd000353e789ec6ce5a999ccdc70"
+    },
+    "crates/hertz-studio/src/diag.rs": {
+      "sha256": "ff17d6a818fe66569a00e340aeb8040e4b6824451dd16a69577e6c3c537922a4",
+      "sha256_lf": "69bac4c905391bc671ff4a191b4d487c345bc3184810ecbb5ca37c3f02860d99"
+    },
+    "crates/hertz-studio/src/edition.rs": {
+      "sha256": "e7fd9962e3622224bace1259c7f5d034bfafe2230d4d2c42bbf7e59dde5a6d3c",
+      "sha256_lf": "0b7355d785474c96ca7052c072917e37334b212412a0fd41baef97c048b39287"
+    },
+    "crates/hertz-studio/src/error.rs": {
+      "sha256": "a890fb49e5df641583a6ba99998329dbd5504ee6c0e64633aa7c7243ee7976e4",
+      "sha256_lf": "0d79686f1a99bd761cab3528372a7a27866cfa503cb552253d5aec414c0e8c72"
+    },
+    "crates/hertz-studio/src/history.rs": {
+      "sha256": "d18e96c04bae820787061ee2bfed6dc2bfc1850d152b53db90f83002a27ee1ed",
+      "sha256_lf": "2e41937409748677cd279b495ba148e39beea7354b5b9eae4f61fb3e692e92c0"
+    },
+    "crates/hertz-studio/src/idempotency.rs": {
+      "sha256": "25fc110bd35dd76dcd20d339c591c34a29ac207e24e840c6d505c754fc6ad444",
+      "sha256_lf": "25fc110bd35dd76dcd20d339c591c34a29ac207e24e840c6d505c754fc6ad444"
+    },
+    "crates/hertz-studio/src/lib.rs": {
+      "sha256": "92ecda74dd9d762e91e24582b43f9b3f24a833dab8e854f4590af245a84dc878",
+      "sha256_lf": "92ecda74dd9d762e91e24582b43f9b3f24a833dab8e854f4590af245a84dc878"
+    },
+    "crates/hertz-studio/src/lyrics.rs": {
+      "sha256": "96d165b631c3584a980e7b74a3fd5d04751ee50c2dc2033e251e36f179c37bf7",
+      "sha256_lf": "96d165b631c3584a980e7b74a3fd5d04751ee50c2dc2033e251e36f179c37bf7"
+    },
+    "crates/hertz-studio/src/lyrics/candidates.rs": {
+      "sha256": "cc6b3aa31375e87327a2ac8aeb6e31805c5167b0545ffd6c8af08fbd854f4a93",
+      "sha256_lf": "4d8796933c9d39b0c02974faf9115d20e4c27b491bb50a951e6a067a6d511139"
+    },
+    "crates/hertz-studio/src/main.rs": {
+      "sha256": "28b6f2d69b4fb064a23dd28705d58022be14d415660bc947929a9e1e24cf2d53",
+      "sha256_lf": "28b6f2d69b4fb064a23dd28705d58022be14d415660bc947929a9e1e24cf2d53"
+    },
+    "crates/hertz-studio/src/online/aggregate.rs": {
+      "sha256": "db33fe013c0d9f6ee3edde1190028c2a841f379862b363986374e5e3b5d9eca7",
+      "sha256_lf": "29dfa197a07750f7c32b01237d75970301168c7f13268af5cfa5a245a0e23741"
+    },
+    "crates/hertz-studio/src/online/cache.rs": {
+      "sha256": "77d60cebf78771ed83dd97d48ea73bbe6436c2c7d464325f699224d64551f3b3",
+      "sha256_lf": "8299b97684661a867370068fe4283511de76f65e6f6c818a7addd6ac74e4376e"
+    },
+    "crates/hertz-studio/src/online/ccmixter.rs": {
+      "sha256": "d3fc70648b738093c628b7625d308ee2c076955eb72fa7a66b04691eacb91ab9",
+      "sha256_lf": "ede2c72f831bdc1c593ebc9fd65a5b0beed5bd6df866d26f733b975cc8cf6f67"
+    },
+    "crates/hertz-studio/src/online/cred.rs": {
+      "sha256": "2ee04270645ac05d40e295df1c02a7cbcdd4c9243a0b47b959032ef7517290bf",
+      "sha256_lf": "6dde02c79417bfd009af6fe0baeaa01a1cee554ff1efaebc902e482314ee2cc0"
+    },
+    "crates/hertz-studio/src/online/http.rs": {
+      "sha256": "ba9c5e3ca6a29aa2116da976d2c716cff331d6ae19a00efbdb48fb2f4b61b634",
+      "sha256_lf": "ad65ab8183e7d9b71895bba61adc3f734bbef4a0e9cc5e3cf06be7fd04635bcc"
+    },
+    "crates/hertz-studio/src/online/jamendo.rs": {
+      "sha256": "c79b5a1ab139f840f15779db93ce1331c0f81836d780a3f8faf76595b5fcb618",
+      "sha256_lf": "0db3ef87e3c48bc029be12850899546de3dfec722694e21614fc50abe055ac45"
+    },
+    "crates/hertz-studio/src/online/kugou.rs": {
+      "sha256": "1d98201e5aa8b5a76a4bb2417b546fb25656bebba6ee6ac6157bc9f22d2c4683",
+      "sha256_lf": "a975c4906eb6b6de3b42ffe6b7a671a71f809a68f6196c02da69f3c5472bd67b"
+    },
+    "crates/hertz-studio/src/online/kuwo.rs": {
+      "sha256": "5b51588ba64279820b90cad9deb03f20cfd7a0df61950ea358a73905b32a6c47",
+      "sha256_lf": "94b74842a73bf3363db6a9208083ac24fef0fcb93073e8e4750cc9b8e3d3f34a"
+    },
+    "crates/hertz-studio/src/online/ladder.rs": {
+      "sha256": "a349ccdaf50082418adaccfea56fbaa8cc82cfcad05fd02efe119cbcead6980b",
+      "sha256_lf": "2ff322583c0bf54d23ba0a06a2a7694d4ef809c1ddeb177bbcb6a36d80032f46"
+    },
+    "crates/hertz-studio/src/online/migu.rs": {
+      "sha256": "33170168e88a8ede55c0538f015571e2af9aa867353346af81d205cc821a5b1b",
+      "sha256_lf": "ffc511c04e307bc49fecfb5edaaf11ba792abb6f93d21e2e637f0f5510b0550b"
+    },
+    "crates/hertz-studio/src/online/migu/tests.rs": {
+      "sha256": "455b86be3fc98f3c4fdc18c1b39f511a77723cbf14b89c654b84aa138f296c33",
+      "sha256_lf": "b8775f7238c70a4ceaab7ab5787ef778eb9ad8bf61a629e351a3798e3ba10a25"
+    },
+    "crates/hertz-studio/src/online/mod.rs": {
+      "sha256": "a99d05edae02127998f948d86b88cbeb142dcfe9d4c48c71aabcc35b5d3fea89",
+      "sha256_lf": "f221f5d1d1e5b137fd417dc106bf468993ecd2e70fada96d24d9ab7ae6b37cfa"
+    },
+    "crates/hertz-studio/src/online/netease.rs": {
+      "sha256": "1a0872fbd9b51c01e959f2691ebd921e093b72f8a08e2953e7e5e1f3a14eb917",
+      "sha256_lf": "a5c7211636a98c12d56c1cb6fd2ecf9c9b38406480efee05abc2693df9642f19"
+    },
+    "crates/hertz-studio/src/online/playlist_common.rs": {
+      "sha256": "05587b41c5e235c29ec3c17dee9f68f1dc7849c5c9014d273cfaeacd49e6671f",
+      "sha256_lf": "328be4e34712af12aaa6bd35e5d838334f72be0a7a311972d77783b842cf685f"
+    },
+    "crates/hertz-studio/src/online/progressive.rs": {
+      "sha256": "904d6424db19bdc06e3c1a40a856d1ff28ff47533e93c6c74f8af6e573620915",
+      "sha256_lf": "57e6c7ece77174a52ace648a883ebcc0ff02142ce6cb7f816c59aebaab337c81"
+    },
+    "crates/hertz-studio/src/online/provider.rs": {
+      "sha256": "d21c745755f3be9853fc86e862543ec061c0e60642dcaae5dac81a06bf642be4",
+      "sha256_lf": "a4c84ede75a255ce64e34040489d9a20922a1c95c647ec6f5da9a42e60e81445"
+    },
+    "crates/hertz-studio/src/online/qishui.rs": {
+      "sha256": "0b9c9c994464fb10f5dee2773cc3745ac2111c71b9a8d847244d0587e7657c39",
+      "sha256_lf": "902ef5d57ff5b9fd9e5c9d3c5afa50c253d8d337dcd72207d118dcf1607fbadc"
+    },
+    "crates/hertz-studio/src/online/qq.rs": {
+      "sha256": "f1ff09059149a0e2b6a5962bc2d89dbf809a309ae0d6261fc97a079ca14e0bd4",
+      "sha256_lf": "1f1ad83d3a623436795f2ee9e5ffdef0d03185761ca90aaf994c29296ad5f615"
+    },
+    "crates/hertz-studio/src/online/qr.rs": {
+      "sha256": "02bb6618e728c98d0fd32995489668f3d065e4f7c18132c9400778003bcfb6b4",
+      "sha256_lf": "40c6c820ccd64b0675920e73999b28e895ed25331bc66103ee52c3ba460de44e"
+    },
+    "crates/hertz-studio/src/online/quality.rs": {
+      "sha256": "9552520d38e57050ff958092f838d6d6a4587037a1fb710497279bd41cceaa1b",
+      "sha256_lf": "fab8b5423f7357d76c49c4f5c623a1f477b2b0fd232a8fa51018311e32c225b7"
+    },
+    "crates/hertz-studio/src/online/quote.rs": {
+      "sha256": "ceb0474f3279d9fa4f4ff208d1ebb19aa3720bf8df27cfe4ab64510a41b601b6",
+      "sha256_lf": "aa2bf09b3309c79113d755982ef7f2ace5e6a42e8c89957252c24d9d0ce6b842"
+    },
+    "crates/hertz-studio/src/online/search_gate.rs": {
+      "sha256": "85c598cc28f2def2fdbc950cd5049a311ac00273707fdb8f9968e09b51b3ef73",
+      "sha256_lf": "4e74eac052eb3e72747a38a8d12acdae1bdc42997499155531ecd6a8a60143d4"
+    },
+    "crates/hertz-studio/src/online/search_pressure.rs": {
+      "sha256": "a24f6f08e6ec7d38ed0a269d7c253e5bbbcb899a5bcdc3dd87a02066ca407f39",
+      "sha256_lf": "d72b90540c8b18b760fad8724b61d4facfb5fb38af9663317af64f6af8973d51"
+    },
+    "crates/hertz-studio/src/online/sign.rs": {
+      "sha256": "73fd2337333a7fbb70db6914265d9987a40412086762ff7974db7eaf7e0b98e1",
+      "sha256_lf": "9ba623ddb0c9757410f758db7a418786bee22d91d6257ec4546a8f5d7d666e4b"
+    },
+    "crates/hertz-studio/src/online_play.rs": {
+      "sha256": "ababd5fceaecccb6b222ef668313ca347d53cd031f829d9ebb3fd88b63cd8ad2",
+      "sha256_lf": "ababd5fceaecccb6b222ef668313ca347d53cd031f829d9ebb3fd88b63cd8ad2"
+    },
+    "crates/hertz-studio/src/persist.rs": {
+      "sha256": "f13636be41343f496d2d246ea3f129803d57b9d3d6fc1ca702358166868b4a62",
+      "sha256_lf": "8eda33cd15a967e19882b8c3767af8155ebf798e8ca4ab8f533af7b1c5b3031e"
+    },
+    "crates/hertz-studio/src/podcasts.rs": {
+      "sha256": "1fcd3ce8f7bb8a7b34fe6117dd5957f43573ff8872cad3419654612dadc80ec2",
+      "sha256_lf": "641df476657c8355470c1478f1877ad5897e34426c40f8b296b7adeacc0708a3"
+    },
+    "crates/hertz-studio/src/podcasts/network.rs": {
+      "sha256": "86fb45bea3c3e2a8fa0f3e0db07c85a1f8403766fd8e9ed3e713da7a96200b80",
+      "sha256_lf": "f8882a2b61765f62e805e59c59747db89b2461f46f6587f6ca2b1a774f65eff0"
+    },
+    "crates/hertz-studio/src/podcasts/parse.rs": {
+      "sha256": "48c41661b5cb00062c3596a99811490cacfd0c70e47ad2fa116fc2e21f0cd6ad",
+      "sha256_lf": "74179f0b33eb6f5d2135e95db36c7dcb844f0e39c9f95a031de75d9009d5a880"
+    },
+    "crates/hertz-studio/src/podcasts/store.rs": {
+      "sha256": "778ddd7836949b64272b938863676a1ca213c7d665154dbd4d343f57ce6cc89c",
+      "sha256_lf": "1b6d4b82ff5887a8f65450faa9f650bb2ab22a0603b0ed9f79013d23f712c684"
+    },
+    "crates/hertz-studio/src/podcasts/tests.rs": {
+      "sha256": "614cddd0424f75360ebb42e56d2c3cabb2999547c4f99fb2b598547debe41e7a",
+      "sha256_lf": "233fd92f4b925073b41cb732943124bea7f7833ec2743f2a52d79c294e26fa97"
+    },
+    "crates/hertz-studio/src/public_net.rs": {
+      "sha256": "3eb3c9823f74519668f129d1085d43cbc230f0ea703a7a52b7149307d5381037",
+      "sha256_lf": "0bb5a79640c77b2fcf79669aa9b39291856bfe3e198d63fccf5dc3970ae54981"
+    },
+    "crates/hertz-studio/src/radio.rs": {
+      "sha256": "8cc1fa537c63aa3d19c6ed20678da6895b02ceebf894b2c327dc392a6a07a6e4",
+      "sha256_lf": "8cc1fa537c63aa3d19c6ed20678da6895b02ceebf894b2c327dc392a6a07a6e4"
+    },
+    "crates/hertz-studio/src/remote.rs": {
+      "sha256": "b0897fa879a0f262b1fbc55210c6eeccdd08296768808de59070d2505f465263",
+      "sha256_lf": "1db7973df5e58f92d388655fcd9c83f1137cdbf36d76794ccb28f2f76dd2813f"
+    },
+    "crates/hertz-studio/src/room/api.rs": {
+      "sha256": "0743a9ad13f68665da9e34fb75ec53df553c0c127bdb836b0589c888245c8058",
+      "sha256_lf": "0743a9ad13f68665da9e34fb75ec53df553c0c127bdb836b0589c888245c8058"
+    },
+    "crates/hertz-studio/src/room/chat.rs": {
+      "sha256": "ffb7e581b77022de3e11b6810dd395654729e9b7d3b6d9724b8397238de3e9ed",
+      "sha256_lf": "ffb7e581b77022de3e11b6810dd395654729e9b7d3b6d9724b8397238de3e9ed"
+    },
+    "crates/hertz-studio/src/room/chat_tests.rs": {
+      "sha256": "652d09dcf581c28e630dc4bd7785831098cb6ef1d03c4eb41eaa8c2fa223a07c",
+      "sha256_lf": "559f9c4510600f3f6e752c52d9e6b49864219e30b00234c012e5623bd73e9d79"
+    },
+    "crates/hertz-studio/src/room/contract.rs": {
+      "sha256": "a725e83469730911646cece036c8b3d47877246798ae27922855076d26aa3ccf",
+      "sha256_lf": "a725e83469730911646cece036c8b3d47877246798ae27922855076d26aa3ccf"
+    },
+    "crates/hertz-studio/src/room/credentials.rs": {
+      "sha256": "e43b0d7294f905df711b07dfd95b48d64e0e5c86f2c90322c0475c642fdc8616",
+      "sha256_lf": "e43b0d7294f905df711b07dfd95b48d64e0e5c86f2c90322c0475c642fdc8616"
+    },
+    "crates/hertz-studio/src/room/guest.rs": {
+      "sha256": "94ea63edd141789a9df7f9a62294480dd688063bb9b710d473c956ae8b0f65cc",
+      "sha256_lf": "94ea63edd141789a9df7f9a62294480dd688063bb9b710d473c956ae8b0f65cc"
+    },
+    "crates/hertz-studio/src/room/history_writer.rs": {
+      "sha256": "ef4519f947bbc9da5178c612d0ae97e3e186604fd0106331451b5033d3790884",
+      "sha256_lf": "ef4519f947bbc9da5178c612d0ae97e3e186604fd0106331451b5033d3790884"
+    },
+    "crates/hertz-studio/src/room/host.rs": {
+      "sha256": "e3b7e4b35536adcdaa41f9fd0127e184136ba0b9986a60042c283b58382ec2b1",
+      "sha256_lf": "e3b7e4b35536adcdaa41f9fd0127e184136ba0b9986a60042c283b58382ec2b1"
+    },
+    "crates/hertz-studio/src/room/host_jobs.rs": {
+      "sha256": "2f2d7daa8663ddbafaa2124c94ae6749378ede0cf2413a151e21bd90a825646f",
+      "sha256_lf": "94ec415bac1d1977f6bcffb295e4e1ee35b77284ec44d1e67715e97441fa05a8"
+    },
+    "crates/hertz-studio/src/room/manager.rs": {
+      "sha256": "9380c7193be0ee42a501a085f627fad18a60560d0ccf9a30e358e02aac844dbd",
+      "sha256_lf": "9380c7193be0ee42a501a085f627fad18a60560d0ccf9a30e358e02aac844dbd"
+    },
+    "crates/hertz-studio/src/room/mod.rs": {
+      "sha256": "eff9871842fe8129ece90efeb0dfad58517907beb8c7aba7afb6d2cab543229d",
+      "sha256_lf": "eff9871842fe8129ece90efeb0dfad58517907beb8c7aba7afb6d2cab543229d"
+    },
+    "crates/hertz-studio/src/room/output_preferences.rs": {
+      "sha256": "b8c4536825312d63adae675e6798425488dc960cb2944c47be91123df5bc8f70",
+      "sha256_lf": "b8c4536825312d63adae675e6798425488dc960cb2944c47be91123df5bc8f70"
+    },
+    "crates/hertz-studio/src/room/presentation.rs": {
+      "sha256": "9c84911aa1bb14647eea833ec7258ab1b705f8cfc376ef4025b1d7e527463199",
+      "sha256_lf": "9c84911aa1bb14647eea833ec7258ab1b705f8cfc376ef4025b1d7e527463199"
+    },
+    "crates/hertz-studio/src/room/producer.rs": {
+      "sha256": "058aaf7d87be8b7e38cae76e4831edb49287a9f3428c15f42025e920426103be",
+      "sha256_lf": "058aaf7d87be8b7e38cae76e4831edb49287a9f3428c15f42025e920426103be"
+    },
+    "crates/hertz-studio/src/room/receiver.rs": {
+      "sha256": "2d86967879efd0189e5386fc5f93db3800b10dfee41cb4cecaab33a33ed207f2",
+      "sha256_lf": "2d86967879efd0189e5386fc5f93db3800b10dfee41cb4cecaab33a33ed207f2"
+    },
+    "crates/hertz-studio/src/room/receiver_tests.rs": {
+      "sha256": "8b176a716bd25ea250029efb22d8345022f3f511e5b25091a200ecf9ec96bb0c",
+      "sha256_lf": "8b176a716bd25ea250029efb22d8345022f3f511e5b25091a200ecf9ec96bb0c"
+    },
+    "crates/hertz-studio/src/room/recent_chat.rs": {
+      "sha256": "8aa944ed104efa572e7c6c5e3ef2e90b10f37fefbf918a975cbeb77768fc4a05",
+      "sha256_lf": "8aa944ed104efa572e7c6c5e3ef2e90b10f37fefbf918a975cbeb77768fc4a05"
+    },
+    "crates/hertz-studio/src/room/resources.rs": {
+      "sha256": "1791883ad1ac785d2c46d5670cb240f96bef28616204e7a3542d1a6f309fa76e",
+      "sha256_lf": "1791883ad1ac785d2c46d5670cb240f96bef28616204e7a3542d1a6f309fa76e"
+    },
+    "crates/hertz-studio/src/room/resources_tests.rs": {
+      "sha256": "3bea7c937c89cf5b1d2825c2e8a15f9667a27554e0c9e4f1293e8cd65c8bc9de",
+      "sha256_lf": "3bea7c937c89cf5b1d2825c2e8a15f9667a27554e0c9e4f1293e8cd65c8bc9de"
+    },
+    "crates/hertz-studio/src/room/sleep_timer.rs": {
+      "sha256": "5aed2ed5ba5a15ad82055772b0f592fd1279b6fed86a05a7a28e503a7d20b78c",
+      "sha256_lf": "5aed2ed5ba5a15ad82055772b0f592fd1279b6fed86a05a7a28e503a7d20b78c"
+    },
+    "crates/hertz-studio/src/routes.rs": {
+      "sha256": "c06736c2292d1e57f75f1de6fa1dadb98c2679c06c13f392e101b0537ce9af3e",
+      "sha256_lf": "c06736c2292d1e57f75f1de6fa1dadb98c2679c06c13f392e101b0537ce9af3e"
+    },
+    "crates/hertz-studio/src/rpc/ai.rs": {
+      "sha256": "842c1b234fe990ba7cb8a29cfd14d88301fa707c35fda3b4a97b028e06d2983f",
+      "sha256_lf": "bd7550fd29f4ac5ed05f232ac3a99cef07ca3c2f80ecf5caf4799c77f8bb2408"
+    },
+    "crates/hertz-studio/src/rpc/library.rs": {
+      "sha256": "e84754e3094bbde71bcf32c336d44b6bcdf56cf4e93be57bf341f4fe319935c2",
+      "sha256_lf": "1518638a32ee59d74b3af6ce7a3d72a5c96ef34996a03466a3109256ee09e063"
+    },
+    "crates/hertz-studio/src/rpc/maintenance.rs": {
+      "sha256": "1f12baa830b3b16358cc2dc871bb7ab29d2bdd04a07ca84e8cb542d3932d1934",
+      "sha256_lf": "a7d39081686ab7e8a620d61641acac40027ca50342ad5b4bfb57fd76e8347a98"
+    },
+    "crates/hertz-studio/src/rpc/mod.rs": {
+      "sha256": "993e1e326718e47f72838f3ddeb8f29276028e3943e8c08c00a476b0296d4842",
+      "sha256_lf": "993e1e326718e47f72838f3ddeb8f29276028e3943e8c08c00a476b0296d4842"
+    },
+    "crates/hertz-studio/src/rpc/online.rs": {
+      "sha256": "955bb01860469fff2133d2264bb9df5631a45f6c36c19a20be41941f812d4d83",
+      "sha256_lf": "06cfc80782680db936b6a18b0400863dcc067fa1e277537b4a5ac4a2eee0e521"
+    },
+    "crates/hertz-studio/src/rpc/playback.rs": {
+      "sha256": "0253c3d9f5f19663fc4f70e456a8bec3bb8d74ee2e4788bf973e654d1069be82",
+      "sha256_lf": "eda4ab63305ddfacfba7cf631f28ba886ecce70ebf877e6ce58c41a7ffe176a3"
+    },
+    "crates/hertz-studio/src/rpc/playlists.rs": {
+      "sha256": "49246b7fc8233d738f2be24d60f5c938c4c9b544e0561e91a3e1602dd65131b6",
+      "sha256_lf": "be93ce72236c0be9900ce61513202fcc1adcae28e22d5f9942caa457b046b9fd"
+    },
+    "crates/hertz-studio/src/rpc/podcasts.rs": {
+      "sha256": "ae2db464ead9a4c81c624fb91d0c5fdca8fb680f98c2024f8d06fa3607d0e7e8",
+      "sha256_lf": "26bb8c5bdb8aad24ceafe2b845d46b381d588d2898787ae94b6415a463d28cc8"
+    },
+    "crates/hertz-studio/src/rpc/recommend.rs": {
+      "sha256": "be239bcdddc78150bd2170fca22c1aab2539aa1094cdc53af346304e00913c0b",
+      "sha256_lf": "4e160f101f1ea62643864225fbbb066fd9328f19540d9e1ec8db282ec0983b74"
+    },
+    "crates/hertz-studio/src/rpc/remote.rs": {
+      "sha256": "cdf918be5d208ea4c84ba046c462f3d9b43ef6731bad6ebbd54593197bf64122",
+      "sha256_lf": "c76676bf2cc1b9d3eb753c78655729d57919e8bafe6316ca1ba0116c9dbc700b"
+    },
+    "crates/hertz-studio/src/scan.rs": {
+      "sha256": "f606d9971d4cc73d9ca590930bde472624cecffed3bbc25d6d10d693f8d35a10",
+      "sha256_lf": "92d0894550796eb2a58395396fd2ae102aa4fde457c68c9cf230e9b971e43c48"
+    },
+    "crates/hertz-studio/src/secrets.rs": {
+      "sha256": "bb7ce90e493b11d6f98250c73a64cf6506728be7a6614777f4874de515b4f08f",
+      "sha256_lf": "5eb04a7e1e3b3ff0a9c72e3bc2aeab9ac588d14b6e7901140986158821b40e1d"
+    },
+    "crates/hertz-studio/src/space_previews.rs": {
+      "sha256": "f4ed7a729ce660a87553291baa6323ed1b73461a86633110f29cb081e142aa6f",
+      "sha256_lf": "37e0cafc85c65c6504c847e72934c803631a193ffd3d91796be761db8468279e"
+    },
+    "crates/hertz-studio/src/stage_beats.rs": {
+      "sha256": "5cfe7ba52711a6513334e20e93745d54ab8d4317d05f14ee450c191af7635ffe",
+      "sha256_lf": "ab3c374429ceed3b22ee822eff59f02fc1ba0eed89d7073334bdb1c204536529"
+    },
+    "crates/hertz-studio/src/stage_pitch.rs": {
+      "sha256": "617fffa1ea7e482faed77338ee9fec01c51ffc04acafaa1068a8e2024395c99b",
+      "sha256_lf": "a925c83645ef3c3133d3dc41256b0aa78f89ed4b73f0c58e61cecb2e57e57faa"
+    },
+    "crates/hertz-studio/src/stage_project.rs": {
+      "sha256": "17e3e2d2fdbb1881e23aedc4117f89153ed6ba3827b003c509dd9fcb59a5cef9",
+      "sha256_lf": "55fc065d98ba5f7b01f3c5161e6b1dfcc275868f7c99c94574fedfe589e7d2df"
+    },
+    "crates/hertz-studio/src/state.rs": {
+      "sha256": "acdc9e4e873311458f147f511e095dd57c0f0fbd8ecc7caa8b7b1a5fc9fb68d9",
+      "sha256_lf": "acdc9e4e873311458f147f511e095dd57c0f0fbd8ecc7caa8b7b1a5fc9fb68d9"
+    },
+    "crates/hertz-studio/src/state/viewers.rs": {
+      "sha256": "305f0da0717b8ad9b03693aa5b147e080ace8526d61765bb2ea9c564ddc26484",
+      "sha256_lf": "17cc2f207f6b3a19600c81891b43a278f63068b9c11407b255b9e34300026a13"
+    },
+    "crates/hertz-studio/src/ticket.rs": {
+      "sha256": "e14aa8bf383eddef22cfc3577b9a38cd4a71b56892cf0118b309f9ecbb0810a0",
+      "sha256_lf": "03aba3000b0e633359b972c272c31995b7b0b35a8995c6b1d01d48f6b564d74d"
+    },
+    "crates/hertz-studio/src/ws.rs": {
+      "sha256": "b7b1b869d884d0b22480eb8a955b6f020969c944edbe938c2449698dc08a6fd9",
+      "sha256_lf": "8b74949106086e3cd70893a2a148609832682a01e7d12fab9d76516a7aa429ce"
+    },
+    "crates/hertz-studio/tests/fixtures/jamendo_search.json": {
+      "sha256": "7f4f50822ecd89e58d1c1b40008857b7bf4981d64a6e24aee1cfbb54af53395d",
+      "sha256_lf": "3e7f2bd9c0cc6a191473729f67ecc5077033ace827ee577a2b8ff41afc47cb63"
+    },
+    "crates/hertz-studio/tests/fixtures/kugou_search.json": {
+      "sha256": "20ec574d518bcf639c358a8051f60fa8c7ed17d94b648753b4f44713eed3a1df",
+      "sha256_lf": "a079272ebe64bbedbf33c8bc525014b6bb443d617dfa445efd42388794b239fc"
+    },
+    "crates/hertz-studio/tests/fixtures/kuwo_search.json": {
+      "sha256": "7f1d2495dd5a6e96b8fda1fc6d8d08fef4ebaf434bc6b2b9106971fae7fb5cc4",
+      "sha256_lf": "87095ad01b78b409e595294e2a19badf796f3a0fb48272fd2ccfbac1a6b14823"
+    },
+    "crates/hertz-studio/tests/fixtures/qq_radar.json": {
+      "sha256": "9efd3ae1a51c4bf38d52651653c475cfcb0fc2109bb5e7c559be2cd418b8ae61",
+      "sha256_lf": "425fa3949fb84d2984a3c5b3c17ab659e39f93a6d705574d5231f03c9c8fd38a"
+    },
+    "crates/hertz-studio/tests/fixtures/qq_search.json": {
+      "sha256": "4cae28282fd2433087cd6b7c64e205f73a7c277ea0616eebafacd559c04275a7",
+      "sha256_lf": "8e09ed826438ed66147ec3784a8f876e52fb1d7ce337fa3c5700f9206b33481b"
+    },
+    "crates/hertz-studio/tests/mcp_sdk.rs": {
+      "sha256": "6c0391f2ccd0a21d2d32a9e57fbefe8614cb22cd8a9f9cedcab390c160965a53",
+      "sha256_lf": "c91bd698deb6642dae8da61f57b0cef60b4480e043dd101e2666cd60388e4a61"
+    },
+    "crates/vmusic-audio/Cargo.toml": {
+      "sha256": "ac20c553a0990ff37452d174b184ef9e6333cce37adf0bfa09ac35a36803fef7",
+      "sha256_lf": "e8115afdb29a5b7dd5a60f839ad14f97baa952efc7d4d31922be4a87c586269d"
+    },
+    "crates/vmusic-audio/examples/clocked_resample_probe.rs": {
+      "sha256": "0456ea14b4e189478e28c566febf68cff671a09013a68d379a87f635ebb9b214",
+      "sha256_lf": "0456ea14b4e189478e28c566febf68cff671a09013a68d379a87f635ebb9b214"
+    },
+    "crates/vmusic-audio/examples/device_clock_probe.rs": {
+      "sha256": "4cb92c8fd5d156b7b50b91c5ac8ec77a5ea99168d2c9bdeb9269ac284d9242e8",
+      "sha256_lf": "4cb92c8fd5d156b7b50b91c5ac8ec77a5ea99168d2c9bdeb9269ac284d9242e8"
+    },
+    "crates/vmusic-audio/examples/resample_probe.rs": {
+      "sha256": "d4a321ba1c9d1bb72f07c909c8ee2716009f048cbb18f84bdf09c5b711fd682d",
+      "sha256_lf": "ed89d391a9fba46c18b978af14daa8b45405f09edcdfd1a136a5df6269e33a13"
+    },
+    "crates/vmusic-audio/src/actor.rs": {
+      "sha256": "95a22bfdfc6bf7e16a186917efda9b035a303cef36f9cf978b87b45908c6b635",
+      "sha256_lf": "95a22bfdfc6bf7e16a186917efda9b035a303cef36f9cf978b87b45908c6b635"
+    },
+    "crates/vmusic-audio/src/clocked_resample.rs": {
+      "sha256": "85fea3f2028f31ae79fb3dc457026cbbda7b65c32e5a81b0e1b6b9d3e7ea7e7c",
+      "sha256_lf": "85fea3f2028f31ae79fb3dc457026cbbda7b65c32e5a81b0e1b6b9d3e7ea7e7c"
+    },
+    "crates/vmusic-audio/src/cpal_backend.rs": {
+      "sha256": "17a1887339d4ecb20c09e4c39bd18855fb0e3d944e5002eb3e23862442e75c94",
+      "sha256_lf": "e5e65096a2c0c073e2493502782251f0cab98ea9b885b2b135d5bcba1cfa20ef"
+    },
+    "crates/vmusic-audio/src/lib.rs": {
+      "sha256": "cf33381196991cef4db90f04a0390a13c9c06d58b6a02317a61726026dd955a9",
+      "sha256_lf": "cf33381196991cef4db90f04a0390a13c9c06d58b6a02317a61726026dd955a9"
+    },
+    "crates/vmusic-audio/src/null.rs": {
+      "sha256": "a3263611f3221431491a057f89591ffaad74c1f78a68fe1ce61d024b7a13f67d",
+      "sha256_lf": "5ae27053773320de50e39da44569ebc5ca0001a762de367a01da872116766e70"
+    },
+    "crates/vmusic-audio/src/output_clock.rs": {
+      "sha256": "efb9134a8b65f19dd282f24caeeecbf6b9c9e30a59d0871b24aea2f08699bb93",
+      "sha256_lf": "efb9134a8b65f19dd282f24caeeecbf6b9c9e30a59d0871b24aea2f08699bb93"
+    },
+    "crates/vmusic-audio/src/render.rs": {
+      "sha256": "ef76a8d4f1d8faa67a2a3ec76778d6281c3abe9c4eea95a2912454afc8727d02",
+      "sha256_lf": "ef76a8d4f1d8faa67a2a3ec76778d6281c3abe9c4eea95a2912454afc8727d02"
+    },
+    "crates/vmusic-audio/src/resample.rs": {
+      "sha256": "06b2a2da58fec5a79c446415cbfaf327516caee3b015d51a3237484dbcd20096",
+      "sha256_lf": "d06193f716daf2a7812e60774158b265fadb1822410b5dbeeadf7c68c09f94c6"
+    },
+    "crates/vmusic-audio/src/scheduled_output.rs": {
+      "sha256": "2d26dee0ed7483e3d72d642e4614f45243d8b4906757bbe70d466835a50b4de9",
+      "sha256_lf": "2d26dee0ed7483e3d72d642e4614f45243d8b4906757bbe70d466835a50b4de9"
+    },
+    "crates/vmusic-audio/tests/fixtures/compressed/generate.py": {
+      "sha256": "ad9af201d737261013b28d1e9a79b46d01a2b8409db36f17243192aea9ddca36",
+      "sha256_lf": "68bb490eb40f0c31f775f398d2fdfc4861dca6e9f308fd273d9d906766305fd4"
+    },
+    "crates/vmusic-audio/tests/fixtures/compressed/sha256.json": {
+      "sha256": "6f298c4299aa599989ac8a2ec80a47f73fe822961a363da992f8a25db592a345",
+      "sha256_lf": "72e07e09e5a4e25e157ce6baf0642d5546fb0f51519caebe6a98258ba9b5d1c9"
+    },
+    "crates/vmusic-audio/tests/resampling.rs": {
+      "sha256": "0b9dddb1b7a6560e6eb9b03bcd91002f0093eb906dc5ded75a9aaf50a1601999",
+      "sha256_lf": "db6e2d4260df09a41c88392ecb9ac9d3e316764c11b59d4d9c6c8263224b9cdf"
+    },
+    "crates/vmusic-audio/tests/scheduled_output_alloc.rs": {
+      "sha256": "624141490f0932a7dc6b7139017af4eb54b2f3c0b1a247d1bc27c35646c78811",
+      "sha256_lf": "624141490f0932a7dc6b7139017af4eb54b2f3c0b1a247d1bc27c35646c78811"
+    },
+    "crates/vmusic-beats/Cargo.toml": {
+      "sha256": "9ffbdc99e8858565bf9a85edf2945adf54473ef7ca782960db2a9054d3314ade",
+      "sha256_lf": "d7c6868c50defea5b28f64f6498399c979ccaa8a350255d9c880000305554adf"
+    },
+    "crates/vmusic-beats/examples/pitch_evaluation.rs": {
+      "sha256": "7aaaf858a3b06387bd8f888086b1d575a426e5caf235e075eb9b677e6ae0ae6c",
+      "sha256_lf": "7a740c3f964b131615006a6ebd21d3cd861eabefe5e3341d23e0da12d9f2adc0"
+    },
+    "crates/vmusic-beats/src/lib.rs": {
+      "sha256": "1a659d274ec402dd927a4b2abb545fd404871412a9221a0796a70893b6cb1794",
+      "sha256_lf": "f4d6dc8dbb8ccb81f48f50a235bca7e230d1968e789fe5c7b545b46cbce23d79"
+    },
+    "crates/vmusic-beats/src/pitch.rs": {
+      "sha256": "b3fac540bc46279118372b2de5042f30248f2f05aa64d9c6a91bb2aeb9e3a486",
+      "sha256_lf": "3c7021d87b672eb79bb14c20676ad4826a6e7811305b0ed7991ddde2a067b820"
+    },
+    "crates/vmusic-beats/tests/pitch.rs": {
+      "sha256": "3574051a85ca479ab577d58c772d6acc886ae271a8e83a63ce296011fc160794",
+      "sha256_lf": "c25a24f565a41823f6ebd358781274e65fc2565b1d413a74e70fa39e42c35203"
+    },
+    "crates/vmusic-beats/tests/support/pitch_cases.rs": {
+      "sha256": "7c71b48427ad12d0729cb97b7e0e830d35b7d03ccff5361eb3c1df3f49a119dd",
+      "sha256_lf": "ce2399ff5c9b9ef8cb039ceca36f0fbe4331265b8f56caa475da71ffba9efb27"
+    },
+    "crates/vmusic-core/Cargo.toml": {
+      "sha256": "72d4bb82c61e30cf4c1ea61931fcc4e1055c95f1fb3d8895174235ddb3e67d0b",
+      "sha256_lf": "0d0476a68c2d32e8946a2c02df8906bf1f3d01dd419615c7e7e9d97f38b72155"
+    },
+    "crates/vmusic-core/src/audio.rs": {
+      "sha256": "8961af885ab91105ed98ef1e8dc0815238b1b34087fb64b3ee083c5ddc25307c",
+      "sha256_lf": "68afec724bc34e5bf198bcbb350710b3871fd8ee5fec66deb016e6457f819478"
+    },
+    "crates/vmusic-core/src/error.rs": {
+      "sha256": "f9b77ccc179e40caf3b566bc0641505c0c49472ddefc51c06cdae392fde91c3c",
+      "sha256_lf": "5c6cab54a1d88f1600459b82d927aa171d6a58fb2b24f02ef199a2f8257443c5"
+    },
+    "crates/vmusic-core/src/lib.rs": {
+      "sha256": "9709cd506eba5471ed9b50125492e827da05fe20ecc7a9767582c2c00d6c6c8c",
+      "sha256_lf": "80060d852bef30299c50dd54f732f7aec60e4f75fcdd4bacc5dbceca85be3c23"
+    },
+    "crates/vmusic-core/src/model.rs": {
+      "sha256": "78b426c0115e18e55874a79c6d51c44efc6a27bc68f32f7eedc67a7c2b6b4e0a",
+      "sha256_lf": "21da6335ec3f69d5ba1fe093ee4fb6ab1ad6a6b20b889bed3933b0feeb4122f7"
+    },
+    "crates/vmusic-core/src/room.rs": {
+      "sha256": "f2ff6b9dba6fcbd7e161e8046ab631f5fdca3465d7e6e8d96410c1cbe0b76d7c",
+      "sha256_lf": "f2ff6b9dba6fcbd7e161e8046ab631f5fdca3465d7e6e8d96410c1cbe0b76d7c"
+    },
+    "crates/vmusic-core/src/room/receiver.rs": {
+      "sha256": "ea4b7cf9965f7d80badb7e1fa009941db2794e2195eb64fe09cda939c188d79d",
+      "sha256_lf": "ea4b7cf9965f7d80badb7e1fa009941db2794e2195eb64fe09cda939c188d79d"
+    },
+    "crates/vmusic-lan/Cargo.toml": {
+      "sha256": "d3595581ee6f0c64645c838f6ee0d6f27d65e1c6b9ad6a3f6cd199cb02e6e985",
+      "sha256_lf": "d3595581ee6f0c64645c838f6ee0d6f27d65e1c6b9ad6a3f6cd199cb02e6e985"
+    },
+    "crates/vmusic-lan/src/buffer.rs": {
+      "sha256": "1b2e43ca161eb61d18df96bcca410a36fa7052e0bd86a60b58fdb71be475d655",
+      "sha256_lf": "1b2e43ca161eb61d18df96bcca410a36fa7052e0bd86a60b58fdb71be475d655"
+    },
+    "crates/vmusic-lan/src/client.rs": {
+      "sha256": "6886addf604a20e593706d27932887e942bcb950f51564c0d2a78cbab596cff6",
+      "sha256_lf": "6886addf604a20e593706d27932887e942bcb950f51564c0d2a78cbab596cff6"
+    },
+    "crates/vmusic-lan/src/clock.rs": {
+      "sha256": "fd20e228e5db5f411db4ba0baacb4347b2f1937fbe51ab0e7047f45fb34700f4",
+      "sha256_lf": "fd20e228e5db5f411db4ba0baacb4347b2f1937fbe51ab0e7047f45fb34700f4"
+    },
+    "crates/vmusic-lan/src/discovery.rs": {
+      "sha256": "9d00a6c903f4abf6432b3eb5b6e83f5ac0fc620d1e67a26e0a26986aeede31c6",
+      "sha256_lf": "9d00a6c903f4abf6432b3eb5b6e83f5ac0fc620d1e67a26e0a26986aeede31c6"
+    },
+    "crates/vmusic-lan/src/invitation.rs": {
+      "sha256": "ad8ac1bc993b9aef9c4a0e158a4fe8e86d74d2d0c8dbd542f8ca8a20136c9592",
+      "sha256_lf": "ad8ac1bc993b9aef9c4a0e158a4fe8e86d74d2d0c8dbd542f8ca8a20136c9592"
+    },
+    "crates/vmusic-lan/src/lib.rs": {
+      "sha256": "3f8b31359e7546157aa229e3023c3d86a8068e8d7830fa2377e5afdef86e6866",
+      "sha256_lf": "3f8b31359e7546157aa229e3023c3d86a8068e8d7830fa2377e5afdef86e6866"
+    },
+    "crates/vmusic-lan/src/members.rs": {
+      "sha256": "d5bc28348abd2209020413b611c7839ccf7649fdf214b5ec63d345cef4d6db00",
+      "sha256_lf": "d5bc28348abd2209020413b611c7839ccf7649fdf214b5ec63d345cef4d6db00"
+    },
+    "crates/vmusic-lan/src/notifications.rs": {
+      "sha256": "b3d809dc5cb3430fcd4c4521d23ef9a3a3c08a229cdf7ff7b711dba7f09b280a",
+      "sha256_lf": "b3d809dc5cb3430fcd4c4521d23ef9a3a3c08a229cdf7ff7b711dba7f09b280a"
+    },
+    "crates/vmusic-lan/src/protocol.rs": {
+      "sha256": "dd01e566d39c6aa7776a27aa6fc43e2e5ff68e5b85bc1b81da37c6445addb74d",
+      "sha256_lf": "dd01e566d39c6aa7776a27aa6fc43e2e5ff68e5b85bc1b81da37c6445addb74d"
+    },
+    "crates/vmusic-lan/src/server.rs": {
+      "sha256": "2cf398644d7f1b5432e1da8d2ad72756f20b093638abd510d64708b4a762824e",
+      "sha256_lf": "2cf398644d7f1b5432e1da8d2ad72756f20b093638abd510d64708b4a762824e"
+    },
+    "crates/vmusic-lan/src/tls.rs": {
+      "sha256": "72c04c38a8c9a6c338dc3b4b598e6bb8debe61ddebc11c522235d5637ac9f434",
+      "sha256_lf": "72c04c38a8c9a6c338dc3b4b598e6bb8debe61ddebc11c522235d5637ac9f434"
+    },
+    "crates/vmusic-lan/tests/transport.rs": {
+      "sha256": "86ee88ce5517d93193efe7c9bcc430db77e14ddff8ef558e95e5e1f85671ae53",
+      "sha256_lf": "86ee88ce5517d93193efe7c9bcc430db77e14ddff8ef558e95e5e1f85671ae53"
+    },
+    "crates/vmusic-library/Cargo.toml": {
+      "sha256": "6ee53d65cb1eb20c24545bebc2a138e464aaec7f84d68da36f4c778d4b582c7b",
+      "sha256_lf": "f729f8efaa213b9c869f285f96a756e9ec738cab509a1d57c90b6b5eaa4809f2"
+    },
+    "crates/vmusic-library/src/lib.rs": {
+      "sha256": "de67bffe84ed1dfeddd0a2933924e8505c4453f1bed77360bb8a0c98f17e9ce6",
+      "sha256_lf": "de67bffe84ed1dfeddd0a2933924e8505c4453f1bed77360bb8a0c98f17e9ce6"
+    },
+    "crates/vmusic-lyrics/Cargo.toml": {
+      "sha256": "5cc66789ffeb3a5f65f88c28143bda5b6b01fe5d70d979b8d54481eb75eaa97c",
+      "sha256_lf": "a5faae9a9adec856347babc2809dc0ce202e8a2435f2180c441ca2383ee5e962"
+    },
+    "crates/vmusic-lyrics/src/lib.rs": {
+      "sha256": "d15a4aecbdb65d60d43cbba2c611e77211017091debed3ed4d3406f2f02b7a93",
+      "sha256_lf": "317d25d05ec5f698852970e66cc49f3a5b8a508495f54ddfbc76ef2a30104151"
+    },
+    "crates/vmusic-lyrics/src/structured.rs": {
+      "sha256": "dd5fd8c3aac4503be624a6c223607262443333e84c2049032f419d910333a7cc",
+      "sha256_lf": "cb0990050c3995b68ba7b44b0e3223f1de89c187cb20a617af277d611f1d9174"
+    },
+    "crates/vmusic-lyrics/tests/structured.rs": {
+      "sha256": "6d1d4e859f0a0f37a618212c0e700b367e7f2caebf7b3b61b34a19db0fc42213",
+      "sha256_lf": "9d68424615ba53ca875f90d4ae713e214326c865befafb6f89e22f33858549b9"
+    },
+    "crates/vmusic-store/Cargo.toml": {
+      "sha256": "f5576bc883c7bd31f1466ff0c8e2493af8d366a3d35476efd04ea14495e24eaa",
+      "sha256_lf": "c05a93dbb8209ff6d4920a0c0df1627f39948ab7e2f6c82e55d7e4b20608ad0c"
+    },
+    "crates/vmusic-store/build.rs": {
+      "sha256": "cdde0c6193dd2e6732aa96f59926a7a51e05e819fef7425b0ae3ee2f5ca480ed",
+      "sha256_lf": "e577cc673de56118fd8a210773581992834e5bd00cb2b7a8c0cdbc113dba2dbf"
+    },
+    "crates/vmusic-store/examples/profile-search-candidates.rs": {
+      "sha256": "62f097ccec8206f4d719de96103ab6cc63a02992f374c657e3d1f70ce16a8f53",
+      "sha256_lf": "8d2b0b86059b46e7476e691528f92c78d426a130097fde7bff87278479d2fc39"
+    },
+    "crates/vmusic-store/src/ai.rs": {
+      "sha256": "58543e6c3fa0b50df2d6f0675646c8c46be2786f6e28faeb3f385e78dc923c63",
+      "sha256_lf": "76c68015168096b98bcfeaad2eba8ead42135cceaf4bca049ff11daac33a3ea2"
+    },
+    "crates/vmusic-store/src/ai_jobs.rs": {
+      "sha256": "6698ec1c15a566c9bad3ab6d0de5599b0c910cfb7d0859cc3ebabff8c0b902cb",
+      "sha256_lf": "c227400d9abbaa9cb7b9afd3b1517a57366fdbbeff1c7d6e044d63261c5219fa"
+    },
+    "crates/vmusic-store/src/ai_ledger.rs": {
+      "sha256": "fae8e845ab32845b9d5f2c97b9e2b8bf8efa0ec9d63a7b969e70be97c4b04817",
+      "sha256_lf": "0d6df9dfc28517a9403dfd55dac291db5ef8430c04afdc912494e82ab6107aa7"
+    },
+    "crates/vmusic-store/src/backup.rs": {
+      "sha256": "0412023a6d6679d3d06ef5589ad8c58c2beeb82cbdfbd9ee9777c1703d55418f",
+      "sha256_lf": "29a2f0fb89e431d13cd390b61746f190c047d208f8135f161dce13305541aade"
+    },
+    "crates/vmusic-store/src/emotion.rs": {
+      "sha256": "d06b5ff775f8dcdcb89c6a81e59c49c220a007192159d5c9b5e762f9b740cbc9",
+      "sha256_lf": "0863c10eeabec72bdf0b115e70278cc1923b4bb7c478a34a1902097c7db9ee77"
+    },
+    "crates/vmusic-store/src/favorites.rs": {
+      "sha256": "b3cf11642794b046d7ccb72b58b824eb57d5a4aefa25fc7a49f5edc28e5b7b27",
+      "sha256_lf": "42b037eb1b29c5063718e9ca3210a550c82287bd2ca2f2c2d595793c2bbbd432"
+    },
+    "crates/vmusic-store/src/lib.rs": {
+      "sha256": "806fd664f002bc2967a17420023ae3281ace4082ea164dd1915a6e103ec4efa1",
+      "sha256_lf": "596d35200832df4c2bf4d0b0482bbd025d0727f328df9f3adfa6173217e4e000"
+    },
+    "crates/vmusic-store/src/limits.rs": {
+      "sha256": "92aa1f3c18dcc0f005dbdda65fd0802879487a179b66e7db8af28045e62a5c5b",
+      "sha256_lf": "2a1ae21876cdbb0625ae2ceb50e20d7f063d6c6ec936b80dbeb0ab6cf7fb6567"
+    },
+    "crates/vmusic-store/src/lyrics.rs": {
+      "sha256": "17555cad2632d0138e20d1f5afe29bcd85a98c1246b6556b6ecd10f457b55f40",
+      "sha256_lf": "026e0095e9739ac18b8fe3746f71058dc8981dcf25cf7acb4940ddd8ab3a61d8"
+    },
+    "crates/vmusic-store/src/no_auto_match.rs": {
+      "sha256": "dd56a86f2aa814e98146500e93dc538a0991211d6e1e06086b58d3aaeced8e6f",
+      "sha256_lf": "7ded6d2e554ae174787200297c7b8c393f769cdf1e12c6fa48cca4c162218ff9"
+    },
+    "crates/vmusic-store/src/playlists.rs": {
+      "sha256": "f6fe1b6567fda918cc0d3f83bf94c354ccc594a14ca7a4383791193ab97479b7",
+      "sha256_lf": "75a8c443b0e0c20d97ddd1e21d0af197b16f363b0d3465fceeb4adaf76559715"
+    },
+    "crates/vmusic-store/src/remote_roots.rs": {
+      "sha256": "57a7914652f4fbb9e6e3e15a99f747f1d3eb24900645a830b01c6974e734df21",
+      "sha256_lf": "39b73863e3bc5a2e4406f36afadffd7a43aa0b7bf67beab966224531e53777fd"
+    },
+    "crates/vmusic-store/src/scan_roots.rs": {
+      "sha256": "f57578d96aa48a052a64bdc39bacda7edcd19a0a1b35ffd2d9d9117f1e6fe9f7",
+      "sha256_lf": "0d8d18882dd6732e4d9ce18f43ef124639be14ee7b8468a181c17345fc901f77"
+    },
+    "crates/vmusic-store/src/settings.rs": {
+      "sha256": "f71fd6fc98498b6eacaed90b52dfa9b811dff10387303a1b3392427ec0677854",
+      "sha256_lf": "58fe4840cafb02eef257a4f7b61cacf79938f3e02be550d680da860df7692721"
+    },
+    "crates/vmusic-store/src/track_edits.rs": {
+      "sha256": "b97c699d30d4712818aa78a4a2cb3965352b6613fccdc9bf8aad3d282d423d31",
+      "sha256_lf": "fdee58c9e3ccb22c32d72e6a8e15a434c72b7ad1ff110e7fe77a2c4c09975914"
+    },
+    "plugin/backend/Cargo.toml": {
+      "sha256": "f70a2e08feedf15027f8db18323ba65e7d6c5fedb28c25ff53f2431229f889f5",
+      "sha256_lf": "46d7b8e2eb9f3b21d45e845db412b6f046ca415a78e4d8902a03327bcdca7ede"
+    },
+    "plugin/backend/src/main.rs": {
+      "sha256": "afbcfc5cb51dcefc073bfb19ea94bb44a63d5da2a8a9ca474d11a74905e369f3",
+      "sha256_lf": "54bee1f345b67dfe7c306acc0673ae081bf2961448a3df5ab823b0d90a34cfa1"
+    },
+    "plugin/ui/_metrics.html": {
+      "sha256": "ad0522781253b24f7c3e332fe5291d39ef4d578f5a78e50a78db346dc354d3f5",
+      "sha256_lf": "589a10f674680e3ca9845fec36360539b48c4241994a5b6964aba0c216585334"
+    },
+    "plugin/ui/_wprobe.html": {
+      "sha256": "6ff0360e864d32fbb4a16de34728bfb0b13e471693aa58f06e789f76978d84c5",
+      "sha256_lf": "93fc0aa937dd2b3609701fbd8a5540adebabc03cb29c4505f212e38b086181c6"
+    },
+    "plugin/ui/ai-ledger.js": {
+      "sha256": "76716c12ca165fd7146caf297178ef3aabc60de1c17b27ebbbaabf6806c05593",
+      "sha256_lf": "27c5df574b7469a5b2518bdc8f82fb4e2e2ce258c17f49b3b99e1c78a7af8aef"
+    },
+    "plugin/ui/anime-interactions.css": {
+      "sha256": "25208b6fc336e18c7a292236e21ece8bec95f29701f6cd09648fccc089181ce1",
+      "sha256_lf": "e543e4cbabd7b8970257f06157e83ed427eca264451f38c7d06c9a619951cbe9"
+    },
+    "plugin/ui/anime-interactions.js": {
+      "sha256": "b8a3b336413ae6bd1f0827680f2ac6829f26c61e63e15620efd29661f5dce4c0",
+      "sha256_lf": "84c01a8a1829f67a1c38fbfba105634a596675fe5b98add90ee12533b5e4a5a7"
+    },
+    "plugin/ui/anime-stage.css": {
+      "sha256": "b5ea31e73b4cd0c1d49a8c9c89159af1fc04fc8f674c1e7827683155b22cf201",
+      "sha256_lf": "046c9617473b250a92e06e591584adceb3cb29be23f53b24faedc86ea7c39a7a"
+    },
+    "plugin/ui/anime-ui.css": {
+      "sha256": "b97eb0250bd096f89be859880d84a9c5aaff4e6cda99909f54731f92645456b3",
+      "sha256_lf": "2d4c4f3a6557698cbeb4bc30df2957000c6f2ce0cda7b9800f55eb2b0bfb93f8"
+    },
+    "plugin/ui/app.js": {
+      "sha256": "19752ae81ef62f05e74ffa0798747791ce8527e419241c9db382ac9d7f0c6eed",
+      "sha256_lf": "d5e5ad63916286701bc7ac26c6fdf480c7235b03754c7a8e2956f27c6c41d781"
+    },
+    "plugin/ui/backgrounds.js": {
+      "sha256": "efa1d200d9a7df280b58ed01e02f9ed7852e38e0bcdadc68c5406047d983d557",
+      "sha256_lf": "5876188a421014e37bd1522266ce45f6f071a7adb19b6a7e80d497b3b4aa3fc9"
+    },
+    "plugin/ui/bgwall.js": {
+      "sha256": "7a3712659b56809c686dd2403931b00b7c2af57ef7a0622b57b7bd4420df728e",
+      "sha256_lf": "255042ee0035187df6c23636bf491337d2f940e5437e444eaa9e9f20ea612b0b"
+    },
+    "plugin/ui/cadenza-emotion-check.html": {
+      "sha256": "302039c28767df8d23c737a91f7579ec153fdcf0732e655457570ed747c8266c",
+      "sha256_lf": "5879446fe3ca889266a3cecc928fa1365c11acfab52840e6c8c4d1ac7140eeb6"
+    },
+    "plugin/ui/cel-ui.css": {
+      "sha256": "b0bbf0b52224669052c9fa2e25c4f1d0155d4233fdb09ec63560228fb4b58678",
+      "sha256_lf": "677c4406b47d91321df505b0f81a10dd91f38aac84687fcf78001f02d4d79036"
+    },
+    "plugin/ui/creative-anime.css": {
+      "sha256": "d95b6d6d8eebcd4b3ed29a87f33a95279f215c0b7fd5a5843e6aa9b4fedb3243",
+      "sha256_lf": "59b6bcc4014f606f757118fd73c3ef389029f5b650ff0f547674c0b72b06d563"
+    },
+    "plugin/ui/creative-anime.js": {
+      "sha256": "a4b2952fd48835f467d4cdeee394d5bd51a07c48e95789127a7f525b0815fd7a",
+      "sha256_lf": "3d4dde7edc9d9eafae60b8840e6a207034d6c11695f4b77121d32c8b781d149d"
+    },
+    "plugin/ui/creative-arrangement.js": {
+      "sha256": "26b1769d271f491edf315ad7d608ed18e48004c5eae4d3a7a656e7e6a567a629",
+      "sha256_lf": "b0b7c3e0303f2acaa99fc1da4a3845e3f2b20cfeac2535d59d3af25a17160beb"
+    },
+    "plugin/ui/creative-contract.js": {
+      "sha256": "ba9a4b95e5a6ca76ffc0d6c60f65ccbea6a79904b01b451b81063d0e5eb4e09d",
+      "sha256_lf": "ba9a4b95e5a6ca76ffc0d6c60f65ccbea6a79904b01b451b81063d0e5eb4e09d"
+    },
+    "plugin/ui/creative-draft.js": {
+      "sha256": "ade111807b261e246afb0f310239086064a5951f8d442736bd2b1f683937e766",
+      "sha256_lf": "9437b8f052c4e89659599d2282959bf9d2c68f2af9649f934d9c0f5588ea5cce"
+    },
+    "plugin/ui/creative-gl.js": {
+      "sha256": "d441a60571794f15e891a04fed0084679071ecb7897cb200bd58f40d0ba19098",
+      "sha256_lf": "e159b2dda6e69db347ede4515d6ed0a6490a8c9af54ec7224d86e4688100d73a"
+    },
+    "plugin/ui/creative-pitch.js": {
+      "sha256": "84a6ff939060bc12214240d3c4ffc2554aded473b5aa660cecd5179d18eecc5d",
+      "sha256_lf": "c0e835db910a768cc1cc294022c53be0dde4462a239600156f9bb3ac4db00c41"
+    },
+    "plugin/ui/creative-project.js": {
+      "sha256": "c57e11fe37dc76efff7c956ce4e4cde4fc5f2710024cf8fd5a5fbc22e5bca5b5",
+      "sha256_lf": "b4c2a450d21b007390226822d0a04ed6af7d015068ee5c5e8d68fe0eb0475bcd"
+    },
+    "plugin/ui/creative-prompt.js": {
+      "sha256": "aa9ac25c9364948e38710f75b45cb051bcc46f22804837d1069b899365a0dc58",
+      "sha256_lf": "ca3dbfcf3bde116f41567fa6e13230b969757e3c8a79df75df8dbed5d17bb8b7"
+    },
+    "plugin/ui/creative-share-code.js": {
+      "sha256": "fd4bc4a40703718d8f01e6da94140cb2225bb1dd9d0c02f5f162a0d5bd078f9e",
+      "sha256_lf": "87451e1f067d3e8c2da1a6c4e3281fcd0ae8236350ce6fbfdbccca9ee850c2a9"
+    },
+    "plugin/ui/creative-stage.js": {
+      "sha256": "8fa142d40e2f1875e44cc917a972869835fa0be7e7ebbf57752d0d6484b9722b",
+      "sha256_lf": "45ca18329613f4ae5212bcfba9610cb0332080ad7dfd23ea504eed1803e7bee4"
+    },
+    "plugin/ui/creative-templates.js": {
+      "sha256": "adc683de3000959baf768601835e238b9a79c34bc52c5e0f3672e3f6e3e88aac",
+      "sha256_lf": "4ae38b80c5549a2cd6051f2de8f39019a0b47d89238938f282d2855fca59bf1e"
+    },
+    "plugin/ui/creative.css": {
+      "sha256": "d28148a9b7258e2477859ed0ab3fb07ad6dbfa42c396b3a245ed1894a6d02e01",
+      "sha256_lf": "f68755f9f9b0e9be08087c0f7ce1eca959f25ca76492fb4c7c946785e0bf5f11"
+    },
+    "plugin/ui/daily-view.js": {
+      "sha256": "7eddcac97f9a96693560c1f9db00c229597d4051463c6a21ec8baee29217bc56",
+      "sha256_lf": "9f42301937c84ec7408eaebac9e5d7863f915ccb147cc1798ec3357ae1fa5b88"
+    },
+    "plugin/ui/daily.js": {
+      "sha256": "ad991ff8ef21b177160bd3a5eaf639275c7d65fee71c28163193602eb98d09ad",
+      "sha256_lf": "cdd73e8ee7b9605e7e996d85dc7be059857225cf98e5b56bcd8469e1a1e9a32c"
+    },
+    "plugin/ui/dialogs.js": {
+      "sha256": "5c80fe06b10717ff8062d2a05485a6d37f46326cde30478341131ec026cfdd2d",
+      "sha256_lf": "a69e821c746075abbb87bd38771dd9f46232f1e737d3578dfe620ddd01b478f1"
+    },
+    "plugin/ui/emotion-track-check.html": {
+      "sha256": "2f5b6e7356e5b42c885f15d7b54374b6aa0ff76f1c5eb7ec308177720ed80747",
+      "sha256_lf": "5460649369ad7e53f13a321326339a613ddedf76d4bf0b477dfa2b9defe4ea13"
+    },
+    "plugin/ui/emotion.css": {
+      "sha256": "6fe8362b273e7603b651b8e48898787ef93f00b2061f4c4431286a132b27079a",
+      "sha256_lf": "8f288cf92c34ff6aadde3b524c4bb908aad03a1ec9aaab69e509c505020cb402"
+    },
+    "plugin/ui/favorites.js": {
+      "sha256": "a5c82969c65345482ec885f17073a9f14d2b59437232ad94229509d63570c35a",
+      "sha256_lf": "fe517fec3686600e16ddecddbcdc8512d4a2c738241abe1fff553d9febb1f910"
+    },
+    "plugin/ui/glyph-ab.html": {
+      "sha256": "5a543b6e001b26f4f5834f95c246408248355fb01a332651398f7e69d0cc90e6",
+      "sha256_lf": "055f148bd41b6880189b1c4048cc4dda16829958dc576ed598907377ecc5f69e"
+    },
+    "plugin/ui/glyph-blend.html": {
+      "sha256": "6f8cebfea77d8177f24843ba5058f616234695b6a35efb59f4a574de40477229",
+      "sha256_lf": "448a404917b6d5a428efa197265ee03ec8fdaae59b8f7c22b8fb821cbc90c570"
+    },
+    "plugin/ui/glyph-g1.html": {
+      "sha256": "96079a0e75b0c8440a8a654655f8e706ea067dc3160b18f7f7f5d921b8d06e24",
+      "sha256_lf": "c0f674ec4d6a80040135ebf8d7ccd0f0921411feebfe51264533b7bbcbe19a0e"
+    },
+    "plugin/ui/glyph-g2.html": {
+      "sha256": "5111efa22c4ffe1eb44a341273c66cdb0ab6228978013279df52e404aaf22450",
+      "sha256_lf": "d48909649becc861e3969978b3f18a333b571cf6a724c406170a1f4c40ffe7f1"
+    },
+    "plugin/ui/glyph-g3.html": {
+      "sha256": "6acd1462daf16592f6d28424cb319ff309f159e4547c1f6d75b06c3a5eb41f63",
+      "sha256_lf": "f8b09e7177c675c0171069ad0de43d6dfeb3a5d0e916cf942384a0364e78b4ea"
+    },
+    "plugin/ui/glyph-g4.html": {
+      "sha256": "c8596812e213eb8cf568b3861ba6b861d28ae148246c31d7b78aed900f00fdab",
+      "sha256_lf": "c838dedde3b147c37d89eb03b63e7418c0d5ae28ad8300cf189872d9424b64dc"
+    },
+    "plugin/ui/handdrawn.js": {
+      "sha256": "2c3541238c324b224ab02eaa1b240913ad84ff8ed568a97ef1fdd92efe034a85",
+      "sha256_lf": "17f50d5d38c33d63d3238f537821c1d9ee53d4635b0581b5d584b8d3dbaf1f75"
+    },
+    "plugin/ui/home-dashboard.css": {
+      "sha256": "8ab4147a59f5a61acd675fd33c1b0d402411d957958eb741c330fd130dcdeb08",
+      "sha256_lf": "38c5bc4550ad3865cf519c04ae39dfd03996da96f58eadfbe19e3adace3dcafa"
+    },
+    "plugin/ui/home-dashboard.js": {
+      "sha256": "24b81944fac0dfe6487938c5bec180b4401469e568bcc3b979b4ebbff45d8b50",
+      "sha256_lf": "6bb2f646501ba75907b83dce0e18a9ca298c6307877d62cc723972676c49061e"
+    },
+    "plugin/ui/home-quote.js": {
+      "sha256": "0e0b8a16f9857f79029f3ab3fc2c127d30b1ec36f6cfec74d00055abd3b78116",
+      "sha256_lf": "937621d24042e1e1d2945aff01ddb3d08de21cb7546901d1d9397ce8eaf049a5"
+    },
+    "plugin/ui/host.js": {
+      "sha256": "162feab55b1950249c09e3301f848e956863aabe5690c469aa45274ecc465a46",
+      "sha256_lf": "11ca4a91b2d7eb2e9d6de2ec27f117a58028fe1504a1705065595a77d601474c"
+    },
+    "plugin/ui/index.html": {
+      "sha256": "4f11db97f3ad25a3ad5582c9646feba8534aea73d688b944fc0c5cd004202e98",
+      "sha256_lf": "8315d950b8b83ea72ea5029ad9551267061f8fee733fb5c3ccc14deede289771"
+    },
+    "plugin/ui/lyric-emotion-field.js": {
+      "sha256": "3b34c94d5b4d73aa8faa5eb61bda05cb643d289aa8c605a287455aa8d5199f59",
+      "sha256_lf": "1b3ea00a11382117ff48ab2997f9c87e4b9badb2af38c7e059ecfa5230bbbb0f"
+    },
+    "plugin/ui/lyric-emotion.js": {
+      "sha256": "c27db51bfcf46d0754fbd46dc77cae3ea42fc50aaa897cd53383dd62dc523fc8",
+      "sha256_lf": "71eec091f20ffe8bdceed927521345c276b28abce6a57e5d0ee05a87cfefcfe8"
+    },
+    "plugin/ui/lyric-glyph-atlas.js": {
+      "sha256": "619c68b7dc5a2af19ea1c0b0528c1352f51d31110d754beab21f05ddc4af20d8",
+      "sha256_lf": "866a745c8fac360d01fb77ed784dbd43ba53d3bd21872412457433ab7c892fcf"
+    },
+    "plugin/ui/lyric-glyph-gl.js": {
+      "sha256": "93d1641658dbbae1cf20219ba242bee39097ae50bc24935fe0b237b5b6f17533",
+      "sha256_lf": "630b195df915b44a09afbdd8e6c02bc32282d2f37edd1a89f84e3ee89f652cb6"
+    },
+    "plugin/ui/lyric-glyph-sdf.js": {
+      "sha256": "37e2d86a8e3ff94fff2728ab4414d51433ed9ddfb4f2db519a14d2ee07bfc57b",
+      "sha256_lf": "0f760f8f119880a79d2bee7baaef2aab5f6eae8a46c78015b918aee7d6c89eab"
+    },
+    "plugin/ui/lyric-import.js": {
+      "sha256": "f384e2ac03ae65a905eb86aff9504f959a57af49c7164bf598b1ff698ac86e9e",
+      "sha256_lf": "4eb84b1f1d407d49fcd9a7866d408bde035980f29f5a8b3bfa6a7a21fd2e4fab"
+    },
+    "plugin/ui/lyric3d-emotion-check.html": {
+      "sha256": "2cfc83dc6a21eb22d6fa5684e278b802ef5a75d820bd6ec05ecc2dd37616f027",
+      "sha256_lf": "7b66b95af5ae2d2c69ad40ac6a285c68ae6d03cfb428d613ceae71d61e4ac0c5"
+    },
+    "plugin/ui/lyric3d.js": {
+      "sha256": "c5e6a4e015113fa1f066a5aa5da72b158dac34e2647e43e9e9ad75c6374412e3",
+      "sha256_lf": "6ae3f3f74ef642d08492c9941c9e8c672b1e610e03f4ef9e7f6cbedce44c7dad"
+    },
+    "plugin/ui/now-playing.css": {
+      "sha256": "41b8cd50d1fac9ac77e748ec0cdb5e95dc26dca0730709e0fe9d42c511713745",
+      "sha256_lf": "95f4b1bb2d95b578a59ebd8c2cc7ae5837e2de04ba61e336bc7d429c33123089"
+    },
+    "plugin/ui/now-playing.js": {
+      "sha256": "a085991b7171db06ad696ffd61c314d0a38f219d8af16fec2b21376db9da9cc0",
+      "sha256_lf": "c76660ad2d3a2e4cffcb832cc86f1bf9504bc613586c8585d0ef66483a23d5f8"
+    },
+    "plugin/ui/obs-css.js": {
+      "sha256": "aaa04c62c1bc122402a7bc3864080c1c36a15c3070012cad625cc51087828d5d",
+      "sha256_lf": "86035292c0fb388810ac2202ac73340256ccbd3ef012c8d2e5df2d67651c58db"
+    },
+    "plugin/ui/online-login.js": {
+      "sha256": "ef4d623ec917554e9590289f76fb68dba15c62722ff60a54185dff90dda2ed7d",
+      "sha256_lf": "640d9f7179f0d816b9a4d8e2b89ca2f870a4e617bf742fb476d9f4c20a95e013"
+    },
+    "plugin/ui/online-playlist-view.js": {
+      "sha256": "7926837f88165b393e2935841c4baa9feca81ed38bd3e397e40b257450e90fed",
+      "sha256_lf": "33bfb532d361327d318fd31ea2ccdd41cb6ad601b4081d23233385d021bc55d8"
+    },
+    "plugin/ui/online-playlists.js": {
+      "sha256": "ddb9ffc912e4b80417a0e4cac748dbb1e1dab4ee4e5d5020933570d56b698c25",
+      "sha256_lf": "0f4d83b4af22de5e5c25f93be63a271a55acdb7556a5fa2c01a696a8e2cef458"
+    },
+    "plugin/ui/online.css": {
+      "sha256": "e674e023891e38a75116a1f9067d057fe63f81cc4ca90752a782031560186f1e",
+      "sha256_lf": "2915bbe53e4a6ba4f4d22335e93fc1af708032dd93567cb3b5ef28a6acdf03e1"
+    },
+    "plugin/ui/online.js": {
+      "sha256": "bb85c7aa185bad540f4863d287ceb9f680933969709bb41a4960a31ad1eac8fe",
+      "sha256_lf": "e5b84044d14b5cbbbc973425c2dec1174ec013bf28b9068dac7cf6508e4da475"
+    },
+    "plugin/ui/onset.js": {
+      "sha256": "fdb5bc852e378dcfece1d38091ebd5f3ff076c3de7258ec602ca176f9d6348f6",
+      "sha256_lf": "e6b3f01f0acdb2920998e5c3758e1c74e9a2d9f09b2d7463f2a243b0df64f2fc"
+    },
+    "plugin/ui/overlay.html": {
+      "sha256": "ea1b6bab443d7447a6b19e24fc719352772e3778521f6def6e8a81c5b8fbc7ae",
+      "sha256_lf": "9e6b06e07c898c6b462325fa69a20daa0802cfd74c22fd40a602dff62b6b412e"
+    },
+    "plugin/ui/palette.js": {
+      "sha256": "beea6e9053a19bde561f45690cc2c592115bec7787f9d5f175dfd4e224582eb7",
+      "sha256_lf": "907d98462f0f75bcafe75deb6f3eb07a95b2ad1c73b459199afa2738a2efb6c2"
+    },
+    "plugin/ui/perf-probe.js": {
+      "sha256": "c4a334ef3d949f584ef2b512151b0ea913dc2276d5584502a7739b2e8b49ba40",
+      "sha256_lf": "13fd06753dac39e4276262c73855a21dce9598803e7e85d345aa82e59c827a94"
+    },
+    "plugin/ui/pl-covers.js": {
+      "sha256": "bf737e3ca902c799616803610ebbe01a63c8adb24ebe59f16d8d6350f427b25d",
+      "sha256_lf": "3a1d102f6197cf78f895b7a26f4b6ed896cd39e942c7aac28dea7c6c025604b5"
+    },
+    "plugin/ui/podcasts.css": {
+      "sha256": "b24ba93360a4f0489330640e54e9b586bdd2e88241a57166435cc3b516be2032",
+      "sha256_lf": "7232b8077cc272370c4d9ee6ba4eddbd33407f5355a848051f4644cb787b5308"
+    },
+    "plugin/ui/podcasts.js": {
+      "sha256": "f4671f50710fe81ffac5925d3a29859a23efb9cb81e38e0798c7ce5385573367",
+      "sha256_lf": "956b5dfdc0aa472d939aaade84138572c53b82f86c63934051f6e30c9203c51a"
+    },
+    "plugin/ui/room-transport.js": {
+      "sha256": "22d02442bef25ab86d0dd4b7537af571b7d256df15d3ea5c375194fa3b2511e7",
+      "sha256_lf": "22d02442bef25ab86d0dd4b7537af571b7d256df15d3ea5c375194fa3b2511e7"
+    },
+    "plugin/ui/room.css": {
+      "sha256": "e7df939856ec0b8535079a748dac18a5d95cb4e9e1995740aab33f05c736f536",
+      "sha256_lf": "419dbd4c8c2b6aabfd9600e2dffc5d90fe2c4f789727645b5af957e387872b36"
+    },
+    "plugin/ui/room.js": {
+      "sha256": "eb412026b8c36264708bc46396576e39468f5ac6b6d79de53d471a2daa9d0b4b",
+      "sha256_lf": "af018701929da54c5a27b7c1d825f6e971c05acd1e8aad429b80069b5a54a45d"
+    },
+    "plugin/ui/search-history.js": {
+      "sha256": "635005fe5451d7979828dd94e50ed51a1a29e8b5d568459237eb9088dbcbf349",
+      "sha256_lf": "8de00d8a4b2dd65b4c1e24a2eb30eae555407b50f654cc9081d541f616b0483b"
+    },
+    "plugin/ui/search-session.js": {
+      "sha256": "31463be44d6c69033847b5a142fccbfd8f03443f3063f0a7d3b58f78c2beb7fc",
+      "sha256_lf": "ad11589c8fd61a0c50fae3fdaed8348b5564105c45601be98ddc4f98085045d1"
+    },
+    "plugin/ui/shelf.js": {
+      "sha256": "dc638ec12fff5ab3d5e2697c32479e609dc78a9850805e31064789342217ecf5",
+      "sha256_lf": "e4b19ad4f51a5341918b30d81f2beaff400921239b62f371d70cedee6201d4f7"
+    },
+    "plugin/ui/skins/skin-settings-sheet.js": {
+      "sha256": "8d8f26e8b923370368ce6432257130defd8abb2b7098d8f8897aae5f7f6b1ba8",
+      "sha256_lf": "94f9f64a47c5985516cf81274f9ec8b1a9f136cf10ff200ef966a59c2d188792"
+    },
+    "plugin/ui/skins/skin-shared.js": {
+      "sha256": "4fba28351ab6ff1fcfc2a8599eac55458717516b6fe1f776cb808c6e1888e123",
+      "sha256_lf": "9dbaa4e26bee86ead358b3f862cec33bbe165879fce8cdf32c642b22684c5d48"
+    },
+    "plugin/ui/skins/skin.classic.css": {
+      "sha256": "e6271a04a26a12b5cd74d815ec37aef9bf16adc1819980c06f248974222dee25",
+      "sha256_lf": "18b68bcd322623445ebd9454e3f66cf43d1c0aa81f324898d4e91e8943ec9ed2"
+    },
+    "plugin/ui/skins/skin.heijiao.css": {
+      "sha256": "7856967aed04797af89b81db11073afc579f2e80e600894a424b46b130a7cc04",
+      "sha256_lf": "53f76134a777af7da0397d92f942b1e007b4d0cc3ba3c6689e2e14e856183c5b"
+    },
+    "plugin/ui/skins/skin.heijiao.js": {
+      "sha256": "5be0a658f48160fe7a2e6c6ec9fd7dd8d7670e155b64db2b5da07e23ad997404",
+      "sha256_lf": "7690e9d4eca707e652f0273a87b5e3139f14fceda43c33ff8f743117b42501cc"
+    },
+    "plugin/ui/skins/skin.liunian.css": {
+      "sha256": "f7aec699f51cd13920d1e517f40ce1b05305745a1d7a7d14a537f752016675d3",
+      "sha256_lf": "196e5f85af1c816e55fab4d6be5019741d82531ca03ef4164e3af565bb0ec996"
+    },
+    "plugin/ui/skins/skin.liunian.js": {
+      "sha256": "cdaf47cfa9767e558fd886f0d357f824c108ccbb358fed14cc611c14ab2d2439",
+      "sha256_lf": "e88c239ab43640d7dffcc6a327435de0c28801710ca2bb544ee5c05d97f8b382"
+    },
+    "plugin/ui/skins/skin.orbit.css": {
+      "sha256": "3c77015ba82988ea3f49d9da0d2f26c0aec5ab80401b6d80cd0f7cb7692bb4bc",
+      "sha256_lf": "4c4724ffe7db623baaf5dc8b5a8059c0348e889c89ae2503a89691fd38ddb315"
+    },
+    "plugin/ui/skins/skin.orbit.js": {
+      "sha256": "70e939f989ef89a53df7e4724010e9c876c488de37234346db2db326aaa0f2e4",
+      "sha256_lf": "8e4c7c29cd48010fc5238f39b58604df979dcc354fa6c3135532b17751cc3ae0"
+    },
+    "plugin/ui/skins/skin.qingfeng.css": {
+      "sha256": "acc77f835f9e3b897a626e84d0b2ffc3310861f41340aa000a8dc8dbaa3ef861",
+      "sha256_lf": "77f1bbd1a4d42317eb6a292a8d25307d93684b35a93d5648e63e156de96ae75e"
+    },
+    "plugin/ui/skins/skin.qingfeng.js": {
+      "sha256": "4eaa8feca69430de43d16985781b6601b960f0b367fab11f11ff2545d53121c7",
+      "sha256_lf": "7614eb4fcaf1d63141bfbf6d5dcb65bdfe2530c9b4f255620facb2c97a803433"
+    },
+    "plugin/ui/skins/skins.css": {
+      "sha256": "e20e419ee586c933dccd58b6a1628dbe28be11c53e98750988f304c8742e539b",
+      "sha256_lf": "fecfb534357d0beb9c6fde37ba86b327f335ef69f34254015bc43869439857b8"
+    },
+    "plugin/ui/skins/skins.js": {
+      "sha256": "3796bc3920a5191679dd36ce3cb37011ac2090fb0dbfb1e985837e8f3cd1e3d9",
+      "sha256_lf": "e574bf6b1bd4a607cc8638a5940e396a9b5c693f670c7ac56a8331c517c02489"
+    },
+    "plugin/ui/space-camera.js": {
+      "sha256": "72cd2208445ef97cc4dd70307dea1badda6ac13dbf14c3f7d450d1b5f67cc0cb",
+      "sha256_lf": "f3473eb33e514682d41dc03edfe85b2d792702c1b390992865a2c190724f7323"
+    },
+    "plugin/ui/space-fields.js": {
+      "sha256": "18f34a02236527f54831642fbb96a7b017f96e37ac9e20b3b96768e4b0dea8cb",
+      "sha256_lf": "274f9ba33befe621cb0600abbdc0d000c0d9c3df69049e33fc9f5e38d3d24692"
+    },
+    "plugin/ui/space-home.css": {
+      "sha256": "b31a8fe4aca0e8ca4c495786f632710eeaaeff37497c4da4faecb9ea926c3aa1",
+      "sha256_lf": "514fe754f923f3ad6e62e1bd88bdec797614abd2590614914de276ca9a2fcbe2"
+    },
+    "plugin/ui/space-home.js": {
+      "sha256": "f7e1dabff8989ae8e8733d75faf7f993f5c85a7ba7b93c52a63b389af42a7456",
+      "sha256_lf": "48a7775990a9eaefb9d9998175e61e9b98ccb6d2af386eed2442e802720c1c9b"
+    },
+    "plugin/ui/space-layers.css": {
+      "sha256": "da780e4164c70fcda9933b94097ed4f77ad4ed701ee496c3f78a91c9ed4d7ae3",
+      "sha256_lf": "e1cdb5a8335525f8fb642eec22d4eb9fcf8f08a64531f5a766f9d7b40368aa49"
+    },
+    "plugin/ui/space-layers.js": {
+      "sha256": "2e0a7a0ae2a8ee1ffaf0df8ab9ca6027a70a31254465c1c1c9cd31caba98b0d6",
+      "sha256_lf": "7e042dbe7ab61101647d00ac29a5092303ba9b92a601a9e7e234628cfd910aeb"
+    },
+    "plugin/ui/space-post.js": {
+      "sha256": "7769c31ef7b0afa2db806b8fb6b2b4042d881c758816b3ec5fc9a03bd663c8b1",
+      "sha256_lf": "0a92076412c78620792611284d9150a88a88c858f459a23708af527bbcf7379d"
+    },
+    "plugin/ui/space3d.css": {
+      "sha256": "c3866e180502baaa3caad16d81c96027f5403edcd650a9f4787bc75bc50dc931",
+      "sha256_lf": "034ac25df18a8af2f042c842c17c23f8256b9103680c91defa9141282f4884ca"
+    },
+    "plugin/ui/space3d.js": {
+      "sha256": "da5bab410e48e1e7621e864823e54bbbe518b6adfe6f629936c115bddfcc16a1",
+      "sha256_lf": "fb5b5dc35555b3cd123cc4dcaafb1ffbf6d81eafd2ed1c91d76e80c947629212"
+    },
+    "plugin/ui/stage-anime-svg.css": {
+      "sha256": "40f6d6bfa5fd72049ca3ea7ec51132c153aaf82662a07dab9c1a43349b032900",
+      "sha256_lf": "cef91f43467275c8a86146191c206188ae3d59b6dc72ee735cb7cea0ffb30df0"
+    },
+    "plugin/ui/stage-anime-svg.js": {
+      "sha256": "74b9a8c6f528ecd9b44976331aed64e841f5c90332c1cc2fb38ac6e37b2ffe51",
+      "sha256_lf": "8c6c2031649e5ecf383757b1a4ebc23ba63a165bce891c130c6698c66f8e08fb"
+    },
+    "plugin/ui/stage-cinema.js": {
+      "sha256": "14fae02cd2322fe56b25c114f170c3403ad2dc4f1e57269ee2d9c9df270ed66d",
+      "sha256_lf": "51a6b891c46859d3790a84648dbbf7ee786f9b9ec7d0af2c012f3cfe3f657236"
+    },
+    "plugin/ui/stage-coast.js": {
+      "sha256": "9c6fa6675724826191eeecf6e99c81b569cf339f2363250ba1ebce99f48634b9",
+      "sha256_lf": "042a50d67ddbde33a8d81e5a1094601cec35fc452d44b1f373f26291e717fb3f"
+    },
+    "plugin/ui/stage-control.js": {
+      "sha256": "e63739de6c43d49f8654915c7be8f501f12c61acee9861d4fde24c07577efaf7",
+      "sha256_lf": "0f317a151ebead7e66b610471d9db8d182b72490e87a4c99a910ac47c62db5ff"
+    },
+    "plugin/ui/stage-focus.js": {
+      "sha256": "7a86eb573530220438bf455d7ede3ed28d8789293222f7a710cab190951a492c",
+      "sha256_lf": "7b90f95d5eef0d133f7f6a1ce069f4978665bb54b9d3e0a8a2b35621bc7ea203"
+    },
+    "plugin/ui/stage-freecam.js": {
+      "sha256": "5ef58553760f086098b522651bbc0caed3db6fb25af79f11949c433052f5feaf",
+      "sha256_lf": "52da47a9d15bd81541ab9bba690282ea480dee69026e510340dbc6ce9750b075"
+    },
+    "plugin/ui/stage-immersive.js": {
+      "sha256": "a1f973d3b4eeeac4142cbb13c8b21a354f435c6c954c618b9f67d076f460df1e",
+      "sha256_lf": "af08e8283a5663fb95d6b27042045c288c2888bddd1085b45abe16229b9b1e33"
+    },
+    "plugin/ui/stage-lyrics.js": {
+      "sha256": "c196ac5bcd5d153e8654e6be7d8a34603db672a2fb5a45850a0e3d21142e2c7b",
+      "sha256_lf": "2fd59a3a759dbbaadda120e89f34ec78213bb8d347f30d07df4cef92dd17c0a3"
+    },
+    "plugin/ui/stage-particles-gl.js": {
+      "sha256": "bbda1a107eec9ad8cf304710ae7021605123cdbcd2fce642f9618bbe8a306d99",
+      "sha256_lf": "d106a4bd3e9a17f4ff2aa12fd4b7124c0bd203572b3338bfc0bb40705f3d3ea7"
+    },
+    "plugin/ui/stage-particles.js": {
+      "sha256": "9aee442aab698b5150a394c0b6fc9eaed81e9d65504710e908ce1c7dcd4804d0",
+      "sha256_lf": "15230fb8d99f9203d9940c14e6929150f85e1e921aa1a8efa32586af1dff7bc9"
+    },
+    "plugin/ui/stage-settings.js": {
+      "sha256": "45e2f666b6480bc6775b96e70816dd288f9db2478a68f4aaf586a2057221a137",
+      "sha256_lf": "a05e11936e5db658b2d4b01e424e36046a388cf0eba86b3b4592bd977e8ead00"
+    },
+    "plugin/ui/stage-shelf.js": {
+      "sha256": "68ce8d98dbddf98c52a1501c1a1d5287a16dafbf5f98da49964bc97e25d5ffe5",
+      "sha256_lf": "a7b6d23edf781afb059e134036014d48ac1f572fdb4352f9962c0b192f71de51"
+    },
+    "plugin/ui/stage-themes/ios.css": {
+      "sha256": "1be49734a5a7a55af3adb15a040ad6cf49f4d58329936753328c6f102e49d69d",
+      "sha256_lf": "7781a8bab4d70bfed83c65ba6aacf1aa6384e1123d5e9570be35ee5f3ca244c5"
+    },
+    "plugin/ui/stage-themes/starfall.css": {
+      "sha256": "65d62a3b76d2b38b37967afa9e5eb38a222574dd24cdf3a016586fd65e7223d1",
+      "sha256_lf": "52d4ad548f6306bdb29fae9cdacf459c134ae2a95fef5c0d1115a24f4aa158f8"
+    },
+    "plugin/ui/stage-zodiac.js": {
+      "sha256": "473d4bf7c0f64e331ee2e8787b1b6512e7da88c1e2e5597749076de43c6bd1d5",
+      "sha256_lf": "425c36da1d4a23691a40bedc252a37da6fb092fba8235511fe56221089139b38"
+    },
+    "plugin/ui/stage.css": {
+      "sha256": "70124998e6f8c0d072ee8899e8d38a8f9eb2637003bb15fc08ae93f15d3fb895",
+      "sha256_lf": "3518d8b579da01982310e8b6eed0bc7cd661488b8d1e406e143a07e958566851"
+    },
+    "plugin/ui/stage.js": {
+      "sha256": "e9e2d1d4a033c2018ce35f216a5a1ce2e328ad779c01211d1fe75ab1344d3f5a",
+      "sha256_lf": "0e966d03e1c9464e3aca845d1964a30dc8099e8297d831d10aa2506a19de803f"
+    },
+    "plugin/ui/stage3d.css": {
+      "sha256": "8df0bb79b7e3ac68969701ed48424f02da80081872a2d08fd8a263e7c766f7de",
+      "sha256_lf": "8e4d0789fd42d5953fb626dfbc4437fa2930c592358428491963354f6fb89cb2"
+    },
+    "plugin/ui/stage3d.js": {
+      "sha256": "c6c7c3c31f39e20aaf576caa4cc1ecdb53a3b08efe1342457f9f543581ee2499",
+      "sha256_lf": "cda0c55c9442c375d2b1b4143feaac6723373c8610d5e266e61d41ab977f21a7"
+    },
+    "plugin/ui/stanza/stanza-bg.js": {
+      "sha256": "762349f3f9a0149468d8f5ef39685ef012018638cef979e1f25c77a17ba41536",
+      "sha256_lf": "e1d0080df5ba14988c842e2e8ff2cca9f1d0fdaccd2219b741cfc62e1d5b507c"
+    },
+    "plugin/ui/stanza/stanza-cadenza.js": {
+      "sha256": "9732f41afecb7d5ec7ed95922b37537faca937872281c798c8bcc728c6ef375c",
+      "sha256_lf": "a290a4907320e11a32c0dfd7b8bb219eba8f61a9207440846e9545ccbf5afe07"
+    },
+    "plugin/ui/stanza/stanza-classic.js": {
+      "sha256": "791036f2ebc9e4c369b2b07e57779a587f576f1a5606a91424e554ed307da670",
+      "sha256_lf": "46f583ca1c969f208563389abf46d0df901baaff4e826eaf571f6d23d8fba775"
+    },
+    "plugin/ui/stanza/stanza-glyph.js": {
+      "sha256": "00f9fe4c3bb100be0b7f39d8d485ca4bd7d6d9120d330bbc3ce7060755ba824c",
+      "sha256_lf": "40fb21f273a0ba5bfceb8e868853f3f57eb09cf948843cc1145cc34c688f9e02"
+    },
+    "plugin/ui/stanza/stanza-songform.js": {
+      "sha256": "c9b3c1b4b8236ef23dcb0a584e8fdd67c09637c18ad7dee21af1a8bda1ce3b3e",
+      "sha256_lf": "3e4ad00af8e6d85441be984a498cff8ea801c28b449f66170cb46c12a986c6a1"
+    },
+    "plugin/ui/stanza/stanza-sonnet-fx.js": {
+      "sha256": "4bb959525f3fa7ebbc30d5366e50d2bbcbfa31dd4f938a92d5559fefd6c5b98e",
+      "sha256_lf": "7b9ed395e7760b234a9ae1dc89b66fda8601ad50230b99ea4eb2d1cffc298caf"
+    },
+    "plugin/ui/stanza/stanza-sonnet.js": {
+      "sha256": "ac2228e7534e3a99fdd420597e03e56c94066de6d371eca70144c5b92fbd9bff",
+      "sha256_lf": "df8ec14e654a489962402a7f83eb0927d63db5ef2073db46c08146932d5ff848"
+    },
+    "plugin/ui/stanza/stanza-starborn.css": {
+      "sha256": "e4badaf4ebef3664323133e5e7aa2ddfb36514e671b3f868ad107707d6c9feab",
+      "sha256_lf": "4b2b9dd70ecd024fc47f61b073a092e36a103790e35a696f2917c7e03a7f8e1a"
+    },
+    "plugin/ui/stanza/stanza-starborn.js": {
+      "sha256": "df17ed8a9c565b813c4eb131a480f6237013b92044a01ce56d80be595a26c123",
+      "sha256_lf": "75f48e7549b7ccb9eb89c262ee721c6b443325f69993e8735f6786cf426e407b"
+    },
+    "plugin/ui/stanza/stanza-subtitle.js": {
+      "sha256": "850ef86ee6ad8b11db2fec5166633e9fa55ebb9c17b25958f439e32901ff3451",
+      "sha256_lf": "42e9a96cbffa222f6c7fc4685bf8e8c4e8b440f20d03f7902b78dcf3b465d615"
+    },
+    "plugin/ui/stanza/stanza-tempera.js": {
+      "sha256": "af8dda358571e1ed9627f4bafbdccf954075db8242b11173f79ff006aa6db3eb",
+      "sha256_lf": "5791409b62eb949f4181e80ec93fd53d808d8b9790042ec27172a2841edc878b"
+    },
+    "plugin/ui/stanza/stanza-textlayout.js": {
+      "sha256": "eb2c5cf97277c7dca53001f4c422621ea73b53abe5a4ea0ea101bf0bd154947b",
+      "sha256_lf": "a69ee690e94bcdca87eb18443f847598ae41a0b7ea4babb1feaaef2c490d772f"
+    },
+    "plugin/ui/stanza/stanza-theme.js": {
+      "sha256": "481d0cdbef0f82bb5020bf400f83263354f022142932161faeab82b6ac77bcce",
+      "sha256_lf": "67b9c5c22e7eac6a83aa1c3de1131023b79bf0a8ccd5e8cbb01fec277f4eca8a"
+    },
+    "plugin/ui/stanza/stanza-util.js": {
+      "sha256": "ffe62cbd68ca03b4a4bdf1a70a86fd8c3f55cc41237f613aa60f74165a67fadc",
+      "sha256_lf": "fbfb2844051f8dcf15677afc5b2fee25f1e6358da1cdb2ad19ffdaf65ffac064"
+    },
+    "plugin/ui/stanza/stanza.css": {
+      "sha256": "9283d7ad357d16822b59cd143eaa650d7a75cfaf907aef954e55f629c02c5e84",
+      "sha256_lf": "b0a40bcc0e0301bc5005f8d02e55d56010fca593b8fd7c8cd6390a37ed6dbda3"
+    },
+    "plugin/ui/style.css": {
+      "sha256": "095501960eaec40b69fe969564a7f09d67d2f167c70c0bbda09e359c7c97b891",
+      "sha256_lf": "9615e7d27eef3bcd8058a24347572537cd2569b8ee5c5926775aa48401b6431c"
+    },
+    "plugin/ui/theme-studio.css": {
+      "sha256": "11797922d2db67281b309d4ae075e963c16db2515b6cf750dbd222e30f27f4c4",
+      "sha256_lf": "500cbf8851138b31141d622e2ce8fd5c85965511fb4b264458b2550b788b56ea"
+    },
+    "plugin/ui/theme-studio.js": {
+      "sha256": "b368b96064fb902bbb15cbc6ee60187e11447f2b34523942c720305beb380121",
+      "sha256_lf": "78e9c6bb8a20e853bd41fe88f89b76eb586986aba9aaec76e120c119a16899d6"
+    },
+    "plugin/ui/themes.js": {
+      "sha256": "8d3adaded51f50315710b03417733f56358bbdc3d3ea22b1afa5a920a9816763",
+      "sha256_lf": "fbb095361c7a8bb01f1844dd8c138cccb0d0c4d4ab65c1cfe36ece0420591463"
+    },
+    "plugin/ui/topsearch.js": {
+      "sha256": "5886e6a1a58f9aba1b257d27b8f13d42b9102f6ee78a064bd035173c959b203b",
+      "sha256_lf": "6645a92917b9beaa3314f2e9c2dcac9a2bb0d37917b389aa052b0ee08e8eb42d"
+    },
+    "plugin/ui/vendor/coast-stage.js": {
+      "sha256": "71879224fd5044f8562f3a486170bcb5e6fb3a3c5983345a5ae93a9cfed52975",
+      "sha256_lf": "71879224fd5044f8562f3a486170bcb5e6fb3a3c5983345a5ae93a9cfed52975"
+    },
+    "plugin/ui/vendor/pixi.min.js": {
+      "sha256": "0528842e37fd89c975344f54a51d4cb6955ac2d4654726d52959586aecfd948a",
+      "sha256_lf": "9948591083793305468d73915a3ea85032dcf8e32eee7a1328585050d7a14d53"
+    },
+    "plugin/ui/vendor/qrcode.js": {
+      "sha256": "55427af126a7fd46b83b7a9557b7ad6a48850b31f2b4a1b32e2289e376dc80b4",
+      "sha256_lf": "79ec86f82856005b1c887905cfccfcfbec3821ca61c7fd5a952faa5f778f791c"
+    },
+    "plugin/ui/vendor/space-stage.js": {
+      "sha256": "9d0991ceebb27dd3278a6ab4d374a48a33aa9a42b3513109efce8f8dcae51104",
+      "sha256_lf": "9d0991ceebb27dd3278a6ab4d374a48a33aa9a42b3513109efce8f8dcae51104"
+    },
+    "plugin/ui/vendor/stage-runtime.js": {
+      "sha256": "79e9580573afcbf5e29c2aedd743b083a880a6285257af27cab4e4102793d5f5",
+      "sha256_lf": "79e9580573afcbf5e29c2aedd743b083a880a6285257af27cab4e4102793d5f5"
+    },
+    "plugin/ui/vendor/zodiac-stage.js": {
+      "sha256": "001209d751bc8a9c0babbe17f79c75cdb2ebf801a74d3f1085485ec9477bc538",
+      "sha256_lf": "001209d751bc8a9c0babbe17f79c75cdb2ebf801a74d3f1085485ec9477bc538"
+    },
+    "plugin/ui/video-export.js": {
+      "sha256": "9dbb721d1d44b460f61f1580c53620c9979a93313659836237bd53196dbc0982",
+      "sha256_lf": "0f6bd8a42a7358cfc1df93d8d267668801de3ed9db5ad2f56dea98dbfe6ec852"
+    },
+    "plugin/ui/workshop.js": {
+      "sha256": "9f157b5238ae5c758d299224cd607d9c47fae7d58e59eedc66f6c333ca238e1d",
+      "sha256_lf": "91f00063e162c2c2558168aa01b6028c79658f12a68b110b9e7cac9e61e1af65"
+    },
+    "plugin/vendor/dbx-plugin-sdk/Cargo.toml": {
+      "sha256": "6606e9990ee3c072ff46d9fabe970b8c038ef8372f3c5f9491f929a68257edb2",
+      "sha256_lf": "4959d1a2e3d4ae730e6c773aff749007fca2cb52a671e74213440babd768e29f"
+    },
+    "plugin/vendor/dbx-plugin-sdk/src/lib.rs": {
+      "sha256": "5ce065d48e8dcfcdfac890c316771e3ad2a5cf43f9b8b5e2ef43b61222b4f928",
+      "sha256_lf": "6ad1b4253deee8842400658a2fff8bf21d2d1d1d18328d632029eb847ce91b2a"
+    },
+    "scripts/check-lan-room.py": {
+      "sha256": "450252522aaf41d3ac58a4e20151a777d96fefaf828fb8efd61419a9b2b16d22",
+      "sha256_lf": "450252522aaf41d3ac58a4e20151a777d96fefaf828fb8efd61419a9b2b16d22"
+    },
+    "scripts/check-plugin-room-shutdown.py": {
+      "sha256": "a10c92d1b39a2c8adedd49799e5d709fb91db222c8fa73186244d4c9b6139e0f",
+      "sha256_lf": "a10c92d1b39a2c8adedd49799e5d709fb91db222c8fa73186244d4c9b6139e0f"
+    },
+    "scripts/check-room-ui.js": {
+      "sha256": "4ee2289738f2aaa0750f05983714615945d29df6e96ae8381802b735802ef4db",
+      "sha256_lf": "260eaa4d09845aa51afbc90c76513fab3992a847e2a0ec558dc10291410a225b"
+    },
+    "scripts/minify-ui.js": {
+      "sha256": "1177badeec8d71aa1975aa4b287e771fcf8ce4217e37e0146d1f9405ec19e208",
+      "sha256_lf": "987137f05dd7c475c063fbc698e83814cac6b5318c94a0cceb67686381fa0df2"
+    },
+    "tools/space-stage/package-lock.json": {
+      "sha256": "94c5de1152fe676062eb17da69d8e478e4f6c466428e6f088e2e78a5d038367c",
+      "sha256_lf": "94c5de1152fe676062eb17da69d8e478e4f6c466428e6f088e2e78a5d038367c"
+    },
+    "tools/space-stage/package.json": {
+      "sha256": "1bd3a6c25b6a8da4d68a7ea74196384b9dcffd951919f91a9a0f378ce75355a6",
+      "sha256_lf": "1bd3a6c25b6a8da4d68a7ea74196384b9dcffd951919f91a9a0f378ce75355a6"
+    }
+  },
+  "platform": "Windows-11-10.0.26200-SP0",
+  "compiler": "rustc 1.98.1 (48a229cea 2026-09-01)\nbinary: rustc\ncommit-hash: 48a229ceaefd4985c50990b14116b6d856af0985\ncommit-date: 2026-09-01\nhost: x86_64-pc-windows-msvc\nrelease: 1.98.1\nLLVM version: 22.1.8",
+  "cargo": "cargo 1.98.1 (797e8a9bc 2026-08-05)",
+  "native_binary": "target/debug/hertz-studio.exe",
+  "native_edition": "Standard",
+  "native_binary_sha256": "e8fe7b12adad8d36b9b85371c266d59988ed8bbf730e0a50dd8f1da29691d978",
+  "plugin_binary": "target/debug/dbx-plugin-hertz.exe",
+  "plugin_edition": "Full",
+  "plugin_binary_sha256": "97531eb7b4fa14abdc2753f7f36aba8660c4bef4470fade0f520de47b29e220e",
+  "release_eligible": false,
+  "hardware_pending": [
+    "macOS/Linux native device and clock acceptance",
+    "two-machine and cross-OS acoustic measurements with one capture clock",
+    "8 native audio endpoints under network and chat load",
+    "8-hour real-device continuous playback",
+    "real-device sleep/wake, hot-unplug and network recovery matrix"
+  ],
+  "ci_matrix": "Windows/macOS/Linux, Standard/Full and MSRV jobs configured; remote execution not observed in this local delivery",
+  "limitations": "Two processes on one Windows machine with a real muted WASAPI output. Digital probe is synthetic. Neither establishes cross-machine acoustic synchronization."
+}

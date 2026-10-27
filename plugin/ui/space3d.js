@@ -16,8 +16,11 @@
   var panelPreview = null, nodePreview = null, previewTimer = 0, hud = null, hudRecipe = null, hudUntil = 0, hudTimer = 0;
   var zodiacHud = null, zodiacStarCard = null, zodiacSignIndex = -1;
   var zodiacHover = null, zodiacPinTimer = 0, zodiacPinIndex = -1, zodiacSwapTimer = 0;
+  var phoenixHud = null, phoenixHudAt = 0, phoenixPhase = '';
   var CN_HOUSES = ['一', '二', '三', '四', '五', '六', '七', '八', '九', '十', '十一', '十二'];
+  var PHOENIX_PHASES = { flight: '翱翔', swarm: '散羽', gather: '聚焰', egg: '凝卵', rebirth: '涅槃' };
   var clickSerial = 0, lastClickAt = 0, downPoint = null, holdTimer = 0, charging = false;
+  var warpTimer = 0, warpHideTimer = 0, warpFrameTimer = 0, warpStarted = 0, warpActive = false, warpReady = false, bootSeq = 0;
   var prefs = { sceneSource: 'coast', sceneStates: {}, lyrics: true, lyricStyle: 'subtitle', cinema: true,
     qualityMode: 'auto', playerAutoHide: true, shelfMode: 'side', freeCam: null, schemaVersion: 3 };
   var labels = { auto: '自动', low: '轻量', medium: '标准', high: '高画质' };
@@ -175,11 +178,12 @@
       requestAnimationFrame(function () { if (zodiacHud) zodiacHud.classList.remove('is-changing'); });
     }, 150);
   }
-  function zodiacPrimary() {
+  function scenePrimary() {
     if (!host) return null;
     var measured = host.stats();
     return measured && measured.sceneStats && measured.sceneStats.primary || null;
   }
+  function zodiacPrimary() { return scenePrimary(); }
   function zodiacActive() {
     return page === 'stage' && prefs.sceneSource === 'zodiac' && status.state === 'ready'
       && !root.classList.contains('sp-immersive');
@@ -192,7 +196,60 @@
     zodiacHud.hidden = !info;
     if (!info) { hideZodiacStar(true); return; }
     setZodiacInfo(info, zodiacSignIndex >= 0);
+    var hint = zodiacHud.querySelector('.sp-zodiac-hint');
+    var hintText = info.charge >= .98 ? '蓄能完成 · 松开释放星链脉冲'
+      : info.charge > .08 ? '正在蓄能 · 保持按住，松开释放'
+      : info.hover >= 0 ? '主星已锁定 · 点击读取 · 按住蓄能'
+      : '移动扫描 · 按住蓄能 · 拖拽环绕 · 滚轮缩放';
+    if (hint && hint.textContent !== hintText) hint.textContent = hintText;
     if (zodiacHover && zodiacStarCard && !zodiacStarCard.hidden) positionZodiacStar(zodiacHover.x, zodiacHover.y);
+  }
+  function phoenixActive() {
+    return page === 'stage' && prefs.sceneSource === 'phoenix-vortex' && status.state === 'ready'
+      && !root.classList.contains('sp-immersive');
+  }
+  function syncPhoenixHud() {
+    if (!phoenixHud) return;
+    var info = phoenixActive() ? scenePrimary() : null;
+    phoenixHud.hidden = !info;
+    if (!info) { phoenixPhase = ''; return; }
+    var phase = PHOENIX_PHASES[info.phase] ? info.phase : 'flight';
+    var label = PHOENIX_PHASES[phase];
+    var charge = clamp(Number(info.charge) || 0, 0, 1);
+    var strikes = clamp(Math.round(Number(info.strikes) || 0), 0, 3);
+    if (phase !== phoenixPhase) { phoenixPhase = phase; phoenixHud.dataset.phase = phase; }
+    var phaseNode = $('sp-phoenix-phase');
+    if (phaseNode && phaseNode.textContent !== label) phaseNode.textContent = label;
+    var meta, hint;
+    if (phase === 'egg') {
+      meta = strikes >= 2 ? '蛋壳将裂 · 最后一击'
+        : strikes > 0 ? '裂纹蔓延 · 再击 ' + (3 - strikes) + ' 次'
+        : charge > .5 ? '烈焰灌入 · 蛋壳嗡鸣' : '蛋壳封火 · 等待唤醒';
+      hint = charge > .95 ? '蓄火完成 · 松手裂壳'
+        : charge > .08 ? '蓄火中 · 松手裂壳' : '按住蓄火 · 点击裂壳';
+    } else if (phase === 'gather') {
+      meta = '万羽归焰 · 凝卵成形';
+      hint = '点击催火 · 加速凝卵';
+    } else if (phase === 'rebirth') {
+      meta = '烈焰焚壳 · 涅槃重生';
+      hint = '守候余烬 · 等待重生';
+    } else if (phase === 'swarm') {
+      meta = '凤羽漫天 · 聚散成焰';
+      hint = '点击凤凰 · 唤来涅槃';
+    } else {
+      meta = '烈焰加身 · 长空翱翔';
+      hint = '点击凤凰 · 唤来涅槃';
+    }
+    var metaNode = $('sp-phoenix-meta');
+    if (metaNode && metaNode.textContent !== meta) metaNode.textContent = meta;
+    var hintNode = $('sp-phoenix-hint');
+    if (hintNode && hintNode.textContent !== hint) hintNode.textContent = hint;
+    var fill = $('sp-phoenix-charge-fill');
+    if (fill) fill.style.width = Math.round(charge * 100) + '%';
+    var pips = $('sp-phoenix-pips');
+    if (pips) Array.prototype.forEach.call(pips.children, function (pip, i) { pip.classList.toggle('is-on', i < strikes); });
+    var aria = '凤凰涅槃：' + label + (phase === 'egg' ? '，裂纹 ' + strikes + ' / 3，蓄火 ' + Math.round(charge * 100) + '%' : '');
+    if (phoenixHud.getAttribute('aria-label') !== aria) phoenixHud.setAttribute('aria-label', aria);
   }
   function positionZodiacStar(x, y) {
     if (!zodiacStarCard || !root) return;
@@ -271,7 +328,7 @@
       immersiveNodes.forEach(function(item){item.node.inert=item.inert;});immersiveNodes=[];
     }
     root.classList.toggle('sp-immersive',on);
-    syncShelf(); syncZodiacHud();
+    syncShelf(); syncZodiacHud(); syncPhoenixHud();
     ['sp-immersive','sp-stage-immersive'].forEach(function(id){$(id).setAttribute('aria-pressed',String(on));});
     $('sp-immersive-toggle').checked=on;
     if(!on){
@@ -282,10 +339,27 @@
     poke();
   }
   function touch(ms) { until = Math.max(until,performance.now()+(ms||900)); kick(); poke(); }
+  function homeIdle(value) {
+    if (!root || root.classList.contains('sp-home-idle') === value) return;
+    root.classList.toggle('sp-home-idle', value);
+    $('sp-home').inert = value;
+  }
+  function hideHome() {
+    if (page !== 'home' || panels.length || loginOpen()
+      || (global.SpaceHome && SpaceHome.isPanelOpen())
+      || !global.matchMedia('(hover: hover) and (pointer: fine)').matches) return;
+    var focused = document.activeElement;
+    if ($('sp-home').contains(focused) && focused.matches(':focus-visible')) return;
+    homeIdle(true);
+  }
   function poke() {
     if (!root) return; root.classList.remove('sp-idle');
+    homeIdle(false);
     if (idleTimer) clearTimeout(idleTimer); idleTimer = 0;
-    if (page === 'stage') idleTimer = setTimeout(function () {
+    if (page === 'home') idleTimer = setTimeout(function () {
+      idleTimer = 0; hideHome();
+    },3000);
+    else if (page === 'stage') idleTimer = setTimeout(function () {
       idleTimer = 0;
       if (page === 'stage' && present().playing && !panels.length && !isControl(document.activeElement)) root.classList.add('sp-idle');
     },2600);
@@ -369,13 +443,14 @@
   }
   function setPage(next) {
     page = next; root.dataset.page = next; root.classList.remove('sp-idle'); clearPreview();
+    poke();
     $('sp-home').hidden = next !== 'home'; $('sp-canvas').hidden = next === 'closed';
     $('sp-stage-settings').hidden = next === 'closed'; $('sp-fx-toggle').hidden = next === 'closed';
     resetFloat();
     var toggle=$('sp-page-toggle'),destination=next==='stage'?'首页':'三维舞台';
     toggle.title=destination;toggle.setAttribute('aria-label',destination);
     toggle.querySelector('use').setAttribute('href',next==='stage'?'#i-home':'#i-cube');
-    $('sp-reading').hidden = next !== 'stage'; syncSettings(); syncPlayer(); syncShelf(); syncZodiacHud();
+    $('sp-reading').hidden = next !== 'stage'; syncSettings(); syncPlayer(); syncShelf(); syncZodiacHud(); syncPhoenixHud();
   }
   function releaseInput() {
     lockRequest++;
@@ -393,6 +468,75 @@
     $('sp-canvas').textContent = ''; status = {state:'idle'}; $('sp-failure').hidden = true;
     if (lyricView) lyricView.reset(); lyricKey = ''; lastPosition = -1; lastTrack = null;
   }
+  function buildWarpSpace() {
+    var gates = $('sp-warp-gates'), stars = $('sp-warp-stars');
+    if (gates && !gates.childElementCount) {
+      for (var i = 0; i < 12; i++) {
+        var gate = document.createElement('i'); gate.className = 'sp-warp-gate'; gate.style.setProperty('--i', i); gates.appendChild(gate);
+      }
+    }
+    if (stars && !stars.childElementCount) {
+      for (var j = 0; j < 64; j++) {
+        var star = document.createElement('i'); star.className = 'sp-warp-star';
+        star.style.setProperty('--a', (j * 137.508).toFixed(2) + 'deg');
+        star.style.setProperty('--r', 70 + (j * 71) % 310 + 'px');
+        star.style.setProperty('--d', (-(j % 34) * .072).toFixed(2) + 's');
+        star.style.setProperty('--travel', (1.9 + (j % 5) * .14).toFixed(2) + 's');
+        stars.appendChild(star);
+      }
+    }
+  }
+  function startEntryWarp() {
+    var el = $('sp-warp');
+    clearTimeout(warpTimer); clearTimeout(warpHideTimer); clearTimeout(warpFrameTimer); warpTimer = warpHideTimer = warpFrameTimer = 0;
+    if (root) root.classList.remove('sp-warping');
+    if (!el || reduced()) {
+      warpActive = warpReady = false;
+      if (el) { el.hidden = true; el.classList.remove('sp-warp-on', 'sp-warp-out'); }
+      return false;
+    }
+    warpActive = true; warpReady = false; warpStarted = performance.now();
+    buildWarpSpace();
+    el.hidden = false; el.classList.remove('sp-warp-out'); el.classList.add('sp-warp-on');
+    root.classList.add('sp-warping'); root.setAttribute('aria-busy', 'true');
+    warpTimer = setTimeout(function () { warpTimer = 0; finishEntryWarp(); }, 6500);
+    return true;
+  }
+  function readyEntryWarp() {
+    if (!warpActive || warpReady) return;
+    warpReady = true;
+    var remaining = Math.max(0, 800 - (performance.now() - warpStarted));
+    clearTimeout(warpTimer);
+    warpTimer = setTimeout(function () { warpTimer = 0; finishEntryWarp(); }, remaining);
+  }
+  function waitEntryWarpFrame() {
+    if (!warpActive || warpReady) return;
+    clearTimeout(warpFrameTimer); warpFrameTimer = 0;
+    var check = function () {
+      if (!warpActive) return;
+      warpFrameTimer = 0;
+      if (host && host.stats().frameCount > 0) readyEntryWarp();
+      else warpFrameTimer = setTimeout(check, 50);
+    };
+    check();
+  }
+  function finishEntryWarp() {
+    clearTimeout(warpTimer); clearTimeout(warpHideTimer); clearTimeout(warpFrameTimer); warpTimer = warpHideTimer = warpFrameTimer = 0;
+    if (root) { root.classList.remove('sp-warping'); root.removeAttribute('aria-busy'); }
+    var el = $('sp-warp'); if (!el) { warpActive = warpReady = false; return; }
+    if (!warpActive) { el.hidden = true; return; }
+    warpActive = false; warpReady = false;
+    el.classList.remove('sp-warp-on'); el.classList.add('sp-warp-out');
+    warpHideTimer = setTimeout(function () {
+      warpHideTimer = 0; el.hidden = true; el.classList.remove('sp-warp-out');
+    }, 620);
+  }
+  function cancelEntryWarp() {
+    clearTimeout(warpTimer); clearTimeout(warpHideTimer); clearTimeout(warpFrameTimer); warpTimer = warpHideTimer = warpFrameTimer = 0;
+    warpActive = warpReady = false;
+    if (root) { root.classList.remove('sp-warping'); root.removeAttribute('aria-busy'); }
+    var el = $('sp-warp'); if (el) { el.hidden = true; el.classList.remove('sp-warp-on', 'sp-warp-out'); }
+  }
   function open(source) {
     if (!initialized) init(); if (!root) return false;
     if (page !== 'closed') { goHome(); return true; }
@@ -407,7 +551,21 @@
     });
     if (isLyric(source)) prefs.lyricStyle=source;else if (isStage(source)) prefs.sceneSource = source;
     document.body.classList.add('space3d-open'); root.classList.add('sp-open'); root.setAttribute('aria-hidden','false');
-    setPage('home'); if (global.SpaceHome) SpaceHome.enter(); root.focus({preventScroll:true}); ensureStage(prefs.sceneSource); revealPlayer(); kick(); return true;
+    var warped = startEntryWarp();
+    setPage('home'); root.focus({preventScroll:true});
+    var seq = ++bootSeq, booted = false;
+    var begin = function () {
+      if (booted || seq !== bootSeq || page !== 'home') return;
+      booted = true;
+      if (global.SpaceHome) SpaceHome.enter();
+      ensureStage(prefs.sceneSource);
+    };
+    if (warped) {
+      var afterFrame = function () { setTimeout(begin, 0); };
+      if (global.requestAnimationFrame) requestAnimationFrame(afterFrame); else setTimeout(begin, 0);
+      setTimeout(begin, 900);
+    } else begin();
+    revealPlayer(); kick(); return true;
   }
   function goHome() {
     if (page === 'closed') return false;
@@ -418,8 +576,8 @@
     if (page === 'closed' || !root) return;
     immersive(false);
     if (loginOpen()) OnlineLogin.close();
-    save(); closePanels(); disposeStage(); if (global.SpaceHome) SpaceHome.leave(); setPage('closed');
-    document.body.classList.remove('space3d-open'); root.classList.remove('sp-open','sp-idle','sp-immersive','sp-player-hidden'); root.setAttribute('aria-hidden','true');
+    save(); closePanels(); disposeStage(); if (global.SpaceHome) SpaceHome.leave(); setPage('closed'); bootSeq++;
+    document.body.classList.remove('space3d-open'); cancelEntryWarp(); root.classList.remove('sp-open','sp-idle','sp-immersive','sp-player-hidden'); root.setAttribute('aria-hidden','true');
     clearTimeout(playerTimer); playerTimer = 0; $('sp-click-feedback').replaceChildren();
     if (idleTimer) clearTimeout(idleTimer); idleTimer = 0; if (camera) camera.dispose();
     background.forEach(function (item) { item.node.inert=item.inert; }); background=[];
@@ -435,7 +593,8 @@
     $('sp-failure').hidden = !failed;
     $('sp-error-message').textContent = failed ? (errorText || '场景加载失败') : '';
     $('sp-loading').hidden = next.state !== 'loading'; root.dataset.sceneState=next.state||'idle'; syncSettings(); syncShelf(); syncHud(); syncZodiacHud(); kick();
-    if (next.state === 'ready') { contextRetries = 0; clearTimeout(contextRetryTimer); contextRetryTimer = 0; }
+    if (failed) finishEntryWarp();
+    if (next.state === 'ready') { contextRetries = 0; clearTimeout(contextRetryTimer); contextRetryTimer = 0; waitEntryWarpFrame(); }
     else if (contextLost) {
       // GPU 进程重启会带走 WebGL 上下文；浏览器会重建进程，这里等一拍再重建舞台。
       // 每分钟最多两次，避免驱动持续崩溃时在「重建→再丢」之间空转。
@@ -579,6 +738,7 @@
     if(frame.playing&&!frame.reduced)sceneTime+=frame.dt;frame.sceneTime=sceneTime;frame.dynamicDt=frame.playing&&!frame.reduced?frame.dt:0;
     if(camera){camera.tick(dt,{playing:frame.playing&&!frame.reduced,reduced:frame.reduced,audioTime:frame.time,energy:frame.level,low:frame.bands[0]||0});host.setRig(camera.pose());}
     try{host.frame(frame);}catch(error){showStatus({state:'error',error:error.message});}
+    if (performance.now() - phoenixHudAt > 90) { phoenixHudAt = performance.now(); syncPhoenixHud(); }
     lastPosition=p.position;lastTrack=p.track&&p.track.id;lastSceneCover=p.cover||'';subtitles(p,dt);
   }
   function time(ms){var s=Math.floor(Math.max(0,Number(ms)||0)/1000);return Math.floor(s/60)+':'+('0'+s%60).slice(-2);}
@@ -618,6 +778,7 @@
     if(document.activeElement!==$('sp-volume'))$('sp-volume').value=Math.round((p.volume==null?.8:p.volume)*100);
     if(page==='stage')subtitles(p);
     syncZodiacHud();
+    syncPhoenixHud();
   }
   function buildQueue(){
     var body=$('sp-playlist-body');body.textContent='';
@@ -746,6 +907,7 @@
     if(card){target.style.setProperty('--sp-glare-x',(px*100).toFixed(1)+'%');target.style.setProperty('--sp-glare-y',(py*100).toFixed(1)+'%');}
   }
   function bindGestures(){
+    root.addEventListener('pointerenter',poke);
     root.addEventListener('pointermove',floatPointer,{passive:true});
     root.addEventListener('pointerleave',resetFloat);
     root.addEventListener('pointerout',function(e){if(floatTarget&&!floatTarget.contains(e.relatedTarget))resetFloat();});
@@ -754,6 +916,7 @@
       if(camera.isFreeActive()){requestLock();e.preventDefault();return;}
       dragging=true;pointer=e.pointerId;point={x:e.clientX,y:e.clientY,t:performance.now()};camera.setRotating(true);if(root.setPointerCapture)root.setPointerCapture(pointer);touch();
       downPoint={x:e.clientX,y:e.clientY};frame.pointer.down=true;frame.pointer.dragging=false;clearTimeout(holdTimer);
+      frame.pointer.x=e.clientX/Math.max(1,root.clientWidth)*2-1;frame.pointer.y=1-e.clientY/Math.max(1,root.clientHeight)*2;frame.pointer.active=true;
       holdTimer=setTimeout(function(){holdTimer=0;if(frame.pointer.down){charging=true;syncHud();}},350);
     });
     root.addEventListener('pointermove',function(e){
@@ -765,7 +928,7 @@
       if(downPoint&&!frame.pointer.dragging&&Math.hypot(e.clientX-downPoint.x,e.clientY-downPoint.y)>5){frame.pointer.dragging=true;frame.pointer.down=false;clearTimeout(holdTimer);holdTimer=0;if(charging){charging=false;syncHud();}}
       camera.spinDrag(e.clientX-point.x,e.clientY-point.y,clamp((now-point.t)/1000,1/120,.08));point={x:e.clientX,y:e.clientY,t:now};touch();
     });
-    root.addEventListener('pointerleave',function(){frame.pointer.active=false;if(page!=='closed')touch(750);});
+    root.addEventListener('pointerleave',function(){frame.pointer.active=false;if(page!=='closed'){touch(750);hideHome();}});
     function end(e){
       if(e.pointerId!==pointer)return;
       if(e.type==='pointerup'&&downPoint&&!frame.pointer.dragging){
@@ -777,7 +940,7 @@
       dragging=false;point=null;pointer=null;if(camera)camera.setRotating(false);scheduleSave();touch();
     }
     root.addEventListener('pointerup',end);root.addEventListener('pointercancel',end);
-    root.addEventListener('wheel',function(e){if(page!=='stage'||!camera||isControl(e.target))return;e.preventDefault();camera.wheel(e.deltaY,{free:camera.isFreeActive()});touch();scheduleSave();},{passive:false});
+    root.addEventListener('wheel',function(e){poke();if(page!=='stage'||!camera||isControl(e.target))return;e.preventDefault();camera.wheel(e.deltaY,{free:camera.isFreeActive()});touch();scheduleSave();},{passive:false});
     root.addEventListener('dblclick',function(e){if(root.classList.contains('sp-immersive')){immersive(false);return;}if(page!=='stage'||!camera||isControl(e.target))return;if(camera.isFreeEngaged())camera.freeReset();else camera.recenter();touch();});
   }
   function bindChrome(){
@@ -826,10 +989,13 @@
     $('sp-volume').addEventListener('input',function(){control('volume',Number(this.value)/100);});
     ['space3d-entry','set-space3d-btn'].forEach(function(id){if($(id))$(id).addEventListener('click',function(){open();});});
     root.addEventListener('focusin',poke);
+    root.addEventListener('focusout',function(){if(!root.classList.contains('sp-home-idle'))poke();});
+    root.addEventListener('pointerdown',poke,true);
+    root.addEventListener('scroll',poke,true);
     root.addEventListener('pointerdown',dismissOutside,true);
     root.addEventListener('pointerdown',clickFeedback,true);
     document.addEventListener('keydown',function(e){
-      if(page==='closed')return;if(e.code==='Escape'){e.preventDefault();e.stopImmediatePropagation();escape();return;}if(loginOpen()||typing(e.target))return;
+      if(page==='closed')return;poke();if(e.code==='Escape'){e.preventDefault();e.stopImmediatePropagation();escape();return;}if(loginOpen()||typing(e.target))return;
       if(root.classList.contains('sp-immersive')&&e.code!=='KeyF'&&e.code!=='KeyX'){
         if(e.code==='Slash'||((e.ctrlKey||e.metaKey)&&e.code==='KeyK')||/^Digit[1-9]$/.test(e.code)){e.preventDefault();e.stopImmediatePropagation();}
         return;
@@ -843,7 +1009,7 @@
       if(actions[e.code]){if(!e.repeat)actions[e.code]();e.preventDefault();e.stopImmediatePropagation();}
     },true);
     document.addEventListener('keyup',function(e){if(page==='stage'&&camera)camera.freeKey(e.code,false);});
-    function pauseInput(){if(page==='closed')return;releaseInput();save();}
+    function pauseInput(){if(page==='closed')return;releaseInput();hideHome();save();}
     global.addEventListener('blur',pauseInput);global.addEventListener('pagehide',pauseInput);
     document.addEventListener('visibilitychange',function(){if(document.hidden){pauseInput();if(lyricPerformance)lyricPerformance.setPaused(true);}else{touch(300);syncPlayer();}});global.addEventListener('resize',resize);
   }
@@ -857,7 +1023,7 @@
     var feedback=document.createElement('div');feedback.id='sp-click-feedback';feedback.setAttribute('aria-hidden','true');root.appendChild(feedback);
     hud=document.createElement('div');hud.id='sp-scene-hud';hud.className='sp-scene-hud';hud.setAttribute('role','status');hud.setAttribute('aria-live','polite');hud.hidden=true;
     hud.innerHTML='<i aria-hidden="true"></i><span class="sp-scene-hud-tag"></span><strong></strong><small></small>';root.appendChild(hud);
-    zodiacHud=$('sp-zodiac-hud'); zodiacStarCard=$('sp-zodiac-star');
+    zodiacHud=$('sp-zodiac-hud'); zodiacStarCard=$('sp-zodiac-star'); phoenixHud=$('sp-phoenix-hud');
     var zodiacTicks=$('sp-zodiac-ticks');
     if(zodiacTicks) for(var zi=0;zi<12;zi++) zodiacTicks.appendChild(document.createElement('i'));
     var telemetry=document.createElement('aside');telemetry.id='sp-reactor-telemetry';telemetry.className='sp-reactor-telemetry';telemetry.hidden=true;

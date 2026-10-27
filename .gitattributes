@@ -21,6 +21,15 @@ evals/search/page-v1/profile-search-candidates.rs.txt -text
 # Stage sources and build inputs are byte-hashed into .build-manifest.json.
 # Pin LF so a Windows checkout (core.autocrlf=true) produces the same bytes as CI.
 tools/*-stage/src/** text eol=lf
+# The rule above forces `text`, so art dropped under src/ gets line-ending converted
+# too — that eats the 0D0A inside the PNG magic number and leaves a blob no decoder
+# accepts. Same reasoning as the evals/**/*.png rule: bytes are the artifact.
+tools/*-stage/src/**/*.png -text
+tools/*-stage/src/**/*.jpg -text
+tools/*-stage/src/**/*.jpeg -text
+tools/*-stage/src/**/*.webp -text
+tools/*-stage/src/**/*.gif -text
+tools/*-stage/src/**/*.ico -text
 tools/*-stage/build.mjs text eol=lf
 tools/build-stages.mjs text eol=lf
 tools/space-stage/package.json text eol=lf

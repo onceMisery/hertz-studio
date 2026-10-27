@@ -1,0 +1,75 @@
+阶段 1/4 语法（node --check）
+  334 个文件，全部通过
+
+阶段 2/4 静态 guard（形状 / 接线 / 禁用词）
+  ✓ export-stage-contract.js  59ms  舞台契约与源码一致（10 个场景、schema 与基线 hash）
+  ✓ check-assets.js  123ms  前端资源接线检查：1104/1104 全部通过
+  ✓ check-scripts.js  46ms  脚本登记通过：221 个 check-*，78 个在聚合入口，143 个手工登记。
+  ✓ check-lineage-names.js  146ms  出处名禁用词扫描通过：342 个文件 / 8622 KB，4 条规则零命中（上游署名见 NOTICE）
+  ✓ api-routes.js  57ms  REST 路由清单与源码一致（168 个「方法 + 路径」）
+  ✓ check-css-tokens.js  813ms  CSS 令牌契约检查通过（20 个文件 / 4055 条规则 / 47 个受检声明）
+  ✓ check-plugin-assets.js  140ms  插件资源 URL 契约检查：56/56 全部通过
+  ✓ check-search-pressure-evidence.js  593ms  }
+  ✓ check-lyric-calibration.js  56ms  歌词校准契约检查：25 项全部通过
+  ✓ check-crash-report.js  51ms  崩溃报告契约检查：44 项全部通过
+  ✓ check-source-origin.js  58ms  出处身份契约检查：57 项全部通过
+  ✓ check-adrs.js  84ms  ADR 契约检查：316 项全部通过
+
+阶段 3/4 行为回归（vm 沙箱跑真实模块）
+  ✓ check-room-ui.js  175ms  Room UI: background projection recovery, admission retries, queue instance identity, reconnect receipts, history and session isolation passed.
+  ✓ check-audio-errors.js  44ms  PASS audio error guidance: stable codes, read/codec distinction, unknown-code fallback and request IDs
+  ✓ check-stage-legacy-fixtures.js  115ms  Historical stage fixtures: 10 scenes / 20 switch+edit cases + 1 fixed gzip frame; source replay, pure materialization, rule entry and bidirectional share codec compatibility passed
+  ✓ check-stage-materialize.js  103ms  ✓ R3-K 物化检查全部通过
+  ✓ check-stage-evaluation.js  438ms  Stage evaluation offline: frozen coverage, actual baseline defaults, false acceptance/refusal, invalid materialization, sample/review denominators and release gates passed
+  ✓ check-stage-intent-label-review.js  126ms  StageIntent blind label review: 160 opaque cases, private mapping, complete coverage, mismatch reporting, and invalid answer rejection passed
+  ✓ check-stage-project.js  153ms  Stage projects: strict envelope/import, current and stale restore, isolated legacy cues, media confirmation/races and reversible timelines passed
+  ✓ check-stage-arrangement.js  67ms  Stage arrangement: pure section compilation, shared rules, bounds, explicit replacement/media confirmation, reversible seeks, stale rejection and project/share roundtrips passed
+  ✓ check-stage-pitch.js  64ms  Pitch inspector: strict version/time/frequency bounds, null gaps, bounded plot, cancellation transport and shared asset wiring passed
+  ✓ check-stage-templates.js  104ms  Stage templates: fixed compatibility, pure canonical creation, named content identity, preview isolation, explicit apply, collection and share roundtrips passed
+  ✓ check-video-export.js  98ms  Video export lifecycle: startup/stop isolation, late permission, final chunks, real audio-track facts, all failure cleanup, interruptions, bounded stop and download retry passed
+  ✓ check-capsule-performance.js  60ms  Capsule performance: demand scheduling, high refresh/visibility/motion/resize, hidden events, local/online/podcast metadata, cover races, restored cursor, reconnect, OS media controls and resize retry passed.
+  ✓ check-home-dashboard.js  49ms  Home dashboard: snapshot actions, restored queue, no autoplay, history/cover races, empty/error/retry and recent identity passed.
+  ✓ check-creative-share-code.js  110ms  Creative share code: 44 checks passed
+  ✓ check-perf-probe.js  108ms  跨模块性能探针契约检查：213 项全部通过
+  ✓ check-cover-lifecycle.js  50ms  Cover lifecycle: proxy/decode races, clear, completion and failure passed
+  ✓ check-beat-lifecycle.js  64ms  Beat lifecycle: status identity, bounded recovery, retry identity and queue focus passed.
+  ✓ check-daily-view.js  71ms  每日推荐独立页契约检查：103/103 全部通过
+  ✓ check-lyric-emotion.js  61ms    cache entries=5 bytes=1024995
+  ✓ check-ai-grants-ui.js  82ms  AI grants UI fixture passed: create scopes, safe summary, MCP config, rotate, revoke-after-refresh-failure, DBX and demo states.
+  ✓ check-online.js  240ms  472 checks, 0 failures
+  ✓ check-search-session.js  61ms  Search admission: shared limit, per-source serialization, bounded queue, canceled queue, raw DBX settlement, error facts and no automatic retry passed
+  ✓ check-online-transport.js  53ms  Transport bootstrap, real DBX subscription lifecycle, HTTP cancellation, response-body timeout and transient retry checks passed
+  ✓ check-quality-ceiling.js  63ms  音质上限契约检查：43 项全部通过
+  ✓ check-beat-budget.js  49ms  节拍调度契约检查：34 项全部通过
+  ✓ check-search-history.js  51ms  搜索历史契约检查：39 项全部通过
+  ✓ check-online-playlist-view.js  65ms  在线歌单两层界面契约检查：93 项全部通过
+  ✓ check-stage-control.js  121ms  舞台控制契约：154 项检查，全部通过
+  ✓ check-stage-settings.js  50ms  Stage settings: 530 checks passed (mode/background/device matrix, preferences, theme ownership)
+  ✓ check-stage-backgrounds.js  48ms  Shared backgrounds: 11 host clock/depth lifecycle checks passed
+  ✓ check-stage-idle.js  64ms  空闲收起契约检查：63/63 全部通过
+  ✓ check-frame-gates.js  84ms  帧门契约检查：61 项全部通过
+  ✓ check-window-rendering.js  60ms  Window rendering: spectrum bursts, hidden views, Retina fullscreen budgets and restore timing passed
+  ✓ check-obs-css.js  117ms  OBS 素材通道检查：52/52 全部通过
+  ✓ check-skins.js  109ms  界面皮肤契约检查：656/656 全部通过
+  ✓ check-appearance-restore.js  217ms  刷新恢复契约检查：60/60 全部通过
+  ✓ check-favorites.js  125ms  收藏与每日推荐契约检查：207/207 全部通过
+  ✓ check-library.js  53ms  Library pagination, retry, stale-query and complete-queue checks passed
+  ✓ check-scan-ui.js  61ms  Directory controls, stale roots and terminal scan status checks passed
+  ✓ check-creative.js  327ms  创意舞台契约检查：465/465 全部通过
+  ✓ check-scene-registry.js  94ms  Scene registry: 176 checks passed (new scene/preset/share/prompt, renderer lifecycle, factory ownership)
+  ✓ check-anime-scenes.js  83ms  PASS 98 anime scene registration, editing, sharing, prompt and restore checks
+  ✓ check-stage-anime-svg.js  63ms  PASS 52 SVG stage adapter, audio, mirror, pause, degrade and wiring checks
+  ✓ check-anime-ui.js  47ms  晴空绘卷外观族契约检查：58/58 全部通过
+  ✓ check-stanza.js  71ms  全部通过
+  ✓ check-space-camera.js  162ms  SpaceCamera 契约检查：138 项，0 项失败
+  ✓ check-space-post.js  48ms  SpacePost: 95 checks passed
+  ✓ check-space-layers.js  52ms  SpaceLayers: 33 contracts passed.
+  ✓ check-stanza-sonnet.js  64ms  check-stanza-sonnet 全部通过
+  ✓ check-stanza-tempera.js  55ms  凝彩检查通过：构图、色彩、扫光时间轴、惰性初始化取消与资源接线
+  ✓ check-stanza-starborn.js  226ms  星诞导演层契约检查：205 项，0 项失败
+  ✓ check-sonnet-palette.js  62ms  PASS 调色来源、1083 组色相/饱和度、角色分色、签名刷新与旧契约；活动字最低对比 7.26:1
+
+阶段 4/4 活体检查（真实浏览器 + 运行中的服务）
+  跳过 108 项（要跑加 --live）。活体检查需要 Playwright（PLAYWRIGHT_MODULE 或 NODE_PATH）。多数检查还需要运行中的服务；清风与窄屏检查自行启动隔离服务，需要先构建 hertz-studio（可设 HERTZ_BIN）。
+
+前端检查聚合：通过 64 步，失败 0 步（默认集合与 ci.yml 的 Frontend contract checks 等价；--extra 的那批 CI 暂不跑）

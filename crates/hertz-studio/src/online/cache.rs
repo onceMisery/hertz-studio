@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::SystemTime;
 
 use tokio::fs;
@@ -136,6 +136,27 @@ impl Index {
 pub struct CacheIndex {
     dir: PathBuf,
     inner: RwLock<Index>,
+    leases: Mutex<HashMap<String, usize>>,
+}
+
+/// Protects every delivered quality and the active .part file until the last
+/// decoder using this track releases its source.
+pub(crate) struct CacheLease {
+    index: Arc<CacheIndex>,
+    names: Vec<String>,
+}
+impl Drop for CacheLease {
+    fn drop(&mut self) {
+        let mut leases = self.index.leases.lock().unwrap_or_else(|e| e.into_inner());
+        for name in &self.names {
+            if let Some(count) = leases.get_mut(name) {
+                *count -= 1;
+                if *count == 0 {
+                    leases.remove(name);
+                }
+            }
+        }
+    }
 }
 
 impl CacheIndex {
@@ -144,6 +165,7 @@ impl CacheIndex {
         let index = Self {
             dir,
             inner: RwLock::new(Index::default()),
+            leases: Mutex::default(),
         };
         index.refresh().await;
         index
@@ -161,6 +183,38 @@ impl CacheIndex {
 
     pub fn dir(&self) -> &Path {
         &self.dir
+    }
+
+    pub(crate) fn lease(self: &Arc<Self>, source: &str, id: &str) -> CacheLease {
+        let names = vec![
+            format!("{}-", stem(source, id)),
+            legacy_cache_name(source, id),
+        ];
+        let mut leases = self.leases.lock().unwrap_or_else(|e| e.into_inner());
+        for name in &names {
+            *leases.entry(name.clone()).or_default() += 1;
+        }
+        CacheLease {
+            index: self.clone(),
+            names,
+        }
+    }
+
+    fn delete_unleased(&self, name: &str) -> bool {
+        // Pin acquisition and deletion are one synchronous critical section.
+        // A cache hit can never lose its file between acquiring a lease and open.
+        let leases = self.leases.lock().unwrap_or_else(|e| e.into_inner());
+        let normalized = name.strip_prefix('.').unwrap_or(name);
+        if leases.keys().any(|p| {
+            if p.ends_with('-') {
+                normalized.starts_with(p)
+            } else {
+                normalized == p
+            }
+        }) {
+            return false;
+        }
+        std::fs::remove_file(self.dir.join(name)).is_ok()
     }
 
     /// 全量重扫（启动一次；目录被外力大改后可手动调）。
@@ -292,7 +346,7 @@ impl CacheIndex {
             if newest.as_ref() == Some(&name) {
                 continue;
             }
-            if fs::remove_file(self.dir.join(&name)).await.is_ok() {
+            if self.delete_unleased(&name) {
                 self.forget(&name);
                 total -= len;
                 removed += len;
@@ -343,7 +397,7 @@ impl CacheIndex {
                 let idx = self.read();
                 idx.files.get(&name).map(|e| e.len).unwrap_or(0)
             };
-            if fs::remove_file(self.dir.join(&name)).await.is_ok() {
+            if self.delete_unleased(&name) {
                 self.forget(&name);
                 removed += len;
             }
@@ -360,7 +414,7 @@ impl CacheIndex {
                     }
                 }
                 let len = entry.metadata().await.map(|m| m.len()).unwrap_or(0);
-                if fs::remove_file(entry.path()).await.is_ok() {
+                if self.delete_unleased(&name) {
                     removed += len;
                 }
             }
@@ -692,6 +746,42 @@ mod tests {
         assert!(dir.join("song2.mp3").exists());
         assert!(!dir.join("song1.mp3").exists());
         assert_eq!(idx.stats().files, 1);
+    }
+
+    #[tokio::test]
+    async fn decoder_leases_survive_lru_until_the_last_user_releases() {
+        let dir = temp_dir("leases").await;
+        for name in [
+            "qq-a1-standard.mp3",
+            "qq-a1-lossless.flac",
+            "qq-a1.mp3",
+            "qq-a10-standard.mp3",
+            "newest.mp3",
+        ] {
+            fs::write(dir.join(name), vec![0u8; 2048]).await.unwrap();
+        }
+        let idx = Arc::new(CacheIndex::load(dir.clone()).await);
+        // Deterministic age ordering, independent of filesystem timestamp precision.
+        idx.write().files.get_mut("newest.mp3").unwrap().mtime =
+            SystemTime::now() + std::time::Duration::from_secs(1);
+        let first = idx.lease("qq", "a1");
+        let second = idx.lease("qq", "a1");
+        idx.enforce_limit(1, &[]).await.unwrap();
+        assert!(
+            !dir.join("qq-a10-standard.mp3").exists(),
+            "adjacent song is not pinned"
+        );
+        assert_eq!(
+            idx.stats().files,
+            4,
+            "all qualities and legacy name stay pinned"
+        );
+        drop(first);
+        assert_eq!(idx.clear(&[], Some("qq")).await.unwrap(), 0);
+        drop(second);
+        idx.enforce_limit(1, &[]).await.unwrap();
+        assert_eq!(idx.stats().files, 1);
+        fs::remove_dir_all(dir).await.unwrap();
     }
 
     #[tokio::test]

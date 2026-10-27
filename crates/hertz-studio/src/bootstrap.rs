@@ -70,6 +70,8 @@ pub async fn boot(
     config: Config,
     token: String,
     overlay_key: String,
+    desktop_lyrics_key: String,
+    wallpaper_key: String,
 ) -> anyhow::Result<Booted> {
     let data_dir = absolute_data_dir(&data_dir)?;
     let db = vmusic_store::open(&data_dir).await?;
@@ -145,10 +147,14 @@ pub async fn boot(
     let state = Arc::new(AppState {
         db,
         audio,
+        room: Default::default(),
         config: Arc::new(config.clone()),
         data_dir: data_dir.clone(),
         token: token.clone(),
         overlay_key: overlay_key.clone(),
+        desktop_lyrics_key: desktop_lyrics_key.clone(),
+        wallpaper_key: wallpaper_key.clone(),
+        wallpaper: Default::default(),
         events,
         queue: Default::default(),
         cursor: Default::default(),
@@ -187,6 +193,7 @@ pub async fn boot(
         exiting: tokio::sync::watch::channel(false).0,
         pending_restore_seek: Default::default(),
         overlay_lyric: Default::default(),
+        desktop_lyrics: Default::default(),
         listen: Default::default(),
         scrobble: Default::default(),
         relay_tried: Default::default(),
@@ -209,10 +216,16 @@ pub async fn boot(
         let queue_len = session.queue.len();
         let cursor = session.cursor.filter(|i| *i < queue_len);
         if queue_len > 0 {
+            let pending = cursor.and_then(|i| session.queue.get(i)).map(|track_id| {
+                crate::state::PendingRestore {
+                    track_id: track_id.clone(),
+                    position_ms: session.position_ms,
+                }
+            });
             *state.queue.lock().await = session.queue;
             *state.cursor.lock().await = cursor;
             if session.position_ms > 3000 {
-                *state.pending_restore_seek.lock().await = Some(session.position_ms);
+                *state.pending_restore_seek.lock().await = pending;
             }
             tracing::info!(
                 queue = queue_len,

@@ -1,0 +1,30 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 hertz-studio contributors
+
+[package]
+name = "desktop-probe"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# 独立工作区：探针不进入主 workspace，避免把桌面依赖和 MSRV 带进产品 CI。
+[workspace]
+
+[target.'cfg(windows)'.dependencies]
+wry = { version = "=0.57.0", default-features = false, features = ["os-webview"] }
+tao = { version = "=0.37.1", default-features = false, features = ["rwh_06"] }
+tray-icon = { version = "=0.24.2", default-features = false }
+windows-sys = { version = "=0.61.2", features = [
+  "Win32_Foundation",
+  "Win32_Graphics_Gdi",
+  "Win32_Security",
+  "Win32_System_Diagnostics_ToolHelp",
+  "Win32_System_Power",
+  "Win32_System_ProcessStatus",
+  "Win32_System_SystemServices",
+  "Win32_System_Threading",
+  "Win32_UI_HiDpi",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_Shell",
+  "Win32_UI_WindowsAndMessaging",
+] }

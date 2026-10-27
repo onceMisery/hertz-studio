@@ -30,26 +30,17 @@ pub(super) fn request_error(err: reqwest::Error) -> ApiError {
 }
 
 pub(super) async fn read_bounded(
-    mut response: reqwest::Response,
+    response: reqwest::Response,
     limit: usize,
     too_large: fn() -> ApiError,
 ) -> ApiResult<Vec<u8>> {
-    if !response.status().is_success() {
-        return Err(ApiError::upstream_rejected(format!(
-            "播客服务返回 HTTP {}",
-            response.status().as_u16()
-        ))
-        .with_source("podcast"));
+    match public_net::read_bounded(response, limit).await {
+        Ok(bytes) => Ok(bytes),
+        Err(public_net::BoundedReadError::Status(status)) => Err(ApiError::upstream_rejected(
+            format!("播客服务返回 HTTP {}", status),
+        )
+        .with_source("podcast")),
+        Err(public_net::BoundedReadError::TooLarge) => Err(too_large()),
+        Err(public_net::BoundedReadError::Transport(err)) => Err(request_error(err)),
     }
-    if response.content_length().is_some_and(|n| n > limit as u64) {
-        return Err(too_large());
-    }
-    let mut bytes = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(request_error)? {
-        if chunk.len() > limit.saturating_sub(bytes.len()) {
-            return Err(too_large());
-        }
-        bytes.extend_from_slice(&chunk);
-    }
-    Ok(bytes)
 }

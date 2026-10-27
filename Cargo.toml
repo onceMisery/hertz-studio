@@ -22,6 +22,7 @@ repository = "https://github.com/onceMisery/hertz-studio"
 # --- internal ---
 vmusic-core = { path = "crates/vmusic-core", version = "0.2.1" }
 vmusic-audio = { path = "crates/vmusic-audio", version = "0.2.1" }
+vmusic-lan = { path = "crates/vmusic-lan", version = "0.2.1" }
 vmusic-store = { path = "crates/vmusic-store", version = "0.2.1" }
 vmusic-library = { path = "crates/vmusic-library", version = "0.2.1" }
 vmusic-lyrics = { path = "crates/vmusic-lyrics", version = "0.2.1" }
@@ -55,11 +56,19 @@ num-traits = "0.2"
 uuid = { version = "1", features = ["v4"] }
 getrandom = "0.3"
 sha2 = "0.10"
+# 阅读领域解析 RSS pubDate（RFC 2822）与 Atom updated（RFC 3339）；
+# 只开解析所需 feature，不引入格式化与时区数据库。
+time = { version = "0.3", default-features = false, features = ["std", "parsing"] }
 rmcp = { version = "3.5.1", features = ["server", "transport-io"] }
 fslock = "0.2"
 walkdir = "2"
 notify = "8"
 dirs = "5"
+# 「选择音乐目录」按钮调系统原生文件夹对话框。Windows / macOS 的原生后端不吃特性，
+# 所以关掉默认特性——Linux 的那条路是 XDG 门户（ashpd → zbus 5.19），其中
+# zbus_macros 6.1 声明 rust-version 1.89，会直接红在 ci.yml 的 1.88 msrv job 上。
+# 因此只在 Windows / macOS 挂这个依赖，Linux 走 scan::pick_root 的明确不支持分支。
+rfd = { version = "0.15", default-features = false }
 
 # --- audio ---
 # 按 vmusic-library 的 AUDIO_EXTENSIONS 逐个裁：只留扩展名真的用得到的格式与

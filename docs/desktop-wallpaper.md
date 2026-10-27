@@ -1,10 +1,18 @@
 # Hertz 自带桌面壁纸模式：产品与技术方案
 
+2026-10-27 UI 更新：当前实现已提供统一「桌面歌词与壁纸」中心，支持固定 / 跟随来源、宿主返回的九个场景、真实静态图和内嵌实时预览、目标显示器、帧率和音乐响应。预览与桌面运行独立，「设置已保存」不等于「壁纸正在运行」；未启用、托盘隐藏、等待来源、目标屏未连接、策略暂停及挂载失败分别呈现。
+
+修改以草稿保存，应用时检查 revision；关闭中心有放弃确认。壁纸停用不会关闭歌词，关闭设置不会停用已运行的壁纸。暂停音乐时继续环境动画，策略暂停才停止绘制。旧独立预览窗口已收拢到同一中心、同一预览租约。Windows 本机 WorkerW 的创建、渲染与释放已有自动化证据；这不替代物理断屏和跨设备长期测试，详见[落地记录](plans/2026-10-27-ui-productization-delivery.md)。
+
+下文日期较早的 W 阶段描述保留为设计历史，实施状态以上述更新及实际验证记录为准。
+
 日期：2026-10-21。状态：产品目标已由用户选定；本文为待评审的设计方案，功能尚未实施，不代表架构已生效、原生兼容性已验证或发布日期已承诺。
 
 核对基线：提交 `acd87e9` 与当日工作树。工作树包含正在进行的空间场景、星座和歌词相关修改，本文按实际源码描述现状，不把这些修改视为已经发布。本文交付范围为方案与文档导航；实现、依赖引入、安装和发布另行执行。
 
 2026-10-22 设计修订：结合[桌面歌词方案](./desktop-lyrics.md)，将尚未实施的 `hertz-wallpaper.exe` 提案收敛为统一可选组件 `hertz-desktop.exe`。托盘、来源绑定、配置和全局自启只有一个 owner；壁纸与歌词保持独立窗口、启用状态和运行策略。歌词不依赖壁纸 W0，壁纸也不要求启用歌词；下文已同步相关归属。这是设计修订，不表示已存在需要兼容的旧壁纸组件。
+
+2026-10-23 设计复核（`2f2765c`）：共同管理规则收敛到[共享宿主设计](./desktop-host.md)，W0 的步骤和阶段退出见[原生验证计划](./plans/2026-10-23-desktop-native-validation.md)。本页保留壁纸特有的场景、时钟、频谱和挂载契约；两份设计均尚未实施。
 
 ## 1. 产品目标与定位
 
@@ -91,11 +99,11 @@
 
 托盘提供“打开壁纸设置”“暂停/继续”“退出壁纸”。“打开壁纸设置”使用宿主自己的原生设置窗口加内嵌设置页，可在音乐服务未启动时使用；不靠自动启动整个服务才能修改壁纸。播放器的壁纸设置使用同一管理协议，不保存另一份配置。
 
-所有设置入口共享宿主发放的唯一临时预览租约。新入口请求预览时，前一预览先停止并释放；关闭、页面断连或租约超时均回收。租约最长 15 秒，每 5 秒低频续租，显式关闭立即撤销，失联最迟在到期时回收。预览最多 15 fps，像素、几何和后处理上限从现有低档 profile 派生，叠加预览视口上限；不因同时打开两套设置而各建一份 renderer。
+所有设置入口共享[宿主唯一预览租约](./desktop-host.md#5-管理协议与恢复)，关闭、断连或超时回收，旧实例释放后才可交接。壁纸预览的像素、几何和后处理上限从现有低档 profile 派生，叠加预览视口上限；不因同时打开两套设置而各建一份 renderer。
 
 | 用户动作或环境变化 | 明确行为 |
 | --- | --- |
-| 关闭播放器网页 | 壁纸继续；是否继续音乐遵循原服务离页暂停设置，壁纸不冒充播放器页面观察者 |
+| 关闭播放器网页 | 壁纸继续；当前服务在最后页面离场宽限期后暂停音乐，壁纸转环境动画，不计作播放器页面观察者 |
 | 停止 Hertz 服务 | 壁纸保留环境动画，频谱在 1 秒内衰减至零，显示音乐源未连接 |
 | 暂停 Hertz 音乐 | 仅音频响应消退；环境动画继续 |
 | 手动暂停壁纸 | 停止连续绘制并冻结视觉时间；不会暂停歌曲 |
@@ -122,7 +130,9 @@
 
 WebView2 优先使用已安装的 Evergreen Runtime，组件自身内嵌壁纸页、设置页和同版本场景资源，不依赖运行期开发服务器或 CDN。首次启用由播放器调用组件内嵌的原生设置页完成资格检查和预览；已有网页入口只发管理意图并展示状态。未安装组件时说明获取匹配版本的方法，不把下载解包藏在“应用”操作中。
 
-壁纸与宿主设置页共享组件专属 WebView2 environment，用户数据目录固定在当前用户的壁纸组件运行目录下，与普通浏览器、DBX 和播放器网页隔离；不借用它们的 profile。内嵌页面使用受控本地 origin，拒绝外部页面导航和任意本地文件读取，不向 JS 暴露通用原生命令执行接口。专属 environment 的创建、关闭、进程归属与缓存边界纳入 W0 验证。
+壁纸、歌词与宿主设置页由同一组件管理专属 WebView2 environment，数据目录与普通浏览器、DBX 和播放器网页隔离；不借用它们的 profile。内嵌页面使用受控本地 origin，拒绝外部页面导航和任意本地文件读取，不向 JS 暴露通用原生命令执行接口。environment 的创建、关闭、进程归属与缓存边界由共用原生实验验证；关闭壁纸不关闭仍启用的歌词。
+
+壁纸页与预览页整页走宿主自定义协议 `hertz://localhost/wallpaper.html`（wry 映射为 `http://hertz.localhost/`，即上面那个受控本地 origin），只为这一个路径返回页面，其余路径 404，不当通用文件服务。两条已实测的禁区：WebView2 的 `NavigateToString` 约 2 MB 上限会被内联的舞台运行时越过；`file://` 页面收不到 `window.ipc`，页面回报的 `wallpaper_dom_ready` 静默丢失，表现为 surface 已挂载却永远不进入 ready 与心跳。
 
 两个发行版使用同一共享构建流程和 UI 资源注册来源，不能手工维护第二份 Three.js bundle 或资产清单。生产构建需检验组件、服务与共享场景资源的版本/hash；新增 Windows 依赖不能使 Linux/macOS 的原工作区检查被迫编译原生宿主。
 
@@ -219,7 +229,7 @@ W1 不承诺普通窗口部分遮挡的逐像素裁剪，也不承诺远程桌�
 
 新增专用只读能力，从既有播放状态和频谱广播派生数据，不创建第二份 FFT 或第二个播放状态 owner。现有 OBS `overlay-key` 只允许歌词与封面；主 `/ws` 使用原鉴权，均不能直接宣称为已具备的壁纸频谱通道。
 
-建议的 HTTP/WS 形状如下，均为新增草案，不是当前公开 API：
+已实现的 HTTP/WS 形状如下，仍不是公开 API：
 
 | 入口 | 权限与行为 |
 | --- | --- |
@@ -231,6 +241,108 @@ W1 不承诺普通窗口部分遮挡的逐像素裁剪，也不承诺远程桌�
 
 本地 native feed 读取该钥匙，JS 页面不读取文件、不拿播放器完整令牌，也不持有只读钥匙。原生桥将数据转为无凭据消息交给内嵌页面；来源不在受信内嵌 origin 的页面不得接收桥或命令。
 
+#### W1-A 冻结：首版只做快照轮询（2026-10-24）
+
+W1-A 先实现 `GET /v1/wallpaper/snapshot`，不实现 `/v1/wallpaper/events` WS；事件推送留到 W1-B（W1-B 已实现，见下文“事件流”）。原生 feed 500 ms 轮询，不新建第二份播放/频谱 owner。W1-A 只交付契约与宿主 feed，探针场景仍只做环境动画；把 feed 接入场景在 W1-B 完成。
+
+| 项 | 冻结值 |
+| --- | --- |
+| 凭据 | 数据目录 `wallpaper-key`（64 hex，删文件重启轮换）；请求头 `Authorization: Wallpaper <key>`；只放行该 GET |
+| discovery | `vmusicd.json` 增加 `wallpaper_protocol: 1`；缺失/不匹配时停止音乐桥，不扫描端口 |
+| 快照 | `protocol:1`、`timing:"presentation_applied"`、`server{session,edition,version}`、`seq`、`valid`、`playing`、`positionMs`、`durationMs`、`generation`、`spectrum{bands[64],energy,ageMs}` |
+| 频谱 | 64 个有限值，范围 0..1；`energy` 为均值；服务端最后一帧超过 1 s 归零 |
+| 新鲜度 | 客户端 500 ms 内原样、500–1000 ms 线性衰减、之后归零；没有频谱帧也归零 |
+| 暂停/无曲 | `playing:false` 时不插值位置，频谱按 `ageMs` 衰减；环境动画继续 |
+| 断连 | HTTP 失败、发现失效或会话变化时丢弃快照，不保留旧位置插值；按有界退避重读发现 |
+| 迟到/重复 | 同一 session 内 `seq` 必须严格递增，否则 `wallpaper_stale_snapshot` |
+| 隐私 | 不含曲名、路径、账号、封面；W2 再单独评审 |
+
+客户端错误码冻结为：`discovery_missing`、`discovery_invalid`、`edition_mismatch`、`wallpaper_protocol_missing`、`wallpaper_protocol_mismatch`、`wallpaper_key_missing`、`wallpaper_key_invalid`、`wallpaper_http_error`、`wallpaper_events_error`、`wallpaper_events_unavailable`、`wallpaper_session_changed`、`wallpaper_stale_snapshot`、`wallpaper_invalid_snapshot`。服务端对越权一律 401，不回显钥匙。
+
+#### W1-B 首片进度（2026-10-24）
+
+已实现：`hertz-desktop` 的壁纸场景页（registry 相机 + `applyFeed`）、WorkerW 目标屏 surface（完整显示器矩形）、混合 DPI WebView 缩放补偿、目标屏选择（设置页）、500 ms feed 线程、全屏/会话/息屏停绘、托盘“显示壁纸”开关（用户隐藏时隐藏 WebView，露出系统壁纸）、壁纸设置页（启用/目标屏/帧率/跟随音乐）、15 s 预览租约与预览窗口、应用 revision 与运行时启停、Explorer 重启自动恢复（存活检测 + 3 次/120 s 预算 + 托盘重新挂载）、主应用管理通道（服务端 `/v1/desktop/control` + app 设置行 + 宿主 pipe）、多来源切换（配置 schema v2、按 profile 独立域、设置页来源列表与候选）与事件流（`GET /v1/wallpaper/events`，旧服务自动回退轮询），以及 `wallpaper.enabled`（默认关闭）与 `--wallpaper` 运行开关。隔离 mock 快照端到端已记录 page ready / mounted / feed ok；设置页经 WebView2 CDP 验证预览、应用、live surface 与 feed；真实 Explorer 重启验证 page/scene 重新挂载；96/144 混合 DPI 在第二屏实机验证。
+
+W1-B 的功能件已齐，单屏拓扑重排已在 W3 首片接上，W1-C 的渲染失联恢复、诊断投影、真实双发行版服务与 live/预览共存已验收；W1-C 只剩安装升级与多小时长稳。同时挂多块屏、多屏整机预算仍属 W3。宿主托盘已提供开机启动开关（`launch_at_login`）；运行中的旧服务需重建/重启后才提供新路由、新 UI 资源、`wallpaper-key` 与快照/事件端点。
+
+#### W1-B 设置与预览首片（2026-10-24）
+
+- 托盘“壁纸设置”打开 520×520 设置页；可改启用、15/30/60 fps、跟随音乐，点“预览”打开 960×540 场景预览窗口。
+- 预览租约 15 s，设置窗口打开期间自动续租；同一时间只有一个预览；关闭设置、应用或超时都会关闭预览。
+- “应用”校验当前配置 revision 后保存，运行时创建/销毁 WorkerW surface、重建托盘并更新 feed 响应；目标屏变化会重建 surface；失败显示错误，不静默改配置。
+- 设置页可选目标显示器；列表来自宿主的完整显示器矩形（设备名、物理尺寸、DPI、主屏标记），选择结果保存到 `wallpaper.monitor`。
+- 设置页自身走宿主页面 IPC；主应用入口走服务端 `/v1/desktop/control` 转发到宿主 pipe，见下。
+
+#### W1-B 主应用管理通道（2026-10-25）
+
+- 服务端新增 `POST /v1/desktop/control`（保留 `/v1/desktop/lyrics/control` 兼容）和 `POST /v1/desktop/wallpaper/launch`；命令白名单包含 `wallpaper-status/settings/toggle/show/hide/retry/preview/preview-close/preview-renew/apply`。
+- 启动路由以 `--settings` 拉起宿主，并在 400 ms 后补一次 `wallpaper-settings`，兼容已有宿主单实例退出的情况。
+- 宿主 pipe 返回统一 `status_json`：壁纸 enabled/visible/hidden/revision/fps/musicResponse/monitor、settingsOpen、previewActive、monitorMissing；apply 失败返回明确 error/message。
+- 主应用设置页新增“桌面壁纸：壁纸设置 / 显示隐藏”；DBX 形态隐藏该入口。按钮经服务端控制路由，宿主未启动时自动拉起并重试一次。
+- 验证：消息模式命名管道逐项通过 status/toggle/show/settings/preview/close/apply enable/disable/hide/show/retry；服务端命令白名单、前端资源 1054/1054 与 JS 语法通过。尚未在重建后的应用实例里做整页人工验收。
+
+#### W1-B 多来源切换（2026-10-25）
+
+- 配置升到 schema v2：`activeProfile` 加最多 8 个 profile 的独立歌词/壁纸域；schema v1 配置在加载时原地迁移（顶层域归入当时的 `activeProfile`），超限、重复来源或坏配置拒绝改写。
+- 宿主 pipe 新增 `profile-switch`（`expectedRevision` + `profile{dataDir,edition}`）；设置页新增“来源”选择与“切换来源”。列表只来自已保存来源、两个规范数据目录和主应用本次传入的候选，不从端口扫描。
+- 切换前校验发行版为 full/standard/custom、数据目录为存在的绝对路径；持久保存成功后才清空旧歌词、播放锚与频谱，递增来源代际并重启歌词/壁纸 feed。目标 profile 的 enabled 与样式在切换后应用；新来源不继承另一 profile 的启用状态。
+- 主应用启动壁纸设置时，服务端把本实例的 `dataDir` 与发行版作为候选传给宿主；已有宿主绑定其他来源时，用户在设置页显式选择后切换，不会被静默改绑。
+- “来源已保存”与“壁纸挂载失败”分开报告：切换已落盘但 surface 创建失败时保留新绑定与错误，不静默回退旧来源。
+- 验证：隔离 mock 双来源 31/31 通过，包含 v1 迁移、A/B 域隔离、设置页切换、自定义目录候选、旧服务回退、慢请求跨切换的旧代际丢弃、非法路径拒绝与 revision 不变。尚未在正式服务、真实双发行版安装或登录自启场景验收。
+
+#### W1-B 事件流（2026-10-25）
+
+- `GET /v1/wallpaper/events` 使用同一把 `wallpaper-key` 的 `Authorization: Wallpaper <key>` 请求头升级 WS；握手前由壁纸路由组鉴权，越权 401。旧服务没有该入口时返回 404，宿主回退到原来的 500 ms 快照轮询。
+- 首发一条完整快照（字段与 `GET /v1/wallpaper/snapshot` 相同），之后只把现有播放/频谱广播标脏，最多每 250 ms 合并发送一帧完整快照；无事件时 1 s 心跳推进 `seq` 与 `ageMs`。不新开 FFT、播放 owner 或频谱订阅。
+- 慢客户端由 `send` 背压和 broadcast 的 `Lagged` 合并处理：只保留“需要新快照”的事实，不排队重放旧频谱；断连后按 1/2/4/8/16/30 s 有界退避重连，收到有效快照后重置。
+- 宿主仍执行同一套校验：协议/时间语义/服务会话/`seq` 严格递增/64 段有限频谱；旧连接迟到帧与旧来源代际事件都不能覆盖新快照。
+- 验证：服务端 `wallpaper_events_stream_starts_with_a_snapshot` 单测；真实 Standard 服务上 WS 鉴权、首发快照、心跳推进 `seq`、无钥匙拒绝，以及宿主 `wallpaper events connected`/feed ok/WorkerW surface 全部通过；旧服务 404 回退轮询在双来源 mock 中通过（31/31）。
+
+#### W3 单屏拓扑重排首片（2026-10-25）
+
+- 宿主每 1 s 按稳定设备名重新枚举目标屏；矩形、DPI 或位置变化时原地调用 `mount_wallpaper` 重算 WorkerW 相对坐标，再按目标 DPI / 窗口 DPI 重算 WebView zoom，并记录新的子窗与父窗矩形。目标屏缺席仍只停绘等待，不自动占用另一块屏。
+- 重排不重置配置、场景参数或质量偏好；只有重挂失败才丢弃当前 surface，进入现有 3 次/120 s 恢复预算。
+- 实机验证：目标 `DISPLAY5` 1920×1080@96 at (510,-1080) → 1600×900@59 at (510,-900) → 恢复；子窗从 `510,-1080..2430,0` 变为 `510,-900..2110,0` 再恢复，`zoom=0.667` 保持，页面仍为 ready，第二屏截图显示场景填满新尺寸。证据在 `output/desk-w0/w1b-reflow-*`。
+- 边界：只验证了位置/分辨率变化，DPI 变化与横竖屏切换尚未实机覆盖；同时挂多块屏、逐屏实例上限与整机预算仍属 W3 后续。
+
+#### W1-C 渲染失联恢复首片（2026-10-25）
+
+- 场景页渲染循环每 2 s 上报 `wallpaper_heartbeat <ticks> <draws> <mounted> <lost>`；宿主只在壁纸可见且页面 ready 时检查，超过 10 s 没有有效心跳视为渲染停摆。
+- 心跳宽限只在可见性从 false→true 时给一次；feed 每 250 ms 的 `recompute_wallpaper` 不刷新心跳时间（早期实现每拍重置，导致 10 s 超时永远不会触发）。
+- 壁纸 feed 每 250 ms 调用页面 `evaluate_script`；页面就绪后连续 3 次失败视为 WebView 控制器/渲染进程失效。两条路径都丢弃当前 surface，清空页面代际，再走统一的 3 次/120 s 恢复预算；旧页面迟到 IPC 仍按 generation 丢弃。
+- `status_json.diagnostics` 暴露暂停原因、FPS 与运行事实：`pauseReasons`（`disabled/hidden/monitorMissing/noSurface/pageNotReady/fullscreen/sessionUnavailable/displayOff`）、`fps{configured,effective,measured}`、`page{ready,ticks,draws,heartbeatAgeMs,evalFailures,zoom}`、`monitor{name,left,top,width,height,dpi}`、`recovery{attempts,terminal}`、`feed{hasSnapshot,lastSeq}`。`measured` 由 draw 增量除以至少 1 s 的心跳间隔得到；不可见或心跳超过 5 s 时返回 `null`，`effective` 在停绘时为 0。
+- 验证：隔离宿主杀掉自己的 WebView2 进程树后，2.6 s 内连续 eval 失败触发恢复，0.4 s 重建成功，新的 dom ready/mounted 出现，`pageTicks` 恢复递增且 surface 仍启用（8/8 checks）。无壁纸页的宿主诊断投影 12/12 通过：禁用/隐藏暂停原因、FPS 字段、空 monitor/recovery/feed 与状态大小均符合预期。10 s 心跳超时分支已补冻结页面端到端验收（9/9）：用 CDP 替换页面的 `requestAnimationFrame` 让它不出帧但仍响应，宿主只由心跳判停；当天早些时候挡住这条用例的 `E_INVALIDARG` 根因见[壁纸页供给通道](#壁纸页供给通道2026-10-25)，不是 WebView2 运行时状态。
+
+#### 壁纸页供给通道（2026-10-25）
+
+- 现象：新建壁纸页稳定失败 `加载壁纸页面失败：WebView2 error: 0x80070057`（E_INVALIDARG），而 WorkerW 挂载、feed、状态管道都正常；先前记为「本机 WebView2 运行时卡住，需重启」，实为误判——本机自 10-23 起未重启，只换掉页面供给方式就恢复。
+- 根因：壁纸页整页用 `NavigateToString` 内联，该 API 约 2 MB 上限；并行的舞台改动把内联的 `plugin/ui/vendor/stage-runtime.js` 从 1.077 MB 增到 1.681 MB、整页 1.69 MB 越线。变异证明：同一份 exe 只把内联 runtime 换回 1.077 MB 版本即 `pageReady`，四种 `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` 组合（无参数/两个调试端口/其它参数）都同样失败或同样通过，与调试端口和杀进程史无关。
+- 中途方案落盘 `file://` 不可用：页面正常加载、`window.ipc` 与 `chrome.webview` 都在、场景运行时已注入，但 file:// 文档的 postMessage 到不了宿主（CDP 手动 post 也收不到），症状是表面已挂载却永不进入 ready 与心跳，比直接报错更难发现。
+- 现方案：壁纸页与预览页整页由宿主自定义协议 `hertz://localhost/wallpaper.html` 供给（wry 映射为 `http://hertz.localhost/`，仍是受控本地 origin，IPC 可用且没有尺寸悬崖）；页面每个 surface 构造一次并以 `Arc<[u8]>` 交给协议处理器，该 origin 只为这一条路径返回页面、其余路径 404，避免变成通用文件服务；`wallpaper target` 日志补 `page_bytes`。仍走 `NavigateToString` 的只剩歌词页与设置页，由单测钉在 256 KiB 以内。
+- 验收（真实 1.69 MB 页面）：四种启动参数组合全部 pageReady；崩溃恢复 8/8；冻结页面心跳停摆 9/9；预览/设置/来源切换/事件流/目标屏回归同步通过；真机壁纸页诊断拿到 `draws=112 measured=27.4 ticks=643 zoom=0.667`。证据在 `output/desk-w0/w1c-ab-*`、`w1c-fileurl-*`、`log2_summary.txt`。
+
+#### W1-C 双发行版服务与双表面共存（2026-10-25）
+
+- 同一份宿主分别连 Standard（`target/debug`，默认特征）与 Full（`--features full`，隔离在 `target/full-cargo/debug`）服务，逐项对齐：discovery 的 `edition` 与 `wallpaper_protocol: 1`、`wallpaper-key` 为 64 hex、`GET /v1/wallpaper/snapshot` 带钥匙 200 且 64 段、不带钥匙 401、宿主 WS `wallpaper events connected`、feed 快照、页面实际绘制与 `measured` FPS。两版各 12/12 通过，实测 `standard 27.43 / full 27.40`、同目标屏 `DISPLAY5`、`zoom=0.667`；壁纸契约不需要按发行版分支。
+- 双表面共存是协议改造后的新边界：live 壁纸与设置页预览同时挂载，两个 WebView 各持一份 `hertz` 协议处理器，都能取到页面并 mounted；预览打开期间 live 继续出帧，关闭预览后预览页面释放、live 不受影响，全程没有恢复或 eval 失败记录（11/11）。
+- 边界：Full 侧是 debug 特征构建，release 产物的壁纸契约未单独再跑（双版本 release 构建与哈希见发布矩阵）；真实安装/升级路径（换 exe、`launch_at_login` 指向新路径、旧服务需重启才提供新路由）与多小时长稳仍未做。
+
+#### W1-B 多屏与混合 DPI 首片（2026-10-24）
+
+- 宿主枚举每块显示器的完整矩形、设备名、有效 DPI 与主屏标记；默认主屏，用户可在设置页选择单块目标屏。
+- 壁纸窗口作为 WorkerW 子窗放在目标屏完整矩形（不受任务栏工作区裁剪）；WebView 缩放因子为目标 DPI / 窗口 DPI，页面按目标屏 CSS 尺寸首次布局。
+- 目标屏消失时停绘并保留窗口；重新出现后恢复绘制。分辨率/DPI/位置变化会在下一次 1 s 检查中原地重排（重挂 WorkerW 与重算缩放），不同时占用另一块屏。
+- 同时挂多块屏与整机多屏预算仍未实现（W3）。
+- 2026-10-25 第二屏实机：`DISPLAY1 2560×1600@144`（主）+ `DISPLAY5 1920×1080@96`（510,-1080）。设置页选 DISPLAY5 后 `target rect=510,-1080 1920×1080 dpi=96 window_dpi=144 zoom=0.667`，子窗 `510,-1080..2430,0`、WorkerW `0,-1080..2560,1600`，page/mounted/feed 全过，第二屏截图显示星座场景。
+- 负虚拟屏原点修正：WorkerW 是 Progman 的子窗，`SetWindowPos` 必须按 Progman 屏幕原点换算；直接传虚拟屏坐标会让整层再偏移一屏（显示器在上方/左侧时必现）。
+
+#### W1-B Explorer 重启恢复（2026-10-24）
+
+- 每秒核对壁纸子窗口仍挂在 WorkerW 下；Explorer 重启销毁 WorkerW 后自动丢弃旧窗口，重新找 Progman/WorkerW（各最多等 3 s）、建窗、挂载并加载场景页。
+- 页面事件带 generation；旧页面的迟到 IPC 被丢弃。新页面就绪后重新应用最新 feed，并以当前 policy/用户隐藏状态起停。
+- 自动恢复预算为 120 s 内最多 3 次；到顶进入终止态并提示，托盘“重新挂载壁纸”显式清零预算后重试。设置页“应用”也会清零预算。
+- 真实 Explorer 重启验收：初始 page ready/mounted 各 1 次，重启后各增至 2 次，`wallpaper recovery success attempt=1`，宿主继续运行；仍未覆盖其它 OS、弱机和 GPU 恢复。
+
 ### 8.2 数据与流量约定
 
 W1 帧数据包括协议版本、发行版、绑定 profile 身份、当前服务 session、递增序号、有效性、播放标志、歌曲位置、64 个有限频谱数值和能量。频谱归一化到约定范围，非法值拒绝，不传 PCM、文件路径、账号或整张曲库。
@@ -239,13 +351,11 @@ W1 帧数据包括协议版本、发行版、绑定 profile 身份、当前服�
 
 原生接收层按类型只保留最新待处理快照和频谱，不为每帧追加任务。向页面推送上限为 `min(30, 当前有效绘制 fps)`；暂停时停止频谱订阅或转为只接收低频状态，恢复先拉最新快照再订阅。不重放暂停期间的频谱。
 
-壁纸只读连接不增加播放器页面观察者计数，不改变既有离页暂停设置。桌面歌词使用独立窄凭据和数据面；共享宿主不代表歌词页面能读取壁纸频谱或任何完整播放控制权限。
+壁纸只读连接不增加播放器页面观察者计数，不改变当前固定离场暂停策略；关闭最后网页后音乐暂停，环境动画继续，详见[共享宿主 §2](./desktop-host.md#2-播放生命周期的当前事实)。桌面歌词使用独立窄凭据和数据面；共享宿主不代表歌词页面能读取壁纸频谱或任何完整播放控制权限。
 
 WS 重连采用 1/2/4/8/16/30 秒有界退避，恢复收到有效快照后重置；断连期间不触发用户提示连发，不尝试启动服务。服务会话变化时清空旧序号和时间锚，旧连接迟到事件不能覆盖新快照。
 
-绑定由 `edition + 规范数据目录/profile 身份` 确定，启动会话 ID 另用于识别服务重启。可复用现有服务实例标识，但需在专用桥中明确其稳定/会话语义；不得按端口号、进程名或当前活动浏览器猜测来源。
-
-端点发现只读取已绑定 profile 数据目录中的本机发现记录。优先复用现有服务写出的 discovery，以有界、版本化字段补齐实际回环端点、发行版、profile 与会话身份；不再并行维护第二份独立发现文件。宿主仅采纳数值 loopback 地址，不跟随网络重定向，不扫描默认端口。`--port 0` 或自定义端口均使用记录中的实际端点，连接后仍核对认证快照的来源身份。
+来源身份、切换和 discovery 统一遵循[共享宿主 §3/6](./desktop-host.md#3-来源身份与切换)，不依赖 AI/MCP 开启。壁纸 feed 仅采纳绑定 profile 的数值 loopback 端点，不跟随重定向、不扫描默认端口；随机/自定义端口从版本化发现记录取得，再核对认证快照身份。当前 `vmusicd.json` 尚缺该身份契约，必须补齐后接入。
 
 发现记录缺失、过期、端点未就绪或来源不匹配时保留环境动画，并按有界退避重新读取。服务晚启动或换端口重启后可重新发现；旧记录和旧连接不能修改当前绑定。发现记录中现有全权 token 不传入壁纸页面，专用 feed 仅使用 `wallpaper-key`。
 
@@ -261,30 +371,19 @@ W2 封面只允许服务确认的当前曲目封面入口，由原生桥有界�
 
 ### 9.1 单一桌面 owner
 
-每个当前用户仅允许一个有效 HertzDesktop 宿主，本机交互会话之外不创建第二套呈现。壁纸与歌词共享 activeProfile；Standard/Full 以及多个 `--data-dir` 竞争来源绑定时，由宿主报告当前绑定，用户显式切换并明确同时影响已启用的两个 surface。
-
-管理通道采用当前用户受限的本机命名管道，拒绝远程客户端，检查来源用户/会话。协议含版本、请求 ID、预期配置 revision 和结构化错误；仅支持状态、准备配置、提交、暂停、继续与停止，不接受任意程序路径、shell 命令或脚本。
-
-服务只从当前安装目录定位匹配版本的壁纸组件，启动参数不携带长期凭据。并发“启用”合并到单实例握手；配置提交使用 revision 检查，旧设置页不能覆盖托盘的新修改。
+单实例、交互会话、托盘、activeProfile 和管理 IPC 的唯一规范为[共享宿主设计](./desktop-host.md)。壁纸只拥有自己的 controller、挂载与运行策略；管理命令显式指定 surface。第二份 exe 不会静默替换已有宿主，配置提交与运行就绪分别报告。
 
 ### 9.2 配置唯一归属
 
-宿主拥有唯一桌面配置文件，建议路径为 `%LOCALAPPDATA%/Hertz/Desktop/config.json`。该文件在同一宿主内按发行版和 profile 隔离记录，各 profile 下分别保存 wallpaper 与 lyrics 配置域；播放器不在 SQLite `settings.space3d`、localStorage 或另一个文件中保存壁纸设置副本。
-
-建议字段：
+共享配置路径、总容量、revision、profile 切换和失败处理由[共享宿主 §4](./desktop-host.md#4-配置提交与实际运行分离)定义；本页只定义各 profile 的 wallpaper 域，不在 `settings.space3d` 或 localStorage 保存副本。字段如下：
 
 | 字段组 | 内容与约束 |
 | --- | --- |
-| 文件信封 | `schemaVersion`、`revision`、当前绑定的 profile 引用；壁纸与歌词合计配置最多 64 KiB |
-| 宿主全局偏好 | 唯一登录自启开关，随宿主保存；系统启动项据此启停并恢复当前 `activeProfile` |
-| 来源身份 | 发行版、规范数据目录、稳定 profile 身份；不保存令牌、钥匙或完整取流 URL |
 | 场景快照 | `sceneId`、原 `stateVersion`、原 registry 校验后的 `params`；不复制默认值生成规则 |
 | 桌面设置 | 目标显示器稳定标识、亮度、运动强度、质量与 FPS 偏好 |
-| profile 壁纸运行偏好 | enabled、音乐响应、全屏暂停、电池暂停；与歌词合计最多保存 8 个 profile 配置 |
+| profile 壁纸运行偏好 | enabled、音乐响应、全屏暂停、电池暂停；不复制宿主全局自启开关 |
 
-当前用户宿主配置与 profile 数据的用途不同：壁纸可在源服务未启动时恢复，所以配置由宿主持有；曲库、播放与空间偏好仍由原服务持有。不同 profile 的参数不可自动串用，达到保存上限时提示删除不用的配置，不自动丢弃当前或自启绑定。
-
-配置先经 registry 与原生字段校验，再原子替换；每次成功提交增加 revision。坏文件保留为一个可诊断副本，进入停用状态，不覆盖为新默认值并假装恢复成功。仅实现明确的版本迁移；遇到未来版本停止应用并保留原文件。
+配置提交前使用原 registry 校验场景参数。挂载失败仍如实保留“配置已保存、运行失败”，不会自动改回另一 profile；选择上次有效配置须由用户明确提交。配置不可读时不擅自用默认场景占据桌面。
 
 “将当前舞台设为壁纸”是一次性复制已校验的场景状态。之后舞台和壁纸各自修改，不双向实时同步。未具备壁纸资格的场景明确不可用，不能静默换成另一场景。
 
@@ -292,15 +391,7 @@ W2 封面只允许服务确认的当前曲目封面入口，由原生桥有界�
 
 ### 9.3 登录自启与更新
 
-只建立一个当前用户的登录启动入口，不创建系统服务或管理员权限任务。入口启动固定安装位置的组件，由宿主配置决定来源与场景；不把认证信息写进注册表或命令行。
-
-切换 Standard/Full 或 profile 不改变全局自启开关；开启时下次登录恢复切换后已提交的 `activeProfile`，关闭时所有 profile 都不自启。配置提交与启动项更新须校对实际结果，失败显示状态不一致并提供修复入口，不能仅凭 JSON 已写入就报告自启生效。
-
-自启只恢复 activeProfile 中 enabled 的功能。退出壁纸不禁用歌词；两者均 disabled 且设置关闭时组件退出，自启项不启动空宿主。再次启用任一功能时按全局偏好同步启动项。具体共享生命周期与桌面歌词方案一致。
-
-移动便携程序后，旧启动路径可能失效：设置页检测并提供用户触发的修复；不扫描磁盘寻找可执行文件。卸载移除指向本组件的自启项，保留/删除用户配置由卸载流程明确选择。
-
-服务、宿主、管理协议和场景资源须报告版本。协议主版本不兼容时拒绝新的配置提交并显示升级提示；已有静音环境动画可继续，音乐桥停止。构建与发布使用同一提交产物，不现场替换运行中的脚本包。
+自启、便携目录迁移、安装升级和协议兼容遵循[共享宿主 §6–7](./desktop-host.md#6-数据权限和版本边界)。退出壁纸不禁用歌词；数据协议不兼容时停止音乐桥，已有环境动画可继续。壁纸内嵌场景资源必须与宿主配套，不现场替换运行中的脚本包。
 
 ## 10. 性能、功耗与可观测性
 
@@ -342,6 +433,8 @@ W0 先验证最不确定的 Windows 边界，W1-A/B 可在接口明确后分工�
 W0 输出必须包含具体 Windows 构建、GPU/驱动、显示器/DPI/刷新率、WebView2 版本、Rust 依赖、帧率和资源数据。若可靠运行依赖不受控的系统改动、关闭所有后台保护或无法恢复桌面输入，停止进入 W1，重审技术路线。
 
 本方案不锁发布日期。W0 实测后才能按已验证的部署与恢复成本拆工期，不能用现有 Web 场景数量推算原生开发完成比例。
+
+具体实验见[原生验证计划](./plans/2026-10-23-desktop-native-validation.md)。W0 只证明原生挂载/绘制及所测恢复条件；进入 W1-A 前冻结共享帧信号、频谱 schema、身份和窄凭据契约，进入 W1-B 前冻结管理 IPC，W1-C 再完成八小时长稳与完整发布矩阵。
 
 ## 12. 验收标准与证据
 

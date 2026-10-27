@@ -204,6 +204,7 @@
     refs.bar.insertBefore(heading, refs.bar.firstChild);
     make('span', 'ln-player-label', heading).textContent = '此刻，听见';
     var actions = make('div', 'ln-player-actions', heading);
+    relocate(byId('bar-desktop-settings'), actions);
     relocate(byId('bar-player-expand'), actions);
     var stageButton = make('button', 'ln-stage-entry', actions);
     stageButton.type = 'button';

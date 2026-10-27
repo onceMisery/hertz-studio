@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>凤凰涅槃 · 连续演出预览</title>
+<style>
+*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#020204;color:#f5dec0;font:14px system-ui,'Microsoft YaHei',sans-serif}
+canvas{display:block;width:100%;height:100%;touch-action:none;cursor:grab}canvas.dragging{cursor:grabbing}
+header{position:absolute;top:26px;left:30px;pointer-events:none}h1{font-size:22px;font-weight:400;letter-spacing:6px;margin:0 0 10px}header p{color:#af906c;font-size:12px;letter-spacing:2px}.hint{color:#8e9eaf;letter-spacing:1px}
+footer{position:absolute;bottom:25px;left:30px;right:30px;display:flex;align-items:center;gap:14px}button{border:1px solid #aa75385e;background:#100a08c9;color:#e8c596;border-radius:4px;padding:9px 15px;cursor:pointer}button:hover{border-color:#b57e43}button:focus-visible{outline:2px solid #e8c596;outline-offset:3px}
+#phase{min-width:78px}progress{flex:1;height:2px;border:0;background:#322214;accent-color:#d3994b}#time{font-variant-numeric:tabular-nums;color:#af906c;font-size:12px}#error{position:absolute;top:40%;left:10%;right:10%;color:#ffa789}#error:empty{display:none}
+@media(max-width:600px){header{top:18px;left:18px}footer{left:18px;right:18px;bottom:18px;gap:10px;flex-wrap:wrap}button{padding:8px 11px}progress{min-width:40%;order:1}#time{order:2}}
+</style>
+<canvas aria-label="凤凰涅槃三维舞台，可拖拽旋转视角"></canvas>
+<header><h1>凤凰涅槃</h1><p>展翼 · 羽化 · 凝卵 · 重生</p><p class="hint">拖拽旋转 · 滚轮缩放 · 双击回正</p></header>
+<div id="error" role="alert"></div>
+<footer><button id="play">暂停</button><button id="restart">从头播放</button><button id="reset-camera">视角复位</button><span id="phase">神凤展翼</span><progress max="36" value="0"></progress><span id="time">00 / 36s</span></footer>
+<script src="/plugin/ui/vendor/stage-runtime.js"></script>
+<script src="/plugin/ui/vendor/space-stage.js"></script>
+<script src="/plugin/ui/space-camera.js"></script>
+<script src="/tools/space-stage/phoenix-preview.js"></script>
+</html>

@@ -52,6 +52,27 @@ async function main() {
     await page.addScriptTag({ path: path.join(root, 'plugin/ui/vendor/stage-runtime.js') });
     await page.addScriptTag({ path: path.join(root, 'plugin/ui/vendor/zodiac-stage.js') });
 
+    report.longClock = await page.evaluate(() => {
+      __mount('low');
+      const samples = [14399, 14400, 14401, 28800, 28801].map(time => {
+        __step(time);
+        const stats = ZodiacStagePure.stats();
+        return { requested: time, actual: stats.time, index: stats.signIndex, phase: stats.stateT,
+          expected: ZodiacStagePure.pure.timelineAt(time) };
+      });
+      const invalid = [-1, NaN, Infinity, -Infinity, undefined].map(time => {
+        __step(time);
+        return ZodiacStagePure.stats().time;
+      });
+      return { samples, invalid };
+    });
+    for (const sample of report.longClock.samples) {
+      assert.equal(sample.actual, sample.requested, 'visual clock must advance past four and eight hours');
+      assert.equal(sample.index, sample.expected.index, 'long-running clock reaches the correct sign');
+      assert.ok(Math.abs(sample.phase - sample.expected.t) < 1e-8, 'long-running timeline phase is not frozen');
+    }
+    assert.deepEqual(report.longClock.invalid, [0, 0, 0, 0, 0], 'invalid or negative time cannot poison the renderer');
+
     // Supplied poses must move the rendered Three camera, including its projection
     // and free-camera heading. The engine's existing rAF owns every transition.
     assert.equal(await page.evaluate(() => typeof ZodiacStagePure.setRig), 'function', 'setRig camera export');

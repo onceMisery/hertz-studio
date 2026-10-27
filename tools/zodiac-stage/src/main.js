@@ -327,7 +327,8 @@ export function resize(width, height) {
 
 export function setTime(frame = {}) {
   if (!st) return;
-  const time = clamp(Number(frame.time) || 0, 0, 3600 * 4);
+  const requestedTime = Number(frame.time);
+  const time = Number.isFinite(requestedTime) ? Math.max(0, requestedTime) : 0;
   const playing = !!frame.playing;
   if (time !== st.time || playing !== st.playing) st.dirty = true;
   st.time = time;

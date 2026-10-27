@@ -145,6 +145,18 @@ Jamendo、ccMixter 和公开播客；显式开启 `full` feature 的 **Full** �
 - 支持公开分发的 MP3/M4A 等有限长度音频；直播电台与平台私有付费节目不在此入口。
   每个 RSS 最多解析 16 MiB、收录 2000 个可播放单集
 
+### RSS 图文阅读
+
+- 独立「阅读」栏目：订阅博客、新闻等公开 RSS/Atom 源，与播客分开管理；
+  同一地址可以在两处分别添加，互不同步
+- 源内图文正文应用内阅读（标题、段落、表格、代码块、受控图片）；
+  源只提供摘要时显示摘要并提供「打开原文」入口，不自动抓取网页全文
+- 已读/未读、收藏、全部/未读/收藏筛选与分页；正文详情成功显示后标记已读
+- 正文图片默认不加载，点击「加载本文图片」后经服务端有界代理（仅 HTTPS、
+  `image/*`、6 MiB 上限，只放行正文登记过的图片键）；音频附件不进入播放器
+- 每 16 MiB/单源、2000 条/次扫描、64 KiB/篇正文、200 源 / 5 万条 / 256 MiB
+  逻辑容量的有界预算；超限如实标注，不静默丢弃
+
 ### 外观：主题、壁纸与界面皮肤
 
 - 布局皮肤（界面可选五套）：**星轨 orbit（默认）** / 经典 classic / 流年 liunian /
@@ -214,6 +226,8 @@ cargo run --release -- --open
 在 UI 左侧填入音乐目录 → 点「扫描」→ 点击曲目即可播放。要停掉服务：终端里 `Ctrl-C`，
 或者用界面顶栏那颗电源钮。
 
+局域网收听：每台电脑运行本机 Hertz，在左侧选择“一起听”。房主创建房间、选择分享歌曲并生成一次性邀请；接收电脑核对指纹后加入，声音由原生服务输出。设备、权限、聊天与验收说明见 [局域网一起听使用指南](docs/lan-listening-user-guide.md)。
+
 常用参数：
 
 | 参数               | 说明                             |
@@ -269,6 +283,7 @@ sidecar 只做传输：把宿主的调用转成与 HTTP 响应同构的返回值
 │  scan       后台扫描，进度经事件总线广播                  │
 │  online     音源注册表：契约 + 分发 + 落盘缓存             │
 │  podcasts   中文播客目录与 RSS，用户给的地址逐跳校验       │
+│  reader     RSS 图文阅读：订阅、源内正文、阅读状态         │
 │  ai         持久任务、provider、凭据、账本、情绪分类       │
 └───────────────────────────┬─────────────────────────────┘
                             │ 命令队列（单消费者）
@@ -523,9 +538,11 @@ pwsh -File scripts/smoke.ps1 7899 # Windows
 
 路线图按**用户获得的完整结果**排序，不按模块排序。一句话概括当前状态：**代码走在了验收前面**——
 「当前没有需要在缺少真实环境时继续新增的主线功能」是功能核对结论，不等于发布条件已经满足。
-每条的真实状态以[路线图进度](docs/roadmap-progress.md)（核对 2026-10-21）为准，范围与依赖见
+每条的真实状态以[路线图进度](docs/roadmap-progress.md)（最新增量 2026-10-23）为准，范围与依赖见
 [产品路线图](docs/product-roadmap.md)，设计基线见[技术实施方案](docs/technical-roadmap.md)，
-发布门槛见[发布验收矩阵](docs/release-validation.md)，两者冲突时以[架构复核记录](docs/architecture-review.md)为准。
+发布门槛见[发布验收矩阵](docs/release-validation.md)。现行契约见对应 [ADR](docs/adr/README.md)及路线最新修订；[架构复核记录](docs/architecture-review.md)保留历史评审依据，不能覆盖后续明确决定。未决冲突需记录并复核。
+
+2026-10-23 已补核最新 master 的三 OS / 双发行版 CI 与构建结果；近期任务顺序和验收标准见[下一阶段开发计划](docs/plans/2026-10-23-next-development.md)。
 
 **主线 R0–R6**
 
@@ -547,8 +564,10 @@ pwsh -File scripts/smoke.ps1 7899 # Windows
 | S1 重采样 | 固定参数流式 sinc 已实现并有离线验证；真实声卡、长时间听测与其它 OS 待验 | [audio-resampling.md](docs/audio-resampling.md) |
 | 音频格式与错误边界 | 13 种扩展名，四件不同的事（检查 / 标签 / 解码 / 出声）写明并如实上报 | [audio-format-support.md](docs/audio-format-support.md) |
 | S2–S4 音频二期 | 升采样、参数 EQ、卷积 IR、EBU R128、真峰值限幅、噪声整形、交叉馈送、饱和，以及 Windows WASAPI 独占输出——排期在 R0–R6 之外 | 待音频专项重新定序 |
-| W0–W3 桌面壁纸 | 产品目标已选定，**方案待评审、尚未实施** | [desktop-wallpaper.md](docs/desktop-wallpaper.md) |
-| L0–L3 桌面歌词 | 透明置顶、锁定穿透、托盘恢复与只读歌词同步的设计已成稿（首版 Windows 11 x64）；与壁纸拟共用可选的 `hertz-desktop.exe`。**设计草案待评审、尚未实施** | [desktop-lyrics.md](docs/desktop-lyrics.md) |
+| W0–W3 桌面壁纸 | W0 稳定通过；W1-A 相机 registry/只读快照契约已实现；W1-B 首片已接 WorkerW 目标屏 surface、混合 DPI（第二屏 96/144 实测）、快照+事件 feed、托盘、设置页、15 秒预览租约、Explorer 重启恢复、主应用管理通道与多 profile/发行版切换；W3 单屏拓扑重排、WebView 失联恢复与诊断投影已接；W1-C 安装升级验收与多屏同时运行未做 | [desktop-wallpaper.md](docs/desktop-wallpaper.md) |
+| L0–L3 桌面歌词 | **L1 首版已实现**：服务端只读快照/文档桥、Windows 透明置顶与锁定穿透、托盘恢复、播放器启动与解锁定位、本机管理通道；L1-C 发布验收与 DBX 入口未做 | [desktop-lyrics.md](docs/desktop-lyrics.md) |
+| 桌面公共契约与原生验证 | 单实例、来源切换、配置/应用状态、IPC、自启与部署统一设计；L0/W0 已有实机探针结果，L1 首版按本契约落地；本机管理通道与来源切换已通，发布验收仍未完成 | [共享宿主](docs/desktop-host.md) · [原生验证计划](docs/plans/2026-10-23-desktop-native-validation.md) |
+| LAN-L 局域网一起听 | 房主统一渲染、接收端按设备时钟同步；含受限配对/撤权、旧播控入口模式门禁，以及互动弹幕的独立有界存储。**设计提案待评审、尚未实施**，不依赖桌面专项 | [lan-listening.md](docs/lan-listening.md) |
 | 创意舞台二期（P8） | 基频轨迹已能本地分析与只读查看；工程、模板、分享码、视频导出已落地，人工视觉与音乐质量验收未做 | [pitch-track.md](docs/pitch-track.md) · [stage-projects.md](docs/stage-projects.md) · [stage-templates.md](docs/stage-templates.md) · [orchestration-art.md](docs/orchestration-art.md) · [video-export.md](docs/video-export.md) |
 | 星座场景视觉 | 逐座造型、配色与动效按文档调过一轮，可拖拽环绕、滚轮缩放、双击复位 | [zodiac-visual-tuning.md](docs/zodiac-visual-tuning.md) |
 | 搜索性能基线 | 五万曲本机 P95 与受控上游时延有基线，不替代真实来源 / 弱网 / 弱机验收 | [search-performance.md](docs/search-performance.md) |
@@ -559,7 +578,7 @@ pwsh -File scripts/smoke.ps1 7899 # Windows
 | DBX 上架 | 规则出处、字段填法与当前提交状态 | [dbx-store-submission.md](docs/dbx-store-submission.md) |
 | 参考与可行性评估 | VCPChat 对照、自研舞台引擎可行性、技术方案的独立评估（结论已回写进上面两份路线图） | [vcpchat-reference-assessment.md](docs/vcpchat-reference-assessment.md) · [stage-engine-feasibility.md](docs/stage-engine-feasibility.md) · [technical-roadmap-assessment.md](docs/technical-roadmap-assessment.md) |
 
-明确**不做**的也写在路线图里，免得被当成待办：云同步 / 多用户 / 远程 MCP、在线热加载
+明确**不做**的也写在路线图里，免得被当成待办：云同步 / 云端多用户账号体系 / 远程 MCP、在线热加载
 SVG/GLSL/JS、新增皮肤与新增平台、通用 agent、动态代码生成、向量库、完整 DSP 图、
 用模型直接改当前舞台、时间轴式 StageIntent（按 `unsupported_timeline` 拒绝）。
 

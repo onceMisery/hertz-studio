@@ -76,6 +76,147 @@ body.space3d-open #toast { z-index: 100; border-radius: 8px; }
 #sp-stage-settings summary { cursor: pointer; font-size: 13px; }
 #sp-scene-params output { display: block; text-align: right; font-size: 11px; color: var(--sp-muted); }
 .sp-loading { position: absolute; z-index: 4; left: 50%; top: 45%; transform: translate(-50%,-50%); font-size: 14px; }
+/* —— 二维 → 三维：先铺满隧道，WebGL 在下面准备 —— */
+.sp.sp-warping { opacity: 1; visibility: visible; transition: none; }
+.sp-warp {
+  position: absolute;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  overflow: clip;
+  contain: strict;
+  pointer-events: none;
+  background: radial-gradient(ellipse at 50% 48%, color-mix(in srgb, var(--sp-accent) 10%, transparent), transparent 38%), #030405;
+  opacity: 0;
+  visibility: hidden;
+  transform: scale(1.035);
+  transition: opacity .18s ease, transform .7s var(--sp-ease), visibility 0s linear .18s;
+}
+.sp-warp.sp-warp-on { opacity: 1; visibility: visible; transform: scale(1); transition: opacity .16s ease, transform .7s var(--sp-ease), visibility 0s linear 0s; }
+.sp-warp.sp-warp-out { opacity: 0; visibility: hidden; transform: scale(1.012); transition: opacity .6s var(--sp-ease), transform .6s var(--sp-ease), visibility 0s linear .6s; }
+.sp-warp::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  background: radial-gradient(ellipse at 50% 48%, transparent 24%, rgba(0, 0, 0, .28) 62%, rgba(0, 0, 0, .72) 100%);
+}
+.sp-warp-space {
+  position: absolute;
+  inset: 0;
+  overflow: clip;
+  perspective: 680px;
+  perspective-origin: 50% 48%;
+  pointer-events: none;
+}
+.sp-warp-depth {
+  position: absolute;
+  inset: 0;
+  transform-style: preserve-3d;
+  transform-origin: 50% 48%;
+  animation: sp-warp-bank 5.6s ease-in-out infinite alternate;
+}
+.sp-warp-gates, .sp-warp-stars { position: absolute; inset: 0; transform-style: preserve-3d; }
+.sp-warp-gate {
+  position: absolute;
+  left: 50%;
+  top: 48%;
+  width: 82vmin;
+  height: 82vmin;
+  border: 1px solid color-mix(in srgb, var(--sp-accent) 68%, transparent);
+  border-radius: 50%;
+  box-shadow: 0 0 28px color-mix(in srgb, var(--sp-accent) 34%, transparent), inset 0 0 30px color-mix(in srgb, var(--sp-accent) 20%, transparent);
+  opacity: 0;
+  will-change: transform, opacity;
+  animation: sp-warp-gate 2.7s linear infinite;
+  animation-delay: calc(var(--i) * -.225s);
+}
+.sp-warp-gate:nth-child(3n) {
+  border-color: color-mix(in srgb, var(--sp-accent-2) 62%, transparent);
+  box-shadow: 0 0 28px color-mix(in srgb, var(--sp-accent-2) 30%, transparent), inset 0 0 26px color-mix(in srgb, var(--sp-accent-2) 18%, transparent);
+}
+.sp-warp-star {
+  position: absolute;
+  left: 50%;
+  top: 48%;
+  width: 2px;
+  height: 22px;
+  border-radius: 2px;
+  background: linear-gradient(180deg, transparent, rgba(255, 255, 255, .92));
+  box-shadow: 0 0 4px rgba(255, 255, 255, .28);
+  opacity: 0;
+  transform-origin: 50% 50%;
+  will-change: transform, opacity;
+  animation: sp-warp-star var(--travel, 2.2s) linear infinite;
+  animation-delay: var(--d);
+}
+.sp-warp-star:nth-child(4n) { background: linear-gradient(180deg, transparent, color-mix(in srgb, var(--sp-accent) 72%, white)); }
+.sp-warp-star:nth-child(7n) { height: 32px; background: linear-gradient(180deg, transparent, color-mix(in srgb, var(--sp-accent-2) 62%, white)); }
+.sp-warp-swirl {
+  position: absolute;
+  left: 50%;
+  top: 48%;
+  width: 82vmin;
+  aspect-ratio: 1;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  background: conic-gradient(from 0deg, transparent 0 7%, color-mix(in srgb, var(--sp-accent) 44%, transparent) 12%, transparent 23%, color-mix(in srgb, var(--sp-accent-2) 32%, transparent) 38%, transparent 53%, color-mix(in srgb, var(--sp-accent) 38%, transparent) 67%, transparent 82%);
+  -webkit-mask-image: radial-gradient(circle, transparent 0 25%, currentColor 32%, currentColor 43%, transparent 59%);
+  mask-image: radial-gradient(circle, transparent 0 25%, currentColor 32%, currentColor 43%, transparent 59%);
+  color: white;
+  opacity: .72;
+  animation: sp-warp-swirl 8s linear infinite;
+}
+.sp-warp-glow {
+  position: absolute;
+  left: 50%;
+  top: 48%;
+  width: min(52vmin, 480px);
+  aspect-ratio: 1;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  background: radial-gradient(circle, color-mix(in srgb, var(--sp-text) 80%, transparent) 0 1.4%, color-mix(in srgb, var(--sp-accent) 62%, transparent) 4.5%, transparent 34%);
+  opacity: .85;
+  animation: sp-warp-pulse 2.4s ease-in-out infinite;
+}
+.sp-warp-copy {
+  position: relative;
+  z-index: 2;
+  display: grid;
+  gap: 8px;
+  text-align: center;
+  color: var(--sp-text);
+  animation: sp-warp-copy 2.6s ease-in-out infinite;
+}
+.sp-warp-copy b { font-size: 10px; font-weight: 500; letter-spacing: .44em; color: color-mix(in srgb, var(--sp-text) 58%, transparent); }
+.sp-warp-copy em { font-style: normal; font-size: 14px; letter-spacing: .14em; text-shadow: 0 0 20px color-mix(in srgb, var(--sp-accent) 66%, transparent); }
+.sp.sp-warping .sp-loading { opacity: 0; }
+@keyframes sp-warp-gate {
+  0% { opacity: 0; transform: translate(-50%, -50%) translateZ(-1500px) rotateZ(-5deg); }
+  10% { opacity: .72; }
+  62% { opacity: .34; }
+  100% { opacity: 0; transform: translate(-50%, -50%) translateZ(390px) rotateZ(8deg); }
+}
+@keyframes sp-warp-star {
+  0% { opacity: 0; transform: translate(-50%, -50%) rotate(var(--a)) translateY(calc(var(--r) * -1)) translateZ(-1100px) scaleY(.28); }
+  12% { opacity: .9; }
+  74% { opacity: .55; }
+  100% { opacity: 0; transform: translate(-50%, -50%) rotate(var(--a)) translateY(calc(var(--r) * -1)) translateZ(220px) scaleY(3.2); }
+}
+@keyframes sp-warp-bank {
+  from { transform: rotateX(8deg) rotateY(-5deg) rotateZ(-2deg) scale(1.03); }
+  to { transform: rotateX(11deg) rotateY(5deg) rotateZ(2deg) scale(.99); }
+}
+@keyframes sp-warp-swirl { to { transform: translate(-50%, -50%) rotate(360deg); } }
+@keyframes sp-warp-pulse { 0%, 100% { transform: translate(-50%, -50%) scale(.82); opacity: .55; } 50% { transform: translate(-50%, -50%) scale(1.14); opacity: 1; } }
+@keyframes sp-warp-copy { 0%, 100% { opacity: .62; } 50% { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) {
+  .sp-warp-depth, .sp-warp-gate, .sp-warp-star, .sp-warp-swirl, .sp-warp-glow, .sp-warp-copy { animation: none; }
+  .sp-warp { transition-duration: .01s; }
+  .sp-warp.sp-warp-out { transition-duration: .01s; }
+}
 .sp-failure { position: absolute; z-index: 4; left: 50%; top: 45%; transform: translate(-50%,-50%); width: min(420px,calc(100% - 40px)); padding: 24px; border: 1px solid var(--sp-line); border-radius: 8px; background: var(--sp-glass-strong); text-align: center; }
 .sp-failure p { overflow-wrap: anywhere; }
 .sp-failure button { border: 1px solid var(--sp-line); border-radius: 6px; padding: 10px 16px; margin: 4px; color: var(--sp-text); background: transparent; cursor: pointer; }
@@ -117,6 +258,7 @@ body.space3d-open #toast { z-index: 100; border-radius: 8px; }
 @media (max-width: 420px) { .sp-progress { width: 88px; } .sp-bar .sp-tbtn { width: 30px; height: 34px; } }
 .sp.sp-idle { cursor: none; }
 .sp.sp-idle .sp-fab { opacity: 0; }
+.sp.sp-home-idle #sp-home { opacity: 0; visibility: hidden; pointer-events: none; }
 .sp-bar, .sp-fab, .sp-head-btn { transition: opacity var(--dur-base, 0.2s) var(--sp-ease), transform var(--dur-base, 0.2s) var(--sp-ease); }
 
 /* —— 场景宿主层 —— */
@@ -719,6 +861,84 @@ body.space3d-open #toast { z-index: 100; border-radius: 8px; }
 }
 @media (prefers-reduced-motion: reduce) {
   .sp-zodiac-plaque, .sp-zodiac-ticks i, .sp-zodiac-star { transition: none; }
+}
+
+/* —— 涅槃仪轨题签 —— */
+.sp-phoenix-hud {
+  position: absolute; z-index: 5; left: clamp(38px, 4.4vw, 72px); bottom: clamp(122px, 17vh, 172px);
+  width: 252px; pointer-events: none; color: var(--sp-text);
+}
+.sp-phoenix-plaque {
+  padding-left: 17px; border-left: 1px solid color-mix(in srgb, #ff9448 34%, transparent);
+  text-shadow: 0 1px 18px rgba(0, 0, 0, .5);
+}
+.sp-phoenix-kicker {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0 0 18px;
+  color: color-mix(in srgb, #ffc47a 62%, var(--sp-muted));
+  font: 9px/1.2 ui-monospace, SFMono-Regular, Consolas, monospace; letter-spacing: .2em; white-space: nowrap;
+}
+.sp-phoenix-kicker span:last-child { color: #ffb35f; letter-spacing: .18em; }
+.sp-phoenix-plaque h2 {
+  margin: 0; color: var(--sp-text); font-size: 42px; line-height: 1; font-weight: 300; letter-spacing: .1em;
+}
+.sp-phoenix-latin {
+  margin: 9px 0 0; color: #e8a457; font-family: Georgia, "Times New Roman", serif;
+  font-size: 12px; letter-spacing: .4em;
+}
+.sp-phoenix-rule {
+  display: block; width: 76px; height: 1px; margin-top: 16px;
+  background: linear-gradient(90deg, color-mix(in srgb, #ffb35f 82%, transparent), transparent);
+}
+.sp-phoenix-meta {
+  margin: 13px 0 0; color: color-mix(in srgb, #ffcf93 58%, var(--sp-muted));
+  font-size: 10px; line-height: 1.8; letter-spacing: .075em;
+}
+.sp-phoenix-rite { display: flex; align-items: center; gap: 12px; margin: 15px 0 0 17px; }
+.sp-phoenix-charge { position: relative; flex: 1; height: 2px; background: color-mix(in srgb, #ffb35f 16%, transparent); }
+.sp-phoenix-charge i {
+  position: absolute; inset: 0 auto 0 0; width: 0;
+  background: linear-gradient(90deg, #ff5a12, #ffd27a);
+  box-shadow: 0 0 10px color-mix(in srgb, #ff9c3f 72%, transparent);
+  transition: width .12s linear;
+}
+.sp-phoenix-pips { display: flex; gap: 6px; }
+.sp-phoenix-pips i {
+  width: 5px; height: 5px; border-radius: 50%;
+  border: 1px solid color-mix(in srgb, #ffb35f 46%, transparent); background: transparent;
+  transition: background-color .2s var(--sp-ease), box-shadow .2s var(--sp-ease), border-color .2s var(--sp-ease);
+}
+.sp-phoenix-pips i.is-on {
+  border-color: #ffd27a; background: #ffd27a;
+  box-shadow: 0 0 9px color-mix(in srgb, #ffb35f 82%, transparent);
+}
+.sp-phoenix-hint {
+  margin: 12px 0 0 17px; color: color-mix(in srgb, #ffd7a4 62%, var(--sp-muted));
+  font: 9px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; letter-spacing: .11em;
+}
+.sp-phoenix-hud[data-phase="egg"] .sp-phoenix-plaque { border-left-color: color-mix(in srgb, #ff5e1a 55%, transparent); }
+.sp-phoenix-hud[data-phase="egg"] .sp-phoenix-meta,
+.sp-phoenix-hud[data-phase="egg"] .sp-phoenix-hint { color: #ffc077; }
+.sp-phoenix-hud[data-phase="rebirth"] .sp-phoenix-plaque { border-left-color: #ffd27a; }
+.sp-phoenix-hud[data-phase="rebirth"] .sp-phoenix-kicker span:last-child { color: #ffe2a5; }
+#space3d:not([data-page="stage"]) .sp-phoenix-hud,
+#space3d.sp-immersive .sp-phoenix-hud,
+#space3d:has(#sp-playlist.sp-show) .sp-phoenix-hud { display: none !important; }
+@media (max-width: 1100px) {
+  .sp-phoenix-hud { left: 36px; bottom: 118px; width: 216px; }
+  .sp-phoenix-plaque h2 { font-size: 35px; }
+}
+@media (max-width: 760px) {
+  .sp-phoenix-hud { left: 18px; bottom: 104px; width: auto; max-width: calc(100% - 90px); }
+  .sp-phoenix-plaque { padding-left: 12px; }
+  .sp-phoenix-kicker { margin-bottom: 9px; font-size: 8px; letter-spacing: .14em; }
+  .sp-phoenix-kicker span:first-child { display: none; }
+  .sp-phoenix-plaque h2 { font-size: 26px; letter-spacing: .08em; }
+  .sp-phoenix-latin { margin-top: 5px; font-size: 9px; letter-spacing: .3em; }
+  .sp-phoenix-rule, .sp-phoenix-meta, .sp-phoenix-hint { display: none; }
+  .sp-phoenix-rite { margin-top: 10px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sp-phoenix-charge i, .sp-phoenix-pips i { transition: none; }
 }
 
 /* —— 星座控制台题头与参数排版 —— */

@@ -55,3 +55,9 @@
   [data-skin="classic"] .bar-controls { justify-content: flex-start; }
   [data-skin="classic"] .bar-right { justify-self: end; }
 }
+@media (max-width: 440px) {
+  [data-skin="classic"] { --bar-h: 188px; }
+  [data-skin="classic"] .bar { grid-template-columns: minmax(0, 1fr); grid-template-rows: 48px 44px 18px 44px; grid-template-areas: "track" "controls" "progress" "right"; }
+  [data-skin="classic"] .bar-controls { justify-content: center; }
+  [data-skin="classic"] .bar-right { justify-self: center; }
+}

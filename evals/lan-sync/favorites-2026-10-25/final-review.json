@@ -1,0 +1,18 @@
+{
+  "source_commit": "8f414b9c42c82c8aba43f015e8da0569add04bab",
+  "agent": "delivery_acceptance_review",
+  "role": "independent final delivery evidence review",
+  "passed": true,
+  "verdict": "Approved; no unresolved important issues",
+  "verified": [
+    "Final service binary SHA-256 matches the final acceptance reports",
+    "Recorded test counts and platform/hardware limitations are consistent",
+    "11 final PNG hashes and visual appearance are consistent",
+    "115 local documentation links resolve",
+    "37 source files have matching worktree-byte, Git-blob and LF-normalized hashes (111 values)",
+    "Source commit matches the runtime-source HEAD at review time",
+    "Original failed runs retain their original binary identity"
+  ],
+  "resolved_finding": "Distinguish raw worktree bytes from Git blob bytes and LF-normalized content in build-identity.json and README",
+  "limits": "Read-only evidence review; does not add runtime, cross-platform or acoustic measurements. The subsequent delivery commit contains only evidence and screenshots."
+}

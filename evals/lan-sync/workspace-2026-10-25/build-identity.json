@@ -1,0 +1,173 @@
+{
+  "source_commit": "17a40b9c6f34141544c535bfd6b3dc2ba9f00205",
+  "branch": "codex/lan-listening-delivery",
+  "service_edition": "Standard",
+  "service_binary": "target/debug/hertz-studio.exe",
+  "service_sha256": "4901ef3ab0301e51bec351854b60cbcde06d5472e0d73ba7327231c51412ede3",
+  "plugins": {
+    "standard": "96d2fa26eee2bab8d1819c986bf9cd84fb4a1de711d3e9aad73259fc64ffc427",
+    "full": "ddf599ad38fbcac4a31171ba67932ba5f4cba211540859e7c3b69178c30886ab"
+  },
+  "platform": "Windows-11-10.0.26200-SP0",
+  "compiler": "rustc 1.98.1 (48a229cea 2026-09-01)\nbinary: rustc\ncommit-hash: 48a229ceaefd4985c50990b14116b6d856af0985\ncommit-date: 2026-09-01\nhost: x86_64-pc-windows-msvc\nrelease: 1.98.1\nLLVM version: 22.1.8",
+  "cargo": "cargo 1.98.1 (797e8a9bc 2026-08-05)",
+  "source_hashes": {
+    "Cargo.lock": {
+      "sha256": "b11a39371b6ca1a998c24ea2432dac4f390aff9ab60cf5de3a78dc28a08b57dd",
+      "sha256_lf": "b11a39371b6ca1a998c24ea2432dac4f390aff9ab60cf5de3a78dc28a08b57dd"
+    },
+    "Cargo.toml": {
+      "sha256": "7923710281ea728c326146b57e7aa94a830c50b876a9c3443f79b56b4e5f5e2f",
+      "sha256_lf": "55525c56a854dfab46d02518142746a00877de275bad95721b8c6ddc5234d81d"
+    },
+    "crates/hertz-studio/src/assets.rs": {
+      "sha256": "e38ff84afe856c9bab3f9e1413eecfab0cdf09d72977a82560e3435164c4e717",
+      "sha256_lf": "592b95c062c4b4391321b79ef336d3d974f4d51ddaf7656b8ac68d9d92964cbb"
+    },
+    "crates/hertz-studio/src/room/chat.rs": {
+      "sha256": "d8f4bbc6abcdec6f915cea7ae54290a8ac1b40698aed1b5692636908ee047ae1",
+      "sha256_lf": "3950494e403853645b8b53b007f49a266fef414fe829fce4b9d841ffd0b1ab6a"
+    },
+    "crates/hertz-studio/src/room/chat_tests.rs": {
+      "sha256": "f318e9bbfe69772442a3c1e8f5e3d50a401f6f59e8531f0532df60a70b3b3caa",
+      "sha256_lf": "f318e9bbfe69772442a3c1e8f5e3d50a401f6f59e8531f0532df60a70b3b3caa"
+    },
+    "crates/hertz-studio/src/room/collaboration.rs": {
+      "sha256": "49f14d6063dc2d41307f7a3255888cbc7076bc543753c74f231d521f1714d170",
+      "sha256_lf": "49f14d6063dc2d41307f7a3255888cbc7076bc543753c74f231d521f1714d170"
+    },
+    "crates/hertz-studio/src/room/contract.rs": {
+      "sha256": "e6d467313fda86c2aafb2fb2ab00c60db3394db483065902651f6b28da673775",
+      "sha256_lf": "e6d467313fda86c2aafb2fb2ab00c60db3394db483065902651f6b28da673775"
+    },
+    "crates/hertz-studio/src/room/guest.rs": {
+      "sha256": "59fbdcccb0491eb631c4c40004209036c2363b48e91dfccf32c8e95b3495ab28",
+      "sha256_lf": "f311d7e6b701bbf418bd0ea896347c6d4e9b3f6002fa4d846c68dd9da49b548a"
+    },
+    "crates/hertz-studio/src/room/host.rs": {
+      "sha256": "b1abc0b9612ba30f251d51f89e67730c9f3fc700cf48b777b40b65ce2d787373",
+      "sha256_lf": "b1abc0b9612ba30f251d51f89e67730c9f3fc700cf48b777b40b65ce2d787373"
+    },
+    "crates/hertz-studio/src/room/manager.rs": {
+      "sha256": "99460cc4518e7f70ab6538b393e51f3ceb56192b1983990d652464d7e7cbf3af",
+      "sha256_lf": "99460cc4518e7f70ab6538b393e51f3ceb56192b1983990d652464d7e7cbf3af"
+    },
+    "crates/hertz-studio/src/room/mod.rs": {
+      "sha256": "b7cbeee33fd3efe1761095ce95087b8bef0d11b66e4122a46165fc967aa9e679",
+      "sha256_lf": "b7cbeee33fd3efe1761095ce95087b8bef0d11b66e4122a46165fc967aa9e679"
+    },
+    "crates/hertz-studio/src/room/recent_chat.rs": {
+      "sha256": "28e78f81b1d4daab502acbe15f00ae5bc182f9efc3e4ba23938528dff96064f9",
+      "sha256_lf": "28e78f81b1d4daab502acbe15f00ae5bc182f9efc3e4ba23938528dff96064f9"
+    },
+    "crates/hertz-studio/src/room/resources.rs": {
+      "sha256": "933f639c77d421df9f93f9596e7946b08a13659c77a4c1000cf91908292023ec",
+      "sha256_lf": "933f639c77d421df9f93f9596e7946b08a13659c77a4c1000cf91908292023ec"
+    },
+    "crates/hertz-studio/src/room/resources_tests.rs": {
+      "sha256": "b9268ae6fd529998637d528e3762392d7fd4e94aaf05ce49b823d8424d722d1d",
+      "sha256_lf": "b9268ae6fd529998637d528e3762392d7fd4e94aaf05ce49b823d8424d722d1d"
+    },
+    "crates/vmusic-lan/src/admission.rs": {
+      "sha256": "c73b06d4ab8e0ce26934424dcf1c1529004386af2c675063904e7c75db347641",
+      "sha256_lf": "c73b06d4ab8e0ce26934424dcf1c1529004386af2c675063904e7c75db347641"
+    },
+    "crates/vmusic-lan/src/client.rs": {
+      "sha256": "53f8a9fbc680e766520e0782a8eeb39706d20630c25a1256d006788937549ae1",
+      "sha256_lf": "53f8a9fbc680e766520e0782a8eeb39706d20630c25a1256d006788937549ae1"
+    },
+    "crates/vmusic-lan/src/discovery.rs": {
+      "sha256": "e1c504d311561b51c600866c6debe6042ddd337a140545bdc5e9deed46941e7c",
+      "sha256_lf": "e1c504d311561b51c600866c6debe6042ddd337a140545bdc5e9deed46941e7c"
+    },
+    "crates/vmusic-lan/src/lib.rs": {
+      "sha256": "fa9c9bd43d26762785736af7588fb3a5dbd325436c3af29bcf719ff9651e5c6f",
+      "sha256_lf": "fa9c9bd43d26762785736af7588fb3a5dbd325436c3af29bcf719ff9651e5c6f"
+    },
+    "crates/vmusic-lan/src/members.rs": {
+      "sha256": "c71de97936bed8a47d34c3e4c00c94dd1bbe3d92a82d4c7014d82b9e0078eb8f",
+      "sha256_lf": "c71de97936bed8a47d34c3e4c00c94dd1bbe3d92a82d4c7014d82b9e0078eb8f"
+    },
+    "crates/vmusic-lan/src/protocol.rs": {
+      "sha256": "85768105a9b94cf546cb016d09e79f9b6fd49fb5d540cb672b3014f0442c227f",
+      "sha256_lf": "85768105a9b94cf546cb016d09e79f9b6fd49fb5d540cb672b3014f0442c227f"
+    },
+    "crates/vmusic-lan/src/server.rs": {
+      "sha256": "dfd58c9c3a791607987e79e97f9ec57fd37e52ecd4d67f309aacdae6e4d0c76e",
+      "sha256_lf": "dfd58c9c3a791607987e79e97f9ec57fd37e52ecd4d67f309aacdae6e4d0c76e"
+    },
+    "crates/vmusic-lan/tests/admission.rs": {
+      "sha256": "6314a5f194a4b77594e8eefee17577fb88cecc75d204bfaa950d48819718280e",
+      "sha256_lf": "6314a5f194a4b77594e8eefee17577fb88cecc75d204bfaa950d48819718280e"
+    },
+    "docs/adr/0011-lan-rendering-and-output-ownership.md": {
+      "sha256": "00ce27bb29c9a2a302bbe65875d7874f51a6f35c291a27bfd8dd92a8120801b5",
+      "sha256_lf": "00ce27bb29c9a2a302bbe65875d7874f51a6f35c291a27bfd8dd92a8120801b5"
+    },
+    "docs/api-routes.md": {
+      "sha256": "2ab03d6f7d20c5668183ca596e050e7c1328ee1abb580a1feefd95639ea249ce",
+      "sha256_lf": "2ab03d6f7d20c5668183ca596e050e7c1328ee1abb580a1feefd95639ea249ce"
+    },
+    "docs/lan-listening-user-guide.md": {
+      "sha256": "19022fcf824901578893cd5704e50008f2d021cbc2685ac60a68ab0c3b6a2a8f",
+      "sha256_lf": "19022fcf824901578893cd5704e50008f2d021cbc2685ac60a68ab0c3b6a2a8f"
+    },
+    "docs/plans/2026-10-25-listening-workspace-design.md": {
+      "sha256": "9ba9bc5e942817609a6eeab60a51afd7bb39bf9507edbba0f4dcc3c3df781bdc",
+      "sha256_lf": "9ba9bc5e942817609a6eeab60a51afd7bb39bf9507edbba0f4dcc3c3df781bdc"
+    },
+    "plugin/ui/app.js": {
+      "sha256": "81f90fd6f18393287d947526b28335d15bb68ede6098de0141960d81f453fdc9",
+      "sha256_lf": "acf38ef988b6d42e1ab382a7863deed080e72f17f5171d6ddaf47b91dbeb5a5f"
+    },
+    "plugin/ui/index.html": {
+      "sha256": "52b5acc81b01f407bf580de4296cd43f4962f30ddc46728b664d4d38cc4f268b",
+      "sha256_lf": "753b1e74ad02f3afbf82038a42285cf55ea2bd3f425f72f5005361687a483587"
+    },
+    "plugin/ui/room-transport.js": {
+      "sha256": "60cc79463eb8df931b62b933f200acc567a5b486b7f30ed68e7056a65d01f2b8",
+      "sha256_lf": "60cc79463eb8df931b62b933f200acc567a5b486b7f30ed68e7056a65d01f2b8"
+    },
+    "plugin/ui/room-view.js": {
+      "sha256": "d79d1141186ed36af0f6d63730517b0afd18df9a0eeb755a1271de80abcc79db",
+      "sha256_lf": "3913f847a2b42e15f731c88f627017a67dc08e572813e9032d2ce9a4cab208bc"
+    },
+    "plugin/ui/room-workspace.js": {
+      "sha256": "dc2e09d6c2d51d7ff8cea55c070d3d14e3c62ee965fa2c33df0be31c032f612c",
+      "sha256_lf": "dc2e09d6c2d51d7ff8cea55c070d3d14e3c62ee965fa2c33df0be31c032f612c"
+    },
+    "plugin/ui/room.css": {
+      "sha256": "b0145714abfc311804357410e7be355f10cccb5dd0d8b1eee945789062a6e65d",
+      "sha256_lf": "e552c74f9391e3a127d72cf415124cdf00c7c18240aecd8b43b1e391b41b910a"
+    },
+    "plugin/ui/room.js": {
+      "sha256": "1ebaf94679d209c6f4799bee0bcfa91630d0d290ea60e032d9c51c0fb315c56d",
+      "sha256_lf": "482f0794e1d13f1e1f2ed3ebeb768bed2b225fb06d0f1f6608ccf2838ec89747"
+    },
+    "scripts/check-assets.js": {
+      "sha256": "439fdd7e8d01b61ec0cc7167c2ff608749a9babb95c15676b1c7e5d94684cc61",
+      "sha256_lf": "dda5274ed0aa50db007ce5ff8cbc943f4fbde7d92db749d2b96d1a35064e40cb"
+    },
+    "scripts/check-lan-room.py": {
+      "sha256": "8535a2e59399c75cfe2bd1e337822d685035a610a8dc025bc6f4dbaf14b8701f",
+      "sha256_lf": "8535a2e59399c75cfe2bd1e337822d685035a610a8dc025bc6f4dbaf14b8701f"
+    },
+    "scripts/check-room-ui.js": {
+      "sha256": "6be1fac37d0308ccdbc13e38cf184f34080a141fe60868bdd2c4848b115491e5",
+      "sha256_lf": "b76f0e840289a62eeb0275ac5d9cbfdf9e4e128f2ccab8ffcd4b5255eb0dbc8f"
+    }
+  },
+  "release_eligible": false,
+  "pending": [
+    "macOS/Linux native device and clock acceptance",
+    "two-machine/cross-OS acoustic measurement using one capture clock",
+    "8 audio endpoints and 8-hour real-device endurance",
+    "real-device sleep/wake, hot-unplug and network recovery matrix",
+    "personal favorites for room-shared tracks"
+  ],
+  "scope_confirmed_2026_10_25": {
+    "current": "Desktop LAN listening and small-screen responsive layout",
+    "out_of_scope": "Standalone mobile client, remote mobile connection and mobile audio",
+    "deferred": "Internet identity, friends, directory and remote listening"
+  }
+}

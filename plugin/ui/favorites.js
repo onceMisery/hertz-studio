@@ -13,6 +13,7 @@
 (function () {
   'use strict';
   var T = null; // VMusicTransport，bind() 时取
+  var membershipEpoch = 0, membershipVersion = new Map(), pendingWrites = new Map(), hearts = new Set();
   var H = null; // 宿主：{ ui, state, setStateQueue, paintArt, fmt, toast, errText, playOnline }
 
   var favState = {
@@ -27,6 +28,7 @@
     // 已收藏的身份集合，键是 `identity(kind, source, refId)`。
     // 曲库一屏 200 行，靠它做 O(1) 判红，不必每行回服务端问一次。
     owned: new Set(),
+    known: new Set(),
     // 判红的音源维度：本地曲库行是 local，在线行是各音源 id。
     membershipSource: 'local',
   };
@@ -62,6 +64,7 @@
   }
 
   async function loadPage(append) {
+    var readEpoch = membershipEpoch;
     var kind = favState.kind;
     var generation = favState.generation;
     var offset = append ? favState.offset : 0;
@@ -81,7 +84,8 @@
       favState.counts = page.counts || favState.counts;
       // 本地列表本身就是判红集合的来源之一，顺手合并进去。
       items.forEach(function (f) {
-        favState.owned.add(identity(f.kind, f.source, f.ref_id));
+        var key = identity(f.kind, f.source, f.ref_id);
+        if (readEpoch === membershipEpoch && !pendingWrites.has(key)) { favState.owned.add(key); favState.known.add(key); repaint(f, true); }
       });
       renderCounts();
     } catch (err) {
@@ -109,7 +113,7 @@
       var offset = 0;
       var ids = [];
       var meta = {};
-      var total;
+      var total, skipped = 0;
       do {
         var page = await T.get(pageUrl('track', offset));
         if (!T.isPlaybackIntent(intent)) return;
@@ -118,6 +122,7 @@
         if (!items.length && offset < total) throw new Error('收藏列表已变化，请重试');
         items.forEach(function (f) {
           if (f.kind !== 'track') return;
+          if (f.source === 'lan') { skipped++; return; }
           if (f.source === 'local' || !f.source) {
             ids.push(f.ref_id);
             return;
@@ -135,11 +140,12 @@
         offset += items.length;
       } while (offset < total);
       if (!ids.length) {
-        H.toast('还没有可播放的收藏曲目');
+        H.toast(skipped ? '局域网收藏需连接原房主后逐首加入共同队列；已跳过 ' + skipped + ' 首' : '还没有可播放的收藏曲目');
         return;
       }
       if (!T.isPlaybackIntent(intent)) return;
       await H.playQueue(ids, meta);
+      if (skipped) H.toast('已跳过 ' + skipped + ' 首局域网收藏；连接原房主后可逐首加入共同队列');
     } catch (err) {
       if (!T.isPlaybackIntent(intent)) return;
       H.toast(H.errText('收藏播放失败', err), 'error');
@@ -153,71 +159,93 @@
   ///
   /// 返回命中的 id 集合（Set），调用方拿去给行加 .is-fav。失败时**不**清空
   /// 已有集合：一次网络抖动不该让整屏的红心集体消失。
-  async function syncMembership(kind, source, ids) {
+  async function syncMembership(kind, source, ids, isCurrent) {
     if (!ids || !ids.length) return new Set();
+    var versions = new Map(ids.map(function (id) { var key = identity(kind, source, id), version = (membershipVersion.get(key) || 0) + 1; membershipVersion.set(key, version); return [id, version]; }));
     try {
-      var res = await T.post('/v1/favorites/membership', { kind: kind, source: source, ids: ids });
-      var hit = new Set(res && res.ids || []);
-      hit.forEach(function (id) { favState.owned.add(identity(kind, source, id)); });
-      // 未被命中的要从集合里摘掉，否则取消收藏后红心不灭。
+      var hit = new Set();
+      for (var offset = 0; offset < ids.length; offset += 200) {
+        var res = await T.post('/v1/favorites/membership', { kind: kind, source: source, ids: ids.slice(offset, offset + 200) });
+        (res && res.ids || []).forEach(function (id) { hit.add(id); });
+      }
+      if (isCurrent && !isCurrent()) return new Set();
       ids.forEach(function (id) {
-        if (!hit.has(id)) favState.owned.delete(identity(kind, source, id));
+        var key = identity(kind, source, id);
+        if (pendingWrites.has(key) || (membershipVersion.get(key) || 0) !== versions.get(id)) return;
+        favState.known.add(key);
+        favState.owned[hit.has(id) ? 'add' : 'delete'](key);
+        repaint({ kind: kind, source: source, ref_id: id }, hit.has(id));
       });
       return hit;
     } catch (err) {
+      if (!isCurrent || isCurrent()) ids.forEach(function (id) {
+        var key = identity(kind, source, id);
+        if (!pendingWrites.has(key) && (membershipVersion.get(key) || 0) === versions.get(id)) {
+          favState.known.delete(key); repaint({ kind: kind, source: source, ref_id: id }, has(kind, source, id));
+        }
+      });
       return new Set(ids.filter(function (id) { return has(kind, source, id); }));
     }
   }
 
-  /// 红心开关。乐观更新 + 失败回滚：收藏是一次点击就能完成的动作，等服务端
-  /// 回来再变色会让人以为没点上；但失败了必须变回去，不能留一个假状态。
+  // Every write states its desired result. Pending clicks share one write;
+  // timed-out writes become unknown and can safely be explicitly retried.
   async function toggle(input, onDone) {
-    var kind = input.kind || 'track';
-    var source = input.source || 'local';
+    var kind = input.kind || 'track', source = input.source || 'local';
     var refId = input.ref_id != null ? input.ref_id : input.id;
-    if (refId == null || refId === '') return;
+    if (refId == null || refId === '' || (input.isCurrent && !input.isCurrent())) return;
     var key = identity(kind, source, refId);
-    var next = !favState.owned.has(key);
-
+    if (pendingWrites.has(key)) return pendingWrites.get(key);
+    var before = favState.owned.has(key), wasKnown = favState.known.has(key), reconcile = false;
+    var next = typeof input.favorited === 'boolean' ? input.favorited : wasKnown ? !before : true;
+    membershipEpoch++;
+    membershipVersion.set(key, (membershipVersion.get(key) || 0) + 1);
     favState.owned[next ? 'add' : 'delete'](key);
+    var resolveWrite;
+    var pending = new Promise(function (resolve) { resolveWrite = resolve; });
+    pendingWrites.set(key, pending);
     repaint(input, next);
     try {
       var res = await T.post('/v1/favorites/toggle', {
-        kind: kind,
-        source: source,
-        ref_id: String(refId),
-        title: input.title,
-        artist: input.artist,
-        album: input.album,
-        duration_ms: input.duration_ms,
-        cover: input.cover,
-      });
-      var final = !!(res && res.favorited);
-      if (final !== next) {
-        favState.owned[final ? 'add' : 'delete'](key);
-        repaint(input, final);
+        kind: kind, source: source, ref_id: String(refId), favorited: next,
+        title: input.title, artist: input.artist, album: input.album,
+        duration_ms: input.duration_ms, cover: source === 'lan' ? null : input.cover,
+      }, { retry: false });
+      if (!res || typeof res.favorited !== 'boolean') throw new Error('收藏状态尚未确认');
+      var final = res.favorited;
+      favState.owned[final ? 'add' : 'delete'](key);
+      favState.known.add(key);
+      if (!input.isCurrent || input.isCurrent()) {
+        H.toast(final ? '已加入我的收藏' : '已取消收藏');
+        if (final !== before) favState.counts[kind] = Math.max(0, (favState.counts[kind] || 0) + (final ? 1 : -1));
+        renderCounts();
+        if (H.state.view === 'favorites' && favState.kind === kind) load();
+        if (typeof onDone === 'function') onDone(final);
       }
-      H.toast(final ? '已加入我的收藏' : '已取消收藏');
-      if (final && res && res.favorite) {
-        favState.counts[kind] = (favState.counts[kind] || 0) + 1;
-      } else if (!final) {
-        favState.counts[kind] = Math.max(0, (favState.counts[kind] || 0) - 1);
-      }
-      renderCounts();
-      // 收藏视图正开着：立刻反映增删，而不是等下次进入才更新。
-      if (H.state.view === 'favorites' && favState.kind === kind) load();
-      if (typeof onDone === 'function') onDone(final);
     } catch (err) {
-      favState.owned[next ? 'delete' : 'add'](key);
-      repaint(input, !next);
-      H.toast(H.errText('收藏失败', err), 'error');
+      favState.owned[before ? 'add' : 'delete'](key);
+      reconcile = !wasKnown || !err.status || /timeout|unknown|connection|network/i.test(err.code || err.message || '');
+      if (reconcile) favState.known.delete(key);
+      if (!input.isCurrent || input.isCurrent()) H.toast(H.errText('收藏状态未确认，请刷新后重试', err), 'error');
+    } finally {
+      pendingWrites.delete(key);
+      membershipEpoch++;
+      membershipVersion.set(key, (membershipVersion.get(key) || 0) + 1);
+      repaint(input, favState.owned.has(key));
+      if (reconcile && (!input.isCurrent || input.isCurrent())) await syncMembership(kind, source, [refId], input.isCurrent);
+      resolveWrite();
     }
   }
 
   /// 让订阅了同一批 id 的视图（曲库行、在线行、收藏列表）重画红心。
   function repaint(input, on) {
     var refId = input.ref_id != null ? input.ref_id : input.id;
+    var key = identity(input.kind || 'track', input.source || 'local', refId);
     if (H.onFavoriteChanged) H.onFavoriteChanged(input.kind || 'track', input.source || 'local', refId, on);
+    hearts.forEach(function (binding) {
+      if (binding.button.isConnected === false) { hearts.delete(binding); return; }
+      if (binding.key === key && (!binding.input.isCurrent || binding.input.isCurrent())) binding.paint();
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -242,20 +270,21 @@
     btn.dataset.act = 'fav';
     var kind = input.kind || 'track';
     var source = input.source || 'local';
-    var on = has(kind, source, input.ref_id != null ? input.ref_id : input.id);
-    btn.classList.toggle('is-on', on);
-    btn.innerHTML = heartSvg(on);
-    btn.title = on ? '取消收藏' : '加入我的收藏';
-    btn.setAttribute('aria-label', btn.title);
-    btn.onclick = function (e) {
-      e.stopPropagation();
-      toggle(input, function (final) {
-        btn.classList.toggle('is-on', final);
-        btn.innerHTML = heartSvg(final);
-        btn.title = final ? '取消收藏' : '加入我的收藏';
-        btn.setAttribute('aria-label', btn.title);
-      });
-    };
+    var refId = input.ref_id != null ? input.ref_id : input.id;
+    var key = identity(kind, source, refId);
+    function paint() {
+      var on = has(kind, source, refId), known = favState.known.has(key), pending = pendingWrites.has(key);
+      btn.classList.toggle('is-on', on);
+      btn.innerHTML = heartSvg(on);
+      btn.disabled = pending;
+      btn.title = pending ? '正在保存收藏…' : !known ? '收藏状态待确认，点击加入我的收藏' : on ? '取消收藏' : '加入我的收藏';
+      btn.setAttribute('aria-label', btn.title);
+      btn.setAttribute('aria-pressed', known && !pending ? String(on) : 'mixed');
+      btn.setAttribute('aria-busy', String(pending));
+    }
+    hearts.add({ key: key, button: btn, input: input, paint: paint });
+    paint();
+    btn.onclick = function (e) { e.stopPropagation(); return toggle(input); };
     actions.insertBefore(btn, actions.firstChild);
     return btn;
   }
@@ -312,7 +341,7 @@
 
   function row(f) {
     var el = document.createElement('div');
-    el.className = 'track fav-row';
+    el.className = 'track fav-row' + (f.source === 'lan' ? ' fav-lan' : '');
     el.tabIndex = 0;
     el.setAttribute('role', 'button');
     el.innerHTML =
@@ -336,13 +365,14 @@
     var quality = el.querySelector('.t-quality');
     // 来源徽标与在线面板同一套平台 app 图标；没有 online.js 时（单元测试桩）
     // 退回裸文本，至少不把整行渲染打断。
-    var tag = window.Online && window.Online.badge
+    var tag = f.source !== 'lan' && window.Online && window.Online.badge
       ? window.Online.badge(f.source === 'local' ? 'local' : f.source)
       : null;
     if (!tag) {
       tag = document.createElement('span');
       tag.className = 'src-badge';
-      tag.textContent = f.source === 'local' ? '本地' : f.source;
+      if (f.source === 'lan') tag.classList.add('fav-source-text');
+      tag.textContent = f.source === 'local' ? '本地' : f.source === 'lan' ? '局域网' : f.source;
     }
     quality.appendChild(tag);
 
@@ -373,8 +403,10 @@
     var play = document.createElement('button');
     play.className = 't-act';
     play.type = 'button';
-    play.title = f.kind === 'radio' ? '载入这个电台' : '播放';
-    play.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-play"/></svg>';
+    play.title = f.source === 'lan' ? '加入当前房间队列' : f.kind === 'radio' ? '载入这个电台' : '播放';
+    play.setAttribute('aria-label', play.title);
+    if (f.source === 'lan') play.classList.add('fav-room-append');
+    play.innerHTML = f.source === 'lan' ? '<span>加入房间队列</span>' : '<svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-play"/></svg>';
     play.onclick = function (e) { e.stopPropagation(); activate(f); };
     actions.appendChild(play);
 
@@ -384,6 +416,16 @@
 
   /// 点一行：歌曲直接播，电台整盘载入。
   async function activate(f) {
+    if (f.source === 'lan') {
+      var room = window.HertzRoom, owner = room && room.operationContext ? room.operationContext() : null;
+      function currentRoom() { return !room || !room.operationContext || (window.HertzRoom === room && owner === room.operationContext()); }
+      try {
+        if (!window.HertzRoom || !window.HertzRoom.activateFavorite) throw new Error('请先连接收藏歌曲的原房主');
+        await window.HertzRoom.activateFavorite(f);
+        if (currentRoom()) H.toast('已加入当前房间队列');
+      } catch (err) { if (currentRoom()) H.toast(H.errText('无法加入房间队列', err), 'error'); }
+      return;
+    }
     if (f.kind === 'radio') {
       if (typeof H.playRadio === 'function') {
         H.playRadio(f);
@@ -434,6 +476,7 @@
     // 旧导出名：check 脚本与既有调用方的兼容别名。
     playLocalFavorites: playFavorites,
     toggle: toggle,
+    activate: activate,
     syncMembership: syncMembership,
     attachHeart: attachHeart,
     heartSvg: heartSvg,

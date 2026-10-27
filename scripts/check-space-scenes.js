@@ -162,8 +162,18 @@ async function reactorContract(THREE, registry, createScope, PROFILES) {
   instance.setParams(params);
   step({ track: { id: first }, reduced: true });
   const fixedAccent = cloudUniforms.uColorC.value.getHexString(), firstPrimary = cloudUniforms.uColorA.value.getHexString();
+  assert.ok(cloudUniforms.uColorB?.value && cloudUniforms.uColorD?.value, 'reactor exposes both supporting color channels');
+  const hueOf = color => { const hsl = {}; color.getHSL(hsl); return hsl.h; };
+  const hueGap = (a, b) => { const gap = Math.abs(a - b); return Math.min(gap, 1 - gap); };
+  const firstHues = ['uColorA', 'uColorB', 'uColorD'].map(key => hueOf(cloudUniforms[key].value));
+  assert.ok(hueGap(firstHues[0], firstHues[1]) > .15, 'secondary hue separates from the primary: ' + firstHues.join(','));
+  assert.ok(hueGap(firstHues[0], firstHues[2]) > .15, 'tertiary hue separates from the primary: ' + firstHues.join(','));
+  assert.ok(hueGap(firstHues[1], firstHues[2]) > .15, 'supporting hues separate from each other: ' + firstHues.join(','));
+  const firstSecondary = cloudUniforms.uColorB.value.getHexString(), firstTertiary = cloudUniforms.uColorD.value.getHexString();
   step({ track: { id: third }, reduced: true });
   assert.notEqual(cloudUniforms.uColorA.value.getHexString(), firstPrimary, 'primary hue follows the track');
+  assert.notEqual(cloudUniforms.uColorB.value.getHexString(), firstSecondary, 'secondary hue follows the track');
+  assert.notEqual(cloudUniforms.uColorD.value.getHexString(), firstTertiary, 'tertiary hue follows the track');
   assert.equal(cloudUniforms.uColorC.value.getHexString(), fixedAccent, 'accent hue stays fixed across tracks');
   step({ playing: false, sceneTime: 1 }, 500);
   const fixedAim = new THREE.Vector3().fromArray(satellites[0].geometry.attributes.position.array, 3).applyMatrix4(satellites[0].matrixWorld).project(camera);

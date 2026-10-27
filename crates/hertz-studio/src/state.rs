@@ -3,7 +3,6 @@
 
 //! Shared server state, the event bus and the playback queue.
 
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -16,6 +15,10 @@ use vmusic_audio::{AudioEvent, AudioHandle};
 use vmusic_core::{PlayMode, PlayerSnapshot, PROTOCOL_VERSION};
 
 use crate::config::Config;
+
+mod viewers;
+
+pub(crate) use viewers::ViewerGuard;
 
 /// Everything that crosses the WebSocket boundary.
 #[derive(Debug, Clone, Serialize)]
@@ -519,8 +522,8 @@ pub(crate) enum DlRole {
 
 /// 下载注册表里的一个条目：下载器本体 + 它当前承担的角色。
 pub(crate) struct DlEntry {
-    dl: crate::online::progressive::Download,
-    role: DlRole,
+    pub(crate) dl: crate::online::progressive::Download,
+    pub(crate) role: DlRole,
 }
 
 /// 缓存快路径一次提交尝试的三分结果（坏缓存自愈用）。
@@ -756,9 +759,16 @@ pub(crate) struct PreparedPlayback {
     track_gain_db: f32,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PendingRestore {
+    pub track_id: String,
+    pub position_ms: u64,
+}
+
 pub struct AppState {
     pub db: SqlitePool,
     pub audio: AudioHandle,
+    pub(crate) room: crate::room::RoomManager,
     pub config: Arc<Config>,
     pub data_dir: PathBuf,
     pub token: String,
@@ -766,6 +776,13 @@ pub struct AppState {
     /// 分开是因为它会被粘进 OBS 的配置：权限只到「GET + 浮层歌词 + 曲目封面」。
     /// 插件形态（stdio）没有 HTTP 通道，填空串即可。
     pub overlay_key: String,
+    /// 桌面歌词只读钥匙。原生宿主从数据目录直接读取；权限只到两条桌面歌词 GET。
+    /// 插件形态（stdio）没有 HTTP 通道，填空串即可。
+    pub desktop_lyrics_key: String,
+    /// 壁纸只读钥匙。与桌面歌词钥匙分开轮换；只放行壁纸快照。
+    pub wallpaper_key: String,
+    /// 最新一帧壁纸频谱；由既有 AudioEvent::Spectrum 消费方写入。
+    pub(crate) wallpaper: crate::wallpaper::Wallpaper,
     pub events: broadcast::Sender<WsEvent>,
     /// Ordered list of track ids the "next / previous" buttons walk through.
     pub queue: Mutex<Vec<String>>,
@@ -857,7 +874,7 @@ pub struct AppState {
     pub(crate) exiting: tokio::sync::watch::Sender<bool>,
     /// 会话恢复的待回放进度：重启时从快照装进来，首次 play 成功提交后
     /// seek 过去并清空（只消费一次，之后的 play/seek 都是用户自己的意图）。
-    pub(crate) pending_restore_seek: Mutex<Option<u64>>,
+    pub(crate) pending_restore_seek: Mutex<Option<PendingRestore>>,
     /// 听歌打卡计时器（网易云在线曲，seek-proof，见 [`ListenTracker`]）。
     pub(crate) listen: Mutex<ListenTracker>,
     /// 打卡上报频控闸门（见 [`ScrobbleGate`]）：发送侧的最后一道防线。
@@ -870,6 +887,8 @@ pub struct AppState {
     /// 等于每秒打两次上游歌词接口、本地曲每次重开音频文件读标签。换曲
     /// 自然失效；同一曲播放中导入新歌词要等换曲才反映（OBS 场景可接受）。
     pub(crate) overlay_lyric: Mutex<Option<(String, vmusic_core::LyricDocument)>>,
+    /// 桌面歌词的只读快照/文档缓存；轻量快照不等待取词。
+    pub(crate) desktop_lyrics: crate::desktop_lyrics::DesktopLyrics,
     /// 短写幂等表（见 [`crate::idempotency`]）：带 `clientOperationId` 的播控
     /// 命令在 10 分钟窗口内按 `(principal, operation, clientOperationId)` 去重。
     pub(crate) short_writes: crate::idempotency::ShortWriteStore,
@@ -895,33 +914,16 @@ pub struct AppState {
 /// 否则按一次 F5 就停一次播。
 pub(crate) const DEPART_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
 
-/// 「还开着几个页面」的唯一出处：一条 `/ws` 连接进 `handle_socket` 时 +1，任何
-/// 出口（早退、发送失败、panic 展开）由 Drop 收回。不用 `events.receiver_count()`
-/// 是因为集合补页、AI 任务、电台取数这些内部等待者订阅的是同一条总线，那个数
-/// 答不出「有没有浏览器开着」。
-pub(crate) struct ViewerGuard {
-    state: Arc<AppState>,
-}
-
-impl ViewerGuard {
-    pub(crate) fn enter(state: Arc<AppState>) -> Self {
-        state.viewers.fetch_add(1, Ordering::AcqRel);
-        Self { state }
-    }
-}
-
-impl Drop for ViewerGuard {
-    fn drop(&mut self) {
-        self.state.viewers.fetch_sub(1, Ordering::AcqRel);
-        // 断开本身就武装一次，不靠前端的信标：实测关掉整个浏览器时
-        // `fetch(keepalive)` 请求根本发不出去（Chromium 抢先撕掉网络栈），
-        // 只认 `/v1/player/depart` 的话「关浏览器还在放」照旧成立。信标覆盖的是
-        // 主动调用与单标签关闭，这条兜住崩溃、进程被杀与整浏览器退出。
-        self.state.schedule_depart_pause();
-    }
-}
-
 impl AppState {
+    pub(crate) fn require_local_playback(&self) -> Result<(), vmusic_core::CoreError> {
+        if self.room.is_active() || self.audio.exclusively_owned() {
+            return Err(vmusic_core::CoreError::Invalid(
+                "room_mode_requires_room_command".into(),
+            ));
+        }
+        Ok(())
+    }
+
     /// 本次服务进程的实例身份（技术路线 §5.5）。字段保持 pub(crate)，
     /// 传输层（独立 bin 与插件宿主）经这里只读访问。
     pub fn server_instance_id(&self) -> &str {
@@ -932,6 +934,16 @@ impl AppState {
     /// 与上面 `server_instance_id` 同一套「bin 走方法、不直接摸字段」的边界。
     pub fn exiting_signal(&self) -> tokio::sync::watch::Receiver<bool> {
         self.exiting.subscribe()
+    }
+
+    /// Shared shutdown barrier for the service binary and embedded hosts.
+    /// Stop room admission first, drain Host End and all native output leases,
+    /// then stop the local actor and remove the service discovery file.
+    pub async fn shutdown(&self) {
+        self.exiting.send_replace(true);
+        self.room.shutdown().await;
+        self.audio.shutdown();
+        remove_discovery(&self.data_dir).await;
     }
 
     /// AI runner 锁是否在本进程（生成受理的门禁）。
@@ -999,7 +1011,11 @@ impl AppState {
         self.loudness_for(&track_id, mode).await
     }
 
-    async fn loudness_for(&self, track_id: &str, mode: &str) -> Option<(f64, &'static str)> {
+    pub(crate) async fn loudness_for(
+        &self,
+        track_id: &str,
+        mode: &str,
+    ) -> Option<(f64, &'static str)> {
         if crate::online::split_virtual_id(track_id).is_some() {
             // 在线曲的响度来自平台随取流一起给的 gain/peak，存在 online_meta 里
             // （见 play_online 的落地）；没有标签就报「没有」，调用方按 0 dB 播。
@@ -1038,7 +1054,7 @@ impl AppState {
     /// 这首在线曲已缓存的文件：先按请求档位，未命中再逐级向下（见
     /// [`crate::online::cache::CacheIndex::find_best`]）。返回的档位是**文件
     /// 自己名字里那档**，播放标注必须用它而不是请求档位。
-    async fn find_online_cached(
+    pub(crate) async fn find_online_cached(
         &self,
         source: &str,
         id: &str,
@@ -1191,7 +1207,12 @@ impl AppState {
 
     /// 记下平台给的响度标签。条目不存在就什么都不做 —— 不为了存一个增益
     /// 捏一条没有标题的元数据（那会让播放历史退化成平台 id）。
-    async fn store_online_rg(&self, track_id: &str, gain: Option<f64>, peak: Option<f64>) {
+    pub(crate) async fn store_online_rg(
+        &self,
+        track_id: &str,
+        gain: Option<f64>,
+        peak: Option<f64>,
+    ) {
         if gain.is_none() && peak.is_none() {
             return;
         }
@@ -1287,15 +1308,16 @@ impl AppState {
         &self,
         ids: Vec<String>,
         start: Option<usize>,
-    ) -> (usize, Vec<String>, Option<usize>) {
+    ) -> Result<(usize, Vec<String>, Option<usize>), vmusic_core::CoreError> {
         // 与播放预留/提交尾部互斥：整盘替换必须作废旧队列里一切在途的现场取流，
         // 且「顶代际 + 换队列 + 写 cursor」要相对某个提交原子地发生，否则旧盘
         // 的下载晚于新盘的 load 完成时，会把新歌盖掉。
         let _commit = self.play_commit.lock().await;
+        self.require_local_playback()?;
         let result = self.set_queue_locked(ids, start).await;
         drop(_commit);
         self.publish(WsEvent::QueueChanged);
-        result
+        Ok(result)
     }
 
     /// Caller holds play_commit; shared online preparation adds metadata in that same transaction.
@@ -1340,9 +1362,16 @@ impl AppState {
 
     /// 消费会话恢复的待回放进度：>3 秒才 seek（太短的重头播没有体感差），
     /// 一次性——之后的 play/seek 都是用户自己的意图，不再掺和。
-    pub(crate) async fn consume_restore_seek(&self) {
-        let pending = self.pending_restore_seek.lock().await.take();
-        if let Some(pos) = pending {
+    async fn consume_restore_seek(&self, expected: Option<PendingRestore>) {
+        let mut pending = self.pending_restore_seek.lock().await;
+        if *pending != expected {
+            return;
+        }
+        if let Some(pending) = pending
+            .take()
+            .filter(|p| self.audio.snapshot().track_id.as_deref() == Some(p.track_id.as_str()))
+        {
+            let pos = pending.position_ms;
             if pos > 3000 {
                 if let Err(e) = self.audio.seek(pos).await {
                     tracing::warn!("恢复播放进度失败（从头播）: {e}");
@@ -1454,10 +1483,22 @@ impl AppState {
         reserve_gen: Option<usize>,
         trigger: PlayTrigger,
     ) -> Result<PlayOutcome, vmusic_core::CoreError> {
+        self.play_index_internal(index, reserve_gen, trigger, false)
+            .await
+    }
+
+    async fn play_index_internal(
+        &self,
+        index: usize,
+        reserve_gen: Option<usize>,
+        trigger: PlayTrigger,
+        restore: bool,
+    ) -> Result<PlayOutcome, vmusic_core::CoreError> {
         // 预留区整段持 commit：验代际、读曲、顶新代际、写乐观 cursor 必须相对
         // set_queue 与别的播放预留原子——否则多 worker 下「预闸后队列被换」或
         // 「同队列秒切」都可能让迟到的提交劫持正在听的曲。
         let commit = self.play_commit.lock().await;
+        self.require_local_playback()?;
         if let Some(expected) = reserve_gen {
             if self.play_generation.load(Ordering::Relaxed) != expected {
                 crate::diaglog!("play.stale", idx = index, reason = "队列已被替换");
@@ -1481,6 +1522,11 @@ impl AppState {
         // 经切歌，回来后必须先过 attempt_alive 闸门才允许碰 audio actor。
         // cursor 乐观先写——下载的几秒里状态查询也该高亮这首——但失败且
         // 仍属当代时恢复到切入前。
+        let pending = if restore {
+            self.pending_restore_seek.lock().await.clone()
+        } else {
+            None
+        };
         let gen = self
             .play_generation
             .fetch_add(1, Ordering::Relaxed)
@@ -1546,6 +1592,11 @@ impl AppState {
             let record = {
                 let _commit = self.play_commit.lock().await;
                 if self.attempt_alive(gen, index, &track_id).await {
+                    // Both the track and attempt generation still belong to
+                    // this load. A failed/superseded load leaves recovery intact.
+                    if restore {
+                        self.consume_restore_seek(pending).await;
+                    }
                     self.on_track_committed(&track_id, outcome.actual_quality)
                         .await;
                     true
@@ -1800,11 +1851,16 @@ impl AppState {
             key = key
         );
 
-        // 进入即收口下载注册表：他键条目一律移除（在跑的 cancel，已完成的
-        // 惰性 drop——去删一个已随 rename 消失的 .part 没有意义）；同键条目
-        // 按角色分流——Prefetch 取得所有权直接接管（下载不白跑），Playback
-        // 说明上一代播放仍在途，cancel 后由新一代重开。
-        let takeover: Option<crate::online::progressive::Download> = {
+        // 与模式切换互斥地收口注册表。预取接管只取视图，所有权留在
+        // 注册表中，房间进入可立即取消；旧播放条目取消后由本代重开。
+        let takeover = {
+            let _commit = self.play_commit.lock().await;
+            if !self.attempt_alive(gen, index, &track_id).await {
+                return Ok(PlayOutcome {
+                    committed: false,
+                    actual_quality: None,
+                });
+            }
             let mut map = self.downloads.lock().await;
             let others: Vec<String> = map.keys().filter(|k| k.as_str() != key).cloned().collect();
             for k in others {
@@ -1823,7 +1879,17 @@ impl AppState {
                     None
                 }
                 Some(entry) => match entry.role {
-                    DlRole::Prefetch => Some(entry.dl),
+                    DlRole::Prefetch => {
+                        let view = entry.dl.view();
+                        map.insert(
+                            key.clone(),
+                            DlEntry {
+                                dl: entry.dl,
+                                role: DlRole::Playback,
+                            },
+                        );
+                        Some(view)
+                    }
                     DlRole::Playback => {
                         entry.dl.cancel();
                         None
@@ -1890,7 +1956,7 @@ impl AppState {
 
         // 同键预取在跑则 owned 接管（此时请求侧的 info 根本不存在，档位只能
         // 从下载视图反查）；否则现场取流并新开渐进式下载。
-        let (dl, actual) = if let Some(dl) = takeover {
+        let (view, actual) = if let Some(view) = takeover {
             crate::diaglog!(
                 "download.takeover",
                 idx = index,
@@ -1898,7 +1964,7 @@ impl AppState {
                 key = key,
                 from = "prefetch"
             );
-            (dl, None)
+            (view, None)
         } else {
             let ctx = crate::online::Ctx::new(self.db.clone());
             let resolved = self
@@ -1960,15 +2026,40 @@ impl AppState {
             self.store_online_rg(&track_id, info.rg_gain_db, info.rg_peak)
                 .await;
             let duration_ms = self.online_duration_ms(&track_id).await;
-            match crate::online::progressive::start(
-                &source,
-                dir.clone(),
-                key.clone(),
-                ladder,
-                duration_ms,
-                self.cache_index.clone(),
-            ) {
-                Ok(dl) => (dl, actual),
+            let started = {
+                let _commit = self.play_commit.lock().await;
+                if !self.attempt_alive(gen, index, &track_id).await {
+                    return Ok(PlayOutcome {
+                        committed: false,
+                        actual_quality: None,
+                    });
+                }
+                let mut downloads = self.downloads.lock().await;
+                if let Some(old) = downloads.remove(&key) {
+                    old.dl.cancel();
+                }
+                crate::online::progressive::start(
+                    &source,
+                    dir.clone(),
+                    key.clone(),
+                    ladder,
+                    duration_ms,
+                    self.cache_index.clone(),
+                )
+                .map(|dl| {
+                    let view = dl.view();
+                    downloads.insert(
+                        key.clone(),
+                        DlEntry {
+                            dl,
+                            role: DlRole::Playback,
+                        },
+                    );
+                    view
+                })
+            };
+            match started {
+                Ok(view) => (view, actual),
                 Err(e) => {
                     crate::diaglog!(
                         "download.start_fail",
@@ -1985,27 +2076,6 @@ impl AppState {
                 }
             }
         };
-
-        // 播放流程持视图轮询；Download 所有权注册进 map，随代际可被中止/接管。
-        // entry 原子落槽：开头摘同键与此处之间隔着取流 await，双击/并发预取
-        // 可能已重新塞进同键条目——先 cancel 旧的再插入，槽位必须归本播放
-        // 流程持有的这个 dl（后面靠 key 摘它做 cancel/join）。
-        let view = dl.view();
-        match self.downloads.lock().await.entry(key.clone()) {
-            Entry::Vacant(v) => {
-                v.insert(DlEntry {
-                    dl,
-                    role: DlRole::Playback,
-                });
-            }
-            Entry::Occupied(mut o) => {
-                o.get().dl.cancel();
-                o.insert(DlEntry {
-                    dl,
-                    role: DlRole::Playback,
-                });
-            }
-        }
 
         // 等预读阈值：每轮一个 200ms tick，轮间复核代际——用户切走立刻摘条目
         // 并 cancel，旧代际的等待再也拖不住新一代（修 B3）。
@@ -2178,6 +2248,7 @@ impl AppState {
         };
 
         let commit = self.play_commit.lock().await;
+        self.require_local_playback()?;
         if !self.attempt_alive(gen, index, &track_id).await {
             // 新一代的注册表收口通常已把本条目 cancel 摘掉；这里兜底一次。
             drop(commit);
@@ -2394,6 +2465,9 @@ impl AppState {
     /// 就是锁外的非提交复核）：先取队列锁（持锁期间队列内容不可能变），再
     /// 复读代际，挡掉「读 gen 之后、拿锁之前」被 set_queue 顶代际的缝。
     pub(crate) async fn attempt_alive(&self, gen: usize, index: usize, track_id: &str) -> bool {
+        if self.room.is_active() {
+            return false;
+        }
         let queue = self.queue.lock().await;
         self.play_generation.load(Ordering::Relaxed) == gen
             && queue.get(index).is_some_and(|id| id == track_id)
@@ -2448,11 +2522,22 @@ impl AppState {
     }
 
     /// 中止全部在途下载并清空注册表（切到本地曲/换队预留时调用）。
-    /// 短锁内 drain：cancel 只是置 AtomicBool + 删 .part，不 await。
+    /// 短锁内 drain，全部 abort 后在锁外回收，避免模式切换重用未退出任务的路径。
     pub(crate) async fn cancel_all_downloads(&self) {
-        let mut map = self.downloads.lock().await;
-        for (_, entry) in map.drain() {
-            entry.dl.cancel();
+        let downloads: Vec<_> = self
+            .downloads
+            .lock()
+            .await
+            .drain()
+            .map(|(_, entry)| entry.dl)
+            .collect();
+        for dl in &downloads {
+            dl.cancel();
+        }
+        // All tasks have been aborted before awaiting; this cannot wait for
+        // upstream I/O. Join before room preparation may reuse these paths.
+        for dl in downloads {
+            let _ = dl.join().await;
         }
     }
 
@@ -2730,6 +2815,7 @@ impl AppState {
             next.actual_quality.map(|_| next.path.clone()),
         )
         .await;
+        self.pending_restore_seek.lock().await.take();
         self.auto_failures.store(0, Ordering::Relaxed);
         *self.skip_walk_from.lock().await = None;
         self.relay_tried.lock().await.clear();
@@ -2811,6 +2897,7 @@ impl AppState {
         _track_id: &str,
         actual: Option<crate::online::quality::Quality>,
     ) {
+        self.pending_restore_seek.lock().await.take();
         self.auto_failures.store(0, Ordering::Relaxed);
         // 跳曲走结束了：起点锚只在一次「连着跳了好几首」的过程中有意义。
         *self.skip_walk_from.lock().await = None;
@@ -2922,13 +3009,18 @@ impl AppState {
     /// 写一条播放历史。在线曲用 online_meta 快照（缺失则标题退化为平台 id）；
     /// 本地曲从库中取字段。失败只记日志，绝不能影响播放链路。
     async fn record_history(&self, track_id: &str) {
+        if let Err(error) = self.write_history(track_id).await {
+            tracing::warn!("写播放历史失败: {error}");
+        }
+    }
+    pub(crate) async fn write_history(&self, track_id: &str) -> Result<(), String> {
         if let Some((source, ref_id)) = crate::online::split_virtual_id(track_id) {
-            let snap = self.online_meta.lock().await.get(track_id).cloned();
-            let (title, artist, album, cover, duration) = match snap {
+            let metadata = self.online_meta.lock().await.get(track_id).cloned();
+            let (title, artist, album, cover, duration) = match metadata {
                 Some(m) => (m.title, m.artist, m.album, m.cover, m.duration_ms),
                 None => (ref_id.clone(), None, None, None, None),
             };
-            if let Err(e) = crate::history::upsert(
+            crate::history::upsert(
                 &self.db,
                 crate::history::HistoryEntry {
                     track_id,
@@ -2942,27 +3034,25 @@ impl AppState {
                 },
             )
             .await
-            {
-                tracing::warn!("写播放历史失败: {e}");
-            }
-        } else if let Ok(Some(t)) = vmusic_store::get_track(&self.db, &track_id.to_string()).await {
-            if let Err(e) = crate::history::upsert(
+        } else {
+            let track = vmusic_store::get_track(&self.db, &track_id.to_string())
+                .await
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| "历史曲目已从曲库移除".to_string())?;
+            crate::history::upsert(
                 &self.db,
                 crate::history::HistoryEntry {
-                    track_id: &t.id,
+                    track_id: &track.id,
                     source: "local",
-                    ref_id: &t.id,
-                    title: &t.title,
-                    artist: t.artist.as_deref(),
-                    album: t.album.as_deref(),
+                    ref_id: &track.id,
+                    title: &track.title,
+                    artist: track.artist.as_deref(),
+                    album: track.album.as_deref(),
                     cover_url: None,
-                    duration_ms: t.duration_ms,
+                    duration_ms: track.duration_ms,
                 },
             )
             .await
-            {
-                tracing::warn!("写播放历史失败: {e}");
-            }
         }
     }
 
@@ -2970,6 +3060,7 @@ impl AppState {
     /// 命中时，后台预热下一首（注册表最多同时 1 个，由切歌取消逻辑保证）。
     /// 任何失败都只 debug 日志——预取绝不影响正在听的曲。
     async fn spawn_prefetch(&self) {
+        let generation = self.play_generation.load(Ordering::Relaxed);
         let mode = self.audio.snapshot().mode;
         let queue = self.queue.lock().await.clone();
         let len = queue.len();
@@ -3026,6 +3117,16 @@ impl AppState {
         else {
             return;
         };
+        let _commit = self.play_commit.lock().await;
+        if self.require_local_playback().is_err()
+            || self.play_generation.load(Ordering::Relaxed) != generation
+        {
+            return;
+        }
+        let mut downloads = self.downloads.lock().await;
+        if downloads.contains_key(&key) {
+            return;
+        }
         match crate::online::progressive::start(
             &source,
             dir,
@@ -3036,24 +3137,13 @@ impl AppState {
         ) {
             Ok(dl) => {
                 self.watch_prefetch_completion(dl.view());
-                // entry 原子落槽：前面的 contains_key 检查与这里之间隔着
-                // 取流 await，并发预取/播放接管可能已占下同键槽位——先 cancel
-                // 旧的再插入本次预取。
-                match self.downloads.lock().await.entry(key) {
-                    Entry::Vacant(v) => {
-                        v.insert(DlEntry {
-                            dl,
-                            role: DlRole::Prefetch,
-                        });
-                    }
-                    Entry::Occupied(mut o) => {
-                        o.get().dl.cancel();
-                        o.insert(DlEntry {
-                            dl,
-                            role: DlRole::Prefetch,
-                        });
-                    }
-                }
+                downloads.insert(
+                    key,
+                    DlEntry {
+                        dl,
+                        role: DlRole::Prefetch,
+                    },
+                );
             }
             Err(e) => tracing::debug!("预取启动失败: {}", e.message),
         }
@@ -3429,6 +3519,7 @@ impl AppState {
             }
         }
         let commit = self.play_commit.lock().await;
+        self.require_local_playback()?;
         if !self.attempt_alive(gen, index, &track_id).await {
             // 被顶代际：为跳过的曲子弹错、抢光标、给迟到的 HTTP 响应塞 404
             // 都不对。
@@ -3536,6 +3627,9 @@ impl AppState {
         generation: u64,
     ) {
         let commit = self.play_commit.lock().await;
+        if self.require_local_playback().is_err() {
+            return;
+        }
         let snapshot = self.audio.snapshot();
         if snapshot.generation != generation || snapshot.track_id.is_some() {
             return;
@@ -3758,6 +3852,7 @@ impl AppState {
     /// `*_control` 方法里，HTTP 与 RPC 各自只做取参与应答整形。
     pub(crate) async fn pause_control(&self) -> Result<ControlOutcome, vmusic_core::CoreError> {
         let commit = self.play_commit.lock().await;
+        self.require_local_playback()?;
         self.cancel_prepared_playback().await;
         self.play_generation.fetch_add(1, Ordering::Relaxed);
         let outcome = self.pause_audio_locked().await?;
@@ -3779,27 +3874,6 @@ impl AppState {
         })
     }
 
-    /// 页面离场的收尾：宽限期到点后，只有「没有页面开着」且「确实还在出声」两个
-    /// 条件同时成立才暂停。武装点有两处——前端的 `pagehide` 信标（`/v1/player/depart`）
-    /// 与最后一条 `/ws` 断开（[`ViewerGuard::drop`]），后者是关整个浏览器时唯一可能
-    /// 生效的那条，因为信标在那种退出里发不出去。
-    ///
-    /// 宽限期存在的理由是 `pagehide` 与 WS 断开在按 F5 时同样发生：实测本机重载
-    /// → 重连 257–675 ms，立即暂停等于每刷一次停一次。重复武装（两个标签先后关、
-    /// 信标与断开各一次）无害——判定只看当下的观看者数，多个任务只是把同一件事
-    /// 确认多次。停的是 pause 不是 stop：游标与进度留着，重开页面点播放能接回原处
-    /// （`pending_restore_seek` 那条恢复路）。
-    pub(crate) fn schedule_depart_pause(self: &Arc<Self>) {
-        let Some(state) = self.weak_self.get().and_then(std::sync::Weak::upgrade) else {
-            tracing::warn!("离场暂停没有 AppState 弱引用，跳过");
-            return;
-        };
-        tokio::spawn(async move {
-            tokio::time::sleep(DEPART_GRACE).await;
-            state.pause_if_alone().await;
-        });
-    }
-
     /// 首页那颗退出钮：拉退出信号。先留 150 ms 让这次 POST 的应答发完——进程要是
     /// 抢在应答之前没掉，浏览器只看到一个失败请求，用户分不清按没按成。
     pub(crate) fn request_exit(&self) {
@@ -3808,38 +3882,6 @@ impl AppState {
             tokio::time::sleep(std::time::Duration::from_millis(150)).await;
             let _ = exiting.send(true);
         });
-    }
-
-    /// 宽限期到点后的判定：没有页面开着、且确实还在出声，才暂停。返回有没有真的
-    /// 停。判定只依赖当下的观看者数，与那 3 秒无关，所以单独拆出来能被直接测到。
-    ///
-    /// `playing == false` 不代表没有播放意图：在线/远程曲目取流期间音频快照尚未
-    /// 起播，若此处直接放行，加载完成后就会在零观看者下开始播放，而且不会再有
-    /// 新的离场事件来暂停。所以确认独自一人后先顶代际、取消预取，让尚未提交的
-    /// 加载在播放提交锁内复核时作废；「顶代际 → 读快照 → 暂停」整段与其它播放
-    /// 提交共用同一把锁，避免复核与提交擦肩而过。
-    pub(crate) async fn pause_if_alone(&self) -> bool {
-        let _commit = self.play_commit.lock().await;
-        if self.viewers.load(Ordering::Acquire) > 0 {
-            return false;
-        }
-        self.cancel_prepared_playback().await;
-        self.play_generation.fetch_add(1, Ordering::Relaxed);
-        if !self.audio.snapshot().playing {
-            // 没有声音可停，但缓冲覆盖态属于刚被作废的播放意图，一并收口。
-            self.set_buffering(false, None).await;
-            return false;
-        }
-        match self.pause_audio_locked().await {
-            Ok(outcome) => {
-                tracing::info!(?outcome, "最后一个页面已离场，播放暂停");
-                true
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "离场暂停失败");
-                false
-            }
-        }
     }
 
     /// 共享播控入口：恢复/开始播放。
@@ -3852,6 +3894,7 @@ impl AppState {
         &self,
         strict: bool,
     ) -> Result<ControlOutcome, vmusic_core::CoreError> {
+        self.require_local_playback()?;
         if self.audio.snapshot().track_id.is_none() {
             if strict {
                 crate::diaglog!(
@@ -3866,13 +3909,14 @@ impl AppState {
             // 会话恢复后的首次 play：audio 里还没装任何曲目，但队列/游标已从快照
             // 回来——按游标起播，提交成功后把上次进度 seek 回去。此后走正常路径。
             if let Some(index) = self.current_index().await {
-                let outcome = self.play_index_for(index, None, PlayTrigger::Pick).await?;
+                let outcome = self
+                    .play_index_internal(index, None, PlayTrigger::Pick, true)
+                    .await?;
                 if !outcome.committed {
                     return Ok(ControlOutcome::Superseded {
                         generation: self.play_generation.load(Ordering::Relaxed),
                     });
                 }
-                self.consume_restore_seek().await;
                 if let Some(arc) = self.weak_self.get().and_then(std::sync::Weak::upgrade) {
                     arc.post_commit_background();
                 }
@@ -3882,6 +3926,7 @@ impl AppState {
             }
         }
         let commit = self.play_commit.lock().await;
+        self.require_local_playback()?;
         self.cancel_prepared_playback().await;
         self.play_generation.fetch_add(1, Ordering::Relaxed);
         self.audio
@@ -3901,6 +3946,7 @@ impl AppState {
         position_ms: u64,
     ) -> Result<ControlOutcome, vmusic_core::CoreError> {
         let commit = self.play_commit.lock().await;
+        self.require_local_playback()?;
         self.cancel_prepared_playback().await;
         self.play_generation.fetch_add(1, Ordering::Relaxed);
         self.audio
@@ -3921,6 +3967,7 @@ impl AppState {
         &self,
         volume: f32,
     ) -> Result<ControlOutcome, vmusic_core::CoreError> {
+        self.require_local_playback()?;
         if !volume.is_finite() || !(0.0..=1.0).contains(&volume) {
             return Err(vmusic_core::CoreError::Invalid(
                 "volume must be between 0.0 and 1.0".into(),
@@ -3953,6 +4000,7 @@ impl AppState {
             let _ = self.playlist_refill(false).await;
         }
         let commit = self.play_commit.lock().await;
+        self.require_local_playback()?;
         if self.play_generation.load(Ordering::Relaxed) != before_refill {
             return Ok(ControlOutcome::Superseded {
                 generation: self.play_generation.load(Ordering::Relaxed),
@@ -4220,12 +4268,36 @@ pub fn spawn_session_saver(state: Arc<AppState>) {
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             interval.tick().await;
-            let snap = state.audio.snapshot();
-            let queue = state.queue.lock().await.clone();
-            if queue.is_empty() && snap.track_id.is_none() && !snap.playing {
-                continue;
-            }
-            let cursor = state.current_index().await;
+            let (queue, cursor, position_ms) = {
+                let _commit = state.play_commit.lock().await;
+                if let Some(saved) = state.room.local_resume() {
+                    saved
+                } else {
+                    let snap = state.audio.snapshot();
+                    let queue = state.queue.lock().await.clone();
+                    if queue.is_empty() && snap.track_id.is_none() && !snap.playing {
+                        continue;
+                    }
+                    let cursor = state.current_index().await;
+                    let position = if snap.track_id.is_none() {
+                        state
+                            .pending_restore_seek
+                            .lock()
+                            .await
+                            .as_ref()
+                            .filter(|p| {
+                                cursor
+                                    .and_then(|i| queue.get(i))
+                                    .is_some_and(|id| id == &p.track_id)
+                            })
+                            .map(|p| p.position_ms)
+                            .unwrap_or(snap.position_ms)
+                    } else {
+                        snap.position_ms
+                    };
+                    (queue, cursor, position)
+                }
+            };
             let saved_at = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis() as i64)
@@ -4235,7 +4307,7 @@ pub fn spawn_session_saver(state: Arc<AppState>) {
                 &crate::persist::SessionSnapshot {
                     queue,
                     cursor,
-                    position_ms: snap.position_ms,
+                    position_ms,
                     saved_at,
                 },
             )
@@ -4323,7 +4395,10 @@ pub fn spawn_event_pump(state: Arc<AppState>) {
                     // 听歌打卡计时：纯内存累积，结算才 detach 网络任务。
                     state.observe_listen(&snap).await;
                 }
-                AudioEvent::Spectrum(bands) => state.publish(WsEvent::Spectrum { bands }),
+                AudioEvent::Spectrum(bands) => {
+                    state.wallpaper.observe_spectrum(&bands);
+                    state.publish(WsEvent::Spectrum { bands });
+                }
                 AudioEvent::Ended {
                     generation,
                     track_id,
@@ -4404,6 +4479,13 @@ pub async fn write_discovery(state: &AppState, port: u16) -> anyhow::Result<Path
         token: String,
         version: String,
         protocol_version: u32,
+        edition: &'static str,
+        data_dir: String,
+        server_instance_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        desktop_lyrics_protocol: Option<u32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        wallpaper_protocol: Option<u32>,
     }
     let body = Discovery {
         pid: std::process::id(),
@@ -4411,6 +4493,12 @@ pub async fn write_discovery(state: &AppState, port: u16) -> anyhow::Result<Path
         token: state.token.clone(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         protocol_version: PROTOCOL_VERSION,
+        edition: crate::edition::NAME,
+        data_dir: state.data_dir.to_string_lossy().into_owned(),
+        server_instance_id: state.server_instance_id.clone(),
+        desktop_lyrics_protocol: (!state.desktop_lyrics_key.is_empty())
+            .then_some(crate::desktop_lyrics::PROTOCOL),
+        wallpaper_protocol: (!state.wallpaper_key.is_empty()).then_some(crate::wallpaper::PROTOCOL),
     };
     let path = state.data_dir.join("vmusicd.json");
     tokio::fs::write(&path, serde_json::to_vec_pretty(&body)?).await?;
@@ -4443,10 +4531,14 @@ pub(crate) mod tests {
         let state = AppState {
             db,
             audio,
+            room: Default::default(),
             config: Arc::new(Config::default()),
             data_dir: PathBuf::new(),
             token: String::new(),
             overlay_key: String::new(),
+            desktop_lyrics_key: String::new(),
+            wallpaper_key: String::new(),
+            wallpaper: Default::default(),
             events: broadcast::channel(16).0,
             queue: Default::default(),
             cursor: Default::default(),
@@ -4492,6 +4584,7 @@ pub(crate) mod tests {
             exiting: tokio::sync::watch::channel(false).0,
             pending_restore_seek: Default::default(),
             overlay_lyric: Default::default(),
+            desktop_lyrics: Default::default(),
             listen: Default::default(),
             scrobble: Default::default(),
             relay_tried: Default::default(),
@@ -4516,7 +4609,10 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn depart_pause_only_fires_for_the_last_viewer() {
         let (state, handle) = playback_state().await;
-        state.set_queue(vec!["first".into()], Some(0)).await;
+        state
+            .set_queue(vec!["first".into()], Some(0))
+            .await
+            .unwrap();
         state
             .audio
             .load("first.wav", Some("first".into()))
@@ -4575,7 +4671,10 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn last_socket_drop_pauses_after_the_grace() {
         let (state, handle) = playback_state().await;
-        state.set_queue(vec!["first".into()], Some(0)).await;
+        state
+            .set_queue(vec!["first".into()], Some(0))
+            .await
+            .unwrap();
         state
             .audio
             .load("first.wav", Some("first".into()))
@@ -4655,7 +4754,7 @@ pub(crate) mod tests {
 
         let (state, handle) = playback_state_with_db(db).await;
         let state = Arc::new(state);
-        let (gen, ..) = state.set_queue(vec![track_id], Some(0)).await;
+        let (gen, ..) = state.set_queue(vec![track_id], Some(0)).await.unwrap();
 
         let play = tokio::spawn({
             let state = state.clone();
@@ -4694,7 +4793,8 @@ pub(crate) mod tests {
         let (state, handle) = playback_state().await;
         state
             .set_queue(vec!["first".into(), "second".into()], Some(0))
-            .await;
+            .await
+            .unwrap();
         state
             .audio
             .load("first.wav", Some("first".into()))
@@ -4718,7 +4818,10 @@ pub(crate) mod tests {
         assert!(!state.audio.snapshot().playing);
 
         let stopped = state.audio.snapshot();
-        state.set_queue(vec!["second".into()], Some(0)).await;
+        state
+            .set_queue(vec!["second".into()], Some(0))
+            .await
+            .unwrap();
         state
             .audio
             .load("second.wav", Some("second".into()))
@@ -4742,7 +4845,8 @@ pub(crate) mod tests {
     async fn transition_fixture(state: &AppState, target: &str) -> PreparedPlayback {
         state
             .set_queue(vec!["first".into(), target.into(), "third".into()], Some(0))
-            .await;
+            .await
+            .unwrap();
         state
             .audio
             .load("first.wav", Some("first".into()))
@@ -4796,7 +4900,10 @@ pub(crate) mod tests {
             .await
             .unwrap();
         let generation = state.audio.snapshot().generation;
-        state.set_queue(vec!["replacement".into()], Some(0)).await;
+        state
+            .set_queue(vec!["replacement".into()], Some(0))
+            .await
+            .unwrap();
         assert!(state
             .commit_prepared_transition(next.actor_generation, generation, "second")
             .await
@@ -4962,7 +5069,7 @@ pub(crate) mod tests {
         .unwrap();
 
         let (state, handle) = playback_state_with_db(db).await;
-        let (gen, ..) = state.set_queue(vec![track_id], Some(0)).await;
+        let (gen, ..) = state.set_queue(vec![track_id], Some(0)).await.unwrap();
 
         let play = state.play_index_for(0, Some(gen), PlayTrigger::Pick);
         let probe = async {
@@ -4972,7 +5079,10 @@ pub(crate) mod tests {
                 .await
                 .is_ok_and(|result| result.is_ok());
             let t0 = std::time::Instant::now();
-            state.set_queue(vec!["other".into()], Some(0)).await;
+            state
+                .set_queue(vec!["other".into()], Some(0))
+                .await
+                .unwrap();
             (accepted, t0.elapsed())
         };
         let result = tokio::time::timeout(std::time::Duration::from_secs(8), async {
@@ -4996,8 +5106,14 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn replaced_queue_rejects_a_reserved_load() {
         let (state, handle) = playback_state().await;
-        let (generation, _, _) = state.set_queue(vec!["first".into()], Some(0)).await;
-        state.set_queue(vec!["second".into()], Some(0)).await;
+        let (generation, _, _) = state
+            .set_queue(vec!["first".into()], Some(0))
+            .await
+            .unwrap();
+        state
+            .set_queue(vec!["second".into()], Some(0))
+            .await
+            .unwrap();
         let outcome = state
             .play_index_for(0, Some(generation), PlayTrigger::Pick)
             .await
@@ -5013,7 +5129,10 @@ pub(crate) mod tests {
     async fn delayed_decode_failure_cannot_interrupt_a_retry_of_the_same_track() {
         let (state, handle) = playback_state().await;
         let state = Arc::new(state);
-        state.set_queue(vec!["first".into()], Some(0)).await;
+        state
+            .set_queue(vec!["first".into()], Some(0))
+            .await
+            .unwrap();
         state
             .audio
             .load("first.wav", Some("first".into()))
@@ -5096,7 +5215,8 @@ pub(crate) mod tests {
         let target = "online:qq:t1";
         let (gen, _, _) = state
             .set_queue(vec![old.into(), target.into()], Some(0))
-            .await;
+            .await
+            .unwrap();
         state
             .remember_online_meta(old.into(), online_snap(None, None))
             .await;
@@ -5170,7 +5290,10 @@ pub(crate) mod tests {
     async fn relay_of_one_repeated_id_preserves_the_other_slots_snapshot() {
         let (state, handle) = playback_state().await;
         let old = "online:netease:n1";
-        let (gen, _, _) = state.set_queue(vec![old.into(), old.into()], Some(0)).await;
+        let (gen, _, _) = state
+            .set_queue(vec![old.into(), old.into()], Some(0))
+            .await
+            .unwrap();
         state
             .remember_online_meta(old.into(), online_snap(Some(2.0), None))
             .await;
@@ -5445,7 +5568,8 @@ pub(crate) mod tests {
         let failed = "online:netease:n1";
         let _ = state
             .set_queue(vec![failed.into(), "online:netease:n2".into()], Some(0))
-            .await;
+            .await
+            .unwrap();
         // 网易没有注册权益探测能力：探测拿不到结果就不换曲。把「不知道」当
         // 「不能播」会把整队列的网易歌都跳掉，把「不知道」当「能播」又会换到
         // 一首点了还是哑的曲——两种都不许发生。
@@ -5467,7 +5591,8 @@ pub(crate) mod tests {
                 ],
                 Some(0),
             )
-            .await;
+            .await
+            .unwrap();
         // 队列里没有第二首 QQ 曲：一次上游都不该发，直接回「不换」。
         assert!(state
             .playable_substitute(0, "qq", "online:qq:a")
@@ -5907,7 +6032,7 @@ pub(crate) mod tests {
         use crate::online::quality::Quality;
         let (state, handle) = playback_state().await;
         let vid = "online:netease:test";
-        let (gen, _, _) = state.set_queue(vec![vid.into()], Some(0)).await;
+        let (gen, _, _) = state.set_queue(vec![vid.into()], Some(0)).await.unwrap();
         let mut events = state.events.subscribe();
         let mut attempts = Vec::new();
         let result = state
@@ -5951,7 +6076,7 @@ pub(crate) mod tests {
         use crate::online::quality::Quality;
         let (state, handle) = playback_state().await;
         let vid = "online:netease:test";
-        let (gen, _, _) = state.set_queue(vec![vid.into()], Some(0)).await;
+        let (gen, _, _) = state.set_queue(vec![vid.into()], Some(0)).await.unwrap();
         let mut attempts = 0;
         let result = state
             .resolve_online_stream(
@@ -5989,7 +6114,7 @@ pub(crate) mod tests {
         use crate::online::quality::Quality;
         let (state, handle) = playback_state().await;
         let vid = "online:netease:test";
-        let (gen, _, _) = state.set_queue(vec![vid.into()], Some(0)).await;
+        let (gen, _, _) = state.set_queue(vec![vid.into()], Some(0)).await.unwrap();
         let mut events = state.events.subscribe();
         let result = state
             .resolve_online_stream(
@@ -6000,7 +6125,10 @@ pub(crate) mod tests {
                 Quality::Hires,
                 std::time::Duration::from_secs(1),
                 |_| async {
-                    state.set_queue(vec!["new-choice".into()], Some(0)).await;
+                    state
+                        .set_queue(vec!["new-choice".into()], Some(0))
+                        .await
+                        .unwrap();
                     state.set_buffering(true, Some(75)).await;
                     Err(crate::error::ApiError::vip_required("old failed"))
                 },
@@ -6024,7 +6152,7 @@ pub(crate) mod tests {
     async fn pick_stream_failure_closes_the_buffering_overlay() {
         let (state, handle) = playback_state().await;
         let vid = "online:qq:dead-link";
-        let (gen, _, _) = state.set_queue(vec![vid.into()], Some(0)).await;
+        let (gen, _, _) = state.set_queue(vec![vid.into()], Some(0)).await.unwrap();
         // 对应 play_online 缓存未命中时点亮的那一次
         state.set_buffering(true, None).await;
         let mut events = state.events.subscribe();
@@ -6060,8 +6188,11 @@ pub(crate) mod tests {
     async fn stale_failure_leaves_the_new_generation_buffering_alone() {
         let (state, handle) = playback_state().await;
         let vid = "online:qq:dead-link";
-        let (gen, _, _) = state.set_queue(vec![vid.into()], Some(0)).await;
-        state.set_queue(vec!["new-choice".into()], Some(0)).await;
+        let (gen, _, _) = state.set_queue(vec![vid.into()], Some(0)).await.unwrap();
+        state
+            .set_queue(vec!["new-choice".into()], Some(0))
+            .await
+            .unwrap();
         state.set_buffering(true, Some(40)).await;
         let outcome = state
             .online_failed(
@@ -6088,7 +6219,8 @@ pub(crate) mod tests {
 
         state
             .set_queue(vec!["first".into(), "second".into()], Some(1))
-            .await;
+            .await
+            .unwrap();
 
         assert!(matches!(events.try_recv(), Ok(WsEvent::QueueChanged)));
         assert_eq!(
@@ -6197,7 +6329,7 @@ pub(crate) mod tests {
         use crate::online::quality::Quality;
         let (state, handle) = playback_state().await;
         let vid = "online:netease:test";
-        let (gen, _, _) = state.set_queue(vec![vid.into()], Some(0)).await;
+        let (gen, _, _) = state.set_queue(vec![vid.into()], Some(0)).await.unwrap();
         let mut attempts = 0;
         let result = state
             .resolve_online_stream(
@@ -6233,7 +6365,7 @@ pub(crate) mod tests {
         use crate::online::quality::Quality;
         let (state, handle) = playback_state().await;
         let vid = "online:netease:test";
-        let (gen, _, _) = state.set_queue(vec![vid.into()], Some(0)).await;
+        let (gen, _, _) = state.set_queue(vec![vid.into()], Some(0)).await.unwrap();
         let mut attempts = 0;
         let result = state
             .resolve_online_stream(
@@ -6264,7 +6396,7 @@ pub(crate) mod tests {
         let (state, handle) = playback_state().await;
         let vid = "online:ccmixter:project";
         let path = Path::new("exact-standard.wav");
-        let (gen, _, _) = state.set_queue(vec![vid.into()], Some(0)).await;
+        let (gen, _, _) = state.set_queue(vec![vid.into()], Some(0)).await.unwrap();
         state
             .try_commit_cached(gen, 0, vid, path, Some(Quality::Standard))
             .await
@@ -6282,7 +6414,7 @@ pub(crate) mod tests {
         state.audio.seek(100).await.unwrap();
         state.transport_committed().await;
         assert_eq!(state.project_online_media(vid).await.as_deref(), Some(path));
-        state.set_queue(vec![vid.into()], Some(0)).await;
+        state.set_queue(vec![vid.into()], Some(0)).await.unwrap();
         assert!(
             state.project_online_media(vid).await.is_none(),
             "new same-track intent cannot inherit the old bytes"
@@ -6296,7 +6428,7 @@ pub(crate) mod tests {
         use crate::online::quality::Quality;
         let (state, handle) = playback_state().await;
         let vid = "online:netease:test";
-        let (gen, _, _) = state.set_queue(vec![vid.into()], Some(0)).await;
+        let (gen, _, _) = state.set_queue(vec![vid.into()], Some(0)).await.unwrap();
         assert!(matches!(
             state
                 .try_commit_cached(gen, 0, vid, Path::new("mock.wav"), Some(Quality::Exhigh))
@@ -6332,7 +6464,7 @@ pub(crate) mod tests {
         use crate::online::quality::Quality;
         let (state, handle) = playback_state().await;
         let vid = "online:netease:test";
-        let (gen, _, _) = state.set_queue(vec![vid.into()], Some(0)).await;
+        let (gen, _, _) = state.set_queue(vec![vid.into()], Some(0)).await.unwrap();
         state
             .try_commit_cached(gen, 0, vid, Path::new("mock.wav"), Some(Quality::Exhigh))
             .await
@@ -6344,7 +6476,7 @@ pub(crate) mod tests {
             .remember_committed_quality(gen, vid, Some(Quality::Exhigh), None)
             .await;
         // A new same-track intent exists but has not loaded its actor bytes yet.
-        state.set_queue(vec![vid.into()], Some(0)).await;
+        state.set_queue(vec![vid.into()], Some(0)).await.unwrap();
         assert!(state.take_failed_quality(vid, actor_gen).await.is_none());
         state.audio.shutdown();
         handle.join().unwrap();
@@ -6355,7 +6487,7 @@ pub(crate) mod tests {
         use crate::online::quality::Quality;
         let (state, handle) = playback_state().await;
         let vid = "online:netease:test";
-        let (gen, _, _) = state.set_queue(vec![vid.into()], Some(0)).await;
+        let (gen, _, _) = state.set_queue(vec![vid.into()], Some(0)).await.unwrap();
         let mut events = state.events.subscribe();
         let mut attempts = 0;
         state
@@ -6607,7 +6739,8 @@ pub(crate) mod tests {
         let (state, handle) = playback_state_with_db(db).await;
         state
             .set_queue(vec!["first".into(), "second".into()], Some(0))
-            .await;
+            .await
+            .unwrap();
         state
             .audio
             .load("first.wav", Some("first".into()))
@@ -6657,7 +6790,8 @@ pub(crate) mod tests {
         let (state, handle) = playback_state().await;
         state
             .set_queue(vec!["first".into(), "second".into()], Some(0))
-            .await;
+            .await
+            .unwrap();
         state
             .audio
             .load("first.wav", Some("first".into()))
@@ -6686,7 +6820,8 @@ pub(crate) mod tests {
         // 队列和游标都在：严格模式仍然拒绝——恢复会话语义只属于官方 UI 的 play。
         state
             .set_queue(vec!["first".into(), "second".into()], Some(0))
-            .await;
+            .await
+            .unwrap();
         let generation = state.play_generation.load(Ordering::Relaxed);
         let outcome = state.resume_control(true).await.unwrap();
         assert_eq!(
@@ -6701,6 +6836,22 @@ pub(crate) mod tests {
         assert!(state.audio.snapshot().track_id.is_none());
         state.audio.shutdown();
         handle.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_lazy_resume_preserves_track_bound_recovery() {
+        let (state, thread) = playback_state().await;
+        *state.queue.lock().await = vec!["missing".into()];
+        *state.cursor.lock().await = Some(0);
+        let pending = PendingRestore {
+            track_id: "missing".into(),
+            position_ms: 42_000,
+        };
+        *state.pending_restore_seek.lock().await = Some(pending.clone());
+        assert!(state.resume_control(false).await.is_err());
+        assert_eq!(*state.pending_restore_seek.lock().await, Some(pending));
+        state.audio.shutdown();
+        thread.join().unwrap();
     }
 
     #[tokio::test]
@@ -6761,5 +6912,28 @@ pub(crate) mod tests {
         assert_eq!(state.audio.snapshot().volume, 0.4);
         state.audio.shutdown();
         handle.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn discovery_advertises_wallpaper_protocol_only_with_key() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("hertz-discovery-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (mut state, handle) = playback_state().await;
+        state.data_dir = dir.clone();
+        state.wallpaper_key = "a".repeat(64);
+        let path = write_discovery(&state, 4321).await.unwrap();
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(value["port"], 4321);
+        assert_eq!(value["wallpaper_protocol"], crate::wallpaper::PROTOCOL);
+        assert_eq!(value["desktop_lyrics_protocol"], serde_json::Value::Null);
+        state.audio.shutdown();
+        handle.join().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

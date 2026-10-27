@@ -424,6 +424,29 @@ async function loginScenario(pollStates, opts) {
 }
 
 (async function main() {
+  section('一起听入口保留来源并复用房间控制器');
+  {
+    const env = makeSandbox({ transport: makeTransport({}) });
+    bindOnline(env);
+    eq(env.sandbox.Online.roomButton([T({})]), null, '无房间控制器时不显示入口');
+    const shared = [];
+    let release;
+    env.sandbox.HertzRoom = { addOnline: async tracks => { shared.push(tracks); await new Promise(resolve => { release = resolve; }); } };
+    const playable = T({ id: 'provider:id', track_ref: { token: 'provider-reference' } });
+    const button = env.sandbox.Online.roomButton([playable, T({ playable: false })]);
+    const pending = button.onclick({ stopPropagation() {} });
+    ok(button.disabled, '请求期间禁止重复加入');
+    eq(shared[0].length, 1, '只加入可播放曲目');
+    eq(shared[0][0], playable, '完整保留平台曲目引用');
+    release(); await pending;
+    ok(!button.disabled, '请求完成恢复按钮');
+    env.sandbox.HertzRoom.addOnline = async () => { throw new Error('请先创建房间'); };
+    await button.onclick({ stopPropagation() {} });
+    eq(env.spies.toasts.at(-1).msg, '请先创建房间', '房间门禁错误可见');
+    const row = env.sandbox.Online.row(playable);
+    ok(row.querySelector('.t-actions').children.some(node => node.title === '加入一起听'), '真实在线行包含一起听操作');
+    ok(env.sandbox.Online.roomButton([T({ playable: false })]).disabled, '无可播歌曲时禁用');
+  }
   section('QQ 登录提示跟随扫码渠道，取码与等待轮询保持一致');
   {
     const s = await loginScenario(['waiting']);

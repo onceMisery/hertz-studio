@@ -1,0 +1,120 @@
+{
+  "binary_sha256": "e8fe7b12adad8d36b9b85371c266d59988ed8bbf730e0a50dd8f1da29691d978",
+  "platform": "Windows-11-10.0.26200-SP0",
+  "passed": true,
+  "checks": [
+    "duplicate queue occurrences retain identity; duplicate, mismatched, removed and stale writes are atomic",
+    "independent profiles, pinned TLS pairing, restricted shared library and queue",
+    "legacy local playback rejects room-mode writes",
+    "native chat persists and returns exact plain text",
+    "native output diagnostic finishes without an underrun",
+    "120s native muted PCM, three source rates, natural transitions, zero underrun/resync",
+    "next and instance-bound seek commit on the native receiver without underruns",
+    "removing an earlier duplicate preserves the playing instance and native epoch without a pause",
+    "playing queue reorder and shared DSP changes preserve the current native epoch",
+    "host-owned sleep timer schedules pause without an open UI",
+    "scheduled pause, paused queue reorder, resume and last-output halt",
+    "server rechecks revoked playback permission",
+    "explicit guest leave restores silent local mode",
+    "host End restores the connected guest to silent local mode",
+    "host service shutdown drains End, forgets ended guest membership and removes discovery before exit"
+  ],
+  "native_output_tested": true,
+  "output_binding": {
+    "backend": "WASAPI",
+    "channels": 2,
+    "configuration": "cpal-default/f32/default-buffer",
+    "device": "扬声器 (Realtek(R) Audio)",
+    "sample_rate": 48000
+  },
+  "duration_seconds": 120,
+  "sample_retention": "Last 600 observations; every observation is checked during the run.",
+  "limits": "Single Windows machine / two processes when run locally. No acoustic or cross-OS claim.",
+  "observations": {
+    "count": 485,
+    "max_underrun_frames": 0,
+    "max_resync_count": 0,
+    "all_ready": true,
+    "track_instances": [
+      "4",
+      "5",
+      "6"
+    ],
+    "clock_fault_counts": [
+      1
+    ],
+    "timestamp_capabilities": [
+      "BackendEstimate"
+    ],
+    "first": {
+      "elapsed_seconds": 0.091,
+      "playing": true,
+      "instance": "4",
+      "position_ms": "214",
+      "mode": "guest",
+      "epoch": "2",
+      "error": null,
+      "played_frame": "9355",
+      "underrun_frames": "0",
+      "input_frames": 17262,
+      "ready": true,
+      "clock": {
+        "converged": true,
+        "drift_ppm": 4.253921297374392,
+        "rtt_ns": "247700",
+        "uncertainty_ns": "141284"
+      },
+      "device": {
+        "clock_fault_count": "1",
+        "clock_status": "Valid",
+        "clock_uncertainty_ns": "176175",
+        "device_clock_ppm": 91.99045122931793,
+        "last_clock_fault": {
+          "kind": "PlaybackRegressionNs",
+          "value": -5691800.0
+        },
+        "muted": false,
+        "queued_frames": 4691,
+        "timestamp_capability": "BackendEstimate"
+      },
+      "resync_count": "0",
+      "last_resync_reason": null
+    },
+    "last": {
+      "elapsed_seconds": 119.925,
+      "playing": true,
+      "instance": "6",
+      "position_ms": "7970",
+      "mode": "guest",
+      "epoch": "2",
+      "error": null,
+      "played_frame": "5745849",
+      "underrun_frames": "0",
+      "input_frames": 17285,
+      "ready": true,
+      "clock": {
+        "converged": true,
+        "drift_ppm": -0.051586281693759305,
+        "rtt_ns": "212200",
+        "uncertainty_ns": "130997"
+      },
+      "device": {
+        "clock_fault_count": "1",
+        "clock_status": "Valid",
+        "clock_uncertainty_ns": "891587",
+        "device_clock_ppm": 29.435401396771255,
+        "last_clock_fault": {
+          "kind": "PlaybackRegressionNs",
+          "value": -5691800.0
+        },
+        "muted": false,
+        "queued_frames": 4532,
+        "timestamp_capability": "BackendEstimate"
+      },
+      "resync_count": "0",
+      "last_resync_reason": null
+    }
+  },
+  "credential_backend": "memory (explicit test override); OS credential persistence is not certified by this run",
+  "raw_report_sha256": "2a3b75bcf39cdf94844f42f24abf30e6b604c3cba1814914424c0d55db9acbc8"
+}

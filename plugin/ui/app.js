@@ -41,10 +41,12 @@ const ui = {
     library: $('view-library'),
     online: $('view-online'),
     podcasts: $('view-podcasts'),
+    reader: $('view-reader'),
     playlists: $('view-playlists'),
     // 每日推荐：一级目的地，容器在 index.html，菜单项由 daily-view.js 注入。
     daily: $('view-daily'),
     queue: $('view-queue'),
+    room: $('view-room'),
     favorites: $('view-favorites'),
     settings: $('view-settings'),
   },
@@ -71,6 +73,13 @@ const ui = {
   setLyricOffsetDown: $('set-lyric-offset-down'),
   setLyricOffsetUp: $('set-lyric-offset-up'),
   setLyricOffsetReset: $('set-lyric-offset-reset'),
+  setDesktopLyricsRow: $('set-desktop-lyrics-row'),
+  setDesktopLyricsOpen: $('set-desktop-lyrics-open'),
+  setDesktopLyricsLocate: $('set-desktop-lyrics-locate'),
+  setWallpaperRow: $('set-wallpaper-row'),
+  setWallpaperSettings: $('set-wallpaper-settings'),
+  setWallpaperToggle: $('set-wallpaper-toggle'),
+  setWallpaperNote: $('set-wallpaper-note'),
   setLyricStaff: $('set-lyric-staff'),
   setLyricStaffPattern: $('set-lyric-staff-pattern'),
   setLyricStaffNote: $('set-lyric-staff-note'),
@@ -169,6 +178,7 @@ const ui = {
   scanToggle: $('scan-toggle'),
   scanPanel: $('scan-panel'),
   scanRoot: $('scan-root'),
+  scanPick: $('scan-pick'),
   scanBtn: $('scan-btn'),
   scanBar: $('scan-bar'),
   scanLabel: $('scan-label'),
@@ -265,6 +275,7 @@ const ui = {
   barTitle: $('bar-title'),
   barSub: $('bar-sub'),
   barFavorite: $('bar-favorite'),
+  barDesktopSettings: $('bar-desktop-settings'),
   barTime: $('bar-time'),
   prev: $('prev'),
   playpause: $('playpause'),
@@ -2178,6 +2189,7 @@ function syncBufferingIndicator(active, pct) {
 }
 
 function applySnapshot(snap) {
+  if (window.HertzRoom && HertzRoom.active()) return;
   if (Object.prototype.hasOwnProperty.call(snap, 'buffering')) {
     syncBufferingIndicator(snap.buffering, snap.pct);
   }
@@ -3125,12 +3137,17 @@ function initStage() {
   if (window.StageParticles) window.StageParticles.init();
   if (window.Shelf) initShelf();
   document.addEventListener('stage:control', onStageControl);
+  document.addEventListener('stage:visibility', event => { if (window.HertzRoom) HertzRoom.setStageVisible(event.detail.open); });
 }
 
 let stageSettingsWrite = Promise.resolve();
 
 function onStageControl(e) {
   const d = e.detail || {};
+  if (window.HertzRoom && HertzRoom.active()) {
+    if (d.action === 'queue-play') { HertzRoom.playback('pick', { instance_id: String(d.value) }); return; }
+    if (d.action === 'queue-remove' || d.action === 'lyricOffset') { toast('请在一起听房间内管理共同队列与歌曲信息'); return; }
+  }
   switch (d.action) {
     case 'seek': seekTo(d.value); break;
     case 'toggle': togglePlay(); break;
@@ -3309,6 +3326,7 @@ function drawSpectrum() {
 // 全屏声场（Stage3D）里的播放队列浮层与队列视图同源：这里把精简后的行模型
 // 推给 Stage3D，全屏内点行跳播/移出经 stage:control 意图回到同一套播放逻辑。
 function pushStageQueue() {
+  if (window.HertzRoom && HertzRoom.active()) { if (window.Stage3D) Stage3D.setQueue([]); return; }
   if (window.Space3D && Space3D.setQueue) {
     Space3D.setQueue(state.queue.map((id) => {
       const track = state.byId.get(id) || window.Online.getMeta(id)
@@ -4370,11 +4388,19 @@ function initDetailSortable() {
 // 右键菜单：把后端已有、旧 UI 没接的能力接到曲目上
 // ---------------------------------------------------------------------------
 
+async function startListeningWith(tracks) {
+  if (!window.HertzRoom) return;
+  setView('room');
+  try { await HertzRoom.startFromTracks(tracks); }
+  catch (error) { toast(errText('一起听', error), 'error'); }
+}
+
 function openContextMenu(track, anchor, event) {
   ui.menu.innerHTML = '';
   const items = [
     { label: '播放', run: () => playFromList(track.id) },
     { label: queueAddLabel(), run: () => queueAddTrack(track.id) },
+    { label: window.HertzRoom && HertzRoom.active() ? '加入当前一起听房间' : '从这首歌发起一起听', run: () => startListeningWith([track]) },
     { label: '复制文件路径', run: () => copyText(track.path) },
     { sep: true },
     { label: '加入歌单', children: state.playlists.length
@@ -5316,7 +5342,9 @@ async function loadDevices() {
 
 function setView(name, options) {
   if (state.view === 'online' && name !== 'online' && window.Online) Online.cancelSearch();
+  if (state.view === 'room' && name !== 'room' && window.HertzRoom) window.HertzRoom.onViewExit();
   state.view = name;
+  document.body.classList.toggle('room-view', name === 'room');
   for (const [key, el] of Object.entries(ui.views)) el.hidden = key !== name;
   ui.rail.querySelectorAll('.rail-item').forEach((b) => b.classList.toggle('active', b.dataset.view === name));
   if (ui.settingsEntry) {
@@ -5328,7 +5356,9 @@ function setView(name, options) {
     if (window.TopSearch && window.TopSearch.onOnlineViewEnter) window.TopSearch.onOnlineViewEnter();
     if (!(options && options.historyOnly) && window.Online) window.Online.onViewEnter();
   }
+  if (name === 'room' && window.HertzRoom) window.HertzRoom.onViewEnter();
   if (name === 'podcasts' && window.Podcasts) window.Podcasts.onViewEnter();
+  if (name === 'reader' && window.Reader) window.Reader.onViewEnter();
   // 设置页里的诊断日志大小是「现在有多少内容」：不进页面就不刷新，用户开着
   // 日志录了一晚上，这里还停在「还没有内容」，等于把功能自己的状态说错了。
   if (name === 'settings') loadDiagnostics();
@@ -5669,25 +5699,7 @@ const Theme = window.Theme;
 // var(--bg)（当前主题的底色），漏传不会报错，只会让所有样本变成同一个颜色 ——
 // scripts/check-css-tokens.js 有断言盯着这两个别名，别只改这里。
 function themeDotStyle(theme) {
-  return `--t-bg:${theme.tokens['--bg']};--t-accent:${theme.tokens['--accent']};--t-accent-2:${theme.tokens['--accent-2']}`;
-}
-
-function renderThemeMenu() {
-  if (!Theme || !ui.themeMenu) return;
-  const current = Theme.current();
-  ui.themeMenu.innerHTML = '';
-  Theme.list().forEach((theme) => {
-    const btn = document.createElement('button');
-    btn.className = 'theme-item';
-    btn.type = 'button';
-    btn.setAttribute('role', 'option');
-    btn.setAttribute('aria-selected', String(current && theme.id === current.id));
-    btn.innerHTML = `<span class="theme-dot" style="${themeDotStyle(theme)}"></span>
-      <span class="theme-meta"><span class="theme-name"></span></span>`;
-    btn.querySelector('.theme-name').textContent = theme.name;
-    btn.onclick = () => { applyTheme(theme.id); closeThemeMenu(); };
-    ui.themeMenu.appendChild(btn);
-  });
+  return window.ThemePicker.themeDotStyle(theme);
 }
 
 function renderThemeSettings() {
@@ -5726,18 +5738,12 @@ function applyTheme(id) {
   if (Stage && typeof Stage.retint === 'function') Stage.retint();
 }
 
-function closeThemeMenu() {
-  if (!ui.themeMenu) return;
-  ui.themeMenu.hidden = true;
-  if (ui.themeBtn) ui.themeBtn.setAttribute('aria-expanded', 'false');
-}
-
 // 菜单挂在 <body> 上，位置只能自己算：默认与按钮右对齐、落在按钮下方；
 // 下方放不下就翻到上方，右边超出视口就向左收。
 /// 顶栏弹层的通用定位：右对齐按钮，下方放不下就翻上去，最后夹进视口。
 ///
 /// 三个入口（主题色 / 界面皮肤 / 更多工具）都得把弹层搬出 .topbar 才压得住后面
-/// 那些玻璃面板（顶栏自己就是层叠上下文，见 positionThemeMenu 上方注释），而搬
+/// 那些玻璃面板（顶栏自己就是层叠上下文，见 theme-picker.js），而搬
 /// 出来之后 CSS 的 top/right 就都不成立了，位置只能由 JS 按按钮矩形算。
 function positionAnchoredMenu(btn, menu, fallbackW) {
   if (!btn || !menu || menu.hidden) return;
@@ -5761,10 +5767,6 @@ function positionAnchoredMenu(btn, menu, fallbackW) {
   menu.style.top = `${Math.round(top)}px`;
 }
 
-function positionThemeMenu() {
-  positionAnchoredMenu(ui.themeBtn, ui.themeMenu, 232);
-}
-
 /// 顶栏弹层的互斥广播：三个入口（主题色 / 界面皮肤 / 更多工具）的按钮 onclick
 /// 都 stopPropagation，彼此那套「点外部就关」的 document 监听收不到对方的按钮
 /// 点击，两个面板会叠着开。约定 topbar:popup —— 谁开谁喊一声，其余弹层听见
@@ -5775,47 +5777,13 @@ function broadcastTopbarPopup(id) {
   } catch (e) { /* 老浏览器没有 CustomEvent 构造器 */ }
 }
 
-function setThemeMenuOpen(open) {
-  if (!ui.themeMenu) return;
-  ui.themeMenu.hidden = !open;
-  if (ui.themeBtn) ui.themeBtn.setAttribute('aria-expanded', String(open));
-  if (open) {
-    positionThemeMenu();
-    broadcastTopbarPopup('theme');
-  }
-}
-
 function initTheme() {
   if (!Theme) return;
   Theme.init();
-  Theme.onChange(() => { renderThemeMenu(); renderThemeSettings(); });
-  renderThemeMenu();
+  Theme.onChange(renderThemeSettings);
   renderThemeSettings();
-
-  if (ui.themeBtn && ui.themeMenu) {
-    // 关键一步：把菜单从 .topbar 的层叠上下文里搬出来。留在原处的话，
-    // 后面那些带 backdrop-filter 的玻璃面板（.column / .stage）会整块盖住它。
-    document.body.appendChild(ui.themeMenu);
-
-    ui.themeBtn.onclick = (e) => {
-      e.stopPropagation();
-      setThemeMenuOpen(ui.themeMenu.hidden);
-    };
-    document.addEventListener('click', (e) => {
-      // 用 contains 而不是 ===：按钮里有个 svg，点图标时 target 是 svg，
-      // 严格相等判断会漏掉，导致点按钮先关又立刻被 onclick 打开。
-      if (!ui.themeMenu.hidden && !ui.themeMenu.contains(e.target) && !ui.themeBtn.contains(e.target)) {
-        closeThemeMenu();
-      }
-    });
-    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeThemeMenu(); });
-    // 窗口尺寸变化时菜单可能变得越界，跟随重算
-    window.addEventListener('resize', () => { if (!ui.themeMenu.hidden) positionThemeMenu(); });
-    // 别的顶栏弹层开了就收起（见 broadcastTopbarPopup 上方注释）
-    document.addEventListener('topbar:popup', (e) => {
-      if (e.detail && e.detail.id !== 'theme' && !ui.themeMenu.hidden) closeThemeMenu();
-    });
-  }
+  window.ThemePicker.configure({ apply: applyTheme });
+  if (ui.themeBtn) window.ThemePicker.bind(ui.themeBtn);
   if (ui.setTheme) ui.setTheme.onchange = () => applyTheme(ui.setTheme.value);
 }
 
@@ -5962,6 +5930,7 @@ function probeImage(url, timeoutMs = 8000) {
 // ---------------------------------------------------------------------------
 
 function updateMediaSessionMetadata(track, artUrl) {
+  if (window.HertzRoom && HertzRoom.active()) return;
   if (!('mediaSession' in navigator)) return;
   try {
     navigator.mediaSession.metadata = new window.MediaMetadata({
@@ -5974,6 +5943,7 @@ function updateMediaSessionMetadata(track, artUrl) {
 }
 
 function syncMediaSession() {
+  if (window.HertzRoom && HertzRoom.active()) return HertzRoom.syncMediaSession();
   if (!('mediaSession' in navigator)) return;
   const duration = playbackDuration(state.snapshot);
   const playbackState = !state.snapshot.track_id || state.stopped
@@ -6022,6 +5992,7 @@ function bindMediaSession() {
 let seekRequestEpoch = 0;
 
 async function seekTo(ms) {
+  if (window.HertzRoom && HertzRoom.active()) return HertzRoom.playback('seek', { instance_id: HertzRoom.snapshot().track_instance_id, position_ms: String(Math.max(0, Math.round(ms))) });
   if (!state.snapshot.track_id || !Number.isFinite(ms)) return;
   const epoch = ++seekRequestEpoch;
   const intent = PlaybackIntent.generation;
@@ -6043,7 +6014,7 @@ async function seekTo(ms) {
 }
 
 async function seekRelative(deltaSec) {
-  const base = !window.HertzCapsuleOnly && Stage ? Stage.position() : state.snapshot.position_ms || 0;
+  const base = window.HertzRoom && HertzRoom.active() ? Number(HertzRoom.snapshot().position_ms || 0) : !window.HertzCapsuleOnly && Stage ? Stage.position() : state.snapshot.position_ms || 0;
   await seekTo(base + deltaSec * 1000);
 }
 
@@ -6074,7 +6045,7 @@ function setVolumeFromInput() {
         do {
           sent = volumeTarget;
           try {
-            await transport.post('/v1/player/volume', { volume: sent });
+            if (window.HertzRoom && HertzRoom.active()) await HertzRoom.localVolume(sent); else await transport.post('/v1/player/volume', { volume: sent });
           } catch (error) {
             toast(errText('调整音量失败', error), 'error');
           }
@@ -6527,6 +6498,7 @@ function initPalette() {
     { id: 'view-podcasts', group: '导航', title: '转到：播客', keywords: 'podcast 播客 RSS', run: () => setView('podcasts') },
     { id: 'view-playlists', group: '导航', title: '转到：歌单', keywords: 'playlist 歌单', run: () => setView('playlists') },
     { id: 'view-daily', group: '导航', title: '转到：每日推荐', keywords: 'daily 推荐 每日', run: () => setView('daily') },
+    { id: 'view-room', group: '导航', title: '转到：局域网一起听', keywords: 'room lan 一起听 同步 房间', run: () => setView('room') },
     { id: 'view-queue', group: '导航', title: '转到：播放队列', keywords: 'queue 队列', run: () => setView('queue') },
     { id: 'view-favorites', group: '导航', title: '转到：收藏', keywords: 'favorite 收藏 红心', run: () => setView('favorites') },
     { id: 'view-settings', group: '导航', title: '转到：设置', keywords: 'settings 设置', run: () => setView('settings') },
@@ -6997,6 +6969,16 @@ function onlineItemId(t) {
   return 'online:' + src + ':' + key;
 }
 
+// Room favorites are durable personal references, never online playback IDs.
+function lanFavoriteSourceItem(f, index) {
+  return { id: f.id || 'track:lan:' + f.ref_id, sourceKey: 'favorites', source: 'lan', ref: f.ref_id,
+    index, badge: index + 1, title: f.title || '未知曲目', artist: f.artist || '未知艺术家',
+    duration: Number(f.duration_ms) || null, cover: null, current: false, playing: false, progress: 0 };
+}
+function isLanSourceItem(item) {
+  return !!item && (item.source === 'lan' || item.favSource === 'lan' || (item.raw && item.raw.source === 'lan') || String(item.id || '').startsWith('online:lan:') || String(item.raw && item.raw.id || '').startsWith('online:lan:'));
+}
+
 /// 每日推荐项。已按当前 mode（online/local）选源并截断到 LIMIT。
 function dailySourceItems() {
   const DV = window.DailyView;
@@ -7014,7 +6996,7 @@ function favoriteSourceItems() {
   const F = window.Favorites;
   const items = (F && F.state ? F.state.items : []) || [];
   return items.map((f, i) => {
-    const base = f.kind === 'radio'
+    const base = f.source === 'lan' ? lanFavoriteSourceItem(f, i) : f.kind === 'radio'
       ? onlineSourceItem({
         id: f.ref_id,
         source: f.source,
@@ -7105,7 +7087,7 @@ function queueForSourceItem(item) {
   const def = viewSourceDef(state.view);
   const list = (def ? def.items() : []) || [];
   const ids = list
-    .filter((x) => x && !x.isPlaylist && !String(x.id).startsWith('online:'))
+    .filter((x) => x && !isLanSourceItem(x) && !x.isPlaylist && x.favKind !== 'radio' && !String(x.id).startsWith('online:'))
     .map((x) => x.id);
   if (ids.includes(item.id)) return ids;
   // 兜底：源里凑不出一条纯本地队列（在线源 / 收藏电台），退回播放队列。
@@ -7120,6 +7102,7 @@ function queueForSourceItem(item) {
 /// 那一推拿到的是**歌单记录**，`raw.id` 是平台歌单 id —— 发出去就是拿歌单 id
 /// 当曲目 id 去取流，必 404，而且服务端只会回「暂无可用音频」这种误导话术。
 function playOnlineItem(item, list) {
+  if (isLanSourceItem(item)) return playSourceItem(item, list);
   const Online = window.Online;
   if (!Online || typeof Online.playAll !== 'function') {
     toast('在线播放还没准备好', 'error');
@@ -7129,10 +7112,12 @@ function playOnlineItem(item, list) {
     ? list
     : (((viewSourceDef(state.view) || {}).items || (() => []))());
   // 传整份同源列表：playAll 从 tracks[index] 开播，之后 next/prev 才有意义。
-  const tracks = source.map((x) => x.raw || x).filter((x) => x && x.id);
+  const skippedLan = source.filter(isLanSourceItem).length;
+  const tracks = source.filter((x) => x && !isLanSourceItem(x) && !x.isPlaylist && x.favKind !== 'radio' && x.source !== 'local').map((x) => x.raw || x).filter((x) => x && x.id && x.source !== 'lan');
   const at = tracks.findIndex((x) => onlineItemId(x) === item.id);
   if (at >= 0) {
     Online.playAll(tracks, at);
+    if (skippedLan) toast('已跳过 ' + skippedLan + ' 首局域网收藏；连接原房主后可逐首加入共同队列');
     return;
   }
   // 列表里找不到被点的那一项时，只播它自己 —— 退回 index 0 会播成**另一首歌**，
@@ -7183,6 +7168,11 @@ function playSourceItem(item, list) {
   // 播放队列那一份已经带好了 id，直接走队列路径（顺序播放语义要对）。
   if (item.queueItem) {
     playQueueIndex(item.index);
+    return;
+  }
+  if (isLanSourceItem(item)) {
+    if (window.Favorites && window.Favorites.activate) return window.Favorites.activate({ kind: item.favKind || 'track', source: 'lan', ref_id: item.favRefId || item.ref, title: item.title });
+    toast('收藏模块尚未准备好，请刷新后重试', 'error');
     return;
   }
   // 电台收藏：整盘载入，不是一首。
@@ -7346,7 +7336,7 @@ function initBarVisibility() {
   sync();
 }
 
-function post(path) { return transport.post(path, {}).catch((err) => toast(errText('操作失败', err), 'error')); }
+function post(path) { const action = path.match(/^\/v1\/player\/(play|pause|stop|next|previous)$/); if (action && window.HertzRoom && HertzRoom.active()) return HertzRoom.playback(action[1]); return transport.post(path, {}).catch((err) => toast(errText('操作失败', err), 'error')); }
 
 // ---------------------------------------------------------------------------
 // 创意舞台
@@ -7380,6 +7370,7 @@ function initCreative() {
 let playbackCommandEpoch = 0;
 
 async function setPlayback(action) {
+  if (window.HertzRoom && HertzRoom.active()) return HertzRoom.playback(action);
   const epoch = ++playbackCommandEpoch;
   if (action === 'stop') seekRequestEpoch += 1;
   const previous = state.snapshot;
@@ -7410,6 +7401,7 @@ async function setPlayback(action) {
 }
 
 function togglePlay() {
+  if (window.HertzRoom && HertzRoom.active()) return HertzRoom.playback('toggle');
   return setPlayback(state.snapshot.playing ? 'pause' : 'play');
 }
 
@@ -7445,6 +7437,7 @@ function isNpOpen() {
 }
 
 function openNowPlaying() {
+  if (window.HertzRoom && HertzRoom.active()) { setView('room'); return; }
   np.scrim.hidden = false;
   np.modal.hidden = false;
   if (window.NowPlaying) NowPlaying.open();
@@ -8047,6 +8040,26 @@ async function startApp() {
   // 落盘的在线元数据先喂回内存：队列行第一帧就能显示真名字，不用等补取。
   if (window.Online && window.Online.seedFromStore) window.Online.seedFromStore();
   transport = await chooseTransport();
+  if (window.HertzRoom) window.HertzRoom.init({
+    root: ui.views.room, transport, confirm: message => modal().confirm(message),
+    onReturn: () => setView('library'),
+    onNavigate: name => { if (['library', 'favorites', 'online', 'room'].includes(name)) setView(name); },
+    onOpenStage: () => { if (window.Stage3D) Stage3D.open(); },
+    onModeChange(active) {
+      cancelSeek(); clearSleepTimer(true); closeNowPlaying();
+      loadNowPlaying.epoch = (loadNowPlaying.epoch || 0) + 1; lyricRefreshEpoch++;
+      if (window.Stage3D) Stage3D.close();
+      if (active) document.title = '一起听 · hertz-studio';
+      else {
+        state.snapshot = { ...state.snapshot, track_id: null };
+        if (Stage) { Stage.setTrack(null, null); Stage.setLyrics(null); }
+        mediaSessionStateKey = ''; documentTitleCache = '';
+        if (state.current) updateMediaSessionMetadata(state.current, Stage && Stage.coverUrl());
+        transport.get('/v1/state').then(applySnapshot).catch(() => {});
+        restoreQueue();
+      }
+    }
+  });
   // 两种 surface（工作台 tab / 浮动胶囊）都要挂；放在分支之前，别藏在 tab 那条路里。
   if (transport.kind === 'dbx') bindDbxCloseHook();
   if (window.HertzCapsuleOnly) return startFloatingCapsule();
@@ -8787,6 +8800,23 @@ async function startApp() {
   // 轻空态条上的同名按钮：同一件事，另一个入口（在线推荐来源下列表区那行提示）。
   const emptyStripScan = $('empty-strip-scan');
   if (emptyStripScan) emptyStripScan.onclick = () => { ui.scanPanel.hidden = false; ui.scanRoot.focus(); };
+  // 对话框开在服务端那一侧（曲库读的就是那台机器的磁盘），用户停在上面的时间没有
+  // 上界，所以这条请求单独给 5 分钟，不走 15 秒默认超时。「取消」和「弹不出对话框」
+  // 在后端是同一个 cancelled，界面上不区分——手填输入框一直是退路。
+  ui.scanPick.onclick = async () => {
+    ui.scanPick.disabled = true;
+    try {
+      const picked = await transport.post('/v1/library/roots/pick', {}, { timeoutMs: 300000 });
+      if (picked && picked.path) ui.scanRoot.value = picked.path;
+    } catch (err) {
+      // 这个平台的构建没编译原生对话框（Linux）：入口留着只会反复撞同一堵墙，
+      // 按 capability_unsupported 的既有约定收起按钮，只留手填。
+      if (err.code === 'capability_unsupported') ui.scanPick.hidden = true;
+      else toast(errText('选择目录失败，可直接填写路径', err), 'error');
+    } finally {
+      ui.scanPick.disabled = false;
+    }
+  };
   ui.scanBtn.onclick = startScan;
   ui.scanCancel.onclick = async () => {
     ui.scanCancel.disabled = true;
@@ -8843,6 +8873,7 @@ async function startApp() {
   ui.plDetailBack.onclick = () => closeDetail();
   ui.plDetailPlay.onclick = () => { if (detailPlaylistId) playPlaylist(detailPlaylistId); };
   ui.plDetailQueue.onclick = () => { const p = currentDetailPl(); if (p) queuePlaylistNext(p.id); };
+  const playlistRoom = $('pl-detail-room'); if (playlistRoom) playlistRoom.onclick = () => startListeningWith(detailTracks);
   ui.plDetailRename.onclick = () => { const p = currentDetailPl(); if (p) renamePlaylist(p); };
   ui.plDetailDelete.onclick = () => { const p = currentDetailPl(); if (p) deletePlaylist(p); };
   initDetailSortable();
@@ -9006,6 +9037,70 @@ async function startApp() {
     };
   }
   // 歌词设置：偏移步进 100ms（±2000 封顶），正则改完失焦即存。
+  // 桌面歌词是独立 Windows 组件：DBX 形态没有桌面入口，也不该在这里催用户安装。
+  if (ui.barDesktopSettings) {
+    ui.barDesktopSettings.hidden = !!(window.hertzHost && window.hertzHost.isDbx);
+  }
+  if (ui.setDesktopLyricsRow) {
+    ui.setDesktopLyricsRow.style.display =
+      window.hertzHost && window.hertzHost.isDbx ? 'none' : '';
+  }
+  if (ui.setWallpaperRow) {
+    ui.setWallpaperRow.style.display =
+      window.hertzHost && window.hertzHost.isDbx ? 'none' : '';
+  }
+  if (ui.setWallpaperNote) {
+    ui.setWallpaperNote.style.display =
+      window.hertzHost && window.hertzHost.isDbx ? 'none' : '';
+  }
+  if (ui.setDesktopLyricsOpen) {
+    ui.setDesktopLyricsOpen.onclick = () => {
+      wallpaperControl('wallpaper-settings', { tab: 'lyrics' })
+        .then(() => toast('已打开桌面歌词设置'))
+        .catch((err) => toast(errText('打开桌面歌词设置失败', err), 'error'));
+    };
+  }
+  if (ui.setDesktopLyricsLocate) {
+    ui.setDesktopLyricsLocate.onclick = () => {
+      transport.post('/v1/desktop/lyrics/control', { command: 'locate' })
+        .then(() => toast('已定位桌面歌词'))
+        .catch((err) => toast(errText('定位桌面歌词失败', err), 'error'));
+    };
+  }
+  const wallpaperControl = (command, value) => {
+    const post = () => transport.post('/v1/desktop/control', { command, value }).then((result) => {
+      if (result && result.ok === false) throw new Error(result.message || result.error || '桌面宿主返回错误');
+      return result;
+    });
+    return post().catch((err) => {
+      if (err.code !== 'desktop_not_running') throw err;
+      return transport.post('/v1/desktop/wallpaper/launch', {})
+        .then(() => new Promise((resolve) => setTimeout(resolve, 600)))
+        .then(post);
+    });
+  };
+  for (const button of [ui.setWallpaperSettings, ui.barDesktopSettings]) {
+    if (!button) continue;
+    button.onclick = () => {
+      wallpaperControl('wallpaper-settings', { tab: 'wallpaper' })
+        .then(() => toast('已打开桌面歌词与壁纸'))
+        .catch((err) => toast(errText('打开桌面歌词与壁纸失败', err), 'error'));
+    };
+  }
+  if (ui.setWallpaperToggle) {
+    ui.setWallpaperToggle.onclick = () => {
+      wallpaperControl('wallpaper-toggle')
+        .then((result) => {
+          const wallpaper = result && result.wallpaper;
+          if (!wallpaper || !wallpaper.enabled) {
+            toast('桌面壁纸未启用，请先在壁纸设置中开启');
+            return;
+          }
+          toast(wallpaper.hidden ? '已隐藏桌面壁纸' : '已显示桌面壁纸');
+        })
+        .catch((err) => toast(errText('切换桌面壁纸失败', err), 'error'));
+    };
+  }
   ui.setLyricOffsetDown.onclick = () => saveLyricSettings({ global_lyric_offset_ms: Math.max(-2000, globalLyricOffsetMs() - 100) });
   ui.setLyricOffsetUp.onclick = () => saveLyricSettings({ global_lyric_offset_ms: Math.min(2000, globalLyricOffsetMs() + 100) });
   ui.setLyricOffsetReset.onclick = () => saveLyricSettings({ global_lyric_offset_ms: 0 });
@@ -9180,10 +9275,16 @@ async function startApp() {
   if (window.Podcasts) window.Podcasts.bind({
     play: (tracks, index) => Online.playAll(tracks, index), seek: seekTo, toast,
   });
+  if (window.Reader) window.Reader.bind({ toast });
   // 扫码登录模块（web/online-login.js）：放在 Online.init 之后，头像 URL
   // 归一化要用它挂出的 safeCoverUrl。init() 负责在启动阶段就把顶栏头像按
   // 服务端持久化的选择恢复出来（以前只有打开登录弹窗才恢复）。
   if (window.OnlineLogin) window.OnlineLogin.init();
+  // 在线歌单网格/歌单架：模块自己在 DOMContentLoaded 也会拉一次，但插件形态下
+  // 那一刻 transport 还是 ServerTransport（chooseTransport 在本函数上方才 await
+  // 完成），首请求必然打空且不会重试——表现就是「重启后登录态还在，歌单架空了」。
+  // transport 定形后补拉一次，把它盖回真实数据；首发已经成功时不重复打接口。
+  if (window.OnlinePlaylists && !window.OnlinePlaylists.loaded()) window.OnlinePlaylists.init();
   // 在线歌单两层界面（web/online-playlist-view.js）：同样是先注入宿主再 init。
   // 宿主只给三样它自己造不出来的东西：层切换、音源能力位、队列写入。
   if (window.OnlinePlaylistView) {

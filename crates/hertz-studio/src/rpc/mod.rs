@@ -37,6 +37,7 @@ pub mod online;
 pub mod playback;
 pub mod playlists;
 pub mod podcasts;
+pub mod reader;
 pub mod recommend;
 pub mod remote;
 
@@ -206,6 +207,16 @@ impl Rpc {
         let raw = call.raw.as_ref();
 
         match (call.op, segments.as_slice()) {
+            (Op::Get, ["v1", "room"]) => Ok(Reply::ok(state.room.snapshot())),
+            (Op::Post, ["v1", "room"]) => {
+                if serde_json::to_vec(body).map_or(true, |v| v.len() > 64 * 1024) {
+                    return Err(bad_request("房间请求超过64KiB"));
+                }
+                let (status, body) = crate::room::api::response(
+                    crate::room::api::execute(state.clone(), body.clone()).await,
+                );
+                Ok(Reply { status, body })
+            }
             (Op::Get, ["v1", "ai", "status"]) => ai::status(state).await,
             (Op::Get, ["v1", "ai", "lyrics", "emotion", "status"]) => {
                 ai::emotion_status(state).await
@@ -368,6 +379,7 @@ impl Rpc {
             // --- 曲库：扫描根目录与进度 ---
             (Op::Get, ["v1", "library", "roots"]) => library::library_roots(state).await,
             (Op::Post, ["v1", "library", "roots"]) => library::add_library_root(state, body).await,
+            (Op::Post, ["v1", "library", "roots", "pick"]) => library::pick_root().await,
             (Op::Put, ["v1", "library", "roots"]) => {
                 library::update_library_root(state, body).await
             }
@@ -452,6 +464,26 @@ impl Rpc {
             }
             (Op::Delete, ["v1", "podcasts", "subscriptions", id]) => {
                 podcasts::unsubscribe(state, id).await
+            }
+
+            // --- RSS 图文阅读 ---
+            (Op::Post, ["v1", "reader", "preview"]) => reader::preview(state, body).await,
+            (Op::Get, ["v1", "reader", "subscriptions"]) => reader::subscriptions(state).await,
+            (Op::Post, ["v1", "reader", "subscriptions"]) => reader::subscribe(state, body).await,
+            (Op::Delete, ["v1", "reader", "subscriptions", id]) => {
+                reader::unsubscribe(state, id).await
+            }
+            (Op::Delete, ["v1", "reader", "feeds", id]) => reader::delete_feed(state, id).await,
+            (Op::Post, ["v1", "reader", "feeds", id, "refresh"]) => {
+                reader::refresh(state, id, body).await
+            }
+            (Op::Get, ["v1", "reader", "entries"]) => reader::entries(state, query).await,
+            (Op::Get, ["v1", "reader", "entries", id]) => reader::entry_detail(state, id).await,
+            (Op::Put, ["v1", "reader", "entries", id, "state"]) => {
+                reader::set_state(state, id, body).await
+            }
+            (Op::Get, ["v1", "reader", "entries", id, "images", key]) => {
+                reader::entry_image(state, id, key).await
             }
 
             // --- 在线曲库（代理）---

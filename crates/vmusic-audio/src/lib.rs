@@ -9,10 +9,30 @@ pub mod actor;
 pub mod null;
 
 #[cfg(feature = "playback")]
+pub mod clocked_resample;
+
+#[cfg(feature = "playback")]
+pub mod output_clock;
+
+#[cfg(feature = "playback")]
+pub mod scheduled_output;
+
+#[cfg(feature = "playback")]
 pub mod cpal_backend;
 
 #[cfg(feature = "playback")]
+pub mod render;
+
+#[cfg(feature = "playback")]
 pub mod resample;
+
+#[cfg(feature = "playback")]
+pub use render::{RenderCore, RenderFormat};
+
+#[cfg(feature = "playback")]
+pub use scheduled_output::{
+    OutputBinding, OutputError, OutputOptions, OutputTelemetry, ScheduledOutput,
+};
 
 pub use actor::{spawn, AudioEvent, AudioHandle, BackendKind};
 pub use null::NullBackend;

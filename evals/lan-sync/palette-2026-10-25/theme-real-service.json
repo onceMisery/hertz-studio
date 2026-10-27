@@ -1,0 +1,14 @@
+{
+  "passed": true,
+  "backend": "null",
+  "service_sha256": "ad2d19a699e8bd8fd7e62b8f3116806263d82a34fc32f085e5778152efd4dc1f",
+  "checks": [
+    "real app bootstrap and embedded palette asset",
+    "outer-to-room selected theme",
+    "room-to-outer selected theme",
+    "reload persistence",
+    "narrow popup containment",
+    "Escape focus return",
+    "no page errors"
+  ]
+}

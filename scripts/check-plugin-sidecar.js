@@ -1095,6 +1095,22 @@ async function main() {
       op: 'POST', body: { feed_url: 'http://10.0.0.1/private.xml' },
     });
     eq(podcastPrivateSubscription.result?.status, 400, '播客订阅使用相同的公网地址校验');
+
+    const readerSubscriptions = await client.send('v1/reader/subscriptions', { op: 'GET' });
+    eq(readerSubscriptions.result?.status, 200, 'DBX 阅读订阅列表路由可达');
+    eq(readerSubscriptions.result?.body?.feeds?.length, 0, '新数据目录初始无阅读订阅');
+    const readerEntries = await client.send('v1/reader/entries', { op: 'GET', query: { limit: 5 } });
+    eq(readerEntries.result?.status, 200, 'DBX 阅读文章列表路由可达');
+    eq(readerEntries.result?.body?.items?.length, 0, '空库返回空文章页');
+    const readerPrivatePreview = await client.send('v1/reader/preview', {
+      op: 'POST', body: { feed_url: 'http://127.0.0.1/private.xml' },
+    });
+    eq(readerPrivatePreview.result?.status, 400, '阅读源拒绝本机地址');
+    eq(readerPrivatePreview.result?.body?.error?.source, 'reader', '阅读 URL 错误携带领域来源');
+    const readerPrivateSubscribe = await client.send('v1/reader/subscriptions', {
+      op: 'POST', body: { feed_url: 'http://10.0.0.1/private.xml' },
+    });
+    eq(readerPrivateSubscribe.result?.status, 400, '阅读订阅使用相同的公网地址校验');
     const noCookieSource = olSourceList.find((s) => s.supportsCookie === false);
     ok(!!noCookieSource, '清单里有一个不需要登录的音源可供后续断言');
 

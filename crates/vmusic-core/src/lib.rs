@@ -10,6 +10,7 @@
 pub mod audio;
 pub mod error;
 pub mod model;
+pub mod room;
 
 pub use audio::{
     AudioBackend, AudioSource, DspParams, MediaInfo, NextEvent, NextTrack, PrepareResult,

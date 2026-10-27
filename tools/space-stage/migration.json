@@ -5,6 +5,8 @@
   "verification": { "node": "scripts/check-space-scenes.js", "browser": "scripts/check-space-scenes-browser.js", "evidence": "output/playwright/space-scenes/evidence.json", "previews": "plugin/ui/space-scene-preview/*.jpg", "baselineHardwareQualified": false },
   "performance": { "source": "static geometry/resource budgets plus Chrome ANGLE SwiftShader actual draw/point/triangle counts", "ordinaryPcP1toP6": "unmeasured", "dbxHardware": "unmeasured" },
   "entries": [
+    { "source": "space3d", "oldId": "butterfly-vortex", "plugin": "butterfly-vortex", "component": "folding butterfly wings, interactive instanced swarm and golden vortex", "state": "implemented" },
+    { "source": "space3d", "oldId": "phoenix-vortex", "plugin": "phoenix-vortex", "component": "phoenix flight, fledgling swarm, egg gathering and rebirth flash performance", "state": "implemented", "note": "additional explicit preset; 36s auto loop covers flight, split, gathering, glowing egg and rebirth" },
     { "source": "space3d", "oldId": "coast", "plugin": "coast", "component": "shared coast world", "state": "implemented" },
     { "source": "space3d", "oldId": "zodiac", "plugin": "zodiac", "component": "shared zodiac world", "state": "implemented" },
     { "source": "Stage3D.STAGES", "oldId": "aurora", "plugin": "aurora-dome", "component": "depth-layered particle curtains", "state": "removed", "note": "Removed from Space3D; saved selections fall back to coast" },

@@ -63,6 +63,9 @@ impl AppState {
         gen: usize,
     ) {
         let _commit = self.play_commit.lock().await;
+        if self.require_local_playback().is_err() {
+            return;
+        }
         if self
             .play_generation
             .load(std::sync::atomic::Ordering::Relaxed)
@@ -82,6 +85,9 @@ impl AppState {
         total: u64,
         loaded: usize,
     ) {
+        if self.require_local_playback().is_err() {
+            return;
+        }
         self.playlist_load.lock().await.active = Some(ActiveLoad {
             source: source.to_string(),
             id: id.to_string(),
@@ -108,6 +114,7 @@ impl AppState {
         let _fetch = self.playlist_fetch.lock().await;
         let next = {
             let _commit = self.play_commit.lock().await;
+            self.require_local_playback()?;
             let mut pl = self.playlist_load.lock().await;
             let session = pl.session;
             let Some(active) = pl.active.as_mut() else {
@@ -189,6 +196,7 @@ impl AppState {
         result: ApiResult<online::PlaylistDetail>,
     ) -> ApiResult<()> {
         let _commit = self.play_commit.lock().await;
+        self.require_local_playback()?;
         let mut pl = self.playlist_load.lock().await;
         if pl.session != session {
             return Ok(());
@@ -333,7 +341,8 @@ mod tests {
         let mut rx = state.events.subscribe();
         let (gen, _, _) = state
             .set_queue(vec!["online:netease:dup".into()], Some(0))
-            .await;
+            .await
+            .unwrap();
         seeded(&state, gen, 120).await;
         // set_queue now publishes QueueChanged; drain setup noise before asserting collection progress.
         while rx.try_recv().is_ok() {}
@@ -393,7 +402,8 @@ mod tests {
         let (state, _h) = playback_state().await;
         let (gen, _, _) = state
             .set_queue(vec!["online:netease:a".into()], Some(0))
-            .await;
+            .await
+            .unwrap();
         seeded(&state, gen, 120).await;
         let stale_session = state.playlist_load.lock().await.session;
 
@@ -401,10 +411,12 @@ mod tests {
         // （会话号已 +1）。旧意图在途的那一页此刻才回来。
         state
             .set_queue(vec!["online:netease:new".into()], Some(0))
-            .await;
+            .await
+            .unwrap();
         let (gen2, _, _) = state
             .set_queue(vec!["online:netease:a".into()], Some(0))
-            .await;
+            .await
+            .unwrap();
         seeded(&state, gen2, 120).await;
 
         state
@@ -465,7 +477,8 @@ mod tests {
         let mut rx = state.events.subscribe();
         let (gen, _, _) = state
             .set_queue(vec!["online:netease:a".into()], Some(0))
-            .await;
+            .await
+            .unwrap();
         seeded(&state, gen, 120).await;
         // set_queue now publishes QueueChanged; drain setup noise before asserting collection progress.
         while rx.try_recv().is_ok() {}
@@ -516,7 +529,8 @@ mod tests {
                 vec!["online:netease:a".into(), "online:netease:b".into()],
                 Some(0),
             )
-            .await;
+            .await
+            .unwrap();
         state
             .begin_collection_load("netease", "pl1", 120, 2, gen)
             .await;
@@ -559,7 +573,8 @@ mod tests {
         let (state, _h) = playback_state().await;
         let (gen, _, _) = state
             .set_queue(vec!["online:netease:a".into()], Some(0))
-            .await;
+            .await
+            .unwrap();
         // 陈旧代际（比如起播前用户又点了一次播放）不许登记。
         state
             .begin_collection_load("netease", "pl1", 120, 1, gen + 1)
@@ -573,7 +588,8 @@ mod tests {
         assert!(state.collection_status().await.is_some());
         state
             .set_queue(vec!["online:netease:z".into()], Some(0))
-            .await;
+            .await
+            .unwrap();
         assert!(state.collection_status().await.is_none(), "换队即作废");
     }
 
@@ -582,7 +598,8 @@ mod tests {
         let (state, handle) = playback_state().await;
         let (gen, _, _) = state
             .set_queue(vec!["online:netease:a".into()], Some(0))
-            .await;
+            .await
+            .unwrap();
         seeded(&state, gen, 120).await;
         let session = state.playlist_load.lock().await.session;
         state
@@ -622,7 +639,8 @@ mod tests {
         let (state, handle) = playback_state().await;
         let (gen, _, _) = state
             .set_queue(vec!["online:netease:a".into()], Some(0))
-            .await;
+            .await
+            .unwrap();
         seeded(&state, gen, 120).await;
         let session = state.playlist_load.lock().await.session;
         state
@@ -660,7 +678,8 @@ mod tests {
         let (state, handle) = playback_state().await;
         let (gen, _, _) = state
             .set_queue(vec!["online:netease:a".into()], Some(0))
-            .await;
+            .await
+            .unwrap();
         seeded(&state, gen, 5000).await;
         let session = {
             let mut load = state.playlist_load.lock().await;
@@ -717,7 +736,8 @@ mod tests {
                     .collect::<Vec<_>>(),
                 Some(0),
             )
-            .await;
+            .await
+            .unwrap();
         seeded(&state, gen, 400).await;
         // 游标之后还剩 39 首 > 水位 24：不取数、意图保持。
         state.playlist_refill(false).await.unwrap();

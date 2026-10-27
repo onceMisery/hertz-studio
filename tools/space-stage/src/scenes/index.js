@@ -9,9 +9,13 @@ import { createParticleSilk } from './particle-silk.js';
 import { createGravitySphere } from './gravity-sphere.js';
 import { createWarpTunnel } from './warp-tunnel.js';
 import { createPrismGalaxy } from './prism-galaxy.js';
+import { createButterflyVortex } from './butterfly-vortex.js';
+import { createPhoenixVortex } from './phoenix-vortex.js';
 import { createEffects, postSpecs } from '../effects/index.js';
 
 const definitions = [
+  ['butterfly-vortex', '蝶舞星涡', 'particles', createButterflyVortex],
+  ['phoenix-vortex', '凤凰涅槃', 'particles', createPhoenixVortex, ['immersive/phoenix', 'phoenix']],
   ['reactor', '粒子反应堆', 'particles', createReactor],
   ['particle-silk', '粒子绸带', 'particles', createParticleSilk],
   ['gravity-sphere', '引力星球', 'particles', createGravitySphere, ['immersive/orb', 'orb']],
@@ -54,6 +58,14 @@ function definition([id, label, category, factory, aliases = []]) {
       } : {}),
       ...(id === 'cover-particles' ? { relief: number('封面起伏', 1, 0, 2.5) } : {}),
       ...(id === 'reactor' ? { trackRecipes: toggle('按曲换场'), queuePreview: toggle('悬停预览') } : {}),
+      ...(id === 'butterfly-vortex' ? {
+        performance: select('演出段落', 'auto', [{ value: 'auto', label: '自动演出' }, { value: 'butterfly', label: '巨蝶振翅' }, { value: 'swarm', label: '蝶群漫游' }, { value: 'vortex', label: '金色星涡' }]),
+        pointerStrength: number('引蝶强度', 1, 0, 2)
+      } : {}),
+      ...(id === 'phoenix-vortex' ? {
+        performance: select('演出方式', 'auto', [{ value: 'auto', label: '完整涅槃循环' }, { value: 'flight', label: '神凤展翼' }, { value: 'swarm', label: '凤雏漫舞' }, { value: 'egg', label: '凝卵淬光' }, { value: 'rebirth', label: '涅槃重生' }]),
+        pointerStrength: number('引凤强度', 1, 0, 2)
+      } : {}),
       ...(lyrics ? { textWidth: number('文字宽度', 12, 6, 18, .5), spacing: number('行距', 2.1, 1.4, 4, .1), arc: number('歌词弧度', .7, 0, 3, .1), karaoke: { type: 'boolean', label: '逐字高亮', default: true },
         layout: select('舞台主题', 'venue', ['venue', 'diorama', 'tempo', 'still']) } : {}),
       ...(stanzaRenderer ? { scale: number('歌词字号', 1, .5, 2), reactivity: number('律动强度', 1.35, 0, 2), speed: number('镜头动态', .65, 0, 2) } : {}),
@@ -71,7 +83,9 @@ function definition([id, label, category, factory, aliases = []]) {
         phraseLength: number('短句长度', 12, 4, 24, 1), decor: toggle('画面装饰'), accents: toggle('强调特效'), atmosphere: toggle('氛围光'), halation: number('光晕强度', .5, 0, 1)
       } : {}),
       ...(id === 'cover-wall' ? { radius: number('曲面半径', 11, 7, 18, .5), coverIndex: number('当前封面', 0, 0, 100000, 1) } : {}) },
-    camera: id === 'reactor' ? { theta: 0, phi: .06, radius: 15, fov: 48, lookAt: [0, 0, 0], minRadius: 3, maxRadius: 36, orbit: true, zoom: true, fit: { halfWidth: 6.2, halfHeight: 5.4 } } :
+    camera: id === 'butterfly-vortex' ? { theta: 0, phi: .03, radius: 17, fov: 48, lookAt: [0, .5, 0], minRadius: 5, maxRadius: 36, orbit: true, zoom: true, fit: { halfWidth: 5.2, halfHeight: 4.6 } } :
+      id === 'phoenix-vortex' ? { theta: 0, phi: .04, radius: 20.5, fov: 46, lookAt: [0, 1.1, 0], minRadius: 5, maxRadius: 38, orbit: true, zoom: true, fit: { halfWidth: 7.4, halfHeight: 7.3 } } :
+      id === 'reactor' ? { theta: 0, phi: .06, radius: 15, fov: 48, lookAt: [0, 0, 0], minRadius: 3, maxRadius: 36, orbit: true, zoom: true, fit: { halfWidth: 6.2, halfHeight: 5.4 } } :
       { theta: prismScene ? .3 : orbScene ? .3 : galaxy || towers ? .3 : 0,
         phi: silkScene ? .12 : orbScene ? .3 : warpScene ? .02 : prismScene ? .32 : id === 'cover-particles' ? 0 : terrain || towers ? .35 : galaxy ? .35 : .06,
         radius: warpScene ? 8 : orbScene ? 11.5 : prismScene ? 18 : silkScene ? 13 : tunnel ? 5 : lyrics ? 15 : galaxy ? 21 : terrain ? 22 : sphere ? 9.2 : id === 'cover-wall' ? 8 : id === 'cover-particles' ? 9.6 : 13,

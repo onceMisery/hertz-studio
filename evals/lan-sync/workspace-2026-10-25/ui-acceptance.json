@@ -1,0 +1,329 @@
+{
+  "service_sha256": "4901ef3ab0301e51bec351854b60cbcde06d5472e0d73ba7327231c51412ede3",
+  "source_commit": "17a40b9c6f34141544c535bfd6b3dc2ba9f00205",
+  "browser": "Playwright CLI / Chromium",
+  "mobile_audio_tested": false,
+  "limits": "Responsive desktop browser viewports; not a deployed mobile client or mobile audio acceptance.",
+  "actions": {
+    "textChat": true,
+    "occurrenceVote": true,
+    "typedSongChat": true,
+    "hostVoteOrdering": true
+  },
+  "play": {
+    "nativeMuted": true,
+    "coverVisible": true,
+    "guestJoined": true
+  },
+  "layout": {
+    "passed": true,
+    "measurements": [
+      {
+        "width": 1440,
+        "height": 1000,
+        "page": "lobby",
+        "rootWidth": 1440,
+        "scrollWidth": 1440,
+        "bodyWidth": 1440,
+        "bodyScroll": 1440,
+        "focusedHeading": true
+      },
+      {
+        "width": 1440,
+        "height": 1000,
+        "page": "play",
+        "rootWidth": 1425,
+        "scrollWidth": 1425,
+        "bodyWidth": 1440,
+        "bodyScroll": 1440,
+        "focusedHeading": true
+      },
+      {
+        "width": 1440,
+        "height": 1000,
+        "page": "collaborate",
+        "rootWidth": 1425,
+        "scrollWidth": 1425,
+        "bodyWidth": 1440,
+        "bodyScroll": 1440,
+        "focusedHeading": true
+      },
+      {
+        "width": 1440,
+        "height": 1000,
+        "page": "invite",
+        "rootWidth": 1425,
+        "scrollWidth": 1425,
+        "bodyWidth": 1440,
+        "bodyScroll": 1440,
+        "focusedHeading": true
+      },
+      {
+        "width": 1440,
+        "height": 1000,
+        "page": "settings",
+        "rootWidth": 1425,
+        "scrollWidth": 1425,
+        "bodyWidth": 1440,
+        "bodyScroll": 1440,
+        "focusedHeading": true
+      },
+      {
+        "width": 1280,
+        "height": 900,
+        "page": "lobby",
+        "rootWidth": 1280,
+        "scrollWidth": 1280,
+        "bodyWidth": 1280,
+        "bodyScroll": 1280,
+        "focusedHeading": true
+      },
+      {
+        "width": 1280,
+        "height": 900,
+        "page": "play",
+        "rootWidth": 1265,
+        "scrollWidth": 1265,
+        "bodyWidth": 1280,
+        "bodyScroll": 1280,
+        "focusedHeading": true
+      },
+      {
+        "width": 1280,
+        "height": 900,
+        "page": "collaborate",
+        "rootWidth": 1265,
+        "scrollWidth": 1265,
+        "bodyWidth": 1280,
+        "bodyScroll": 1280,
+        "focusedHeading": true
+      },
+      {
+        "width": 1280,
+        "height": 900,
+        "page": "invite",
+        "rootWidth": 1265,
+        "scrollWidth": 1265,
+        "bodyWidth": 1280,
+        "bodyScroll": 1280,
+        "focusedHeading": true
+      },
+      {
+        "width": 1280,
+        "height": 900,
+        "page": "settings",
+        "rootWidth": 1265,
+        "scrollWidth": 1265,
+        "bodyWidth": 1280,
+        "bodyScroll": 1280,
+        "focusedHeading": true
+      },
+      {
+        "width": 1024,
+        "height": 768,
+        "page": "lobby",
+        "rootWidth": 1009,
+        "scrollWidth": 1009,
+        "bodyWidth": 1024,
+        "bodyScroll": 1024,
+        "focusedHeading": true
+      },
+      {
+        "width": 1024,
+        "height": 768,
+        "page": "play",
+        "rootWidth": 1009,
+        "scrollWidth": 1009,
+        "bodyWidth": 1024,
+        "bodyScroll": 1024,
+        "focusedHeading": true
+      },
+      {
+        "width": 1024,
+        "height": 768,
+        "page": "collaborate",
+        "rootWidth": 1009,
+        "scrollWidth": 1009,
+        "bodyWidth": 1024,
+        "bodyScroll": 1024,
+        "focusedHeading": true
+      },
+      {
+        "width": 1024,
+        "height": 768,
+        "page": "invite",
+        "rootWidth": 1009,
+        "scrollWidth": 1009,
+        "bodyWidth": 1024,
+        "bodyScroll": 1024,
+        "focusedHeading": true
+      },
+      {
+        "width": 1024,
+        "height": 768,
+        "page": "settings",
+        "rootWidth": 1009,
+        "scrollWidth": 1009,
+        "bodyWidth": 1024,
+        "bodyScroll": 1024,
+        "focusedHeading": true
+      },
+      {
+        "width": 390,
+        "height": 844,
+        "page": "lobby",
+        "rootWidth": 390,
+        "scrollWidth": 390,
+        "bodyWidth": 390,
+        "bodyScroll": 390,
+        "focusedHeading": true
+      },
+      {
+        "width": 390,
+        "height": 844,
+        "page": "play",
+        "rootWidth": 375,
+        "scrollWidth": 375,
+        "bodyWidth": 390,
+        "bodyScroll": 390,
+        "focusedHeading": true
+      },
+      {
+        "width": 390,
+        "height": 844,
+        "page": "collaborate",
+        "rootWidth": 375,
+        "scrollWidth": 375,
+        "bodyWidth": 390,
+        "bodyScroll": 390,
+        "focusedHeading": true
+      },
+      {
+        "width": 390,
+        "height": 844,
+        "page": "invite",
+        "rootWidth": 390,
+        "scrollWidth": 390,
+        "bodyWidth": 390,
+        "bodyScroll": 390,
+        "focusedHeading": true
+      },
+      {
+        "width": 390,
+        "height": 844,
+        "page": "settings",
+        "rootWidth": 375,
+        "scrollWidth": 375,
+        "bodyWidth": 390,
+        "bodyScroll": 390,
+        "focusedHeading": true
+      },
+      {
+        "width": 360,
+        "height": 800,
+        "page": "lobby",
+        "rootWidth": 360,
+        "scrollWidth": 360,
+        "bodyWidth": 360,
+        "bodyScroll": 360,
+        "focusedHeading": true
+      },
+      {
+        "width": 360,
+        "height": 800,
+        "page": "play",
+        "rootWidth": 345,
+        "scrollWidth": 345,
+        "bodyWidth": 360,
+        "bodyScroll": 360,
+        "focusedHeading": true
+      },
+      {
+        "width": 360,
+        "height": 800,
+        "page": "collaborate",
+        "rootWidth": 345,
+        "scrollWidth": 345,
+        "bodyWidth": 360,
+        "bodyScroll": 360,
+        "focusedHeading": true
+      },
+      {
+        "width": 360,
+        "height": 800,
+        "page": "invite",
+        "rootWidth": 360,
+        "scrollWidth": 360,
+        "bodyWidth": 360,
+        "bodyScroll": 360,
+        "focusedHeading": true
+      },
+      {
+        "width": 360,
+        "height": 800,
+        "page": "settings",
+        "rootWidth": 345,
+        "scrollWidth": 345,
+        "bodyWidth": 360,
+        "bodyScroll": 360,
+        "focusedHeading": true
+      },
+      {
+        "width": 844,
+        "height": 390,
+        "page": "lobby",
+        "rootWidth": 829,
+        "scrollWidth": 829,
+        "bodyWidth": 844,
+        "bodyScroll": 844,
+        "focusedHeading": true
+      },
+      {
+        "width": 844,
+        "height": 390,
+        "page": "play",
+        "rootWidth": 829,
+        "scrollWidth": 829,
+        "bodyWidth": 844,
+        "bodyScroll": 844,
+        "focusedHeading": true
+      },
+      {
+        "width": 844,
+        "height": 390,
+        "page": "collaborate",
+        "rootWidth": 829,
+        "scrollWidth": 829,
+        "bodyWidth": 844,
+        "bodyScroll": 844,
+        "focusedHeading": true
+      },
+      {
+        "width": 844,
+        "height": 390,
+        "page": "invite",
+        "rootWidth": 829,
+        "scrollWidth": 829,
+        "bodyWidth": 844,
+        "bodyScroll": 844,
+        "focusedHeading": true
+      },
+      {
+        "width": 844,
+        "height": 390,
+        "page": "settings",
+        "rootWidth": 829,
+        "scrollWidth": 829,
+        "bodyWidth": 844,
+        "bodyScroll": 844,
+        "focusedHeading": true
+      }
+    ],
+    "draftRetained": true,
+    "returnPreservesRoom": true,
+    "compactTransportOwnership": true,
+    "keyboardChatSend": true,
+    "pageErrors": [],
+    "mobileAudioClaim": false
+  }
+}

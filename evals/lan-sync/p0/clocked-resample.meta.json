@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "capturedAt": "2026-10-23T16:15:21.747Z",
+  "command": "cargo run --release -p vmusic-audio --example clocked_resample_probe",
+  "compiler": "rustc 1.98.1 (48a229cea 2026-09-01)\nbinary: rustc\ncommit-hash: 48a229ceaefd4985c50990b14116b6d856af0985\ncommit-date: 2026-09-01\nhost: x86_64-pc-windows-msvc\nrelease: 1.98.1\nLLVM version: 22.1.8",
+  "osRelease": "Windows 11 build 10.0.26200",
+  "architecture": "x64",
+  "gitHead": "841fc1f304837fed4ed4c28ba0c8cfc4ed6f13e4",
+  "workspaceDirty": true,
+  "executable": "target/release/examples/clocked_resample_probe.exe",
+  "executableHash": "f14c2fb16dfdc59c5c8f87889ee9dab322d1d17e98054af01a95bfef38d7ceca",
+  "reportHash": "95c56d82783de5ad454636e8a8a8dc88bc92744d2e79276060aa9f0443db6008",
+  "sourceHashes": {
+    "crates/vmusic-audio/src/clocked_resample.rs": "f5646c23208d40089fa88111416c1c25178a09ac97f5d72487d47ca2d77a1660",
+    "crates/vmusic-audio/examples/clocked_resample_probe.rs": "41cf5c843819b13d029c9e30a53e96e1ccfc2bdbb45f7bf5e8a39aed311f3e95",
+    "crates/vmusic-audio/Cargo.toml": "012672f92bcff7caaa89e9d1e711c03f9887a6e261e44a215fcf38cd3da64381"
+  },
+  "syntheticOnly": true,
+  "releaseEligible": false,
+  "notes": "lan-listening P0 技术验证批次的单机（Windows）证据；两机/三平台/声学测量未包含"
+}

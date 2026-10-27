@@ -431,6 +431,8 @@
     play.disabled = add.disabled = !view.length;
     acts.appendChild(play);
     acts.appendChild(add);
+    var together = window.Online && window.Online.roomButton && window.Online.roomButton(view, '已加载歌曲加入一起听');
+    if (together) acts.appendChild(together);
     box.appendChild(acts);
     box.appendChild(scopeNote());
     box.appendChild(loadNote());
@@ -748,6 +750,8 @@
     sub.className = 'op-pl-sub';
     sub.textContent = (t.artist || '未知艺术家') + ' · ' + fmt(t.duration_ms || 0);
     c.appendChild(sub);
+    var together = window.Online && window.Online.roomButton && window.Online.roomButton([t], '加入一起听');
+    if (together) c.appendChild(together);
 
     function play() {
       if (!t.playable) return;
@@ -755,6 +759,7 @@
     }
     c.onclick = play;
     c.onkeydown = function (e) {
+      if (e.target !== c) return;
       if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); play(); }
     };
     return c;

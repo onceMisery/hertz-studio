@@ -1,0 +1,74 @@
+<div id="shell">
+  <div id="toolbar" aria-label="桌面歌词工具">
+    <button id="drag" title="按住拖动歌词窗口" aria-label="拖动歌词窗口">⠿</button>
+    <button id="lock" data-cmd="lock" title="锁定后鼠标可穿透；在 Hertz 托盘菜单中解锁">锁定</button>
+    <button id="style-open" aria-haspopup="dialog" aria-expanded="false" aria-controls="options-panel" title="在歌词下方调整显示与外观">样式</button>
+    <button data-cmd="hide" title="隐藏歌词，可从 Hertz 托盘菜单找回">隐藏</button>
+  </div>
+  <div id="stage">
+    <div id="current" class="line current"></div>
+    <div id="secondary" class="line secondary"></div>
+    <div id="notice" class="notice" role="status" aria-live="polite"></div>
+  </div>
+  <section id="options-panel" role="dialog" aria-label="歌词样式" tabindex="-1" hidden>
+    <div class="options-row">
+      <div class="option-cell">
+        <span class="option-label">布局</span>
+        <div class="segmented" role="group" aria-label="歌词行数">
+          <button type="button" data-layout="single" aria-pressed="false">单行</button>
+          <button type="button" data-layout="double" aria-pressed="false">双行</button>
+        </div>
+      </div>
+      <div class="option-cell" id="secondary-cell">
+        <span class="option-label">次行</span>
+        <div class="segmented" role="group" aria-label="次行内容">
+          <button type="button" data-secondary="next" aria-pressed="false">下一句</button>
+          <button type="button" data-secondary="translation" aria-pressed="false">译文</button>
+          <button type="button" data-secondary="romanization" aria-pressed="false">罗马音</button>
+        </div>
+      </div>
+      <div class="option-cell">
+        <span class="option-label">字号</span>
+        <div class="stepper">
+          <button type="button" data-cmd="font-down" aria-label="缩小字号">A−</button>
+          <output id="font-value"></output>
+          <button type="button" data-cmd="font-up" aria-label="放大字号">A+</button>
+        </div>
+      </div>
+      <div class="option-cell">
+        <span class="option-label">颜色</span>
+        <div class="colors">
+          <label class="color-field" title="已唱颜色">
+            <input id="sung-color" type="color" data-color="sung" aria-label="已唱颜色">
+            <span>已唱</span>
+          </label>
+          <label class="color-field" title="未唱颜色">
+            <input id="unsung-color" type="color" data-color="unsung" aria-label="未唱颜色">
+            <span>未唱</span>
+          </label>
+        </div>
+      </div>
+    </div>
+    <div class="options-row">
+      <div class="option-cell">
+        <span class="option-label">不透明度</span>
+        <div class="stepper">
+          <button type="button" data-cmd="opacity-down" aria-label="降低不透明度">−</button>
+          <output id="opacity-value"></output>
+          <button type="button" data-cmd="opacity-up" aria-label="提高不透明度">+</button>
+        </div>
+      </div>
+      <div class="option-cell">
+        <span class="option-label">窗口宽度</span>
+        <div class="stepper">
+          <button type="button" data-cmd="width-down" aria-label="缩窄歌词窗口">窄</button>
+          <button type="button" data-cmd="width-up" aria-label="加宽歌词窗口">宽</button>
+        </div>
+      </div>
+      <div class="option-actions">
+        <button type="button" data-cmd="quit" class="option-quit" title="退出桌面歌词，可从托盘重新启用">退出桌面歌词</button>
+        <button id="options-done" class="options-done" title="收起样式设置">完成</button>
+      </div>
+    </div>
+  </section>
+</div>

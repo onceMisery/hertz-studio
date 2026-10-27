@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "capturedAt": "2026-10-23T16:15:21.747Z",
+  "command": "cargo run --release -p lan-probe --bin sync-experiment -- --seconds 20 (in tools/lan-probe)",
+  "compiler": "rustc 1.98.1 (48a229cea 2026-09-01)\nbinary: rustc\ncommit-hash: 48a229ceaefd4985c50990b14116b6d856af0985\ncommit-date: 2026-09-01\nhost: x86_64-pc-windows-msvc\nrelease: 1.98.1\nLLVM version: 22.1.8",
+  "osRelease": "Windows 11 build 10.0.26200",
+  "architecture": "x64",
+  "gitHead": "841fc1f304837fed4ed4c28ba0c8cfc4ed6f13e4",
+  "workspaceDirty": true,
+  "executable": "tools/lan-probe/target/release/sync-experiment.exe",
+  "executableHash": "87c8a75f0a480cd7624123a9beae3ae54409ffc60a79b3322b4e72638fb146aa",
+  "reportHash": "595361db6f90f89ef0c9c5d67c1297d2f956c0ef2fcfb5c4de10b1daaa3e300c",
+  "sourceHashes": {
+    "tools/lan-probe/src/lib.rs": "2c8ab06a7f549c68c7ea1e90e233dfbe7039aa3ba0a18b7fa0184af3b65b613d",
+    "tools/lan-probe/src/bin/sync-experiment.rs": "b3b42c7a7308934428d12aa620938235bb1c1fcca8d27334cd2c51433e9a3fe8",
+    "tools/lan-probe/Cargo.toml": "ab98ddc0f5175e89db233ef4edff50230e4868abed669380623d71e9c9ff4217"
+  },
+  "syntheticOnly": true,
+  "releaseEligible": false,
+  "notes": "lan-listening P0 技术验证批次的单机（Windows）证据；两机/三平台/声学测量未包含"
+}

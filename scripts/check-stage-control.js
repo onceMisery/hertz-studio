@@ -555,9 +555,10 @@ const z3d = Number((s3css.match(/\.s3d\s*\{[\s\S]{0,900}?z-index:\s*(\d+)/) || [
 ok(z3d > 0, `三维舞台根层 z-index 可解析（实测 ${z3d}）`);
 ok(zCtl > z3d, `控制舱 z=${zCtl} 浮在三维舞台 z=${z3d} 之上（真3D 里也打得开）`);
 
-// —— 语境分段的接线 ——
-ok(/id="sc-context-flat"/.test(html), '语境分段：普通舞台按钮已接线');
-ok(/id="sc-context-3d"/.test(html), '语境分段：真3D 按钮已接线');
+// —— 语境跟随舞台：二维/三维各看各的，不提供手动互切 ——
+ok(!/id="sc-context-(flat|3d)"/.test(html), '控制舱不再提供手动语境分段（两个场景池不混在一屏）');
+ok(/function followStage\(/.test(controlSrc) && /MutationObserver/.test(controlSrc),
+  '进出三维舞台时语境自动跟随');
 ok(/id="sc-3d-body"[^>]*\shidden/.test(html) || /id="sc-3d-body"[^>]*hidden/.test(html),
   '真3D 宿主默认收起（不抢普通舞台首屏）');
 
@@ -595,7 +596,7 @@ for (const k of ['lyrics', 'coastInteract', 'zodiacField', 'zodiacInteract', 'an
 ok(/\.sc-pill\s*\{/.test(stageCss), '.sc-pill 有样式定义');
 ok(/\.sc-pill\.on\s*\{[\s\S]{0,300}?--accent/.test(stageCss), '.sc-pill ON 态走 accent（一眼可读）');
 ok(/\.sc-seg-btn\.is-on\s*\{[\s\S]{0,300}?--accent/.test(stageCss), '.sc-seg-btn 当前段走 accent');
-ok(/\.sc-seg-btn\.is-on\s*\{[\s\S]{0,300}?--accent/.test(stageCss), '语境分段与来源分段共用同一套高亮');
+ok(/\.sc-seg-btn\.is-on\s*\{[\s\S]{0,300}?--accent/.test(stageCss), '来源分段与布局分段共用同一套高亮');
 ok(!/\.sc-switch\b/.test(stageCss) && !/'sc-switch'|"sc-switch"/.test(controlSrc),
   '旧小开关 .sc-switch 已彻底移除（CSS 与 JS 两侧）');
 // 3D 面板的引导行依赖 .sc-note 可见；被 display:none 掉等于写了没人看得到。
@@ -681,17 +682,14 @@ function check3DContext() {
     eq(s.el('sc-body').hidden, false, '普通舞台语境下旋钮照常显示');
   }
 
-  // —— 手切优先于自动检测，关面板后复位 ——
+  // —— 语境只跟随舞台，不能手动把三维来源拉到二维首屏 ——
   {
-    const { s } = openWith({ sceneSource: 'creative' });
-    s.el('sc-context-3d').fire('click');
-    eq(s.SC.context(), '3d', '手切「真3D 舞台」切得过去（即使当前不是 3D 来源）');
-    s.el('sc-context-flat').fire('click');
-    eq(s.SC.context(), 'flat', '手切「普通舞台」切得回来');
-    s.el('sc-context-3d').fire('click');
+    const { s, fake } = openWith({ sceneSource: 'coast' });
+    eq(s.SC.context(), '3d', '海岸公路下打开 → 真3D 语境');
+    fake.isActive = () => false;
     s.SC.close();
     s.SC.open();
-    eq(s.SC.context(), 'flat', '关面板后手动锁定复位，下次打开重新自动跟随');
+    eq(s.SC.context(), 'flat', '退出三维舞台后重开 → 二维语境（来源清单不跟过来）');
   }
 
   // —— 离散动作：当场生效并落库 ——

@@ -52,12 +52,9 @@ const EVENT_METHOD: &str = "studio/event";
 const SUBSCRIBE_METHOD: &str = "studio/events/subscribe";
 
 struct Plugin {
-    runtime: tokio::runtime::Runtime,
+    runtime: tokio::runtime::Handle,
     rpc: Rpc,
     state: Arc<AppState>,
-    /// 保活音频 actor 的线程句柄。丢掉句柄只会 detach 而不会杀线程，但显式持有
-    /// 到进程结束更贴近独立形态的语义。
-    _booted: hertz_studio::bootstrap::Booted,
     /// Whether the current event-forwarding task is still active.
     event_forwarder_running: Arc<AtomicBool>,
 }
@@ -235,7 +232,15 @@ async fn boot_plugin() -> anyhow::Result<hertz_studio::bootstrap::Booted> {
     // stdio 天然可信，没有 HTTP 那一层的 bearer token；`AppState` 要求有值，
     // 所以填一个随机串，永不外泄也永不校验。
     let token = uuid::Uuid::new_v4().to_string();
-    let booted = hertz_studio::bootstrap::boot(data_dir, config, token, String::new()).await?;
+    let booted = hertz_studio::bootstrap::boot(
+        data_dir,
+        config,
+        token,
+        String::new(),
+        String::new(),
+        String::new(),
+    )
+    .await?;
     tracing::info!(backend = %booted.backend_label, "hertz-studio sidecar 就绪");
     Ok(booted)
 }
@@ -257,14 +262,30 @@ fn main() -> std::io::Result<()> {
         }
     };
 
+    // main retains Runtime and Booted through the explicit exit barrier. SDK
+    // workers may retain Arc<Plugin> after serve returns on EOF or read error;
+    // their last Arc's Drop must never own process shutdown or the runtime.
+    let state = booted.state.clone();
     let plugin = Plugin {
-        rpc: Rpc::new(booted.state.clone()),
-        state: booted.state.clone(),
+        rpc: Rpc::new(state.clone()),
+        state: state.clone(),
         event_forwarder_running: Arc::new(AtomicBool::new(false)),
-        runtime,
-        _booted: booted,
+        runtime: runtime.handle().clone(),
     };
 
+    let mut exiting = state.exiting_signal();
+    let shutdown_state = state.clone();
+    runtime.spawn(async move {
+        if !*exiting.borrow() && exiting.changed().await.is_err() {
+            return;
+        }
+        shutdown_state.shutdown().await;
+    });
+
     let metadata = PluginMetadata::new(PLUGIN_ID, env!("CARGO_PKG_VERSION"));
-    PluginServer::new(metadata, plugin).serve()
+    let result = PluginServer::new(metadata, plugin).serve();
+    // stdin EOF/read failure can leave an RPC executing or queued in the SDK.
+    // The process owner must drain Host End before main is allowed to return.
+    runtime.block_on(booted.state.shutdown());
+    result
 }

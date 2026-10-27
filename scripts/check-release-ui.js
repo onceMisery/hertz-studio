@@ -31,7 +31,14 @@ try {
   assert.equal(sandbox.window.result, 49, 'Classic global and cross-script lexical names survive');
   assert.equal(digest(fs.readFileSync(path.join(source, 'creative-stage.js'))), before, 'Source remains readable');
   const runtime = fs.readFileSync(path.join(source, 'vendor/stage-runtime.js'), 'utf8');
-  assert.ok(Buffer.byteLength(runtime) < 1.1 * 1024 * 1024, 'Shared runtime budget includes Three.js and all scenes');
+  // 1.1 → 1.9 MiB：这条上限原本守的是「壁纸页整页内联 runtime 后不能越过 NavigateToString 约 2 MB」，
+  // 而该页与预览页已改由宿主自定义协议 hertz://localhost/wallpaper.html 供给，没有尺寸悬崖；
+  // 1.69 MB 的真实页面已实测：四组启动参数全 pageReady、崩溃恢复 8/8、心跳停摆 9/9、同屏 27.4 FPS，
+  // 记录见 docs/desktop-wallpaper.md 的 W1-C 一节。上限仍要钉住，因为再往共享包塞 MB 级资源
+  // （凤凰的打包美术就占约 0.54 MB）会一路涨到页面加载成本失控。
+  // 只剩歌词页与设置页整页走 NavigateToString，由 app.rs 的
+  // inlined_pages_stay_inside_the_navigate_to_string_limit 钉在 256 KiB。
+  assert.ok(Buffer.byteLength(runtime) < 1.9 * 1024 * 1024, 'Shared runtime budget covers Three.js, all scenes and the packed phoenix artwork');
   assert.ok(!/\beval\s*\(|new Function\s*\(|\bimport\s*\(/.test(runtime), 'No eval or dynamic modules under plugin CSP');
   const html = fs.readFileSync(path.join(source, 'index.html'), 'utf8');
   for (const id of ['coast', 'zodiac', 'space']) {
