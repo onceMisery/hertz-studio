@@ -3,6 +3,10 @@
   "note": "check-* scripts that are deliberate manual/browser/diagnostic entry points. New unregistered check-* files fail scripts/check-scripts.js until they are either registered in check-frontend.js / a workflow or added here.",
   "scripts": [
     {
+      "script": "check-room-stage-browser.js",
+      "purpose": "Isolated real room and complete stage UI: personal scene, shared composer/danmaku, online picker, real sharing/queue writes, canceled search, narrow layouts and return navigation."
+    },
+    {
       "script": "check-desktop-settings-browser.js",
       "purpose": "Isolated Chrome verification of desktop settings drafts, preview lifecycle, conflicts, presets and narrow layouts."
     },

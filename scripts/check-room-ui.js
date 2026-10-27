@@ -214,14 +214,16 @@ async function main() {
     f.set({ permissions: { queue: true, transport: true } }); await f.poll();
     f.hooks.set('share_online', async request => {
       assert.equal(request.tracks[0].ref.license, 'fixture', 'provider reference survives sharing');
-      f.set({ sharing_revision: '2', favorite_local_ids: { [key]: 'online:ccmixter:song:with:colon' }, shared_track_ids: ['online:ccmixter:song:with:colon'], current_track: song });
-      return { tracks: [song], favorite_local_ids: { [key]: 'online:ccmixter:song:with:colon' } };
+      f.set({ revision: '8', sharing_revision: '2', favorite_local_ids: { [key]: 'online:ccmixter:song:with:colon' }, shared_track_ids: ['online:ccmixter:song:with:colon'], current_track: song });
+      return { revision: '8', tracks: [song], favorite_local_ids: { [key]: 'online:ccmixter:song:with:colon' } };
     });
+    f.hooks.set('queue_page', async request => { assert.equal(request.revision, '8', 'online sharing revision is used before the next poll'); return { revision: '8', queue: [], tracks: [] }; });
     f.hooks.set('library', async () => ({ revision: '2', tracks: [song] }));
     await f.api.addOnline([track]); await settle(); await f.poll();
     const write = f.calls.find(call => call.action === 'queue');
     assert.equal(write.items[0].resource_id, song.resource_id);
     assert.equal(write.items[0].instance_id, null, 'online append uses the same instance allocator');
+    assert.equal(write.expected_revision, '8', 'append follows the confirmed share revision');
     const heart = walk(f.root).find(node => node.className === 't-act fav-act');
     assert.ok(heart, 'shared online songs expose favorites');
     await heart.onclick({ stopPropagation() {} }); await settle();

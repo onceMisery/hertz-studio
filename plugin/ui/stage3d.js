@@ -1881,7 +1881,7 @@
   }
 
   function controlTarget(e) {
-    return e.target && e.target.closest && e.target.closest('button, a, input, select, textarea, [contenteditable], [role="button"], #s3d-settings, .s3d-queue-panel, #s3d-reading, #s3d-stanza');
+    return e.target && e.target.closest && e.target.closest('button, a, input, select, textarea, summary, .room-stage-composer-dock, [contenteditable], [role="button"], #s3d-settings, .s3d-queue-panel, #s3d-reading, #s3d-stanza');
   }
 
   function cancelGestures() {
@@ -2338,7 +2338,7 @@
   }
 
   function play() {
-    if (global.Stage && Stage.presentation && !Stage.presentation().track) { close(); control('view', 'library'); }
+    if (global.Stage && Stage.presentation && !Stage.presentation().track) { close(); control('view', global.HertzRoom && HertzRoom.active() ? 'room' : 'library'); }
     else control('toggle');
   }
 
@@ -2410,6 +2410,7 @@
   }
 
   function setQueuePanel(on) {
+    if (on && global.HertzRoom && HertzRoom.active()) { close(); control('view', 'room'); HertzRoom.navigate('collaborate'); return; }
     var panel = $('s3d-queue-panel');
     var restoreFocus = !on && panel.contains(document.activeElement);
     queueOpen = !!on;
@@ -3507,6 +3508,16 @@
     // 平面布局由 stanza 渲染器接管歌词，GL lyricView 空转 update 没有意义。
     if (lyricView && showLyrics && !stanzaActive()) lyricView.update(data);
     if (global.HandDrawn && HandDrawn.refreshAnnotation) HandDrawn.refreshAnnotation();
+    var inRoom = global.HertzRoom && HertzRoom.active(), roomContext = inRoom && HertzRoom.stageContext();
+    if (inRoom) {
+      ['s3d-play', 's3d-prev', 's3d-next', 's3d-seek'].forEach(function (id) { $(id).disabled = !roomContext.transport || (id === 's3d-seek' && !data.duration); });
+      $('s3d-volume').disabled = !roomContext.volume;
+      $('s3d-favorite').disabled = true;
+      $('s3d-favorite').title = '请在一起听中收藏当前共享歌曲';
+    } else $('s3d-volume').disabled = false;
+    ['s3d-fl-off-down', 's3d-fl-off-up'].forEach(function (id) { var node = $(id); if (node) { node.disabled = !!inRoom; node.title = inRoom ? '房间歌词跟随共享歌曲' : ''; } });
+    $('s3d-queue').setAttribute('aria-label', inRoom ? '共同队列' : '播放队列');
+    $('s3d-queue').title = inRoom ? '返回一起听管理共同队列 (Q)' : '播放队列 (Q)';
   }
 
   function syncDock() {
@@ -3594,6 +3605,7 @@
       }
     }
     active = true;
+    document.dispatchEvent(new CustomEvent('stage:visibility', { detail: { open: true } }));
     fadeTarget = 1;
     root.classList.add('s3d-open');
     root.setAttribute('aria-hidden', 'false');
@@ -3634,6 +3646,7 @@
     if (lyricView) lyricView.reset();
     fadeTarget = 0;
     active = false;
+    document.dispatchEvent(new CustomEvent('stage:visibility', { detail: { open: false } }));
     syncCreativeStage();
     syncCoastStage();
     syncZodiacStage();
@@ -3706,7 +3719,7 @@
     if (global.Workshop && Workshop.isOpen()) return;
     var k = e.key;
     if (k === 'Tab') {
-      var focusable = Array.prototype.filter.call(root.querySelectorAll('button:not(:disabled), input:not(:disabled), select:not(:disabled)'), function (el) { return el.tabIndex >= 0 && el.getClientRects().length && getComputedStyle(el).visibility !== 'hidden'; });
+      var focusable = Array.prototype.filter.call(root.querySelectorAll('button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled), summary'), function (el) { return el.tabIndex >= 0 && el.getClientRects().length && getComputedStyle(el).visibility !== 'hidden'; });
       var first = focusable[0], last = focusable[focusable.length - 1];
       if (e.shiftKey && (document.activeElement === first || document.activeElement === root)) { e.preventDefault(); last.focus(); }
       else if (!e.shiftKey && (document.activeElement === last || document.activeElement === root)) { e.preventDefault(); first.focus(); }

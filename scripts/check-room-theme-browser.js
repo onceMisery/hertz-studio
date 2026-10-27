@@ -163,6 +163,8 @@ async function main() {
     await page.getByRole('button', { name: '＋ 点歌', exact: true }).click();
     const songPicker = page.getByRole('dialog', { name: '添加歌曲', exact: true });
     assert.ok(await songPicker.isVisible(), 'song picker opens in a native drawer');
+    assert.equal(await songPicker.getByRole('tab', { name: '在线歌曲', exact: true }).getAttribute('aria-selected'), 'true', 'host starts with online songs');
+    await songPicker.getByRole('tab', { name: '房间已共享', exact: true }).click();
     await songPicker.getByLabel('搜索已共享歌曲', { exact: true }).fill('夜航');
     await page.keyboard.press('Escape');
     await page.getByRole('button', { name: '＋ 点歌', exact: true }).click();

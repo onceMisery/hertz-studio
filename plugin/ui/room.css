@@ -525,3 +525,52 @@ body.room-active:not(.room-view):not(.room-player-collapsed) .app { margin-botto
   .room-global.is-collapsed .room-global-return .room-icon { display:none; }
   .room-global.is-collapsed .room-global-collapse { grid-column:5; }
 }
+
+/* Song selection stays in the room, with an explicit source and room action. */
+#view-room .room-song-source-tabs { display:flex; gap:6px; border-bottom:1px solid var(--line); padding:0 0 12px; margin-bottom:20px; }
+#view-room .room-song-source-tabs .btn { flex:1; padding:10px 8px; border-radius:10px; }
+#view-room .room-song-source-tabs [aria-selected="true"] { color:var(--accent-ink); background:var(--accent); }
+#view-room .room-online-search { display:grid; grid-template-columns:minmax(100px,.6fr) minmax(140px,1fr) auto; align-items:end; gap:12px; }
+#view-room .room-online-search .room-field { min-width:0; }
+#view-room .room-online-search .btn { margin-bottom:10px; }
+#view-room .room-online-results { display:grid; gap:8px; margin:16px 0; }
+#view-room .room-online-track .btn { flex-shrink:0; }
+#view-room .room-player-quick { flex-wrap:wrap; }
+#view-room .room-open-stage { border-color:var(--line-strong); }
+/* The overlay is inside Stage3D so fullscreen and the stage focus boundary
+   include the original chat composer, never a second form or message owner. */
+.room-stage-overlay { position:absolute; inset:0; z-index:5; pointer-events:none; color:var(--s3d-text); font:13px/1.5 "Segoe UI","Microsoft YaHei",sans-serif; cursor:auto; }
+.room-stage-overlay [hidden] { display:none!important; }
+.room-stage-room-bar { position:absolute; top:82px; left:24px; right:150px; display:flex; gap:12px; align-items:center; }
+.room-stage-notice { position:absolute; top:126px; left:24px; max-width:min(70vw,620px); margin:0; padding:8px 12px; border-radius:8px; background:#101815ed; color:var(--s3d-muted); }
+.room-stage-notice.room-error { color:#ffb6ad; }
+.room-stage-room-bar>span { color:var(--s3d-muted); font-size:12px; }
+.room-stage-overlay .btn,.room-stage-chat-popover>summary { pointer-events:auto; cursor:pointer; min-height:44px; border:1px solid rgba(255,255,255,.18); border-radius:10px; padding:10px 14px; color:var(--s3d-text); background:rgba(16,24,22,.94); font:inherit; }
+.room-stage-overlay .btn:hover,.room-stage-chat-popover>summary:hover { background:#283c33; }
+.room-stage-overlay .btn:disabled { opacity:.45; cursor:not-allowed; }
+.room-stage-overlay :focus-visible { outline:2px solid var(--s3d-accent); outline-offset:3px; }
+.room-stage-chat-popover { position:absolute; top:82px; right:24px; pointer-events:auto; }
+.room-stage-chat-popover>summary { list-style:none; text-align:center; }
+.room-stage-chat-popover>summary::-webkit-details-marker { display:none; }
+.room-stage-composer-dock { position:absolute; top:52px; right:0; width:min(420px,calc(100vw - 48px)); max-height:55dvh; overflow:auto; box-sizing:border-box; padding:18px; border:1px solid rgba(255,255,255,.18); border-radius:14px; background:rgba(16,24,22,.97); box-shadow:0 12px 44px #0006; user-select:text; }
+.room-stage-composer-dock .room-chat-form { display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:end; gap:10px; }
+.room-stage-composer-dock .room-field { display:grid; gap:6px; font-size:12px; }
+.room-stage-composer-dock textarea { box-sizing:border-box; width:100%; min-height:76px; max-height:160px; resize:vertical; padding:10px; color:var(--s3d-text); border:1px solid #62746c; border-radius:8px; background:#101815; font:inherit; font-size:14px; line-height:1.5; }
+.room-stage-composer-dock .room-chat-composer>label { display:flex; align-items:center; margin-top:12px; }
+.room-stage-composer-dock .room-sub { margin:0 0 12px; color:var(--s3d-muted); }
+.room-stage-composer-dock .room-error { color:#ffb6ad; }
+.room-stage-overlay .room-danmaku { position:absolute; top:146px; left:0; right:0; height:156px; pointer-events:none; overflow:hidden; z-index:-1; }
+.room-stage-overlay .room-danmaku span { position:absolute; left:100%; top:calc(var(--lane)*38px); white-space:nowrap; color:#fff; background:#101815d9; border:1px solid #ffffff38; border-radius:10px; padding:6px 12px; text-shadow:0 1px 3px #000; animation:room-fly var(--room-flight,6s) linear forwards; }
+body.s3d-open #room-global-player { display:none!important; }
+@media(max-width:700px) {
+  #view-room .room-online-search { grid-template-columns:minmax(0,1fr) auto; }
+  #view-room .room-online-search>.room-field:first-child { grid-column:1/-1; }
+  #view-room .room-online-track { flex-wrap:wrap; }
+  .room-stage-room-bar { top:76px; left:12px; right:12px; gap:8px; }
+  .room-stage-room-bar>span { display:none; }
+  .room-stage-notice { top:184px; left:12px; right:12px; max-width:none; }
+  .room-stage-chat-popover { top:130px; right:12px; }
+  .room-stage-composer-dock { width:min(370px,calc(100vw - 24px)); }
+  .room-stage-overlay .room-danmaku { top:186px; }
+}
+@media(prefers-reduced-motion:reduce) { .room-stage-overlay .room-danmaku { display:none; } }

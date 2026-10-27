@@ -3136,12 +3136,17 @@ function initStage() {
   if (window.StageParticles) window.StageParticles.init();
   if (window.Shelf) initShelf();
   document.addEventListener('stage:control', onStageControl);
+  document.addEventListener('stage:visibility', event => { if (window.HertzRoom) HertzRoom.setStageVisible(event.detail.open); });
 }
 
 let stageSettingsWrite = Promise.resolve();
 
 function onStageControl(e) {
   const d = e.detail || {};
+  if (window.HertzRoom && HertzRoom.active()) {
+    if (d.action === 'queue-play') { HertzRoom.playback('pick', { instance_id: String(d.value) }); return; }
+    if (d.action === 'queue-remove' || d.action === 'lyricOffset') { toast('请在一起听房间内管理共同队列与歌曲信息'); return; }
+  }
   switch (d.action) {
     case 'seek': seekTo(d.value); break;
     case 'toggle': togglePlay(); break;
@@ -3320,6 +3325,7 @@ function drawSpectrum() {
 // 全屏声场（Stage3D）里的播放队列浮层与队列视图同源：这里把精简后的行模型
 // 推给 Stage3D，全屏内点行跳播/移出经 stage:control 意图回到同一套播放逻辑。
 function pushStageQueue() {
+  if (window.HertzRoom && HertzRoom.active()) { if (window.Stage3D) Stage3D.setQueue([]); return; }
   if (window.Space3D && Space3D.setQueue) {
     Space3D.setQueue(state.queue.map((id) => {
       const track = state.byId.get(id) || window.Online.getMeta(id)
@@ -8036,12 +8042,16 @@ async function startApp() {
   if (window.HertzRoom) window.HertzRoom.init({
     root: ui.views.room, transport, confirm: message => modal().confirm(message),
     onReturn: () => setView('library'),
-    onNavigate: name => { if (name === 'library' || name === 'favorites') setView(name); },
+    onNavigate: name => { if (['library', 'favorites', 'online', 'room'].includes(name)) setView(name); },
+    onOpenStage: () => { if (window.Stage3D) Stage3D.open(); },
     onModeChange(active) {
       cancelSeek(); clearSleepTimer(true); closeNowPlaying();
+      loadNowPlaying.epoch = (loadNowPlaying.epoch || 0) + 1; lyricRefreshEpoch++;
       if (window.Stage3D) Stage3D.close();
       if (active) document.title = '一起听 · hertz-studio';
       else {
+        state.snapshot = { ...state.snapshot, track_id: null };
+        if (Stage) { Stage.setTrack(null, null); Stage.setLyrics(null); }
         mediaSessionStateKey = ''; documentTitleCache = '';
         if (state.current) updateMediaSessionMetadata(state.current, Stage && Stage.coverUrl());
         transport.get('/v1/state').then(applySnapshot).catch(() => {});

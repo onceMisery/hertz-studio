@@ -2,7 +2,7 @@
 // Local control surface only. TLS credentials and PCM stay in native services.
 (function (global) {
   'use strict';
-  let root, transport, confirmAction, timer, chrome, view, workspace, onModeChange, onReturn = () => {}, onNavigate = () => {}, workspaceVisible = false, invitationExpires = 0, snap = { mode: 'local' }, busy = false;
+  let root, transport, confirmAction, timer, chrome, view, workspace, onModeChange, onOpenStage = () => {}, onReturn = () => {}, onNavigate = () => {}, workspaceVisible = false, stageVisible = false, stageMediaKey = '', lyricDoc = null, invitationExpires = 0, snap = { mode: 'local' }, busy = false;
   let mountedSession = '', workspaceOwner = '', mediaKey = '', lifecycle = 0, playbackPending = null, queuePending = null, admissionRequest = null, invitationId = '';
   let mounted = '', sequence = 1n, chatSequence = 1n, revision = '', polling = false;
   let libraryQuery = '', libraryTotal = 0, libraryGeneration = 0;
@@ -19,7 +19,7 @@
   function button(text, fn, cls) { const e = h('button', 'btn ' + (cls || ''), text); e.type = 'button'; e.onclick = () => run(fn); return e; }
   function field(parent, label, type, value) { const l = h('label', 'room-field', label), e = h(type === 'textarea' ? 'textarea' : 'input'); if (type !== 'textarea') e.type = type; e.value = value == null ? '' : value; l.append(e); parent.append(l); return e; }
   function select(parent, label, choices) { const l = h('label', 'room-field', label), e = h('select'); e.setAttribute('aria-label', label); choices.forEach(([value, text]) => { const o = h('option', '', text); o.value = value; e.append(o); }); l.append(e); parent.append(l); return e; }
-  function status(text, error) { if (chrome) chrome.notice(text, error); [refs.notice, refs.entryNotice].filter(Boolean).forEach(node => { node.textContent = text || ''; node.classList.toggle('room-error', !!error); node.hidden = !text; }); }
+  function status(text, error) { if (chrome) chrome.notice(text, error); [refs.notice, refs.entryNotice, refs.stageNotice].filter(Boolean).forEach(node => { node.textContent = text || ''; node.classList.toggle('room-error', !!error); node.hidden = !text; }); }
   function counter(v) { return typeof v === 'string' && /^(0|[1-9]\d*)$/.test(v) ? BigInt(v) : 1n; }
   function op(chat) { if (chat) { chatSequence = chatSequence > counter(snap.next_chat_operation_id) ? chatSequence : counter(snap.next_chat_operation_id); return String(chatSequence++); } sequence = sequence > counter(snap.next_operation_id) ? sequence : counter(snap.next_operation_id); return String(sequence++); }
   function sessionKey() { return [lifecycle, snap.mode === 'local' ? 'local' : 'active', snap.room_id || '', snap.instance_id || '', snap.member_id || '', snap.session_id || ''].join(':'); }
@@ -47,6 +47,7 @@
   async function control(action, extra) { requireConnectedRoom(); return peer({ action, operation_id: op(false), expected_revision: snap.revision, ...extra }); }
   async function playback(action, extra) {
     requireConnectedRoom();
+    if (!(snap.permissions || {}).transport) throw new Error('房主未授权播控，你仍可选择自己的舞台和发送弹幕。');
     const owner = operationOwner();
     if (!owner) throw new Error('正在读取房间身份，请稍后重试。');
     if (playbackPending && playbackPending.owner === owner && playbackPending.phase !== 'scheduled') throw new Error('请先查询原播放操作的结果，再发送新的播放命令。');
@@ -140,6 +141,10 @@
       h, button, field, select, section, refs, selection, metadata, command, control, playback, run, status,
       sessionKey, current, confirmAction, loadLocal, appendResource, mutateQueue, loadChat, resetChat, sendChat,
       queueUncertain: () => !!queuePending,
+      openStage: () => onOpenStage(),
+      onNavigate: name => onNavigate(name),
+      beginOnlineSearch: () => global.HertzSearch.create(transport),
+      addOnline,
       uncertain,
       async readJoinStatus() { await poll(true); return snap.mode; },
       startDraft: () => startDraft,
@@ -280,6 +285,8 @@
     const draft = preservePage && refs.chatInput ? refs.chatInput.value : '';
     const preservedReceipt = preservePage && chatReceipt && chatReceipt.owner === operationOwner() ? chatReceipt : null;
     mountedSession = roomSession; liveChatId = null; metadata.clear(); selection.clear(); chatReceipt = preservedReceipt; chatUnknown = preservedReceipt ? preservedReceipt.id : null; chatSending = null; chatSongPending = preservedReceipt && preservedReceipt.songTitle || null; resetChat(); chatLoading = null;
+    if (refs.disposeSongPicker) refs.disposeSongPicker();
+    if (refs.setStageVisible) refs.setStageVisible(false);
     if (workspace && workspace.destroy) workspace.destroy();
     mounted = key; favoriteSignature = ''; memberSignature = ''; queueSignature = ''; librarySignature = ''; resourceGeneration++; resourceKey = ''; resourceSignature = ''; lyrics = []; if (coverUrl) URL.revokeObjectURL(coverUrl); coverUrl = ''; root.replaceChildren(); Object.keys(refs).forEach(k => delete refs[k]);
     invitationExpires = 0; invitationId = '';
@@ -291,6 +298,7 @@
     if (previousTab) view.selectTab(previousTab);
     if (previousSetting) workspace.selectSettings(previousSetting);
     if (draft && refs.chatInput) refs.chatInput.value = draft;
+    if (stageVisible && key === 'active' && refs.setStageVisible) refs.setStageVisible(true);
     if (key === 'active') admissionRequest = null;
     drawPlaybackReceipt(); drawQueueReceipt();
     if (key === 'active') { drawChatReceipt(); syncChatComposer(); }
@@ -388,6 +396,7 @@
     refs.album.textContent = track && track.album || ''; refs.album.hidden = !refs.album.textContent;
     refs.quickMode.textContent = { repeat: '列表循环', repeat_one: '单曲循环', shuffle: '随机播放' }[snap.play_mode] || '列表循环'; refs.quickMode.disabled = !p.queue;
     refs.songAppend.disabled = !track || !p.queue; refs.songShare.disabled = !track || !p.chat_send;
+    if (refs.refreshSongPicker) refs.refreshSongPicker();
     refs.guestInvite.hidden = host || !!p.invite; refs.invitePerms.hidden = !host; refs.activeRoomName.textContent = snap.name || '一起听房间';
     refs.queueCount.textContent = Number(snap.queue_count || 0) + ' 首歌曲';
     refs.queueNav.hidden = Number(snap.queue_count || 0) <= pageSize; refs.queuePrev.disabled = queuePage === 0; refs.queueNext.disabled = queuePage + pageSize >= Number(snap.queue_count || 0);
@@ -435,6 +444,7 @@
     revision = snap.revision;
     const members = JSON.stringify(snap.members || []); if (members !== memberSignature) { memberSignature = members; view.drawMembers(); }
     updateResources(track);
+    syncStage();
     if (snap.error || snap.local_error) status(snap.local_error || snap.error, true);
     if (!p.chat_read) { liveChatId = null; resetChat(); refs.chat.replaceChildren(); refs.danmaku.replaceChildren(); refs.chatOlder.disabled = true; }
     if (p.chat_read && chatSharingRevision !== (snap.sharing_revision || '')) {
@@ -571,6 +581,7 @@
     if (!refs.sharedOnline.childElementCount) refs.sharedOnline.append(h('p', 'room-sub', '在在线歌曲列表点击“加入一起听”，即可分享并点歌。'));
   }
   async function addOnline(tracks) {
+    if (queuePending) throw new Error('请先查询原队列操作的结果，再继续点歌。');
     const fresh = await transport.get('/v1/room', { retry: false });
     if (fresh.mode !== 'host') throw new Error(fresh.mode === 'local' ? '请先在“一起听”中创建房间，再添加在线歌曲。' : '在线歌曲需由房主分享；你可以从房间共享曲库点歌。');
     if (fresh.room_id !== snap.room_id || fresh.instance_id !== snap.instance_id) throw queueContextError('房间会话已改变，请刷新后重试。');
@@ -578,6 +589,9 @@
     const songs = tracks.map(t => ({ source: t.source, id: String(t.id), title: t.title, artist: t.artist || null, album: t.album || null, duration_ms: t.duration_ms || null, cover: t.cover || null, ref: t.ref || t.track_ref || {} }));
     const result = await command({ action: 'share_online', tracks: songs });
     if (!current(key)) throw queueContextError('房间会话已改变，请在原房间检查分享结果。');
+    // Sharing itself advances the queue/control revision. Read the queue at
+    // that confirmed revision rather than waiting for the next one-second poll.
+    if (typeof result.revision === 'string') snap = { ...snap, revision: result.revision };
     const ids = result.favorite_local_ids || {}, resources = new Map((result.tracks || []).map(t => [ids[t.favorite_key], t.resource_id]));
     const added = songs.map(t => { const id = 'online:' + t.source + ':' + t.id; selection.add(id); const resource = resources.get(id); if (!resource) throw new Error('歌曲已分享，请到一起听共享曲库中点歌。'); return { resource_id: resource }; });
     await mutateQueue(queue => queue.concat(added));
@@ -610,6 +624,7 @@
         status('房间已创建，正在分享选中的 ' + ids.length + ' 首歌曲…');
         try { const shared = await command({ action: 'share', track_ids: [...new Set([...(snap.shared_track_ids || []), ...ids])] });
           if (!current(key) || operationOwner() !== owner) return;
+          if (typeof shared.revision === 'string') snap = { ...snap, revision: shared.revision };
           const mapping = shared.favorite_local_ids || {};
           result = ids.map(id => (shared.tracks || []).find(track => mapping[track.favorite_key] === id));
           if (result.some(track => !track)) throw new Error('歌曲分享已受理，请在点歌抽屉中核对已共享歌曲。');
@@ -700,9 +715,9 @@
     const signature = JSON.stringify([id, snap.sharing_revision || '', !!(track && track.has_cover)]);
     // A shared resource UUID survives re-sharing and cover replacement. Bind
     // each fetch generation to its authorized sharing projection as well.
-    if (resourceSignature !== signature) { resourceSignature = signature; resourceKey = id; const generation = ++resourceGeneration; lyrics = []; refs.lyrics.replaceChildren(); delete refs.lyrics.dataset.key; refs.cover.hidden = true; if (coverUrl) URL.revokeObjectURL(coverUrl); coverUrl = '';
-      if (id) { if (track.has_cover) resource(id, 'cover').then(blob => { if (generation !== resourceGeneration) return; coverUrl = URL.createObjectURL(blob); refs.cover.src = coverUrl; refs.cover.hidden = false; }).catch(() => {});
-        resource(id, 'lyrics').then(blob => blob.text()).then(text => { if (generation !== resourceGeneration) return; const doc = JSON.parse(text); lyrics = Array.isArray(doc.lines) ? doc.lines : []; delete refs.lyrics.dataset.key; drawLyrics(); }).catch(() => {}); }
+    if (resourceSignature !== signature) { resourceSignature = signature; resourceKey = id; const generation = ++resourceGeneration; lyrics = []; lyricDoc = null; refs.lyrics.replaceChildren(); delete refs.lyrics.dataset.key; refs.cover.hidden = true; if (coverUrl) URL.revokeObjectURL(coverUrl); coverUrl = '';
+      if (id) { if (track.has_cover) resource(id, 'cover').then(blob => { if (generation !== resourceGeneration) return; coverUrl = URL.createObjectURL(blob); refs.cover.src = coverUrl; refs.cover.hidden = false; syncStage(); }).catch(() => {});
+        resource(id, 'lyrics').then(blob => blob.text()).then(text => { if (generation !== resourceGeneration) return; const doc = JSON.parse(text); lyricDoc = doc; lyrics = Array.isArray(doc.lines) ? doc.lines : []; delete refs.lyrics.dataset.key; drawLyrics(); syncStage(); }).catch(() => {}); }
     }
     drawLyrics();
   }
@@ -727,7 +742,7 @@
     } catch (_) { /* Browser media controls are optional; native playback is authoritative. */ }
   }
   function animateMessage(message) {
-    if (!workspaceVisible || !workspace || workspace.currentPage() !== 'play' || document.hidden || !refs.danmaku || refs.danmaku.hidden || refs.danmaku.childElementCount >= 20 || !(snap.permissions || {}).chat_read || matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    if ((!stageVisible && (!workspaceVisible || !workspace || workspace.currentPage() !== 'play')) || document.hidden || !refs.danmaku || refs.danmaku.hidden || refs.danmaku.childElementCount >= 20 || !(snap.permissions || {}).chat_read || matchMedia('(prefers-reduced-motion: reduce)').matches) return;
     const layer = refs.danmaku, now = Date.now(), lanes = refs.danmakuLanes || (refs.danmakuLanes = [0, 0, 0, 0]);
     const lane = lanes.findIndex(free => free <= now); if (lane < 0) return;
     const el = h('span', '', message.name + '：' + message.text); el.style.setProperty('--lane', String(lane)); layer.append(el);
@@ -736,12 +751,23 @@
     el.style.setProperty('--room-travel', travel + 'px'); el.style.setProperty('--room-flight', seconds + 's');
     el.addEventListener('animationend', () => el.remove(), { once: true }); setTimeout(() => el.remove(), seconds * 1000 + 100);
   }
-  function applySnapshot(value, force) { const wasActive = snap.mode !== 'local'; snap = value; mount(); chrome.render(snap); syncMediaSession(); if (wasActive !== (snap.mode !== 'local') && onModeChange) onModeChange(snap.mode !== 'local'); if (force || (!document.hidden && !root.hidden)) update(); }
+  // The room remains the only media/resource owner. The stage consumes its
+  // presentation; scene preferences and rendering remain on each device.
+  function syncStage() {
+    if (!stageVisible || snap.mode === 'local' || !global.Stage) return;
+    const track = snap.current_track, id = track ? 'room:' + snap.room_id + ':' + snap.track_instance_id : null;
+    global.Stage.setTrack(track ? { ...track, id } : null, coverUrl || null);
+    global.Stage.setSnapshot({ track_id: id, playing: !!snap.playing && /^(host|guest)$/.test(snap.mode), position_ms: Number(snap.position_ms || 0), duration_ms: Number(track && track.duration_ms || 0), volume: Number((snap.output && snap.output.settings || {}).volume ?? 1) });
+    const key = id + ':' + resourceGeneration + ':' + !!lyricDoc;
+    if (stageMediaKey !== key) { stageMediaKey = key; global.Stage.setLyrics(lyricDoc); }
+  }
+  function applySnapshot(value, force) { const wasActive = snap.mode !== 'local'; snap = value; mount(); chrome.render(snap); syncMediaSession(); if (wasActive !== (snap.mode !== 'local') && onModeChange) onModeChange(snap.mode !== 'local'); if (force || (!document.hidden && (!root.hidden || stageVisible))) update(); }
   async function poll(force) { if (polling || !root) return; const generation = lifecycle, key = sessionKey(); polling = true; try { const value = await transport.get('/v1/room', { retry: false }); if (!root || generation !== lifecycle || key !== sessionKey()) return; applySnapshot(value, force); } finally { polling = false; } }
   global.HertzRoom = {
     init(options) {
       lifecycle++; root = options.root; transport = options.transport; confirmAction = options.confirm; onModeChange = options.onModeChange;
       onReturn = options.onReturn || (() => {}); onNavigate = options.onNavigate || (() => {});
+      onOpenStage = options.onOpenStage || (() => {});
       if (!root) return;
       const preferenceLifecycle = lifecycle;
       transport.get('/v1/settings').then(settings => {
@@ -775,6 +801,8 @@
     active() { return snap.mode !== 'local'; },
     playback(action, extra) { update(); return run(() => playback(action === 'toggle' ? (snap.playing ? 'pause' : 'play') : action, extra)); },
     snapshot() { return snap; },
+    setStageVisible(value) { stageVisible = !!value && snap.mode !== 'local'; stageMediaKey = ''; if (refs.setStageVisible) refs.setStageVisible(stageVisible); if (stageVisible) { update(); if (global.Stage3D) global.Stage3D.setQueue([]); } },
+    stageContext() { return { transport: /^(host|guest)$/.test(snap.mode) && !!(snap.permissions || {}).transport && !playbackPending, volume: !!(snap.output || {}).enabled }; },
     async startFromTracks(tracks) {
       const selected = (tracks || []).filter(Boolean);
       if (!selected.length) throw new Error('请先选择歌曲。');
@@ -794,6 +822,6 @@
     operationContext: operationOwner,
     syncMediaSession,
     async localVolume(volume) { const o = snap.output || {}; if (!o.enabled) throw new Error('请先启用房间本机输出'); const result = await command({ action: 'output', enabled: true, settings: { ...(o.settings || {}), volume } }); await poll(true); return result; },
-    destroy() { if (workspace && workspace.destroy) workspace.destroy(); lifecycle++; resourceGeneration++; if (coverUrl) URL.revokeObjectURL(coverUrl); coverUrl = ''; if (timer) clearInterval(timer); timer = 0; if (chrome) chrome.destroy(); if (refs.invitation) refs.invitation.value = ''; if (refs.invitationQr) refs.invitationQr.replaceChildren(); invitationId = ''; invitationExpires = 0; root = null; workspace = null; view = null; messages = []; playbackPending = null; queuePending = null; chatReceipt = null; chatUnknown = null; chatSending = null; chatSongPending = null; admissionRequest = null; startDraft = null; }
+    destroy() { if (refs.disposeSongPicker) refs.disposeSongPicker(); if (refs.setStageVisible) refs.setStageVisible(false); stageVisible = false; lyricDoc = null; if (workspace && workspace.destroy) workspace.destroy(); lifecycle++; resourceGeneration++; if (coverUrl) URL.revokeObjectURL(coverUrl); coverUrl = ''; if (timer) clearInterval(timer); timer = 0; if (chrome) chrome.destroy(); if (refs.invitation) refs.invitation.value = ''; if (refs.invitationQr) refs.invitationQr.replaceChildren(); invitationId = ''; invitationExpires = 0; root = null; workspace = null; view = null; messages = []; playbackPending = null; queuePending = null; chatReceipt = null; chatUnknown = null; chatSending = null; chatSongPending = null; admissionRequest = null; startDraft = null; }
   };
 })(window);

@@ -218,8 +218,37 @@
     refs.chatSend = h('button', 'btn primary', '发送'); refs.chatSend.type = 'submit'; form.append(refs.chatSend);
     form.onsubmit = e => { e.preventDefault(); run(() => sendChat()); }; composer.append(form);
     refs.chatInput.placeholder = '发条弹幕，一起聊聊这首歌';
-    const show = field(composer, '显示实时弹幕', 'checkbox'); show.checked = true; show.onchange = () => { refs.danmaku.hidden = !show.checked; if (!show.checked) refs.danmaku.replaceChildren(); }; refs.danmaku = h('div', 'room-danmaku'); refs.danmaku.setAttribute('aria-hidden', 'true'); scene.append(refs.danmaku);
-    refs.placeChatComposer = page => { (page === 'play' ? stageDock : chatDock).append(composer); refs.chatSend.textContent = page === 'play' ? '发送弹幕' : '发送'; };
+    const show = field(composer, '显示实时弹幕', 'checkbox');
+    try { show.checked = localStorage.getItem('hertz.room.danmaku') !== 'off'; } catch (_) { show.checked = true; }
+    refs.danmaku = h('div', 'room-danmaku'); refs.danmaku.hidden = !show.checked; refs.danmaku.setAttribute('aria-hidden', 'true'); scene.append(refs.danmaku);
+    show.onchange = () => { refs.danmaku.hidden = !show.checked; if (!show.checked) refs.danmaku.replaceChildren(); try { localStorage.setItem('hertz.room.danmaku', show.checked ? 'on' : 'off'); } catch (_) {} };
+    let stageOverlay = null, stageComposerDock = null, composerPage = api.workspace().currentPage();
+    refs.placeChatComposer = page => {
+      composerPage = page;
+      (stageOverlay ? stageComposerDock : page === 'play' ? stageDock : chatDock).append(composer);
+      refs.chatSend.textContent = stageOverlay || page === 'play' ? '发送弹幕' : '发送';
+    };
+    refs.setStageVisible = visible => {
+      if (visible && !stageOverlay) {
+        const stage = document.getElementById('stage3d'); if (!stage) return;
+        stageOverlay = h('div', 'room-stage-overlay');
+        const toolbar = h('div', 'room-stage-room-bar');
+        refs.stageNotice = h('p', 'room-stage-notice'); refs.stageNotice.setAttribute('role', 'status'); refs.stageNotice.hidden = true;
+        const back = navigationButton('返回一起听', () => { global.Stage3D.close(); api.onNavigate('room'); });
+        const note = h('span', '', '我的舞台 · 画面设置仅对自己生效');
+        const add = navigationButton('点歌 / 共同队列', () => { global.Stage3D.close(); api.onNavigate('room'); api.workspace().navigate('collaborate', true); refs.openSongPicker(); });
+        toolbar.append(back, note, add);
+        const chat = h('details', 'room-stage-chat-popover'), toggle = h('summary', '', '发弹幕');
+        stageComposerDock = h('div', 'room-stage-composer-dock'); chat.append(toggle, stageComposerDock);
+        chat.ontoggle = () => { if (chat.open) refs.chatInput.focus({ preventScroll: true }); };
+        stageOverlay.append(toolbar, refs.stageNotice, chat, refs.danmaku); stage.append(stageOverlay);
+      } else if (!visible && stageOverlay) {
+        scene.append(refs.danmaku); refs.danmaku.replaceChildren(); refs.danmakuLanes = null;
+        const old = stageOverlay; stageOverlay = null; refs.placeChatComposer(composerPage); old.remove(); stageComposerDock = null;
+        delete refs.stageNotice;
+      }
+      refs.placeChatComposer(composerPage);
+    };
     refs.placeChatComposer(api.workspace().currentPage());
     refs.chatOlder = button('更早消息', async () => loadChat(true));
     chat.append(refs.chatOlder, button('回到最新消息', async () => { resetChat(); await loadChat(); }));
@@ -392,6 +421,87 @@
     if (!invitations.length) refs.outstandingInvitations.append(h('p', 'room-sub', '当前没有未使用的直接邀请'));
     invitations.forEach(invite => { const issuer = (snapshot.members || []).find(member => member.id === invite.issuer); const row = h('div', 'room-admission-row'); row.append(h('p', 'room-sub', (issuer ? issuer.name : '房主') + ' 发出的有效邀请'), button('撤销邀请', () => api.revokeInvitation(invite.id))); refs.outstandingInvitations.append(row); });
   }
+  function mountOnlinePicker(parent, picker) {
+    const panel = section(parent, '在线点歌');
+    panel.append(h('p', 'room-sub', '搜索喜欢的歌，加入共同队列。歌曲由房主提供给房间，大家无需分别登录音源。'));
+    const form = h('form', 'room-online-search');
+    const source = select(form, '音源', []), query = field(form, '搜索在线歌曲', 'search'); query.maxLength = 128; query.placeholder = '输入歌名或歌手，按回车搜索';
+    const submit = h('button', 'btn primary', '搜索在线歌曲'); submit.type = 'submit'; form.append(submit);
+    const feedback = h('p', 'room-sub'); feedback.setAttribute('role', 'status'); feedback.setAttribute('aria-live', 'polite');
+    const results = h('div', 'room-online-results'), more = navigationButton('加载更多歌曲', () => search(true)); more.hidden = true;
+    const footer = h('div', 'room-toolbar'); footer.append(navigationButton('查看共同队列', () => { picker.close(); api.workspace().navigate('collaborate', true); }), navigationButton('浏览在线歌单 / 登录音源', () => { picker.close(); api.onNavigate('online'); }));
+    panel.append(form, feedback, results, more, footer);
+    let network = null, epoch = 0, offset = 0, committed = '', selectedSource = '', loaded = false, loading = false, readyPromise = null;
+    const rows = [];
+    const connectedHost = () => api.snapshot().mode === 'host';
+    const refresh = () => rows.forEach(({ add, track, pending }) => { add.disabled = pending || !track.playable || !connectedHost() || api.queueUncertain(); });
+    const cancel = () => { const interrupted = loading; epoch++; if (network) network.cancel(); network = null; loading = false; submit.disabled = false; more.disabled = false; more.hidden = true; if (interrupted) feedback.textContent = '搜索已取消，可重新搜索。'; };
+    async function ready() {
+      if (loaded) return;
+      if (readyPromise) return readyPromise;
+      readyPromise = (async () => {
+        feedback.textContent = '正在读取音源…';
+        try {
+          if (!global.Online) throw new Error('在线音源尚未就绪，请稍后重试或浏览在线歌单。');
+          await global.Online.whenSearchReady();
+          const sources = global.Online.sources();
+          source.replaceChildren();
+          global.Online.searchSources().forEach(id => { const info = sources.find(item => item.id === id); const option = h('option', '', global.Online.sourceLabel(id) || info && info.name || id); option.value = id; source.append(option); });
+          const preferred = global.Online.searchSource('song');
+          if ([...source.children].some(option => option.value === preferred)) source.value = preferred;
+          loaded = source.children.length > 0;
+          feedback.textContent = loaded ? '先选择音源，再搜索歌名或歌手。' : '当前没有可用音源，请先到在线音乐配置或登录。';
+          submit.disabled = !loaded;
+        } catch (error) { feedback.textContent = error.message || '音源读取失败，请重新打开点歌重试。'; }
+        finally { readyPromise = null; }
+      })();
+      return readyPromise;
+    }
+    async function search(append) {
+      if (loading || !connectedHost()) return;
+      const preparing = epoch; loading = true; submit.disabled = true;
+      if (!loaded) await ready();
+      if (preparing !== epoch) return;
+      loading = false; submit.disabled = false;
+      const q = query.value.trim();
+      if (!q) { feedback.textContent = '请输入歌名或歌手。'; query.focus(); return; }
+      if (!loaded) return;
+      if (!append) { cancel(); committed = q; selectedSource = source.value; offset = 0; rows.length = 0; results.replaceChildren(); network = api.beginOnlineSearch(); }
+      if (!network || !network.active) return;
+      const ticket = epoch, key = sessionKey(), ownerNetwork = network;
+      loading = true; submit.disabled = true; more.disabled = true; feedback.textContent = append ? '正在加载更多…' : '正在搜索…';
+      try {
+        const page = await ownerNetwork.get('/v1/online/search?' + new URLSearchParams({ source: selectedSource, q: committed, limit: 20, offset }));
+        if (ticket !== epoch || !current(key) || !ownerNetwork.active) return;
+        const tracks = page.tracks || [], seen = new Set(rows.map(row => row.track.source + ':' + row.track.id));
+        const before = rows.length;
+        tracks.forEach(track => {
+          track = { ...track, source: track.source || selectedSource };
+          if (seen.has(track.source + ':' + track.id)) return; seen.add(track.source + ':' + track.id);
+          const row = h('div', 'room-track room-online-track'), copy = h('div', 'room-track-copy');
+          copy.append(h('strong', '', track.title), h('small', 'room-sub', [track.artist || '未知歌手', track.album].filter(Boolean).join(' · ')));
+          const record = { track, pending: false }, add = record.add = button(track.playable ? '加入共同队列' : '暂不可播', async () => {
+            record.pending = true; refresh(); add.textContent = '正在加入…';
+            try { await api.addOnline([track]); if (current(key)) { add.textContent = '已加入 · 再点一次'; feedback.textContent = '已加入共同队列，按队列顺序播放。可继续点歌或查看共同队列。'; } }
+            catch (error) { if (current(key)) { add.textContent = api.queueUncertain() ? '等待确认' : '重试加入'; feedback.textContent = error.message || '未能加入，请重试。'; } throw error; }
+            finally { record.pending = false; if (current(key)) refresh(); }
+          });
+          if (!track.playable) add.title = '当前音源未提供可播放版本，请换一个音源搜索';
+          row.append(copy, add); results.append(row); rows.push(record);
+        });
+        const cursor = page.pagination, next = cursor && Number.isSafeInteger(cursor.next_offset) ? cursor.next_offset : offset + tracks.length;
+        more.hidden = !(next > offset && rows.length > before && (cursor ? cursor.has_more : page.total != null ? next < page.total : tracks.length >= 20)); offset = next;
+        feedback.textContent = rows.length ? '已找到 ' + rows.length + ' 首歌曲 · 点右侧按钮加入共同队列' : '没有找到歌曲，试试更短的关键词或其他音源。'; refresh();
+      } catch (error) {
+        if (ticket !== epoch || !current(key) || error.name === 'AbortError') return;
+        const failure = global.HertzSearch.failure(error); feedback.textContent = failure.label + '。' + (failure.retryable ? '请点击搜索重试。' : '请更换音源，或前往在线音乐登录。');
+      } finally { if (ticket === epoch) { loading = false; submit.disabled = false; more.disabled = false; } }
+    }
+    form.onsubmit = event => { event.preventDefault(); search(false); };
+    const invalidate = () => { cancel(); more.hidden = true; feedback.textContent = '搜索条件已改变，按回车重新搜索。'; };
+    query.oninput = invalidate; source.onchange = () => { invalidate(); results.replaceChildren(); rows.length = 0; };
+    return { panel, focus: query, ready, cancel, refresh };
+  }
   function mountActive() {
     const workspace = api.workspace(), pages = workspace.pages;
     const go = name => name === 'settings' ? workspace.openSettings('members') : workspace.navigate(name, true);
@@ -426,6 +536,7 @@
     seekLine.append(refs.position, refs.progress, refs.duration); stageControls.append(seekLine);
     const controls = h('div', 'room-player-controls'); refs.prev = button('上一首', () => playback('previous')); refs.play = button('播放', () => playback(api.snapshot().playing ? 'pause' : 'play'), 'primary room-play-button'); refs.next = button('下一首', () => playback('next')); refs.stop = button('停止', () => playback('stop')); iconButton(refs.prev, 'prev', '上一首'); iconButton(refs.next, 'next', '下一首'); iconButton(refs.stop, 'stop', '停止'); controls.append(refs.prev, refs.play, refs.next, refs.stop); stageControls.append(controls);
     const quick = h('div', 'room-player-quick');
+    const openStage = navigationButton('打开我的舞台', () => api.openStage(), 'room-open-stage'); openStage.title = '与大家同步听歌，独立选择自己的画面与效果'; quick.append(openStage);
     refs.songFavorite = h('div', 'room-song-favorite'); quick.append(refs.songFavorite);
     refs.quickMode = button('列表循环', () => api.cycleMode());
     const volumeLabel = h('label', 'room-player-volume', '本机音量'); refs.quickVolume = h('input'); refs.quickVolume.type = 'range'; refs.quickVolume.min = 0; refs.quickVolume.max = 100; refs.quickVolume.step = 1; refs.quickVolume.setAttribute('aria-label', '本机音量'); refs.quickVolume.onchange = () => run(() => api.localVolume(Number(refs.quickVolume.value) / 100)); volumeLabel.append(refs.quickVolume); quick.append(refs.quickMode, volumeLabel, navigationButton('共同队列', () => go('collaborate'))); stageControls.append(quick);
@@ -472,7 +583,10 @@
       selectAside(asideEntries[next].key); asideEntries[next].tab.focus({ preventScroll: true });
     }; });
     selectAside('queue'); playLayout.append(aside); pages.play.append(playLayout);
-    const picker = workspace.createEntryDialog('song-picker', '添加歌曲'); refs.openSongPicker = () => picker.open(refs.librarySearch);
+    const picker = workspace.createEntryDialog('song-picker', '添加歌曲');
+    const hostPicker = api.snapshot().mode === 'host', sourceTabs = h('div', 'room-song-source-tabs'); sourceTabs.setAttribute('role', 'tablist'); sourceTabs.setAttribute('aria-label', '点歌来源'); picker.body.append(sourceTabs);
+    const online = hostPicker ? mountOnlinePicker(picker.body, picker) : null;
+    let localPanel, localFocus, loadLocalPanel = () => {}, chosenSource = hostPicker ? 'online' : 'shared';
     const library = section(picker.body, '房间共享曲库');
     refs.librarySearch = field(library, '搜索已共享歌曲', 'search'); refs.librarySearch.placeholder = '歌名、歌手或专辑'; refs.librarySearch.maxLength = 128;
     refs.librarySearch.onkeydown = event => { if (event.key === 'Enter') { event.preventDefault(); run(() => api.searchLibrary(refs.librarySearch.value)); } };
@@ -480,7 +594,7 @@
     refs.library = h('div', 'room-list'); library.append(refs.library);
     refs.libraryNav = h('div', 'room-toolbar'); refs.libraryPrev = button('上一页', () => api.pageLibrary(-1)); refs.libraryNext = button('下一页', () => api.pageLibrary(1)); refs.libraryNav.append(refs.libraryPrev, refs.libraryNext); library.append(refs.libraryNav);
     if (api.snapshot().mode === 'host') {
-      const local = section(picker.body, '从本机点歌'), localQuery = field(local, '搜索本机歌曲', 'search');
+      const local = localPanel = section(picker.body, '从本机点歌'), localQuery = localFocus = field(local, '搜索本机歌曲', 'search');
       local.append(h('p', 'room-sub', '仅将你点选的歌曲分享给当前房间，并加入共同队列。已有分享范围会保留。'));
       const localResults = h('div', 'room-local-picker-results'), localNav = h('div', 'room-toolbar');
       let localOffset = 0, localGeneration = 0, localSearch = '';
@@ -507,9 +621,25 @@
       const search = button('搜索本机歌曲', () => { localOffset = 0; localSearch = localQuery.value.trim(); return searchLocal(); });
       localQuery.onkeydown = event => { if (event.key === 'Enter') { event.preventDefault(); run(() => { localOffset = 0; localSearch = localQuery.value.trim(); return searchLocal(); }); } };
       local.append(search, localResults, localNav, navigationButton('管理歌曲分享范围', () => { picker.close(); workspace.openSettings('sharing'); }));
-      const sharedOpen = refs.openSongPicker;
-      refs.openSongPicker = () => { sharedOpen(); if (!localResults.children.length) searchLocal(); };
+      loadLocalPanel = () => { if (!localResults.children.length) searchLocal(); };
     }
+    const sourcePanels = hostPicker ? [['online', '在线歌曲', online.panel, online.focus], ['local', '本机歌曲', localPanel, localFocus], ['shared', '房间已共享', library, refs.librarySearch]] : [['shared', '房间已共享', library, refs.librarySearch]];
+    const chooseSource = (id, focusTab) => {
+      chosenSource = id;
+      sourcePanels.forEach(([key, , panel, , tab]) => { panel.hidden = key !== id; tab.setAttribute('aria-selected', String(key === id)); tab.tabIndex = key === id ? 0 : -1; if (key === id && focusTab) tab.focus(); });
+      if (online && id !== 'online') online.cancel();
+      if (id === 'online') online.ready(); else if (id === 'local') loadLocalPanel();
+    };
+    sourcePanels.forEach((entry, index) => {
+      const [id, label, panel] = entry, tab = navigationButton(label, () => chooseSource(id)); entry.push(tab);
+      tab.id = 'room-song-source-' + id; tab.setAttribute('role', 'tab'); tab.setAttribute('aria-controls', tab.id + '-panel'); panel.id = tab.id + '-panel'; panel.setAttribute('role', 'tabpanel'); panel.setAttribute('aria-labelledby', tab.id);
+      tab.onkeydown = event => { const key = event.key; if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(key)) return; event.preventDefault(); const next = key === 'Home' ? 0 : key === 'End' ? sourcePanels.length - 1 : (index + (key === 'ArrowRight' ? 1 : -1) + sourcePanels.length) % sourcePanels.length; chooseSource(sourcePanels[next][0], true); };
+      sourceTabs.append(tab); panel.hidden = id !== chosenSource; tab.setAttribute('aria-selected', String(id === chosenSource)); tab.tabIndex = id === chosenSource ? 0 : -1;
+    });
+    refs.openSongPicker = () => { picker.open(sourcePanels.find(entry => entry[0] === chosenSource)[3]); chooseSource(chosenSource); };
+    refs.refreshSongPicker = () => { if (online) online.refresh(); };
+    refs.disposeSongPicker = () => { if (online) online.cancel(); };
+    picker.onClose = refs.disposeSongPicker;
     const inviteLayout = h('div', 'room-invite-layout'); pages.invite.append(inviteLayout);
     const invitationHelp = section(inviteLayout, '把音乐分享给身边的人');
     refs.roomCodeRow = h('div', 'room-code-row'); const codeLabel = h('div'); codeLabel.append(h('small', 'room-sub', '房间查找码')); refs.roomCode = h('strong', 'room-code'); codeLabel.append(refs.roomCode);

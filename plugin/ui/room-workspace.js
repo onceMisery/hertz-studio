@@ -44,6 +44,7 @@
           },
           close() {
             if (!node.open) return;
+            if (dialog.onClose) dialog.onClose();
             if (confirmResolve) { confirmResolve(false); confirmResolve = null; }
             verification.hidden = true; body.hidden = false;
             node.close();
