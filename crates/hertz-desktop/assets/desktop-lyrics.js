@@ -12,7 +12,11 @@
     secondaryCell: document.getElementById("secondary-cell"),
     fontValue: document.getElementById("font-value"),
     opacityValue: document.getElementById("opacity-value"),
+    sungColor: document.getElementById("sung-color"),
+    unsungColor: document.getElementById("unsung-color"),
   };
+  /** 面板与窗口底边之间留出的空隙（CSS px），与样式表 #options-panel 的 bottom 一致。 */
+  const PANEL_GAP = 6;
   const ipc = (payload) => {
     try {
       window.ipc.postMessage(JSON.stringify(payload));
@@ -46,10 +50,23 @@
     raf: 0,
     lastPaint: 0,
     optionsOpen: false,
+    panelHeight: -1,
+    panelFrame: 0,
+    hoverTimer: 0,
   };
 
   function trackId(snapshot) {
     return snapshot && snapshot.track ? snapshot.track.id : null;
+  }
+
+  function colorValue(value, fallback) {
+    const text = String(value || "").trim();
+    if (/^#[0-9a-f]{6}$/i.test(text)) return text.toLowerCase();
+    if (/^#[0-9a-f]{8}$/i.test(text)) return text.slice(0, 7).toLowerCase();
+    if (/^#[0-9a-f]{3}$/i.test(text)) {
+      return `#${text[1]}${text[1]}${text[2]}${text[2]}${text[3]}${text[3]}`.toLowerCase();
+    }
+    return fallback;
   }
 
   function applyConfig(config) {
@@ -78,6 +95,8 @@
     els.secondaryCell.hidden = layout === "single";
     els.fontValue.textContent = `${config.fontSize}px`;
     els.opacityValue.textContent = `${Math.round(config.opacity * 100)}%`;
+    els.sungColor.value = colorValue(config.sungColor, "#8fe3ff");
+    els.unsungColor.value = colorValue(config.unsungColor, "#ffffff");
     const limits = {
       "font-down": config.fontSize <= 18,
       "font-up": config.fontSize >= 72,
@@ -101,20 +120,41 @@
   }
 
   function setOptionsOpen(open, restoreFocus = true) {
+    open = Boolean(open);
     if (state.optionsOpen === open) return;
     state.optionsOpen = open;
-    document.body.classList.toggle("options-open", open);
     els.optionsPanel.hidden = !open;
     els.styleButton.setAttribute("aria-expanded", String(open));
     if (open) {
-      stopLoop();
-      els.optionsPanel.scrollTop = 0;
       els.optionsPanel.focus({ preventScroll: true });
+      schedulePanelMeasure();
     } else {
-      if (restoreFocus) els.styleButton.focus({ preventScroll: true });
+      if (restoreFocus && document.body.classList.contains("hovering")) {
+        els.styleButton.focus({ preventScroll: true });
+      }
+      schedulePanelMeasure();
       render();
       updateLoop();
     }
+  }
+
+  /** 样式条高度上报给宿主：窗口按这个高度向下长高，歌词区域原样保留。 */
+  function schedulePanelMeasure() {
+    if (state.panelFrame) return;
+    state.panelFrame = requestAnimationFrame(() => {
+      state.panelFrame = 0;
+      measurePanel();
+    });
+  }
+
+  function measurePanel() {
+    const height = state.optionsOpen
+      ? Math.ceil(els.optionsPanel.getBoundingClientRect().height) + PANEL_GAP
+      : 0;
+    if (height === state.panelHeight) return;
+    state.panelHeight = height;
+    root.style.setProperty("--panel-height", `${height}px`);
+    ipc({ cmd: "panel", value: height });
   }
 
   function setActive(active) {
@@ -450,7 +490,6 @@
   function canAnimate() {
     return Boolean(
       state.active &&
-        !state.optionsOpen &&
         state.snapshot &&
         state.snapshot.playing &&
         !state.snapshot.buffering &&
@@ -490,6 +529,7 @@
     setLocked,
     setActive,
     setSource,
+    setOptions: (open) => setOptionsOpen(open, false),
   };
 
   document.getElementById("drag").addEventListener("mousedown", (event) => {
@@ -529,6 +569,33 @@
       ipc({ cmd: "secondary", text: value });
     });
   });
+
+  const setHovering = (value) => {
+    if (document.body.classList.contains("hovering") === value) return;
+    document.body.classList.toggle("hovering", value);
+  };
+
+  document.documentElement.addEventListener("pointerenter", () => {
+    window.clearTimeout(state.hoverTimer);
+    setHovering(true);
+  });
+  document.documentElement.addEventListener("pointerleave", () => {
+    window.clearTimeout(state.hoverTimer);
+    state.hoverTimer = window.setTimeout(() => setHovering(false), 240);
+  });
+
+  document.querySelectorAll("[data-color]").forEach((input) => {
+    input.addEventListener("input", () => {
+      const target = input.dataset.color;
+      const variable = target === "sung" ? "--sung" : "--unsung";
+      root.style.setProperty(variable, input.value);
+      ipc({ cmd: "color", target, text: input.value });
+    });
+  });
+
+  if (typeof ResizeObserver === "function") {
+    new ResizeObserver(() => schedulePanelMeasure()).observe(els.optionsPanel);
+  }
 
   document.addEventListener("contextmenu", (event) => event.preventDefault());
   document.addEventListener("keydown", (event) => {

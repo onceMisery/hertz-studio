@@ -314,7 +314,7 @@ fn sanitize_wallpaper(wallpaper: &mut WallpaperConfig) {
     }
 }
 
-fn valid_color(value: &str) -> bool {
+pub(crate) fn valid_color(value: &str) -> bool {
     let Some(hex) = value.strip_prefix('#') else {
         return false;
     };

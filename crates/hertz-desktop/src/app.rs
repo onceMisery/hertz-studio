@@ -345,6 +345,10 @@ struct App {
     preview: Option<PreviewSurface>,
     position_edit: Option<PositionEdit>,
     placed_position: Option<(i32, i32)>,
+    /// 页面样式条高度（DIP）；展开时窗口向下长高，歌词区域保持原高度。
+    panel_height: f64,
+    /// 样式条展开期间的窗口顶边（物理像素），关掉面板后回到锚点定位。
+    panel_top: Option<i32>,
     proxy: EventLoopProxy<UserEvent>,
 }
 
@@ -1206,6 +1210,9 @@ impl App {
         self.policy.locked = false;
         self.policy.user_hidden = false;
         native::set_locked(self.hwnd(), false);
+        self.panel_height = 0.0;
+        self.panel_top = None;
+        self.eval("window.hertzLyrics && window.hertzLyrics.setOptions(false);");
         self.send_config();
         self.place(true);
         self.recompute_visibility();
@@ -1239,6 +1246,7 @@ impl App {
         self.policy.locked = self.config.lyrics.locked;
         native::set_locked(self.hwnd(), self.policy.locked);
         self.send_config();
+        self.panel_top = None;
         self.place(true);
         self.recompute_visibility();
         self.sync_tray();
@@ -1447,6 +1455,7 @@ impl App {
             self.eval("window.hertzLyrics && window.hertzLyrics.setLocked(false);");
             self.schedule_save();
         }
+        self.panel_top = None;
         self.place(true);
         native::show_no_activate(self.hwnd());
         native::focus(self.hwnd());
@@ -1496,6 +1505,8 @@ impl App {
             value: Option<f64>,
             #[serde(default)]
             text: Option<String>,
+            #[serde(default)]
+            target: Option<String>,
         }
         let Ok(command) = serde_json::from_str::<Command>(body) else {
             log("ignore malformed page command");
@@ -1554,6 +1565,34 @@ impl App {
                     self.send_config();
                     self.place(true);
                     self.schedule_save();
+                }
+            }
+            "color" => {
+                let (Some(target), Some(color)) = (command.target, command.text) else {
+                    return;
+                };
+                if !config::valid_color(&color) {
+                    log(&format!("ignore invalid color: {target}={color}"));
+                    return;
+                }
+                let color = color.to_ascii_lowercase();
+                let slot = match target.as_str() {
+                    "sung" => &mut self.config.lyrics.sung_color,
+                    "unsung" => &mut self.config.lyrics.unsung_color,
+                    other => {
+                        log(&format!("ignore unknown color target: {other}"));
+                        return;
+                    }
+                };
+                if *slot != color {
+                    *slot = color;
+                    self.send_config();
+                    self.schedule_save();
+                }
+            }
+            "panel" => {
+                if let Some(height) = command.value {
+                    self.set_panel_height(height);
                 }
             }
             "opacity" => {
@@ -2141,7 +2180,7 @@ impl App {
             .or_else(native::primary_work_area)
     }
 
-    fn height_dip(&self) -> f64 {
+    fn base_height_dip(&self) -> f64 {
         let lyrics = &self.config.lyrics;
         let lines = match lyrics.layout {
             Layout::Double => 2.0,
@@ -2149,6 +2188,26 @@ impl App {
         };
         let toolbar = if lyrics.locked { 0.0 } else { 30.0 };
         (lyrics.font_size * 1.55 * lines + 60.0 + toolbar).clamp(96.0, 360.0)
+    }
+
+    fn height_dip(&self) -> f64 {
+        (self.base_height_dip() + self.panel_height).clamp(96.0, 620.0)
+    }
+
+    /// 顶部不动的窗口高度调整：样式条只往下长，歌词不跳。
+    fn set_panel_height(&mut self, height: f64) {
+        let height = height.clamp(0.0, 480.0);
+        if (height - self.panel_height).abs() < 0.5 {
+            return;
+        }
+        if self.panel_height <= 0.0 && height > 0.0 {
+            self.panel_top = native::window_rect(self.hwnd()).map(|rect| rect.top);
+        }
+        self.panel_height = height;
+        if height <= 0.0 {
+            self.panel_top = None;
+        }
+        self.place(true);
     }
 
     fn place(&mut self, keep_anchor: bool) {
@@ -2170,6 +2229,9 @@ impl App {
         let available_y = (area.height() - height).max(0);
         let mut x = area.left + (f64::from(available_x) * anchor_x).round() as i32;
         let mut y = area.top + (f64::from(available_y) * anchor_y).round() as i32;
+        if let Some(top) = self.panel_top {
+            y = top.clamp(area.top, (area.top + available_y).max(area.top));
+        }
         if self.position_edit.is_some() {
             (x, y) = bounded_lyrics_position(x, y, width, height, &area);
             self.config.lyrics.anchor_x = f64::from(x - area.left) / f64::from(available_x.max(1));
@@ -2191,6 +2253,9 @@ impl App {
             );
         }
         self.placing = false;
+        if self.panel_height > 0.0 {
+            self.panel_top = Some(y);
+        }
         self.window.set_always_on_top(true);
         self.sync_webview_bounds(width_dip, height_dip);
         let rect = native::window_rect(self.hwnd()).map(|rect| {
@@ -2255,13 +2320,22 @@ impl App {
                 rect.top = y;
             }
         }
-        if area.width() <= width || area.height() <= height {
+        // 样式条占用的高度不属于持久位置：锚点仍按收起时的窗口高度换算。
+        let anchor_height = if self.panel_height > 0.0 {
+            (self.base_height_dip() * area.scale()).round() as i32
+        } else {
+            height
+        };
+        if self.panel_height > 0.0 {
+            self.panel_top = Some(rect.top);
+        }
+        if area.width() <= width || area.height() <= anchor_height {
             return;
         }
         self.config.lyrics.anchor_x =
             f64::from(rect.left - area.left) / f64::from(area.width() - width);
         self.config.lyrics.anchor_y =
-            f64::from(rect.top - area.top) / f64::from(area.height() - height);
+            f64::from(rect.top - area.top) / f64::from(area.height() - anchor_height);
         self.config.lyrics.anchor_x = self.config.lyrics.anchor_x.clamp(0.0, 1.0);
         self.config.lyrics.anchor_y = self.config.lyrics.anchor_y.clamp(0.0, 1.0);
         if self.config.lyrics.monitor.as_deref() != Some(area.name.as_str()) {
@@ -2405,8 +2479,11 @@ pub(crate) fn run() -> Result<()> {
     let proxy = event_loop.create_proxy();
     install_global_handlers(proxy.clone());
 
+    let icon = window_icon()?;
     let window = WindowBuilder::new()
         .with_title("Hertz 桌面歌词")
+        .with_window_icon(Some(icon.clone()))
+        .with_taskbar_icon(Some(icon))
         .with_inner_size(tao::dpi::LogicalSize::new(
             config.lyrics.width.max(240.0),
             160.0,
@@ -2519,6 +2596,8 @@ pub(crate) fn run() -> Result<()> {
         preview: None,
         position_edit: None,
         placed_position: None,
+        panel_height: 0.0,
+        panel_top: None,
         proxy: proxy.clone(),
     };
     app.policy.locked = app.config.lyrics.locked;
@@ -2952,8 +3031,11 @@ fn create_settings(
             )
         })
         .unwrap_or((1120.0, 740.0));
+    let icon = window_icon()?;
     let window = WindowBuilder::new()
         .with_title("桌面歌词与壁纸")
+        .with_window_icon(Some(icon.clone()))
+        .with_taskbar_icon(Some(icon))
         .with_inner_size(tao::dpi::LogicalSize::new(width, height))
         .with_min_inner_size(tao::dpi::LogicalSize::new(320.0, 420.0))
         .with_resizable(true)
@@ -3204,18 +3286,21 @@ fn page_html() -> String {
     )
 }
 
-fn tray_icon_image() -> Result<Icon> {
-    const SIZE: u32 = 32;
-    let mut rgba = vec![0u8; (SIZE * SIZE * 4) as usize];
-    for y in 0..SIZE {
-        for x in 0..SIZE {
-            let index = ((y * SIZE + x) * 4) as usize;
-            let dx = x as i32 - 16;
-            let dy = y as i32 - 16;
-            let in_disc = dx * dx + dy * dy <= 15 * 15;
-            let in_h = (9..=12).contains(&x) && (9..=22).contains(&y)
-                || (19..=22).contains(&x) && (9..=22).contains(&y)
-                || (12..=19).contains(&x) && (14..=17).contains(&y);
+/// 托盘与窗口共用的一枚图标：蓝色圆盘上写白色 H；几何值按 32 px 设计稿等比缩放。
+fn hertz_icon_pixels(size: u32) -> Vec<u8> {
+    let scale = f64::from(size) / 32.0;
+    let mut rgba = vec![0u8; (size * size * 4) as usize];
+    for y in 0..size {
+        for x in 0..size {
+            let index = ((y * size + x) * 4) as usize;
+            let px = f64::from(x) / scale;
+            let py = f64::from(y) / scale;
+            let dx = px - 16.0;
+            let dy = py - 16.0;
+            let in_disc = dx * dx + dy * dy <= 15.0 * 15.0;
+            let in_h = (9.0..13.0).contains(&px) && (9.0..23.0).contains(&py)
+                || (19.0..23.0).contains(&px) && (9.0..23.0).contains(&py)
+                || (12.0..20.0).contains(&px) && (14.0..18.0).contains(&py);
             let color = if in_h {
                 [245, 250, 255, 255]
             } else if in_disc {
@@ -3226,7 +3311,17 @@ fn tray_icon_image() -> Result<Icon> {
             rgba[index..index + 4].copy_from_slice(&color);
         }
     }
-    Ok(Icon::from_rgba(rgba, SIZE, SIZE)?)
+    rgba
+}
+
+fn tray_icon_image() -> Result<Icon> {
+    Ok(Icon::from_rgba(hertz_icon_pixels(32), 32, 32)?)
+}
+
+/// 任务栏/切换器按 150% 显示 48 px，用 64 px 源图缩放更干净。
+fn window_icon() -> Result<tao::window::Icon> {
+    tao::window::Icon::from_rgba(hertz_icon_pixels(64), 64, 64)
+        .map_err(|error| anyhow::anyhow!("生成窗口图标失败：{error}"))
 }
 
 fn run_wallpaper_feed_test(profile: Profile) -> Result<()> {

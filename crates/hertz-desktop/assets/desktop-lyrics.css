@@ -19,6 +19,7 @@ body {
 [hidden] { display: none !important; }
 
 #shell {
+  position: relative;
   width: 100%;
   height: 100%;
   display: flex;
@@ -39,6 +40,18 @@ body {
   border: 1px solid rgba(235, 228, 212, 0.18);
   border-radius: 10px;
   background: rgba(23, 23, 21, 0.94);
+  opacity: 0;
+  transform: translateY(-3px);
+  pointer-events: none;
+  transition: opacity 160ms ease, transform 160ms ease;
+}
+
+/* 指针离开窗口即收起工具栏；键盘聚焦时仍然可见。 */
+body.hovering #toolbar,
+#toolbar:focus-within {
+  opacity: 1;
+  transform: none;
+  pointer-events: auto;
 }
 
 body.locked #toolbar {
@@ -84,7 +97,7 @@ body.locked #toolbar {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  padding: 4px 24px 14px;
+  padding: 4px 24px calc(14px + var(--panel-height, 0px));
   gap: 4px;
   overflow: hidden;
 }
@@ -146,82 +159,53 @@ body.locked .notice {
   -webkit-text-stroke: var(--outline-width, 2px) var(--outline-color, #000);
 }
 
-body.options-open #toolbar,
-body.options-open #stage {
+body.locked #options-panel {
   display: none;
 }
 
+/* 样式条固定在歌词下方：窗口由宿主按上报高度向下长高，歌词区域不缩不让。 */
 #options-panel {
-  position: fixed;
-  inset: 6px;
+  position: absolute;
+  left: 50%;
+  bottom: 6px;
+  transform: translateX(-50%);
   z-index: 2;
+  width: max-content;
+  max-width: calc(100% - 16px);
   display: flex;
   flex-direction: column;
   gap: 4px;
-  padding: 8px 12px;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  scrollbar-width: thin;
-  border: 1px solid #49473e;
+  padding: 6px 10px;
+  border: 1px solid rgba(235, 228, 212, 0.16);
   border-radius: 12px;
-  background: rgba(21, 21, 18, 0.97);
+  background: rgba(20, 20, 18, 0.95);
   color: #eeeae1;
-  box-shadow: 0 8px 24px rgba(8, 8, 6, 0.45);
+  box-shadow: 0 10px 26px rgba(8, 8, 6, 0.42);
+  font: 500 12px/1.2 "Segoe UI", "Microsoft YaHei UI", sans-serif;
 }
 
 #options-panel:focus { outline: none; }
 #options-panel:focus-visible { outline: 2px solid #e4dfd0; outline-offset: 2px; }
 
-.options-head {
+.options-row {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-}
-
-.options-head h2 {
-  margin: 0;
-  font: 600 13px/1.2 "Segoe UI", "Microsoft YaHei UI", sans-serif;
-  letter-spacing: 0.02em;
-}
-
-.options-done {
-  -webkit-appearance: none;
-  appearance: none;
-  min-height: 26px;
-  padding: 4px 12px;
-  border: 1px solid #eeeae1;
-  border-radius: 7px;
-  background: #eeeae1;
-  color: #1b1b18;
-  font: 600 12px/1.2 "Segoe UI", "Microsoft YaHei UI", sans-serif;
-  cursor: pointer;
-  transition: background 150ms, border-color 150ms;
-}
-
-.options-done:hover { background: #fff; border-color: #fff; }
-.options-done:focus-visible { outline: 2px solid #e4dfd0; outline-offset: 2px; }
-
-.options-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 3px 20px;
-  align-content: start;
+  gap: 5px 14px;
+  min-width: 0;
 }
 
 .option-cell {
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
-  gap: 3px 10px;
+  gap: 6px;
+  min-height: 26px;
   min-width: 0;
-  min-height: 28px;
 }
 
 .option-label {
-  flex: 0 0 60px;
   color: #b3afa4;
-  font-size: 12px;
+  font-size: 11.5px;
   white-space: nowrap;
 }
 
@@ -241,8 +225,8 @@ body.options-open #stage {
   border-radius: 6px;
   background: transparent;
   color: #b5b1a5;
-  min-height: 24px;
-  padding: 3px 8px;
+  min-height: 22px;
+  padding: 2px 7px;
   font: 600 11.5px/1.2 "Segoe UI", "Microsoft YaHei UI", sans-serif;
   white-space: nowrap;
   cursor: pointer;
@@ -262,7 +246,9 @@ body.options-open #stage {
 
 .segmented button:focus-visible,
 .stepper button:focus-visible,
-.option-quit:focus-visible { outline: 2px solid #e4dfd0; outline-offset: 1px; }
+.color-field input:focus-visible,
+.option-quit:focus-visible,
+.options-done:focus-visible { outline: 2px solid #e4dfd0; outline-offset: 1px; }
 
 .stepper {
   display: inline-flex;
@@ -277,8 +263,8 @@ body.options-open #stage {
   border-radius: 6px;
   background: rgba(235, 228, 212, 0.04);
   color: #eeeae1;
-  min-height: 26px;
-  padding: 3px 8px;
+  min-height: 24px;
+  padding: 2px 7px;
   font: 600 11.5px/1.2 "Segoe UI", "Microsoft YaHei UI", sans-serif;
   white-space: nowrap;
   cursor: pointer;
@@ -293,30 +279,52 @@ body.options-open #stage {
 .stepper button:disabled { opacity: 0.4; cursor: default; }
 
 .stepper output {
-  min-width: 44px;
+  min-width: 38px;
   text-align: center;
   color: #eeeae1;
-  font: 600 12px/1.2 "Segoe UI", "Microsoft YaHei UI", sans-serif;
+  font: 600 11.5px/1.2 "Segoe UI", "Microsoft YaHei UI", sans-serif;
   font-variant-numeric: tabular-nums;
 }
 
-.options-foot {
-  display: flex;
+.colors {
+  display: inline-flex;
   align-items: center;
-  gap: 10px;
-  margin-top: auto;
-  padding-top: 3px;
-  border-top: 1px solid rgba(235, 228, 212, 0.1);
+  gap: 8px;
 }
 
-.options-hint {
-  flex: 1;
-  color: #8f8c82;
-  font-size: 11px;
-  min-width: 0;
-  overflow: hidden;
+.color-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #b3afa4;
+  font-size: 11.5px;
   white-space: nowrap;
-  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+.color-field input[type="color"] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid rgba(235, 228, 212, 0.34);
+  border-radius: 50%;
+  background: transparent;
+  cursor: pointer;
+}
+
+.color-field input[type="color"]::-webkit-color-swatch-wrapper { padding: 2px; }
+.color-field input[type="color"]::-webkit-color-swatch {
+  border: 0;
+  border-radius: 50%;
+}
+
+.option-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
 }
 
 .option-quit {
@@ -327,37 +335,32 @@ body.options-open #stage {
   background: transparent;
   color: #cba8a0;
   min-height: 24px;
-  padding: 4px 2px;
+  padding: 2px 0;
   font: 600 11.5px/1.2 "Segoe UI", "Microsoft YaHei UI", sans-serif;
+  white-space: nowrap;
   cursor: pointer;
 }
 
 .option-quit:hover { color: #f0c9bf; text-decoration: underline; }
 
-@media (max-width: 640px) {
-  .options-grid { grid-template-columns: minmax(0, 1fr); }
+.options-done {
+  -webkit-appearance: none;
+  appearance: none;
+  min-height: 24px;
+  padding: 3px 12px;
+  border: 1px solid #eeeae1;
+  border-radius: 7px;
+  background: #eeeae1;
+  color: #1b1b18;
+  font: 600 11.5px/1.2 "Segoe UI", "Microsoft YaHei UI", sans-serif;
+  cursor: pointer;
+  transition: background 150ms, border-color 150ms;
 }
 
-@media (max-width: 500px) {
-  .options-hint { display: none; }
-}
-
-/* 32px 双行的歌词窗口约 189 DIP；再矮就收紧间距，避免设置页出现滚动。 */
-@media (max-height: 189px) {
-  #options-panel { gap: 3px; padding: 6px 10px; }
-  .options-head h2 { font-size: 12px; }
-  .options-done { min-height: 22px; padding: 2px 10px; }
-  .options-grid { gap: 3px 16px; }
-  .option-cell { min-height: 24px; }
-  .segmented { padding: 1px; }
-  .segmented button { min-height: 20px; padding: 2px 6px; font-size: 11px; }
-  .stepper button { min-height: 22px; padding: 2px 6px; font-size: 11px; }
-  .stepper output { min-width: 38px; font-size: 11.5px; }
-  .options-foot { padding-top: 3px; }
-  .option-quit { min-height: 20px; font-size: 11px; }
-}
+.options-done:hover { background: #fff; border-color: #fff; }
 
 @media (prefers-reduced-motion: reduce) {
+  #toolbar,
   #toolbar button,
   .options-done,
   .segmented button,
