@@ -805,7 +805,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-plugin-hertz"
-version = "0.2.1"
+version = "0.3.0-preview"
 dependencies = [
  "anyhow",
  "dbx-plugin-sdk",
@@ -1630,7 +1630,7 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
 name = "hertz-desktop"
-version = "0.2.1"
+version = "0.3.0-preview"
 dependencies = [
  "anyhow",
  "dirs 5.0.1",
@@ -1646,7 +1646,7 @@ dependencies = [
 
 [[package]]
 name = "hertz-studio"
-version = "0.2.1"
+version = "0.3.0-preview"
 dependencies = [
  "aes",
  "ammonia",
@@ -5276,7 +5276,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vmusic-audio"
-version = "0.2.1"
+version = "0.3.0-preview"
 dependencies = [
  "arc-swap",
  "cpal",
@@ -5296,7 +5296,7 @@ dependencies = [
 
 [[package]]
 name = "vmusic-beats"
-version = "0.2.1"
+version = "0.3.0-preview"
 dependencies = [
  "num-complex",
  "rustfft",
@@ -5307,7 +5307,7 @@ dependencies = [
 
 [[package]]
 name = "vmusic-core"
-version = "0.2.1"
+version = "0.3.0-preview"
 dependencies = [
  "serde",
  "thiserror 2.0.20",
@@ -5315,7 +5315,7 @@ dependencies = [
 
 [[package]]
 name = "vmusic-lan"
-version = "0.2.1"
+version = "0.3.0-preview"
 dependencies = [
  "base64 0.22.1",
  "futures",
@@ -5342,7 +5342,7 @@ dependencies = [
 
 [[package]]
 name = "vmusic-library"
-version = "0.2.1"
+version = "0.3.0-preview"
 dependencies = [
  "symphonia",
  "thiserror 2.0.20",
@@ -5354,7 +5354,7 @@ dependencies = [
 
 [[package]]
 name = "vmusic-lyrics"
-version = "0.2.1"
+version = "0.3.0-preview"
 dependencies = [
  "roxmltree",
  "thiserror 2.0.20",
@@ -5363,7 +5363,7 @@ dependencies = [
 
 [[package]]
 name = "vmusic-store"
-version = "0.2.1"
+version = "0.3.0-preview"
 dependencies = [
  "anyhow",
  "serde",
