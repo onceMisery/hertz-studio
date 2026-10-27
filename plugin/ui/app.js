@@ -275,6 +275,7 @@ const ui = {
   barTitle: $('bar-title'),
   barSub: $('bar-sub'),
   barFavorite: $('bar-favorite'),
+  barDesktopSettings: $('bar-desktop-settings'),
   barTime: $('bar-time'),
   prev: $('prev'),
   playpause: $('playpause'),
@@ -9037,6 +9038,9 @@ async function startApp() {
   }
   // 歌词设置：偏移步进 100ms（±2000 封顶），正则改完失焦即存。
   // 桌面歌词是独立 Windows 组件：DBX 形态没有桌面入口，也不该在这里催用户安装。
+  if (ui.barDesktopSettings) {
+    ui.barDesktopSettings.hidden = !!(window.hertzHost && window.hertzHost.isDbx);
+  }
   if (ui.setDesktopLyricsRow) {
     ui.setDesktopLyricsRow.style.display =
       window.hertzHost && window.hertzHost.isDbx ? 'none' : '';
@@ -9075,11 +9079,12 @@ async function startApp() {
         .then(post);
     });
   };
-  if (ui.setWallpaperSettings) {
-    ui.setWallpaperSettings.onclick = () => {
+  for (const button of [ui.setWallpaperSettings, ui.barDesktopSettings]) {
+    if (!button) continue;
+    button.onclick = () => {
       wallpaperControl('wallpaper-settings', { tab: 'wallpaper' })
         .then(() => toast('已打开桌面歌词与壁纸'))
-        .catch((err) => toast(errText('打开桌面壁纸设置失败', err), 'error'));
+        .catch((err) => toast(errText('打开桌面歌词与壁纸失败', err), 'error'));
     };
   }
   if (ui.setWallpaperToggle) {

@@ -186,6 +186,27 @@
 
   // --- 文章列表 ---
 
+  async function refreshFeed(feedId, force) {
+    await T.post('/v1/reader/feeds/' + feedId + '/refresh', { force: force }, { timeoutMs: 30000 });
+    await loadFeeds();
+    if (st.currentFeed !== feedId) return;
+    await loadEntries(true);
+    // 源刷新也更新已打开的正文，否则旧的纯文本摘要会一直留在阅读区。
+    var current = st.current;
+    if (!current || current.feed_id !== feedId) return;
+    var epoch = st.detailEpoch;
+    var data = await T.get('/v1/reader/entries/' + current.id, { timeoutMs: 20000 });
+    if (epoch !== st.detailEpoch || st.currentFeed !== feedId || !data.entry) return;
+    var next = data.entry;
+    if (next.document_key === current.document_key && next.content_html === current.content_html
+      && next.summary === current.summary && next.content_status === current.content_status) return;
+    ++st.detailEpoch;
+    st.current = next;
+    st.imagesLoaded = false;
+    entryStatus('');
+    renderEntry();
+  }
+
   function openFeed(feedId) {
     st.currentFeed = feedId;
     renderFeeds();
@@ -193,9 +214,7 @@
     // 进入当前源时按需刷新：force=false 时服务端在 TTL 内直接复用缓存。
     var feed = findFeed(feedId);
     if (feed && feed.subscribed) {
-      T.post('/v1/reader/feeds/' + feedId + '/refresh', { force: false }, { timeoutMs: 30000 })
-        .then(function () { return loadFeeds(); })
-        .then(function () { if (st.currentFeed === feedId) return loadEntries(true); })
+      refreshFeed(feedId, false)
         .catch(function (error) {
           var detail = error && error.error;
           if (detail && detail.code === 'reader_busy') return;
@@ -366,8 +385,10 @@
     var content = entry.content_html;
     if (content) {
       var holder = document.createElement('div');
+      holder.className = 'reader-document';
       holder.innerHTML = content;
       sanitizeTree(holder);
+      formatDocument(holder);
       var images = holder.querySelectorAll('img');
       images.forEach(function (img) {
         var key = img.getAttribute('src') || '';
@@ -399,6 +420,7 @@
         note.textContent = '订阅源内容（可能仅含摘要）：';
         box.appendChild(note);
         var text = document.createElement('p');
+        text.className = 'reader-plain-text';
         text.textContent = entry.summary;
         box.appendChild(text);
       } else {
@@ -407,6 +429,46 @@
       if (entry.content_status === 'over_budget' || entry.content_status === 'over_limit') {
         entryStatus('正文因超出缓存预算未保存，请打开原文阅读。');
       }
+    }
+  }
+
+  function formatDocument(holder) {
+    // 一些新闻源把图片与说明作为相邻节点输出，合为 figure 后统一控制间距。
+    holder.querySelectorAll('figcaption').forEach(function (caption) {
+      if (caption.parentElement.tagName === 'FIGURE') return;
+      var previous = caption.previousElementSibling;
+      if (!previous || previous.tagName !== 'P' || previous.textContent.trim()
+        || !previous.querySelector('img') || previous.querySelectorAll('img').length !== 1
+        || previous.querySelector('br, hr, table, figure')) return;
+      var figure = document.createElement('figure');
+      previous.before(figure);
+      while (previous.firstChild) figure.appendChild(previous.firstChild);
+      previous.remove();
+      figure.appendChild(caption);
+    });
+    // 日报常用独占一段的粗体文字作栏目名；只提升紧接列表的短标题。
+    holder.querySelectorAll('p').forEach(function (paragraph) {
+      var bold = paragraph.firstElementChild;
+      var next = paragraph.nextElementSibling;
+      var text = paragraph.textContent.trim();
+      if (paragraph.children.length === 1 && bold && /^(STRONG|B)$/.test(bold.tagName)
+        && text && text.length <= 80 && text === bold.textContent.trim()
+        && next && /^(UL|OL)$/.test(next.tagName)) {
+        paragraph.classList.add('reader-section-heading');
+      }
+    });
+    holder.querySelectorAll('table').forEach(function (table) {
+      var wrapper = document.createElement('div');
+      wrapper.className = 'reader-table-wrap';
+      wrapper.tabIndex = 0;
+      wrapper.setAttribute('role', 'region');
+      var caption = table.querySelector('caption');
+      wrapper.setAttribute('aria-label', caption ? caption.textContent.trim() : '正文表格');
+      table.before(wrapper);
+      wrapper.appendChild(table);
+    });
+    if (!holder.querySelector('p, h1, h2, h3, h4, h5, h6, ul, ol, dl, pre, table, blockquote, div, figure')) {
+      holder.classList.add('reader-plain-text');
     }
   }
 
@@ -584,8 +646,7 @@
         return;
       }
       status('正在刷新…');
-      T.post('/v1/reader/feeds/' + feed.id + '/refresh', { force: true }, { timeoutMs: 30000 })
-        .then(function () { return Promise.all([loadFeeds(), loadEntries(true)]); })
+      refreshFeed(feed.id, true)
         .then(function () { status(''); })
         .catch(function (error) { status('刷新失败：' + describeError(error)); });
     });

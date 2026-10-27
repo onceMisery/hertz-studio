@@ -252,6 +252,43 @@ fn atom_xhtml_and_html_content_both_parse() {
 }
 
 #[test]
+fn atom_rich_summaries_preserve_structure_and_use_the_content_sanitizer() {
+    let xml = r#"<feed xmlns="http://www.w3.org/2005/Atom">
+        <title>Atom 日报</title>
+        <entry><id>html-summary</id><summary type="html" xml:base="https://cdn.example.com/news/">
+            &lt;p onclick="evil()"&gt;导读&lt;/p&gt;
+            &lt;h2&gt;产品更新&lt;/h2&gt;&lt;ul&gt;&lt;li&gt;&lt;a href="item"&gt;一条新闻&lt;/a&gt;&lt;/li&gt;&lt;/ul&gt;
+            &lt;img src="one.png" onerror="evil()"&gt;&lt;script&gt;evil()&lt;/script&gt;
+        </summary></entry>
+        <entry><id>xhtml-summary</id><content src="https://example.com/full"/>
+            <summary type="xhtml"><div xmlns="http://www.w3.org/1999/xhtml">
+                <p>第一段</p><p>第二段 <strong>重点</strong></p>
+            </div></summary></entry>
+        <entry><id>content-first</id><content type="html">&lt;p&gt;优先正文&lt;/p&gt;</content>
+            <summary type="html">&lt;p&gt;摘要&lt;/p&gt;</summary></entry>
+        <entry><id>plain-summary</id><summary type="text">普通摘要</summary></entry>
+    </feed>"#;
+    let data = cleaned(xml);
+    let html = data.entries[0].content_html.as_deref().unwrap();
+    assert!(html.contains("<h2>产品更新</h2><ul><li>"));
+    assert!(html.contains("href=\"https://cdn.example.com/news/item\""));
+    assert!(!html.contains("script") && !html.contains("onclick") && !html.contains("onerror"));
+    assert_eq!(
+        data.entries[0].images[0].1,
+        "https://cdn.example.com/news/one.png"
+    );
+    let xhtml = data.entries[1].content_html.as_deref().unwrap();
+    assert!(xhtml.contains("<p>第一段</p><p>第二段 <strong>重点</strong></p>"));
+    assert_eq!(
+        data.entries[2].content_html.as_deref(),
+        Some("<p>优先正文</p>")
+    );
+    assert!(data.entries[3].content_html.is_none());
+    assert_eq!(data.entries[3].content_status, "summary_only");
+    assert_eq!(data.entries[3].summary, "普通摘要");
+}
+
+#[test]
 fn guid_identity_ignores_link_changes_and_weak_ids_dedup() {
     let (feed_url, document_url) = urls();
     let first = parse_feed(&feed_url, &document_url, RSS.as_bytes()).unwrap();

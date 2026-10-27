@@ -12,10 +12,16 @@ const html = read('index.html');
 const start = html.indexOf('<!-- 阅读 -->');
 const end = html.indexOf('<!-- /阅读 -->', start);
 assert.ok(start >= 0 && end > start, 'reader view must be shipped');
+const spriteStart = html.indexOf('<svg id="icon-sprite"');
+const spriteEnd = html.indexOf('</svg>', spriteStart);
+const sprite = html.slice(spriteStart, spriteEnd + 6);
 
 const ENTRY_CONTENT = '<p onclick="evil()">第一段正文<script>alert(1)</script>'
   + '<a href="https://ok.example.com/src">来源</a><a href="javascript:alert(2)">坏链接</a>'
   + '<img src="__KEY__" alt="图一"><iframe src="https://evil.example.com"></iframe></p>';
+const dailyXml = fs.readFileSync(path.join(root, 'crates/hertz-studio/src/reader/fixtures/aihot-daily-2026-10-23.xml'), 'utf8');
+const DAILY_CONTENT = dailyXml.match(/<description><!\[CDATA\[([\s\S]*?)\]\]><\/description>/)[1];
+const DAILY_TITLE = dailyXml.match(/<title><!\[CDATA\[([\s\S]*?)\]\]><\/title>/)[1];
 
 async function main() {
   const browser = await chromium.launch({ channel: 'chrome', headless: true });
@@ -27,7 +33,7 @@ async function main() {
     page.on('request', request => requests.push(request.url()));
     await page.route('https://fixture.test/**', route => route.fulfill({ contentType: 'text/html', body: '<!doctype html><html><body></body></html>' }));
     await page.goto('https://fixture.test');
-    await page.setContent(html.slice(start, end));
+    await page.setContent('<!doctype html><html lang="zh-CN"><body>' + sprite + html.slice(start, end) + '</body></html>');
     for (const file of ['style.css', 'reader.css']) await page.addStyleTag({ content: read(file) });
     await page.addStyleTag({ content: 'body{padding:20px;overflow:auto}#view-reader{height:780px;width:100%;max-width:1140px;margin:auto}' });
     const imageKey = 'ab'.repeat(16);
@@ -41,6 +47,7 @@ async function main() {
       window.feeds = [feed('a'.repeat(40), '技术快报', 2), feed('b'.repeat(40), '长列表源', 35)];
       window.states = {};
       window.calls = [];
+      window.detailOverrides = {};
       const baseEntries = [
         { id: entryId('1'), feed_id: 'a'.repeat(40), title: '图文正文一篇', author: '作者甲',
           published_at: 1_791_930_000, original_url: 'https://blog.example.com/posts/1',
@@ -88,6 +95,7 @@ async function main() {
             if (tail === 'images') {
               return { data: 'R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', content_type: 'image/gif' };
             }
+            if (detailOverrides[id]) return { entry: { ...detailOverrides[id] } };
             if (id === entryId('1')) {
               return { entry: { id, feed_id: 'a'.repeat(40), title: '图文正文一篇', author: '作者甲',
                 published_at: 1_791_930_000, original_url: 'https://blog.example.com/posts/1',
@@ -221,6 +229,10 @@ async function main() {
     await page.waitForFunction(() => document.querySelector('#reader-load-images').textContent === '图片已加载');
     assert.equal(await page.locator('#reader-content img').isVisible(), true);
     assert.equal(await page.locator('.reader-image-placeholder').count(), 0);
+    await page.locator('#reader-refresh').click();
+    await page.waitForFunction(() => document.querySelector('#reader-status').textContent === '');
+    assert.equal(await page.locator('#reader-content img').isVisible(), true,
+      'refreshing an unchanged document preserves its loaded images');
     // 仅摘要条目：展示摘要说明与原文入口。
     await page.locator('.reader-entry-main').filter({ hasText: '仅摘要条目' }).first().click();
     await page.waitForFunction(() => document.querySelector('#reader-content').textContent.includes('只有摘要内容'));
@@ -304,10 +316,141 @@ async function main() {
     // Capture the settled theme, after the shared controls' color transitions.
     await page.waitForTimeout(300);
     await page.screenshot({ path: path.join(out, 'desktop-light.png') });
+
+    // 用截图中的真实日报验收：刷新旧摘要后立即替换当前正文，无需重选文章。
+    const dailyEntry = {
+      id: '2'.repeat(40), feed_id: 'a'.repeat(40), title: DAILY_TITLE,
+      author: 'noreply@aihot.news (AIHOT)', published_at: 1_792_713_618,
+      original_url: 'https://aihot.news/daily/2026-10-23', summary: '旧缓存中的纯文本摘要',
+      content_html: null, content_status: 'summary_only', document_key: 'legacy-daily',
+      images: [], is_read: true, starred: true,
+    };
+    await page.evaluate(entry => {
+      detailOverrides[entry.id] = entry;
+      feeds[0].title = 'AIHOT 日报';
+    }, dailyEntry);
+    await page.locator('.reader-entry-main').filter({ hasText: '仅摘要条目' }).click();
+    await page.waitForFunction(() => document.querySelector('#reader-content').textContent.includes('旧缓存中的纯文本摘要'));
+    await page.evaluate(({ id, html }) => {
+      detailOverrides[id] = { ...detailOverrides[id], content_html: html, content_status: 'cached', document_key: 'structured-daily' };
+    }, { id: dailyEntry.id, html: DAILY_CONTENT });
+    await page.locator('#reader-refresh').click();
+    await page.waitForFunction(() => document.querySelectorAll('#reader-content li').length === 12);
+    assert.equal(await page.locator('.reader-section-heading').count(), 3,
+      'standalone bold section labels introduce the three news lists');
+    assert.equal(await page.locator('#reader-content a[href]').count(), 13, 'daily source links remain usable');
+    await page.addStyleTag({ content: '#view-reader{height:calc(100dvh - 40px);max-width:none}#view-reader.reader-fullscreen{height:auto;width:auto}' });
+    await page.evaluate(() => Theme.apply('mineral'));
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await page.waitForTimeout(300);
+    const visualOut = path.join(root, 'output', 'playwright', 'reader');
+    fs.mkdirSync(visualOut, { recursive: true });
+    await page.screenshot({ path: path.join(visualOut, 'daily-desktop.png') });
+    await page.locator('#reader-fullscreen').click();
+    await page.setViewportSize({ width: 1920, height: 1080 });
+    const measure = await page.evaluate(() => {
+      const head = document.querySelector('#reader-entry-head').getBoundingClientRect();
+      const body = document.querySelector('#reader-content').getBoundingClientRect();
+      const paragraph = document.querySelector('#reader-content p').getBoundingClientRect();
+      const style = getComputedStyle(document.querySelector('#reader-content'));
+      return { left: Math.abs(head.left - body.left), width: Math.abs(head.width - body.width),
+        measure: body.width, paragraph: paragraph.width, fontSize: parseFloat(style.fontSize), color: style.color };
+    });
+    assert.ok(measure.left <= 1 && measure.width <= 1, 'article title and body share the same reading column');
+    assert.ok(measure.measure <= 736 && measure.measure >= 640, 'fullscreen keeps a comfortable reading measure');
+    assert.ok(measure.fontSize >= 16 && measure.fontSize <= 18, 'reading font stays independent of wide windows');
+    assert.equal(measure.color, await page.locator('.reader-article').evaluate(el => getComputedStyle(el).color),
+      'body uses the primary theme text color');
+    await page.screenshot({ path: path.join(visualOut, 'daily-fullscreen-dark.png') });
+    await page.evaluate(() => Theme.apply('chaoxi-day'));
+    await page.waitForTimeout(300);
+    await page.screenshot({ path: path.join(visualOut, 'daily-fullscreen-light.png') });
+    await page.setViewportSize({ width: 390, height: 844 });
+    assert.ok(await page.evaluate(() => document.querySelector('.reader-article').scrollWidth <= document.querySelector('.reader-article').clientWidth + 1),
+      'daily content fits a narrow reading pane');
+    await page.screenshot({ path: path.join(visualOut, 'daily-mobile.png') });
+
+    // 技术文章的表格与长代码独立滚动，不挤宽整篇文章，也不折叠代码换行。
+    const technicalContent = '<h2>一篇技术文章</h2><p>正文中保留 <strong>行内重点</strong> 与 <code>content_html</code>。</p>'
+      + '<blockquote><p>保留原文结构，让长文阅读更轻松。</p></blockquote>'
+      + '<pre><code>const message = "' + 'long-code-'.repeat(25) + '";\nconsole.log(message);</code></pre>'
+      + '<table><caption>渲染格式对照</caption><thead><tr>' + '<th>格式</th>'.repeat(8) + '</tr></thead>'
+      + '<tbody><tr>' + '<td>段落与列表</td>'.repeat(8) + '</tr></tbody></table>'
+      + '<p><strong>这是一段普通强调。</strong></p><p>后续说明。</p>';
+    await page.evaluate(({ id, html }) => {
+      detailOverrides[id] = { ...detailOverrides[id], title: '技术文章 · 格式与排版', content_html: html, document_key: 'technical' };
+    }, { id: dailyEntry.id, html: technicalContent });
+    await page.keyboard.press('Escape');
+    await page.locator('#reader-back').click();
+    await page.locator('.reader-entry-main').filter({ hasText: '仅摘要条目' }).click();
+    await page.waitForFunction(() => document.querySelector('.reader-table-wrap'));
+    assert.equal(await page.locator('.reader-section-heading').count(), 0, 'inline emphasis and bold paragraphs keep their meaning');
+    const overflow = await page.evaluate(() => {
+      const article = document.querySelector('.reader-article');
+      const code = document.querySelector('#reader-content pre');
+      const table = document.querySelector('.reader-table-wrap');
+      return { article: article.scrollWidth <= article.clientWidth + 1,
+        code: code.scrollWidth > code.clientWidth, table: table.scrollWidth > table.clientWidth,
+        whitespace: getComputedStyle(code).whiteSpace, label: table.getAttribute('aria-label'), tabIndex: table.tabIndex };
+    });
+    assert.deepEqual(overflow, { article: true, code: true, table: true, whitespace: 'pre', label: '渲染格式对照', tabIndex: 0 });
+    await page.screenshot({ path: path.join(visualOut, 'technical-mobile.png') });
+
+    // 真实新闻图注与 Rust 周报表格：保持源文字，不把英文单词拆成碎片。
+    const fragments = fs.readFileSync(path.join(root, 'evals/reader/rendering-v1/fragments.html'), 'utf8');
+    await page.evaluate(({ id, html }) => {
+      detailOverrides[id] = { ...detailOverrides[id], title: '真实源排版片段', content_html: html, document_key: 'real-fragments' };
+    }, { id: dailyEntry.id, html: fragments });
+    await page.locator('#reader-back').click();
+    await page.locator('.reader-entry-main').filter({ hasText: '仅摘要条目' }).click();
+    await page.waitForFunction(() => document.querySelector('#reader-content figure'));
+    const fragmentsAudit = await page.locator('#reader-content').evaluate(content => {
+      const figure = content.querySelector('figure');
+      const word = content.querySelector('tbody tr:nth-child(2) td').firstChild;
+      const range = document.createRange();
+      range.setStart(word, 0);
+      range.setEnd(word, 'Improvements'.length);
+      const table = content.querySelector('.reader-table-wrap');
+      return {
+        pairedCaption: figure.querySelector('figcaption').textContent,
+        pairedImages: figure.querySelectorAll('img').length,
+        figureCount: content.querySelectorAll('figure').length,
+        nestedFigures: content.querySelectorAll('figure figure').length,
+        prosePreserved: Array.from(content.querySelectorAll('p')).some(p => p.firstChild && p.firstChild.textContent === '带有说明的段落。' && p.querySelector('img')),
+        wordLines: new Set(Array.from(range.getClientRects(), rect => Math.round(rect.top))).size,
+        tableScrolls: table.scrollWidth > table.clientWidth,
+        pendingImages: content.querySelectorAll('img.reader-image-pending:not([src])').length,
+      };
+    });
+    assert.deepEqual(fragmentsAudit, {
+      pairedCaption: '▲ IT之家开箱：华为 Pura 70 Pro+「光织银」图赏', pairedImages: 1,
+      figureCount: 2, nestedFigures: 0, prosePreserved: true, wordLines: 1, tableScrolls: true, pendingImages: 3,
+    });
+    await page.screenshot({ path: path.join(visualOut, 'real-fragments-mobile.png') });
+
+    // 刷新发出的旧详情请求不能覆盖后来选中的文章。
+    await page.setViewportSize({ width: 1180, height: 860 });
+    await page.evaluate(() => {
+      const get = VMusicTransport.get;
+      VMusicTransport.get = function (url, ...args) {
+        if (url === '/v1/reader/entries/' + entryId('2')) {
+          return new Promise(resolve => { window.releaseReaderRefresh = () => resolve({ entry: { ...detailOverrides[entryId('2')], content_html: '<p>过期刷新</p>' } }); });
+        }
+        return get.call(this, url, ...args);
+      };
+    });
+    await page.locator('#reader-refresh').click();
+    await page.waitForFunction(() => !!window.releaseReaderRefresh);
+    await page.locator('.reader-entry-main').filter({ hasText: '图文正文一篇' }).click();
+    await page.waitForFunction(() => document.querySelector('#reader-entry-title').textContent === '图文正文一篇');
+    await page.evaluate(() => releaseReaderRefresh());
+    await page.waitForFunction(() => document.querySelector('#reader-status').textContent === '');
+    assert.equal(await page.locator('#reader-entry-title').textContent(), '图文正文一篇', 'late refresh preserves the selected article');
     assert.deepEqual(errors, []);
     console.log('Reader Chrome: unread badges, entry reading, client-side XSS hardening, deferred image proxy, '
       + 'read/star persistence, filters, cursor pagination, subscribe/unsubscribe/delete, recommended source link, '
-      + 'web fullscreen and narrow layout passed.');
+      + 'web fullscreen, structured daily rendering, refreshed article replacement, reading column alignment, '
+      + 'technical content overflow, real-source captions/tables and narrow layout passed.');
   } finally { await browser.close(); }
 }
 main().catch(err => { console.error(err); process.exitCode = 1; });

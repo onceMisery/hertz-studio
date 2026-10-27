@@ -237,14 +237,19 @@ fn entry_content(item: Node<'_, '_>, atom: bool) -> Option<Content> {
             }
         }
         let summary = child(item, "summary")?;
-        let value = text(summary);
+        let value = if summary.attribute("type") == Some("xhtml") {
+            serialize_children(summary)
+        } else {
+            text(summary)
+        };
         if value.trim().is_empty() {
             return None;
         }
+        let rich = matches!(summary.attribute("type"), Some("html" | "xhtml"));
         return Some(Content {
+            raw_html: rich.then(|| value.clone()),
             text: value,
-            raw_html: None,
-            xml_base: None,
+            xml_base: summary.attribute((XML_BASE_NS, "base")).map(str::to_string),
         });
     }
     let encoded = item.children().find(|n| {
