@@ -223,9 +223,25 @@ function run(nodeArgs, label) {
   const res = spawnSync(process.execPath, nodeArgs, { cwd: ROOT, encoding: 'utf8' });
   const ms = Date.now() - t0;
   const ok = res.status === 0;
-  const tail = String(res.stdout || '').trim().split('\n').slice(-1)[0] || '';
-  const errTail = String(res.stderr || '').trim().split('\n').slice(0, 6).join('\n');
-  return { ok, ms, label, tail, errTail, stdout: res.stdout || '', stderr: res.stderr || '' };
+  const stdout = res.stdout || '';
+  const stderr = res.stderr || '';
+  // 子进程被信号杀死时 spawnSync 只填 signal（status 是 null），根本没起来时只填 error。
+  // 这两种都不会留下 stderr，于是「runner 把进程宰了」和「检查自己断言失败」在报告里
+  // 长得一模一样——2026-10-27 macOS 那次红就只剩一句 (无输出)，谁都判不出死因。
+  const death = res.error ? `killed before start: ${res.error.code || res.error.message}`
+    : res.signal ? `killed by signal: ${res.signal}` : '';
+  const tail = stdout.trim().split('\n').slice(-1)[0] || '';
+  const errTail = stderr.trim().split('\n').slice(0, 6).join('\n');
+  return { ok, ms, label, tail, errTail, stdout, stderr, death };
+}
+
+// 失败报告要自己分清是哪一类：断言红是产品问题，进程被终止是仪器/runner 问题。
+// 分不开时两者都只剩一句「无输出」，读日志的人只能靠猜——猜错就会去改产品代码。
+function reportFailure(r, name, why) {
+  console.log(`  ✗ ${name}${r.death ? '  ' + r.death : ''}`);
+  console.log('    ' + (r.errTail || r.tail || '(没有任何输出)').split('\n').join('\n    '));
+  if (r.death) console.log('    子进程被终止/没能启动，不是断言失败：重跑这一格，连着两次才当代码问题查。');
+  if (why) console.log('    这一步在防的失败：' + why);
 }
 
 function main() {
@@ -243,6 +259,8 @@ function main() {
   let passed = 0;
   let skipped = 0;
   let ran = 0;
+  // 只统计「进程被终止/没起来」这一类失败：它们要重跑 CI，不是改代码的对象。
+  let killed = 0;
 
   console.log('阶段 1/4 语法（node --check）');
   const files = syntaxTargets();
@@ -254,8 +272,8 @@ function main() {
     if (!r.ok) {
       syntaxBad += 1;
       failures += 1;
-      console.log('  ✗ ' + rel);
-      console.log('    ' + r.stderr.trim().split('\n').slice(0, 4).join('\n    '));
+      if (r.death) killed += 1;
+      reportFailure(r, rel, '');
     }
   }
   console.log(`  ${files.length} 个文件，${syntaxBad ? syntaxBad + ' 个语法错误（后面几步的意义已经打折）' : '全部通过'}`);
@@ -282,9 +300,8 @@ function main() {
         console.log(`  – ${step.script}  缺环境（playwright 或服务没起），不算产品失败`);
       } else {
         failures += 1;
-        console.log(`  ✗ ${step.script}`);
-        console.log('    ' + (r.errTail || r.tail || '(无输出)').split('\n').join('\n    '));
-        console.log('    这一步在防的失败：' + step.why);
+        if (r.death) killed += 1;
+        reportFailure(r, step.script, step.why);
       }
     }
   }
@@ -318,13 +335,15 @@ function main() {
           console.log(`  – ${f}  缺环境（playwright 或服务没起）`);
         } else {
           failures += 1;
-          console.log(`  ✗ ${f}\n    ` + (r.errTail || r.tail || '').split('\n').join('\n    '));
+          if (r.death) killed += 1;
+          reportFailure(r, f, '');
         }
       }
     }
   }
 
   console.log(`\n前端检查聚合：通过 ${passed} 步，失败 ${failures} 步`
+    + (killed ? `（其中 ${killed} 步是子进程被终止/没起来，不是断言失败）` : '')
     + (skipped ? `，环境缺件跳过 ${skipped} 步` : '')
     + `（默认集合与 ci.yml 的 Frontend contract checks 等价；--extra 的那批 CI 暂不跑）`);
   // 一步都没跑却报绿，是聚合入口最坏的失效：它会让人以为全查过了。
