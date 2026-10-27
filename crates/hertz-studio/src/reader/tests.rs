@@ -124,16 +124,85 @@ fn rss_blog_fixture_keeps_articles_and_skips_audio() {
         first.original_url.as_deref(),
         Some("https://blog.example.com/posts/1")
     );
-    let summary_only = &data.entries[1];
-    assert!(summary_only.raw_html.is_none() && summary_only.content_present);
-    assert_eq!(summary_only.published_at, None);
-    assert_eq!(summary_only.summary, "只有摘要内容");
+    let description = &data.entries[1];
+    assert_eq!(description.raw_html.as_deref(), Some("<p>只有摘要内容</p>"));
+    assert!(description.content_present);
+    assert_eq!(description.published_at, None);
+    assert_eq!(description.summary, "只有摘要内容");
     let link_only = &data.entries[2];
     assert!(link_only.title.starts_with("未命名"));
     let weak = &data.entries[3];
     assert!(weak.weak);
     assert!(weak.identity.starts_with("weak:"));
     assert!(weak.original_url.is_none());
+}
+
+#[test]
+fn rss_description_preserves_aihot_daily_structure() {
+    let xml = include_str!("fixtures/aihot-daily-2026-10-23.xml");
+    let url = Url::parse("https://aihot.news/feed/daily.xml").unwrap();
+    let data = parse_and_clean(&url, &url, xml.as_bytes()).unwrap();
+    assert_eq!(data.entries.len(), 1);
+    let entry = &data.entries[0];
+    assert_eq!(entry.content_status, "cached");
+    let html = entry
+        .content_html
+        .as_deref()
+        .expect("description HTML is cached");
+    assert_eq!(html.matches("<p>").count(), 5);
+    assert_eq!(html.matches("<ul>").count(), 3);
+    assert_eq!(html.matches("<li>").count(), 12);
+    assert!(html.contains("<strong>产品发布/更新</strong>"));
+    assert!(html.contains("<strong>行业动态</strong>"));
+    assert!(html.contains("<strong>论文研究</strong>"));
+    assert!(html.contains("href=\"https://aihot.news/items/xffhf8h0e0r145getmi9k1zgs\""));
+    assert!(entry.summary.starts_with("作者复盘 PHP2Shell 事件"));
+    assert!(!entry.summary.contains('<'));
+    assert_eq!(
+        entry.original_url.as_deref(),
+        Some("https://aihot.news/daily/2026-10-23")
+    );
+}
+
+#[test]
+fn rss_description_uses_the_same_sanitizer_and_content_priority() {
+    let xml = r#"<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+        <channel><title>RSS HTML</title>
+        <item><guid>html</guid><description xml:base="https://cdn.example.com/news/"><![CDATA[
+            <p onclick="evil()">摘要<script>evil()</script><img src="one.png" onerror="evil()"></p>
+            <ul><li><a href="article">来源</a><a href="javascript:evil()">危险链接</a></li></ul>
+            <iframe src="https://evil.example.com"></iframe>
+        ]]></description></item>
+        <item><guid>encoded</guid><description>&lt;p&gt;摘要&lt;/p&gt;</description>
+            <content:encoded><![CDATA[<p>优先正文</p>]]></content:encoded></item>
+        <item><guid>escaped</guid><description>&lt;p&gt;转义段落&lt;/p&gt;</description>
+            <content:encoded> </content:encoded></item>
+        <item><guid>plain</guid><description>普通文字 &amp; 中文</description></item>
+        </channel></rss>"#;
+    let data = cleaned(xml);
+    let first = &data.entries[0];
+    let html = first.content_html.as_deref().unwrap();
+    assert!(html.contains("<ul><li>"));
+    assert!(html.contains("href=\"https://cdn.example.com/news/article\""));
+    for unsafe_text in ["script", "iframe", "onclick", "onerror", "evil()"] {
+        assert!(!html.contains(unsafe_text), "must strip {unsafe_text}");
+    }
+    assert_eq!(first.images.len(), 1);
+    assert_eq!(first.images[0].1, "https://cdn.example.com/news/one.png");
+    assert!(html.contains(&format!("src=\"{}\"", first.images[0].0)));
+    assert_eq!(
+        data.entries[1].content_html.as_deref(),
+        Some("<p>优先正文</p>")
+    );
+    assert_eq!(
+        data.entries[2].content_html.as_deref(),
+        Some("<p>转义段落</p>")
+    );
+    assert_eq!(
+        data.entries[3].content_html.as_deref(),
+        Some("普通文字 &amp; 中文")
+    );
+    assert_eq!(data.entries[3].summary, "普通文字 & 中文");
 }
 
 #[test]

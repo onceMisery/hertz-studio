@@ -572,8 +572,13 @@ pub async fn refresh(ctx: &online::Ctx, feed_id: &str, force: bool) -> ApiResult
                     fetched_at: feed.fetched_at.unwrap_or_default(),
                 });
             }
-            let fetched =
-                fetch_feed(&url, feed.etag.as_deref(), feed.last_modified.as_deref()).await?;
+            // 手动刷新也绕过 HTTP 条件缓存，让旧解析器保存的内容重新经过清洗。
+            let (etag, last_modified) = if force {
+                (None, None)
+            } else {
+                (feed.etag.as_deref(), feed.last_modified.as_deref())
+            };
+            let fetched = fetch_feed(&url, etag, last_modified).await?;
             match fetched {
                 Fetched::NotModified => {
                     store::touch_fetched(&task_ctx, &task_id).await?;

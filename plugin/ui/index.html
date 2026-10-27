@@ -730,6 +730,9 @@
         </div>
         <div class="col-tools">
           <button id="reader-refresh" class="btn" type="button" disabled title="选择一个订阅源后刷新">刷新当前源</button>
+          <button id="reader-fullscreen" class="btn reader-fullscreen-btn" type="button" aria-pressed="false" title="网页全屏" aria-label="网页全屏">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-fullscreen"/></svg>
+          </button>
         </div>
       </div>
       <div class="reader-layout">
@@ -741,6 +744,13 @@
           </form>
           <button id="reader-all" class="reader-all active" type="button" aria-pressed="true">全部订阅<span id="reader-total" class="reader-unread" hidden></span></button>
           <ul id="reader-feed-list" class="reader-feed-list" role="list"></ul>
+          <section class="reader-picks" aria-labelledby="reader-picks-title">
+            <h3 id="reader-picks-title" class="reader-pane-title">推荐</h3>
+            <a class="reader-pick" href="https://jackyst0.github.io/awesome-rsshub-routes/" target="_blank" rel="noopener noreferrer">
+              <span class="reader-pick-title">RSS 源列表 · Awesome RSSHub Routes</span>
+              <span class="reader-pick-note">按网站与分类查找可订阅的公开 RSS 源</span>
+            </a>
+          </section>
         </aside>
         <section class="reader-list-pane" aria-label="文章列表">
           <p id="reader-status" class="reader-status" role="status" aria-live="polite"></p>

@@ -114,6 +114,55 @@
   padding: var(--sp-2);
 }
 
+/* 推荐源：公开的 RSS 源列表是发现入口，不属于订阅数据，固定挂在左栏底部。 */
+.reader-picks {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  border-top: 1px solid var(--line);
+  padding-top: var(--sp-3);
+}
+.reader-picks .reader-pane-title { margin: 0; }
+.reader-pick {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--sp-2);
+  border-radius: var(--r-sm);
+  color: var(--text);
+  text-decoration: none;
+}
+.reader-pick:hover { background: var(--hover); }
+.reader-pick-title { color: var(--accent); font-size: var(--fs-sm); }
+.reader-pick-note { color: var(--muted); font-size: var(--fs-sm); line-height: 1.5; }
+
+.reader-fullscreen-btn { display: inline-flex; align-items: center; justify-content: center; padding: 0 var(--sp-3); }
+.reader-fullscreen-btn svg { width: 18px; height: 18px; }
+
+/* 网页全屏：盖住导航与播放侧栏，把正文留给阅读；同一按钮或 Esc 退出。 */
+#view-reader.reader-fullscreen {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  padding: 0;
+  background: var(--bg);
+}
+#view-reader.reader-fullscreen .col-head { padding: var(--sp-4) var(--sp-5) 14px; }
+#view-reader.reader-fullscreen .reader-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  gap: 0;
+  padding: 0 var(--sp-5) var(--sp-5);
+}
+#view-reader.reader-fullscreen .reader-feeds,
+#view-reader.reader-fullscreen .reader-list-pane { display: none; }
+#view-reader.reader-fullscreen .reader-article { display: flex; }
+#view-reader.reader-fullscreen .reader-article > .reader-entry-head,
+#view-reader.reader-fullscreen .reader-article > .reader-content,
+#view-reader.reader-fullscreen .reader-article > .reader-status { max-width: 76ch; }
+
 .reader-status {
   color: var(--muted);
   font-size: var(--fs-sm);
@@ -253,10 +302,14 @@
     grid-template-columns: minmax(210px, .8fr) minmax(0, 1.2fr);
     grid-template-rows: auto minmax(0, 1fr);
   }
-  .reader-feeds { grid-column: 1 / -1; display: grid; grid-template-columns: minmax(180px, 230px) minmax(0, 1fr); grid-template-rows: auto auto auto; max-height: 160px; }
+  .reader-feeds { grid-column: 1 / -1; display: grid; grid-template-columns: minmax(180px, 230px) minmax(0, 1fr); grid-template-rows: auto auto auto auto; max-height: 200px; }
   .reader-pane-title, .reader-add, .reader-all { grid-column: 1; }
   .reader-pane-title { margin: 0; }
   .reader-feed-list { grid-column: 2; grid-row: 1 / 4; border-left: 1px solid var(--line); padding-left: var(--sp-4); }
+  .reader-picks { grid-column: 1 / -1; grid-row: 4; flex-direction: row; align-items: baseline; gap: var(--sp-2); }
+  .reader-picks .reader-pane-title { margin: 0; }
+  .reader-pick { flex-direction: row; align-items: baseline; gap: var(--sp-2); padding: 0; }
+  .reader-pick-note { display: none; }
 }
 
 @container (max-width: 640px) {

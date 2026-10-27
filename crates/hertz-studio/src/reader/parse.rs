@@ -20,8 +20,8 @@ const ATOM_NS: &str = "http://www.w3.org/2005/Atom";
 const CONTENT_NS: &str = "http://purl.org/rss/1.0/modules/content/";
 const XML_BASE_NS: &str = "http://www.w3.org/XML/1998/namespace";
 
-/// 正文档位由 `raw_html` 是否存在区分：Some = 源内提供完整正文；None =
-/// 只有摘要语义（或只有标题/链接），正文入口在原文。
+/// `raw_html` 保存源内可渲染的 HTML（含 RSS description），不代表已取得全文；
+/// None 时只提供纯文本摘要或标题/原文链接。
 pub(super) struct ParsedEntry {
     /// `guid:<sha1>` / `url:<sha1>` / `weak:<sha1>`；`weak` 表示无稳定身份。
     pub identity: String,
@@ -31,7 +31,7 @@ pub(super) struct ParsedEntry {
     pub published_at: Option<i64>,
     pub original_url: Option<String>,
     pub summary: String,
-    /// 待清洗的源内正文（Full 档位才有）。
+    /// 待清洗的源内 HTML，可为全文或摘要。
     pub raw_html: Option<String>,
     /// 正文根的 xml:base（若源提供）；清洗时优先于响应地址。
     pub content_base: Option<String>,
@@ -196,7 +196,7 @@ fn parse_entry(item: Node<'_, '_>, document_url: &Url, atom: bool) -> Option<Par
 struct Content {
     /// 供摘要与清洗用的正文文本（html 或 xhtml 序列化结果）。
     text: String,
-    /// Some = 完整正文（待清洗）；None = 仅摘要语义。
+    /// 源内 HTML（待清洗）；None = 仅提供纯文本展示。
     raw_html: Option<String>,
     xml_base: Option<String>,
 }
@@ -268,9 +268,13 @@ fn entry_content(item: Node<'_, '_>, atom: bool) -> Option<Content> {
         return None;
     }
     Some(Content {
-        text: value,
-        raw_html: None,
-        xml_base: None,
+        text: value.clone(),
+        // RSS description 允许 HTML，不能先转成纯文本，否则会丢失段落与链接。
+        // 与 content:encoded 走相同的清洗、图片登记和正文预算。
+        raw_html: Some(value),
+        xml_base: description
+            .attribute((XML_BASE_NS, "base"))
+            .map(str::to_string),
     })
 }
 

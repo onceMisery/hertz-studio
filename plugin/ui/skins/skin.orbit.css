@@ -132,6 +132,9 @@
   box-shadow: none; backdrop-filter: none; transform: none; overflow: visible; z-index: auto;
 }
 [data-skin="orbit"] .orbit-main > .stage::before { content: none; }
+/* 阅读是整页工作区：顶部舞台（正在播放）会把三栏压到下半屏。一起听视图
+   已经用 room-view 关掉舞台；阅读没有对应的 body 标记，按活动视图判定。 */
+[data-skin="orbit"] .orbit-main:has(> .column > #view-reader:not([hidden])) > .stage { display: none; }
 [data-skin="orbit"] #stage { background: transparent; }
 [data-skin="orbit"] #stage > :is(.creative-canvas, .hd-layer, .lp-dock, .stage-fx, .stage-dots, .stage-particles, .stage-ripple) { display: none; }
 [data-skin="orbit"] .orbit-info { min-width: 0; align-self: center; padding-bottom: 8px; }

@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Snapshot from https://aihot.news/feed/daily.xml, fetched 2026-10-27. -->
+<rss version="2.0"><channel><title>AIHOT 日报</title>
+    <item>
+      <title><![CDATA[AIHOT 日报 · 2026-10-23 — AI 挖出潜伏十几年的 PHP 底层漏洞，PHP2Shell 事件全景复盘]]></title>
+      <link>https://aihot.news/daily/2026-10-23</link>
+      <description><![CDATA[<p>作者复盘 PHP2Shell 事件：两个 CVSS 满分定为 9.2 分的 PHP 远程代码执行漏洞（CVE-2026-109618 和 CVE-2026-109619）在补丁发布前泄露，攻击演示视频外流，多国政府网站预防性下线，OpenAI 认领漏洞由 GPT-5.6 Sol 辅助发现。</p>
+<p><strong>产品发布/更新</strong></p>
+<ul><li><a href="https://aihot.news/items/xffhf8h0e0r145getmi9k1zgs">OpenAI 正式发布 Decisions API，面向低延迟低成本小决策</a></li><li><a href="https://aihot.news/items/ybo2q5ug2e71tfuab9m1t128o">Claude 网页、桌面和移动端将默认启用 auto mode</a></li><li><a href="https://aihot.news/items/h1d0qu9nsy86fmfqns5f3pkjb">Replit 发布 Monitoring Agent，为应用提供可自动修复并部署的值班智能体</a></li></ul>
+<p><strong>行业动态</strong></p>
+<ul><li><a href="https://aihot.news/items/h1v8wxdkljwpiyadhmy7miw4x">AI 挖出潜伏十几年的 PHP 底层漏洞，PHP2Shell 事件全景复盘</a></li><li><a href="https://aihot.news/items/eud25k8zsrrwc63xp39ptvfah">Bloomberg 报道 DeepSeek 新一轮融资约 150 亿美元</a></li><li><a href="https://aihot.news/items/nag5wgod0havrmodeo75pwnge">WSJ：马斯克希望以 AI 为核心推动 SpaceX 与 Tesla 合并</a></li><li><a href="https://aihot.news/items/p74ybrpplgjfi3d8ql7fz0z6k">Anthropic 将 Agent Skills 开放标准捐赠给 Linux Foundation 旗下 Agentic AI Foundation</a></li><li><a href="https://aihot.news/items/shd9gpw42uwoxqtenpzhy1je4">Anthropic 股权表内幕：风投迟到多年，如今无人持股超 2%</a></li><li><a href="https://aihot.news/items/n6afjfxhq6vadobu4p0lm6tzm">Wiz 披露 ARTEX 智能体被 Storm-0940 用于攻击 IT 和软件厂商</a></li></ul>
+<p><strong>论文研究</strong></p>
+<ul><li><a href="https://aihot.news/items/r7uwz6n0sd6jr2r0tb1fu3o0u">Microsoft AI 发布 SDBench 基准与 MAI-DxO 诊断系统，登 Science</a></li><li><a href="https://aihot.news/items/fcw2s1pdclkgm5kmg2qwginp7">METR 与 Redwood Research 红队测试 OpenAI 内部智能体监控系统，发现多个漏洞</a></li><li><a href="https://aihot.news/items/jsr18rtgxl0kvb0k7np7lpyou">Anthropic 用 Claude 对 123 个开源库完成汇编级形式化安全证明</a></li></ul>
+<p>via AIHOT · <a href="https://aihot.news/daily/2026-10-23">https://aihot.news/daily/2026-10-23</a></p>]]></description>
+      <pubDate>Fri, 23 Oct 2026 00:00:18 GMT</pubDate>
+      <guid isPermaLink="false">daily-2026-10-23</guid>
+      <author>noreply@aihot.news (AIHOT)</author>
+    </item>
+</channel></rss>

@@ -522,6 +522,35 @@
     }
   }
 
+  // --- 网页全屏 ---
+
+  function fullscreenActive() {
+    var view = $('view-reader');
+    return !!view && view.classList.contains('reader-fullscreen');
+  }
+
+  function syncFullscreenButton() {
+    var button = $('reader-fullscreen');
+    if (!button) return;
+    var on = fullscreenActive();
+    button.setAttribute('aria-pressed', String(on));
+    button.title = on ? '退出网页全屏' : '网页全屏';
+    button.setAttribute('aria-label', button.title);
+    var use = button.querySelector('use');
+    if (use) use.setAttribute('href', on ? '#i-compress' : '#i-fullscreen');
+  }
+
+  function setFullscreen(on) {
+    var view = $('view-reader');
+    if (!view || fullscreenActive() === on) return;
+    view.classList.toggle('reader-fullscreen', on);
+    syncFullscreenButton();
+    var target = on
+      ? (document.querySelector('#reader-entry-head:not([hidden]) h2') || $('reader-fullscreen'))
+      : $('reader-fullscreen');
+    if (target) target.focus({ preventScroll: true });
+  }
+
   // --- 入口 ---
 
   function setFilter(filter) {
@@ -566,7 +595,14 @@
     $('reader-load-images').addEventListener('click', loadImages);
     $('reader-all').addEventListener('click', function () { openFeed(null); });
     $('reader-retry').addEventListener('click', function () { if (st.selectedId) openEntry(st.selectedId); });
+    $('reader-fullscreen').addEventListener('click', function () { setFullscreen(!fullscreenActive()); });
+    $('view-reader').addEventListener('keydown', function (event) {
+      if (event.key !== 'Escape' || !fullscreenActive() || event.defaultPrevented) return;
+      event.preventDefault();
+      setFullscreen(false);
+    });
     $('reader-back').addEventListener('click', function () {
+      if (fullscreenActive()) setFullscreen(false);
       $('view-reader').classList.remove('reader-reading');
       var selected = $('reader-entry-list').querySelector('[aria-current="true"]');
       var target = selected || document.querySelector('[data-reader-filter].active');
@@ -575,6 +611,7 @@
   }
 
   function onViewEnter() {
+    setFullscreen(false);
     if (st.loaded || !T) return;
     st.loaded = true;
     loadFeeds()

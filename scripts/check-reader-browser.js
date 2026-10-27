@@ -150,6 +150,24 @@ async function main() {
     await page.locator('.reader-feed').filter({ hasText: '技术快报' }).waitFor();
     assert.match(await page.locator('.reader-feed').filter({ hasText: '技术快报' }).textContent(), /2/,
       'unread badge shows the fixture unread count');
+    // 推荐入口：公开 RSS 源列表，外链新窗口打开。
+    const pick = page.locator('.reader-pick');
+    assert.equal(await pick.getAttribute('href'), 'https://jackyst0.github.io/awesome-rsshub-routes/',
+      'recommended RSS source list stays linked');
+    assert.equal(await pick.getAttribute('target'), '_blank', 'recommendation opens outside the app');
+    assert.equal(await pick.getAttribute('rel'), 'noopener noreferrer', 'recommendation drops opener');
+    // 网页全屏：阅读区固定到视口、隐藏订阅与列表，Esc 还原。
+    await page.locator('#reader-fullscreen').click();
+    assert.equal(await page.evaluate(() => getComputedStyle(document.getElementById('view-reader')).position), 'fixed',
+      'fullscreen pins the reader to the viewport');
+    assert.equal(await page.locator('.reader-feeds').isVisible(), false, 'fullscreen hides the feed column');
+    assert.equal(await page.locator('.reader-list-pane').isVisible(), false, 'fullscreen hides the entry list');
+    assert.equal(await page.locator('#reader-fullscreen').getAttribute('aria-pressed'), 'true');
+    assert.equal(await page.evaluate(() => document.querySelector('#reader-fullscreen use').getAttribute('href')), '#i-compress',
+      'fullscreen button advertises the exit affordance');
+    await page.keyboard.press('Escape');
+    assert.equal(await page.locator('#reader-fullscreen').getAttribute('aria-pressed'), 'false', 'Escape exits fullscreen');
+    assert.equal(await page.locator('.reader-feeds').isVisible(), true, 'feed column returns after exit');
     await page.locator('.reader-feed-main').filter({ hasText: '技术快报' }).click();
     await page.waitForFunction(() => document.querySelectorAll('.reader-entry').length === 2);
     // 打开图文条目：客户端兜底清洗 + 已读标记 + 图片默认不加载。
@@ -246,14 +264,22 @@ async function main() {
     await page.locator('.reader-entry-main').filter({ hasText: '图文正文一篇' }).click();
     await page.waitForFunction(() => !document.querySelector('#reader-content').hidden);
     await page.screenshot({ path: path.join(out, 'desktop.png') });
+    await page.locator('#reader-fullscreen').click();
+    await page.screenshot({ path: path.join(out, 'desktop-fullscreen.png') });
+    await page.locator('#reader-fullscreen').click();
     await page.setViewportSize({ width: 390, height: 844 });
     assert.equal(await page.locator('.reader-entry-list').isVisible(), false, 'compact reading gives the article the available width');
     assert.equal(await page.locator('#reader-back').isVisible(), true, 'compact reader offers a visible return action');
     assert.equal(await page.locator('#reader-entry-title').isVisible(), true);
     await page.screenshot({ path: path.join(out, 'mobile.png') });
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), 'no horizontal overflow on narrow screens');
+    await page.locator('#reader-fullscreen').click();
+    assert.equal(await page.locator('.reader-article').isVisible(), true, 'compact fullscreen keeps the article visible');
+    assert.equal(await page.locator('.reader-feeds').isVisible(), false, 'compact fullscreen hides the feed column');
     await page.locator('#reader-back').click();
+    assert.equal(await page.locator('.reader-feeds').isVisible(), true, 'compact back exits fullscreen');
     assert.equal(await page.locator('.reader-entry-list').isVisible(), true);
+    assert.equal(await page.locator('.reader-pick').isVisible(), true, 'recommended source list stays reachable on narrow screens');
     assert.equal(await page.locator('.reader-entry.active .reader-entry-main').evaluate(el => el === document.activeElement), true,
       'return restores keyboard focus to the selected article');
     await page.screenshot({ path: path.join(out, 'mobile-list.png') });
@@ -280,7 +306,8 @@ async function main() {
     await page.screenshot({ path: path.join(out, 'desktop-light.png') });
     assert.deepEqual(errors, []);
     console.log('Reader Chrome: unread badges, entry reading, client-side XSS hardening, deferred image proxy, '
-      + 'read/star persistence, filters, cursor pagination, subscribe/unsubscribe/delete and narrow layout passed.');
+      + 'read/star persistence, filters, cursor pagination, subscribe/unsubscribe/delete, recommended source link, '
+      + 'web fullscreen and narrow layout passed.');
   } finally { await browser.close(); }
 }
 main().catch(err => { console.error(err); process.exitCode = 1; });
