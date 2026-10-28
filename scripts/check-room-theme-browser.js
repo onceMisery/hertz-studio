@@ -552,7 +552,7 @@ async function main() {
     await page.waitForFunction(() => !Array.from(document.querySelectorAll('button')).find(node => node.textContent === '保存房间封面').disabled);
     const draftCover = await page.locator('.room-cover-editor img').getAttribute('src');
     assert.ok(Buffer.from(draftCover.split(',')[1], 'base64').length <= 24 * 1024, 'shared cover is bounded');
-    assert.ok(await page.locator('.room-cover-editor img').evaluate(node => node.naturalWidth <= 320 && node.naturalHeight <= 180), 'upload resizes the image');
+    assert.ok(await page.locator('.room-cover-editor img').evaluate(node => node.naturalWidth === 512 && node.naturalHeight === 288), 'upload preserves high-density card resolution');
     await page.evaluate(() => HertzRoom.onViewEnter());
     assert.equal(await page.locator('.room-cover-editor img').getAttribute('src'), draftCover, 'polling preserves cover draft');
     await page.evaluate(() => { window.__coverFailure = true; });

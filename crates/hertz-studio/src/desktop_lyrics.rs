@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 hertz-studio contributors
 
-//! 桌面歌词只读桥。
+//! 桌面歌词数据桥；显式窄播控路由复用 AppState 的播放控制入口。
 //!
 //! 与 OBS 浮层共用「服务端解析 + 偏移只应用一次」的语义，但窗口不同：
 //! OBS 500 ms 轮询一个会重传整份歌词的端点；桌面歌词把轻量快照与完整文档
@@ -563,6 +563,49 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.status, StatusCode::CONFLICT);
         assert_eq!(error.code, "stale_document");
+        state.audio.shutdown();
+        handle.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn desktop_seek_only_accepts_current_nonempty_phrase_starts() {
+        let (mut state, handle) = crate::state::tests::playback_state().await;
+        state.desktop_lyrics_key = "b".repeat(64);
+        state
+            .audio
+            .load("first.wav", Some("first".into()))
+            .await
+            .unwrap();
+        state.desktop_lyrics.cache.lock().await.document = Some(CachedDocument {
+            identity: "test".into(),
+            state: DocumentState::Ready,
+            key: Some("test".into()),
+            body: Some(document_body(&document(
+                0,
+                vec![line(1000, Some(2000), "phrase"), line(2000, None, "")],
+            ))),
+        });
+        let state = Arc::new(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!(
+            "http://{}/v1/desktop-lyrics/control",
+            listener.local_addr().unwrap()
+        );
+        let app = crate::routes::router(state.clone()).with_state(state.clone());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        for (position, status) in [(1000, 200), (1250, 400), (2000, 400)] {
+            let result = client.post(&url).header("Authorization", format!("Desktop {}", state.desktop_lyrics_key))
+                .json(&json!({"action":"seek", "session":state.server_instance_id(), "trackId":"first",
+                    "generation":state.audio.snapshot().generation.to_string(), "documentKey":"test", "positionMs":position}))
+                .send().await.unwrap();
+            assert_eq!(result.status(), status, "position {position}");
+        }
+        assert_eq!(state.audio.snapshot().position_ms, 1000);
+        server.abort();
+        let _ = server.await;
         state.audio.shutdown();
         handle.join().unwrap();
     }

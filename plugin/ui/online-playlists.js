@@ -395,6 +395,8 @@
     var p = state.detailPlaylist;
     var tracks = state.detailTracks;
     var canWrite = hasCap(src, 'playlist_write');
+    var inRoom = window.Online && typeof window.Online.roomActive === 'function'
+      && window.Online.roomActive();
     var box = el('op-tracks');
     box.innerHTML = '';
 
@@ -426,10 +428,15 @@
       box.appendChild(row);
     });
 
+    el('op-playall').textContent = inRoom ? '点播全部到共同队列' : '播放全部';
     el('op-playall').onclick = function () {
       if (!tracks.length) return;
-      window.Online.playAll(tracks, 0);
+      // 房间进行中本地播放会被拒绝，整单意图改为点播整批到共同队列。
+      var room = window.Online && typeof window.Online.roomActive === 'function'
+        && window.Online.roomActive();
+      window.Online.playAll(tracks, 0, room ? tracks : null);
     };
+    el('op-shuffle').textContent = inRoom ? '随机点播到共同队列' : '随机播放';
     el('op-shuffle').onclick = function () {
       if (!tracks.length) return;
       var shuffled = tracks.slice();
@@ -437,7 +444,9 @@
         var j = Math.floor(Math.random() * (i + 1));
         var tmp = shuffled[i]; shuffled[i] = shuffled[j]; shuffled[j] = tmp;
       }
-      window.Online.playAll(shuffled, 0);
+      var room = window.Online && typeof window.Online.roomActive === 'function'
+        && window.Online.roomActive();
+      window.Online.playAll(shuffled, 0, room ? shuffled : null);
     };
   }
 

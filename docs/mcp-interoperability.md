@@ -2,7 +2,7 @@
 
 Hertz 的外部 MCP 入口是独立程序的 `--mcp-stdio --data-dir <显式目录> --grant <grantId>` 模式。业务仍由已运行的独立服务执行；适配进程只读发现与专用授权凭据，不启动播放器、音频、数据库或 HTTP 服务。DBX 外部 MCP 桥接不在首发范围。
 
-受限授权凭据是 `DataDir/ai/grants/<grantId>.key` 的 256 位随机 bearer，数据库只存 SHA-256 摘要，应答与日志不回显秘密。该文件是明文而不是系统钥匙串条目（只有 provider API key 走钥匙串）：Unix 上目录收为 0700、文件 0600，Windows 继承 DataDir ACL，具体 ACL 行为仍按 §13 在 R2-G/R4-J 实测固定。轮换先写临时文件、再提交摘要、最后替换旧文件；失败时保留旧摘要和旧文件。
+受限授权凭据是 `DataDir/ai/grants/<grantId>.key` 的 256 位随机 bearer，数据库只存 SHA-256 摘要，应答与日志不回显秘密。该文件是明文而不是系统钥匙串条目（只有 provider API key 走钥匙串）：Unix 上目录收为 0700、文件 0600，Windows 继承 DataDir ACL，具体 ACL 行为仍按[技术实施方案 §13：尚待实测、但不阻止当前文档落地的事项](./technical-roadmap.md#13-尚待实测但不阻止当前文档落地的事项)在 R2-G/R4-J 实测固定。轮换先写临时文件、再提交摘要、最后替换旧文件；失败时保留旧摘要和旧文件。
 
 ## 协议与工具契约
 

@@ -1,608 +1,397 @@
 (() => {
-  "use strict";
-
+  'use strict';
   const root = document.documentElement;
-  const els = {
-    current: document.getElementById("current"),
-    secondary: document.getElementById("secondary"),
-    notice: document.getElementById("notice"),
-    styleButton: document.getElementById("style-open"),
-    optionsPanel: document.getElementById("options-panel"),
-    optionsDone: document.getElementById("options-done"),
-    secondaryCell: document.getElementById("secondary-cell"),
-    fontValue: document.getElementById("font-value"),
-    opacityValue: document.getElementById("opacity-value"),
-    sungColor: document.getElementById("sung-color"),
-    unsungColor: document.getElementById("unsung-color"),
+  const $ = id => document.getElementById(id);
+  const systemTheme = matchMedia('(prefers-color-scheme: light)');
+  const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
+  const defaults = {
+    layout: 'triple', secondary: 'next', theme: 'auto', surface: 'glass', align: 'center',
+    bilingual: true, karaoke: true, readabilityBoost: false, fontFamily: 'Segoe UI',
+    fontSize: 30, fontWeight: 600, sungColor: '#ffffff', unsungColor: '#ffffff',
+    outlineColor: '#000000', outlineWidth: 0, opacity: 1, frameCap: 30,
   };
-  /** 面板与窗口底边之间留出的空隙（CSS px），与样式表 #options-panel 的 bottom 一致。 */
-  const PANEL_GAP = 6;
-  const ipc = (payload) => {
-    try {
-      window.ipc.postMessage(JSON.stringify(payload));
-    } catch (_) {
-      /* 页面不在宿主里时静默 */
-    }
-  };
-
   const state = {
-    snapshot: null,
-    document: null,
-    config: null,
-    locked: false,
-    active: true,
-    source: "waiting",
-    groups: null,
-    anchor: null,
-    confirmed: false,
-    lastPosition: null,
-    lastSession: null,
-    lastSeq: -1,
-    lastSnapshotAt: 0,
-    renderedKey: null,
-    renderedGroup: -1,
-    renderedText: "",
-    renderedSecondary: "",
-    renderedLayout: "",
-    wordSpans: [],
-    lineSpan: null,
-    lineTiming: null,
-    raf: 0,
-    lastPaint: 0,
-    optionsOpen: false,
-    panelHeight: -1,
-    panelFrame: 0,
-    hoverTimer: 0,
+    config: { ...defaults }, snapshot: null, document: null, groups: [], source: 'waiting',
+    active: true, locked: false, anchor: null, confirmed: false,
+    lastPosition: null, lastSession: null, lastSeq: -1, lastSnapshotAt: 0,
+    renderedKey: null, renderedGroup: -99, signature: '', nodes: new Map(), words: [],
+    raf: 0, lastPaint: 0, staleTimer: 0, panelFrame: 0, panelHeight: -1,
+    optionsOpen: false, hoverTimer: 0, pendingControl: false, controlTimer: 0,
   };
-
-  function trackId(snapshot) {
-    return snapshot && snapshot.track ? snapshot.track.id : null;
+  function ipc(payload) {
+    try { window.ipc.postMessage(JSON.stringify(payload)); } catch (_) { /* Browser preview. */ }
   }
-
   function colorValue(value, fallback) {
-    const text = String(value || "").trim();
-    if (/^#[0-9a-f]{6}$/i.test(text)) return text.toLowerCase();
-    if (/^#[0-9a-f]{8}$/i.test(text)) return text.slice(0, 7).toLowerCase();
-    if (/^#[0-9a-f]{3}$/i.test(text)) {
-      return `#${text[1]}${text[1]}${text[2]}${text[2]}${text[3]}${text[3]}`.toLowerCase();
-    }
+    const text = String(value || '').trim();
+    if (/^#[0-9a-f]{6,8}$/i.test(text)) return text.slice(0, 7).toLowerCase();
+    if (/^#[0-9a-f]{3}$/i.test(text)) return '#' + [...text.slice(1)].map(c => c + c).join('').toLowerCase();
     return fallback;
   }
-
-  function applyConfig(config) {
-    if (!config) return;
-    state.config = config;
-    root.style.setProperty("--font-family", config.fontFamily);
-    root.style.setProperty("--font-size", `${config.fontSize}px`);
-    root.style.setProperty("--font-weight", String(config.fontWeight));
-    root.style.setProperty("--sung", config.sungColor);
-    root.style.setProperty("--unsung", config.unsungColor);
-    root.style.setProperty("--outline-color", config.outlineColor);
-    root.style.setProperty("--outline-width", `${config.outlineWidth}px`);
-    root.style.setProperty("--opacity", String(config.opacity));
-    document.body.dataset.layout = config.layout;
-    const layout = config.layout === "single" ? "single" : "double";
-    document.querySelectorAll("[data-layout]").forEach((button) => {
-      button.setAttribute("aria-pressed", String(button.dataset.layout === layout));
-    });
-    const secondary = config.secondary || "next";
-    document.querySelectorAll("[data-secondary]").forEach((button) => {
-      button.setAttribute(
-        "aria-pressed",
-        String(button.dataset.secondary === secondary),
-      );
-    });
-    els.secondaryCell.hidden = layout === "single";
-    els.fontValue.textContent = `${config.fontSize}px`;
-    els.opacityValue.textContent = `${Math.round(config.opacity * 100)}%`;
-    els.sungColor.value = colorValue(config.sungColor, "#8fe3ff");
-    els.unsungColor.value = colorValue(config.unsungColor, "#ffffff");
-    const limits = {
-      "font-down": config.fontSize <= 18,
-      "font-up": config.fontSize >= 72,
-      "opacity-down": config.opacity <= 0.25,
-      "opacity-up": config.opacity >= 1,
-    };
-    Object.keys(limits).forEach((command) => {
-      document.querySelector(`[data-cmd="${command}"]`).disabled = limits[command];
-    });
-    setLocked(config.locked);
-    render();
-    updateLoop();
-  }
-
-  function setLocked(locked) {
-    state.locked = Boolean(locked);
-    document.body.classList.toggle("locked", state.locked);
-    document.body.classList.toggle("unlocked", !state.locked);
-    if (state.locked) setOptionsOpen(false, false);
-    scheduleRender();
-  }
-
-  function setOptionsOpen(open, restoreFocus = true) {
-    open = Boolean(open);
-    if (state.optionsOpen === open) return;
-    state.optionsOpen = open;
-    els.optionsPanel.hidden = !open;
-    els.styleButton.setAttribute("aria-expanded", String(open));
-    if (open) {
-      els.optionsPanel.focus({ preventScroll: true });
-      schedulePanelMeasure();
-    } else {
-      if (restoreFocus && document.body.classList.contains("hovering")) {
-        els.styleButton.focus({ preventScroll: true });
-      }
-      schedulePanelMeasure();
-      render();
-      updateLoop();
+  function applyTheme() {
+    const config = state.config;
+    root.style.setProperty('--panel-max-height', `${config.panelMaxHeight || 480}px`);
+    const theme = config.theme === 'auto' ? (systemTheme.matches ? 'light' : 'dark') : config.theme;
+    document.body.dataset.theme = theme;
+    // Neutral defaults follow the theme; explicit custom colors remain user choices.
+    for (const [key, variable] of [['sungColor', '--lyric-sung'], ['unsungColor', '--lyric-unsung']]) {
+      root.style.setProperty(variable, colorValue(config[key], '#ffffff') === '#ffffff'
+        ? (theme === 'light' ? '#0b0d11' : '#ffffff') : config[key]);
     }
   }
-
-  /** 样式条高度上报给宿主：窗口按这个高度向下长高，歌词区域原样保留。 */
+  function applyConfig(value) {
+    if (!value) return;
+    state.config = { ...defaults, ...value };
+    const config = state.config;
+    for (const [key, variable, suffix] of [
+      ['fontFamily', '--font-family', ''], ['fontSize', '--font-size', 'px'],
+      ['fontWeight', '--font-weight', ''], ['outlineColor', '--outline-color', ''],
+      ['outlineWidth', '--outline-width', 'px'], ['opacity', '--opacity', ''],
+    ]) root.style.setProperty(variable, config[key] + suffix);
+    for (const key of ['layout', 'surface', 'align', 'bilingual']) document.body.dataset[key] = String(config[key]);
+    document.body.dataset.boost = String(config.readabilityBoost);
+    document.body.dataset.lowPower = String(config.frameCap <= 15);
+    applyTheme();
+    document.querySelectorAll('[data-setting]').forEach(button => {
+      let value = config[button.dataset.setting];
+      if (button.dataset.setting === 'secondary' && value === 'translation') value = 'next';
+      button.setAttribute('aria-pressed', String(button.dataset.value === value));
+    });
+    document.querySelectorAll('[data-toggle]').forEach(button => button.setAttribute('aria-pressed', String(config[button.dataset.toggle])));
+    $('secondary-cell').hidden = !config.bilingual;
+    $('font-value').textContent = `${config.fontSize}px`;
+    $('font-size').value = config.fontSize;
+    $('opacity-value').textContent = `${Math.round(config.opacity * 100)}%`;
+    $('opacity').value = Math.round(config.opacity * 100);
+    $('sung-color').value = colorValue(config.sungColor, '#ffffff');
+    $('unsung-color').value = colorValue(config.unsungColor, '#ffffff');
+    setLocked(config.locked);
+    state.signature = '';
+    render();
+    scheduleLayout();
+    schedulePanelMeasure();
+    updateLoop();
+  }
+  function setLocked(locked) {
+    state.locked = Boolean(locked);
+    document.body.classList.toggle('locked', state.locked);
+    document.body.classList.toggle('unlocked', !state.locked);
+    if (state.locked) setOptionsOpen(false, false);
+    updateControls();
+  }
+  function setOptionsOpen(open, restoreFocus = true) {
+    open = Boolean(open) && !state.locked && state.active;
+    if (state.optionsOpen === open) return;
+    state.optionsOpen = open;
+    $('options-panel').hidden = !open;
+    document.body.classList.toggle('options-open', open);
+    $('style-open').setAttribute('aria-expanded', String(open));
+    if (open) { $('options-panel').scrollTop = 0; $('options-panel').focus({ preventScroll: true }); }
+    else if (restoreFocus) $('style-open').focus({ preventScroll: true });
+    schedulePanelMeasure();
+  }
   function schedulePanelMeasure() {
     if (state.panelFrame) return;
     state.panelFrame = requestAnimationFrame(() => {
       state.panelFrame = 0;
-      measurePanel();
+      const height = state.optionsOpen ? Math.ceil($('options-panel').getBoundingClientRect().height) + 16 : 0;
+      if (height === state.panelHeight) return;
+      state.panelHeight = height;
+      root.style.setProperty('--panel-height', `${height}px`);
+      ipc({ cmd: 'panel', value: height });
     });
   }
-
-  function measurePanel() {
-    const height = state.optionsOpen
-      ? Math.ceil(els.optionsPanel.getBoundingClientRect().height) + PANEL_GAP
-      : 0;
-    if (height === state.panelHeight) return;
-    state.panelHeight = height;
-    root.style.setProperty("--panel-height", `${height}px`);
-    ipc({ cmd: "panel", value: height });
-  }
-
   function setActive(active) {
     state.active = Boolean(active);
-    if (!state.active) {
-      setOptionsOpen(false, false);
-      stopLoop();
-      return;
-    }
-    render();
-    updateLoop();
+    if (!state.active) { setOptionsOpen(false, false); stopLoop(); }
+    else { render(); updateLoop(); }
   }
-
+  function resetDocument() {
+    state.document = null;
+    state.groups = [];
+    state.renderedKey = null;
+    clearLines();
+  }
   function setSource(payload) {
-    if (!payload) return;
-    state.source = payload.state || "error";
-    if (state.source !== "ok") {
-      state.document = null;
-      state.groups = null;
-      state.renderedKey = null;
-    }
+    state.source = payload?.state || 'error';
+    if (state.source !== 'ok') { resetDocument(); state.confirmed = false; controlDone(); stopLoop(); }
     render();
   }
-
+  function trackId(snapshot) { return snapshot?.track?.id ?? null; }
   function applySnapshot(snapshot) {
     if (!snapshot) {
       state.snapshot = null;
-      state.document = null;
-      state.groups = null;
       state.anchor = null;
       state.confirmed = false;
-      state.renderedKey = null;
-      render();
-      stopLoop();
+      state.lastSeq = -1;
+      state.lastSession = null;
+      resetDocument();
+      controlDone();
+      render(); stopLoop();
       return;
     }
-    if (
-      state.lastSession === snapshot.server.session &&
-      snapshot.seq <= state.lastSeq
-    ) {
-      return;
-    }
+    if (state.lastSession === snapshot.server.session && snapshot.seq <= state.lastSeq) return;
     const previous = state.snapshot;
     const now = performance.now();
-    const identityChanged =
-      !previous ||
-      previous.server.session !== snapshot.server.session ||
-      previous.generation !== snapshot.generation ||
-      trackId(previous) !== trackId(snapshot);
-    const advanced =
-      !identityChanged &&
-      state.lastPosition != null &&
-      snapshot.positionMs > state.lastPosition + 1;
-    state.confirmed =
-      advanced && snapshot.playing && !snapshot.buffering
-        ? true
-        : false;
+    const trackChanged = previous && (previous.server.session !== snapshot.server.session || trackId(previous) !== trackId(snapshot));
+    const identityChanged = !previous || trackChanged || previous.generation !== snapshot.generation
+      || previous.lyrics?.documentKey !== snapshot.lyrics?.documentKey;
+    state.confirmed = !identityChanged && state.lastPosition != null
+      && snapshot.positionMs > state.lastPosition + 1 && snapshot.playing && !snapshot.buffering;
     state.anchor = { position: snapshot.positionMs, at: now };
     state.lastPosition = snapshot.positionMs;
     state.lastSeq = snapshot.seq;
     state.lastSession = snapshot.server.session;
     state.lastSnapshotAt = now;
-    if (snapshot.lyrics.status !== "ready") {
-      state.document = null;
-      state.groups = null;
-      state.renderedKey = null;
-    } else if (
-      state.document &&
-      state.document.documentKey &&
-      snapshot.lyrics.documentKey &&
-      state.document.documentKey !== snapshot.lyrics.documentKey
-    ) {
-      state.document = null;
-      state.groups = null;
-      state.renderedKey = null;
-    }
+    if (trackChanged || snapshot.lyrics.status !== 'ready'
+      || (state.document && state.document.documentKey !== snapshot.lyrics.documentKey)) resetDocument();
     state.snapshot = snapshot;
-    render();
-    updateLoop();
+    if (state.pendingControl && snapshot.generation !== state.controlGeneration) controlDone();
+    clearTimeout(state.staleTimer);
+    state.staleTimer = setTimeout(() => { render(); stopLoop(); }, 2020);
+    document.body.classList.toggle('playing', Boolean(snapshot.playing));
+    $('play').setAttribute('aria-label', snapshot.playing ? '暂停' : '播放');
+    if (identityChanged) state.signature = '';
+    render(); updateLoop();
   }
-
   function applyDocument(document) {
-    if (!document) {
-      state.document = null;
-      state.groups = null;
-      state.renderedKey = null;
-      render();
-      return;
-    }
-    if (
-      state.snapshot &&
-      state.snapshot.lyrics.documentKey &&
-      document.documentKey &&
-      state.snapshot.lyrics.documentKey !== document.documentKey
-    ) {
-      return;
-    }
+    if (!document) { resetDocument(); render(); stopLoop(); return; }
+    if (!state.snapshot || document.documentKey !== state.snapshot.lyrics.documentKey) return;
     state.document = document;
-    state.groups = buildGroups(document.lines || []);
-    state.renderedKey = null;
-    render();
-    updateLoop();
-  }
-
-  function buildGroups(lines) {
-    const groups = [];
-    for (const line of lines) {
-      const last = groups[groups.length - 1];
-      if (last && last.start === line.startMs) {
-        last.lines.push(line);
-      } else {
-        groups.push({ start: line.startMs, lines: [line] });
-      }
+    state.groups = [];
+    for (const line of document.lines || []) {
+      const last = state.groups.at(-1);
+      if (last && last.start === line.startMs) last.lines.push(line);
+      else state.groups.push({ start: line.startMs, lines: [line] });
     }
-    return groups;
+    clearLines();
+    render(); updateLoop();
   }
-
-  function displayLine(group) {
-    if (!group) return null;
-    for (let index = group.lines.length - 1; index >= 0; index -= 1) {
-      const line = group.lines[index];
-      if (line.text && line.text.trim()) return line;
-    }
+  function displayLine(index) {
+    const lines = state.groups[index]?.lines || [];
+    for (let i = lines.length - 1; i >= 0; i--) if (lines[i].text?.trim()) return lines[i];
     return null;
   }
-
   function positionAt(now) {
     const snapshot = state.snapshot;
-    if (!snapshot) return null;
-    if (now - state.lastSnapshotAt > 2000) return null;
+    if (!snapshot || now - state.lastSnapshotAt > 2000) return null;
     if (!state.anchor) return snapshot.positionMs;
-    if (!snapshot.playing || snapshot.buffering || !state.confirmed) {
-      return state.anchor.position;
-    }
-    const elapsed = Math.min(now - state.anchor.at, 1000);
-    const predicted = state.anchor.position + elapsed;
-    return snapshot.durationMs != null
-      ? Math.min(predicted, snapshot.durationMs)
-      : predicted;
+    if (!snapshot.playing || snapshot.buffering || !state.confirmed) return state.anchor.position;
+    const predicted = state.anchor.position + Math.min(now - state.anchor.at, 1000);
+    return snapshot.durationMs != null ? Math.min(predicted, snapshot.durationMs) : predicted;
   }
-
-  function groupIndex(groups, position) {
-    let index = -1;
-    for (let i = 0; i < groups.length; i += 1) {
-      if (groups[i].start <= position) index = i;
-      else break;
-    }
-    return index;
+  function groupIndex(position) {
+    let lo = 0, hi = state.groups.length;
+    while (lo < hi) { const mid = (lo + hi) >>> 1; if (state.groups[mid].start <= position) lo = mid + 1; else hi = mid; }
+    return lo - 1;
   }
-
-  function secondaryText(index, line) {
-    const mode = state.config ? state.config.secondary : "next";
-    if (mode === "translation") return (line && line.translation) || "";
-    if (mode === "romanization") return (line && line.romanization) || "";
-    const groups = state.groups || [];
-    const next = displayLine(groups[index + 1]);
-    return next ? next.text : "";
-  }
-
   function placeholder() {
-    const snapshot = state.snapshot;
-    if (state.source === "waiting") return "正在连接 Hertz 服务";
-    if (state.source === "error") return "暂无歌词";
-    if (!snapshot) return "正在连接 Hertz 服务";
-    if (!snapshot.track) return "暂无播放";
-    const status = snapshot.lyrics ? snapshot.lyrics.status : "idle";
-    if (status === "loading") return "正在读取歌词";
-    if (status === "too_large") return "桌面歌词暂不支持此文档";
-    if (status === "error") return "暂无歌词";
-    if (status === "empty") return "暂无歌词";
-    if (status === "ready") return "正在读取歌词";
-    return "暂无歌词";
+    if (state.source !== 'ok' || !state.snapshot) return '正在连接 Hertz 服务';
+    if (!state.snapshot.track) return '暂无播放';
+    const status = state.snapshot.lyrics?.status;
+    if (status === 'loading' || status === 'ready') return '正在读取歌词';
+    if (status === 'too_large') return '桌面歌词暂不支持此文档';
+    return '暂无歌词';
   }
-
+  function setNotice(text) {
+    $('shell').classList.toggle('is-empty', Boolean(text));
+    if ($('notice').textContent !== text) $('notice').textContent = text;
+  }
+  function clearLines() {
+    $('lyric-column').replaceChildren();
+    state.nodes.clear(); state.words = []; state.signature = ''; state.renderedGroup = -99;
+  }
+  function lineEnd(index, line) {
+    return line?.endMs ?? state.groups[index + 1]?.start ?? state.snapshot?.durationMs ?? null;
+  }
+  function makeKara(text, word) {
+    const span = document.createElement('span'); span.className = word ? 'kara word' : 'kara';
+    const base = document.createElement('span'); base.className = 'base'; base.textContent = text;
+    const fill = document.createElement('span'); fill.className = 'fill'; fill.textContent = text;
+    fill.setAttribute('aria-hidden', 'true');
+    span.append(base, fill);
+    return span;
+  }
+  function buildNode(index, active, interlude) {
+    const line = displayLine(index);
+    const group = document.createElement('div'); group.className = 'lyric-group'; group.dataset.index = index;
+    const main = document.createElement('div'); main.className = 'line main';
+    const text = document.createElement('span'); text.className = 'lyric-text';
+    if (!line || interlude) {
+      text.textContent = '· · ·'; main.classList.add('interlude');
+    } else if (active && state.config.karaoke && line.words?.length
+      && line.words.map(word => word.text).join('') === line.text) {
+      line.words.forEach((word, i) => {
+        const span = makeKara(word.text, true);
+        text.appendChild(span);
+        state.words.push({ el: span, start: word.startMs, end: word.endMs ?? line.words[i + 1]?.startMs ?? lineEnd(index, line) });
+      });
+    } else {
+      // LRC without real word times lights as one line, never a fabricated character timeline.
+      text.textContent = line.text;
+      if (active) text.style.color = 'var(--lyric-sung, var(--text))';
+    }
+    main.appendChild(text);
+    group.appendChild(main);
+    const sub = document.createElement('div'); sub.className = 'line sub lyric-text';
+    sub.textContent = !interlude && line ? (state.config.secondary === 'romanization' ? line.romanization : line.translation) || '' : '';
+    group.appendChild(sub);
+    return group;
+  }
   function render() {
     if (!state.active) return;
-    const snapshot = state.snapshot;
     const position = positionAt(performance.now());
-    if (state.source !== "ok" || !snapshot || position == null) {
-      setNotice(placeholder());
-      clearLines();
+    if (state.source !== 'ok' || !state.snapshot || position == null || !state.document || !state.groups.length) {
+      setNotice(position == null && state.snapshot ? '正在等待播放器同步' : placeholder());
+      if (state.nodes.size) clearLines();
+      updateControls();
       return;
     }
-    if (!state.document || !state.groups || state.groups.length === 0) {
-      setNotice(placeholder());
-      clearLines();
-      return;
-    }
-    const index = groupIndex(state.groups, position);
-    const line = index >= 0 ? displayLine(state.groups[index]) : null;
-    const text = line ? line.text : "♪";
-    const secondary = index >= 0 ? secondaryText(index, line) : "";
-    const key = state.document.documentKey || "";
-    const layout = state.config ? state.config.layout : "double";
-    if (
-      state.renderedKey !== key ||
-      state.renderedGroup !== index ||
-      state.renderedText !== text ||
-      state.renderedSecondary !== secondary ||
-      state.renderedLayout !== layout
-    ) {
-      rebuildLine(line, text, secondary, index);
-      state.renderedKey = key;
+    const index = groupIndex(position);
+    const line = displayLine(index);
+    const end = lineEnd(index, line);
+    const interlude = !line || (end != null && position >= end);
+    const signature = [state.document.documentKey, index, state.config.secondary, state.config.karaoke, interlude].join('|');
+    if (state.signature !== signature) {
+      const previous = state.renderedGroup;
+      const animate = previous !== -99 && Math.abs(index - previous) === 1 && !reducedMotion.matches;
+      const start = Math.max(-1, index - 3), stop = Math.min(state.groups.length - 1, index + 3);
+      state.words = [];
+      for (const [key, node] of state.nodes) {
+        if (key < start || key > stop || key === index || key === previous || !state.signature) { node.remove(); state.nodes.delete(key); }
+      }
+      for (let i = start; i <= stop; i++) {
+        if (!state.nodes.has(i)) state.nodes.set(i, buildNode(i, i === index, i === index && interlude));
+        const node = state.nodes.get(i);
+        node.dataset.distance = Math.abs(i - index) > 2 ? 'hidden' : String(i - index);
+        $('lyric-column').appendChild(node);
+      }
       state.renderedGroup = index;
-      state.renderedText = text;
-      state.renderedSecondary = secondary;
-      state.renderedLayout = layout;
-    }
-    setNotice("");
-    paintSweep(position);
-  }
-
-  function rebuildLine(line, text, secondary, index) {
-    els.current.textContent = "";
-    state.wordSpans = [];
-    state.lineSpan = null;
-    state.lineTiming = null;
-    if (!line) {
-      els.current.textContent = text;
-    } else if (line.words && line.words.length > 0) {
-      const words = line.words;
-      for (let index = 0; index < words.length; index += 1) {
-        const word = words[index];
-        const span = document.createElement("span");
-        span.className = "sweep w";
-        span.textContent = word.text;
-        els.current.appendChild(span);
-        const nextStart =
-          index + 1 < words.length ? words[index + 1].startMs : null;
-        state.wordSpans.push({
-          el: span,
-          start: word.startMs,
-          end: word.endMs != null ? word.endMs : nextStart,
-          last: word.endMs == null && nextStart == null,
-        });
+      state.signature = signature;
+      layout(animate ? previous : null);
+      if (animate) {
+        const main = state.nodes.get(index)?.querySelector('.main');
+        main?.classList.add('enter');
       }
-      state.lineTiming = {
-        start: line.startMs,
-        end: line.endMs,
-        next: nextGroupStart(index),
-      };
-    } else {
-      const span = document.createElement("span");
-      span.className = "sweep";
-      span.textContent = text;
-      els.current.appendChild(span);
-      state.lineSpan = span;
-      state.lineTiming = {
-        start: line.startMs,
-        end: line.endMs,
-        next: nextGroupStart(index),
-      };
     }
-    els.secondary.textContent = secondary;
-  }
-
-  function nextGroupStart(index) {
-    const groups = state.groups || [];
-    const next = index >= 0 ? groups[index + 1] : null;
-    return next ? next.start : null;
-  }
-
-  function sweepProgress(position, start, end) {
-    if (end == null || end <= start) {
-      return position >= start ? 1 : 0;
-    }
-    return Math.max(0, Math.min(1, (position - start) / (end - start)));
-  }
-
-  function paintSweep(position) {
-    if (state.lineSpan && state.lineTiming) {
-      const duration = state.snapshot ? state.snapshot.durationMs : null;
-      const end =
-        state.lineTiming.end != null
-          ? state.lineTiming.end
-          : state.lineTiming.next != null
-            ? state.lineTiming.next
-            : duration;
-      setProgress(
-        state.lineSpan,
-        sweepProgress(position, state.lineTiming.start, end),
-      );
-    }
-    for (const word of state.wordSpans) {
-      let end = word.end;
-      if (end == null && word.last) {
-        end = state.lineTiming ? state.lineTiming.end || state.lineTiming.next : null;
+    setNotice('');
+    for (const word of state.words) {
+      const progress = word.end == null || word.end <= word.start ? Number(position >= word.start)
+        : Math.max(0, Math.min(1, (position - word.start) / (word.end - word.start)));
+      if (word.progress == null || Math.abs(progress - word.progress) >= .003) {
+        word.progress = progress; word.el.style.setProperty('--p', `${(progress * 100).toFixed(2)}%`);
+        word.el.querySelector('.fill').style.maskImage = progress >= 1 ? 'none' : '';
       }
-      setProgress(word.el, sweepProgress(position, word.start, end));
+    }
+    updateControls();
+  }
+  function layout(previous = null) {
+    if (!state.nodes.size) return;
+    const column = $('lyric-column');
+    const groupHeight = state.nodes.values().next().value.offsetHeight;
+    const first = Math.min(...state.nodes.keys());
+    const visibleCenter = state.config.layout === 'double' ? groupHeight / 2 : 0;
+    const center = $('viewport').clientHeight / 2 - groupHeight / 2 - visibleCenter;
+    column.style.transition = 'none';
+    column.style.transform = `translateY(${center - ((previous ?? state.renderedGroup) - first) * groupHeight}px)`;
+    if (previous != null) {
+      column.getBoundingClientRect(); // Commit the rebased, bounded column before its next movement.
+      column.style.transition = '';
+      column.style.transform = `translateY(${center - (state.renderedGroup - first) * groupHeight}px)`;
     }
   }
-
-  function setProgress(element, progress) {
-    const previous = element.__progress;
-    if (previous != null && Math.abs(previous - progress) < 0.004) return;
-    element.__progress = progress;
-    element.style.setProperty("--p", progress.toFixed(3));
+  let layoutFrame = 0;
+  function scheduleLayout() {
+    if (!layoutFrame) layoutFrame = requestAnimationFrame(() => { layoutFrame = 0; layout(); });
   }
-
-  function setNotice(text) {
-    const next = text || "";
-    document.getElementById("shell").classList.toggle("is-empty", Boolean(next));
-    if (els.notice.textContent !== next) {
-      els.notice.textContent = next;
-    }
-  }
-
-  function clearLines() {
-    if (state.wordSpans.length || state.lineSpan || els.current.textContent) {
-      els.current.textContent = "";
-      els.secondary.textContent = "";
-      state.wordSpans = [];
-      state.lineSpan = null;
-      state.lineTiming = null;
-      state.renderedKey = null;
-      state.renderedGroup = -1;
-      state.renderedText = "";
-      state.renderedSecondary = "";
-    }
-  }
-
-  let renderQueued = false;
-  function scheduleRender() {
-    if (renderQueued) return;
-    renderQueued = true;
-    requestAnimationFrame(() => {
-      renderQueued = false;
-      render();
-      updateLoop();
-    });
-  }
-
   function canAnimate() {
-    return Boolean(
-      state.active &&
-        state.snapshot &&
-        state.snapshot.playing &&
-        !state.snapshot.buffering &&
-        state.confirmed &&
-        state.document,
-    );
+    return state.active && state.source === 'ok' && state.snapshot?.playing && !state.snapshot.buffering
+      && state.confirmed && state.document && performance.now() - state.lastSnapshotAt < 2000;
   }
-
   function updateLoop() {
-    if (!canAnimate()) {
-      stopLoop();
-      return;
-    }
+    if (!canAnimate()) { stopLoop(); return; }
     if (!state.raf) state.raf = requestAnimationFrame(loop);
   }
-
   function loop(now) {
     state.raf = 0;
-    if (!state.active) return;
-    const cap = state.config ? Math.max(1, state.config.frameCap || 30) : 30;
-    if (now - state.lastPaint >= 1000 / cap - 0.5) {
-      state.lastPaint = now;
-      render();
-    }
+    if (now - state.lastPaint >= 1000 / Math.max(1, state.config.frameCap) - .5) { state.lastPaint = now; render(); }
     updateLoop();
   }
-
-  function stopLoop() {
-    if (state.raf) cancelAnimationFrame(state.raf);
-    state.raf = 0;
+  function stopLoop() { if (state.raf) cancelAnimationFrame(state.raf); state.raf = 0; }
+  function targetLine(delta) {
+    const position = positionAt(performance.now());
+    if (position == null) return null;
+    let index = groupIndex(position) + delta;
+    if (delta > 0 && index < 0) index = 0;
+    for (; index >= 0 && index < state.groups.length; index += delta) if (displayLine(index)) return state.groups[index].start;
+    return null;
   }
-
-  window.hertzLyrics = {
-    applyConfig,
-    applySnapshot,
-    applyDocument,
-    setLocked,
-    setActive,
-    setSource,
-    setOptions: (open) => setOptionsOpen(open, false),
-  };
-
-  document.getElementById("drag").addEventListener("mousedown", (event) => {
-    event.preventDefault();
-    ipc({ cmd: "drag" });
-  });
-
-  document.querySelectorAll("[data-cmd]").forEach((button) => {
-    button.addEventListener("click", () => {
-      const cmd = button.dataset.cmd;
-      if (cmd === "font-up") ipc({ cmd: "font", value: 2 });
-      else if (cmd === "font-down") ipc({ cmd: "font", value: -2 });
-      else if (cmd === "width-up") ipc({ cmd: "width", value: 48 });
-      else if (cmd === "width-down") ipc({ cmd: "width", value: -48 });
-      else if (cmd === "opacity-up") ipc({ cmd: "opacity", value: 0.05 });
-      else if (cmd === "opacity-down") ipc({ cmd: "opacity", value: -0.05 });
-      else ipc({ cmd });
-    });
-  });
-
-  els.styleButton.addEventListener("click", () => {
-    setOptionsOpen(!state.optionsOpen);
-  });
-  els.optionsDone.addEventListener("click", () => setOptionsOpen(false));
-
-  document.querySelectorAll("[data-layout]").forEach((button) => {
-    button.addEventListener("click", () => {
-      const value = button.dataset.layout;
-      if (state.config && state.config.layout === value) return;
-      ipc({ cmd: "layout", text: value });
-    });
-  });
-  document.querySelectorAll("[data-secondary]").forEach((button) => {
-    button.addEventListener("click", () => {
-      const value = button.dataset.secondary;
-      if (state.config && state.config.secondary === value) return;
-      ipc({ cmd: "secondary", text: value });
-    });
-  });
-
-  const setHovering = (value) => {
-    if (document.body.classList.contains("hovering") === value) return;
-    document.body.classList.toggle("hovering", value);
-  };
-
-  document.documentElement.addEventListener("pointerenter", () => {
-    window.clearTimeout(state.hoverTimer);
-    setHovering(true);
-  });
-  document.documentElement.addEventListener("pointerleave", () => {
-    window.clearTimeout(state.hoverTimer);
-    state.hoverTimer = window.setTimeout(() => setHovering(false), 240);
-  });
-
-  document.querySelectorAll("[data-color]").forEach((input) => {
-    input.addEventListener("input", () => {
-      const target = input.dataset.color;
-      const variable = target === "sung" ? "--sung" : "--unsung";
-      root.style.setProperty(variable, input.value);
-      ipc({ cmd: "color", target, text: input.value });
-    });
-  });
-
-  if (typeof ResizeObserver === "function") {
-    new ResizeObserver(() => schedulePanelMeasure()).observe(els.optionsPanel);
+  function updateControls() {
+    const available = state.active && !state.locked && state.source === 'ok' && state.snapshot?.track && positionAt(performance.now()) != null && !state.pendingControl;
+    $('play').disabled = !available;
+    $('previous').disabled = !available || targetLine(-1) == null;
+    $('next').disabled = !available || targetLine(1) == null;
   }
-
-  document.addEventListener("contextmenu", (event) => event.preventDefault());
-  document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape" && state.optionsOpen) {
-      event.preventDefault();
-      setOptionsOpen(false);
-    }
+  function control(cmd, value) {
+    if (state.locked || state.pendingControl || $('play').disabled) return;
+    state.pendingControl = true;
+    state.controlGeneration = state.snapshot.generation;
+    updateControls();
+    ipc({ cmd, ...(value == null ? {} : { value }) });
+    state.controlTimer = setTimeout(() => controlDone('操作未完成，请重试或返回播放器'), 4000);
+  }
+  function controlDone(message = '') {
+    // Keep transport disabled until the native feed confirms the resulting generation.
+    if (!message && state.pendingControl && state.source === 'ok'
+      && state.snapshot?.generation === state.controlGeneration) return;
+    clearTimeout(state.controlTimer);
+    state.pendingControl = false;
+    $('feedback').hidden = !message;
+    $('feedback').textContent = message;
+    if (message) setTimeout(() => { $('feedback').hidden = true; }, 3000);
+    updateControls();
+  }
+  function changeSetting(target, value) {
+    if (state.locked) return;
+    if (target === 'layout' || target === 'secondary') ipc({ cmd: target, text: value });
+    else ipc({ cmd: 'appearance', target, ...(typeof value === 'number' ? { value } : { text: String(value) }) });
+  }
+  $('drag').addEventListener('mousedown', event => { if (event.button !== 0 || state.locked) return; event.preventDefault(); ipc({ cmd: 'drag' }); });
+  $('stage').addEventListener('mousedown', event => { if (event.button === 0 && !state.locked) { event.preventDefault(); ipc({ cmd: 'drag' }); } });
+  $('play').addEventListener('click', () => control(state.snapshot?.playing ? 'pause' : 'play'));
+  for (const [id, delta] of [['previous', -1], ['next', 1]]) $(id).addEventListener('click', () => { const value = targetLine(delta); if (value != null) control('seek', value); });
+  document.querySelectorAll('[data-cmd]').forEach(button => button.addEventListener('click', () => {
+    if (state.locked) return;
+    const cmd = button.dataset.cmd;
+    if (cmd === 'width-up' || cmd === 'width-down') ipc({ cmd: 'width', value: cmd === 'width-up' ? 48 : -48 });
+    else ipc({ cmd });
+  }));
+  document.querySelectorAll('[data-setting]').forEach(button => button.addEventListener('click', () => changeSetting(button.dataset.setting, button.dataset.value)));
+  document.querySelectorAll('[data-toggle]').forEach(button => button.addEventListener('click', () => changeSetting(button.dataset.toggle, !state.config[button.dataset.toggle])));
+  $('font-size').addEventListener('input', event => changeSetting('fontSize', Number(event.target.value)));
+  $('opacity').addEventListener('input', event => changeSetting('opacity', Number(event.target.value) / 100));
+  document.querySelectorAll('[data-color]').forEach(input => input.addEventListener('input', () => ipc({ cmd: 'color', target: input.dataset.color, text: input.value })));
+  $('style-open').addEventListener('click', () => setOptionsOpen(!state.optionsOpen));
+  $('options-done').addEventListener('click', () => setOptionsOpen(false));
+  document.addEventListener('pointerdown', event => { if (state.optionsOpen && !event.target.closest('#options-panel, #style-open')) setOptionsOpen(false, false); });
+  root.addEventListener('pointerenter', () => { clearTimeout(state.hoverTimer); document.body.classList.add('hovering'); });
+  root.addEventListener('pointerleave', () => { clearTimeout(state.hoverTimer); state.hoverTimer = setTimeout(() => document.body.classList.remove('hovering'), 160); });
+  $('lyric-column').addEventListener('animationend', event => event.target.classList.remove('enter'));
+  systemTheme.addEventListener('change', applyTheme);
+  if (typeof ResizeObserver === 'function') {
+    new ResizeObserver(schedulePanelMeasure).observe($('options-panel'));
+    new ResizeObserver(scheduleLayout).observe($('viewport'));
+  }
+  document.fonts?.ready.then(scheduleLayout);
+  document.addEventListener('contextmenu', event => event.preventDefault());
+  document.addEventListener('keydown', event => {
+    if (state.locked) return;
+    if (event.key === 'Escape') { event.preventDefault(); if (state.optionsOpen) setOptionsOpen(false); else ipc({ cmd: 'hide' }); return; }
+    if (event.target.closest('input, button, select, textarea, [contenteditable]')) return;
+    if (event.code === 'Space') { event.preventDefault(); control(state.snapshot?.playing ? 'pause' : 'play'); }
+    else if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') { const value = targetLine(event.key === 'ArrowLeft' ? -1 : 1); if (value != null) { event.preventDefault(); control('seek', value); } }
+    else if (event.key.toLowerCase() === 'l') ipc({ cmd: 'lock' });
   });
-  ipc({ cmd: "ready" });
+  window.hertzLyrics = { applyConfig, applySnapshot, applyDocument, setLocked, setActive, setSource, controlDone, setOptions: open => setOptionsOpen(open, false) };
+  applyConfig(defaults);
+  ipc({ cmd: 'ready' });
 })();

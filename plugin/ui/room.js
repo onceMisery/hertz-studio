@@ -17,6 +17,7 @@
   const selection = new Set(), metadata = new Map(), refs = {}, pageSize = 32;
   let favoriteSignature = '', queueSignature = "", librarySignature = "", memberSignature = "", resourceKey = "", resourceSignature = "", coverUrl = "", lyrics = [], resourceGeneration = 0, chatUnknown = null, chatSending = null, chatSongPending = null, chatReceipt = null;
   let coverRead = null, lyricState = 'empty';
+  const validAvatar = value => global.HertzRoomWorkspace.avatarPresets.some(item => item[0] === value) || ['disc', 'phones', 'heart', 'radio', 'queue', 'crown', 'user', 'play'].includes(value);
   const h = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = String(text); return e; };
   function button(text, fn, cls) { const e = h('button', 'btn ' + (cls || ''), text); e.type = 'button'; e.onclick = () => run(fn); return e; }
   function field(parent, label, type, value) { const l = h('label', 'room-field', label), e = h(type === 'textarea' ? 'textarea' : 'input'); if (type !== 'textarea') e.type = type; e.value = value == null ? '' : value; l.append(e); parent.append(l); return e; }
@@ -202,7 +203,7 @@
       markChatRead() { unreadChat = 0; if (refs.chatTab) refs.chatTab.textContent = '聊天'; },
       nickname: () => rememberedNickname,
       avatar: () => rememberedAvatar,
-      rememberAvatar(value) { rememberedAvatar = ['disc', 'phones', 'heart', 'radio', 'queue', 'crown', 'user', 'play'].includes(value) ? value : ''; try { global.localStorage.setItem('hertz.room.avatar.v1', rememberedAvatar); } catch (_) {} },
+      rememberAvatar(value) { rememberedAvatar = validAvatar(value) ? value : ''; try { global.localStorage.setItem('hertz.room.avatar.v1', rememberedAvatar); } catch (_) {} },
       recentSessions: () => recentSessions,
       summary: () => lastSummary,
       application: () => admissionRequest,
@@ -836,7 +837,7 @@
       if (!root) return;
       try {
         const avatar = global.localStorage.getItem('hertz.room.avatar.v1');
-        rememberedAvatar = ['disc', 'phones', 'heart', 'radio', 'queue', 'crown', 'user', 'play'].includes(avatar) ? avatar : '';
+        rememberedAvatar = validAvatar(avatar) ? avatar : '';
         const history = global.localStorage.getItem('hertz.room.history.v1') || '[]';
         const records = history.length <= 524288 ? JSON.parse(history) : [];
         recentSessions = Array.isArray(records) ? records.slice(0, 8).filter(record => record && typeof record.name === 'string' && record.name.length <= 256 && Array.isArray(record.members) && record.members.length <= 64 && record.members.every(member => member && typeof member.name === 'string' && member.name.length <= 128) && Array.isArray(record.tracks) && record.tracks.length <= 100 && record.tracks.every(track => track && typeof track.title === 'string' && track.title.length <= 1024) && Number.isFinite(record.elapsed_ms) && record.elapsed_ms >= 0) : [];

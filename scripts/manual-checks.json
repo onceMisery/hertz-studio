@@ -3,6 +3,14 @@
   "note": "check-* scripts that are deliberate manual/browser/diagnostic entry points. New unregistered check-* files fail scripts/check-scripts.js until they are either registered in check-frontend.js / a workflow or added here.",
   "scripts": [
     {
+      "script": "check-desktop-lyrics-browser.js",
+      "purpose": "Desktop lyrics prototype rendering, appearance settings, bounded DOM, real timing boundaries, stale snapshots, safe text and narrow layouts."
+    },
+    {
+      "script": "check-desktop-lyrics-native.js",
+      "purpose": "Isolated Windows WebView2 lyrics: native IPC, panel expansion, persisted appearance, authenticated phrase seek/play/pause and lock/tray recovery."
+    },
+    {
       "script": "check-room-flow-browser.js",
       "purpose": "一起听原型流程：入口、发现刷新/保留旧结果、头像、申请、等待座位、邀请、重连、退出小结与窄屏。"
     },

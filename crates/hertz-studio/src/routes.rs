@@ -362,10 +362,14 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/v1/ai/capabilities/call", post(ai_capabilities_call))
         .layer(middleware::from_fn_with_state(state.clone(), require_grant));
 
-    // 桌面歌词只读桥：独立钥匙、独立路由组，够不到主 token 组与受限门面。
+    // 桌面歌词桥：只读数据 + 显式窄播控，够不到主 token 组与受限门面。
     let desktop_lyrics = Router::new()
         .route("/v1/desktop-lyrics/snapshot", get(desktop_lyrics_snapshot))
         .route("/v1/desktop-lyrics/document", get(desktop_lyrics_document))
+        .route(
+            "/v1/desktop-lyrics/control",
+            post(desktop_lyrics_playback).layer(axum::extract::DefaultBodyLimit::max(2048)),
+        )
         .layer(middleware::from_fn_with_state(
             state.clone(),
             require_desktop_lyrics_key,
@@ -561,11 +565,13 @@ fn overlay_key_allows(path: &str) -> bool {
     path == "/v1/overlay/lyric" || (path.starts_with("/v1/tracks/") && path.ends_with("/cover"))
 }
 
-/// 桌面歌词钥匙只开两条只读 GET；主 WS、播放、设置、曲库、AI 一律不放行。
+/// 桌面歌词钥匙只开快照、文档与窄播控；不开放主播放器 API。
 fn desktop_lyrics_key_allows(path: &str) -> bool {
     matches!(
         path,
-        "/v1/desktop-lyrics/snapshot" | "/v1/desktop-lyrics/document"
+        "/v1/desktop-lyrics/snapshot"
+            | "/v1/desktop-lyrics/document"
+            | "/v1/desktop-lyrics/control"
     )
 }
 
@@ -581,9 +587,13 @@ async fn require_desktop_lyrics_key(
     request: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
-    if request.method() != axum::http::Method::GET
-        || !desktop_lyrics_key_allows(request.uri().path())
-    {
+    let control = request.uri().path() == "/v1/desktop-lyrics/control";
+    let method = if control {
+        axum::http::Method::POST
+    } else {
+        axum::http::Method::GET
+    };
+    if request.method() != method || !desktop_lyrics_key_allows(request.uri().path()) {
         return unauthorized().into_response();
     }
     let presented = request
@@ -830,6 +840,70 @@ fn launch_desktop_host(
 /// 桌面歌词轻量快照：500 ms 轮询用，永不等待取词。
 async fn desktop_lyrics_snapshot(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     Json(crate::desktop_lyrics::snapshot(&state).await)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DesktopPlaybackRequest {
+    action: String,
+    session: String,
+    track_id: String,
+    generation: String,
+    document_key: Option<String>,
+    position_ms: Option<u64>,
+}
+
+async fn desktop_lyrics_playback(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<DesktopPlaybackRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let snapshot = state.audio.snapshot();
+    if request.session != state.server_instance_id()
+        || snapshot.track_id.as_deref() != Some(request.track_id.as_str())
+        || request.generation != snapshot.generation.to_string()
+    {
+        return Err(ApiError::new(
+            axum::http::StatusCode::CONFLICT,
+            "stale_playback",
+            "播放已变化，请重试",
+        ));
+    }
+    let expected = Some((request.track_id.as_str(), snapshot.generation));
+    let outcome = match request.action.as_str() {
+        "play" => state.resume_control_if(true, expected).await?,
+        "pause" => state.pause_control_if(expected).await?,
+        "seek" => {
+            let position = request
+                .position_ms
+                .ok_or_else(|| bad_request("缺少歌词位置"))?;
+            let key = request
+                .document_key
+                .as_deref()
+                .ok_or_else(|| bad_request("缺少歌词文档"))?;
+            let document = crate::desktop_lyrics::document(&state, key).await?;
+            let is_line_start = document["lines"].as_array().is_some_and(|lines| {
+                lines.iter().any(|line| {
+                    line["startMs"].as_u64() == Some(position)
+                        && line["text"]
+                            .as_str()
+                            .is_some_and(|text| !text.trim().is_empty())
+                })
+            });
+            if !is_line_start {
+                return Err(bad_request("只能跳转到当前歌词的句首"));
+            }
+            state.seek_control_if(position, expected).await?
+        }
+        _ => return Err(bad_request("未知桌面播控操作")),
+    };
+    if matches!(outcome, crate::state::ControlOutcome::Superseded { .. }) {
+        return Err(ApiError::new(
+            axum::http::StatusCode::CONFLICT,
+            "stale_playback",
+            "播放已变化，请重试",
+        ));
+    }
+    Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 /// 壁纸只读快照：播放真值 + 最新一帧 64 段频谱；不含曲名、路径或账号。
@@ -2055,6 +2129,21 @@ fn remote_image_client() -> ApiResult<reqwest::Client> {
     crate::public_net::client(crate::public_net::SchemePolicy::HttpsOnly).map_err(bad_request)
 }
 
+/// 上游图片类型归一：网易云等 CDN 会回非标准别名 `image/jpg`，房间封面白名单
+/// 只认 `image/jpeg`；参数与大小写也一并收拢，调用方拿到的就是标准主类型。
+fn normalized_image_type(raw: &str) -> String {
+    let base = raw
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    match base.as_str() {
+        "image/jpg" | "image/pjpeg" => "image/jpeg".into(),
+        _ => base,
+    }
+}
+
 async fn read_remote_image(mut resp: reqwest::Response) -> ApiResult<(Vec<u8>, String)> {
     if !resp.status().is_success() {
         return Err(bad_request(format!("upstream returned {}", resp.status())));
@@ -2067,12 +2156,12 @@ async fn read_remote_image(mut resp: reqwest::Response) -> ApiResult<(Vec<u8>, S
     {
         return Err(bad_request("upstream cover is too large"));
     }
-    let content_type = resp
-        .headers()
-        .get(header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("application/octet-stream")
-        .to_string();
+    let content_type = normalized_image_type(
+        resp.headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("application/octet-stream"),
+    );
     if !content_type.starts_with("image/") {
         return Err(bad_request("upstream is not an image"));
     }
@@ -5009,9 +5098,10 @@ mod tests {
     }
 
     #[test]
-    fn desktop_key_only_opens_the_two_lyrics_read_paths() {
+    fn desktop_key_only_opens_the_lyrics_bridge() {
         assert!(desktop_lyrics_key_allows("/v1/desktop-lyrics/snapshot"));
         assert!(desktop_lyrics_key_allows("/v1/desktop-lyrics/document"));
+        assert!(desktop_lyrics_key_allows("/v1/desktop-lyrics/control"));
         for path in [
             "/v1/overlay/lyric",
             "/v1/state",
@@ -5026,6 +5116,91 @@ mod tests {
                 "{path} 不该被桌面钥匙放行"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn desktop_playback_checks_key_identity_and_actions() {
+        let (mut state, handle) = crate::state::tests::playback_state().await;
+        state.desktop_lyrics_key = "b".repeat(64);
+        state
+            .audio
+            .load("first.wav", Some("first".into()))
+            .await
+            .unwrap();
+        let state = std::sync::Arc::new(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!(
+            "http://{}/v1/desktop-lyrics/control",
+            listener.local_addr().unwrap()
+        );
+        let app = super::router(state.clone()).with_state(state.clone());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let request = |action: &str| {
+            serde_json::json!({
+                "action": action, "session": state.server_instance_id(), "trackId": "first",
+                "generation": state.audio.snapshot().generation.to_string(),
+            })
+        };
+        let denied = client
+            .post(&url)
+            .json(&request("play"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), 401);
+        let auth = format!("Desktop {}", state.desktop_lyrics_key);
+        for (action, status) in [
+            ("play", 200),
+            ("pause", 200),
+            ("delete", 400),
+            ("seek", 400),
+        ] {
+            let result = client
+                .post(&url)
+                .header("Authorization", &auth)
+                .json(&request(action))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(result.status(), status, "{action}");
+            if action == "play" {
+                assert!(state.audio.snapshot().playing);
+            }
+            if action == "pause" {
+                assert!(!state.audio.snapshot().playing);
+            }
+        }
+        let mut stale = request("play");
+        stale["trackId"] = "another-song".into();
+        assert_eq!(
+            client
+                .post(&url)
+                .header("Authorization", &auth)
+                .json(&stale)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            409
+        );
+        assert!(!state.audio.snapshot().playing);
+        assert_eq!(
+            client
+                .get(&url)
+                .header("Authorization", &auth)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            401
+        );
+        server.abort();
+        let _ = server.await;
+        state.audio.shutdown();
+        handle.join().unwrap();
     }
 
     #[test]
@@ -5492,6 +5667,15 @@ mod tests {
                 }),
             )
             .route(
+                "/image-jpg",
+                get(|| async {
+                    (
+                        [(header::CONTENT_TYPE, "image/jpg")],
+                        b"\xff\xd8\xff\xe0".as_slice(),
+                    )
+                }),
+            )
+            .route(
                 "/html",
                 get(|| async {
                     Response::builder()
@@ -5540,6 +5724,16 @@ mod tests {
                 assert_eq!(mime, "image/png");
             }
         }
+        // 网易云 CDN 实测回 `image/jpg`；房间封面只认 `image/jpeg`。
+        let response = client
+            .get(format!("http://{addr}/image-jpg"))
+            .timeout(Duration::from_secs(2))
+            .send()
+            .await
+            .unwrap();
+        let (bytes, mime) = super::read_remote_image(response).await.unwrap();
+        assert_eq!(bytes, b"\xff\xd8\xff\xe0");
+        assert_eq!(mime, "image/jpeg");
         server.abort();
         let _ = server.await;
     }

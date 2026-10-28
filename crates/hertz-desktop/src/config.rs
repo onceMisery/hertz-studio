@@ -66,6 +66,38 @@ pub(crate) struct Profile {
 pub(crate) enum Layout {
     Single,
     Double,
+    Triple,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum LyricTheme {
+    #[default]
+    Auto,
+    Light,
+    Dark,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum LyricSurface {
+    Bare,
+    #[default]
+    Glass,
+    Solid,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum LyricAlign {
+    Left,
+    #[default]
+    Center,
+    Right,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -120,6 +152,18 @@ pub(crate) struct LyricsConfig {
     pub(crate) locked: bool,
     pub(crate) layout: Layout,
     pub(crate) secondary: Secondary,
+    #[serde(default)]
+    pub(crate) theme: LyricTheme,
+    #[serde(default)]
+    pub(crate) surface: LyricSurface,
+    #[serde(default)]
+    pub(crate) align: LyricAlign,
+    #[serde(default = "default_true")]
+    pub(crate) bilingual: bool,
+    #[serde(default = "default_true")]
+    pub(crate) karaoke: bool,
+    #[serde(default)]
+    pub(crate) readability_boost: bool,
     pub(crate) font_family: String,
     pub(crate) font_size: f64,
     pub(crate) font_weight: u16,
@@ -165,17 +209,23 @@ impl Default for LyricsConfig {
         Self {
             enabled: true,
             locked: false,
-            layout: Layout::Double,
+            layout: Layout::Triple,
             secondary: Secondary::Next,
+            theme: LyricTheme::Auto,
+            surface: LyricSurface::Glass,
+            align: LyricAlign::Center,
+            bilingual: true,
+            karaoke: true,
+            readability_boost: false,
             font_family: "Segoe UI".into(),
-            font_size: 32.0,
+            font_size: 30.0,
             font_weight: 600,
-            sung_color: "#8fe3ff".into(),
+            sung_color: "#ffffff".into(),
             unsung_color: "#ffffff".into(),
             outline_color: "#000000".into(),
-            outline_width: 2.0,
-            opacity: 0.92,
-            width: 900.0,
+            outline_width: 0.0,
+            opacity: 1.0,
+            width: 550.0,
             anchor_x: 0.5,
             anchor_y: 0.84,
             monitor: None,
@@ -555,6 +605,50 @@ pub(crate) fn detect_profiles() -> Vec<Profile> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn old_lyrics_config_keeps_style_and_gets_appearance_defaults() {
+        let mut value = serde_json::to_value(LyricsConfig::default()).unwrap();
+        let object = value.as_object_mut().unwrap();
+        for key in [
+            "theme",
+            "surface",
+            "align",
+            "bilingual",
+            "karaoke",
+            "readabilityBoost",
+        ] {
+            object.remove(key);
+        }
+        value["layout"] = "double".into();
+        value["fontSize"] = 44.0.into();
+        value["sungColor"] = "#8fe3ff".into();
+        let lyrics: LyricsConfig = serde_json::from_value(value).unwrap();
+        assert_eq!(lyrics.layout, Layout::Double);
+        assert_eq!(lyrics.font_size, 44.0);
+        assert_eq!(lyrics.sung_color, "#8fe3ff");
+        assert_eq!(lyrics.theme, LyricTheme::Auto);
+        assert_eq!(lyrics.surface, LyricSurface::Glass);
+        assert!(lyrics.bilingual && lyrics.karaoke);
+    }
+
+    #[test]
+    fn appearance_round_trips_in_its_profile_domain() {
+        let mut config = Config::default();
+        config.activate_profile(profile("a")).unwrap();
+        config.lyrics.theme = LyricTheme::Light;
+        config.lyrics.surface = LyricSurface::Bare;
+        config.lyrics.align = LyricAlign::Right;
+        config.lyrics.bilingual = false;
+        config.lyrics.karaoke = false;
+        config.lyrics.readability_boost = true;
+        let (loaded, _) = parse_config(&encode_config(&config).unwrap()).unwrap();
+        assert_eq!(loaded.lyrics.theme, LyricTheme::Light);
+        assert_eq!(loaded.lyrics.surface, LyricSurface::Bare);
+        assert_eq!(loaded.lyrics.align, LyricAlign::Right);
+        assert!(!loaded.lyrics.bilingual && !loaded.lyrics.karaoke);
+        assert!(loaded.lyrics.readability_boost);
+    }
+
     fn profile(name: &str) -> Profile {
         Profile {
             data_dir: PathBuf::from(format!(r"C:\profiles\{name}")),
@@ -630,7 +724,7 @@ mod tests {
         config.wallpaper.enabled = true;
 
         assert!(config.activate_profile(b.clone()).unwrap());
-        assert_eq!(config.lyrics.font_size, 32.0);
+        assert_eq!(config.lyrics.font_size, LyricsConfig::default().font_size);
         assert!(!config.wallpaper.enabled);
         config.lyrics.font_size = 20.0;
 

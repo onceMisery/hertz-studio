@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 hertz-studio contributors
 
-//! 来源发现、窄凭据与只读快照/文档拉取。
+//! 来源发现、窄凭据、只读快照/文档与显式歌词播控。
 //!
 //! 只认当前 profile 数据目录里的 `vmusicd.json` 与 `desktop-lyrics-key`；
 //! 不扫描端口、不跟随重定向、不接触主 token 或 OBS 钥匙。
@@ -13,6 +13,30 @@ use crate::bridge;
 use crate::config::Profile;
 
 pub(crate) const PROTOCOL: u32 = 1;
+
+/// Explicit toolbar actions use the narrow desktop endpoint; credentials stay native.
+pub(crate) fn control(profile: &Profile, payload: &serde_json::Value) -> Result<()> {
+    let discovery = bridge::read_discovery(profile)?;
+    if discovery.desktop_lyrics_protocol != Some(PROTOCOL)
+        || discovery.edition.as_deref() != Some(profile.edition.as_str())
+        || discovery.server_instance_id.as_deref() != payload["session"].as_str()
+    {
+        bail!("播放来源已变化，请等待重新同步");
+    }
+    let key = bridge::read_key(&profile.data_dir, "desktop-lyrics-key", "桌面歌词")?;
+    let response = bridge::client()?
+        .post(format!(
+            "http://127.0.0.1:{}/v1/desktop-lyrics/control",
+            discovery.port
+        ))
+        .header("Authorization", format!("Desktop {key}"))
+        .json(payload)
+        .send()?;
+    if !response.status().is_success() {
+        bail!("桌面播控返回 {}", response.status());
+    }
+    Ok(())
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

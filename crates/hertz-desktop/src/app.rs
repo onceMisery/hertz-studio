@@ -50,6 +50,7 @@ pub(crate) enum UserEvent {
     SettingsPage(String),
     Tick,
     Page(String),
+    LyricControl(u64, Result<(), String>),
     Tray(TrayIconEvent),
     Menu(MenuEvent),
     Native(NativeEvent),
@@ -368,20 +369,16 @@ impl App {
 
     fn send_config(&self) {
         let lyrics = &self.config.lyrics;
-        let payload = serde_json::json!({
-            "layout": lyrics.layout,
-            "secondary": lyrics.secondary,
-            "fontFamily": lyrics.font_family,
-            "fontSize": lyrics.font_size,
-            "fontWeight": lyrics.font_weight,
-            "sungColor": lyrics.sung_color,
-            "unsungColor": lyrics.unsung_color,
-            "outlineColor": lyrics.outline_color,
-            "outlineWidth": lyrics.outline_width,
-            "opacity": lyrics.opacity,
-            "locked": lyrics.locked,
-            "frameCap": self.frame_cap,
-        });
+        let mut payload = serde_json::to_value(lyrics).unwrap();
+        payload["frameCap"] = self.frame_cap.into();
+        let panel_max = self
+            .target_area()
+            .map(|area| {
+                (f64::from(area.height()) / area.scale() - self.base_height_dip() - 16.0)
+                    .clamp(120.0, 480.0)
+            })
+            .unwrap_or(360.0);
+        payload["panelMaxHeight"] = serde_json::json!(panel_max);
         self.eval(&format!(
             "window.hertzLyrics && window.hertzLyrics.applyConfig({payload});"
         ));
@@ -1531,6 +1528,77 @@ impl App {
             "drag" => {
                 let _ = self.window.drag_window();
             }
+            "play" | "pause" | "seek" => {
+                let (Some(profile), Some(snapshot)) = (
+                    self.config.active_profile.clone(),
+                    self.last_snapshot.as_ref(),
+                ) else {
+                    return;
+                };
+                if self.policy.locked || self.last_update.elapsed() > Duration::from_secs(2) {
+                    return;
+                }
+                let Some(track) = snapshot.track.as_ref() else {
+                    return;
+                };
+                let payload = serde_json::json!({
+                    "action": command.cmd,
+                    "session": snapshot.server.session,
+                    "trackId": track.id,
+                    "generation": snapshot.generation,
+                    "documentKey": snapshot.lyrics.document_key,
+                    "positionMs": command.value.filter(|v| v.is_finite() && *v >= 0.0).map(|v| v as u64),
+                });
+                let proxy = self.proxy.clone();
+                let generation = self.source_generation;
+                std::thread::spawn(move || {
+                    let result =
+                        crate::feed::control(&profile, &payload).map_err(|e| format!("{e:#}"));
+                    let _ = proxy.send_event(UserEvent::LyricControl(generation, result));
+                });
+            }
+            "appearance" => {
+                let Some(target) = command.target.as_deref() else {
+                    return;
+                };
+                if !matches!(
+                    target,
+                    "theme"
+                        | "surface"
+                        | "align"
+                        | "bilingual"
+                        | "karaoke"
+                        | "readabilityBoost"
+                        | "fontSize"
+                        | "opacity"
+                ) {
+                    return;
+                }
+                let value = match target {
+                    "bilingual" | "karaoke" | "readabilityBoost" => match command.text.as_deref() {
+                        Some("true") => serde_json::Value::Bool(true),
+                        Some("false") => serde_json::Value::Bool(false),
+                        _ => return,
+                    },
+                    "fontSize" | "opacity" => {
+                        let Some(value) = command.value.filter(|v| v.is_finite()) else {
+                            return;
+                        };
+                        serde_json::json!(value)
+                    }
+                    _ => serde_json::json!(command.text),
+                };
+                let mut updated = serde_json::to_value(&self.config.lyrics).unwrap();
+                updated[target] = value;
+                let Ok(lyrics) = serde_json::from_value::<config::LyricsConfig>(updated) else {
+                    return;
+                };
+                self.config.lyrics = lyrics;
+                self.config.sanitize();
+                self.send_config();
+                self.place(true);
+                self.schedule_save();
+            }
             "layout" => {
                 let Some(layout) =
                     layout_choice(command.text.as_deref(), self.config.lyrics.layout)
@@ -1832,6 +1900,7 @@ impl App {
                 let layout = match value.and_then(|value| value.as_str()) {
                     Some("single") => Layout::Single,
                     Some("double") => Layout::Double,
+                    Some("triple") => Layout::Triple,
                     _ => return pipe_error("invalid_value"),
                 };
                 self.config.lyrics.layout = layout;
@@ -2185,18 +2254,31 @@ impl App {
         let lines = match lyrics.layout {
             Layout::Double => 2.0,
             Layout::Single => 1.0,
+            Layout::Triple => 3.0,
         };
-        let toolbar = if lyrics.locked { 0.0 } else { 30.0 };
-        (lyrics.font_size * 1.55 * lines + 60.0 + toolbar).clamp(96.0, 360.0)
+        // Fixed slots keep wrapped lyrics and translations from moving the native window.
+        let factor = if lyrics.width <= 360.0 {
+            if lyrics.bilingual {
+                4.5
+            } else {
+                3.25
+            }
+        } else if lyrics.bilingual {
+            2.55
+        } else {
+            2.0
+        };
+        let group = lyrics.font_size * factor;
+        group * lines + 108.0
     }
 
     fn height_dip(&self) -> f64 {
-        (self.base_height_dip() + self.panel_height).clamp(96.0, 620.0)
+        self.base_height_dip() + self.panel_height
     }
 
     /// 顶部不动的窗口高度调整：样式条只往下长，歌词不跳。
     fn set_panel_height(&mut self, height: f64) {
-        let height = height.clamp(0.0, 480.0);
+        let height = height.clamp(0.0, 512.0);
         if (height - self.panel_height).abs() < 0.5 {
             return;
         }
@@ -2217,7 +2299,7 @@ impl App {
         let scale = area.scale();
         let max_width = (f64::from(area.width()) / scale * 0.9).max(240.0);
         let width_dip = self.config.lyrics.width.min(max_width);
-        let height_dip = self.height_dip();
+        let height_dip = self.height_dip().min(f64::from(area.height()) / scale);
         let width = (width_dip * scale).round() as i32;
         let height = (height_dip * scale).round() as i32;
         let (anchor_x, anchor_y) = if keep_anchor {
@@ -2687,6 +2769,14 @@ pub(crate) fn run() -> Result<()> {
             }
             Event::UserEvent(UserEvent::Tick) => app.tick(target),
             Event::UserEvent(UserEvent::Page(body)) => app.page_command(&body),
+            Event::UserEvent(UserEvent::LyricControl(generation, result)) => {
+                if generation == app.source_generation {
+                    let error = result.err();
+                    if let Some(message) = error.as_ref() { log(&format!("lyric control failed: {message}")); }
+                    let message = if error.is_some() { "操作未完成，请重试或返回播放器" } else { "" };
+                    app.eval(&format!("window.hertzLyrics.controlDone({});", serde_json::to_string(message).unwrap()));
+                }
+            }
             Event::UserEvent(UserEvent::Tray(event)) => app.handle_tray(event),
             Event::UserEvent(UserEvent::Menu(event)) => app.handle_menu(&event.id.0, target),
             Event::UserEvent(UserEvent::Native(event)) => app.handle_native(event, target),
@@ -2736,9 +2826,11 @@ fn layout_choice(text: Option<&str>, current: Layout) -> Option<Layout> {
     match text {
         Some("single") => Some(Layout::Single),
         Some("double") => Some(Layout::Double),
+        Some("triple") => Some(Layout::Triple),
         None => Some(match current {
             Layout::Double => Layout::Single,
             Layout::Single => Layout::Double,
+            Layout::Triple => Layout::Single,
         }),
         Some(_) => None,
     }
@@ -3645,7 +3737,11 @@ mod tests {
         );
         assert_eq!(layout_choice(None, Layout::Double), Some(Layout::Single));
         assert_eq!(layout_choice(None, Layout::Single), Some(Layout::Double));
-        assert_eq!(layout_choice(Some("triple"), Layout::Double), None);
+        assert_eq!(
+            layout_choice(Some("triple"), Layout::Double),
+            Some(Layout::Triple)
+        );
+        assert_eq!(layout_choice(Some("unknown"), Layout::Double), None);
     }
 
     #[test]

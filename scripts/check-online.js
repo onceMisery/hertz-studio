@@ -447,6 +447,36 @@ async function loginScenario(pollStates, opts) {
     ok(row.querySelector('.t-actions').children.some(node => node.title === '加入一起听'), '真实在线行包含一起听操作');
     ok(env.sandbox.Online.roomButton([T({ playable: false })]).disabled, '无可播歌曲时禁用');
   }
+  section('房间进行中：在线列表播放改走点播入队');
+  {
+    const transport = makeTransport({});
+    const env = makeSandbox({ transport });
+    bindOnline(env);
+    const shared = [];
+    env.sandbox.HertzRoom = {
+      active: () => true,
+      addOnline: async tracks => { shared.push(tracks.slice()); },
+    };
+    const first = T({ id: 'room-a', title: 'A' });
+    await env.sandbox.Online.playAll([first], 0);
+    eq(shared.length, 1, '房间内 playAll 走一起听');
+    eq(shared[0][0], first, '点播保留完整曲目');
+    eq(transport.calls.post.filter(call => call.url.indexOf('/v1/online/play') >= 0).length, 0,
+      '房间内不再调用本地在线播放');
+    eq(env.spies.toasts.at(-1).msg, '已点播《A》到共同队列', '单曲点播回执');
+    const batch = [T({ id: 'room-b', title: 'B' }), T({ id: 'room-c', title: 'C' })];
+    await env.sandbox.Online.playAll(batch, 0, batch);
+    eq(shared[1].length, 2, '整批意图点播全部曲目');
+    eq(env.spies.toasts.at(-1).msg, '已点播 2 首到共同队列', '批量点播回执');
+    await env.sandbox.Online.playAll([T({ id: 'x' }), T({ id: 'room-d', title: 'D' })], 1);
+    eq(shared[2].length, 1, '单曲入口只点播被点的那一首');
+    eq(shared[2][0].id, 'room-d', '按 index 取曲目');
+    env.sandbox.HertzRoom.addOnline = async () => { throw new Error('房主未开放点歌'); };
+    await env.sandbox.Online.playAll([first], 0);
+    eq(env.spies.toasts.at(-1).msg, '房主未开放点歌', '房间门禁错误可见');
+    await env.sandbox.Online.playCollection('netease', 'P1');
+    eq(env.spies.toasts.at(-1).msg, '房间进行中，请点播已加载的歌曲到共同队列', '整单播放入口在房间内提示点播');
+  }
   section('QQ 登录提示跟随扫码渠道，取码与等待轮询保持一致');
   {
     const s = await loginScenario(['waiting']);

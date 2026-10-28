@@ -8,12 +8,13 @@
   function navigationButton(text, action, cls) { const node = h('button', 'btn ' + (cls || ''), text); node.type = 'button'; node.onclick = action; return node; }
   function iconButton(node, name, label) { node.replaceChildren(global.HertzRoomWorkspace.icon(name), h('span', 'room-visually-hidden', label)); node.setAttribute('aria-label', label); node.title = label; }
   function stageIcon(node, name) { const svg = global.HertzRoomWorkspace.icon(name); svg.setAttribute('class', 'room-stage-ic'); node.prepend(svg); return node; }
-  const avatarPresets = [['disc', '唱片', 'disc'], ['phones', '耳机', 'headphones'], ['heart', '爱心', 'heart'], ['radio', '电台', 'radio'], ['queue', '歌单', 'queue'], ['crown', '皇冠', 'crown'], ['user', '听众', 'user'], ['play', '播放', 'play']];
+  const avatarPresets = global.HertzRoomWorkspace.avatarPresets;
+  const legacyAvatars = { disc: 'disc', phones: 'headphones', heart: 'heart', radio: 'radio', queue: 'queue', crown: 'crown', user: 'user', play: 'play' };
   function person(name, preset, big) {
     const node = h('span', 'room-avatar' + (big ? ' room-avatar-big' : ''));
-    const selected = avatarPresets.find(item => item[0] === preset);
+    const symbol = avatarPresets.some(item => item[0] === preset) ? preset : Object.hasOwn(legacyAvatars, preset) ? legacyAvatars[preset] : '';
     node.setAttribute('aria-label', name || '成员');
-    if (selected) { node.dataset.avatar = selected[0]; node.append(global.HertzRoomWorkspace.icon(selected[2])); }
+    if (symbol) { node.dataset.avatar = preset; node.append(global.HertzRoomWorkspace.icon(symbol)); }
     else node.textContent = [...(name || 'H')][0];
     return node;
   }
@@ -56,7 +57,7 @@
       if (signature === title + '\n' + (value || '')) return;
       signature = title + '\n' + (value || '');
       const fallback = h('span', 'room-card-name', title); node.replaceChildren(fallback);
-      if (typeof value !== 'string' || value.length > 32800 || !/^data:image\/png;base64,[A-Za-z0-9+/]+=*$/.test(value)) return;
+      if (typeof value !== 'string' || value.length > 32800 || !/^data:image\/(png|jpeg);base64,[A-Za-z0-9+/]+=*$/.test(value)) return;
       const image = h('img'); image.alt = title + '的房间封面'; image.decoding = 'async';
       image.onload = () => { fallback.hidden = true; };
       image.onerror = () => { image.remove(); fallback.hidden = false; };
@@ -73,11 +74,21 @@
       const canvas = document.createElement('canvas'), context = canvas.getContext('2d');
       if (!context) throw new Error('无法处理图片，请重新选择');
       const scale = Math.min(image.naturalWidth / 16, image.naturalHeight / 9), width = scale * 16, height = scale * 9;
-      for (const size of [320, 256, 192, 128, 96]) {
+      // Keep enough pixels for the card on high-density displays. Photos use
+      // JPEG compression before reducing resolution; flat artwork keeps PNG.
+      for (const size of [512, 448, 384, 320]) {
         canvas.width = size; canvas.height = size * 9 / 16;
+        context.imageSmoothingQuality = 'high';
         context.drawImage(image, (image.naturalWidth - width) / 2, (image.naturalHeight - height) / 2, width, height, 0, 0, canvas.width, canvas.height);
         const value = canvas.toDataURL('image/png');
-        if ((value.length - 'data:image/png;base64,'.length) * 3 / 4 <= 24 * 1024) return value;
+        if (atob(value.split(',')[1]).length <= 24 * 1024) return value;
+        context.globalCompositeOperation = 'destination-over';
+        context.fillStyle = '#fff'; context.fillRect(0, 0, canvas.width, canvas.height);
+        context.globalCompositeOperation = 'source-over';
+        for (const quality of [0.9, 0.82, 0.74, 0.66, 0.58]) {
+          const photo = canvas.toDataURL('image/jpeg', quality);
+          if (atob(photo.split(',')[1]).length <= 24 * 1024) return photo;
+        }
       }
       throw new Error('图片无法缩小到可共享的大小，请选择其他图片');
     } catch (error) { throw new Error(error.message || '无法读取这张图片，请重新选择'); }

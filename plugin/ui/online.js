@@ -374,6 +374,30 @@
     return button;
   }
 
+  function roomActive() {
+    return !!(window.HertzRoom && typeof window.HertzRoom.active === 'function'
+      && window.HertzRoom.active());
+  }
+
+  /// 房间进行中，本地播放被服务端拒绝（room_mode_requires_room_command）。
+  /// 在线列表里的「播放」因此改走点播：只加入共同队列，不切当前歌曲。
+  async function pointToRoom(tracks) {
+    var songs = (tracks || []).filter(function (track) { return track && track.playable; });
+    if (!songs.length) return;
+    if (!window.HertzRoom || typeof window.HertzRoom.addOnline !== 'function') {
+      H.toast('一起听还没准备好，请回一起听重试', 'error');
+      return;
+    }
+    try {
+      await window.HertzRoom.addOnline(songs);
+      H.toast(songs.length > 1
+        ? '已点播 ' + songs.length + ' 首到共同队列'
+        : '已点播《' + (songs[0].title || '歌曲') + '》到共同队列');
+    } catch (error) {
+      H.toast(error.message || '点播失败，请稍后重试', 'error');
+    }
+  }
+
   function buildRow(track, activate) {
     var row = document.createElement('div');
     // 无试听地址：整行置灰。只禁用按钮不够，行点击也必须失效。
@@ -451,7 +475,9 @@
 
     var btn = row.querySelector('[data-act="preview"]');
     btn.disabled = disabled;
-    btn.title = track.vip_only ? VIP_TITLE : (track.playable ? '在线试听' : '该音源没有可用的试听地址');
+    btn.title = !track.playable ? '该音源没有可用的试听地址'
+      : roomActive() ? '点播到共同队列'
+        : track.vip_only ? VIP_TITLE : '在线试听';
 
     row.dataset.previewTitle = btn.title;
     btn.onclick = function (e) { e.stopPropagation(); activate(); };
@@ -1237,8 +1263,9 @@
     if (loading) { button.title = '正在加载歌曲…'; button.setAttribute('aria-label', '正在加载歌曲'); }
     else if (error) { button.title = failedPlay.message + ' · 点击重试'; button.setAttribute('aria-label', '播放失败，点击重试'); }
     else {
-      button.title = row.dataset.previewTitle || '在线试听';
-      button.setAttribute('aria-label', '在线试听');
+      var point = roomActive() && !row.classList.contains('is-disabled');
+      button.title = point ? '点播到共同队列' : (row.dataset.previewTitle || '在线试听');
+      button.setAttribute('aria-label', point ? '点播到共同队列' : '在线试听');
     }
     if (!row._onlineLoadStatus) {
       row._onlineLoadStatus = document.createElement('span');
@@ -1257,9 +1284,12 @@
     document.querySelectorAll('.online-row').forEach(paintRowPlayback);
   }
 
-  async function playAll(tracks, index) {
+  // `roomQueue` 是「播放全部」这类整批意图在房间里的点播范围；单曲入口不传，
+  // 房间里只点播被点的那一首（`tracks[index]`），否则点一首会塞进整页结果。
+  async function playAll(tracks, index, roomQueue) {
     if (!tracks || !tracks.length) return;
     index = Math.max(0, Math.min(index || 0, tracks.length - 1));
+    if (roomActive()) return pointToRoom(roomQueue || [tracks[index]]);
     var id = virtualId(tracks[index]);
     if (pendingPlay && pendingPlay.id === id && pendingPlay.current()) return;
     var epoch = ++onlinePlayEpoch;
@@ -1313,6 +1343,7 @@
   // 续载都由服务端负责（crates 的 collection.rs）。响应带首页元数据，与整盘
   // 形态走同一段落地逻辑；进度靠 collection_load 事件推进，这里不轮询。
   async function playCollection(source, collectionId) {
+    if (roomActive()) { H.toast('房间进行中，请点播已加载的歌曲到共同队列'); return; }
     var intentId = 'collection:' + source + ':' + collectionId;
     var epoch = ++onlinePlayEpoch;
     var ticket = T.playbackIntent ? T.playbackIntent() : null;
@@ -2191,6 +2222,8 @@
     setKind: setKind,
     playAll: playAll,
     playCollection: playCollection,
+    // 房间进行中本地播放入口会被服务端拒绝；集合页据此把「播放」改成点播文案。
+    roomActive: roomActive,
     // 行工厂：歌单抽屉复用同一套标记/VIP/置灰，activate 由调用方注入。
     row: buildRow,
     roomButton: roomButton,

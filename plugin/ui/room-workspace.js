@@ -4,10 +4,27 @@
   'use strict';
   const titles = { lobby: '一起听', discover: '附近的房间', application: '入房申请', play: '听歌现场', invite: '邀请一起听', collaborate: '共同队列与聊天', settings: '房间设置', summary: '收听小结' };
   const symbols = { lobby: 'home', play: 'headphones', invite: 'user', collaborate: 'queue', settings: 'settings' };
+  const avatarPresets = [['coffee', '咖啡'], ['cocktail', '鸡尾酒'], ['cupcake', '纸杯蛋糕'], ['pacman', '吃豆人'], ['knight', '棋马'], ['invader', '太空怪兽'], ['stamp', '邮票'], ['beetle', '甲虫'], ['radar', '雷达'], ['bear', '小熊'], ['ghost', '幽灵'], ['alien', '外星人'], ['rocket', '火箭'], ['flask', '烧瓶']];
+  const avatarPaths = {
+    coffee: 'M4 4h12v9a4 4 0 0 1-4 4H8a4 4 0 0 1-4-4V4Zm12 1h2a3 3 0 0 1 0 6h-2M2 21h18',
+    cocktail: 'M3 4h18l-9 10L3 4Zm9 10v7m-5 0h10M7 8h10',
+    cupcake: 'M6 11a4 4 0 0 1 1-7 5 5 0 0 1 10 0 4 4 0 0 1 1 7M5 11h14l-2 10H7L5 11Zm5 4v3m4-3v3',
+    pacman: 'M20 5a9 9 0 1 0 0 14l-8-7 8-7ZM12 6h.01',
+    knight: 'm8 3 3 2 4-2 4 7-5 4 3 4H6l2-7 4-3-4-5ZM6 18l-1 4h15l-1-4M14 8h.01',
+    invader: 'm7 3 2 3m8-3-2 3M5 6h14v11H5V6Zm-3 4v8m20-8v8M8 17v4m8-4v4M5 13h14M9 9v1m6-1v1',
+    stamp: 'M5 3h3l2 2 2-2 2 2 2-2h3l2 2v3l-2 2 2 2-2 2 2 2v3l-2 2h-3l-2-2-2 2-2-2-2 2H5l-2-2v-3l2-2-2-2 2-2-2-2V5l2-2Zm3 5h8v8H8V8Z',
+    beetle: 'M8 8V6a4 4 0 0 1 8 0v2M7 8h10v9a5 5 0 0 1-10 0V8Zm5 0v14M3 9h4m10 0h4M3 14h4m10 0h4M3 19h4m10 0h4M8 3 6 1m10 2 2-2',
+    radar: 'M5 5a9 9 0 1 0 14 0M12 3l-4 9h9m-5 0 5-8M3 22h18',
+    bear: 'M6 8a3 3 0 1 1 3-4 10 10 0 0 1 6 0 3 3 0 1 1 3 4 8 8 0 1 1-12 0Zm3 4h.01M15 12h.01M10 16h4l-2 2-2-2Z',
+    ghost: 'M5 11a7 7 0 0 1 14 0v3l2 3-4 1-2 3-3-2-3 2-2-3-4-1 2-3v-3Zm4-1h.01M15 10h.01',
+    alien: 'M20 10c0 5-5 11-8 12-3-1-8-7-8-12a8 8 0 0 1 16 0ZM7 11l3 2-1 2-2-4Zm10 0-3 2 1 2 2-4Z',
+    rocket: 'M7 16V9c0-4 5-8 5-8s5 4 5 8v7H7Zm-1 4h12M10 23h4M4 16h16M10 8a2 2 0 1 0 4 0 2 2 0 0 0-4 0Z',
+    flask: 'M9 2h6m-5 0v7L4 22h16L14 9V2M8 14h8'
+  };
   function icon(name) {
     const make = tag => document.createElementNS ? document.createElementNS('http://www.w3.org/2000/svg', tag) : document.createElement(tag);
     const svg = make('svg'), use = make('use'); svg.setAttribute('class', 'room-icon'); svg.setAttribute('viewBox', '0 0 24 24'); svg.setAttribute('aria-hidden', 'true'); svg.setAttribute('focusable', 'false');
-    if (name === 'crown') { const path = make('path'); path.setAttribute('d', 'M3 6l5 4 4-6 4 6 5-4-2 13H5L3 6z'); path.setAttribute('fill', 'none'); path.setAttribute('stroke', 'currentColor'); path.setAttribute('stroke-width', '1.5'); svg.append(path); }
+    if (avatarPaths[name] || name === 'crown') { const path = make('path'); path.setAttribute('d', avatarPaths[name] || 'M3 6l5 4 4-6 4 6 5-4-2 13H5L3 6z'); path.setAttribute('fill', 'none'); path.setAttribute('stroke', 'currentColor'); path.setAttribute('stroke-width', '1.7'); path.setAttribute('stroke-linecap', 'round'); path.setAttribute('stroke-linejoin', 'round'); svg.append(path); }
     else { use.setAttribute('href', '#i-' + name); svg.append(use); } return svg;
   }
   // Native popovers live above scrolling panels and modal drawers. Their DOM
@@ -69,7 +86,7 @@
   }
   function closeMenus(parent) { parent.querySelectorAll('details[open]').forEach(node => { if (node.closeMenu) node.closeMenu(); }); }
   global.HertzRoomWorkspace = {
-    icon, createMenu, closeMenus,
+    icon, avatarPresets, createMenu, closeMenus,
     create(root, actions) {
       const { h, refs } = actions;
       function button(text, action, cls) { const node = h('button', 'btn ' + (cls || ''), text); node.type = 'button'; node.onclick = action; return node; }
