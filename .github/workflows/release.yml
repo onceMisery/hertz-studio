@@ -33,6 +33,9 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  desktop-component:
+    uses: ./.github/workflows/desktop-component.yml
+
   # -------------------------------------------------------------------------
   # 独立形态：单二进制
   # -------------------------------------------------------------------------
@@ -170,7 +173,7 @@ jobs:
   # -------------------------------------------------------------------------
   summary:
     name: merge checksums
-    needs: [build, plugin]
+    needs: [build, plugin, desktop-component]
     runs-on: ubuntu-latest
     steps:
       - name: Download all dist artifacts

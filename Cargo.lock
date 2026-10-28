@@ -1634,14 +1634,29 @@ version = "0.3.0"
 dependencies = [
  "anyhow",
  "dirs 5.0.1",
+ "hertz-desktop-ipc",
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "tao",
+ "tokio",
  "tray-icon",
  "tungstenite 0.28.0",
  "windows-sys 0.61.2",
  "wry",
+]
+
+[[package]]
+name = "hertz-desktop-ipc"
+version = "0.3.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1659,6 +1674,7 @@ dependencies = [
  "fslock",
  "futures",
  "getrandom 0.3.4",
+ "hertz-desktop-ipc",
  "hmac",
  "keyring",
  "md-5",

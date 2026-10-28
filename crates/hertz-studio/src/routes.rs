@@ -336,6 +336,7 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         // OBS 歌词输出：「正在播放」歌词+播放态快照，轮询驱动 /overlay 浮层页。
         .route("/v1/overlay/lyric", get(overlay_lyric))
         // 独立形态的桌面歌词组件启动入口；组件固定来自服务同目录，不接受路径参数。
+        .route("/v1/desktop/capabilities", get(desktop_capabilities))
         .route("/v1/desktop/lyrics/launch", post(launch_desktop_lyrics))
         .route(
             "/v1/desktop/wallpaper/launch",
@@ -694,149 +695,48 @@ async fn get_overlay_key(State(state): State<Arc<AppState>>) -> ApiResult<Json<s
     Ok(Json(overlay_key_payload(&state)?))
 }
 
-const DESKTOP_CONTROL_BODY_BYTES: usize = 2 * 1024;
-const DESKTOP_CONTROL_COMMANDS: &[&str] = &[
-    "status",
-    "lock",
-    "unlock",
-    "show",
-    "hide",
-    "locate",
-    "layout",
-    "secondary",
-    "font",
-    "opacity",
-    "quit",
-    "wallpaper-status",
-    "wallpaper-settings",
-    "wallpaper-toggle",
-    "wallpaper-show",
-    "wallpaper-hide",
-    "wallpaper-retry",
-    "wallpaper-preview",
-    "wallpaper-preview-close",
-    "wallpaper-preview-renew",
-    "wallpaper-apply",
-    "profile-switch",
-];
+const DESKTOP_CONTROL_BODY_BYTES: usize = crate::desktop::CONTROL_BODY_BYTES;
+#[cfg(test)]
+use crate::desktop::CONTROL_COMMANDS as DESKTOP_CONTROL_COMMANDS;
 
-#[derive(Deserialize)]
-pub(crate) struct DesktopControlRequest {
-    command: String,
-    #[serde(default)]
-    value: Option<serde_json::Value>,
+async fn desktop_capabilities(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<crate::desktop::CapabilitiesQuery>,
+) -> Json<crate::desktop::Capabilities> {
+    Json(
+        crate::desktop::Desktop::for_state(&state)
+            .capabilities(query.refresh)
+            .await,
+    )
 }
 
-/// 把播放器的明确动作转给正在运行的原生宿主；宿主不在时如实返回 503。
 async fn desktop_lyrics_control(
-    Json(request): Json<DesktopControlRequest>,
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<crate::desktop::ControlRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    if !DESKTOP_CONTROL_COMMANDS.contains(&request.command.as_str()) {
-        return Err(bad_request("不支持的桌面控制命令"));
-    }
-    let payload = serde_json::json!({
-        "command": request.command,
-        "value": request.value,
-    });
-    let result = tokio::task::spawn_blocking(move || crate::desktop_control::send(payload))
+    crate::desktop::Desktop::for_state(&state)
+        .control(request)
         .await
-        .map_err(|error| internal(format!("桌面歌词控制任务失败：{error}")))?;
-    match result {
-        Ok(response) => Ok(Json(response)),
-        Err(error) => {
-            let message = format!("{error:#}");
-            let code = if message.contains("未运行") {
-                "desktop_not_running"
-            } else {
-                "desktop_unavailable"
-            };
-            Err(ApiError::new(
-                StatusCode::SERVICE_UNAVAILABLE,
-                code,
-                message,
-            ))
-        }
-    }
+        .map(Json)
 }
 
-/// 启动同目录的桌面宿主。组件缺失时明确拒绝，不从 PATH 猜。
 async fn launch_desktop_lyrics(
     State(state): State<Arc<AppState>>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    launch_desktop_host(&state, &["--locate"], "locate", None)
+    crate::desktop::Desktop::for_state(&state)
+        .launch(false)
+        .await
+        .map(Json)
 }
 
 async fn launch_desktop_wallpaper(
     State(state): State<Arc<AppState>>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    // 把本实例的来源作为候选交给宿主设置页：已有宿主绑定别的 profile 时，
-    // 用户能在列表里看到当前应用的数据目录并显式切换，而不是被静默改绑。
-    let candidate = serde_json::json!({
-        "profile": {
-            "dataDir": state.data_dir.to_string_lossy(),
-            "edition": crate::edition::NAME,
-        }
-    });
-    launch_desktop_host(
-        &state,
-        &["--settings"],
-        "wallpaper-settings",
-        Some(candidate),
-    )
+    crate::desktop::Desktop::for_state(&state)
+        .launch(true)
+        .await
+        .map(Json)
 }
-
-fn launch_desktop_host(
-    state: &AppState,
-    extra_args: &[&str],
-    followup: &str,
-    followup_value: Option<serde_json::Value>,
-) -> ApiResult<Json<serde_json::Value>> {
-    let exe = std::env::current_exe().map_err(|error| internal(error.to_string()))?;
-    let Some(dir) = exe.parent() else {
-        return Err(internal("无法定位服务所在目录".to_string()));
-    };
-    let host = dir.join(if cfg!(windows) {
-        "hertz-desktop.exe"
-    } else {
-        "hertz-desktop"
-    });
-    if !host.is_file() {
-        return Err(ApiError::new(
-            StatusCode::NOT_FOUND,
-            "desktop_component_missing",
-            format!(
-                "未找到桌面组件 {}；请安装与本服务匹配的桌面组件",
-                host.display()
-            ),
-        ));
-    }
-    let mut command = std::process::Command::new(&host);
-    command.arg("--data-dir").arg(&state.data_dir);
-    for arg in extra_args {
-        command.arg(arg);
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        // 组件是 GUI 进程；开发构建的 console 也不要弹出来。
-        command.creation_flags(0x0800_0000);
-    }
-    command
-        .spawn()
-        .map_err(|error| internal(format!("启动桌面组件失败：{error}")))?;
-    // 已有宿主时新进程会因单实例退出；给正在运行的那个补一次幂等命令。
-    let followup = followup.to_string();
-    std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(400));
-        let mut payload = serde_json::json!({ "command": followup });
-        if let Some(value) = followup_value {
-            payload["value"] = value;
-        }
-        let _ = crate::desktop_control::send(payload);
-    });
-    Ok(Json(serde_json::json!({ "started": true })))
-}
-
 /// 桌面歌词轻量快照：500 ms 轮询用，永不等待取词。
 async fn desktop_lyrics_snapshot(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     Json(crate::desktop_lyrics::snapshot(&state).await)

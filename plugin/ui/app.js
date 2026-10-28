@@ -3049,7 +3049,7 @@ function onSkinChangedForViews() {
     pendingSkinViewHandoff = true;
     return;
   }
-  setView(defaultView());
+  setView(defaultView(), { skipDesktopDetection: true });
 }
 
 /// Daily.bind() 之后调用：若启动期攒下了换肤广播，这里补上对账。
@@ -3057,7 +3057,7 @@ function bindDailyStrip() {
   dailyStripBound = true;
   if (!pendingSkinViewHandoff) return;
   pendingSkinViewHandoff = false;
-  setView(defaultView());
+  setView(defaultView(), { skipDesktopDetection: true });
 }
 
 function applyNavVisibility() {
@@ -5379,6 +5379,8 @@ function setView(name, options) {
   }
   // 缓存占用是随时会变的数字，进设置页才刷新。
   if (name === 'settings') {
+    // 恢复默认视图（包括已保存的 settings）不代表用户请求桌面检测。
+    if (!(options && options.skipDesktopDetection) && window.HertzDesktopSettings) window.HertzDesktopSettings.onSettingsEnter();
     if (window.__loadCacheStats) window.__loadCacheStats();
     if (window.__loadDspSettings) window.__loadDspSettings();
     if (window.__loadRemoteRoots) window.__loadRemoteRoots();
@@ -6643,7 +6645,7 @@ function bindShortcuts() {
     }
     if (e.key === 'Escape') {
       if (window.NowPlaying && NowPlaying.back()) { e.preventDefault(); return; }
-      closeMenu(); closeNowPlaying(); if (typing) document.activeElement.blur(); setView(state.view); document.body.classList.remove('stage-open'); return;
+      closeMenu(); closeNowPlaying(); if (typing) document.activeElement.blur(); setView(state.view, { skipDesktopDetection: true }); document.body.classList.remove('stage-open'); return;
     }
     if (e.key === '/' && !typing) { e.preventDefault(); focusSearch(false); return; }
     if (typing || e.ctrlKey || e.metaKey || e.altKey || target.closest('button, a, [role="button"], [role="slider"]')) return;
@@ -6678,6 +6680,8 @@ function initSkinBridge() {
     if (d.action === 'open-player') {
       openNowPlaying();
     } else if (d.action === 'settings-enter') {
+      // 流年/清风的显式打开事件不经 setView；同一次打开的请求由模块本地合并。
+      if (window.HertzDesktopSettings) window.HertzDesktopSettings.onSettingsEnter();
       loadDiagnostics();
       const refreshers = { cache: window.__loadCacheStats, dsp: window.__loadDspSettings, remote: window.__loadRemoteRoots };
       (Array.isArray(d.sections) ? d.sections : []).forEach(section => {
@@ -9041,9 +9045,10 @@ async function startApp() {
     };
   }
   // 歌词设置：偏移步进 100ms（±2000 封顶），正则改完失焦即存。
-  // 桌面歌词是独立 Windows 组件：DBX 形态没有桌面入口，也不该在这里催用户安装。
+  // DBX 的统一桌面区只注册事件；实际打开设置或显式桌面动作才检测。
+  if (window.HertzDesktopSettings) window.HertzDesktopSettings.init(transport);
   if (ui.barDesktopSettings) {
-    ui.barDesktopSettings.hidden = !!(window.hertzHost && window.hertzHost.isDbx);
+    ui.barDesktopSettings.hidden = false;
   }
   if (ui.setDesktopLyricsRow) {
     ui.setDesktopLyricsRow.style.display =
@@ -9056,6 +9061,9 @@ async function startApp() {
   if (ui.setWallpaperNote) {
     ui.setWallpaperNote.style.display =
       window.hertzHost && window.hertzHost.isDbx ? 'none' : '';
+  }
+  if ($('set-desktop-lyrics-note')) {
+    $('set-desktop-lyrics-note').hidden = !!(window.hertzHost && window.hertzHost.isDbx);
   }
   if (ui.setDesktopLyricsOpen) {
     ui.setDesktopLyricsOpen.onclick = () => {
@@ -9086,6 +9094,22 @@ async function startApp() {
   for (const button of [ui.setWallpaperSettings, ui.barDesktopSettings]) {
     if (!button) continue;
     button.onclick = () => {
+      if (window.hertzHost && window.hertzHost.isDbx) {
+        const skin = window.Skins && window.Skins.currentId();
+        const sheet = document.querySelector(skin === 'qingfeng' ? '.qf-modal' : skin === 'liunian' ? '.ln-modal' : '.skset-modal');
+        if (skin === 'qingfeng' || skin === 'liunian') {
+          // 这两套皮肤有自己的打开入口；setView 只会隐藏它们已搬走的设置视图。
+          if (sheet && sheet.hidden) {
+            const opener = skin === 'qingfeng' ? document.querySelector('.qf-settings-btn') : ui.settingsEntry;
+            if (opener) opener.click();
+          }
+        } else setView('settings');
+        // 若已打开则显式重新检测；入口已发出的同次检测会被本地合并。
+        if (window.HertzDesktopSettings) window.HertzDesktopSettings.onSettingsEnter();
+        // 皮肤先完成现有浮层搬运/分类还原，再聚焦歌词组里的桌面区。
+        requestAnimationFrame(() => window.HertzDesktopSettings && window.HertzDesktopSettings.focus());
+        return;
+      }
       wallpaperControl('wallpaper-settings', { tab: 'wallpaper' })
         .then(() => toast('已打开桌面歌词与壁纸'))
         .catch((err) => toast(errText('打开桌面歌词与壁纸失败', err), 'error'));
@@ -9454,7 +9478,7 @@ async function startApp() {
 
   // 启动落在默认视图（在线曲库）—— 见 defaultView() 上方的边界说明：
   // 这里只改"回首页"语义，rail 的显式点击仍去本地曲库。
-  setView(defaultView());
+  setView(defaultView(), { skipDesktopDetection: true });
   // 先把封面票签好再拉列表：coverUrl() 是同步契约，票没到位就只能退回 ?token=，
   // 那第一屏封面又会把长期凭据带进 URL（正是这一步要消掉的东西）。
   await refreshCoverTicket();

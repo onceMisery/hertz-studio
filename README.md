@@ -564,10 +564,10 @@ pwsh -File scripts/smoke.ps1 7899 # Windows
 | S1 重采样 | 固定参数流式 sinc 已实现并有离线验证；真实声卡、长时间听测与其它 OS 待验 | [audio-resampling.md](docs/audio-resampling.md) |
 | 音频格式与错误边界 | 13 种扩展名，四件不同的事（检查 / 标签 / 解码 / 出声）写明并如实上报 | [audio-format-support.md](docs/audio-format-support.md) |
 | S2–S4 音频二期 | 升采样、参数 EQ、卷积 IR、EBU R128、真峰值限幅、噪声整形、交叉馈送、饱和，以及 Windows WASAPI 独占输出——排期在 R0–R6 之外 | 待音频专项重新定序 |
-| W0–W3 桌面壁纸 | W0 稳定通过；W1-A 相机 registry/只读快照契约已实现；W1-B 首片已接 WorkerW 目标屏 surface、混合 DPI（第二屏 96/144 实测）、快照+事件 feed、托盘、设置页、15 秒预览租约、Explorer 重启恢复、主应用管理通道与多 profile/发行版切换；W3 单屏拓扑重排、WebView 失联恢复与诊断投影已接；W1-C 安装升级验收与多屏同时运行未做 | [desktop-wallpaper.md](docs/desktop-wallpaper.md) |
-| L0–L3 桌面歌词 | **L1 首版已实现**：服务端只读快照/文档桥、Windows 透明置顶与锁定穿透、托盘恢复、播放器启动与解锁定位、本机管理通道；L1-C 发布验收与 DBX 入口未做 | [desktop-lyrics.md](docs/desktop-lyrics.md) |
+| P0–P3 壁纸引擎 | 已有九场景、单目标屏、预览、自启与分项恢复证据；后续设计覆盖本地作品库与多屏、可扩展资源/组合编辑、AI 生成与受控切换、隔离网页及社区分发，约束资源生命周期、性能预算与生成授权；新增阶段尚未交付，W0/W1 历史证据保留 | [desktop-wallpaper.md](docs/desktop-wallpaper.md) |
+| L0–L3 桌面歌词 | **L1 首版已实现**：服务端只读快照/文档桥、Windows 透明置顶与锁定穿透、托盘恢复、播放器启动与解锁定位、本机管理通道；DBX 候选入口已实现，L1-C 与 DBX D3 完整发布验收待完成 | [desktop-lyrics.md](docs/desktop-lyrics.md) |
 | 桌面公共契约与原生验证 | 单实例、来源切换、配置/应用状态、IPC、自启与部署统一设计；L0/W0 已有实机探针结果，L1 首版按本契约落地；本机管理通道与来源切换已通，发布验收仍未完成 | [共享宿主](docs/desktop-host.md) · [原生验证计划](docs/plans/2026-10-23-desktop-native-validation.md) |
-| DBX 桌面接入 | 后续设计草案已补齐：只读命名管道、来源身份与配置迁移、统一管理、配套组件分发及 D0–D3 验收；尚未实施 | [DBX 接入方案](docs/desktop-dbx.md) |
+| DBX 桌面接入 | D0–D2 已实现并通过独立审查；D3a 两版同源配套候选已准备。最低 0.6.35 / 当前 0.6.47 两版插件的无组件基础流程、真实定时、关闭重开、原生呈现和正常退出通过，当前 Full 另验真实在线取词；D3b 的物理媒体键、跨用户/会话、桌面恢复与长稳等仍待验。组件由用户独立启动，DBX 单独使用无行为变化为硬约束 | [DBX 接入方案](docs/desktop-dbx.md) |
 | LAN-L 局域网一起听 | 房主统一渲染、接收端按设备时钟同步；含受限配对/撤权、旧播控入口模式门禁，以及互动弹幕的独立有界存储。**设计提案待评审、尚未实施**，不依赖桌面专项 | [lan-listening.md](docs/lan-listening.md) |
 | 创意舞台二期（P8） | 基频轨迹已能本地分析与只读查看；工程、模板、分享码、视频导出已落地，人工视觉与音乐质量验收未做 | [pitch-track.md](docs/pitch-track.md) · [stage-projects.md](docs/stage-projects.md) · [stage-templates.md](docs/stage-templates.md) · [orchestration-art.md](docs/orchestration-art.md) · [video-export.md](docs/video-export.md) |
 | 星座场景视觉 | 逐座造型、配色与动效按文档调过一轮，可拖拽环绕、滚轮缩放、双击复位 | [zodiac-visual-tuning.md](docs/zodiac-visual-tuning.md) |

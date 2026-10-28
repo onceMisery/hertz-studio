@@ -16,14 +16,21 @@ pub(crate) const PROTOCOL: u32 = 1;
 
 /// Explicit toolbar actions use the narrow desktop endpoint; credentials stay native.
 pub(crate) fn control(profile: &Profile, payload: &serde_json::Value) -> Result<()> {
+    if crate::config::is_dbx(profile) {
+        bail!("DBX 来源仅支持歌词读取，请在 DBX 中控制播放");
+    }
     let discovery = bridge::read_discovery(profile)?;
     if discovery.desktop_lyrics_protocol != Some(PROTOCOL)
-        || discovery.edition.as_deref() != Some(profile.edition.as_str())
+        || discovery.edition.as_deref() != Some(profile.edition())
         || discovery.server_instance_id.as_deref() != payload["session"].as_str()
     {
         bail!("播放来源已变化，请等待重新同步");
     }
-    let key = bridge::read_key(&profile.data_dir, "desktop-lyrics-key", "桌面歌词")?;
+    let key = bridge::read_key(
+        std::path::Path::new(profile.data_dir()),
+        "desktop-lyrics-key",
+        "桌面歌词",
+    )?;
     let response = bridge::client()?
         .post(format!(
             "http://127.0.0.1:{}/v1/desktop-lyrics/control",
@@ -138,6 +145,9 @@ pub(crate) struct Feed {
 
 impl Feed {
     pub(crate) fn new(profile: Profile) -> Result<Self> {
+        if crate::config::is_dbx(&profile) {
+            bail!("DBX 来源必须使用私有管道读取");
+        }
         Ok(Self {
             client: bridge::client()?,
             profile,
@@ -149,11 +159,11 @@ impl Feed {
     pub(crate) fn poll(&mut self) -> Result<FeedUpdate> {
         let discovery = bridge::read_discovery(&self.profile)?;
         if let Some(edition) = discovery.edition.as_deref() {
-            if self.profile.edition != "custom" && edition != self.profile.edition {
+            if self.profile.edition() != "custom" && edition != self.profile.edition() {
                 bail!(
                     "数据目录属于 {} 发行版，当前 profile 是 {}",
                     edition,
-                    self.profile.edition
+                    self.profile.edition()
                 );
             }
         }
@@ -169,7 +179,11 @@ impl Feed {
         }
         self.session = discovery.server_instance_id.clone();
         // 每拍重读钥匙：删文件重启即可轮换，不需要组件重启。
-        let read_key = bridge::read_key(&self.profile.data_dir, "desktop-lyrics-key", "桌面歌词")?;
+        let read_key = bridge::read_key(
+            std::path::Path::new(self.profile.data_dir()),
+            "desktop-lyrics-key",
+            "桌面歌词",
+        )?;
         let base = format!("http://127.0.0.1:{}", discovery.port);
 
         let snapshot: Snapshot = bridge::get_json(

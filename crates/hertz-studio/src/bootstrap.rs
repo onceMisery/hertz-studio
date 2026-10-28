@@ -150,6 +150,7 @@ pub async fn boot(
         room: Default::default(),
         config: Arc::new(config.clone()),
         data_dir: data_dir.clone(),
+        desktop: Default::default(),
         token: token.clone(),
         overlay_key: overlay_key.clone(),
         desktop_lyrics_key: desktop_lyrics_key.clone(),

@@ -771,6 +771,7 @@ pub struct AppState {
     pub(crate) room: crate::room::RoomManager,
     pub config: Arc<Config>,
     pub data_dir: PathBuf,
+    pub(crate) desktop: std::sync::OnceLock<Arc<crate::desktop::Desktop>>,
     pub token: String,
     /// 浮层只读钥匙（见 `main.rs` 的 `load_or_create_overlay_key`）。与 token
     /// 分开是因为它会被粘进 OBS 的配置：权限只到「GET + 浮层歌词 + 曲目封面」。
@@ -4584,6 +4585,7 @@ pub(crate) mod tests {
             room: Default::default(),
             config: Arc::new(Config::default()),
             data_dir: PathBuf::new(),
+            desktop: Default::default(),
             token: String::new(),
             overlay_key: String::new(),
             desktop_lyrics_key: String::new(),

@@ -31,6 +31,7 @@ use std::sync::Arc;
 use dbx_plugin_sdk::{
     PluginEmitter, PluginError, PluginHandler, PluginMetadata, PluginServer, RequestContext,
 };
+use hertz_studio::desktop_bridge::DesktopBridge;
 use hertz_studio::error::{ErrorBody, ErrorDetail};
 use hertz_studio::rpc::{decode_base64, Call, Op, RawBody, Rpc, RpcResult};
 use hertz_studio::state::AppState;
@@ -266,8 +267,19 @@ fn main() -> std::io::Result<()> {
     // workers may retain Arc<Plugin> after serve returns on EOF or read error;
     // their last Arc's Drop must never own process shutdown or the runtime.
     let state = booted.state.clone();
+    let desktop_bridge = DesktopBridge::new(&state);
+    let restore_bridge = desktop_bridge.clone();
+    runtime.spawn(async move {
+        if let Err(error) = restore_bridge.restore().await {
+            tracing::warn!(
+                code = error.code,
+                "DBX desktop source unavailable: {}",
+                error.message
+            );
+        }
+    });
     let plugin = Plugin {
-        rpc: Rpc::new(state.clone()),
+        rpc: Rpc::new(state.clone()).with_desktop_bridge(desktop_bridge.clone()),
         state: state.clone(),
         event_forwarder_running: Arc::new(AtomicBool::new(false)),
         runtime: runtime.handle().clone(),
@@ -275,10 +287,15 @@ fn main() -> std::io::Result<()> {
 
     let mut exiting = state.exiting_signal();
     let shutdown_state = state.clone();
+    let shutdown_bridge = desktop_bridge.clone();
     runtime.spawn(async move {
         if !*exiting.borrow() && exiting.changed().await.is_err() {
             return;
         }
+        shutdown_bridge.begin_shutdown();
+        tokio::spawn(async move {
+            shutdown_bridge.shutdown().await;
+        });
         shutdown_state.shutdown().await;
     });
 
@@ -286,6 +303,10 @@ fn main() -> std::io::Result<()> {
     let result = PluginServer::new(metadata, plugin).serve();
     // stdin EOF/read failure can leave an RPC executing or queued in the SDK.
     // The process owner must drain Host End before main is allowed to return.
+    desktop_bridge.begin_shutdown();
+    runtime.spawn(async move {
+        desktop_bridge.shutdown().await;
+    });
     runtime.block_on(booted.state.shutdown());
     result
 }

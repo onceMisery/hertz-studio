@@ -3,12 +3,16 @@
 
 //! 唯一的桌面配置。持久配置表达用户意图；窗口/来源运行事实另行查询。
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
-pub(crate) const SCHEMA_VERSION: u32 = 2;
+pub(crate) const SCHEMA_VERSION: u32 = 3;
+static COMMIT_LOCK: Mutex<()> = Mutex::new(());
+pub(crate) use hertz_desktop_ipc::Profile;
 pub(crate) const MAX_PROFILES: usize = 8;
 const MAX_CONFIG_BYTES: usize = 64 * 1024;
 
@@ -18,6 +22,7 @@ pub(crate) struct Config {
     pub(crate) launch_at_login: bool,
     pub(crate) active_profile: Option<Profile>,
     pub(crate) profiles: Vec<ProfileDomain>,
+    pub(crate) unbound_standalone: Option<StandalonePreferences>,
     pub(crate) lyrics: LyricsConfig,
     pub(crate) wallpaper: WallpaperConfig,
 }
@@ -30,17 +35,61 @@ pub(crate) struct ProfileDomain {
     pub(crate) wallpaper: WallpaperConfig,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct StandalonePreferences {
+    lyrics: LyricsConfig,
+    wallpaper: WallpaperConfig,
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct StoredConfigV2 {
+struct StoredConfigV3 {
     schema_version: u32,
     revision: u64,
     launch_at_login: bool,
     active_profile: Option<Profile>,
     #[serde(default)]
     profiles: Vec<ProfileDomain>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    unbound_standalone: Option<StandalonePreferences>,
 }
 
+// Untagged identities are accepted only while decoding legacy schemas.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LegacyProfile {
+    data_dir: String,
+    edition: String,
+}
+impl LegacyProfile {
+    fn migrate(self) -> Result<Profile> {
+        let profile = Profile::Standalone {
+            data_dir: self.data_dir,
+            edition: self.edition.to_ascii_lowercase(),
+        };
+        profile.validate()?;
+        Ok(profile)
+    }
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LegacyDomain {
+    profile: LegacyProfile,
+    lyrics: LyricsConfig,
+    wallpaper: WallpaperConfig,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct StoredConfigV2 {
+    #[allow(dead_code)]
+    schema_version: u32,
+    revision: u64,
+    launch_at_login: bool,
+    active_profile: Option<LegacyProfile>,
+    #[serde(default)]
+    profiles: Vec<LegacyDomain>,
+}
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct StoredConfigV1 {
@@ -48,17 +97,32 @@ struct StoredConfigV1 {
     schema_version: u32,
     revision: u64,
     launch_at_login: bool,
-    active_profile: Option<Profile>,
+    active_profile: Option<LegacyProfile>,
     lyrics: LyricsConfig,
     #[serde(default)]
     wallpaper: WallpaperConfig,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct Profile {
-    pub(crate) data_dir: PathBuf,
-    pub(crate) edition: String,
+pub(crate) fn standalone(data_dir: PathBuf, edition: &str) -> Profile {
+    Profile::Standalone {
+        data_dir: data_dir.to_string_lossy().into_owned(),
+        edition: edition.into(),
+    }
+}
+pub(crate) fn is_dbx(profile: &Profile) -> bool {
+    matches!(profile, Profile::Dbx { .. })
+}
+// Compatibility at the old management boundary only; stored schema v3 is strict.
+pub(crate) fn management_profile(value: serde_json::Value) -> Result<Profile> {
+    if value.get("kind").is_some() {
+        return Ok(serde_json::from_value(value)?);
+    }
+    serde_json::from_value::<LegacyProfile>(value)?.migrate()
+}
+pub(crate) fn next_revision(revision: u64) -> Result<u64> {
+    revision
+        .checked_add(1)
+        .context("桌面配置 revision 已达上限，未保存")
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -185,6 +249,7 @@ impl Default for Config {
             launch_at_login: false,
             active_profile: None,
             profiles: Vec::new(),
+            unbound_standalone: None,
             lyrics: LyricsConfig::default(),
             wallpaper: WallpaperConfig::default(),
         }
@@ -237,6 +302,10 @@ impl Config {
     pub(crate) fn sanitize(&mut self) {
         sanitize_lyrics(&mut self.lyrics);
         sanitize_wallpaper(&mut self.wallpaper);
+        if let Some(unbound) = self.unbound_standalone.as_mut() {
+            sanitize_lyrics(&mut unbound.lyrics);
+            sanitize_wallpaper(&mut unbound.wallpaper);
+        }
         for domain in &mut self.profiles {
             sanitize_lyrics(&mut domain.lyrics);
             sanitize_wallpaper(&mut domain.wallpaper);
@@ -289,11 +358,17 @@ impl Config {
             self.lyrics = self.profiles[index].lyrics.clone();
             self.wallpaper = self.profiles[index].wallpaper.clone();
         } else {
-            // 首次绑定时沿用现有域（含 schema v1 迁移）；已绑定过来源后，
-            // 新来源从默认域开始，不继承另一个 profile 的启用状态与样式。
-            if self.active_profile.is_some() {
+            if !is_dbx(&profile) && self.unbound_standalone.is_some() {
+                let unbound = self.unbound_standalone.take().unwrap();
+                self.lyrics = unbound.lyrics;
+                self.wallpaper = unbound.wallpaper;
+            } else {
                 self.lyrics = LyricsConfig::default();
                 self.wallpaper = WallpaperConfig::default();
+                // DBX authorization always starts with both persistent surfaces disabled.
+                if is_dbx(&profile) {
+                    self.lyrics.enabled = false;
+                }
             }
             self.profiles.push(ProfileDomain {
                 profile: profile.clone(),
@@ -372,43 +447,39 @@ pub(crate) fn valid_color(value: &str) -> bool {
 }
 
 pub(crate) fn same_profile(left: &Profile, right: &Profile) -> bool {
-    left.edition.eq_ignore_ascii_case(&right.edition)
-        && normalized_path(&left.data_dir).eq_ignore_ascii_case(&normalized_path(&right.data_dir))
+    // Existing directories use the shared Win32 final-path/invariant-case identity.
+    // Offline persisted directories keep their lexical identity without losing the domain.
+    let left = left.normalized().unwrap_or_else(|_| lexical_profile(left));
+    let right = right
+        .normalized()
+        .unwrap_or_else(|_| lexical_profile(right));
+    left == right
 }
-
-fn normalized_path(path: &Path) -> String {
-    let text = path.to_string_lossy().replace('/', "\\");
-    let trimmed = text.trim_end_matches('\\');
-    if trimmed.len() < 3 {
-        text
-    } else {
-        trimmed.to_string()
+fn lexical_profile(profile: &Profile) -> Profile {
+    let path = profile.data_dir().replace('/', "\\");
+    let path = path
+        .strip_prefix(r"\\?\UNC\")
+        .map(|p| format!(r"\\{p}"))
+        .or_else(|| path.strip_prefix(r"\\?\").map(str::to_string))
+        .unwrap_or(path);
+    let data_dir = path.trim_end_matches('\\').to_lowercase();
+    match profile {
+        Profile::Standalone { edition, .. } => Profile::Standalone {
+            edition: edition.to_ascii_lowercase(),
+            data_dir,
+        },
+        Profile::Dbx {
+            edition, plugin_id, ..
+        } => Profile::Dbx {
+            edition: edition.to_ascii_lowercase(),
+            data_dir,
+            plugin_id: plugin_id.clone(),
+        },
     }
 }
-
-/// 切换来源前解析目标：只接受已知发行版、绝对路径和存在的文件夹。
+/// Explicit switches require an existing absolute directory; persisted offline sources do not.
 pub(crate) fn normalize_profile(profile: Profile) -> Result<Profile> {
-    let edition = profile.edition.trim().to_ascii_lowercase();
-    if !matches!(edition.as_str(), "full" | "standard" | "custom") {
-        bail!("未知发行版：{}", profile.edition);
-    }
-    if !profile.data_dir.is_absolute() {
-        bail!("数据目录必须是绝对路径");
-    }
-    let canonical = std::fs::canonicalize(&profile.data_dir)
-        .with_context(|| format!("数据目录不可用：{}", profile.data_dir.display()))?;
-    if !canonical.is_dir() {
-        bail!("数据目录不是文件夹：{}", canonical.display());
-    }
-    let text = canonical.to_string_lossy().into_owned();
-    let data_dir = if let Some(stripped) = text.strip_prefix(r"\\?\UNC\") {
-        PathBuf::from(format!(r"\\{stripped}"))
-    } else if let Some(stripped) = text.strip_prefix(r"\\?\") {
-        PathBuf::from(stripped)
-    } else {
-        canonical
-    };
-    Ok(Profile { data_dir, edition })
+    profile.normalized().context("来源身份或数据目录不可用")
 }
 
 pub(crate) fn base_dir() -> PathBuf {
@@ -435,138 +506,227 @@ pub(crate) fn webview_dir() -> PathBuf {
 }
 
 fn parse_config(bytes: &[u8]) -> Result<(Config, bool)> {
+    if bytes.len() > MAX_CONFIG_BYTES {
+        bail!("桌面配置超过 64 KiB 上限");
+    }
     let value: serde_json::Value = serde_json::from_slice(bytes)?;
-    match value.get("schemaVersion").and_then(|value| value.as_u64()) {
+    let schema = value.get("schemaVersion").and_then(|value| value.as_u64());
+    let mut config = match schema {
         Some(1) => {
             let stored: StoredConfigV1 = serde_json::from_value(value)?;
-            let mut config = Config {
+            let active = stored
+                .active_profile
+                .map(LegacyProfile::migrate)
+                .transpose()?;
+            let unbound = active.is_none().then(|| StandalonePreferences {
+                lyrics: stored.lyrics.clone(),
+                wallpaper: stored.wallpaper.clone(),
+            });
+            Config {
                 revision: stored.revision,
                 launch_at_login: stored.launch_at_login,
-                active_profile: stored.active_profile.clone(),
-                profiles: Vec::new(),
+                active_profile: active.clone(),
+                profiles: active
+                    .into_iter()
+                    .map(|profile| ProfileDomain {
+                        profile,
+                        lyrics: stored.lyrics.clone(),
+                        wallpaper: stored.wallpaper.clone(),
+                    })
+                    .collect(),
+                unbound_standalone: unbound,
                 lyrics: stored.lyrics,
                 wallpaper: stored.wallpaper,
-            };
-            if let Some(profile) = stored.active_profile {
-                config.profiles.push(ProfileDomain {
-                    profile,
-                    lyrics: config.lyrics.clone(),
-                    wallpaper: config.wallpaper.clone(),
-                });
             }
-            config.sanitize();
-            Ok((config, true))
         }
         Some(2) => {
             let stored: StoredConfigV2 = serde_json::from_value(value)?;
-            if stored.profiles.len() > MAX_PROFILES {
-                bail!(
-                    "桌面配置包含 {} 个来源，超过上限 {MAX_PROFILES}",
-                    stored.profiles.len()
-                );
+            let profiles = stored
+                .profiles
+                .into_iter()
+                .map(|domain| {
+                    Ok(ProfileDomain {
+                        profile: domain.profile.migrate()?,
+                        lyrics: domain.lyrics,
+                        wallpaper: domain.wallpaper,
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            Config {
+                revision: stored.revision,
+                launch_at_login: stored.launch_at_login,
+                active_profile: stored
+                    .active_profile
+                    .map(LegacyProfile::migrate)
+                    .transpose()?,
+                profiles,
+                unbound_standalone: None,
+                lyrics: LyricsConfig::default(),
+                wallpaper: WallpaperConfig::default(),
             }
-            for (index, domain) in stored.profiles.iter().enumerate() {
-                if stored.profiles[..index]
-                    .iter()
-                    .any(|other| same_profile(&other.profile, &domain.profile))
-                {
-                    bail!(
-                        "桌面配置包含重复来源：{}",
-                        domain.profile.data_dir.display()
-                    );
-                }
-            }
-            let mut config = Config {
+        }
+        Some(3) => {
+            let stored: StoredConfigV3 = serde_json::from_value(value)?;
+            Config {
                 revision: stored.revision,
                 launch_at_login: stored.launch_at_login,
                 active_profile: stored.active_profile,
                 profiles: stored.profiles,
+                unbound_standalone: stored.unbound_standalone,
                 lyrics: LyricsConfig::default(),
                 wallpaper: WallpaperConfig::default(),
-            };
-            if let Some(active) = config.active_profile.clone() {
-                match config.domain_index(&active) {
-                    Some(index) => {
-                        config.lyrics = config.profiles[index].lyrics.clone();
-                        config.wallpaper = config.profiles[index].wallpaper.clone();
-                    }
-                    None => config.profiles.push(ProfileDomain {
-                        profile: active,
-                        lyrics: config.lyrics.clone(),
-                        wallpaper: config.wallpaper.clone(),
-                    }),
-                }
             }
-            config.sanitize();
-            Ok((config, false))
         }
-        other => bail!(
-            "{} 的 schemaVersion={:?}，本组件只支持 {SCHEMA_VERSION}（文件未改动）",
-            config_path().display(),
-            other
-        ),
+        other => bail!("不支持 schemaVersion={other:?}，文件未改动"),
+    };
+    validate_domains(&config)?;
+    if let Some(active) = config.active_profile.clone() {
+        active.validate()?;
+        if let Some(index) = config.domain_index(&active) {
+            config.lyrics = config.profiles[index].lyrics.clone();
+            config.wallpaper = config.profiles[index].wallpaper.clone();
+        } else {
+            if is_dbx(&active) {
+                config.lyrics = LyricsConfig::default();
+                config.lyrics.enabled = false;
+                config.wallpaper = WallpaperConfig::default();
+            }
+            config.profiles.push(ProfileDomain {
+                profile: active,
+                lyrics: config.lyrics.clone(),
+                wallpaper: config.wallpaper.clone(),
+            });
+        }
+    } else if config.unbound_standalone.is_some() {
+        // Unbound preferences are not a candidate or a running surface.
+        config.lyrics = LyricsConfig::default();
+        config.lyrics.enabled = false;
+        config.wallpaper = WallpaperConfig::default();
     }
+    validate_domains(&config)?;
+    config.sanitize();
+    let migrated = schema != Some(3);
+    if migrated {
+        config.revision = next_revision(config.revision)?;
+    }
+    Ok((config, migrated))
 }
-
+fn validate_domains(config: &Config) -> Result<()> {
+    if config.profiles.len() > MAX_PROFILES {
+        bail!("桌面配置来源超过上限 {MAX_PROFILES}");
+    }
+    for (index, domain) in config.profiles.iter().enumerate() {
+        domain.profile.validate()?;
+        if config.profiles[..index]
+            .iter()
+            .any(|other| same_profile(&other.profile, &domain.profile))
+        {
+            bail!("桌面配置包含重复来源");
+        }
+    }
+    Ok(())
+}
 fn encode_config(config: &Config) -> Result<Vec<u8>> {
     let mut copy = config.clone();
     copy.store_active()?;
-    let stored = StoredConfigV2 {
+    validate_domains(&copy)?;
+    if let Some(active) = copy.active_profile.as_ref() {
+        active.validate()?;
+    }
+    let stored = StoredConfigV3 {
         schema_version: SCHEMA_VERSION,
         revision: copy.revision,
         launch_at_login: copy.launch_at_login,
         active_profile: copy.active_profile,
         profiles: copy.profiles,
+        unbound_standalone: copy.unbound_standalone,
     };
     let bytes = serde_json::to_vec_pretty(&stored)?;
     if bytes.len() > MAX_CONFIG_BYTES {
-        bail!(
-            "桌面配置超过 {} KiB 上限（{} 字节），未保存",
-            MAX_CONFIG_BYTES / 1024,
-            bytes.len()
-        );
+        bail!("桌面配置超过 64 KiB 上限，未保存");
     }
     Ok(bytes)
 }
-
+fn read_bounded(path: &Path) -> std::io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?
+        .take((MAX_CONFIG_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_CONFIG_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "desktop config exceeds 64 KiB",
+        ));
+    }
+    Ok(bytes)
+}
 pub(crate) fn load() -> Result<Config> {
+    let _commit = COMMIT_LOCK
+        .lock()
+        .map_err(|_| anyhow::anyhow!("配置保存锁不可用"))?;
     let path = config_path();
-    let bytes = match std::fs::read(&path) {
+    let bytes = match read_bounded(&path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             let config = Config::default();
-            save(&config)?;
+            save_locked(&config)?;
             return Ok(config);
         }
-        Err(error) => return Err(error).with_context(|| format!("读取 {}", path.display())),
+        Err(error) => return Err(error).context("读取桌面配置失败（文件未改动）"),
     };
-    let (config, migrated) = parse_config(&bytes)
-        .with_context(|| format!("解析 {}（坏配置原样保留，未覆盖）", path.display()))?;
-    // 没有 activeProfile 的 v1 配置还带着顶层域，先不要落盘：等首次绑定
-    // 把它归入选中的 profile 后再写 v2，避免迁移时丢掉歌词/壁纸设置。
-    if migrated && config.active_profile.is_some() {
-        save(&config)
-            .with_context(|| format!("迁移 {} 到 schema v{SCHEMA_VERSION}", path.display()))?;
+    let (config, migrated) = parse_config(&bytes).context("坏配置原样保留，未覆盖")?;
+    if migrated {
+        save_locked(&config).context("保存 schema v3 迁移失败（原文件未改动）")?;
     }
     Ok(config)
 }
-
 pub(crate) fn save(config: &Config) -> Result<()> {
-    let dir = base_dir();
-    std::fs::create_dir_all(&dir).with_context(|| format!("创建 {}", dir.display()))?;
-    let path = config_path();
-    let tmp = dir.join("config.json.tmp");
-    let bytes = encode_config(config)?;
-    std::fs::write(&tmp, bytes).with_context(|| format!("写入 {}", tmp.display()))?;
-    crate::native::replace_file(&tmp, &path).with_context(|| format!("替换 {}", path.display()))?;
+    let _commit = COMMIT_LOCK
+        .lock()
+        .map_err(|_| anyhow::anyhow!("配置保存锁不可用"))?;
+    save_locked(config)
+}
+/// The host's serialized commit boundary. Disk succeeds before revision/domain swap.
+pub(crate) fn commit(current: &mut Config, next: Config) -> Result<()> {
+    let _commit = COMMIT_LOCK
+        .lock()
+        .map_err(|_| anyhow::anyhow!("配置保存锁不可用"))?;
+    commit_at(current, next, &base_dir())
+}
+fn commit_at(current: &mut Config, mut next: Config, directory: &Path) -> Result<()> {
+    next.revision = next_revision(current.revision)?;
+    save_at(&next, directory)?;
+    *current = next;
     Ok(())
+}
+fn save_locked(config: &Config) -> Result<()> {
+    save_at(config, &base_dir())
+}
+fn save_at(config: &Config, dir: &Path) -> Result<()> {
+    let bytes = encode_config(config)?;
+    std::fs::create_dir_all(&dir).context("创建桌面配置目录")?;
+    let path = dir.join("config.json");
+    let tmp = dir.join("config.json.tmp");
+    let result = (|| -> Result<()> {
+        use std::io::Write;
+        let mut file = std::fs::File::create(&tmp).context("创建配置临时文件")?;
+        file.write_all(&bytes).context("写入桌面配置")?;
+        file.sync_all().context("刷新桌面配置")?;
+        drop(file);
+        crate::native::replace_file(&tmp, &path).context("原子替换桌面配置")?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
 }
 
 /// 首次启动自动选一个 profile：只读两个规范数据目录，不扫描端口。
 pub(crate) fn detect_profile() -> Option<Profile> {
     let mut candidates = Vec::new();
     for profile in detect_profiles() {
-        let discovery = profile.data_dir.join("vmusicd.json");
+        let discovery = Path::new(profile.data_dir()).join("vmusicd.json");
         let Ok(meta) = std::fs::metadata(&discovery) else {
             continue;
         };
@@ -593,10 +753,7 @@ pub(crate) fn detect_profiles() -> Vec<Profile> {
     .into_iter()
     .filter_map(|(edition, name)| {
         let data_dir = base.join(name);
-        data_dir.is_dir().then(|| Profile {
-            data_dir,
-            edition: edition.into(),
-        })
+        data_dir.is_dir().then(|| standalone(data_dir, edition))
     })
     .collect()
 }
@@ -650,10 +807,7 @@ mod tests {
     }
 
     fn profile(name: &str) -> Profile {
-        Profile {
-            data_dir: PathBuf::from(format!(r"C:\profiles\{name}")),
-            edition: "full".into(),
-        }
+        standalone(PathBuf::from(format!(r"C:\profiles\{name}")), "full")
     }
 
     #[test]
@@ -673,15 +827,12 @@ mod tests {
         let (config, migrated) = parse_config(value.to_string().as_bytes()).unwrap();
         assert!(migrated);
         assert_eq!(config.profiles.len(), 1);
-        assert_eq!(
-            config.profiles[0].profile.data_dir,
-            PathBuf::from(r"C:\profiles\a")
-        );
+        assert_eq!(config.profiles[0].profile.data_dir(), r"C:\profiles\a");
         assert_eq!(config.profiles[0].lyrics.font_size, 44.0);
         assert_eq!(config.lyrics.font_size, 44.0);
         let encoded = encode_config(&config).unwrap();
         let encoded: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
-        assert_eq!(encoded["schemaVersion"], 2);
+        assert_eq!(encoded["schemaVersion"], 3);
         assert!(encoded.get("lyrics").is_none());
         assert_eq!(encoded["profiles"][0]["lyrics"]["fontSize"], 44.0);
     }
@@ -703,7 +854,11 @@ mod tests {
         let (mut config, migrated) = parse_config(value.to_string().as_bytes()).unwrap();
         assert!(migrated);
         assert!(config.profiles.is_empty());
-        assert_eq!(config.lyrics.font_size, 44.0);
+        assert_eq!(
+            config.unbound_standalone.as_ref().unwrap().lyrics.font_size,
+            44.0
+        );
+        assert!(!config.lyrics.enabled);
         config.activate_profile(profile("a")).unwrap();
         let encoded = encode_config(&config).unwrap();
         let (loaded, migrated_again) = parse_config(&encoded).unwrap();
@@ -740,8 +895,8 @@ mod tests {
         assert_eq!(loaded.lyrics.font_size, 44.0);
         assert_eq!(loaded.profiles.len(), 2);
         assert_eq!(
-            loaded.active_profile.as_ref().unwrap().data_dir,
-            PathBuf::from(r"C:\profiles\a")
+            loaded.active_profile.as_ref().unwrap().data_dir(),
+            r"C:\profiles\a"
         );
     }
 
@@ -760,14 +915,8 @@ mod tests {
 
     #[test]
     fn profile_match_is_case_and_separator_insensitive() {
-        let left = Profile {
-            data_dir: PathBuf::from(r"C:\Users\Miracle\hertz-studio"),
-            edition: "FULL".into(),
-        };
-        let right = Profile {
-            data_dir: PathBuf::from("c:/users/miracle/hertz-studio/"),
-            edition: "full".into(),
-        };
+        let left = standalone(PathBuf::from(r"C:\Users\Miracle\hertz-studio"), "FULL");
+        let right = standalone(PathBuf::from("c:/users/miracle/hertz-studio/"), "full");
         assert!(same_profile(&left, &right));
     }
 
@@ -801,5 +950,185 @@ mod tests {
         assert_eq!(invalid.scene, "zodiac");
         assert!(wallpaper_scene_allowed("butterfly-vortex"));
         assert!(!wallpaper_scene_allowed("cover-sphere"));
+    }
+    fn dbx(name: &str) -> Profile {
+        Profile::Dbx {
+            data_dir: format!(r"C:\profiles\{name}"),
+            edition: "standard".into(),
+            plugin_id: hertz_desktop_ipc::profile::STANDARD_PLUGIN_ID.into(),
+        }
+    }
+    #[test]
+    fn unbound_legacy_preferences_survive_dbx_then_bind_to_standalone() {
+        let mut lyrics = LyricsConfig::default();
+        lyrics.font_size = 48.0;
+        lyrics.locked = true;
+        let mut wallpaper = WallpaperConfig::default();
+        wallpaper.enabled = true;
+        wallpaper.fps = 60;
+        let bytes = serde_json::to_vec(
+            &serde_json::json!({"schemaVersion":1,"revision":9,"launchAtLogin":true,
+            "activeProfile":null,"lyrics":lyrics,"wallpaper":wallpaper}),
+        )
+        .unwrap();
+        let (mut config, migrated) = parse_config(&bytes).unwrap();
+        assert!(migrated);
+        assert_eq!(config.revision, 10);
+        assert!(!config.lyrics.enabled);
+        let (restored, again) = parse_config(&encode_config(&config).unwrap()).unwrap();
+        assert!(!again);
+        assert_eq!(restored.revision, 10);
+        assert!(restored.unbound_standalone.is_some());
+        config.activate_profile(dbx("dbx")).unwrap();
+        assert!(!config.lyrics.enabled && !config.wallpaper.enabled);
+        assert_eq!(config.lyrics.font_size, 30.0);
+        assert!(config.unbound_standalone.is_some());
+        let (mut config, _) = parse_config(&encode_config(&config).unwrap()).unwrap();
+        config.activate_profile(profile("standalone")).unwrap();
+        assert!(config.lyrics.enabled && config.lyrics.locked && config.wallpaper.enabled);
+        assert_eq!(config.lyrics.font_size, 48.0);
+        assert_eq!(config.wallpaper.fps, 60);
+        assert!(config.unbound_standalone.is_none());
+        assert!(config.launch_at_login);
+    }
+    #[test]
+    fn schema2_custom_migrates_once_and_schema3_rejects_untagged_identity() {
+        let domain = serde_json::json!({"profile":{"dataDir":r"C:\offline\custom","edition":"custom"},"lyrics":LyricsConfig::default(),"wallpaper":WallpaperConfig::default()});
+        let value = serde_json::json!({"schemaVersion":2,"revision":17,"launchAtLogin":true,"activeProfile":domain["profile"],"profiles":[domain]});
+        let (config, migrated) = parse_config(&serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(migrated);
+        assert_eq!(config.revision, 18);
+        assert!(
+            matches!(config.active_profile,Some(Profile::Standalone{ref edition,..}) if edition=="custom")
+        );
+        let (config, again) = parse_config(&encode_config(&config).unwrap()).unwrap();
+        assert!(!again);
+        assert_eq!(config.revision, 18);
+        let mut invalid = value;
+        invalid["schemaVersion"] = 3.into();
+        assert!(parse_config(&serde_json::to_vec(&invalid).unwrap()).is_err());
+    }
+    #[test]
+    fn rejects_duplicate_identity_active_ninth_overflow_and_oversize() {
+        let mut config = Config::default();
+        for index in 0..8 {
+            config
+                .activate_profile(profile(&index.to_string()))
+                .unwrap();
+        }
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&encode_config(&config).unwrap()).unwrap();
+        value["activeProfile"] = serde_json::to_value(profile("ninth")).unwrap();
+        assert!(parse_config(&serde_json::to_vec(&value).unwrap()).is_err());
+        value["activeProfile"] = serde_json::Value::Null;
+        value["profiles"][1] = value["profiles"][0].clone();
+        assert!(parse_config(&serde_json::to_vec(&value).unwrap()).is_err());
+        let legacy = serde_json::json!({"schemaVersion":1,"revision":u64::MAX,"launchAtLogin":false,"activeProfile":null,"lyrics":LyricsConfig::default()});
+        assert!(parse_config(&serde_json::to_vec(&legacy).unwrap()).is_err());
+        assert!(next_revision(u64::MAX).is_err());
+        assert!(parse_config(&vec![b' '; MAX_CONFIG_BYTES + 1]).is_err());
+    }
+    #[test]
+    fn kind_plugin_and_windows_aliases_participate_in_identity() {
+        let a = dbx("a");
+        let standalone = standalone(PathBuf::from(a.data_dir()), a.edition());
+        assert!(!same_profile(&a, &standalone));
+        let mut wrong = a.clone();
+        if let Profile::Dbx { plugin_id, .. } = &mut wrong {
+            plugin_id.push_str(".wrong");
+        }
+        assert!(!same_profile(&a, &wrong));
+        assert!(wrong.validate().is_err());
+        let prefixed = Profile::Dbx {
+            data_dir: r"\\?\c:\PROFILES\a\".into(),
+            edition: "standard".into(),
+            plugin_id: hertz_desktop_ipc::profile::STANDARD_PLUGIN_ID.into(),
+        };
+        assert!(same_profile(&a, &prefixed));
+    }
+    #[test]
+    fn bounded_reader_rejects_a_large_file_before_parsing() {
+        let path = std::env::temp_dir().join(format!(
+            "hertz-dbx-config-bound-{}.json",
+            std::process::id()
+        ));
+        std::fs::write(&path, vec![b' '; MAX_CONFIG_BYTES + 1]).unwrap();
+        assert!(read_bounded(&path).is_err());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn atomic_writer_keeps_original_when_temp_write_or_encode_fails() {
+        let dir =
+            std::env::temp_dir().join(format!("hertz-dbx-config-write-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut original = Config::default();
+        original.activate_profile(profile("a")).unwrap();
+        save_at(&original, &dir).unwrap();
+        let old = std::fs::read(dir.join("config.json")).unwrap();
+        std::fs::create_dir(dir.join("config.json.tmp")).unwrap();
+        let mut next = original.clone();
+        next.revision = 2;
+        next.lyrics.font_size = 50.0;
+        assert!(commit_at(&mut original, next.clone(), &dir).is_err());
+        assert_eq!(original.revision, 1);
+        assert_eq!(original.lyrics.font_size, 30.0);
+        assert_eq!(std::fs::read(dir.join("config.json")).unwrap(), old);
+        std::fs::remove_dir(dir.join("config.json.tmp")).unwrap();
+        next.lyrics.font_family = "x".repeat(MAX_CONFIG_BYTES);
+        assert!(save_at(&next, &dir).is_err());
+        assert_eq!(std::fs::read(dir.join("config.json")).unwrap(), old);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn shared_windows_normalization_resolves_junctions() {
+        let directory =
+            std::env::temp_dir().join(format!("hertz-dbx-junction-{}", std::process::id()));
+        let real = directory.join("real");
+        let link = directory.join("alias");
+        std::fs::create_dir_all(&real).unwrap();
+        let result = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(&link)
+            .arg(&real)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let left = standalone(real, "standard");
+        let right = standalone(link.clone(), "standard");
+        assert!(same_profile(&left, &right));
+        assert_eq!(
+            normalize_profile(left).unwrap(),
+            normalize_profile(right).unwrap()
+        );
+        std::fs::remove_dir(link).unwrap();
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+    #[test]
+    fn missing_dbx_active_domain_starts_disabled_and_preserves_unbound_preferences() {
+        let mut old_lyrics = LyricsConfig::default();
+        old_lyrics.font_size = 44.0;
+        let mut old_wallpaper = WallpaperConfig::default();
+        old_wallpaper.enabled = true;
+        let value = serde_json::json!({ "schemaVersion":3,"revision":7,"launchAtLogin":true,
+            "activeProfile":dbx("missing-domain"),"profiles":[],
+            "unboundStandalone":{"lyrics":old_lyrics,"wallpaper":old_wallpaper} });
+        let (config, migrated) = parse_config(&serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(!migrated);
+        assert_eq!(config.revision, 7);
+        assert_eq!(config.profiles.len(), 1);
+        assert!(!config.lyrics.enabled && !config.wallpaper.enabled);
+        assert!(!config.profiles[0].lyrics.enabled && !config.profiles[0].wallpaper.enabled);
+        let (mut restored, _) = parse_config(&encode_config(&config).unwrap()).unwrap();
+        restored.activate_profile(profile("independent")).unwrap();
+        assert!(restored.lyrics.enabled && restored.wallpaper.enabled);
+        assert_eq!(restored.lyrics.font_size, 44.0);
+        assert!(restored.launch_at_login);
+        assert!(restored.unbound_standalone.is_none());
     }
 }

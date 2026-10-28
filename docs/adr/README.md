@@ -32,3 +32,4 @@
 | 0009 | `0009-extension-registries.md` | 内置扩展定义集中登记，保留原播放、预置、时钟与资源响应归属 |
 | 0010 | `0010-ai-drafts-and-retention.md` | 草稿临时预览不落盘，七天任务保护与十三个月账本独立保留 |
 | 0011 | `0011-lan-rendering-and-output-ownership.md` | 房间共用渲染与队列，设备网格归接收队列，呈现和输出交接分别提交 |
+| 0012 | `0012-dbx-desktop-readonly-boundary.md` | DBX 桌面读取显式授权，原播放与退出归属保持不变，取消回收与新鲜度独立有界 |

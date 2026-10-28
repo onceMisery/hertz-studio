@@ -133,6 +133,16 @@ async function main() {
     await page.locator('#lyrics-size').fill('43');
     await page.locator('#close').click();await page.locator('#discard-close').click();
     assert.equal((await page.evaluate(()=>window.desktopRequests.at(-1))).cmd,'close');
+    // The detected source is only a candidate when a v1 migration has no binding.
+    const unbound = structuredClone(initial); unbound.profile = null; unbound.profiles = [initial.profile];
+    await page.evaluate(payload => hertzWallpaperSettings.applyStatus(payload), unbound);
+    await page.locator('#tab-runtime').click();
+    assert.equal(await page.locator('#switch-source').isEnabled(), true, 'a single unbound candidate can be explicitly selected');
+    await page.locator('#switch-source').click();
+    const bind = await page.evaluate(() => desktopRequests.at(-1));
+    assert.equal(bind.cmd, 'switch-source'); assert.deepEqual(bind.profile, initial.profile); assert.equal(bind.expectedRevision, unbound.revision);
+    await page.evaluate(payload => hertzWallpaperSettings.applyStatus(payload), { ...unbound, profile: initial.profile, message: '已切换来源' });
+    assert.equal(await page.locator('#switch-source').isDisabled(), true, 'the same source becomes current only after native confirms binding');
     assert.deepEqual(errors, []);
     console.log('desktop settings browser checks passed: draft/apply/discard, dirty close guard, concrete presets/custom, authentic static thumbnails, conflict, readonly real renderer, lease cleanup, position controls, monitor recovery, responsive layout');
     console.log('screenshots: ' + out);

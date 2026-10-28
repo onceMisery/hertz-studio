@@ -22,7 +22,7 @@
     if (window.ipc && window.ipc.postMessage) window.ipc.postMessage(JSON.stringify(Object.assign({ cmd: cmd }, extra || {})));
   }
   function status(text, error) { $('status').textContent = text; $('status').className = error ? 'error' : ''; }
-  function profileKey(profile) { return profile ? String(profile.edition || '').toLowerCase() + '|' + String(profile.dataDir || '').replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase() : ''; }
+  function profileKey(profile) { return profile ? String(profile.kind || 'standalone') + '|' + String(profile.pluginId || '') + '|' + String(profile.edition || '').toLowerCase() + '|' + String(profile.dataDir || '').replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase() : ''; }
   function sceneLabel(id) { var scene = scenes.find(item => item.id === id); return scene ? scene.label : id || '等待三维空间'; }
   function selectOptions(id, list, selected) {
     var node = $(id), key = list.map(item => item.value + '|' + item.label).join('\n');
@@ -39,13 +39,13 @@
   function renderMetadata(payload) {
     if (payload.scenes) scenes = payload.scenes;
     if (payload.profiles) profiles = payload.profiles;
-    if (payload.profile) currentProfile = payload.profile;
+    if (Object.prototype.hasOwnProperty.call(payload, 'profile')) currentProfile = payload.profile;
     spaceScene = payload.spaceScene || null;
     var previous = $('profile').value;
     selectOptions('profile', profiles.map(function (profile) {
       var name = String(profile.dataDir || '').replace(/[\\/]+$/, '').split(/[\\/]/).pop();
-      return { value: profileKey(profile), label: (profile.edition === 'standard' ? 'Standard' : 'Full') + ' · ' + name };
-    }), previous || profileKey(currentProfile));
+      return { value: profileKey(profile), label: (profile.kind === 'dbx' ? 'DBX · ' : '') + (profile.edition === 'custom' ? 'Custom' : profile.edition === 'standard' ? 'Standard' : 'Full') + ' · ' + name };
+    }), previous || profileKey(currentProfile) || profileKey(profiles[0]));
     if (payload.message === '已切换来源') $('profile').value = profileKey(currentProfile);
     if (draft) {
       selectOptions('scene-fixed', scenes.map(scene => ({ value: scene.id, label: scene.label })), draft.wallpaper.scene);

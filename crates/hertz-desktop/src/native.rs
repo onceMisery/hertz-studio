@@ -40,19 +40,22 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, GetWindowThreadProcessId, IsWindow,
     IsZoomed, RegisterClassW, RegisterWindowMessageW, SendMessageTimeoutW, SetForegroundWindow,
     SetLayeredWindowAttributes, SetParent, SetWindowLongPtrW, SetWindowPos, ShowWindow,
-    TranslateMessage, HWND_BOTTOM, HWND_TOPMOST, LWA_ALPHA, MSG, PBT_APMRESUMEAUTOMATIC,
-    PBT_APMRESUMESUSPEND, PBT_APMSUSPEND, PBT_POWERSETTINGCHANGE, SMTO_NORMAL, SWP_FRAMECHANGED,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_HIDE, SW_SHOW,
-    SW_SHOWNOACTIVATE, WM_NCHITTEST, WM_POWERBROADCAST, WM_WTSSESSION_CHANGE, WNDCLASSW, WNDPROC,
-    WS_CAPTION, WS_CHILD, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU,
-    WS_THICKFRAME, WTS_SESSION_LOCK, WTS_SESSION_LOGOFF, WTS_SESSION_LOGON, WTS_SESSION_UNLOCK,
+    TranslateMessage, GWL_STYLE, HWND_BOTTOM, HWND_TOPMOST, LWA_ALPHA, MSG, PBT_APMRESUMEAUTOMATIC,
+    PBT_APMRESUMESUSPEND, PBT_APMSUSPEND, PBT_POWERSETTINGCHANGE, SMTO_NORMAL, STYLESTRUCT,
+    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW,
+    SW_HIDE, SW_SHOW, SW_SHOWNOACTIVATE, WM_NCHITTEST, WM_POWERBROADCAST, WM_STYLECHANGING,
+    WM_WTSSESSION_CHANGE, WNDCLASSW, WNDPROC, WS_CAPTION, WS_CHILD, WS_EX_APPWINDOW, WS_EX_LAYERED,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_MAXIMIZEBOX,
+    WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU, WS_THICKFRAME, WTS_SESSION_LOCK, WTS_SESSION_LOGOFF,
+    WTS_SESSION_LOGON, WTS_SESSION_UNLOCK,
 };
 
 static CLICK_THROUGH: AtomicBool = AtomicBool::new(false);
 static ORIGINAL_WNDPROC: AtomicIsize = AtomicIsize::new(0);
 static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
 static DISPLAY_STATE_SEEN: AtomicBool = AtomicBool::new(false);
+const OVERLAY_FRAME_STYLES: u32 =
+    WS_CAPTION | WS_THICKFRAME | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX;
 type Sink = Box<dyn Fn(NativeEvent) + Send>;
 static SINK: OnceLock<std::sync::Mutex<Sink>> = OnceLock::new();
 
@@ -103,16 +106,10 @@ pub(crate) fn replace_file(from: &Path, to: &Path) -> Result<()> {
 }
 
 pub(crate) fn strip_title_bar(hwnd: HWND) {
-    let old =
-        unsafe { GetWindowLongPtrW(hwnd, windows_sys::Win32::UI::WindowsAndMessaging::GWL_STYLE) }
-            as u32;
-    let next = old & !(WS_CAPTION | WS_THICKFRAME | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX);
+    let old = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) } as u32;
+    let next = old & !OVERLAY_FRAME_STYLES;
     unsafe {
-        SetWindowLongPtrW(
-            hwnd,
-            windows_sys::Win32::UI::WindowsAndMessaging::GWL_STYLE,
-            next as isize,
-        );
+        SetWindowLongPtrW(hwnd, GWL_STYLE, next as isize);
         SetWindowPos(
             hwnd,
             std::ptr::null_mut(),
@@ -176,6 +173,12 @@ unsafe extern "system" fn overlay_wndproc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    // Tao can rebuild GWL_STYLE after startup, restoring WS_CAPTION even for an
+    // undecorated window. Filter the proposed style before Windows paints it.
+    if msg == WM_STYLECHANGING && wparam as i32 == GWL_STYLE {
+        let styles = unsafe { &mut *(lparam as *mut STYLESTRUCT) };
+        styles.styleNew &= !OVERLAY_FRAME_STYLES;
+    }
     if msg == WM_NCHITTEST && CLICK_THROUGH.load(Ordering::SeqCst) {
         return windows_sys::Win32::UI::WindowsAndMessaging::HTTRANSPARENT as isize;
     }

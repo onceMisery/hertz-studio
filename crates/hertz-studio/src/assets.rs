@@ -57,6 +57,7 @@ ui_assets! {
     "/room.js", JS => const ROOM_JS: &str = edition_ui!("room.js");
     "/room.css", CSS => const ROOM_CSS: &str = edition_ui!("room.css");
     "/host.js", JS => const HOST_JS: &str = edition_ui!("host.js");
+    "/desktop-settings.js", JS => const DESKTOP_SETTINGS_JS: &str = edition_ui!("desktop-settings.js");
     "/dialogs.js", JS => const DIALOGS_JS: &str = edition_ui!("dialogs.js");
     "/search-history.js", JS => const SEARCH_HISTORY_JS: &str = edition_ui!("search-history.js");
     "/app.js", JS => const APP_JS: &str = edition_ui!("app.js");

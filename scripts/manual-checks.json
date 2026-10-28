@@ -3,6 +3,22 @@
   "note": "check-* scripts that are deliberate manual/browser/diagnostic entry points. New unregistered check-* files fail scripts/check-scripts.js until they are either registered in check-frontend.js / a workflow or added here.",
   "scripts": [
     {
+      "script": "check-dbx-desktop-settings-browser.js",
+      "purpose": "Production plugin UI in a real allow-scripts opaque iframe: all five skins' settings/reopen/desktop entries, explicit consent, independent component/authorization/source facts, partial failures, revoke races, no startup detection/polling and inline guide fallback. Controlled API replies; requires Playwright and Chrome."
+    },
+    {
+      "script": "check-desktop-management-native.js",
+      "purpose": "Isolated Windows WebView2 management v2 admission, legacy scalar compatibility, explicit DBX candidate binding failure/retry, revision guards and authenticated pipe source health. Requires a built native binary, Cargo, Playwright and no running desktop instance."
+    },
+    {
+      "script": "check-desktop-persistence-native.js",
+      "purpose": "Isolated Windows WebView2/Win32 persistence regression: failed-save lock, appearance and placement rollback, and unbound legacy preferences explicit atomic binding. Requires a built native binary, Playwright and no running desktop instance."
+    },
+    {
+      "script": "check-desktop-dbx-browser.js",
+      "purpose": "Isolated Chrome/WebGL verification of DBX read-only lyric controls, standalone recovery, monotonic request/queue/cache freshness, sequence replay and wallpaper expiry. Requires Playwright and Chrome."
+    },
+    {
       "script": "check-desktop-lyrics-browser.js",
       "purpose": "Desktop lyrics prototype rendering, appearance settings, bounded DOM, real timing boundaries, stale snapshots, safe text and narrow layouts."
     },

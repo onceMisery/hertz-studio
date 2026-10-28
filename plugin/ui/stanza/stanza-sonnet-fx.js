@@ -408,6 +408,10 @@
         d.fit = fit;
         d.fontSize = fontSize;
         d.trackingX = (d.rowX - total / 2) * fit;
+        if (tuning.lyricMotion === 'tempera') {
+          d.ribbonU = (d.rowX - total / 2) / Math.max(fontSize, total / 2);
+          d.ribbonPhase = (hashString(seed) % 7) * 0.3 + rowIndex * 0.7;
+        }
         node.position.set(d.baseX, d.baseY);
         node.scale.set(fit);
       });
@@ -478,8 +482,16 @@
         }
       }
       var spread = tempera ? ease((time - d.endTime - duration) / Math.max(0.2, lineEnd - d.endTime)) * 0.018 : 0;
+      var ribbon = 0;
+      if (tempera) {
+        var phase = num(d.ribbonU, 0) * 2.6 + num(d.ribbonPhase, 0);
+        var age = Math.max(0, time - num(frame.activeLine && frame.activeLine.startTime, 0));
+        ribbon = Math.sin(phase) * size * 0.28 + Math.sin(age * 1.05 + phase) * size * 0.045;
+        rotation += Math.cos(phase) * 0.1 + Math.cos(age * 1.05 + phase) * 0.016;
+      }
       node.position.set(d.baseX + (dx + num(d.trackingX, 0) * spread) * strength,
-        d.baseY + (dy - emphasis * size * 0.035 - exit * size * 0.16 - handoff * size * 0.12) * strength);
+        d.baseY + (dy + ribbon - emphasis * size * (tempera ? 0.08 : 0.035)
+          - exit * size * 0.16 - handoff * size * 0.12) * strength);
       node.rotation = rotation * strength;
       node.skew.set(0, 0);
       var swell = emphasis * (tempera ? 0.045 : 0.055);
@@ -488,13 +500,13 @@
       var phraseWeight = ease((time - d.phraseStart + 0.3) / 0.3)
         * (1 - ease((time - d.phraseEnd) / 0.65));
       var focusAlpha = 1 - phraseEmphasis * 0.5 * (1 - phraseWeight);
-      var waiting = amount(tuning.waitingOpacity, 0.38, 1);
+      var waiting = amount(tuning.waitingOpacity, tempera ? 0.86 : 0.38, 1);
       var reveal = ease((time - d.startTime + lead) / lead);
       node.alpha = (waiting + (1 - waiting) * reveal)
         * (1 - exit * 0.8) * focusAlpha
         * (1 - handoff * (time < d.endTime ? 0.18 : 0.75));
       var sungColor = sung > 0 ? ease((time - d.startTime) / attack) : 0;
-      var colorWeight = sungColor * (0.22 + emphasis * 0.78);
+      var colorWeight = tempera ? emphasis : sungColor * (0.22 + emphasis * 0.78);
       node.tint = tuning.textInversion !== false ? mixTint(ink, color, colorWeight) : ink;
     });
   }

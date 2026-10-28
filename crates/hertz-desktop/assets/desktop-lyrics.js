@@ -13,7 +13,7 @@
   const state = {
     config: { ...defaults }, snapshot: null, document: null, groups: [], source: 'waiting',
     active: true, locked: false, anchor: null, confirmed: false,
-    lastPosition: null, lastSession: null, lastSeq: -1, lastSnapshotAt: 0,
+    lastPosition: null, lastSession: null, lastSeq: -1, lastSnapshotAt: 0, lastClockBeacon: -Infinity,
     renderedKey: null, renderedGroup: -99, signature: '', nodes: new Map(), words: [],
     raf: 0, lastPaint: 0, staleTimer: 0, panelFrame: 0, panelHeight: -1,
     optionsOpen: false, hoverTimer: 0, pendingControl: false, controlTimer: 0,
@@ -113,6 +113,7 @@
   }
   function setSource(payload) {
     state.source = payload?.state || 'error';
+    state.lyricsControl = payload?.capabilities?.lyricsControl !== false;
     if (state.source !== 'ok') { resetDocument(); state.confirmed = false; controlDone(); stopLoop(); }
     render();
   }
@@ -132,6 +133,29 @@
     if (state.lastSession === snapshot.server.session && snapshot.seq <= state.lastSeq) return;
     const previous = state.snapshot;
     const now = performance.now();
+    const age = Math.max(0, Number(snapshot.snapshotAgeMs) || 0) + (Number.isFinite(snapshot.pageDispatchMs) ? Math.max(0, now - snapshot.pageDispatchMs) : 0);
+    if (age >= 2000 && now - state.lastClockBeacon >= 1000) { state.lastClockBeacon = now; ipc({ cmd: 'clock', value: now }); }
+    if (age >= 3000) {
+      // A queued snapshot can expire while native keeps receiving fresh data.
+      // Retain only the document already bound to this exact identity; it stays
+      // invisible until a fresh snapshot confirms the same source and key.
+      const sameDocument = previous && previous.server.session === snapshot.server.session
+        && trackId(previous) === trackId(snapshot)
+        && previous.lyrics?.documentKey === snapshot.lyrics?.documentKey
+        && snapshot.lyrics?.status === 'ready';
+      if (!sameDocument) resetDocument();
+      else clearLines();
+      state.snapshot = snapshot;
+      state.anchor = null;
+      state.confirmed = false;
+      state.lastPosition = null;
+      state.lastSeq = snapshot.seq;
+      state.lastSession = snapshot.server.session;
+      state.lastSnapshotAt = now - age;
+      clearTimeout(state.staleTimer);
+      controlDone(); render(); stopLoop();
+      return;
+    }
     const trackChanged = previous && (previous.server.session !== snapshot.server.session || trackId(previous) !== trackId(snapshot));
     const identityChanged = !previous || trackChanged || previous.generation !== snapshot.generation
       || previous.lyrics?.documentKey !== snapshot.lyrics?.documentKey;
@@ -141,13 +165,13 @@
     state.lastPosition = snapshot.positionMs;
     state.lastSeq = snapshot.seq;
     state.lastSession = snapshot.server.session;
-    state.lastSnapshotAt = now;
+    state.lastSnapshotAt = now - age;
     if (trackChanged || snapshot.lyrics.status !== 'ready'
       || (state.document && state.document.documentKey !== snapshot.lyrics.documentKey)) resetDocument();
     state.snapshot = snapshot;
     if (state.pendingControl && snapshot.generation !== state.controlGeneration) controlDone();
     clearTimeout(state.staleTimer);
-    state.staleTimer = setTimeout(() => { render(); stopLoop(); }, 2020);
+    state.staleTimer = setTimeout(() => { render(); stopLoop(); }, Math.max(0, 2020 - age));
     document.body.classList.toggle('playing', Boolean(snapshot.playing));
     $('play').setAttribute('aria-label', snapshot.playing ? '暂停' : '播放');
     if (identityChanged) state.signature = '';
@@ -326,13 +350,14 @@
     return null;
   }
   function updateControls() {
-    const available = state.active && !state.locked && state.source === 'ok' && state.snapshot?.track && positionAt(performance.now()) != null && !state.pendingControl;
+    const available = state.lyricsControl !== false && state.active && !state.locked && state.source === 'ok' && state.snapshot?.track && positionAt(performance.now()) != null && !state.pendingControl;
+    for (const id of ['play', 'previous', 'next']) $(id).title = state.lyricsControl === false ? 'DBX 来源仅供读取，请在 DBX 中控制播放' : '';
     $('play').disabled = !available;
     $('previous').disabled = !available || targetLine(-1) == null;
     $('next').disabled = !available || targetLine(1) == null;
   }
   function control(cmd, value) {
-    if (state.locked || state.pendingControl || $('play').disabled) return;
+    if (state.lyricsControl === false || state.locked || state.pendingControl || $('play').disabled) return;
     state.pendingControl = true;
     state.controlGeneration = state.snapshot.generation;
     updateControls();
@@ -393,5 +418,5 @@
   });
   window.hertzLyrics = { applyConfig, applySnapshot, applyDocument, setLocked, setActive, setSource, controlDone, setOptions: open => setOptionsOpen(open, false) };
   applyConfig(defaults);
-  ipc({ cmd: 'ready' });
+  ipc({ cmd: 'ready', value: performance.now() });
 })();

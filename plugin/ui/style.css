@@ -1696,6 +1696,18 @@ body.reduce-motion .shelf-vinyl { transition: none; }
 .set-row > input:not([type="checkbox"]), .set-row > select { min-width: 0; max-width: 100%; }
 .set-row > .hint { min-width: 0; flex: 1 1 140px; overflow-wrap: anywhere; }
 .set-actions { display: flex; flex-wrap: wrap; gap: 8px; min-width: 0; }
+.dbx-desktop-settings { margin-block: 12px 24px; padding: 16px; border: 1px solid var(--line); border-radius: 10px; }
+.dbx-desktop-settings h3 { margin: 0 0 10px; font-size: 15px; }
+.dbx-desktop-settings .hint { line-height: 1.7; }
+.dbx-desktop-facts { display: grid; grid-template-columns: minmax(80px, auto) minmax(0, 1fr); gap: 8px 16px; margin-block: 16px; font-size: 12px; line-height: 1.7; }
+.dbx-desktop-facts dt { color: var(--muted); }
+.dbx-desktop-facts dd { margin: 0; overflow-wrap: anywhere; }
+.dbx-desktop-actions { margin-block: 12px 18px; }
+.dbx-desktop-guide { font-size: 12px; line-height: 1.8; }
+.dbx-desktop-guide summary { cursor: pointer; }
+.dbx-desktop-guide ol { padding-left: 20px; }
+.dbx-desktop-guide code { overflow-wrap: anywhere; user-select: text; }
+.dbx-desktop-settings [data-error="true"] { color: var(--danger, #c64747); }
 
 /* 音源登录行：label + 输入框 + 保存 + 状态。输入框给 flex:1 才能在没有内容时
    也撑满一行，否则四个元素会挤在左边、状态文字看起来像按钮的一部分。 */

@@ -46,12 +46,15 @@ pub(crate) fn client() -> Result<reqwest::blocking::Client> {
 }
 
 pub(crate) fn read_discovery(profile: &Profile) -> Result<Discovery> {
-    let path = profile.data_dir.join("vmusicd.json");
+    if crate::config::is_dbx(profile) {
+        bail!("DBX 来源不支持 HTTP 发现");
+    }
+    let path = std::path::Path::new(profile.data_dir()).join("vmusicd.json");
     let bytes = std::fs::read(&path).with_context(|| {
         format!(
             "未找到 {}：请先启动 Hertz {} 服务",
             path.display(),
-            profile.edition
+            profile.edition()
         )
     })?;
     if bytes.len() > 64 * 1024 {

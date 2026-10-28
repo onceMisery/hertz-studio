@@ -299,7 +299,6 @@
     this.kind = 'split-duo';
     this.cameraKind = 'quiet-tableau';
     this.words = [];
-    this.phrases = [];
     this.clones = [];
     this.rows = [];
     this.accents = null;
@@ -379,6 +378,56 @@
 
   function clear(container) {
     container.removeChildren().forEach(FX.destroyDisplayTree);
+  }
+
+  function createLineAccents(PIXI, parent, words, color, seed, tuning) {
+    var layer = new PIXI.Container();
+    parent.addChild(layer);
+    var random = FX.seededRandom('tempera-stars:' + seed);
+    var eligible = words.filter(function (word) { return word.dataset.text.trim(); });
+    var count = tuning.quality === 'energy-saving' ? 0 : Math.min(18, eligible.length * 2);
+    var stars = Array.from({ length: count }, function (_, index) {
+      var target = eligible[Math.floor(index * eligible.length / count)];
+      var large = index % 5 === 0;
+      var radius = target.dataset.fontSize * target.dataset.fit
+        * (large ? 0.18 + random() * 0.08 : 0.055 + random() * 0.04);
+      var points = [];
+      for (var i = 0; i < 8; i += 1) {
+        var a = i * Math.PI / 4, r = i % 2 ? radius * 0.2 : radius;
+        points.push(Math.cos(a) * r, Math.sin(a) * r);
+      }
+      var shape = new PIXI.Graphics().poly(points).fill(color);
+      layer.addChild(shape);
+      return { shape: shape, target: target, direction: index % 2 ? 1 : -1, large: large,
+        dx: random() - 0.5, angle: random() * Math.PI, delay: random() * 0.1 };
+    });
+    return {
+      update: function (frame, state) {
+        var line = frame.activeLine;
+        var age = line ? frame.playbackTime - line.startTime : -1;
+        var duration = line ? Math.min(0.52, Math.max(0, line.endTime - line.startTime) * 0.22) : 0;
+        var motion = FX.motionScale(state);
+        layer.visible = !!line && duration >= 0.16 && age >= 0 && age < duration
+          && motion > 0 && state.accentEffects !== false && state.quality !== 'energy-saving';
+        if (!layer.visible) return;
+        stars.forEach(function (star) {
+          var p = FX.clamp((age / duration - star.delay) / (1 - star.delay), 0, 1);
+          var size = star.target.dataset.fontSize * star.target.dataset.fit;
+          var travel = star.large ? 0.45 + p * 0.6 : 0.3 + p * 0.65;
+          star.shape.position.set(star.target.x + star.dx * size * travel * motion,
+            star.target.y + star.direction * size * (star.large ? 0.7 + p * 0.7 : 0.55 + p * 0.6) * motion);
+          star.shape.rotation = star.angle + p * (star.large ? 0.45 : 0.8) * motion;
+          star.shape.scale.set((star.large ? 0.45 : 0.5) + Math.sin(p * Math.PI) * (star.large ? 0.9 : 0.7));
+          star.shape.alpha = Math.sin(p * Math.PI) * (1 - p * 0.35);
+        });
+      },
+      snapshot: function () { return { particles: stars.length, visible: layer.visible }; },
+      destroy: function () {
+        if (layer.destroyed) return;
+        layer.removeFromParent();
+        FX.destroyDisplayTree(layer);
+      }
+    };
   }
 
   // 网屏：圆点网（半调）或斜线网，裁进色块多边形。点数设上限，大屏也不爆顶点。
@@ -522,7 +571,7 @@
     this.colors = colors;
     tuning.palette = { background: colors.paper, ink: colors.ink };
     this.kind = compositionKind(seed, tuning, line && line.section);
-    this.cameraKind = FX.shotKind(seed, {}, line && line.section);
+    this.cameraKind = tuning.backgroundMode === 'spatial' ? 'quiet-tableau' : FX.shotKind(seed, {}, line && line.section);
     var rand = FX.seededRandom('tempera-screens:' + seed);
     // 套色错版方向：每块色版一个 {-1,0,1} 的漂移向量（底板除外），起音时
     // 整版沿它滑出再弹回 —— 印刷机「对版」的瞬间。种子化保证 seek 回来一致。
@@ -532,7 +581,7 @@
     clear(this.blocks);
     clear(this.screens);
     clear(this.decor);
-    var patternSize = w + 'x' + h;
+    var patternSize = w + 'x' + h + ':' + (tuning.showBlocks !== false);
     if (patternSize !== this.patternSize) {
       // capture 已释放旧退场，且当前 screens 已拆下；此时才回收共享几何。
       Object.keys(this.screenPatterns).forEach(function (key) { this.screenPatterns[key].destroy(); }, this);
@@ -591,14 +640,13 @@
       }
     }
     this.paper.tint = tones[3];
-    buildDecor(PIXI, this.decor, w, h, colors, lineNo, this.kind);
+    if (tuning.showDecor !== false) buildDecor(PIXI, this.decor, w, h, colors, lineNo, this.kind);
 
     // 正文：商籁同一条排版管线（字素时间轴 + 词组断行 + 行宽收敛）。
     clear(this.invert);
     this.words = FX.buildLyrics(PIXI, this.text, line, w, h, tuning, seed, this.fontStack);
-    this.phrases = FX.buildPhraseStage(PIXI, this.text, this.words, accentNum);
     if (this.accents) this.accents.destroy();
-    this.accents = FX.createAccentChoreography(PIXI, this.text, this.words, accentNum, seed);
+    this.accents = createLineAccents(PIXI, this.text, this.words, accentNum, seed, tuning);
     // 反色层：每个字素一个同款克隆，染底色，只在扫光遮罩内可见。
     var paperNum = hexNum(colors.paper, 0x09090b);
     this.clones = tuning.inversion === false ? [] : this.words.map(function (node) {
@@ -663,7 +711,6 @@
     this.decor.position.set(Math.sin(time * 0.4) * 6 * motion, Math.cos(time * 0.3) * 4 * motion);
 
     FX.animateLyrics(this.words, frame, tuning, hexNum(this.colors.accent, 0xffffff));
-    FX.animatePhraseStage(this.phrases, frame, tuning, this.cameraKind);
     if (this.accents) this.accents.update(frame, tuning);
 
     // 扫光带 + 反色：带画在正文下方，同一形状做反色层遮罩。
@@ -721,7 +768,7 @@
     // 起音闪白：整屏一层强调色薄膜。峰值从 0.07 提到 0.1 —— 0.07 在深色构图上
     // 几乎看不见（相当于 18/255 的抬升），重拍时画面「该跳一下」却没跳。
     this.flash.clear();
-    if (tuning.backgroundMode !== 'creative' && motion > 0 && kick > 0.02 && tuning.quality !== 'energy-saving') {
+    if (tuning.showBlocks !== false && motion > 0 && kick > 0.02 && tuning.quality !== 'energy-saving') {
     // 二次方映射：弱起音只给极淡的一层，强起音才明显 —— 线性映射会让
     // 持续的能量把整屏常驻提亮成「发灰」。
       this.flash.rect(0, 0, w, h).fill({ color: hexNum(this.colors.accent, 0xffffff),
@@ -750,6 +797,7 @@
       paperGrain: !!(this.paper && this.paper.visible && this.paper.children.length),
       screenPatterns: Object.keys(this.screenPatterns).length,
       glyphs: this.words.length, clones: this.clones.length, rows: this.rows.length,
+      accents: this.accents ? this.accents.snapshot() : null,
       sweepGlow: this.sweepGlow ? this.sweepGlow.blendMode : null,
       performance: this.performance.snapshot(),
       halation: this.optical ? this.optical.halation.enabled : false,
@@ -763,7 +811,6 @@
     this.pendingShot = null;
     this.performance.reset();
     this.words = [];
-    this.phrases = [];
     this.clones = [];
     this.rows = [];
     if (this.accents) { this.accents.destroy(); this.accents = null; }
@@ -829,12 +876,14 @@
     var ro = null;
 
     function engineTuning(frame) {
-      var creativeBackground = bgMode === 'creative';
+      var externalBackground = bgMode === 'creative' || bgMode === 'spatial';
       return {
         palette: { background: theme.backgroundColor, ink: theme.primaryColor },
         backgroundMode: bgMode,
         fontScale: fontScale,
         lyricMotion: 'tempera',
+        waitingOpacity: 0.9,
+        phraseEmphasis: 0,
         composition: tuning.composition,
         monochrome: tuning.colorMode === 'mono',
         lyricLayout: 'phrases',
@@ -847,24 +896,24 @@
         performanceIntensity: reactivity,
         quality: eco ? 'energy-saving' : 'high',
         reducedMotion: reduced,
-        showBlocks: !creativeBackground,
-        showDecor: true,
-        screens: !creativeBackground && tuning.screens,
+        showBlocks: !externalBackground,
+        showDecor: bgMode !== 'spatial',
+        screens: !externalBackground && tuning.screens,
         inversion: tuning.inversion,
         halation: tuning.halation,
         seams: tuning.seams,
         accentEffects: true,
         // 「舞台场景」背景下色块压到 0.62，让 3D 场景从色块间透出来。
         blockAlpha: bgMode === 'stage' ? 0.62 : 0.94,
-        // 创意布景已负责纸面与空间，不再盖一层整屏印相和闪白。
-        postProcess: !creativeBackground,
-        vignette: vignette && !creativeBackground ? 0.22 : 0,
+        // 外部场景已有后期，歌词不能再覆盖整屏印相与闪白。
+        postProcess: !externalBackground,
+        vignette: vignette && !externalBackground ? 0.22 : 0,
         grain: 0.1,
         contrast: 0.12,
         lensDistortion: 0.18,
         lensDispersion: 0.12,
         opticalImpact: 0.7,
-        sceneTransitions: !creativeBackground,
+        sceneTransitions: !externalBackground,
         textInversion: true
       };
     }
@@ -919,7 +968,9 @@
       if (key !== renderedKey) {
         renderedKey = key;
         var seed = ((f.track && (f.track.id || f.track.title)) || 'tempera') + ':' + line.startTime;
-        director.buildShot(line, seed, palette(theme, tuning.colorMode), engineTuning(f), f.currentLineIndex);
+        var colors = palette(theme, tuning.colorMode);
+        if (bgMode === 'spatial' && tuning.colorMode === 'vivid') colors.ink = U.mixHex(colors.ink, colors.accent, 0.35);
+        director.buildShot(line, seed, colors, engineTuning(f), f.currentLineIndex);
       }
       var camera = director.update(f.activeLine ? f : Object.assign({}, f, { activeLine: null, lineProgress: 0 }),
         engineTuning(f));

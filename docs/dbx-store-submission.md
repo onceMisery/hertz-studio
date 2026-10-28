@@ -143,12 +143,20 @@ schema 是 `additionalProperties: false`，所以：没有 `screenshots` 字段�
   指定的本地目录；Standard 保留本地/WebDAV、Jamendo、ccMixter 与公开播客，Jamendo 需自备 client_id。
   不把 Full 的商业平台账号与协议写入 Standard 能力清单。需要保存的凭据进操作系统钥匙串（Windows Credential
   Manager / macOS Keychain / freedesktop Secret Service），不落 SQLite 明文、不上传第三方。
-- 原生 sidecar 行为：自带 `bin/dbx-plugin-hertz`，与宿主走 stdio JSON-RPC。**插件形态不开监听口**——
+- 原生 sidecar 行为：自带 `bin/dbx-plugin-hertz`，与宿主走 stdio JSON-RPC。**插件形态不建立网络监听**——
   HTTP + token 那一层只存在于独立形态（独立默认绑 `127.0.0.1`，绑到非回环会打警告）。
   DBX 不开放外部 MCP stdio，也不会自动启动本地模型；不要把独立 CLI 的 MCP 模式宣传成 DBX 外部接入。
   浮动胶囊是渐进增强：宿主没有 `capabilities.floating` 时自动退回页内最小化。
 - License：MIT（仓库 LICENSE；上游第三方署名见 NOTICE）。
 - Support：`https://github.com/onceMisery/hertz-studio/issues`。
+
+### DBX 桌面接入候选的补充材料（尚未发布）
+
+[桌面接入](desktop-dbx.md)完成产品流程与 D3 验收后，对应候选说明须另行披露 Windows 11 x64 的可选桌面歌词与壁纸组件。组件单独分发，用户主动授权后才开放同用户、同交互会话的只读命名管道，提供歌词和音乐响应数据；没有新网络监听，不扩大现有 manifest 的宿主权限。组件由用户独立启动，插件不执行、下载或安装组件。
+
+候选 Release 同时给出配套组件 zip 的不可变下载地址、SHA-256、`desktopBuildId` 与[安装升级说明](desktop-component-install.md)，并记录 Standard / Full 各自的插件 `buildId` 和共同要求的组件构建。只声明已经验收的平台；macOS、Linux 与 ARM64 保留基础插件能力。未安装、未授权或组件故障时，DBX 的原播放、工作台与退出行为必须通过当期候选回归。
+
+当前实现与运行时证据不等于市场候选已验收；真实图形工作台、跨用户/会话、安装升级及长稳待验项见[实施记录](plans/2026-10-28-dbx-desktop-implementation.md)。本节只准备候选材料，不更新已发布版本或发起市场提交。
 
 ### store 校验器实际会卡什么
 

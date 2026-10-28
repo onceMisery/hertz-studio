@@ -1278,7 +1278,7 @@
             <button id="set-desktop-lyrics-locate" class="btn">解锁并定位</button>
           </span>
         </div>
-        <p class="hint set-note">Windows 11 x64 独立组件：透明置顶、锁定后鼠标穿透、托盘找回；关闭播放器页面后仍显示当前歌词。</p>
+        <p class="hint set-note" id="set-desktop-lyrics-note">Windows 11 x64 独立组件：透明置顶、锁定后鼠标穿透、托盘找回；关闭播放器页面后仍显示当前歌词。</p>
         <div class="set-row" id="set-wallpaper-row">
           <label>桌面壁纸</label>
           <span class="set-actions">
@@ -1287,6 +1287,32 @@
           </span>
         </div>
         <p class="hint set-note" id="set-wallpaper-note">Windows 11 x64 独立组件，默认关闭；在设置页选择目标屏、帧率与音乐响应并预览。</p>
+        <section id="dbx-desktop-settings" class="dbx-desktop-settings" aria-labelledby="dbx-desktop-title" tabindex="-1" hidden>
+          <h3 id="dbx-desktop-title">桌面歌词与壁纸（可选）</h3>
+          <p class="hint">连接后，允许独立桌面组件只读本插件的歌词与音乐响应数据。音乐来源切换、歌词与壁纸启用都由原生中心管理；打开设置或检测不会授权，也不会启用窗口。</p>
+          <p class="hint" id="dbx-desktop-status" role="status" aria-live="polite">尚未检测</p>
+          <dl id="dbx-desktop-facts" class="dbx-desktop-facts"></dl>
+          <p class="hint" id="dbx-desktop-result" role="status" aria-live="polite"></p>
+          <div class="set-actions dbx-desktop-actions">
+            <button type="button" class="btn" id="dbx-desktop-refresh">重新检测</button>
+            <button type="button" class="btn primary" id="dbx-desktop-connect" disabled>连接并授权</button>
+            <button type="button" class="btn" id="dbx-desktop-open" hidden>打开原生中心</button>
+            <button type="button" class="btn" id="dbx-desktop-revoke" disabled>撤销授权</button>
+          </div>
+          <details class="dbx-desktop-guide">
+            <summary>安装、升级与手动启动</summary>
+            <ol>
+              <li>从配套插件版本的发布说明获取 Windows 11 x64 桌面组件包，并核对 SHA-256。升级前先从托盘退出旧组件。</li>
+              <li>将完整组件包解压到 <code>%LOCALAPPDATA%\Hertz\Desktop\bin\</code>，保留 exe、desktop-component.json 和随包文档。</li>
+              <li>手动运行该目录的 <code>hertz-desktop.exe</code>，再点「重新检测」。DBX 不代为启动组件。</li>
+              <li>点「连接并授权」后，在原生中心选择本插件来源，并按需开启歌词或壁纸。</li>
+            </ol>
+            <p class="hint">安装指南（可选中文字，在浏览器打开）：</p>
+            <p><code id="dbx-desktop-guide-url" tabindex="0">https://github.com/onceMisery/hertz-studio/blob/main/docs/desktop-component-install.md</code></p>
+            <button type="button" class="btn" id="dbx-desktop-copy-guide">复制指南地址</button>
+            <p class="hint" id="dbx-desktop-copy-result" role="status"></p>
+          </details>
+        </section>
         <div class="set-row">
           <label>全局时间偏移</label>
           <span class="set-actions">
@@ -2728,6 +2754,7 @@
   </span>
 </div>
 
+<script defer src="desktop-settings.js"></script>
 <script defer src="app.js"></script>
 </body>
 </html>

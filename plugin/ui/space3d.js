@@ -722,7 +722,7 @@
     api.setTuning(kind === 'classic' ? Object.assign({}, params, { spacing: params.wordSpacing }) : params);
     if (api.setMotion) api.setMotion(quiet ? 0 : params.speed);
     if (api.setReactivity) api.setReactivity(reactivity);
-    if (api.setBgMode) api.setBgMode('stage');
+    if (api.setBgMode) api.setBgMode(kind === 'tempera' ? 'spatial' : 'stage');
     if (api.rootEl().hidden) api.setVisible(true);
     performanceHost.style.setProperty('--fl-sonnet-accent', theme.accentColor);
     if (dt != null) api.frame(dt);
@@ -840,7 +840,7 @@
     if (kind) lyricKeys = ['scale','speed','reactivity','reduced'].concat({
       classic: ['rotation','breathing','wordSpacing'], cadenza: ['width','motion','glow','beam'],
       sonnet: ['shotFlow','lyricLayout','phraseLength','decor','accents','halation','atmosphere'],
-      tempera: ['colorMode','composition','screens','inversion','halation','seams']
+      tempera: ['colorMode','inversion']
     }[kind]);
     specs.forEach(function(spec){
       var key=spec.key||spec.id;if(lyric&&lyricKeys.indexOf(key)<0)return;
