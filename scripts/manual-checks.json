@@ -23,6 +23,10 @@
       "purpose": "Real allow-scripts-only iframe: proves hertzHost.onSubmit keeps submit buttons and Enter alive where the browser swallows form submission, and never runs the handler twice without the sandbox."
     },
     {
+      "script": "check-queue-save-browser.js",
+      "purpose": "队列「存为歌单」的插件形态：自建输入框、按音源建歌单并追加全部曲目、保存后「歌单」页立即能看到新歌单。"
+    },
+    {
       "script": "check-desktop-settings-native.js",
       "purpose": "Windows native/WebView2 acceptance with an isolated config: positioning rollback, wallpaper preview, WorkerW lifecycle and revision conflicts."
     },

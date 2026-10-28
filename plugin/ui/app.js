@@ -8940,6 +8940,9 @@ async function startApp() {
           }
           try {
             const pl = await transport.post('/v1/online/playlist', { source, name: trimmed });
+            if (window.OnlinePlaylists && window.OnlinePlaylists.rememberCreated) {
+              window.OnlinePlaylists.rememberCreated(source, pl);
+            }
             await transport.post('/v1/online/playlist/tracks/add', {
               source, id: pl.id, tracks: ids.map((trackId) => ({ id: trackId })),
             });

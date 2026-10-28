@@ -428,12 +428,13 @@
     // 内置主题将来真要放浅色主题时不用回头改推导。
     var towardWhite = bgLum < 0.5;
     var lineTint = towardWhite ? '255, 255, 255' : '0, 0, 0';
+    // 浮雕高光、半透明面板都比底色亮一档，前景色按亮过底色的表面反推，
+    // 否则正文在卡片上会掉出 7:1（实测亮一档的底上只有 6.9:1）。
+    var foregroundBase = shade(bg, 0.18, towardWhite);
     return {
       '--bg': bg,
-      // 正文 7:1、次要 4.5:1：都在 AA 之上留了余量。壁纸压暗后有效底色会略亮
-      // 于 --bg，余量就是留给那一段的。
-      '--text': deriveForeground(bg, 7),
-      '--muted': deriveForeground(bg, 4.5),
+      '--text': deriveForeground(foregroundBase, 7),
+      '--muted': deriveForeground(foregroundBase, 4.5),
       '--panel': 'rgba(' + rgbTriple(shade(bg, 0.045, towardWhite)) + ', 0.72)',
       '--panel-solid': shade(bg, 0.05, towardWhite),
       '--panel-2': 'rgba(' + lineTint + ', 0.05)',

@@ -491,6 +491,23 @@
     document.dispatchEvent(new CustomEvent('online-playlists:changed'));
   }
 
+  /// 新建在线歌单后把平台返回的那份就地塞进缓存。
+  ///
+  /// 「歌单」页读的是这里的 `state.lists`，而 refresh() 要一整轮网络往返；
+  /// 不塞的话刚存好的歌单要等下一次同步才出现，读起来就是「存了没反应」。
+  function rememberCreated(source, playlist) {
+    if (!source || !playlist || playlist.id == null) return;
+    var list = state.lists[source] || (state.lists[source] = []);
+    if (!list.some(function (p) { return String(p.id) === String(playlist.id); })) {
+      list.unshift(playlist);
+    }
+    if (state.sources.length && !state.sources.some(function (s) { return s.id === source; })) {
+      loadSources();
+      return;
+    }
+    renderGrid();
+  }
+
   // 扫码/cookie 登录成功后由 online-login.js 回调：整区重建，把新登录的
   // 账号昵称和歌单拉回来。
   function refresh() {
@@ -603,6 +620,7 @@
 
   window.OnlinePlaylists = {
     refresh: refresh,
+    rememberCreated: rememberCreated,
     init: loadSources,
     loaded: hasSources,
     all: allPlaylists,

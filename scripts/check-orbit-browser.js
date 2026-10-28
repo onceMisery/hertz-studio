@@ -67,10 +67,11 @@ async function main() {
   let page;
   try {
     page = await browser.newPage({ viewport: { width: 1600, height: 1000 } });
-    page.on('pageerror', error => errors.push(error.message));
+    page.on('pageerror', error => errors.push(error.stack || error.message));
     await page.addInitScript(() => localStorage.setItem('vmusic.defaultView', 'library'));
     await page.route('**/v1/online/account?**', route => route.fulfill({ json: { logged_in: false } }));
-    await page.route('**/v1/recommend/daily/online?**', route => route.fulfill({ json: { tracks: [], sources: [] } }));
+    await page.route('**/v1/recommend/daily/online?**',
+      route => route.fulfill({ json: { tracks: [], sources: [], skipped: [], ready: [] } }));
     if (source) {
       const assets = new Map(readAssets().map(asset => [asset.path, asset]));
       await page.route('**/*', async route => {
@@ -80,12 +81,15 @@ async function main() {
           const asset = assets.get(url.pathname);
           return route.fulfill({ path: asset.file, contentType: asset.mime === 'JS' ? 'application/javascript' : 'text/css' });
         }
+        if (/^\/platform-icons\/[a-z]+\.png$/.test(url.pathname)) {
+          return route.fulfill({ path: path.join(root, 'plugin/ui', url.pathname), contentType: 'image/png' });
+        }
         if (url.pathname === '/') {
           const response = await route.fetch();
           return route.fulfill({ response, contentType: 'text/html', body:
             fs.readFileSync(path.join(root, 'plugin/ui/index.html'), 'utf8').replace('__VMUSIC_TOKEN_VALUE__', uiToken()) });
         }
-        return route.continue();
+        return route.fallback();
       });
     }
     await page.goto(uiUrl(base));
@@ -109,6 +113,7 @@ async function main() {
     await page.waitForFunction(() => document.querySelector('.orbit-current-source .src-badge'));
     check((await page.locator('.orbit-current-source .src-badge').getAttribute('title')).includes('网易云'),
       'current-track card shows the provider icon label');
+    await page.waitForFunction(() => document.querySelector('.orbit-current-source .src-badge img')?.complete);
     check(await page.locator('.orbit-current-source .src-badge img').evaluate(img => img.complete && img.naturalWidth > 0),
       'current-track provider icon asset renders');
     check(await page.locator('.orbit-current-duration').textContent() === '3:00',
@@ -271,6 +276,79 @@ async function main() {
       check(await page.locator('#orbit-play').isVisible(), themeId + ' keeps transport visible');
     }
 
+    for (const themeId of ['anime-abyss', 'anime-sakura', 'orbit-fog', 'mineral']) {
+      await page.evaluate(id => Theme.apply(id), themeId);
+      await page.locator('.rail-item[data-view="daily"]').click();
+      await page.getByRole('button', { name: '本地', exact: true }).click();
+      const playAll = page.locator('#view-daily .col-tools .btn.primary');
+      await until(() => playAll.isEnabled(), value => value);
+      for (const hover of [false, true]) {
+        if (hover) await playAll.hover(); else await page.mouse.move(4, 4);
+        await page.waitForTimeout(700);
+        const contrast = await page.evaluate(() => {
+          const canvas = document.createElement('canvas'); canvas.width = canvas.height = 1;
+          const ctx = canvas.getContext('2d');
+          const rgb = color => {
+            ctx.clearRect(0, 0, 1, 1); ctx.fillStyle = color; ctx.fillRect(0, 0, 1, 1);
+            return Array.from(ctx.getImageData(0, 0, 1, 1).data).slice(0, 3);
+          };
+          const luminance = color => rgb(color).map(v => {
+            v /= 255; return v <= .04045 ? v / 12.92 : ((v + .055) / 1.055) ** 2.4;
+          }).reduce((sum, v, i) => sum + v * [.2126, .7152, .0722][i], 0);
+          const ratio = (a, b) => {
+            a = luminance(a); b = luminance(b);
+            return (Math.max(a, b) + .05) / (Math.min(a, b) + .05);
+          };
+          const button = getComputedStyle(document.querySelector('#view-daily .col-tools .btn.primary'));
+          const probe = document.createElement('span'); document.querySelector('.orbit-main').appendChild(probe);
+          probe.style.color = 'var(--orbit-hi)'; const hi = getComputedStyle(probe).color;
+          probe.style.color = 'var(--text)'; const text = getComputedStyle(probe).color;
+          probe.style.color = 'var(--muted)'; const muted = getComputedStyle(probe).color;
+          probe.remove();
+          return { background: button.backgroundImage, button: ratio(button.color, button.backgroundColor),
+            text: ratio(text, hi), muted: ratio(muted, hi) };
+        });
+        check(contrast.background === 'none' && contrast.button >= 4.5,
+          themeId + ' daily primary button retains a legible accent surface' + (hover ? ' on hover' : '') + ': ' + JSON.stringify(contrast));
+        if (themeId.startsWith('anime-')) {
+          check(contrast.text >= 7 && contrast.muted >= 4.5,
+            themeId + ' foregrounds remain readable on the raised surface: ' + JSON.stringify(contrast));
+        }
+      }
+      if (themeId === 'anime-abyss') {
+        await playAll.click();
+        await until(() => api('GET', '/v1/state'), state => state.playing);
+        const recommendationQueue = await api('GET', '/v1/player/queue');
+        check(recommendationQueue.queue.length === queue.length,
+          'daily primary action still starts the complete local recommendation queue');
+        await api('POST', '/v1/player/pause');
+        await page.screenshot({ path: path.join(output, 'theme-anime-abyss.png') });
+      }
+    }
+    for (const width of [901, 900, 884, 801, 800, 621, 620, 390]) {
+      await page.setViewportSize({ width, height: 900 });
+      await page.waitForTimeout(350);
+      const compact = await page.evaluate(() => {
+        const rail = document.getElementById('rail').getBoundingClientRect();
+        const entry = document.querySelector('.rail-item[data-view="queue"]');
+        const icon = entry.querySelector('svg').getBoundingClientRect();
+        const badge = entry.querySelector('.rail-badge').getBoundingClientRect();
+        return { width: rail.width, centered: Math.abs(icon.x + icon.width / 2 - rail.x - rail.width / 2),
+          labelHidden: getComputedStyle(entry.querySelector('span')).display === 'none',
+          badgeContained: badge.x >= rail.x && badge.right <= rail.right,
+          overflow: document.documentElement.scrollWidth > innerWidth };
+      });
+      check(!compact.overflow, width + 'px compact breakpoint has no horizontal overflow');
+      if (width > 620 && width <= 900) {
+        check(compact.width <= 72 && compact.labelHidden && compact.centered <= 1 && compact.badgeContained,
+          width + 'px icon-only navigation is narrow with centered icons and contained counts: ' + JSON.stringify(compact));
+      } else if (width > 900) {
+        check(!compact.labelHidden && compact.width > 100, 'expanded desktop navigation retains its labels');
+      } else {
+        check(compact.width >= width - 20, width + 'px retains the horizontal mobile navigation');
+      }
+    }
+    await page.setViewportSize({ width: 1600, height: 1000 });
     await page.evaluate(() => Skins.apply('orbit'));
     await page.reload();
     await page.waitForFunction(() => window.Skins && Skins.currentId() === 'orbit' && document.querySelector('.orbit-main'));
