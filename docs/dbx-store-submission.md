@@ -59,7 +59,7 @@ manifest 的 `id`/`version`/`publisher`，`onceMisery` 这种带大写的写法�
 2. 跑一遍本地契约检查（`node scripts/check-frontend.js`，等价于 CI 的 Frontend contract
    checks），确认插件形态没退化。
 3. 验证当前提交的 CI 与 [发布验收矩阵](./release-validation.md)，再建 tag 与 Release，命名为
-   `hertz-plugin-standard-v<version>`（当前 0.2.1 对应 `hertz-plugin-standard-v0.2.1`）。旧
+   `hertz-plugin-standard-v<version>`（当前 0.3.0 对应 `hertz-plugin-standard-v0.3.0`）。旧
    `hertz-plugin-v...` 与 Full tag 不触发当前候选链路。
    Release 正文见下面「Release notes 模板」。
 4. Publish 该 Release → `release dbx plugin` workflow 跑完，Release 资产里应出现

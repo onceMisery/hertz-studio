@@ -6,7 +6,7 @@ resolver = "2"
 members = ["crates/*", "plugin/backend", "plugin/vendor/dbx-plugin-sdk"]
 
 [workspace.package]
-version = "0.3.0-preview"
+version = "0.3.0"
 edition = "2021"
 # 工具链下界。依赖的 rust-version 声明仅作初筛，源码是否能在此版本编译
 # 由 ci.yml 的固定 1.88.0 msrv 矩阵验证，不能拿最新 stable 的结果替代。
