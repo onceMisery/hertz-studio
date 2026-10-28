@@ -33,9 +33,14 @@ async function main() {
     page.on('request', request => requests.push(request.url()));
     await page.route('https://fixture.test/**', route => route.fulfill({ contentType: 'text/html', body: '<!doctype html><html><body></body></html>' }));
     await page.goto('https://fixture.test');
-    await page.setContent('<!doctype html><html lang="zh-CN"><body>' + sprite + html.slice(start, end) + '</body></html>');
+    const railStart = html.indexOf('<nav class="rail"');
+    const rail = html.slice(railStart, html.indexOf('</nav>', railStart) + 6);
+    const barStart = html.indexOf('<footer class="bar"');
+    const bar = html.slice(barStart, html.indexOf('</footer>', barStart) + 9);
+    await page.setContent('<!doctype html><html lang="zh-CN"><body>' + sprite
+      + '<header class="topbar">音乐界面</header><div class="app">' + rail
+      + '<section id="column" class="column">' + html.slice(start, end) + '</section></div>' + bar + '</body></html>');
     for (const file of ['style.css', 'reader.css']) await page.addStyleTag({ content: read(file) });
-    await page.addStyleTag({ content: 'body{padding:20px;overflow:auto}#view-reader{height:780px;width:100%;max-width:1140px;margin:auto}' });
     const imageKey = 'ab'.repeat(16);
     await page.evaluate(key => {
       const feed = (id, title, unread) => ({
@@ -147,6 +152,8 @@ async function main() {
     // fixture 常量要在 transport 闭包外可见：注入为全局字符串。
     await page.evaluate(text => { window.ENTRY_CONTENT_PLACEHOLDER = text; }, ENTRY_CONTENT);
     // 上面 transport 定义时引用了 const，重新求值一次确保占位符已就绪：
+    // 真页面里 host.js 是最先加载的那个：reader.js 通过 hertzHost.onSubmit 绑表单。
+    await page.addScriptTag({ content: read('host.js') });
     await page.addScriptTag({ content: read('reader.js') });
     await page.evaluate(() => {
       document.getElementById('view-reader').hidden = false;
@@ -156,6 +163,11 @@ async function main() {
       return Reader.onViewEnter();
     });
     await page.locator('.reader-feed').filter({ hasText: '技术快报' }).waitFor();
+    assert.equal(await page.locator('.topbar').isVisible(), false, 'reading replaces the music shell');
+    assert.equal(await page.locator('#view-reader').evaluate(el => el.parentElement === document.body), true);
+    assert.equal(await page.locator('#playback-bar').evaluate(el => el.parentElement === document.body), true);
+    assert.equal(await page.locator('#playback-bar').isVisible(), true, 'real playback controls remain available');
+    assert.equal(await page.locator('.reader-nav-link[aria-current="page"]').count(), 1);
     assert.match(await page.locator('.reader-feed').filter({ hasText: '技术快报' }).textContent(), /2/,
       'unread badge shows the fixture unread count');
     // 推荐入口：公开 RSS 源列表，外链新窗口打开。
@@ -259,6 +271,16 @@ async function main() {
     await page.locator('.reader-feed').filter({ hasText: '新订阅的源' }).waitFor();
     assert.ok(await page.evaluate(() => calls.some(c => c[0] === 'POST' && c[1] === '/v1/reader/subscriptions'
       && c[2].feed_url === 'https://example.org/feed.xml')));
+    // 沙箱里没有 allow-forms，浏览器不派发 submit：真鼠标点按钮与输入框回车这两条
+    // 补偿路径必须各自顶得上，否则插件形态下这颗「订阅」就是死的。
+    await page.locator('#reader-add-url').fill('https://example.org/clicked.xml');
+    await page.locator('#reader-add .btn').click();
+    await page.waitForFunction(() => calls.some(c => c[2] && c[2].feed_url === 'https://example.org/clicked.xml'),
+      null, { timeout: 4000 });
+    await page.locator('#reader-add-url').fill('https://example.org/entered.xml');
+    await page.locator('#reader-add-url').press('Enter');
+    await page.waitForFunction(() => calls.some(c => c[2] && c[2].feed_url === 'https://example.org/entered.xml'),
+      null, { timeout: 4000 });
     const longRow = page.locator('.reader-feed').filter({ hasText: '长列表源' });
     await longRow.hover();
     await longRow.locator('.reader-feed-action').filter({ hasText: '退订' }).click();
@@ -339,13 +361,26 @@ async function main() {
     assert.equal(await page.locator('.reader-section-heading').count(), 3,
       'standalone bold section labels introduce the three news lists');
     assert.equal(await page.locator('#reader-content a[href]').count(), 13, 'daily source links remain usable');
-    await page.addStyleTag({ content: '#view-reader{height:calc(100dvh - 40px);max-width:none}#view-reader.reader-fullscreen{height:auto;width:auto}' });
     await page.evaluate(() => Theme.apply('mineral'));
     await page.setViewportSize({ width: 1440, height: 1000 });
     await page.waitForTimeout(300);
     const visualOut = path.join(root, 'output', 'playwright', 'reader');
     fs.mkdirSync(visualOut, { recursive: true });
     await page.screenshot({ path: path.join(visualOut, 'daily-desktop.png') });
+    assert.equal(await page.locator('#reader-toc button').count(), 3, 'news section labels generate the outline');
+    await page.locator('#reader-toc button').last().click();
+    await page.waitForFunction(() => parseInt(document.querySelector('#reader-progress-text').textContent) > 0);
+    await page.waitForFunction(() => document.querySelector('#reader-toc li:last-child button.active'));
+    await page.locator('.reader-article').evaluate(el => { el.scrollTop = 0; });
+    await page.locator('#reader-size-up').click();
+    assert.equal(await page.locator('#reader-content').evaluate(el => getComputedStyle(el).fontSize), '20px');
+    await page.locator('#reader-size-down').click();
+    await page.locator('#reader-font-toggle').click();
+    assert.equal(await page.locator('#view-reader').getAttribute('data-reader-font'), 'sans');
+    await page.locator('#reader-font-toggle').click();
+    await page.locator('#reader-theme-toggle').click();
+    assert.equal(await page.locator('#view-reader').getAttribute('data-reader-theme'), 'dark');
+    assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem('hertz-reader-preferences')).theme), 'dark');
     await page.locator('#reader-fullscreen').click();
     await page.setViewportSize({ width: 1920, height: 1080 });
     const measure = await page.evaluate(() => {
@@ -358,17 +393,24 @@ async function main() {
     });
     assert.ok(measure.left <= 1 && measure.width <= 1, 'article title and body share the same reading column');
     assert.ok(measure.measure <= 736 && measure.measure >= 640, 'fullscreen keeps a comfortable reading measure');
-    assert.ok(measure.fontSize >= 16 && measure.fontSize <= 18, 'reading font stays independent of wide windows');
+    assert.equal(measure.fontSize, 19, 'prototype default size stays independent of wide windows');
     assert.equal(measure.color, await page.locator('.reader-article').evaluate(el => getComputedStyle(el).color),
       'body uses the primary theme text color');
     await page.screenshot({ path: path.join(visualOut, 'daily-fullscreen-dark.png') });
     await page.evaluate(() => Theme.apply('chaoxi-day'));
+    assert.equal(await page.locator('#view-reader').getAttribute('data-reader-theme'), 'dark', 'music themes do not override the reading palette');
+    await page.locator('#reader-theme-toggle').click();
     await page.waitForTimeout(300);
     await page.screenshot({ path: path.join(visualOut, 'daily-fullscreen-light.png') });
     await page.setViewportSize({ width: 390, height: 844 });
     assert.ok(await page.evaluate(() => document.querySelector('.reader-article').scrollWidth <= document.querySelector('.reader-article').clientWidth + 1),
       'daily content fits a narrow reading pane');
     await page.screenshot({ path: path.join(visualOut, 'daily-mobile.png') });
+    await page.keyboard.press('Escape');
+    await page.locator('#reader-outline-toggle').click();
+    assert.equal(await page.locator('#reader-toc').isVisible(), true, 'narrow outline opens as a drawer');
+    await page.keyboard.press('Escape');
+    assert.equal(await page.locator('#reader-outline-toggle').getAttribute('aria-expanded'), 'false');
 
     // 技术文章的表格与长代码独立滚动，不挤宽整篇文章，也不折叠代码换行。
     const technicalContent = '<h2>一篇技术文章</h2><p>正文中保留 <strong>行内重点</strong> 与 <code>content_html</code>。</p>'
@@ -446,6 +488,11 @@ async function main() {
     await page.evaluate(() => releaseReaderRefresh());
     await page.waitForFunction(() => document.querySelector('#reader-status').textContent === '');
     assert.equal(await page.locator('#reader-entry-title').textContent(), '图文正文一篇', 'late refresh preserves the selected article');
+    await page.evaluate(() => Reader.onViewExit());
+    assert.equal(await page.locator('#view-reader').evaluate(el => el.parentElement.id), 'column', 'leaving reading restores the skin content anchor');
+    assert.equal(await page.locator('.topbar').isVisible(), true, 'leaving reading restores the music shell');
+    await page.evaluate(() => Reader.onViewEnter());
+    assert.equal(await page.locator('#reader-entry-title').textContent(), '图文正文一篇', 'reopening preserves the selected article');
     assert.deepEqual(errors, []);
     console.log('Reader Chrome: unread badges, entry reading, client-side XSS hardening, deferred image proxy, '
       + 'read/star persistence, filters, cursor pagination, subscribe/unsubscribe/delete, recommended source link, '

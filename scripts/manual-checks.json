@@ -3,12 +3,24 @@
   "note": "check-* scripts that are deliberate manual/browser/diagnostic entry points. New unregistered check-* files fail scripts/check-scripts.js until they are either registered in check-frontend.js / a workflow or added here.",
   "scripts": [
     {
+      "script": "check-room-flow-browser.js",
+      "purpose": "一起听原型流程：入口、发现刷新/保留旧结果、头像、申请、等待座位、邀请、重连、退出小结与窄屏。"
+    },
+    {
+      "script": "check-dbx-ui-browser.js",
+      "purpose": "DBX sandbox click/Enter/validation and textarea behavior, plus production online row action/duration geometry at eight viewport widths."
+    },
+    {
       "script": "check-room-stage-browser.js",
       "purpose": "Isolated real room and complete stage UI: personal scene, shared composer/danmaku, online picker, real sharing/queue writes, canceled search, narrow layouts and return navigation."
     },
     {
       "script": "check-desktop-settings-browser.js",
       "purpose": "Isolated Chrome verification of desktop settings drafts, preview lifecycle, conflicts, presets and narrow layouts."
+    },
+    {
+      "script": "check-dbx-sandbox-forms-browser.js",
+      "purpose": "Real allow-scripts-only iframe: proves hertzHost.onSubmit keeps submit buttons and Enter alive where the browser swallows form submission, and never runs the handler twice without the sandbox."
     },
     {
       "script": "check-desktop-settings-native.js",

@@ -11,6 +11,8 @@
   var coverKey = null;
   var nextCoverKey = null;
   var listeners = [];
+  // 队列折叠是纯表现层偏好：只记一个开关，不动队列数据本身。
+  var QUEUE_COLLAPSED_KEY = 'vmusic.skin.orbit.queue.collapsed';
 
   function byId(id) { return document.getElementById(id); }
   function make(tag, cls, parent, text) {
@@ -38,6 +40,28 @@
   function navigate(view) {
     var entry = document.querySelector('.rail-item[data-view="' + view + '"]');
     if (entry) entry.click();
+  }
+
+  /// 队列折叠：只在 .app 上落一个类名 + 维护按钮 aria，队列数据与播放逻辑不参与。
+  /// 收起后侧栏留一条窄轨（封面 + 纵向「播放队列 N 首」+ 展开），窄屏本来就隐藏整栏。
+  function queueCollapsed() {
+    var app = document.querySelector('.app');
+    return !!app && app.classList.contains('orbit-queue-collapsed');
+  }
+
+  function setQueueCollapsed(on) {
+    var app = document.querySelector('.app');
+    if (app) app.classList.toggle('orbit-queue-collapsed', !!on);
+    if (refs.queueCollapse) {
+      refs.queueCollapse.setAttribute('aria-expanded', String(!on));
+      refs.queueCollapse.title = on ? '展开播放队列' : '收起播放队列';
+      refs.queueCollapse.setAttribute('aria-label', refs.queueCollapse.title);
+    }
+    try { localStorage.setItem(QUEUE_COLLAPSED_KEY, on ? '1' : '0'); } catch (e) {}
+  }
+
+  function storedQueueCollapsed() {
+    try { return localStorage.getItem(QUEUE_COLLAPSED_KEY) === '1'; } catch (e) { return false; }
   }
 
   function sync() {
@@ -260,11 +284,18 @@
     listen(refs.turntable, 'pointercancel', resetTilt);
 
     var sidebar = make('aside', 'orbit-queue', app);
+    sidebar.id = 'orbit-queue';
     sidebar.setAttribute('aria-label', '播放队列');
     var heading = make('div', 'orbit-queue-heading', sidebar);
     make('h2', '', heading, '播放队列');
     refs.queueCount = make('span', 'count', heading);
     refs.queueOpen = button(heading, 'orbit-queue-open', 'iconbtn', '查看完整队列', 'expand', function () { navigate('queue'); });
+    refs.queueCollapse = button(heading, 'orbit-queue-collapse', 'iconbtn orbit-queue-collapse', '收起播放队列', 'chevron-down', function () {
+      setQueueCollapsed(!queueCollapsed());
+    });
+    heading.insertBefore(refs.queueCollapse, refs.queueOpen);
+    refs.queueCollapse.setAttribute('aria-controls', 'orbit-queue');
+    refs.queueCollapse.setAttribute('aria-expanded', 'true');
     var current = make('div', 'orbit-current', sidebar);
     var currentArt = make('div', 'orbit-current-art', current);
     currentArt.innerHTML = icon('disc');
@@ -299,6 +330,7 @@
     listen(document, 'stage:playing-changed', sync);
     listen(document, 'visibilitychange', resetTilt);
     if (window.SkinSettingsSheet) window.SkinSettingsSheet.mount();
+    setQueueCollapsed(storedQueueCollapsed());
     sync();
   }
 
@@ -311,7 +343,7 @@
     listeners = [];
     if (window.SkinSettingsSheet) window.SkinSettingsSheet.unmount();
     var app = document.querySelector('.app');
-    if (app) app.classList.remove('orbit-nav-hidden');
+    if (app) app.classList.remove('orbit-nav-hidden', 'orbit-queue-collapsed');
     resetTilt();
     moves.restore();
     built.remove();

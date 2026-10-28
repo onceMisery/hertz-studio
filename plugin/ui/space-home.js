@@ -102,9 +102,7 @@
     el.nextUp = root.querySelector('.sh-next-up');
     bindDepthTilt(el.nextUp);
     if (callbacks.chromeRoot) { callbacks.chromeRoot.append(el.searchDock, el.panelLayer); }
-    el.search.addEventListener('submit', function (event) {
-      event.preventDefault(); search(true);
-    });
+    window.hertzHost.onSubmit(el.search, function () { search(true); });
     el.query.addEventListener('focus', function () {
       if (restoringSearchFocus) return;
       el.searchDock.classList.add('is-expanded'); buildSearchModes();
@@ -299,7 +297,7 @@
     if (spec.kind === 'library' && spec.source === 'online') {
       var form = node('form', 'sh-inline-search'), input = node('input'); input.type = 'search'; input.placeholder = '搜索在线音乐'; input.setAttribute('aria-label', '搜索在线音乐'); input.value = spec.q || '';
       var submit = button('搜索', 'search', function () {}); submit.type = 'submit'; form.append(input, submit);
-      form.addEventListener('submit', function (event) { event.preventDefault(); open({ kind: 'library', source: 'online', provider: select.value, q: input.value.trim(), offset: 0 }); }); el.panelControls.appendChild(form);
+      window.hertzHost.onSubmit(form, function () { open({ kind: 'library', source: 'online', provider: select.value, q: input.value.trim(), offset: 0 }); }); el.panelControls.appendChild(form);
     }
     if (spec.kind === 'playlist') {
       var detail = node('div', 'sh-playlist-summary'); detail.appendChild(art(spec.playlist, true));

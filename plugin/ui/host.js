@@ -176,6 +176,59 @@
   var shim = native ? null : installStorageShim();
 
   // -------------------------------------------------------------------------
+  // 表单提交
+  // -------------------------------------------------------------------------
+
+  /// 绑一个表单的提交动作，返回实际执行的那个函数（调用方拿它当 onsubmit 用）。
+  ///
+  /// DBX 的插件 iframe 是 sandbox="allow-scripts"，**没有 allow-forms**：浏览器
+  /// 不把表单当一次提交处理，`submit` 事件根本不会派发——真鼠标点 submit 按钮、
+  /// 输入框里按 Enter、连 `form.requestSubmit()` 都一样被吞（实测见下）。只挂
+  /// `submit` 的表单在插件里就是一颗死按钮：订阅、搜索、发弹幕全都不出声。
+  ///
+  /// 所以这里自己走两条等价触发路径：表单内的 submit 按钮点击 + 输入框里的 Enter。
+  /// 两条都先 `preventDefault()` 掐掉原生提交，独立形态也只会被叫一次，不会和
+  /// `submit` 事件重复执行。
+  ///
+  /// 原生提交顺带做的约束校验也得自己补上，否则 `<input type="url" required>`
+  /// 在插件形态里形同虚设。
+  function onSubmit(form, handler) {
+    function run(event) {
+      if (typeof form.checkValidity === 'function' && !form.checkValidity()) {
+        if (typeof form.reportValidity === 'function') form.reportValidity();
+        return undefined;
+      }
+      return handler(event);
+    }
+    form.onsubmit = function (event) {
+      if (event && typeof event.preventDefault === 'function') event.preventDefault();
+      return run(event);
+    };
+    form.addEventListener('click', function (event) {
+      var trigger = event.target && event.target.closest
+        ? event.target.closest('button,input[type=submit],input[type=image]')
+        : null;
+      if (!trigger || trigger.disabled || trigger.form !== form) return undefined;
+      if (trigger.type !== 'submit') return undefined;
+      event.preventDefault();
+      run(event);
+      return undefined;
+    });
+    form.addEventListener('keydown', function (event) {
+      if (event.key !== 'Enter' || !event.isTrusted) return undefined;
+      var field = event.target;
+      if (!field || field.form !== form || field.disabled) return undefined;
+      // textarea 的 Enter 是换行；按钮和勾选态自己会走 click 那条路。
+      if (field.tagName !== 'INPUT') return undefined;
+      if (/^(checkbox|radio|button|submit|image|file|range|color)$/.test(field.type)) return undefined;
+      event.preventDefault();
+      run(event);
+      return undefined;
+    });
+    return run;
+  }
+
+  // -------------------------------------------------------------------------
   // 对外
   // -------------------------------------------------------------------------
 
@@ -184,6 +237,7 @@
     isDbx: !!dbx,
     dbx: dbx,
     assetUrl: assetUrl,
+    onSubmit: onSubmit,
     /// 原生 localStorage 不可用时装了替身，需要先 hydrate 再让界面读偏好。
     needsHydrate: !!shim,
     hydrate: function () {

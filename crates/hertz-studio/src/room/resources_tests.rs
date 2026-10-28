@@ -580,6 +580,30 @@ async fn cover_pages_are_immutable_revision_bound_and_cursor_checked() {
 }
 
 #[tokio::test]
+async fn gif_cover_cache_uses_the_same_authorized_resource_reader() {
+    let f = Fixture::new().await;
+    let library = SharedLibrary::default();
+    let track = f.track("gif-cover").await;
+    let id = f.share(&library, &[&track.id]).await[0].resource_id;
+    let gif = b"GIF89a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\xff\xff\xff\x21\xf9\x04\x01\x00\x00\x00\x00\x2c\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02\x44\x01\x00\x3b";
+    tokio::fs::write(f.state.cover_dir().join(format!("{}.gif", track.id)), gif)
+        .await
+        .unwrap();
+    let cover = library
+        .read(&f.state, id, ResourceKind::Cover, 0, None)
+        .await
+        .unwrap();
+    assert_eq!(cover.mime, "image/gif");
+    assert_eq!(decoded(&cover), gif);
+    f.share(&library, &[]).await;
+    assert!(library
+        .read(&f.state, id, ResourceKind::Cover, 0, None)
+        .await
+        .is_err());
+    f.finish().await;
+}
+
+#[tokio::test]
 async fn expired_or_revoked_snapshots_are_never_served() {
     let f = Fixture::new().await;
     let library = SharedLibrary::default();

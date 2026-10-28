@@ -128,6 +128,9 @@ struct Owner {
     endpoints: HashMap<Uuid, Endpoint>,
     next_endpoint: u32,
     local: Option<ReceiverHandle>,
+    // Only epochs announced to this native receiver may enter its PCM FIFO.
+    // A shared producer may run while this output is warming up or rejoining.
+    local_pcm_epochs: HashSet<u64>,
     local_identity: StreamIdentity,
     local_events: mpsc::Receiver<ReceiverEvent>,
     receiver_registry: ReceiverRegistry,
@@ -341,6 +344,7 @@ pub(crate) async fn start(
         endpoints: HashMap::new(),
         next_endpoint: 1,
         local,
+        local_pcm_epochs: HashSet::new(),
         local_identity,
         local_events,
         receiver_registry: lease.receiver.clone(),
@@ -690,6 +694,7 @@ impl Owner {
                 }
                 self.output_preparing = true;
                 self.local.take();
+                self.local_pcm_epochs.clear();
                 self.endpoints.remove(&OWNER);
                 let options = output_options(&settings, &self.clock, self.format.sample_rate);
                 let clock = self.clock.clone();
@@ -1009,7 +1014,10 @@ impl Owner {
                     Ok(source) => self.send_successor(epoch, Some(source), self.crossfade_ms)?,
                     Err(e) => {
                         self.successor_targets.remove(&epoch);
-                        self.error = Some(e.message);
+                        // This is speculative work for the next track. The
+                        // current source is still playing; a real Next request
+                        // will retry through Source and report its own failure.
+                        tracing::warn!(epoch, code = e.code, message = %e.message, "room successor preparation failed");
                         self.send_successor(epoch, None, 0)?;
                     }
                 }
@@ -1151,6 +1159,8 @@ impl Owner {
             self.scheduled.as_ref().map(|a| a.plan.epoch.0),
             self.audible.as_ref().map(|a| a.plan.epoch.0),
         ];
+        self.local_pcm_epochs
+            .retain(|epoch| epochs.contains(&Some(*epoch)));
         self.render_heads
             .retain(|epoch, _| epochs.contains(&Some(*epoch)));
         self.rendered_until
@@ -1587,6 +1597,9 @@ impl Owner {
         }
     }
     fn resync(&mut self, member: Uuid) -> RoomResult<()> {
+        if member == OWNER {
+            self.local_pcm_epochs.clear();
+        }
         // A receiver has discarded this prefix. Keep its old plan as a token
         // fence until the shared candidate commits or expires; re-sending its
         // frame-zero Prepare cannot recover PCM that has already been sent.
@@ -1695,7 +1708,10 @@ impl Owner {
         endpoint.plan = Some(plan.clone());
         endpoint.committed = false;
         endpoint.ready = false;
-        self.send_plan_frame(member, &ControlFrame::Prepare { plan })?;
+        let epoch = plan.epoch.0;
+        if self.send_plan_frame(member, &ControlFrame::Prepare { plan })? && member == OWNER {
+            self.local_pcm_epochs.insert(epoch);
+        }
         Ok(())
     }
     fn join_commit(&mut self, member: Uuid, epoch: u64, plan_id: u64) -> RoomResult<()> {
@@ -1912,7 +1928,11 @@ impl Owner {
                     .transport
                     .broadcast_pcm(epoch, sequence, frame, format, samples.clone())
                     .map_err(transport_error)?;
-                if let Some(local) = &self.local {
+                if let Some(local) = self
+                    .local
+                    .as_ref()
+                    .filter(|_| self.local_pcm_epochs.contains(&epoch))
+                {
                     let _ = local.pcm(PcmBlock {
                         identity: self.local_identity,
                         epoch,
@@ -1971,11 +1991,15 @@ impl Owner {
                 stage,
                 message,
             } => {
-                self.error = Some(message.clone());
+                if self.epoch_plan(epoch).is_none() {
+                    return Ok(());
+                }
                 if matches!(stage, FailureStage::Successor) {
+                    tracing::warn!(epoch, %message, "room successor decode failed");
                     self.send_successor(epoch, None, 0)?;
                     return Ok(());
                 }
+                self.error = Some(message.clone());
                 if let Some(change) = self.mixer.pending.as_ref().map(|p| p.id) {
                     self.mixer.fail(change, message.clone());
                 }
@@ -2008,6 +2032,7 @@ impl Owner {
     /// A dead renderer or an empty output lease cannot acknowledge another
     /// future plan. Install the terminal fact immediately and invalidate audio.
     fn halt_presentation(&mut self, reason: &str) -> RoomResult<()> {
+        self.local_pcm_epochs.clear();
         self.broadcast(&ControlFrame::Resync {
             reason: "presentation_halted".into(),
         });
@@ -3520,6 +3545,7 @@ pub(super) mod join_retry_tests {
             endpoints: HashMap::new(),
             next_endpoint: 1,
             local: None,
+            local_pcm_epochs: HashSet::new(),
             local_identity: StreamIdentity {
                 room_id: room,
                 instance_id: instance,
@@ -3559,6 +3585,181 @@ pub(super) mod join_retry_tests {
         owner.server.shutdown().await;
         owner.state.audio.shutdown();
         audio.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn local_output_waits_for_its_plan_while_members_join() {
+        let (mut owner, audio, _render, _inbound) = playing_owner().await;
+        let (handle, mut receiver) = receiver::tests::HostReceiver::new(owner.local_identity);
+        owner.local = Some(handle);
+        owner.join(OWNER).unwrap(); // The local output clock is still warming.
+        let member = Uuid::new_v4();
+        let identity = StreamIdentity {
+            session_id: Uuid::new_v4(),
+            ..owner.local_identity
+        };
+        owner
+            .network(Inbound::Connected {
+                member_id: member,
+                identity,
+            })
+            .await
+            .unwrap();
+        owner
+            .network(Inbound::AudioAttached {
+                member_id: member,
+                identity,
+            })
+            .await
+            .unwrap();
+        owner
+            .render(ProducerEvent::Pcm {
+                epoch: 1,
+                sequence: 0,
+                frame: 0,
+                format: owner.format,
+                samples: vec![0.5; 960 * 2].into(),
+            })
+            .await
+            .unwrap();
+        let (status, events) = receiver.step(0, false);
+        assert!(events.is_empty());
+        assert_eq!(
+            status.buffered_input_frames, 0,
+            "unannounced local PCM must not wait for a plan"
+        );
+        let (status, events) = receiver.step(600_000_000, false);
+        assert!(events.is_empty());
+        assert_eq!(status.resync_count, 0);
+        assert!(owner.audible.as_ref().unwrap().target.playing);
+        assert!(owner.error.is_none());
+
+        // Warmup completes: a future local Prepare must still admit the PCM
+        // needed for Ready, without waiting for Commit (which depends on Ready).
+        receiver.step(600_000_000, true);
+        owner.join(OWNER).unwrap();
+        let plan = owner.endpoints[&OWNER].plan.clone().unwrap();
+        let start = Owner::time(&plan, plan.join_frame.0).unwrap();
+        receiver.step(600_000_000, true);
+        for sequence in 1..=20 {
+            owner
+                .render(ProducerEvent::Pcm {
+                    epoch: 1,
+                    sequence,
+                    frame: plan.join_frame.0 - 960 + (sequence - 1) * 960,
+                    format: owner.format,
+                    samples: vec![0.5; 960 * 2].into(),
+                })
+                .await
+                .unwrap();
+            let (_, events) = receiver.step(600_000_000, true);
+            for event in events {
+                owner.local_event(event).await.unwrap();
+            }
+        }
+        assert!(owner.endpoints[&OWNER].committed);
+        let (status, events) = receiver.step(start + 20_000_000, true);
+        assert!(events.is_empty(), "{events:?}");
+        assert_eq!(status.current_epoch, Some(1));
+        assert!(receiver.render(start, 1920).iter().any(|v| *v > 0.4));
+
+        // A second member joins an already audible host. Its warmup/resync
+        // must neither revoke the local plan nor mute the native output.
+        let second = Uuid::new_v4();
+        let second_identity = StreamIdentity {
+            session_id: Uuid::new_v4(),
+            ..identity
+        };
+        owner
+            .network(Inbound::Connected {
+                member_id: second,
+                identity: second_identity,
+            })
+            .await
+            .unwrap();
+        owner
+            .network(Inbound::AudioAttached {
+                member_id: second,
+                identity: second_identity,
+            })
+            .await
+            .unwrap();
+        owner.resync(second).unwrap();
+        assert!(owner.local_pcm_epochs.contains(&1));
+        let (status, events) = receiver.step(start + 40_000_000, true);
+        assert!(events.is_empty(), "{events:?}");
+        assert_eq!(status.current_epoch, Some(1));
+        assert_eq!(status.resync_count, 0);
+        assert!(receiver
+            .render(start + 40_000_000, 480)
+            .iter()
+            .all(|v| *v > 0.4));
+        assert!(owner.audible.as_ref().unwrap().target.playing);
+        assert!(owner.error.is_none());
+
+        // Local recovery revokes only the local ingress while retries wait.
+        owner
+            .endpoints
+            .get_mut(&OWNER)
+            .unwrap()
+            .rejoin
+            .not_before_ns = u64::MAX;
+        owner.resync(OWNER).unwrap();
+        assert!(owner.local_pcm_epochs.is_empty());
+        finish_owner(owner, audio).await;
+    }
+
+    #[tokio::test]
+    async fn successor_failure_does_not_report_current_playback_failed() {
+        let (mut owner, audio, _render, _inbound) = playing_owner().await;
+        let desired = SuccessorTarget {
+            current: 1,
+            next: 2,
+        };
+        owner.successor_targets.insert(1, desired);
+        owner.successor_tokens.insert(1, 1);
+        owner
+            .complete(Completion::Successor {
+                epoch: 1,
+                current: 1,
+                token: 1,
+                library_revision: owner.library.revision().await,
+                result: Err(RoomError::new("upstream_rejected", "在线歌曲获取失败")),
+            })
+            .await
+            .unwrap();
+        assert!(owner.error.is_none());
+        assert!(owner.audible.as_ref().unwrap().target.playing);
+        assert!(!owner.successor_targets.contains_key(&1));
+        assert_eq!(owner.pending_successors[&1].back(), Some(&None));
+        owner
+            .render(ProducerEvent::Error {
+                epoch: 1,
+                stage: FailureStage::Successor,
+                message: "下一首解码失败".into(),
+            })
+            .await
+            .unwrap();
+        assert!(owner.error.is_none());
+        owner
+            .render(ProducerEvent::Error {
+                epoch: 99,
+                stage: FailureStage::Render,
+                message: "旧播放错误".into(),
+            })
+            .await
+            .unwrap();
+        assert!(owner.error.is_none());
+        owner
+            .render(ProducerEvent::Error {
+                epoch: 1,
+                stage: FailureStage::Render,
+                message: "当前播放错误".into(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(owner.error.as_deref(), Some("当前播放错误"));
+        finish_owner(owner, audio).await;
     }
 
     #[tokio::test]

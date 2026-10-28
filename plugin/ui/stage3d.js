@@ -1881,7 +1881,7 @@
   }
 
   function controlTarget(e) {
-    return e.target && e.target.closest && e.target.closest('button, a, input, select, textarea, summary, .room-stage-composer-dock, [contenteditable], [role="button"], #s3d-settings, .s3d-queue-panel, #s3d-reading, #s3d-stanza');
+    return e.target && e.target.closest && e.target.closest('button, a, input, select, textarea, summary, .room-stage-composer-dock, .room-stage-chat-panel, [contenteditable], [role="button"], #s3d-settings, .s3d-queue-panel, #s3d-reading, #s3d-stanza');
   }
 
   function cancelGestures() {

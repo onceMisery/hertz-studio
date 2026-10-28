@@ -97,6 +97,7 @@ async function main() {
         async del(url) { calls.push(['DELETE', url]); subscribed = subscribed.filter(s => !url.endsWith('/' + s.id)); return { ok: true }; },
       };
     });
+    await page.addScriptTag({ content: read('host.js') });
     await page.addScriptTag({ content: read('podcasts.js') });
     await page.evaluate(() => {
       document.getElementById('view-podcasts').hidden = false;
@@ -291,12 +292,14 @@ async function main() {
     assert.equal(await page.locator('#podcast-country').inputValue(), 'GB', 'search failure preserves selected region');
     await page.reload();
     await page.setContent(html.slice(start, end));
+    await page.addScriptTag({ content: read('host.js') });
     await page.addScriptTag({ content: read('podcasts.js') });
     await page.evaluate(() => Podcasts.bind({ play() {} }));
     assert.equal(await page.locator('#podcast-country').inputValue(), 'GB', 'region survives a page reload');
     await page.evaluate(() => localStorage.setItem('hertz.podcasts.country', 'ZZ'));
     await page.reload();
     await page.setContent(html.slice(start, end));
+    await page.addScriptTag({ content: read('host.js') });
     await page.addScriptTag({ content: read('podcasts.js') });
     await page.evaluate(() => Podcasts.bind({ play() {} }));
     assert.equal(await page.locator('#podcast-country').inputValue(), 'CN', 'obsolete saved region uses default');

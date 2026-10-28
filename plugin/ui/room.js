@@ -8,6 +8,7 @@
   let libraryQuery = '', libraryTotal = 0, libraryGeneration = 0;
   let rememberedNickname = '', preferenceWrite = Promise.resolve(), admissionChecking = false, unreadChat = 0;
   let startDraft = null, startDraftAdding = false;
+  let listeningSession = null, lastSummary = null, recentSessions = [], rememberedAvatar = '', leaving = false, leavingSummary = true;
   let libraryPage = 0, queuePage = 0, lastChatId = '', historyRevision = '', messages = [];
   let chatBefore = null, chatHasMore = false, chatBrowsing = false, chatLoading = null;
   let chatSharingRevision = '', chatHistorySharingRevision = '';
@@ -15,6 +16,7 @@
   let roomProfileKey = '', roomProfileCover = null, roomProfileLoaded = false, roomProfileLoading = null, roomProfileRetryAt = 0;
   const selection = new Set(), metadata = new Map(), refs = {}, pageSize = 32;
   let favoriteSignature = '', queueSignature = "", librarySignature = "", memberSignature = "", resourceKey = "", resourceSignature = "", coverUrl = "", lyrics = [], resourceGeneration = 0, chatUnknown = null, chatSending = null, chatSongPending = null, chatReceipt = null;
+  let coverRead = null, lyricState = 'empty';
   const h = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = String(text); return e; };
   function button(text, fn, cls) { const e = h('button', 'btn ' + (cls || ''), text); e.type = 'button'; e.onclick = () => run(fn); return e; }
   function field(parent, label, type, value) { const l = h('label', 'room-field', label), e = h(type === 'textarea' ? 'textarea' : 'input'); if (type !== 'textarea') e.type = type; e.value = value == null ? '' : value; l.append(e); parent.append(l); return e; }
@@ -27,20 +29,51 @@
   function current(key) { return !!root && key === mountedSession && key === sessionKey(); }
   function uncertain(error) { return !error.status || /timeout|unknown|connection|network/i.test(error.code || error.message || ''); }
   async function command(body) { return transport.post('/v1/room', body, { retry: false }); }
+  function observeSession(value) {
+    if (value.mode === 'local') return;
+    const owner = [value.room_id, value.instance_id, value.member_id].join(':');
+    if (!listeningSession || listeningSession.owner !== owner) {
+      listeningSession = { owner, name: value.name || '音乐房间', startedAt: Date.now(), members: new Map(), tracks: [], seen: new Set(), mode: value.mode };
+      lastSummary = null;
+    }
+    const session = listeningSession;
+    session.name = value.name || session.name;
+    if (['host', 'guest'].includes(value.mode)) session.mode = value.mode;
+    if (Number.isFinite(Number(value.elapsed_ms)) && value.elapsed_ms != null) session.elapsed_ms = Number(value.elapsed_ms);
+    (value.members || []).slice(0, 64).forEach(member => { if (session.members.has(member.id) || session.members.size < 64) session.members.set(member.id, { id: member.id, name: String(member.name || '成员').slice(0, 128), owner: !!member.owner, avatar: member.id === value.member_id ? rememberedAvatar : member.avatar || '' }); });
+    const track = value.current_track, instance = value.track_instance_id;
+    if (track && value.playing && instance && !session.seen.has(instance) && session.tracks.length < 2000) {
+      session.seen.add(instance); session.tracks.push({ title: String(track.title || '共享歌曲').slice(0, 256), artist: String(track.artist || '').slice(0, 128), duration_ms: Number(track.duration_ms) || 0 });
+    }
+  }
+  function sessionSummary(reason) {
+    if (!listeningSession) return null;
+    const session = listeningSession;
+    return { name: session.name, reason, mode: session.mode, endedAt: Date.now(), elapsed_ms: session.elapsed_ms ?? Math.max(0, Date.now() - session.startedAt), members: [...session.members.values()], tracks: [...session.tracks] };
+  }
+  function finishSession(reason, showSummary = true) {
+    const result = sessionSummary(reason); if (!result) return;
+    lastSummary = showSummary ? result : null; listeningSession = null;
+    recentSessions = [result, ...recentSessions].slice(0, 8);
+    try { global.localStorage.setItem('hertz.room.history.v1', JSON.stringify(recentSessions.map(record => ({ ...record, track_count: record.track_count || record.tracks.length, tracks: record.tracks.slice(0, 100) })))); } catch (_) { /* In-memory history remains usable in restricted hosts. */ }
+  }
   async function leaveRoom() {
     const key = sessionKey(), host = snap.mode === 'host';
     if (snap.mode === 'local') return;
-    if (!await confirmAction(host ? '结束并退出房间？房间将结束，所有成员将停止收听。' : '退出当前房间？只会断开你的连接，其他成员可继续收听。') || !current(key)) return { cancelled: true };
+    const choice = await workspace.confirmLeave(snap, sessionSummary());
+    if (!choice || !current(key)) return { cancelled: true };
     const actions = Array.from(root.querySelectorAll('.room-leave')); actions.forEach(node => { node.disabled = true; });
     try {
+      leaving = true; leavingSummary = choice.showSummary !== false;
       const result = await command({ action: 'leave' });
       if (!current(key)) return;
       if (!result || result.mode !== 'local') throw new Error('服务尚未确认退出，请检查房间状态后重试。');
       resetChat(); selection.clear();
+      finishSession(host ? 'ended' : 'left', leavingSummary);
       applySnapshot(result, true);
-      workspace.navigate('lobby');
+      workspace.navigate(leavingSummary ? 'summary' : 'lobby');
       status(host ? '房间已结束。' : '已退出房间。');
-    } finally { actions.forEach(node => { node.disabled = false; }); }
+    } finally { leaving = false; leavingSummary = true; actions.forEach(node => { node.disabled = false; }); }
   }
   async function peer(request) { return command({ action: 'peer', request }); }
   function requireConnectedRoom() { if (snap.mode !== 'host' && snap.mode !== 'guest') throw Object.assign(new Error('房间连接尚未恢复，请先等待连接。'), { code: 'room_not_connected', status: 409 }); }
@@ -168,6 +201,16 @@
       },
       markChatRead() { unreadChat = 0; if (refs.chatTab) refs.chatTab.textContent = '聊天'; },
       nickname: () => rememberedNickname,
+      avatar: () => rememberedAvatar,
+      rememberAvatar(value) { rememberedAvatar = ['disc', 'phones', 'heart', 'radio', 'queue', 'crown', 'user', 'play'].includes(value) ? value : ''; try { global.localStorage.setItem('hertz.room.avatar.v1', rememberedAvatar); } catch (_) {} },
+      recentSessions: () => recentSessions,
+      summary: () => lastSummary,
+      application: () => admissionRequest,
+      exportSummary() {
+        if (!lastSummary) throw new Error('当前没有可保存的收听小结');
+        const url = URL.createObjectURL(new Blob([JSON.stringify(lastSummary, null, 2)], { type: 'application/json;charset=utf-8' }));
+        const link = h('a'); link.href = url; link.download = 'Hertz-收听小结.json'; root.append(link); link.click(); link.remove(); global.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      },
       rememberNickname(value) {
         rememberedNickname = value;
         if (typeof transport.put === 'function') preferenceWrite = preferenceWrite.catch(() => {}).then(() => transport.put('/v1/settings', { room_nickname: value })).catch(() => status('昵称本次可用，但未能保存到本机设置。', true));
@@ -236,17 +279,13 @@
         const key = sessionKey(), target = id || invitationId;
         if (!target) throw new Error('当前没有可撤销的邀请');
         const result = await (snap.mode === 'host' ? command({ action: 'revoke_invitation', invitation_id: target }) : peer({ action: 'revoke_invitation', invitation_id: target }));
+        if (current(key)) view.invitationRevoked(target);
         if (current(key) && target === invitationId) { invitationId = ''; invitationExpires = 0; refs.invitation.value = ''; refs.invitationQr.replaceChildren(); refs.invitationExpiry.textContent = '邀请已撤销'; refs.revokeInvitation.disabled = true; }
         return result;
       },
       async setDiscoverable(enabled) { try { return await command({ action: 'discoverable', enabled }); } catch (error) { if (refs.discoverable) refs.discoverable.checked = snap.discoverable !== false; throw error; } },
       attachFavorite,
-      appendCurrentSong() { if (!snap.current_track) throw new Error('当前没有共享歌曲'); return appendResource(snap.current_track.resource_id); },
       shareSong(resource) { return shareSong(resource); },
-      shareCurrentSong() {
-        if (!snap.current_track) throw new Error('当前没有共享歌曲');
-        return shareSong(snap.current_track.resource_id);
-      },
       invitationGenerated(value, id, expiresInSeconds) {
         if (!value) throw new Error('服务未返回有效邀请');
         invitationExpires = Date.now() + Math.min(300, Math.max(1, Number(expiresInSeconds) || 300)) * 1000;
@@ -359,6 +398,7 @@
   function renderChatMessages() {
     const key = sessionKey();
     refs.chat.replaceChildren(); messages.forEach(m => { const e = h('li'); view.drawMessage(m, e); if (snap.mode === 'host') e.append(button('删除', async () => { if (!current(key) || !await confirmAction('删除这条聊天消息？') || !current(key)) return; await command({ action: 'chat_admin', command: { action: 'delete', message_id: m.message_id } }); if (!current(key)) return; resetChat(); await loadChat(); })); refs.chat.append(e); });
+    if (refs.stageChatLog && refs.stageChatPanel && !refs.stageChatPanel.hidden) refs.stageChatLog.scrollTop = refs.stageChatLog.scrollHeight;
   }
   function metric(label, value) { refs.metrics.append(h('dt', '', label), h('dd', 'room-mono', value == null ? '待测量' : value)); }
   function drawRoomProfile() {
@@ -394,8 +434,7 @@
     refs.progress.disabled = !p.transport || !duration || !connected || !!playbackBlocked;
     refs.playingBadge.textContent = snap.pending && !snap.pending.prepared ? '正在准备歌曲' : snap.playing ? '正在播放' : track ? '已暂停' : '等待共享歌曲';
     refs.album.textContent = track && track.album || ''; refs.album.hidden = !refs.album.textContent;
-    refs.quickMode.textContent = { repeat: '列表循环', repeat_one: '单曲循环', shuffle: '随机播放' }[snap.play_mode] || '列表循环'; refs.quickMode.disabled = !p.queue;
-    refs.songAppend.disabled = !track || !p.queue; refs.songShare.disabled = !track || !p.chat_send;
+    view.updatePlayMode(snap.play_mode); refs.quickMode.disabled = !p.queue;
     if (refs.refreshSongPicker) refs.refreshSongPicker();
     refs.guestInvite.hidden = host || !!p.invite; refs.invitePerms.hidden = !host; refs.activeRoomName.textContent = snap.name || '一起听房间';
     refs.queueCount.textContent = Number(snap.queue_count || 0) + ' 首歌曲';
@@ -403,14 +442,6 @@
     refs.orderControl.hidden = !host || !snap.collaboration; refs.order.value = snap.collaboration && snap.collaboration.queue_order || 'manual';
     view.drawActivity(snap.collaboration && snap.collaboration.activity || []);
     view.drawAdmissions(snap.admission);
-    const applications = host && snap.admission ? (snap.admission.pending || []).filter(application => application.state === 'pending') : [];
-    if (refs.admissionAlert) {
-      const signature = applications.map(application => application.id).join(':');
-      if (refs.admissionAlert.dataset.signature !== signature) { refs.admissionAlert.dataset.signature = signature; refs.admissionAlert.replaceChildren();
-        if (applications.length) refs.admissionAlert.append(h('span', '', applications.length === 1 ? applications[0].name + ' 申请加入一起听' : applications.length + ' 位朋友申请加入一起听'), button('查看申请', () => view.selectTab('members')));
-      }
-      refs.admissionAlert.hidden = !applications.length;
-    }
     view.drawInvitationManagement();
     drawRoomProfile();
     if (invitationId && Array.isArray(snap.invitations) && !snap.invitations.some(invite => invite.id === invitationId)) {
@@ -442,7 +473,8 @@
     const libraryKey = [snap.sharing_revision || snap.revision, snap.mode, !!queuePending, !!p.queue, !!p.chat_send].join(':');
     if (libraryKey !== librarySignature) { librarySignature = libraryKey; loadLibrary().catch(e => { if (current(key) && librarySignature === libraryKey) { librarySignature = ''; if (e.code !== 'revision_conflict') status(e.message, true); } }); if (host) loadSharedOnline().catch(e => { if (current(key) && e.code !== 'revision_conflict') status(e.message, true); }); }
     revision = snap.revision;
-    const members = JSON.stringify(snap.members || []); if (members !== memberSignature) { memberSignature = members; view.drawMembers(); }
+    const members = JSON.stringify([snap.mode, rememberedAvatar, snap.members || []]); if (members !== memberSignature) { memberSignature = members; view.drawMembers(); }
+    view.drawWaiting(); view.drawConnection();
     updateResources(track);
     syncStage();
     if (snap.error || snap.local_error) status(snap.local_error || snap.error, true);
@@ -715,16 +747,37 @@
     const signature = JSON.stringify([id, snap.sharing_revision || '', !!(track && track.has_cover)]);
     // A shared resource UUID survives re-sharing and cover replacement. Bind
     // each fetch generation to its authorized sharing projection as well.
-    if (resourceSignature !== signature) { resourceSignature = signature; resourceKey = id; const generation = ++resourceGeneration; lyrics = []; lyricDoc = null; refs.lyrics.replaceChildren(); delete refs.lyrics.dataset.key; refs.cover.hidden = true; if (coverUrl) URL.revokeObjectURL(coverUrl); coverUrl = '';
-      if (id) { if (track.has_cover) resource(id, 'cover').then(blob => { if (generation !== resourceGeneration) return; coverUrl = URL.createObjectURL(blob); refs.cover.src = coverUrl; refs.cover.hidden = false; syncStage(); }).catch(() => {});
-        resource(id, 'lyrics').then(blob => blob.text()).then(text => { if (generation !== resourceGeneration) return; const doc = JSON.parse(text); lyricDoc = doc; lyrics = Array.isArray(doc.lines) ? doc.lines : []; delete refs.lyrics.dataset.key; drawLyrics(); syncStage(); }).catch(() => {}); }
+    if (resourceSignature !== signature) { resourceSignature = signature; resourceKey = id; const generation = ++resourceGeneration; lyrics = []; lyricDoc = null; lyricState = id ? 'loading' : 'empty'; refs.lyrics.replaceChildren(); delete refs.lyrics.dataset.key; refs.cover.hidden = true; if (coverUrl) URL.revokeObjectURL(coverUrl); coverUrl = '';
+      coverRead = { generation, attempts: 0, pending: false, retryAt: 0 };
+      if (id) {
+        resource(id, 'lyrics').then(blob => blob.text()).then(text => { if (generation !== resourceGeneration) return; const doc = JSON.parse(text); lyricDoc = doc; lyrics = Array.isArray(doc.lines) ? doc.lines : []; lyricState = lyrics.length ? 'ready' : 'empty'; drawLyrics(); syncStage(); }).catch(() => { if (generation === resourceGeneration) { lyricState = 'error'; drawLyrics(); } }); }
     }
+    // A transient peer/CDN failure must not leave artwork blank for the
+    // remainder of a track. Retries are bounded and revoked with the read owner.
+    if (id && track.has_cover && !coverUrl && coverRead && coverRead.generation === resourceGeneration && !coverRead.pending && coverRead.attempts < 3 && Date.now() >= coverRead.retryAt) {
+      const read = coverRead; read.pending = true; read.attempts++;
+      resource(id, 'cover').then(blob => {
+        if (read.generation !== resourceGeneration) return;
+        const url = URL.createObjectURL(blob); coverUrl = url;
+        refs.cover.alt = [track.title, track.artist].filter(Boolean).join(' · ') + '的封面';
+        refs.cover.onerror = () => {
+          if (read.generation !== resourceGeneration || coverUrl !== url) return;
+          refs.cover.hidden = true; URL.revokeObjectURL(url); coverUrl = ''; read.retryAt = Date.now() + read.attempts * 3000; syncStage();
+        };
+        refs.cover.src = url; refs.cover.hidden = false; syncStage();
+      }).catch(() => { read.retryAt = Date.now() + read.attempts * 3000; }).finally(() => { read.pending = false; });
+    }
+    refs.drawLyrics = drawLyrics;
     drawLyrics();
   }
   function drawLyrics() {
     const position = Number(snap.position_ms || 0); let index = 0; while (index + 1 < lyrics.length && lyrics[index + 1].start_ms <= position) index++;
-    const key = resourceKey + ':' + resourceGeneration + ':' + index; if (refs.lyrics.dataset.key === key) return; refs.lyrics.dataset.key = key; refs.lyrics.replaceChildren();
-    lyrics.slice(Math.max(0, index - 1), index + 3).forEach(line => refs.lyrics.append(h('p', line === lyrics[index] ? 'active' : '', line.text)));
+    const expanded = refs.playerScene.dataset.lyricsExpanded === 'true';
+    const count = Math.max(3, Math.min(13, Math.floor((refs.lyrics.clientHeight || (expanded ? 300 : 156)) / (expanded ? 36 : 28))));
+    const key = [resourceKey, resourceGeneration, index, expanded, count, lyricState].join(':'); if (refs.lyrics.dataset.key === key) return; refs.lyrics.dataset.key = key; refs.lyrics.replaceChildren();
+    if (!lyrics.length) { refs.lyrics.append(h('p', 'room-lyric-empty', lyricState === 'loading' ? '正在读取歌词…' : lyricState === 'error' ? '歌词暂不可用' : snap.current_track ? '暂无歌词，静静听这首歌' : '选择一首歌，开始一起听')); return; }
+    const start = Math.max(0, Math.min(index - Math.floor(count / 2), lyrics.length - count));
+    lyrics.slice(start, start + count).forEach((line, offset) => { const row = h('p', start + offset === index ? 'active' : '', line.text); if (start + offset === index) row.setAttribute('aria-current', 'true'); refs.lyrics.append(row); });
   }
   function syncMediaSession() {
     if (snap.mode === 'local' || !('mediaSession' in navigator)) return;
@@ -761,7 +814,19 @@
     const key = id + ':' + resourceGeneration + ':' + !!lyricDoc;
     if (stageMediaKey !== key) { stageMediaKey = key; global.Stage.setLyrics(lyricDoc); }
   }
-  function applySnapshot(value, force) { const wasActive = snap.mode !== 'local'; snap = value; mount(); chrome.render(snap); syncMediaSession(); if (wasActive !== (snap.mode !== 'local') && onModeChange) onModeChange(snap.mode !== 'local'); if (force || (!document.hidden && (!root.hidden || stageVisible))) update(); }
+  function applySnapshot(value, force) {
+    const wasActive = snap.mode !== 'local';
+    if (wasActive && value.mode === 'local') {
+      const error = String(value.last_error || '');
+      const reason = leaving ? listeningSession && listeningSession.mode === 'host' ? 'ended' : 'left'
+        : /authorization expired|room_authorization_expired/i.test(error) ? 'revoked'
+        : !error || /room ended|room_ended|房间.*结束/i.test(error) ? 'dissolved' : 'disconnected';
+      finishSession(reason, !leaving || leavingSummary);
+    }
+    observeSession(value); snap = value; mount(); chrome.render(snap); syncMediaSession();
+    if (wasActive !== (snap.mode !== 'local') && onModeChange) onModeChange(snap.mode !== 'local');
+    if (force || (!document.hidden && (!root.hidden || stageVisible))) update();
+  }
   async function poll(force) { if (polling || !root) return; const generation = lifecycle, key = sessionKey(); polling = true; try { const value = await transport.get('/v1/room', { retry: false }); if (!root || generation !== lifecycle || key !== sessionKey()) return; applySnapshot(value, force); } finally { polling = false; } }
   global.HertzRoom = {
     init(options) {
@@ -769,6 +834,13 @@
       onReturn = options.onReturn || (() => {}); onNavigate = options.onNavigate || (() => {});
       onOpenStage = options.onOpenStage || (() => {});
       if (!root) return;
+      try {
+        const avatar = global.localStorage.getItem('hertz.room.avatar.v1');
+        rememberedAvatar = ['disc', 'phones', 'heart', 'radio', 'queue', 'crown', 'user', 'play'].includes(avatar) ? avatar : '';
+        const history = global.localStorage.getItem('hertz.room.history.v1') || '[]';
+        const records = history.length <= 524288 ? JSON.parse(history) : [];
+        recentSessions = Array.isArray(records) ? records.slice(0, 8).filter(record => record && typeof record.name === 'string' && record.name.length <= 256 && Array.isArray(record.members) && record.members.length <= 64 && record.members.every(member => member && typeof member.name === 'string' && member.name.length <= 128) && Array.isArray(record.tracks) && record.tracks.length <= 100 && record.tracks.every(track => track && typeof track.title === 'string' && track.title.length <= 1024) && Number.isFinite(record.elapsed_ms) && record.elapsed_ms >= 0) : [];
+      } catch (_) { recentSessions = []; }
       const preferenceLifecycle = lifecycle;
       transport.get('/v1/settings').then(settings => {
         if (!root || preferenceLifecycle !== lifecycle || rememberedNickname) return;
@@ -786,7 +858,7 @@
         try {
           await poll(false);
           const request = admissionRequest;
-          if (!request || snap.mode !== 'local' || busy || admissionChecking || !workspaceVisible || root.hidden || document.hidden || !workspace || workspace.currentPage() !== 'lobby' || workspace.hasOpenEntry() || request.joinAttempted || Date.now() < request.nextCheck) return;
+          if (!request || snap.mode !== 'local' || busy || admissionChecking || !workspaceVisible || root.hidden || document.hidden || !workspace || !['lobby', 'discover', 'application'].includes(workspace.currentPage()) || workspace.hasOpenEntry() || request.joinAttempted || Date.now() < request.nextCheck) return;
           if (Date.now() >= request.expiresAt) { view.drawApplication({ name: request.roomName, state: 'status_failed' }); request.nextCheck = Infinity; return; }
           admissionChecking = true;
           try { await view.checkApplication(false, true); await poll(true); }
@@ -822,6 +894,6 @@
     operationContext: operationOwner,
     syncMediaSession,
     async localVolume(volume) { const o = snap.output || {}; if (!o.enabled) throw new Error('请先启用房间本机输出'); const result = await command({ action: 'output', enabled: true, settings: { ...(o.settings || {}), volume } }); await poll(true); return result; },
-    destroy() { if (refs.disposeSongPicker) refs.disposeSongPicker(); if (refs.setStageVisible) refs.setStageVisible(false); stageVisible = false; lyricDoc = null; if (workspace && workspace.destroy) workspace.destroy(); lifecycle++; resourceGeneration++; if (coverUrl) URL.revokeObjectURL(coverUrl); coverUrl = ''; if (timer) clearInterval(timer); timer = 0; if (chrome) chrome.destroy(); if (refs.invitation) refs.invitation.value = ''; if (refs.invitationQr) refs.invitationQr.replaceChildren(); invitationId = ''; invitationExpires = 0; root = null; workspace = null; view = null; messages = []; playbackPending = null; queuePending = null; chatReceipt = null; chatUnknown = null; chatSending = null; chatSongPending = null; admissionRequest = null; startDraft = null; }
+    destroy() { if (refs.disposeSongPicker) refs.disposeSongPicker(); if (refs.setStageVisible) refs.setStageVisible(false); stageVisible = false; lyricDoc = null; if (workspace && workspace.destroy) workspace.destroy(); lifecycle++; resourceGeneration++; if (coverUrl) URL.revokeObjectURL(coverUrl); coverUrl = ''; if (timer) clearInterval(timer); timer = 0; if (chrome) chrome.destroy(); if (refs.invitation) refs.invitation.value = ''; if (refs.invitationQr) refs.invitationQr.replaceChildren(); invitationId = ''; invitationExpires = 0; root = null; workspace = null; view = null; messages = []; playbackPending = null; queuePending = null; chatReceipt = null; chatUnknown = null; chatSending = null; chatSongPending = null; admissionRequest = null; startDraft = null; listeningSession = null; lastSummary = null; leaving = false; leavingSummary = true; }
   };
 })(window);

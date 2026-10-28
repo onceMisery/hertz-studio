@@ -180,6 +180,10 @@ struct Endpoint {
     high: mpsc::Sender<String>,
     chat: Arc<Notifications>,
     audio: Option<mpsc::Sender<OutboundPcm>>,
+    // The clock/device warmup can outlive the receiver's early-PCM window.
+    // An attached audio socket receives PCM only after its first Prepare was
+    // enqueued on control; Ready still needs PCM and must not gate delivery.
+    audio_prepared: bool,
     budget: Arc<MemoryBudget>,
 }
 struct State {
@@ -534,12 +538,15 @@ impl Transport {
         state.members.permissions(member, identity.session_id)?;
         let endpoint = state
             .endpoints
-            .get(&member)
+            .get_mut(&member)
             .filter(|e| e.session_id == identity.session_id)
             .ok_or(TransportError::Closed)?;
         if endpoint.high.try_send(text).is_err() {
             state.members.disconnect(member, identity.session_id);
             return Err(TransportError::Closed);
+        }
+        if matches!(frame, ControlFrame::Prepare { .. }) {
+            endpoint.audio_prepared = true;
         }
         Ok(())
     }
@@ -586,6 +593,9 @@ impl Transport {
         let mut failed = Vec::new();
         let mut sent = 0;
         for (member, endpoint) in &state.endpoints {
+            if !endpoint.audio_prepared {
+                continue;
+            }
             if !state
                 .members
                 .permissions(*member, endpoint.session_id)
@@ -843,6 +853,7 @@ async fn run_control(
                 high: high.clone(),
                 chat: chat.clone(),
                 audio: None,
+                audio_prepared: false,
                 budget: MemoryBudget::new(ENDPOINT_BYTES),
             },
         );
@@ -882,7 +893,7 @@ async fn run_control(
                 }
                 break;
             },
-            _ = tick.tick() => { if last_received.elapsed() > HANDSHAKE_TIMEOUT { break; } },
+            _ = tick.tick() => { if last_received.elapsed() > crate::PEER_IDLE_TIMEOUT { break; } },
             _ = requests.join_next(), if !requests.is_empty() => {},
             message = socket.next() => {
                 let Some(Ok(message)) = message else { break; };
@@ -950,6 +961,7 @@ async fn run_audio(
             return;
         };
         endpoint.audio = Some(tx);
+        endpoint.audio_prepared = false;
     }
     if inner
         .events
@@ -968,7 +980,7 @@ async fn run_audio(
         tokio::select! {
             biased;
             _ = session.invalidated.changed() => break,
-            _ = tick.tick() => { if last_received.elapsed() > HANDSHAKE_TIMEOUT { break; } },
+            _ = tick.tick() => { if last_received.elapsed() > crate::PEER_IDLE_TIMEOUT { break; } },
             message = socket.next() => {
                 let Some(Ok(message)) = message else { break; };
                 if !ingress.allow() { break; }

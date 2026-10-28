@@ -5341,6 +5341,7 @@ async function loadDevices() {
 // ---------------------------------------------------------------------------
 
 function setView(name, options) {
+  if (state.view === 'reader' && name !== 'reader' && window.Reader) window.Reader.onViewExit();
   if (state.view === 'online' && name !== 'online' && window.Online) Online.cancelSearch();
   if (state.view === 'room' && name !== 'room' && window.HertzRoom) window.HertzRoom.onViewExit();
   state.view = name;
@@ -9275,7 +9276,7 @@ async function startApp() {
   if (window.Podcasts) window.Podcasts.bind({
     play: (tracks, index) => Online.playAll(tracks, index), seek: seekTo, toast,
   });
-  if (window.Reader) window.Reader.bind({ toast });
+  if (window.Reader) window.Reader.bind({ toast, navigate: setView });
   // 扫码登录模块（web/online-login.js）：放在 Online.init 之后，头像 URL
   // 归一化要用它挂出的 safeCoverUrl。init() 负责在启动阶段就把顶栏头像按
   // 服务端持久化的选择恢复出来（以前只有打开登录弹窗才恢复）。

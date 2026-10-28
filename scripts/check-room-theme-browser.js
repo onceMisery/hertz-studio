@@ -24,7 +24,7 @@ async function main() {
       return route.fulfill({ contentType: file.endsWith('.css') ? 'text/css' : 'text/html', body });
     });
     await page.goto('http://room-theme.test/');
-    for (const file of ['themes.js', 'theme-picker.js', 'favorites.js', 'room-workspace.js', 'room-view.js', 'room.js']) await page.addScriptTag({ content: source(file) });
+    for (const file of ['host.js', 'themes.js', 'theme-picker.js', 'favorites.js', 'room-workspace.js', 'room-view.js', 'room.js']) await page.addScriptTag({ content: source(file) });
     await page.evaluate(async () => {
       Theme.init();
       ThemePicker.bind(document.querySelector('#theme-btn'));
@@ -70,7 +70,8 @@ async function main() {
       document.body.classList.add('room-view');
       document.querySelectorAll('.view').forEach(node => { node.hidden = node.id !== 'view-room'; });
       window.__snapshot = { mode: 'host', room_id: 'room', instance_id: 'host', session_id: 'session', member_id: 'member', name: '同一主题房间', revision: '1', sharing_revision: '1', library_search: true, track_instance_id: '1', current_track: { resource_id: 'song', title: '午夜霓虹', artist: '共享艺术家', duration_ms: 32000 }, queue: [], members: [], permissions: { queue: true, transport: true, chat_read: true, chat_send: true }, output: {} };
-      window.__queue = Array.from({ length: 14 }, (_, index) => ({ instance_id: String(index + 1), resource_id: 'song-' + index }));
+      window.__queue = Array.from({ length: 14 }, (_, index) => ({ instance_id: String(index + 1), resource_id: 'song-' + index, votes: index % 4, votable: true, requester: { id: index % 2 ? 'guest' : 'member', name: index % 2 ? '临窗' : '夜航听众' } }));
+      window.__snapshot.collaboration = { queue_order: 'manual' };
       window.__tracks = window.__queue.map((entry, index) => ({ resource_id: entry.resource_id, title: index === 1 ? '这是一首名字很长很长需要在共同队列中保持清晰的夜航歌曲' : '夜航选曲 ' + (index + 1), artist: '共享艺术家', duration_ms: 32000 }));
       window.__library = window.__tracks.concat(
         Array.from({ length: 30 }, (_, index) => ({ resource_id: 'other-' + index, title: '其他共享歌曲 ' + index })),
@@ -173,13 +174,13 @@ async function main() {
     assert.equal(await songPicker.locator('.room-list').getByText('全库目标 01', { exact: true }).count(), 0, 'target starts beyond the initial shared page');
     await sharedSearch.fill('全库目标');
     await sharedSearch.press('Enter');
-    await songPicker.locator('.room-list').getByText('全库目标 01', { exact: true }).waitFor();
+    await songPicker.locator('.room-list .room-track-copy').getByText('全库目标 01', { exact: true }).waitFor();
     assert.equal(await songPicker.locator('.room-list > .room-track').count(), 32, 'search returns the first matching server page');
     assert.deepEqual(await page.evaluate(() => { const request = window.__roomRequests.filter(body => body.request && body.request.action === 'library').at(-1).request; return { query: request.query, offset: request.offset, limit: request.limit }; }), { query: '全库目标', offset: 0, limit: 32 }, 'search forwards the query across the authorized shared library');
     const libraryNext = songPicker.getByRole('button', { name: '下一页', exact: true }), libraryPrevious = songPicker.getByRole('button', { name: '上一页', exact: true });
     assert.ok(await libraryPrevious.isDisabled(), 'first result page disables previous');
     await libraryNext.click();
-    await songPicker.locator('.room-list').getByText('全库目标 33', { exact: true }).waitFor();
+    await songPicker.locator('.room-list .room-track-copy').getByText('全库目标 33', { exact: true }).waitFor();
     assert.equal(await songPicker.locator('.room-list > .room-track').count(), 8, 'next page contains the remaining matches');
     assert.ok(await libraryNext.isDisabled(), 'last result page disables next');
     assert.deepEqual(await page.evaluate(() => { const request = window.__roomRequests.filter(body => body.request && body.request.action === 'library').at(-1).request; return { query: request.query, offset: request.offset, limit: request.limit }; }), { query: '全库目标', offset: 32, limit: 32 }, 'pagination retains the query');
@@ -187,7 +188,7 @@ async function main() {
     await songPicker.getByText('没有匹配的共享歌曲，试试其他关键词。', { exact: true }).waitFor();
     assert.equal(await libraryNext.isVisible(), false, 'empty search hides pagination');
     await sharedSearch.fill(''); await sharedSearch.press('Enter');
-    await songPicker.locator('.room-list').getByText('夜航选曲 1', { exact: true }).waitFor();
+    await songPicker.locator('.room-list .room-track-copy').getByText('夜航选曲 1', { exact: true }).waitFor();
     await page.keyboard.press('Escape');
     const composer = page.getByLabel('说点什么（最多 200 字）', { exact: true });
     await composer.fill('舞台与聊天共用草稿');
@@ -199,14 +200,31 @@ async function main() {
     await page.getByRole('tab', { name: '队列', exact: true }).click();
     await page.setViewportSize({ width: 1440, height: 900 });
     const movingRow = page.locator('.room-queue > li[data-instance="4"]');
+    assert.ok(await movingRow.getByRole('button', { name: '播放', exact: true }).isVisible(), 'queue playback is visible with the more menu closed');
+    assert.equal(await movingRow.locator('details .room-queue-play').count(), 0, 'playback stays outside the more menu');
+    const beforeMenu = await movingRow.boundingBox();
     await movingRow.locator('summary').click();
+    await movingRow.locator('summary').focus(); await page.keyboard.press('ArrowDown');
+    assert.ok(await movingRow.locator('[popover]').evaluate(node => node.contains(document.activeElement)), 'ArrowDown enters the floating menu');
+    await page.keyboard.press('End');
+    assert.equal(await movingRow.getByRole('menuitem', { name: '移除', exact: true }).evaluate(node => node === document.activeElement), true, 'End reaches the final enabled action');
+    await page.keyboard.press('Escape');
+    assert.equal(await movingRow.locator('summary').evaluate(node => node === document.activeElement && node.getAttribute('aria-expanded') === 'false'), true, 'Escape closes the menu and restores its trigger');
+    await movingRow.locator('summary').click();
+    await page.locator('.room-queue > li[data-instance="3"] summary').click();
+    assert.equal(await page.locator('.room-track-actions:popover-open').count(), 1, 'opening another song dismisses the first menu');
+    await page.locator('.room-stage-label').click();
+    assert.equal(await page.locator('.room-track-actions:popover-open').count(), 0, 'outside click dismisses the menu');
+    await movingRow.locator('summary').click();
+    assert.equal((await movingRow.boundingBox()).height, beforeMenu.height, 'floating menu never expands the queue row');
+    assert.ok(await movingRow.locator('[popover]').evaluate(node => node.matches(':popover-open')), 'song actions use the browser top layer');
     for (const [label, expectedIndex] of [['上移', 2], ['下移', 3]]) {
       const revision = await page.evaluate(() => window.__snapshot.revision);
-      await movingRow.getByRole('button', { name: label, exact: true }).focus();
+      await movingRow.getByRole('menuitem', { name: label, exact: true }).focus();
       await page.keyboard.press('Enter');
       await page.waitForFunction(({ revision, label }) => window.__snapshot.revision !== revision && document.querySelector('.room-queue > li[data-instance="4"] button:focus')?.textContent === label, { revision, label });
       assert.equal(await page.evaluate(() => window.__queue.findIndex(entry => entry.instance_id === '4')), expectedIndex, label + ' persists the moved queue instance');
-      assert.equal(await movingRow.getByRole('button', { name: label, exact: true }).evaluate(node => node === document.activeElement), true, label + ' restores keyboard focus after snapshot redraw');
+      assert.equal(await movingRow.getByRole('menuitem', { name: label, exact: true }).evaluate(node => node === document.activeElement), true, label + ' restores keyboard focus after snapshot redraw');
       assert.equal(await movingRow.locator('details').evaluate(node => node.open), true, 'queue menu stays open after ' + label);
     }
     await movingRow.locator('summary').click();
@@ -215,15 +233,59 @@ async function main() {
       const output = path.resolve(__dirname, '../output/ui-productization'); fs.mkdirSync(output, { recursive: true });
       await page.screenshot({ path: path.join(output, 'room-scene-' + width + '.png') });
       if (width >= 1000) {
-        const queuePanel = page.locator('#room-stage-panel-queue');
+        const queuePanel = page.locator('#room-stage-panel-queue .room-queue');
         const scroll = await queuePanel.evaluate(node => ({ height: node.clientHeight, content: node.scrollHeight, overflow: getComputedStyle(node).overflowY }));
         assert.ok(scroll.content > scroll.height && scroll.height < height && scroll.overflow === 'auto', 'long queues use a bounded scroll area at ' + width);
+        const layout = await page.evaluate(() => {
+          const root = document.querySelector('#view-room'), aside = document.querySelector('.room-play-aside'), queue = document.querySelector('.room-queue');
+          const box = queue.getBoundingClientRect();
+          const player = document.querySelector('.room-player'), scene = player.querySelector('.room-stage-scene').getBoundingClientRect(), controls = player.querySelector('.room-stage-controls').getBoundingClientRect();
+          return { rootScroll: root.scrollHeight - root.clientHeight, bottomGap: root.getBoundingClientRect().bottom - aside.getBoundingClientRect().bottom,
+            playerScroll: player.scrollHeight - player.clientHeight, overlap: scene.bottom > controls.top + 1,
+            visible: [...queue.children].filter(row => { const r = row.getBoundingClientRect(); return r.top >= box.top && r.bottom <= box.bottom; }).length,
+            rowHeight: queue.firstElementChild.getBoundingClientRect().height };
+        });
+        assert.ok(layout.rootScroll <= 1 && layout.bottomGap <= 24 && layout.rowHeight <= 65 && layout.visible >= (height >= 900 ? 8 : 5), 'queue fills host height with compact rows: ' + JSON.stringify(layout));
+        assert.ok(!layout.overlap && layout.playerScroll <= 1, 'music, controls and composer fit without overlapping or a second scrollbar: ' + JSON.stringify(layout));
         await queuePanel.evaluate(node => { node.scrollTop = node.scrollHeight; });
-        const panelBox = await queuePanel.boundingBox(), lastSong = await queuePanel.locator('.room-queue > li').last().boundingBox();
+        const panelBox = await queuePanel.boundingBox(), lastSong = await queuePanel.locator(':scope > li').last().boundingBox();
         assert.ok(lastSong.y + lastSong.height <= panelBox.y + panelBox.height + 1, 'last queued song is reachable at ' + width);
+        const lastRow = queuePanel.locator(':scope > li').last(), rowBefore = await lastRow.boundingBox();
+        await lastRow.locator('summary').click();
+        const popup = await lastRow.locator('[popover]').boundingBox();
+        assert.ok(popup.x >= 0 && popup.y >= 0 && popup.x + popup.width <= width && popup.y + popup.height <= height && popup.y < rowBefore.y, 'bottom-row menu flips upward within the host viewport');
+        assert.equal((await lastRow.boundingBox()).height, rowBefore.height, 'bottom-row menu leaves list geometry intact');
+        await page.screenshot({ path: path.join(output, 'room-queue-menu-' + width + '.png') });
+        if (width === 1440) {
+          const bottomRow = page.locator('.room-queue > li[data-instance="14"]');
+          for (const label of ['上移', '下移']) {
+            const revision = await page.evaluate(() => window.__snapshot.revision);
+            await bottomRow.getByRole('menuitem', { name: label, exact: true }).focus(); await page.keyboard.press('Enter');
+            const focusLabel = label === '下移' ? '移除' : label;
+            await page.waitForFunction(({ revision, focusLabel }) => window.__snapshot.revision !== revision && document.querySelector('.room-queue > li[data-instance="14"] button:focus')?.textContent === focusLabel, { revision, focusLabel });
+            assert.ok(await bottomRow.locator('[popover]').evaluate(node => node.matches(':popover-open') && node.contains(document.activeElement)), 'scrolled queue redraw preserves the open menu and action focus');
+            const bounds = await bottomRow.locator('[popover]').boundingBox();
+            assert.ok(bounds.y >= 0 && bounds.y + bounds.height <= height, 'restored menu remains anchored within the viewport after moving a bottom row');
+          }
+        }
+        await page.keyboard.press('Escape');
         await queuePanel.evaluate(node => { node.scrollTop = 0; });
       }
     }
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.evaluate(async () => {
+      window.__fullQueue = window.__queue; window.__queue = window.__queue.slice(0, 4);
+      window.__snapshot = { ...window.__snapshot, revision: String(Number(window.__snapshot.revision) + 1), queue_count: 4 };
+      await HertzRoom.onViewEnter();
+    });
+    await page.waitForFunction(() => document.querySelectorAll('.room-queue > li').length === 4);
+    assert.ok(await page.locator('.room-queue').evaluate(node => node.scrollHeight <= node.clientHeight + 1), 'four-song queues do not create an unnecessary scrollbar');
+    await page.evaluate(async () => {
+      window.__queue = window.__fullQueue;
+      window.__snapshot = { ...window.__snapshot, revision: String(Number(window.__snapshot.revision) + 1), queue_count: window.__queue.length };
+      await HertzRoom.onViewEnter();
+    });
+    await page.waitForFunction(() => document.querySelectorAll('.room-queue > li').length === 14);
     // Native browser 200% zoom has a 720x450 CSS viewport on a 1440x900 window.
     await page.setViewportSize({ width: 720, height: 450 });
     await page.getByRole('button', { name: '＋ 点歌', exact: true }).focus(); await page.keyboard.press('Enter');
@@ -395,9 +457,9 @@ async function main() {
     await page.evaluate(() => { Theme.register({ id: 'room-custom', name: '扩展自定义配色', tokens: { '--bg': '#18232a', '--accent': '#aadeef' } }); });
     await choose('room-custom');
     assert.equal(await page.evaluate(() => localStorage.getItem('vmusic.theme.v2')), 'room-custom', 'room uses existing global persistence');
-    await page.evaluate(async () => { window.__snapshot = { mode: 'local' }; await HertzRoom.onViewEnter(); });
+    await page.evaluate(async () => { window.__snapshot = { mode: 'local' }; await HertzRoom.onViewEnter(); HertzRoom.navigate('lobby'); });
     assert.ok(await theme.isVisible(), 'unjoined lobby has a palette button');
-    const joinTrigger = page.locator('.room-page-lobby > .room-toolbar').getByRole('button', { name: '使用邀请加入', exact: true });
+    const joinTrigger = page.locator('.room-page-lobby .room-flow-actions').getByRole('button', { name: '使用邀请加入', exact: true });
     const joinDialog = page.getByRole('dialog', { name: '通过邀请加入', exact: true });
     const createDialog = page.getByRole('dialog', { name: '创建房间', exact: true });
     for (const width of [1440, 390, 360]) {
@@ -445,9 +507,10 @@ async function main() {
       assert.equal(await createDialog.count(), 0);
     }
     // Verification stays inside the entry dialog so the native modal retains focus ownership.
-    await page.evaluate(() => { window.hertzHost = { isDbx: true }; });
+    await page.evaluate(() => { window.hertzHost.isDbx = true; });
     await page.addScriptTag({ content: source('dialogs.js') });
     await page.evaluate(() => { window.__confirmRoom = message => hertzDialog.confirm(message); });
+    await page.evaluate(() => HertzRoom.navigate('discover'));
     await page.locator('.room-nearby-card').getByRole('button', { name: '使用邀请加入', exact: true }).click();
     assert.equal(await joinDialog.getByLabel('你的昵称', { exact: true }).inputValue(), '  房主夜航  ', 'nickname follows between entry methods');
     await joinDialog.getByLabel('你的昵称', { exact: true }).fill('');
@@ -505,12 +568,13 @@ async function main() {
     assert.equal(await page.locator('.room-cover-editor img').count(), 0, 'removing cover returns to the room name');
     // Cancelled and failed exits retain the room. Host and guest share one close flow.
     const headerLeave = page.locator('.room-header-leave');
-    const clickHeaderLeave = async () => { await page.locator('.room-more').evaluate(node => { node.open = true; }); await headerLeave.click(); };
+    let leaveWarning = '';
+    const clickHeaderLeave = async (accept = true) => { await page.locator('.room-more > summary').click(); await headerLeave.click(); const dialog = page.locator('[aria-labelledby="room-entry-title-leave"]'); await dialog.waitFor(); leaveWarning = await dialog.textContent(); const host = await page.evaluate(() => window.__snapshot.mode === 'host'); await dialog.getByRole('button', { name: accept ? host ? '结束房间' : '退出房间' : host ? '继续一起听' : '继续听', exact: true }).click(); };
     let leaves = await page.evaluate(() => window.__roomRequests.filter(request => request.action === 'leave').length);
     await page.evaluate(() => { window.__confirmRoom = async () => false; });
-    await clickHeaderLeave();
+    await clickHeaderLeave(false);
     assert.equal(await page.evaluate(() => window.__roomRequests.filter(request => request.action === 'leave').length), leaves, 'cancel does not end host room');
-    assert.ok(await page.evaluate(() => window.__confirmMessages.at(-1).includes('所有成员将停止收听')), 'host warning states the effect on everyone');
+    assert.match(leaveWarning, /连接将同时断开/, 'host warning states the effect on everyone');
     await page.evaluate(async () => { window.__snapshot = { ...window.__hostSnapshot, mode: 'guest', session_id: 'exit-guest', room_cover_revision: 'member-cover' }; await HertzRoom.onViewEnter(); HertzRoom.navigate('lobby'); });
     await page.locator('.room-current-card img').waitFor();
     let profileReads = await page.evaluate(() => window.__roomRequests.filter(request => request.request && request.request.action === 'room_profile').length);
@@ -523,7 +587,7 @@ async function main() {
     await page.evaluate(() => { window.__confirmRoom = async () => true; window.__leaveFailure = true; });
     await clickHeaderLeave(); await page.locator('.room-notice.room-error').filter({ hasText: '退出失败' }).waitFor();
     assert.equal(await page.evaluate(() => window.__snapshot.mode), 'guest', 'failed exit keeps the active room');
-    assert.ok(await page.evaluate(() => window.__confirmMessages.at(-1).includes('其他成员可继续收听')), 'guest warning preserves everyone else');
+    assert.match(leaveWarning, /其他成员可以继续收听/, 'guest warning preserves everyone else');
     await page.evaluate(() => {
       window.__leaveFailure = false; window.__holdLeave = true;
       window.__discoveredRooms = [
@@ -537,7 +601,9 @@ async function main() {
     await headerLeave.evaluate(node => { node.click(); node.click(); });
     assert.equal(await page.evaluate(() => window.__roomRequests.filter(request => request.action === 'leave').length), leaves + 1, 'pending exit is submitted once');
     await page.evaluate(() => window.__resolveLeave());
-    await page.waitForFunction(() => document.querySelector('#view-room').dataset.roomPage === 'lobby' && document.querySelectorAll('.room-nearby-card').length === 3);
+    await page.waitForFunction(() => document.querySelector('#view-room').dataset.roomPage === 'summary');
+    await page.evaluate(() => HertzRoom.navigate('discover'));
+    await page.waitForFunction(() => document.querySelectorAll('.room-nearby-card').length === 3);
     assert.equal(await headerLeave.isVisible(), false, 'confirmed exit returns to unjoined lobby');
     assert.equal(await page.locator('.room-nearby-card').nth(0).locator('img').count(), 1);
     assert.equal(await page.locator('.room-nearby-card').nth(1).locator('.room-card-name').textContent(), '午后轻音乐');
@@ -555,6 +621,7 @@ async function main() {
     await page.keyboard.press('Escape');
     const applyCount = await page.evaluate(() => window.__roomRequests.filter(request => request.action === 'apply').length);
     const joinCount = await page.evaluate(() => window.__roomRequests.filter(request => request.action === 'join').length);
+    await page.evaluate(() => HertzRoom.navigate('lobby'));
     await joinTrigger.click();
     await joinDialog.getByLabel('邀请或 8 位查找码', { exact: true }).fill('b2c3d4e5');
     await joinDialog.getByRole('button', { name: '加入房间', exact: true }).click();
@@ -577,6 +644,7 @@ async function main() {
       }
     }
     const roomSearch = page.getByLabel('搜索房间名称或房间码', { exact: true });
+    await page.evaluate(() => HertzRoom.navigate('discover'));
     await roomSearch.fill('午后'); assert.equal(await page.locator('.room-nearby-card').count(), 1);
     await roomSearch.fill('没有这间房'); assert.equal(await page.locator('.room-nearby-card').count(), 0);
     await roomSearch.fill('');
@@ -591,7 +659,8 @@ async function main() {
     await page.evaluate(() => { window.__holdLeave = false; HertzRoom.navigate('settings'); });
     await page.getByRole('tab', { name: '房间会话', exact: true }).click();
     await page.locator('.room-settings-panel:visible').getByRole('button', { name: '结束并退出', exact: true }).click();
-    await page.waitForFunction(() => window.__snapshot.mode === 'local' && document.querySelector('#view-room').dataset.roomPage === 'lobby');
+    await page.locator('[aria-labelledby="room-entry-title-leave"]').getByRole('button', { name: '结束房间', exact: true }).click();
+    await page.waitForFunction(() => window.__snapshot.mode === 'local' && document.querySelector('#view-room').dataset.roomPage === 'summary');
     await choose('room-custom');
     await page.evaluate(() => { document.body.classList.remove('room-view'); document.querySelector('#view-room').hidden = true; });
     const outer = page.locator('#theme-btn');
@@ -605,6 +674,86 @@ async function main() {
     await page.evaluate(() => HertzRoom.destroy());
     assert.equal(await menu.isVisible(), false, 'destroy closes the shared menu');
     assert.equal(await page.locator('#theme-menu').count(), 1, 'single menu owner');
+    // Reproduce the actual DBX boundary: an opaque sandbox frame below host
+    // chrome, with a shorter viewport than the surrounding application.
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await page.emulateMedia({ reducedMotion: 'no-preference' });
+    await page.setContent('<body style="margin:0;background:#202328"><iframe title="DBX plugin" sandbox="allow-scripts" src="http://room-theme.test/" style="display:block;margin-top:88px;width:100%;height:880px;border:0"></iframe></body>');
+    const embedded = page.frames().find(frame => frame !== page.mainFrame());
+    await embedded.waitForSelector('#view-room', { state: 'attached' });
+    for (const file of ['host.js', 'themes.js', 'favorites.js', 'room-workspace.js', 'room-view.js', 'room.js']) await embedded.addScriptTag({ content: source(file) });
+    await embedded.evaluate(async () => {
+      Theme.init(); Theme.apply('emerald');
+      document.body.classList.add('room-view');
+      document.querySelectorAll('.view').forEach(node => { node.hidden = node.id !== 'view-room'; });
+      const songs = ['罗生门（Follow）', '开始懂了', '一半一半', '给未来的自己'];
+      const tracks = Array.from({ length: 14 }, (_, index) => ({ resource_id: 'song-' + index, title: songs[index % songs.length], artist: index % 2 ? '孙燕姿' : '梨冻紧 / Wiz H张子豪', duration_ms: 244000 }));
+      const queue = tracks.map((track, index) => ({ instance_id: String(index + 1), resource_id: track.resource_id, votes: index % 4, votable: index > 2, requester: { id: 'member', name: '夜航听众' } }));
+      const snapshot = { mode: 'host', room_id: 'room', instance_id: 'host', session_id: 'session', member_id: 'member', name: '夜航电台', revision: '1', sharing_revision: '1', queue_count: queue.length, queue: [], current_track: tracks[3], track_instance_id: '4', playing: false, collaboration: { queue_order: 'manual' }, permissions: { queue: true, transport: true, chat_read: true, chat_send: true }, members: [{ id: 'member', name: '夜航听众', owner: true, connected: true }], output: { enabled: true, ready: true } };
+      window.__sandboxSnapshot = snapshot; snapshot.current_track.has_cover = true; snapshot.playing = true; snapshot.position_ms = 32000;
+      const canvas = document.createElement('canvas'); canvas.width = canvas.height = 256;
+      const ink = canvas.getContext('2d'); ink.fillStyle = '#254a42'; ink.fillRect(0, 0, 256, 256);
+      ink.fillStyle = '#a9c1af'; ink.beginPath(); ink.arc(185, 75, 72, 0, Math.PI * 2); ink.fill();
+      ink.fillStyle = '#eef3e8'; ink.font = '600 32px sans-serif'; ink.fillText('夜航', 28, 185);
+      const cover = canvas.toDataURL('image/png').split(',')[1];
+      const lyricLines = ['留一盏灯，给晚归的人', '风穿过这座城市', '我们听见同一首歌', '让时间慢一些', '把今天轻轻放下', '音乐沿着夜色流淌', '下一站，仍然有你', '和你一起听下一首', '那些还没说出口的话', '都留在旋律里', '窗外有星光落下', '这一刻刚刚好'];
+      const transport = { get: async url => url === '/v1/room' ? snapshot : { tracks: [] }, post: async (url, body) => {
+        if (body.request?.action === 'queue_page') return { revision: '1', queue, tracks };
+        if (body.request?.action === 'resource') {
+          const isCover = body.request.kind === 'cover';
+          const bytes = isCover ? Uint8Array.from(atob(cover), c => c.charCodeAt(0)) : new TextEncoder().encode(JSON.stringify({ lines: lyricLines.map((text, index) => ({ start_ms: index * 8000, text })) }));
+          return { offset: 0, total: bytes.length, revision: '1', mime: isCover ? 'image/png' : 'application/json', base64: btoa(String.fromCharCode(...bytes)) };
+        }
+        return { tracks: [], messages: [], ids: [] };
+      } };
+      window.VMusicTransport = transport;
+      Favorites.bind({ ui: {}, state: { view: 'room' }, toast() {}, errText: (prefix, error) => prefix + error.message });
+      window.HertzRoomTransport = { create: () => ({ render() {}, notice() {}, destroy() {}, setWorkspaceVisible() {} }) };
+      HertzRoom.init({ root: document.querySelector('#view-room'), transport, confirm: async () => true });
+      await HertzRoom.onViewEnter();
+    });
+    await embedded.waitForSelector('.room-queue > li[data-instance="14"]');
+    const hostFit = await embedded.evaluate(() => {
+      const root = document.querySelector('#view-room'), aside = document.querySelector('.room-play-aside');
+      return { rootScroll: root.scrollHeight - root.clientHeight, bottom: aside.getBoundingClientRect().bottom, height: root.getBoundingClientRect().bottom };
+    });
+    assert.ok(hostFit.rootScroll <= 1 && Math.abs(hostFit.height - hostFit.bottom) <= 24, 'DBX queue fills its sandbox viewport: ' + JSON.stringify(hostFit));
+    const sandboxOutput = path.resolve(__dirname, '../output/playwright/dbx-room'); fs.mkdirSync(sandboxOutput, { recursive: true });
+    await embedded.waitForFunction(() => { const image = document.querySelector('.room-art img'); return image.complete && image.naturalWidth > 0 && !image.hidden; });
+    assert.equal(await embedded.locator('.room-cover').evaluate(node => getComputedStyle(node).animationPlayState), 'running', 'sandbox renders the real artwork and rotates it while playing');
+    assert.equal(await embedded.locator('.room-hero .room-toolbar').count(), 0, 'now-playing shortcuts have been removed');
+    await page.locator('iframe').screenshot({ path: path.join(sandboxOutput, 'listening-1440.png'), animations: 'disabled' });
+    await embedded.getByRole('button', { name: '展开歌词', exact: true }).first().click();
+    assert.equal(await embedded.locator('.room-stage-scene').getAttribute('data-lyrics-expanded'), 'true');
+    assert.ok(await embedded.locator('.room-lyrics p').count() > 4, 'expanded scene shows more than the old four-line limit');
+    await page.locator('iframe').screenshot({ path: path.join(sandboxOutput, 'lyrics-expanded-1440.png'), animations: 'disabled' });
+    await embedded.getByRole('button', { name: '收起歌词', exact: true }).click();
+    await embedded.evaluate(async () => { window.__sandboxSnapshot.playing = false; await HertzRoom.onViewEnter(); });
+    assert.equal(await embedded.locator('.room-cover').evaluate(node => getComputedStyle(node).animationPlayState), 'paused', 'pausing playback preserves the cover angle');
+    await embedded.evaluate(async () => { window.__sandboxSnapshot.admission = { pending: [{ id: 'first', name: '临窗听众', state: 'pending' }] }; await HertzRoom.onViewEnter(); });
+    const admission = embedded.getByRole('dialog', { name: '有人申请加入一起听', exact: true });
+    await admission.waitFor({ state: 'visible' });
+    await page.locator('iframe').screenshot({ path: path.join(sandboxOutput, 'join-application-1440.png'), animations: 'disabled' });
+    await admission.getByRole('combobox').selectOption('listen');
+    await admission.getByRole('combobox').focus();
+    await embedded.evaluate(async () => { window.__sandboxSnapshot.admission.pending.push({ id: 'second', name: '夜航听众', state: 'pending' }); await HertzRoom.onViewEnter(); });
+    assert.equal(await admission.getByRole('combobox').first().inputValue(), 'listen', 'a second application preserves the selected participation role');
+    assert.equal(await admission.getByRole('combobox').first().evaluate(node => node === document.activeElement), true, 'incoming applications preserve review focus');
+    await admission.getByRole('button', { name: '稍后处理', exact: true }).click();
+    await embedded.evaluate(() => HertzRoom.onViewEnter());
+    assert.equal(await admission.isVisible(), false, 'dismissed applications do not reopen every poll');
+    assert.equal(await embedded.locator('.room-member-dot').isVisible(), true, 'members keep the red dot until review');
+    await embedded.evaluate(async () => { window.__sandboxSnapshot.admission.pending.forEach(application => { application.state = 'approved'; }); await HertzRoom.onViewEnter(); });
+    assert.equal(await embedded.locator('.room-member-dot').isVisible(), false, 'review clears the pending indicator');
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    assert.equal(await embedded.locator('.room-cover').evaluate(node => getComputedStyle(node).animationName), 'none', 'reduced-motion preference disables rotation');
+    await embedded.locator('.room-queue > li[data-instance="4"] summary').click();
+    const sandboxPopup = await embedded.locator('.room-track-actions:popover-open').evaluate(node => { const r = node.getBoundingClientRect(); return { right: r.right, bottom: r.bottom, width: innerWidth, height: innerHeight }; });
+    assert.ok(sandboxPopup.right <= sandboxPopup.width && sandboxPopup.bottom <= sandboxPopup.height, 'sandbox popover remains inside plugin boundaries');
+    await page.locator('iframe').screenshot({ path: path.join(sandboxOutput, 'song-menu-1440.png'), animations: 'disabled' });
+    await embedded.locator('.room-queue > li[data-instance="4"] summary').press('Escape');
+    assert.equal(await embedded.locator('.room-track-actions:popover-open').count(), 0, 'Escape from a mouse-opened trigger closes the actual top layer');
+    await embedded.evaluate(() => HertzRoom.destroy());
     console.log('Room theme browser: 200% zoom/reflow/focus, shared search/pagination, queue menu focus/scrolling, aside keyboard navigation, invitation reuse/permissions, song drawer, code applications, inline verification, cover drafts/failures, exits/session isolation, nicknames, stage/danmaku, settings, responsive geometry, themes and LAN favorites passed.');
   } finally { await browser.close(); }
 }

@@ -563,6 +563,7 @@ impl SharedLibrary {
                         ("jpeg", "image/jpeg"),
                         ("png", "image/png"),
                         ("webp", "image/webp"),
+                        ("gif", "image/gif"),
                     ] {
                         let file = state.cover_dir().join(format!("{track_id}.{ext}"));
                         if tokio::fs::try_exists(&file).await.unwrap_or(false) {

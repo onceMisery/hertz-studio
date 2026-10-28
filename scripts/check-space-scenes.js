@@ -317,7 +317,7 @@ async function reactorContract(THREE, registry, createScope, PROFILES) {
   post.setParams({ grain: 10, bokeh: 10 }); post.update({ time: 1 }); post.render(fakeRenderer, new THREE.Scene(), ctx.camera);
   assert.equal(post.stats().drawCalls, 1); assert.ok(post.stats().bytes <= 800 * 600 * 8 / 4); assert.equal(fakeRenderer.autoClear, false, 'renderer state restored');
   post.setParams({ grain: 0, bokeh: 0 }); assert.equal(post.stats().bytes, 0, 'disabled chain releases target'); post.dispose(); scope.dispose();
-  for (const directory of ['src/scenes', 'src/effects']) for (const name of fs.readdirSync(path.join(stage, directory))) {
+  for (const directory of ['src/scenes', 'src/effects']) for (const name of fs.readdirSync(path.join(stage, directory), { recursive: true }).filter(name => name.endsWith('.js'))) {
     const source = fs.readFileSync(path.join(stage, directory, name), 'utf8'); assert.doesNotMatch(source, /requestAnimationFrame|new\s+\w*\.?WebGLRenderer|AudioContext|Stage3D\.|CreativeGL\./, name + ' independent host or old renderer');
   }
   console.log('Space scene checks passed: ' + registry.catalog().length + ' scenes, ' + effects.catalog().length + ' effects, ' + created + ' real Three.js lifecycles, ' + manifest.entries.length + ' migration rows. Ordinary-PC/DBX GPU qualification unmeasured.');

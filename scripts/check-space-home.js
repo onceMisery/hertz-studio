@@ -94,6 +94,7 @@ async function browserContract() {
     const sprite = html.slice(spriteStart, html.indexOf('</svg>', spriteStart) + 6);
     await page.setContent(sprite + '<div id="sp-home"></div>');
     await page.addStyleTag({ content: ':root { --bg:#171a1c; --text:#eff1f3; --muted:#a0a6ae; --accent:#71ceac; --sp-text:#eff1f3; --sp-muted:#a0a6ae; --sp-accent:#71ceac; --sp-accent-2:#ff8fb1; --sp-line:#42494e; --sp-line-soft:#292f33; } body {margin:0;font-family:Arial,sans-serif;} * {box-sizing:border-box;}' + read('space-home.css') });
+    await page.addScriptTag({ content: read('host.js') });
     await page.addScriptTag({ content: read('space-home.js') });
     await page.evaluate(() => {
       window.actions = []; window.searches = []; window.libraryFailures = 0;

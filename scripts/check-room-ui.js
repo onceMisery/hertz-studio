@@ -6,7 +6,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
-const sources = ['favorites.js', 'room-workspace.js', 'room-view.js', 'room.js'].map(name => ({ name, source: fs.readFileSync(path.join(__dirname, '../plugin/ui', name), 'utf8') }));
+const sources = ['host.js', 'favorites.js', 'room-workspace.js', 'room-view.js', 'room.js'].map(name => ({ name, source: fs.readFileSync(path.join(__dirname, '../plugin/ui', name), 'utf8') }));
 class Node {
   constructor(tag) { this.tagName = tag; this.children = []; this.value = ''; this.dataset = {}; this._text = ''; this.attrs = {}; this.style = { setProperty() {} }; this.classList = { toggle() {}, add() {}, remove() {} }; }
   set textContent(text) { this._text = String(text); this.children = []; }
@@ -15,7 +15,7 @@ class Node {
   insertBefore(node, before) { const index = before ? this.children.indexOf(before) : this.children.length; this.children.splice(index, 0, node); return node; }
   prepend(...nodes) { this.children.unshift(...nodes); }
   focus() {}
-  showModal() { this.open = true; }
+  showModal() { this.open = true; if (this.onShowModal) this.onShowModal(this); }
   close() { this.open = false; }
   remove() {}
   replaceChildren(...nodes) { this._text = ''; this.children = nodes; }
@@ -23,6 +23,7 @@ class Node {
   getAttribute(key) { return this.attrs[key]; }
   addEventListener() {}
   querySelectorAll(selector) { return walk(this).filter(node => (node.className || '').split(/\s+/).includes(selector.slice(1))); }
+  querySelector(selector) { return walk(this).find(node => node.tagName === selector); }
 }
 const walk = node => [node, ...node.children.flatMap(walk)];
 function deferred() { let resolve, reject; const promise = new Promise((a, b) => { resolve = a; reject = b; }); return { promise, resolve, reject }; }
@@ -56,7 +57,7 @@ function fixture(themePicker) {
       }
     }
   };
-  const context = { document: { createElement: tag => new Node(tag), hidden: false }, Date: FixtureDate, TextEncoder, URL, Blob, atob, Option: function (text, value) { const n = new Node('option'); n.textContent = text; n.value = value; return n; }, navigator: {}, setInterval: () => 1, clearInterval() {}, setTimeout() {}, matchMedia: () => ({ matches: true }) };
+  const context = { document: { createElement: tag => { const node = new Node(tag); node.onShowModal = async modal => { if (modal.attrs['aria-labelledby'] !== 'room-entry-title-leave') return; const accepted = await confirmation(modal.textContent); const action = walk(modal).find(child => child.tagName === 'button' && child.textContent === (accepted ? snapshot.mode === 'host' ? '结束房间' : '退出房间' : snapshot.mode === 'host' ? '继续一起听' : '继续听')); action.onclick(); }; return node; }, hidden: false }, Date: FixtureDate, TextEncoder, URL, Blob, atob, Option: function (text, value) { const n = new Node('option'); n.textContent = text; n.value = value; return n; }, navigator: {}, setInterval: () => 1, clearInterval() {}, setTimeout() {}, matchMedia: () => ({ matches: true }) };
   context.window = context;
   context.HertzClipboard = { write: async value => copied.push(value) };
   if (themePicker) context.ThemePicker = themePicker;
@@ -185,7 +186,7 @@ async function main() {
     assert.ok(f.button('结束并退出'), 'exit failure keeps the host room');
     f.hooks.set('leave', async () => { f.set({ mode: 'local' }); return { mode: 'local' }; });
     await f.button('结束并退出').onclick();
-    assert.equal(f.root.dataset.roomPage, 'lobby', 'confirmed host exit returns to lobby');
+    assert.equal(f.root.dataset.roomPage, 'summary', 'confirmed host exit opens the listening summary');
   }
   {
     const f = fixture(); await settle(); f.set({ mode: 'guest' }); await f.poll();
@@ -205,7 +206,7 @@ async function main() {
     await f.button('结束并退出').onclick();
     oldPoll.resolve({ mode: 'host', room_id: 'room', instance_id: 'instance', member_id: 'owner', session_id: 's1' });
     await poll; await settle();
-    assert.equal(f.root.dataset.roomPage, 'lobby', 'a poll started before confirmed exit cannot resurrect the old room');
+    assert.equal(f.root.dataset.roomPage, 'summary', 'a poll started before confirmed exit cannot resurrect the old room');
   }
   {
     const f = fixture(); await settle();
@@ -534,14 +535,55 @@ async function main() {
   assert.equal(navigation.field('说点什么（最多 200 字）').value, '', 'drafts never cross memberships');
   navigation.api.destroy();
 
+  const admissions = fixture(); await settle();
+  const popup = () => walk(admissions.root).find(n => n.attrs['aria-labelledby'] === 'room-entry-title-admissions');
+  const dot = () => walk(admissions.root).find(n => n.className === 'room-member-dot');
+  const application = { id: 'new-application', name: '临窗听众', state: 'pending' };
+  admissions.set({ admission: { pending: [application] } }); await admissions.poll();
+  assert.equal(popup().open, true, 'a new application opens a review dialog');
+  assert.equal(dot().hidden, false, 'members retain a pending application dot');
+  await admissions.button('稍后处理').onclick(); await admissions.poll();
+  assert.equal(popup().open, false, 'polling cannot reopen a dismissed application');
+  assert.equal(dot().hidden, false, 'dismissal does not mark a pending application as handled');
+  admissions.set({ admission: { pending: [{ ...application, state: 'approved' }] } }); await admissions.poll();
+  assert.equal(dot().hidden, true, 'handling the last application clears the dot');
+  await admissions.button('＋ 点歌').onclick();
+  admissions.set({ admission: { pending: [{ ...application, id: 'another-application' }] } }); await admissions.poll();
+  assert.equal(popup().open, false, 'automatic review does not interrupt an open song picker');
+  walk(admissions.root).find(n => n.tagName === 'dialog' && n.open).children[0].children[1].onclick(); await admissions.poll();
+  assert.equal(popup().open, true, 'deferred application is presented when the form closes');
+  admissions.api.destroy();
+
+  const artwork = fixture(); await settle();
+  let artworkReads = 0;
+  artwork.hooks.set('resource', async request => {
+    if (request.kind === 'cover' && ++artworkReads === 1) throw new Error('transient cover failure');
+    const bytes = request.kind === 'cover' ? Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64') : Buffer.from('{"lines":[]}');
+    return { total: bytes.length, offset: 0, revision: 'cover-version', mime: request.kind === 'cover' ? 'image/gif' : 'application/json', base64: bytes.toString('base64') };
+  });
+  artwork.set({ current_track: { resource_id: 'artwork-song', has_cover: true, title: '夜航' } }); await artwork.poll();
+  const cover = () => walk(artwork.root).find(n => n.className === 'room-cover');
+  assert.equal(artworkReads, 1); assert.equal(cover().hidden, true);
+  await artwork.poll(); assert.equal(artworkReads, 1, 'cover failure does not retry on every poll');
+  artwork.advance(3001); await artwork.poll();
+  assert.equal(artworkReads, 2); assert.equal(cover().hidden, false, 'transient failure recovers without changing songs');
+  const previousCover = cover().src;
+  cover().onerror(); artwork.advance(6001); await artwork.poll();
+  assert.equal(artworkReads, 3); assert.notEqual(cover().src, previousCover, 'image decode failure revokes and refetches artwork');
+  cover().onerror(); artwork.advance(9001); await artwork.poll();
+  assert.equal(artworkReads, 3, 'retries stay bounded even for a permanently broken image');
+  artwork.api.destroy();
+
   const song = fixture(); await settle();
-  song.set({ current_track: { resource_id: 'shared-song', title: '<script>song</script>' + '长标题'.repeat(100), artist: 'Artist' } }); await song.poll();
+  song.hooks.set('queue_page', async () => ({ revision: '2', queue: [{ instance_id: 'song-instance', resource_id: 'shared-song' }], tracks: [{ resource_id: 'shared-song', title: 'Shared song' }] }));
+  song.set({ revision: '2', current_track: { resource_id: 'shared-song', title: '<script>song</script>' + '长标题'.repeat(100), artist: 'Artist' } }); await song.poll();
   song.hooks.set('chat_song', async () => { throw Object.assign(new Error('timeout'), { code: 'timeout', status: 504 }); });
-  await song.button('分享歌曲到聊天').onclick();
+  assert.equal(walk(song.root).some(n => n.tagName === 'button' && n.textContent === '分享歌曲到聊天'), false, 'now-playing shortcuts leave room for lyrics');
+  await song.button('分享歌曲').onclick();
   const songRequest = song.calls.find(c => c.action === 'chat_song');
   assert.equal(songRequest.resource_id, 'shared-song', 'song share sends a typed authorized resource reference');
   assert.equal(song.calls.filter(c => c.action === 'chat_send').length, 0, 'song share does not encode executable markup or a fake text card');
-  await song.button('分享歌曲到聊天').onclick();
+  await song.button('分享歌曲').onclick();
   assert.equal(song.calls.filter(c => c.action === 'chat_song').length, 1, 'unknown song share cannot be sent again');
   song.hooks.set('chat_operation', async () => ({ status: 'applied' }));
   await song.button('查询这条消息的发送结果').onclick();
@@ -759,6 +801,6 @@ async function main() {
   assert.equal(body.children[0].hidden, true, 'leaving the room removes the mini player');
   bar.render(trackSnapshot('C', 300000));
   assert.equal(collapse.getAttribute('aria-expanded'), 'true', 'a new room starts expanded');
-  console.log('Room UI: selected-track creation/no replay, background projection recovery, inline admission verification/retries, queue instance identity, reconnect receipts, history and session isolation passed.');
+  console.log('Room UI: selected-track creation/no replay, application dialogs/dots/deferred review, bounded artwork recovery, background projection recovery, inline admission verification/retries, queue instance identity, reconnect receipts, history and session isolation passed.');
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

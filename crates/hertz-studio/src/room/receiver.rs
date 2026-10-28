@@ -2461,7 +2461,7 @@ impl<D: DeviceOutput> Engine<D> {
 
 #[cfg(test)]
 #[path = "receiver_tests.rs"]
-mod tests;
+pub(super) mod tests;
 
 #[cfg(test)]
 mod registry_tests {

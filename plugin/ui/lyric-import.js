@@ -117,8 +117,8 @@
       } catch (error) { if (mine === serial) { candidate = null; apply.disabled = true; status.textContent = errorText(error); } }
       finally { if (mine === serial) controller = null; }
     }
-    form.addEventListener('submit', async function (event) {
-      event.preventDefault(); if (!same(picked, actions.selection())) { close(); return; }
+    window.hertzHost.onSubmit(form, async function () {
+      if (!same(picked, actions.selection())) { close(); return; }
       invalidate(); var mine = ++serial, target = picked; search.disabled = true; results.replaceChildren(); preview.replaceChildren();
       status.textContent = '正在搜索歌词候选…'; controller = new AbortController();
       try {

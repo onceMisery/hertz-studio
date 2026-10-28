@@ -5,7 +5,8 @@ const assert = require('node:assert/strict'), fs = require('node:fs'), path = re
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const { startFixture } = require('./ui-browser-fixture');
 const { readAssets } = require('./ui-assets');
-const root = path.resolve(__dirname, '..'), web = path.join(root, 'plugin/ui'), output = path.join(root, 'output/playwright/phoenix');
+const root = path.resolve(__dirname, '..'), web = path.join(root, 'plugin/ui');
+const output = process.env.PHOENIX_TEST_OUTPUT ? path.resolve(process.env.PHOENIX_TEST_OUTPUT) : path.join(root, 'output/playwright/phoenix');
 
 async function previewContract(browser) {
   const page = await browser.newPage({ viewport: { width: 960, height: 540 } }), errors = [];
@@ -234,6 +235,33 @@ async function fireContract(browser) {
       eggUniforms.uFlash.value = 1;
       const flashed = pixels();
       const egg = { eggPixels: difference(glowing, noEgg), flashPixels: difference(flashed, dim), counts };
+      const nearEmbers = scene.getObjectByName('phoenix-near-embers');
+      const depthScene = new THREE.Scene(), shell = scene.getObjectByName('phoenix-egg');
+      const depthShell = new THREE.Mesh(shell.geometry, shell.material);
+      depthShell.position.copy(shell.position); depthShell.quaternion.copy(shell.quaternion); depthShell.scale.copy(shell.scale);
+      depthShell.renderOrder = shell.renderOrder; depthScene.add(depthShell);
+      const sampleGeometry = nearEmbers.geometry.clone(); sampleGeometry.setDrawRange(0, 1);
+      const depthEmber = new THREE.Points(sampleGeometry, nearEmbers.material);
+      depthEmber.renderOrder = nearEmbers.renderOrder; depthEmber.frustumCulled = false; depthScene.add(depthEmber);
+      const saved = Object.fromEntries(['uTime', 'uEgg', 'uFlash', 'uHatch'].map(name => [name, uniforms[name].value]));
+      const depthTest = depthEmber.material.depthTest;
+      let occlusion;
+      try {
+        for (const [name, value] of Object.entries({ uTime: 0, uEgg: 1, uFlash: 0, uHatch: 0 })) uniforms[name].value = value;
+        depthEmber.visible = false; const shellOnly = pixels(depthScene); depthEmber.visible = true;
+        const life = (.9 + 5.6) / 12, seeds = sampleGeometry.getAttribute('aEmber');
+        const sample = angle => {
+          seeds.setXYZW(0, life, (angle - life * .8) / (Math.PI * 2), 0, 1); seeds.needsUpdate = true;
+          return difference(shellOnly, pixels(depthScene));
+        };
+        occlusion = { foreground: sample(Math.PI / 2), background: sample(-Math.PI / 2) };
+        depthEmber.material.depthTest = false;
+        occlusion.backgroundUnoccluded = sample(-Math.PI / 2);
+      } finally {
+        depthEmber.material.depthTest = depthTest;
+        for (const [name, value] of Object.entries(saved)) uniforms[name].value = value;
+        sampleGeometry.dispose();
+      }
       // Measure the actual auto performance: both generations must coexist for
       // several seconds, and the hero must finish dissolving before gathering.
       instance.setParams({ performance: 'auto' });
@@ -298,10 +326,123 @@ async function fireContract(browser) {
       up.head.forEach((lit, i) => { if (lit && down.head[i]) headIntersection++; if (lit || down.head[i]) headUnion++; });
       const wingbeat = { leftTravel: up.left - down.left, rightTravel: up.right - down.right,
         headOverlap: headIntersection / headUnion, upImage: up.image, downImage: down.image };
+      const skin = hero.getObjectByName('phoenix-reference-skin'), geometry = skin.geometry;
+      const positions = geometry.getAttribute('position'), surfaces = geometry.getAttribute('aSurface'), tailIndices = [];
+      for (let i = 0; i < geometry.index.count; i += 3) {
+        const triangle = [0, 1, 2].map(j => geometry.index.getX(i + j));
+        if (triangle.every(index => positions.getY(index) < -2.15)) tailIndices.push(...triangle);
+      }
+      const tailGeometry = geometry.clone(); tailGeometry.setIndex(tailIndices);
+      const tailScene = new THREE.Scene(); tailScene.background = new THREE.Color(0x000000);
+      const tailMesh = new THREE.Mesh(tailGeometry, skin.material); tailMesh.position.set(0, .9, 0); tailMesh.frustumCulled = false;
+      tailScene.add(tailMesh);
+      const range = values => Math.max(...values) - Math.min(...values);
+      const thresholds = [60, 140], tailFrames = [], poses = [];
+      let lastTail;
+      for (let i = 0; i < 64; i++) {
+        instance.update(frame);
+        lastTail = pixels(tailScene);
+        poses.push(Object.fromEntries(['uTime', 'uFlap', 'uSweep', 'uWingLift'].map(name => [name, uniforms[name].value])));
+        tailFrames.push(thresholds.map(threshold => {
+          const columns = new Uint32Array(1280);
+          let count = 0, sumX = 0, edgePixels = 0;
+          for (let y = 0; y < 720; y++) for (let x = 0; x < 1280; x++) {
+            const at = (y * 1280 + x) * 4;
+            if (lastTail[at] + lastTail[at + 1] + lastTail[at + 2] <= threshold) continue;
+            columns[x]++; count++; sumX += x;
+            if (x < 2 || x > 1277 || y < 2 || y > 717) edgePixels++;
+          }
+          let cumulative = 0, low = -1, high = -1;
+          for (let x = 0; x < 1280; x++) {
+            cumulative += columns[x];
+            if (low < 0 && cumulative >= count * .05) low = x;
+            if (high < 0 && cumulative >= count * .95) high = x;
+          }
+          return { count, centroid: sumX / count, boundsCenter: (low + high) / 2, edgePixels };
+        }));
+      }
+      instance.update({ ...frame, reduced: true, time: 999 });
+      const tail = { samples: poses.length, duration: poses[poses.length - 1].uTime - poses[0].uTime,
+        freezeDifference: difference(lastTail, pixels(tailScene)), thresholds: thresholds.map((threshold, i) => ({ threshold,
+          minLit: Math.min(...tailFrames.map(frame => frame[i].count)),
+          edgePixels: Math.max(...tailFrames.map(frame => frame[i].edgePixels)),
+          centroidTravel: range(tailFrames.map(frame => frame[i].centroid)),
+          boundsTravel: range(tailFrames.map(frame => frame[i].boundsCenter)) })) };
+      tailGeometry.dispose();
+      const targets = [[-1.8, 1.55], [-3.3, 2.45], [-5, 3.8], [1.8, 1.55], [3.3, 2.45], [5, 3.8],
+        [.1, .8], [.1, 3.1], [.1, 4], [-1.5, -3], [0, -4.3], [1.3, -4.3]];
+      const landmarks = targets.map(([x, y]) => {
+        let nearest = -1, distance = Infinity;
+        for (let i = 0; i < positions.count; i++) {
+          if (surfaces.getX(i) < .5) continue;
+          const d = (positions.getX(i) - x) ** 2 + (positions.getY(i) - y) ** 2;
+          if (d < distance) { distance = d; nearest = i; }
+        }
+        if (nearest < 0 || distance > .75 ** 2) throw new Error('Missing painted motion landmark: ' + [x, y]);
+        return nearest;
+      });
+      const program = gl.createProgram(), shaders = [], buffers = [], vao = gl.createVertexArray(), feedback = gl.createTransformFeedback();
+      const compile = (type, source) => {
+        const shader = gl.createShader(type); shaders.push(shader); gl.shaderSource(shader, source); gl.compileShader(shader);
+        if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(shader));
+        gl.attachShader(program, shader);
+      };
+      let articulation;
+      try {
+        const renderedProgram = renderer.properties.get(skin.material).currentProgram;
+        compile(gl.VERTEX_SHADER, gl.getShaderSource(renderedProgram.vertexShader));
+        compile(gl.FRAGMENT_SHADER, '#version 300 es\nprecision highp float;out vec4 color;void main(){color=vec4(1.0);}');
+        gl.transformFeedbackVaryings(program, ['vViewPosition'], gl.INTERLEAVED_ATTRIBS); gl.linkProgram(program);
+        if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(program));
+        gl.useProgram(program); gl.bindVertexArray(vao);
+        for (const name of ['position', 'uv', 'aSurface']) {
+          const location = gl.getAttribLocation(program, name);
+          if (location < 0) continue;
+          const attribute = geometry.getAttribute(name), buffer = gl.createBuffer(); buffers.push(buffer);
+          const data = new Float32Array(landmarks.length * attribute.itemSize);
+          landmarks.forEach((index, i) => {
+            for (let j = 0; j < attribute.itemSize; j++) data[i * attribute.itemSize + j] = attribute.array[index * attribute.itemSize + j];
+          });
+          gl.bindBuffer(gl.ARRAY_BUFFER, buffer); gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
+          gl.enableVertexAttribArray(location); gl.vertexAttribPointer(location, attribute.itemSize, gl.FLOAT, false, 0, 0);
+        }
+        const identity = new THREE.Matrix4().elements;
+        for (const name of ['modelViewMatrix', 'projectionMatrix']) gl.uniformMatrix4fv(gl.getUniformLocation(program, name), false, identity);
+        gl.uniform1f(gl.getUniformLocation(program, 'uPointerAmount'), 0);
+        gl.uniform3f(gl.getUniformLocation(program, 'uPointer'), 0, 0, 0);
+        const buffer = gl.createBuffer(); buffers.push(buffer);
+        gl.bindBuffer(gl.TRANSFORM_FEEDBACK_BUFFER, buffer);
+        gl.bufferData(gl.TRANSFORM_FEEDBACK_BUFFER, landmarks.length * 3 * 4, gl.STREAM_READ);
+        gl.bindTransformFeedback(gl.TRANSFORM_FEEDBACK, feedback); gl.bindBufferBase(gl.TRANSFORM_FEEDBACK_BUFFER, 0, buffer);
+        gl.enable(gl.RASTERIZER_DISCARD);
+        const samples = poses.map(pose => {
+          for (const [name, value] of Object.entries(pose)) gl.uniform1f(gl.getUniformLocation(program, name), value);
+          gl.beginTransformFeedback(gl.POINTS); gl.drawArrays(gl.POINTS, 0, landmarks.length); gl.endTransformFeedback();
+          const data = new Float32Array(landmarks.length * 3); gl.getBufferSubData(gl.TRANSFORM_FEEDBACK_BUFFER, 0, data);
+          if (!data.every(Number.isFinite)) throw new Error('Non-finite phoenix transform feedback');
+          return landmarks.map((_, i) => new THREE.Vector3().fromArray(data, i * 3));
+        });
+        const angle = (sample, start) => sample[start + 1].clone().sub(sample[start]).angleTo(sample[start + 2].clone().sub(sample[start + 1]));
+        articulation = {
+          leftAngleTravel: range(samples.map(sample => angle(sample, 0))), rightAngleTravel: range(samples.map(sample => angle(sample, 3))),
+          anchorTravel: Math.max(...samples.flatMap(sample => [6, 7, 8].map(i => sample[i].distanceTo(new THREE.Vector3().fromBufferAttribute(positions, landmarks[i]))))),
+          tailTravel: [9, 10, 11].map(i => range(samples.map(sample => sample[i].x))),
+          shoulderWristSpan: [0, 3].map(i => Math.min(...samples.map(sample => sample[i].distanceTo(sample[i + 1])))),
+          wristTipSpan: [0, 3].map(i => Math.min(...samples.map(sample => sample[i + 1].distanceTo(sample[i + 2])))),
+          glError: gl.getError() };
+      } finally {
+        gl.disable(gl.RASTERIZER_DISCARD); gl.bindTransformFeedback(gl.TRANSFORM_FEEDBACK, null);
+        gl.bindBuffer(gl.TRANSFORM_FEEDBACK_BUFFER, null); gl.bindVertexArray(null); gl.useProgram(null);
+        gl.deleteTransformFeedback(feedback); gl.deleteVertexArray(vao); buffers.forEach(buffer => gl.deleteBuffer(buffer));
+        gl.deleteProgram(program); shaders.forEach(shader => gl.deleteShader(shader)); renderer.resetState();
+      }
       parent.add(hero);
       instance.dispose(); scope.dispose(); renderer.dispose();
-      return { flock, egg, orientation, transition, wingbeat };
+      return { flock, egg, occlusion, orientation, transition, wingbeat, tail, articulation };
     });
+    assert.ok(evidence.occlusion.foreground > 10, 'foreground embers remain visible in front of the egg: ' + evidence.occlusion.foreground);
+    assert.ok(evidence.occlusion.backgroundUnoccluded > 3, 'the background ember projects inside the visible shell');
+    assert.equal(evidence.occlusion.background, 0, 'the egg occludes embers behind its shell');
     assert.ok(evidence.flock.firePixels > 500, 'burning changes actual fledgling pixels');
     assert.ok(evidence.flock.flamePixels > 100, 'the outer flame layer contributes visible pixels');
     assert.ok(evidence.flock.emberPixels > 20, 'attached ember trails contribute visible pixels: ' + evidence.flock.emberPixels);
@@ -338,6 +479,20 @@ async function fireContract(browser) {
       fs.writeFileSync(path.join(output, `wingbeat-${pose}.png`), Buffer.from(beat[pose + 'Image'], 'base64'));
       delete beat[pose + 'Image'];
     }
+    const tail = evidence.tail, joints = evidence.articulation;
+    assert.ok(tail.duration > 6, 'tail sampling covers full wingbeats and the slower trailing motion');
+    assert.equal(tail.freezeDifference, 0, 'the actual isolated tail freezes in reduced motion');
+    for (const sample of tail.thresholds) {
+      assert.ok(sample.minLit > 2000 && sample.edgePixels === 0, 'the isolated painted tail stays visible and unclipped: ' + JSON.stringify(sample));
+      assert.ok(sample.centroidTravel > 18 && sample.boundsTravel > 18,
+        'the painted tail visibly sways beyond the old near-static motion at both brightness thresholds: ' + JSON.stringify(sample));
+    }
+    assert.equal(joints.glError, 0, 'actual hero vertex shader transform feedback has no WebGL errors');
+    assert.ok(joints.shoulderWristSpan.every(span => span > .5) && joints.wristTipSpan.every(span => span > .5), 'wing landmarks do not collapse');
+    assert.ok(joints.leftAngleTravel > .18 && joints.rightAngleTravel > .18,
+      'both shoulder-wrist-tip angles flex by at least .18 radians, not just a rigid wing rotation: ' + JSON.stringify(joints));
+    assert.ok(joints.anchorTravel < .00001, 'the breast, neck and crown remain fixed in the actual vertex shader: ' + joints.anchorTravel);
+    assert.ok(joints.tailTravel.every(travel => travel > .45), 'tail sway moves actual vertices, not just flame shading: ' + JSON.stringify(joints.tailTravel));
     assert.deepEqual(errors, [], 'fire and egg layers compile and render without WebGL errors');
     return evidence;
   } finally { await page.close(); }

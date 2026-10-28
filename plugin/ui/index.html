@@ -239,6 +239,11 @@
   <symbol id="i-arrow-left" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
     <path d="m12 19-7-7 7-7M5 12h14"/>
   </symbol>
+  <!-- 房间弹幕/聊天记录：方泡 + 两行文字，区别于 i-lyrics 的竖排词行 -->
+  <symbol id="i-chat" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+    <path d="M8 9h8M8 12h5"/>
+  </symbol>
   <symbol id="i-undo" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
           stroke-linecap="round" stroke-linejoin="round">
     <!-- 整体右移 1：原图形贴到 x=0，在一排居中绘制的图标里会明显偏左。 -->
@@ -453,10 +458,6 @@
       <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-headphones"/></svg>
       <span>播客</span>
     </button>
-    <button class="rail-item" data-view="reader" aria-label="阅读">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-rss"/></svg>
-      <span>阅读</span>
-    </button>
     <button class="rail-item" data-view="playlists" aria-label="歌单">
       <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-playlist"/></svg>
       <span>歌单</span>
@@ -473,6 +474,10 @@
     </button>
     <button class="rail-item" data-view="room" aria-label="局域网一起听">
       <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-headphones"/></svg><span>一起听</span>
+    </button>
+    <button class="rail-item" data-view="reader" aria-label="阅读">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-rss"/></svg>
+      <span>阅读</span>
     </button>
     <div class="rail-spacer"></div>
     <button class="rail-item" data-view="settings" aria-label="设置">
@@ -724,19 +729,21 @@
     <!-- /播客 -->
     <!-- 阅读 -->
     <div class="view" id="view-reader" hidden>
+      <nav class="reader-rail" aria-label="应用导航">
+        <button id="reader-home" class="reader-brand" type="button" aria-label="返回曲库">h</button>
+        <div id="reader-nav" class="reader-nav"></div>
+        <span class="reader-rail-foot">慢慢读</span>
+      </nav>
+      <aside class="reader-library" aria-label="订阅与文章">
       <div class="col-head">
         <div class="col-head-left">
           <h2 class="col-title">阅读</h2>
           <span id="reader-count" class="count">博客与新闻 · 公开 RSS/Atom</span>
         </div>
         <div class="col-tools">
-          <button id="reader-refresh" class="btn" type="button" disabled title="选择一个订阅源后刷新">刷新当前源</button>
-          <button id="reader-fullscreen" class="btn reader-fullscreen-btn" type="button" aria-pressed="false" title="网页全屏" aria-label="网页全屏">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-fullscreen"/></svg>
-          </button>
+          <button id="reader-refresh" class="btn" type="button" disabled title="选择一个订阅源后刷新" aria-label="刷新当前源"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5M6.1 7a7 7 0 0 1 11.8-1L20 9M4 15l2.1 3A7 7 0 0 0 17.9 17"/></svg></button>
         </div>
       </div>
-      <div class="reader-layout">
         <aside class="reader-feeds" aria-label="订阅源">
           <h3 class="reader-pane-title">我的订阅</h3>
           <form id="reader-add" class="reader-add">
@@ -745,13 +752,6 @@
           </form>
           <button id="reader-all" class="reader-all active" type="button" aria-pressed="true">全部订阅<span id="reader-total" class="reader-unread" hidden></span></button>
           <ul id="reader-feed-list" class="reader-feed-list" role="list"></ul>
-          <section class="reader-picks" aria-labelledby="reader-picks-title">
-            <h3 id="reader-picks-title" class="reader-pane-title">推荐</h3>
-            <a class="reader-pick" href="https://jackyst0.github.io/awesome-rsshub-routes/" target="_blank" rel="noopener noreferrer">
-              <span class="reader-pick-title">RSS 源列表 · Awesome RSSHub Routes</span>
-              <span class="reader-pick-note">按网站与分类查找可订阅的公开 RSS 源</span>
-            </a>
-          </section>
         </aside>
         <section class="reader-list-pane" aria-label="文章列表">
           <p id="reader-status" class="reader-status" role="status" aria-live="polite"></p>
@@ -763,6 +763,30 @@
           <ul id="reader-entry-list" class="reader-entry-list" role="list"></ul>
           <button id="reader-more" class="btn reader-more" type="button" hidden>加载更多文章</button>
         </section>
+        <section class="reader-picks" aria-labelledby="reader-picks-title">
+          <h3 id="reader-picks-title" class="reader-pane-title">推荐订阅</h3>
+          <a class="reader-pick" href="https://jackyst0.github.io/awesome-rsshub-routes/" target="_blank" rel="noopener noreferrer">
+            <span class="reader-pick-title">RSS 源列表 · Awesome RSSHub Routes ↗</span>
+            <span class="reader-pick-note">发现值得慢慢读的博客与新闻</span>
+          </a>
+        </section>
+      </aside>
+      <main class="reader-workspace" aria-label="阅读器">
+        <header class="reader-bar">
+          <button id="reader-library-toggle" class="btn reader-library-toggle" type="button" aria-label="返回订阅与文章列表">文章</button>
+          <div class="reader-crumb"><span>阅读</span><span class="reader-slash">/</span><span id="reader-crumb-title">留一点时间给阅读</span></div>
+          <div class="reader-tools">
+            <span class="reader-progress-pill"><span id="reader-progress-ring" class="reader-progress-ring"></span><span id="reader-progress-text">0%</span></span>
+            <div class="reader-font-size" role="group" aria-label="正文字号">
+              <button id="reader-size-down" type="button" aria-label="缩小字号">A−</button><output id="reader-size-value">19</output><button id="reader-size-up" type="button" aria-label="放大字号">A+</button>
+            </div>
+            <button id="reader-font-toggle" class="btn" type="button" aria-label="切换宋体与黑体" aria-pressed="false">宋</button>
+            <button id="reader-theme-toggle" class="btn" type="button" aria-label="切换深色阅读" aria-pressed="false">☼</button>
+            <button id="reader-outline-toggle" class="btn" type="button" aria-expanded="false" aria-controls="reader-outline">目录</button>
+            <button id="reader-fullscreen" class="btn reader-fullscreen-btn" type="button" aria-pressed="false" title="网页全屏" aria-label="网页全屏"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-fullscreen"/></svg></button>
+          </div>
+        </header>
+        <div class="reader-progress-track"><span id="reader-progress-fill"></span></div>
         <article class="reader-article" aria-label="正文" aria-busy="false">
           <button id="reader-back" class="btn reader-back" type="button">← 返回文章列表</button>
           <div id="reader-welcome" class="reader-welcome">
@@ -771,6 +795,7 @@
             <p>订阅你喜欢的博客与新闻，留在这里慢慢读。<br>正文图片在你选择后加载。</p>
           </div>
           <div id="reader-entry-head" class="reader-entry-head" hidden>
+            <div class="reader-kicker"><span></span><span id="reader-source-label">订阅精选</span></div>
             <h2 id="reader-entry-title" tabindex="-1"></h2>
             <p id="reader-entry-meta" class="reader-entry-meta"></p>
             <div class="reader-entry-actions">
@@ -782,8 +807,23 @@
           <p id="reader-entry-status" class="reader-status" role="status" aria-live="polite"></p>
           <button id="reader-retry" class="btn reader-retry" type="button" hidden>重试加载正文</button>
           <div id="reader-content" class="reader-content" hidden></div>
+          <nav id="reader-pager" class="reader-pager" aria-label="上一篇与下一篇" hidden><button id="reader-prev" type="button"><small>上一篇</small><span></span></button><button id="reader-next" type="button"><small>下一篇</small><span></span></button></nav>
         </article>
-      </div>
+      </main>
+      <aside id="reader-outline" class="reader-outline" aria-label="章节目录">
+        <header class="reader-outline-head"><span>目录 <small id="reader-outline-count">0 节</small></span><button id="reader-outline-close" class="btn" type="button" aria-label="关闭目录">×</button></header>
+        <nav class="reader-toc-nav" aria-label="文章章节"><ol id="reader-toc" class="reader-toc"></ol><p id="reader-toc-empty">打开文章后，在这里查看章节。</p></nav>
+        <div class="reader-progress-card">
+          <div class="reader-stat-row"><span>阅读进度</span><span id="reader-section-position">—</span></div>
+          <div class="reader-progress-big"><span id="reader-progress-big">0</span><small>%</small></div>
+          <div class="reader-progress-track"><span id="reader-outline-fill"></span></div>
+          <div class="reader-stat-row"><span>全文字数</span><b id="reader-word-count">—</b></div>
+          <div class="reader-stat-row"><span>预计剩余</span><b id="reader-time-left">—</b></div>
+          <div class="reader-stat-row"><span>当前字号</span><b id="reader-outline-size">19 px</b></div>
+        </div>
+        <p class="reader-outline-foot">滚动正文时，目录会自动跟随。</p>
+      </aside>
+      <button id="reader-scrim" class="reader-scrim" type="button" aria-label="关闭目录"></button>
     </div>
     <!-- /阅读 -->
     <div class="view" id="view-online" hidden>

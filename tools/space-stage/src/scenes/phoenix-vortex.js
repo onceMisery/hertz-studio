@@ -5,7 +5,7 @@ import { basicInstance, own, qualityDensity, root, seed } from './factories.js';
 import { createParticlePointer, particleNoiseShader } from './particle-pointer.js';
 import { approach, createGlow, createShockPool, createStarfield, faceCamera, TAU } from './scene-field.js';
 import { createPhoenixArtwork, buildPhoenixReference, buildPhoenixGeometry, phoenixDeparturePoints, phoenixSkinning, phoenixDissolve, phoenixEggShape, buildEggGeometry } from './phoenix-form.js';
-import { phoenixAtmosphereVertex, phoenixAtmosphereFragment, createPhoenixStarTravel } from './phoenix-atmosphere.js';
+import { phoenixAtmosphereVertex, phoenixAtmosphereFragment, createPhoenixStarTravel, createPhoenixSanctum } from './phoenix-atmosphere.js';
 
 const PHOENIXES = 16, DUST = 15000, TRAILS = 760, SHARDS = 120;
 const NEST = [0, .9, .2];
@@ -179,10 +179,14 @@ void main(){
  alpha*=fire*shimmer*.32;
  #else
  vec3 n=normalize(cross(dFdx(vViewPosition),dFdy(vViewPosition)));
- float light=.70+.34*max(0.0,dot(n,normalize(vec3(-.3,.65,1.0))));
+ vec3 view=normalize(-vViewPosition);
+ float key=max(0.0,dot(n,normalize(vec3(-.65,.9,.75))));
+ float rim=pow(1.0-abs(dot(n,view)),2.1);
+ float fill=max(0.0,dot(n,normalize(vec3(.8,.15,-.6))));
  float back=1.0-smoothstep(-.7,.1,vSurface);
- color*=light*mix(vec3(1.0),vec3(.85,.69,.54),back);
- color=mix(color,max(color,vec3(.48,.075,.008)),edge*.75);
+ color*=mix(vec3(.58)+vec3(.48,.43,.35)*key,vec3(.46,.34,.24)+key*.44,back);
+ color+=vec3(.18,.24,.26)*fill*rim+vec3(.48,.19,.035)*rim;
+ color=mix(color,max(color,vec3(.48,.075,.008)),edge*.65);
  color+=vec3(.65,.12,.006)*ember;
  #endif
  if(alpha<.006)discard;
@@ -481,7 +485,7 @@ void main(){
  float filament=pow(.5+.5*cos(spiral+fbm(p*1.5)*2.3),22.0);
  float cloud=fbm(p*1.8+vec2(t*.25,-t*.2));
  float lanes=exp(-pow((r-2.1)/.2,2.0))+.6*exp(-pow((r-4.3)/.24,2.0));
- float alpha=(cloud*.06+(ridge*.8+filament*.55)*cloud*uGather+lanes*(.1+uBass*uResponse*.08)*uGather);
+ float alpha=(cloud*.025+(ridge*.38+filament*.24)*cloud*uGather+lanes*(.05+uBass*uResponse*.04)*uGather);
  alpha*=smoothstep(.16,.75,r)*(1.0-smoothstep(5.2,10.8,r))*(1.0+uFlash*.6)*(1.0+uEgg*.25);
  vec3 color=mix(vec3(.7,.025,.004),vec3(.9,.24,.025),smoothstep(.4,4.2,r));
  color*=1.0+uBass*uResponse*.2+uFlash*.3;
@@ -656,6 +660,7 @@ export function createPhoenixVortex(ctx) {
   atmosphere.name = 'phoenix-deep-space'; atmosphere.renderOrder = -20; atmosphere.frustumCulled = false; world.add(atmosphere);
   const stars = createStarfield(ctx, world, { count: 1800, near: 30, far: 72, palette: [0xd9e9ff, 0x8bb7ec, 0xffdab0], opacity: .65, size: [.55, 1.5] });
   const starTravel = createPhoenixStarTravel(ctx, world, uniforms);
+  const sanctum = createPhoenixSanctum(ctx, world, uniforms);
 
   const spawnQuat = new T.Quaternion(), parentQuat = new T.Quaternion(), cameraQuat = new T.Quaternion();
   const strikePoint = new T.Vector3(), shockPoint = new T.Vector3();
@@ -673,8 +678,9 @@ export function createPhoenixVortex(ctx) {
     shards.count = Math.max(24, Math.floor(SHARDS * Math.max(.55, fraction)));
     dust.geometry.setDrawRange(0, Math.floor(DUST * fraction));
     trails.geometry.setDrawRange(0, Math.floor(TRAILS * fraction) * 2);
-    uniforms.uFine.value = profile?.mode === 'low' ? 0 : 1; stars.setDensity(fraction);
-    starTravel.setDensity(fraction);
+    uniforms.uFine.value = profile?.mode === 'low' ? 0 : 1; stars.setDensity(fraction * .55);
+    starTravel.setDensity(fraction * .65);
+    sanctum.setDensity(fraction);
   }
 
   function startRitual() {
@@ -727,11 +733,11 @@ export function createPhoenixVortex(ctx) {
     uniforms.uHatch.value = uniforms.uGhost.value;
     uniforms.uStrikeAge.value = Math.min(10, strikeAge);
     uniforms.uShardAge.value = Math.min(10, shardAge); uniforms.uShardPower.value = shardPower;
-    uniforms.uSpeed.value = .16 * flight + flash * .08;
+    uniforms.uSpeed.value = .07 * flight + flash * .04;
     // A deliberate downstroke and softer recovery, roughly one beat per 2.4s.
     const beat = time * 2.65 - .22 * Math.sin(time * 2.65);
     uniforms.uFlap.value = .13 + Math.sin(beat) * .34 + uniforms.uBass.value * uniforms.uResponse.value * .025;
-    uniforms.uSweep.value = Math.sin(beat - .55) * .18;
+    uniforms.uSweep.value = Math.sin(beat - .55) * .29;
     uniforms.uWingLift.value = emerging ? .4 * (1 - smooth(0, 2.7, hatchAge)) : .02;
     uniforms.uSize.value = params.pointSize ?? 1; uniforms.uResponse.value = params.reactivity ?? .7;
     uniforms.uStir.value = stirPhase;

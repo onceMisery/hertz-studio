@@ -367,8 +367,8 @@
       if (el('podcast-query').value.trim()) search(el('podcast-query').value);
       else browse('discover');
     };
-    el('podcast-search').onsubmit = function (event) { event.preventDefault(); search(el('podcast-query').value); };
-    el('podcast-import').onsubmit = function (event) { event.preventDefault(); importFeed(); };
+    window.hertzHost.onSubmit(el('podcast-search'), function () { search(el('podcast-query').value); });
+    window.hertzHost.onSubmit(el('podcast-import'), function () { importFeed(); });
     document.querySelectorAll('[data-podcast-tab]').forEach(function (button) {
       button.onclick = function () { browse(button.dataset.podcastTab); };
     });

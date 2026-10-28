@@ -1142,6 +1142,57 @@ fn queued_handle(engine: &Engine<FakeOutput>) -> (ReceiverHandle, mpsc::Receiver
     )
 }
 
+/// Drives the host's real command ingress and native engine without a sound card.
+pub(in crate::room) struct HostReceiver {
+    engine: Engine<FakeOutput>,
+    inbox: mpsc::Receiver<Envelope>,
+    status: watch::Sender<ReceiverStatus>,
+}
+
+impl HostReceiver {
+    pub(in crate::room) fn new(identity: StreamIdentity) -> (ReceiverHandle, Self) {
+        let mut engine = engine();
+        engine.identity = identity;
+        engine.output.as_mut().unwrap().valid = false;
+        let (mut handle, inbox) = queued_handle(&engine);
+        let (status, status_rx) = watch::channel(handle.status());
+        handle.status = status_rx;
+        (
+            handle,
+            Self {
+                engine,
+                inbox,
+                status,
+            },
+        )
+    }
+
+    pub(in crate::room) fn step(
+        &mut self,
+        now: u64,
+        output_ready: bool,
+    ) -> (ReceiverStatus, Vec<ReceiverEvent>) {
+        let output = self.engine.output.as_mut().unwrap();
+        output.now = now;
+        output.valid = output_ready;
+        self.engine.mapping = Some(mapping(now, 0.0));
+        let mut events = Vec::new();
+        while let Ok(envelope) = self.inbox.try_recv() {
+            let command = envelope.into_command(0).unwrap();
+            self.engine
+                .command(self.engine.observe(|| now), command, &mut events);
+        }
+        self.engine.tick(self.engine.observe(|| now), &mut events);
+        let status = self.engine.status(self.engine.observe(|| now));
+        self.status.send_replace(status.clone());
+        (status, events)
+    }
+
+    pub(in crate::room) fn render(&mut self, at: u64, frames: usize) -> Vec<f32> {
+        self.engine.output.as_mut().unwrap().render(at, frames)
+    }
+}
+
 #[test]
 fn accepted_volume_survives_native_fault_before_dispatch_and_silences_fresh_pcm() {
     let mut engine = engine();

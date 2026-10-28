@@ -564,6 +564,17 @@ input.opl-filter{flex:none;width:190px;height:30px;padding:0 10px;
 .online-error-actions .btn{padding:4px 12px;font-size:12px}
 /* 实际档位标（now-tech 内） */
 .actual-q{font-size:10px;color:#ffc46b;margin-left:6px}
+/* Online rows can have four actions. Reserve their intrinsic width so they
+   cannot overflow backwards into the duration column. */
+.online-row { grid-template-columns:30px 40px minmax(0,1fr) minmax(0,.62fr) 88px 52px auto; }
+.online-row .t-actions { width:max-content; min-width:max-content; gap:6px; }
+.online-row .t-dur { font-variant-numeric:tabular-nums; white-space:nowrap; }
+@media(max-width:1240px) {
+  .online-row { grid-template-columns:30px 40px minmax(0,1fr) minmax(0,.5fr) 80px 52px auto; }
+}
+@media(max-width:900px) {
+  .online-row { grid-template-columns:28px 40px minmax(0,1fr) 80px 48px auto; }
+}
 /* FM shares the player and stays compact beside search on narrow screens. */
 .online-radio { display:flex; align-items:center; gap:16px; flex-wrap:wrap; padding:16px; margin:12px 0; border:1px solid var(--glass-line); border-radius:12px; }
 .online-radio-copy { flex:1 1 220px; min-width:0; }

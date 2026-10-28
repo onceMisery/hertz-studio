@@ -25,7 +25,7 @@ async function main() {
       return route.fulfill({ contentType: file.endsWith('.css') ? 'text/css' : 'text/html', body });
     });
     await page.goto('http://room-player.test/');
-    for (const file of ['themes.js', 'favorites.js', 'room-transport.js', 'room-workspace.js', 'room-view.js', 'room.js']) await page.addScriptTag({ content: source(file) });
+    for (const file of ['host.js', 'themes.js', 'favorites.js', 'room-transport.js', 'room-workspace.js', 'room-view.js', 'room.js']) await page.addScriptTag({ content: source(file) });
     await page.evaluate(async () => {
       Theme.init(); Theme.apply('orbit-fog');
       window.__requests = [];

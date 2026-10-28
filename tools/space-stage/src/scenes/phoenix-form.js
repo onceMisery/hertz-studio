@@ -39,8 +39,9 @@ function profile(x, y) {
   const breast = Math.exp(-Math.pow((x - spine) / .64, 2) - Math.pow((y - .65) / 2.5, 4));
   const neck = Math.exp(-Math.pow((x - .12) / .36, 2) - Math.pow((y - 2.75) / 1.1, 2));
   const wing = Math.exp(-Math.pow((Math.abs(x) - 1.6) / 2.4, 2) - Math.pow((y - 1.6) / 2.6, 2));
-  return { center: Math.sin(x * .7) * .06 + Math.max(0, Math.abs(x) - 1) * .045,
-    depth: .045 + breast * .67 + neck * .28 + wing * .12 };
+  const span = Math.max(0, Math.abs(x) - 1);
+  return { center: Math.sin(x * .7) * .06 + span * .085 + wing * Math.sin((y - 1.1) * .85) * .32,
+    depth: .045 + breast * .67 + neck * .28 + wing * .16 };
 }
 
 // Keep the approved painting's complete silhouette and UV layout. Depth is a
@@ -176,26 +177,33 @@ vec3 phoenixSkin(vec3 p,float time,float flap,float sweep,float lift,float bank)
 }
 vec3 phoenixHeroSkin(vec3 p,float time,float flap,float sweep,float lift){
  vec3 rest=p;
- float side=sign(rest.x);
- float wing=smoothstep(.6,1.65,abs(rest.x))*smoothstep(-1.6,.25,rest.y);
- float span=smoothstep(1.5,5.5,abs(rest.x));
+ float side=sign(rest.x), distance=abs(rest.x);
+ float wing=smoothstep(.6,1.65,distance)*smoothstep(-1.6,.25,rest.y);
+ float span=smoothstep(1.5,5.5,distance);
  float beat=time*2.65-.22*sin(time*2.65);
+ float asymmetry=side*.07*sin(time*.63);
+ float delayed=beat-span*.82+asymmetry;
  vec2 shoulder=vec2(.65*side,1.25);
- // Rotate the painted wings around their shoulders, leaving the breast and
- // crown intact. The wrist follows a little later instead of moving as a board.
- float wrist=sin(beat-.55)*span*.075;
- p.xy=turn(side*(flap-lift*.35+wrist)*wing)*(p.xy-shoulder)+shoulder;
- float recovery=smoothstep(-.15,.8,-cos(beat));
- p.x=shoulder.x+(p.x-shoulder.x)*(1.0-recovery*span*wing*.045);
- vec2 depth=turn(-side*sweep*wing)*vec2(p.x-shoulder.x,p.z);
+ float recovery=smoothstep(-.25,.85,-cos(delayed));
+ float wristMask=smoothstep(1.7,4.8,distance)*wing;
+ vec2 wrist=vec2(2.35*side,2.0);
+ float flex=(sin(delayed-.65)-sin(beat))*.18-lift*.16;
+ p.xy=mix(p.xy,turn(side*flex)*(p.xy-wrist)+wrist,wristMask);
+ p.x=shoulder.x+(p.x-shoulder.x)*(1.0-recovery*span*wing*.11);
+ p.xy=turn(side*(flap-lift*.35+asymmetry*.15)*wing)*(p.xy-shoulder)+shoulder;
+ float featherTwist=sin(delayed-.9)*span*.19;
+ vec2 depth=turn(-side*(sweep+featherTwist)*wing)*vec2(p.x-shoulder.x,p.z);
  p.x=depth.x+shoulder.x;p.z=depth.y;
- float tip=smoothstep(2.5,5.7,abs(rest.x))*wing;
- p.z+=sin(beat-.85)*tip*.18;
- // Tail movement stays restrained; wing amplitude cannot stretch the body.
- float tail=1.0-smoothstep(-1.7,.15,rest.y);
- p.x+=sin(rest.y*.85-time*1.1)*tail*.126;
- p.z+=cos(rest.y*.7-time*.94)*tail*.129;
- p.y+=sin(rest.x*2.1-time*1.1)*tail*.033;
+ float tip=smoothstep(2.5,5.7,distance)*wing;
+ float featherPhase=rest.y*.85+distance*.55;
+ p.y+=sin(delayed-1.1+featherPhase*.3)*tip*.17;
+ p.z+=sin(delayed-1.25+featherPhase*.25)*tip*.32;
+ float tail=1.0-smoothstep(-2.6,-.35,rest.y);
+ float trailing=pow(clamp((-rest.y+.35)/5.5,0.0,1.0),1.35);
+ float tailPhase=time*1.55+rest.y*.72;
+ p.x+=(sin(tailPhase)*.52+sin(tailPhase*.61+rest.x*.65)*.16)*tail*trailing;
+ p.z+=(cos(tailPhase-.65)*.62+sin(beat+rest.y*.6)*.14)*tail*trailing;
+ p.y+=sin(tailPhase+rest.x*.8)*tail*trailing*.12;
  return p;
 }`;
 

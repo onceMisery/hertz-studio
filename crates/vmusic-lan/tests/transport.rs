@@ -360,6 +360,66 @@ async fn abrupt_room_transport_loss_is_reconnectable_without_a_terminal_end() {
 }
 
 #[tokio::test]
+async fn wifi_stall_and_retired_clock_replies_do_not_disconnect_an_established_peer() {
+    use tokio_tungstenite::tungstenite::Message;
+    let (connection, mut events, mut control, _audio) =
+        scripted_connection(client::ConnectionMode::Listening).await;
+    // Keep TCP alive but withhold all server traffic. This exceeds the old
+    // five-second liveness limit and evicts startup probes from the bounded
+    // pending window. Clock freshness must still expire independently.
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    assert_eq!(*events.state.borrow(), ConnectionState::Connected);
+    assert!(events.mapping.borrow().is_none());
+    tokio::time::timeout(Duration::from_secs(3), async {
+        let mut replied = 0;
+        while replied < 40 {
+            let Message::Text(text) = control.next().await.unwrap().unwrap() else {
+                continue;
+            };
+            if let ControlFrame::TimeRequest { sequence, t1 } = ControlFrame::decode(&text).unwrap()
+            {
+                let now = connection.handle.clock().now_ns();
+                let response = ControlFrame::TimeResponse {
+                    sequence,
+                    t1,
+                    t2: Counter(now),
+                    t3: Counter(now),
+                };
+                control
+                    .send(Message::Text(response.encode().unwrap().into()))
+                    .await
+                    .unwrap();
+                replied += 1;
+            }
+        }
+        // A reliable response after the obsolete probes proves the receive
+        // loop survived them; merely checking state could race its teardown.
+        control
+            .send(Message::Text(
+                ControlFrame::Response {
+                    request_id: Counter(1),
+                    body: serde_json::json!({"resumed":true}),
+                }
+                .encode()
+                .unwrap()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let frame = events.control.recv().await.unwrap();
+        assert!(matches!(frame, ControlFrame::Response { body, .. } if body["resumed"] == true));
+    })
+    .await
+    .unwrap();
+    assert_eq!(*events.state.borrow(), ConnectionState::Connected);
+    assert!(
+        events.mapping.borrow().is_none(),
+        "delayed probes cannot renew synchronization"
+    );
+    connection.shutdown().await;
+}
+
+#[tokio::test]
 async fn audio_loss_mutes_immediately_and_keeps_consumers_alive_for_the_terminal_end() {
     let (connection, mut events, mut control, audio) =
         scripted_connection(client::ConnectionMode::Listening).await;
@@ -479,6 +539,21 @@ async fn pinned_pair_dual_stream_request_pcm_and_revocation_are_one_lifecycle() 
         sample_rate: 48_000,
         channels: 2,
     };
+    let samples: Arc<[f32]> = (0..1920)
+        .map(|i| if i == 0 { -0.0 } else { i as f32 / 4096.0 })
+        .collect::<Vec<_>>()
+        .into();
+    // A new listener may spend longer than the receiver's 500ms match
+    // window calibrating its clock. Audio attachment alone is not a plan.
+    assert_eq!(
+        server
+            .transport
+            .broadcast_pcm(1, 0, 0, format, samples.clone())
+            .unwrap(),
+        0,
+        "do not send PCM before the endpoint's first Prepare"
+    );
+    assert_eq!(server.transport.buffered_bytes(), 0);
     let plan = Plan {
         epoch: Counter(1),
         plan_id: Counter(1),
@@ -497,10 +572,6 @@ async fn pinned_pair_dual_stream_request_pcm_and_revocation_are_one_lifecycle() 
     assert!(
         matches!(control(&mut events).await, ControlFrame::Prepare { plan: actual } if actual == plan)
     );
-    let samples: Arc<[f32]> = (0..1920)
-        .map(|i| if i == 0 { -0.0 } else { i as f32 / 4096.0 })
-        .collect::<Vec<_>>()
-        .into();
     assert_eq!(
         server
             .transport
@@ -520,6 +591,71 @@ async fn pinned_pair_dual_stream_request_pcm_and_revocation_are_one_lifecycle() 
         .zip(samples.iter())
         .all(|(a, b)| a.to_bits() == b.to_bits()));
     drop(received);
+    // A second listener attaches while the first is already receiving PCM.
+    // Its clock warmup must neither receive unmatched PCM nor interrupt the
+    // established endpoint. Delivery starts on Prepare, before Ready/Commit.
+    let invitation = server.transport.invite(Permissions::default()).unwrap();
+    let newcomer = client::pair(
+        server.address,
+        server.fingerprint,
+        room_id,
+        &invitation,
+        "刚加入的电脑",
+    )
+    .await
+    .unwrap();
+    let (new_connection, mut new_events) = ClientConnection::connect(
+        server.address,
+        server.fingerprint,
+        room_id,
+        newcomer.member_id,
+        &newcomer.credential,
+    )
+    .await
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if matches!(inbound.recv().await, Some(Inbound::AudioAttached { member_id, .. }) if member_id == newcomer.member_id) {
+                break;
+            }
+        }
+    }).await.unwrap();
+    assert_eq!(
+        server
+            .transport
+            .broadcast_pcm(1, 2, 960, format, samples.clone())
+            .unwrap(),
+        1
+    );
+    let established = tokio::time::timeout(Duration::from_secs(3), events.audio.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(established.block().sequence, 2);
+    drop(established);
+    assert!(new_events.audio.try_recv().is_err());
+    server
+        .transport
+        .send(
+            newcomer.member_id,
+            new_connection.handle.identity,
+            &ControlFrame::Prepare { plan: plan.clone() },
+        )
+        .unwrap();
+    assert_eq!(
+        server
+            .transport
+            .broadcast_pcm(1, 3, 1920, format, samples.clone())
+            .unwrap(),
+        2
+    );
+    for audio in [&mut events.audio, &mut new_events.audio] {
+        let block = tokio::time::timeout(Duration::from_secs(3), audio.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(block.block().sequence, 3);
+    }
     connection
         .handle
         .send(ControlFrame::Request {
@@ -580,6 +716,7 @@ async fn pinned_pair_dual_stream_request_pcm_and_revocation_are_one_lifecycle() 
         Err(client::ClientError::AuthorizationExpired)
     ));
     connection.shutdown().await;
+    new_connection.shutdown().await;
     tokio::time::timeout(Duration::from_secs(2), server.shutdown())
         .await
         .unwrap();

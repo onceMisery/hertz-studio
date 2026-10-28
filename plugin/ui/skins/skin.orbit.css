@@ -25,7 +25,7 @@
   --skin-track-wide: 0px;
 }
 [data-skin="orbit"] .orbit-anchor { display: none; }
-[data-skin="orbit"] body { padding: 22px 24px 14px; gap: var(--orbit-gap); letter-spacing: 0; background: var(--panel-solid); }
+[data-skin="orbit"] body { padding: 22px 24px 14px; gap: 0; letter-spacing: 0; background: var(--panel-solid); }
 [data-skin="orbit"] body::before,
 [data-skin="orbit"] #ambient,
 [data-skin="orbit"] #ts-wallpaper { display: none; }
@@ -279,10 +279,35 @@
 [data-skin="orbit"] .orbit-queue-empty { padding: 24px 0; color: var(--muted); font-size: 13px; }
 [data-skin="orbit"] .orbit-queue-empty[hidden] { display: none; }
 
+/* 队列折叠：整栏收成一条窄轨，只留纵向标题、曲目数与展开/完整队列入口。
+   开关本身是表现层偏好（skin.orbit.js 记 localStorage），队列数据不受影响。 */
+[data-skin="orbit"] body .app.orbit-queue-collapsed { --orbit-queue: 72px; }
+[data-skin="orbit"] .orbit-queue-collapse svg { transform: rotate(-90deg); }
+[data-skin="orbit"] .orbit-queue-collapse[aria-expanded="false"] svg { transform: rotate(90deg); }
+[data-skin="orbit"] .orbit-queue-collapse:hover { background: var(--orbit-surface); box-shadow: var(--orbit-raised); }
+[data-skin="orbit"] .app.orbit-queue-collapsed .orbit-queue { padding: 16px 10px; align-items: center; gap: 12px; }
+[data-skin="orbit"] .app.orbit-queue-collapsed .orbit-queue-heading {
+  flex: none; width: 100%; flex-direction: column; align-items: center; gap: 10px; margin-bottom: 0;
+}
+[data-skin="orbit"] .app.orbit-queue-collapsed .orbit-queue-heading h2 {
+  writing-mode: vertical-rl; letter-spacing: .18em; font-size: 11px; color: var(--muted);
+}
+[data-skin="orbit"] .app.orbit-queue-collapsed .orbit-queue-heading .count {
+  writing-mode: vertical-rl; font-size: 10px; color: var(--accent); font-variant-numeric: tabular-nums;
+}
+[data-skin="orbit"] .app.orbit-queue-collapsed .orbit-queue-heading .iconbtn { margin-left: 0; }
+[data-skin="orbit"] .app.orbit-queue-collapsed :is(.orbit-current, .orbit-queue-list, .orbit-queue-empty) { display: none; }
+
+@media (prefers-reduced-motion: no-preference) {
+  [data-skin="orbit"] body .app { transition: grid-template-columns 240ms var(--ease-out); }
+  [data-skin="orbit"] .orbit-queue-collapse svg { transition: transform 200ms var(--ease-out); }
+}
+
 [data-skin="orbit"] .bar {
   grid-template-columns: minmax(180px, 1fr) minmax(200px, 1.2fr) minmax(320px, 1fr);
   grid-template-areas: "summary controls right" "summary progress right"; gap: 6px 20px;
-  margin: 0; min-height: 88px; padding: 10px 22px; flex: none;
+  /* 间距只留在播放器上方，避免 body 内的空容器也触发 flex gap。 */
+  margin: var(--orbit-gap) 0 0; min-height: 88px; padding: 10px 22px; flex: none;
 }
 [data-skin="orbit"] .bar-summary { grid-area: summary; }
 [data-skin="orbit"] .bar-controls { grid-area: controls; }

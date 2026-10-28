@@ -495,6 +495,7 @@ async fn run_control(
     let mut estimator = Estimator::default();
     let mut sequence = 0u64;
     let mut pending = VecDeque::new();
+    let mut retired_probe = 0;
     let mut tick = tokio::time::interval(Duration::from_millis(100));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut ticks = 0u64;
@@ -503,10 +504,9 @@ async fn run_control(
     let mut reported_output_ready = false;
     loop {
         tokio::select! {
-            biased;
             _ = tick.tick() => {
                 ticks += 1;
-                if last_received.elapsed() > TIMEOUT { return Err(ClientError::Connection); }
+                if last_received.elapsed() > crate::PEER_IDLE_TIMEOUT { return Err(ClientError::Connection); }
                 if current_mapping.is_some_and(|m| !m.valid_at(clock.now_ns())) {
                     current_mapping = None;
                     mapping.send_replace(None);
@@ -517,7 +517,7 @@ async fn run_control(
                 if clock_probe_due(ticks, current_mapping, clock.now_ns()) {
                     sequence = sequence.checked_add(1).ok_or(ClientError::Protocol)?;
                     let t1 = clock.now_ns(); pending.push_back((sequence, t1));
-                    while pending.len() > 32 { pending.pop_front(); }
+                    while pending.len() > 32 { if let Some((sequence, _)) = pending.pop_front() { retired_probe = sequence; } }
                     let frame = ControlFrame::TimeRequest { sequence: Counter(sequence), t1: Counter(t1) };
                     send(&mut socket, Message::Text(frame.encode().map_err(|_| ClientError::Protocol)?.into())).await?;
                 }
@@ -547,6 +547,10 @@ async fn run_control(
                 let frame = ControlFrame::decode(&text).map_err(|_| ClientError::Protocol)?;
                 match frame {
                     ControlFrame::TimeResponse { sequence, t1, t2, t3 } => {
+                        // A delayed TCP backlog can contain replies to probes
+                        // evicted during a Wi-Fi stall. They cannot refresh the
+                        // clock, but are not a reason to tear down membership.
+                        if sequence.0 > 0 && sequence.0 <= retired_probe { continue; }
                         let Some(index) = pending.iter().position(|p| *p == (sequence.0, t1.0)) else { return Err(ClientError::Protocol); };
                         pending.remove(index);
                         estimator.push(TimeSample { t1: t1.0, t2: t2.0, t3: t3.0, t4: received_at });
@@ -580,7 +584,7 @@ async fn run_audio(
         tokio::select! {
             biased;
             _ = tick.tick() => {
-                if last_received.elapsed() > TIMEOUT { return Err(ClientError::Connection); }
+                if last_received.elapsed() > crate::PEER_IDLE_TIMEOUT { return Err(ClientError::Connection); }
                 send(&mut socket, Message::Ping(Vec::new().into())).await?;
             },
             message = socket.next() => {

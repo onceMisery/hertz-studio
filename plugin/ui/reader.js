@@ -7,6 +7,12 @@
 
   var T = null;
   var toast = function () {};
+  var navigate = function () {};
+  var mounted = [];
+  var sections = [];
+  var wordCount = 0;
+  var progressFrame = 0;
+  var preferences = { size: 19, font: 'serif', theme: 'light' };
   var st = {
     feeds: [],
     loaded: false,
@@ -275,6 +281,7 @@
     var feed = findFeed(item.feed_id);
     meta.textContent = [feed ? feed.title : '', dateText(item.published_at)].filter(Boolean).join(' · ');
     button.appendChild(meta);
+    button.insertBefore(meta, title);
     button.addEventListener('click', function () { openEntry(item.id); });
     li.appendChild(button);
     var star = document.createElement('button');
@@ -301,6 +308,7 @@
     st.items.forEach(function (item) { list.appendChild(entryRow(item)); });
     list.scrollTop = scrollTop;
     $('reader-more').hidden = !st.cursor;
+    renderPager();
   }
 
   async function toggleStar(item) {
@@ -334,6 +342,8 @@
     $('reader-entry-head').hidden = true;
     $('reader-content').hidden = true;
     $('reader-retry').hidden = true;
+    $('reader-crumb-title').textContent = '正在加载文章…';
+    buildOutline();
     renderEntries();
     entryStatus('正在加载正文…');
     try {
@@ -347,6 +357,7 @@
     } catch (error) {
       if (epoch === st.detailEpoch) {
         entryStatus(describeError(error));
+        $('reader-crumb-title').textContent = '正文暂时无法加载';
         $('reader-retry').hidden = false;
       }
     } finally {
@@ -430,6 +441,7 @@
         entryStatus('正文因超出缓存预算未保存，请打开原文阅读。');
       }
     }
+    buildOutline();
   }
 
   function formatDocument(holder) {
@@ -477,6 +489,8 @@
     head.hidden = false;
     $('reader-entry-title').textContent = entry.title;
     var feed = findFeed(entry.feed_id);
+    $('reader-source-label').textContent = feed ? feed.title : '订阅精选';
+    $('reader-crumb-title').textContent = entry.title;
     var parts = [feed ? feed.title : '', entry.author, dateText(entry.published_at)];
     $('reader-entry-meta').textContent = parts.filter(Boolean).join(' · ');
     var original = $('reader-open-original');
@@ -489,6 +503,133 @@
     }
     $('reader-star').textContent = entry.starred ? '★ 已收藏' : '☆ 收藏';
     $('reader-star').setAttribute('aria-pressed', String(!!entry.starred));
+  }
+
+  // 阅读工作台的设置只作用于此页，不修改音乐界面的主题或播放状态。
+  function applyPreferences() {
+    var view = $('view-reader');
+    view.dataset.readerTheme = preferences.theme;
+    view.dataset.readerFont = preferences.font;
+    document.body.dataset.readerTheme = preferences.theme;
+    view.style.setProperty('--reader-body-size', preferences.size + 'px');
+    $('reader-size-value').textContent = preferences.size;
+    $('reader-outline-size').textContent = preferences.size + ' px';
+    $('reader-size-down').disabled = preferences.size <= 16;
+    $('reader-size-up').disabled = preferences.size >= 23;
+    $('reader-font-toggle').textContent = preferences.font === 'serif' ? '宋' : '黑';
+    $('reader-font-toggle').setAttribute('aria-pressed', String(preferences.font === 'sans'));
+    var dark = preferences.theme === 'dark';
+    $('reader-theme-toggle').textContent = dark ? '☾' : '☼';
+    $('reader-theme-toggle').setAttribute('aria-pressed', String(dark));
+    $('reader-theme-toggle').setAttribute('aria-label', dark ? '切换浅色阅读' : '切换深色阅读');
+    try { localStorage.setItem('hertz-reader-preferences', JSON.stringify(preferences)); } catch (_) {}
+    scheduleProgress();
+  }
+
+  function scheduleProgress() {
+    if (progressFrame) return;
+    progressFrame = requestAnimationFrame(function () { progressFrame = 0; updateProgress(); });
+  }
+
+  function updateProgress() {
+    var article = document.querySelector('.reader-article');
+    var range = article.scrollHeight - article.clientHeight;
+    var value = !st.current ? 0 : range > 1 ? Math.min(100, Math.max(0, article.scrollTop / range * 100)) : 100;
+    var percent = Math.round(value);
+    $('reader-progress-text').textContent = percent + '%';
+    $('reader-progress-big').textContent = percent;
+    $('reader-progress-ring').style.setProperty('--progress', value + '%');
+    $('reader-progress-fill').style.width = value + '%';
+    $('reader-outline-fill').style.width = value + '%';
+    var active = 0;
+    var top = article.getBoundingClientRect().top;
+    sections.forEach(function (section, index) {
+      if (section.getBoundingClientRect().top - top <= Math.max(80, article.clientHeight * .25)) active = index;
+    });
+    // 短尾章的标题可能无法滚到上方阈值；到达文末时应高亮最后一节。
+    if (value >= 99.5 && sections.length) active = sections.length - 1;
+    $('reader-section-position').textContent = sections.length ? String(active + 1).padStart(2, '0') + ' / ' + String(sections.length).padStart(2, '0') + ' 节' : '—';
+    $('reader-toc').querySelectorAll('button').forEach(function (button, index) {
+      button.classList.toggle('active', index === active);
+      if (index === active) button.setAttribute('aria-current', 'location');
+      else button.removeAttribute('aria-current');
+    });
+    var remaining = Math.ceil(wordCount / 350 * (1 - value / 100));
+    $('reader-time-left').textContent = !st.current ? '—' : remaining ? remaining + ' 分钟' : '已读完';
+  }
+
+  function buildOutline() {
+    var content = $('reader-content');
+    var list = $('reader-toc');
+    list.textContent = '';
+    sections = content.hidden ? [] : Array.from(content.querySelectorAll('h1, h2, h3, h4, h5, h6, .reader-section-heading'));
+    sections.forEach(function (section, index) {
+      section.id = 'reader-section-' + index;
+      var item = document.createElement('li');
+      var button = document.createElement('button');
+      button.type = 'button';
+      var number = document.createElement('span');
+      number.textContent = String(index + 1).padStart(2, '0');
+      button.append(number, document.createTextNode(section.textContent.trim()));
+      button.addEventListener('click', function () {
+        var article = document.querySelector('.reader-article');
+        var reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches || document.body.classList.contains('reduce-motion');
+        article.scrollTo({ top: article.scrollTop + section.getBoundingClientRect().top - article.getBoundingClientRect().top - 24, behavior: reduceMotion ? 'instant' : 'smooth' });
+        closeOutline(true);
+      });
+      item.appendChild(button);
+      list.appendChild(item);
+    });
+    $('reader-outline-count').textContent = sections.length + ' 节';
+    $('reader-toc-empty').hidden = sections.length > 0;
+    $('reader-toc-empty').textContent = st.current ? '这篇文章没有章节标题，安心往下读。' : '打开文章后，在这里查看章节。';
+    wordCount = content.hidden ? 0 : content.textContent.replace(/\s/g, '').length;
+    $('reader-word-count').textContent = st.current ? wordCount.toLocaleString() : '—';
+    renderPager();
+    scheduleProgress();
+  }
+
+  function renderPager() {
+    var index = st.items.findIndex(function (item) { return item.id === st.selectedId; });
+    var previous = st.items[index - 1];
+    var next = st.items[index + 1];
+    $('reader-pager').hidden = !st.current || index < 0 || (!previous && !next);
+    [['reader-prev', previous], ['reader-next', next]].forEach(function (pair) {
+      var button = $(pair[0]);
+      button.disabled = !pair[1];
+      button.querySelector('span').textContent = pair[1] ? pair[1].title : '没有更多文章';
+      button.onclick = pair[1] ? function () { openEntry(pair[1].id); } : null;
+    });
+  }
+
+  function closeOutline(restoreFocus) {
+    var wasOpen = $('view-reader').classList.contains('reader-outline-open');
+    $('view-reader').classList.remove('reader-outline-open');
+    $('reader-outline-toggle').setAttribute('aria-expanded', 'false');
+    if (wasOpen && restoreFocus) $('reader-outline-toggle').focus({ preventScroll: true });
+  }
+
+  function mountWorkspace() {
+    if (!mounted.length) {
+      // 皮肤会移动内容列与播放器。临时搬到 body，退出时放回原锚点。
+      [$('view-reader'), $('playback-bar')].forEach(function (node) {
+        if (!node) return;
+        var anchor = document.createComment('reader workspace return');
+        node.before(anchor);
+        mounted.push({ node: node, anchor: anchor });
+        document.body.appendChild(node);
+      });
+    }
+    document.body.classList.add('reader-view');
+    scheduleProgress();
+  }
+
+  function onViewExit() {
+    setFullscreen(false);
+    closeOutline(false);
+    document.body.classList.remove('reader-view');
+    mounted.forEach(function (item) { item.anchor.replaceWith(item.node); });
+    mounted = [];
   }
 
   async function loadImages() {
@@ -606,6 +747,9 @@
     var view = $('view-reader');
     if (!view || fullscreenActive() === on) return;
     view.classList.toggle('reader-fullscreen', on);
+    document.body.classList.toggle('reader-immersive', on);
+    closeOutline(false);
+    scheduleProgress();
     syncFullscreenButton();
     var target = on
       ? (document.querySelector('#reader-entry-head:not([hidden]) h2') || $('reader-fullscreen'))
@@ -628,8 +772,50 @@
   function bind(host) {
     T = window.VMusicTransport;
     toast = host.toast || toast;
-    $('reader-add').addEventListener('submit', function (event) {
-      event.preventDefault();
+    navigate = host.navigate || function (name) {
+      var entry = document.querySelector('.rail-item[data-view="' + name + '"]');
+      if (entry) entry.click();
+    };
+    document.querySelectorAll('.rail-item[data-view]').forEach(function (entry) {
+      var button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'reader-nav-link';
+      var name = entry.dataset.view;
+      button.setAttribute('aria-label', entry.getAttribute('aria-label') || entry.textContent.trim());
+      var icon = entry.querySelector('svg');
+      var label = entry.querySelector('span');
+      if (icon) button.appendChild(icon.cloneNode(true));
+      if (label) button.appendChild(label.cloneNode(true));
+      if (name === 'reader') { button.classList.add('active'); button.setAttribute('aria-current', 'page'); }
+      button.addEventListener('click', function () { navigate(name); });
+      $('reader-nav').appendChild(button);
+    });
+    $('reader-home').addEventListener('click', function () { navigate('library'); });
+    try {
+      var saved = JSON.parse(localStorage.getItem('hertz-reader-preferences'));
+      if (saved) {
+        if (Number.isInteger(saved.size)) preferences.size = Math.max(16, Math.min(23, saved.size));
+        if (saved.font === 'sans') preferences.font = 'sans';
+        if (saved.theme === 'dark') preferences.theme = 'dark';
+      }
+    } catch (_) {}
+    applyPreferences();
+    $('reader-size-down').addEventListener('click', function () { preferences.size = Math.max(16, preferences.size - 1); applyPreferences(); });
+    $('reader-size-up').addEventListener('click', function () { preferences.size = Math.min(23, preferences.size + 1); applyPreferences(); });
+    $('reader-font-toggle').addEventListener('click', function () { preferences.font = preferences.font === 'serif' ? 'sans' : 'serif'; applyPreferences(); });
+    $('reader-theme-toggle').addEventListener('click', function () { preferences.theme = preferences.theme === 'light' ? 'dark' : 'light'; applyPreferences(); });
+    $('reader-outline-toggle').addEventListener('click', function () {
+      var on = $('view-reader').classList.toggle('reader-outline-open');
+      this.setAttribute('aria-expanded', String(on));
+      if (on) $('reader-outline-close').focus({ preventScroll: true });
+    });
+    $('reader-outline-close').addEventListener('click', function () { closeOutline(true); });
+    $('reader-scrim').addEventListener('click', function () { closeOutline(true); });
+    $('reader-library-toggle').addEventListener('click', function () { $('reader-back').click(); });
+    document.querySelector('.reader-article').addEventListener('scroll', scheduleProgress, { passive: true });
+    new ResizeObserver(scheduleProgress).observe($('reader-content'));
+    window.addEventListener('resize', function () { closeOutline(false); scheduleProgress(); });
+    window.hertzHost.onSubmit($('reader-add'), function () {
       var url = $('reader-add-url').value.trim();
       if (url) addFeed(url);
     });
@@ -658,10 +844,32 @@
     $('reader-retry').addEventListener('click', function () { if (st.selectedId) openEntry(st.selectedId); });
     $('reader-fullscreen').addEventListener('click', function () { setFullscreen(!fullscreenActive()); });
     $('view-reader').addEventListener('keydown', function (event) {
+      if (event.key === 'Escape' && $('view-reader').classList.contains('reader-outline-open')) {
+        event.preventDefault();
+        closeOutline(true);
+        return;
+      }
       if (event.key !== 'Escape' || !fullscreenActive() || event.defaultPrevented) return;
       event.preventDefault();
       setFullscreen(false);
     });
+    // 沙箱只给了 allow-scripts，没有 allow-popups：`<a target="_blank">` 的跳转被
+    // 浏览器静默丢弃，「推荐」和「打开原文」点着像坏了。和在线页同一套处置：
+    // 链接进剪贴板，让宿主浏览器接手（bubble 阶段，页面自己的处理器先跑）。
+    if (window.hertzHost.isDbx) {
+      $('view-reader').addEventListener('click', function (event) {
+        if (event.defaultPrevented) return;
+        var anchor = event.target && event.target.closest ? event.target.closest('a[target="_blank"]') : null;
+        var url = anchor && anchor.href;
+        if (!url || !/^https?:/i.test(url)) return;
+        event.preventDefault();
+        var write = window.HertzClipboard && window.HertzClipboard.write;
+        Promise.resolve().then(function () {
+          if (!write) throw new Error('无法复制链接');
+          return write(url);
+        }).then(function () { toast('链接已复制，粘到浏览器地址栏打开'); }, function () { toast(url); });
+      });
+    }
     $('reader-back').addEventListener('click', function () {
       if (fullscreenActive()) setFullscreen(false);
       $('view-reader').classList.remove('reader-reading');
@@ -672,6 +880,7 @@
   }
 
   function onViewEnter() {
+    mountWorkspace();
     setFullscreen(false);
     if (st.loaded || !T) return;
     st.loaded = true;
@@ -680,5 +889,5 @@
       .catch(function (error) { status(describeError(error)); });
   }
 
-  window.Reader = { bind: bind, onViewEnter: onViewEnter };
+  window.Reader = { bind: bind, onViewEnter: onViewEnter, onViewExit: onViewExit };
 })();
