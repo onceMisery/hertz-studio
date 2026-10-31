@@ -395,6 +395,8 @@
     var p = state.detailPlaylist;
     var tracks = state.detailTracks;
     var canWrite = hasCap(src, 'playlist_write');
+    var inRoom = window.Online && typeof window.Online.roomActive === 'function'
+      && window.Online.roomActive();
     var box = el('op-tracks');
     box.innerHTML = '';
 
@@ -426,10 +428,15 @@
       box.appendChild(row);
     });
 
+    el('op-playall').textContent = inRoom ? '点播全部到共同队列' : '播放全部';
     el('op-playall').onclick = function () {
       if (!tracks.length) return;
-      window.Online.playAll(tracks, 0);
+      // 房间进行中本地播放会被拒绝，整单意图改为点播整批到共同队列。
+      var room = window.Online && typeof window.Online.roomActive === 'function'
+        && window.Online.roomActive();
+      window.Online.playAll(tracks, 0, room ? tracks : null);
     };
+    el('op-shuffle').textContent = inRoom ? '随机点播到共同队列' : '随机播放';
     el('op-shuffle').onclick = function () {
       if (!tracks.length) return;
       var shuffled = tracks.slice();
@@ -437,7 +444,9 @@
         var j = Math.floor(Math.random() * (i + 1));
         var tmp = shuffled[i]; shuffled[i] = shuffled[j]; shuffled[j] = tmp;
       }
-      window.Online.playAll(shuffled, 0);
+      var room = window.Online && typeof window.Online.roomActive === 'function'
+        && window.Online.roomActive();
+      window.Online.playAll(shuffled, 0, room ? shuffled : null);
     };
   }
 
@@ -489,6 +498,23 @@
   // state.lists 一份，谁也不复制缓存。
   function notifyChanged() {
     document.dispatchEvent(new CustomEvent('online-playlists:changed'));
+  }
+
+  /// 新建在线歌单后把平台返回的那份就地塞进缓存。
+  ///
+  /// 「歌单」页读的是这里的 `state.lists`，而 refresh() 要一整轮网络往返；
+  /// 不塞的话刚存好的歌单要等下一次同步才出现，读起来就是「存了没反应」。
+  function rememberCreated(source, playlist) {
+    if (!source || !playlist || playlist.id == null) return;
+    var list = state.lists[source] || (state.lists[source] = []);
+    if (!list.some(function (p) { return String(p.id) === String(playlist.id); })) {
+      list.unshift(playlist);
+    }
+    if (state.sources.length && !state.sources.some(function (s) { return s.id === source; })) {
+      loadSources();
+      return;
+    }
+    renderGrid();
   }
 
   // 扫码/cookie 登录成功后由 online-login.js 回调：整区重建，把新登录的
@@ -603,6 +629,7 @@
 
   window.OnlinePlaylists = {
     refresh: refresh,
+    rememberCreated: rememberCreated,
     init: loadSources,
     loaded: hasSources,
     all: allPlaylists,

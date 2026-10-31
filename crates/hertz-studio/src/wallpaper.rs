@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 use axum::extract::ws::{Message, WebSocket};
 use serde_json::{json, Value};
 use tokio::sync::broadcast::error::RecvError;
+use vmusic_core::PlayerSnapshot;
 
 use crate::state::{AppState, WsEvent};
 
@@ -29,6 +30,8 @@ const EVENT_HEARTBEAT: Duration = Duration::from_secs(1);
 struct SpectrumFrame {
     bands: [f32; BANDS],
     at: Instant,
+    generation: u64,
+    position_ms: u64,
 }
 
 #[derive(Default)]
@@ -38,7 +41,20 @@ pub(crate) struct Wallpaper {
 }
 
 impl Wallpaper {
-    pub(crate) fn observe_spectrum(&self, bands: &[f32]) {
+    pub(crate) fn observe_spectrum(&self, bands: &[f32], player: &PlayerSnapshot) {
+        if !player.playing || player.track_id.is_none() {
+            return;
+        }
+        let Ok(mut slot) = self.spectrum.lock() else {
+            return;
+        };
+        // The backend can repeat its last FFT while an online decoder waits for
+        // bytes. Only advancing PCM (or a new timeline) refreshes desktop age.
+        if slot.as_ref().is_some_and(|frame| {
+            frame.generation == player.generation && frame.position_ms == player.position_ms
+        }) {
+            return;
+        }
         let mut normalized = [0.0f32; BANDS];
         for (slot, value) in normalized.iter_mut().zip(bands.iter()) {
             *slot = if value.is_finite() {
@@ -47,12 +63,12 @@ impl Wallpaper {
                 0.0
             };
         }
-        if let Ok(mut slot) = self.spectrum.lock() {
-            *slot = Some(SpectrumFrame {
-                bands: normalized,
-                at: Instant::now(),
-            });
-        }
+        *slot = Some(SpectrumFrame {
+            bands: normalized,
+            at: Instant::now(),
+            generation: player.generation,
+            position_ms: player.position_ms,
+        });
     }
 
     #[cfg(test)]
@@ -191,6 +207,43 @@ pub(crate) async fn events(state: Arc<AppState>, mut socket: WebSocket) {
 mod tests {
     use super::*;
 
+    #[test]
+    fn stalled_playback_does_not_make_the_last_fft_fresh_again() {
+        let wallpaper = Wallpaper::default();
+        let mut player = PlayerSnapshot {
+            track_id: Some("progressive-track".into()),
+            playing: true,
+            position_ms: 28_801,
+            generation: 2,
+            ..PlayerSnapshot::default()
+        };
+        wallpaper.observe_spectrum(&[0.5; BANDS], &player);
+        wallpaper.age_spectrum(Duration::from_millis(1100));
+        for _ in 0..30 {
+            wallpaper.observe_spectrum(&[0.5; BANDS], &player);
+        }
+        let (bands, age) = wallpaper.spectrum_view();
+        assert_eq!(bands, [0.0; BANDS]);
+        assert!(age.unwrap() >= 1100);
+
+        player.position_ms += 20;
+        wallpaper.observe_spectrum(&[0.25; BANDS], &player);
+        assert_eq!(wallpaper.spectrum_view().0, [0.25; BANDS]);
+
+        player.playing = false;
+        player.position_ms += 20;
+        wallpaper.age_spectrum(Duration::from_millis(1100));
+        wallpaper.observe_spectrum(&[1.0; BANDS], &player);
+        assert_eq!(wallpaper.spectrum_view().0, [0.0; BANDS]);
+
+        // A seek/load owns a new timeline, including when its position repeats.
+        player.playing = true;
+        player.position_ms -= 20;
+        player.generation += 1;
+        wallpaper.observe_spectrum(&[0.75; BANDS], &player);
+        assert_eq!(wallpaper.spectrum_view().0, [0.75; BANDS]);
+    }
+
     #[tokio::test]
     async fn idle_snapshot_is_valid_but_silent() {
         let (state, handle) = crate::state::tests::playback_state().await;
@@ -217,7 +270,12 @@ mod tests {
         input[0] = 0.5;
         input[1] = 3.0;
         input[2] = -1.0;
-        state.wallpaper.observe_spectrum(&input);
+        let player = PlayerSnapshot {
+            track_id: Some("test-spectrum".into()),
+            playing: true,
+            ..PlayerSnapshot::default()
+        };
+        state.wallpaper.observe_spectrum(&input, &player);
         let value = snapshot(&state).await;
         let bands = value["spectrum"]["bands"].as_array().unwrap();
         assert_eq!(bands.len(), BANDS);
@@ -233,7 +291,12 @@ mod tests {
     #[tokio::test]
     async fn short_spectrum_is_zero_padded_and_expires() {
         let (state, handle) = crate::state::tests::playback_state().await;
-        state.wallpaper.observe_spectrum(&[0.25, 0.5]);
+        let player = PlayerSnapshot {
+            track_id: Some("test-spectrum".into()),
+            playing: true,
+            ..PlayerSnapshot::default()
+        };
+        state.wallpaper.observe_spectrum(&[0.25, 0.5], &player);
         let value = snapshot(&state).await;
         let bands = value["spectrum"]["bands"].as_array().unwrap();
         assert_eq!(bands[0], 0.25);

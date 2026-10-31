@@ -16,9 +16,15 @@ mod app;
 #[cfg(windows)]
 mod bridge;
 #[cfg(windows)]
+mod component;
+#[cfg(windows)]
 mod config;
 #[cfg(windows)]
+mod dbx_feed;
+#[cfg(windows)]
 mod feed;
+#[cfg(windows)]
+mod management;
 #[cfg(windows)]
 mod native;
 #[cfg(windows)]
@@ -28,6 +34,10 @@ mod wallpaper_feed;
 
 #[cfg(windows)]
 fn main() {
+    if std::env::args_os().skip(1).any(|arg| arg == "--describe") {
+        println!("{}", component::description());
+        return;
+    }
     if let Err(error) = app::run() {
         app::log(&format!("fatal: {error:#}"));
         eprintln!("hertz-desktop failed: {error:#}");

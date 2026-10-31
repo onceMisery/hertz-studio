@@ -388,7 +388,7 @@
         node.className = big ? 'lyric lp-line' : 'lyric';
         var toks = tokensFor(line);
         var words = null;
-        if (toks.length > 1) {
+        if (toks.length) {
           var wrap = document.createElement('span');
           wrap.className = 'lyric-words';
           toks.forEach(function (w, k) {
@@ -638,7 +638,10 @@
     if (view._emoSign === sign) return;
     view._emoSign = sign;
     view._emoIdx = idx;
-    E.applyLine(node.el, emotionWords(node), state, emPx);
+    node.emotion = state;
+    node.emotionPx = emPx;
+    node.emotionWords = emotionWords(node);
+    E.applyLine(node.el, node.emotionWords, state, emPx);
   }
 
   function applyEmotionAll(current) {
@@ -824,6 +827,16 @@
       view.dim(idx);
       var node = view.nodes[idx];
       if (node) paintWords(node, pos);
+      if (node && node.emotion && node.emotion.id !== 'neutral' && emotionReadyDoc === doc) {
+        var tokens = tokensFor(node.line);
+        var quiet = reduced || lowfx || document.body.matches('[data-rm~="lyrics"]');
+        node.emotionWords.forEach(function (word, i) {
+          var token = tokens[i];
+          var progress = clamp01((pos - token.start_ms) / Math.max(80, token.end_ms - token.start_ms));
+          emotion.applyWordMotion(word.el, node.emotion, (word.uStart + word.uEnd) / 2, pos / 1000,
+            node.emotionPx, Math.sin(progress * Math.PI), quiet);
+        });
+      }
     });
 
     // 全屏页的译文行跟着当前行走

@@ -80,10 +80,10 @@
 
   // 从大字号往下试，直到一行放得下。长句靠缩字号而不是换行 —— 三维空间里
   // 两行文字的面片高度会破坏等距排布。
-  function fitFont(weight, startSize, text) {
+  function fitFont(weight, startSize, text, family) {
     var size = startSize;
     while (size > 24) {
-      ctx.font = weight + ' ' + size + 'px ' + FONT_STACK;
+      ctx.font = weight + ' ' + size + 'px ' + (family || FONT_STACK);
       if (ctx.measureText(text).width <= MAX_TEXT_W) break;
       size -= 2;
     }
@@ -105,9 +105,10 @@
       var weight = emotion && emotion.type && emotion.type.weight || 600;
       var fill = emotion && paletteOn ? emotion.palette.accent : '#ffffff';
       var glow = emotion && paletteOn ? withAlpha(emotion.palette.accent, 0.4) : 'rgba(255,255,255,0.4)';
-      var s1 = fitFont(weight, Math.round(CELL_H * 0.375), text);
-      ctx.font = weight + ' ' + s1 + 'px ' + FONT_STACK;
+      var family = emotion ? E.fontFamily(emotion, FONT_STACK) : FONT_STACK;
       ctx.letterSpacing = emotion && emotion.type && emotion.type.tracking || '0px';
+      var s1 = fitFont(weight, Math.round(CELL_H * 0.375), text, family);
+      ctx.font = weight + ' ' + s1 + 'px ' + family;
       if (emotion && window.LyricEmotionField) {
         var shift = window.LyricEmotionField.evaluate(
           emotion.profile, 0.5, emotion.intensity, s1, 0, 0

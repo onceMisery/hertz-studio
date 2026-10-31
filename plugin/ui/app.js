@@ -87,8 +87,6 @@ const ui = {
   setLyricFilterPattern: $('set-lyric-filter-pattern'),
   setLyricFilterNote: $('set-lyric-filter-note'),
   setEmotionMode: $('set-emotion-mode'),
-  setEmotionPreviewRow: $('set-emotion-preview-row'),
-  setEmotionPreview: $('set-emotion-preview'),
   setEmotionScale: $('set-emotion-scale'),
   setEmotionScaleValue: $('set-emotion-scale-value'),
   setEmotionCurve: $('set-emotion-curve'),
@@ -2630,6 +2628,10 @@ function paintPatternNotes() {
 }
 
 let emotionAiStatus = null;
+let emotionAiChecking = false;
+let emotionAiError = '';
+let emotionAutoState = 'idle';
+let emotionAutoError = '';
 let emotionAutoToken = 0;
 let emotionAutoScanToken = 0;
 let emotionAutoController = null;
@@ -2667,10 +2669,182 @@ function lyricEmotionAccentWords() {
 function lyricEmotionPalette() {
   return state.settings.lyrics_emotion_palette !== false;
 }
+
+// 独立样本只消费共享纯函数：不绑定歌词、不设置 Cue、不推进真实播放时钟。
+let emotionPreviewFrame = 0;
+let emotionPreviewStarted = 0;
+let emotionPreviewIntersecting = false;
+let emotionPreviewNodes = [];
+let emotionPreviewState = null;
+let emotionPreviewEm = 40;
+let emotionPreviewMedia = null;
+let emotionControlsBound = false;
+function stopEmotionPreview() {
+  cancelAnimationFrame(emotionPreviewFrame);
+  emotionPreviewFrame = 0;
+}
+function emotionPreviewReduced() {
+  return state.settings.reduce_motion === true || state.settings.reduce_motion_lyrics === true ||
+    !!(emotionPreviewMedia && emotionPreviewMedia.matches);
+}
+function drawEmotionPreview(seconds, reduced) {
+  if (!emotionPreviewState) return;
+  emotionPreviewNodes.forEach((node, i) => {
+    const u = (i + 0.5) / emotionPreviewNodes.length;
+    const emphasis = Math.pow(Math.max(0, Math.sin((seconds / 6 - u) * Math.PI * 2)), 6);
+    const pose = LyricEmotion.motionPose(emotionPreviewState, u, seconds, emotionPreviewEm, emphasis, reduced);
+    node.style.transform = `translate(${pose.x}px, ${pose.y}px) rotate(${pose.rotate}rad) scale(${pose.scaleX}, ${pose.scaleY}) skewX(${pose.skew}rad)`;
+    LyricEmotion.paintGlyphEffects(node, emotionPreviewState, seconds, reduced);
+  });
+}
+function tickEmotionPreview(now) {
+  emotionPreviewFrame = 0;
+  if (!emotionPreviewIntersecting || document.hidden || emotionPreviewReduced()) return;
+  drawEmotionPreview(((now - emotionPreviewStarted) % 6000) / 1000, false);
+  emotionPreviewFrame = requestAnimationFrame(tickEmotionPreview);
+}
+function syncEmotionPreview() {
+  const sample = $('emotion-preview-sample');
+  if (!sample || !emotionControlsBound) return;
+  stopEmotionPreview();
+  const modal = $('emotion-dialog').open;
+  if (!emotionPreviewIntersecting || document.hidden || !sample.getClientRects().length ||
+      (!modal && sample.closest('[inert]')) ||
+      (document.fullscreenElement && !document.fullscreenElement.contains(sample)) ||
+      (sample.checkVisibility ? !sample.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })
+        : getComputedStyle(sample).visibility === 'hidden')) return;
+  const api = window.LyricEmotion;
+  const profile = api && api.profiles[lyricEmotionPreview()];
+  if (!profile || !api.fontFamily || !api.motionPose) {
+    $('emotion-preview-note').textContent = '共享字体效果尚未加载；可保存情绪设置，暂不展示动态样本。';
+    return;
+  }
+  // 手动 section Cue 的置信度为 1，解析后强度乘 0.8；样本与实际歌词同档。
+  const intensity = api.effectiveIntensity({ intensity: 0.8, confidence: 1 },
+    Number(ui.setEmotionScale.value), Number(ui.setEmotionCurve.value));
+  emotionPreviewState = { id: profile.id, profile, intensity };
+  const text = $('emotion-preview-text');
+  text.style.fontFamily = api.fontFamily(emotionPreviewState, 'var(--font-sans)');
+  text.style.fontWeight = String((profile.type && profile.type.weight) || 400);
+  text.style.letterSpacing = (profile.type && profile.type.tracking) || 'normal';
+  text.style.color = lyricEmotionPalette() ? profile.palette.ink : '#eeeeef';
+  emotionPreviewEm = parseFloat(getComputedStyle(text).fontSize) || 40;
+  const reduced = emotionPreviewReduced();
+  emotionPreviewNodes.forEach((node, i) => api.prepareGlyphEffects(node, emotionPreviewState, i, emotionPreviewNodes.length));
+  $('emotion-preview-note').textContent = reduced
+    ? '已减少动态效果；保留字形与配色。点击样本以手动模式应用。'
+    : '6 秒循环演示 · 点击样本应用动画与字形；不发送歌词。';
+  drawEmotionPreview(0, reduced);
+  if (!reduced) {
+    emotionPreviewStarted = performance.now();
+    emotionPreviewFrame = requestAnimationFrame(tickEmotionPreview);
+  }
+}
+
+function initEmotionControls() {
+  if (emotionControlsBound) return;
+  const controls = $('emotion-controls'), dialog = $('emotion-dialog');
+  if (!controls || !dialog) return;
+  emotionControlsBound = true;
+  let home = null, returnFocus = null, dialogWasInert = false;
+  function restore() {
+    if (dialog.open || !home) return;
+    stopEmotionPreview();
+    home.replaceWith(controls);
+    home = null;
+    document.body.appendChild(dialog);
+    dialog.inert = dialogWasInert;
+    if (returnFocus && returnFocus.isConnected && !returnFocus.closest('[hidden], [inert]') && returnFocus.getClientRects().length) {
+      returnFocus.focus({ preventScroll: true });
+    }
+    returnFocus = null;
+    syncEmotionPreview();
+  }
+  function open(opener) {
+    if (dialog.open) return;
+    // 原生 modal 逃逸父级 inert；显式 inert 必须解除。全屏时挂入全屏子树。
+    restore();
+    returnFocus = opener;
+    home = document.createComment('emotion controls home');
+    controls.before(home);
+    dialogWasInert = dialog.inert;
+    (document.fullscreenElement || document.body).appendChild(dialog);
+    dialog.inert = false;
+    $('emotion-dialog-content').appendChild(controls);
+    try { dialog.showModal(); } catch (error) {
+      restore();
+      toast(errText('情绪字体面板打开失败', error), 'error');
+      return;
+    }
+    paintEmotionSettings();
+  }
+  document.querySelectorAll('[data-emotion-open]').forEach(button => {
+    button.addEventListener('click', () => open(button));
+  });
+  $('emotion-dialog-close').onclick = () => dialog.close();
+  dialog.addEventListener('close', restore);
+  dialog.addEventListener('cancel', event => { event.preventDefault(); dialog.close(); });
+  dialog.addEventListener('click', event => event.stopPropagation());
+  // 先于舞台的 document 捕获监听处理，Escape 不退出舞台，其余键保留控件默认行为。
+  window.addEventListener('keydown', event => {
+    if (!dialog.open) return;
+    event.stopPropagation();
+    if (event.key === 'Escape') { event.preventDefault(); dialog.close(); }
+  }, true);
+  // 全屏挂载到舞台子树后，不能让舞台的「点击面板外关闭」捕获监听收起原入口。
+  // 不 preventDefault，原生输入、拖动滑块与后续 click 均保留。
+  window.addEventListener('pointerdown', event => {
+    if (dialog.open && dialog.contains(event.target)) event.stopPropagation();
+  }, true);
+  document.addEventListener('fullscreenchange', () => {
+    if (!dialog.open) return;
+    dialog.close();
+    (document.fullscreenElement || document.body).appendChild(dialog);
+    try { dialog.showModal(); } catch (error) {
+      restore();
+      toast(errText('情绪字体面板打开失败', error), 'error');
+    }
+    syncEmotionPreview();
+  });
+  const text = $('emotion-preview-text');
+  const sampleText = text.textContent;
+  const segments = typeof Intl.Segmenter === 'function'
+    ? Array.from(new Intl.Segmenter('zh', { granularity: 'grapheme' }).segment(sampleText), item => item.segment)
+    : Array.from(sampleText);
+  text.textContent = '';
+  emotionPreviewNodes = segments.slice(0, 24).map(segment => {
+    const node = document.createElement('span');
+    node.textContent = segment;
+    text.appendChild(node);
+    return node;
+  });
+  const choose = id => saveEmotionSettings({ lyrics_emotion_mode: 'manual', lyrics_emotion_preview: id });
+  controls.querySelectorAll('[data-emotion-preview]').forEach(button => {
+    button.onclick = () => choose(button.dataset.emotionPreview);
+  });
+  $('emotion-preview-sample').onclick = () => choose(lyricEmotionPreview());
+  $('emotion-retry').onclick = async () => {
+    invalidateEmotionAuto();
+    await refreshEmotionAiStatus();
+  };
+  const observer = new IntersectionObserver(entries => {
+    emotionPreviewIntersecting = entries[0].isIntersecting;
+    syncEmotionPreview();
+  });
+  observer.observe($('emotion-preview-sample'));
+  // 只观察祖先可见性，不观察样本 transform，避免动画触发全页 Mutation 循环。
+  const visibility = new MutationObserver(syncEmotionPreview);
+  visibility.observe(document.body, { attributes: true, attributeFilter: ['class', 'data-rm'] });
+  document.addEventListener('visibilitychange', syncEmotionPreview);
+  window.addEventListener('resize', syncEmotionPreview);
+  emotionPreviewMedia = window.matchMedia('(prefers-reduced-motion: reduce)');
+  emotionPreviewMedia.addEventListener('change', syncEmotionPreview);
+}
+
 function applyEmotionSettings() {
-  if (!window.Stage || !Stage.setEmotionSettings) return;
   const mode = lyricEmotionMode();
   if (mode !== 'auto') invalidateEmotionAuto();
+  if (!window.Stage || !Stage.setEmotionSettings) return;
   Stage.setEmotionSettings({
     mode,
     preview: lyricEmotionPreview(),
@@ -2686,8 +2860,11 @@ function paintEmotionSettings() {
   var mode = lyricEmotionMode();
   var auto = state.settings.lyrics_emotion_mode === 'auto';
   ui.setEmotionMode.value = auto ? 'auto' : mode;
-  ui.setEmotionPreview.value = lyricEmotionPreview();
-  ui.setEmotionPreviewRow.hidden = mode !== 'manual';
+  document.querySelectorAll('[data-emotion-preview]').forEach(button => {
+    button.setAttribute('aria-pressed', String(button.dataset.emotionPreview === lyricEmotionPreview()));
+  });
+  const selected = document.querySelector('[data-emotion-preview="' + lyricEmotionPreview() + '"] strong');
+  if (selected) $('emotion-preview-label').textContent = selected.textContent;
   ui.setEmotionScale.value = lyricEmotionScale();
   if (ui.setEmotionScaleValue) ui.setEmotionScaleValue.textContent = lyricEmotionScale().toFixed(2);
   if (ui.setEmotionCurve) ui.setEmotionCurve.value = lyricEmotionCurve();
@@ -2697,16 +2874,20 @@ function paintEmotionSettings() {
   ui.setEmotionPalette.checked = lyricEmotionPalette();
   if (ui.setEmotionAiAuthorized) ui.setEmotionAiAuthorized.checked = state.settings.lyrics_emotion_ai_authorized === true;
   var autoOption = ui.setEmotionMode.querySelector('option[value="auto"]');
-  if (autoOption) autoOption.disabled = !lyricEmotionReady();
+  var provider = emotionAiStatus && emotionAiStatus.provider;
+  if (autoOption) {
+    autoOption.disabled = !lyricEmotionReady();
+    autoOption.textContent = emotionAiChecking ? '自动（检查中）'
+      : emotionAiError ? '自动（检查失败）'
+        : !provider || !provider.ready ? '自动（需配置）'
+          : lyricEmotionReady() ? '自动（就绪）' : '自动（需授权）';
+  }
   if (ui.setEmotionAiNote) {
-    var provider = emotionAiStatus && emotionAiStatus.provider;
-    ui.setEmotionAiNote.textContent = !emotionAiStatus
-      ? '正在检查模型状态…'
-      : provider && provider.simulated
-        ? (lyricEmotionReady() ? '本地模拟 provider 已就绪，不访问云端；结果仅用于联调' : '启用后只运行本地模拟分类，不访问云端')
-        : provider && provider.ready
-          ? (lyricEmotionReady() ? '模型已就绪；授权后会在每首歌载入时分类' : '授权前不会发送歌词')
-          : ((provider && provider.diagnostic) || '模型未就绪；不会发送歌词');
+    ui.setEmotionAiNote.textContent = emotionAiChecking ? '正在检查模型状态，不发送歌词…'
+      : emotionAiError || (!provider || !provider.ready
+        ? ((provider && provider.diagnostic) || '模型未配置；手动效果仍可使用。')
+        : provider.simulated ? '本地模拟模型，不访问云端；结果仅用于联调，并非真实识别。'
+          : (lyricEmotionReady() ? '模型已就绪；只有自动模式会发送歌词。' : '需明确授权；授权前不会发送歌词。'));
   }
   if (ui.setEmotionLockNote) {
     var lockCount = Object.keys(emotionLockCache).reduce(function (sum, hash) {
@@ -2716,11 +2897,30 @@ function paintEmotionSettings() {
       ? '已锁定 ' + lockCount + ' 行；手动覆盖优先于 auto 结果'
       : '手动覆盖优先于 auto 结果；关闭情绪演出时不生效';
   }
+  const doc = window.Stage && Stage.lyrics ? Stage.lyrics() : null;
+  const hasLyrics = !!(doc && doc.lines && doc.lines.some(line => String(line.text || '').trim()));
   if (ui.setEmotionNote) {
-    ui.setEmotionNote.textContent = auto
-      ? '自动分类使用已配置的模型 provider；失败时保持中性，不影响播放。'
-      : '关闭时与当前版本完全一致；手动预览只用于调试，自动分类需要模型 provider 和显式授权。';
+    let note = mode === 'manual'
+      ? (hasLyrics ? '已应用手动固定情绪；不是自动识别结果。' : '已选择手动情绪；当前无歌词，播放区暂不呈现，固定样本仍可预览。')
+      : '情绪字体已关闭；固定样本仍可预览。';
+    if (auto) {
+      note = emotionAiChecking ? '正在检查模型状态…'
+        : emotionAiError || (!provider || !provider.ready ? '自动模式待配置；尚未发送歌词。'
+          : !lyricEmotionReady() ? '自动模式待授权；尚未发送歌词。'
+            : !hasLyrics ? '等待歌词；尚未发送分析请求。'
+              : emotionAutoState === 'error' ? emotionAutoError
+                : emotionAutoState === 'applied' ? '已应用当前歌词的自动分类；上方仍是固定预览。'
+                  : emotionAutoState === 'analyzing' ? '正在分析当前歌词… 播放不受影响。'
+                    : '自动模式已就绪，等待当前歌词分析。');
+    }
+    ui.setEmotionNote.textContent = note;
   }
+  const retry = $('emotion-retry');
+  if (retry) {
+    retry.disabled = emotionAiChecking || emotionAutoState === 'analyzing';
+    retry.textContent = auto && lyricEmotionReady() && hasLyrics ? '重新分析歌词' : '重新检查模型';
+  }
+  syncEmotionPreview();
 }
 
 let emotionLockCache = Object.create(null);
@@ -2833,23 +3033,32 @@ async function applyEmotionLocks(cue) {
 
 async function refreshEmotionAiStatus() {
   const epoch = ++emotionStatusEpoch;
-  let nextStatus = null;
+  let nextStatus = null, statusError = '';
+  emotionAiChecking = true;
+  paintEmotionSettings();
   try {
     nextStatus = await transport.get('/v1/ai/lyrics/emotion/status');
+    if (!nextStatus || !nextStatus.provider) throw new Error('模型状态响应无效');
   } catch (error) {
     nextStatus = null;
+    statusError = errText('模型状态检查失败', error);
   }
   if (epoch !== emotionStatusEpoch) return;
+  emotionAiChecking = false;
+  emotionAiError = statusError;
   emotionAiStatus = nextStatus;
-  paintEmotionSettings();
   applyEmotionSettings();
+  paintEmotionSettings();
   if (lyricEmotionMode() === 'auto') maybeAutoEmotion();
 }
 
 async function maybeAutoEmotion() {
-  if (lyricEmotionMode() !== 'auto' || !window.LyricEmotion || !Stage || !Stage.lyrics) return;
+  if (lyricEmotionMode() !== 'auto' || !window.LyricEmotion || !window.Stage || !Stage.lyrics) return;
   var doc = Stage.lyrics();
-  if (!doc || !doc.lines || !doc.lines.length) return;
+  if (!doc || !doc.lines || !doc.lines.some(line => String(line.text || '').trim())) {
+    paintEmotionSettings();
+    return;
+  }
   var scanToken = ++emotionAutoScanToken;
   var lines = doc.lines.map(function (line, index) {
     return { index: index, start_ms: line.start_ms, text: String(line.text == null ? '' : line.text).normalize('NFC') };
@@ -2864,18 +3073,32 @@ async function maybeAutoEmotion() {
     var controller = new AbortController();
     emotionAutoController = controller;
     emotionAutoPendingHash = hash;
+    emotionAutoState = 'analyzing';
+    emotionAutoError = '';
+    paintEmotionSettings();
     var cue = await transport.post('/v1/ai/lyrics/emotion',
       { lyricsHash: hash, lines: lines }, { signal: controller.signal });
-    if (requestToken !== emotionAutoToken || lyricEmotionMode() !== 'auto' || !cue || cue.version !== 1) return;
+    if (requestToken !== emotionAutoToken || lyricEmotionMode() !== 'auto') return;
+    if (!cue || cue.version !== 1 || cue.lyricsHash !== hash) throw new Error('分析结果与当前歌词不匹配');
     var merged = await applyEmotionLocks(cue);
     if (requestToken !== emotionAutoToken || lyricEmotionMode() !== 'auto') return;
-    if (Stage.setEmotionCueDoc(merged)) emotionAutoAppliedHash = hash;
+    if (!Stage.setEmotionCueDoc(merged)) throw new Error('分析结果未通过歌词校验');
+    emotionAutoAppliedHash = hash;
+    emotionAutoState = 'applied';
   } catch (error) {
-    // Provider 未就绪/授权撤销/超时都保持中性；播放不受影响。
+    // 仅本代请求可报告错误；旧歌、撤销授权与 Abort 的迟到结果不得回写。
+    if (lyricEmotionMode() !== 'auto' || (requestToken == null
+      ? scanToken !== emotionAutoScanToken : requestToken !== emotionAutoToken)) return;
+    emotionAutoState = 'error';
+    emotionAutoError = errText('歌词分析失败', error) + '；可重试，播放不受影响。';
   } finally {
-    if (requestToken != null && requestToken === emotionAutoToken) {
-      emotionAutoPendingHash = null;
-      emotionAutoController = null;
+    if ((requestToken == null && scanToken === emotionAutoScanToken) ||
+        (requestToken != null && requestToken === emotionAutoToken)) {
+      if (requestToken != null) {
+        emotionAutoPendingHash = null;
+        emotionAutoController = null;
+      }
+      paintEmotionSettings();
     }
   }
 }
@@ -2887,11 +3110,14 @@ function invalidateEmotionAuto() {
   emotionAutoController = null;
   emotionAutoPendingHash = null;
   emotionAutoAppliedHash = null;
+  emotionAutoState = 'idle';
+  emotionAutoError = '';
 }
 
 window.HertzEmotionAuto = {
   onLyricsChanged: function () {
     invalidateEmotionAuto();
+    paintEmotionSettings();
     if (lyricEmotionMode() === 'auto') maybeAutoEmotion();
   }
 };
@@ -2914,6 +3140,60 @@ function paintLyricSettings() {
 function persistSettings(patch) {
   return transport.put('/v1/settings', patch)
     .catch((err) => toast(errText('设置保存失败', err), 'error'));
+}
+
+// 情绪参数不改变歌词过滤结果；串行合并设置写入，失败只回滚没有更新动作的键。
+let emotionSavePending = {};
+let emotionSaveConfirmed = {};
+let emotionSaveTask = null;
+function saveEmotionSettings(patch) {
+  Object.keys(patch).forEach(key => {
+    if (!Object.prototype.hasOwnProperty.call(emotionSaveConfirmed, key)) emotionSaveConfirmed[key] = state.settings[key];
+  });
+  if (Object.prototype.hasOwnProperty.call(patch, 'lyrics_emotion_ai_authorized')) {
+    emotionStatusEpoch += 1;
+    emotionAiChecking = false;
+    // 授权变更必须写入并重新核实，不能沿用上次授权状态发送歌词。
+    if (emotionAiStatus) emotionAiStatus = Object.assign({}, emotionAiStatus, { authorized: false });
+    invalidateEmotionAuto();
+  }
+  Object.assign(state.settings, patch);
+  Object.assign(emotionSavePending, patch);
+  applyEmotionSettings();
+  paintEmotionSettings();
+  const note = $('emotion-save-note');
+  if (note) { note.hidden = false; note.textContent = '正在保存设置…'; }
+  if (!emotionSaveTask) {
+    emotionSaveTask = Promise.resolve().then(async () => {
+      while (Object.keys(emotionSavePending).length) {
+        const next = emotionSavePending;
+        emotionSavePending = {};
+        try {
+          await transport.put('/v1/settings', next);
+          Object.assign(emotionSaveConfirmed, next);
+          if (note) note.hidden = true;
+          if ('lyrics_emotion_ai_authorized' in next && !('lyrics_emotion_ai_authorized' in emotionSavePending)) {
+            await refreshEmotionAiStatus();
+          } else if ('lyrics_emotion_mode' in next && lyricEmotionMode() === 'auto') {
+            maybeAutoEmotion();
+          }
+        } catch (error) {
+          Object.keys(next).forEach(key => {
+            if (!(key in emotionSavePending)) state.settings[key] = emotionSaveConfirmed[key];
+          });
+          if (note) { note.hidden = false; note.textContent = errText('情绪设置保存失败', error) + '；未保存的设置已还原，请重试。'; }
+          applyEmotionSettings();
+          paintEmotionSettings();
+          if ('lyrics_emotion_ai_authorized' in next && !('lyrics_emotion_ai_authorized' in emotionSavePending)) {
+            await refreshEmotionAiStatus();
+          } else if (lyricEmotionMode() === 'auto') {
+            maybeAutoEmotion();
+          }
+        }
+      }
+    }).finally(() => { emotionSaveTask = null; });
+  }
+  return emotionSaveTask;
 }
 
 async function saveLyricSettings(patch) {
@@ -3049,7 +3329,7 @@ function onSkinChangedForViews() {
     pendingSkinViewHandoff = true;
     return;
   }
-  setView(defaultView());
+  setView(defaultView(), { skipDesktopDetection: true });
 }
 
 /// Daily.bind() 之后调用：若启动期攒下了换肤广播，这里补上对账。
@@ -3057,7 +3337,7 @@ function bindDailyStrip() {
   dailyStripBound = true;
   if (!pendingSkinViewHandoff) return;
   pendingSkinViewHandoff = false;
-  setView(defaultView());
+  setView(defaultView(), { skipDesktopDetection: true });
 }
 
 function applyNavVisibility() {
@@ -3325,14 +3605,25 @@ function drawSpectrum() {
 
 // 全屏声场（Stage3D）里的播放队列浮层与队列视图同源：这里把精简后的行模型
 // 推给 Stage3D，全屏内点行跳播/移出经 stage:control 意图回到同一套播放逻辑。
+//
+// 「当前曲」的唯一判据：快照优先，队列游标兜底。重启/刷新后的会话恢复里音频是
+// 惰性起播的——快照 track_id 还是 null，游标却已经指向上次要听的那首，控制条与
+// 队列行都按 queue[index] 认它。只认快照的话整份队列一个 playing 都没有，
+// 3D 歌单架就退回队列第一首当「正在播放」（症状：架子上显示的不是在听的歌）。
+function stageCurrentTrackId() {
+  return state.snapshot.track_id
+    || (state.queueIndex >= 0 ? state.queue[state.queueIndex] : null);
+}
+
 function pushStageQueue() {
   if (window.HertzRoom && HertzRoom.active()) { if (window.Stage3D) Stage3D.setQueue([]); return; }
+  const currentId = stageCurrentTrackId();
   if (window.Space3D && Space3D.setQueue) {
     Space3D.setQueue(state.queue.map((id) => {
       const track = state.byId.get(id) || window.Online.getMeta(id)
         || { id, title: '未知曲目', artist: '', duration_ms: null };
       const cover = track.has_cover ? transport.coverUrl(id) : window.Online && track.cover ? window.Online.safeCoverUrl(track.cover) : null;
-      return { id, title: track.title, artist: track.artist, album: track.album || '', duration: track.duration_ms, cover, vip_only: !!track.vip_only, playing: id === state.snapshot.track_id };
+      return { id, title: track.title, artist: track.artist, album: track.album || '', duration: track.duration_ms, cover, vip_only: !!track.vip_only, playing: id === currentId };
     }));
   }
   if (!window.Stage3D || !Stage3D.setQueue) return;
@@ -3345,7 +3636,7 @@ function pushStageQueue() {
     else if (window.Online && track.cover) cover = window.Online.safeCoverUrl(track.cover);
     return {
       id, title: track.title, artist: track.artist, album: track.album || '',
-      duration: track.duration_ms, cover, playing: id === state.snapshot.track_id,
+      duration: track.duration_ms, cover, playing: id === currentId,
       vip_only: !!track.vip_only,
     };
   }));
@@ -5379,6 +5670,8 @@ function setView(name, options) {
   }
   // 缓存占用是随时会变的数字，进设置页才刷新。
   if (name === 'settings') {
+    // 恢复默认视图（包括已保存的 settings）不代表用户请求桌面检测。
+    if (!(options && options.skipDesktopDetection) && window.HertzDesktopSettings) window.HertzDesktopSettings.onSettingsEnter();
     if (window.__loadCacheStats) window.__loadCacheStats();
     if (window.__loadDspSettings) window.__loadDspSettings();
     if (window.__loadRemoteRoots) window.__loadRemoteRoots();
@@ -5617,7 +5910,13 @@ function initSpaceHome(playbackHost) {
       if (!quote || !quote.hitokoto) throw new Error('每日内容暂时无法读取');
       return { text: quote.hitokoto, source: [quote.from || quote.origin, quote.author].filter(Boolean).join(' · ') };
     },
-    play: (item, list) => {
+    play: (item, list, enqueue) => {
+      if (enqueue) {
+        if (item.onlineId) return Online.playOne({ ...item, id: item.onlineId, playable: item.playable !== false });
+        const ids = state.queue.slice();
+        if (!ids.includes(item.id)) ids.push(item.id);
+        return playbackHost.playQueue(ids, queueMeta([item]), item.id);
+      }
       const items = list && list.length ? list : [item];
       return playbackHost.playQueue(items.map((track) => track.id), queueMeta(items), item.id);
     },
@@ -6643,7 +6942,7 @@ function bindShortcuts() {
     }
     if (e.key === 'Escape') {
       if (window.NowPlaying && NowPlaying.back()) { e.preventDefault(); return; }
-      closeMenu(); closeNowPlaying(); if (typing) document.activeElement.blur(); setView(state.view); document.body.classList.remove('stage-open'); return;
+      closeMenu(); closeNowPlaying(); if (typing) document.activeElement.blur(); setView(state.view, { skipDesktopDetection: true }); document.body.classList.remove('stage-open'); return;
     }
     if (e.key === '/' && !typing) { e.preventDefault(); focusSearch(false); return; }
     if (typing || e.ctrlKey || e.metaKey || e.altKey || target.closest('button, a, [role="button"], [role="slider"]')) return;
@@ -6678,6 +6977,8 @@ function initSkinBridge() {
     if (d.action === 'open-player') {
       openNowPlaying();
     } else if (d.action === 'settings-enter') {
+      // 流年/清风的显式打开事件不经 setView；同一次打开的请求由模块本地合并。
+      if (window.HertzDesktopSettings) window.HertzDesktopSettings.onSettingsEnter();
       loadDiagnostics();
       const refreshers = { cache: window.__loadCacheStats, dsp: window.__loadDspSettings, remote: window.__loadRemoteRoots };
       (Array.isArray(d.sections) ? d.sections : []).forEach(section => {
@@ -8940,6 +9241,9 @@ async function startApp() {
           }
           try {
             const pl = await transport.post('/v1/online/playlist', { source, name: trimmed });
+            if (window.OnlinePlaylists && window.OnlinePlaylists.rememberCreated) {
+              window.OnlinePlaylists.rememberCreated(source, pl);
+            }
             await transport.post('/v1/online/playlist/tracks/add', {
               source, id: pl.id, tracks: ids.map((trackId) => ({ id: trackId })),
             });
@@ -9038,9 +9342,10 @@ async function startApp() {
     };
   }
   // 歌词设置：偏移步进 100ms（±2000 封顶），正则改完失焦即存。
-  // 桌面歌词是独立 Windows 组件：DBX 形态没有桌面入口，也不该在这里催用户安装。
+  // DBX 的统一桌面区只注册事件；实际打开设置或显式桌面动作才检测。
+  if (window.HertzDesktopSettings) window.HertzDesktopSettings.init(transport);
   if (ui.barDesktopSettings) {
-    ui.barDesktopSettings.hidden = !!(window.hertzHost && window.hertzHost.isDbx);
+    ui.barDesktopSettings.hidden = false;
   }
   if (ui.setDesktopLyricsRow) {
     ui.setDesktopLyricsRow.style.display =
@@ -9053,6 +9358,9 @@ async function startApp() {
   if (ui.setWallpaperNote) {
     ui.setWallpaperNote.style.display =
       window.hertzHost && window.hertzHost.isDbx ? 'none' : '';
+  }
+  if ($('set-desktop-lyrics-note')) {
+    $('set-desktop-lyrics-note').hidden = !!(window.hertzHost && window.hertzHost.isDbx);
   }
   if (ui.setDesktopLyricsOpen) {
     ui.setDesktopLyricsOpen.onclick = () => {
@@ -9083,6 +9391,22 @@ async function startApp() {
   for (const button of [ui.setWallpaperSettings, ui.barDesktopSettings]) {
     if (!button) continue;
     button.onclick = () => {
+      if (window.hertzHost && window.hertzHost.isDbx) {
+        const skin = window.Skins && window.Skins.currentId();
+        const sheet = document.querySelector(skin === 'qingfeng' ? '.qf-modal' : skin === 'liunian' ? '.ln-modal' : '.skset-modal');
+        if (skin === 'qingfeng' || skin === 'liunian') {
+          // 这两套皮肤有自己的打开入口；setView 只会隐藏它们已搬走的设置视图。
+          if (sheet && sheet.hidden) {
+            const opener = skin === 'qingfeng' ? document.querySelector('.qf-settings-btn') : ui.settingsEntry;
+            if (opener) opener.click();
+          }
+        } else setView('settings');
+        // 若已打开则显式重新检测；入口已发出的同次检测会被本地合并。
+        if (window.HertzDesktopSettings) window.HertzDesktopSettings.onSettingsEnter();
+        // 皮肤先完成现有浮层搬运/分类还原，再聚焦歌词组里的桌面区。
+        requestAnimationFrame(() => window.HertzDesktopSettings && window.HertzDesktopSettings.focus());
+        return;
+      }
       wallpaperControl('wallpaper-settings', { tab: 'wallpaper' })
         .then(() => toast('已打开桌面歌词与壁纸'))
         .catch((err) => toast(errText('打开桌面歌词与壁纸失败', err), 'error'));
@@ -9110,38 +9434,33 @@ async function startApp() {
   ui.setLyricFilterOn.onchange = () => saveLyricSettings({ lyrics_filter_enabled: ui.setLyricFilterOn.checked });
   ui.setLyricFilterPattern.onchange = () => saveLyricSettings({ lyrics_filter_pattern: ui.setLyricFilterPattern.value });
   if (ui.setEmotionMode) {
-    ui.setEmotionMode.onchange = () => saveLyricSettings({ lyrics_emotion_mode: ui.setEmotionMode.value });
-    ui.setEmotionPreview.onchange = () => saveLyricSettings({ lyrics_emotion_preview: ui.setEmotionPreview.value });
+    initEmotionControls();
+    ui.setEmotionMode.onchange = () => saveEmotionSettings({ lyrics_emotion_mode: ui.setEmotionMode.value });
     ui.setEmotionScale.oninput = () => {
       if (ui.setEmotionScaleValue) ui.setEmotionScaleValue.textContent = Number(ui.setEmotionScale.value).toFixed(2);
+      syncEmotionPreview();
     };
-    ui.setEmotionScale.onchange = () => saveLyricSettings({ lyrics_emotion_scale: Number(ui.setEmotionScale.value) });
+    ui.setEmotionScale.onchange = () => saveEmotionSettings({ lyrics_emotion_scale: Number(ui.setEmotionScale.value) });
     if (ui.setEmotionCurve) {
       ui.setEmotionCurve.oninput = () => {
         if (ui.setEmotionCurveValue) ui.setEmotionCurveValue.textContent = Number(ui.setEmotionCurve.value).toFixed(2);
+        syncEmotionPreview();
       };
-      ui.setEmotionCurve.onchange = () => saveLyricSettings({ lyrics_emotion_curve: Number(ui.setEmotionCurve.value) });
+      ui.setEmotionCurve.onchange = () => saveEmotionSettings({ lyrics_emotion_curve: Number(ui.setEmotionCurve.value) });
     }
     if (ui.setEmotionAccent) {
-      ui.setEmotionAccent.onchange = () => saveLyricSettings({ lyrics_emotion_accent: ui.setEmotionAccent.checked });
+      ui.setEmotionAccent.onchange = () => saveEmotionSettings({ lyrics_emotion_accent: ui.setEmotionAccent.checked });
     }
     if (ui.setEmotionAccentWords) {
-      ui.setEmotionAccentWords.onchange = () => saveLyricSettings({
+      ui.setEmotionAccentWords.onchange = () => saveEmotionSettings({
         lyrics_emotion_accent_words: ui.setEmotionAccentWords.value.trim()
       });
     }
-    ui.setEmotionPalette.onchange = () => saveLyricSettings({ lyrics_emotion_palette: ui.setEmotionPalette.checked });
+    ui.setEmotionPalette.onchange = () => saveEmotionSettings({ lyrics_emotion_palette: ui.setEmotionPalette.checked });
     if (ui.setEmotionAiAuthorized) {
-      ui.setEmotionAiAuthorized.onchange = async () => {
-        var authorized = ui.setEmotionAiAuthorized.checked;
-        if (!authorized) {
-          emotionAiStatus = emotionAiStatus ? Object.assign({}, emotionAiStatus, { authorized: false }) : null;
-          invalidateEmotionAuto();
-          applyEmotionSettings();
-        }
-        await saveLyricSettings({ lyrics_emotion_ai_authorized: authorized });
-        await refreshEmotionAiStatus();
-      };
+      ui.setEmotionAiAuthorized.onchange = () => saveEmotionSettings({
+        lyrics_emotion_ai_authorized: ui.setEmotionAiAuthorized.checked
+      });
     }
     if (ui.setEmotionLockApply && ui.setEmotionLockClear) {
       ui.setEmotionLockApply.onclick = async () => {
@@ -9451,7 +9770,7 @@ async function startApp() {
 
   // 启动落在默认视图（在线曲库）—— 见 defaultView() 上方的边界说明：
   // 这里只改"回首页"语义，rail 的显式点击仍去本地曲库。
-  setView(defaultView());
+  setView(defaultView(), { skipDesktopDetection: true });
   // 先把封面票签好再拉列表：coverUrl() 是同步契约，票没到位就只能退回 ?token=，
   // 那第一屏封面又会把长期凭据带进 URL（正是这一步要消掉的东西）。
   await refreshCoverTicket();

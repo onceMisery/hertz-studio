@@ -14,6 +14,9 @@ description = "Hertz desktop lyrics host for Windows 11 x64"
 name = "hertz-desktop"
 path = "src/main.rs"
 
+[build-dependencies]
+sha2 = { workspace = true }
+
 [target.'cfg(windows)'.dependencies]
 tao = { version = "=0.37.1", default-features = false, features = ["rwh_06"] }
 wry = { version = "=0.57.0", default-features = false, features = ["os-webview"] }
@@ -40,3 +43,6 @@ anyhow = { workspace = true }
 dirs = { workspace = true }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json"] }
 tungstenite = { version = "0.28", default-features = false, features = ["handshake"] }
+
+hertz-desktop-ipc = { path = "../hertz-desktop-ipc" }
+tokio = { workspace = true }

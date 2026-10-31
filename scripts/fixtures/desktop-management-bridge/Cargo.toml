@@ -1,0 +1,12 @@
+[package]
+name = "desktop-management-bridge-fixture"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+hertz-desktop-ipc = { path = "../../../crates/hertz-desktop-ipc" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net"] }
+serde_json = "1"

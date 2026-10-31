@@ -820,14 +820,16 @@ body.s3d-open #room-global-player { display:none!important; }
 #view-room .room-avatar-picker { display:grid; gap:12px; padding:12px 0; }
 #view-room .room-avatar-preview { display:flex; align-items:center; gap:12px; }
 #view-room .room-avatar-preview .room-sub { margin:0; font-size:11px; }
-#view-room .room-avatar-options { display:grid; grid-template-columns:repeat(8,minmax(0,1fr)); gap:8px; }
-#view-room .btn.room-avatar-option { display:grid; place-items:center; padding:3px; background:transparent; min-width:0; border-radius:50%; }
+#view-room .room-avatar-options { display:grid; grid-template-columns:repeat(auto-fit,minmax(44px,1fr)); gap:8px; }
+#view-room .btn.room-avatar-option { display:grid; place-items:center; padding:8px; background:var(--panel-2); min-width:44px; min-height:44px; border-radius:8px; }
 #view-room .room-avatar-option[aria-pressed=true] { outline:2px solid var(--text); outline-offset:1px; }
-#view-room .room-avatar-option .room-avatar { width:100%; height:auto; aspect-ratio:1; }
+#view-room .room-avatar-option .room-avatar { width:24px; height:24px; border:0; background:transparent; }
+#view-room .room-avatar-option .room-avatar .room-icon { width:22px; height:22px; }
 #view-room .room-avatar { display:inline-grid; place-items:center; flex:none; width:24px; height:24px; background:var(--panel-2); border:1px solid var(--line-strong); border-radius:50%; font-size:11px; color:var(--muted); }
 #view-room .room-avatar-big { width:44px; height:44px; font-size:15px; }
 #view-room .room-avatar .room-icon { width:56%; height:56%; }
-#view-room .room-avatar[data-avatar] { color:#fff; border-color:transparent; }
+#view-room .room-avatar[data-avatar] { color:var(--text); border-color:var(--line-strong); }
+#view-room .room-avatar:is([data-avatar=disc],[data-avatar=phones],[data-avatar=heart],[data-avatar=radio],[data-avatar=queue],[data-avatar=crown],[data-avatar=user],[data-avatar=play]) { color:#fff; border-color:transparent; }
 #view-room .room-avatar[data-avatar=disc] { background:linear-gradient(140deg,#00cbb4,#0a84ff); }
 #view-room .room-avatar[data-avatar=phones] { background:linear-gradient(140deg,#8b7bff,#3b2a9e); }
 #view-room .room-avatar[data-avatar=heart] { background:linear-gradient(140deg,#ff6b8b,#8e2f5f); }

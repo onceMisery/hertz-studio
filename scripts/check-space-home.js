@@ -17,7 +17,8 @@ async function bridgeContract() {
   const local = { id: 'local-a', title: 'Local', has_cover: true };
   const online = { id: 'remote-a', source: 'netease', virtual_id: 'online:netease:remote-a', title: 'Remote', cover: 'https://cover.example/a.jpg', vip_only: true };
   const context = {
-    window: { SpaceHome: {}, Online: { sources: () => [{ id: 'netease', label: '网易云' }], searchSources: () => ['netease'], whenSearchReady: () => Promise.resolve(), safeCoverUrl: (url) => url, getMeta: () => null }, Space3D: { openQueue: () => commands.push('queue') } },
+    window: { SpaceHome: {}, Online: { sources: () => [{ id: 'netease', label: '网易云' }], searchSources: () => ['netease'], whenSearchReady: () => Promise.resolve(), safeCoverUrl: (url) => url, getMeta: () => null,
+      playOne: track => commands.push({ single: track }) }, Space3D: { openQueue: () => commands.push('queue') } },
     state: { byId: new Map(), tracks: [local], queue: ['current'], settings: {} }, plCovers: null,
     homeSnapshot: () => ({ current: local, playing: false, queueLength: 1 }),
     onlineItemId: (track) => String(track.id).startsWith('online:') ? track.id : 'online:' + track.source + ':' + track.id,
@@ -56,6 +57,7 @@ async function bridgeContract() {
   assert.equal(requests.some((url) => url.includes('all+providers')), false, 'All search waits for the online source catalog');
   releaseSearchReady();
   const allResults = await allSearch;
+  context.window.Online.whenSearchReady = () => Promise.resolve();
   assert.equal(allResults.sourceStates.length, 2, 'All includes local and every ready online source');
   assert.equal(allResults.items.length, 2);
   assert.equal(allResults.total, 202, 'All totals combine the server counts from each source');
@@ -72,6 +74,15 @@ async function bridgeContract() {
   assert.equal(played.id, online.virtual_id); assert.deepEqual(Array.from(played.ids), ['local-a', online.virtual_id]);
   assert.equal(played.meta[online.virtual_id].onlineId, 'remote-a', 'online metadata preserves provider identity');
   assert.equal(played.meta[online.virtual_id].vip_only, true, 'playback metadata preserves VIP status');
+  await host.play(found.items[0], found.items, true);
+  assert.equal(commands.at(-1).single.id, 'remote-a', 'online search uses the queue-preserving single-track owner');
+  assert.equal(commands.at(-1).single.source, 'netease');
+  await host.play(local, [local, ...found.items], true);
+  assert.deepEqual(Array.from(commands.at(-1).ids), ['current', 'local-a'], 'local search preserves the queue and adds only the selected song');
+  context.state.queue = ['current', 'local-a'];
+  await host.play(local, [local], true);
+  assert.deepEqual(Array.from(commands.at(-1).ids), ['current', 'local-a'], 'playing an existing entry does not duplicate it');
+  context.state.queue = ['current'];
   await host.enqueue(found.items[0]); assert.equal(commands.at(-1)[1], online.virtual_id);
   await host.enqueue(null, playlist.items); assert.deepEqual(Array.from(commands.at(-1)[1]), ['current', 'local-a', online.virtual_id]);
   const recent = await host.recent(); assert.equal(recent.items.length, 2, 'removed local history is skipped');

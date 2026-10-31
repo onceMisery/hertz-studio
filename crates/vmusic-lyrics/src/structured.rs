@@ -58,7 +58,7 @@ pub fn parse_import(input: &str, format: &str) -> Result<LyricDocument, ImportEr
                     return Err(ImportError::Invalid);
                 }
             }
-            super::parse_lrc_bounded(input)?
+            super::parse_lrc_checked(input)?
         }
         "ttml" => parse_ttml(input)?,
         _ => return Err(ImportError::Unsupported),

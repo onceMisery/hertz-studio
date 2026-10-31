@@ -90,6 +90,80 @@ function cue(hash, extra) {
   EM.setAccent(false, '星光');
   assert(!EM.accentFor('星光'), '关闭后重音词仍匹配');
 
+  const signatures = new Set();
+  for (const id of ids.filter(id => id !== 'neutral')) {
+    const emotion = { id, profile: EM.profiles[id], intensity: 0.8 };
+    const pose = EM.motionPose(emotion, 0.7, 2.3, 64, 0.8, false);
+    assert(Object.values(pose).every(Number.isFinite), id + ' 姿态必须为有限数');
+    assert(Math.abs(pose.x) < 24 && Math.abs(pose.y) < 32 && pose.scaleX > 0.8 && pose.scaleY < 1.3,
+      id + ' 位姿越过阅读预算');
+    assert(JSON.stringify(pose) === JSON.stringify(EM.motionPose(emotion, 0.7, 2.3, 64, 0.8, false)),
+      id + ' seek 后姿态不确定');
+    const frozen = EM.motionPose(emotion, 0.7, 2.3, 64, 0.8, true);
+    assert(JSON.stringify(frozen) === JSON.stringify(EM.motionPose(emotion, 0.7, 7.8, 64, 0.1, true)),
+      id + ' 减少动态仍随时间改变');
+    assert(EM.fontFamily(emotion, 'fallback') !== 'fallback', id + ' 未选择字体');
+    signatures.add(JSON.stringify(pose));
+  }
+  assert(signatures.size === 7, '七种情绪必须有独立姿态而不是只换颜色');
+  const motionSignatures = new Set();
+  for (const id of ids.filter(id => id !== 'neutral')) {
+    const emotion = { id, profile: EM.profiles[id], intensity: 0.8 };
+    const frames = Array.from({ length: 121 }, (_, i) => EM.motionPose(emotion, 0.37, i / 20, 40, 0, false));
+    const span = key => Math.max(...frames.map(p => p[key])) - Math.min(...frames.map(p => p[key]));
+    const travel = Math.max(span('x'), span('y'), 40 * span('scaleX'), 40 * span('scaleY'), 40 * span('rotate'));
+    assert(travel >= 4, id + ' 默认字号下动态行程不足4px，不能只靠静态字形区分：' + travel);
+    const first = frames[0], last = frames[frames.length - 1];
+    assert(Object.keys(first).every(key => Math.abs(first[key] - last[key]) < 1e-9), id + ' 6秒循环接缝跳变');
+    const deltas = frames.map(p => Object.keys(p).map(key => +(p[key] - first[key]).toFixed(3)));
+    motionSignatures.add(JSON.stringify(deltas));
+    for (const u of [0, 0.5, 1]) {
+      for (let i = 0; i <= 120; i++) {
+        const pose = EM.motionPose(emotion, u, i / 20, 64, 1, false);
+        assert(Object.values(pose).every(Number.isFinite) && Math.abs(pose.x) < 24 && Math.abs(pose.y) < 32 &&
+          pose.scaleX > 0.8 && pose.scaleY > 0.8 && pose.scaleX < 1.3 && pose.scaleY < 1.3,
+        id + ' 动画越过阅读预算');
+      }
+    }
+  }
+  assert(motionSignatures.size === 7, '七种情绪需要不同的运动轨迹，而不只是静态偏移');
+  const wordStyles = new Map();
+  const word = { style: { setProperty: (key, value) => wordStyles.set(key, value),
+    getPropertyValue: key => wordStyles.get(key) || '', removeProperty: key => wordStyles.delete(key) }, removeAttribute() {} };
+  const moving = { id: 'joy', profile: EM.profiles.joy, intensity: 0.8 };
+  EM.applyWordMotion(word, moving, 0.37, 1, 40, 0, false);
+  const wordFirst = JSON.stringify([...wordStyles]);
+  EM.applyWordMotion(word, moving, 0.37, 2, 40, 0, false);
+  assert(JSON.stringify([...wordStyles]) !== wordFirst, 'DOM 词动画没有逐帧写入');
+  EM.applyWordMotion(word, moving, 0.37, 1, 40, 0, false);
+  assert(JSON.stringify([...wordStyles]) === wordFirst, 'DOM 词动画 seek 后未归位');
+  EM.clearLine(word, [word]);
+  assert(wordStyles.size === 0, '关闭情绪后 DOM 动画变量未清除');
+  const effectKinds = { joy: 'sparkle', sorrow: 'tears', anger: 'flame', anxious: 'electric', tender: 'petals', triumph: 'rays', lonely: 'mist' };
+  for (const [id, kind] of Object.entries(effectKinds)) {
+    const emotion = { id, profile: EM.profiles[id], intensity: 0.8 };
+    const first = EM.effectFrame(emotion, 3, 0.7, false);
+    assert(first.kind === kind && first.particles.length > 0 && first.particles.length <= 3, id + ' 缺少具象字体特效或超出预算');
+    assert(first.particles.every(p => [p.x, p.y, p.scaleX, p.scaleY, p.rotation, p.alpha].every(Number.isFinite) && p.alpha >= 0 && p.alpha <= 1), id + ' 特效参数无效');
+    assert(JSON.stringify(first) !== JSON.stringify(EM.effectFrame(emotion, 3, 2.1, false)), id + ' 具象特效没有动画');
+    assert(JSON.stringify(first) === JSON.stringify(EM.effectFrame(emotion, 3, 0.7, false)), id + ' 特效 seek 不确定');
+    assert(EM.effectFrame(emotion, 3, 0.7, true).particles.length === 0, id + ' 减少动态时仍冒火/滴泪');
+  }
+  assert(EM.effectFrame(null, 0, 1, false).particles.length === 0, '关闭必须停止具象特效');
+  assert(EM.fontFamily({ id: 'neutral' }, 'fallback') === 'fallback', '中性必须保留主题字体');
+  const neutralPose = EM.motionPose(null, 0.2, 8, 64, 1, false);
+  assert(JSON.stringify(neutralPose) === JSON.stringify({ x: 0, y: 0, rotate: 0, scaleX: 1, scaleY: 1, skew: 0 }),
+    '关闭必须恢复单位变换');
+  for (const [setter, value] of [['setScale', 0.8], ['setCurve', 0.8], ['setPaletteEnabled', false]]) {
+    const before = EM.revision();
+    EM[setter](value);
+    assert(EM.revision() > before, setter + ' 未通知同一句的渲染器');
+    const after = EM.revision();
+    EM[setter](value);
+    assert(EM.revision() === after, setter + ' 相同设置不能反复重建字形');
+  }
+  EM.setScale(1); EM.setCurve(1); EM.setPaletteEnabled(true);
+
   // 清除只清 Cue，不清歌词绑定。
   assert(EM.clearCues() === true, 'clearCues 未改变状态');
   assert(EM.resolveForLine(0).id === 'neutral', 'clearCues 后未回中性');

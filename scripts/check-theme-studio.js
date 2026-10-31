@@ -218,6 +218,9 @@ function checkThemeContrast() {
     const cMuted = contrast(muted, bg);
     ok(cText >= 7, `${id} 正文对比度 ≥ 7:1（实际 ${cText.toFixed(2)}）`);
     ok(cMuted >= 4.5, `${id} 次要文字对比度 ≥ 4.5:1（实际 ${cMuted.toFixed(2)}）`);
+    const panel = lum(t.tokens['--panel-solid']);
+    ok(contrast(text, panel) >= 7, `${id} 面板正文对比度 ≥ 7:1`);
+    ok(contrast(muted, panel) >= 4.5, `${id} 面板次要文字对比度 ≥ 4.5:1`);
     // --accent-ink 是在强调色底上放文字用的前景色，反了就是"亮按钮上糊白字"。
     const ink = contrast(lum(t.tokens['--accent-ink']), lum(t.tokens['--accent']));
     ok(ink >= 4.5, `${id} 强调色上的前景色 ≥ 4.5:1（实际 ${ink.toFixed(2)}）`);

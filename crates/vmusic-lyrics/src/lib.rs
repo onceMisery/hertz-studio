@@ -35,10 +35,11 @@ pub struct LrcMeta {
 /// lines rather than an error, because a half-broken lyric file is still more
 /// useful to the user than no lyrics at all.
 pub fn parse_lrc(input: &str) -> LyricDocument {
-    parse_lrc_bounded(input).unwrap_or_else(|_| LyricDocument::empty())
+    parse_lrc_checked(input).unwrap_or_else(|_| LyricDocument::empty())
 }
 
-fn parse_lrc_bounded(input: &str) -> Result<LyricDocument, ImportError> {
+/// Tolerant LRC parsing which preserves size/structure limit errors.
+pub fn parse_lrc_checked(input: &str) -> Result<LyricDocument, ImportError> {
     if input.len() > MAX_BYTES {
         return Err(ImportError::Limit);
     }

@@ -94,12 +94,44 @@ async function main() {
     await navigate('lobby'); await page.getByRole('button', { name: '+ 创建房间', exact: true }).click();
     const create = page.getByRole('dialog', { name: '创建房间', exact: true });
     await create.getByLabel('你的昵称', { exact: true }).fill('晚风');
-    await create.getByRole('button', { name: '头像 皇冠', exact: true }).click();
-    assert.equal(await create.getByRole('button', { name: '头像 皇冠', exact: true }).getAttribute('aria-pressed'), 'true');
+    const avatarLabels = ['咖啡', '鸡尾酒', '纸杯蛋糕', '吃豆人', '棋马', '太空怪兽', '邮票', '甲虫', '雷达', '小熊', '幽灵', '外星人', '火箭', '烧瓶'];
+    assert.deepEqual(await create.locator('.room-avatar-option').evaluateAll(nodes => nodes.map(node => node.getAttribute('aria-label'))), avatarLabels.map(label => '头像 ' + label));
+    for (const label of avatarLabels) {
+      const option = create.getByRole('button', { name: '头像 ' + label, exact: true }); await option.click();
+      assert.equal(await create.locator('.room-avatar-option[aria-pressed=true]').count(), 1);
+      assert.ok(await create.locator('.room-avatar-preview svg path').getAttribute('d'), 'preset renders its own vector artwork');
+    }
+    await create.getByRole('button', { name: '头像 幽灵', exact: true }).click();
+    for (const width of [360, 390, 1200]) {
+      await page.setViewportSize({ width, height: 900 });
+      assert.ok(await create.evaluate(node => node.scrollWidth <= node.clientWidth), 'avatar grid fits dialog at ' + width);
+    }
+    await create.getByText('封面与高级设置', { exact: true }).click();
+    const photo = await page.evaluate(() => {
+      const canvas = document.createElement('canvas'); canvas.width = 1600; canvas.height = 900;
+      const ctx = canvas.getContext('2d'), pixels = ctx.createImageData(1600, 900); let seed = 42;
+      for (let y = 0; y < 900; y++) for (let x = 0; x < 1600; x++) {
+        seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+        const i = (y * 1600 + x) * 4, grain = ((seed >>> 24) - 128) * 0.6;
+        pixels.data[i] = 40 + x / 12 + grain; pixels.data[i + 1] = 60 + y / 8 + grain; pixels.data[i + 2] = 130 + 35 * Math.sin(x / 23) + grain; pixels.data[i + 3] = 255;
+      }
+      ctx.putImageData(pixels, 0, 0); ctx.fillStyle = '#fff'; ctx.font = 'bold 90px sans-serif'; ctx.fillText('NIGHT RADIO', 80, 700);
+      return canvas.toDataURL('image/png');
+    });
+    await create.getByLabel('房间封面（可选）', { exact: true }).setInputFiles({ name: 'detailed-photo.png', mimeType: 'image/png', buffer: Buffer.from(photo.split(',')[1], 'base64') });
+    const coverPreview = create.locator('.room-cover-editor img'); await coverPreview.waitFor();
+    await coverPreview.evaluate(node => node.decode());
+    const preparedCover = await coverPreview.getAttribute('src');
+    assert.ok(preparedCover.startsWith('data:image/jpeg;base64,'), 'detailed photos use JPEG instead of shrinking PNG to a tiny bitmap');
+    assert.ok(Buffer.from(preparedCover.split(',')[1], 'base64').length <= 24 * 1024);
+    assert.equal(await coverPreview.evaluate(node => node.naturalWidth), 512, 'cover keeps enough pixels for high-density cards');
+    fs.writeFileSync(path.join(output, 'prepared-cover.jpg'), Buffer.from(preparedCover.split(',')[1], 'base64'));
     await shot('create-avatar');
     await create.getByRole('button', { name: '创建房间', exact: true }).click();
     await page.getByRole('heading', { name: '等朋友们进来', exact: true }).waitFor(); await shot('waiting');
-    assert.ok(await page.locator('.room-seat [data-avatar=crown]').count());
+    assert.ok(await page.locator('.room-seat [data-avatar=ghost]').count());
+    assert.equal(await page.evaluate(() => localStorage.getItem('hertz.room.avatar.v1')), 'ghost');
+    assert.equal(await page.evaluate(() => window.__calls.find(call => call.action === 'create').cover), preparedCover, 'creation submits the prepared cover');
     await page.getByRole('button', { name: '邀请朋友', exact: true }).click();
     const invite = page.getByRole('dialog', { name: '邀请一起听', exact: true });
     await page.evaluate(() => { window.__clipboardFail = true; }); await invite.getByRole('button', { name: '生成并复制邀请', exact: true }).click();

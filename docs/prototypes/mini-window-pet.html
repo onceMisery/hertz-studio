@@ -1,0 +1,1064 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>小窗播放（桌面宠物）· 交互原型</title>
+<style>
+/* ===========================================================================
+   小窗播放（桌面宠物）交互原型
+   这不是视觉稿：页面模拟了一块桌面，小窗的拖拽、吸附、贴边隐藏、透明区域
+   穿透全部是真的行为。穿透尤其要能被验证——桌面上的「便签」里有按钮和输入框，
+   开启穿透后隔着小窗的透明区点下去，命中的必须是便签，而不是小窗。
+   =========================================================================== */
+
+:root{
+  --font-ui: "PingFang SC", "HarmonyOS Sans SC", "Source Han Sans SC", "Microsoft YaHei UI", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "SF Mono", "Cascadia Mono", "JetBrains Mono", "Consolas", ui-monospace, monospace;
+  --out: cubic-bezier(.16,1,.3,1);
+  --soft: cubic-bezier(.22,.61,.36,1);
+  --taskbar: 46px;
+  --accent: #ff7a2f;
+  --state: #6fe3c2;
+}
+html[data-theme="dark"]{
+  --bg: #0b0e13;
+  --wall-a: rgba(255,122,47,.10);
+  --wall-b: rgba(111,227,194,.08);
+  --grid: rgba(255,255,255,.022);
+  --app: #14181f;
+  --app-head: #191e26;
+  --surface: rgba(18,21,28,.82);
+  --panel: rgba(13,16,21,.92);
+  --text: #e8ecf2;
+  --dim: rgba(232,236,242,.58);
+  --faint: rgba(232,236,242,.34);
+  --stroke: rgba(255,255,255,.10);
+  --stroke-hi: rgba(255,255,255,.18);
+  --shadow: 0 18px 46px -14px rgba(0,0,0,.65), 0 4px 12px -4px rgba(0,0,0,.45);
+}
+html[data-theme="light"]{
+  --bg: #e9edf3;
+  --wall-a: rgba(255,122,47,.14);
+  --wall-b: rgba(15,110,86,.10);
+  --grid: rgba(0,0,0,.028);
+  --app: #ffffff;
+  --app-head: #f4f6fa;
+  --surface: rgba(255,255,255,.92);
+  --panel: rgba(252,253,255,.94);
+  --text: #12161d;
+  --dim: rgba(18,22,29,.58);
+  --faint: rgba(18,22,29,.34);
+  --stroke: rgba(0,0,0,.10);
+  --stroke-hi: rgba(0,0,0,.18);
+  --shadow: 0 18px 44px -16px rgba(24,34,56,.30), 0 4px 12px -5px rgba(24,34,56,.20);
+  --accent: #e0561a;
+  --state: #0f6e56;
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{
+  margin:0; font-family:var(--font-ui); color:var(--text);
+  background:var(--bg); overflow:hidden; user-select:none;
+  -webkit-font-smoothing:antialiased;
+}
+button{font:inherit;color:inherit;cursor:pointer}
+:focus-visible{outline:2px solid var(--state); outline-offset:2px}
+
+/* --- 桌面 ---------------------------------------------------------------- */
+#desktop{
+  position:fixed; inset:0 0 var(--taskbar) 0; overflow:hidden;
+  background:
+    radial-gradient(900px 620px at 14% 92%, var(--wall-a), transparent 62%),
+    radial-gradient(760px 520px at 88% 6%, var(--wall-b), transparent 60%),
+    repeating-linear-gradient(0deg, var(--grid) 0 1px, transparent 1px 42px),
+    repeating-linear-gradient(90deg, var(--grid) 0 1px, transparent 1px 42px),
+    var(--bg);
+}
+/* 模拟桌面上已经开着的窗口：用来验证「置顶」开与不开的层叠差异，
+   也用来验证穿透时点击会落到谁身上。 */
+.app{
+  position:absolute; border-radius:12px; overflow:hidden;
+  background:var(--app); box-shadow:var(--shadow);
+  border:1px solid var(--stroke); z-index:10;
+}
+.app-head{
+  height:28px; display:flex; align-items:center; gap:6px; padding:0 10px;
+  background:var(--app-head); border-bottom:1px solid var(--stroke);
+  font-size:11.5px; color:var(--dim);
+}
+.app-head i{width:9px;height:9px;border-radius:50%;background:var(--stroke-hi)}
+.app-body{padding:12px; font-size:12px; color:var(--dim); line-height:1.7}
+.app-body b{color:var(--text); font-weight:500}
+
+/* 便签：穿透测试的目标。里面有真按钮、真输入框、真复选框。 */
+#note{left:64px; top:96px; width:246px}
+#note .app-body{display:grid; gap:9px}
+#note textarea{
+  font:12px/1.6 var(--font-ui); color:var(--text); background:transparent;
+  border:1px solid var(--stroke); border-radius:8px; padding:7px 9px; resize:none; height:58px;
+}
+#note textarea:focus{outline:none; border-color:var(--state)}
+.note-row{display:flex; align-items:center; gap:9px}
+.btn{
+  border:1px solid var(--stroke-hi); background:transparent; border-radius:8px;
+  padding:6px 11px; font-size:12px; transition:background .16s, transform .16s var(--out);
+}
+.btn:hover{background:color-mix(in srgb, var(--text) 10%, transparent)}
+.btn:active{transform:scale(.96)}
+.btn strong{font-variant-numeric:tabular-nums; color:var(--state); font-weight:600}
+.check{display:flex; align-items:center; gap:7px; font-size:12px; color:var(--dim)}
+
+#files{left:392px; top:78px; width:300px; height:206px}
+#files .app-body{padding:0}
+.file{display:flex;align-items:center;gap:9px;padding:7px 12px;font-size:12px;border-bottom:1px solid var(--stroke)}
+.file:last-child{border-bottom:0}
+.file span{width:22px;height:22px;border-radius:6px;background:var(--stroke);flex:none}
+.file.on span{background:var(--accent);opacity:.8}
+.file.on{color:var(--text)}
+
+/* --- 主窗口（被最小化的那个）--------------------------------------------- */
+#main{
+  position:absolute; left:50%; top:52%; transform:translate(-50%,-50%);
+  width:520px; height:330px; z-index:40; border-radius:14px; overflow:hidden;
+  background:var(--app); box-shadow:var(--shadow); border:1px solid var(--stroke);
+  transition:opacity .28s var(--soft), transform .34s var(--out);
+}
+#main.min{
+  opacity:0; transform:translate(-50%,-50%) scale(.9) translateY(46px);
+  pointer-events:none;
+}
+#main .app-body{padding:20px 22px; display:grid; gap:14px}
+.np{display:flex; gap:16px; align-items:center}
+.np-cover{
+  width:88px;height:88px;border-radius:12px;flex:none;position:relative;overflow:hidden;
+  background:linear-gradient(150deg,#2a3340,#161b23);
+}
+.np-cover::after{
+  content:"";position:absolute;inset:0;
+  background:radial-gradient(circle at 32% 26%, var(--accent), transparent 58%);
+  opacity:.55;
+}
+.np h3{margin:0 0 4px; font-size:17px; font-weight:500; letter-spacing:-.01em}
+.np p{margin:0; font-size:12.5px; color:var(--dim)}
+.bar{height:4px;border-radius:4px;background:var(--stroke);overflow:hidden}
+.bar i{display:block;height:100%;background:var(--accent);width:0%;transition:width .26s linear}
+.hint{font-size:11.5px;color:var(--faint)}
+
+/* --- 任务栏 -------------------------------------------------------------- */
+#taskbar{
+  position:fixed; left:0; right:0; bottom:0; height:var(--taskbar); z-index:800;
+  display:flex; align-items:center; gap:8px; padding:0 14px;
+  background:var(--panel); border-top:1px solid var(--stroke);
+  backdrop-filter:blur(20px) saturate(160%);
+}
+.tb-btn{
+  border:1px solid var(--stroke); background:transparent; border-radius:8px;
+  padding:6px 12px; font-size:12px; color:var(--dim);
+}
+.tb-btn[data-on="1"]{color:var(--text); border-color:var(--stroke-hi)}
+.tb-spacer{flex:1}
+.tb-clock{font:11.5px var(--font-mono); color:var(--faint); font-variant-numeric:tabular-nums}
+
+/* --- 小窗 ---------------------------------------------------------------- */
+/* 关键点：#mini 自己永不成为命中目标（否则它的盒子会接住本该穿过去的点击），
+   能吃鼠标的只有 #capsule 与其中的实心区。事件仍会冒泡到 #mini 上的监听。 */
+#mini{
+  /* 尺寸档位靠 --scale 传导到内部每个元素：只改外层 width/height 的话，
+     内部固定 px 会在小档位溢出、大档位留白。 */
+  --scale: 1;
+  position:absolute; z-index:900; pointer-events:none;
+  transition:left .28s var(--out), top .28s var(--out), width .2s var(--soft), height .2s var(--soft);
+}
+#mini.dragging{transition:none}
+/* 不置顶时压到桌面窗口下面：这样「置顶」这个开关才有可见的后果。 */
+#mini.notop{z-index:5}
+#mini[hidden]{display:none}
+#capsule{
+  position:relative; width:100%; height:100%; pointer-events:auto;
+  display:flex; align-items:center; gap:calc(10px * var(--scale)); padding:0 calc(12px * var(--scale));
+  border-radius:calc(28px * var(--scale)); background:var(--surface);
+  backdrop-filter:blur(26px) saturate(175%);
+  box-shadow:var(--shadow), inset 0 0 0 1px var(--stroke), inset 0 1px 0 var(--stroke-hi);
+  overflow:hidden; cursor:grab;
+}
+#mini.dragging #capsule{cursor:grabbing; box-shadow:var(--shadow), inset 0 0 0 1px var(--stroke-hi)}
+/* 透明区域穿透：整块不吃鼠标，只有 [data-hit] 的实心区吃。 */
+#mini.pass #capsule{pointer-events:none}
+#mini.pass #capsule [data-hit]{pointer-events:auto}
+#mini.pass [data-hit]{cursor:default}
+/* 锁定：连实心区也不吃，整扇窗完全穿透。 */
+#mini.lock #capsule, #mini.lock #capsule *{pointer-events:none !important}
+
+/* 桌面宠物态：去掉背板与描边，只留内容本体。 */
+#mini.pet #capsule{background:transparent; backdrop-filter:none; box-shadow:none}
+#mini.pet #meta{display:none}
+#mini.pet #transport{opacity:0; transition:opacity .2s}
+#mini.pet.hover #transport{opacity:1}
+#mini.pet #title-glow{opacity:1}
+
+#cover{
+  position:relative; flex:none; border-radius:50%; overflow:hidden;
+  width:calc(36px * var(--scale)); height:calc(36px * var(--scale));
+  display:grid; place-items:center; background:linear-gradient(150deg,#2a3340,#161b23);
+}
+#cover::after{
+  content:""; position:absolute; inset:0;
+  background:radial-gradient(circle at 32% 26%, var(--accent), transparent 60%); opacity:.6;
+}
+#cover span{position:relative; font-size:calc(15px * var(--scale)); opacity:.75}
+#meta{flex:1 1 auto; min-width:0}
+#title,#sub{margin:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+#title{font-size:calc(13px * var(--scale)); font-weight:500; letter-spacing:-.005em}
+#sub{font-size:calc(11px * var(--scale)); color:var(--dim)}
+#transport{display:flex; align-items:center; gap:calc(4px * var(--scale)); flex:none}
+.ic{
+  border:0; background:transparent; border-radius:50%; display:grid; place-items:center;
+  color:var(--dim); width:calc(28px * var(--scale)); height:calc(28px * var(--scale));
+  transition:background .16s, transform .16s var(--out), color .16s;
+}
+.ic:hover{background:color-mix(in srgb, var(--text) 12%, transparent); color:var(--text)}
+.ic:active{transform:scale(.9)}
+.ic svg{width:calc(16px * var(--scale));height:calc(16px * var(--scale));display:block;fill:currentColor}
+.play{
+  border:0; background:var(--accent); color:#fff; border-radius:50%;
+  width:calc(30px * var(--scale)); height:calc(30px * var(--scale)); display:grid; place-items:center;
+  box-shadow:0 6px 16px -6px color-mix(in srgb, var(--accent) 70%, transparent);
+  transition:transform .18s var(--out), filter .18s;
+}
+.play:hover{filter:brightness(1.08)}
+.play:active{transform:scale(.92)}
+.play svg{width:calc(15px * var(--scale));height:calc(15px * var(--scale));display:block;fill:#fff}
+#pause, html body.playing #playicon{display:none}
+body.playing #pause{display:block}
+#prog{
+  position:absolute; left:calc(28px * var(--scale)); right:calc(28px * var(--scale)); bottom:3px; height:2px; border-radius:2px;
+  overflow:hidden; background:color-mix(in srgb, var(--text) 14%, transparent);
+  opacity:0; transition:opacity .26s var(--soft); pointer-events:none;
+}
+body.playing #prog, body.buffering #prog{opacity:1}
+#prog i{display:block;height:100%;width:0%;background:var(--accent);transition:width .26s linear}
+body.buffering #prog i{opacity:.4; animation:pulse 1.1s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:.25}50%{opacity:.7}}
+/* 贴边隐藏：窗口滑出屏幕，只留 3px 触发条。
+   #strip 必须是 #capsule 的兄弟——贴边时 #capsule 整块是隐藏的，
+   嵌在里面的话触发条会跟着一起看不见，用户就再也找不回这扇窗了。
+   触发条永远可点：真实实现里「可达的恢复入口」也不能被穿透开关关掉。 */
+#strip{
+  position:absolute; top:6px; bottom:6px; width:6px; border-radius:6px;
+  background:var(--accent); opacity:0; pointer-events:none; transition:opacity .2s;
+}
+#mini.peek #capsule{opacity:0}
+#mini.peek #strip{opacity:.65; pointer-events:auto}
+#mini.peek[data-dock="left"] #strip{right:0}
+#mini.peek[data-dock="right"] #strip{left:0}
+#mini.peek[data-dock="top"] #strip{left:22%;right:22%;top:auto;bottom:0;width:auto;height:6px}
+#mini.peek[data-dock="bottom"] #strip{left:22%;right:22%;top:0;bottom:auto;width:auto;height:6px}
+/* 吸附到位时给一条边高亮，让人看见「吸附发生了」 */
+#mini[data-dock]:not([data-dock="none"]):not(.peek) #capsule{
+  box-shadow:var(--shadow), inset 0 0 0 1px var(--stroke-hi), inset 0 1px 0 var(--stroke-hi);
+}
+
+/* --- 命中区调试描边 ------------------------------------------------------ */
+#regions{position:absolute; inset:0; z-index:999; pointer-events:none; display:none}
+#regions.on{display:block}
+#regions div{
+  position:absolute; border:1px dashed var(--state); border-radius:4px;
+  background:color-mix(in srgb, var(--state) 10%, transparent);
+  /* 标签必须画在框内：画在框外会溢出胶囊、糊到下面的便签上，
+     看起来就像命中区算错了位置。 */
+  overflow:hidden;
+}
+#regions div::after{
+  content:attr(data-name); position:absolute; top:1px; left:4px;
+  font:10px var(--font-mono); color:var(--state); white-space:nowrap;
+}
+
+/* --- 右键菜单 ------------------------------------------------------------ */
+#menu{
+  position:absolute; z-index:1000; min-width:196px; padding:6px; border-radius:14px;
+  background:var(--panel); backdrop-filter:blur(30px) saturate(180%);
+  box-shadow:var(--shadow); border:1px solid var(--stroke); font-size:12.5px;
+  animation:pop .16s var(--out);
+}
+#menu[hidden]{display:none}
+@keyframes pop{from{opacity:0;transform:translateY(-6px) scale(.97)}to{opacity:1;transform:none}}
+#menu button{
+  width:100%; border:0; background:transparent; border-radius:9px; padding:7px 10px;
+  display:flex; align-items:center; gap:9px; text-align:left;
+}
+#menu button:hover{background:color-mix(in srgb, var(--text) 12%, transparent)}
+#menu button::before{
+  content:""; width:8px;height:8px;border-radius:50%;flex:none;
+  box-shadow:inset 0 0 0 1px var(--stroke-hi); transition:background .16s;
+}
+#menu button[data-check="1"]::before{background:var(--accent); box-shadow:none}
+#menu button.plain::before{display:none}
+#menu .sep{height:1px;margin:4px 6px;background:var(--stroke)}
+
+/* --- 控制台 -------------------------------------------------------------- */
+/* 控制台固定在右下：它只是观察/操作面板，不该占掉左侧那块——
+   左侧要留给便签（穿透测试目标）和小窗的默认落点，否则演示时两者互相遮挡，
+   点下去命中谁就变成玄学了。 */
+#console{
+  position:fixed; right:16px; bottom:calc(var(--taskbar) + 16px); z-index:950;
+  width:288px; max-height:calc(100vh - var(--taskbar) - 32px); overflow:auto;
+  border-radius:14px; padding:12px 13px;
+  background:var(--panel); backdrop-filter:blur(24px) saturate(160%);
+  border:1px solid var(--stroke); box-shadow:var(--shadow);
+  font:11.5px/1.6 var(--font-mono);
+}
+#console h2{
+  margin:0 0 10px; font:11.5px/1 var(--font-mono); letter-spacing:.14em;
+  text-transform:uppercase; color:var(--faint); font-weight:400;
+}
+.grp{border-top:1px solid var(--stroke); padding-top:9px; margin-top:9px}
+.grp:first-of-type{border-top:0; padding-top:0; margin-top:0}
+.grp>label{
+  display:flex; align-items:center; justify-content:space-between; gap:8px;
+  padding:3px 0; color:var(--dim); cursor:pointer;
+}
+.grp>label:hover{color:var(--text)}
+.grp>label em{font-style:normal; color:var(--faint); font-size:10.5px}
+.sw{
+  position:relative; flex:none; width:34px; height:19px; border:0; border-radius:999px;
+  background:color-mix(in srgb, var(--text) 18%, transparent); transition:background .2s;
+}
+.sw::after{
+  content:""; position:absolute; top:2.5px; left:2.5px; width:14px; height:14px; border-radius:50%;
+  background:var(--text); transition:transform .24s var(--out);
+}
+.sw[data-on="1"]{background:var(--state)}
+.sw[data-on="1"]::after{transform:translateX(15px)}
+.seg{display:flex; gap:2px; padding:2px; border-radius:9px; background:color-mix(in srgb, var(--text) 9%, transparent)}
+.seg button{
+  flex:1; border:0; background:transparent; border-radius:7px; padding:4px 6px;
+  font:11px var(--font-mono); color:var(--faint);
+}
+.seg button[data-on="1"]{background:color-mix(in srgb, var(--text) 16%, transparent); color:var(--text)}
+.readout{display:grid; grid-template-columns:auto 1fr; gap:2px 10px; font-size:11px}
+.readout dt{color:var(--faint)}
+.readout dd{margin:0; color:var(--state); font-variant-numeric:tabular-nums; overflow:hidden; text-overflow:ellipsis}
+#log{
+  margin-top:8px; max-height:78px; overflow:auto; font-size:10.5px; line-height:1.55;
+  color:var(--faint); scrollbar-width:thin;
+}
+#log b{color:var(--state); font-weight:400}
+#log i{color:var(--accent); font-style:normal}
+.row2{display:flex; gap:6px; margin-top:8px}
+.row2 .btn{flex:1; font:11px var(--font-mono); padding:6px 8px; border-radius:8px}
+
+/* --- 提示条 -------------------------------------------------------------- */
+#toast{
+  position:fixed; left:50%; bottom:calc(var(--taskbar) + 22px); transform:translate(-50%,10px);
+  z-index:1200; padding:9px 15px; border-radius:11px; font-size:12px;
+  background:var(--panel); border:1px solid var(--stroke); box-shadow:var(--shadow);
+  opacity:0; pointer-events:none; transition:opacity .22s, transform .22s var(--out);
+  max-width:min(560px, 84vw);
+}
+#toast.on{opacity:1; transform:translate(-50%,0)}
+#toast b{color:var(--state); font-weight:500}
+</style>
+</head>
+<body>
+
+<div id="desktop">
+  <div class="app" id="note">
+    <div class="app-head"><i></i><i></i><i></i>&nbsp;便签 — 穿透测试目标</div>
+    <div class="app-body">
+      <div class="note-row">
+        <button class="btn" id="tap">点我 <strong id="taps">0</strong></button>
+        <label class="check"><input type="checkbox" id="chk"> 勾选框</label>
+      </div>
+      <textarea id="ta" placeholder="在这里打字。开启穿透后，隔着小窗的透明区也能点到这个输入框。"></textarea>
+      <div class="hint" id="lasthit">最后命中：—</div>
+    </div>
+  </div>
+
+  <div class="app" id="files">
+    <div class="app-head"><i></i><i></i><i></i>&nbsp;音乐库</div>
+    <div class="app-body">
+      <div class="file on"><span></span>至少还有你.mp3</div>
+      <div class="file"><span></span>富士山下.flac</div>
+      <div class="file"><span></span>红豆.wav</div>
+      <div class="file"><span></span>陀飞轮.m4a</div>
+    </div>
+  </div>
+
+  <div class="app" id="main">
+    <div class="app-head"><i></i><i></i><i></i>&nbsp;Hertz Studio</div>
+    <div class="app-body">
+      <div class="np">
+        <div class="np-cover"></div>
+        <div>
+          <h3 id="m-title">至少还有你</h3>
+          <p id="m-sub">林忆莲 · 至少还有你</p>
+        </div>
+      </div>
+      <div class="bar"><i id="m-bar"></i></div>
+      <div class="hint">主窗口。点右上角最小化，观察小窗是否在 1.2 秒后自动接管。</div>
+      <div class="row2" style="margin:0">
+        <button class="btn" id="m-min">最小化</button>
+        <button class="btn" id="m-capsule">进入小窗</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="mini" hidden data-dock="none">
+    <div id="capsule">
+      <div id="cover" data-hit data-name="封面"><span>♫</span></div>
+      <div id="meta" data-hit data-name="文字区">
+        <p id="title">至少还有你</p>
+        <p id="sub">林忆莲</p>
+      </div>
+      <div id="transport">
+        <button class="ic" id="prev" data-hit data-name="上一首" aria-label="上一首"><svg viewBox="0 0 24 24"><path d="M7 6v12M19 6l-9 6 9 6z"/></svg></button>
+        <button class="play" id="play" data-hit data-name="播放键" aria-label="播放/暂停">
+          <svg id="playicon" viewBox="0 0 24 24"><path d="M8 5l11 7-11 7z"/></svg>
+          <svg id="pause" viewBox="0 0 24 24"><path d="M9 5v14M15 5v14"/></svg>
+        </button>
+        <button class="ic" id="next" data-hit data-name="下一首" aria-label="下一首"><svg viewBox="0 0 24 24"><path d="M17 6v12M5 6l9 6-9 6z"/></svg></button>
+      </div>
+      <div id="prog"><i></i></div>
+    </div>
+    <div id="strip" data-name="触发条"></div>
+    <div id="regions"></div>
+  </div>
+</div>
+
+<div id="taskbar">
+  <button class="tb-btn" id="tb-main" data-on="1">Hertz Studio</button>
+  <button class="tb-btn" id="tb-mini">小窗</button>
+  <div class="tb-spacer"></div>
+  <div class="tb-clock" id="clock">--:--</div>
+</div>
+
+<aside id="console">
+  <h2>原型控制台</h2>
+
+  <div class="grp">
+    <label>主窗口可见 <em>模拟最小化</em>
+      <button class="sw" id="sw-main" data-on="1" aria-label="切换主窗口可见性"></button>
+    </label>
+    <label>小窗已开启
+      <button class="sw" id="sw-mini" aria-label="开关小窗"></button>
+    </label>
+  </div>
+
+  <div class="grp">
+    <label>置顶显示 <em>关掉会被桌面窗口压住</em>
+      <button class="sw" id="sw-top" data-on="1" aria-label="置顶"></button>
+    </label>
+    <label>桌面宠物 <em>去背板，只留内容</em>
+      <button class="sw" id="sw-pet" aria-label="桌面宠物态"></button>
+    </label>
+    <label>透明区域穿透 <em>实心区仍可点</em>
+      <button class="sw" id="sw-pass" aria-label="透明区域穿透"></button>
+    </label>
+    <label>锁定（完全穿透）<em>整扇窗都点不到</em>
+      <button class="sw" id="sw-lock" aria-label="锁定"></button>
+    </label>
+    <label>贴边自动隐藏
+      <button class="sw" id="sw-edge" aria-label="贴边自动隐藏"></button>
+    </label>
+    <label>主窗隐藏自动接管 <em>1.2s 去抖</em>
+      <button class="sw" id="sw-auto" data-on="1" aria-label="自动接管"></button>
+    </label>
+  </div>
+
+  <div class="grp">
+    <div class="seg" id="seg-size">
+      <button data-scale="0.85">小</button>
+      <button data-scale="1" data-on="1">标准</button>
+      <button data-scale="1.2">大</button>
+    </div>
+    <div class="seg" id="seg-theme" style="margin-top:6px">
+      <button data-theme="dark" data-on="1">深色</button>
+      <button data-theme="light">浅色</button>
+    </div>
+    <label style="margin-top:6px">显示命中区 <em>调试</em>
+      <button class="sw" id="sw-regions" aria-label="显示命中区"></button>
+    </label>
+  </div>
+
+  <div class="grp">
+    <dl class="readout">
+      <dt>相位</dt><dd id="r-phase">Hidden</dd>
+      <dt>几何</dt><dd id="r-geo">—</dd>
+      <dt>尺寸</dt><dd id="r-size">268 × 56</dd>
+      <dt>呈现位置</dt><dd id="r-pos">0:00</dd>
+      <dt>时钟锚点</dt><dd id="r-anchor">—</dd>
+    </dl>
+    <div id="log"></div>
+    <div class="row2">
+      <button class="btn" id="btn-reset">复位几何</button>
+      <button class="btn" id="btn-clear">清日志</button>
+    </div>
+  </div>
+</aside>
+
+<div id="menu" hidden role="menu">
+  <button class="plain" data-act="restore">回到主窗口</button>
+  <button data-act="top" data-check="1">置顶显示</button>
+  <button data-act="pet" data-check="0">桌面宠物</button>
+  <button data-act="edge" data-check="0">贴边自动隐藏</button>
+  <button data-act="lock" data-check="0">锁定（完全穿透）</button>
+  <div class="sep"></div>
+  <button class="plain" data-act="quit">退出小窗</button>
+</div>
+
+<div id="toast"></div>
+
+<script>
+(() => {
+  'use strict';
+  const $ = id => document.getElementById(id);
+  const SNAP = 28, PEEK_STRIP = 3, PEEK_DELAY = 1200, DRAG_PX = 4;
+  const KEY = 'hertz.mini.prototype.v1';
+
+  // --- 几何与尺寸 ---------------------------------------------------------
+  // 300 是按「标题不被截断」倒推的：封面 36 + 内距 24 + 传输区 126 + 间隙 20，
+  // 剩下的 ~94px 才刚好放得下 13px 的四字曲名。268 会把标题压成省略号。
+  const BASE = { w: 300, h: 58 };
+  const state = {
+    phase: 'Hidden',
+    geo: { dock: 'none', along: .5, x: 120, y: 96, scale: 1 },
+    pet: false, pass: false, lock: false, top: true, edgeHide: false, auto: true,
+    showRegions: false,
+    mainVisible: true, mainHiddenAt: 0,
+    settledAt: 0, cursor: { x: -1, y: -1 }, dragging: false,
+    enterReason: null,
+  };
+  const size = () => ({ w: Math.round(BASE.w * state.geo.scale), h: Math.round(BASE.h * state.geo.scale) });
+
+  function workArea() {
+    return { left: 0, top: 0, right: innerWidth, bottom: innerHeight - 46 };
+  }
+
+  function save() {
+    try {
+      localStorage.setItem(KEY, JSON.stringify({
+        geo: state.geo, pet: state.pet, pass: state.pass, lock: state.lock,
+        top: state.top, edgeHide: state.edgeHide, auto: state.auto,
+      }));
+    } catch (_) {}
+  }
+  function load() {
+    try {
+      const raw = localStorage.getItem(KEY);
+      if (!raw) return;
+      const v = JSON.parse(raw);
+      if (v.geo) Object.assign(state.geo, v.geo);
+      for (const k of ['pet', 'pass', 'lock', 'top', 'edgeHide', 'auto']) {
+        if (typeof v[k] === 'boolean') state[k] = v[k];
+      }
+    } catch (_) {}
+  }
+
+  // --- 日志 ---------------------------------------------------------------
+  function log(text, mark) {
+    const box = $('log');
+    const line = document.createElement('div');
+    const t = new Date().toTimeString().slice(0, 8);
+    line.innerHTML = `<b>${t}</b> ${mark ? `<i>${mark}</i> ` : ''}${text}`;
+    box.appendChild(line);
+    box.scrollTop = box.scrollHeight;
+    while (box.children.length > 60) box.removeChild(box.firstChild);
+  }
+  let toastTimer = 0;
+  function toast(html) {
+    const el = $('toast');
+    el.innerHTML = html;
+    el.classList.add('on');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => el.classList.remove('on'), 2400);
+  }
+
+  // --- 相位迁移（与 Rust 侧 MiniHost::handle 一一对应）---------------------
+  function setPhase(next, note) {
+    if (state.phase === next) return;
+    log(`${state.phase} → ${next}${note ? ' · ' + note : ''}`, 'phase');
+    state.phase = next;
+    $('r-phase').textContent = next;
+  }
+
+  function enterMini(reason) {
+    if (state.phase !== 'Hidden' && state.phase !== 'Peeking') {
+      if (state.phase === 'Docked') state.settledAt = performance.now();
+      place(true);
+      return;
+    }
+    state.enterReason = reason;
+    setPhase(state.geo.dock === 'none' ? 'Floating' : 'Docked', `reason=${reason}`);
+    state.settledAt = performance.now();
+    $('mini').hidden = false;
+    applyFlags();
+    place(false);
+  }
+
+  function hideMini() {
+    setPhase('Hidden');
+    $('mini').hidden = true;
+    state.enterReason = null;
+  }
+
+  /// 回到主窗口：相位先回 Hidden，另外必须把主窗口叫回来。
+  /// 只关小窗不叫主窗口，用户就两个都没有了。
+  function restore() {
+    if (state.phase === 'Hidden') return;
+    hideMini();
+    setMainVisible(true);
+    syncSwitches();
+    log('通知主窗口：expand-capsule', 'notify');
+    toast('已回到主窗口');
+  }
+
+  function quit() {
+    if (state.phase === 'Hidden') return;
+    hideMini();
+    syncSwitches();
+    toast('小窗已退出（主窗口保持原状）');
+  }
+
+  function setMainVisible(on) {
+    state.mainVisible = on;
+    $('main').classList.toggle('min', !on);
+    $('tb-main').dataset.on = on ? '1' : '0';
+    $('sw-main').dataset.on = on ? '1' : '0';
+    state.mainHiddenAt = on ? 0 : performance.now();
+    if (on) {
+      // 只对「因为主窗口隐藏而接管」的那次自动收回；手动开的小窗不收。
+      if (state.phase !== 'Hidden' && state.auto && state.enterReason === 'main-hidden') {
+        log('主窗口回来，自动收回小窗', 'auto');
+        hideMini();
+        toast('主窗口回来了，小窗自动收回');
+      }
+    } else if (state.auto) {
+      log('主窗口隐藏，1.2s 去抖后接管', 'auto');
+    }
+    syncSwitches();
+  }
+
+  // --- 吸附几何（与 Rust snap_target / dock_position 同一套）---------------
+  function snapTarget(x, y, w, h, area) {
+    const d = [
+      [Math.abs(x - area.left), 'left'],
+      [Math.abs(area.right - (x + w)), 'right'],
+      [Math.abs(y - area.top), 'top'],
+      [Math.abs(area.bottom - (y + h)), 'bottom'],
+    ].filter(v => v[0] <= SNAP).sort((a, b) => a[0] - b[0]);
+    if (!d.length) return null;
+    const edge = d[0][1];
+    const horizontal = edge === 'top' || edge === 'bottom';
+    const span = horizontal ? area.right - w - area.left : area.bottom - h - area.top;
+    const off = horizontal ? x - area.left : y - area.top;
+    return { edge, along: span > 0 ? Math.min(1, Math.max(0, off / span)) : .5 };
+  }
+
+  function dockPosition(edge, along, w, h, area) {
+    along = Math.min(1, Math.max(0, along));
+    const sx = area.left + Math.round((area.right - w - area.left) * along);
+    const sy = area.top + Math.round((area.bottom - h - area.top) * along);
+    if (edge === 'left') return { x: area.left, y: sy };
+    if (edge === 'right') return { x: area.right - w, y: sy };
+    if (edge === 'top') return { x: sx, y: area.top };
+    if (edge === 'bottom') return { x: sx, y: area.bottom - h };
+    return { x: area.left, y: area.top };
+  }
+
+  function desiredRect() {
+    const area = workArea();
+    const { w, h } = size();
+    let pos = state.geo.dock === 'none'
+      ? { x: state.geo.x, y: state.geo.y }
+      : dockPosition(state.geo.dock, state.geo.along, w, h, area);
+    if (state.phase === 'Peeking') {
+      const d = state.geo.dock;
+      if (d === 'left') pos = { x: area.left - w + PEEK_STRIP, y: pos.y };
+      else if (d === 'right') pos = { x: area.right - PEEK_STRIP, y: pos.y };
+      else if (d === 'top') pos = { x: pos.x, y: area.top - h + PEEK_STRIP };
+      else if (d === 'bottom') pos = { x: pos.x, y: area.bottom - PEEK_STRIP };
+    }
+    return { x: pos.x, y: pos.y, w, h };
+  }
+
+  function place(animate) {
+    if (state.phase === 'Hidden') return;
+    const el = $('mini');
+    const r = desiredRect();
+    el.classList.toggle('dragging', !animate && state.dragging);
+    if (!animate) el.style.transition = 'none';
+    el.style.left = r.x + 'px';
+    el.style.top = r.y + 'px';
+    el.style.width = r.w + 'px';
+    el.style.height = r.h + 'px';
+    el.style.setProperty('--scale', state.geo.scale);
+    el.dataset.dock = state.geo.dock;
+    if (!animate) { void el.offsetWidth; el.style.transition = ''; }
+    updateRegions();
+    updateReadout();
+  }
+
+  function updateReadout() {
+    const g = state.geo;
+    $('r-geo').textContent = g.dock === 'none'
+      ? `x=${g.x} y=${g.y}`
+      : `${g.dock} · along=${g.along.toFixed(3)}`;
+    const s = size();
+    $('r-size').textContent = `${s.w} × ${s.h}`;
+  }
+
+  /// 命中区：把所有 [data-hit] 的矩形画出来。宠物态下这些矩形之外的地方
+  /// 在真实实现里会被 WM_NCHITTEST 判成 HTTRANSPARENT；这里用 pointer-events 表达。
+  function updateRegions() {
+    const host = $('regions');
+    host.innerHTML = '';
+    const box = $('mini').getBoundingClientRect();
+    $('mini').querySelectorAll('[data-hit]').forEach(el => {
+      const r = el.getBoundingClientRect();
+      if (r.width <= 0 || r.height <= 0) return;
+      const d = document.createElement('div');
+      d.dataset.name = el.dataset.name || '区';
+      d.style.left = (r.left - box.left) + 'px';
+      d.style.top = (r.top - box.top) + 'px';
+      d.style.width = r.width + 'px';
+      d.style.height = r.height + 'px';
+      host.appendChild(d);
+    });
+  }
+
+  function applyFlags() {
+    const el = $('mini');
+    el.classList.toggle('pet', state.pet);
+    el.classList.toggle('pass', state.pass || state.lock);
+    el.classList.toggle('lock', state.lock);
+    el.classList.toggle('notop', !state.top);
+    el.classList.toggle('peek', state.phase === 'Peeking');
+    for (const [id, on] of [['sw-top', state.top], ['sw-pet', state.pet], ['sw-pass', state.pass],
+      ['sw-lock', state.lock], ['sw-edge', state.edgeHide], ['sw-auto', state.auto]]) {
+      $(id).dataset.on = on ? '1' : '0';
+    }
+    for (const [act, on] of [['top', state.top], ['pet', state.pet], ['edge', state.edgeHide], ['lock', state.lock]]) {
+      const b = document.querySelector(`#menu [data-act="${act}"]`);
+      if (b) b.dataset.check = on ? '1' : '0';
+    }
+    $('seg-size').querySelectorAll('button').forEach(b => {
+      b.dataset.on = Math.abs(parseFloat(b.dataset.scale) - state.geo.scale) < .01 ? '1' : '0';
+    });
+    // 宠物态会隐藏文字区，实心区集合变了，命中区也要跟着重算。
+    updateRegions();
+  }
+
+  function syncSwitches() {
+    $('sw-mini').dataset.on = state.phase !== 'Hidden' ? '1' : '0';
+    $('tb-mini').dataset.on = state.phase !== 'Hidden' ? '1' : '0';
+  }
+
+  // --- 拖拽 ---------------------------------------------------------------
+  function onPointerDown(e) {
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    if (e.target.closest('#transport')) return;
+    if (state.lock) return;
+    const startX = e.clientX, startY = e.clientY;
+    const r = $('mini').getBoundingClientRect();
+    const offX = startX - r.left, offY = startY - r.top;
+    let started = false, justDragged = false;
+    const move = ev => {
+      if (!started) {
+        if (Math.hypot(ev.clientX - startX, ev.clientY - startY) < DRAG_PX) return;
+        started = true; justDragged = true; state.dragging = true;
+        setPhase('Dragging');
+        $('mini').classList.add('dragging');
+        try { $('mini').setPointerCapture(e.pointerId); } catch (_) {}
+      }
+      const s = size();
+      let x = ev.clientX - offX, y = ev.clientY - offY;
+      // 拖出界外时贴住工作区，别让窗跑丢。
+      const area = workArea();
+      x = Math.min(Math.max(x, area.left - s.w + 64), area.right - 64);
+      y = Math.min(Math.max(y, area.top - s.h + 64), area.bottom - 64);
+      $('mini').style.left = x + 'px';
+      $('mini').style.top = y + 'px';
+      state.geo.x = x; state.geo.y = y;
+    };
+    const up = () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', up);
+      $('mini').classList.remove('dragging');
+      state.dragging = false;
+      if (!started) return;
+      const s = size();
+      const rect = $('mini').getBoundingClientRect();
+      const target = snapTarget(rect.left, rect.top, s.w, s.h, workArea());
+      if (target) {
+        state.geo.dock = target.edge;
+        state.geo.along = target.along;
+        setPhase('Docked', `吸附到 ${target.edge}`);
+      } else {
+        state.geo.dock = 'none';
+        setPhase('Floating', '自由位置');
+      }
+      state.settledAt = performance.now();
+      place(true);
+      save();
+      setTimeout(() => { justDragged = false; }, 0);
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', up);
+    $('mini')._justDragged = () => justDragged;
+  }
+
+  // --- 贴边隐藏的推进 -----------------------------------------------------
+  function cursorIn(r) {
+    const c = state.cursor;
+    return c.x >= r.left && c.x < r.right && c.y >= r.top && c.y < r.bottom;
+  }
+
+  function tickPeek() {
+    if (state.phase === 'Docked' && state.edgeHide) {
+      const r = $('mini').getBoundingClientRect();
+      const settled = performance.now() - state.settledAt >= PEEK_DELAY;
+      if (settled && !cursorIn(r)) {
+        setPhase('Peeking', '滑出，只留 3px');
+        state.settledAt = performance.now();
+        applyFlags(); place(true);
+      }
+    } else if (state.phase === 'Peeking') {
+      const r = $('mini').getBoundingClientRect();
+      if (!state.edgeHide || cursorIn(r)) {
+        setPhase('Docked', '回到贴边');
+        state.settledAt = performance.now();
+        applyFlags(); place(true);
+      }
+    }
+  }
+
+  // --- 播放：呈现时钟 -----------------------------------------------------
+  const TRACKS = [
+    { title: '至少还有你', artist: '林忆莲', album: '至少还有你', dur: 254000 },
+    { title: '富士山下', artist: '陈奕迅', album: "What's Going On…?", dur: 259000 },
+    { title: '红豆', artist: '王菲', album: '唱游', dur: 268000 },
+  ];
+  const clock = { idx: 0, anchorMs: 42000, anchorAt: performance.now(), playing: true, buffering: false };
+  function nowMs() {
+    if (!clock.playing) return clock.anchorMs;
+    const t = TRACKS[clock.idx];
+    return Math.min(t.dur, clock.anchorMs + (performance.now() - clock.anchorAt));
+  }
+  /// 重锚：换曲、播放态变化、或偏差 > 1200ms。小于这个只当抖动，
+  /// 重锚反而会让进度条回跳——这条与 Rust 侧 PresentationClock 一致。
+  function anchor(ms) { clock.anchorMs = ms; clock.anchorAt = performance.now(); }
+
+  function fmt(ms) {
+    const s = Math.floor(ms / 1000);
+    return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+  }
+
+  function renderTrack() {
+    const t = TRACKS[clock.idx];
+    $('title').textContent = t.title;
+    $('sub').textContent = `${t.artist} · ${t.album}`;
+    $('m-title').textContent = t.title;
+    $('m-sub').textContent = `${t.artist} · ${t.album}`;
+  }
+
+  function renderProgress() {
+    const t = TRACKS[clock.idx];
+    const p = nowMs();
+    const ratio = p / t.dur;
+    $('prog').firstElementChild.style.width = (ratio * 100).toFixed(2) + '%';
+    $('m-bar').style.width = (ratio * 100).toFixed(2) + '%';
+    $('r-pos').textContent = `${fmt(p)} / ${fmt(t.dur)}`;
+    $('r-anchor').textContent = `锚点 ${fmt(clock.anchorMs)} · ${clock.playing ? '推进中' : '暂停'}`;
+  }
+
+  function setPlaying(on) {
+    anchor(nowMs());
+    clock.playing = on;
+    document.body.classList.toggle('playing', on);
+  }
+
+  function step(delta) {
+    clock.idx = (clock.idx + delta + TRACKS.length) % TRACKS.length;
+    clock.buffering = true;
+    document.body.classList.add('buffering');
+    anchor(0);
+    renderTrack();
+    log(`切曲 → ${TRACKS[clock.idx].title}`, 'audio');
+    setTimeout(() => {
+      clock.buffering = false;
+      document.body.classList.remove('buffering');
+      anchor(0);
+    }, 700);
+  }
+
+  // --- 右键菜单 -----------------------------------------------------------
+  function openMenu(x, y) {
+    const m = $('menu');
+    m.hidden = false;
+    const r = m.getBoundingClientRect();
+    m.style.left = Math.max(6, Math.min(x, innerWidth - r.width - 6)) + 'px';
+    m.style.top = Math.max(6, Math.min(y, innerHeight - r.height - 6)) + 'px';
+  }
+  function closeMenu() { $('menu').hidden = true; }
+
+  // --- 事件接线 -----------------------------------------------------------
+  function bind() {
+    const mini = $('mini');
+    mini.addEventListener('pointerdown', onPointerDown);
+    mini.addEventListener('click', e => {
+      if (e.target.closest('#transport')) return;
+      if (state.dragging || (mini._justDragged && mini._justDragged())) return;
+      restore();
+    });
+    mini.addEventListener('contextmenu', e => {
+      e.preventDefault();
+      if (state.lock) { toast('锁定态下整扇窗都点不到，先解锁'); return; }
+      openMenu(e.clientX, e.clientY);
+    });
+    mini.addEventListener('pointerenter', () => mini.classList.add('hover'));
+    mini.addEventListener('pointerleave', () => mini.classList.remove('hover'));
+
+    $('prev').addEventListener('click', e => { e.stopPropagation(); step(-1); });
+    $('next').addEventListener('click', e => { e.stopPropagation(); step(1); });
+    $('play').addEventListener('click', e => { e.stopPropagation(); setPlaying(!clock.playing); });
+
+    $('menu').addEventListener('click', e => {
+      const b = e.target.closest('[data-act]');
+      if (!b) return;
+      const act = b.dataset.act;
+      closeMenu();
+      if (act === 'restore') return restore();
+      if (act === 'quit') return quit();
+      const map = { top: 'top', pet: 'pet', edge: 'edgeHide', lock: 'lock' };
+      state[map[act]] = !state[map[act]];
+      log(`菜单：${b.textContent.trim()} = ${state[map[act]]}`, 'menu');
+      applyFlags(); save(); syncSwitches();
+    });
+    document.addEventListener('pointerdown', e => {
+      if (!$('menu').hidden && !e.target.closest('#menu')) closeMenu();
+    }, true);
+    window.addEventListener('blur', closeMenu);
+    window.addEventListener('keydown', e => { if (e.key === 'Escape') closeMenu(); });
+
+    // 开关
+    const sw = (id, key, after) => $(id).addEventListener('click', () => {
+      state[key] = !state[key];
+      after ? after() : applyFlags();
+      save(); syncSwitches();
+      log(`${id} = ${state[key]}`, 'flag');
+    });
+    sw('sw-top', 'top');
+    sw('sw-pet', 'pet');
+    sw('sw-pass', 'pass');
+    sw('sw-lock', 'lock');
+    sw('sw-edge', 'edgeHide', () => { applyFlags(); if (!state.edgeHide && state.phase === 'Peeking') { setPhase('Docked'); place(true); } });
+    sw('sw-auto', 'auto');
+    sw('sw-regions', 'showRegions', () => $('regions').classList.toggle('on', state.showRegions));
+    $('sw-mini').addEventListener('click', () => {
+      if (state.phase === 'Hidden') { enterMini('user'); } else { hideMini(); }
+      syncSwitches();
+    });
+    $('sw-main').addEventListener('click', () => setMainVisible(!state.mainVisible));
+    $('tb-main').addEventListener('click', () => setMainVisible(true));
+    $('tb-mini').addEventListener('click', () => {
+      if (state.phase === 'Hidden') enterMini('user'); else restore();
+      syncSwitches();
+    });
+    $('m-min').addEventListener('click', () => setMainVisible(false));
+    $('m-capsule').addEventListener('click', () => { enterMini('user'); syncSwitches(); });
+
+    $('seg-size').addEventListener('click', e => {
+      const b = e.target.closest('button');
+      if (!b) return;
+      state.geo.scale = parseFloat(b.dataset.scale);
+      applyFlags(); place(true); save();
+      log(`尺寸档位 = ${state.geo.scale}`, 'flag');
+    });
+    $('seg-theme').addEventListener('click', e => {
+      const b = e.target.closest('button');
+      if (!b) return;
+      document.documentElement.dataset.theme = b.dataset.theme;
+      b.parentElement.querySelectorAll('button').forEach(x => { x.dataset.on = x === b ? '1' : '0'; });
+    });
+
+    $('btn-reset').addEventListener('click', () => {
+      state.geo = { dock: 'none', along: .5, x: 120, y: 96, scale: state.geo.scale };
+      setPhase('Floating', '复位');
+      place(true); save();
+    });
+    $('btn-clear').addEventListener('click', () => { $('log').innerHTML = ''; });
+    $('tap').addEventListener('click', () => {
+      $('taps').textContent = String(Number($('taps').textContent) + 1);
+    });
+
+    window.addEventListener('pointermove', e => { state.cursor = { x: e.clientX, y: e.clientY }; }, { passive: true });
+    window.addEventListener('resize', () => {
+      // 显示器/视口变化：贴边的窗按「边 + 比例」重新落位，坐标记忆会漂。
+      place(false);
+    });
+
+    // 穿透验证：记录每次点击到底落在谁身上；如果点击位置在小窗矩形内、
+    // 但不在任何实心区里，就说明它穿过去了。
+    document.addEventListener('click', e => {
+      const label = e.target.closest('[data-name]')
+        ? e.target.closest('[data-name]').dataset.name
+        : (e.target.id ? '#' + e.target.id : e.target.tagName.toLowerCase());
+      const r = $('mini').getBoundingClientRect();
+      const inside = state.phase !== 'Hidden' &&
+        e.clientX >= r.left && e.clientX < r.right && e.clientY >= r.top && e.clientY < r.bottom;
+      let through = false;
+      if (inside && (state.pass || state.lock)) {
+        const hit = mini.querySelectorAll('[data-hit]');
+        const solid = [...hit].some(el => {
+          const b = el.getBoundingClientRect();
+          return e.clientX >= b.left && e.clientX < b.right && e.clientY >= b.top && e.clientY < b.bottom;
+        });
+        through = !solid;
+      }
+      $('lasthit').textContent = through
+        ? `最后命中：${label} —— 穿过了小窗的透明区`
+        : `最后命中：${label}`;
+      $('lasthit').style.color = through ? 'var(--state)' : '';
+    }, true);
+  }
+
+  // --- 启动 ---------------------------------------------------------------
+  load();
+  bind();
+  applyFlags();
+  renderTrack();
+  setPlaying(clock.playing);
+  syncSwitches();
+  $('r-phase').textContent = state.phase;
+
+  // 时钟：呈现位置 4Hz 推进（与设计方案里宿主推送的节奏一致），
+  // 进度条用 CSS 过渡补间，所以看着是连续的。
+  setInterval(renderProgress, 250);
+  renderProgress();
+  setInterval(tickPeek, 200);
+  setInterval(() => {
+    const d = new Date();
+    $('clock').textContent = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  }, 1000);
+
+  // 主窗口隐藏 → 1.2s 去抖 → 自动接管。
+  // 去抖不是装饰：浏览器里 visibilitychange 分不清「最小化」和「切标签页」，
+  // 不去抖的话一次 Alt-Tab 就会把小窗弹出来。
+  setInterval(() => {
+    if (state.mainVisible || !state.auto) return;
+    if (state.phase !== 'Hidden') return;
+    if (performance.now() - state.mainHiddenAt < PEEK_DELAY) return;
+    enterMini('main-hidden');
+    syncSwitches();
+    toast('主窗口已隐藏 <b>1.2s</b>，小窗自动接管');
+  }, 400);
+
+  log('原型就绪：拖小窗到屏幕边缘试试', 'boot');
+  toast('拖动小窗到屏幕四边可吸附 · 右键小窗看菜单 · 关掉「置顶」会被桌面窗口压住');
+})();
+</script>
+</body>
+</html>

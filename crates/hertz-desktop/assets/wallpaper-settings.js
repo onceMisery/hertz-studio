@@ -6,9 +6,10 @@
   var scenes = [], profiles = [], currentProfile = null, spaceScene = null;
   var presetStyle = { sungColor:'#8fe3ff', unsungColor:'#ffffff', outlineColor:'#000000', outlineWidth:2, opacity:.92, fontWeight:600 };
   var presets = {
-    single: Object.assign({}, presetStyle, { layout:'single', secondary:'next', fontSize:36 }),
-    double: Object.assign({}, presetStyle, { layout:'double', secondary:'next', fontSize:32 }),
-    translation: Object.assign({}, presetStyle, { layout:'double', secondary:'translation', fontSize:30, fontWeight:500, outlineWidth:1.5 })
+    single: Object.assign({}, presetStyle, { layout:'single', secondary:'next', fontSize:36, bilingual:false }),
+    double: Object.assign({}, presetStyle, { layout:'double', secondary:'next', fontSize:32, bilingual:false }),
+    triple: { layout:'triple', secondary:'next', fontSize:30, fontWeight:600, sungColor:'#ffffff', unsungColor:'#ffffff', outlineColor:'#000000', outlineWidth:0, opacity:1, bilingual:true, theme:'auto', surface:'glass', align:'center', karaoke:true, readabilityBoost:false },
+    translation: Object.assign({}, presetStyle, { layout:'double', secondary:'translation', fontSize:30, fontWeight:500, outlineWidth:1.5, bilingual:true })
   };
   function currentPreset(lyrics) { return Object.keys(presets).find(key => Object.keys(presets[key]).every(field => presets[key][field] === lyrics[field])) || null; }
   function requestClose() {
@@ -21,7 +22,7 @@
     if (window.ipc && window.ipc.postMessage) window.ipc.postMessage(JSON.stringify(Object.assign({ cmd: cmd }, extra || {})));
   }
   function status(text, error) { $('status').textContent = text; $('status').className = error ? 'error' : ''; }
-  function profileKey(profile) { return profile ? String(profile.edition || '').toLowerCase() + '|' + String(profile.dataDir || '').replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase() : ''; }
+  function profileKey(profile) { return profile ? String(profile.kind || 'standalone') + '|' + String(profile.pluginId || '') + '|' + String(profile.edition || '').toLowerCase() + '|' + String(profile.dataDir || '').replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase() : ''; }
   function sceneLabel(id) { var scene = scenes.find(item => item.id === id); return scene ? scene.label : id || '等待三维空间'; }
   function selectOptions(id, list, selected) {
     var node = $(id), key = list.map(item => item.value + '|' + item.label).join('\n');
@@ -38,13 +39,13 @@
   function renderMetadata(payload) {
     if (payload.scenes) scenes = payload.scenes;
     if (payload.profiles) profiles = payload.profiles;
-    if (payload.profile) currentProfile = payload.profile;
+    if (Object.prototype.hasOwnProperty.call(payload, 'profile')) currentProfile = payload.profile;
     spaceScene = payload.spaceScene || null;
     var previous = $('profile').value;
     selectOptions('profile', profiles.map(function (profile) {
       var name = String(profile.dataDir || '').replace(/[\\/]+$/, '').split(/[\\/]/).pop();
-      return { value: profileKey(profile), label: (profile.edition === 'standard' ? 'Standard' : 'Full') + ' · ' + name };
-    }), previous || profileKey(currentProfile));
+      return { value: profileKey(profile), label: (profile.kind === 'dbx' ? 'DBX · ' : '') + (profile.edition === 'custom' ? 'Custom' : profile.edition === 'standard' ? 'Standard' : 'Full') + ' · ' + name };
+    }), previous || profileKey(currentProfile) || profileKey(profiles[0]));
     if (payload.message === '已切换来源') $('profile').value = profileKey(currentProfile);
     if (draft) {
       selectOptions('scene-fixed', scenes.map(scene => ({ value: scene.id, label: scene.label })), draft.wallpaper.scene);
@@ -97,7 +98,7 @@
     document.querySelectorAll('[data-scene]').forEach(node => node.setAttribute('aria-pressed', String(wallpaper.source === 'fixed' && node.dataset.scene === wallpaper.scene)));
     var preset = currentPreset(lyrics);
     document.querySelectorAll('[data-preset]').forEach(node => node.setAttribute('aria-pressed', String(node.dataset.preset === preset)));
-    $('lyrics-preset-status').textContent = preset ? ({single:'单行预设',double:'双行预设',translation:'翻译预设'})[preset] : '自定义样式';
+    $('lyrics-preset-status').textContent = preset ? ({single:'单行预设',double:'双行预设',triple:'三行景深预设',translation:'翻译预设'})[preset] : '自定义样式';
     var staticScene = scenes.find(scene => scene.id === current) || scenes.find(scene => scene.id === wallpaper.scene);
     var staticImage = $('scene-static');
     if (staticScene) {
@@ -112,8 +113,11 @@
     style.setProperty('--font-size', lyrics.fontSize + 'px'); style.setProperty('--font-weight', String(lyrics.fontWeight));
     style.setProperty('--font-family', lyrics.fontFamily); style.setProperty('--sung', lyrics.sungColor); style.setProperty('--unsung', lyrics.unsungColor);
     style.setProperty('--outline', lyrics.outlineColor); style.setProperty('--stroke', lyrics.outlineWidth + 'px'); style.setProperty('--opacity', String(lyrics.opacity));
-    $('lyric-secondary').hidden = lyrics.layout === 'single';
-    $('lyric-secondary').textContent = lyrics.secondary === 'translation' ? 'Let the music stay in this moment' : lyrics.secondary === 'romanization' ? 'Rang yin yue liu zai ci ke' : '下一句，与你一起听见';
+    $('lyric-previous').hidden = lyrics.layout !== 'triple';
+    $('lyric-next').hidden = lyrics.layout === 'single';
+    $('lyrics-preview').classList.toggle('has-depth', lyrics.layout === 'triple');
+    $('lyric-secondary').hidden = lyrics.bilingual === false;
+    $('lyric-secondary').textContent = lyrics.secondary === 'romanization' ? 'Rang yin yue liu zai ci ke' : 'Let the music stay in this moment';
     $('lyrics-secondary').value = lyrics.secondary;
     $('opacity-value').textContent = Math.round(lyrics.opacity * 100) + '%';
   }

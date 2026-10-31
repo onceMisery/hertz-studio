@@ -126,10 +126,8 @@ async function main() {
       if (snapshot.activeColor !== rgb(snapshot.palette.accent)) {
         throw new Error(id + ' 活动字色 ' + snapshot.activeColor + ' != ' + rgb(snapshot.palette.accent));
       }
-      var expectedAnim = { joy: 'emo-bob', sorrow: 'emo-sink', anger: 'emo-impact',
-        lonely: 'emo-sink', tender: 'emo-float' }[id];
-      if (!snapshot.animation.every((a) => a === expectedAnim)) {
-        throw new Error(id + ' 循环动画错误：' + snapshot.animation.join('/'));
+      if (!snapshot.animation.every((a) => a === 'none')) {
+        throw new Error(id + ' 仍叠加墙钟动画：' + snapshot.animation.join('/'));
       }
       var expectedDecor = { joy: 'emo-spark', sorrow: 'emo-tear', anger: 'emo-ember' }[id];
       var expectedCount = { joy: 6, sorrow: 3, anger: 6, lonely: 0, tender: 0 }[id];

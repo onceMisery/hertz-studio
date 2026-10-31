@@ -15,6 +15,12 @@ async function main() {
   const context = await browser.newContext({viewport:{width:1440,height:960}});
   await fixture.connect(context);
   const page = await context.newPage(), errors = [], requests = [], releases = new Map();
+  for (const file of ['app.js', 'online.js', 'topsearch.js', 'space-home.js']) {
+    await page.route('**/' + file + '*', route => route.fulfill({
+      contentType: 'application/javascript',
+      body: fs.readFileSync(path.resolve(__dirname, '../plugin/ui', file), 'utf8'),
+    }));
+  }
   let active = 0, maxActive = 0;
   page.on('pageerror', e => errors.push(e.message));
   const sources = ['netease','qq','kugou'].map((id,i) => ({id,label:['网易云音乐','QQ音乐','酷狗音乐'][i],kind:'music',
@@ -123,20 +129,17 @@ async function main() {
     const selectedQqTitle = await tsQqRows.nth(1).locator('.t-title').textContent();
     await page.evaluate(() => {
       window.r1TopPlayCapture = null;
-      Online.playAll = (tracks, index) => {
+      Online.playOne = track => {
         window.r1TopPlayCapture = {
-          sources: tracks.map(track => track.source),
-          titles: tracks.map(track => track.title),
-          index,
+          source: track.source,
+          title: track.title,
         };
       };
     });
     await tsQqRows.nth(1).click();
     const topPlayCapture = await page.evaluate(() => window.r1TopPlayCapture);
-    assert.deepEqual(topPlayCapture.sources, ['qq', 'qq'],
-      'topbar playback queue contains only the clicked source');
-    assert.equal(topPlayCapture.titles[topPlayCapture.index], selectedQqTitle,
-      'topbar playback starts from the clicked row in its source queue');
+    assert.equal(topPlayCapture.source, 'qq', 'topbar single-track playback retains the clicked source');
+    assert.equal(topPlayCapture.title, selectedQqTitle, 'topbar playback submits only the clicked song');
     await page.locator('#search').fill('R1 top canceled slow');
     assert.equal(await page.locator('.ts-menu .ts-row').count(),0,'new input clears stale selectable rows before debounce');
     await page.waitForFunction(()=>TopSearch.state.previewTracks.length===8);
