@@ -447,6 +447,36 @@ async function loginScenario(pollStates, opts) {
     ok(row.querySelector('.t-actions').children.some(node => node.title === '加入一起听'), '真实在线行包含一起听操作');
     ok(env.sandbox.Online.roomButton([T({ playable: false })]).disabled, '无可播歌曲时禁用');
   }
+  section('房间进行中：在线列表播放改走点播入队');
+  {
+    const transport = makeTransport({});
+    const env = makeSandbox({ transport });
+    bindOnline(env);
+    const shared = [];
+    env.sandbox.HertzRoom = {
+      active: () => true,
+      addOnline: async tracks => { shared.push(tracks.slice()); },
+    };
+    const first = T({ id: 'room-a', title: 'A' });
+    await env.sandbox.Online.playAll([first], 0);
+    eq(shared.length, 1, '房间内 playAll 走一起听');
+    eq(shared[0][0], first, '点播保留完整曲目');
+    eq(transport.calls.post.filter(call => call.url.indexOf('/v1/online/play') >= 0).length, 0,
+      '房间内不再调用本地在线播放');
+    eq(env.spies.toasts.at(-1).msg, '已点播《A》到共同队列', '单曲点播回执');
+    const batch = [T({ id: 'room-b', title: 'B' }), T({ id: 'room-c', title: 'C' })];
+    await env.sandbox.Online.playAll(batch, 0, batch);
+    eq(shared[1].length, 2, '整批意图点播全部曲目');
+    eq(env.spies.toasts.at(-1).msg, '已点播 2 首到共同队列', '批量点播回执');
+    await env.sandbox.Online.playAll([T({ id: 'x' }), T({ id: 'room-d', title: 'D' })], 1);
+    eq(shared[2].length, 1, '单曲入口只点播被点的那一首');
+    eq(shared[2][0].id, 'room-d', '按 index 取曲目');
+    env.sandbox.HertzRoom.addOnline = async () => { throw new Error('房主未开放点歌'); };
+    await env.sandbox.Online.playAll([first], 0);
+    eq(env.spies.toasts.at(-1).msg, '房主未开放点歌', '房间门禁错误可见');
+    await env.sandbox.Online.playCollection('netease', 'P1');
+    eq(env.spies.toasts.at(-1).msg, '房间进行中，请点播已加载的歌曲到共同队列', '整单播放入口在房间内提示点播');
+  }
   section('QQ 登录提示跟随扫码渠道，取码与等待轮询保持一致');
   {
     const s = await loginScenario(['waiting']);
@@ -1156,6 +1186,39 @@ async function loginScenario(pollStates, opts) {
     if (more) await more.onclick();
     eq(online.state.tracks.length, 40, '酷狗第二页追加到40条');
     ok(transport.calls.get[1] && transport.calls.get[1].url.includes('offset=20'), '后续请求使用offset=20');
+  }
+
+  section('搜索单曲点播：只提交所选歌曲，保留队列与元数据身份');
+  {
+    const queue = ['local-kept', 'online:qq:kept', 'online:netease:picked'];
+    const transport = makeTransport({
+      POST: [{ match: '/v1/online/play', returns: {
+        track_ids: ['online:netease:picked'], index: 0, queue,
+      } }],
+      GET: [{ match: '/v1/online/lyric', returns: null }],
+    });
+    const env = makeSandbox({ transport });
+    const bound = bindOnline(env);
+    const online = env.sandbox.window.Online;
+    const selected = T({ id: 'picked', title: 'Picked song' });
+    online.state.tracks = [T({ id: 'unselected' }), selected];
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await online.playOne(selected);
+      const body = transport.calls.post.at(-1).body;
+      eq(body.tracks.length, 1, '搜索结果只提交一首');
+      eq(body.tracks[0].id, 'picked', '只提交选中的歌曲');
+      eq(body.enqueue, true, '单曲播放要求保留现有队列');
+      eq(JSON.stringify(bound.setStateQueueCalls.at(-1).ids), JSON.stringify(queue), '界面使用服务端合并后的队列');
+      eq(bound.setStateQueueCalls.at(-1).start, 'online:netease:picked', '播放游标指向所选歌曲');
+      eq(env.onlineState.byId.get('online:netease:picked').title, 'Picked song', '队列下标不影响单曲元数据');
+      ok(!env.onlineState.byId.has('local-kept'), '单曲元数据不会写到原队列歌曲上');
+    }
+    await online.playAll(online.state.tracks, 1);
+    eq(transport.calls.post.at(-1).body.tracks.length, 2, '明确的整批播放仍提交整批');
+    eq(transport.calls.post.at(-1).body.enqueue, undefined, '整批播放维持替换语义');
+    const before = transport.calls.post.length;
+    await online.playOne(T({ playable: false }));
+    eq(transport.calls.post.length, before, '不可播放歌曲不发请求');
   }
 
   section('播放意图：重复点击去重、旧返回隔离、暂停取消');

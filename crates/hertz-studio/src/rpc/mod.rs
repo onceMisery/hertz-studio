@@ -188,11 +188,28 @@ pub fn query_str<'a>(query: &'a Value, key: &str) -> Option<&'a str> {
 
 pub struct Rpc {
     state: Arc<AppState>,
+    desktop_bridge: Option<Arc<crate::desktop_bridge::DesktopBridge>>,
 }
 
 impl Rpc {
     pub fn new(state: Arc<AppState>) -> Self {
-        Self { state }
+        Self {
+            state,
+            desktop_bridge: None,
+        }
+    }
+
+    pub fn with_desktop_bridge(
+        mut self,
+        bridge: Arc<crate::desktop_bridge::DesktopBridge>,
+    ) -> Self {
+        crate::desktop::Desktop::for_state(&self.state).attach_bridge(bridge.clone());
+        self.desktop_bridge = Some(bridge);
+        self
+    }
+
+    pub fn desktop_bridge(&self) -> Option<&Arc<crate::desktop_bridge::DesktopBridge>> {
+        self.desktop_bridge.as_ref()
     }
 
     pub fn state(&self) -> Arc<AppState> {
@@ -207,6 +224,54 @@ impl Rpc {
         let raw = call.raw.as_ref();
 
         match (call.op, segments.as_slice()) {
+            (Op::Get, ["v1", "desktop", "capabilities"]) => {
+                let query: crate::desktop::CapabilitiesQuery = query_as(query)?;
+                Reply::json(
+                    &crate::desktop::Desktop::for_state(state)
+                        .capabilities(query.refresh)
+                        .await,
+                )
+            }
+            (Op::Post, ["v1", "desktop", "connect"]) => {
+                if !query.is_null() && !query.as_object().is_some_and(|q| q.is_empty()) {
+                    return Err(bad_request("桌面连接不接受查询参数"));
+                }
+                let request = crate::desktop::parse_connect(body)?;
+                Reply::json(
+                    &crate::desktop::Desktop::for_state(state)
+                        .connect(request.tab)
+                        .await,
+                )
+            }
+            (Op::Post, ["v1", "desktop", "disconnect"]) => {
+                if !query.is_null() && !query.as_object().is_some_and(|q| q.is_empty()) {
+                    return Err(bad_request("桌面断开不接受查询参数"));
+                }
+                crate::desktop::parse_empty(body)?;
+                Reply::json(&crate::desktop::Desktop::for_state(state).disconnect().await)
+            }
+            (Op::Post, ["v1", "desktop", "lyrics", "launch"]) => Ok(Reply::ok(
+                crate::desktop::Desktop::for_state(state)
+                    .launch(false)
+                    .await?,
+            )),
+            (Op::Post, ["v1", "desktop", "wallpaper", "launch"]) => Ok(Reply::ok(
+                crate::desktop::Desktop::for_state(state)
+                    .launch(true)
+                    .await?,
+            )),
+            (Op::Post, ["v1", "desktop", "control"] | ["v1", "desktop", "lyrics", "control"]) => {
+                if serde_json::to_vec(body)
+                    .map_or(true, |body| body.len() > crate::desktop::CONTROL_BODY_BYTES)
+                {
+                    return Err(bad_request("桌面控制请求超过 2KiB"));
+                }
+                Ok(Reply::ok(
+                    crate::desktop::Desktop::for_state(state)
+                        .control(body_as(body)?)
+                        .await?,
+                ))
+            }
             (Op::Get, ["v1", "room"]) => Ok(Reply::ok(state.room.snapshot())),
             (Op::Post, ["v1", "room"]) => {
                 if serde_json::to_vec(body).map_or(true, |v| v.len() > 64 * 1024) {

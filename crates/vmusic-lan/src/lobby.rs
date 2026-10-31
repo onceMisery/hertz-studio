@@ -7,6 +7,7 @@ use uuid::Uuid;
 
 pub const COVER_BYTES: usize = 24 * 1024;
 pub const COVER_PREFIX: &str = "data:image/png;base64,";
+pub const JPEG_COVER_PREFIX: &str = "data:image/jpeg;base64,";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -17,7 +18,11 @@ pub struct LobbyProfile {
 
 /// Decode the complete bounded bitmap, rather than trusting a MIME label or header.
 pub fn valid_cover(cover: &str) -> bool {
-    let Some(encoded) = cover.strip_prefix(COVER_PREFIX) else {
+    let jpeg = cover.starts_with(JPEG_COVER_PREFIX);
+    let Some(encoded) = cover
+        .strip_prefix(COVER_PREFIX)
+        .or_else(|| cover.strip_prefix(JPEG_COVER_PREFIX))
+    else {
         return false;
     };
     if encoded.len() > COVER_BYTES.div_ceil(3) * 4 {
@@ -28,6 +33,21 @@ pub fn valid_cover(cover: &str) -> bool {
     };
     if bytes.len() > COVER_BYTES {
         return false;
+    }
+    if jpeg {
+        let mut decoder = jpeg_decoder::Decoder::new(Cursor::new(bytes));
+        decoder.set_max_decoding_buffer_size(1024 * 1024);
+        if decoder.read_info().is_err() {
+            return false;
+        }
+        let Some(info) = decoder.info() else {
+            return false;
+        };
+        return info.width > 0
+            && info.height > 0
+            && info.width <= 512
+            && info.height <= 512
+            && decoder.decode().is_ok();
     }
     let mut decoder = png::Decoder::new(Cursor::new(bytes));
     decoder.set_limits(png::Limits {
@@ -79,5 +99,40 @@ mod tests {
         )));
         let good = bitmap(2, 2);
         assert!(!valid_cover(&good[..good.len() - 12]));
+    }
+
+    #[test]
+    fn photo_cover_requires_a_complete_bounded_jpeg() {
+        let bytes = include_bytes!("../tests/fixtures/lobby-cover.jpg");
+        let cover = format!("{JPEG_COVER_PREFIX}{}", STANDARD.encode(bytes));
+        assert!(valid_cover(&cover));
+        assert!(!valid_cover(
+            &cover.replace(JPEG_COVER_PREFIX, COVER_PREFIX)
+        ));
+        assert!(!valid_cover(
+            &bitmap(2, 2).replace(COVER_PREFIX, JPEG_COVER_PREFIX)
+        ));
+        for length in [bytes.len() / 2, bytes.len() - 2] {
+            assert!(!valid_cover(&format!(
+                "{JPEG_COVER_PREFIX}{}",
+                STANDARD.encode(&bytes[..length])
+            )));
+        }
+        assert!(!valid_cover(&format!(
+            "{JPEG_COVER_PREFIX}{}",
+            STANDARD.encode(vec![0; COVER_BYTES + 1])
+        )));
+        let frame = bytes
+            .windows(2)
+            .position(|marker| marker == [0xff, 0xc0])
+            .unwrap();
+        for (offset, dimension) in [(5, 513u16), (7, 513u16), (5, 0u16), (7, 0u16)] {
+            let mut invalid = bytes.to_vec();
+            invalid[frame + offset..frame + offset + 2].copy_from_slice(&dimension.to_be_bytes());
+            assert!(!valid_cover(&format!(
+                "{JPEG_COVER_PREFIX}{}",
+                STANDARD.encode(invalid)
+            )));
+        }
     }
 }

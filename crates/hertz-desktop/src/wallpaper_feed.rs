@@ -64,6 +64,8 @@ impl std::fmt::Display for FeedError {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Snapshot {
+    #[serde(skip)]
+    pub(crate) received_at: Option<std::time::Instant>,
     pub(crate) protocol: u32,
     pub(crate) seq: u64,
     pub(crate) server: ServerInfo,
@@ -142,6 +144,9 @@ pub(crate) struct Feed {
 
 impl Feed {
     pub(crate) fn new(profile: Profile) -> anyhow::Result<Self> {
+        if crate::config::is_dbx(&profile) {
+            anyhow::bail!("DBX 来源必须使用私有管道读取");
+        }
         Ok(Self {
             client: bridge::client()?,
             profile,
@@ -151,26 +156,26 @@ impl Feed {
     }
 
     fn prepare(&self) -> Result<(bridge::Discovery, String), FeedError> {
-        let discovery_path = self.profile.data_dir.join("vmusicd.json");
+        let discovery_path = std::path::Path::new(self.profile.data_dir()).join("vmusicd.json");
         if !discovery_path.is_file() {
             return Err(FeedError::new(
                 ERR_DISCOVERY_MISSING,
                 format!(
                     "未找到 {}：请先启动 Hertz {} 服务",
                     discovery_path.display(),
-                    self.profile.edition
+                    self.profile.edition()
                 ),
             ));
         }
         let discovery = bridge::read_discovery(&self.profile)
             .map_err(|error| FeedError::new(ERR_DISCOVERY_INVALID, error.to_string()))?;
         if let Some(edition) = discovery.edition.as_deref() {
-            if self.profile.edition != "custom" && edition != self.profile.edition {
+            if self.profile.edition() != "custom" && edition != self.profile.edition() {
                 return Err(FeedError::new(
                     ERR_EDITION_MISMATCH,
                     format!(
                         "数据目录属于 {edition} 发行版，当前 profile 是 {}",
-                        self.profile.edition
+                        self.profile.edition()
                     ),
                 ));
             }
@@ -190,7 +195,7 @@ impl Feed {
             }
             Some(_) => {}
         }
-        let key_path = self.profile.data_dir.join("wallpaper-key");
+        let key_path = std::path::Path::new(self.profile.data_dir()).join("wallpaper-key");
         if !key_path.is_file() {
             return Err(FeedError::new(
                 ERR_KEY_MISSING,
@@ -200,8 +205,12 @@ impl Feed {
                 ),
             ));
         }
-        let key = bridge::read_key(&self.profile.data_dir, "wallpaper-key", "壁纸")
-            .map_err(|error| FeedError::new(ERR_KEY_INVALID, error.to_string()))?;
+        let key = bridge::read_key(
+            std::path::Path::new(self.profile.data_dir()),
+            "wallpaper-key",
+            "壁纸",
+        )
+        .map_err(|error| FeedError::new(ERR_KEY_INVALID, error.to_string()))?;
         Ok((discovery, key))
     }
 
@@ -350,7 +359,7 @@ fn map_socket_error(error: tungstenite::Error) -> FeedError {
     FeedError::new(ERR_EVENTS, message)
 }
 
-fn validate(snapshot: &Snapshot) -> Result<(), FeedError> {
+pub(crate) fn validate(snapshot: &Snapshot) -> Result<(), FeedError> {
     let invalid = |message: &str| FeedError::new(ERR_INVALID, message);
     if snapshot.protocol != PROTOCOL {
         return Err(invalid("快照协议不一致"));
@@ -404,6 +413,7 @@ mod tests {
 
     fn snapshot(seq: u64) -> Snapshot {
         Snapshot {
+            received_at: None,
             protocol: PROTOCOL,
             seq,
             server: ServerInfo {
@@ -534,10 +544,7 @@ mod tests {
         if key {
             std::fs::write(dir.0.join("wallpaper-key"), "a".repeat(64)).unwrap();
         }
-        Profile {
-            data_dir: dir.0.clone(),
-            edition: "full".into(),
-        }
+        crate::config::standalone(dir.0.clone(), "full")
     }
 
     fn serve(body: String) -> (u16, std::thread::JoinHandle<()>) {

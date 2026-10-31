@@ -13,6 +13,7 @@ Cargo feature 决定哪些 Provider 与协议模块进入编译，UI 在构建�
 | 默认端口 | 7635 | 7634 |
 | 系统钥匙串服务 | `hertz-studio-standard` | `hertz-studio` |
 | 商店候选发布链路 | 可进入，仍需维护者审核 | 不进入 |
+| 独立发布包 | 不发布（本地验证与 DBX 商店候选） | 唯一独立发布形态 |
 
 Jamendo 需配置自己的 client_id。作品授权以逐曲许可证为准；公开播客保留原站点 RSS 与音频地址，
 公开可访问不代表授予再分发权。Standard 的命名不替代商店审核结论。
@@ -33,6 +34,7 @@ HERTZ_EDITION=standard bash scripts/ci-package-plugin.sh
 HERTZ_EDITION=full bash scripts/ci-package-plugin.sh
 ```
 
+独立发布包只构建 Full；上面无 `full` 的 standalone 命令保留给本地 Standard 验证与 DBX 商店候选。
 Cargo 的 features 会在一次构建中合并。验证 Standard 时单独执行无 `full` 的命令；
 不要使用 `--all-features` 构建商店包。两版二进制同名，本地同时保留时使用不同 `--target-dir`。
 `--version`、HTTP / RPC 的 `/v1/health` 都报告发行版。
@@ -54,13 +56,14 @@ DBX 分别按插件 ID 分配宿主存储。Standard 在宿主提供的数据目
 
 ## Release
 
-`release.yml` 从同一提交并行构建 Standard / Full 独立程序和插件，文件名、artifact 名与插件 ID 区分版本，
-只产出 Actions artifacts，不发布。两版同时升版本，不维护长期分支或第二个项目。
+`release.yml` 从同一提交构建 Full 独立程序和 Standard / Full 插件；独立程序只出 Full，
+Standard 不再作为独立包发布。文件名、artifact 名与插件 ID 区分版本，只产出 Actions artifacts，
+不发布。两版同时升版本，不维护长期分支或第二个项目。
 
 商店候选链路只匹配 `hertz-plugin-standard-v<version>`，0.3.0 对应
 `hertz-plugin-standard-v0.3.0`；旧 `hertz-plugin-v...` 与 Full tag 不触发候选打包。
 脚本在 `PLUGIN_RELEASE=1` 时拒绝 Full，候选保持未签名，等待商店审核签名。
-Full 通过手动 release workflow 取得独立的 GitHub 分发产物。
+Full 独立包通过手动 release workflow 取得独立的 GitHub 分发产物；Standard 保留在商店候选与本地验证中。
 
 ## Verify
 

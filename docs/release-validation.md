@@ -2,6 +2,14 @@
 
 核对日期：2026-10-21。适用于 0.2.1 开发工作区，基于 HEAD `401a90376c0fa8391b5d60234103eeb381ef2c2c` 加未提交改动；不是该提交、已发布二进制或商店候选的验收结论。发布时必须用实际候选的源码、依赖和产物身份重跑，不能直接沿用开发工作区结果。完整范围仍由[产品路线](./product-roadmap.md)、[技术方案](./technical-roadmap.md)与[进度记录](./roadmap-progress.md)约束。
 
+> 2026-10-30 起，`release.yml` 的独立形态只构建 Full；Standard 继续用于 DBX 商店候选与本地 Standard 验证。下文两版独立程序的历史构建记录保留当时事实，不再代表当前发布矩阵。
+
+## 2026-10-29 DBX 可选桌面接入增量
+
+当前 0.3.0 dirty 工作区的 D0–D2 已实现并通过分阶段独立规格及质量审查。最低/当前真实 DBX 运行时确认只读管道、可取消 I/O 与 Job 归属；组件固定用户独立启动。Standard/Full 原 stdio 冒烟分别 314/314、298/298，六种未授权/坏恢复状态、真实管理等待中的 EOF 取消、授权与配置迁移、原生只读限制及五皮肤实际 opaque sandbox 检查通过。保存默认设置视图、换肤恢复与 Escape 不触发桌面检测。
+
+配套组件 zip 已完成清单/hash、无副作用 `--describe`、真实运行中覆盖拒绝、退出后升级和配置备份恢复检查。最终 Standard/Full unsigned 包体及配套标识核验通过，包内原回归分别 314/314、298/298，最低/当前真实运行时再次加载通过；新 Standalone 原 HTTP/native 流程通过。隔离 DBX 0.6.39 覆盖显式连接/切源及撤销/停止/正常退出的数据清空。官方最低 0.6.35 / 当前 0.6.47 两版插件另完成无组件未授权播放/seek/队列、真实一分钟定时、主题/预设持久化、工作台关闭/重开和原生歌词/真实频谱；正常退出约 1.24 / 1.26 秒清空音乐数据，组件随后正常退出。当前 Full 另通过一次真实在线取词并向原生提供 43 行文档。D3a 本地材料已准备；D3b 的物理媒体键、真实跨用户/会话、物理桌面恢复、八小时长稳、其他 OS 与签名发布仍待验，完整 D3 保持未完成。实际产物身份、既有初始化 CSP 调用栈、其余控制台错误及每项限制以[专项验证记录](./plans/2026-10-28-dbx-desktop-evidence.md)为准，不把本增量套用到历史 0.2.1 候选。
+
 ## 2026-10-23 远端自动化与构建增量
 
 本次通过 GitHub API 核对 `origin/master` 提交 `2f2765c2867f9295ab28dd05aff21bc9ae324b17` 的远端运行结果；未在本机重跑产品测试或安装候选。以下增量只替换旧记录中相应的“远端未核对”状态，其余历史本机证据仍绑定各自源码和产物。
@@ -34,7 +42,7 @@ release workflow 由 `workflow_dispatch` 手动触发，只保留 artifacts；�
 | DBX Standard | `io.github.oncemisery.hertz-studio-0.2.1-windows-x64.dbxp` | 11,342,810 | `536cea26986a186f2c559020d7e25c3bbb047d522460bf1da9a0b0dcc4cf1fd8` | manifest `io.github.oncemisery.hertz-studio` 0.2.1；sidecar `b44fe4ccc1617ff6d51010e55655cd9ac00cb01e07f38ed561573ddfff2bd203` |
 | DBX Full | `io.github.oncemisery.hertz-studio.full-0.2.1-windows-x64.dbxp` | 12,093,282 | `e56d33bce8006a48a015f55d0599886249447b083c5944e8bf97cb7ce0790335` | manifest `io.github.oncemisery.hertz-studio.full` 0.2.1；sidecar `7edf005e9a9a82b9abf6f2a144756af84ca72b9eb78c383228de36e6eaed790b` |
 
-构建命令与 `release.yml` 的 Windows 分支一致：两版分别执行 `cargo build --locked --release -p hertz-studio --target x86_64-pc-windows-msvc`（Full 加 `--features full`），随后按 `<名称>/hertz-studio.exe + README + LICENSE` 组包；DBX 包执行 `HERTZ_EDITION=<edition> bash scripts/ci-package-plugin.sh`（未设 `PLUGIN_RELEASE`）。两版独立构建共用同一 target 路径，故每版 zip 都在对应构建结束后立即生成，表中 exe 哈希即当时产物。
+构建命令与当时的 `release.yml` Windows 分支一致：两版分别执行 `cargo build --locked --release -p hertz-studio --target x86_64-pc-windows-msvc`（Full 加 `--features full`），随后按 `<名称>/hertz-studio.exe + README + LICENSE` 组包；DBX 包执行 `HERTZ_EDITION=<edition> bash scripts/ci-package-plugin.sh`（未设 `PLUGIN_RELEASE`）。两版独立构建共用同一 target 路径，故每版 zip 都在对应构建结束后立即生成，表中 exe 哈希即当时产物。
 
 同轮静态检查：`node scripts/check-editions.js` 与 `node scripts/check-release-ui.js` 通过；打包脚本逐包核对 `.artifact.json` 的 hash/size、未签名、manifest 身份、Standard 侧仅一个 sidecar 且不含 Full 协议/资源。以下仍未验证：四份候选的启动与安装、升级/回滚、签名与 Store、真实 DBX 宿主、真实声卡与播放旅程、正式 MCP 客户端、模型或任何 provider 请求。两个 `.artifact.json` 的 `url` 为裸文件名而非不可变 Release URL；它们是检视候选，不是上架候选。
 
@@ -75,6 +83,7 @@ release workflow 由 `workflow_dispatch` 手动触发，只保留 artifacts；�
 | 分源搜索与局部恢复 R1-S | 已实现 | 已实现 | 四入口、HTTP 共享额度 | 同源 UI、RPC 共享额度 | 有可控 DBX 调用与 Chrome 旅程；两版三轮各两分钟实际 HTTP/RPC/旧聚合受控压力、期限与槽位/socket 回收通过，含测试进程内存，见[长时压力归档](../evals/search/pressure-v2/README.md)；固定过载下HTTP单源大量busy，未证明有效吞吐/公平性；生产独立进程混合负载 RSS、真实账号/弱网、原生宿主、长期稳定性和弱机仍待验 |
 | 搜索性能基线 R0/R1-S | 本轮顺序查询通过 | 分页修复后本轮顺序查询通过 | 两版 release、50000 条合成曲目真实 HTTP；受控来源真实 Chrome；五分钟本地负载与实际服务进程内存 | HTTP/RPC 语义一致检查通过；RPC/原生 DBX 未计时 | 默认调度最慢本地 P95 208.54 / 207.28 ms，受控首结果286.10 / 290.90 ms，均通过原门槛；更广泛运行条件稳定性、长期内存预算、真实网络混合压力、弱机/跨 OS 仍待验，见[分页修复复测](../evals/search/page-v1/README.md)；原 Full 失败仍保留 |
 | 本地歌词候选导入 R1-L | 已有增量 | 同源 | LRC/窄 TTML 检查、预览与确认 | 同一服务/UI；原生未验 | Rust 解析/旧库迁移/修订并发、HTTP/RPC 与 Chrome 实际导入通过；许可、真实歌曲及全部歌词视图/导出/原生宿主待验，见[歌词导入](./lyric-import.md) |
+| DBX 可选桌面歌词与壁纸 | D0–D2 已实现 | 同源 | 原 HTTP 与共用原生宿主保留 | 只读命名管道、显式授权、用户独立启动组件；五皮肤设置入口已实现 | D3a 最终配套候选及手工升级/备份恢复已验；最低/当前双发行版运行时、无组件播放/seek/队列、真实定时、关闭重开、原生呈现和退出清空通过，当前 Full 另验一次真实在线取词。物理媒体键、实际跨用户/会话、桌面恢复及八小时长稳等仍待验，见[证据](./plans/2026-10-28-dbx-desktop-evidence.md) |
 | 手选在线歌词候选 R1-L | 不编译商业协议，无入口 | 五个既有音源，均未完成真实验收 | 显式搜索/选择/取词/预览/应用；可勾选严格自动应用 | 同一服务/UI；原生未验 | 有 Rust 存储/冲突/边界与 HTTP/RPC、真实回环响应流及受控 Chrome UI 检查；严格自动应用默认不勾选，须用户显式选择，且仅适用于无可见歌词的唯一精确匹配；真实来源/账号/许可与实际匹配质量仍待验收 |
 | 受限外部 MCP R2 | 已实现 | 已实现 | IPv4 回环服务与 Rust stdio adapter | 首发不提供外部连接 | 有实际 JSON-RPC 与官方 Rust SDK 子进程检查；八个在途请求直到 flush 才归还、超载/重复 ID 关闭与出站帧上限，见[MCP 互操作](./mcp-interoperability.md)；正式目标客户端、长时间压力/进程内存与完整取消/超时、逐 OS 与候选端到端未完成 |
 | 场景契约与 intent 校验 R3 | 已实现，另需开关与 scope | 同左 | 经受限 MCP 查询/窄校验 | 官方 UI 可用；不承诺外部 MCP | 十场景契约/物化与分享回归通过；新增重构前十场景20组完整预置、规则入口与固定旧分享导入回溯检查，见[历史 fixture](../evals/stage/legacy-v1/README.md)；全部历史用户预置、原生宿主、GPU/弱机与人工视觉验收仍待核对 |

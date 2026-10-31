@@ -1,0 +1,158 @@
+/* 小窗播放（桌面宠物）。与桌面歌词同一套变量约定：深/浅色各一组，
+   尺寸走 --scale，颜色不写死在结构里。 */
+:root {
+  --scale: 1;
+  --radius: 28px;
+  --out: cubic-bezier(.16, 1, .3, 1);
+  --soft: cubic-bezier(.22, .61, .36, 1);
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: transparent; }
+body {
+  --surface: rgba(14, 16, 20, .82);
+  --stroke: rgba(255, 255, 255, .10);
+  --stroke-hi: rgba(255, 255, 255, .20);
+  --text: #fff;
+  --text-dim: rgba(255, 255, 255, .62);
+  --accent: #ff7a2f;
+  --shadow: 0 18px 46px -14px rgba(0, 0, 0, .55), 0 4px 12px -4px rgba(0, 0, 0, .38);
+  font-family: var(--font-family, "Segoe UI"), "Microsoft YaHei UI", system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  color: var(--text);
+  cursor: default;
+}
+body[data-theme="light"] {
+  --surface: rgba(250, 250, 252, .92);
+  --stroke: rgba(255, 255, 255, .92);
+  --stroke-hi: #fff;
+  --text: #0b0d11;
+  --text-dim: rgba(12, 14, 18, .60);
+  --accent: #e0561a;
+  --shadow: 0 18px 44px -16px rgba(24, 34, 56, .30), 0 4px 12px -5px rgba(24, 34, 56, .20);
+}
+[hidden] { display: none !important; }
+button { font: inherit; color: inherit; cursor: pointer; }
+button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* 胶囊本体。整块是拖拽把手，按钮各自 stopPropagation（与页内胶囊同一手感）。 */
+#capsule {
+  position: absolute; inset: 0;
+  display: flex; align-items: center; gap: calc(10px * var(--scale));
+  padding: 0 calc(12px * var(--scale));
+  border-radius: var(--radius);
+  background: var(--surface);
+  backdrop-filter: blur(26px) saturate(175%);
+  box-shadow: var(--shadow), inset 0 0 0 1px var(--stroke), inset 0 1px 0 var(--stroke-hi);
+  opacity: var(--opacity, 1);
+  transition: opacity 220ms var(--soft), box-shadow 220ms var(--soft);
+}
+body.dragging #capsule { box-shadow: var(--shadow), inset 0 0 0 1px var(--stroke-hi); }
+
+#cover {
+  position: relative; flex: none;
+  width: calc(36px * var(--scale)); height: calc(36px * var(--scale));
+  border-radius: 50%; overflow: hidden;
+  background: color-mix(in srgb, var(--text) 12%, transparent);
+  display: grid; place-items: center;
+}
+#cover-img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+#cover-img[hidden] { display: none; }
+#cover-glyph { font-size: calc(16px * var(--scale)); opacity: .45; }
+#cover-img:not([hidden]) ~ #cover-glyph { display: none; }
+
+#meta { flex: 1 1 auto; min-width: 0; }
+#title, #subtitle {
+  margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+#title { font-size: calc(13px * var(--scale)); font-weight: 600; line-height: 1.2; }
+#subtitle { font-size: calc(11px * var(--scale)); color: var(--text-dim); line-height: 1.35; }
+
+#transport { display: flex; align-items: center; gap: calc(4px * var(--scale)); flex: none; }
+.icon {
+  appearance: none; border: 0; background: transparent;
+  width: calc(28px * var(--scale)); height: calc(28px * var(--scale));
+  border-radius: 50%; display: grid; place-items: center; color: var(--text-dim);
+  transition: background 180ms, transform 180ms var(--out), color 180ms;
+}
+.icon:hover { background: color-mix(in srgb, var(--text) 14%, transparent); color: var(--text); }
+.icon:active { transform: scale(.9); }
+.icon svg { width: calc(16px * var(--scale)); height: calc(16px * var(--scale)); display: block; fill: currentColor; }
+.primary {
+  appearance: none; border: 0; background: var(--accent); color: #fff;
+  width: calc(30px * var(--scale)); height: calc(30px * var(--scale));
+  border-radius: 50%; display: grid; place-items: center;
+  box-shadow: 0 6px 16px -6px color-mix(in srgb, var(--accent) 70%, transparent);
+  transition: transform 180ms var(--out), filter 180ms;
+}
+.primary:hover { filter: brightness(1.08); }
+.primary:active { transform: scale(.92); }
+.primary svg { width: calc(15px * var(--scale)); height: calc(15px * var(--scale)); display: block; fill: #fff; }
+/* 播放/暂停图标互斥：body.playing 是唯一权威，别再各存一份布尔。 */
+#pause-icon, body[data-playing="true"] #play-icon { display: none; }
+body[data-playing="true"] #pause-icon { display: block; }
+
+/* 进度条贴着胶囊底边，1px 高，只在播着的时候露出来。 */
+#progress {
+  position: absolute; left: var(--radius); right: var(--radius); bottom: 3px; height: 2px;
+  border-radius: 2px; overflow: hidden; pointer-events: none;
+  background: color-mix(in srgb, var(--text) 14%, transparent);
+  opacity: 0; transition: opacity 260ms var(--soft);
+}
+body[data-playing="true"] #progress, body.buffering #progress { opacity: 1; }
+#progress-fill {
+  display: block; height: 100%; width: var(--p, 0%);
+  background: var(--accent); border-radius: inherit;
+}
+body.buffering #progress-fill { opacity: .4; }
+
+/* 桌面宠物态：去掉背板与描边，只留内容本体，外面全交给 native 穿透。 */
+body[data-pet="true"] #capsule {
+  background: transparent; backdrop-filter: none; box-shadow: none;
+}
+body[data-pet="true"] #title, body[data-pet="true"] #subtitle {
+  text-shadow: 0 1px 2px rgba(0, 0, 0, .55), 0 2px 14px rgba(0, 0, 0, .35);
+}
+body[data-pet="true"] #meta { display: none; }
+body[data-pet="true"] #transport { opacity: 0; transition: opacity 200ms; }
+body[data-pet="true"].hovering #transport { opacity: 1; }
+
+/* 锁定（完全穿透）：整块压暗一档，提示「现在点不到」。 */
+body[data-locked="true"] #capsule { opacity: calc(var(--opacity, 1) * .82); }
+body[data-locked="true"] #transport, body[data-locked="true"] #progress { display: none; }
+
+/* 贴边隐藏的残条：只留一条亮线做触发提示。 */
+body[data-peek="true"] #capsule {
+  background: var(--accent); box-shadow: none; opacity: .55;
+}
+body[data-peek="true"] #meta, body[data-peek="true"] #transport,
+body[data-peek="true"] #cover, body[data-peek="true"] #progress { display: none; }
+
+#menu {
+  position: absolute; z-index: 10; min-width: 168px; padding: 6px;
+  border-radius: 14px; font-size: 12.5px;
+  background: var(--surface); backdrop-filter: blur(30px) saturate(180%);
+  box-shadow: 0 20px 42px -18px rgba(0, 0, 0, .6), inset 0 0 0 1px var(--stroke), inset 0 1px 0 var(--stroke-hi);
+  animation: menu-in 160ms var(--out);
+}
+@keyframes menu-in { from { opacity: 0; transform: translateY(-6px) scale(.97); } to { opacity: 1; transform: none; } }
+#menu button {
+  appearance: none; border: 0; background: transparent; width: 100%;
+  display: flex; align-items: center; gap: 8px; padding: 7px 10px; border-radius: 9px; text-align: left;
+}
+#menu button:hover { background: color-mix(in srgb, var(--text) 14%, transparent); }
+/* 勾选用文字前缀，不引图标库：勾选态由 aria-checked 驱动。 */
+#menu button[role="menuitemcheckbox"]::before {
+  content: ""; width: 8px; height: 8px; border-radius: 50%; flex: none;
+  background: transparent; box-shadow: inset 0 0 0 1px var(--stroke-hi);
+  transition: background 160ms;
+}
+#menu button[role="menuitemcheckbox"][aria-checked="true"]::before { background: var(--accent); box-shadow: none; }
+#menu .sep { height: 1px; margin: 4px 6px; background: var(--stroke); }
+
+#flash {
+  position: absolute; left: 50%; bottom: 6px; transform: translateX(-50%);
+  padding: 5px 10px; border-radius: 10px; font-size: 11.5px;
+  background: var(--surface); box-shadow: var(--shadow); white-space: nowrap;
+}
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }

@@ -1,0 +1,37 @@
+# SPDX-License-Identifier: MIT
+# Build the optional shared component as reviewable artifacts; never publish/install it.
+name: desktop component
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  component:
+    name: desktop windows-x64
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: desktop-windows-x64
+      - name: Build component
+        run: cargo build --locked --release -p hertz-desktop --target x86_64-pc-windows-msvc
+      - name: Package component and checksums
+        run: node scripts/package-desktop-component.js target/x86_64-pc-windows-msvc/release/hertz-desktop.exe dist/desktop
+      - name: Upload component for review
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-component-windows-x64
+          path: |
+            dist/desktop/*.zip
+            dist/desktop/*.sha256
+          if-no-files-found: error

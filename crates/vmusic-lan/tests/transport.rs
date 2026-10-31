@@ -98,6 +98,31 @@ async fn lobby_artwork_is_public_bounded_pinned_and_never_pairs_a_member() {
             .cover,
         Some(cover)
     );
+    let photo = format!(
+        "{}{}",
+        vmusic_lan::lobby::JPEG_COVER_PREFIX,
+        STANDARD.encode(include_bytes!("fixtures/lobby-cover.jpg"))
+    );
+    server
+        .transport
+        .set_lobby_profile(Some(LobbyProfile {
+            room_id: room,
+            cover: Some(photo.clone()),
+        }))
+        .unwrap();
+    assert_eq!(
+        client::lobby_profile(server.address, server.fingerprint, room)
+            .await
+            .unwrap()
+            .unwrap()
+            .cover,
+        Some(photo)
+    );
+    assert!(
+        server.transport.members().is_empty(),
+        "public JPEG artwork never pairs a member"
+    );
+    assert!(inbound.try_recv().is_err());
     server.transport.set_lobby_profile(None).unwrap();
     assert!(
         client::lobby_profile(server.address, server.fingerprint, room)

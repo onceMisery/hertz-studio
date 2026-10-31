@@ -31,6 +31,7 @@ use std::sync::Arc;
 use dbx_plugin_sdk::{
     PluginEmitter, PluginError, PluginHandler, PluginMetadata, PluginServer, RequestContext,
 };
+use hertz_studio::desktop_bridge::DesktopBridge;
 use hertz_studio::error::{ErrorBody, ErrorDetail};
 use hertz_studio::rpc::{decode_base64, Call, Op, RawBody, Rpc, RpcResult};
 use hertz_studio::state::AppState;
@@ -266,8 +267,19 @@ fn main() -> std::io::Result<()> {
     // workers may retain Arc<Plugin> after serve returns on EOF or read error;
     // their last Arc's Drop must never own process shutdown or the runtime.
     let state = booted.state.clone();
+    let desktop_bridge = DesktopBridge::new(&state);
+    let restore_bridge = desktop_bridge.clone();
+    runtime.spawn(async move {
+        if let Err(error) = restore_bridge.restore().await {
+            tracing::warn!(
+                code = error.code,
+                "DBX desktop source unavailable: {}",
+                error.message
+            );
+        }
+    });
     let plugin = Plugin {
-        rpc: Rpc::new(state.clone()),
+        rpc: Rpc::new(state.clone()).with_desktop_bridge(desktop_bridge.clone()),
         state: state.clone(),
         event_forwarder_running: Arc::new(AtomicBool::new(false)),
         runtime: runtime.handle().clone(),
@@ -275,17 +287,23 @@ fn main() -> std::io::Result<()> {
 
     let mut exiting = state.exiting_signal();
     let shutdown_state = state.clone();
+    let shutdown_bridge = desktop_bridge.clone();
     runtime.spawn(async move {
         if !*exiting.borrow() && exiting.changed().await.is_err() {
             return;
         }
-        shutdown_state.shutdown().await;
+        shutdown_bridge.begin_shutdown();
+        tokio::join!(shutdown_bridge.shutdown(), shutdown_state.shutdown());
     });
 
     let metadata = PluginMetadata::new(PLUGIN_ID, env!("CARGO_PKG_VERSION"));
     let result = PluginServer::new(metadata, plugin).serve();
     // stdin EOF/read failure can leave an RPC executing or queued in the SDK.
-    // The process owner must drain Host End before main is allowed to return.
-    runtime.block_on(booted.state.shutdown());
+    // Keep the runtime alive until both Host End and bridge discovery cleanup
+    // finish. A detached bridge task can otherwise be dropped on normal EOF.
+    desktop_bridge.begin_shutdown();
+    runtime.block_on(async {
+        tokio::join!(desktop_bridge.shutdown(), booted.state.shutdown());
+    });
     result
 }

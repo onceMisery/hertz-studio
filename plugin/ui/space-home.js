@@ -461,7 +461,10 @@
       var albumText = node('span', 'sh-track-album', album); albumText.title = album; meta.appendChild(albumText);
       text.appendChild(meta); var status = node('span', 'sh-track-status'); status.setAttribute('role','status'); status.hidden = true; text.appendChild(status); play.appendChild(text);
       play.dataset.searchKey = 'track:' + item.id;
-      play.addEventListener('click', function () { activateTrack(item, spec ? spec.items : items); });
+      play.addEventListener('click', function () {
+        var enqueue = !!(spec && (spec.kind === 'search' || (spec.kind === 'library' && spec.q)));
+        activateTrack(item, spec ? spec.items : items, enqueue);
+      });
       var queue = button('加入队列 · ' + item.title, 'queue-next', function () { run(function () { return host.enqueue(item); }, queue); });
       queue.dataset.searchKey = 'queue:' + item.id;
       if (!spec) { var live = node('span', 'sh-track-live'); live.innerHTML = equalizer(); play.appendChild(live); queue.appendChild(node('span', 'sh-queue-label', '+Q')); }
@@ -469,12 +472,12 @@
       row.append(play, queue); container.appendChild(row);
     });
   }
-  async function activateTrack(item, items) {
+  async function activateTrack(item, items, enqueue) {
     if (playAction && playAction.id === item.id && playAction.pending) return;
     var ticket = ++playGeneration; playAction = {id:item.id,pending:true,error:''}; updateRows();
     if (callbacks.revealPlayer) callbacks.revealPlayer();
     try {
-      var result = await host.play(item, items);
+      var result = await host.play(item, items, enqueue);
       if (result === false) throw new Error('无法播放《' + (item.title || '当前曲目') + '》，请重试或切换音源');
       if (ticket === playGeneration) playAction = null;
     } catch (error) {

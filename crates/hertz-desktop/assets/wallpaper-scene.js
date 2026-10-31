@@ -40,6 +40,8 @@
   var ticks = 0;
   var draws = 0;
   var lastHeartbeat = 0;
+  var lastClockBeacon = -Infinity;
+  var feedExpiryTimer = 0;
   var followSpace = null;
   var followSignature = '';
   var feed = {
@@ -50,7 +52,8 @@
     bands: new Float32Array(BANDS),
     energy: 0,
     ageMs: null,
-    receivedAt: null
+    receivedAt: null,
+    expiresAt: null
   };
 
   function notify(message) {
@@ -189,6 +192,7 @@
     if (!last) last = now;
     var dt = Math.min(100, now - last);
     last = now;
+    if (feed.valid && feed.expiresAt != null && now >= feed.expiresAt) applyFeed(null);
     if (feed.valid && feed.receivedAt == null) feed.receivedAt = now;
     sceneTime += dt;
     if (now - lastDraw < 1000 / cap - 0.5) return;
@@ -473,7 +477,14 @@
     applyFollow();
   }
 
+  function expireFeed() {
+    if (feed.expiresAt == null) return;
+    var remaining = feed.expiresAt - performance.now();
+    if (remaining <= 0) applyFeed(null);
+    else feedExpiryTimer = setTimeout(expireFeed, remaining + 1);
+  }
   function applyFeed(snapshot) {
+    clearTimeout(feedExpiryTimer);
     if (snapshot == null || typeof snapshot !== 'object') {
       feed.valid = false;
       feed.playing = false;
@@ -483,6 +494,7 @@
       feed.energy = 0;
       feed.ageMs = null;
       feed.receivedAt = null;
+      feed.expiresAt = null;
       return false;
     }
     var spectrum = snapshot.spectrum;
@@ -501,15 +513,21 @@
       && (spectrum.ageMs == null
         || (typeof spectrum.ageMs === 'number' && isFinite(spectrum.ageMs) && spectrum.ageMs >= 0));
     if (!valid) return applyFeed(null);
+    var now = performance.now();
+    var snapshotAge = Math.max(0, Number(snapshot.snapshotAgeMs) || 0) + (Number.isFinite(snapshot.pageDispatchMs) ? Math.max(0, now - snapshot.pageDispatchMs) : 0);
+    if (snapshotAge >= 2000 && now - lastClockBeacon >= 1000) { lastClockBeacon = now; notify('wallpaper_clock ' + now); }
+    if (snapshotAge >= 3000) return applyFeed(null);
     feed.valid = true;
     feed.playing = snapshot.playing;
     feed.positionMs = typeof snapshot.positionMs === 'number' ? snapshot.positionMs : 0;
     feed.durationMs = typeof snapshot.durationMs === 'number' ? snapshot.durationMs : null;
     feed.energy = spectrum.energy;
-    feed.ageMs = spectrum.ageMs;
+    feed.ageMs = spectrum.ageMs == null ? null : spectrum.ageMs + snapshotAge;
     feed.bands = new Float32Array(BANDS);
     for (var i = 0; i < BANDS; i++) feed.bands[i] = bands[i];
-    feed.receivedAt = null;
+    feed.receivedAt = performance.now();
+    feed.expiresAt = feed.receivedAt + 3000 - snapshotAge;
+    feedExpiryTimer = setTimeout(expireFeed, Math.max(0, 3001 - snapshotAge));
     followSpace = snapshot.space && typeof snapshot.space.scene === 'string'
       ? {
           scene: snapshot.space.scene,
@@ -571,5 +589,6 @@
     debug: debug
   };
 
+  notify('wallpaper_clock ' + performance.now());
   notify('wallpaper_dom_ready');
 })();

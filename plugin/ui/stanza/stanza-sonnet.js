@@ -124,6 +124,7 @@
       isPlaying: !!(pres && pres.playing),
       currentLineIndex: idx,
       activeLine: activeLine,
+      emotion: global.LyricEmotion ? global.LyricEmotion.resolveForLine(idx) : null,
       nextLines: idx >= 0 ? lines.slice(idx + 1, idx + 4) : lines.slice(0, 3),
       lineProgress: activeLine ? U.clamp((positionS - activeLine.startTime) / dur, 0, 1) : 0,
       lines: lines,
@@ -725,6 +726,9 @@
     }
 
     function makeEntry(line, lineIndex, point, tuning) {
+      var E = global.LyricEmotion;
+      var resolved = E ? E.resolveForLine(lineIndex) : null;
+      var emotion = resolved && resolved.id !== 'neutral' ? resolved : null;
       var palette = tuning.palette || {};
       var secondary = colorNumber(palette.secondary, color);
       var tertiary = colorNumber(palette.tertiary, color);
@@ -753,7 +757,9 @@
         var node = new PIXI.Text({
           text: glyph.text,
           style: {
-            fontFamily: fontStack, fontSize: fontSize, fontWeight: '750', fill: '#ffffff',
+            fontFamily: emotion ? E.fontFamily(emotion, fontStack) : fontStack, fontSize: fontSize,
+            fontWeight: String(emotion && emotion.type ? (E.accentFor(glyph.text)
+              ? E.accentWeight(emotion.type.weight, emotion.intensity) : emotion.type.weight) : 750), fill: '#ffffff',
             stroke: { color: (tuning.palette && tuning.palette.background) || '#09090b',
               width: Math.max(1, fontSize * 0.022) }
           }
@@ -777,6 +783,7 @@
           angle: ((glyphIndex % 5) - 2) * 0.035
         });
         entryText.addChild(node);
+        if (emotion && !blank) E.preparePixiGlyphEffects(PIXI, node, emotion, glyphIndex, timed.length);
         return node;
       });
 
@@ -837,7 +844,7 @@
         });
       }
       accentLayer.visible = false;
-      return { root: entryRoot, nodes: nodes, line: line, lineIndex: lineIndex,
+      return { root: entryRoot, nodes: nodes, line: line, lineIndex: lineIndex, emotion: emotion,
         point: point, entryDecor: entryDecor, entryText: entryText, accent: accent, prepareAccent: prepareAccent };
     }
 
@@ -888,7 +895,7 @@
         height = nextHeight;
         var nextSignature = [seed, width, height, tuning.fontScale, tuning.phraseLength, tuning.trackVerticalChance,
           tuning.trackJunction, tuning.trackMinSegment, tuning.quality, nextColor,
-          JSON.stringify(tuning.palette)].join(':');
+          JSON.stringify(tuning.palette), frame.emotion ? frame.emotion.revision : 0].join(':');
         if (source !== frame.lines || signature !== nextSignature) {
           release();
           source = frame.lines;
@@ -941,6 +948,18 @@
             node.scale.set(Math.max(0.28, 1 - entryScale * glyphStrength + activePulse * glyphStrength));
             node.alpha = time < d.startTime ? FX.amount(tuning.waitingOpacity, 0.25, 1) : 1;
             node.tint = active && tuning.textInversion !== false ? nextColor : ink;
+            if (entry.emotion) {
+              var E = global.LyricEmotion;
+              var pose = E.motionPose(entry.emotion, (d.index + 0.5) / entry.nodes.length, time, d.fontSize,
+                active ? Math.sin(p * Math.PI) : 0, glyphStrength === 0 || relative !== 0);
+              node.x += pose.x; node.y += pose.y;
+              node.rotation += pose.rotate;
+              node.skew.set(pose.skew, 0);
+              node.scale.x *= pose.scaleX; node.scale.y *= pose.scaleY;
+              if (E.paletteEnabled()) node.tint = colorNumber(active && tuning.textInversion !== false
+                ? entry.emotion.palette.accent : entry.emotion.palette.ink, ink);
+              E.paintPixiGlyphEffects(node, entry.emotion, time, glyphStrength === 0 || relative !== 0);
+            }
           });
 
           var accentEnabled = entry.lineIndex === activeIndex
@@ -1086,6 +1105,7 @@
         backgroundMode: bgMode,
         fontScale: fontScale,
         lyricMotion: 'sonnet',
+        emotion: frame && frame.emotion,
         shotFlow: tuning.shotFlow,
         lyricLayout: tuning.lyricLayout,
         phraseLength: tuning.phraseLength,
@@ -1117,7 +1137,8 @@
       var line = frame.activeLine;
       var trackId = (frame.track && (frame.track.id || frame.track.title)) || '';
       return [trackId, line ? line.startTime : 'none', line ? line.fullText : '',
-        tuning.shotFlow, tuning.lyricLayout, tuning.phraseLength, fontScale, themeSig].join('|');
+        tuning.shotFlow, tuning.lyricLayout, tuning.phraseLength, fontScale, themeSig,
+        frame.emotion ? frame.emotion.revision : 0].join('|');
     }
 
     function updateHotspots(frame, camera) {

@@ -34,6 +34,9 @@ pub(crate) struct OnlinePlayRequest {
     pub(crate) collection: Option<OnlinePlayCollection>,
     #[serde(default)]
     pub(crate) index: Option<usize>,
+    /// 单曲点播：保留当前队列，缺少该曲目时追加，再切到该曲目播放。
+    #[serde(default)]
+    pub(crate) enqueue: bool,
 }
 
 #[cfg(test)]
@@ -257,6 +260,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn single_selection_preserves_the_queue_and_reuses_existing_entries() {
+        for initial in [
+            vec![],
+            vec!["local:kept", "online:qq:kept"],
+            vec!["local:kept", "online:netease:picked", "online:qq:kept"],
+        ] {
+            let (state, handle) = playback_state().await;
+            let mut expected: Vec<String> = initial.iter().map(|id| (*id).into()).collect();
+            state.set_queue(expected.clone(), Some(0)).await.unwrap();
+            if !expected.iter().any(|id| id == "online:netease:picked") {
+                expected.push("online:netease:picked".into());
+            }
+            let index = expected
+                .iter()
+                .position(|id| id == "online:netease:picked")
+                .unwrap();
+            for _ in 0..2 {
+                let request = serde_json::from_value(json!({
+                    "source": "netease", "enqueue": true,
+                    "tracks": [{"id": "picked", "title": "Selected song"}]
+                }))
+                .unwrap();
+                let prepared = state
+                    .prepare_online_play(request, std::future::pending())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(*state.queue.lock().await, expected);
+                assert_eq!(*state.cursor.lock().await, Some(index));
+                assert_eq!(prepared.queue, expected);
+                assert_eq!(prepared.queue_index, index);
+                assert_eq!(prepared.vids, vec!["online:netease:picked"]);
+                assert_eq!(prepared.index, 0);
+                assert_eq!(
+                    state
+                        .online_meta
+                        .lock()
+                        .await
+                        .get("online:netease:picked")
+                        .unwrap()
+                        .title,
+                    "Selected song"
+                );
+            }
+            state.audio.shutdown();
+            handle.join().unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn enqueue_rejects_batch_and_collection_intents_without_changing_the_queue() {
+        let (state, handle) = playback_state().await;
+        state.set_queue(vec!["kept".into()], Some(0)).await.unwrap();
+        let generation = state.play_generation.load(Ordering::Relaxed);
+        for body in [
+            json!({"source":"netease", "enqueue":true, "tracks":[{"id":"a"},{"id":"b"}]}),
+            json!({"source":"netease", "enqueue":true, "collection":{"kind":"playlist","id":"p"}}),
+        ] {
+            let request = serde_json::from_value(body).unwrap();
+            assert!(state
+                .prepare_online_play(request, std::future::pending())
+                .await
+                .is_err());
+            assert_eq!(*state.queue.lock().await, vec!["kept"]);
+            assert_eq!(state.play_generation.load(Ordering::Relaxed), generation);
+        }
+        state.audio.shutdown();
+        handle.join().unwrap();
+    }
+
+    #[tokio::test]
     async fn a_new_direct_selection_resets_old_relay_provenance() {
         let (state, handle) = playback_state().await;
         state.remember_online_meta("online:qq:t1".into(), serde_json::from_value(json!({
@@ -308,6 +382,8 @@ pub(crate) struct PreparedOnlinePlay {
     tracks: Vec<OnlinePlayTrack>,
     vids: Vec<String>,
     index: usize,
+    queue: Vec<String>,
+    queue_index: usize,
     generation: usize,
     collection: Option<(String, u64)>,
 }
@@ -366,6 +442,9 @@ impl AppState {
         if request.collection.is_none() && tracks.iter().any(|t| t.id.trim().is_empty()) {
             return Err(bad_request("tracks 中存在缺少 id 的曲目"));
         }
+        if request.enqueue && (request.collection.is_some() || tracks.len() != 1) {
+            return Err(bad_request("保留队列点播只支持单首歌曲"));
+        }
         let reservation = self.reserve_online_intent().await?;
         let collection = if let Some(coll) = request.collection {
             let result = first_page.await;
@@ -410,7 +489,22 @@ impl AppState {
         if self.play_generation.load(Ordering::Relaxed) != reservation {
             return Ok(None);
         }
-        let (generation, _, _) = self.set_queue_locked(vids.clone(), Some(index)).await;
+        let (queue, queue_index) = if request.enqueue {
+            let mut queue = self.queue.lock().await.clone();
+            let queue_index = match queue.iter().position(|id| id == &vids[index]) {
+                Some(at) => at,
+                None => {
+                    queue.push(vids[index].clone());
+                    queue.len() - 1
+                }
+            };
+            (queue, queue_index)
+        } else {
+            (vids.clone(), index)
+        };
+        let (generation, _, _) = self
+            .set_queue_locked(queue.clone(), Some(queue_index))
+            .await;
         for (t, vid) in tracks.iter().zip(&vids) {
             self.remember_online_meta(
                 vid.clone(),
@@ -442,6 +536,8 @@ impl AppState {
             tracks,
             vids,
             index,
+            queue,
+            queue_index,
             generation,
             collection,
         }))
@@ -471,11 +567,13 @@ impl AppState {
             tracks,
             vids,
             index,
+            queue,
+            queue_index,
             generation,
             collection,
         } = prepared;
         let outcome = self
-            .play_index_for(index, Some(generation), PlayTrigger::Pick)
+            .play_index_for(queue_index, Some(generation), PlayTrigger::Pick)
             .await?;
         // Replacement itself invalidates the old collection. A stale starter has nothing to cancel.
         if !outcome.committed
@@ -501,6 +599,7 @@ impl AppState {
         };
         Ok(Some(json!({
             "ok": true, "track_id": vids[index], "track_ids": vids, "index": index,
+            "queue": queue,
             "source": source, "id": current.id, "title": current.title.clone().unwrap_or_default(),
             "artist": current.artist.clone().unwrap_or_default(), "album": current.album.clone().unwrap_or_default(),
             "duration_ms": current.duration_ms.unwrap_or(0), "cover": cover,

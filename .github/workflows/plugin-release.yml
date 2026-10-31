@@ -67,3 +67,11 @@ jobs:
       plugin-cli-version: 0.1.2
       # 插件 sidecar 是 Rust（cpal + ashpd），没有 Go 后端；空字符串让矩阵跳过 Go 安装。
       go-version: ""
+
+  # This separate component remains a review artifact. The pinned DBX reusable
+  # workflow publishes only its original five .dbxp targets; desktop installation
+  # is explicit and has its own verification/immutable release step.
+  desktop-component:
+    needs: gate
+    if: needs.gate.outputs.tag != ''
+    uses: ./.github/workflows/desktop-component.yml

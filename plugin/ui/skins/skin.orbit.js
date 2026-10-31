@@ -42,20 +42,20 @@
     if (entry) entry.click();
   }
 
-  /// 队列折叠：只在 .app 上落一个类名 + 维护按钮 aria，队列数据与播放逻辑不参与。
-  /// 收起后侧栏留一条窄轨（封面 + 纵向「播放队列 N 首」+ 展开），窄屏本来就隐藏整栏。
+  /// 队列折叠：右侧整栏完全隐藏，开关固定在中间卡片右上角。
+  /// 只在 .app 上落一个类名 + 维护按钮 aria，队列数据与播放逻辑不参与。
   function queueCollapsed() {
     var app = document.querySelector('.app');
-    return !!app && app.classList.contains('orbit-queue-collapsed');
+    return !!app && app.classList.contains('orbit-queue-hidden');
   }
 
   function setQueueCollapsed(on) {
     var app = document.querySelector('.app');
-    if (app) app.classList.toggle('orbit-queue-collapsed', !!on);
-    if (refs.queueCollapse) {
-      refs.queueCollapse.setAttribute('aria-expanded', String(!on));
-      refs.queueCollapse.title = on ? '展开播放队列' : '收起播放队列';
-      refs.queueCollapse.setAttribute('aria-label', refs.queueCollapse.title);
+    if (app) app.classList.toggle('orbit-queue-hidden', !!on);
+    if (refs.queueToggle) {
+      refs.queueToggle.setAttribute('aria-expanded', String(!on));
+      refs.queueToggle.title = on ? '展开播放队列' : '收起播放队列';
+      refs.queueToggle.setAttribute('aria-label', refs.queueToggle.title);
     }
     try { localStorage.setItem(QUEUE_COLLAPSED_KEY, on ? '1' : '0'); } catch (e) {}
   }
@@ -165,9 +165,10 @@
     });
     refs.queueList.replaceChildren(fragment);
     if (focusedIndex !== null) {
-      var next = refs.queueList.querySelector('[data-index="' + focusedIndex + '"]');
+      var next = refs.queueList.querySelector('[data-index="' + focusedIndex + '"]')
+        || refs.queueList.querySelector('.orbit-queue-row');
       if (next) next.focus({ preventScroll: true });
-      else refs.queueOpen.focus({ preventScroll: true });
+      else refs.queueToggle.focus({ preventScroll: true });
     }
   }
 
@@ -289,13 +290,14 @@
     var heading = make('div', 'orbit-queue-heading', sidebar);
     make('h2', '', heading, '播放队列');
     refs.queueCount = make('span', 'count', heading);
-    refs.queueOpen = button(heading, 'orbit-queue-open', 'iconbtn', '查看完整队列', 'expand', function () { navigate('queue'); });
-    refs.queueCollapse = button(heading, 'orbit-queue-collapse', 'iconbtn orbit-queue-collapse', '收起播放队列', 'chevron-down', function () {
+    var topRight = document.querySelector('.topbar .top-right');
+    refs.queueToggle = button(topRight || topbar, 'orbit-queue-toggle', 'iconbtn orbit-queue-toggle', '收起播放队列', 'chevron-down', function () {
       setQueueCollapsed(!queueCollapsed());
     });
-    heading.insertBefore(refs.queueCollapse, refs.queueOpen);
-    refs.queueCollapse.setAttribute('aria-controls', 'orbit-queue');
-    refs.queueCollapse.setAttribute('aria-expanded', 'true');
+    var exitButton = byId('service-exit');
+    if (topRight && exitButton && exitButton.parentNode === topRight) topRight.insertBefore(refs.queueToggle, exitButton);
+    refs.queueToggle.setAttribute('aria-controls', 'orbit-queue');
+    refs.queueToggle.setAttribute('aria-expanded', 'true');
     var current = make('div', 'orbit-current', sidebar);
     var currentArt = make('div', 'orbit-current-art', current);
     currentArt.innerHTML = icon('disc');
@@ -343,7 +345,7 @@
     listeners = [];
     if (window.SkinSettingsSheet) window.SkinSettingsSheet.unmount();
     var app = document.querySelector('.app');
-    if (app) app.classList.remove('orbit-nav-hidden', 'orbit-queue-collapsed');
+    if (app) app.classList.remove('orbit-nav-hidden', 'orbit-queue-hidden');
     resetTilt();
     moves.restore();
     built.remove();

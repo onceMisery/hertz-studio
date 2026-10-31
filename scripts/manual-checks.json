@@ -3,6 +3,34 @@
   "note": "check-* scripts that are deliberate manual/browser/diagnostic entry points. New unregistered check-* files fail scripts/check-scripts.js until they are either registered in check-frontend.js / a workflow or added here.",
   "scripts": [
     {
+      "script": "check-search-queue-browser.js",
+      "purpose": "隔离服务与受控音源响应，验证在线页、顶栏及空间搜索的单曲点播保留队列、去重和失败重试。"
+    },
+    {
+      "script": "check-dbx-desktop-settings-browser.js",
+      "purpose": "Production plugin UI in a real allow-scripts opaque iframe: all five skins' settings/reopen/desktop entries, explicit consent, independent component/authorization/source facts, partial failures, revoke races, no startup detection/polling and inline guide fallback. Controlled API replies; requires Playwright and Chrome."
+    },
+    {
+      "script": "check-desktop-management-native.js",
+      "purpose": "Isolated Windows WebView2 management v2 admission, legacy scalar compatibility, explicit DBX candidate binding failure/retry, revision guards and authenticated pipe source health. Requires a built native binary, Cargo, Playwright and no running desktop instance."
+    },
+    {
+      "script": "check-desktop-persistence-native.js",
+      "purpose": "Isolated Windows WebView2/Win32 persistence regression: failed-save lock, appearance and placement rollback, and unbound legacy preferences explicit atomic binding. Requires a built native binary, Playwright and no running desktop instance."
+    },
+    {
+      "script": "check-desktop-dbx-browser.js",
+      "purpose": "Isolated Chrome/WebGL verification of DBX read-only lyric controls, standalone recovery, monotonic request/queue/cache freshness, sequence replay and wallpaper expiry. Requires Playwright and Chrome."
+    },
+    {
+      "script": "check-desktop-lyrics-browser.js",
+      "purpose": "Desktop lyrics prototype rendering, appearance settings, bounded DOM, real timing boundaries, stale snapshots, safe text and narrow layouts."
+    },
+    {
+      "script": "check-desktop-lyrics-native.js",
+      "purpose": "Isolated Windows WebView2 lyrics: native IPC, panel expansion, persisted appearance, authenticated phrase seek/play/pause and lock/tray recovery."
+    },
+    {
       "script": "check-room-flow-browser.js",
       "purpose": "一起听原型流程：入口、发现刷新/保留旧结果、头像、申请、等待座位、邀请、重连、退出小结与窄屏。"
     },
@@ -21,6 +49,10 @@
     {
       "script": "check-dbx-sandbox-forms-browser.js",
       "purpose": "Real allow-scripts-only iframe: proves hertzHost.onSubmit keeps submit buttons and Enter alive where the browser swallows form submission, and never runs the handler twice without the sandbox."
+    },
+    {
+      "script": "check-queue-save-browser.js",
+      "purpose": "队列「存为歌单」的插件形态：自建输入框、按音源建歌单并追加全部曲目、保存后「歌单」页立即能看到新歌单。"
     },
     {
       "script": "check-desktop-settings-native.js",
@@ -169,6 +201,10 @@
     {
       "script": "check-emotion-sidebar-browser.js",
       "purpose": "侧栏 P0 浏览器检查：真实隔离服务 + 真实 Stage。"
+    },
+    {
+      "script": "check-emotion-stage-browser.js",
+      "purpose": "隔离服务回源实测情绪字体入口、七种情绪、四种渲染器及暂停/seek/关闭恢复；--serve 保留预览。"
     },
     {
       "script": "check-emotion-track-browser.js",

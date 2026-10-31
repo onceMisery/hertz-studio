@@ -48,22 +48,24 @@
 
 未引入曲库虚拟滚动、额外延迟模块加载、强制销毁隐藏渲染器或更改 Release 优化级别：这些仍需独立证明焦点/选择、首次进入时延、重开平滑度和运行速度等价，不能仅凭静态体积推断收益。
 
-## 后续待优化：Rust 源码文件体量（2026-10-22 登记，本轮不实施）
+## Rust 源码文件体量：历史快照与后续边界
 
-本轮删除浮光与潮汐皮肤后，顺手核了服务端 Rust 文件的体量。结论不是“行数多就必须重构”，而是区分**生产代码体量**和**测试体量**：
+以下保留 **2026-10-22 的历史快照**，不是当前文件行数或待办清单。当时删除浮光与潮汐皮肤后核对了服务端 Rust 文件体量；结论不是“行数多就必须重构”，而是区分**生产代码体量**和**测试体量**：
 
-| 文件 | 总行数 | `#[cfg(test)]` 前生产行数 | 主要问题 |
+| 文件 | 当时总行数 | 当时 `#[cfg(test)]` 前生产行数 | 10-22 当时观察 |
 | --- | ---: | ---: | --- |
 | [`state.rs`](../crates/hertz-studio/src/state.rs) | 6,765 | 约 4,423 | 单个 `impl AppState` 从 924 行铺到测试模块前，约 3,500 行；播放、队列、扫描、在线元数据、观众计数和发现文件共用一个类型，定位一条锁序要跨全文件读 |
 | [`ai/jobs.rs`](../crates/hertz-studio/src/ai/jobs.rs) | 7,384 | 约 2,405 | 总行数最大，但 2,406 行以后几乎全是测试；先拆测试即可，业务逻辑暂不是首要瓶颈 |
 | [`routes.rs`](../crates/hertz-studio/src/routes.rs) | 4,900 | 约 3,410 | 223 个函数但文件自述“薄 handler”；主要风险是 HTTP 与 RPC 契约漂移，不按行数优先拆 |
 | [`cpal_backend.rs`](../crates/vmusic-audio/src/cpal_backend.rs) | 4,137 | 约 2,126 | 设备回调、重采样与 DSP 耦合，拆分会影响时钟与延迟语义，优先级低于 `state.rs` |
 
-下一轮建议从 `state.rs` 开始，且只做**可逆的模块边界拆分**，不改并发语义：
+**2026-10-28 状态修订：** `ai/jobs.rs` 的测试已拆至 [`ai/jobs/tests.rs`](../crates/hertz-studio/src/ai/jobs/tests.rs)，由 `jobs.rs` 末尾的 `#[cfg(test)] mod tests;` 引入，不再列为未完成。`AppState` 已抽出 [`state/viewers.rs`](../crates/hertz-studio/src/state/viewers.rs)，其他职责仍主要集中在 `state.rs`，属于部分推进。cpal 后端已是共享 [`RenderCore`](../crates/vmusic-audio/src/render.rs) 的设备适配层，解码、重采样和 DSP 不再是上表所述的未拆旧状态；不能按旧行数重新立项。
 
-1. 先按职责抽出子模块：播放与队列、在线元数据与下载、扫描进度、观众/发现文件、DSP 与监听统计。`AppState` 继续作为字段与锁的 owner，子模块只通过明确的 `impl AppState` 分块或 helper 访问，避免把 `play_commit`、代际和 viewer 计数拆成多把隐式锁。
+后续如仍有维护痛点，只按当前职责做**可逆的模块边界拆分**，不改并发语义：
+
+1. 以已抽出的 viewers 为基础，按需选择播放与队列、在线元数据与下载、扫描进度、发现文件、DSP 与监听统计中的一个剩余职责。`AppState` 继续作为字段与锁的单一 owner，子模块只通过明确的 `impl AppState` 分块或 helper 访问，避免把 `play_commit`、代际和 viewer 计数拆成多把隐式锁，不另造业务 owner。
 2. 每次只搬一个职责，并保留现有行为测试为门槛：`cargo test --locked -p hertz-studio --lib state::tests` 与 `ai::facade::tests` 必须同轮通过；涉及播控时再跑 `check-player-races.js` 或对应浏览器检查。
-3. `ai/jobs.rs` 的测试拆成 `ai/jobs/tests.rs` 或按“受理、派发、取消、恢复、结算”分多个测试模块；拆完用 `cargo test --locked -p hertz-studio --lib ai::jobs::tests -- --test-threads=1` 证明用例数量与结果不变。
-4. `routes.rs` 暂不拆。若后续要按端点域分文件，必须保留 `router()` 单一入口和现有 `pub(crate)` 请求体复用，防止 HTTP、RPC、MCP 三套入口各自漂移。
+3. 已拆出的 AI 任务测试继续用 `cargo test --locked -p hertz-studio --lib ai::jobs::tests -- --test-threads=1` 核验；后续若调整测试分组，须证明用例数量与结果等价，不重复安排已完成的搬迁。
+4. `routes.rs` 暂不拆。若后续要按端点域分文件，必须保留 `router()` 单一入口和现有 `pub(crate)` 请求体复用，防止 HTTP、RPC、MCP 三套入口各自漂移。音频若再拆分，保留 `RenderCore` 与设备适配的现有边界，时钟、延迟与输出行为须等价。
 
 验收口径不是“每个文件都低于某个行数”，而是：一次播控或授权变更能在一个职责模块内读完主路径，锁序和完成事实仍能由现有测试证明；拆分不新增运行时分配、不改变事件顺序、不扩大公开 API。

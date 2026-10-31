@@ -212,7 +212,7 @@ pub(crate) async fn start(
         .is_some_and(|c| !vmusic_lan::lobby::valid_cover(c))
     {
         return Err(RoomError::invalid(
-            "房间封面须为 512px 以内、24 KiB 以内的有效 PNG 缩略图",
+            "房间封面须为 512px 以内、24 KiB 以内的有效 PNG 或 JPEG 图片",
         ));
     }
     vmusic_lan::members::validate_name(&host_name)

@@ -303,10 +303,10 @@
         ? '来自' + (online() ? online().sourceLabel(data.source) : data.source) + ' · 回车看全部'
         : '没有匹配的歌曲。';
       if (!tracks.length) return;
-      tracks.forEach(function (t, i) {
+      tracks.forEach(function (t) {
         var row = window.Online.row(t, function () {
           if (!t.playable) return;
-          window.Online.playAll(state.previewTracks, i);
+          window.Online.playOne(t);
           close();
         });
         row.classList.add('ts-row');
@@ -400,7 +400,7 @@
         group.tracks.forEach(function (t) {
           var row = o.row(t, function () {
             if (!t.playable) return;
-            o.playAll(group.tracks, group.tracks.indexOf(t)); close();
+            o.playOne(t); close();
           });
           row.classList.add('ts-row'); group.container.appendChild(row);
         });

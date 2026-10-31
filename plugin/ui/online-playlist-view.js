@@ -413,11 +413,20 @@
     var acts = document.createElement('div');
     acts.className = 'opl-info-acts';
     var view = visibleTracks();
+    // 房间进行中本地播放会被服务端拒绝：这一层的「播放」改成点播进共同队列，
+    // 本地队列按钮与单独的「加入一起听」都随之隐藏，只留一个入口。
+    var inRoom = !!(window.Online && typeof window.Online.roomActive === 'function'
+      && window.Online.roomActive());
     var play = actionButton(playLabel(view), 'primary', function () {
       if (!view.length) return;
       // F2 整单播放：歌单未取全且未筛选时发集合意图，首页之后由服务端续载
       // ——只有这条路径上的「播放全部」才真的承诺了全部。专辑/歌手的翻页
       // 接口不同（more 布尔、无服务端续载），保持只播已加载。
+      if (window.Online && typeof window.Online.roomActive === 'function'
+          && window.Online.roomActive()) {
+        window.Online.playAll(view, 0, view);
+        return;
+      }
       if (playSupportsCollection()) {
         window.Online.playCollection(state.source, state.subject.id);
         return;
@@ -430,8 +439,9 @@
     });
     play.disabled = add.disabled = !view.length;
     acts.appendChild(play);
-    acts.appendChild(add);
-    var together = window.Online && window.Online.roomButton && window.Online.roomButton(view, '已加载歌曲加入一起听');
+    if (!inRoom) acts.appendChild(add);
+    var together = !inRoom && window.Online && window.Online.roomButton
+      && window.Online.roomButton(view, '已加载歌曲加入一起听');
     if (together) acts.appendChild(together);
     box.appendChild(acts);
     box.appendChild(scopeNote());
@@ -462,6 +472,13 @@
   }
 
   function playLabel(view) {
+    if (window.Online && typeof window.Online.roomActive === 'function'
+        && window.Online.roomActive()) {
+      if (state.trackQuery.trim()) return '点播 ' + view.length + ' 首';
+      return collectionIsPartial()
+        ? '点播已加载 ' + view.length + ' 首'
+        : '点播全部 ' + view.length + ' 首';
+    }
     if (state.trackQuery.trim()) return '播放 ' + view.length + ' 首';
     // F2：歌单有服务端整单续载时，「全部」由后台按页兑现，可以如实说全部；
     // 其余集合（专辑/歌手）仍只承诺已加载的部分。

@@ -8,9 +8,9 @@
 本地优先：播放、曲库、歌词、歌单、设置全部在你自己的机器上完成，断网也能用。
 在线曲库浏览是显式启用的附加能力，由本机服务代理解析，不上传你的曲库、收听记录或任何个人数据。
 
-从 **0.2.1** 起，同一主分支构建两个发行版并同步更新：默认 **Standard** 保留本地、WebDAV、
-Jamendo、ccMixter 和公开播客；显式开启 `full` feature 的 **Full** 额外包含六个平台音源。
-两版使用不同插件 ID 和默认数据目录，详见[双版本构建与发布](docs/editions.md)。
+从 **0.2.1** 起，同一主分支构建两个发行版并同步更新：**Standard** 保留本地、WebDAV、
+Jamendo、ccMixter 和公开播客，并作为 DBX 商店候选；**Full** 额外包含六个平台音源，是独立发布包
+使用的版本。两版使用不同插件 ID 和默认数据目录，详见[双版本构建与发布](docs/editions.md)。
 
 ![星轨皮肤：正在播放、立体唱片与常驻队列](docs/images/ui-library.png)
 
@@ -206,13 +206,15 @@ Jamendo、ccMixter 和公开播客；显式开启 `full` feature 的 **Full** �
 # 发布构建：Rust 1.88+、Node.js 22+（开发 cargo run 不需要 Node.js）
 # 安装固定版本的发布压缩工具；仅修改暂存产物，保留 JS/CSS 开发源码可读
 npm ci --prefix tools/space-stage --no-audit --no-fund
-cargo build --release -p hertz-studio
+# 独立形态使用 Full（含六个平台音源）；去掉 --features full 得到 Standard，
+# 它只用于 DBX 商店候选与本地 Standard 验证。
+cargo build --release -p hertz-studio --features full
 
 # 运行独立形态（Windows 下产物是 target\release\hertz-studio.exe）
 ./target/release/hertz-studio
 
 # 或者一步到位，并自动打开浏览器
-cargo run --release -- --open
+cargo run --release --features full -- --open
 ```
 
 发布构建在构建期压缩 JS/CSS 并内嵌 gzip；浏览器直接接收预压缩资源，identity 客户端按资源首次访问
@@ -220,8 +222,8 @@ cargo run --release -- --open
 `node tools/build-stages.mjs`，并运行 `node scripts/check-release-ui.js` 校验哈希与加载顺序。
 诊断 HTML 保留在源码目录，发布仅带 `index.html` 与 `overlay.html`。
 
-启动后终端会打印界面入口（Standard 默认 `http://127.0.0.1:7635/`，Full 默认端口 `7634`，后面跟着
-一张一次性入口票据）、健康检查地址，以及服务发现文件的位置。
+启动后终端会打印界面入口（独立发布包为 Full，默认端口 `7634`；本地 Standard 构建为 `7635`，
+后面跟着一张一次性入口票据）、健康检查地址，以及服务发现文件的位置。
 
 在 UI 左侧填入音乐目录 → 点「扫描」→ 点击曲目即可播放。要停掉服务：终端里 `Ctrl-C`，
 或者用界面顶栏那颗电源钮。
@@ -233,7 +235,7 @@ cargo run --release -- --open
 | 参数               | 说明                             |
 | ---------------- | ------------------------------ |
 | `--bind ADDR`    | 监听地址，默认 `127.0.0.1`          |
-| `--port PORT`    | 端口，`0` 表示随机空闲端口，Standard 默认 `7635`，Full 默认 `7634` |
+| `--port PORT`    | 端口，`0` 表示随机空闲端口；默认 Full `7634`，Standard 构建 `7635` |
 | `--data-dir DIR` | 数据库、封面缓存、令牌的存放位置       |
 | `--open`         | 启动后打开浏览器（走系统 `cmd`，只在 Windows 生效） |
 | `--mcp-stdio`    | 以 MCP stdio 适配进程启动，需配 `--grant` |
@@ -330,7 +332,7 @@ REST 路由清单不写在 README 里，见 [docs/api-routes.md](docs/api-routes
 Standard 接入 ccMixter、Jamendo 两个开放曲库及公开 RSS 播客。Jamendo 需在 devportal 免费注册
 client_id，在「设置 → 在线音源」保存后才启用，未配置时自动隐藏。
 
-Full 额外接入网易云音乐、QQ 音乐、酷狗音乐、酷我音乐、汽水音乐和咪咕音乐。以下平台协议与
+独立发布包使用 Full；它在上述开放曲库之外额外接入网易云音乐、QQ 音乐、酷狗音乐、酷我音乐、汽水音乐和咪咕音乐。以下平台协议与
 账号能力仅编译进 Full，Standard 不包含相应协议实现、请求签名、平台登录脚本和图标。Full 对接使用：
 平台**网页端 / 自家客户端公开使用的端点**（含这些端点要求的请求签名，如酷狗的 MD5 签名、
 QQ 的搜索签名与取流凭据、酷我移动端的变形 DES 载荷），和**用户自己账号的凭据**
@@ -564,10 +566,10 @@ pwsh -File scripts/smoke.ps1 7899 # Windows
 | S1 重采样 | 固定参数流式 sinc 已实现并有离线验证；真实声卡、长时间听测与其它 OS 待验 | [audio-resampling.md](docs/audio-resampling.md) |
 | 音频格式与错误边界 | 13 种扩展名，四件不同的事（检查 / 标签 / 解码 / 出声）写明并如实上报 | [audio-format-support.md](docs/audio-format-support.md) |
 | S2–S4 音频二期 | 升采样、参数 EQ、卷积 IR、EBU R128、真峰值限幅、噪声整形、交叉馈送、饱和，以及 Windows WASAPI 独占输出——排期在 R0–R6 之外 | 待音频专项重新定序 |
-| W0–W3 桌面壁纸 | W0 稳定通过；W1-A 相机 registry/只读快照契约已实现；W1-B 首片已接 WorkerW 目标屏 surface、混合 DPI（第二屏 96/144 实测）、快照+事件 feed、托盘、设置页、15 秒预览租约、Explorer 重启恢复、主应用管理通道与多 profile/发行版切换；W3 单屏拓扑重排、WebView 失联恢复与诊断投影已接；W1-C 安装升级验收与多屏同时运行未做 | [desktop-wallpaper.md](docs/desktop-wallpaper.md) |
-| L0–L3 桌面歌词 | **L1 首版已实现**：服务端只读快照/文档桥、Windows 透明置顶与锁定穿透、托盘恢复、播放器启动与解锁定位、本机管理通道；L1-C 发布验收与 DBX 入口未做 | [desktop-lyrics.md](docs/desktop-lyrics.md) |
+| P0–P3 壁纸引擎 | 已有九场景、单目标屏、预览、自启与分项恢复证据；后续设计覆盖本地作品库与多屏、可扩展资源/组合编辑、AI 生成与受控切换、隔离网页及社区分发，约束资源生命周期、性能预算与生成授权；新增阶段尚未交付，W0/W1 历史证据保留 | [desktop-wallpaper.md](docs/desktop-wallpaper.md) |
+| L0–L3 桌面歌词 | **L1 首版已实现**：服务端只读快照/文档桥、Windows 透明置顶与锁定穿透、托盘恢复、播放器启动与解锁定位、本机管理通道；DBX 候选入口已实现，L1-C 与 DBX D3 完整发布验收待完成 | [desktop-lyrics.md](docs/desktop-lyrics.md) |
 | 桌面公共契约与原生验证 | 单实例、来源切换、配置/应用状态、IPC、自启与部署统一设计；L0/W0 已有实机探针结果，L1 首版按本契约落地；本机管理通道与来源切换已通，发布验收仍未完成 | [共享宿主](docs/desktop-host.md) · [原生验证计划](docs/plans/2026-10-23-desktop-native-validation.md) |
-| DBX 桌面接入 | 后续设计草案已补齐：只读命名管道、来源身份与配置迁移、统一管理、配套组件分发及 D0–D3 验收；尚未实施 | [DBX 接入方案](docs/desktop-dbx.md) |
+| DBX 桌面接入 | D0–D2 已实现并通过独立审查；D3a 两版同源配套候选已准备。最低 0.6.35 / 当前 0.6.47 两版插件的无组件基础流程、真实定时、关闭重开、原生呈现和正常退出通过，当前 Full 另验真实在线取词；D3b 的物理媒体键、跨用户/会话、桌面恢复与长稳等仍待验。组件由用户独立启动，DBX 单独使用无行为变化为硬约束 | [DBX 接入方案](docs/desktop-dbx.md) |
 | LAN-L 局域网一起听 | 房主统一渲染、接收端按设备时钟同步；含受限配对/撤权、旧播控入口模式门禁，以及互动弹幕的独立有界存储。**设计提案待评审、尚未实施**，不依赖桌面专项 | [lan-listening.md](docs/lan-listening.md) |
 | 创意舞台二期（P8） | 基频轨迹已能本地分析与只读查看；工程、模板、分享码、视频导出已落地，人工视觉与音乐质量验收未做 | [pitch-track.md](docs/pitch-track.md) · [stage-projects.md](docs/stage-projects.md) · [stage-templates.md](docs/stage-templates.md) · [orchestration-art.md](docs/orchestration-art.md) · [video-export.md](docs/video-export.md) |
 | 星座场景视觉 | 逐座造型、配色与动效按文档调过一轮，可拖拽环绕、滚轮缩放、双击复位 | [zodiac-visual-tuning.md](docs/zodiac-visual-tuning.md) |

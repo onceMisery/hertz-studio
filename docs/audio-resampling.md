@@ -4,7 +4,7 @@
 
 ## 接线和依赖
 
-`vmusic-audio::resample::Converter` 替换原 cpal 解码线程中的线性插值。顺序保持为：源域解码 → 重采样/声道映射 → 设备域队列与 crossfade → 既有 EQ/增益/软限幅 → float32 输出。每个 deck 独立持有转换历史，音频 actor 和输出回调继续使用原控制归属。
+`vmusic-audio::resample::Converter` 已替换线性插值，当前接线位于共享 `RenderCore` 的解码线程，cpal 后端负责设备适配。顺序保持为：源域解码 → 重采样/声道映射 → 设备域队列与 crossfade → 既有 EQ/增益/软限幅 → float32 输出。每个 deck 独立持有转换历史，音频 actor 和输出回调继续使用原控制归属。
 
 播放特性固定使用 MIT 的 `rubato = 0.16.2`，关闭默认 FFT 特性；锁文件新增该包，复用既有数值依赖。此处选择已核验接口和 MSRV 的固定版本，不跟随最新版本。关闭 `playback` 时转换模块与 Rubato 均不编译；Standard 与 Full 使用同一实现。
 

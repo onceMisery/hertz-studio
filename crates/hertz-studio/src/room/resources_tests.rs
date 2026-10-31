@@ -1225,3 +1225,19 @@ async fn structured_song_chat_is_durable_deduplicated_and_scrubs_revoked_resourc
     restarted.shutdown().await;
     f.finish().await;
 }
+
+#[test]
+fn netease_room_cover_requests_a_bounded_variant() {
+    assert_eq!(
+        room_cover_url("https://p1.music.126.net/abc.jpg"),
+        "https://p1.music.126.net/abc.jpg?param=600y600"
+    );
+    assert_eq!(
+        room_cover_url("https://p1.music.126.net/abc.jpg?imageView=1"),
+        "https://p1.music.126.net/abc.jpg?imageView=1"
+    );
+    assert_eq!(
+        room_cover_url("https://img2.kuwo.cn/star/albumcover/500/a.jpg"),
+        "https://img2.kuwo.cn/star/albumcover/500/a.jpg"
+    );
+}

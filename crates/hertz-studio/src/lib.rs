@@ -21,6 +21,8 @@ pub mod collection;
 pub mod complete;
 pub mod config;
 pub mod daily;
+pub(crate) mod desktop;
+pub mod desktop_bridge;
 pub(crate) mod desktop_control;
 pub(crate) mod desktop_lyrics;
 pub mod diag;

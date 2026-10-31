@@ -1,74 +1,35 @@
 <div id="shell">
-  <div id="toolbar" aria-label="桌面歌词工具">
-    <button id="drag" title="按住拖动歌词窗口" aria-label="拖动歌词窗口">⠿</button>
-    <button id="lock" data-cmd="lock" title="锁定后鼠标可穿透；在 Hertz 托盘菜单中解锁">锁定</button>
-    <button id="style-open" aria-haspopup="dialog" aria-expanded="false" aria-controls="options-panel" title="在歌词下方调整显示与外观">样式</button>
-    <button data-cmd="hide" title="隐藏歌词，可从 Hertz 托盘菜单找回">隐藏</button>
+  <div id="toolbar" role="toolbar" aria-label="桌面歌词工具">
+    <button id="drag" class="icon-button grip" title="按住拖动歌词窗口" aria-label="拖动歌词窗口"><svg viewBox="0 0 24 24"><path d="M9 6h.01M15 6h.01M9 12h.01M15 12h.01M9 18h.01M15 18h.01" stroke-width="3"/></svg></button>
+    <span class="divider"></span>
+    <button id="previous" class="icon-button" title="上一句（←）" aria-label="上一句"><svg viewBox="0 0 24 24"><path d="M18 5.5v13L9 12Z"/><path d="M5 5.5v13"/></svg></button>
+    <button id="play" class="icon-button" title="播放或暂停（空格）" aria-label="播放"><svg viewBox="0 0 24 24"><path class="play-icon" d="M8.5 5.6v12.8L19 12Z"/><path class="pause-icon" d="M9 6v12M15 6v12" stroke-width="3"/></svg></button>
+    <button id="next" class="icon-button" title="下一句（→）" aria-label="下一句"><svg viewBox="0 0 24 24"><path d="M6 5.5v13L15 12Z"/><path d="M19 5.5v13"/></svg></button>
+    <span class="divider"></span>
+    <button id="lock" class="icon-button" data-cmd="lock" title="锁定并穿透鼠标；从 Hertz 托盘解锁" aria-label="锁定并开启鼠标穿透"><svg viewBox="0 0 24 24"><rect x="5" y="10.5" width="14" height="9.5" rx="2.4"/><path d="M8.2 10.5V7.8a3.8 3.8 0 0 1 7.6 0v2.7"/></svg></button>
+    <button id="style-open" class="icon-button" aria-haspopup="dialog" aria-expanded="false" aria-controls="options-panel" title="歌词设置" aria-label="歌词设置"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.1"/><path d="M12 3.2v2.4M12 18.4v2.4M4.8 7.8l2 1.2M17.2 15l2 1.2M4.8 16.2l2-1.2M17.2 9l2-1.2"/></svg></button>
+    <button class="icon-button" data-cmd="hide" title="隐藏歌词（Esc）；从 Hertz 托盘恢复" aria-label="隐藏歌词"><svg viewBox="0 0 24 24"><path d="m6.4 6.4 11.2 11.2M17.6 6.4 6.4 17.6"/></svg></button>
   </div>
-  <div id="stage">
-    <div id="current" class="line current"></div>
-    <div id="secondary" class="line secondary"></div>
-    <div id="notice" class="notice" role="status" aria-live="polite"></div>
-  </div>
-  <section id="options-panel" role="dialog" aria-label="歌词样式" tabindex="-1" hidden>
-    <div class="options-row">
-      <div class="option-cell">
-        <span class="option-label">布局</span>
-        <div class="segmented" role="group" aria-label="歌词行数">
-          <button type="button" data-layout="single" aria-pressed="false">单行</button>
-          <button type="button" data-layout="double" aria-pressed="false">双行</button>
-        </div>
-      </div>
-      <div class="option-cell" id="secondary-cell">
-        <span class="option-label">次行</span>
-        <div class="segmented" role="group" aria-label="次行内容">
-          <button type="button" data-secondary="next" aria-pressed="false">下一句</button>
-          <button type="button" data-secondary="translation" aria-pressed="false">译文</button>
-          <button type="button" data-secondary="romanization" aria-pressed="false">罗马音</button>
-        </div>
-      </div>
-      <div class="option-cell">
-        <span class="option-label">字号</span>
-        <div class="stepper">
-          <button type="button" data-cmd="font-down" aria-label="缩小字号">A−</button>
-          <output id="font-value"></output>
-          <button type="button" data-cmd="font-up" aria-label="放大字号">A+</button>
-        </div>
-      </div>
-      <div class="option-cell">
-        <span class="option-label">颜色</span>
-        <div class="colors">
-          <label class="color-field" title="已唱颜色">
-            <input id="sung-color" type="color" data-color="sung" aria-label="已唱颜色">
-            <span>已唱</span>
-          </label>
-          <label class="color-field" title="未唱颜色">
-            <input id="unsung-color" type="color" data-color="unsung" aria-label="未唱颜色">
-            <span>未唱</span>
-          </label>
-        </div>
-      </div>
-    </div>
-    <div class="options-row">
-      <div class="option-cell">
-        <span class="option-label">不透明度</span>
-        <div class="stepper">
-          <button type="button" data-cmd="opacity-down" aria-label="降低不透明度">−</button>
-          <output id="opacity-value"></output>
-          <button type="button" data-cmd="opacity-up" aria-label="提高不透明度">+</button>
-        </div>
-      </div>
-      <div class="option-cell">
-        <span class="option-label">窗口宽度</span>
-        <div class="stepper">
-          <button type="button" data-cmd="width-down" aria-label="缩窄歌词窗口">窄</button>
-          <button type="button" data-cmd="width-up" aria-label="加宽歌词窗口">宽</button>
-        </div>
-      </div>
-      <div class="option-actions">
-        <button type="button" data-cmd="quit" class="option-quit" title="退出桌面歌词，可从托盘重新启用">退出桌面歌词</button>
-        <button id="options-done" class="options-done" title="收起样式设置">完成</button>
-      </div>
-    </div>
+  <main id="stage" aria-label="同步歌词">
+    <div class="pane" aria-hidden="true"></div>
+    <div id="viewport"><div id="lyric-column"></div></div>
+    <div id="notice" role="status" aria-live="polite"></div>
+  </main>
+  <section id="options-panel" role="dialog" aria-label="歌词设置" tabindex="-1" hidden>
+    <div class="panel-heading"><span>歌词设置</span><button id="options-done" aria-label="收起歌词设置">完成</button></div>
+    <div class="option-row"><span>主题<small>自动跟随系统明暗</small></span><div class="segmented" role="group" aria-label="主题"><button data-setting="theme" data-value="auto">自动</button><button data-setting="theme" data-value="light">浅色</button><button data-setting="theme" data-value="dark">深色</button></div></div>
+    <div class="option-row"><span>背景材质</span><div class="segmented" role="group" aria-label="背景材质"><button data-setting="surface" data-value="bare">无边框</button><button data-setting="surface" data-value="glass">毛玻璃</button><button data-setting="surface" data-value="solid">纯色</button></div></div>
+    <div class="option-row"><span>显示行数</span><div class="segmented" role="group" aria-label="歌词行数"><button data-setting="layout" data-value="single">单行</button><button data-setting="layout" data-value="double">两行</button><button data-setting="layout" data-value="triple">三行</button></div></div>
+    <div class="option-row"><span>对齐</span><div class="segmented" role="group" aria-label="对齐"><button data-setting="align" data-value="left">左</button><button data-setting="align" data-value="center">居中</button><button data-setting="align" data-value="right">右</button></div></div>
+    <div class="option-row"><span>双语歌词<small>在原文下方显示译文</small></span><button class="switch" data-toggle="bilingual" aria-label="双语歌词" aria-pressed="true"></button></div>
+    <div class="option-row" id="secondary-cell"><span>辅助文本</span><div class="segmented" role="group" aria-label="辅助文本"><button data-setting="secondary" data-value="next">译文</button><button data-setting="secondary" data-value="romanization">罗马音</button></div></div>
+    <div class="option-row"><span>逐字高亮<small>跟随歌曲的真实词时间</small></span><button class="switch" data-toggle="karaoke" aria-label="逐字高亮" aria-pressed="true"></button></div>
+    <div class="option-row"><span>可读性增强<small>增强文字阴影与轮廓</small></span><button class="switch" data-toggle="readabilityBoost" aria-label="可读性增强" aria-pressed="false"></button></div>
+    <div class="option-row"><label for="font-size">字号 <output id="font-value"></output></label><input id="font-size" type="range" min="18" max="72" step="1" aria-label="字号"></div>
+    <div class="option-row"><label for="opacity">窗口不透明度 <output id="opacity-value"></output></label><input id="opacity" type="range" min="25" max="100" step="1" aria-label="窗口不透明度"></div>
+    <div class="option-row colors"><span>文字颜色</span><label title="已唱颜色"><input id="sung-color" data-color="sung" type="color" aria-label="已唱颜色">已唱</label><label title="未唱颜色"><input id="unsung-color" data-color="unsung" type="color" aria-label="未唱颜色">未唱</label></div>
+    <div class="option-row"><span>窗口宽度</span><div class="segmented"><button data-cmd="width-down" aria-label="缩窄歌词窗口">−</button><button data-cmd="width-up" aria-label="加宽歌词窗口">＋</button></div></div>
+    <p class="panel-foot">空格 播放/暂停 · ← → 切句 · 托盘 解锁/恢复</p>
   </section>
+  <div id="feedback" role="status" aria-live="polite" hidden></div>
 </div>

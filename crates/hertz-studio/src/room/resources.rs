@@ -479,12 +479,13 @@ impl SharedLibrary {
                     )
                 }
                 ResourceKind::Cover => {
-                    let url = crate::routes::public_https_url(
+                    let cover = room_cover_url(
                         song.cover
                             .as_deref()
                             .ok_or_else(|| RoomError::invalid("歌曲没有封面"))?,
-                    )
-                    .map_err(super::online_source::error)?;
+                    );
+                    let url = crate::routes::public_https_url(&cover)
+                        .map_err(super::online_source::error)?;
                     let (bytes, mime) = crate::routes::fetch_remote_image(&url)
                         .await
                         .map_err(super::online_source::error)?;
@@ -738,6 +739,17 @@ async fn read_bounded(path: &Path) -> RoomResult<Vec<u8>> {
         return Err(RoomError::invalid("资源超过2MiB"));
     }
     Ok(bytes)
+}
+
+/// 歌曲封面走房间资源通道（单份上限 2 MiB）。网易云列表给的是原图，实测单张
+/// 可达 4 MB；房间展示不需要原图，按前端 `rowCoverUrl` 的同一规则换 600px 档。
+/// 其他音源给的已是列表小图，原样使用；带查询串的地址不猜测参数语义。
+fn room_cover_url(raw: &str) -> String {
+    if raw.contains(".music.126.net/") && !raw.contains('?') {
+        format!("{raw}?param=600y600")
+    } else {
+        raw.to_string()
+    }
 }
 
 #[cfg(test)]

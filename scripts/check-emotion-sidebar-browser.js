@@ -247,7 +247,7 @@ async function main() {
     await page.waitForTimeout(150);
     await page.selectOption('#set-emotion-mode', 'manual');
     await page.waitForTimeout(300);
-    await page.selectOption('#set-emotion-preview', 'sorrow');
+    await page.click('[data-emotion-preview="sorrow"]');
     await page.waitForTimeout(400);
     await page.evaluate(() => { const b = document.querySelector('.skset-modal-close'); if (b) b.click(); });
     await page.waitForTimeout(200);

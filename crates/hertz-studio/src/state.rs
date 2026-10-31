@@ -771,6 +771,7 @@ pub struct AppState {
     pub(crate) room: crate::room::RoomManager,
     pub config: Arc<Config>,
     pub data_dir: PathBuf,
+    pub(crate) desktop: std::sync::OnceLock<Arc<crate::desktop::Desktop>>,
     pub token: String,
     /// 浮层只读钥匙（见 `main.rs` 的 `load_or_create_overlay_key`）。与 token
     /// 分开是因为它会被粘进 OBS 的配置：权限只到「GET + 浮层歌词 + 曲目封面」。
@@ -3851,8 +3852,27 @@ impl AppState {
     /// 「lock → 顶掉在途预取 → actor 命令 → 提交收口」的编排只存在于这几个
     /// `*_control` 方法里，HTTP 与 RPC 各自只做取参与应答整形。
     pub(crate) async fn pause_control(&self) -> Result<ControlOutcome, vmusic_core::CoreError> {
+        self.pause_control_if(None).await
+    }
+
+    fn playback_identity_matches(&self, expected: Option<(&str, u64)>) -> bool {
+        expected.is_none_or(|(track, generation)| {
+            let snapshot = self.audio.snapshot();
+            snapshot.track_id.as_deref() == Some(track) && snapshot.generation == generation
+        })
+    }
+
+    pub(crate) async fn pause_control_if(
+        &self,
+        expected: Option<(&str, u64)>,
+    ) -> Result<ControlOutcome, vmusic_core::CoreError> {
         let commit = self.play_commit.lock().await;
         self.require_local_playback()?;
+        if !self.playback_identity_matches(expected) {
+            return Ok(ControlOutcome::Superseded {
+                generation: self.play_generation.load(Ordering::Relaxed),
+            });
+        }
         self.cancel_prepared_playback().await;
         self.play_generation.fetch_add(1, Ordering::Relaxed);
         let outcome = self.pause_audio_locked().await?;
@@ -3894,7 +3914,20 @@ impl AppState {
         &self,
         strict: bool,
     ) -> Result<ControlOutcome, vmusic_core::CoreError> {
+        self.resume_control_if(strict, None).await
+    }
+
+    pub(crate) async fn resume_control_if(
+        &self,
+        strict: bool,
+        expected: Option<(&str, u64)>,
+    ) -> Result<ControlOutcome, vmusic_core::CoreError> {
         self.require_local_playback()?;
+        if !self.playback_identity_matches(expected) {
+            return Ok(ControlOutcome::Superseded {
+                generation: self.play_generation.load(Ordering::Relaxed),
+            });
+        }
         if self.audio.snapshot().track_id.is_none() {
             if strict {
                 crate::diaglog!(
@@ -3927,6 +3960,11 @@ impl AppState {
         }
         let commit = self.play_commit.lock().await;
         self.require_local_playback()?;
+        if !self.playback_identity_matches(expected) {
+            return Ok(ControlOutcome::Superseded {
+                generation: self.play_generation.load(Ordering::Relaxed),
+            });
+        }
         self.cancel_prepared_playback().await;
         self.play_generation.fetch_add(1, Ordering::Relaxed);
         self.audio
@@ -3945,8 +3983,21 @@ impl AppState {
         &self,
         position_ms: u64,
     ) -> Result<ControlOutcome, vmusic_core::CoreError> {
+        self.seek_control_if(position_ms, None).await
+    }
+
+    pub(crate) async fn seek_control_if(
+        &self,
+        position_ms: u64,
+        expected: Option<(&str, u64)>,
+    ) -> Result<ControlOutcome, vmusic_core::CoreError> {
         let commit = self.play_commit.lock().await;
         self.require_local_playback()?;
+        if !self.playback_identity_matches(expected) {
+            return Ok(ControlOutcome::Superseded {
+                generation: self.play_generation.load(Ordering::Relaxed),
+            });
+        }
         self.cancel_prepared_playback().await;
         self.play_generation.fetch_add(1, Ordering::Relaxed);
         self.audio
@@ -4396,7 +4447,11 @@ pub fn spawn_event_pump(state: Arc<AppState>) {
                     state.observe_listen(&snap).await;
                 }
                 AudioEvent::Spectrum(bands) => {
-                    state.wallpaper.observe_spectrum(&bands);
+                    // Desktop freshness follows actual PCM progress; the
+                    // original spectrum broadcast keeps its existing behavior.
+                    state
+                        .wallpaper
+                        .observe_spectrum(&bands, &state.audio.snapshot());
                     state.publish(WsEvent::Spectrum { bands });
                 }
                 AudioEvent::Ended {
@@ -4534,6 +4589,7 @@ pub(crate) mod tests {
             room: Default::default(),
             config: Arc::new(Config::default()),
             data_dir: PathBuf::new(),
+            desktop: Default::default(),
             token: String::new(),
             overlay_key: String::new(),
             desktop_lyrics_key: String::new(),
@@ -6890,6 +6946,41 @@ pub(crate) mod tests {
             panic!("seek 必须 Applied");
         };
         assert_eq!(generation, before + 2);
+        state.audio.shutdown();
+        handle.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn guarded_lyric_control_rechecks_identity_after_waiting_for_commit() {
+        let (state, handle) = playback_state().await;
+        let state = Arc::new(state);
+        state
+            .audio
+            .load("first.wav", Some("first".into()))
+            .await
+            .unwrap();
+        let generation = state.audio.snapshot().generation;
+        let commit = state.play_commit.lock().await;
+        let waiting = state.clone();
+        let task = tokio::spawn(async move {
+            waiting
+                .seek_control_if(1500, Some(("first", generation)))
+                .await
+                .unwrap()
+        });
+        tokio::task::yield_now().await;
+        state
+            .audio
+            .load("second.wav", Some("second".into()))
+            .await
+            .unwrap();
+        drop(commit);
+        assert!(matches!(
+            task.await.unwrap(),
+            ControlOutcome::Superseded { .. }
+        ));
+        assert_eq!(state.audio.snapshot().track_id.as_deref(), Some("second"));
+        assert_eq!(state.audio.snapshot().position_ms, 0);
         state.audio.shutdown();
         handle.join().unwrap();
     }

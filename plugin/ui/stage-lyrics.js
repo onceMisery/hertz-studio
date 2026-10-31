@@ -57,6 +57,7 @@
         el.removeAttribute('data-emo-active');
         el.removeAttribute('data-emotion');
         el.style.removeProperty('font-weight');
+        el.style.removeProperty('font-family');
         el.style.removeProperty('letter-spacing');
         el.style.removeProperty('--emo-accent-weight');
         row.nodes.forEach(function (node) { node.removeAttribute('data-emo-accent'); });
@@ -70,6 +71,7 @@
       el.style.fontWeight = String(emotion.type && emotion.type.weight || 600);
       el.style.letterSpacing = emotion.type && emotion.type.tracking ? emotion.type.tracking : '';
       var E = global.LyricEmotion;
+      el.style.fontFamily = E.fontFamily(emotion, 'inherit');
       if (E && E.accentFor && E.accentWeight) {
         el.style.setProperty('--emo-accent-weight', String(E.accentWeight(
           emotion.type && emotion.type.weight || 600, emotion.intensity)));
@@ -95,16 +97,21 @@
     function applyEmotionField(row, emotion) {
       if (!row.nodes.length) return;
       if (!emotion || !global.LyricEmotionField) {
-        row.nodes.forEach(function (node) { node.style.removeProperty('--emo-dy'); });
+        row.nodes.forEach(function (node) {
+          ['--emo-x', '--emo-dy', '--emo-rotate', '--emo-scale-x', '--emo-scale-y'].forEach(function (name) { node.style.removeProperty(name); });
+          if (global.LyricEmotion) global.LyricEmotion.clearGlyphEffects(node);
+        });
         return;
       }
       var px = parseFloat(getComputedStyle(row.el).fontSize) || 48;
+      row.emotionPx = px;
       row.nodes.forEach(function (node, i) {
         var u = (i + 0.5) / row.nodes.length;
         var b = global.LyricEmotionField.evaluate(
           emotion.profile, u, emotion.intensity, px, 0, 0
         ).b;
         node.style.setProperty('--emo-dy', b.toFixed(3) + 'px');
+        global.LyricEmotion.prepareGlyphEffects(node, emotion, i, row.nodes.length);
       });
     }
 
@@ -234,6 +241,8 @@
         row.nodes.forEach(function (node, i) {
           var token = row.tokens[i];
           var p = Math.max(0, Math.min(1, (position - token.start_ms) / Math.max(1, (token.end_ms || token.start_ms + 400) - token.start_ms)));
+          if (row.emotion) global.LyricEmotion.applyWordMotion(node, row.emotion, (i + 0.5) / row.nodes.length,
+            position / 1000, row.emotionPx, Math.sin(p * Math.PI), reduced || document.body.matches('[data-rm~="lyrics"]'));
           // 星火（spark）布局按这个词级开关逐字点亮，其余布局不消费 is-lit。
           // 必须放在 _fill 早退之前：词起点附近 pct 常落在同一档，早退会吞掉翻转。
           var lit = p > 0;

@@ -28,7 +28,7 @@
 
     // animation-play-state 不继承：只停 root 的呼吸会让行入场、逐字辉光继续走墙钟。
     // 只在暂停边沿/节点状态变化时读取动画集合，不在静止帧里扫描 DOM。
-    function syncAnimationPlayback() {
+    function syncAnimationPlayback(settleTransitions) {
       if (!root.getAnimations) return;
       if (paused) {
         var animations = root.getAnimations({ subtree: true });
@@ -37,6 +37,13 @@
           var target = animation.effect && animation.effect.target;
           // root 的跨渲染器交接归 stage3d；这里仅持有流光自身的呼吸与词/行动画。
           if (target === root && animation.animationName !== 'fl-breath') return;
+          // 暂停中重排的新节点必须落在当前词态，不能冻结在透明的 waiting 起点：
+          // 新行自己的入场动画与全树过渡都直接落到终点，旧行退场残影仍按暂停冻结。
+          if (settleTransitions && animation.effect &&
+              animation.effect.getComputedTiming().iterations !== Infinity &&
+              (animation.transitionProperty || (lineEl && target && lineEl.contains(target)))) {
+            animation.finish(); return;
+          }
           if (animation.playState === 'running' && frozenAnimations.indexOf(animation) < 0) {
             animation.pause(); frozenAnimations.push(animation);
           }
@@ -71,7 +78,8 @@
       if (!measureCanvas) measureCanvas = document.createElement('canvas');
       var ctx = measureCanvas.getContext('2d');
       var weight = emotionState && emotionState.type && emotionState.type.weight || 700;
-      ctx.font = weight + ' ' + px + 'px ' + StanzaTheme.fontStack(theme.fontStyle);
+      var family = StanzaTheme.fontStack(theme.fontStyle);
+      ctx.font = weight + ' ' + px + 'px ' + (emotionState ? global.LyricEmotion.fontFamily(emotionState, family) : family);
       var width = ctx.measureText(text).width;
       var tracking = emotionState && emotionState.type && emotionState.type.tracking;
       if (tracking && /em$/.test(tracking)) {
@@ -189,53 +197,13 @@
           emotionState.profile, u, emotionState.intensity, px, 0, 0
         ).b;
         word.style.setProperty('--emo-dy', b.toFixed(3) + 'px');
+        word._emotionU = u;
+        word._emotionBaseline = b;
         acc += word._advance || 0;
       }
     }
 
     function rand(seed, off) { return U.srand(seed + off); }
-
-    var EMO_ENTER_MS = { bounce: 620, sink: 900, impact: 180, drift: 420, float: 560 };
-
-    function prepareEmotionWordMotion(words, emotion, line) {
-      if (!emotion || !words.length) return;
-      var arch = emotion.archetype || 'drift';
-      var target = EMO_ENTER_MS[arch] || 420;
-      var now = Stage.position();
-      var lineEnd = typeof line.end_ms === 'number' ? line.end_ms : 0;
-      words.forEach(function (word) {
-        var motion = word._motion;
-        var w = word._word;
-        if (!motion || !w) return;
-        var wordDur = Math.max(0, (w.end_ms || 0) - (w.start_ms || 0));
-        var remain = lineEnd > now ? lineEnd - now : target * 2;
-        // 与短句策略一致：剩余/词长不足 180ms 时不排情绪入场。
-        if (remain <= 180 || (wordDur > 0 && wordDur <= 180)) {
-          motion.style.setProperty('--emo-enter-dur', '0ms');
-          return;
-        }
-        var dur = Math.round(Math.min(target, (wordDur > 0 ? wordDur : target * 2) * 0.5));
-        if (dur < 80) {
-          motion.style.setProperty('--emo-enter-dur', '0ms');
-          return;
-        }
-        motion.style.setProperty('--emo-enter-dur', dur + 'ms');
-        motion.setAttribute('data-emo-enter', arch);
-      });
-    }
-
-    function flashEmotionWord(wordEl) {
-      var motion = wordEl && wordEl._motion;
-      if (!motion) return;
-      var arch = motion.getAttribute('data-emo-enter');
-      if (!arch) return;
-      var dur = parseFloat(motion.style.getPropertyValue('--emo-enter-dur'));
-      if (!Number.isFinite(dur) || dur < 80) return;
-      motion.classList.remove('fl-emo-enter-bounce', 'fl-emo-enter-sink',
-        'fl-emo-enter-impact', 'fl-emo-enter-drift', 'fl-emo-enter-float');
-      void motion.offsetWidth;
-      motion.classList.add('fl-emo-enter-' + arch);
-    }
 
     function buildLine(line, soft) {
       if (lineEl) { lineEl.remove(); lineEl = null; }
@@ -274,12 +242,12 @@
       var chaotic = theme.animationIntensity === 'chaotic';
       var calm = theme.animationIntensity === 'calm';
       var narrow = (global.innerWidth || 1200) < 760;
-      var baseSpread = (chaotic ? 60 : calm ? 0 : 20) * (narrow ? 0.6 : 1);
-      var activeScaleMul = narrow ? 1.28 : 1.4;   // stanza 窄屏收敛
+      var baseSpread = emotion ? 0 : (chaotic ? 60 : calm ? 0 : 20) * (narrow ? 0.6 : 1);
+      var activeScaleMul = emotion ? 1.08 : narrow ? 1.28 : 1.4;
       var seed = line.start_ms;
 
       // 容器对齐：calm 与间奏固定居中；normal/chaotic 由 seed 随机（justify 5 选 1、align 3 选 1）。
-      if (calm || isInterlude) {
+      if (emotion || calm || isInterlude) {
         container.style.justifyContent = 'center';
         container.style.alignItems = 'center';
       } else {
@@ -294,7 +262,7 @@
       dispTokens.forEach(function (w, i) {
         var wordSeed = seed / 1000 + i; // stanza 用秒级 seed
         var r = function (off) { return rand(wordSeed, off); };
-        var scaleCfg = chaotic ? 0.8 + r(4) * 0.6 : 1.1 + r(4) * 0.2;
+        var scaleCfg = emotion ? 1 : chaotic ? 0.8 + r(4) * 0.6 : 1.1 + r(4) * 0.2;
         // 间奏词只有轻微纵向随机（±7.5px），无 x 散布。
         var x, y;
         if (isInterlude) {
@@ -304,14 +272,14 @@
           x = (r(1) - 0.5) * baseSpread * 2;
           y = (r(2) - 0.5) * baseSpread * 2;
         }
-        var rotate = tuning.rotation ? (r(3) - 0.5) * (chaotic ? 60 : calm ? 0 : 10) : 0;
-        var passedRotate = tuning.rotation ? (r(8) - 0.5) * 45 : 0;
+        var rotate = !emotion && tuning.rotation ? (r(3) - 0.5) * (chaotic ? 60 : calm ? 0 : 10) : 0;
+        var passedRotate = !emotion && tuning.rotation ? (r(8) - 0.5) * 45 : 0;
         // 精确词距（stanza 新版排版）
         var wi = widths[i] || 0, si = scaleCfg * activeScaleMul;
         var wnext = 0, snext = 1, xnext = 0;
         if (i + 1 < dispTokens.length) {
           var ns = seed / 1000 + i + 1, nr = function (o) { return rand(ns, o); };
-          snext = (chaotic ? 0.8 + nr(4) * 0.6 : 1.1 + nr(4) * 0.2) * activeScaleMul;
+          snext = (emotion ? 1 : chaotic ? 0.8 + nr(4) * 0.6 : 1.1 + nr(4) * 0.2) * activeScaleMul;
           xnext = (nr(1) - 0.5) * baseSpread * 2;
           wnext = widths[i + 1] || 0;
         }
@@ -324,7 +292,8 @@
         wordEl.className = 'fl-cword';
         wordEl.dataset.st = 'waiting';
         wordEl.style.fontSize = px + 'px';
-        wordEl.style.fontFamily = StanzaTheme.fontStack(theme.fontStyle);
+        wordEl.style.fontFamily = emotion ? global.LyricEmotion.fontFamily(emotion, StanzaTheme.fontStack(theme.fontStyle))
+          : StanzaTheme.fontStack(theme.fontStyle);
         var baseWeight = emotion && emotion.type && emotion.type.weight || 700;
         var accentWord = !!(emotion && global.LyricEmotion && LyricEmotion.accentFor &&
           LyricEmotion.accentFor(w.text));
@@ -367,11 +336,6 @@
         motion.append(crot);
         wordEl.append(motion);
         wordEl._motion = motion;
-        motion.addEventListener('animationend', function () {
-          motion.classList.remove('fl-emo-word-hop', 'fl-emo-word-jitter',
-            'fl-emo-enter-bounce', 'fl-emo-enter-sink', 'fl-emo-enter-impact',
-            'fl-emo-enter-drift', 'fl-emo-enter-float');
-        });
         wordEl.addEventListener('click', function (e) {
           e.stopPropagation();
           if (typeof line.start_ms === 'number' && onSeek) onSeek(line.start_ms);
@@ -386,7 +350,9 @@
       lineEl._tokens = dispTokens;
       lineEl._words = Array.prototype.slice.call(container.querySelectorAll('.fl-cword'));
       applyEmotionField(lineEl._words, px);
-      if (!soft) prepareEmotionWordMotion(lineEl._words, emotion, line);
+      if (emotion) lineEl._words.forEach(function (word, i) {
+        global.LyricEmotion.prepareGlyphEffects(word._motion, emotion, i, lineEl._words.length);
+      });
       buildDecor(container, emotion, line);
     }
 
@@ -398,7 +364,7 @@
           (cfg.y + Math.cos(cfg.x) * 50) + 'px) scale(.5)';
         crot.style.transform = 'rotate(' + (cfg.rotate + 20) + 'deg)';
       } else if (st === 'active') {
-        var mul = (global.innerWidth || 1200) < 760 ? 1.28 : 1.4;
+        var mul = emotionState ? 1.08 : (global.innerWidth || 1200) < 760 ? 1.28 : 1.4;
         el.style.transform = 'translate(' + cfg.x + 'px,' + cfg.y + 'px) scale(' +
           (cfg.scale * mul).toFixed(3) + ')';
         crot.style.transform = 'rotate(' + cfg.rotate + 'deg)';
@@ -512,8 +478,20 @@
       }
       if (!lineEl || !curHints) return;
       var words = lineEl._words, tokens = lineEl._tokens;
+      var reducedEmotion = !decorationAllowed() || tuning.breathing <= 0;
       for (var i = 0; i < words.length; i += 1) {
         var st = U.wordState(tokens[i], curHints, line, tMs);
+        if (emotionState && E) {
+          var token = tokens[i];
+          var age = tMs - token.start_ms;
+          var accent = age < 0 ? 0 : Math.min(1, age / 100) * Math.max(0, 1 - Math.max(0, tMs - token.end_ms) / 300);
+          var pose = E.motionPose(emotionState, words[i]._emotionU, tMs / 1000,
+            parseFloat(words[i].style.fontSize), accent, reducedEmotion);
+          var transform = 'translate(' + pose.x.toFixed(3) + 'px,' + (pose.y - words[i]._emotionBaseline).toFixed(3) + 'px) rotate(' +
+            pose.rotate.toFixed(4) + 'rad) skewX(' + pose.skew.toFixed(4) + 'rad) scale(' + pose.scaleX.toFixed(4) + ',' + pose.scaleY.toFixed(4) + ')';
+          if (words[i]._motion.style.transform !== transform) words[i]._motion.style.transform = transform;
+          E.paintGlyphEffects(words[i]._motion, emotionState, tMs / 1000, reducedEmotion);
+        }
         var previousSt = words[i].dataset.st;
         if (previousSt !== st) {
           animationChanged = true;
@@ -538,10 +516,10 @@
             (st === 'active' ? emotionAccent(w.text) : emotionInk());
           if (st !== 'passed') words[i].style.opacity = '';
           applyPose(words[i], st);
-          if (st === 'active' && previousSt !== 'active') flashEmotionWord(words[i]);
         }
       }
-      if (paused && animationChanged) syncAnimationPlayback();
+      // 新建的行无论软硬都要落定：暂停态下把入场与过渡直接落到当前词态。
+      if (paused && animationChanged) syncAnimationPlayback(true);
     }
 
     host.append(root);

@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 24 24" role="img" aria-label="Hertz Studio 桌面歌词 · 线性版">
+  <title>Hertz Studio · 桌面歌词（透明底线描）</title>
+  <defs>
+    <linearGradient id="lyric3" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#2563EB" stop-opacity="1"/>
+      <stop offset="0.55" stop-color="#2563EB" stop-opacity="0.9"/>
+      <stop offset="1" stop-color="#2563EB" stop-opacity="0.18"/>
+    </linearGradient>
+  </defs>
+
+  <!-- 与官方 plugin.svg 完全同规格：透明底 + 品牌蓝描边 + 一条歌词行 -->
+  <rect x="1.7" y="11" width="20.6" height="2" rx="1" fill="url(#lyric3)" opacity="0.35"/>
+
+  <g fill="none" stroke="#2563EB" stroke-linecap="round" stroke-width="1.8">
+    <path d="M3 11.5v1"/>
+    <path d="M6.5 9v6"/>
+    <path d="M10 5.5v13"/>
+    <path d="M13.5 8v8"/>
+    <path d="M17 10.5v3"/>
+    <path d="M20.5 11.5v1"/>
+  </g>
+</svg>

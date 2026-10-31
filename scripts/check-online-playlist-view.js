@@ -220,7 +220,9 @@ function makeSandbox(opts) {
       el.innerHTML = '<use href="#i-app-netease"/>';
       return el;
     },
-    playAll(tracks, index) { spies.played.push({ tracks: tracks.slice(), index }); },
+    playAll(tracks, index, roomQueue) {
+      spies.played.push({ tracks: tracks.slice(), index, roomQueue: roomQueue && roomQueue.slice() });
+    },
     supports(source, cap) { return ((opts.caps && opts.caps[source]) || []).indexOf(cap) >= 0; },
     playCollection(source, id) { spies.collections.push({ source, id }); },
   };
@@ -275,6 +277,24 @@ function detailBody(tracks, total) {
     ok(!!bulk, '详情层显示已加载歌曲加入一起听');
     eq(bulk.tracks.length, 2, '不把尚未加载的整单歌曲算入分享');
     bulk.button.onclick(); eq(env.spies.shared[0].id, '1', '歌曲引用交回公共一起听入口');
+  }
+  section('房间进行中：详情播放改成点播进共同队列');
+  {
+    const env = makeSandbox({
+      transport: makeTransport(() => detailBody([T('1', 'A'), T('2', 'B')], 5)),
+      caps: { netease: ['playlist_detail'] },
+    });
+    env.sandbox.window.Online.roomActive = () => true;
+    env.view.open('netease', 'P1', 'arrange'); await ticks();
+    const info = env.doc.getElementById('opl-info');
+    ok(!!btnByText(info, '点播已加载 2 首'), '按钮文案改成点播且只承诺已加载');
+    ok(!btnByText(info, '加入已加载 2 首到队列'), '房间内不显示本地队列按钮');
+    eq(env.spies.roomButtons.filter(item => item.label === '已加载歌曲加入一起听').length, 0,
+      '房间内不再重复显示一起听入口');
+    btnByText(info, '点播已加载 2 首').onclick(); await ticks();
+    eq(env.spies.played.length, 1, '点播走 Online.playAll');
+    eq(env.spies.played[0].roomQueue.length, 2, '整批作为房间点播范围');
+    eq(env.spies.collections.length, 0, '房间内不发集合播放意图');
   }
   section('层级：网格层与详情层的进出');
   {

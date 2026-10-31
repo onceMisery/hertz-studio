@@ -2090,13 +2090,14 @@ function checkSkinSwitchViewHandoff() {
   // 默认视图现在是"在线曲库"（需求：所有皮肤默认展示在线曲库数据）。
   // 真正要钉的是「收尾动作只有一处、统一走 defaultView()」这件事，
   // 不是钉住哪个 id —— 以后再改默认值时这条断言不该跟着红。
+  // 恢复落点还必须显式跳过桌面检测：保存的默认视图可能是 settings。
   ok(/Skins\.onChange\(onSkinChangedForViews\)/.test(APP)
-    && /function onSkinChangedForViews\(\)\s*\{[\s\S]{0,400}?setView\(defaultView\(\)\);/.test(APP),
+    && /function onSkinChangedForViews\(\)\s*\{[\s\S]{0,400}?setView\(defaultView\(\), \{ skipDesktopDetection: true \}\);/.test(APP),
     'app.js 订阅换肤并统一回首页（收尾动作只有一处，不靠各条调用路径记得调）');
   // 启动期闸门 + 补跑：两处都要有，缺一个就退回「首页永久空白」。
   ok(/if \(!dailyStripBound\)\s*\{[\s\S]{0,120}?pendingSkinViewHandoff = true;[\s\S]{0,80}?return;/.test(APP),
     '启动期的那次换肤广播被闸门挡住（不早于 Daily.bind()）');
-  ok(/function bindDailyStrip\(\)\s*\{[\s\S]{0,200}?dailyStripBound = true;[\s\S]{0,200}?setView\(defaultView\(\)\);/.test(APP),
+  ok(/function bindDailyStrip\(\)\s*\{[\s\S]{0,200}?dailyStripBound = true;[\s\S]{0,200}?setView\(defaultView\(\), \{ skipDesktopDetection: true \}\);/.test(APP),
     'bind 之后有补跑入口 bindDailyStrip()');
   ok(/Daily\.bind\(favHost\);[\s\S]{0,200}?bindDailyStrip\(\);/.test(APP),
     'bindDailyStrip() 排在 Daily.bind() 之后（闸门由 bind 打开）');
@@ -2565,7 +2566,8 @@ function checkHeijiaoSkin() {
     '快捷键 1 仍去本地曲库（显式导航不改）');
   // 三处「回首页」都要走 defaultView()，漏一处就是"启动去了在线、
   // 换肤后又跳回本地"这种前后不一致。
-  eq((APP.match(/setView\(defaultView\(\)\)/g) || []).length, 3,
+  // 精确核对恢复选项；其它 setView 动作或任意 options 不能凑足三处。
+  eq((APP.match(/setView\(defaultView\(\), \{ skipDesktopDetection: true \}\);/g) || []).length, 3,
     '三处回首页调用（启动 / 换肤 / bind 后补跑）统一走 defaultView()');
   // 兜底判据：默认视图自己被关掉时（nav_visible_online=false）也必须有地方去。
   ok(/if \(hidCurrent\) setView\(ui\.views\[DEFAULT_VIEW\] \? DEFAULT_VIEW : 'library'\)/.test(APP),

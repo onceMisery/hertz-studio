@@ -36,7 +36,7 @@ use crate::wallpaper_feed::{
 const POLL_IDLE: Duration = Duration::from_millis(500);
 const POLL_ERROR: Duration = Duration::from_secs(1);
 const SAVE_DEBOUNCE: Duration = Duration::from_millis(400);
-const STALE_AFTER: Duration = Duration::from_secs(3);
+use crate::management::STALE_AFTER;
 const PREVIEW_LEASE: Duration = Duration::from_secs(15);
 /// 页面每 2 s 心跳；可见状态下超过这个时间没有有效心跳就按渲染停摆重建。
 const HEARTBEAT_STALE: Duration = Duration::from_secs(10);
@@ -44,12 +44,14 @@ const HEARTBEAT_STALE: Duration = Duration::from_secs(10);
 static LOG_SEQ: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) enum UserEvent {
-    Feed(u64, Box<Result<crate::feed::FeedUpdate, String>>),
-    WallpaperFeed(u64, Box<Result<WallpaperSnapshot, FeedError>>),
+    Dbx(u64, Box<crate::dbx_feed::Message>),
+    Feed(u64, Instant, Box<Result<crate::feed::FeedUpdate, String>>),
+    WallpaperFeed(u64, Instant, Box<Result<WallpaperSnapshot, FeedError>>),
     WallpaperPage(u64, String),
     SettingsPage(String),
     Tick,
     Page(String),
+    LyricControl(u64, Result<(), String>),
     Tray(TrayIconEvent),
     Menu(MenuEvent),
     Native(NativeEvent),
@@ -80,7 +82,31 @@ impl Policy {
     }
 }
 
+/// One-way page-ready mapping. The upstream IPC delay is counted as extra age,
+/// so queue delay is conservative even across wall-clock adjustments.
+#[derive(Clone, Copy)]
+struct PageClock {
+    native_ready: Instant,
+    page_ready_ms: f64,
+}
+impl PageClock {
+    fn new(page_ready_ms: f64) -> Option<Self> {
+        (page_ready_ms.is_finite() && page_ready_ms >= 0.0).then(|| Self {
+            native_ready: Instant::now(),
+            page_ready_ms,
+        })
+    }
+    fn at(self, now: Instant) -> f64 {
+        self.page_ready_ms
+            + now
+                .saturating_duration_since(self.native_ready)
+                .as_secs_f64()
+                * 1000.0
+    }
+}
+
 struct WallpaperSurface {
+    page_clock: Option<PageClock>,
     window: Window,
     webview: wry::WebView,
     monitor: native::WallpaperMonitor,
@@ -112,7 +138,7 @@ impl WallpaperSurface {
     }
 
     fn apply_feed(&self, snapshot: &WallpaperSnapshot) {
-        if let Ok(payload) = serde_json::to_string(snapshot) {
+        if let Ok(payload) = wallpaper_payload(snapshot, self.page_clock) {
             self.eval(&format!(
                 "window.hertzWallpaper && window.hertzWallpaper.applyFeed({payload});"
             ));
@@ -207,6 +233,7 @@ impl SettingsSurface {
 }
 
 struct PreviewSurface {
+    page_clock: Option<PageClock>,
     webview: Rc<wry::WebView>,
     fps: u8,
     music_response: bool,
@@ -232,7 +259,7 @@ impl PreviewSurface {
     }
 
     fn apply_feed(&self, snapshot: &WallpaperSnapshot) {
-        if let Ok(payload) = serde_json::to_string(snapshot) {
+        if let Ok(payload) = wallpaper_payload(snapshot, self.page_clock) {
             self.eval(&format!(
                 "window.hertzWallpaper && window.hertzWallpaper.applyFeed({payload});"
             ));
@@ -300,6 +327,11 @@ struct App {
     tray: Option<TrayIcon>,
     tray_actions: Option<TrayActions>,
     config: Config,
+    committed_config: Config,
+    dbx: Option<crate::dbx_feed::Controller>,
+    dbx_session: Option<String>,
+    source_health: crate::management::SourceHealth,
+    wallpaper_last_update: Option<Instant>,
     profile: Profile,
     policy: Policy,
     last_snapshot: Option<Snapshot>,
@@ -308,6 +340,7 @@ struct App {
     current_document_key: Option<String>,
     current_document: Option<Document>,
     page_ready: bool,
+    page_clock: Option<PageClock>,
     visible: bool,
     placing: bool,
     save_due: Option<Instant>,
@@ -368,20 +401,16 @@ impl App {
 
     fn send_config(&self) {
         let lyrics = &self.config.lyrics;
-        let payload = serde_json::json!({
-            "layout": lyrics.layout,
-            "secondary": lyrics.secondary,
-            "fontFamily": lyrics.font_family,
-            "fontSize": lyrics.font_size,
-            "fontWeight": lyrics.font_weight,
-            "sungColor": lyrics.sung_color,
-            "unsungColor": lyrics.unsung_color,
-            "outlineColor": lyrics.outline_color,
-            "outlineWidth": lyrics.outline_width,
-            "opacity": lyrics.opacity,
-            "locked": lyrics.locked,
-            "frameCap": self.frame_cap,
-        });
+        let mut payload = serde_json::to_value(lyrics).unwrap();
+        payload["frameCap"] = self.frame_cap.into();
+        let panel_max = self
+            .target_area()
+            .map(|area| {
+                (f64::from(area.height()) / area.scale() - self.base_height_dip() - 16.0)
+                    .clamp(120.0, 480.0)
+            })
+            .unwrap_or(360.0);
+        payload["panelMaxHeight"] = serde_json::json!(panel_max);
         self.eval(&format!(
             "window.hertzLyrics && window.hertzLyrics.applyConfig({payload});"
         ));
@@ -391,6 +420,7 @@ impl App {
         let payload = serde_json::json!({
             "state": self.source_state,
             "message": self.source_message,
+            "capabilities": { "lyricsControl": !config::is_dbx(&self.profile) },
         });
         self.eval(&format!(
             "window.hertzLyrics && window.hertzLyrics.setSource({payload});"
@@ -402,7 +432,13 @@ impl App {
             self.eval("window.hertzLyrics && window.hertzLyrics.applySnapshot(null);");
             return;
         };
-        let payload = serde_json::to_string(snapshot).unwrap_or_else(|_| "null".into());
+        let mut payload = serde_json::to_value(snapshot).unwrap();
+        let now = Instant::now();
+        payload["snapshotAgeMs"] =
+            (now.saturating_duration_since(self.last_update).as_millis() as u64).into();
+        if let Some(clock) = self.page_clock {
+            payload["pageDispatchMs"] = serde_json::json!(clock.at(now));
+        }
         self.eval(&format!(
             "window.hertzLyrics && window.hertzLyrics.applySnapshot({payload});"
         ));
@@ -434,11 +470,39 @@ impl App {
         ));
     }
 
-    fn handle_update(&mut self, update: crate::feed::FeedUpdate) {
-        self.last_update = Instant::now();
+    fn handle_update(&mut self, mut update: crate::feed::FeedUpdate, started: Instant) {
+        if started.elapsed() >= STALE_AFTER {
+            return;
+        }
+        if self.current_document.is_some()
+            && self
+                .last_snapshot
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.server.session == update.snapshot.server.session)
+            && self.current_document_key == update.snapshot.lyrics.document_key
+            && self.current_track.as_deref()
+                == update
+                    .snapshot
+                    .track
+                    .as_ref()
+                    .map(|track| track.id.as_str())
+        {
+            update.document = None;
+        }
+        self.source_health
+            .accept(true, started, &update.snapshot.server.session);
+        self.handle_timed_update(update, started);
+    }
+
+    fn handle_timed_update(&mut self, update: crate::feed::FeedUpdate, started: Instant) {
+        self.last_update = started;
         self.last_feed_error = None;
         let track_id = update.snapshot.track.as_ref().map(|track| track.id.clone());
         let track_changed = track_id != self.current_track;
+        let session_changed = self
+            .last_snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.server.session != update.snapshot.server.session);
         if track_changed {
             self.current_track = track_id;
         }
@@ -449,7 +513,7 @@ impl App {
             .and_then(|document| document.document_key.clone())
             .or_else(|| snapshot_key.clone());
         let mut document_changed = false;
-        if track_changed || incoming_key != self.current_document_key {
+        if session_changed || track_changed || incoming_key != self.current_document_key {
             self.current_document = None;
             self.current_document_key = None;
             document_changed = true;
@@ -488,11 +552,13 @@ impl App {
     }
 
     fn handle_feed_error(&mut self, message: String) {
+        self.source_health.fail(true);
         if self.last_feed_error.as_deref() != Some(&message) {
             log(&format!("source error: {message}"));
             self.last_feed_error = Some(message.clone());
         }
-        let waiting = message.contains("未找到") || message.contains("未启动");
+        let waiting =
+            message.contains("未找到") || message.contains("未启动") || message.contains("等待");
         self.source_state = if waiting { "waiting" } else { "error" };
         self.source_message = Some(message);
         self.last_snapshot = None;
@@ -631,6 +697,7 @@ impl App {
                 }
             }
             Err(error) => {
+                self.source_health.fail(false);
                 log(&format!("wallpaper feed {error}"));
                 self.wallpaper_feed_logged = false;
                 self.wallpaper_last = None;
@@ -659,6 +726,12 @@ impl App {
                 "ignore stale wallpaper page generation={generation} current={}",
                 self.wallpaper_generation
             ));
+            return;
+        }
+        if let Some(clock) = parse_page_clock(event) {
+            if let Some(surface) = self.wallpaper.as_mut() {
+                surface.page_clock = Some(clock);
+            }
             return;
         }
         if let Some((ticks, draws, mounted, lost)) = parse_wallpaper_heartbeat(event) {
@@ -775,6 +848,9 @@ impl App {
     }
 
     fn retry_wallpaper(&mut self, target: &EventLoopWindowTarget<UserEvent>) {
+        if let Some(dbx) = &self.dbx {
+            dbx.retry();
+        }
         log("wallpaper retry requested");
         self.wallpaper_recovery_terminal = false;
         self.wallpaper_recovery_attempts.clear();
@@ -838,10 +914,7 @@ impl App {
                 .as_ref()
                 .and_then(|snapshot| snapshot.space.as_ref())
                 .map(|space| space.scene.clone()),
-            "profile": {
-                "dataDir": self.profile.data_dir.to_string_lossy(),
-                "edition": self.profile.edition,
-            },
+            "profile": self.config.active_profile,
             "profiles": profile_options(
                 &self.profile,
                 &self.config,
@@ -928,6 +1001,7 @@ impl App {
         self.open_settings(target);
         let settings = self.settings.as_ref().ok_or("无法打开桌面设置")?;
         self.preview = Some(PreviewSurface {
+            page_clock: None,
             webview: settings.webview.clone(),
             fps: candidate.fps,
             music_response: candidate.music_response,
@@ -951,6 +1025,13 @@ impl App {
     }
 
     fn ensure_wallpaper_feed(&mut self) {
+        if self.config.active_profile.is_none() {
+            return;
+        }
+        if config::is_dbx(&self.profile) {
+            self.sync_dbx_feed();
+            return;
+        }
         if self.wallpaper_feed_stop.is_some() {
             return;
         }
@@ -965,16 +1046,155 @@ impl App {
     }
 
     fn stop_wallpaper_feed(&mut self) {
+        self.source_health.fail(false);
         if let Some(stop) = self.wallpaper_feed_stop.take() {
             stop.store(true, Ordering::Relaxed);
         }
     }
 
     fn sync_settings_feed(&mut self) {
+        if config::is_dbx(&self.profile) {
+            self.sync_dbx_feed();
+            return;
+        }
         if self.settings.is_some() || self.config.wallpaper.enabled || self.wallpaper_forced {
             self.ensure_wallpaper_feed();
         } else {
             self.stop_wallpaper_feed();
+        }
+    }
+
+    fn sync_dbx_feed(&mut self) {
+        if !config::is_dbx(&self.profile) {
+            return;
+        }
+        if self.dbx.is_none() {
+            self.dbx = Some(crate::dbx_feed::Controller::start(
+                self.profile.clone(),
+                self.source_generation,
+                self.proxy.clone(),
+            ));
+        }
+        self.dbx
+            .as_ref()
+            .unwrap()
+            .set_needs(crate::dbx_feed::Needs {
+                lyrics: self.config.lyrics.enabled || self.settings.is_some(),
+                wallpaper: self.config.wallpaper.enabled
+                    || self.wallpaper_forced
+                    || self.settings.is_some(),
+            });
+    }
+    fn handle_dbx(&mut self, message: crate::dbx_feed::Message) {
+        use crate::dbx_feed::Message;
+        use hertz_desktop_ipc::Scope;
+        match message {
+            Message::Session(session) => {
+                if self.dbx_session.as_deref() != Some(session.as_str()) {
+                    self.handle_feed_error("DBX 来源会话已变化，等待新快照".into());
+                    self.handle_wallpaper_feed(Err(FeedError {
+                        code: "dbx_session_changed",
+                        message: "DBX 来源会话已变化".into(),
+                    }));
+                    self.dbx_session = Some(session);
+                }
+            }
+            Message::Lyrics {
+                started,
+                snapshot,
+                cached_document,
+            } => {
+                if started.elapsed() >= STALE_AFTER
+                    || self.dbx_session.as_deref() != Some(snapshot.server.session.as_str())
+                {
+                    return;
+                }
+                if self.last_snapshot.as_ref().is_some_and(|old| {
+                    old.server.session == snapshot.server.session && old.seq >= snapshot.seq
+                }) {
+                    return;
+                }
+                // A native expiry may have cleared the document during transport or
+                // event queueing. Reuse the authenticated cache only when this accepted
+                // snapshot needs it; ordinary snapshots never replay large JS documents.
+                let needs_document = self.current_document.is_none()
+                    || self.current_document_key != snapshot.lyrics.document_key
+                    || self.current_track.as_deref()
+                        != snapshot.track.as_ref().map(|track| track.id.as_str());
+                let document = cached_document
+                    .filter(|document| {
+                        needs_document
+                            && snapshot.lyrics.status == "ready"
+                            && document.document_key == snapshot.lyrics.document_key
+                    })
+                    .map(|document| (*document).clone());
+                self.source_health
+                    .accept(true, started, &snapshot.server.session);
+                self.last_update = started;
+                // The original handler owns presentation/offset semantics. Set t0 before
+                // dispatch so the first page delivery includes transport and native queue age.
+                self.handle_timed_update(
+                    crate::feed::FeedUpdate {
+                        snapshot,
+                        document,
+                        warning: None,
+                    },
+                    started,
+                );
+            }
+            Message::Wallpaper {
+                started,
+                mut snapshot,
+            } => {
+                if started.elapsed() >= STALE_AFTER
+                    || self.dbx_session.as_deref() != Some(snapshot.server.session.as_str())
+                {
+                    return;
+                }
+                if self.wallpaper_last.as_ref().is_some_and(|old| {
+                    old.server.session == snapshot.server.session && old.seq >= snapshot.seq
+                }) {
+                    return;
+                }
+                snapshot.received_at = Some(started);
+                self.wallpaper_last_update = Some(started);
+                self.source_health
+                    .accept(false, started, &snapshot.server.session);
+                self.handle_wallpaper_feed(Ok(snapshot));
+            }
+            Message::Document {
+                session,
+                key,
+                document,
+            } => {
+                if self.last_update.elapsed() >= STALE_AFTER
+                    || self.dbx_session.as_deref() != Some(session.as_str())
+                    || self.last_snapshot.as_ref().is_none_or(|snapshot| {
+                        snapshot.server.session != session
+                            || snapshot.lyrics.document_key.as_deref() != Some(key.as_str())
+                    })
+                {
+                    return;
+                }
+                self.current_document_key = Some(key);
+                self.current_document = Some(document);
+                self.policy.no_content = self.last_snapshot.as_ref().is_none_or(|snapshot| {
+                    snapshot.track.is_none() || snapshot.lyrics.status != "ready"
+                });
+                self.send_document();
+                self.recompute_visibility();
+            }
+            Message::Failure { scope, message } => {
+                if scope.is_none() || scope == Some(Scope::Lyrics) {
+                    self.handle_feed_error(message.into());
+                }
+                if scope.is_none() || scope == Some(Scope::Wallpaper) {
+                    self.handle_wallpaper_feed(Err(FeedError {
+                        code: "dbx_source_unavailable",
+                        message: message.into(),
+                    }));
+                }
+            }
         }
     }
 
@@ -1034,30 +1254,45 @@ impl App {
         if self.position_edit.is_some() {
             return Err("请先完成或取消位置调整".into());
         }
-        if expected_revision != self.config.revision {
+        if self.save_due.is_some() || expected_revision != self.config.revision {
             return Err("设置已变化，请重新打开设置后重试".into());
         }
         let profile = config::normalize_profile(profile).map_err(|error| format!("{error:#}"))?;
-        if config::same_profile(&self.profile, &profile) {
+        if self
+            .config
+            .active_profile
+            .as_ref()
+            .is_some_and(|active| config::same_profile(active, &profile))
+        {
             return Err("已经是当前来源".into());
         }
+        let next_generation = self
+            .source_generation
+            .checked_add(1)
+            .ok_or("来源 generation 已达上限")?;
         let mut next = self.config.clone();
         next.activate_profile(profile.clone())
             .map_err(|error| format!("{error:#}"))?;
-        next.revision = self.config.revision.saturating_add(1);
-        config::save(&next).map_err(|error| format!("保存设置失败：{error:#}"))?;
-        self.config = next;
+        config::commit(&mut self.config, next)
+            .map_err(|error| format!("保存设置失败：{error:#}"))?;
+        self.committed_config = self.config.clone();
         self.close_preview();
         self.profile = profile;
-        self.source_generation = self.source_generation.wrapping_add(1);
+        self.source_generation = next_generation;
+        self.dbx = None;
+        self.dbx_session = None;
+        self.source_health = crate::management::SourceHealth::default();
+        self.wallpaper_last_update = None;
         self.lyrics_feed_stop.store(true, Ordering::Relaxed);
         self.lyrics_feed_stop = Arc::new(AtomicBool::new(false));
-        spawn_feed(
-            self.profile.clone(),
-            self.proxy.clone(),
-            self.source_generation,
-            self.lyrics_feed_stop.clone(),
-        );
+        if !config::is_dbx(&self.profile) {
+            spawn_feed(
+                self.profile.clone(),
+                self.proxy.clone(),
+                self.source_generation,
+                self.lyrics_feed_stop.clone(),
+            );
+        }
         self.stop_wallpaper_feed();
         self.wallpaper_last = None;
         self.wallpaper_feed_logged = false;
@@ -1076,7 +1311,7 @@ impl App {
         self.current_document = None;
         self.policy.no_content = true;
         self.source_state = "waiting";
-        self.source_message = Some(format!("正在连接 Hertz {} 服务", self.profile.edition));
+        self.source_message = Some(format!("正在连接 Hertz {} 服务", self.profile.edition()));
         self.send_document();
         self.send_snapshot();
         self.send_source();
@@ -1110,8 +1345,8 @@ impl App {
         self.rebuild_tray();
         log(&format!(
             "source switched edition={} data_dir={}",
-            self.profile.edition,
-            self.profile.data_dir.display()
+            self.profile.edition(),
+            std::path::Path::new(self.profile.data_dir()).display()
         ));
         self.send_settings_status(surface_error.as_deref(), Some("已切换来源"));
         Ok(())
@@ -1134,24 +1369,23 @@ impl App {
             return Err("设置已在其他位置变化；草稿已保留，请放弃修改后重新读取".into());
         }
         let previous = self.config.clone();
+        let mut next = previous.clone();
         if let Some(lyrics) = lyrics {
             if lyrics.locked && self.tray.is_none() {
                 return Err("托盘不可用，暂时无法锁定歌词".into());
             }
-            self.config.lyrics = lyrics;
-            self.config.sanitize();
+            next.lyrics = lyrics;
+            next.sanitize();
         }
-        self.config.wallpaper.enabled = candidate.enabled;
-        self.config.wallpaper.fps = candidate.fps;
-        self.config.wallpaper.music_response = candidate.music_response;
-        self.config.wallpaper.monitor = candidate.monitor.clone();
-        self.config.wallpaper.source = candidate.source.clone();
-        self.config.wallpaper.scene = candidate.scene.clone();
-        self.config.revision = previous.revision.saturating_add(1);
-        if let Err(error) = config::save(&self.config) {
-            self.config = previous;
-            return Err(format!("保存设置失败：{error:#}"));
-        }
+        next.wallpaper.enabled = candidate.enabled;
+        next.wallpaper.fps = candidate.fps;
+        next.wallpaper.music_response = candidate.music_response;
+        next.wallpaper.monitor = candidate.monitor.clone();
+        next.wallpaper.source = candidate.source.clone();
+        next.wallpaper.scene = candidate.scene.clone();
+        config::commit(&mut self.config, next)
+            .map_err(|error| format!("保存设置失败：{error:#}"))?;
+        self.committed_config = self.config.clone();
         self.wallpaper_forced = false;
         self.wallpaper_recovery_terminal = false;
         self.wallpaper_recovery_attempts.clear();
@@ -1159,8 +1393,10 @@ impl App {
             if let Err(error) = self.ensure_wallpaper_surface(target, candidate.monitor.as_deref())
             {
                 log(&format!("wallpaper enable failed: {error:#}"));
-                self.config = previous;
-                let _ = config::save(&self.config);
+                if config::save(&previous).is_ok() {
+                    self.config = previous;
+                    self.committed_config = self.config.clone();
+                }
                 return Err(format!("启用壁纸失败：{error}"));
             }
             self.ensure_wallpaper_feed();
@@ -1222,26 +1458,28 @@ impl App {
     }
 
     fn finish_position_edit(&mut self, commit: bool) -> Result<(), String> {
+        if commit {
+            config::next_revision(self.config.revision).map_err(|error| error.to_string())?;
+        }
         let Some(edit) = self.position_edit.take() else {
             return Ok(());
         };
         let moved = self.config.lyrics.clone();
-        self.config.lyrics = edit.lyrics;
+        let mut restored = self.config.clone();
+        restored.lyrics = edit.lyrics;
         self.policy.user_hidden = edit.user_hidden;
-        let previous = self.config.clone();
-        if commit {
-            self.config.lyrics.anchor_x = moved.anchor_x;
-            self.config.lyrics.anchor_y = moved.anchor_y;
-            self.config.lyrics.monitor = moved.monitor;
-            self.config.revision = self.config.revision.saturating_add(1);
-        }
         let result = if commit {
-            config::save(&self.config).map_err(|error| format!("保存位置失败：{error:#}"))
+            let mut next = restored.clone();
+            next.lyrics.anchor_x = moved.anchor_x;
+            next.lyrics.anchor_y = moved.anchor_y;
+            next.lyrics.monitor = moved.monitor;
+            config::commit(&mut restored, next).map_err(|error| format!("保存位置失败：{error:#}"))
         } else {
             Ok(())
         };
-        if result.is_err() {
-            self.config = previous;
+        self.config = restored;
+        if result.is_ok() && commit {
+            self.committed_config = self.config.clone();
         }
         self.policy.locked = self.config.lyrics.locked;
         native::set_locked(self.hwnd(), self.policy.locked);
@@ -1319,14 +1557,16 @@ impl App {
                 let previous = self.config.clone();
                 let previous_native =
                     native::autostart_enabled().unwrap_or(previous.launch_at_login);
-                let result = native::set_autostart(enable).and_then(|_| {
-                    self.config.launch_at_login = enable;
-                    self.config.revision = self.config.revision.saturating_add(1);
-                    config::save(&self.config)
-                });
+                let mut next = self.config.clone();
+                next.launch_at_login = enable;
+                let result = native::set_autostart(enable)
+                    .and_then(|_| config::commit(&mut self.config, next));
                 if result.is_err() {
                     self.config = previous;
                     let _ = native::set_autostart(previous_native);
+                }
+                if result.is_ok() {
+                    self.committed_config = self.config.clone();
                 }
                 self.sync_tray();
                 let error = result
@@ -1402,6 +1642,12 @@ impl App {
     }
 
     fn handle_preview_page(&mut self, event: &str) {
+        if let Some(clock) = parse_page_clock(event) {
+            if let Some(preview) = self.preview.as_mut() {
+                preview.page_clock = Some(clock);
+            }
+            return;
+        }
         if event.starts_with("wallpaper_heartbeat ") {
             return;
         }
@@ -1446,6 +1692,7 @@ impl App {
     }
 
     fn locate(&mut self) {
+        let was_enabled = self.config.lyrics.enabled;
         self.config.lyrics.enabled = true;
         self.policy.user_hidden = false;
         if self.config.lyrics.locked {
@@ -1456,6 +1703,9 @@ impl App {
             self.schedule_save();
         }
         self.panel_top = None;
+        if !was_enabled {
+            self.schedule_save();
+        }
         self.place(true);
         native::show_no_activate(self.hwnd());
         native::focus(self.hwnd());
@@ -1479,9 +1729,48 @@ impl App {
             return;
         }
         self.save_due = None;
-        self.config.revision = self.config.revision.saturating_add(1);
-        if let Err(error) = config::save(&self.config) {
-            log(&format!("save config failed: {error:#}"));
+        let next = self.config.clone();
+        let mut committed = self.committed_config.clone();
+        let result = config::commit(&mut committed, next);
+        match result {
+            Ok(()) => {
+                self.config = committed;
+                self.committed_config = self.config.clone();
+            }
+            Err(error) => {
+                let restore_autostart =
+                    self.config.launch_at_login != self.committed_config.launch_at_login;
+                self.config = self.committed_config.clone();
+                let mut restore_error = None;
+                if restore_autostart {
+                    if let Err(error) = native::set_autostart(self.config.launch_at_login) {
+                        log(&format!("restore autostart after failed save: {error:#}"));
+                        restore_error = Some(error);
+                    }
+                }
+                // Ordinary edits apply immediately. Rollback must restore their
+                // window/page effects along with the durable intent and revision.
+                self.policy.locked = self.config.lyrics.locked;
+                native::set_locked(self.hwnd(), self.policy.locked);
+                self.panel_top = None;
+                if self.policy.locked {
+                    self.panel_height = 0.0;
+                }
+                self.send_config();
+                self.place(true);
+                self.recompute_visibility();
+                self.sync_settings_feed();
+                self.sync_tray();
+                log(&format!("save config failed: {error:#}"));
+                let message = restore_error.map_or_else(
+                    || "未保存，已恢复上次设置".to_string(),
+                    |error| {
+                        format!("未保存，已恢复上次歌词与壁纸设置；Windows 启动项恢复失败：{error}")
+                    },
+                );
+                self.send_settings_status(Some(&message), None);
+                return;
+            }
         }
         self.send_settings_status(None, None);
     }
@@ -1489,7 +1778,9 @@ impl App {
     fn sync_tray(&self) {
         if let Some(actions) = self.tray_actions.as_ref() {
             actions.toggle.set_checked(!self.policy.user_hidden);
-            actions.autostart.set_checked(self.config.launch_at_login);
+            if let Ok(enabled) = native::autostart_enabled() {
+                actions.autostart.set_checked(enabled);
+            }
             if let Some(toggle) = actions.wallpaper_toggle.as_ref() {
                 toggle.set_checked(!self.wallpaper_hidden);
             }
@@ -1512,12 +1803,17 @@ impl App {
             log("ignore malformed page command");
             return;
         };
-        if self.position_edit.is_some() && !matches!(command.cmd.as_str(), "ready" | "drag" | "log")
+        if self.position_edit.is_some()
+            && !matches!(command.cmd.as_str(), "ready" | "clock" | "drag" | "log")
         {
             return;
         }
         match command.cmd.as_str() {
+            "clock" => {
+                self.page_clock = command.value.and_then(PageClock::new);
+            }
             "ready" => {
+                self.page_clock = command.value.and_then(PageClock::new);
                 self.page_ready = true;
                 self.send_all();
             }
@@ -1530,6 +1826,80 @@ impl App {
             "locate" => self.locate(),
             "drag" => {
                 let _ = self.window.drag_window();
+            }
+            "play" | "pause" | "seek" => {
+                let (Some(profile), Some(snapshot)) = (
+                    self.config.active_profile.clone(),
+                    self.last_snapshot.as_ref(),
+                ) else {
+                    return;
+                };
+                if config::is_dbx(&profile)
+                    || self.policy.locked
+                    || self.last_update.elapsed() > Duration::from_secs(2)
+                {
+                    return;
+                }
+                let Some(track) = snapshot.track.as_ref() else {
+                    return;
+                };
+                let payload = serde_json::json!({
+                    "action": command.cmd,
+                    "session": snapshot.server.session,
+                    "trackId": track.id,
+                    "generation": snapshot.generation,
+                    "documentKey": snapshot.lyrics.document_key,
+                    "positionMs": command.value.filter(|v| v.is_finite() && *v >= 0.0).map(|v| v as u64),
+                });
+                let proxy = self.proxy.clone();
+                let generation = self.source_generation;
+                std::thread::spawn(move || {
+                    let result =
+                        crate::feed::control(&profile, &payload).map_err(|e| format!("{e:#}"));
+                    let _ = proxy.send_event(UserEvent::LyricControl(generation, result));
+                });
+            }
+            "appearance" => {
+                let Some(target) = command.target.as_deref() else {
+                    return;
+                };
+                if !matches!(
+                    target,
+                    "theme"
+                        | "surface"
+                        | "align"
+                        | "bilingual"
+                        | "karaoke"
+                        | "readabilityBoost"
+                        | "fontSize"
+                        | "opacity"
+                ) {
+                    return;
+                }
+                let value = match target {
+                    "bilingual" | "karaoke" | "readabilityBoost" => match command.text.as_deref() {
+                        Some("true") => serde_json::Value::Bool(true),
+                        Some("false") => serde_json::Value::Bool(false),
+                        _ => return,
+                    },
+                    "fontSize" | "opacity" => {
+                        let Some(value) = command.value.filter(|v| v.is_finite()) else {
+                            return;
+                        };
+                        serde_json::json!(value)
+                    }
+                    _ => serde_json::json!(command.text),
+                };
+                let mut updated = serde_json::to_value(&self.config.lyrics).unwrap();
+                updated[target] = value;
+                let Ok(lyrics) = serde_json::from_value::<config::LyricsConfig>(updated) else {
+                    return;
+                };
+                self.config.lyrics = lyrics;
+                self.config.sanitize();
+                self.send_config();
+                self.place(true);
+                self.schedule_save();
             }
             "layout" => {
                 let Some(layout) =
@@ -1699,16 +2069,56 @@ impl App {
         request: &serde_json::Value,
         target: &EventLoopWindowTarget<UserEvent>,
     ) -> serde_json::Value {
+        if !crate::management::is_versioned(request) {
+            return self.handle_pipe_command(request, target, None);
+        }
+        let v2 = match crate::management::parse(request) {
+            Ok(request) => request,
+            Err(response) => return response,
+        };
+        let response = match v2
+            .check_target(self.config.active_profile.as_ref())
+            .and_then(|()| v2.check_value(self.config.revision, self.save_due.is_some()))
+        {
+            Ok(()) => self.handle_pipe_command(request, target, Some(&v2)),
+            Err(error) => error,
+        };
+        let response = if response["ok"] == true {
+            self.with_target_status(response, Some(&v2.target_profile))
+        } else {
+            response
+        };
+        crate::management::reply(response, Some(&v2.request_id))
+    }
+
+    fn handle_pipe_command(
+        &mut self,
+        request: &serde_json::Value,
+        target: &EventLoopWindowTarget<UserEvent>,
+        v2: Option<&crate::management::Request>,
+    ) -> serde_json::Value {
         let command = request
             .get("command")
             .and_then(|value| value.as_str())
             .unwrap_or("");
         log(&format!("control command={command}"));
         let value = request.get("value");
+        if v2.is_none()
+            && config::is_dbx(&self.profile)
+            && !matches!(
+                command,
+                "status" | "wallpaper-status" | "wallpaper-settings" | "open-center"
+            )
+        {
+            return pipe_error_detail(
+                "source_target_required",
+                "此来源需要带明确目标的桌面管理协议",
+            );
+        }
         if self.position_edit.is_some()
             && !matches!(
                 command,
-                "status" | "wallpaper-status" | "wallpaper-settings" | "quit"
+                "status" | "wallpaper-status" | "wallpaper-settings" | "open-center" | "quit"
             )
         {
             return pipe_error_detail(
@@ -1718,7 +2128,7 @@ impl App {
         }
         match command {
             "status" | "wallpaper-status" => {}
-            "wallpaper-settings" => {
+            "wallpaper-settings" | "open-center" => {
                 if let Some(tab) = value
                     .and_then(|value| value.get("tab"))
                     .and_then(|tab| tab.as_str())
@@ -1727,12 +2137,18 @@ impl App {
                     self.settings_tab = tab.to_string();
                     self.settings_navigation = self.settings_navigation.wrapping_add(1);
                 }
-                if let Some(profile) = value
-                    .and_then(|value| value.get("profile"))
-                    .and_then(|value| serde_json::from_value::<Profile>(value.clone()).ok())
-                    .and_then(|profile| config::normalize_profile(profile).ok())
-                {
-                    self.settings_candidate = Some(profile);
+                // Legacy callers may open the current DBX center, but cannot nominate
+                // another source through the unscoped management envelope.
+                if let Some(v2) = v2 {
+                    self.settings_candidate = Some(v2.target_profile.clone());
+                } else if !config::is_dbx(&self.profile) {
+                    if let Some(profile) = value
+                        .and_then(|value| value.get("profile"))
+                        .and_then(|value| config::management_profile(value.clone()).ok())
+                        .and_then(|profile| config::normalize_profile(profile).ok())
+                    {
+                        self.settings_candidate = Some(profile);
+                    }
                 }
                 self.open_settings(target);
             }
@@ -1796,7 +2212,7 @@ impl App {
                 #[serde(rename_all = "camelCase")]
                 struct SwitchRequest {
                     expected_revision: u64,
-                    profile: Profile,
+                    profile: serde_json::Value,
                 }
                 let switch = match serde_json::from_value::<SwitchRequest>(
                     value.cloned().unwrap_or(serde_json::Value::Null),
@@ -1804,9 +2220,11 @@ impl App {
                     Ok(switch) => switch,
                     Err(_) => return pipe_error("invalid_value"),
                 };
-                if let Err(error) =
-                    self.switch_source(switch.profile, switch.expected_revision, target)
-                {
+                let profile = match config::management_profile(switch.profile) {
+                    Ok(profile) if !config::is_dbx(&profile) => profile,
+                    _ => return pipe_error("source_target_required"),
+                };
+                if let Err(error) = self.switch_source(profile, switch.expected_revision, target) {
                     return pipe_error_detail("profile_switch_failed", error);
                 }
             }
@@ -1818,6 +2236,9 @@ impl App {
             }
             "unlock" => self.set_locked(false),
             "show" => {
+                if !self.config.lyrics.enabled {
+                    self.schedule_save();
+                }
                 self.config.lyrics.enabled = true;
                 self.policy.user_hidden = false;
                 self.recompute_visibility();
@@ -1832,6 +2253,7 @@ impl App {
                 let layout = match value.and_then(|value| value.as_str()) {
                     Some("single") => Layout::Single,
                     Some("double") => Layout::Double,
+                    Some("triple") => Layout::Triple,
                     _ => return pipe_error("invalid_value"),
                 };
                 self.config.lyrics.layout = layout;
@@ -1881,9 +2303,39 @@ impl App {
         self.status_json()
     }
 
+    fn with_target_status(
+        &self,
+        mut response: serde_json::Value,
+        target: Option<&Profile>,
+    ) -> serde_json::Value {
+        let is_active = target
+            .zip(self.config.active_profile.as_ref())
+            .is_some_and(|(target, active)| config::same_profile(target, active));
+        let scopes = self.source_health.scopes(is_active, Instant::now());
+        response["targetProfile"] = serde_json::to_value(target).unwrap();
+        response["sourceConnected"] =
+            (scopes["lyrics"] == true || scopes["wallpaper"] == true).into();
+        response["sourceScopes"] = scopes;
+        response["sourceSession"] = self.source_health.session().into();
+        response
+    }
+
     fn status_json(&self) -> serde_json::Value {
-        serde_json::json!({
+        self.with_target_status(serde_json::json!({
             "ok": true,
+            "managementProtocol": crate::component::MANAGEMENT_PROTOCOL,
+            "bridgeProtocol": crate::component::DBX_BRIDGE_PROTOCOL,
+            "desktopBuildId": crate::component::BUILD_ID,
+            "capabilities": {
+                "targetProfile": true,
+                "requestId": true,
+                "requiredDesktopBuildId": true,
+                "expectedRevision": true,
+                "commands": crate::management::V2_COMMANDS,
+                "sourceFreshnessMs": crate::management::STALE_AFTER.as_millis() as u64,
+                "sourceSwitch": "native-center",
+            },
+            "activeProfile": self.config.active_profile,
             "revision": self.config.revision,
             "locked": self.config.lyrics.locked,
             "enabled": self.config.lyrics.enabled,
@@ -1897,10 +2349,7 @@ impl App {
                 "displayOff": self.policy.display_off,
                 "noContent": self.policy.no_content,
             },
-            "profile": {
-                "dataDir": self.profile.data_dir.to_string_lossy(),
-                "edition": self.profile.edition,
-            },
+            "profile": self.config.active_profile,
             "wallpaper": {
                 "enabled": self.config.wallpaper.enabled || self.wallpaper_forced,
                 "visible": self.wallpaper_visible,
@@ -1975,7 +2424,7 @@ impl App {
                     "lastSeq": self.wallpaper_last.as_ref().map(|snapshot| snapshot.seq),
                 },
             },
-        })
+        }), self.config.active_profile.as_ref())
     }
 
     fn handle_native(&mut self, event: NativeEvent, target: &EventLoopWindowTarget<UserEvent>) {
@@ -2012,7 +2461,51 @@ impl App {
         }
     }
 
+    fn source_expiry_deadline(&self) -> Option<Instant> {
+        let lyrics = self
+            .last_snapshot
+            .as_ref()
+            .map(|_| self.last_update + STALE_AFTER);
+        let wallpaper = config::is_dbx(&self.profile)
+            .then_some(self.wallpaper_last_update)
+            .flatten()
+            .filter(|_| self.wallpaper_last.is_some())
+            .map(|at| at + STALE_AFTER);
+        lyrics.into_iter().chain(wallpaper).min()
+    }
+
+    fn expire_source_data(&mut self, now: Instant) {
+        if config::is_dbx(&self.profile)
+            && self
+                .wallpaper_last_update
+                .is_some_and(|at| now.saturating_duration_since(at) >= STALE_AFTER)
+            && self.wallpaper_last.is_some()
+        {
+            self.handle_wallpaper_feed(Err(FeedError {
+                code: "dbx_stale",
+                message: "等待所选 DBX 的新快照".into(),
+            }));
+        }
+        if now.saturating_duration_since(self.last_update) >= STALE_AFTER
+            && self.last_snapshot.is_some()
+        {
+            self.last_snapshot = None;
+            self.current_document = None;
+            self.current_document_key = None;
+            self.policy.no_content = true;
+            self.source_state = "waiting";
+            self.source_message = Some("等待 Hertz 服务的新快照".into());
+            self.send_document();
+            self.send_snapshot();
+            self.send_source();
+            self.recompute_visibility();
+            self.last_update = now;
+        }
+    }
+
     fn tick(&mut self, target: &EventLoopWindowTarget<UserEvent>) {
+        self.sync_dbx_feed();
+        self.expire_source_data(Instant::now());
         self.flush_save();
         let now = Instant::now();
         if self
@@ -2065,19 +2558,6 @@ impl App {
                 }
             }
             self.ensure_on_screen();
-            if now.duration_since(self.last_update) > STALE_AFTER && self.last_snapshot.is_some() {
-                self.last_snapshot = None;
-                self.current_document = None;
-                self.current_document_key = None;
-                self.policy.no_content = true;
-                self.source_state = "waiting";
-                self.source_message = Some("等待 Hertz 服务的新快照".into());
-                self.send_document();
-                self.send_snapshot();
-                self.send_source();
-                self.recompute_visibility();
-                self.last_update = now;
-            }
         }
         if self.visible && now.duration_since(self.last_raise) >= Duration::from_secs(2) {
             self.last_raise = now;
@@ -2185,18 +2665,31 @@ impl App {
         let lines = match lyrics.layout {
             Layout::Double => 2.0,
             Layout::Single => 1.0,
+            Layout::Triple => 3.0,
         };
-        let toolbar = if lyrics.locked { 0.0 } else { 30.0 };
-        (lyrics.font_size * 1.55 * lines + 60.0 + toolbar).clamp(96.0, 360.0)
+        // Fixed slots keep wrapped lyrics and translations from moving the native window.
+        let factor = if lyrics.width <= 360.0 {
+            if lyrics.bilingual {
+                4.5
+            } else {
+                3.25
+            }
+        } else if lyrics.bilingual {
+            2.55
+        } else {
+            2.0
+        };
+        let group = lyrics.font_size * factor;
+        group * lines + 108.0
     }
 
     fn height_dip(&self) -> f64 {
-        (self.base_height_dip() + self.panel_height).clamp(96.0, 620.0)
+        self.base_height_dip() + self.panel_height
     }
 
     /// 顶部不动的窗口高度调整：样式条只往下长，歌词不跳。
     fn set_panel_height(&mut self, height: f64) {
-        let height = height.clamp(0.0, 480.0);
+        let height = height.clamp(0.0, 512.0);
         if (height - self.panel_height).abs() < 0.5 {
             return;
         }
@@ -2217,7 +2710,7 @@ impl App {
         let scale = area.scale();
         let max_width = (f64::from(area.width()) / scale * 0.9).max(240.0);
         let width_dip = self.config.lyrics.width.min(max_width);
-        let height_dip = self.height_dip();
+        let height_dip = self.height_dip().min(f64::from(area.height()) / scale);
         let width = (width_dip * scale).round() as i32;
         let height = (height_dip * scale).round() as i32;
         let (anchor_x, anchor_y) = if keep_anchor {
@@ -2295,6 +2788,10 @@ impl App {
 
     fn on_moved(&mut self) {
         if self.placing {
+            return;
+        }
+        // A move caused by an outage hiding the window must not rewrite the saved anchor or pin the monitor.
+        if self.policy.no_content {
             return;
         }
         let hwnd = self.hwnd();
@@ -2420,10 +2917,7 @@ pub(crate) fn run() -> Result<()> {
         let profile = args
             .data_dir
             .take()
-            .map(|data_dir| Profile {
-                data_dir,
-                edition: "custom".into(),
-            })
+            .map(|data_dir| config::standalone(data_dir, "custom"))
             .or_else(|| config.active_profile.clone())
             .or_else(config::detect_profile)
             .unwrap_or_else(default_profile);
@@ -2440,36 +2934,31 @@ pub(crate) fn run() -> Result<()> {
     };
     let mut config = config::load()?;
     config.sanitize();
-    let mut profile = args
+    let profile = args
         .data_dir
         .take()
-        .map(|data_dir| Profile {
-            data_dir,
-            edition: "custom".into(),
-        })
+        .map(|data_dir| config::standalone(data_dir, "custom"))
         .or_else(|| config.active_profile.clone())
         .or_else(config::detect_profile)
         .unwrap_or_else(default_profile);
-    match config.activate_profile(profile.clone()) {
-        Ok(true) => {
-            if let Err(error) = config::save(&config) {
-                log(&format!("save initial profile failed: {error:#}"));
-            }
-        }
-        Ok(false) => {}
-        Err(error) => {
-            log(&format!("activate initial profile failed: {error:#}"));
-            if let Some(active) = config.active_profile.clone() {
-                profile = active;
-            }
+    let explicit_binding = args.data_dir.is_some();
+    // The CLI value was consumed above; custom means it was explicitly supplied.
+    let explicit_binding = explicit_binding
+        || matches!(&profile, Profile::Standalone { edition, .. } if edition == "custom");
+    if config.unbound_standalone.is_none() || explicit_binding || config.active_profile.is_some() {
+        let mut next = config.clone();
+        if next.activate_profile(profile.clone())? {
+            config::commit(&mut config, next)?;
         }
     }
     let wallpaper_forced = args.wallpaper;
     log(&format!(
         "profile={} edition={} discovery={}",
-        profile.data_dir.display(),
-        profile.edition,
-        profile.data_dir.join("vmusicd.json").display()
+        std::path::Path::new(profile.data_dir()).display(),
+        profile.edition(),
+        std::path::Path::new(profile.data_dir())
+            .join("vmusicd.json")
+            .display()
     ));
 
     std::fs::create_dir_all(config::webview_dir()).ok();
@@ -2543,7 +3032,12 @@ pub(crate) fn run() -> Result<()> {
         webview,
         tray: None,
         tray_actions: None,
+        committed_config: config.clone(),
         config,
+        dbx: None,
+        dbx_session: None,
+        source_health: crate::management::SourceHealth::default(),
+        wallpaper_last_update: None,
         profile,
         policy: Policy {
             locked: false,
@@ -2559,6 +3053,7 @@ pub(crate) fn run() -> Result<()> {
         current_document_key: None,
         current_document: None,
         page_ready: false,
+        page_clock: None,
         visible: false,
         placing: false,
         save_due: None,
@@ -2633,12 +3128,16 @@ pub(crate) fn run() -> Result<()> {
     if app.config.wallpaper.enabled || app.wallpaper_forced {
         app.ensure_wallpaper_feed();
     }
-    spawn_feed(
-        app.profile.clone(),
-        proxy.clone(),
-        app.source_generation,
-        app.lyrics_feed_stop.clone(),
-    );
+    if !config::is_dbx(&app.profile) && app.config.active_profile.is_some() {
+        spawn_feed(
+            app.profile.clone(),
+            proxy.clone(),
+            app.source_generation,
+            app.lyrics_feed_stop.clone(),
+        );
+    } else if config::is_dbx(&app.profile) {
+        app.sync_dbx_feed();
+    }
     spawn_ticker(proxy.clone());
     let pipe_proxy = proxy.clone();
     if let Err(error) = crate::pipe::start(move |request| {
@@ -2654,12 +3153,22 @@ pub(crate) fn run() -> Result<()> {
     }
 
     event_loop.run(move |event, target, control_flow| {
-        *control_flow = ControlFlow::Wait;
+        // Freshness is a deadline, independent of the 500 ms maintenance ticker.
+        // This also clears expired data before handling a queued status/document.
+        if !matches!(&event, Event::LoopDestroyed) {
+            app.expire_source_data(Instant::now());
+        }
+        *control_flow = app
+            .source_expiry_deadline()
+            .map_or(ControlFlow::Wait, ControlFlow::WaitUntil);
         match event {
-            Event::UserEvent(UserEvent::Feed(generation, result)) => {
+            Event::UserEvent(UserEvent::Dbx(generation, message)) => {
+                if generation == app.source_generation && config::is_dbx(&app.profile) { app.handle_dbx(*message); }
+            }
+            Event::UserEvent(UserEvent::Feed(generation, started, result)) => {
                 if generation == app.source_generation {
                     match *result {
-                        Ok(update) => app.handle_update(update),
+                        Ok(update) => app.handle_update(update, started),
                         Err(message) => app.handle_feed_error(message),
                     }
                 } else {
@@ -2669,8 +3178,15 @@ pub(crate) fn run() -> Result<()> {
                     ));
                 }
             }
-            Event::UserEvent(UserEvent::WallpaperFeed(generation, result)) => {
+            Event::UserEvent(UserEvent::WallpaperFeed(generation, started, mut result)) => {
                 if generation == app.source_generation {
+                    if let Ok(snapshot) = result.as_mut() {
+                        if started.elapsed() >= STALE_AFTER { return; }
+                        snapshot.received_at = Some(started);
+                    }
+                    if let Ok(snapshot) = result.as_ref() {
+                        app.source_health.accept(false, started, &snapshot.server.session);
+                    }
                     app.handle_wallpaper_feed(*result);
                 } else {
                     log(&format!(
@@ -2687,10 +3203,21 @@ pub(crate) fn run() -> Result<()> {
             }
             Event::UserEvent(UserEvent::Tick) => app.tick(target),
             Event::UserEvent(UserEvent::Page(body)) => app.page_command(&body),
+            Event::UserEvent(UserEvent::LyricControl(generation, result)) => {
+                if generation == app.source_generation {
+                    let error = result.err();
+                    if let Some(message) = error.as_ref() { log(&format!("lyric control failed: {message}")); }
+                    let message = if error.is_some() { "操作未完成，请重试或返回播放器" } else { "" };
+                    app.eval(&format!("window.hertzLyrics.controlDone({});", serde_json::to_string(message).unwrap()));
+                }
+            }
             Event::UserEvent(UserEvent::Tray(event)) => app.handle_tray(event),
             Event::UserEvent(UserEvent::Menu(event)) => app.handle_menu(&event.id.0, target),
             Event::UserEvent(UserEvent::Native(event)) => app.handle_native(event, target),
             Event::UserEvent(UserEvent::Pipe(request)) => {
+                if !request.admission.is_valid() {
+                    return;
+                }
                 let response = app.handle_pipe_request(&request.body, target);
                 let _ = request.reply.send(response);
             }
@@ -2717,9 +3244,15 @@ pub(crate) fn run() -> Result<()> {
                 }
             }
             Event::LoopDestroyed => {
+                app.dbx = None;
                 log("event loop destroyed");
             }
             _ => {}
+        }
+        if *control_flow != ControlFlow::Exit {
+            if let Some(deadline) = app.source_expiry_deadline() {
+                *control_flow = ControlFlow::WaitUntil(deadline);
+            }
         }
     });
 }
@@ -2736,9 +3269,11 @@ fn layout_choice(text: Option<&str>, current: Layout) -> Option<Layout> {
     match text {
         Some("single") => Some(Layout::Single),
         Some("double") => Some(Layout::Double),
+        Some("triple") => Some(Layout::Triple),
         None => Some(match current {
             Layout::Double => Layout::Single,
             Layout::Single => Layout::Double,
+            Layout::Triple => Layout::Single,
         }),
         Some(_) => None,
     }
@@ -2783,6 +3318,7 @@ fn spawn_feed(
                 Err(error) => {
                     let _ = proxy.send_event(UserEvent::Feed(
                         generation,
+                        Instant::now(),
                         Box::new(Err(format!("{error:#}"))),
                     ));
                     return;
@@ -2792,10 +3328,11 @@ fn spawn_feed(
                 if stop.load(Ordering::Relaxed) {
                     break;
                 }
+                let started = Instant::now();
                 let update = feed.poll().map_err(|error| format!("{error:#}"));
                 let failed = update.is_err();
                 if proxy
-                    .send_event(UserEvent::Feed(generation, Box::new(update)))
+                    .send_event(UserEvent::Feed(generation, started, Box::new(update)))
                     .is_err()
                 {
                     break;
@@ -2918,12 +3455,7 @@ fn profile_options(
     }
     profiles
         .into_iter()
-        .map(|profile| {
-            serde_json::json!({
-                "dataDir": profile.data_dir.to_string_lossy(),
-                "edition": profile.edition,
-            })
-        })
+        .map(|profile| serde_json::to_value(profile).unwrap())
         .collect()
 }
 
@@ -3010,6 +3542,7 @@ fn create_wallpaper(
         monitor.name, monitor.left, monitor.top, monitor.width, monitor.height, monitor.dpi
     ));
     Ok(WallpaperSurface {
+        page_clock: None,
         window,
         webview,
         monitor,
@@ -3182,7 +3715,11 @@ fn spawn_wallpaper_feed(
                     }
                     received = true;
                     proxy
-                        .send_event(UserEvent::WallpaperFeed(generation, Box::new(Ok(snapshot))))
+                        .send_event(UserEvent::WallpaperFeed(
+                            generation,
+                            Instant::now(),
+                            Box::new(Ok(snapshot)),
+                        ))
                         .is_ok()
                         && !stop.load(Ordering::Relaxed)
                 });
@@ -3198,8 +3735,11 @@ fn spawn_wallpaper_feed(
                     }
                     Err(error) => {
                         log(&format!("wallpaper events {error}"));
-                        let _ = proxy
-                            .send_event(UserEvent::WallpaperFeed(generation, Box::new(Err(error))));
+                        let _ = proxy.send_event(UserEvent::WallpaperFeed(
+                            generation,
+                            Instant::now(),
+                            Box::new(Err(error)),
+                        ));
                     }
                 }
                 if received {
@@ -3224,10 +3764,15 @@ fn poll_wallpaper_feed(
         if stop.load(Ordering::Relaxed) {
             break;
         }
+        let started = Instant::now();
         let result = feed.poll();
         let failed = result.is_err();
         if proxy
-            .send_event(UserEvent::WallpaperFeed(generation, Box::new(result)))
+            .send_event(UserEvent::WallpaperFeed(
+                generation,
+                started,
+                Box::new(result),
+            ))
             .is_err()
         {
             break;
@@ -3264,14 +3809,29 @@ fn spawn_ticker(proxy: EventLoopProxy<UserEvent>) {
         .ok();
 }
 
+fn parse_page_clock(event: &str) -> Option<PageClock> {
+    PageClock::new(event.strip_prefix("wallpaper_clock ")?.parse().ok()?)
+}
+fn wallpaper_payload(
+    snapshot: &WallpaperSnapshot,
+    clock: Option<PageClock>,
+) -> Result<String, serde_json::Error> {
+    let mut value = serde_json::to_value(snapshot)?;
+    if let Some(started) = snapshot.received_at {
+        let now = Instant::now();
+        value["snapshotAgeMs"] = (now.saturating_duration_since(started).as_millis() as u64).into();
+        if let Some(clock) = clock {
+            value["pageDispatchMs"] = serde_json::json!(clock.at(now));
+        }
+    }
+    serde_json::to_string(&value)
+}
+
 fn default_profile() -> Profile {
     let dir = dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("hertz-studio");
-    Profile {
-        data_dir: dir,
-        edition: "full".into(),
-    }
+    config::standalone(dir, "full")
 }
 
 fn page_html() -> String {
@@ -3446,10 +4006,7 @@ mod tests {
     use super::*;
 
     fn profile(dir: &str) -> Profile {
-        Profile {
-            data_dir: PathBuf::from(dir),
-            edition: "full".into(),
-        }
+        config::standalone(PathBuf::from(dir), "full")
     }
 
     fn monitor() -> native::WallpaperMonitor {
@@ -3596,10 +4153,7 @@ mod tests {
     fn profile_options_include_saved_and_candidate_sources() {
         let current = profile(r"C:\profiles\a");
         let saved = profile(r"C:\profiles\b");
-        let candidate = Profile {
-            data_dir: PathBuf::from(r"C:\profiles\c"),
-            edition: "standard".into(),
-        };
+        let candidate = config::standalone(PathBuf::from(r"C:\profiles\c"), "standard");
         let mut config = config::Config::default();
         config.activate_profile(saved).unwrap();
         let options = profile_options(&current, &config, Some(&candidate));
@@ -3645,7 +4199,11 @@ mod tests {
         );
         assert_eq!(layout_choice(None, Layout::Double), Some(Layout::Single));
         assert_eq!(layout_choice(None, Layout::Single), Some(Layout::Double));
-        assert_eq!(layout_choice(Some("triple"), Layout::Double), None);
+        assert_eq!(
+            layout_choice(Some("triple"), Layout::Double),
+            Some(Layout::Triple)
+        );
+        assert_eq!(layout_choice(Some("unknown"), Layout::Double), None);
     }
 
     #[test]

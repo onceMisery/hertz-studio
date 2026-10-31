@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: MIT
+#[path = "../../build-support/desktop-build.rs"]
+mod desktop_build;
 #[path = "../../build-support/edition-ui.rs"]
 mod edition_ui;
 
@@ -16,7 +18,11 @@ fn main() {
             .expect("compiler version is UTF-8")
             .trim()
     );
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let root = std::path::PathBuf::from(
+        std::env::var_os("CARGO_MANIFEST_DIR").expect("Cargo manifest directory"),
+    )
+    .join("../..");
+    desktop_build::emit(&root, true);
     let source = root.join("plugin/ui");
     println!("cargo:rerun-if-changed={}", source.display());
     println!(
