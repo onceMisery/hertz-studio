@@ -372,9 +372,9 @@ async fn run(
             changed = needs_rx.changed() => {
                 if changed.is_err() { break; }
                 needs = *needs_rx.borrow_and_update();
-                for slot in 0..3 {
+                for (slot, work) in slots.iter().enumerate() {
                     if (slot == 1 && !needs.wallpaper) || (slot != 1 && !needs.lyrics) {
-                        if let Some(work) = &slots[slot] { work.cancel.cancel(); }
+                        if let Some(work) = &work { work.cancel.cancel(); }
                     }
                 }
                 if !needs.lyrics { desired_doc = None; successful_doc = None; document_confirmation_after = None; }

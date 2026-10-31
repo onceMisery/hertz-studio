@@ -759,7 +759,7 @@ fn save_locked(config: &Config) -> Result<()> {
 }
 fn save_at(config: &Config, dir: &Path) -> Result<()> {
     let bytes = encode_config(config)?;
-    std::fs::create_dir_all(&dir).context("创建桌面配置目录")?;
+    std::fs::create_dir_all(dir).context("创建桌面配置目录")?;
     let path = dir.join("config.json");
     let tmp = dir.join("config.json.tmp");
     let result = (|| -> Result<()> {
@@ -927,9 +927,11 @@ mod tests {
 
     #[test]
     fn unbound_edits_survive_save_reload_and_first_binding() {
-        let mut lyrics = LyricsConfig::default();
-        lyrics.font_size = 44.0;
-        lyrics.locked = true;
+        let lyrics = LyricsConfig {
+            font_size: 44.0,
+            locked: true,
+            ..Default::default()
+        };
         let bytes = serde_json::to_vec(&serde_json::json!({
             "schemaVersion":1,"revision":5,"launchAtLogin":false,"activeProfile":null,
             "lyrics":lyrics,"wallpaper":WallpaperConfig::default()
@@ -1044,12 +1046,16 @@ mod tests {
     }
     #[test]
     fn unbound_legacy_preferences_survive_dbx_then_bind_to_standalone() {
-        let mut lyrics = LyricsConfig::default();
-        lyrics.font_size = 48.0;
-        lyrics.locked = true;
-        let mut wallpaper = WallpaperConfig::default();
-        wallpaper.enabled = true;
-        wallpaper.fps = 60;
+        let lyrics = LyricsConfig {
+            font_size: 48.0,
+            locked: true,
+            ..Default::default()
+        };
+        let wallpaper = WallpaperConfig {
+            enabled: true,
+            fps: 60,
+            ..Default::default()
+        };
         let bytes = serde_json::to_vec(
             &serde_json::json!({"schemaVersion":1,"revision":9,"launchAtLogin":true,
             "activeProfile":null,"lyrics":lyrics,"wallpaper":wallpaper}),
@@ -1195,10 +1201,14 @@ mod tests {
     }
     #[test]
     fn missing_dbx_active_domain_starts_disabled_and_preserves_unbound_preferences() {
-        let mut old_lyrics = LyricsConfig::default();
-        old_lyrics.font_size = 44.0;
-        let mut old_wallpaper = WallpaperConfig::default();
-        old_wallpaper.enabled = true;
+        let old_lyrics = LyricsConfig {
+            font_size: 44.0,
+            ..Default::default()
+        };
+        let old_wallpaper = WallpaperConfig {
+            enabled: true,
+            ..Default::default()
+        };
         let value = serde_json::json!({ "schemaVersion":3,"revision":7,"launchAtLogin":true,
             "activeProfile":dbx("missing-domain"),"profiles":[],
             "unboundStandalone":{"lyrics":old_lyrics,"wallpaper":old_wallpaper} });
