@@ -52,6 +52,8 @@ public class LyricsFrame {
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h,out Rect r);
   [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr h,out Rect r);
   [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr h,ref Point p);
+  [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr h,uint m,IntPtr w,IntPtr l);
+  [DllImport("user32.dll")] public static extern bool RedrawWindow(IntPtr h,IntPtr r,IntPtr region,uint flags);
   public struct Rect { public int left,top,right,bottom; }
   public struct Point { public int x,y; }
 }
@@ -63,6 +65,9 @@ ${refreshStyle ? `
 [void][LyricsFrame]::SetWindowLong($hwnd,-16,([LyricsFrame]::GetWindowLong($hwnd,-16) -bor 0x00cf0000))
 [void][LyricsFrame]::SetWindowPos($hwnd,[IntPtr]::Zero,0,0,0,0,55)
 ` : ''}
+[void][LyricsFrame]::SendMessage($hwnd,134,[IntPtr]1,[IntPtr]::Zero)
+[void][LyricsFrame]::RedrawWindow($hwnd,[IntPtr]::Zero,[IntPtr]::Zero,1153)
+[void][LyricsFrame]::SendMessage($hwnd,134,[IntPtr]::Zero,[IntPtr]::Zero)
 $window=New-Object LyricsFrame+Rect
 $client=New-Object LyricsFrame+Rect
 $origin=New-Object LyricsFrame+Point
@@ -74,6 +79,7 @@ $origin=New-Object LyricsFrame+Point
   // Keep the fixture server responsive while PowerShell reads the real Win32 frame.
   const {stdout}=await execFileAsync('powershell.exe',['-NoProfile','-NonInteractive','-Command',script],{encoding:'utf8',windowsHide:true});
   const frame=JSON.parse(stdout);
+  fs.appendFileSync(path.join(output,'native-frame-observations.jsonl'),JSON.stringify({stage,refreshStyle,...frame})+'\n');
   assert.equal(frame.style&0x00cf0000,0,stage+': native caption and frame stay removed');
   assert.equal(frame.origin.x,frame.window.left,stage+': no left frame');
   assert.equal(frame.origin.y,frame.window.top,stage+': no title bar');
@@ -88,8 +94,10 @@ async function main(){
   fs.writeFileSync(path.join(profileDir,'desktop-lyrics-key'),key);
   fs.writeFileSync(path.join(output,'config.json'),JSON.stringify({schemaVersion:2,revision:1,launchAtLogin:false,activeProfile:profile,profiles:[{profile,lyrics:{...config,width:550,anchorX:.5,anchorY:.3,monitor:null},wallpaper:{enabled:false,fps:30,musicResponse:true,monitor:null,source:'fixed',scene:'coast'}}]}).replace(',"frameCap":30','').replace(',"panelMaxHeight":360',''));
   const port=Number(process.env.DESKTOP_CDP_PORT||19427);
-  const child=spawn(path.join(root,'target/debug/hertz-desktop.exe'),[],{cwd:root,windowsHide:true,env:{...process.env,HERTZ_DESKTOP_CONFIG_DIR:output,WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS:'--remote-debugging-port='+port},stdio:'ignore'});
-  let browser;
+  const binary=process.env.HERTZ_DESKTOP_BIN||path.join(root,'target/debug/hertz-desktop.exe');
+  const child=spawn(binary,[],{cwd:root,windowsHide:true,env:{...process.env,HERTZ_DESKTOP_CONFIG_DIR:output,WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS:'--remote-debugging-port='+port},stdio:'ignore'});
+  const exited=new Promise(resolve=>child.once('exit',resolve));
+  let browser,verificationPassed=false;
   try{
     for(let i=0;i<60;i++){try{browser=await chromium.connectOverCDP('http://127.0.0.1:'+port);break;}catch{}if(child.exitCode!==null)throw new Error('Host exited '+child.exitCode);await new Promise(r=>setTimeout(r,200));}
     assert.ok(browser);
@@ -108,6 +116,23 @@ async function main(){
     assert.ok(expanded.panel.bottom<=expanded.height);
     assert.ok(Math.abs(expanded.stage-(baseSize.height-84))<3,'Opening settings preserves lyric height');
     await assertBorderless('settings expanded');
+    // Exercise the actual expand/collapse path, including native activation/frame
+    // redraws. A single launch check misses captions that return after interaction.
+    for(let cycle=0;cycle<6;cycle++){
+      await page.locator('#options-done').click();
+      await page.waitForFunction(h=>Math.abs(innerHeight-h)<3,baseSize.height);
+      await assertBorderless('settings collapsed '+cycle);
+      await page.locator('#stage').hover();await page.locator('#style-open').click();
+      await page.waitForFunction(()=>innerHeight>500);
+      await assertBorderless('settings reopened '+cycle,cycle===3);
+    }
+    await page.locator('[data-cmd="width-up"]').scrollIntoViewIfNeeded();
+    assert.equal(await page.locator('#options-panel').evaluate(e=>e.scrollWidth<=e.clientWidth),true,'Settings do not overflow horizontally');
+    assert.equal(await page.locator('#options-done').evaluate(e=>{
+      const button=e.getBoundingClientRect(),panel=document.getElementById('options-panel').getBoundingClientRect();
+      return button.top>=panel.top && button.bottom<=panel.bottom;
+    }),true,'Done stays visible when scrolled to the last controls');
+    await page.locator('#options-panel').screenshot({path:path.join(output,'settings-scrollbar-dark.png')});
     await page.locator('[data-setting="theme"][data-value="light"]').click();
     await page.waitForFunction(()=>document.body.dataset.theme==='light');
     await page.locator('[data-setting="surface"][data-value="bare"]').click();
@@ -131,14 +156,41 @@ async function main(){
     await page.waitForTimeout(600);
     const saved=JSON.parse(fs.readFileSync(path.join(output,'config.json'),'utf8')).profiles[0].lyrics;
     assert.equal(saved.theme,'light');assert.equal(saved.surface,'bare');assert.equal(saved.karaoke,false);
+    await page.locator('#stage').hover();await page.locator('#style-open').click();
+    await page.locator('[data-setting="layout"][data-value="single"]').click();
+    await page.locator('[data-toggle="bilingual"]').click();
+    await page.waitForFunction(()=>document.body.dataset.layout==='single'&&document.body.dataset.bilingual==='false');
+    await page.locator('#options-done').click();
+    await page.waitForFunction(()=>innerHeight<200);
+    const singleHeight=await page.evaluate(()=>innerHeight);
+    for(let cycle=0;cycle<6;cycle++){
+      await page.locator('#stage').hover();await page.locator('#style-open').click();
+      await page.waitForFunction(()=>innerHeight>500);
+      await assertBorderless('single bare settings expanded '+cycle);
+      if(cycle===0)await page.screenshot({path:path.join(output,'single-bare-settings.png')});
+      await page.locator('#options-done').click();
+      await page.waitForFunction(h=>Math.abs(innerHeight-h)<3,singleHeight);
+      await assertBorderless('single bare settings collapsed '+cycle);
+    }
     assert.deepEqual(errors,[]);
     await page.screenshot({path:path.join(output,'native.png')});
+    verificationPassed=true;
     console.log('Native lyrics checks passed: borderless Win32 frame and style refresh, IPC, stable expansion, persisted appearance, phrase seek, play/pause, lock and tray recovery. Evidence: '+output);
   }finally{
-    try{await command('quit');}catch{}
+    // Cleanup stays on the WebView connection created by this run. A child that
+    // exits at the singleton gate must never send quit to the shared control pipe.
+    let quitRequested=false,forced=false;
+    if(browser&&child.exitCode===null&&child.signalCode===null){
+      try{const page=browser.contexts().flatMap(context=>context.pages())[0];if(page){quitRequested=true;await page.evaluate(()=>window.ipc.postMessage(JSON.stringify({cmd:'quit'})));}}catch{}
+    }
     if(browser)await browser.close();
-    if(child.exitCode===null)child.kill();
+    if(child.exitCode===null&&child.signalCode===null){
+      let timer;try{await Promise.race([exited,new Promise(resolve=>{timer=setTimeout(resolve,2000);})]);}finally{clearTimeout(timer);}
+    }
+    if(child.exitCode===null&&child.signalCode===null){forced=true;child.kill();}
     server.close();
+    fs.writeFileSync(path.join(output,'cleanup.json'),JSON.stringify({binary,binarySha256:require('node:crypto').createHash('sha256').update(fs.readFileSync(binary)).digest('hex'),pid:child.pid,verificationPassed,quitRequested,forced,exitCode:child.exitCode,signal:child.signalCode},null,2));
+    if(verificationPassed){assert.equal(quitRequested,true,'owned WebView requests normal quit');assert.equal(forced,false,'successful native checks exit without force');assert.equal(child.exitCode,0,'owned component exits normally');}
   }
 }
 main().catch(e=>{console.error(e);server.close();process.exitCode=1;});

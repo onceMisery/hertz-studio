@@ -418,7 +418,6 @@ body.buffering #prog i{opacity:.4; animation:pulse 1.1s ease-in-out infinite}
           <svg id="pause" viewBox="0 0 24 24"><path d="M9 5v14M15 5v14"/></svg>
         </button>
         <button class="ic" id="next" data-hit data-name="下一首" aria-label="下一首"><svg viewBox="0 0 24 24"><path d="M17 6v12M5 6l9 6-9 6z"/></svg></button>
-        <button class="ic" id="expand" data-hit data-name="展开" aria-label="回到主窗口"><svg viewBox="0 0 24 24"><path d="M4 9V4h5M20 15v5h-5M20 9V4h-5M4 15v5h5"/></svg></button>
       </div>
       <div id="prog"><i></i></div>
     </div>
@@ -925,7 +924,6 @@ body.buffering #prog i{opacity:.4; animation:pulse 1.1s ease-in-out infinite}
     $('prev').addEventListener('click', e => { e.stopPropagation(); step(-1); });
     $('next').addEventListener('click', e => { e.stopPropagation(); step(1); });
     $('play').addEventListener('click', e => { e.stopPropagation(); setPlaying(!clock.playing); });
-    $('expand').addEventListener('click', e => { e.stopPropagation(); restore(); });
 
     $('menu').addEventListener('click', e => {
       const b = e.target.closest('[data-act]');

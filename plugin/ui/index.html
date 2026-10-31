@@ -1347,31 +1347,42 @@
           <input id="set-lyric-filter-pattern" type="text" placeholder="如 ^\（.*\）$">
         </div>
         <p class="hint set-note" id="set-lyric-filter-note" hidden></p>
+        <section id="emotion-controls" aria-labelledby="emotion-controls-title">
+        <header class="emotion-heading">
+          <h2 id="emotion-controls-title">情绪字体</h2>
+          <p>让字形、节奏与色彩回应情绪。先试一种，再决定如何演出。</p>
+        </header>
         <div class="set-row">
-          <label for="set-emotion-mode">情绪演出</label>
-          <select id="set-emotion-mode">
+          <label for="set-emotion-mode">应用方式</label>
+          <select id="set-emotion-mode" aria-describedby="set-emotion-note">
             <option value="off">关闭</option>
-            <option value="manual">手动预览</option>
-            <option value="auto" disabled>自动（需模型，未开放）</option>
+            <option value="manual">手动 · 固定情绪</option>
+            <option value="auto" disabled>自动（检查中）</option>
           </select>
         </div>
-        <div class="set-row" id="set-emotion-preview-row">
-          <label for="set-emotion-preview">预览情绪</label>
-          <select id="set-emotion-preview">
-            <option value="joy">雀跃</option>
-            <option value="sorrow">悲伤</option>
-            <option value="anger">愤怒</option>
-            <option value="anxious">不安</option>
-            <option value="tender">温柔</option>
-            <option value="triumph">胜利</option>
-            <option value="lonely">孤独</option>
-          </select>
+        <div class="emotion-choices" role="group" aria-label="选择固定预览情绪">
+          <button type="button" data-emotion-preview="joy" aria-pressed="false"><strong>雀跃</strong><small>弹跳 · 星光</small></button>
+          <button type="button" data-emotion-preview="sorrow" aria-pressed="false"><strong>悲伤</strong><small>下沉 · 泪滴</small></button>
+          <button type="button" data-emotion-preview="anger" aria-pressed="false"><strong>愤怒</strong><small>顿挫 · 火焰</small></button>
+          <button type="button" data-emotion-preview="anxious" aria-pressed="false"><strong>不安</strong><small>轻颤 · 电光</small></button>
+          <button type="button" data-emotion-preview="tender" aria-pressed="false"><strong>温柔</strong><small>摇曳 · 花瓣</small></button>
+          <button type="button" data-emotion-preview="triumph" aria-pressed="false"><strong>胜利</strong><small>上扬 · 金芒</small></button>
+          <button type="button" data-emotion-preview="lonely" aria-pressed="false"><strong>孤独</strong><small>飘散 · 薄雾</small></button>
+        </div>
+        <div class="emotion-specimen">
+          <div class="emotion-specimen-meta"><span>动画预览 · <b id="emotion-preview-label">雀跃</b></span><span>非自动识别结果</span></div>
+          <button type="button" id="emotion-preview-sample" aria-label="应用当前情绪字体与动画" aria-describedby="emotion-preview-note"><span id="emotion-preview-text">让这一刻，有了形状</span></button>
+          <p id="emotion-preview-note">点击样本或选择情绪，即以手动模式应用；不发送歌词。</p>
         </div>
         <div class="set-row">
           <label for="set-emotion-scale">情绪强度</label>
           <input id="set-emotion-scale" type="range" min="0" max="1.5" step="0.05" value="1">
           <span class="count" id="set-emotion-scale-value">1.00</span>
         </div>
+        <p class="emotion-status" id="set-emotion-note" role="status" aria-live="polite">情绪字体已关闭；固定样本仍可预览。</p>
+        <p class="emotion-status" id="emotion-save-note" role="status" hidden></p>
+        <details class="emotion-details">
+          <summary>字形与强调</summary>
         <div class="set-row">
           <label for="set-emotion-curve">强度曲线</label>
           <input id="set-emotion-curve" type="range" min="0.5" max="1.5" step="0.05" value="1">
@@ -1392,11 +1403,23 @@
           <input id="set-emotion-palette" type="checkbox" checked>
           <span class="hint" id="set-emotion-palette-note">关闭时保留场位移与字体参数，尊重自定义歌词色</span>
         </div>
-        <div class="set-row">
+        </details>
+        <div class="set-row emotion-authorization">
           <label for="set-emotion-ai-authorized">允许歌词发送给模型</label>
-          <input id="set-emotion-ai-authorized" type="checkbox">
+          <input id="set-emotion-ai-authorized" type="checkbox" aria-describedby="set-emotion-ai-note">
           <span class="hint" id="set-emotion-ai-note">仅自动分类需要；未授权时不发送歌词</span>
         </div>
+        <div class="emotion-model-actions">
+          <button type="button" class="btn" id="emotion-retry">重新检查模型</button>
+          <details class="emotion-model-guide">
+            <summary>模型配置与密钥位置</summary>
+            <p>模型选择目前没有独立设置页。请在服务端配置的 <code>[ai]</code> 中设置 <code>provider</code>、<code>origin</code>、<code>model</code>，重启服务后再检查。</p>
+            <p>OpenAI / StepFun 密钥使用现有入口：<strong>创意工坊 → 高级编排 → AI 生成 → 模型密钥设置</strong>。密钥保存在系统钥匙串。工坊会切换舞台，这里不代为跳转。</p>
+            <p>手动效果无需模型或授权；自动分类只在模型就绪、明确授权且选择自动模式后请求。模拟模型不代表真实识别。</p>
+          </details>
+        </div>
+        <details class="emotion-details">
+          <summary>当前行覆盖</summary>
         <div class="set-row">
           <label for="set-emotion-lock">手动锁定当前行</label>
           <span class="set-actions">
@@ -1415,7 +1438,8 @@
           </span>
           <span class="hint" id="set-emotion-lock-note">手动覆盖优先于 auto 结果；关闭情绪演出时不生效</span>
         </div>
-        <p class="hint set-note" id="set-emotion-note">关闭时与当前版本完全一致；手动预览只用于调试，自动分类需要模型 provider 和显式授权。</p>
+        </details>
+        </section>
       </div>
 
       <!-- 歌词输出：本地 HTTP 歌词 API + OBS 浮层页（folia 的 lyric api / obs
@@ -1894,6 +1918,7 @@
       </button>
       <span class="stage-tech" id="now-tech" hidden></span>
     </div>
+    <button type="button" class="emotion-entry" data-emotion-open aria-haspopup="dialog" aria-controls="emotion-dialog">情绪字体 <span>字形随情绪起伏</span></button>
 
     <div class="disc-wrap">
       <div class="disc is-empty" id="cover"></div>
@@ -1913,6 +1938,11 @@
   </aside>
 
 </div>
+
+<dialog id="emotion-dialog" aria-labelledby="emotion-controls-title">
+  <div class="emotion-dialog-bar"><span>歌词演出</span><button type="button" class="btn" id="emotion-dialog-close" autofocus>关闭</button></div>
+  <div id="emotion-dialog-content"></div>
+</dialog>
 
 <footer class="bar" id="playback-bar">
   <!-- 空态不写占位符：原来这里放了一个 em dash「—」，在满屏 SVG 图标中间
@@ -2055,6 +2085,7 @@
     <select id="s3d-layout"><option value="focus">沉浸歌词</option><option value="sleeve">封面与歌词</option><option value="single">简洁单句</option></select>
     <label for="s3d-lyric-visual">歌词视觉</label>
     <select id="s3d-lyric-visual"><option value="stage">舞台 3D 歌词轨</option><option value="starborn">星诞 · 自动导演</option><option value="classic">流光歌词</option><option value="cadenza">心象歌词</option><option value="sonnet">商籁歌词</option><option value="tempera">凝彩 · 色块歌词 MV</option></select>
+    <button type="button" class="sp-btn-line" data-emotion-open aria-haspopup="dialog" aria-controls="emotion-dialog">情绪字体</button>
     <div id="s3d-fl-starborn" hidden>
       <label for="s3d-fl-auto-lock">自动切镜间隔 <output id="s3d-fl-auto-lock-value">4.0s</output></label>
       <input id="s3d-fl-auto-lock" type="range" min="0" max="12" step="0.5" value="4">
@@ -2625,6 +2656,7 @@
       <section id="sp-console-lyrics" role="tabpanel" aria-labelledby="sp-tab-lyrics" tabindex="0" hidden>
         <label class="sp-check" for="sp-lyrics-toggle"><input id="sp-lyrics-toggle" type="checkbox" checked> 显示歌词</label>
         <label for="sp-lyric-style">歌词效果</label><select id="sp-lyric-style"></select>
+        <button type="button" class="sp-btn-line" data-emotion-open aria-haspopup="dialog" aria-controls="emotion-dialog">情绪字体</button>
         <div id="sp-lyric-params"></div>
       </section>
       <section id="sp-console-camera" role="tabpanel" aria-labelledby="sp-tab-camera" tabindex="0" hidden>

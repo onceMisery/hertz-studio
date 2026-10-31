@@ -440,6 +440,25 @@ impl Connection {
         Fut: Future<Output = io::Result<Response>>,
         A: FnOnce(&Response) -> io::Result<G>,
     {
+        self.serve_with_async_admission(cancel, handler, |response| {
+            std::future::ready(admission(&response))
+        })
+        .await
+    }
+
+    /// Async authority checks share the connection deadline and are cancelled before permits release.
+    pub async fn serve_with_async_admission<F, Fut, A, AFut, G>(
+        self,
+        cancel: &Cancellation,
+        handler: F,
+        admission: A,
+    ) -> io::Result<PeerIdentity>
+    where
+        F: FnOnce(PeerIdentity, Request) -> Fut,
+        Fut: Future<Output = io::Result<Response>>,
+        A: FnOnce(Response) -> AFut,
+        AFut: Future<Output = io::Result<G>>,
+    {
         let deadline = self.connected_at + REQUEST_TIMEOUT;
         let mut resources = SendResources {
             pipe: self.pipe,
@@ -476,7 +495,7 @@ impl Connection {
                     "desktop request deadline",
                 ));
             }
-            resources.registration = Some(admission(&response)?);
+            resources.registration = Some(admission(response.clone()).await?);
             frame::write_frame(&mut *resources.pipe, &json, RESPONSE_LIMIT).await?;
             let mut extra = [0u8; 1];
             match resources.pipe.read(&mut extra).await {
@@ -620,22 +639,27 @@ pub fn normalize_directory(path: &Path) -> io::Result<String> {
 /// Bounded before allocation and JSON parsing. Rejects reparse points and broad/inherited ACLs.
 pub fn read_private_bounded(path: &Path, limit: usize) -> io::Result<Vec<u8>> {
     use std::io::Read;
+    crate::blocking::check()?;
     let mut file = std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
         .open(path)?;
+    crate::blocking::check()?;
     let metadata = file.metadata()?;
     if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 || !metadata.is_file() {
         return Err(denied("private desktop file must be a regular file"));
     }
+    crate::blocking::check()?;
     validate_private_file(&file)?;
     if file.metadata()?.len() > limit as u64 {
         return Err(invalid("desktop file exceeds budget"));
     }
+    crate::blocking::check()?;
     let mut bytes = Vec::new();
     Read::by_ref(&mut file)
         .take(limit as u64 + 1)
         .read_to_end(&mut bytes)?;
+    crate::blocking::check()?;
     if bytes.len() > limit {
         return Err(invalid("desktop file exceeds budget"));
     }
@@ -643,7 +667,18 @@ pub fn read_private_bounded(path: &Path, limit: usize) -> io::Result<Vec<u8>> {
 }
 
 pub fn write_private_atomic(path: &Path, bytes: &[u8], limit: usize) -> io::Result<()> {
+    write_private_atomic_checked(path, bytes, limit, || Ok(()))
+}
+
+/// Prepare and sync outside the caller's gate, then serialize final replacement with revoke.
+pub fn write_private_atomic_checked<G>(
+    path: &Path,
+    bytes: &[u8],
+    limit: usize,
+    admission: impl FnOnce() -> io::Result<G>,
+) -> io::Result<()> {
     use std::io::Write;
+    crate::blocking::check()?;
     if bytes.len() > limit {
         return Err(invalid("desktop file exceeds budget"));
     }
@@ -670,11 +705,16 @@ pub fn write_private_atomic(path: &Path, bytes: &[u8], limit: usize) -> io::Resu
             return Err(io::Error::last_os_error());
         }
         let mut file = unsafe { std::fs::File::from_raw_handle(handle) };
+        crate::blocking::check()?;
         file.write_all(bytes)?;
+        crate::blocking::check()?;
         file.sync_all()?;
+        crate::blocking::check()?;
         validate_private_file(&file)?;
         drop(file);
         let destination = wide(path.as_os_str());
+        let _admission = admission()?;
+        crate::blocking::check()?;
         if unsafe {
             MoveFileExW(
                 name.as_ptr(),

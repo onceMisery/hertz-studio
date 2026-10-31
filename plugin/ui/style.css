@@ -1709,6 +1709,95 @@ body.reduce-motion .shelf-vinyl { transition: none; }
 .dbx-desktop-guide code { overflow-wrap: anywhere; user-select: text; }
 .dbx-desktop-settings [data-error="true"] { color: var(--danger, #c64747); }
 
+/* 情绪字体：唯一设置 owner 可移动到原生 top layer；面板中性，选择只用一支强调色。 */
+#emotion-controls {
+  --emotion-accent: #7ab6aa;
+  display: flex; flex-direction: column; gap: 16px;
+  min-width: 0; padding-block: 22px 8px; border-top: 1px solid var(--line-strong);
+  color: var(--text); font: 13px/1.65 var(--font-sans); text-align: left;
+}
+#emotion-controls [hidden] { display: none !important; }
+#emotion-controls .emotion-heading h2 { margin: 0; font-size: 24px; font-weight: 600; letter-spacing: 0; color: var(--text); }
+#emotion-controls .emotion-heading p { margin: 5px 0 0; color: var(--muted); }
+#emotion-controls .set-row { gap: 10px 14px; }
+#emotion-controls .set-row label { width: 112px; margin: 0; font-size: 13px; color: var(--muted); }
+#emotion-controls input[type="range"] { flex: 1; width: 120px; accent-color: var(--emotion-accent); }
+#emotion-controls input[type="text"] { flex: 1; width: 160px; }
+#emotion-controls input[type="checkbox"] { accent-color: var(--emotion-accent); }
+#emotion-controls select { width: auto; margin: 0; }
+#emotion-controls .count { font-variant-numeric: tabular-nums; font-size: 12px; }
+#emotion-controls .hint { font-size: 12px; line-height: 1.7; }
+#emotion-controls .emotion-choices { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 4px; }
+#emotion-controls .emotion-choices button {
+  display: flex; flex-direction: column; align-items: center; gap: 3px;
+  padding: 11px 2px; min-height: 60px; border: 0; border-bottom: 2px solid transparent;
+  border-radius: 4px 4px 0 0; background: transparent; color: var(--muted); font-family: inherit; cursor: pointer;
+}
+#emotion-controls .emotion-choices strong { font-size: 14px; font-weight: 500; }
+#emotion-controls .emotion-choices small { font-size: 10px; white-space: nowrap; }
+#emotion-controls .emotion-choices button:hover { background: var(--hover); color: var(--text); }
+#emotion-controls button:active { transform: scale(.98); }
+#emotion-controls .emotion-choices button[aria-pressed="true"] {
+  color: var(--emotion-accent); border-bottom-color: currentColor;
+  background: color-mix(in srgb, var(--emotion-accent) 7%, transparent);
+}
+#emotion-controls :is(button, select, input, summary):focus-visible,
+#emotion-dialog-close:focus-visible, .emotion-entry:focus-visible { outline: 2px solid var(--accent-2); outline-offset: 3px; }
+#emotion-controls .emotion-specimen { padding: 16px; background: #171719; color: #eeeeef; border-radius: 6px; }
+#emotion-controls .emotion-specimen-meta { display: flex; justify-content: space-between; gap: 8px; font-size: 11px; color: #a4a4ad; }
+#emotion-controls .emotion-specimen-meta b { font-weight: 500; color: #eeeeef; }
+#emotion-preview-sample {
+  display: grid; place-items: center; width: 100%; min-height: 132px; padding: 26px 8px;
+  border: 0; border-radius: 4px; background: transparent; color: inherit; cursor: pointer;
+}
+#emotion-preview-text { display: block; max-width: 100%; font-size: clamp(24px, 3.5vw, 40px); white-space: nowrap; line-height: 1.8; }
+#emotion-preview-text > span { display: inline-block; transform-origin: 50% 70%; }
+#emotion-controls #emotion-preview-note { margin: 0; font-size: 11px; color: #a4a4ad; }
+#emotion-controls .emotion-status { margin: 0; font-size: 12px; color: var(--text); overflow-wrap: anywhere; }
+#emotion-controls .emotion-details { border-top: 1px solid var(--line-strong); padding-top: 12px; }
+#emotion-controls summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+#emotion-controls summary:hover { color: var(--text); }
+#emotion-controls .emotion-details .set-row { margin-top: 14px; }
+#emotion-controls .emotion-authorization { display: grid; grid-template-columns: minmax(0, 1fr) auto; }
+#emotion-controls .emotion-authorization label { width: auto; }
+#emotion-controls .emotion-authorization .hint { grid-column: 1 / -1; }
+#emotion-controls .emotion-model-actions { display: flex; flex-wrap: wrap; align-items: baseline; gap: 12px 20px; }
+#emotion-controls .emotion-model-guide { flex: 1; min-width: 180px; }
+#emotion-controls .emotion-model-guide p { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+#emotion-controls .emotion-model-guide code { color: var(--text); user-select: text; }
+#emotion-dialog {
+  position: fixed; inset: 0; width: min(680px, calc(100vw - 32px)); max-width: none;
+  height: fit-content; max-height: calc(100dvh - 40px); margin: auto; padding: 0;
+  border: 1px solid var(--line-strong); border-radius: 12px; overflow: auto; overscroll-behavior: contain;
+  background: var(--panel-solid); color: var(--text); font-family: var(--font-sans); text-align: left;
+  box-shadow: 0 24px 80px #0006;
+}
+#emotion-dialog::backdrop { background: #0008; }
+#emotion-dialog .emotion-dialog-bar {
+  position: sticky; top: 0; z-index: 1; display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 24px; background: var(--panel-solid); border-bottom: 1px solid var(--line);
+  font-size: 11px; color: var(--muted);
+}
+#emotion-dialog #emotion-controls { border: 0; padding: 20px 24px 24px; }
+.stage > .emotion-entry {
+  align-self: flex-start; display: flex; gap: 10px; flex: none; margin-top: 12px; padding: 5px 0;
+  border: 0; background: transparent; color: var(--text); font: 12px/1.6 var(--font-sans); cursor: pointer;
+}
+.stage > .emotion-entry span { color: var(--muted); font-size: 11px; }
+.stage > .emotion-entry:hover { color: var(--accent-2); }
+@media (max-width: 600px) {
+  #emotion-dialog { width: calc(100vw - 20px); max-height: calc(100dvh - 20px); }
+  #emotion-dialog #emotion-controls { padding: 16px; gap: 14px; }
+  #emotion-dialog .emotion-dialog-bar { padding: 10px 16px; }
+  #emotion-controls .emotion-choices { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  #emotion-controls .emotion-heading h2 { font-size: 22px; }
+  #emotion-controls .emotion-specimen { padding: 12px; }
+  #emotion-controls .emotion-specimen-meta { flex-wrap: wrap; }
+  #emotion-preview-text { font-size: 24px; }
+  #emotion-controls .emotion-authorization .hint { flex-basis: 100%; }
+  #emotion-controls .set-row > label { width: 96px; }
+}
+
 /* 音源登录行：label + 输入框 + 保存 + 状态。输入框给 flex:1 才能在没有内容时
    也撑满一行，否则四个元素会挤在左边、状态文字看起来像按钮的一部分。 */
 .cookie-row { flex-wrap: wrap; row-gap: 6px; }

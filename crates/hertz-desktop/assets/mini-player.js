@@ -150,7 +150,6 @@
   $('prev').addEventListener('click', e => { e.stopPropagation(); control('previous'); });
   $('next').addEventListener('click', e => { e.stopPropagation(); control('next'); });
   $('play').addEventListener('click', e => { e.stopPropagation(); control('toggle'); });
-  $('expand').addEventListener('click', e => { e.stopPropagation(); ipc({ cmd: 'restore' }); });
 
   // --- 右键菜单 -------------------------------------------------------------
 

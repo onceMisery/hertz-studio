@@ -118,21 +118,6 @@ mod unsupported {
         pub async fn connect_authorization(self: &Arc<Self>) -> Result<DesktopStatus, ApiError> {
             self.restore().await
         }
-        pub(crate) fn admission_epoch(&self) -> Result<u64, ApiError> {
-            Err(failure(
-                "desktop_platform_unsupported",
-                "DBX desktop data requires Windows x64",
-            ))
-        }
-        pub(crate) fn admission_current(&self, _: u64) -> bool {
-            false
-        }
-        pub(crate) async fn connect_authorization_at(
-            self: &Arc<Self>,
-            _: u64,
-        ) -> Result<DesktopStatus, ApiError> {
-            self.restore().await
-        }
         pub async fn disconnect(self: &Arc<Self>) -> Result<DesktopStatus, ApiError> {
             self.restore().await
         }

@@ -5,9 +5,12 @@
 # 设计边界（计划第 12 项）：
 #   - 仅 workflow_dispatch 手动触发，绝不自动推送/发布/上传 Release；
 #     产物留在 workflow run 的 artifacts 里，由维护者人工检查后自行发布。
-#   - 两种产物并行出：
-#       * 独立形态：单二进制 hertz-studio(.exe)，web 资源编译期嵌入，配 README + LICENSE；
-#       * 插件形态：.dbxp（sidecar + ui + manifest），由 dbx-plugin CLI 打包。
+#   - 两种产物：
+#       * 独立形态：单二进制 hertz-studio(.exe)，web 资源编译期嵌入，配 README + LICENSE。
+#         只构建 Full（含六个平台音源）；Standard 继续用于 DBX 商店候选与本地验证，
+#         不作为独立发布产物，避免用户拿到的独立包没有平台音源。
+#       * 插件形态：.dbxp（sidecar + ui + manifest），由 dbx-plugin CLI 打包，仍按
+#         Standard / Full 两版处理。
 #   - 校验和只在 summary 里算一次。原先每个平台各算一份再由 summary 拼接，但
 #     download-artifact 的 merge-multiple 会把文件摊平到同一层，`cat */SHA256SUMS.txt`
 #     永远匹配不到子目录，合并结果是空的；而 Windows 那段为了绕开没有 sha256sum
@@ -37,7 +40,7 @@ jobs:
     uses: ./.github/workflows/desktop-component.yml
 
   # -------------------------------------------------------------------------
-  # 独立形态：单二进制
+  # 独立形态：单二进制（仅 Full）
   # -------------------------------------------------------------------------
   build:
     name: binary ${{ matrix.edition }} ${{ matrix.target }}
@@ -45,7 +48,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        edition: [standard, full]
+        # 独立包只发 Full。Standard 的商店干净边界不能靠发布流程口头承诺：
+        # 把它从独立产物里去掉，就不会有人误下到没有平台音源的那一份。
+        edition: [full]
         os: [windows-latest, macos-latest, ubuntu-latest]
         include:
           - os: windows-latest
@@ -102,6 +107,22 @@ jobs:
           elif [ -f "$BIN" ]; then cp "$BIN" "dist/${NAME}/hertz-studio";
           else echo "binary not found" >&2; exit 1; fi
           cp README.md LICENSE "dist/${NAME}/" 2>/dev/null || true
+          # 独立包固定为 Full：至少命中一个平台协议指纹，否则说明 --features full 丢了。
+          PACKAGED="dist/${NAME}/hertz-studio.exe"
+          if [ ! -f "$PACKAGED" ]; then PACKAGED="dist/${NAME}/hertz-studio"; fi
+          python3 - "$PACKAGED" <<'PY'
+          import pathlib
+          import sys
+
+          binary = pathlib.Path(sys.argv[1]).read_bytes()
+          fingerprints = (
+              b"https://u.y.qq.com/cgi-bin/musicu.fcg",
+              b"0CoJUm6Qyw8W8jud",
+              b"https://wwwapi.kugou.com/play/songinfo",
+          )
+          if not any(value in binary for value in fingerprints):
+              sys.exit("standalone package is not Full: platform source fingerprints missing")
+          PY
           cd dist
           if [ "${{ matrix.archive }}" = "zip" ]; then
             python3 -c "import shutil; shutil.make_archive('${NAME}', 'zip', '.', '${NAME}')"

@@ -3,6 +3,10 @@
   "note": "check-* scripts that are deliberate manual/browser/diagnostic entry points. New unregistered check-* files fail scripts/check-scripts.js until they are either registered in check-frontend.js / a workflow or added here.",
   "scripts": [
     {
+      "script": "check-search-queue-browser.js",
+      "purpose": "隔离服务与受控音源响应，验证在线页、顶栏及空间搜索的单曲点播保留队列、去重和失败重试。"
+    },
+    {
       "script": "check-dbx-desktop-settings-browser.js",
       "purpose": "Production plugin UI in a real allow-scripts opaque iframe: all five skins' settings/reopen/desktop entries, explicit consent, independent component/authorization/source facts, partial failures, revoke races, no startup detection/polling and inline guide fallback. Controlled API replies; requires Playwright and Chrome."
     },
@@ -197,6 +201,10 @@
     {
       "script": "check-emotion-sidebar-browser.js",
       "purpose": "侧栏 P0 浏览器检查：真实隔离服务 + 真实 Stage。"
+    },
+    {
+      "script": "check-emotion-stage-browser.js",
+      "purpose": "隔离服务回源实测情绪字体入口、七种情绪、四种渲染器及暂停/seek/关闭恢复；--serve 保留预览。"
     },
     {
       "script": "check-emotion-track-browser.js",

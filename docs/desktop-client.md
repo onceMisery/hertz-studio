@@ -57,7 +57,7 @@
 | 系统媒体接入目前是浏览器 MediaSession | [app.js:5933](../plugin/ui/app.js#L5933) | 原生媒体键和系统媒体卡片不能直接宣称已完成 |
 | 现有锁约束 AI runner，不是整个服务的排他锁 | [bootstrap.rs:267](../crates/hertz-studio/src/bootstrap.rs#L267) | 桌面托管前必须解决同一 DataDir 多个音频/数据库 owner |
 | 现有统一退出会先关闭房间、再停本地音频 | [state.rs:942](../crates/hertz-studio/src/state.rs#L942) | 桌面退出应进入这个屏障，不另造粗暴结束流程 |
-| 独立发布包仅复制服务及说明，没有完整桌面安装器 | [release.yml:88](../.github/workflows/release.yml#L88) | 安装器、主程序与组件配套、签名更新都是新增交付 |
+| 独立发布包仅复制服务及说明，没有完整桌面安装器 | [release.yml:96](../.github/workflows/release.yml#L96) | 安装器、主程序与组件配套、签名更新都是新增交付 |
 
 已有歌词/壁纸的现行职责仍以[共享宿主](./desktop-host.md)为准；[DBX 桌面连接](./desktop-dbx.md)是另一专项，D0–D2 已实现、D3 完整发布验收待完成，不作为本方案前置，也不顺手改变其传输选择。
 

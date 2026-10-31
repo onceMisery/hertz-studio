@@ -1,8 +1,34 @@
 # DBX 接入桌面歌词与壁纸：后续设计
 
-日期：2026-10-27；设计复核与实施：2026-10-28–29，基线为 `1d042b8` 与当前工作树，包含已落地的歌词工具条。状态：**D0–D2 已实现并通过两阶段审查，D3a 同源配套候选和交付材料已准备；D3b 完整发布验收待完成**。最终候选已在最低 0.6.35、当前 0.6.47 及隔离 0.6.39 宿主验证核心流程；最低/当前两版插件覆盖无组件播放、seek、队列、真实睡眠定时、工作台关闭/重开与原生呈现，当前 Full 另覆盖一次真实在线取词。独立组件启动方式固定为 manual。物理媒体键、跨用户/会话、物理桌面恢复与八小时长稳等仍待验，不能据此宣称正式交付。实施进度与证据见[实施记录](./plans/2026-10-28-dbx-desktop-implementation.md)和[验证记录](./plans/2026-10-28-dbx-desktop-evidence.md)。
+日期：2026-10-27；设计复核与实施：2026-10-28–29，基线为 `1d042b8` 与当前工作树，包含已落地的歌词工具条。状态：**D0–D2 已实现并通过两阶段审查，D3a 同源配套候选和交付材料已准备；D3b 完整发布验收待完成**。独立组件启动方式固定为 manual，不能据分项通过宣称正式交付。实施进度与证据见[实施记录](./plans/2026-10-28-dbx-desktop-implementation.md)、[验证记录](./plans/2026-10-28-dbx-desktop-evidence.md)及[D-A01–D-A18 验收审计](./plans/2026-10-29-dbx-desktop-acceptance-audit.md)。
+
+最新进度（10 月 30 日，非八小时专项）：最终两版当前宿主核心无授权图形差分、已授权/未授权生命周期、12 次原生伪造播控拒绝、指定独立 Standard 三来源切换/播控恢复、GUI 保存失败/重试、zip 升级/备份恢复、实际旧 build 拒绝、重复点击/撤销重连与卸载重装均有最终产物证据。renderer crash 后约 10.6 秒自动重建并恢复同来源；CDP frozen 注入的未及时重建仍待查。三端已正常退出，22 个实际归属进程实例回收、宿主全局文件无差异。索引 `shutdown-discovery/final-nonsoak-verification.json` 绑定 15 份通过报告，保留 17 份失败尝试。原长稳约 87.75 分钟后按优先级正常结束，不计八小时通过。目录移动/自启、其余故障与系统恢复、最低宿主图形差分、资源预算和身份/平台等缺项见验收表；D3b 保持未完成。
+
+历史配套候选已在最低 0.6.35、当前 0.6.47 和隔离 0.6.39 宿主覆盖核心图形流程；单行、无边框默认值阶段另有当前宿主提交基线差分及独立 Standard HTTP/native 回归。用户报告设置白条后，歌词窗口补上了非客户区计算、绘制与激活重绘处理。`output/dbx-desktop-d3/nonclient-repaint/` 的 `433e…` 配套候选通过构建/验包、最低/当前真实运行时八组、原 stdio、两版原生联调、在线歌词及 104 项包内隔离检查；其两版独立服务的 HTTP、房间/管理 EOF 亦已通过。真实 WebView2 的两种样式共 12 轮设置开关、29 次 Win32 检查正常，但没有稳定复现间歇白条的原始触发条件，不能承诺所有系统情形均已覆盖。
+
+后续发现共用 Cargo target 的构建脚本可能保留旧源码目录，已修正三项构建文件；A→B→A 不清缓存、复用同一已编译脚本的实际 RPC 身份和返回 A 的程序字节均验证通过。仅含该增量的 `build-root-fix/` 新候选 `07d87e…` 已单独冻结，组件/两版包、51 项 native、MSRV 1.88、Windows cpal 原 stdio 314/314 与 298/298、Linux 两版回归、最低/当前真实运行时八组及独立身份复算通过。新包自身的 104 项隔离检查、两版管理 EOF 六例、新配套独立服务 HTTP 与双 scope 阻塞下房间 EOF 亦通过。另补两版共 6 项真实授权替换/发现发布/来源锁失败后的强杀、重启与显式重连检查，原空闲状态/队列/设置未变。索引为 `acceptance-progress.json`；图形/native launch/control 尚待复验。组件采用同会话固定单实例，不能靠换文件名或目录并行验证；相关失败尝试已归档，检查器保护恢复。原 `433e…` 证据保留原身份，不能自动覆盖新构建或共享工作区后续的在线/搜索 UI 修改。
+
+15:55 补验发现暂停旧 FFT 被当新壁纸频谱刷新；现只在播放中刷新桌面投影，让暂停时最后有效帧自然过期，保留原频谱广播。17:30 更新：`paused-spectrum/` 的两版服务和 `.dbxp` 已构建/验包，构建后 72/547 项实际源输入仍为 `596f2543…` / `ab2eee4b…`；桌面输入与 `07d…` 组件字节未变。新包 Windows cpal 原 stdio 314/314、298/298，最低/当前真实 PluginHost 八组、独立实际 RPC 身份复算、104 项包内隔离检查、管理 EOF 六例及实际激活失败/强杀恢复六例均通过。新两版服务原 HTTP/WS、暂停后频谱自然过期和两版 21 项房间合同通过；Full PCM 第三次在构建结束后通过 60 秒、三采样率/自然切曲、零 underrun/resync，前两次连接中断/欠载失败保留，未确认其原因。新 Linux x64 两版原 stdio 311/311、295/295、四组 unsupported 和实际身份复算通过；不是 macOS/ARM64 或 Windows 图形资格。
+
+授权阻塞下的房间 EOF 仍不合格：Full 首轮异常退出、一次复跑成功；再用三个交错对照轮次，暂停频谱修正前的 `build-root-fix` Full 失败 1/3、新 Full 失败 2/3，均保留实际退出码 `3221226505` 和 SDK worker 的 Tokio timer shutdown panic。另以提交 `1d042b8` 的准确 Full 包和新 Full 运行未改的原无授权/无阻塞 EOF 检查，各三次正常，不能据此认定提交基线也有该 panic，或完整已授权故障矩阵无变化。最初提交基线对照因夹具路径错误未启动，已单列作废，不能充作产品失败。新候选图形、原生管理播控/三来源切换、此退出缺陷和完整长稳仍待完成；没有修改 SDK、原音频或退出实现迁就检查。
+
+18:36 接续：房间 `Discover` 已复用既有 `RoomManager::starting` 退出取消入口。原发现主体、其他房间分支、SDK、进程退出屏障及音频实现均未改；只在退出信号到达后停止轮询挂起的发现计时器。新冻结 `output/dbx-desktop-d3/shutdown-discovery/` 的插件 547 项指纹为 `171524606d174dbe68eaf07ee8b30478d98bb6a36f1197069c9b604275329daf`，桌面 72 项输入与 `07d87e…` 组件字节保持不变。`shutdown-timer-verified.json` 独立核对发现主体去空白完全相同、分支外源码完全相同。真实旧→新探针保留同样的挂起请求、第二请求 busy、服务 shutdown、销毁 runtime 后再轮询：旧实现确定性 panic，新实现返回 `room_shutting_down`。探针为 Linux debug/unwind，Windows release 实测另列。
+
+补查保留 stderr 后，修正此前“原无授权 EOF 六次正常”的解释：准确提交 `1d042b8` 的 Full 在 **1/3** 次、暂停频谱候选在 **2/3** 次写出同一 Tokio shutdown panic，尽管六次退出码均为 0。新交错对照中旧暂停频谱 Full 也有 **3/5** 次后台 panic、五次退出码均为 0。旧报告和日志保持原样，不能只凭 exit=0 判定无 panic。该补证确认未授权的原提交也存在此退出竞态。新 Full 共 11 次 Windows 退出实测（五次交错及配套授权/未授权各三次）、新 Standard 配套授权/未授权各三次均无该 panic，授权、Host End 与 guest membership 原断言保持；索引保留原失败与日志 hash。
+
+新两版 `.dbxp` 和配套独立服务已实际构建/验包，72/547 项 Windows、Linux 源输入前后复算一致。Windows cpal 原 stdio **314/314、298/298**、最低 0.6.35/当前 0.6.47 真实 PluginHost 八组、104 项包内隔离检查、管理 EOF 六项、激活失败/强杀恢复六项及实际 RPC 独立身份复算通过；Linux x64 原 stdio **311/311、295/295**、四组 unsupported 与实际身份通过。房间模块原有 12 项测试、两版原 HTTP/WS、暂停频谱自然过期、各 21 项房间权限及 60 秒静音 WASAPI PCM/三采样率/自然切曲/零 underrun-resync 通过。文件和 SHA 见 `shutdown-discovery/acceptance-progress.json`，状态仍为 partial-acceptance、`graphicalNativeVerified=false`、`d3bComplete=false`。
+
+最终组件 GUI、成功 WebView 清理、独立版原生管理/播控恢复和三来源切换待验。原 `433e…` 第四轮仍保留同一进程、时钟和不合格采样缺口，不能代替本候选的完整八小时，原结束点仍为 18:48:30。CPU/GPU 绝对发布预算、物理身份/平台/桌面恢复等 D-A01–18 缺项继续保留。
+
+原 `433e…` 第四轮长稳的 2/4/6 小时干预已全部通过；六小时 seek 在北京时间 16:48:51 将原播放跳到 5000ms，约一秒后实际进度 6020ms，继续播放且原二进制不变。17:30 原三个 PID live，738 样本/401.48 分钟、累计 26 次观察失败；两个原采样缺口继续使该轮不能合格。末段资源、正常退出和专属进程回收继续原控制器，预计原结束点仍为 18:48:30；新候选没有运行 GUI/长稳，不能借用该轮身份或累计时间。 三轮采样工具对照和五分钟短验只供下一轮使用，不修复原采样缺口。CPU/GPU 绝对发布预算、物理媒体键、跨用户/会话、桌面恢复及其余 D-A01–18 缺项继续保留。
 
 本文承接[共享宿主](./desktop-host.md)、[桌面歌词 L3](./desktop-lyrics.md)与[桌面壁纸的 DBX 扩展](./desktop-wallpaper.md)，只定义 DBX 形态新增的连接、身份、管理与分发契约。窗口、场景、桌面配置提交、预览租约和恢复策略继续以原设计为准；本文的协议与数值是目标契约，实现并验证后才能进入现行 ADR 和 API 清单。D0 是可行性门槛，D1/D2 是功能交付，D3 是发布门槛，不用任一阶段代替其余阶段。
+
+18:58 接续：原第四轮于 18:48:50 按原控制器结束，实际 28820568.7423ms、890 个样本、2/4/6 小时干预全部通过；26 次观察失败和两个原采样缺口保持，`measuredEightHours=true` 但 `passed=false`，不能作为完整长稳资格。DBX 与 native 均正常 exit=0，native forced=false；DBX 窗口状态恢复、globalFilesChanged=[]，末样本的 20 个原归属进程实例经只读 Win32 查询已不存在。原内存窗口比较在原阈值内，但不据此宣称无增长或发布预算通过。报告为 `nonclient-repaint/fourth-soak-completion.json`，仍归原 `433e…` 身份。
+
+随后最终 `07d87e…` / exe SHA `4d2906f4195c0b55cdd6df31b616225de2f30099d97acae3096e3a69ea60874a` 组件通过真实 WebView2 复验：两种样式各六轮设置开关、29 次 Win32 样式/几何/激活重绘检查；深浅主题截图经查看，单行、无边框及滚动条正确。检查器成功路径通过自己创建的 WebView 请求退出，并实际等待正常退出；`cleanup.json` 确认 forced=false、exit=0，不借用共用控制管道。证据 `output/playwright/desktop-lyrics-native-1793270931402/`，索引 `shutdown-discovery/native-regression.json`。新两版配套服务也通过真实原生启动、重复启动保持单实例、原 status/font/wallpaper-status 管理、非法命令拒绝和正常退出，原检查脚本断言未改。
+
+这些补齐最终组件 fixture/成功清理及原独立版管理子项，不代替最终两版 DBX 图形联调、三来源切换后的原生播控恢复，或新候选完整八小时。`shutdown-discovery/acceptance-progress.json` 已绑定准确 hash、截图与报告，`graphicalNativeVerified=false`、`d3bComplete=false` 保持。
 
 ## 1. 目标与范围
 
@@ -271,6 +297,8 @@ D2b 原生管理 v2 保留 `command/value`，必填 `managementProtocol:2`、`re
 管理管道仍是独立的 raw JSON，不走上节数据帧。D2a 已实现请求/应答各 8 KiB、连接最多一秒、建连后总期限两秒、实际可取消 I/O、最多一个 GUI pending 和 expired guard；D2b 不替换这些机制。管理能力现为 2，数据桥仍为 1，`--describe` 继续无 UI/配置副作用。
 
 原生 status 保留 legacy 字段，并报告 `managementProtocol`、`bridgeProtocol`、实际 `desktopBuildId`、`activeProfile`（兼容别名 `profile`）、`revision`、已实现的 `capabilities`、本次规范化 `targetProfile`、`sourceConnected` 和 `sourceScopes:{lyrics,wallpaper}`。`sourceConnected` 仅在请求 target 等于实际绑定，且任一 scope 通过已有 feed 接受了仍新鲜的真实认证数据时为 true；两 scope 分别记录单调 `Instant`，快照请求使用请求起点，独立版持续事件流使用收到该事件的时点，以独立 3 秒 stale 窗口判断。空曲目仍可连接，来源 B 已认证不能使 target A 在线，候选/listenerReady/曾经连接/开窗均不算在线；scope 失败、切源或新 session 清除对应旧事实，不复制播放真值。
+
+管理应答另带 `sourceSession`，表示原生最近实际接受的认证数据会话。DBX 门面仅在它等于当前 sidecar 的 `serverInstanceId` 时确认在线；字段缺失或会话不同均返回未确认，防止新 sidecar 沿用旧会话三秒内的新鲜度。
 
 原生 v2 当前没有返回每 scope 的已消耗年龄，服务门面不能给收到的 true 再追加三秒缓存寿命。因此 DBX 门面的 `sourceConnected=true` 只随本次验证通过的实时 v2 应答返回；`refresh=false` 的缓存查询保守返回 false，含义为没有本次在线确认，不单独代表连接失败或撤销。两条 scope 也遵守同一规则；当前授权闸门关闭或代际已变化时，即使收到迟到 true 仍必须返回 false。
 

@@ -100,6 +100,7 @@ pub(crate) enum Tab {
     #[default]
     Runtime,
 }
+#[cfg(all(windows, target_arch = "x86_64"))]
 impl Tab {
     pub fn name(self) -> &'static str {
         match self {

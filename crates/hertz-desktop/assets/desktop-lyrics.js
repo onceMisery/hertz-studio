@@ -5,8 +5,8 @@
   const systemTheme = matchMedia('(prefers-color-scheme: light)');
   const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
   const defaults = {
-    layout: 'triple', secondary: 'next', theme: 'auto', surface: 'glass', align: 'center',
-    bilingual: true, karaoke: true, readabilityBoost: false, fontFamily: 'Segoe UI',
+    layout: 'single', secondary: 'next', theme: 'auto', surface: 'bare', align: 'center',
+    bilingual: false, karaoke: true, readabilityBoost: false, fontFamily: 'Segoe UI',
     fontSize: 30, fontWeight: 600, sungColor: '#ffffff', unsungColor: '#ffffff',
     outlineColor: '#000000', outlineWidth: 0, opacity: 1, frameCap: 30,
   };

@@ -311,11 +311,22 @@ fn start_job(
                     scope_revoked: matches!(response.status, 401 | 403),
                 });
             }
-            if document.is_none()
-                && (response.body["server"]["session"].as_str() != Some(session.as_str())
-                    || response.body["server"]["edition"].as_str() != Some(profile.edition()))
-            {
-                return Err(ReadError::identity());
+            if document.is_none() {
+                // A body that cannot even carry a server block is a format failure, not an identity
+                // mismatch; keep identity errors for genuine session or edition differences.
+                match response
+                    .body
+                    .get("server")
+                    .and_then(serde_json::Value::as_object)
+                {
+                    Some(server)
+                        if server.get("session").and_then(serde_json::Value::as_str)
+                            == Some(session.as_str())
+                            && server.get("edition").and_then(serde_json::Value::as_str)
+                                == Some(profile.edition()) => {}
+                    None => return Err(ReadError::unavailable()),
+                    Some(_) => return Err(ReadError::identity()),
+                }
             }
             Ok(response.body)
         }
@@ -392,7 +403,7 @@ async fn run(
                 match completion.result {
                     Err(error) => {
                         retries[slot].fail();
-                        if slot == 0 {
+                        if slot == 0 && (error.source_invalid || error.scope_revoked) {
                             document_confirmation_after = Some(Instant::now());
                             if error.scope_revoked { successful_doc = None; }
                             if let Some(work) = &slots[2] { work.cancel.cancel(); }
@@ -404,7 +415,7 @@ async fn run(
                         }
                         if slot == 2 {
                             if error.source_invalid || error.scope_revoked { emit(Message::Failure { scope: if error.source_invalid { None } else { Some(Scope::Lyrics) }, message: error.message }); }
-                        } else {
+                        } else if error.source_invalid || error.scope_revoked {
                             emit(Message::Failure { scope: if error.source_invalid { None } else { Some(if slot == 0 { Scope::Lyrics } else { Scope::Wallpaper }) }, message: error.message });
                         }
                         if error.source_invalid {
@@ -421,7 +432,7 @@ async fn run(
                         }
                         if slot == 0 {
                             let snapshot = serde_json::from_value::<Snapshot>(value).ok().filter(|s| s.protocol == 1 && s.timing == "presentation_applied");
-                            let Some(snapshot) = snapshot else { retries[0].fail(); emit(Message::Failure { scope: Some(Scope::Lyrics), message: "DBX 歌词快照无效" }); continue; };
+                            let Some(snapshot) = snapshot else { retries[0].fail(); continue; };
                             if seq[0].is_some_and(|old| snapshot.seq <= old) { continue; }
                             seq[0] = Some(snapshot.seq); retries[0].success();
                             let wanted = if snapshot.lyrics.status == "ready" { snapshot.lyrics.document_key.as_ref().filter(|key| valid_key(key)).map(|key| DocIdentity { session: session.clone(), key: key.clone() }) } else { None };
@@ -438,7 +449,7 @@ async fn run(
                             emit(Message::Lyrics { started: completion.started, snapshot, cached_document });
                         } else if slot == 1 {
                             let snapshot = serde_json::from_value::<wallpaper_feed::Snapshot>(value).ok().filter(|s| wallpaper_feed::validate(s).is_ok());
-                            let Some(snapshot) = snapshot else { retries[1].fail(); emit(Message::Failure { scope: Some(Scope::Wallpaper), message: "DBX 壁纸快照无效" }); continue; };
+                            let Some(snapshot) = snapshot else { retries[1].fail(); continue; };
                             if seq[1].is_some_and(|old| snapshot.seq <= old) { continue; }
                             seq[1] = Some(snapshot.seq); retries[1].success();
                             emit(Message::Wallpaper { started: completion.started, snapshot });
@@ -559,6 +570,8 @@ mod tests {
         replay_sequence: AtomicBool,
         wrong_session: AtomicBool,
         fail_first_document: AtomicBool,
+        snapshot_status: AtomicUsize,
+        snapshot_invalid: AtomicBool,
         slow_document: AtomicBool,
         snapshot_delay_ms: AtomicU64,
         document_status: AtomicU64,
@@ -600,12 +613,14 @@ mod tests {
                         serde_json::json!({"protocol":1,"timing":"presentation_applied","documentKey":request.params["key"],"lines":[{"startMs":0,"endMs":3000,"text":"fixture"}]})
                     } else if scope == Scope::Lyrics {
                         state.snapshots.fetch_add(1, Ordering::SeqCst);
+                        let forced = state.snapshot_status.load(Ordering::SeqCst);
+                        if forced != 0 { status = forced as u16; }
                         let delay = state.snapshot_delay_ms.load(Ordering::SeqCst);
                         if delay != 0 { tokio::time::sleep(Duration::from_millis(delay)).await; }
-                        serde_json::json!({"protocol":1,"seq":if state.replay_sequence.load(Ordering::SeqCst) { 0 } else { state.sequence.fetch_add(1,Ordering::SeqCst) },"server":{"session":session,"edition":"standard","version":"fixture"},"generation":"1","positionMs":100,"durationMs":4000,"playing":true,"buffering":false,"track":{"id":"track","title":"fixture","artist":null,"album":null,"durationMs":4000},"lyrics":{"status":"ready","documentKey":key},"timing":"presentation_applied"})
+                        serde_json::json!({"protocol":if state.snapshot_invalid.load(Ordering::SeqCst) { 99 } else { 1 },"seq":if state.replay_sequence.load(Ordering::SeqCst) { 0 } else { state.sequence.fetch_add(1,Ordering::SeqCst) },"server":{"session":session,"edition":"standard","version":"fixture"},"generation":"1","positionMs":100,"durationMs":4000,"playing":true,"buffering":false,"track":{"id":"track","title":"fixture","artist":null,"album":null,"durationMs":4000},"lyrics":{"status":"ready","documentKey":key},"timing":"presentation_applied"})
                     } else {
                         state.wallpapers.fetch_add(1, Ordering::SeqCst);
-                        serde_json::json!({"protocol":1,"seq":if state.replay_sequence.load(Ordering::SeqCst) { 0 } else { state.sequence.fetch_add(1,Ordering::SeqCst) },"server":{"session":session,"edition":"standard","version":"fixture"},"valid":true,"playing":true,"positionMs":100,"durationMs":4000,"generation":"1","spectrum":{"bands":vec![0.5;64],"energy":0.5,"ageMs":0},"timing":"presentation_applied"})
+                        serde_json::json!({"protocol":if state.snapshot_invalid.load(Ordering::SeqCst) { 99 } else { 1 },"seq":if state.replay_sequence.load(Ordering::SeqCst) { 0 } else { state.sequence.fetch_add(1,Ordering::SeqCst) },"server":{"session":session,"edition":"standard","version":"fixture"},"valid":true,"playing":true,"positionMs":100,"durationMs":4000,"generation":"1","spectrum":{"bands":vec![0.5;64],"energy":0.5,"ageMs":0},"timing":"presentation_applied"})
                     };
                     Ok(Response { bridge_protocol:1,request_id:request.request_id,server_instance_id:request.server_instance_id,status,body })
                 }).await;
@@ -733,6 +748,77 @@ mod tests {
             count,
             state.snapshots.load(Ordering::SeqCst) + state.wallpapers.load(Ordering::SeqCst)
         );
+        cancel.cancel();
+        worker.await.unwrap();
+        server_cancel.cancel();
+        for task in servers {
+            task.await.unwrap();
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn transient_snapshot_failure_keeps_document_and_does_not_invalidate_native_data() {
+        let fixture = Fixture::new();
+        let state = Arc::new(State::default());
+        let (server_cancel, servers) = start_servers(&fixture, state.clone());
+        let (_needs, rx) = watch::channel(Needs {
+            lyrics: true,
+            wallpaper: false,
+        });
+        let (_retry, retry_rx) = mpsc::unbounded_channel();
+        let cancel = Cancellation::new();
+        let (events, mut receive) = mpsc::unbounded_channel();
+        let worker = tokio::spawn(run(
+            fixture.profile.clone(),
+            move |event| {
+                let _ = events.send(event);
+            },
+            cancel.clone(),
+            rx,
+            retry_rx,
+        ));
+        loop {
+            if matches!(
+                tokio::time::timeout(Duration::from_secs(3), receive.recv())
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                Message::Document { .. }
+            ) {
+                break;
+            }
+        }
+        for malformed in [false, true] {
+            state
+                .snapshot_status
+                .store(if malformed { 0 } else { 503 }, Ordering::SeqCst);
+            state.snapshot_invalid.store(malformed, Ordering::SeqCst);
+            let before = state.snapshots.load(Ordering::SeqCst);
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+            while state.snapshots.load(Ordering::SeqCst) == before {
+                assert!(tokio::time::Instant::now() < deadline);
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            state.snapshot_status.store(0, Ordering::SeqCst);
+            state.snapshot_invalid.store(false, Ordering::SeqCst);
+            loop {
+                match tokio::time::timeout(Duration::from_secs(3), receive.recv())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                {
+                    Message::Failure { .. } => {
+                        panic!("transient snapshot failures must leave freshness to native timers")
+                    }
+                    Message::Lyrics {
+                        cached_document: Some(_),
+                        ..
+                    } => break,
+                    _ => {}
+                }
+            }
+        }
+        assert_eq!(state.documents.load(Ordering::SeqCst), 1);
         cancel.cancel();
         worker.await.unwrap();
         server_cancel.cancel();

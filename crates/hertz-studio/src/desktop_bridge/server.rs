@@ -7,7 +7,10 @@ use super::{
 use crate::error::{ApiError, ErrorBody, ErrorDetail};
 use axum::http::StatusCode;
 use futures::{future::BoxFuture, stream::FuturesUnordered, StreamExt};
-use hertz_desktop_ipc::{windows, Request, Response, Scope, BRIDGE_PROTOCOL};
+use hertz_desktop_ipc::{
+    windows::{self, Cancellation},
+    Request, Response, Scope, BRIDGE_PROTOCOL,
+};
 use std::{
     io,
     sync::{Arc, Mutex, Weak},
@@ -73,22 +76,30 @@ pub(super) async fn listen(
             let handler_key = requested_key.clone();
             let handler_bridge = bridge.clone();
             let handler_generation = generation.clone();
+            let connection_cancel = generation.cancel.clone();
             let _ = connection
-                .serve_with_admission(
-                    &generation.cancel,
+                .serve_with_async_admission(
+                    &connection_cancel,
                     move |_, request| async move {
                         let response = handler_bridge
                             .handle_request(scope, &handler_generation, &request, &handler_key)
                             .await;
                         Ok(response)
                     },
-                    |response| {
-                        bridge.register_send(
-                            scope,
-                            &generation,
-                            response,
-                            lock(&requested_key).as_deref().map(String::as_str),
-                        )
+                    move |response| async move {
+                        let requested = lock(&requested_key).clone();
+                        hertz_desktop_ipc::blocking::Worker::start(
+                            Cancellation::new(),
+                            move || {
+                                bridge.register_send(
+                                    scope,
+                                    &generation,
+                                    &response,
+                                    requested.as_deref().map(String::as_str),
+                                )
+                            },
+                        )?
+                        .await?
                     },
                 )
                 .await;
@@ -145,22 +156,33 @@ impl DesktopBridge {
     }
 
     pub(super) async fn handle_request(
-        &self,
+        self: &Arc<Self>,
         scope: Scope,
         generation: &AuthorizationGeneration,
         request: &Request,
         requested_key: &Mutex<Option<Zeroizing<String>>>,
     ) -> Response {
-        let result = if request.validate(scope, &self.session).is_err() {
+        let valid_request = request.validate(scope, &self.session).is_ok();
+        let authority = if valid_request {
+            let bridge = self.clone();
+            let generation = generation.clone();
+            let key = Zeroizing::new(request.key.clone());
+            match hertz_desktop_ipc::blocking::Worker::start(Cancellation::new(), move || {
+                bridge.validate_authority(scope, &generation, Some(&key))
+            }) {
+                Ok(worker) => worker.await.is_ok_and(|result| result.is_ok()),
+                Err(_) => false,
+            }
+        } else {
+            false
+        };
+        let result = if !valid_request {
             Err(ApiError::new(
                 StatusCode::BAD_REQUEST,
                 "desktop_request_invalid",
                 "Invalid desktop read request",
             ))
-        } else if self
-            .validate_authority(scope, generation, Some(&request.key))
-            .is_err()
-        {
+        } else if !authority {
             Err(ApiError::new(
                 StatusCode::FORBIDDEN,
                 "desktop_authorization_required",

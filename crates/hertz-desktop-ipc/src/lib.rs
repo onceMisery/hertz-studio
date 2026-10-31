@@ -3,6 +3,8 @@
 //! A caller owns authorization, concurrency permits and lifetime cancellation. The user SID
 //! boundary does not isolate mutually malicious processes belonging to the same user.
 
+#[cfg(windows)]
+pub mod blocking;
 pub mod frame;
 #[cfg(windows)]
 pub mod management;

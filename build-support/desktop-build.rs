@@ -8,6 +8,9 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 
 pub fn emit(root: &Path, plugin: bool) {
+    // Cargo can reuse a compiled build script in another checkout sharing target/.
+    // Resolve inputs from that invocation and invalidate cached output when it moves.
+    println!("cargo:rerun-if-env-changed=CARGO_MANIFEST_DIR");
     println!("cargo:rerun-if-env-changed=RUSTC");
     println!("cargo:rerun-if-env-changed=CARGO_ENCODED_RUSTFLAGS");
     let mut desktop = BTreeSet::new();

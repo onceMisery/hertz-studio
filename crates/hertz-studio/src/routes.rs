@@ -2205,6 +2205,11 @@ pub(crate) async fn lyric_doc_for(
 
 /// 无手动导入时的回退链：容器内嵌歌词标签 → 同目录 sidecar `.lrc`。
 pub(crate) async fn read_embedded_or_sidecar_lyrics(path: &Path) -> vmusic_core::LyricDocument {
+    read_embedded_or_sidecar_lyrics_checked(path).await.unwrap_or_else(|_| vmusic_core::LyricDocument::empty())
+}
+
+pub(crate) async fn read_embedded_or_sidecar_lyrics_checked(path: &Path) -> Result<vmusic_core::LyricDocument, vmusic_lyrics::ImportError> {
+    use tokio::io::AsyncReadExt;
     let embedded = {
         let path = path.to_path_buf();
         tokio::task::spawn_blocking(move || {
@@ -2216,22 +2221,23 @@ pub(crate) async fn read_embedded_or_sidecar_lyrics(path: &Path) -> vmusic_core:
         .unwrap_or(None)
     };
     if let Some(text) = embedded {
-        let mut doc = vmusic_lyrics::parse_lrc(&text);
+        let mut doc = vmusic_lyrics::parse_lrc_checked(&text)?;
         if !doc.lines.is_empty() {
             doc.source = vmusic_core::LyricSource::Embedded;
-            return doc;
+            return Ok(doc);
         }
     }
-    match vmusic_library::find_sidecar_lyrics(path) {
-        Some(lrc) => match tokio::fs::read_to_string(&lrc).await {
-            Ok(text) => vmusic_lyrics::parse_lrc(&text),
-            Err(e) => {
-                tracing::debug!("cannot read {}: {e}", lrc.display());
-                vmusic_core::LyricDocument::empty()
-            }
-        },
-        None => vmusic_core::LyricDocument::empty(),
+    let path = path.to_path_buf();
+    let lrc = tokio::task::spawn_blocking(move || vmusic_library::find_sidecar_lyrics(&path)).await.unwrap_or(None);
+    let Some(lrc) = lrc else { return Ok(vmusic_core::LyricDocument::empty()); };
+    let Ok(file) = tokio::fs::File::open(&lrc).await else { return Ok(vmusic_core::LyricDocument::empty()); };
+    let mut bytes = Vec::new();
+    if file.take(vmusic_lyrics::MAX_BYTES as u64 + 1).read_to_end(&mut bytes).await.is_err() {
+        return Ok(vmusic_core::LyricDocument::empty());
     }
+    if bytes.len() > vmusic_lyrics::MAX_BYTES { return Err(vmusic_lyrics::ImportError::Limit); }
+    let text = std::str::from_utf8(&bytes).map_err(|_| vmusic_lyrics::ImportError::Invalid)?;
+    vmusic_lyrics::parse_lrc_checked(text)
 }
 
 #[derive(Deserialize)]

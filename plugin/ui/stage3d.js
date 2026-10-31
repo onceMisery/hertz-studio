@@ -196,7 +196,9 @@
     // halation / atmosphere 是共享引擎 FX.createOpticalChain 与 buildAtmosphere 的入口参数，
     // 缺省值必须与引擎内 fallback 一致，否则「面板显示关着但画面仍开」这种鬼故事无从排查。
     sonnetTuning: { shotFlow: 'auto', lyricLayout: 'phrases', phraseLength: 12, decor: true, accents: true, halation: 0.5, atmosphere: true },
-    temperaTuning: { composition: 'auto', colorMode: 'duo', screens: true, inversion: true, halation: 0.5, seams: true },
+    // 新一版凝彩把逐字染色放在前景，旧的满高反色扫光会整条盖住弧线；
+    // 旧配置没有 sweepVersion，载入时一次性回落为关闭，之后用户仍可手动打开。
+    temperaTuning: { composition: 'auto', colorMode: 'duo', screens: true, inversion: false, halation: 0.5, seams: true, sweepVersion: 2 },
     // pendingOffset：歌词偏移的乐观暂存（毫秒），null 表示与服务端一致。
     // PUT+refresh 追上之前连点都基于它递增，避免读旧值导致连点塌缩成一步。
     // pendingTrackId：pendingOffset 所属曲目 id；切歌隔离与 PUT 失败回清都据此判定。
@@ -2319,14 +2321,18 @@
         halation: clamp(num(value.sonnetTuning.halation, 0.5), 0, 1),
         atmosphere: value.sonnetTuning.atmosphere !== false
       };
-      if (value.temperaTuning && typeof value.temperaTuning === 'object') stanza.temperaTuning = {
-        composition: global.StanzaTempera && global.StanzaTempera.COMPOSITION_KINDS.indexOf(value.temperaTuning.composition) >= 0 ? value.temperaTuning.composition : 'auto',
-        colorMode: ['duo', 'mono', 'vivid'].indexOf(value.temperaTuning.colorMode) >= 0 ? value.temperaTuning.colorMode : 'duo',
-        screens: value.temperaTuning.screens !== false,
-        inversion: value.temperaTuning.inversion !== false,
-        halation: clamp(num(value.temperaTuning.halation, 0.5), 0, 1),
-        seams: value.temperaTuning.seams !== false
-      };
+      if (value.temperaTuning && typeof value.temperaTuning === 'object') {
+        var temperaSweepVersion = num(value.temperaTuning.sweepVersion, 1);
+        stanza.temperaTuning = {
+          composition: global.StanzaTempera && global.StanzaTempera.COMPOSITION_KINDS.indexOf(value.temperaTuning.composition) >= 0 ? value.temperaTuning.composition : 'auto',
+          colorMode: ['duo', 'mono', 'vivid'].indexOf(value.temperaTuning.colorMode) >= 0 ? value.temperaTuning.colorMode : 'duo',
+          screens: value.temperaTuning.screens !== false,
+          inversion: temperaSweepVersion >= 2 && value.temperaTuning.inversion === true,
+          halation: clamp(num(value.temperaTuning.halation, 0.5), 0, 1),
+          seams: value.temperaTuning.seams !== false,
+          sweepVersion: 2
+        };
+      }
       syncLayout();
       for (var i = 0; i < STAGES.length; i += 1) if (STAGES[i].id === value.scene) applyStageSelection(i, true);
       $('s3d-motion').value = Math.round(motion * 100); text('s3d-motion-value', Math.round(motion * 100) + '%');

@@ -196,6 +196,9 @@ pub(crate) struct SourceHealth {
 }
 
 impl SourceHealth {
+    pub(crate) fn session(&self) -> Option<&str> {
+        self.session.as_deref()
+    }
     pub(crate) fn accept(&mut self, lyrics: bool, started: Instant, session: &str) {
         if self.session.as_deref() != Some(session) {
             *self = Self {

@@ -86,7 +86,13 @@ fn verify(directory: &Path, cancel: &Cancellation, deadline: Instant) -> io::Res
     {
         return Err(invalid());
     }
-    let mut binary = File::open(directory.join("hertz-desktop.exe"))?;
+    let mut binary = File::open(directory.join("hertz-desktop.exe")).map_err(|error| {
+        if error.kind() == io::ErrorKind::NotFound {
+            invalid()
+        } else {
+            error
+        }
+    })?;
     let metadata = binary.metadata()?;
     if !metadata.is_file() || metadata.len() != manifest.size {
         return Err(invalid());

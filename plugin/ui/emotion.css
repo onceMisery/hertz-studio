@@ -12,15 +12,20 @@
   --lyric-active: var(--emo-ink, var(--text));
   color: var(--emo-ink, inherit);
   font-weight: var(--emo-weight, inherit);
+  font-family: var(--emo-font, inherit);
   letter-spacing: var(--emo-track, normal);
   line-height: var(--emo-leading, inherit);
 }
 
-/* translate 是独立变换属性，与 .word 的 scale 和行级 transform 各自合成，
-   不会像写进 transform 那样互相覆盖。--emo-dy 是逐词基线场采样值。 */
-.lyric[data-emo-active="true"] .word {
-  translate: 0 var(--emo-dy, 0px);
+/* 独立变换与原有歌词 transform 合成，保留逐词染色和排版。 */
+.lyric[data-emo-active="true"] .word,
+.sl-line[data-emo-active="true"] .sl-word {
+  translate: var(--emo-x, 0px) var(--emo-dy, 0px);
+  rotate: var(--emo-rotate, 0rad);
+  scale: var(--emo-scale-x, 1) var(--emo-scale-y, 1);
 }
+/* 逐帧缩放不能再经过 CSS transition，否则暂停后仍会追赶旧目标。 */
+.lyric[data-emo-active="true"] .word { transition-property: opacity; }
 /* P3 重音词：只加粗匹配词，不改变行级字重/字距。 */
 .lyric[data-emo-active="true"] .word[data-emo-accent="true"] {
   font-weight: var(--emo-accent-weight, 800);
@@ -30,48 +35,6 @@
    （translate/scale）与 .fl-crot 的 rotate 各自合成，互不覆盖。 */
 .fl-cline[data-emo-active="true"] .fl-cword {
   translate: 0 var(--emo-dy, 0px);
-}
-
-/* 时间维度：只作用于 classic 的词，场位移始终在 keyframe 里保留。
-   span 的呼吸/入场动画在 .fl-cline 上，词级循环用 translate，不会互抢。 */
-@keyframes emo-bob {
-  0%, 100% { translate: 0 var(--emo-dy, 0px); }
-  50% { translate: 0 calc(var(--emo-dy, 0px) - 2px); }
-}
-@keyframes emo-sink {
-  0%, 100% { translate: 0 var(--emo-dy, 0px); }
-  50% { translate: 0 calc(var(--emo-dy, 0px) + 1.5px); }
-}
-@keyframes emo-impact {
-  0%, 100% { translate: 0 var(--emo-dy, 0px); }
-  25% { translate: 1.2px var(--emo-dy, 0px); }
-  50% { translate: -1.2px var(--emo-dy, 0px); }
-  75% { translate: 0.6px var(--emo-dy, 0px); }
-}
-@keyframes emo-drift {
-  0%, 100% { translate: 0 var(--emo-dy, 0px); }
-  33% { translate: 0.8px calc(var(--emo-dy, 0px) - 0.6px); }
-  66% { translate: -0.8px calc(var(--emo-dy, 0px) + 0.6px); }
-}
-.fl-cline[data-emo-active="true"][data-emo-arch="bounce"] .fl-cword {
-  animation: emo-bob 2.8s ease-in-out infinite;
-}
-.fl-cline[data-emo-active="true"][data-emo-arch="sink"] .fl-cword {
-  animation: emo-sink 6.8s ease-in-out infinite;
-}
-.fl-cline[data-emo-active="true"][data-emo-arch="impact"] .fl-cword {
-  animation: emo-impact .7s cubic-bezier(.36,.07,.19,.97) 1;
-}
-.fl-cline[data-emo-active="true"][data-emo-arch="drift"] .fl-cword {
-  animation: emo-drift 3.6s ease-in-out infinite;
-}
-
-/* 减少动效 / 低性能：停循环，但场的静态位移保留（设计文档 §10.2）。 */
-body.reduce-motion .fl-cline[data-emo-active="true"] .fl-cword,
-body[data-rm~="lyrics"] .fl-cline[data-emo-active="true"] .fl-cword,
-.s3d-reduced .fl-cline[data-emo-active="true"] .fl-cword,
-body.stage-lowfx .fl-cline[data-emo-active="true"] .fl-cword {
-  animation: none;
 }
 
 /* P2a 装饰件：只在 climax 出现；层在字后，粒子不接指针。 */
@@ -133,11 +96,7 @@ body.stage-lowfx .fl-emo-decor {
   display: none;
 }
 
-/* 3D 歌词轨：只给当前行；场位移用独立 translate，与 --sl-rise/scatter 的
-   transform 各自合成。配色走当前行的渐变，不覆盖周边句。 */
-.sl-line[data-emo-active="true"] .sl-word {
-  translate: 0 var(--emo-dy, 0px);
-}
+/* 3D 歌词轨的配色只覆盖当前行，不覆盖周边句。 */
 .sl-line[data-emo-active="true"] .sl-word[data-emo-accent="true"] {
   font-weight: var(--emo-accent-weight, 700);
 }
@@ -158,63 +117,21 @@ body.stage-lowfx .fl-emo-decor {
   translate: 0 var(--emo-dy, 0px);
 }
 
-/* P3：tender 的慢速浮动动作族；场位移仍由 --emo-dy 提供。 */
-@keyframes emo-float {
-  0%, 100% { translate: 0 var(--emo-dy, 0px); }
-  50% { translate: 0 calc(var(--emo-dy, 0px) - 0.8px); }
+/* 情绪姿态只由媒体时钟驱动，避免 CSS 墙钟动画叠加后在 seek 时漂移。 */
+.fl-emo-motion { display: block; position: relative; transform-origin: center; }
+#emotion-preview-text > span, .sl-word { position: relative; }
+.emo-glyph-fx {
+  position: absolute; left: 50%; top: 50%; width: 1em; height: 1.5em;
+  transform: translate(-50%, -50%); overflow: visible; z-index: 2;
+  pointer-events: none; user-select: none;
 }
-.fl-cline[data-emo-active="true"][data-emo-arch="float"] .fl-cword {
-  animation: emo-float 5.5s ease-in-out infinite;
-}
-body.reduce-motion .fl-cline[data-emo-active="true"][data-emo-arch="float"] .fl-cword,
-body[data-rm~="lyrics"] .fl-cline[data-emo-active="true"][data-emo-arch="float"] .fl-cword,
-.s3d-reduced .fl-cline[data-emo-active="true"][data-emo-arch="float"] .fl-cword,
-body.stage-lowfx .fl-cline[data-emo-active="true"][data-emo-arch="float"] .fl-cword {
-  animation: none;
-}
-
-/* P1：逐词激励。独立 motion 层承载入场/词级位移，
-   不与 .fl-cword 的循环 translate、.fl-crot 的 rotate、.fl-body 的音频 scale 抢属性。 */
-.fl-emo-motion { display: block; transform-origin: center; }
-@keyframes emo-enter-bounce {
-  0% { translate: 0 10px; scale: .94; rotate: -1.5deg; opacity: 0; }
-  35% { translate: 0 -9px; scale: 1.02; rotate: 1deg; opacity: 1; }
-  55% { translate: 0 -2px; scale: 1.02; rotate: 0deg; }
-  100% { translate: 0 0; scale: 1; rotate: 0deg; opacity: 1; }
-}
-@keyframes emo-enter-sink {
-  0% { translate: 0 -8px; opacity: 0; }
-  70% { translate: 0 3px; opacity: 1; }
-  100% { translate: 0 0; opacity: 1; }
-}
-@keyframes emo-enter-impact {
-  0% { translate: 0 0; scale: .86; opacity: 0; }
-  40% { translate: 1.2px 0; scale: 1.14; opacity: 1; }
-  70% { translate: -0.8px 0; scale: 1; }
-  100% { translate: 0 0; scale: 1; opacity: 1; }
-}
-@keyframes emo-enter-drift {
-  0% { translate: 0 4px; rotate: 1deg; opacity: 0; }
-  100% { translate: 0 0; rotate: 0deg; opacity: 1; }
-}
-@keyframes emo-enter-float {
-  0% { translate: 0 6px; scale: .96; opacity: 0; }
-  100% { translate: 0 0; scale: 1; opacity: 1; }
-}
-.fl-emo-motion.fl-emo-enter-bounce { animation: emo-enter-bounce var(--emo-enter-dur, 620ms) cubic-bezier(.34,1.56,.64,1) both; }
-.fl-emo-motion.fl-emo-enter-sink { animation: emo-enter-sink var(--emo-enter-dur, 900ms) cubic-bezier(.45,0,.55,1) both; }
-.fl-emo-motion.fl-emo-enter-impact { animation: emo-enter-impact var(--emo-enter-dur, 180ms) cubic-bezier(.2,.9,.2,1) both; }
-.fl-emo-motion.fl-emo-enter-drift { animation: emo-enter-drift var(--emo-enter-dur, 420ms) ease-out both; }
-.fl-emo-motion.fl-emo-enter-float { animation: emo-enter-float var(--emo-enter-dur, 560ms) ease-out both; }
-body.reduce-motion .fl-emo-motion,
-body[data-rm~="lyrics"] .fl-emo-motion,
-.s3d-reduced .fl-emo-motion,
-body.stage-lowfx .fl-emo-motion {
-  animation: none !important;
-  translate: 0 0 !important;
-  scale: 1 !important;
-  rotate: 0deg !important;
-}
+.emo-glyph-fx[data-emotion-fx="flame"] { filter: drop-shadow(0 0 2px #ff642f80); }
+.emo-glyph-fx[data-emotion-fx="tears"] { filter: drop-shadow(0 1px 1px #277bbb50); }
+body.reduce-motion .emo-glyph-fx,
+body[data-rm~="lyrics"] .emo-glyph-fx,
+.s3d-reduced .emo-glyph-fx,
+body.stage-lowfx .emo-glyph-fx { display: none; }
+@media (prefers-reduced-motion: reduce) { .emo-glyph-fx { display: none; } }
 
 /* P3：lonely 的雾层（单例背景装饰，不占粒子预算）。 */
 .fl-emo-fog {

@@ -170,10 +170,9 @@ const scripts = ['vendor/stage-runtime.js', 'vendor/space-stage.js', 'space-came
         if (mode !== 'tempera') {
           assert.equal(await page.locator('#sp-lyric-param-' + tuning).count(), 1, mode + ' exposes its original ' + tuning + ' tuning');
         } else {
-          for (const key of ['colorMode', 'inversion']) {
-            assert.equal(await page.locator('#sp-lyric-param-' + key).count(), 1, 'spatial mode keeps the foreground setting: ' + key);
-          }
-          for (const key of ['composition', 'screens', 'seams', 'halation']) {
+          assert.equal(await page.locator('#sp-lyric-param-colorMode').count(), 1,
+            'spatial mode keeps the foreground setting: colorMode');
+          for (const key of ['composition', 'screens', 'seams', 'halation', 'inversion']) {
             assert.equal(await page.locator('#sp-lyric-param-' + key).count(), 0,
               'spatial mode does not expose a setting with no rendered surface: ' + key);
           }

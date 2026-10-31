@@ -4447,7 +4447,11 @@ pub fn spawn_event_pump(state: Arc<AppState>) {
                     state.observe_listen(&snap).await;
                 }
                 AudioEvent::Spectrum(bands) => {
-                    state.wallpaper.observe_spectrum(&bands);
+                    // Desktop freshness follows actual PCM progress; the
+                    // original spectrum broadcast keeps its existing behavior.
+                    state
+                        .wallpaper
+                        .observe_spectrum(&bands, &state.audio.snapshot());
                     state.publish(WsEvent::Spectrum { bands });
                 }
                 AudioEvent::Ended {

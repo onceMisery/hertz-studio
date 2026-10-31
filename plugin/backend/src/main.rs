@@ -293,20 +293,17 @@ fn main() -> std::io::Result<()> {
             return;
         }
         shutdown_bridge.begin_shutdown();
-        tokio::spawn(async move {
-            shutdown_bridge.shutdown().await;
-        });
-        shutdown_state.shutdown().await;
+        tokio::join!(shutdown_bridge.shutdown(), shutdown_state.shutdown());
     });
 
     let metadata = PluginMetadata::new(PLUGIN_ID, env!("CARGO_PKG_VERSION"));
     let result = PluginServer::new(metadata, plugin).serve();
     // stdin EOF/read failure can leave an RPC executing or queued in the SDK.
-    // The process owner must drain Host End before main is allowed to return.
+    // Keep the runtime alive until both Host End and bridge discovery cleanup
+    // finish. A detached bridge task can otherwise be dropped on normal EOF.
     desktop_bridge.begin_shutdown();
-    runtime.spawn(async move {
-        desktop_bridge.shutdown().await;
+    runtime.block_on(async {
+        tokio::join!(desktop_bridge.shutdown(), booted.state.shutdown());
     });
-    runtime.block_on(booted.state.shutdown());
     result
 }

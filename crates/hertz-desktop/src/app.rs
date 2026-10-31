@@ -470,9 +470,19 @@ impl App {
         ));
     }
 
-    fn handle_update(&mut self, update: crate::feed::FeedUpdate, started: Instant) {
+    fn handle_update(&mut self, mut update: crate::feed::FeedUpdate, started: Instant) {
+        if started.elapsed() >= STALE_AFTER {
+            return;
+        }
+        if self.current_document.is_some()
+            && self.last_snapshot.as_ref().is_some_and(|snapshot| snapshot.server.session == update.snapshot.server.session)
+            && self.current_document_key == update.snapshot.lyrics.document_key
+            && self.current_track.as_deref() == update.snapshot.track.as_ref().map(|track| track.id.as_str())
+        {
+            update.document = None;
+        }
         self.source_health.accept(true, started, &update.snapshot.server.session);
-        self.handle_timed_update(update, Instant::now());
+        self.handle_timed_update(update, started);
     }
 
     fn handle_timed_update(&mut self, update: crate::feed::FeedUpdate, started: Instant) {
@@ -480,6 +490,7 @@ impl App {
         self.last_feed_error = None;
         let track_id = update.snapshot.track.as_ref().map(|track| track.id.clone());
         let track_changed = track_id != self.current_track;
+        let session_changed = self.last_snapshot.as_ref().is_some_and(|snapshot| snapshot.server.session != update.snapshot.server.session);
         if track_changed {
             self.current_track = track_id;
         }
@@ -490,7 +501,7 @@ impl App {
             .and_then(|document| document.document_key.clone())
             .or_else(|| snapshot_key.clone());
         let mut document_changed = false;
-        if track_changed || incoming_key != self.current_document_key {
+        if session_changed || track_changed || incoming_key != self.current_document_key {
             self.current_document = None;
             self.current_document_key = None;
             document_changed = true;
@@ -534,7 +545,7 @@ impl App {
             log(&format!("source error: {message}"));
             self.last_feed_error = Some(message.clone());
         }
-        let waiting = message.contains("未找到") || message.contains("未启动");
+        let waiting = message.contains("未找到") || message.contains("未启动") || message.contains("等待");
         self.source_state = if waiting { "waiting" } else { "error" };
         self.source_message = Some(message);
         self.last_snapshot = None;
@@ -1666,6 +1677,7 @@ impl App {
     }
 
     fn locate(&mut self) {
+        let was_enabled = self.config.lyrics.enabled;
         self.config.lyrics.enabled = true;
         self.policy.user_hidden = false;
         if self.config.lyrics.locked {
@@ -1676,6 +1688,9 @@ impl App {
             self.schedule_save();
         }
         self.panel_top = None;
+        if !was_enabled {
+            self.schedule_save();
+        }
         self.place(true);
         native::show_no_activate(self.hwnd());
         native::focus(self.hwnd());
@@ -2201,6 +2216,9 @@ impl App {
             }
             "unlock" => self.set_locked(false),
             "show" => {
+                if !self.config.lyrics.enabled {
+                    self.schedule_save();
+                }
                 self.config.lyrics.enabled = true;
                 self.policy.user_hidden = false;
                 self.recompute_visibility();
@@ -2272,6 +2290,7 @@ impl App {
         response["targetProfile"] = serde_json::to_value(target).unwrap();
         response["sourceConnected"] = (scopes["lyrics"] == true || scopes["wallpaper"] == true).into();
         response["sourceScopes"] = scopes;
+        response["sourceSession"] = self.source_health.session().into();
         response
     }
 
@@ -2416,12 +2435,24 @@ impl App {
         }
     }
 
-    fn tick(&mut self, target: &EventLoopWindowTarget<UserEvent>) {
-        self.sync_dbx_feed();
+    fn source_expiry_deadline(&self) -> Option<Instant> {
+        let lyrics = self
+            .last_snapshot
+            .as_ref()
+            .map(|_| self.last_update + STALE_AFTER);
+        let wallpaper = config::is_dbx(&self.profile)
+            .then_some(self.wallpaper_last_update)
+            .flatten()
+            .filter(|_| self.wallpaper_last.is_some())
+            .map(|at| at + STALE_AFTER);
+        lyrics.into_iter().chain(wallpaper).min()
+    }
+
+    fn expire_source_data(&mut self, now: Instant) {
         if config::is_dbx(&self.profile)
             && self
                 .wallpaper_last_update
-                .is_some_and(|at| at.elapsed() >= STALE_AFTER)
+                .is_some_and(|at| now.saturating_duration_since(at) >= STALE_AFTER)
             && self.wallpaper_last.is_some()
         {
             self.handle_wallpaper_feed(Err(FeedError {
@@ -2429,16 +2460,9 @@ impl App {
                 message: "等待所选 DBX 的新快照".into(),
             }));
         }
-        self.flush_save();
-        let now = Instant::now();
-        if self
-            .preview
-            .as_ref()
-            .is_some_and(|preview| now >= preview.lease_until)
+        if now.saturating_duration_since(self.last_update) >= STALE_AFTER
+            && self.last_snapshot.is_some()
         {
-            self.close_preview();
-        }
-        if now.duration_since(self.last_update) > STALE_AFTER && self.last_snapshot.is_some() {
             self.last_snapshot = None;
             self.current_document = None;
             self.current_document_key = None;
@@ -2450,6 +2474,20 @@ impl App {
             self.send_source();
             self.recompute_visibility();
             self.last_update = now;
+        }
+    }
+
+    fn tick(&mut self, target: &EventLoopWindowTarget<UserEvent>) {
+        self.sync_dbx_feed();
+        self.expire_source_data(Instant::now());
+        self.flush_save();
+        let now = Instant::now();
+        if self
+            .preview
+            .as_ref()
+            .is_some_and(|preview| now >= preview.lease_until)
+        {
+            self.close_preview();
         }
         if now.duration_since(self.last_check) >= Duration::from_secs(1) {
             self.last_check = now;
@@ -2724,6 +2762,10 @@ impl App {
 
     fn on_moved(&mut self) {
         if self.placing {
+            return;
+        }
+        // A move caused by an outage hiding the window must not rewrite the saved anchor or pin the monitor.
+        if self.policy.no_content {
             return;
         }
         let hwnd = self.hwnd();
@@ -3085,7 +3127,14 @@ pub(crate) fn run() -> Result<()> {
     }
 
     event_loop.run(move |event, target, control_flow| {
-        *control_flow = ControlFlow::Wait;
+        // Freshness is a deadline, independent of the 500 ms maintenance ticker.
+        // This also clears expired data before handling a queued status/document.
+        if !matches!(&event, Event::LoopDestroyed) {
+            app.expire_source_data(Instant::now());
+        }
+        *control_flow = app
+            .source_expiry_deadline()
+            .map_or(ControlFlow::Wait, ControlFlow::WaitUntil);
         match event {
             Event::UserEvent(UserEvent::Dbx(generation, message)) => {
                 if generation == app.source_generation && config::is_dbx(&app.profile) { app.handle_dbx(*message); }
@@ -3103,8 +3152,12 @@ pub(crate) fn run() -> Result<()> {
                     ));
                 }
             }
-            Event::UserEvent(UserEvent::WallpaperFeed(generation, started, result)) => {
+            Event::UserEvent(UserEvent::WallpaperFeed(generation, started, mut result)) => {
                 if generation == app.source_generation {
+                    if let Ok(snapshot) = result.as_mut() {
+                        if started.elapsed() >= STALE_AFTER { return; }
+                        snapshot.received_at = Some(started);
+                    }
                     if let Ok(snapshot) = result.as_ref() {
                         app.source_health.accept(false, started, &snapshot.server.session);
                     }
@@ -3169,6 +3222,11 @@ pub(crate) fn run() -> Result<()> {
                 log("event loop destroyed");
             }
             _ => {}
+        }
+        if *control_flow != ControlFlow::Exit {
+            if let Some(deadline) = app.source_expiry_deadline() {
+                *control_flow = ControlFlow::WaitUntil(deadline);
+            }
         }
     });
 }

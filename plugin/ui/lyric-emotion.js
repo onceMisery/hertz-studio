@@ -487,7 +487,260 @@
     return F.evaluate(emotionState.profile, u, emotionState.intensity, emPx, 0, 0);
   }
 
+  var EMOTION_FONTS = {
+    joy: '"YouYuan","Yuanti SC","Arial Rounded MT Bold","Microsoft YaHei",sans-serif',
+    sorrow: '"FangSong","STFangsong","Noto Serif CJK SC",serif',
+    anger: '"Noto Sans CJK SC","Microsoft YaHei","Arial Black",sans-serif',
+    anxious: '"JetBrains Mono",Consolas,"Microsoft YaHei",monospace',
+    tender: '"KaiTi","STKaiti","Kaiti SC","Noto Serif CJK SC",serif',
+    triumph: '"Microsoft YaHei","Noto Sans CJK SC","Arial Black",sans-serif',
+    lonely: '"FangSong","STFangsong","Noto Serif CJK SC",serif'
+  };
+
+  function fontFamily(emotion, fallback) {
+    return emotion && emotion.id !== 'neutral' && emotion.intensity >= MIN_INTENSITY
+      ? EMOTION_FONTS[emotion.id] || fallback : fallback;
+  }
+
+  function motionPose(emotion, u, time, emPx, emphasis, reduced) {
+    var pose = { x: 0, y: 0, rotate: 0, scaleX: 1, scaleY: 1, skew: 0 };
+    if (!emotion || emotion.id === 'neutral' || emotion.intensity < MIN_INTENSITY) return pose;
+    var intensity = clamp01(emotion.intensity);
+    var size = emPx * intensity;
+    var phase = u * Math.PI * 2;
+    var clock = time * Math.PI / 3;
+    var wave = reduced ? 0 : Math.sin(clock - phase * 0.5);
+    var swell = reduced ? 0 : (1 - Math.cos(clock - phase * 0.25)) * 0.5;
+    var accent = reduced ? 0 : clamp01(emphasis);
+    pose.y = sampleAt(emotion, u, emPx).b;
+    switch (emotion.id) {
+      case 'joy':
+        var bounce = reduced ? 0 : Math.sin(clock * 2 - phase);
+        var jump = Math.pow(Math.max(0, bounce), 2);
+        var land = Math.pow(Math.max(0, -bounce), 8);
+        pose.y -= size * (0.23 * jump + 0.08 * accent);
+        pose.rotate = (bounce * 0.06 + accent * 0.025) * intensity;
+        pose.scaleX += (0.07 * land - 0.045 * jump) * intensity;
+        pose.scaleY += (0.12 * jump - 0.075 * land + 0.04 * accent) * intensity;
+        break;
+      case 'sorrow':
+        pose.y += size * (0.18 * swell + 0.035 * accent);
+        pose.rotate = wave * 0.035 * intensity;
+        pose.scaleX -= 0.035 * intensity;
+        pose.scaleY -= 0.07 * swell * intensity;
+        pose.skew = -0.025 * intensity;
+        break;
+      case 'anger':
+        var strike = reduced ? 0 : Math.pow(Math.max(0, Math.sin(clock * 3 - phase * 0.15)), 4);
+        var impact = Math.max(strike, accent * 0.8);
+        pose.x = size * (reduced ? 0 : Math.sin(clock * 18 + phase) * 0.075 * impact);
+        pose.y -= size * 0.09 * impact;
+        pose.skew = (-0.09 - 0.035 * impact) * intensity;
+        pose.rotate = wave * 0.025 * impact * intensity;
+        pose.scaleX += (0.055 + 0.13 * impact) * intensity;
+        pose.scaleY += (0.045 + 0.16 * impact) * intensity;
+        break;
+      case 'anxious':
+        var tremble = reduced ? 0 : Math.sin(clock * 7 + phase) * 0.085 + Math.sin(clock * 11 - phase) * 0.035;
+        pose.x = size * tremble;
+        pose.y += size * (reduced ? 0 : Math.sin(clock * 5 - phase) * 0.065);
+        pose.rotate = (0.015 * Math.sin(phase) + tremble * 0.7) * intensity;
+        pose.scaleX -= 0.025 * intensity;
+        break;
+      case 'tender':
+        pose.x = size * 0.045 * wave;
+        pose.y -= size * (0.10 * wave + 0.035 * accent);
+        pose.rotate = (0.018 * Math.sin(phase) + wave * 0.045) * intensity;
+        pose.scaleX += (0.035 * swell + 0.02 * accent) * intensity;
+        pose.scaleY += (0.035 * swell + 0.02 * accent) * intensity;
+        break;
+      case 'triumph':
+        pose.x = size * (u - 0.5) * 0.12 * swell;
+        pose.y -= size * (0.23 * swell + 0.07 * accent);
+        pose.scaleX += (0.06 + 0.06 * swell) * intensity;
+        pose.scaleY += (0.09 + 0.13 * swell + 0.035 * accent) * intensity;
+        break;
+      case 'lonely':
+        pose.x = size * ((u - 0.5) * (0.16 + 0.28 * swell) + wave * 0.075);
+        pose.y += size * (0.065 * wave + 0.08 * swell);
+        pose.rotate = wave * 0.035 * intensity;
+        pose.scaleX -= (0.045 + 0.025 * swell) * intensity;
+        break;
+    }
+    return pose;
+  }
+
+  var GLYPH_EFFECTS = {
+    anger: { kind: 'flame', paths: [
+      ['M0 6 C-24 4 -21 -19 -12 -30 C-14 -18 -7 -15 -6 -21 C-2 -31 -9 -40 3 -59 C0 -42 20 -33 13 -17 C22 -24 24 -11 17 -1 C13 6 5 8 0 6Z', '#ff5728'],
+      ['M0 5 C-12 1 -8 -11 -3 -19 C-4 -8 5 -12 5 -30 C14 -15 12 -1 3 5Z', '#ffd56a']
+    ] },
+    sorrow: { kind: 'tears', paths: [
+      ['M0 -15 C-3 -8 -10 0 -10 6 A10 10 0 0 0 10 6 C10 0 3 -8 0 -15Z', '#58b9ff'],
+      ['M-3 -1 C-8 4 -7 10 -3 11 C-5 7 -3 3 -1 1Z', '#d9f3ff']
+    ] },
+    joy: { kind: 'sparkle', paths: [
+      ['M0 -15 L4 -4 L15 0 L4 4 L0 15 L-4 4 L-15 0 L-4 -4Z', '#ffcf63'],
+      ['M0 -7 L2 -2 L7 0 L2 2 L0 7 L-2 2 L-7 0 L-2 -2Z', '#fff9d9']
+    ] },
+    anxious: { kind: 'electric', paths: [
+      ['M4 -26 L-11 -4 L0 -4 L-6 24 L14 -6 L4 -6 L11 -26Z', '#b7a1ff'],
+      ['M4 -21 L-6 -2 L4 -2 L-1 13 L9 -4 L1 -4Z', '#f0eaff']
+    ] },
+    tender: { kind: 'petals', paths: [
+      ['M0 14 C-21 0 -12 -19 0 -9 C12 -19 21 0 0 14Z', '#f3a9bd'],
+      ['M0 9 C-9 -1 -7 -9 -2 -7 C-3 -2 -1 3 0 9Z', '#ffe3e8']
+    ] },
+    triumph: { kind: 'rays', paths: [
+      ['M-3 7 L-5 -23 L0 -40 L5 -23 L3 7Z', '#ffcf54'],
+      ['M-1 5 L-2 -22 L0 -32 L2 -22 L1 5Z', '#fff5c4']
+    ] },
+    lonely: { kind: 'mist', paths: [
+      ['M-34 2 C-24 -9 -12 9 0 -2 C12 -14 26 -8 34 2 C23 -3 17 7 5 6 C-11 14 -20 -1 -34 2Z', '#a9c8dc'],
+      ['M-24 10 C-10 0 -1 17 15 7 C8 19 -11 9 -24 10Z', '#d8e6ef']
+    ] }
+  };
+
+  function effectFrame(emotion, index, time, reduced) {
+    var def = emotion && emotion.intensity >= MIN_INTENSITY && GLYPH_EFFECTS[emotion.id];
+    var result = { kind: def ? def.kind : null, particles: [] };
+    if (!def || reduced) return result;
+    var intensity = clamp01(emotion.intensity);
+    var count = emotion.id === 'sorrow' || emotion.id === 'anxious' || emotion.id === 'lonely' ? 2 : 3;
+    for (var i = 0; i < count; i++) {
+      var phase = ((time / (emotion.id === 'anger' ? 2 : 3) + index * 0.173 + i / count) % 1 + 1) % 1;
+      var wave = Math.sin(phase * Math.PI * 2);
+      var fade = Math.pow(Math.sin(phase * Math.PI), 0.7);
+      var p = { x: 0, y: 0, scaleX: 1, scaleY: 1, rotation: 0, alpha: intensity };
+      if (emotion.id === 'anger') {
+        p.x = (i - 1) * 24 + wave * 3; p.y = -17;
+        p.scaleX = 0.64 + 0.10 * wave; p.scaleY = (i === 1 ? 1 : 0.73) + 0.16 * wave;
+        p.rotation = wave * 0.13; p.alpha *= 0.76 + 0.24 * fade;
+      } else if (emotion.id === 'sorrow') {
+        p.x = (i ? 1 : -1) * 24 + wave * 3; p.y = 28 + phase * phase * 70;
+        p.scaleX = 0.56 + phase * 0.2; p.scaleY = 0.62 + phase * 0.42; p.alpha *= fade;
+      } else if (emotion.id === 'joy') {
+        p.x = (i - 1) * 32 + wave * 7; p.y = -30 - phase * 38;
+        p.scaleX = p.scaleY = 0.42 + 0.38 * fade; p.rotation = phase * 0.9; p.alpha *= fade;
+      } else if (emotion.id === 'anxious') {
+        p.x = (i ? 1 : -1) * (43 + wave * 3); p.y = wave * 8;
+        p.scaleX = 0.65; p.scaleY = 0.6 + 0.2 * fade; p.rotation = wave * 0.18;
+        p.alpha *= 0.12 + 0.74 * Math.pow(fade, 3);
+      } else if (emotion.id === 'tender') {
+        p.x = (i - 1) * 32 + wave * 10; p.y = 16 - phase * 65;
+        p.scaleX = p.scaleY = 0.43 + 0.18 * fade; p.rotation = wave * 0.6; p.alpha *= fade * 0.85;
+      } else if (emotion.id === 'triumph') {
+        p.x = (i - 1) * 28; p.y = -23 - fade * 10;
+        p.scaleX = 0.66; p.scaleY = 0.65 + fade * 0.55; p.rotation = (i - 1) * 0.38;
+        p.alpha *= 0.35 + fade * 0.6;
+      } else {
+        p.x = wave * 18; p.y = 6 + i * 18 - phase * 24;
+        p.scaleX = 0.8 + phase * 0.5; p.scaleY = 0.7 + phase * 0.3; p.alpha *= fade * 0.45;
+      }
+      result.particles.push(p);
+    }
+    return result;
+  }
+
+  function effectEnabled(emotion, index, total) {
+    return emotion && emotion.intensity >= MIN_INTENSITY && GLYPH_EFFECTS[emotion.id] &&
+      index % Math.max(1, Math.ceil(total / 12)) === 0;
+  }
+
+  function clearGlyphEffects(el) {
+    if (!el._emotionFx) return;
+    el._emotionFx.svg.remove();
+    delete el._emotionFx;
+  }
+
+  function prepareGlyphEffects(el, emotion, index, total) {
+    if (!effectEnabled(emotion, index, total)) { clearGlyphEffects(el); return; }
+    var def = GLYPH_EFFECTS[emotion.id];
+    if (el._emotionFx && el._emotionFx.kind === def.kind) { el._emotionFx.index = index; return; }
+    clearGlyphEffects(el);
+    var ns = 'http://www.w3.org/2000/svg';
+    var svg = document.createElementNS(ns, 'svg');
+    svg.setAttribute('class', 'emo-glyph-fx');
+    svg.setAttribute('viewBox', '-50 -75 100 150');
+    svg.setAttribute('aria-hidden', 'true');
+    svg.setAttribute('focusable', 'false');
+    svg.setAttribute('data-emotion-fx', def.kind);
+    var groups = effectFrame(emotion, index, 0, false).particles.map(function () {
+      var group = document.createElementNS(ns, 'g');
+      def.paths.forEach(function (spec) {
+        var path = document.createElementNS(ns, 'path');
+        path.setAttribute('d', spec[0]); path.setAttribute('fill', spec[1]); group.appendChild(path);
+      });
+      svg.appendChild(group); return group;
+    });
+    el.appendChild(svg);
+    el._emotionFx = { svg: svg, kind: def.kind, groups: groups, index: index };
+  }
+
+  function paintGlyphEffects(el, emotion, time, reduced) {
+    var fx = el._emotionFx;
+    if (!fx) return;
+    var frame = effectFrame(emotion, fx.index, time, reduced);
+    var display = frame.particles.length ? '' : 'none';
+    if (fx.svg.style.display !== display) fx.svg.style.display = display;
+    frame.particles.forEach(function (p, i) {
+      // 量化后不变就不写：逐帧 setAttribute 会和歌词其余部分一样留在失效集里。
+      var transform = 'translate(' + p.x.toFixed(2) + ' ' + p.y.toFixed(2) + ') rotate(' +
+        (p.rotation * 180 / Math.PI).toFixed(2) + ') scale(' + p.scaleX.toFixed(3) + ' ' + p.scaleY.toFixed(3) + ')';
+      var alpha = p.alpha.toFixed(3), cache = fx.groups[i]._emoPainted;
+      if (cache === transform + '|' + alpha) return;
+      fx.groups[i]._emoPainted = transform + '|' + alpha;
+      fx.groups[i].setAttribute('transform', transform);
+      fx.groups[i].setAttribute('opacity', alpha);
+    });
+  }
+
+  function preparePixiGlyphEffects(PIXI, node, emotion, index, total) {
+    if (!effectEnabled(emotion, index, total)) return;
+    var def = GLYPH_EFFECTS[emotion.id];
+    var layer = new PIXI.Container();
+    layer.label = 'emotion-fx-' + def.kind;
+    layer.eventMode = 'none';
+    var source = '<svg xmlns="http://www.w3.org/2000/svg">' + def.paths.map(function (p) {
+      return '<path d="' + p[0] + '" fill="' + p[1] + '"/>';
+    }).join('') + '</svg>';
+    var particles = effectFrame(emotion, index, 0, false).particles.map(function () {
+      var graphic = new PIXI.Graphics().svg(source);
+      layer.addChild(graphic); return graphic;
+    });
+    node.parent.addChild(layer);
+    node._emotionFx = { layer: layer, particles: particles, index: index, kind: def.kind };
+  }
+
+  function paintPixiGlyphEffects(node, emotion, time, reduced) {
+    var fx = node._emotionFx;
+    if (!fx) return;
+    var frame = effectFrame(emotion, fx.index, time, reduced);
+    fx.layer.visible = node.visible && frame.particles.length > 0;
+    if (!fx.layer.visible) return;
+    fx.layer.position.copyFrom(node.position);
+    fx.layer.rotation = node.rotation;
+    fx.layer.skew.copyFrom(node.skew);
+    fx.layer.scale.set(node.scale.x * node.dataset.fontSize / 100, node.scale.y * node.dataset.fontSize / 100);
+    fx.layer.alpha = node.alpha;
+    frame.particles.forEach(function (p, i) {
+      var graphic = fx.particles[i];
+      graphic.position.set(p.x, p.y); graphic.scale.set(p.scaleX, p.scaleY);
+      graphic.rotation = p.rotation; graphic.alpha = p.alpha;
+    });
+  }
+
   // ---- DOM 后端 ----
+  var MOTION_VARS = ['--emo-x', '--emo-dy', '--emo-rotate', '--emo-scale-x', '--emo-scale-y'];
+  function applyWordMotion(el, emotion, u, time, emPx, emphasis, reduced) {
+    var pose = motionPose(emotion, u, time, emPx, emphasis, reduced);
+    var values = [pose.x.toFixed(3) + 'px', pose.y.toFixed(3) + 'px', pose.rotate.toFixed(4) + 'rad',
+      pose.scaleX.toFixed(4), pose.scaleY.toFixed(4)];
+    MOTION_VARS.forEach(function (name, i) {
+      if (el.style.getPropertyValue(name) !== values[i]) el.style.setProperty(name, values[i]);
+    });
+    paintGlyphEffects(el, emotion, time, reduced);
+  }
   function setVar(el, name, value) { el.style.setProperty(name, value); }
   function clearVar(el, name) { el.style.removeProperty(name); }
   function rgbText(hex) {
@@ -503,13 +756,14 @@
     lineEl.removeAttribute('data-emo-climax');
     ['--emo-i', '--emo-ink', '--emo-accent', '--emo-accent-2',
       '--emo-ink-rgb', '--emo-accent-rgb',
-      '--emo-weight', '--emo-track', '--emo-leading', '--emo-accent-weight'].forEach(function (name) {
+      '--emo-weight', '--emo-track', '--emo-leading', '--emo-font', '--emo-accent-weight'].forEach(function (name) {
       clearVar(lineEl, name);
     });
     (words || []).forEach(function (word) {
       var el = word && word.el ? word.el : word;
       if (el) {
-        clearVar(el, '--emo-dy');
+        MOTION_VARS.forEach(function (name) { clearVar(el, name); });
+        clearGlyphEffects(el);
         el.removeAttribute('data-emo-accent');
       }
     });
@@ -528,6 +782,7 @@
     if (emotionState.intensity >= 0.75) lineEl.setAttribute('data-emo-climax', 'true');
     else lineEl.removeAttribute('data-emo-climax');
     setVar(lineEl, '--emo-i', emotionState.intensity.toFixed(3));
+    setVar(lineEl, '--emo-font', fontFamily(emotionState, 'inherit'));
     if (state.paletteEnabled) {
       setVar(lineEl, '--emo-ink', emotionState.palette.ink);
       setVar(lineEl, '--emo-accent', emotionState.palette.accent);
@@ -557,6 +812,7 @@
       var u = isFinite(u0) && isFinite(u1) ? (u0 + u1) / 2 : 0.5;
       var b = sampleAt(emotionState, u, emPx).b;
       setVar(el, '--emo-dy', b.toFixed(3) + 'px');
+      prepareGlyphEffects(el, emotionState, i, words.length);
       if (emotionState) el.setAttribute('data-emo-i', emotionState.intensity.toFixed(3));
       if (state.accentEnabled && state.accentWords.length && accentFor(el.textContent)) {
         el.setAttribute('data-emo-accent', 'true');
@@ -572,11 +828,11 @@
   function revision() { return state.revision; }
   function setScale(v) {
     if (typeof v !== 'number' || !isFinite(v) || v < 0 || v > 1.5) fail('情绪强度必须在 0..1.5');
-    state.scale = v;
+    if (state.scale !== v) { state.scale = v; state.revision += 1; }
   }
   function setCurve(v) {
     if (typeof v !== 'number' || !isFinite(v) || v < 0.5 || v > 1.5) fail('情绪曲线必须在 0.5..1.5');
-    state.curve = v;
+    if (state.curve !== v) { state.curve = v; state.revision += 1; }
   }
   function setAccent(enabled, words) {
     var nextEnabled = enabled === true;
@@ -588,7 +844,10 @@
     state.accentWords = nextWords;
     if (changed) state.revision += 1;
   }
-  function setPaletteEnabled(v) { state.paletteEnabled = v !== false; }
+  function setPaletteEnabled(v) {
+    var enabled = v !== false;
+    if (state.paletteEnabled !== enabled) { state.paletteEnabled = enabled; state.revision += 1; }
+  }
   function paletteEnabled() { return state.paletteEnabled; }
   function reset() {
     state.lines = null; state.hash = null; state.generation += 1;
@@ -618,6 +877,15 @@
     accentFor: accentFor,
     accentWeight: accentWeight,
     sampleAt: sampleAt,
+    fontFamily: fontFamily,
+    motionPose: motionPose,
+    effectFrame: effectFrame,
+    prepareGlyphEffects: prepareGlyphEffects,
+    paintGlyphEffects: paintGlyphEffects,
+    clearGlyphEffects: clearGlyphEffects,
+    preparePixiGlyphEffects: preparePixiGlyphEffects,
+    paintPixiGlyphEffects: paintPixiGlyphEffects,
+    applyWordMotion: applyWordMotion,
     applyLine: applyLine,
     clearLine: clearLine,
     bound: bound,

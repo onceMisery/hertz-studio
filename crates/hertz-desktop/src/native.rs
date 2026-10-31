@@ -43,11 +43,11 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     TranslateMessage, GWL_STYLE, HWND_BOTTOM, HWND_TOPMOST, LWA_ALPHA, MSG, PBT_APMRESUMEAUTOMATIC,
     PBT_APMRESUMESUSPEND, PBT_APMSUSPEND, PBT_POWERSETTINGCHANGE, SMTO_NORMAL, STYLESTRUCT,
     SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW,
-    SW_HIDE, SW_SHOW, SW_SHOWNOACTIVATE, WM_NCHITTEST, WM_POWERBROADCAST, WM_STYLECHANGING,
-    WM_WTSSESSION_CHANGE, WNDCLASSW, WNDPROC, WS_CAPTION, WS_CHILD, WS_EX_APPWINDOW, WS_EX_LAYERED,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_MAXIMIZEBOX,
-    WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU, WS_THICKFRAME, WTS_SESSION_LOCK, WTS_SESSION_LOGOFF,
-    WTS_SESSION_LOGON, WTS_SESSION_UNLOCK,
+    SW_HIDE, SW_SHOW, SW_SHOWNOACTIVATE, WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCHITTEST, WM_NCPAINT,
+    WM_POWERBROADCAST, WM_STYLECHANGING, WM_WTSSESSION_CHANGE, WNDCLASSW, WNDPROC, WS_CAPTION,
+    WS_CHILD, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WS_EX_TRANSPARENT, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU, WS_THICKFRAME,
+    WTS_SESSION_LOCK, WTS_SESSION_LOGOFF, WTS_SESSION_LOGON, WTS_SESSION_UNLOCK,
 };
 
 static CLICK_THROUGH: AtomicBool = AtomicBool::new(false);
@@ -173,6 +173,12 @@ unsafe extern "system" fn overlay_wndproc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    // The transparent overlay has no non-client area, including during the nested
+    // resize/activation messages sent when WebView2 expands the settings panel.
+    // Style filtering alone does not suppress a cached native caption repaint.
+    if msg == WM_NCCALCSIZE || msg == WM_NCPAINT {
+        return 0;
+    }
     // Tao can rebuild GWL_STYLE after startup, restoring WS_CAPTION even for an
     // undecorated window. Filter the proposed style before Windows paints it.
     if msg == WM_STYLECHANGING && wparam as i32 == GWL_STYLE {
@@ -182,6 +188,9 @@ unsafe extern "system" fn overlay_wndproc(
     if msg == WM_NCHITTEST && CLICK_THROUGH.load(Ordering::SeqCst) {
         return windows_sys::Win32::UI::WindowsAndMessaging::HTTRANSPARENT as isize;
     }
+    // Keep Tao's activation/focus bookkeeping, but tell DefWindowProc not to paint
+    // the native frame. -1 is WM_NCACTIVATE's documented no-repaint lParam.
+    let lparam = if msg == WM_NCACTIVATE { -1 } else { lparam };
     let original = ORIGINAL_WNDPROC.load(Ordering::SeqCst);
     if original == 0 {
         return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };

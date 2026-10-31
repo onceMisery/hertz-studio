@@ -26,7 +26,7 @@
     // 不走 waiting 低通），false 留给真实换句的硬挂载（节点从 waiting 姿态低通进入）。
     var needRepack = false, repackSoft = false, destroyed = false;
     var lastTime = null, lastReduced = false, lastEnergy = 0, paintDirty = true;
-    var emotionRevision = -1, measureWeight = 700;
+    var emotionRevision = -1, measureWeight = 700, measureFamily = '';
 
     // 配置类变更（宽度/字号/主题/eco/尺寸）请求下一帧重排。motion/glow/beam 帧内活读，不走这里。
     function requestRepack(soft) {
@@ -67,7 +67,7 @@
       measureCanvas = document.createElement('canvas');
       measureCtx = measureCanvas.getContext('2d');
       StanzaTextLayout.configure({ measure: function (text, px) {
-        measureCtx.font = measureWeight + ' ' + px + 'px ' + StanzaTheme.fontStack(theme.fontStyle);
+        measureCtx.font = measureWeight + ' ' + px + 'px ' + (measureFamily || StanzaTheme.fontStack(theme.fontStyle));
         return measureCtx.measureText(text).width;
       }});
       return measureCtx;
@@ -82,6 +82,7 @@
     function packLine(line, emotion) {
       var tokens = Stage.lyricTokens(line);
       measureWeight = emotion && emotion.type && emotion.type.weight || 700;
+      measureFamily = emotion ? global.LyricEmotion.fontFamily(emotion, StanzaTheme.fontStack(theme.fontStyle)) : StanzaTheme.fontStack(theme.fontStyle);
       var fontPx = baseFontPx();
       var graphemeCount = tokens.reduce(function (a, t) { return a + U.graphemes(t.text).length; }, 0);
       if (graphemeCount > 12) fontPx *= U.clamp(0.92 - (graphemeCount - 12) * 0.018, 0.62, 0.92);
@@ -105,7 +106,7 @@
         el.style.top = '0';
         var narrowHero = p.hero && W < 760 ? 0.85 : 1;   // 窄屏 hero 尺寸上限收 15%
         el.style.fontSize = (pack.fontPx * p.scale * narrowHero) + 'px';
-        el.style.fontFamily = StanzaTheme.fontStack(theme.fontStyle);
+        el.style.fontFamily = measureFamily;
         var emotion = pack.emotion;
         el.style.fontWeight = String(emotion && emotion.type && emotion.type.weight || 700);
         if (emotion && emotion.type && emotion.type.tracking) el.style.letterSpacing = emotion.type.tracking;
@@ -119,6 +120,7 @@
         var body = document.createElement('span'); body.className = 'fl-body';
         glow.textContent = p.text; body.textContent = p.text;
         el.append(glow, body);
+        if (emotion) global.LyricEmotion.prepareGlyphEffects(body, emotion, pack.laid.placements.indexOf(p), pack.laid.placements.length);
         el.dataset.st = 'waiting';
         if (!emotion) el.style.color = theme.primaryColor;
         el.addEventListener('click', function () { if (onSeek) onSeek(pack.line.start_ms); });
@@ -207,6 +209,17 @@
       var absX = cx + s.x - cur.laid.width / 2 - (p.w * rs - p.w) / 2;
       var absY = cy + s.y - cur.laid.height / 2 - (p.h * rs - p.h) / 2;
       node.el.style.transform = 'translate(' + absX.toFixed(1) + 'px,' + absY.toFixed(1) + 'px) rotate(' + s.rot.toFixed(2) + 'deg) scale(' + s.scale.toFixed(3) + ')';
+      if (emotion && global.LyricEmotion) {
+        var u = (p.x + p.w / 2) / Math.max(1, cur.laid.width);
+        var pose = global.LyricEmotion.motionPose(emotion, u, tMs / 1000, cur.fontPx * p.scale,
+          tg.st === 'active' ? glowAlpha(node, tMs) : 0, reduced || eco || tuning.motion === 0);
+        var dy = pose.y - (parseFloat(node.el.style.getPropertyValue('--emo-dy')) || 0);
+        var textPose = 'translate(' + pose.x.toFixed(3) + 'px,' + dy.toFixed(3) + 'px) rotate(' + pose.rotate.toFixed(4) +
+          'rad) skewX(' + pose.skew.toFixed(4) + 'rad) scale(' + pose.scaleX.toFixed(4) + ',' + pose.scaleY.toFixed(4) + ')';
+        node.body.style.transform = textPose;
+        node.glow.style.transform = textPose;
+        global.LyricEmotion.paintGlyphEffects(node.body, emotion, tMs / 1000, reduced || eco || tuning.motion === 0);
+      }
       node.el.style.opacity = U.clamp(s.alpha, 0, 1).toFixed(3);
       node.body.style.color = color;
       if (s.glowA > 0.01) {

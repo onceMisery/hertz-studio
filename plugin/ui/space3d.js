@@ -840,7 +840,7 @@
     if (kind) lyricKeys = ['scale','speed','reactivity','reduced'].concat({
       classic: ['rotation','breathing','wordSpacing'], cadenza: ['width','motion','glow','beam'],
       sonnet: ['shotFlow','lyricLayout','phraseLength','decor','accents','halation','atmosphere'],
-      tempera: ['colorMode','inversion']
+      tempera: ['colorMode']
     }[kind]);
     specs.forEach(function(spec){
       var key=spec.key||spec.id;if(lyric&&lyricKeys.indexOf(key)<0)return;

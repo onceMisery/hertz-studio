@@ -140,6 +140,7 @@ pub(crate) struct Feed {
     client: reqwest::blocking::Client,
     profile: Profile,
     last_document_key: Option<String>,
+    cached_document: Option<Document>,
     session: Option<String>,
 }
 
@@ -152,6 +153,7 @@ impl Feed {
             client: bridge::client()?,
             profile,
             last_document_key: None,
+            cached_document: None,
             session: None,
         })
     }
@@ -243,6 +245,7 @@ impl Feed {
                             } else {
                                 self.validate_timing(&value)?;
                                 self.last_document_key = Some(key.to_string());
+                                self.cached_document = Some(value.clone());
                                 document = Some(value);
                             }
                         }
@@ -251,6 +254,8 @@ impl Feed {
                             warning = Some(format!("读取歌词文档失败：{error}"));
                         }
                     }
+                } else {
+                    document = self.cached_document.clone();
                 }
             } else {
                 self.last_document_key = None;
@@ -286,5 +291,91 @@ impl Timing for Snapshot {
 impl Timing for Document {
     fn timing(&self) -> &str {
         &self.timing
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+    };
+
+    #[test]
+    fn same_key_document_is_replayed_after_failure_and_duplicate_track_change() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let directory =
+            std::env::temp_dir().join(format!("hertz-feed-{}-{}", std::process::id(), port));
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(
+            directory.join("vmusicd.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "pid":1,"port":port,"version":"test","protocol_version":1,
+                "edition":"full","server_instance_id":"session","desktop_lyrics_protocol":1
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(directory.join("desktop-lyrics-key"), "a".repeat(64)).unwrap();
+        let server = std::thread::spawn(move || {
+            let mut snapshots = 0;
+            let mut documents = 0;
+            for _ in 0..5 {
+                let (mut socket, _) = listener.accept().unwrap();
+                socket
+                    .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+                    .unwrap();
+                let mut request = [0; 4096];
+                let count = socket.read(&mut request).unwrap();
+                let request = String::from_utf8_lossy(&request[..count]);
+                let (status, body) = if request.starts_with("GET /v1/desktop-lyrics/document") {
+                    documents += 1;
+                    (
+                        "200 OK",
+                        serde_json::json!({"protocol":1,"timing":"presentation_applied","documentKey":"same-key","lines":[]}),
+                    )
+                } else {
+                    snapshots += 1;
+                    if snapshots == 2 {
+                        ("503 Service Unavailable", serde_json::json!({}))
+                    } else {
+                        (
+                            "200 OK",
+                            serde_json::json!({"protocol":1,"seq":snapshots,"server":{"session":"session","edition":"full","version":"test"},
+                        "generation":"1","positionMs":0,"playing":false,"buffering":false,"timing":"presentation_applied",
+                        "track":{"id":if snapshots == 4 {"duplicate"} else {"first"},"title":"test"},
+                        "lyrics":{"status":"ready","documentKey":"same-key"}}),
+                        )
+                    }
+                };
+                let body = body.to_string();
+                write!(
+                    socket,
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            }
+            documents
+        });
+        let mut feed = Feed::new(Profile::Standalone {
+            edition: "full".into(),
+            data_dir: directory.to_string_lossy().into_owned(),
+        })
+        .unwrap();
+        assert!(feed.poll().unwrap().document.is_some());
+        assert!(feed.poll().is_err());
+        assert!(feed.poll().unwrap().document.is_some());
+        let duplicate = feed.poll().unwrap();
+        assert_eq!(duplicate.snapshot.track.unwrap().id, "duplicate");
+        assert!(duplicate.document.is_some());
+        assert_eq!(
+            server.join().unwrap(),
+            1,
+            "cached documents should not require repeated GETs"
+        );
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }

@@ -41,6 +41,7 @@ pub(super) fn detect(
     let component = component::discover(environment.installation.as_deref(), cancel, deadline);
     check(cancel, deadline).map_err(|e| io_error(&e))?;
     let (reason, failure) = match probe {
+        Ok(value) if matches!(value["error"].as_str(), Some("control busy" | "control_busy")) => ("management-busy", error("desktop_control_busy", "The desktop component is busy; retry shortly")),
         Ok(_) => ("incompatible-host", error("desktop_component_incompatible", "The running desktop host does not support this plugin build and management contract")),
         Err(failure) if failure.kind() != io::ErrorKind::NotFound => ("management-unknown", io_error(&failure)),
         Err(_) => match component.state {

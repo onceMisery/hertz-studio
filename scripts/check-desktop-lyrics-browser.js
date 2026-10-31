@@ -72,7 +72,7 @@ async function main() {
   const url = 'http://127.0.0.1:'+server.address().port;
   if(process.argv.includes('--serve')) { console.log(url); return; }
   const {chromium} = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
-  const browser = await chromium.launch({channel:'chrome',headless:true});
+  const browser = await chromium.launch({channel:'chrome',headless:true,ignoreDefaultArgs:['--hide-scrollbars']});
   const page = await browser.newPage({viewport:{width:1440,height:1080},colorScheme:'dark'});
   const errors=[];page.on('pageerror',e=>errors.push(e.message));
   try {
@@ -81,6 +81,14 @@ async function main() {
     const frame = page.frames().find(f=>f.url().endsWith('/lyrics'));
     await frame.waitForSelector('.lyric-group[data-distance="0"]');
     const current = frame.locator('.lyric-group[data-distance="0"]');
+    // Fresh config uses the same defaults as the native host; explicit old choices still work.
+    await frame.evaluate(()=>hertzLyrics.applyConfig({}));
+    assert.deepEqual(await frame.evaluate(()=>({layout:document.body.dataset.layout,surface:document.body.dataset.surface,bilingual:document.body.dataset.bilingual})),{layout:'single',surface:'bare',bilingual:'false'});
+    assert.equal(await current.locator('.sub').isVisible(),false);
+    await frame.waitForFunction(()=>getComputedStyle(document.querySelector('.pane')).opacity==='0');
+    await page.waitForTimeout(650);
+    await page.locator('iframe').screenshot({path:path.join(output,'default-lyrics.png')});
+    await frame.evaluate(()=>hertzLyrics.applyConfig(fixture.config));
     assert.equal(await current.locator('.base').allTextContents().then(a=>a.join('')),lines[3].text);
     assert.ok(await frame.locator('.lyric-group').count()<=7,'DOM stays bounded');
     await page.mouse.move(10,10);
@@ -158,6 +166,23 @@ async function main() {
     await current.hover();await frame.locator('#style-open').click();
     const panel=await frame.locator('#options-panel').boundingBox();
     assert.ok(panel.width<=248);assert.ok(panel.height<=180);
+    // A short, narrow panel must scroll to its last controls without clipping horizontally.
+    for (const theme of ['dark','light']) {
+      await frame.evaluate(theme=>{fixture.config.theme=theme;hertzLyrics.applyConfig(fixture.config);document.getElementById('options-panel').scrollTop=0;},theme);
+      const before=await frame.locator('#options-panel').evaluate(e=>({client:e.clientWidth,scroll:e.scrollWidth}));
+      assert.equal(before.scroll,before.client,'No horizontal overflow in '+theme+' settings');
+      await frame.locator('[data-cmd="width-up"]').scrollIntoViewIfNeeded();
+      assert.ok(await frame.locator('#options-panel').evaluate(e=>e.scrollTop)>0,'Panel scrolls to the width controls');
+      await frame.locator('[data-cmd="width-up"]').click();
+      assert.deepEqual(await frame.evaluate(()=>commands.filter(c=>c.cmd==='width').at(-1)),{cmd:'width',value:48});
+      assert.ok(await frame.locator('#options-done').evaluate(e=>{
+        const button=e.getBoundingClientRect(),panel=document.getElementById('options-panel').getBoundingClientRect();
+        return button.top>=panel.top && button.bottom<=panel.bottom;
+      }),'Done remains visible after scrolling');
+      assert.equal(await frame.locator('#options-panel').evaluate(e=>e.clientWidth),before.client,'Scrolling does not move the controls');
+      await page.screenshot({path:path.join(output,'narrow-settings-'+theme+'.png')});
+      await frame.locator('#options-panel').screenshot({path:path.join(output,'scrollbar-'+theme+'.png')});
+    }
     await frame.locator('#options-done').click();
     await page.screenshot({path:path.join(output,'narrow.png')});
     assert.deepEqual(errors,[]);

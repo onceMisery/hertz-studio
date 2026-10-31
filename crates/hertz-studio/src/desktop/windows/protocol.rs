@@ -61,12 +61,18 @@ pub(super) fn validate(value: &Value, id: &str, target: &Profile) -> Result<(), 
     }
     Ok(())
 }
-pub(super) fn scopes(value: &Value, target: &Profile) -> SourceScopes {
+pub(super) fn scopes(value: &Value, target: &Profile, session: &str) -> SourceScopes {
     let active = serde_json::from_value::<Profile>(value["activeProfile"].clone()).ok();
     let reported = serde_json::from_value::<Profile>(value["targetProfile"].clone()).ok();
-    if active.as_ref() != Some(target)
-        || reported.as_ref() != Some(target)
+    if !active.as_ref().is_some_and(|active| {
+        active
+            .normalized()
+            .ok()
+            .zip(target.normalized().ok())
+            .is_some_and(|(active, target)| active == target)
+    }) || reported.as_ref() != Some(target)
         || value["sourceConnected"] != true
+        || value["sourceSession"].as_str() != Some(session)
     {
         return SourceScopes::default();
     }

@@ -49,6 +49,20 @@ impl Fixture {
             audio: Some(audio),
         }
     }
+    fn successful_host(
+        &self,
+        name: String,
+        count: usize,
+        active: Option<Profile>,
+        connected: bool,
+    ) -> Host {
+        let session = self.state.server_instance_id().to_owned();
+        Host::start(name, count, move |request, _| {
+            let mut value = response(&request, active.clone(), connected);
+            value["sourceSession"] = session.clone().into();
+            reply(value)
+        })
+    }
     fn environment(&self) -> Environment {
         self.desktop.runtime.environment()
     }
@@ -90,6 +104,43 @@ fn reply(value: Value) -> mpsc::Receiver<Value> {
     let (send, receive) = mpsc::channel();
     send.send(value).unwrap();
     receive
+}
+
+#[tokio::test]
+async fn busy_legacy_probe_is_retryable_and_never_authorizes() {
+    let fixture = Fixture::new().await;
+    let host = Host::start(fixture.environment().pipe, 1, |_, _| {
+        reply(json!({"ok":false,"error":"control busy"}))
+    });
+    let result = fixture.desktop.connect_windows(Tab::Runtime).await;
+    assert_eq!(result.error.unwrap().code, "desktop_control_busy");
+    assert!(fixture.consent().is_none());
+    assert_eq!(host.join().len(), 1);
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn source_scopes_accept_canonical_alias_of_active_profile() {
+    let fixture = Fixture::new().await;
+    let target = fixture.bridge.profile().unwrap();
+    let mut active = target.clone();
+    if let Profile::Dbx { data_dir, .. } = &mut active {
+        *data_dir = data_dir.to_uppercase();
+    }
+    let (_, envelope) = protocol::envelope(&target, "status", Value::Null);
+    let mut reply = response(&envelope, Some(active), true);
+    reply["sourceSession"] = fixture.state.server_instance_id().into();
+    let scopes = protocol::scopes(&reply, &target, fixture.state.server_instance_id());
+    assert!(scopes.lyrics && scopes.wallpaper);
+    for stale in [Value::Null, json!(uuid::Uuid::new_v4().to_string())] {
+        reply["sourceSession"] = stale;
+        let scopes = protocol::scopes(&reply, &target, fixture.state.server_instance_id());
+        assert!(
+            !scopes.lyrics && !scopes.wallpaper,
+            "a fresh response about another session must not confirm this source"
+        );
+    }
+    fixture.finish().await;
 }
 
 struct Host {
@@ -136,11 +187,6 @@ impl Host {
             calls,
         }
     }
-    fn successful(name: String, count: usize, active: Option<Profile>, connected: bool) -> Self {
-        Self::start(name, count, move |request, _| {
-            reply(response(&request, active.clone(), connected))
-        })
-    }
     fn join(mut self) -> Vec<io::Result<()>> {
         self.worker.take().unwrap().join().unwrap()
     }
@@ -179,6 +225,13 @@ fn installed_manifest_is_strict_bounded_and_errors_are_not_missing() {
     assert_eq!(inspect().state, "missing");
     let manifest = install(&directory);
     assert_eq!(inspect().state, "ready");
+    fs::remove_file(directory.join("hertz-desktop.exe")).unwrap();
+    assert_eq!(
+        inspect().state,
+        "incompatible",
+        "a manifest with a missing binary is an incomplete installation"
+    );
+    install(&directory);
     for (key, value) in [
         ("extra", json!(true)),
         ("file", json!("other.exe")),
@@ -219,7 +272,7 @@ fn installed_manifest_is_strict_bounded_and_errors_are_not_missing() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn construction_cached_calls_and_restore_do_not_probe_components_or_create_authority() {
     let fixture = Fixture::new().await;
-    let host = Host::successful(fixture.environment().pipe, 1, None, false);
+    let host = fixture.successful_host(fixture.environment().pipe, 1, None, false);
     for _ in 0..20 {
         let capabilities = fixture.desktop.capabilities(false).await;
         assert_eq!(capabilities.component.state, "unknown");
@@ -240,7 +293,7 @@ async fn construction_cached_calls_and_restore_do_not_probe_components_or_create
 async fn compatible_running_host_outranks_missing_install_and_connects_coalesce_reusing_authority()
 {
     let fixture = Fixture::new().await;
-    let host = Host::successful(
+    let host = fixture.successful_host(
         fixture.environment().pipe,
         6,
         fixture.bridge.profile(),
@@ -334,7 +387,7 @@ async fn source_a_is_not_source_b_and_revoke_masks_an_earlier_true_response() {
     }
     .normalized()
     .unwrap();
-    let host = Host::successful(fixture.environment().pipe, 3, Some(other), true);
+    let host = fixture.successful_host(fixture.environment().pipe, 3, Some(other), true);
     let result = fixture.desktop.connect(Tab::Runtime).await;
     assert!(result.ok && !result.capabilities.source_connected);
     host.join();
@@ -526,7 +579,7 @@ async fn multiple_management_requests_share_the_five_second_deadline_and_reap_ti
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn refreshes_coalesce_without_authorization_and_management_cache_expires() {
     let fixture = Fixture::new().await;
-    let host = Host::successful(
+    let host = fixture.successful_host(
         fixture.environment().pipe,
         2,
         fixture.bridge.profile(),
@@ -558,7 +611,7 @@ async fn old_preauthorization_admission_cannot_commit_after_a_completed_disconne
         .is_err());
     assert!(fixture.keys_if_any().is_empty());
     assert_eq!(fixture.consent().unwrap()["scopes"], json!([]));
-    let host = Host::successful(
+    let host = fixture.successful_host(
         fixture.environment().pipe,
         3,
         fixture.bridge.profile(),
@@ -662,7 +715,7 @@ async fn explicit_scope_repair_promotes_new_generation_instead_of_cancelled_old_
     let (_, old_admission) = fixture.bridge.admission().unwrap();
     let keys = fixture.keys();
     fs::remove_file(fixture.directory.join("wallpaper-key")).unwrap();
-    let host = Host::successful(
+    let host = fixture.successful_host(
         fixture.environment().pipe,
         3,
         fixture.bridge.profile(),

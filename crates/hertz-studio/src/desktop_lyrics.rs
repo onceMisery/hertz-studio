@@ -28,16 +28,29 @@ pub(crate) const PROTOCOL: u32 = 1;
 pub(crate) const DOCUMENT_MAX_BYTES: usize = 2 * 1024 * 1024;
 /// 取词失败后的退避上限。
 const ERROR_BACKOFF_MAX: Duration = Duration::from_secs(30);
+const REVISION_INTERVAL: Duration = Duration::from_secs(2);
 
 /// 每次服务启动的桌面歌词会话状态。缓存只有一槽：当前曲目/修订/偏移组合。
 #[derive(Default)]
 pub(crate) struct DesktopLyrics {
     seq: AtomicU64,
     cache: tokio::sync::Mutex<Cache>,
+    file_revision: Arc<tokio::sync::Mutex<Option<FileRevision>>>,
+}
+
+struct FileRevision {
+    path: String,
+    generation: Arc<()>,
+    stamp: i64,
+    checked: Instant,
+    checking: bool,
 }
 
 #[derive(Default)]
 struct Cache {
+    identity: Option<String>,
+    snapshot_seq: u64,
+    load_serial: u64,
     /// 最近一次成功构建的文档（含空文档/超限结论）。
     document: Option<CachedDocument>,
     /// 正在取词的身份；同一身份不重复起任务。
@@ -146,7 +159,13 @@ pub(crate) async fn snapshot(state: &Arc<AppState>) -> Value {
                     offset_ms: 0,
                     revision: 0,
                 });
-            let revision = local_revision(&track, saved.content.as_deref(), saved.revision);
+            let revision = local_revision(
+                &state.desktop_lyrics,
+                &track,
+                saved.content.as_deref(),
+                saved.revision,
+            )
+            .await;
             let user_offset = saved.offset_ms;
             let track_json = json!({
                 "id": track.id,
@@ -169,8 +188,15 @@ pub(crate) async fn snapshot(state: &Arc<AppState>) -> Value {
     };
 
     let identity = identity_token(&track_id, &revision, user_offset, global_offset);
-    let (status, key) =
-        resolve_document(state, identity.clone(), load, user_offset, global_offset).await;
+    let (status, key) = resolve_document(
+        state,
+        seq,
+        identity.clone(),
+        load,
+        user_offset,
+        global_offset,
+    )
+    .await;
     snapshot_json(
         state,
         SnapshotView {
@@ -190,10 +216,13 @@ pub(crate) async fn document(state: &AppState, key: &str) -> Result<Value, ApiEr
     if key.is_empty() || key.len() > 128 {
         return Err(stale_document());
     }
+    let identity = current_identity(state).await.ok_or_else(stale_document)?;
     let cache = state.desktop_lyrics.cache.lock().await;
     match cache.document.as_ref() {
         Some(document)
-            if document.state == DocumentState::Ready && document.key.as_deref() == Some(key) =>
+            if document.identity == identity
+                && document.state == DocumentState::Ready
+                && document.key.as_deref() == Some(key) =>
         {
             document.body.clone().ok_or_else(stale_document)
         }
@@ -220,18 +249,94 @@ async fn global_lyric_offset(state: &AppState) -> i64 {
 }
 
 /// 本地曲的「源内容版本」：手动导入看修订，内嵌/sidecar 看文件时间戳。
-fn local_revision(track: &vmusic_core::Track, content: Option<&str>, revision: i64) -> String {
+async fn local_revision(
+    lyrics: &DesktopLyrics,
+    track: &vmusic_core::Track,
+    content: Option<&str>,
+    revision: i64,
+) -> String {
     if content.is_some_and(|text| !text.trim().is_empty()) {
         return format!("imported:{revision}");
     }
     let embedded = track.file_mtime.unwrap_or(0);
-    let sidecar = vmusic_library::find_sidecar_lyrics(std::path::Path::new(&track.path))
+    let mut slot = lyrics.file_revision.lock().await;
+    let entry = slot.get_or_insert_with(|| FileRevision {
+        path: track.path.clone(),
+        generation: Arc::new(()),
+        stamp: 0,
+        checked: Instant::now() - REVISION_INTERVAL,
+        checking: false,
+    });
+    if entry.path != track.path {
+        *entry = FileRevision {
+            path: track.path.clone(),
+            generation: Arc::new(()),
+            stamp: 0,
+            checked: Instant::now() - REVISION_INTERVAL,
+            checking: false,
+        };
+    }
+    if !entry.checking && entry.checked.elapsed() >= REVISION_INTERVAL {
+        entry.checking = true;
+        let path = entry.path.clone();
+        let generation = entry.generation.clone();
+        let cache = lyrics.file_revision.clone();
+        tokio::spawn(async move {
+            let work_path = path.clone();
+            let stamp = tokio::task::spawn_blocking(move || sidecar_stamp(&work_path))
+                .await
+                .unwrap_or(0);
+            let mut slot = cache.lock().await;
+            if let Some(entry) = slot
+                .as_mut()
+                .filter(|entry| Arc::ptr_eq(&entry.generation, &generation))
+            {
+                entry.stamp = stamp;
+                entry.checked = Instant::now();
+                entry.checking = false;
+            }
+        });
+    }
+    format!("file:{embedded}:{}", entry.stamp)
+}
+
+fn sidecar_stamp(path: &str) -> i64 {
+    vmusic_library::find_sidecar_lyrics(std::path::Path::new(path))
         .and_then(|path| std::fs::metadata(path).ok())
         .and_then(|meta| meta.modified().ok())
         .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|age| age.as_millis() as i64)
-        .unwrap_or(0);
-    format!("file:{embedded}:{sidecar}")
+        .unwrap_or(0)
+}
+
+async fn current_identity(state: &AppState) -> Option<String> {
+    let track_id = state.audio.snapshot().track_id?;
+    let global_offset = global_lyric_offset(state).await;
+    let (revision, offset) = if crate::online::split_virtual_id(&track_id).is_some() {
+        (
+            "online".to_string(),
+            crate::routes::lyrics_user_offset(state, &track_id).await,
+        )
+    } else {
+        let track = vmusic_store::get_track(&state.db, &track_id).await.ok()??;
+        let saved = vmusic_store::lyrics::snapshot(&state.db, &track_id)
+            .await
+            .ok()?;
+        (
+            local_revision(
+                &state.desktop_lyrics,
+                &track,
+                saved.content.as_deref(),
+                saved.revision,
+            )
+            .await,
+            saved.offset_ms,
+        )
+    };
+    if state.audio.snapshot().track_id.as_deref() != Some(track_id.as_str()) {
+        return None;
+    }
+    Some(identity_token(&track_id, &revision, offset, global_offset))
 }
 
 fn identity_token(track_id: &str, revision: &str, user_offset: i64, global_offset: i64) -> String {
@@ -252,12 +357,24 @@ enum LoadSpec {
 
 async fn resolve_document(
     state: &Arc<AppState>,
+    seq: u64,
     identity: String,
     load: LoadSpec,
     user_offset: i64,
     global_offset: i64,
 ) -> (&'static str, Option<String>) {
     let mut cache = state.desktop_lyrics.cache.lock().await;
+    if seq < cache.snapshot_seq {
+        return ("loading", None);
+    }
+    cache.snapshot_seq = seq;
+    if cache.identity.as_deref() != Some(&identity) {
+        cache.identity = Some(identity.clone());
+        cache.document = None;
+        cache.loading = None;
+        cache.retry = None;
+        cache.failures = 0;
+    }
     if let Some(document) = cache.document.as_ref() {
         if document.identity == identity {
             return (document.state.status(), document.key.clone());
@@ -281,16 +398,19 @@ async fn resolve_document(
         return ("loading", None);
     }
     cache.loading = Some(identity.clone());
+    cache.load_serial += 1;
+    let serial = cache.load_serial;
     drop(cache);
     let state = Arc::clone(state);
     tokio::spawn(async move {
-        finish_load(state, identity, load, user_offset, global_offset).await;
+        finish_load(state, serial, identity, load, user_offset, global_offset).await;
     });
     ("loading", None)
 }
 
 async fn finish_load(
     state: Arc<AppState>,
+    serial: u64,
     identity: String,
     load: LoadSpec,
     user_offset: i64,
@@ -298,28 +418,39 @@ async fn finish_load(
 ) {
     let result = build_document(&state, load, user_offset, global_offset).await;
     let mut cache = state.desktop_lyrics.cache.lock().await;
-    if cache.loading.as_deref() == Some(identity.as_str()) {
-        cache.loading = None;
-    }
-    match result {
-        Ok(document) => {
-            cache.failures = 0;
-            cache.retry = None;
-            cache.document = Some(CachedDocument {
-                identity,
-                state: document.state,
-                key: document.key,
-                body: document.body,
-            });
+    cache.finish(serial, identity, result);
+}
+
+impl Cache {
+    fn finish(&mut self, serial: u64, identity: String, result: Result<BuiltDocument, String>) {
+        let cache = self;
+        if cache.load_serial != serial || cache.identity.as_deref() != Some(&identity) {
+            return;
         }
-        Err(error) => {
-            tracing::debug!(error = %error, "desktop lyrics document load failed");
-            cache.failures = cache.failures.saturating_add(1);
-            let backoff = Duration::from_secs(1 << cache.failures.min(5)).min(ERROR_BACKOFF_MAX);
-            cache.retry = Some(Retry {
-                identity,
-                at: Instant::now() + backoff,
-            });
+        if cache.loading.as_deref() == Some(identity.as_str()) {
+            cache.loading = None;
+        }
+        match result {
+            Ok(document) => {
+                cache.failures = 0;
+                cache.retry = None;
+                cache.document = Some(CachedDocument {
+                    identity,
+                    state: document.state,
+                    key: document.key,
+                    body: document.body,
+                });
+            }
+            Err(error) => {
+                tracing::debug!(error = %error, "desktop lyrics document load failed");
+                cache.failures = cache.failures.saturating_add(1);
+                let backoff =
+                    Duration::from_secs(1 << cache.failures.min(5)).min(ERROR_BACKOFF_MAX);
+                cache.retry = Some(Retry {
+                    identity,
+                    at: Instant::now() + backoff,
+                });
+            }
         }
     }
 }
@@ -338,7 +469,49 @@ async fn build_document(
 ) -> Result<BuiltDocument, String> {
     let mut doc = match load {
         LoadSpec::Local { track, content } => {
-            crate::lyrics::raw_local(&track, content.as_deref()).await
+            let result = if let Some(content) = content.as_deref().filter(|s| !s.trim().is_empty())
+            {
+                match crate::lyrics::parse_saved_checked(content) {
+                    // Keep legacy LRC tolerance and empty/malformed handling; only
+                    // resource limit errors need a different desktop status.
+                    Err(error) if error.code != "lyrics_limit" => {
+                        Ok(crate::lyrics::parse_saved(content))
+                    }
+                    result => result,
+                }
+            } else {
+                crate::routes::read_embedded_or_sidecar_lyrics_checked(std::path::Path::new(
+                    &track.path,
+                ))
+                .await
+                .map_err(|error| {
+                    ApiError::new(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        if matches!(error, vmusic_lyrics::ImportError::Limit) {
+                            "lyrics_limit"
+                        } else {
+                            "lyrics_invalid"
+                        },
+                        error.to_string(),
+                    )
+                })
+            };
+            match result {
+                Ok(mut doc) => {
+                    if content.is_some() {
+                        doc.source = vmusic_core::LyricSource::Imported;
+                    }
+                    doc
+                }
+                Err(error) if error.code == "lyrics_limit" => {
+                    return Ok(BuiltDocument {
+                        state: DocumentState::TooLarge,
+                        key: None,
+                        body: None,
+                    })
+                }
+                Err(error) => return Err(error.message),
+            }
         }
         LoadSpec::Online { source, ref_id } => {
             crate::online::lyric(&crate::routes::online_ctx(state), &source, &ref_id)
@@ -488,6 +661,33 @@ fn snapshot_json(state: &AppState, view: SnapshotView<'_>) -> Value {
 mod tests {
     use super::*;
 
+    async fn schema_state() -> (AppState, std::thread::JoinHandle<()>, std::path::PathBuf) {
+        let directory =
+            std::env::temp_dir().join(format!("hertz-desktop-lyrics-{}", uuid::Uuid::new_v4()));
+        let db = vmusic_store::open(&directory).await.unwrap();
+        let (state, audio) = crate::state::tests::playback_state_with_db(db).await;
+        (state, audio, directory)
+    }
+
+    async fn close_schema_state(
+        state: impl std::borrow::Borrow<AppState>,
+        directory: std::path::PathBuf,
+    ) {
+        let db = state.borrow().db.clone();
+        db.close().await;
+        // SQLx can report the pool closed while a return task still closes its SQLite
+        // worker. Wait for actual pool accounting before deleting Windows DB files.
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while db.size() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("SQLite connections must be released before fixture removal");
+        drop(state);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
     fn line(start: u64, end: Option<u64>, text: &str) -> vmusic_core::LyricLine {
         vmusic_core::LyricLine {
             start_ms: start,
@@ -569,15 +769,18 @@ mod tests {
 
     #[tokio::test]
     async fn desktop_seek_only_accepts_current_nonempty_phrase_starts() {
-        let (mut state, handle) = crate::state::tests::playback_state().await;
+        let (mut state, handle, directory) = schema_state().await;
         state.desktop_lyrics_key = "b".repeat(64);
         state
             .audio
             .load("first.wav", Some("first".into()))
             .await
             .unwrap();
+        sqlx::query("INSERT INTO tracks(id,path,title,added_at,updated_at) VALUES('first','first.wav','First',0,0)")
+            .execute(&state.db).await.unwrap();
+        let identity = current_identity(&state).await.unwrap();
         state.desktop_lyrics.cache.lock().await.document = Some(CachedDocument {
-            identity: "test".into(),
+            identity,
             state: DocumentState::Ready,
             key: Some("test".into()),
             body: Some(document_body(&document(
@@ -608,10 +811,11 @@ mod tests {
         let _ = server.await;
         state.audio.shutdown();
         handle.join().unwrap();
+        close_schema_state(state, directory).await;
     }
 
-    #[test]
-    fn imported_revision_wins_over_file_stamps() {
+    #[tokio::test]
+    async fn imported_revision_wins_over_file_stamps() {
         let track = vmusic_core::Track {
             id: "t".into(),
             path: "missing.mp3".into(),
@@ -628,7 +832,127 @@ mod tests {
             file_size: None,
             added_at: 0,
         };
-        assert_eq!(local_revision(&track, Some("text"), 3), "imported:3");
-        assert!(local_revision(&track, None, 3).starts_with("file:7:"));
+        let lyrics = DesktopLyrics::default();
+        assert_eq!(
+            local_revision(&lyrics, &track, Some("text"), 3).await,
+            "imported:3"
+        );
+        assert!(local_revision(&lyrics, &track, None, 3)
+            .await
+            .starts_with("file:7:"));
+    }
+
+    #[test]
+    fn superseded_load_cannot_overwrite_document_or_retry() {
+        let mut cache = Cache {
+            identity: Some("new".into()),
+            load_serial: 3,
+            loading: Some("new".into()),
+            ..Cache::default()
+        };
+        cache.finish(
+            3,
+            "new".into(),
+            Ok(BuiltDocument {
+                state: DocumentState::Ready,
+                key: Some("new-key".into()),
+                body: Some(json!({"new":true})),
+            }),
+        );
+        // A -> B -> A also needs a serial check, even when the identity matches again.
+        cache.finish(
+            1,
+            "new".into(),
+            Ok(BuiltDocument {
+                state: DocumentState::Empty,
+                key: None,
+                body: None,
+            }),
+        );
+        cache.finish(2, "old".into(), Err("late error".into()));
+        assert_eq!(
+            cache.document.as_ref().unwrap().key.as_deref(),
+            Some("new-key")
+        );
+        assert!(cache.retry.is_none());
+    }
+
+    #[tokio::test]
+    async fn document_rejects_track_and_revision_changes_before_next_snapshot() {
+        let (state, audio, directory) = schema_state().await;
+        sqlx::query("INSERT INTO tracks(id,path,title,added_at,updated_at) VALUES('first','first.wav','First',0,0)")
+            .execute(&state.db).await.unwrap();
+        state
+            .audio
+            .load("first.wav", Some("first".into()))
+            .await
+            .unwrap();
+        let identity = current_identity(&state).await.unwrap();
+        state.desktop_lyrics.cache.lock().await.document = Some(CachedDocument {
+            identity,
+            state: DocumentState::Ready,
+            key: Some("old-key".into()),
+            body: Some(json!({"lines":[]})),
+        });
+        assert!(super::document(&state, "old-key").await.is_ok());
+        vmusic_store::settings::set(&state.db, "global_lyric_offset_ms", &json!(250))
+            .await
+            .unwrap();
+        assert_eq!(
+            super::document(&state, "old-key").await.unwrap_err().status,
+            StatusCode::CONFLICT
+        );
+        vmusic_store::settings::set(&state.db, "global_lyric_offset_ms", &json!(0))
+            .await
+            .unwrap();
+        state
+            .audio
+            .load("second.wav", Some("second".into()))
+            .await
+            .unwrap();
+        assert_eq!(
+            super::document(&state, "old-key").await.unwrap_err().status,
+            StatusCode::CONFLICT
+        );
+        state.audio.shutdown();
+        audio.join().unwrap();
+        close_schema_state(state, directory).await;
+    }
+
+    #[tokio::test]
+    async fn oversized_sidecar_reports_too_large_without_unbounded_read() {
+        let (state, audio, directory) = schema_state().await;
+        let path = directory.join("song.wav");
+        std::fs::write(
+            path.with_extension("lrc"),
+            "x".repeat(vmusic_lyrics::MAX_BYTES + 1),
+        )
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO tracks(id,path,title,added_at,updated_at) VALUES('large',?,'Large',0,0)",
+        )
+        .bind(path.to_string_lossy().as_ref())
+        .execute(&state.db)
+        .await
+        .unwrap();
+        let track = vmusic_store::get_track(&state.db, &"large".into())
+            .await
+            .unwrap()
+            .unwrap();
+        let result = build_document(
+            &state,
+            LoadSpec::Local {
+                track,
+                content: None,
+            },
+            0,
+            0,
+        )
+        .await
+        .unwrap();
+        assert!(result.state == DocumentState::TooLarge);
+        state.audio.shutdown();
+        audio.join().unwrap();
+        close_schema_state(state, directory).await;
     }
 }

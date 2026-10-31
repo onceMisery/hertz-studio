@@ -882,6 +882,7 @@
         backgroundMode: bgMode,
         fontScale: fontScale,
         lyricMotion: 'tempera',
+        emotion: frame && frame.emotion,
         waitingOpacity: 0.9,
         phraseEmphasis: 0,
         composition: tuning.composition,
@@ -899,7 +900,8 @@
         showBlocks: !externalBackground,
         showDecor: bgMode !== 'spatial',
         screens: !externalBackground && tuning.screens,
-        inversion: tuning.inversion,
+        // 三维场景必须是主体；满高反色扫光会把弧线盖成横幅。
+        inversion: bgMode === 'spatial' ? false : tuning.inversion,
         halation: tuning.halation,
         seams: tuning.seams,
         accentEffects: true,
@@ -921,7 +923,8 @@
     function shotKey(frame, line) {
       var trackId = (frame.track && (frame.track.id || frame.track.title)) || '';
       return [trackId, line.startTime, line.fullText, tuning.composition, tuning.colorMode,
-        tuning.screens, tuning.inversion, tuning.seams, fontScale, themeSig, bgMode].join('|');
+        tuning.screens, tuning.inversion, tuning.seams, fontScale, themeSig, bgMode,
+        frame.emotion ? frame.emotion.revision : 0].join('|');
     }
 
     function updateHot(frame, camera) {

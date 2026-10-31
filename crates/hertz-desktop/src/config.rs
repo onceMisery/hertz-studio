@@ -23,6 +23,8 @@ pub(crate) struct Config {
     pub(crate) active_profile: Option<Profile>,
     pub(crate) profiles: Vec<ProfileDomain>,
     pub(crate) unbound_standalone: Option<StandalonePreferences>,
+    // Runtime view shown before binding; only edits to this view update legacy preferences.
+    unbound_baseline: Option<StandalonePreferences>,
     pub(crate) lyrics: LyricsConfig,
     pub(crate) wallpaper: WallpaperConfig,
 }
@@ -145,8 +147,8 @@ pub(crate) enum LyricTheme {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) enum LyricSurface {
-    Bare,
     #[default]
+    Bare,
     Glass,
     Solid,
 }
@@ -222,7 +224,7 @@ pub(crate) struct LyricsConfig {
     pub(crate) surface: LyricSurface,
     #[serde(default)]
     pub(crate) align: LyricAlign,
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub(crate) bilingual: bool,
     #[serde(default = "default_true")]
     pub(crate) karaoke: bool,
@@ -250,6 +252,7 @@ impl Default for Config {
             active_profile: None,
             profiles: Vec::new(),
             unbound_standalone: None,
+            unbound_baseline: None,
             lyrics: LyricsConfig::default(),
             wallpaper: WallpaperConfig::default(),
         }
@@ -274,12 +277,12 @@ impl Default for LyricsConfig {
         Self {
             enabled: true,
             locked: false,
-            layout: Layout::Triple,
+            layout: Layout::Single,
             secondary: Secondary::Next,
             theme: LyricTheme::Auto,
-            surface: LyricSurface::Glass,
+            surface: LyricSurface::Bare,
             align: LyricAlign::Center,
-            bilingual: true,
+            bilingual: false,
             karaoke: true,
             readability_boost: false,
             font_family: "Segoe UI".into(),
@@ -321,6 +324,27 @@ impl Config {
     /// 把当前活动域写回该 profile 的存档。调用方保证不越过 profile 上限。
     fn store_active(&mut self) -> Result<()> {
         let Some(profile) = self.active_profile.clone() else {
+            let current = StandalonePreferences {
+                lyrics: self.lyrics.clone(),
+                wallpaper: self.wallpaper.clone(),
+            };
+            self.unbound_standalone =
+                Some(match (&self.unbound_standalone, &self.unbound_baseline) {
+                    (Some(saved), Some(baseline)) => {
+                        let mut saved = serde_json::to_value(saved)?;
+                        let baseline = serde_json::to_value(baseline)?;
+                        let current = serde_json::to_value(&current)?;
+                        for domain in ["lyrics", "wallpaper"] {
+                            for (field, value) in current[domain].as_object().unwrap() {
+                                if *value != baseline[domain][field] {
+                                    saved[domain][field] = value.clone();
+                                }
+                            }
+                        }
+                        serde_json::from_value(saved)?
+                    }
+                    _ => current,
+                });
             return Ok(());
         };
         if let Some(index) = self.domain_index(&profile) {
@@ -462,7 +486,22 @@ fn lexical_profile(profile: &Profile) -> Profile {
         .map(|p| format!(r"\\{p}"))
         .or_else(|| path.strip_prefix(r"\\?\").map(str::to_string))
         .unwrap_or(path);
-    let data_dir = path.trim_end_matches('\\').to_lowercase();
+    let mut normalized = PathBuf::new();
+    for component in Path::new(&path).components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if normalized.file_name().is_some() {
+                    normalized.pop();
+                }
+            }
+            _ => normalized.push(component.as_os_str()),
+        }
+    }
+    let data_dir = normalized
+        .to_string_lossy()
+        .trim_end_matches('\\')
+        .to_lowercase();
     match profile {
         Profile::Standalone { edition, .. } => Profile::Standalone {
             edition: edition.to_ascii_lowercase(),
@@ -535,6 +574,7 @@ fn parse_config(bytes: &[u8]) -> Result<(Config, bool)> {
                     })
                     .collect(),
                 unbound_standalone: unbound,
+                unbound_baseline: None,
                 lyrics: stored.lyrics,
                 wallpaper: stored.wallpaper,
             }
@@ -561,6 +601,7 @@ fn parse_config(bytes: &[u8]) -> Result<(Config, bool)> {
                     .transpose()?,
                 profiles,
                 unbound_standalone: None,
+                unbound_baseline: None,
                 lyrics: LyricsConfig::default(),
                 wallpaper: WallpaperConfig::default(),
             }
@@ -573,6 +614,7 @@ fn parse_config(bytes: &[u8]) -> Result<(Config, bool)> {
                 active_profile: stored.active_profile,
                 profiles: stored.profiles,
                 unbound_standalone: stored.unbound_standalone,
+                unbound_baseline: None,
                 lyrics: LyricsConfig::default(),
                 wallpaper: WallpaperConfig::default(),
             }
@@ -605,6 +647,12 @@ fn parse_config(bytes: &[u8]) -> Result<(Config, bool)> {
     }
     validate_domains(&config)?;
     config.sanitize();
+    if config.active_profile.is_none() {
+        config.unbound_baseline = Some(StandalonePreferences {
+            lyrics: config.lyrics.clone(),
+            wallpaper: config.wallpaper.clone(),
+        });
+    }
     let migrated = schema != Some(3);
     if migrated {
         config.revision = next_revision(config.revision)?;
@@ -695,7 +743,14 @@ pub(crate) fn commit(current: &mut Config, next: Config) -> Result<()> {
 }
 fn commit_at(current: &mut Config, mut next: Config, directory: &Path) -> Result<()> {
     next.revision = next_revision(current.revision)?;
+    next.store_active()?;
     save_at(&next, directory)?;
+    if next.active_profile.is_none() {
+        next.unbound_baseline = Some(StandalonePreferences {
+            lyrics: next.lyrics.clone(),
+            wallpaper: next.wallpaper.clone(),
+        });
+    }
     *current = next;
     Ok(())
 }
@@ -784,25 +839,27 @@ mod tests {
         assert_eq!(lyrics.font_size, 44.0);
         assert_eq!(lyrics.sung_color, "#8fe3ff");
         assert_eq!(lyrics.theme, LyricTheme::Auto);
-        assert_eq!(lyrics.surface, LyricSurface::Glass);
-        assert!(lyrics.bilingual && lyrics.karaoke);
+        assert_eq!(lyrics.surface, LyricSurface::Bare);
+        assert!(!lyrics.bilingual && lyrics.karaoke);
     }
 
     #[test]
     fn appearance_round_trips_in_its_profile_domain() {
         let mut config = Config::default();
         config.activate_profile(profile("a")).unwrap();
+        config.lyrics.layout = Layout::Triple;
         config.lyrics.theme = LyricTheme::Light;
-        config.lyrics.surface = LyricSurface::Bare;
+        config.lyrics.surface = LyricSurface::Glass;
         config.lyrics.align = LyricAlign::Right;
-        config.lyrics.bilingual = false;
+        config.lyrics.bilingual = true;
         config.lyrics.karaoke = false;
         config.lyrics.readability_boost = true;
         let (loaded, _) = parse_config(&encode_config(&config).unwrap()).unwrap();
+        assert_eq!(loaded.lyrics.layout, Layout::Triple);
         assert_eq!(loaded.lyrics.theme, LyricTheme::Light);
-        assert_eq!(loaded.lyrics.surface, LyricSurface::Bare);
+        assert_eq!(loaded.lyrics.surface, LyricSurface::Glass);
         assert_eq!(loaded.lyrics.align, LyricAlign::Right);
-        assert!(!loaded.lyrics.bilingual && !loaded.lyrics.karaoke);
+        assert!(loaded.lyrics.bilingual && !loaded.lyrics.karaoke);
         assert!(loaded.lyrics.readability_boost);
     }
 
@@ -869,6 +926,26 @@ mod tests {
     }
 
     #[test]
+    fn unbound_edits_survive_save_reload_and_first_binding() {
+        let mut lyrics = LyricsConfig::default();
+        lyrics.font_size = 44.0;
+        lyrics.locked = true;
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "schemaVersion":1,"revision":5,"launchAtLogin":false,"activeProfile":null,
+            "lyrics":lyrics,"wallpaper":WallpaperConfig::default()
+        }))
+        .unwrap();
+        let (mut config, _) = parse_config(&bytes).unwrap();
+        config.lyrics.font_size = 52.0;
+        config.wallpaper.fps = 60;
+        let (mut reloaded, _) = parse_config(&encode_config(&config).unwrap()).unwrap();
+        reloaded.activate_profile(profile("first-binding")).unwrap();
+        assert_eq!(reloaded.lyrics.font_size, 52.0);
+        assert_eq!(reloaded.wallpaper.fps, 60);
+        assert!(reloaded.lyrics.enabled && reloaded.lyrics.locked);
+    }
+
+    #[test]
     fn switching_profiles_keeps_independent_domains() {
         let a = profile("a");
         let b = profile("b");
@@ -917,6 +994,13 @@ mod tests {
     fn profile_match_is_case_and_separator_insensitive() {
         let left = standalone(PathBuf::from(r"C:\Users\Miracle\hertz-studio"), "FULL");
         let right = standalone(PathBuf::from("c:/users/miracle/hertz-studio/"), "full");
+        assert!(same_profile(&left, &right));
+    }
+
+    #[test]
+    fn offline_profiles_collapse_dot_segments_before_duplicate_validation() {
+        let left = standalone(PathBuf::from(r"C:\hertz-nonexistent\a\..\b\."), "full");
+        let right = standalone(PathBuf::from(r"c:\hertz-nonexistent\b"), "full");
         assert!(same_profile(&left, &right));
     }
 

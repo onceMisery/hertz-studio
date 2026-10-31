@@ -1,6 +1,10 @@
 # Hertz 壁纸引擎 P0–P3 开发设计与实施计划
 
-日期：2026-10-28；AI 增量更新：2026-10-29。核对基线：`1d042b8` 与 2026-10-28 工作树；工作树另有 DBX 桌面接入的并行修改。状态：**开发设计，不代表新增能力已经实现或发布。**
+日期：2026-10-28；AI 增量更新：2026-10-29（并入 Muralume 运行期核对与本地媒体服务决定，见 §1.4、§8.1、§13.1–§13.3、§20.1、§21.2）。核对基线：`1d042b8` 与 2026-10-28 工作树；工作树另有 DBX 桌面接入的并行修改。状态：**开发设计，不代表新增能力已经实现或发布。**
+
+本地媒体专项复核：2026-10-29，基于 `8eac246` 与当日工作树。按用户明确选择，**舞台与壁纸的图片/视频均采用持久化方案，导入并保存成功后重启可恢复**。补充舞台媒体存储 owner、稳定引用、导入快照与真实探测、媒体流合同、预览成本和暂停释放语义，见 §1.5、§7.1、§8.1–§8.5、§12–§13、§20–§21；本次只修订设计，未实现这些增量。
+
+持久化再次复核：2026-10-30。明确 DBX 现有 mediaUrl 尚缺有界连续流合同，列为宿主升级与实际发行资格前置；补齐舞台预置的三个受管键、并发保存/迁移、删除后重导入的崩溃恢复，以及停服务的完整备份边界。新增能力仍是设计要求，不能按文档修订视作已经可用。
 
 **目标：**在现有 Windows 桌面宿主上，建设可接入图片、视频、内置三维场景、图层工程、模型与受隔离网页作品的本地优先壁纸引擎，并演进到作品创作、AI 生成与受控切换、分享、订阅与安全更新。
 
@@ -33,7 +37,7 @@
 | 阶段 | 用户得到什么 | 必须完成的引擎能力 |
 | --- | --- | --- |
 | P0：可靠运行底座 | 九场景可放心常驻，状态、暂停和设置保存可解释 | 时钟分离、按目标屏策略、亮度/运动、电池停绘、真实预算与故障恢复 |
-| P1：通用本地壁纸 | 导入图片/视频、保存内置场景作品、作品库/轮播、系统音频和多屏；本地自然语言切换、AI 内置场景草稿 | 包协议、资源目录、安装事务、轻后端、统一输入、逐屏预算与缓存；AI-01～03 |
+| P1：通用本地壁纸 | 舞台与壁纸导入图片/视频并跨重启恢复、保存内置场景作品、作品库/轮播、系统音频和多屏；本地自然语言切换、AI 内置场景草稿 | 舞台持久媒体服务、包协议、资源目录、安装事务、轻后端、统一输入、逐屏预算与缓存；AI-01～03 |
 | P2：可创作引擎 | 图片图层、遮罩、粒子/水波/风动、文本、受限三维模型、关键帧、公开参数；AI 文生图与组合草稿 | 场景文档、编译器、资源适配器、统一 Three.js 合成、编辑器复用同一运行时；AI-04/05 |
 | P3：可分发内容平台 | 网页作品隔离运行、作者发布、审核、订阅更新、回滚和撤销；外部助手提出生成/切换申请 | 不可信内容执行边界、签名版本、下载与安装复用、独立社区服务；AI-06 |
 
@@ -46,10 +50,36 @@ AI 可在对应引擎闭环之后单独发布，但不能用“支持导入 AI �
 - 不允许作品携带 exe、DLL、原生插件、浏览器扩展、任意依赖安装脚本或运行期模型生成代码。
 - 不把任意 GLSL/JavaScript 注入现有可信场景注册表；P2 的效果实现随应用发布，P3 的用户脚本只在独立隔离网页里执行。
 - 不采集麦克风、不保存系统原始录音；壁纸内的视频始终静音，本轮不新增环境音乐播放器。
+- 不将 ObjectURL、用户原文件路径或浏览器临时缓存作为持久媒体身份。舞台素材由原播放器服务的 StageMediaStore 保存，壁纸由桌面 AssetStore 保存；renderer 只持稳定资源引用，不获得任意路径读取，也不要求独立舞台启动桌面组件。
 - 不修改现有播放队列、账号、曲库、房间音频 owner 或原网页离场规则；壁纸存在不意味着音乐应继续播放。
 - 不为了社区增加播放器登录前置；未配置社区、未登录、断网时，本地壁纸、编辑和导出继续可用。
 - 不因 AI 授予任意代码执行、文件/网络访问、无人确认重复生成、收费或覆盖桌面权限；不自动上传桌面截图、歌曲或原始音频。
 - 不预建 ECS、可热加载原生插件 ABI、通用节点脚本语言或跨进程共享 GPU 纹理框架。
+
+### 1.4 本版收紧的五条决定
+
+| 决定 | 理由 | 落地位置 |
+| --- | --- | --- |
+| 桌面壁纸视频字节只走 `WebResourceRequested` + 有界可 seek 的 COM IStream；不用 wry custom protocol 整段返回、不用 data/base64/NavigateToString、不把虚拟目录映射作默认或回退 | wry 0.57 在 Windows 把 custom protocol 响应体包进 `SHCreateMemStream`，当前同步 handler 跑 UI 线程；异步 responder 也不提供文件流 | §8.1、§21.2 C49；舞台传输另见 §8.5 |
+| 壁纸媒体采用“复制进不可变包”模型，舞台复制进原服务内容库；P1 不支持只引用原路径 | 重启、轮播和导出必须使用稳定字节；原路径引用会引入移动/删除、授权与缺失恢复成本 | §7.1、§7.2、§8.5 |
+| 视频能力只承诺 MP4/H.264 与 WebM/VP8/VP9；MOV/MKV/HEVC/AV1/HDR 不承诺，导入期实际探测 | WebView2 解码取决于 Edge 与系统编解码器，扩展名不是能力；Muralume 的 32 种扩展名来自 AVFoundation，不能平移 | §5.1、§7.1、§21.2 C48 |
+| 多屏不按屏幕数默认开实例；span 只建一个呈现目标，single 多组必须显式选择并计入 decoder/GPU 预算 | 每屏一个 WebView2 = 多渲染进程 + 独立 GPU context + decoder；Muralume 的 per-display 没有额外进程，成本模型不适用 | §12.1、§13.1、§20.2 P1-07 |
+| 舞台与壁纸素材均持久化；各自原生服务保存字节，运行时 URL 按需重建 | 重启恢复依赖文件副本和稳定 ID；DBX 的隔离页面不能靠设置存储或失效 blob URL 保存大媒体 | §1.5、§3.1、§8.5 |
+
+### 1.5 本地图片/视频用于舞台与壁纸的评审结论
+
+**结论：舞台和壁纸都默认持久化；导入及当前选择保存成功后，重开页面、重启应用/电脑均可恢复，无需重选原文件。** 用户删除或移动原文件不影响已导入副本。ObjectURL 和宿主媒体 URL 只是当前会话的播放租约，不进入设置，过期或重启后按稳定资源 ID 重新取得。
+
+| 用途 | 资源入口与 owner | 恢复与分享 | 呈现方式 |
+| --- | --- | --- | --- |
+| 插件/播放器舞台 | 用户选择的 `File` → 原 AppState 的 StageMediaStore 复制/校验/持久化；CreativeStage 保存稳定 assetRef；Backgrounds 持有呈现租约 | 当前背景和本机预置跨重启恢复；独立版/DBX 使用各自 DataDir；文本分享不携带本机资源引用或媒体字节 | 平面用现有 img/video；独立版走原 HTTP 资源流，DBX 视频须先完成宿主受控 URL 的连续流升级/资格；组合借用同一媒体源 |
+| 桌面壁纸 | 原生 fileToken → staging 快照 → 校验/准备 → 不可变包；AssetStore/Broker 持有 | 重启不依赖源路径；按固定版本导出/分享，源文件删除不影响已安装作品 | 图片/视频轻后端优先；只有组合效果进入同一 Three.js context |
+
+三种路线的取舍：仅存 blob URL/浏览器缓存不能满足可靠恢复，DBX opaque-origin 页面也不能假定 IndexedDB/OPFS 可用；全部放进桌面库会使独立舞台依赖 `hertz-desktop`；**采用原播放器持久舞台库＋桌面持久壁纸库**，复用纯格式校验、适配计算和渲染实现。两者服务不同生命周期与进程，不同步同一条“当前选择”，也不跨目录直接读写。舞台转壁纸仍通过正式包导出/原生导入取得独立副本；P1 可在桌面中心重选原文件导入，不传 `blob:` URL，不要求为了壁纸继续运行音乐服务。
+
+当前代码仍只有会话级媒体：`CreativeStage.saveLocal/flushLocalSave` 会序列化含 `blob:` URL 的 preset；`Backgrounds.setLocalFile` 没有持久文件库或完整准入；舞台视频的 `playbackRate=0.75` 与低分辨率画布不会保证源视频按更低分辨率解码。§8.5 和 P1-M0～M2 定义从现状到持久化的实施出口。导入字节保存与预置保存分别确认，任一步失败都不能显示“已保存”，也不自动退成临时素材。
+
+本次审查的不变量是“已保存素材跨重启恢复，不依赖源路径；可呈现、可停止、可释放，失败可解释”。规范 owner 为播放器 StageMediaStore 与桌面 AssetStore；旧媒体 URL 只允许作为过渡预览租约，成功迁移后不再作为保存身份。用关闭桌面组件、删除原文件后重开舞台、DBX 重启、磁盘满、服务换 DataDir、宿主媒体 token 过期来证伪。原生视频后端、跨进程共享纹理和舞台跨机媒体工程包不在本次增量内。
 
 ## 2. 当前基线与必须先修的欠账
 
@@ -64,6 +94,7 @@ AI 可在对应引擎闭环之后单独发布，但不能用“支持导入 AI �
 | 专用壁纸快照/事件、64 段频谱、过期衰减 | `crates/hertz-studio/src/wallpaper.rs`、`wallpaper_feed.rs` | 沿用投影与窄授权，P1 才升级高频数据协议 |
 | 场景参数定义、迁移、scope、质量档、异步失效票据 | `tools/space-stage/src/{registry,main,scope,quality}.js` | 提取可复用的呈现与资源合同，不重写 Three.js 引擎 |
 | 创意舞台工程与分享 | `plugin/ui/creative-project.js`、`creative-share-code.js` | 借鉴严格校验和编辑事务，不复用其文件格式 |
+| 舞台本地图片/视频背景（当前仅会话级） | `plugin/ui/backgrounds.js::setLocalFile`、`space-layers.js`、`workshop.js` | 改为 §8.5 的原服务持久化＋稳定引用；保留现有媒体元素与借用关系，不并入桌面壁纸库 |
 
 当前 `SpaceStagePure.catalog()` 包含的项目比桌面九个场景多，不能全部开放为壁纸。Creative 工程排除了自定义图片/视频，分享 CRC32 也不是内容签名；现有舞台构建 manifest 的截断哈希不能作为壁纸包的完整性校验。
 
@@ -77,6 +108,9 @@ AI 可在对应引擎闭环之后单独发布，但不能用“支持导入 AI �
 6. 当前预览是设置页内 iframe，没有独立 owner token，且没有完整继承壁纸电源策略；它不能作为不可信网页容器。
 7. `draws` 在调用 renderer 前递增，只能说明尝试调用，不能当作 GPU 完成次数；现有质量采样也会把主动低 FPS 误判为退化。
 8. 旧管理管道、播放器代理、设置页消息分别有 8 KiB、2 KiB/8 KiB、8 KiB 边界；不能把大工程、素材或导入任务塞进同步命令。
+9. 显示器身份仍按 GDI 名匹配：`native.rs` 取 `MONITORINFOEXW.szDevice`，`app.rs` 用 `monitor.name == surface.monitor.name`；换主屏、拔插或驱动重置后 `\\.\DISPLAY1` 可能指向另一块物理屏，壁纸会悄悄换屏。P0 改用 DisplayConfig `monitorDevicePath` + EDID，GDI 名只作当前枚举映射。
+10. 目标屏消失立即 `surface.stop()`，没有空拓扑宽限；Windows 在模式切换、驱动重置、RDP 进出时可能短暂少报显示器。P0 加连续 3 次（约 750 ms）宽限，并把全屏/遮挡去抖做成非对称（进入慢、恢复快）。
+11. 壁纸页把质量写死 `quality:'low'`/`deviceTier:1`，没有自适应档位；电池降帧只作用于歌词窗口。P0 的电池停绘与 P1 的降档阶梯要分开实现，不能把歌词的 `frameCap` 当作壁纸已降档。
 
 ### 2.3 与正在进行的 DBX 工作隔离
 
@@ -109,6 +143,7 @@ flowchart TB
   Center --> AI[原 AiService：受管生成]
   AI --> Candidate[受限 artifact]
   Candidate --> Import
+  StageUi[独立播放器或 DBX 舞台] <--> StageMedia[原 AppState：StageMediaStore 与原设置服务]
 ```
 
 ### 3.1 唯一 owner 表
@@ -128,6 +163,9 @@ flowchart TB
 | 不可信内容生命周期 | 原生 worker manager | 网页自己宣称停止、自己恢复无限重试 |
 | AI 派发、凭据与费用 | 已运行服务的 AiService | 桌面组件第二个 runner、renderer/MCP 持有模型密钥 |
 | AI 候选到桌面的授权 | 原生 WallpaperAI 与原配置提交队列 | 模型自报“用户已确认”、生成服务直接修改桌面配置 |
+| 舞台持久媒体文件、索引与导入任务 | 原 `hertz-studio` AppState 的 StageMediaStore；独立版/DBX 各自 DataDir | 桌面壁纸库、localStorage/DBX storage 中的媒体字节、renderer 自行写路径 |
+| 舞台当前预置及本机预置库 | CreativeStage 定义/运行态＋原 settings 三个受管键（§8.5.3）；同 DataDir 共享最后保存状态，localStorage 仅缓存 | StageMediaStore 再存一份当前选择、桌面配置、分享 codec |
+| 舞台媒体元素与呈现租约 | `Backgrounds`；Space3D/BgWall 只借用源与帧通知 | 每个舞台另建播放器、借用方撤销共享 URL |
 
 ### 3.2 文件级结构
 
@@ -143,6 +181,10 @@ flowchart TB
 | `crates/hertz-desktop/src/wallpaper/{library,assets,media,display,audio,worker,community}.rs` | 本地库、资源 broker、原生媒体流、多屏、loopback、隔离与社区客户端 |
 | `crates/hertz-desktop/migrations/wallpaper/` | 壁纸独立 SQLite 迁移；不进入根目录音乐库 migrations |
 | `crates/hertz-wallpaper/src/{lib,manifest,archive,document,release}.rs` | 新增纯数据/校验共享 crate；供桌面与社区使用，无 Windows、音乐服务或联网副作用 |
+| `crates/hertz-studio/src/stage_media/{mod,store,imports,leases}.rs` | 原 AppState 内的舞台持久文件、索引协调、分块导入及受控读取；不启动独立服务进程 |
+| `crates/hertz-studio/src/rpc/stage_media.rs`、`routes.rs`、`plugin/backend/src/main.rs` | 同一舞台媒体/预置业务门面；独立版 HTTP、DBX 小块 RPC 与宿主媒体读取适配 |
+| `crates/vmusic-store/src/{stage_media,settings,backup}.rs`、根 `migrations/` | 舞台媒体索引/导入收据、settings 受管键与原子版本提交、备份验证及删除恢复；使用下一个空闲迁移号 |
+| `plugin/ui/stage-media.js`、`backgrounds.js`、`creative-stage.js`、`host.js`、`workshop.js`、`space-layers.js` | 资源引用/导入进度/恢复与 URL 租约；分离本机预置和分享投影；assets 宏清单沿现有入口登记 |
 | `tools/space-stage/src/{main,registry,scope,quality}.js` | 现有工厂继续工作；加入明确帧合同与可复用 render context |
 | `tools/space-stage/src/wallpaper/{context,assets,compiler,graph,timeline,bindings}.js` | 资源缓存、编译与组合场景运行时；随现有舞台构建产物发布 |
 | `tools/space-stage/src/wallpaper/loaders/` | 图片、视频纹理、字体、GLB、KTX2 等内置 adapter |
@@ -231,6 +273,8 @@ ai_receipts/ai_requests 的终态收据合计最多 256 条/4 MiB，至少保留
 
 运行中的引用租约放内存，不把 `refcount` 永久存入数据库。启动时从已保存布局、播放列表、草稿引用和订阅安装版本重建 GC 根；不依赖上次正常退出才能避免删掉活动文件。
 
+本节目录、wallpaper.db 与 GC 仅属于桌面壁纸。舞台素材另由原播放器的 `<DataDir>/stage-media/` 和原 SQLite 管理（§8.5），独立版与 DBX 的 DataDir 不互相回退，桌面卸载/壁纸 GC 不清舞台素材。两库出现相同字节也不跨进程做硬链接；各自副本和导入峰值分别计入容量。
+
 ### 4.3 配置版本与提交
 
 版本分配固定为：DBX 来源身份迁移使用共享方案保留的 **v3**；P0 的新增运行字段使用 **v4**；P1 的布局/作品引用模型使用 **v5**。P2/P3 不再改变布局结构，工程与订阅分别在独立文档/数据库中版本化。
@@ -283,7 +327,7 @@ brightness 范围 0.25–1；motion 范围 0–1；FPS 只接受 15/30/60，0 �
 | 资源/内容 | P1 | P2 | P3 与边界 |
 | --- | --- | --- | --- |
 | JPEG/PNG/WebP 静态图片 | 直接导入、静态轻后端、裁切/适配 | 图层、纹理、遮罩、派生尺寸 | 相同管线 |
-| MP4/H.264，WebM/VP8/VP9 | 静音循环，实际解码能力检查 | 视频纹理及图层；仍受解码槽限制 | 相同管线；不承诺所有 profile/level |
+| MP4/H.264，WebM/VP8/VP9 | 静音循环，导入期实际解码探测 | 视频纹理及图层；仍受解码槽限制 | 相同管线；不承诺所有 profile/level；MOV/MKV/HEVC/AV1/HDR 不承诺 |
 | 内置三维场景 | 版本化参数快照，复用真实 registry | 可作为组合工程的唯一三维背景 | 不开放内容包替换内置脚本 |
 | SVG | 拒绝直接执行或静默取第一帧 | 受限静态 SVG 导入后栅格化；保留原稿 | 不把 SVG 当网页导航 |
 | TTF/OTF/WOFF2 | 不作为独立壁纸 | 包内字体与文本层，不安装系统字体 | 字体授权随包声明 |
@@ -293,6 +337,10 @@ brightness 范围 0.25–1；motion 范围 0–1；FPS 只接受 15/30/60，0 �
 | HTML/CSS/JavaScript 网页 | 不支持 | 不支持 | 本地完整依赖、独立隔离 worker；网络与原生权限默认不授予 |
 | 系统音频/播放器频谱 | 输入信号，不是资源文件 | 同一输入总线 | 网页需显式申请只读频谱授权 |
 | GIF/APNG、HEVC、AV1、HDR、任意音频文件 | 不承诺；不得以扩展名冒充可播 | 在能力目录明确 unsupported | 后续通过独立 adapter/转换器增量加入，不绕过预算 |
+
+视频能力以容器解析、`canPlayType` 初筛和实际首帧/seek/错误探测为准（§7.1），能力目录记录本机结果；扩展名只用于选择候选 adapter，不能作为“可播”的声明。Muralume 的 32 种视频扩展名来自 AVFoundation，WebView2 不能平移这套覆盖；HEVC 取决于系统扩展，AV1 取决于 Edge 版本，HDR 不在本轮范围。
+
+P1 的图片必须确认为静态：PNG 的 APNG 标记、WebP 的动画标记与 GIF 都不能因 `image/*` 或首帧解码成功而混入静态轻后端。视频首发限经过验证的 SDR、8-bit 变体；容器、codec/profile、旋转、像素宽高比和时间信息按 §7.1 提取。P1 不内置通用视频转码器，能力拒绝或超预算时提示用户另选受支持文件/更低分辨率或帧率版本，不自动下载 FFmpeg 或静默改变素材。图片派生与视频封面生成属于 P1；降分辨率/降帧率视频转码是后续独立 adapter 工作。
 
 模型支持范围先冻结为 glTF 2.0 核心 metallic-roughness、unlit、纹理变换、基础 morph/skinning 和动画；`extensionsRequired` 中存在未注册扩展即拒绝。Draco/Meshopt 压缩扩展不是“GLB 能导入就自动支持”，其解码器只能在单独能力与性能验收后随应用加入。
 
@@ -378,7 +426,7 @@ content 的各分支固定为：
 
 每个 asset 有局部 id、kind、source 和 variants；id 仅在该包内唯一。source/variant 引用 files.path，不接系统路径或 URL。派生元数据由导入器测得，不把作者填写的宽高、三角形数、时长作为准入真值。
 
-variant 包含 `id/file/purpose` 以及类型对应的 width/height、codec、colorSpace、alphaMode、mipLevels。purpose 只接受 preview/low/medium/high；选择顺序为满足用途的最小分辨率、当前设备能解码的 codec、然后比较字节数。没有满足预算的变体可以在导入期生成；禁止在每次切壁纸时重新缩图或压纹理。
+variant 包含 `id/file/purpose` 以及类型对应的 width/height、codec、colorSpace、alphaMode、mipLevels。purpose 只接受 preview/low/medium/high；选择顺序为满足用途的最小分辨率、当前设备能解码的 codec、然后比较字节数。没有满足预算的变体时，仅已实现的转换 adapter 可在导入期生成；P1 不承诺视频转码。禁止在每次切壁纸时重新缩图或压纹理。
 
 原始资源与派生资源分别校验哈希。派生缓存不必加入导出包；导出时只有作者选择“包含优化资源”才固化为新的包版本。资源转换失败保留原稿、说明不可应用，不静默替换为别的资源。
 
@@ -393,6 +441,7 @@ variant 包含 `id/file/purpose` 以及类型对应的 width/height、codec、co
 | 单资源压缩输入 | 图片 32 MiB；视频 512 MiB；模型 256 MiB；字体 16 MiB；文本文件 4 MiB |
 | 图片原始像素 | 64 MP、单边 16384；超过 GPU 上限必须先派生 |
 | 导入期同时解码的原始图片 | 1 张，独立 320 MiB CPU 内存预算；原图不进入常驻缓存 |
+| 视频元数据探测 | 输入仍受 512 MiB 限制；累计检查最多 32 MiB 元数据、100 万采样/时间条目；超限或无法得出可靠帧率上界则不准入 |
 | SVG | 1024 元素、100000 路径段；禁脚本、foreignObject、外部引用、动画与滤镜图 |
 | 工程 | 1 MiB、128 个编辑节点、层级深度 8、64 条绑定、256 条轨道、4096 个关键帧 |
 | 模型 | 5000 节点、100 万三角形文件准入；运行时仍受所选质量档更低预算 |
@@ -400,17 +449,29 @@ variant 包含 `id/file/purpose` 以及类型对应的 width/height、codec、co
 
 相对路径只允许小写 ASCII 字母、数字、`-_. /` 中的合法路径字符，实际不允许空格；每段非空，拒绝 `.`/`..`、反斜杠、冒号、百分号、控制字符、尾点、Windows 保留设备名、绝对路径和大小写折叠冲突。禁止符号链接、硬链接和 reparse point；解包逐文件使用新建语义，不跟随已有路径。压缩比超过 100:1 的大条目拒绝，解压流仍逐块累计实际字节，不能只信 ZIP 目录声明。
 
+文件像素上限不代表解码一定能放进工作区：64 MP 的单张 RGBA 已接近 256 MiB，解码器内部、方向变换和缩放输出必须一起预留；可用缩放解码时优先使用，否则提前拒绝，不能分配后才检查。图片准备统一应用 EXIF 方向并输出 SDR sRGB；剥离运行时不需要的 EXIF/GPS，保留的原稿不被改写，分享 UI 说明原稿可能含元数据。所有单文件上限还受整个包上限约束，512 MiB 视频加 manifest/封面不能绕过 512 MiB 包上限。
+
 ## 7. 导入、编译与安装管线
 
 ### 7.1 三个阶段，不能把重活放进播放路径
 
-1. **Probe**：读魔数与有界头部，识别内容、依赖和约束；视频同时检查容器与真实解码能力。未知格式返回 format_unsupported，不靠文件名选择 decoder。
+1. **Probe**：先消费 fileToken，以只读句柄把输入有界复制到私有 staging 并计算 hash，后续所有检查、封面与安装均读取这份固定快照。句柄打开时拒绝并发写入；源不可读、复制中断或输入身份变化则失败，不使用“先探测原路径、再复制另一份字节”的结果。读魔数及有界容器结构，未知格式返回 format_unsupported，不靠文件名选择 decoder。MP4/WebM 的可信解析器提取 codec/profile、编码/显示尺寸、旋转、像素宽高比、色彩、时长和帧时间；MP4 尾部 moov 允许定位读取，WebM 缺少可靠时间信息时允许在 §6.3 限额内扫描，不只读固定前缀。CFR 记录 sourceFps；VFR 根据时间戳记录 fpsUpperBound，不能把 duration 的平均帧率当上界。结构未知、病态时间戳或超出探测限额则明确不支持。
 2. **Prepare**：在后台导入槽中校验所有文件、计算 SHA-256、解析依赖 DAG、生成必要缩略图/低分辨率变体、编译工程计划；不创建桌面窗口。
 3. **Install**：校验结果和可用磁盘空间后，把包含 original.hwpkg、files 投影与 receipt 的完整 staging 原子改名为 packageHash 目录，再用短事务发布包/来源/版本索引。只有此时作品才在可用库中出现。
 
 裸图片、视频和已保存草稿先在 Prepare 末尾生成一次最终 `.hwpkg`，冻结文件顺序、时间戳和编码参数后计算完整包 hash；之后按同一安装器处理。导入已有包必须保留原字节，不能解包再重压后沿用原 hash。普通导出逐字节复制 original.hwpkg；修改内容、嵌入新优化资源或改许可均生成新版本和新 hash。
 
 原生管理请求只启动 job 并立即返回 jobId。总并发：一个准备/解码任务，两个下载任务；交互修改与停止永远不等待这些任务。取消后先作废 job generation，待真实 I/O/解码退出才归还槽，不能提前接受第二个大任务。
+
+页面不提交系统路径：`wallpaper.file.pick` 由原生对话框产生一次性 fileToken，绑定真实路径或文件句柄；`import.begin` 只接受 token，不接受绝对路径、相对路径或 URL。token 单次、短期、绑定 settingsSession，过期/取消后不可重放。
+
+**真实解码是 Probe 的第二道检查。** `loadedmetadata` 只证明部分元数据可读，不提供可靠 codec/源帧率，也不证明首帧可播。使用当前 WebView2 的受信探测容器和仅该 job 可访问的 staging URL，完成 metadata → `play()` 成功 → 首个 `requestVideoFrameCallback` → 中段/近尾 seek 与帧到达 → error 观察；全部请求受同一取消代际约束，单次探测最长 15 秒。探测宿主必须经实测能解码，不能依赖 `display:none`、隐藏 controller 或桌面 WorkerW 窗口；后台节流导致无帧应报告 probe_inconclusive，不能误记 codec unsupported。结果是有限抽样，运行中仍处理坏帧和断流。
+
+上述顺序针对裸媒体；已有 `.hwpkg` 先完成包结构、路径、长度/hash 校验与有界安全解包，再对 staging 中已验证的媒体执行同样探测，不能为了取首帧跳过包校验或直接开放压缩包任意路径。
+
+探测沿用全局 decoder 上限 2，另受一个准备任务槽限制；已占满时返回 budget_busy/有界等待，用户可显式释放预览或暂停并卸载指定桌面会话，不额外开第三个隐藏 decoder。取消、失败或完成都执行 pause、清 src、load、移除监听与原生流租约回收；实际退出后才还槽。能力结果按内容 hash、adapter 版本、WebView2/OS 与图形驱动环境版本缓存，环境变化后复核，不能将一次成功永久当作跨机器承诺。
+
+打包已压缩图片/视频默认 ZIP Store，避免对视频做无收益的 Deflate。安装空间预检同时计算 staging、原包、解包投影、封面/派生与旧版本暂存的峰值；容量不足在发布前拒绝。复制快照完成后原文件移动/删除不影响本次任务，已安装作品永不重新打开用户源路径。
 
 ### 7.2 原子性与崩溃恢复
 
@@ -455,9 +516,10 @@ type AssetKind = 'image' | 'video' | 'font' | 'model' | 'vector' | 'texture';
 type AssetRef = { packageHash: string; assetId: string; variantId: string | null };
 type ByteRange = { start: number; endExclusive: number };
 type AssetMetadata = {
-  width?: number; height?: number; durationMs?: number; sourceFps?: number;
+  width?: number; height?: number; durationMs?: number; sourceFps?: number; fpsUpperBound?: number;
+  encodedWidth?: number; encodedHeight?: number; rotationDegrees?: number; pixelAspectRatio?: number;
   triangles?: number; vertexBytes?: number; mipBytes?: readonly number[];
-  codec?: string; colorSpace?: 'srgb' | 'linear';
+  codec?: string; profile?: string; bitDepth?: number; colorSpace?: 'srgb' | 'linear';
 };
 type AssetInfo = {
   bytes: number; mime: string; sha256: string; kind: AssetKind;
@@ -477,13 +539,28 @@ interface AssetProvider {
 }
 ```
 
-这是新增合同的类型说明，不要求前端改用 TypeScript。类型专用 schema 规定 metadata 的必需字段，例如图片必有宽高、视频必有宽高/时长/sourceFps，不能把可选字段当作允许漏掉成本真值。`read` 单次最多 1 MiB；大视频不经过 read/JSON/base64，而由原生文件流供 WebView 解码。控制消息不传媒体 Blob。
+这是新增合同的类型说明，不要求前端改用 TypeScript。类型专用 schema 规定 metadata 的必需字段：图片必有规范化宽高；视频必有编码/显示尺寸、方向、像素宽高比、codec/profile、时长、CFR 的 sourceFps 或 VFR 的 fpsUpperBound。显示尺寸用于适配，编码尺寸与帧率上界用于解码预算，不能把可选字段当作允许漏掉成本真值。`read` 单次最多 1 MiB；大视频不经过 read/JSON/base64，而由原生文件流供 WebView 解码。控制消息不传媒体 Blob。
 
 AssetRef 是文档逻辑引用，ResolvedAsset 是一次规划选择的不可变实体：原包 variant 的 contentKey 为文件完整 hash，派生资源为 derivedKey＋输出文件 hash；url 和租约必须固定到该实体。转换器升级生成新 contentKey，旧 session 继续引用旧实体，不能让同一个 variantId 悄悄换字节。缺少所需派生时返回 prepare_required 并启动已有准备任务，不在 loader 内隐式转码。
 
-资源地址使用每包隔离的保留域 `https://<hash前32位>.<hash后32位>.wallpaper.invalid/`，由 WebView2 `WebResourceRequested` 在本机拦截，不做 DNS 请求；拆分标签避免超过单个 DNS 标签 63 字符限制。只允许已索引路径的 GET/HEAD；可信引擎资源和作品资源使用不同 origin。
+资源地址使用每包隔离的保留域 `https://<hash前32位>.<hash后32位>.wallpaper.invalid/`，由 WebView2 `WebResourceRequested` 在本机拦截，不做 DNS 请求；拆分标签避免超过单个 DNS 标签 63 字符限制。只允许已索引路径的 GET/HEAD；可信引擎资源和作品资源使用不同 origin。hash URL 不是授权：原生按发起请求的 controller/session/generation 检查当前准入包及派生资源集合；未知域/路径或已撤销租约在本机失败，不漏到网络。导入探测只得到该 job 的临时集合，不开放 staging 目录。
 
-响应设置正确 MIME、`nosniff`、准确 Content-Length 与严格 CORS；视频支持单范围 Range、206、Content-Range、416，禁止多范围请求。CORS 只允许当前可信呈现 origin，网页作品对同包为同源，不使用 `*` 授权管理页数据。用有界、可 seek 的原生 COM IStream 持有已打开文件句柄，响应创建不读取整文件；页面关闭/取消/流结束必须释放句柄。流总并发 8、单流缓冲最多 1 MiB。
+响应设置正确 MIME、`nosniff`、准确 Content-Length 与严格 CORS；媒体响应不做内容压缩，使用 `Cache-Control: no-store`，避免 WebView HTTP 磁盘缓存再存一份大视频或绕过会话资源撤回；包/派生与系统文件缓存承担复用。可信 img/video 加载跨 origin 资源时设置 `crossOrigin='anonymous'` 并匹配 CSP 白名单，使组合纹理可用且不污染 canvas；CORS 只允许当前可信呈现 origin，网页作品对同包为同源，不使用 `*`。确有预检时仅对已授权 origin/资源响应 OPTIONS，限定 GET/HEAD 与 Range；不把 OPTIONS 变成额外文件读取入口。
+
+视频 Range 按 HTTP byte-range 定义实现，并用固定长度 N 的 fixture 验证：
+
+| 请求 | 响应 |
+| --- | --- |
+| GET 无 Range / HEAD | 200；完整 Content-Length=N；HEAD 无响应体、不占流槽 |
+| `bytes=a-b`、`bytes=a-`、`bytes=-k` 的可满足单范围 | 206；末端裁至 N−1；Content-Length 为实际片段长度，Content-Range 为 `bytes a-b/N`，Accept-Ranges=bytes |
+| 有效但不可满足的范围 | 416；Content-Range=`bytes */N`，不创建文件流 |
+| 语法错误、整数溢出或多范围 | 有界解析后返回 400；不拼 multipart、不退回整文件响应 |
+
+用有界、可 seek 的原生 COM IStream 持有已打开文件句柄，响应创建不读取整文件。206 的流视图只暴露所选片段，逻辑 Seek/Stat/EOF 以片段为界；Clone 如需支持必须使用独立游标，不能让并发请求改写共享文件位置。流必须 agile 或在后台线程创建并正确 marshal；文件打开/校验经 `GetDeferral` 在后台完成，响应回到 WebView2 所属线程设置并 Complete，所有失败/取消分支也要完成 deferral。不可用 UI apartment 上同步执行的大文件 Read 冒充非阻塞流，也不能返回暂时没数据的“未来流”：Complete 时全部文件字节必须已可读取，未到 EOF 不返回伪 EOF。
+
+流总并发 8、单流缓冲最多 1 MiB；达到上限返回可解释的资源忙错误，不在 UI 线程等待信号量或无限排队。EOF 不等于对象寿命结束，不能在首次读到尾部就关闭仍可 seek 的句柄；按最终 COM 引用及 session 取消租约回收。页面关闭/换代先取消新读，待在途读取退出再关闭句柄并归还槽；需以 50 次 seek/切换证明不会遗留流。WebView2 自身缓冲仍计入实际进程内存，1 MiB 只约束本应用的单流缓冲。
+
+实现约束：不要用 wry `with_custom_protocol` 返回视频整段字节。wry 0.57 在 Windows 把 custom protocol 的响应体包进 `SHCreateMemStream`，当前同步 handler 跑在 UI 线程；改成异步 responder 仍需提供内存响应体，不能自动成为文件流。即使状态码和响应头能表达 206，整段读入也会阻塞 UI、放大内存峰值。视频只走本节的 `WebResourceRequested` + 有界 IStream；图片同样走该流，但不要求实现 206/416，仍受 §6.3 上限约束。原生集成使用 wry `WebViewExtWindows` 暴露的 controller/environment/webview，直接依赖与锁定 wry 匹配的 COM/windows crate 版本，不为媒体另建 HTTP listener 或第二套 WebView 运行时。
 
 不以 `NavigateToString` 内联大包，也不改用任意 `file://`。不把虚拟目录映射当作默认视频路径：微软文档明确指出其媒体加载可能很慢；资源流方案须在 P1 媒体门槛中测首帧、seek、句柄与 UI 响应。
 
@@ -493,6 +570,7 @@ AssetRef 是文档逻辑引用，ResolvedAsset 是一次规划选择的不可变
 type Cost = {
   cpuBytes: number; gpuBytes: number; decoderSlots: number; transcodeSlots: number;
   uploadBytes: number; streamUploadBytesPerSecond: number; pixelWorkPerSecond: number;
+  decodePixelsPerSecond: number;
 };
 type AssetLease<T> = { value: T; release(): void };
 type DecodeOptions = {
@@ -527,7 +605,7 @@ interface AssetAdapter<T> {
 具体实现：
 
 - 图片：优先有界下载后的 `createImageBitmap`，导入期生成合适尺寸；WebGL 上传后在不需要 CPU 恢复副本时 `ImageBitmap.close()`。静态轻后端不为了复用接口额外建立 WebGLTexture。
-- 视频：一个解码槽对应一个 HTMLVideoElement；muted/loop/playsInline。纯视频直接交给 WebView 合成器；组合工程才创建 VideoTexture，不把每帧读成 ImageData 或经 Rust 复制。
+- 视频：一个解码槽对应一个 HTMLVideoElement；设置 muted/defaultMuted/loop/playsInline，原生 controller 同时静音，P1 playbackRate=1。纯视频直接交给 WebView 合成器；组合工程才创建 VideoTexture，不把每帧读成 ImageData 或经 Rust 复制。`play()` 拒绝、首帧超时、运行时 error/断流都进入当前 generation 的结构化失败态并显示已准备封面；不空吞错误或无限重试。释放取消帧回调与监听，pause → 清 src/srcObject → load → 移除元素 → 释放 VideoTexture/流租约，最后确认预算释放。
 - 字体：FontFace 从包 URL 加载，只加入当前 document.fonts；卸载删 FontFace，文本纹理按文本/字体/字号/颜色/比例缓存，不每帧重排字形。
 - GLB：GLTFLoader 使用受控 LoadingManager，所有 URI 改写为同包 asset 引用；拒绝未声明外链和 data URI 超限。实例克隆保留骨骼/动画私有状态，几何和只读纹理可以由池共享。
 - SVG：在导入期使用受限解析与栅格化 adapter，运行时消费普通图片；不把不可信 SVG DOM 注入设置页。
@@ -536,6 +614,8 @@ interface AssetAdapter<T> {
 ### 8.3 ResourcePool 与 Scope 不得互相销毁
 
 池键为 `ResolvedAsset.contentKey + canonicalDecodeOptions + adapterId/version + contextId`；别名引用可以共享同一表示，sRGB/linear、alpha、mipmap、wrap 或压缩目标不同则不共享。acquire 必须把 DecodeOptions 原样传入 estimate/load，不能只有缓存字符串而加载器没有对应输入。同一键的并发 load 合并为一个 Promise；多个消费者各持一份租约。单个调用方取消只减少自己的等待者，最后一个等待者离开才中止底层加载。
+
+媒体元素具有可变播放位置，不能仅按 contentKey 合并：video 的共享键还包含 session、播放时钟域、循环区间与 seek 策略；不同区间/独立时间线占独立 decoder，同一播放域的多个图层才可借用一个元素。跨 WebView 不共享元素或解码槽；释放某个图层不得暂停其它仍持租约的消费者。
 
 状态机：`absent → loading → ready(refs>0) → idle(refs=0) → evicted`；失败不保留永久 rejected Promise，记录有界错误并允许显式重试。异步完成时必须再核对 session generation，过期结果立即 release，不能重新挂入新场景。
 
@@ -564,6 +644,96 @@ interface AssetAdapter<T> {
 5. 参数控件从资源 kind 自动筛选可选项；错误和不支持状态使用共用格式。
 6. 增加有效文件、坏头、超限、取消、并发去重、切换迟到、context loss、释放和真实 GPU 对照测试。
 7. 通过构建、包往返与性能门槛后随应用发布；作者不能靠在包中写一个同名 adapter 文件覆盖它。
+
+### 8.5 舞台持久媒体：原服务保存文件，设置保存稳定引用
+
+**默认行为：选择图片/视频 → 导入到当前播放器资料目录 → 保存背景选择 → 呈现；完成后重启仍恢复。** 不要求安装或启动 `hertz-desktop`，不增加 DBX 网络 listener，不把大文件写入 localStorage、DBX storage、普通 settings JSON 或分享码。以下是新增设计；当前 `setLocalFile` 仍为会话实现，不能因修改本文就宣称已交付。
+
+#### 8.5.1 owner、稳定引用与存储
+
+StageMediaStore 作为原 AppState 的领域服务，同时服务独立版 HTTP 和 DBX stdio RPC；不另开服务进程。字节存在 `<DataDir>/stage-media/objects/<sha256>/source`，派生图在 `derived/`，未提交导入在 `staging/<importId>/`；元数据位于原播放器 SQLite 的 `stage_media_assets`、`stage_media_imports` 表。前者记录 assetId、hash、bytes、MIME、显示名、验证结果及 ready/missing/quarantined/deleting 状态，删除中另记 deleteId；后者记录 requestId、输入摘要、进度及提交事实。ready 只代表原生字节/结构验证与安装完成，不代表每个浏览器都能播放。媒体域按 DataDir 持有进程级独占锁，防止两个 AppState 同写文件；拿不到锁只报告媒体库被占用，不阻断原音乐播放。启动先协调未完成的发布/删除记录，再开放相应媒体操作，不全库解码或等待浏览器。
+
+首次初始化在原 settings 的受管 `creative_stage_state` 中持久生成 storeId，标识这套数据库与媒体目录，不能从 UI 自报或读取失败时重新生成。assetId 使用完整内容 SHA-256；同一 store 中重复字节复用已核验的 ready 文件，不能仅凭索引存在就跳过缺失/损坏检查。完整搬迁 DataDir 保留 storeId；独立创建的独立版、DBX Standard/Full 或其它 DataDir 不自动合并/回退。storeId 不匹配时报告资源来自另一资料库，不按文件名猜测；相同 hash 不是跨库授权，也不赋予任意路径访问。
+
+CreativeStage 的本机持久背景形状为 `bg={type:'media',media:'image'|'video',assetRef:{storeId,assetId},...融合参数}`；标题/文件名仅在媒体索引中作为有界展示元数据。实际 url、File/Blob、句柄、导入 token 和解码状态只在运行态。Backgrounds 持有唯一媒体元素及资源租约，Space3D/工坊/BgWall 借源，不各自恢复一个视频。文件是否已保存由 StageMediaStore 裁决，当前选哪个背景仍由 CreativeStage/原设置服务裁决。
+
+舞台媒体库首发默认 10 GiB、最多 2000 个素材，派生缓存另限 256 MiB；与桌面 20 GiB 库分开计量。一个活动导入、单媒体大小及呈现限制见下文；写入前检查副本、staging 和派生峰值。用户导入的 source 不是可自动淘汰缓存，清理浏览器缓存、关闭页面、预览回滚或壁纸 GC 都不得删除它。本节数值是初始设计阈值，实施时与性能基线一同冻结。
+
+#### 8.5.2 导入与保存确认
+
+工坊和 Space3D 统一走 stage-media 客户端，再调用 Backgrounds 呈现。`setLocalFile` 的调用者必须等待异步导入/保存结果，不能继续按同步返回 spec 就提示成功。候选过程带 UI generation 与 requestId，取消文件对话框保持现状。
+
+1. File 的 `accept`/MIME 仅作提示，原生复核字节、容器、长度/hash、静态/动画和成本；格式范围沿用 §5.1，原生图片准备沿用 §6.3 的尺寸、方向/色彩与工作区预算。舞台只加载适配目标且最多 16 MP、单边 8192、压缩字节≤32 MiB 的准备后图片；16 MP 是上限，不是所有屏幕都生成的默认尺寸。视频输入最多 512 MiB，首发编码像素总数≤1920×1088、编码单边≤1920（为常见 1080p 保留 codec 对齐填充），显示尺寸另按裁切/旋转/像素宽高比计算；codec/帧率按 §7.1 解析，并按编码像素×帧率上界准入，不能只限制裁切后的显示区域。P1 无视频转码，过重素材明确拒绝或选择已有合格变体，不能用 CSS 缩小冒充降解码尺寸。
+2. `stage.media.import.begin` 返回 importId 与绑定本 UI 会话的短期上传 token；`chunk` 只接受顺序 offset、块摘要及最多 256 KiB 原始字节，一个在途块。独立版使用原 HTTP 二进制 body，DBX 使用已有 RPC 的 `raw_base64` 承载**单个小块**（编码后约 342 KiB），两端均在解码/写入前验长度；禁止 `file.arrayBuffer()`/base64 整段视频或扩大桌面管理 IPC。UI 使用 `File.slice()`，超时按相同 importId/offset/hash 查询或幂等重试，不重复追加；错序/异载荷拒绝。
+3. `finish` 冻结已收字节、持久记录任务受理后返回 jobId；同 importId 重复 finish 返回同一任务，之后不再收 chunk。后台验证完整 hash/格式结构，安全解码/准备图片变体，flush 后在同一文件系统原子发布对象，再以短事务同时提交素材索引和导入终态；只有查询到该提交才返回稳定 assetRef。原文件之后移动/删除不影响此副本。文件发布后数据库失败的孤立对象可核验恢复，不自动启用；未完成导入不能作为可用素材返回。查询已受理任务使用当前管理会话和 requestId/importId，不依赖已过期的上传 token。
+4. 当前受信舞台页面取得该 assetRef 的租约后，做实际图片 decode 或视频 metadata/play/首帧与 seek 探测（沿 §7.1 的超时/错误原则，最多 15 秒），再写入当前预置，等待 §8.5.3 的持久回执后才提示“已保存”。AppState 不引入 WebView/第二个视频解码器；容器结构有效、文件已保存与当前浏览器能播放是三个事实，探测结果按客户端浏览器/设备缓存，不能跨远程浏览器复用。旧背景/静态帧保留到新媒体首帧；视频换视频先卸载旧 decoder，再探测/加载新候选，旧 assetRef 保留以供显式恢复，不为切换双开。首帧失败展示素材已保存但不可呈现的事实和重试入口，不删除已经完成的素材；可用视频帧生成的封面只以有界图片回传校验，失败使用内置静态占位，不增加通用视频转换器。
+
+一个导入槽覆盖上传到准备结束；上传 token 空闲 60 秒过期，单次任务总期限 15 分钟，finish 受理后以 job 期限管理，不再因没有 chunk 误判上传空闲。UI 取消先作废 generation，再显式发送取消请求；AbortSignal/停止等待不等于原生已停。待在途写入退出后才释放槽与临时文件；取消不撤销已完成的文件安装。已保存但未应用的素材留在库中供用户查找/删除；旧结果可记导入终态，只有仍匹配当前意图与预置版本的结果才可请求应用。服务重启先查提交事实，已提交任务仍返回原 assetRef；其它任务标为 interrupted，重选 File 才重传，不伪造浏览器仍能重开原路径。
+
+独立版素材保存在**当前连接服务所在设备**的 DataDir；远程部署时界面明确保存设备。导入行为不自动同步到社区、AI provider 或其它客户端资料库。
+
+#### 8.5.3 预置提交、启动恢复与旧数据迁移
+
+持久化只收口原有舞台预置，不搬迁播放器全部 UI 状态。CreativeStage 继续拥有字段规则与运行态；原 SQLite settings 中明确管理以下三个键，不新增 current-background 真值表：
+
+| 键 | 内容与规则 |
+| --- | --- |
+| `creative_current_preset`（新增） | 一份完整的本机当前预置，含稳定 assetRef；不存预览草稿、播放位置、元素或 URL |
+| `creative_presets`（沿用） | 原本机预置库，保留既有最多 40 份的产品边界；不是分享投影 |
+| `creative_stage_state`（新增、内部写入） | schemaVersion、storeId，以及 current/library 各自的 revision、lastCommit 和迁移完成标志；载荷不在此再复制 |
+
+同一 DataDir 的客户端共享最后成功保存的当前预置，不再声称每个浏览器有独立的持久当前选择；打开页面或显式刷新时载入，不新增实时跨端控制。`saveLocal/flushLocalSave/persistLibrary/loadLocal` 收口到可等待回执的舞台持久化适配器；localStorage/DBX storage 仅缓存与 storeId/revision 对应的规范化预置，缓存写失败不撤销服务端已保存结果。启动 hydrate 完成前不自动保存默认值；服务未连接时不把缓存当作已提交真值。
+
+新增 `stage.preset.load/save` 的窄 HTTP/RPC 门面，save 明确 target=current 或 library、requestId、expectedPresetRevision；载荷摘要由服务端对校验后的规范形计算。原生在同一短事务检查 revision、新增/替换的媒体引用属于当前 store 且 ready，再更新对应载荷键与 `creative_stage_state`；不借用桌面 configRevision。保留原持久项中未改变的缺失/跨库引用允许编辑其它字段或移除它，但不能把它当成新选中的可播素材。JS 与原生使用同一字段合同及往返 fixture，原生验证版本、结构和媒体身份，不复制造景/渲染逻辑，也不复用会把媒体变成 theme 的分享校验器。
+
+每个客户端每个 target 最多一个保存请求在途，后续编辑只合并最新待存状态；前次终态明确后才携带新 revision 发出下一次。迟到回执只能更新对应提交状态，不能把旧画面/载荷重新 apply；跨客户端冲突返回 conflict，保留本地未保存编辑，用户重新载入或明确重提后才可覆盖，不能自动取新 revision 重放旧载荷。同 requestId/摘要的最后一次提交返回原回执，异载荷拒绝；回执丢失先 load 核对 lastCommit/revision。若已被另一提交取代，只能报告无法确认旧结果并展示当前值，不能凭 lastCommit 缺失认定旧请求从未执行。自动去抖写入必须在页面存活期间完成；pagehide/unload 只尽力刷新，不作为跨重启保证。媒体应用和显式保存必须等待成功回执才显示“已保存”。
+
+域写入与删除协调，但不持 SQLite 事务跨越上传/解码/文件清理。通用 settings 写入若包含上述受管键，应在任何写入前拒绝并指向舞台门面；备份恢复按 §8.5.5 走同一验证/事务入口。现有 `settings::set_all` 的逐键 execute 不能冒充这项原子提交。其它 settings 键沿用原自由 JSON 与总量边界，不增加全局单值上限；舞台预置沿用原字段/数量约束。媒体/预置写入口只面向原可信 UI 的完整管理认证或当前 DBX 插件会话，不映射到 overlay、MCP、AI 申请或壁纸只读凭据。
+
+导入成功、预置落盘失败时明确显示“素材已保存，背景选择未保存”，保留旧持久选择并允许对同一 assetRef 重试；不重新上传或静默退为临时模式。页面可继续显示当前临时预览，但必须显示未保存状态。启动先载入持久预置与 store 身份，再解析 assetRef、重新取得资源 URL、按现有可见性/播放策略呈现；服务暂不可用时显示连接/等待，不能把默认 theme 回写覆盖原选择，也不自动播放音乐。
+
+首次迁移分别处理 current/library：先接纳已有服务端 `creative_presets`，只有对应项尚未初始化时才允许旧本机/DBX 缓存作一次 CAS 迁移；已保存空库/默认背景也算初始化，不能下次又被旧缓存填回。旧 `blob:` 字符串无法恢复文件字节，清理失效地址并提示该项需重新导入一次；若当前页面仍持有真实 File/Blob，须走完整导入后才生成 assetRef。正常持久化成功后不再要求每次启动重选。store/素材缺失保留原引用及错误，不悄悄将持久预置改为 theme；同字节重导入修复原 assetId，换成不同字节则是用户明确选择的新引用。
+
+#### 8.5.4 运行时资源交付与 DBX 资格门
+
+独立版沿用现有 HTTP listener，以窄只读资源租约提供 GET/HEAD、正确 MIME、无压缩与单 Range；按 §8.1 的范围/取消原则流式读文件，不经过 JSON 整文件响应。媒体标签不能携带管理 bearer：URL 只含随机短期只读 lease，限制当前 assetRef、用途和会话，可续租，关闭时撤销，不写日志或设置。完整管理 token、系统路径、目录枚举均不暴露。
+
+资源租约固定到规划器选择的变体及完整 contentKey；图片读取不能借原 assetId 绕过尺寸限制加载大 source。派生缓存缺失时由原后台准备槽从持久原稿重建，期间保留引用并显示加载/静态占位，不在帧循环缩图，也不要求重选素材。不同流水线版本的变体不在活动 URL 下换字节，活动读租约固定旧版本直到释放。
+
+DBX 页面不访问 loopback listener，不以 IndexedDB/OPFS 或 host.storage 存视频。图片通过有界 `stage.media.read(offset,length)` 小块 RPC 恢复已准备变体，单块≤256 KiB、顺序读取，累计不超过其验证长度和 32 MiB，组装 Blob 后由 Backgrounds 持当前 ObjectURL 租约；完成即释放块数组，中途失败立即释放片段，不建立整库内存副本。该图片路径不依赖视频流升级。
+
+**DBX 视频的宿主字节流能力是外部前置，现有 mediaUrl 布尔值不够。** 参考 DBX 工作树 `41698ac70` 的 `pluginHostBridge.ts`、`commands/plugin_media.rs`、`plugin_ui_protocol.rs`：`dbxPlugin.media.open/close` 已存在且只允许 `filesystem/media/read`；但一次浏览器请求只 invoke 一次后端，并把整个 `dataBase64` 解码成 `Vec<u8>` 回包，没有后续块的拼接流或背压。直接把响应截为 256 KiB 会缩短浏览器请求的范围，甚至对无 Range 请求返回 206；不能假定所有 WebView2 都会自动补读直到 EOF。反过来满足 `bytes=0-` 而整段回包，又会突破 RPC/内存边界。
+
+采用宿主受控媒体 URL 路线，但 **P1-M1 先完成宿主流合同及发布资格，再开放 DBX 视频应用**：
+
+- 插件的 `filesystem/media/read` 精确适配器只接受当前 StageMediaStore 的 lease 及 `hertz-stage:<assetId>`，由升级后的宿主按确定的 offset/length 拉取片段；单次原始字节≤256 KiB，元数据/HEAD 不读 body，返回宿主正式合同要求的顶层 `dataBase64/size/offset/length/partial/rangeNotSatisfiable/contentType/etag`，不套普通 `{status,body}`。只开放已准入的变体，不接任意路径/URL/目录枚举。
+- 宿主负责将片段接入有界、可取消的原生媒体流；面对浏览器按 §8.1 的 GET/HEAD/单 Range 表返回完整语义。无 Range 返回完整长度的 200 流，`bytes=0-`/大范围按其实际范围持续供给；Content-Length/Content-Range 描述 HTTP 响应，不能直接拿一次 RPC 块长度代替。不得在宿主先拼完整 `Vec`、在 renderer 拼整视频 Blob，或以过早 EOF 诱导播放器重试。
+- 插件每会话最多两个媒体读请求在途、单块≤256 KiB；宿主只按消费进度拉取，并界定总缓冲/流并发及关闭传播。解码器/宿主的实际内存仍须测量，RPC 块上限不等于全链路内存上限。seek/关闭撤销旧读代际，不允许读任务占住控制队列形成无限等待；原播控 P95 和请求取消必须实测。
+- HTTPS/资源 origin 的 CSP 与 CORS 由各宿主合同配置。独立版与 DBX 都在设置 src 前设 `crossOrigin='anonymous'`；DBX opaque-origin 所需的宿主 CORS 策略不能照搬桌面包 origin。图片/视频用作 canvas/WebGL 纹理须通过真实不污染画布的检查。
+
+宿主流支持须有可识别的协议版本/已验收发行版本，不能从源码或 `mediaUrl=true` 推算最低 0.6.35 可用。P1-M1 的宿主升级属于 DBX 仓库外部依赖，本文不表示已获实现或发布；未满足时，Hertz 单独改适配器不足以交付 DBX 大视频。保留已安装媒体/引用，选择前明确当前宿主不能应用视频；不得显示已可播、回落为临时素材、开放 loopback 或新增 MSE/视频转码旁路。原小块 JSON 传输可复用，不为规避缺失流能力临时放宽 host.binary 权限。独立版与 DBX 图片可独立验证，但不能据此勾掉 DBX 视频出口。
+
+播放 URL/token 都是会话租约，重新启动、过期、插件重载后按 assetRef 重建；原生读取租约绑定当前会话、assetRef/变体、用途及期限，仅在活动呈现时续租，页面退出或连接失效后有界回收。宿主当前媒体 token 有 6 小时有效期且最多 32 个，适配器须按已验收宿主合同在到期前换取租约，通过同一停止/恢复流程保留媒体位置，关闭旧 token，不让 token 随切换累计；续租时钟也归呈现租约管理，停止后不留永久定时器。8 小时用例必须跨过这一边界。服务重启或租约失效只重取资源，不再要求用户选原文件；恢复仍受 generation 和可见性策略控制。
+
+#### 8.5.5 呈现、删除与分享边界
+
+同一媒体元素随唯一背景层在主页/舞台间移动；重复 apply 同 assetRef 幂等，改透明度/适配参数不重建元素。临时 ObjectURL/宿主媒体 URL 由创建者在最后借用/预览回滚引用释放时撤销；撤销 URL **不删除 source**。正常替换、失败、取消预览、页面关闭统一取消监听/帧回调、清 src/load、释放纹理与读取租约；页面异常消失的原生租约有期限，未确认 I/O 退出前不归还资源额度。
+
+隐藏、离开活动舞台或减少动态时停止视频播放/上传；恢复核对 host/generation 后再取租约/play，拒绝须可见。舞台同时最多一个活动视频 decoder，与独立桌面进程的上限 2 分开计量；整机验收仍包含两者。已有 0.75 倍速只是艺术参数，不能降低解码分辨率估计。沿用 Stage 性能采样，连续 3 个 2 秒窗口超预算或掉帧比例超过 10% 时停视频并显示封面/原因，保留已保存 assetRef，不另开帧循环或永久轮询。
+
+持久库必须有最小可找回入口：在现有背景选择器提供“已导入素材”，分页最多 50 项，展示封面/名称/类型/大小、是否被预置引用及错误状态，支持重新应用、重试和显式删除。列表不自动播放视频；未应用或保存选择失败的素材也可找到，不要求再次选原文件，不另建完整媒体管理应用。
+
+容量不足、只读目录、损坏或数据库失败均显式报错，不自动删除用户导入文件。永久删除按以下顺序执行，不能只写“串行”而省略崩溃后的事实：
+
+1. 在媒体域协调锁下，短事务检查当前预置/预置库引用及运行态读取、探测、预览回滚 pin；在用返回 asset_in_use。无引用则持久标记 deleting 与唯一 deleteId，拒绝新的读取/保存引用和同 hash 导入提交。
+2. 释放数据库事务后，把对象目录原子移到同卷 `trash/<deleteId>/<assetId>/`；后台只清除此 deleteId 对应的目录，最后核对 deleteId 完成索引删除。标记、改名或清理任一步崩溃，重启按记录与两处路径协调并继续；未完成前不释放磁盘额度，也不开放该 hash 的重新安装。
+3. 新导入只有在旧删除终结后才可发布相同 hash；迟到清理任务只能操作原 trash 路径，不能重新按 `objects/<hash>` 删除。缺失/隔离素材的修复同样在域内协调，排空旧租约后以新校验副本替换，保留原 assetId/预置引用，不把坏文件当去重命中。
+
+关闭预览、换背景、清缓存不等于永久删除；运行态 pin 不作为持久 refcount。应用更新/普通卸载默认保留 DataDir，用户显式删除应用数据才删除素材。
+
+**P1 的舞台完整备份/恢复采用停服务后的完整 DataDir 快照**：数据库完成关闭/检查点，连同 stage-media 原稿及必要元数据一起复制，恢复时核验 schema、storeId 和文件 hash；派生缓存可重建。SQLite backup API 只保证数据库快照，不能单独保证同时变化的媒体目录一致，舞台在线跨文件备份不列为本轮能力。JSON 设置备份明确不含媒体，导出排除内部 `creative_stage_state`，恢复也不能接受它来覆盖 storeId/revision；恢复其中的当前预置/预置库时，由舞台域校验并在原备份事务内作为新的版本提交，缺失/跨库引用保留为不可用并报告。受管键验证失败须在整个备份写入前拒绝，不能先恢复其它设置再半途失败；需要调整原 HTTP/RPC 与 `vmusic-store::backup::restore` 的入口，不能绕过域规则直写 settings。
+
+本机保存的当前预置/预置库保留稳定 assetRef；**跨机工程 JSON 和 HSCP1 分享码继续使用原分享投影，排除媒体字节、URL 与本机 storeId/assetId**，并在导出前说明不包含本地素材。不得为持久化放宽旧分享格式/大小或把本机资源 ID 当跨机可用；含媒体的舞台工程分发包以后单独设计，壁纸 `.hwpkg` 仍走既有完整包管线。
 
 ## 9. 场景文档、编译器与可扩展节点
 
@@ -782,6 +952,10 @@ builtinScene 与 model 节点互斥作为三维背景来源；多个 model 共�
 
 CSS 亮度不保证一定被平台零成本合成，必须测量；组合场景则在已有最终输出 pass 中调亮度，避免单独增加全屏 pass。视频硬解是否实际启用由原生/GPU 诊断确认，`canPlayType` 只能用于初筛。
 
+图片/视频轻后端消费同一 `presentation.fit=cover|contain|stretch`：默认 cover，居中裁切；contain 留边填充固定底色，stretch 明确允许比例变化。先按图片方向规范化结果或视频显示尺寸适配，预览与 WorkerW 使用相同计算；不默认增加模糊铺底、第二个 video、canvas 拷贝或 rAF。`motion=0`/减少动态对视频表示冻结到当前帧或已准备封面，不用降低 playbackRate 伪装静态；单纯亮度与布局更新只触发一次必要补画。
+
+纯视频轻路径必须在真实 WorkerW 窗口里验遮挡与自动播放：Chromium 可能把被桌面图标或其它窗口覆盖的 WebView 判为 occluded，暂停或降频媒体；`muted`/`playsinline`/`autoplay` 是允许自动播放的前提，但仍不能假设隐藏窗口会持续解码。验收使用 `requestVideoFrameCallback` 计数、10 分钟位置推进和原生 GPU/解码计数，不用“画面看起来在动”代替。
+
 ### 10.2 一份 RenderContext
 
 从现有 main.js 提取 context 创建、质量对象、scope 和共享资源服务，原 SpaceStagePure 继续调用这一实现；新增 composition 后端也调用它。一个 WallpaperSession 同时只选一个后端，后端切换先释放旧的 renderer 再创建新的，不保留两个大场景做默认淡入淡出。
@@ -849,15 +1023,22 @@ AudioInput 是互斥联合：none、hertz、system。system 固定选择一个 W
 | 额度 | 默认值与规则 |
 | --- | --- |
 | 桌面呈现目标 | 最多 4；同时组合/三维 context 最多 4 |
-| 实时预览 | 全局最多 1，15 fps，960×540 上限；与编辑器预览共用 |
-| 视频解码 | 桌面与预览合计最多 2；第三个明确拒绝，不靠“静音”放行 |
+| 实时预览 | 全局最多 1，960×540 上限；GL 提交上限 15 fps；纯视频按源速率计量，与编辑器预览共用 |
+| 视频解码 | 桌面、预览及导入探测合计最多 2；第三个不启动，返回 budget_busy 或进入有界等待 |
+| 视频解码像素率 | 默认合计 125 MP/s，按编码宽×高×已验证帧率上界计算；独立于输出像素预算 |
 | CPU 常驻解码资产 | 全局 128 MiB；导入工作区另计且不与播放同时抢满 |
 | GPU 跟踪资源估计 | 默认总 384 MiB，含纹理、几何、RT、骨骼、字形与闲置池 |
-| 输出像素工作量 | 默认 120 MP/s，按每目标实际渲染像素×有效 FPS 相加；预览先保留最多 8 MP/s |
+| 输出像素工作量 | 默认 120 MP/s，按每目标实际呈现像素×有效 FPS 相加，纯视频按源帧率上界；GL 预览先保留最多 8 MP/s |
 | 资源准备任务 | 一个；图片/字体解析工作进程和 Basis 转码各最多一个活动任务，不按屏扩容 |
 | 待应用场景 | 每个目标最多一个，新的意图取代未提交的旧意图 |
 
 此表的 context/decoder/资源预留硬合同适用于经可信 adapter 创建的内容；P3 任意网页不能依靠这些 API 自觉遵守，使用 §16.5 的独立原生配额和准入规则。不得把网页自报统计并入后就宣称它也只创建了一个 context。
+
+纯视频轻路径不创建 WebGL context，仍占 decoder、解码/输出像素率及媒体缓冲预算。暂停先停止播放、帧回调与纹理上传，允许最多 2 秒排空已提交解码；仍持续推进就强制卸载并报告。`pause()` 不证明 decoder/缓冲已经释放，短暂停时继续记账。真正卸载按 §8.2 清 src/load 并确认资源退出后才还槽；强制原因立即卸载，软暂停可按 §13.3 保留有限资源。纯视频与组合视频共用同一全局上限，不能以 muted、DOM 隐藏或停止 JS 帧循环替代停解码。
+
+decoderSlots 约束本应用持有的媒体管线，不是驱动内部对象数量。卸载至少需要当前代际的媒体重置/纹理释放回执、流租约退出与解码停止证据；`paused`/`emptied` 单一事件不能证明原生缓冲全部销毁。实现若无法可靠确认退出，就关闭该媒体呈现/探测 controller 后再还槽；媒体故障不允许通过关闭整个设置中心来清理。P1-03 须先证明可独立关闭的媒体容器与回收边界，平台内部缓存仍另计实测内存，不能宣称全部受 JS 硬配额控制。
+
+视频预览不能把 60 fps 源按 15 fps 少记：输出为预览尺寸×源帧率上界，解码仍为编码尺寸×帧率上界；没有可用额度时只显示已准备封面并说明原因，用户显式播放才申请剩余全局预算。一个 GL 预览的 8 MP/s 预留不是视频额外硬额度。预览转应用先释放其媒体租约，再为桌面申请；不因是同一文件就假定跨 WebView 复用 decoder。
 
 上述 GPU 数字是 tracked estimate，不是实测显存。驱动、WebView、交换链和视频解码器还有额外开销，必须另测，不能通过少记一类资源“达标”。
 
@@ -868,12 +1049,13 @@ AudioInput 是互斥联合：none、hertz、system。system 固定选择一个 W
 - render target 按全部颜色附件、深度/模板、采样数和 ping-pong 数量相加。
 - 几何按去重后的 attribute/index typed array 字节；实例矩阵、骨骼纹理、morph 目标单独计入。
 - 视频至少保守计入三帧解码缓冲和输出纹理；NV12 与 RGBA 表示分别计算，不把压缩码率当显存。
+- 视频解码像素率按编码尺寸计算并独立累计；旋转、CSS cover/缩小与较低合成 FPS 不降低该值。125 MP/s 是 P1 初始准入上限，仍须通过设备性能门；它不代表 H.264、VP9 或软件解码具有相同成本。
 
 例如一张 3840×2160 RGBA 纹理约 31.6 MiB，含 mip 约 42.2 MiB；若每个图层都额外建两张全尺寸 RGBA 离屏缓冲，十层仅这些缓冲就约 633 MiB。因此默认禁止“一层一套全屏 RT”，必须根据真实依赖分配并复用。
 
 ### 12.3 准入算法
 
-全局额度只能由原生 BudgetCoordinator 原子授予。reservation token 绑定 ownerSession、sessionGeneration、taskId、CPU/GPU 字节、decoder/转码槽和 allocationRevision；同一 token 的释放幂等，错误 owner 或旧代际不得改写新账本。两个 WebView 竞争最后一个解码槽时，只有一个收到 granted，另一个得到 budget_busy，不允许先各自解码再上报。
+全局额度只能由原生 BudgetCoordinator 原子授予。reservation token 绑定 ownerSession、sessionGeneration、taskId、CPU/GPU 字节、decoder/转码槽、解码/输出像素率和 allocationRevision；同一 token 的释放幂等，错误 owner 或旧代际不得改写新账本。两个 WebView 竞争最后一个解码槽时，只有一个收到 granted，另一个得到 budget_busy，不允许先各自解码再上报。
 
 TargetPlanner 取得整个 session 的保留额度，内部资源 acquire 从该额度分配子 token，不重复扣一次全局账；准备阶段临时峰值单独保留。原生拒绝超过计划或账面保留量的新增申请。请求取消先标记 cancelling，实际解码/上传任务退出且部分资源释放后才归还；池的底层任务拥有 token，单个等待者不拥有它。超时只使调用方停止等待，不视作资源已经退出。
 
@@ -895,7 +1077,7 @@ TargetPlanner 取得整个 session 的保留额度，内部资源 acquire 从该
 
 请求质量与有效质量分别保存/展示，运行降档不覆盖持久偏好。低档仍持续超限 10 秒时停止该会话并报告，不无限降低到不可读画面。多个会话先限制可选效果与最昂贵会话，不能把某个后台 worker 的压力算成每块屏都需要重启。
 
-最低诊断：configuredFps、effectiveBudgetFps、measuredRenderFps、videoDecodedFps、frameP50/P95、cpuUpdateMs、uploadBytes、drawCalls、triangles、trackedGpuBytes、processPrivateBytes、cacheHits、decoderSlots、pauseReasons、recoveryAttempts。GPU 时间不可得时为 null；不得把 JS 时间标成 GPU 时间。
+最低诊断：configuredFps、effectiveBudgetFps、measuredRenderFps、videoDecodedFps、frameP50/P95、cpuUpdateMs、uploadBytes、drawCalls、triangles、trackedGpuBytes、processPrivateBytes、cacheHits、decoderSlots、decodePixelsPerSecond、pauseReasons、recoveryAttempts。GPU 时间不可得时为 null；不得把 JS 时间标成 GPU 时间。
 
 ## 13. 多屏、策略和生命周期
 
@@ -904,6 +1086,8 @@ TargetPlanner 取得整个 session 的保留额度，内部资源 acquire 从该
 布局组 mode 为 single、mirror、span；多个 single 组实现各屏独立。一个 displayId 不能属于两个组。mirror 共享作品与逻辑时钟，但每屏拥有独立呈现与资源预算；span 只有一个覆盖虚拟边界的呈现目标。
 
 稳定屏幕键使用 DisplayConfig 的 monitorDevicePath，辅以 EDID 厂商/产品/序列和已知连接路径；GDI 名仅用于当前枚举映射。相同无序列显示器发生歧义时等待用户识别，不自动交换壁纸。显示器拓扑 generation 使旧 resize/挂载回调失效。
+
+空拓扑宽限：系统枚举在模式切换、驱动重置、RDP 进出时可能短暂返回 0 块屏；不要立即销毁 session，先等 500 ms 并连续复核。目标屏从非空拓扑中消失时，要求连续 3 次（约 750 ms）未命中才判定 missing；确认后进入 `waitingDisplay`，避免一次误判重建 WebView2。
 
 single/mirror 沿用目标 DPI / 窗口 DPI 补偿。span 以物理虚拟屏坐标为画布，按 96 DPI 逻辑基准建立明确映射，所有渲染像素再由质量比例缩放；不能把某一屏的 CSS DPR 当作整个跨屏 DPR。负坐标、旋转、不同缩放率必须原生验证。
 
@@ -919,11 +1103,13 @@ mirror 的时间线来自组时钟，不发送逐帧变换：任一成员可运�
 
 强制原因：sessionUnavailable、displayOff、displayMissing、battery、shutdown、contentRevoked。软原因：manualPause、fullscreen、maximized、applicationRule、reducedMotion、aiGeneration。hidden 独立控制可见性，不等同保留静帧的暂停；aiGeneration 仅由用户选中的本地推理暂停租约产生，见 §19.9，不改变持久 enabled 意图。
 
-每个原因独立增删，解除一个不能清空集合。全局会话/电源信号可共享，目标覆盖只按对应 display/group 计算，不能再使用歌词 HWND。single/mirror 的其它屏全屏不暂停本屏；span 任一成员屏被全屏覆盖即暂停整个组，避免半张跨屏画面继续消耗。
+每个原因独立增删，并带 scope：`allPresentations`、`desktopOnly`、`previewOnly`，以及可选的 target/group 句柄；解除时只移除对应范围的原因，不能清空整个集合。这样用户手动暂停后不会因解锁/唤醒被自动恢复，预览暂停也不会误停 live。全局会话/电源信号可共享，目标覆盖只按对应 display/group 计算，不能再使用歌词 HWND。single/mirror 的其它屏全屏不暂停本屏；span 任一成员屏被全屏覆盖即暂停整个组，避免半张跨屏画面继续消耗。
 
 电池策略默认 pause。启动状态未知先停绘，后续未知沿最近一次已知电源状态并标注；接拔电源、解锁、唤醒重新采样。P1 才允许用户明确选择 batteryPolicy=runLow；锁屏、息屏和会话不可用没有继续绘制选项。
 
 全屏判断排除桌面壳和本组件窗口，对目标完整矩形比较并去抖 300 ms；普通最大化使用单独开关。应用规则按规范化可执行文件路径匹配，不能靠可变窗口标题；规则不得覆盖强制原因。
+
+displayMissing 先走 §13.1 的空拓扑/目标缺失宽限。遮挡/最大化去抖采用非对称：进入暂停慢（约 750 ms；若实测改用 400 ms 必须写进同一常量），恢复快（约 150 ms；预览可用 100 ms）。全屏保留 300 ms 进入去抖，恢复可更快。恢复快是为了退出全屏立刻看到画面，暂停慢是为了容忍短暂抖动。
 
 ### 13.3 Session 状态机
 
@@ -931,9 +1117,11 @@ mirror 的时间线来自组时钟，不发送逐帧变换：任一成员可运�
 
 ready 要求资源准入成功、原生窗口挂载/可见确认、当前 generation 页面握手与后端 firstFrameReady；“DOM ready”“已保存”或调用前计数均不等价。图片使用实际 decode 完成，视频使用首个帧回调，WebGL 使用当前会话真实提交后的确认；状态同时保留 frameSubmitted 与 nativeAttached 两个事实，不把它们称作 GPU 完成或逐帧物理显示证明。发布验收再用原生截图与进程/GPU采样证明用户实际可见，不能仅靠页面自报。
 
+首帧揭幕：窗口先以透明/极低 alpha 存在，`firstFrameReady` 后再渐显，避免用户瞥见未上色的黑矩形；就绪轮询从 16 ms 起步，1.5 s 后转 250 ms，再指数退避到 4 s 上限。轮询必须受 generation 约束，旧代际的迟到 ready 不能揭幕新窗口。此项为 P2 收尾，不阻塞 P1 的 ready 判定。
+
 恢复预算沿用 120 秒最多 3 次，但按故障域记账：单会话故障计会话预算；Explorer 全局重挂计一次全局预算，不按屏幕数消耗四次。全局恢复串行建窗，不并行产生 GPU 峰值。超额进入终止态，只接受用户明确重试；时间经过不会自动解锁。
 
-暂停持续 5 分钟可释放 GPU scope、decoder 和非必要 feed，保留作品引用与静态图；恢复先重新准入，不能假设旧预算仍可用。退出按订阅、scheduler、视频、scope、controller、worker 的顺序回收；只处理明确归属本组件的进程。
+强制暂停原因生效时立即卸载视频和需回收的动态资源，不等待 5 分钟；软暂停停止运动与解码后可短暂保留已记账的资源，持续 5 分钟必须释放 decoder/GPU scope 和非必要 feed，仅保留作品引用、媒体位置与静态图。预算紧张时允许提前释放。暂停保留的租约未释放就不能授予其它会话；卸载后恢复先重新准入，单屏继续原位置，mirror 采样当前组时间，不能假设旧预算仍可用。退出按订阅、scheduler、视频、scope、controller、worker 的顺序回收；只处理明确归属本组件的进程。
 
 ### 13.4 预览租约
 
@@ -1402,23 +1590,27 @@ AI 不接入 FrameInput、render/update、FFT 回调或轮播时钟；生成关�
 | P0-04 参数与迁移 | `config.rs`、settings HTML/JS、场景页；v3→v4、亮度/运动/质量 | 迁移只补一次；草稿/预览/应用一致；motion=0 静态且真实媒体时钟不变 |
 | P0-05 帧率与诊断 | `quality.js`、场景实际提交计数与原生状态 | 15/30/60 FPS 和 60/75/120/144 Hz，不误降档，不冒充 GPU 完成 |
 | P0-06 预览与候选 | app/settings、原生脚本；owner 租约、电池共停、退出回收 | 发布候选长稳、50 次启停、安装升级和进程归属报告 |
+| P0-07 显示器身份与拓扑宽限 | `native.rs` 增加 DisplayConfig `monitorDevicePath` 与 EDID 读取，`app.rs` 改匹配顺序；`wallpaper/policy` 加空拓扑/目标缺失宽限与非对称去抖 | 换主屏/拔插/驱动重置后壁纸回到原屏；模式切换、RDP 进出不销毁 WebView2；歧义显示器等待用户识别 |
 
-P0-02/P0-03 可并行；P0-04 的配置合入依赖共享 v3 身份迁移，不能擅改 DBX 分支。P0-06 必须使用实际候选产物，不只运行 debug 探针。
+P0-02/P0-03/P0-07 可并行；P0-04 的配置合入依赖共享 v3 身份迁移，不能擅改 DBX 分支。P0-06 必须使用实际候选产物，不只运行 debug 探针。P0-07 的宽限依赖 P0-03 的原因集合，先建 Gate 再加去抖。
 
 ### 20.2 P1：本地资源闭环
 
 | 任务 | 文件与具体变更 | 交付证据 |
 | --- | --- | --- |
 | P1-01 合同和包校验 | 新增 `hertz-wallpaper` crate、manifest/archive、合同导出器 | 包 schema、完整哈希、路径/压缩/重复键反例、有效图片/视频往返 |
-| P1-02 本地库与任务 | 新增 wallpaper/library/assets/jobs 和独立 migrations | staging→安装事务、崩溃恢复、容量/取消/句柄/重复导入 |
-| P1-03 媒体路径 | 新增 wallpaper/media，原生流响应、image/video 轻后端 | Range/seek/首帧、静音、硬解事实、暂停真正停止解码 |
+| P1-M0 舞台持久文件库 | 原 AppState 的 stage_media 服务、vmusic-store 索引/收据迁移、分块导入；单写锁、原子发布、去重修复、deleting/trash 恢复、配额/取消 | 只启动原播放器服务也可保存素材；删除源文件不影响副本；断流/磁盘满/崩溃不发布半成品；删除后重导入同 hash 不被旧任务误删 |
+| P1-M1 舞台资源交付 | 独立版 HTTP 流、DBX 图片小块恢复；DBX 视频须先落实宿主有界流协议/发行版本的外部依赖，再接精确媒体方法与 URL 租约 | 实际宿主无 Range/大 Range 完整响应、首帧/seek/循环/纹理、原播控与 8 小时换租约；只具 mediaUrl 的旧宿主不能当作通过，不改桌面管道或开 DBX listener |
+| P1-M2 舞台保存与恢复 | CreativeStage/Backgrounds/工坊/SpaceLayers；settings 三个受管键的原子 revision、备份入口校验、hydrate/迁移、已导入素材入口、本机/分享投影分离 | 独立版与合格 DBX 重启恢复；双客户端/回执丢失不覆盖新选择；空库迁移不反复填回；未应用素材可找回；停服务快照及 JSON 备份边界明确 |
+| P1-02 本地库与任务 | 新增 wallpaper/library/assets/jobs 和独立 migrations | 固定输入快照、staging→安装事务、空间峰值/崩溃恢复/取消/句柄/重复导入 |
+| P1-03 媒体路径 | 新增 wallpaper/media，容器解析/真实解码探测、原生流响应、image/video 轻后端 | 尾部 moov/VFR/动画图拒绝、Range/seek/首帧、静音、硬解事实、暂停与释放分开计账、WorkerW 遮挡/自动播、预览竞争、源缺失/包损坏回退 |
 | P1-04 资源会话 | session/budget、JS context/assets、scope 租约；内置资格从 registry 派生 | 合并加载、取消最后等待者、共享资源不被误 dispose、预算峰值 |
 | P1-05 库 UI 与配置 | 现有中心＋wallpaper-library.js、v4→v5、management v2 | 导入→预览→应用→重启；无来源本地可用；大载荷不进入小 IPC |
 | P1-06 输入 | wallpaper/audio、原音频 FFT 算法复用、只读 feed v2 | 真设备切换/失联/静音/休眠；同机多屏只有一个采集和分析 owner |
 | P1-07 多屏 | wallpaper/display/policy/budget，single/mirror/span | 双屏混合 DPI、负坐标、拔插、视频槽、整机预算、局部全屏 |
 | P1-08 收藏与轮播 | library/playlist 状态与中心控件 | 暂停冻结、失败停止、不预建一排实例、引用版本不可被 GC |
 
-依赖：01→02→03/04→05；06 可在 P0 输入合同上并行；07 依赖 04/05/06；08 依赖 05。纯图片路径先交付，不能让三维模型或社区阻塞 P1。
+依赖：01→02→03/04→05；06 可在 P0 输入合同上并行；07 依赖 04/05/06；08 依赖 05。舞台 M0→M1/M2 使用原播放器后端，可独立于桌面库推进；M2 的提交/迁移可先验证，端到端恢复须接通 M1。DBX 宿主流升级与 M0 可并行准备，须在 M1 的视频集成前冻结合同并取得实际发行证据；未完成只阻断 DBX 视频，不能把图片/独立版的通过替作全部出口。纯格式校验可共享，不依赖桌面组件安装/授权；M0～M2 全部完成才满足舞台持久化出口，不能只存文件却重启丢选择。P1-03 先做最小真实 WebView2 文件流/首帧/seek 验证，再扩展库界面；流线程或 WorkerW 解码门不通过时停止对应视频交付。纯图片路径先交付，不能让三维模型或社区阻塞 P1。
 
 ### 20.3 P2：可扩展组合引擎与创作
 
@@ -1473,8 +1665,11 @@ P3-03 可与 G3-S 并行，社区先分发声明式包；但**完整 P3** 必须
 | `crates/hertz-desktop/src/wallpaper/` 内模块测试 | 策略、状态、预算、引用、取消、恢复与迁移 |
 | `scripts/check-wallpaper-package.js` | 生成真实资源 fixture、导入导出往返、失败无副作用 |
 | `scripts/check-wallpaper-runtime.js` | 资源池并发、生命周期、时钟、dirty、适配器合同 |
+| `crates/hertz-studio/src/stage_media/`、`crates/vmusic-store/src/{stage_media,settings,backup}.rs` 模块测试与真实服务集成用例 | 分块/去重修复/发布事务/配额、删除各阶段崩溃及同 hash 重导入、双进程锁、原子预置 revision、备份/通用 settings 不旁路、DataDir/租约隔离 |
+| `scripts/check-stage-media-browser.js` 与现有舞台/SpaceLayers 检查增量 | File→持久导入→保存→关闭→重启恢复、删除原文件、已导入素材找回、快速替换/双客户端/空库迁移、回滚不删副本、本机/分享投影分离 |
+| `scripts/check-stage-media-dbx.js` | 实际发行宿主的流协议版本、顶层片段合同、无 Range/大 Range/seek/循环/取消、CSP/纹理、6 小时到期与 8 小时恢复；旧 mediaUrl 布尔能力不冒充流资格 |
 | `scripts/check-wallpaper-editor-browser.js` | 编辑器真实交互、文件导入、撤销与版本 |
-| `scripts/check-wallpaper-native.js` | 实机窗口、流媒体、策略、多屏、worker 和进程树 |
+| `scripts/check-wallpaper-native.js` | 实机窗口、流媒体（Range/seek/遮挡/自动播/编解码拒绝）、策略、多屏、worker 和进程树 |
 | `scripts/check-wallpaper-performance.js` | 固定素材和采样窗的冷/热、CPU/GPU/内存对照 |
 | `crates/hertz-wallpaper-hub/tests/releases.rs` | 上传/审核/权限/签名/撤销/订阅端到端 |
 | `crates/hertz-studio/src/ai/{wallpaper,artifacts,image_provider,usage}.rs` 模块测试 | 分型请求、原 owner/单槽、计价迁移、artifact 边界、迟到费用 |
@@ -1533,6 +1728,34 @@ P3-03 可与 G3-S 并行，社区先分发声明式包；但**完整 P3** 必须
 | C44 | “安静一点”、重名作品或停用目标，未连接 AI 服务 | 本地候选/明确提示，不调用模型、不下载、不自动启用或修改其它屏 |
 | C45 | 本地模型任务期间锁屏，随后任务取消/服务断开 | 只释放 aiGeneration 暂停原因，锁屏仍停绘；不停止音乐或杀外部 Ollama |
 | C46 | 服务重启或用户关闭面板后重新进入 | 输入不重发、未终结生成 interrupted；已确认完成结果可显式认领，未确认申请不可恢复执行 |
+| C47 | 壁纸窗口挂到 WorkerW 后被全屏应用覆盖、锁屏或息屏 | 视频解码计数停止；恢复后不补隐藏帧；不能只靠画面截图判断 |
+| C48 | 视频文件为 MOV/MKV/HEVC/AV1/HDR，或扩展名与容器不符 | 导入期明确 unsupported 或转码提示；不黑屏、不静默播放失败 |
+| C49 | 视频 seek/循环到未缓冲区间，闭区间/开放末端/后缀 Range，或多范围/溢出输入 | 206/416/400、片段长度与 Seek/Stat 正确；HEAD 无体；首帧与 seek 后位置正确；整文件不被读入内存 |
+| C50 | 源在快照前不可读/复制失败，快照后源被移动/删除，或已安装包损坏/磁盘满 | 快照失败明确终止；快照成功后不再依赖源；包缺失/损坏标记 unavailable/quarantined，仅临时显示封面/系统壁纸并保留原选择与错误，不隐式改配置 |
+| C51 | 设置页提交绝对路径、相对路径或 URL，或重放过期 fileToken | 拒绝；只接受一次性 token；不读取任意路径 |
+| C52 | MP4 的 moov 在尾部，WebM 无可靠帧率，VFR 尖峰或元数据超限 | 有界解析后取可靠帧率上界或明确拒绝；不从 loadedmetadata/平均 FPS 伪造准入数据 |
+| C53 | 隐藏探测页无首帧，play 被拒绝，探测中取消或旧帧迟到 | 报告可区分的失败/不确定状态；15 秒内终结等待；旧代际不成功入库，实际清理后归还槽 |
+| C54 | APNG/动画 WebP 伪装静态图，带 EXIF 旋转的照片、非方形像素/旋转视频 | 动画拒绝；方向/宽高/适配在预览与桌面一致；contain/cover/stretch 无额外 decoder |
+| C55 | 两个桌面视频占满，再导入/播放预览；或 60 fps 源用于 15 fps 预览 | 不启动第三个 decoder；封面可显示；源解码成本真实计量，释放预览后应用不重复占槽 |
+| C56 | 软暂停后请求新视频，随后锁屏/恢复；pause 后 decoder 仍持缓冲 | 保留资源仍记账；不提前还槽；强制卸载后释放，恢复重新准入，2 秒排空后无持续解码 |
+| C57 | 舞台本地文件 A 慢加载，立刻选择 B/取消预览/关闭；同 URL 重复 apply | A 不覆盖 B；活动素材不被撤销；最后借用释放才 revoke，视频元素/回调/纹理回到基线 |
+| C58 | 舞台导入图片/视频并保存，删除/移动原文件，随后关闭页面、重启服务/DBX/电脑 | 已保存字节和 assetRef 恢复，重新取得 URL；同一素材可呈现，无需重选；旧 blob 数据只在迁移时提示重新导入一次 |
+| C59 | 流读到 EOF 后 seek 回前部，后台读尚未结束时关闭页面/耗尽 8 个流槽 | 有效租约内仍可 seek；取消不关闭在用句柄；流槽有界且 UI 不阻塞，无遗留 deferral/句柄 |
+| C60 | 未准入 controller 猜中另一个包 hash URL，或撤回后重放旧 URL | 原生按 session 拒绝，不靠 CORS 授权；无跨包读取或意外 DNS/网络请求 |
+| C61 | 两图层用同视频不同循环区间，或两个高解码像素率视频仍未超过 2 个槽 | 独立播放域分配独立元素；超解码像素率预算仍拒绝，不以共享 hash 或剩余槽绕过 |
+| C62 | 舞台媒体复制/准备时磁盘满、只读，发布文件后数据库提交失败 | 不报已保存；旧选择不变；可识别孤立对象，未完成素材不可供呈现；不自动降为临时素材 |
+| C63 | 同 importId/offset/hash 块重试、同 offset 不同字节、乱序/越界、重复 finish | 同载荷幂等，异载荷/越界拒绝；只发布一份内容，实际字节和索引长度/hash 一致 |
+| C64 | DBX token 到期/插件重载/服务重启，或连续视频运行超过 6 小时 | 按已保存 assetRef 重取租约并恢复；不要求原 File，不累计 token，不依赖未过期旧 URL；8 小时用例通过 |
+| C65 | 真实宿主只有 mediaUrl=true、缺少有界流合同，或最低版本未获资格 | 视频应用明确 unsupported/需升级；已有素材保留；无 loopback/权限放宽/整视频 base64 或临时模式回退 |
+| C66 | 换 DataDir/另一库 assetRef/过期 lease，或两个 AppState 打开同一 DataDir | 跨库/过期读取拒绝；第二个媒体写者锁失败且不影响音乐；完整 DataDir 搬迁保留 storeId，不按名字跨目录找文件 |
+| C67 | 媒体已存但预置提交失败/回执丢失；旧保存迟到、双客户端冲突、保存前关闭页面 | 字节与选择分别显示；最多一个同目标保存在途，旧回执不 apply；冲突不盲重试，未知结果不谎称未执行；只保证已确认提交跨重启恢复，重试不重传素材 |
+| C68 | 删除正在读/被已存预置引用的素材，同时另一请求保存该 assetRef | asset_in_use 或串行确定结果；不删在用文件，不产生指向刚删除素材的新成功提交；关预览不删持久文件 |
+| C69 | 清浏览器缓存/更新应用、停服务完整 DataDir 恢复、仅 JSON 恢复或通用 settings 写受管键 | 文件不受缓存/更新影响；完整快照校验后恢复；JSON 不重置 storeId/revision，缺媒体明确标记；受管键不被直写旁路，非法备份整体不写入 |
+| C70 | 同一本机媒体预置保存/重开，再导出工程 JSON 或 HSCP1 分享码 | 本机保持 assetRef；跨机文本导出按原投影排除资源身份/字节并提示；不能复用分享校验器把本机媒体保存成 theme |
+| C71 | 512 MiB 舞台视频导入/恢复、暂停读流、快速取消或 stdio 原播控并发 | 单块≤256 KiB、一个上传在途块；不把整个视频读入 JS/JSON，不无限排队；取消后实际 I/O 回收，原播放控制保持可用 |
+| C72 | DBX 对大视频发无 Range、bytes=0-、跨多个块的有限范围、后缀范围、HEAD，再 seek/取消 | 按 §8.1 返回准确状态/长度/范围及全部应有字节；无截短 206/伪 EOF，不拼整文件；含尾部 moov 的视频可播，宿主内存不随文件大小线性增长 |
+| C73 | 删除标记、移入 trash、删文件、删索引任一步崩溃，再导入同 hash；或索引 ready 但文件损坏 | 删除未终结前不发布同 hash；重启可协调，迟到任务只删旧 deleteId 目录；坏文件不能命中去重，修复后原引用仍有效 |
+| C74 | 已保存空库/默认背景，旧客户端带缓存启动；缺失素材时改其它舞台字段；素材安装成功但选择保存失败 | 初始化标志阻止旧缓存重新填回；未改变的不可用引用可保留，不误清成 theme；素材可从“已导入素材”找到并重试应用，无需原文件 |
 
 每个新增断言至少做一次针对性变异：例如去掉 generation 检查、改成提前 release 或用歌词 HWND，测试必须失败；“代码里搜到某个字符串”不能代替交错与资源归属验证。
 
@@ -1544,7 +1767,11 @@ P3-03 可与 G3-S 并行，社区先分发声明式包；但**完整 P3** 必须
 - 1080p/低档/30 fps 动态默认作品：有效帧率达到调度预算的 90%，帧间隔 P95 不超过预算间隔 1.5 倍；引擎 update+提交 P95≤4 ms。
 - 扩展基础设施开销用相同场景 A/B 测：新增资源池/IR/调度层的 JS P95 增量≤0.3 ms，CPU 稳态增量≤10%；不通过则先定位，不能以场景更简单换取通过。
 - 本地 SSD 上已安装作品冷打开到首帧 P95：静态图≤1 秒、1080p H.264≤2 秒、内置/标准组合≤3 秒；导入准备时间单独计，不混成加载成绩。
+- 纯视频壁纸：1080p H.264 静音循环 10 分钟，视频解码帧率/呈现帧率/GPU 视频解码计数稳定；策略触发暂停后最多 2 秒排空，随后连续 10 秒解码计数不增长；保留资源的短暂停恢复首帧 P95≤500 ms，已卸载恢复按冷打开门槛计，不混为同一成绩。
+- 文件流：大视频冷打开、前/中/近尾 seek 和连续循环时，UI 命令 P95≤100 ms，取消不被文件 I/O 阻塞；分别记录应用流缓冲与 WebView2 进程内存，证明内存峰值不随视频总文件长度线性增长。覆盖软件解码回退与非 fast-start MP4，不能只测小型缓存命中样片。
+- 组合视频纹理：1080p30 上传按 §10.3 的 256 MiB/s 估算准入；实测 GPU 上传与帧 P95，不能把解码帧率当成提交帧率。
 - 50 次切换/预览关闭后，活动 renderer、decoder、文件句柄和 scope 回到相应基线；缓存只允许停在声明的上限以内。
+- 舞台分别在独立版与实际 DBX 宿主执行“导入→保存→退出→删除原文件→重启→恢复”，图片/视频各覆盖；检查持久文件、当前预置和首次可见帧，不能只验证数据库存在一行。DBX 记录实际流协议/发行版本，用短片与 512 MiB 同规格视频对照，并覆盖无 Range/大范围/尾部 moov；分别记录插件、宿主及 WebView2 进程内存和原播控 P95（目标≤100 ms），证明各层不拼整视频、峰值不随文件大小线性增长。8 小时循环跨过宿主 token 的 6 小时有效期，换租约后位置正确、旧 token 和读租约数量回到基线。
 - 连续 8 小时：第 30 分钟与末 30 分钟的私有提交内存增长不超过 `max(32 MiB,10%)`，无持续单调增长；覆盖真实音乐、暂停、恢复和轮播。
 - 暂停采样 10 秒无连续 render/解码；native worker 另验证停止后的 CPU/网络/进程事实，不用心跳停止冒充停机。
 - 多屏按全局像素/资源预算做对照，不把单屏的通过数字乘四作为证据；视频硬解、GPU 引擎和驱动额外内存分别记录。
@@ -1601,7 +1828,7 @@ AI 自动化命令默认只连接隔离 fixture、关闭真实云请求与真实
 | 出口 | 不可替代的完成证据 |
 | --- | --- |
 | P0 | 原生保存/策略/时钟与预览闭环，候选安装升级、资源释放和长稳；九场景逐项资格 |
-| P1 | 新用户无音乐服务导入图片/视频并跨重启使用；系统音频与完整多屏原生实测；安装事务与预算反例；AI-01～03 的本地明确切换与 standalone 内置草稿生成→预览→保存闭环 |
+| P1 | 新用户无音乐服务导入壁纸图片/视频并跨重启使用；P1-M0～M2 的舞台文件/选择/重启闭环，独立版和完成流升级及发行资格的 DBX 均不依赖原文件；保存并发/删除崩溃/备份反例通过，不能只凭 mediaUrl 宣告 DBX 视频完成；视频在 WorkerW 遮挡/息屏下真正停解码，MOV/MKV/HEVC 明确拒绝；系统音频与完整多屏实测；安装事务与预算反例；AI-01～03 本地切换与 standalone 内置草稿生成→预览→保存闭环 |
 | P2 | 从素材新建组合→编辑→保存→导出→另一台机器导入→相同语义呈现；节点/adapter 扩展不修改管理业务；性能对照通过；AI-04/05 的真实文生图计费/文件资格与受限组合生成 |
 | P3 | 作者上传→审核→签名→另一账号下载/订阅→权限变更→更新/回滚/撤销；G3-S 安全隔离、真实部署及备份恢复；AI-06 的正式外部客户端申请→本机确认→原生回执 |
 
@@ -1625,6 +1852,16 @@ AI 自动化命令默认只连接隔离 fixture、关闭真实云请求与真实
 | 推荐与切换分开，原生签发并消费票据 | 模型的置信度/approved 字段不是用户授权 | desktop-host、management v2、revision/代际/操作日志 |
 | MCP 只查询或创建申请 | 不让外部工具绕过本机收费/动作确认，不给任意管理代理 | mcp-interoperability、同一 Capability 注册表、正式客户端验收 |
 | 不兼容 Steam/Wallpaper Engine 私有格式 | 这是另一条格式与生态工程，不是本轮资源 adapter | 对外能力说明和错误提示 |
+| 舞台和壁纸均持久化，分别由原播放器 StageMediaStore 和桌面 AssetStore 保存 | 重启恢复需要独立于源文件的副本；舞台不以桌面组件安装/授权为前提 | P1-M0～M2、desktop-host、播放器 DataDir/迁移/卸载/容量与资源边界 |
+| 舞台本机预置保存 assetRef，原 settings 三个受管键为准，分享使用独立投影 | 文件保存与预置提交分别确认；同 DataDir 共享持久选择，缓存/旧页面/普通备份不能覆盖新版本 | CreativeStage/host hydrate、原子 revision、settings/backup 入口、ADR-0004/0008/0009 作用域；旧分享格式不放宽 |
+| DBX 舞台用小块 RPC 和宿主受控媒体流，不开 listener；当前宿主需升级 | 现有 mediaUrl 一次返回内存 Vec，不能把 RPC 小块当成完整 HTTP 范围；opaque-origin 也不能靠浏览器缓存保存视频 | DBX 仓库流协议/发行资格的外部依赖、plugin/backend 适配、背压/内存/到期测试；不改变桌面只读管道和 ADR-0012 |
+| 舞台删除先持久标记再移入独立 trash；完整备份首版停服务 | 单队列不能替代崩溃记录，旧清理不能误删重新导入；SQLite 快照不等于媒体目录快照 | StageMediaStore 单写锁/deleteId/恢复、设置与备份入口、C68/69/73 |
+| 壁纸媒体复制进不可变包，舞台复制进内容库，P1 不引用原路径 | 重启/轮播/导出需要稳定字节；固定快照同时消除探测与实际安装字节不一致 | P1-01/02/03、P1-M0～M2、导入 UI 与错误提示 |
+| 桌面壁纸视频字节只走 WebResourceRequested + 有界 IStream | wry custom protocol 的响应体在 Windows 走内存流且 handler 同步，整段视频会阻塞 UI | P1-03、§8.1、C49；舞台宿主另按 §8.5 验收 |
+| 视频能力以实际解码探测为准 | WebView2 解码取决于 Edge/OS；扩展名不是能力 | P1-03、能力目录、C48 |
+| 容器真值与解码抽样分开，P1 无通用视频转码 | HTMLVideoElement 不提供可靠 codec/源帧率；首帧可播不保证全片无损坏 | P1-03、有界解析/探测与环境版本缓存、失败提示 |
+| 暂停、卸载、还槽是三个事实；视频预览按真实源速率计账 | pause 不释放所有缓冲，场景 FPS 不限制浏览器解码，不能产生虚假空余预算 | session/budget、C55/56/61、真实解码停止与资源退出证据 |
+| 多屏不按屏幕数默认开实例；single 组需显式选择 | 每屏 WebView2 多渲染进程/GPU context/decoder；Muralume 的 per-display 无额外进程 | P1-07、预算与解码槽 |
 
 旧 ADR-0009 的“只允许内置扩展”仍约束播放器及可信代码；P1/P2 新增的是桌面声明式内容数据，P3 在独立安全域开放网页。对应 ADR 更新必须写清作用域，不把整仓的动态代码执行权限一并放开。
 
@@ -1648,6 +1885,7 @@ P0/P1 改变调度、策略、资源与发布产物后，必须对新候选做�
 - WebView set_visible(false) 不能替代可信页面 stopMotion；不可信页面更不能只靠该操作宣称暂停。
 - 页面初始 ready 之前提前隐藏可能阻止加载；构造期与稳定运行期的策略应用必须分开。
 - 内联大运行时可能越过 NavigateToString 约 2 MB 限制；`file://` 的页面 IPC 在本项目历史路径中失效，继续使用受控本地 origin。
+- 不要用 wry 的同步 custom protocol 返回视频整段字节；Windows 侧响应体会进 `SHCreateMemStream`，UI 线程会被大文件读盘阻塞。视频走受控 `WebResourceRequested` + 可 seek IStream。
 - 真实 S3 的消息送达、QUNS 与唤醒抖动必须按独立原因集合处理，不能收到一个恢复事件就清掉全部停绘原因。
 
 <a id="w1-a-冻结首版只做快照轮询2026-10-24"></a>
@@ -1668,6 +1906,7 @@ P1 的 v2 是配套升级任务，不用当前 v1 历史证据冒充高频输入
 - [可编辑舞台工程](./stage-projects.md)、[舞台引擎评估](./stage-engine-feasibility.md)
 - [现有 AI 舞台草稿](./ai-stage-drafts.md)、[模型密钥与任务代际](./ai-provider-credential.md)、[MCP 互操作](./mcp-interoperability.md)、[ADR-0010 AI 草稿与保留](./adr/0010-ai-drafts-and-retention.md)
 - [ADR-0002 缓存](./adr/0002-bounded-in-memory-caches.md)、[ADR-0003 后台预算](./adr/0003-background-work-budget.md)、[ADR-0004 持久载荷](./adr/0004-persisted-payload-bounds.md)、[ADR-0006 帧门](./adr/0006-frame-gates-and-visual-timing.md)、[ADR-0009 注册与资源](./adr/0009-extension-registries.md)
+- [Muralume 桌面壁纸实现分析](./reference-muralume-wallpaper-comparison.md)：MIT 参考实现；只采用其运行期证据（稳定屏身份、暂停原因集合、空拓扑宽限、非对称去抖、首帧揭幕），不移植 macOS 窗口层级、AVFoundation 与探针窗；原文 §5.4 热/负载、§7.5 电池降帧、§7.1 DeviceID、§7.3 250 ms 四处以本文为准。
 
 外部事实仅用于说明能力与 API 边界，不替代本项目实测：
 
@@ -1675,3 +1914,5 @@ P1 的 v2 是配套升级任务，不用当前 v1 历史证据冒充高频输入
 - [Wallpaper Engine 用户参数](https://docs.wallpaperengine.io/en/web/customization/properties.html)
 - [WebView2 本地内容与媒体限制](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/working-with-local-content)
 - [WebView2 TrySuspend 与虚拟主机映射](https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/icorewebview2_3?view=webview2-1.0.4191.47)
+- [WebView2 响应流的可读性、线程与 Range 要求](https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/icorewebview2webresourceresponse)：2026-10-29 核对 Content 合同；deferral 完成时数据须可读，流须 agile 或在后台创建，Range 响应只暴露所选片段。
+- [HTTP byte ranges（RFC 9110 §14）](https://www.rfc-editor.org/rfc/rfc9110.html#section-14)：闭区间、开放末端、后缀范围及 206/416 语义；本方案对语法错误/多范围采用明确拒绝策略。

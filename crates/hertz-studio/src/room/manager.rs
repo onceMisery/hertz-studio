@@ -311,65 +311,70 @@ impl RoomManager {
                 Ok(json!({"devices":devices}))
             }
             LocalRequest::Discover => {
-                let _permit = self
-                    .discovery
-                    .try_acquire()
-                    .map_err(|_| RoomError::new("room_busy", "正在发现局域网房间"))?;
-                let interfaces = vmusic_lan::discovery::interfaces()
-                    .map_err(|_| RoomError::new("room_discovery", "无法读取网卡"))?;
-                let discovery = vmusic_lan::discovery::Discovery::start().ok();
-                tokio::time::sleep(std::time::Duration::from_millis(800)).await;
-                let mut rooms: Vec<_> = discovery
-                    .as_ref()
-                    .map(|d| d.candidates())
-                    .unwrap_or_default()
-                    .into_iter()
-                    .take(64)
-                    .collect();
-                {
-                    use futures::StreamExt as _;
-                    let jobs: Vec<_> = rooms
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, r)| {
-                            r.lobby_profile && r.version == vmusic_lan::protocol::VERSION
-                        })
-                        .map(|(index, room)| (index, room.clone()))
+                // SDK workers can outlive the process runtime after stdin EOF.
+                // Observe the existing exit signal before polling discovery timers.
+                Self::starting(&state, async {
+                    let _permit = self
+                        .discovery
+                        .try_acquire()
+                        .map_err(|_| RoomError::new("room_busy", "正在发现局域网房间"))?;
+                    let interfaces = vmusic_lan::discovery::interfaces()
+                        .map_err(|_| RoomError::new("room_discovery", "无法读取网卡"))?;
+                    let discovery = vmusic_lan::discovery::Discovery::start().ok();
+                    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+                    let mut rooms: Vec<_> = discovery
+                        .as_ref()
+                        .map(|d| d.candidates())
+                        .unwrap_or_default()
+                        .into_iter()
+                        .take(64)
                         .collect();
-                    let fetches = futures::stream::iter(jobs)
-                        .map(|(index, room)| async move {
-                            if let Ok(pin) = vmusic_lan::tls::Fingerprint::parse(&room.fingerprint)
-                            {
-                                for address in room.addresses.into_iter().take(2) {
-                                    if let Ok(Ok(Some(profile))) = tokio::time::timeout(
-                                        std::time::Duration::from_millis(700),
-                                        vmusic_lan::client::lobby_profile(
-                                            address,
-                                            pin,
-                                            room.room_id,
-                                        ),
-                                    )
-                                    .await
-                                    {
-                                        return (index, profile.cover);
+                    {
+                        use futures::StreamExt as _;
+                        let jobs: Vec<_> = rooms
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, r)| {
+                                r.lobby_profile && r.version == vmusic_lan::protocol::VERSION
+                            })
+                            .map(|(index, room)| (index, room.clone()))
+                            .collect();
+                        let fetches = futures::stream::iter(jobs)
+                            .map(|(index, room)| async move {
+                                if let Ok(pin) = vmusic_lan::tls::Fingerprint::parse(&room.fingerprint)
+                                {
+                                    for address in room.addresses.into_iter().take(2) {
+                                        if let Ok(Ok(Some(profile))) = tokio::time::timeout(
+                                            std::time::Duration::from_millis(700),
+                                            vmusic_lan::client::lobby_profile(
+                                                address,
+                                                pin,
+                                                room.room_id,
+                                            ),
+                                        )
+                                        .await
+                                        {
+                                            return (index, profile.cover);
+                                        }
                                     }
                                 }
-                            }
-                            (index, None)
-                        })
-                        .buffer_unordered(4);
-                    futures::pin_mut!(fetches);
-                    // Slow or old peers must not block finding the other rooms.
-                    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
-                    while let Ok(Some((index, cover))) =
-                        tokio::time::timeout_at(deadline, fetches.next()).await
-                    {
-                        rooms[index].cover = cover;
+                                (index, None)
+                            })
+                            .buffer_unordered(4);
+                        futures::pin_mut!(fetches);
+                        // Slow or old peers must not block finding the other rooms.
+                        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+                        while let Ok(Some((index, cover))) =
+                            tokio::time::timeout_at(deadline, fetches.next()).await
+                        {
+                            rooms[index].cover = cover;
+                        }
                     }
-                }
-                Ok(
-                    json!({"interfaces":interfaces,"rooms":rooms,"discovery_available":discovery.is_some()}),
-                )
+                    Ok(
+                        json!({"interfaces":interfaces,"rooms":rooms,"discovery_available":discovery.is_some()}),
+                    )
+                })
+                .await
             }
             LocalRequest::Apply {
                 address,

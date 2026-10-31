@@ -6,10 +6,10 @@
 // 纯函数（时间轴/断句/选点/镜头数学）可在 Node 下 require 做验证；PIXI 相关
 // 构建函数一律以 PIXI 作首参注入，本文件不触碰全局。
 (function (root, factory) {
-  var api = factory(root.StanzaUtil);
+  var api = factory(root.StanzaUtil, root);
   if (typeof module === 'object' && module.exports) module.exports = api;
   else root.StanzaSonnetFx = api;
-})(typeof globalThis !== 'undefined' ? globalThis : this, function (U) {
+})(typeof globalThis !== 'undefined' ? globalThis : this, function (U, G) {
   'use strict';
 
   function num(v, f) { v = Number(v); return isFinite(v) ? v : f; }
@@ -361,18 +361,24 @@
     var rows = [[]];
     var rowWidth = 0;
     var glyphs = compilePhrases(line, tuning);
+    var E = G.LyricEmotion;
+    var emotion = E && tuning.emotion && tuning.emotion.id !== 'neutral' ? tuning.emotion : null;
+    var type = emotion && emotion.type;
     var nodes = glyphs.map(function (glyph, index) {
+      var weight = type && type.weight || 800;
+      var accent = !!(emotion && E.accentFor(glyph.text));
       var node = new PIXI.Text({
         text: glyph.text,
         style: {
-          fontFamily: fontStack,
-          fontSize: fontSize, fontWeight: '800', fill: '#ffffff',
+          fontFamily: emotion ? E.fontFamily(emotion, fontStack) : fontStack,
+          fontSize: fontSize, fontWeight: String(accent ? E.accentWeight(weight, emotion.intensity) : weight), fill: '#ffffff',
           stroke: { color: tuning.palette && tuning.palette.background || '#09090b',
             width: Math.max(1, fontSize * 0.025) }
         }
       });
       node.anchor.set(0.5);
-      var advance = Math.max(fontSize * 0.18, node.width) + fontSize * 0.035;
+      var tracking = type ? parseFloat(type.tracking) : 0.035;
+      var advance = Math.max(fontSize * 0.18, node.width) + fontSize * tracking;
       var row = rows[rows.length - 1];
       var phraseBreak = layout !== 'lines' && row.length
         && row[row.length - 1].dataset.phrase !== glyph.phrase;
@@ -408,12 +414,14 @@
         d.fit = fit;
         d.fontSize = fontSize;
         d.trackingX = (d.rowX - total / 2) * fit;
+        d.emotionU = total > 0 ? d.rowX / total : 0.5;
         if (tuning.lyricMotion === 'tempera') {
           d.ribbonU = (d.rowX - total / 2) / Math.max(fontSize, total / 2);
           d.ribbonPhase = (hashString(seed) % 7) * 0.3 + rowIndex * 0.7;
         }
         node.position.set(d.baseX, d.baseY);
         node.scale.set(fit);
+        if (emotion && d.text.trim()) E.preparePixiGlyphEffects(PIXI, node, emotion, d.index, nodes.length);
       });
     });
     return nodes;
@@ -453,6 +461,12 @@
       ? ease((time - next.startTime + 0.16) / 0.16) : 0;
     var phraseEmphasis = amount(tuning.phraseEmphasis, 0.3, 1);
     var ink = parseInt(String(tuning.palette && tuning.palette.ink || '#f4f4f5').slice(1), 16);
+    var E = G.LyricEmotion;
+    var emotion = E && tuning.emotion && tuning.emotion.id !== 'neutral' ? tuning.emotion : null;
+    if (emotion && E.paletteEnabled() && !tuning.monochrome) {
+      ink = parseInt(emotion.palette.ink.slice(1), 16);
+      color = parseInt(emotion.palette.accent.slice(1), 16);
+    }
     nodes.forEach(function (node) {
       var d = node.dataset;
       var sung = Math.max(0, d.endTime - d.startTime);
@@ -489,13 +503,25 @@
         ribbon = Math.sin(phase) * size * 0.28 + Math.sin(age * 1.05 + phase) * size * 0.045;
         rotation += Math.cos(phase) * 0.1 + Math.cos(age * 1.05 + phase) * 0.016;
       }
-      node.position.set(d.baseX + (dx + num(d.trackingX, 0) * spread) * strength,
+      var pose = emotion ? E.motionPose(emotion, d.emotionU, time, size, emphasis, strength === 0) : null;
+      if (pose) {
+        var entrySize = size * emotion.intensity * entry;
+        if (emotion.id === 'sorrow' || emotion.id === 'lonely') { dy = -entrySize * 0.3; dx = 0; }
+        else if (emotion.id === 'anger') { dy = 0; scale = 1 + entry * 0.22 * emotion.intensity; }
+        else if (emotion.id === 'triumph') { dy = entrySize * 0.5; scale = 1 - entry * 0.14; }
+        else if (emotion.id === 'joy') { dy = entrySize * 0.38; rotation = -entry * 0.08; }
+        else if (emotion.id === 'anxious') { dx = entrySize * (d.index % 2 ? -0.22 : 0.22); }
+        else { dy = entrySize * 0.15; rotation = 0; }
+        ribbon *= 0.3;
+      }
+      node.position.set(d.baseX + (dx + num(d.trackingX, 0) * spread) * strength + (pose ? pose.x : 0),
         d.baseY + (dy + ribbon - emphasis * size * (tempera ? 0.08 : 0.035)
-          - exit * size * 0.16 - handoff * size * 0.12) * strength);
-      node.rotation = rotation * strength;
-      node.skew.set(0, 0);
+          - exit * size * 0.16 - handoff * size * 0.12) * strength + (pose ? pose.y : 0));
+      node.rotation = rotation * strength + (pose ? pose.rotate : 0);
+      node.skew.set(pose ? pose.skew : 0, 0);
       var swell = emphasis * (tempera ? 0.045 : 0.055);
-      node.scale.set(d.fit * (1 + (scale - 1 + swell) * strength));
+      var scaleBase = d.fit * (1 + (scale - 1 + swell) * strength);
+      node.scale.set(scaleBase * (pose ? pose.scaleX : 1), scaleBase * (pose ? pose.scaleY : 1));
       // 非当前词组轻微压暗，保留阅读上下文。
       var phraseWeight = ease((time - d.phraseStart + 0.3) / 0.3)
         * (1 - ease((time - d.phraseEnd) / 0.65));
@@ -508,6 +534,7 @@
       var sungColor = sung > 0 ? ease((time - d.startTime) / attack) : 0;
       var colorWeight = tempera ? emphasis : sungColor * (0.22 + emphasis * 0.78);
       node.tint = tuning.textInversion !== false ? mixTint(ink, color, colorWeight) : ink;
+      if (E) E.paintPixiGlyphEffects(node, emotion, time, strength === 0);
     });
   }
 

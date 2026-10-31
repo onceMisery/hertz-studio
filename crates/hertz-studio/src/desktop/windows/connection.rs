@@ -88,8 +88,10 @@ impl Desktop {
             // by caching true; only this live response can confirm a source. Under scheduling
             // delay we conservatively report unconfirmed as well.
             if observed.elapsed() < Duration::from_millis(50) && capabilities.authorization.gate {
-                if let Some(source) = capabilities.source.as_ref() {
-                    let scopes = protocol::scopes(&native, source);
+                if let (Some(source), Some(state)) =
+                    (capabilities.source.as_ref(), self.state.upgrade())
+                {
+                    let scopes = protocol::scopes(&native, source, state.server_instance_id());
                     capabilities.source_scopes = SourceScopes {
                         lyrics: scopes.lyrics
                             && capabilities
@@ -145,17 +147,15 @@ impl Desktop {
         }
         let name = environment.pipe.clone();
         let worker_cancel = cancel.clone();
-        let worker = worker::Worker::start(cancel.clone(), move || {
+        let worker = worker::Worker::start_until(cancel.clone(), Some(deadline), move || {
             management::request_until(&name, &payload, &worker_cancel, Some(deadline))
         })
         .map_err(|e| io_error(&e))?;
-        let result = if let Some(authority) = authority {
-            tokio::select! { biased;
-                _ = authority.cancelled() => return Err(error("desktop_operation_cancelled", "Desktop admission or authorization was revoked during management I/O")),
-                result = worker => result,
-            }
-        } else {
-            worker.await
+        let result = tokio::select! { biased;
+            _ = cancel.cancelled() => return Err(io_error(&io::Error::from(io::ErrorKind::Interrupted))),
+            _ = tokio::time::sleep_until(deadline.into()) => return Err(io_error(&io::Error::from(io::ErrorKind::TimedOut))),
+            _ = async { match authority { Some(authority) => authority.cancelled().await, None => std::future::pending().await } } => return Err(error("desktop_operation_cancelled", "Desktop admission or authorization was revoked during management I/O")),
+            result = worker => result,
         };
         result.map_err(|e| io_error(&e))?.map_err(|e| io_error(&e))
     }
@@ -228,16 +228,16 @@ impl Desktop {
         let environment = self.runtime.environment();
         let worker_environment = environment.clone();
         let worker_cancel = cancel.clone();
-        let worker = worker::Worker::start(cancel.clone(), move || {
+        let worker = worker::Worker::start_until(cancel.clone(), Some(deadline), move || {
             detect(&worker_environment, &worker_cancel, deadline)
         })
         .map_err(|e| io_error(&e))?;
-        let detection = if let Some((_, admission_cancel)) = &admission {
-            tokio::select! { biased;
-                _ = admission_cancel.cancelled() => return Err(error("desktop_operation_cancelled", "Desktop admission was revoked during detection")),
-                result = worker => result,
-            }
-        } else { worker.await }.map_err(|e| io_error(&e))??;
+        let detection = tokio::select! { biased;
+            _ = cancel.cancelled() => return Err(io_error(&io::Error::from(io::ErrorKind::Interrupted))),
+            _ = tokio::time::sleep_until(deadline.into()) => return Err(io_error(&io::Error::from(io::ErrorKind::TimedOut))),
+            _ = async { match &admission { Some((_, cancel)) => cancel.cancelled().await, None => std::future::pending().await } } => return Err(error("desktop_operation_cancelled", "Desktop admission was revoked during detection")),
+            result = worker => result,
+        }.map_err(|e| io_error(&e))??;
         self.runtime.current(epoch, cancel)?;
         if let Some(bridge) = self.bridge.get() {
             if !admission
@@ -266,10 +266,12 @@ impl Desktop {
         })?;
         if let Some(tab) = tab {
             check(cancel, deadline).map_err(|e| io_error(&e))?;
-            bridge
-                .connect_authorization_at(admission.expect("DBX admission").0)
-                .await
-                .map_err(|e| api_error(&e))?;
+            let authorize = bridge.connect_authorization_at(admission.expect("DBX admission").0);
+            tokio::select! { biased;
+                _ = cancel.cancelled() => return Err(error("desktop_operation_cancelled", "Desktop connect cancelled during authorization")),
+                _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => return Err(error("desktop_timeout", "Desktop authorization exceeded the total deadline")),
+                result = authorize => { result.map_err(|e| api_error(&e))?; }
+            }
             self.runtime.current(epoch, cancel)?;
             let generation = bridge.capture_generation().ok_or_else(|| {
                 error(

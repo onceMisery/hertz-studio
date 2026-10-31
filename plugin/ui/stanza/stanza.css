@@ -169,7 +169,7 @@ body[data-rm~="lyrics"] .fl-cword .fl-body { transform: none !important; }
 /* line-height:1 与 layout 的 h=0.96em 盒模型对齐，避免 UA 行盒把视觉中心顶偏。 */
 .fl-cadz { position: absolute; z-index: 2; line-height: 1; will-change: transform, opacity; cursor: pointer; pointer-events: auto; }
 .fl-cadz .fl-glow { position: absolute; inset: 0; color: transparent; pointer-events: none; z-index: 0; white-space: pre; }
-.fl-cadz .fl-body { position: relative; z-index: 1; white-space: pre; }
+.fl-cadz .fl-body { display: inline-block; position: relative; z-index: 1; white-space: pre; }
 
 /* 商籁 sonnet：全屏 Pixi 画布 + 角标文案 + HUD 读数 + 寻句热区。
    画面主体在 canvas 里；DOM 层只承载 chrome 与点击热区。 */

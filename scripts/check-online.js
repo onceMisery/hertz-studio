@@ -1188,6 +1188,39 @@ async function loginScenario(pollStates, opts) {
     ok(transport.calls.get[1] && transport.calls.get[1].url.includes('offset=20'), '后续请求使用offset=20');
   }
 
+  section('搜索单曲点播：只提交所选歌曲，保留队列与元数据身份');
+  {
+    const queue = ['local-kept', 'online:qq:kept', 'online:netease:picked'];
+    const transport = makeTransport({
+      POST: [{ match: '/v1/online/play', returns: {
+        track_ids: ['online:netease:picked'], index: 0, queue,
+      } }],
+      GET: [{ match: '/v1/online/lyric', returns: null }],
+    });
+    const env = makeSandbox({ transport });
+    const bound = bindOnline(env);
+    const online = env.sandbox.window.Online;
+    const selected = T({ id: 'picked', title: 'Picked song' });
+    online.state.tracks = [T({ id: 'unselected' }), selected];
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await online.playOne(selected);
+      const body = transport.calls.post.at(-1).body;
+      eq(body.tracks.length, 1, '搜索结果只提交一首');
+      eq(body.tracks[0].id, 'picked', '只提交选中的歌曲');
+      eq(body.enqueue, true, '单曲播放要求保留现有队列');
+      eq(JSON.stringify(bound.setStateQueueCalls.at(-1).ids), JSON.stringify(queue), '界面使用服务端合并后的队列');
+      eq(bound.setStateQueueCalls.at(-1).start, 'online:netease:picked', '播放游标指向所选歌曲');
+      eq(env.onlineState.byId.get('online:netease:picked').title, 'Picked song', '队列下标不影响单曲元数据');
+      ok(!env.onlineState.byId.has('local-kept'), '单曲元数据不会写到原队列歌曲上');
+    }
+    await online.playAll(online.state.tracks, 1);
+    eq(transport.calls.post.at(-1).body.tracks.length, 2, '明确的整批播放仍提交整批');
+    eq(transport.calls.post.at(-1).body.enqueue, undefined, '整批播放维持替换语义');
+    const before = transport.calls.post.length;
+    await online.playOne(T({ playable: false }));
+    eq(transport.calls.post.length, before, '不可播放歌曲不发请求');
+  }
+
   section('播放意图：重复点击去重、旧返回隔离、暂停取消');
   {
     const resolvers = [];

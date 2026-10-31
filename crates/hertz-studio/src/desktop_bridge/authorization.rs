@@ -58,9 +58,22 @@ impl Authorization {
             Err(error) => Err(error),
         }
     }
+    #[cfg(test)]
     pub fn write(&self, directory: &Path) -> io::Result<()> {
+        self.write_checked(directory, || Ok(()))
+    }
+    pub fn write_checked<G>(
+        &self,
+        directory: &Path,
+        admission: impl FnOnce() -> io::Result<G>,
+    ) -> io::Result<()> {
         let bytes = hertz_desktop_ipc::frame::serialize_bounded(self, AUTHORIZATION_LIMIT)?;
-        windows::write_private_atomic(&directory.join(AUTH_FILE), &bytes, AUTHORIZATION_LIMIT)
+        windows::write_private_atomic_checked(
+            &directory.join(AUTH_FILE),
+            &bytes,
+            AUTHORIZATION_LIMIT,
+            admission,
+        )
     }
     pub fn next_revision(existing: Option<&Self>) -> io::Result<u64> {
         existing

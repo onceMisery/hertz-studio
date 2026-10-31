@@ -143,6 +143,7 @@ pub struct DesktopBridge {
     profile: Option<Profile>,
     pub(super) gate: Mutex<Gate>,
     lifecycle: Mutex<Lifecycle>,
+    file_operation: Mutex<()>,
     cleanup_done: Notify,
     pub(super) global_slots: Arc<Semaphore>,
     #[cfg(test)]
@@ -150,10 +151,29 @@ pub struct DesktopBridge {
     #[cfg(test)]
     before_publish: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     #[cfg(test)]
+    before_authorization: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    #[cfg(test)]
     after_publish: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl DesktopBridge {
+    fn lock_file_operation(&self) -> Result<MutexGuard<'_, ()>, ApiError> {
+        loop {
+            hertz_desktop_ipc::blocking::check().map_err(|_| {
+                failure(
+                    "desktop_operation_cancelled",
+                    "Desktop file operation was cancelled",
+                )
+            })?;
+            match self.file_operation.try_lock() {
+                Ok(guard) => return Ok(guard),
+                Err(std::sync::TryLockError::Poisoned(error)) => return Ok(error.into_inner()),
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    std::thread::park_timeout(Duration::from_millis(1))
+                }
+            }
+        }
+    }
     /// Uses the already resolved business DataDir. No files, listeners, component probes,
     /// native configuration migration or process launch occur here.
     pub fn new(state: &Arc<AppState>) -> Arc<Self> {
@@ -195,12 +215,15 @@ impl DesktopBridge {
                 cleanup_keys: false,
                 status,
             }),
+            file_operation: Mutex::new(()),
             cleanup_done: Notify::new(),
             global_slots: Arc::new(Semaphore::new(4)),
             #[cfg(test)]
             projection_calls: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             before_publish: Mutex::new(None),
+            #[cfg(test)]
+            before_authorization: Mutex::new(None),
             #[cfg(test)]
             after_publish: Mutex::new(None),
         })
@@ -261,7 +284,23 @@ impl DesktopBridge {
 
     pub async fn restore(self: &Arc<Self>) -> Result<DesktopStatus, ApiError> {
         let epoch = self.operation_epoch(true)?;
-        let result = self.activate(epoch, true);
+        let bridge = self.clone();
+        let result = hertz_desktop_ipc::blocking::Worker::start(Cancellation::new(), move || {
+            bridge.activate(epoch, true)
+        })
+        .map_err(|_| {
+            failure(
+                "desktop_listener_failed",
+                "Cannot start desktop authorization worker",
+            )
+        })?
+        .await
+        .map_err(|_| {
+            failure(
+                "desktop_listener_failed",
+                "Desktop authorization worker failed",
+            )
+        })?;
         if result.is_err() || !lock(&self.gate).open {
             self.cleanup(false, None).await;
         }
@@ -308,9 +347,29 @@ impl DesktopBridge {
             ));
         }
         if let Some(generation) = self.capture_generation() {
-            let fully_ready = SCOPES
-                .into_iter()
-                .all(|scope| self.validate_authority(scope, &generation, None).is_ok());
+            let bridge = self.clone();
+            let admission_cancel = lock(&self.gate).intent_cancel.clone();
+            let worker =
+                hertz_desktop_ipc::blocking::Worker::start(Cancellation::new(), move || {
+                    SCOPES
+                        .into_iter()
+                        .all(|scope| bridge.validate_authority(scope, &generation, None).is_ok())
+                })
+                .map_err(|_| {
+                    failure(
+                        "desktop_listener_failed",
+                        "Cannot start desktop authorization worker",
+                    )
+                })?;
+            let fully_ready = tokio::select! { biased;
+                _ = admission_cancel.cancelled() => return Err(failure("desktop_operation_cancelled", "Desktop authorization was revoked")),
+                result = worker => result.map_err(|_| {
+                    failure(
+                        "desktop_listener_failed",
+                        "Desktop authorization worker failed",
+                    )
+                })?,
+            };
             if !fully_ready {
                 let mut gate = lock(&self.gate);
                 if !Self::epoch_valid(&gate, epoch, false) {
@@ -327,15 +386,29 @@ impl DesktopBridge {
         if !lock(&self.gate).open {
             self.cleanup(false, None).await;
         }
-        let result = self.activate(epoch, false);
+        let bridge = self.clone();
+        let admission_cancel = lock(&self.gate).intent_cancel.clone();
+        let worker = hertz_desktop_ipc::blocking::Worker::start(Cancellation::new(), move || {
+            bridge.activate(epoch, false)
+        })
+        .map_err(|_| {
+            failure(
+                "desktop_listener_failed",
+                "Cannot start desktop authorization worker",
+            )
+        })?;
+        let result = tokio::select! { biased;
+            _ = admission_cancel.cancelled() => Err(failure("desktop_operation_cancelled", "Desktop authorization was revoked")),
+            result = worker => result.map_err(|_| failure("desktop_listener_failed", "Desktop authorization worker failed"))?,
+        };
         if result.is_err() {
             self.cleanup(false, None).await;
         }
         result
     }
 
-    fn acquire_writer(&self, life: &mut Lifecycle) -> Result<(), ApiError> {
-        if life.writer.is_some() {
+    fn acquire_writer(&self) -> Result<(), ApiError> {
+        if lock(&self.lifecycle).writer.is_some() {
             return Ok(());
         }
         let mut writer = fslock::LockFile::open(&self.directory.join(LOCK_FILE)).map_err(|_| {
@@ -355,7 +428,7 @@ impl DesktopBridge {
                 "Another sidecar owns this desktop source",
             ));
         }
-        life.writer = Some(Arc::new(Mutex::new(writer)));
+        lock(&self.lifecycle).writer = Some(Arc::new(Mutex::new(writer)));
         Ok(())
     }
 
@@ -375,6 +448,7 @@ impl DesktopBridge {
     }
 
     fn activate_inner(self: &Arc<Self>, epoch: u64, restoring: bool) -> Result<(), ApiError> {
+        let _operation = self.lock_file_operation()?;
         let profile = self.profile.as_ref().ok_or_else(|| {
             failure(
                 "desktop_profile_invalid",
@@ -410,11 +484,13 @@ impl DesktopBridge {
         life.status.persistent_revoked = initial
             .as_ref()
             .is_some_and(|record| record.scopes.is_empty());
+        drop(life);
         if restoring
             && initial
                 .as_ref()
                 .is_none_or(|record| record.scopes.is_empty())
         {
+            let mut life = lock(&self.lifecycle);
             let mut gate = lock(&self.gate);
             if gate.open {
                 gate.close();
@@ -442,6 +518,7 @@ impl DesktopBridge {
                 })
                 .collect();
             if unavailable.len() == record.scopes.len() {
+                let mut life = lock(&self.lifecycle);
                 let mut gate = lock(&self.gate);
                 if gate.open {
                     gate.close();
@@ -451,7 +528,7 @@ impl DesktopBridge {
                 return Ok(());
             }
         }
-        self.acquire_writer(&mut life)?;
+        self.acquire_writer()?;
         // Another process may have changed authority/keys before this process acquired
         // the writer lock. Never use the optimistic read to publish a listener.
         let existing = Authorization::read(&self.directory).map_err(|_| {
@@ -464,6 +541,7 @@ impl DesktopBridge {
             match existing {
                 Some(record) if !record.scopes.is_empty() => record,
                 record => {
+                    let mut life = lock(&self.lifecycle);
                     life.status.revision = record.as_ref().map(|record| record.revision);
                     life.status.authorized_scopes.clear();
                     life.status.persistent_revoked = record.is_some();
@@ -524,19 +602,40 @@ impl DesktopBridge {
                 record.revision != authorization.revision || record.scopes != authorization.scopes
             })
         {
-            authorization.write(&self.directory).map_err(|_| {
-                failure(
-                    "desktop_authorization_write_failed",
-                    "Cannot persist desktop authorization",
-                )
-            })?;
+            #[cfg(test)]
+            if let Some(hook) = lock(&self.before_authorization).take() {
+                hook();
+            }
+            authorization
+                .write_checked(&self.directory, || {
+                    let gate = lock(&self.gate);
+                    if !Self::epoch_valid(&gate, epoch, restoring) {
+                        return Err(io::Error::new(
+                            io::ErrorKind::Interrupted,
+                            "desktop authorization cancelled",
+                        ));
+                    }
+                    Ok(gate)
+                })
+                .map_err(|error| {
+                    failure(
+                        if error.kind() == io::ErrorKind::Interrupted {
+                            "desktop_operation_cancelled"
+                        } else {
+                            "desktop_authorization_write_failed"
+                        },
+                        "Cannot persist desktop authorization",
+                    )
+                })?;
         }
+        let mut life = lock(&self.lifecycle);
         life.status.revision = Some(authorization.revision);
         life.status.authorized_scopes = authorization.scopes.clone();
         life.status.persistent_revoked = false;
         life.status.scope_errors = scope_errors;
         life.status.error = None;
         life.status.cleanup_incomplete = false;
+        drop(life);
         #[cfg(test)]
         if let Some(hook) = lock(&self.before_publish).take() {
             hook();
@@ -560,13 +659,13 @@ impl DesktopBridge {
         {
             return Ok(());
         }
-        if !life.tasks.is_empty() {
+        drop(gate);
+        if !lock(&self.lifecycle).tasks.is_empty() {
             return Err(failure(
                 "desktop_cleanup_pending",
                 "Desktop source must finish disconnecting before reconnecting",
             ));
         }
-        drop(gate);
         let cancel = Cancellation::new();
         let mut servers = Vec::new();
         let mut pipes = Pipes {
@@ -588,7 +687,7 @@ impl DesktopBridge {
             servers.push((scope, name, server));
         }
         if servers.is_empty() {
-            life.writer = None;
+            lock(&self.lifecycle).writer = None;
             return Ok(());
         }
         let identity = windows::Identity::current().map_err(|_| {
@@ -623,7 +722,8 @@ impl DesktopBridge {
                 "Desktop authorization operation was cancelled",
             ));
         }
-        // Only the lifecycle writer covers file I/O. Revoke can close the small gate
+        // The file transaction owns the writer without holding the lifecycle mutex.
+        // Revoke can close the small gate
         // immediately while publication runs; the final epoch check below forbids
         // opening a revoked generation and error cleanup removes its own discovery.
         windows::write_private_atomic(
@@ -641,6 +741,7 @@ impl DesktopBridge {
         if let Some(hook) = lock(&self.after_publish).take() {
             hook();
         }
+        let mut life = lock(&self.lifecycle);
         let mut gate = lock(&self.gate);
         if !Self::epoch_valid(&gate, epoch, restoring) {
             return Err(failure(
@@ -697,59 +798,19 @@ impl DesktopBridge {
                 break;
             }
         }
-        let persisted = {
-            let mut life = lock(&self.lifecycle);
-            // A newer revoke can finish and explicitly reconnect while this call
-            // waits for cleanup. Only the current attempt may commit or update status.
-            if !Self::revoke_current(&lock(&self.gate), epoch) {
-                return Err(failure(
-                    "desktop_operation_cancelled",
-                    "Desktop revocation operation was superseded",
-                ));
-            }
-            let result = if life.cleaning {
-                Err(io::Error::other("cleanup in progress"))
-            } else {
-                self.acquire_writer(&mut life)
-                    .map_err(|_| io::Error::other("writer conflict"))
-                    .and_then(|_| Authorization::read(&self.directory))
-                    .and_then(|existing| {
-                        let revision = Authorization::next_revision(existing.as_ref())?;
-                        let disabled = Authorization {
-                            schema_version: 1,
-                            revision,
-                            scopes: Vec::new(),
-                        };
-                        if !Self::revoke_current(&lock(&self.gate), epoch) {
-                            return Err(io::Error::new(
-                                io::ErrorKind::Interrupted,
-                                "revocation superseded",
-                            ));
-                        }
-                        disabled.write(&self.directory)?;
-                        if !Self::revoke_current(&lock(&self.gate), epoch) {
-                            return Err(io::Error::new(
-                                io::ErrorKind::Interrupted,
-                                "revocation superseded",
-                            ));
-                        }
-                        life.status.revision = Some(revision);
-                        life.status.authorized_scopes.clear();
-                        Ok(())
-                    })
-            };
-            if !Self::revoke_current(&lock(&self.gate), epoch) {
-                return Err(failure(
-                    "desktop_operation_cancelled",
-                    "Desktop revocation operation was superseded",
-                ));
-            }
-            life.status.persistent_revoked = result.is_ok();
-            if result.is_ok() {
-                life.cleanup_keys = true;
-                life.status.error = None;
-            }
-            result.is_ok()
+        let bridge = self.clone();
+        let worker = hertz_desktop_ipc::blocking::Worker::start(Cancellation::new(), move || {
+            bridge.persist_revoke(epoch)
+        })
+        .map_err(|_| {
+            failure(
+                "desktop_revocation_incomplete",
+                "Cannot start desktop revocation worker",
+            )
+        })?;
+        let persisted = match tokio::time::timeout(Duration::from_secs(2), worker).await {
+            Ok(Ok(result)) => result?,
+            _ => false,
         };
         self.cleanup(persisted, Some(epoch)).await;
         let mut life = lock(&self.lifecycle);
@@ -759,13 +820,65 @@ impl DesktopBridge {
                 "Desktop revocation operation was superseded",
             ));
         }
-        if !persisted {
+        if !persisted && !life.status.persistent_revoked {
             let error = failure("desktop_revocation_incomplete", "Disconnected in this process, but revocation could not be persisted; restart may restore previous consent. Retry disconnect.");
             life.status.error = Some(desktop_error(&error));
             return Err(error);
         }
         drop(life);
         Ok(self.status())
+    }
+
+    fn persist_revoke(&self, epoch: u64) -> Result<bool, ApiError> {
+        let _operation = self.lock_file_operation()?;
+        if !Self::revoke_current(&lock(&self.gate), epoch) {
+            return Err(failure(
+                "desktop_operation_cancelled",
+                "Desktop revocation was superseded",
+            ));
+        }
+        let result = if lock(&self.lifecycle).cleaning {
+            Err(io::Error::other("cleanup in progress"))
+        } else {
+            self.acquire_writer()
+                .map_err(|_| io::Error::other("writer conflict"))
+                .and_then(|_| Authorization::read(&self.directory))
+                .and_then(|existing| {
+                    let revision = Authorization::next_revision(existing.as_ref())?;
+                    let disabled = Authorization {
+                        schema_version: 1,
+                        revision,
+                        scopes: Vec::new(),
+                    };
+                    disabled.write_checked(&self.directory, || {
+                        let gate = lock(&self.gate);
+                        if !Self::revoke_current(&gate, epoch) {
+                            return Err(io::Error::new(
+                                io::ErrorKind::Interrupted,
+                                "revocation superseded",
+                            ));
+                        }
+                        Ok(gate)
+                    })?;
+                    let mut life = lock(&self.lifecycle);
+                    life.status.revision = Some(revision);
+                    life.status.authorized_scopes.clear();
+                    Ok(())
+                })
+        };
+        let mut life = lock(&self.lifecycle);
+        if !Self::revoke_current(&lock(&self.gate), epoch) {
+            return Err(failure(
+                "desktop_operation_cancelled",
+                "Desktop revocation was superseded",
+            ));
+        }
+        life.status.persistent_revoked |= result.is_ok();
+        if result.is_ok() {
+            life.cleanup_keys = true;
+            life.status.error = None;
+        }
+        Ok(result.is_ok())
     }
 
     fn revoke_current(gate: &Gate, epoch: u64) -> bool {
@@ -791,7 +904,7 @@ impl DesktopBridge {
         self.cleanup(false, None).await;
     }
 
-    async fn cleanup(&self, delete_keys: bool, revoke_epoch: Option<u64>) {
+    async fn cleanup(self: &Arc<Self>, delete_keys: bool, revoke_epoch: Option<u64>) {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
         let mut batch = loop {
             let notified = self.cleanup_done.notified();
@@ -844,6 +957,16 @@ impl DesktopBridge {
             .await;
         }
         batch.tasks.retain(|task| !task.is_finished());
+        if batch.tasks.is_empty() && lock(&self.lifecycle).writer.is_some() {
+            let bridge = self.clone();
+            let worker =
+                hertz_desktop_ipc::blocking::Worker::start(Cancellation::new(), move || {
+                    bridge.cleanup_files()
+                });
+            if let Ok(worker) = worker {
+                let _ = tokio::time::timeout_at(deadline, worker).await;
+            }
+        }
         let mut life = lock(&self.lifecycle);
         if !batch.tasks.is_empty() {
             // Keep the exclusive writer until actual handle/permit release, even if the
@@ -851,29 +974,38 @@ impl DesktopBridge {
             life.tasks.append(&mut batch.tasks);
             life.status.cleanup_incomplete = true;
         } else if life.writer.is_some() {
-            let mut incomplete = self.remove_owned_discovery().is_err();
-            if life.cleanup_keys {
-                for scope in SCOPES {
-                    let path = self.directory.join(key_file(scope));
-                    match windows::read_private_bounded(&path, 128) {
-                        Ok(_) => {
-                            if std::fs::remove_file(&path).is_err() {
-                                incomplete = true;
-                            }
-                        }
-                        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                        Err(_) => incomplete = true,
-                    }
-                }
-            }
-            life.status.cleanup_incomplete = incomplete;
-            life.cleanup_keys = false;
-            life.writer = None;
+            life.status.cleanup_incomplete = true;
         }
         life.cleaning = false;
         batch.finished = true;
         drop(life);
         self.cleanup_done.notify_waiters();
+    }
+
+    fn cleanup_files(&self) {
+        let Ok(_operation) = self.lock_file_operation() else {
+            return;
+        };
+        let delete_keys = lock(&self.lifecycle).cleanup_keys;
+        let mut incomplete = self.remove_owned_discovery().is_err();
+        if delete_keys {
+            for scope in SCOPES {
+                let path = self.directory.join(key_file(scope));
+                match windows::read_private_bounded(&path, 128) {
+                    Ok(_) => {
+                        if std::fs::remove_file(&path).is_err() {
+                            incomplete = true;
+                        }
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(_) => incomplete = true,
+                }
+            }
+        }
+        let mut life = lock(&self.lifecycle);
+        life.status.cleanup_incomplete = incomplete;
+        life.cleanup_keys = false;
+        life.writer = None;
     }
 
     fn remove_owned_discovery(&self) -> io::Result<()> {
@@ -891,12 +1023,17 @@ impl DesktopBridge {
         Ok(())
     }
 
-    pub(super) fn listener_failed(&self) {
+    pub(super) fn listener_failed(self: &Arc<Self>) {
         lock(&self.gate).close();
         self.record_error(&failure(
             "desktop_listener_failed",
             "Desktop pipe replacement failed; reconnect the source",
         ));
+        lock(&self.lifecycle).status.cleanup_incomplete = true;
+        let bridge = self.clone();
+        tokio::spawn(async move {
+            bridge.cleanup(false, None).await;
+        });
     }
 }
 
@@ -914,7 +1051,9 @@ mod tests {
     use super::*;
     use hertz_desktop_ipc::{Request, Response};
     use serde_json::json;
-    use std::{fs::OpenOptions, os::windows::fs::OpenOptionsExt, sync::atomic::Ordering};
+    use std::{
+        fs::OpenOptions, os::windows::fs::OpenOptionsExt, sync::atomic::Ordering, time::Instant,
+    };
     use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
 
     struct Fixture {
@@ -1257,7 +1396,12 @@ mod tests {
         // Their actual pipe handles still exist, so the directory must remain exclusive.
         let replacement = DesktopBridge::new(&fixture.state);
         assert_eq!(
-            replacement.restore().await.unwrap_err().code,
+            // Check synchronously before yielding to the aborted tasks. restore now
+            // correctly runs file work off-thread and would itself let them finish.
+            replacement
+                .activate(replacement.operation_epoch(true).unwrap(), true)
+                .unwrap_err()
+                .code,
             "desktop_source_conflict"
         );
         tokio::task::yield_now().await;
@@ -1544,8 +1688,17 @@ mod tests {
     async fn cancelled_disconnect_keeps_gate_closed_but_allows_explicit_retry() {
         let fixture = Fixture::new().await;
         fixture.bridge.connect_authorization().await.unwrap();
+        // Keep cleanup pending independently of how quickly real listeners observe cancel.
+        lock(&fixture.bridge.lifecycle)
+            .tasks
+            .push(tokio::spawn(std::future::pending()));
         let mut disconnecting = Box::pin(fixture.bridge.disconnect());
-        assert!(futures::poll!(&mut disconnecting).is_pending());
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !lock(&fixture.bridge.lifecycle).cleaning {
+            assert!(futures::poll!(&mut disconnecting).is_pending());
+            assert!(Instant::now() < deadline);
+            tokio::task::yield_now().await;
+        }
         assert!(lock(&fixture.bridge.lifecycle).cleaning);
         assert!(lock(&fixture.bridge.gate).revoking);
         drop(disconnecting);
@@ -1604,6 +1757,28 @@ mod tests {
         );
         assert!(!fixture.bridge.status().listener_ready);
         assert!(!fixture.directory.join(DISCOVERY_FILE).exists());
+        fixture.bridge.disconnect().await.unwrap();
+        fixture.finish().await;
+    }
+
+    #[tokio::test]
+    async fn revoke_before_authorization_commit_never_persists_cancelled_consent() {
+        let fixture = Fixture::new().await;
+        let weak = Arc::downgrade(&fixture.bridge);
+        *lock(&fixture.bridge.before_authorization) = Some(Box::new(move || {
+            weak.upgrade().unwrap().close_for_revoke();
+        }));
+        assert_eq!(
+            fixture
+                .bridge
+                .connect_authorization()
+                .await
+                .unwrap_err()
+                .code,
+            "desktop_operation_cancelled"
+        );
+        assert!(Authorization::read(&fixture.directory).unwrap().is_none());
+        assert!(!fixture.bridge.status().listener_ready);
         fixture.bridge.disconnect().await.unwrap();
         fixture.finish().await;
     }
@@ -1767,6 +1942,58 @@ mod tests {
         assert_eq!(fixture.bridge.global_slots.available_permits(), 4);
         assert!(!fixture.directory.join(DISCOVERY_FILE).exists());
         drop(clients);
+        fixture.finish().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn slow_client_deadline_releases_slot_without_disconnect() {
+        let fixture = Fixture::new().await;
+        fixture.bridge.connect_authorization().await.unwrap();
+        let name = fixture.discovery().pipes.lyrics.unwrap();
+        let client = tokio::net::windows::named_pipe::ClientOptions::new()
+            .open(&name)
+            .unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        while fixture.bridge.global_slots.available_permits() == 4 {
+            assert!(tokio::time::Instant::now() < deadline);
+            tokio::task::yield_now().await;
+        }
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(2500);
+        while fixture.bridge.global_slots.available_permits() != 4 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "request deadline did not reclaim its slot"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(fixture.bridge.status().listener_ready);
+        drop(client);
+        fixture.finish().await;
+    }
+
+    #[tokio::test]
+    async fn listener_failure_cleans_discovery_and_releases_writer_without_revoking_consent() {
+        let fixture = Fixture::new().await;
+        fixture.bridge.connect_authorization().await.unwrap();
+        fixture.bridge.listener_failed();
+        assert!(!fixture.bridge.status().listener_ready);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        while lock(&fixture.bridge.lifecycle).writer.is_some() {
+            assert!(tokio::time::Instant::now() < deadline);
+            tokio::task::yield_now().await;
+        }
+        assert!(!fixture.directory.join(DISCOVERY_FILE).exists());
+        let status = fixture.bridge.status();
+        assert!(!status.cleanup_incomplete);
+        assert_eq!(status.error.unwrap().code, "desktop_listener_failed");
+        assert!(!Authorization::read(&fixture.directory)
+            .unwrap()
+            .unwrap()
+            .scopes
+            .is_empty());
+        let competitor = DesktopBridge::new(&fixture.state);
+        assert!(competitor.restore().await.unwrap().listener_ready);
+        competitor.shutdown().await;
         fixture.finish().await;
     }
 }

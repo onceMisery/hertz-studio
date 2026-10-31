@@ -13,7 +13,7 @@ const base = process.env.SPACE_BASE || 'http://127.0.0.1:18815', output = path.r
   assert.ok(library.tracks.length, 'existing local playback fixtures are required');
   const browser = await chromium.launch({ channel: 'chrome', headless: true, args: ['--use-angle=swiftshader', '--enable-unsafe-swiftshader'] });
   try {
-    const page = await browser.newPage({ viewport: { width: 1440, height: 900 } }), errors = [], loads = [];
+    const page = await browser.newPage({ viewport: { width: 1440, height: 900 } }), errors = [], onlinePlays = [];
     page.on('pageerror', error => errors.push(error.message));
     let settings;
     await page.route('**/v1/settings', async route => {
@@ -27,9 +27,8 @@ const base = process.env.SPACE_BASE || 'http://127.0.0.1:18815', output = path.r
         artist: '空间音乐人', album: '声音与星球', duration_ms: 180000 }));
       await route.fulfill({ json: { tracks, total: tracks.length } });
     });
-    await page.route('**/v1/player/load', async route => {
-      const body = route.request().postDataJSON(); loads.push(body);
-      if (!body.track_id.startsWith('online:')) return route.continue();
+    await page.route('**/v1/online/play', async route => {
+      onlinePlays.push(route.request().postDataJSON());
       await new Promise(resolve => setTimeout(resolve, 900));
       return route.fulfill({ status: 503, json: { error: '试听暂不可用' } });
     });
@@ -50,8 +49,9 @@ const base = process.env.SPACE_BASE || 'http://127.0.0.1:18815', output = path.r
     assert.equal(await row.locator('.sh-track-status').textContent(), '正在载入…');
     await page.waitForFunction(() => !!document.querySelector('.sh-panel-body .sh-track.has-error'));
     assert.match(await row.locator('.sh-track-status').textContent(), /无法播放/);
-    const failed = loads.at(-1); assert.equal(failed.track_id, 'online:netease:search-0');
-    assert.equal(failed.meta[failed.track_id].onlineId, 'search-0');
+    const failed = onlinePlays.at(-1);
+    assert.equal(failed.source, 'netease'); assert.equal(failed.tracks[0].id, 'search-0');
+    assert.equal(failed.tracks.length, 1); assert.equal(failed.enqueue, true);
     await row.locator('.sh-track-main').click();
     await page.evaluate(() => handleEvent({type:'error',source:'netease',message:'音源暂时无法提供播放地址',index:0}));
     assert.equal(await row.locator('.sh-track-status').textContent(), '音源暂时无法提供播放地址', 'websocket errors appear in the active result row');

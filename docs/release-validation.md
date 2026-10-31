@@ -2,6 +2,8 @@
 
 核对日期：2026-10-21。适用于 0.2.1 开发工作区，基于 HEAD `401a90376c0fa8391b5d60234103eeb381ef2c2c` 加未提交改动；不是该提交、已发布二进制或商店候选的验收结论。发布时必须用实际候选的源码、依赖和产物身份重跑，不能直接沿用开发工作区结果。完整范围仍由[产品路线](./product-roadmap.md)、[技术方案](./technical-roadmap.md)与[进度记录](./roadmap-progress.md)约束。
 
+> 2026-10-30 起，`release.yml` 的独立形态只构建 Full；Standard 继续用于 DBX 商店候选与本地 Standard 验证。下文两版独立程序的历史构建记录保留当时事实，不再代表当前发布矩阵。
+
 ## 2026-10-29 DBX 可选桌面接入增量
 
 当前 0.3.0 dirty 工作区的 D0–D2 已实现并通过分阶段独立规格及质量审查。最低/当前真实 DBX 运行时确认只读管道、可取消 I/O 与 Job 归属；组件固定用户独立启动。Standard/Full 原 stdio 冒烟分别 314/314、298/298，六种未授权/坏恢复状态、真实管理等待中的 EOF 取消、授权与配置迁移、原生只读限制及五皮肤实际 opaque sandbox 检查通过。保存默认设置视图、换肤恢复与 Escape 不触发桌面检测。
@@ -40,7 +42,7 @@ release workflow 由 `workflow_dispatch` 手动触发，只保留 artifacts；�
 | DBX Standard | `io.github.oncemisery.hertz-studio-0.2.1-windows-x64.dbxp` | 11,342,810 | `536cea26986a186f2c559020d7e25c3bbb047d522460bf1da9a0b0dcc4cf1fd8` | manifest `io.github.oncemisery.hertz-studio` 0.2.1；sidecar `b44fe4ccc1617ff6d51010e55655cd9ac00cb01e07f38ed561573ddfff2bd203` |
 | DBX Full | `io.github.oncemisery.hertz-studio.full-0.2.1-windows-x64.dbxp` | 12,093,282 | `e56d33bce8006a48a015f55d0599886249447b083c5944e8bf97cb7ce0790335` | manifest `io.github.oncemisery.hertz-studio.full` 0.2.1；sidecar `7edf005e9a9a82b9abf6f2a144756af84ca72b9eb78c383228de36e6eaed790b` |
 
-构建命令与 `release.yml` 的 Windows 分支一致：两版分别执行 `cargo build --locked --release -p hertz-studio --target x86_64-pc-windows-msvc`（Full 加 `--features full`），随后按 `<名称>/hertz-studio.exe + README + LICENSE` 组包；DBX 包执行 `HERTZ_EDITION=<edition> bash scripts/ci-package-plugin.sh`（未设 `PLUGIN_RELEASE`）。两版独立构建共用同一 target 路径，故每版 zip 都在对应构建结束后立即生成，表中 exe 哈希即当时产物。
+构建命令与当时的 `release.yml` Windows 分支一致：两版分别执行 `cargo build --locked --release -p hertz-studio --target x86_64-pc-windows-msvc`（Full 加 `--features full`），随后按 `<名称>/hertz-studio.exe + README + LICENSE` 组包；DBX 包执行 `HERTZ_EDITION=<edition> bash scripts/ci-package-plugin.sh`（未设 `PLUGIN_RELEASE`）。两版独立构建共用同一 target 路径，故每版 zip 都在对应构建结束后立即生成，表中 exe 哈希即当时产物。
 
 同轮静态检查：`node scripts/check-editions.js` 与 `node scripts/check-release-ui.js` 通过；打包脚本逐包核对 `.artifact.json` 的 hash/size、未签名、manifest 身份、Standard 侧仅一个 sidecar 且不含 Full 协议/资源。以下仍未验证：四份候选的启动与安装、升级/回滚、签名与 Store、真实 DBX 宿主、真实声卡与播放旅程、正式 MCP 客户端、模型或任何 provider 请求。两个 `.artifact.json` 的 `url` 为裸文件名而非不可变 Release URL；它们是检视候选，不是上架候选。
 

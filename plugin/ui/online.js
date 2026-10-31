@@ -45,7 +45,7 @@
     // 歌手 / 专辑搜索结果，卡片可点进详情页。
     artists: [],
     albums: [],
-    // All 聚合时为 true：此入口保持单曲试听，跨源队列由宿主的混合队列入口管理。
+    // All 聚合时为 true；单曲播放始终保留现有队列。
     aggregate: false,
     // 音源清单由 /v1/online/sources 填；拉不到时下拉框保持 index.html 的静态项。
     sources: [],
@@ -495,14 +495,7 @@
     return buildRow(track, function () {
       // VIP 曲也放行：能不能播由后端按账号 cookie 定，失败如实 toast。
       if (!track.playable) return;
-      // All 视图保持单曲试听；单源视图整盘入队，点第几首
-      // 就从第几首开始（后端队列与高亮都以同一批虚拟 id 为准）。
-      if (onlineState.aggregate) {
-        playAll([track], 0);
-      } else {
-        var idx = onlineState.tracks.indexOf(track);
-        playAll(onlineState.tracks, idx < 0 ? 0 : idx);
-      }
+      playOne(track);
     });
   }
 
@@ -1284,9 +1277,14 @@
     document.querySelectorAll('.online-row').forEach(paintRowPlayback);
   }
 
-  // `roomQueue` 是「播放全部」这类整批意图在房间里的点播范围；单曲入口不传，
-  // 房间里只点播被点的那一首（`tracks[index]`），否则点一首会塞进整页结果。
-  async function playAll(tracks, index, roomQueue) {
+  // 单曲点播只提交这一首，队列合并与去重由服务端在播放提交锁内完成。
+  function playOne(track) {
+    if (!track || !track.playable) return;
+    return playAll([track], 0, null, true);
+  }
+
+  // roomQueue 指定房间里的整批点播范围；单曲入口只点播 tracks[index]。
+  async function playAll(tracks, index, roomQueue, enqueue) {
     if (!tracks || !tracks.length) return;
     index = Math.max(0, Math.min(index || 0, tracks.length - 1));
     if (roomActive()) return pointToRoom(roomQueue || [tracks[index]]);
@@ -1315,6 +1313,7 @@
           };
         }),
         index: index,
+        ...(enqueue ? { enqueue: true } : {}),
       });
       ticket = T.playbackIntent ? T.playbackIntent() : null;
       refreshPlaybackRows();
@@ -1327,7 +1326,7 @@
       failedPlay = { id: id, message: H.errText('试听失败', err) };
       H.toast(failedPlay.message, 'error');
       H.ui.playpause.classList.remove('is-loading');
-      return;
+      return false;
     } finally {
       if (epoch === onlinePlayEpoch) {
         pendingPlay = null;
@@ -1337,6 +1336,7 @@
     }
 
     await finishOnlinePlay(res, tracks[0].source, tracks, index, current);
+    return current();
   }
 
   // F2 整单播放：只发集合意图（{source, collection:{kind,id}}），首页与之后的
@@ -1423,7 +1423,7 @@
       meta.relayed = true;
     }
     H.state.current = meta;
-    H.setStateQueue(ids, startId);
+    H.setStateQueue(res.queue || ids, startId);
 
     // 先把能确定的部分画出来（标题/歌手/封面），歌词异步补，
     // 这样即使歌词接口慢或失败，界面也不会停在空白上。
@@ -2221,6 +2221,7 @@
     // 拉回单曲。同类型是空操作。
     setKind: setKind,
     playAll: playAll,
+    playOne: playOne,
     playCollection: playCollection,
     // 房间进行中本地播放入口会被服务端拒绝；集合页据此把「播放」改成点播文案。
     roomActive: roomActive,
