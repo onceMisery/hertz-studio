@@ -10,6 +10,14 @@
    这不是视觉稿：页面模拟了一块桌面，小窗的拖拽、吸附、贴边隐藏、透明区域
    穿透全部是真的行为。穿透尤其要能被验证——桌面上的「便签」里有按钮和输入框，
    开启穿透后隔着小窗的透明区点下去，命中的必须是便签，而不是小窗。
+   宠物形象走统一资源层（Pet）：默认皮肤与用户素材从同一个 <img> 出口显示，
+   支持 idle/playing/dragging/tap 四状态、多帧序列；素材缺失时按
+   「用户该状态 → 用户 idle → 内置默认 → 内置 idle」逐级兜底。换肤入口：
+   控制台「导入素材」（约定命名或 pet.json）、localStorage 记忆、
+   以及配置代码里的 window.HertzPet.defineSkin(manifest)。
+   宠物态平时只显示一小块素材（默认 56×56），悬停时展开成完整播放胶囊：
+   素材缩成封面圆，露出曲名与上一曲/播放暂停/下一曲/回主窗控制条，
+   光标离开 350ms 后收起。
    =========================================================================== */
 
 :root{
@@ -190,12 +198,46 @@ button{font:inherit;color:inherit;cursor:pointer}
 /* 锁定：连实心区也不吃，整扇窗完全穿透。 */
 #mini.lock #capsule, #mini.lock #capsule *{pointer-events:none !important}
 
-/* 桌面宠物态：去掉背板与描边，只留内容本体。 */
+/* 桌面宠物态：去掉背板与描边，只留素材本体，整窗缩到 skin.size 一小块。 */
 #mini.pet #capsule{background:transparent; backdrop-filter:none; box-shadow:none}
-#mini.pet #meta{display:none}
-#mini.pet #transport{opacity:0; transition:opacity .2s}
-#mini.pet.hover #transport{opacity:1}
-#mini.pet #title-glow{opacity:1}
+#mini.pet #meta, #mini.pet #prog{display:none}
+#mini.pet #transport{display:none}
+/* 悬停展开成完整播放胶囊：背板回来，素材缩成封面圆，
+   曲名与 上一曲/播放暂停/下一曲/回主窗 就位。播放状态平时由素材动画表达，
+   胶囊进度条只在展开态出现。 */
+#mini.pet.hover #capsule{
+  background:var(--surface); backdrop-filter:blur(26px) saturate(175%);
+  box-shadow:var(--shadow), inset 0 0 0 1px var(--stroke), inset 0 1px 0 var(--stroke-hi);
+}
+/* 素材仍是绝对定位（要参与变形动画），文字区用边距让出封面位：
+   左内距 12 + 封面 36 + 间隙 10 = 58px 起。 */
+#mini.pet.hover #meta{display:block; margin-left:calc(46px * var(--scale))}
+#mini.pet.hover #prog{display:block}
+#mini.pet.hover #transport{display:flex}
+/* --- 宠物素材层 ----------------------------------------------------------
+   #pet-art 是唯一的素材出口：默认皮肤与用户素材都从它显示。宠物态窗体尺寸
+   由 skin.size 决定（size() 里切换基准），素材按 contain 适配。
+   命中区按整盒近似（[data-hit]）；真实实现可以按分层窗口 alpha 逐像素判定，
+   原型里用盒子表达同样的语义：透明区可穿透、形象本体可点。 */
+#pet-art{
+  position:absolute; inset:0; width:100%; height:100%; object-fit:contain;
+  display:none; -webkit-user-drag:none; user-select:none;
+  transition:width .2s var(--soft), height .2s var(--soft),
+    left .2s var(--soft), top .2s var(--soft), border-radius .2s var(--soft);
+}
+#mini.pet #pet-art{display:block}
+/* 悬停展开态：素材从整窗缩进胶囊布局的封面位（36px 圆），
+   过渡与窗口尺寸同步，看起来是「宠物缩成一角变成封面」。 */
+#mini.pet.hover #pet-art{
+  left:calc(12px * var(--scale)); top:calc(11px * var(--scale));
+  right:auto; bottom:auto;
+  width:calc(36px * var(--scale)); height:calc(36px * var(--scale));
+  border-radius:50%;
+}
+/* 素材缺失的最终兜底：连内置默认都加载失败时，退回最早的 ♫ 封面块。 */
+#mini.pet #cover{display:none}
+#mini.pet[data-art-failed] #pet-art{display:none}
+#mini.pet[data-art-failed] #cover{display:grid}
 
 #cover{
   position:relative; flex:none; border-radius:50%; overflow:hidden;
@@ -347,6 +389,8 @@ body.buffering #prog i{opacity:.4; animation:pulse 1.1s ease-in-out infinite}
 #log i{color:var(--accent); font-style:normal}
 .row2{display:flex; gap:6px; margin-top:8px}
 .row2 .btn{flex:1; font:11px var(--font-mono); padding:6px 8px; border-radius:8px}
+/* 宠物素材组：状态行超长时截断，别把控制台撑开。 */
+#pet-skin{max-width:62%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
 
 /* --- 提示条 -------------------------------------------------------------- */
 #toast{
@@ -406,6 +450,7 @@ body.buffering #prog i{opacity:.4; animation:pulse 1.1s ease-in-out infinite}
 
   <div id="mini" hidden data-dock="none">
     <div id="capsule">
+      <img id="pet-art" data-hit data-name="宠物" alt="桌面宠物" draggable="false">
       <div id="cover" data-hit data-name="封面"><span>♫</span></div>
       <div id="meta" data-hit data-name="文字区">
         <p id="title">至少还有你</p>
@@ -481,6 +526,15 @@ body.buffering #prog i{opacity:.4; animation:pulse 1.1s ease-in-out infinite}
     </label>
   </div>
 
+  <div class="grp" id="grp-pet">
+    <label>宠物素材 <em id="pet-skin">内置</em></label>
+    <div class="row2">
+      <button class="btn" id="pet-import">导入素材…</button>
+      <button class="btn" id="pet-reset">恢复默认</button>
+    </div>
+    <input type="file" id="pet-files" multiple accept=".png,.jpg,.jpeg,.webp,.gif,.svg,.json" hidden>
+  </div>
+
   <div class="grp">
     <dl class="readout">
       <dt>相位</dt><dd id="r-phase">Hidden</dd>
@@ -523,13 +577,19 @@ body.buffering #prog i{opacity:.4; animation:pulse 1.1s ease-in-out infinite}
   const state = {
     phase: 'Hidden',
     geo: { dock: 'none', along: .5, x: 120, y: 96, scale: 1 },
-    pet: false, pass: false, lock: false, top: true, edgeHide: false, auto: true,
+    pet: false, petHover: false, pass: false, lock: false, top: true, edgeHide: false, auto: true,
     showRegions: false,
     mainVisible: true, mainHiddenAt: 0,
     settledAt: 0, cursor: { x: -1, y: -1 }, dragging: false,
     enterReason: null,
   };
-  const size = () => ({ w: Math.round(BASE.w * state.geo.scale), h: Math.round(BASE.h * state.geo.scale) });
+  // 宠物态平时只有一小块素材（skin.size，限幅 48–160），悬停展开成完整播放
+  // 胶囊（BASE）；用户素材的原始比例直接决定收起窗口的形状。展开只会比收起
+  // 更大（默认皮肤 56×56 < 胶囊 58 高），贴边吸附下窗口向屏幕内生长。
+  const size = () => {
+    const base = state.pet && !state.petHover ? Pet.logicalSize() : BASE;
+    return { w: Math.round(base.w * state.geo.scale), h: Math.round(base.h * state.geo.scale) };
+  };
 
   function workArea() {
     return { left: 0, top: 0, right: innerWidth, bottom: innerHeight - 46 };
@@ -600,6 +660,8 @@ body.buffering #prog i{opacity:.4; animation:pulse 1.1s ease-in-out infinite}
     setPhase('Hidden');
     $('mini').hidden = true;
     state.enterReason = null;
+    Pet.stop();
+    setPetHover(false);
   }
 
   /// 回到主窗口：相位先回 Hidden，另外必须把主窗口叫回来。
@@ -727,9 +789,25 @@ body.buffering #prog i{opacity:.4; animation:pulse 1.1s ease-in-out infinite}
     });
   }
 
+  // --- 悬停展开 -------------------------------------------------------------
+  // 宠物态悬停 → 展开成完整播放胶囊；光标离开延迟 350ms 再收起，
+  // 光标落在展开/收起的边界附近时不会来回闪。
+  let hoverTimer = 0;
+  function setPetHover(on) {
+    if (!state.pet || state.phase === 'Hidden') on = false;
+    if (state.petHover === on) return;
+    state.petHover = on;
+    $('mini').classList.toggle('hover', on);
+    place(true); // 展开=播放胶囊尺寸，收起=素材尺寸
+  }
+
   function applyFlags() {
     const el = $('mini');
+    const wasPet = el.classList.contains('pet');
     el.classList.toggle('pet', state.pet);
+    if (!state.pet) setPetHover(false); // 关掉宠物态时顺手退出悬停展开
+    // 宠物态窗体尺寸随 skin.size 变，落位要重算（place 对 Hidden 相位是空操作）。
+    if (wasPet !== state.pet) place(true);
     el.classList.toggle('pass', state.pass || state.lock);
     el.classList.toggle('lock', state.lock);
     el.classList.toggle('notop', !state.top);
@@ -745,6 +823,9 @@ body.buffering #prog i{opacity:.4; animation:pulse 1.1s ease-in-out infinite}
     $('seg-size').querySelectorAll('button').forEach(b => {
       b.dataset.on = Math.abs(parseFloat(b.dataset.scale) - state.geo.scale) < .01 ? '1' : '0';
     });
+    // 宠物动画跟着可见性与开关走；素材状态（playing/idle/dragging）由各自
+    // 的事件源（setPlaying / 拖拽）主动推给 Pet.sync()。
+    if (state.pet && state.phase !== 'Hidden') Pet.start(); else Pet.stop();
     // 宠物态会隐藏文字区，实心区集合变了，命中区也要跟着重算。
     updateRegions();
   }
@@ -767,6 +848,7 @@ body.buffering #prog i{opacity:.4; animation:pulse 1.1s ease-in-out infinite}
       if (!started) {
         if (Math.hypot(ev.clientX - startX, ev.clientY - startY) < DRAG_PX) return;
         started = true; justDragged = true; state.dragging = true;
+        Pet.sync(); // 拖拽态素材（dragging）立即接管形象
         setPhase('Dragging');
         $('mini').classList.add('dragging');
         try { $('mini').setPointerCapture(e.pointerId); } catch (_) {}
@@ -787,6 +869,7 @@ body.buffering #prog i{opacity:.4; animation:pulse 1.1s ease-in-out infinite}
       window.removeEventListener('pointercancel', up);
       $('mini').classList.remove('dragging');
       state.dragging = false;
+      Pet.sync();
       if (!started) return;
       const s = size();
       const rect = $('mini').getBoundingClientRect();
@@ -878,6 +961,7 @@ body.buffering #prog i{opacity:.4; animation:pulse 1.1s ease-in-out infinite}
     anchor(nowMs());
     clock.playing = on;
     document.body.classList.toggle('playing', on);
+    Pet.sync(); // 播放/暂停直接映射到素材状态 playing / idle
   }
 
   function step(delta) {
@@ -887,12 +971,248 @@ body.buffering #prog i{opacity:.4; animation:pulse 1.1s ease-in-out infinite}
     anchor(0);
     renderTrack();
     log(`切曲 → ${TRACKS[clock.idx].title}`, 'audio');
+    Pet.oneShotPlay('tap'); // 一次性反应帧：切曲时蹦一下（皮肤没提供就静默跳过）
     setTimeout(() => {
       clock.buffering = false;
       document.body.classList.remove('buffering');
       anchor(0);
     }, 700);
   }
+
+  // --- 宠物资源层 ==========================================================
+  // skin = { name, size:[w,h], states: { <状态>: { fps, loop, frames:[url,...] } } }
+  // 状态清单：idle 待机/暂停 · playing 播放中 · dragging 拖拽 · tap 点按一次性
+  // 生效皮肤 = 用户素材与内置默认按状态合并；单个状态缺失时按
+  // 「用户该状态 → 用户 idle → 内置该状态 → 内置 idle」逐级兜底，永不空窗。
+  // 默认皮肤本身也是普通素材（data-URL SVG），走同一条 <img> 管线，没有特权路径；
+  // 连默认都画不出来才退回最早的 ♫ 封面块（#mini[data-art-failed]）。
+  // 换肤入口有三条：控制台「导入素材」（约定命名或 pet.json）、
+  // localStorage 记忆（hertz.mini.prototype.v1.pet.v1）、以及配置代码里的
+  // window.HertzPet.defineSkin(manifest)。
+  const petArt = (() => {
+    const svg = body => 'data:image/svg+xml,' + encodeURIComponent(
+      '<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96" viewBox="0 0 96 96">' +
+      '<defs><radialGradient id="g" cx="35%" cy="28%" r="85%">' +
+      '<stop offset="0" stop-color="#ffb066"/><stop offset="1" stop-color="#ff7a2f"/>' +
+      '</radialGradient></defs>' + body + '</svg>');
+    const blob = (cy, rx, ry) =>
+      `<ellipse cx="48" cy="${cy}" rx="${rx}" ry="${ry}" fill="url(#g)"/>` +
+      `<path d="M46 ${(cy - ry + .5).toFixed(1)}q1-11 11-12.5" fill="none" stroke="#e0561a" stroke-width="3.5" stroke-linecap="round"/>` +
+      `<ellipse cx="33" cy="${cy + 4}" rx="4.5" ry="2.8" fill="#e0561a" opacity=".35"/>` +
+      `<ellipse cx="63" cy="${cy + 4}" rx="4.5" ry="2.8" fill="#e0561a" opacity=".35"/>`;
+    const eyesOpen = '<circle cx="39" cy="52" r="3.4" fill="#3a1d0b"/><circle cx="57" cy="52" r="3.4" fill="#3a1d0b"/>' +
+      '<circle cx="40.2" cy="50.6" r="1.1" fill="#fff"/><circle cx="58.2" cy="50.6" r="1.1" fill="#fff"/>';
+    const eyesHappy = '<path d="M35.5 52q3.5-4.5 7 0M53.5 52q3.5-4.5 7 0" fill="none" stroke="#3a1d0b" stroke-width="2.6" stroke-linecap="round"/>';
+    const eyesClosed = '<path d="M35.5 52.5h7M53.5 52.5h7" stroke="#3a1d0b" stroke-width="2.6" stroke-linecap="round"/>';
+    const mouthSing = '<ellipse cx="48" cy="62.5" rx="3.4" ry="4.4" fill="#3a1d0b"/>';
+    const mouthSmile = '<path d="M42.5 60q5.5 6.5 11 0z" fill="#3a1d0b"/>';
+    const note = (dy, op = 1) =>
+      `<g fill="#8a3d12" opacity="${op}" transform="translate(0 ${dy})">` +
+      '<ellipse cx="67" cy="35" rx="4" ry="3"/><rect x="69.4" y="20" width="2.6" height="15" rx="1.3"/>' +
+      '<path d="M72 20q6.5 2.5 5 9.5c-1.2-3.2-2.8-4.8-5-5.4z"/></g>';
+    return {
+      playing1: svg(blob(55, 29, 27) + eyesOpen + mouthSing + note(0)),
+      playing2: svg(`<g transform="translate(0 -3)">${blob(55, 29.5, 26)}</g>` + eyesHappy + mouthSmile + note(-5)),
+      idle: svg(blob(55, 29, 27) + eyesClosed +
+        '<path d="M45.5 62h5" stroke="#3a1d0b" stroke-width="2.4" stroke-linecap="round"/>' + note(0, .35)),
+      drag: svg(blob(55, 29, 27) +
+        '<circle cx="39" cy="52" r="4.2" fill="#3a1d0b"/><circle cx="57" cy="52" r="4.2" fill="#3a1d0b"/>' +
+        '<circle cx="40.4" cy="50.4" r="1.3" fill="#fff"/><circle cx="58.4" cy="50.4" r="1.3" fill="#fff"/>' +
+        '<circle cx="48" cy="62.5" r="3.4" fill="#3a1d0b"/>' + note(0) +
+        '<path d="M10 47h8M8 57h8M78 47h8M80 57h8" stroke="#e0561a" stroke-width="2.6" stroke-linecap="round"/>' +
+        '<path d="M80 18l2 4 4 2-4 2-2 4-2-4-4-2 4-2z" fill="#ffb066"/>'),
+      tap: svg(blob(60, 33, 21.5) + eyesHappy +
+        '<ellipse cx="48" cy="66" rx="5" ry="3.6" fill="#3a1d0b"/>' + note(-9)),
+    };
+  })();
+
+  const DEFAULT_SKIN = {
+    name: '内置 · 橙团子',
+    size: [56, 56],
+    states: {
+      idle:     { fps: 2, loop: true,  frames: [petArt.idle] },
+      playing:  { fps: 4, loop: true,  frames: [petArt.playing1, petArt.playing2] },
+      dragging: { fps: 6, loop: true,  frames: [petArt.drag] },
+      tap:      { fps: 8, loop: false, frames: [petArt.tap] },
+    },
+  };
+
+  const Pet = (() => {
+    const PET_KEY = KEY + '.pet.v1';
+    const STATES = ['idle', 'playing', 'dragging', 'tap'];
+    const img = $('pet-art'), mini = $('mini');
+    let user = null, skin = null, cur = null, frame = 0, oneShot = null, timer = 0, running = false;
+
+    // 兜底的最后一级：素材整体画不出来时退回 ♫ 封面块。
+    img.addEventListener('error', () => mini.setAttribute('data-art-failed', ''));
+    img.addEventListener('load', () => mini.removeAttribute('data-art-failed'));
+
+    const clampSize = v => Math.min(160, Math.max(48, Math.round(Number(v) || 96)));
+
+    function merge() {
+      const states = {};
+      for (const s of STATES) {
+        const own = user && user.states && user.states[s];
+        const dflt = DEFAULT_SKIN.states[s];
+        // 逐级兜底：用户该状态 → 用户 idle → 内置该状态 → 内置 idle。
+        const pick = own && Array.isArray(own.frames) && own.frames.length ? own :
+          user && user.states && user.states.idle && Array.isArray(user.states.idle.frames) &&
+          user.states.idle.frames.length ? user.states.idle : dflt;
+        states[s] = {
+          fps: Math.min(24, Math.max(1, Math.round(pick.fps || dflt.fps || 6))),
+          loop: pick.loop === undefined ? dflt.loop !== false : !!pick.loop,
+          frames: pick.frames,
+        };
+      }
+      skin = {
+        name: (user && user.name) || DEFAULT_SKIN.name,
+        size: (user && Array.isArray(user.size) && user.size.length === 2 ? user.size : DEFAULT_SKIN.size).map(clampSize),
+        states,
+      };
+      $('pet-skin').textContent = skin.name;
+      cur = null; frame = 0; oneShot = null;
+    }
+
+    // 状态优先级：拖拽 > 一次性反应 > 播放/待机。
+    function pickState() {
+      if (state.dragging) return 'dragging';
+      if (oneShot) return oneShot;
+      return clock.playing ? 'playing' : 'idle';
+    }
+    function step() {
+      if (!running) return;
+      const name = pickState();
+      if (name !== cur) { cur = name; frame = 0; }
+      const def = skin.states[name];
+      const url = def.frames[Math.min(frame, def.frames.length - 1)];
+      // 同帧不重设 src：避免单帧 GIF 被周期性重放、静态图被反复解码。
+      if (img.getAttribute('src') !== url) img.src = url;
+      frame += 1;
+      if (frame >= def.frames.length) {
+        frame = 0;
+        if (def.loop === false) oneShot = null; // 一次性状态播完回基础态
+      }
+      timer = setTimeout(step, Math.max(40, 1000 / def.fps));
+    }
+    function start() { if (running) return; running = true; step(); }
+    function stop() { running = false; clearTimeout(timer); }
+    function sync() { if (!running) return; clearTimeout(timer); step(); }
+    function oneShotPlay(name) { if (running && skin.states[name]) { oneShot = name; sync(); } }
+
+    function sanitizeStates(raw) {
+      const out = {};
+      for (const s of STATES) {
+        const def = raw && raw[s];
+        const frames = def && Array.isArray(def.frames) ?
+          def.frames.filter(u => typeof u === 'string' && u).slice(0, 64) : [];
+        if (!frames.length) continue;
+        out[s] = { fps: Number(def.fps) || undefined, loop: def.loop, frames };
+      }
+      return out;
+    }
+    function setSkin(manifest, note) {
+      const states = sanitizeStates(manifest && manifest.states);
+      const size = manifest && Array.isArray(manifest.size) ?
+        manifest.size.map(Number).filter(Number.isFinite) : null;
+      user = Object.keys(states).length ? {
+        name: typeof (manifest && manifest.name) === 'string' && manifest.name ? manifest.name : '自定义宠物',
+        size: size && size.length === 2 ? size : null,
+        states,
+      } : null;
+      merge(); persist(); sync();
+      // 皮肤可能在宠物可见时被替换：skin.size 变了，窗体要立刻重落位。
+      if (running) place(true);
+      if (note) log(`${note}：${skin.name}（${Object.keys(states).join('、') || '无有效状态'}）`, 'pet');
+    }
+    function persist() {
+      try {
+        if (user) localStorage.setItem(PET_KEY, JSON.stringify(user));
+        else localStorage.removeItem(PET_KEY);
+      } catch (_) { log('素材体积过大，自定义皮肤仅本次会话有效（未能写入本地记忆）', 'pet'); }
+    }
+    function reset() {
+      try { localStorage.removeItem(PET_KEY); } catch (_) {}
+      user = null; merge(); sync();
+      log('宠物素材已恢复内置默认', 'pet');
+    }
+    function loadSaved() {
+      try {
+        const raw = localStorage.getItem(PET_KEY);
+        if (raw) setSkin(JSON.parse(raw), '已恢复上次的宠物素材');
+        else merge();
+      } catch (_) { merge(); }
+    }
+
+    async function importFiles(list) {
+      const files = [...list];
+      const imgs = files.filter(f => /\.(png|jpe?g|webp|gif|svg)$/i.test(f.name));
+      const json = files.find(f => /\.json$/i.test(f.name));
+      if (!imgs.length && !json) { log('没有可识别的素材（PNG/JPG/WebP/GIF/SVG 或 pet.json）', 'pet'); return; }
+      const toUrl = f => new Promise((ok, no) => {
+        const r = new FileReader();
+        r.onload = () => ok(r.result);
+        r.onerror = () => no(r.error);
+        r.readAsDataURL(f);
+      });
+      const data = new Map();
+      for (const f of imgs) { try { data.set(f.name.toLowerCase(), await toUrl(f)); } catch (_) {} }
+      const manifest = { name: '自定义宠物', states: {} };
+      if (json) {
+        try {
+          const spec = JSON.parse(await json.text());
+          if (typeof spec.name === 'string' && spec.name) manifest.name = spec.name;
+          if (Array.isArray(spec.size)) manifest.size = spec.size;
+          for (const [s, def] of Object.entries(spec.states || {})) {
+            if (!STATES.includes(s)) { log(`pet.json 里的未知状态「${s}」已忽略`, 'pet'); continue; }
+            const frames = [];
+            for (const name of [].concat((def && def.frames) || [])) {
+              const key = String(name).toLowerCase();
+              if (data.has(key)) frames.push(data.get(key));
+            }
+            if (frames.length) manifest.states[s] = { fps: def.fps, loop: def.loop, frames };
+          }
+        } catch (e) { log('pet.json 解析失败，改用文件名约定：' + e.message, 'pet'); }
+      }
+      if (!Object.keys(manifest.states).length) {
+        // 约定命名：<状态>.<ext> 单帧；<状态>-<序号>.<ext> 多帧（按序号升序）。
+        for (const s of STATES) {
+          const re = new RegExp('^' + s + '(?:-([0-9]+))?$');
+          const keys = [...data.keys()].filter(k => re.test(k))
+            .sort((a, b) => Number(a.match(re)[1] || 1) - Number(b.match(re)[1] || 1));
+          if (keys.length) manifest.states[s] = { frames: keys.map(k => data.get(k)) };
+        }
+      }
+      const got = Object.keys(manifest.states);
+      if (!got.length) { log('素材命名没对上约定（idle/playing/dragging/tap），什么都没换', 'pet'); return; }
+      const missing = STATES.filter(s => !manifest.states[s]);
+      if (!Array.isArray(manifest.size)) {
+        // 尺寸：优先 pet.json 声明，否则读第一帧的原始尺寸。
+        const first = manifest.states[got[0]].frames[0];
+        manifest.size = await new Promise(ok => {
+          const im = new Image();
+          im.onload = () => ok([im.naturalWidth, im.naturalHeight]);
+          im.onerror = () => ok(null);
+          im.src = first;
+        });
+      }
+      setSkin(manifest, '已加载宠物素材');
+      log('生效状态：' + got.join('、') + (missing.length ? `；${missing.join('、')} 将回退 idle` : ''), 'pet');
+    }
+
+    return {
+      loadSaved, setSkin, reset, importFiles,
+      start, stop, sync, oneShotPlay,
+      logicalSize: () => ({ w: skin.size[0], h: skin.size[1] }),
+    };
+  })();
+
+  // 配置换肤入口：宿主或用户配置脚本加载后调用即可，例如
+  // window.HertzPet.defineSkin({ name:'我的宠物', size:[128,128],
+  //   states:{ playing:{ fps:8, frames:['data:image/png;base64,…'] } } })
+  window.HertzPet = {
+    defineSkin: manifest => Pet.setSkin(manifest, '配置皮肤已生效'),
+    reset: () => Pet.reset(),
+  };
 
   // --- 右键菜单 -----------------------------------------------------------
   function openMenu(x, y) {
@@ -918,12 +1238,19 @@ body.buffering #prog i{opacity:.4; animation:pulse 1.1s ease-in-out infinite}
       if (state.lock) { toast('锁定态下整扇窗都点不到，先解锁'); return; }
       openMenu(e.clientX, e.clientY);
     });
-    mini.addEventListener('pointerenter', () => mini.classList.add('hover'));
-    mini.addEventListener('pointerleave', () => mini.classList.remove('hover'));
+    mini.addEventListener('pointerenter', () => {
+      clearTimeout(hoverTimer);
+      setPetHover(true);
+    });
+    mini.addEventListener('pointerleave', () => {
+      clearTimeout(hoverTimer);
+      // 宠物态延迟收起防边界抖动；非宠物态没有展开概念，直接收。
+      hoverTimer = setTimeout(() => setPetHover(false), state.pet ? 350 : 0);
+    });
 
     $('prev').addEventListener('click', e => { e.stopPropagation(); step(-1); });
     $('next').addEventListener('click', e => { e.stopPropagation(); step(1); });
-    $('play').addEventListener('click', e => { e.stopPropagation(); setPlaying(!clock.playing); });
+    $('play').addEventListener('click', e => { e.stopPropagation(); setPlaying(!clock.playing); Pet.oneShotPlay('tap'); });
 
     $('menu').addEventListener('click', e => {
       const b = e.target.closest('[data-act]');
@@ -990,6 +1317,12 @@ body.buffering #prog i{opacity:.4; animation:pulse 1.1s ease-in-out infinite}
       place(true); save();
     });
     $('btn-clear').addEventListener('click', () => { $('log').innerHTML = ''; });
+    $('pet-import').addEventListener('click', () => $('pet-files').click());
+    $('pet-files').addEventListener('change', e => {
+      Pet.importFiles(e.target.files);
+      e.target.value = '';
+    });
+    $('pet-reset').addEventListener('click', () => Pet.reset());
     $('tap').addEventListener('click', () => {
       $('taps').textContent = String(Number($('taps').textContent) + 1);
     });
@@ -1027,6 +1360,7 @@ body.buffering #prog i{opacity:.4; animation:pulse 1.1s ease-in-out infinite}
 
   // --- 启动 ---------------------------------------------------------------
   load();
+  Pet.loadSaved(); // 先于 applyFlags：宠物态窗体尺寸依赖生效皮肤
   bind();
   applyFlags();
   renderTrack();

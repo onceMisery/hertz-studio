@@ -40,4 +40,4 @@ node scripts/check-video-export-browser.js
 node scripts/check-stage-draft-browser.js
 ```
 
-真实系统音频共享、全部画幅/格式组合、其它浏览器、实际 GPU/弱机/多显示器、原生 DBX 和候选发行版矩阵仍需验收。[可编辑工程与本地媒体身份](./stage-projects.md) 已有版本化试点；远程媒体身份、完整时间线异常矩阵及视觉模板人工评审仍属于 [R6 未完成项](./roadmap-progress.md)，不能以本导出验证替代。
+真实系统音频共享、全部画幅/格式组合、其它浏览器、实际 GPU/弱机/多显示器、原生 DBX 和候选发行版矩阵仍需验收。[可编辑工程与媒体身份](./stage-projects.md) 已有版本化试点，在线完整缓存与显式远程读取的媒体身份也已实现并经真实浏览器加受控回环 HTTP 验证，见[进度](./roadmap-progress.md) 的「工程在线与远程媒体身份增量」；那里远程只到受控回环响应与隔离账号 fixture，不代表真实 provider、NAS、许可或原生 DBX 通过。完整时间线异常矩阵及视觉模板人工评审仍属于 [R6 未完成项](./roadmap-progress.md)，不能以本导出验证替代。

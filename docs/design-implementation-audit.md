@@ -6,6 +6,8 @@
 
 2026-10-29 补充：已接入用户提供的[前端原型说明](design/frontend-gap-prototypes.md)与[HTML 原型总览](design/prototypes/index.html)，逐项对应关系见第 1.1 节。原型表示界面设计已准备，不改变功能的实现或验收状态；其中 P1–P7 是原型编号，与壁纸引擎的 P0–P3 实施阶段不同。
 
+2026-10-31 补充：基线之后落地 `1d042b8`（按原型重做桌面歌词）与 `8eac246`（桌面组件收口与小窗陪伴原型），据此就地订正三处：桌面歌词 L2 改判为部分实现、新增未覆盖过的小窗陪伴一行、纠正[视频导出方案](video-export.md) 把远程媒体身份当作未完成的说法。其余行仍保持 `0330508` 基线范围，未重新运行构建、浏览器、音频或原生验收。
+
 **DBX 接入桌面歌词与壁纸（D0–D3）已落地候选**：截至 2026-10-29，D0–D2 的只读管道、授权、来源类型、schema v3、管理与设置流程已实现并通过独立审查，D3a 配套候选已准备，D3b 完整发布验收待完成。其他缺口主要分为桌面能力的后续扩展、一起听音频模式的设计差距，以及主线功能的真实环境与发布验收。桌面歌词、单屏壁纸、一起听工作区、在线点歌和个人舞台已经有实现，不应再按早期计划整体重做。
 
 本轮对照 `docs/` 中现行方案、交付记录、路线图，以及 `docs/aegis/`、`docs/research/`、`docs/superpowers/` 中历史设计，并定向检查相关源码、配置和验证入口。属于静态盘点，没有重新运行构建、浏览器、音频、模型或原生验收；历史记录中的“通过”只沿用其原有范围。原工作树的 `space_previews.rs` 修改不属于本次整理。
@@ -24,7 +26,8 @@
 | 壁纸作品化 W2 | 部分实现；后续范围 | 专用版本化配置导入导出、参数预置/收藏/轮播，及可选歌曲/封面/简洁歌词叠层 | [壁纸方案](desktop-wallpaper.md) §3.2/§11；[UI 方案](plans/2026-10-26-desktop-listening-ui-productization.md) P2。已有九个场景、固定/跟随与实时预览；[创意工程](stage-projects.md) 与播放器壁纸设置不能直接算作桌面壁纸作品格式 |
 | 壁纸系统音频、多屏与交互 W3 | 未实现；后续范围 | WASAPI loopback、设备切换；多屏同时运行/独立配置/整机预算；不干扰图标的鼠标视差 | [壁纸方案](desktop-wallpaper.md) §3.2，并明确同时多屏尚未实现。已有能力是“选择一块目标屏”，包括其混合 DPI 与恢复，不是多屏实例。现有频谱来自绑定 Hertz 服务，不是系统音频采集 |
 | 一起听原生采样率优先 | 部分实现；当前交付明确缩小范围 | 按歌曲原生采样率切换房间格式、新格式代际及预缓冲；与锁定采样率连续混音的选择/提示 | [一起听方案](lan-listening.md) §6.2 设计默认原生采样率优先，但 §15 明确当前创建时固定 44.1/48/96/192kHz、双声道 f32，逐曲格式切换未开放。[创建合同](../crates/hertz-studio/src/room/contract.rs) 也使用固定 `sample_rate`。不能把整个一起听标为未实现，也不能把此音质模式算已完成 |
-| 桌面歌词 L2 / 非 DBX 的 L3 | 后续提案 | 更细排版、受控主题、更多行/多人声、可选校准入口；其他 OS/ARM64 与系统媒体来源 | [桌面歌词](desktop-lyrics.md) §10。当前单/双行、译文/罗马音、样式及定位不属于缺口；系统媒体标题/系统声音也不等于已经取得歌词 |
+| 桌面歌词 L2 / 非 DBX 的 L3 | L2 部分实现（三行排版已落地）；其余为后续提案 | 内置白名单主题、多人声标识、可选校准入口；其他 OS/ARM64 与系统媒体来源 | [桌面歌词](desktop-lyrics.md) §10。`1d042b8` 已把三行接通到全链路：[config.rs](../crates/hertz-desktop/src/config.rs) 的 `Layout::Triple`、宿主行数解析、设置页的上一行开关与深度样式，因此「更细排版」不再属于缺口；槽位共三个（上一行/原文/一个副行），仍在设计的「最多 4 个文本槽」预算内，不另计缺口。未做的是命名主题预设——现只有 auto/light/dark 与 bare/glass/solid 两组独立字段。系统媒体标题/系统声音也不等于已经取得歌词 |
+| 小窗播放（桌面宠物） | 未接入：代码已提交但没有进入构建 | 模块树挂载、服务端 discovery 字段与窄凭据键、配置域与迁移、托盘入口、前端回主窗口上报；接通后还需首次编译与运行验证 | 方案与接线清单见[小窗原型](plans/2026-10-29-mini-window-desktop-pet.md)，页面原型 [mini-window-pet.html](prototypes/mini-window-pet.html)。`8eac246` 提交了 `mini.rs`、`mini_native.rs`、`mini_feed.rs`、`desktop_mini.rs` 与三份 `assets/mini-player.*`，但 [main.rs](../crates/hertz-desktop/src/main.rs) 与 [lib.rs](../crates/hertz-studio/src/lib.rs) 均未声明这些模块，未被 `mod` 引用的源码不参与编译，故这些文件从未被编译器检查过；全仓对 `mini-player` 在 `.rs/.toml/.yml/.mjs` 内零引用。两处依赖在服务侧不存在：小窗读取的 `desktop_mini_protocol` 不在宿主 `Discovery` 结构里，`desktop_mini_seq` 与 `desktop-mini-key` 也没有发布者 |
 | 统一 2D/3D 舞台引擎 M 系列 | 部分基础已有；整体方案未闭环 | 跨 CreativeGL/SpaceStage 的统一生命周期与质量治理；双实现场景族及其 StageIntent 契约；M4 离线新场景创作/审核/入库管线 | [引擎评估](stage-engine-feasibility.md) §7。现有 [CreativeGL](../plugin/ui/creative-gl.js)、[空间 registry](../tools/space-stage/src/registry.js) 与 Stage 时钟已存在；R4/R5 任务底座也已实现。不能照搬旧文“均未实现”的判断，也不能把各自有注册表视为 M0–M4 已整体交付；正式启动前须重做差距定标 |
 
 ### 1.1 配套前端原型与当前实施状态（2026-10-29）
@@ -88,6 +91,7 @@
 | [Folia 计划](superpowers/plans/2026-09-27-folia-lyrics.md)：大量未勾选任务 | 当前对应实现已在 `plugin/ui/stanza/`，有 classic/cadenza/bg/subtitle 等模块与 `check-stanza*` 检查。路径/名称演进与未回填勾选不能当成缺功能 | [扩展指南](extension-guide.md)、[stanza 目录](../plugin/ui/stanza/) |
 | [舞台引擎评估](stage-engine-feasibility.md)：R4/R5 任务/提案/评测均未实现 | 该部分已过时；现有 AI 底座应复用。统一双后端和离线创作管线仍需单独核对/设计 | [AI 草稿现状](ai-stage-drafts.md)、本盘点第 1 节 |
 | [源码体量优化](resource-optimization.md)：待拆 `ai/jobs.rs` 测试、待拆 AppState | `ai/jobs.rs` 已通过 `mod tests;` 引入 `ai/jobs/tests.rs`，测试拆分不应再列未完成。AppState 已抽 `state/viewers.rs`，其他职责仍主要集中在 state.rs，属于部分推进 | [jobs.rs](../crates/hertz-studio/src/ai/jobs.rs)、[tests.rs](../crates/hertz-studio/src/ai/jobs/tests.rs)、[state.rs](../crates/hertz-studio/src/state.rs)、[viewers.rs](../crates/hertz-studio/src/state/viewers.rs) |
+| [视频导出方案](video-export.md) 验收段（2026-10-18 基线）：远程媒体身份与在线缓存身份仍属 R6 未完成项 | 已被「工程在线与远程媒体身份增量」覆盖：[stage_project.rs](../crates/hertz-studio/src/stage_project.rs) 对在线完整缓存给出 `file-sha256-v1` 身份并在读取前后复核播放代际与路径，远程曲库走默认关闭的 `allow_remote_read` 同意门与单条有界 GET，均带回归。该项应读作已实现、缺真实 provider/NAS/许可/原生 DBX 证据，不是缺功能；完整时间线异常矩阵与视觉模板人工评审仍是未完成项 | [进度增量](roadmap-progress.md) 的「工程在线与远程媒体身份增量」、[工程说明](stage-projects.md) |
 
 `docs/aegis/`、`docs/research/`、`docs/superpowers/` 中部分文档处于 Git 忽略目录，本地能读到不等于克隆仓库后一定存在。本盘点保留这些历史方案的出处；若要把其中提案转为正式开发任务，应先在受版本管理的目录整理当前契约。没有更改忽略规则或自动把历史目录加入版本管理。
 
