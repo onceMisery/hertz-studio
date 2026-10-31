@@ -475,13 +475,22 @@ impl App {
             return;
         }
         if self.current_document.is_some()
-            && self.last_snapshot.as_ref().is_some_and(|snapshot| snapshot.server.session == update.snapshot.server.session)
+            && self
+                .last_snapshot
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.server.session == update.snapshot.server.session)
             && self.current_document_key == update.snapshot.lyrics.document_key
-            && self.current_track.as_deref() == update.snapshot.track.as_ref().map(|track| track.id.as_str())
+            && self.current_track.as_deref()
+                == update
+                    .snapshot
+                    .track
+                    .as_ref()
+                    .map(|track| track.id.as_str())
         {
             update.document = None;
         }
-        self.source_health.accept(true, started, &update.snapshot.server.session);
+        self.source_health
+            .accept(true, started, &update.snapshot.server.session);
         self.handle_timed_update(update, started);
     }
 
@@ -490,7 +499,10 @@ impl App {
         self.last_feed_error = None;
         let track_id = update.snapshot.track.as_ref().map(|track| track.id.clone());
         let track_changed = track_id != self.current_track;
-        let session_changed = self.last_snapshot.as_ref().is_some_and(|snapshot| snapshot.server.session != update.snapshot.server.session);
+        let session_changed = self
+            .last_snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.server.session != update.snapshot.server.session);
         if track_changed {
             self.current_track = track_id;
         }
@@ -545,7 +557,8 @@ impl App {
             log(&format!("source error: {message}"));
             self.last_feed_error = Some(message.clone());
         }
-        let waiting = message.contains("未找到") || message.contains("未启动") || message.contains("等待");
+        let waiting =
+            message.contains("未找到") || message.contains("未启动") || message.contains("等待");
         self.source_state = if waiting { "waiting" } else { "error" };
         self.source_message = Some(message);
         self.last_snapshot = None;
@@ -1115,7 +1128,8 @@ impl App {
                             && document.document_key == snapshot.lyrics.document_key
                     })
                     .map(|document| (*document).clone());
-                self.source_health.accept(true, started, &snapshot.server.session);
+                self.source_health
+                    .accept(true, started, &snapshot.server.session);
                 self.last_update = started;
                 // The original handler owns presentation/offset semantics. Set t0 before
                 // dispatch so the first page delivery includes transport and native queue age.
@@ -1144,7 +1158,8 @@ impl App {
                 }
                 snapshot.received_at = Some(started);
                 self.wallpaper_last_update = Some(started);
-                self.source_health.accept(false, started, &snapshot.server.session);
+                self.source_health
+                    .accept(false, started, &snapshot.server.session);
                 self.handle_wallpaper_feed(Ok(snapshot));
             }
             Message::Document {
@@ -2061,14 +2076,18 @@ impl App {
             Ok(request) => request,
             Err(response) => return response,
         };
-        let response = match v2.check_target(self.config.active_profile.as_ref())
-            .and_then(|()| v2.check_value(self.config.revision, self.save_due.is_some())) {
+        let response = match v2
+            .check_target(self.config.active_profile.as_ref())
+            .and_then(|()| v2.check_value(self.config.revision, self.save_due.is_some()))
+        {
             Ok(()) => self.handle_pipe_command(request, target, Some(&v2)),
             Err(error) => error,
         };
         let response = if response["ok"] == true {
             self.with_target_status(response, Some(&v2.target_profile))
-        } else { response };
+        } else {
+            response
+        };
         crate::management::reply(response, Some(&v2.request_id))
     }
 
@@ -2084,7 +2103,8 @@ impl App {
             .unwrap_or("");
         log(&format!("control command={command}"));
         let value = request.get("value");
-        if v2.is_none() && config::is_dbx(&self.profile)
+        if v2.is_none()
+            && config::is_dbx(&self.profile)
             && !matches!(
                 command,
                 "status" | "wallpaper-status" | "wallpaper-settings" | "open-center"
@@ -2283,12 +2303,18 @@ impl App {
         self.status_json()
     }
 
-    fn with_target_status(&self, mut response: serde_json::Value, target: Option<&Profile>) -> serde_json::Value {
-        let is_active = target.zip(self.config.active_profile.as_ref())
+    fn with_target_status(
+        &self,
+        mut response: serde_json::Value,
+        target: Option<&Profile>,
+    ) -> serde_json::Value {
+        let is_active = target
+            .zip(self.config.active_profile.as_ref())
             .is_some_and(|(target, active)| config::same_profile(target, active));
         let scopes = self.source_health.scopes(is_active, Instant::now());
         response["targetProfile"] = serde_json::to_value(target).unwrap();
-        response["sourceConnected"] = (scopes["lyrics"] == true || scopes["wallpaper"] == true).into();
+        response["sourceConnected"] =
+            (scopes["lyrics"] == true || scopes["wallpaper"] == true).into();
         response["sourceScopes"] = scopes;
         response["sourceSession"] = self.source_health.session().into();
         response
@@ -3689,7 +3715,11 @@ fn spawn_wallpaper_feed(
                     }
                     received = true;
                     proxy
-                        .send_event(UserEvent::WallpaperFeed(generation, Instant::now(), Box::new(Ok(snapshot))))
+                        .send_event(UserEvent::WallpaperFeed(
+                            generation,
+                            Instant::now(),
+                            Box::new(Ok(snapshot)),
+                        ))
                         .is_ok()
                         && !stop.load(Ordering::Relaxed)
                 });
@@ -3705,8 +3735,11 @@ fn spawn_wallpaper_feed(
                     }
                     Err(error) => {
                         log(&format!("wallpaper events {error}"));
-                        let _ = proxy
-                            .send_event(UserEvent::WallpaperFeed(generation, Instant::now(), Box::new(Err(error))));
+                        let _ = proxy.send_event(UserEvent::WallpaperFeed(
+                            generation,
+                            Instant::now(),
+                            Box::new(Err(error)),
+                        ));
                     }
                 }
                 if received {
@@ -3735,7 +3768,11 @@ fn poll_wallpaper_feed(
         let result = feed.poll();
         let failed = result.is_err();
         if proxy
-            .send_event(UserEvent::WallpaperFeed(generation, started, Box::new(result)))
+            .send_event(UserEvent::WallpaperFeed(
+                generation,
+                started,
+                Box::new(result),
+            ))
             .is_err()
         {
             break;
