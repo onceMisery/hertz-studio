@@ -134,9 +134,11 @@
 [data-skin="orbit"] .orbit-main > .stage::before { content: none; }
 /* Keep the entry above the two-column player so the record stays out of the library. */
 [data-skin="orbit"] .orbit-main > .stage > .emotion-entry { grid-column: 1 / -1; margin-top: 0; padding: 4px 0; line-height: 20px; }
-/* 阅读是整页工作区：顶部舞台（正在播放）会把三栏压到下半屏。一起听视图
-   已经用 room-view 关掉舞台；阅读没有对应的 body 标记，按活动视图判定。 */
-[data-skin="orbit"] .orbit-main:has(> .column > #view-reader:not([hidden])) > .stage { display: none; }
+/* 顶部这块「正在播放」只在曲库首页出现。星轨把它重排进中间栏顶部（370px），
+   其余视图——在线、播客、每日推荐、歌单、队列、收藏、一起听、阅读、设置——要的
+   是整页空间，留着就像首页压在目标页上。按活动视图判定，非曲库一律收起：
+   视图容器只有 hidden 属性在切，没有 body 标记可挂，所以用 :has 反向选。 */
+[data-skin="orbit"] .orbit-main:not(:has(> .column > #view-library:not([hidden]))) > .stage { display: none; }
 [data-skin="orbit"] #stage { background: transparent; }
 [data-skin="orbit"] #stage > :is(.creative-canvas, .hd-layer, .lp-dock, .stage-fx, .stage-dots, .stage-particles, .stage-ripple) { display: none; }
 [data-skin="orbit"] .orbit-info { min-width: 0; align-self: center; padding-bottom: 8px; }

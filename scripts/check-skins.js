@@ -301,10 +301,11 @@ function checkSkinEntry() {
   // skins/ 子目录不在它范围内，所以这条得自己钉住。
   ok(!/skin-btn/.test(APP), 'app.js 不碰 #skin-btn（绑定只在 skins.js）');
   ok(/<symbol id="i-skin"/.test(HTML), 'i-skin 画在共享 sprite 里（不是又复制一份）');
-  const atTheme = HTML.indexOf('id="theme-btn"');
-  const atSkin = HTML.indexOf('id="skin-btn"');
-  const atMore = HTML.indexOf('id="top-more-btn"');
-  ok(atTheme >= 0 && atTheme < atSkin && atSkin < atMore, '按钮排在主题色之后、「更多」之前');
+  // 三个入口的相对顺序仍然是契约，只是现在同住「更多工具」：主题色 → 界面皮肤。
+  const moreMenu = HTML.slice(HTML.indexOf('id="top-more-menu"'), HTML.indexOf('id="online-account-btn"'));
+  const atTheme = moreMenu.indexOf('id="theme-btn"');
+  const atSkin = moreMenu.indexOf('id="skin-btn"');
+  ok(atTheme >= 0 && atTheme < atSkin, '主题色与界面皮肤都在「更多工具」里，且主题色在前');
 
   // 弹层必须搬出 .topbar：顶栏是 relative + z-index:40 + backdrop-filter，本身就
   // 是一个层叠上下文，弹层写多高的 z-index 都只在顶栏内部参与比较。舞台抽屉

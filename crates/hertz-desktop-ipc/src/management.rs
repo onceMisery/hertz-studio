@@ -1294,15 +1294,72 @@ mod tests {
         assert!(worker.join().unwrap().pop().unwrap().is_ok());
     }
 
+    // 期望串也要过同一个转换器：Windows 把内置 Administrator、SYSTEM 这类 Well-known 账户
+    // 渲染成 SDDL 别名（`LA`、`SY`）而不是裸 SID，把裸 SID 拼成字面量在以管理员账户运行的
+    // CI runner 上必然假失败。
+    fn dacl_text(descriptor: windows_sys::Win32::Security::PSECURITY_DESCRIPTOR) -> String {
+        use windows_sys::Win32::{
+            Foundation::LocalFree,
+            Security::{
+                Authorization::{
+                    ConvertSecurityDescriptorToStringSecurityDescriptorW, SDDL_REVISION_1,
+                },
+                DACL_SECURITY_INFORMATION,
+            },
+        };
+        let mut text = std::ptr::null_mut();
+        assert_ne!(
+            unsafe {
+                ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                    descriptor,
+                    SDDL_REVISION_1,
+                    DACL_SECURITY_INFORMATION,
+                    &mut text,
+                    std::ptr::null_mut(),
+                )
+            },
+            0
+        );
+        let mut length = 0;
+        while unsafe { *text.add(length) } != 0 {
+            length += 1;
+        }
+        let sddl = String::from_utf16(unsafe { std::slice::from_raw_parts(text, length) }).unwrap();
+        unsafe { LocalFree(text.cast()) };
+        sddl
+    }
+
+    fn rendered_dacl(sddl: &str) -> String {
+        use windows_sys::Win32::{
+            Foundation::LocalFree,
+            Security::Authorization::{
+                ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+            },
+        };
+        let source: Vec<u16> = sddl.encode_utf16().chain(std::iter::once(0)).collect();
+        let mut descriptor = std::ptr::null_mut();
+        assert_ne!(
+            unsafe {
+                ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                    source.as_ptr(),
+                    SDDL_REVISION_1,
+                    &mut descriptor,
+                    std::ptr::null_mut(),
+                )
+            },
+            0
+        );
+        let text = dacl_text(descriptor);
+        unsafe { LocalFree(descriptor) };
+        text
+    }
+
     #[test]
     fn private_acl_and_actual_peer_token_and_session() {
         use windows_sys::Win32::{
             Foundation::LocalFree,
             Security::{
-                Authorization::{
-                    ConvertSecurityDescriptorToStringSecurityDescriptorW, GetSecurityInfo,
-                    SDDL_REVISION_1, SE_FILE_OBJECT,
-                },
+                Authorization::{GetSecurityInfo, SE_FILE_OBJECT},
                 DACL_SECURITY_INFORMATION,
             },
         };
@@ -1328,32 +1385,18 @@ mod tests {
             },
             0
         );
-        let mut text = std::ptr::null_mut();
-        assert_ne!(
-            unsafe {
-                ConvertSecurityDescriptorToStringSecurityDescriptorW(
-                    descriptor,
-                    SDDL_REVISION_1,
-                    DACL_SECURITY_INFORMATION,
-                    &mut text,
-                    std::ptr::null_mut(),
-                )
-            },
-            0
-        );
-        let mut length = 0;
-        while unsafe { *text.add(length) } != 0 {
-            length += 1;
-        }
-        let sddl = String::from_utf16(unsafe { std::slice::from_raw_parts(text, length) }).unwrap();
-        unsafe {
-            LocalFree(text.cast());
-            LocalFree(descriptor);
-        }
+        let sddl = dacl_text(descriptor);
+        unsafe { LocalFree(descriptor) };
         assert_eq!(
             sddl,
-            format!("D:P(A;;FA;;;{})", Identity::current().unwrap().user_sid)
+            rendered_dacl(&format!(
+                "D:P(A;;FA;;;{})",
+                Identity::current().unwrap().user_sid
+            ))
         );
+        // 变异证明：别名替换是真实行为，S-1-5-18 恒渲染成 SY。缺了这条，把期望改成
+        // 原样透传也能过，就不再保证「DACL 里只有当前用户一条 FA」。
+        assert_eq!(rendered_dacl("D:P(A;;FA;;;S-1-5-18)"), "D:P(A;;FA;;;SY)");
         assert!(
             create_server(&name).is_err(),
             "management must have one instance"

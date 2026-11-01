@@ -35,7 +35,7 @@ async function installProbe(page) {
   await page.evaluate(() => {
     window.__clicks = [];
     document.addEventListener('click', event => {
-      const control = event.target.closest && event.target.closest('#theme-btn');
+      const control = event.target.closest && event.target.closest('#top-more-btn');
       if (!control) return;
       const layer = document.querySelector('.anime-interactions-layer');
       const node = layer && layer.querySelector('.anime-interactions-burst');
@@ -57,14 +57,14 @@ async function clickAndProbe(page) {
   // 必须先 clear：anime-interactions.js 有 MIN_GAP 90ms 节流 + 上一次
   // 动画的节点清理，不清会读到"没有反馈"。
   //
-  // ⚠ 目标必须选**可见**的按钮：#theme-btn 恒在顶栏、且就在 CONTROLS
+  // ⚠ 目标必须选**可见**的按钮：#top-more-btn 恒在顶栏、且就在 CONTROLS
   // 列表里（踩过的坑：无曲库 fixture 里 .btn.primary 宽度为 0，会被
   // onClick 的 rect 门槛过滤掉，看起来像"反馈坏了"）。
   await page.evaluate(() => { if (window.AnimeInteractions) window.AnimeInteractions.clear(); window.__clicks.length = 0; });
-  await page.locator('#theme-btn').click();
+  await page.locator('#top-more-btn').click();
   await page.waitForFunction(() => window.__clicks.length > 0, null, { timeout: 3000 }).catch(() => {});
   const sample = await page.evaluate(() => window.__clicks[0] || { particles: 0, anim: '', fx: '' });
-  // #theme-btn 的业务行为是拉开主题菜单；不收起，下一轮的真实点击会被
+  // #top-more-btn 的业务行为是拉开更多工具菜单；不收起，下一轮的真实点击会被
   // 菜单盖住（Playwright 命中检测一直重试直到超时，且不报产品错）。
   // 与 check-anime-ui-browser.js 的 selectTheme 同款：点完按 Escape。
   await page.keyboard.press('Escape');

@@ -141,10 +141,19 @@ async function navigate(page, view) {
   await settle(page);
 }
 
+/// 主题色 / 界面皮肤收在「更多工具」里：先开 ⋮ 再点那一项。点完 ⋮ 自己收起
+/// （一次只开一层），弹层锚到那颗常驻的 ⋮ 按钮上。
+async function openOverflowItem(page, id) {
+  if (await page.locator('#top-more-menu').isHidden()) await page.locator('#top-more-btn').click();
+  await page.locator('#top-more-menu').waitFor({ state: 'visible' });
+  await page.locator('#' + id).click();
+}
+
 async function selectTheme(page, id) {
   const name = await page.evaluate(value => Theme.list().find(t => t.id === value)?.name, id);
   assert.ok(name, 'theme remains available: ' + id);
-  await page.locator('#theme-btn').click();
+  // 主题色入口收在 ⋮ 里（顶栏只留常驻动作），所以先开 ⋮ 再点那一项。
+  await openOverflowItem(page, 'theme-btn');
   await page.locator('#theme-menu').waitFor({ state: 'visible' });
   await page.locator('#theme-menu').getByRole('option', { name, exact: true }).click();
   await page.waitForFunction(value => Theme.current().id === value, id);
@@ -192,8 +201,9 @@ async function readParticleClick(page, id, label, expected, duration = '0.28s') 
   return sample;
 }
 
-async function auditMenu(page, button, menu, width) {
-  await page.locator('#' + button).click();
+async function auditMenu(page, button, menu, width, viaOverflow) {
+  if (viaOverflow) await openOverflowItem(page, button);
+  else await page.locator('#' + button).click();
   await page.locator('#' + menu).waitFor({ state: 'visible' });
   await page.locator('#' + menu).evaluate(async el => {
     await new Promise(resolve => requestAnimationFrame(resolve));
@@ -256,7 +266,8 @@ async function auditLayout(page, width) {
   await settle(page);
   const value = await page.evaluate(() => {
     const rect = el => { const r = el.getBoundingClientRect(); return { x: r.x, y: r.y, right: r.right, bottom: r.bottom, width: r.width, height: r.height }; };
-    const ids = ['capsule-entry', 'stage3d-entry', 'settings-entry', 'theme-btn', 'skin-btn', 'top-more-btn', 'online-account-btn', 'playpause', 'next', 'progress'];
+    // 顶栏这一排只剩常驻动作；主题色/界面皮肤收在 ⋮ 里，量它们要先把 ⋮ 打开（见 auditMenu）。
+    const ids = ['capsule-entry', 'stage3d-entry', 'settings-entry', 'top-more-btn', 'online-account-btn', 'playpause', 'next', 'progress'];
     return { width: innerWidth, document: { client: document.scrollingElement.clientWidth, scroll: document.scrollingElement.scrollWidth },
       topbar: rect(document.querySelector('.topbar')), app: rect(document.querySelector('.app')),
       search: rect(document.getElementById('search')), bar: rect(document.getElementById('playback-bar')),
@@ -283,9 +294,9 @@ async function auditLayout(page, width) {
     await page.locator('#' + control.id).click({ trial: true });
   }
   await page.screenshot({ path: path.join(out, 'celestial-' + width + '.png') });
-  for (const [button, menu] of [['theme-btn', 'theme-menu'], ['skin-btn', 'skin-menu'], ['top-more-btn', 'top-more-menu']]) {
-    await auditMenu(page, button, menu, width);
-  }
+  await auditMenu(page, 'top-more-btn', 'top-more-menu', width);
+  await auditMenu(page, 'theme-btn', 'theme-menu', width, true);
+  await auditMenu(page, 'skin-btn', 'skin-menu', width, true);
   await page.locator('#lib-list .track').first().scrollIntoViewIfNeeded();
   await page.locator('#lib-list .track').first().click({ trial: true, position: { x: 80, y: 20 } });
   await page.screenshot({ path: path.join(out, 'library-' + width + '.png') });
@@ -410,8 +421,8 @@ async function main() {
       for (const source of ['system', 'app']) {
         if (source === 'system') await page.emulateMedia({ reducedMotion: 'reduce' });
         else { await navigate(page, 'settings'); await page.locator('#set-motion').check(); }
-        await page.locator('#theme-btn').hover();
-        assert.equal(await page.locator('#theme-btn').evaluate(el => getComputedStyle(el).transform), 'none', source + ' reduced motion prevents hover movement');
+        await page.locator('#top-more-btn').hover();
+        assert.equal(await page.locator('#top-more-btn').evaluate(el => getComputedStyle(el).transform), 'none', source + ' reduced motion prevents hover movement');
         if (source === 'system') await page.emulateMedia({ reducedMotion: 'no-preference' });
         else {
           await until(async () => (await fixture.api('/v1/settings')).reduce_motion === true, 'app reduced motion saved');
@@ -525,14 +536,14 @@ async function main() {
         await page.locator('.skset-link[data-skset-key="look"]').click();
         await page.locator('#set-motion').check();
       }
-      // 设置浮层是模态的：勾完开关先按 Esc 收起，#theme-btn 才点得到
+      // 设置浮层是模态的：勾完开关先按 Esc 收起，#top-more-btn 才点得到
       // （scrim 会一直吞掉浮层外的指针事件）。
       if (source === 'app') await page.keyboard.press('Escape');
       await prepareParticleClick(page);
-      await page.locator('#theme-btn').hover();
-      assert.equal(await page.locator('#theme-btn').evaluate(el => getComputedStyle(el).transform), 'none', source + ' reduced motion prevents hover movement');
-      await page.locator('#theme-btn').click();
-      await readParticleClick(page, 'theme-btn', source + ' reduced motion', 0);
+      await page.locator('#top-more-btn').hover();
+      assert.equal(await page.locator('#top-more-btn').evaluate(el => getComputedStyle(el).transform), 'none', source + ' reduced motion prevents hover movement');
+      await page.locator('#top-more-btn').click();
+      await readParticleClick(page, 'top-more-btn', source + ' reduced motion', 0);
       await page.keyboard.press('Escape');
       if (source === 'system') await page.emulateMedia({ reducedMotion: 'no-preference' });
       else {
@@ -548,17 +559,20 @@ async function main() {
     }
     await selectTheme(page, 'mineral');
     await prepareParticleClick(page);
-    await page.locator('#theme-btn').click();
+    await page.locator('#top-more-btn').click();
     // mineral 曾经是"纯换色的 legacy 主题"，点击反馈为 0；现在特效按主题
     // 声明，mineral 声明了 fx: 'shard'（7 粒晶体碎片）。这条断言钉的是
     // "不落在 glass/cel 两族的主题也有自己的特效"。
-    await readParticleClick(page, 'theme-btn', 'plain theme gets its own fx', 7, '0.24s');
+    await readParticleClick(page, 'top-more-btn', 'plain theme gets its own fx', 7, '0.24s');
     await page.keyboard.press('Escape');
     await selectTheme(page, 'celestial');
     pass('system and saved app reduced motion suppress particles; plain-look themes get their own declared fx');
 
     for (const width of [1440, 1024, 390, 320]) await auditLayout(page, width);
     await page.setViewportSize({ width: 1440, height: 1000 });
+    // 界面皮肤入口现在在 ⋮ 里：先开 ⋮，再用键盘点它——验的正是「收进去之后键盘还够得着」。
+    await page.locator('#top-more-btn').click();
+    await page.locator('#top-more-menu').waitFor({ state: 'visible' });
     await page.locator('#skin-btn').focus();
     await page.keyboard.press('Space');
     await page.locator('#skin-menu').waitFor({ state: 'visible' });
@@ -600,7 +614,7 @@ async function main() {
           return { width: innerWidth, pageWidth: document.scrollingElement.scrollWidth,
             topbar: rect(document.querySelector('.topbar')), brand: rect(document.querySelector('.qf-brand-group')),
             right: rect(document.querySelector('.top-right')), wordmark: getComputedStyle(document.querySelector('.brand-wordmark')).display,
-            buttons: ['capsule-entry', 'theme-btn', 'skin-btn', 'top-more-btn'].map(id => {
+            buttons: ['capsule-entry', 'stage3d-entry', 'top-more-btn'].map(id => {
               const el = document.getElementById(id), r = el.getBoundingClientRect();
               return { id, ...rect(el), hit: el.contains(document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2)) };
             }) };

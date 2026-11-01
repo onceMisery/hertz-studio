@@ -102,6 +102,8 @@ async function main() {
     await clickPlay(page.locator('.ts-row[data-online-id="online:netease:top-2"]').getByRole('button', { name: '在线试听', exact: true }));
     assert.equal(expected.at(-1), 'online:netease:top-2');
 
+    // 三维空间入口收在「更多工具」里：先开 ⋮ 再点那一项。
+    if (await page.locator('#top-more-menu').isHidden()) await page.locator('#top-more-btn').click();
     await page.locator('#space3d-entry').click();
     await page.locator('#sh-query').fill('space');
     await clickPlay(page.locator('.sh-track[data-track-id="online:qq:space-1"] .sh-track-main'));

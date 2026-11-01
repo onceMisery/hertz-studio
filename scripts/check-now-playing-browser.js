@@ -20,6 +20,14 @@ async function until(read, test) {
   while (Date.now() < deadline) { const value = await read(); if (test(value)) return value; await new Promise(resolve => setTimeout(resolve, 100)); }
   throw new Error('Timed out waiting for player state; last value: ' + JSON.stringify(await read()));
 }
+/// 「全屏播放页」现在收在播放页的「更多操作」面板里（顶栏那颗改成直接进沉浸声场），
+/// 所以进全屏要先开面板；进完按 Escape 把面板收回——后续步骤自己会再开。
+async function enterPlayerFullscreen(page) {
+  if (await page.locator('#np-tools').isHidden()) await page.locator('#np-more').click();
+  await page.locator('#np-fullscreen').click();
+  await page.waitForFunction(() => document.fullscreenElement?.id === 'np-modal');
+  await page.keyboard.press('Escape');
+}
 async function fixtures() {
   const dir = path.join(root, 'output/playwright/now-playing-fixtures'); fs.mkdirSync(dir, { recursive: true });
   const samples = 8000 * 180, wav = Buffer.alloc(44 + samples * 2);
@@ -133,8 +141,7 @@ async function fixtures() {
     check(await page.locator('#np-eq-pane #dsp-save').isVisible(), 'existing equalizer controls are usable in player');
     await page.keyboard.press('Escape');
     check(await page.locator('#np-modal').isVisible() && await page.locator('#np-eq-pane .set-group').count() === 0, 'tools close and equalizer nodes return');
-    await page.locator('#np-fullscreen').click();
-    await page.waitForFunction(() => document.fullscreenElement?.id === 'np-modal');
+    await enterPlayerFullscreen(page);
     await page.locator('#np-more').click(); await page.locator('#np-sleep').click();
     check(await page.locator('#ctx-menu').isVisible() && await page.evaluate(() => document.fullscreenElement.contains(document.getElementById('ctx-menu'))), 'sleep menu is available inside fullscreen player');
     await page.keyboard.press('Tab');
@@ -146,6 +153,21 @@ async function fixtures() {
     await page.keyboard.press('Escape');
     await page.waitForFunction(() => !document.fullscreenElement);
     check(await page.locator('#np-modal').isVisible(), 'leaving fullscreen keeps the ordinary player open');
+    // 播放页右上角那颗现在是「进沉浸声场」：开声场后播放页要让位（inert），
+    // 退出声场要回到播放页而不是掉回主界面。
+    await page.locator('#np-stage').click();
+    await page.waitForFunction(() => document.body.classList.contains('s3d-open'));
+    check(await page.evaluate(() => document.getElementById('stage3d').getAttribute('aria-hidden') === 'false'
+      && document.getElementById('np-modal').inert === true), '播放页按钮进入沉浸声场，播放页退出命中测试');
+    // 退出用两次 Escape：入口是「开声场 + 申请原生全屏」，第一下 Esc 归浏览器用来退出
+    // 全屏，第二下才轮到舞台自己关（与「Escape 或双击恢复」的说明一致）。
+    for (let i = 0; i < 2 && await page.evaluate(() => document.body.classList.contains('s3d-open')); i += 1) {
+      await page.keyboard.press('Escape');
+      await page.waitForTimeout(400);
+    }
+    await page.waitForFunction(() => !document.body.classList.contains('s3d-open'));
+    check(await page.locator('#np-modal').isVisible()
+      && !(await page.evaluate(() => document.getElementById('np-modal').inert)), '退出声场回到播放页');
     // Exercise the DBX dialog implementation with the real standalone transport.
     await page.evaluate(source => {
       const host = window.hertzHost;
@@ -153,8 +175,7 @@ async function fixtures() {
       (0, eval)(source);
       window.hertzHost = host;
     }, fs.readFileSync(path.join(root, 'plugin/ui/dialogs.js'), 'utf8'));
-    await page.locator('#np-fullscreen').click();
-    await page.waitForFunction(() => document.fullscreenElement?.id === 'np-modal');
+    await enterPlayerFullscreen(page);
     await page.locator('#np-more').click(); await page.locator('#np-sleep').click();
     await page.locator('#ctx-menu button').filter({hasText:'自定义分钟数'}).click();
     await page.locator('.hz-dialog-input').waitFor();

@@ -9945,6 +9945,9 @@ function showBootFailure(err) {
 /// `window.close()` 只对脚本自己开的窗口生效，普通标签页浏览器不让脚本关，所以
 /// 关不掉时整页换成一张收尾卡：比留在一个「服务已断开、正在重连」的死界面上诚实。
 async function exitService() {
+  // 这一键会停掉播放、结束服务进程并关掉页面，毁掉的是整个会话，所以先要一次确认。
+  // 收进 ⋮ 只是减少误触的第一层；确认才是「知道自己在关服务」的那层。
+  if (!(await modal().confirm('退出播放服务？正在播放的音乐会停止，服务进程与这个页面都会关掉。'))) return;
   ui.serviceExit.disabled = true;
   await transport.post('/v1/system/shutdown').catch(() => null);
   window.close();

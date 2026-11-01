@@ -1313,11 +1313,9 @@ body.reduce-motion .stage-ripple { display: none; }
    10. 主题色切换入口
    ========================================================================== */
 
-.theme-picker { position: relative; }
-
 /* 这个菜单由 theme-picker.js 挂到 <body> 上（共用 portal），并立刻设成
-   position: fixed —— 它原来的宿主 .theme-picker 在 .topbar 内部，而
-   .topbar / .column / .stage 都带 backdrop-filter，各自形成层叠上下文。
+   position: fixed —— 它写在 .topbar 子树里，而 .topbar / .column / .stage 都带
+   backdrop-filter，各自形成层叠上下文。
    同一层层叠上下文里 z-index:auto 按 DOM 顺序绘制，排在后面的玻璃面板会
    整块盖住顶栏子树；菜单自己的 z-index 再高也逃不出父级上下文——这正是
    「主题色菜单被挡住、只剩一条边」的原因。挂到 body 后它就是根层叠上下文里

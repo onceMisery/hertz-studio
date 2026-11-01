@@ -64,6 +64,8 @@ async function main() {
     page.setDefaultTimeout(20000);
     await page.goto(fixture.base, { waitUntil: 'domcontentloaded' });
     await page.waitForFunction(() => window.Space3D && document.getElementById('conn').textContent === '服务已连接');
+    // 三维空间入口收在「更多工具」里：先开 ⋮ 再点那一项。
+    if (await page.locator('#top-more-menu').isHidden()) await page.locator('#top-more-btn').click();
     await page.locator('#space3d-entry').click();
     await page.waitForFunction(() => Space3D.stats().renderer?.frameCount > 0);
     assert.equal(await page.evaluate(() => Space3D.stats().page), 'home');

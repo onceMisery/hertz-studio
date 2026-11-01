@@ -520,15 +520,72 @@ mod native {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    // 与 src/management.rs 的同名辅助一致：期望串也要过同一个 SDDL 转换器。Windows 把
+    // 内置 Administrator、SYSTEM 这类 Well-known 账户渲染成别名（`LA`、`SY`）而不是裸 SID，
+    // 拿 `Identity::current().user_sid` 拼字面量在管理员账户运行的 runner 上必然假失败。
+    fn dacl_text(descriptor: windows_sys::Win32::Security::PSECURITY_DESCRIPTOR) -> String {
+        use windows_sys::Win32::{
+            Foundation::LocalFree,
+            Security::{
+                Authorization::{
+                    ConvertSecurityDescriptorToStringSecurityDescriptorW, SDDL_REVISION_1,
+                },
+                DACL_SECURITY_INFORMATION,
+            },
+        };
+        let mut text = std::ptr::null_mut();
+        assert_ne!(
+            unsafe {
+                ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                    descriptor,
+                    SDDL_REVISION_1,
+                    DACL_SECURITY_INFORMATION,
+                    &mut text,
+                    std::ptr::null_mut(),
+                )
+            },
+            0
+        );
+        let mut size = 0;
+        while unsafe { *text.add(size) } != 0 {
+            size += 1;
+        }
+        let sddl = String::from_utf16(unsafe { std::slice::from_raw_parts(text, size) }).unwrap();
+        unsafe { LocalFree(text.cast()) };
+        sddl
+    }
+
+    fn rendered_dacl(sddl: &str) -> String {
+        use windows_sys::Win32::{
+            Foundation::LocalFree,
+            Security::Authorization::{
+                ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+            },
+        };
+        let source: Vec<u16> = sddl.encode_utf16().chain(std::iter::once(0)).collect();
+        let mut descriptor = std::ptr::null_mut();
+        assert_ne!(
+            unsafe {
+                ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                    source.as_ptr(),
+                    SDDL_REVISION_1,
+                    &mut descriptor,
+                    std::ptr::null_mut(),
+                )
+            },
+            0
+        );
+        let text = dacl_text(descriptor);
+        unsafe { LocalFree(descriptor) };
+        text
+    }
+
     #[tokio::test]
     async fn pipe_dacl_contains_only_current_user_sid_and_is_protected() {
         use windows_sys::Win32::{
             Foundation::LocalFree,
             Security::{
-                Authorization::{
-                    ConvertSecurityDescriptorToStringSecurityDescriptorW, GetSecurityInfo,
-                    SDDL_REVISION_1, SE_FILE_OBJECT,
-                },
+                Authorization::{GetSecurityInfo, SE_FILE_OBJECT},
                 DACL_SECURITY_INFORMATION,
             },
         };
@@ -549,32 +606,15 @@ mod native {
             },
             0
         );
-        let mut text = std::ptr::null_mut();
-        assert_ne!(
-            unsafe {
-                ConvertSecurityDescriptorToStringSecurityDescriptorW(
-                    descriptor,
-                    SDDL_REVISION_1,
-                    DACL_SECURITY_INFORMATION,
-                    &mut text,
-                    std::ptr::null_mut(),
-                )
-            },
-            0
-        );
-        let mut size = 0;
-        while unsafe { *text.add(size) } != 0 {
-            size += 1;
-        }
-        let sddl = String::from_utf16(unsafe { std::slice::from_raw_parts(text, size) }).unwrap();
-        unsafe {
-            LocalFree(text.cast());
-            LocalFree(descriptor);
-        }
+        let sddl = dacl_text(descriptor);
+        unsafe { LocalFree(descriptor) };
         // Windows expands generic-all (GA) to the file object's full-access mask (FA).
         assert_eq!(
             sddl,
-            format!("D:P(A;;FA;;;{})", Identity::current().unwrap().user_sid)
+            rendered_dacl(&format!(
+                "D:P(A;;FA;;;{})",
+                Identity::current().unwrap().user_sid
+            ))
         );
     }
 }

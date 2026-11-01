@@ -664,6 +664,10 @@ async function main() {
     await choose('room-custom');
     await page.evaluate(() => { document.body.classList.remove('room-view'); document.querySelector('#view-room').hidden = true; });
     const outer = page.locator('#theme-btn');
+    // 这个 fixture 只注入 themes/theme-picker/room 几个模块，不跑 app.js 的
+    // initTopMoreMenu，所以「更多工具」容器还是初始 hidden——主题入口现在住在里面，
+    // 先把容器打开再点，否则点不到。
+    await page.evaluate(() => { document.getElementById('top-more-menu').hidden = false; });
     await outer.click();
     assert.equal(await menu.locator('[aria-selected="true"]').getAttribute('data-theme-id'), 'room-custom', 'application uses the same selected theme and menu');
     await menu.locator('[data-theme-id="orbit-fog"]').click();
