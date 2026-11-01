@@ -25,7 +25,8 @@ fn com_stream_reads_seeks_and_stats() {
     let (_dir, path, body) = fixture("istream-basic");
     let pool = StreamSlotPool::new();
     assert_eq!(pool.active(), 0);
-    let stream: IStream = MediaIStream::open(&path, &pool).unwrap();
+    // 200 响应：窗口是整个文件（base=0, len=文件长度）。
+    let stream: IStream = MediaIStream::open(&path, &pool, (0, body.len() as u64)).unwrap();
     assert_eq!(pool.active(), 1, "打开即占用一个流槽");
 
     unsafe {
@@ -90,7 +91,7 @@ fn com_stream_reads_seeks_and_stats() {
 fn com_clone_has_independent_cursor() {
     let (_dir, path, body) = fixture("istream-clone");
     let pool = StreamSlotPool::new();
-    let stream: IStream = MediaIStream::open(&path, &pool).unwrap();
+    let stream: IStream = MediaIStream::open(&path, &pool, (0, body.len() as u64)).unwrap();
     unsafe {
         stream.Seek(1000, STREAM_SEEK_SET, None).ok().unwrap();
         let clone = stream.Clone().unwrap();
@@ -123,13 +124,89 @@ fn com_clone_has_independent_cursor() {
 
 #[test]
 fn com_write_is_denied_and_agile_marker_present() {
-    let (_dir, path, _body) = fixture("istream-write");
+    let (_dir, path, body) = fixture("istream-write");
     let pool = StreamSlotPool::new();
-    let stream: IStream = MediaIStream::open(&path, &pool).unwrap();
+    let stream: IStream = MediaIStream::open(&path, &pool, (0, body.len() as u64)).unwrap();
     unsafe {
         let mut written = 0u32;
         let hr = stream.Write("no".as_ptr().cast(), 2, Some(&mut written));
         assert!(hr.is_err(), "只读流的 Write 必须拒绝");
 
+    }
+}
+
+/// 206 语义（§8.1）：流的内容是 body 窗口，不是整个文件。
+/// 浏览器按 body 语义消费——流位置 0 必须就是 `Content-Range` 的 start 字节。
+#[test]
+fn com_stream_serves_a_range_window() {
+    let (_dir, path, body) = fixture("istream-window");
+    let pool = StreamSlotPool::new();
+    // bytes=1000-1499 → base=1000, len=500。
+    let stream: IStream = MediaIStream::open(&path, &pool, (1000, 500)).unwrap();
+    unsafe {
+        // 位置 0 即 body 首字节：文件偏移 1000，不是文件开头。
+        let mut buffer = [0u8; 8];
+        let mut read = 0u32;
+        stream
+            .Read(buffer.as_mut_ptr().cast(), 8, Some(&mut read))
+            .ok()
+            .unwrap();
+        assert_eq!(read, 8);
+        assert_eq!(&buffer, &body[1000..1008]);
+
+        // Stat 报窗口长度（= Content-Length），不是文件总长。
+        let mut stat = Default::default();
+        stream.Stat(&mut stat, STATFLAG_NONAME).ok().unwrap();
+        assert_eq!(stat.cbSize, 500);
+
+        // Seek 的三个原点都相对窗口，不是相对文件。
+        let mut position = 0u64;
+        stream.Seek(-8, STREAM_SEEK_END, Some(&mut position)).ok().unwrap();
+        assert_eq!(position, 492, "END 相对窗口末端");
+        stream
+            .Read(buffer.as_mut_ptr().cast(), 8, Some(&mut read))
+            .ok()
+            .unwrap();
+        assert_eq!(read, 8);
+        assert_eq!(&buffer, &body[1492..1500]);
+
+        // 越过窗口末端 → 越界拒绝；窗口内读到末尾 → 0。
+        assert!(stream.Seek(501, STREAM_SEEK_SET, None).is_err());
+        stream.Seek(500, STREAM_SEEK_SET, None).ok().unwrap();
+        stream
+            .Read(buffer.as_mut_ptr().cast(), 8, Some(&mut read))
+            .ok()
+            .unwrap();
+        assert_eq!(read, 0);
+    }
+}
+
+/// 窗口流的 Clone 也要带窗口，且各自游标独立。
+#[test]
+fn com_clone_keeps_the_window() {
+    let (_dir, path, body) = fixture("istream-window-clone");
+    let pool = StreamSlotPool::new();
+    let stream: IStream = MediaIStream::open(&path, &pool, (2000, 100)).unwrap();
+    unsafe {
+        let mut buffer = [0u8; 4];
+        let mut read = 0u32;
+        let clone = stream.Clone().unwrap();
+        stream
+            .Read(buffer.as_mut_ptr().cast(), 4, Some(&mut read))
+            .ok()
+            .unwrap();
+        assert_eq!(&buffer, &body[2000..2004]);
+        clone
+            .Read(buffer.as_mut_ptr().cast(), 4, Some(&mut read))
+            .ok()
+            .unwrap();
+        assert_eq!(&buffer, &body[2000..2004], "克隆的起点仍是窗口起点");
+        // 克隆推进不影响原流。
+        clone.Seek(50, STREAM_SEEK_SET, None).ok().unwrap();
+        stream
+            .Read(buffer.as_mut_ptr().cast(), 4, Some(&mut read))
+            .ok()
+            .unwrap();
+        assert_eq!(&buffer, &body[2004..2008]);
     }
 }
