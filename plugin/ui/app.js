@@ -2691,6 +2691,12 @@ function emotionPreviewReduced() {
   return state.settings.reduce_motion === true || state.settings.reduce_motion_lyrics === true ||
     !!(emotionPreviewMedia && emotionPreviewMedia.matches);
 }
+// 降级档摘特效只发生在 CSS 里（body.stage-lowfx 把 .emo-glyph-fx 整层 display:none），
+// 上面那套 reduce-motion 判据看不见它。样本必须自己认这个 class，否则面板会一边
+// 写着「6 秒循环演示」一边什么都不画——排查的人只能去翻样式表才发现层被藏了。
+function emotionPreviewFxHidden() {
+  return document.body.classList.contains('stage-lowfx');
+}
 function drawEmotionPreview(seconds, reduced) {
   if (!emotionPreviewState) return;
   emotionPreviewNodes.forEach((node, i) => {
@@ -2734,10 +2740,15 @@ function syncEmotionPreview() {
   text.style.color = lyricEmotionPalette() ? profile.palette.ink : '#eeeeef';
   emotionPreviewEm = parseFloat(getComputedStyle(text).fontSize) || 40;
   const reduced = emotionPreviewReduced();
-  emotionPreviewNodes.forEach((node, i) => api.prepareGlyphEffects(node, emotionPreviewState, i, emotionPreviewNodes.length));
+  const fxHidden = emotionPreviewFxHidden();
+  emotionPreviewNodes.forEach((node, i) => fxHidden
+    ? api.clearGlyphEffects(node)
+    : api.prepareGlyphEffects(node, emotionPreviewState, i, emotionPreviewNodes.length));
   $('emotion-preview-note').textContent = reduced
     ? '已减少动态效果；保留字形与配色。点击样本以手动模式应用。'
-    : '6 秒循环演示 · 点击样本应用动画与字形；不发送歌词。';
+    : fxHidden
+      ? '性能降级中：具象特效已隐藏，字形与动画保留。'
+      : '6 秒循环演示 · 点击样本应用动画与字形；不发送歌词。';
   drawEmotionPreview(0, reduced);
   if (!reduced) {
     emotionPreviewStarted = performance.now();

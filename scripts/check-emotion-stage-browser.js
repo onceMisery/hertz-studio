@@ -101,7 +101,17 @@ async function run() {
       assert.ok(effect.paths > 0 && effect.width > 10 && effect.pointer === 'none', id + ' effect is visible and cannot block input');
       if (['anger', 'sorrow'].includes(id)) await page.screenshot({ path: path.join(output, 'literal-' + id + '.png') });
     }
-    console.log('PASS preview: seven literal glyph effects plus existing font animations');
+    // 降级档藏特效层只发生在 CSS 里；面板文案必须自己认这个 class，否则它一边写着
+    // 「6 秒循环演示」一边什么都不画，看的人只能翻样式表才发现层被藏了。
+    await page.evaluate(() => document.body.classList.add('stage-lowfx'));
+    await page.waitForFunction(() => document.getElementById('emotion-preview-note').textContent.includes('性能降级中'));
+    assert.equal(await page.locator('#emotion-preview-text .emo-glyph-fx').count(), 0,
+      'low fx drops the specimen particles instead of faking a demo');
+    await page.evaluate(() => document.body.classList.remove('stage-lowfx'));
+    await page.waitForFunction(() => document.getElementById('emotion-preview-note').textContent.includes('6 秒循环演示'));
+    assert.ok(await page.locator('#emotion-preview-text .emo-glyph-fx').count() > 0,
+      'particles return as soon as the latch lifts');
+    console.log('PASS preview: seven literal glyph effects, existing font animations, low-fx honesty');
     assert.equal(modelRequests.length, 0, 'manual preview never sends lyrics to a model');
     await page.locator('#set-emotion-ai-authorized').check();
     await page.waitForFunction(() => !document.querySelector('#set-emotion-mode option[value="auto"]').disabled);

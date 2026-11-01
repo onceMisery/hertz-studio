@@ -58,7 +58,9 @@
   var userReduced = false;
   var systemMotion = null;
   var lowfx = false;
-  var fps = { frames: 0, since: 0, last: 0, done: false };
+  // 设备判定（启动档位、视口档位）给出的降级是本次会话的下限，探针的升档不许越过它。
+  var lowfxFloored = false;
+  var fps = { frames: 0, since: 0, last: 0, done: false, nextAt: 0, good: 0 };
   var ringBars = [];
 
   // 本地时钟每帧的间隔，用来把 lerp 归一化，掉帧时滚动速度不会变慢
@@ -1313,10 +1315,11 @@
   function refreshViewport() {
     if (hidden || document.hidden) return;
     tier = Math.min(tier, detectTier());
-    if (tier === 0) setLowFx(true);
+    if (tier === 0) { lowfxFloored = true; setLowFx(true); }
     // Native fullscreen and display changes invalidate the startup measurements.
     fps.done = false;
     fps.since = 0;
+    fps.good = 0;
     hzSamples.length = 0;
     displayHz = 0;
     lastFrameAt = 0;
@@ -1336,11 +1339,34 @@
     return document.body.classList.contains('stage-open');
   }
 
+  // 降级档的进出判据。抽成不带外部状态的纯函数是为了能被逐段抠出去跑：一段合成
+  // 帧率序列就能钉住「一次抖动不再锁死整场」和「不在阈值附近来回抖」，
+  // 不用在真机上等满一分钟。阈值写成局部量同样是为了整段可搬。
+  //   进：一个窗口 <40fps（定太低会让好机器也降级）；
+  //   出：连续 3 个窗口 ≥52fps——留 12fps 回差，40 上下抖动的机器不会反复升降。
+  function lowFxDecision(state, measured) {
+    var ENTER_HZ = 40, EXIT_HZ = 52, EXIT_WINDOWS = 3;
+    var next = { on: state.on, good: 0 };
+    if (measured >= EXIT_HZ) {
+      next.good = state.good + 1;
+      if (!state.floored && next.good >= EXIT_WINDOWS) next.on = false;
+    } else if (measured < ENTER_HZ) {
+      next.on = true;
+    }
+    return next;
+  }
+
   // 帧率只在「连续播放」时才有意义：暂停后 rAF 会停，稀疏的几帧不能拿来算。
   // 另外起步 1.2s 天然抖（首帧渲染 + WS 建连），量它只会把好机器判成弱机。
   function sampleFrameRate() {
-    if (fps.done || !playing) return;
+    var REPROBE_MS = 20000;
+    if (!playing) return;
     var t = now();
+    // 一窗定档不等于从此不再量：冷却到期重开一窗，降级才有出路。
+    if (fps.done) {
+      if (t < fps.nextAt) return;
+      fps.done = false; fps.frames = 0; fps.since = 0;
+    }
     if (!fps.since || t - fps.last > 250) {
       fps.since = t; fps.frames = 0; fps.last = t;
       return;
@@ -1352,8 +1378,10 @@
     if (span < 3200) return;
     var f = (fps.frames * 1000) / (span - 1200);
     fps.done = true;
-    // 低于 40fps 才认为这台机器扛不住大面积模糊；阈值定太低会让好机器也降级。
-    if (f < 40) setLowFx(true);
+    fps.nextAt = t + REPROBE_MS;
+    var d = lowFxDecision({ on: lowfx, good: fps.good, floored: lowfxFloored }, f);
+    fps.good = d.good;
+    if (d.on !== lowfx) setLowFx(d.on);
     document.dispatchEvent(new CustomEvent('stage:fps', { detail: { fps: f, lowfx: lowfx } }));
   }
 
@@ -1494,9 +1522,10 @@
     if (narrowMql.addEventListener) narrowMql.addEventListener('change', onNarrowChange);
     else if (narrowMql.addListener) narrowMql.addListener(onNarrowChange);
     tier = detectTier();
-    // 弱机先按降级启动。帧率探针后面测出来够用也不会自动升回来——升档会让
-    // 画面突然多出一层效果，比一直朴素着更让人不适。
-    if (tier === 0) setLowFx(true);
+    // 弱机先按降级启动，并且这是本次会话的下限：帧率探针后面测出来够用也不会
+    // 把它升回来——升档会让画面突然多出一层效果，比一直朴素着更让人不适。
+    // 探针自己测出来的降级不在此列，它按 lowFxDecision 的回差进出。
+    if (tier === 0) { lowfxFloored = true; setLowFx(true); }
 
     buildRing(tier === 0 ? 0 : 36);
     paintEnergy();
@@ -1718,8 +1747,8 @@
     },
     // 实测显示刷新率（0 = 样本还不够）。帧门换算、档位文案、诊断都用它。
     displayHz: function () { return displayHz; },
-    // 当前设备档位（0 eco / 1 balanced / 2 high）与降级态。帧率探针只会把它
-    // 往下调，所以启动后任何时刻读到的都是「这台机器目前确定扛得住的上限」。
+    // 当前设备档位（0 eco / 1 balanced / 2 high）与降级态。设备判定给出来的降级
+    // 是下限，探针只会往下压；探针自己压下去的那档在连续几轮够快之后会升回来。
     tier: function () { return lowfx ? 0 : tier; },
     isLowFx: function () { return lowfx; },
     // Visual layers under the immersive stage stop drawing. The shared clock,

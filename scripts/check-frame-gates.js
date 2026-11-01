@@ -17,7 +17,9 @@
 //   1. 换算：N = ceil(刷新率 / 目标)，任何目标都不兑现成超过预算的帧率；
 //   2. 兑现：跑出来的帧率恰好是 hz / N，且给帧的间隔是整 N 帧，不抖不漂；
 //   3. 停机：fpsFn 报 0 就是这个门一帧都不要（0 的含义全局唯一，不是"不封顶"）；
-//   4. 档位表不许再说谎：写死的目标帧率必须同时是 60 与 120 的整数分频。
+//   4. 档位表不许再说谎：写死的目标帧率必须同时是 60 与 120 的整数分频；
+//   5. 降级档的进出：探针压下去的那档在连续几轮够快之后要能升回来，设备判定
+//      给出来的下限不许升，且阈值附近抖动的机器不能来回抖。
 //
 // 判定用的函数是从 plugin/ui/stage.js 里整段抠出来执行的，不是照着源码另写一份：
 // 换算改了，这里跟着一起变。
@@ -287,6 +289,62 @@ function feedHz(hz, times) {
     // 三维层的 240 = 「每个 rAF 都给」是刻意约定，不是漏网的谎数。
     ok(/return 240;/.test(stageSrc) || /return 240;/.test(read('stage3d.js')),
       '240（每帧都给）这个约定还在，帧门未封顶时的写法');
+  }
+
+  section('降级档：探针压下去的能升回来，设备判定的下限不许升');
+  {
+    // 探针原来一窗定档就再也不量（fps.done 只被视口变化清），setLowFx 也没有
+    // false 的调用方 —— 播放中途一次抖动就把降级锁到页面重载，被藏掉的不止模糊，
+    // 还有情绪层的具象特效。这里用合成帧序列钉住进出与回差。
+    const clock = { t: 10000 };   // 不从 0 起：fps.since 用 0 当「还没开始」
+    const fx = {
+      console, Math, playing: true, lowfx: false, lowfxFloored: false,
+      fps: { frames: 0, since: 0, last: 0, done: false, nextAt: 0, good: 0 },
+      latch: [], document: { dispatchEvent() {} },
+      CustomEvent: function (type, init) { this.type = type; this.detail = init && init.detail; },
+      now: () => clock.t,
+    };
+    vm.createContext(fx);
+    vm.runInContext(grabFn(stageSrc, 'function lowFxDecision(') + '\n'
+      + grabFn(stageSrc, 'function sampleFrameRate(') + '\n'
+      + 'this.setLowFx = function (on) { lowfx = on; latch.push(on); };\n'
+      + 'this.read = sampleFrameRate;', fx);
+    // 一个测量窗口要跑满 3.2s；按帧间隔喂进去，测出来的就是 1000/间隔。
+    const runWindow = (gapMs) => {
+      for (let i = 0; i < 220; i += 1) { clock.t += gapMs; fx.read(); }
+    };
+    const cooldown = () => { clock.t += 20001; };
+
+    runWindow(30);   // ~33fps
+    eq(fx.lowfx, true, '一个 <40fps 的窗口就压进降级档');
+    eq(fx.latch.length, 1, '压档只写一次 setLowFx');
+    eq(fx.fps.done, true, '窗口跑完就定档，等冷却');
+    const latchAfterDrop = fx.latch.length;
+    runWindow(16.7);  // ~60fps，但还在冷却期内
+    eq(fx.latch.length, latchAfterDrop, '冷却期内不许重测（否则一掉帧就连环升降）');
+    eq(fx.lowfx, true, '冷却期内快帧不许偷偷升档');
+
+    cooldown(); runWindow(16.7);
+    eq(fx.lowfx, true, '第 1 个够快窗口只记账不升档');
+    eq(fx.fps.good, 1, '够快窗口计入连续达标数');
+    cooldown(); runWindow(22);   // ~45fps：40 与 52 之间
+    eq(fx.fps.good, 0, '回差区间的窗口把连续达标数清零');
+    eq(fx.lowfx, true, '40–52fps 既不压档也不升档');
+    cooldown(); runWindow(18);   // ~55fps
+    cooldown(); runWindow(18);
+    eq(fx.lowfx, true, '第 2 个够快窗口还不够，得连着 3 个');
+    cooldown(); runWindow(16.7);
+    eq(fx.lowfx, false, '连续 3 个 ≥52fps 的窗口把降级档升回来');
+    eq(fx.latch[fx.latch.length - 1], false, '升档同样只写一次 setLowFx');
+    cooldown(); runWindow(30);
+    eq(fx.lowfx, true, '升回来之后再掉到 40fps 以下会重新压下去');
+
+    fx.lowfxFloored = true;   // 设备判定：这台机器就是弱机，探针不许替它翻案
+    for (let i = 0; i < 6; i += 1) { cooldown(); runWindow(16.7); }
+    eq(fx.lowfx, true, '设备判定给出来的下限，快窗口不许升');
+    fx.lowfxFloored = false;
+    for (let i = 0; i < 3; i += 1) { cooldown(); runWindow(16.7); }
+    eq(fx.lowfx, false, '下限解除后同样的快窗口序列可以升档');
   }
 
   console.log(`\n帧门契约检查：${checks} 项` + (failures ? `，${failures} 项失败` : '全部通过'));
