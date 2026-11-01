@@ -200,7 +200,7 @@
         if (startDraftAdding || startDraft && startDraft.phase !== 'ready') throw new Error('请先处理上一组选曲的分享或入队结果。');
         startDraft = { tracks: [track], phase: 'ready' }; await addStartDraft();
       },
-      markChatRead() { unreadChat = 0; if (refs.chatTab) refs.chatTab.textContent = '聊天'; },
+      markChatRead() { unreadChat = 0; if (refs.chatTab) refs.chatTab.textContent = '聊天'; if (refs.mobileChat) refs.mobileChat.setAttribute('aria-label', '聊天'); },
       nickname: () => rememberedNickname,
       avatar: () => rememberedAvatar,
       rememberAvatar(value) { rememberedAvatar = validAvatar(value) ? value : ''; try { global.localStorage.setItem('hertz.room.avatar.v1', rememberedAvatar); } catch (_) {} },
@@ -711,13 +711,14 @@
         incoming.forEach(message => {
           const id = counter(message.message_id), age = Date.now() - Number(message.received_at_ms);
           if (!seen.has(message.message_id) && baseline != null && !reset && id > counter(baseline)) {
-            if (!workspaceVisible || workspace.currentPage() !== 'play' || root.dataset.roomAside !== 'chat' || document.hidden) unreadChat++;
+            if (!workspaceVisible || workspace.currentPage() !== 'play' || root.dataset.roomChatVisible !== 'true' || document.hidden) unreadChat++;
             if (age >= 0 && age < 5000 && message.content_kind !== 'song') animateMessage(message);
           }
           seen.add(message.message_id); if (id > newest) newest = id;
         });
         liveChatId = String(newest);
         if (refs.chatTab) refs.chatTab.textContent = unreadChat ? '聊天 · ' + Math.min(unreadChat, 99) + (unreadChat > 99 ? '+' : '') : '聊天';
+        if (refs.mobileChat) refs.mobileChat.setAttribute('aria-label', unreadChat ? '聊天 · ' + unreadChat + ' 条未读' : '聊天');
       }
       incoming.forEach(m => {
         // A fresh history read can revoke a song reference without changing

@@ -322,7 +322,8 @@
     let stageOverlay = null, stageComposerDock = null, composerPage = api.workspace().currentPage();
     refs.placeChatComposer = page => {
       composerPage = page;
-      (stageOverlay ? stageComposerDock : page === 'play' ? stageDock : chatDock).append(composer);
+      const dock = stageOverlay ? stageComposerDock : page === 'play' ? stageDock : chatDock;
+      if (composer.parentNode !== dock) dock.append(composer);
       refs.chatSend.textContent = stageOverlay || page === 'play' ? '发送弹幕' : '发送';
     };
     refs.setStageVisible = visible => {
@@ -482,6 +483,7 @@
     const count = snapshot.online_count == null ? (snapshot.members || []).length : snapshot.online_count;
     const capacity = snapshot.member_capacity == null ? '' : ' / ' + snapshot.member_capacity;
     refs.members.replaceChildren(h('h3', '', '房间成员 · ' + count + capacity)); refs.memberPreview.replaceChildren(); refs.memberStrip.replaceChildren();
+    if (refs.memberCount) refs.memberCount.textContent = count + capacity + ' 位成员';
     const members = snapshot.members || [];
     if (!members.length) refs.memberPreview.append(h('p', 'room-sub', '等待成员状态'));
     members.forEach((m, index) => {
@@ -498,7 +500,13 @@
       }
       refs.members.append(card);
       const avatar = () => { const node = person(name, m.id === snapshot.member_id ? api.avatar() : m.avatar); node.setAttribute('aria-label', name + ' · ' + state); return node; };
-      if (index < 5) { const summary = h('button', 'room-member-summary'), copy = h('div'); summary.type = 'button'; summary.onclick = () => m.id === snapshot.member_id ? api.workspace().openSettings('output') : api.workspace().openSettings('members'); copy.append(h('strong', '', name + (m.owner ? ' · 房主' : '') + (m.id === snapshot.member_id ? ' · 你' : '')), h('small', '', state)); summary.append(avatar(), copy); refs.memberPreview.append(summary); }
+      const summary = h('button', 'room-member-summary'), previewCopy = h('div'); summary.type = 'button';
+      summary.onclick = () => m.id === snapshot.member_id ? api.workspace().openSettings('output') : api.workspace().openSettings('members');
+      const heading = h('strong', '', name + (m.id === snapshot.member_id ? ' · 你' : ''));
+      if (m.owner) heading.append(h('span', 'room-host-badge', '房主'));
+      const memberState = h('small', 'room-member-state', state);
+      memberState.dataset.state = offline || m.connected === false ? 'offline' : m.ready ? 'ready' : 'waiting';
+      previewCopy.append(heading, memberState); summary.append(avatar(), previewCopy); refs.memberPreview.append(summary);
       if (index < 8) refs.memberStrip.append(avatar());
     });
     if (members.length > 8) refs.memberStrip.append(h('span', 'room-avatar', '+' + (members.length - 8)));
@@ -506,7 +514,8 @@
   function drawWaiting() {
     if (!refs.waiting) return;
     const snapshot = api.snapshot(), waiting = !snapshot.current_track && !snapshot.playing && !Number(snapshot.queue_count) && !refs.waitingDismissed;
-    refs.waiting.hidden = !waiting; refs.playLayout.hidden = waiting;
+    const mobilePanel = api.root().dataset.roomMobile === 'true' && api.root().dataset.roomMobilePage !== 'play';
+    refs.waiting.hidden = !waiting || mobilePanel; refs.playLayout.hidden = waiting && !mobilePanel;
     const members = snapshot.members || [], capacity = Number(snapshot.member_capacity) || 0;
     refs.waitingCount.textContent = members.length + ' 人已加入' + (capacity ? ' · ' + capacity + ' 个位置，还剩 ' + Math.max(0, capacity - members.length) + ' 个空位' : ' · 等待朋友加入');
     const signature = JSON.stringify([members, api.avatar(), capacity]);
@@ -533,6 +542,7 @@
     items.slice(-4).forEach(item => { const row = h('li', '', (item.name || '成员') + ' ' + (labels[item.kind] || '更新了房间')); row.dataset.sequence = item.seq; refs.activity.append(row); });
   }
   function drawMessage(message, node) {
+    node.classList.toggle('room-message-mine', !!message.member_id && message.member_id === api.snapshot().member_id);
     node.append(h('strong', '', message.name + ' '), h('span', '', message.text));
     if (message.content_kind === 'song') {
       const song = message.sharing_revision && message.sharing_revision !== api.snapshot().sharing_revision ? null : message.song;
@@ -591,6 +601,8 @@
     const pending = applications.filter(application => application.state === 'pending');
     refs.memberDot.hidden = !pending.length;
     refs.memberTab.setAttribute('aria-label', pending.length ? '成员，' + pending.length + ' 个待处理申请' : '成员');
+    if (refs.mobileMembers) refs.mobileMembers.setAttribute('aria-label', pending.length ? '成员，' + pending.length + ' 个待处理申请' : '成员');
+    if (refs.manageMembers) refs.manageMembers.textContent = pending.length ? '管理成员 · ' + pending.length + ' 个待处理申请' : '管理成员与申请';
     drawAdmissionRows(refs.admissionList, applications);
     drawAdmissionRows(refs.asideAdmissionList, applications);
     drawAdmissionRows(refs.admissionPopupList, pending);
@@ -774,8 +786,11 @@
     const aside = h('aside', 'room-play-aside'), asideTabs = h('div', 'room-stage-tabs');
     asideTabs.setAttribute('role', 'tablist'); asideTabs.setAttribute('aria-label', '一起听现场'); aside.append(asideTabs);
     const queuePanel = h('div', 'room-aside-panel'), chatPanel = h('div', 'room-aside-panel'), memberPanel = h('div', 'room-aside-panel');
-    const memberPreview = section(memberPanel, '房间成员'); refs.memberPreview = h('div', 'room-members-preview');
-    memberPreview.append(refs.memberPreview, navigationButton('管理成员与申请', () => workspace.openSettings('members')));
+    const memberPreview = section(memberPanel, '一起听的人', 'room-people-section'); refs.memberPreview = h('div', 'room-members-preview');
+    const peopleHead = h('div', 'room-people-heading'); refs.memberCount = h('p', 'room-sub');
+    peopleHead.append(refs.memberCount, navigationButton('+ 邀请', () => go('invite'), 'primary room-people-invite'));
+    refs.manageMembers = navigationButton('管理成员与申请', () => workspace.openSettings('members'), 'room-manage-members');
+    memberPreview.append(peopleHead, refs.memberPreview, refs.manageMembers);
     refs.memberStrip = h('div', 'room-member-strip'); refs.activity = h('ol', 'room-activity'); memberPreview.append(refs.memberStrip, refs.activity);
     refs.queuePreview = h('ol', 'room-queue-preview'); refs.queuePreview.hidden = true;
     const queue = section(queuePanel, '共同队列', 'room-queue-section'), queueTools = h('div', 'room-queue-tools');
@@ -796,20 +811,54 @@
     refs.memberTab = asideEntries.find(entry => entry.key === 'members').tab;
     refs.memberDot = h('span', 'room-member-dot'); refs.memberDot.hidden = true; refs.memberDot.setAttribute('aria-hidden', 'true'); refs.memberTab.append(refs.memberDot);
     refs.markChatRead = () => api.markChatRead();
+    const mobileMedia = global.matchMedia?.('(max-width: 760px)'), wideMedia = global.matchMedia?.('(min-width: 1200px) and (min-height: 621px)');
+    const mobileNav = api.root().querySelector('.room-mobile-navigation'), mobileEntries = [];
+    let selectedAside = wideMedia?.matches ? 'chat' : 'queue', mobilePage = 'play';
+    function updateLayout() {
+      const mobile = !!mobileMedia?.matches, wide = !!wideMedia?.matches;
+      const key = mobile ? mobilePage : selectedAside;
+      const chatVisible = key === 'chat' || wide && key === 'members';
+      api.root().dataset.roomMobile = String(mobile); api.root().dataset.roomMobilePage = mobilePage;
+      api.root().dataset.roomAside = key; api.root().dataset.roomChatVisible = String(chatVisible);
+      now.hidden = mobile && key !== 'play'; aside.hidden = mobile && key === 'play';
+      asideEntries.forEach(entry => {
+        const selected = entry.key === key;
+        entry.panel.hidden = !(selected || wide && (entry.key === 'members' || key === 'members' && entry.key === 'chat'));
+        entry.tab.hidden = wide && entry.key === 'members';
+        entry.tab.setAttribute('aria-selected', String(selected || wide && key === 'members' && entry.key === 'chat'));
+        entry.tab.tabIndex = entry.tab.getAttribute('aria-selected') === 'true' ? 0 : -1;
+      });
+      memberPanel.setAttribute('role', wide ? 'region' : 'tabpanel');
+      (mobile && refs.mobileMembers ? refs.mobileMembers : wide ? peopleHead : refs.memberTab).append(refs.memberDot);
+      mobileEntries.forEach(entry => { entry.node.classList.toggle('active', entry.key === mobilePage); entry.node.setAttribute('aria-current', entry.key === mobilePage ? 'page' : 'false'); });
+      if (refs.placeChatComposer) refs.placeChatComposer(chatVisible ? 'chat' : 'play');
+      if (chatVisible && workspace.currentPage() === 'play' && refs.markChatRead) refs.markChatRead();
+      drawWaiting();
+    }
     function selectAside(key) {
       if (!asideEntries.some(entry => entry.key === key)) return;
-      api.root().dataset.roomAside = key;
-      asideEntries.forEach(entry => { const selected = entry.key === key; entry.panel.hidden = !selected; entry.tab.setAttribute('aria-selected', String(selected)); entry.tab.tabIndex = selected ? 0 : -1; });
-      if (refs.placeChatComposer) refs.placeChatComposer(key === 'chat' ? 'chat' : 'play');
-      if (key === 'chat' && refs.markChatRead) refs.markChatRead();
+      selectedAside = key; mobilePage = key; updateLayout();
+    }
+    if (mobileNav) {
+      mobileNav.hidden = false; mobileNav.setAttribute('aria-label', '房间导航');
+      [['play', '播放', 'headphones'], ['queue', '队列', 'queue'], ['members', '成员', 'user'], ['chat', '聊天', 'chat']].forEach(([key, label, symbol]) => {
+        const node = navigationButton('', () => { if (workspace.currentPage() !== 'play') workspace.navigate('play'); mobilePage = key; if (key !== 'play') selectedAside = key; updateLayout(); }, 'room-mobile-item');
+        node.append(global.HertzRoomWorkspace.icon(symbol), h('span', '', label)); node.setAttribute('aria-label', label);
+        if (key === 'chat') refs.mobileChat = node;
+        if (key === 'members') refs.mobileMembers = node;
+        mobileEntries.push({ key, node }); mobileNav.append(node);
+      });
     }
     refs.selectTab = selectAside;
-    asideEntries.forEach((entry, index) => { entry.tab.onkeydown = event => {
+    asideEntries.forEach(entry => { entry.tab.onkeydown = event => {
       if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return; event.preventDefault();
-      const next = event.key === 'Home' ? 0 : event.key === 'End' ? 2 : (index + (event.key === 'ArrowRight' ? 1 : -1) + 3) % 3;
-      selectAside(asideEntries[next].key); asideEntries[next].tab.focus({ preventScroll: true });
+      const visible = asideEntries.filter(item => !item.tab.hidden), currentIndex = visible.indexOf(entry);
+      const next = event.key === 'Home' ? 0 : event.key === 'End' ? visible.length - 1 : (currentIndex + (event.key === 'ArrowRight' ? 1 : -1) + visible.length) % visible.length;
+      selectAside(visible[next].key); visible[next].tab.focus({ preventScroll: true });
     }; });
-    selectAside('queue'); playLayout.append(aside); pages.play.append(playLayout);
+    playLayout.append(aside); pages.play.append(playLayout); updateLayout();
+    mobileMedia?.addEventListener?.('change', updateLayout); wideMedia?.addEventListener?.('change', updateLayout);
+    refs.disposeRoomLayout = () => { mobileMedia?.removeEventListener?.('change', updateLayout); wideMedia?.removeEventListener?.('change', updateLayout); };
     const picker = workspace.createEntryDialog('song-picker', '添加歌曲');
     const hostPicker = api.snapshot().mode === 'host', sourceTabs = h('div', 'room-song-source-tabs'); sourceTabs.setAttribute('role', 'tablist'); sourceTabs.setAttribute('aria-label', '点歌来源'); picker.body.append(sourceTabs);
     const online = hostPicker ? mountOnlinePicker(picker.body, picker) : null;

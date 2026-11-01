@@ -65,6 +65,7 @@ async function main() {
     await page.keyboard.press('Enter');
     assert.equal(await page.evaluate(() => window.__appends), 1, 'keyboard activates the explicit append action');
     // Restore the real controller after the isolated favorites fixture.
+    await page.setViewportSize({ width: 1440, height: 1000 });
     await page.addScriptTag({ content: source('room.js') });
     await page.evaluate(async () => {
       document.body.classList.add('room-view');
@@ -127,6 +128,48 @@ async function main() {
       HertzRoom.init({ root: document.querySelector('#view-room'), transport, confirm: message => { window.__confirmMessages.push(message); return window.__confirmRoom(message); } });
       await HertzRoom.onViewEnter();
     });
+    const redesignOutput = path.resolve(__dirname, '../output/playwright/listen-redesign'); fs.mkdirSync(redesignOutput, { recursive: true });
+    await page.evaluate(async () => {
+      Theme.apply('emerald');
+      window.__snapshot.members = [
+        { id: 'member', name: '夜航听众', owner: true, connected: true, ready: true },
+        { id: 'guest', name: '临窗', connected: true, ready: false },
+        { id: 'away', name: '周周', connected: false }
+      ];
+      await HertzRoom.onViewEnter();
+    });
+    assert.ok(await page.locator('#room-stage-panel-members').isVisible(), 'wide layout shows people alongside chat');
+    assert.ok(await page.locator('#room-stage-panel-chat').isVisible(), 'wide layout opens chat by default');
+    await page.screenshot({ path: path.join(redesignOutput, 'desktop.png') });
+    const roomDraft = page.getByLabel('说点什么（最多 200 字）', { exact: true });
+    await roomDraft.fill('切换设备尺寸也要保留的草稿');
+    const draftNode = await roomDraft.elementHandle();
+    await roomDraft.focus();
+    for (const width of [1024, 768, 760, 390, 360]) {
+      await page.setViewportSize({ width, height: 844 });
+      if (width === 1024) assert.ok(await roomDraft.evaluate(node => document.activeElement === node), 'resizing keeps the active chat input focused');
+      if (width <= 760) {
+        const mobile = page.getByRole('navigation', { name: '房间导航', exact: true });
+        await mobile.getByRole('button', { name: '播放', exact: true }).click();
+        assert.ok(await page.locator('.room-player').isVisible());
+        assert.equal(await page.locator('.room-play-aside').isVisible(), false, 'H5 playback has its own page');
+        if (width === 390) await page.screenshot({ path: path.join(redesignOutput, 'mobile-play.png') });
+        await mobile.getByRole('button', { name: '成员', exact: true }).click();
+        assert.equal(await page.locator('.room-player').isVisible(), false);
+        assert.equal(await page.locator('.room-member-state[data-state=offline]').count(), 1);
+        if (width === 390) await page.screenshot({ path: path.join(redesignOutput, 'mobile-members.png') });
+        await mobile.getByRole('button', { name: '聊天', exact: true }).click();
+      } else await page.getByRole('tab', { name: '聊天', exact: true }).click();
+      assert.equal(await roomDraft.inputValue(), '切换设备尺寸也要保留的草稿');
+      assert.ok(await roomDraft.evaluate((node, original) => node === original, draftNode), 'resize keeps one composer owner');
+      assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'layout fits ' + width);
+      if (width === 390) await page.screenshot({ path: path.join(redesignOutput, 'mobile-chat.png') });
+    }
+    await page.evaluate(() => Theme.apply('orbit-fog'));
+    await page.screenshot({ path: path.join(redesignOutput, 'mobile-light.png') });
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await page.evaluate(() => Theme.apply('emerald'));
+    await roomDraft.fill('');
     const theme = page.locator('#view-room').getByRole('button', { name: '切换主题色', exact: true });
     const menu = page.getByRole('listbox', { name: '主题色列表', exact: true });
     const choose = async id => {
@@ -161,6 +204,7 @@ async function main() {
     assert.equal(await page.evaluate(() => window.__roomRequests.filter(request => request.action === 'revoke_invitation').at(-1).invitation_id), 'invite-1', 'changing permissions revokes the prior capability');
     assert.equal(await page.evaluate(() => window.__roomRequests.filter(request => request.action === 'invite').at(-1).permissions.queue), false, 'listening preset does not grant queue access');
     await page.keyboard.press('Escape');
+    await page.getByRole('tab', { name: '队列', exact: true }).click();
     await page.getByRole('button', { name: '＋ 点歌', exact: true }).click();
     const songPicker = page.getByRole('dialog', { name: '添加歌曲', exact: true });
     assert.ok(await songPicker.isVisible(), 'song picker opens in a native drawer');
@@ -329,17 +373,17 @@ async function main() {
     const asideTabs = page.getByRole('tablist', { name: '一起听现场' });
     await asideTabs.getByRole('tab', { name: '队列', exact: true }).click();
     assert.equal(await page.locator('.room-play-aside [role=tabpanel]:visible').count(), 1);
-    await asideTabs.getByRole('tab', { name: '成员', exact: true }).click();
-    await asideTabs.getByRole('tab', { name: '成员', exact: true }).focus();
+    await asideTabs.locator('#room-stage-tab-chat').click();
+    await asideTabs.getByRole('tab', { name: '聊天', exact: true }).focus();
     await page.keyboard.press('Home');
     assert.equal(await asideTabs.getByRole('tab', { name: '队列', exact: true }).getAttribute('aria-selected'), 'true', 'Home selects the queue');
     await page.keyboard.press('End');
-    assert.equal(await asideTabs.getByRole('tab', { name: '成员', exact: true }).getAttribute('aria-selected'), 'true', 'End selects members');
+    assert.equal(await asideTabs.getByRole('tab', { name: '聊天', exact: true }).getAttribute('aria-selected'), 'true', 'End selects chat while people remain visible');
     await page.keyboard.press('ArrowLeft');
-    assert.equal(await asideTabs.getByRole('tab', { name: '聊天', exact: true }).getAttribute('aria-selected'), 'true', 'arrow keys switch the scene aside');
-    assert.equal(await asideTabs.getByRole('tab', { name: '聊天', exact: true }).evaluate(node => node === document.activeElement), true, 'arrow keys focus the selected aside tab');
+    assert.equal(await asideTabs.getByRole('tab', { name: '队列', exact: true }).getAttribute('aria-selected'), 'true', 'arrow keys switch the scene aside');
+    assert.equal(await asideTabs.getByRole('tab', { name: '队列', exact: true }).evaluate(node => node === document.activeElement), true, 'arrow keys focus the selected aside tab');
     await page.keyboard.press('ArrowRight'); await page.keyboard.press('ArrowRight');
-    assert.equal(await asideTabs.getByRole('tab', { name: '队列', exact: true }).getAttribute('aria-selected'), 'true', 'Right wraps from members to queue');
+    assert.equal(await asideTabs.getByRole('tab', { name: '队列', exact: true }).getAttribute('aria-selected'), 'true', 'Right wraps from chat to queue');
     assert.equal(await page.locator('.room-chat-form textarea').count(), 1, 'scene and chat have one composer owner');
     await asideTabs.getByRole('tab', { name: '队列', exact: true }).click();
     await page.getByLabel('显示实时弹幕', { exact: true }).uncheck();
@@ -348,12 +392,13 @@ async function main() {
     for (const width of [1440, 1024, 700, 390, 360]) {
       await page.setViewportSize({ width, height: width < 700 ? 844 : 900 });
       await choose('orbit-fog');
+      if (width <= 760) await page.getByRole('navigation', { name: '房间导航', exact: true }).getByRole('button', { name: '播放', exact: true }).click();
       await page.locator('#view-room').evaluate(node => { node.scrollTop = 0; });
       const layout = await page.evaluate(() => {
         const scene = document.querySelector('.room-stage-scene').getBoundingClientRect(), input = document.querySelector('.room-stage-chat-dock textarea').getBoundingClientRect();
         return { overflow: document.documentElement.scrollWidth > innerWidth, sceneWidth: scene.width, inputWidth: input.width, titleSize: parseFloat(getComputedStyle(document.querySelector('.room-current')).fontSize) };
       });
-      assert.ok(!layout.overflow && layout.sceneWidth > 200 && layout.inputWidth > 100 && layout.titleSize <= 20, 'stage fits ' + width + ': ' + JSON.stringify(layout));
+      assert.ok(!layout.overflow && layout.sceneWidth > 200 && layout.inputWidth > 100 && layout.titleSize <= 42, 'stage fits ' + width + ': ' + JSON.stringify(layout));
       const output = path.resolve(__dirname, '../output/playwright'); fs.mkdirSync(output, { recursive: true });
       if (width === 1440 || width === 390) {
         await page.evaluate(async () => { window.__messages.push({ message_id: String(window.__messages.length + 1), name: '夜航听众', text: '和你一起听这首歌', received_at_ms: String(Date.now()) }); await HertzRoom.onViewEnter(); });
@@ -703,6 +748,10 @@ async function main() {
       const lyricLines = ['留一盏灯，给晚归的人', '风穿过这座城市', '我们听见同一首歌', '让时间慢一些', '把今天轻轻放下', '音乐沿着夜色流淌', '下一站，仍然有你', '和你一起听下一首', '那些还没说出口的话', '都留在旋律里', '窗外有星光落下', '这一刻刚刚好'];
       const transport = { get: async url => url === '/v1/room' ? snapshot : { tracks: [] }, post: async (url, body) => {
         if (body.request?.action === 'queue_page') return { revision: '1', queue, tracks };
+        if (body.request?.action === 'chat_history') return { history_revision: '1', messages: [
+          { message_id: '1', member_id: 'guest', name: '临窗', text: '这首歌很适合今晚，一起听完吧。', received_at_ms: '0' },
+          { message_id: '2', member_id: 'member', name: '夜航听众', text: '好，下一首交给你来选。', received_at_ms: '0' }
+        ] };
         if (body.request?.action === 'resource') {
           const isCover = body.request.kind === 'cover';
           const bytes = isCover ? Uint8Array.from(atob(cover), c => c.charCodeAt(0)) : new TextEncoder().encode(JSON.stringify({ lines: lyricLines.map((text, index) => ({ start_ms: index * 8000, text })) }));
@@ -716,6 +765,7 @@ async function main() {
       HertzRoom.init({ root: document.querySelector('#view-room'), transport, confirm: async () => true });
       await HertzRoom.onViewEnter();
     });
+    await embedded.getByRole('tab', { name: '队列', exact: true }).click();
     await embedded.waitForSelector('.room-queue > li[data-instance="14"]');
     const hostFit = await embedded.evaluate(() => {
       const root = document.querySelector('#view-room'), aside = document.querySelector('.room-play-aside');
@@ -726,6 +776,10 @@ async function main() {
     await embedded.waitForFunction(() => { const image = document.querySelector('.room-art img'); return image.complete && image.naturalWidth > 0 && !image.hidden; });
     assert.equal(await embedded.locator('.room-cover').evaluate(node => getComputedStyle(node).animationPlayState), 'running', 'sandbox renders the real artwork and rotates it while playing');
     assert.equal(await embedded.locator('.room-hero .room-toolbar').count(), 0, 'now-playing shortcuts have been removed');
+    await embedded.locator('#room-stage-tab-chat').click();
+    assert.equal(await embedded.locator('.room-message-mine').count(), 1, 'own messages use the authoritative member ID');
+    await page.locator('iframe').screenshot({ path: path.join(redesignOutput, 'desktop.png'), animations: 'disabled' });
+    await embedded.getByRole('tab', { name: '队列', exact: true }).click();
     await page.locator('iframe').screenshot({ path: path.join(sandboxOutput, 'listening-1440.png'), animations: 'disabled' });
     await embedded.getByRole('button', { name: '展开歌词', exact: true }).first().click();
     assert.equal(await embedded.locator('.room-stage-scene').getAttribute('data-lyrics-expanded'), 'true');

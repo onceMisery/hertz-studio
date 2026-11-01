@@ -236,7 +236,7 @@
         [navButtons, mobileButtons].forEach(map => map.forEach((node, key) => { node.classList.toggle('active', key === next); node.setAttribute('aria-current', key === next ? 'page' : 'false'); }));
         refs.pageTitle.textContent = titles[next];
         root.dataset.roomPage = next;
-        if (refs.placeChatComposer) refs.placeChatComposer(next === 'play' && root.dataset.roomAside === 'chat' ? 'chat' : next);
+        if (refs.placeChatComposer) refs.placeChatComposer(next === 'play' && root.dataset.roomChatVisible === 'true' ? 'chat' : next);
         if (refs.danmaku) refs.danmaku.replaceChildren();
         if (refs.notice && refs.notice.textContent === '操作已受理') { refs.notice.textContent = ''; refs.notice.hidden = true; }
         if (refs.renderEntryPage) refs.renderEntryPage(next);
@@ -297,7 +297,7 @@
       navigate(page);
       return {
         pages, navigate, createSettings, openSettings, selectSettings, createEntryDialog, closeEntryDialogs, confirmLeave, hasOpenEntry: () => entryDialogs.some(dialog => dialog.isOpen()),
-        destroy() { closeEntryDialogs(); if (themeBinding) themeBinding.destroy(); },
+        destroy() { closeEntryDialogs(); if (refs.disposeRoomLayout) refs.disposeRoomLayout(); if (themeBinding) themeBinding.destroy(); },
         render(snapshot) {
           const active = snapshot.mode !== 'local', output = snapshot.output || {};
           root.dataset.roomActive = String(active);
