@@ -1,8 +1,11 @@
 #!/usr/bin/env node
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 hertz-studio contributors
-// P1-03c 原生冒烟：预置一个有效包目录，启动真实 WebView2 宿主，
-// 从壁纸页上下文 fetch wallpaper.invalid 保留域，验证拦截器 200/206/404。
+// P1-03 原生冒烟：预置一个有效包目录，启动真实 WebView2 宿主，
+// 验证 wallpaper.invalid 保留域拦截（200/206/404）与轻后端
+// （img/video 元素消费保留域 URL：首帧 ready、静音、motion 冻结、
+// 缺源结构化失败、释放顺序）。视频 fixture 由页面内 MediaRecorder
+// 现场生成——verify_installed 每请求重读磁盘收据，单次宿主生命周期即可补投喂。
 // 运行前提：cargo build -p hertz-desktop；无已运行实例。
 'use strict';
 const assert = require('node:assert/strict');
@@ -220,6 +223,192 @@ async function main() {
     const hwpkg = await fetchInfo(base + '/original.hwpkg');
     assert.equal(hwpkg.status, 404, `original.hwpkg 不暴露：${JSON.stringify(hwpkg)}`);
     console.log('PASS 404 original.hwpkg');
+
+    // --- 轻后端（P1-03 §10.1/§8.2）---
+    // wry 注入的 window.ipc 不可写且不可配置（实测 defineProperty 拒绝），
+    // 页面事件无法在页外捕获；页面侧真值走 debug()（media.state 与事件同源
+    // 翻转）+ DOM 契约断言。
+    const mediaProbe = () => wallpaperPage.evaluate(() => {
+      const debug = window.hertzWallpaper.debug();
+      return {
+        backend: debug.backend,
+        media: debug.media,
+        img: !!document.querySelector('img[data-wallpaper-media]'),
+        video: !!document.querySelector('video[data-wallpaper-media]'),
+        canvas: !!document.querySelector('canvas'),
+      };
+    });
+    const waitForMedia = async (predicate, timeoutMs, label) => {
+      const deadline = Date.now() + timeoutMs;
+      for (;;) {
+        const probe = await mediaProbe();
+        if (predicate(probe)) return probe;
+        if (Date.now() > deadline) {
+          throw new Error(`等待媒体状态超时: ${label}（最近 ${JSON.stringify(probe)}）`);
+        }
+        await new Promise(resolve => setTimeout(resolve, 200));
+      }
+    };
+
+    // ⑥ 图片轻后端：首帧 ready + 元素契约 + 场景 canvas 让位。
+    await wallpaperPage.evaluate(
+      url => window.hertzWallpaper.applyMedia({ kind: 'image', url, fit: 'cover' }),
+      base + '/files/assets/background.png',
+    );
+    const imageProbe = await waitForMedia(
+      probe => !!probe.media && probe.media.state === 'ready',
+      15000, 'image ready',
+    );
+    assert.equal(imageProbe.media.kind, 'image');
+    assert.equal(imageProbe.backend, 'media');
+    assert.equal(imageProbe.img, true);
+    assert.equal(imageProbe.canvas, false, '场景 canvas 必须让位（一个会话一个后端）');
+    const imgContract = await wallpaperPage.evaluate(() => {
+      const img = document.querySelector('img[data-wallpaper-media="image"]');
+      return {
+        visible: getComputedStyle(img).visibility,
+        objectFit: getComputedStyle(img).objectFit,
+        crossOrigin: img.crossOrigin,
+      };
+    });
+    assert.equal(imgContract.visible, 'visible', 'decode 后必须揭幕');
+    assert.equal(imgContract.objectFit, 'cover');
+    assert.equal(imgContract.crossOrigin, 'anonymous', '§8.1：跨 origin 包资源可作纹理');
+    console.log('PASS image light backend (ready + fit + canvas 让位)');
+
+    // 媒体心跳是行为事实：接管后 12s 内页面不被看门狗重建（HEARTBEAT_STALE=10s）。
+    // 期间场景 rAF 已让位、无场景心跳，只有媒体 interval 维持存活。
+    await wallpaperPage.evaluate(() => { window.__liveness = 'alive'; });
+    await wallpaperPage.waitForTimeout(12000);
+    const alive = await wallpaperPage.evaluate(() => window.__liveness === 'alive');
+    assert.ok(alive, '媒体接管 12s 内页面必须存活（心跳未断，未触发重建）');
+    console.log('PASS media heartbeat keeps page alive (12s, no rAF)');
+
+    // ⑦ 视频轻后端：页面内 MediaRecorder 造一段 WebM（VP8）→ 补投影与收据 → 播放。
+    const webmB64 = await wallpaperPage.evaluate(async () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = 64;
+      canvas.height = 48;
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#204060';
+      ctx.fillRect(0, 0, 64, 48);
+      const stream = canvas.captureStream(0);
+      const track = stream.getVideoTracks()[0];
+      const mime = ['video/webm;codecs=vp8', 'video/webm;codecs=vp9', 'video/webm']
+        .find(candidate => MediaRecorder.isTypeSupported(candidate));
+      if (!mime) throw new Error('MediaRecorder 不支持 webm');
+      const recorder = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 150000 });
+      const chunks = [];
+      recorder.ondataavailable = event => { if (event.data && event.data.size) chunks.push(event.data); };
+      const stopped = new Promise(resolve => { recorder.onstop = resolve; });
+      recorder.start();
+      for (let i = 0; i < 10; i++) {
+        ctx.fillStyle = 'hsl(' + (i * 36) + ',70%,45%)';
+        ctx.fillRect(0, 0, 64, 48);
+        if (track.requestFrame) track.requestFrame();
+        await new Promise(resolve => setTimeout(resolve, 80));
+      }
+      recorder.stop();
+      await stopped;
+      const blob = new Blob(chunks, { type: 'video/webm' });
+      const buffer = new Uint8Array(await blob.arrayBuffer());
+      let binary = '';
+      for (let i = 0; i < buffer.length; i += 0x8000) {
+        binary += String.fromCharCode.apply(null, buffer.subarray(i, Math.min(buffer.length, i + 0x8000)));
+      }
+      return btoa(binary);
+    });
+    assert.ok(webmB64.length > 64, '录制的 WebM 不能为空');
+    const webm = Buffer.from(webmB64, 'base64');
+    const webmSha = crypto.createHash('sha256').update(webm).digest('hex');
+    fs.writeFileSync(path.join(packageDir, 'files', 'assets', 'background.webm'), webm);
+    const receipt = JSON.parse(fs.readFileSync(path.join(packageDir, 'receipt.json'), 'utf8'));
+    receipt.entries.push({ path: 'assets/background.webm', bytes: webm.length, sha256: webmSha, mime: 'video/webm' });
+    fs.writeFileSync(path.join(packageDir, 'receipt.json'), JSON.stringify(receipt));
+
+    await wallpaperPage.evaluate(
+      url => window.hertzWallpaper.applyMedia({ kind: 'video', url, fit: 'cover' }),
+      base + '/files/assets/background.webm',
+    );
+    const videoProbe = await waitForMedia(
+      probe => !!probe.media && probe.media.state === 'ready',
+      30000, 'video first frame',
+    );
+    assert.equal(videoProbe.media.kind, 'video');
+    const videoState = await wallpaperPage.evaluate(() => {
+      const video = document.querySelector('video[data-wallpaper-media="video"]');
+      if (!video) return null;
+      return {
+        muted: video.muted,
+        loop: video.loop,
+        playsInline: video.playsInline,
+        crossOrigin: video.crossOrigin,
+        objectFit: getComputedStyle(video).objectFit,
+        time: video.currentTime,
+      };
+    });
+    assert.ok(videoState, 'video 元素必须存在');
+    assert.equal(videoState.muted, true, '壁纸视频必须静音（§8.2）');
+    assert.equal(videoState.loop, true);
+    assert.equal(videoState.playsInline, true);
+    assert.equal(videoState.crossOrigin, 'anonymous');
+    assert.equal(videoState.objectFit, 'cover');
+    await wallpaperPage.waitForTimeout(1500);
+    const timeAfter = await wallpaperPage.evaluate(() => {
+      const video = document.querySelector('video[data-wallpaper-media="video"]');
+      return video ? video.currentTime : -1;
+    });
+    assert.ok(timeAfter > videoState.time, `位置必须推进：${videoState.time} → ${timeAfter}`);
+    console.log(`PASS video light backend (首帧 ready, muted, 位置 ${videoState.time.toFixed(2)}→${timeAfter.toFixed(2)})`);
+
+    // ⑧ motion=0 冻结到当前帧（不降 playbackRate），motion=1 恢复。
+    await wallpaperPage.evaluate(() => window.hertzWallpaper.applyConfig({ source: 'fixed', scene: 'coast', motion: 0 }));
+    await wallpaperPage.waitForTimeout(400);
+    const frozen = await wallpaperPage.evaluate(() => window.hertzWallpaper.debug().media.paused);
+    assert.equal(frozen, true, 'motion=0 必须冻结视频');
+    await wallpaperPage.evaluate(() => window.hertzWallpaper.applyConfig({ source: 'fixed', scene: 'coast', motion: 1 }));
+    await wallpaperPage.waitForTimeout(600);
+    const resumed = await wallpaperPage.evaluate(() => window.hertzWallpaper.debug().media.paused);
+    assert.equal(resumed, false, 'motion=1 必须恢复播放');
+    console.log('PASS motion freeze/resume (pause 伪装静态被禁止)');
+
+    // ⑨ 非保留域 URL 拒绝：返回 false 且不动当前呈现。
+    const rejected = await wallpaperPage.evaluate(() => window.hertzWallpaper.applyMedia(
+      { kind: 'image', url: 'https://example.invalid/evil.png' },
+    ));
+    assert.equal(rejected, false, '非保留域必须拒绝');
+    const kept = await mediaProbe();
+    assert.equal(kept.media.state, 'ready', '畸形选择不得清掉当前呈现');
+    assert.equal(kept.video, true);
+    console.log('PASS non-reserved URL rejected (presentation kept)');
+
+    // ⑩ 缺源 → 结构化失败，元素移除，失败态可查（C50 页面侧）。
+    await wallpaperPage.evaluate(
+      url => window.hertzWallpaper.applyMedia({ kind: 'image', url, fit: 'cover' }),
+      base + '/files/assets/missing.png',
+    );
+    const failed = await waitForMedia(
+      probe => !!probe.media && probe.media.state === 'failed',
+      15000, 'image decode failure',
+    );
+    assert.equal(failed.media.error, 'media_decode_failed', `缺源必须给结构化失败：${failed.media.error}`);
+    assert.equal(failed.img, false, '失败元素必须移除');
+    console.log('PASS missing source → structured failure');
+
+    // ⑪ 释放顺序：applyMedia(null) 清元素与 src，随后可重挂。
+    await wallpaperPage.evaluate(() => window.hertzWallpaper.applyMedia(null));
+    const torn = await mediaProbe();
+    assert.equal(torn.media, null);
+    assert.equal(torn.img, false);
+    assert.equal(torn.video, false);
+    console.log('PASS teardown releases media element');
+    const remounted = await wallpaperPage.evaluate(
+      url => window.hertzWallpaper.applyMedia({ kind: 'image', url, fit: 'cover' }),
+      base + '/files/assets/background.png',
+    );
+    assert.equal(remounted, true);
+    await waitForMedia(probe => !!probe.media && probe.media.state === 'ready', 15000, 'image re-mount');
+    console.log('PASS re-mount image after teardown');
 
     console.log(`wallpaper media native checks passed (hash ${packageHash.slice(0, 12)}…)`);
   } finally {

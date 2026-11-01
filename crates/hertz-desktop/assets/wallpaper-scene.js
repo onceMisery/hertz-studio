@@ -55,6 +55,13 @@
   var feedExpiryTimer = 0;
   var followSpace = null;
   var followSignature = '';
+  // P1-03 轻后端（§10.1）：单图片/单静音视频不进 WebGL，img/video 直接呈现。
+  // URL 只接受已安装包的保留域（§8.1）；页面校验是纵深防御，真值在原生拦截层。
+  var MEDIA_URL = /^https:\/\/[0-9a-f]{32}\.[0-9a-f]{32}\.wallpaper\.invalid\/files\/[a-z0-9\-_.\/]+$/;
+  var MEDIA_FIRST_FRAME_TIMEOUT_MS = 10000;
+  var MEDIA_HEARTBEAT_MS = 2000;
+  var media = null;
+  var mediaToken = 0;
   var feed = {
     valid: false,
     playing: false,
@@ -287,6 +294,10 @@
     gate = computeGate(cap, config.refreshHz);
     resetGate();
     enabled = true;
+    if (media) {
+      applyMediaMotion(); // 当前呈现是媒体：恢复播放，不重复挂场景
+      return true;
+    }
     if (!mounted && !switching) return mount();
     if (mounted && !lost) startLoop();
     return true;
@@ -299,6 +310,7 @@
     if (backend === 'zodiac' && mounted && zodiac) {
       zodiac.setTime({ time: sceneTime / 1000, playing: false });
     }
+    applyMediaMotion();
   }
 
   function onLost(event) {
@@ -448,6 +460,7 @@
   }
 
   function mount() {
+    if (media) unmountMedia(); // 场景接管呈现（start 的场景分支/显式 mount）
     if (mounted || switching) return true;
     if (!zodiac && !spaceRuntime) {
       error = 'scene_runtime_missing';
@@ -469,6 +482,7 @@
   function unmount() {
     stop();
     switching = false;
+    unmountMedia();
     teardown();
   }
 
@@ -497,6 +511,145 @@
     selectScene(id, params, false, false);
   }
 
+  // ---- 轻后端：单图片/单静音视频（P1-03，§10.1/§8.2）----
+
+  function mediaFit(fit) {
+    return fit === 'contain' ? 'contain' : fit === 'stretch' ? 'fill' : 'cover';
+  }
+
+  function failMedia(code) {
+    if (!media || media.state === 'failed') return;
+    media.state = 'failed';
+    media.error = code;
+    if (media.el) media.el.remove();
+    // 心跳续跑：呈现失败但页面存活，由原生决定回退策略（C50），避免看门狗误判停摆。
+    notify('wallpaper_media_failed ' + code);
+  }
+
+  function mediaReady() {
+    error = null;
+    // 与场景后端同一就绪语义（§13.3）：首帧真实可呈现后才揭幕。
+    notify('wallpaper_ready');
+  }
+
+  // motion=0 或停用 → 视频冻结到当前帧（§10.1：不降 playbackRate 伪装静态）。
+  function applyMediaMotion() {
+    if (!media || media.kind !== 'video' || media.state !== 'ready' || !media.el) return;
+    if (enabled && config.motion > 0) {
+      var attempt = media.el.play();
+      if (attempt && attempt.catch) attempt.catch(function () { /* 恢复被拒：保持冻结 */ });
+    } else {
+      media.el.pause();
+    }
+  }
+
+  // 释放顺序（§8.2）：pause → 清 src → load → 移除元素；租约随窗口退出由原生回收。
+  function unmountMedia() {
+    mediaToken++;
+    var record = media;
+    media = null;
+    if (!record) return;
+    if (backend === 'media') backend = null;
+    clearInterval(record.timer);
+    clearTimeout(record.deadline);
+    var el = record.el;
+    record.el = null;
+    if (!el) return;
+    try {
+      if (record.kind === 'video') el.pause();
+      el.removeAttribute('src');
+      if (record.kind === 'video') el.load();
+    } catch (_) { /* context already gone */ }
+    el.remove();
+  }
+
+  // desc 为 null → 交还场景后端；desc 畸形 → 报失败但不动当前呈现；合法 → 换呈现。
+  function applyMedia(desc) {
+    if (desc == null || typeof desc !== 'object') {
+      unmountMedia();
+      return false;
+    }
+    var kind = desc.kind === 'image' || desc.kind === 'video' ? desc.kind : null;
+    var url = typeof desc.url === 'string' ? desc.url : '';
+    var fit = desc.fit === 'contain' || desc.fit === 'stretch' ? desc.fit : 'cover';
+    if (!kind || !MEDIA_URL.test(url) || !host) {
+      notify('wallpaper_media_failed media_invalid_selection');
+      return false;
+    }
+    unmountMedia(); // 释放旧媒体呈现（§8.2 顺序；内部令旧 token 失效）
+    mediaToken++;
+    teardown(); // 一个会话一个后端（§10.2）：场景让位
+    switching = false;
+    backend = 'media';
+    var token = mediaToken;
+    var record = { kind: kind, url: url, fit: fit, state: 'loading', error: null, ticks: 0, timer: 0, deadline: 0, el: null };
+    media = record;
+    var el = document.createElement(kind === 'video' ? 'video' : 'img');
+    // 跨 origin 包资源须可作纹理（§8.1）：crossOrigin='anonymous' + 拦截层 CORS。
+    el.crossOrigin = 'anonymous';
+    el.setAttribute('data-wallpaper-media', kind);
+    el.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;object-fit:' +
+      mediaFit(fit) + ';visibility:hidden';
+    record.el = el;
+    el.addEventListener('error', function () {
+      if (token !== mediaToken) return;
+      failMedia(kind === 'image'
+        ? 'media_decode_failed'
+        : 'media_error_' + (el.error && el.error.code ? el.error.code : 'unknown'));
+    });
+    // 静态图无连续 rAF（§10.1）：心跳走低频 interval，页面存活事实不断。
+    record.timer = setInterval(function () {
+      if (token !== mediaToken) { clearInterval(record.timer); return; }
+      record.ticks++;
+      notify('wallpaper_heartbeat ' + record.ticks + ' 0 1 0');
+    }, MEDIA_HEARTBEAT_MS);
+    host.appendChild(el);
+    if (kind === 'image') {
+      el.src = url;
+      var decoded = el.decode ? el.decode() : Promise.reject(new Error('decode_unsupported'));
+      decoded.then(function () {
+        if (token !== mediaToken) return;
+        el.style.visibility = 'visible';
+        record.state = 'ready';
+        mediaReady();
+      }, function () {
+        if (token !== mediaToken) return;
+        failMedia('media_decode_failed');
+      });
+    } else {
+      el.muted = true;
+      el.defaultMuted = true;
+      el.loop = true;
+      el.playsInline = true;
+      el.setAttribute('playsinline', '');
+      var settled = false;
+      var markReady = function () {
+        if (settled || token !== mediaToken) return;
+        settled = true;
+        el.style.visibility = 'visible';
+        record.state = 'ready';
+        mediaReady();
+        applyMediaMotion();
+      };
+      // 首帧就绪（§13.3）：帧回调为准，旧引擎回退 loadeddata；超时给结构化失败。
+      if (el.requestVideoFrameCallback) {
+        el.requestVideoFrameCallback(function () { markReady(); });
+      } else {
+        el.addEventListener('loadeddata', markReady, { once: true });
+      }
+      record.deadline = setTimeout(function () {
+        if (!settled && token === mediaToken) failMedia('media_first_frame_timeout');
+      }, MEDIA_FIRST_FRAME_TIMEOUT_MS);
+      el.src = url;
+      var attempt = el.play();
+      if (attempt && attempt.catch) attempt.catch(function () {
+        if (settled || token !== mediaToken) return;
+        failMedia('media_play_rejected');
+      });
+    }
+    return true;
+  }
+
   function applyConfig(next) {
     if (!next || typeof next !== 'object') return;
     if (Array.isArray(next.allowed) && next.allowed.length) {
@@ -520,6 +673,7 @@
     resetGate();
     applyBrightness();
     if (zodiac && zodiac.setMotion && backend === 'zodiac') zodiac.setMotion({ active: motionActive() });
+    applyMediaMotion();
     if (!mounted) return;
     if (nextSource === 'fixed') {
       if (previousSource !== 'fixed' || sceneId !== nextScene) {
@@ -624,6 +778,20 @@
       energy: feed.energy,
       ageMs: feed.ageMs,
       feedPeak: peak,
+      media: media ? {
+        kind: media.kind,
+        url: media.url,
+        fit: media.fit,
+        state: media.state,
+        error: media.error,
+        ticks: media.ticks,
+        muted: media.kind === 'video' && media.el ? media.el.muted === true : null,
+        paused: media.kind === 'video' && media.el ? media.el.paused === true : null,
+        timeMs: media.kind === 'video' && media.el ? Math.round((media.el.currentTime || 0) * 1000) : null,
+        durationMs: media.kind === 'video' && media.el && isFinite(media.el.duration)
+          ? Math.round(media.el.duration * 1000)
+          : null
+      } : null,
       stats: stats
     };
   }
@@ -642,6 +810,7 @@
   window.hertzWallpaper = {
     applyFeed: applyFeed,
     applyConfig: applyConfig,
+    applyMedia: applyMedia,
     start: start,
     stop: stop,
     mount: mount,

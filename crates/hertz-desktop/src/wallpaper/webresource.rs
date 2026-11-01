@@ -363,6 +363,32 @@ fn reason_phrase(status: i32) -> &'static str {
     }
 }
 
+/// 已安装包内文件的保留域 URL（native→页面的媒体投影用，§8.1）。
+/// hash 必须 64 位十六进制（大小写不敏感，落 URL 前规范化为小写）；path 为
+/// 包内相对路径，沿用安装期的小写 ASCII 字符集（§6.3），不在此做百分号编码。
+/// 生产调用方随 P1-05 的 selection 接线进入；当前由测试与冒烟钉住合同。
+#[allow(dead_code)]
+pub(crate) fn files_url(package_hash: &str, path: &str) -> Option<String> {
+    let hash = package_hash.to_ascii_lowercase();
+    if hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    let path_ok = !path.is_empty()
+        && path
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_' | b'.' | b'/'))
+        && path.split('/').all(|segment| !segment.is_empty() && segment != "." && segment != "..");
+    if !path_ok {
+        return None;
+    }
+    Some(format!(
+        "https://{}.{}{RESERVED_HOST_SUFFIX}/files/{}",
+        &hash[..32],
+        &hash[32..],
+        path
+    ))
+}
+
 /// 从请求读一个字符串属性（Uri/Method）。
 unsafe fn string_property(
     request: &ICoreWebView2WebResourceRequest,
@@ -384,4 +410,59 @@ unsafe fn request_header(
         .GetHeader(&HSTRING::from(name), &mut value)
         .ok()?;
     Some(take_pwstr(value))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{files_url, MediaUrl, MediaUrlParse};
+
+    const HASH: &str = "a1b2c3d4e5f60718293a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e";
+
+    #[test]
+    fn builds_split_label_reserved_domain() {
+        let url = files_url(HASH, "assets/background.png").expect("合法 hash+path 必须出 URL");
+        assert_eq!(
+            url,
+            format!(
+                "https://{}.{}.wallpaper.invalid/files/assets/background.png",
+                &HASH[..32],
+                &HASH[32..]
+            )
+        );
+    }
+
+    #[test]
+    fn normalizes_uppercase_hash() {
+        let upper = HASH.to_ascii_uppercase();
+        let url = files_url(&upper, "assets/bg.png").expect("大写 hash 规范化为小写");
+        assert!(url.starts_with("https://a1b2c3d4"), "URL host 必须小写：{url}");
+    }
+
+    #[test]
+    fn round_trips_through_media_url_parse() {
+        let url = files_url(HASH, "assets/background.png").expect("合法输入");
+        match MediaUrl::parse(&url) {
+            MediaUrlParse::Ok(parsed) => {
+                assert_eq!(parsed.package_hash, HASH);
+                assert_eq!(parsed.path, "assets/background.png");
+            }
+            _ => panic!("构造出的 URL 必须能被同层解析接受"),
+        }
+    }
+
+    #[test]
+    fn rejects_bad_hash() {
+        assert!(files_url("a1", "assets/bg.png").is_none(), "长度不足");
+        assert!(files_url(&"g".repeat(64), "assets/bg.png").is_none(), "非十六进制");
+    }
+
+    #[test]
+    fn rejects_bad_path() {
+        assert!(files_url(HASH, "").is_none(), "空路径");
+        assert!(files_url(HASH, "assets\\bg.png").is_none(), "反斜杠");
+        assert!(files_url(HASH, "assets/../bg.png").is_none(), "点段");
+        assert!(files_url(HASH, "assets//bg.png").is_none(), "空段");
+        assert!(files_url(HASH, "assets/白.png").is_none(), "非小写 ASCII 字符集");
+        assert!(files_url(HASH, "/assets/bg.png").is_none(), "空首段");
+    }
 }
