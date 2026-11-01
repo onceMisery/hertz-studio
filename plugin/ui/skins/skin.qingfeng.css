@@ -2010,6 +2010,9 @@
    装饰层（absolute 铺满整卡）：进了 grid 会变成网格项把行撑开，
    必须显式点名，光靠「卡片变小」盖不住。进度条也是业务节点，胶囊里
    有同款，迷你卡不再重复一份。
+   .emotion-entry（情绪字体快捷入口）在迷你卡里只有两列宽，标签会被压成
+   一字一行；情绪字体的完整控制本来就在设置页（#set-emotion-mode /
+   #set-emotion-scale），快捷入口在这么小的卡上没有意义。
    唯独 .stage-head-fs（全屏舞台）留下 —— 它是业务既有的沉浸声场入口
    （与顶栏那颗、F 键同一条路），清风摘掉顶栏图标后，迷你卡是唯一入口。 */
 [data-skin="qingfeng"] .stage-modes,
@@ -2021,6 +2024,7 @@
 [data-skin="qingfeng"] .stage-fx,
 [data-skin="qingfeng"] .stage-dots,
 [data-skin="qingfeng"] .stage-particles,
+[data-skin="qingfeng"] .emotion-entry,
 [data-skin="qingfeng"] .stage-ripple {
   display: none !important;
 }
