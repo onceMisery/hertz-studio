@@ -57,9 +57,11 @@
       $('scene-grid').replaceChildren();
       scenes.forEach(function (scene, index) {
         var button = document.createElement('button'); button.type = 'button'; button.dataset.scene = scene.id;
-        var name = document.createElement('span'); name.textContent = scene.label;
+        var image = document.createElement('img'); image.src = '/scene-thumbnails/' + scene.id + '.jpg'; image.alt = ''; image.loading = 'lazy';
+        var text = document.createElement('span'); text.className = 'scene-text';
+        var name = document.createElement('span'); name.className = 'scene-name'; name.textContent = scene.label;
         var small = document.createElement('small'); small.textContent = String(index + 1).padStart(2, '0') + ' / 动态场景';
-        button.append(name, small); button.addEventListener('click', function () { if (!draft || editing) return; draft.wallpaper.scene = scene.id; draft.wallpaper.source = 'fixed'; changed(true); renderForm(); });
+        text.append(name, small); button.append(image, text); button.addEventListener('click', function () { if (!draft || editing) return; draft.wallpaper.scene = scene.id; draft.wallpaper.source = 'fixed'; changed(true); renderForm(); });
         $('scene-grid').appendChild(button);
       });
       $('scene-grid').dataset.scenes = signature;
