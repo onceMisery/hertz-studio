@@ -80,6 +80,9 @@ async function run() {
     const modelRequests = [];
     page.on('request', request => { if (new URL(request.url()).pathname === '/v1/ai/lyrics/emotion') modelRequests.push(request); });
     await page.evaluate(() => document.body.classList.add('stage-open'));
+    // 星轨把顶部「正在播放」（连同上面的情绪入口）收在曲库首页，其余视图整页让位，
+    // 所以入口只在 library 视图可见。检查走真实路径：先落到曲库首页再点入口。
+    await page.evaluate(() => setView('library'));
     await page.locator('.stage > [data-emotion-open]').click();
     await page.waitForSelector('#emotion-dialog[open]');
     for (const id of ['joy', 'sorrow', 'anger', 'anxious', 'tender', 'triumph', 'lonely']) {
