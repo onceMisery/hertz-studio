@@ -8,13 +8,19 @@ use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
 use std::sync::OnceLock;
 
 use anyhow::{bail, Result};
+use windows_sys::Win32::Devices::Display::{
+    DisplayConfigGetDeviceInfo, GetDisplayConfigBufferSizes, QueryDisplayConfig,
+    DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME, DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME,
+    DISPLAYCONFIG_DEVICE_INFO_HEADER, DISPLAYCONFIG_PATH_INFO, DISPLAYCONFIG_SOURCE_DEVICE_NAME,
+    DISPLAYCONFIG_TARGET_DEVICE_NAME, QDC_ONLY_ACTIVE_PATHS,
+};
 use windows_sys::Win32::Foundation::{
     CloseHandle, HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
 };
 use windows_sys::Win32::Graphics::Gdi::{
-    EnumDisplayMonitors, GetMonitorInfoW, MonitorFromWindow, RedrawWindow, HDC, HMONITOR,
-    MONITORINFO, MONITORINFOEXW, MONITOR_DEFAULTTONEAREST, RDW_ALLCHILDREN, RDW_FRAME,
-    RDW_INVALIDATE, RDW_UPDATENOW,
+    EnumDisplayMonitors, EnumDisplaySettingsExW, GetMonitorInfoW, MonitorFromWindow, RedrawWindow,
+    DEVMODEW, ENUM_CURRENT_SETTINGS, HDC, HMONITOR, MONITORINFO, MONITORINFOEXW,
+    MONITOR_DEFAULTTONEAREST, RDW_ALLCHILDREN, RDW_FRAME, RDW_INVALIDATE, RDW_UPDATENOW,
 };
 use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_REPLACE_EXISTING};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -356,6 +362,34 @@ pub(crate) struct WallpaperMonitor {
     pub(crate) height: i32,
     pub(crate) dpi: u32,
     pub(crate) primary: bool,
+    /// 当前刷新率（Hz）。ADR-0006 整数分频用；读不到按 60。
+    pub(crate) refresh_hz: u32,
+    /// DisplayConfig 的 monitorDevicePath；查询失败为 None。
+    pub(crate) device_path: Option<String>,
+    /// EDID 派生身份摘要（厂商/产品码/连接器实例的 FNV-1a 64）。
+    pub(crate) edid_digest: Option<String>,
+}
+
+impl WallpaperMonitor {
+    /// 稳定显示器身份（设计 §2.2-9/§4.1）：devicePath + EDID 摘要。
+    /// 任一成分缺失时降级为 GDI 名（仅当前枚举有效，不跨拓扑持久）。
+    pub(crate) fn display_id(&self) -> String {
+        match (&self.device_path, &self.edid_digest) {
+            (Some(path), Some(digest)) => format!("{path}#{digest}"),
+            (Some(path), None) => path.clone(),
+            _ => self.name.clone(),
+        }
+    }
+}
+
+/// FNV-1a 64：仅用于把 EDID 身份字节压成稳定摘要，不承担安全哈希职责。
+pub(crate) fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
 }
 
 pub(crate) fn wallpaper_monitors() -> Vec<WallpaperMonitor> {
@@ -383,6 +417,109 @@ pub(crate) fn wallpaper_monitors() -> Vec<WallpaperMonitor> {
     output
 }
 
+/// 读取显示器当前模式刷新率；异常值（0/1 或超常）按 60 兜底。
+fn refresh_rate_hz(device: &[u16]) -> u32 {
+    let mut mode = DEVMODEW {
+        dmSize: std::mem::size_of::<DEVMODEW>() as u16,
+        ..Default::default()
+    };
+    let ok = unsafe {
+        EnumDisplaySettingsExW(device.as_ptr(), ENUM_CURRENT_SETTINGS, &mut mode, 0)
+    };
+    if ok == 0 {
+        return 60;
+    }
+    let hz = mode.dmDisplayFrequency;
+    if (5..=500).contains(&hz) {
+        hz
+    } else {
+        60
+    }
+}
+
+/// 在 DisplayConfig 活动路径里找 GDI 设备名对应的源/目标，取 monitorDevicePath
+/// 与 EDID 身份（设计 §2.2-9：GDI 名只作当前枚举映射）。
+fn display_identity(device: &str) -> (Option<String>, Option<String>) {
+    let mut num_paths = 0u32;
+    let mut num_modes = 0u32;
+    let result = unsafe {
+        GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &mut num_paths, &mut num_modes)
+    };
+    if result != 0 || num_paths == 0 || num_paths > 128 {
+        return (None, None);
+    }
+    let mut paths = vec![DISPLAYCONFIG_PATH_INFO::default(); num_paths as usize];
+    let mut modes = vec![
+        windows_sys::Win32::Devices::Display::DISPLAYCONFIG_MODE_INFO::default();
+        num_modes as usize
+    ];
+    let mut topology = 0i32;
+    let result = unsafe {
+        QueryDisplayConfig(
+            QDC_ONLY_ACTIVE_PATHS,
+            &mut num_paths,
+            paths.as_mut_ptr(),
+            &mut num_modes,
+            modes.as_mut_ptr(),
+            &mut topology,
+        )
+    };
+    if result != 0 {
+        return (None, None);
+    }
+    paths.truncate(num_paths as usize);
+    for path in &paths {
+        let mut source = DISPLAYCONFIG_SOURCE_DEVICE_NAME {
+            header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
+                r#type: DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME,
+                size: std::mem::size_of::<DISPLAYCONFIG_SOURCE_DEVICE_NAME>() as u32,
+                adapterId: path.sourceInfo.adapterId,
+                id: path.sourceInfo.id,
+            },
+            viewGdiDeviceName: [0; 32],
+        };
+        if unsafe { DisplayConfigGetDeviceInfo(&mut source.header) } != 0 {
+            continue;
+        }
+        let gdi = from_wide(&source.viewGdiDeviceName);
+        if gdi != device {
+            continue;
+        }
+        let mut target = DISPLAYCONFIG_TARGET_DEVICE_NAME {
+            header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
+                r#type: DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME,
+                size: std::mem::size_of::<DISPLAYCONFIG_TARGET_DEVICE_NAME>() as u32,
+                adapterId: path.targetInfo.adapterId,
+                id: path.targetInfo.id,
+            },
+            flags: windows_sys::Win32::Devices::Display::DISPLAYCONFIG_TARGET_DEVICE_NAME_FLAGS::default(),
+            outputTechnology: 0,
+            edidManufactureId: 0,
+            edidProductCodeId: 0,
+            connectorInstance: 0,
+            monitorFriendlyDeviceName: [0; 64],
+            monitorDevicePath: [0; 128],
+        };
+        if unsafe { DisplayConfigGetDeviceInfo(&mut target.header) } != 0 {
+            return (None, None);
+        }
+        let device_path = from_wide(&target.monitorDevicePath);
+        let edid_bytes = format!(
+            "{:04x}{:04x}{:08x}",
+            target.edidManufactureId, target.edidProductCodeId, target.connectorInstance
+        )
+        .into_bytes();
+        let digest = format!("fnv{:016x}", fnv1a64(&edid_bytes));
+        return (Some(device_path), Some(digest));
+    }
+    (None, None)
+}
+
+fn from_wide(buffer: &[u16]) -> String {
+    let end = buffer.iter().position(|value| *value == 0).unwrap_or(buffer.len());
+    String::from_utf16_lossy(&buffer[..end])
+}
+
 fn wallpaper_monitor_from_monitor(monitor: HMONITOR) -> Option<WallpaperMonitor> {
     if monitor.is_null() {
         return None;
@@ -408,6 +545,8 @@ fn wallpaper_monitor_from_monitor(monitor: HMONITOR) -> Option<WallpaperMonitor>
     let mut dpi_y = 96u32;
     let dpi_ok = unsafe { GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) };
     let dpi = if dpi_ok >= 0 { dpi_x } else { 96 };
+    let refresh_hz = refresh_rate_hz(&to_wide(&name));
+    let (device_path, edid_digest) = display_identity(&name);
     let rect = info.monitorInfo.rcMonitor;
     Some(WallpaperMonitor {
         name,
@@ -417,6 +556,9 @@ fn wallpaper_monitor_from_monitor(monitor: HMONITOR) -> Option<WallpaperMonitor>
         height: rect.bottom - rect.top,
         dpi,
         primary: info.monitorInfo.dwFlags & 1 != 0,
+        refresh_hz,
+        device_path,
+        edid_digest,
     })
 }
 
@@ -558,13 +700,30 @@ fn class_name(hwnd: HWND) -> String {
     }
 }
 
-/// 交流电供电返回 true；读不到时按交流电处理（不额外降帧）。
-pub(crate) fn on_ac_power() -> bool {
+/// 电源三态（设计 §13.2）：未知按停绘处理；歌词降帧路径继续用 on_ac_power 兜底。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PowerState {
+    Ac,
+    Battery,
+    Unknown,
+}
+
+pub(crate) fn power_state() -> PowerState {
     let mut status = SYSTEM_POWER_STATUS::default();
     if unsafe { GetSystemPowerStatus(&mut status) } == 0 {
-        return true;
+        return PowerState::Unknown;
     }
-    status.ACLineStatus != 0
+    // ACLineStatus: 0=离线 1=在线 255=未知。
+    match status.ACLineStatus {
+        1 => PowerState::Ac,
+        0 => PowerState::Battery,
+        _ => PowerState::Unknown,
+    }
+}
+
+/// 交流电供电返回 true；读不到时按交流电处理（歌词降帧路径不额外降帧）。
+pub(crate) fn on_ac_power() -> bool {
+    power_state() == PowerState::Ac
 }
 
 pub(crate) fn autostart_enabled() -> Result<bool> {
@@ -982,4 +1141,51 @@ pub(crate) fn dialog_error(message: &str) {
             MB_OK | MB_ICONERROR,
         )
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fnv1a64_is_stable_and_order_sensitive() {
+        assert_eq!(fnv1a64(b""), 0xcbf29ce484222325);
+        assert_eq!(fnv1a64(b"a"), 0xaf63dc4c8601ec8c);
+        assert_ne!(fnv1a64(b"ab"), fnv1a64(b"ba"));
+        assert_eq!(fnv1a64(b"abc"), fnv1a64(b"abc"));
+    }
+
+    #[test]
+    fn display_id_prefers_device_path_and_edid_digest() {
+        let mut monitor = WallpaperMonitor {
+            name: r"\.\DISPLAY1".into(),
+            left: 0,
+            top: 0,
+            width: 2560,
+            height: 1600,
+            dpi: 144,
+            primary: true,
+            refresh_hz: 144,
+            device_path: Some(r"\?\DISPLAY#DEL4026#5&abc#UID4353".into()),
+            edid_digest: Some("fnv0164deadbeef".into()),
+        };
+        assert_eq!(
+            monitor.display_id(),
+            r"\?\DISPLAY#DEL4026#5&abc#UID4353#fnv0164deadbeef"
+        );
+        monitor.edid_digest = None;
+        assert_eq!(monitor.display_id(), r"\?\DISPLAY#DEL4026#5&abc#UID4353");
+        // 查询失败降级为 GDI 名：仅当前枚举有效，不会跨拓扑伪装成稳定身份。
+        monitor.device_path = None;
+        assert_eq!(monitor.display_id(), r"\.\DISPLAY1");
+    }
+
+    #[test]
+    fn wide_conversion_round_trips_and_terminates() {
+        let wide = to_wide(r"\.\DISPLAY1");
+        assert_eq!(wide.last(), Some(&0));
+        assert_eq!(from_wide(&wide), r"\.\DISPLAY1");
+        assert_eq!(from_wide(&[]), "");
+        assert_eq!(from_wide(&[0x4e16, 0]), "世");
+    }
 }

@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use tao::dpi::{PhysicalPosition, PhysicalSize};
 use tao::event::{Event, WindowEvent};
@@ -28,7 +28,11 @@ use wry::WebViewBuilder;
 
 use crate::config::{self, Config, Layout, Profile, Secondary};
 use crate::feed::{Document, Feed, Snapshot};
+use crate::mini::{MiniAction, MiniEvent, MiniHost, MiniPhase};
+use crate::mini_feed::MiniUpdate;
+use crate::mini_native::{self, DragEvent};
 use crate::native::{self, NativeEvent};
+use crate::wallpaper::policy;
 use crate::wallpaper_feed::{
     Feed as WallpaperFeed, FeedError, Snapshot as WallpaperSnapshot, ERR_EVENTS_UNAVAILABLE,
 };
@@ -49,6 +53,16 @@ pub(crate) enum UserEvent {
     WallpaperFeed(u64, Instant, Box<Result<WallpaperSnapshot, FeedError>>),
     WallpaperPage(u64, String),
     SettingsPage(String),
+    /// 小窗快照轮询的一拍（含可能的封面字节）。
+    MiniFeed(Instant, Box<Result<MiniUpdate, String>>),
+    /// 呈现时钟的 4Hz 位置推进。
+    MiniPosition(u64),
+    /// 拖拽线程的光标事件。
+    MiniDrag(DragEvent),
+    /// 小窗页面的 IPC 消息。
+    MiniPage(String),
+    /// 小窗播控/回主窗口的结果（只记日志与提示）。
+    MiniControl(Result<(), String>),
     Tick,
     Page(String),
     LyricControl(u64, Result<(), String>),
@@ -75,10 +89,6 @@ impl Policy {
             && !self.session_unavailable
             && !self.display_off
             && !(self.locked && self.no_content)
-    }
-
-    fn renderable(&self) -> bool {
-        !self.fullscreen && !self.session_unavailable && !self.display_off
     }
 }
 
@@ -145,15 +155,19 @@ impl WallpaperSurface {
         }
     }
 
-    fn apply_config(&self, source: &str, scene: &str, music_response: bool) {
+    fn apply_config(&self, wallpaper: &config::WallpaperConfig, refresh_hz: u32) {
         if let Ok(payload) = serde_json::to_string(&serde_json::json!({
-            "source": source,
-            "scene": scene,
-            "musicResponse": music_response,
+            "source": wallpaper.source,
+            "scene": wallpaper.scene,
+            "musicResponse": wallpaper.music_response,
             "allowed": config::WALLPAPER_SCENES
                 .iter()
                 .map(|(id, _)| *id)
                 .collect::<Vec<_>>(),
+            "brightness": wallpaper.brightness,
+            "motion": wallpaper.motion,
+            "quality": wallpaper.quality.as_str(),
+            "refreshHz": refresh_hz,
         })) {
             self.eval(&format!(
                 "window.hertzWallpaper && window.hertzWallpaper.applyConfig({payload});"
@@ -239,8 +253,15 @@ struct PreviewSurface {
     music_response: bool,
     source: String,
     scene: String,
+    brightness: f64,
+    motion: f64,
+    quality: config::WallpaperQuality,
     ready: bool,
     lease_until: Instant,
+    /// owner 租约（设计 §13.4）：renew/close 必须携带，页面刷新后凭 status 取回。
+    lease_id: String,
+    /// 电池/会话/息屏的预览投影命中时为 true（scope=previewOnly）。
+    paused: bool,
 }
 
 struct PositionEdit {
@@ -279,6 +300,11 @@ impl PreviewSurface {
                 .iter()
                 .map(|(id, _)| *id)
                 .collect::<Vec<_>>(),
+            // 预览跟随草稿的亮度/运动/画质；设置窗口按 60 Hz 兜底做分频。
+            "brightness": self.brightness,
+            "motion": self.motion,
+            "quality": self.quality.as_str(),
+            "refreshHz": 60,
         })) {
             self.eval(&format!(
                 "window.hertzWallpaper && window.hertzWallpaper.applyConfig({payload});"
@@ -292,6 +318,10 @@ impl PreviewSurface {
             self.fps
         ));
     }
+
+    fn stop(&self) {
+        self.eval("window.hertzWallpaper && window.hertzWallpaper.stop();");
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -302,23 +332,46 @@ struct WallpaperCandidate {
     music_response: bool,
     #[serde(default)]
     monitor: Option<String>,
+    #[serde(default)]
+    display_id: Option<String>,
     #[serde(default = "config::default_wallpaper_source")]
     source: String,
     #[serde(default = "config::default_wallpaper_scene")]
     scene: String,
+    #[serde(default = "config::default_wallpaper_brightness")]
+    brightness: f64,
+    #[serde(default = "config::default_wallpaper_motion")]
+    motion: f64,
+    #[serde(default)]
+    quality: config::WallpaperQuality,
+    #[serde(default)]
+    #[allow(dead_code)] // v4 只收 pause；runLow 属 P1 的显式用户选项
+    battery_policy: config::BatteryPolicy,
 }
 
 struct TrayActions {
     toggle: CheckMenuItem,
     autostart: CheckMenuItem,
     wallpaper_toggle: Option<CheckMenuItem>,
+    mini_toggle: CheckMenuItem,
     toggle_id: String,
     locate_id: String,
     autostart_id: String,
     settings_id: String,
     wallpaper_toggle_id: Option<String>,
     wallpaper_retry_id: Option<String>,
+    mini_toggle_id: String,
+    mini_assets_id: String,
     quit_id: String,
+}
+
+/// 小窗的原生 surface。窗口与 WebView 一起生灭；封面走共享槽（协议闭包读最新帧，
+/// 事件循环写它），避免每次换封面都 base64。
+struct MiniSurface {
+    window: Window,
+    webview: wry::WebView,
+    hwnd: HWND,
+    cover: Arc<std::sync::Mutex<Option<(u64, Vec<u8>, String)>>>,
 }
 
 struct App {
@@ -364,6 +417,14 @@ struct App {
     wallpaper_visible: bool,
     wallpaper_hidden: bool,
     wallpaper_forced: bool,
+    /// 保存成功与运行失败分离（设计 C01）：挂载失败不回滚配置，只记独立错误。
+    wallpaper_apply_error: Option<String>,
+    /// 逐屏全屏去抖门（非对称：进入慢、恢复快）。
+    wallpaper_fullscreen_gate: policy::Debounce,
+    /// 目标屏缺失宽限计数：连续 3 次未命中才判定 displayMissing。
+    wallpaper_topology_misses: u8,
+    last_topology_check: Instant,
+    wallpaper_power: native::PowerState,
     source_generation: u64,
     lyrics_feed_stop: Arc<AtomicBool>,
     wallpaper_feed_stop: Option<Arc<AtomicBool>>,
@@ -376,13 +437,37 @@ struct App {
     settings_tab: String,
     settings_navigation: u64,
     preview: Option<PreviewSurface>,
+    /// 配置格式迁移的一次性说明（schema v4）。
+    migration_notice: Option<String>,
     position_edit: Option<PositionEdit>,
     placed_position: Option<(i32, i32)>,
     /// 页面样式条高度（DIP）；展开时窗口向下长高，歌词区域保持原高度。
     panel_height: f64,
     /// 样式条展开期间的窗口顶边（物理像素），关掉面板后回到锚点定位。
     panel_top: Option<i32>,
+    /// 小窗播放（桌面宠物）：窗口按需创建，状态机常驻。
+    mini: Option<MiniSurface>,
+    mini_page_ready: bool,
+    mini_host: MiniHost,
+    mini_last_snapshot: Option<crate::mini_feed::MiniSnapshot>,
+    mini_feed_logged: bool,
+    mini_drag_offset: Option<(i32, i32)>,
+    /// 小窗封面版本号：协议闭包按版本号回图，页面用 ?v= 破缓存。
+    mini_cover_version: u64,
+    /// 桌宠素材目录的签名（文件名+大小+mtime 哈希）。变化即触发热重载。
+    mini_skin_signature: Option<u64>,
+    mini_runtime: MiniRuntime,
     proxy: EventLoopProxy<UserEvent>,
+}
+
+/// 小窗来源线程与事件循环之间的共享开关。
+#[derive(Clone, Default)]
+struct MiniRuntime {
+    stop: Arc<AtomicBool>,
+    /// 小窗可见（非 Hidden）：暂停时位置推送与轮询节奏都看它。
+    visible: Arc<AtomicBool>,
+    /// 轮询间隔提示（毫秒）。组件侧按相位/播放态更新，线程每拍读取。
+    poll_hint_ms: Arc<AtomicU64>,
 }
 
 impl App {
@@ -623,33 +708,32 @@ impl App {
         if !native::wallpaper_alive(surface.hwnd()) {
             return;
         }
-        if !native::wallpaper_monitors()
-            .iter()
-            .any(|monitor| monitor.name == surface.monitor.name)
-        {
-            if !self.wallpaper_monitor_missing {
-                log(&format!(
-                    "wallpaper target monitor missing; stop name={}",
-                    surface.monitor.name
-                ));
-                self.wallpaper_monitor_missing = true;
-            }
+        if self.wallpaper_monitor_missing {
+            // waitingDisplay：宽限期已过、目标屏确认缺失；保留 surface，仅停绘。
             surface.stop();
             self.wallpaper_visible = false;
             return;
-        }
-        if self.wallpaper_monitor_missing {
-            log("wallpaper target monitor returned");
-            self.wallpaper_monitor_missing = false;
         }
         // 页面就绪前不能把 WebView2 隐藏：隐藏会让页面不加载，dom_ready 永远不来。
         if !self.wallpaper_page_ready {
             return;
         }
-        let visible = (self.config.wallpaper.enabled || self.wallpaper_forced)
+        let inputs = policy::PolicyInputs {
+            enabled: self.config.wallpaper.enabled || self.wallpaper_forced,
+            wallpaper: &self.config.wallpaper,
+            manual_pause: self.wallpaper_hidden,
+            fullscreen: self.wallpaper_fullscreen_gate.stable(),
+            session_unavailable: self.policy.session_unavailable,
+            display_off: self.policy.display_off,
+            display_missing: self.wallpaper_monitor_missing,
+            power: self.wallpaper_power,
+            has_surface: true,
+            page_ready: self.wallpaper_page_ready,
+        };
+        let visible = inputs.enabled
             && self.config.wallpaper.fps > 0
-            && !self.wallpaper_hidden
-            && self.policy.renderable();
+            && !inputs.manual_pause
+            && policy::renderable(&inputs);
         let was_visible = self.wallpaper_visible;
         self.wallpaper_visible = visible;
         if visible {
@@ -667,6 +751,144 @@ impl App {
                 self.reset_wallpaper_heartbeat();
             }
         }
+    }
+
+    /// 拓扑/全屏/预览策略的 250 ms 巡检（设计 §13.1/§13.2）：
+    /// 空拓扑宽限不销毁；目标缺失连续 3 次才判 displayMissing；全屏走非对称去抖。
+    fn poll_wallpaper_policy(&mut self, target: &EventLoopWindowTarget<UserEvent>) {
+        let now = Instant::now();
+        if now.duration_since(self.last_topology_check) < policy::TOPOLOGY_INTERVAL {
+            return;
+        }
+        self.last_topology_check = now;
+        // 预览继承电池/会话/息屏（scope=previewOnly）。
+        if let Some(preview) = self.preview.as_mut() {
+            let paused = !policy::preview_pause_reasons(
+                &self.config.wallpaper,
+                self.policy.session_unavailable,
+                self.policy.display_off,
+                self.wallpaper_power,
+            )
+            .is_empty();
+            if paused != preview.paused {
+                preview.paused = paused;
+                if paused {
+                    preview.stop();
+                    log("preview paused by policy");
+                } else if preview.ready {
+                    preview.apply_config();
+                    preview.start();
+                    log("preview resumed by policy");
+                }
+            }
+        }
+        if self.wallpaper.is_none() {
+            return;
+        }
+        let monitors = native::wallpaper_monitors();
+        if monitors.is_empty() {
+            // 空拓扑宽限：模式切换/驱动重置/RDP 可能短暂少报，不销毁、不累计缺失。
+            return;
+        }
+        let alive = self
+            .wallpaper
+            .as_ref()
+            .is_some_and(|surface| native::wallpaper_alive(surface.hwnd()));
+        let raw_fullscreen = self
+            .wallpaper
+            .as_ref()
+            .filter(|_| alive)
+            .map(|surface| native::target_fullscreen(surface.hwnd()))
+            .unwrap_or(false);
+        if let Some(next) = self.wallpaper_fullscreen_gate.update(raw_fullscreen, now) {
+            log(&format!("wallpaper fullscreen={next}"));
+            self.recompute_wallpaper();
+        }
+        let Some(surface) = self.wallpaper.as_ref() else {
+            return;
+        };
+        let resolved = monitors
+            .iter()
+            .find(|monitor| {
+                monitor.display_id() == surface.monitor.display_id()
+                    || monitor.name == surface.monitor.name
+            })
+            .cloned();
+        match resolved {
+            None => {
+                self.wallpaper_topology_misses = self.wallpaper_topology_misses.saturating_add(1);
+                if self.wallpaper_topology_misses >= policy::DISPLAY_MISSING_HITS
+                    && !self.wallpaper_monitor_missing
+                {
+                    log(&format!(
+                        "wallpaper target display missing after {} misses; waitingDisplay",
+                        self.wallpaper_topology_misses
+                    ));
+                    self.wallpaper_monitor_missing = true;
+                    self.recompute_wallpaper();
+                }
+            }
+            Some(monitor) => {
+                if self.wallpaper_topology_misses > 0 {
+                    self.wallpaper_topology_misses = 0;
+                }
+                if self.wallpaper_monitor_missing {
+                    self.wallpaper_monitor_missing = false;
+                    log("wallpaper target display returned");
+                    self.recompute_wallpaper();
+                }
+                self.reconcile_wallpaper_geometry(target, monitor);
+            }
+        }
+    }
+
+    /// 目标屏仍在拓扑中时的几何/DPI 校准（原 1 s 节奏并入 250 ms 巡检）。
+    fn reconcile_wallpaper_geometry(
+        &mut self,
+        target: &EventLoopWindowTarget<UserEvent>,
+        monitor: native::WallpaperMonitor,
+    ) {
+        let (geometry_changed, zoom_changed) = {
+            let Some(surface) = self.wallpaper.as_ref() else {
+                return;
+            };
+            let window_dpi = native::window_dpi(surface.hwnd()).max(1);
+            let zoom_changed = (f64::from(monitor.dpi) / f64::from(window_dpi) - surface.zoom).abs() > 0.001;
+            (monitor_geometry_changed(&surface.monitor, &monitor), zoom_changed)
+        };
+        if !geometry_changed && !zoom_changed {
+            return;
+        }
+        if geometry_changed {
+            log(&format!(
+                "wallpaper monitor geometry changed name={} rect={},{} {}x{} dpi={} hz={}",
+                monitor.name,
+                monitor.left,
+                monitor.top,
+                monitor.width,
+                monitor.height,
+                monitor.dpi,
+                monitor.refresh_hz
+            ));
+            let Some(surface) = self.wallpaper.as_mut() else {
+                return;
+            };
+            if let Err(error) = surface.reflow(monitor) {
+                log(&format!("wallpaper reflow failed: {error:#}"));
+                self.wallpaper = None;
+                self.wallpaper_page_ready = false;
+                self.wallpaper_visible = false;
+                self.reset_wallpaper_page_stats();
+                self.wallpaper_generation = self.wallpaper_generation.wrapping_add(1);
+                self.recover_wallpaper(target);
+                return;
+            }
+        } else if let Some(surface) = self.wallpaper.as_mut() {
+            if let Err(error) = surface.apply_zoom(monitor.dpi) {
+                log(&format!("wallpaper zoom sync failed: {error:#}"));
+            }
+        }
+        self.recompute_wallpaper();
     }
 
     fn handle_wallpaper_feed(&mut self, result: Result<WallpaperSnapshot, FeedError>) {
@@ -780,11 +1002,7 @@ impl App {
         }
         if self.wallpaper_page_ready {
             if let Some(surface) = self.wallpaper.as_ref() {
-                surface.apply_config(
-                    &self.config.wallpaper.source,
-                    &self.config.wallpaper.scene,
-                    self.config.wallpaper.music_response,
-                );
+                surface.apply_config(&self.config.wallpaper, surface.monitor.refresh_hz);
             }
             if let Some(snapshot) = self.wallpaper_last.as_ref() {
                 if let Some(surface) = self.wallpaper.as_ref() {
@@ -827,14 +1045,27 @@ impl App {
         self.wallpaper_visible = false;
         self.reset_wallpaper_page_stats();
         self.wallpaper_generation = self.wallpaper_generation.wrapping_add(1);
-        match create_wallpaper(
-            target,
-            self.proxy.clone(),
-            self.wallpaper_generation,
-            self.config.wallpaper.monitor.as_deref(),
-        ) {
+        let monitors = native::wallpaper_monitors();
+        let resolved = resolve_wallpaper_monitor_or_primary(&monitors, &self.config.wallpaper);
+        match resolved
+            .ok_or_else(|| anyhow::anyhow!("目标显示器未连接，请在设置中重新认领"))
+            .and_then(|monitor| {
+                create_wallpaper(target, self.proxy.clone(), self.wallpaper_generation, monitor)
+            }) {
             Ok(surface) => {
                 self.wallpaper = Some(surface);
+                self.wallpaper_apply_error = None;
+                // 恢复成功同样建立稳定身份；沿用统一去抖提交。
+                let identity = self
+                    .wallpaper
+                    .as_ref()
+                    .map(|surface| surface.monitor.display_id());
+                if let Some(identity) = identity {
+                    if self.config.wallpaper.display_id.as_deref() != Some(identity.as_str()) {
+                        self.config.wallpaper.display_id = Some(identity);
+                        self.schedule_save();
+                    }
+                }
                 log(&format!("wallpaper recovery success attempt={attempt}"));
             }
             Err(error) => {
@@ -863,8 +1094,13 @@ impl App {
             fps: self.config.wallpaper.fps,
             music_response: self.config.wallpaper.music_response,
             monitor: self.config.wallpaper.monitor.clone(),
+            display_id: self.config.wallpaper.display_id.clone(),
             source: self.config.wallpaper.source.clone(),
             scene: self.config.wallpaper.scene.clone(),
+            brightness: self.config.wallpaper.brightness,
+            motion: self.config.wallpaper.motion,
+            quality: self.config.wallpaper.quality,
+            battery_policy: self.config.wallpaper.battery_policy,
         }
     }
 
@@ -897,14 +1133,7 @@ impl App {
             .collect();
         let payload = serde_json::json!({
             "revision": self.config.revision,
-            "config": {
-                "enabled": self.config.wallpaper.enabled,
-                "fps": self.config.wallpaper.fps,
-                "musicResponse": self.config.wallpaper.music_response,
-                "monitor": self.config.wallpaper.monitor,
-                "source": self.config.wallpaper.source,
-                "scene": self.config.wallpaper.scene,
-            },
+            "config": self.config.wallpaper,
             "scenes": config::WALLPAPER_SCENES
                 .iter()
                 .map(|(id, label)| serde_json::json!({ "id": id, "label": label }))
@@ -922,6 +1151,7 @@ impl App {
             ),
             "monitors": monitors,
             "previewActive": self.preview.is_some(),
+            "previewLease": self.preview.as_ref().map(|preview| preview.lease_id.clone()),
             "lyricsConfig": self.position_edit.as_ref().map(|edit| &edit.lyrics).unwrap_or(&self.config.lyrics),
             "runtime": self.status_json(),
             "launchAtLogin": native::autostart_enabled().ok(),
@@ -986,8 +1216,11 @@ impl App {
             preview.music_response = candidate.music_response;
             preview.source = candidate.source.clone();
             preview.scene = candidate.scene.clone();
+            preview.brightness = candidate.brightness;
+            preview.motion = candidate.motion;
+            preview.quality = candidate.quality;
             preview.lease_until = Instant::now() + PREVIEW_LEASE;
-            if preview.ready {
+            if preview.ready && !preview.paused {
                 preview.apply_config();
                 if let Some(snapshot) = self.wallpaper_last.as_ref() {
                     preview.apply_feed(snapshot);
@@ -1007,19 +1240,29 @@ impl App {
             music_response: candidate.music_response,
             source: candidate.source.clone(),
             scene: candidate.scene.clone(),
+            brightness: candidate.brightness,
+            motion: candidate.motion,
+            quality: candidate.quality,
             ready: false,
             lease_until: Instant::now() + PREVIEW_LEASE,
+            lease_id: new_lease_id(),
+            paused: false,
         });
         settings
             .eval("window.hertzWallpaperSettings && window.hertzWallpaperSettings.mountPreview();");
         Ok(())
     }
 
-    fn renew_preview(&mut self) {
+    fn renew_preview(&mut self, lease: Option<&str>) {
         let Some(preview) = self.preview.as_mut() else {
             self.send_settings_status(Some("没有活动预览"), None);
             return;
         };
+        if lease != Some(preview.lease_id.as_str()) {
+            // 非 owner 的续租一律拒绝（设计 §13.4）。
+            self.send_settings_status(Some("预览租约不匹配"), None);
+            return;
+        }
         preview.lease_until = Instant::now() + PREVIEW_LEASE;
         self.send_settings_status(None, None);
     }
@@ -1198,23 +1441,18 @@ impl App {
         }
     }
 
-    fn ensure_wallpaper_surface(
-        &mut self,
-        target: &EventLoopWindowTarget<UserEvent>,
-        monitor: Option<&str>,
-    ) -> Result<()> {
+    fn ensure_wallpaper_surface(&mut self, target: &EventLoopWindowTarget<UserEvent>) -> Result<()> {
         let monitors = native::wallpaper_monitors();
-        let resolved_name = monitor.map(str::to_string).or_else(|| {
-            monitors
-                .iter()
-                .find(|monitor| monitor.primary)
-                .map(|monitor| monitor.name.clone())
+        if monitors.is_empty() {
+            bail!("显示器拓扑暂时为空，请稍后重试");
+        }
+        let resolved = resolve_wallpaper_monitor_or_primary(&monitors, &self.config.wallpaper)
+            .ok_or_else(|| anyhow::anyhow!("目标显示器未连接，请在设置中重新认领"))?;
+        let surface_stale = self.wallpaper.as_ref().is_some_and(|surface| {
+            surface.monitor.display_id() != resolved.display_id()
+                || monitor_geometry_changed(&surface.monitor, &resolved)
         });
-        let monitor_changed = self
-            .wallpaper
-            .as_ref()
-            .is_some_and(|surface| Some(surface.monitor.name.as_str()) != resolved_name.as_deref());
-        if monitor_changed
+        if surface_stale
             || self
                 .wallpaper
                 .as_ref()
@@ -1229,9 +1467,20 @@ impl App {
                 target,
                 self.proxy.clone(),
                 self.wallpaper_generation,
-                monitor,
+                resolved,
             )?;
             self.wallpaper = Some(surface);
+        }
+        // 旧 GDI 名命中后建立稳定身份（设计 §4.3）：回填 displayId 并按统一去抖提交。
+        let identity = self
+            .wallpaper
+            .as_ref()
+            .map(|surface| surface.monitor.display_id());
+        if let Some(identity) = identity {
+            if self.config.wallpaper.display_id.as_deref() != Some(identity.as_str()) {
+                self.config.wallpaper.display_id = Some(identity);
+                self.schedule_save();
+            }
         }
         Ok(())
     }
@@ -1327,16 +1576,19 @@ impl App {
         self.sync_tray();
         let mut surface_error = None;
         if self.config.wallpaper.enabled || self.wallpaper_forced {
-            let monitor = self.config.wallpaper.monitor.clone();
-            if let Err(error) = self.ensure_wallpaper_surface(target, monitor.as_deref()) {
+            if let Err(error) = self.ensure_wallpaper_surface(target) {
                 log(&format!(
                     "wallpaper enable after source switch failed: {error:#}"
                 ));
+                self.wallpaper_apply_error = Some(error.to_string());
                 surface_error = Some(format!("来源已保存，但壁纸挂载失败：{error}"));
+            } else {
+                self.wallpaper_apply_error = None;
             }
             self.ensure_wallpaper_feed();
         } else {
             self.drop_wallpaper_surface();
+            self.wallpaper_apply_error = None;
         }
         self.sync_settings_feed();
         self.wallpaper_recovery_terminal = false;
@@ -1368,8 +1620,7 @@ impl App {
         if self.save_due.is_some() || expected_revision != self.config.revision {
             return Err("设置已在其他位置变化；草稿已保留，请放弃修改后重新读取".into());
         }
-        let previous = self.config.clone();
-        let mut next = previous.clone();
+        let mut next = self.config.clone();
         if let Some(lyrics) = lyrics {
             if lyrics.locked && self.tray.is_none() {
                 return Err("托盘不可用，暂时无法锁定歌词".into());
@@ -1381,41 +1632,46 @@ impl App {
         next.wallpaper.fps = candidate.fps;
         next.wallpaper.music_response = candidate.music_response;
         next.wallpaper.monitor = candidate.monitor.clone();
+        next.wallpaper.display_id = candidate.display_id.clone();
         next.wallpaper.source = candidate.source.clone();
         next.wallpaper.scene = candidate.scene.clone();
+        next.wallpaper.brightness = candidate.brightness;
+        next.wallpaper.motion = candidate.motion;
+        next.wallpaper.quality = candidate.quality;
         config::commit(&mut self.config, next)
             .map_err(|error| format!("保存设置失败：{error:#}"))?;
         self.committed_config = self.config.clone();
         self.wallpaper_forced = false;
         self.wallpaper_recovery_terminal = false;
         self.wallpaper_recovery_attempts.clear();
+        // 保存成功与运行失败分离（设计 C01/C02）：以下任何运行失败都保留
+        // 新 revision 与意图，只把错误独立呈现给设置页，不回写旧配置。
+        let mut run_error = None;
         if candidate.enabled {
-            if let Err(error) = self.ensure_wallpaper_surface(target, candidate.monitor.as_deref())
-            {
+            if let Err(error) = self.ensure_wallpaper_surface(target) {
                 log(&format!("wallpaper enable failed: {error:#}"));
-                if config::save(&previous).is_ok() {
-                    self.config = previous;
-                    self.committed_config = self.config.clone();
-                }
-                return Err(format!("启用壁纸失败：{error}"));
-            }
-            self.ensure_wallpaper_feed();
-            if let Some(surface) = self.wallpaper.as_ref() {
-                surface.apply_config(
-                    &self.config.wallpaper.source,
-                    &self.config.wallpaper.scene,
-                    self.config.wallpaper.music_response,
-                );
-                if self.wallpaper_page_ready {
-                    if let Some(snapshot) = self.wallpaper_last.as_ref() {
-                        surface.apply_feed(snapshot);
-                    } else {
-                        surface.clear_feed();
+                self.wallpaper_apply_error = Some(error.to_string());
+                run_error = Some(format!("设置已保存，但壁纸挂载失败：{error}"));
+            } else {
+                self.wallpaper_apply_error = None;
+                self.ensure_wallpaper_feed();
+                if let Some(surface) = self.wallpaper.as_ref() {
+                    surface.apply_config(
+                        &self.config.wallpaper,
+                        surface.monitor.refresh_hz,
+                    );
+                    if self.wallpaper_page_ready {
+                        if let Some(snapshot) = self.wallpaper_last.as_ref() {
+                            surface.apply_feed(snapshot);
+                        } else {
+                            surface.clear_feed();
+                        }
                     }
                 }
             }
         } else {
             self.drop_wallpaper_surface();
+            self.wallpaper_apply_error = None;
         }
         self.close_preview();
         self.sync_settings_feed();
@@ -1426,7 +1682,10 @@ impl App {
         self.place(true);
         self.recompute_visibility();
         self.rebuild_tray();
-        Ok(())
+        match run_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 
     fn begin_position_edit(&mut self) -> Result<(), String> {
@@ -1508,6 +1767,8 @@ impl App {
             event: Option<String>,
             #[serde(default)]
             enabled: Option<bool>,
+            #[serde(default)]
+            lease: Option<String>,
         }
         let Ok(command) = serde_json::from_str::<Command>(body) else {
             self.send_settings_status(Some("设置请求格式无效"), None);
@@ -1531,13 +1792,26 @@ impl App {
             return;
         }
         match command.cmd.as_str() {
-            "ready" | "status" => self.send_settings_status(None, None),
+            "ready" => {
+                // 迁移说明只在设置页首次就绪时展示一次。
+                let notice = self.migration_notice.take();
+                self.send_settings_status(None, notice.as_deref());
+            }
+            "status" => self.send_settings_status(None, None),
             "preview-event" => {
                 if let Some(event) = command.event {
                     self.handle_preview_page(&event);
                 }
             }
-            "preview-close" => self.close_preview(),
+            "preview-close" => {
+                if let Some(preview) = self.preview.as_ref() {
+                    if command.lease.as_deref() != Some(preview.lease_id.as_str()) {
+                        self.send_settings_status(Some("预览租约不匹配"), None);
+                        return;
+                    }
+                }
+                self.close_preview();
+            }
             "position-begin" => {
                 let result = self.begin_position_edit();
                 self.send_settings_status(
@@ -1603,7 +1877,7 @@ impl App {
                     Err(error) => self.send_settings_status(Some(&error), None),
                 }
             }
-            "preview-renew" => self.renew_preview(),
+            "preview-renew" => self.renew_preview(command.lease.as_deref()),
             "apply" => {
                 let Some(candidate) = command.config else {
                     self.send_settings_status(Some("缺少壁纸配置"), None);
@@ -1784,6 +2058,541 @@ impl App {
             if let Some(toggle) = actions.wallpaper_toggle.as_ref() {
                 toggle.set_checked(!self.wallpaper_hidden);
             }
+            actions
+                .mini_toggle
+                .set_checked(self.mini_host.phase != MiniPhase::Hidden);
+        }
+    }
+
+    // --- 小窗播放（桌面宠物）-------------------------------------------------
+
+    fn mini_hwnd(&self) -> Option<HWND> {
+        self.mini.as_ref().map(|mini| mini.hwnd)
+    }
+
+    fn mini_eval(&self, script: &str) {
+        if !self.mini_page_ready {
+            return;
+        }
+        let Some(mini) = self.mini.as_ref() else {
+            return;
+        };
+        if let Err(error) = mini.webview.evaluate_script(script) {
+            log(&format!("mini evaluate_script failed: {error}"));
+        }
+    }
+
+    /// 状态机的动作落到窗口。mini.rs 只出意图，HWND 的活全在这。
+    fn apply_mini_action(
+        &mut self,
+        action: MiniAction,
+        target: &EventLoopWindowTarget<UserEvent>,
+    ) {
+        match action {
+            MiniAction::None => {}
+            MiniAction::Show => {
+                if self.ensure_mini(target) {
+                    if let Some(hwnd) = self.mini_hwnd() {
+                        native::show_no_activate(hwnd);
+                    }
+                    self.place_mini();
+                    if let Some(hwnd) = self.mini_hwnd() {
+                        self.mini_host.push_window_style(hwnd as isize);
+                    }
+                    self.mini_send_all();
+                    self.sync_tray();
+                }
+            }
+            MiniAction::Hide => {
+                if let Some(hwnd) = self.mini_hwnd() {
+                    native::hide(hwnd);
+                }
+                self.sync_tray();
+            }
+            MiniAction::Place => {
+                self.place_mini();
+                self.mini_send_config();
+            }
+            MiniAction::ApplyWindowStyle => {
+                if let Some(hwnd) = self.mini_hwnd() {
+                    self.mini_host.push_window_style(hwnd as isize);
+                }
+                self.mini_send_config();
+            }
+            MiniAction::NotifyRestore => {
+                // 相位已回 Hidden：窗口必须同时藏起来，否则用户「回到主窗口」
+                // 之后小窗还钉在原地（真机验证踩过）。
+                if let Some(hwnd) = self.mini_hwnd() {
+                    native::hide(hwnd);
+                }
+                self.mini_request_restore();
+            }
+        }
+        self.mini_sync_runtime();
+    }
+
+    /// 按需创建小窗。返回 false 表示创建失败（已记日志），状态机保持现状。
+    fn ensure_mini(&mut self, target: &EventLoopWindowTarget<UserEvent>) -> bool {
+        if self.mini.is_some() {
+            return true;
+        }
+        match create_mini(target, self.proxy.clone()) {
+            Ok(surface) => {
+                // 必须在 WebView 建好之后再装命中处理：WebView2 的子窗那时才存在，
+                // 而它才是 WM_NCHITTEST 的第一到达点（设计 §6.2）。
+                mini_native::install(surface.hwnd);
+                self.mini = Some(surface);
+                self.mini_page_ready = false;
+                true
+            }
+            Err(error) => {
+                log(&format!("mini window unavailable: {error:#}"));
+                false
+            }
+        }
+    }
+
+    fn place_mini(&mut self) {
+        let Some(surface) = self.mini.as_ref() else {
+            return;
+        };
+        let dpi = native::window_dpi(surface.hwnd).max(1);
+        let Some((x, y, width, height)) = self.mini_host.desired_rect(dpi) else {
+            return;
+        };
+        // 拖拽期间位置归拖拽线程管，place 只负责尺寸（Peeking 拖出时要恢复整窗）。
+        let (x, y) = if self.mini_host.phase == MiniPhase::Dragging {
+            self.mini_host
+                .rect
+                .map(|(cx, cy, _, _)| (cx, cy))
+                .unwrap_or((x, y))
+        } else {
+            (x, y)
+        };
+        mini_native::move_window(surface.hwnd, x, y, width, height);
+        self.mini_host.rect = Some((x, y, width, height));
+    }
+
+    fn mini_send_all(&self) {
+        self.mini_send_config();
+        self.mini_send_snapshot();
+        self.mini_send_cover();
+    }
+
+    fn mini_send_config(&self) {
+        let mini = &self.config.mini;
+        let payload = serde_json::json!({
+            "theme": "auto",
+            "scale": mini.scale,
+            "opacity": mini.opacity,
+            "pet": mini.pet,
+            "locked": mini.locked,
+            "topmost": mini.always_on_top,
+            "edgeHide": mini.edge_hide,
+            "dock": self.mini_host.geometry.dock.label(),
+            "peek": self.mini_host.phase == MiniPhase::Peeking,
+        });
+        self.mini_eval(&format!(
+            "window.hertzMini && window.hertzMini.applyConfig({payload});"
+        ));
+    }
+
+    fn mini_send_snapshot(&self) {
+        let Some(snapshot) = self.mini_last_snapshot.as_ref() else {
+            self.mini_eval("window.hertzMini && window.hertzMini.applySnapshot(null);");
+            return;
+        };
+        let payload = serde_json::to_value(snapshot).unwrap_or(serde_json::Value::Null);
+        self.mini_eval(&format!(
+            "window.hertzMini && window.hertzMini.applySnapshot({payload});"
+        ));
+    }
+
+    fn mini_send_position(&self, ms: u64) {
+        if self.mini_host.phase == MiniPhase::Hidden {
+            return;
+        }
+        let duration = self
+            .mini_last_snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.duration_ms);
+        let payload = serde_json::json!({ "ms": ms, "durationMs": duration });
+        self.mini_eval(&format!(
+            "window.hertzMini && window.hertzMini.applyPosition({payload});"
+        ));
+    }
+
+    fn mini_send_cover(&self) {
+        let Some(mini) = self.mini.as_ref() else {
+            return;
+        };
+        let guard = mini.cover.lock().unwrap_or_else(|error| error.into_inner());
+        let script = match guard.as_ref() {
+            // 相对 URL：页面实际跑在 http://hertz.localhost/（wry 的自定义协议
+            // 映射），绝对 hertz:// 形式不匹配资源拦截过滤器，img 会静默失败。
+            Some((version, _, _)) => format!(
+                "window.hertzMini && window.hertzMini.applyCover('mini-cover?v={version}');"
+            ),
+            None => "window.hertzMini && window.hertzMini.applyCover(null);".to_string(),
+        };
+        drop(guard);
+        self.mini_eval(&script);
+    }
+
+    /// 页面 ⇄ 宿主的可见性/节奏开关。线程读共享量，不认识相位。
+    fn mini_sync_runtime(&self) {
+        let visible = self.mini_host.phase != MiniPhase::Hidden && self.mini.is_some();
+        self.mini_runtime.visible.store(visible, Ordering::Relaxed);
+        let playing = self
+            .mini_last_snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.playing);
+        let hint = if !visible {
+            5000
+        } else if playing {
+            500
+        } else {
+            2000
+        };
+        self.mini_runtime
+            .poll_hint_ms
+            .store(hint, Ordering::Relaxed);
+    }
+
+    fn handle_mini_feed(
+        &mut self,
+        started: Instant,
+        result: Result<MiniUpdate, String>,
+        target: &EventLoopWindowTarget<UserEvent>,
+    ) {
+        if started.elapsed() >= STALE_AFTER {
+            return;
+        }
+        match result {
+            Err(message) => {
+                // 同一条错误只记一次，别让 500ms 轮询刷爆日志。
+                if !std::mem::replace(&mut self.mini_feed_logged, true) {
+                    return;
+                }
+                log(&format!("mini feed: {message}"));
+            }
+            Ok(update) => {
+                self.mini_feed_logged = false;
+                let previous = self
+                    .mini_last_snapshot
+                    .as_ref()
+                    .map(|snapshot| snapshot.main.visible);
+                let visible_now = update.snapshot.main.visible;
+                // 主窗口回前台：自动接管的那次要收回去；主窗口藏了：到点自动接管。
+                if previous == Some(false) && visible_now {
+                    let action = self.mini_host.handle(MiniEvent::MainVisible);
+                    self.apply_mini_action(action, target);
+                } else if previous == Some(true) && !visible_now {
+                    let action = self
+                        .mini_host
+                        .handle(MiniEvent::Enter(crate::mini::EnterReason::MainHidden));
+                    self.apply_mini_action(action, target);
+                }
+                self.mini_last_snapshot = Some(update.snapshot);
+                self.mini_send_snapshot();
+                if let Some(bytes) = update.cover {
+                    let mime = sniff_image_mime(&bytes).to_string();
+                    let Some(mini) = self.mini.as_ref() else {
+                        return;
+                    };
+                    let mut guard = mini.cover.lock().unwrap_or_else(|error| error.into_inner());
+                    self.mini_cover_version += 1;
+                    *guard = Some((self.mini_cover_version, bytes, mime));
+                    drop(guard);
+                    self.mini_send_cover();
+                }
+                self.mini_sync_runtime();
+            }
+        }
+    }
+
+    /// 小窗页面的 IPC。与歌词页的 page_command 平行，互不复用：
+    /// 命令集不同、容错策略不同（小窗卡住比崩掉好）。
+    fn mini_page_command(
+        &mut self,
+        body: &str,
+        target: &EventLoopWindowTarget<UserEvent>,
+    ) {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Command {
+            cmd: String,
+            #[serde(default)]
+            regions: Vec<(f64, f64, f64, f64)>,
+            #[serde(default)]
+            offset_x: Option<f64>,
+            #[serde(default)]
+            offset_y: Option<f64>,
+            #[serde(default)]
+            action: Option<String>,
+            #[serde(default)]
+            item: Option<String>,
+            #[serde(default)]
+            on: Option<bool>,
+            #[serde(default)]
+            width: Option<f64>,
+            #[serde(default)]
+            height: Option<f64>,
+        }
+        let Ok(command) = serde_json::from_str::<Command>(body) else {
+            log("ignore malformed mini page command");
+            return;
+        };
+        match command.cmd.as_str() {
+            "ready" => {
+                self.mini_page_ready = true;
+                self.mini_send_all();
+            }
+            "hit-regions" => {
+                self.mini_host.set_hit_regions(command.regions.clone());
+                if let Some(hwnd) = self.mini_hwnd() {
+                    let dpi = native::window_dpi(hwnd).max(1);
+                    mini_native::set_hit_regions(hwnd, &command.regions, dpi);
+                }
+            }
+            "drag-begin" => {
+                let (Some(offset_x), Some(offset_y)) = (command.offset_x, command.offset_y) else {
+                    return;
+                };
+                self.mini_drag_offset =
+                    Some((offset_x.round() as i32, offset_y.round() as i32));
+                let action = self.mini_host.handle(MiniEvent::DragBegin);
+                self.apply_mini_action(action, target);
+                if let Some(hwnd) = self.mini_hwnd() {
+                    let proxy = self.proxy.clone();
+                    mini_native::begin_drag(hwnd, move |event| {
+                        let _ = proxy.send_event(UserEvent::MiniDrag(event));
+                    });
+                }
+            }
+            "restore" => {
+                let action = self.mini_host.handle(MiniEvent::Restore);
+                self.apply_mini_action(action, target);
+                self.config.mini.reopen = false;
+                self.schedule_save();
+                self.sync_tray();
+            }
+            "control" => {
+                let Some(action) = command.action.filter(|action| {
+                    matches!(action.as_str(), "play" | "pause" | "toggle" | "next" | "previous")
+                }) else {
+                    return;
+                };
+                self.mini_control(&action);
+            }
+            "menu" => self.mini_menu(command.item.as_deref(), command.on, target),
+            "quit" => {
+                let action = self.mini_host.handle(MiniEvent::Quit);
+                self.apply_mini_action(action, target);
+                self.config.mini.reopen = false;
+                self.schedule_save();
+                self.sync_tray();
+            }
+            // 页面加载皮肤后上报逻辑尺寸：宠物收起态的窗体形状跟素材走。
+            "pet-size" => {
+                let (Some(width), Some(height)) = (command.width, command.height) else {
+                    return;
+                };
+                if self.mini_host.set_pet_size(width, height) {
+                    self.place_mini();
+                }
+            }
+            // 悬停展开/收起。Peeking/Hidden 下无效（窗可能整块穿透，事件本来也收不到）。
+            "pet-hover" => {
+                let on = command.on.unwrap_or(false)
+                    && self.mini_host.phase != MiniPhase::Peeking
+                    && self.mini_host.phase != MiniPhase::Hidden;
+                if self.mini_host.pet_hover != on {
+                    self.mini_host.pet_hover = on;
+                    self.place_mini();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn mini_menu(
+        &mut self,
+        item: Option<&str>,
+        on: Option<bool>,
+        target: &EventLoopWindowTarget<UserEvent>,
+    ) {
+        let Some(item) = item else { return };
+        match item {
+            "restore" => {
+                let action = self.mini_host.handle(MiniEvent::Restore);
+                self.apply_mini_action(action, target);
+                self.config.mini.reopen = false;
+                self.schedule_save();
+                self.sync_tray();
+                return;
+            }
+            "quit" => {
+                let action = self.mini_host.handle(MiniEvent::Quit);
+                self.apply_mini_action(action, target);
+                self.config.mini.reopen = false;
+                self.schedule_save();
+                self.sync_tray();
+                return;
+            }
+            // 下面四项都是开关，on 缺省按「取反现值」处理不可靠，直接忽略。
+            "topmost" | "pet" | "edge-hide" | "lock" => {}
+            _ => return,
+        }
+        let Some(on) = on else { return };
+        match item {
+            "topmost" => {
+                self.config.mini.always_on_top = on;
+                self.mini_host.always_on_top = on;
+            }
+            "pet" => {
+                self.config.mini.pet = on;
+                self.mini_host.pet = on;
+                if !on {
+                    self.mini_host.pet_hover = false;
+                }
+            }
+            "edge-hide" => {
+                self.config.mini.edge_hide = on;
+            }
+            "lock" => {
+                self.config.mini.locked = on;
+                self.mini_host.locked = on;
+            }
+            _ => {}
+        }
+        self.config.sanitize();
+        // 置顶/穿透即刻生效（走状态机动作，别绕过 push_window_style 的唯一入口）。
+        self.apply_mini_action(MiniAction::ApplyWindowStyle, target);
+        // 宠物开关会改窗体尺寸；贴边隐藏的相位也要对齐。
+        let cursor_inside = self
+            .mini_hwnd()
+            .is_some_and(mini_native::cursor_in_window);
+        let action = self.mini_host.tick_peek(self.config.mini.edge_hide, cursor_inside);
+        self.apply_mini_action(action, target);
+        self.place_mini();
+        self.schedule_save();
+        self.sync_tray();
+    }
+
+    fn mini_control(&mut self, action: &str) {
+        let Some(snapshot) = self.mini_last_snapshot.as_ref() else {
+            return;
+        };
+        let payload = serde_json::json!({
+            "action": action,
+            "session": snapshot.server.session,
+            "generation": snapshot.generation,
+        });
+        let profile = self.profile.clone();
+        let proxy = self.proxy.clone();
+        std::thread::spawn(move || {
+            let result = crate::mini_feed::MiniFeed::new(profile)
+                .and_then(|feed| feed.control(&payload))
+                .map_err(|error| format!("{error:#}"));
+            let _ = proxy.send_event(UserEvent::MiniControl(result));
+        });
+    }
+
+    /// 小窗请求回主窗口：服务端广播 expand-capsule，主界面那条 WS 解除最小化。
+    fn mini_request_restore(&mut self) {
+        let Some(snapshot) = self.mini_last_snapshot.as_ref() else {
+            return;
+        };
+        let payload = serde_json::json!({
+            "action": "restore",
+            "session": snapshot.server.session,
+        });
+        let profile = self.profile.clone();
+        let proxy = self.proxy.clone();
+        std::thread::spawn(move || {
+            let result = crate::mini_feed::MiniFeed::new(profile)
+                .and_then(|feed| feed.control(&payload))
+                .map_err(|error| format!("{error:#}"));
+            let _ = proxy.send_event(UserEvent::MiniControl(result));
+        });
+    }
+
+    /// 松手后把吸附/自由位置写回配置（设计 §2：只在 DragEnd 落盘）。
+    fn mini_save_geometry(&mut self) {
+        self.config.mini.geometry = self.mini_host.geometry.clone();
+        self.config.mini.reopen = true;
+        self.schedule_save();
+        self.mini_send_config();
+    }
+
+    fn mini_drag_move(&mut self, x: i32, y: i32) {
+        let Some(surface) = self.mini.as_ref() else {
+            return;
+        };
+        let Some((offset_x, offset_y)) = self.mini_drag_offset else {
+            return;
+        };
+        let dpi = native::window_dpi(surface.hwnd).max(1);
+        let scale = f64::from(dpi) / 96.0;
+        let Some((_, _, width, height)) = self.mini_host.rect else {
+            return;
+        };
+        let mut nx = x - (f64::from(offset_x) * scale).round() as i32;
+        let mut ny = y - (f64::from(offset_y) * scale).round() as i32;
+        // 拖出界外贴住工作区，别让窗跑丢（与歌词的 bounded_lyrics_position 同款）。
+        if let Some(area) = self.mini_host.target_area() {
+            let (bx, by) = crate::mini::bounded_position(nx, ny, width, height, &area);
+            nx = bx;
+            ny = by;
+        }
+        mini_native::move_window(surface.hwnd, nx, ny, width, height);
+        self.mini_host.rect = Some((nx, ny, width, height));
+    }
+
+    /// 桌宠素材目录的指纹：浅层文件的（名字, 大小, mtime 纳秒）哈希。
+    /// 目录不存在返回 None；只在内存里与上一次比较，不落盘。
+    fn pet_skin_signature(&self) -> Option<u64> {
+        use std::hash::{Hash, Hasher};
+        let entries = std::fs::read_dir(config::base_dir().join("pet")).ok()?;
+        let mut files: Vec<(String, u64, u64)> = Vec::new();
+        for entry in entries.flatten() {
+            let Ok(metadata) = entry.metadata() else { continue };
+            if !metadata.is_file() {
+                continue;
+            }
+            let modified = metadata
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|duration| duration.as_nanos() as u64)
+                .unwrap_or(0);
+            files.push((entry.file_name().to_string_lossy().into_owned(), metadata.len(), modified));
+        }
+        files.sort();
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for (name, len, modified) in &files {
+            name.hash(&mut hasher);
+            len.hash(&mut hasher);
+            modified.hash(&mut hasher);
+        }
+        Some(hasher.finish())
+    }
+
+    /// 打开（并初始化）桌宠素材文件夹。约定见 PET_ASSETS_README。
+    fn open_pet_assets(&mut self) {
+        let dir = config::base_dir().join("pet");
+        if let Err(error) = std::fs::create_dir_all(&dir) {
+            log(&format!("create pet dir failed: {error:#}"));
+            return;
+        }
+        let readme = dir.join("README.txt");
+        if !readme.exists() {
+            let _ = std::fs::write(&readme, PET_ASSETS_README);
+        }
+        match std::process::Command::new("explorer").arg(&dir).spawn() {
+            Ok(_) => log("opened pet assets folder"),
+            Err(error) => log(&format!("open pet assets folder failed: {error:#}")),
         }
     }
 
@@ -2045,6 +2854,19 @@ impl App {
             .is_some_and(|retry| retry == id)
         {
             self.retry_wallpaper(target);
+        } else if id == actions.mini_toggle_id {
+            // 托盘开关：勾上 = 进入小窗（宠物态由配置里的 pet 决定），去掉 = 退出。
+            let action = if self.mini_host.phase == MiniPhase::Hidden {
+                self.mini_host.handle(MiniEvent::Enter(crate::mini::EnterReason::User))
+            } else {
+                self.mini_host.handle(MiniEvent::Quit)
+            };
+            self.apply_mini_action(action, target);
+            self.config.mini.reopen = self.mini_host.phase != MiniPhase::Hidden;
+            self.schedule_save();
+            self.sync_tray();
+        } else if id == actions.mini_assets_id {
+            self.open_pet_assets();
         } else if id == actions.quit_id {
             log("quit from tray");
             let _ = self.finish_position_edit(false);
@@ -2168,9 +2990,36 @@ impl App {
                 self.recompute_wallpaper();
                 self.sync_tray();
             }
+            "mini-toggle" => {
+                // DBX/Web 宿主走页内胶囊：小窗需要本机 HTTP 窄凭据，DBX 没有通道。
+                if config::is_dbx(&self.profile) {
+                    return pipe_error_detail(
+                        "unsupported_source",
+                        "DBX 形态不支持小窗播放，请使用页内胶囊",
+                    );
+                }
+                let action = if self.mini_host.phase == MiniPhase::Hidden {
+                    self.mini_host.handle(MiniEvent::Enter(crate::mini::EnterReason::User))
+                } else {
+                    self.mini_host.handle(MiniEvent::Quit)
+                };
+                self.apply_mini_action(action, target);
+                self.config.mini.reopen = self.mini_host.phase != MiniPhase::Hidden;
+                self.schedule_save();
+                self.sync_tray();
+            }
+            "open-pet-assets" => {
+                if config::is_dbx(&self.profile) {
+                    return pipe_error_detail(
+                        "unsupported_source",
+                        "DBX 形态没有桌面宠物素材目录",
+                    );
+                }
+                self.open_pet_assets();
+            }
             "wallpaper-retry" => self.retry_wallpaper(target),
             "wallpaper-preview-close" => self.close_preview(),
-            "wallpaper-preview-renew" => self.renew_preview(),
+            "wallpaper-preview-renew" => self.renew_preview(None),
             "wallpaper-preview" => {
                 let candidate = match serde_json::from_value::<WallpaperCandidate>(
                     value.cloned().unwrap_or(serde_json::Value::Null),
@@ -2321,6 +3170,25 @@ impl App {
     }
 
     fn status_json(&self) -> serde_json::Value {
+        let pause_inputs = policy::PolicyInputs {
+            enabled: self.config.wallpaper.enabled || self.wallpaper_forced,
+            wallpaper: &self.config.wallpaper,
+            manual_pause: self.wallpaper_hidden,
+            fullscreen: self.wallpaper_fullscreen_gate.stable(),
+            session_unavailable: self.policy.session_unavailable,
+            display_off: self.policy.display_off,
+            display_missing: self.wallpaper_monitor_missing,
+            power: self.wallpaper_power,
+            has_surface: self.wallpaper.is_some(),
+            page_ready: self.wallpaper_page_ready,
+        };
+        let (divisor, budget) = frame_divisor(
+            self.config.wallpaper.fps,
+            self.wallpaper
+                .as_ref()
+                .map(|surface| surface.monitor.refresh_hz)
+                .unwrap_or(0),
+        );
         self.with_target_status(serde_json::json!({
             "ok": true,
             "managementProtocol": crate::component::MANAGEMENT_PROTOCOL,
@@ -2348,6 +3216,12 @@ impl App {
                 "sessionUnavailable": self.policy.session_unavailable,
                 "displayOff": self.policy.display_off,
                 "noContent": self.policy.no_content,
+                "wallpaperFullscreen": self.wallpaper_fullscreen_gate.stable(),
+                "power": match self.wallpaper_power {
+                    native::PowerState::Ac => "ac",
+                    native::PowerState::Battery => "battery",
+                    native::PowerState::Unknown => "unknown",
+                },
             },
             "profile": self.config.active_profile,
             "wallpaper": {
@@ -2362,25 +3236,39 @@ impl App {
                 "revision": self.config.revision,
                 "fps": self.config.wallpaper.fps,
                 "musicResponse": self.config.wallpaper.music_response,
+                "brightness": self.config.wallpaper.brightness,
+                "motion": self.config.wallpaper.motion,
+                "quality": self.config.wallpaper.quality.as_str(),
+                "batteryPolicy": "pause",
                 "monitor": self.config.wallpaper.monitor,
+                "displayId": self.config.wallpaper.display_id,
                 "source": self.config.wallpaper.source,
                 "scene": self.config.wallpaper.scene,
                 "settingsOpen": self.settings.is_some(),
                 "previewActive": self.preview.is_some(),
+                "previewLease": self.preview.as_ref().map(|preview| preview.lease_id.clone()),
                 "monitorMissing": self.wallpaper_monitor_missing,
+                "applyError": self.wallpaper_apply_error,
+            },
+            // 小窗播放（桌面宠物）：web 设置页的开关与状态展示读这一节。
+            "mini": {
+                "pet": self.config.mini.pet,
+                "visible": self.mini_host.phase != MiniPhase::Hidden,
+                "pageReady": self.mini_page_ready,
+                "dock": self.mini_host.geometry.dock.label(),
+                "peek": self.mini_host.phase == MiniPhase::Peeking,
+                "reopen": self.config.mini.reopen,
+                "scale": self.config.mini.scale,
+                "supported": !config::is_dbx(&self.profile),
             },
             "diagnostics": {
-                "pauseReasons": wallpaper_pause_reasons(
-                    self.config.wallpaper.enabled || self.wallpaper_forced,
-                    self.wallpaper_hidden,
-                    self.wallpaper_monitor_missing,
-                    self.wallpaper.is_some(),
-                    self.wallpaper_page_ready,
-                    &self.policy,
-                ),
+                "pauseReasons": policy::pause_reasons(&pause_inputs),
                 "fps": {
                     "configured": self.config.wallpaper.fps,
-                    "effective": if self.wallpaper_visible { self.config.wallpaper.fps } else { 0 },
+                    "refreshHz": self.wallpaper.as_ref().map(|surface| surface.monitor.refresh_hz),
+                    "divisor": divisor,
+                    "effectiveBudget": budget,
+                    "effective": if self.wallpaper_visible { budget } else { 0.0 },
                     "measured": if self.wallpaper_visible
                         && self
                             .wallpaper_heartbeat_at
@@ -2408,11 +3296,13 @@ impl App {
                 "monitor": self.wallpaper.as_ref().map(|surface| {
                     serde_json::json!({
                         "name": surface.monitor.name,
+                        "displayId": surface.monitor.display_id(),
                         "left": surface.monitor.left,
                         "top": surface.monitor.top,
                         "width": surface.monitor.width,
                         "height": surface.monitor.height,
                         "dpi": surface.monitor.dpi,
+                        "refreshHz": surface.monitor.refresh_hz,
                     })
                 }),
                 "recovery": {
@@ -2441,11 +3331,16 @@ impl App {
                 self.recompute_visibility();
                 self.rebuild_tray();
                 self.recover_wallpaper(target);
+                // explorer 重建常伴随显示器拓扑变化：贴边的小窗要重新落位。
+                let action = self.mini_host.handle(MiniEvent::DisplayChanged);
+                self.apply_mini_action(action, target);
             }
             NativeEvent::SessionUnavailable(unavailable) => {
                 if self.policy.session_unavailable != unavailable {
                     log(&format!("session_unavailable={unavailable}"));
                     self.policy.session_unavailable = unavailable;
+                    // 接电/解锁/唤醒事件后的重采样（设计 §13.2）。
+                    self.wallpaper_power = native::power_state();
                     self.recompute_visibility();
                     self.recompute_wallpaper();
                 }
@@ -2454,6 +3349,7 @@ impl App {
                 if self.policy.display_off != off {
                     log(&format!("display_off={off}"));
                     self.policy.display_off = off;
+                    self.wallpaper_power = native::power_state();
                     self.recompute_visibility();
                     self.recompute_wallpaper();
                 }
@@ -2507,6 +3403,37 @@ impl App {
         self.sync_dbx_feed();
         self.expire_source_data(Instant::now());
         self.flush_save();
+        // 小窗贴边隐藏的低频推进（穿透窗收不到鼠标事件，靠轮询光标）。
+        if matches!(
+            self.mini_host.phase,
+            MiniPhase::Docked | MiniPhase::Peeking
+        ) {
+            let cursor_inside = self
+                .mini_hwnd()
+                .is_some_and(mini_native::cursor_in_window);
+            let action = self
+                .mini_host
+                .tick_peek(self.config.mini.edge_hide, cursor_inside);
+            if !matches!(action, MiniAction::None) {
+                self.apply_mini_action(action, target);
+                self.mini_send_config();
+            }
+        }
+        // 桌宠素材热重载：目录浅层 stat 一遍（几个文件），签名变了就通知页面
+        // 重新拉皮肤。用户落素材是多文件操作，partial 状态等下一次变化自然收敛。
+        if self.mini.is_some() {
+            let signature = self.pet_skin_signature();
+            if signature != self.mini_skin_signature {
+                let first_observation = self.mini_skin_signature.is_none();
+                self.mini_skin_signature = signature;
+                if !first_observation {
+                    log("pet skin changed; reloading");
+                    self.mini_eval(
+                        "window.hertzMini && window.hertzMini.reloadSkin && window.hertzMini.reloadSkin();",
+                    );
+                }
+            }
+        }
         let now = Instant::now();
         if self
             .preview
@@ -2515,6 +3442,8 @@ impl App {
         {
             self.close_preview();
         }
+        // 250 ms 巡检：预览策略、逐屏全屏去抖、拓扑宽限与几何校准。
+        self.poll_wallpaper_policy(target);
         if now.duration_since(self.last_check) >= Duration::from_secs(1) {
             self.last_check = now;
             self.send_settings_status(None, None);
@@ -2532,8 +3461,6 @@ impl App {
             {
                 log("wallpaper surface lost; recovering");
                 self.recover_wallpaper(target);
-            } else {
-                self.reconcile_wallpaper_geometry(target);
             }
             if self.wallpaper_visible && self.wallpaper_page_ready {
                 let stalled = self
@@ -2570,60 +3497,12 @@ impl App {
                 self.frame_cap = cap;
                 self.send_config();
             }
-        }
-    }
-
-    fn reconcile_wallpaper_geometry(&mut self, target: &EventLoopWindowTarget<UserEvent>) {
-        let Some(surface) = self.wallpaper.as_ref() else {
-            return;
-        };
-        let name = surface.monitor.name.clone();
-        let Some(monitor) = native::wallpaper_monitors()
-            .into_iter()
-            .find(|monitor| monitor.name == name)
-        else {
-            if !self.wallpaper_monitor_missing {
-                self.wallpaper_monitor_missing = true;
-                log("wallpaper target monitor missing");
+            let power = native::power_state();
+            if power != self.wallpaper_power {
+                self.wallpaper_power = power;
                 self.recompute_wallpaper();
             }
-            return;
-        };
-        if self.wallpaper_monitor_missing {
-            self.wallpaper_monitor_missing = false;
-            log("wallpaper target monitor returned");
         }
-        let geometry_changed = monitor_geometry_changed(&surface.monitor, &monitor);
-        let window_dpi = native::window_dpi(surface.hwnd()).max(1);
-        let desired_zoom = f64::from(monitor.dpi) / f64::from(window_dpi);
-        let zoom_changed = (desired_zoom - surface.zoom).abs() > 0.001;
-        if !geometry_changed && !zoom_changed {
-            return;
-        }
-        if geometry_changed {
-            log(&format!(
-                "wallpaper monitor geometry changed name={} rect={},{} {}x{} dpi={}",
-                monitor.name, monitor.left, monitor.top, monitor.width, monitor.height, monitor.dpi
-            ));
-            let Some(surface) = self.wallpaper.as_mut() else {
-                return;
-            };
-            if let Err(error) = surface.reflow(monitor) {
-                log(&format!("wallpaper reflow failed: {error:#}"));
-                self.wallpaper = None;
-                self.wallpaper_page_ready = false;
-                self.wallpaper_visible = false;
-                self.reset_wallpaper_page_stats();
-                self.wallpaper_generation = self.wallpaper_generation.wrapping_add(1);
-                self.recover_wallpaper(target);
-                return;
-            }
-        } else if let Some(surface) = self.wallpaper.as_mut() {
-            if let Err(error) = surface.apply_zoom(monitor.dpi) {
-                log(&format!("wallpaper zoom sync failed: {error:#}"));
-            }
-        }
-        self.recompute_wallpaper();
     }
 
     fn ensure_on_screen(&mut self) {
@@ -2869,6 +3748,13 @@ impl App {
             .as_ref()
             .map(|_| CheckMenuItem::new("显示壁纸", true, !self.wallpaper_hidden, None));
         let wallpaper_retry = wallpaper_enabled.then(|| MenuItem::new("重新挂载壁纸", true, None));
+        let mini_toggle = CheckMenuItem::new(
+            "小窗播放（桌面宠物）",
+            !config::is_dbx(&self.profile),
+            self.mini_host.phase != MiniPhase::Hidden,
+            None,
+        );
+        let mini_assets = MenuItem::new("打开桌宠素材文件夹", true, None);
         let settings = MenuItem::new("桌面歌词与壁纸", true, None);
         let quit = MenuItem::new("退出桌面歌词", true, None);
         let separator_after_toggle = PredefinedMenuItem::separator();
@@ -2878,6 +3764,8 @@ impl App {
         menu.append_items(&[&toggle, &separator_after_toggle, &locate, &autostart])?;
         menu.append(&separator_before_settings)?;
         menu.append(&settings)?;
+        menu.append(&mini_toggle)?;
+        menu.append(&mini_assets)?;
         if let Some(wallpaper) = wallpaper_toggle.as_ref() {
             menu.append(&separator_before_wallpaper)?;
             menu.append(wallpaper)?;
@@ -2893,11 +3781,14 @@ impl App {
             settings_id: settings.id().0.clone(),
             wallpaper_toggle_id: wallpaper_toggle.as_ref().map(|item| item.id().0.clone()),
             wallpaper_retry_id: wallpaper_retry.as_ref().map(|item| item.id().0.clone()),
+            mini_toggle_id: mini_toggle.id().0.clone(),
+            mini_assets_id: mini_assets.id().0.clone(),
             locate_id: locate.id().0.clone(),
             quit_id: quit.id().0.clone(),
             toggle,
             autostart,
             wallpaper_toggle,
+            mini_toggle,
         };
         let tray = TrayIconBuilder::new()
             .with_menu(Box::new(menu))
@@ -2932,7 +3823,7 @@ pub(crate) fn run() -> Result<()> {
         log("another hertz-desktop instance is running; exiting");
         return Ok(());
     };
-    let mut config = config::load()?;
+    let (mut config, migration_notice) = config::load_with_notice()?;
     config.sanitize();
     let profile = args
         .data_dir
@@ -2945,7 +3836,7 @@ pub(crate) fn run() -> Result<()> {
     // The CLI value was consumed above; custom means it was explicitly supplied.
     let explicit_binding = explicit_binding
         || matches!(&profile, Profile::Standalone { edition, .. } if edition == "custom");
-    if config.unbound_standalone.is_none() || explicit_binding || config.active_profile.is_some() {
+    if config.unbound_domain.is_none() || explicit_binding || config.active_profile.is_some() {
         let mut next = config.clone();
         if next.activate_profile(profile.clone())? {
             config::commit(&mut config, next)?;
@@ -3010,14 +3901,23 @@ pub(crate) fn run() -> Result<()> {
             anyhow::anyhow!("创建 WebView2 失败：{error}")
         })?;
 
+    let mini_host = MiniHost::new(profile.clone());
     let wallpaper = if config.wallpaper.enabled || wallpaper_forced {
-        match create_wallpaper(
-            &event_loop,
-            proxy.clone(),
-            1,
-            config.wallpaper.monitor.as_deref(),
-        ) {
-            Ok(surface) => Some(surface),
+        let monitors = native::wallpaper_monitors();
+        match resolve_wallpaper_monitor_or_primary(&monitors, &config.wallpaper)
+            .ok_or_else(|| anyhow::anyhow!("没有可用显示器"))
+            .and_then(|monitor| create_wallpaper(&event_loop, proxy.clone(), 1, monitor))
+        {
+            Ok(surface) => {
+                // 启动期建立稳定显示器身份（设计 §2.2-9）：独立提交，revision 递增。
+                let identity = surface.monitor.display_id();
+                if config.wallpaper.display_id.as_deref() != Some(identity.as_str()) {
+                    config.wallpaper.display_id = Some(identity);
+                    let next = config.clone();
+                    let _ = config::commit(&mut config, next);
+                }
+                Some(surface)
+            }
             Err(error) => {
                 log(&format!("wallpaper unavailable: {error:#}"));
                 None
@@ -3077,6 +3977,11 @@ pub(crate) fn run() -> Result<()> {
         wallpaper_visible: false,
         wallpaper_hidden: false,
         wallpaper_forced,
+        wallpaper_apply_error: None,
+        wallpaper_fullscreen_gate: policy::Debounce::new(false),
+        wallpaper_topology_misses: 0,
+        last_topology_check: Instant::now(),
+        wallpaper_power: native::power_state(),
         source_generation: 1,
         lyrics_feed_stop: Arc::new(AtomicBool::new(false)),
         wallpaper_feed_stop: None,
@@ -3089,13 +3994,33 @@ pub(crate) fn run() -> Result<()> {
         settings_tab: "wallpaper".into(),
         settings_navigation: 0,
         preview: None,
+        migration_notice,
         position_edit: None,
         placed_position: None,
         panel_height: 0.0,
         panel_top: None,
+        mini: None,
+        mini_page_ready: false,
+        mini_host,
+        mini_last_snapshot: None,
+        mini_feed_logged: false,
+        mini_drag_offset: None,
+        mini_cover_version: 0,
+        mini_skin_signature: None,
+        mini_runtime: MiniRuntime::default(),
         proxy: proxy.clone(),
     };
     app.policy.locked = app.config.lyrics.locked;
+    // 配置 → 状态机的初值。宠物尺寸等运行时量由页面稍后上报。
+    {
+        let mini = &app.config.mini;
+        let host = &mut app.mini_host;
+        host.pet = mini.pet;
+        host.locked = mini.locked;
+        host.always_on_top = mini.always_on_top;
+        host.auto_on_main_hidden = mini.auto_on_main_hidden;
+        host.geometry = mini.geometry.clone();
+    }
     match app.build_tray() {
         Ok((tray, actions)) => {
             app.tray = Some(tray);
@@ -3135,6 +4060,13 @@ pub(crate) fn run() -> Result<()> {
             app.source_generation,
             app.lyrics_feed_stop.clone(),
         );
+        // 小窗来源线程：常驻轮询，事件侧按相位/播放态调节奏。
+        spawn_mini_feed(app.profile.clone(), proxy.clone(), app.mini_runtime.clone());
+        // 上次退出时小窗还开着 → 这次启动直接恢复。
+        if app.config.mini.reopen {
+            let action = app.mini_host.handle(MiniEvent::Enter(crate::mini::EnterReason::Restored));
+            app.apply_mini_action(action, &event_loop);
+        }
     } else if config::is_dbx(&app.profile) {
         app.sync_dbx_feed();
     }
@@ -3201,6 +4133,26 @@ pub(crate) fn run() -> Result<()> {
             Event::UserEvent(UserEvent::SettingsPage(body)) => {
                 app.handle_settings_page(&body, target)
             }
+            Event::UserEvent(UserEvent::MiniFeed(started, result)) => {
+                app.handle_mini_feed(started, *result, target)
+            }
+            Event::UserEvent(UserEvent::MiniPosition(ms)) => app.mini_send_position(ms),
+            Event::UserEvent(UserEvent::MiniDrag(event)) => match event {
+                DragEvent::Move(x, y) => app.mini_drag_move(x, y),
+                DragEvent::End => {
+                    let action = app.mini_host.handle(MiniEvent::DragEnd);
+                    app.apply_mini_action(action, target);
+                    app.mini_save_geometry();
+                    app.mini_send_config();
+                }
+            },
+            Event::UserEvent(UserEvent::MiniPage(body)) => app.mini_page_command(&body, target),
+            Event::UserEvent(UserEvent::MiniControl(result)) => {
+                if let Err(message) = result.as_ref() {
+                    log(&format!("mini control failed: {message}"));
+                    app.mini_eval("window.hertzMini && window.hertzMini.flash('操作未完成，请重试');");
+                }
+            }
             Event::UserEvent(UserEvent::Tick) => app.tick(target),
             Event::UserEvent(UserEvent::Page(body)) => app.page_command(&body),
             Event::UserEvent(UserEvent::LyricControl(generation, result)) => {
@@ -3241,10 +4193,29 @@ pub(crate) fn run() -> Result<()> {
                     if let Some(settings) = app.settings.as_ref() {
                         settings.eval("window.hertzWallpaperSettings && window.hertzWallpaperSettings.requestClose();");
                     }
+                } else if app
+                    .mini
+                    .as_ref()
+                    .is_some_and(|mini| mini.window.id() == window_id)
+                {
+                    match event {
+                        WindowEvent::CloseRequested => {
+                            let action = app.mini_host.handle(MiniEvent::Quit);
+                            app.apply_mini_action(action, target);
+                            app.sync_tray();
+                        }
+                        WindowEvent::ScaleFactorChanged { .. } => app.place_mini(),
+                        _ => {}
+                    }
                 }
             }
             Event::LoopDestroyed => {
                 app.dbx = None;
+                app.mini_runtime.stop.store(true, Ordering::Relaxed);
+                // 还窗口过程并清注册表，避免收尾回调打在已销毁的窗上。
+                if let Some(mini) = app.mini.take() {
+                    mini_native::uninstall(mini.hwnd);
+                }
                 log("event loop destroyed");
             }
             _ => {}
@@ -3387,42 +4358,6 @@ fn fps_from_draws(draws_delta: u64, elapsed: Duration) -> Option<f64> {
     Some(draws_delta as f64 * 1000.0 / millis as f64)
 }
 
-fn wallpaper_pause_reasons(
-    enabled: bool,
-    hidden: bool,
-    monitor_missing: bool,
-    has_surface: bool,
-    page_ready: bool,
-    policy: &Policy,
-) -> Vec<&'static str> {
-    let mut reasons = Vec::new();
-    if !enabled {
-        reasons.push("disabled");
-    }
-    if hidden {
-        reasons.push("hidden");
-    }
-    if monitor_missing {
-        reasons.push("monitorMissing");
-    }
-    if enabled && !has_surface {
-        reasons.push("noSurface");
-    }
-    if has_surface && !page_ready {
-        reasons.push("pageNotReady");
-    }
-    if policy.fullscreen {
-        reasons.push("fullscreen");
-    }
-    if policy.session_unavailable {
-        reasons.push("sessionUnavailable");
-    }
-    if policy.display_off {
-        reasons.push("displayOff");
-    }
-    reasons
-}
-
 fn monitor_geometry_changed(
     left: &native::WallpaperMonitor,
     right: &native::WallpaperMonitor,
@@ -3469,29 +4404,77 @@ fn validate_candidate(candidate: &WallpaperCandidate) -> Result<(), &'static str
     if !config::wallpaper_scene_allowed(&candidate.scene) {
         return Err("不支持的壁纸场景");
     }
+    if !(0.25..=1.0).contains(&candidate.brightness) || !candidate.brightness.is_finite() {
+        return Err("亮度范围是 25%–100%");
+    }
+    if !(0.0..=1.0).contains(&candidate.motion) || !candidate.motion.is_finite() {
+        return Err("运动强度范围是 0–100%");
+    }
+    if candidate
+        .display_id
+        .as_deref()
+        .is_some_and(|display_id| display_id.trim().is_empty() || display_id.len() > 256)
+    {
+        return Err("显示器身份无效");
+    }
     Ok(())
+}
+
+/// ADR-0006 整数分频：N=max(1,ceil(refreshHz/targetFps))，有效预算=refreshHz/N。
+/// 与壁纸页 wallpaper-scene.js 的 computeGate 保持同一公式。
+fn frame_divisor(fps: u8, refresh_hz: u32) -> (u32, f64) {
+    let hz = if refresh_hz >= 5 { f64::from(refresh_hz) } else { 60.0 };
+    let target = f64::from(fps.max(1));
+    let divisor = ((hz / target).ceil() as u32).max(1);
+    (divisor, hz / f64::from(divisor))
+}
+
+fn new_lease_id() -> String {
+    use std::sync::atomic::AtomicU64;
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos() as u64)
+        .unwrap_or(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    format!("{nanos:016x}{seq:04x}")
+}
+
+/// 按稳定身份优先、GDI 名次序解析目标显示器（设计 §2.2-9）。
+fn resolve_wallpaper_monitor(
+    monitors: &[native::WallpaperMonitor],
+    wallpaper: &config::WallpaperConfig,
+) -> Option<native::WallpaperMonitor> {
+    if let Some(display_id) = wallpaper.display_id.as_deref() {
+        if let Some(monitor) = monitors
+            .iter()
+            .find(|monitor| monitor.display_id() == display_id)
+        {
+            return Some(monitor.clone());
+        }
+    }
+    let name = wallpaper.monitor.as_deref()?;
+    monitors
+        .iter()
+        .find(|monitor| monitor.name == name)
+        .cloned()
+}
+
+fn resolve_wallpaper_monitor_or_primary(
+    monitors: &[native::WallpaperMonitor],
+    wallpaper: &config::WallpaperConfig,
+) -> Option<native::WallpaperMonitor> {
+    resolve_wallpaper_monitor(monitors, wallpaper)
+        .or_else(|| monitors.iter().find(|monitor| monitor.primary).cloned())
+        .or_else(|| monitors.first().cloned())
 }
 
 fn create_wallpaper(
     target: &EventLoopWindowTarget<UserEvent>,
     proxy: EventLoopProxy<UserEvent>,
     generation: u64,
-    monitor_name: Option<&str>,
+    monitor: native::WallpaperMonitor,
 ) -> Result<WallpaperSurface> {
-    let monitors = native::wallpaper_monitors();
-    let monitor = if let Some(name) = monitor_name {
-        monitors
-            .into_iter()
-            .find(|monitor| monitor.name == name)
-            .ok_or_else(|| anyhow::anyhow!("目标显示器不存在：{name}"))?
-    } else {
-        monitors
-            .iter()
-            .find(|monitor| monitor.primary)
-            .cloned()
-            .or_else(|| monitors.first().cloned())
-            .ok_or_else(|| anyhow::anyhow!("没有可用显示器"))?
-    };
     let page: Arc<[u8]> = Arc::from(wallpaper_html().into_bytes());
     let page_bytes = page.len();
     let window = WindowBuilder::new()
@@ -3846,6 +4829,217 @@ fn page_html() -> String {
     )
 }
 
+/// 小窗页面：三件套占位符拼装（html 里的注释说明了这一手法）。
+fn mini_page_html() -> String {
+    include_str!("../assets/mini-player.html")
+        .replace("__MINI_CSS__", include_str!("../assets/mini-player.css"))
+        .replace("__MINI_JS__", include_str!("../assets/mini-player.js"))
+}
+
+const MINI_PAGE_PATH: &str = "/mini-player.html";
+const MINI_PAGE_URL: &str = "hertz://localhost/mini-player.html";
+/// 皮肤文件单上限。pet.json + 若干帧，8MB 足够任何合理的精灵序列。
+const MINI_SKIN_MAX_BYTES: usize = 8 * 1024 * 1024;
+
+/// 打开（并初始化）桌宠素材文件夹时落一份约定说明。
+const PET_ASSETS_README: &str = r#"Hertz 桌面宠物 · 素材约定
+========================
+
+把这个文件夹里的图片作为你的桌面宠物：小窗开着时增删或替换文件，宠物几秒内自动换装
+（若没刷新，托盘里关掉再勾上一次小窗即可）。
+
+文件命名（全部小写）：
+  idle.png            待机/暂停时的形象（单帧）
+  playing-1.png       播放中的动画帧，按序号循环：playing-1.png / playing-2.png / ...
+  dragging.png        按住宠物拖动时的形象（可选）
+  tap.png             点击播放/暂停、切曲时蹦一下的一次性动画（可选，默认不循环）
+  pet.json            可选清单，示例：
+                      {"name":"我的宠物","size":[96,96],
+                       "states":{"playing":{"fps":8,"frames":["playing-1.png","playing-2.png"]}}}
+
+支持 PNG / JPG / WebP / GIF / SVG（SVG 请自带 width/height，或在 pet.json 里写 size）。
+推荐 56~128 见方、透明背景。某个状态没提供时自动回退 idle，全部缺失时回退内置形象。
+
+状态清单：idle（待机/暂停）· playing（播放中）· dragging（拖拽）· tap（点按反应）
+"#;
+
+fn create_mini(
+    target: &EventLoopWindowTarget<UserEvent>,
+    proxy: EventLoopProxy<UserEvent>,
+) -> Result<MiniSurface> {
+    let icon = window_icon()?;
+    let window = WindowBuilder::new()
+        .with_title("Hertz 小窗")
+        .with_window_icon(Some(icon))
+        .with_decorations(false)
+        .with_transparent(true)
+        .with_resizable(false)
+        .with_visible(false)
+        .with_focused(false)
+        .with_always_on_top(true)
+        .with_skip_taskbar(true)
+        .with_undecorated_shadow(false)
+        .build(target)?;
+    let hwnd = window.hwnd() as HWND;
+    let page = mini_page_html().into_bytes();
+    let cover: Arc<std::sync::Mutex<Option<(u64, Vec<u8>, String)>>> =
+        Arc::new(std::sync::Mutex::new(None));
+    let cover_in_handler = Arc::clone(&cover);
+    let page_proxy = proxy.clone();
+    let webview = WebViewBuilder::new()
+        .with_transparent(true)
+        // 页面要 fetch 同源的皮肤文件（pet.json / 帧图片），NavigateToString 的
+        // origin 取不到 hertz://，所以整页走自定义协议（与壁纸/设置窗同一招）。
+        .with_custom_protocol(WALLPAPER_PROTOCOL.to_string(), move |_id, request| {
+            mini_protocol_response(&page, request.uri().path(), &cover_in_handler)
+        })
+        .with_url(MINI_PAGE_URL)
+        .with_ipc_handler(move |request| {
+            let body = request.body();
+            if body.len() <= 4096 {
+                let _ = page_proxy.send_event(UserEvent::MiniPage(body.clone()));
+            }
+        })
+        .build(&window)
+        .map_err(|error| anyhow::anyhow!("创建小窗 WebView 失败：{error}"))?;
+    Ok(MiniSurface {
+        window,
+        webview,
+        hwnd,
+        cover,
+    })
+}
+
+/// 小窗 origin 的白名单：页面本身、皮肤文件、最新一帧封面。其余一律 404，
+/// 不做通用文件服务（与壁纸页同一原则）。
+fn mini_protocol_response(
+    page: &[u8],
+    path: &str,
+    cover: &Arc<std::sync::Mutex<Option<(u64, Vec<u8>, String)>>>,
+) -> Response<Cow<'static, [u8]>> {
+    if path == MINI_PAGE_PATH {
+        return Response::builder()
+            .status(200)
+            .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+            .body(Cow::Owned(page.to_vec()))
+            .unwrap();
+    }
+    if path == "/mini-cover" {
+        let guard = cover.lock().unwrap_or_else(|error| error.into_inner());
+        return match guard.as_ref() {
+            Some((_, bytes, mime)) => Response::builder()
+                .status(200)
+                .header(header::CONTENT_TYPE, mime.clone())
+                .body(Cow::Owned(bytes.clone()))
+                .unwrap(),
+            None => Response::builder()
+                .status(404)
+                .body(Cow::Borrowed(&b""[..]))
+                .unwrap(),
+        };
+    }
+    match mini_skin_file(path.strip_prefix("/mini-skin/")) {
+        Some((bytes, mime)) => Response::builder()
+            .status(200)
+            .header(header::CONTENT_TYPE, mime)
+            // 皮肤可能被用户替换：组件重开窗口时必须拿到新文件。
+            .header(header::CACHE_CONTROL, "no-store")
+            .body(Cow::Owned(bytes))
+            .unwrap(),
+        None => Response::builder()
+            .status(404)
+            .body(Cow::Borrowed(&b""[..]))
+            .unwrap(),
+    }
+}
+
+/// 皮肤文件：数据目录 `pet/` 下按严格白名单取名。`..`、绝对路径、大写、
+/// 超限体积全部拒绝——这个 handler 离文件系统只有一步，准入必须谨慎。
+fn mini_skin_file(name: Option<&str>) -> Option<(Vec<u8>, &'static str)> {
+    let name = name?;
+    if name.is_empty() || name.len() > 96 || name.contains("..") {
+        return None;
+    }
+    if !name
+        .chars()
+        .all(|character| character.is_ascii_lowercase() || character.is_ascii_digit() || matches!(character, '-' | '_' | '.'))
+    {
+        return None;
+    }
+    let mime = match name.rsplit('.').next()? {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        "svg" => "image/svg+xml",
+        "json" => "application/json; charset=utf-8",
+        _ => return None,
+    };
+    let bytes = std::fs::read(config::base_dir().join("pet").join(name)).ok()?;
+    if bytes.len() > MINI_SKIN_MAX_BYTES {
+        return None;
+    }
+    Some((bytes, mime))
+}
+
+fn sniff_image_mime(bytes: &[u8]) -> &'static str {
+    if bytes.starts_with(b"\x89PNG") {
+        "image/png"
+    } else if bytes.starts_with(b"GIF8") {
+        "image/gif"
+    } else if bytes.len() > 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        "image/webp"
+    } else {
+        "image/jpeg"
+    }
+}
+
+/// 小窗来源线程：轮询快照 + 播放中 4Hz 推位置。节奏由事件侧通过共享量调节，
+/// 线程自己不认识相位（与歌词 feed 的 generation 模式同源）。
+fn spawn_mini_feed(profile: Profile, proxy: EventLoopProxy<UserEvent>, runtime: MiniRuntime) {
+    std::thread::Builder::new()
+        .name("hertz-mini-feed".into())
+        .spawn(move || {
+            let mut feed = match crate::mini_feed::MiniFeed::new(profile) {
+                Ok(feed) => feed,
+                Err(error) => {
+                    log(&format!("mini feed unavailable: {error:#}"));
+                    return;
+                }
+            };
+            loop {
+                if runtime.stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                let started = Instant::now();
+                let result = feed.poll().map_err(|error| format!("{error:#}"));
+                if proxy
+                    .send_event(UserEvent::MiniFeed(started, Box::new(result)))
+                    .is_err()
+                {
+                    break;
+                }
+                let interval =
+                    Duration::from_millis(runtime.poll_hint_ms.load(Ordering::Relaxed).max(250));
+                let deadline = Instant::now() + interval;
+                while Instant::now() < deadline {
+                    if runtime.stop.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(250));
+                    // 播放中的位置由组件侧呈现时钟推 4Hz，页面不做二次插值。
+                    if runtime.visible.load(Ordering::Relaxed) && feed.clock().playing() {
+                        let ms = feed.clock().now_ms();
+                        if proxy.send_event(UserEvent::MiniPosition(ms)).is_err() {
+                            return;
+                        }
+                    }
+                }
+            }
+        })
+        .ok();
+}
+
 /// 托盘与窗口共用的一枚图标：蓝色圆盘上写白色 H；几何值按 32 px 设计稿等比缩放。
 fn hertz_icon_pixels(size: u32) -> Vec<u8> {
     let scale = f64::from(size) / 32.0;
@@ -4018,6 +5212,9 @@ mod tests {
             height: 1600,
             dpi: 144,
             primary: true,
+            refresh_hz: 144,
+            device_path: None,
+            edid_digest: None,
         }
     }
 
@@ -4088,49 +5285,134 @@ mod tests {
         assert_eq!(fps_from_draws(10, Duration::from_millis(500)), None);
     }
 
-    fn running_policy() -> Policy {
-        Policy {
-            locked: false,
-            user_hidden: false,
+    fn policy_inputs(
+        enabled: bool,
+        manual_pause: bool,
+        display_missing: bool,
+        has_surface: bool,
+        page_ready: bool,
+    ) -> policy::PolicyInputs<'static> {
+        policy::PolicyInputs {
+            enabled,
+            wallpaper: Box::leak(Box::new(config::WallpaperConfig::default())),
+            manual_pause,
             fullscreen: false,
             session_unavailable: false,
             display_off: false,
-            no_content: false,
+            display_missing,
+            power: native::PowerState::Ac,
+            has_surface,
+            page_ready,
         }
     }
 
     #[test]
     fn pause_reasons_report_each_gate() {
-        let running = running_policy();
-        assert!(wallpaper_pause_reasons(true, false, false, true, true, &running).is_empty());
+        let inputs = policy_inputs(true, false, false, true, true);
+        assert!(policy::pause_reasons(&inputs).is_empty());
         assert_eq!(
-            wallpaper_pause_reasons(false, false, false, false, false, &running),
+            policy::pause_reasons(&policy_inputs(false, false, false, false, false)),
             vec!["disabled"]
         );
         assert_eq!(
-            wallpaper_pause_reasons(true, true, false, true, true, &running),
-            vec!["hidden"]
+            policy::pause_reasons(&policy_inputs(true, true, false, true, true)),
+            vec!["manualPause"]
         );
         assert_eq!(
-            wallpaper_pause_reasons(true, false, true, false, false, &running),
-            vec!["monitorMissing", "noSurface"]
+            policy::pause_reasons(&policy_inputs(true, false, true, false, false)),
+            vec!["displayMissing", "noSurface"]
         );
         assert_eq!(
-            wallpaper_pause_reasons(true, false, false, false, false, &running),
+            policy::pause_reasons(&policy_inputs(true, false, false, false, false)),
             vec!["noSurface"]
         );
         assert_eq!(
-            wallpaper_pause_reasons(true, false, false, true, false, &running),
+            policy::pause_reasons(&policy_inputs(true, false, false, true, false)),
             vec!["pageNotReady"]
         );
-        let mut paused = running_policy();
+        let mut paused = policy_inputs(true, false, false, true, true);
         paused.fullscreen = true;
         paused.session_unavailable = true;
         paused.display_off = true;
         assert_eq!(
-            wallpaper_pause_reasons(true, false, false, true, true, &paused),
+            policy::pause_reasons(&paused),
             vec!["fullscreen", "sessionUnavailable", "displayOff"]
         );
+        assert!(!policy::renderable(&paused));
+        assert!(policy::renderable(&inputs));
+    }
+
+    #[test]
+    fn frame_divisor_follows_integer_split_rule() {
+        // ADR-0006：N=ceil(hz/target)，有效预算=hz/N；刷新率未知按 60。
+        assert_eq!(frame_divisor(30, 144), (5, 28.8));
+        assert_eq!(frame_divisor(60, 144), (3, 48.0));
+        assert_eq!(frame_divisor(30, 60), (2, 30.0));
+        assert_eq!(frame_divisor(60, 60), (1, 60.0));
+        assert_eq!(frame_divisor(30, 75), (3, 25.0));
+        assert_eq!(frame_divisor(15, 0), (4, 15.0));
+    }
+
+    #[test]
+    fn wallpaper_candidate_accepts_v4_fields_and_rejects_out_of_range() {
+        let base = serde_json::json!({
+            "enabled": true, "fps": 30, "musicResponse": true,
+            "monitor": null, "source": "fixed", "scene": "zodiac"
+        });
+        // 旧载荷（无 v4 字段）按默认值通过。
+        let legacy: WallpaperCandidate =
+            serde_json::from_value(base.clone()).expect("legacy candidate");
+        assert_eq!(legacy.quality, config::WallpaperQuality::Low);
+        assert_eq!(legacy.brightness, 1.0);
+        assert_eq!(legacy.motion, 1.0);
+        assert!(validate_candidate(&legacy).is_ok());
+        let mut full = base.clone();
+        full["brightness"] = 0.5.into();
+        full["motion"] = 0.25.into();
+        full["quality"] = "high".into();
+        full["batteryPolicy"] = "pause".into();
+        let full: WallpaperCandidate = serde_json::from_value(full).expect("v4 candidate");
+        assert!(validate_candidate(&full).is_ok());
+        let mut bad = full.clone();
+        bad.brightness = 0.1;
+        assert!(validate_candidate(&bad).is_err());
+        let mut bad = full.clone();
+        bad.motion = 1.5;
+        assert!(validate_candidate(&bad).is_err());
+        let mut bad = full;
+        bad.fps = 45;
+        assert!(validate_candidate(&bad).is_err());
+    }
+
+    #[test]
+    fn monitor_resolution_prefers_display_id_then_legacy_name() {
+        let monitors = vec![monitor()];
+        // 无身份记录：无名字匹配 → None（不猜另一块屏）。
+        let wallpaper = config::WallpaperConfig {
+            monitor: Some(r"\\.\DISPLAY9".into()),
+            ..Default::default()
+        };
+        assert!(resolve_wallpaper_monitor(&monitors, &wallpaper).is_none());
+        // 旧 GDI 名命中。
+        let wallpaper = config::WallpaperConfig {
+            monitor: Some(r"\\.\DISPLAY1".into()),
+            ..Default::default()
+        };
+        assert!(resolve_wallpaper_monitor(&monitors, &wallpaper).is_some());
+        // 稳定身份优先；身份不存在但名字命中时仍按名字解析（等待回填）。
+        let wallpaper = config::WallpaperConfig {
+            monitor: Some(r"\\.\DISPLAY1".into()),
+            display_id: Some("future-identity".into()),
+            ..Default::default()
+        };
+        assert!(resolve_wallpaper_monitor(&monitors, &wallpaper).is_some());
+        let wallpaper = config::WallpaperConfig {
+            monitor: Some(r"\\.\DISPLAY9".into()),
+            display_id: Some("future-identity".into()),
+            ..Default::default()
+        };
+        assert!(resolve_wallpaper_monitor(&monitors, &wallpaper).is_none());
+        assert!(resolve_wallpaper_monitor_or_primary(&monitors, &wallpaper).is_some());
     }
 
     #[test]

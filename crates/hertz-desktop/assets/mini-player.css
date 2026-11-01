@@ -106,16 +106,48 @@ body[data-playing="true"] #progress, body.buffering #progress { opacity: 1; }
 }
 body.buffering #progress-fill { opacity: .4; }
 
-/* 桌面宠物态：去掉背板与描边，只留内容本体，外面全交给 native 穿透。 */
+/* --- 宠物素材层 ----------------------------------------------------------
+   #pet-art 是唯一素材出口：内置皮肤与用户素材（mini-skin/*）都从它显示。
+   收起态窗口尺寸由 native 按皮肤尺寸给（pet-size 上报），素材 contain 适配。
+   命中区按整盒近似上报；透明处的真正穿透由 WM_NCHITTEST 按这些矩形判。 */
+#pet-art {
+  position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain;
+  display: none; -webkit-user-drag: none; user-select: none; pointer-events: none;
+  transition: width 200ms var(--soft), height 200ms var(--soft),
+    left 200ms var(--soft), top 200ms var(--soft), border-radius 200ms var(--soft);
+}
+body[data-pet="true"] #pet-art { display: block; }
+/* 兜底的最后一级：连内置默认都加载失败才退回 ♫ 封面块。 */
+body[data-pet="true"][data-art-failed] #pet-art { display: none; }
+body[data-pet="true"][data-art-failed] #cover { display: grid; }
+
+/* 桌面宠物态：去掉背板与描边，只留素材本体，外面全交给 native 穿透。 */
 body[data-pet="true"] #capsule {
   background: transparent; backdrop-filter: none; box-shadow: none;
 }
-body[data-pet="true"] #title, body[data-pet="true"] #subtitle {
-  text-shadow: 0 1px 2px rgba(0, 0, 0, .55), 0 2px 14px rgba(0, 0, 0, .35);
+body[data-pet="true"] #meta,
+body[data-pet="true"] #progress,
+body[data-pet="true"] #cover { display: none; }
+/* 控制条整块退场（display:none 让命中区同步消失，别留隐形可点区）。 */
+body[data-pet="true"] #transport { display: none; }
+
+/* 悬停展开：背板回来，素材缩成封面圆，曲名与传输键就位。
+   素材保持绝对定位以参与变形动画，文字区用边距让出封面位（12+36+10）。 */
+body[data-pet="true"].hovering #capsule {
+  background: var(--surface); backdrop-filter: blur(26px) saturate(175%);
+  box-shadow: var(--shadow), inset 0 0 0 1px var(--stroke), inset 0 1px 0 var(--stroke-hi);
 }
-body[data-pet="true"] #meta { display: none; }
-body[data-pet="true"] #transport { opacity: 0; transition: opacity 200ms; }
-body[data-pet="true"].hovering #transport { opacity: 1; }
+body[data-pet="true"].hovering #meta {
+  display: block; margin-left: calc(46px * var(--scale));
+}
+body[data-pet="true"].hovering #progress { display: block; }
+body[data-pet="true"].hovering #transport { display: flex; }
+body[data-pet="true"].hovering #pet-art {
+  left: calc(12px * var(--scale)); top: calc(10px * var(--scale));
+  right: auto; bottom: auto;
+  width: calc(36px * var(--scale)); height: calc(36px * var(--scale));
+  border-radius: 50%;
+}
 
 /* 锁定（完全穿透）：整块压暗一档，提示「现在点不到」。 */
 body[data-locked="true"] #capsule { opacity: calc(var(--opacity, 1) * .82); }
@@ -126,7 +158,8 @@ body[data-peek="true"] #capsule {
   background: var(--accent); box-shadow: none; opacity: .55;
 }
 body[data-peek="true"] #meta, body[data-peek="true"] #transport,
-body[data-peek="true"] #cover, body[data-peek="true"] #progress { display: none; }
+body[data-peek="true"] #cover, body[data-peek="true"] #progress,
+body[data-peek="true"] #pet-art { display: none; }
 
 #menu {
   position: absolute; z-index: 10; min-width: 168px; padding: 6px;

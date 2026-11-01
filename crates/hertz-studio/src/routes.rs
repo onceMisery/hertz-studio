@@ -385,12 +385,28 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
             require_wallpaper_key,
         ));
 
+    // 小窗播放（桌面宠物）桥：独立钥匙、独立路由组。只读快照与封面、
+    // 显式窄播控与回主窗口；与桌面歌词同构，够不到主 token 组。
+    let desktop_mini = Router::new()
+        .route("/v1/desktop-mini/snapshot", get(desktop_mini_snapshot))
+        .route("/v1/desktop-mini/cover", get(desktop_mini_cover))
+        .route(
+            "/v1/desktop-mini/control",
+            post(desktop_mini_control).layer(axum::extract::DefaultBodyLimit::max(2048)),
+        )
+        .route("/v1/desktop-mini/restore", post(desktop_mini_restore))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_desktop_mini_key,
+        ));
+
     Router::new()
         .route("/v1/health", get(health))
         .merge(api)
         .merge(ai_restricted)
         .merge(desktop_lyrics)
         .merge(wallpaper)
+        .merge(desktop_mini)
 }
 
 // ---------------------------------------------------------------------------
@@ -634,6 +650,50 @@ async fn require_wallpaper_key(
     }
 }
 
+/// 小窗钥匙只开快照、封面与窄播控/回主窗口；主播放器 API 一律不放行。
+fn desktop_mini_key_allows(path: &str) -> bool {
+    matches!(
+        path,
+        "/v1/desktop-mini/snapshot"
+            | "/v1/desktop-mini/cover"
+            | "/v1/desktop-mini/control"
+            | "/v1/desktop-mini/restore"
+    )
+}
+
+/// 小窗（桌面宠物）的原生宿主鉴权。`Authorization: Desktop <desktop-mini-key>`
+/// 与歌词/壁纸钥匙互不通用；control/restore 强制 POST，其余只收 GET。
+async fn require_desktop_mini_key(
+    State(state): State<Arc<AppState>>,
+    request: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    let write = matches!(
+        request.uri().path(),
+        "/v1/desktop-mini/control" | "/v1/desktop-mini/restore"
+    );
+    let method = if write {
+        axum::http::Method::POST
+    } else {
+        axum::http::Method::GET
+    };
+    if request.method() != method || !desktop_mini_key_allows(request.uri().path()) {
+        return unauthorized().into_response();
+    }
+    let presented = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Desktop "))
+        .map(str::trim);
+    match presented {
+        Some(key) if !state.desktop_mini_key.is_empty() && key == state.desktop_mini_key => {
+            next.run(request).await
+        }
+        _ => unauthorized().into_response(),
+    }
+}
+
 /// 从查询串里取出某个参数的值。
 ///
 /// 不做 percent-decode：token 是两个 `Uuid::simple()` 拼出来的纯小写十六进制，
@@ -803,6 +863,39 @@ async fn desktop_lyrics_playback(
             "播放已变化，请重试",
         ));
     }
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// 小窗快照：轻量投影 + 主窗口可见性回传，500ms 轮询用。
+async fn desktop_mini_snapshot(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    Json(crate::desktop_mini::snapshot(&state).await)
+}
+
+/// 小窗封面的查询串：`?key=` 是曲目 uuid（safe_cover_id 准入在 desktop_mini::cover 里）。
+#[derive(Deserialize)]
+struct CoverQuery {
+    key: Option<String>,
+}
+
+/// 小窗封面：`?key=` 是曲目 uuid，准入与 `/v1/tracks/{id}/cover` 同一套。
+async fn desktop_mini_cover(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<CoverQuery>,
+) -> Response {
+    crate::desktop_mini::cover(&state, q.key.as_deref().unwrap_or_default())
+}
+
+/// 小窗窄播控（play/pause/toggle/next/previous/restore）。
+async fn desktop_mini_control(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<crate::desktop_mini::MiniControlRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(crate::desktop_mini::control(&state, request).await?))
+}
+
+/// 小窗请求回主窗口：广播 expand-capsule，不新增订阅协议。
+async fn desktop_mini_restore(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
+    crate::desktop_mini::request_restore(&state).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -2103,11 +2196,15 @@ async fn home_quote(Query(q): Query<online::QuoteQuery>) -> ApiResult<Json<serde
 #[derive(Deserialize)]
 pub(crate) struct UiNoticeRequest {
     pub(crate) action: String,
+    /// 仅 `main-visibility` 用：主界面是否不可见。缺省按「可见」处理。
+    #[serde(default)]
+    pub(crate) hidden: Option<bool>,
 }
 
 /// 界面实例间信号的白名单。这条管道会广播给**所有**订阅者（独立形态的 WS 客户端
 /// 也会收到），动作名即协议，所以不收任意字符串：前端不必为每个未知动作做防御，
-/// 新增动作时两边一起改。
+/// 新增动作时两边一起改。`main-visibility` 不广播——它只喂给小窗的主窗口
+/// 可见性判定，见 `post_ui_notice`。
 const UI_NOTICE_ACTIONS: [&str; 1] = ["expand-capsule"];
 
 pub(crate) async fn broadcast_ui_notice(state: &AppState, action: &str) -> ApiResult<()> {
@@ -2122,11 +2219,18 @@ pub(crate) async fn broadcast_ui_notice(state: &AppState, action: &str) -> ApiRe
 
 /// 浮动胶囊窗口与 tab 实例之间的信号中转：两个 iframe 是 opaque origin，浏览器侧
 /// 的 BroadcastChannel / storage 事件都不通，只能借服务端这条广播绕一圈。
+/// `main-visibility` 是例外：它不是实例间信号，而是浏览器主界面给小窗的
+/// 可见性回传，直接喂 `desktop_mini` 的判定，不走 WS 广播。
 async fn post_ui_notice(
     State(state): State<Arc<AppState>>,
     Json(body): Json<UiNoticeRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    broadcast_ui_notice(&state, &body.action).await?;
+    match body.action.as_str() {
+        "main-visibility" => {
+            crate::desktop_mini::note_main_visibility(body.hidden != Some(true));
+        }
+        other => broadcast_ui_notice(&state, other).await?,
+    }
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 

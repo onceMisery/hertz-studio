@@ -653,6 +653,10 @@
     {
       "script": "check-zodiac-volume.mjs",
       "purpose": "手工检查（原文件未写说明）"
+    },
+    {
+      "script": "check-desktop-mini-native.js",
+      "purpose": "小窗播放（桌面宠物）原生集成：reopen 自启、宠物收起态窗体随皮肤尺寸、不透明包围盒命中穿透（WM_NCHITTEST）、悬停展开成播放胶囊、播放/待机素材切换、封面经自定义协议注入、拖拽吸附落盘、点击回主窗口广播。需要已构建的 hertz-desktop、Playwright 与无运行中的桌面实例。"
     }
   ]
 }

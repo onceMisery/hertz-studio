@@ -821,7 +821,9 @@ export function createPhoenixVortex(ctx) {
   return basicInstance(group, params, profile, {
     update(frame, p) {
       const click = frame.pointer?.click;
-      const dt = frame.reduced || frame.playing === false ? 0 : Math.max(0, Math.min(.1, Number(frame.dt) || 0));
+      // P0-02：环境运动冻结看 motionActive；旧宿主回退 playing 语义。
+      const motionAllowed = frame.motionActive === undefined ? frame.playing !== false : !!frame.motionActive;
+      const dt = frame.reduced || !motionAllowed ? 0 : Math.max(0, Math.min(.1, Number(frame.dt) || 0));
       if (performanceChanged) {
         manualRitual = false; manualIdle = 0; holdFull = 0; timelineTime = 0; strikes = 0; charge = 0;
         uniforms.uCharge.value = 0; hatchStarted = false; hatchAge = 10; shardAge = 10; formed = false; autoHatch = false;

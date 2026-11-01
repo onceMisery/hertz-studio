@@ -782,6 +782,11 @@ pub struct AppState {
     pub desktop_lyrics_key: String,
     /// 壁纸只读钥匙。与桌面歌词钥匙分开轮换；只放行壁纸快照。
     pub wallpaper_key: String,
+    /// 小窗播放（桌面宠物）只读钥匙。与歌词/壁纸钥匙独立轮换；只放行小窗
+    /// 快照、封面与窄播控/回主窗口。插件形态（stdio）填空串即可。
+    pub desktop_mini_key: String,
+    /// 小窗快照自增序号：仅用于组件侧判新旧，不需要跨重启连续。
+    pub(crate) desktop_mini_seq: std::sync::atomic::AtomicU64,
     /// 最新一帧壁纸频谱；由既有 AudioEvent::Spectrum 消费方写入。
     pub(crate) wallpaper: crate::wallpaper::Wallpaper,
     pub events: broadcast::Sender<WsEvent>,
@@ -4541,6 +4546,8 @@ pub async fn write_discovery(state: &AppState, port: u16) -> anyhow::Result<Path
         desktop_lyrics_protocol: Option<u32>,
         #[serde(skip_serializing_if = "Option::is_none")]
         wallpaper_protocol: Option<u32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        desktop_mini_protocol: Option<u32>,
     }
     let body = Discovery {
         pid: std::process::id(),
@@ -4554,6 +4561,8 @@ pub async fn write_discovery(state: &AppState, port: u16) -> anyhow::Result<Path
         desktop_lyrics_protocol: (!state.desktop_lyrics_key.is_empty())
             .then_some(crate::desktop_lyrics::PROTOCOL),
         wallpaper_protocol: (!state.wallpaper_key.is_empty()).then_some(crate::wallpaper::PROTOCOL),
+        desktop_mini_protocol: (!state.desktop_mini_key.is_empty())
+            .then_some(crate::desktop_mini::PROTOCOL),
     };
     let path = state.data_dir.join("vmusicd.json");
     tokio::fs::write(&path, serde_json::to_vec_pretty(&body)?).await?;
@@ -4594,6 +4603,8 @@ pub(crate) mod tests {
             overlay_key: String::new(),
             desktop_lyrics_key: String::new(),
             wallpaper_key: String::new(),
+            desktop_mini_key: String::new(),
+            desktop_mini_seq: Default::default(),
             wallpaper: Default::default(),
             events: broadcast::channel(16).0,
             queue: Default::default(),

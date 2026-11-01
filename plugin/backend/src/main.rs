@@ -240,6 +240,7 @@ async fn boot_plugin() -> anyhow::Result<hertz_studio::bootstrap::Booted> {
         String::new(),
         String::new(),
         String::new(),
+        String::new(),
     )
     .await?;
     tracing::info!(backend = %booted.backend_label, "hertz-studio sidecar 就绪");

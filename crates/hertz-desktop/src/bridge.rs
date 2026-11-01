@@ -35,6 +35,8 @@ pub(crate) struct Discovery {
     pub(crate) desktop_lyrics_protocol: Option<u32>,
     #[serde(default)]
     pub(crate) wallpaper_protocol: Option<u32>,
+    #[serde(default)]
+    pub(crate) desktop_mini_protocol: Option<u32>,
 }
 
 pub(crate) fn client() -> Result<reqwest::blocking::Client> {

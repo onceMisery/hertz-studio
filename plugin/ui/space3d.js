@@ -731,6 +731,8 @@
     if(page==='closed'||!host||document.hidden)return;
     var p=present();frame.now=performance.now();frame.dt=Math.min(.16,dt/1000);frame.time=(p.position||0)/1000;frame.deviceTier=global.Stage&&Stage.tier?Stage.tier():1;
     frame.position=p.position||0;frame.playing=!!p.playing;frame.reduced=reduced();
+    // P0-02 时钟分离：播放器宿主显式计算环境运动许可，保持「暂停/减少动态即冻结」的原行为。
+    frame.motionActive=!!frame.playing&&!frame.reduced;
     frame.bands=global.Stage&&Stage.spectrum?Stage.spectrum()||zeros:zeros;frame.level=global.Stage&&Stage.energy?Stage.energy():0;
     frame.lyrics=lyrics(p);if(onset&&frame.playing&&!frame.reduced)onset.step(dt,frame.bands,frame.now);frame.onset=onset?onset.pulse||0:0;
     frame.track=p.track?{id:p.track.id,cover:p.cover||''}:null;

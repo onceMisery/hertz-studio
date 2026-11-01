@@ -91,7 +91,9 @@ export function createCoverParticles(ctx) {
       uniforms.uPrevious.value = previous?.texture || texture || null;
       uniforms.uHasCover.value = texture ? 1 : 0;
       if (entry?.texture) {
-        uniforms.uMix.value = frame.playing === false || frame.reduced || !previous ? 1 : Math.min(1, uniforms.uMix.value + (frame.dt || 0) * 3);
+        // P0-02：转场补间冻结看 motionActive；旧宿主回退 playing 语义。
+        const motionAllowed = frame.motionActive === undefined ? frame.playing !== false : !!frame.motionActive;
+        uniforms.uMix.value = !motionAllowed || frame.reduced || !previous ? 1 : Math.min(1, uniforms.uMix.value + (frame.dt || 0) * 3);
         if (uniforms.uMix.value === 1 && previous) {
           resources.cover.release(previous); previous = null; uniforms.uPrevious.value = texture;
         }

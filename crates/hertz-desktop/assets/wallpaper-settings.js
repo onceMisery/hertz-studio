@@ -3,6 +3,7 @@
   var $ = id => document.getElementById(id);
   var saved = null, draft = null, revision = 0, latest = null;
   var ready = false, dirty = false, conflict = false, previewActive = false, editing = false;
+  var previewLease = null;
   var scenes = [], profiles = [], currentProfile = null, spaceScene = null;
   var presetStyle = { sungColor:'#8fe3ff', unsungColor:'#ffffff', outlineColor:'#000000', outlineWidth:2, opacity:.92, fontWeight:600 };
   var presets = {
@@ -78,6 +79,11 @@
     var wallpaper = draft.wallpaper, lyrics = draft.lyrics;
     $('enabled').checked = !!wallpaper.enabled; $('fps').value = String(wallpaper.fps); $('music').checked = !!wallpaper.musicResponse;
     $('scene-source').value = wallpaper.source;
+    $('quality').value = wallpaper.quality || 'low';
+    $('brightness').value = String(wallpaper.brightness == null ? 1 : wallpaper.brightness);
+    $('motion').value = String(wallpaper.motion == null ? 1 : wallpaper.motion);
+    $('brightness-value').textContent = Math.round(($('brightness').value || 1) * 100) + '%';
+    $('motion-value').textContent = Math.round(($('motion').value == null ? 100 : $('motion').value * 100)) + '%';
     if (latest) renderMetadata(latest);
     $('lyrics-enabled').checked = !!lyrics.enabled; $('lyrics-locked').checked = !!lyrics.locked;
     $('lyrics-secondary').value = lyrics.secondary;
@@ -123,7 +129,7 @@
   }
   function syncControls() {
     var disabled = !ready || editing || pending;
-    ['enabled','monitor','fps','music','scene-source','lyrics-enabled','lyrics-locked','lyrics-size','lyrics-weight','lyrics-sung','lyrics-unsung','lyrics-outline','lyrics-stroke','lyrics-opacity','profile'].forEach(id => $(id).disabled = disabled);
+    ['enabled','monitor','fps','quality','brightness','motion','music','scene-source','lyrics-enabled','lyrics-locked','lyrics-size','lyrics-weight','lyrics-sung','lyrics-unsung','lyrics-outline','lyrics-stroke','lyrics-opacity','profile'].forEach(id => $(id).disabled = disabled);
     $('scene-fixed').disabled = disabled || !draft || draft.wallpaper.source !== 'fixed';
     $('lyrics-secondary').disabled = disabled || !draft || draft.lyrics.layout === 'single';
     document.querySelectorAll('[data-preset],[data-scene]').forEach(node => node.disabled = disabled);
@@ -145,15 +151,21 @@
   function renderRuntime(payload) {
     var runtime = payload.runtime || {}, wallpaper = runtime.wallpaper || {}, policy = runtime.policy || {}, diagnostics = runtime.diagnostics || {};
     var reasons = diagnostics.pauseReasons || [];
-    var reasonText = { fullscreen:'全屏应用正在运行', sessionUnavailable:'Windows 已锁屏或会话不可用', displayOff:'显示器已关闭', noSurface:'壁纸尚未挂载', pageNotReady:'渲染页面正在准备' };
-    var state = !wallpaper.enabled ? '壁纸未启用' : wallpaper.monitorMissing ? '目标显示器未连接' : wallpaper.hidden ? '壁纸已从托盘隐藏' : wallpaper.visible ? '壁纸正在运行' : diagnostics.recovery && diagnostics.recovery.terminal ? '壁纸挂载失败' : reasons.some(reason => ['fullscreen','sessionUnavailable','displayOff'].includes(reason)) ? '壁纸已按运行规则暂停' : '壁纸正在准备';
+    var reasonText = { fullscreen:'全屏应用正在运行', sessionUnavailable:'Windows 已锁屏或会话不可用', displayOff:'显示器已关闭', displayMissing:'目标显示器未连接', manualPause:'已从托盘隐藏', battery:'使用电池供电', noSurface:'壁纸尚未挂载', pageNotReady:'渲染页面正在准备' };
+    var state = !wallpaper.enabled ? '壁纸未启用' : wallpaper.monitorMissing ? '目标显示器未连接' : wallpaper.hidden ? '壁纸已从托盘隐藏' : wallpaper.visible ? '壁纸正在运行' : diagnostics.recovery && diagnostics.recovery.terminal ? '壁纸挂载失败' : reasons.some(reason => ['fullscreen','sessionUnavailable','displayOff','displayMissing','battery'].includes(reason)) ? '壁纸已按运行规则暂停' : '壁纸正在准备';
     var waitingForScene = payload.config && payload.config.source === 'follow' && !payload.spaceScene;
     var unsupportedScene = payload.config && payload.config.source === 'follow' && payload.spaceScene && !scenes.some(scene => scene.id === payload.spaceScene);
     if (wallpaper.enabled && wallpaper.visible && (waitingForScene || unsupportedScene)) state = waitingForScene ? '等待三维空间场景' : '当前空间场景暂不支持壁纸';
     var running = wallpaper.visible && !waitingForScene && !unsupportedScene;
     $('wallpaper-state').textContent = state;
     $('wallpaper-dot').className = 'state-dot' + (running ? ' running' : state.includes('失败') ? ' error' : '');
-    $('wallpaper-detail').textContent = wallpaper.monitorMissing ? '重新连接目标显示器，或选择其他显示器后应用。' : unsupportedScene ? '可以在右侧选择固定场景后应用。' : waitingForScene ? '在播放器打开三维空间，或选择一个固定场景。' : wallpaper.visible ? '桌面实际运行 · ' + wallpaper.fps + ' fps' : reasons.map(reason => reasonText[reason]).filter(Boolean).join(' · ') || '启用并应用壁纸后，将显示在桌面图标后方。';
+    var detail = wallpaper.applyError ? '设置已保存，但运行存在问题：' + wallpaper.applyError
+      : wallpaper.monitorMissing ? '重新连接目标显示器，或选择其他显示器后应用。'
+      : unsupportedScene ? '可以在右侧选择固定场景后应用。'
+      : waitingForScene ? '在播放器打开三维空间，或选择一个固定场景。'
+      : wallpaper.visible ? '桌面实际运行 · ' + wallpaper.fps + ' fps · 画质 ' + (wallpaper.quality || 'low')
+      : reasons.map(reason => reasonText[reason]).filter(Boolean).join(' · ') || '启用并应用壁纸后，将显示在桌面图标后方。';
+    $('wallpaper-detail').textContent = detail;
     $('wallpaper-show').hidden = !wallpaper.hidden;
     $('wallpaper-retry').hidden = !wallpaper.enabled || wallpaper.monitorMissing || (wallpaper.pageReady && !(diagnostics.recovery && diagnostics.recovery.terminal));
     $('lyrics-state').textContent = editing ? '歌词已临时解锁，可拖动位置' : !runtime.enabled ? '歌词未启用' : runtime.userHidden ? '歌词已从托盘隐藏' : runtime.visible ? (runtime.locked ? '歌词正在显示 · 已锁定' : '歌词正在显示 · 可拖动') : policy.noContent && runtime.locked ? '等待可显示的歌词' : '歌词已按运行规则隐藏';
@@ -180,6 +192,7 @@
     }
     editing = !!payload.positionEditing;
     previewActive = !!payload.previewActive;
+    previewLease = payload.previewLease || null;
     if (payload.error) { pending = false; status(payload.error, true); }
     else if (payload.message) status(payload.message, false);
     else if (!$('status').classList.contains('error')) status(editing ? '正在调整真实歌词位置；关闭窗口会取消本次调整。' : dirty ? '草稿尚未应用；两个页面的修改会一起保存。' : '设置已保存。实际显示状态见上方。', false);
@@ -197,7 +210,7 @@
     renderPreview(); syncControls();
     if (wallpaperChanged && previewActive) { clearTimeout(previewTimer); previewTimer = setTimeout(function () { send('preview', { config: draft.wallpaper }); }, 180); }
   }
-  var wallpaperFields = { enabled:['enabled','check'], fps:['fps','number'], music:['musicResponse','check'], monitor:['monitor','monitor'], 'scene-source':['source','text'], 'scene-fixed':['scene','text'] };
+  var wallpaperFields = { enabled:['enabled','check'], fps:['fps','number'], music:['musicResponse','check'], monitor:['monitor','monitor'], 'scene-source':['source','text'], 'scene-fixed':['scene','text'], quality:['quality','text'], brightness:['brightness','number'], motion:['motion','number'] };
   Object.keys(wallpaperFields).forEach(function (id) { $(id).addEventListener('change', function () { if (!draft) return; var field = wallpaperFields[id]; draft.wallpaper[field[0]] = field[1] === 'check' ? this.checked : field[1] === 'number' ? Number(this.value) : field[1] === 'monitor' ? this.value || null : this.value; changed(true); }); });
   var lyricsFields = { 'lyrics-enabled':['enabled','check'], 'lyrics-locked':['locked','check'], 'lyrics-secondary':['secondary','text'], 'lyrics-size':['fontSize','number'], 'lyrics-weight':['fontWeight','number'], 'lyrics-sung':['sungColor','text'], 'lyrics-unsung':['unsungColor','text'], 'lyrics-outline':['outlineColor','text'], 'lyrics-stroke':['outlineWidth','number'], 'lyrics-opacity':['opacity','number'] };
   Object.keys(lyricsFields).forEach(function (id) { $(id).addEventListener('input', function () { if (!draft) return; if (this.validity && !this.validity.valid || this.type === 'number' && this.value === '') { dirty = true; status('请填写有效的字号或描边宽度。', true); syncControls(); return; } var field = lyricsFields[id]; draft.lyrics[field[0]] = field[1] === 'check' ? this.checked : field[1] === 'number' ? Number(this.value) : this.value; changed(false); }); });
@@ -214,7 +227,7 @@
   $('profile').addEventListener('change', updateProfilePath);
   $('switch-source').addEventListener('click', function () { var profile = profiles.find(profile => profileKey(profile) === $('profile').value); if (profile && !dirty) { pending = true; syncControls(); send('switch-source', { profile: profile, expectedRevision: revision }); } });
   $('autostart').addEventListener('change', function () { send('autostart', { enabled: this.checked }); });
-  $('preview').addEventListener('click', function () { if (previewActive) send('preview-close'); else send('preview', { config: draft.wallpaper }); });
+  $('preview').addEventListener('click', function () { if (previewActive) send('preview-close', { lease: previewLease }); else send('preview', { config: draft.wallpaper }); });
   $('apply').addEventListener('click', function () { if (!dirty || conflict || editing) return; if (!document.querySelectorAll('#panel-lyrics input:invalid').length) { pending = true; syncControls(); send('apply', { expectedRevision: revision, config: draft.wallpaper, lyrics: draft.lyrics }); } else status('请检查字号和描边宽度的有效范围。', true); });
   $('discard').addEventListener('click', function () { dirty = false; conflict = false; pending = false; draft = clone(saved); revision = latest.revision; send('preview-close'); renderForm(); status('已放弃草稿，读取最新保存的设置。', false); });
   $('close').addEventListener('click', requestClose);
@@ -229,8 +242,8 @@
     evalPreview: function (script) { var frame = $('preview-renderer'); if (frame && frame.contentWindow) frame.contentWindow.eval(script); },
     previewEvent: function (event) { send('preview-event', { event: event }); }
   };
-  setInterval(function () { if (previewActive && !document.hidden && activeTab === 'wallpaper') send('preview-renew'); }, 5000);
-  document.addEventListener('visibilitychange', function () { if (document.hidden && previewActive) send('preview-close'); });
-  window.addEventListener('pagehide', function () { send('preview-close'); send('position-cancel'); });
+  setInterval(function () { if (previewActive && !document.hidden && activeTab === 'wallpaper') send('preview-renew', { lease: previewLease }); }, 5000);
+  document.addEventListener('visibilitychange', function () { if (document.hidden && previewActive) send('preview-close', { lease: previewLease }); });
+  window.addEventListener('pagehide', function () { send('preview-close', { lease: previewLease }); send('position-cancel'); });
   send('ready');
 })();

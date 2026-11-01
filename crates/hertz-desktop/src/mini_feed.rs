@@ -186,6 +186,9 @@ impl MiniFeed {
     }
 
     /// 轮询间隔：播着的时候要跟手，暂停和隐藏时要把请求降下来。
+    /// 接线后的节奏由 app 通过共享量提示（poll_hint_ms），这里保留纯函数形态
+    /// 供单测钉住语义。
+    #[allow(dead_code)]
     pub(crate) fn poll_interval(&self, visible: bool) -> Duration {
         if !visible {
             Duration::from_secs(5)
@@ -199,11 +202,11 @@ impl MiniFeed {
     pub(crate) fn poll(&mut self) -> Result<MiniUpdate> {
         let discovery = bridge::read_discovery(&self.profile)?;
         if let Some(edition) = discovery.edition.as_deref() {
-            if self.profile.edition != "custom" && edition != self.profile.edition {
+            if self.profile.edition() != "custom" && edition != self.profile.edition() {
                 bail!(
                     "数据目录属于 {} 发行版，当前 profile 是 {}",
                     edition,
-                    self.profile.edition
+                    self.profile.edition()
                 );
             }
         }
@@ -221,7 +224,11 @@ impl MiniFeed {
         }
         self.session = discovery.server_instance_id.clone();
         // 每拍重读钥匙：删文件重启即可轮换，不需要组件重启（与歌词同源同策略）。
-        let key = bridge::read_key(&self.profile.data_dir, "desktop-mini-key", "小窗")?;
+        let key = bridge::read_key(
+            std::path::Path::new(self.profile.data_dir()),
+            "desktop-mini-key",
+            "小窗",
+        )?;
         let base = format!("http://127.0.0.1:{}", discovery.port);
 
         let snapshot: MiniSnapshot = bridge::get_json(
@@ -315,12 +322,16 @@ impl MiniFeed {
     pub(crate) fn control(&self, payload: &serde_json::Value) -> Result<()> {
         let discovery = bridge::read_discovery(&self.profile)?;
         if discovery.desktop_mini_protocol != Some(PROTOCOL)
-            || discovery.edition.as_deref() != Some(self.profile.edition.as_str())
+            || discovery.edition.as_deref() != Some(self.profile.edition())
             || discovery.server_instance_id.as_deref() != payload["session"].as_str()
         {
             bail!("播放来源已变化，请等待重新同步");
         }
-        let key = bridge::read_key(&self.profile.data_dir, "desktop-mini-key", "小窗")?;
+        let key = bridge::read_key(
+            std::path::Path::new(self.profile.data_dir()),
+            "desktop-mini-key",
+            "小窗",
+        )?;
         let response = bridge::client()?
             .post(format!(
                 "http://127.0.0.1:{}/v1/desktop-mini/control",
@@ -381,10 +392,10 @@ mod tests {
 
     #[test]
     fn poll_interval_relaxes_when_idle_or_hidden() {
-        let mut feed = MiniFeed::new(Profile {
-            data_dir: std::path::PathBuf::from("C:\\d"),
-            edition: "full".into(),
-        })
+        let mut feed = MiniFeed::new(crate::config::standalone(
+            std::path::PathBuf::from("C:\\d"),
+            "full",
+        ))
         .expect("feed");
         assert_eq!(feed.poll_interval(false), Duration::from_secs(5));
         assert_eq!(feed.poll_interval(true), Duration::from_secs(2));

@@ -18,8 +18,9 @@ use std::time::{Duration, Instant};
 
 use axum::body::Bytes;
 use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE};
-use axum::http::{Response, StatusCode};
-use serde::{Deserialize, Serialize};
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::error::{bad_request, ApiError};
@@ -39,39 +40,6 @@ const MAIN_HIDDEN_DEBOUNCE: Duration = Duration::from_millis(1200);
 /// 用原子量而不是塞进 AppState：可见性不属于播放真值，别让它参与状态快照。
 static MAIN_VISIBLE: AtomicBool = AtomicBool::new(true);
 static MAIN_LAST_SEEN: AtomicU64 = AtomicU64::new(0);
-static MAIN_EPOCH: once_epoch::OnceEpoch = once_epoch::OnceEpoch::new();
-
-mod once_epoch {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::Instant;
-
-    /// 进程启动时刻。用它把「墙钟」折算成单调的毫秒差，避免改系统时间导致
-    /// sinceMs 忽大忽小。
-    pub(crate) struct OnceEpoch(AtomicU64);
-
-    impl OnceEpoch {
-        pub(crate) const fn new() -> Self {
-            Self(AtomicU64::new(u64::MAX))
-        }
-
-        pub(crate) fn now_ms(&self) -> u64 {
-            let cached = self.0.load(Ordering::Relaxed);
-            if cached != u64::MAX {
-                return cached;
-            }
-            let start = Instant::now();
-            let _ = start;
-            // 首次调用时把「进程起点」记成一个稳定基准，之后所有 sinceMs
-            // 都相对它计算。用 Instant 的单调时钟，不读 SystemTime。
-            let value = std::time::SystemTime::now()
-                .duration_since(std::time::SystemTime::UNIX_EPOCH)
-                .map(|duration| duration.as_millis() as u64)
-                .unwrap_or(0);
-            self.0.store(value, Ordering::Relaxed);
-            value
-        }
-    }
-}
 
 /// 主窗口上报可见性。由 `/v1/ui/notice` 的 `main-visibility` 动作转进来。
 pub(crate) fn note_main_visibility(visible: bool) {
@@ -95,10 +63,12 @@ pub(crate) fn main_hidden() -> bool {
 }
 
 fn monotonic_ms() -> u64 {
-    // 进程内单调毫秒。用 OnceEpoch 固定基准，保证差值只增不减。
+    // 进程内单调毫秒。用 OnceLock 固定基准，保证差值只增不减。
+    // 下限 1：`main_hidden()` 用 0 当「从未上报」的哨兵，而进程启动后的
+    // 第一毫秒里 elapsed() 真的会是 0——首测就撞上了，不能让两者相撞。
     static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
     let start = START.get_or_init(Instant::now);
-    start.elapsed().as_millis() as u64
+    (start.elapsed().as_millis() as u64).max(1)
 }
 
 /// 小窗快照：轻量、可 500ms 轮询，绝不等待封面 I/O。
@@ -152,7 +122,8 @@ async fn build_track(state: &Arc<AppState>, track_id: &str, duration_ms: Option<
             })
         }
         None => {
-            let Ok(Some(track)) = vmusic_store::get_track(&state.db, track_id).await else {
+            let Ok(Some(track)) = vmusic_store::get_track(&state.db, &track_id.to_owned()).await
+            else {
                 return json!({
                     "id": track_id,
                     "title": "未知曲目",
@@ -219,7 +190,9 @@ pub(crate) fn cover(state: &Arc<AppState>, key: &str) -> Response {
 
 /// 小窗播控的动作白名单。比桌面歌词多的是 `toggle` / `next` / `previous`——
 /// 小窗上有完整的传输三键，但依旧不接受音量、队列、随机等更大范围的写入。
-const MINI_ACTIONS: [&str; 5] = ["play", "pause", "toggle", "next", "previous"];
+/// `restore` 不动播放状态，只广播「回主窗口」（§7.7：落到既有 expand-capsule
+/// 通知，不新增订阅协议）。
+const MINI_ACTIONS: [&str; 6] = ["play", "pause", "toggle", "next", "previous", "restore"];
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct MiniControlRequest {
@@ -253,6 +226,12 @@ pub(crate) async fn control(
         .as_deref()
         .map(|track_id| (track_id, player.generation));
 
+    // restore 只是个界面信号，与播放代际无关，提前于代际校验处理。
+    if request.action == "restore" {
+        request_restore(state).await?;
+        return Ok(json!({ "ok": true }));
+    }
+
     // toggle 由当前真值决定方向，不读 UI 侧缓存的布尔——小窗关着的时候
     // 那份缓存没有更新来源。
     let outcome = match request.action.as_str() {
@@ -267,14 +246,8 @@ pub(crate) async fn control(
         }
         // 上下曲走与主界面同一条 step_by_user：预取、LRU detach 与历史
         // 记录都在里面，不能在小窗这条路上另起一套。
-        "next" => {
-            state.step_by_user(1).await?;
-            crate::state::ControlOutcome::Applied
-        }
-        "previous" => {
-            state.step_by_user(-1).await?;
-            crate::state::ControlOutcome::Applied
-        }
+        "next" => state.step_by_user(1).await?,
+        "previous" => state.step_by_user(-1).await?,
         _ => return Err(bad_request("不支持的小窗播控操作")),
     };
 
@@ -305,19 +278,24 @@ pub(crate) async fn request_restore(state: &Arc<AppState>) -> Result<(), ApiErro
 #[cfg(test)]
 mod tests {
     use super::*;
+    // 可见性判定读的是进程级 static，测试之间必须串行，否则一个用例的
+    // 去抖等待会被另一个用例的复位打断（首次接进模块树时踩过）。
+    static VISIBILITY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn action_allowlist_is_explicit() {
         assert!(MINI_ACTIONS.contains(&"toggle"));
         assert!(MINI_ACTIONS.contains(&"next"));
-        // 比桌面歌词宽的只有传输键；音量、队列、随机一律不放行。
+        assert!(MINI_ACTIONS.contains(&"restore"));
+        // 比桌面歌词宽的只有传输键与回主窗口；音量、队列、随机一律不放行。
         for denied in ["volume", "shuffle", "enqueue", "seek", "stop"] {
-            assert!(!MINI_ACTIONS.contains(&denied), "{denied} 不该在小窗白名单里");
+            assert!(!MINI_ACTIONS.contains(&denied), "{denied} 不该在小窗白名单");
         }
     }
 
     #[test]
     fn main_visibility_never_auto_enters_without_evidence() {
+        let _guard = VISIBILITY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // 组件刚起来、主窗口还没上报过一次可见：没有证据说它藏起来了。
         MAIN_VISIBLE.store(true, Ordering::Relaxed);
         MAIN_LAST_SEEN.store(0, Ordering::Relaxed);
@@ -326,6 +304,7 @@ mod tests {
 
     #[test]
     fn main_hidden_needs_the_debounce_to_elapse() {
+        let _guard = VISIBILITY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         MAIN_LAST_SEEN.store(monotonic_ms(), Ordering::Relaxed);
         MAIN_VISIBLE.store(true, Ordering::Relaxed);
         note_main_visibility(false);
@@ -343,11 +322,5 @@ mod tests {
         let first = monotonic_ms();
         std::thread::sleep(Duration::from_millis(5));
         assert!(monotonic_ms() >= first);
-    }
-
-    #[test]
-    fn epoch_is_stable_across_calls() {
-        let first = MAIN_EPOCH.now_ms();
-        assert_eq!(MAIN_EPOCH.now_ms(), first);
     }
 }

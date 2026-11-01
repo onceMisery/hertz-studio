@@ -6,8 +6,11 @@ const TAU = Math.PI * 2;
 const silentBands = Object.freeze({ bass: 0, mid: 0, treble: 0 });
 const silentSpectrum = new Float32Array(16);
 export function motionFrame(frame, reduced, preservePlayback = false) {
+  // 环境运动许可（P0-02 时钟分离）：motionActive 由宿主策略显式计算；
+  // 未携带该字段的旧宿主回退到 playing 语义，行为不变。
+  const motionAllowed = frame.motionActive === undefined ? frame.playing !== false : !!frame.motionActive;
   const frozen = reduced || frame.reduced, sceneTime = reduced ? 0 : frame.sceneTime ?? frame.time ?? 0;
-  return { ...frame, sceneTime, reduced: !!frozen, dt: frame.dynamicDt ?? (frame.playing === false || frozen ? 0 : frame.dt),
+  return { ...frame, sceneTime, reduced: !!frozen, dt: frame.dynamicDt ?? (motionAllowed && !frozen ? frame.dt : 0),
     ...(preservePlayback ? {} : { time: sceneTime }), ...(frozen ? { level: 0, bands: silentBands, spectrum: silentSpectrum, onset: 0 } : {}) };
 }
 export const seed = (i, salt = 0) => { const n = Math.sin(i * 127.1 + salt * 311.7) * 43758.5453; return n - Math.floor(n); };

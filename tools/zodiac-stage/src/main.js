@@ -257,6 +257,9 @@ function createStage(canvas, opts = {}, context = null) {
     canvas, renderer, scene, camera, cameraTarget, control: null, world, quality, prefs, audio, rig,
     raf: 0, lastFrame: 0, lastRender: 0, lastTime: -1,
     time: 0, sceneTime: 0, playing: false, dirty: true,
+    // external：宿主自持调度器（P0-02「每呈现页一个 scheduler」）；由 render(now) 驱动。
+    // motionActive：环境运动许可；undefined 保持旧行为（仅 reduced 冻结）。
+    external: false, motionActive: undefined,
     width: 0, height: 0, pr: 1, pointer: null, localPointer, charge: 0,
     timeline: { index: -1, state: 'gather', t: 0 },
     warmed: !!context,
@@ -270,7 +273,8 @@ export function mount(canvas, opts = {}) {
   st = createStage(canvas, opts);
   if (!st) return false;
   st.bindInput();
-  st.raf = requestAnimationFrame(tick);
+  st.external = !!opts.external;
+  if (!st.external) st.raf = requestAnimationFrame(tick);
   return true;
 }
 
@@ -339,6 +343,22 @@ export function setAudio(frame = {}) {
   if (!st) return;
   st.audio.raw = frame.bands && frame.bands.length ? frame.bands : null;
   st.audio.onset = !!frame.onset;
+}
+
+// 环境运动许可（P0-02）：与 playing（音频事实）分离；未调用时保持旧行为。
+export function setMotion(frame = {}) {
+  if (!st) return;
+  st.motionActive = frame.active !== false;
+}
+
+// 外部时钟入口：external 模式下由宿主按自己的帧门调用；一次调用 = 一次真实提交。
+export function render(now) {
+  if (!st || !st.external) return false;
+  const stamp = Number.isFinite(Number(now)) ? Number(now) : performance.now();
+  updateStage(st, stamp);
+  st.renderer.info.reset();
+  st.renderer.render(st.scene, st.camera);
+  return true;
 }
 
 export function setPrefs(patch = {}) {
@@ -436,6 +456,9 @@ function updateStage(st, now, suppliedDt, suppliedUiDt) {
   const dt = suppliedDt === undefined ? st.lastFrame ? Math.min((now - st.lastFrame) / 1000, st.playing ? 0.1 : 0.25) : 0.016 : suppliedDt;
   const uiDt = suppliedUiDt === undefined ? dt : suppliedUiDt;
   st.lastFrame = now;
+  // P0-02 时钟分离：积分型环境运动（相机漂移/蓄能/回弹）由 motionActive 许可冻结；
+  // 音频包络与宿主提供的绝对时间不受影响。undefined 保持旧宿主行为。
+  const envDt = st.motionActive === false ? 0 : dt;
   const prefs = st.prefs;
   const time = st.time;
   const seek = st.lastTime < 0 || Math.abs(time - st.lastTime) > 0.5;
@@ -482,7 +505,7 @@ function updateStage(st, now, suppliedDt, suppliedUiDt) {
   const pointerActive = !!(pointer && pointer.active && !pointer.dragging && !prefs.reduced);
   const charging = !!(pointerActive && pointer.down);
   st.charge = prefs.reduced ? 0
-    : charging ? Math.min(1, st.charge + dt / .85) : Math.max(0, st.charge - dt * 7);
+    : charging ? Math.min(1, st.charge + envDt / .85) : Math.max(0, st.charge - envDt * 7);
 
   const rig = st.rig;
   const camera = st.camera;
@@ -501,13 +524,13 @@ function updateStage(st, now, suppliedDt, suppliedUiDt) {
     // 相机：极慢漂移 + 拖拽偏移；造型本身也在自转，两层速度错开有视差。
     // 松手后保留一小段角速度（惯性），拖拽的余韵比「说停就停」更像游戏镜头。
     if (!rig.dragging) {
-      rig.yaw += rig.spinYaw * dt * 60;
-      rig.pitch = clamp(rig.pitch + rig.spinPitch * dt * 60, -PITCH_LIMIT, PITCH_LIMIT);
-      rig.spinYaw = damp(rig.spinYaw, 0, .22, dt);
-      rig.spinPitch = damp(rig.spinPitch, 0, .22, dt);
+      rig.yaw += rig.spinYaw * envDt * 60;
+      rig.pitch = clamp(rig.pitch + rig.spinPitch * envDt * 60, -PITCH_LIMIT, PITCH_LIMIT);
+      rig.spinYaw = damp(rig.spinYaw, 0, .22, envDt);
+      rig.spinPitch = damp(rig.spinPitch, 0, .22, envDt);
     }
-    rig.drift += dt * CAMERA_DRIFT * (prefs.reduced ? 0.3 : 1) * prefs.speed
-      + dt * bass * 0.04 * (prefs.reduced ? 0.3 : 1);
+    rig.drift += envDt * CAMERA_DRIFT * (prefs.reduced ? 0.3 : 1) * prefs.speed
+      + envDt * bass * 0.04 * (prefs.reduced ? 0.3 : 1);
     const effYaw = rig.drift + rig.yaw;
     const cp = Math.cos(rig.pitch);
     camera.position.set(
@@ -518,11 +541,11 @@ function updateStage(st, now, suppliedDt, suppliedUiDt) {
     camera.lookAt(0, 0, 0);
     // 指针在屏幕左右移动时给一点极轻的滚转，像手持镜头跟着视线倾斜。
     const rollTarget = pointerActive && pointer ? clamp(pointer.x, -1, 1) * .018 : 0;
-    rig.roll = prefs.reduced ? 0 : damp(rig.roll, rollTarget, .22, dt);
+    rig.roll = prefs.reduced ? 0 : damp(rig.roll, rollTarget, .22, envDt);
     if (Math.abs(rig.roll) > 1e-5) camera.rotateZ(rig.roll);
     // 蓄能时轻微推近（FOV 收窄）+ 低频 FOV 呼吸，松开瞬间由冲击波接棒。
     const fovTarget = FOV_BASE + bass * 1.6 + st.charge * 2.4;
-    rig.fov = seek ? fovTarget : damp(rig.fov, fovTarget, 0.32, dt);
+    rig.fov = seek ? fovTarget : damp(rig.fov, fovTarget, 0.32, envDt);
     if (Math.abs(camera.fov - rig.fov) > 0.001) {
       camera.fov = rig.fov;
       camera.updateProjectionMatrix();
@@ -532,7 +555,7 @@ function updateStage(st, now, suppliedDt, suppliedUiDt) {
   st.world.update(st.sceneTime, {
     bass, mid: mid / 9 * response, treble: treble / (BIN_COUNT - 17) * response,
     onset, cycle: tl.cycle, pointerStrength: prefs.pointerStrength,
-    reduced: prefs.reduced, glow: prefs.glow, dt, uiDt,
+    reduced: prefs.reduced, glow: prefs.glow, dt: envDt, uiDt,
     state: tl.state, k, cameraPos: camera.position, camera,
     pointer, width: st.width, height: st.height, now,
   });

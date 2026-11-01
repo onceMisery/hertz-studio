@@ -197,6 +197,8 @@ async fn run(args: Args) -> anyhow::Result<()> {
     let desktop_lyrics_key = load_or_create_desktop_lyrics_key(&data_dir).await?;
     // 壁纸只读钥匙：与歌词钥匙独立轮换；只放行壁纸快照。
     let wallpaper_key = load_or_create_wallpaper_key(&data_dir).await?;
+    // 小窗播放（桌面宠物）只读钥匙：放行快照、封面与窄播控/回主窗口。
+    let desktop_mini_key = load_or_create_desktop_mini_key(&data_dir).await?;
 
     // `booted` 必须活到 main 结束：它持有音频 actor 的线程句柄。
     let booted = bootstrap::boot(
@@ -206,6 +208,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
         overlay_key,
         desktop_lyrics_key,
         wallpaper_key,
+        desktop_mini_key,
     )
     .await?;
     let state = booted.state.clone();
@@ -858,6 +861,12 @@ async fn load_or_create_desktop_lyrics_key(data_dir: &std::path::Path) -> anyhow
 /// 组件一起踢掉。内嵌页面同样只收到无凭据数据。
 async fn load_or_create_wallpaper_key(data_dir: &std::path::Path) -> anyhow::Result<String> {
     load_or_create_secret(&data_dir.join("wallpaper-key")).await
+}
+
+/// 小窗播放（桌面宠物）只读钥匙：与歌词/壁纸钥匙独立轮换；只放行小窗快照、
+/// 封面与窄播控。原生宿主直接按数据目录读取，真泄露删文件重启即可轮换。
+async fn load_or_create_desktop_mini_key(data_dir: &std::path::Path) -> anyhow::Result<String> {
+    load_or_create_secret(&data_dir.join("desktop-mini-key")).await
 }
 
 /// 读一个长期凭据文件，没有就生成一个（两个 `Uuid::simple()` 拼成，256 位）。

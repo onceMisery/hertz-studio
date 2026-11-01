@@ -9,6 +9,10 @@
 <body data-pet="false" data-locked="false" data-playing="false" data-peek="false">
   <!-- 命中区：JS 把这些元素的矩形交给 native，宠物态下它们之外的地方全穿透。 -->
   <div id="capsule" data-hit>
+    <!-- 宠物素材层的唯一出口：内置皮肤与用户素材（mini-skin/*）都从它显示。
+         宠物态下它就是整个形象；悬停展开时缩成封面圆。data-art-failed 是
+         「连内置默认都画不出来」的最后兜底开关，退回 ♫ 封面块。 -->
+    <img id="pet-art" data-hit alt="桌面宠物" draggable="false">
     <div id="cover" data-hit><img id="cover-img" alt=""><span id="cover-glyph" aria-hidden="true">♫</span></div>
     <div id="meta" data-hit>
       <div id="title">未在播放</div>

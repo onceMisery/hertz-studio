@@ -26,9 +26,17 @@ mod feed;
 #[cfg(windows)]
 mod management;
 #[cfg(windows)]
+mod mini;
+#[cfg(windows)]
+mod mini_feed;
+#[cfg(windows)]
+mod mini_native;
+#[cfg(windows)]
 mod native;
 #[cfg(windows)]
 mod pipe;
+#[cfg(windows)]
+mod wallpaper;
 #[cfg(windows)]
 mod wallpaper_feed;
 

@@ -20,7 +20,15 @@
     'prism-galaxy': true
   };
 
-  var config = { source: 'follow', scene: DEFAULT_SCENE, musicResponse: true };
+  var config = {
+    source: 'follow',
+    scene: DEFAULT_SCENE,
+    musicResponse: true,
+    brightness: 1,
+    motion: 1,
+    quality: 'low',
+    refreshHz: 60
+  };
   var backend = null;
   var sceneId = null;
   var sceneParams = null;
@@ -34,8 +42,11 @@
   var selectToken = 0;
   var raf = 0;
   var last = 0;
-  var lastDraw = 0;
   var cap = 30;
+  // ADR-0006 整数分频：N=max(1,ceil(refreshHz/targetFps))，有效预算=refreshHz/N。
+  // 帧门按 rAF 计数取模，不漂移；停绘恢复先重置计数与时间基准。
+  var gate = { divisor: 2, budget: 30 };
+  var frameCount = 0;
   var sceneTime = 0;
   var ticks = 0;
   var draws = 0;
@@ -55,6 +66,27 @@
     receivedAt: null,
     expiresAt: null
   };
+
+  function computeGate(fps, refreshHz) {
+    var hz = refreshHz >= 5 ? refreshHz : 60;
+    var divisor = Math.max(1, Math.ceil(hz / (fps || 30)));
+    return { divisor: divisor, budget: hz / divisor };
+  }
+
+  function resetGate() {
+    frameCount = 0;
+    last = 0;
+  }
+
+  // motion=0 冻结环境运动（真实媒体时钟不变）；音频响应仍按 musicResponse 独立生效。
+  function motionActive() {
+    return config.motion > 0;
+  }
+
+  function applyBrightness() {
+    var value = Math.min(1, Math.max(0.25, Number(config.brightness) || 1));
+    if (host) host.style.filter = value >= 0.999 ? '' : 'brightness(' + value + ')';
+  }
 
   function notify(message) {
     if (window.parent !== window && window.parent.hertzWallpaperSettings) {
@@ -194,30 +226,37 @@
     last = now;
     if (feed.valid && feed.expiresAt != null && now >= feed.expiresAt) applyFeed(null);
     if (feed.valid && feed.receivedAt == null) feed.receivedAt = now;
-    sceneTime += dt;
-    if (now - lastDraw < 1000 / cap - 0.5) return;
-    lastDraw = now;
-    draws++;
+    // 场景时间按运动强度积分；真实媒体时钟（positionMs）单独随 feed 传递。
+    sceneTime += dt * config.motion;
+    // 整数分频帧门：只提交第 N 帧；rAF 仍持续用于心跳与 feed 时效。
+    frameCount++;
+    if (frameCount % gate.divisor !== 0) return;
+    var bands = effectiveBands(now);
+    var motionAllowed = motionActive();
     try {
+      var submitted = false;
       if (backend === 'zodiac') {
         if (!zodiac) return;
-        zodiac.setAudio({ bands: effectiveBands(now), onset: false });
+        zodiac.setAudio({ bands: bands, onset: false });
         zodiac.setTime({ time: sceneTime / 1000, playing: scenePlaying() });
+        if (zodiac.setMotion) zodiac.setMotion({ active: motionAllowed });
+        // 外部时钟模式：本页是唯一调度器；旧 bundle 回退内部循环。
+        submitted = zodiac.render ? zodiac.render(now) : true;
       } else if (stage) {
-        var bands = effectiveBands(now);
         var shaped = bandsObject(bands);
         var level = 0;
         for (var i = 0; i < BANDS; i++) level += bands[i] || 0;
         level /= BANDS;
-        stage.frame({
+        submitted = stage.frame({
           now: now,
-          dt: dt / 1000,
+          dt: (dt * config.motion) / 1000,
           time: (feed.positionMs || 0) / 1000,
           position: feed.positionMs || 0,
-          playing: true,
+          playing: scenePlaying(),
+          motionActive: motionAllowed,
           reduced: false,
           sceneTime: sceneTime / 1000,
-          dynamicDt: dt / 1000,
+          dynamicDt: (dt * config.motion) / 1000,
           deviceTier: 1,
           level: level,
           onset: 0,
@@ -227,8 +266,10 @@
           lyrics: null,
           track: null,
           preview: null
-        });
+        }) === true;
       }
+      // 只在渲染真实提交后计数；尝试调用不算 GPU 完成（P0-05）。
+      if (submitted) draws++;
     } catch (failure) {
       error = String(failure);
     }
@@ -236,14 +277,15 @@
 
   function startLoop() {
     if (!raf && enabled && !lost) {
-      last = 0;
-      lastDraw = 0;
+      resetGate();
       raf = requestAnimationFrame(loop);
     }
   }
 
   function start(fps) {
     cap = fps || cap;
+    gate = computeGate(cap, config.refreshHz);
+    resetGate();
     enabled = true;
     if (!mounted && !switching) return mount();
     if (mounted && !lost) startLoop();
@@ -309,14 +351,18 @@
   function mountZodiac(initial) {
     if (!zodiac) throw new Error('zodiac runtime missing');
     attachCanvas();
+    applyBrightness();
     if (!zodiac.mount(canvas, {
-      quality: 'low',
+      quality: config.quality,
       reduced: false,
-      interactive: false
+      interactive: false,
+      // 外部时钟：本页持唯一调度器（设计 §3.1），fps 门才真实作用于提交。
+      external: true
     })) throw new Error('mount returned false');
     zodiac.resize(innerWidth, innerHeight);
     if (!applyZodiacCamera()) throw new Error('scene_registry_error');
     zodiac.setPrefs({ field: true, interactive: false });
+    if (zodiac.setMotion) zodiac.setMotion({ active: motionActive() });
     backend = 'zodiac';
     sceneId = 'zodiac';
     sceneParams = null;
@@ -352,8 +398,9 @@
       }
       if (!spaceRuntime) throw new Error('space runtime missing');
       attachCanvas();
+      applyBrightness();
       stage = spaceRuntime.create(canvas, {
-        qualityMode: 'low',
+        qualityMode: config.quality,
         deviceTier: 1,
         onInvalidate: function () { /* wallpaper loop already runs */ },
         onStatus: function (status) {
@@ -462,9 +509,17 @@
     var previousSource = config.source;
     var nextSource = next.source === 'fixed' ? 'fixed' : 'follow';
     config.musicResponse = next.musicResponse !== false;
+    if (Number.isFinite(Number(next.brightness))) config.brightness = Math.min(1, Math.max(0.25, Number(next.brightness)));
+    if (Number.isFinite(Number(next.motion))) config.motion = Math.min(1, Math.max(0, Number(next.motion)));
+    if (next.quality === 'low' || next.quality === 'medium' || next.quality === 'high') config.quality = next.quality;
+    if (Number.isFinite(Number(next.refreshHz)) && Number(next.refreshHz) >= 5) config.refreshHz = Number(next.refreshHz);
     var nextScene = allowedScene(next.scene) ? next.scene : config.scene;
     config.source = nextSource;
     config.scene = nextScene;
+    gate = computeGate(cap, config.refreshHz);
+    resetGate();
+    applyBrightness();
+    if (zodiac && zodiac.setMotion && backend === 'zodiac') zodiac.setMotion({ active: motionActive() });
     if (!mounted) return;
     if (nextSource === 'fixed') {
       if (previousSource !== 'fixed' || sceneId !== nextScene) {
@@ -555,6 +610,11 @@
       backend: backend,
       source: config.source,
       musicResponse: config.musicResponse,
+      brightness: config.brightness,
+      motion: config.motion,
+      quality: config.quality,
+      refreshHz: config.refreshHz,
+      gate: gate,
       sceneParams: sceneParams,
       followScene: followSpace ? followSpace.scene : null,
       followSignature: followSignature,

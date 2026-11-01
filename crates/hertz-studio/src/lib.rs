@@ -25,6 +25,7 @@ pub(crate) mod desktop;
 pub mod desktop_bridge;
 pub(crate) mod desktop_control;
 pub(crate) mod desktop_lyrics;
+pub(crate) mod desktop_mini;
 pub mod diag;
 pub mod edition;
 pub mod error;

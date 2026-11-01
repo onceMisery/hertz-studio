@@ -86,7 +86,7 @@ impl DockEdge {
 
 /// 落盘的几何。物理坐标只在 `DockEdge::None` 时有效——贴边之后显示器随时可能
 /// 换分辨率，记坐标会漂，只记「哪条边 + 沿边的比例」才稳。
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub(crate) struct MiniGeometry {
     /// 目标显示器名；None 表示跟随主显示器。
@@ -122,10 +122,16 @@ pub(crate) const SNAP_THRESHOLD: i32 = 28;
 pub(crate) const PEEK_STRIP: i32 = 3;
 /// 贴边隐藏的进入延迟：刚松手不要立刻缩回去，否则拖完就闪。
 pub(crate) const PEEK_DELAY: Duration = Duration::from_millis(1200);
+/// 宠物收起态的默认逻辑尺寸（页面上报 skin.size 之前的先验值）。
+pub(crate) const PET_DEFAULT_SIZE: (f64, f64) = (56.0, 56.0);
+/// 宠物素材逻辑尺寸的限幅：再小看不见、再大就成了第二块壁纸。
+pub(crate) const PET_SIZE_RANGE: (f64, f64) = (48.0, 160.0);
 
 /// 小窗的运行时状态机。窗口句柄不在这里——相位与几何可以在无窗口时推进，
 /// 这样单测不需要真的开窗口。
 pub(crate) struct MiniHost {
+    /// 来源身份。当前接线里窗口只认一份 profile，字段留给多来源共存时区分。
+    #[allow(dead_code)]
     pub(crate) profile: Profile,
     pub(crate) phase: MiniPhase,
     pub(crate) geometry: MiniGeometry,
@@ -143,6 +149,12 @@ pub(crate) struct MiniHost {
     pub(crate) rect: Option<(i32, i32, i32, i32)>,
     /// 页面上报的命中区（逻辑像素）。宠物态判定用。
     pub(crate) hit_regions: Vec<(f64, f64, f64, f64)>,
+    /// 宠物态素材的逻辑尺寸（页面按生效皮肤上报）。None = 用默认 56×56。
+    /// 只影响宠物收起态的窗口形状，不落盘——素材换了下次启动自然变。
+    pub(crate) pet_size: Option<(f64, f64)>,
+    /// 宠物态悬停展开：窗口临时回到胶囊尺寸，露出曲名与传输键。
+    /// 由页面的 hover 事件驱动，Peeking/Hidden 下不生效。
+    pub(crate) pet_hover: bool,
 }
 
 /// 状态机的输入。每个都是「用户/系统做了什么」，不是「把状态设成什么」。
@@ -189,6 +201,8 @@ impl MiniHost {
             settled_at: None,
             rect: None,
             hit_regions: Vec::new(),
+            pet_size: None,
+            pet_hover: false,
         }
     }
 
@@ -340,7 +354,7 @@ impl MiniHost {
         native::monitors().iter().any(|area| area.name == name)
     }
 
-    fn target_area(&self) -> Option<native::WorkArea> {
+    pub(crate) fn target_area(&self) -> Option<native::WorkArea> {
         match self.geometry.monitor.as_deref() {
             Some(name) => native::work_area_by_name(name),
             None => native::primary_work_area(),
@@ -352,8 +366,21 @@ impl MiniHost {
     pub(crate) fn desired_rect(&self, dpi: u32) -> Option<(i32, i32, i32, i32)> {
         let area = self.target_area()?;
         let scale = f64::from(dpi.max(1)) / 96.0;
-        let width = (self.geometry.width * scale).round().max(1.0) as i32;
-        let height = (self.geometry.height * scale).round().max(1.0) as i32;
+        // 宠物收起态用素材尺寸：宠物就是一小块形象，不是一条压扁的胶囊。
+        // 悬停展开（pet_hover）临时回到胶囊尺寸——窗口只会比收起时更大，
+        // 贴边吸附下向屏幕内生长，不会跑到屏外。
+        let (base_width, base_height) = match self.pet && !self.pet_hover {
+            true => {
+                let (w, h) = self.pet_size.unwrap_or(PET_DEFAULT_SIZE);
+                (
+                    w.clamp(PET_SIZE_RANGE.0, PET_SIZE_RANGE.1),
+                    h.clamp(PET_SIZE_RANGE.0, PET_SIZE_RANGE.1),
+                )
+            }
+            false => (self.geometry.width, self.geometry.height),
+        };
+        let width = (base_width * scale).round().max(1.0) as i32;
+        let height = (base_height * scale).round().max(1.0) as i32;
         let width = width.min(area.width().max(1));
         let height = height.min(area.height().max(1));
         let (x, y) = match self.geometry.dock {
@@ -375,7 +402,22 @@ impl MiniHost {
         self.hit_regions = regions;
     }
 
+    /// 页面上报的宠物素材尺寸（逻辑像素）。值不合法就忽略，保留现值。
+    pub(crate) fn set_pet_size(&mut self, width: f64, height: f64) -> bool {
+        if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 {
+            return false;
+        }
+        let next = (width, height);
+        if self.pet_size == Some(next) {
+            return false;
+        }
+        self.pet_size = Some(next);
+        true
+    }
+
     /// 宠物态判定：点是否落在页面上报的实心区域里（物理像素入参）。
+    /// 与 mini_native 的 wndproc 判定同语义；留在状态机侧供单测与未来复用。
+    #[allow(dead_code)]
     pub(crate) fn hit_solid(&self, px: i32, py: i32, dpi: u32) -> bool {
         let scale = f64::from(dpi.max(1)) / 96.0;
         let Some((left, top, _, _)) = self.rect else {
@@ -395,6 +437,8 @@ impl MiniHost {
     /// 把窗口样式一次性推给 native。两处都调用同一个入口，避免出现
     /// 「置顶改了但穿透没改」这种半套状态。
     pub(crate) fn push_window_style(&self, hwnd: isize) {
+        // 注册表与 Win32 调用都按 HWND（裸指针）走；app 侧为省事传 isize。
+        let hwnd = hwnd as windows_sys::Win32::Foundation::HWND;
         mini_native::set_pet_mode(hwnd, self.pet && !self.locked);
         mini_native::set_locked(hwnd, self.locked);
         mini_native::set_topmost(hwnd, self.always_on_top);
@@ -442,7 +486,8 @@ pub(crate) struct DockTarget {
     pub(crate) along: f64,
 }
 
-/// 沿边比例：把窗口中心在主轴上的位置折算成 0..1，并把窗口夹在工作区内。
+/// 沿边比例：把窗口左上角在主轴上的位置折算成 0..1。与 `dock_position`
+/// 互为反函数（两者都按左上角算），沿边拖动落盘再还原不会漂。
 fn along_for(edge: DockEdge, x: i32, y: i32, width: i32, height: i32, area: &native::WorkArea) -> f64 {
     let span = if edge.horizontal() {
         area.width() - width
@@ -577,7 +622,9 @@ mod tests {
     #[test]
     fn top_edge_uses_horizontal_span() {
         let area = area();
-        let target = snap_target(960, 0, 268, 56, &area).expect("应吸附");
+        // 沿边比例按窗口左上角算：x=826 时 (1920-268) 的中点，along 应恰为 0.5。
+        // Top 的主轴是横的，所以 along 来自 x 而不是 y。
+        let target = snap_target(826, 0, 268, 56, &area).expect("应吸附");
         assert_eq!(target.edge, DockEdge::Top);
         assert!((target.along - 0.5).abs() < 0.01);
     }
@@ -586,11 +633,11 @@ mod tests {
     fn peek_leaves_only_a_strip() {
         let area = area();
         let (x, y) = peek_offset(0, 400, 268, 56, DockEdge::Left, &area);
-        // 左边界上只剩 PEEK_STRIP 像素可见。
+        // 窗被推出屏外，工作区内只剩 PEEK_STRIP 像素可见。
         assert_eq!(x + 268 - area.left, PEEK_STRIP);
         assert_eq!(y, 400);
         let (_, y) = peek_offset(960, 1040 - 56, 268, 56, DockEdge::Bottom, &area);
-        assert_eq!(y + 56 - area.bottom, PEEK_STRIP);
+        assert_eq!(area.bottom - y, PEEK_STRIP);
     }
 
     #[test]
@@ -603,10 +650,10 @@ mod tests {
 
     #[test]
     fn enter_twice_does_not_recreate_and_restore_asks_for_main() {
-        let mut host = MiniHost::new(Profile {
-            data_dir: std::path::PathBuf::from("C:\\d"),
-            edition: "full".into(),
-        });
+        let mut host = MiniHost::new(crate::config::standalone(
+            std::path::PathBuf::from("C:\\d"),
+            "full",
+        ));
         assert!(matches!(host.handle(MiniEvent::Enter(EnterReason::User)), MiniAction::Show));
         // 第二次进入：已经在小窗里，只重新落位。
         assert!(matches!(
@@ -619,10 +666,10 @@ mod tests {
 
     #[test]
     fn manual_mini_window_survives_main_window_coming_back() {
-        let mut host = MiniHost::new(Profile {
-            data_dir: std::path::PathBuf::from("C:\\d"),
-            edition: "full".into(),
-        });
+        let mut host = MiniHost::new(crate::config::standalone(
+            std::path::PathBuf::from("C:\\d"),
+            "full",
+        ));
         host.handle(MiniEvent::Enter(EnterReason::User));
         // 没开自动接管：主窗口回来也不该把用户手动开的小窗收掉。
         assert!(matches!(
@@ -634,10 +681,10 @@ mod tests {
 
     #[test]
     fn auto_mini_window_retreats_when_main_returns() {
-        let mut host = MiniHost::new(Profile {
-            data_dir: std::path::PathBuf::from("C:\\d"),
-            edition: "full".into(),
-        });
+        let mut host = MiniHost::new(crate::config::standalone(
+            std::path::PathBuf::from("C:\\d"),
+            "full",
+        ));
         host.auto_on_main_hidden = true;
         host.handle(MiniEvent::Enter(EnterReason::MainHidden));
         assert!(matches!(host.handle(MiniEvent::MainVisible), MiniAction::Hide));
@@ -646,10 +693,10 @@ mod tests {
 
     #[test]
     fn drag_end_persists_dock_or_free_position() {
-        let mut host = MiniHost::new(Profile {
-            data_dir: std::path::PathBuf::from("C:\\d"),
-            edition: "full".into(),
-        });
+        let mut host = MiniHost::new(crate::config::standalone(
+            std::path::PathBuf::from("C:\\d"),
+            "full",
+        ));
         host.handle(MiniEvent::Enter(EnterReason::User));
         host.phase = MiniPhase::Dragging;
         // 松手位置贴着左边 → 记住 Left。
@@ -664,5 +711,53 @@ mod tests {
         assert_eq!(host.geometry.dock, DockEdge::None);
         assert_eq!((host.geometry.x, host.geometry.y), (900, 500));
         assert_eq!(host.phase, MiniPhase::Floating);
+    }
+
+    fn pet_host() -> MiniHost {
+        let mut host = MiniHost::new(crate::config::standalone(
+            std::path::PathBuf::from("C:\\d"),
+            "full",
+        ));
+        host.pet = true;
+        host
+    }
+
+    #[test]
+    fn pet_collapsed_uses_skin_size_and_hover_expands() {
+        let mut host = pet_host();
+        // 页面上报素材 80×64：收起态窗口就是 80×64。
+        assert!(host.set_pet_size(80.0, 64.0));
+        let (w, h) = {
+            let rect = host.desired_rect(96).expect("工作区存在");
+            (rect.2, rect.3)
+        };
+        assert_eq!((w, h), (80, 64));
+        // 悬停展开 = 胶囊尺寸（268×56）。
+        host.pet_hover = true;
+        let rect = host.desired_rect(96).expect("工作区存在");
+        assert_eq!((rect.2, rect.3), (268, 56));
+        // 非 pet 态不受素材尺寸影响。
+        host.pet = false;
+        host.pet_hover = false;
+        let rect = host.desired_rect(96).expect("工作区存在");
+        assert_eq!((rect.2, rect.3), (268, 56));
+    }
+
+    #[test]
+    fn pet_size_without_report_falls_back_to_default() {
+        let host = pet_host();
+        let rect = host.desired_rect(96).expect("工作区存在");
+        assert_eq!((rect.2, rect.3), (56, 56));
+    }
+
+    #[test]
+    fn pet_size_is_clamped_and_invalid_values_are_ignored() {
+        let mut host = pet_host();
+        assert!(host.set_pet_size(9999.0, 10.0));
+        let rect = host.desired_rect(96).expect("工作区存在");
+        assert_eq!((rect.2, rect.3), (160, 48));
+        assert!(!host.set_pet_size(0.0, 64.0));
+        assert!(!host.set_pet_size(f64::NAN, 64.0));
+        assert_eq!(host.pet_size, Some((9999.0, 10.0)));
     }
 }

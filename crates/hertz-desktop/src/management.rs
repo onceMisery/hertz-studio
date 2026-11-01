@@ -22,6 +22,10 @@ pub(crate) const V2_COMMANDS: &[&str] = &[
     "wallpaper-preview-close",
     "wallpaper-preview-renew",
     "wallpaper-apply",
+    // 小窗播放（桌面宠物）：开关（进/出小窗，宠物态由配置决定）与素材文件夹。
+    // 仅独立形态受理（DBX 的 handle_pipe_command 里显式拒绝）。
+    "mini-toggle",
+    "open-pet-assets",
 ];
 
 #[derive(Deserialize)]
@@ -136,8 +140,13 @@ impl Request {
                 "fps",
                 "musicResponse",
                 "monitor",
+                "displayId",
                 "source",
                 "scene",
+                "brightness",
+                "motion",
+                "quality",
+                "batteryPolicy",
             ],
             "wallpaper-apply" => &["expectedRevision", "config"],
             _ => &[],
@@ -176,11 +185,54 @@ impl Request {
                 "fps",
                 "musicResponse",
                 "monitor",
+                "displayId",
                 "source",
                 "scene",
+                "brightness",
+                "motion",
+                "quality",
+                "batteryPolicy",
             ];
             if config.keys().any(|key| !fields.contains(&key.as_str())) {
                 return Err(error("invalid_value"));
+            }
+            // v4 运行字段的有界复核（数值范围与档位由 config::sanitize 兜底）。
+            if let Some(brightness) = config.get("brightness") {
+                let ok = brightness
+                    .as_f64()
+                    .is_some_and(|value| (0.25..=1.0).contains(&value));
+                if !ok {
+                    return Err(error("invalid_value"));
+                }
+            }
+            if let Some(motion) = config.get("motion") {
+                let ok = motion.as_f64().is_some_and(|value| (0.0..=1.0).contains(&value));
+                if !ok {
+                    return Err(error("invalid_value"));
+                }
+            }
+            if let Some(quality) = config.get("quality") {
+                if !matches!(quality.as_str(), None | Some("low" | "medium" | "high")) {
+                    return Err(error("invalid_value"));
+                }
+            }
+            if let Some(policy) = config.get("batteryPolicy") {
+                if !matches!(policy.as_str(), None | Some("pause")) {
+                    return Err(error("invalid_value"));
+                }
+            }
+            if let Some(display_id) = config.get("displayId") {
+                let ok = display_id.as_str().is_none_or(|value| {
+                    !value.trim().is_empty() && value.len() <= 256
+                });
+                if !ok {
+                    return Err(error("invalid_value"));
+                }
+            }
+            if let Some(fps) = config.get("fps") {
+                if !matches!(fps.as_u64(), None | Some(15 | 30 | 60)) {
+                    return Err(error("invalid_value"));
+                }
             }
         }
         Ok(())

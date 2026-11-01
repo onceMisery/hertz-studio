@@ -18,14 +18,16 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTT
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallWindowProcW, DefWindowProcW, EnumChildWindows, GetCursorPos, GetWindowLongPtrW,
     GetWindowRect, GetWindowThreadProcessId, SetWindowLongPtrW, SetWindowPos, GWLP_WNDPROC,
-    GWL_EXSTYLE, HTCLIENT, HWND_TOPMOST, HWND_NOTOPMOST, SWP_NOACTIVATE, SWP_NOZORDER,
-    WM_NCHITTEST, WNDPROC, WS_EX_LAYERED, WS_EX_TRANSPARENT,
+    GWL_EXSTYLE, HTCLIENT, HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    SWP_NOZORDER, WM_NCHITTEST, WNDPROC, WS_EX_LAYERED, WS_EX_TRANSPARENT,
 };
 
 /// 一扇窗的命中状态。坐标一律是物理像素，换算在 Rust 侧做完，wndproc 里只比大小。
+/// 键值都用 `isize` 存 HWND：注册表要跨线程共享（拖拽线程/事件循环），
+/// 裸指针进 `Mutex<HashMap>` 需要 `Send`，按值存再转回去反而省一层 unsafe。
 struct Chrome {
     /// 这扇窗（或其子窗）归属的根窗口。子窗的 WM_NCHITTEST 也要问根窗的区域表。
-    root: HWND,
+    root: isize,
     original: isize,
 }
 
@@ -99,7 +101,7 @@ pub(crate) fn install(hwnd: HWND) {
         map.insert(
             target as isize,
             Chrome {
-                root: hwnd,
+                root: hwnd as isize,
                 original,
             },
         );
@@ -129,7 +131,7 @@ unsafe extern "system" fn mini_wndproc(
     if msg == WM_NCHITTEST {
         let map = chrome_map().lock().unwrap_or_else(|e| e.into_inner());
         if let Some(chrome) = map.get(&(hwnd as isize)) {
-            let root = chrome.root;
+            let root = chrome.root as HWND;
             let original = chrome.original;
             drop(map);
             // 屏幕坐标是 lparam 的低 16 / 高 16 位（有符号）。
@@ -324,8 +326,9 @@ pub(crate) fn begin_drag(_hwnd: HWND, sink: impl Fn(DragEvent) + Send + 'static)
                 }
                 // 左键松开即结束。GetAsyncKeyState 的高位是当前按下状态。
                 // VK_LBUTTON 在不同 windows-sys 版本里是 u16 / VIRTUAL_KEY，
-                // 显式 as i32 比 i32::from 稳。
-                let pressed = unsafe { GetAsyncKeyState(VK_LBUTTON as i32) } & 0x8000 != 0;
+                // 显式 as i32 比 i32::from 稳；返回值是 i16，高位判断先转 u16
+                // 再掩 0x8000，避免字面量溢出到负数。
+                let pressed = unsafe { GetAsyncKeyState(VK_LBUTTON as i32) } as u16 & 0x8000 != 0;
                 if !pressed || Instant::now() >= deadline {
                     break;
                 }
@@ -342,7 +345,7 @@ pub(crate) fn uninstall(hwnd: HWND) {
     let mut map = chrome_map().lock().unwrap_or_else(|e| e.into_inner());
     let keys: Vec<isize> = map
         .iter()
-        .filter(|(_, chrome)| chrome.root == hwnd)
+        .filter(|(_, chrome)| chrome.root == hwnd as isize)
         .map(|(key, _)| *key)
         .collect();
     for key in keys {

@@ -72,6 +72,7 @@ pub async fn boot(
     overlay_key: String,
     desktop_lyrics_key: String,
     wallpaper_key: String,
+    desktop_mini_key: String,
 ) -> anyhow::Result<Booted> {
     let data_dir = absolute_data_dir(&data_dir)?;
     let db = vmusic_store::open(&data_dir).await?;
@@ -155,6 +156,8 @@ pub async fn boot(
         overlay_key: overlay_key.clone(),
         desktop_lyrics_key: desktop_lyrics_key.clone(),
         wallpaper_key: wallpaper_key.clone(),
+        desktop_mini_key: desktop_mini_key.clone(),
+        desktop_mini_seq: Default::default(),
         wallpaper: Default::default(),
         events,
         queue: Default::default(),

@@ -56,6 +56,8 @@ num-traits = "0.2"
 uuid = { version = "1", features = ["v4"] }
 getrandom = "0.3"
 sha2 = "0.10"
+# 壁纸包（HWPK v1）的运输容器：只启用 Store/Deflate，不引入加密与其它压缩后端。
+zip = { version = "2.2", default-features = false, features = ["deflate"] }
 # 阅读领域解析 RSS pubDate（RFC 2822）与 Atom updated（RFC 3339）；
 # 只开解析所需 feature，不引入格式化与时区数据库。
 time = { version = "0.3", default-features = false, features = ["std", "parsing"] }

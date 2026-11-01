@@ -80,6 +80,10 @@ const ui = {
   setWallpaperSettings: $('set-wallpaper-settings'),
   setWallpaperToggle: $('set-wallpaper-toggle'),
   setWallpaperNote: $('set-wallpaper-note'),
+  setMiniRow: $('set-mini-row'),
+  setMiniToggle: $('set-mini-toggle'),
+  setMiniAssets: $('set-mini-assets'),
+  setMiniNote: $('set-mini-note'),
   setLyricStaff: $('set-lyric-staff'),
   setLyricStaffPattern: $('set-lyric-staff-pattern'),
   setLyricStaffNote: $('set-lyric-staff-note'),
@@ -8342,6 +8346,17 @@ async function startApp() {
   // 落盘的在线元数据先喂回内存：队列行第一帧就能显示真名字，不用等补取。
   if (window.Online && window.Online.seedFromStore) window.Online.seedFromStore();
   transport = await chooseTransport();
+  // 主窗口可见性回传：小窗（桌面宠物）靠它判断「主界面还在不在」来决定自动
+  // 接管/自动收回。只在主 surface 上报（胶囊浮窗自己就是"藏起来的主界面"，
+  // 不能替它报可见）；DBX 形态没有桌面小窗组件，不用报。
+  // 服务端只记「上次可见距今多久」再由组件判阈值，Alt-Tab 的瞬时 hidden
+  // 不会把小窗弹出来（见 desktop_mini.rs 的 1.2s 去抖）。
+  document.addEventListener('visibilitychange', () => {
+    if (window.HertzCapsuleOnly || transport.kind === 'dbx') return;
+    transport
+      .post('/v1/ui/notice', { action: 'main-visibility', hidden: document.hidden })
+      .catch(() => {});
+  });
   if (window.HertzRoom) window.HertzRoom.init({
     root: ui.views.room, transport, confirm: message => modal().confirm(message),
     onReturn: () => setView('library'),
@@ -9426,6 +9441,45 @@ async function startApp() {
         .catch((err) => toast(errText('切换桌面壁纸失败', err), 'error'));
     };
   }
+  // 桌面宠物（小窗播放）：开关走管理管道；按钮文案跟 status 应答的 mini 节走。
+  // 只在独立形态展示；DBX 走页内胶囊，桌面宠物对它不可用。
+  const applyMiniStatus = (mini) => {
+    if (!mini || !ui.setMiniToggle) return;
+    ui.setMiniToggle.textContent = mini.visible ? '关闭小窗' : '开启小窗';
+  };
+  const probeMiniStatus = () => {
+    if (window.hertzHost && window.hertzHost.isDbx) return;
+    transport.post('/v1/desktop/control', { command: 'status' })
+      .then((result) => applyMiniStatus(result && result.mini))
+      .catch(() => { /* 组件未运行：保持默认文案，点击时再按需拉起 */ });
+  };
+  if (ui.setMiniRow) {
+    ui.setMiniRow.style.display =
+      window.hertzHost && window.hertzHost.isDbx ? 'none' : '';
+  }
+  if (ui.setMiniNote) {
+    ui.setMiniNote.style.display =
+      window.hertzHost && window.hertzHost.isDbx ? 'none' : '';
+  }
+  if (ui.setMiniToggle) {
+    ui.setMiniToggle.onclick = () => {
+      wallpaperControl('mini-toggle')
+        .then((result) => {
+          applyMiniStatus(result && result.mini);
+          const mini = result && result.mini;
+          toast(mini && mini.visible ? '已开启桌面宠物小窗' : '已关闭桌面宠物小窗');
+        })
+        .catch((err) => toast(errText('切换桌面宠物失败', err), 'error'));
+    };
+  }
+  if (ui.setMiniAssets) {
+    ui.setMiniAssets.onclick = () => {
+      wallpaperControl('open-pet-assets')
+        .then(() => toast('已打开桌宠素材文件夹'))
+        .catch((err) => toast(errText('打开素材文件夹失败', err), 'error'));
+    };
+  }
+  probeMiniStatus();
   ui.setLyricOffsetDown.onclick = () => saveLyricSettings({ global_lyric_offset_ms: Math.max(-2000, globalLyricOffsetMs() - 100) });
   ui.setLyricOffsetUp.onclick = () => saveLyricSettings({ global_lyric_offset_ms: Math.min(2000, globalLyricOffsetMs() + 100) });
   ui.setLyricOffsetReset.onclick = () => saveLyricSettings({ global_lyric_offset_ms: 0 });
