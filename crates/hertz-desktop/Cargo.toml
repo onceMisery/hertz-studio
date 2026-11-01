@@ -59,7 +59,12 @@ thiserror = { workspace = true }
 zip = { workspace = true }
 # 媒体流的 COM IStream 实现必须与 webview2-com/wry 锁定同一 windows 版本
 # （Cargo.lock 已是 0.62.2），否则接口不互通（设计 §8.1）。
-windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_Com"] }
+windows = { version = "0.62", features = [
+  "Win32_Foundation",
+  "Win32_Media_Audio",
+  "Win32_Security",
+  "Win32_System_Com",
+] }
 # 与 wry/webview2-com 锁定同版本，IStream 才能交给 WebView2（设计 §8.1）。
 webview2-com = "=0.39.1"
 windows-core = "0.62"

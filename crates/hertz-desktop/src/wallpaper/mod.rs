@@ -18,6 +18,8 @@ pub(crate) mod assets;
 #[allow(dead_code)]
 pub(crate) mod audio;
 #[allow(dead_code)]
+pub(crate) mod audio_capture;
+#[allow(dead_code)]
 pub(crate) mod budget;
 #[allow(dead_code)]
 pub(crate) mod jobs;
