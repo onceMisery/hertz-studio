@@ -69,7 +69,7 @@ pub(crate) struct MiniConfig {
     #[serde(default)]
     pub(crate) reopen: bool,
     /// 桌面宠物态：透明区域不吃鼠标（区域级穿透）。
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub(crate) pet: bool,
     /// 整体鼠标穿透（锁定）。
     #[serde(default)]
@@ -99,7 +99,7 @@ impl Default for MiniConfig {
     fn default() -> Self {
         Self {
             reopen: false,
-            pet: false,
+            pet: true,
             locked: false,
             always_on_top: true,
             edge_hide: false,
@@ -485,23 +485,22 @@ impl Config {
                 wallpaper: self.wallpaper.clone(),
                 mini: self.mini.clone(),
             };
-            self.unbound_domain =
-                Some(match (&self.unbound_domain, &self.unbound_baseline) {
-                    (Some(saved), Some(baseline)) => {
-                        let mut saved = serde_json::to_value(saved)?;
-                        let baseline = serde_json::to_value(baseline)?;
-                        let current = serde_json::to_value(&current)?;
-                        for domain in ["lyrics", "wallpaper", "mini"] {
-                            for (field, value) in current[domain].as_object().unwrap() {
-                                if *value != baseline[domain][field] {
-                                    saved[domain][field] = value.clone();
-                                }
+            self.unbound_domain = Some(match (&self.unbound_domain, &self.unbound_baseline) {
+                (Some(saved), Some(baseline)) => {
+                    let mut saved = serde_json::to_value(saved)?;
+                    let baseline = serde_json::to_value(baseline)?;
+                    let current = serde_json::to_value(&current)?;
+                    for domain in ["lyrics", "wallpaper", "mini"] {
+                        for (field, value) in current[domain].as_object().unwrap() {
+                            if *value != baseline[domain][field] {
+                                saved[domain][field] = value.clone();
                             }
                         }
-                        serde_json::from_value(saved)?
                     }
-                    _ => current,
-                });
+                    serde_json::from_value(saved)?
+                }
+                _ => current,
+            });
             return Ok(());
         };
         if let Some(index) = self.domain_index(&profile) {
@@ -1584,6 +1583,16 @@ mod tests {
         let (loaded, migrated) = parse_config(&serde_json::to_vec(&value).unwrap()).unwrap();
         assert!(!migrated);
         assert_eq!(loaded.mini, MiniConfig::default());
+        assert!(loaded.mini.pet);
+    }
+
+    #[test]
+    fn explicit_capsule_preference_survives_the_new_pet_default() {
+        let mut config = Config::default();
+        config.activate_profile(profile("capsule")).unwrap();
+        config.mini.pet = false;
+        let (loaded, _) = parse_config(&encode_config(&config).unwrap()).unwrap();
+        assert!(!loaded.mini.pet);
     }
 
     #[test]

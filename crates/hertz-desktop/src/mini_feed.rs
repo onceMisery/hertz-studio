@@ -70,9 +70,11 @@ pub(crate) struct MiniTrack {
     pub(crate) online: bool,
 }
 
-#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct MainSurface {
+    #[serde(default)]
+    pub(crate) window_title: String,
     #[serde(default)]
     pub(crate) visible: bool,
     /// 主窗口上次说「我还可见」到现在过了多少毫秒。用来判定是不是真的被最小化了，
@@ -292,10 +294,9 @@ impl MiniFeed {
         if self.cover_key.as_deref() == Some(wanted.as_str()) {
             return Ok(None);
         }
-        if wanted
-            .chars()
-            .any(|character| !(character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')))
-        {
+        if wanted.chars().any(|character| {
+            !(character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.'))
+        }) {
             self.cover_key = None;
             return Ok(None);
         }

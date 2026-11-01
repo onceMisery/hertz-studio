@@ -2199,6 +2199,10 @@ pub(crate) struct UiNoticeRequest {
     /// 仅 `main-visibility` 用：主界面是否不可见。缺省按「可见」处理。
     #[serde(default)]
     pub(crate) hidden: Option<bool>,
+    /// 独立主界面的当前标题；缺省保留最近一次上报，用于原生窗口精确匹配。
+    #[serde(default)]
+    #[serde(rename = "windowTitle")]
+    pub(crate) window_title: Option<String>,
 }
 
 /// 界面实例间信号的白名单。这条管道会广播给**所有**订阅者（独立形态的 WS 客户端
@@ -2227,7 +2231,10 @@ async fn post_ui_notice(
 ) -> ApiResult<Json<serde_json::Value>> {
     match body.action.as_str() {
         "main-visibility" => {
-            crate::desktop_mini::note_main_visibility(body.hidden != Some(true));
+            crate::desktop_mini::note_main_visibility(
+                body.hidden != Some(true),
+                body.window_title.as_deref(),
+            );
         }
         other => broadcast_ui_notice(&state, other).await?,
     }

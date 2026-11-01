@@ -13,18 +13,20 @@
 //! 句柄（只共享读），Write/SetSize 一律拒绝。
 
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use windows::core::{implement, Result};
 use windows::Win32::Foundation::{
-    STG_E_ACCESSDENIED, STG_E_INVALIDFUNCTION, STG_E_INVALIDPARAMETER,
+    STG_E_ACCESSDENIED, STG_E_INVALIDFUNCTION, STG_E_INVALIDPARAMETER, STG_E_READFAULT, S_FALSE,
+    S_OK,
 };
 use windows::Win32::System::Com::{
-    IAgileObject, IAgileObject_Impl, ISequentialStream_Impl, IStream, IStream_Impl,
-    LOCKTYPE, STATFLAG, STATFLAG_NONAME, STATSTG, STGM_READ, STGTY_STREAM,
-    STREAM_SEEK, STREAM_SEEK_CUR, STREAM_SEEK_END, STREAM_SEEK_SET, STGC,
+    IAgileObject, IAgileObject_Impl, ISequentialStream_Impl, IStream, IStream_Impl, LOCKTYPE,
+    STATFLAG, STATFLAG_NONAME, STATSTG, STGC, STGM_READ, STGTY_STREAM, STREAM_SEEK,
+    STREAM_SEEK_CUR, STREAM_SEEK_END, STREAM_SEEK_SET,
 };
 
+use super::access::ReadPermit;
 use super::media_stream::{MediaFileStream, StreamSlotPool};
 
 /// 单个 COM 流。body 是文件的窗口：200 → 全文件（base=0）；206 → 从 range
@@ -36,12 +38,59 @@ use super::media_stream::{MediaFileStream, StreamSlotPool};
 /// 串行使用（COM 侧也要求调用方自行同步），锁的粒度与文件句柄一致。
 #[implement(IStream, IAgileObject)]
 pub(crate) struct MediaIStream {
-    stream: Mutex<MediaFileStream>,
+    stream: Arc<Mutex<StreamState>>,
     path: PathBuf,
     pool: Arc<StreamSlotPool>,
     base: u64,
     len: u64,
-    position: Mutex<u64>,
+}
+
+struct StreamState {
+    file: Option<MediaFileStream>,
+    position: u64,
+    permit: Option<ReadPermit>,
+}
+
+impl StreamState {
+    fn check_access(&mut self) -> Result<()> {
+        if self
+            .permit
+            .as_ref()
+            .is_some_and(|permit| !permit.is_active())
+        {
+            // 此锁也包围 Read；真实读取退出后才关闭句柄、归还流槽。
+            self.file.take();
+            // 浏览器可继续持有 COM 外壳；它不能继续持有 staging pin 或活动计数。
+            self.permit.take();
+            return Err(STG_E_ACCESSDENIED.into());
+        }
+        if self.file.is_none() {
+            return Err(STG_E_ACCESSDENIED.into());
+        }
+        Ok(())
+    }
+}
+
+type StreamRegistry = Mutex<Vec<Weak<Mutex<StreamState>>>>;
+
+fn registry() -> &'static StreamRegistry {
+    static REGISTRY: OnceLock<StreamRegistry> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// 只在后台媒体 worker 调用。撤销本身只置原子旗标，不阻塞 UI 等待磁盘 Read。
+/// 即便浏览器保留 COM 引用且不再 Read，也有界回收已撤销流的文件与槽。
+pub(crate) fn reap_revoked_streams() {
+    registry()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .retain(|weak| {
+            let Some(stream) = weak.upgrade() else {
+                return false;
+            };
+            let mut stream = stream.lock().unwrap_or_else(|error| error.into_inner());
+            stream.check_access().is_ok()
+        });
 }
 
 impl MediaIStream {
@@ -53,45 +102,70 @@ impl MediaIStream {
         window: (u64, u64),
     ) -> Result<IStream> {
         let stream = MediaFileStream::open(path, pool).map_err(stream_error)?;
+        Self::from_file(stream, path.to_path_buf(), pool, window)
+    }
+
+    pub(crate) fn from_file(
+        stream: MediaFileStream,
+        path: PathBuf,
+        pool: &Arc<StreamSlotPool>,
+        window: (u64, u64),
+    ) -> Result<IStream> {
+        Self::from_file_with_permit(stream, path, pool, window, None)
+    }
+
+    pub(crate) fn from_file_with_permit(
+        stream: MediaFileStream,
+        path: PathBuf,
+        pool: &Arc<StreamSlotPool>,
+        window: (u64, u64),
+        permit: Option<ReadPermit>,
+    ) -> Result<IStream> {
+        if window
+            .0
+            .checked_add(window.1)
+            .is_none_or(|end| end > stream.total())
+        {
+            return Err(STG_E_INVALIDPARAMETER.into());
+        }
+        let stream = Arc::new(Mutex::new(StreamState {
+            file: Some(stream),
+            position: 0,
+            permit,
+        }));
+        stream.lock().map_err(lock_poisoned)?.check_access()?;
+        {
+            let mut registry = registry().lock().unwrap_or_else(|error| error.into_inner());
+            registry.retain(|entry| entry.strong_count() > 0);
+            registry.push(Arc::downgrade(&stream));
+        }
         Ok(Self {
-            stream: Mutex::new(stream),
-            path: path.to_path_buf(),
+            stream,
+            path,
             pool: Arc::clone(pool),
             base: window.0,
             len: window.1,
-            position: Mutex::new(0),
         }
         .into())
-    }
-
-    /// 读当前游标。锁中毒按 0 处理：游标只影响"从哪继续读"，
-    /// 拿不到确切值时从头读比整流失败更安全。
-    fn position(&self) -> u64 {
-        *self.position.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    /// 推进游标并返回推进后的值。
-    fn advance(&self, delta: u64) -> u64 {
-        let mut position = self.position.lock().unwrap_or_else(|e| e.into_inner());
-        *position += delta;
-        *position
-    }
-
-    /// 定位到指定位置（窗口内的偏移）。
-    fn set_position(&self, position: u64) {
-        *self.position.lock().unwrap_or_else(|e| e.into_inner()) = position;
     }
 }
 
 // windows 0.62 的 ISequentialStream_Impl 以 HRESULT 直返（新式 out-param 签名）。
 #[allow(non_snake_case)]
 impl ISequentialStream_Impl for MediaIStream_Impl {
-    fn Read(&self, pv: *mut core::ffi::c_void, cb: u32, pcb_read: *mut u32) -> windows::core::HRESULT {
-        if pv.is_null() || pcb_read.is_null() {
+    fn Read(
+        &self,
+        pv: *mut core::ffi::c_void,
+        cb: u32,
+        pcb_read: *mut u32,
+    ) -> windows::core::HRESULT {
+        if pv.is_null() && cb != 0 {
             return STG_E_INVALIDPARAMETER;
         }
-        unsafe {
-            *pcb_read = 0;
+        if !pcb_read.is_null() {
+            unsafe {
+                *pcb_read = 0;
+            }
         }
         if cb == 0 {
             return windows::core::HRESULT(0);
@@ -100,26 +174,52 @@ impl ISequentialStream_Impl for MediaIStream_Impl {
             Ok(stream) => stream,
             Err(error) => return lock_poisoned(error).into(),
         };
-        let position = self.position();
-        let remaining = self.len.saturating_sub(position) as usize;
-        let want = (cb as usize).min(remaining);
-        if want == 0 {
-            return windows::core::HRESULT(0);
+        if let Err(error) = stream.check_access() {
+            return error.code();
         }
+        let remaining = self.len.saturating_sub(stream.position);
+        let want = u64::from(cb).min(remaining) as usize;
         let slice = unsafe { std::slice::from_raw_parts_mut(pv.cast::<u8>(), want) };
-        match stream.read_at(self.base + position, slice) {
-            Ok(read) => {
-                self.advance(read as u64);
-                unsafe {
-                    *pcb_read = read as u32;
-                }
-                windows::core::HRESULT(0)
+        let mut read = 0;
+        // IStream::Read 不能把内部 1 MiB 分块误报为 EOF；直接填调用方缓冲，
+        // 每次磁盘读取仍有界，无额外大分配。
+        while read < want {
+            if let Err(error) = stream.check_access() {
+                return error.code();
             }
-            Err(error) => stream_error(error).into(),
+            let offset = self.base + stream.position;
+            match stream
+                .file
+                .as_mut()
+                .expect("active stream file")
+                .read_at(offset, &mut slice[read..])
+            {
+                Ok(0) => return STG_E_READFAULT,
+                Ok(count) => {
+                    stream.position += count as u64;
+                    read += count;
+                    if !pcb_read.is_null() {
+                        unsafe {
+                            *pcb_read = read as u32;
+                        }
+                    }
+                }
+                Err(error) => return stream_error(error).into(),
+            }
+        }
+        if read < cb as usize {
+            S_FALSE
+        } else {
+            S_OK
         }
     }
 
-    fn Write(&self, _pv: *const core::ffi::c_void, _cb: u32, _pcb_written: *mut u32) -> windows::core::HRESULT {
+    fn Write(
+        &self,
+        _pv: *const core::ffi::c_void,
+        _cb: u32,
+        _pcb_written: *mut u32,
+    ) -> windows::core::HRESULT {
         // 只读流：壁纸媒体对呈现侧永不开放写。
         STG_E_ACCESSDENIED
     }
@@ -132,20 +232,22 @@ impl IAgileObject_Impl for MediaIStream_Impl {}
 impl IStream_Impl for MediaIStream_Impl {
     fn Seek(&self, dlib_move: i64, origin: STREAM_SEEK, new_position: *mut u64) -> Result<()> {
         // plibnewposition 可为 null（COM 合同）：调用方不要回值时不写出。
-        let position = self.position();
-        let target: i64 = if origin == STREAM_SEEK_SET {
-            dlib_move
+        let mut stream = self.stream.lock().map_err(lock_poisoned)?;
+        stream.check_access()?;
+        let position = stream.position;
+        let target: i128 = if origin == STREAM_SEEK_SET {
+            i128::from(dlib_move)
         } else if origin == STREAM_SEEK_CUR {
-            position as i64 + dlib_move
+            i128::from(position) + i128::from(dlib_move)
         } else if origin == STREAM_SEEK_END {
-            self.len as i64 + dlib_move
+            i128::from(self.len) + i128::from(dlib_move)
         } else {
             return Err(STG_E_INVALIDPARAMETER.into());
         };
-        if target < 0 || target > self.len as i64 {
+        if target < 0 || target > i128::from(self.len) {
             return Err(STG_E_INVALIDPARAMETER.into());
         }
-        self.set_position(target as u64);
+        stream.position = target as u64;
         if !new_position.is_null() {
             unsafe {
                 *new_position = target as u64;
@@ -206,21 +308,29 @@ impl IStream_Impl for MediaIStream_Impl {
 
     /// 独立游标（§8.1/C59）：新句柄 + 对齐克隆时刻的位置，此后互不影响。
     fn Clone(&self) -> Result<IStream> {
-        let clone = MediaIStream {
-            stream: Mutex::new(
-                MediaFileStream::open(&self.path, &self.pool).map_err(stream_error)?,
-            ),
-            path: self.path.clone(),
-            pool: Arc::clone(&self.pool),
-            base: self.base,
-            len: self.len,
-            position: Mutex::new(self.position()),
+        let (position, permit) = {
+            let mut stream = self.stream.lock().map_err(lock_poisoned)?;
+            stream.check_access()?;
+            (stream.position, stream.permit.clone())
         };
-        Ok(clone.into())
+        let file = MediaFileStream::open(&self.path, &self.pool).map_err(stream_error)?;
+        let clone = MediaIStream::from_file_with_permit(
+            file,
+            self.path.clone(),
+            &self.pool,
+            (self.base, self.len),
+            permit,
+        )?;
+        unsafe {
+            clone.Seek(position as i64, STREAM_SEEK_SET, None)?;
+        }
+        Ok(clone)
     }
 }
 
-fn lock_poisoned(_: std::sync::PoisonError<std::sync::MutexGuard<'_, MediaFileStream>>) -> windows::core::Error {
+fn lock_poisoned(
+    _: std::sync::PoisonError<std::sync::MutexGuard<'_, StreamState>>,
+) -> windows::core::Error {
     windows::core::Error::from_hresult(windows::core::HRESULT(0x8003_0001u32 as i32))
 }
 

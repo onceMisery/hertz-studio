@@ -11,6 +11,88 @@ use windows::Win32::System::Com::{
     IStream, STATFLAG_NONAME, STREAM_SEEK_CUR, STREAM_SEEK_END, STREAM_SEEK_SET,
 };
 
+#[test]
+fn revocation_closes_files_and_clones_even_when_com_references_survive() {
+    use super::super::access::MediaAccess;
+    use super::super::media_stream::MediaFileStream;
+    use windows::Win32::Foundation::STG_E_ACCESSDENIED;
+    let (_dir, path, body) = fixture("istream-revocation");
+    let pool = StreamSlotPool::new();
+    let access = MediaAccess::new();
+    let hash = "a".repeat(64);
+    assert!(access.replace(1, &[(hash.clone(), "assets/media.bin".into())]));
+    let file = MediaFileStream::open(&path, &pool).unwrap();
+    let stream = MediaIStream::from_file_with_permit(
+        file,
+        path.clone(),
+        &pool,
+        (0, body.len() as u64),
+        access.permit(&hash, "assets/media.bin"),
+    )
+    .unwrap();
+    let clone = unsafe { stream.Clone().unwrap() };
+    assert_eq!(pool.active(), 2);
+    let drain = access.revoke();
+    assert!(!drain.is_drained(), "撤销不等于文件已经关闭");
+    super::reap_revoked_streams();
+    assert!(drain.is_drained(), "COM 外壳不能持有文件活动屏障");
+    assert_eq!(pool.active(), 0, "撤销不得等待浏览器释放 COM 引用");
+    let mut out = [0u8; 8];
+    let mut count = 7;
+    unsafe {
+        assert_eq!(
+            stream.Read(out.as_mut_ptr().cast(), 8, Some(&mut count)),
+            STG_E_ACCESSDENIED
+        );
+        assert_eq!(count, 0);
+        assert!(stream.Seek(0, STREAM_SEEK_SET, None).is_err());
+        assert!(stream.Clone().is_err());
+        assert_eq!(
+            clone.Read(out.as_mut_ptr().cast(), 8, None),
+            STG_E_ACCESSDENIED
+        );
+    }
+    assert!(std::fs::OpenOptions::new().write(true).open(&path).is_ok());
+    assert!(access.replace(2, &[(hash.clone(), "assets/media.bin".into())]));
+    // 新代际的授权不能复活旧流。
+    unsafe {
+        assert_eq!(
+            stream.Read(out.as_mut_ptr().cast(), 8, None),
+            STG_E_ACCESSDENIED
+        );
+    }
+}
+
+#[test]
+fn com_read_honors_optional_count_and_fills_large_requests_until_real_eof() {
+    use windows::Win32::Foundation::{S_FALSE, S_OK};
+    let (dir, path, _) = fixture("istream-read-contract");
+    let bytes = vec![19u8; 2 * super::super::media_stream::MAX_READ_BYTES + 17];
+    std::fs::write(&path, &bytes).unwrap();
+    let pool = StreamSlotPool::new();
+    let stream = MediaIStream::open(&path, &pool, (0, bytes.len() as u64)).unwrap();
+    let mut out = vec![0; bytes.len()];
+    unsafe {
+        assert_eq!(
+            stream.Read(out.as_mut_ptr().cast(), out.len() as u32, None),
+            S_OK
+        );
+        assert_eq!(out, bytes);
+        let mut count = 7;
+        assert_eq!(
+            stream.Read(out.as_mut_ptr().cast(), 1, Some(&mut count)),
+            S_FALSE
+        );
+        assert_eq!(count, 0);
+        assert!(stream.Seek(i64::MAX, STREAM_SEEK_CUR, None).is_err());
+        assert_eq!(stream.Read(std::ptr::null_mut(), 0, None), S_OK);
+    }
+    drop(stream);
+    assert!(MediaIStream::open(&path, &pool, (bytes.len() as u64, 1)).is_err());
+    assert_eq!(pool.active(), 0);
+    drop(dir);
+}
+
 fn fixture(tag: &str) -> (tempfileish::TempDir, std::path::PathBuf, Vec<u8>) {
     let dir = tempfileish::temp_dir(tag);
     // 5000 字节可辨识内容。
@@ -46,7 +128,10 @@ fn com_stream_reads_seeks_and_stats() {
 
         // Seek SET → 读中段。
         let mut position = 0u64;
-        stream.Seek(100, STREAM_SEEK_SET, Some(&mut position)).ok().unwrap();
+        stream
+            .Seek(100, STREAM_SEEK_SET, Some(&mut position))
+            .ok()
+            .unwrap();
         assert_eq!(position, 100);
         stream
             .Read(buffer.as_mut_ptr().cast(), 8, Some(&mut read))
@@ -57,11 +142,17 @@ fn com_stream_reads_seeks_and_stats() {
         assert_eq!(position, 100);
 
         // Seek CUR 相对推进。
-        stream.Seek(2, STREAM_SEEK_CUR, Some(&mut position)).ok().unwrap();
+        stream
+            .Seek(2, STREAM_SEEK_CUR, Some(&mut position))
+            .ok()
+            .unwrap();
         assert_eq!(position, 110);
 
         // Seek END -8 → 尾部。
-        stream.Seek(-8, STREAM_SEEK_END, Some(&mut position)).ok().unwrap();
+        stream
+            .Seek(-8, STREAM_SEEK_END, Some(&mut position))
+            .ok()
+            .unwrap();
         assert_eq!(position, 4992);
         stream
             .Read(buffer.as_mut_ptr().cast(), 16, Some(&mut read))
@@ -131,7 +222,6 @@ fn com_write_is_denied_and_agile_marker_present() {
         let mut written = 0u32;
         let hr = stream.Write("no".as_ptr().cast(), 2, Some(&mut written));
         assert!(hr.is_err(), "只读流的 Write 必须拒绝");
-
     }
 }
 
@@ -161,7 +251,10 @@ fn com_stream_serves_a_range_window() {
 
         // Seek 的三个原点都相对窗口，不是相对文件。
         let mut position = 0u64;
-        stream.Seek(-8, STREAM_SEEK_END, Some(&mut position)).ok().unwrap();
+        stream
+            .Seek(-8, STREAM_SEEK_END, Some(&mut position))
+            .ok()
+            .unwrap();
         assert_eq!(position, 492, "END 相对窗口末端");
         stream
             .Read(buffer.as_mut_ptr().cast(), 8, Some(&mut read))

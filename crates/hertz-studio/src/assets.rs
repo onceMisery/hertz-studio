@@ -81,6 +81,8 @@ ui_assets! {
     "/stage-control.js", JS => const STAGE_CTL_JS: &str = edition_ui!("stage-control.js");
     "/stage-particles.js", JS => const STAGE_PARTICLES_JS: &str = edition_ui!("stage-particles.js");
     "/stage-particles-gl.js", JS => const STAGE_PARTICLES_GL_JS: &str = edition_ui!("stage-particles-gl.js");
+    "/vendor/stage-fluid.js", JS => const STAGE_FLUID_ENGINE_JS: &str = edition_ui!("vendor/stage-fluid.js");
+    "/stage-fluid.js", JS => const STAGE_FLUID_JS: &str = edition_ui!("stage-fluid.js");
     "/themes.js", JS => const THEMES_JS: &str = edition_ui!("themes.js");
     "/theme-picker.js", JS => const THEME_PICKER_JS: &str = edition_ui!("theme-picker.js");
     "/anime-interactions.js", JS => const ANIME_INTERACTIONS_JS: &str = edition_ui!("anime-interactions.js");
@@ -190,5 +192,4 @@ ui_assets! {
     "/skins/skin.orbit.js", JS => const SKIN_ORBIT_JS: &str = edition_ui!("skins/skin.orbit.js");
     "/skins/skin.orbit.css", CSS => const SKIN_ORBIT_CSS: &str = edition_ui!("skins/skin.orbit.css");
     "/stage-themes/starfall.css", CSS => const STAGE_THEME_STARFALL_CSS: &str = edition_ui!("stage-themes/starfall.css");
-    "/stage-themes/ios.css", CSS => const STAGE_THEME_IOS_CSS: &str = edition_ui!("stage-themes/ios.css");
 }

@@ -136,6 +136,13 @@ impl Library {
                         work.package_hash, row.bytes, work.package_bytes
                     )));
                 }
+                if row.state == "unavailable" {
+                    sqlx::query("UPDATE packages SET state = 'installed' WHERE package_hash = ?1")
+                        .bind(&work.package_hash)
+                        .execute(&mut *tx)
+                        .await
+                        .map_err(|error| JobError::database(error.to_string()))?;
+                }
             }
         }
         // 作品行：(source, remote) 幂等映射到既有 work_key。
@@ -207,11 +214,12 @@ impl Library {
 
     /// 包是否已索引（崩溃恢复与重复导入的判据）。
     pub async fn is_installed(&self, package_hash: &str) -> Result<bool> {
-        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM packages WHERE package_hash = ?1")
-            .bind(package_hash)
-            .fetch_one(&self.pool)
-            .await
-            .map_err(|error| JobError::database(error.to_string()))?;
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM packages WHERE package_hash = ?1")
+                .bind(package_hash)
+                .fetch_one(&self.pool)
+                .await
+                .map_err(|error| JobError::database(error.to_string()))?;
         Ok(count > 0)
     }
 
@@ -237,6 +245,13 @@ impl Library {
             .bind(package_hash)
             .execute(&self.pool)
             .await
+            .map_err(|error| JobError::database(error.to_string()))?;
+        Ok(())
+    }
+
+    pub(crate) async fn mark_available(&self, package_hash: &str) -> Result<()> {
+        sqlx::query("UPDATE packages SET state = 'installed' WHERE package_hash = ?1 AND state = 'unavailable'")
+            .bind(package_hash).execute(&self.pool).await
             .map_err(|error| JobError::database(error.to_string()))?;
         Ok(())
     }
@@ -423,7 +438,10 @@ mod tests {
             }
         }
         assert_eq!(seen.len(), 7);
-        assert_eq!(seen.iter().collect::<std::collections::BTreeSet<_>>().len(), 7);
+        assert_eq!(
+            seen.iter().collect::<std::collections::BTreeSet<_>>().len(),
+            7
+        );
     }
 }
 

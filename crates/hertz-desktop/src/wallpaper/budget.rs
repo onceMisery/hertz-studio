@@ -20,7 +20,13 @@
 //! 先保留 8 MP/s——live 侧永远摸不到这 8 MP/s（"未打开时不创建资源"指资源，
 //! 不是指账面额度）。导入探测与桌面/预览共用 2 个解码槽（§7.1）。
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, OnceLock};
+
+/// 进程内唯一生产账本。导入准备/探测已接入；桌面与预览规划器沿用此 owner。
+pub(crate) fn global() -> Arc<BudgetCoordinator> {
+    static BUDGET: OnceLock<Arc<BudgetCoordinator>> = OnceLock::new();
+    Arc::clone(BUDGET.get_or_init(|| Arc::new(BudgetCoordinator::new())))
+}
 
 /// 桌面呈现目标上限（§12.1）。
 pub(crate) const MAX_PRESENTATION_TARGETS: u32 = 4;
@@ -38,6 +44,8 @@ pub(crate) const MAX_DECODE_PIXEL_RATE: u64 = 125_000_000;
 pub(crate) const MAX_OUTPUT_PIXEL_RATE: u64 = 120_000_000;
 /// CPU 常驻解码资产上限（§12.1；导入工作区另计）。
 pub(crate) const MAX_CPU_DECODED_BYTES: u64 = 128 * 1024 * 1024;
+/// 原图准备的独立 CPU 工作区（§6.3；不占常驻解码额度）。
+pub(crate) const MAX_PREPARE_CPU_BYTES: u64 = 320 * 1024 * 1024;
 /// GPU 跟踪资源估计上限（§12.1；tracked estimate，不是实测显存）。
 pub(crate) const MAX_GPU_TRACKED_BYTES: u64 = 384 * 1024 * 1024;
 /// 资源准备任务槽（§12.1：一个；P1 不承诺视频转码，转码槽恒 0）。
@@ -80,6 +88,7 @@ pub(crate) struct BudgetRequest {
     pub output_pixel_rate: u64,
     /// CPU 常驻解码字节。
     pub cpu_bytes: u64,
+    pub prepare_cpu_bytes: u64,
     /// GPU 跟踪字节（纹理/几何/RT/骨骼/字形/闲置池，§12.2）。
     pub gpu_bytes: u64,
     /// 资源准备任务槽数。
@@ -136,6 +145,7 @@ pub(crate) struct BudgetUsage {
     pub decode_pixel_rate: u64,
     pub output_pixel_rate: u64,
     pub cpu_bytes: u64,
+    pub prepare_cpu_bytes: u64,
     pub gpu_bytes: u64,
     pub prepare_tasks: u32,
     /// release 后未 confirm_exit 的 token 数（"某个释放没有确认时保留占用并报告"）。
@@ -165,6 +175,7 @@ impl Ledger {
             usage.decode_pixel_rate += request.decode_pixel_rate;
             usage.output_pixel_rate += request.output_pixel_rate;
             usage.cpu_bytes += request.cpu_bytes;
+            usage.prepare_cpu_bytes += request.prepare_cpu_bytes;
             usage.gpu_bytes += request.gpu_bytes;
             usage.prepare_tasks += request.prepare_tasks;
             if request.owner == OwnerKind::Preview {
@@ -184,15 +195,19 @@ impl Ledger {
         MAX_OUTPUT_PIXEL_RATE - PREVIEW_RESERVED_OUTPUT_RATE
     }
 
-    fn reject(quota: &'static str, cap: u64, held: u64, requested: u64, hint: &str) -> BudgetRejection {
+    fn reject(
+        quota: &'static str,
+        cap: u64,
+        held: u64,
+        requested: u64,
+        hint: &str,
+    ) -> BudgetRejection {
         BudgetRejection {
             quota,
             cap,
             held,
             requested,
-            message: format!(
-                "{quota} 超限：已占 {held} + 申请 {requested} > 上限 {cap}；{hint}"
-            ),
+            message: format!("{quota} 超限：已占 {held} + 申请 {requested} > 上限 {cap}；{hint}"),
         }
     }
 }
@@ -233,8 +248,10 @@ impl BudgetCoordinator {
             let cap = u64::from(MAX_PRESENTATION_TARGETS);
             if u64::from(usage.targets) + u64::from(request.targets) > cap {
                 return Err(Ledger::reject(
-                    "presentation_targets", cap,
-                    u64::from(usage.targets), u64::from(request.targets),
+                    "presentation_targets",
+                    cap,
+                    u64::from(usage.targets),
+                    u64::from(request.targets),
                     "减少同时呈现的目标（屏幕/组）或停用其中之一",
                 ));
             }
@@ -243,8 +260,10 @@ impl BudgetCoordinator {
             let cap = u64::from(MAX_GL_CONTEXTS);
             if u64::from(usage.contexts) + u64::from(request.contexts) > cap {
                 return Err(Ledger::reject(
-                    "gl_contexts", cap,
-                    u64::from(usage.contexts), u64::from(request.contexts),
+                    "gl_contexts",
+                    cap,
+                    u64::from(usage.contexts),
+                    u64::from(request.contexts),
                     "先释放闲置 context 或降低目标质量档",
                 ));
             }
@@ -253,8 +272,10 @@ impl BudgetCoordinator {
             let cap = u64::from(MAX_DECODER_SLOTS);
             if u64::from(usage.decoder_slots) + u64::from(request.decoders) > cap {
                 return Err(Ledger::reject(
-                    "decoder_slots", cap,
-                    u64::from(usage.decoder_slots), u64::from(request.decoders),
+                    "decoder_slots",
+                    cap,
+                    u64::from(usage.decoder_slots),
+                    u64::from(request.decoders),
                     "显式释放预览或暂停并卸载指定桌面会话后再试",
                 ));
             }
@@ -263,8 +284,10 @@ impl BudgetCoordinator {
             let cap = u64::from(MAX_PREVIEW_INSTANCES);
             if u64::from(usage.preview_instances) + 1 > cap {
                 return Err(Ledger::reject(
-                    "preview_instances", cap,
-                    u64::from(usage.preview_instances), 1,
+                    "preview_instances",
+                    cap,
+                    u64::from(usage.preview_instances),
+                    1,
                     "先关闭现有预览（切页/关闭/应用都会释放旧实例）",
                 ));
             }
@@ -279,7 +302,8 @@ impl BudgetCoordinator {
             }
         }
         if request.decode_pixel_rate > 0
-            && usage.decode_pixel_rate + request.decode_pixel_rate > MAX_DECODE_PIXEL_RATE
+            && request.decode_pixel_rate
+                > MAX_DECODE_PIXEL_RATE.saturating_sub(usage.decode_pixel_rate)
         {
             return Err(Ledger::reject(
                 "decode_pixel_rate",
@@ -295,7 +319,7 @@ impl BudgetCoordinator {
                 .output_pixel_rate
                 .saturating_sub(Self::preview_output_held(&ledger));
             let cap = ledger.live_output_cap();
-            if live_held + request.output_pixel_rate > cap {
+            if request.output_pixel_rate > cap.saturating_sub(live_held) {
                 return Err(Ledger::reject(
                     "output_pixel_rate",
                     cap,
@@ -305,7 +329,7 @@ impl BudgetCoordinator {
                 ));
             }
         }
-        if usage.cpu_bytes + request.cpu_bytes > MAX_CPU_DECODED_BYTES {
+        if request.cpu_bytes > MAX_CPU_DECODED_BYTES.saturating_sub(usage.cpu_bytes) {
             return Err(Ledger::reject(
                 "cpu_decoded_bytes",
                 MAX_CPU_DECODED_BYTES,
@@ -314,7 +338,17 @@ impl BudgetCoordinator {
                 "等待闲置解码缓存被回收或降低素材尺寸",
             ));
         }
-        if usage.gpu_bytes + request.gpu_bytes > MAX_GPU_TRACKED_BYTES {
+        if request.prepare_cpu_bytes > MAX_PREPARE_CPU_BYTES.saturating_sub(usage.prepare_cpu_bytes)
+        {
+            return Err(Ledger::reject(
+                "prepare_cpu_bytes",
+                MAX_PREPARE_CPU_BYTES,
+                usage.prepare_cpu_bytes,
+                request.prepare_cpu_bytes,
+                "图片准备工作区不足；使用更小输入或等待准备退出",
+            ));
+        }
+        if request.gpu_bytes > MAX_GPU_TRACKED_BYTES.saturating_sub(usage.gpu_bytes) {
             return Err(Ledger::reject(
                 "gpu_tracked_bytes",
                 MAX_GPU_TRACKED_BYTES,
@@ -327,8 +361,10 @@ impl BudgetCoordinator {
             let cap = u64::from(MAX_PREPARE_TASKS);
             if u64::from(usage.prepare_tasks) + u64::from(request.prepare_tasks) > cap {
                 return Err(Ledger::reject(
-                    "prepare_tasks", cap,
-                    u64::from(usage.prepare_tasks), u64::from(request.prepare_tasks),
+                    "prepare_tasks",
+                    cap,
+                    u64::from(usage.prepare_tasks),
+                    u64::from(request.prepare_tasks),
                     "等待在途准备任务结束（取消不提前归还，见 C24）",
                 ));
             }
@@ -455,9 +491,9 @@ impl BudgetCoordinator {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let before = ledger.reservations.len();
-        ledger.reservations.retain(|reservation| {
-            reservation.request.session != session
-        });
+        ledger
+            .reservations
+            .retain(|reservation| reservation.request.session != session);
         let removed = before - ledger.reservations.len();
         if removed > 0 {
             ledger.revision += 1;

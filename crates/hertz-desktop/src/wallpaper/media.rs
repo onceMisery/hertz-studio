@@ -5,8 +5,8 @@
 //!
 //! 「容器真值与解码抽样分开」：本模块用可信解析器从字节本身提取 codec/profile、
 //! 编码/显示尺寸、旋转、像素宽高比、时长与帧时间上界——扩展名不参与分派，
-//! 一律先读魔数。真实解码探测（WebView2 受信探测容器 + 首帧/seek）属 P1-03
-//! 的第二道，在原生流与呈现会话接线时实现。
+//! 一律先读魔数。第二道由 decode_probe 的独立 WebView2 完成真实首帧/seek，
+//! PNG 还执行有界的流式像素与 CRC 校验。
 //!
 //! 有界规则（§6.3）：累计元数据读取 ≤32 MiB、box/元素数量有界、mdat 不入内存；
 //! 结构未知、病态时间戳或超限 → 明确 `format_unsupported`，不用平均帧率冒充
@@ -100,6 +100,9 @@ pub fn probe<R: Read + Seek>(reader: &mut R) -> ProbeResult<MediaProbe> {
     }
     if magic[0..4] == [0x1A, 0x45, 0xDF, 0xA3] {
         return webm::probe(reader);
+    }
+    if magic[..2] == [0xff, 0xd8] {
+        return image::probe_jpeg(reader);
     }
     if magic[0..8] == [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A] {
         return image::probe_png(reader);
@@ -264,15 +267,15 @@ pub(crate) mod mp4 {
                     if payload.len() < 4 {
                         return Err(ProbeError::unsupported("ftyp 截断"));
                     }
-                    reader.seek(SeekFrom::Start(header.end)).map_err(|error| {
-                        ProbeError::unsupported(format!("跳转失败：{error}"))
-                    })?;
+                    reader
+                        .seek(SeekFrom::Start(header.end))
+                        .map_err(|error| ProbeError::unsupported(format!("跳转失败：{error}")))?;
                 }
                 b"mdat" | b"free" | b"skip" | b"wide" | b"sidx" => {
                     // 不读媒体负载（§7.1：mdat 不入内存）。
-                    reader.seek(SeekFrom::Start(header.end)).map_err(|error| {
-                        ProbeError::unsupported(format!("跳转失败：{error}"))
-                    })?;
+                    reader
+                        .seek(SeekFrom::Start(header.end))
+                        .map_err(|error| ProbeError::unsupported(format!("跳转失败：{error}")))?;
                 }
                 b"moov" => {
                     // tail moov 天然支持：顶层顺序遍历到它即可（§7.1）。
@@ -282,9 +285,9 @@ pub(crate) mod mp4 {
                         .map_err(|error| ProbeError::unsupported(format!("跳转失败：{error}")))?;
                 }
                 _ => {
-                    reader.seek(SeekFrom::Start(header.end)).map_err(|error| {
-                        ProbeError::unsupported(format!("跳转失败：{error}"))
-                    })?;
+                    reader
+                        .seek(SeekFrom::Start(header.end))
+                        .map_err(|error| ProbeError::unsupported(format!("跳转失败：{error}")))?;
                 }
             }
         }
@@ -390,7 +393,9 @@ pub(crate) mod mp4 {
                             } else {
                                 (
                                     u32::from_be_bytes(payload[12..16].try_into().unwrap()),
-                                    u64::from(u32::from_be_bytes(payload[16..20].try_into().unwrap())),
+                                    u64::from(u32::from_be_bytes(
+                                        payload[16..20].try_into().unwrap(),
+                                    )),
                                 )
                             };
                             mdhd = Some((timescale, duration));
@@ -456,16 +461,10 @@ pub(crate) mod mp4 {
             return None;
         }
         let matrix_start = body.len() - 44;
-        let width_fixed = u32::from_be_bytes(
-            body[matrix_start - 8..matrix_start - 4]
-                .try_into()
-                .unwrap(),
-        );
-        let height_fixed = u32::from_be_bytes(
-            body[matrix_start - 4..matrix_start]
-                .try_into()
-                .unwrap(),
-        );
+        let width_fixed =
+            u32::from_be_bytes(body[matrix_start - 8..matrix_start - 4].try_into().unwrap());
+        let height_fixed =
+            u32::from_be_bytes(body[matrix_start - 4..matrix_start].try_into().unwrap());
         // 矩阵：a b u | c d v | tx ty w（16.16 定点；u/v/w 为 2.30）。
         let a = i32::from_be_bytes(body[matrix_start..matrix_start + 4].try_into().unwrap());
         let b = i32::from_be_bytes(body[matrix_start + 4..matrix_start + 8].try_into().unwrap());
@@ -486,12 +485,7 @@ pub(crate) mod mp4 {
         budget: &mut Budget,
         video: &mut VideoTrackFacts,
     ) -> ProbeResult<()> {
-        let head = read_exact_n(
-            reader,
-            8,
-            budget,
-            "stsd",
-        )?;
+        let head = read_exact_n(reader, 8, budget, "stsd")?;
         let entry_count = u32::from_be_bytes(head[4..8].try_into().unwrap());
         let mut offset = stsd.payload_start + 8;
         for _ in 0..entry_count.min(64) {
@@ -507,10 +501,8 @@ pub(crate) mod mp4 {
             // 样本项：8 头 + 6 reserved + 2 index + 16 predefined/reserved
             // + 2 width + 2 height + …（78 字节固定前缀）。
             let fixed = read_exact_n(reader, 78, budget, "样本项")?;
-            let encoded_width =
-                u16::from_be_bytes(fixed[24..26].try_into().unwrap()) as u32;
-            let encoded_height =
-                u16::from_be_bytes(fixed[26..28].try_into().unwrap()) as u32;
+            let encoded_width = u16::from_be_bytes(fixed[24..26].try_into().unwrap()) as u32;
+            let encoded_height = u16::from_be_bytes(fixed[26..28].try_into().unwrap()) as u32;
             if is_video_codec(&entry.kind) {
                 video.codec = String::from_utf8_lossy(&entry.kind).to_string();
                 video.encoded_width = encoded_width;
@@ -522,7 +514,9 @@ pub(crate) mod mp4 {
                 while child_offset + 8 <= child_end {
                     reader
                         .seek(SeekFrom::Start(child_offset))
-                        .map_err(|error| ProbeError::unsupported(format!("样本项遍历失败：{error}")))?;
+                        .map_err(|error| {
+                            ProbeError::unsupported(format!("样本项遍历失败：{error}"))
+                        })?;
                     let Some(child) = read_box_header(reader, budget, 3)? else {
                         break;
                     };
@@ -531,10 +525,8 @@ pub(crate) mod mp4 {
                             let payload_len = (child.end - child.payload_start).min(32) as usize;
                             let payload = read_exact_n(reader, payload_len, budget, "avcC")?;
                             if payload.len() >= 4 {
-                                video.profile = Some(format!(
-                                    "profile-{}-level-{}",
-                                    payload[1], payload[3]
-                                ));
+                                video.profile =
+                                    Some(format!("profile-{}-level-{}", payload[1], payload[3]));
                             }
                         }
                         b"pasp" => {
@@ -563,24 +555,24 @@ pub(crate) mod mp4 {
         if payload.len() < 8 {
             return Ok(None);
         }
-        let entry_count =
-            u32::from_be_bytes(payload[4..8].try_into().unwrap()) as usize;
+        let entry_count = u32::from_be_bytes(payload[4..8].try_into().unwrap()) as usize;
         let mut entries: Vec<(u32, u32)> = Vec::with_capacity(entry_count.min(1024));
         let available = (payload.len() - 8) / 8;
         let count = entry_count.min(available);
         for index in 0..count {
             let base = 8 + index * 8;
-            let sample_count =
-                u32::from_be_bytes(payload[base..base + 4].try_into().unwrap());
-            let sample_delta =
-                u32::from_be_bytes(payload[base + 4..base + 8].try_into().unwrap());
+            let sample_count = u32::from_be_bytes(payload[base..base + 4].try_into().unwrap());
+            let sample_delta = u32::from_be_bytes(payload[base + 4..base + 8].try_into().unwrap());
             entries.push((sample_count, sample_delta));
         }
         if entries.is_empty() {
             return Ok(None);
         }
         // 病态时间戳：delta 0 或全零计数 → 明确拒绝（C52：不给假上界）。
-        if entries.iter().any(|(count, delta)| *count == 0 || *delta == 0) {
+        if entries
+            .iter()
+            .any(|(count, delta)| *count == 0 || *delta == 0)
+        {
             return Err(ProbeError::unsupported(
                 "stts 存在零计数/零间隔的病态时间戳",
             ));
@@ -632,7 +624,9 @@ pub(crate) mod mp4 {
     impl VideoTrackFacts {
         fn finish(self, mvhd: &Option<(u32, u64)>) -> ProbeResult<MediaProbe> {
             if !self.confirmed_video && !self.found_codec {
-                return Err(ProbeError::unsupported("未找到视频轨（音频轨不能冒充壁纸）"));
+                return Err(ProbeError::unsupported(
+                    "未找到视频轨（音频轨不能冒充壁纸）",
+                ));
             }
             sane_dimensions(self.encoded_width, self.encoded_height)?;
             let (duration_ms, source_fps, fps_upper_bound) = match self.stts {
@@ -651,7 +645,8 @@ pub(crate) mod mp4 {
                         (
                             duration_ms,
                             fps_from_delta(
-                                self.video_mdhd.map_or(mvhd.map_or(0, |(scale, _)| scale), |(scale, _)| scale),
+                                self.video_mdhd
+                                    .map_or(mvhd.map_or(0, |(scale, _)| scale), |(scale, _)| scale),
                                 facts.min_delta,
                             ),
                             None,
@@ -661,7 +656,8 @@ pub(crate) mod mp4 {
                             duration_ms,
                             None,
                             fps_from_delta(
-                                self.video_mdhd.map_or(mvhd.map_or(0, |(scale, _)| scale), |(scale, _)| scale),
+                                self.video_mdhd
+                                    .map_or(mvhd.map_or(0, |(scale, _)| scale), |(scale, _)| scale),
                                 facts.min_delta,
                             ),
                         )
@@ -710,8 +706,17 @@ pub(crate) mod mp4 {
     fn is_video_codec(kind: &[u8; 4]) -> bool {
         matches!(
             kind,
-            b"avc1" | b"avc2" | b"avc3" | b"avc4" | b"hvc1" | b"hev1" | b"vp08" | b"vp09"
-                | b"av01" | b"mp4v" | b"encv"
+            b"avc1"
+                | b"avc2"
+                | b"avc3"
+                | b"avc4"
+                | b"hvc1"
+                | b"hev1"
+                | b"vp08"
+                | b"vp09"
+                | b"av01"
+                | b"mp4v"
+                | b"encv"
         )
     }
 }
@@ -749,17 +754,14 @@ pub(crate) mod webm {
 
     impl WebmFacts {
         fn finish(self) -> ProbeResult<MediaProbe> {
-            let codec = self.codec.ok_or_else(|| {
-                ProbeError::unsupported("WebM 缺少视频 CodecID 或轨类型不是视频")
-            })?;
+            let codec = self
+                .codec
+                .ok_or_else(|| ProbeError::unsupported("WebM 缺少视频 CodecID 或轨类型不是视频"))?;
             sane_dimensions(self.encoded_width, self.encoded_height)?;
-            let duration_ms = self
-                .duration_ns
-                .map(|ns| ns / 1_000_000)
-                .or_else(|| {
-                    // 时长缺失：用最大帧时间近似（仅作显示参考，不作准入上界）。
-                    self.frame_times.last().map(|last| last / 1_000_000)
-                });
+            let duration_ms = self.duration_ns.map(|ns| ns / 1_000_000).or_else(|| {
+                // 时长缺失：用最大帧时间近似（仅作显示参考，不作准入上界）。
+                self.frame_times.last().map(|last| last / 1_000_000)
+            });
             // VFR 上界：最小正间隔（ns→fps）。§7.1：不把总时长平均当上界。
             let mut min_delta_ns: Option<u64> = None;
             for pair in self.frame_times.windows(2) {
@@ -890,9 +892,9 @@ pub(crate) mod webm {
                     if facts.frame_times.len() < MAX_FRAME_TIMESTAMPS {
                         parse_cluster(reader, element_end, budget, facts)?;
                     } else {
-                        reader
-                            .seek(SeekFrom::Start(element_end))
-                            .map_err(|error| ProbeError::unsupported(format!("跳转失败：{error}")))?;
+                        reader.seek(SeekFrom::Start(element_end)).map_err(|error| {
+                            ProbeError::unsupported(format!("跳转失败：{error}"))
+                        })?;
                     }
                 }
                 _ => {
@@ -973,8 +975,7 @@ pub(crate) mod webm {
             match id {
                 // TimestampScale
                 0x2A_D7_B1 => {
-                    facts.timestamp_scale_ns =
-                        read_uint_payload(reader, size as usize, budget)?;
+                    facts.timestamp_scale_ns = read_uint_payload(reader, size as usize, budget)?;
                 }
                 // Duration（float）
                 0x44_89 => {
@@ -1054,9 +1055,9 @@ pub(crate) mod webm {
         let mut height = 0u32;
         let mut offset = entry_start;
         while offset < entry_end {
-            reader
-                .seek(SeekFrom::Start(offset))
-                .map_err(|error| ProbeError::unsupported(format!("TrackEntry 遍历失败：{error}")))?;
+            reader.seek(SeekFrom::Start(offset)).map_err(|error| {
+                ProbeError::unsupported(format!("TrackEntry 遍历失败：{error}"))
+            })?;
             let Some(id) = read_vint(reader, true, budget)? else {
                 break;
             };
@@ -1085,9 +1086,9 @@ pub(crate) mod webm {
                     let video_end = payload_start + size.min(entry_end - payload_start);
                     let mut inner = payload_start;
                     while inner < video_end {
-                        reader
-                            .seek(SeekFrom::Start(inner))
-                            .map_err(|error| ProbeError::unsupported(format!("Video 遍历失败：{error}")))?;
+                        reader.seek(SeekFrom::Start(inner)).map_err(|error| {
+                            ProbeError::unsupported(format!("Video 遍历失败：{error}"))
+                        })?;
                         let Some(child_id) = read_vint(reader, true, budget)? else {
                             break;
                         };
@@ -1096,26 +1097,34 @@ pub(crate) mod webm {
                         };
                         match child_id {
                             // PixelWidth
-                            0xB0 => width = read_uint_payload(reader, child_size as usize, budget)? as u32,
+                            0xB0 => {
+                                width =
+                                    read_uint_payload(reader, child_size as usize, budget)? as u32
+                            }
                             // PixelHeight
-                            0xBA => height = read_uint_payload(reader, child_size as usize, budget)? as u32,
+                            0xBA => {
+                                height =
+                                    read_uint_payload(reader, child_size as usize, budget)? as u32
+                            }
                             _ => {
-                                reader.seek(SeekFrom::Current(child_size as i64)).map_err(|error| {
-                                    ProbeError::unsupported(format!("跳转失败：{error}"))
-                                })?;
+                                reader.seek(SeekFrom::Current(child_size as i64)).map_err(
+                                    |error| ProbeError::unsupported(format!("跳转失败：{error}")),
+                                )?;
                             }
                         }
                         if child_size == u64::MAX {
                             break;
                         }
-                        inner = reader
-                            .stream_position()
-                            .map_err(|error| ProbeError::unsupported(format!("定位失败：{error}")))?;
+                        inner = reader.stream_position().map_err(|error| {
+                            ProbeError::unsupported(format!("定位失败：{error}"))
+                        })?;
                     }
                 }
                 _ => {
                     reader
-                        .seek(SeekFrom::Start(payload_start + size.min(entry_end - payload_start)))
+                        .seek(SeekFrom::Start(
+                            payload_start + size.min(entry_end - payload_start),
+                        ))
                         .map_err(|error| ProbeError::unsupported(format!("跳转失败：{error}")))?;
                 }
             }
@@ -1187,15 +1196,16 @@ pub(crate) mod webm {
                         let timecode_offset = if header[0] & 0x80 != 0 { 1 } else { 2 };
                         reader
                             .seek(SeekFrom::Start(payload_start + timecode_offset as u64))
-                            .map_err(|error| ProbeError::unsupported(format!("跳转失败：{error}")))?;
+                            .map_err(|error| {
+                                ProbeError::unsupported(format!("跳转失败：{error}"))
+                            })?;
                         let mut timecode = [0u8; 2];
                         reader
                             .read_exact(&mut timecode)
                             .map_err(|_| ProbeError::unsupported("block 时间戳截断"))?;
                         budget.charge(2)?;
                         let relative = i16::from_be_bytes(timecode);
-                        let absolute_ns = (cluster_time_ns as i64
-                            + i64::from(relative) * 1_000_000)
+                        let absolute_ns = (cluster_time_ns as i64 + i64::from(relative) * 1_000_000)
                             .max(0) as u64;
                         facts.frame_times.push(absolute_ns);
                     }
@@ -1217,133 +1227,8 @@ pub(crate) mod webm {
 // 图片：静态/动画判别（§5.1：动画不得混入静态轻后端）
 // ---------------------------------------------------------------------------
 
-pub(crate) mod image {
-    use super::*;
-
-    /// 读取有界前缀（≤1 MiB）用于判别块。
-    fn head<R: Read + Seek>(reader: &mut R, budget: &mut Budget, len: u64) -> ProbeResult<Vec<u8>> {
-        let len = len.min(1024 * 1024) as usize;
-        let mut bytes = vec![0u8; len];
-        let read = reader
-            .read(&mut bytes)
-            .map_err(|error| ProbeError::unsupported(format!("图片头读取失败：{error}")))?;
-        bytes.truncate(read);
-        budget.charge(read as u64)?;
-        Ok(bytes)
-    }
-
-    pub(super) fn probe_png<R: Read + Seek>(reader: &mut R) -> ProbeResult<MediaProbe> {
-        let mut budget = Budget::new();
-        let head = head(reader, &mut budget, 1024 * 1024)?;
-        // PNG：8 签名 + IHDR(25)。宽高在 16..24。
-        if head.len() < 33 {
-            return Err(ProbeError::unsupported("PNG 头截断"));
-        }
-        let width = u32::from_be_bytes(head[16..20].try_into().unwrap());
-        let height = u32::from_be_bytes(head[20..24].try_into().unwrap());
-        sane_dimensions(width, height)?;
-        // APNG：acTL 块（num_frames > 1 或有 acTL 且 seq 未按静态处理）。
-        let animated = head.windows(4).any(|window| window == b"acTL");
-        if animated {
-            return Err(ProbeError::unsupported(
-                "APNG 动画图不得作为静态轻后端素材（§5.1）",
-            ));
-        }
-        Ok(MediaProbe {
-            container: Container::Image,
-            codec: "png".into(),
-            profile: None,
-            encoded_width: width,
-            encoded_height: height,
-            display_width: width,
-            display_height: height,
-            rotation_degrees: 0,
-            pixel_aspect_ratio: 1.0,
-            duration_ms: None,
-            source_fps: None,
-            fps_upper_bound: None,
-        })
-    }
-
-    pub(super) fn probe_webp<R: Read + Seek>(reader: &mut R) -> ProbeResult<MediaProbe> {
-        let mut budget = Budget::new();
-        let head = head(reader, &mut budget, 1024 * 1024)?;
-        if head.len() < 30 {
-            return Err(ProbeError::unsupported("WebP 头截断"));
-        }
-        let format = &head[12..16];
-        let (width, height, animated) = match format {
-            b"VP8 " => {
-                // lossy：帧头 6..10 处 14-bit 尺寸（keyframe 标志在 frame tag）。
-                let frame = u32::from_le_bytes(head[20..24].try_into().unwrap());
-                let keyframe = frame & 1 == 0;
-                if !keyframe {
-                    return Err(ProbeError::unsupported("WebP 非关键帧首图"));
-                }
-                let w = u16::from_le_bytes(head[26..28].try_into().unwrap()) & 0x3fff;
-                let h = u16::from_le_bytes(head[28..30].try_into().unwrap()) & 0x3fff;
-                (u32::from(w), u32::from(h), false)
-            }
-            b"VP8L" => {
-                // lossless：签名 0x2F 后 14+14 bit 尺寸。
-                let bits = u32::from_le_bytes(head[21..25].try_into().unwrap());
-                let w = (bits & 0x3fff) + 1;
-                let h = ((bits >> 14) & 0x3fff) + 1;
-                (w, h, false)
-            }
-            b"VP8X" => {
-                // 扩展：canvas 尺寸 24-bit ×2（-1 编码）；ANIM 标志位 0x02。
-                let flags = head[20];
-                let w = u32::from(head[24]) | (u32::from(head[25]) << 8) | (u32::from(head[26]) << 16);
-                let h = u32::from(head[27]) | (u32::from(head[28]) << 8) | (u32::from(head[29]) << 16);
-                (w + 1, h + 1, flags & 0x02 != 0)
-            }
-            other => {
-                return Err(ProbeError::unsupported(format!(
-                    "未知 WebP 子格式：{}",
-                    String::from_utf8_lossy(other)
-                )))
-            }
-        };
-        // 动画标记也可能出现在后续块（ANIM/ANMF）——前缀窗口内一并检查。
-        let animated = animated || head.windows(4).any(|window| window == b"ANIM");
-        if animated {
-            return Err(ProbeError::unsupported(
-                "动画 WebP 不得作为静态轻后端素材（§5.1）",
-            ));
-        }
-        sane_dimensions(width, height)?;
-        Ok(MediaProbe {
-            container: Container::Image,
-            codec: "webp".into(),
-            profile: None,
-            encoded_width: width,
-            encoded_height: height,
-            display_width: width,
-            display_height: height,
-            rotation_degrees: 0,
-            pixel_aspect_ratio: 1.0,
-            duration_ms: None,
-            source_fps: None,
-            fps_upper_bound: None,
-        })
-    }
-
-    pub(super) fn probe_gif<R: Read + Seek>(reader: &mut R) -> ProbeResult<MediaProbe> {
-        let mut budget = Budget::new();
-        let head = head(reader, &mut budget, 1024 * 1024)?;
-        if head.len() < 10 {
-            return Err(ProbeError::unsupported("GIF 头截断"));
-        }
-        let width = u16::from_le_bytes(head[6..8].try_into().unwrap()) as u32;
-        let height = u16::from_le_bytes(head[8..10].try_into().unwrap()) as u32;
-        sane_dimensions(width, height)?;
-        // GIF 语境即动画/多帧位图；§5.1 P1 不承诺 → 明确拒绝，静帧需求转 PNG/WebP。
-        Err(ProbeError::unsupported(
-            "GIF 不在壁纸 P1 承诺内（动画/多帧），请改用 PNG 或静态 WebP（§5.1）",
-        ))
-    }
-}
+#[path = "media_images.rs"]
+pub(crate) mod image;
 
 #[cfg(test)]
 #[path = "media_tests.rs"]

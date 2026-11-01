@@ -14,10 +14,16 @@ fn plan(header: Option<&str>, total: u64, head: bool) -> StreamPlan {
 fn range_table_full_and_head() {
     // GET 无 Range / HEAD：200；完整 Content-Length=N；HEAD 无响应体。
     let full = plan(None, 1000, false);
-    assert_eq!((full.status, full.content_length, full.body), (200, 1000, true));
+    assert_eq!(
+        (full.status, full.content_length, full.body),
+        (200, 1000, true)
+    );
     assert!(full.content_range.is_none());
     let head = plan(None, 1000, true);
-    assert_eq!((head.status, head.content_length, head.body), (200, 1000, false));
+    assert_eq!(
+        (head.status, head.content_length, head.body),
+        (200, 1000, false)
+    );
     // 非 bytes 单位：忽略（整文件）。
     assert_eq!(plan(Some("chunks=0-1"), 1000, false).status, 200);
 }
@@ -40,7 +46,10 @@ fn range_table_single_forms() {
     assert_eq!(suffix.content_range.as_deref(), Some("bytes 900-999/1000"));
     // 后缀超过总长 → 整个文件。
     let big_suffix = plan(Some("bytes=-5000"), 1000, false);
-    assert_eq!(big_suffix.content_range.as_deref(), Some("bytes 0-999/1000"));
+    assert_eq!(
+        big_suffix.content_range.as_deref(),
+        Some("bytes 0-999/1000")
+    );
     // 末端裁剪至 N-1（§8.1：末端裁至 N−1）。
     let clipped = plan(Some("bytes=900-5000"), 1000, false);
     assert_eq!(clipped.content_range.as_deref(), Some("bytes 900-999/1000"));
@@ -61,11 +70,10 @@ fn range_table_unsatisfiable_and_malformed() {
         "bytes=500-100",
         "bytes=-",
         "bytes=a-b",
-        "bytes=0-499,500-999", // 多范围
-        "bytes=+0-10",         // 符号前缀
-        "bytes= 0-10",         // 空格
+        "bytes=0-499,500-999",          // 多范围
+        "bytes=+0-10",                  // 符号前缀
+        "bytes= 0-10",                  // 空格
         "bytes=0-18446744073709551616", // u64 溢出
-        "bytes=-0",            // 零长度后缀（非空文件）
     ] {
         let malformed = plan(Some(bad), 1000, false);
         assert_eq!(malformed.status, 400, "{bad}");
@@ -73,6 +81,19 @@ fn range_table_unsatisfiable_and_malformed() {
     }
     // "bytes=-0" 在空文件上属于「什么都要不到」→ 416。
     assert_eq!(plan(Some("bytes=-0"), 0, false).status, 416);
+    assert_eq!(plan(Some("bytes=-0"), 1000, false).status, 416);
+    assert_eq!(plan(Some("bytes=2-1"), 0, false).status, 400);
+}
+
+#[test]
+fn head_ignores_ranges_and_never_opens_a_body() {
+    for range in [Some("bytes=1-2"), Some("bytes=9999-"), Some("bytes=bad")] {
+        let response = plan(range, 1000, true);
+        assert_eq!(response.status, 200);
+        assert_eq!(response.content_length, 1000);
+        assert!(response.content_range.is_none());
+        assert!(!response.body);
+    }
 }
 
 #[test]
@@ -137,8 +158,7 @@ fn slot_pool_caps_concurrency_and_releases_on_drop() {
 fn stream_open_rejects_missing_file_and_slot_is_released_on_error() {
     let pool = StreamSlotPool::new();
     let before = pool.active();
-    let error = MediaFileStream::open(Path::new("Z:/definitely/missing.hwpkg"), &pool)
-        .unwrap_err();
+    let error = MediaFileStream::open(Path::new("Z:/definitely/missing.hwpkg"), &pool).unwrap_err();
     assert_eq!(error.code, "io");
     assert_eq!(pool.active(), before);
 }

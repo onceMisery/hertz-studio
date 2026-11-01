@@ -4,7 +4,7 @@
   var saved = null, draft = null, revision = 0, latest = null;
   var ready = false, dirty = false, conflict = false, previewActive = false, editing = false;
   var previewLease = null;
-  var scenes = [], profiles = [], currentProfile = null, spaceScene = null;
+  var scenes = [], profiles = [], monitors = [], currentProfile = null, spaceScene = null;
   var presetStyle = { sungColor:'#8fe3ff', unsungColor:'#ffffff', outlineColor:'#000000', outlineWidth:2, opacity:.92, fontWeight:600 };
   var presets = {
     single: Object.assign({}, presetStyle, { layout:'single', secondary:'next', fontSize:36, bilingual:false }),
@@ -40,6 +40,7 @@
   function renderMetadata(payload) {
     if (payload.scenes) scenes = payload.scenes;
     if (payload.profiles) profiles = payload.profiles;
+    if (payload.monitors) monitors = payload.monitors;
     if (Object.prototype.hasOwnProperty.call(payload, 'profile')) currentProfile = payload.profile;
     spaceScene = payload.spaceScene || null;
     var previous = $('profile').value;
@@ -213,7 +214,7 @@
     if (wallpaperChanged && previewActive) { clearTimeout(previewTimer); previewTimer = setTimeout(function () { send('preview', { config: draft.wallpaper }); }, 180); }
   }
   var wallpaperFields = { enabled:['enabled','check'], fps:['fps','number'], music:['musicResponse','check'], monitor:['monitor','monitor'], 'scene-source':['source','text'], 'scene-fixed':['scene','text'], quality:['quality','text'], brightness:['brightness','number'], motion:['motion','number'] };
-  Object.keys(wallpaperFields).forEach(function (id) { $(id).addEventListener('change', function () { if (!draft) return; var field = wallpaperFields[id]; draft.wallpaper[field[0]] = field[1] === 'check' ? this.checked : field[1] === 'number' ? Number(this.value) : field[1] === 'monitor' ? this.value || null : this.value; changed(true); }); });
+  Object.keys(wallpaperFields).forEach(function (id) { $(id).addEventListener('change', function () { if (!draft) return; var field = wallpaperFields[id]; draft.wallpaper[field[0]] = field[1] === 'check' ? this.checked : field[1] === 'number' ? Number(this.value) : field[1] === 'monitor' ? this.value || null : this.value; if (id === 'monitor') { var monitor = monitors.find(item => item.name === this.value); draft.wallpaper.displayId = monitor ? monitor.displayId || null : null; } changed(true); }); });
   var lyricsFields = { 'lyrics-enabled':['enabled','check'], 'lyrics-locked':['locked','check'], 'lyrics-secondary':['secondary','text'], 'lyrics-size':['fontSize','number'], 'lyrics-weight':['fontWeight','number'], 'lyrics-sung':['sungColor','text'], 'lyrics-unsung':['unsungColor','text'], 'lyrics-outline':['outlineColor','text'], 'lyrics-stroke':['outlineWidth','number'], 'lyrics-opacity':['opacity','number'] };
   Object.keys(lyricsFields).forEach(function (id) { $(id).addEventListener('input', function () { if (!draft) return; if (this.validity && !this.validity.valid || this.type === 'number' && this.value === '') { dirty = true; status('请填写有效的字号或描边宽度。', true); syncControls(); return; } var field = lyricsFields[id]; draft.lyrics[field[0]] = field[1] === 'check' ? this.checked : field[1] === 'number' ? Number(this.value) : this.value; changed(false); }); });
   document.querySelectorAll('[data-preset]').forEach(node => node.addEventListener('click', function () { if (!draft) return; Object.assign(draft.lyrics, presets[node.dataset.preset]); changed(false); renderForm(); }));

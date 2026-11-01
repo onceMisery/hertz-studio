@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 // 小窗播放（桌面宠物）原生集成：真实 exe、窄凭据 fixture、宠物态命中穿透、
-// 悬停展开、拖拽吸附、回主窗口与封面注入。真机行为断言，非单测。
+// 悬停展开、回主窗口与封面注入。鼠标拖拽仅 HERTZ_MINI_TEST_DRAG=1 时运行。
 'use strict';
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -17,22 +17,54 @@ const profileDir = path.join(output, 'profile');
 const profile = { kind: 'standalone', dataDir: profileDir.replace(/\\/g, '/'), edition: 'full' };
 const session = 'desktop-mini-native';
 const key = 'b'.repeat(64);
-// 1×1 橙色 PNG（封面 fixture）。
-const coverBytes = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mOsZf9/DwAEHwJY6dvMqAAAAABJRU5ErkJggg==', 'base64');
+const secondSession = 'desktop-mini-native-second';
+const secondKey = 'c'.repeat(64);
+// Generate valid RGBA PNGs locally; handwritten compressed fixtures can hide CRC/decode errors.
+function png(width, height) {
+  function chunk(type, data) {
+    const content = Buffer.concat([Buffer.from(type), data]);
+    let crc = 0xffffffff;
+    for (const byte of content) {
+      crc ^= byte;
+      for (let bit = 0; bit < 8; bit++) crc = (crc >>> 1) ^ ((crc & 1) ? 0xedb88320 : 0);
+    }
+    const result = Buffer.alloc(data.length + 12);
+    result.writeUInt32BE(data.length); content.copy(result, 4);
+    result.writeUInt32BE((crc ^ 0xffffffff) >>> 0, result.length - 4);
+    return result;
+  }
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(width); header.writeUInt32BE(height, 4); header[8] = 8; header[9] = 6;
+  const pixels = Buffer.alloc((width * 4 + 1) * height);
+  for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
+    const offset = y * (width * 4 + 1) + 1 + x * 4;
+    pixels.set([255, 128, 32, 255], offset);
+  }
+  return Buffer.concat([Buffer.from('89504e470d0a1a0a', 'hex'), chunk('IHDR', header),
+    chunk('IDAT', require('node:zlib').deflateSync(pixels)), chunk('IEND', Buffer.alloc(0))]);
+}
+const coverBytes = png(1, 1);
+const fixtureTitle = `Mini restore fixture ${process.pid}-${Date.now()} · hertz-studio`;
 const snapshot = {
   protocol: 1, seq: 0,
   server: { session, edition: 'full', version: '0.3.0' },
   generation: '1', positionMs: 17000, durationMs: 35000,
   playing: false, buffering: false,
   track: { id: 'fixture-track', title: '原生宠物测试', artist: 'fixture', album: null, durationMs: 35000, coverKey: 'fixture', online: false },
-  main: { visible: true, sinceMs: 0 },
+  main: { visible: true, sinceMs: 0, windowTitle: fixtureTitle },
   timing: 'presentation_applied',
 };
+const secondSnapshot = {
+  ...structuredClone(snapshot), playing: true,
+  server: { ...snapshot.server, session: secondSession },
+  track: { ...snapshot.track, id: 'fixture-track-second', title: '第二来源宠物测试' },
+};
 const actions = [];
+const controlSources = [];
 const requests = [];
 // 管理管道：v2 命令走这条命名管道（与歌词原生检查同一把钥匙格式）。
 const pipePath = '\\\\.\\pipe\\hertz-desktop-control-' + (process.env.USERNAME || '').replace(/[^a-z0-9_-]/gi, '').slice(0, 32);
-function pipeCommand(command, value) {
+function pipeCommandOnce(command, value) {
   return new Promise((resolve, reject) => {
     const socket = require('node:net').connect(pipePath);
     let body = '';
@@ -43,16 +75,37 @@ function pipeCommand(command, value) {
     socket.on('timeout', () => { socket.destroy(); reject(new Error('pipe timeout')); });
   });
 }
+async function pipeCommand(command, value) {
+  // The serial named-pipe listener briefly disappears between accepted clients.
+  for (let attempt = 0; ; attempt++) {
+    try { return await pipeCommandOnce(command, value); }
+    catch (error) {
+      if (error.code !== 'ENOENT' || attempt >= 19) throw error;
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+  }
+}
 const server = http.createServer((request, response) => {
   requests.push(request.url.slice(0, 60));
-  if (request.headers.authorization !== 'Desktop ' + key) { response.statusCode = 401; response.end('{}'); return; }
-  if (request.url.startsWith('/v1/desktop-mini/snapshot')) { snapshot.seq++; response.end(JSON.stringify(snapshot)); return; }
+  if (request.url === '/restore-fixture') {
+    response.setHeader('Content-Type', 'text/html; charset=utf-8');
+    response.end(`<title>${fixtureTitle}</title><p>Owned native restore fixture</p>`); return;
+  }
+  const sourceSnapshot = request.headers.authorization === 'Desktop ' + key ? snapshot
+    : request.headers.authorization === 'Desktop ' + secondKey ? secondSnapshot : null;
+  if (!sourceSnapshot) { response.statusCode = 401; response.end('{}'); return; }
+  if (request.url.startsWith('/v1/desktop-mini/snapshot')) { sourceSnapshot.seq++; response.end(JSON.stringify(sourceSnapshot)); return; }
   if (request.url.startsWith('/v1/desktop-mini/cover')) { response.setHeader('Content-Type', 'image/png'); response.end(coverBytes); return; }
   if (request.url === '/v1/desktop-mini/control' && request.method === 'POST') {
     let body = ''; request.on('data', chunk => body += chunk); request.on('end', () => {
       const action = JSON.parse(body); actions.push(action);
-      if (action.action === 'play' || action.action === 'toggle') snapshot.playing = true;
-      if (action.action === 'pause') snapshot.playing = false;
+      controlSources.push({ credentialSession: sourceSnapshot.server.session, payload: action });
+      if (action.session !== sourceSnapshot.server.session) { response.statusCode = 409; response.end('{"error":"wrong source session"}'); return; }
+      // Native restore runs before HTTP control. A deliberate failure makes the
+      // default-browser fallback unreachable even if Windows denies foreground.
+      if (action.action === 'restore') { response.statusCode = 503; response.end('{"error":"fixture restore failure"}'); return; }
+      if (action.action === 'play' || action.action === 'toggle') sourceSnapshot.playing = true;
+      if (action.action === 'pause') sourceSnapshot.playing = false;
       response.end('{"ok":true}');
     }); return;
   }
@@ -113,6 +166,38 @@ async function frame() {
   const { stdout } = await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', psFrame], { encoding: 'utf8', windowsHide: true });
   return JSON.parse(stdout.trim().split('\n').pop());
 }
+async function fixtureWindow() {
+  const title64 = Buffer.from(fixtureTitle, 'utf16le').toString('base64');
+  const script = `
+Add-Type -TypeDefinition @'
+using System;
+using System.Text;
+using System.Runtime.InteropServices;
+public class FixtureWindow {
+  public delegate bool Callback(IntPtr h,IntPtr l);
+  [DllImport("user32.dll")] public static extern bool EnumWindows(Callback f,IntPtr l);
+  [DllImport("user32.dll",CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr h,StringBuilder s,int n);
+  [DllImport("user32.dll",CharSet=CharSet.Unicode)] public static extern int GetClassName(IntPtr h,StringBuilder s,int n);
+  [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  public static IntPtr[] Find(string title) {
+    var windows=new System.Collections.Generic.List<IntPtr>();
+    EnumWindows((h,l)=>{var text=new StringBuilder(1024);var cls=new StringBuilder(256);
+      GetWindowText(h,text,1024);GetClassName(h,cls,256);
+      if(cls.ToString()=="Chrome_WidgetWin_1" && text.ToString().StartsWith(title)) windows.Add(h);
+      return true;},IntPtr.Zero);
+    return windows.ToArray();
+  }
+}
+'@
+$title=[Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('${title64}'))
+$windows=@([FixtureWindow]::Find($title))
+if($windows.Count -ne 1){throw 'expected exactly one owned fixture window'}
+@{minimized=[FixtureWindow]::IsIconic($windows[0]);foreground=($windows[0] -eq [FixtureWindow]::GetForegroundWindow())}|ConvertTo-Json -Compress
+`;
+  const { stdout } = await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { encoding: 'utf8', windowsHide: true });
+  return JSON.parse(stdout.trim().split('\n').pop());
+}
 async function drag(sx, sy, ex, ey, screen) {
   const toAbs = (value, span) => Math.round(value * 65535 / span);
   // 24 步小步移动：页面要越过 4px 阈值并 setPointerCapture，一步跨千里的
@@ -139,18 +224,6 @@ async function main() {
   assert.equal(require('node:child_process').execSync(
     'powershell.exe -NoProfile -Command "@(Get-Process hertz-desktop -ErrorAction SilentlyContinue).Count"',
     { encoding: 'utf8', windowsHide: true }).trim(), '0', 'native check requires no running desktop instance');
-  // WebView2 的用户数据目录全局共享：上次异常退出留下的孤儿浏览器进程会吞掉
-  // 本进程的 CDP 启动参数（新 WebView 直接加入旧浏览器进程）。先清场。
-  require('node:child_process').execSync(
-    'powershell.exe -NoProfile -Command "Get-Process msedgewebview2 -ErrorAction SilentlyContinue | Stop-Process -Force"',
-    { windowsHide: true });
-  for (let i = 0; i < 25; i++) {
-    const count = require('node:child_process').execSync(
-      'powershell.exe -NoProfile -Command "@(Get-Process msedgewebview2 -ErrorAction SilentlyContinue).Count"',
-      { encoding: 'utf8', windowsHide: true }).trim();
-    if (count === '0') break;
-    await new Promise(r => setTimeout(r, 200));
-  }
   fs.mkdirSync(profileDir, { recursive: true });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   fs.writeFileSync(path.join(profileDir, 'vmusicd.json'), JSON.stringify({
@@ -159,18 +232,25 @@ async function main() {
     desktop_lyrics_protocol: 1, wallpaper_protocol: 1, desktop_mini_protocol: 1,
   }));
   fs.writeFileSync(path.join(profileDir, 'desktop-mini-key'), key);
+  const secondProfileDir = path.join(output, 'profile-second');
+  fs.mkdirSync(secondProfileDir, { recursive: true });
+  for (const filename of ['vmusicd.json', 'desktop-mini-key']) {
+    fs.copyFileSync(path.join(profileDir, filename), path.join(secondProfileDir, filename));
+  }
+  const secondDiscovery = JSON.parse(fs.readFileSync(path.join(secondProfileDir, 'vmusicd.json'), 'utf8'));
+  secondDiscovery.server_instance_id = secondSession;
+  fs.writeFileSync(path.join(secondProfileDir, 'vmusicd.json'), JSON.stringify(secondDiscovery));
+  fs.writeFileSync(path.join(secondProfileDir, 'desktop-mini-key'), secondKey);
+  const secondProfile = { ...profile, dataDir: secondProfileDir.replace(/\\/g, '/') };
   // 用户自定义皮肤：pet.json 声明尺寸与 playing 双帧；idle 不声明 →
   // 兜底链应回退到内置默认（验证素材缺失路径）。
   // 素材目录是组件配置根下的 pet/（config::base_dir 随 HERTZ_DESKTOP_CONFIG_DIR）。
   const petDir = path.join(output, 'pet');
-  fs.mkdirSync(petDir, { recursive: true });
-  const skinFrame = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAYAAADED76LAAAAFElEQVR42mOsZf9/DwAGYgJY6dvMqAEAtwT/UvDbUaMAAAAASUVORK5CYII=', 'base64');
-  fs.writeFileSync(path.join(petDir, 'playing-1.png'), skinFrame);
-  fs.writeFileSync(path.join(petDir, 'playing-2.png'), skinFrame);
-  fs.writeFileSync(path.join(petDir, 'pet.json'), JSON.stringify({
+  const skinFrame = png(8, 8);
+  const skinManifest = {
     name: 'fixture 宠物', size: [64, 48],
     states: { playing: { fps: 2, frames: ['playing-1.png', 'playing-2.png'] } },
-  }));
+  };
   const mini = {
     reopen: true, pet: true, locked: false, alwaysOnTop: true, edgeHide: false,
     autoOnMainHidden: false, scale: 1, opacity: 1,
@@ -188,7 +268,7 @@ async function main() {
   const wallpaper = { enabled: false, fps: 30, musicResponse: true, monitor: null, source: 'follow', scene: 'zodiac' };
   fs.writeFileSync(path.join(output, 'config.json'), JSON.stringify({
     schemaVersion: 4, revision: 1, launchAtLogin: false, activeProfile: profile,
-    profiles: [{ profile, lyrics, wallpaper, mini }],
+    profiles: [{ profile, lyrics, wallpaper, mini }, { profile: secondProfile, lyrics, wallpaper, mini }],
   }));
   const binary = process.env.HERTZ_DESKTOP_BIN || path.join(root, 'target/debug/hertz-desktop.exe');
   // 每次运行一个独立 CDP 端口：残留的旧浏览器进程占住固定端口时，
@@ -196,11 +276,13 @@ async function main() {
   const cdpPort = 19517 + (process.pid % 800);
   const child = spawn(binary, [], {
     cwd: root, windowsHide: true,
-    env: { ...process.env, HERTZ_DESKTOP_CONFIG_DIR: output, WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: '--remote-debugging-port=' + cdpPort },
+    env: { ...process.env, HERTZ_DESKTOP_CONFIG_DIR: output,
+      WEBVIEW2_USER_DATA_FOLDER: path.join(output, 'webview2'),
+      WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: '--remote-debugging-port=' + cdpPort },
     stdio: 'ignore',
   });
   const exited = new Promise(resolve => child.once('exit', resolve));
-  let browser, passed = false;
+  let browser, fixtureBrowser, passed = false, restoreEvidence;
   try {
     for (let i = 0; i < 80; i++) {
       try { browser = await chromium.connectOverCDP('http://127.0.0.1:' + cdpPort); break; } catch { }
@@ -227,6 +309,13 @@ async function main() {
     }));
     // 初始未播放：pet.json 没声明 idle → 兜底链回退内置默认（data-URL SVG）。
     assert.ok(art.src.startsWith('data:image/svg'), 'missing idle falls back to built-in, got ' + art.src);
+    await page.waitForFunction(() => Math.abs(innerWidth - 56) < 2, null, { timeout: 6000 });
+    // Start with no pet directory, then create it while the native window lives.
+    fs.mkdirSync(petDir, { recursive: true });
+    fs.writeFileSync(path.join(petDir, 'playing-1.png'), skinFrame);
+    fs.writeFileSync(path.join(petDir, 'playing-2.png'), skinFrame);
+    fs.writeFileSync(path.join(petDir, 'pet.json'), JSON.stringify(skinManifest));
+    await page.waitForFunction(() => Math.abs(innerWidth - 64) < 2, null, { timeout: 6000 });
     // 宠物收起态：窗体 = 皮肤尺寸 × DPI，几何来自配置（160,160），reopen 生效。
     const frame1 = await frame();
     const scale = frame1.dpi / 96;
@@ -261,9 +350,14 @@ async function main() {
     }, null, { timeout: 8000 });
     const coverUrl = await page.evaluate(() => document.getElementById('cover-img').getAttribute('src'));
     assert.ok(coverUrl.startsWith('mini-cover?v='), 'cover served via custom protocol: ' + coverUrl);
-    // 收起 + 拖拽到右缘 → 吸附 Docked Right 并落盘（DragEnd 才写配置）。
+    // Same-name frame replacement must bypass the browser's cached image.
+    fs.writeFileSync(path.join(petDir, 'playing-1.png'), png(12, 12));
+    fs.writeFileSync(path.join(petDir, 'playing-2.png'), png(12, 12));
+    await page.waitForFunction(() => document.getElementById('pet-art').naturalWidth === 12, null, { timeout: 8000 });
+    // 收起 + 可选真鼠标拖拽（默认不注入任何全局鼠标事件）。
     await page.evaluate(() => document.getElementById('capsule').dispatchEvent(new PointerEvent('pointerleave', { bubbles: false })));
     await page.waitForFunction(() => innerWidth < 100, null, { timeout: 4000 });
+    if (process.env.HERTZ_MINI_TEST_DRAG === '1') {
     await page.waitForTimeout(500);
     const frame3 = await frame();
     const cx = Math.round((frame3.window.left + frame3.window.right) / 2);
@@ -287,6 +381,7 @@ async function main() {
     assert.ok(Math.abs(frame5.window.right - screen.width) <= 2, 'still docked right');
     const saved = JSON.parse(fs.readFileSync(path.join(output, 'config.json'), 'utf8'));
     assert.equal(saved.profiles[0].mini.geometry.dock, 'right', 'dock persisted on drag end');
+    }
     // 素材热重载：覆盖 pet.json（更大的尺寸）→ 宿主 tick 签名变化 → 页面
     // reloadSkin → pet-size 上报 → 窗体自动跟随，全程无需重开窗口。
     fs.writeFileSync(path.join(petDir, 'pet.json'), JSON.stringify({
@@ -296,38 +391,92 @@ async function main() {
     await page.waitForFunction(width => Math.abs(innerWidth - width) < 2, 88, { timeout: 6000 });
     const hotSrc = await page.evaluate(() => document.getElementById('pet-art').getAttribute('src'));
     assert.ok(hotSrc.startsWith('mini-skin/playing-'), 'hot reload keeps playing frames: ' + hotSrc);
-    // 点击形象 → restore → fixture 收到 restore 播控，小窗隐藏。
+    // Distinct credentials, sessions and tracks expose a stopped old feed thread
+    // or controls still routed through the previous profile after switching.
+    for (const [nextProfile, expectedSnapshot] of [[secondProfile, secondSnapshot], [profile, snapshot]]) {
+      await page.evaluate(() => document.getElementById('capsule').dispatchEvent(new PointerEvent('pointerenter', { bubbles: false })));
+      await page.waitForFunction(() => innerWidth > 200, null, { timeout: 4000 });
+      await page.waitForTimeout(800); // allow deferred geometry/config writes to settle
+      const status = await pipeCommand('status');
+      const switched = await pipeCommand('profile-switch', { expectedRevision: status.revision, profile: nextProfile });
+      assert.equal(switched.ok, true, 'source switch succeeds: ' + JSON.stringify(switched));
+      await page.waitForFunction(() => Math.abs(innerWidth - 88) < 2, null, { timeout: 6000 });
+      const sourceFrame = await frame();
+      assert.equal(sourceFrame.visible, true, 'mini reopened for switched source');
+      assert.equal(sourceFrame.window.right - sourceFrame.window.left, Math.round(88 * scale), 'source switch preserves native pet width and clears hover');
+      assert.equal(sourceFrame.window.bottom - sourceFrame.window.top, Math.round(72 * scale), 'source switch preserves native pet height');
+      await page.waitForFunction(title => document.getElementById('title').textContent === title, expectedSnapshot.track.title, { timeout: 8000 });
+      await page.waitForFunction(() => document.getElementById('pet-art').naturalWidth === 12 && document.getElementById('cover-img').naturalWidth > 0, null, { timeout: 8000 });
+      const controlCount = controlSources.length;
+      await page.evaluate(() => document.getElementById('play').click());
+      for (let attempt = 0; attempt < 80 && controlSources.length === controlCount; attempt++) await page.waitForTimeout(50);
+      assert.equal(controlSources.length, controlCount + 1, 'playback control received after source switch');
+      const control = controlSources[controlCount];
+      assert.equal(control.credentialSession, expectedSnapshot.server.session, 'playback control uses current source credential');
+      assert.equal(control.payload.session, expectedSnapshot.server.session, 'playback control carries current source session');
+    }
+    // Restore an owned real browser window; never target the user's browser.
+    // Windows already supplies Edge for WebView2; Playwright uses a fresh
+    // temporary browser profile rather than the user's regular Edge session.
+    fixtureBrowser = await chromium.launch({ headless: false, channel: process.env.HERTZ_MINI_TEST_BROWSER_CHANNEL || 'msedge' });
+    const fixturePage = await fixtureBrowser.newPage();
+    await fixturePage.goto(`http://127.0.0.1:${server.address().port}/restore-fixture`);
+    const fixtureCdp = await fixturePage.context().newCDPSession(fixturePage);
+    const { windowId } = await fixtureCdp.send('Browser.getWindowForTarget');
+    await fixtureCdp.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'minimized' } });
+    assert.equal((await fixtureCdp.send('Browser.getWindowBounds', { windowId })).bounds.windowState, 'minimized', 'owned browser fixture minimized');
+    assert.equal((await fixtureWindow()).minimized, true, 'Win32 confirms only owned browser fixture minimized');
+    // HTTP503 prevents native fallback opening a default browser, regardless of
+    // SetForegroundWindow restrictions. The page reports hidden throughout.
+    snapshot.main.visible = false;
+    await page.waitForTimeout(2400);
     await page.evaluate(() => document.getElementById('capsule').dispatchEvent(new PointerEvent('pointerenter', { bubbles: false })));
     await page.waitForFunction(() => innerWidth > 200, null, { timeout: 4000 });
     await page.evaluate(() => document.getElementById('title').click());
     await page.waitForTimeout(700);
     assert.equal(actions.some(action => action.action === 'restore'), true, 'restore reaches fixture control');
+    const restoredBounds = (await fixtureCdp.send('Browser.getWindowBounds', { windowId })).bounds;
+    restoreEvidence = { minimizedBefore: true, windowStateAfter: restoredBounds.windowState, ...await fixtureWindow() };
+    // Synthetic page clicks do not grant foreground rights on every Windows
+    // desktop. Record Win32 facts separately from the deterministic assertions;
+    // CDP's reported normal bounds alone do not prove OS restoration.
     const frame6 = await frame();
-    assert.equal(frame6.visible, false, 'mini hides after restore');
+    assert.equal(frame6.visible, true, 'failed restore control retains mini window');
     // 管理管道：web 设置页的开关路径。status 应答带 mini 节；mini-toggle 进/出。
     const status1 = await pipeCommand('status');
     assert.equal(status1.ok, true, 'status via pipe ok');
-    assert.equal(status1.mini && status1.mini.visible, false, 'status reports mini hidden after restore');
+    assert.equal(status1.mini && status1.mini.visible, true, 'status reports mini retained after failed restore');
     assert.equal(status1.mini && status1.mini.supported, true, 'status reports mini supported (standalone)');
     const toggle1 = await pipeCommand('mini-toggle');
-    assert.equal(toggle1.ok, true, 'mini-toggle shows the window');
-    await page.waitForFunction(() => innerWidth > 0, null, { timeout: 4000 });
+    assert.equal(toggle1.ok, true, 'mini-toggle hides the window');
+    await page.waitForTimeout(500);
     const status2 = await pipeCommand('status');
-    assert.equal(status2.mini && status2.mini.visible, true, 'status reports mini visible after toggle');
+    assert.equal(status2.mini && status2.mini.visible, false, 'status reports mini hidden after toggle');
     const toggle2 = await pipeCommand('mini-toggle');
-    assert.equal(toggle2.ok, true, 'mini-toggle quits the window');
+    assert.equal(toggle2.ok, true, 'mini-toggle shows the window');
     await page.waitForTimeout(500);
     const status3 = await pipeCommand('status');
-    assert.equal(status3.mini && status3.mini.visible, false, 'status reports mini hidden after second toggle');
+    assert.equal(status3.mini && status3.mini.visible, true, 'status reports mini visible after second toggle');
+    // A failed restore followed by hide/show must permit a fresh restore.
+    const restoreCount = actions.filter(action => action.action === 'restore').length;
+    await fixtureCdp.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'minimized' } });
+    await page.evaluate(() => document.getElementById('title').click());
+    for (let attempt = 0; attempt < 40 && actions.filter(action => action.action === 'restore').length === restoreCount; attempt++) {
+      await page.waitForTimeout(50);
+    }
+    assert.equal(actions.filter(action => action.action === 'restore').length, restoreCount + 1, 'restore accepted after failed request and hide/show');
+    await page.waitForTimeout(300);
+    assert.equal((await frame()).visible, true, 'retry failure also retains mini');
     assert.deepEqual(errors, [], 'no page errors');
     passed = true;
-    console.log('Mini/pet native checks passed: reopen by config, pet-size window, user skin frames with idle fallback, opaque hit regions, hover expand/collapse, cover via custom protocol, drag dock right with persistence, restore broadcast, management pipe mini-toggle/status, skin hot reload. Evidence: ' + output);
+    console.log('Mini/pet native checks passed: reopen, missing pet directory creation, decoded skin/fallback, opaque hit regions, hover, initial cover, same-name asset reload, source switch/back uses distinct feed credentials/sessions and keeps pet size, failed-control retention/retry, management pipe, manifest reload. Owned browser Win32 outcome: restored=' + !restoreEvidence.minimized + ', foreground=' + restoreEvidence.foreground + '. Global mouse drag: ' + (process.env.HERTZ_MINI_TEST_DRAG === '1' ? 'enabled' : 'skipped') + '. Restore success/hide is not asserted because HTTP503 disables browser fallback. Evidence: ' + output);
   } finally {
     if (child.exitCode === null && child.signalCode === null) child.kill();
     if (browser) await browser.close();
+    if (fixtureBrowser) await fixtureBrowser.close();
+    await exited;
     server.close();
-    fs.writeFileSync(path.join(output, 'cleanup.json'), JSON.stringify({ verificationPassed: passed, pid: child.pid, exitCode: child.exitCode }, null, 2));
-    void exited;
+    fs.writeFileSync(path.join(output, 'cleanup.json'), JSON.stringify({ verificationPassed: passed, pid: child.pid, exitCode: child.exitCode, restoreEvidence }, null, 2));
   }
 }
 main().catch(e => { console.error(e); server.close(); process.exitCode = 1; });

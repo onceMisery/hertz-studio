@@ -30,7 +30,7 @@ DBX 桌面功能通过用户主动授权的本机只读管道复用 HertzDesktop
 | 原生管理协议版本 | 2 | `crates/hertz-desktop/src/component.rs::MANAGEMENT_PROTOCOL` | 严格目标来源、实际构建及 requestId 关联；legacy 独立版兼容 |
 | 门面单次操作总期限（秒） | 5 | `crates/hertz-studio/src/desktop/windows/mod.rs::TOTAL` | 排队、探测与全部管理请求共用剩余预算，超时取消并回收实际 worker |
 | 门面管理可用缓存期限（秒） | 3 | `crates/hertz-studio/src/desktop/windows/protocol.rs::FRESHNESS` | 当前操作/授权代际遮罩；来源认证不复用此缓存 |
-| 原生配置 schema 版本 | 3 | `crates/hertz-desktop/src/config.rs::SCHEMA_VERSION` | v1/v2 迁移、未绑定独立版偏好与降级说明 |
+| 原生配置 schema 版本 | 4 | `crates/hertz-desktop/src/config.rs::SCHEMA_VERSION` | v1/v2/v3 迁移、未绑定独立版偏好与降级说明 |
 | 已绑定来源上限（个） | 8 | `crates/hertz-desktop/src/config.rs::MAX_PROFILES` | 插入活动来源后数量校验与设置页候选 |
 | 原生配置上限（字节） | 65536 | `crates/hertz-desktop/src/config.rs::MAX_CONFIG_BYTES` | 读入前限长与提交失败不替换内存 |
 | 音乐数据失效期限（秒） | 3 | `crates/hertz-desktop/src/management.rs::STALE_AFTER` | 原生独立计时、管理来源在线事实、页面剩余寿命与同身份文档恢复 |

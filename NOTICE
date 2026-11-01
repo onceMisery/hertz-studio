@@ -23,10 +23,23 @@ license, see `cargo deny list` or each crate's own LICENSE file):
   - uuid, rand, walkdir, dirs         (MIT / Apache-2.0)
   - rmcp                              (Apache-2.0 / MIT)
   - fslock, getrandom, sha2           (MIT / Apache-2.0)
+  - png                               (MIT / Apache-2.0)
+  - image, image-webp                  (MIT / Apache-2.0)
+  - moxcms, pxfm                       (BSD-3-Clause / Apache-2.0)
+  - zune-jpeg, zune-core               (MIT / Apache-2.0 / Zlib)
 
 ---------------------------------------------------------------------------
 Vendored assets
 ---------------------------------------------------------------------------
+
+  - tools/stage-fluid/src/ and plugin/ui/vendor/stage-fluid.js
+    Fluid simulation shaders and solver adapted from Canvas UI LiquidVanilla.ts
+    Copyright (c) 2026 David Haz; adaptations (c) 2026 hertz-studio contributors.
+    Licensed under MIT + Commons Clause (not the project's plain MIT license).
+    Complete terms: tools/stage-fluid/LICENSE.md and the generated bundle header.
+    Upstream: https://github.com/DavidHDev/canvas-ui
+    Pinned commit: a04a99b235299ee79a123a16ccb2e6cf9da74b6b
+    Included as part of Hertz Studio; no separate component package is provided.
 
   - plugin/ui/vendor/qrcode.js
     QR Code Generator for JavaScript

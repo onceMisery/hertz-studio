@@ -23,9 +23,9 @@ use std::thread::JoinHandle;
 use windows::core::GUID;
 use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0, WAIT_TIMEOUT};
 use windows::Win32::Media::Audio::{
-    eMultimedia, eRender, AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED,
-    AUDCLNT_STREAMFLAGS_EVENTCALLBACK, AUDCLNT_STREAMFLAGS_LOOPBACK, IAudioCaptureClient,
-    IAudioClient, IMMDevice, IMMDeviceEnumerator, MMDeviceEnumerator, WAVEFORMATEX,
+    eMultimedia, eRender, IAudioCaptureClient, IAudioClient, IMMDevice, IMMDeviceEnumerator,
+    MMDeviceEnumerator, AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED,
+    AUDCLNT_STREAMFLAGS_EVENTCALLBACK, AUDCLNT_STREAMFLAGS_LOOPBACK, WAVEFORMATEX,
     WAVEFORMATEXTENSIBLE,
 };
 use windows::Win32::System::Com::{
@@ -36,7 +36,7 @@ use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
 use super::audio::{downmix_interleaved, SampleRing};
 
 #[cfg(test)]
-use super::audio::{BANDS, FFT_SIZE, SpectrumAnalyzer};
+use super::audio::{SpectrumAnalyzer, BANDS, FFT_SIZE};
 #[cfg(test)]
 use std::time::Duration;
 
@@ -92,6 +92,15 @@ impl CaptureHandle {
     }
 }
 
+impl Drop for CaptureHandle {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
 /// 启动 system loopback 采集。`device: None` 跟随默认渲染设备（默认设备
 /// 变化时由编排层按此语义重绑），`Some(id)` 为固定的 endpoint id——拿不到
 /// 该设备直接失败，不回退默认或别的设备。
@@ -135,7 +144,11 @@ fn run_capture(
     }
 }
 
-fn capture_loop(device: &Option<String>, ring: &Mutex<SampleRing>, stop: &AtomicBool) -> Result<(), String> {
+fn capture_loop(
+    device: &Option<String>,
+    ring: &Mutex<SampleRing>,
+    stop: &AtomicBool,
+) -> Result<(), String> {
     unsafe {
         // 采集线程自有 COM 单元（MTA）；S_FALSE（此前已初始化）同样可继续，
         // 其余失败直接退出。S_OK/S_FALSE 都要配平一次 CoUninitialize。
@@ -215,8 +228,7 @@ unsafe fn open_and_capture(
             .map_err(|error| format!("启动采集失败：{error}"))?;
         // 热路径零分配：线程内一次性预热 1 秒单声道 + 原始缓冲容量。
         let mut mono: Vec<f32> = Vec::with_capacity(sample_rate as usize);
-        let mut raw: Vec<f32> = Vec::with_capacity(sample_rate as usize * channels);
-        capture_packets(&capture, stop, ring, channels, event, &mut mono, &mut raw)
+        capture_packets(&capture, stop, ring, channels, event, &mut mono)
     });
 
     let _ = client.Stop();
@@ -233,9 +245,15 @@ unsafe fn validate_format(format: *mut WAVEFORMATEX) -> Result<(usize, u32), Str
     let tag = core::ptr::addr_of!((*format).wFormatTag).read_unaligned();
     let channels_raw = core::ptr::addr_of!((*format).nChannels).read_unaligned();
     let rate = core::ptr::addr_of!((*format).nSamplesPerSec).read_unaligned();
+    let bits = core::ptr::addr_of!((*format).wBitsPerSample).read_unaligned();
+    let align = core::ptr::addr_of!((*format).nBlockAlign).read_unaligned();
+    let extra = core::ptr::addr_of!((*format).cbSize).read_unaligned();
     let is_float = match tag {
         WAVE_FORMAT_IEEE_FLOAT => true,
         WAVE_FORMAT_EXTENSIBLE => {
+            if usize::from(extra) < size_of::<WAVEFORMATEXTENSIBLE>() - size_of::<WAVEFORMATEX>() {
+                return Err("混合格式扩展头不完整".into());
+            }
             let ext: WAVEFORMATEXTENSIBLE = core::ptr::read_unaligned(format.cast());
             let sub_format = core::ptr::addr_of!(ext.SubFormat).read_unaligned();
             sub_format == SUBFORMAT_IEEE_FLOAT
@@ -251,6 +269,9 @@ unsafe fn validate_format(format: *mut WAVEFORMATEX) -> Result<(usize, u32), Str
     if channels == 0 || channels > MAX_CHANNELS || rate == 0 || rate > MAX_SAMPLE_RATE {
         return Err(format!("混合格式越界：{channels} 声道 @ {rate} Hz"));
     }
+    if bits != 32 || usize::from(align) != channels * size_of::<f32>() {
+        return Err("IEEE float 必须为 32 位且帧对齐与声道数一致".into());
+    }
     Ok((channels, rate))
 }
 
@@ -263,7 +284,6 @@ unsafe fn capture_packets(
     channels: usize,
     event: windows::Win32::Foundation::HANDLE,
     mono: &mut Vec<f32>,
-    raw: &mut Vec<f32>,
 ) -> Result<(), String> {
     loop {
         if stop.load(Ordering::Relaxed) {
@@ -277,6 +297,9 @@ unsafe fn capture_packets(
             return Err(format!("等待采集事件失败：{waited:?}"));
         }
         loop {
+            if stop.load(Ordering::Relaxed) {
+                return Ok(());
+            }
             let mut frames = capture
                 .GetNextPacketSize()
                 .map_err(|error| format!("读取包大小失败：{error}"))?;
@@ -288,16 +311,24 @@ unsafe fn capture_packets(
             capture
                 .GetBuffer(&mut data, &mut frames, &mut flags, None, None)
                 .map_err(|error| format!("读取采集缓冲失败：{error}"))?;
+            if frames as usize > mono.capacity()
+                || (data.is_null()
+                    && frames > 0
+                    && flags & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32 == 0)
+            {
+                let _ = capture.ReleaseBuffer(frames);
+                return Err("采集包超过预分配容量或缺少样本数据".into());
+            }
             mono.clear();
             if flags & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32 != 0 {
                 // 静音包：mono 帧 ×1（不是 ×channels），全零推进时钟。
                 mono.resize(frames as usize, 0.0);
             } else {
                 let count = frames as usize * channels;
-                let samples = std::slice::from_raw_parts(data.cast::<f32>(), count);
-                raw.clear();
-                raw.extend_from_slice(samples);
-                downmix_interleaved(raw, channels, mono);
+                if count > 0 {
+                    let samples = std::slice::from_raw_parts(data.cast::<f32>(), count);
+                    downmix_interleaved(samples, channels, mono);
+                }
             }
             if let Ok(mut guard) = ring.lock() {
                 guard.push(mono);
@@ -329,12 +360,60 @@ mod tests {
         assert!(error.contains("IEEE float"), "{error}");
 
         fmt.wFormatTag = WAVE_FORMAT_IEEE_FLOAT;
+        assert!(
+            unsafe { validate_format(&mut fmt) }.is_err(),
+            "16 位 float 不能按 f32 读取"
+        );
+        fmt.wBitsPerSample = 32;
+        fmt.nBlockAlign = 8;
         assert_eq!(unsafe { validate_format(&mut fmt) }.unwrap(), (2, 48_000));
 
         fmt.nChannels = 64;
         assert!(unsafe { validate_format(&mut fmt) }
             .unwrap_err()
             .contains("越界"));
+    }
+
+    /// 只验证真实采集生命周期，不创建 render client、不发声、不改设备或音量。
+    /// 没有其它渲染活动时允许没有 PCM，不能把静音当成采集失败。
+    #[test]
+    #[ignore = "需要真实默认渲染设备；显式运行，不播放测试音"]
+    fn loopback_lifecycle_without_playback() {
+        for generation in 1..=3 {
+            let ring = Arc::new(Mutex::new(SampleRing::new(48_000)));
+            let handle = spawn_loopback(None, Arc::clone(&ring), generation).unwrap();
+            std::thread::sleep(Duration::from_millis(300));
+            let stopped = std::time::Instant::now();
+            let exit = handle.stop_and_join();
+            assert_eq!(exit.generation, generation);
+            assert!(
+                exit.error.is_none(),
+                "真实默认设备初始化/停止失败：{:?}",
+                exit.error
+            );
+            assert!(
+                stopped.elapsed() < Duration::from_secs(3),
+                "停止必须在一次事件等待内退出"
+            );
+        }
+        let ring = Arc::new(Mutex::new(SampleRing::new(48_000)));
+        let handle = spawn_loopback(
+            Some("hertz-test-missing-endpoint".into()),
+            Arc::clone(&ring),
+            4,
+        )
+        .unwrap();
+        let exit = handle.stop_and_join();
+        assert!(exit
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("找不到指定渲染设备"));
+        assert_eq!(
+            ring.lock().unwrap().len(),
+            0,
+            "固定设备失联不能回退到默认设备采集"
+        );
     }
 
     /// 真机冒烟（端到端）：自绘 440Hz 测试音 → 引擎 → loopback 采集 →
@@ -353,7 +432,11 @@ mod tests {
 
         let exit = handle.stop_and_join();
         assert_eq!(exit.generation, 1);
-        assert!(exit.error.is_none(), "COM/初始化路径必须干净：{:?}", exit.error);
+        assert!(
+            exit.error.is_none(),
+            "COM/初始化路径必须干净：{:?}",
+            exit.error
+        );
 
         let (len, dropped) = {
             let guard = ring.lock().unwrap();
@@ -395,15 +478,29 @@ mod tests {
         let client: IAudioClient = endpoint
             .Activate(CLSCTX_ALL, None)
             .map_err(|error| format!("激活：{error}"))?;
-        let format = client.GetMixFormat().map_err(|error| format!("格式：{error}"))?;
-        let channels = core::ptr::addr_of!((*format).nChannels).read_unaligned() as usize;
-        let rate = core::ptr::addr_of!((*format).nSamplesPerSec).read_unaligned();
+        let format = client
+            .GetMixFormat()
+            .map_err(|error| format!("格式：{error}"))?;
+        // 发声探针也必须遵守 f32 合同，不能把 16 位 PCM 缓冲当作 f32 写。
+        let (channels, rate) = match validate_format(format) {
+            Ok(shape) => shape,
+            Err(error) => {
+                CoTaskMemFree(Some(format.cast::<core::ffi::c_void>()));
+                return Err(error);
+            }
+        };
         // 这台设备的引擎不吃 0 时长（AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED）：
         // 用默认设备周期对齐（×2），仍不齐再放大一档重试。
         let mut default_period = 10_000_000 / 100; // 10ms 兜底（hns）
         let _ = client.GetDevicePeriod(Some(&mut default_period), None);
-        let mut initialized =
-            client.Initialize(AUDCLNT_SHAREMODE_SHARED, 0, default_period * 2, 0, format, None);
+        let mut initialized = client.Initialize(
+            AUDCLNT_SHAREMODE_SHARED,
+            0,
+            default_period * 2,
+            0,
+            format,
+            None,
+        );
         if initialized.is_err() {
             initialized = client.Initialize(
                 AUDCLNT_SHAREMODE_SHARED,
@@ -415,23 +512,35 @@ mod tests {
             );
         }
         initialized.map_err(|error| format!("render 初始化：{error}"))?;
-        let render: IAudioRenderClient = client.GetService().map_err(|error| format!("render 服务：{error}"))?;
+        let render: IAudioRenderClient = client
+            .GetService()
+            .map_err(|error| format!("render 服务：{error}"))?;
         // 实际缓冲帧数以引擎分配为准（Initialize 的时长决定，不按采样率猜）。
-        let buffer_frames = client.GetBufferSize().map_err(|error| format!("缓冲大小：{error}"))? as usize;
-        client.Start().map_err(|error| format!("render 启动：{error}"))?;
+        let buffer_frames = client
+            .GetBufferSize()
+            .map_err(|error| format!("缓冲大小：{error}"))? as usize;
+        client
+            .Start()
+            .map_err(|error| format!("render 启动：{error}"))?;
 
         let deadline = std::time::Instant::now() + duration;
         let mut cursor = 0usize;
         loop {
-            let padding = client.GetCurrentPadding().map_err(|error| format!("padding：{error}"))?;
+            let padding = client
+                .GetCurrentPadding()
+                .map_err(|error| format!("padding：{error}"))?;
             let writable = buffer_frames.saturating_sub(padding as usize);
             if writable > 0 {
                 let buffer = render
                     .GetBuffer(writable as u32)
                     .map_err(|error| format!("GetBuffer({writable})：{error}"))?;
-                let out = std::slice::from_raw_parts_mut(buffer.cast::<f32>(), writable as usize * channels);
+                let out = std::slice::from_raw_parts_mut(
+                    buffer.cast::<f32>(),
+                    writable as usize * channels,
+                );
                 for frame in out.chunks_exact_mut(channels) {
-                    let sample = amplitude * (2.0 * std::f32::consts::PI * freq * cursor as f32 / rate as f32).sin();
+                    let sample = amplitude
+                        * (2.0 * std::f32::consts::PI * freq * cursor as f32 / rate as f32).sin();
                     for channel in frame.iter_mut() {
                         *channel = sample;
                     }

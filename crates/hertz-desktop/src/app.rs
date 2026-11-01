@@ -52,6 +52,11 @@ pub(crate) enum UserEvent {
     Feed(u64, Instant, Box<Result<crate::feed::FeedUpdate, String>>),
     WallpaperFeed(u64, Instant, Box<Result<WallpaperSnapshot, FeedError>>),
     WallpaperPage(u64, String),
+    WallpaperMedia(u64, Box<crate::wallpaper::webresource::PreparedResponse>),
+    WallpaperProbe(Box<crate::wallpaper::decode_probe::ProbeRequest>),
+    WallpaperProbePage(u64, String),
+    #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+    WallpaperProbeTestResult(u64, serde_json::Value),
     SettingsPage(String),
     /// 小窗快照轮询的一拍（含可能的封面字节）。
     MiniFeed(u64, Instant, Box<Result<MiniUpdate, String>>),
@@ -123,6 +128,7 @@ struct WallpaperSurface {
     monitor: native::WallpaperMonitor,
     zoom: f64,
     eval_failures: AtomicU64,
+    _media_access: crate::wallpaper::access::MediaAccess,
 }
 
 impl WallpaperSurface {
@@ -408,6 +414,7 @@ struct App {
     source_state: &'static str,
     source_message: Option<String>,
     wallpaper: Option<WallpaperSurface>,
+    wallpaper_probe: crate::wallpaper::decode_probe::ProbeHost,
     wallpaper_page_ready: bool,
     wallpaper_last: Option<WallpaperSnapshot>,
     wallpaper_feed_logged: bool,
@@ -794,6 +801,9 @@ impl App {
             }
         }
         if self.wallpaper.is_none() {
+            if self.wallpaper_monitor_missing {
+                self.recover_wallpaper(target);
+            }
             return;
         }
         let monitors = native::wallpaper_monitors();
@@ -815,16 +825,7 @@ impl App {
             log(&format!("wallpaper fullscreen={next}"));
             self.recompute_wallpaper();
         }
-        let Some(surface) = self.wallpaper.as_ref() else {
-            return;
-        };
-        let resolved = monitors
-            .iter()
-            .find(|monitor| {
-                monitor.display_id() == surface.monitor.display_id()
-                    || monitor.name == surface.monitor.name
-            })
-            .cloned();
+        let resolved = resolve_wallpaper_monitor_or_primary(&monitors, &self.config.wallpaper);
         match resolved {
             None => {
                 self.wallpaper_topology_misses = self.wallpaper_topology_misses.saturating_add(1);
@@ -965,6 +966,37 @@ impl App {
             ));
             return;
         }
+        #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+        if let Some(body) = event.strip_prefix("wallpaper_probe_import ") {
+            if body.len() <= 4096 {
+                crate::wallpaper::decode_probe::harness::command(body, self.proxy.clone());
+            }
+            return;
+        }
+        #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+        if let Some(body) = event.strip_prefix("wallpaper_probe_access ") {
+            // 显式测试构建专用。正式构建不存在此分支，网页无法自授准入。
+            if body.len() <= 32768 {
+                #[derive(serde::Deserialize)]
+                #[serde(rename_all = "camelCase", deny_unknown_fields)]
+                struct ProbeAccess {
+                    nonce: u64,
+                    generation: u64,
+                    resources: Vec<(String, String)>,
+                }
+                if let (Some(surface), Ok(request)) = (
+                    self.wallpaper.as_ref(),
+                    serde_json::from_str::<ProbeAccess>(body),
+                ) {
+                    let accepted = surface._media_access.replace(request.generation, &request.resources);
+                    surface.eval(&format!("window.__nativeMediaProbe={};", serde_json::json!({
+                        "nonce": request.nonce, "accepted": accepted,
+                        "activeStreams": crate::wallpaper::media_stream::global_pool().active(),
+                    })));
+                }
+            }
+            return;
+        }
         if let Some(clock) = parse_page_clock(event) {
             if let Some(surface) = self.wallpaper.as_mut() {
                 surface.page_clock = Some(clock);
@@ -1039,6 +1071,13 @@ impl App {
         {
             return;
         }
+        // 缺屏不是渲染故障，不消耗重建预算，也不临时认领另一块屏。
+        let monitors = native::wallpaper_monitors();
+        let Some(resolved) = resolve_wallpaper_monitor_or_primary(&monitors, &self.config.wallpaper)
+        else {
+            self.wallpaper_monitor_missing = true;
+            return;
+        };
         let now = Instant::now();
         self.wallpaper_recovery_attempts
             .retain(|attempt| now.duration_since(*attempt) < Duration::from_secs(120));
@@ -1060,20 +1099,15 @@ impl App {
         self.wallpaper_visible = false;
         self.reset_wallpaper_page_stats();
         self.wallpaper_generation = self.wallpaper_generation.wrapping_add(1);
-        let monitors = native::wallpaper_monitors();
-        let resolved = resolve_wallpaper_monitor_or_primary(&monitors, &self.config.wallpaper);
-        match resolved
-            .ok_or_else(|| anyhow::anyhow!("目标显示器未连接，请在设置中重新认领"))
-            .and_then(|monitor| {
-                create_wallpaper(
-                    target,
-                    self.proxy.clone(),
-                    self.wallpaper_generation,
-                    monitor,
-                )
-            }) {
+        match create_wallpaper(
+            target,
+            self.proxy.clone(),
+            self.wallpaper_generation,
+            resolved,
+        ) {
             Ok(surface) => {
                 self.wallpaper = Some(surface);
+                self.wallpaper_monitor_missing = false;
                 self.wallpaper_apply_error = None;
                 // 恢复成功同样建立稳定身份；沿用统一去抖提交。
                 let identity = self
@@ -1141,6 +1175,7 @@ impl App {
                 );
                 serde_json::json!({
                     "name": monitor.name,
+                    "displayId": monitor.display_id(),
                     "label": label,
                     "primary": monitor.primary,
                     "left": monitor.left,
@@ -1469,8 +1504,13 @@ impl App {
         if monitors.is_empty() {
             bail!("显示器拓扑暂时为空，请稍后重试");
         }
-        let resolved = resolve_wallpaper_monitor_or_primary(&monitors, &self.config.wallpaper)
-            .ok_or_else(|| anyhow::anyhow!("目标显示器未连接，请在设置中重新认领"))?;
+        let Some(resolved) = resolve_wallpaper_monitor_or_primary(&monitors, &self.config.wallpaper)
+        else {
+            self.wallpaper_monitor_missing = true;
+            bail!("目标显示器未连接，请在设置中重新认领");
+        };
+        self.wallpaper_monitor_missing = false;
+        self.wallpaper_topology_misses = 0;
         let surface_stale = self.wallpaper.as_ref().is_some_and(|surface| {
             surface.monitor.display_id() != resolved.display_id()
                 || monitor_geometry_changed(&surface.monitor, &resolved)
@@ -4110,9 +4150,11 @@ pub(crate) fn run() -> Result<()> {
                 // 启动期建立稳定显示器身份（设计 §2.2-9）：独立提交，revision 递增。
                 let identity = surface.monitor.display_id();
                 if config.wallpaper.display_id.as_deref() != Some(identity.as_str()) {
-                    config.wallpaper.display_id = Some(identity);
-                    let next = config.clone();
-                    let _ = config::commit(&mut config, next);
+                    let mut next = config.clone();
+                    next.wallpaper.display_id = Some(identity);
+                    if let Err(error) = config::commit(&mut config, next) {
+                        log(&format!("save initial display identity failed: {error:#}"));
+                    }
                 }
                 Some(surface)
             }
@@ -4125,6 +4167,9 @@ pub(crate) fn run() -> Result<()> {
         None
     };
 
+    let wallpaper_monitor_missing = wallpaper.is_none()
+        && config.wallpaper.enabled
+        && (config.wallpaper.display_id.is_some() || config.wallpaper.monitor.is_some());
     let mut app = App {
         window,
         webview,
@@ -4164,6 +4209,7 @@ pub(crate) fn run() -> Result<()> {
         source_state: "waiting",
         source_message: Some("正在连接 Hertz 服务".into()),
         wallpaper,
+        wallpaper_probe: crate::wallpaper::decode_probe::ProbeHost::default(),
         wallpaper_page_ready: false,
         wallpaper_last: None,
         wallpaper_feed_logged: false,
@@ -4186,7 +4232,7 @@ pub(crate) fn run() -> Result<()> {
         wallpaper_generation: 1,
         wallpaper_recovery_attempts: Vec::new(),
         wallpaper_recovery_terminal: false,
-        wallpaper_monitor_missing: false,
+        wallpaper_monitor_missing,
         settings: None,
         settings_candidate: None,
         settings_tab: "wallpaper".into(),
@@ -4295,6 +4341,7 @@ pub(crate) fn run() -> Result<()> {
         // Freshness is a deadline, independent of the 500 ms maintenance ticker.
         // This also clears expired data before handling a queued status/document.
         if !matches!(&event, Event::LoopDestroyed) {
+            app.wallpaper_probe.tick();
             app.expire_source_data(Instant::now());
         }
         *control_flow = app
@@ -4336,6 +4383,21 @@ pub(crate) fn run() -> Result<()> {
             }
             Event::UserEvent(UserEvent::WallpaperPage(generation, body)) => {
                 app.handle_wallpaper_page(generation, &body)
+            }
+            Event::UserEvent(UserEvent::WallpaperMedia(id, response)) => {
+                crate::wallpaper::webresource::complete(id, *response);
+            }
+            Event::UserEvent(UserEvent::WallpaperProbe(request)) => {
+                app.wallpaper_probe.start(*request, target, proxy.clone());
+            }
+            Event::UserEvent(UserEvent::WallpaperProbePage(id, body)) => {
+                app.wallpaper_probe.page(id, &body);
+            }
+            #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+            Event::UserEvent(UserEvent::WallpaperProbeTestResult(nonce, value)) => {
+                if let Some(surface) = app.wallpaper.as_ref() {
+                    surface.eval(&format!("window.__nativeImportProbes ||= {{}}; window.__nativeImportProbes[{nonce}]={value};"));
+                }
             }
             Event::UserEvent(UserEvent::SettingsPage(body)) => {
                 app.handle_settings_page(&body, target)
@@ -4404,7 +4466,9 @@ pub(crate) fn run() -> Result<()> {
             Event::WindowEvent {
                 window_id, event, ..
             } => {
-                if window_id == app.window.id() {
+                if matches!(&event, WindowEvent::CloseRequested) && app.wallpaper_probe.close_window(window_id) {
+                    // 探测窗口只取消它自己的 job；仍推进回收期限。
+                } else if window_id == app.window.id() {
                     match event {
                         WindowEvent::CloseRequested => *control_flow = ControlFlow::Exit,
                         WindowEvent::Moved(_) => app.on_moved(),
@@ -4448,7 +4512,8 @@ pub(crate) fn run() -> Result<()> {
             _ => {}
         }
         if *control_flow != ControlFlow::Exit {
-            if let Some(deadline) = app.source_expiry_deadline() {
+            if let Some(deadline) = app.source_expiry_deadline().into_iter()
+                .chain(app.wallpaper_probe.next_deadline()).min() {
                 *control_flow = ControlFlow::WaitUntil(deadline);
             }
         }
@@ -4673,12 +4738,10 @@ fn resolve_wallpaper_monitor(
     wallpaper: &config::WallpaperConfig,
 ) -> Option<native::WallpaperMonitor> {
     if let Some(display_id) = wallpaper.display_id.as_deref() {
-        if let Some(monitor) = monitors
+        return monitors
             .iter()
             .find(|monitor| monitor.display_id() == display_id)
-        {
-            return Some(monitor.clone());
-        }
+            .cloned();
     }
     let name = wallpaper.monitor.as_deref()?;
     monitors
@@ -4691,9 +4754,15 @@ fn resolve_wallpaper_monitor_or_primary(
     monitors: &[native::WallpaperMonitor],
     wallpaper: &config::WallpaperConfig,
 ) -> Option<native::WallpaperMonitor> {
-    resolve_wallpaper_monitor(monitors, wallpaper)
-        .or_else(|| monitors.iter().find(|monitor| monitor.primary).cloned())
-        .or_else(|| monitors.first().cloned())
+    if wallpaper.display_id.is_some() || wallpaper.monitor.is_some() {
+        resolve_wallpaper_monitor(monitors, wallpaper)
+    } else {
+        monitors
+            .iter()
+            .find(|monitor| monitor.primary)
+            .or_else(|| monitors.first())
+            .cloned()
+    }
 }
 
 fn create_wallpaper(
@@ -4743,9 +4812,8 @@ fn create_wallpaper(
         .build(&window)
         .map_err(|error| anyhow::anyhow!("创建壁纸 WebView 失败：{error}"))?;
     // 媒体拦截：wallpaper.invalid 保留域 → 本机 IStream（§8.1）。
-    if let Err(error) = crate::wallpaper::webresource::install(&webview) {
-        log(&format!("wallpaper media interceptor: {error}"));
-    }
+    let media_access = crate::wallpaper::webresource::install(&webview, proxy.clone())
+        .map_err(|error| anyhow::anyhow!("安装壁纸媒体拦截失败：{error}"))?;
     if (zoom - 1.0).abs() > 0.001 {
         webview
             .zoom(zoom)
@@ -4762,6 +4830,7 @@ fn create_wallpaper(
         monitor,
         zoom,
         eval_failures: AtomicU64::new(0),
+        _media_access: media_access,
     })
 }
 
@@ -5637,20 +5706,21 @@ mod tests {
             ..Default::default()
         };
         assert!(resolve_wallpaper_monitor(&monitors, &wallpaper).is_some());
-        // 稳定身份优先；身份不存在但名字命中时仍按名字解析（等待回填）。
+        // 已有稳定身份时等待原屏，不能认领复用 GDI 名的新屏。
         let wallpaper = config::WallpaperConfig {
             monitor: Some(r"\\.\DISPLAY1".into()),
             display_id: Some("future-identity".into()),
             ..Default::default()
         };
-        assert!(resolve_wallpaper_monitor(&monitors, &wallpaper).is_some());
+        assert!(resolve_wallpaper_monitor(&monitors, &wallpaper).is_none());
         let wallpaper = config::WallpaperConfig {
             monitor: Some(r"\\.\DISPLAY9".into()),
             display_id: Some("future-identity".into()),
             ..Default::default()
         };
         assert!(resolve_wallpaper_monitor(&monitors, &wallpaper).is_none());
-        assert!(resolve_wallpaper_monitor_or_primary(&monitors, &wallpaper).is_some());
+        assert!(resolve_wallpaper_monitor_or_primary(&monitors, &wallpaper).is_none());
+        assert!(resolve_wallpaper_monitor_or_primary(&monitors, &Default::default()).is_some());
     }
 
     #[test]

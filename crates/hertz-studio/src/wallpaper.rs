@@ -27,7 +27,7 @@ pub(crate) const BANDS: usize = 64;
 /// 最后一帧超过这个时长后，快照不再回放旧频谱。
 const SPECTRUM_MAX_AGE: Duration = Duration::from_millis(1000);
 /// v2 频谱帧推送节拍（引擎 33 ms 一帧；推送上限 30 Hz，§11.2）。
-const SPECTRUM_PUSH_INTERVAL: Duration = Duration::from_millis(33);
+const SPECTRUM_PUSH_INTERVAL: Duration = Duration::from_nanos(1_000_000_000 / 30 + 1);
 /// v2 离散状态推送上限，也是空转心跳周期（§11.2 状态最多 1 Hz）。
 const STATUS_PUSH_INTERVAL: Duration = Duration::from_secs(1);
 /// v2 单帧长度上限（§11.2 包长最多 8 KiB）。运行期不逐帧断言（30 Hz 热路径

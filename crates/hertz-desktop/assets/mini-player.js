@@ -88,48 +88,47 @@
   const Pet = (() => {
     const STATES = ['idle', 'playing', 'dragging', 'tap'];
     const img = $('pet-art');
-    let user = null, skin = null, cur = null, frame = 0, oneShot = null, timer = 0, running = false;
+    let skin = null, cur = null, frame = 0, oneShot = null, timer = 0, running = false;
+    let loadGeneration = 0;
+    const failedFrames = new Set();
+    const clamp = value => Math.min(160, Math.max(48, Math.round(Number(value) || 56)));
 
-    // 兜底的最后一级：素材整体画不出来时退回 ♫ 封面块。
-    // 每一帧加载完都重报命中区：不透明包围盒随帧微动（bounce），加载前上报的
-    // 是整盒近似，不能让它一直留着。
+    // A failed candidate is retired for this load, including failures discovered after
+    // preload. Each state has a finite, ordered chain; no bad URL is retried by a timer.
+    function definition(name) {
+      return skin.states[name].find(def => !def.frames.some(url => failedFrames.has(url)));
+    }
     img.addEventListener('error', () => {
-      document.body.setAttribute('data-art-failed', '');
-      scheduleHitRegions();
+      const url = img.getAttribute('src');
+      if (!skin || !url || failedFrames.has(url)) return;
+      failedFrames.add(url);
+      cur = null; frame = 0;
+      if (running) { clearTimeout(timer); step(); }
     });
     img.addEventListener('load', () => {
       document.body.removeAttribute('data-art-failed');
       scheduleHitRegions();
     });
 
-    const clamp = value => Math.min(160, Math.max(48, Math.round(Number(value) || 56)));
-
-    function merge() {
+    function setSkin(manifest) {
       const states = {};
       for (const name of STATES) {
-        const own = user && user.states && user.states[name];
         const fallback = DEFAULT_SKIN.states[name];
-        // 逐级兜底：用户该状态 → 用户 idle → 内置该状态 → 内置 idle。
-        const pick = own && Array.isArray(own.frames) && own.frames.length ? own :
-          user && user.states && user.states.idle && user.states.idle.frames &&
-          user.states.idle.frames.length ? user.states.idle : fallback;
-        states[name] = {
-          fps: Math.min(24, Math.max(1, Math.round(pick.fps || fallback.fps || 6))),
-          loop: pick.loop === undefined ? fallback.loop !== false : !!pick.loop,
-          frames: pick.frames,
-        };
+        const candidates = [manifest.states[name], manifest.states.idle, fallback, DEFAULT_SKIN.states.idle];
+        states[name] = [...new Set(candidates.filter(Boolean))].map(def => ({
+          fps: Math.min(24, Math.max(1, Math.round(Number(def.fps) || fallback.fps || 6))),
+          loop: def.loop === undefined ? fallback.loop !== false : !!def.loop,
+          frames: def.frames,
+        }));
       }
-      skin = {
-        name: (user && user.name) || DEFAULT_SKIN.name,
-        size: (user && Array.isArray(user.size) && user.size.length === 2 ? user.size : DEFAULT_SKIN.size).map(clamp),
-        states,
-      };
+      skin = { size: (manifest.size || DEFAULT_SKIN.size).map(clamp), states };
+      failedFrames.clear();
+      petOpaqueCache.clear();
       cur = null; frame = 0; oneShot = null;
-      // 生效尺寸交给 native：宠物收起态的窗口形状跟素材走。
       ipc({ cmd: 'pet-size', width: skin.size[0], height: skin.size[1] });
-      // 皮肤是异步加载的：宿主的 applyConfig(pet) 可能先到、当时 skin 还是
-      // null，start() 被吞。皮肤就位后按当前配置把引擎拉起来。
-      if (state.config.pet) start(); else sync();
+      if (state.config.pet) {
+        if (running) { clearTimeout(timer); step(); } else start();
+      }
     }
 
     // 状态优先级：拖拽 > 一次性反应 > 播放/待机。
@@ -140,98 +139,114 @@
     }
     function step() {
       if (!running) return;
-      const name = pickState();
+      let name = pickState();
+      let def = definition(name);
       if (name !== cur) { cur = name; frame = 0; }
-      const def = skin.states[name];
-      const url = def.frames[Math.min(frame, def.frames.length - 1)];
-      // 同帧不重设 src：避免 GIF 被周期性重放、静态图被反复解码。
+      if (def && frame >= def.frames.length) {
+        frame = 0;
+        // A one-shot invocation ends after one sequence, even when its
+        // fallback is an otherwise looping idle/playing animation.
+        if (oneShot === name) {
+          oneShot = null;
+          name = pickState(); cur = name;
+          def = definition(name);
+        }
+      }
+      if (!def) {
+        document.body.setAttribute('data-art-failed', '');
+        scheduleHitRegions();
+        return;
+      }
+      const url = def.frames[frame];
+      // Stable state snapshots and single-frame GIFs never reset their src.
       if (img.getAttribute('src') !== url) img.src = url;
       frame += 1;
-      if (frame >= def.frames.length) {
-        frame = 0;
-        if (def.loop === false) oneShot = null; // 一次性状态播完回基础态
-      }
       timer = setTimeout(step, Math.max(40, 1000 / def.fps));
     }
-    function start() { if (running || !skin) return; running = true; step(); }
+    function start() { if (running || !skin) return; running = true; cur = null; step(); }
     function stop() { running = false; clearTimeout(timer); }
-    function sync() { if (running) { clearTimeout(timer); step(); } }
-    function oneShotPlay(name) { if (running && skin.states[name]) { oneShot = name; sync(); } }
-
-    function setSkin(manifest) {
-      const states = {};
-      for (const name of STATES) {
-        const def = manifest && manifest.states && manifest.states[name];
-        const frames = def && Array.isArray(def.frames) ?
-          def.frames.filter(url => typeof url === 'string' && url).slice(0, 64) : [];
-        if (!frames.length) continue;
-        states[name] = { fps: Number(def.fps) || undefined, loop: def.loop, frames };
-      }
-      user = Object.keys(states).length ? {
-        name: typeof manifest.name === 'string' && manifest.name ? manifest.name : '自定义宠物',
-        size: Array.isArray(manifest.size) && manifest.size.length === 2 ? manifest.size : null,
-        states,
-      } : null;
-      merge();
-      sync();
+    function sync() {
+      if (running && pickState() !== cur) { clearTimeout(timer); step(); }
+    }
+    function oneShotPlay(name) {
+      if (running && skin.states[name]) { oneShot = name; cur = null; sync(); }
     }
 
-    // 用户素材：宿主伺服 mini-skin/pet.json（显式帧清单），没有清单的状态按
-    // 文件名约定探测（<状态>.<ext>、<状态>-<序号>.<ext>）。探测用 HEAD：
-    // 404 的候选 URL 绝不能进 frames，否则 img error 会误触发 ♫ 兜底。
+    const SKIN_EXTS = ['png', 'gif', 'webp', 'svg', 'jpg', 'jpeg'];
+    const withRevision = (url, revision) => `${url}?mini-rev=${revision}`;
     async function probeFrame(url) {
       try {
-        // no-store：热重载时同名文件可能已被替换，缓存会喂回旧图/旧状态。
         const response = await fetch(url, { method: 'HEAD', cache: 'no-store' });
         return response.ok;
       } catch (_) { return false; }
     }
-    const SKIN_EXTS = ['png', 'gif', 'webp', 'svg', 'jpg'];
-    async function framesByConvention(name) {
-      const frames = [];
-      let base = null;
-      for (const ext of SKIN_EXTS) {
-        const url = `mini-skin/${name}.${ext}`;
-        if (await probeFrame(url)) { base = url; break; }
-      }
-      if (!base) return frames;
-      frames.push(base);
-      for (let index = 2; index <= 64; index += 1) {
-        let found = null;
+    async function framesByConvention(name, revision) {
+      const find = async stem => {
         for (const ext of SKIN_EXTS) {
-          const url = `mini-skin/${name}-${index}.${ext}`;
-          if (await probeFrame(url)) { found = url; break; }
+          const url = withRevision(`mini-skin/${stem}.${ext}`, revision);
+          if (await probeFrame(url)) return url;
         }
-        if (!found) break;
-        frames.push(found);
+        return null;
+      };
+      // Both idle.png + idle-2.png and idle-1.png + idle-2.png are accepted.
+      const first = await find(name) || await find(`${name}-1`);
+      if (!first) return [];
+      const frames = [first];
+      for (let index = 2; index <= 64; index += 1) {
+        const url = await find(`${name}-${index}`);
+        if (!url) break;
+        frames.push(url);
       }
       return frames;
     }
+    function decodeFrame(url) {
+      return new Promise(resolve => {
+        const image = new Image();
+        image.onload = () => resolve(image.naturalWidth && image.naturalHeight ?
+          [image.naturalWidth, image.naturalHeight] : null);
+        image.onerror = () => resolve(null);
+        image.src = url;
+      });
+    }
     async function loadUserSkin() {
+      const generation = ++loadGeneration;
+      const revision = `${Date.now()}-${generation}`;
       let spec = null;
       try {
-        const response = await fetch('mini-skin/pet.json', { cache: 'no-store' });
+        const response = await fetch(withRevision('mini-skin/pet.json', revision), { cache: 'no-store' });
         if (response.ok) spec = await response.json();
       } catch (_) { /* 没有素材目录：内置默认。 */ }
-      const manifest = {
-        name: spec && spec.name,
-        size: spec && spec.size,
-        states: {},
-      };
-      for (const name of STATES) {
-        const def = spec && spec.states && spec.states[name];
-        let fps = def && def.fps;
-        let loop = def && def.loop;
-        let urls = [];
-        if (def && Array.isArray(def.frames) && def.frames.length) {
-          urls = def.frames
-            .map(file => (typeof file === 'string' ? `mini-skin/${file.trim().toLowerCase()}` : ''))
-            .filter(url => url && !url.endsWith('/'));
-        } else {
-          urls = await framesByConvention(name);
-        }
-        if (urls.length) manifest.states[name] = { fps, loop, frames: urls };
+      if (generation !== loadGeneration) return;
+      const manifest = { size: null, states: {} };
+      if (spec && Array.isArray(spec.size) && spec.size.length === 2 &&
+          spec.size.every(value => Number.isFinite(Number(value)) && Number(value) > 0)) {
+        manifest.size = spec.size;
       }
+      const decoded = new Map();
+      let inferredSize = null;
+      for (const name of STATES) {
+        if (generation !== loadGeneration) return;
+        const def = spec && spec.states && spec.states[name];
+        let urls;
+        if (def && Array.isArray(def.frames) && def.frames.length) {
+          urls = def.frames.slice(0, 64).map(file => typeof file === 'string' && file.trim() ?
+            withRevision(`mini-skin/${file.trim().toLowerCase()}`, revision) : null);
+        } else {
+          urls = await framesByConvention(name, revision);
+        }
+        if (!urls.length || urls.some(url => !url)) continue;
+        const sizes = await Promise.all(urls.map(url => {
+          if (!decoded.has(url)) decoded.set(url, decodeFrame(url));
+          return decoded.get(url);
+        }));
+        if (generation !== loadGeneration) return;
+        // A partial explicit animation is not silently reordered or shortened.
+        if (sizes.some(size => !size)) continue;
+        if (!inferredSize) inferredSize = sizes[0];
+        manifest.states[name] = { fps: def && def.fps, loop: def && def.loop, frames: urls };
+      }
+      if (generation !== loadGeneration) return;
+      manifest.size = manifest.size || inferredSize;
       setSkin(manifest);
     }
 
@@ -251,10 +266,6 @@
     document.body.dataset.peek = String(!!c.peek);
     root.style.setProperty('--scale', String(c.scale || 1));
     root.style.setProperty('--opacity', String(c.opacity == null ? 1 : c.opacity));
-    for (const [item, key] of [['topmost', 'topmost'], ['pet', 'pet'], ['edge-hide', 'edgeHide'], ['lock', 'locked']]) {
-      const node = document.querySelector(`[data-menu="${item}"]`);
-      if (node) node.setAttribute('aria-checked', String(!!c[key]));
-    }
     scheduleHitRegions();
     // 宠物态开关驱动素材动画引擎；皮肤尺寸由 pet-size 上报，这里只管起停。
     if (c.pet) Pet.start(); else Pet.stop();
@@ -427,43 +438,11 @@
 
   // --- 右键菜单 -------------------------------------------------------------
 
-  const menu = $('menu');
-  function closeMenu() {
-    if (!menu) return;
-    menu.hidden = true;
-    document.body.classList.remove('menu-open');
-  }
+  // Native popups can extend beyond the compact WebView's clipped bounds.
   window.addEventListener('contextmenu', event => {
     event.preventDefault();
-    if (!menu) return;
-    // 锁定态不弹菜单：整窗都穿透了，弹出来也点不到，只会让人以为坏了。
-    if (state.config.locked) return;
-    menu.hidden = false;
-    document.body.classList.add('menu-open');
-    const width = menu.offsetWidth, height = menu.offsetHeight;
-    menu.style.left = `${Math.max(4, Math.min(event.clientX, innerWidth - width - 4))}px`;
-    menu.style.top = `${Math.max(4, Math.min(event.clientY, innerHeight - height - 4))}px`;
-    scheduleHitRegions();
+    if (!state.config.locked) ipc({ cmd: 'context-menu' });
   });
-  document.addEventListener('pointerdown', event => {
-    if (menu && !menu.hidden && !menu.contains(event.target)) closeMenu();
-  }, true);
-  window.addEventListener('blur', closeMenu);
-  if (menu) {
-    menu.addEventListener('click', event => {
-      const button = event.target.closest('[data-menu]');
-      if (!button) return;
-      const item = button.dataset.menu;
-      // 开关项立刻回显：native 侧是权威，但菜单不该等一拍才动。
-      if (button.getAttribute('role') === 'menuitemcheckbox') {
-        const next = button.getAttribute('aria-checked') !== 'true';
-        button.setAttribute('aria-checked', String(next));
-      }
-      closeMenu();
-      if (item === 'size') { flash('用设置页调整小窗尺寸'); return; }
-      ipc({ cmd: 'menu', item, on: button.getAttribute('aria-checked') === 'true' });
-    });
-  }
 
   // 悬停驱动两件事：宠物态展开成播放胶囊（pet-hover 交给 native 改窗体尺寸）、
   // 展开态传输键的显隐（hovering 类）。收起延迟 320ms 防边界抖动。
@@ -487,6 +466,14 @@
 
   window.hertzMini = {
     applySnapshot, applyPosition, applyCover, applyConfig, flash,
+    resetInteraction() {
+      window.dispatchEvent(new Event('pointercancel'));
+      clearTimeout(state.hoverTimer);
+      state.dragging = false;
+      document.body.classList.remove('hovering', 'dragging');
+      Pet.sync();
+      scheduleHitRegions();
+    },
     // 宿主检测到素材目录变化（tick 签名）后调用：整链重拉，pet-size 随新皮肤上报。
     reloadSkin: () => Pet.loadUserSkin(),
   };

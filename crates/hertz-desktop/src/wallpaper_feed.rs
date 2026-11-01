@@ -241,15 +241,16 @@ impl Feed {
             ));
         }
         // v2：状态与频谱序号分别单调；两者都不推进才是重放（§11.2）。
-        let status_stale = self
-            .last_status_seq
-            .is_some_and(|seq| snapshot.seq <= seq);
+        let regressed = self.last_status_seq.is_some_and(|seq| snapshot.seq < seq)
+            || self
+                .last_spectrum_seq
+                .is_some_and(|seq| snapshot.spectrum_seq < seq);
+        let status_stale = self.last_status_seq.is_some_and(|seq| snapshot.seq <= seq);
         let spectrum_stale = self
             .last_spectrum_seq
             .is_some_and(|seq| snapshot.spectrum_seq <= seq);
         if self.session.as_deref() == Some(snapshot.server.session.as_str())
-            && status_stale
-            && spectrum_stale
+            && (regressed || (status_stale && spectrum_stale))
         {
             return Err(FeedError::new(
                 ERR_STALE,
@@ -514,6 +515,36 @@ mod tests {
         assert_eq!(seqs, vec![(2, 10), (2, 11)]);
         assert_eq!(error.code, ERR_EVENTS, "服务端关流是正常收尾");
         server.join().unwrap();
+    }
+
+    #[test]
+    fn advancing_one_counter_cannot_roll_back_the_other() {
+        let dir = temp_dir();
+        std::fs::create_dir_all(&dir.0).unwrap();
+        let mut feed = Feed::new(make_profile(&dir, Some(PROTOCOL), true, 1)).unwrap();
+        let mut value = snapshot(10);
+        value.spectrum_seq = 10;
+        feed.accept_snapshot(&value, None).unwrap();
+        value.seq = 9;
+        value.spectrum_seq = 11;
+        assert_eq!(
+            feed.accept_snapshot(&value, None).unwrap_err().code,
+            ERR_STALE
+        );
+        value.seq = 11;
+        value.spectrum_seq = 9;
+        assert_eq!(
+            feed.accept_snapshot(&value, None).unwrap_err().code,
+            ERR_STALE
+        );
+        value.seq = 10;
+        value.spectrum_seq = 10;
+        assert_eq!(
+            feed.accept_snapshot(&value, None).unwrap_err().code,
+            ERR_STALE
+        );
+        value.spectrum_seq = 11;
+        feed.accept_snapshot(&value, None).unwrap();
     }
 
     /// v2 去重：状态序号单独推进（1 Hz 状态帧/心跳）必须接受。

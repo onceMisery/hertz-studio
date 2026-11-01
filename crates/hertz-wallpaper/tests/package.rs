@@ -18,7 +18,9 @@ const FIXTURE_SHA256: &str = "abc58d5127d7cdf313beb9ec8ee839860a9c6bfbc48c8b8eb6
 const WORK_ID: &str = "c17ed10a-5c55-4a52-85dc-7509f9e88aae";
 
 fn fixture_png() -> Vec<u8> {
-    let bytes = STANDARD.decode(FIXTURE_PNG_B64).expect("文档 fixture base64");
+    let bytes = STANDARD
+        .decode(FIXTURE_PNG_B64)
+        .expect("文档 fixture base64");
     assert_eq!(bytes.len(), 70);
     let digest = format!("{:x}", Sha256::digest(&bytes));
     assert_eq!(digest, FIXTURE_SHA256, "文档 fixture 哈希必须自洽");
@@ -84,7 +86,8 @@ fn assert_code(error: PackageError, code: &str) {
 #[test]
 fn doc_fixture_round_trips_and_revalidates() {
     let bytes = valid_package();
-    let first = validate_package(std::io::Cursor::new(bytes.clone())).expect("文档 fixture 必须可安装");
+    let first =
+        validate_package(std::io::Cursor::new(bytes.clone())).expect("文档 fixture 必须可安装");
     assert_eq!(first.manifest.work_id, WORK_ID);
     assert_eq!(first.entries.len(), 1);
     assert_eq!(first.entries[0].sha256, FIXTURE_SHA256);
@@ -159,10 +162,7 @@ fn mime_mutation_flips_content_inconsistency() {
     value["files"][0]["mime"] = "image/jpeg".into();
     let manifest = serde_json::to_vec(&value).unwrap();
     validate_package(std::io::Cursor::new(build_package(
-        &[
-            ("manifest.json", manifest),
-            ("assets/background.png", png),
-        ],
+        &[("manifest.json", manifest), ("assets/background.png", png)],
         false,
     )))
     .expect("合法 mime 变异不破坏包合同");
@@ -223,14 +223,20 @@ fn symlink_entries_are_rejected() {
             .unwrap();
         std::io::Write::write_all(&mut writer, manifest.as_bytes()).unwrap();
         writer
-            .add_symlink("assets/link.png", "assets/background.png", SimpleFileOptions::default())
+            .add_symlink(
+                "assets/link.png",
+                "assets/background.png",
+                SimpleFileOptions::default(),
+            )
             .unwrap();
         writer.finish().unwrap();
     }
     // 符号链接在声明检查之前被拒；即便声明了也必须挡在解包之前。
     let error = validate_package(std::io::Cursor::new(buffer.into_inner())).unwrap_err();
     assert!(
-        error.code == "symlink_entry" || error.code == "undeclared_file" || error.code == "invalid_path",
+        error.code == "symlink_entry"
+            || error.code == "undeclared_file"
+            || error.code == "invalid_path",
         "符号链接必须被拒绝：{error}"
     );
 }
@@ -256,6 +262,15 @@ fn compression_bombs_are_rejected() {
 fn oversize_manifest_is_rejected_before_parse() {
     let big = vec![b' '; hertz_wallpaper::MAX_MANIFEST_BYTES + 1];
     assert_code(validate_package_from_manifest(&big), "manifest_too_large");
+}
+
+#[test]
+fn compressed_manifest_bomb_is_bounded_before_json_parsing() {
+    let zip = build_package(&[("manifest.json", vec![b' '; 4 * 1024 * 1024])], true);
+    assert_code(
+        validate_package(std::io::Cursor::new(zip)).unwrap_err(),
+        "manifest_too_large",
+    );
 }
 
 fn validate_package_from_manifest(bytes: &[u8]) -> PackageError {

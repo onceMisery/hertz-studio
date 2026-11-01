@@ -19,28 +19,14 @@
       <div id="subtitle">—</div>
     </div>
     <div id="transport">
-      <button id="prev" class="icon" type="button" aria-label="上一首" data-hit><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 6v12M19 6l-9 6 9 6z"/></svg></button>
+      <button id="prev" class="icon" type="button" aria-label="上一首" data-hit><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 6v12"/><path d="M19 6l-9 6 9 6z" fill="currentColor" stroke="none"/></svg></button>
       <button id="play" class="primary" type="button" aria-label="播放" data-hit>
-        <svg id="play-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5l11 7-11 7z"/></svg>
+        <svg id="play-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5l11 7-11 7z" fill="currentColor" stroke="none"/></svg>
         <svg id="pause-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5v14M15 5v14"/></svg>
       </button>
-      <button id="next" class="icon" type="button" aria-label="下一首" data-hit><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17 6v12M5 6l9 6-9 6z"/></svg></button>
+      <button id="next" class="icon" type="button" aria-label="下一首" data-hit><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17 6v12"/><path d="M5 6l9 6-9 6z" fill="currentColor" stroke="none"/></svg></button>
     </div>
     <div id="progress" aria-hidden="true"><i id="progress-fill"></i></div>
-  </div>
-
-  <!-- 右键菜单在页面里画：不引 TrackPopupMenu，样式跟着主题走，也免得
-       native 侧为每种菜单项再挂一次窗口过程。 -->
-  <div id="menu" hidden role="menu">
-    <button type="button" role="menuitem" data-menu="restore">回到主窗口</button>
-    <button type="button" role="menuitemcheckbox" data-menu="topmost" aria-checked="true">置顶显示</button>
-    <button type="button" role="menuitemcheckbox" data-menu="pet" aria-checked="false">桌面宠物（透明穿透）</button>
-    <button type="button" role="menuitemcheckbox" data-menu="edge-hide" aria-checked="false">贴边自动隐藏</button>
-    <button type="button" role="menuitemcheckbox" data-menu="lock" aria-checked="false">锁定（完全穿透）</button>
-    <div class="sep" role="separator"></div>
-    <button type="button" role="menuitem" data-menu="size">尺寸…</button>
-    <div class="sep" role="separator"></div>
-    <button type="button" role="menuitem" data-menu="quit">退出小窗</button>
   </div>
 
   <div id="flash" hidden></div>

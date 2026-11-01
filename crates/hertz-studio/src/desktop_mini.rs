@@ -12,8 +12,8 @@
 //!   2. 主窗口的可见性回传。小窗要知道「主界面还在不在」才能自动接管 /
 //!      自动收回，而这个真值只有浏览器那边说得准。
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::body::Bytes;
@@ -32,43 +32,68 @@ pub(crate) const PROTOCOL: u32 = 1;
 /// 主窗口可见性被判定为「真的没了」所需的持续时间。
 ///
 /// `visibilitychange` 分不清最小化和切标签页：Alt-Tab 切走也会 hidden。
-/// 所以这里不做瞬时判断，只报「上次可见到现在多久了」，由小窗组件自己定阈值
-/// （默认 1.2s）。这样一次快速切走不会把小窗弹出来。
+/// 从实际 hidden 转换开始去抖，1.2s 后才向小窗报告不可见。
 const MAIN_HIDDEN_DEBOUNCE: Duration = Duration::from_millis(1200);
+const MAX_WINDOW_TITLE_CHARS: usize = 512;
 
 /// 主窗口可见性。整个进程只有一份（一个服务实例对应一个组件），
-/// 用原子量而不是塞进 AppState：可见性不属于播放真值，别让它参与状态快照。
-static MAIN_VISIBLE: AtomicBool = AtomicBool::new(true);
-static MAIN_LAST_SEEN: AtomicU64 = AtomicU64::new(0);
+/// 锁内一起更新可见性、转换时刻与窗口标题，快照不会读到不同次上报的组合。
+static MAIN_VISIBILITY: Mutex<MainVisibility> = Mutex::new(MainVisibility::new());
 
-/// 主窗口上报可见性。由 `/v1/ui/notice` 的 `main-visibility` 动作转进来。
-pub(crate) fn note_main_visibility(visible: bool) {
-    MAIN_VISIBLE.store(visible, Ordering::Relaxed);
-    if visible {
-        MAIN_LAST_SEEN.store(monotonic_ms(), Ordering::Relaxed);
+struct MainVisibility {
+    visible: bool,
+    changed_at_ms: Option<u64>,
+    window_title: String,
+}
+
+impl MainVisibility {
+    const fn new() -> Self {
+        Self {
+            visible: true,
+            changed_at_ms: None,
+            window_title: String::new(),
+        }
+    }
+
+    fn note(&mut self, visible: bool, window_title: Option<&str>, now_ms: u64) {
+        if self.changed_at_ms.is_none() || self.visible != visible {
+            self.changed_at_ms = Some(now_ms);
+        }
+        self.visible = visible;
+        if let Some(title) = window_title {
+            self.window_title = title.chars().take(MAX_WINDOW_TITLE_CHARS).collect();
+        }
+    }
+
+    fn since_ms(&self, now_ms: u64) -> u64 {
+        self.changed_at_ms
+            .map_or(0, |changed| now_ms.saturating_sub(changed))
+    }
+
+    fn hidden(&self, now_ms: u64) -> bool {
+        !self.visible && self.since_ms(now_ms) >= MAIN_HIDDEN_DEBOUNCE.as_millis() as u64
+    }
+
+    fn snapshot(&self, now_ms: u64) -> Value {
+        json!({
+            "visible": !self.hidden(now_ms),
+            "sinceMs": self.since_ms(now_ms),
+            "windowTitle": self.window_title,
+        })
     }
 }
 
-/// 主窗口是否已经被判定为「不在了」。这是自动接管的唯一依据。
-pub(crate) fn main_hidden() -> bool {
-    if MAIN_VISIBLE.load(Ordering::Relaxed) {
-        return false;
-    }
-    let last = MAIN_LAST_SEEN.load(Ordering::Relaxed);
-    if last == 0 {
-        // 从没上报过可见：没有证据说它藏起来了，别自动弹小窗。
-        return false;
-    }
-    monotonic_ms().saturating_sub(last) >= MAIN_HIDDEN_DEBOUNCE.as_millis() as u64
+/// 主窗口上报可见性。由 `/v1/ui/notice` 的 `main-visibility` 动作转进来。
+pub(crate) fn note_main_visibility(visible: bool, window_title: Option<&str>) {
+    let mut visibility = MAIN_VISIBILITY.lock().unwrap_or_else(|e| e.into_inner());
+    visibility.note(visible, window_title, monotonic_ms());
 }
 
 fn monotonic_ms() -> u64 {
     // 进程内单调毫秒。用 OnceLock 固定基准，保证差值只增不减。
-    // 下限 1：`main_hidden()` 用 0 当「从未上报」的哨兵，而进程启动后的
-    // 第一毫秒里 elapsed() 真的会是 0——首测就撞上了，不能让两者相撞。
     static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
     let start = START.get_or_init(Instant::now);
-    (start.elapsed().as_millis() as u64).max(1)
+    start.elapsed().as_millis() as u64
 }
 
 /// 小窗快照：轻量、可 500ms 轮询，绝不等待封面 I/O。
@@ -81,6 +106,11 @@ pub(crate) async fn snapshot(state: &Arc<AppState>) -> Value {
         Some(track_id) => Some(build_track(state, track_id, player.duration_ms).await),
         None => None,
     };
+
+    let main = MAIN_VISIBILITY
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .snapshot(monotonic_ms());
 
     json!({
         "protocol": PROTOCOL,
@@ -96,10 +126,7 @@ pub(crate) async fn snapshot(state: &Arc<AppState>) -> Value {
         "playing": player.playing,
         "buffering": buffering,
         "track": track,
-        "main": {
-            "visible": !main_hidden(),
-            "sinceMs": monotonic_ms().saturating_sub(MAIN_LAST_SEEN.load(Ordering::Relaxed)),
-        },
+        "main": main,
         // 与桌面歌词同一语义：位置是「呈现时刻」的位置，不是解码器读数。
         "timing": "presentation_applied",
     })
@@ -212,10 +239,16 @@ pub(crate) async fn control(
     if !MINI_ACTIONS.contains(&request.action.as_str()) {
         return Err(bad_request("不支持的小窗播控操作"));
     }
-    let player = state.audio.snapshot();
     if request.session != state.server_instance_id() {
         return Err(control_stale());
     }
+    // restore 只是个界面信号，与播放代际无关，但仍须属于当前服务会话。
+    if request.action == "restore" {
+        request_restore(state).await?;
+        return Ok(json!({ "ok": true }));
+    }
+
+    let player = state.audio.snapshot();
     if let Some(generation) = request.generation.as_deref() {
         if generation != player.generation.to_string() {
             return Err(control_stale());
@@ -225,12 +258,6 @@ pub(crate) async fn control(
         .track_id
         .as_deref()
         .map(|track_id| (track_id, player.generation));
-
-    // restore 只是个界面信号，与播放代际无关，提前于代际校验处理。
-    if request.action == "restore" {
-        request_restore(state).await?;
-        return Ok(json!({ "ok": true }));
-    }
 
     // toggle 由当前真值决定方向，不读 UI 侧缓存的布尔——小窗关着的时候
     // 那份缓存没有更新来源。
@@ -258,11 +285,7 @@ pub(crate) async fn control(
 }
 
 fn control_stale() -> ApiError {
-    ApiError::new(
-        StatusCode::CONFLICT,
-        "stale_playback",
-        "播放已变化，请重试",
-    )
+    ApiError::new(StatusCode::CONFLICT, "stale_playback", "播放已变化，请重试")
 }
 
 /// 小窗请求回到主窗口。走既有的 `/v1/ui/notice` 广播：主界面那条 WS 本来就
@@ -278,9 +301,6 @@ pub(crate) async fn request_restore(state: &Arc<AppState>) -> Result<(), ApiErro
 #[cfg(test)]
 mod tests {
     use super::*;
-    // 可见性判定读的是进程级 static，测试之间必须串行，否则一个用例的
-    // 去抖等待会被另一个用例的复位打断（首次接进模块树时踩过）。
-    static VISIBILITY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn action_allowlist_is_explicit() {
@@ -295,32 +315,117 @@ mod tests {
 
     #[test]
     fn main_visibility_never_auto_enters_without_evidence() {
-        let _guard = VISIBILITY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        // 组件刚起来、主窗口还没上报过一次可见：没有证据说它藏起来了。
-        MAIN_VISIBLE.store(true, Ordering::Relaxed);
-        MAIN_LAST_SEEN.store(0, Ordering::Relaxed);
-        assert!(!main_hidden());
+        let visibility = MainVisibility::new();
+        assert!(!visibility.hidden(60_000));
+        assert_eq!(
+            visibility.snapshot(60_000),
+            json!({
+                "visible": true, "sinceMs": 0, "windowTitle": "",
+            })
+        );
     }
 
     #[test]
-    fn main_hidden_needs_the_debounce_to_elapse() {
-        let _guard = VISIBILITY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        MAIN_LAST_SEEN.store(monotonic_ms(), Ordering::Relaxed);
-        MAIN_VISIBLE.store(true, Ordering::Relaxed);
-        note_main_visibility(false);
-        // 刚上报 hidden：还在去抖窗口内，不算藏起来。
-        assert!(!main_hidden());
-        std::thread::sleep(MAIN_HIDDEN_DEBOUNCE + Duration::from_millis(60));
-        assert!(main_hidden());
-        // 主窗口回来：立刻不算藏起来。
-        note_main_visibility(true);
-        assert!(!main_hidden());
+    fn first_report_can_be_hidden_at_clock_zero() {
+        let mut visibility = MainVisibility::new();
+        visibility.note(false, None, 0);
+        assert!(!visibility.hidden(1199));
+        assert!(visibility.hidden(1200));
     }
 
     #[test]
-    fn monotonic_ms_only_moves_forward() {
-        let first = monotonic_ms();
-        std::thread::sleep(Duration::from_millis(5));
-        assert!(monotonic_ms() >= first);
+    fn debounce_starts_at_hidden_transition_after_a_long_visible_period() {
+        let mut visibility = MainVisibility::new();
+        visibility.note(true, None, 10);
+        visibility.note(false, None, 60_000);
+        assert!(!visibility.hidden(61_199));
+        assert!(visibility.hidden(61_200));
+        assert_eq!(visibility.snapshot(61_200)["sinceMs"], 1200);
+    }
+
+    #[test]
+    fn repeated_reports_and_hidden_title_changes_preserve_transition_age() {
+        let mut visibility = MainVisibility::new();
+        visibility.note(false, Some("First · hertz-studio"), 100);
+        visibility.note(false, Some("Second · hertz-studio"), 1100);
+        visibility.note(false, None, 1299);
+        assert!(!visibility.hidden(1299));
+        assert_eq!(
+            visibility.snapshot(1300),
+            json!({
+                "visible": false, "sinceMs": 1200, "windowTitle": "Second · hertz-studio",
+            })
+        );
+        visibility.note(true, None, 1400);
+        assert!(!visibility.hidden(1400));
+        visibility.note(true, None, 1900);
+        assert_eq!(visibility.snapshot(2000)["sinceMs"], 600);
+        visibility.note(false, None, 2100);
+        assert!(!visibility.hidden(3299));
+        assert!(visibility.hidden(3300));
+    }
+
+    #[test]
+    fn window_title_is_bounded_without_breaking_unicode_and_can_be_cleared() {
+        let mut visibility = MainVisibility::new();
+        visibility.note(true, Some(&"音🎵".repeat(MAX_WINDOW_TITLE_CHARS)), 0);
+        assert_eq!(
+            visibility.window_title.chars().count(),
+            MAX_WINDOW_TITLE_CHARS
+        );
+        visibility.note(true, None, 1);
+        assert_eq!(
+            visibility.window_title.chars().count(),
+            MAX_WINDOW_TITLE_CHARS
+        );
+        visibility.note(true, Some(""), 2);
+        assert!(visibility.window_title.is_empty());
+    }
+
+    #[test]
+    fn visibility_notice_fields_remain_optional_and_title_is_camel_case() {
+        let default: crate::routes::UiNoticeRequest =
+            serde_json::from_value(json!({ "action": "main-visibility" })).unwrap();
+        assert!(default.hidden.is_none());
+        assert!(default.window_title.is_none());
+        let notice: crate::routes::UiNoticeRequest = serde_json::from_value(json!({
+            "action": "main-visibility", "hidden": true, "windowTitle": "曲目 · hertz-studio",
+        }))
+        .unwrap();
+        assert_eq!(notice.hidden, Some(true));
+        assert_eq!(notice.window_title.as_deref(), Some("曲目 · hertz-studio"));
+    }
+
+    #[tokio::test]
+    async fn restore_ignores_playback_generation_but_requires_current_session() {
+        let (state, handle) = crate::state::tests::playback_state().await;
+        let state = Arc::new(state);
+        let mut notices = state.events.subscribe();
+        let request = |action: &str, session: &str| MiniControlRequest {
+            action: action.to_owned(),
+            session: session.to_owned(),
+            generation: Some("stale-generation".to_owned()),
+        };
+        assert!(control(&state, request("restore", "another-session"))
+            .await
+            .is_err());
+        assert!(notices.try_recv().is_err());
+        assert!(
+            control(&state, request("pause", state.server_instance_id()))
+                .await
+                .is_err()
+        );
+        assert!(notices.try_recv().is_err());
+        assert_eq!(
+            control(&state, request("restore", state.server_instance_id()))
+                .await
+                .unwrap(),
+            json!({ "ok": true })
+        );
+        assert!(
+            matches!(notices.try_recv().unwrap(), crate::state::WsEvent::UiNotice { action } if action == "expand-capsule")
+        );
+        state.audio.shutdown();
+        handle.join().unwrap();
     }
 }

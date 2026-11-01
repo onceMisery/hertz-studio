@@ -9,7 +9,7 @@
 //! 解压总量有流式上限，超限立即终止，不分配后才检查。
 
 use std::collections::HashSet;
-use std::io::Read;
+use std::io::{Read, SeekFrom};
 
 use sha2::{Digest, Sha256};
 use zip::ZipArchive;
@@ -17,7 +17,7 @@ use zip::ZipArchive;
 use crate::manifest::{validate_manifest_bytes, Manifest, MANIFEST_PATH};
 use crate::paths::validate_rel_path_ext;
 use crate::{
-    PackageError, Result, MAX_COMPRESSION_RATIO, MAX_FILES, MAX_PACKAGE_BYTES,
+    PackageError, Result, MAX_COMPRESSION_RATIO, MAX_FILES, MAX_MANIFEST_BYTES, MAX_PACKAGE_BYTES,
     MAX_UNCOMPRESSED_BYTES,
 };
 
@@ -56,9 +56,20 @@ pub fn validate_archive<R: std::io::Read + std::io::Seek>(
     validate_archive_in_place(&mut archive, manifest)
 }
 
-fn open_archive<R: std::io::Read + std::io::Seek>(reader: R) -> Result<ZipArchive<R>> {
-    ZipArchive::new(reader)
-        .map_err(|error| PackageError::new("format_unsupported", format!("不是合法的 ZIP 容器：{error}")))
+fn open_archive<R: std::io::Read + std::io::Seek>(mut reader: R) -> Result<ZipArchive<R>> {
+    let bytes = reader
+        .seek(SeekFrom::End(0))
+        .map_err(|error| PackageError::new("format_unsupported", error.to_string()))?;
+    check_package_bytes(bytes)?;
+    reader
+        .seek(SeekFrom::Start(0))
+        .map_err(|error| PackageError::new("format_unsupported", error.to_string()))?;
+    ZipArchive::new(reader).map_err(|error| {
+        PackageError::new(
+            "format_unsupported",
+            format!("不是合法的 ZIP 容器：{error}"),
+        )
+    })
 }
 
 fn read_manifest_bytes<R: std::io::Read + std::io::Seek>(
@@ -67,9 +78,12 @@ fn read_manifest_bytes<R: std::io::Read + std::io::Seek>(
     let index = archive
         .index_for_name(MANIFEST_PATH)
         .ok_or_else(|| PackageError::new("missing_manifest", "包根缺少 manifest.json"))?;
-    let mut file = archive
-        .by_index(index)
-        .map_err(|error| PackageError::new("format_unsupported", format!("manifest.json 不可读：{error}")))?;
+    let mut file = archive.by_index(index).map_err(|error| {
+        PackageError::new(
+            "format_unsupported",
+            format!("manifest.json 不可读：{error}"),
+        )
+    })?;
     if file.compression() != zip::CompressionMethod::Stored
         && file.compression() != zip::CompressionMethod::Deflated
     {
@@ -78,9 +92,29 @@ fn read_manifest_bytes<R: std::io::Read + std::io::Seek>(
             "manifest.json 只允许 Store/Deflate",
         ));
     }
+    if file.size() > MAX_MANIFEST_BYTES as u64 {
+        return Err(PackageError::new(
+            "manifest_too_large",
+            "manifest.json 超过大小上限",
+        ));
+    }
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)
-        .map_err(|error| PackageError::new("format_unsupported", format!("manifest.json 读取失败：{error}")))?;
+    // 中央目录可以谎报尺寸，实际解压也必须在分配前截断。
+    file.by_ref()
+        .take(MAX_MANIFEST_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| {
+            PackageError::new(
+                "format_unsupported",
+                format!("manifest.json 读取失败：{error}"),
+            )
+        })?;
+    if bytes.len() > MAX_MANIFEST_BYTES {
+        return Err(PackageError::new(
+            "manifest_too_large",
+            "manifest.json 超过大小上限",
+        ));
+    }
     Ok(bytes)
 }
 
@@ -95,20 +129,27 @@ fn validate_archive_in_place<R: std::io::Read + std::io::Seek>(
         ));
     }
     let mut seen_lower: HashSet<String> = HashSet::new();
-    let mut declared: HashSet<&str> = manifest.files.iter().map(|file| file.path.as_str()).collect();
+    let mut declared: HashSet<&str> = manifest
+        .files
+        .iter()
+        .map(|file| file.path.as_str())
+        .collect();
     let mut verified = Vec::new();
     let mut total_uncompressed: u64 = 0;
     let mut saw_manifest = false;
 
     for index in 0..archive.len() {
-        let mut file = archive
-            .by_index(index)
-            .map_err(|error| PackageError::new("format_unsupported", format!("条目不可读：{error}")))?;
+        let mut file = archive.by_index(index).map_err(|error| {
+            PackageError::new("format_unsupported", format!("条目不可读：{error}"))
+        })?;
         let raw_name = file.name_raw().to_vec();
         let name = String::from_utf8(raw_name.clone())
             .map_err(|_| PackageError::new("invalid_path", "条目名不是合法 UTF-8"))?;
         if file.encrypted() {
-            return Err(PackageError::new("encrypted_entry", format!("条目已加密：{name}")));
+            return Err(PackageError::new(
+                "encrypted_entry",
+                format!("条目已加密：{name}"),
+            ));
         }
         match file.compression() {
             zip::CompressionMethod::Stored | zip::CompressionMethod::Deflated => {}
@@ -123,7 +164,10 @@ fn validate_archive_in_place<R: std::io::Read + std::io::Seek>(
             // S_IFLNK：符号链接在 ZIP 里靠 unix mode 表达；硬链接/reparse 无法在
             // 本容器中合法表达，解包一律新建文件（P1-02），这里只挡链接。
             if mode & 0o170_000 == 0o120_000 {
-                return Err(PackageError::new("symlink_entry", format!("条目是符号链接：{name}")));
+                return Err(PackageError::new(
+                    "symlink_entry",
+                    format!("条目是符号链接：{name}"),
+                ));
             }
         }
         let is_dir = name.ends_with('/');
@@ -172,9 +216,12 @@ fn validate_archive_in_place<R: std::io::Read + std::io::Seek>(
             if want == 0 {
                 break;
             }
-            let read = file
-                .read(&mut chunk[..want])
-                .map_err(|error| PackageError::new("format_unsupported", format!("条目 {name} 读取失败：{error}")))?;
+            let read = file.read(&mut chunk[..want]).map_err(|error| {
+                PackageError::new(
+                    "format_unsupported",
+                    format!("条目 {name} 读取失败：{error}"),
+                )
+            })?;
             if read == 0 {
                 break;
             }
@@ -184,7 +231,10 @@ fn validate_archive_in_place<R: std::io::Read + std::io::Seek>(
         if actual != declared_entry.bytes {
             return Err(PackageError::new(
                 "size_mismatch",
-                format!("条目 {name} 实际 {actual} 字节，声明 {} 字节", declared_entry.bytes),
+                format!(
+                    "条目 {name} 实际 {actual} 字节，声明 {} 字节",
+                    declared_entry.bytes
+                ),
             ));
         }
         total_uncompressed = total_uncompressed
@@ -211,7 +261,10 @@ fn validate_archive_in_place<R: std::io::Read + std::io::Seek>(
         });
     }
     if !saw_manifest {
-        return Err(PackageError::new("missing_manifest", "包根缺少 manifest.json"));
+        return Err(PackageError::new(
+            "missing_manifest",
+            "包根缺少 manifest.json",
+        ));
     }
     if let Some(remaining) = declared.iter().next() {
         return Err(PackageError::new(

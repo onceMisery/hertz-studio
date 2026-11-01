@@ -47,6 +47,7 @@
   // 帧门按 rAF 计数取模，不漂移；停绘恢复先重置计数与时间基准。
   var gate = { divisor: 2, budget: 30 };
   var frameCount = 0;
+  var pendingDt = 0;
   var sceneTime = 0;
   var ticks = 0;
   var draws = 0;
@@ -83,6 +84,7 @@
   function resetGate() {
     frameCount = 0;
     last = 0;
+    pendingDt = 0;
   }
 
   // motion=0 冻结环境运动（真实媒体时钟不变）；音频响应仍按 musicResponse 独立生效。
@@ -235,9 +237,12 @@
     if (feed.valid && feed.receivedAt == null) feed.receivedAt = now;
     // 场景时间按运动强度积分；真实媒体时钟（positionMs）单独随 feed 传递。
     sceneTime += dt * config.motion;
+    pendingDt = Math.min(100, pendingDt + dt);
     // 整数分频帧门：只提交第 N 帧；rAF 仍持续用于心跳与 feed 时效。
     frameCount++;
     if (frameCount % gate.divisor !== 0) return;
+    var frameDt = pendingDt;
+    pendingDt = 0;
     var bands = effectiveBands(now);
     var motionAllowed = motionActive();
     try {
@@ -248,7 +253,7 @@
         zodiac.setTime({ time: sceneTime / 1000, playing: scenePlaying() });
         if (zodiac.setMotion) zodiac.setMotion({ active: motionAllowed });
         // 外部时钟模式：本页是唯一调度器；旧 bundle 回退内部循环。
-        submitted = zodiac.render ? zodiac.render(now) : true;
+        submitted = zodiac.render ? zodiac.render(now, frameDt * config.motion / 1000, frameDt / 1000) : false;
       } else if (stage) {
         var shaped = bandsObject(bands);
         var level = 0;
@@ -256,14 +261,14 @@
         level /= BANDS;
         submitted = stage.frame({
           now: now,
-          dt: (dt * config.motion) / 1000,
+          dt: (frameDt * config.motion) / 1000,
           time: (feed.positionMs || 0) / 1000,
           position: feed.positionMs || 0,
           playing: scenePlaying(),
           motionActive: motionAllowed,
           reduced: false,
           sceneTime: sceneTime / 1000,
-          dynamicDt: (dt * config.motion) / 1000,
+          dynamicDt: (frameDt * config.motion) / 1000,
           deviceTier: 1,
           level: level,
           onset: 0,
@@ -487,6 +492,7 @@
   }
 
   function applyFollow() {
+    if (media) return;
     if (config.source !== 'follow' || !mounted || !followSpace) return;
     var id = canonicalScene(followSpace.scene);
     if (!allowedScene(id)) return;
@@ -521,7 +527,8 @@
     if (!media || media.state === 'failed') return;
     media.state = 'failed';
     media.error = code;
-    if (media.el) media.el.remove();
+    clearTimeout(media.deadline);
+    releaseMediaElement(media);
     // 心跳续跑：呈现失败但页面存活，由原生决定回退策略（C50），避免看门狗误判停摆。
     notify('wallpaper_media_failed ' + code);
   }
@@ -552,6 +559,10 @@
     if (backend === 'media') backend = null;
     clearInterval(record.timer);
     clearTimeout(record.deadline);
+    releaseMediaElement(record);
+  }
+
+  function releaseMediaElement(record) {
     var el = record.el;
     record.el = null;
     if (!el) return;
@@ -565,14 +576,14 @@
 
   // desc 为 null → 交还场景后端；desc 畸形 → 报失败但不动当前呈现；合法 → 换呈现。
   function applyMedia(desc) {
-    if (desc == null || typeof desc !== 'object') {
+    if (desc == null) {
       unmountMedia();
-      return false;
+      return enabled ? mount() : false;
     }
-    var kind = desc.kind === 'image' || desc.kind === 'video' ? desc.kind : null;
+    var kind = desc && (desc.kind === 'image' || desc.kind === 'video') ? desc.kind : null;
     var url = typeof desc.url === 'string' ? desc.url : '';
     var fit = desc.fit === 'contain' || desc.fit === 'stretch' ? desc.fit : 'cover';
-    if (!kind || !MEDIA_URL.test(url) || !host) {
+    if (!kind || !MEDIA_URL.test(url) || url.split('/').slice(4).some(part => !part || part === '.' || part === '..') || !host) {
       notify('wallpaper_media_failed media_invalid_selection');
       return false;
     }
@@ -604,11 +615,15 @@
       notify('wallpaper_heartbeat ' + record.ticks + ' 0 1 0');
     }, MEDIA_HEARTBEAT_MS);
     host.appendChild(el);
+    record.deadline = setTimeout(function () {
+      if (token === mediaToken && record.state === 'loading') failMedia('media_first_frame_timeout');
+    }, MEDIA_FIRST_FRAME_TIMEOUT_MS);
     if (kind === 'image') {
       el.src = url;
       var decoded = el.decode ? el.decode() : Promise.reject(new Error('decode_unsupported'));
       decoded.then(function () {
-        if (token !== mediaToken) return;
+        if (token !== mediaToken || record.state !== 'loading') return;
+        clearTimeout(record.deadline);
         el.style.visibility = 'visible';
         record.state = 'ready';
         mediaReady();
@@ -624,8 +639,9 @@
       el.setAttribute('playsinline', '');
       var settled = false;
       var markReady = function () {
-        if (settled || token !== mediaToken) return;
+        if (settled || token !== mediaToken || record.state !== 'loading') return;
         settled = true;
+        clearTimeout(record.deadline);
         el.style.visibility = 'visible';
         record.state = 'ready';
         mediaReady();
@@ -637,9 +653,6 @@
       } else {
         el.addEventListener('loadeddata', markReady, { once: true });
       }
-      record.deadline = setTimeout(function () {
-        if (!settled && token === mediaToken) failMedia('media_first_frame_timeout');
-      }, MEDIA_FIRST_FRAME_TIMEOUT_MS);
       el.src = url;
       var attempt = el.play();
       if (attempt && attempt.catch) attempt.catch(function () {
@@ -660,6 +673,7 @@
       if (allowed[DEFAULT_SCENE]) ALLOWED = allowed;
     }
     var previousSource = config.source;
+    var previousQuality = config.quality;
     var nextSource = next.source === 'fixed' ? 'fixed' : 'follow';
     config.musicResponse = next.musicResponse !== false;
     if (Number.isFinite(Number(next.brightness))) config.brightness = Math.min(1, Math.max(0.25, Number(next.brightness)));
@@ -675,6 +689,12 @@
     if (zodiac && zodiac.setMotion && backend === 'zodiac') zodiac.setMotion({ active: motionActive() });
     applyMediaMotion();
     if (!mounted) return;
+    if (previousQuality !== config.quality) {
+      followSignature = '';
+      var id = targetScene();
+      selectScene(id, config.source === 'follow' && followSpace ? followSpace.params : null, false, true);
+      return;
+    }
     if (nextSource === 'fixed') {
       if (previousSource !== 'fixed' || sceneId !== nextScene) {
         followSignature = '';

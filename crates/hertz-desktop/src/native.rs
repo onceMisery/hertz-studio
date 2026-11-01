@@ -38,22 +38,24 @@ use windows_sys::Win32::System::RemoteDesktop::{
 use windows_sys::Win32::System::SystemServices::GUID_CONSOLE_DISPLAY_STATE;
 use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, GetDpiForWindow, MDT_EFFECTIVE_DPI};
 use windows_sys::Win32::UI::Shell::{
-    SHQueryUserNotificationState, QUNS_PRESENTATION_MODE, QUNS_RUNNING_D3D_FULL_SCREEN,
+    SHQueryUserNotificationState, ShellExecuteW, QUNS_PRESENTATION_MODE,
+    QUNS_RUNNING_D3D_FULL_SCREEN,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallWindowProcW, CreateWindowExW, DefWindowProcW, DispatchMessageW, EnumChildWindows,
-    FindWindowExW, FindWindowW, GetClassNameW, GetForegroundWindow, GetMessageW, GetParent,
-    GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, GetWindowThreadProcessId, IsWindow,
-    IsZoomed, RegisterClassW, RegisterWindowMessageW, SendMessageTimeoutW, SetForegroundWindow,
-    SetLayeredWindowAttributes, SetParent, SetWindowLongPtrW, SetWindowPos, ShowWindow,
-    TranslateMessage, GWL_STYLE, HWND_BOTTOM, HWND_TOPMOST, LWA_ALPHA, MSG, PBT_APMRESUMEAUTOMATIC,
-    PBT_APMRESUMESUSPEND, PBT_APMSUSPEND, PBT_POWERSETTINGCHANGE, SMTO_NORMAL, STYLESTRUCT,
-    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW,
-    SW_HIDE, SW_SHOW, SW_SHOWNOACTIVATE, WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCHITTEST, WM_NCPAINT,
-    WM_POWERBROADCAST, WM_STYLECHANGING, WM_WTSSESSION_CHANGE, WNDCLASSW, WNDPROC, WS_CAPTION,
-    WS_CHILD, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_EX_TRANSPARENT, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU, WS_THICKFRAME,
-    WTS_SESSION_LOCK, WTS_SESSION_LOGOFF, WTS_SESSION_LOGON, WTS_SESSION_UNLOCK,
+    EnumWindows, FindWindowExW, FindWindowW, GetClassNameW, GetForegroundWindow, GetMessageW,
+    GetParent, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, GetWindowTextW,
+    GetWindowThreadProcessId, IsIconic, IsWindow, IsZoomed, RegisterClassW, RegisterWindowMessageW,
+    SendMessageTimeoutW, SetForegroundWindow, SetLayeredWindowAttributes, SetParent,
+    SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, GWL_STYLE, HWND_BOTTOM,
+    HWND_TOPMOST, LWA_ALPHA, MSG, PBT_APMRESUMEAUTOMATIC, PBT_APMRESUMESUSPEND, PBT_APMSUSPEND,
+    PBT_POWERSETTINGCHANGE, SMTO_NORMAL, STYLESTRUCT, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
+    SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_HIDE, SW_RESTORE, SW_SHOW, SW_SHOWNOACTIVATE,
+    WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCHITTEST, WM_NCPAINT, WM_POWERBROADCAST, WM_STYLECHANGING,
+    WM_WTSSESSION_CHANGE, WNDCLASSW, WNDPROC, WS_CAPTION, WS_CHILD, WS_EX_APPWINDOW, WS_EX_LAYERED,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_MAXIMIZEBOX,
+    WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU, WS_THICKFRAME, WTS_SESSION_LOCK, WTS_SESSION_LOGOFF,
+    WTS_SESSION_LOGON, WTS_SESSION_UNLOCK,
 };
 
 static CLICK_THROUGH: AtomicBool = AtomicBool::new(false);
@@ -326,6 +328,85 @@ pub(crate) fn raise(hwnd: HWND) {
 
 pub(crate) fn focus(hwnd: HWND) {
     unsafe { SetForegroundWindow(hwnd) };
+}
+
+fn browser_title_matches(title: &str, text: &str) -> bool {
+    text == title
+        || text.strip_prefix(title).is_some_and(|suffix| {
+            suffix.starts_with(" - ") || suffix.starts_with(" — ") || suffix.starts_with(" – ")
+        })
+}
+
+fn main_browser_matches(hwnd: HWND, title: &str) -> bool {
+    if title.is_empty() || !title.to_ascii_lowercase().contains("hertz-studio") {
+        return false;
+    }
+    let mut class = [0u16; 128];
+    let mut text = [0u16; 1024];
+    unsafe {
+        let class_len = GetClassNameW(hwnd, class.as_mut_ptr(), class.len() as i32);
+        let text_len = GetWindowTextW(hwnd, text.as_mut_ptr(), text.len() as i32);
+        let class = String::from_utf16_lossy(&class[..class_len.max(0) as usize]);
+        let text = String::from_utf16_lossy(&text[..text_len.max(0) as usize]);
+        matches!(class.as_str(), "Chrome_WidgetWin_1" | "MozillaWindowClass")
+            && browser_title_matches(title, &text)
+    }
+}
+
+pub(crate) fn main_browser_is_foreground(title: &str) -> bool {
+    main_browser_matches(unsafe { GetForegroundWindow() }, title)
+}
+
+/// Restore only a uniquely identified main browser window.
+pub(crate) fn restore_main_browser(title: &str) -> bool {
+    struct Search<'a> {
+        title: &'a str,
+        windows: Vec<HWND>,
+    }
+    unsafe extern "system" fn callback(hwnd: HWND, data: LPARAM) -> i32 {
+        let search = &mut *(data as *mut Search<'_>);
+        if main_browser_matches(hwnd, search.title) {
+            search.windows.push(hwnd);
+        }
+        1
+    }
+    let mut search = Search {
+        title,
+        windows: Vec::new(),
+    };
+    unsafe {
+        EnumWindows(Some(callback), &mut search as *mut _ as LPARAM);
+    }
+    if search.windows.len() != 1 {
+        return false;
+    }
+    let hwnd = search.windows[0];
+    unsafe {
+        if IsIconic(hwnd) != 0 {
+            ShowWindow(hwnd, SW_RESTORE);
+        }
+        SetForegroundWindow(hwnd);
+    }
+    main_browser_is_foreground(title)
+}
+
+pub(crate) fn open_url(url: &str) -> Result<()> {
+    let verb = to_wide("open");
+    let url = to_wide(url);
+    let result = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            verb.as_ptr(),
+            url.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            SW_SHOW,
+        )
+    };
+    if result as isize <= 32 {
+        bail!("Cannot open main window ({})", result as isize);
+    }
+    Ok(())
 }
 
 pub(crate) fn monitors() -> Vec<WorkArea> {
@@ -1187,5 +1268,28 @@ mod tests {
         assert_eq!(from_wide(&wide), r"\.\DISPLAY1");
         assert_eq!(from_wide(&[]), "");
         assert_eq!(from_wide(&[0x4e16, 0]), "世");
+    }
+
+    #[test]
+    fn browser_title_identity_requires_a_whole_page_title() {
+        let title = "山海之间 · hertz-studio";
+        assert!(browser_title_matches(title, title));
+        assert!(browser_title_matches(
+            title,
+            &format!("{title} - Google Chrome")
+        ));
+        assert!(browser_title_matches(
+            title,
+            &format!("{title} — Mozilla Firefox")
+        ));
+        assert!(!browser_title_matches(
+            title,
+            "另一首 · hertz-studio - Google Chrome"
+        ));
+        assert!(!browser_title_matches(
+            title,
+            &format!("{title} extra - Google Chrome")
+        ));
+        assert!(!browser_title_matches(title, "Google Chrome"));
     }
 }

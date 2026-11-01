@@ -77,15 +77,16 @@ impl SpectrumAnalyzer {
         {
             *bin = num_complex::Complex::new(sample * gain, 0.0);
         }
-        self.fft.process_with_scratch(&mut self.input, &mut self.scratch);
+        self.fft
+            .process_with_scratch(&mut self.input, &mut self.scratch);
 
         let bins = FFT_SIZE / 2;
         let mut peak = 1e-6f32;
         for (i, slot) in out.iter_mut().enumerate() {
             // 二次方间隔频带边沿：低频不被挤进两带（与播放器一致）。
             let lo = (((i as f32 / BANDS as f32).powi(2)) * bins as f32) as usize;
-            let hi = ((((i + 1) as f32 / BANDS as f32).powi(2)) * bins as f32)
-                .max(lo as f32 + 1.0) as usize;
+            let hi = ((((i + 1) as f32 / BANDS as f32).powi(2)) * bins as f32).max(lo as f32 + 1.0)
+                as usize;
             let hi = hi.min(bins);
             let mut acc = 0.0f32;
             for bin in self.input[lo..hi].iter() {
@@ -124,6 +125,7 @@ pub(crate) struct SampleRing {
     /// 下一写位置；满载时该位置即最旧样本（覆盖=丢弃）。
     write_pos: usize,
     len: usize,
+    pending: usize,
     dropped: u64,
 }
 
@@ -135,6 +137,7 @@ impl SampleRing {
             samples: vec![0.0; capacity],
             write_pos: 0,
             len: 0,
+            pending: 0,
             dropped: 0,
         }
     }
@@ -157,17 +160,20 @@ impl SampleRing {
         for &sample in mono {
             if self.len < self.samples.len() {
                 self.len += 1;
-            } else {
+            }
+            if self.pending == self.samples.len() {
                 self.dropped += 1;
+            } else {
+                self.pending += 1;
             }
             self.samples[self.write_pos] = sample;
             self.write_pos = (self.write_pos + 1) % self.samples.len();
         }
     }
 
-    /// 取最新一个完整 FFT 窗（滑动，不清空缓冲）。不足一窗返回 false。
-    pub(crate) fn take_window(&self, out: &mut [f32; FFT_SIZE]) -> bool {
-        if self.len < FFT_SIZE {
+    /// 取最新 FFT 窗并确认消费；保留滑窗历史，没有新样本时不重复刷新频谱。
+    pub(crate) fn take_window(&mut self, out: &mut [f32; FFT_SIZE]) -> bool {
+        if self.len < FFT_SIZE || self.pending == 0 {
             return false;
         }
         let cap = self.samples.len();
@@ -176,6 +182,7 @@ impl SampleRing {
             let idx = (newest + cap - (FFT_SIZE - 1 - i)) % cap;
             *slot = self.samples[idx];
         }
+        self.pending = 0;
         true
     }
 
@@ -183,6 +190,7 @@ impl SampleRing {
     pub(crate) fn clear(&mut self) {
         self.write_pos = 0;
         self.len = 0;
+        self.pending = 0;
         self.dropped = 0;
     }
 }
@@ -208,7 +216,9 @@ pub(crate) enum InputKind {
     Hertz,
     /// 系统声音 loopback。`device: None` = 跟随默认渲染设备（默认设备变化
     /// 时只对这种选择重绑，§11.3 固定/默认分别编码）。
-    System { device: Option<String> },
+    System {
+        device: Option<String>,
+    },
 }
 
 /// 单一输入 owner：同一时刻只有一种来源。切换按 §11.3 顺序推进：

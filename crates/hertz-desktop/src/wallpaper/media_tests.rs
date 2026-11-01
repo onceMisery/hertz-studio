@@ -170,7 +170,15 @@ fn cursor(bytes: &[u8]) -> std::io::Cursor<&[u8]> {
 #[test]
 fn mp4_cfr_reports_source_fps_and_dimensions() {
     // stts: 30 帧 × 40 tick @1000 → 25fps；编码 1920×1080，显示同。
-    let bytes = mp4_fixture(false, (1920, 1080), (1920, 1080), 0, Some(40), &[], Some((100, 40)));
+    let bytes = mp4_fixture(
+        false,
+        (1920, 1080),
+        (1920, 1080),
+        0,
+        Some(40),
+        &[],
+        Some((100, 40)),
+    );
     let probe = probe(&mut cursor(&bytes)).unwrap();
     assert_eq!(probe.container, Container::Mp4);
     assert_eq!(probe.codec, "avc1");
@@ -369,8 +377,10 @@ fn apng_is_rejected_as_animated() {
     png.extend_from_slice(&1080u32.to_be_bytes());
     png.extend_from_slice(&[8, 6, 0, 0, 0]);
     png.extend_from_slice(&[0u8; 4]); // CRC 占位 → 头部 33 字节
-    png.extend_from_slice(b"acTL"); // 动画控制块标记
+    png.extend_from_slice(&8u32.to_be_bytes());
+    png.extend_from_slice(b"acTL"); // 动画控制块
     png.extend_from_slice(&[0u8; 8]);
+    png.extend_from_slice(&[0u8; 4]);
     let error = probe(&mut cursor(&png)).unwrap_err();
     assert_eq!(error.code, "format_unsupported");
     assert!(error.message.contains("APNG"));
@@ -385,6 +395,11 @@ fn static_png_reports_dimensions() {
     png.extend_from_slice(&1080u32.to_be_bytes());
     png.extend_from_slice(&[8, 6, 0, 0, 0]); // bit depth/color/compression…
     png.extend_from_slice(&[0u8; 4]); // CRC 占位 → 头部 33 字节
+    png.extend_from_slice(&png_chunk(
+        b"IDAT",
+        b"acTL in compressed bytes is not a chunk",
+    ));
+    png.extend_from_slice(&png_chunk(b"IEND", &[]));
     let probe = probe(&mut cursor(&png)).unwrap();
     assert_eq!(probe.container, Container::Image);
     assert_eq!(probe.codec, "png");
@@ -395,7 +410,7 @@ fn static_png_reports_dimensions() {
 
 #[test]
 fn animated_webp_is_rejected() {
-    let mut webp = b"RIFF\x24\x00\x00\x00WEBP".to_vec();
+    let mut webp = b"RIFF\x16\x00\x00\x00WEBP".to_vec();
     webp.extend_from_slice(b"VP8X");
     webp.extend_from_slice(&10u32.to_le_bytes());
     webp.push(0x02); // Animation 标志位
@@ -418,6 +433,105 @@ fn gif_is_out_of_p1_scope() {
 fn short_inputs_are_rejected() {
     let error = probe(&mut cursor(&[0u8; 4])).unwrap_err();
     assert_eq!(error.code, "format_unsupported");
+}
+
+fn png_chunk(kind: &[u8; 4], data: &[u8]) -> Vec<u8> {
+    let mut bytes = (data.len() as u32).to_be_bytes().to_vec();
+    bytes.extend_from_slice(kind);
+    bytes.extend_from_slice(data);
+    bytes.extend_from_slice(&[0; 4]); // 容器探测不替代 CRC/像素解码。
+    bytes
+}
+
+#[test]
+fn png_walks_real_chunks_beyond_one_megabyte_and_checks_bounds() {
+    let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
+    let mut ihdr = Vec::from([0, 0, 0, 2, 0, 0, 0, 3]);
+    ihdr.extend_from_slice(&[8, 6, 0, 0, 0]);
+    bytes.extend_from_slice(&png_chunk(b"IHDR", &ihdr));
+    bytes.extend_from_slice(&png_chunk(b"tEXt", &vec![0; 1024 * 1024 + 16]));
+    bytes.extend_from_slice(&png_chunk(b"acTL", &[0; 8]));
+    assert!(probe(&mut cursor(&bytes))
+        .unwrap_err()
+        .message
+        .contains("APNG"));
+    bytes.truncate(40);
+    assert!(
+        probe(&mut cursor(&bytes)).is_err(),
+        "跳过的块也不能越过 EOF"
+    );
+}
+
+fn riff(chunks: &[(&[u8; 4], &[u8])]) -> Vec<u8> {
+    let mut data = b"WEBP".to_vec();
+    for (kind, payload) in chunks {
+        data.extend_from_slice(*kind);
+        data.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        data.extend_from_slice(payload);
+        if payload.len() % 2 != 0 {
+            data.push(0);
+        }
+    }
+    let mut out = b"RIFF".to_vec();
+    out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    out.extend(data);
+    out
+}
+
+#[test]
+fn webp_uses_chunk_boundaries_and_accepts_minimal_lossless_headers() {
+    let lossless = [0x2f, 1, 0x80, 0, 0]; // 2 × 3，payload 只有 5 字节。
+    let bytes = riff(&[(b"VP8L", &lossless), (b"XMP ", b"ANIM inside metadata")]);
+    let result = probe(&mut cursor(&bytes)).unwrap();
+    assert_eq!((result.encoded_width, result.encoded_height), (2, 3));
+    let bytes = riff(&[
+        (b"VP8L", &lossless),
+        (b"XMP ", &vec![0; 1024 * 1024 + 1]),
+        (b"ANMF", &[0; 16]),
+    ]);
+    assert!(probe(&mut cursor(&bytes))
+        .unwrap_err()
+        .message
+        .contains("动画"));
+    let mut bad = riff(&[(b"VP8L", &lossless)]);
+    bad[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
+    assert!(probe(&mut cursor(&bad)).is_err());
+}
+
+fn jpeg(orientation: u16) -> Vec<u8> {
+    let mut bytes = vec![0xff, 0xd8];
+    let mut exif = b"Exif\0\0II\x2a\0\x08\0\0\0\x01\0\x12\x01\x03\0\x01\0\0\0".to_vec();
+    exif.extend_from_slice(&orientation.to_le_bytes());
+    exif.extend_from_slice(&[0; 6]);
+    bytes.extend_from_slice(&[0xff, 0xe1]);
+    bytes.extend_from_slice(&((exif.len() + 2) as u16).to_be_bytes());
+    bytes.extend(exif);
+    bytes.extend_from_slice(&[0xff, 0xc0, 0, 11, 8, 0, 3, 0, 2, 1, 1, 0x11, 0]);
+    bytes.extend_from_slice(&[0xff, 0xda, 0, 8, 1, 1, 0, 0, 63, 0, 1, 0xff, 0xd9]);
+    bytes
+}
+
+#[test]
+fn jpeg_reads_dimensions_and_exif_rotation_without_decoding_pixels() {
+    let result = probe(&mut cursor(&jpeg(6))).unwrap();
+    assert_eq!(result.codec, "jpeg");
+    assert_eq!((result.encoded_width, result.encoded_height), (2, 3));
+    assert_eq!(
+        (
+            result.display_width,
+            result.display_height,
+            result.rotation_degrees
+        ),
+        (3, 2, 90)
+    );
+    assert_eq!(probe(&mut cursor(&jpeg(2))).unwrap().display_width, 2);
+    assert_eq!(probe(&mut cursor(&jpeg(5))).unwrap().display_width, 3);
+    let mut truncated = jpeg(1);
+    truncated.pop();
+    assert!(probe(&mut cursor(&truncated)).is_err());
+    let mut invalid_exif = jpeg(1);
+    invalid_exif[16..20].copy_from_slice(&u32::MAX.to_le_bytes());
+    assert!(probe(&mut cursor(&invalid_exif)).is_err());
 }
 
 // serde 形状回归（诊断 JSON 契约）。

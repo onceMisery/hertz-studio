@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 
 use super::super::policy::{REASON_BATTERY, REASON_FULLSCREEN, REASON_MANUAL_PAUSE};
 use super::{
-    ApplyError, FaultDomain, FrameKind, PauseScope, RecoveryLedger, SessionState,
-    WallpaperSession, MAX_RECOVERY_ATTEMPTS, RECOVERY_WINDOW,
+    ApplyError, FaultDomain, FrameKind, PauseScope, RecoveryLedger, SessionState, WallpaperSession,
+    MAX_RECOVERY_ATTEMPTS, RECOVERY_WINDOW,
 };
 
 fn base() -> Instant {
@@ -60,6 +60,19 @@ fn happy_path_reaches_running_with_applied_revision() {
     assert_eq!(diagnostics.generation, generation);
     assert_eq!(diagnostics.frame_kind, Some(FrameKind::Gl));
     assert_eq!(diagnostics.error, None);
+}
+
+#[test]
+fn a_new_generation_does_not_inherit_the_previous_pause_duration() {
+    let recovery = RecoveryLedger::new();
+    let mut session = WallpaperSession::new();
+    let generation = to_attaching(&mut session, &recovery, 1);
+    submit_facts_but(&mut session, generation, usize::MAX);
+    session.start_presentation(base());
+    session.add_pause_reason(REASON_MANUAL_PAUSE, PauseScope::DesktopOnly, base());
+    assert!(session.diagnostics().paused_at.is_some());
+    session.apply(2, &recovery).unwrap();
+    assert_eq!(session.diagnostics().paused_at, None);
 }
 
 /// ready 缺一不可：任一事实缺失都停在 attaching（§13.3）。
@@ -152,7 +165,10 @@ fn display_missing_then_restore_re_admits() {
 
     // resolving 阶段的缺席判定无效（§13.1 宽限属策略层）。
     let generation = session.apply(6, &recovery).expect("apply");
-    assert!(!session.display_missing(generation), "resolving 阶段不判缺席");
+    assert!(
+        !session.display_missing(generation),
+        "resolving 阶段不判缺席"
+    );
     assert_eq!(session.state(), SessionState::Resolving);
 }
 
@@ -187,11 +203,19 @@ fn pause_reasons_are_scoped_and_independent() {
 
     // previewOnly 不 pause 桌面会话。
     session.add_pause_reason("aiGeneration", PauseScope::PreviewOnly, now);
-    assert_eq!(session.state(), SessionState::Running, "previewOnly 不影响桌面呈现");
+    assert_eq!(
+        session.state(),
+        SessionState::Running,
+        "previewOnly 不影响桌面呈现"
+    );
     session.add_pause_reason(REASON_FULLSCREEN, PauseScope::DesktopOnly, now);
     assert_eq!(session.state(), SessionState::Paused);
     assert!(session.remove_pause_reason(REASON_FULLSCREEN, PauseScope::DesktopOnly, now));
-    assert_eq!(session.state(), SessionState::Running, "previewOnly 单独存在时恢复");
+    assert_eq!(
+        session.state(),
+        SessionState::Running,
+        "previewOnly 单独存在时恢复"
+    );
 
     // 就绪但未启动呈现：登记原因不改变 ready 态，启动时直接进入 paused。
     let generation = session.apply(2, &recovery).expect("apply");
@@ -200,7 +224,11 @@ fn pause_reasons_are_scoped_and_independent() {
     submit_facts_but(&mut session, generation, usize::MAX);
     assert_eq!(session.state(), SessionState::Ready);
     session.add_pause_reason(REASON_MANUAL_PAUSE, PauseScope::AllPresentations, now);
-    assert_eq!(session.state(), SessionState::Ready, "ready 态不受暂停原因影响");
+    assert_eq!(
+        session.state(),
+        SessionState::Ready,
+        "ready 态不受暂停原因影响"
+    );
     session.start_presentation(now);
     assert_eq!(session.state(), SessionState::Paused, "启动即暂停");
     assert!(session.diagnostics().paused_at.is_some());
@@ -213,12 +241,16 @@ fn recovery_terminal_requires_explicit_retry() {
     let now = base();
     for attempt in 0..MAX_RECOVERY_ATTEMPTS as u64 {
         assert!(
-            ledger.charge(FaultDomain::Session, now + Duration::from_secs(attempt)).is_ok(),
+            ledger
+                .charge(FaultDomain::Session, now + Duration::from_secs(attempt))
+                .is_ok(),
             "第 {} 次恢复必须允许",
             attempt + 1
         );
     }
-    assert!(ledger.charge(FaultDomain::Session, now + Duration::from_secs(3)).is_err());
+    assert!(ledger
+        .charge(FaultDomain::Session, now + Duration::from_secs(3))
+        .is_err());
     assert!(ledger.is_terminal(FaultDomain::Session));
 
     // 时间经过不解锁（§13.3）。
@@ -242,7 +274,9 @@ fn recovery_domains_are_independent() {
             .charge(FaultDomain::Global, now + Duration::from_secs(attempt))
             .expect("全局恢复在预算内");
     }
-    assert!(ledger.charge(FaultDomain::Global, now + Duration::from_secs(3)).is_err());
+    assert!(ledger
+        .charge(FaultDomain::Global, now + Duration::from_secs(3))
+        .is_err());
     assert!(ledger.is_terminal(FaultDomain::Global));
 
     // 全局终态不影响会话域预算；会话域终态也不影响全局。

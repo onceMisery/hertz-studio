@@ -5,10 +5,10 @@
 //! C11（第三个视频/超预算）、C23（抢最后一个解码槽）、C24（取消后未退出）。
 
 use super::{
-    BudgetCoordinator, BudgetRequest, LedgerError, MAX_CPU_DECODED_BYTES,
-    MAX_DECODE_PIXEL_RATE, MAX_DECODER_SLOTS, MAX_GPU_TRACKED_BYTES,
-    MAX_OUTPUT_PIXEL_RATE, MAX_PREPARE_TASKS, MAX_PRESENTATION_TARGETS,
-    MAX_PREVIEW_INSTANCES, OwnerKind, PREVIEW_RESERVED_OUTPUT_RATE,
+    BudgetCoordinator, BudgetRequest, LedgerError, OwnerKind, MAX_CPU_DECODED_BYTES,
+    MAX_DECODER_SLOTS, MAX_DECODE_PIXEL_RATE, MAX_GPU_TRACKED_BYTES, MAX_OUTPUT_PIXEL_RATE,
+    MAX_PREPARE_TASKS, MAX_PRESENTATION_TARGETS, MAX_PREVIEW_INSTANCES,
+    PREVIEW_RESERVED_OUTPUT_RATE,
 };
 
 fn req(owner: OwnerKind, session: &str) -> BudgetRequest {
@@ -24,8 +24,54 @@ fn req(owner: OwnerKind, session: &str) -> BudgetRequest {
         decode_pixel_rate: 0,
         output_pixel_rate: 0,
         cpu_bytes: 0,
+        prepare_cpu_bytes: 0,
         gpu_bytes: 0,
         prepare_tasks: 0,
+    }
+}
+
+#[test]
+fn image_workspace_is_separate_bounded_and_held_until_exit() {
+    use super::MAX_PREPARE_CPU_BYTES;
+    let budget = BudgetCoordinator::new();
+    let mut resident = req(OwnerKind::Desktop, "resident");
+    resident.cpu_bytes = MAX_CPU_DECODED_BYTES;
+    budget.grant(&resident).unwrap();
+    let mut prepare = req(OwnerKind::Probe, "image");
+    prepare.prepare_cpu_bytes = MAX_PREPARE_CPU_BYTES;
+    let token = budget.grant(&prepare).unwrap();
+    let mut next = req(OwnerKind::Probe, "next");
+    next.prepare_cpu_bytes = 1;
+    assert_eq!(budget.grant(&next).unwrap_err().quota, "prepare_cpu_bytes");
+    budget.release(token, "image", 1).unwrap();
+    assert!(budget.grant(&next).is_err());
+    budget.confirm_exit(token, "image", 1).unwrap();
+    assert!(budget.grant(&next).is_ok());
+    next.prepare_cpu_bytes = u64::MAX;
+    assert_eq!(budget.grant(&next).unwrap_err().quota, "prepare_cpu_bytes");
+    assert_eq!(budget.usage().cpu_bytes, MAX_CPU_DECODED_BYTES);
+}
+
+#[test]
+fn extreme_requests_do_not_overflow_or_poison_the_ledger() {
+    let budget = BudgetCoordinator::new();
+    let mut held = req(OwnerKind::Desktop, "held");
+    held.cpu_bytes = 1;
+    held.gpu_bytes = 1;
+    held.decode_pixel_rate = 1;
+    held.output_pixel_rate = 1;
+    budget.grant(&held).unwrap();
+    let before = budget.usage();
+    for field in 0..4 {
+        let mut huge = req(OwnerKind::Desktop, "huge");
+        match field {
+            0 => huge.cpu_bytes = u64::MAX,
+            1 => huge.gpu_bytes = u64::MAX,
+            2 => huge.decode_pixel_rate = u64::MAX,
+            _ => huge.output_pixel_rate = u64::MAX,
+        }
+        assert!(budget.grant(&huge).is_err());
+        assert_eq!(budget.usage(), before);
     }
 }
 
@@ -45,7 +91,10 @@ fn third_decoder_is_budget_busy() {
     let rejection = budget.grant(&c).expect_err("第三个解码槽必须拒绝");
     assert_eq!(rejection.quota, "decoder_slots");
     assert_eq!(rejection.cap, u64::from(MAX_DECODER_SLOTS));
-    assert!(rejection.message.contains("释放预览"), "拒绝必须给可操作选项：{rejection:?}");
+    assert!(
+        rejection.message.contains("释放预览"),
+        "拒绝必须给可操作选项：{rejection:?}"
+    );
 
     let usage = budget.usage();
     assert_eq!(usage.decoder_slots, 2, "已授予的两个不得被第三个申请改写");
@@ -63,17 +112,26 @@ fn release_pending_keeps_slot_until_confirm() {
     budget.grant(&b).expect("授予 b（占满 2 槽）");
 
     budget.release(token, "session-a", 1).expect("首次 release");
-    budget.release(token, "session-a", 1).expect("release 必须幂等");
+    budget
+        .release(token, "session-a", 1)
+        .expect("release 必须幂等");
     assert_eq!(budget.usage().decoder_slots, 2, "pending 仍占用");
     assert_eq!(budget.usage().release_pending, 1);
-    assert_eq!(budget.stuck(), vec![(token, "session-a".to_string(), "task".to_string())]);
+    assert_eq!(
+        budget.stuck(),
+        vec![(token, "session-a".to_string(), "task".to_string())]
+    );
 
     let mut c = req(OwnerKind::Desktop, "session-c");
     c.decoders = 1;
     assert!(budget.grant(&c).is_err(), "未确认退出前不得把槽给下一任务");
 
-    budget.confirm_exit(token, "session-a", 1).expect("确认退出");
-    budget.confirm_exit(token, "session-a", 1).expect("confirm 幂等");
+    budget
+        .confirm_exit(token, "session-a", 1)
+        .expect("确认退出");
+    budget
+        .confirm_exit(token, "session-a", 1)
+        .expect("confirm 幂等");
     assert_eq!(budget.usage().decoder_slots, 1, "确认后归还（只剩 b）");
     assert!(budget.stuck().is_empty());
     assert!(budget.grant(&c).is_ok(), "归还后新申请必须成功");
@@ -126,7 +184,9 @@ fn purge_session_clears_all_states() {
     let token2 = budget.grant(&a2).expect("a2");
     let token_b = budget.grant(&b).expect("b");
     budget.release(token1, "session-a", 1).expect("release a1");
-    budget.confirm_exit(token2, "session-a", 1).expect("a2 已退出");
+    budget
+        .confirm_exit(token2, "session-a", 1)
+        .expect("a2 已退出");
 
     assert_eq!(budget.purge_session("session-a"), 2, "pending+墓碑都清除");
     assert_eq!(budget.usage().decoder_slots, 1, "只残留 b 的槽");
@@ -136,7 +196,9 @@ fn purge_session_clears_all_states() {
         Err(LedgerError::UnknownToken),
         "清除后不得再操作"
     );
-    budget.release(token_b, "session-b", 1).expect("b 的 token 仍可由本人正常释放");
+    budget
+        .release(token_b, "session-b", 1)
+        .expect("b 的 token 仍可由本人正常释放");
 }
 
 /// 预览：全局 1 个、输出率只能用 8 MP/s 保留带，live 摸不到保留带。
@@ -161,11 +223,17 @@ fn preview_single_instance_and_reserved_band() {
     let rejection = budget.grant(&preview2).expect_err("第二个预览必须拒绝");
     assert_eq!(rejection.quota, "preview_instances");
 
-    budget.release(preview_token, "preview-1", 1).expect("预览释放");
-    budget.confirm_exit(preview_token, "preview-1", 1).expect("预览退出");
+    budget
+        .release(preview_token, "preview-1", 1)
+        .expect("预览释放");
+    budget
+        .confirm_exit(preview_token, "preview-1", 1)
+        .expect("预览退出");
     let mut still_over = req(OwnerKind::Desktop, "session-next");
     still_over.output_pixel_rate = MAX_OUTPUT_PIXEL_RATE - PREVIEW_RESERVED_OUTPUT_RATE + 1;
-    let rejection = budget.grant(&still_over).expect_err("预览退出后 live 上限不变");
+    let rejection = budget
+        .grant(&still_over)
+        .expect_err("预览退出后 live 上限不变");
     assert_eq!(rejection.quota, "output_pixel_rate");
 }
 
@@ -189,7 +257,9 @@ fn decode_pixel_rate_cap() {
     let mut oversize = req(OwnerKind::Desktop, "session-c");
     oversize.decoders = 1;
     oversize.decode_pixel_rate = 1_920 * 1_088 * 60; // 125.3 MP/s，单路即超
-    let rejection = budget.grant(&oversize).expect_err("编码尺寸×帧率超上限必须直接拒绝");
+    let rejection = budget
+        .grant(&oversize)
+        .expect_err("编码尺寸×帧率超上限必须直接拒绝");
     assert_eq!(rejection.quota, "decode_pixel_rate");
 }
 
@@ -217,7 +287,10 @@ fn byte_caps_and_prepare_slot() {
     d.prepare_tasks = 1;
     let rejection = budget.grant(&d).expect_err("准备任务单槽");
     assert_eq!(rejection.quota, "prepare_tasks");
-    assert!(rejection.message.contains("C24"), "拒绝话术必须提醒取消不提前归还");
+    assert!(
+        rejection.message.contains("C24"),
+        "拒绝话术必须提醒取消不提前归还"
+    );
 }
 
 /// owner 与字段组合的申请面合同。

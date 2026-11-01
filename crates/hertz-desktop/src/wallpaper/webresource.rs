@@ -5,31 +5,35 @@
 //!
 //! 保留域 `https://<hash前32位>.<hash后32位>.wallpaper.invalid/files/<path>`
 //! 由 `WebResourceRequested` 在本机拦截，不做 DNS 请求。处理链：
-//! URL 解析（hash = 两段 32hex 拼合）→ 包核验（verify_installed：original
-//! 哈希 + 投影尺寸抽查）→ Range 语义（media_stream::plan_response）→
+//! URL 解析（hash = 两段 32hex 拼合）→ 包及投影哈希核验 → Range 语义 →
 //! `MediaIStream` 窗口流（agile，浏览器读线程自取字节）→
 //! `CreateWebResourceResponse` + `SetResponse`。
 //!
-//! 线程决策：处理器在 WebView2 UI 线程同步执行——只做 URL 解析、收据读取
-//! （小 JSON）与 CreateFile（µs 级），无阻塞媒体 I/O；字节流经 agile IStream
-//! 由浏览器读线程异步消费，故不需要 GetDeferral 分派（§8.1 的 deferral 要求
-//! 针对「重活进播放路径」，此处按构造排除；重校验已在安装时完成）。会话级
-//! 授权绑定（§8.1 controller/session/generation 准入）属 P1-04，当前阶段先
-//! 服务已核验包。
+//! UI 线程只提取有界请求并取得 GetDeferral；单个有界 worker 负责启动恢复、
+//! 验证及文件打开，再通过宿主事件回 UI 组装响应并完成 deferral。媒体字节由
+//! agile IStream 在浏览器读线程消费。controller 销毁时撤销待处理请求。
+//! 每个 controller 只服务当前原生准入集合；集合默认空，换代立即撤销旧请求、
+//! 核验缓存与流。媒体选择的 TargetPlanner 接线属 P1-05。
 
+use crate::app::UserEvent;
+use std::cell::RefCell;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
+use tao::event_loop::EventLoopProxy;
 
+use super::access::{MediaAccess, ReadPermit};
 use super::assets::AssetStore;
 use super::istream::MediaIStream;
-use super::media_stream::{parse_range_header, plan_response};
+use super::media_stream::{global_pool, parse_range_header, plan_response, MediaFileStream};
 use webview2_com::Microsoft::Web::WebView2::Win32::{
-    ICoreWebView2, ICoreWebView2_2, ICoreWebView2Environment,
-    ICoreWebView2WebResourceRequest, ICoreWebView2WebResourceRequestedEventArgs,
+    ICoreWebView2, ICoreWebView2Deferral, ICoreWebView2Environment,
+    ICoreWebView2WebResourceRequest, ICoreWebView2WebResourceRequestedEventArgs, ICoreWebView2_2,
     COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL,
 };
 use webview2_com::{take_pwstr, WebResourceRequestedEventHandler};
-use windows::core::{HSTRING, Interface, PWSTR};
+use windows::core::{Interface, HSTRING, PWSTR};
 
 /// 保留域后缀（§8.1）。
 const RESERVED_HOST_SUFFIX: &str = ".wallpaper.invalid";
@@ -58,16 +62,16 @@ impl MediaUrl {
             Some(parts) => parts,
             None => return MediaUrlParse::NotOurDomain,
         };
-        let host = host.split(':').next().unwrap_or(host);
-        if !host.to_ascii_lowercase().ends_with(RESERVED_HOST_SUFFIX) {
+        let host = host.to_ascii_lowercase();
+        if !host.ends_with(RESERVED_HOST_SUFFIX) {
             return MediaUrlParse::NotOurDomain;
         }
         let labels = host
             .strip_suffix(RESERVED_HOST_SUFFIX)
-            .unwrap_or(host)
+            .unwrap_or(&host)
             .split('.')
             .collect::<Vec<_>>();
-        if labels.len() != 2 {
+        if labels.len() != 2 || labels.iter().any(|label| label.len() != 32) {
             return MediaUrlParse::BadPath;
         }
         let hash = labels.concat().to_ascii_lowercase();
@@ -76,8 +80,11 @@ impl MediaUrl {
         }
         // 只服务已索引投影；original.hwpkg 与 receipt.json 不暴露（§4.2）。
         match path.strip_prefix("files/") {
-            Some(rel) if !rel.is_empty() => {
-                MediaUrlParse::Ok(Self { package_hash: hash, path: rel.to_string() })
+            Some(rel) if hertz_wallpaper::validate_rel_path(rel).is_ok() => {
+                MediaUrlParse::Ok(Self {
+                    package_hash: hash,
+                    path: rel.to_string(),
+                })
             }
             _ => MediaUrlParse::BadPath,
         }
@@ -108,7 +115,9 @@ fn global_assets() -> Option<&'static Arc<AssetStore>> {
                         let base = crate::config::base_dir();
                         let library = super::library::Library::open(&base).await.ok()?;
                         let assets = AssetStore::new(&base).ok()?;
-                        super::jobs::reconcile_startup(&library, &assets).await.ok()?;
+                        super::jobs::reconcile_startup(&library, &assets)
+                            .await
+                            .ok()?;
                         Some(Arc::new(assets))
                     })
                 })
@@ -117,11 +126,10 @@ fn global_assets() -> Option<&'static Arc<AssetStore>> {
 }
 
 /// 在 WebView 上安装媒体拦截。每个 WebView 调一次；重复注册会造成双重响应。
-pub(crate) fn install(webview: &wry::WebView) -> Result<(), String> {
-    let Some(assets) = global_assets() else {
-        return Ok(()); // AssetStore 不可用：不注册拦截，.invalid 请求将自然失败
-    };
-    let assets = Arc::clone(assets);
+pub(crate) fn install(
+    webview: &wry::WebView,
+    proxy: EventLoopProxy<UserEvent>,
+) -> Result<MediaAccess, String> {
     use wry::WebViewExtWindows;
     let controller = webview.controller();
     let core: ICoreWebView2 = unsafe { controller.CoreWebView2() }
@@ -135,26 +143,29 @@ pub(crate) fn install(webview: &wry::WebView) -> Result<(), String> {
 
     let filter = HSTRING::from(format!("https://*{RESERVED_HOST_SUFFIX}/*"));
     unsafe {
-        core.AddWebResourceRequestedFilter(
-            &filter,
-            COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL,
-        )
-        .map_err(|error| format!("注册媒体过滤器失败：{error}"))?;
+        core.AddWebResourceRequestedFilter(&filter, COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL)
+            .map_err(|error| format!("注册媒体过滤器失败：{error}"))?;
     }
 
     let mut token = 0i64;
+    let access = MediaAccess::new();
+    let lifetime = ControllerRequests {
+        id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
+        alive: Arc::new(AtomicBool::new(true)),
+        access: access.clone(),
+    };
     let handler = WebResourceRequestedEventHandler::create(Box::new(move |_, args| {
         let Some(args) = args else {
             return Ok(());
         };
-        handle_request(&args, &environment, &assets);
+        handle_request(&args, &environment, &proxy, &lifetime);
         Ok(())
     }));
     unsafe {
         core.add_WebResourceRequested(&handler, &mut token)
             .map_err(|error| format!("注册媒体拦截失败：{error}"))?;
     }
-    Ok(())
+    Ok(access)
 }
 
 /// 单次请求的处置结果。
@@ -162,7 +173,6 @@ enum Outcome {
     /// 已组装完整响应（含无体错误响应）。
     Resolved {
         status: i32,
-        reason: &'static str,
         headers: String,
         path: Option<PathBuf>,
         window: (u64, u64),
@@ -171,120 +181,417 @@ enum Outcome {
     Passthrough,
 }
 
+// COM 对象只在 UI 线程保留，后台仅接收纯数据和可发送的文件句柄。
+static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+const MAX_PENDING: usize = 8;
+struct Pending {
+    controller: u64,
+    args: ICoreWebView2WebResourceRequestedEventArgs,
+    environment: ICoreWebView2Environment,
+    deferral: ICoreWebView2Deferral,
+    cors: Option<String>,
+}
+thread_local! {
+    static PENDING: RefCell<HashMap<u64, Pending>> = RefCell::new(HashMap::new());
+}
+struct ControllerRequests {
+    id: u64,
+    alive: Arc<AtomicBool>,
+    access: MediaAccess,
+}
+impl Drop for ControllerRequests {
+    fn drop(&mut self) {
+        self.alive.store(false, Ordering::Relaxed);
+        self.access.revoke();
+        let cancelled = PENDING.with(|pending| {
+            let mut pending = pending.borrow_mut();
+            let ids: Vec<_> = pending
+                .iter()
+                .filter(|(_, request)| request.controller == self.id)
+                .map(|(id, _)| *id)
+                .collect();
+            ids.into_iter()
+                .filter_map(|id| pending.remove(&id))
+                .collect::<Vec<_>>()
+        });
+        for request in cancelled {
+            let _ = unsafe { request.deferral.Complete() };
+        }
+    }
+}
+
+struct Work {
+    id: u64,
+    controller: u64,
+    alive: Arc<AtomicBool>,
+    uri: String,
+    method: String,
+    cors: Option<String>,
+    range: Option<String>,
+    proxy: EventLoopProxy<UserEvent>,
+    permit: ReadPermit,
+}
+
+struct CachedMedia {
+    controller: u64,
+    hash: String,
+    path: String,
+    alive: Arc<AtomicBool>,
+    media: Arc<super::assets::PinnedMedia>,
+    permit: ReadPermit,
+}
+
+pub(crate) struct PreparedResponse {
+    outcome: Outcome,
+    stream: Option<MediaFileStream>,
+    permit: Option<ReadPermit>,
+}
+
+fn worker() -> Option<&'static std::sync::mpsc::SyncSender<Work>> {
+    static WORKER: OnceLock<Option<std::sync::mpsc::SyncSender<Work>>> = OnceLock::new();
+    WORKER
+        .get_or_init(|| {
+            let (tx, rx) = std::sync::mpsc::sync_channel::<Work>(MAX_PENDING);
+            std::thread::Builder::new()
+                .name("hertz-wallpaper-media".into())
+                .spawn(move || {
+                    let mut cache = VecDeque::<CachedMedia>::new();
+                    loop {
+                        // 不在 controller 关闭后永久保留核验句柄；在途 I/O 退出后清理。
+                        cache.retain(|entry| {
+                            entry.alive.load(Ordering::Relaxed) && entry.permit.is_active()
+                        });
+                        super::istream::reap_revoked_streams();
+                        let work = match rx.recv_timeout(std::time::Duration::from_millis(250)) {
+                            Ok(work) => work,
+                            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                            Err(_) => break,
+                        };
+                        if !work.alive.load(Ordering::Relaxed) || !work.permit.is_active() {
+                            let _ = work.proxy.send_event(UserEvent::WallpaperMedia(
+                                work.id,
+                                Box::new(PreparedResponse {
+                                    outcome: error_response(404, work.cors),
+                                    stream: None,
+                                    permit: None,
+                                }),
+                            ));
+                            continue;
+                        }
+                        let mut outcome = resolve(&work, &mut cache);
+                        let stream = match &outcome {
+                            Outcome::Resolved {
+                                path: Some(path), ..
+                            } => match MediaFileStream::open(path, global_pool()) {
+                                Ok(stream) => Some(stream),
+                                Err(error) => {
+                                    outcome = error_response(
+                                        if error.code == "stream_busy" {
+                                            503
+                                        } else {
+                                            404
+                                        },
+                                        work.cors,
+                                    );
+                                    None
+                                }
+                            },
+                            _ => None,
+                        };
+                        let _ = work.proxy.send_event(UserEvent::WallpaperMedia(
+                            work.id,
+                            Box::new(PreparedResponse {
+                                outcome,
+                                stream,
+                                permit: Some(work.permit),
+                            }),
+                        ));
+                    }
+                })
+                .ok()?;
+            Some(tx)
+        })
+        .as_ref()
+}
+
 fn handle_request(
     args: &ICoreWebView2WebResourceRequestedEventArgs,
     environment: &ICoreWebView2Environment,
-    assets: &Arc<AssetStore>,
+    proxy: &EventLoopProxy<UserEvent>,
+    controller: &ControllerRequests,
 ) {
-    let outcome = resolve(args, assets);
-    let result = match &outcome {
-        Outcome::Passthrough => Ok(()),
-        Outcome::Resolved {
-            status,
-            reason,
-            headers,
-            path,
-            window,
-        } => {
-            let stream = match path
-                .as_deref()
-                .map(|path| MediaIStream::open(path, assets.stream_pool(), *window))
-            {
-                Some(Ok(stream)) => Some(stream),
-                Some(Err(error)) => {
-                    crate::app::log(&format!("wallpaper media stream open failed: {error}"));
-                    None
-                }
-                None => None,
+    let Ok(request) = (unsafe { args.Request() }) else {
+        return;
+    };
+    let Ok(uri) = (unsafe { string_property(&request, |request, out| request.Uri(out)) }) else {
+        return;
+    };
+    if matches!(MediaUrl::parse(&uri), MediaUrlParse::NotOurDomain) {
+        return;
+    }
+    let cors = unsafe { request_header(&request, "Origin") }
+        .filter(|origin| ALLOWED_ORIGINS.contains(&origin.as_str()));
+    let method = unsafe { string_property(&request, |request, out| request.Method(out)) }
+        .unwrap_or_default();
+    let range = unsafe { request_header(&request, "Range") };
+    if uri.len() > 1024 || range.as_ref().is_some_and(|range| range.len() > 256) {
+        respond(
+            args,
+            environment,
+            PreparedResponse {
+                outcome: error_response(400, cors),
+                stream: None,
+                permit: None,
+            },
+        );
+        return;
+    }
+    // 授权在任何库初始化/磁盘读取前完成，OPTIONS 同样不能探测未准入资源。
+    let permit = match MediaUrl::parse(&uri) {
+        MediaUrlParse::Ok(media) => controller.access.permit(&media.package_hash, &media.path),
+        _ => None,
+    };
+    let Some(permit) = permit else {
+        respond(
+            args,
+            environment,
+            PreparedResponse {
+                outcome: error_response(404, cors),
+                stream: None,
+                permit: None,
+            },
+        );
+        return;
+    };
+    // 预检只回答已准入资源的 CORS 合同，不能触发库恢复或任何文件打开。
+    if method.eq_ignore_ascii_case("OPTIONS") {
+        respond(
+            args,
+            environment,
+            PreparedResponse {
+                outcome: Outcome::Resolved {
+                    status: 204,
+                    headers: cors_headers(cors, true),
+                    path: None,
+                    window: (0, 0),
+                },
+                stream: None,
+                permit: None,
+            },
+        );
+        return;
+    }
+    if !matches!(method.as_str(), "GET" | "HEAD") {
+        respond(
+            args,
+            environment,
+            PreparedResponse {
+                outcome: error_response(405, cors),
+                stream: None,
+                permit: None,
+            },
+        );
+        return;
+    }
+    if PENDING.with(|pending| pending.borrow().len() >= MAX_PENDING) {
+        respond(
+            args,
+            environment,
+            PreparedResponse {
+                outcome: error_response(503, cors),
+                stream: None,
+                permit: None,
+            },
+        );
+        return;
+    }
+    let Ok(deferral) = (unsafe { args.GetDeferral() }) else {
+        respond(
+            args,
+            environment,
+            PreparedResponse {
+                outcome: error_response(503, cors),
+                stream: None,
+                permit: None,
+            },
+        );
+        return;
+    };
+    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    PENDING.with(|pending| {
+        pending.borrow_mut().insert(
+            id,
+            Pending {
+                controller: controller.id,
+                args: args.clone(),
+                environment: environment.clone(),
+                deferral,
+                cors: cors.clone(),
+            },
+        )
+    });
+    let work = Work {
+        id,
+        controller: controller.id,
+        alive: Arc::clone(&controller.alive),
+        uri,
+        method,
+        cors: cors.clone(),
+        range,
+        proxy: proxy.clone(),
+        permit,
+    };
+    if !worker().is_some_and(|tx| tx.try_send(work).is_ok()) {
+        complete(
+            id,
+            PreparedResponse {
+                outcome: error_response(503, cors),
+                stream: None,
+                permit: None,
+            },
+        );
+    }
+}
+
+pub(crate) fn complete(id: u64, mut response: PreparedResponse) {
+    let pending = PENDING.with(|pending| pending.borrow_mut().remove(&id));
+    if let Some(pending) = pending {
+        if response
+            .permit
+            .as_ref()
+            .is_some_and(|permit| !permit.is_active())
+        {
+            response = PreparedResponse {
+                outcome: error_response(404, pending.cors),
+                stream: None,
+                permit: None,
             };
-            unsafe {
-                environment
-                    .CreateWebResourceResponse(
-                        stream.as_ref(),
-                        *status,
-                        &HSTRING::from(*reason),
-                        &HSTRING::from(headers.as_str()),
-                    )
-                    .and_then(|response| args.SetResponse(&response))
-            }
         }
+        respond(&pending.args, &pending.environment, response);
+        let _ = unsafe { pending.deferral.Complete() };
+    }
+    // controller 已退出时 response 随栈释放，文件与流槽不会遗留。
+}
+
+fn respond(
+    args: &ICoreWebView2WebResourceRequestedEventArgs,
+    environment: &ICoreWebView2Environment,
+    response: PreparedResponse,
+) {
+    let Outcome::Resolved {
+        mut status,
+        mut headers,
+        path,
+        window,
+    } = response.outcome
+    else {
+        return;
+    };
+    let stream = response.stream.and_then(|stream| {
+        MediaIStream::from_file_with_permit(
+            stream,
+            path.unwrap_or_default(),
+            global_pool(),
+            window,
+            response.permit,
+        )
+        .ok()
+    });
+    if path_is_required(status, window) && stream.is_none() {
+        status = 503;
+        // 不得用成功的 Content-Length 宣告一个空响应体。
+        headers = "Content-Length: 0\r\n".into();
+    }
+    let result = unsafe {
+        environment
+            .CreateWebResourceResponse(
+                stream.as_ref(),
+                status,
+                &HSTRING::from(reason_phrase(status)),
+                &HSTRING::from(headers),
+            )
+            .and_then(|response| args.SetResponse(&response))
     };
     if let Err(error) = result {
         crate::app::log(&format!("wallpaper media response failed: {error}"));
     }
 }
 
-fn resolve(
-    args: &ICoreWebView2WebResourceRequestedEventArgs,
-    assets: &Arc<AssetStore>,
-) -> Outcome {
-    let request = match unsafe { args.Request() } {
-        Ok(request) => request,
-        Err(_) => return passthrough(),
-    };
-    let uri = match unsafe { string_property(&request, |request, out| request.Uri(out)) } {
-        Ok(uri) => uri,
-        Err(_) => return passthrough(),
-    };
-    // Origin/Range 先于域匹配提取：本域 404 也需要 CORS 头（否则 fetch
-    // 只能拿到 TypeError 而非确定性的 404）。
-    let origin = unsafe {
-        request_header(&request, "Origin")
-    };
-    let cors = origin.filter(|origin| ALLOWED_ORIGINS.contains(&origin.as_str()));
-    let range = unsafe {
-        request_header(&request, "Range")
-    };
+fn path_is_required(status: i32, window: (u64, u64)) -> bool {
+    matches!(status, 200 | 206) && window.1 > 0
+}
 
+fn error_response(status: i32, cors: Option<String>) -> Outcome {
+    Outcome::Resolved {
+        status,
+        headers: format!("Content-Length: 0\r\n{}", cors_headers(cors, false)),
+        path: None,
+        window: (0, 0),
+    }
+}
+
+fn resolve(work: &Work, cache: &mut VecDeque<CachedMedia>) -> Outcome {
+    let (uri, method, cors, range) = (
+        work.uri.as_str(),
+        work.method.as_str(),
+        work.cors.clone(),
+        work.range.as_deref(),
+    );
     // 域匹配分两层：非本域 → passthrough；本域但路径不合法 → 404（不放给
     // DNS，否则 .invalid 会报 TypeError 而非确定性的 404）。
-    let media = match MediaUrl::parse(&uri) {
+    let media = match MediaUrl::parse(uri) {
         MediaUrlParse::NotOurDomain => return passthrough(),
         MediaUrlParse::Ok(media) => media,
         MediaUrlParse::BadPath => return not_found(cors),
     };
-    let method = unsafe {
-        string_property(&request, |request, out| request.Method(out))
-    }
-    .unwrap_or_default();
-
-    if method.eq_ignore_ascii_case("OPTIONS") {
-        return Outcome::Resolved {
-            status: 204,
-            reason: "No Content",
-            headers: cors_headers(cors, true),
-            path: None,
-            window: (0, 0),
-        };
-    }
-    if !matches!(method.as_str(), "GET" | "HEAD") {
-        return Outcome::Resolved {
-            status: 405,
-            reason: "Method Not Allowed",
-            headers: cors_headers(cors, false),
-            path: None,
-            window: (0, 0),
-        };
-    }
     let head = method.eq_ignore_ascii_case("HEAD");
 
-    // 包核验：original 哈希 + 投影抽查（§7.2 快速检查；重校验在安装时）。
-    let Ok(Some(receipt)) = assets.verify_installed(&media.package_hash) else {
-        return not_found(cors);
+    // 每个 controller 的不可变字节只核验一次，seek 不反复哈希大视频。
+    // 缓存全局最多 4 项（8 个核验句柄），关闭 controller 或 LRU 淘汰时释放。
+    let cached = cache.iter().position(|entry| {
+        entry.controller == work.controller
+            && entry.permit.generation == work.permit.generation
+            && entry.hash == media.package_hash
+            && entry.path == media.path
+    });
+    let entry = if let Some(index) = cached {
+        cache.remove(index).expect("cached media index")
+    } else {
+        if cache.len() >= 4 {
+            cache.pop_front();
+        }
+        let pinned = if let Some(pinned) = work.permit.pinned() {
+            Arc::clone(pinned)
+        } else {
+            let Some(assets) = global_assets() else {
+                return error_response(503, cors);
+            };
+            let Ok(Some(pinned)) = assets.pin_verified_media(&media.package_hash, &media.path)
+            else {
+                return not_found(cors);
+            };
+            Arc::new(pinned)
+        };
+        CachedMedia {
+            controller: work.controller,
+            hash: media.package_hash.clone(),
+            path: media.path.clone(),
+            alive: Arc::clone(&work.alive),
+            media: pinned,
+            permit: work.permit.clone(),
+        }
     };
-    let Some(entry) = receipt.entries.iter().find(|entry| entry.path == media.path)
-    else {
-        return not_found(cors);
-    };
+    cache.push_back(entry);
+    let entry = &cache.back().expect("cached media").media.entry;
 
-    let range_request = parse_range_header(range.as_deref(), entry.bytes);
+    let range_request = parse_range_header(range, entry.bytes);
     let plan = plan_response(head, range_request, entry.bytes);
 
     let mime = entry
         .mime
         .clone()
         .unwrap_or_else(|| "application/octet-stream".into());
-    let mut headers = format!("Content-Type: {mime}\r\nContent-Length: {}\r\n", plan.content_length);
+    let mut headers = format!("Content-Type: {mime}\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\nX-Content-Type-Options: nosniff\r\n", plan.content_length);
     if let Some(content_range) = &plan.content_range {
         headers.push_str(&format!("Content-Range: {content_range}\r\n"));
     }
@@ -302,10 +609,7 @@ fn resolve(
         } else {
             0
         };
-        let path = assets
-            .package_dir(&media.package_hash)
-            .join("files")
-            .join(&media.path);
+        let path = cache.back().expect("cached media").media.path.clone();
         (Some(path), (base, plan.content_length))
     } else {
         (None, (0, 0))
@@ -313,7 +617,7 @@ fn resolve(
 
     Outcome::Resolved {
         status: i32::from(plan.status),
-        reason: reason_phrase(i32::from(plan.status)),
+
         headers,
         path,
         window,
@@ -327,7 +631,7 @@ fn passthrough() -> Outcome {
 fn not_found(cors: Option<String>) -> Outcome {
     Outcome::Resolved {
         status: 404,
-        reason: "Not Found",
+
         headers: cors_headers(cors, false),
         path: None,
         window: (0, 0),
@@ -335,7 +639,7 @@ fn not_found(cors: Option<String>) -> Outcome {
 }
 
 fn cors_headers(origin: Option<String>, preflight: bool) -> String {
-    let mut headers = String::new();
+    let mut headers = "Cache-Control: no-store\r\n".to_string();
     if let Some(origin) = origin {
         headers.push_str(&format!("Access-Control-Allow-Origin: {origin}\r\n"));
         headers.push_str("Vary: Origin\r\n");
@@ -359,6 +663,7 @@ fn reason_phrase(status: i32) -> &'static str {
         404 => "Not Found",
         405 => "Method Not Allowed",
         416 => "Range Not Satisfiable",
+        503 => "Service Unavailable",
         _ => "OK",
     }
 }
@@ -373,11 +678,7 @@ pub(crate) fn files_url(package_hash: &str, path: &str) -> Option<String> {
     if hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return None;
     }
-    let path_ok = !path.is_empty()
-        && path
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_' | b'.' | b'/'))
-        && path.split('/').all(|segment| !segment.is_empty() && segment != "." && segment != "..");
+    let path_ok = hertz_wallpaper::validate_rel_path(path).is_ok();
     if !path_ok {
         return None;
     }
@@ -400,15 +701,10 @@ unsafe fn string_property(
 }
 
 /// 读单个请求头；缺失（HRESULT 错误）返回 None。
-unsafe fn request_header(
-    request: &ICoreWebView2WebResourceRequest,
-    name: &str,
-) -> Option<String> {
+unsafe fn request_header(request: &ICoreWebView2WebResourceRequest, name: &str) -> Option<String> {
     let headers = request.Headers().ok()?;
     let mut value = PWSTR::null();
-    headers
-        .GetHeader(&HSTRING::from(name), &mut value)
-        .ok()?;
+    headers.GetHeader(&HSTRING::from(name), &mut value).ok()?;
     Some(take_pwstr(value))
 }
 
@@ -435,7 +731,10 @@ mod tests {
     fn normalizes_uppercase_hash() {
         let upper = HASH.to_ascii_uppercase();
         let url = files_url(&upper, "assets/bg.png").expect("大写 hash 规范化为小写");
-        assert!(url.starts_with("https://a1b2c3d4"), "URL host 必须小写：{url}");
+        assert!(
+            url.starts_with("https://a1b2c3d4"),
+            "URL host 必须小写：{url}"
+        );
     }
 
     #[test]
@@ -453,7 +752,10 @@ mod tests {
     #[test]
     fn rejects_bad_hash() {
         assert!(files_url("a1", "assets/bg.png").is_none(), "长度不足");
-        assert!(files_url(&"g".repeat(64), "assets/bg.png").is_none(), "非十六进制");
+        assert!(
+            files_url(&"g".repeat(64), "assets/bg.png").is_none(),
+            "非十六进制"
+        );
     }
 
     #[test]
@@ -462,7 +764,10 @@ mod tests {
         assert!(files_url(HASH, "assets\\bg.png").is_none(), "反斜杠");
         assert!(files_url(HASH, "assets/../bg.png").is_none(), "点段");
         assert!(files_url(HASH, "assets//bg.png").is_none(), "空段");
-        assert!(files_url(HASH, "assets/白.png").is_none(), "非小写 ASCII 字符集");
+        assert!(
+            files_url(HASH, "assets/白.png").is_none(),
+            "非小写 ASCII 字符集"
+        );
         assert!(files_url(HASH, "/assets/bg.png").is_none(), "空首段");
     }
 }

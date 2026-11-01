@@ -134,6 +134,7 @@ pub(crate) struct MiniHost {
     #[allow(dead_code)]
     pub(crate) profile: Profile,
     pub(crate) phase: MiniPhase,
+    enter_reason: Option<EnterReason>,
     pub(crate) geometry: MiniGeometry,
     /// 桌面宠物态：透明区域不吃鼠标（区域级穿透）。
     pub(crate) pet: bool,
@@ -155,13 +156,15 @@ pub(crate) struct MiniHost {
     /// 宠物态悬停展开：窗口临时回到胶囊尺寸，露出曲名与传输键。
     /// 由页面的 hover 事件驱动，Peeking/Hidden 下不生效。
     pub(crate) pet_hover: bool,
+    pub(crate) scale: f64,
 }
 
 /// 状态机的输入。每个都是「用户/系统做了什么」，不是「把状态设成什么」。
 pub(crate) enum MiniEvent {
     Enter(EnterReason),
-    /// 请求回到主窗口。小窗自己关掉，并让 app 去通知服务端。
+    /// 请求回到主窗口；恢复成功前保留小窗。
     Restore,
+    RestoreComplete,
     /// 主窗口重新可见；只有 MainHidden 进来的小窗会自动退。
     MainVisible,
     DragBegin,
@@ -193,8 +196,9 @@ impl MiniHost {
         Self {
             profile,
             phase: MiniPhase::Hidden,
+            enter_reason: None,
             geometry: MiniGeometry::default(),
-            pet: false,
+            pet: true,
             locked: false,
             always_on_top: true,
             auto_on_main_hidden: false,
@@ -203,6 +207,7 @@ impl MiniHost {
             hit_regions: Vec::new(),
             pet_size: None,
             pet_hover: false,
+            scale: 1.0,
         }
     }
 
@@ -211,6 +216,13 @@ impl MiniHost {
     pub(crate) fn handle(&mut self, event: MiniEvent) -> MiniAction {
         match event {
             MiniEvent::Enter(reason) => {
+                if reason == EnterReason::MainHidden && !self.auto_on_main_hidden {
+                    return MiniAction::None;
+                }
+                // 手动接管可以升级自动弹出的窗口；自动事件不能覆盖用户意图。
+                if self.enter_reason.is_none() || reason != EnterReason::MainHidden {
+                    self.enter_reason = Some(reason);
+                }
                 crate::app::log(&format!("mini enter reason={}", reason.label()));
                 match self.phase {
                     MiniPhase::Hidden => {}
@@ -236,20 +248,25 @@ impl MiniHost {
                     return MiniAction::None;
                 }
                 crate::app::log("mini restore");
-                self.phase = MiniPhase::Hidden;
-                self.settled_at = None;
-                // 相位已经回到 Hidden，动作里还要带一次「去叫主窗口」：
-                // 小窗关掉而主窗口没回来，用户就既没有小窗也没有主界面。
                 MiniAction::NotifyRestore
+            }
+            MiniEvent::RestoreComplete => {
+                self.phase = MiniPhase::Hidden;
+                self.enter_reason = None;
+                self.settled_at = None;
+                MiniAction::Hide
             }
             MiniEvent::MainVisible => {
                 // 只对「因为主窗口隐藏而接管」的那次生效；用户手动开的小窗不该
                 // 被主窗口的一次 Alt-Tab 收掉。
-                if self.phase == MiniPhase::Hidden || !self.auto_on_main_hidden {
+                if self.phase == MiniPhase::Hidden
+                    || self.enter_reason != Some(EnterReason::MainHidden)
+                {
                     return MiniAction::None;
                 }
                 crate::app::log("mini auto-restore on main visible");
                 self.phase = MiniPhase::Hidden;
+                self.enter_reason = None;
                 MiniAction::Hide
             }
             MiniEvent::DragBegin => match self.phase {
@@ -311,6 +328,7 @@ impl MiniHost {
             }
             MiniEvent::Quit => {
                 self.phase = MiniPhase::Hidden;
+                self.enter_reason = None;
                 MiniAction::Hide
             }
         }
@@ -365,7 +383,7 @@ impl MiniHost {
     /// 都拿不到（远程桌面 / 锁屏），此时不要动窗口。
     pub(crate) fn desired_rect(&self, dpi: u32) -> Option<(i32, i32, i32, i32)> {
         let area = self.target_area()?;
-        let scale = f64::from(dpi.max(1)) / 96.0;
+        let scale = f64::from(dpi.max(1)) / 96.0 * self.scale;
         // 宠物收起态用素材尺寸：宠物就是一小块形象，不是一条压扁的胶囊。
         // 悬停展开（pet_hover）临时回到胶囊尺寸——窗口只会比收起时更大，
         // 贴边吸附下向屏幕内生长，不会跑到屏外。
@@ -488,7 +506,14 @@ pub(crate) struct DockTarget {
 
 /// 沿边比例：把窗口左上角在主轴上的位置折算成 0..1。与 `dock_position`
 /// 互为反函数（两者都按左上角算），沿边拖动落盘再还原不会漂。
-fn along_for(edge: DockEdge, x: i32, y: i32, width: i32, height: i32, area: &native::WorkArea) -> f64 {
+fn along_for(
+    edge: DockEdge,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    area: &native::WorkArea,
+) -> f64 {
     let span = if edge.horizontal() {
         area.width() - width
     } else {
@@ -660,7 +685,15 @@ mod tests {
             host.handle(MiniEvent::Enter(EnterReason::User)),
             MiniAction::Place
         ));
-        assert!(matches!(host.handle(MiniEvent::Restore), MiniAction::NotifyRestore));
+        assert!(matches!(
+            host.handle(MiniEvent::Restore),
+            MiniAction::NotifyRestore
+        ));
+        assert_ne!(host.phase, MiniPhase::Hidden);
+        assert!(matches!(
+            host.handle(MiniEvent::RestoreComplete),
+            MiniAction::Hide
+        ));
         assert_eq!(host.phase, MiniPhase::Hidden);
     }
 
@@ -670,8 +703,10 @@ mod tests {
             std::path::PathBuf::from("C:\\d"),
             "full",
         ));
+        host.auto_on_main_hidden = true;
         host.handle(MiniEvent::Enter(EnterReason::User));
-        // 没开自动接管：主窗口回来也不该把用户手动开的小窗收掉。
+        host.handle(MiniEvent::Enter(EnterReason::MainHidden));
+        // 即使开了自动接管，手动打开的小窗也要保留。
         assert!(matches!(
             host.handle(MiniEvent::MainVisible),
             MiniAction::None
@@ -689,6 +724,24 @@ mod tests {
         host.handle(MiniEvent::Enter(EnterReason::MainHidden));
         assert!(matches!(host.handle(MiniEvent::MainVisible), MiniAction::Hide));
         assert_eq!(host.phase, MiniPhase::Hidden);
+    }
+
+    #[test]
+    fn automatic_entry_requires_opt_in_and_manual_entry_takes_ownership() {
+        let mut host = pet_host();
+        assert!(matches!(
+            host.handle(MiniEvent::Enter(EnterReason::MainHidden)),
+            MiniAction::None
+        ));
+        assert_eq!(host.phase, MiniPhase::Hidden);
+        host.auto_on_main_hidden = true;
+        host.handle(MiniEvent::Enter(EnterReason::MainHidden));
+        host.handle(MiniEvent::Enter(EnterReason::User));
+        assert!(matches!(
+            host.handle(MiniEvent::MainVisible),
+            MiniAction::None
+        ));
+        assert_ne!(host.phase, MiniPhase::Hidden);
     }
 
     #[test]
@@ -748,6 +801,17 @@ mod tests {
         let host = pet_host();
         let rect = host.desired_rect(96).expect("工作区存在");
         assert_eq!((rect.2, rect.3), (56, 56));
+    }
+
+    #[test]
+    fn native_dimensions_follow_the_configured_ui_scale() {
+        let mut host = pet_host();
+        host.scale = 1.2;
+        let rect = host.desired_rect(96).expect("工作区存在");
+        assert_eq!((rect.2, rect.3), (67, 67));
+        host.pet_hover = true;
+        let rect = host.desired_rect(96).expect("工作区存在");
+        assert_eq!((rect.2, rect.3), (322, 67));
     }
 
     #[test]

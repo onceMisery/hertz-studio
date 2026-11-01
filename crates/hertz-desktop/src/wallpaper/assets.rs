@@ -8,9 +8,9 @@
 //! `staging/<jobId>/`、`derived/<inputHash>/…`。复制进不可变包，P1 不引用
 //! 原路径；已安装作品永不重新打开用户源文件。
 
-use std::io::Read;
-use std::sync::Arc;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 
@@ -50,6 +50,20 @@ pub struct AssetStore {
     root: PathBuf,
 }
 
+/// 核验缓存持有只读、拒绝写入/删除共享的句柄；命中时字节身份不能变化。
+pub(crate) struct PinnedMedia {
+    pub(crate) entry: hertz_wallpaper::VerifiedEntry,
+    pub(crate) path: PathBuf,
+    _pins: [std::fs::File; 2],
+}
+
+/// 结构与摘要已复核，真实解码期间持续固定这份字节。
+pub(crate) struct DecodeInput {
+    pub(crate) package_hash: String,
+    pub(crate) media: Arc<PinnedMedia>,
+    pub(crate) metadata: super::media::MediaProbe,
+}
+
 impl AssetStore {
     pub fn new(root: &Path) -> Result<Self> {
         std::fs::create_dir_all(root.join("packages"))
@@ -61,12 +75,53 @@ impl AssetStore {
         })
     }
 
-    fn staging_dir(&self, job_id: &str) -> PathBuf {
+    pub(crate) fn staging_dir(&self, job_id: &str) -> PathBuf {
         self.root.join("staging").join(job_id)
     }
 
     pub fn package_dir(&self, package_hash: &str) -> PathBuf {
         self.root.join("packages").join(package_hash)
+    }
+
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub(crate) fn pin_prepared(
+        &self,
+        input: &DecodeInput,
+        path: PathBuf,
+        entry: hertz_wallpaper::VerifiedEntry,
+    ) -> Result<DecodeInput> {
+        let file = open_immutable(&path)?;
+        let mut reader = file
+            .try_clone()
+            .map_err(|error| JobError::io(error.to_string()))?;
+        let mut digest = Sha256::new();
+        let bytes = std::io::copy(&mut reader, &mut digest)
+            .map_err(|error| JobError::io(error.to_string()))?;
+        if bytes != entry.bytes || format!("{:x}", digest.finalize()) != entry.sha256 {
+            return Err(JobError::new("hash_mismatch", "派生图固定前字节发生变化"));
+        }
+        reader
+            .seek(SeekFrom::Start(0))
+            .map_err(|error| JobError::io(error.to_string()))?;
+        let metadata = super::media::probe(&mut reader)
+            .map_err(|error| JobError::new(error.code, error.message))?;
+        Ok(DecodeInput {
+            package_hash: input.package_hash.clone(),
+            metadata,
+            media: Arc::new(PinnedMedia {
+                entry,
+                path,
+                _pins: [
+                    input.media._pins[0]
+                        .try_clone()
+                        .map_err(|error| JobError::io(error.to_string()))?,
+                    file,
+                ],
+            }),
+        })
     }
 
     /// ① 固定输入快照（§7.1 Probe 第一道）：以只读共享句柄打开源文件——
@@ -81,9 +136,6 @@ impl AssetStore {
     ) -> Result<SnapshotReceipt> {
         use std::os::windows::fs::OpenOptionsExt;
         use std::sync::atomic::Ordering;
-        let staging = self.staging_dir(job_id);
-        std::fs::create_dir_all(&staging)
-            .map_err(|error| JobError::io(format!("创建 staging 目录失败：{error}")))?;
         let source_file = std::fs::OpenOptions::new()
             .read(true)
             // 只共享读（FILE_SHARE_READ）：打开期间任何写入者都会撞
@@ -95,12 +147,24 @@ impl AssetStore {
                 if raw == 32 {
                     JobError::new(
                         "source_busy",
-                        format!("源文件正被其它进程写入，已拒绝并发读取：{}", source.display()),
+                        format!(
+                            "源文件正被其它进程写入，已拒绝并发读取：{}",
+                            source.display()
+                        ),
                     )
                 } else {
                     JobError::io(format!("打开导入源失败：{error}"))
                 }
             })?;
+        let source_bytes = source_file
+            .metadata()
+            .map_err(|error| JobError::io(format!("读取源大小失败：{error}")))?
+            .len();
+        hertz_wallpaper::archive::check_package_bytes(source_bytes)?;
+        self.check_disk_space(source_bytes)?;
+        let staging = self.staging_dir(job_id);
+        std::fs::create_dir_all(&staging)
+            .map_err(|error| JobError::io(format!("创建 staging 目录失败：{error}")))?;
         let mut reader = std::io::BufReader::with_capacity(256 * 1024, source_file);
         let target_path = staging.join("original.hwpkg");
         let target = std::fs::OpenOptions::new()
@@ -124,16 +188,18 @@ impl AssetStore {
             if read == 0 {
                 break;
             }
+            hertz_wallpaper::archive::check_package_bytes(bytes + read as u64)?;
             hasher.update(&chunk[..read]);
             std::io::Write::write_all(&mut writer, &chunk[..read])
                 .map_err(|error| JobError::io(format!("写入快照失败：{error}")))?;
             bytes += read as u64;
         }
-        std::io::Write::flush(&mut writer).and_then(|_| {
-            let file = writer.into_inner().map_err(|error| error.into_error())?;
-            file.sync_all()
-        })
-        .map_err(|error| JobError::io(format!("快照落盘失败：{error}")))?;
+        std::io::Write::flush(&mut writer)
+            .and_then(|_| {
+                let file = writer.into_inner().map_err(|error| error.into_error())?;
+                file.sync_all()
+            })
+            .map_err(|error| JobError::io(format!("快照落盘失败：{error}")))?;
         Ok(SnapshotReceipt {
             job_id: job_id.to_string(),
             original: target_path,
@@ -145,11 +211,17 @@ impl AssetStore {
     /// ② 对固定快照执行完整包校验（P1-01 合同）并取回 manifest 事实。
     pub fn validate_staged(&self, job_id: &str) -> Result<StagedPackage> {
         let original = self.staging_dir(job_id).join("original.hwpkg");
-        let bytes = std::fs::read(&original)
+        let mut file = open_immutable(&original)?;
+        hertz_wallpaper::archive::check_package_bytes(
+            file.metadata()
+                .map_err(|error| JobError::io(error.to_string()))?
+                .len(),
+        )?;
+        let mut hasher = Sha256::new();
+        std::io::copy(&mut file, &mut hasher)
             .map_err(|error| JobError::io(format!("读取快照失败：{error}")))?;
-        let package_hash = format!("{:x}", Sha256::digest(&bytes));
-        hertz_wallpaper::archive::check_package_bytes(bytes.len() as u64)?;
-        let package = hertz_wallpaper::validate_package(std::io::Cursor::new(bytes))?;
+        let package_hash = format!("{:x}", hasher.finalize());
+        let package = hertz_wallpaper::validate_package(file)?;
         let manifest_json = serde_json::to_string(&package.manifest)
             .map_err(|error| JobError::io(format!("manifest 再序列化失败：{error}")))?;
         Ok(StagedPackage {
@@ -160,10 +232,146 @@ impl AssetStore {
         })
     }
 
-    /// ③ 空间峰值预检（§7.1 末段）：所需 = 投影字节数 + 已有 staging 占用 + 余量。
+    /// 复核摘要与容器真值并固定字节；返回值必须交给 ProbeClient 完成真实解码。
+    pub(crate) fn probe_staged_media(
+        &self,
+        job_id: &str,
+        package: &StagedPackage,
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<Vec<DecodeInput>> {
+        Self::probe_media_at(&self.staging_dir(job_id).join("files"), package, cancel)
+    }
+
+    pub(crate) fn probe_installed_media(
+        &self,
+        package: &StagedPackage,
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<Vec<DecodeInput>> {
+        Self::probe_media_at(
+            &self.package_dir(&package.package_hash).join("files"),
+            package,
+            cancel,
+        )
+    }
+
+    fn probe_media_at(
+        files: &Path,
+        package: &StagedPackage,
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<Vec<DecodeInput>> {
+        use super::media::{probe, Container};
+        use hertz_wallpaper::manifest::AssetKind;
+        let mut original =
+            open_immutable(&files.parent().expect("package root").join("original.hwpkg"))?;
+        hertz_wallpaper::archive::check_package_bytes(
+            original
+                .metadata()
+                .map_err(|error| JobError::io(error.to_string()))?
+                .len(),
+        )?;
+        let mut hash = Sha256::new();
+        std::io::copy(&mut original, &mut hash).map_err(|error| JobError::io(error.to_string()))?;
+        if format!("{:x}", hash.finalize()) != package.package_hash {
+            return Err(JobError::new("hash_mismatch", "探测前固定原包字节已变化"));
+        }
+        let mut inputs = Vec::new();
+        let mut checked = std::collections::HashSet::new();
+        for asset in &package.manifest.assets {
+            if !matches!(asset.kind, AssetKind::Image | AssetKind::Video) {
+                continue;
+            }
+            for path in std::iter::once(asset.source.as_str())
+                .chain(asset.variants.iter().map(|variant| variant.file.as_str()))
+            {
+                if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                    return Err(JobError::new("cancelled", "媒体探测已取消"));
+                }
+                if !checked.insert((path, asset.kind == AssetKind::Image)) {
+                    continue;
+                }
+                let mut file = open_immutable(&files.join(path))?;
+                let entry = package
+                    .entries
+                    .iter()
+                    .find(|entry| entry.path == path)
+                    .ok_or_else(|| JobError::new("package_invalid", "媒体路径未校验"))?;
+                if asset.kind == AssetKind::Image && entry.bytes > 32 * 1024 * 1024 {
+                    return Err(JobError::new(
+                        "probe_budget_exceeded",
+                        format!("{path}: 图片压缩字节超过 32 MiB"),
+                    ));
+                }
+                if file
+                    .metadata()
+                    .map_err(|error| JobError::io(error.to_string()))?
+                    .len()
+                    != entry.bytes
+                {
+                    return Err(JobError::new(
+                        "hash_mismatch",
+                        format!("{path}: 探测前投影大小已变化"),
+                    ));
+                }
+                let mut hash = Sha256::new();
+                let bytes = std::io::copy(&mut file, &mut hash)
+                    .map_err(|error| JobError::io(error.to_string()))?;
+                if bytes != entry.bytes || format!("{:x}", hash.finalize()) != entry.sha256 {
+                    return Err(JobError::new(
+                        "hash_mismatch",
+                        format!("{path}: 探测前投影字节已变化"),
+                    ));
+                }
+                file.seek(SeekFrom::Start(0))
+                    .map_err(|error| JobError::io(error.to_string()))?;
+                let metadata = probe(&mut file).map_err(|error| {
+                    JobError::new(error.code, format!("{path}: {}", error.message))
+                })?;
+                if (asset.kind == AssetKind::Image) != (metadata.container == Container::Image) {
+                    return Err(JobError::new(
+                        "format_unsupported",
+                        format!("{path}: 媒体真值与 asset.kind 不一致"),
+                    ));
+                }
+                let expected_mime = match metadata.container {
+                    Container::Mp4 => "video/mp4".to_string(),
+                    Container::Webm => "video/webm".to_string(),
+                    Container::Image => format!("image/{}", metadata.codec),
+                };
+                if package
+                    .manifest
+                    .files
+                    .iter()
+                    .find(|file| file.path == path)
+                    .is_none_or(|file| file.mime != expected_mime)
+                {
+                    return Err(JobError::new(
+                        "format_unsupported",
+                        format!("{path}: MIME 与实际容器不一致（{expected_mime}）"),
+                    ));
+                }
+                inputs.push(DecodeInput {
+                    package_hash: package.package_hash.clone(),
+                    metadata,
+                    media: Arc::new(PinnedMedia {
+                        entry: entry.clone(),
+                        path: files.join(path),
+                        _pins: [
+                            original
+                                .try_clone()
+                                .map_err(|error| JobError::io(error.to_string()))?,
+                            file,
+                        ],
+                    }),
+                });
+            }
+        }
+        Ok(inputs)
+    }
+
+    /// ③ 空间预检：剩余空间应覆盖后续新增写入及余量，现有 staging 已计入占用。
     pub fn check_disk_space(&self, required: u64) -> Result<()> {
-        let staged = self.staged_total_bytes()?;
-        let need = required.saturating_add(staged);
+        // free 已扣除了所有现存 staging；只申请此后还要写入的字节。
+        let need = required;
         let free = free_disk_bytes(&self.root)?;
         // 余量取 64 MiB 下限：DB、WAL 与收据等簿记不在精确预测内。
         const SLACK: u64 = 64 * 1024 * 1024;
@@ -176,37 +384,21 @@ impl AssetStore {
         Ok(())
     }
 
-    fn staged_total_bytes(&self) -> Result<u64> {
-        let mut total = 0u64;
-        let staging = self.root.join("staging");
-        let entries = std::fs::read_dir(&staging)
-            .map_err(|error| JobError::io(format!("读取 staging 失败：{error}")))?;
-        for entry in entries.flatten() {
-            if entry.path().is_dir() {
-                total += dir_size(&entry.path())?;
-            }
-        }
-        Ok(total)
-    }
-
     /// ④ 投影解包：files/ 只包含已声明路径（校验器已排除未声明条目）。
-    pub fn unpack_projection(
-        &self,
-        job_id: &str,
-        package: &StagedPackage,
-    ) -> Result<()> {
+    pub fn unpack_projection(&self, job_id: &str, package: &StagedPackage) -> Result<()> {
         let original = self.staging_dir(job_id).join("original.hwpkg");
         let files_dir = self.staging_dir(job_id).join("files");
         std::fs::create_dir_all(&files_dir)
             .map_err(|error| JobError::io(format!("创建投影目录失败：{error}")))?;
-        let mut archive = zip::ZipArchive::new(std::fs::File::open(&original).map_err(|error| {
-            JobError::io(format!("重新打开快照失败：{error}"))
-        })?)
+        let mut archive = zip::ZipArchive::new(
+            std::fs::File::open(&original)
+                .map_err(|error| JobError::io(format!("重新打开快照失败：{error}")))?,
+        )
         .map_err(|error| JobError::new("package_invalid", format!("快照不是合法 ZIP：{error}")))?;
         for entry in &package.entries {
-            let mut reader = archive
-                .by_name(&entry.path)
-                .map_err(|error| JobError::new("package_invalid", format!("投影条目缺失：{error}")))?;
+            let mut reader = archive.by_name(&entry.path).map_err(|error| {
+                JobError::new("package_invalid", format!("投影条目缺失：{error}"))
+            })?;
             let target = files_dir.join(&entry.path);
             if let Some(parent) = target.parent() {
                 std::fs::create_dir_all(parent)
@@ -217,8 +409,9 @@ impl AssetStore {
             let entry_path = entry.path.clone();
             std::io::copy(&mut reader, &mut file)
                 .map_err(|error| JobError::io(format!("解包条目失败：{entry_path}: {error}")))?;
-            file.sync_all()
-                .map_err(|error| JobError::io(format!("投影条目落盘失败：{entry_path}: {error}")))?;
+            file.sync_all().map_err(|error| {
+                JobError::io(format!("投影条目落盘失败：{entry_path}: {error}"))
+            })?;
         }
         // ⑤ 收据：核验事实落盘（§4.2 packages 的本机验证收据）。
         let receipt = InstalledReceipt {
@@ -227,10 +420,13 @@ impl AssetStore {
             entries: package.entries.clone(),
         };
         let receipt_path = self.staging_dir(job_id).join("receipt.json");
-        std::fs::write(&receipt_path, serde_json::to_vec_pretty(&receipt).map_err(|error| {
-            JobError::io(format!("收据序列化失败：{error}"))
-        })?)
-        .map_err(|error| JobError::io(format!("写入收据失败：{error}")))?;
+        let receipt_bytes = serde_json::to_vec_pretty(&receipt)
+            .map_err(|error| JobError::io(format!("收据序列化失败：{error}")))?;
+        let mut file = std::fs::File::create(&receipt_path)
+            .map_err(|error| JobError::io(format!("创建收据失败：{error}")))?;
+        std::io::Write::write_all(&mut file, &receipt_bytes)
+            .and_then(|_| file.sync_all())
+            .map_err(|error| JobError::io(format!("写入收据失败：{error}")))?;
         Ok(())
     }
 
@@ -260,7 +456,7 @@ impl AssetStore {
         self.discard_staging(job_id);
     }
 
-    /// 已安装包快速核验（§7.2：收据 + 只读目录 + 哈希核对）。
+    /// 已安装包核验：原包验证结果是路径/MIME/摘要真值，投影逐文件核对 SHA-256。
     /// 返回 Some(收据) 表示目录与 original.hwpkg 完整可核验。
     pub fn verify_installed(&self, package_hash: &str) -> Result<Option<InstalledReceipt>> {
         let dir = self.package_dir(package_hash);
@@ -269,8 +465,12 @@ impl AssetStore {
             return Ok(None);
         }
         let mut hasher = Sha256::new();
-        let mut file = std::fs::File::open(&original)
-            .map_err(|error| JobError::io(format!("打开 original.hwpkg 失败：{error}")))?;
+        let mut file = open_immutable(&original)?;
+        hertz_wallpaper::archive::check_package_bytes(
+            file.metadata()
+                .map_err(|error| JobError::io(error.to_string()))?
+                .len(),
+        )?;
         std::io::copy(&mut file, &mut hasher)
             .map_err(|error| JobError::io(format!("核对 original.hwpkg 失败：{error}")))?;
         if format!("{:x}", hasher.finalize()) != package_hash {
@@ -280,23 +480,61 @@ impl AssetStore {
         if !receipt_path.is_file() {
             return Ok(None);
         }
-        let receipt: InstalledReceipt = serde_json::from_slice(&std::fs::read(&receipt_path).map_err(|error| {
-            JobError::io(format!("读取收据失败：{error}"))
-        })?)
-        .map_err(|error| JobError::new("package_invalid", format!("收据损坏：{error}")))?;
+        // 收据只提供安装时间，路径、MIME 和摘要以原包验证结果为准。
+        let mut receipt_bytes = Vec::new();
+        open_immutable(&receipt_path)?
+            .take(2 * 1024 * 1024 + 1)
+            .read_to_end(&mut receipt_bytes)
+            .map_err(|error| JobError::io(format!("读取收据失败：{error}")))?;
+        if receipt_bytes.len() > 2 * 1024 * 1024 {
+            return Ok(None);
+        }
+        let Ok(mut receipt) = serde_json::from_slice::<InstalledReceipt>(&receipt_bytes) else {
+            return Ok(None);
+        };
         if receipt.package_hash != package_hash {
             return Ok(None);
         }
-        // 投影文件抽查：收据声明的每个条目都在 files/ 且大小一致。
-        for entry in &receipt.entries {
+        let package = hertz_wallpaper::validate_package(file)?;
+        for entry in &package.entries {
             let path = dir.join("files").join(&entry.path);
-            let meta = std::fs::metadata(&path).ok();
-            match meta {
-                Some(meta) if meta.len() == entry.bytes => {}
-                _ => return Ok(None),
+            let Ok(mut projection) = open_immutable(&path) else {
+                return Ok(None);
+            };
+            if projection
+                .metadata()
+                .map_err(|error| JobError::io(error.to_string()))?
+                .len()
+                != entry.bytes
+            {
+                return Ok(None);
+            }
+            let mut digest = Sha256::new();
+            std::io::copy(&mut projection, &mut digest)
+                .map_err(|error| JobError::io(format!("核对投影失败：{error}")))?;
+            if format!("{:x}", digest.finalize()) != entry.sha256 {
+                return Ok(None);
             }
         }
+        receipt.entries = package.entries;
         Ok(Some(receipt))
+    }
+
+    pub(crate) fn pin_verified_media(&self, hash: &str, path: &str) -> Result<Option<PinnedMedia>> {
+        let original = open_immutable(&self.package_dir(hash).join("original.hwpkg"))?;
+        let path_buf = self.package_dir(hash).join("files").join(path);
+        let projection = open_immutable(&path_buf)?;
+        let Some(receipt) = self.verify_installed(hash)? else {
+            return Ok(None);
+        };
+        let Some(entry) = receipt.entries.into_iter().find(|entry| entry.path == path) else {
+            return Ok(None);
+        };
+        Ok(Some(PinnedMedia {
+            entry,
+            path: path_buf,
+            _pins: [original, projection],
+        }))
     }
 
     /// 进程级媒体流槽池（§8.1 总并发 8）。
@@ -322,14 +560,9 @@ impl AssetStore {
     }
 
     /// 读取已安装包的 manifest（启动恢复入库用）。
-    pub fn read_installed_manifest(
-        &self,
-        package_hash: &str,
-    ) -> Result<StagedPackage> {
+    pub fn read_installed_manifest(&self, package_hash: &str) -> Result<StagedPackage> {
         let original = self.package_dir(package_hash).join("original.hwpkg");
-        let bytes = std::fs::read(&original)
-            .map_err(|error| JobError::io(format!("读取已安装包失败：{error}")))?;
-        let package = hertz_wallpaper::validate_package(std::io::Cursor::new(bytes))?;
+        let package = hertz_wallpaper::validate_package(open_immutable(&original)?)?;
         let manifest_json = serde_json::to_string(&package.manifest)
             .map_err(|error| JobError::io(format!("manifest 再序列化失败：{error}")))?;
         Ok(StagedPackage {
@@ -348,20 +581,13 @@ impl AssetStore {
     }
 }
 
-fn dir_size(path: &Path) -> Result<u64> {
-    let mut total = 0u64;
-    let entries = std::fs::read_dir(path).map_err(|error| JobError::io(format!("读取目录失败：{error}")))?;
-    for entry in entries.flatten() {
-        let meta = entry
-            .metadata()
-            .map_err(|error| JobError::io(format!("读取元数据失败：{error}")))?;
-        if meta.is_dir() {
-            total += dir_size(&entry.path())?;
-        } else {
-            total += meta.len();
-        }
-    }
-    Ok(total)
+fn open_immutable(path: &Path) -> Result<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(1)
+        .open(path)
+        .map_err(|error| JobError::io(format!("打开只读资产失败：{error}")))
 }
 
 /// 剩余磁盘空间（Windows）。
@@ -375,14 +601,8 @@ fn free_disk_bytes(root: &Path) -> Result<u64> {
     let mut free_to_caller: u64 = 0;
     let mut total: u64 = 0;
     let mut free: u64 = 0;
-    let ok = unsafe {
-        GetDiskFreeSpaceExW(
-            wide.as_ptr(),
-            &mut free_to_caller,
-            &mut total,
-            &mut free,
-        )
-    };
+    let ok =
+        unsafe { GetDiskFreeSpaceExW(wide.as_ptr(), &mut free_to_caller, &mut total, &mut free) };
     if ok == 0 {
         return Err(JobError::io("查询磁盘剩余空间失败"));
     }
@@ -418,7 +638,10 @@ mod tests {
                 .unwrap();
             std::io::Write::write_all(&mut writer, manifest.as_bytes()).unwrap();
             writer
-                .start_file("assets/background.png", zip::write::SimpleFileOptions::default())
+                .start_file(
+                    "assets/background.png",
+                    zip::write::SimpleFileOptions::default(),
+                )
                 .unwrap();
             std::io::Write::write_all(&mut writer, &png).unwrap();
             writer.finish().unwrap();
@@ -471,8 +694,13 @@ mod tests {
         assert_eq!(staged.package_hash, receipt.sha256);
         assert_eq!(staged.manifest.title, "静夜");
         store.unpack_projection("job-1", &staged).unwrap();
-        store.publish_staging("job-1", &staged.package_hash).unwrap();
-        assert!(store.verify_installed(&staged.package_hash).unwrap().is_some());
+        store
+            .publish_staging("job-1", &staged.package_hash)
+            .unwrap();
+        assert!(store
+            .verify_installed(&staged.package_hash)
+            .unwrap()
+            .is_some());
     }
 
     #[test]
@@ -483,7 +711,9 @@ mod tests {
         store.snapshot_input("job-1", &source, None).unwrap();
         let staged = store.validate_staged("job-1").unwrap();
         store.unpack_projection("job-1", &staged).unwrap();
-        store.publish_staging("job-1", &staged.package_hash).unwrap();
+        store
+            .publish_staging("job-1", &staged.package_hash)
+            .unwrap();
         // 第二次发布同 hash → target_exists，绝不覆盖（§7.2）。
         store.snapshot_input("job-2", &source, None).unwrap();
         store.unpack_projection("job-2", &staged).unwrap();
@@ -509,13 +739,48 @@ mod tests {
         store.snapshot_input("job-1", &source, None).unwrap();
         let staged = store.validate_staged("job-1").unwrap();
         store.unpack_projection("job-1", &staged).unwrap();
-        store.publish_staging("job-1", &staged.package_hash).unwrap();
-        assert!(store.verify_installed(&staged.package_hash).unwrap().is_some());
-        // 投影文件被截断 → 核验失败。
+        store
+            .publish_staging("job-1", &staged.package_hash)
+            .unwrap();
+        assert!(store
+            .verify_installed(&staged.package_hash)
+            .unwrap()
+            .is_some());
+        // 等长篡改也必须拒绝，不能只核对尺寸。
         let projection = store
             .package_dir(&staged.package_hash)
             .join("files/assets/background.png");
-        std::fs::write(&projection, b"").unwrap();
-        assert!(store.verify_installed(&staged.package_hash).unwrap().is_none());
+        std::fs::write(&projection, vec![0; 70]).unwrap();
+        assert!(store
+            .verify_installed(&staged.package_hash)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn cached_verification_pins_bytes_until_the_lease_is_dropped() {
+        let (store, dir) = store("pinned");
+        let source = write_source(&dir, "src.hwpkg", &sample_package());
+        store.snapshot_input("job-1", &source, None).unwrap();
+        let package = store.validate_staged("job-1").unwrap();
+        store.unpack_projection("job-1", &package).unwrap();
+        store
+            .publish_staging("job-1", &package.package_hash)
+            .unwrap();
+        let pinned = store
+            .pin_verified_media(&package.package_hash, "assets/background.png")
+            .unwrap()
+            .unwrap();
+        let projection = pinned.path.clone();
+        assert!(std::fs::write(&projection, b"tampered").is_err());
+        assert!(std::fs::write(
+            store
+                .package_dir(&package.package_hash)
+                .join("original.hwpkg"),
+            b"tampered"
+        )
+        .is_err());
+        drop(pinned);
+        assert!(std::fs::write(projection, b"tampered").is_ok());
     }
 }

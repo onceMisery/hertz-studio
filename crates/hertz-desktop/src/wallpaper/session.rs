@@ -201,6 +201,7 @@ impl WallpaperSession {
         self.desired_revision = Some(desired_revision);
         self.applied_revision = None;
         self.error = None;
+        self.paused_at = None;
         self.facts.clear();
         self.state = SessionState::Resolving;
         Ok(self.generation)
@@ -215,12 +216,7 @@ impl WallpaperSession {
         self.advance_stage(generation, SessionState::Preparing, SessionState::Attaching)
     }
 
-    fn advance_stage(
-        &mut self,
-        generation: u64,
-        from: SessionState,
-        to: SessionState,
-    ) -> bool {
+    fn advance_stage(&mut self, generation: u64, from: SessionState, to: SessionState) -> bool {
         if generation != self.generation || self.state != from {
             return false;
         }
@@ -249,11 +245,7 @@ impl WallpaperSession {
         self.set_fact(generation, |facts| facts.frame_submitted = Some(kind))
     }
 
-    fn set_fact(
-        &mut self,
-        generation: u64,
-        set: impl FnOnce(&mut ReadyFacts),
-    ) -> bool {
+    fn set_fact(&mut self, generation: u64, set: impl FnOnce(&mut ReadyFacts)) -> bool {
         if generation != self.generation || self.state != SessionState::Attaching {
             return false;
         }
@@ -334,7 +326,10 @@ impl WallpaperSession {
 
     /// 登记原因；同 (name, scope) 幂等。
     pub(crate) fn add_pause_reason(&mut self, name: &str, scope: PauseScope, now: Instant) {
-        let reason = PauseReason { name: name.to_string(), scope };
+        let reason = PauseReason {
+            name: name.to_string(),
+            scope,
+        };
         if !self.pauses.contains(&reason) {
             self.pauses.push(reason);
         }
@@ -343,7 +338,12 @@ impl WallpaperSession {
 
     /// 解除原因：只移除 (name, scope) 完全匹配的登记，不清空集合。
     /// 返回是否发生了解除。
-    pub(crate) fn remove_pause_reason(&mut self, name: &str, scope: PauseScope, now: Instant) -> bool {
+    pub(crate) fn remove_pause_reason(
+        &mut self,
+        name: &str,
+        scope: PauseScope,
+        now: Instant,
+    ) -> bool {
         let before = self.pauses.len();
         self.pauses
             .retain(|reason| !(reason.name == name && reason.scope == scope));
@@ -446,10 +446,9 @@ impl RecoveryLedger {
         if self.terminal[slot] {
             return Err(());
         }
-        self.attempts
-            .retain(|(attempt_domain, at)| {
-                *attempt_domain != domain || now.duration_since(*at) < RECOVERY_WINDOW
-            });
+        self.attempts.retain(|(attempt_domain, at)| {
+            *attempt_domain != domain || now.duration_since(*at) < RECOVERY_WINDOW
+        });
         self.attempts.push((domain, now));
         let count = self
             .attempts
@@ -467,10 +466,9 @@ impl RecoveryLedger {
     pub(crate) fn explicit_retry(&mut self, domain: FaultDomain, now: Instant) {
         let slot = Self::slot(domain);
         self.terminal[slot] = false;
-        self.attempts
-            .retain(|(attempt_domain, at)| {
-                *attempt_domain != domain || now.duration_since(*at) >= RECOVERY_WINDOW
-            });
+        self.attempts.retain(|(attempt_domain, at)| {
+            *attempt_domain != domain || now.duration_since(*at) >= RECOVERY_WINDOW
+        });
     }
 }
 

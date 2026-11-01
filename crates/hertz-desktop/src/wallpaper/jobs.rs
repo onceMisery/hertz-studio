@@ -16,6 +16,7 @@ use serde::Serialize;
 use thiserror::Error;
 
 use crate::wallpaper::assets::AssetStore;
+use crate::wallpaper::decode_probe::ProbeClient;
 use crate::wallpaper::library::{Library, LOCAL_SOURCE};
 
 #[derive(Debug, Error)]
@@ -97,7 +98,7 @@ impl Inner {
 /// 导入任务管理器：单槽 worker 线程（current_thread runtime 跑 sqlx）。
 pub struct ImportJobs {
     inner: Arc<Mutex<Inner>>,
-    submit_tx: std::sync::mpsc::SyncSender<JobRequest>,
+    submit_tx: tokio::sync::mpsc::Sender<JobRequest>,
     generation: Arc<AtomicU64>,
     library: Arc<Library>,
     assets: Arc<AssetStore>,
@@ -113,11 +114,11 @@ struct JobRequest {
 
 impl ImportJobs {
     /// 启动 worker。`library` 与 `assets` 的所有权共享给任务管线。
-    pub fn start(library: Library, assets: AssetStore) -> Self {
+    pub fn start(library: Library, assets: AssetStore, probe: ProbeClient) -> Self {
         let library = Arc::new(library);
         let assets = Arc::new(assets);
         // 容量 1：受理即入队；并发受 inner.current 单槽标记约束（busy 即拒）。
-        let (tx, rx) = std::sync::mpsc::sync_channel::<JobRequest>(1);
+        let (tx, rx) = tokio::sync::mpsc::channel::<JobRequest>(1);
         let inner = Arc::new(Mutex::new(Inner {
             current: None,
             history: std::collections::VecDeque::new(),
@@ -135,7 +136,13 @@ impl ImportJobs {
                     Ok(runtime) => runtime,
                     Err(_) => return,
                 };
-                runtime.block_on(worker_loop(rx, worker_inner, worker_library, worker_assets));
+                runtime.block_on(worker_loop(
+                    rx,
+                    worker_inner,
+                    worker_library,
+                    worker_assets,
+                    probe,
+                ));
             })
             .expect("create wallpaper import thread");
         Self {
@@ -159,6 +166,14 @@ impl ImportJobs {
     /// P1-05 管理层；内核层只见本进程拥有的路径）。
     /// 槽占用返回 `budget_busy`；受理立即返回 jobId（§7.1）。
     pub fn submit(&self, job_id: String, source: PathBuf) -> Result<String, JobError> {
+        if job_id.is_empty()
+            || job_id.len() > 64
+            || !job_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        {
+            return Err(JobError::invalid_input("jobId 必须是有界的单个目录名"));
+        }
         if !source.is_file() {
             return Err(JobError::invalid_input(format!(
                 "导入源不存在或不是文件：{}",
@@ -238,13 +253,26 @@ impl ImportJobs {
 }
 
 async fn worker_loop(
-    rx: std::sync::mpsc::Receiver<JobRequest>,
+    mut rx: tokio::sync::mpsc::Receiver<JobRequest>,
     inner: Arc<Mutex<Inner>>,
     library: Arc<Library>,
     assets: Arc<AssetStore>,
+    probe: ProbeClient,
 ) {
-    while let Ok(request) = rx.recv() {
-        let outcome = run_import(&request, &library, &assets).await;
+    // 等任务时必须继续驱动 runtime：sqlx 的连接归还也会投递异步任务。
+    // 在 current_thread runtime 内阻塞 recv 会把空闲连接卡住，查询最终池超时。
+    while let Some(request) = rx.recv().await {
+        let preparation =
+            probe.prepare(format!("prepare-{}-{}", request.job_id, request.generation));
+        let outcome = match preparation.as_ref() {
+            Ok(_) => run_import(&request, &library, &assets, &probe).await,
+            Err(error) => Err(JobError::new(error.code, error.message.clone())),
+        };
+        // run_import 返回时全部同步 I/O 已退出；成功、失败和取消均回收暂存后再还槽。
+        assets.cleanup_staging(&request.job_id);
+        if let Ok(preparation) = preparation {
+            preparation.finish();
+        }
         let mut status = request.status.lock().expect("status").clone();
         match outcome {
             Ok(package_hash) => {
@@ -306,12 +334,13 @@ fn cancelled(cancel: &AtomicBool) -> Result<(), JobError> {
     Ok(())
 }
 
-/// 导入管线（§7.1 Probe→Prepare→Install 的 P1-02 文件侧；媒体探测属 P1-03）：
-/// 固定输入快照 → 包校验 → 去重 → 空间峰值预检 → 投影解包 → 原子发布 → DB 事务。
+/// §7.1 导入管线：固定快照 → 包校验/解包 → 容器/像素及真实首帧/seek →
+/// controller 与流物理退出 → 原子发布 → DB 事务。重复导入也复核当前解码环境。
 async fn run_import(
     request: &JobRequest,
     library: &Library,
     assets: &AssetStore,
+    probe: &ProbeClient,
 ) -> Result<String, JobError> {
     let _ = library
         .record_job(&request.job_id, None, "preparing", None, None, None)
@@ -342,20 +371,50 @@ async fn run_import(
     }
     .to_string();
     // ③ 去重：相同 hash 已安装 → 不再发布第二份物理包，幂等返回既有事实。
-    if library.is_installed(&package.package_hash).await? {
-        assets.discard_staging(&request.job_id);
+    if library.is_installed(&package.package_hash).await?
+        && assets.verify_installed(&package.package_hash)?.is_some()
+    {
+        let mut prepared = qualify_media(
+            request,
+            library,
+            assets,
+            probe,
+            assets.probe_installed_media(&package, &request.cancel)?,
+        )
+        .await?;
+        cancelled(&request.cancel)?;
+        for image in &mut prepared {
+            image.publish(assets, library).await?;
+        }
+        library.mark_available(&package.package_hash).await?;
         return Ok(package.package_hash.clone());
     }
     // ④ 空间峰值预检：staging 原包 + 解包投影 + 发布余量（§7.1 末段）。
     let projection_bytes: u64 = package.manifest.files.iter().map(|file| file.bytes).sum();
-    assets.check_disk_space(receipt.bytes + projection_bytes)?;
+    assets.check_disk_space(projection_bytes)?;
     // ⑤ 投影解包（files/ 只含已声明路径）。
     assets.unpack_projection(&request.job_id, &package)?;
+    let mut prepared = qualify_media(
+        request,
+        library,
+        assets,
+        probe,
+        assets.probe_staged_media(&request.job_id, &package, &request.cancel)?,
+    )
+    .await?;
     cancelled(&request.cancel)?;
     // ⑥ Install：flush → 原子改名到 packageHash 目录（拒绝覆盖）。
     set_state(&request.status, JobState::Publishing);
-    let published = match assets.publish_staging(&request.job_id, &package.package_hash) {
-        Ok(()) => true,
+    for image in &mut prepared {
+        image.publish(assets, library).await?;
+    }
+    // 所有派生代际已移出，空的准备目录不进入不可变原包投影。
+    let derived = assets.staging_dir(&request.job_id).join("derived");
+    if derived.exists() {
+        std::fs::remove_dir_all(derived).map_err(|error| JobError::io(error.to_string()))?;
+    }
+    match assets.publish_staging(&request.job_id, &package.package_hash) {
+        Ok(()) => {}
         Err(error) if error.code == "target_exists" => {
             // 目录已存在但未索引：崩溃恢复语义覆盖它；本任务按重复处理。
             let existing = assets.verify_installed(&package.package_hash)?;
@@ -368,28 +427,71 @@ async fn run_import(
                     ),
                 ));
             }
-            false
         }
         Err(error) => return Err(error),
     };
-    if published {
-        // ⑦ DB 短事务：发布失败留给启动恢复（§7.2）。
-        library
-            .install(&crate::wallpaper::library::InstallWork {
-                remote_work_id: package.manifest.work_id.clone(),
-                work_key: format!("local-{}", package.manifest.work_id),
-                title: package.manifest.title.clone(),
-                description: package.manifest.description.clone(),
-                kind: content_kind,
-                package_hash: package.package_hash.clone(),
-                manifest_json: package.manifest_json.clone(),
-                package_bytes: receipt.bytes,
-                version: package.manifest.version,
-                source_id: LOCAL_SOURCE.into(),
-            })
-            .await?;
-    }
+    // ⑦ 新发布和核验通过的孤立目录都必须完成索引事务。
+    library
+        .install(&crate::wallpaper::library::InstallWork {
+            remote_work_id: package.manifest.work_id.clone(),
+            work_key: format!("local-{}", package.manifest.work_id),
+            title: package.manifest.title.clone(),
+            description: package.manifest.description.clone(),
+            kind: content_kind,
+            package_hash: package.package_hash.clone(),
+            manifest_json: package.manifest_json.clone(),
+            package_bytes: receipt.bytes,
+            version: package.manifest.version,
+            source_id: LOCAL_SOURCE.into(),
+        })
+        .await?;
     Ok(package.package_hash)
+}
+
+async fn qualify_media(
+    request: &JobRequest,
+    library: &Library,
+    assets: &AssetStore,
+    probe: &ProbeClient,
+    inputs: Vec<super::assets::DecodeInput>,
+) -> Result<Vec<super::image_prepare::PreparedImage>, JobError> {
+    let mut prepared: Vec<super::image_prepare::PreparedImage> = Vec::new();
+    for input in inputs {
+        cancelled(&request.cancel)?;
+        if input.metadata.container == super::media::Container::Image {
+            if let Some(image) = prepared
+                .iter()
+                .find(|image| image.receipt.input_hash == input.media.entry.sha256)
+            {
+                probe
+                    .probe(
+                        image.decode_input(assets, &input)?,
+                        Arc::clone(&request.cancel),
+                    )
+                    .await?;
+            } else {
+                let image = super::image_prepare::prepare(
+                    assets,
+                    library,
+                    probe,
+                    &request.job_id,
+                    &input,
+                    &request.cancel,
+                )
+                .await?;
+                probe
+                    .probe(
+                        image.decode_input(assets, &input)?,
+                        Arc::clone(&request.cancel),
+                    )
+                    .await?;
+                prepared.push(image);
+            }
+        } else {
+            probe.probe(input, Arc::clone(&request.cancel)).await?;
+        }
+    }
+    Ok(prepared)
 }
 
 /// 启动恢复（§7.2）：目录在索引缺 → 核验后恢复入库；索引在目录缺 → unavailable。
@@ -399,8 +501,15 @@ pub async fn reconcile_startup(library: &Library, assets: &AssetStore) -> Result
     let mut indexed_hashes: std::collections::HashSet<String> = std::collections::HashSet::new();
     for row in indexed {
         indexed_hashes.insert(row.package_hash.clone());
-        if assets.verify_installed(&row.package_hash)?.is_none() {
-            library.mark_unavailable(&row.package_hash).await?;
+        match assets.verify_installed(&row.package_hash) {
+            Ok(Some(_)) => {
+                if row.state == "unavailable" {
+                    library.mark_available(&row.package_hash).await?;
+                }
+            }
+            _ => {
+                library.mark_unavailable(&row.package_hash).await?;
+            }
         }
     }
     for hash in assets.package_dirs() {
@@ -408,9 +517,9 @@ pub async fn reconcile_startup(library: &Library, assets: &AssetStore) -> Result
             continue;
         }
         // 孤立目录：核验 original.hwpkg 的 hash 与投影后恢复入库。
-        if assets.verify_installed(&hash)?.is_some() {
+        if matches!(assets.verify_installed(&hash), Ok(Some(_))) {
             let package = assets.read_installed_manifest(&hash)?;
-            library
+            let result = library
                 .install(&crate::wallpaper::library::InstallWork {
                     remote_work_id: package.manifest.work_id.clone(),
                     work_key: format!("local-{}", package.manifest.work_id),
@@ -423,7 +532,14 @@ pub async fn reconcile_startup(library: &Library, assets: &AssetStore) -> Result
                     version: package.manifest.version,
                     source_id: LOCAL_SOURCE.into(),
                 })
-                .await?;
+                .await;
+            if let Err(error) = result {
+                if error.code != "version_hash_conflict" {
+                    return Err(error);
+                }
+                // 冲突孤包不覆盖已安装版本，也不能阻止其它作品恢复。
+                crate::app::log(&format!("wallpaper recovery skipped {hash}: {error}"));
+            }
         }
         // 核验失败的目录保留在盘上（孤立包清理策略属 P1-05 库 UI）。
     }
@@ -455,4 +571,3 @@ pub(crate) fn new_job_id() -> String {
 #[cfg(test)]
 #[path = "jobs_tests.rs"]
 mod tests;
-

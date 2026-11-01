@@ -68,12 +68,7 @@ pub fn parse_range_header(header: Option<&str>, total: u64) -> RangeRequest {
             return RangeRequest::Malformed;
         };
         if suffix == 0 {
-            // bytes=-0 不可满足任何字节。
-            return if total == 0 {
-                RangeRequest::Unsatisfiable
-            } else {
-                RangeRequest::Malformed
-            };
+            return RangeRequest::Unsatisfiable;
         }
         if total == 0 {
             return RangeRequest::Unsatisfiable;
@@ -95,13 +90,13 @@ pub fn parse_range_header(header: Option<&str>, total: u64) -> RangeRequest {
             None => return RangeRequest::Malformed,
         },
     };
-    if total == 0 {
-        return RangeRequest::Unsatisfiable;
-    }
     if let Some(end) = end {
         if end < start {
             return RangeRequest::Malformed;
         }
+    }
+    if total == 0 {
+        return RangeRequest::Unsatisfiable;
     }
     if start >= total {
         return RangeRequest::Unsatisfiable;
@@ -124,11 +119,16 @@ pub struct StreamPlan {
     pub body: bool,
 }
 
-pub fn plan_response(
-    method_head: bool,
-    request: RangeRequest,
-    total: u64,
-) -> StreamPlan {
+pub fn plan_response(method_head: bool, request: RangeRequest, total: u64) -> StreamPlan {
+    // RFC 9110：Range 只作用于 GET；HEAD 描述完整表示且没有响应体。
+    if method_head {
+        return StreamPlan {
+            status: 200,
+            content_length: total,
+            content_range: None,
+            body: false,
+        };
+    }
     match request {
         RangeRequest::Full => StreamPlan {
             status: 200,
@@ -213,7 +213,10 @@ impl MediaFileStream {
         if position > self.total {
             return Err(StreamError {
                 code: "seek_out_of_range",
-                message: format!("seek 到 {position} 超出文件长度 {total}", total = self.total),
+                message: format!(
+                    "seek 到 {position} 超出文件长度 {total}",
+                    total = self.total
+                ),
             });
         }
         self.position = position;
@@ -306,12 +309,7 @@ impl StreamSlotPool {
             }
             if self
                 .active
-                .compare_exchange(
-                    current,
-                    current + 1,
-                    Ordering::Acquire,
-                    Ordering::Relaxed,
-                )
+                .compare_exchange(current, current + 1, Ordering::Acquire, Ordering::Relaxed)
                 .is_ok()
             {
                 return Ok(StreamSlot {
