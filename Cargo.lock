@@ -1667,6 +1667,8 @@ dependencies = [
  "tokio",
  "tray-icon",
  "tungstenite 0.28.0",
+ "windows 0.62.2",
+ "windows-core 0.62.2",
  "windows-sys 0.61.2",
  "wry",
  "zip",

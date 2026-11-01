@@ -15,5 +15,9 @@ pub(crate) mod jobs;
 #[allow(dead_code)]
 pub(crate) mod media;
 #[allow(dead_code)]
+pub(crate) mod media_stream;
+#[allow(dead_code)]
+pub(crate) mod istream;
+#[allow(dead_code)]
 pub(crate) mod library;
 pub(crate) mod policy;
