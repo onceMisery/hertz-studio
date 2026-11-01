@@ -103,13 +103,13 @@ body[data-layout="triple"] .lyric-group:not([data-distance="-1"]):not([data-dist
 .kara .fill {
   position: absolute; inset: 0; color: var(--lyric-sung, var(--text)); pointer-events: none;
   mask-image: linear-gradient(90deg, #000 calc(var(--p, 0%) - 14px), transparent var(--p, 0%));
-  filter: drop-shadow(0 0 10px rgba(111, 227, 194, .30));
+  filter: drop-shadow(0 0 10px color-mix(in srgb, var(--lyric-sung, #6fe3c2) 30%, transparent));
 }
 .word { display: inline-block; position: relative; white-space: pre; }
 .word .fill { white-space: pre; }
 .lyric-group[data-distance="0"] .main::before {
   content: ""; position: absolute; inset: -50% -10%; pointer-events: none; z-index: -1;
-  background: radial-gradient(ellipse, rgba(111, 227, 194, .12), transparent 70%);
+  background: radial-gradient(ellipse, color-mix(in srgb, var(--lyric-sung, #6fe3c2) 12%, transparent), transparent 70%);
 }
 body[data-boost="true"] .line { text-shadow: var(--halo-strong); }
 .main.enter { animation: line-in 560ms var(--out); }

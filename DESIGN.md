@@ -29,6 +29,16 @@ chrome（页签、按钮、字段、状态片）永远安静。
 - 禁止：纯黑 `#000000`、紫蓝渐变、霓虹辉光、彩色阴影、跨色相渐变、
   玻璃卡内高光。深度只来自 surface 台阶与发丝线。
 
+### 双表面体系（Dual-Surface）
+
+两个表面各有独立的可读性契约，共用同一签名与栅格：
+
+- **仪器面板**（设置中心）：暖色石墨实面、暖白 accent `#dfdacb`——chrome 即界面
+- **玻璃覆盖层**（桌面歌词）：中性玻璃（`rgba(14,16,20,.34)` + backdrop blur）
+  悬浮于任意桌面背景之上；chrome 内的 accent 是**用户配置的已唱色**
+  （`--lyric-sung`，默认 `#6fe3c2`）——richness 归内容（歌词本身），
+  karaoke 辉光与环境光一律 `color-mix` 绑定该变量，随用户换色而换色
+
 ## 3. Typography Rules
 
 - **UI 栈**：`"Segoe UI","Microsoft YaHei UI",sans-serif` — Windows 11
