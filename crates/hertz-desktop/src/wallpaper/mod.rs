@@ -4,12 +4,17 @@
 //! 壁纸运行底座。
 //! P0：策略（policy，§20.1 P0-03）。
 //! P1-02：本地库与任务（library/assets/jobs，§20.2）——staging→安装事务、
-//! 崩溃恢复与单槽导入；会话/预算/媒体（session/budget/media）随对应包创建。
+//! 崩溃恢复与单槽导入。
+//! P1-03：媒体路径（media/media_stream/istream/webresource）——容器探测、
+//! Range 流内核、保留域拦截与页面轻后端。
+//! P1-04：预算账本（budget，§12.1/§12.3）——会话状态机随对应包创建。
 
-// P1-02 内核在本包内自测；接线到 app/管理协议属 P1-05（§20.2 依赖链 01→02→05），
-// 接线后移除 dead_code 放行。
+// P1-02/P1-04a 内核在本包内自测；接线到 app/管理协议属 P1-05（§20.2 依赖链
+// 01→02→03/04→05），接线后移除 dead_code 放行。
 #[allow(dead_code)]
 pub(crate) mod assets;
+#[allow(dead_code)]
+pub(crate) mod budget;
 #[allow(dead_code)]
 pub(crate) mod jobs;
 #[allow(dead_code)]

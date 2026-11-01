@@ -1,0 +1,519 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 hertz-studio contributors
+
+//! 原生预算账本（设计 docs/desktop-wallpaper.md §12.1/§12.3，P1-04a）。
+//!
+//! 全局额度只能由 [`BudgetCoordinator`] 原子授予：所有配额在同一把锁内
+//! 一次校验、一次入账，没有"先各自解码再上报"的窗口（C23）。JS 侧只接收
+//! 分配结果，不复制第二份自适应算法（§12.1）。
+//!
+//! 生命周期合同（§12.3）：
+//! - reservation token 绑定 ownerSession / sessionGeneration / taskId 与全部
+//!   记账值；释放幂等，错误 owner 或旧代际不得改写账本。
+//! - 暂停/取消是三段事实：`release` 只标记（C24：load 被取消但 decoder 尚未
+//!   退出时，槽位仍占用，不提前给下一任务），`confirm_exit` 在真实 I/O/解码
+//!   退出后才归还额度；未确认的占用进入 [`BudgetCoordinator::stuck`] 报告。
+//! - 会话销毁由宿主在 controller/context 清理确认后 [`BudgetCoordinator::purge_session`]
+//!   一次性清除，不依赖逐 token 退出回执。
+//!
+//! 预览语义（§12.1/§12.3）：实时预览全局 1 个，输出像素率在 120 MP/s 总额内
+//! 先保留 8 MP/s——live 侧永远摸不到这 8 MP/s（"未打开时不创建资源"指资源，
+//! 不是指账面额度）。导入探测与桌面/预览共用 2 个解码槽（§7.1）。
+
+use std::sync::Mutex;
+
+/// 桌面呈现目标上限（§12.1）。
+pub(crate) const MAX_PRESENTATION_TARGETS: u32 = 4;
+/// 组合/三维 context 上限（§12.1；纯图片/视频轻后端不占 context）。
+pub(crate) const MAX_GL_CONTEXTS: u32 = 4;
+/// 视频解码槽：桌面、预览及导入探测合计（§12.1）。
+pub(crate) const MAX_DECODER_SLOTS: u32 = 2;
+/// 实时预览实例：全局最多 1（§12.1/§13.4）。
+pub(crate) const MAX_PREVIEW_INSTANCES: u32 = 1;
+/// 预览输出像素率保留额度（GL 提交 ≤15 fps、960×540 ≈ 7.8 MP/s，§12.1）。
+pub(crate) const PREVIEW_RESERVED_OUTPUT_RATE: u64 = 8_000_000;
+/// 视频解码像素率合计上限：编码宽×高×已验证帧率上界（§12.1/§12.2）。
+pub(crate) const MAX_DECODE_PIXEL_RATE: u64 = 125_000_000;
+/// 输出像素工作量合计上限：呈现像素×有效 FPS（§12.1/§12.2）。
+pub(crate) const MAX_OUTPUT_PIXEL_RATE: u64 = 120_000_000;
+/// CPU 常驻解码资产上限（§12.1；导入工作区另计）。
+pub(crate) const MAX_CPU_DECODED_BYTES: u64 = 128 * 1024 * 1024;
+/// GPU 跟踪资源估计上限（§12.1；tracked estimate，不是实测显存）。
+pub(crate) const MAX_GPU_TRACKED_BYTES: u64 = 384 * 1024 * 1024;
+/// 资源准备任务槽（§12.1：一个；P1 不承诺视频转码，转码槽恒 0）。
+pub(crate) const MAX_PREPARE_TASKS: u32 = 1;
+/// P1 转码槽上限：转码 adapter 是后续独立工作包（§5.1/§6.2）。
+pub(crate) const MAX_TRANSCODE_SLOTS: u32 = 0;
+
+/// 预算申请方。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OwnerKind {
+    /// 桌面呈现会话。
+    Desktop,
+    /// 实时预览（§13.4 租约；预览转应用先释放预览再为桌面申请）。
+    Preview,
+    /// 导入期真实解码探测（§7.1；只解码，不呈现）。
+    Probe,
+}
+
+/// 一次额度申请（§12.3 token 绑定字段的申请面）。
+#[derive(Debug, Clone)]
+pub(crate) struct BudgetRequest {
+    pub owner: OwnerKind,
+    /// ownerSession：会话/预览租约/导入任务的稳定标识。
+    pub session: String,
+    /// sessionGeneration：代际递增后旧代际不得再动账本。
+    pub generation: u64,
+    /// taskId：同一会话内区分多笔占用（如视频切换的新旧 decoder）。
+    pub task_id: String,
+    /// 桌面呈现目标数（Preview/Probe 必须为 0）。
+    pub targets: u32,
+    /// 组合/三维 GL context 数（轻后端为 0）。
+    pub contexts: u32,
+    /// 视频解码槽数。
+    pub decoders: u32,
+    /// 转码槽数（P1 必须为 0）。
+    pub transcode_slots: u32,
+    /// 解码像素率：编码宽×高×帧率上界。
+    pub decode_pixel_rate: u64,
+    /// 输出像素率：呈现像素×有效 FPS（Probe 必须为 0）。
+    pub output_pixel_rate: u64,
+    /// CPU 常驻解码字节。
+    pub cpu_bytes: u64,
+    /// GPU 跟踪字节（纹理/几何/RT/骨骼/字形/闲置池，§12.2）。
+    pub gpu_bytes: u64,
+    /// 资源准备任务槽数。
+    pub prepare_tasks: u32,
+}
+
+/// 拒绝明细：哪个配额、占了多少、要多少、上限多少。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BudgetRejection {
+    pub quota: &'static str,
+    pub cap: u64,
+    pub held: u64,
+    pub requested: u64,
+    pub message: String,
+}
+
+/// 释放/确认阶段的调用方身份错误。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LedgerError {
+    /// token 不存在（已 purge 或从未授予）。
+    UnknownToken,
+    /// ownerSession 不匹配。
+    OwnerMismatch,
+    /// sessionGeneration 不匹配（旧代际不得改写新账本）。
+    GenerationMismatch,
+}
+
+/// token 的三段状态：占用（计入额度）→ 释放中（仍占用，等真实退出）
+/// → 已退出（只留墓碑供幂等调用）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReservationState {
+    Active,
+    ReleasePending,
+    Released,
+}
+
+#[derive(Debug)]
+struct Reservation {
+    token: u64,
+    request: BudgetRequest,
+    state: ReservationState,
+    /// 授予时的 allocationRevision（§12.3）；本切片只记录，降档联动随
+    /// 质量/会话工作包进入。
+    allocation_revision: u64,
+}
+
+/// 当前占用快照（§12.4 最低诊断的账本侧字段）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct BudgetUsage {
+    pub targets: u32,
+    pub contexts: u32,
+    pub decoder_slots: u32,
+    pub preview_instances: u32,
+    pub decode_pixel_rate: u64,
+    pub output_pixel_rate: u64,
+    pub cpu_bytes: u64,
+    pub gpu_bytes: u64,
+    pub prepare_tasks: u32,
+    /// release 后未 confirm_exit 的 token 数（"某个释放没有确认时保留占用并报告"）。
+    pub release_pending: u32,
+}
+
+#[derive(Debug)]
+struct Ledger {
+    next_token: u64,
+    revision: u64,
+    reservations: Vec<Reservation>,
+}
+
+impl Ledger {
+    fn active_usage(&self) -> BudgetUsage {
+        let mut usage = BudgetUsage::default();
+        for reservation in &self.reservations {
+            // ReleasePending 仍占用额度（C24：真实退出前不还给下一任务）；
+            // 只有确认退出的墓碑不计。
+            if reservation.state == ReservationState::Released {
+                continue;
+            }
+            let request = &reservation.request;
+            usage.targets += request.targets;
+            usage.contexts += request.contexts;
+            usage.decoder_slots += request.decoders;
+            usage.decode_pixel_rate += request.decode_pixel_rate;
+            usage.output_pixel_rate += request.output_pixel_rate;
+            usage.cpu_bytes += request.cpu_bytes;
+            usage.gpu_bytes += request.gpu_bytes;
+            usage.prepare_tasks += request.prepare_tasks;
+            if request.owner == OwnerKind::Preview {
+                usage.preview_instances += 1;
+            }
+        }
+        usage.release_pending = self
+            .reservations
+            .iter()
+            .filter(|reservation| reservation.state == ReservationState::ReleasePending)
+            .count() as u32;
+        usage
+    }
+
+    /// live（Desktop/Probe）可用的输出像素率上限：总额减去预览保留带。
+    fn live_output_cap(&self) -> u64 {
+        MAX_OUTPUT_PIXEL_RATE - PREVIEW_RESERVED_OUTPUT_RATE
+    }
+
+    fn reject(quota: &'static str, cap: u64, held: u64, requested: u64, hint: &str) -> BudgetRejection {
+        BudgetRejection {
+            quota,
+            cap,
+            held,
+            requested,
+            message: format!(
+                "{quota} 超限：已占 {held} + 申请 {requested} > 上限 {cap}；{hint}"
+            ),
+        }
+    }
+}
+
+/// 全局预算协调器：额度授予、两段释放、代际校验与会话清除的唯一真值表。
+#[derive(Debug)]
+pub(crate) struct BudgetCoordinator {
+    ledger: Mutex<Ledger>,
+}
+
+impl Default for BudgetCoordinator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl BudgetCoordinator {
+    pub(crate) fn new() -> Self {
+        Self {
+            ledger: Mutex::new(Ledger {
+                next_token: 1,
+                revision: 1,
+                reservations: Vec::new(),
+            }),
+        }
+    }
+
+    /// 原子授予：全部配额一次校验，任一不过即整体拒绝（不部分入账）。
+    pub(crate) fn grant(&self, request: &BudgetRequest) -> Result<u64, BudgetRejection> {
+        let mut ledger = self
+            .ledger
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        Self::validate_shape(request)?;
+        let usage = ledger.active_usage();
+
+        if request.targets > 0 {
+            let cap = u64::from(MAX_PRESENTATION_TARGETS);
+            if u64::from(usage.targets) + u64::from(request.targets) > cap {
+                return Err(Ledger::reject(
+                    "presentation_targets", cap,
+                    u64::from(usage.targets), u64::from(request.targets),
+                    "减少同时呈现的目标（屏幕/组）或停用其中之一",
+                ));
+            }
+        }
+        if request.contexts > 0 {
+            let cap = u64::from(MAX_GL_CONTEXTS);
+            if u64::from(usage.contexts) + u64::from(request.contexts) > cap {
+                return Err(Ledger::reject(
+                    "gl_contexts", cap,
+                    u64::from(usage.contexts), u64::from(request.contexts),
+                    "先释放闲置 context 或降低目标质量档",
+                ));
+            }
+        }
+        if request.decoders > 0 {
+            let cap = u64::from(MAX_DECODER_SLOTS);
+            if u64::from(usage.decoder_slots) + u64::from(request.decoders) > cap {
+                return Err(Ledger::reject(
+                    "decoder_slots", cap,
+                    u64::from(usage.decoder_slots), u64::from(request.decoders),
+                    "显式释放预览或暂停并卸载指定桌面会话后再试",
+                ));
+            }
+        }
+        if request.owner == OwnerKind::Preview {
+            let cap = u64::from(MAX_PREVIEW_INSTANCES);
+            if u64::from(usage.preview_instances) + 1 > cap {
+                return Err(Ledger::reject(
+                    "preview_instances", cap,
+                    u64::from(usage.preview_instances), 1,
+                    "先关闭现有预览（切页/关闭/应用都会释放旧实例）",
+                ));
+            }
+            if request.output_pixel_rate > PREVIEW_RESERVED_OUTPUT_RATE {
+                return Err(Ledger::reject(
+                    "preview_output_rate",
+                    PREVIEW_RESERVED_OUTPUT_RATE,
+                    0,
+                    request.output_pixel_rate,
+                    "预览按 960×540 与 ≤15 fps 申请（或降低预览质量）",
+                ));
+            }
+        }
+        if request.decode_pixel_rate > 0
+            && usage.decode_pixel_rate + request.decode_pixel_rate > MAX_DECODE_PIXEL_RATE
+        {
+            return Err(Ledger::reject(
+                "decode_pixel_rate",
+                MAX_DECODE_PIXEL_RATE,
+                usage.decode_pixel_rate,
+                request.decode_pixel_rate,
+                "选择已准备的低分辨率/低帧率变体（§12.1 按编码尺寸计）",
+            ));
+        }
+        if request.output_pixel_rate > 0 && request.owner != OwnerKind::Preview {
+            // live 侧不共享预览保留带：预览占用独立于 live 上限之外。
+            let live_held = usage
+                .output_pixel_rate
+                .saturating_sub(Self::preview_output_held(&ledger));
+            let cap = ledger.live_output_cap();
+            if live_held + request.output_pixel_rate > cap {
+                return Err(Ledger::reject(
+                    "output_pixel_rate",
+                    cap,
+                    live_held,
+                    request.output_pixel_rate,
+                    "清 idle 缓存、降低预览像素或对允许降档的目标降级（§12.3）",
+                ));
+            }
+        }
+        if usage.cpu_bytes + request.cpu_bytes > MAX_CPU_DECODED_BYTES {
+            return Err(Ledger::reject(
+                "cpu_decoded_bytes",
+                MAX_CPU_DECODED_BYTES,
+                usage.cpu_bytes,
+                request.cpu_bytes,
+                "等待闲置解码缓存被回收或降低素材尺寸",
+            ));
+        }
+        if usage.gpu_bytes + request.gpu_bytes > MAX_GPU_TRACKED_BYTES {
+            return Err(Ledger::reject(
+                "gpu_tracked_bytes",
+                MAX_GPU_TRACKED_BYTES,
+                usage.gpu_bytes,
+                request.gpu_bytes,
+                "优先清闲置纹理/几何缓存，再降低允许自动降档目标的效果（§12.3）",
+            ));
+        }
+        if request.prepare_tasks > 0 {
+            let cap = u64::from(MAX_PREPARE_TASKS);
+            if u64::from(usage.prepare_tasks) + u64::from(request.prepare_tasks) > cap {
+                return Err(Ledger::reject(
+                    "prepare_tasks", cap,
+                    u64::from(usage.prepare_tasks), u64::from(request.prepare_tasks),
+                    "等待在途准备任务结束（取消不提前归还，见 C24）",
+                ));
+            }
+        }
+
+        let token = ledger.next_token;
+        ledger.next_token += 1;
+        ledger.revision += 1;
+        let allocation_revision = ledger.revision;
+        ledger.reservations.push(Reservation {
+            token,
+            request: request.clone(),
+            state: ReservationState::Active,
+            allocation_revision,
+        });
+        Ok(token)
+    }
+
+    fn preview_output_held(ledger: &Ledger) -> u64 {
+        ledger
+            .reservations
+            .iter()
+            .filter(|reservation| {
+                reservation.state != ReservationState::Released
+                    && reservation.request.owner == OwnerKind::Preview
+            })
+            .map(|reservation| reservation.request.output_pixel_rate)
+            .sum()
+    }
+
+    /// 申请面静态校验：owner 与字段组合的合同（§12.1 表格的行内约束）。
+    fn validate_shape(request: &BudgetRequest) -> Result<(), BudgetRejection> {
+        match request.owner {
+            OwnerKind::Desktop => {
+                if request.targets == 0 {
+                    return Err(BudgetRejection {
+                        quota: "request_shape",
+                        cap: 0,
+                        held: 0,
+                        requested: 0,
+                        message: "Desktop 申请必须带至少一个呈现目标".into(),
+                    });
+                }
+            }
+            OwnerKind::Preview | OwnerKind::Probe => {
+                if request.targets != 0 {
+                    return Err(BudgetRejection {
+                        quota: "request_shape",
+                        cap: 0,
+                        held: 0,
+                        requested: u64::from(request.targets),
+                        message: "呈现目标只允许 Desktop owner 申请".into(),
+                    });
+                }
+            }
+        }
+        if request.owner == OwnerKind::Probe && request.output_pixel_rate != 0 {
+            return Err(BudgetRejection {
+                quota: "request_shape",
+                cap: 0,
+                held: 0,
+                requested: request.output_pixel_rate,
+                message: "探测不呈现：output_pixel_rate 只允许 Desktop/Preview 申请".into(),
+            });
+        }
+        if request.transcode_slots > MAX_TRANSCODE_SLOTS {
+            return Err(BudgetRejection {
+                quota: "request_shape",
+                cap: u64::from(MAX_TRANSCODE_SLOTS),
+                held: 0,
+                requested: u64::from(request.transcode_slots),
+                message: "P1 无视频转码额度（§5.1）；转码 adapter 落地前恒 0".into(),
+            });
+        }
+        Ok(())
+    }
+
+    /// 释放（第一段）：标记 ReleasePending，额度仍占用，直到真实退出确认
+    /// （C24）。幂等：重复 release 已释放中的 token 返回 Ok。
+    pub(crate) fn release(
+        &self,
+        token: u64,
+        session: &str,
+        generation: u64,
+    ) -> Result<(), LedgerError> {
+        let mut ledger = self
+            .ledger
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let reservation = Self::find_checked(&mut ledger, token, session, generation)?;
+        if reservation.state == ReservationState::Active {
+            reservation.state = ReservationState::ReleasePending;
+            ledger.revision += 1;
+        }
+        Ok(())
+    }
+
+    /// 退出确认（第二段）：真实 I/O/解码/上传退出后归还额度（§12.3）。
+    /// 幂等：对已 Released 的墓碑重复确认返回 Ok。
+    pub(crate) fn confirm_exit(
+        &self,
+        token: u64,
+        session: &str,
+        generation: u64,
+    ) -> Result<(), LedgerError> {
+        let mut ledger = self
+            .ledger
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let reservation = Self::find_checked(&mut ledger, token, session, generation)?;
+        if reservation.state != ReservationState::Released {
+            reservation.state = ReservationState::Released;
+            ledger.revision += 1;
+        }
+        Ok(())
+    }
+
+    /// 会话销毁：宿主确认 controller/context 清理完成后一次性清除该会话的
+    /// 全部 token（含 pending 与墓碑），不依赖逐 token 回执（§12.3）。
+    /// 返回清除的 token 数。
+    pub(crate) fn purge_session(&self, session: &str) -> usize {
+        let mut ledger = self
+            .ledger
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let before = ledger.reservations.len();
+        ledger.reservations.retain(|reservation| {
+            reservation.request.session != session
+        });
+        let removed = before - ledger.reservations.len();
+        if removed > 0 {
+            ledger.revision += 1;
+        }
+        removed
+    }
+
+    /// 释放中未确认的占用清单（诊断报告用；§12.3"保留占用并报告"）。
+    pub(crate) fn stuck(&self) -> Vec<(u64, String, String)> {
+        let ledger = self
+            .ledger
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        ledger
+            .reservations
+            .iter()
+            .filter(|reservation| reservation.state == ReservationState::ReleasePending)
+            .map(|reservation| {
+                (
+                    reservation.token,
+                    reservation.request.session.clone(),
+                    reservation.request.task_id.clone(),
+                )
+            })
+            .collect()
+    }
+
+    /// 当前占用快照（§12.4 账本侧最低诊断）。
+    pub(crate) fn usage(&self) -> BudgetUsage {
+        self.ledger
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .active_usage()
+    }
+
+    fn find_checked<'ledger>(
+        ledger: &'ledger mut Ledger,
+        token: u64,
+        session: &str,
+        generation: u64,
+    ) -> Result<&'ledger mut Reservation, LedgerError> {
+        let reservation = ledger
+            .reservations
+            .iter_mut()
+            .find(|reservation| reservation.token == token)
+            .ok_or(LedgerError::UnknownToken)?;
+        if reservation.request.session != session {
+            return Err(LedgerError::OwnerMismatch);
+        }
+        if reservation.request.generation != generation {
+            return Err(LedgerError::GenerationMismatch);
+        }
+        Ok(reservation)
+    }
+}
+
+#[cfg(test)]
+#[path = "budget_tests.rs"]
+mod tests;
