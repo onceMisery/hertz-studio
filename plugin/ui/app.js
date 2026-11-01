@@ -7007,6 +7007,12 @@ function initSkinBridge() {
       }
     } else if (d.action === 'view-local') {
       const q = d.q || '';
+      if (d.artist !== undefined) {
+        state.libFilter.artist = String(d.artist);
+        state.libFilter.album = '';
+        ui.libArtistFilter.value = state.libFilter.artist;
+        ui.libAlbumFilter.value = '';
+      }
       ui.search.value = q;
       ui.searchClear.hidden = !q;
       state.q = q.trim();
@@ -7023,6 +7029,8 @@ function initSkinBridge() {
       if (wasOnline && window.Online) window.Online.search();
     } else if (d.action === 'queue-request') {
       d.queue = queueSnapshot();
+    } else if (d.action === 'home-request') {
+      d.result = mobileHomeSnapshot();
     } else if (d.action === 'source-request') {
       // 按当前 tab 取源 —— 队列拼接墙的正式入口。
       // 保留 queue-request 是因为播放队列 tab 走的就是它（kind==='queue'，
@@ -7076,6 +7084,47 @@ function initSkinBridge() {
       if (total) seekTo(Math.round(total * d.ratio));
     }
   });
+}
+
+// Mobile home is a read-only projection. Track activation still uses the shared
+// source-item actions, and history/catalogue reads use the normal transport.
+async function mobileHomeSnapshot() {
+  const [history, library, artists] = await Promise.allSettled([
+    transport.get('/v1/history?limit=8&offset=0'),
+    transport.get('/v1/tracks?sort=added&limit=12&offset=0'),
+    transport.get('/v1/tracks/facets?kind=artist'),
+  ]);
+  const added = library.status === 'fulfilled' ? (library.value.tracks || []) : [];
+  added.forEach(track => state.byId.set(track.id, track));
+  let recent = [], recentError = history.status === 'rejected';
+  if (!recentError) {
+    const results = await Promise.allSettled((history.value.items || []).map(async entry => {
+      if (entry.source === 'local' && entry.track_id) {
+        let track = state.byId.get(entry.track_id);
+        if (!track) {
+          try { track = await transport.get('/v1/tracks/' + encodeURIComponent(entry.track_id)); }
+          catch (error) { if (error.status === 404) return null; throw error; }
+        }
+        state.byId.set(track.id, track);
+        return localSourceItem(track, 0);
+      }
+      if (!entry.source || !entry.ref_id) return null;
+      return onlineSourceItem({ id: entry.ref_id, source: entry.source, title: entry.title,
+        artist: entry.artist, album: entry.album, cover: entry.cover_url, duration_ms: entry.duration_ms }, 0);
+    }));
+    const seen = new Set();
+    recent = results.filter(result => result.status === 'fulfilled' && result.value)
+      .map(result => result.value).filter(item => !seen.has(item.id) && seen.add(item.id));
+    recentError = results.some(result => result.status === 'rejected');
+  }
+  return {
+    recent, recentError, added: added.map((track, index) => localSourceItem(track, index)),
+    libraryError: library.status === 'rejected', artistsError: artists.status === 'rejected',
+    artists: artists.status === 'fulfilled' ? (artists.value.facets || []).slice(0, 8).map(artist => {
+      const track = added.find(item => item.artist === artist.name);
+      return { name: artist.name, count: artist.count, cover: track && track.has_cover ? transport.coverUrl(track.id) : '' };
+    }) : [],
+  };
 }
 
 // 队列快照：海报墙要的每项就是「id / 标题 / 艺人 / 封面 / 序号 / 在不在放」。
@@ -8349,6 +8398,18 @@ async function refreshFloatingCapsule() {
   await restoreQueue();
 }
 
+// 独立主界面才代表真实主窗口。标题改变也上报，后台换曲仍能精确匹配窗口。
+function initMainVisibility() {
+  if (window.HertzCapsuleOnly || transport.kind !== 'server') return;
+  const report = () => transport.post('/v1/ui/notice', {
+    action: 'main-visibility', hidden: document.hidden, windowTitle: document.title
+  }).catch(() => {});
+  document.addEventListener('visibilitychange', report);
+  const title = document.querySelector('title');
+  if (title) new MutationObserver(report).observe(title, { childList: true, characterData: true, subtree: true });
+  report();
+}
+
 async function startApp() {
   // 插件形态下 localStorage 是替身，得先把宿主里存的界面偏好读回内存，否则下面
   // 这一串 init() 拿到的全是默认值（症状：刷新后主题、皮肤、舞台参数集体丢失）。
@@ -8357,17 +8418,7 @@ async function startApp() {
   // 落盘的在线元数据先喂回内存：队列行第一帧就能显示真名字，不用等补取。
   if (window.Online && window.Online.seedFromStore) window.Online.seedFromStore();
   transport = await chooseTransport();
-  // 主窗口可见性回传：小窗（桌面宠物）靠它判断「主界面还在不在」来决定自动
-  // 接管/自动收回。只在主 surface 上报（胶囊浮窗自己就是"藏起来的主界面"，
-  // 不能替它报可见）；DBX 形态没有桌面小窗组件，不用报。
-  // 服务端只记「上次可见距今多久」再由组件判阈值，Alt-Tab 的瞬时 hidden
-  // 不会把小窗弹出来（见 desktop_mini.rs 的 1.2s 去抖）。
-  document.addEventListener('visibilitychange', () => {
-    if (window.HertzCapsuleOnly || transport.kind === 'dbx') return;
-    transport
-      .post('/v1/ui/notice', { action: 'main-visibility', hidden: document.hidden })
-      .catch(() => {});
-  });
+  initMainVisibility();
   if (window.HertzRoom) window.HertzRoom.init({
     root: ui.views.room, transport, confirm: message => modal().confirm(message),
     onReturn: () => setView('library'),

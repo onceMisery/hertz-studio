@@ -232,6 +232,12 @@ async function main() {
           bar:box('#playback-bar'), play:box('#playpause'), volume:box('#volume'), queue:box('.orbit-queue') };
       });
       check(layout.scroll <= width + 1, width + 'px has no horizontal page overflow');
+      if (width < 768) {
+        check(!layout.rail.visible && !layout.bar.visible && await page.locator('.orbit-mobile-nav').isVisible(),
+          width + 'px uses bottom navigation and a separate player');
+        check(layout.column.height >= height - 160, width + 'px gives browsing the available height');
+        continue;
+      }
       for (const key of ['top','rail','main','column','bar','play','volume']) {
         const b = layout[key];
         check(b.visible && b.width > 8 && b.height > 8 && b.x >= -1 && b.right <= width + 1 && b.bottom <= height + 1,
@@ -249,7 +255,7 @@ async function main() {
       check(!await page.locator('#rail').isVisible() && await navToggle.getAttribute('aria-expanded') === 'false',
         width + 'px hides navigation while keeping the expand control available');
       const collapsed = await page.locator('.orbit-main').boundingBox();
-      check(width > 620 ? collapsed.width > layout.main.width + 50 : collapsed.y < layout.main.y - 40,
+      check(collapsed.width > layout.main.width + 50,
         width + 'px reclaims the hidden navigation space');
       check(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)
         && await page.locator('#playpause').isVisible(), width + 'px hidden navigation keeps playback and page bounds intact');
@@ -339,13 +345,14 @@ async function main() {
           overflow: document.documentElement.scrollWidth > innerWidth };
       });
       check(!compact.overflow, width + 'px compact breakpoint has no horizontal overflow');
-      if (width > 620 && width <= 900) {
+      if (width >= 768 && width <= 900) {
         check(compact.width <= 72 && compact.labelHidden && compact.centered <= 1 && compact.badgeContained,
           width + 'px icon-only navigation is narrow with centered icons and contained counts: ' + JSON.stringify(compact));
       } else if (width > 900) {
         check(!compact.labelHidden && compact.width > 100, 'expanded desktop navigation retains its labels');
       } else {
-        check(compact.width >= width - 20, width + 'px retains the horizontal mobile navigation');
+        check(await page.locator('.orbit-mobile-nav').isVisible() && !await page.locator('#rail').isVisible(),
+          width + 'px uses the mobile navigation');
       }
     }
     await page.setViewportSize({ width: 1600, height: 1000 });

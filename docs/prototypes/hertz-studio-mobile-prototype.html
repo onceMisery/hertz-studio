@@ -1,0 +1,758 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hertz Studio · 移动端产品原型</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700&display=swap" rel="stylesheet"><!-- taste-skill-ignore 参考稿就是 Montserrat 系几何无衬线，字形属于比对目标 -->
+<style>
+/* ============================================================
+   Hertz Studio — 移动端产品原型
+
+   分工：
+   · 内层三屏 App 界面，作为 interface fragment 遵循参考稿：
+     纯黑 ground / #1C1C1E 卡片 / #2A2A2C 条目 / 三级灰阶，
+     唯一强调色青绿 #2BD9C2 只落在品牌字、主按钮、进度、选中 tab，
+     8pt 节奏、圆角 8–12、界面内部零投影、中屏略大略前。
+   · 外层展台保留参考稿的斜向渐变 board，但拿掉上一版的
+     网格线、噪点、编号列和 tiny caps：那些参考稿里没有。
+   ============================================================ */
+
+:root{
+  --phone-w: 322px;
+  --phone-h: 672px;
+
+  /* App 层：纯黑 ground + 两级抬升 + 三级灰阶 + 单强调色 */
+  --app-bg:   #000000;
+  --app-card: #1C1C1E;
+  --app-item: #2A2A2C;
+  --hair:     rgba(255,255,255,.09);
+  --ink:      #FFFFFF;
+  --ink-2:    #B0B0B0;
+  --ink-3:    #6E6E73;
+  --accent:   #2BD9C2;
+
+  /* 展台层 */
+  --ground:    #050507;
+  --board-ink: #FFFFFF;
+  --board-2:   rgba(255,255,255,.84);
+
+  --face: "Montserrat","Segoe UI","Microsoft YaHei UI","Microsoft YaHei",sans-serif;
+}
+
+*{ box-sizing:border-box; margin:0; padding:0; }
+html,body{ height:100%; }
+body{
+  font-family:var(--face); color:var(--ink); background:var(--ground);
+  font-size:13px; line-height:1.5; -webkit-font-smoothing:antialiased; overflow-x:hidden;
+}
+
+/* ---------- 展台：黑 ground + 居中渐变 board ---------- */
+.stage{ min-height:100%; padding:56px 32px 72px; }
+.board{
+  max-width:1216px; margin:0 auto; border-radius:32px; overflow:hidden;
+  padding:56px 48px 64px;
+  /* 参考稿的斜向渐变 board 是本次要比对的目标，不是装饰 */
+  background:
+    radial-gradient(760px 520px at 8% 4%, rgba(126,240,214,.20), transparent 60%), /* taste-skill-ignore gradient */
+    linear-gradient(132deg,#0e8a7b 0%,#0c7290 34%,#124677 66%,#152358 100%); /* taste-skill-ignore gradient */
+}
+
+/* ---------- 页头：大标题 + 一句，无 eyebrow ---------- */
+.masthead{ max-width:1180px; margin:0 auto 44px; padding:0 4px; }
+.masthead h1{
+  font-size:clamp(32px,4.2vw,54px); font-weight:700; line-height:1.04;
+  letter-spacing:-.035em; color:var(--board-ink); max-width:22ch;
+}
+.masthead p{
+  margin-top:16px; max-width:62ch; font-size:14px; line-height:1.72;
+  color:var(--board-2); font-weight:400;
+}
+.masthead p b{ color:var(--board-ink); font-weight:600; }
+
+/* ---------- 三屏：等间距，中屏略大略前 ---------- */
+.rail{
+  display:flex; gap:32px; justify-content:center; align-items:flex-start; flex-wrap:wrap;
+}
+.device{ width:var(--phone-w); }
+/* 中屏略大略前（参考稿特征）：缩放锚在顶边保证三屏顶边对齐；
+   transform 不占布局高度，中屏视觉底边比另两屏低 (1.04-1)×672≈27px，
+   必须把下方说明文字同步下移，否则手机底边会压住标题 */
+.device.mid{ position:relative; z-index:2; }
+.device.mid .caption{ padding-top:27px; }
+.device.mid .phone{ transform:scale(1.04); transform-origin:top center; }
+.phone{
+  position:relative; width:var(--phone-w); height:var(--phone-h);
+  border-radius:26px; padding:6px; background:#000;
+  /* 参考稿里手机屏落在渐变板上自带轻微投影 */
+  box-shadow:0 34px 64px -20px rgba(4,8,20,.62); /* taste-skill-ignore shadow */
+}
+.screen{
+  position:relative; width:100%; height:100%; overflow:hidden;
+  border-radius:22px; background:var(--app-bg); color:var(--ink);
+  display:flex; flex-direction:column;
+}
+.caption{ margin-top:18px; text-align:center; }
+.caption b{
+  display:block; font-size:13.5px; font-weight:600; letter-spacing:-.01em; color:var(--board-ink);
+}
+.caption small{
+  display:block; margin-top:6px; font-size:11.5px; line-height:1.68;
+  color:rgba(255,255,255,.80); max-width:31ch; margin-inline:auto;
+}
+.caption small span{ color:rgba(255,255,255,.62); }
+
+/* ---------- App 通用：状态栏 / home 条 ---------- */
+.status{
+  height:44px; flex:none; display:flex; align-items:center; justify-content:space-between;
+  padding:0 22px; font-size:11px; font-weight:600; color:var(--ink);
+}
+.status .sys{ display:flex; align-items:center; gap:5px; }
+
+/* ---------- 滚动区 ---------- */
+.scroll{ flex:1 1 auto; overflow-y:auto; overflow-x:hidden; scrollbar-width:none; }
+.scroll::-webkit-scrollbar{ display:none; }
+
+/* ---------- 区块标题：16px 白 SemiBold + 右侧弱动作 ---------- */
+.sec-head{
+  display:flex; align-items:baseline; justify-content:space-between;
+  padding:0 22px; margin:18px 0 10px;
+}
+.scroll > .sec-head:first-child{ margin-top:8px; }
+.sec-head h3{ font-size:16px; font-weight:600; letter-spacing:-.015em; color:var(--ink); }
+.sec-head .more{
+  font-size:11px; font-weight:500; color:var(--ink-3); cursor:pointer;
+}
+.sec-head .more:hover{ color:var(--ink-2); }
+
+/* ============================================================
+   封面：参考稿是真实唱片封面，这里用 SVG 几何折面代替
+   ============================================================ */
+.art{ position:relative; overflow:hidden; flex:none; border-radius:10px; background:#111; }
+.art svg{ position:absolute; inset:0; width:100%; height:100%; display:block; }
+
+/* ============================ 屏 1 · 首页 ============================ */
+.topbar{
+  flex:none; display:flex; align-items:center; justify-content:space-between;
+  padding:2px 22px 0;
+}
+.logo{ font-size:19px; font-weight:700; letter-spacing:-.03em; color:var(--ink); }
+.logo em{ font-style:normal; color:var(--accent); }
+.bell{
+  width:34px; height:34px; border:0; background:transparent; cursor:pointer;
+  display:grid; place-items:center; position:relative; color:var(--ink);
+}
+.bell svg{ width:20px; height:20px; stroke:currentColor; fill:none; stroke-width:1.7;
+  stroke-linecap:round; stroke-linejoin:round; }
+.bell .dot{
+  position:absolute; top:6px; right:7px; width:6px; height:6px; border-radius:50%;
+  background:var(--accent); border:1.5px solid var(--app-bg);
+}
+
+/* 横向滚动卡带 */
+.strip{
+  display:flex; gap:14px; padding:0 22px 2px; overflow-x:auto;
+  scroll-snap-type:x proximity; scrollbar-width:none;
+}
+.strip::-webkit-scrollbar{ display:none; }
+.strip > *{ scroll-snap-align:start; }
+.card-tile{ width:104px; cursor:pointer; }
+.card-tile .art{ width:104px; height:104px; transition:transform .2s cubic-bezier(.2,.8,.2,1); }
+.card-tile:active .art{ transform:scale(.97); }
+.card-tile h4{
+  margin-top:9px; font-size:11.5px; font-weight:600; letter-spacing:-.01em; color:var(--ink);
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+}
+.card-tile p{ margin-top:2px; font-size:10.5px; color:var(--ink-3); }
+
+/* 新专辑卡：#1C1C1E，左侧黑白封面，右侧文字，底部分隔线 + 两个图标 */
+.release{
+  margin:0 22px; border-radius:12px; overflow:hidden; background:var(--app-card);
+  cursor:pointer;
+}
+.release .row{ display:flex; gap:14px; align-items:center; padding:12px; }
+.release .art{ width:56px; height:56px; border-radius:8px; }
+.release .meta{ flex:1 1 auto; min-width:0; }
+.release h4{ font-size:13.5px; font-weight:600; letter-spacing:-.012em; color:var(--ink); }
+.release p{ margin-top:3px; font-size:11px; color:var(--ink-2); }
+.release p em{ font-style:normal; color:var(--ink-3); }
+[data-ui] .release .acts{
+  display:flex; gap:9px; justify-content:flex-end; align-items:center;
+  padding:9px 12px; border-top:1px solid var(--hair);
+}
+.ibtn{
+  width:28px; height:28px; border:0; background:transparent; cursor:pointer;
+  display:grid; place-items:center; color:var(--ink-2); transition:color .18s;
+}
+.ibtn svg{ width:17px; height:17px; stroke:currentColor; fill:none; stroke-width:1.8;
+  stroke-linecap:round; stroke-linejoin:round; }
+.ibtn:hover{ color:var(--ink); }
+.ibtn.on{ color:var(--accent); }
+.ibtn.on svg{ fill:currentColor; }
+
+/* 常听艺人：圆形头像横向滚动 */
+.avatars{ display:flex; gap:18px; padding:0 22px 2px; overflow-x:auto; scrollbar-width:none; }
+.avatars::-webkit-scrollbar{ display:none; }
+.avatar{ text-align:center; cursor:pointer; flex:none; }
+.avatar .art{ width:64px; height:64px; border-radius:50%; transition:transform .2s; }
+.avatar:active .art{ transform:scale(.94); }
+.avatar h5{
+  margin-top:8px; font-size:10.5px; font-weight:500; color:var(--ink-2);
+  max-width:70px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+}
+
+/* 底部 tab：4 项，线性图标 + 11px，选中青绿 */
+[data-ui] .tabbar{
+  flex:none; height:64px; border-top:1px solid var(--hair); background:var(--app-bg);
+  display:flex; align-items:center; justify-content:space-around;
+}
+.tab{
+  flex:1 1 0; display:flex; flex-direction:column; align-items:center; gap:4px;
+  background:none; border:0; cursor:pointer; color:var(--ink-3);
+  font-family:var(--face); font-size:10.5px; font-weight:500;
+  transition:color .18s;
+}
+.tab svg{ width:21px; height:21px; fill:none; stroke:currentColor; stroke-width:1.8;
+  stroke-linecap:round; stroke-linejoin:round; }
+.tab:hover{ color:var(--ink-2); }
+.tab[aria-current="page"]{ color:var(--accent); }
+
+/* ============================ 屏 2 · 艺人 ============================ */
+.hero{ position:relative; height:196px; flex:none; }
+.hero svg{ position:absolute; inset:0; width:100%; height:100%; }
+.hero .veil{
+  position:absolute; inset:0;
+  /* 照片上的中性 scrim，保证压在其上的标题可读 */
+  background:linear-gradient(180deg, rgba(0,0,0,.58) 0%, transparent 32%, rgba(0,0,0,.28) 60%, var(--app-bg) 100%); /* taste-skill-ignore gradient */
+}
+.hero-top{
+  position:absolute; top:0; left:0; right:0; height:46px; display:flex; align-items:center;
+  justify-content:space-between; padding:0 16px; z-index:2;
+}
+[data-ui] .ghost{
+  width:30px; height:30px; border-radius:50%; background:rgba(0,0,0,.42);
+  border:1px solid rgba(255,255,255,.14); display:grid; place-items:center; cursor:pointer;
+  color:#fff; transition:background .18s;
+}
+.ghost:hover{ background:rgba(0,0,0,.7); }
+.ghost svg{ width:15px; height:15px; stroke:currentColor; fill:none; stroke-width:1.9;
+  stroke-linecap:round; stroke-linejoin:round; }
+.ghost svg.f{ fill:currentColor; stroke:none; }
+.hero-title{
+  position:absolute; left:22px; right:22px; bottom:14px; z-index:2;
+  font-size:25px; font-weight:700; line-height:1.06; letter-spacing:-.03em;
+  /* 标题压在照片上，需要投影才读得出 */
+  color:#fff; text-shadow:0 3px 18px rgba(0,0,0,.66); /* taste-skill-ignore shadow */
+}
+.am{ padding:8px 22px 0; }
+.listeners{ font-size:11.5px; color:var(--ink-2); }
+.artist-acts{ display:flex; align-items:center; gap:12px; margin-top:8px; }
+.btn-follow{
+  padding:8px 22px; border-radius:6px; background:transparent; color:var(--ink);
+  border:1.2px solid rgba(255,255,255,.42); font-family:var(--face); font-size:12px;
+  font-weight:600; cursor:pointer; transition:.18s;
+}
+.btn-follow:hover{ border-color:#fff; }
+.btn-follow.on{ background:#fff; color:#000; border-color:#fff; }
+.push{ flex:1 1 auto; }
+.btn-play{
+  width:46px; height:46px; border-radius:50%; background:var(--accent); border:0; cursor:pointer;
+  display:grid; place-items:center; color:#04231f; transition:transform .2s;
+}
+.btn-play svg{ width:19px; height:19px; fill:currentColor; stroke:currentColor; margin-left:2px; }
+.btn-play:hover{ transform:scale(1.06); }
+.btn-play.playing svg{ margin-left:0; }
+
+.reco{
+  margin:0 22px; border-radius:12px; background:var(--app-card);
+  display:flex; gap:13px; align-items:center; padding:8px; cursor:pointer; transition:background .18s;
+}
+.reco:hover{ background:var(--app-item); }
+.reco .art{ width:46px; height:46px; border-radius:8px; }
+.reco .meta h4{ font-size:13px; font-weight:600; color:var(--ink); }
+.reco .meta p{ font-size:11px; color:var(--ink-2); margin-top:3px; }
+
+/* 热门单曲：编号 + 40 封面 + 歌名/播放数 + 三点；行高约 60 */
+.tracks{ padding:0 14px 0; }
+.track{
+  display:flex; align-items:center; gap:13px; padding:7px 8px; border-radius:10px;
+  cursor:pointer; transition:background .18s;
+}
+.track:hover{ background:var(--app-card); }
+.track:active{ background:var(--app-item); }
+.track .no{ width:13px; flex:none; text-align:center; font-size:11.5px; color:var(--ink-3); }
+.track .art{ width:38px; height:38px; border-radius:8px; }
+.track .meta{ flex:1 1 auto; min-width:0; }
+.track .meta h4{ font-size:13px; font-weight:600; letter-spacing:-.012em; color:var(--ink); }
+.track .meta p{
+  font-size:10.5px; color:var(--ink-2); margin-top:3px; font-variant-numeric:tabular-nums;
+}
+.track .ghost{ width:26px; height:26px; border:0; background:transparent; }
+.track .ghost svg{ width:14px; height:14px; }
+.track[aria-current="true"] .meta h4{ color:var(--accent); }
+
+/* ============================ 屏 3 · 播放器 ============================ */
+.player-top{
+  height:46px; flex:none; display:flex; align-items:center; justify-content:space-between;
+  padding:0 20px;
+}
+.player-body{
+  flex:1 1 auto; display:flex; flex-direction:column; padding:0 24px;
+  min-height:0; overflow-y:auto; scrollbar-width:none;
+}
+.player-body::-webkit-scrollbar{ display:none; }
+.cover{
+  width:100%; aspect-ratio:1/1; border-radius:12px; overflow:hidden;
+  position:relative; flex:none; transition:opacity .18s;
+}
+.np{ margin-top:24px; text-align:center; }
+.np h2{
+  font-size:22px; font-weight:700; letter-spacing:-.03em; line-height:1.16; color:var(--ink);
+}
+.np p{ margin-top:6px; font-size:12px; color:var(--ink-2); }
+
+.seek{ margin-top:26px; }
+.bar{ height:3px; border-radius:99px; background:rgba(255,255,255,.16); position:relative; cursor:pointer; }
+.bar .fill{
+  position:absolute; inset:0 auto 0 0; width:34%; border-radius:99px; background:var(--accent);
+}
+.bar .knob{
+  position:absolute; top:50%; left:34%; width:10px; height:10px; border-radius:50%;
+  background:var(--accent); transform:translate(-50%,-50%);
+}
+.times{
+  display:flex; justify-content:space-between; margin-top:8px;
+  font-size:10.5px; color:var(--ink-3); font-variant-numeric:tabular-nums;
+}
+.controls{ display:flex; align-items:center; justify-content:space-between; margin-top:22px; }
+.ctl{
+  background:none; border:0; color:var(--ink-2); cursor:pointer;
+  width:34px; height:34px; display:grid; place-items:center; border-radius:50%;
+  transition:color .18s;
+}
+.ctl svg{ width:20px; height:20px; stroke:currentColor; fill:none; stroke-width:1.8;
+  stroke-linecap:round; stroke-linejoin:round; }
+.ctl:hover{ color:var(--ink); }
+.ctl.on{ color:var(--accent); }
+.ctl.big{ width:56px; height:56px; background:#fff; color:#000; transition:transform .2s; }
+.ctl.big svg{ width:22px; height:22px; fill:currentColor; stroke:currentColor; margin-left:2px; }
+.ctl.big:hover{ transform:scale(1.05); color:#000; }
+.ctl.big.playing svg{ margin-left:0; }
+
+/* 歌词卡：深灰圆角，居中多行 */
+.lyric{
+  margin:26px 0 22px; padding:15px 16px; border-radius:12px; background:var(--app-card);
+  text-align:center;
+}
+.lyric .line{ font-size:12.5px; line-height:2.0; letter-spacing:-.01em; }
+.lyric .sung{ color:var(--accent); }
+.lyric .now{ color:var(--accent); }
+.lyric .unsung{ color:transparent; -webkit-text-stroke:1px rgba(255,255,255,.30); }
+.lyric .next{
+  margin-top:14px; font-size:11px; line-height:2.0; color:transparent;
+  -webkit-text-stroke:1px rgba(255,255,255,.22);
+}
+
+/* ---------- 展台说明 ---------- */
+.notes{
+  max-width:1216px; margin:36px auto 0; border-radius:24px; padding:30px 40px;
+  background:#0F0F12;
+}
+.notes h3{ font-size:20px; font-weight:600; letter-spacing:-.022em; color:var(--board-ink); }
+.notes .sub{ margin-top:8px; font-size:13px; line-height:1.7; color:var(--board-2); }
+.steps{ display:flex; margin-top:26px; flex-wrap:wrap; }
+.step{ flex:1 1 168px; min-width:0; padding:0 20px; }
+.step:first-child{ padding-left:0; }
+.step h4{ font-size:13px; font-weight:600; color:var(--board-ink); }
+.step p{ margin-top:6px; font-size:11.5px; line-height:1.7; color:var(--board-2); }
+
+@media (max-width:900px){
+  .stage{ padding:32px 14px 48px; }
+  .board{ padding:34px 20px 40px; border-radius:24px; }
+  .device.mid{ transform:none; margin:0; }
+  .device.mid .caption{ padding-top:0; }
+  .notes{ padding:26px 22px; }
+}
+@media (prefers-reduced-motion:reduce){
+  *{ transition-duration:.01ms !important; }
+}
+</style>
+</head>
+<body>
+
+<!-- ============ 图标 ============ -->
+<svg style="display:none" aria-hidden="true">
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.6-3.6"/></symbol>
+  <symbol id="i-bell" viewBox="0 0 24 24"><path d="M18 8a6 6 0 1 0-12 0c0 5-2 6-2 6h16s-2-1-2-6"/><path d="M13.7 20a2 2 0 0 1-3.4 0"/></symbol>
+  <symbol id="i-heart" viewBox="0 0 24 24"><path d="M12 20.2 4.7 13a4.55 4.55 0 0 1 6.45-6.42L12 7.4l.85-.82A4.55 4.55 0 0 1 19.3 13z"/></symbol>
+  <symbol id="i-user" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4.5 20.5a7.5 7.5 0 0 1 15 0"/></symbol>
+  <symbol id="i-home" viewBox="0 0 24 24"><path d="M3.4 10.4 12 3.2l8.6 7.2V20a1 1 0 0 1-1 1H4.4a1 1 0 0 1-1-1z"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="M7.5 4.6 19 12 7.5 19.4z"/></symbol>
+  <symbol id="i-pause" viewBox="0 0 24 24"><rect x="6.6" y="4.8" width="3.6" height="14.4" rx="1.2"/><rect x="13.8" y="4.8" width="3.6" height="14.4" rx="1.2"/></symbol>
+  <symbol id="i-prev" viewBox="0 0 24 24"><path d="M18.5 5.2v13.6L8.6 12z"/><rect x="4.6" y="5.2" width="2.3" height="13.6" rx="1.1"/></symbol>
+  <symbol id="i-next" viewBox="0 0 24 24"><path d="M5.5 5.2v13.6L15.4 12z"/><rect x="17.1" y="5.2" width="2.3" height="13.6" rx="1.1"/></symbol>
+  <symbol id="i-shuffle" viewBox="0 0 24 24"><path d="M17 3.5 21 7l-4 3.5M17 13.5 21 17l-4 3.5"/><path d="M3 7h4.4c1.4 0 2.6.7 3.3 1.9l3 4.4c.7 1.1 1.9 1.7 3.3 1.7H21M3 17h4.4c1.4 0 2.6-.7 3.3-1.9l.7-1M14.4 8.6c.7-1.1 1.9-1.6 3.2-1.6H21"/></symbol>
+  <symbol id="i-repeat" viewBox="0 0 24 24"><path d="M17 2.5 20.5 6 17 9.5"/><path d="M3.5 12V9a3 3 0 0 1 3-3h14M6.5 21.5 3 18l3.5-3.5"/><path d="M20.5 12v3a3 3 0 0 1-3 3h-14"/></symbol>
+  <symbol id="i-down" viewBox="0 0 24 24"><path d="m5 9 7 7 7-7"/></symbol>
+  <symbol id="i-back" viewBox="0 0 24 24"><path d="m14.5 5-7 7 7 7"/></symbol>
+  <symbol id="i-dots" viewBox="0 0 24 24"><circle cx="12" cy="5" r="1.6" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none"/><circle cx="12" cy="19" r="1.6" fill="currentColor" stroke="none"/></symbol>
+</svg>
+
+<div class="stage">
+  <div class="board">
+
+    <header class="masthead">
+      <h1>Hertz Studio 移动端原型</h1>
+      <p>本地优先的音乐服务与播放器：解码、播放、曲库与歌词都在你的机器上完成，<b>断网也能用</b>。在线曲库是显式启用的附加能力，由本机服务代理解析，<b>不上传曲库、收听记录或任何个人数据</b>。三屏分别为首页、艺人详情与播放器，点任意曲目可跨屏切换。</p>
+    </header>
+
+    <div class="rail">
+
+      <!-- ============ 屏 1 · 首页 ============ -->
+      <div class="device">
+        <div class="phone">
+          <div class="screen" data-ui>
+            <div class="status">
+              <span>21:42</span>
+              <span class="sys">
+                <svg width="15" height="10" viewBox="0 0 15 10" fill="none"><rect x=".5" y=".5" width="12" height="9" rx="2.6" stroke="rgba(255,255,255,.6)"/><rect x="2" y="2" width="8" height="6" rx="1.4" fill="#fff"/><path d="M14 3.6v2.8a1.6 1.6 0 0 0 0-2.8z" fill="rgba(255,255,255,.6)"/></svg>
+              </span>
+            </div>
+
+            <div class="topbar">
+              <span class="logo">Hertz <em>Studio</em></span>
+              <button class="bell" aria-label="通知"><svg><use href="#i-bell"/></svg><span class="dot"></span></button>
+            </div>
+
+            <div class="scroll">
+              <div class="sec-head"><h3>最近播放</h3><span class="more">全部</span></div>
+              <div class="strip">
+                <article class="card-tile" data-track="0">
+                  <div class="art"><svg viewBox="0 0 104 104" preserveAspectRatio="none"><defs><linearGradient id="g1" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#2BD9C2"/><stop offset=".55" stop-color="#0E7C74"/><stop offset="1" stop-color="#071F22"/></linearGradient></defs><rect width="104" height="104" fill="url(#g1)"/><path d="M0 66 L44 26 L68 104 L0 104 Z" fill="#fff" opacity=".10"/><circle cx="74" cy="30" r="15" fill="none" stroke="#fff" stroke-opacity=".28"/></svg></div>
+                  <h4>历历万乡</h4><p>陈粒</p>
+                </article>
+                <article class="card-tile" data-track="1">
+                  <div class="art"><svg viewBox="0 0 104 104" preserveAspectRatio="none"><defs><linearGradient id="g2" x1="0" y1="1" x2="1" y2="0"><stop offset="0" stop-color="#6C4BD8"/><stop offset=".55" stop-color="#3A2391"/><stop offset="1" stop-color="#120B2E"/></linearGradient></defs><rect width="104" height="104" fill="url(#g2)"/><path d="M104 0 v58 L40 104 H0 Z" fill="#fff" opacity=".08"/><circle cx="30" cy="72" r="18" fill="none" stroke="#fff" stroke-opacity=".22"/></svg></div>
+                  <h4>云与海之间</h4><p>陈鸿宇</p>
+                </article>
+                <article class="card-tile" data-track="2">
+                  <div class="art"><svg viewBox="0 0 104 104" preserveAspectRatio="none"><defs><linearGradient id="g3" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#F2A0B6"/><stop offset=".5" stop-color="#C2527A"/><stop offset="1" stop-color="#2A1020"/></linearGradient></defs><rect width="104" height="104" fill="url(#g3)"/><path d="M20 0 L64 0 L104 62 L104 104 L20 104 Z" fill="#000" opacity=".16"/><path d="M0 84 L34 40 L58 104Z" fill="#fff" opacity=".10"/></svg></div>
+                  <h4>山丘</h4><p>李宗盛</p>
+                </article>
+              </div>
+
+              <div class="sec-head"><h3>新专辑</h3><span class="more">更多</span></div>
+              <div class="release" data-track="3">
+                <div class="row">
+                  <div class="art"><svg viewBox="0 0 56 56"><defs><pattern id="p1" width="8" height="8" patternTransform="rotate(45)" patternUnits="userSpaceOnUse"><rect width="8" height="8" fill="#111"/><rect width="4" height="8" fill="#EDEDED"/></pattern></defs><rect width="56" height="56" fill="url(#p1)"/><rect y="30" width="56" height="26" fill="#111" opacity=".55"/></svg></div>
+                  <div class="meta">
+                    <h4>夜航西飞</h4>
+                    <p>陈粒 · 如也 <em>· Album</em></p>
+                  </div>
+                </div>
+                <div class="acts">
+                  <button class="ibtn heart" aria-label="喜欢"><svg><use href="#i-heart"/></svg></button>
+                  <button class="ibtn" aria-label="播放"><svg><use href="#i-play"/></svg></button>
+                </div>
+              </div>
+
+              <div class="sec-head"><h3>常听艺人</h3><span class="more">全部</span></div>
+              <div class="avatars">
+                <div class="avatar" data-track="0">
+                  <div class="art"><svg viewBox="0 0 64 64"><defs><linearGradient id="a1" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#2BD9C2"/><stop offset="1" stop-color="#08322F"/></linearGradient></defs><rect width="64" height="64" fill="url(#a1)"/><circle cx="32" cy="26" r="12" fill="#fff" opacity=".14"/><path d="M8 60q24-22 48 0Z" fill="#fff" opacity=".14"/></svg></div>
+                  <h5>陈粒</h5>
+                </div>
+                <div class="avatar" data-track="1">
+                  <div class="art"><svg viewBox="0 0 64 64"><defs><linearGradient id="a2" x1="0" y1="1" x2="1" y2="0"><stop offset="0" stop-color="#7C6BE8"/><stop offset="1" stop-color="#1A1046"/></linearGradient></defs><rect width="64" height="64" fill="url(#a2)"/><circle cx="32" cy="26" r="12" fill="#fff" opacity=".14"/><path d="M8 60q24-22 48 0Z" fill="#fff" opacity=".14"/></svg></div>
+                  <h5>陈鸿宇</h5>
+                </div>
+                <div class="avatar" data-track="2">
+                  <div class="art"><svg viewBox="0 0 64 64"><defs><linearGradient id="a3" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#F2A0B6"/><stop offset="1" stop-color="#38121F"/></linearGradient></defs><rect width="64" height="64" fill="url(#a3)"/><circle cx="32" cy="26" r="12" fill="#fff" opacity=".14"/><path d="M8 60q24-22 48 0Z" fill="#fff" opacity=".14"/></svg></div>
+                  <h5>李宗盛</h5>
+                </div>
+              </div>
+              <div style="height:2px"></div>
+            </div>
+
+            <nav class="tabbar">
+              <button class="tab" aria-current="page"><svg><use href="#i-home"/></svg>首页</button>
+              <button class="tab"><svg><use href="#i-search"/></svg>搜索</button>
+              <button class="tab"><svg><use href="#i-heart"/></svg>收藏</button>
+              <button class="tab"><svg><use href="#i-user"/></svg>我的</button>
+            </nav>
+          </div>
+        </div>
+        <p class="caption"><b>首页</b><small>最近播放、新专辑与常听艺人。<span>进入即看清还能接着听什么。</span></small></p>
+      </div>
+
+      <!-- ============ 屏 2 · 艺人详情 ============ -->
+      <div class="device mid">
+        <div class="phone">
+          <div class="screen" data-ui>
+            <div class="status">
+              <span>21:42</span>
+              <span class="sys"><svg width="15" height="10" viewBox="0 0 15 10" fill="none"><rect x=".5" y=".5" width="12" height="9" rx="2.6" stroke="rgba(255,255,255,.6)"/><rect x="2" y="2" width="8" height="6" rx="1.4" fill="#fff"/><path d="M14 3.6v2.8a1.6 1.6 0 0 0 0-2.8z" fill="rgba(255,255,255,.6)"/></svg></span>
+            </div>
+
+            <div class="hero">
+              <svg viewBox="0 0 322 230" preserveAspectRatio="xMidYMid slice">
+                <defs>
+                  <linearGradient id="hb" x1="0" y1="0" x2="1" y2="1">
+                    <stop offset="0" stop-color="#1D6A62"/><stop offset=".55" stop-color="#0B2C2B"/><stop offset="1" stop-color="#04100F"/>
+                  </linearGradient>
+                  <radialGradient id="hg" cx="50%" cy="18%" r="66%">
+                    <stop offset="0" stop-color="#7FF0DD" stop-opacity=".48"/><stop offset="1" stop-color="#000" stop-opacity="0"/>
+                  </radialGradient>
+                  <g id="guy">
+                    <ellipse cx="0" cy="0" rx="10.5" ry="12.5"/>
+                    <path d="M-19 74 L-17 18 Q0 9 17 18 L19 74 Z"/>
+                    <ellipse cx="-2" cy="42" rx="15" ry="18" transform="rotate(-16 -2 42)"/>
+                    <path d="M7 28 L40 -20" stroke="#02100F" stroke-width="5.5" stroke-linecap="round"/>
+                  </g>
+                </defs>
+                <rect width="322" height="230" fill="url(#hb)"/>
+                <rect width="322" height="230" fill="url(#hg)"/>
+                <g fill="#02100F" opacity=".92">
+                  <use href="#guy" x="48" y="138"/><use href="#guy" x="116" y="130"/>
+                  <use href="#guy" x="186" y="142"/><use href="#guy" x="258" y="132"/>
+                </g>
+                <g stroke="#7FF0DD" stroke-opacity=".14">
+                  <path d="M0 190 H322"/><path d="M0 204 H322"/>
+                </g>
+              </svg>
+              <div class="veil"></div>
+              <div class="hero-top">
+                <button class="ghost" aria-label="返回"><svg><use href="#i-back"/></svg></button>
+                <button class="ghost" aria-label="更多"><svg class="f"><use href="#i-dots"/></svg></button>
+              </div>
+              <h2 class="hero-title">街角四人组</h2>
+            </div>
+
+            <div class="scroll" style="padding-bottom:18px">
+              <div class="am">
+                <p class="listeners">1,690,420 月听众</p>
+                <div class="artist-acts">
+                  <button class="btn-follow">关注</button>
+                  <span class="push"></span>
+                  <button class="ibtn shuffle" aria-label="随机播放"><svg><use href="#i-shuffle"/></svg></button>
+                  <button class="btn-play" aria-label="播放"><svg><use href="#i-play"/></svg></button>
+                </div>
+              </div>
+
+              <div class="sec-head"><h3>相似推荐</h3><span class="more">更多</span></div>
+              <div class="reco" data-track="0">
+                <div class="art"><svg viewBox="0 0 52 52"><defs><linearGradient id="r1" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#8FD6FF"/><stop offset="1" stop-color="#123A63"/></linearGradient></defs><rect width="52" height="52" fill="url(#r1)"/><path d="M0 40 L20 16 L34 52 L0 52Z" fill="#fff" opacity=".10"/></svg></div>
+                <div class="meta"><h4>我们所有人</h4><p>歌单</p></div>
+              </div>
+
+              <div class="sec-head"><h3>热门单曲</h3><span class="more">查看全部</span></div>
+              <div class="tracks">
+                <div class="track" data-track="0">
+                  <span class="no">1</span>
+                  <div class="art"><svg viewBox="0 0 40 40"><defs><linearGradient id="t1" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#2BD9C2"/><stop offset="1" stop-color="#08322F"/></linearGradient></defs><rect width="40" height="40" fill="url(#t1)"/><circle cx="20" cy="20" r="11" fill="none" stroke="#fff" stroke-opacity=".3"/></svg></div>
+                  <div class="meta"><h4>追梦人</h4><p>250,186,589 次播放</p></div>
+                  <button class="ghost" aria-label="更多"><svg class="f"><use href="#i-dots"/></svg></button>
+                </div>
+                <div class="track" data-track="1">
+                  <span class="no">2</span>
+                  <div class="art"><svg viewBox="0 0 40 40"><defs><linearGradient id="t2" x1="0" y1="1" x2="1" y2="0"><stop offset="0" stop-color="#8B72E8"/><stop offset="1" stop-color="#1D1350"/></linearGradient></defs><rect width="40" height="40" fill="url(#t2)"/><rect x="8" y="8" width="24" height="24" rx="4" fill="none" stroke="#fff" stroke-opacity=".3"/></svg></div>
+                  <div class="meta"><h4>有所感受</h4><p>102,478,239 次播放</p></div>
+                  <button class="ghost" aria-label="更多"><svg class="f"><use href="#i-dots"/></svg></button>
+                </div>
+                <div class="track" data-track="2">
+                  <span class="no">3</span>
+                  <div class="art"><svg viewBox="0 0 40 40"><defs><linearGradient id="t3" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#F2A0B6"/><stop offset="1" stop-color="#3A1422"/></linearGradient></defs><rect width="40" height="40" fill="url(#t3)"/><path d="M0 30 L16 12 L26 40 L0 40Z" fill="#fff" opacity=".12"/></svg></div>
+                  <div class="meta"><h4>迷失于你</h4><p>9,140,599 次播放</p></div>
+                  <button class="ghost" aria-label="更多"><svg class="f"><use href="#i-dots"/></svg></button>
+                </div>
+              </div>
+              <div style="height:2px"></div>
+            </div>
+          </div>
+        </div>
+        <p class="caption"><b>艺人详情</b><small>大图压标题、关注与随机／播放三件套、相似推荐与热门单曲。<span>对应参考稿的详情页骨架。</span></small></p>
+      </div>
+
+      <!-- ============ 屏 3 · 播放器 ============ -->
+      <div class="device">
+        <div class="phone">
+          <div class="screen" data-ui>
+            <div class="status" style="height:6px"></div>
+            <div class="player-top">
+              <button class="ghost" aria-label="收起"><svg><use href="#i-down"/></svg></button>
+              <button class="ghost" aria-label="更多"><svg class="f"><use href="#i-dots"/></svg></button>
+            </div>
+
+            <div class="player-body">
+              <div class="cover" id="cover">
+                <svg viewBox="0 0 274 274" preserveAspectRatio="xMidYMid slice">
+                  <defs>
+                    <radialGradient id="eg" cx="50%" cy="46%" r="68%">
+                      <stop offset="0" stop-color="#12655D"/><stop offset="1" stop-color="#04140F"/>
+                    </radialGradient>
+                    <linearGradient id="al" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0" stop-color="#9CEFE2"/><stop offset="1" stop-color="#39B7A6"/>
+                    </linearGradient>
+                    <radialGradient id="ir" cx="42%" cy="38%" r="62%">
+                      <stop offset="0" stop-color="#8FF0E0"/><stop offset=".55" stop-color="#169E8C"/><stop offset="1" stop-color="#04302B"/>
+                    </radialGradient>
+                    <filter id="soft"><feGaussianBlur stdDeviation="8"/></filter>
+                  </defs>
+                  <rect width="274" height="274" fill="url(#eg)"/>
+                  <g filter="url(#soft)" opacity=".7"><ellipse cx="137" cy="137" rx="118" ry="78" fill="#0F766E" opacity=".5"/></g>
+                  <ellipse cx="137" cy="137" rx="112" ry="70" fill="url(#al)"/>
+                  <ellipse cx="137" cy="137" rx="112" ry="70" fill="none" stroke="#04231F" stroke-width="7"/>
+                  <circle cx="137" cy="137" r="48" fill="url(#ir)"/>
+                  <circle cx="137" cy="137" r="48" fill="none" stroke="#031917" stroke-width="4"/>
+                  <circle cx="137" cy="137" r="20" fill="#02100F"/>
+                  <circle cx="120" cy="121" r="9" fill="#ffffff" opacity=".8"/>
+                  <g stroke="#04231F" stroke-width="3.4" stroke-linecap="round" opacity=".85">
+                    <path d="M62 109 C77 94 96 85 117 82"/><path d="M212 109 C197 94 178 85 157 82"/>
+                    <path d="M70 165 C85 182 104 192 125 195"/><path d="M204 165 C189 182 170 192 149 195"/>
+                  </g>
+                </svg>
+              </div>
+
+              <div class="np">
+                <h2 id="npTitle">夜航西飞</h2>
+                <p id="npArtist">陈粒 · 如也</p>
+              </div>
+
+              <div class="seek">
+                <div class="bar" id="bar">
+                  <div class="fill" id="fill"></div>
+                  <div class="knob" id="knob"></div>
+                </div>
+                <div class="times"><span id="tCur">01:12</span><span id="tTot">04:38</span></div>
+              </div>
+
+              <div class="controls">
+                <button class="ctl shuffle on" aria-label="随机播放"><svg><use href="#i-shuffle"/></svg></button>
+                <button class="ctl" aria-label="上一首"><svg><use href="#i-prev"/></svg></button>
+                <button class="ctl big" id="playBtn" aria-label="播放/暂停"><svg id="playIcon"><use href="#i-pause"/></svg></button>
+                <button class="ctl" aria-label="下一首"><svg><use href="#i-next"/></svg></button>
+                <button class="ctl repeat on" aria-label="循环"><svg><use href="#i-repeat"/></svg></button>
+              </div>
+
+              <div class="lyric">
+                <div class="line" id="lyricLine">
+                  <span class="sung">夜航西飞</span><span class="now">越过</span><span class="unsung">云层的裂缝</span>
+                </div>
+                <div class="next">下一句：沿着风的轨迹 抵达星群</div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <p class="caption"><b>播放器</b><small>大封面、居中歌名、逐字歌词与五个控制键。<span>点首页或热门单曲可切换这里。</span></small></p>
+      </div>
+
+    </div>
+  </div>
+
+  <section class="notes">
+    <h3>界面怎么做的内容判断</h3>
+    <p class="sub">三屏内部是产品界面，遵循它自己的规则；外层展台只是把三块屏并排放大的画框。</p>
+    <div class="steps">
+      <div class="step"><h4>纯黑 ground 加两级抬升</h4><p>界面用纯黑打底，卡片抬到 #1C1C1E，按下的条目抬到 #2A2A2C。层次只靠色阶，不靠投影。</p></div>
+      <div class="step"><h4>三级文字灰阶</h4><p>主标题纯白，次级说明 #B0B0B0，编号与时间码 #6E6E73。灰只给次要信息，正文一律全白。</p></div>
+      <div class="step"><h4>单一强调色</h4><p>青绿只出现在品牌字后半段、播放主按钮、进度条与选中的那一 tab，其余全部无色。</p></div>
+      <div class="step"><h4>八点网格</h4><p>区块间 26 像素，标题到内容 14 像素，列表行高约 60 像素，左右留边 22 像素。</p></div>
+    </div>
+  </section>
+</div>
+
+<script>
+(function () {
+  /* ---------- 播放器 ---------- */
+  var SONGS = [
+    { t:'历历万乡', a:'陈粒 · 如也', d:221 },
+    { t:'云与海之间', a:'陈鸿宇 · 理想三旬', d:312 },
+    { t:'山丘', a:'李宗盛 · 既然青春留不住', d:384 },
+    { t:'夜航西飞', a:'陈粒 · 如也', d:278 }
+  ];
+  var total = 278, pos = 72, playing = true, timer = null;
+  var fill = document.getElementById('fill'), knob = document.getElementById('knob'),
+      tCur = document.getElementById('tCur'), tTot = document.getElementById('tTot'),
+      playBtn = document.getElementById('playBtn'), playIcon = document.getElementById('playIcon');
+
+  function fmt(s){ var m = Math.floor(s/60), r = Math.floor(s%60);
+    return (m<10?'0':'')+m+':'+(r<10?'0':'')+r; }
+  function paint(){
+    var pct = Math.max(0, Math.min(100, (pos/total)*100));
+    fill.style.width = pct+'%'; knob.style.left = pct+'%';
+    tCur.textContent = fmt(pos); tTot.textContent = fmt(total);
+  }
+  function setPlaying(next){
+    playing = next;
+    playIcon.innerHTML = playing ? '<use href="#i-pause"/>' : '<use href="#i-play"/>';
+    playBtn.classList.toggle('playing', playing);
+    clearInterval(timer);
+    if (playing) timer = setInterval(function(){ pos = (pos+1) % total; paint(); advance(); }, 1000);
+  }
+  playBtn.addEventListener('click', function(){ setPlaying(!playing); });
+
+  var bar = document.getElementById('bar');
+  function seekTo(x){ var r = bar.getBoundingClientRect();
+    pos = Math.max(0, Math.min(1, (x-r.left)/r.width)) * total; paint(); }
+  bar.addEventListener('pointerdown', function(e){ bar.setPointerCapture(e.pointerId); seekTo(e.clientX); });
+  bar.addEventListener('pointermove', function(e){ if (bar.hasPointerCapture(e.pointerId)) seekTo(e.clientX); });
+
+  /* ---------- 逐字歌词 ---------- */
+  var W = [['夜航西飞','越过','云层的裂缝'],['沿着风的','轨迹','抵达星群'],
+           ['引擎低鸣','像是','一句未说的话'],['城市的灯火','在身后','慢慢熄灭']];
+  var N = ['下一句：沿着风的轨迹 抵达星群','下一句：引擎低鸣 像是一句未说的话',
+           '下一句：城市的灯火 在身后慢慢熄灭','下一句：夜航西飞 越过云层的裂缝'];
+  var wi = 0;
+  function advance(){
+    wi = (wi+1) % W.length;
+    var g = W[wi];
+    document.getElementById('lyricLine').innerHTML =
+      '<span class="sung">'+g[0]+'</span><span class="now">'+g[1]+'</span><span class="unsung">'+g[2]+'</span>';
+    document.querySelector('.lyric .next').textContent = N[wi];
+  }
+
+  /* ---------- 点任意曲目 → 第三屏切换 ---------- */
+  function apply(i){
+    var s = SONGS[i] || SONGS[3];
+    document.getElementById('npTitle').textContent = s.t;
+    document.getElementById('npArtist').textContent = s.a;
+    total = s.d; pos = 0;
+    var cover = document.getElementById('cover');
+    cover.style.opacity = '.4';
+    setTimeout(function(){ cover.style.opacity = '1'; }, 130);
+    paint(); setPlaying(true);
+  }
+  document.querySelectorAll('[data-track]').forEach(function(n){
+    n.addEventListener('click', function(){ apply(parseInt(n.dataset.track,10) || 3); });
+  });
+  document.querySelector('.btn-play').addEventListener('click', function(){ apply(0); });
+
+  /* ---------- tab / 关注 / 喜欢 / 开关 ---------- */
+  document.querySelectorAll('.tabbar').forEach(function(b){
+    b.addEventListener('click', function(e){
+      var t = e.target.closest('.tab'); if (!t) return;
+      b.querySelectorAll('.tab').forEach(function(x){ x.removeAttribute('aria-current'); });
+      t.setAttribute('aria-current','page');
+    });
+  });
+  document.querySelector('.btn-follow').addEventListener('click', function(){
+    this.classList.toggle('on');
+    this.textContent = this.classList.contains('on') ? '已关注' : '关注';
+  });
+  document.querySelectorAll('.ibtn.heart').forEach(function(n){
+    n.addEventListener('click', function(e){
+      e.stopPropagation(); n.classList.toggle('on');
+      n.querySelector('svg').style.fill = n.classList.contains('on') ? 'currentColor' : 'none';
+    });
+  });
+  document.querySelectorAll('.ctl.shuffle, .ctl.repeat, .ibtn.shuffle').forEach(function(n){
+    n.addEventListener('click', function(e){ e.stopPropagation(); n.classList.toggle('on'); });
+  });
+
+  paint(); setPlaying(true);
+})();
+</script>
+</body>
+</html>

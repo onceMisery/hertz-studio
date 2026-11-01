@@ -1,0 +1,418 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark" data-page-node-id="Mz5d1aFObXmI4y9hPWFWQ4">
+<head data-page-node-id="6l3Pq5XoGthdWLYZMN5238">
+<meta charset="utf-8" data-page-node-id="SavzpAYQuqGmpbGHe0bQg8">
+<meta name="viewport" content="width=device-width, initial-scale=1" data-page-node-id="YATMdwcvZary6OWbLjaebI">
+<title>Hertz Studio · 桌面端原型</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" data-page-node-id="q1g1ZmtDbzOjxwgU03zONg">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin data-page-node-id="rYH9IYSH4MRa6uOTwvJEbu">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet" data-page-node-id="evEHUkzEWTdNPlrDs7KiK2">
+<link rel="stylesheet" href="app.css" data-page-node-id="J1X7RYnAGH9RiLEkvirZmP">
+</head>
+<body data-page-node-id="6ChZzeuzleAjOMRimuJdup">
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" data-page-node-id="Sv4Vb0ZmEBjGNxt8pTkCJm"><defs data-page-node-id="aa9Ihn8ddaCJ346mS3tFSX">
+<g id="ic" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" data-page-node-id="wnWrvzdF0ezg7pHl4I0bOd"></g>
+</defs>
+<symbol id="i-home" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" data-page-node-id="vxsg266J18GxQbJjY2EVWN"><path d="M3.5 10.6 12 3.4l8.5 7.2" data-page-node-id="E7EfGOHUnlaXdFqqWGjLfv"/><path d="M5.8 9.4V20h12.4V9.4" data-page-node-id="Ttks900rwCdFz3fPsQYDMS"/><path d="M9.9 20v-5.4h4.2V20" data-page-node-id="IilePz5BTPFWlp5jDVVnHK"/></symbol>
+<symbol id="i-disc" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" data-page-node-id="EQ983JcREAijxO4cNLCqsD"><circle cx="12" cy="12" r="8.6" data-page-node-id="oj2w0wV9bZeHzDSNX1Vbm2"/><circle cx="12" cy="12" r="2.6" data-page-node-id="PLzGnyeEH8yY5lmDN1SBuV"/></symbol>
+<symbol id="i-heart" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" data-page-node-id="fl4urYOdquwpiUaLOuhFH3"><path d="M12 20.2c-.2 0-7.4-4.4-7.4-9.4A4.2 4.2 0 0 1 12 8.2a4.2 4.2 0 0 1 7.4 2.6c0 5-7.2 9.4-7.4 9.4z" data-page-node-id="jE8ICwFPUniXTGd1tuqT87"/></symbol>
+<symbol id="i-heart-fill" viewBox="0 0 24 24" data-page-node-id="N7oiRN1YnbtjJ28bD5l8TB"><path d="M12 20.2c-.2 0-7.4-4.4-7.4-9.4A4.2 4.2 0 0 1 12 8.2a4.2 4.2 0 0 1 7.4 2.6c0 5-7.2 9.4-7.4 9.4z" fill="currentColor" data-page-node-id="L5quR9ANFwIz8yR8EyaILz"/></symbol>
+<symbol id="i-radio" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" data-page-node-id="CZvHj6i02fbpNy3ttTdXyC"><circle cx="12" cy="12" r="2.1" data-page-node-id="IxmgoXdoscwfF8rwoGwCBk"/><path d="M7.9 7.9a5.8 5.8 0 0 0 0 8.2M16.1 16.1a5.8 5.8 0 0 0 0-8.2" data-page-node-id="6O3qijA6Tn3tahIuq05SGk"/><path d="M5.1 5.1a9.7 9.7 0 0 0 0 13.8M18.9 18.9a9.7 9.7 0 0 0 0-13.8" data-page-node-id="E0XlTJB65soj5mk4OAUa8T"/></symbol>
+<symbol id="i-mic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" data-page-node-id="J6IbGV87l5Xvz9wBhsSVN6"><rect x="9.2" y="2.6" width="5.6" height="10.6" rx="2.8" data-page-node-id="x7q6EfPdiHB5GZZwBGELNx"/><path d="M5.4 11.2a6.6 6.6 0 0 0 13.2 0" data-page-node-id="rScN5YiRQMGX3sFniBdX6W"/><path d="M12 17.8V21M8.6 21h6.8" data-page-node-id="RewwcPSuNguK7pWBbtV3HD"/></symbol>
+<symbol id="i-chart" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" data-page-node-id="DNDL1GDRrxxIv6JWcPWZCK"><path d="M4 20V5" data-page-node-id="5ZylUNk4HOQNOs5GkBHcB4"/><path d="M4 20h16" data-page-node-id="uk1noWIEZ3EQP9HwbCCVbe"/><rect x="7" y="12" width="3.2" height="5" rx="1" data-page-node-id="D2kMekJmgBFJeIB4771k1o"/><rect x="12.4" y="8.4" width="3.2" height="8.6" rx="1" data-page-node-id="05K2waBSUKUv41oQyzkT01"/><rect x="17.8" y="10" width="3.2" height="7" rx="1" data-page-node-id="THONpvvz2jmNKbZgbYDvSA"/></symbol>
+<symbol id="i-user" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" data-page-node-id="kbh9TJV8lT3orZSY6bjy99"><circle cx="12" cy="8.2" r="3.9" data-page-node-id="zXezXpy60PqGFjyeXlqGxw"/><path d="M4.6 20.4c.5-4.2 3.8-6.7 7.4-6.7s6.9 2.5 7.4 6.7" data-page-node-id="Bd6EiTHpH1AtrsIKOxWD8s"/></symbol>
+<symbol id="i-logout" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" data-page-node-id="avPHlexnPDP4L8Ef8YyPBj"><path d="M14.6 4.2H17a2.2 2.2 0 0 1 2.2 2.2v11.2A2.2 2.2 0 0 1 17 19.8h-2.4" data-page-node-id="lfnUxHxKHqSSHsyDsrENJf"/><path d="M10 8.2 6.2 12l3.8 3.8M6.2 12h8.6" data-page-node-id="nKHLHlehUs2HZuMkGR3Oqs"/></symbol>
+<symbol id="i-search" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" data-page-node-id="eCzLe2VOOqDA3H49CdNOvD"><circle cx="10.8" cy="10.8" r="6.6" data-page-node-id="5zb1Ur9bCEvHzKJ5XwHtQC"/><path d="m20 20-4.3-4.3" data-page-node-id="qCYF0iuz4wkbdNPYjRPGyo"/></symbol>
+<symbol id="i-play" viewBox="0 0 24 24" data-page-node-id="ZElx9Ch3Qho7fgahdWhBmN"><path d="M8.2 5.1 19 12 8.2 18.9z" fill="currentColor" data-page-node-id="IQnvD6H3Q7RmwMCd9A16Zz"/></symbol>
+<symbol id="i-pause" viewBox="0 0 24 24" data-page-node-id="dOLDe7M4b0Kf6rUBXqr3Ot"><rect x="7" y="5" width="3.4" height="14" rx="1.2" fill="currentColor" data-page-node-id="RBnkMjKFXgtgyYe7RUhuts"/><rect x="13.6" y="5" width="3.4" height="14" rx="1.2" fill="currentColor" data-page-node-id="PGRjMoyGXNpQ6HLbIAgDki"/></symbol>
+<symbol id="i-prev" viewBox="0 0 24 24" data-page-node-id="4ZPqMVyIDsvRYpM5S2G0q4"><path d="M18.4 6.2 8.6 12l9.8 5.8z" fill="currentColor" data-page-node-id="CD8pKHjJyjBP5MWgYF3hn3"/><rect x="4.8" y="6" width="2.2" height="12" rx="1" fill="currentColor" data-page-node-id="rcl5SjvosDkJ4faYzJN2Ff"/></symbol>
+<symbol id="i-next" viewBox="0 0 24 24" data-page-node-id="cD1uOStSSEoWX8ic5RX1p0"><path d="M5.6 6.2 15.4 12 5.6 17.8z" fill="currentColor" data-page-node-id="NeOXyZV8CJgfqbuFtDMoTZ"/><rect x="17" y="6" width="2.2" height="12" rx="1" fill="currentColor" data-page-node-id="eVxrxt2GWNt9Y1EaNJoxkg"/></symbol>
+<symbol id="i-shuffle" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" data-page-node-id="EV6dlZR0yQUKOFtVYgCKQ8"><path d="M3.6 7.2h2.9c1.5 0 2.4.8 3.3 2l6.4 8.6c.9 1.2 1.8 2 3.3 2h1.9" data-page-node-id="g81qsxxes0ivA7OK2lisOH"/><path d="M3.6 16.8h2.9c1.5 0 2.4-.8 3.3-2" data-page-node-id="JH8pVF9DVLaz70EmjvEEuR"/><path d="M14.6 5.6l3-1.8-1.8 3z" fill="currentColor" data-page-node-id="yRRMjrq1hClHJBLScrOFLR"/><path d="M14.6 18.4l3 1.8-1.8-3z" fill="currentColor" data-page-node-id="9XSXZhHdsanTDYuu3ygI4G"/><path d="M17.6 3.8h2.4v2.4M17.6 20.2h2.4v-2.4" data-page-node-id="QZVSRYlMeF0msdvzxArGUr"/></symbol>
+<symbol id="i-repeat" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" data-page-node-id="F3uUQJY5HQpmQGHKMarr3a"><path d="M6.4 8.6V8a4 4 0 0 1 4-4h8.2" data-page-node-id="vULA3qeKTPwGqQogWOovIo"/><path d="m15.8 1.4 2.8 2.6-2.8 2.6" data-page-node-id="49PDnvKufTCaEGt6pARVtD"/><path d="M17.6 15.4v.6a4 4 0 0 1-4 4H5.4" data-page-node-id="tBQzO3z9cGstvtloAPZeOw"/><path d="m8.2 22.6-2.8-2.6 2.8-2.6" data-page-node-id="uTlgtYCTXG0ycSTMpvPmFS"/></symbol>
+<symbol id="i-volume" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" data-page-node-id="8DcuzDA3jD0T1fgXZD7ubz"><path d="M4 9.4h3.1L12 5.4v13.2L7.1 14.6H4z" data-page-node-id="0CfGUGlFPQru4qgeCmbRxV"/><path d="M15.6 9.6a3.8 3.8 0 0 1 0 4.8M18.2 7.2a7.2 7.2 0 0 1 0 9.6" data-page-node-id="GK7cnNaVNk5ZEXSCxiLDp6"/></symbol>
+<symbol id="i-mute" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" data-page-node-id="l9uMSaVGf53foIETJIkQz0"><path d="M4 9.4h3.1L12 5.4v13.2L7.1 14.6H4z" data-page-node-id="gnosjghGveZmXP8meA1gRo"/><path d="m16 10 4 4M20 10l-4 4" data-page-node-id="uN8MspdaHzR0Edmz44S4yP"/></symbol>
+<symbol id="i-dots" viewBox="0 0 24 24" data-page-node-id="SekPoPeQ6bUiHxtRBUagzS"><circle cx="5.6" cy="12" r="1.7" fill="currentColor" data-page-node-id="mMwu42qLjxMD3NrxFGJRuL"/><circle cx="12" cy="12" r="1.7" fill="currentColor" data-page-node-id="EudIU5C4wXwguU9e6w8NeZ"/><circle cx="18.4" cy="12" r="1.7" fill="currentColor" data-page-node-id="O96ov5Ee6whI9UiYyJ4D7L"/></symbol>
+<symbol id="i-plus" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" data-page-node-id="sAXOSo3TofDVtwftksiaWD"><path d="M12 5.4v13.2M5.4 12h13.2" data-page-node-id="AY8f0nUKK6CR1rUUoOMXCc"/></symbol>
+<symbol id="i-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" data-page-node-id="YfPsyFh0xvveCbqjJvAnpc"><path d="m5.2 12.6 4.4 4.4L19 7.6" data-page-node-id="8CXYydphqrbPrisjpqXS2i"/></symbol>
+<symbol id="i-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" data-page-node-id="HSXaUAJ1ItCtKm5xdzZYQ4"><path d="m6.4 9.4 5.6 5.6 5.6-5.6" data-page-node-id="nifyje3zxninn1mjMyi20W"/></symbol>
+<symbol id="i-clock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" data-page-node-id="tEQgKDeEJRRPu11KgQdLlL"><circle cx="12" cy="12" r="8.6" data-page-node-id="YAhksFb3nMrVAoCUqaiF48"/><path d="M12 6.8V12l3.4 2" data-page-node-id="m3447eRfMWUWDtmBeyrLvj"/></symbol>
+<symbol id="i-list" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" data-page-node-id="hIHZWDFQlXx59WQiYr5wH8"><path d="M4 6.6h16M4 12h16M4 17.4h10" data-page-node-id="qCG6KAq1OXYRsv29n5KeNs"/></symbol>
+<symbol id="i-scan" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" data-page-node-id="NVuxYjDOq03Wane3JEuQNS"><path d="M4 8.4V6.2A2.2 2.2 0 0 1 6.2 4h2.2M15.6 4h2.2A2.2 2.2 0 0 1 20 6.2v2.2M20 15.6v2.2A2.2 2.2 0 0 1 17.8 20h-2.2M8.4 20H6.2A2.2 2.2 0 0 1 4 17.8v-2.2" data-page-node-id="HmbWhbDpVE1YkA2PDuXlaE"/><path d="M3.6 12h16.8" data-page-node-id="oAtOdbnZVL84ormbiGMw27"/></symbol>
+<symbol id="i-wave" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" data-page-node-id="ED1AZzmvl81mDRsCe4zXUq"><path d="M3.6 12h2M8 7.6v8.8M12.4 4.6v14.8M16.8 8.8v6.4M21.2 11h-1.4" data-page-node-id="gb6mBrCxw0TDht6tGNkDdU"/></symbol>
+<symbol id="i-menu" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" data-page-node-id="CgChLpqVBCqpa5h2ZObcRy"><path d="M4 7h16M4 12h16M4 17h16" data-page-node-id="k6olHbS95HFqjoAAWpfKPV"/></symbol>
+<symbol id="i-collapse" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" data-page-node-id="xW37cm6e00960g5HP795Uj"><rect x="3" y="4" width="18" height="16" rx="2" data-page-node-id="cdD9BUhyK56wyGn9UaR9jl"/><path d="M10 4v16" data-page-node-id="0QcgMMhQWAFAb1vkLR8YCI"/><path d="m17 9.5-2.5 2.5 2.5 2.5" data-page-node-id="HSDYu4o2gTo6cxmpsDYLn9"/></symbol>
+<symbol id="i-folder" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" data-page-node-id="Z5WMbrXILvnLvJPdXzL3AW"><path d="M3.5 7.5A1.5 1.5 0 0 1 5 6h3.8l1.7 2H19a1.5 1.5 0 0 1 1.5 1.5V17A1.5 1.5 0 0 1 19 18.5H5A1.5 1.5 0 0 1 3.5 17z" data-page-node-id="2MxFbbqdIhQTubLSSPDDJK"/></symbol>
+<symbol id="i-download" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" data-page-node-id="dT583wyeti3Km6zB4Qjg3C"><path d="M12 3.8v10.4" data-page-node-id="FQul5Jzh6bOM8UnTTHGnUk"/><path d="m7.8 10.4 4.2 4.2 4.2-4.2" data-page-node-id="3fNRIBiuzdGK7JE6AJqQiB"/><path d="M4.6 19.4h14.8" data-page-node-id="5CPXhRWF9nvM8ln7rc4zPs"/></symbol>
+<symbol id="i-settings" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" data-page-node-id="Zx7nUWdlgxuOgKTJ0GUc5Q"><circle cx="12" cy="12" r="3.2" data-page-node-id="0XNzFOJabLxFZqHMdCUvcB"/><path d="M12 3.4v2.2M12 18.4v2.2M4.8 7.8l1.9 1.1M17.3 15.1l1.9 1.1M4.8 16.2l1.9-1.1M17.3 8.9l1.9-1.1" data-page-node-id="h04E5wPOGm6AWLZ8iY0ijz"/></symbol>
+</svg>
+
+<div class="app" data-page-node-id="lvope2sLhAEY3awH4EWDKz">
+
+  <!-- ============ sidebar: the product's mark, its name, and the scope ============ -->
+  <aside class="sidebar" id="sidebar" data-page-node-id="okHW1e6qzVFkGw69rJWDQd">
+    <div class="brand" data-page-node-id="AVnUGyawY6PuDVwlaI81Bo">
+      <svg class="mark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" data-page-node-id="jiJetf8XJalmcwb7b5wc1y"><path d="M2 12h3M8 6.5v11M13.5 3v18M19 8.5v7" data-page-node-id="iO4M2NhayExLwWUylHUUqC"/></svg>
+      <div data-page-node-id="iY4hKy8M3S9Y5qGaFHc5KI">
+        <div class="word" data-page-node-id="ayT6yVgrrLPyZ3GiKfyBw6">Hertz Studio</div>
+        <div class="scope" data-page-node-id="hEijPsbrkZKMD5kh9utWFR">本机曲库 · Standard</div>
+      </div>
+    </div>
+
+    <div class="group-label" data-page-node-id="qDEjRxiEVVA1IlZNcc8B0B">曲库</div>
+    <nav data-page-node-id="sJTIyl69SD5dMC0NKEZnkI">
+      <a class="nav-item" href="#" data-go="home" aria-label="首页" title="首页" data-page-node-id="Y6ZHHHE7N24r3bj5mge0yO"><svg data-page-node-id="PDnCfNh07ZP5nKzIHx6XXv"><use href="#i-home" data-page-node-id="iWGpCltpLqfRFFsCRlhvHo"/></svg><span class="nav-label" data-page-node-id="5ADGlxgyUuEf7JdXOCsWRd">首页</span></a>
+      <a class="nav-item" href="#" data-go="library" aria-label="音乐库" title="音乐库" data-page-node-id="eotLAlqbqNOsUwoazdyxWC"><svg data-page-node-id="eRcgFOUYTx2WEb0ff0Cx2n"><use href="#i-disc" data-page-node-id="6YwmeXxWCH8lHLyg9XLedv"/></svg><span class="nav-label" data-page-node-id="bKk6p3Eio4OqlU47eEHuQV">音乐库</span></a>
+      <a class="nav-item" href="#" data-go="collection" aria-label="收藏" title="收藏" data-page-node-id="ztfSAMKtAaWHYXnGITF2WA"><svg data-page-node-id="IBU6dqVo83rCSQwLa78XAl"><use href="#i-heart" data-page-node-id="YS8AKgFBIAjYAuFxymNaQa"/></svg><span class="nav-label" data-page-node-id="jDDdIiCA8O5bCYtolVVuM1">收藏</span></a>
+    </nav>
+
+    <div class="group-label" data-page-node-id="m8viHBR96kh1cFed9H08kc">收听</div>
+    <nav data-page-node-id="CmpLKhBuEKDUNoGXzDTodu">
+      <a class="nav-item" href="#" data-go="radio" aria-label="电台" title="电台" data-page-node-id="O6NVxfRsvue2oMOGFuTLXl"><svg data-page-node-id="GeG93uFOIjcRjbqaKBPDuy"><use href="#i-radio" data-page-node-id="piMdvVT3jIdPsSAJMKqSFw"/></svg><span class="nav-label" data-page-node-id="eH2DnIYGmJQwKgovBAu4XR">电台</span></a>
+      <a class="nav-item" href="#" data-go="podcast" aria-label="播客" title="播客" data-page-node-id="nGI7hJPQqJTARogL97sfcO"><svg data-page-node-id="AQ2PsIIqr0nN5PmVp9m0lh"><use href="#i-mic" data-page-node-id="7hYX5SfHxevfyrhMt2Fwfm"/></svg><span class="nav-label" data-page-node-id="filNsSaVYC9br4UFCnPOGT">播客</span></a>
+      <a class="nav-item" href="#" data-go="stats" aria-label="收听统计" title="收听统计" data-page-node-id="hoMjzD6RDm0mGksdQcYWYO"><svg data-page-node-id="nGmZEqHhRY4E1UA3QCHq7W"><use href="#i-chart" data-page-node-id="FysVTLKq6oh9V7nuC8bJUV"/></svg><span class="nav-label" data-page-node-id="Cf8oQhOxTWG6R42xOa74Nf">收听统计</span></a>
+    </nav>
+
+    <div class="bottom" data-page-node-id="yNSa1ZpgvEZfnZ9E7wGO0K">
+      <div class="group-label">账户</div>
+      <div class="account" data-page-node-id="7D8xq66BO9MyOoZ4GOt6rT">
+        <span class="avatar" data-page-node-id="Sbb9CRI476tQQxADN1dKIC">赫</span>
+        <span class="meta" data-page-node-id="TAQH4dr4DBzJPXGJptMNMK"><b data-page-node-id="NVzql4i4QWbY5gBptcJ1JT">本地账户</b><span data-page-node-id="GtHQHigXhvwcVFiavI3trY">数据不出这台机器</span></span>
+      </div>
+      <nav data-page-node-id="f9TYmh3io3Q6HAK49b4b3e">
+        <a class="nav-item" href="#" data-go="settings" aria-label="设置" title="设置"><svg><use href="#i-settings"/></svg><span class="nav-label">设置</span></a>
+        <a class="nav-item" href="#" id="nav-logout" aria-label="退出登录" title="退出登录" data-page-node-id="C1sVthzgKFuB62wBEBM7d3"><svg data-page-node-id="haAVfvmDLdFpeL4FnsaXDL"><use href="#i-logout" data-page-node-id="WKVXyULbMOBJDGx8RuBBPd"/></svg><span class="nav-label" data-page-node-id="CXI2ELkIrayu1FDhytNdTp">退出登录</span></a>
+      </nav>
+    </div>
+  </aside>
+
+  <div class="main" data-page-node-id="lX1OsZBM6iakAhiCMs7T7v">
+    <!-- ============ top bar: 64px, one rule, search and the switcher ============ -->
+    <header class="topbar" data-page-node-id="sJAJl7rG4FlXJsoTUmCTCW">
+      <button class="btn icon-only" id="nav-collapse" aria-label="收起侧栏" aria-expanded="true" title="收起侧栏" data-page-node-id="xbaR4c9VysadQ3bCFS06JA"><svg style="width:16px;height:16px" data-page-node-id="YxiZRRX66idgyg953liIaX"><use href="#i-collapse" data-page-node-id="4ahovWOOEHu5PSUTVdAmXs"/></svg></button>
+      <button class="btn menu-toggle" id="menu-toggle" aria-label="打开菜单" data-page-node-id="85DmkIHefYFqqXAs0Hbhxq"><svg style="width:16px;height:16px" data-page-node-id="tn1Quu16ZSEYpwqrrzVWp9"><use href="#i-menu" data-page-node-id="VPqiWpFtHT48IM2C0ZHOD2"/></svg></button>
+      <label class="search" data-page-node-id="vLbthcw471UbY0bTaTDZVT">
+        <svg data-page-node-id="sOqqZhcjn0KktkgXrkbW5T"><use href="#i-search" data-page-node-id="kPqNzy9hX91NX6JEwl2dyJ"/></svg>
+        <input id="q" type="search" placeholder="搜索曲名、歌手、专辑" autocomplete="off" aria-label="搜索曲库" data-page-node-id="4FMcSyCoVNOU5YxYTbSaXR">
+      </label>
+      <span class="spacer" data-page-node-id="dMI643rfemGaSG1uUB6HC7"></span>
+      <span class="stamp" id="stamp" data-page-node-id="v90QfQYQHEPXpEUPCmKUjh">上次扫描 今天 14:02</span>
+      <div class="sw" id="sw" data-page-node-id="ZS2K4UWfFr0M9dHnTrspdU">
+        <button class="switcher" id="switcher" aria-haspopup="menu" aria-expanded="false" aria-label="曲库作用域：本机曲库"><svg class="lead"><use href="#i-disc"/></svg><span class="sw-name">本机曲库</span><svg class="cv"><use href="#i-chevron"/></svg></button>
+        <div class="sw-menu" role="menu" data-page-node-id="jRZtgipqlcccJTDGWN8yDd">
+          <div class="ctx" id="sw-ctx" data-page-node-id="FudoUB9y2dSOXGvAkzQmoq"></div>
+          <button class="sw-item" role="menuitem" data-act="scan" data-page-node-id="RAI6xPjwFuPYXjHyOPd3VX"><svg data-page-node-id="yb3JzcXZaim8AC5hnhRIhm"><use href="#i-scan" data-page-node-id="orJBFHgBtUAlFmCiMTdtBE"/></svg>扫描音乐目录</button>
+          <button class="sw-item" role="menuitem" data-act="manage" data-page-node-id="wFAs5zETjuyPg5H12bAGMe"><svg data-page-node-id="j1eSyIGTbiDtKcuWf7LByp"><use href="#i-list" data-page-node-id="HFeFOpUlajqqebREO95xvR"/></svg>管理音乐目录</button>
+          <button class="sw-item" role="menuitem" data-act="open" data-page-node-id="agqDeBDKHtc469iwTh6arL"><svg data-page-node-id="kT8t2ErJ3XU1DN3N0Au6tB"><use href="#i-folder" data-page-node-id="HmRcjtSZijhj1EGxgUfqUJ"/></svg>打开数据目录</button>
+          <div class="sw-sep" data-page-node-id="XS7UgeFNWwlGv1GhyD2o0G"></div>
+          <button class="sw-item" role="menuitem" data-act="backup" data-page-node-id="Eoa186XiKoHMOW43fZg558"><svg data-page-node-id="pmpQ7AsVHTuSZr6tzqpXiR"><use href="#i-download" data-page-node-id="W7rPdCTBA8AXdBcN33XPSi"/></svg>数据备份与恢复</button>
+        </div>
+      </div>
+    </header>
+
+    <main class="canvas" data-page-node-id="khAhFq7IDGK5dREvjDhXL0">
+
+      <!-- ============================ 首页 ============================ -->
+      <section class="screen on" id="s-home" data-page-node-id="OUvnPXvQU0e3yiiDz7HywD">
+        <div class="title-row" data-page-node-id="rMRHaypnSnzpRhvHUVUzQ1">
+          <div data-page-node-id="R0TOw43U3AAEPYGPswNZqb">
+            <h1 data-page-node-id="66ZyZdNCigHLUb74G12ymE">首页</h1>
+            <p class="sub" id="home-sub" data-page-node-id="rVhffg75yXcCRS7F2bStZm"></p>
+          </div>
+          <button class="btn primary" id="btn-resume" data-page-node-id="FPY8ebDg6x0kjyFSIOxSmb"><svg style="width:14px;height:14px" data-page-node-id="FJUAEI2a43xgKUpTWTKeC7"><use href="#i-play" data-page-node-id="8ljHAA0S4U73s27Zxp3FPK"/></svg>继续播放</button>
+        </div>
+
+        <div class="filters" data-page-node-id="M5vbGTYE3qonGC1fYgkhgh">
+          <div class="segmented" id="range" role="group" aria-label="时间范围" data-page-node-id="ibqhfMNiQpB1ByEVCkB6DT">
+            <button data-range="7" aria-pressed="true" data-page-node-id="L8PJw92yxtbZAHjrvflV6s">近 7 天</button>
+            <button data-range="30" aria-pressed="false" data-page-node-id="he7YfiJtLDCqKCH446RSTi">近 30 天</button>
+          </div>
+          <span class="spacer" data-page-node-id="VFolhUYJ6DpcExgg31hZtW"></span>
+          <span class="stamp" id="home-stamp" data-page-node-id="SSbCFsEmpZ0AA04okw9OGX"></span>
+        </div>
+
+        <div class="grid overview" data-page-node-id="fpRe9Lvt0jqO5xkAbvHgzp">
+          <div class="col" data-page-node-id="AYHqwqcBSLXstMiHsEhDFP">
+            <!-- the signature element: only this product separates these four numbers -->
+            <section class="panel" data-page-node-id="HTTxUtGDMuPbeRucfsScG2">
+              <header data-page-node-id="UvhoFjhGS2qpe749N3EblT"><h2 data-page-node-id="2FCMzFONxMoCAgCeIM0TXI">入库链路</h2><span class="meta" data-page-node-id="PPC0lBvJGweC9NZqIexU0a">扫描 → 读到标签 → 能解码 → 真出声</span></header>
+              <div class="chain-strip" id="chain" data-page-node-id="GiJ9grLiQJA75YmvAPCObG"></div>
+              <div class="share" id="chain-share" style="margin-top:16px" data-page-node-id="E5ux45ScqeuyBfRAcJdK98"></div>
+              <div class="share-legend" id="chain-legend" data-page-node-id="53U2kdH19Q8aLH3mJkCUIV"></div>
+              <p class="sub" id="chain-note" style="margin-top:12px" data-page-node-id="Mujh83HpTiYL9c38yyWHif"></p>
+            </section>
+
+            <section class="panel" data-page-node-id="8rxn7MM0eEMwBBVvjvn5RM">
+              <header data-page-node-id="1Jyq4flaiITPWZtfZayaKR"><h2 data-page-node-id="hoDV6zMEgCC56DM6inFb4f">收听时长</h2><span class="meta" data-page-node-id="WTYmYFdMkBtVlE7CkGVfKh">单位：小时</span></header>
+              <div class="chart" id="ch-week" data-page-node-id="3i8c1I4adPWOPxNMxNQn24"></div>
+              <p class="sub" id="week-note" style="margin-top:8px" data-page-node-id="idLa88v8QWdGJ8EgdXM0vj"></p>
+            </section>
+
+            <section class="panel" data-page-node-id="UecpXVllp9oZ4CB0oqiggS">
+              <header data-page-node-id="4DLuhYEhw3sIvnw00to2pG"><h2 data-page-node-id="TKpaUIFvUuiwRyALBx9BUL">最近加入</h2><button class="card-link" data-go="library" data-page-node-id="7LsHFAUGZqSuawtchuEGJs">全部曲目</button></header>
+              <div class="albums" id="recent-albums" data-page-node-id="2X5teGIAhjpIkPI8D3f4nA"></div>
+            </section>
+          </div>
+
+          <aside class="rail" data-page-node-id="xf47u8UNlGaNe7X3lCCxiH">
+            <section class="panel" data-page-node-id="wCWHoYgx7QxZu1X6aLLpiV">
+              <header data-page-node-id="Ppnq2Fv6R886FaC8VjgVbE"><h2 data-page-node-id="mry5k2AcbHFecFetXhca3V">正在播放</h2><span class="meta" id="np-state" data-page-node-id="A9wFt2rFbCjDUI14onb3UE"></span></header>
+              <div class="media" data-page-node-id="y4TakHhc0PVLb0ptMn4QlM">
+                <span class="cover s56" id="np-cover" data-page-node-id="ca928p2r5t4iWzLTwyxHho"></span>
+                <span class="body" style="min-width:0" data-page-node-id="wTZbR2qe4Iaw5lNEahwbMF">
+                  <div class="name" id="np-title" data-page-node-id="6o3Zo8FqhXwFdPcFXfSImD">未在播放</div>
+                  <div class="sub" id="np-artist" data-page-node-id="NqESC6I3C8mpEZBBgn1iFH">从音乐库挑一首开始</div>
+                </span>
+              </div>
+              <div class="bar" style="margin-top:14px" data-page-node-id="mkn0AzwhkKNcUWMuvDVtsV">
+                <span class="t-sm" id="np-cur" data-page-node-id="8PpG7TFG9weyC44BEYQsbt">0:00</span>
+                <span class="track-bar" id="np-bar" data-page-node-id="41lPbIeSMkZriK2RxrjujC"><i style="width:0" data-page-node-id="rowRk9IYl8LjYwOGEmukvk"></i></span>
+                <span class="t-sm r" id="np-dur" data-page-node-id="4hoO108NaXZlmBNmqBVxLb">0:00</span>
+              </div>
+            </section>
+
+            <section class="panel" data-page-node-id="39yzVHqEuJObL2IVWL9KHY">
+              <header data-page-node-id="hfC4sn7NYibvTAvyuHtrtI"><h2 data-page-node-id="DbDfmSDnKYwf40k7CvyHCz">播放次数</h2><button class="card-link" data-go="stats" data-page-node-id="rKwE2VxwCMBa7JSJ3eASMA">收听统计</button></header>
+              <div class="rows" id="top-list" data-page-node-id="oDlic5ll4vEMjRqOIsaZid"></div>
+            </section>
+
+            <section class="panel" data-page-node-id="vTLyNHgN1si9LDlQEQAhVZ">
+              <header data-page-node-id="oJqlPapiuFkZbvVgpCEM2H"><h2 data-page-node-id="cM13iFgEvlFAZprfn7FR20">精选歌单</h2><span class="meta" data-page-node-id="YB68fxIJAfXBuIvlKhfzrV">播放最多的一张</span></header>
+              <div id="featured" data-page-node-id="xRyox7nMvepkVJHpneHoef"></div>
+            </section>
+
+            <section class="panel" data-page-node-id="NBGI2fLaGYRjIWFezbMEsq">
+              <header data-page-node-id="6pagSEbkpEWJA3rNubLOV4"><h2 data-page-node-id="oKFxDQlJORXpfTCwdFBg87">音频格式</h2><span class="meta" data-page-node-id="c4IxqaPmqL4nhe2XdwGElo">占曲库</span></header>
+              <div class="share" id="fmt-share" data-page-node-id="HH8pz51Op0rianPfN5jIPp"></div>
+              <div class="share-legend" id="fmt-legend" data-page-node-id="ngbfe1r7xXjky2YbNG36wX"></div>
+            </section>
+          </aside>
+        </div>
+      </section>
+
+      <!-- ============================ 音乐库 ============================ -->
+      <section class="screen" id="s-library" data-page-node-id="YUpkQxzIccBUC40iiyVnfk">
+        <div class="title-row" data-page-node-id="loqx4fGdqAMuPc0KEVTJOi">
+          <div data-page-node-id="2Ey0BHG2tHrqVaxS28ZFlk"><h1 data-page-node-id="n14xt6FCvjXJpizTBswMdB">音乐库</h1><p class="sub" id="lib-sub" data-page-node-id="OhQKQMyURZCqhmETn6bRCh"></p></div>
+          <button class="btn primary" id="btn-play-all" data-page-node-id="Rfycgvt50Vuo9NHyGPQgVD"><svg style="width:14px;height:14px" data-page-node-id="xBCGk1h4Mqdvssix2PbNie"><use href="#i-play" data-page-node-id="UhEvARbjS3FVSNB3y8eZwh"/></svg>播放筛选结果</button>
+        </div>
+
+        <div class="counts" id="src-counts" data-page-node-id="Byy2lIaVFDjSPkfPEW6x6V"></div>
+
+        <div class="filters" data-page-node-id="rHBp16PfoyXmINNk1uvQid">
+          <select class="input" id="sort-by" aria-label="排序方式" data-page-node-id="yPp9p08DaLXEJwSuA1uyZP">
+            <option value="added" data-page-node-id="GAbbBP7R4tg0GTA7NcIrmk">按加入时间</option>
+            <option value="title" data-page-node-id="EpEydUCr13BL1HGKO6FEd2">按曲名</option>
+            <option value="artist" data-page-node-id="ejWOP4VK47UCVXiREDmyZA">按歌手</option>
+            <option value="album" data-page-node-id="nCN051de4Bnktzc04G5kDq">按专辑</option>
+            <option value="plays" data-page-node-id="7u4Pl5gKBKhEEfe0gmxJ5o">按播放次数</option>
+            <option value="dur" data-page-node-id="V8wAg4g4ziH0WATl0ZQuPF">按时长</option>
+          </select>
+          <select class="input" id="page-size" aria-label="每页条数" data-page-node-id="cAUHBuv3h8cGdGGqrpJJum">
+            <option value="12" data-page-node-id="FGQE6XpGrMF6Al0fojYq6s">每页 12 条</option>
+            <option value="24" data-page-node-id="BbU0Ez4phpeZx6qyKtOEAt">每页 24 条</option>
+            <option value="48" data-page-node-id="THY7UHUueVQJ9MTd629eqS">每页 48 条</option>
+          </select>
+          <span class="spacer" data-page-node-id="i7QxBM4io6HhNnhruM2yiW"></span>
+          <span class="stamp" id="lib-stamp" data-page-node-id="02pqAVrWF4juOT613te09m"></span>
+        </div>
+
+        <div class="table-wrap" data-page-node-id="ztjJxhQFvqR2QgrlmnWajT">
+          <table data-page-node-id="YHcrkTHQYzAhrfgAem74al">
+            <thead data-page-node-id="tzOExAZsYGE9BiQ7EHFWPP"><tr data-page-node-id="fXXi4ALHcSXsaeVDXtYHH1">
+              <th data-page-node-id="EU4rqWCOpsmjlhVelvItUH">曲目</th><th data-page-node-id="gswbQGitmYtyxtEulYCwIL">专辑</th><th style="width:90px" data-page-node-id="1oFhi0ChrnPrSeYsYCfl2m">流派</th>
+              <th style="width:120px" data-page-node-id="TXD7YqFHwLhH7ZLMK5EFtt">格式</th><th class="n" style="width:80px" data-page-node-id="qHLNJiiyBdaIpSv7CtGA9O">时长</th>
+              <th class="n" style="width:70px" data-page-node-id="FJFGLJPqfctgZgFgQHvbNf">播放</th><th style="width:44px" data-page-node-id="QzioWrG1OmX0qLz92MCN22"></th>
+            </tr></thead>
+            <tbody id="lib-rows" data-page-node-id="6y1X9HDBmCyOCdQiJ2sviB"></tbody>
+          </table>
+        </div>
+        <div class="pager" data-page-node-id="grp35COCFriBH1Zlg3GVaV">
+          <button class="btn" id="pg-prev" data-page-node-id="iCF6Ew8Jk8uP0jCRwjlSiZ">上一页</button>
+          <button class="btn" id="pg-next" data-page-node-id="UdbFdq2ZrtPiKXH12Gm3lp">下一页</button>
+          <span class="spacer" data-page-node-id="Gz3gQWVrSmbn887hS5YW7S"></span>
+          <span class="stamp" id="pg-info" data-page-node-id="jWZ9z7QIiQXzl1c6tusgW3"></span>
+        </div>
+      </section>
+
+      <!-- ============================ 收藏 ============================ -->
+      <section class="screen" id="s-collection" data-page-node-id="4taSHhWfq2iHG66Y66bLZR">
+        <div class="title-row" data-page-node-id="PQL9FNmL3IvdcwNEcfbXLd">
+          <div data-page-node-id="qthZ9dPIdQezKjDSoNECec"><h1 data-page-node-id="U1r5yJnParAqMfNPT9VTmV">收藏</h1><p class="sub" id="col-sub" data-page-node-id="N3KCcdBYGdSToxHlbu8w8N"></p></div>
+          <button class="btn primary" id="btn-play-liked" data-page-node-id="A03LiixGOkDJgLxDNifTD6"><svg style="width:14px;height:14px" data-page-node-id="2sEhJvoqN7Pe8ADHDpN0OM"><use href="#i-play" data-page-node-id="yEAxIT7d2x19n1RIzOTN8t"/></svg>播放喜欢</button>
+        </div>
+        <div class="filters" data-page-node-id="Lk7gbEWxXlJCk21xPvkdi6">
+          <div class="segmented" id="col-tabs" role="group" aria-label="收藏类型" data-page-node-id="respcgrk3PhJXFB601JzQj">
+            <button data-col="album" aria-pressed="true" data-page-node-id="qKQAuHcZ2pUFSRTdVS36DS">专辑</button>
+            <button data-col="track" aria-pressed="false" data-page-node-id="27X4DUlrMiUWvDjgJOFGmh">曲目</button>
+          </div>
+          <span class="spacer" data-page-node-id="4fC9uytUBf04SoX9FluDhu"></span>
+          <span class="stamp" id="col-stamp" data-page-node-id="5yffutAbLR29ETcPlyFAJQ"></span>
+        </div>
+        <div class="albums" id="col-albums" data-page-node-id="nS9HQaE5Mo9mOpC2Te5qYY"></div>
+        <div class="table-wrap" id="col-tracks" hidden data-page-node-id="WAMA0L2zFuvadptE0PyySD">
+          <table data-page-node-id="4GoiIMjFA3dRf7rLBoaYRx">
+            <thead data-page-node-id="pqpXkvsiBKLMGTASEuMDia"><tr data-page-node-id="TRDmZvEZkUoMzsJ59quoEU">
+              <th data-page-node-id="utCaC6OaL3J77e4Cix6Gqm">曲目</th><th data-page-node-id="alpBjSVn2pZChGmHCRawYe">专辑</th><th style="width:90px" data-page-node-id="XDjWd9nlhczWVhbG1hH26k">流派</th>
+              <th style="width:120px" data-page-node-id="GCbyBX33SyXsaYrLZcQ5ys">格式</th><th class="n" style="width:80px" data-page-node-id="gRtaCAFtBMFuDtmLdaErFt">时长</th><th style="width:44px" data-page-node-id="phNtyQJh70ujdQo71ucHm1"></th>
+            </tr></thead>
+            <tbody id="col-rows" data-page-node-id="P27uRwvv1sAkVtlnSg9aa5"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- ============================ 电台 ============================ -->
+      <section class="screen" id="s-radio" data-page-node-id="iECU2mH7izXQmHV759lR9n">
+        <div class="title-row" data-page-node-id="IJWP8fNmAHhjHSBWsgWzb8">
+          <div data-page-node-id="OccppBmXWh4xA5zxkaMlk5"><h1 data-page-node-id="HHGQL1roYZ7Gl7ZFbNOavK">电台</h1><p class="sub" data-page-node-id="H6czXb5bhF0NuHaj20cK9D">在线音源按显式启用解析，不上传曲库或收听记录。</p></div>
+          <button class="btn primary" id="btn-add-station" data-page-node-id="N2Jj6MWvoM2Snk2jC16400"><svg style="width:14px;height:14px" data-page-node-id="FbkaP1nxRJ7mOCrUeBx5ZY"><use href="#i-plus" data-page-node-id="Nvx50EUMBF5FIjSYr2gJBs"/></svg>添加电台</button>
+        </div>
+        <div class="table-wrap" data-page-node-id="LGgEiiZqFlltMSipPMF3mw">
+          <table data-page-node-id="kk5zfCVFSECPcWGM09UBtq">
+            <thead data-page-node-id="8DWsRJsKjtduCKxapsNyGy"><tr data-page-node-id="qGyOJi4Sn0qVqolkYopgBC">
+              <th data-page-node-id="9nTRioBBAhX7LOm4KbAsq4">电台</th><th style="width:90px" data-page-node-id="w746wSl66OBOCSurZGbx7m">波段</th><th style="width:110px" data-page-node-id="bZ7BsBy4Phr7NXv4DrQh9s">码率</th>
+              <th style="width:100px" data-page-node-id="qBsofHfd8v12T2LbH3hAZ2">状态</th><th style="width:44px" data-page-node-id="gqcKHTFA1yen51F2IrGwZm"></th>
+            </tr></thead>
+            <tbody id="radio-rows" data-page-node-id="TFc4G2GpmDKR1QGZIM5SxD"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- ============================ 播客 ============================ -->
+      <section class="screen" id="s-podcast" data-page-node-id="Hctq3Txl8EsiPkuFi7Gj5j">
+        <div class="title-row" data-page-node-id="RbU2vSmz61TkhGoCUYXbUs">
+          <div data-page-node-id="wtvBrIXgwBR9camqAHnlWR"><h1 data-page-node-id="5BLzM2JwW1HjsFLKpgC9GW">播客</h1><p class="sub" data-page-node-id="ynFAN5NRHx7WDBUXrdZoDB">按稳定 ID 记住续播位置，已听完的单集不再重复下载。</p></div>
+          <button class="btn primary" id="btn-add-pod" data-page-node-id="ExamEc0pGwDqSoFOynu2g1"><svg style="width:14px;height:14px" data-page-node-id="vRDDRFEdFEiPAnWOiwi0jN"><use href="#i-plus" data-page-node-id="UYjKlDBgVj0qiDq8I1v9fI"/></svg>添加订阅</button>
+        </div>
+        <div class="table-wrap" data-page-node-id="NkFKOL3SiVuGVaxpdWymxp">
+          <table data-page-node-id="MZxBkNpoG5NujOLoIY7pR8">
+            <thead data-page-node-id="KsuqUuuycgoKKVPRlKL2wl"><tr data-page-node-id="ckpCmOXpGeoe9wRhV0CNHm">
+              <th data-page-node-id="tcVHqxFT4vqqPzVUqRuEVY">单集</th><th style="width:150px" data-page-node-id="eeuKrDZyvbqctrkRlP9s7s">节目</th><th style="width:170px" data-page-node-id="XtbBIon0HURLrI7pxJ0u7C">续播位置</th>
+              <th class="n" style="width:80px" data-page-node-id="Qb6szLAoMPUXFkAxGy8kAE">时长</th><th style="width:44px" data-page-node-id="SG5n1JugyE5GQXCVsk329K"></th>
+            </tr></thead>
+            <tbody id="pod-rows" data-page-node-id="TKKdhVRbUn2StoLwZZdq6C"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- ============================ 收听统计 ============================ -->
+      <section class="screen" id="s-stats" data-page-node-id="NWSvRdgYxZS7NcDSMpiQ6l">
+        <div class="title-row" data-page-node-id="c3lvOAnMxJe2YSwzwpDDbP">
+          <div data-page-node-id="e3SyIAlF699ZcBDUcXBQI4"><h1 data-page-node-id="RroXnweLejRSO1sk1DH6BA">收听统计</h1><p class="sub" data-page-node-id="MvAdPiw2NJhbB7XHaCk9EZ">全部记录留在本机。下面的数字由曲目与播放记录直接算出。</p></div>
+        </div>
+        <div class="filters" data-page-node-id="psEyEeYTlAJsuLD6qvhJ7I">
+          <div class="segmented" id="stats-range" role="group" aria-label="时间范围" data-page-node-id="PQkGG35AW58J8EcFCtiEww">
+            <button data-sr="7" aria-pressed="true" data-page-node-id="cmIENndbS14SSWsPgFDOS7">近 7 天</button>
+            <button data-sr="30" aria-pressed="false" data-page-node-id="njSLlkGLUnahjmBgiFoyxL">近 30 天</button>
+          </div>
+          <span class="spacer" data-page-node-id="MWSrAGyALQJcAwRusKF0HA"></span>
+          <span class="stamp" id="stats-stamp" data-page-node-id="QHGLE6GgV8WTz6fbqcwMdL"></span>
+        </div>
+
+        <div class="kpis" id="stats-kpis" data-page-node-id="ex9KkkmFXGxisN0Fq3W9zg"></div>
+
+        <div class="grid" style="margin-top:16px" data-page-node-id="PmHCEjXEu6d2hGqER3zB0I">
+          <section class="panel" style="grid-column:span 6" data-page-node-id="tiCmohzBNNJQmkqGEVyloy">
+            <header data-page-node-id="TFERF9lcFrZfVYaeAcl4Dt"><h2 data-page-node-id="ObcFlzcVrFODHiHR8ZcMcI">每日收听</h2><span class="meta" data-page-node-id="oTT0lAsmXii6AmP7tUr8D8">单位：小时</span></header>
+            <div class="chart" id="ch-daily" data-page-node-id="zCDMKbezxDOjjRKCAcDWP3"></div>
+          </section>
+          <section class="panel" style="grid-column:span 6" data-page-node-id="XLs6iOunQMMY2wj3lmRJFM">
+            <header data-page-node-id="LwzJBFwA9XRbNAKPT0RBfC"><h2 data-page-node-id="1rVz9NmX4Utp9SdGDEcsL0">累计收听</h2><span class="meta" data-page-node-id="wG4sV5UqYcFxRh0Ohpn41g">同一时间轴</span></header>
+            <div class="chart" id="ch-cum" data-page-node-id="sLG11rEKZPgMPN4hUwDAtz"></div>
+          </section>
+        </div>
+
+        <div class="grid" style="margin-top:16px" data-page-node-id="cxLdDgs5t5nPkeGpRQhgrB">
+          <section class="panel" style="grid-column:span 6" data-page-node-id="Fv03uzeXaFjqjKbO46fuyw">
+            <header data-page-node-id="j0Llvixn2IrmeT6WAfLdha"><h2 data-page-node-id="CUf40VHRFc9iejggXOmre9">流派分布</h2><span class="meta" data-page-node-id="lGnKiapIrRDwCr9ESfK0Zy">占曲库</span></header>
+            <div class="chart" id="ch-genre" data-page-node-id="SovVxymp9fXl9IcGlen8al"></div>
+          </section>
+          <section class="panel" style="grid-column:span 6" data-page-node-id="Du8xTFpeiKupsZjIapkkqT">
+            <header data-page-node-id="ac1CfbyQQog7A61vDesQYQ"><h2 data-page-node-id="HmczA48DbAugdUVYWOfhKw">播放次数</h2><button class="card-link" data-go="library" data-page-node-id="ZyMXdyyn5Dvdab604ivJp6">全部曲目</button></header>
+            <div class="rows" id="stats-top" data-page-node-id="gwNnGjndQG7WZkM6s0uII7"></div>
+          </section>
+        </div>
+      </section>
+
+      <!-- ============================ 设置 ============================ -->
+      <section class="screen" id="s-settings">
+        <div class="title-row">
+          <div><h1 id="set-title">播放</h1><p class="sub">改动即时生效，保存在这台机器上。</p></div>
+          <span class="stamp" id="set-stamp"></span>
+        </div>
+        <div class="tabs" id="set-tabs" role="tablist">
+          <a href="#" data-set="play" aria-selected="true">播放</a>
+          <a href="#" data-set="library" aria-selected="false">曲库</a>
+          <a href="#" data-set="lyrics" aria-selected="false">歌词</a>
+          <a href="#" data-set="look" aria-selected="false">外观</a>
+          <a href="#" data-set="data" aria-selected="false">数据</a>
+        </div>
+        <div id="set-body"></div>
+      </section>
+
+      <!-- ============================ 专辑详情 ============================ -->
+      <section class="screen" id="s-detail" data-page-node-id="GxgbFpZ13yK0XfZ1uMJYnc">
+        <div class="obj-header" id="detail-header" style="margin-bottom:16px" data-page-node-id="xQFRXGGzYKRDbyRHpIZhlX"></div>
+        <div class="kpis" id="detail-kpis" style="margin-bottom:16px" data-page-node-id="eAqrT7EID1SD5NcCC6stAs"></div>
+        <div class="table-wrap" data-page-node-id="CisnwFoCO0CVU0CZSItMGi">
+          <table data-page-node-id="2Mc8yFDfERK5I8xZ3CDKfY">
+            <thead data-page-node-id="mNHD1N1SD60NJI0lI4TfxC"><tr data-page-node-id="PbkuyjmvxGGSH7XHOGiJTG">
+              <th data-page-node-id="T3wZWtToRcw8tq2kp82uKZ">曲目</th><th style="width:90px" data-page-node-id="6MEFTKqou00DaYvqCky9VL">流派</th><th style="width:120px" data-page-node-id="w7WsUgFJ3z9GJlX4Rpgr4g">格式</th>
+              <th class="n" style="width:80px" data-page-node-id="ZnOj9EaEzer7B1nS7XAOrc">时长</th><th class="n" style="width:70px" data-page-node-id="yEqz7KH8ra9UOBMBCwSBaV">播放</th><th style="width:44px" data-page-node-id="k1FqHK2vw77h4v3OfmDBT0"></th>
+            </tr></thead>
+            <tbody id="detail-rows" data-page-node-id="hy9mVZaOLAmNPG5hT9GcTt"></tbody>
+          </table>
+        </div>
+      </section>
+
+    </main>
+  </div>
+</div>
+
+<div class="scrim" id="scrim" data-page-node-id="2oEWqK7XILU3zfBssPblqH"></div>
+
+<!-- ============ player bar ============ -->
+<footer class="player">
+  <div class="np">
+    <span class="cover s40" id="p-cover"></span>
+    <span class="media body" style="min-width:0">
+      <span class="name" id="p-title">未在播放</span>
+      <span class="sub" id="p-artist">Hertz Studio</span>
+    </span>
+    <div class="spectrum" id="spectrum" aria-hidden="true"></div>
+    <button class="icon-btn" id="p-like" aria-label="收藏"><svg><use href="#i-heart"/></svg></button>
+  </div>
+
+  <div class="transport">
+    <div class="ctrls">
+      <button class="icon-btn" id="p-shuffle" aria-label="随机播放"><svg><use href="#i-shuffle"/></svg></button>
+      <button class="icon-btn" id="p-prev" aria-label="上一首"><svg><use href="#i-prev"/></svg></button>
+      <button class="icon-btn play" id="p-play" aria-label="播放"><svg><use href="#i-play"/></svg></button>
+      <button class="icon-btn" id="p-next" aria-label="下一首"><svg><use href="#i-next"/></svg></button>
+      <button class="icon-btn" id="p-repeat" aria-label="循环模式"><svg><use href="#i-repeat"/></svg></button>
+    </div>
+    <div class="bar">
+      <span class="t-sm" id="p-cur">0:00</span>
+      <span class="track-bar" id="p-bar"><i style="width:0"></i></span>
+      <span class="t-sm r" id="p-dur">0:00</span>
+    </div>
+  </div>
+
+  <div class="right">
+    <div class="vol-sw" id="vol-sw">
+      <button class="icon-btn" id="p-mute" aria-label="音量" aria-haspopup="true" aria-expanded="false"><svg><use href="#i-volume"/></svg></button>
+      <div class="vol-pop" role="group" aria-label="音量">
+        <span class="vol-num" id="p-vol-num">72</span>
+        <div class="vol-v" id="p-vol"><i></i><b></b></div>
+      </div>
+    </div>
+    <button class="icon-btn" id="p-queue" aria-label="播放队列"><svg><use href="#i-list"/></svg></button>
+  </div>
+</footer>
+
+<div class="toast-host" id="toasts" data-page-node-id="NGhJdu3U6Uvi8s2e7B1YIk"></div>
+
+<script src="charts.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
