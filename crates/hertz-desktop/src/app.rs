@@ -17,7 +17,7 @@ use tao::event::{Event, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy, EventLoopWindowTarget};
 use tao::platform::windows::{WindowBuilderExtWindows, WindowExtWindows};
 use tao::window::{Window, WindowBuilder};
-use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+use tray_icon::menu::{CheckMenuItem, ContextMenu, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -54,15 +54,16 @@ pub(crate) enum UserEvent {
     WallpaperPage(u64, String),
     SettingsPage(String),
     /// 小窗快照轮询的一拍（含可能的封面字节）。
-    MiniFeed(Instant, Box<Result<MiniUpdate, String>>),
+    MiniFeed(u64, Instant, Box<Result<MiniUpdate, String>>),
     /// 呈现时钟的 4Hz 位置推进。
-    MiniPosition(u64),
+    MiniPosition(u64, u64),
     /// 拖拽线程的光标事件。
-    MiniDrag(DragEvent),
+    MiniDrag(u64, DragEvent),
     /// 小窗页面的 IPC 消息。
     MiniPage(String),
     /// 小窗播控/回主窗口的结果（只记日志与提示）。
-    MiniControl(Result<(), String>),
+    MiniControl(u64, Result<(), String>),
+    MiniRestore(u64, Arc<AtomicBool>, Result<(), String>),
     Tick,
     Page(String),
     LyricControl(u64, Result<(), String>),
@@ -367,11 +368,12 @@ struct TrayActions {
 
 /// 小窗的原生 surface。窗口与 WebView 一起生灭；封面走共享槽（协议闭包读最新帧，
 /// 事件循环写它），避免每次换封面都 base64。
+type MiniCover = Arc<std::sync::Mutex<Option<(u64, Vec<u8>, String)>>>;
+
 struct MiniSurface {
     window: Window,
     webview: wry::WebView,
     hwnd: HWND,
-    cover: Arc<std::sync::Mutex<Option<(u64, Vec<u8>, String)>>>,
 }
 
 struct App {
@@ -454,9 +456,12 @@ struct App {
     mini_drag_offset: Option<(i32, i32)>,
     /// 小窗封面版本号：协议闭包按版本号回图，页面用 ?v= 破缓存。
     mini_cover_version: u64,
+    mini_cover: MiniCover,
     /// 桌宠素材目录的签名（文件名+大小+mtime 哈希）。变化即触发热重载。
     mini_skin_signature: Option<u64>,
     mini_runtime: MiniRuntime,
+    mini_context_menu: Option<Menu>,
+    mini_restore_pending: Option<MiniRestoreRequest>,
     proxy: EventLoopProxy<UserEvent>,
 }
 
@@ -468,6 +473,12 @@ struct MiniRuntime {
     visible: Arc<AtomicBool>,
     /// 轮询间隔提示（毫秒）。组件侧按相位/播放态更新，线程每拍读取。
     poll_hint_ms: Arc<AtomicU64>,
+}
+
+struct MiniRestoreRequest {
+    started: Instant,
+    cancelled: Arc<AtomicBool>,
+    ready: bool,
 }
 
 impl App {
@@ -853,8 +864,12 @@ impl App {
                 return;
             };
             let window_dpi = native::window_dpi(surface.hwnd()).max(1);
-            let zoom_changed = (f64::from(monitor.dpi) / f64::from(window_dpi) - surface.zoom).abs() > 0.001;
-            (monitor_geometry_changed(&surface.monitor, &monitor), zoom_changed)
+            let zoom_changed =
+                (f64::from(monitor.dpi) / f64::from(window_dpi) - surface.zoom).abs() > 0.001;
+            (
+                monitor_geometry_changed(&surface.monitor, &monitor),
+                zoom_changed,
+            )
         };
         if !geometry_changed && !zoom_changed {
             return;
@@ -1050,7 +1065,12 @@ impl App {
         match resolved
             .ok_or_else(|| anyhow::anyhow!("目标显示器未连接，请在设置中重新认领"))
             .and_then(|monitor| {
-                create_wallpaper(target, self.proxy.clone(), self.wallpaper_generation, monitor)
+                create_wallpaper(
+                    target,
+                    self.proxy.clone(),
+                    self.wallpaper_generation,
+                    monitor,
+                )
             }) {
             Ok(surface) => {
                 self.wallpaper = Some(surface);
@@ -1441,7 +1461,10 @@ impl App {
         }
     }
 
-    fn ensure_wallpaper_surface(&mut self, target: &EventLoopWindowTarget<UserEvent>) -> Result<()> {
+    fn ensure_wallpaper_surface(
+        &mut self,
+        target: &EventLoopWindowTarget<UserEvent>,
+    ) -> Result<()> {
         let monitors = native::wallpaper_monitors();
         if monitors.is_empty() {
             bail!("显示器拓扑暂时为空，请稍后重试");
@@ -1528,6 +1551,7 @@ impl App {
         self.close_preview();
         self.profile = profile;
         self.source_generation = next_generation;
+        self.restart_mini_source(target);
         self.dbx = None;
         self.dbx_session = None;
         self.source_health = crate::management::SourceHealth::default();
@@ -1656,10 +1680,7 @@ impl App {
                 self.wallpaper_apply_error = None;
                 self.ensure_wallpaper_feed();
                 if let Some(surface) = self.wallpaper.as_ref() {
-                    surface.apply_config(
-                        &self.config.wallpaper,
-                        surface.monitor.refresh_hz,
-                    );
+                    surface.apply_config(&self.config.wallpaper, surface.monitor.refresh_hz);
                     if self.wallpaper_page_ready {
                         if let Some(snapshot) = self.wallpaper_last.as_ref() {
                             surface.apply_feed(snapshot);
@@ -2082,12 +2103,101 @@ impl App {
         }
     }
 
+    fn restart_mini_source(&mut self, target: &EventLoopWindowTarget<UserEvent>) {
+        self.mini_runtime.stop.store(true, Ordering::Relaxed);
+        if let Some(hwnd) = self.mini_hwnd() {
+            native::hide(hwnd);
+        }
+        self.mini_runtime = MiniRuntime::default();
+        self.cancel_mini_restore();
+        self.mini_last_snapshot = None;
+        self.mini_feed_logged = false;
+        self.mini_drag_offset = None;
+        let pet_size = self.mini_host.pet_size;
+        self.mini_host = MiniHost::new(self.profile.clone());
+        self.mini_host.pet_size = pet_size;
+        let config = &self.config.mini;
+        self.mini_host.pet = config.pet;
+        self.mini_host.locked = config.locked;
+        self.mini_host.always_on_top = config.always_on_top;
+        self.mini_host.auto_on_main_hidden = config.auto_on_main_hidden;
+        self.mini_host.geometry = config.geometry.clone();
+        self.mini_host.scale = config.scale;
+        *self.mini_cover.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        self.mini_eval("window.hertzMini && window.hertzMini.resetInteraction();");
+        self.mini_send_snapshot();
+        self.mini_send_cover();
+        self.mini_send_config();
+        if !config::is_dbx(&self.profile) {
+            spawn_mini_feed(
+                self.profile.clone(),
+                self.proxy.clone(),
+                self.source_generation,
+                self.mini_runtime.clone(),
+            );
+            if self.config.mini.reopen {
+                let action = self
+                    .mini_host
+                    .handle(MiniEvent::Enter(crate::mini::EnterReason::Restored));
+                self.apply_mini_action(action, target);
+            }
+        }
+    }
+
+    fn show_mini_context_menu(&mut self) {
+        let Some(hwnd) = self.mini_hwnd() else { return };
+        let menu = Menu::new();
+        let restore = MenuItem::with_id("mini-context-restore", "回到主窗口", true, None);
+        let topmost = CheckMenuItem::with_id(
+            "mini-context-topmost",
+            "始终置顶",
+            true,
+            self.config.mini.always_on_top,
+            None,
+        );
+        let pet = CheckMenuItem::with_id(
+            "mini-context-pet",
+            "宠物形态",
+            true,
+            self.config.mini.pet,
+            None,
+        );
+        let edge = CheckMenuItem::with_id(
+            "mini-context-edge-hide",
+            "贴边隐藏",
+            true,
+            self.config.mini.edge_hide,
+            None,
+        );
+        let locked = CheckMenuItem::with_id(
+            "mini-context-lock",
+            "锁定位置",
+            self.tray.is_some(),
+            self.config.mini.locked,
+            None,
+        );
+        let quit = MenuItem::with_id("mini-context-quit", "关闭桌面宠物", true, None);
+        if let Err(error) = menu.append_items(&[
+            &restore,
+            &topmost,
+            &pet,
+            &edge,
+            &locked,
+            &PredefinedMenuItem::separator(),
+            &quit,
+        ]) {
+            log(&format!("mini context menu failed: {error}"));
+            return;
+        }
+        // 原生弹出菜单独立于 56px WebView 的裁切区；保留句柄直到菜单事件消费。
+        unsafe {
+            menu.show_context_menu_for_hwnd(hwnd as isize, None);
+        }
+        self.mini_context_menu = Some(menu);
+    }
+
     /// 状态机的动作落到窗口。mini.rs 只出意图，HWND 的活全在这。
-    fn apply_mini_action(
-        &mut self,
-        action: MiniAction,
-        target: &EventLoopWindowTarget<UserEvent>,
-    ) {
+    fn apply_mini_action(&mut self, action: MiniAction, target: &EventLoopWindowTarget<UserEvent>) {
         match action {
             MiniAction::None => {}
             MiniAction::Show => {
@@ -2104,6 +2214,7 @@ impl App {
                 }
             }
             MiniAction::Hide => {
+                self.cancel_mini_restore();
                 if let Some(hwnd) = self.mini_hwnd() {
                     native::hide(hwnd);
                 }
@@ -2120,11 +2231,6 @@ impl App {
                 self.mini_send_config();
             }
             MiniAction::NotifyRestore => {
-                // 相位已回 Hidden：窗口必须同时藏起来，否则用户「回到主窗口」
-                // 之后小窗还钉在原地（真机验证踩过）。
-                if let Some(hwnd) = self.mini_hwnd() {
-                    native::hide(hwnd);
-                }
                 self.mini_request_restore();
             }
         }
@@ -2136,13 +2242,14 @@ impl App {
         if self.mini.is_some() {
             return true;
         }
-        match create_mini(target, self.proxy.clone()) {
+        match create_mini(target, self.proxy.clone(), self.mini_cover.clone()) {
             Ok(surface) => {
                 // 必须在 WebView 建好之后再装命中处理：WebView2 的子窗那时才存在，
                 // 而它才是 WM_NCHITTEST 的第一到达点（设计 §6.2）。
                 mini_native::install(surface.hwnd);
                 self.mini = Some(surface);
                 self.mini_page_ready = false;
+                self.mini_skin_signature = self.pet_skin_signature();
                 true
             }
             Err(error) => {
@@ -2223,10 +2330,10 @@ impl App {
     }
 
     fn mini_send_cover(&self) {
-        let Some(mini) = self.mini.as_ref() else {
-            return;
-        };
-        let guard = mini.cover.lock().unwrap_or_else(|error| error.into_inner());
+        let guard = self
+            .mini_cover
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let script = match guard.as_ref() {
             // 相对 URL：页面实际跑在 http://hertz.localhost/（wry 的自定义协议
             // 映射），绝对 hertz:// 形式不匹配资源拦截过滤器，img 会静默失败。
@@ -2247,7 +2354,9 @@ impl App {
             .mini_last_snapshot
             .as_ref()
             .is_some_and(|snapshot| snapshot.playing);
-        let hint = if !visible {
+        let hint = if self.mini_restore_pending.is_some() {
+            250
+        } else if !visible {
             5000
         } else if playing {
             500
@@ -2271,7 +2380,7 @@ impl App {
         match result {
             Err(message) => {
                 // 同一条错误只记一次，别让 500ms 轮询刷爆日志。
-                if !std::mem::replace(&mut self.mini_feed_logged, true) {
+                if std::mem::replace(&mut self.mini_feed_logged, true) {
                     return;
                 }
                 log(&format!("mini feed: {message}"));
@@ -2284,26 +2393,58 @@ impl App {
                     .map(|snapshot| snapshot.main.visible);
                 let visible_now = update.snapshot.main.visible;
                 // 主窗口回前台：自动接管的那次要收回去；主窗口藏了：到点自动接管。
-                if previous == Some(false) && visible_now {
+                if visible_now
+                    && self
+                        .mini_restore_pending
+                        .as_ref()
+                        .is_some_and(|request| request.ready)
+                    && native::main_browser_is_foreground(&update.snapshot.main.window_title)
+                {
+                    self.cancel_mini_restore();
+                    let action = self.mini_host.handle(MiniEvent::RestoreComplete);
+                    self.apply_mini_action(action, target);
+                    self.config.mini.reopen = false;
+                    self.schedule_save();
+                } else if previous == Some(false)
+                    && visible_now
+                    && self.mini_restore_pending.is_none()
+                {
                     let action = self.mini_host.handle(MiniEvent::MainVisible);
                     self.apply_mini_action(action, target);
-                } else if previous == Some(true) && !visible_now {
+                } else if !visible_now && previous != Some(false) {
                     let action = self
                         .mini_host
                         .handle(MiniEvent::Enter(crate::mini::EnterReason::MainHidden));
                     self.apply_mini_action(action, target);
                 }
+                let old_cover = self
+                    .mini_last_snapshot
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.track.as_ref())
+                    .and_then(|track| track.cover_key.as_ref());
+                let new_cover = update
+                    .snapshot
+                    .track
+                    .as_ref()
+                    .and_then(|track| track.cover_key.as_ref());
+                let cover_changed = old_cover != new_cover;
                 self.mini_last_snapshot = Some(update.snapshot);
                 self.mini_send_snapshot();
                 if let Some(bytes) = update.cover {
                     let mime = sniff_image_mime(&bytes).to_string();
-                    let Some(mini) = self.mini.as_ref() else {
-                        return;
-                    };
-                    let mut guard = mini.cover.lock().unwrap_or_else(|error| error.into_inner());
+                    let mut guard = self
+                        .mini_cover
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner());
                     self.mini_cover_version += 1;
                     *guard = Some((self.mini_cover_version, bytes, mime));
                     drop(guard);
+                    self.mini_send_cover();
+                } else if cover_changed {
+                    *self
+                        .mini_cover
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner()) = None;
                     self.mini_send_cover();
                 }
                 self.mini_sync_runtime();
@@ -2313,11 +2454,7 @@ impl App {
 
     /// 小窗页面的 IPC。与歌词页的 page_command 平行，互不复用：
     /// 命令集不同、容错策略不同（小窗卡住比崩掉好）。
-    fn mini_page_command(
-        &mut self,
-        body: &str,
-        target: &EventLoopWindowTarget<UserEvent>,
-    ) {
+    fn mini_page_command(&mut self, body: &str, target: &EventLoopWindowTarget<UserEvent>) {
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase")]
         struct Command {
@@ -2348,6 +2485,7 @@ impl App {
                 self.mini_page_ready = true;
                 self.mini_send_all();
             }
+            "context-menu" => self.show_mini_context_menu(),
             "hit-regions" => {
                 self.mini_host.set_hit_regions(command.regions.clone());
                 if let Some(hwnd) = self.mini_hwnd() {
@@ -2365,16 +2503,15 @@ impl App {
                 self.apply_mini_action(action, target);
                 if let Some(hwnd) = self.mini_hwnd() {
                     let proxy = self.proxy.clone();
+                    let generation = self.source_generation;
                     mini_native::begin_drag(hwnd, move |event| {
-                        let _ = proxy.send_event(UserEvent::MiniDrag(event));
+                        let _ = proxy.send_event(UserEvent::MiniDrag(generation, event));
                     });
                 }
             }
             "restore" => {
                 let action = self.mini_host.handle(MiniEvent::Restore);
                 self.apply_mini_action(action, target);
-                self.config.mini.reopen = false;
-                self.schedule_save();
                 self.sync_tray();
             }
             "control" => {
@@ -2387,6 +2524,7 @@ impl App {
             }
             "menu" => self.mini_menu(command.item.as_deref(), command.on, target),
             "quit" => {
+                self.cancel_mini_restore();
                 let action = self.mini_host.handle(MiniEvent::Quit);
                 self.apply_mini_action(action, target);
                 self.config.mini.reopen = false;
@@ -2427,12 +2565,11 @@ impl App {
             "restore" => {
                 let action = self.mini_host.handle(MiniEvent::Restore);
                 self.apply_mini_action(action, target);
-                self.config.mini.reopen = false;
-                self.schedule_save();
                 self.sync_tray();
                 return;
             }
             "quit" => {
+                self.cancel_mini_restore();
                 let action = self.mini_host.handle(MiniEvent::Quit);
                 self.apply_mini_action(action, target);
                 self.config.mini.reopen = false;
@@ -2491,16 +2628,26 @@ impl App {
         });
         let profile = self.profile.clone();
         let proxy = self.proxy.clone();
+        let generation = self.source_generation;
         std::thread::spawn(move || {
             let result = crate::mini_feed::MiniFeed::new(profile)
                 .and_then(|feed| feed.control(&payload))
                 .map_err(|error| format!("{error:#}"));
-            let _ = proxy.send_event(UserEvent::MiniControl(result));
+            let _ = proxy.send_event(UserEvent::MiniControl(generation, result));
         });
     }
 
-    /// 小窗请求回主窗口：服务端广播 expand-capsule，主界面那条 WS 解除最小化。
+    fn cancel_mini_restore(&mut self) {
+        if let Some(request) = self.mini_restore_pending.take() {
+            request.cancelled.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// 广播 DOM 展开并恢复浏览器；实际可见且在前台后才收起小窗。
     fn mini_request_restore(&mut self) {
+        if self.mini_restore_pending.is_some() {
+            return;
+        }
         let Some(snapshot) = self.mini_last_snapshot.as_ref() else {
             return;
         };
@@ -2510,11 +2657,42 @@ impl App {
         });
         let profile = self.profile.clone();
         let proxy = self.proxy.clone();
+        let generation = self.source_generation;
+        let title = snapshot.main.window_title.clone();
+        let stop = self.mini_runtime.stop.clone();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        self.mini_restore_pending = Some(MiniRestoreRequest {
+            started: Instant::now(),
+            cancelled: cancelled.clone(),
+            ready: false,
+        });
+        self.mini_runtime.poll_hint_ms.store(250, Ordering::Relaxed);
+        let restored = native::restore_main_browser(&title);
         std::thread::spawn(move || {
-            let result = crate::mini_feed::MiniFeed::new(profile)
-                .and_then(|feed| feed.control(&payload))
+            let result = crate::mini_feed::MiniFeed::new(profile.clone())
+                .and_then(|feed| {
+                    if stop.load(Ordering::Relaxed) || cancelled.load(Ordering::Relaxed) {
+                        bail!("恢复请求已取消");
+                    }
+                    feed.control(&payload)?;
+                    if stop.load(Ordering::Relaxed) || cancelled.load(Ordering::Relaxed) {
+                        bail!("恢复请求已取消");
+                    }
+                    if !restored {
+                        let discovery = crate::bridge::read_discovery(&profile)?;
+                        if stop.load(Ordering::Relaxed)
+                            || cancelled.load(Ordering::Relaxed)
+                            || discovery.server_instance_id.as_deref()
+                                != payload["session"].as_str()
+                        {
+                            bail!("播放来源已切换");
+                        }
+                        native::open_url(&format!("http://127.0.0.1:{}/", discovery.port))?;
+                    }
+                    Ok(())
+                })
                 .map_err(|error| format!("{error:#}"));
-            let _ = proxy.send_event(UserEvent::MiniControl(result));
+            let _ = proxy.send_event(UserEvent::MiniRestore(generation, cancelled, result));
         });
     }
 
@@ -2557,7 +2735,9 @@ impl App {
         let entries = std::fs::read_dir(config::base_dir().join("pet")).ok()?;
         let mut files: Vec<(String, u64, u64)> = Vec::new();
         for entry in entries.flatten() {
-            let Ok(metadata) = entry.metadata() else { continue };
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
             if !metadata.is_file() {
                 continue;
             }
@@ -2567,7 +2747,11 @@ impl App {
                 .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
                 .map(|duration| duration.as_nanos() as u64)
                 .unwrap_or(0);
-            files.push((entry.file_name().to_string_lossy().into_owned(), metadata.len(), modified));
+            files.push((
+                entry.file_name().to_string_lossy().into_owned(),
+                metadata.len(),
+                modified,
+            ));
         }
         files.sort();
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -2805,6 +2989,17 @@ impl App {
     }
 
     fn handle_menu(&mut self, id: &str, target: &EventLoopWindowTarget<UserEvent>) {
+        if let Some(item) = id.strip_prefix("mini-context-") {
+            let on = match item {
+                "topmost" => Some(!self.config.mini.always_on_top),
+                "pet" => Some(!self.config.mini.pet),
+                "edge-hide" => Some(!self.config.mini.edge_hide),
+                "lock" => Some(!self.config.mini.locked),
+                _ => None,
+            };
+            self.mini_menu(Some(item), on, target);
+            return;
+        }
         let Some(actions) = self.tray_actions.as_ref() else {
             return;
         };
@@ -3010,10 +3205,7 @@ impl App {
             }
             "open-pet-assets" => {
                 if config::is_dbx(&self.profile) {
-                    return pipe_error_detail(
-                        "unsupported_source",
-                        "DBX 形态没有桌面宠物素材目录",
-                    );
+                    return pipe_error_detail("unsupported_source", "DBX 形态没有桌面宠物素材目录");
                 }
                 self.open_pet_assets();
             }
@@ -3424,15 +3616,21 @@ impl App {
         if self.mini.is_some() {
             let signature = self.pet_skin_signature();
             if signature != self.mini_skin_signature {
-                let first_observation = self.mini_skin_signature.is_none();
                 self.mini_skin_signature = signature;
-                if !first_observation {
-                    log("pet skin changed; reloading");
-                    self.mini_eval(
+                log("pet skin changed; reloading");
+                self.mini_eval(
                         "window.hertzMini && window.hertzMini.reloadSkin && window.hertzMini.reloadSkin();",
                     );
-                }
             }
+        }
+        if self
+            .mini_restore_pending
+            .as_ref()
+            .is_some_and(|request| request.started.elapsed() > Duration::from_secs(12))
+        {
+            self.cancel_mini_restore();
+            self.mini_eval("window.hertzMini && window.hertzMini.flash('主窗口尚未返回，请重试');");
+            self.mini_sync_runtime();
         }
         let now = Instant::now();
         if self
@@ -4006,8 +4204,11 @@ pub(crate) fn run() -> Result<()> {
         mini_feed_logged: false,
         mini_drag_offset: None,
         mini_cover_version: 0,
+        mini_cover: Arc::new(std::sync::Mutex::new(None)),
         mini_skin_signature: None,
         mini_runtime: MiniRuntime::default(),
+        mini_context_menu: None,
+        mini_restore_pending: None,
         proxy: proxy.clone(),
     };
     app.policy.locked = app.config.lyrics.locked;
@@ -4020,6 +4221,7 @@ pub(crate) fn run() -> Result<()> {
         host.always_on_top = mini.always_on_top;
         host.auto_on_main_hidden = mini.auto_on_main_hidden;
         host.geometry = mini.geometry.clone();
+        host.scale = mini.scale;
     }
     match app.build_tray() {
         Ok((tray, actions)) => {
@@ -4061,7 +4263,12 @@ pub(crate) fn run() -> Result<()> {
             app.lyrics_feed_stop.clone(),
         );
         // 小窗来源线程：常驻轮询，事件侧按相位/播放态调节奏。
-        spawn_mini_feed(app.profile.clone(), proxy.clone(), app.mini_runtime.clone());
+        spawn_mini_feed(
+            app.profile.clone(),
+            proxy.clone(),
+            app.source_generation,
+            app.mini_runtime.clone(),
+        );
         // 上次退出时小窗还开着 → 这次启动直接恢复。
         if app.config.mini.reopen {
             let action = app.mini_host.handle(MiniEvent::Enter(crate::mini::EnterReason::Restored));
@@ -4133,11 +4340,17 @@ pub(crate) fn run() -> Result<()> {
             Event::UserEvent(UserEvent::SettingsPage(body)) => {
                 app.handle_settings_page(&body, target)
             }
-            Event::UserEvent(UserEvent::MiniFeed(started, result)) => {
-                app.handle_mini_feed(started, *result, target)
+            Event::UserEvent(UserEvent::MiniFeed(generation, started, result)) => {
+                if generation == app.source_generation {
+                    app.handle_mini_feed(started, *result, target);
+                }
             }
-            Event::UserEvent(UserEvent::MiniPosition(ms)) => app.mini_send_position(ms),
-            Event::UserEvent(UserEvent::MiniDrag(event)) => match event {
+            Event::UserEvent(UserEvent::MiniPosition(generation, ms)) => {
+                if generation == app.source_generation { app.mini_send_position(ms); }
+            }
+            Event::UserEvent(UserEvent::MiniDrag(generation, event)) => {
+                if generation != app.source_generation { return; }
+                match event {
                 DragEvent::Move(x, y) => app.mini_drag_move(x, y),
                 DragEvent::End => {
                     let action = app.mini_host.handle(MiniEvent::DragEnd);
@@ -4145,12 +4358,26 @@ pub(crate) fn run() -> Result<()> {
                     app.mini_save_geometry();
                     app.mini_send_config();
                 }
+                }
             },
             Event::UserEvent(UserEvent::MiniPage(body)) => app.mini_page_command(&body, target),
-            Event::UserEvent(UserEvent::MiniControl(result)) => {
+            Event::UserEvent(UserEvent::MiniControl(generation, result)) => {
+                if generation != app.source_generation { return; }
                 if let Err(message) = result.as_ref() {
                     log(&format!("mini control failed: {message}"));
                     app.mini_eval("window.hertzMini && window.hertzMini.flash('操作未完成，请重试');");
+                }
+            }
+            Event::UserEvent(UserEvent::MiniRestore(generation, cancelled, result)) => {
+                if generation != app.source_generation { return; }
+                if !app.mini_restore_pending.as_ref().is_some_and(|request| Arc::ptr_eq(&request.cancelled, &cancelled)) { return; }
+                if let Err(message) = result {
+                    log(&format!("mini restore failed: {message}"));
+                    app.cancel_mini_restore();
+                    app.mini_eval("window.hertzMini && window.hertzMini.flash('主窗口未能恢复，请重试');");
+                    app.mini_sync_runtime();
+                } else if let Some(request) = app.mini_restore_pending.as_mut() {
+                    request.ready = true;
                 }
             }
             Event::UserEvent(UserEvent::Tick) => app.tick(target),
@@ -4515,6 +4742,10 @@ fn create_wallpaper(
         })
         .build(&window)
         .map_err(|error| anyhow::anyhow!("创建壁纸 WebView 失败：{error}"))?;
+    // 媒体拦截：wallpaper.invalid 保留域 → 本机 IStream（§8.1）。
+    if let Err(error) = crate::wallpaper::webresource::install(&webview) {
+        log(&format!("wallpaper media interceptor: {error}"));
+    }
     if (zoom - 1.0).abs() > 0.001 {
         webview
             .zoom(zoom)
@@ -4866,6 +5097,7 @@ const PET_ASSETS_README: &str = r#"Hertz 桌面宠物 · 素材约定
 fn create_mini(
     target: &EventLoopWindowTarget<UserEvent>,
     proxy: EventLoopProxy<UserEvent>,
+    cover: MiniCover,
 ) -> Result<MiniSurface> {
     let icon = window_icon()?;
     let window = WindowBuilder::new()
@@ -4882,8 +5114,6 @@ fn create_mini(
         .build(target)?;
     let hwnd = window.hwnd() as HWND;
     let page = mini_page_html().into_bytes();
-    let cover: Arc<std::sync::Mutex<Option<(u64, Vec<u8>, String)>>> =
-        Arc::new(std::sync::Mutex::new(None));
     let cover_in_handler = Arc::clone(&cover);
     let page_proxy = proxy.clone();
     let webview = WebViewBuilder::new()
@@ -4906,7 +5136,6 @@ fn create_mini(
         window,
         webview,
         hwnd,
-        cover,
     })
 }
 
@@ -4915,7 +5144,7 @@ fn create_mini(
 fn mini_protocol_response(
     page: &[u8],
     path: &str,
-    cover: &Arc<std::sync::Mutex<Option<(u64, Vec<u8>, String)>>>,
+    cover: &MiniCover,
 ) -> Response<Cow<'static, [u8]>> {
     if path == MINI_PAGE_PATH {
         return Response::builder()
@@ -4960,10 +5189,11 @@ fn mini_skin_file(name: Option<&str>) -> Option<(Vec<u8>, &'static str)> {
     if name.is_empty() || name.len() > 96 || name.contains("..") {
         return None;
     }
-    if !name
-        .chars()
-        .all(|character| character.is_ascii_lowercase() || character.is_ascii_digit() || matches!(character, '-' | '_' | '.'))
-    {
+    if !name.chars().all(|character| {
+        character.is_ascii_lowercase()
+            || character.is_ascii_digit()
+            || matches!(character, '-' | '_' | '.')
+    }) {
         return None;
     }
     let mime = match name.rsplit('.').next()? {
@@ -4996,7 +5226,12 @@ fn sniff_image_mime(bytes: &[u8]) -> &'static str {
 
 /// 小窗来源线程：轮询快照 + 播放中 4Hz 推位置。节奏由事件侧通过共享量调节，
 /// 线程自己不认识相位（与歌词 feed 的 generation 模式同源）。
-fn spawn_mini_feed(profile: Profile, proxy: EventLoopProxy<UserEvent>, runtime: MiniRuntime) {
+fn spawn_mini_feed(
+    profile: Profile,
+    proxy: EventLoopProxy<UserEvent>,
+    generation: u64,
+    runtime: MiniRuntime,
+) {
     std::thread::Builder::new()
         .name("hertz-mini-feed".into())
         .spawn(move || {
@@ -5014,7 +5249,7 @@ fn spawn_mini_feed(profile: Profile, proxy: EventLoopProxy<UserEvent>, runtime: 
                 let started = Instant::now();
                 let result = feed.poll().map_err(|error| format!("{error:#}"));
                 if proxy
-                    .send_event(UserEvent::MiniFeed(started, Box::new(result)))
+                    .send_event(UserEvent::MiniFeed(generation, started, Box::new(result)))
                     .is_err()
                 {
                     break;
@@ -5030,7 +5265,10 @@ fn spawn_mini_feed(profile: Profile, proxy: EventLoopProxy<UserEvent>, runtime: 
                     // 播放中的位置由组件侧呈现时钟推 4Hz，页面不做二次插值。
                     if runtime.visible.load(Ordering::Relaxed) && feed.clock().playing() {
                         let ms = feed.clock().now_ms();
-                        if proxy.send_event(UserEvent::MiniPosition(ms)).is_err() {
+                        if proxy
+                            .send_event(UserEvent::MiniPosition(generation, ms))
+                            .is_err()
+                        {
                             return;
                         }
                     }

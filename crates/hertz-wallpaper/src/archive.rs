@@ -22,11 +22,14 @@ use crate::{
 };
 
 /// 校验通过的条目（路径为校验后的规范形式）。收据序列化复用该类型。
+/// mime 由 manifest files 行填入；旧收据缺省为 None（serde default 兼容）。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct VerifiedEntry {
     pub path: String,
     pub bytes: u64,
     pub sha256: String,
+    #[serde(default)]
+    pub mime: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -201,6 +204,7 @@ fn validate_archive_in_place<R: std::io::Read + std::io::Seek>(
             ));
         }
         verified.push(VerifiedEntry {
+            mime: Some(declared_entry.mime.clone()),
             path: name,
             bytes: actual,
             sha256: digest,

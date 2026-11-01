@@ -9,6 +9,7 @@
 //! 原路径；已安装作品永不重新打开用户源文件。
 
 use std::io::Read;
+use std::sync::Arc;
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
@@ -296,6 +297,11 @@ impl AssetStore {
             }
         }
         Ok(Some(receipt))
+    }
+
+    /// 进程级媒体流槽池（§8.1 总并发 8）。
+    pub(crate) fn stream_pool(&self) -> &'static Arc<super::media_stream::StreamSlotPool> {
+        super::media_stream::global_pool()
     }
 
     /// packages/ 下的全部 hash 目录名。

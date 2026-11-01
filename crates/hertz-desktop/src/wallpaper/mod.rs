@@ -16,6 +16,7 @@ pub(crate) mod jobs;
 pub(crate) mod media;
 #[allow(dead_code)]
 pub(crate) mod media_stream;
+pub(crate) mod webresource;
 #[allow(dead_code)]
 pub(crate) mod istream;
 #[allow(dead_code)]

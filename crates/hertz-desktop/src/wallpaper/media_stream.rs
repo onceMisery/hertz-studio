@@ -13,7 +13,7 @@
 //! GetDeferral 后台线程、响应组装）属 P1-03 的呈现切片，需要真实 WebView2
 //! 环境验证首帧/seek/句柄回收后接入；本模块的全部纯逻辑先被测试锁死。
 
-use std::io::{Read, Seek};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -220,6 +220,26 @@ impl MediaFileStream {
         Ok(())
     }
 
+    /// 定点读取（COM 流窗口用）：不维护自身游标，读多少由调用方的窗口管理。
+    pub fn read_at(&mut self, offset: u64, out: &mut [u8]) -> Result<usize, StreamError> {
+        if offset >= self.total || out.is_empty() {
+            return Ok(0);
+        }
+        self.file
+            .seek(SeekFrom::Start(offset))
+            .map_err(|error| StreamError {
+                code: "io",
+                message: format!("定位失败：{error}"),
+            })?;
+        let cap = out.len().min(MAX_READ_BYTES);
+        self.file
+            .read(&mut out[..cap])
+            .map_err(|error| StreamError {
+                code: "io",
+                message: format!("读取失败：{error}"),
+            })
+    }
+
     /// 有界读取：单次最多 1 MiB（§8.1）；EOF 只在真实读到末尾返回 0——
     /// 不返回伪 EOF（§8.1），调用方据此区分「到头」与「暂时无数据」。
     pub fn read_bounded(&mut self, out: &mut [u8]) -> Result<usize, StreamError> {
@@ -304,6 +324,12 @@ impl StreamSlotPool {
     pub fn active(&self) -> usize {
         self.active.load(Ordering::Relaxed)
     }
+}
+
+/// 进程级流池：总并发 8（§8.1「流总并发 8」是全桌面组件的总额度）。
+pub(crate) fn global_pool() -> &'static Arc<StreamSlotPool> {
+    static POOL: std::sync::OnceLock<Arc<StreamSlotPool>> = std::sync::OnceLock::new();
+    POOL.get_or_init(StreamSlotPool::new)
 }
 
 /// 持有的槽；Drop 归还（真实句柄关闭后才释放额度——§8.1「EOF 不等于对象
