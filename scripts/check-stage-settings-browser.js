@@ -76,12 +76,12 @@ async function main() {
     await page.locator('#s3d-settings-toggle').click();
     await page.waitForTimeout(200);
 
-    // 吸顶的「舞台设置」标题栏必须**盖得住**滚过的行。两档玻璃主题原来把它的底色
-    // 直接复用面板那层半透明玻璃（星落 12%、iOS 15%），指望 backdrop-filter 糊住
-    // 滑过去的行 —— 实测糊不住：整行文字透过标题叠成一片乱码（用户截图报的就是这个）。
+    // 吸顶的「舞台设置」标题栏必须**盖得住**滚过的行。星落这档玻璃原来把它的底色
+    // 直接复用面板那层 12% 半透明玻璃，指望 backdrop-filter 糊住滑过去的行 —— 实测糊不
+    // 住：整行文字透过标题叠成一片乱码（用户截图报的就是这个）。
     // 所以这里量两件事：① 确实有行滚到了标题底下（否则这条断言在量一个没发生的状态）；
     // ② 标题栏自身的有效不透明度 = 1。
-    for (const theme of ['starfall', 'ios']) {
+    for (const theme of ['starfall']) {
       await page.selectOption('#s3d-stage-theme', theme);
       await page.waitForTimeout(150);
       await page.evaluate(() => { document.getElementById('s3d-settings').scrollTop = 320; });

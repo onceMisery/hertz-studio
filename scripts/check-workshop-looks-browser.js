@@ -169,7 +169,7 @@ async function main() {
         CreativeStage.setInteract(true);
         Stage3D.configure({ scene: 'tunnel', sceneSource: which === 'creative' ? 'creative' : 'immersive',
           motion: .15, bloom: 1.4, reactivity: .4, lyrics: which === 'stanza', cruise: false, layout: 'sleeve', lyricSize: 1.4, lyricGlow: .9,
-          shelfMode: 'off', stageTheme: 'ios', stanzaVisual: which === 'creative' ? 'stage' : 'tempera', stanzaBg: 'solid',
+          shelfMode: 'off', stageTheme: 'starfall', stanzaVisual: which === 'creative' ? 'stage' : 'tempera', stanzaBg: 'solid',
           stanzaBgOpacity: .2, stanzaVignette: false, stanzaSubtitle: false, stanzaWallpaperDim: .7,
           stanzaWallpaper: otherWallpaper && otherWallpaper.id,
           classicTuning: { rotation: false, breathing: .2, spacing: 1.3 },

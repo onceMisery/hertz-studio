@@ -3,6 +3,18 @@
   "note": "check-* scripts that are deliberate manual/browser/diagnostic entry points. New unregistered check-* files fail scripts/check-scripts.js until they are either registered in check-frontend.js / a workflow or added here.",
   "scripts": [
     {
+      "script": "check-stage-fluid-browser.js",
+      "purpose": "Real Stage/StageControl/WebGL pixels, pause, host boundaries, 20 resource cycles, partial GPU failures and opaque DBX storage hydration/failure. Requires Playwright and Chrome."
+    },
+    {
+      "script": "check-stage-fluid-app-browser.js",
+      "purpose": "Complete production UI and real service assets: 2D pixels, actual Stage3D/Space3D handoffs and hidden mobile drawer in standalone and controlled opaque DBX SDK fixture. --performance runs sixteen sequential 60s 1080p/4K samples with particles off/on; native DBX remains separate acceptance."
+    },
+    {
+      "script": "check-wallpaper-clock.js",
+      "purpose": "真实浏览器检查壁纸独立时钟、整数分频和外部时钟模式；需构建舞台产物并提供 Playwright。"
+    },
+    {
       "script": "check-search-queue-browser.js",
       "purpose": "隔离服务与受控音源响应，验证在线页、顶栏及空间搜索的单曲点播保留队列、去重和失败重试。"
     },
@@ -289,6 +301,10 @@
     {
       "script": "check-orbit-browser.js",
       "purpose": "浏览器手工验收（原文件未写说明）"
+    },
+    {
+      "script": "check-orbit-mobile-browser.js",
+      "purpose": "隔离服务与源码资源实测手机首页、侧边菜单、筛选、独立播放器及换肤清理。"
     },
     {
       "script": "check-perf-probe-browser.js",

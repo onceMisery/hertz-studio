@@ -3538,6 +3538,37 @@ button:focus-visible, [role="button"]:focus-visible,
 .iconbtn:active,
 .btn-pill:active { transition-duration: var(--dur-press); }
 
+/* ---------- 关闭键手感 ---------- */
+
+/* 全站 × 关闭键统一「悬停转 90°」：图标是叉，转一下是最轻量的「我响应你了」。
+   转 svg 而不是转按钮——各面板的 :hover 已经占了 translateY / scale，转按钮会和它们
+   抢同一个 transform。
+   认 #i-close 这个符号而不是逐个类名：抽屉、舞台、工坊、房间、列表行里的关闭键散在
+   五份样式表，按符号识别一条就够，以后新增的 × 键也不必再各写一份。
+   文本 × 的两处（目录、在线错误条）没有 svg 可转，只能连着原有的抬升一起转按钮。 */
+button:has(svg use[href="#i-close"]) svg {
+  transition: transform var(--dur-1, 160ms) var(--ease, ease);
+}
+button:has(svg use[href="#i-close"]):hover svg { transform: rotate(90deg); }
+#reader-outline-close:hover { transform: rotate(90deg); }
+#online-error-close:hover { transform: translateY(-1px) rotate(90deg); }
+
+/* 末尾那两段全局兜底只把 transition-duration 压到 0.01ms，transform 照样发生，
+   所以这里显式归零；body.reduce-motion 是应用内的同一个开关，两份都要写。 */
+@media (prefers-reduced-motion: reduce) {
+  button:has(svg use[href="#i-close"]) svg,
+  #reader-outline-close, #online-error-close { transition: none; }
+  button:has(svg use[href="#i-close"]):hover svg,
+  #reader-outline-close:hover { transform: none; }
+  #online-error-close:hover { transform: translateY(-1px); }
+}
+body.reduce-motion button:has(svg use[href="#i-close"]) svg,
+body.reduce-motion #reader-outline-close,
+body.reduce-motion #online-error-close { transition: none; }
+body.reduce-motion button:has(svg use[href="#i-close"]):hover svg,
+body.reduce-motion #reader-outline-close:hover { transform: none; }
+body.reduce-motion #online-error-close:hover { transform: translateY(-1px); }
+
 /* ---------- 键盘焦点兜底 ---------- */
 
 /* 整条选择器用 :where() 包住 → 特异性 0：只在"没有任何既有规则管过"的

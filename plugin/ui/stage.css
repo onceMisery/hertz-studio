@@ -219,6 +219,15 @@
 }
 .stage > * { position: relative; z-index: 1; }
 
+/* Local atmosphere sits above the existing backdrop and below readable content. */
+#stage > .stage-fluid-canvas {
+  position: absolute;
+  z-index: 0;
+  pointer-events: none;
+  user-select: none;
+  contain: strict;
+}
+
 /* --- 舞台头部：模式切换 + 播放列表入口 --- */
 .stage-head {
   margin-bottom: 4px;
@@ -1098,6 +1107,27 @@ body.reduce-motion .stage-ctl, body.reduce-motion .sc-cell { transition: none; }
   line-height: 1.6;
   color: var(--muted);
 }
+
+#sc-group-fluid[hidden], #sc-fluid-details[hidden], #sc-fluid-retry[hidden] { display: none; }
+#sc-group-fluid { gap: 10px; }
+#sc-group-fluid .sc-cell { background: transparent; border-color: transparent; padding-inline: 0; }
+#sc-group-fluid .sc-pill { min-height: 42px; border-radius: 8px; }
+#sc-group-fluid .sc-pill .dot { box-shadow: none; }
+#sc-group-fluid .sc-pill:active, .sc-fluid-retry:active { transform: scale(.98); }
+.sc-fluid-state { margin: 0; min-height: 1.6em; }
+.sc-fluid-retry {
+  justify-self: start;
+  padding: 5px 10px;
+  font: inherit;
+  font-size: 11px;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  cursor: pointer;
+}
+.sc-fluid-retry:hover { border-color: var(--line-strong); }
+.sc-fluid-retry:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 /* 真3D 语境：内容宿主与普通旋钮共用滚动行为；组间分隔改实线低透明 */
 .sc-body-3d[hidden] { display: none; }

@@ -6,7 +6,7 @@
   "tools/coast-stage/src/util.js": "fdc229b45eab86ae",
   "tools/coast-stage/src/world.js": "540b9f1671e4d3d4",
   "tools/zodiac-stage/src/figures.js": "bc4f6beb7e427732",
-  "tools/zodiac-stage/src/main.js": "8dfffb2a4bf36a03",
+  "tools/zodiac-stage/src/main.js": "72b2e9281f797ed4",
   "tools/zodiac-stage/src/util.js": "e066cbb68951890f",
   "tools/zodiac-stage/src/world.js": "5ce8dd538aec503c",
   "tools/zodiac-stage/src/zodiac.js": "0b39aab04c8e2709",
@@ -43,7 +43,7 @@
   "tools/space-stage/build.mjs": "d39520881a300a9f",
   "tools/space-stage/package.json": "1bd3a6c25b6a8da4",
   "tools/space-stage/package-lock.json": "94c5de1152fe6760",
-  "plugin/ui/vendor/stage-runtime.js": "336085ccad841efd",
+  "plugin/ui/vendor/stage-runtime.js": "80e110e667a9b8db",
   "plugin/ui/vendor/coast-stage.js": "71879224fd5044f8",
   "plugin/ui/vendor/zodiac-stage.js": "001209d751bc8a9c",
   "plugin/ui/vendor/space-stage.js": "9d0991ceebb27dd3"

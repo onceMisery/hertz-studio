@@ -46,6 +46,11 @@ Three.js 继续独占三维背景；商籁/凝彩按需创建一个 Pixi 上下�
 
 JS/CSS 由一份显式宏清单同时生成内嵌内容、HTTP 路由与指纹输入。HTML 保留加载顺序与原鉴权；图片保留原二进制响应规则。保存键、ID、分享 v1 和 HTTP/RPC 信封不变。
 
+2026-11-01 二维流体增强：StageControl 在原二维偏好 schema 中持有独立的本机开关，StageFluid 只持有
+一个可选二维 WebGL 上下文，与三维／创意宿主互斥；不新增通用效果 registry，不接管其它 renderer。
+Canvas UI 派生 solver 作为应用内部独立产物，保留 MIT + Commons Clause 与完整署名，不能并入标为
+纯 MIT 的共享 runtime。来源、构建、支持范围及验证边界见 `docs/stage-fluid-enhancement.md`。
+
 DBX 最低宿主版本以真实验收为准，当前为 0.6.35：0.6.29 的样式内联丢失皮肤标记，
 0.6.35 保留标记并通过六套皮肤正反切换。中间版本未逐个验收，不推断最早修复版本；
 不在皮肤注册表中解析 CSS 来补偿宿主丢弃的属性。事件连接仍由 transport 持有，

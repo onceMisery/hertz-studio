@@ -931,8 +931,8 @@
   var lyricView = null, layout = 'focus', lyricSize = 1, lyricGlow = .45;
   // 舞台主题：只管沉浸舞台操作层的观感（见 stage-themes/）。与皮肤正交——
   // 皮肤换整个应用的布局，舞台主题换舞台 chrome，两者可任意组合。
-  // 默认星落：classic 那一档已经从「设置风格」里删掉了（它是没有主题层的裸样式，
-  // 面板头部压不住滚过的行），存过 classic 的偏好走下面的白名单校验自然回落。
+  // 默认星落，也是仅剩的一档：classic（没有主题层的裸样式，面板头部压不住滚过的行）
+  // 和 iOS 都已从「设置风格」里删掉，存过它们的偏好走下面的白名单校验自然回落。
   var stageTheme = 'starfall';
 
   function reducedMotion() {
@@ -2284,7 +2284,7 @@
         if (stanza.director.setTransitionLock) stanza.director.setTransitionLock(stanza.autoLock);
         if (stanza.director.setAvoidRepeat) stanza.director.setAvoidRepeat(stanza.autoAvoidRepeat);
       }
-      if (value.stageTheme === 'starfall' || value.stageTheme === 'ios') stageTheme = value.stageTheme;
+      if (value.stageTheme === 'starfall') stageTheme = value.stageTheme;
       if (typeof value.lyricSize === 'number') lyricSize = clamp(value.lyricSize, 0.7, 1.5);
       if (typeof value.lyricGlow === 'number') lyricGlow = clamp(value.lyricGlow, 0, 1);
       if (value.shelfMode === 'off' || value.shelfMode === 'stage' || value.shelfMode === 'side') {
@@ -4020,7 +4020,7 @@
     sel._bound = true;
     sel.value = stageTheme;
     sel.addEventListener('change', function () {
-      stageTheme = sel.value === 'ios' ? 'ios' : 'starfall';
+      stageTheme = sel.value;
       syncLayout();
       savePreferences();
     });

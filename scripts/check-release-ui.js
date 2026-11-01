@@ -23,7 +23,11 @@ try {
   fs.writeFileSync(path.join(temp, 'first.js'), '// SPDX-License-Identifier: MIT\n// Copyright Fixture Author\nvar PublicAPI = { answer: 42 };\nlet sharedLexical = 7;\n');
   fs.writeFileSync(path.join(temp, 'second.js'), 'window.result = PublicAPI.answer + sharedLexical;\n');
   fs.writeFileSync(path.join(temp, 'style.css'), '/* layout */\nbody { color: rgb(255, 0, 0); --custom-value: 12; }');
+  fs.copyFileSync(path.join(source, 'vendor/stage-fluid.js'), path.join(temp, 'stage-fluid.js'));
   minifyUi(temp);
+  const fluid = fs.readFileSync(path.join(temp, 'stage-fluid.js'), 'utf8');
+  const fluidLicense = fs.readFileSync(path.join(root, 'tools/stage-fluid/LICENSE.md'), 'utf8').trim();
+  assert.ok(fluid.replace(/^ \* ?/gm, '').includes(fluidLicense), 'Complete Canvas UI terms survive release minification');
   assert.match(fs.readFileSync(path.join(temp, 'first.js'), 'utf8'), /Copyright Fixture Author/, 'Ordinary legal notice survives release minification');
   const sandbox = { window: {} };
   vm.createContext(sandbox);

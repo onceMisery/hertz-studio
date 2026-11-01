@@ -581,6 +581,7 @@
     // 冻结在最后一帧的后果是"暂停后画面还跟着并不存在的音乐抖"。
     var fresh = !!(sp && sp.length) && lastSpectrumAt > 0 && (nowMs() - lastSpectrumAt < 600);
     onset.step(dtMs, fresh ? sp : SILENCE, nowMs());
+    feat.sampledAt = nowMs();
 
     if (!opts.dust) { renderer.clear(v); return; }
     renderer.draw(v, {
@@ -734,4 +735,6 @@
   };
 
   window.StageParticles = api;
+  // Borrow the existing detector output without allocating another analyzer.
+  api.audioFeatures = function () { return feat; };
 })();

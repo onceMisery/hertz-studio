@@ -40,7 +40,7 @@ async function main() {
       </aside>
       <div id="s3d-settings" hidden></div><button id="s3d-queue" style="position:absolute;left:50%;bottom:0">播放队列</button>
     </main><div id="queue-list"></div><span id="queue-count"></span><span id="queue-badge"></span><button id="playpause"></button>`);
-    for (const file of ['style.css', 'stage3d.css', 'stage-themes/starfall.css', 'stage-themes/ios.css']) {
+    for (const file of ['style.css', 'stage3d.css', 'stage-themes/starfall.css']) {
       await page.addStyleTag({ content: read(file) });
     }
     await page.addScriptTag({ content: `
@@ -158,7 +158,7 @@ async function main() {
         ]) {
           await page.setViewportSize(viewport);
           for (const scene of ['silk', 'orb']) {
-            for (const theme of ['classic', 'starfall', 'ios']) {
+            for (const theme of ['classic', 'starfall']) {
               await page.evaluate(({ scene, theme }) => {
                 root.dataset.scene = scene; root.dataset.stageTheme = theme;
                 installQueue(fixture, 0); setQueuePanel(true);

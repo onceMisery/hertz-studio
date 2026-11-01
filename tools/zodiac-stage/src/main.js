@@ -352,10 +352,12 @@ export function setMotion(frame = {}) {
 }
 
 // 外部时钟入口：external 模式下由宿主按自己的帧门调用；一次调用 = 一次真实提交。
-export function render(now) {
+export function render(now, dynamicDt, uiDt) {
   if (!st || !st.external) return false;
   const stamp = Number.isFinite(Number(now)) ? Number(now) : performance.now();
-  updateStage(st, stamp);
+  updateStage(st, stamp,
+    Number.isFinite(dynamicDt) ? Math.max(0, Math.min(dynamicDt, .1)) : undefined,
+    Number.isFinite(uiDt) ? Math.max(0, Math.min(uiDt, .1)) : undefined);
   st.renderer.info.reset();
   st.renderer.render(st.scene, st.camera);
   return true;

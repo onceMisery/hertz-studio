@@ -44,6 +44,10 @@ const SYNTAX_SKIP = new Set(['vendor']);
 // why 字段就是原来贴在 ci.yml 里的判断依据：它解释的是「这条失败意味着什么」，
 // 挪到脚本里才不会和 workflow 的 YAML 缩进互相拖累。
 const STEPS = [
+  { script: 'check-desktop-mini-assets.js', stage: 'behavior',
+    why: '桌宠编号帧、解码兜底、同名热重载、动画与原生菜单 IPC 必须保持可用。' },
+  { script: 'check-desktop-mini-visibility.js', stage: 'behavior',
+    why: '桌宠主窗初始可见性、标题变化与独立版上报边界必须保持一致。' },
   { script: 'check-room-ui.js', stage: 'behavior',
     why: '房间聊天分页、未知写结果和旧会话响应不能重复发送或覆盖新房间。' },
   { script: 'check-audio-errors.js', stage: 'behavior',
@@ -124,6 +128,8 @@ const STEPS = [
     why: '集合详情的三态/分页/筛选：按钮只承诺已加载那一段，未取全不许写「播放全部」。' },
   { script: 'check-stage-control.js', stage: 'behavior',
     why: '舞台控制舱：每个旋钮都得有真实消费方，参数搜索与调参撤销在 vm 沙箱里真跑。' },
+  { script: 'check-stage-fluid.js', stage: 'guard',
+    why: '流体的完整上游许可、独立产物、无自主时钟、档位预算及独立版/插件资源登记。' },
   { script: 'check-stage-settings.js', stage: 'behavior',
     why: '歌词模式、背景与设备能力共同决定设置是否生效，切换不能丢失原偏好。' },
   { script: 'check-stage-backgrounds.js', stage: 'behavior',
@@ -174,6 +180,8 @@ const STEPS = [
 
 // CI 暂不跑、但本地值得随手跑的无浏览器检查。
 const EXTRA = [
+  { script: 'check-wallpaper-package.js', stage: 'behavior',
+    why: '壁纸包的真实 Rust 校验器必须拒绝损坏、越界及未声明资源。' },
   { script: 'check-playlist-views.js', why: '歌单的几种视图形态。' },
   { script: 'check-theme-studio.js', why: '主题工坊参数落盘。' },
   { script: 'check-stage-cinema.js', why: '电影镜头与自由相机。' },

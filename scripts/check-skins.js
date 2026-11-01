@@ -33,6 +33,8 @@ const LIUNIAN = read(path.join(SKINS, 'skin.liunian.css'));
 const QINGFENG = read(path.join(SKINS, 'skin.qingfeng.css'));
 const HEIJIAO = read(path.join(SKINS, 'skin.heijiao.css'));
 const HEIJIAO_JS = read(path.join(SKINS, 'skin.heijiao.js'));
+const ORBIT = read(path.join(SKINS, 'skin.orbit.css'));
+const ORBIT_JS = read(path.join(SKINS, 'skin.orbit.js'));
 const LIUNIAN_JS = read(path.join(SKINS, 'skin.liunian.js'));
 const QINGFENG_JS = read(path.join(SKINS, 'skin.qingfeng.js'));
 const SKINS_CSS = read(path.join(SKINS, 'skins.css'));
@@ -2632,6 +2634,60 @@ function checkLanFavoriteSourceDispatch() {
   ok(onlinePlays.at(-1).tracks.every(track => track.source !== 'lan' && !String(track.id).startsWith('online:lan:')), '旧虚拟 LAN 形式也无法混入在线集合');
 }
 
+function checkOrbitMobileNav() {
+  section('星轨：手机形态的底栏与「更多」弹层');
+
+  const orbitBody = ORBIT.replace(/\/\*[\s\S]*?\*\//g, '');
+  const orbitJs = ORBIT_JS.replace(/\/\*[\s\S]*?\*\//g, '');
+
+  // 只取手机形态那一段媒体查询：文件里还有 1400/1100/900/620 等断点，
+  // 跨块匹配会把别的断点当成手机规则（断言要函数级切片，别整文件正则）。
+  const mobileBlock = (orbitBody.match(/@media \(max-width: 767px\) \{[\s\S]*?\n\}/) || [])[0] || '';
+  ok(mobileBlock !== '', 'CSS 里有 767px 的手机形态断点');
+
+  // 断点必须与 JS 一致：JS 用 matchMedia('(max-width: 767px)') 判定手机形态，
+  // CSS 断点若不是同一个数字，弹层会在「开着却看不见导航」的宽度上变成孤儿。
+  const jsBreakpoint = (orbitJs.match(/matchMedia\('\(max-width:\s*(\d+)px\)'\)/) || [])[1];
+  ok(jsBreakpoint === '767', `JS 的手机断点是 767px（实测 ${jsBreakpoint}）`);
+  ok(mobileBlock !== '', 'CSS 的手机断点与 JS 同为 767px');
+
+  // 底栏必须是 .app 栅格的一行、不是 fixed：fixed 会盖住播放条，
+  // 而 .bar 是 .app 的兄弟节点，底栏在栅格里才是「主区下沿、播放条之上」。
+  const navRule = (mobileBlock.match(/\[data-skin="orbit"\] \.orbit-mobile-nav\s*\{[^}]*\}/) || [])[0] || '';
+  ok(/grid-column:\s*1/.test(navRule) && /grid-row:\s*2/.test(navRule),
+    '底栏认领栅格轨道（grid-column/grid-row），不靠源序碰运气');
+  ok(!/position:\s*fixed/.test(navRule), '底栏不是 fixed（fixed 会压住播放条）');
+
+  // rail 让位时必须显式收成单列：rail 一隐藏，后面的兄弟会顶到第一格，
+  // 三列的比例整个反过来（记忆里的双栏栅格纪律）。
+  const appRule = (mobileBlock.match(/\[data-skin="orbit"\] body \.app\s*\{[^}]*\}/) || [])[0] || '';
+  ok(/grid-template-columns:\s*minmax\(0,\s*1fr\)/.test(appRule),
+    'rail 让位后 .app 显式收成单列（否则兄弟顶到第一格，比例反转）');
+  ok(/grid-template-rows:[^;]*minmax\(0,\s*1fr\)[^;]*auto/.test(appRule),
+    '底栏独占自动高度的一行，主区吃掉剩余高度');
+
+  // 弹层必须用 [open] 限定显示规则：dialog 关闭时被 display 覆盖，
+  // showModal() 会造出一个看不见却仍拦截输入的模态（页面直接僵死）。
+  ok(/\[data-skin="orbit"\] \.orbit-more-sheet:not\(\[open\]\)\s*\{\s*display:\s*none/.test(orbitBody),
+    '「更多」弹层关闭时隐藏');
+  ok(/\[data-skin="orbit"\] \.orbit-more-sheet\[open\]\s*\{/.test(orbitBody),
+    '「更多」弹层的显示规则挂在 [open] 上（不会造出隐形模态）');
+
+  // 底栏四个入口由 JS 挂载，CSS 必须给够触控高度（44px 是移动端下限）。
+  const tabRule = (mobileBlock.match(/\[data-skin="orbit"\] \.orbit-mobile-tab\s*\{[^}]*\}/) || [])[0] || '';
+  ok(/min-height:\s*4[4-9]px|min-height:\s*5\dpx/.test(tabRule),
+    '底栏按钮触控高度不低于 44px');
+  ok(/\[data-skin="orbit"\] \.orbit-mobile-tab\[aria-current="page"\]/.test(orbitBody),
+    '底栏当前项有独立的选中态（aria-current）');
+
+  // 皮肤不重定义主题色变量（配色归 themes.js 管，与其它皮肤同一条纪律）。
+  ok(!/^\s*(--bg|--text|--accent|--muted|--brand|--highlight)\s*:/m.test(orbitBody),
+    '星轨不重定义主题色变量');
+  const orbitColors = Array.from(orbitBody.matchAll(/(?:^|[\s;}])color\s*:\s*([^;}]+)/g));
+  ok(orbitColors.every((m) => /^\s*var\(--/.test(m[1])),
+    '星轨的 color 只引用主题 token');
+}
+
 (function main() {
   checkLanFavoriteSourceDispatch();
   checkCatalog();
@@ -2651,6 +2707,7 @@ function checkLanFavoriteSourceDispatch() {
   checkQingfengWiring();
   checkChaoxiThemes();
   checkHeijiaoSkin();
+  checkOrbitMobileNav();
   checkSkinSwitchViewHandoff();
   checkStageNoHorizontalScroll();
   checkWiring();

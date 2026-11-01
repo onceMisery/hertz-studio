@@ -49,6 +49,20 @@
       ]
     },
     {
+      id: 'fluid',
+      title: '流体增强',
+      items: [
+        { key: 'fluidEnabled', label: '流体增强', type: 'toggle', def: false, wide: true, strict: true,
+          aliases: ['流体', '液态', '增强', 'fluid'] },
+        { key: 'fluidStrength', label: '强度', min: 0, max: 100, step: 1, unit: '%', def: 35, wide: true, strict: true,
+          aliases: ['流动', '浓度'] },
+        { key: 'fluidAudio', label: '跟随音乐', type: 'toggle', def: true, strict: true,
+          aliases: ['音频', '音乐响应'] },
+        { key: 'fluidPointer', label: '指针互动', type: 'toggle', def: true, strict: true,
+          aliases: ['鼠标', '互动'] }
+      ]
+    },
+    {
       id: 'lens',
       title: '镜头光学',
       items: [
@@ -223,11 +237,30 @@
     if (sub) sub.textContent = flat
       ? '调节舞台渲染、镜头与全局滤镜参数'
       : '实时调节三维舞台的来源、镜头与当前来源专属参数';
+    paintFluid();
+  }
+
+  function paintFluid() {
+    var section = $('sc-group-fluid');
+    if (!section) return;
+    var fluid = window.StageFluid;
+    section.hidden = !!(fluid && !fluid.supportsHost());
+    var details = $('sc-fluid-details');
+    if (details) details.hidden = !values.fluidEnabled;
+    var toggle = $('sc-fluid-fluidEnabled');
+    if (toggle) toggle.setAttribute('aria-expanded', String(!!values.fluidEnabled));
+    var status = $('sc-fluid-state'), retry = $('sc-fluid-retry');
+    var actual = fluid && fluid.status();
+    if (status) status.textContent = values.fluidEnabled
+      ? actual && actual.reason || '播放音乐或移动指针，感受封面周围的流动。'
+      : '在封面周围加入流动色彩，歌词保持清晰。';
+    if (retry) retry.hidden = !(values.fluidEnabled && actual && actual.retryable);
   }
 
   // 舞台切换时（进/出 Stage3D）语境跟着走：否则二维舱会悬在三维画面上，
   // 三维来源也会在二维首屏里出现。只认 class/aria 变化，不额外占帧循环。
   function followStage() {
+    paintFluid();
     var next = detectContext();
     if (next === context) return;
     context = next;
@@ -563,12 +596,14 @@
   function normalize(it, value) {
     if (it.options) return it.options.some(function (pair) { return pair[0] === value; }) ? value : undefined;
     if (it.type === 'toggle') {
+      if (it.strict && typeof value !== 'boolean') return undefined;
       if (value === true || value === 1 || value === 'true') return true;
       if (value === false || value === 0 || value === 'false') return false;
       return undefined;
     }
     if (it.type === 'color') return value === '' ? ''
       : typeof value === 'string' && /^#[0-9a-f]{6}$/i.test(value) ? value.toLowerCase() : undefined;
+    if (it.strict && typeof value !== 'number') return undefined;
     if ((typeof value !== 'number' && typeof value !== 'string')
         || (typeof value === 'string' && !value.trim())) return undefined;
     var number = Number(value);
@@ -728,6 +763,9 @@
 
   /// 把用户带到命中的那颗控件：滚动居中、聚焦、短暂高亮。
   function reveal(key) {
+    if (key.indexOf('fluid') === 0 && window.StageFluid && !StageFluid.supportsHost()) {
+      setStatus('此参数用于普通二维舞台。'); return;
+    }
     var box = els[key];
     if (!box || !box.cell || box.node.isConnected === false) {
       setStatus('此参数已移除，无法定位。');
@@ -829,7 +867,7 @@
         // 不再写一份无人读取的 --fx-global-intensity。
         if (g.id === 'global' && it.key === 'intensity') return;
         // cine 组只走事件，不写 --fx-cine-* 脏变量。
-        if (g.id === 'cine') return;
+        if (g.id === 'cine' || g.id === 'fluid') return;
         root.setProperty('--fx-' + g.id + '-' + it.key, String(v));
       });
       (g.selects || []).forEach(function (it) {
@@ -853,6 +891,7 @@
   }
 
   function emit() {
+    paintFluid();
     document.dispatchEvent(new CustomEvent('stagecontrol:change', {
       detail: JSON.parse(JSON.stringify(values))
     }));
@@ -1055,14 +1094,32 @@
 
       var grid = document.createElement('div');
       grid.className = 'sc-grid';
+      if (g.id === 'fluid') grid.id = 'sc-fluid-details';
       (g.items || []).forEach(function (it) {
-        grid.appendChild(it.type === 'color'
-          ? buildColor(g.id, it) : buildSlider(g.id, it));
+        var cell = it.type === 'color' ? buildColor(g.id, it) : buildSlider(g.id, it);
+        if (g.id === 'fluid' && it.key === 'fluidEnabled') {
+          sec.appendChild(cell);
+          var toggle = els[it.key].node;
+          toggle.setAttribute('aria-controls', 'sc-fluid-details');
+          toggle.setAttribute('aria-describedby', 'sc-fluid-state');
+        } else grid.appendChild(cell);
       });
       (g.selects || []).forEach(function (it) {
         grid.appendChild(buildSelect(g.id, it));
       });
       sec.appendChild(grid);
+
+      if (g.id === 'fluid') {
+        var status = document.createElement('p');
+        status.id = 'sc-fluid-state'; status.className = 'sc-note sc-fluid-state';
+        status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite');
+        sec.appendChild(status);
+        var retry = document.createElement('button');
+        retry.id = 'sc-fluid-retry'; retry.type = 'button'; retry.className = 'sc-fluid-retry';
+        retry.textContent = '重试'; retry.hidden = true;
+        retry.addEventListener('click', function () { if (window.StageFluid) StageFluid.retry(); });
+        sec.appendChild(retry);
+      }
 
       if (g.id === 'global') {
         var note = document.createElement('div');
@@ -1166,9 +1223,12 @@
     // 舞台进/出三维时语境自动跟随；舱没开时不必重组。
     var stageRoot = $('stage3d');
     if (stageRoot && typeof MutationObserver === 'function') {
-      new MutationObserver(function () {
+      var contextObserver = new MutationObserver(function () {
         if (open) followStage();
-      }).observe(stageRoot, { attributes: true, attributeFilter: ['class', 'aria-hidden'] });
+      });
+      contextObserver.observe(stageRoot, { attributes: true, attributeFilter: ['class', 'aria-hidden'] });
+      contextObserver.observe(document.body, { attributes: true, attributeFilter: ['class'] });
+      contextObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] });
     }
     // 三维舞台的偏好被别处改了（头部按钮 / 自带设置面板），开着舱就重织真3D 面。
     // 正在 3D 面板里拖控件时跳过——重织会掐断拖动。
@@ -1205,6 +1265,8 @@
     });
     if (window.addEventListener) window.addEventListener('blur', function () { endEdit(); });
 
+    document.addEventListener('stagefluid:state', paintFluid);
+    if (window.StageFluid) StageFluid.init();
     emit();
   }
 

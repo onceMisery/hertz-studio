@@ -27,7 +27,6 @@
      新层排在舞台基础层之后，同特异性争议整块胜出。 -->
 <link rel="stylesheet" href="stage-anime-svg.css">
 <link rel="stylesheet" href="stage-themes/starfall.css">
-<link rel="stylesheet" href="stage-themes/ios.css">
 <link rel="stylesheet" href="stanza/stanza.css">
 <link rel="stylesheet" href="emotion.css">
 <link rel="stylesheet" href="stanza/stanza-starborn.css">
@@ -2123,7 +2122,7 @@
       <label for="s3d-anime-mirror"><input id="s3d-anime-mirror" type="checkbox"> 镜像对称（左右两侧一致）</label>
     </div>
     <label for="s3d-stage-theme">舞台风格</label>
-    <select id="s3d-stage-theme"><option value="starfall">星落</option><option value="ios">iOS</option></select>
+    <select id="s3d-stage-theme"><option value="starfall">星落</option></select>
     <label for="s3d-shelf-mode">3D 歌单架</label>
     <select id="s3d-shelf-mode"><option value="stage">舞台封面流</option><option value="side">右侧歌单架</option><option value="off">关闭</option></select>
     <button class="sp-btn-line" id="s3d-workshop">进入创意工坊</button>
@@ -2502,6 +2501,9 @@
 <!-- 星河背景：星野 + 流动星河，与粒子封面同画布切换 -->
 <!-- 视觉子系统统一控制器：仅注册，初始化由 boot 经 VisualController.init() -->
 <script defer src="stage-control.js"></script>
+<!-- Optional fluid atmosphere: external Stage clock, local resources, default off. -->
+<script defer src="vendor/stage-fluid.js"></script>
+<script defer src="stage-fluid.js"></script>
 <script defer src="pl-covers.js"></script>
 <script defer src="shelf.js"></script>
 <!-- 主题工作室：注册二次元主题 + 铺壁纸背景层。依赖 themes.js 的 Theme.register，

@@ -27,8 +27,6 @@ const WEB = path.join(ROOT, 'plugin', 'ui');
 const read = (p) => fs.readFileSync(p, 'utf8').replace(/\r\n/g, '\n');
 
 const THEME = read(path.join(WEB, 'stage-themes', 'starfall.css'));
-// iOS 舞台主题：与星落同层的第二套，受同一批纪律约束（下面按主题逐个跑）。
-const THEME_IOS = read(path.join(WEB, 'stage-themes', 'ios.css'));
 const STAGE3D_CSS = read(path.join(WEB, 'stage3d.css'));
 const STAGE3D_JS = read(path.join(WEB, 'stage3d.js'));
 const SKINS_JS = read(path.join(WEB, 'skins', 'skins.js'));
@@ -173,97 +171,29 @@ ok(HTML.indexOf('href="stage3d.css"') < HTML.indexOf('href="stage-themes/starfal
 ok(/edition_ui!\("stage-themes\/starfall\.css"\)/.test(MAIN_RS), 'starfall.css 编进二进制');
 ok(/"\/stage-themes\/starfall\.css"/.test(MAIN_RS), 'main.rs 注册了 /stage-themes/starfall.css 路由');
 
-// ---------------------------------------------------------------------------
-// 5b. iOS 舞台主题：与星落同一批纪律
-// ---------------------------------------------------------------------------
+section('舞台风格只剩星落一档：classic 与 iOS 都已下架');
 
-section('iOS 舞台主题：配色纪律 / 作用域 / 与皮肤正交');
-
-const ioBody = THEME_IOS.replace(/\/\*[\s\S]*?\*\//g, '');
-const ioHex = ioBody.match(/#[0-9a-fA-F]{3,8}\b/g) || [];
-const ioRgb = ioBody.match(/\brgba?\(/g) || [];
-const ioNamed = ioBody.replace(/white-space|grey|gray/g, '')
-  .match(/\b(?:red|blue|green|white|black)\b/g) || [];
-ok(ioHex.length === 0, `ios 没有十六进制颜色${ioHex.length ? '（' + ioHex.join(',') + '）' : ''}`);
-ok(ioRgb.length === 0, 'ios 没有 rgb()/rgba()');
-ok(ioNamed.length === 0, `ios 没有颜色关键字${ioNamed.length ? '（' + ioNamed.join(',') + '）' : ''}`);
-ok(/^\s*--s3d-(bg|text|muted|accent)\s*:/m.test(ioBody) === false,
-  'ios 不重定义舞台的基础色令牌（材质必须由 --s3d-* 派生）');
-ok(/\bcolor-mix\(in srgb, var\(--s3d-/.test(ioBody), 'ios 的玻璃材质由舞台令牌经 color-mix 派生');
-ok(!/data-skin/.test(ioBody), 'ios 不引用皮肤选择器（两个维度互不感知）');
-
-// 作用域：每条规则都必须带 .s3d[data-stage-theme="ios"] 前缀。
-const IO_PREFIX = '.s3d[data-stage-theme="ios"]';
-const ioRuleSelectors = Array.from(ioBody.matchAll(/^([^\s@/}][^{]*)\{/gm))
-  .map((m) => m[1].trim())
-  .filter((s) => s && !s.startsWith('@') && !s.startsWith('from') && !s.startsWith('to'));
-const ioMissingPrefix = ioRuleSelectors
-  .filter((s) => !s.split(',').every((p) => p.trim().startsWith(IO_PREFIX)));
-ok(ioMissingPrefix.length === 0,
-  `iOS 每条规则都带 ${IO_PREFIX} 前缀${ioMissingPrefix.length ? '（漏：' + ioMissingPrefix.join(' | ') + '）' : ''}`);
-
-const ioSels = new Set();
-{
-  const re = /\.s3d\[data-stage-theme="ios"\]([^{@]*)\{/g;
-  let m;
-  while ((m = re.exec(ioBody))) {
-    m[1].split(',').forEach((part) => { const s = part.trim(); if (s) ioSels.add(s); });
-  }
-}
-ok(ioSels.size >= 20, `iOS 有实质内容（${ioSels.size} 条选择器）`);
-const ioSpa = [...ioSels].filter((s) => /\.(app|rail|column|view|track|q-row|pl-row|bar)\b/.test(s));
-ok(ioSpa.length === 0, `iOS 不触碰 SPA 模块${ioSpa.length ? '（' + ioSpa.join(' ') + '）' : ''}`);
-
-// 沉浸行为：播放舱静止时收走、唤醒时浮现（与星落同一份硬行为）。
-const ioPlayerBase = ioBody.match(/\.s3d\[data-stage-theme="ios"\] \.s3d-player \{([^}]*)\}/);
-const ioPlayerAwake = ioBody.match(/\.s3d\[data-stage-theme="ios"\]\.s3d-chrome \.s3d-player \{([^}]*)\}/);
-ok(ioPlayerBase && /opacity:\s*0/.test(ioPlayerBase[1]), 'iOS 的播放舱静止时整条收走');
-ok(ioPlayerAwake && /opacity:\s*1/.test(ioPlayerAwake[1]), 'iOS 唤醒 chrome 时播放舱浮现');
-ok(ioPlayerBase && /grid-template-columns:\s*0fr/.test(ioPlayerBase[1]),
-  'iOS 收起态是 0fr（从一条发丝 bloom 成完整舱）');
-ok(ioPlayerBase && /border-radius:\s*999px/.test(ioPlayerBase[1]), 'iOS 播放舱是药丸形');
-
-// 与皮肤正交：iOS 这个 id 在两层里各出现一次（皮肤 + 舞台主题），这是
-// **允许且预期的**——两层各自登记、各自持久化，互不派生。真正要防的是
-// 任一层去引用另一层的选择器，那会让两个维度互相污染。
-ok(!/data-skin/.test(ioBody), 'iOS 舞台主题不引用皮肤选择器（两层互不感知）');
-// 皮肤 iOS 已删除；舞台主题独立登记在下拉里。
-ok(/<option value="ios">/.test(HTML), 'iOS 舞台主题在下拉里独立登记');
-
-// 接线。
-ok(/<link rel="stylesheet" href="stage-themes\/ios\.css">/.test(HTML),
-  'stage-themes/ios.css 常驻引入');
-ok(HTML.indexOf('href="stage3d.css"') < HTML.indexOf('href="stage-themes/ios.css"'),
-  'ios.css 排在 stage3d.css 之后（同特异性下覆盖基础样式）');
-ok(/edition_ui!\("stage-themes\/ios\.css"\)/.test(MAIN_RS), 'ios.css 编进二进制');
-ok(/"\/stage-themes\/ios\.css"/.test(MAIN_RS), 'main.rs 注册了 /stage-themes/ios.css 路由');
-ok(/<option value="ios">/.test(HTML), '舞台设置的下拉里有 iOS 选项');
-// 白名单：加一档而不改白名单的话，选中它会被静默回落成默认档——页面不报错，
-// 只是「选了不起作用」。默认档现在是星落（见下面那一节）。
-ok(/sel\.value === 'ios' \? 'ios'/.test(STAGE3D_JS), 'stage3d 的下拉处理认得 ios（不会被回落成默认档）');
-ok(/value\.stageTheme === 'ios'/.test(STAGE3D_JS), 'stage3d 的偏好恢复白名单包含 ios');
-
-section('「默认」档已删除：只剩星落与 iOS，默认星落');
-
-// 「默认 / classic」这一档就是没有主题层的裸样式，删掉它的直接原因见
-// starfall.css 与 ios.css 里那条吸顶标题栏：裸层的头部近不透明所以盖得住滚过的
-// 行，两档玻璃层各自把它改成 12% / 15% 透明，于是标题被透上来的行叠成乱码。
-// 与其修一个界面上已经不给入口的档，不如让它没有第二份观感要维护。
+// 两档都不是「不好看」，是留不住：
+//  · classic 就是没有主题层的裸样式。吸顶标题栏的近不透明底色靠它自己盖住滚过的行，
+//    玻璃层各自把标题改成 12% 透明后，裸层那份反而没人管了 —— 标题被透上来的行叠成乱码。
+//  · iOS 是同一批纪律下的第二份观感，两份玻璃要同步改、同步测，而界面上只有一档在用。
+// 下架后不再给旧值留映射：存过 classic / iOS 的偏好走白名单校验，自然落回星落。
 // 只取这一个下拉的选项：'classic' 这个值在「歌词视觉」里也叫 classic（流光歌词），
 // 整份 HTML 上搜会误伤。
 const THEME_OPTIONS = (HTML.match(/<select id="s3d-stage-theme">([\s\S]*?)<\/select>/) || [, ''])[1];
-ok(!/value="classic"/.test(THEME_OPTIONS), '「设置风格」里不再给「默认」选项');
-ok(/<option value="starfall">星落<\/option><option value="ios">iOS<\/option>/.test(THEME_OPTIONS),
-  '下拉只剩两档，且星落排在第一位');
+ok(/<option value="starfall">星落<\/option>/.test(THEME_OPTIONS), '下拉里有星落');
+ok(!/value="classic"|value="ios"/.test(THEME_OPTIONS), '下拉里不再给 classic / iOS 入口');
+ok(!fs.existsSync(path.join(WEB, 'stage-themes', 'ios.css')), 'stage-themes/ios.css 已删除');
+ok(!/stage-themes\/ios\.css/.test(HTML + MAIN_RS), 'ios.css 的 link 与路由一并撤掉（不留半截接线）');
 ok(/var stageTheme = 'starfall'/.test(STAGE3D_JS), '默认档是星落');
-ok(!/value\.stageTheme === 'classic'/.test(STAGE3D_JS),
-  '恢复白名单不认 classic：存过它的偏好直接落回默认档，不做旧值映射');
+ok(!/value\.stageTheme === 'classic'|value\.stageTheme === 'ios'/.test(STAGE3D_JS),
+  '恢复白名单不认 classic / iOS：存过它们的偏好直接落回默认档，不做旧值映射');
 
 const sharedDrawer = read(path.join(WEB, 'space3d.css'));
 ok(/\.sp-sheet h2\s*\{[^}]*position:\s*sticky[^}]*background:\s*var\(--bg\)/.test(sharedDrawer),
   '共享设置抽屉使用不透明吸顶标题栏');
 ok(/class="sp-sheet" id="s3d-settings"/.test(HTML), '声场复用三维空间的设置抽屉');
-ok(!/\.s3d-settings\b/.test(THEME + THEME_IOS), '舞台主题不覆盖共享设置抽屉');
+ok(!/\.s3d-settings\b/.test(THEME), '舞台主题不覆盖共享设置抽屉');
 
 // ---------------------------------------------------------------------------
 
