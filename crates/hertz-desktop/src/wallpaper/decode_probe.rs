@@ -130,9 +130,23 @@ fn decode_request(metadata: &MediaProbe, session: String) -> Result<BudgetReques
 pub(crate) struct ProbeClient {
     backend: Backend,
     budget: Arc<BudgetCoordinator>,
+    counts: Arc<ProbeCounts>,
+    #[cfg(test)]
+    environment_provider: Option<EnvironmentProvider>,
     #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
     suppress_frames: bool,
+    #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+    force_probe: bool,
 }
+
+#[derive(Default)]
+struct ProbeCounts {
+    hits: AtomicU64,
+    runs: AtomicU64,
+}
+#[cfg(test)]
+type EnvironmentProvider =
+    Arc<dyn Fn() -> Option<super::probe_environment::Environment> + Send + Sync>;
 
 #[derive(Clone)]
 enum Backend {
@@ -150,14 +164,73 @@ impl ProbeClient {
         Self {
             backend: Backend::Native(proxy),
             budget: global_budget(),
+            counts: Arc::default(),
+            #[cfg(test)]
+            environment_provider: None,
             #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
             suppress_frames: false,
+            #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+            force_probe: false,
         }
     }
 
     #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
     pub(crate) fn suppress_frames_for_test(mut self, suppress: bool) -> Self {
         self.suppress_frames = suppress;
+        self
+    }
+
+    #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+    pub(crate) fn force_probe_for_test(mut self, force: bool) -> Self {
+        self.force_probe = force;
+        self
+    }
+
+    pub(crate) fn stats(&self) -> (u64, u64) {
+        (
+            self.counts.hits.load(Ordering::Relaxed),
+            self.counts.runs.load(Ordering::Relaxed),
+        )
+    }
+    pub(super) fn note_cache_hit(&self) {
+        self.counts.hits.fetch_add(1, Ordering::Relaxed);
+    }
+    pub(super) fn cache_allowed(&self) -> bool {
+        #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+        if self.force_probe || self.suppress_frames {
+            return false;
+        }
+        true
+    }
+    pub(super) fn check_metadata(&self, metadata: &MediaProbe) -> Result<(), JobError> {
+        decode_request(metadata, "qualification".into()).map(|_| ())
+    }
+    pub(super) async fn environment(&self) -> Option<super::probe_environment::Environment> {
+        match &self.backend {
+            Backend::Native(proxy) => {
+                let (reply, receive) = oneshot::channel();
+                proxy
+                    .send_event(UserEvent::WallpaperProbeEnvironment(reply))
+                    .ok()?;
+                let browser = tokio::time::timeout(Duration::from_secs(2), receive)
+                    .await
+                    .ok()?
+                    .ok()??;
+                super::probe_environment::capture(browser)
+            }
+            #[cfg(test)]
+            Backend::Test(_) => self
+                .environment_provider
+                .as_ref()
+                .and_then(|provider| provider()),
+        }
+    }
+    #[cfg(test)]
+    pub(crate) fn environment_for_test(
+        mut self,
+        provider: impl Fn() -> Option<super::probe_environment::Environment> + Send + Sync + 'static,
+    ) -> Self {
+        self.environment_provider = Some(Arc::new(provider));
         self
     }
 
@@ -168,8 +241,12 @@ impl ProbeClient {
         Self {
             backend: Backend::Test(Arc::new(probe)),
             budget: Arc::new(BudgetCoordinator::new()),
+            counts: Arc::default(),
+            environment_provider: None,
             #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
             suppress_frames: false,
+            #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+            force_probe: false,
         }
     }
 
@@ -186,14 +263,15 @@ impl ProbeClient {
         Reservation::grant(Arc::clone(&self.budget), request)
     }
 
-    pub(crate) async fn probe(
+    pub(super) async fn run(
         &self,
         input: DecodeInput,
         cancel: Arc<AtomicBool>,
-    ) -> Result<(), JobError> {
+    ) -> Result<Option<String>, JobError> {
         if cancel.load(Ordering::Acquire) {
             return Err(JobError::new("cancelled", "解码探测已取消"));
         }
+        self.counts.runs.fetch_add(1, Ordering::Relaxed);
         if input.metadata.codec == "png" {
             let mut request = decode_request(
                 &input.metadata,
@@ -226,7 +304,9 @@ impl ProbeClient {
                     .map_err(|_| JobError::new("probe_inconclusive", "解码宿主未完成回收回执"))?
             }
             #[cfg(test)]
-            Backend::Test(probe) => probe(input, cancel).await,
+            Backend::Test(probe) => probe(input, cancel)
+                .await
+                .map(|_| Some("test-webview2".into())),
         }
     }
 }
@@ -264,7 +344,7 @@ pub(crate) struct ProbeRequest {
     id: u64,
     input: DecodeInput,
     cancel: Arc<AtomicBool>,
-    reply: oneshot::Sender<Result<(), JobError>>,
+    reply: oneshot::Sender<Result<Option<String>, JobError>>,
     deadline: Instant,
     #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
     suppress_frames: bool,
@@ -279,7 +359,8 @@ struct Surface {
 struct HostedProbe {
     id: u64,
     cancel: Arc<AtomicBool>,
-    reply: Option<oneshot::Sender<Result<(), JobError>>>,
+    reply: Option<oneshot::Sender<Result<Option<String>, JobError>>>,
+    browser: Option<String>,
     deadline: Instant,
     config: serde_json::Value,
     started: bool,
@@ -362,10 +443,12 @@ impl ProbeHost {
         });
         let granted =
             access.grant_probe(request.id, request.input.package_hash, request.input.media);
+        let browser = super::probe_environment::browser_version(&surface.webview);
         self.current = Some(HostedProbe {
             id: request.id,
             cancel: request.cancel,
             reply: Some(request.reply),
+            browser,
             deadline: request.deadline,
             config,
             started: false,
@@ -509,7 +592,7 @@ impl ProbeHost {
             if outcome.is_ok() { "ok" } else { "failed" }
         ));
         if let Some(reply) = probe.reply.take() {
-            let _ = reply.send(outcome);
+            let _ = reply.send(outcome.map(|_| probe.browser));
         }
     }
 }

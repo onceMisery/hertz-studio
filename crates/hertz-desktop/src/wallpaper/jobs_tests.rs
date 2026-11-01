@@ -66,10 +66,16 @@ fn env(tag: &str) -> TestEnv {
 }
 
 fn env_with_probe(tag: &str, probe: ProbeClient) -> TestEnv {
+    env_with_capacity(tag, probe, super::super::content_quota::CAP)
+}
+
+fn env_with_capacity(tag: &str, probe: ProbeClient, capacity: u64) -> TestEnv {
     let root = tempfileish::temp_dir(tag);
     let library = futures_block_on(Library::open(root.path().join("db").as_path()));
     let library = futures_block_on(async { library.expect("open library") });
-    let assets = AssetStore::new(root.path()).unwrap();
+    let assets = AssetStore::new(root.path())
+        .unwrap()
+        .with_content_capacity(capacity);
     let bytes = sample_package();
     let source = root.path().join("source.hwpkg");
     std::fs::write(&source, &bytes).unwrap();
@@ -136,6 +142,141 @@ fn import_installs_package_and_library_rows() {
 }
 
 #[test]
+fn content_quota_rejects_projection_and_receipt_before_decoding() {
+    let probe = ProbeClient::testing(|_, _| Box::pin(async { Ok(()) }));
+    let counts = probe.clone();
+    // 原包与图片都能单独容纳，完整的不可变投影及收据不能容纳。
+    let capacity = sample_package().len() as u64 + 70;
+    let env = env_with_capacity("content-preflight", probe, capacity);
+    let id = new_job_id();
+    env.jobs.submit(id.clone(), env.source.clone()).unwrap();
+    let status = wait_terminal(&env.jobs, &id);
+    assert_eq!(status.state, JobState::Failed);
+    assert!(status.error.unwrap().starts_with("library_full:"));
+    assert_eq!(counts.stats(), (0, 0));
+    assert!(env.jobs.assets().package_dirs().is_empty());
+    assert!(!env.root.path().join("staging").join(id).exists());
+    assert_eq!(std::fs::read(&env.source).unwrap(), env.bytes);
+}
+
+#[test]
+fn content_quota_allows_duplicate_at_capacity_and_preserves_existing_content() {
+    let env = env("content-dedup-full");
+    let id = new_job_id();
+    env.jobs.submit(id.clone(), env.source.clone()).unwrap();
+    let status = wait_terminal(&env.jobs, &id);
+    assert_eq!(status.state, JobState::Done);
+    let hash = status.package_hash.unwrap();
+    let package_dir = env.jobs.assets().package_dir(&hash);
+    let capacity: u64 = [
+        "original.hwpkg",
+        "files/assets/background.png",
+        "receipt.json",
+    ]
+    .iter()
+    .map(|file| std::fs::metadata(package_dir.join(file)).unwrap().len())
+    .sum();
+    let library = futures_block_on(Library::open(&env.root.path().join("db"))).unwrap();
+    let assets = AssetStore::new(env.root.path())
+        .unwrap()
+        .with_content_capacity(capacity);
+    let probe = ProbeClient::testing(|_, _| Box::pin(async { Ok(()) }));
+    let counts = probe.clone();
+    let jobs = ImportJobs::start(library, assets, probe);
+    let id = new_job_id();
+    jobs.submit(id.clone(), env.source.clone()).unwrap();
+    assert_eq!(wait_terminal(&jobs, &id).state, JobState::Done);
+    assert_eq!(counts.stats(), (0, 1));
+    assert_eq!(
+        jobs.assets().package_dirs().as_slice(),
+        std::slice::from_ref(&hash)
+    );
+    // 新字节需要新增目录，即使 packages.bytes 只记录原包也必须拒绝。
+    let mut png = Vec::new();
+    let mut writer = png::Encoder::new(&mut png, 2, 1);
+    writer.set_color(png::ColorType::Rgba);
+    let mut writer = writer.write_header().unwrap();
+    writer
+        .write_image_data(&[1, 2, 3, 255, 4, 5, 6, 255])
+        .unwrap();
+    writer.finish().unwrap();
+    std::fs::write(&env.source, package_with_image(&png)).unwrap();
+    let id = new_job_id();
+    jobs.submit(id.clone(), env.source.clone()).unwrap();
+    let status = wait_terminal(&jobs, &id);
+    assert_eq!(status.state, JobState::Failed);
+    assert!(status.error.unwrap().starts_with("library_full:"));
+    assert_eq!(counts.stats(), (0, 1), "容量拒绝不能占解码器");
+    assert_eq!(
+        std::fs::read(package_dir.join("original.hwpkg")).unwrap(),
+        env.bytes
+    );
+    assert!(jobs.assets().verify_installed(&hash).unwrap().is_some());
+}
+
+#[test]
+fn content_quota_rechecks_actual_files_before_publication() {
+    let root_path = Arc::new(std::sync::OnceLock::<PathBuf>::new());
+    let observed = Arc::clone(&root_path);
+    let capacity = 64 * 1024;
+    let probe = ProbeClient::testing(move |_, _| {
+        // 模拟初检之后发生的外部占用，不能用陈旧 DB/预检事实直接发布。
+        std::fs::write(
+            observed.get().unwrap().join("packages/manual-original"),
+            vec![0; capacity as usize],
+        )
+        .unwrap();
+        Box::pin(async { Ok(()) })
+    });
+    let env = env_with_capacity("content-final-check", probe, capacity);
+    root_path.set(env.root.path().to_path_buf()).unwrap();
+    let id = new_job_id();
+    env.jobs.submit(id.clone(), env.source.clone()).unwrap();
+    let status = wait_terminal(&env.jobs, &id);
+    assert_eq!(status.state, JobState::Failed);
+    assert!(status.error.unwrap().starts_with("library_full:"));
+    assert!(env.jobs.assets().package_dirs().is_empty());
+    assert_eq!(
+        std::fs::metadata(env.root.path().join("packages/manual-original"))
+            .unwrap()
+            .len(),
+        capacity
+    );
+    assert!(!env.root.path().join("staging").join(id).exists());
+}
+
+#[test]
+fn competing_content_writer_cannot_clean_another_jobs_staging() {
+    let env = env("content-writer-collision");
+    let other = AssetStore::new(env.root.path()).unwrap();
+    let writer = other.content_writer().unwrap();
+    assert_eq!(
+        futures_block_on(reconcile_startup(env.jobs.library(), &other))
+            .unwrap_err()
+            .code,
+        "budget_busy"
+    );
+    let id = new_job_id();
+    let staging = env.root.path().join("staging").join(&id);
+    std::fs::create_dir(&staging).unwrap();
+    std::fs::write(staging.join("original.hwpkg"), b"in-flight").unwrap();
+    env.jobs.submit(id.clone(), env.source.clone()).unwrap();
+    let status = wait_terminal(&env.jobs, &id);
+    assert_eq!(status.state, JobState::Failed);
+    assert!(status.error.unwrap().starts_with("budget_busy:"));
+    assert_eq!(
+        std::fs::read(staging.join("original.hwpkg")).unwrap(),
+        b"in-flight"
+    );
+    drop(writer);
+    // 崩溃恢复也服从同一写门；退出后才可重试。
+    other.cleanup_staging(&id);
+    let id = new_job_id();
+    env.jobs.submit(id.clone(), env.source.clone()).unwrap();
+    assert_eq!(wait_terminal(&env.jobs, &id).state, JobState::Done);
+}
+
+#[test]
 fn derived_cache_reuses_valid_generation_and_rebuilds_corruption_without_overwrite() {
     let env = env("derived-generations");
     let import = || {
@@ -176,6 +317,216 @@ fn derived_cache_reuses_valid_generation_and_rebuilds_corruption_without_overwri
         1
     );
     drop(held);
+}
+
+#[test]
+fn cached_decode_input_keeps_generation_until_last_media_pin_exits() {
+    let env = env("derived-media-lease");
+    let id = new_job_id();
+    env.jobs.submit(id.clone(), env.source.clone()).unwrap();
+    let status = wait_terminal(&env.jobs, &id);
+    assert_eq!(status.state, JobState::Done, "{:?}", status.error);
+    let hash = status.package_hash.unwrap();
+    let assets = env.jobs.assets();
+    let library = env.jobs.library();
+    let package = assets.read_installed_manifest(&hash).unwrap();
+    let cancel = AtomicBool::new(false);
+    let source = assets
+        .probe_installed_media(&package, &cancel)
+        .unwrap()
+        .pop()
+        .unwrap();
+    futures_block_on(async {
+        sqlx::query("UPDATE derived_entries SET last_used = 0")
+            .execute(library.pool())
+            .await
+            .unwrap();
+        let probe = ProbeClient::testing(|_, _| Box::pin(async { Ok(()) }));
+        let image = super::super::image_prepare::prepare(
+            assets, library, &probe, "cached", &source, &cancel,
+        )
+        .await
+        .unwrap();
+        let used: i64 = sqlx::query_scalar("SELECT last_used FROM derived_entries")
+            .fetch_one(library.pool())
+            .await
+            .unwrap();
+        assert!(used > 0, "取得已复核代际时更新 LRU");
+        let decoded = image.decode_input(assets, &source).unwrap();
+        let held = Arc::clone(&decoded.media);
+        drop(decoded);
+        drop(image);
+        let cache = super::super::derived_cache::Writer::acquire(assets).unwrap();
+        assert_eq!(
+            cache.reclaim(library, 0, 0).await.unwrap_err().code,
+            "cache_full"
+        );
+        drop(held);
+        assert_eq!(cache.reclaim(library, 0, 0).await.unwrap().bytes, 0);
+        assert!(
+            library.is_installed(&hash).await.unwrap(),
+            "回收派生缓存不删除原包或作品"
+        );
+    });
+    let id = new_job_id();
+    env.jobs.submit(id.clone(), env.source.clone()).unwrap();
+    let restored = wait_terminal(&env.jobs, &id);
+    assert_eq!(
+        restored.state,
+        JobState::Done,
+        "可从原包重建：{:?}",
+        restored.error
+    );
+}
+
+fn qualification_environment(tag: &str) -> super::super::probe_environment::Environment {
+    super::super::probe_environment::Environment {
+        browser: "test-webview2".into(),
+        fingerprint: format!("{:x}", Sha256::digest(tag.as_bytes())),
+    }
+}
+
+#[test]
+fn qualification_reuses_persisted_success_and_invalidates_changed_environment() {
+    let environment = Arc::new(Mutex::new(qualification_environment("environment-a")));
+    let provider = Arc::clone(&environment);
+    let probe = ProbeClient::testing(|_, _| Box::pin(async { Ok(()) }))
+        .environment_for_test(move || Some(provider.lock().unwrap().clone()));
+    let counts = probe.clone();
+    let env = env_with_probe("qualification-reuse", probe);
+    let import = |jobs: &ImportJobs| {
+        let id = new_job_id();
+        jobs.submit(id.clone(), env.source.clone()).unwrap();
+        let status = wait_terminal(jobs, &id);
+        assert_eq!(status.state, JobState::Done, "{:?}", status.error);
+    };
+    import(&env.jobs);
+    import(&env.jobs);
+    assert_eq!(counts.stats(), (1, 1));
+    *environment.lock().unwrap() = qualification_environment("environment-b");
+    import(&env.jobs);
+    assert_eq!(counts.stats(), (1, 2));
+    // 新 Library/ProbeClient 模拟重启；不能依赖内存中的成功标志。
+    let probe = ProbeClient::testing(|_, _| panic!("资格命中不应再创建 decoder"))
+        .environment_for_test(|| Some(qualification_environment("environment-b")));
+    let counts = probe.clone();
+    let library = futures_block_on(Library::open(&env.root.path().join("db"))).unwrap();
+    let jobs = ImportJobs::start(library, AssetStore::new(env.root.path()).unwrap(), probe);
+    import(&jobs);
+    assert_eq!(counts.stats(), (1, 0));
+}
+
+#[test]
+fn qualification_never_remembers_decoder_failure_inconclusive_busy_or_cancel() {
+    for code in [
+        "decode_failed",
+        "probe_inconclusive",
+        "budget_busy",
+        "cancelled",
+    ] {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = Arc::clone(&calls);
+        let probe = ProbeClient::testing(move |_, cancel| {
+            let first = observed.fetch_add(1, Ordering::AcqRel) == 0;
+            Box::pin(async move {
+                if first && code == "cancelled" {
+                    cancel.store(true, Ordering::Release);
+                    Ok(())
+                } else if first {
+                    Err(JobError::new(code, "fixture failure"))
+                } else {
+                    Ok(())
+                }
+            })
+        })
+        .environment_for_test(|| Some(qualification_environment("stable")));
+        let env = env_with_probe(&format!("qualification-{code}"), probe);
+        let id = new_job_id();
+        env.jobs.submit(id.clone(), env.source.clone()).unwrap();
+        let failed = wait_terminal(&env.jobs, &id);
+        assert_eq!(
+            failed.state,
+            if code == "cancelled" {
+                JobState::Cancelled
+            } else {
+                JobState::Failed
+            }
+        );
+        let count = futures_block_on(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM media_qualifications")
+                .fetch_one(env.jobs.library().pool()),
+        )
+        .unwrap();
+        assert_eq!(count, 0, "{code} 不能形成成功资格");
+        let retry = new_job_id();
+        env.jobs.submit(retry.clone(), env.source.clone()).unwrap();
+        assert_eq!(wait_terminal(&env.jobs, &retry).state, JobState::Done);
+        assert_eq!(calls.load(Ordering::Acquire), 2);
+    }
+}
+
+#[test]
+fn qualification_discards_environment_changes_during_probe() {
+    let environment = Arc::new(Mutex::new(qualification_environment("before")));
+    let provider = Arc::clone(&environment);
+    let changed = Arc::clone(&environment);
+    let probe = ProbeClient::testing(move |_, _| {
+        *changed.lock().unwrap() = qualification_environment("after");
+        Box::pin(async { Ok(()) })
+    })
+    .environment_for_test(move || Some(provider.lock().unwrap().clone()));
+    let counts = probe.clone();
+    let env = env_with_probe("qualification-changing", probe);
+    for expected in [0, 1, 1] {
+        let id = new_job_id();
+        env.jobs.submit(id.clone(), env.source.clone()).unwrap();
+        assert_eq!(wait_terminal(&env.jobs, &id).state, JobState::Done);
+        let count = futures_block_on(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM media_qualifications")
+                .fetch_one(env.jobs.library().pool()),
+        )
+        .unwrap();
+        assert_eq!(count, expected);
+    }
+    assert_eq!(counts.stats(), (1, 2));
+}
+
+#[test]
+fn qualification_does_not_cache_unknown_or_mismatched_browser_environment() {
+    for browser in [None, Some("different-runtime")] {
+        let probe = ProbeClient::testing(|_, _| Box::pin(async { Ok(()) })).environment_for_test(
+            move || {
+                browser.map(|browser| super::super::probe_environment::Environment {
+                    browser: browser.into(),
+                    ..qualification_environment("unknown")
+                })
+            },
+        );
+        let counts = probe.clone();
+        let env = env_with_probe("qualification-unknown", probe);
+        for _ in 0..2 {
+            let id = new_job_id();
+            env.jobs.submit(id.clone(), env.source.clone()).unwrap();
+            assert_eq!(wait_terminal(&env.jobs, &id).state, JobState::Done);
+        }
+        assert_eq!(counts.stats(), (0, 2));
+    }
+}
+
+#[test]
+fn qualification_database_failure_still_executes_real_decoder() {
+    let probe = ProbeClient::testing(|_, _| Box::pin(async { Ok(()) }))
+        .environment_for_test(|| Some(qualification_environment("stable")));
+    let counts = probe.clone();
+    let env = env_with_probe("qualification-db-failure", probe);
+    futures_block_on(
+        sqlx::query("DROP TABLE media_qualifications").execute(env.jobs.library().pool()),
+    )
+    .unwrap();
+    let id = new_job_id();
+    env.jobs.submit(id.clone(), env.source.clone()).unwrap();
+    assert_eq!(wait_terminal(&env.jobs, &id).state, JobState::Done);
+    assert_eq!(counts.stats(), (0, 1));
 }
 
 #[test]
@@ -282,9 +633,7 @@ fn decoder_failure_prevents_publication_and_slot_is_reusable() {
     assert!(failed.error.unwrap().starts_with("decode_failed:"));
     assert!(env.jobs.assets().package_dirs().is_empty());
     assert_eq!(
-        std::fs::read_dir(env.root.path().join("derived"))
-            .unwrap()
-            .count(),
+        super::super::derived_cache::directory_bytes(&env.root.path().join("derived")).unwrap(),
         0
     );
     assert!(!env.root.path().join("staging").join(&id).exists());
@@ -328,6 +677,8 @@ fn cancel_waits_for_decoder_exit_and_ignores_late_success() {
         .unwrap();
     assert_eq!(env.jobs.status(&id).unwrap().state, JobState::Preparing);
     assert!(env.root.path().join("staging").join(&id).exists());
+    let other = AssetStore::new(env.root.path()).unwrap();
+    assert_eq!(other.content_writer().err().unwrap().code, "budget_busy");
     assert_eq!(
         env.jobs
             .submit(new_job_id(), env.source.clone())
@@ -337,6 +688,7 @@ fn cancel_waits_for_decoder_exit_and_ignores_late_success() {
     );
     exit_tx.send(()).unwrap();
     assert_eq!(wait_terminal(&env.jobs, &id).state, JobState::Cancelled);
+    assert!(other.content_writer().is_ok());
     assert!(!env.root.path().join("staging").join(&id).exists());
     assert!(env.jobs.assets().package_dirs().is_empty());
 }
@@ -529,6 +881,8 @@ fn reimport_indexes_an_existing_orphan_and_repairs_a_missing_package() {
     let package = assets.validate_staged("orphan").unwrap();
     assets.unpack_projection("orphan", &package).unwrap();
     assets
+        .content_writer()
+        .unwrap()
         .publish_staging("orphan", &package.package_hash)
         .unwrap();
     let id = new_job_id();
@@ -571,6 +925,8 @@ async fn crash_recovery_reindexes_orphans_and_marks_missing() {
     let staged = assets.validate_staged("job-1").unwrap();
     assets.unpack_projection("job-1", &staged).unwrap();
     assets
+        .content_writer()
+        .unwrap()
         .publish_staging("job-1", &staged.package_hash)
         .unwrap();
     assert!(!library.is_installed(&staged.package_hash).await.unwrap());

@@ -125,6 +125,13 @@ function derivedReceipts(configDir) {
   return found;
 }
 
+function directoryBytes(dir) {
+  return fs.readdirSync(dir, { withFileTypes: true }).reduce((bytes, entry) => {
+    const file = path.join(dir, entry.name);
+    return bytes + (entry.isDirectory() ? directoryBytes(file) : fs.statSync(file).size);
+  }, 0);
+}
+
 function verifyDerived(receipt) {
   assert.equal(receipt.pipeline, 'image-srgb-v1');
   for (const name of ['render', 'thumbnail']) {
@@ -167,6 +174,7 @@ async function main() {
     cancel: makePackage('video', video, 6),
     'cancel-window': makePackage('video', video, 13),
     busy: makePackage('video', video, 7),
+    'quota-new': makePackage('image', FIXTURE_PNG, 17),
   };
   for (const [name, bytes] of Object.entries(cases)) fs.writeFileSync(path.join(inputs, name + '.hwpkg'), bytes);
   const profile = { kind: 'standalone', dataDir: path.join(output, 'player'), edition: 'full' };
@@ -245,18 +253,21 @@ async function main() {
       page.on('domcontentloaded', () => { log.url = page.url(); });
     });
     let nonce = 0;
-    async function send(action, name, suppressFrames = false) {
+    async function send(action, name, suppressFrames = false, contentCapacityBytes = null) {
       const id = ++nonce;
-      await wallpaper.evaluate(command => window.ipc.postMessage('wallpaper_probe_import ' + JSON.stringify(command)), { nonce: id, action, name, suppressFrames });
+      await wallpaper.evaluate(command => window.ipc.postMessage('wallpaper_probe_import ' + JSON.stringify(command)), {
+        nonce: id, action, name, suppressFrames, contentCapacityBytes,
+        forceProbe: ['timeout', 'cancel', 'cancel-window', 'busy'].includes(name),
+      });
       return id;
     }
     async function result(id) {
       await wallpaper.waitForFunction(id => !!window.__nativeImportProbes?.[id], id, { timeout: 25000 });
       return wallpaper.evaluate(id => window.__nativeImportProbes[id], id);
     }
-    async function begin(name, expected, suppressFrames = false, afterStart = null) {
+    async function begin(name, expected, suppressFrames = false, afterStart = null, contentCapacityBytes = null) {
       const started = Date.now();
-      const id = await send('begin', name, suppressFrames);
+      const id = await send('begin', name, suppressFrames, contentCapacityBytes);
       if (afterStart) await afterStart();
       const value = await result(id);
       evidence.results.push({ name, elapsedMs: Date.now() - started, ...value });
@@ -277,16 +288,36 @@ async function main() {
     }
     const img = await begin('image', 'done');
     assert.equal(img.decoderSlots, 0);
+    assert.equal(img.cacheHits, 0);
+    assert.equal(img.probeRuns, 1, '首次导入必须真实探测');
     const firstDerived = derivedReceipts(configDir);
     assert.equal(firstDerived.length, 1);
     verifyDerived(firstDerived[0]);
-    await begin('image', 'done'); // 去重也重新验证当前环境的实际解码。
+    const cachedImage = await begin('image', 'done');
+    assert.equal(cachedImage.cacheHits, 1, '相同字节与本机环境复用成功资格');
+    assert.equal(cachedImage.probeRuns, 0, '资格命中不再创建可见探测容器');
     assert.deepEqual(derivedReceipts(configDir), firstDerived, '重复导入复用同一不可变代际');
+    const installedBytes = directoryBytes(path.join(configDir, 'packages'));
+    const fullDuplicate = await begin('image', 'done', false, null, installedBytes);
+    assert.equal(fullDuplicate.cacheHits, 1, '内容库满额仍可复用既有包');
+    const quotaDenied = await begin('quota-new', 'failed', false, null, installedBytes);
+    assert.match(quotaDenied.error, /^library_full:/);
+    assert.equal(quotaDenied.probeRuns, 0, '配额不足在真实解码之前拒绝');
+    assert.equal(directoryBytes(path.join(configDir, 'packages')), installedBytes, '不得淘汰原包给新导入腾位');
+    assert.equal(digest(fs.readFileSync(path.join(configDir, 'packages', digest(cases.image), 'original.hwpkg'))), digest(cases.image));
+    evidence.contentQuota = { installedBytes, duplicateAtCapacity: true, refusedWithoutEviction: true };
     fs.writeFileSync(path.join(path.dirname(firstDerived[0].file), 'render.png'), 'corrupt');
     await begin('image', 'done');
     const repaired = derivedReceipts(configDir).find(receipt => receipt.file !== firstDerived[0].file);
     assert.ok(repaired, '损坏缓存应生成新代际');
     verifyDerived(repaired);
+    assert.ok(!fs.existsSync(path.dirname(firstDerived[0].file)), '已闲置的损坏旧代际必须回收');
+    const orphan = path.join(path.dirname(path.dirname(repaired.file)), 'gen-crash-orphan');
+    fs.cpSync(path.dirname(repaired.file), orphan, { recursive: true });
+    await begin('image', 'done');
+    assert.ok(!fs.existsSync(orphan), '下次导入清理发布后未写索引的崩溃孤代际');
+    assert.ok(fs.existsSync(repaired.file), '当前有效缓存继续复用');
+    evidence.cacheRecovery = { corruptGenerationRemoved: true, orphanRemoved: true, currentPreserved: true };
     for (const name of ['jpeg', 'webp', 'rotated', 'mirrored', 'transposed', 'wide']) await begin(name, 'done');
     const receipts = derivedReceipts(configDir).filter(receipt => receipt.file !== firstDerived[0].file);
     for (const receipt of receipts) verifyDerived(receipt);
@@ -300,6 +331,10 @@ async function main() {
     evidence.derived = receipts;
     const vid = await begin('video', 'done');
     assert.equal(vid.decoderSlots, 0);
+    assert.equal(vid.probeRuns, 1);
+    const cachedVideo = await begin('video', 'done');
+    assert.equal(cachedVideo.cacheHits, 1);
+    assert.equal(cachedVideo.probeRuns, 0);
     const badImage = await begin('bad-image', 'failed');
     assert.match(badImage.error, /^decode_failed:/, '必须通过结构检查后在像素解码失败');
     const badVideo = await begin('bad-video', 'failed');
@@ -340,6 +375,7 @@ async function main() {
     assert.equal(busy.decoderSlots, 2, '探测不得动其它 owner 的配额');
     await result(await send('release', 'budget'));
     await begin('busy', 'done');
+    await begin('quota-new', 'done');
     console.log('wallpaper import native checks passed');
   } finally {
     if (fs.existsSync(path.join(configDir, 'desktop.log'))) evidence.nativeProbeLog = fs.readFileSync(path.join(configDir, 'desktop.log'), 'utf8').split(/\r?\n/).filter(line => line.includes('decode probe'));

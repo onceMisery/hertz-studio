@@ -1,6 +1,6 @@
 # 壁纸实现审查与修复记录
 
-日期：2026-11-01。审查基线：`0b421d4`，对照 [开发设计](desktop-wallpaper.md)。本次修改未创建提交。
+日期：2026-11-01；第七轮续审：2026-11-02。审查基线：`0b421d4`，对照 [开发设计](desktop-wallpaper.md)。各轮实现与验证记录见下文，提交以 Git 历史为准。
 
 ## 结论
 
@@ -32,14 +32,17 @@
 | 高 | 取消/失败若只等页面回执，可能在后台请求、核验缓存或浏览器持有文件时清 staging/提前归还 decoder | 原生精确授予单个已核验、固定句柄的 job 文件；作用域活动计数覆盖请求、缓存、响应、COM 文件与 Clone。撤销、独立 controller Close 成功及活动数归零后，才回执并归还账本配额；保留 COM 外壳不保留文件 pin。延迟退出/迟到成功、IPC 取消及真实窗口 WM_CLOSE 回归通过 |
 | 中 | 实测 WebView2 将无可用像素流的 PNG 也 decode 为透明图，不能据此证明像素完整 | 后台增加 png 0.18.1 流式像素与 CRC 校验。第四轮将原图准备改为独立 320 MiB 工作区，标准化产物再使用常驻解码配额探测；压缩图片限制 32 MiB。正确 CRC 但缺失 deflate 像素流、像素及结束块 CRC 损坏均拒绝安装 |
 | 中 | 原图没有方向/色彩标准化与缩略图；重复导入无法复用派生结果 | 新增 image_prepare：有界 PNG/JPEG/WebP 原生解码、八方向映射、RGB ICC→SDR sRGB、在线性光下以预乘 alpha 面积缩放，输出去除 EXIF/GPS/ICC 的 sRGB PNG；默认 render ≤4096 单边/8,294,400 像素，thumbnail ≤512 单边。按输入哈希/准备器版本/固定输出参数索引不可变代际，逐文件哈希复核后复用；坏缓存生成新代，不覆盖旧租用文件。全部媒体探测通过后才发布 |
+| 中 | 缓存满时只能拒绝，损坏重建留下的旧代际和崩溃孤缓存会不断累积；按文件递归删除可能误删仍在使用的代际的一部分 | 新增 AssetStore 派生缓存回收：同根原生文件写门、拒绝删除共享的目录租约、实际文件字节计账、闲置 LRU、改名到专用回收区后删除。租约传递到媒体固定句柄及其后续持有者；缺失/非法索引只清索引，原包与作品不受缓存淘汰影响；Windows junction/伪造 DB 路径拒绝回归通过 |
+| 中 | 相同内容重复导入仍每次占用独立探测容器，且没有可随环境变化失效的成功证明 | 第六轮新增 Library 成功资格缓存及独立迁移；绑定完整内容/元数据/探测器和页面版本/原生环境，最多 4096 条、7 天 TTL 与 LRU。controller/流退出后再写，环境未知或变化不写；命中不替代原包完整核验、准入或呈现预算。真实图片/视频命中及失败反例通过 |
+| 中 | 只有剩余空间检查，没有执行 20 GiB 内容库上限；多 AssetStore 可并发发布，数据库原包大小不能代表完整占用 | 第七轮按 packages 的真实原包/投影/收据及孤立文件长度计量，解包前预检、改名前复核；容量不足返回 library_full，保留原内容。有效同 hash 包不重复申请容量；跨实例原生写门覆盖导入、恢复、物理退出及暂存清理，竞争失败者不删除另一任务的 staging。扫描拒绝 junction/reparse point |
 
 ## 实现边界
 
 - P1-02 的 library/assets/jobs、P1-04 的 budget/session、P1-06 的系统采集仍主要是内核，尚未完整接入管理协议、配置选择与真实运行编排。`mod.rs` 中的 dead_code 放行和 app 现有状态字段能直接说明这一点，不能把单元测试通过写成产品闭环完成。
 - `applyMedia` 和保留域拦截已能在真实 WebView2 呈现图片、视频；Broker 已强制执行每 controller/代际的精确准入集合和撤销。正式版本目前只有内置场景选择，集合保持为空；用户选择到稳定 AssetRef、TargetPlanner 授权、重启恢复仍待 P1-05 接线。原生冒烟使用显式 `wallpaper-media-probe` debug feature 驱动准入，正式及 release 构建不接受该测试命令。
-- 导入已接通容器与摘要复核、PNG 像素/CRC、原生图片准备、独立可见 WebView2 的标准化图片 decode 与视频首帧/seek。Broker 对 job 的 staging 文件使用原生固定句柄，页面不能指定 staging 根路径；探测不触发已安装库初始化。PNG/JPEG/WebP 均执行原生像素解码；JPEG decoder 的容错行为不等于严格位流完整性验证。按环境版本的资格缓存仍未实现，重复导入继续实际探测。启动恢复只恢复文件/索引事实，不能把 installed 当作跨环境永久可播声明。
+- 导入已接通容器与摘要复核、PNG 像素/CRC、原生图片准备、独立可见 WebView2 的标准化图片 decode 与视频首帧/seek。Broker 对 job 的 staging 文件使用原生固定句柄，页面不能指定 staging 根路径；探测不触发已安装库初始化。PNG/JPEG/WebP 均执行原生像素解码；JPEG decoder 的容错行为不等于严格位流完整性验证。第六轮补齐持久环境资格缓存，相同字节/探测版本/本机环境在有效期内可省去重复解码，未知或变化时重新探测。启动恢复只恢复文件/索引事实，不能把 installed 当作跨环境永久可播声明；缓存也不能替代运行时坏帧处理或 TargetPlanner 的预算准入。
 - 图片原图使用独立 320 MiB 工作区，按输入字节、decoder/转换缓冲、RGBA 输出和固定元数据/ICC/编码余量预检，超预算在构造 decoder 前拒绝；库 limits 为辅助约束，不宣称硬限制进程 RSS。当前没有缩放解码，64 MP 的格式上限不意味着所有 64 MP 输入都能在工作区中处理。支持 RGB ICC；无配置图片明确按 sRGB 解释，已声明但当前无法转换的 HDR/cICP、非 sRGB PNG gamma/色度、非 RGB ICC 明确拒绝。PNG 元数据解压限 8 MiB、ICC 限 1 MiB；PNG 的尾部 EXIF 与结束块 CRC 也检查。
-- 派生缓存已经写入 derived_entries，发布前计入实际磁盘占用并执行 2 GiB 硬上限。缓存满时明确拒绝；活动租约感知的 LRU、旧代际/崩溃孤缓存清理和 20 GiB 内容库配额仍待实现，不能把当前上限检查写成完整缓存管理。派生描述符尚待 TargetPlanner/库 UI 消费。
+- 派生缓存已经写入 derived_entries，发布前按实际文件字节执行 2 GiB 上限；第五轮补齐活动目录租约、闲置代际 LRU、旧代际/崩溃孤缓存和回收区清理。目录租约随 PreparedImage 与媒体固定句柄的最后持有者退出；先原子移入 derived/.trash，再删文件，无法退出的文件仍计账。启动及导入后台执行清理，无常驻轮询；不同 AssetStore 实例通过同一个原生文件写门协调。第七轮实现独立 20 GiB 持久内容配额；staging 峰值仍由单准备槽、有界输入和剩余空间另行约束，不对已安装内容自动淘汰。派生描述符仍待 TargetPlanner/库 UI 消费。
 - 准备与探测已使用 `budget::global()` 的同一生产账本，按编码尺寸/可信 CFR 或 VFR 上界及缓冲估算先保留配额。桌面与预览的 TargetPlanner 尚未接入，因此没有声称整个产品的 decoder/GPU 预算已经闭环。管理 v2/原生选文件/P1-05 产品 UI 尚未连接 ImportJobs；本轮真实导入由明确的 debug feature 回归驱动调用同一管线，没有给正式页面增加路径导入或授权命令。
 - 舞台持久媒体 M0–M2、P1-05 库 UI、多屏/轮播、P2/P3 和 AI 工作包不属于当前已实现出口。本次没有用临时 blob 或扩展旧 IPC 冒充这些能力。
 - 多屏热插拔、真实设备切换/休眠、电池、发布候选长稳、真实大视频内存与硬解证据，仍需按设计验收。已存在的 loopback 发声测试保持显式忽略，本次没有播放测试音。
@@ -81,6 +84,20 @@
 
 第四轮结束时再次构建普通无 feature 二进制，原生负向回归通过：页面不能调用授权或导入测试命令。当前 `target/debug/hertz-desktop.exe` 保留为普通构建（17,655,296 字节；测试 feature 构建约 22.38 MB），没有遗留本轮启动的桌面进程。正式产品的 ImportJobs 管理入口尚未接线，普通构建体积不能据此代表后续完整产品的解码器成本。
 
+第五轮缓存验证：新增六项缓存回归和一项导入/媒体租约集成回归。`cargo test -p hertz-desktop -p hertz-wallpaper --all-features --quiet` 共 235 项通过（desktop 216、wallpaper 19），另两项硬件测试保持忽略；Clippy all-targets/all-features 的 `-D warnings` 通过。本机未取得 symlink 创建权限，因此最终用无需提权的真实 Windows junction 验证缓存扫描及中间路径拒绝，没有用跳过测试替代该证据。覆盖被租用的最旧项跳过、最后引用退出后淘汰、DB 字节少报仍按文件长度计量、全被租用时 cache_full 且代际完整、崩溃回收区与缺失索引幂等恢复、原包保留及缓存重建。针对性变异临时将目录租约从 share_mode(3) 改为 share_mode(7)，保护活动代际的测试按预期失败；源码随后恢复，日志为 `output/wallpaper-cache-lease-mutation.txt`。本轮无新增依赖或数据库迁移，缓存所有权仍在 AssetStore，配置和管理协议没有新增入口。
+
+第五轮原生证据：`output/playwright/wallpaper-import-native-1793545410615/evidence.json`，WebView2 `156.0.4314.58` 下 20 个导入/重试场景通过。新增断言实际验证闲置损坏代际删除、注入的无索引代际在下次导入时删除、当前有效缓存继续复用；原有旋转/镜像/大图、坏像素/坏视频、超时、IPC/原生窗口取消和 decoder 满额反例保持通过。每个终态的准备工作区、任务槽及活动流均归零。随后完整原生媒体冒烟通过；重新构建普通无 feature 二进制后，负向原生检查确认授权与导入测试命令均不可用，没有遗留本轮启动的桌面进程。本轮未重跑 10 分钟/8 小时长播，也未据此宣称内容库配额、完整产品 UI 或大视频硬解已经完成。
+
+第六轮资格缓存验证：新增八项测试，普通与 all-features 的 desktop/wallpaper 均为 243 项通过（desktop 224、wallpaper 19），另两项硬件测试保持忽略；Clippy all-targets/all-features 的 `-D warnings` 和 Rust 1.88 `--all-features --locked` 检查通过。覆盖持久化后新 Library/ProbeClient 复用、环境变化失效、探测前后变化不保存、浏览器版本不匹配/未知环境不保存、内容/元数据/浏览器与环境绑定、旧 adapter 版本拒绝、TTL/时钟倒退、4096 条 LRU，以及缓存数据库故障仍实际探测；键另绑定受信页面源码摘要。解码失败、不确定、资源忙及取消后的迟到成功均不写证明。针对性变异移除环境前后相等检查后，`qualification_discards_environment_changes_during_probe` 按预期失败，源码已恢复；日志为 `output/wallpaper-qualification-environment-mutation.txt`。
+
+第六轮原生证据：`output/playwright/wallpaper-import-native-1793547810969/evidence.json`，WebView2 `156.0.4314.58` 下 21 个导入/重试场景通过，其中 6 次资格命中；重复图片与视频均断言 cacheHits=1、probeRuns=0。每次请求创建新的 Library/ProbeClient，证明复用来自 SQLite，非客户端内存状态。原生通过 DXGI `CheckInterfaceSupport(IID_IDXGIDevice)` 查询全部 adapter 的驱动版本，不以 D3D feature level 或缺省空值代替驱动标识；实际 controller 与安装 runtime 分别读取。超时/取消/预算竞争场景通过仅 debug feature 的 forceProbe 显式执行实际探测，避免缓存命中掩盖这些反例。每次终态工作区、准备槽与活动流均归零；原有完整原生媒体冒烟随后通过。最后重新构建普通无 feature 二进制，负向原生检查确认页面无法调用授权及导入测试命令；当前二进制保留为普通构建，没有遗留本轮启动的桌面进程。真实显卡驱动升级、OS/Edge 更新、远程会话和更多硬件矩阵的实际切换仍属于平台验收，不能用注入环境测试代替。
+
+第七轮（2026-11-02）先按用户要求检查当前项目磁盘占用，清理主 target 的旧依赖/增量缓存、target-verify、MSRV/交叉构建，以及 tools 与历史验证快照中的重复 Cargo 产物。按 D 盘可用空间差值释放 186.37 GiB，清理后可用 221.54 GiB；源码、未提交改动、验证 JSON/截图/长稳日志、临时源码快照及运行中的播放器保留。主 target 的完整 Cargo clean 因正在运行的 hertz-studio.exe 停止，后续仅清理已确认的增量与独立构建路径。记录为 `output/disk-cleanup-2026-11-02.json`；后续验证统一设置 `CARGO_INCREMENTAL=0`，不把历史多次构建继续堆入增量缓存。
+
+第七轮内容配额验证：新增八项回归，普通与 all-features 的 desktop/wallpaper 测试均为 251 项通过（desktop 232、wallpaper 19），另两项硬件测试保持忽略；Clippy all-targets/all-features 的 `-D warnings` 和 Rust 1.88 `--all-features --locked` 检查通过。实际文件测试覆盖原包/深层投影/收据/无索引文件计量、精确满额、原内容和暂存保留、派生容量独立、跨 AssetStore 写门及 Drop 释放、路径越界拒绝、真实 Windows junction 拒绝。导入集成回归验证完整安装大小在解码前拒绝、满额去重成功、新增拒绝、预检后外部占用在发布前重新拒绝、竞争写者/启动恢复不可越过写门且不清理另一任务暂存；取消回归另断言真实解码退出之前写门不可重取。没有新增依赖或数据库迁移。
+
+第七轮原生证据：`output/playwright/wallpaper-import-native-1793561305142/evidence.json`，WebView2 `156.0.4314.58` 下 24 个导入/重试场景通过、8 次资格命中。debug feature 将测试库上限缩小到实际已安装内容的 1247 字节，重复导入仍成功；新增 1248 字节安装被 `library_full` 在真实探测前拒绝，既有原包摘要与目录字节数均保持，恢复默认上限后重试成功。该测试复用生产配额/发布管线，容量覆盖仅在 test 或 debug probe feature 编译；没有向正式页面开放容量修改入口。原有完整原生媒体冒烟随后通过。最后重新构建普通无 feature 二进制，原生负向检查确认页面不能调用授权或导入测试命令；没有遗留本轮桌面测试进程。MSRV 临时产物随后清理，验证重建后 D 盘仍有 219.32 GiB 可用。本轮验证的是小库边界和正确性，没有用它代替百万文件扫描耗时、真实满盘 I/O 故障或产品库 UI 验收。
+
 复现命令（先按本机环境设置 `PLAYWRIGHT_MODULE`）：
 
 ```powershell
@@ -99,7 +116,7 @@ Remove-Item Env:WALLPAPER_EXPECT_DEFAULT_DENY
 
 | 工作包 | 尚未实现的部分 | 不能以现有测试替代的验收 |
 | --- | --- | --- |
-| P1-03 媒体准备 | 环境版本资格缓存；按真实呈现目标生成变体；缓存 LRU/孤代际清理与内容库配额 | 图片方向、RGB ICC、线性透明缩放、元数据剥离和不可变重建已有回归；仍需真实图像集峰值内存、更多 ICC/高位深边界、1080p/大视频内存与硬件解码计数。首帧/中段/尾部坏帧、无帧 inconclusive、取消与独立容器回收已通过原生回归 |
+| P1-03 媒体准备 | 按真实呈现目标生成变体 | 图片方向、RGB ICC、线性透明缩放、元数据剥离、不可变重建、派生缓存回收、环境资格缓存及 20 GiB 内容配额已有回归；仍需真实图像集峰值内存、更多 ICC/高位深边界、1080p/大视频内存与硬件解码计数，以及真实驱动/OS/runtime 升级与更多设备资格。首帧/中段/尾部坏帧、无帧 inconclusive、取消与独立容器回收已通过原生回归 |
 | P1-04 资源会话 | TargetPlanner 接入全局 BudgetCoordinator；app 使用 WallpaperSession 四事实；JS AssetAdapter/ResourcePool/Scope 的真实租约 | 预览/导入/桌面竞争最后 decoder，取消最后等待者，共享纹理不被误 dispose，交接峰值及暂停 5 分钟释放 |
 | P1-05 本地库 UI | 原生文件对话框的一次性 token、management v2、config v5、库/导入进度、预览及 AssetRef 应用 | 用户导入→预览→应用→重启恢复；不启动播放器仍可用；旧配置迁移、回执丢失、候选失败不改旧引用 |
 | P1-06 输入 | 单个系统采集/分析 owner 接入配置与真实会话；设备通知及 none/Hertz/system 切换 | 真设备切换、采集中热拔失联、系统静音、休眠恢复；没有消费者时停止采集。无效固定 ID 不回退的采集内核检查已通过 |

@@ -55,6 +55,7 @@ pub(crate) enum UserEvent {
     WallpaperMedia(u64, Box<crate::wallpaper::webresource::PreparedResponse>),
     WallpaperProbe(Box<crate::wallpaper::decode_probe::ProbeRequest>),
     WallpaperProbePage(u64, String),
+    WallpaperProbeEnvironment(tokio::sync::oneshot::Sender<Option<String>>),
     #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
     WallpaperProbeTestResult(u64, serde_json::Value),
     SettingsPage(String),
@@ -4392,6 +4393,14 @@ pub(crate) fn run() -> Result<()> {
             }
             Event::UserEvent(UserEvent::WallpaperProbePage(id, body)) => {
                 app.wallpaper_probe.page(id, &body);
+            }
+            Event::UserEvent(UserEvent::WallpaperProbeEnvironment(reply)) => {
+                let browser = app.settings.as_ref()
+                    .map(|surface| crate::wallpaper::probe_environment::browser_version(&surface.webview))
+                    .or_else(|| app.wallpaper.as_ref()
+                        .map(|surface| crate::wallpaper::probe_environment::browser_version(&surface.webview)))
+                    .flatten();
+                let _ = reply.send(browser);
             }
             #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
             Event::UserEvent(UserEvent::WallpaperProbeTestResult(nonce, value)) => {

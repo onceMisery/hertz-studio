@@ -48,6 +48,7 @@ pub struct InstalledReceipt {
 
 pub struct AssetStore {
     root: PathBuf,
+    content_capacity: u64,
 }
 
 /// 核验缓存持有只读、拒绝写入/删除共享的句柄；命中时字节身份不能变化。
@@ -55,6 +56,8 @@ pub(crate) struct PinnedMedia {
     pub(crate) entry: hertz_wallpaper::VerifiedEntry,
     pub(crate) path: PathBuf,
     _pins: [std::fs::File; 2],
+    // 派生输入的目录租约随所有 Broker/流持有者退出，不能随准备描述符提前归还。
+    _derived_lease: Option<Arc<std::fs::File>>,
 }
 
 /// 结构与摘要已复核，真实解码期间持续固定这份字节。
@@ -72,7 +75,22 @@ impl AssetStore {
             .map_err(|error| JobError::io(format!("创建资产目录失败：{error}")))?;
         Ok(Self {
             root: root.to_path_buf(),
+            content_capacity: super::content_quota::CAP,
         })
+    }
+
+    pub(crate) fn content_writer(&self) -> Result<super::content_quota::Writer<'_>> {
+        super::content_quota::Writer::acquire(self)
+    }
+
+    pub(crate) fn content_capacity(&self) -> u64 {
+        self.content_capacity
+    }
+
+    #[cfg(any(test, all(debug_assertions, feature = "wallpaper-media-probe")))]
+    pub(crate) fn with_content_capacity(mut self, bytes: u64) -> Self {
+        self.content_capacity = bytes.min(super::content_quota::CAP);
+        self
     }
 
     pub(crate) fn staging_dir(&self, job_id: &str) -> PathBuf {
@@ -92,6 +110,7 @@ impl AssetStore {
         input: &DecodeInput,
         path: PathBuf,
         entry: hertz_wallpaper::VerifiedEntry,
+        lease: Option<Arc<std::fs::File>>,
     ) -> Result<DecodeInput> {
         let file = open_immutable(&path)?;
         let mut reader = file
@@ -120,6 +139,7 @@ impl AssetStore {
                         .map_err(|error| JobError::io(error.to_string()))?,
                     file,
                 ],
+                _derived_lease: lease,
             }),
         })
     }
@@ -361,6 +381,7 @@ impl AssetStore {
                                 .map_err(|error| JobError::io(error.to_string()))?,
                             file,
                         ],
+                        _derived_lease: None,
                     }),
                 });
             }
@@ -414,14 +435,8 @@ impl AssetStore {
             })?;
         }
         // ⑤ 收据：核验事实落盘（§4.2 packages 的本机验证收据）。
-        let receipt = InstalledReceipt {
-            package_hash: package.package_hash.clone(),
-            installed_at: crate::wallpaper::library::now_secs(),
-            entries: package.entries.clone(),
-        };
         let receipt_path = self.staging_dir(job_id).join("receipt.json");
-        let receipt_bytes = serde_json::to_vec_pretty(&receipt)
-            .map_err(|error| JobError::io(format!("收据序列化失败：{error}")))?;
+        let receipt_bytes = self.projection_receipt_bytes(package)?;
         let mut file = std::fs::File::create(&receipt_path)
             .map_err(|error| JobError::io(format!("创建收据失败：{error}")))?;
         std::io::Write::write_all(&mut file, &receipt_bytes)
@@ -430,20 +445,13 @@ impl AssetStore {
         Ok(())
     }
 
-    /// ⑥ 原子发布：staging 目录改名到 packages/<hash>。Windows 的 rename 在
-    /// 目标存在时失败——天然拒绝覆盖另一个 hash 目录（§7.2）。
-    pub fn publish_staging(&self, job_id: &str, package_hash: &str) -> Result<()> {
-        let staging = self.staging_dir(job_id);
-        let target = self.package_dir(package_hash);
-        if target.exists() {
-            return Err(JobError::new(
-                "target_exists",
-                format!("包目录已存在：{package_hash}"),
-            ));
-        }
-        std::fs::rename(&staging, &target)
-            .map_err(|error| JobError::io(format!("发布包目录失败：{error}")))?;
-        Ok(())
+    pub(crate) fn projection_receipt_bytes(&self, package: &StagedPackage) -> Result<Vec<u8>> {
+        serde_json::to_vec_pretty(&InstalledReceipt {
+            package_hash: package.package_hash.clone(),
+            installed_at: crate::wallpaper::library::now_secs(),
+            entries: package.entries.clone(),
+        })
+        .map_err(|error| JobError::io(format!("收据序列化失败：{error}")))
     }
 
     /// 去重路径：同 hash 已安装时丢弃 staging（幂等导入不产生第二份物理包）。
@@ -534,6 +542,7 @@ impl AssetStore {
             entry,
             path: path_buf,
             _pins: [original, projection],
+            _derived_lease: None,
         }))
     }
 
@@ -695,6 +704,8 @@ mod tests {
         assert_eq!(staged.manifest.title, "静夜");
         store.unpack_projection("job-1", &staged).unwrap();
         store
+            .content_writer()
+            .unwrap()
             .publish_staging("job-1", &staged.package_hash)
             .unwrap();
         assert!(store
@@ -712,12 +723,16 @@ mod tests {
         let staged = store.validate_staged("job-1").unwrap();
         store.unpack_projection("job-1", &staged).unwrap();
         store
+            .content_writer()
+            .unwrap()
             .publish_staging("job-1", &staged.package_hash)
             .unwrap();
         // 第二次发布同 hash → target_exists，绝不覆盖（§7.2）。
         store.snapshot_input("job-2", &source, None).unwrap();
         store.unpack_projection("job-2", &staged).unwrap();
         let error = store
+            .content_writer()
+            .unwrap()
             .publish_staging("job-2", &staged.package_hash)
             .unwrap_err();
         assert_eq!(error.code, "target_exists");
@@ -740,6 +755,8 @@ mod tests {
         let staged = store.validate_staged("job-1").unwrap();
         store.unpack_projection("job-1", &staged).unwrap();
         store
+            .content_writer()
+            .unwrap()
             .publish_staging("job-1", &staged.package_hash)
             .unwrap();
         assert!(store
@@ -765,6 +782,8 @@ mod tests {
         let package = store.validate_staged("job-1").unwrap();
         store.unpack_projection("job-1", &package).unwrap();
         store
+            .content_writer()
+            .unwrap()
             .publish_staging("job-1", &package.package_hash)
             .unwrap();
         let pinned = store

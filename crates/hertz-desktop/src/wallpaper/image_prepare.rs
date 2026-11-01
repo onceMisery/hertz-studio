@@ -15,6 +15,7 @@ use sha2::{Digest, Sha256};
 
 use super::assets::{AssetStore, DecodeInput};
 use super::decode_probe::ProbeClient;
+use super::derived_cache::{self, directory_bytes};
 use super::jobs::{new_job_id, JobError};
 use super::library::{now_secs, Library};
 
@@ -24,7 +25,6 @@ pub(crate) const PIPELINE: &str = "image-srgb-v1";
 const IMPORTER: &str = "hertz-native-image";
 const OPTIONS: &str = r#"{"alpha":"straight","codec":"png-rgba8","colorSpace":"sRGB-SDR","filter":"linear-premultiplied-area","maxPixels":8294400,"maxSide":4096,"mipmap":false,"thumbnailSide":512,"untagged":"assume-sRGB"}"#;
 const MAX_FILE: u64 = 32 * 1024 * 1024;
-const CACHE_CAP: u64 = 2 * 1024 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -54,6 +54,7 @@ pub(crate) struct PreparedImage {
     directory: PathBuf,
     relative: PathBuf,
     staged: bool,
+    lease: Option<std::sync::Arc<std::fs::File>>,
 }
 
 fn invalid(error: impl std::fmt::Display) -> JobError {
@@ -146,13 +147,26 @@ pub(crate) async fn prepare(
                 })
         {
             let directory = store.root().join("derived").join(&relative);
-            if let Ok(receipt) = verify(&directory, &input.media.entry.sha256, &cache_key) {
-                return Ok(PreparedImage {
-                    receipt,
-                    directory,
-                    relative,
-                    staged: false,
-                });
+            // 先取得目录租约再复核，GC 不能在复核与正式读之间移走这一代。
+            if let Ok(lease) = derived_cache::pin(store, &relative) {
+                if let Ok(receipt) = verify(&directory, &input.media.entry.sha256, &cache_key) {
+                    sqlx::query(
+                        "UPDATE derived_entries SET last_used = ? WHERE cache_key = ? AND path = ?",
+                    )
+                    .bind(now_secs())
+                    .bind(&cache_key)
+                    .bind(relative.to_string_lossy().as_ref())
+                    .execute(library.pool())
+                    .await
+                    .map_err(|error| JobError::database(error.to_string()))?;
+                    return Ok(PreparedImage {
+                        receipt,
+                        directory,
+                        relative,
+                        staged: false,
+                        lease: Some(lease),
+                    });
+                }
             }
         }
     }
@@ -258,6 +272,7 @@ fn generate(
         directory,
         relative,
         staged: true,
+        lease: None,
     })
 }
 
@@ -538,6 +553,7 @@ impl PreparedImage {
                 sha256: self.receipt.render.sha256.clone(),
                 mime: Some("image/png".into()),
             },
+            self.lease.clone(),
         )?;
         if (input.metadata.encoded_width, input.metadata.encoded_height)
             != (self.receipt.render.width, self.receipt.render.height)
@@ -548,54 +564,27 @@ impl PreparedImage {
     }
 
     pub(crate) async fn publish(&mut self, store: &AssetStore, library: &Library) -> Result<()> {
+        let cache = derived_cache::Writer::acquire(store)?;
         if self.staged {
             let target = store.root().join("derived").join(&self.relative);
+            let required = directory_bytes(&self.directory)?;
+            cache.reclaim(library, required, derived_cache::CAP).await?;
             std::fs::create_dir_all(target.parent().expect("generation parent"))
                 .map_err(invalid)?;
-            let required = directory_bytes(&self.directory)?;
-            let held = directory_bytes(&store.root().join("derived"))?;
-            if required > CACHE_CAP.saturating_sub(held) {
-                return Err(JobError::new(
-                    "cache_full",
-                    "派生缓存达到 2 GiB 上限，请清理闲置缓存后重试",
-                ));
-            }
             // 从不覆盖旧代际；旧 controller 的 contentKey/文件句柄仍指向旧字节。
             std::fs::rename(&self.directory, &target).map_err(invalid)?;
             self.directory = target;
             self.staged = false;
+            self.lease = Some(derived_cache::pin(store, &self.relative)?);
         }
         sqlx::query("INSERT INTO derived_entries (cache_key, path, bytes, pipeline_version, last_used) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(cache_key) DO UPDATE SET path=excluded.path, bytes=excluded.bytes, pipeline_version=excluded.pipeline_version, last_used=excluded.last_used")
             .bind(&self.receipt.cache_key).bind(self.relative.to_string_lossy().as_ref())
             .bind(directory_bytes(&self.directory)? as i64).bind(PIPELINE).bind(now_secs())
             .execute(library.pool()).await.map_err(|error| JobError::database(error.to_string()))?;
+        // 被新索引替换的旧代成为孤缓存；仍在使用的目录租约会阻止它被改名。
+        cache.reclaim(library, 0, derived_cache::CAP).await?;
         Ok(())
     }
-}
-
-fn directory_bytes(root: &Path) -> Result<u64> {
-    let mut stack = vec![(root.to_path_buf(), 0)];
-    let mut count = 0;
-    let mut bytes = 0u64;
-    while let Some((path, depth)) = stack.pop() {
-        for entry in std::fs::read_dir(path).map_err(invalid)? {
-            let entry = entry.map_err(invalid)?;
-            count += 1;
-            if count > 50_000 || depth > 6 {
-                return Err(invalid("派生目录枚举超限"));
-            }
-            let metadata = entry.metadata().map_err(invalid)?;
-            if metadata.file_type().is_symlink() {
-                return Err(invalid("派生缓存禁止符号链接"));
-            }
-            if metadata.is_dir() {
-                stack.push((entry.path(), depth + 1));
-            } else {
-                bytes = bytes.saturating_add(metadata.len());
-            }
-        }
-    }
-    Ok(bytes)
 }
 
 #[cfg(test)]

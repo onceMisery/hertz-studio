@@ -262,17 +262,23 @@ async fn worker_loop(
     // 等任务时必须继续驱动 runtime：sqlx 的连接归还也会投递异步任务。
     // 在 current_thread runtime 内阻塞 recv 会把空闲连接卡住，查询最终池超时。
     while let Some(request) = rx.recv().await {
-        let preparation =
-            probe.prepare(format!("prepare-{}-{}", request.job_id, request.generation));
-        let outcome = match preparation.as_ref() {
-            Ok(_) => run_import(&request, &library, &assets, &probe).await,
-            Err(error) => Err(JobError::new(error.code, error.message.clone())),
+        let outcome = match assets.content_writer() {
+            Ok(writer) => {
+                let preparation =
+                    probe.prepare(format!("prepare-{}-{}", request.job_id, request.generation));
+                let outcome = match preparation.as_ref() {
+                    Ok(_) => run_import(&request, &library, &assets, &probe, &writer).await,
+                    Err(error) => Err(JobError::new(error.code, error.message.clone())),
+                };
+                // 写门保持到物理退出、暂存清理和准备额度归还，失败者不清理其它写者的 job。
+                assets.cleanup_staging(&request.job_id);
+                if let Ok(preparation) = preparation {
+                    preparation.finish();
+                }
+                outcome
+            }
+            Err(error) => Err(error),
         };
-        // run_import 返回时全部同步 I/O 已退出；成功、失败和取消均回收暂存后再还槽。
-        assets.cleanup_staging(&request.job_id);
-        if let Ok(preparation) = preparation {
-            preparation.finish();
-        }
         let mut status = request.status.lock().expect("status").clone();
         match outcome {
             Ok(package_hash) => {
@@ -341,12 +347,17 @@ async fn run_import(
     library: &Library,
     assets: &AssetStore,
     probe: &ProbeClient,
+    writer: &super::content_quota::Writer<'_>,
 ) -> Result<String, JobError> {
     let _ = library
         .record_job(&request.job_id, None, "preparing", None, None, None)
         .await;
     set_state(&request.status, JobState::Preparing);
     cancelled(&request.cancel)?;
+    // 单个后台准备槽中做缓存恢复与清理；没有定时轮询，也不在 UI/帧路径扫盘。
+    super::derived_cache::Writer::acquire(assets)?
+        .reclaim(library, 0, super::derived_cache::CAP)
+        .await?;
     // ① Probe（文件侧）：独占句柄快照，后续只读这份固定输入。
     let receipt = assets.snapshot_input(&request.job_id, &request.source, Some(&request.cancel))?;
     set_stage_bytes(&request.status, receipt.bytes);
@@ -370,7 +381,9 @@ async fn run_import(
         hertz_wallpaper::manifest::Content::Web { .. } => "web",
     }
     .to_string();
-    // ③ 去重：相同 hash 已安装 → 不再发布第二份物理包，幂等返回既有事实。
+    // ③ 配额预检：既有同 hash 只核对安全目录，不重复申请持久容量。
+    writer.preflight(&request.job_id, &package)?;
+    // 去重：相同 hash 已安装 → 不再发布第二份物理包，幂等返回既有事实。
     if library.is_installed(&package.package_hash).await?
         && assets.verify_installed(&package.package_hash)?.is_some()
     {
@@ -389,7 +402,7 @@ async fn run_import(
         library.mark_available(&package.package_hash).await?;
         return Ok(package.package_hash.clone());
     }
-    // ④ 空间峰值预检：staging 原包 + 解包投影 + 发布余量（§7.1 末段）。
+    // ④ 空间峰值预检；现有 staging 已从实际可用空间扣除。
     let projection_bytes: u64 = package.manifest.files.iter().map(|file| file.bytes).sum();
     assets.check_disk_space(projection_bytes)?;
     // ⑤ 投影解包（files/ 只含已声明路径）。
@@ -413,7 +426,7 @@ async fn run_import(
     if derived.exists() {
         std::fs::remove_dir_all(derived).map_err(|error| JobError::io(error.to_string()))?;
     }
-    match assets.publish_staging(&request.job_id, &package.package_hash) {
+    match writer.publish_staging(&request.job_id, &package.package_hash) {
         Ok(()) => {}
         Err(error) if error.code == "target_exists" => {
             // 目录已存在但未索引：崩溃恢复语义覆盖它；本任务按重复处理。
@@ -464,7 +477,8 @@ async fn qualify_media(
                 .find(|image| image.receipt.input_hash == input.media.entry.sha256)
             {
                 probe
-                    .probe(
+                    .qualify(
+                        library,
                         image.decode_input(assets, &input)?,
                         Arc::clone(&request.cancel),
                     )
@@ -480,7 +494,8 @@ async fn qualify_media(
                 )
                 .await?;
                 probe
-                    .probe(
+                    .qualify(
+                        library,
                         image.decode_input(assets, &input)?,
                         Arc::clone(&request.cancel),
                     )
@@ -488,7 +503,9 @@ async fn qualify_media(
                 prepared.push(image);
             }
         } else {
-            probe.probe(input, Arc::clone(&request.cancel)).await?;
+            probe
+                .qualify(library, input, Arc::clone(&request.cancel))
+                .await?;
         }
     }
     Ok(prepared)
@@ -497,6 +514,7 @@ async fn qualify_media(
 /// 启动恢复（§7.2）：目录在索引缺 → 核验后恢复入库；索引在目录缺 → unavailable。
 /// 崩溃恢复不自动启用任何作品（启用意图在 config 域）。
 pub async fn reconcile_startup(library: &Library, assets: &AssetStore) -> Result<(), JobError> {
+    let _writer = assets.content_writer()?;
     let indexed = library.installed_packages().await?;
     let mut indexed_hashes: std::collections::HashSet<String> = std::collections::HashSet::new();
     for row in indexed {
@@ -542,6 +560,17 @@ pub async fn reconcile_startup(library: &Library, assets: &AssetStore) -> Result
             }
         }
         // 核验失败的目录保留在盘上（孤立包清理策略属 P1-05 库 UI）。
+    }
+    // 可重建缓存的故障不能阻断原包库恢复；下一次导入会显式重试并报告错误。
+    let cache_result = match super::derived_cache::Writer::acquire(assets) {
+        Ok(cache) => cache
+            .reclaim(library, 0, super::derived_cache::CAP)
+            .await
+            .map(|_| ()),
+        Err(error) => Err(error),
+    };
+    if let Err(error) = cache_result {
+        crate::app::log(&format!("wallpaper derived recovery deferred: {error}"));
     }
     Ok(())
 }

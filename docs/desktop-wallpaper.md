@@ -263,6 +263,7 @@ Desktop/
 | `release_watermarks` | source_id+remote_work_id+channel | 最高已接受版本及 hash；回滚不降低水位 |
 | `install_jobs` | job_id | request_id、payload_digest、state、input_identity、progress、error、updated_at |
 | `derived_entries` | cache_key | path、bytes、last_used、pipeline_version |
+| `media_qualifications` | cache_key | 被测文件 hash、环境 hash、adapter 版本、qualified_at、last_used；仅成功证明，最多 4096 条、7 天有效期 |
 | `ai_receipts` | service_owner+job_id+artifact_id | hash、会话关联、素材别名映射、draft_id/import_job_id、状态/过期时间；最多 8 个活动候选 |
 | `ai_origins` | work_key+package_hash | provider/model、生成时间、输出 hash 与来源标记；跟随版本，不含 prompt 或凭据 |
 | `ai_requests` | service_owner+grant_id+request_id | payload_digest、状态、确认/操作关联、过期时间；不保存 bearer 或原始自然语言 |
@@ -471,7 +472,11 @@ variant 包含 `id/file/purpose` 以及类型对应的 width/height、codec、co
 
 探测沿用全局 decoder 上限 2，另受一个准备任务槽限制；已占满时返回 budget_busy/有界等待，用户可显式释放预览或暂停并卸载指定桌面会话，不额外开第三个隐藏 decoder。取消、失败或完成都执行 pause、清 src、load、移除监听与原生流租约回收；实际退出后才还槽。能力结果按内容 hash、adapter 版本、WebView2/OS 与图形驱动环境版本缓存，环境变化后复核，不能将一次成功永久当作跨机器承诺。
 
+成功资格由原 Library 的 `media_qualifications` 保存，最多 4096 条，按最近使用淘汰，有效期 7 天；时钟倒退到证明之前不复用。键包含实际被测字节的完整 hash（图片为标准化派生图）、可信媒体元数据、原生 adapter 版本、受信探测页面源码摘要和环境摘要。环境由原生读取：本机范围、实际 controller 与已安装 WebView2 版本、Windows build/修订号、全部 DXGI adapter 及 UMD 驱动版本、远程会话状态和浏览器启动参数；原始机器标识和参数不落库。任一字段未知、实际探测 runtime 与预期不同、探测前后环境变化时均不写缓存，继续真实探测。仅在 controller/流退出回执后保存成功证明，取消、超时、资源忙和解码失败不保存。命中只省略重复解码，不替代固定副本、包/文件 hash、容器验证、会话准入或实际呈现时的资源预算。缓存查询故障时仍执行真实探测，写入故障不推翻已经完成的解码证据。
+
 打包已压缩图片/视频默认 ZIP Store，避免对视频做无收益的 Deflate。安装空间预检同时计算 staging、原包、解包投影、封面/派生与旧版本暂存的峰值；容量不足在发布前拒绝。复制快照完成后原文件移动/删除不影响本次任务，已安装作品永不重新打开用户源路径。
+
+20 GiB 持久内容配额由 AssetStore 按 `packages/` 的实际普通文件长度执行，包含原包、解包投影、收据及未索引/损坏目录，不依赖数据库 `packages.bytes`（该字段只记录原包）。新包在解包和真实解码前按完整安装大小预检，发布前再按实际暂存产物复核；超限返回 `library_full`，不自动淘汰用户内容。有效的同 hash 包直接复用，不重复申请持久容量；既有库超限也允许这种无新增内容的复用和启动索引恢复。staging 是有界瞬时副本，由单准备槽、512 MiB 包/1 GiB 解包上限及实际剩余空间另行约束，复制中的去重快照不挤占第二份持久额度；派生仍独立执行 2 GiB 缓存上限。相同资产根的导入和恢复共用原生文件写门，拿不到立即返回 `budget_busy`；写门保持到真实 I/O/解码退出及暂存清理，不清理另一写者的暂存。目录计量最多枚举一百万项，拒绝 junction/reparse point，无法可靠计量时拒绝新增安装并保留既有文件。
 
 ### 7.2 原子性与崩溃恢复
 

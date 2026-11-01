@@ -29,6 +29,7 @@ tao = { version = "=0.37.1", default-features = false, features = ["rwh_06"] }
 wry = { version = "=0.57.0", default-features = false, features = ["os-webview"] }
 tray-icon = { version = "=0.24.2", default-features = false }
 windows-sys = { version = "=0.61.2", features = [
+  "Wdk_System_SystemServices",
   "Win32_Devices_Display",
   "Win32_Foundation",
   "Win32_Graphics_Gdi",
@@ -37,6 +38,7 @@ windows-sys = { version = "=0.61.2", features = [
   "Win32_System_Pipes",
   "Win32_System_Power",
   "Win32_System_SystemServices",
+  "Win32_System_SystemInformation",
   "Win32_System_Registry",
   "Win32_System_RemoteDesktop",
   "Win32_System_Threading",
@@ -69,6 +71,8 @@ zip = { workspace = true }
 # （Cargo.lock 已是 0.62.2），否则接口不互通（设计 §8.1）。
 windows = { version = "0.62", features = [
   "Win32_Foundation",
+  "Win32_Graphics_Dxgi",
+  "Win32_Graphics_Dxgi_Common",
   "Win32_Media_Audio",
   "Win32_Security",
   "Win32_System_Com",

@@ -24,8 +24,16 @@ pub(crate) mod audio;
 pub(crate) mod audio_capture;
 #[allow(dead_code)]
 pub(crate) mod budget;
+#[allow(dead_code)] // AssetStore 的持久内容计量与单写者发布。
+pub(crate) mod content_quota;
 #[allow(dead_code)] // ImportJobs 的产品管理入口随 P1-05 接入。
 pub(crate) mod decode_probe;
+#[allow(dead_code)] // 本机环境资格，不授予文件或会话访问权限。
+pub(crate) mod qualification;
+#[allow(dead_code)]
+pub(crate) mod probe_environment;
+#[allow(dead_code)] // AssetStore 派生缓存的发布/回收与原生目录租约。
+pub(crate) mod derived_cache;
 #[allow(dead_code)] // 派生描述符供后续 TargetPlanner 消费。
 pub(crate) mod image_prepare;
 #[allow(dead_code)]

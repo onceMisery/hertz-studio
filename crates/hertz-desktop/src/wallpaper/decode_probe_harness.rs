@@ -31,6 +31,10 @@ pub(crate) fn command(body: &str, proxy: EventLoopProxy<UserEvent>) {
         name: String,
         #[serde(default)]
         suppress_frames: bool,
+        #[serde(default)]
+        force_probe: bool,
+        #[serde(default)]
+        content_capacity_bytes: Option<u64>,
     }
     let Ok(command) = serde_json::from_str::<Command>(body) else {
         return;
@@ -88,13 +92,14 @@ pub(crate) fn command(body: &str, proxy: EventLoopProxy<UserEvent>) {
                 let result = runtime.block_on(async {
                     let base = crate::config::base_dir();
                     let library = Library::open(&base).await?;
-                    let assets = AssetStore::new(&base)?;
-                    let jobs = Arc::new(ImportJobs::start(
-                        library,
-                        assets,
-                        ProbeClient::native(proxy.clone())
-                            .suppress_frames_for_test(command.suppress_frames),
-                    ));
+                    let mut assets = AssetStore::new(&base)?;
+                    if let Some(capacity) = command.content_capacity_bytes {
+                        assets = assets.with_content_capacity(capacity);
+                    }
+                    let probe = ProbeClient::native(proxy.clone())
+                        .suppress_frames_for_test(command.suppress_frames)
+                        .force_probe_for_test(command.force_probe);
+                    let jobs = Arc::new(ImportJobs::start(library, assets, probe.clone()));
                     state().lock().unwrap().jobs = Some(Arc::clone(&jobs));
                     jobs.submit(
                         command.name.clone(),
@@ -107,7 +112,11 @@ pub(crate) fn command(body: &str, proxy: EventLoopProxy<UserEvent>) {
                                 status.state,
                                 JobState::Done | JobState::Failed | JobState::Cancelled
                             ) {
-                                return Ok::<_, JobError>(serde_json::to_value(status).unwrap());
+                                let mut value = serde_json::to_value(status).unwrap();
+                                let (hits, runs) = probe.stats();
+                                value["cacheHits"] = serde_json::json!(hits);
+                                value["probeRuns"] = serde_json::json!(runs);
+                                return Ok::<_, JobError>(value);
                             }
                         }
                         tokio::time::sleep(Duration::from_millis(20)).await;
