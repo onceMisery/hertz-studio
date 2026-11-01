@@ -8,7 +8,9 @@ const { startFixture } = require('./ui-browser-fixture');
 
 const OUT = process.env.SKIN_SHOT_DIR || 'output/playwright/narrow-topbar';
 const WIDTHS = [320, 330, 390, 620, 621, 700, 1440];
-const BUTTONS = ['capsule-entry', 'stage3d-entry', 'settings-entry', 'theme-btn', 'skin-btn', 'top-more-btn', 'online-account-btn'];
+// 顶栏这一排只留常驻动作：状态点、最小化、三维舞台、⋮、头像（+ 皮肤注入的右侧折叠）。
+// 三维空间 / 主题色 / 界面皮肤 / 退出服务 收在 #top-more-menu 里，见下面的 popups。
+const BUTTONS = ['capsule-entry', 'stage3d-entry', 'settings-entry', 'top-more-btn', 'online-account-btn'];
 const SKIN_FILTER = process.env.SKIN_FILTER ? new Set(process.env.SKIN_FILTER.split(',').map(s => s.trim()).filter(Boolean)) : null;
 const results = [];
 let failures = 0;
@@ -97,9 +99,17 @@ function check(condition, label, details) {
         for (const b of geometry.buttons.filter(b => b.hit && b.w > 0)) {
           await page.locator('#' + b.id).click({ trial: true, timeout: 3000 });
         }
-        for (const [button, menu] of [['theme-btn', 'theme-menu'], ['skin-btn', 'skin-menu'], ['top-more-btn', 'top-more-menu']]) {
-          if (!geometry.buttons.find(b => b.id === button && b.hit)) continue;
-          await page.locator('#' + button).click();
+        // 弹层链：主题色/界面皮肤收在 ⋮ 里，要先开 ⋮ 再点那一项（点了以后 ⋮ 自己收起，
+        // 弹层锚到常驻的 ⋮ 按钮上——这是「一次只开一层」的约定）。
+        const popups = [
+          { chain: ['top-more-btn'], menu: 'top-more-menu' },
+          { chain: ['top-more-btn', 'theme-btn'], menu: 'theme-menu' },
+          { chain: ['top-more-btn', 'skin-btn'], menu: 'skin-menu' },
+        ];
+        for (const { chain, menu } of popups) {
+          if (!geometry.buttons.find(b => b.id === chain[0] && b.hit)) continue;
+          await page.locator('#' + chain[0]).click();
+          for (const step of chain.slice(1)) await page.locator('#' + step).click();
           await page.locator('#' + menu).waitFor({ state: 'visible' });
           await page.locator('#' + menu).evaluate(async e => {
             await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
@@ -114,8 +124,30 @@ function check(condition, label, details) {
           });
           check(bounds.x >= 0 && bounds.right <= width && bounds.bottom <= 900 && bounds.hit,
             label + ' menu reachable ' + menu, bounds);
+          if (menu === 'top-more-menu') {
+            const items = await page.locator('#top-more-menu .menu-item:not([hidden])').evaluateAll(
+              els => els.map(e => e.id));
+            check(items.join(',') === 'space3d-entry,theme-btn,skin-btn,workshop-btn,stage-control-btn,service-exit',
+              label + ' 更多工具收纳的六项齐全', items);
+          }
           await page.keyboard.press('Escape');
-          if (await page.locator('#' + menu).isVisible()) await page.locator('#' + button).click();
+          if (await page.locator('#' + menu).isVisible()) await page.locator('#' + chain[chain.length - 1]).click();
+        }
+        // ⋮ 里每一项都得点得到，否则「收进去」等于「拿不到」。清风皮肤走自己的工具条，
+        // 顶栏这颗点不到就整段跳过（与上面 popups 的判据一致）。
+        if (geometry.buttons.find(b => b.id === 'top-more-btn' && b.hit)) {
+          await page.keyboard.press('Escape');
+          if (!(await page.locator('#top-more-menu').isHidden())) await page.locator('#top-more-btn').click();
+          await page.locator('#top-more-menu').waitFor({ state: 'visible' });
+          for (const id of ['space3d-entry', 'theme-btn', 'skin-btn', 'workshop-btn', 'stage-control-btn']) {
+            const box = await page.locator('#' + id).boundingBox();
+            const hit = box && await page.evaluate(p => {
+              const e = document.getElementById(p.id), h = document.elementFromPoint(p.x, p.y);
+              return !!e && !!h && e.contains(h);
+            }, { id, x: box.x + box.width / 2, y: box.y + box.height / 2 });
+            check(hit, label + ' 更多工具项可点 ' + id, { box });
+          }
+          await page.keyboard.press('Escape');
         }
         if (skin !== 'qingfeng') {
           await page.locator('#search').blur();

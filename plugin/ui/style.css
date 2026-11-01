@@ -2482,6 +2482,13 @@ button.btn {
   border-color: rgba(var(--highlight-rgb), 0.34);
 }
 
+/* 退出服务是这一列里唯一不可逆的一项，用状态色标出来，别和「舞台控制」长一个样。 */
+.top-more-menu .menu-item-danger,
+.top-more-menu .menu-item-danger svg { color: var(--danger); }
+.top-more-menu .menu-item-danger:hover {
+  background: var(--danger-wash, rgba(255, 90, 90, 0.14));
+}
+
 /* 界面皮肤弹层。与 #theme-menu 同一套做法：**由 skins.js 搬去 <body>**，
    自己 fixed 定位（left/top 由 JS 按按钮矩形算）。
    留在 .skin-picker 里是错的：.topbar 是 position:relative + z-index:40 +
@@ -2489,8 +2496,6 @@ button.btn {
    参与比较。舞台抽屉是 fixed + z-index:58（skin.classic.css），于是整张菜单
    被那块玻璃盖住 —— 实测命中测试在菜单中心与左上角两点都返回 #stage。
    85 与 #theme-menu 同层：只要压过舞台抽屉(50)与控制舱(70/80)即可。 */
-.skin-picker { position: relative; display: flex; }
-
 .skin-menu {
   position: fixed;
   top: 0;

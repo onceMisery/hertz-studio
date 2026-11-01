@@ -376,6 +376,9 @@
     <kbd>/</kbd>
   </div>
 
+  <!-- 顶栏只留常驻动作：状态、最小化、三维舞台、更多、头像（皮肤注入的右侧折叠也在这一簇）。
+       三维空间 / 主题色 / 界面皮肤 / 退出服务 收进 #top-more-menu——它们要么低频，要么
+       一键就能关掉整个服务，摊在这一排只会让误点有机会发生。 -->
   <div class="top-right">
     <span id="demo-badge" class="badge-demo" hidden>演示模式</span>
     <div id="conn" class="conn">连接中…</div>
@@ -385,30 +388,9 @@
     <button id="stage3d-entry" class="iconbtn" title="沉浸声场 (V)" aria-label="进入沉浸声场">
       <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-cube"/></svg>
     </button>
-    <button id="space3d-entry" class="iconbtn" title="三维空间 (X)" aria-label="进入三维空间">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-space"/></svg>
-    </button>
     <button type="button" id="settings-entry" class="iconbtn" title="设置 (4)" aria-label="打开设置" aria-controls="view-settings">
       <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-settings"/></svg>
     </button>
-
-    <!-- 主题色切换：色板 → 下拉调色盘。列表由 themes.js 的 CATALOG 填充，
-         加主题只需要往那张表里加一条。 -->
-    <div class="theme-picker" id="theme-picker">
-      <button id="theme-btn" class="iconbtn" title="主题色" aria-label="切换主题色" aria-haspopup="listbox" aria-expanded="false">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-palette"/></svg>
-      </button>
-      <div class="theme-menu" id="theme-menu" role="listbox" aria-label="主题色列表" hidden></div>
-    </div>
-
-    <!-- 界面皮肤：顶栏一键换装。菜单项由 skins.js 从同一份 CATALOG 渲染，
-         与设置页那组共用真源，所以这里只留空壳。 -->
-    <div class="skin-picker" id="skin-picker">
-      <button type="button" id="skin-btn" class="iconbtn" title="界面皮肤" aria-label="切换界面皮肤" aria-haspopup="menu" aria-expanded="false">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-skin"/></svg>
-      </button>
-      <div class="skin-menu" id="skin-menu" role="menu" aria-label="界面皮肤" hidden></div>
-    </div>
 
     <div class="top-more" id="top-more">
       <button type="button" id="top-more-btn" class="iconbtn" title="更多工具" aria-label="更多工具" aria-haspopup="menu" aria-expanded="false">
@@ -416,6 +398,22 @@
       </button>
 
       <div id="top-more-menu" class="top-more-menu" role="menu" aria-label="更多工具" hidden>
+        <button type="button" id="space3d-entry" class="iconbtn menu-item" role="menuitem" title="三维空间 (X)" aria-label="进入三维空间">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-space"/></svg>
+          <span>三维空间</span>
+        </button>
+        <!-- 主题色：色板 → 调色盘。列表由 themes.js 的 CATALOG 填充，加主题只往那张表加一条。 -->
+        <button type="button" id="theme-btn" class="iconbtn menu-item" role="menuitem" title="主题色" aria-label="切换主题色" aria-expanded="false">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-palette"/></svg>
+          <span>主题色</span>
+        </button>
+
+        <!-- 界面皮肤：菜单项由 skins.js 从同一份 CATALOG 渲染，与设置页那组共用真源。 -->
+        <button type="button" id="skin-btn" class="iconbtn menu-item" role="menuitem" title="界面皮肤" aria-label="切换界面皮肤" aria-expanded="false">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-skin"/></svg>
+          <span>界面皮肤</span>
+        </button>
+
         <button type="button" id="workshop-btn" class="iconbtn menu-item" role="menuitem" title="创意工坊" aria-label="打开创意工坊" aria-expanded="false">
           <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-workshop"/></svg>
           <span>创意工坊</span>
@@ -424,8 +422,22 @@
           <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-sliders"/></svg>
           <span>舞台控制</span>
         </button>
+
+        <!-- 退出服务：像系统电源键那样，一颗钮把播放、进程、这个页面一起收掉，所以点它先要
+             确认一次。初值 hidden —— dbx / demo 形态没有可退的独立服务，由 app.js 只在
+             独立形态放开。 -->
+        <button type="button" id="service-exit" class="iconbtn menu-item menu-item-danger" role="menuitem" title="退出服务" aria-label="退出播放服务" hidden>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-power"/></svg>
+          <span>退出服务</span>
+        </button>
       </div>
     </div>
+
+    <!-- 这两个弹层在运行时会被各自的模块搬到 <body>（.topbar 是 position:relative +
+         z-index:40 的层叠上下文，留在里面会被舞台抽屉盖住）；写在这里只表示它们与
+         #theme-btn / #skin-btn 的从属关系，锚点统一是 #top-more-btn。 -->
+    <div class="theme-menu" id="theme-menu" role="listbox" aria-label="主题色列表" hidden></div>
+    <div class="skin-menu" id="skin-menu" role="menu" aria-label="界面皮肤" hidden></div>
 
     <!-- edition:full -->
     <button id="online-account-btn" class="iconbtn" title="登录音源" aria-label="登录在线音源账号" aria-haspopup="dialog">
@@ -435,13 +447,6 @@
       </span>
     </button>
     <!-- edition:end -->
-
-    <!-- 退出服务：像系统电源键那样，一颗钮把播放、进程、这个页面一起收掉。
-         初值 hidden —— dbx / demo 形态没有可退的独立服务，由 app.js 只在
-         独立形态放开。放在簇的最右，与窗口那套「右边是离开」的习惯对齐。 -->
-    <button type="button" id="service-exit" class="iconbtn" title="退出服务" aria-label="退出播放服务" hidden>
-      <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-power"/></svg>
-    </button>
 
   </div>
 </header>

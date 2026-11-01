@@ -3,20 +3,27 @@
 (function (global) {
   'use strict';
   const triggers = new Set();
-  let menu, anchor, applyTheme = id => global.Theme.apply(id);
+  let menu, anchor, panelAnchor, applyTheme = id => global.Theme.apply(id);
   function themeDotStyle(theme) {
     return `--t-bg:${theme.tokens['--bg']};--t-accent:${theme.tokens['--accent']};--t-accent-2:${theme.tokens['--accent-2']}`;
+  }
+  // 顶栏入口被收进 ⋮ 之后，触发项会随那张菜单一起收起，弹层的定位锚点必须换成
+  // 那颗常驻的 ⋮ 按钮——否则菜单一关，getBoundingClientRect 全是 0，调色盘会跳到左上角。
+  function resolvePanelAnchor(button) {
+    const host = button.closest && button.closest('.top-more-menu');
+    return (host && global.document.getElementById('top-more-btn')) || button;
   }
   function close(restoreFocus) {
     if (!menu) return;
     menu.hidden = true;
     triggers.forEach(button => button.setAttribute('aria-expanded', 'false'));
-    if (restoreFocus && anchor && anchor.isConnected) anchor.focus();
+    if (restoreFocus && panelAnchor && panelAnchor.isConnected) panelAnchor.focus();
     anchor = null;
+    panelAnchor = null;
   }
   function position() {
-    if (!menu || menu.hidden || !anchor) return;
-    const r = anchor.getBoundingClientRect(), pad = 8, gap = 8;
+    if (!menu || menu.hidden || !panelAnchor) return;
+    const r = panelAnchor.getBoundingClientRect(), pad = 8, gap = 8;
     const width = menu.offsetWidth, height = menu.offsetHeight;
     let top = r.bottom + gap;
     if (top + height > innerHeight - pad && r.top - height - gap >= pad) top = r.top - height - gap;
@@ -52,7 +59,7 @@
     target.focus({ preventScroll: true }); target.scrollIntoView({ block: 'nearest' });
   }
   function open(button, focus) {
-    close(false); anchor = button;
+    close(false); anchor = button; panelAnchor = resolvePanelAnchor(button);
     render(); menu.hidden = false; button.setAttribute('aria-expanded', 'true'); position();
     document.dispatchEvent(new CustomEvent('topbar:popup', { detail: { id: 'theme' } }));
     if (focus) focusItem(Math.max(0, Array.from(menu.children).findIndex(item => item.getAttribute('aria-selected') === 'true')));

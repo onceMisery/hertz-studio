@@ -173,6 +173,8 @@ async function main() {
     // Space uses the actual app host, including local normalization and retry closures.
     await page.evaluate(() => localStorage.setItem('vmusic.search-history', JSON.stringify({v:1,items:['R1 saved history']})));
     emptySearchRequests = [];
+    // 三维空间入口收在「更多工具」里：先开 ⋮ 再点那一项。
+    if (await page.locator('#top-more-menu').isHidden()) await page.locator('#top-more-btn').click();
     await page.locator('#space3d-entry').click();
     await page.locator('#sh-query').focus();
     await page.getByRole('button', {name:'R1 saved history',exact:true}).waitFor();

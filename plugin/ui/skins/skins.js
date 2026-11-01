@@ -346,9 +346,16 @@
 
   /// 菜单已经不在按钮下面了（见 bindEntry 里搬 body 那段），位置只能自己算 ——
   /// 与 app.js 的 positionThemeMenu 同一套判据：右对齐按钮，下方放不下就翻上去。
+  /// 入口被收进 ⋮ 之后，触发项会随那张菜单收起，所以锚点换成常驻的 ⋮ 按钮。
+  function entryAnchor() {
+    var host = entryBtn.closest && entryBtn.closest('.top-more-menu');
+    return (host && el('top-more-btn')) || entryBtn;
+  }
+
   function positionEntryMenu() {
     if (!entryMenu || entryMenu.hidden || !entryBtn) return;
-    var r = entryBtn.getBoundingClientRect();
+    var anchor = entryAnchor();
+    var r = anchor.getBoundingClientRect();
     var w = entryMenu.offsetWidth || 246;
     var h = entryMenu.offsetHeight || 0;
     var gap = 8, pad = 8;
