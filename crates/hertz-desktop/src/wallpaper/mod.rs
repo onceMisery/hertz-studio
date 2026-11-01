@@ -7,9 +7,9 @@
 //! 崩溃恢复与单槽导入。
 //! P1-03：媒体路径（media/media_stream/istream/webresource）——容器探测、
 //! Range 流内核、保留域拦截与页面轻后端。
-//! P1-04：预算账本（budget，§12.1/§12.3）——会话状态机随对应包创建。
+//! P1-04：预算账本（budget，§12.1/§12.3）与会话状态机（session，§13.3）。
 
-// P1-02/P1-04a 内核在本包内自测；接线到 app/管理协议属 P1-05（§20.2 依赖链
+// P1-02/P1-04 内核在本包内自测；接线到 app/管理协议属 P1-05（§20.2 依赖链
 // 01→02→03/04→05），接线后移除 dead_code 放行。
 #[allow(dead_code)]
 pub(crate) mod assets;
@@ -21,6 +21,8 @@ pub(crate) mod jobs;
 pub(crate) mod media;
 #[allow(dead_code)]
 pub(crate) mod media_stream;
+#[allow(dead_code)]
+pub(crate) mod session;
 pub(crate) mod webresource;
 #[allow(dead_code)]
 pub(crate) mod istream;
