@@ -47,6 +47,10 @@ anyhow = { workspace = true }
 dirs = { workspace = true }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json"] }
 tungstenite = { version = "0.28", default-features = false, features = ["handshake"] }
+# 系统音频分析（P1-06b §11.3）：复用 2048 点 Hann FFT 算法，与播放器
+# （vmusic-audio）锁同一 rustfft 版本，黄金向量测试钉住频带映射一致。
+rustfft = { workspace = true }
+num-complex = { workspace = true }
 
 hertz-desktop-ipc = { path = "../hertz-desktop-ipc" }
 hertz-wallpaper = { path = "../hertz-wallpaper" }
