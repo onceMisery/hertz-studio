@@ -1,12 +1,16 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 hertz-studio contributors
 
-//! 壁纸只读 feed：播放时钟 + 最新 64 段频谱。
+//! 壁纸只读 feed v2：播放时钟 + 最新 64 段频谱。
 //!
 //! 只认当前 profile 的 `vmusicd.json`、`wallpaper-key` 与壁纸只读桥；
 //! 不接触主 token、歌词钥匙或播放控制。首选 `GET /v1/wallpaper/events`
 //! 事件流，旧服务没有该入口时回退到 500 ms 快照轮询。快照不含曲名、路径、
 //! 账号和封面。断连由调用方清空；暂停不插值；频谱按 500 ms 开始衰减、1 s 归零。
+//!
+//! v2（设计 §11.2）：状态与频谱序号分别递增——接受条件是任一序号推进，
+//! 两者都不推进才算重放；协议不兼容时给出稳定错误码，音乐响应停止、
+//! 环境动画保留（由调用方按错误处理）。
 
 use std::io;
 use std::net::{SocketAddr, TcpStream};
@@ -19,7 +23,7 @@ use tungstenite::http::header::AUTHORIZATION;
 use crate::bridge;
 use crate::config::Profile;
 
-pub(crate) const PROTOCOL: u32 = 1;
+pub(crate) const PROTOCOL: u32 = 2;
 pub(crate) const BANDS: usize = 64;
 
 pub(crate) const ERR_DISCOVERY_MISSING: &str = "discovery_missing";
@@ -67,7 +71,13 @@ pub(crate) struct Snapshot {
     #[serde(skip)]
     pub(crate) received_at: Option<std::time::Instant>,
     pub(crate) protocol: u32,
+    /// 状态序号：离散播放状态帧（≤1 Hz）推进。
     pub(crate) seq: u64,
+    /// 频谱序号：频谱帧（≤30 Hz）推进；两者独立单调（§11.2）。DBX 宿主
+    /// 尚在 v1 形状（无该字段）——default 0 使其退化为仅状态序号去重，
+    /// 待 DBX 桥协议升级后自然获得双序号语义（§11.2 不扩大 DBX scope）。
+    #[serde(default)]
+    pub(crate) spectrum_seq: u64,
     pub(crate) server: ServerInfo,
     pub(crate) valid: bool,
     pub(crate) playing: bool,
@@ -139,7 +149,8 @@ pub(crate) struct Feed {
     client: reqwest::blocking::Client,
     profile: Profile,
     session: Option<String>,
-    last_seq: Option<u64>,
+    last_status_seq: Option<u64>,
+    last_spectrum_seq: Option<u64>,
 }
 
 impl Feed {
@@ -151,7 +162,8 @@ impl Feed {
             client: bridge::client()?,
             profile,
             session: None,
-            last_seq: None,
+            last_status_seq: None,
+            last_spectrum_seq: None,
         })
     }
 
@@ -221,14 +233,23 @@ impl Feed {
     ) -> Result<(), FeedError> {
         if discovery_session.is_some_and(|session| session != snapshot.server.session.as_str()) {
             self.session = None;
-            self.last_seq = None;
+            self.last_status_seq = None;
+            self.last_spectrum_seq = None;
             return Err(FeedError::new(
                 ERR_SESSION_CHANGED,
                 "服务会话已变化，等待新快照",
             ));
         }
+        // v2：状态与频谱序号分别单调；两者都不推进才是重放（§11.2）。
+        let status_stale = self
+            .last_status_seq
+            .is_some_and(|seq| snapshot.seq <= seq);
+        let spectrum_stale = self
+            .last_spectrum_seq
+            .is_some_and(|seq| snapshot.spectrum_seq <= seq);
         if self.session.as_deref() == Some(snapshot.server.session.as_str())
-            && self.last_seq.is_some_and(|seq| snapshot.seq <= seq)
+            && status_stale
+            && spectrum_stale
         {
             return Err(FeedError::new(
                 ERR_STALE,
@@ -236,7 +257,8 @@ impl Feed {
             ));
         }
         self.session = Some(snapshot.server.session.clone());
-        self.last_seq = Some(snapshot.seq);
+        self.last_status_seq = Some(snapshot.seq);
+        self.last_spectrum_seq = Some(snapshot.spectrum_seq);
         Ok(())
     }
 
@@ -361,7 +383,9 @@ fn map_socket_error(error: tungstenite::Error) -> FeedError {
 
 pub(crate) fn validate(snapshot: &Snapshot) -> Result<(), FeedError> {
     let invalid = |message: &str| FeedError::new(ERR_INVALID, message);
-    if snapshot.protocol != PROTOCOL {
+    // v2 是当前协议；v1 仍接受——DBX 宿主的已验收投影停在 v1（§11.2），
+    // 独立服务的协议门禁在 Feed::prepare 处已强制 PROTOCOL=2。
+    if !matches!(snapshot.protocol, 1 | 2) {
         return Err(invalid("快照协议不一致"));
     }
     if !snapshot.valid {
@@ -416,6 +440,7 @@ mod tests {
             received_at: None,
             protocol: PROTOCOL,
             seq,
+            spectrum_seq: seq,
             server: ServerInfo {
                 session: "s1".into(),
                 edition: "full".into(),
@@ -457,12 +482,91 @@ mod tests {
     fn server_shaped_snapshot_is_accepted() {
         let bands = vec!["0.0"; BANDS].join(",");
         let raw = format!(
-            r#"{{"protocol":1,"seq":3,"server":{{"session":"s1","edition":"full","version":"0.2.1"}},"valid":true,"playing":false,"positionMs":0,"durationMs":null,"generation":"0","spectrum":{{"bands":[{bands}],"energy":0.0,"ageMs":null}},"timing":"presentation_applied"}}"#
+            r#"{{"protocol":2,"seq":3,"spectrumSeq":41,"server":{{"session":"s1","edition":"full","version":"0.2.1"}},"valid":true,"playing":false,"positionMs":0,"durationMs":null,"generation":"0","spectrum":{{"bands":[{bands}],"energy":0.0,"ageMs":null}},"timing":"presentation_applied"}}"#
         );
         let value: Snapshot = serde_json::from_str(&raw).unwrap();
         validate(&value).unwrap();
+        assert_eq!(value.seq, 3);
+        assert_eq!(value.spectrum_seq, 41);
         assert_eq!(value.interpolated_position_ms(500), None);
         assert_eq!(value.effective_bands(0), vec![0.0; BANDS]);
+    }
+
+    /// v2 去重：频谱序号单独推进（30 Hz 频谱帧）必须接受，状态序号冻结。
+    #[test]
+    fn spectrum_only_advance_is_accepted() {
+        let dir = temp_dir();
+        std::fs::create_dir_all(&dir.0).unwrap();
+        let mut first = snapshot(2);
+        first.spectrum_seq = 10;
+        let mut second = snapshot(2);
+        second.spectrum_seq = 11;
+        let (port, server) = serve_ws(vec![json(&first), json(&second)]);
+        let profile = make_profile(&dir, Some(PROTOCOL), true, port);
+        let mut feed = Feed::new(profile).unwrap();
+        let mut seqs = Vec::new();
+        let error = feed
+            .subscribe(|value| {
+                seqs.push((value.seq, value.spectrum_seq));
+                true
+            })
+            .unwrap_err();
+        assert_eq!(seqs, vec![(2, 10), (2, 11)]);
+        assert_eq!(error.code, ERR_EVENTS, "服务端关流是正常收尾");
+        server.join().unwrap();
+    }
+
+    /// v2 去重：状态序号单独推进（1 Hz 状态帧/心跳）必须接受。
+    #[test]
+    fn status_only_advance_is_accepted() {
+        let dir = temp_dir();
+        std::fs::create_dir_all(&dir.0).unwrap();
+        let mut first = snapshot(2);
+        first.spectrum_seq = 10;
+        let mut second = snapshot(3);
+        second.spectrum_seq = 10;
+        let (port, server) = serve_ws(vec![json(&first), json(&second)]);
+        let profile = make_profile(&dir, Some(PROTOCOL), true, port);
+        let mut feed = Feed::new(profile).unwrap();
+        let mut seqs = Vec::new();
+        let error = feed
+            .subscribe(|value| {
+                seqs.push((value.seq, value.spectrum_seq));
+                true
+            })
+            .unwrap_err();
+        assert_eq!(seqs, vec![(2, 10), (3, 10)]);
+        assert_eq!(error.code, ERR_EVENTS);
+        server.join().unwrap();
+    }
+
+    /// DBX 宿主仍发 v1 形状（无 spectrumSeq）：解析成功、验证通过、
+    /// 去重退化为状态序号单调（§11.2 不扩大 DBX scope）。
+    #[test]
+    fn v1_shaped_frames_degrade_to_status_seq_dedup() {
+        let bands = vec!["0.5"; BANDS].join(",");
+        let raw = format!(
+            r#"{{"protocol":1,"seq":7,"server":{{"session":"s1","edition":"full","version":"0.2.1"}},"valid":true,"playing":true,"positionMs":1000,"durationMs":60000,"generation":"1","spectrum":{{"bands":[{bands}],"energy":0.5,"ageMs":0}},"timing":"presentation_applied"}}"#
+        );
+        let value: Snapshot = serde_json::from_str(&raw).unwrap();
+        assert_eq!(value.spectrum_seq, 0);
+        validate(&value).unwrap();
+
+        let dir = temp_dir();
+        std::fs::create_dir_all(&dir.0).unwrap();
+        let (port, server) = serve_ws(vec![raw.clone(), raw]);
+        let profile = make_profile(&dir, Some(PROTOCOL), true, port);
+        let mut feed = Feed::new(profile).unwrap();
+        let mut seqs = Vec::new();
+        let error = feed
+            .subscribe(|frame| {
+                seqs.push(frame.seq);
+                true
+            })
+            .unwrap_err();
+        assert_eq!(seqs, vec![7], "同帧重放仍被拒绝");
+        assert_eq!(error.code, ERR_STALE);
+        server.join().unwrap();
     }
 
     #[test]
@@ -648,7 +752,8 @@ mod tests {
     fn events_stream_rejects_replayed_sequence() {
         let dir = temp_dir();
         std::fs::create_dir_all(&dir.0).unwrap();
-        let (port, server) = serve_ws(vec![json(&snapshot(2)), json(&snapshot(1))]);
+        // 两个序号都不推进 = 重放；任一回退但另一个推进不算重放（v2 双单调）。
+        let (port, server) = serve_ws(vec![json(&snapshot(2)), json(&snapshot(2))]);
         let profile = make_profile(&dir, Some(PROTOCOL), true, port);
         let mut feed = Feed::new(profile).unwrap();
         let mut seqs = Vec::new();
@@ -746,7 +851,8 @@ mod tests {
             client: bridge::client().unwrap(),
             profile,
             session: feed.session.clone(),
-            last_seq: feed.last_seq,
+            last_status_seq: feed.last_status_seq,
+            last_spectrum_seq: feed.last_spectrum_seq,
         };
         assert_eq!(stale.poll().unwrap_err().code, ERR_STALE);
         second.join().unwrap();

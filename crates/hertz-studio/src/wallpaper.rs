@@ -1,11 +1,15 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 hertz-studio contributors
 
-//! 壁纸只读桥：独立钥匙 + 最新一帧 64 段频谱。
+//! 壁纸只读桥 v2：独立钥匙 + 双序号（状态 ≤1 Hz / 频谱 ≤30 Hz）。
 //!
 //! 不新增播放 owner、FFT 或第二个频谱订阅：`AudioEvent::Spectrum` 的既有
-//! 消费方把最新帧写入这里，快照直接投影原 `AudioHandle` 与 `AppState` 真值。
-//! 曲名、路径、账号和封面不进入该协议；W2 再单独评审。
+//! 消费方（33 ms 一帧）把最新帧写入这里，快照直接投影原 `AudioHandle` 与
+//! `AppState` 真值。曲名、路径、账号和封面不进入该协议。
+//!
+//! v2（设计 §11.2）：状态与频谱序号分别递增——离散播放状态（播放/曲目/
+//! 代际）推送不超过 1 Hz，频谱帧跟随引擎节拍推送不超过 30 Hz；每客户端
+//! 只保留一份待发送数据，慢消费者不排历史帧；包长 ≤8 KiB。
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -18,14 +22,18 @@ use vmusic_core::PlayerSnapshot;
 
 use crate::state::{AppState, WsEvent};
 
-pub(crate) const PROTOCOL: u32 = 1;
+pub(crate) const PROTOCOL: u32 = 2;
 pub(crate) const BANDS: usize = 64;
 /// 最后一帧超过这个时长后，快照不再回放旧频谱。
 const SPECTRUM_MAX_AGE: Duration = Duration::from_millis(1000);
-/// 事件合并窗口：频谱/播放事件只标脏，最多每 250 ms 发一帧完整快照。
-const EVENT_PUSH_INTERVAL: Duration = Duration::from_millis(250);
-/// 没有新事件时也按 1 s 心跳推进 seq 与 ageMs，避免客户端把连接判死。
-const EVENT_HEARTBEAT: Duration = Duration::from_secs(1);
+/// v2 频谱帧推送节拍（引擎 33 ms 一帧；推送上限 30 Hz，§11.2）。
+const SPECTRUM_PUSH_INTERVAL: Duration = Duration::from_millis(33);
+/// v2 离散状态推送上限，也是空转心跳周期（§11.2 状态最多 1 Hz）。
+const STATUS_PUSH_INTERVAL: Duration = Duration::from_secs(1);
+/// v2 单帧长度上限（§11.2 包长最多 8 KiB）。运行期不逐帧断言（30 Hz 热路径
+/// 不做序列化两次），由测试钉住当前形状的帧长。
+#[cfg(test)]
+const MAX_FRAME_BYTES: usize = 8 * 1024;
 
 struct SpectrumFrame {
     bands: [f32; BANDS],
@@ -36,7 +44,10 @@ struct SpectrumFrame {
 
 #[derive(Default)]
 pub(crate) struct Wallpaper {
-    seq: AtomicU64,
+    /// 离散状态帧序号（≤1 Hz 推送时递增）。
+    status_seq: AtomicU64,
+    /// 频谱帧序号（≤30 Hz 推送时递增）。
+    spectrum_seq: AtomicU64,
     spectrum: Mutex<Option<SpectrumFrame>>,
 }
 
@@ -80,18 +91,27 @@ impl Wallpaper {
         }
     }
 
-    fn next_seq(&self) -> u64 {
-        self.seq.fetch_add(1, Ordering::Relaxed) + 1
-    }
-
-    pub(crate) fn snapshot(&self, state: &AppState) -> Value {
-        let seq = self.next_seq();
+    /// 组装一帧。`bump_status`/`bump_spectrum` 决定哪个序号随本帧递增：
+    /// 轮询与首发是合并帧（双递增），事件流的频谱帧只递增 spectrum_seq、
+    /// 状态帧只递增 status_seq（§11.2 两个序号分别递增）。
+    fn frame(&self, state: &AppState, bump_status: bool, bump_spectrum: bool) -> Value {
+        let status_seq = if bump_status {
+            self.status_seq.fetch_add(1, Ordering::Relaxed) + 1
+        } else {
+            self.status_seq.load(Ordering::Relaxed)
+        };
+        let spectrum_seq = if bump_spectrum {
+            self.spectrum_seq.fetch_add(1, Ordering::Relaxed) + 1
+        } else {
+            self.spectrum_seq.load(Ordering::Relaxed)
+        };
         let player = state.audio.snapshot();
         let (bands, age_ms) = self.spectrum_view();
         let energy = bands.iter().sum::<f32>() / BANDS as f32;
         json!({
             "protocol": PROTOCOL,
-            "seq": seq,
+            "seq": status_seq,
+            "spectrumSeq": spectrum_seq,
             "server": {
                 "session": state.server_instance_id(),
                 "edition": crate::edition::NAME,
@@ -109,6 +129,11 @@ impl Wallpaper {
             },
             "timing": "presentation_applied",
         })
+    }
+
+    /// 轮询端点：合并帧，双序号递增（v1 语义的推平）。
+    pub(crate) fn snapshot(&self, state: &AppState) -> Value {
+        self.frame(state, true, true)
     }
 
     fn spectrum_view(&self) -> ([f32; BANDS], Option<u64>) {
@@ -131,6 +156,70 @@ pub(crate) async fn snapshot(state: &AppState) -> Value {
     let mut value = state.wallpaper.snapshot(state);
     value["space"] = space_presentation(state).await;
     value
+}
+
+/// 一次 tick 的推送决策：状态帧每秒必发（≤1 Hz 的上限与保底——space 场景
+/// 切换与暂停反馈都随它 ≤1 s 送达），频谱帧只跟脏标记（≤30 Hz）。
+/// 纯函数便于测试节拍合同。
+fn plan_push(spectrum_dirty: bool, since_status: Duration) -> (bool, bool) {
+    (
+        since_status >= STATUS_PUSH_INTERVAL,
+        spectrum_dirty,
+    )
+}
+
+/// 壁纸事件流 v2：首发合并帧；33 ms 频谱节拍只推频谱帧（≤30 Hz），
+/// 状态帧每秒一帧（space 投影随之刷新）。不新开 FFT 或播放 owner，慢客户端
+/// 只保留最新帧（send 背压 + broadcast Lagged 合并），旧事件不排队重放。
+pub(crate) async fn events(state: Arc<AppState>, mut socket: WebSocket) {
+    let initial = snapshot(&state).await.to_string();
+    if socket.send(Message::Text(initial.into())).await.is_err() {
+        return;
+    }
+    // space 投影只在状态帧时重查（DB 查询不进 30 Hz 热路径）；频谱帧复用
+    // 缓存。任一帧都带 space，否则 follow 模式会在客户端掉回固定场景。
+    let mut space_cache = space_presentation(&state).await;
+    let mut source = state.events.subscribe();
+    let mut ticker = tokio::time::interval_at(
+        tokio::time::Instant::now() + SPECTRUM_PUSH_INTERVAL,
+        SPECTRUM_PUSH_INTERVAL,
+    );
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut spectrum_dirty = false;
+    let mut last_status_sent = Instant::now();
+    loop {
+        tokio::select! {
+            _ = ticker.tick() => {
+                let now = Instant::now();
+                let (bump_status, bump_spectrum) =
+                    plan_push(spectrum_dirty, now.duration_since(last_status_sent));
+                if !bump_status && !bump_spectrum {
+                    continue;
+                }
+                if bump_status {
+                    space_cache = space_presentation(&state).await;
+                }
+                let mut value = state.wallpaper.frame(&state, bump_status, bump_spectrum);
+                value["space"] = space_cache.clone();
+                if socket.send(Message::Text(value.to_string().into())).await.is_err() {
+                    break;
+                }
+                if bump_status {
+                    last_status_sent = now;
+                }
+                if bump_spectrum {
+                    spectrum_dirty = false;
+                }
+            }
+            event = source.recv() => match event {
+                Ok(WsEvent::Spectrum { .. }) => spectrum_dirty = true,
+                Ok(_) => {}
+                Err(RecvError::Lagged(_)) => spectrum_dirty = true,
+                Err(RecvError::Closed) => break,
+            },
+        }
+    }
+    let _ = socket.send(Message::Close(None)).await;
 }
 
 /// 三维空间当前场景的窄投影：只带场景 id 和该场景参数，不带账号、曲目或整份设置。
@@ -162,45 +251,6 @@ fn space_presentation_from(value: &Value) -> Value {
         return Value::Null;
     }
     json!({ "scene": scene, "params": params })
-}
-
-/// 壁纸事件流：首发完整快照，之后把现有播放/频谱广播合并成最多 4 Hz 的
-/// 完整快照，空转时 1 s 心跳。不新开 FFT 或播放 owner，慢客户端由 send
-/// 背压与 broadcast 的 Lagged 合并处理，旧事件不排队重放。
-pub(crate) async fn events(state: Arc<AppState>, mut socket: WebSocket) {
-    let initial = snapshot(&state).await.to_string();
-    if socket.send(Message::Text(initial.into())).await.is_err() {
-        return;
-    }
-    let mut source = state.events.subscribe();
-    let mut ticker = tokio::time::interval_at(
-        tokio::time::Instant::now() + EVENT_PUSH_INTERVAL,
-        EVENT_PUSH_INTERVAL,
-    );
-    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let mut dirty = false;
-    let mut last_sent = Instant::now();
-    loop {
-        tokio::select! {
-            _ = ticker.tick() => {
-                if dirty || last_sent.elapsed() >= EVENT_HEARTBEAT {
-                    let text = snapshot(&state).await.to_string();
-                    if socket.send(Message::Text(text.into())).await.is_err() {
-                        break;
-                    }
-                    dirty = false;
-                    last_sent = Instant::now();
-                }
-            }
-            event = source.recv() => match event {
-                Ok(WsEvent::State(_)) | Ok(WsEvent::Spectrum { .. }) => dirty = true,
-                Ok(_) => {}
-                Err(RecvError::Lagged(_)) => dirty = true,
-                Err(RecvError::Closed) => break,
-            },
-        }
-    }
-    let _ = socket.send(Message::Close(None)).await;
 }
 
 #[cfg(test)]
@@ -257,10 +307,66 @@ mod tests {
         assert_eq!(value["spectrum"]["energy"], 0.0);
         assert_eq!(value["spectrum"]["ageMs"], Value::Null);
         assert_eq!(value["space"], Value::Null);
-        let first = value["seq"].as_u64().unwrap();
-        assert!(snapshot(&state).await["seq"].as_u64().unwrap() > first);
+        // 合并帧双序号各自递增（§11.2 状态和频谱序号分别递增）。
+        let status_first = value["seq"].as_u64().unwrap();
+        let spectrum_first = value["spectrumSeq"].as_u64().unwrap();
+        let next = snapshot(&state).await;
+        assert!(next["seq"].as_u64().unwrap() > status_first);
+        assert!(next["spectrumSeq"].as_u64().unwrap() > spectrum_first);
         state.audio.shutdown();
         handle.join().unwrap();
+    }
+
+    /// 频谱帧只递增 spectrumSeq：状态序号冻结（≤1 Hz 合同的另一半）。
+    #[tokio::test]
+    async fn spectrum_frame_advances_only_spectrum_seq() {
+        let (state, handle) = crate::state::tests::playback_state().await;
+        let merged = snapshot(&state).await;
+        let status = merged["seq"].as_u64().unwrap();
+        let spectrum = merged["spectrumSeq"].as_u64().unwrap();
+
+        let frame = state.wallpaper.frame(&state, false, true);
+        assert_eq!(frame["seq"].as_u64().unwrap(), status, "频谱帧不得动状态序号");
+        assert!(frame["spectrumSeq"].as_u64().unwrap() > spectrum);
+
+        let status_frame = state.wallpaper.frame(&state, true, false);
+        assert!(status_frame["seq"].as_u64().unwrap() > status);
+        assert_eq!(
+            status_frame["spectrumSeq"].as_u64().unwrap(),
+            frame["spectrumSeq"].as_u64().unwrap(),
+            "状态帧不得动频谱序号"
+        );
+        state.audio.shutdown();
+        handle.join().unwrap();
+    }
+
+    /// §11.2：单帧 ≤8 KiB（64 段 + 信封）。
+    #[tokio::test]
+    async fn frame_length_stays_under_8kib() {
+        let (state, handle) = crate::state::tests::playback_state().await;
+        let value = snapshot(&state).await;
+        assert!(
+            value.to_string().len() <= MAX_FRAME_BYTES,
+            "帧长 {} 超过 {} 上限",
+            value.to_string().len(),
+            MAX_FRAME_BYTES
+        );
+        state.audio.shutdown();
+        handle.join().unwrap();
+    }
+
+    /// 节拍合同：频谱只跟脏标记；状态每秒必发（上限与保底）。
+    #[test]
+    fn plan_push_follows_cadence_contract() {
+        // 频谱脏 → 发频谱帧；状态未到 1 s 不发。
+        assert_eq!(plan_push(true, Duration::from_millis(100)), (false, true));
+        // 状态到 1 s：即使频谱不脏也发状态帧（space 刷新与暂停反馈的保底）。
+        assert_eq!(plan_push(false, STATUS_PUSH_INTERVAL), (true, false));
+        assert_eq!(plan_push(false, STATUS_PUSH_INTERVAL + Duration::from_secs(5)), (true, false));
+        // 双脏同 tick：一帧双递增。
+        assert_eq!(plan_push(true, STATUS_PUSH_INTERVAL), (true, true));
+        // 全静默且未到 1 s：不发。
+        assert_eq!(plan_push(false, Duration::from_millis(500)), (false, false));
     }
 
     #[tokio::test]
