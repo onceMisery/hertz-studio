@@ -4171,10 +4171,10 @@
       if (!open()) return;
       requestFs();
     }
-    // 两个入口：顶栏的声场按钮，以及设置里「窗口与舞台」分组的新按钮
-    // （清风皮肤把控制入口统一收进左上角设置，顶栏那个对它是冗余的；
-    //  隐藏前必须在这里补一个可发现的入口，否则这条路就断了）。
-    var openers = ['stage3d-entry', 'set-stage3d-btn'];
+    // 三个入口：顶栏的声场按钮、设置里「窗口与舞台」分组的按钮，以及播放页右上角那颗
+    // （播放页盖在顶栏之上时，顶栏那颗点不到——清风皮肤把控制入口统一收进左上角设置，
+    //  顶栏那个对它是冗余的；隐藏前必须在这里补一个可发现的入口，否则这条路就断了）。
+    var openers = ['stage3d-entry', 'set-stage3d-btn', 'np-stage'];
     openers.forEach(function (id) {
       var b = $(id);
       if (b) b.addEventListener('click', enterFromUi);

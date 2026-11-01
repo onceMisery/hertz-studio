@@ -143,7 +143,7 @@
   }
   function init(hostActions) {
     actions = hostActions;
-    var ids = { modal: 'np-modal', scroll: 'np-lyric-scroll', lines: 'np-lyric-lines', empty: 'np-empty', reading: 'np-reading', follow: 'np-follow', coverTab: 'np-tab-cover', lyricsTab: 'np-tab-lyrics', queue: 'np-queue', queuePane: 'np-queue-pane', queueList: 'np-queue-list', queueClose: 'np-queue-close', queueCount: 'np-queue-count', more: 'np-more', tools: 'np-tools', toolsClose: 'np-tools-close', fullscreen: 'np-fullscreen', elapsed: 'np-elapsed', duration: 'np-duration', favorite: 'np-favorite', mode: 'np-mode', eqPane: 'np-eq-pane' };
+    var ids = { modal: 'np-modal', scroll: 'np-lyric-scroll', lines: 'np-lyric-lines', empty: 'np-empty', reading: 'np-reading', follow: 'np-follow', coverTab: 'np-tab-cover', lyricsTab: 'np-tab-lyrics', queue: 'np-queue', queuePane: 'np-queue-pane', queueList: 'np-queue-list', queueClose: 'np-queue-close', queueCount: 'np-queue-count', more: 'np-more', tools: 'np-tools', toolsClose: 'np-tools-close', stage: 'np-stage', fullscreen: 'np-fullscreen', elapsed: 'np-elapsed', duration: 'np-duration', favorite: 'np-favorite', mode: 'np-mode', eqPane: 'np-eq-pane' };
     Object.keys(ids).forEach(function (key) { el[key] = document.getElementById(ids[key]); });
     el.coverTab.onclick = function () { selectView('cover'); }; el.lyricsTab.onclick = function () { selectView('lyrics'); };
     el.queue.onclick = function () { showQueue(el.queuePane.hidden); }; el.queueClose.onclick = function () { showQueue(false); };

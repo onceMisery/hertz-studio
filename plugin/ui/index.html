@@ -2365,8 +2365,10 @@
         <button type="button" id="np-tab-lyrics" aria-pressed="false">歌词</button>
       </div>
       <div class="np-head-actions">
-      <button type="button" id="np-fullscreen" class="np-ctrl" title="全屏播放页" aria-label="全屏播放页" aria-pressed="false">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-expand"/></svg>
+      <!-- 这颗不切换浏览器全屏：播放页要「更大」的时候，用户要的是沉浸声场本身。
+           全屏播放页收在下面「更多操作」的工具面板里，入口没丢。 -->
+      <button type="button" id="np-stage" class="np-ctrl" title="沉浸声场" aria-label="进入沉浸声场">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-cube"/></svg>
       </button>
       <button type="button" id="np-more" class="np-ctrl" title="更多操作" aria-label="更多操作" aria-expanded="false" aria-controls="np-tools">
         <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-more"/></svg>
@@ -2433,6 +2435,7 @@
       <div class="np-tool-actions">
         <button type="button" id="np-eq" class="btn">均衡器</button>
         <button type="button" id="np-sleep" class="btn">睡眠定时</button>
+        <button type="button" id="np-fullscreen" class="btn" aria-pressed="false">全屏播放页</button>
         <button type="button" id="np-stop" class="btn">停止播放</button>
       </div>
       <div id="np-eq-pane" hidden></div>
