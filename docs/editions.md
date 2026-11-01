@@ -60,8 +60,8 @@ DBX 分别按插件 ID 分配宿主存储。Standard 在宿主提供的数据目
 Standard 不再作为独立包发布。文件名、artifact 名与插件 ID 区分版本，只产出 Actions artifacts，
 不发布。两版同时升版本，不维护长期分支或第二个项目。
 
-商店候选链路只匹配 `hertz-plugin-standard-v<version>`，0.3.0 对应
-`hertz-plugin-standard-v0.3.0`；旧 `hertz-plugin-v...` 与 Full tag 不触发候选打包。
+商店候选链路只匹配 `hertz-plugin-standard-v<version>`，0.3.1 对应
+`hertz-plugin-standard-v0.3.1`；旧 `hertz-plugin-v...` 与 Full tag 不触发候选打包。
 脚本在 `PLUGIN_RELEASE=1` 时拒绝 Full，候选保持未签名，等待商店审核签名。
 Full 独立包通过手动 release workflow 取得独立的 GitHub 分发产物；Standard 保留在商店候选与本地验证中。
 

@@ -33,7 +33,7 @@ for (const edition of ['standard', 'full']) {
   const backend = fs.readFileSync(path.join(dir, 'backend/Cargo.toml'), 'utf8');
   assert.equal(backend.includes('features = ["full"]'), edition === 'full');
   assert(!html.includes('edition:'));
-  assert.equal(staged[edition].version, '0.3.0');
+  assert.equal(staged[edition].version, '0.3.1');
   for (const item of staged[edition].contributions) assert(item.id.startsWith(staged[edition].id + '.'));
   for (const locale of Object.values(staged[edition].localizations)) {
     assert(locale.name.includes(edition === 'full' ? 'Full' : 'Standard'));
