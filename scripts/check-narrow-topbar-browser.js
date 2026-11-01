@@ -125,29 +125,23 @@ function check(condition, label, details) {
           check(bounds.x >= 0 && bounds.right <= width && bounds.bottom <= 900 && bounds.hit,
             label + ' menu reachable ' + menu, bounds);
           if (menu === 'top-more-menu') {
-            const items = await page.locator('#top-more-menu .menu-item:not([hidden])').evaluateAll(
-              els => els.map(e => e.id));
+            // 「收进 ⋮」只有在每一项都点得到的时候才成立；顺手钉住收纳的六项没被悄悄删掉。
+            // 复用这一轮已经开着的菜单，不再开关第二次——第二次点 ⋮ 是把它关掉。
+            const items = await page.locator('#top-more-menu .menu-item:not([hidden])')
+              .evaluateAll(els => els.map(e => e.id));
             check(items.join(',') === 'space3d-entry,theme-btn,skin-btn,workshop-btn,stage-control-btn,service-exit',
               label + ' 更多工具收纳的六项齐全', items);
+            for (const id of items.filter(x => x !== 'service-exit')) {
+              const box = await page.locator('#' + id).boundingBox();
+              const hit = box && await page.evaluate(p => {
+                const e = document.getElementById(p.id), h = document.elementFromPoint(p.x, p.y);
+                return !!e && !!h && e.contains(h);
+              }, { id, x: box.x + box.width / 2, y: box.y + box.height / 2 });
+              check(hit, label + ' 更多工具项可点 ' + id, { box });
+            }
           }
           await page.keyboard.press('Escape');
           if (await page.locator('#' + menu).isVisible()) await page.locator('#' + chain[chain.length - 1]).click();
-        }
-        // ⋮ 里每一项都得点得到，否则「收进去」等于「拿不到」。清风皮肤走自己的工具条，
-        // 顶栏这颗点不到就整段跳过（与上面 popups 的判据一致）。
-        if (geometry.buttons.find(b => b.id === 'top-more-btn' && b.hit)) {
-          await page.keyboard.press('Escape');
-          if (!(await page.locator('#top-more-menu').isHidden())) await page.locator('#top-more-btn').click();
-          await page.locator('#top-more-menu').waitFor({ state: 'visible' });
-          for (const id of ['space3d-entry', 'theme-btn', 'skin-btn', 'workshop-btn', 'stage-control-btn']) {
-            const box = await page.locator('#' + id).boundingBox();
-            const hit = box && await page.evaluate(p => {
-              const e = document.getElementById(p.id), h = document.elementFromPoint(p.x, p.y);
-              return !!e && !!h && e.contains(h);
-            }, { id, x: box.x + box.width / 2, y: box.y + box.height / 2 });
-            check(hit, label + ' 更多工具项可点 ' + id, { box });
-          }
-          await page.keyboard.press('Escape');
         }
         if (skin !== 'qingfeng') {
           await page.locator('#search').blur();
