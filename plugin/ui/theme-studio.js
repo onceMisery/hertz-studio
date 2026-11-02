@@ -402,14 +402,6 @@
     return 'rgba(' + rgbTriple(hex) + ', ' + alpha + ')';
   }
 
-  /// from 是 '#rrggbb' 或 'rgba(r, g, b, a)'，取它的 rgb 三元组。
-  function anyToRgbTriple(from) {
-    var hex = hex2rgb(from);
-    if (hex) return rgbTriple(from);
-    var m = /rgba?\(\s*([0-9.]+)[,\s]+([0-9.]+)[,\s]+([0-9.]+)/i.exec(String(from));
-    return m ? [m[1], m[2], m[3]].join(', ') : '255, 255, 255';
-  }
-
   // -------------------------------------------------------------------------
   // 令牌推导
   // -------------------------------------------------------------------------

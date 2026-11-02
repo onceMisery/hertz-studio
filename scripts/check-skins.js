@@ -672,9 +672,9 @@ function checkLiunianNavigation() {
 
   const navPill = lnRule('.ln-nav-item');
   ok(/border:\s*1px solid var\(--field-border\)/.test(navPill),
-    '每个导航项自带 1px 细描边（药丸按钮的本体）');
-  ok(/border-radius:\s*999px/.test(navPill) && /white-space:\s*nowrap/.test(navPill),
-    '导航项是药丸形，且文字不折行');
+    '每个导航项自带 1px 细描边');
+  ok(/border-radius:\s*8px/.test(navPill) && /white-space:\s*nowrap/.test(navPill),
+    '导航项沿用 8px 控件圆角，且文字不折行');
   ok(/background:\s*transparent/.test(navPill),
     '未选中项只有描边、不铺底色');
 

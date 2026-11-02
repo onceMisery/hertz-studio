@@ -1001,13 +1001,6 @@
     return b;
   }
 
-  function indexBuffer(data) {
-    var b = gl.createBuffer();
-    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, b);
-    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, data, gl.STATIC_DRAW);
-    return b;
-  }
-
   // attribs: [{ loc, buffer, size, divisor }]
   function makeVAO(attribs, indices) {
     var v = gl.createVertexArray();

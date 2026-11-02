@@ -251,12 +251,6 @@
     return (out && out.source) || { key: '', label: '', kind: 'track', items: [], emptyHint: '' };
   }
 
-  /// 要播放队列那份（第二层「从队列打开」与老路径的兼容入口）。
-  function requestQueue() {
-    var out = emit('queue-request');
-    return (out && out.queue) || [];
-  }
-
   /// 皮肤偏好的小读写（localStorage 布尔/数字/字符串，隐私模式静默回落默认）。
   function readFlag(key, fallback) {
     try {

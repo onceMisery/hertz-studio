@@ -681,16 +681,14 @@ body.reduce-motion .stage::before { transition: none; transform: none; }
   right: 0;
   /* 95 > 三维舞台根层的 90：真3D 演出中也能开着控制舱实时调参。 */
   z-index: 95;
-  width: 372px;
-  max-width: 92vw;
-  height: 100vh;
+  width: 420px;
+  max-width: 100vw;
+  height: 100dvh;
   display: flex;
   flex-direction: column;
-  background: var(--glass-bg-strong);
-  border-left: var(--glass-border);
-  box-shadow: var(--glass-shadow-glow);
-  backdrop-filter: blur(var(--glass-blur)) saturate(1.2);
-  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(1.2);
+  background: var(--panel-solid);
+  border-left: 1px solid var(--line-strong);
+  box-shadow: -16px 0 48px color-mix(in srgb, var(--bg) 32%, transparent);
   transform: translateX(102%);
   transition: transform var(--dur-2) var(--ease);
   will-change: transform;
@@ -701,41 +699,43 @@ body.reduce-motion .stage::before { transition: none; transform: none; }
 .sc-head {
   position: relative;
   display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  padding: 12px 14px 10px;
+  flex: none;
+  align-items: center;
+  gap: 12px;
+  padding: 24px 20px 20px;
   border-bottom: 1px solid var(--line);
 }
 .sc-badge {
   flex: none;
-  width: 26px;
-  height: 26px;
+  width: 36px;
+  height: 36px;
   border-radius: 8px;
   display: grid;
   place-items: center;
-  font-size: 13px;
-  color: var(--accent-ink);
-  background: linear-gradient(140deg, var(--accent), var(--accent-2));
+  color: var(--text);
+  background: var(--hover);
 }
+.sc-badge svg { width: 18px; height: 18px; }
+.sc-head-text { flex: 1; min-width: 0; padding-right: 36px; }
 .sc-title {
   margin: 0;
-  font-size: 14px;
-  font-weight: 650;
-  letter-spacing: 0.02em;
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: 0;
   color: var(--text);
 }
 .sc-sub {
-  margin: 3px 0 0;
-  font-size: 11px;
-  line-height: 1.5;
+  margin: 5px 0 0;
+  font-size: 12px;
+  line-height: 1.6;
   color: var(--muted);
 }
 .sc-close {
   position: absolute;
-  top: 12px;
-  right: 12px;
-  width: 26px;
-  height: 26px;
+  top: 24px;
+  right: 20px;
+  width: 32px;
+  height: 32px;
   display: grid;
   place-items: center;
   border: 1px solid var(--line);
@@ -753,26 +753,28 @@ body.reduce-motion .stage::before { transition: none; transform: none; }
 /* 参数搜索：命中后把用户带到那颗控件上，而不是在结果里再画一份控件。
    参考实现靠选择器反查旧 DOM 再搬进新分组，我们已由 SCHEMA 生成控件，
    搜索与结果值读同一张表就够了。 */
-.sc-search-row { flex: none; padding: 0 12px 8px; }
+.sc-close svg { width: 16px; height: 16px; }
+.sc-search-row { flex: none; padding: 16px 20px; }
 .sc-search {
   width: 100%;
-  padding: 6px 9px;
-  font-size: 11px;
+  min-height: 40px;
+  padding: 9px 12px;
+  font-size: 12px;
   color: var(--text);
-  background: var(--panel);
-  border: 1px solid var(--line);
+  background: var(--field-bg);
+  border: 1px solid var(--line-strong);
   border-radius: 8px;
-  outline: none;
+  box-shadow: none;
   transition: border-color var(--dur-1) var(--ease);
 }
-.sc-search:focus { border-color: var(--line-strong); }
+.sc-search:focus { border-color: var(--accent); outline: 2px solid color-mix(in srgb, var(--accent) 22%, transparent); outline-offset: 1px; }
 .sc-search::placeholder { color: var(--muted); }
 
 .sc-results {
   flex: none;
   display: grid;
   gap: 4px;
-  padding: 0 12px 8px;
+  padding: 0 20px 12px;
   max-height: 168px;
   overflow-y: auto;
   overscroll-behavior: contain;
@@ -783,8 +785,9 @@ body.reduce-motion .stage::before { transition: none; transform: none; }
   align-items: baseline;
   justify-content: space-between;
   gap: 8px;
-  padding: 5px 8px;
-  font-size: 11px;
+  min-height: 36px;
+  padding: 8px 10px;
+  font-size: 12px;
   text-align: left;
   color: var(--text);
   background: transparent;
@@ -804,9 +807,7 @@ body.reduce-motion .stage::before { transition: none; transform: none; }
   font-variant-numeric: tabular-nums;
 }
 .sc-result.is-empty { color: var(--muted); border-style: dashed; cursor: default; }
-/* 命中定位后短暂描一下，让眼睛跟得上滚动 */
-.sc-cell.is-found { border-color: var(--accent); }
-.sc-status { flex: none; margin: 0; padding: 0 12px 6px; color: var(--muted); font-size: 11px; }
+.sc-status { flex: none; margin: 0; padding: 0 20px 12px; color: var(--muted); font-size: 12px; }
 .sc-status:empty { display: none; }
 .sc-result-path, .sc-result-value { overflow-wrap: anywhere; }
 .sc-result-value { flex: none; max-width: 42%; }
@@ -818,19 +819,19 @@ body.reduce-motion .stage-ctl, body.reduce-motion .sc-cell { transition: none; }
 .sc-body {
   flex: 1;
   min-height: 0;
-  /* 内容在两列布局下能完整放进一屏，滚动只是极端窗口下的兜底 */
+  /* 分组共用滚动区，标题、搜索和底部操作始终可见。 */
   overflow-y: auto;
   overscroll-behavior: contain;
-  padding: 2px 12px 12px;
+  padding: 8px 20px 24px;
   display: grid;
-  gap: 14px;
+  gap: 24px;
   align-content: start;
 }
 
-.sc-group { display: grid; gap: 8px; }
+.sc-group { display: grid; gap: 12px; }
 .sc-group + .sc-group {
-  padding-top: 12px;
-  border-top: 1px dashed var(--line);
+  padding-top: 24px;
+  border-top: 1px solid var(--line);
 }
 .sc-group-head {
   display: flex;
@@ -839,29 +840,33 @@ body.reduce-motion .stage-ctl, body.reduce-motion .sc-cell { transition: none; }
   gap: 8px;
 }
 .sc-group-title {
-  font-size: 12px;
-  font-weight: 650;
-  letter-spacing: 0.04em;
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.5;
+  letter-spacing: 0;
   color: var(--text);
 }
-.sc-group-note { font-size: 10px; color: var(--muted); }
+.sc-group-note { font-size: 12px; color: var(--muted); }
 
-/* 两列排布：单列时 11 个控件要滚一屏才看得全，两列正好落在视口内 */
-.sc-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px; }
+/* 两列对齐参数；极窄窗口切换单列，保留标签和读数的空间。 */
+.sc-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; }
 
 .sc-cell {
   display: grid;
   min-width: 0;
-  gap: 4px;
-  padding: 6px 9px;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: var(--panel);
+  gap: 10px;
+  padding: 10px 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
   transition: border-color var(--dur-1) var(--ease);
 }
-.sc-cell:hover { border-color: var(--line-strong); }
+.sc-cell:hover { border-color: transparent; }
+/* 搜索命中后短暂标记目标，让视线跟得上滚动。 */
+.sc-cell.is-found { border-color: var(--accent); background: var(--hover); }
 .sc-cell.is-wide { grid-column: 1 / -1; }
-/* 药丸开关整行自成一块，不再吃 cell 的内边距底色 */
+/* 开关整行使用独立的点击区域。 */
 .sc-cell.is-toggle {
   padding: 0;
   border: none;
@@ -874,12 +879,14 @@ body.reduce-motion .stage-ctl, body.reduce-motion .sc-cell { transition: none; }
   justify-content: space-between;
   gap: 8px;
   margin: 0;
-  font-size: 11px;
+  font-size: 12px;
+  line-height: 1.5;
   color: var(--text);
   cursor: default;
 }
 .sc-value {
-  font: 11px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  flex: none;
+  font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   color: var(--muted);
   font-variant-numeric: tabular-nums;
 }
@@ -936,23 +943,22 @@ body.reduce-motion .stage-ctl, body.reduce-motion .sc-cell { transition: none; }
 }
 .sc-range:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
-/* 药丸开关：整行一颗 pill，左字右点。ON = accent 字色 + 34% 边框 + 7% 底，
-   圆点带辉光 —— 状态一眼可读，不再需要凑近看滑块轨道。 */
+/* 开关使用滑轨和可移动的滑块表达状态。 */
 .sc-pill {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 10px;
   width: 100%;
-  min-height: 39px;
-  padding: 9px 11px;
+  min-height: 44px;
+  padding: 10px 12px;
   font: inherit;
-  font-size: 11.5px;
+  font-size: 12px;
   text-align: left;
   color: var(--muted);
-  background: var(--panel);
+  background: var(--field-bg);
   border: 1px solid var(--line);
-  border-radius: 11px;
+  border-radius: 8px;
   cursor: pointer;
   transition: color var(--dur-1) var(--ease), border-color var(--dur-1) var(--ease),
     background var(--dur-1) var(--ease);
@@ -965,53 +971,72 @@ body.reduce-motion .stage-ctl, body.reduce-motion .sc-cell { transition: none; }
   white-space: nowrap;
 }
 .sc-pill .dot {
+  position: relative;
   flex: none;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
+  width: 30px;
+  height: 18px;
+  border-radius: 999px;
   background: var(--line-strong);
-  transition: background var(--dur-1) var(--ease), box-shadow var(--dur-1) var(--ease);
+  box-shadow: none;
+  transition: background var(--dur-1) var(--ease);
 }
+.sc-pill .dot::after { content: ""; position: absolute; top: 3px; left: 3px; width: 12px; height: 12px; border-radius: 50%; background: var(--muted); transition: transform var(--dur-1) var(--ease), background-color var(--dur-1) var(--ease); }
 .sc-pill.on {
-  color: var(--accent);
-  border-color: color-mix(in srgb, var(--accent) 34%, transparent);
-  background: color-mix(in srgb, var(--accent) 7%, transparent);
+  color: var(--text);
+  border-color: var(--line-strong);
+  background: var(--hover);
 }
 .sc-pill.on .dot {
   background: var(--accent);
-  box-shadow: 0 0 10px color-mix(in srgb, var(--accent) 45%, transparent);
+  box-shadow: none;
 }
+.sc-pill.on .dot::after { background: var(--accent-ink); transform: translateX(12px); }
 .sc-pill:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
-/* 分段选择：一体框内的互斥段，当前段 accent 字色 + 10% 底。
+/* 分段选择：一体框内的互斥段，当前段以底色和内描边标记。
    来源切换、封面布局、歌词字体、舞台主题共用这一套。 */
 .sc-seg {
-  display: flex;
-  border-radius: 11px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 76px), 1fr));
+  gap: 4px;
+  padding: 4px;
+  border-radius: 8px;
   border: 1px solid var(--line);
   overflow: hidden;
-  background: var(--panel);
+  background: var(--field-bg);
 }
 .sc-seg-btn {
   flex: 1;
-  min-height: 34px;
-  padding: 7px 4px;
+  min-width: 0;
+  min-height: 36px;
+  padding: 7px 8px;
+  border-radius: 5px;
   font: inherit;
-  font-size: 11.5px;
+  font-size: 12px;
   color: var(--muted);
   background: none;
   border: none;
   cursor: pointer;
-  white-space: nowrap;
+  line-height: 1.4;
+  white-space: normal;
+  overflow-wrap: anywhere;
   transition: color var(--dur-1) var(--ease), background var(--dur-1) var(--ease);
 }
-.sc-seg-btn + .sc-seg-btn { border-left: 1px solid var(--line); }
+.sc-seg-btn + .sc-seg-btn { border-left: 0; }
 .sc-seg-btn:hover { color: var(--text); background: var(--hover); }
 .sc-seg-btn.is-on {
-  color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  color: var(--text);
+  background: var(--hover);
+  box-shadow: inset 0 0 0 1px var(--line-strong);
 }
 .sc-seg-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+#sc-stage-stagePreset { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+
+@media (prefers-reduced-motion: reduce) {
+  .sc-pill .dot, .sc-pill .dot::after { transition: none; }
+}
+body.reduce-motion .sc-pill .dot,
+body.reduce-motion .sc-pill .dot::after { transition: none; }
 
 /* 取色器：色盘 + 「自动」按钮 */
 .sc-color-row {
@@ -1062,17 +1087,19 @@ body.reduce-motion .stage-ctl, body.reduce-motion .sc-cell { transition: none; }
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding: 8px 12px;
+  flex: none;
+  padding: 16px 20px max(16px, env(safe-area-inset-bottom));
   border-top: 1px solid var(--line);
-  background: transparent;
+  background: var(--panel-solid);
 }
 .sc-foot .sc-reset,
 .sc-foot .sc-undo {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  padding: 5px 9px;
-  font-size: 11px;
+  min-height: 38px;
+  padding: 8px 10px;
+  font-size: 12px;
   color: var(--muted);
   background: transparent;
   border: 1px solid var(--line);
@@ -1087,7 +1114,8 @@ body.reduce-motion .stage-ctl, body.reduce-motion .sc-cell { transition: none; }
 .sc-foot .sc-undo[disabled] { opacity: .45; cursor: default; }
 .sc-foot .sc-undo[disabled]:hover { color: var(--muted); border-color: var(--line); }
 .sc-foot .sc-ok {
-  padding: 5px 14px;
+  min-height: 38px;
+  padding: 8px 18px;
   font-size: 12px;
   font-weight: 600;
   color: var(--accent-ink);
@@ -1103,7 +1131,7 @@ body.reduce-motion .stage-ctl, body.reduce-motion .sc-cell { transition: none; }
 .sc-note {
   grid-column: 1 / -1;
   padding: 2px 2px 0;
-  font-size: 10.5px;
+  font-size: 12px;
   line-height: 1.6;
   color: var(--muted);
 }
@@ -1141,7 +1169,15 @@ body.reduce-motion .stage-ctl, body.reduce-motion .sc-cell { transition: none; }
 
 @media (max-width: 620px) {
   .stage-ctl { width: 100vw; max-width: 100vw; }
-  .sc-body { padding: 4px 12px 16px; }
+  .sc-head { padding: 20px 16px 16px; }
+  .sc-close { top: 20px; right: 16px; }
+  .sc-search-row { padding: 16px; }
+  .sc-results { padding-inline: 16px; }
+  .sc-status { padding-inline: 16px; }
+  .sc-body { padding: 8px 16px 24px; }
+  .sc-foot { padding-inline: 16px; gap: 6px; }
+  .sc-foot :is(.sc-reset, .sc-undo) { padding-inline: 8px; }
+  .sc-seg { grid-template-columns: repeat(auto-fit, minmax(min(100%, 70px), 1fr)); }
 }
 
 @media (max-width: 360px) {

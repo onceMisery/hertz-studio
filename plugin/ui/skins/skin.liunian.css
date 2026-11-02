@@ -1779,16 +1779,16 @@
   }
 }
 
-/* --- 中栏导航：一排独立药丸按钮 -----------------------------------------
+/* --- 中栏导航：一排独立圆角按钮 -----------------------------------------
    原先对外是一颗大胶囊（描边 + 面板底色 + 4px 内距），七个目的地是里面的
    裸文字项 —— 只有当前项有实心底，其余看着像标签，读不出「这是按钮」。
 
-   现在容器退成纯滚动行（无描边、无底色、无内距），每一项自己是一枚细描边
-   药丸：透明底 + 1px 描边，悬停填色并加重描边，选中沿用本皮肤统一的
+   现在容器退成纯滚动行（无描边、无底色、无内距），每一项使用 8px 圆角：
+   透明底 + 1px 描边，悬停填色并加重描边，选中沿用本皮肤统一的
    「实心 + 深字」翻色（与 .ln-tab / .track.active 同一套语言，不新造语义）。
 
-   容器保留 overflow-x:auto：七枚药丸在宽屏一排放得下，窄屏就该横向滑动，
-   而不是压扁或换行。纵向留 2px 内距，给药丸描边与焦点环留出余量。 */
+   容器保留 overflow-x:auto：七个目的地在宽屏一排放得下，窄屏横向滑动。
+   纵向留 2px 内距，给按钮描边与焦点环留出余量。 */
 [data-skin="liunian"] .ln-nav {
   display: flex;
   flex: none;
@@ -1814,7 +1814,7 @@
   padding: 0 18px;
   flex: none;
   border: 1px solid var(--field-border);
-  border-radius: 999px;
+  border-radius: 8px;
   background: transparent;
   color: var(--muted);
   font: inherit;
@@ -1864,13 +1864,13 @@
 [data-skin="liunian"] .ln-player-label {
   color: var(--muted);
   font-size: 11px;
-  letter-spacing: .18em;
+  letter-spacing: 0;
 }
 
 [data-skin="liunian"] .ln-player-actions button,
 [data-skin="liunian"] .ln-daily-more {
   border: 0;
-  border-radius: 999px;
+  border-radius: 8px;
   padding: 8px 12px;
   min-height: 36px;
   background: var(--field-bg);
@@ -1961,7 +1961,7 @@
 
 [data-skin="liunian"] .ln-library-tools summary {
   padding: 10px 14px;
-  border-radius: 999px;
+  border-radius: 8px;
   background: var(--field-bg);
   color: var(--muted);
   cursor: pointer;
@@ -2136,8 +2136,7 @@
     padding: 8px 12px 12px;
   }
 
-  /* 药丸之间要留得出缝：2px 是给「同色文字贴在同一颗胶囊里」定的，
-     换成各自带描边的药丸后会糊成一条，收内距换间距。 */
+  /* 保留独立按钮的间距，收窄内边距以留出更多导航文字。 */
   [data-skin="liunian"] .ln-nav {
     gap: 6px;
   }
@@ -2159,6 +2158,24 @@
 
   [data-skin="liunian"] .ln-player-actions {
     gap: 4px;
+    min-width: 0;
+  }
+
+  [data-skin="liunian"] .ln-player-actions button {
+    min-height: 36px;
+    padding: 6px 8px;
+    white-space: nowrap;
+    flex: none;
+  }
+
+  [data-skin="liunian"] .ln-player-actions .iconbtn {
+    width: 36px;
+    height: 36px;
+    padding: 0;
+  }
+
+  [data-skin="liunian"] .ln-player-actions .ln-stage-entry {
+    flex: 1;
   }
 
   [data-skin="liunian"] .bar:not(.ln-capsule) {
@@ -2170,6 +2187,9 @@
   }
 
   [data-skin="liunian"] .ln-player-heading {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 8px;
     margin-bottom: 0;
   }
 
@@ -2178,7 +2198,8 @@
   }
 
   [data-skin="liunian"] .ln-player-label {
-    letter-spacing: .04em;
+    letter-spacing: 0;
+    white-space: nowrap;
   }
 
   [data-skin="liunian"] .bar .bar-row1 .disc-wrap {

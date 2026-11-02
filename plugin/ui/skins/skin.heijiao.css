@@ -367,7 +367,7 @@ html:is([data-look="glass"], [data-look="cel"])[data-skin="heijiao"] .topbar {
 [data-skin="heijiao"] .view {
   width: 100%;
   min-width: 0;
-  padding: var(--skin-pad) 0;
+  padding: var(--skin-pad);
   /* 整页滚动：滚动权从"各列表体"上移到 .view 一个容器。
      默认链路是 .view 固定高 + 每个列表体 flex:1 自己滚，于是列表能拿到的
      只有剩余高度。改成卡片网格后列表不再需要自滚，卡片按内容长高即可。 */
@@ -1402,7 +1402,7 @@ html:is([data-look="glass"], [data-look="cel"])[data-skin="heijiao"] .topbar {
   [data-skin="heijiao"] .bar {
     margin: 0 var(--skin-pad) var(--skin-gap);
   }
-  [data-skin="heijiao"] .view { padding: var(--skin-pad) 0; }
+  [data-skin="heijiao"] .view { padding: var(--skin-pad); }
 }
 
 @media (max-width: 620px) {

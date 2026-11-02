@@ -478,10 +478,6 @@
       });
     }
 
-    function findLiveNode(id) {
-      return nodes.has(id) ? nodes.get(id) : null;
-    }
-
     // ---- pose（applyFloatingSongCardPose 的 DOM 版）-----------------------
 
     function poseStage(delta, absD, hover, active0, pulse, reveal, entry, w, h) {

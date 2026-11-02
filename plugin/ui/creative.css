@@ -413,7 +413,7 @@ html.creative-bg-on body::after {
 }
 
 .ws-close:hover {
-  background: var(--hover, rgba(255, 255, 255, 0.07));
+  background: var(--ws-hover, rgba(255, 255, 255, 0.07));
 }
 
 .ws-close svg {
@@ -746,7 +746,7 @@ html.creative-bg-on body::after {
 }
 
 .ws-icon:hover {
-  background: var(--hover, rgba(255, 255, 255, 0.08));
+  background: var(--ws-hover, rgba(255, 255, 255, 0.08));
 }
 
 .ws-item-body {
@@ -948,10 +948,39 @@ body.stage-lowfx #creative-bg-canvas {
 }
 
 /* Listening workshop: edit the performance directly on the large stage. */
-.ws-panel { --ws-width: 400px; width: min(var(--ws-width),100vw); color: var(--text); background: #111b1c; box-shadow: -18px 0 60px rgba(0,0,0,.22); touch-action: pan-y; }
+.ws-panel {
+  /* 工坊使用独立的绿灰配色；共享控件也在同一局部色系中，
+     避免浅色主题把标题与参数标签染成深字。 */
+  --ws-width: 400px;
+  --text: #dce6df;
+  --text-rgb: 220 230 223;
+  --muted: #95a99e;
+  --accent: #c3dacc;
+  --accent-ink: #1b3025;
+  --panel-solid: #111b1c;
+  --field-bg: #192826;
+  --field-border: rgba(181,206,192,.2);
+  --field-border-strong: #829c8c;
+  --line: rgba(255,255,255,.09);
+  --line-strong: rgba(181,206,192,.3);
+  --ws-hover: #2a3d35;
+  --ui-control-surface: #192826;
+  color-scheme: dark;
+  width: min(var(--ws-width),100vw);
+  color: var(--text);
+  background: var(--panel-solid);
+  box-shadow: -18px 0 60px rgba(0,0,0,.22);
+  touch-action: pan-y;
+}
 .ws-head { padding: 24px 24px 18px; border-bottom: 0; }
-.ws-badge { background: #c3dacc; color: #1b3025; border-radius: 50%; width: 34px; height: 34px; font-weight: 500; }
-.ws-title { font-size: 16px; }
+.ws-badge { background: #c3dacc; color: #1b3025; border-radius: 8px; width: 34px; height: 34px; font-weight: 500; }
+.ws-badge svg { width: 18px; height: 18px; }
+.ws-title { font-size: 18px; }
+.ws-close { flex: none; width: 32px; height: 32px; border: 1px solid var(--line); border-radius: 8px; }
+.ws-tabs { padding: 10px 24px; }
+.ws-tab { min-height: 36px; border-radius: 8px; }
+.ws-tab.on { border-color: var(--line-strong); background: var(--ws-hover); }
+#workshop .btn:not(.primary):hover { background: var(--ws-hover); }
 .ws-sub { margin-top: 6px; }
 .ws-defaults { flex: none; padding: 7px 9px; border: 1px solid rgba(181, 206, 192, .2); border-radius: 7px; background: transparent; color: #b7cabe; font: inherit; font-size: 11px; line-height: 1.5; white-space: nowrap; cursor: pointer; }
 .ws-defaults:hover { color: #edf2ec; background: rgba(181, 206, 192, .08); border-color: #829c8c; }
@@ -987,6 +1016,30 @@ body.stage-lowfx #creative-bg-canvas {
 .ws-tuning { display: grid; gap: 20px; padding: 18px 0 22px; border-bottom: 1px solid rgba(255,255,255,.08); }
 .ws-tuning .sc-cell { position: relative; padding-bottom: 18px; }
 .ws-tuning .sc-cell.is-toggle { padding-bottom: 0; }
+/* 工坊复用参数标签，但开关仍由自己的按钮表达状态。 */
+.ws-panel .sc-cell.is-toggle { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 44px; }
+.ws-panel .sc-cell.is-toggle .sc-label { flex: 1; min-width: 0; }
+.ws-panel .sc-switch {
+  position: relative;
+  flex: none;
+  width: 44px;
+  height: 32px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  cursor: pointer;
+}
+.ws-panel .sc-switch::before { content: ""; position: absolute; inset: 4px 0; border: 1px solid var(--line-strong); border-radius: inherit; background: var(--field-bg); transition: background-color 160ms var(--ease), border-color 160ms var(--ease); }
+.ws-panel .sc-switch::after { content: ""; position: absolute; top: 8px; left: 4px; width: 16px; height: 16px; border-radius: 50%; background: var(--muted); transition: transform 160ms var(--ease), background-color 160ms var(--ease); }
+.ws-panel .sc-switch[aria-checked="true"]::before { border-color: var(--accent); background: var(--accent); }
+.ws-panel .sc-switch[aria-checked="true"]::after { background: var(--accent-ink); transform: translateX(20px); }
+.ws-panel .sc-switch:not(:disabled):hover::before { border-color: var(--accent); }
+.ws-panel .sc-switch:disabled { opacity: .5; cursor: not-allowed; }
+.ws-panel .sc-select-wrap { min-width: 0; }
+.ws-panel .sc-select-wrap select { width: 100%; min-width: 0; min-height: 40px; padding: 9px 12px; border: 1px solid var(--field-border); border-radius: 8px; background: var(--field-bg); color: var(--text); font-size: 13px; box-shadow: none; backdrop-filter: none; }
+.ws-panel .sc-select-wrap select:hover, .ws-panel .sc-select-wrap select:focus { border-color: var(--field-border-strong); background: var(--field-bg); }
 .ws-value-reset { display: block; margin: 8px 0 0 auto; padding: 0; border: 0; background: none; color: #8da398; font-size: 10px; cursor: pointer; }
 .ws-value-reset:hover { color: #dbe9df; }
 .ws-panel .sc-note { display: block; font-size: 11px; line-height: 1.8; color: #95a99e; }
@@ -999,7 +1052,7 @@ body.stage-lowfx #creative-bg-canvas {
 .ws-section-title.is-locked { color: #7d9187; }
 /* 锁定态的控件：置灰但保持可读的层级，别用 opacity 整块压 —— 那样连
    标签都看不清，用户会以为是渲染坏了而不是被禁用。 */
-.ws-template:disabled, .ws-tuning input:disabled, .ws-tuning [role="switch"][aria-checked] { cursor: not-allowed; }
+.ws-template:disabled, .ws-tuning input:disabled, .ws-tuning [role="switch"]:disabled { cursor: not-allowed; }
 .ws-template:disabled { border-color: rgba(255,255,255,.03); background: #141d1c; }
 .ws-template:disabled strong, .ws-template:disabled small { color: #5c6f66; }
 .ws-template:disabled .ws-scene-art { opacity: .35; }
@@ -1077,5 +1130,8 @@ body.ws-open:not(.s3d-open) #lyric-page { right: 400px; width: auto; }
 }
 @media (prefers-reduced-motion: reduce) {
   .ws-look-card, .ws-look-swatch svg, .ws-defaults { transition: none; }
+  .ws-panel .sc-switch::before, .ws-panel .sc-switch::after { transition: none; }
   .ws-look-card:hover .ws-look-swatch svg, .ws-look-card:active, .ws-defaults:active { transform: none; }
 }
+body.reduce-motion .ws-panel .sc-switch::before,
+body.reduce-motion .ws-panel .sc-switch::after { transition: none; }

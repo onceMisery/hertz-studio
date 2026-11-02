@@ -2440,8 +2440,23 @@ body.qf-stage-dragging [data-skin="qingfeng"] .stage,
 }
 
 @media (max-width: 720px) {
+  [data-skin="qingfeng"] .qf-modal { padding: 12px; }
+
+  [data-skin="qingfeng"] .qf-modal-card {
+    max-height: calc(100dvh - 24px);
+    border-radius: 16px;
+  }
+
   [data-skin="qingfeng"] .qf-modal-body {
     flex-direction: column;
+    min-width: 0;
+    padding: 58px 16px 20px;
+  }
+
+  [data-skin="qingfeng"] .qf-set-layout {
+    flex-direction: column;
+    min-width: 0;
+    gap: 16px;
   }
 
   [data-skin="qingfeng"] .qf-set-nav {
@@ -2455,6 +2470,20 @@ body.qf-stage-dragging [data-skin="qingfeng"] .stage,
     border-right: 0;
     border-bottom: 1px solid var(--skin-line-soft);
     overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
+  }
+
+  [data-skin="qingfeng"] .qf-set-link {
+    flex: none;
+    width: auto;
+    min-height: 40px;
+    border-radius: 8px;
+    white-space: nowrap;
+  }
+
+  [data-skin="qingfeng"] .qf-set-pane > #view-settings {
+    padding: 0;
   }
 
   [data-skin="qingfeng"] .qf-set-sub {

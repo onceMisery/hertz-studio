@@ -768,10 +768,6 @@ function coverSlot(id, apply) {
   if (cached) apply(cached);
 }
 
-function releaseCoverSlots(id) {
-  coverSlots.delete(id);
-}
-
 function repaintCovers(id, dataUrl) {
   if (typeof CSS !== 'undefined' && CSS.escape) {
     document.querySelectorAll(`[data-id="${CSS.escape(id)}"]`).forEach((host) => {
@@ -1610,10 +1606,6 @@ function qualityLabel(track) {
   const k = track.sample_rate / 1000;
   const lossless = track.bitrate === null || track.bitrate === undefined || track.bitrate > 900;
   return `${lossless ? '无损' : `${track.bitrate}k`} · ${k.toFixed(1)}kHz`;
-}
-
-function digestMs(ms) {
-  return `${fmt(ms)} / ${fmt(state.snapshot.duration_ms)}`;
 }
 
 // ---------------------------------------------------------------------------
