@@ -320,6 +320,151 @@ fn derived_cache_reuses_valid_generation_and_rebuilds_corruption_without_overwri
 }
 
 #[test]
+fn targeted_imports_keep_independent_variants_and_media_lifetimes() {
+    use super::super::image_prepare::{self, ImageFit, ImagePurpose, ImageTarget, Receipt};
+    let probe = ProbeClient::testing(|_, _| Box::pin(async { Ok(()) }))
+        .environment_for_test(|| Some(qualification_environment("targeted")));
+    let counts = probe.clone();
+    let env = env_with_probe("targeted-import", probe.clone());
+    let mut png = Vec::new();
+    let mut encoder = png::Encoder::new(&mut png, 320, 160);
+    encoder.set_color(png::ColorType::Rgba);
+    let mut encoder = encoder.write_header().unwrap();
+    encoder
+        .write_image_data(&[32, 64, 128, 255].repeat(320 * 160))
+        .unwrap();
+    encoder.finish().unwrap();
+    let package_bytes = package_with_image(&png);
+    std::fs::write(&env.source, &package_bytes).unwrap();
+    let cover = ImageTarget {
+        width: 80,
+        height: 80,
+        fit: ImageFit::Cover,
+        purpose: ImagePurpose::Low,
+    };
+    let contain = ImageTarget {
+        fit: ImageFit::Contain,
+        ..cover
+    };
+    let import = |target| {
+        let id = new_job_id();
+        env.jobs
+            .submit_for_target(id.clone(), env.source.clone(), Some(target))
+            .unwrap();
+        let status = wait_terminal(&env.jobs, &id);
+        assert_eq!(status.state, JobState::Done, "{:?}", status.error);
+        status.package_hash.unwrap()
+    };
+    let hash = import(cover);
+    let assets = env.jobs.assets();
+    let library = env.jobs.library();
+    let package = assets.read_installed_manifest(&hash).unwrap();
+    let cancel = AtomicBool::new(false);
+    let input = assets
+        .probe_installed_media(&package, &cancel)
+        .unwrap()
+        .pop()
+        .unwrap();
+    let prepared = futures_block_on(image_prepare::prepare(
+        assets,
+        library,
+        &probe,
+        "cached-target",
+        &input,
+        Some(cover),
+        &cancel,
+    ))
+    .unwrap();
+    let first_key = prepared.content_key();
+    let pinned = prepared.decode_input(assets, &input).unwrap();
+    let first_path = pinned.media.path.clone();
+    drop(prepared);
+    assert_eq!(
+        (
+            pinned.metadata.encoded_width,
+            pinned.metadata.encoded_height
+        ),
+        (160, 80)
+    );
+    assert_eq!(import(contain), hash);
+    assert_eq!(import(cover), hash);
+    assert_eq!(counts.stats(), (1, 2));
+    let paths: Vec<String> = futures_block_on(
+        sqlx::query_scalar("SELECT path FROM derived_entries").fetch_all(library.pool()),
+    )
+    .unwrap();
+    assert_eq!(paths.len(), 2);
+    let receipts: Vec<Receipt> = paths
+        .iter()
+        .map(|path| {
+            serde_json::from_slice(
+                &std::fs::read(
+                    assets
+                        .root()
+                        .join("derived")
+                        .join(path)
+                        .join("receipt.json"),
+                )
+                .unwrap(),
+            )
+            .unwrap()
+        })
+        .collect();
+    assert!(receipts
+        .iter()
+        .any(|r| (r.render.width, r.render.height) == (80, 40)));
+    assert!(receipts
+        .iter()
+        .any(|r| format!("{}:{}", r.cache_key, r.render.sha256) == first_key));
+    assert_eq!(
+        std::fs::read(assets.package_dir(&hash).join("original.hwpkg")).unwrap(),
+        package_bytes
+    );
+    futures_block_on(async {
+        let writer = super::super::derived_cache::Writer::acquire(assets).unwrap();
+        assert_eq!(
+            writer.reclaim(library, 0, 0).await.unwrap_err().code,
+            "cache_full"
+        );
+        assert!(first_path.is_file(), "更换目标不释放旧媒体的目录租约");
+        drop(pinned);
+        assert_eq!(writer.reclaim(library, 0, 0).await.unwrap().bytes, 0);
+    });
+    assert!(!first_path.exists());
+}
+
+#[test]
+fn target_cache_rejects_receipt_dimensions_even_with_matching_file_hashes() {
+    let env = env("target-receipt-corrupt");
+    let id = new_job_id();
+    env.jobs.submit(id.clone(), env.source.clone()).unwrap();
+    assert_eq!(wait_terminal(&env.jobs, &id).state, JobState::Done);
+    let cached_path = || {
+        futures_block_on(
+            sqlx::query_scalar::<_, String>("SELECT path FROM derived_entries")
+                .fetch_one(env.jobs.library().pool()),
+        )
+        .unwrap()
+    };
+    let first = cached_path();
+    let receipt_path = env
+        .root
+        .path()
+        .join("derived")
+        .join(&first)
+        .join("receipt.json");
+    let mut receipt: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&receipt_path).unwrap()).unwrap();
+    receipt["render"]["width"] = serde_json::json!(2);
+    // render 字节/hash 未改：不能仅凭 hash 一致复用不符合目标的收据。
+    std::fs::write(receipt_path, serde_json::to_vec(&receipt).unwrap()).unwrap();
+    let id = new_job_id();
+    env.jobs.submit(id.clone(), env.source.clone()).unwrap();
+    assert_eq!(wait_terminal(&env.jobs, &id).state, JobState::Done);
+    assert_ne!(cached_path(), first);
+}
+
+#[test]
 fn cached_decode_input_keeps_generation_until_last_media_pin_exits() {
     let env = env("derived-media-lease");
     let id = new_job_id();
@@ -343,7 +488,7 @@ fn cached_decode_input_keeps_generation_until_last_media_pin_exits() {
             .unwrap();
         let probe = ProbeClient::testing(|_, _| Box::pin(async { Ok(()) }));
         let image = super::super::image_prepare::prepare(
-            assets, library, &probe, "cached", &source, &cancel,
+            assets, library, &probe, "cached", &source, None, &cancel,
         )
         .await
         .unwrap();

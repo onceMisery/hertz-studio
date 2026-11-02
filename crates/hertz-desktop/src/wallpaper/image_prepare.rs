@@ -23,8 +23,129 @@ type Result<T> = std::result::Result<T, JobError>;
 // 像素算法或 decoder/CMS 版本变更时递增；旧会话继续固定旧代际。
 pub(crate) const PIPELINE: &str = "image-srgb-v1";
 const IMPORTER: &str = "hertz-native-image";
-const OPTIONS: &str = r#"{"alpha":"straight","codec":"png-rgba8","colorSpace":"sRGB-SDR","filter":"linear-premultiplied-area","maxPixels":8294400,"maxSide":4096,"mipmap":false,"thumbnailSide":512,"untagged":"assume-sRGB"}"#;
 const MAX_FILE: u64 = 32 * 1024 * 1024;
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ImagePurpose {
+    Preview,
+    Low,
+    Medium,
+    High,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ImageFit {
+    Cover,
+    Contain,
+}
+
+/// width/height 是调用方按实际输出、画质和设备预算规划后的像素，非 CSS 尺寸。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ImageTarget {
+    pub width: u32,
+    pub height: u32,
+    pub fit: ImageFit,
+    pub purpose: ImagePurpose,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TargetPixels {
+    fit: ImageFit,
+    height: u32,
+    width: u32,
+}
+
+// 固定字段顺序保证 canonicalOptions；用途名称不另建一套质量表。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Options {
+    alpha: &'static str,
+    codec: &'static str,
+    color_space: &'static str,
+    filter: &'static str,
+    max_pixels: u64,
+    max_side: u32,
+    mipmap: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target: Option<TargetPixels>,
+    thumbnail_side: u32,
+    untagged: &'static str,
+}
+
+impl Options {
+    fn new(target: Option<ImageTarget>) -> Result<Self> {
+        let preview = target.is_some_and(|target| matches!(target.purpose, ImagePurpose::Preview));
+        let target = target
+            .map(|target| {
+                if target.width == 0
+                    || target.height == 0
+                    || target.width.max(target.height) > 16384
+                {
+                    return Err(JobError::invalid_input("图片目标像素必须在 1–16384 范围内"));
+                }
+                let (width, height) = if preview {
+                    let scale = 1f64
+                        .min(960.0 / f64::from(target.width))
+                        .min(540.0 / f64::from(target.height));
+                    (
+                        (f64::from(target.width) * scale).floor().max(1.0) as u32,
+                        (f64::from(target.height) * scale).floor().max(1.0) as u32,
+                    )
+                } else {
+                    (target.width, target.height)
+                };
+                Ok(TargetPixels {
+                    fit: target.fit,
+                    height,
+                    width,
+                })
+            })
+            .transpose()?;
+        Ok(Self {
+            alpha: "straight",
+            codec: "png-rgba8",
+            color_space: "sRGB-SDR",
+            filter: "linear-premultiplied-area",
+            max_pixels: if preview { 960 * 540 } else { 8_294_400 },
+            max_side: if preview { 960 } else { 4096 },
+            mipmap: false,
+            target,
+            thumbnail_side: 512,
+            untagged: "assume-sRGB",
+        })
+    }
+
+    fn canonical(&self) -> String {
+        serde_json::to_string(self).expect("fixed image options serialize")
+    }
+
+    fn dimensions(&self, width: u32, height: u32) -> (u32, u32) {
+        let cap_scale = 1f64
+            .min(f64::from(self.max_side) / f64::from(width.max(height)))
+            .min((self.max_pixels as f64 / (u64::from(width) * u64::from(height)) as f64).sqrt());
+        let requested = self.target.as_ref().map_or(1.0, |target| {
+            let x = f64::from(target.width) / f64::from(width);
+            let y = f64::from(target.height) / f64::from(height);
+            match target.fit {
+                ImageFit::Cover => x.max(y),
+                ImageFit::Contain => x.min(y),
+            }
+        });
+        let scale = 1f64.min(cap_scale).min(requested);
+        (
+            (f64::from(width) * scale).floor().max(1.0) as u32,
+            (f64::from(height) * scale).floor().max(1.0) as u32,
+        )
+    }
+}
+
+pub(crate) fn validate_target(target: Option<ImageTarget>) -> Result<()> {
+    Options::new(target).map(|_| ())
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -73,10 +194,10 @@ fn cancelled(cancel: &AtomicBool) -> Result<()> {
     }
 }
 
-fn key(input_hash: &str) -> String {
+fn key(input_hash: &str, options: &str) -> String {
     let mut digest = Sha256::new();
-    // 分隔符排除变长字段拼接歧义；OPTIONS 的字段序已固定。
-    for part in [input_hash, IMPORTER, PIPELINE, OPTIONS] {
+    // 分隔符排除变长字段拼接歧义；options 的字段序已固定。
+    for part in [input_hash, IMPORTER, PIPELINE, options] {
         digest.update(part.as_bytes());
         digest.update([0]);
     }
@@ -120,10 +241,13 @@ pub(crate) async fn prepare(
     probe: &ProbeClient,
     job: &str,
     input: &DecodeInput,
+    target: Option<ImageTarget>,
     cancel: &AtomicBool,
 ) -> Result<PreparedImage> {
     cancelled(cancel)?;
-    let cache_key = key(&input.media.entry.sha256);
+    let options = Options::new(target)?;
+    let canonical = options.canonical();
+    let cache_key = key(&input.media.entry.sha256, &canonical);
     let prefix = PathBuf::from(&input.media.entry.sha256)
         .join(PIPELINE)
         .join(&cache_key);
@@ -149,7 +273,7 @@ pub(crate) async fn prepare(
             let directory = store.root().join("derived").join(&relative);
             // 先取得目录租约再复核，GC 不能在复核与正式读之间移走这一代。
             if let Ok(lease) = derived_cache::pin(store, &relative) {
-                if let Ok(receipt) = verify(&directory, &input.media.entry.sha256, &cache_key) {
+                if let Ok(receipt) = verify(&directory, input, &cache_key, &options) {
                     sqlx::query(
                         "UPDATE derived_entries SET last_used = ? WHERE cache_key = ? AND path = ?",
                     )
@@ -177,7 +301,7 @@ pub(crate) async fn prepare(
     )?;
     let reservation = probe.image_workspace(estimate)?;
     // 同步函数返回时 decoder/像素/ICC/编码缓冲均已退出，才归还工作区。
-    let result = generate(store, job, input, prefix, cancel);
+    let result = generate(store, job, input, prefix, &options, cancel);
     reservation.finish();
     result
 }
@@ -187,6 +311,7 @@ fn generate(
     job: &str,
     input: &DecodeInput,
     prefix: PathBuf,
+    options: &Options,
     cancel: &AtomicBool,
 ) -> Result<PreparedImage> {
     store.check_disk_space(2 * MAX_FILE + 16 * 1024)?;
@@ -240,7 +365,7 @@ fn generate(
     } else {
         (width, height)
     };
-    let (rw, rh) = fit(dw, dh, 4096, 8_294_400);
+    let (rw, rh) = options.dimensions(dw, dh);
     let render = write_png(
         &directory.join("render.png"),
         &resample(&pixels, orientation, rw, rh, cancel)?,
@@ -253,10 +378,10 @@ fn generate(
         cancel,
     )?;
     let receipt = Receipt {
-        cache_key: key(&input.media.entry.sha256),
+        cache_key: key(&input.media.entry.sha256, &options.canonical()),
         input_hash: input.media.entry.sha256.clone(),
         pipeline: PIPELINE.into(),
-        options: OPTIONS.into(),
+        options: options.canonical(),
         source_width: width,
         source_height: height,
         orientation,
@@ -502,7 +627,12 @@ fn hash(path: &Path) -> Result<(u64, String)> {
     Ok((bytes, format!("{:x}", digest.finalize())))
 }
 
-fn verify(directory: &Path, input_hash: &str, cache_key: &str) -> Result<Receipt> {
+fn verify(
+    directory: &Path,
+    input: &DecodeInput,
+    cache_key: &str,
+    options: &Options,
+) -> Result<Receipt> {
     let mut bytes = Vec::new();
     open(&directory.join("receipt.json"))?
         .take(8193)
@@ -513,32 +643,48 @@ fn verify(directory: &Path, input_hash: &str, cache_key: &str) -> Result<Receipt
     }
     let receipt: Receipt = serde_json::from_slice(&bytes).map_err(invalid)?;
     if receipt.cache_key != cache_key
-        || receipt.input_hash != input_hash
+        || receipt.input_hash != input.media.entry.sha256
         || receipt.pipeline != PIPELINE
-        || receipt.options != OPTIONS
+        || receipt.options != options.canonical()
+        || (receipt.source_width, receipt.source_height)
+            != (input.metadata.encoded_width, input.metadata.encoded_height)
+        || !(1..=8).contains(&receipt.orientation)
     {
         return Err(invalid("派生缓存身份不匹配"));
     }
-    for (name, out, side, cap) in [
-        ("render.png", &receipt.render, 4096, 8_294_400),
-        ("thumbnail.png", &receipt.thumbnail, 512, 512 * 512),
+    let (dw, dh) = if receipt.orientation >= 5 {
+        (receipt.source_height, receipt.source_width)
+    } else {
+        (receipt.source_width, receipt.source_height)
+    };
+    for (name, out, expected) in [
+        ("render.png", &receipt.render, options.dimensions(dw, dh)),
+        (
+            "thumbnail.png",
+            &receipt.thumbnail,
+            fit(dw, dh, 512, 512 * 512),
+        ),
     ] {
-        if out.width == 0
-            || out.height == 0
-            || out.width.max(out.height) > side
-            || u64::from(out.width) * u64::from(out.height) > cap
-        {
-            return Err(invalid("派生尺寸超限"));
+        if (out.width, out.height) != expected {
+            return Err(invalid("派生尺寸与目标不一致"));
         }
         let (bytes, digest) = hash(&directory.join(name))?;
         if bytes != out.bytes || digest != out.sha256 {
             return Err(invalid("派生缓存已损坏"));
+        }
+        let metadata = super::media::probe(&mut open(&directory.join(name))?).map_err(invalid)?;
+        if metadata.codec != "png" || (metadata.encoded_width, metadata.encoded_height) != expected
+        {
+            return Err(invalid("派生实际尺寸与收据不一致"));
         }
     }
     Ok(receipt)
 }
 
 impl PreparedImage {
+    pub(crate) fn content_key(&self) -> String {
+        format!("{}:{}", self.receipt.cache_key, self.receipt.render.sha256)
+    }
     pub(crate) fn decode_input(
         &self,
         store: &AssetStore,

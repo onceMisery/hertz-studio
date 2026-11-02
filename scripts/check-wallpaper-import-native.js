@@ -225,12 +225,16 @@ async function main() {
       gradient.addColorStop(0, '#3180aa'); gradient.addColorStop(1, '#aabb33');
       context.fillStyle = gradient; context.fillRect(0, 0, 5000, 1000);
       result.push(canvas.toDataURL('image/png').split(',')[1]);
+      canvas.width = 1280; canvas.height = 640;
+      context.fillStyle = '#3180aa'; context.fillRect(0, 0, canvas.width, canvas.height);
+      result.push(canvas.toDataURL('image/png').split(',')[1]);
       return result;
     });
     const jpeg = Buffer.from(encoded[0], 'base64');
     cases.jpeg = makePackage('image', jpeg, 10, 'jpeg');
     cases.webp = makePackage('image', Buffer.from(encoded[1], 'base64'), 11, 'webp');
     cases.wide = makePackage('image', Buffer.from(encoded[2], 'base64'), 16);
+    cases.target = makePackage('image', Buffer.from(encoded[3], 'base64'), 18);
     // 标准 TIFF EXIF Orientation=6；编码 3×2，浏览器显示必须为 2×3。
     const exif = Buffer.alloc(32);
     exif.write('Exif\0\0II', 0, 'binary'); exif.writeUInt16LE(42, 8); exif.writeUInt32LE(8, 10);
@@ -244,7 +248,7 @@ async function main() {
     exif.writeUInt16LE(5, 24);
     const transposed = Buffer.concat([jpeg.subarray(0, 2), Buffer.from([0xff, 0xe1, 0, 34]), exif, jpeg.subarray(2)]);
     cases.transposed = makePackage('image', transposed, 15, 'jpeg');
-    for (const name of ['jpeg', 'webp', 'rotated', 'mirrored', 'transposed', 'wide']) fs.writeFileSync(path.join(inputs, name + '.hwpkg'), cases[name]);
+    for (const name of ['jpeg', 'webp', 'rotated', 'mirrored', 'transposed', 'wide', 'target']) fs.writeFileSync(path.join(inputs, name + '.hwpkg'), cases[name]);
     for (const context of browser.contexts()) context.on('page', page => {
       const log = { url: '', messages: [] };
       evidence.probes.push(log);
@@ -253,10 +257,10 @@ async function main() {
       page.on('domcontentloaded', () => { log.url = page.url(); });
     });
     let nonce = 0;
-    async function send(action, name, suppressFrames = false, contentCapacityBytes = null) {
+    async function send(action, name, suppressFrames = false, contentCapacityBytes = null, imageTarget = null) {
       const id = ++nonce;
       await wallpaper.evaluate(command => window.ipc.postMessage('wallpaper_probe_import ' + JSON.stringify(command)), {
-        nonce: id, action, name, suppressFrames, contentCapacityBytes,
+        nonce: id, action, name, suppressFrames, contentCapacityBytes, imageTarget,
         forceProbe: ['timeout', 'cancel', 'cancel-window', 'busy'].includes(name),
       });
       return id;
@@ -265,9 +269,9 @@ async function main() {
       await wallpaper.waitForFunction(id => !!window.__nativeImportProbes?.[id], id, { timeout: 25000 });
       return wallpaper.evaluate(id => window.__nativeImportProbes[id], id);
     }
-    async function begin(name, expected, suppressFrames = false, afterStart = null, contentCapacityBytes = null) {
+    async function begin(name, expected, suppressFrames = false, afterStart = null, contentCapacityBytes = null, imageTarget = null) {
       const started = Date.now();
-      const id = await send('begin', name, suppressFrames, contentCapacityBytes);
+      const id = await send('begin', name, suppressFrames, contentCapacityBytes, imageTarget);
       if (afterStart) await afterStart();
       const value = await result(id);
       evidence.results.push({ name, elapsedMs: Date.now() - started, ...value });
@@ -329,6 +333,33 @@ async function main() {
     assert.deepEqual([wide.render.width, wide.render.height], [4096, 819]);
     assert.deepEqual([wide.thumbnail.width, wide.thumbnail.height], [512, 102]);
     evidence.derived = receipts;
+    const targetInputHash = digest(Buffer.from(encoded[3], 'base64'));
+    const targeted = () => derivedReceipts(configDir).filter(receipt => receipt.inputHash === targetInputHash);
+    const coverTarget = { width: 80, height: 80, fit: 'cover', purpose: 'low' };
+    const firstTarget = await begin('target', 'done', false, null, null, coverTarget);
+    assert.equal(firstTarget.probeRuns, 1);
+    const coverReceipt = targeted()[0];
+    verifyDerived(coverReceipt);
+    assert.deepEqual([coverReceipt.render.width, coverReceipt.render.height], [160, 80]);
+    const reusedTarget = await begin('target', 'done', false, null, null, coverTarget);
+    assert.equal(reusedTarget.cacheHits, 1);
+    assert.deepEqual(targeted(), [coverReceipt], '相同目标复用代际，不再缩图');
+    await begin('target', 'done', false, null, null, { ...coverTarget, fit: 'contain' });
+    await begin('target', 'done', false, null, null, { width: 3840, height: 2160, fit: 'cover', purpose: 'preview' });
+    const targetReceipts = targeted();
+    assert.equal(targetReceipts.length, 3, '不同目标不能覆盖既有代际');
+    assert.ok(targetReceipts.some(receipt => receipt.render.width === 80 && receipt.render.height === 40));
+    assert.ok(targetReceipts.some(receipt => receipt.render.width === 960 && receipt.render.height === 480));
+    for (const receipt of targetReceipts) verifyDerived(receipt);
+    assert.deepEqual(JSON.parse(targetReceipts.find(receipt => receipt.render.width === 960).options).target, { fit: 'cover', height: 540, width: 960 });
+    assert.ok(fs.existsSync(coverReceipt.file));
+    assert.equal(digest(fs.readFileSync(path.join(configDir, 'packages', digest(cases.target), 'original.hwpkg'))), digest(cases.target));
+    await begin('rotated', 'done', false, null, null, { width: 1, height: 2, fit: 'cover', purpose: 'low' });
+    const rotatedTarget = derivedReceipts(configDir).find(receipt => receipt.orientation === 6 && receipt.render.width === 1);
+    assert.ok(rotatedTarget);
+    assert.deepEqual([rotatedTarget.render.width, rotatedTarget.render.height], [1, 2], '先按 EXIF 转正再规划尺寸');
+    verifyDerived(rotatedTarget);
+    evidence.targetVariants = { receipts: targetReceipts, reusedGeneration: true, originalPreserved: true, rotatedTarget };
     const vid = await begin('video', 'done');
     assert.equal(vid.decoderSlots, 0);
     assert.equal(vid.probeRuns, 1);

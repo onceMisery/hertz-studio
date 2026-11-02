@@ -110,6 +110,7 @@ struct JobRequest {
     status: Arc<Mutex<JobStatus>>,
     cancel: Arc<AtomicBool>,
     generation: u64,
+    target: Option<super::image_prepare::ImageTarget>,
 }
 
 impl ImportJobs {
@@ -166,6 +167,17 @@ impl ImportJobs {
     /// P1-05 管理层；内核层只见本进程拥有的路径）。
     /// 槽占用返回 `budget_busy`；受理立即返回 jobId（§7.1）。
     pub fn submit(&self, job_id: String, source: PathBuf) -> Result<String, JobError> {
+        self.submit_for_target(job_id, source, None)
+    }
+
+    /// 使用已规划的目标像素准备图片；与普通导入共用槽、取消及原子发布流程。
+    pub(crate) fn submit_for_target(
+        &self,
+        job_id: String,
+        source: PathBuf,
+        target: Option<super::image_prepare::ImageTarget>,
+    ) -> Result<String, JobError> {
+        super::image_prepare::validate_target(target)?;
         if job_id.is_empty()
             || job_id.len() > 64
             || !job_id
@@ -209,6 +221,7 @@ impl ImportJobs {
             status,
             cancel,
             generation,
+            target,
         };
         // 槽已在 inner 标记占用；若 worker 已死导致投递失败，这里同步归还槽。
         if self.submit_tx.try_send(request).is_err() {
@@ -490,6 +503,7 @@ async fn qualify_media(
                     probe,
                     &request.job_id,
                     &input,
+                    request.target,
                     &request.cancel,
                 )
                 .await?;

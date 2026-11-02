@@ -35,6 +35,8 @@ pub(crate) fn command(body: &str, proxy: EventLoopProxy<UserEvent>) {
         force_probe: bool,
         #[serde(default)]
         content_capacity_bytes: Option<u64>,
+        #[serde(default)]
+        image_target: Option<super::super::image_prepare::ImageTarget>,
     }
     let Ok(command) = serde_json::from_str::<Command>(body) else {
         return;
@@ -101,10 +103,11 @@ pub(crate) fn command(body: &str, proxy: EventLoopProxy<UserEvent>) {
                         .force_probe_for_test(command.force_probe);
                     let jobs = Arc::new(ImportJobs::start(library, assets, probe.clone()));
                     state().lock().unwrap().jobs = Some(Arc::clone(&jobs));
-                    jobs.submit(
+                    jobs.submit_for_target(
                         command.name.clone(),
                         base.join("probe-inputs")
                             .join(format!("{}.hwpkg", command.name)),
+                        command.image_target,
                     )?;
                     loop {
                         if let Some(status) = jobs.status(&command.name) {
