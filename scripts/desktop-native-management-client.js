@@ -2,7 +2,8 @@
 // Test-only raw JSON client shared by isolated native acceptance scripts.
 'use strict';
 const net = require('node:net');
-const RESPONSE_LIMIT = 8192;
+const REQUEST_LIMIT = 16 * 1024;
+const RESPONSE_LIMIT = 64 * 1024;
 const TOTAL_TIMEOUT_MS = 4000;
 
 function failure(code, message) { return Object.assign(new Error(message), {code}); }
@@ -21,12 +22,16 @@ module.exports = function requestManagement(pipe, payload) { return new Promise(
   const timer = setTimeout(() => finish(failure('ERR_MANAGEMENT_TIMEOUT', 'native management total deadline')), TOTAL_TIMEOUT_MS);
   try {
     const encoded = JSON.stringify(payload);
+    if (Buffer.byteLength(encoded, 'utf8') > REQUEST_LIMIT) {
+      finish(failure('ERR_MANAGEMENT_REQUEST_LIMIT', 'native management request exceeds 16384 bytes'));
+      return;
+    }
     socket = net.connect(pipe);
     socket.once('connect', () => socket.write(encoded));
     socket.on('data', chunk => {
       if (settled) return;
       if (chunk.length > RESPONSE_LIMIT - size) {
-        finish(failure('ERR_MANAGEMENT_RESPONSE_LIMIT', 'native management response exceeds 8192 bytes'));
+        finish(failure('ERR_MANAGEMENT_RESPONSE_LIMIT', 'native management response exceeds 65536 bytes'));
         return;
       }
       size += chunk.length;

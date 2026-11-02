@@ -33,7 +33,7 @@ async function v2(command,targetProfile,value,overrides={}) {
   assert.equal(response.managementProtocol,2); assert.equal(response.desktopBuildId,build);
   const validId = typeof payload.requestId === 'string' && /^[\x21-\x7e]{1,128}$/.test(payload.requestId);
   assert.equal(response.requestId,validId ? payload.requestId : null);
-  assert.ok(Buffer.byteLength(JSON.stringify(response)) <= 8192);
+  assert.ok(Buffer.byteLength(JSON.stringify(response)) <= 65536);
   records.push({command,requestId:response.requestId,ok:response.ok,error:response.error,activeProfile:response.activeProfile,sourceConnected:response.sourceConnected,sourceScopes:response.sourceScopes,revision:response.revision});
   return response;
 }
@@ -52,7 +52,7 @@ async function startBridge(directory,session) {
 async function stop(child) { if(!child||child.exitCode!==null||child.signalCode!==null)return;child.kill();await until(async()=>child.exitCode!==null||child.signalCode!==null,'fixture cleanup timeout',5000); }
 async function verifyClientBounds() {
   const checks = [];
-  for (const mode of ['clean-close','partial-close','silent','trickle','oversize','normal']) {
+  for (const mode of ['clean-close','partial-close','silent','trickle','oversize','large-normal','normal']) {
     const name = '\\\\.\\pipe\\hertz-management-client-fixture-' + process.pid + '-' + mode;
     const sockets = new Set(); let accepted = false, closed = false;
     const server = net.createServer(socket => {
@@ -62,8 +62,9 @@ async function verifyClientBounds() {
       socket.once('data', () => {
         if (mode === 'clean-close') socket.end();
         if (mode === 'partial-close') socket.end('{"ok":');
-        if (mode === 'oversize') socket.write(' '.repeat(8193));
+        if (mode === 'oversize') socket.write(' '.repeat(65537));
         if (mode === 'normal') socket.write('{"ok":true}');
+        if (mode === 'large-normal') socket.write(JSON.stringify({padding:'x'.repeat(65522)}));
         if (mode === 'trickle') {
           const fragments = setInterval(() => socket.write(' '), 50);
           socket.once('close', () => clearInterval(fragments));
@@ -80,6 +81,7 @@ async function verifyClientBounds() {
       ]);
       assert.notEqual(result.pending, true, mode + ' must settle before the observer deadline');
       if (mode === 'normal') assert.deepEqual(result.value, {ok:true}, 'complete JSON succeeds before peer closes');
+      else if (mode === 'large-normal') assert.equal(Buffer.byteLength(JSON.stringify(result.value)), 65536, 'full 64 KiB response succeeds');
       else {
         code = result.error && result.error.code;
         const expected = mode === 'silent' || mode === 'trickle' ? 'ERR_MANAGEMENT_TIMEOUT' : mode === 'oversize' ? 'ERR_MANAGEMENT_RESPONSE_LIMIT' : 'ERR_MANAGEMENT_INCOMPLETE';
@@ -95,6 +97,8 @@ async function verifyClientBounds() {
       await new Promise(resolve => server.close(resolve));
     }
   }
+  await assert.rejects(requestManagement('must-not-connect', {padding:'x'.repeat(16384)}), {code:'ERR_MANAGEMENT_REQUEST_LIMIT'});
+  checks.push({mode:'oversize-request',code:'ERR_MANAGEMENT_REQUEST_LIMIT',rejectedBeforeConnect:true});
   fs.writeFileSync(path.join(output,'client-report.json'),JSON.stringify({passed:true,transport:'real Windows named pipes',checks},null,2));
 }
 async function main() {
@@ -188,6 +192,43 @@ async function main() {
   await until(async()=>(await legacy('status')).activeProfile.kind==='standalone','explicit return to standalone');
   assert.equal((await v2('status',b)).sourceConnected,false,'switching clears source B connection');
   assert.equal((await legacy('hide')).ok,true,'legacy standalone control recovers after switching back');
+  const formal = (command, payload = {}, requestId = 'wallpaper-' + (++sequence)) => request({ protocol: 2, requestId, command, payload });
+  const capabilities = await formal('wallpaper.capabilities');
+  assert.deepEqual(Object.keys(capabilities).sort(), ['protocol','requestId','ok','configRevision','jobId','result','error'].sort());
+  assert.equal(capabilities.ok, true); assert.equal(capabilities.result.nativeFilePicker, true);
+  assert.equal(capabilities.result.requestBytes, 16384); assert.equal(capabilities.result.responseBytes, 65536);
+  assert.equal((await formal('wallpaper.file.pick')).error.code, 'settings_session_required', 'pipe cannot borrow current settings owner');
+  assert.equal((await formal('wallpaper.import.begin', { path: 'C:/private.hwpkg' })).error.code, 'invalid_input');
+  assert.equal((await formal('wallpaper.import.begin', { fileToken: 'a'.repeat(32) })).error.code, 'settings_session_required');
+  const cached = await formal('wallpaper.capabilities', {}, 'formal-retry');
+  assert.deepEqual(await formal('wallpaper.capabilities', {}, 'formal-retry'), cached);
+  assert.equal((await formal('wallpaper.status', {}, 'formal-retry')).error.code, 'request_id_conflict');
+  const duplicate = await page.evaluate(async () => {
+    const first = window.hertzWallpaperSettings.requestManagement('wallpaper.capabilities', {}, 'page-duplicate');
+    const second = window.hertzWallpaperSettings.requestManagement('wallpaper.capabilities', {}, 'page-duplicate');
+    const same = first === second; const receipt = await first;
+    return { same, receipt };
+  });
+  assert.equal(duplicate.same, true); assert.equal(duplicate.receipt.ok, true);
+  await page.locator('#tab-wallpaper').click();
+  await page.locator('#local-library summary').click();
+  await page.waitForFunction(() => !document.getElementById('library-empty').hidden);
+  assert.equal(await page.locator('#library-import').isEnabled(), true);
+  assert.equal(await page.locator('#library-cancel').isVisible(), false);
+  assert.equal((await formal('wallpaper.library.list')).result.works.length, 0);
+  assert.equal((await formal('wallpaper.operations.get', { requestId: 'not-recorded' })).error.code, 'operation_unknown');
+  assert.equal((await legacy('status')).wallpaper.enabled, false, 'library browsing never enables wallpaper');
+  const typed = JSON.parse(fs.readFileSync(configFile));
+  assert.equal(typed.schemaVersion, 5);
+  const typedWallpaper = typed.profiles[0].wallpaper;
+  assert.equal(typedWallpaper.groups.length, 1); assert.equal(typedWallpaper.groups[0].selection.kind, 'builtin');
+  assert.equal(typedWallpaper.groups[0].displays[0].kind, 'primary');
+  assert.ok(Object.keys(typedWallpaper.groups[0].selection.params).length > 0, 'registry defaults persist');
+  for (const field of ['source','scene','fps','monitor','displayId','musicResponse']) assert.equal(Object.hasOwn(typedWallpaper, field), false);
+  const backups = fs.readdirSync(output).filter(name => /^config\.v3\..+\.bak$/.test(name));
+  assert.equal(backups.length, 1); assert.equal(JSON.parse(fs.readFileSync(path.join(output, backups[0]))).schemaVersion, 3);
+
+  records.push({ command: 'wallpaper formal library', ok: true, duplicatePromise: duplicate.same });
   await page.screenshot({path:path.join(output,'center-after-explicit-switch.png'),fullPage:true});
   fs.writeFileSync(path.join(output,'report.json'),JSON.stringify({passed:true,description,checks:records,scope:'isolated native WebView2 + authenticated DBX protocol fixture; excludes real DBX UI, cross-user/session and long-run D3 acceptance'},null,2));
   console.log('Native management v2 checks passed. Evidence: '+output);

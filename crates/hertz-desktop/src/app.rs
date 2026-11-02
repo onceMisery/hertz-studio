@@ -24,7 +24,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     SetWindowPos, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOSIZE,
 };
 use wry::http::{header, Request, Response};
-use wry::WebViewBuilder;
+use wry::{WebViewBuilder, WebViewExtWindows};
 
 use crate::config::{self, Config, Layout, Profile, Secondary};
 use crate::feed::{Document, Feed, Snapshot};
@@ -36,6 +36,13 @@ use crate::wallpaper::policy;
 use crate::wallpaper_feed::{
     Feed as WallpaperFeed, FeedError, Snapshot as WallpaperSnapshot, ERR_EVENTS_UNAVAILABLE,
 };
+
+#[path = "wallpaper_audio.rs"]
+mod wallpaper_audio;
+#[path = "wallpaper_desktop.rs"]
+mod wallpaper_desktop;
+#[path = "wallpaper_preview.rs"]
+mod wallpaper_preview;
 
 const POLL_IDLE: Duration = Duration::from_millis(500);
 const POLL_ERROR: Duration = Duration::from_secs(1);
@@ -52,13 +59,30 @@ pub(crate) enum UserEvent {
     Feed(u64, Instant, Box<Result<crate::feed::FeedUpdate, String>>),
     WallpaperFeed(u64, Instant, Box<Result<WallpaperSnapshot, FeedError>>),
     WallpaperPage(u64, String),
+    WallpaperAudio,
+    WallpaperAudioDelivered(usize, u64),
+    WallpaperSelection(
+        u64,
+        Result<
+            Box<crate::wallpaper::target_planner::ResolvedMedia>,
+            crate::wallpaper::jobs::JobError,
+        >,
+    ),
+    MediaPreviewSelection(
+        u64,
+        Result<
+            Box<crate::wallpaper::target_planner::ResolvedMedia>,
+            crate::wallpaper::jobs::JobError,
+        >,
+    ),
     WallpaperMedia(u64, Box<crate::wallpaper::webresource::PreparedResponse>),
     WallpaperProbe(Box<crate::wallpaper::decode_probe::ProbeRequest>),
     WallpaperProbePage(u64, String),
     WallpaperProbeEnvironment(tokio::sync::oneshot::Sender<Option<String>>),
     #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
     WallpaperProbeTestResult(u64, serde_json::Value),
-    SettingsPage(String),
+    SettingsPage(u64, String),
+    WallpaperManagement(ApiReply, serde_json::Value),
     /// 小窗快照轮询的一拍（含可能的封面字节）。
     MiniFeed(u64, Instant, Box<Result<MiniUpdate, String>>),
     /// 呈现时钟的 4Hz 位置推进。
@@ -78,6 +102,15 @@ pub(crate) enum UserEvent {
     Native(NativeEvent),
     Pipe(crate::pipe::PipeRequest),
     Quit,
+}
+
+#[derive(Clone)]
+pub(crate) enum ApiReply {
+    Settings(u64),
+    Pipe(
+        std::sync::mpsc::SyncSender<serde_json::Value>,
+        hertz_desktop_ipc::management::Admission,
+    ),
 }
 
 struct Policy {
@@ -122,19 +155,114 @@ impl PageClock {
     }
 }
 
+enum PresentationWindow {
+    Desktop { candidate: bool },
+    Preview { owner: HWND },
+}
+
 struct WallpaperSurface {
     page_clock: Option<PageClock>,
-    window: Window,
+    // Destroy the controller before its parent HWND.
     webview: wry::WebView,
+    window: Window,
+    session: crate::wallpaper::session::WallpaperSession,
+    binding: crate::wallpaper::page_events::PageBinding,
+    created_at: Instant,
+    frame_wait_since: Option<Instant>,
+    configuration: config::WallpaperConfig,
     monitor: native::WallpaperMonitor,
     zoom: f64,
     eval_failures: AtomicU64,
     _media_access: crate::wallpaper::access::MediaAccess,
 }
 
+struct RetiringWallpaper {
+    surface: Option<WallpaperSurface>,
+    session: Option<crate::wallpaper::session::WallpaperSession>,
+    drain: crate::wallpaper::access::Drain,
+    close_error_logged: bool,
+}
+
+impl RetiringWallpaper {
+    fn new(mut surface: WallpaperSurface) -> Self {
+        surface.stop();
+        surface.session.disable();
+        let drain = surface._media_access.revoke();
+        Self {
+            surface: Some(surface),
+            session: None,
+            drain,
+            close_error_logged: false,
+        }
+    }
+
+    fn poll(&mut self) -> bool {
+        if let Some(surface) = self.surface.as_ref() {
+            if let Err(error) = unsafe { surface.webview.controller().Close() } {
+                if !self.close_error_logged {
+                    log(&format!("wallpaper controller close pending: {error}"));
+                    self.close_error_logged = true;
+                }
+                return false;
+            }
+            let WallpaperSurface {
+                mut session,
+                webview,
+                window,
+                ..
+            } = self.surface.take().expect("closing surface");
+            drop(webview);
+            drop(window);
+            for generation in session.retiring_media_generations() {
+                session.media_controller_closed(generation);
+            }
+            self.session = Some(session);
+        }
+        let Some(session) = self.session.as_mut() else {
+            return false;
+        };
+        session.reap_media();
+        self.drain.is_drained() && session.retiring_media_generations().is_empty()
+    }
+}
+
 impl WallpaperSurface {
     fn hwnd(&self) -> HWND {
         self.window.hwnd() as HWND
+    }
+
+    fn media_frame_kind(&self) -> crate::wallpaper::session::FrameKind {
+        use crate::wallpaper::{media::Container, session::FrameKind};
+        self.session.media().map_or(FrameKind::Gl, |media| {
+            if media.input().metadata.container == Container::Image {
+                FrameKind::Image
+            } else {
+                FrameKind::Video
+            }
+        })
+    }
+
+    fn load_media_page(&mut self) {
+        self.apply_config(&self.configuration, self.monitor.refresh_hz);
+        if let Some(media) = self.session.media() {
+            let kind = if self.media_frame_kind() == crate::wallpaper::session::FrameKind::Image {
+                "image"
+            } else {
+                "video"
+            };
+            let descriptor = serde_json::json!({"kind":kind,"url":media.url(),"fit":self.configuration.presentation().fit});
+            self.eval(&format!("window.hertzWallpaper.applyMedia({descriptor});"));
+        }
+        self.start(self.configuration.presentation().fps);
+        self.frame_wait_since = Some(Instant::now());
+    }
+
+    fn first_frame_ready(&self) -> bool {
+        use crate::wallpaper::session::SessionState;
+        matches!(
+            self.session.state(),
+            SessionState::Ready | SessionState::Running | SessionState::Paused
+        )
     }
 
     fn eval(&self, script: &str) {
@@ -164,19 +292,7 @@ impl WallpaperSurface {
     }
 
     fn apply_config(&self, wallpaper: &config::WallpaperConfig, refresh_hz: u32) {
-        if let Ok(payload) = serde_json::to_string(&serde_json::json!({
-            "source": wallpaper.source,
-            "scene": wallpaper.scene,
-            "musicResponse": wallpaper.music_response,
-            "allowed": config::WALLPAPER_SCENES
-                .iter()
-                .map(|(id, _)| *id)
-                .collect::<Vec<_>>(),
-            "brightness": wallpaper.brightness,
-            "motion": wallpaper.motion,
-            "quality": wallpaper.quality.as_str(),
-            "refreshHz": refresh_hz,
-        })) {
+        if let Ok(payload) = serde_json::to_string(&wallpaper_page_config(wallpaper, refresh_hz)) {
             self.eval(&format!(
                 "window.hertzWallpaper && window.hertzWallpaper.applyConfig({payload});"
             ));
@@ -257,13 +373,7 @@ impl SettingsSurface {
 struct PreviewSurface {
     page_clock: Option<PageClock>,
     webview: Rc<wry::WebView>,
-    fps: u8,
-    music_response: bool,
-    source: String,
-    scene: String,
-    brightness: f64,
-    motion: f64,
-    quality: config::WallpaperQuality,
+    config: config::WallpaperConfig,
     ready: bool,
     lease_until: Instant,
     /// owner 租约（设计 §13.4）：renew/close 必须携带，页面刷新后凭 status 取回。
@@ -300,20 +410,7 @@ impl PreviewSurface {
     }
 
     fn apply_config(&self) {
-        if let Ok(payload) = serde_json::to_string(&serde_json::json!({
-            "source": self.source,
-            "scene": self.scene,
-            "musicResponse": self.music_response,
-            "allowed": config::WALLPAPER_SCENES
-                .iter()
-                .map(|(id, _)| *id)
-                .collect::<Vec<_>>(),
-            // 预览跟随草稿的亮度/运动/画质；设置窗口按 60 Hz 兜底做分频。
-            "brightness": self.brightness,
-            "motion": self.motion,
-            "quality": self.quality.as_str(),
-            "refreshHz": 60,
-        })) {
+        if let Ok(payload) = serde_json::to_string(&wallpaper_page_config(&self.config, 60)) {
             self.eval(&format!(
                 "window.hertzWallpaper && window.hertzWallpaper.applyConfig({payload});"
             ));
@@ -323,7 +420,7 @@ impl PreviewSurface {
     fn start(&self) {
         self.eval(&format!(
             "window.hertzWallpaper && window.hertzWallpaper.start({});",
-            self.fps
+            self.config.presentation().fps
         ));
     }
 
@@ -333,8 +430,8 @@ impl PreviewSurface {
 }
 
 #[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct WallpaperCandidate {
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LegacyWallpaperCandidate {
     enabled: bool,
     fps: u8,
     music_response: bool,
@@ -355,6 +452,84 @@ struct WallpaperCandidate {
     #[serde(default)]
     #[allow(dead_code)] // v4 只收 pause；runLow 属 P1 的显式用户选项
     battery_policy: config::BatteryPolicy,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(untagged)]
+enum WallpaperCandidate {
+    Current(config::WallpaperConfig),
+    Legacy(LegacyWallpaperCandidate),
+}
+impl WallpaperCandidate {
+    fn normalized(&self) -> Result<config::WallpaperConfig, String> {
+        let mut config = match self {
+            Self::Current(config) => config.clone(),
+            Self::Legacy(legacy) => config::LegacyWallpaperConfig {
+                enabled: legacy.enabled,
+                fps: legacy.fps,
+                music_response: legacy.music_response,
+                monitor: legacy.monitor.clone(),
+                display_id: legacy.display_id.clone(),
+                source: legacy.source.clone(),
+                scene: legacy.scene.clone(),
+                brightness: legacy.brightness,
+                motion: legacy.motion,
+                battery_policy: legacy.battery_policy,
+                quality: legacy.quality,
+            }
+            .migrate(&native::wallpaper_monitors(), false)
+            .map_err(|error| error.to_string())?,
+        };
+        config.normalize().map_err(|error| error.to_string())?;
+        validate_current_presentation(&config)?;
+        Ok(config)
+    }
+}
+
+fn validate_current_presentation(config: &config::WallpaperConfig) -> Result<(), String> {
+    if config.builtin().is_none() {
+        return Err("请使用本地作品的正式应用入口".into());
+    }
+    validate_configured_presentation(config)
+}
+
+fn validate_configured_presentation(config: &config::WallpaperConfig) -> Result<(), String> {
+    use crate::wallpaper::config::LayoutMode;
+    if config.groups.len() != 1 || config.main().mode != LayoutMode::Single {
+        return Err("当前版本尚不支持此显示布局".into());
+    }
+    if config.builtin().is_none()
+        && !matches!(
+            config.main().selection,
+            crate::wallpaper::config::Selection::Package { .. }
+        )
+    {
+        return Err("此作品类型暂时无法应用".into());
+    }
+    if config.main().presentation.pointer || !config.main().properties.is_empty() {
+        return Err("此作品输入或公开属性暂时不可用".into());
+    }
+    if config.pause_on_maximized || !config.application_rules.is_empty() {
+        return Err("此应用暂停规则暂时不可用".into());
+    }
+    Ok(())
+}
+
+fn wallpaper_page_config(
+    wallpaper: &config::WallpaperConfig,
+    refresh_hz: u32,
+) -> serde_json::Value {
+    let builtin = wallpaper.builtin();
+    serde_json::json!({
+        "source": if wallpaper.follows_hertz() { "follow" } else { "fixed" },
+        "scene": builtin.as_ref().map(|state| state.scene_id.as_str()),
+        "params": builtin.as_ref().map(|state| &state.params),
+        "musicResponse": !matches!(wallpaper.audio_input, crate::wallpaper::config::AudioInput::None),
+        "audioInput": wallpaper.audio_input,
+        "allowed": config::WALLPAPER_SCENES.iter().map(|(id,_)| *id).collect::<Vec<_>>(),
+        "brightness": wallpaper.presentation().brightness,"motion":wallpaper.presentation().motion,
+        "quality": wallpaper.presentation().quality.as_str(),"refreshHz":refresh_hz,
+    })
 }
 
 struct TrayActions {
@@ -394,6 +569,8 @@ struct App {
     dbx_session: Option<String>,
     source_health: crate::management::SourceHealth,
     wallpaper_last_update: Option<Instant>,
+    wallpaper_audio: crate::wallpaper::audio_service::AudioService,
+    wallpaper_audio_dispatch: wallpaper_audio::Dispatch,
     profile: Profile,
     policy: Policy,
     last_snapshot: Option<Snapshot>,
@@ -415,6 +592,11 @@ struct App {
     source_state: &'static str,
     source_message: Option<String>,
     wallpaper: Option<WallpaperSurface>,
+    wallpaper_retiring: Vec<RetiringWallpaper>,
+    wallpaper_candidate: Option<WallpaperSurface>,
+    wallpaper_prepared: Option<wallpaper_desktop::Prepared>,
+    wallpaper_selection: Option<wallpaper_desktop::SelectionTask>,
+    wallpaper_media_failed_revision: Option<u64>,
     wallpaper_probe: crate::wallpaper::decode_probe::ProbeHost,
     wallpaper_page_ready: bool,
     wallpaper_last: Option<WallpaperSnapshot>,
@@ -442,11 +624,15 @@ struct App {
     wallpaper_recovery_attempts: Vec<Instant>,
     wallpaper_recovery_terminal: bool,
     wallpaper_monitor_missing: bool,
+    wallpaper_library: crate::wallpaper::service::LibraryService,
+    settings_drafts: crate::wallpaper::settings_drafts::SettingsDrafts,
+    settings_generation: u64,
     settings: Option<SettingsSurface>,
     settings_candidate: Option<Profile>,
     settings_tab: String,
     settings_navigation: u64,
     preview: Option<PreviewSurface>,
+    media_preview: Option<wallpaper_preview::MediaPreview>,
     /// 配置格式迁移的一次性说明（schema v4）。
     migration_notice: Option<String>,
     position_edit: Option<PositionEdit>,
@@ -721,25 +907,38 @@ impl App {
     }
 
     fn recompute_wallpaper(&mut self) {
-        let Some(surface) = self.wallpaper.as_ref() else {
+        let Some(surface) = self.wallpaper.as_mut() else {
             return;
         };
         if !native::wallpaper_alive(surface.hwnd()) {
             return;
         }
+        use crate::wallpaper::session::PauseScope;
+        let now = Instant::now();
         if self.wallpaper_monitor_missing {
+            surface.session.add_pause_reason(
+                policy::REASON_DISPLAY_MISSING,
+                PauseScope::DesktopOnly,
+                now,
+            );
             // waitingDisplay：宽限期已过、目标屏确认缺失；保留 surface，仅停绘。
             surface.stop();
+            surface.frame_wait_since = None;
             self.wallpaper_visible = false;
             return;
         }
+        surface.session.remove_pause_reason(
+            policy::REASON_DISPLAY_MISSING,
+            PauseScope::DesktopOnly,
+            now,
+        );
         // 页面就绪前不能把 WebView2 隐藏：隐藏会让页面不加载，dom_ready 永远不来。
         if !self.wallpaper_page_ready {
             return;
         }
         let inputs = policy::PolicyInputs {
             enabled: self.config.wallpaper.enabled || self.wallpaper_forced,
-            wallpaper: &self.config.wallpaper,
+            wallpaper: &surface.configuration,
             manual_pause: self.wallpaper_hidden,
             fullscreen: self.wallpaper_fullscreen_gate.stable(),
             session_unavailable: self.policy.session_unavailable,
@@ -749,22 +948,48 @@ impl App {
             has_surface: true,
             page_ready: self.wallpaper_page_ready,
         };
+        let reasons = policy::pause_reasons(&inputs);
+        for (name, scope) in [
+            (policy::REASON_MANUAL_PAUSE, PauseScope::DesktopOnly),
+            (policy::REASON_FULLSCREEN, PauseScope::DesktopOnly),
+            (
+                policy::REASON_SESSION_UNAVAILABLE,
+                PauseScope::AllPresentations,
+            ),
+            (policy::REASON_DISPLAY_OFF, PauseScope::AllPresentations),
+            (policy::REASON_BATTERY, PauseScope::AllPresentations),
+        ] {
+            if reasons.contains(&name) {
+                surface.session.add_pause_reason(name, scope, now);
+            } else {
+                surface.session.remove_pause_reason(name, scope, now);
+            }
+        }
         let visible = inputs.enabled
-            && self.config.wallpaper.fps > 0
+            && surface.configuration.presentation().fps > 0
             && !inputs.manual_pause
             && policy::renderable(&inputs);
         let was_visible = self.wallpaper_visible;
-        self.wallpaper_visible = visible;
+        self.wallpaper_visible = visible && surface.first_frame_ready();
         if visible {
-            surface.start(self.config.wallpaper.fps);
+            if surface.first_frame_ready() {
+                surface.frame_wait_since = None;
+            } else {
+                surface.frame_wait_since.get_or_insert_with(Instant::now);
+            }
+            surface.start(surface.configuration.presentation().fps);
+            if surface.first_frame_ready() {
+                surface.eval("window.hertzWallpaper && window.hertzWallpaper.reveal();");
+            }
             // 只在重新变为可见时给宽限；feed 每 250 ms 调本函数，不能把心跳
             // 时间一直刷新，否则页面停摆永远不会被判超时。
-            if !was_visible {
+            if self.wallpaper_visible && !was_visible {
                 self.wallpaper_heartbeat_at = Some(Instant::now());
                 self.wallpaper_fps_sample = Some((Instant::now(), self.wallpaper_heartbeat_draws));
                 self.wallpaper_measured_fps = None;
             }
         } else {
+            surface.frame_wait_since = None;
             surface.stop();
             if was_visible {
                 self.reset_wallpaper_heartbeat();
@@ -876,6 +1101,21 @@ impl App {
         if !geometry_changed && !zoom_changed {
             return;
         }
+        if geometry_changed
+            && self
+                .wallpaper
+                .as_ref()
+                .is_some_and(|surface| surface.session.media().is_some())
+        {
+            self.retire_wallpaper_surface();
+            self.wallpaper_page_ready = false;
+            self.wallpaper_visible = false;
+            self.wallpaper_media_failed_revision = None;
+            if let Err(error) = self.ensure_media_wallpaper(target) {
+                self.wallpaper_apply_error = Some(error.to_string());
+            }
+            return;
+        }
         if geometry_changed {
             log(&format!(
                 "wallpaper monitor geometry changed name={} rect={},{} {}x{} dpi={} hz={}",
@@ -892,7 +1132,7 @@ impl App {
             };
             if let Err(error) = surface.reflow(monitor) {
                 log(&format!("wallpaper reflow failed: {error:#}"));
-                self.wallpaper = None;
+                self.retire_wallpaper_surface();
                 self.wallpaper_page_ready = false;
                 self.wallpaper_visible = false;
                 self.reset_wallpaper_page_stats();
@@ -960,11 +1200,36 @@ impl App {
     }
 
     fn handle_wallpaper_page(&mut self, generation: u64, event: &str) {
-        if generation != self.wallpaper_generation {
+        if self.handle_media_preview_page(generation, event) {
+            return;
+        }
+        if self.handle_candidate_page(generation, event) {
+            return;
+        }
+        if !self
+            .wallpaper
+            .as_ref()
+            .is_some_and(|surface| surface.binding.generation() == generation)
+        {
             log(&format!(
                 "ignore stale wallpaper page generation={generation} current={}",
                 self.wallpaper_generation
             ));
+            return;
+        }
+        if event.starts_with("wallpaper_media_failed ")
+            && self
+                .wallpaper
+                .as_ref()
+                .is_some_and(|surface| surface.session.media().is_some())
+        {
+            self.wallpaper_media_failed_revision = Some(self.config.revision);
+            self.wallpaper_apply_error = Some(event.chars().take(256).collect());
+            self.retire_wallpaper_surface();
+            self.wallpaper_page_ready = false;
+            self.wallpaper_visible = false;
+            self.reset_wallpaper_page_stats();
+            self.send_settings_status(self.wallpaper_apply_error.as_deref(), None);
             return;
         }
         #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
@@ -989,11 +1254,16 @@ impl App {
                     self.wallpaper.as_ref(),
                     serde_json::from_str::<ProbeAccess>(body),
                 ) {
-                    let accepted = surface._media_access.replace(request.generation, &request.resources);
-                    surface.eval(&format!("window.__nativeMediaProbe={};", serde_json::json!({
-                        "nonce": request.nonce, "accepted": accepted,
-                        "activeStreams": crate::wallpaper::media_stream::global_pool().active(),
-                    })));
+                    let accepted = surface
+                        ._media_access
+                        .replace(request.generation, &request.resources);
+                    surface.eval(&format!(
+                        "window.__nativeMediaProbe={};",
+                        serde_json::json!({
+                            "nonce": request.nonce, "accepted": accepted,
+                            "activeStreams": crate::wallpaper::media_stream::global_pool().active(),
+                        })
+                    ));
                 }
             }
             return;
@@ -1014,43 +1284,63 @@ impl App {
             }
             return;
         }
-        match event {
-            "wallpaper_dom_ready" => {
-                log("wallpaper page dom ready");
-                self.wallpaper_page_ready = true;
-                let now = Instant::now();
-                self.wallpaper_heartbeat_ticks = 0;
-                self.wallpaper_heartbeat_draws = 0;
-                self.wallpaper_heartbeat_at = Some(now);
-                self.wallpaper_fps_sample = Some((now, 0));
-                self.wallpaper_measured_fps = None;
-                if let Some(surface) = self.wallpaper.as_ref() {
+        if event.starts_with("wallpaper_session ") {
+            use crate::wallpaper::page_events::PageEvent;
+            use crate::wallpaper::session::FrameKind;
+            let Some(surface) = self.wallpaper.as_mut() else {
+                return;
+            };
+            match surface.binding.parse(event) {
+                Some(PageEvent::Handshake) => {
+                    if !surface.session.page_handshake(generation) {
+                        return;
+                    }
+                    log("wallpaper page handshake");
+                    self.wallpaper_page_ready = true;
+                    let now = Instant::now();
+                    self.wallpaper_heartbeat_ticks = 0;
+                    self.wallpaper_heartbeat_draws = 0;
+                    self.wallpaper_heartbeat_at = Some(now);
+                    self.wallpaper_fps_sample = Some((now, 0));
+                    self.wallpaper_measured_fps = None;
                     surface.reset_eval_failures();
+                    surface.session.start_presentation(Instant::now());
                 }
-            }
-            "wallpaper_ready" => {
-                log("wallpaper page mounted");
-                self.wallpaper_page_ready = true;
-                let now = Instant::now();
-                self.wallpaper_heartbeat_ticks = 0;
-                self.wallpaper_heartbeat_draws = 0;
-                self.wallpaper_heartbeat_at = Some(now);
-                self.wallpaper_fps_sample = Some((now, 0));
-                self.wallpaper_measured_fps = None;
-                if let Some(surface) = self.wallpaper.as_ref() {
-                    surface.reset_eval_failures();
+                // This controller currently hosts builtins. A media receipt cannot qualify GL.
+                Some(PageEvent::FirstFrame(FrameKind::Gl)) => {
+                    if !surface.session.frame_submitted(generation, FrameKind::Gl) {
+                        return;
+                    }
+                    surface.session.start_presentation(Instant::now());
+                    log("wallpaper page mounted: current session submitted first GL frame");
+                    self.recompute_wallpaper();
+                    return;
                 }
+                _ => return,
             }
-            "wallpaper_mount_failed" => {
-                log("wallpaper page mount failed");
-                self.wallpaper_page_ready = false;
-                self.reset_wallpaper_page_stats();
+        } else {
+            match event {
+                // Kept for the embedded builtin preview and legacy diagnostics only.
+                "wallpaper_dom_ready" | "wallpaper_ready" => return,
+                "wallpaper_mount_failed" => {
+                    log("wallpaper page mount failed");
+                    if let Some(surface) = self.wallpaper.as_mut() {
+                        surface.session.fail(
+                            generation,
+                            "scene_mount_failed",
+                            "场景无法挂载",
+                            true,
+                        );
+                    }
+                    self.wallpaper_page_ready = false;
+                    self.reset_wallpaper_page_stats();
+                }
+                other => log(&format!("unknown wallpaper page event: {other}")),
             }
-            other => log(&format!("unknown wallpaper page event: {other}")),
         }
         if self.wallpaper_page_ready {
             if let Some(surface) = self.wallpaper.as_ref() {
-                surface.apply_config(&self.config.wallpaper, surface.monitor.refresh_hz);
+                surface.apply_config(&surface.configuration, surface.monitor.refresh_hz);
             }
             if let Some(snapshot) = self.wallpaper_last.as_ref() {
                 if let Some(surface) = self.wallpaper.as_ref() {
@@ -1062,6 +1352,10 @@ impl App {
     }
 
     fn recover_wallpaper(&mut self, target: &EventLoopWindowTarget<UserEvent>) {
+        self.poll_wallpaper_retirements();
+        if !self.wallpaper_retiring.is_empty() {
+            return;
+        }
         if !(self.config.wallpaper.enabled || self.wallpaper_forced) {
             return;
         }
@@ -1072,9 +1366,20 @@ impl App {
         {
             return;
         }
+        if self.config.wallpaper.builtin().is_none() {
+            if let Err(error) = self.ensure_media_wallpaper(target) {
+                self.wallpaper_apply_error = Some(error.to_string());
+            }
+            return;
+        }
+        if let Err(error) = validate_current_presentation(&self.config.wallpaper) {
+            self.wallpaper_apply_error = Some(error);
+            return;
+        }
         // 缺屏不是渲染故障，不消耗重建预算，也不临时认领另一块屏。
         let monitors = native::wallpaper_monitors();
-        let Some(resolved) = resolve_wallpaper_monitor_or_primary(&monitors, &self.config.wallpaper)
+        let Some(resolved) =
+            resolve_wallpaper_monitor_or_primary(&monitors, &self.config.wallpaper)
         else {
             self.wallpaper_monitor_missing = true;
             return;
@@ -1095,32 +1400,27 @@ impl App {
         self.wallpaper_recovery_attempts.push(now);
         let attempt = self.wallpaper_recovery_attempts.len();
         log(&format!("wallpaper recovery begin attempt={attempt}"));
-        self.wallpaper = None;
+        self.retire_wallpaper_surface();
+        if !self.wallpaper_retiring.is_empty() {
+            return;
+        }
         self.wallpaper_page_ready = false;
         self.wallpaper_visible = false;
         self.reset_wallpaper_page_stats();
         self.wallpaper_generation = self.wallpaper_generation.wrapping_add(1);
-        match create_wallpaper(
+        match create_presentation(
             target,
             self.proxy.clone(),
             self.wallpaper_generation,
+            self.config.revision,
+            self.config.wallpaper.clone(),
             resolved,
+            PresentationWindow::Desktop { candidate: false },
         ) {
             Ok(surface) => {
                 self.wallpaper = Some(surface);
                 self.wallpaper_monitor_missing = false;
                 self.wallpaper_apply_error = None;
-                // 恢复成功同样建立稳定身份；沿用统一去抖提交。
-                let identity = self
-                    .wallpaper
-                    .as_ref()
-                    .map(|surface| surface.monitor.display_id());
-                if let Some(identity) = identity {
-                    if self.config.wallpaper.display_id.as_deref() != Some(identity.as_str()) {
-                        self.config.wallpaper.display_id = Some(identity);
-                        self.schedule_save();
-                    }
-                }
                 log(&format!("wallpaper recovery success attempt={attempt}"));
             }
             Err(error) => {
@@ -1134,6 +1434,16 @@ impl App {
     }
 
     fn retry_wallpaper(&mut self, target: &EventLoopWindowTarget<UserEvent>) {
+        self.wallpaper_media_failed_revision = None;
+        if self.wallpaper_audio.snapshot().phase == "failed" {
+            self.wallpaper_audio.retry();
+        }
+        if self.config.wallpaper.builtin().is_none() {
+            if let Err(error) = self.ensure_media_wallpaper(target) {
+                self.wallpaper_apply_error = Some(error.to_string());
+            }
+            return;
+        }
         if let Some(dbx) = &self.dbx {
             dbx.retry();
         }
@@ -1144,19 +1454,7 @@ impl App {
     }
 
     fn current_wallpaper_candidate(&self) -> WallpaperCandidate {
-        WallpaperCandidate {
-            enabled: self.config.wallpaper.enabled,
-            fps: self.config.wallpaper.fps,
-            music_response: self.config.wallpaper.music_response,
-            monitor: self.config.wallpaper.monitor.clone(),
-            display_id: self.config.wallpaper.display_id.clone(),
-            source: self.config.wallpaper.source.clone(),
-            scene: self.config.wallpaper.scene.clone(),
-            brightness: self.config.wallpaper.brightness,
-            motion: self.config.wallpaper.motion,
-            quality: self.config.wallpaper.quality,
-            battery_policy: self.config.wallpaper.battery_policy,
-        }
+        WallpaperCandidate::Current(self.config.wallpaper.clone())
     }
 
     fn send_settings_status(&self, error: Option<&str>, message: Option<&str>) {
@@ -1206,8 +1504,10 @@ impl App {
                 self.settings_candidate.as_ref(),
             ),
             "monitors": monitors,
-            "previewActive": self.preview.is_some(),
-            "previewLease": self.preview.as_ref().map(|preview| preview.lease_id.clone()),
+            "previewActive": self.preview_active(),
+            "mediaPreview": self.preview_diagnostics(),
+            "mediaPreviewAvailable": true,
+            "previewLease": self.preview_lease(),
             "lyricsConfig": self.position_edit.as_ref().map(|edit| &edit.lyrics).unwrap_or(&self.config.lyrics),
             "runtime": self.status_json(),
             "launchAtLogin": native::autostart_enabled().ok(),
@@ -1230,10 +1530,14 @@ impl App {
             self.send_settings_status(None, None);
             return;
         }
-        match create_settings(target, self.proxy.clone()) {
+        self.settings_generation += 1;
+        match create_settings(target, self.proxy.clone(), self.settings_generation) {
             Ok(settings) => {
                 log("wallpaper settings opened");
                 self.settings = Some(settings);
+                self.settings_drafts.set_owner(self.settings_generation);
+                self.wallpaper_library
+                    .set_settings_owner(self.settings_generation);
                 self.sync_settings_feed();
                 self.send_settings_status(None, None);
             }
@@ -1245,15 +1549,24 @@ impl App {
     }
 
     fn close_settings(&mut self) {
+        if let Some(task) = &self.wallpaper_selection {
+            if task.apply.is_some() {
+                task.cancel.store(true, Ordering::Release);
+            }
+        }
         let _ = self.finish_position_edit(false);
         self.close_preview();
+        self.settings_drafts.set_owner(0);
+        self.wallpaper_library.set_settings_owner(0);
+        self.settings_generation += 1;
         self.settings = None;
         self.settings_candidate = None;
         self.sync_settings_feed();
     }
 
     fn close_preview(&mut self) {
-        if self.preview.take().is_some() {
+        let media_closed = self.close_media_preview();
+        if self.preview.take().is_some() || media_closed {
             if let Some(settings) = self.settings.as_ref() {
                 settings.eval("window.hertzWallpaperSettings && window.hertzWallpaperSettings.unmountPreview();");
             }
@@ -1267,14 +1580,12 @@ impl App {
         target: &EventLoopWindowTarget<UserEvent>,
         candidate: &WallpaperCandidate,
     ) -> Result<(), String> {
+        let candidate = candidate.normalized()?;
+        self.validate_preview_audio(&candidate)?;
+        self.wallpaper_audio_dispatch.invalidate();
+        self.close_media_preview();
         if let Some(preview) = self.preview.as_mut() {
-            preview.fps = candidate.fps;
-            preview.music_response = candidate.music_response;
-            preview.source = candidate.source.clone();
-            preview.scene = candidate.scene.clone();
-            preview.brightness = candidate.brightness;
-            preview.motion = candidate.motion;
-            preview.quality = candidate.quality;
+            preview.config = candidate.clone();
             preview.lease_until = Instant::now() + PREVIEW_LEASE;
             if preview.ready && !preview.paused {
                 preview.apply_config();
@@ -1292,20 +1603,17 @@ impl App {
         self.preview = Some(PreviewSurface {
             page_clock: None,
             webview: settings.webview.clone(),
-            fps: candidate.fps,
-            music_response: candidate.music_response,
-            source: candidate.source.clone(),
-            scene: candidate.scene.clone(),
-            brightness: candidate.brightness,
-            motion: candidate.motion,
-            quality: candidate.quality,
+            config: candidate,
             ready: false,
             lease_until: Instant::now() + PREVIEW_LEASE,
-            lease_id: new_lease_id(),
+            lease_id: new_lease_id()?,
             paused: false,
         });
-        settings
-            .eval("window.hertzWallpaperSettings && window.hertzWallpaperSettings.mountPreview();");
+        let lease = serde_json::to_string(&self.preview.as_ref().expect("preview").lease_id)
+            .expect("lease id");
+        settings.eval(&format!(
+            "window.hertzWallpaperSettings && window.hertzWallpaperSettings.mountPreview({lease});"
+        ));
         Ok(())
     }
 
@@ -1501,11 +1809,17 @@ impl App {
         &mut self,
         target: &EventLoopWindowTarget<UserEvent>,
     ) -> Result<()> {
+        if self.config.wallpaper.builtin().is_none() {
+            return self.ensure_media_wallpaper(target);
+        }
+        validate_current_presentation(&self.config.wallpaper).map_err(anyhow::Error::msg)?;
+
         let monitors = native::wallpaper_monitors();
         if monitors.is_empty() {
             bail!("显示器拓扑暂时为空，请稍后重试");
         }
-        let Some(resolved) = resolve_wallpaper_monitor_or_primary(&monitors, &self.config.wallpaper)
+        let Some(resolved) =
+            resolve_wallpaper_monitor_or_primary(&monitors, &self.config.wallpaper)
         else {
             self.wallpaper_monitor_missing = true;
             bail!("目标显示器未连接，请在设置中重新认领");
@@ -1522,36 +1836,46 @@ impl App {
                 .as_ref()
                 .is_some_and(|surface| !native::wallpaper_alive(surface.hwnd()))
         {
-            self.wallpaper = None;
+            self.retire_wallpaper_surface();
             self.wallpaper_page_ready = false;
         }
         if self.wallpaper.is_none() {
+            self.poll_wallpaper_retirements();
+            if !self.wallpaper_retiring.is_empty() {
+                bail!("旧壁纸仍在退出，请稍后重试");
+            }
             self.wallpaper_generation = self.wallpaper_generation.wrapping_add(1);
-            let surface = create_wallpaper(
+            let surface = create_presentation(
                 target,
                 self.proxy.clone(),
                 self.wallpaper_generation,
+                self.config.revision,
+                self.config.wallpaper.clone(),
                 resolved,
+                PresentationWindow::Desktop { candidate: false },
             )?;
             self.wallpaper = Some(surface);
-        }
-        // 旧 GDI 名命中后建立稳定身份（设计 §4.3）：回填 displayId 并按统一去抖提交。
-        let identity = self
-            .wallpaper
-            .as_ref()
-            .map(|surface| surface.monitor.display_id());
-        if let Some(identity) = identity {
-            if self.config.wallpaper.display_id.as_deref() != Some(identity.as_str()) {
-                self.config.wallpaper.display_id = Some(identity);
-                self.schedule_save();
-            }
         }
         Ok(())
     }
 
+    fn retire_wallpaper_surface(&mut self) {
+        if let Some(surface) = self.wallpaper.take() {
+            self.wallpaper_retiring
+                .push(RetiringWallpaper::new(surface));
+        }
+        self.poll_wallpaper_retirements();
+    }
+
+    fn poll_wallpaper_retirements(&mut self) {
+        self.wallpaper_retiring
+            .retain_mut(|retiring| !retiring.poll());
+    }
+
     fn drop_wallpaper_surface(&mut self) {
+        self.cancel_wallpaper_transition();
         self.stop_wallpaper_feed();
-        self.wallpaper = None;
+        self.retire_wallpaper_surface();
         self.wallpaper_generation = self.wallpaper_generation.wrapping_add(1);
         self.wallpaper_page_ready = false;
         self.wallpaper_visible = false;
@@ -1590,6 +1914,7 @@ impl App {
             .map_err(|error| format!("保存设置失败：{error:#}"))?;
         self.committed_config = self.config.clone();
         self.close_preview();
+        self.settings_drafts.clear();
         self.profile = profile;
         self.source_generation = next_generation;
         self.restart_mini_source(target);
@@ -1679,9 +2004,7 @@ impl App {
         if self.position_edit.is_some() {
             return Err("请先完成或取消位置调整".into());
         }
-        if let Err(error) = validate_candidate(candidate) {
-            return Err(error.to_string());
-        }
+        let candidate = candidate.normalized()?;
         if self.save_due.is_some() || expected_revision != self.config.revision {
             return Err("设置已在其他位置变化；草稿已保留，请放弃修改后重新读取".into());
         }
@@ -1693,19 +2016,20 @@ impl App {
             next.lyrics = lyrics;
             next.sanitize();
         }
-        next.wallpaper.enabled = candidate.enabled;
-        next.wallpaper.fps = candidate.fps;
-        next.wallpaper.music_response = candidate.music_response;
-        next.wallpaper.monitor = candidate.monitor.clone();
-        next.wallpaper.display_id = candidate.display_id.clone();
-        next.wallpaper.source = candidate.source.clone();
-        next.wallpaper.scene = candidate.scene.clone();
-        next.wallpaper.brightness = candidate.brightness;
-        next.wallpaper.motion = candidate.motion;
-        next.wallpaper.quality = candidate.quality;
+        next.wallpaper = candidate.clone();
         config::commit(&mut self.config, next)
             .map_err(|error| format!("保存设置失败：{error:#}"))?;
+        self.apply_saved_wallpaper_settings(candidate, target)
+    }
+
+    fn apply_saved_wallpaper_settings(
+        &mut self,
+        candidate: config::WallpaperConfig,
+        target: &EventLoopWindowTarget<UserEvent>,
+    ) -> Result<(), String> {
+        self.wallpaper_audio_dispatch.invalidate();
         self.committed_config = self.config.clone();
+        self.settings_drafts.clear();
         self.wallpaper_forced = false;
         self.wallpaper_recovery_terminal = false;
         self.wallpaper_recovery_attempts.clear();
@@ -1713,7 +2037,21 @@ impl App {
         // 新 revision 与意图，只把错误独立呈现给设置页，不回写旧配置。
         let mut run_error = None;
         if candidate.enabled {
-            if let Err(error) = self.ensure_wallpaper_surface(target) {
+            let mut mount = Ok(());
+            if candidate.builtin().is_some() {
+                self.cancel_wallpaper_transition();
+                if self
+                    .wallpaper
+                    .as_ref()
+                    .is_some_and(|surface| surface.session.media().is_some())
+                {
+                    // A builtin replacement uses its own controller and first-frame gate.
+                    mount = self.stage_builtin_wallpaper(target);
+                } else if let Some(surface) = self.wallpaper.as_mut() {
+                    surface.configuration = candidate.clone();
+                }
+            }
+            if let Err(error) = mount.and_then(|()| self.ensure_wallpaper_surface(target)) {
                 log(&format!("wallpaper enable failed: {error:#}"));
                 self.wallpaper_apply_error = Some(error.to_string());
                 run_error = Some(format!("设置已保存，但壁纸挂载失败：{error}"));
@@ -1721,7 +2059,7 @@ impl App {
                 self.wallpaper_apply_error = None;
                 self.ensure_wallpaper_feed();
                 if let Some(surface) = self.wallpaper.as_ref() {
-                    surface.apply_config(&self.config.wallpaper, surface.monitor.refresh_hz);
+                    surface.apply_config(&surface.configuration, surface.monitor.refresh_hz);
                     if self.wallpaper_page_ready {
                         if let Some(snapshot) = self.wallpaper_last.as_ref() {
                             surface.apply_feed(snapshot);
@@ -1812,7 +2150,376 @@ impl App {
         result
     }
 
+    fn submit_wallpaper_management(
+        &mut self,
+        value: serde_json::Value,
+        reply: ApiReply,
+        target: &EventLoopWindowTarget<UserEvent>,
+    ) {
+        use crate::wallpaper::{api, jobs::JobError};
+        let request_id = value
+            .get("requestId")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
+        let request = match api::Request::parse(value) {
+            Ok(request) => request,
+            Err(error) => {
+                self.send_wallpaper_management(
+                    reply,
+                    api::response(request_id.as_deref(), Err(error), None),
+                );
+                return;
+            }
+        };
+        let owner = match &reply {
+            ApiReply::Settings(generation)
+                if self.settings.is_some() && *generation == self.settings_generation =>
+            {
+                *generation
+            }
+            _ => 0,
+        };
+        if request
+            .typed()
+            .is_ok_and(|command| command.settings_command())
+        {
+            if let Some(result) =
+                self.handle_settings_management(&request, owner, reply.clone(), target)
+            {
+                self.send_wallpaper_management(reply, result);
+            }
+            return;
+        }
+        let hwnd = if owner != 0 {
+            self.settings
+                .as_ref()
+                .map_or(0, |settings| settings.window.hwnd())
+        } else {
+            0
+        };
+        let proxy = self.proxy.clone();
+        let destination = reply.clone();
+        if let Err(error) = self
+            .wallpaper_library
+            .submit(request, owner, hwnd, move |value| {
+                let _ = proxy.send_event(UserEvent::WallpaperManagement(destination, value));
+            })
+        {
+            self.send_wallpaper_management(
+                reply,
+                api::response(
+                    request_id.as_deref(),
+                    Err(JobError::new(error.code, error.message)),
+                    None,
+                ),
+            );
+        }
+    }
+
+    fn handle_settings_management(
+        &mut self,
+        request: &crate::wallpaper::api::Request,
+        owner: u64,
+        reply: ApiReply,
+        target: &EventLoopWindowTarget<UserEvent>,
+    ) -> Option<serde_json::Value> {
+        use crate::wallpaper::{api, jobs::JobError};
+        let slot = match self.wallpaper_library.reserve() {
+            Ok(slot) => slot,
+            Err(error) => return Some(api::response(Some(&request.request_id), Err(error), None)),
+        };
+        if matches!(request.typed(), Ok(api::Command::Apply { .. })) {
+            let replay = crate::config_journal::caller_sid().and_then(|caller_sid| {
+                config::replay_request(&crate::config_journal::Intent {
+                    request_id: request.request_id.clone(),
+                    payload_digest: request.digest(),
+                    command: request.command.clone(),
+                    caller_sid,
+                })
+            });
+            match replay {
+                Ok(Some(operation)) => {
+                    return Some(api::response(
+                        Some(&request.request_id),
+                        Ok(serde_json::to_value(operation).expect("operation")),
+                        None,
+                    ))
+                }
+                Err(error) => {
+                    return Some(api::response(
+                        Some(&request.request_id),
+                        Err(JobError::new(
+                            crate::config_journal::error_code(&error, "config_conflict"),
+                            error.to_string(),
+                        )),
+                        None,
+                    ))
+                }
+                Ok(None) => {}
+            }
+        }
+        if owner == 0 || owner != self.settings_generation || self.settings.is_none() {
+            return Some(api::response(
+                Some(&request.request_id),
+                Err(JobError::new(
+                    "settings_session_required",
+                    "请在当前设置中心管理草稿和预览",
+                )),
+                None,
+            ));
+        }
+        match self.wallpaper_library.begin_local(request) {
+            Ok(Some(receipt)) => return Some(receipt),
+            Err(error) => return Some(api::response(Some(&request.request_id), Err(error), None)),
+            Ok(None) => {}
+        }
+        let result = if self.is_media_apply(request, owner) {
+            match self.begin_media_apply(request.clone(), owner, reply, slot) {
+                Ok(()) => return None,
+                Err(error) => Err(error),
+            }
+        } else if self.media_preview_request(request, owner) {
+            self.begin_media_preview(request, owner, slot)
+        } else {
+            self.execute_settings_management(request, owner, target)
+        };
+        let mut receipt = api::response(Some(&request.request_id), result, None);
+        receipt["configRevision"] = receipt["result"]["configRevision"]
+            .as_u64()
+            .unwrap_or(self.config.revision)
+            .into();
+        self.wallpaper_library.finish_local(request, &receipt);
+        Some(receipt)
+    }
+
+    fn execute_settings_management(
+        &mut self,
+        request: &crate::wallpaper::api::Request,
+        owner: u64,
+        target: &EventLoopWindowTarget<UserEvent>,
+    ) -> Result<serde_json::Value, crate::wallpaper::jobs::JobError> {
+        use crate::wallpaper::{api::Command, jobs::JobError};
+        use serde_json::json;
+        let draft_receipt = |draft: &crate::wallpaper::settings_drafts::Draft| {
+            serde_json::to_value(draft.receipt()).expect("draft receipt")
+        };
+        Ok(match request.typed()? {
+            Command::DraftCreate => {
+                if self.save_due.is_some() || self.position_edit.is_some() {
+                    return Err(JobError::new("conflict", "请先完成当前设置修改"));
+                }
+                draft_receipt(self.settings_drafts.create(owner, &self.config)?)
+            }
+            Command::DraftUpdate {
+                draft_id,
+                draft_revision,
+                operations,
+            } => draft_receipt(self.settings_drafts.update(
+                owner,
+                &draft_id,
+                draft_revision,
+                operations,
+            )?),
+            Command::DraftDiscard {
+                draft_id,
+                draft_revision,
+            } => {
+                self.settings_drafts
+                    .discard(owner, &draft_id, draft_revision)?;
+                self.close_preview();
+                json!({"discarded":true})
+            }
+            Command::Apply {
+                draft_id,
+                draft_revision,
+            } => {
+                let draft = self
+                    .settings_drafts
+                    .get(owner, &draft_id, draft_revision)?
+                    .clone();
+                draft.check_apply(
+                    request.expected_revision.expect("validated revision"),
+                    &self.config,
+                )?;
+                if self.position_edit.is_some() || self.save_due.is_some() {
+                    return Err(JobError::new("conflict", "请先完成当前设置修改"));
+                }
+                let candidate = WallpaperCandidate::Current(draft.wallpaper)
+                    .normalized()
+                    .map_err(JobError::invalid_input)?;
+                if draft.lyrics.locked && self.tray.is_none() {
+                    return Err(JobError::new(
+                        "tray_unavailable",
+                        "托盘不可用，暂时无法锁定歌词",
+                    ));
+                }
+                let intent = crate::config_journal::Intent {
+                    request_id: request.request_id.clone(),
+                    payload_digest: request.digest(),
+                    command: request.command.clone(),
+                    caller_sid: crate::config_journal::caller_sid().map_err(|error| {
+                        JobError::new("identity_unavailable", error.to_string())
+                    })?,
+                };
+                let mut next = self.config.clone();
+                next.wallpaper = candidate.clone();
+                next.lyrics = draft.lyrics;
+                let operation =
+                    config::commit_request(&mut self.config, next, &intent).map_err(|error| {
+                        let code = crate::config_journal::error_code(&error, "config_write_failed");
+                        JobError::new(code, error.to_string())
+                    })?;
+                let apply_error = self.apply_saved_wallpaper_settings(candidate, target).err();
+                self.send_settings_status(apply_error.as_deref(), Some("已应用"));
+                if operation.state == crate::config_journal::State::Pending {
+                    return Err(JobError::new(
+                        "operation_pending",
+                        "配置写入完成，正在核对提交记录，请按原请求查询",
+                    ));
+                }
+                serde_json::to_value(operation).expect("configuration receipt")
+            }
+            Command::PreviewAcquire {
+                draft_id,
+                draft_revision,
+            } => {
+                let draft = self
+                    .settings_drafts
+                    .get(owner, &draft_id, draft_revision)?
+                    .clone();
+                if self.preview_active() {
+                    return Err(JobError::new("preview_busy", "请先释放当前预览"));
+                }
+                self.validate_preview_audio(&draft.wallpaper)
+                    .map_err(|error| JobError::new("audio_busy", error))?;
+                self.open_preview(target, &WallpaperCandidate::Current(draft.wallpaper))
+                    .map_err(|error| JobError::new("preview_failed", error))?;
+                self.send_settings_status(None, None);
+                let preview = self.preview.as_ref().expect("opened preview");
+                json!({"leaseId":preview.lease_id,"generation":self.settings_generation,"expiresInMs":15000})
+            }
+            Command::PreviewUpdate {
+                lease_id,
+                draft_id,
+                draft_revision,
+            } => {
+                self.check_preview_owner(owner, &lease_id)?;
+                let draft = self
+                    .settings_drafts
+                    .get(owner, &draft_id, draft_revision)?
+                    .clone();
+                self.validate_preview_audio(&draft.wallpaper)
+                    .map_err(|error| JobError::new("audio_busy", error))?;
+                self.open_preview(target, &WallpaperCandidate::Current(draft.wallpaper))
+                    .map_err(|error| JobError::new("preview_failed", error))?;
+                json!({"leaseId":self.preview_lease(),"generation":self.settings_generation,"expiresInMs":15000})
+            }
+            Command::PreviewRenew { lease_id } => {
+                self.check_preview_owner(owner, &lease_id)?;
+                if let Some(preview) = self.preview.as_mut() {
+                    preview.lease_until = Instant::now() + PREVIEW_LEASE;
+                }
+                if let Some(preview) = self.media_preview.as_mut() {
+                    preview.lease_until = Instant::now() + PREVIEW_LEASE;
+                }
+                json!({"leaseId":lease_id,"expiresInMs":15000})
+            }
+            Command::PreviewRelease { lease_id } => {
+                self.check_preview_owner(owner, &lease_id)?;
+                self.close_preview();
+                json!({"released":true})
+            }
+            _ => {
+                return Err(JobError::new(
+                    "unsupported_command",
+                    "此命令不属于设置草稿入口",
+                ))
+            }
+        })
+    }
+
+    fn check_preview_owner(
+        &self,
+        owner: u64,
+        lease_id: &str,
+    ) -> Result<(), crate::wallpaper::jobs::JobError> {
+        if owner == 0
+            || owner != self.settings_generation
+            || self.preview_lease() != Some(lease_id)
+            || self
+                .preview
+                .as_ref()
+                .map(|preview| preview.lease_until)
+                .or_else(|| {
+                    self.media_preview
+                        .as_ref()
+                        .map(|preview| preview.lease_until)
+                })
+                .is_none_or(|until| until <= Instant::now())
+        {
+            return Err(crate::wallpaper::jobs::JobError::new(
+                "preview_lease_invalid",
+                "预览租约已过期或不属于当前设置会话",
+            ));
+        }
+        Ok(())
+    }
+
+    fn send_wallpaper_management(&self, reply: ApiReply, mut value: serde_json::Value) {
+        if value["configRevision"].is_null() {
+            value["configRevision"] = value["result"]["configRevision"]
+                .as_u64()
+                .unwrap_or(self.config.revision)
+                .into();
+        }
+        if hertz_desktop_ipc::frame::serialize_bounded(
+            &value,
+            hertz_desktop_ipc::management::RESPONSE_LIMIT,
+        )
+        .is_err()
+        {
+            value = crate::wallpaper::api::response(
+                value["requestId"].as_str(),
+                Err(crate::wallpaper::jobs::JobError::new(
+                    "response_too_large",
+                    "响应超过 64 KiB，请缩小分页",
+                )),
+                None,
+            );
+            value["configRevision"] = value["result"]["configRevision"]
+                .as_u64()
+                .unwrap_or(self.config.revision)
+                .into();
+        }
+        match reply {
+            ApiReply::Settings(generation) if generation == self.settings_generation => {
+                if let Some(settings) = self.settings.as_ref() {
+                    settings.eval(&format!("window.hertzWallpaperSettings && window.hertzWallpaperSettings.applyManagement({value});"));
+                }
+            }
+            ApiReply::Pipe(reply, admission) if admission.is_valid() => {
+                let _ = reply.send(value);
+            }
+            _ => {}
+        }
+    }
+
     fn handle_settings_page(&mut self, body: &str, target: &EventLoopWindowTarget<UserEvent>) {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(body) {
+            if value.get("protocol").is_some()
+                || value
+                    .get("command")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|command| command.starts_with("wallpaper."))
+            {
+                self.submit_wallpaper_management(
+                    value,
+                    ApiReply::Settings(self.settings_generation),
+                    target,
+                );
+                return;
+            }
+        }
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase")]
         struct Command {
@@ -1860,9 +2567,18 @@ impl App {
                 self.send_settings_status(None, notice.as_deref());
             }
             "status" => self.send_settings_status(None, None),
+            "audio-retry" => {
+                self.wallpaper_audio.retry();
+                self.send_settings_status(None, Some("已请求重试系统音频"));
+            }
             "preview-event" => {
-                if let Some(event) = command.event {
-                    self.handle_preview_page(&event);
+                if self.preview.as_ref().is_some_and(|preview| {
+                    command.lease.as_deref() == Some(preview.lease_id.as_str())
+                        && preview.lease_until > Instant::now()
+                }) {
+                    if let Some(event) = command.event {
+                        self.handle_preview_page(&event);
+                    }
                 }
             }
             "preview-close" => {
@@ -1931,7 +2647,7 @@ impl App {
                     .config
                     .unwrap_or_else(|| self.current_wallpaper_candidate());
                 if let Err(error) = validate_candidate(&candidate) {
-                    self.send_settings_status(Some(error), None);
+                    self.send_settings_status(Some(&error), None);
                     return;
                 }
                 match self.open_preview(target, &candidate) {
@@ -2538,8 +3254,7 @@ impl App {
                 let (Some(offset_x), Some(offset_y)) = (command.offset_x, command.offset_y) else {
                     return;
                 };
-                self.mini_drag_offset =
-                    Some((offset_x.round() as i32, offset_y.round() as i32));
+                self.mini_drag_offset = Some((offset_x.round() as i32, offset_y.round() as i32));
                 let action = self.mini_host.handle(MiniEvent::DragBegin);
                 self.apply_mini_action(action, target);
                 if let Some(hwnd) = self.mini_hwnd() {
@@ -2557,7 +3272,10 @@ impl App {
             }
             "control" => {
                 let Some(action) = command.action.filter(|action| {
-                    matches!(action.as_str(), "play" | "pause" | "toggle" | "next" | "previous")
+                    matches!(
+                        action.as_str(),
+                        "play" | "pause" | "toggle" | "next" | "previous"
+                    )
                 }) else {
                     return;
                 };
@@ -2648,10 +3366,10 @@ impl App {
         // 置顶/穿透即刻生效（走状态机动作，别绕过 push_window_style 的唯一入口）。
         self.apply_mini_action(MiniAction::ApplyWindowStyle, target);
         // 宠物开关会改窗体尺寸；贴边隐藏的相位也要对齐。
-        let cursor_inside = self
-            .mini_hwnd()
-            .is_some_and(mini_native::cursor_in_window);
-        let action = self.mini_host.tick_peek(self.config.mini.edge_hide, cursor_inside);
+        let cursor_inside = self.mini_hwnd().is_some_and(mini_native::cursor_in_window);
+        let action = self
+            .mini_host
+            .tick_peek(self.config.mini.edge_hide, cursor_inside);
         self.apply_mini_action(action, target);
         self.place_mini();
         self.schedule_save();
@@ -3093,7 +3811,8 @@ impl App {
         } else if id == actions.mini_toggle_id {
             // 托盘开关：勾上 = 进入小窗（宠物态由配置里的 pet 决定），去掉 = 退出。
             let action = if self.mini_host.phase == MiniPhase::Hidden {
-                self.mini_host.handle(MiniEvent::Enter(crate::mini::EnterReason::User))
+                self.mini_host
+                    .handle(MiniEvent::Enter(crate::mini::EnterReason::User))
             } else {
                 self.mini_host.handle(MiniEvent::Quit)
             };
@@ -3235,7 +3954,8 @@ impl App {
                     );
                 }
                 let action = if self.mini_host.phase == MiniPhase::Hidden {
-                    self.mini_host.handle(MiniEvent::Enter(crate::mini::EnterReason::User))
+                    self.mini_host
+                        .handle(MiniEvent::Enter(crate::mini::EnterReason::User))
                 } else {
                     self.mini_host.handle(MiniEvent::Quit)
                 };
@@ -3416,12 +4136,65 @@ impl App {
             page_ready: self.wallpaper_page_ready,
         };
         let (divisor, budget) = frame_divisor(
-            self.config.wallpaper.fps,
+            self.config.wallpaper.presentation().fps,
             self.wallpaper
                 .as_ref()
                 .map(|surface| surface.monitor.refresh_hz)
                 .unwrap_or(0),
         );
+        let media_status = self.wallpaper.as_ref().and_then(|surface| surface.session.media()).map(|media| serde_json::json!({
+            "kind": if media.input().metadata.container == crate::wallpaper::media::Container::Image { "image" } else { "video" },
+            "sourceFps": media.input().metadata.source_fps,
+            "fpsUpperBound": media.input().metadata.fps_upper_bound,
+            "targetWidth": media.target().width, "targetHeight": media.target().height,
+        }));
+        let wallpaper_status = serde_json::json!({
+            "enabled": self.config.wallpaper.enabled || self.wallpaper_forced,
+            "visible": self.wallpaper_visible,
+            "pageReady": self.wallpaper_page_ready,
+            "firstFrameReady": self.wallpaper.as_ref().is_some_and(WallpaperSurface::first_frame_ready),
+            "appliedRevision": self.wallpaper.as_ref().and_then(|surface| surface.session.diagnostics().applied_revision),
+            "desiredRevision": self.config.revision,
+            "media": media_status,
+            "audio": self.wallpaper_audio_status(),
+            "session": self.wallpaper.as_ref().map(|surface| serde_json::json!({
+                "binding": surface.binding,
+                "state": surface.session.state().as_str(),
+                "frameKind": surface.session.diagnostics().frame_kind.map(|kind| match kind {
+                    crate::wallpaper::session::FrameKind::Gl => "gl",
+                    crate::wallpaper::session::FrameKind::Image => "image",
+                    crate::wallpaper::session::FrameKind::Video => "video",
+                }),
+            })),
+            "retiringControllers": self.wallpaper_retiring.len(),
+            "selectionPreparing": self.wallpaper_selection.is_some(),
+            "candidateLoading": self.wallpaper_candidate.is_some() || self.wallpaper_prepared.is_some(),
+            "appliedSelection": self.wallpaper.as_ref().map(|surface| &surface.configuration.main().selection),
+            "desiredSelection": self.config.wallpaper.main().selection,
+            "pageTicks": self.wallpaper_heartbeat_ticks,
+            "heartbeatAgeMs": self
+                .wallpaper_heartbeat_at
+                .map(|at| at.elapsed().as_millis() as u64),
+            "hidden": self.wallpaper_hidden,
+            "revision": self.config.revision,
+            "fps": self.config.wallpaper.presentation().fps,
+            "musicResponse": self.config.wallpaper.responds_to_hertz(),
+            "brightness": self.config.wallpaper.presentation().brightness,
+            "motion": self.config.wallpaper.presentation().motion,
+            "quality": self.config.wallpaper.presentation().quality.as_str(),
+            "batteryPolicy": "pause",
+            "monitor": self.wallpaper.as_ref().map(|surface| &surface.monitor.name),
+            "displayId": self.wallpaper.as_ref().map(|surface| surface.monitor.display_id()),
+            "source": if self.config.wallpaper.follows_hertz() { "follow" } else { "fixed" },
+            "scene": self.config.wallpaper.builtin().map(|state| state.scene_id),
+            "settingsOpen": self.settings.is_some(),
+            "previewActive": self.preview_active(),
+            "mediaPreview": self.preview_diagnostics(),
+            "mediaPreviewAvailable": true,
+            "previewLease": self.preview_lease(),
+            "monitorMissing": self.wallpaper_monitor_missing,
+            "applyError": self.wallpaper_apply_error,
+        });
         self.with_target_status(serde_json::json!({
             "ok": true,
             "managementProtocol": crate::component::MANAGEMENT_PROTOCOL,
@@ -3457,32 +4230,7 @@ impl App {
                 },
             },
             "profile": self.config.active_profile,
-            "wallpaper": {
-                "enabled": self.config.wallpaper.enabled || self.wallpaper_forced,
-                "visible": self.wallpaper_visible,
-                "pageReady": self.wallpaper_page_ready,
-                "pageTicks": self.wallpaper_heartbeat_ticks,
-                "heartbeatAgeMs": self
-                    .wallpaper_heartbeat_at
-                    .map(|at| at.elapsed().as_millis() as u64),
-                "hidden": self.wallpaper_hidden,
-                "revision": self.config.revision,
-                "fps": self.config.wallpaper.fps,
-                "musicResponse": self.config.wallpaper.music_response,
-                "brightness": self.config.wallpaper.brightness,
-                "motion": self.config.wallpaper.motion,
-                "quality": self.config.wallpaper.quality.as_str(),
-                "batteryPolicy": "pause",
-                "monitor": self.config.wallpaper.monitor,
-                "displayId": self.config.wallpaper.display_id,
-                "source": self.config.wallpaper.source,
-                "scene": self.config.wallpaper.scene,
-                "settingsOpen": self.settings.is_some(),
-                "previewActive": self.preview.is_some(),
-                "previewLease": self.preview.as_ref().map(|preview| preview.lease_id.clone()),
-                "monitorMissing": self.wallpaper_monitor_missing,
-                "applyError": self.wallpaper_apply_error,
-            },
+            "wallpaper": wallpaper_status,
             // 小窗播放（桌面宠物）：web 设置页的开关与状态展示读这一节。
             "mini": {
                 "pet": self.config.mini.pet,
@@ -3497,7 +4245,7 @@ impl App {
             "diagnostics": {
                 "pauseReasons": policy::pause_reasons(&pause_inputs),
                 "fps": {
-                    "configured": self.config.wallpaper.fps,
+                    "configured": self.config.wallpaper.presentation().fps,
                     "refreshHz": self.wallpaper.as_ref().map(|surface| surface.monitor.refresh_hz),
                     "divisor": divisor,
                     "effectiveBudget": budget,
@@ -3633,17 +4381,15 @@ impl App {
     }
 
     fn tick(&mut self, target: &EventLoopWindowTarget<UserEvent>) {
+        self.poll_wallpaper_retirements();
+        self.tick_media_preview();
+        self.tick_media_wallpaper(target);
         self.sync_dbx_feed();
         self.expire_source_data(Instant::now());
         self.flush_save();
         // 小窗贴边隐藏的低频推进（穿透窗收不到鼠标事件，靠轮询光标）。
-        if matches!(
-            self.mini_host.phase,
-            MiniPhase::Docked | MiniPhase::Peeking
-        ) {
-            let cursor_inside = self
-                .mini_hwnd()
-                .is_some_and(mini_native::cursor_in_window);
+        if matches!(self.mini_host.phase, MiniPhase::Docked | MiniPhase::Peeking) {
+            let cursor_inside = self.mini_hwnd().is_some_and(mini_native::cursor_in_window);
             let action = self
                 .mini_host
                 .tick_peek(self.config.mini.edge_hide, cursor_inside);
@@ -3693,30 +4439,40 @@ impl App {
                 self.recompute_visibility();
                 self.recompute_wallpaper();
             }
-            if self
-                .wallpaper
-                .as_ref()
-                .is_some_and(|surface| !native::wallpaper_alive(surface.hwnd()))
+            if (self.config.wallpaper.enabled || self.wallpaper_forced)
+                && self
+                    .wallpaper
+                    .as_ref()
+                    .is_none_or(|surface| !native::wallpaper_alive(surface.hwnd()))
             {
-                log("wallpaper surface lost; recovering");
+                log("wallpaper surface unavailable; recovering");
                 self.recover_wallpaper(target);
             }
-            if self.wallpaper_visible && self.wallpaper_page_ready {
-                let stalled = self
-                    .wallpaper_heartbeat_at
-                    .is_some_and(|at| at.elapsed() > HEARTBEAT_STALE);
+            if let Some(surface) = self.wallpaper.as_ref() {
+                let startup_stalled = (!self.wallpaper_page_ready
+                    && surface.created_at.elapsed() > HEARTBEAT_STALE)
+                    || surface
+                        .frame_wait_since
+                        .is_some_and(|at| at.elapsed() > HEARTBEAT_STALE);
+                let stalled = self.wallpaper_visible
+                    && self.wallpaper_page_ready
+                    && self
+                        .wallpaper_heartbeat_at
+                        .is_some_and(|at| at.elapsed() > HEARTBEAT_STALE);
                 let eval_failed = self
                     .wallpaper
                     .as_ref()
                     .is_some_and(|surface| surface.eval_failures() >= 3);
-                if stalled || eval_failed {
-                    log(if stalled {
+                if stalled || eval_failed || startup_stalled {
+                    log(if startup_stalled {
+                        "wallpaper session handshake/first frame timed out; recovering"
+                    } else if stalled {
                         "wallpaper page heartbeat stalled; recovering"
                     } else {
                         "wallpaper WebView eval failed repeatedly; recovering"
                     });
                     self.reset_wallpaper_page_stats();
-                    self.wallpaper = None;
+                    self.retire_wallpaper_surface();
                     self.wallpaper_page_ready = false;
                     self.wallpaper_visible = false;
                     self.wallpaper_generation = self.wallpaper_generation.wrapping_add(1);
@@ -4141,36 +4897,45 @@ pub(crate) fn run() -> Result<()> {
         })?;
 
     let mini_host = MiniHost::new(profile.clone());
-    let wallpaper = if config.wallpaper.enabled || wallpaper_forced {
-        let monitors = native::wallpaper_monitors();
-        match resolve_wallpaper_monitor_or_primary(&monitors, &config.wallpaper)
-            .ok_or_else(|| anyhow::anyhow!("没有可用显示器"))
-            .and_then(|monitor| create_wallpaper(&event_loop, proxy.clone(), 1, monitor))
-        {
-            Ok(surface) => {
-                // 启动期建立稳定显示器身份（设计 §2.2-9）：独立提交，revision 递增。
-                let identity = surface.monitor.display_id();
-                if config.wallpaper.display_id.as_deref() != Some(identity.as_str()) {
-                    let mut next = config.clone();
-                    next.wallpaper.display_id = Some(identity);
-                    if let Err(error) = config::commit(&mut config, next) {
-                        log(&format!("save initial display identity failed: {error:#}"));
-                    }
+    let wallpaper =
+        if (config.wallpaper.enabled || wallpaper_forced) && config.wallpaper.builtin().is_some() {
+            let monitors = native::wallpaper_monitors();
+            match validate_current_presentation(&config.wallpaper)
+                .map_err(anyhow::Error::msg)
+                .and_then(|_| {
+                    resolve_wallpaper_monitor_or_primary(&monitors, &config.wallpaper)
+                        .ok_or_else(|| anyhow::anyhow!("没有可用显示器"))
+                })
+                .and_then(|monitor| {
+                    create_presentation(
+                        &event_loop,
+                        proxy.clone(),
+                        1,
+                        config.revision,
+                        config.wallpaper.clone(),
+                        monitor,
+                        PresentationWindow::Desktop { candidate: false },
+                    )
+                }) {
+                Ok(surface) => Some(surface),
+                Err(error) => {
+                    log(&format!("wallpaper unavailable: {error:#}"));
+                    None
                 }
-                Some(surface)
             }
-            Err(error) => {
-                log(&format!("wallpaper unavailable: {error:#}"));
-                None
-            }
-        }
-    } else {
-        None
-    };
+        } else {
+            None
+        };
 
-    let wallpaper_monitor_missing = wallpaper.is_none()
-        && config.wallpaper.enabled
-        && (config.wallpaper.display_id.is_some() || config.wallpaper.monitor.is_some());
+    let wallpaper_monitor_missing = config.wallpaper.enabled
+        && resolve_wallpaper_monitor_or_primary(&native::wallpaper_monitors(), &config.wallpaper)
+            .is_none();
+    let audio_proxy = proxy.clone();
+    let wallpaper_audio =
+        crate::wallpaper::audio_service::AudioService::start(Arc::new(move || {
+            let _ = audio_proxy.send_event(UserEvent::WallpaperAudio);
+        }))
+        .map_err(anyhow::Error::msg)?;
     let mut app = App {
         window,
         webview,
@@ -4182,6 +4947,8 @@ pub(crate) fn run() -> Result<()> {
         dbx_session: None,
         source_health: crate::management::SourceHealth::default(),
         wallpaper_last_update: None,
+        wallpaper_audio,
+        wallpaper_audio_dispatch: Default::default(),
         profile,
         policy: Policy {
             locked: false,
@@ -4210,6 +4977,11 @@ pub(crate) fn run() -> Result<()> {
         source_state: "waiting",
         source_message: Some("正在连接 Hertz 服务".into()),
         wallpaper,
+        wallpaper_retiring: Vec::new(),
+        wallpaper_candidate: None,
+        wallpaper_prepared: None,
+        wallpaper_selection: None,
+        wallpaper_media_failed_revision: None,
         wallpaper_probe: crate::wallpaper::decode_probe::ProbeHost::default(),
         wallpaper_page_ready: false,
         wallpaper_last: None,
@@ -4234,11 +5006,18 @@ pub(crate) fn run() -> Result<()> {
         wallpaper_recovery_attempts: Vec::new(),
         wallpaper_recovery_terminal: false,
         wallpaper_monitor_missing,
+        wallpaper_library: crate::wallpaper::service::LibraryService::start(
+            config::base_dir(),
+            crate::wallpaper::decode_probe::ProbeClient::native(proxy.clone()),
+        ),
+        settings_drafts: Default::default(),
+        settings_generation: 0,
         settings: None,
         settings_candidate: None,
         settings_tab: "wallpaper".into(),
         settings_navigation: 0,
         preview: None,
+        media_preview: None,
         migration_notice,
         position_edit: None,
         placed_position: None,
@@ -4286,6 +5065,11 @@ pub(crate) fn run() -> Result<()> {
     app.place(true);
     app.recompute_visibility();
     app.recompute_wallpaper();
+    if app.config.wallpaper.enabled && app.config.wallpaper.builtin().is_none() {
+        if let Err(error) = app.ensure_wallpaper_surface(&event_loop) {
+            app.wallpaper_apply_error = Some(error.to_string());
+        }
+    }
     if locate_on_start {
         app.locate();
     }
@@ -4318,7 +5102,9 @@ pub(crate) fn run() -> Result<()> {
         );
         // 上次退出时小窗还开着 → 这次启动直接恢复。
         if app.config.mini.reopen {
-            let action = app.mini_host.handle(MiniEvent::Enter(crate::mini::EnterReason::Restored));
+            let action = app
+                .mini_host
+                .handle(MiniEvent::Enter(crate::mini::EnterReason::Restored));
             app.apply_mini_action(action, &event_loop);
         }
     } else if config::is_dbx(&app.profile) {
@@ -4349,6 +5135,8 @@ pub(crate) fn run() -> Result<()> {
             .source_expiry_deadline()
             .map_or(ControlFlow::Wait, ControlFlow::WaitUntil);
         match event {
+            Event::UserEvent(UserEvent::WallpaperAudio) => { app.wallpaper_audio.take_latest(); }
+            Event::UserEvent(UserEvent::WallpaperAudioDelivered(slot, token)) => { app.wallpaper_audio_dispatch.acknowledge(slot, token); }
             Event::UserEvent(UserEvent::Dbx(generation, message)) => {
                 if generation == app.source_generation && config::is_dbx(&app.profile) { app.handle_dbx(*message); }
             }
@@ -4382,6 +5170,12 @@ pub(crate) fn run() -> Result<()> {
                     ));
                 }
             }
+            Event::UserEvent(UserEvent::MediaPreviewSelection(id, result)) => {
+                app.finish_media_preview(id, result.map(|media| *media), target);
+            }
+            Event::UserEvent(UserEvent::WallpaperSelection(id, result)) => {
+                app.finish_wallpaper_selection(id, result.map(|media| *media), target);
+            }
             Event::UserEvent(UserEvent::WallpaperPage(generation, body)) => {
                 app.handle_wallpaper_page(generation, &body)
             }
@@ -4399,7 +5193,8 @@ pub(crate) fn run() -> Result<()> {
                     .map(|surface| crate::wallpaper::probe_environment::browser_version(&surface.webview))
                     .or_else(|| app.wallpaper.as_ref()
                         .map(|surface| crate::wallpaper::probe_environment::browser_version(&surface.webview)))
-                    .flatten();
+                    .flatten()
+                    .or_else(|| crate::wallpaper::probe_environment::browser_version(&app.webview));
                 let _ = reply.send(browser);
             }
             #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
@@ -4408,9 +5203,10 @@ pub(crate) fn run() -> Result<()> {
                     surface.eval(&format!("window.__nativeImportProbes ||= {{}}; window.__nativeImportProbes[{nonce}]={value};"));
                 }
             }
-            Event::UserEvent(UserEvent::SettingsPage(body)) => {
-                app.handle_settings_page(&body, target)
+            Event::UserEvent(UserEvent::SettingsPage(generation, body)) => {
+                if generation == app.settings_generation && app.settings.is_some() { app.handle_settings_page(&body, target); }
             }
+            Event::UserEvent(UserEvent::WallpaperManagement(reply, value)) => { app.send_wallpaper_management(reply, value); }
             Event::UserEvent(UserEvent::MiniFeed(generation, started, result)) => {
                 if generation == app.source_generation {
                     app.handle_mini_feed(started, *result, target);
@@ -4468,14 +5264,22 @@ pub(crate) fn run() -> Result<()> {
                 if !request.admission.is_valid() {
                     return;
                 }
-                let response = app.handle_pipe_request(&request.body, target);
-                let _ = request.reply.send(response);
+                if request.body.get("protocol").is_some() || request.body.get("command").and_then(serde_json::Value::as_str).is_some_and(|command| command.starts_with("wallpaper.")) {
+                    app.submit_wallpaper_management(request.body.clone(), ApiReply::Pipe(request.reply.clone(), request.admission.clone()), target);
+                } else {
+                    let response = app.handle_pipe_request(&request.body, target);
+                    let _ = request.reply.send(response);
+                }
             }
             Event::UserEvent(UserEvent::Quit) => *control_flow = ControlFlow::Exit,
             Event::WindowEvent {
                 window_id, event, ..
             } => {
-                if matches!(&event, WindowEvent::CloseRequested) && app.wallpaper_probe.close_window(window_id) {
+                if app.media_preview.as_ref().and_then(|preview| preview.surface.as_ref())
+                    .is_some_and(|surface| surface.window.id()==window_id)
+                    && matches!(&event, WindowEvent::CloseRequested) {
+                    app.close_preview();
+                } else if matches!(&event, WindowEvent::CloseRequested) && app.wallpaper_probe.close_window(window_id) {
                     // 探测窗口只取消它自己的 job；仍推进回收期限。
                 } else if window_id == app.window.id() {
                     match event {
@@ -4510,6 +5314,8 @@ pub(crate) fn run() -> Result<()> {
                 }
             }
             Event::LoopDestroyed => {
+                app.close_preview();
+                app.drop_wallpaper_surface();
                 app.dbx = None;
                 app.mini_runtime.stop.store(true, Ordering::Relaxed);
                 // 还窗口过程并清注册表，避免收尾回调打在已销毁的窗上。
@@ -4521,6 +5327,7 @@ pub(crate) fn run() -> Result<()> {
             _ => {}
         }
         if *control_flow != ControlFlow::Exit {
+            app.sync_wallpaper_audio();
             if let Some(deadline) = app.source_expiry_deadline().into_iter()
                 .chain(app.wallpaper_probe.next_deadline()).min() {
                 *control_flow = ControlFlow::WaitUntil(deadline);
@@ -4695,50 +5502,25 @@ fn profile_options(
         .collect()
 }
 
-fn validate_candidate(candidate: &WallpaperCandidate) -> Result<(), &'static str> {
-    if !matches!(candidate.fps, 15 | 30 | 60) {
-        return Err("帧率只能是 15/30/60");
-    }
-    if !matches!(candidate.source.as_str(), "follow" | "fixed") {
-        return Err("壁纸来源只能是跟随三维空间或固定场景");
-    }
-    if !config::wallpaper_scene_allowed(&candidate.scene) {
-        return Err("不支持的壁纸场景");
-    }
-    if !(0.25..=1.0).contains(&candidate.brightness) || !candidate.brightness.is_finite() {
-        return Err("亮度范围是 25%–100%");
-    }
-    if !(0.0..=1.0).contains(&candidate.motion) || !candidate.motion.is_finite() {
-        return Err("运动强度范围是 0–100%");
-    }
-    if candidate
-        .display_id
-        .as_deref()
-        .is_some_and(|display_id| display_id.trim().is_empty() || display_id.len() > 256)
-    {
-        return Err("显示器身份无效");
-    }
-    Ok(())
+fn validate_candidate(candidate: &WallpaperCandidate) -> Result<(), String> {
+    candidate.normalized().map(|_| ())
 }
 
 /// ADR-0006 整数分频：N=max(1,ceil(refreshHz/targetFps))，有效预算=refreshHz/N。
 /// 与壁纸页 wallpaper-scene.js 的 computeGate 保持同一公式。
 fn frame_divisor(fps: u8, refresh_hz: u32) -> (u32, f64) {
-    let hz = if refresh_hz >= 5 { f64::from(refresh_hz) } else { 60.0 };
+    let hz = if refresh_hz >= 5 {
+        f64::from(refresh_hz)
+    } else {
+        60.0
+    };
     let target = f64::from(fps.max(1));
     let divisor = ((hz / target).ceil() as u32).max(1);
     (divisor, hz / f64::from(divisor))
 }
 
-fn new_lease_id() -> String {
-    use std::sync::atomic::AtomicU64;
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_nanos() as u64)
-        .unwrap_or(0);
-    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-    format!("{nanos:016x}{seq:04x}")
+fn new_lease_id() -> Result<String, String> {
+    crate::wallpaper::file_tokens::random_token().map_err(|error| error.message)
 }
 
 /// 按稳定身份优先、GDI 名次序解析目标显示器（设计 §2.2-9）。
@@ -4746,58 +5528,90 @@ fn resolve_wallpaper_monitor(
     monitors: &[native::WallpaperMonitor],
     wallpaper: &config::WallpaperConfig,
 ) -> Option<native::WallpaperMonitor> {
-    if let Some(display_id) = wallpaper.display_id.as_deref() {
-        return monitors
+    match &wallpaper.main().displays[0] {
+        crate::wallpaper::config::DisplaySelection::Fixed { display_id } => monitors
             .iter()
-            .find(|monitor| monitor.display_id() == display_id)
-            .cloned();
+            .find(|monitor| monitor.display_id() == *display_id)
+            .cloned(),
+        crate::wallpaper::config::DisplaySelection::Primary => {
+            monitors.iter().find(|monitor| monitor.primary).cloned()
+        }
+        crate::wallpaper::config::DisplaySelection::Unresolved { .. } => None,
     }
-    let name = wallpaper.monitor.as_deref()?;
-    monitors
-        .iter()
-        .find(|monitor| monitor.name == name)
-        .cloned()
 }
 
 fn resolve_wallpaper_monitor_or_primary(
     monitors: &[native::WallpaperMonitor],
     wallpaper: &config::WallpaperConfig,
 ) -> Option<native::WallpaperMonitor> {
-    if wallpaper.display_id.is_some() || wallpaper.monitor.is_some() {
-        resolve_wallpaper_monitor(monitors, wallpaper)
-    } else {
-        monitors
-            .iter()
-            .find(|monitor| monitor.primary)
-            .or_else(|| monitors.first())
-            .cloned()
-    }
+    resolve_wallpaper_monitor(monitors, wallpaper)
 }
 
-fn create_wallpaper(
+fn create_presentation(
     target: &EventLoopWindowTarget<UserEvent>,
     proxy: EventLoopProxy<UserEvent>,
     generation: u64,
+    revision: u64,
+    configuration: config::WallpaperConfig,
     monitor: native::WallpaperMonitor,
+    presentation: PresentationWindow,
 ) -> Result<WallpaperSurface> {
+    use crate::wallpaper::session::{RecoveryLedger, WallpaperSession};
+    let is_preview = matches!(presentation, PresentationWindow::Preview { .. });
+    let mut session = if is_preview {
+        WallpaperSession::preview_after_generation(generation.saturating_sub(1))
+    } else {
+        WallpaperSession::after_generation(generation.saturating_sub(1))
+    };
+    let session_generation = session
+        .apply(revision, &RecoveryLedger::new())
+        .map_err(|_| anyhow::anyhow!("壁纸会话无法开始"))?;
+    debug_assert_eq!(session_generation, generation);
+    session.resolved(generation);
+    session.prepared(generation);
+    let binding = crate::wallpaper::page_events::PageBinding::new(generation)
+        .map_err(|error| anyhow::anyhow!(error.message))?;
     let page: Arc<[u8]> = Arc::from(wallpaper_html().into_bytes());
     let page_bytes = page.len();
-    let window = WindowBuilder::new()
-        .with_title("Hertz wallpaper")
+    let mut builder = WindowBuilder::new()
+        .with_title(if is_preview {
+            "壁纸预览"
+        } else {
+            "Hertz wallpaper"
+        })
         .with_inner_size(PhysicalSize::new(
             monitor.width.max(1) as u32,
             monitor.height.max(1) as u32,
         ))
         .with_position(PhysicalPosition::new(monitor.left, monitor.top))
-        .with_decorations(false)
+        .with_decorations(is_preview)
         .with_resizable(false)
         .with_visible(false)
         .with_focused(false)
         .with_skip_taskbar(true)
-        .with_undecorated_shadow(false)
-        .build(target)?;
+        .with_undecorated_shadow(false);
+    if let PresentationWindow::Preview { owner } = presentation {
+        builder = builder.with_owner_window(owner as _);
+    }
+    let window = builder.build(target)?;
     let hwnd = window.hwnd() as HWND;
-    native::mount_wallpaper(hwnd, &monitor)?;
+    if is_preview
+        || matches!(
+            presentation,
+            PresentationWindow::Desktop { candidate: true }
+        )
+    {
+        native::wallpaper_opacity(hwnd, 1)?;
+    }
+    if is_preview {
+        let size = window.inner_size();
+        if size.width != monitor.width as u32 || size.height != monitor.height as u32 {
+            bail!("原生预览窗口与固定输出尺寸不匹配");
+        }
+        window.set_visible(true);
+    } else {
+        native::mount_wallpaper(hwnd, &monitor)?;
+    }
     let child_rect =
         native::window_rect(hwnd).map(|rect| (rect.left, rect.top, rect.right, rect.bottom));
     let parent_rect =
@@ -4806,6 +5620,7 @@ fn create_wallpaper(
     let zoom = f64::from(monitor.dpi) / f64::from(window_dpi.max(1));
     let page_proxy = proxy.clone();
     let webview = WebViewBuilder::new()
+        .with_initialization_script(binding.initialization_script())
         .with_custom_protocol(
             WALLPAPER_PROTOCOL.to_string(),
             wallpaper_page_response(page),
@@ -4832,8 +5647,18 @@ fn create_wallpaper(
         "wallpaper target name={} rect={},{} {}x{} dpi={} window_dpi={window_dpi} zoom={zoom:.3} page_bytes={page_bytes} child={child_rect:?} parent={parent_rect:?}",
         monitor.name, monitor.left, monitor.top, monitor.width, monitor.height, monitor.dpi
     ));
+    // Builtin resources and native attachment are host facts; media will use atomic admit_media.
+    if configuration.builtin().is_some() {
+        session.admit_resources(generation);
+    }
+    session.native_attached(generation);
     Ok(WallpaperSurface {
         page_clock: None,
+        session,
+        binding,
+        created_at: Instant::now(),
+        frame_wait_since: None,
+        configuration,
         window,
         webview,
         monitor,
@@ -4846,6 +5671,7 @@ fn create_wallpaper(
 fn create_settings(
     target: &EventLoopWindowTarget<UserEvent>,
     proxy: EventLoopProxy<UserEvent>,
+    generation: u64,
 ) -> Result<SettingsSurface> {
     let area = native::primary_work_area();
     let (width, height) = area
@@ -4894,8 +5720,8 @@ fn create_settings(
         .with_background_color((20, 20, 19, 255))
         .with_ipc_handler(move |request| {
             let body = request.body();
-            if body.len() <= 8192 {
-                let _ = page_proxy.send_event(UserEvent::SettingsPage(body.clone()));
+            if body.len() <= hertz_desktop_ipc::management::REQUEST_LIMIT {
+                let _ = page_proxy.send_event(UserEvent::SettingsPage(generation, body.clone()));
             }
         })
         .build(&window)
@@ -4932,10 +5758,15 @@ fn scene_thumbnail(file: &str) -> Option<&'static [u8]> {
 }
 
 fn settings_html() -> String {
-    include_str!("../assets/wallpaper-settings.html").replace(
-        "__SETTINGS__",
-        include_str!("../assets/wallpaper-settings.js"),
-    )
+    include_str!("../assets/wallpaper-settings.html")
+        .replace(
+            "__SETTINGS__",
+            include_str!("../assets/wallpaper-settings.js"),
+        )
+        .replace(
+            "__LIBRARY__",
+            include_str!("../assets/wallpaper-library.js"),
+        )
 }
 
 /// 壁纸页内联的舞台运行时是 MB 级：NavigateToString 有 ~2 MB 上限，file:// 又收不到
@@ -5678,9 +6509,12 @@ mod tests {
         // 旧载荷（无 v4 字段）按默认值通过。
         let legacy: WallpaperCandidate =
             serde_json::from_value(base.clone()).expect("legacy candidate");
-        assert_eq!(legacy.quality, config::WallpaperQuality::Low);
-        assert_eq!(legacy.brightness, 1.0);
-        assert_eq!(legacy.motion, 1.0);
+        assert_eq!(
+            legacy.normalized().unwrap().presentation().quality,
+            config::WallpaperQuality::Low
+        );
+        assert_eq!(legacy.normalized().unwrap().presentation().brightness, 1.0);
+        assert_eq!(legacy.normalized().unwrap().presentation().motion, 1.0);
         assert!(validate_candidate(&legacy).is_ok());
         let mut full = base.clone();
         full["brightness"] = 0.5.into();
@@ -5689,44 +6523,52 @@ mod tests {
         full["batteryPolicy"] = "pause".into();
         let full: WallpaperCandidate = serde_json::from_value(full).expect("v4 candidate");
         assert!(validate_candidate(&full).is_ok());
-        let mut bad = full.clone();
-        bad.brightness = 0.1;
-        assert!(validate_candidate(&bad).is_err());
-        let mut bad = full.clone();
-        bad.motion = 1.5;
-        assert!(validate_candidate(&bad).is_err());
-        let mut bad = full;
-        bad.fps = 45;
-        assert!(validate_candidate(&bad).is_err());
+        let mut bad = full.normalized().unwrap();
+        bad.main_mut().presentation.brightness = 0.1;
+        assert!(validate_candidate(&WallpaperCandidate::Current(bad)).is_err());
+        let mut bad = full.normalized().unwrap();
+        bad.main_mut().presentation.motion = 1.5;
+        assert!(validate_candidate(&WallpaperCandidate::Current(bad)).is_err());
+        let mut bad = full.normalized().unwrap();
+        bad.main_mut().presentation.fps = 45;
+        assert!(validate_candidate(&WallpaperCandidate::Current(bad)).is_err());
     }
 
     #[test]
     fn monitor_resolution_prefers_display_id_then_legacy_name() {
         let monitors = vec![monitor()];
         // 无身份记录：无名字匹配 → None（不猜另一块屏）。
-        let wallpaper = config::WallpaperConfig {
+        let wallpaper = config::LegacyWallpaperConfig {
             monitor: Some(r"\\.\DISPLAY9".into()),
             ..Default::default()
-        };
+        }
+        .migrate(&monitors, false)
+        .unwrap();
         assert!(resolve_wallpaper_monitor(&monitors, &wallpaper).is_none());
         // 旧 GDI 名命中。
-        let wallpaper = config::WallpaperConfig {
+        let wallpaper = config::LegacyWallpaperConfig {
             monitor: Some(r"\\.\DISPLAY1".into()),
             ..Default::default()
-        };
+        }
+        .migrate(&monitors, false)
+        .unwrap();
         assert!(resolve_wallpaper_monitor(&monitors, &wallpaper).is_some());
         // 已有稳定身份时等待原屏，不能认领复用 GDI 名的新屏。
-        let wallpaper = config::WallpaperConfig {
+        let wallpaper = config::LegacyWallpaperConfig {
             monitor: Some(r"\\.\DISPLAY1".into()),
             display_id: Some("future-identity".into()),
             ..Default::default()
-        };
+        }
+        .migrate(&monitors, false)
+        .unwrap();
         assert!(resolve_wallpaper_monitor(&monitors, &wallpaper).is_none());
-        let wallpaper = config::WallpaperConfig {
+        let wallpaper = config::LegacyWallpaperConfig {
             monitor: Some(r"\\.\DISPLAY9".into()),
             display_id: Some("future-identity".into()),
             ..Default::default()
-        };
+        }
+        .migrate(&monitors, false)
+        .unwrap();
         assert!(resolve_wallpaper_monitor(&monitors, &wallpaper).is_none());
         assert!(resolve_wallpaper_monitor_or_primary(&monitors, &wallpaper).is_none());
         assert!(resolve_wallpaper_monitor_or_primary(&monitors, &Default::default()).is_some());

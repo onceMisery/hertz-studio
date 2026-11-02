@@ -160,7 +160,12 @@ fn display_missing_then_restore_re_admits() {
 
     assert!(session.display_restored(generation));
     assert_eq!(session.state(), SessionState::Attaching);
-    submit_facts_but(&mut session, generation, usize::MAX);
+    let restored = session.generation();
+    assert!(restored > generation, "重新建窗不复用旧代际");
+    assert!(!session.page_handshake(generation));
+    assert!(!session.frame_submitted(generation, FrameKind::Gl));
+    assert!(!session.native_attached(generation));
+    submit_facts_but(&mut session, restored, usize::MAX);
     assert_eq!(session.state(), SessionState::Ready);
 
     // resolving 阶段的缺席判定无效（§13.1 宽限属策略层）。
@@ -334,4 +339,22 @@ fn apply_supersedes_pending_intent() {
     assert!(!session.prepared(first));
     assert!(session.resolved(second));
     assert!(session.prepared(second));
+}
+
+#[test]
+fn preview_session_ignores_desktop_pauses_and_respects_its_own_scope() {
+    let mut session = WallpaperSession::preview_after_generation(4);
+    let generation = to_attaching(&mut session, &RecoveryLedger::new(), 8);
+    assert_eq!(generation, 5);
+    submit_facts_but(&mut session, generation, usize::MAX);
+    let now = base();
+    assert!(session.start_presentation(now));
+    session.add_pause_reason(REASON_MANUAL_PAUSE, PauseScope::DesktopOnly, now);
+    assert_eq!(session.state(), SessionState::Running);
+    session.add_pause_reason(REASON_BATTERY, PauseScope::PreviewOnly, now);
+    assert_eq!(session.state(), SessionState::Paused);
+    session.remove_pause_reason(REASON_BATTERY, PauseScope::PreviewOnly, now);
+    assert_eq!(session.state(), SessionState::Running);
+    session.add_pause_reason(REASON_BATTERY, PauseScope::AllPresentations, now);
+    assert_eq!(session.state(), SessionState::Paused);
 }

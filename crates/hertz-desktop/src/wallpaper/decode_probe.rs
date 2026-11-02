@@ -95,7 +95,11 @@ fn empty_request(session: String) -> BudgetRequest {
     }
 }
 
-fn decode_request(metadata: &MediaProbe, session: String) -> Result<BudgetRequest, JobError> {
+/// 导入探测和目标规划共用媒体成本真值；呈现 owner/目标开销由规划器补齐。
+pub(crate) fn decode_request(
+    metadata: &MediaProbe,
+    session: String,
+) -> Result<BudgetRequest, JobError> {
     let mut request = empty_request(session);
     let pixels = u64::from(metadata.encoded_width) * u64::from(metadata.encoded_height);
     if pixels == 0 {
@@ -442,7 +446,7 @@ impl ProbeHost {
             "metadata": request.input.metadata,
         });
         let granted =
-            access.grant_probe(request.id, request.input.package_hash, request.input.media);
+            access.grant_pinned(request.id, request.input.package_hash, request.input.media);
         let browser = super::probe_environment::browser_version(&surface.webview);
         self.current = Some(HostedProbe {
             id: request.id,

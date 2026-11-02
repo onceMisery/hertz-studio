@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::wallpaper::assets::AssetStore;
@@ -54,7 +54,7 @@ impl From<hertz_wallpaper::PackageError> for JobError {
 }
 
 /// 任务状态机（§7.1 Probe/Prepare/Install 三阶段 + 终态）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JobState {
     Queued,
@@ -65,7 +65,7 @@ pub enum JobState {
     Cancelled,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct JobStatus {
     pub job_id: String,
@@ -106,11 +106,27 @@ pub struct ImportJobs {
 
 struct JobRequest {
     job_id: String,
-    source: PathBuf,
+    source: JobSource,
     status: Arc<Mutex<JobStatus>>,
     cancel: Arc<AtomicBool>,
     generation: u64,
     target: Option<super::image_prepare::ImageTarget>,
+}
+
+enum JobSource {
+    Import(ImportSource),
+    Prepare(super::target_planner::PrepareRequest),
+}
+
+enum ImportSource {
+    Path(PathBuf),
+    Pinned(super::file_tokens::SelectedFile),
+}
+
+/// 持久请求身份只由管理入口构造，作品和页面不能指定文件路径。
+pub(crate) struct ImportIdentity {
+    pub request_id: String,
+    pub payload_digest: String,
 }
 
 impl ImportJobs {
@@ -178,6 +194,93 @@ impl ImportJobs {
         target: Option<super::image_prepare::ImageTarget>,
     ) -> Result<String, JobError> {
         super::image_prepare::validate_target(target)?;
+        if !source.is_file() {
+            return Err(JobError::invalid_input(format!(
+                "导入源不存在或不是文件：{}",
+                source.display()
+            )));
+        }
+        self.enqueue(
+            job_id,
+            JobSource::Import(ImportSource::Path(source)),
+            target,
+        )
+    }
+
+    /// 正式管理入口：先持久接受记录再向同一个 worker 投递；重试返回既有 job。
+    pub(crate) async fn submit_authorized(
+        &self,
+        job_id: String,
+        file: super::file_tokens::SelectedFile,
+        identity: ImportIdentity,
+    ) -> Result<String, JobError> {
+        if let Some(existing) = self.library.import_operation(&identity.request_id).await? {
+            if existing.payload_digest != identity.payload_digest {
+                return Err(JobError::new(
+                    "request_id_conflict",
+                    "相同请求 id 对应另一份输入",
+                ));
+            }
+            return Ok(existing.job_id);
+        }
+        let request = self.reserve(job_id, JobSource::Import(ImportSource::Pinned(file)), None)?;
+        let status = request.status.lock().expect("status").clone();
+        let accepted = self.library.accept_import(&status, &identity).await;
+        match accepted {
+            Ok(accepted) if accepted == request.job_id => {
+                let job_id = request.job_id.clone();
+                let result = self.dispatch(request);
+                if result.is_err() {
+                    if let Some(status) = self.status(&job_id) {
+                        self.library
+                            .record_job(
+                                &job_id,
+                                None,
+                                job_state_db(&status.state),
+                                None,
+                                serde_json::to_string(&status).ok().as_deref(),
+                                status.error.as_deref(),
+                            )
+                            .await?;
+                    }
+                }
+                result
+            }
+            result => {
+                self.inner.lock().expect("job inner").current = None;
+                result
+            }
+        }
+    }
+
+    /// TargetPlanner 的缺图请求复用导入 worker；只从已安装固定包准备，不再读取源文件。
+    pub(crate) fn prepare_asset(
+        &self,
+        job_id: String,
+        request: super::target_planner::PrepareRequest,
+    ) -> Result<String, JobError> {
+        request.reference.validate()?;
+        super::image_prepare::validate_target(Some(request.target))?;
+        let target = request.target;
+        self.enqueue(job_id, JobSource::Prepare(request), Some(target))
+    }
+
+    fn enqueue(
+        &self,
+        job_id: String,
+        source: JobSource,
+        target: Option<super::image_prepare::ImageTarget>,
+    ) -> Result<String, JobError> {
+        let request = self.reserve(job_id, source, target)?;
+        self.dispatch(request)
+    }
+
+    fn reserve(
+        &self,
+        job_id: String,
+        source: JobSource,
+        target: Option<super::image_prepare::ImageTarget>,
+    ) -> Result<JobRequest, JobError> {
         if job_id.is_empty()
             || job_id.len() > 64
             || !job_id
@@ -185,12 +288,6 @@ impl ImportJobs {
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
         {
             return Err(JobError::invalid_input("jobId 必须是有界的单个目录名"));
-        }
-        if !source.is_file() {
-            return Err(JobError::invalid_input(format!(
-                "导入源不存在或不是文件：{}",
-                source.display()
-            )));
         }
         let generation = self.generation.fetch_add(1, Ordering::Relaxed);
         let status = Arc::new(Mutex::new(JobStatus {
@@ -215,19 +312,29 @@ impl ImportJobs {
                 cancel: cancel.clone(),
             });
         }
-        let request = JobRequest {
-            job_id: job_id.clone(),
+        Ok(JobRequest {
+            job_id,
             source,
             status,
             cancel,
             generation,
             target,
-        };
+        })
+    }
+
+    fn dispatch(&self, request: JobRequest) -> Result<String, JobError> {
+        let job_id = request.job_id.clone();
         // 槽已在 inner 标记占用；若 worker 已死导致投递失败，这里同步归还槽。
-        if self.submit_tx.try_send(request).is_err() {
+        if let Err(error) = self.submit_tx.try_send(request) {
+            let request = error.into_inner();
+            drop(request.source);
+            let mut status = request.status.lock().expect("status").clone();
+            status.state = JobState::Failed;
+            status.error = Some("worker_unavailable: 导入工作线程不可用".into());
             let mut guard = self.inner.lock().expect("job inner");
+            guard.remember(status);
             guard.current = None;
-            return Err(JobError::new("budget_busy", "导入槽暂不可用"));
+            return Err(JobError::new("worker_unavailable", "导入工作线程不可用"));
         }
         Ok(job_id)
     }
@@ -246,6 +353,15 @@ impl ImportJobs {
     /// 查询任务状态：活动任务优先，其次近期历史（内存去重表，有界）。
     pub fn status(&self, job_id: &str) -> Option<JobStatus> {
         self.latest_status_of(job_id)
+    }
+
+    pub(crate) fn active_status(&self) -> Option<JobStatus> {
+        self.inner
+            .lock()
+            .expect("job inner")
+            .current
+            .as_ref()
+            .map(|job| job.status.lock().expect("status").clone())
     }
 
     fn latest_status_of(&self, job_id: &str) -> Option<JobStatus> {
@@ -280,7 +396,14 @@ async fn worker_loop(
                 let preparation =
                     probe.prepare(format!("prepare-{}-{}", request.job_id, request.generation));
                 let outcome = match preparation.as_ref() {
-                    Ok(_) => run_import(&request, &library, &assets, &probe, &writer).await,
+                    Ok(_) => match &request.source {
+                        JobSource::Import(source) => {
+                            run_import(&request, source, &library, &assets, &probe, &writer).await
+                        }
+                        JobSource::Prepare(prepare) => {
+                            run_prepare(&request, prepare, &library, &assets, &probe).await
+                        }
+                    },
                     Err(error) => Err(JobError::new(error.code, error.message.clone())),
                 };
                 // 写门保持到物理退出、暂存清理和准备额度归还，失败者不清理其它写者的 job。
@@ -292,6 +415,8 @@ async fn worker_loop(
             }
             Err(error) => Err(error),
         };
+        // 源能力与读取句柄也须在终态发布前退出。
+        drop(request.source);
         let mut status = request.status.lock().expect("status").clone();
         match outcome {
             Ok(package_hash) => {
@@ -313,7 +438,7 @@ async fn worker_loop(
                 None,
                 job_state_db(&status.state),
                 None,
-                Some(&format!("{}", status.staged_bytes)),
+                serde_json::to_string(&status).ok().as_deref(),
                 status.error.as_deref(),
             )
             .await;
@@ -357,6 +482,7 @@ fn cancelled(cancel: &AtomicBool) -> Result<(), JobError> {
 /// controller 与流物理退出 → 原子发布 → DB 事务。重复导入也复核当前解码环境。
 async fn run_import(
     request: &JobRequest,
+    source: &ImportSource,
     library: &Library,
     assets: &AssetStore,
     probe: &ProbeClient,
@@ -372,7 +498,23 @@ async fn run_import(
         .reclaim(library, 0, super::derived_cache::CAP)
         .await?;
     // ① Probe（文件侧）：独占句柄快照，后续只读这份固定输入。
-    let receipt = assets.snapshot_input(&request.job_id, &request.source, Some(&request.cancel))?;
+    let receipt = match source {
+        ImportSource::Path(path) => {
+            assets.snapshot_input(&request.job_id, path, Some(&request.cancel))
+        }
+        ImportSource::Pinned(file) => {
+            assets.snapshot_open_file(&request.job_id, &file.file, Some(&request.cancel))
+        }
+    }?;
+    let name = match source {
+        ImportSource::Path(path) => path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("本地壁纸"),
+        ImportSource::Pinned(file) => &file.name,
+    };
+    let receipt =
+        super::raw_import::ensure_package(assets, library, receipt, name, &request.cancel).await?;
     set_stage_bytes(&request.status, receipt.bytes);
     cancelled(&request.cancel)?;
     // ② Prepare：对固定快照做包校验（结构/路径/哈希），取 manifest 事实。
@@ -474,6 +616,60 @@ async fn run_import(
     Ok(package.package_hash)
 }
 
+async fn run_prepare(
+    request: &JobRequest,
+    prepare: &super::target_planner::PrepareRequest,
+    library: &Library,
+    assets: &AssetStore,
+    probe: &ProbeClient,
+) -> Result<String, JobError> {
+    set_state(&request.status, JobState::Preparing);
+    cancelled(&request.cancel)?;
+    if !library
+        .is_installed(&prepare.reference.package_hash)
+        .await?
+    {
+        return Err(JobError::new("asset_not_found", "准备目标尚未安装或不可用"));
+    }
+    let package = assets.read_installed_manifest(&prepare.reference.package_hash)?;
+    let inputs = assets.probe_installed_media(&package, &request.cancel)?;
+    let (_, input) = super::target_planner::select_input(
+        &package,
+        &inputs,
+        &prepare.reference,
+        prepare.target,
+        &["image/png".into(), "video/mp4".into(), "video/webm".into()],
+    )?;
+    if input.metadata.container != super::media::Container::Image {
+        probe
+            .qualify(library, input, Arc::clone(&request.cancel))
+            .await?;
+        cancelled(&request.cancel)?;
+        return Ok(package.package_hash);
+    }
+    let mut image = super::image_prepare::prepare(
+        assets,
+        library,
+        probe,
+        &request.job_id,
+        &input,
+        Some(prepare.target),
+        &request.cancel,
+    )
+    .await?;
+    probe
+        .qualify(
+            library,
+            image.decode_input(assets, &input)?,
+            Arc::clone(&request.cancel),
+        )
+        .await?;
+    cancelled(&request.cancel)?;
+    set_state(&request.status, JobState::Publishing);
+    image.publish(assets, library).await?;
+    Ok(package.package_hash)
+}
+
 async fn qualify_media(
     request: &JobRequest,
     library: &Library,
@@ -529,6 +725,7 @@ async fn qualify_media(
 /// 崩溃恢复不自动启用任何作品（启用意图在 config 域）。
 pub async fn reconcile_startup(library: &Library, assets: &AssetStore) -> Result<(), JobError> {
     let _writer = assets.content_writer()?;
+    library.interrupt_imports().await?;
     let indexed = library.installed_packages().await?;
     let mut indexed_hashes: std::collections::HashSet<String> = std::collections::HashSet::new();
     for row in indexed {

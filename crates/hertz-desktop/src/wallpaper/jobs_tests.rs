@@ -25,12 +25,16 @@ fn package_with_image(png: &[u8]) -> Vec<u8> {
 }
 
 fn package_with_image_mime(png: &[u8], mime: &str) -> Vec<u8> {
+    package_with_media(png, mime, "image")
+}
+
+fn package_with_media(png: &[u8], mime: &str, kind: &str) -> Vec<u8> {
     let length = png.len();
     let sha = format!("{:x}", Sha256::digest(png));
     let manifest = format!(
         r#"{{"formatVersion":1,"workId":"c17ed10a-5c55-4a52-85dc-7509f9e88aae","version":1,
-            "title":"静夜","description":"","content":{{"kind":"image","asset":"background"}},
-            "assets":[{{"id":"background","kind":"image","source":"assets/background.png","variants":[]}}],
+            "title":"静夜","description":"","content":{{"kind":"{kind}","asset":"background"}},
+            "assets":[{{"id":"background","kind":"{kind}","source":"assets/background.png","variants":[]}}],
             "files":[{{"path":"assets/background.png","bytes":{length},"sha256":"{sha}","mime":"{mime}"}}],
             "properties":[],"permissions":{{"audioSpectrum":false,"pointer":false}},
             "license":{{"code":"none","assets":"CC0-1.0","attribution":""}}}}"#
@@ -462,6 +466,285 @@ fn target_cache_rejects_receipt_dimensions_even_with_matching_file_hashes() {
     env.jobs.submit(id.clone(), env.source.clone()).unwrap();
     assert_eq!(wait_terminal(&env.jobs, &id).state, JobState::Done);
     assert_ne!(cached_path(), first);
+}
+
+#[test]
+fn planner_prepares_installed_asset_without_source_and_admits_only_after_budget() {
+    use super::super::image_prepare::{ImageFit, ImagePurpose, ImageTarget};
+    use super::super::target_planner::{self, AssetRef, Resolution};
+    let env = env("planner-installed");
+    let id = new_job_id();
+    env.jobs.submit(id.clone(), env.source.clone()).unwrap();
+    let hash = wait_terminal(&env.jobs, &id).package_hash.unwrap();
+    std::fs::remove_file(&env.source).unwrap();
+    let reference = AssetRef {
+        package_hash: hash.clone(),
+        asset_id: "background".into(),
+        variant_id: None,
+    };
+    let target = ImageTarget {
+        width: 80,
+        height: 80,
+        fit: ImageFit::Cover,
+        purpose: ImagePurpose::Low,
+    };
+    let cancel = AtomicBool::new(false);
+    let resolve = |target| {
+        futures_block_on(target_planner::resolve(
+            env.jobs.assets(),
+            env.jobs.library(),
+            &reference,
+            target,
+            &["image/png".into()],
+            &cancel,
+        ))
+        .unwrap()
+    };
+    let before: i64 = futures_block_on(
+        sqlx::query_scalar("SELECT COUNT(*) FROM derived_entries")
+            .fetch_one(env.jobs.library().pool()),
+    )
+    .unwrap();
+    let Resolution::PrepareRequired(request) = resolve(target) else {
+        panic!("缺少目标必须请求后台准备")
+    };
+    let after: i64 = futures_block_on(
+        sqlx::query_scalar("SELECT COUNT(*) FROM derived_entries")
+            .fetch_one(env.jobs.library().pool()),
+    )
+    .unwrap();
+    assert_eq!(before, after, "resolve 不隐式生成图片");
+    let id = new_job_id();
+    env.jobs.prepare_asset(id.clone(), request).unwrap();
+    let status = wait_terminal(&env.jobs, &id);
+    assert_eq!(status.state, JobState::Done, "{:?}", status.error);
+    assert_eq!(status.staged_bytes, 0, "已安装包准备不复制原包");
+    let Resolution::Ready(first) = resolve(target) else {
+        panic!("准备后可解析")
+    };
+    let Resolution::Ready(reused) = resolve(target) else {
+        panic!("同目标可复用")
+    };
+    assert_eq!(first.content_key(), reused.content_key());
+    assert_eq!(first.input().media.path, reused.input().media.path);
+    assert!(!first.url().contains(env.root.path().to_str().unwrap()));
+    use super::super::session::{RecoveryLedger, SessionState, WallpaperSession};
+    let budget = Arc::new(super::super::budget::BudgetCoordinator::new());
+    let access = super::super::access::MediaAccess::new();
+    let path = first.input().media.entry.path.clone();
+    let recovery = RecoveryLedger::new();
+    let mut session = WallpaperSession::new();
+    let first_generation = attaching_media_session(&mut session, &recovery, 1);
+    assert!(access.permit(&hash, &path).is_none());
+    session
+        .admit_media(
+            first_generation,
+            first,
+            Arc::clone(&budget),
+            &access,
+            "live".into(),
+        )
+        .unwrap();
+    let old_permit = access.permit(&hash, &path).unwrap();
+    let held = budget.usage();
+    assert_eq!(
+        session
+            .admit_media(
+                first_generation,
+                resolve_ready(resolve(target)),
+                Arc::clone(&budget),
+                &access,
+                "live".into()
+            )
+            .unwrap_err()
+            .code,
+        "stale_generation"
+    );
+    assert_eq!(budget.usage(), held, "重复准入不新增 token");
+
+    let mut stale_controller = WallpaperSession::new();
+    let stale_generation = attaching_media_session(&mut stale_controller, &recovery, 1);
+    assert_eq!(
+        stale_controller
+            .admit_media(
+                stale_generation,
+                resolve_ready(resolve(target)),
+                Arc::clone(&budget),
+                &access,
+                "stale-controller".into()
+            )
+            .unwrap_err()
+            .code,
+        "stale_generation"
+    );
+    assert_eq!(budget.usage(), held, "controller 拒绝时只回收本次 token");
+    assert!(old_permit.is_active());
+    let mut full = reused.budget_request("other".into(), 1).unwrap();
+    full.targets = 3;
+    let other = budget.grant(&full).unwrap();
+    let mut candidate = WallpaperSession::new();
+    let candidate_generation = attaching_media_session(&mut candidate, &recovery, 2);
+    assert_eq!(
+        candidate
+            .admit_media(
+                candidate_generation,
+                resolve_ready(resolve(target)),
+                Arc::clone(&budget),
+                &access,
+                "candidate".into()
+            )
+            .unwrap_err()
+            .code,
+        "budget_busy"
+    );
+    assert_eq!(candidate.state(), SessionState::Attaching);
+    assert!(old_permit.is_active(), "候选预算失败不撤销当前壁纸");
+    budget.confirm_exit(other, "other", 1).unwrap();
+
+    let second_generation = attaching_media_session(&mut session, &recovery, 2);
+    assert!(!old_permit.is_active(), "换代先撤销旧读取");
+    session
+        .admit_media(
+            second_generation,
+            reused,
+            Arc::clone(&budget),
+            &access,
+            "live".into(),
+        )
+        .unwrap();
+    assert_eq!(budget.usage().targets, 2, "新旧代际按交接峰值一起计账");
+    assert_eq!(budget.usage().release_pending, 1);
+    assert!(
+        !session.media_controller_closed(second_generation),
+        "活动代际不能被退出回执释放"
+    );
+    assert!(session.media_controller_closed(first_generation));
+    assert!(
+        session.reap_media().is_empty(),
+        "controller 关闭仍须等待文件流"
+    );
+    assert!(
+        access.permit(&hash, &path).unwrap().is_active(),
+        "旧回收不能撤销新授权"
+    );
+    drop(old_permit);
+    assert_eq!(session.reap_media(), vec![first_generation]);
+    assert_eq!(budget.usage().targets, 1, "只归还已退出的旧代际");
+    session.disable();
+    assert_eq!(session.state(), SessionState::Disabled);
+    assert!(session.media_controller_closed(second_generation));
+    assert_eq!(session.reap_media(), vec![second_generation]);
+    assert_eq!(budget.usage(), Default::default());
+    assert_eq!(
+        std::fs::read(env.jobs.assets().package_dir(&hash).join("original.hwpkg")).unwrap(),
+        env.bytes
+    );
+    cancel.store(true, Ordering::Release);
+    assert_eq!(
+        futures_block_on(target_planner::resolve(
+            env.jobs.assets(),
+            env.jobs.library(),
+            &reference,
+            target,
+            &["image/png".into()],
+            &cancel
+        ))
+        .err()
+        .unwrap()
+        .code,
+        "cancelled"
+    );
+}
+
+#[test]
+fn planner_rejects_damaged_cache_and_preparation_shares_import_slot() {
+    use super::super::image_prepare::{ImageFit, ImagePurpose, ImageTarget};
+    use super::super::target_planner::{self, AssetRef, Resolution};
+    let blocked = Arc::new(AtomicBool::new(false));
+    let entered = Arc::new(AtomicBool::new(false));
+    let block = Arc::clone(&blocked);
+    let entry = Arc::clone(&entered);
+    let probe = ProbeClient::testing(move |_, cancel| {
+        let block = Arc::clone(&block);
+        let entry = Arc::clone(&entry);
+        Box::pin(async move {
+            if block.load(Ordering::Acquire) {
+                entry.store(true, Ordering::Release);
+                while !cancel.load(Ordering::Acquire) {
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+                return Err(JobError::new("cancelled", "test cancellation"));
+            }
+            Ok(())
+        })
+    });
+    let env = env_with_probe("planner-cancel", probe);
+    let target = ImageTarget {
+        width: 80,
+        height: 80,
+        fit: ImageFit::Cover,
+        purpose: ImagePurpose::Low,
+    };
+    let id = new_job_id();
+    env.jobs
+        .submit_for_target(id.clone(), env.source.clone(), Some(target))
+        .unwrap();
+    let hash = wait_terminal(&env.jobs, &id).package_hash.unwrap();
+    let reference = AssetRef {
+        package_hash: hash.clone(),
+        asset_id: "background".into(),
+        variant_id: None,
+    };
+    let path: String = futures_block_on(
+        sqlx::query_scalar("SELECT path FROM derived_entries").fetch_one(env.jobs.library().pool()),
+    )
+    .unwrap();
+    std::fs::write(
+        env.jobs
+            .assets()
+            .root()
+            .join("derived")
+            .join(path)
+            .join("render.png"),
+        b"broken",
+    )
+    .unwrap();
+    let Resolution::PrepareRequired(request) = futures_block_on(target_planner::resolve(
+        env.jobs.assets(),
+        env.jobs.library(),
+        &reference,
+        target,
+        &["image/png".into()],
+        &AtomicBool::new(false),
+    ))
+    .unwrap() else {
+        panic!("坏缓存不能标为 ready")
+    };
+    blocked.store(true, Ordering::Release);
+    let id = new_job_id();
+    env.jobs.prepare_asset(id.clone(), request).unwrap();
+    for _ in 0..400 {
+        if entered.load(Ordering::Acquire) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(entered.load(Ordering::Acquire));
+    assert_eq!(
+        env.jobs
+            .submit(new_job_id(), env.source.clone())
+            .unwrap_err()
+            .code,
+        "budget_busy"
+    );
+    env.jobs.cancel(&id);
+    assert_eq!(wait_terminal(&env.jobs, &id).state, JobState::Cancelled);
+    assert!(!env.jobs.assets().staging_dir(&id).exists());
+    assert!(futures_block_on(env.jobs.library().is_installed(&hash)).unwrap());
+    blocked.store(false, Ordering::Release);
+    let id = new_job_id();
+    env.jobs.submit(id.clone(), env.source.clone()).unwrap();
+    assert_eq!(wait_terminal(&env.jobs, &id).state, JobState::Done);
 }
 
 #[test]
@@ -1102,4 +1385,560 @@ async fn crash_recovery_reindexes_orphans_and_marks_missing() {
         .await
         .unwrap();
     assert_eq!(missing, "unavailable");
+}
+
+fn resolve_ready(
+    resolution: super::super::target_planner::Resolution,
+) -> super::super::target_planner::ResolvedMedia {
+    match resolution {
+        super::super::target_planner::Resolution::Ready(media) => media,
+        _ => panic!("已准备的媒体应可解析"),
+    }
+}
+
+fn attaching_media_session(
+    session: &mut super::super::session::WallpaperSession,
+    recovery: &super::super::session::RecoveryLedger,
+    revision: u64,
+) -> u64 {
+    let generation = session.apply(revision, recovery).unwrap();
+    assert!(session.resolved(generation));
+    assert!(session.prepared(generation));
+    generation
+}
+
+fn installed_media(
+    env: &TestEnv,
+    target: super::super::image_prepare::ImageTarget,
+) -> super::super::target_planner::ResolvedMedia {
+    use super::super::target_planner::{self, AssetRef};
+    let id = new_job_id();
+    env.jobs
+        .submit_for_target(id.clone(), env.source.clone(), Some(target))
+        .unwrap();
+    let status = wait_terminal(&env.jobs, &id);
+    assert_eq!(status.state, JobState::Done, "{:?}", status.error);
+    resolve_ready(
+        futures_block_on(target_planner::resolve(
+            env.jobs.assets(),
+            env.jobs.library(),
+            &AssetRef {
+                package_hash: status.package_hash.unwrap(),
+                asset_id: "background".into(),
+                variant_id: None,
+            },
+            target,
+            &["image/png".into(), "video/webm".into()],
+            &AtomicBool::new(false),
+        ))
+        .unwrap(),
+    )
+}
+
+fn session_target() -> super::super::image_prepare::ImageTarget {
+    use super::super::image_prepare::{ImageFit, ImagePurpose, ImageTarget};
+    ImageTarget {
+        width: 80,
+        height: 80,
+        fit: ImageFit::Cover,
+        purpose: ImagePurpose::Low,
+    }
+}
+
+#[test]
+fn resolved_target_is_normalized_and_bound_to_the_cost_request() {
+    use super::super::image_prepare::{ImagePurpose, ImageTarget};
+    let env = env("session-target");
+    let media = installed_media(
+        &env,
+        ImageTarget {
+            width: 3840,
+            height: 2160,
+            purpose: ImagePurpose::Preview,
+            ..session_target()
+        },
+    );
+    assert_eq!(
+        media.target(),
+        ImageTarget {
+            width: 960,
+            height: 540,
+            purpose: ImagePurpose::Preview,
+            ..session_target()
+        }
+    );
+    let request = media.budget_request("preview".into(), 1).unwrap();
+    assert_eq!(request.owner, super::super::budget::OwnerKind::Preview);
+    assert_eq!(request.targets, 0);
+    assert_eq!(request.output_pixel_rate, 0, "静态图无连续输出");
+    assert!(media.budget_request("preview".into(), 0).is_err());
+}
+
+#[test]
+fn media_readiness_rejects_wrong_backend_and_frames_before_admission() {
+    use super::super::session::{FrameKind, RecoveryLedger, SessionState, WallpaperSession};
+    for missing in 0..3 {
+        let env = env("session-ready");
+        let media = installed_media(&env, session_target());
+        let budget = Arc::new(super::super::budget::BudgetCoordinator::new());
+        let access = super::super::access::MediaAccess::new();
+        let recovery = RecoveryLedger::new();
+        let mut session = WallpaperSession::new();
+        let generation = attaching_media_session(&mut session, &recovery, 1);
+        assert!(session.frame_submitted(generation, FrameKind::Gl));
+        session
+            .admit_media(
+                generation,
+                media,
+                Arc::clone(&budget),
+                &access,
+                "live".into(),
+            )
+            .unwrap();
+        assert!(!session.frame_submitted(generation, FrameKind::Gl));
+        assert!(!session.frame_submitted(generation, FrameKind::Video));
+        if missing != 0 {
+            assert!(session.native_attached(generation));
+        }
+        if missing != 1 {
+            assert!(session.page_handshake(generation));
+        }
+        if missing != 2 {
+            assert!(session.frame_submitted(generation, FrameKind::Image));
+        }
+        assert_eq!(
+            session.state(),
+            SessionState::Attaching,
+            "缺少事实不能 ready"
+        );
+        assert_eq!(session.diagnostics().applied_revision, None);
+        match missing {
+            0 => assert!(session.native_attached(generation)),
+            1 => assert!(session.page_handshake(generation)),
+            _ => assert!(session.frame_submitted(generation, FrameKind::Image)),
+        }
+        assert_eq!(session.state(), SessionState::Ready);
+        assert_eq!(session.diagnostics().frame_kind, Some(FrameKind::Image));
+        session.disable();
+        assert!(
+            session.reap_media().is_empty(),
+            "无读者也不能代替 controller 关闭"
+        );
+        assert!(session.media_controller_closed(generation));
+        assert_eq!(session.reap_media(), vec![generation]);
+        assert_eq!(budget.usage(), Default::default());
+    }
+}
+
+#[test]
+fn restored_media_uses_new_generation_and_failure_keeps_reservation_until_exit() {
+    use super::super::session::{FrameKind, RecoveryLedger, SessionState, WallpaperSession};
+    let env = env("session-failure");
+    let media = installed_media(&env, session_target());
+    let budget = Arc::new(super::super::budget::BudgetCoordinator::new());
+    let access = super::super::access::MediaAccess::new();
+    let hash = media.reference().package_hash.clone();
+    let path = media.input().media.entry.path.clone();
+    let mut session = WallpaperSession::new();
+    let recovery = RecoveryLedger::new();
+    let generation = attaching_media_session(&mut session, &recovery, 1);
+    session
+        .admit_media(
+            generation,
+            media,
+            Arc::clone(&budget),
+            &access,
+            "live".into(),
+        )
+        .unwrap();
+    assert!(session.native_attached(generation));
+    assert!(session.page_handshake(generation));
+    assert!(session.frame_submitted(generation, FrameKind::Image));
+    assert!(session.start_presentation(std::time::Instant::now()));
+    assert!(session.display_missing(generation));
+    assert!(access.permit(&hash, &path).is_none());
+    assert_eq!(session.retiring_media_generations(), vec![generation]);
+    assert!(session.reap_media().is_empty());
+    assert_eq!(budget.usage().targets, 1);
+    assert!(session.media_controller_closed(generation));
+    assert_eq!(session.reap_media(), vec![generation]);
+    assert!(session.display_restored(generation));
+    assert!(
+        !session.frame_submitted(generation, FrameKind::Image),
+        "已回收代际的迟到首帧不能复活"
+    );
+    assert_eq!(
+        session
+            .admit_media(
+                generation,
+                installed_media(&env, session_target()),
+                Arc::clone(&budget),
+                &access,
+                "live".into()
+            )
+            .unwrap_err()
+            .code,
+        "stale_generation"
+    );
+    assert!(
+        !session.admit_resources(generation),
+        "不能绕过媒体准入填写资源事实"
+    );
+    assert_eq!(session.state(), SessionState::Attaching);
+    let next = session.generation();
+    assert!(next > generation, "显示器恢复建立新 controller 代际");
+    session
+        .admit_media(
+            next,
+            installed_media(&env, session_target()),
+            Arc::clone(&budget),
+            &access,
+            "live".into(),
+        )
+        .unwrap();
+    assert!(!session.fail(generation, "late", "old", true));
+    assert!(session.fail(next, "media_error", "failed", true));
+    assert_eq!(session.state(), SessionState::Failed);
+    assert_eq!(budget.usage().targets, 1);
+    assert_eq!(budget.usage().release_pending, 1);
+    assert!(session.media_controller_closed(next));
+    assert_eq!(session.reap_media(), vec![next]);
+    assert_eq!(budget.usage(), Default::default());
+}
+
+#[test]
+fn dropping_session_revokes_access_but_does_not_claim_physical_exit() {
+    use super::super::session::{RecoveryLedger, WallpaperSession};
+    let env = env("session-drop");
+    let media = installed_media(&env, session_target());
+    let hash = media.reference().package_hash.clone();
+    let path = media.input().media.entry.path.clone();
+    let budget = Arc::new(super::super::budget::BudgetCoordinator::new());
+    let access = super::super::access::MediaAccess::new();
+    let mut session = WallpaperSession::new();
+    let generation = attaching_media_session(&mut session, &RecoveryLedger::new(), 1);
+    session
+        .admit_media(
+            generation,
+            media,
+            Arc::clone(&budget),
+            &access,
+            "live".into(),
+        )
+        .unwrap();
+    let reader = access.permit(&hash, &path).unwrap();
+    drop(session);
+    assert!(!reader.is_active());
+    assert!(access.permit(&hash, &path).is_none());
+    drop(reader);
+    assert_eq!(
+        budget.usage().targets,
+        1,
+        "Rust Drop 不是 controller 退出证明"
+    );
+    assert_eq!(budget.usage().release_pending, 1);
+    assert_eq!(budget.stuck().len(), 1);
+}
+
+#[test]
+fn video_session_counts_handoff_peak_and_holds_last_decoder_until_physical_exit() {
+    use super::super::session::{FrameKind, RecoveryLedger, SessionState, WallpaperSession};
+    let mut env = env("session-video");
+    env.bytes = package_with_media(
+        include_bytes!("../../../../scripts/fixtures/wallpaper-vp8.webm"),
+        "video/webm",
+        "video",
+    );
+    std::fs::write(&env.source, &env.bytes).unwrap();
+    let target = super::super::image_prepare::ImageTarget {
+        width: 1920,
+        height: 1080,
+        ..session_target()
+    };
+    let first = installed_media(&env, target);
+    let next_media = installed_media(&env, target);
+    let third = next_media.budget_request("third".into(), 1).unwrap();
+    let fps = next_media.input().metadata.fps_upper_bound.unwrap();
+    assert_eq!(
+        third.output_pixel_rate,
+        (1920.0 * 1080.0 * fps).ceil() as u64
+    );
+    assert_eq!(third.decode_pixel_rate, (64.0 * 48.0 * fps).ceil() as u64);
+    let budget = Arc::new(super::super::budget::BudgetCoordinator::new());
+    let access = super::super::access::MediaAccess::new();
+    let mut session = WallpaperSession::new();
+    let recovery = RecoveryLedger::new();
+    let old = attaching_media_session(&mut session, &recovery, 1);
+    session
+        .admit_media(old, first, Arc::clone(&budget), &access, "video".into())
+        .unwrap();
+    assert!(!session.frame_submitted(old, FrameKind::Image));
+    assert!(!session.frame_submitted(old, FrameKind::Gl));
+    assert!(session.frame_submitted(old, FrameKind::Video));
+    assert!(session.page_handshake(old));
+    assert!(session.native_attached(old));
+    assert_eq!(session.state(), SessionState::Ready);
+    let next = attaching_media_session(&mut session, &recovery, 2);
+    session
+        .admit_media(
+            next,
+            next_media,
+            Arc::clone(&budget),
+            &access,
+            "video".into(),
+        )
+        .unwrap();
+    assert_eq!(budget.usage().decoder_slots, 2);
+    assert_eq!(budget.grant(&third).unwrap_err().quota, "decoder_slots");
+    assert!(
+        session.reap_media().is_empty(),
+        "流已退出也须等独立 controller 关闭"
+    );
+    assert_eq!(budget.usage().decoder_slots, 2);
+    assert!(session.media_controller_closed(old));
+    assert_eq!(session.reap_media(), vec![old]);
+    assert!(
+        !session.media_controller_closed(old),
+        "重复关闭不命中新代际"
+    );
+    assert_eq!(budget.usage().decoder_slots, 1);
+    let token = budget.grant(&third).unwrap();
+    budget.confirm_exit(token, "third", 1).unwrap();
+    session.disable();
+    assert!(session.media_controller_closed(next));
+    assert_eq!(session.reap_media(), vec![next]);
+    assert_eq!(budget.usage(), Default::default());
+}
+
+#[test]
+fn desktop_session_rejects_preview_owner_before_granting_any_resources() {
+    use super::super::image_prepare::{ImagePurpose, ImageTarget};
+    use super::super::session::{RecoveryLedger, WallpaperSession};
+    let env = env("session-owner");
+    let media = installed_media(
+        &env,
+        ImageTarget {
+            purpose: ImagePurpose::Preview,
+            ..session_target()
+        },
+    );
+    let budget = Arc::new(super::super::budget::BudgetCoordinator::new());
+    let access = super::super::access::MediaAccess::new();
+    let mut session = WallpaperSession::new();
+    let generation = attaching_media_session(&mut session, &RecoveryLedger::new(), 1);
+    assert_eq!(
+        session
+            .admit_media(
+                generation,
+                media,
+                Arc::clone(&budget),
+                &access,
+                "live".into()
+            )
+            .unwrap_err()
+            .code,
+        "invalid_input"
+    );
+    assert_eq!(budget.usage(), Default::default());
+    assert!(session.media().is_none());
+}
+
+#[test]
+fn accepted_import_dispatch_failure_is_durable_and_releases_the_source() {
+    let mut env = env("dispatch-failure");
+    let (tx, rx) = tokio::sync::mpsc::channel(1);
+    drop(rx);
+    env.jobs.submit_tx = tx;
+    let job_id = new_job_id();
+    let identity = ImportIdentity {
+        request_id: "failed-dispatch".into(),
+        payload_digest: "digest".into(),
+    };
+    let tokens = super::super::file_tokens::FileTokens::default();
+    tokens.set_owner(1);
+    let now = std::time::Instant::now();
+    let ticket = tokens
+        .issue(
+            1,
+            super::super::file_tokens::SelectedFile::open(&env.source).unwrap(),
+            now,
+        )
+        .unwrap();
+    let file = tokens.consume(1, &ticket.file_token, now).unwrap();
+    let error =
+        futures_block_on(env.jobs.submit_authorized(job_id.clone(), file, identity)).unwrap_err();
+    assert_eq!(error.code, "worker_unavailable");
+    assert!(env.jobs.active_status().is_none());
+    std::fs::remove_file(&env.source).unwrap();
+    let status = futures_block_on(env.jobs.library.persisted_job(&job_id))
+        .unwrap()
+        .unwrap();
+    assert_eq!(status.state, JobState::Failed);
+    assert!(status.error.unwrap().starts_with("worker_unavailable:"));
+    assert_eq!(
+        futures_block_on(env.jobs.library.import_operation("failed-dispatch"))
+            .unwrap()
+            .unwrap()
+            .job_id,
+        job_id
+    );
+}
+
+#[test]
+fn restart_marks_unfinished_accepted_imports_interrupted_and_preserves_their_identity() {
+    let env = env("interrupted-acceptance");
+    let status = JobStatus {
+        job_id: "lost-job".into(),
+        state: JobState::Queued,
+        error: None,
+        package_hash: None,
+        staged_bytes: 0,
+        generation: 1,
+    };
+    let identity = ImportIdentity {
+        request_id: "lost-request".into(),
+        payload_digest: "digest".into(),
+    };
+    futures_block_on(env.jobs.library.accept_import(&status, &identity)).unwrap();
+    futures_block_on(reconcile_startup(&env.jobs.library, &env.jobs.assets)).unwrap();
+    let interrupted = futures_block_on(env.jobs.library.persisted_job("lost-job"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(interrupted.state, JobState::Failed);
+    assert!(interrupted
+        .error
+        .as_ref()
+        .unwrap()
+        .starts_with("interrupted:"));
+    assert_eq!(
+        futures_block_on(env.jobs.library.import_operation("lost-request"))
+            .unwrap()
+            .unwrap()
+            .job_id,
+        "lost-job"
+    );
+    futures_block_on(env.jobs.library.interrupt_imports()).unwrap();
+    assert_eq!(
+        futures_block_on(env.jobs.library.persisted_job("lost-job"))
+            .unwrap()
+            .unwrap()
+            .error,
+        interrupted.error
+    );
+}
+
+#[test]
+fn raw_image_import_preserves_fixed_bytes_and_reimport_after_rename_is_idempotent() {
+    let env = env("raw-image");
+    use base64::Engine;
+    let png = base64::engine::general_purpose::STANDARD
+        .decode(FIXTURE_PNG_B64)
+        .unwrap();
+    let source = env.root.path().join("我的图片.jpg"); // 魔数优先，不能信任扩展名。
+    std::fs::write(&source, &png).unwrap();
+    let first = env.jobs.submit(new_job_id(), source.clone()).unwrap();
+    let status = wait_terminal(&env.jobs, &first);
+    assert_eq!(status.state, JobState::Done, "{status:?}");
+    let hash = status.package_hash.unwrap();
+    let installed = env.jobs.assets.package_dir(&hash);
+    assert_eq!(
+        std::fs::read(installed.join("files/assets/background.png")).unwrap(),
+        png
+    );
+    let mut package =
+        zip::ZipArchive::new(std::fs::File::open(installed.join("original.hwpkg")).unwrap())
+            .unwrap();
+    let mut manifest = String::new();
+    std::io::Read::read_to_string(
+        &mut package.by_name("manifest.json").unwrap(),
+        &mut manifest,
+    )
+    .unwrap();
+    assert!(!manifest.contains(&env.root.path().to_string_lossy().replace('\\', "\\\\")));
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&manifest).unwrap()["title"],
+        "我的图片"
+    );
+    let renamed = env.root.path().join("另一个名字.webm");
+    std::fs::rename(&source, &renamed).unwrap();
+    let second = env.jobs.submit(new_job_id(), renamed.clone()).unwrap();
+    let second = wait_terminal(&env.jobs, &second);
+    assert_eq!(second.state, JobState::Done, "{second:?}");
+    assert_eq!(second.package_hash.as_deref(), Some(hash.as_str()));
+    std::fs::remove_file(renamed).unwrap();
+    futures_block_on(reconcile_startup(&env.jobs.library, &env.jobs.assets)).unwrap();
+    assert!(env.jobs.assets.verify_installed(&hash).unwrap().is_some());
+    assert_eq!(
+        futures_block_on(env.jobs.library.list_works(50, None))
+            .unwrap()
+            .0
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn invalid_raw_media_never_publishes_a_package() {
+    let env = env("raw-unsupported");
+    let source = env.root.path().join("fake.png");
+    std::fs::write(&source, b"not an image or video").unwrap();
+    let id = env.jobs.submit(new_job_id(), source).unwrap();
+    let status = wait_terminal(&env.jobs, &id);
+    assert_eq!(status.state, JobState::Failed);
+    assert!(status.error.unwrap().starts_with("format_unsupported:"));
+    assert!(!env.jobs.assets.staging_dir(&id).exists());
+    assert!(futures_block_on(env.jobs.library.installed_hashes())
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn preview_session_admits_only_preview_targets_and_waits_for_real_exit() {
+    use super::super::image_prepare::{ImagePurpose, ImageTarget};
+    use super::super::session::{RecoveryLedger, WallpaperSession};
+    let env = env("preview-owner");
+    let budget = Arc::new(super::super::budget::BudgetCoordinator::new());
+    let access = super::super::access::MediaAccess::new();
+    let mut session = WallpaperSession::preview_after_generation(2);
+    let generation = attaching_media_session(&mut session, &RecoveryLedger::new(), 1);
+    assert_eq!(
+        session
+            .admit_media(
+                generation,
+                installed_media(&env, session_target()),
+                Arc::clone(&budget),
+                &access,
+                "preview".into()
+            )
+            .unwrap_err()
+            .code,
+        "invalid_input"
+    );
+    assert_eq!(budget.usage(), Default::default());
+    let media = installed_media(
+        &env,
+        ImageTarget {
+            purpose: ImagePurpose::Preview,
+            ..session_target()
+        },
+    );
+    session
+        .admit_media(
+            generation,
+            media,
+            Arc::clone(&budget),
+            &access,
+            "preview".into(),
+        )
+        .unwrap();
+    assert_eq!(budget.usage().preview_instances, 1);
+    session.disable();
+    assert_eq!(
+        budget.usage().preview_instances,
+        1,
+        "requesting release is not an exit"
+    );
+    assert!(session.media_controller_closed(generation));
+    assert_eq!(session.reap_media(), vec![generation]);
+    assert_eq!(budget.usage(), Default::default());
 }

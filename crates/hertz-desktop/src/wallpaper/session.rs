@@ -16,17 +16,25 @@
 //!
 //! 暂停原因（§13.2）：每个原因独立增删并带 scope（allPresentations /
 //! desktopOnly / previewOnly），解除只移除对应范围，不清空集合；原因名沿用
-//! policy.rs 的常量，不建第二份名字表。本会话是桌面呈现：previewOnly 的
-//! 原因不影响其状态。
+//! policy.rs 的常量，不建第二份名字表。桌面忽略 previewOnly，独立预览忽略
+//! desktopOnly；两者复用就绪/退出状态机并分别持有预算。
 //!
 //! 恢复预算（§13.3）：120 秒最多 3 次，按故障域记账——单会话故障计会话
 //! 预算，Explorer 全局重挂计一次全局预算（不按屏幕数消耗）；超额进入
 //! 终止态，只接受用户明确重试，时间经过不自动解锁。
 //!
-//! 退出顺序（订阅、scheduler、视频、scope、controller、worker）是宿主接线
-//! 的回收清单，不属于本状态机。
+//! 单媒体准入随会话持有预算与文件 scope。换代/失败/停用先撤销并保留占用，
+//! 宿主确认独立 controller 关闭且文件读者退出后才归还。窗口、订阅与 scheduler
+//! 的真实操作仍由宿主执行，超时/页面暂停不能充当关闭事实。
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+use super::access::{Drain, MediaAccess, MediaGrant};
+use super::budget::{BudgetCoordinator, BudgetRequest, OwnerKind};
+use super::jobs::JobError;
+use super::media::Container;
+use super::target_planner::ResolvedMedia;
 
 /// 恢复预算窗口与次数（§13.3）。
 pub(crate) const RECOVERY_WINDOW: Duration = Duration::from_secs(120);
@@ -140,10 +148,81 @@ pub(crate) enum ApplyError {
     RecoveryExhausted,
 }
 
+/// 单次媒体准入的生命周期；仅 WallpaperSession 持有，不能复制资源所有权。
+struct MediaAdmission {
+    media: Option<ResolvedMedia>,
+    grant: MediaGrant,
+    budget: Arc<BudgetCoordinator>,
+    request: BudgetRequest,
+    token: u64,
+    frame_kind: FrameKind,
+    drain: Option<Drain>,
+    controller_closed: bool,
+    finished: bool,
+}
+
+impl std::fmt::Debug for MediaAdmission {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("MediaAdmission")
+            .field("generation", &self.request.generation)
+            .field("token", &self.token)
+            .field("frame_kind", &self.frame_kind)
+            .field("retiring", &self.drain.is_some())
+            .field("controller_closed", &self.controller_closed)
+            .finish()
+    }
+}
+
+impl MediaAdmission {
+    fn retire(&mut self) {
+        if self.drain.is_none() {
+            self.drain = Some(self.grant.revoke());
+            let _ = self
+                .budget
+                .release(self.token, &self.request.session, self.request.generation);
+        }
+    }
+
+    fn finish(&mut self) -> bool {
+        if !self.controller_closed || !self.drain.as_ref().is_some_and(Drain::is_drained) {
+            return false;
+        }
+        // 释放自身的固定句柄/派生目录租约后才归还额度。
+        self.media.take();
+        if self
+            .budget
+            .confirm_exit(self.token, &self.request.session, self.request.generation)
+            .is_err()
+        {
+            return false;
+        }
+        if self
+            .budget
+            .forget_released(self.token, &self.request.session, self.request.generation)
+            .is_err()
+        {
+            return false;
+        }
+        self.finished = true;
+        true
+    }
+}
+
+impl Drop for MediaAdmission {
+    fn drop(&mut self) {
+        if !self.finished {
+            // 丢失宿主回执时保持 stuck 占用，绝不能把 Rust Drop 当作原生退出。
+            self.retire();
+        }
+    }
+}
+
 /// 单个壁纸会话的状态机。事件式推进：无效迁移与旧代际事件被忽略并返回
 /// false，不 panic——调用方（宿主接线）据此记日志。
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct WallpaperSession {
+    owner: OwnerKind,
     state: SessionState,
     generation: u64,
     desired_revision: Option<u64>,
@@ -152,6 +231,9 @@ pub(crate) struct WallpaperSession {
     facts: ReadyFacts,
     pauses: Vec<PauseReason>,
     paused_at: Option<Instant>,
+    media: Option<MediaAdmission>,
+    retiring_media: Vec<MediaAdmission>,
+    last_media_generation: Option<u64>,
 }
 
 impl Default for WallpaperSession {
@@ -163,6 +245,7 @@ impl Default for WallpaperSession {
 impl WallpaperSession {
     pub(crate) fn new() -> Self {
         Self {
+            owner: OwnerKind::Desktop,
             state: SessionState::Disabled,
             generation: 0,
             desired_revision: None,
@@ -171,6 +254,25 @@ impl WallpaperSession {
             facts: ReadyFacts::default(),
             pauses: Vec::new(),
             paused_at: None,
+            media: None,
+            retiring_media: Vec::new(),
+            last_media_generation: None,
+        }
+    }
+
+    /// Preserve the host's monotonic controller generation when creating a fresh session owner.
+    pub(crate) fn after_generation(generation: u64) -> Self {
+        Self {
+            generation,
+            ..Self::new()
+        }
+    }
+
+    /// Preview has its own lease/controller, but shares the same readiness and exit barriers.
+    pub(crate) fn preview_after_generation(generation: u64) -> Self {
+        Self {
+            owner: OwnerKind::Preview,
+            ..Self::after_generation(generation)
         }
     }
 
@@ -197,6 +299,7 @@ impl WallpaperSession {
         if recovery.is_terminal(FaultDomain::Session) {
             return Err(ApplyError::RecoveryExhausted);
         }
+        self.retire_current_media();
         self.generation += 1;
         self.desired_revision = Some(desired_revision);
         self.applied_revision = None;
@@ -224,9 +327,138 @@ impl WallpaperSession {
         true
     }
 
+    /// 单媒体一次性准入：只有当前 attaching 代际可申请；拒绝不改旧权限/状态。
+    /// 目标准入必须匹配本会话的桌面/预览 owner。
+    pub(crate) fn admit_media(
+        &mut self,
+        generation: u64,
+        media: ResolvedMedia,
+        budget: Arc<BudgetCoordinator>,
+        access: &MediaAccess,
+        owner_session: String,
+    ) -> Result<(), JobError> {
+        if generation != self.generation
+            || self.state != SessionState::Attaching
+            || self.media.is_some()
+            || self.last_media_generation == Some(generation)
+        {
+            return Err(JobError::new(
+                "stale_generation",
+                "媒体准入必须属于尚未加载的当前代际",
+            ));
+        }
+        let request = media.budget_request(owner_session, generation)?;
+        if request.owner != self.owner {
+            return Err(JobError::invalid_input("呈现目标与会话预算 owner 不匹配"));
+        }
+        let token = budget.grant(&request).map_err(|error| {
+            JobError::new("budget_busy", format!("{}: {}", error.quota, error.message))
+        })?;
+        let grant = access.grant_scoped_pinned(
+            generation,
+            media.reference().package_hash.clone(),
+            Arc::clone(&media.input().media),
+        );
+        let Some(grant) = grant else {
+            // 尚未启动媒体/创建读者，只清本笔 token，不 purge 其它代际。
+            let _ = budget.release(token, &request.session, generation);
+            let _ = budget.confirm_exit(token, &request.session, generation);
+            let _ = budget.forget_released(token, &request.session, generation);
+            return Err(JobError::new(
+                "stale_generation",
+                "controller 拒绝旧代际准入",
+            ));
+        };
+        let frame_kind = if media.input().metadata.container == Container::Image {
+            FrameKind::Image
+        } else {
+            FrameKind::Video
+        };
+        self.media = Some(MediaAdmission {
+            media: Some(media),
+            grant,
+            budget,
+            request,
+            token,
+            frame_kind,
+            drain: None,
+            controller_closed: false,
+            finished: false,
+        });
+        self.last_media_generation = Some(generation);
+        // grant 之前的帧属于旧内容，不能替本次媒体补齐 ready。
+        self.facts.frame_submitted = None;
+        self.set_fact(generation, |facts| facts.resource_admitted = true);
+        Ok(())
+    }
+
+    /// 页面加载描述只读借用当前已准入计划，不能替换目标或资源。
+    pub(crate) fn media(&self) -> Option<&ResolvedMedia> {
+        self.media.as_ref()?.media.as_ref()
+    }
+
+    fn retire_current_media(&mut self) {
+        if let Some(mut media) = self.media.take() {
+            media.retire();
+            self.retiring_media.push(media);
+        }
+    }
+
+    /// 宿主仍需关闭这些代际各自的 controller；超时不自动清除它们。
+    pub(crate) fn retiring_media_generations(&self) -> Vec<u64> {
+        self.retiring_media
+            .iter()
+            .map(|media| media.request.generation)
+            .collect()
+    }
+
+    /// 仅在对应原生 controller Close 成功且其 surface 销毁后调用。
+    /// 活动代际/未知代际拒绝；页面 stop、emptied、错误或超时均不能调用本方法。
+    pub(crate) fn media_controller_closed(&mut self, generation: u64) -> bool {
+        let Some(media) = self
+            .retiring_media
+            .iter_mut()
+            .find(|media| media.request.generation == generation)
+        else {
+            return false;
+        };
+        media.controller_closed = true;
+        true
+    }
+
+    /// 非阻塞检查关闭与文件流两道屏障；只归还已退出代际自己的 token。
+    pub(crate) fn reap_media(&mut self) -> Vec<u64> {
+        let mut finished = Vec::new();
+        self.retiring_media.retain_mut(|media| {
+            if media.finish() {
+                finished.push(media.request.generation);
+                false
+            } else {
+                true
+            }
+        });
+        finished
+    }
+
+    /// 停用撤销所有当前事实；旧媒体继续等宿主的物理退出回执。
+    pub(crate) fn disable(&mut self) {
+        self.retire_current_media();
+        self.generation += 1;
+        self.state = SessionState::Disabled;
+        self.desired_revision = None;
+        self.applied_revision = None;
+        self.error = None;
+        self.paused_at = None;
+        self.facts.clear();
+    }
+
     // ---- ready 四事实 ----
 
     pub(crate) fn admit_resources(&mut self, generation: u64) -> bool {
+        // 非媒体后端的宿主事实；媒体不得绕过原子准入或复用已回收代际。
+        if self.last_media_generation == Some(generation) {
+            return false;
+        }
         self.set_fact(generation, |facts| facts.resource_admitted = true)
     }
 
@@ -242,6 +474,14 @@ impl WallpaperSession {
     }
 
     pub(crate) fn frame_submitted(&mut self, generation: u64, kind: FrameKind) -> bool {
+        if self
+            .media
+            .as_ref()
+            .is_some_and(|media| media.frame_kind != kind)
+            || (self.last_media_generation == Some(generation) && self.media.is_none())
+        {
+            return false;
+        }
         self.set_fact(generation, |facts| facts.frame_submitted = Some(kind))
     }
 
@@ -284,6 +524,8 @@ impl WallpaperSession {
         if generation != self.generation {
             return false;
         }
+        self.retire_current_media();
+        self.facts.clear();
         self.error = Some(SessionError {
             code: code.to_string(),
             message: message.to_string(),
@@ -307,17 +549,20 @@ impl WallpaperSession {
         ) {
             return false;
         }
+        self.retire_current_media();
         self.facts.clear();
         self.paused_at = None;
         self.state = SessionState::WaitingDisplay;
         true
     }
 
-    /// 目标屏恢复：重新走 attaching（§13.3：卸载后恢复先重新准入）。
+    /// 目标屏恢复：为新 controller 递增代际，再走 attaching/重新准入。
+    /// 返回 true 后宿主使用 generation()；缺席前的握手、帧和关闭回执不复用。
     pub(crate) fn display_restored(&mut self, generation: u64) -> bool {
         if generation != self.generation || self.state != SessionState::WaitingDisplay {
             return false;
         }
+        self.generation += 1;
         self.state = SessionState::Attaching;
         true
     }
@@ -359,11 +604,12 @@ impl WallpaperSession {
             .collect()
     }
 
-    /// 生效于本桌面会话的原因（previewOnly 不算，§13.2）。
+    /// 只计算本 owner 范围内的暂停原因（§13.2）。
     fn effective_pause_held(&self) -> bool {
-        self.pauses
-            .iter()
-            .any(|reason| !matches!(reason.scope, PauseScope::PreviewOnly))
+        self.pauses.iter().any(|reason| match self.owner {
+            OwnerKind::Preview => !matches!(reason.scope, PauseScope::DesktopOnly),
+            _ => !matches!(reason.scope, PauseScope::PreviewOnly),
+        })
     }
 
     fn enter_paused(&mut self, now: Instant) {

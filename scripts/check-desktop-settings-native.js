@@ -18,7 +18,26 @@ const profile = {dataDir:profileDir, edition:'full'};
 const configFile = path.join(output, 'config.json');
 fs.writeFileSync(configFile, JSON.stringify({schemaVersion:2, revision:1, launchAtLogin:false, activeProfile:profile, profiles:[{profile,lyrics,wallpaper}]}));
 const pipePath = '\\\\.\\pipe\\hertz-desktop-control-' + (process.env.USERNAME || '').replace(/[^a-z0-9_-]/gi,'').slice(0,32);
-function command(command, value) { return new Promise((resolve,reject) => { const socket = net.connect(pipePath); let bytes=''; socket.setTimeout(4000); socket.on('connect', () => socket.write(JSON.stringify({command,value}))); socket.on('data', chunk => {bytes += chunk; try { const response=JSON.parse(bytes); socket.destroy(); resolve(response); } catch {} }); socket.on('error',reject); socket.on('timeout',() => {socket.destroy();reject(new Error('pipe timeout'));}); }); }
+async function command(command, value) {
+  const deadline=Date.now()+2000;
+  for(;;) {
+    try {
+      return await new Promise((resolve,reject)=>{
+        const socket=net.connect(pipePath);let bytes='',connected=false;
+        socket.setTimeout(4000);
+        socket.on('connect',()=>{connected=true;socket.write(JSON.stringify({command,value}));});
+        socket.on('data',chunk=>{bytes+=chunk;try{const response=JSON.parse(bytes);socket.destroy();resolve(response);}catch{}});
+        socket.on('error',error=>{error.beforeConnect=!connected;reject(error);});
+        socket.on('timeout',()=>{socket.destroy();reject(new Error('pipe timeout'));});
+      });
+    } catch(error) {
+      // The legacy pipe briefly disappears between clients; retry only if nothing was sent.
+      if(!error.beforeConnect || !['ENOENT','ECONNREFUSED'].includes(error.code) || Date.now()>=deadline)throw error;
+      await new Promise(resolve=>setTimeout(resolve,30));
+    }
+  }
+}
+
 function closeNativeSettings() {
  const title=Buffer.from('桌面歌词与壁纸','utf16le').toString('base64');
  const script=`Add-Type -TypeDefinition 'using System;using System.Runtime.InteropServices;public class HertzClose{[DllImport("user32.dll",CharSet=CharSet.Unicode)]public static extern IntPtr FindWindow(string c,string t);[DllImport("user32.dll")]public static extern bool PostMessage(IntPtr h,uint m,IntPtr w,IntPtr l);}'; $hwnd=[HertzClose]::FindWindow([NullString]::Value,[Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('${title}')));if($hwnd -eq [IntPtr]::Zero){throw 'Settings not found'};[void][HertzClose]::PostMessage($hwnd,16,[IntPtr]::Zero,[IntPtr]::Zero)`;
@@ -63,8 +82,9 @@ async function main() {
     const active=await command('status');
     assert.equal(active.positionEditing,true);assert.equal(active.locked,false);assert.equal(active.enabled,true);assert.equal(active.userHidden,false);
     geometry('edge');
-    await page.waitForTimeout(500);
-    const bounded=geometry(false);assert.ok(bounded.left>=16 && bounded.top>=16,'Position editing enforces the per-monitor 16 DIP safety inset');
+    let bounded;
+    for (let attempt=0;attempt<10;attempt++) { bounded=geometry(false); if (bounded.left>=16 && bounded.top>=16) break; await page.waitForTimeout(150); }
+    fs.writeFileSync(path.join(output,'position-boundary.json'),JSON.stringify({original,bounded},null,2));assert.ok(bounded.left>=16 && bounded.top>=16,'Position editing enforces the per-monitor 16 DIP safety inset');
     await page.waitForTimeout(200);
     assert.equal(fs.readFileSync(configFile,'utf8'),before,'Position edit must not persist before done');
     await page.locator('#position-cancel').click();
@@ -122,7 +142,59 @@ async function main() {
     for(let i=0;i<40;i++){ mounted=await command('status'); if(mounted.wallpaper.pageReady && mounted.wallpaper.visible && mounted.diagnostics.page.draws>0)break; await new Promise(resolve=>setTimeout(resolve,200)); }
     assert.equal(mounted.wallpaper.enabled,true);assert.equal(mounted.wallpaper.pageReady,true);assert.equal(mounted.wallpaper.visible,true);assert.ok(mounted.diagnostics.page.draws>0,'Actual desktop renderer must draw');
     assert.equal(mounted.wallpaper.fps,15);
+    assert.equal(mounted.wallpaper.firstFrameReady,true);
+    assert.equal(mounted.wallpaper.session.state,'running');
+    assert.equal(mounted.wallpaper.session.frameKind,'gl');
+    const firstBinding=mounted.wallpaper.session.binding;
+    assert.match(firstBinding.sessionId,/^[a-f0-9]{32}$/);
+    const renderer=browser.contexts().flatMap(context=>context.pages()).find(page=>page.url().includes('/wallpaper.html'));
+    assert.ok(renderer);
+    const rendererSession=await renderer.evaluate(()=>window.hertzWallpaper.debug().session);
+    assert.equal(rendererSession.sessionId,firstBinding.sessionId);
+    assert.equal(rendererSession.generation,firstBinding.generation);
+    assert.equal(rendererSession.revealed,true);
+    assert.equal(rendererSession.frameKind,'gl');
+    assert.equal(await renderer.evaluate(()=>getComputedStyle(document.getElementById('host')).visibility),'visible');
+    assert.equal(await renderer.evaluate(()=>{try{window.__hertzWallpaperBinding={sessionId:'forged',generation:0};}catch{};return window.__hertzWallpaperBinding.sessionId;}),firstBinding.sessionId);
+    await renderer.evaluate(binding=>{
+      window.ipc.postMessage('wallpaper_ready');
+      window.ipc.postMessage('wallpaper_dom_ready');
+      window.ipc.postMessage('wallpaper_session '+JSON.stringify({...binding,generation:binding.generation-1,event:'firstFrame',frameKind:'video'}));
+      window.ipc.postMessage('wallpaper_session '+JSON.stringify({...binding,sessionId:'0'.repeat(32),event:'pageHandshake'}));
+    },firstBinding);
+    assert.deepEqual((await command('status')).wallpaper.session,mounted.wallpaper.session);
+
     fs.writeFileSync(path.join(output,'native-wallpaper-running.json'),JSON.stringify(mounted,null,2));
+    await command('wallpaper-hide');
+    const pausedSession=(await command('status')).wallpaper;
+    assert.equal(pausedSession.visible,false);
+    assert.equal(pausedSession.session.state,'paused');
+    assert.equal(pausedSession.firstFrameReady,true,'pause preserves the submitted frame fact');
+    assert.deepEqual(pausedSession.session.binding,firstBinding);
+    await command('wallpaper-show');
+    const resumedSession=(await command('status')).wallpaper;
+    assert.equal(resumedSession.visible,true);
+    assert.equal(resumedSession.session.state,'running');
+    assert.deepEqual(resumedSession.session.binding,firstBinding);
+
+    await page.locator('#enabled').uncheck();await page.locator('#apply').click();
+    await page.waitForFunction(()=>document.querySelector('#settings-state').textContent==='设置已保存');
+    let released;
+    for(let i=0;i<30;i++){released=await command('status');if(!released.wallpaper.enabled && released.wallpaper.retiringControllers===0 && renderer.isClosed())break;await new Promise(resolve=>setTimeout(resolve,100));}
+    assert.equal(released.wallpaper.enabled,false);
+    assert.equal(released.wallpaper.retiringControllers,0,'controller closes before retirement is forgotten');
+    assert.equal(released.wallpaper.session,null);
+    assert.equal(renderer.isClosed(),true,'actual WebView2 target must exit');
+    // A replacement controller gets a fresh native identity and its own actual frame receipt.
+    await page.locator('#enabled').check();await page.locator('#apply').click();
+    await page.waitForFunction(()=>document.querySelector('#settings-state').textContent==='设置已保存');
+    let replacement;
+    for(let i=0;i<40;i++){replacement=await command('status');if(replacement.wallpaper.firstFrameReady && replacement.wallpaper.visible)break;await new Promise(resolve=>setTimeout(resolve,200));}
+    assert.equal(replacement.wallpaper.firstFrameReady,true);
+    assert.equal(replacement.wallpaper.session.frameKind,'gl');
+    assert.notEqual(replacement.wallpaper.session.binding.sessionId,firstBinding.sessionId);
+    assert.ok(replacement.wallpaper.session.binding.generation>firstBinding.generation);
+    fs.writeFileSync(path.join(output,'native-session-lifecycle.json'),JSON.stringify({initial:mounted.wallpaper,released:released.wallpaper,replacement:replacement.wallpaper},null,2));
     await page.locator('#enabled').uncheck();await page.locator('#apply').click();
     await page.waitForFunction(()=>document.querySelector('#settings-state').textContent==='设置已保存');
     assert.equal((await command('status')).wallpaper.enabled,false);

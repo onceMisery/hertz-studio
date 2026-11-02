@@ -155,7 +155,6 @@ impl AssetStore {
         cancel: Option<&std::sync::atomic::AtomicBool>,
     ) -> Result<SnapshotReceipt> {
         use std::os::windows::fs::OpenOptionsExt;
-        use std::sync::atomic::Ordering;
         let source_file = std::fs::OpenOptions::new()
             .read(true)
             // 只共享读（FILE_SHARE_READ）：打开期间任何写入者都会撞
@@ -176,6 +175,17 @@ impl AssetStore {
                     JobError::io(format!("打开导入源失败：{error}"))
                 }
             })?;
+        self.snapshot_open_file(job_id, &source_file, cancel)
+    }
+
+    /// fileToken 已固定的只读文件；不再按路径重新打开，避免选择到受理之间换文件。
+    pub(crate) fn snapshot_open_file(
+        &self,
+        job_id: &str,
+        source_file: &std::fs::File,
+        cancel: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<SnapshotReceipt> {
+        use std::sync::atomic::Ordering;
         let source_bytes = source_file
             .metadata()
             .map_err(|error| JobError::io(format!("读取源大小失败：{error}")))?
@@ -590,7 +600,7 @@ impl AssetStore {
     }
 }
 
-fn open_immutable(path: &Path) -> Result<std::fs::File> {
+pub(super) fn open_immutable(path: &Path) -> Result<std::fs::File> {
     use std::os::windows::fs::OpenOptionsExt;
     std::fs::OpenOptions::new()
         .read(true)

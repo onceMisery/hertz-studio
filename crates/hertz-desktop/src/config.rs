@@ -10,11 +10,12 @@ use std::sync::Mutex;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
-pub(crate) const SCHEMA_VERSION: u32 = 4;
+pub(crate) const SCHEMA_VERSION: u32 = 5;
 static COMMIT_LOCK: Mutex<()> = Mutex::new(());
+pub(crate) use crate::wallpaper::config::WallpaperConfig;
 pub(crate) use hertz_desktop_ipc::Profile;
 pub(crate) const MAX_PROFILES: usize = 8;
-const MAX_CONFIG_BYTES: usize = 64 * 1024;
+pub(crate) const MAX_CONFIG_BYTES: usize = 64 * 1024;
 
 #[derive(Clone)]
 pub(crate) struct Config {
@@ -28,12 +29,11 @@ pub(crate) struct Config {
     pub(crate) lyrics: LyricsConfig,
     pub(crate) wallpaper: WallpaperConfig,
     pub(crate) mini: MiniConfig,
-    /// v4 根字段 lastCommit 的只读透传：由后续配置提交日志（设计 §14.1）写它。
-    /// 本包从不主动赋值，只为不破坏含该字段的文件做往返。
+    /// 最后一次配置提交身份，由同一串行提交日志写入（设计 §14.1）。
     pub(crate) last_commit: Option<CommitRef>,
 }
 
-/// v4 根字段 lastCommit 的形状。提交日志落地前恒为 null。
+/// 与磁盘提交日志共同确认配置替换是否已经发生。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct CommitRef {
@@ -286,9 +286,9 @@ impl WallpaperQuality {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct WallpaperConfig {
+pub(crate) struct LegacyWallpaperConfig {
     pub(crate) enabled: bool,
     pub(crate) fps: u8,
     pub(crate) music_response: bool,
@@ -357,7 +357,7 @@ pub(crate) fn wallpaper_scene_allowed(scene: &str) -> bool {
     WALLPAPER_SCENES.iter().any(|(id, _)| *id == scene)
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct LyricsConfig {
     pub(crate) enabled: bool,
@@ -399,7 +399,10 @@ impl Default for Config {
             profiles: Vec::new(),
             unbound_domain: None,
             unbound_baseline: None,
-            lyrics: LyricsConfig::default(),
+            lyrics: LyricsConfig {
+                enabled: false,
+                ..Default::default()
+            },
             wallpaper: WallpaperConfig::default(),
             mini: MiniConfig::default(),
             last_commit: None,
@@ -407,7 +410,7 @@ impl Default for Config {
     }
 }
 
-impl Default for WallpaperConfig {
+impl Default for LegacyWallpaperConfig {
     fn default() -> Self {
         Self {
             enabled: false,
@@ -457,16 +460,13 @@ impl Default for LyricsConfig {
 impl Config {
     pub(crate) fn sanitize(&mut self) {
         sanitize_lyrics(&mut self.lyrics);
-        sanitize_wallpaper(&mut self.wallpaper);
         sanitize_mini(&mut self.mini);
         if let Some(unbound) = self.unbound_domain.as_mut() {
             sanitize_lyrics(&mut unbound.lyrics);
-            sanitize_wallpaper(&mut unbound.wallpaper);
             sanitize_mini(&mut unbound.mini);
         }
         for domain in &mut self.profiles {
             sanitize_lyrics(&mut domain.lyrics);
-            sanitize_wallpaper(&mut domain.wallpaper);
             sanitize_mini(&mut domain.mini);
         }
     }
@@ -541,20 +541,10 @@ impl Config {
             self.wallpaper = self.profiles[index].wallpaper.clone();
             self.mini = self.profiles[index].mini.clone();
         } else {
-            if !is_dbx(&profile) && self.unbound_domain.is_some() {
-                let unbound = self.unbound_domain.take().unwrap();
-                self.lyrics = unbound.lyrics;
-                self.wallpaper = unbound.wallpaper;
-                self.mini = unbound.mini;
-            } else {
-                self.lyrics = LyricsConfig::default();
-                self.wallpaper = WallpaperConfig::default();
-                self.mini = MiniConfig::default();
-                // DBX authorization always starts with both persistent surfaces disabled.
-                if is_dbx(&profile) {
-                    self.lyrics.enabled = false;
-                }
-            }
+            self.lyrics = LyricsConfig::default();
+            self.lyrics.enabled = false;
+            self.wallpaper = WallpaperConfig::default();
+            self.mini = MiniConfig::default();
             self.profiles.push(ProfileDomain {
                 profile: profile.clone(),
                 lyrics: self.lyrics.clone(),
@@ -610,6 +600,33 @@ fn sanitize_mini(mini: &mut MiniConfig) {
     mini.geometry.along = mini.geometry.along.clamp(0.0, 1.0);
 }
 
+pub(crate) fn validate_settings_lyrics(lyrics: &LyricsConfig) -> Result<()> {
+    if ![
+        lyrics.font_size,
+        lyrics.outline_width,
+        lyrics.opacity,
+        lyrics.width,
+        lyrics.anchor_x,
+        lyrics.anchor_y,
+    ]
+    .iter()
+    .all(|value| value.is_finite())
+        || lyrics.font_family.len() > 256
+        || lyrics
+            .monitor
+            .as_ref()
+            .is_some_and(|value| value.len() > 256)
+    {
+        bail!("歌词样式数值或文本超过限制");
+    }
+    let mut normalized = lyrics.clone();
+    sanitize_lyrics(&mut normalized);
+    if &normalized != lyrics {
+        bail!("歌词样式不符合当前参数范围");
+    }
+    Ok(())
+}
+
 fn sanitize_lyrics(lyrics: &mut LyricsConfig) {
     lyrics.font_size = lyrics.font_size.clamp(18.0, 72.0);
     lyrics.font_weight = match lyrics.font_weight {
@@ -635,7 +652,7 @@ fn sanitize_lyrics(lyrics: &mut LyricsConfig) {
     }
 }
 
-fn sanitize_wallpaper(wallpaper: &mut WallpaperConfig) {
+fn sanitize_legacy_wallpaper(wallpaper: &mut LegacyWallpaperConfig) {
     // v4 起帧率只保留 15/30/60 三档，不再 sanitize 任意整数（设计 §4.3）。
     wallpaper.fps = fps_tier(wallpaper.fps);
     wallpaper.monitor = wallpaper
@@ -662,6 +679,100 @@ fn sanitize_wallpaper(wallpaper: &mut WallpaperConfig) {
     if !wallpaper_scene_allowed(&wallpaper.scene) {
         wallpaper.scene = default_wallpaper_scene();
     }
+}
+
+impl LegacyWallpaperConfig {
+    pub(crate) fn migrate(
+        mut self,
+        monitors: &[crate::native::WallpaperMonitor],
+        normalize_legacy: bool,
+    ) -> Result<WallpaperConfig> {
+        use crate::wallpaper::config::{AudioInput, BuiltinState, DisplaySelection, Selection};
+        if normalize_legacy {
+            sanitize_legacy_wallpaper(&mut self);
+        }
+        let mut next = WallpaperConfig {
+            enabled: self.enabled,
+            battery_policy: self.battery_policy,
+            ..Default::default()
+        };
+        if !self.music_response {
+            next.audio_input = AudioInput::None;
+        }
+        let group = next.main_mut();
+        group.presentation.fps = self.fps;
+        group.presentation.quality = self.quality;
+        group.presentation.brightness = self.brightness;
+        group.presentation.motion = self.motion;
+        group.displays = vec![if let Some(display_id) = self.display_id {
+            DisplaySelection::Fixed { display_id }
+        } else if let Some(name) = self.monitor {
+            match monitors.iter().find(|monitor| monitor.name == name) {
+                Some(monitor) => DisplaySelection::Fixed {
+                    display_id: monitor.display_id(),
+                },
+                None => DisplaySelection::Unresolved { legacy_name: name },
+            }
+        } else {
+            DisplaySelection::Primary
+        }];
+        group.selection = match self.source.as_str() {
+            "fixed" => Selection::Builtin {
+                scene_id: self.scene,
+                state_version: 1,
+                params: serde_json::Map::new(),
+            },
+            "follow" => Selection::FollowHertz {
+                idle_builtin: BuiltinState {
+                    scene_id: self.scene,
+                    state_version: 1,
+                    params: serde_json::Map::new(),
+                },
+            },
+            _ => bail!("不支持的壁纸来源"),
+        };
+        next.normalize()?;
+        Ok(next)
+    }
+}
+fn migrate_wallpaper_domains(value: &mut serde_json::Value, schema: u64) -> Result<()> {
+    let monitors = crate::native::wallpaper_monitors();
+    fn migrate(
+        value: &mut serde_json::Value,
+        monitors: &[crate::native::WallpaperMonitor],
+        schema: u64,
+    ) -> Result<()> {
+        if let Some(wallpaper) = value.get_mut("wallpaper") {
+            let legacy: LegacyWallpaperConfig = serde_json::from_value(wallpaper.clone())?;
+            *wallpaper = serde_json::to_value(legacy.migrate(monitors, schema < 4)?)?;
+        }
+        Ok(())
+    }
+    migrate(value, &monitors, schema)?;
+    for key in ["unboundStandalone", "unboundDomain"] {
+        if let Some(domain) = value.get_mut(key) {
+            migrate(domain, &monitors, schema)?;
+        }
+    }
+    if let Some(domains) = value
+        .get_mut("profiles")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        for domain in domains {
+            migrate(domain, &monitors, schema)?;
+        }
+    }
+    Ok(())
+}
+fn normalize_wallpapers(config: &mut Config) -> Result<()> {
+    config.wallpaper.normalize()?;
+    if let Some(unbound) = config.unbound_domain.as_mut() {
+        unbound.wallpaper.normalize()?;
+    }
+    for domain in &mut config.profiles {
+        domain.wallpaper.normalize()?;
+    }
+    Ok(())
 }
 
 pub(crate) fn valid_color(value: &str) -> bool {
@@ -749,8 +860,11 @@ fn parse_config(bytes: &[u8]) -> Result<(Config, bool)> {
     if bytes.len() > MAX_CONFIG_BYTES {
         bail!("桌面配置超过 64 KiB 上限");
     }
-    let value: serde_json::Value = serde_json::from_slice(bytes)?;
+    let mut value: serde_json::Value = serde_json::from_slice(bytes)?;
     let schema = value.get("schemaVersion").and_then(|value| value.as_u64());
+    if matches!(schema, Some(1..=4)) {
+        migrate_wallpaper_domains(&mut value, schema.unwrap())?;
+    }
     let mut config = match schema {
         Some(1) => {
             let stored: StoredConfigV1 = serde_json::from_value(value)?;
@@ -829,7 +943,7 @@ fn parse_config(bytes: &[u8]) -> Result<(Config, bool)> {
                 last_commit: None,
             }
         }
-        Some(4) => {
+        Some(4 | 5) => {
             let stored: StoredConfigV4 = serde_json::from_value(value)?;
             Config {
                 revision: stored.revision,
@@ -866,14 +980,14 @@ fn parse_config(bytes: &[u8]) -> Result<(Config, bool)> {
                 mini: config.mini.clone(),
             });
         }
-    } else if config.unbound_domain.is_some() {
-        // Unbound preferences are not a candidate or a running surface.
-        config.lyrics = LyricsConfig::default();
-        config.lyrics.enabled = false;
-        config.wallpaper = WallpaperConfig::default();
+    } else if let Some(unbound) = config.unbound_domain.as_ref() {
+        config.lyrics = unbound.lyrics.clone();
+        config.wallpaper = unbound.wallpaper.clone();
+        config.mini = unbound.mini.clone();
     }
     validate_domains(&config)?;
     config.sanitize();
+    normalize_wallpapers(&mut config)?;
     if config.active_profile.is_none() {
         config.unbound_baseline = Some(StandalonePreferences {
             lyrics: config.lyrics.clone(),
@@ -881,7 +995,7 @@ fn parse_config(bytes: &[u8]) -> Result<(Config, bool)> {
             mini: config.mini.clone(),
         });
     }
-    let migrated = schema != Some(4);
+    let migrated = schema != Some(u64::from(SCHEMA_VERSION));
     if migrated {
         config.revision = next_revision(config.revision)?;
     }
@@ -904,6 +1018,7 @@ fn validate_domains(config: &Config) -> Result<()> {
 }
 fn encode_config(config: &Config) -> Result<Vec<u8>> {
     let mut copy = config.clone();
+    normalize_wallpapers(&mut copy)?;
     copy.store_active()?;
     validate_domains(&copy)?;
     if let Some(active) = copy.active_profile.as_ref() {
@@ -924,7 +1039,7 @@ fn encode_config(config: &Config) -> Result<Vec<u8>> {
     }
     Ok(bytes)
 }
-fn read_bounded(path: &Path) -> std::io::Result<Vec<u8>> {
+pub(crate) fn read_bounded(path: &Path) -> std::io::Result<Vec<u8>> {
     let mut bytes = Vec::new();
     std::fs::File::open(path)?
         .take((MAX_CONFIG_BYTES + 1) as u64)
@@ -946,19 +1061,54 @@ pub(crate) fn load_with_notice() -> Result<(Config, Option<String>)> {
     let _commit = COMMIT_LOCK
         .lock()
         .map_err(|_| anyhow::anyhow!("配置保存锁不可用"))?;
+    let directory = base_dir();
+    let _file_lock = crate::config_journal::FileLock::acquire(&directory)?;
+    let recovery_notice = match reconcile_journal_at(&directory) {
+        Ok(false) => None,
+        Ok(true) => {
+            Some("配置与提交日志不符，已保留文件并暂停写入，请恢复配置后重试。".to_string())
+        }
+        Err(error) => Some(format!(
+            "配置提交记录无法核对，已保留文件并暂停写入：{error:#}"
+        )),
+    };
     let path = config_path();
     let bytes = match read_bounded(&path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if let Some(notice) = recovery_notice {
+                bail!("{notice}");
+            }
             let config = Config::default();
             save_locked(&config)?;
             return Ok((config, None));
         }
         Err(error) => return Err(error).context("读取桌面配置失败（文件未改动）"),
     };
-    let notice = migration_notice(&bytes);
+    let notice = recovery_notice.or_else(|| migration_notice(&bytes));
     let (config, migrated) = parse_config(&bytes).context("坏配置原样保留，未覆盖")?;
     if migrated {
+        if reconcile_journal_at(&directory)? {
+            bail!(crate::config_journal::JournalError::Conflict);
+        }
+        use std::io::Write;
+        let old_schema = serde_json::from_slice::<serde_json::Value>(&bytes)?["schemaVersion"]
+            .as_u64()
+            .unwrap_or(0);
+        let backup = path.with_file_name(format!(
+            "config.v{old_schema}.{}.{}.bak",
+            config.revision,
+            crate::wallpaper::jobs::new_job_id()
+        ));
+        let mut file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(backup)
+            .context("创建迁移备份失败，原配置未改动")?;
+        file.write_all(&bytes)
+            .and_then(|_| file.sync_all())
+            .context("保存迁移备份失败，原配置未改动")?;
+        drop(file);
         save_locked(&config).context("保存配置格式迁移失败（原文件未改动）")?;
     }
     Ok((config, notice))
@@ -967,7 +1117,9 @@ pub(crate) fn load_with_notice() -> Result<(Config, Option<String>)> {
 /// 迁移说明（一次性，内存态）：旧文件里出现非 15/30/60 档的帧率时提示已归一。
 fn migration_notice(bytes: &[u8]) -> Option<String> {
     let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
-    let schema = value.get("schemaVersion").and_then(|value| value.as_u64())?;
+    let schema = value
+        .get("schemaVersion")
+        .and_then(|value| value.as_u64())?;
     if schema >= u64::from(SCHEMA_VERSION) {
         return None;
     }
@@ -993,7 +1145,7 @@ fn migration_notice(bytes: &[u8]) -> Option<String> {
     Some(if normalized {
         "桌面设置已升级到新格式：帧率已归一到 15/30/60 档。".into()
     } else {
-        "桌面设置已升级到新格式（schema v4）。".into()
+        "桌面设置已升级到新格式（schema v5）。".into()
     })
 }
 /// The host's serialized commit boundary. Disk succeeds before revision/domain swap.
@@ -1003,10 +1155,73 @@ pub(crate) fn commit(current: &mut Config, next: Config) -> Result<()> {
         .map_err(|_| anyhow::anyhow!("配置保存锁不可用"))?;
     commit_at(current, next, &base_dir())
 }
-fn commit_at(current: &mut Config, mut next: Config, directory: &Path) -> Result<()> {
+pub(crate) fn commit_request(
+    current: &mut Config,
+    next: Config,
+    intent: &crate::config_journal::Intent,
+) -> Result<crate::config_journal::Operation> {
+    let _commit = COMMIT_LOCK
+        .lock()
+        .map_err(|_| anyhow::anyhow!("配置保存锁不可用"))?;
+    commit_named_at(current, next, &base_dir(), intent)
+}
+
+pub(crate) fn replay_request(
+    intent: &crate::config_journal::Intent,
+) -> Result<Option<crate::config_journal::Operation>> {
+    let _commit = COMMIT_LOCK
+        .lock()
+        .map_err(|_| anyhow::anyhow!("配置保存锁不可用"))?;
+    let directory = base_dir();
+    let _file_lock = crate::config_journal::FileLock::acquire(&directory)?;
+    let mut journal = crate::config_journal::Store::open(&directory)?;
+    journal.reconcile(&directory)?;
+    journal.replay(intent)
+}
+
+fn commit_at(current: &mut Config, next: Config, directory: &Path) -> Result<()> {
+    let intent = crate::config_journal::Intent::internal(&encode_config(&next)?)?;
+    commit_named_at(current, next, directory, &intent)?;
+    Ok(())
+}
+
+/// A replay returns its retained operation without reapplying an older candidate to memory.
+fn commit_named_at(
+    current: &mut Config,
+    mut next: Config,
+    directory: &Path,
+    intent: &crate::config_journal::Intent,
+) -> Result<crate::config_journal::Operation> {
+    use crate::config_journal::{JournalError, Store};
+    let _file_lock = crate::config_journal::FileLock::acquire(directory)?;
+    let mut journal = Store::open(directory)?;
+    journal.reconcile(directory)?;
+    if let Some(operation) = journal.replay(intent)? {
+        return Ok(operation);
+    }
+    if journal.blocked() {
+        bail!(JournalError::Conflict);
+    }
+    let base = read_bounded(&directory.join("config.json"))?;
+    let (stored, migrated) = parse_config(&base)?;
+    if migrated || stored.revision != current.revision || stored.last_commit != current.last_commit
+    {
+        bail!(JournalError::Conflict);
+    }
     next.revision = next_revision(current.revision)?;
+    next.last_commit = Some(CommitRef {
+        request_id: intent.request_id.clone(),
+        payload_digest: intent.payload_digest.clone(),
+    });
+    normalize_wallpapers(&mut next)?;
     next.store_active()?;
-    save_at(&next, directory)?;
+    let target = encode_config(&next)?;
+    journal.prepare(intent, &base, &target)?;
+    if let Err(error) = save_bytes_at(&target, directory) {
+        // A failure to finalize leaves an intent that startup will classify against the original file.
+        let _ = journal.finish(&intent.caller_sid, &intent.request_id, false);
+        return Err(error);
+    }
     if next.active_profile.is_none() {
         next.unbound_baseline = Some(StandalonePreferences {
             lyrics: next.lyrics.clone(),
@@ -1015,20 +1230,57 @@ fn commit_at(current: &mut Config, mut next: Config, directory: &Path) -> Result
         });
     }
     *current = next;
-    Ok(())
+    match journal.finish(&intent.caller_sid, &intent.request_id, true) {
+        Ok(operation) => Ok(operation),
+        Err(error) => {
+            // Disk is authoritative even if the final receipt failed. No subsequent write can pass
+            // reconciliation until that receipt is flushed; never roll memory back to an older intent.
+            crate::app::log(&format!(
+                "config saved; journal finalization pending: {error:#}"
+            ));
+            journal
+                .lookup(&intent.caller_sid, &intent.request_id)
+                .context("提交记录缺失")
+        }
+    }
+}
+
+fn reconcile_journal_at(directory: &Path) -> Result<bool> {
+    let mut journal = crate::config_journal::Store::open(directory)?;
+    journal.reconcile(directory)?;
+    Ok(journal.blocked())
+}
+
+pub(crate) fn operation_at(
+    directory: &Path,
+    request_id: &str,
+) -> Result<Option<crate::config_journal::Operation>> {
+    let _commit = COMMIT_LOCK
+        .lock()
+        .map_err(|_| anyhow::anyhow!("配置保存锁不可用"))?;
+    if !directory.exists() {
+        return Ok(None);
+    }
+    let _file_lock = crate::config_journal::FileLock::acquire(directory)?;
+    let mut journal = crate::config_journal::Store::open(directory)?;
+    journal.reconcile(directory)?;
+    Ok(journal.lookup(&crate::config_journal::caller_sid()?, request_id))
 }
 fn save_locked(config: &Config) -> Result<()> {
     save_at(config, &base_dir())
 }
 fn save_at(config: &Config, dir: &Path) -> Result<()> {
     let bytes = encode_config(config)?;
+    save_bytes_at(&bytes, dir)
+}
+fn save_bytes_at(bytes: &[u8], dir: &Path) -> Result<()> {
     std::fs::create_dir_all(dir).context("创建桌面配置目录")?;
     let path = dir.join("config.json");
     let tmp = dir.join("config.json.tmp");
     let result = (|| -> Result<()> {
         use std::io::Write;
         let mut file = std::fs::File::create(&tmp).context("创建配置临时文件")?;
-        file.write_all(&bytes).context("写入桌面配置")?;
+        file.write_all(bytes).context("写入桌面配置")?;
         file.sync_all().context("刷新桌面配置")?;
         drop(file);
         crate::native::replace_file(&tmp, &path).context("原子替换桌面配置")?;
@@ -1133,7 +1385,7 @@ mod tests {
     #[test]
     fn v1_config_moves_domain_under_active_profile() {
         let lyrics = serde_json::to_value(LyricsConfig::default()).unwrap();
-        let wallpaper = serde_json::to_value(WallpaperConfig::default()).unwrap();
+        let wallpaper = serde_json::to_value(LegacyWallpaperConfig::default()).unwrap();
         let mut value = serde_json::json!({
             "schemaVersion": 1,
             "revision": 7,
@@ -1152,7 +1404,7 @@ mod tests {
         assert_eq!(config.lyrics.font_size, 44.0);
         let encoded = encode_config(&config).unwrap();
         let encoded: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
-        assert_eq!(encoded["schemaVersion"], 4);
+        assert_eq!(encoded["schemaVersion"], 5);
         assert!(encoded.get("lyrics").is_none());
         assert_eq!(encoded["profiles"][0]["lyrics"]["fontSize"], 44.0);
     }
@@ -1160,7 +1412,7 @@ mod tests {
     #[test]
     fn v1_without_active_profile_keeps_domain_until_binding() {
         let lyrics = serde_json::to_value(LyricsConfig::default()).unwrap();
-        let wallpaper = serde_json::to_value(WallpaperConfig::default()).unwrap();
+        let wallpaper = serde_json::to_value(LegacyWallpaperConfig::default()).unwrap();
         let mut value = serde_json::json!({
             "schemaVersion": 1,
             "revision": 5,
@@ -1178,13 +1430,26 @@ mod tests {
             config.unbound_domain.as_ref().unwrap().lyrics.font_size,
             44.0
         );
-        assert!(!config.lyrics.enabled);
+        assert!(config.lyrics.enabled);
         config.activate_profile(profile("a")).unwrap();
         let encoded = encode_config(&config).unwrap();
         let (loaded, migrated_again) = parse_config(&encoded).unwrap();
         assert!(!migrated_again);
-        assert_eq!(loaded.lyrics.font_size, 44.0);
-        assert_eq!(loaded.wallpaper.fps, 60);
+        assert!(!loaded.lyrics.enabled);
+        assert_eq!(
+            loaded.unbound_domain.as_ref().unwrap().lyrics.font_size,
+            44.0
+        );
+        assert_eq!(
+            loaded
+                .unbound_domain
+                .as_ref()
+                .unwrap()
+                .wallpaper
+                .presentation()
+                .fps,
+            60
+        );
         assert_eq!(loaded.profiles.len(), 1);
     }
 
@@ -1197,17 +1462,22 @@ mod tests {
         };
         let bytes = serde_json::to_vec(&serde_json::json!({
             "schemaVersion":1,"revision":5,"launchAtLogin":false,"activeProfile":null,
-            "lyrics":lyrics,"wallpaper":WallpaperConfig::default()
+            "lyrics":lyrics,"wallpaper":LegacyWallpaperConfig::default()
         }))
         .unwrap();
         let (mut config, _) = parse_config(&bytes).unwrap();
         config.lyrics.font_size = 52.0;
-        config.wallpaper.fps = 60;
+        config.wallpaper.main_mut().presentation.fps = 60;
         let (mut reloaded, _) = parse_config(&encode_config(&config).unwrap()).unwrap();
-        reloaded.activate_profile(profile("first-binding")).unwrap();
         assert_eq!(reloaded.lyrics.font_size, 52.0);
-        assert_eq!(reloaded.wallpaper.fps, 60);
+        assert_eq!(reloaded.wallpaper.presentation().fps, 60);
         assert!(reloaded.lyrics.enabled && reloaded.lyrics.locked);
+        reloaded.activate_profile(profile("first-binding")).unwrap();
+        assert!(!reloaded.lyrics.enabled && !reloaded.wallpaper.enabled);
+        assert_eq!(
+            reloaded.unbound_domain.as_ref().unwrap().lyrics.font_size,
+            52.0
+        );
     }
 
     #[test]
@@ -1217,7 +1487,7 @@ mod tests {
         let mut config = Config::default();
         assert!(config.activate_profile(a.clone()).unwrap());
         config.lyrics.font_size = 44.0;
-        config.wallpaper.fps = 60;
+        config.wallpaper.main_mut().presentation.fps = 60;
         config.wallpaper.enabled = true;
 
         assert!(config.activate_profile(b.clone()).unwrap());
@@ -1227,7 +1497,7 @@ mod tests {
 
         assert!(config.activate_profile(a.clone()).unwrap());
         assert_eq!(config.lyrics.font_size, 44.0);
-        assert_eq!(config.wallpaper.fps, 60);
+        assert_eq!(config.wallpaper.presentation().fps, 60);
         assert!(config.wallpaper.enabled);
         assert!(!config.activate_profile(a).unwrap());
 
@@ -1277,16 +1547,16 @@ mod tests {
 
     #[test]
     fn wallpaper_scene_defaults_to_follow_and_sanitizes_unknown_values() {
-        let mut value = serde_json::to_value(WallpaperConfig::default()).unwrap();
+        let mut value = serde_json::to_value(LegacyWallpaperConfig::default()).unwrap();
         assert_eq!(value["source"], "follow");
         assert_eq!(value["scene"], "zodiac");
         value.as_object_mut().unwrap().remove("source");
         value.as_object_mut().unwrap().remove("scene");
-        let defaults: WallpaperConfig = serde_json::from_value(value).unwrap();
+        let defaults: LegacyWallpaperConfig = serde_json::from_value(value).unwrap();
         assert_eq!(defaults.source, "follow");
         assert_eq!(defaults.scene, "zodiac");
 
-        let mut invalid: WallpaperConfig = serde_json::from_value(serde_json::json!({
+        let mut invalid: LegacyWallpaperConfig = serde_json::from_value(serde_json::json!({
             "enabled": false,
             "fps": 30,
             "musicResponse": true,
@@ -1294,7 +1564,7 @@ mod tests {
             "scene": "cover-sphere"
         }))
         .unwrap();
-        sanitize_wallpaper(&mut invalid);
+        sanitize_legacy_wallpaper(&mut invalid);
         assert_eq!(invalid.source, "follow");
         assert_eq!(invalid.scene, "zodiac");
         assert!(wallpaper_scene_allowed("butterfly-vortex"));
@@ -1314,7 +1584,7 @@ mod tests {
             locked: true,
             ..Default::default()
         };
-        let wallpaper = WallpaperConfig {
+        let wallpaper = LegacyWallpaperConfig {
             enabled: true,
             fps: 60,
             ..Default::default()
@@ -1327,7 +1597,7 @@ mod tests {
         let (mut config, migrated) = parse_config(&bytes).unwrap();
         assert!(migrated);
         assert_eq!(config.revision, 10);
-        assert!(!config.lyrics.enabled);
+        assert!(config.lyrics.enabled && config.wallpaper.enabled);
         let (restored, again) = parse_config(&encode_config(&config).unwrap()).unwrap();
         assert!(!again);
         assert_eq!(restored.revision, 10);
@@ -1338,15 +1608,15 @@ mod tests {
         assert!(config.unbound_domain.is_some());
         let (mut config, _) = parse_config(&encode_config(&config).unwrap()).unwrap();
         config.activate_profile(profile("standalone")).unwrap();
-        assert!(config.lyrics.enabled && config.lyrics.locked && config.wallpaper.enabled);
-        assert_eq!(config.lyrics.font_size, 48.0);
-        assert_eq!(config.wallpaper.fps, 60);
-        assert!(config.unbound_domain.is_none());
+        assert!(!config.lyrics.enabled && !config.wallpaper.enabled);
+        let unbound = config.unbound_domain.as_ref().unwrap();
+        assert_eq!(unbound.lyrics.font_size, 48.0);
+        assert_eq!(unbound.wallpaper.presentation().fps, 60);
         assert!(config.launch_at_login);
     }
     #[test]
     fn schema2_custom_migrates_once_and_schema3_rejects_untagged_identity() {
-        let domain = serde_json::json!({"profile":{"dataDir":r"C:\offline\custom","edition":"custom"},"lyrics":LyricsConfig::default(),"wallpaper":WallpaperConfig::default()});
+        let domain = serde_json::json!({"profile":{"dataDir":r"C:\offline\custom","edition":"custom"},"lyrics":LyricsConfig::default(),"wallpaper":LegacyWallpaperConfig::default()});
         let value = serde_json::json!({"schemaVersion":2,"revision":17,"launchAtLogin":true,"activeProfile":domain["profile"],"profiles":[domain]});
         let (config, migrated) = parse_config(&serde_json::to_vec(&value).unwrap()).unwrap();
         assert!(migrated);
@@ -1468,7 +1738,7 @@ mod tests {
             font_size: 44.0,
             ..Default::default()
         };
-        let old_wallpaper = WallpaperConfig {
+        let old_wallpaper = LegacyWallpaperConfig {
             enabled: true,
             ..Default::default()
         };
@@ -1486,16 +1756,18 @@ mod tests {
         assert!(!again);
         assert_eq!(restored.revision, 8);
         restored.activate_profile(profile("independent")).unwrap();
-        assert!(restored.lyrics.enabled && restored.wallpaper.enabled);
-        assert_eq!(restored.lyrics.font_size, 44.0);
+        assert!(!restored.lyrics.enabled && !restored.wallpaper.enabled);
+        assert_eq!(
+            restored.unbound_domain.as_ref().unwrap().lyrics.font_size,
+            44.0
+        );
         assert!(restored.launch_at_login);
-        assert!(restored.unbound_domain.is_none());
     }
 
     #[test]
     fn v4_migration_adds_runtime_defaults_once_and_normalizes_fps() {
         let lyrics = LyricsConfig::default();
-        let wallpaper = WallpaperConfig {
+        let wallpaper = LegacyWallpaperConfig {
             fps: 45,
             ..Default::default()
         };
@@ -1505,13 +1777,22 @@ mod tests {
         let (config, migrated) = parse_config(&serde_json::to_vec(&value).unwrap()).unwrap();
         assert!(migrated);
         assert_eq!(config.revision, 8);
-        assert_eq!(config.wallpaper.fps, 30);
-        assert_eq!(config.wallpaper.brightness, 1.0);
-        assert_eq!(config.wallpaper.motion, 1.0);
-        assert_eq!(config.wallpaper.quality, WallpaperQuality::Low);
+        assert_eq!(config.wallpaper.presentation().fps, 30);
+        assert_eq!(config.wallpaper.presentation().brightness, 1.0);
+        assert_eq!(config.wallpaper.presentation().motion, 1.0);
+        assert_eq!(
+            config.wallpaper.presentation().quality,
+            WallpaperQuality::Low
+        );
         assert_eq!(config.wallpaper.battery_policy, BatteryPolicy::Pause);
         assert_eq!(
-            config.unbound_domain.as_ref().unwrap().wallpaper.fps,
+            config
+                .unbound_domain
+                .as_ref()
+                .unwrap()
+                .wallpaper
+                .presentation()
+                .fps,
             30
         );
         let (reloaded, again_migrated) = parse_config(&encode_config(&config).unwrap()).unwrap();
@@ -1519,28 +1800,38 @@ mod tests {
         assert_eq!(reloaded.revision, 8);
         let encoded: serde_json::Value =
             serde_json::from_slice(&encode_config(&reloaded).unwrap()).unwrap();
-        assert_eq!(encoded["schemaVersion"], 4);
+        assert_eq!(encoded["schemaVersion"], 5);
         assert!(encoded.get("unboundStandalone").is_none());
         assert!(encoded["unboundDomain"].is_object());
         assert_eq!(encoded["lastCommit"], serde_json::Value::Null);
     }
 
     #[test]
-    fn v4_round_trips_new_wallpaper_fields() {
+    fn v5_round_trips_presentation_and_explicit_stable_display() {
+        use crate::wallpaper::config::DisplaySelection;
         let mut config = Config::default();
         config.activate_profile(profile("a")).unwrap();
-        config.wallpaper.brightness = 0.5;
-        config.wallpaper.motion = 0.0;
-        config.wallpaper.quality = WallpaperQuality::High;
-        config.wallpaper.display_id = Some(r"\\?\DISPLAY#DEL4026#5&abc#fnv0164deadbeef".into());
-        config.wallpaper.monitor = Some(r"\\.\DISPLAY1".into());
+        config.wallpaper.main_mut().presentation.brightness = 0.5;
+        config.wallpaper.main_mut().presentation.motion = 0.0;
+        config.wallpaper.main_mut().presentation.quality = WallpaperQuality::High;
+        let identity = r"\\?\DISPLAY#DEL4026#5&abc#fnv0164deadbeef".to_string();
+        config.wallpaper.main_mut().displays = vec![DisplaySelection::Fixed {
+            display_id: identity.clone(),
+        }];
         let (loaded, migrated) = parse_config(&encode_config(&config).unwrap()).unwrap();
         assert!(!migrated);
-        assert_eq!(loaded.wallpaper.brightness, 0.5);
-        assert_eq!(loaded.wallpaper.motion, 0.0);
-        assert_eq!(loaded.wallpaper.quality, WallpaperQuality::High);
-        assert_eq!(loaded.wallpaper.display_id.as_deref(), Some(r"\\?\DISPLAY#DEL4026#5&abc#fnv0164deadbeef"));
-        assert_eq!(loaded.wallpaper.monitor.as_deref(), Some(r"\\.\DISPLAY1"));
+        assert_eq!(loaded.wallpaper.presentation().brightness, 0.5);
+        assert_eq!(loaded.wallpaper.presentation().motion, 0.0);
+        assert_eq!(
+            loaded.wallpaper.presentation().quality,
+            WallpaperQuality::High
+        );
+        assert_eq!(
+            loaded.wallpaper.main().displays,
+            vec![DisplaySelection::Fixed {
+                display_id: identity
+            }]
+        );
         assert_eq!(loaded.wallpaper.battery_policy, BatteryPolicy::Pause);
     }
 
@@ -1551,14 +1842,14 @@ mod tests {
         assert_eq!(fps_tier(20), 15);
         assert_eq!(fps_tier(8), 15);
         assert_eq!(fps_tier(30), 30);
-        let mut wallpaper = WallpaperConfig {
+        let mut wallpaper = LegacyWallpaperConfig {
             fps: 75,
             brightness: 0.1,
             motion: 2.0,
             display_id: Some("  ".into()),
             ..Default::default()
         };
-        sanitize_wallpaper(&mut wallpaper);
+        sanitize_legacy_wallpaper(&mut wallpaper);
         assert_eq!(wallpaper.fps, 60);
         assert_eq!(wallpaper.brightness, 0.25);
         assert_eq!(wallpaper.motion, 1.0);
@@ -1566,12 +1857,12 @@ mod tests {
         wallpaper.brightness = f64::NAN;
         wallpaper.motion = f64::NEG_INFINITY;
         wallpaper.display_id = Some(" x ".into());
-        sanitize_wallpaper(&mut wallpaper);
+        sanitize_legacy_wallpaper(&mut wallpaper);
         assert_eq!(wallpaper.brightness, 1.0);
         assert_eq!(wallpaper.motion, 0.0);
         assert_eq!(wallpaper.display_id.as_deref(), Some("x"));
         wallpaper.display_id = Some("y".repeat(257));
-        sanitize_wallpaper(&mut wallpaper);
+        sanitize_legacy_wallpaper(&mut wallpaper);
         assert!(wallpaper.display_id.is_none());
     }
 
@@ -1581,7 +1872,7 @@ mod tests {
         let value = serde_json::json!({"schemaVersion":4,"revision":7,"launchAtLogin":false,
             "activeProfile":null,"profiles":[],"lastCommit":null});
         let (loaded, migrated) = parse_config(&serde_json::to_vec(&value).unwrap()).unwrap();
-        assert!(!migrated);
+        assert!(migrated);
         assert_eq!(loaded.mini, MiniConfig::default());
         assert!(loaded.mini.pet);
     }
@@ -1629,12 +1920,55 @@ mod tests {
         let mut unknown = base.clone();
         unknown["legacySomething"] = 1.into();
         assert!(parse_config(&serde_json::to_vec(&unknown).unwrap()).is_err());
-        let mut wallpaper = serde_json::to_value(WallpaperConfig::default()).unwrap();
+        let mut wallpaper = serde_json::to_value(LegacyWallpaperConfig::default()).unwrap();
         wallpaper["customField"] = 1.into();
         let domain = serde_json::json!({"profile":{"dataDir":r"C:\profiles\a","edition":"full"},"lyrics":LyricsConfig::default(),"wallpaper":wallpaper});
         let value = serde_json::json!({"schemaVersion":4,"revision":3,"launchAtLogin":false,
             "activeProfile":null,"profiles":[domain]});
         assert!(parse_config(&serde_json::to_vec(&value).unwrap()).is_err());
+    }
+
+    #[test]
+    fn v4_to_v5_preserves_intent_without_persisting_legacy_fields() {
+        let legacy = LegacyWallpaperConfig {
+            enabled: true,
+            source: "fixed".into(),
+            scene: "coast".into(),
+            music_response: false,
+            monitor: Some(r"\\.\DISPLAY-unplugged".into()),
+            brightness: 0.5,
+            motion: 0.25,
+            ..Default::default()
+        };
+        let value = serde_json::json!({"schemaVersion":4,"revision":4,"launchAtLogin":false,"activeProfile":null,"profiles":[],
+            "unboundDomain":{"lyrics":LyricsConfig::default(),"wallpaper":legacy}});
+        let (config, migrated) = parse_config(&serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(migrated && config.wallpaper.enabled);
+        assert_eq!(config.wallpaper.builtin().unwrap().scene_id, "coast");
+        assert!(!config.wallpaper.follows_hertz() && !config.wallpaper.responds_to_hertz());
+        assert!(
+            matches!(&config.wallpaper.main().displays[0], crate::wallpaper::config::DisplaySelection::Unresolved { legacy_name } if legacy_name == r"\\.\DISPLAY-unplugged")
+        );
+        let persisted: serde_json::Value =
+            serde_json::from_slice(&encode_config(&config).unwrap()).unwrap();
+        let wallpaper = &persisted["unboundDomain"]["wallpaper"];
+        for field in [
+            "source",
+            "scene",
+            "monitor",
+            "displayId",
+            "fps",
+            "musicResponse",
+        ] {
+            assert!(wallpaper.get(field).is_none(), "{field}");
+        }
+        assert!(!wallpaper["groups"][0]["selection"]["params"]
+            .as_object()
+            .unwrap()
+            .is_empty());
+        let (restored, migrated) = parse_config(&serde_json::to_vec(&persisted).unwrap()).unwrap();
+        assert!(!migrated);
+        assert_eq!(restored.revision, 5);
     }
 
     #[test]
@@ -1647,9 +1981,45 @@ mod tests {
             "activeProfile":null,"profiles":[],
             "lastCommit":{"requestId":commit.request_id,"payloadDigest":commit.payload_digest}});
         let (config, migrated) = parse_config(&serde_json::to_vec(&value).unwrap()).unwrap();
-        assert!(!migrated);
+        assert!(migrated);
         assert_eq!(config.last_commit.as_ref().unwrap(), &commit);
         let (reloaded, _) = parse_config(&encode_config(&config).unwrap()).unwrap();
         assert_eq!(reloaded.last_commit.as_ref().unwrap(), &commit);
+    }
+}
+
+#[cfg(test)]
+mod journal_integration_tests {
+    use super::*;
+    use crate::wallpaper::library::tempfileish;
+
+    #[test]
+    fn named_replay_after_a_later_commit_never_swaps_old_intent_into_memory() {
+        let dir = tempfileish::temp_dir("config-named-replay");
+        let mut current = Config::default();
+        save_at(&current, dir.path()).unwrap();
+        let mut next = current.clone();
+        next.wallpaper.enabled = true;
+        let mut intent =
+            crate::config_journal::Intent::internal(&encode_config(&next).unwrap()).unwrap();
+        intent.command = "wallpaper.apply".into();
+        let first = commit_named_at(&mut current, next.clone(), dir.path(), &intent).unwrap();
+        assert_eq!(first.config_revision, Some(2));
+        let mut later = current.clone();
+        later.wallpaper.enabled = false;
+        commit_at(&mut current, later, dir.path()).unwrap();
+        let bytes = std::fs::read(dir.path().join("config.json")).unwrap();
+        let replay = commit_named_at(&mut current, next, dir.path(), &intent).unwrap();
+        assert_eq!(replay.config_revision, first.config_revision);
+        assert_eq!(current.revision, 3);
+        assert!(!current.wallpaper.enabled);
+        assert_eq!(
+            std::fs::read(dir.path().join("config.json")).unwrap(),
+            bytes
+        );
+        assert_eq!(
+            current.last_commit,
+            parse_config(&bytes).unwrap().0.last_commit
+        );
     }
 }

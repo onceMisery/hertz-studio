@@ -4,6 +4,11 @@
   var BANDS = 64;
   var ZERO = new Float32Array(BANDS);
   var host = document.getElementById('host');
+  // Issued once by the native controller; public configuration cannot replace this identity.
+  var nativeBinding = window.__hertzWallpaperBinding || null;
+  var firstFrameKind = null;
+  var revealed = !nativeBinding;
+  if (nativeBinding && host) host.style.visibility = 'hidden';
   var runtime = window.HertzStageRuntime || {};
   var zodiac = window.ZodiacStagePure || runtime.ZodiacStagePure || null;
   var spaceRuntime = runtime.SpaceStagePure || null;
@@ -23,7 +28,9 @@
   var config = {
     source: 'follow',
     scene: DEFAULT_SCENE,
+    params: {},
     musicResponse: true,
+    audioInput: { kind: 'hertz', gain: 1, attackMs: 40, releaseMs: 250 },
     brightness: 1,
     motion: 1,
     quality: 'low',
@@ -75,6 +82,63 @@
     expiresAt: null
   };
 
+  var systemAudio = { valid: false, generation: 0, seq: 0, bands: new Float32Array(BANDS), ageMs: 0, receivedAt: 0 };
+  var audioTarget = new Float32Array(BANDS), audioShaped = new Float32Array(BANDS), audioShapedAt = null;
+
+  function resetAudio() {
+    systemAudio.valid = false;
+    systemAudio.bands.fill(0);
+    audioShaped.fill(0);
+    audioShapedAt = null;
+  }
+
+  // A distinct native input: it never creates track, transport or playback-clock metadata.
+  function applyAudio(snapshot) {
+    if (config.audioInput.kind !== 'system' || !snapshot || !Number.isSafeInteger(snapshot.generation) || snapshot.generation < 0 || snapshot.generation < systemAudio.generation
+      || !Number.isSafeInteger(snapshot.seq) || snapshot.seq < 0) return false;
+    var device = config.audioInput.device;
+    var sourceKey = device && device.kind === 'fixed' ? 'fixed:' + device.id : 'default';
+    if (snapshot.sourceKey != null && snapshot.sourceKey !== sourceKey) return false;
+    var clear = snapshot.bands === null;
+    if (!clear && (!Array.isArray(snapshot.bands) || snapshot.bands.length !== BANDS
+      || !snapshot.bands.every(function (value) { return Number.isFinite(value) && value >= 0 && value <= 1; })
+      || !Number.isFinite(snapshot.ageMs) || snapshot.ageMs < 0)) return false;
+    if (snapshot.generation > systemAudio.generation) {
+      resetAudio(); systemAudio.generation = snapshot.generation; systemAudio.seq = 0;
+    }
+    if (clear) { resetAudio(); return true; }
+    if (snapshot.seq <= systemAudio.seq) return false;
+    var now = performance.now();
+    var age = snapshot.ageMs + (Number.isFinite(snapshot.pageDispatchMs) ? Math.max(0, now - snapshot.pageDispatchMs) : 0);
+    systemAudio.seq = snapshot.seq;
+    if (age >= 1000) { resetAudio(); return false; }
+    systemAudio.valid = true;
+    systemAudio.bands.set(snapshot.bands);
+    systemAudio.ageMs = age;
+    systemAudio.receivedAt = now;
+    return true;
+  }
+
+  function sessionEvent(event, kind) {
+    if (!nativeBinding) return;
+    var receipt = { sessionId: nativeBinding.sessionId, generation: nativeBinding.generation, event: event };
+    if (kind) receipt.frameKind = kind;
+    notify('wallpaper_session ' + JSON.stringify(receipt));
+  }
+
+  function firstFrame(kind) {
+    if (firstFrameKind) return;
+    firstFrameKind = kind;
+    sessionEvent('firstFrame', kind);
+  }
+
+  function reveal() {
+    if (nativeBinding && !firstFrameKind) return false;
+    if (host) host.style.visibility = 'visible';
+    revealed = true;
+    return true;
+  }
+
   function computeGate(fps, refreshHz) {
     var hz = refreshHz >= 5 ? refreshHz : 60;
     var divisor = Math.max(1, Math.ceil(hz / (fps || 30)));
@@ -99,7 +163,7 @@
 
   function notify(message) {
     if (window.parent !== window && window.parent.hertzWallpaperSettings) {
-      window.parent.hertzWallpaperSettings.previewEvent(message);
+      window.parent.hertzWallpaperSettings.previewEvent(message, window);
       return;
     }
     if (window.ipc && window.ipc.postMessage) window.ipc.postMessage(message);
@@ -182,20 +246,40 @@
     }, { external: true });
   }
 
+  function audioState() { return config.audioInput.kind === 'system' ? systemAudio : feed; }
+
+  function audioAge(now) {
+    var state = audioState();
+    return (state.ageMs == null ? 0 : state.ageMs) + (state.receivedAt == null ? 0 : Math.max(0, now - state.receivedAt));
+  }
+
   function scenePlaying() {
-    return feed.valid && feed.playing;
+    return config.audioInput.kind === 'system'
+      ? systemAudio.valid && audioAge(performance.now()) < 1000
+      : feed.valid && feed.playing;
   }
 
   function effectiveBands(now) {
-    if (!feed.valid || config.musicResponse === false) return ZERO;
-    var since = feed.receivedAt == null ? 0 : Math.max(0, now - feed.receivedAt);
-    var age = (feed.ageMs == null ? 0 : feed.ageMs) + since;
-    if (age <= 500) return feed.bands;
+    var state = audioState();
+    if (!state.valid || config.musicResponse === false) return ZERO;
+    var age = audioAge(now);
     if (age >= 1000) return ZERO;
-    var gain = (1000 - age) / 500;
-    var out = new Float32Array(BANDS);
-    for (var i = 0; i < BANDS; i++) out[i] = feed.bands[i] * gain;
-    return out;
+    var gain = config.audioInput.gain * (age <= 500 ? 1 : (1000 - age) / 500);
+    for (var i = 0; i < BANDS; i++) audioTarget[i] = Math.min(1, state.bands[i] * gain);
+    return audioTarget;
+  }
+
+  function shapedAudio(now) {
+    var target = effectiveBands(now);
+    // Stale sources reach exact zero at one second, independent of the release setting.
+    if (target === ZERO) { audioShaped.fill(0); audioShapedAt = now; return ZERO; }
+    var dt = audioShapedAt == null ? 1000 / 60 : Math.min(250, Math.max(0, now - audioShapedAt));
+    audioShapedAt = now;
+    for (var i = 0; i < BANDS; i++) {
+      var ms = target[i] > audioShaped[i] ? config.audioInput.attackMs : config.audioInput.releaseMs;
+      audioShaped[i] += (target[i] - audioShaped[i]) * (ms > 0 ? 1 - Math.exp(-dt / ms) : 1);
+    }
+    return audioShaped;
   }
 
   function bandsObject(bands) {
@@ -243,7 +327,7 @@
     if (frameCount % gate.divisor !== 0) return;
     var frameDt = pendingDt;
     pendingDt = 0;
-    var bands = effectiveBands(now);
+    var bands = shapedAudio(now);
     var motionAllowed = motionActive();
     try {
       var submitted = false;
@@ -281,7 +365,10 @@
         }) === true;
       }
       // 只在渲染真实提交后计数；尝试调用不算 GPU 完成（P0-05）。
-      if (submitted) draws++;
+      if (submitted === true) {
+        draws++;
+        firstFrame('gl');
+      }
     } catch (failure) {
       error = String(failure);
     }
@@ -378,7 +465,7 @@
     })) throw new Error('mount returned false');
     zodiac.resize(innerWidth, innerHeight);
     if (!applyZodiacCamera()) throw new Error('scene_registry_error');
-    zodiac.setPrefs({ field: true, interactive: false });
+    zodiac.setPrefs(Object.assign({}, config.params, { interactive: false }));
     if (zodiac.setMotion) zodiac.setMotion({ active: motionActive() });
     backend = 'zodiac';
     sceneId = 'zodiac';
@@ -395,6 +482,7 @@
     if (!allowedScene(id)) id = DEFAULT_SCENE;
     var nextBackend = id === 'zodiac' && zodiac ? 'zodiac' : 'space';
     if (!force && mounted && sceneId === id && backend === nextBackend) {
+      if (id === 'zodiac' && params && zodiac) zodiac.setPrefs(Object.assign({}, params, { interactive: false }));
       if (id !== 'zodiac' && params && stage) {
         try {
           var patched = stage.setParams(params);
@@ -411,6 +499,7 @@
     try {
       if (nextBackend === 'zodiac') {
         mountZodiac(initial);
+        zodiac.setPrefs(Object.assign({}, params || config.params, { interactive: false }));
         return true;
       }
       if (!spaceRuntime) throw new Error('space runtime missing');
@@ -473,7 +562,7 @@
       return false;
     }
     var id = targetScene();
-    var params = id === 'zodiac' ? null : (followSpace && canonicalScene(followSpace.scene) === id ? followSpace.params : null);
+    var params = config.source === 'follow' && followSpace && canonicalScene(followSpace.scene) === id ? followSpace.params : config.params;
     var pending = selectScene(id, params, true, false);
     Promise.resolve(pending).then(function (ok) {
       if (!ok && !mounted && !switching) {
@@ -493,10 +582,10 @@
 
   function applyFollow() {
     if (media) return;
-    if (config.source !== 'follow' || !mounted || !followSpace) return;
-    var id = canonicalScene(followSpace.scene);
-    if (!allowedScene(id)) return;
-    var params = followSpace.params && typeof followSpace.params === 'object' ? followSpace.params : {};
+    if (config.source !== 'follow' || !mounted) return;
+    var hasFollow = followSpace && allowedScene(canonicalScene(followSpace.scene));
+    var id = hasFollow ? canonicalScene(followSpace.scene) : config.scene;
+    var params = hasFollow ? followSpace.params : config.params;
     var signature = id + '|' + JSON.stringify(params);
     if (id === sceneId) {
       if (backend === 'space' && stage && signature !== followSignature) {
@@ -509,6 +598,7 @@
         }
       } else if (backend === 'zodiac') {
         followSignature = signature;
+        zodiac.setPrefs(Object.assign({}, params, { interactive: false }));
       }
       return;
     }
@@ -567,7 +657,12 @@
     record.el = null;
     if (!el) return;
     try {
-      if (record.kind === 'video') el.pause();
+      if (record.kind === 'video') {
+        if (record.frameCallback != null && typeof el.cancelVideoFrameCallback === 'function') {
+          el.cancelVideoFrameCallback(record.frameCallback);
+        }
+        el.pause();
+      }
       el.removeAttribute('src');
       if (record.kind === 'video') el.load();
     } catch (_) { /* context already gone */ }
@@ -626,6 +721,7 @@
         clearTimeout(record.deadline);
         el.style.visibility = 'visible';
         record.state = 'ready';
+        firstFrame('image');
         mediaReady();
       }, function () {
         if (token !== mediaToken) return;
@@ -644,15 +740,16 @@
         clearTimeout(record.deadline);
         el.style.visibility = 'visible';
         record.state = 'ready';
+        firstFrame('video');
         mediaReady();
         applyMediaMotion();
       };
-      // 首帧就绪（§13.3）：帧回调为准，旧引擎回退 loadeddata；超时给结构化失败。
-      if (el.requestVideoFrameCallback) {
-        el.requestVideoFrameCallback(function () { markReady(); });
-      } else {
-        el.addEventListener('loadeddata', markReady, { once: true });
+      // loadeddata proves metadata/data availability, never presentation of an actual frame.
+      if (typeof el.requestVideoFrameCallback !== 'function') {
+        failMedia('media_frame_callback_unsupported');
+        return false;
       }
+      record.frameCallback = el.requestVideoFrameCallback(function () { markReady(); });
       el.src = url;
       var attempt = el.play();
       if (attempt && attempt.catch) attempt.catch(function () {
@@ -674,8 +771,20 @@
     }
     var previousSource = config.source;
     var previousQuality = config.quality;
+    var previousParams = JSON.stringify(config.params);
     var nextSource = next.source === 'fixed' ? 'fixed' : 'follow';
-    config.musicResponse = next.musicResponse !== false;
+    var previousAudio = JSON.stringify(config.audioInput);
+    var input = next.audioInput;
+    if (input && ['none', 'hertz', 'system'].includes(input.kind)) {
+      config.audioInput = { kind: input.kind, device: input.device,
+        gain: Number.isFinite(input.gain) ? Math.min(4, Math.max(0, input.gain)) : 1,
+        attackMs: Number.isFinite(input.attackMs) ? Math.min(5000, Math.max(0, input.attackMs)) : 40,
+        releaseMs: Number.isFinite(input.releaseMs) ? Math.min(10000, Math.max(0, input.releaseMs)) : 250 };
+    } else if (typeof next.musicResponse === 'boolean') {
+      config.audioInput.kind = next.musicResponse ? 'hertz' : 'none';
+    }
+    config.musicResponse = config.audioInput.kind !== 'none';
+    if (previousAudio !== JSON.stringify(config.audioInput)) resetAudio();
     if (Number.isFinite(Number(next.brightness))) config.brightness = Math.min(1, Math.max(0.25, Number(next.brightness)));
     if (Number.isFinite(Number(next.motion))) config.motion = Math.min(1, Math.max(0, Number(next.motion)));
     if (next.quality === 'low' || next.quality === 'medium' || next.quality === 'high') config.quality = next.quality;
@@ -683,6 +792,7 @@
     var nextScene = allowedScene(next.scene) ? next.scene : config.scene;
     config.source = nextSource;
     config.scene = nextScene;
+    config.params = next.params && typeof next.params === 'object' ? next.params : {};
     gate = computeGate(cap, config.refreshHz);
     resetGate();
     applyBrightness();
@@ -692,13 +802,13 @@
     if (previousQuality !== config.quality) {
       followSignature = '';
       var id = targetScene();
-      selectScene(id, config.source === 'follow' && followSpace ? followSpace.params : null, false, true);
+      selectScene(id, config.source === 'follow' && followSpace && allowedScene(canonicalScene(followSpace.scene)) ? followSpace.params : config.params, false, true);
       return;
     }
     if (nextSource === 'fixed') {
-      if (previousSource !== 'fixed' || sceneId !== nextScene) {
+      if (previousSource !== 'fixed' || sceneId !== nextScene || previousParams !== JSON.stringify(config.params)) {
         followSignature = '';
-        selectScene(nextScene, null, false, previousSource !== 'fixed');
+        selectScene(nextScene, config.params, false, previousSource !== 'fixed');
       }
       return;
     }
@@ -724,6 +834,8 @@
       feed.ageMs = null;
       feed.receivedAt = null;
       feed.expiresAt = null;
+      followSpace = null;
+      if (config.source === 'follow') applyFollow();
       return false;
     }
     var spectrum = snapshot.spectrum;
@@ -782,8 +894,14 @@
       sceneTime: Math.round(sceneTime),
       scene: sceneId,
       backend: backend,
+      session: nativeBinding ? { sessionId: nativeBinding.sessionId, generation: nativeBinding.generation, frameKind: firstFrameKind, revealed: revealed } : null,
       source: config.source,
       musicResponse: config.musicResponse,
+      audioSource: config.audioInput.kind,
+      audioGeneration: systemAudio.generation,
+      audioSequence: systemAudio.seq,
+      audioFresh: audioState().valid && audioAge(Number.isFinite(now) ? now : performance.now()) < 1000,
+      renderedAudioPeak: Math.max.apply(null, audioShaped),
       brightness: config.brightness,
       motion: config.motion,
       quality: config.quality,
@@ -829,15 +947,18 @@
 
   window.hertzWallpaper = {
     applyFeed: applyFeed,
+    applyAudio: applyAudio,
     applyConfig: applyConfig,
     applyMedia: applyMedia,
     start: start,
     stop: stop,
     mount: mount,
+    reveal: reveal,
     unmount: unmount,
     debug: debug
   };
 
   notify('wallpaper_clock ' + performance.now());
+  sessionEvent('pageHandshake');
   notify('wallpaper_dom_ready');
 })();

@@ -291,7 +291,10 @@ impl BudgetCoordinator {
                     "先关闭现有预览（切页/关闭/应用都会释放旧实例）",
                 ));
             }
-            if request.output_pixel_rate > PREVIEW_RESERVED_OUTPUT_RATE {
+            // 8 MP/s 是 GL 预览的保留带。纯视频按真实源速率申请剩余总额，
+            // 不能强制套 15 fps，也不能把保留带当成它的绝对上限。
+            let video_preview = request.contexts == 0 && request.decoders > 0;
+            if !video_preview && request.output_pixel_rate > PREVIEW_RESERVED_OUTPUT_RATE {
                 return Err(Ledger::reject(
                     "preview_output_rate",
                     PREVIEW_RESERVED_OUTPUT_RATE,
@@ -300,6 +303,16 @@ impl BudgetCoordinator {
                     "预览按 960×540 与 ≤15 fps 申请（或降低预览质量）",
                 ));
             }
+        }
+        if request.output_pixel_rate > MAX_OUTPUT_PIXEL_RATE.saturating_sub(usage.output_pixel_rate)
+        {
+            return Err(Ledger::reject(
+                "output_pixel_rate",
+                MAX_OUTPUT_PIXEL_RATE,
+                usage.output_pixel_rate,
+                request.output_pixel_rate,
+                "全部桌面和预览共用输出像素率总额",
+            ));
         }
         if request.decode_pixel_rate > 0
             && request.decode_pixel_rate
@@ -480,6 +493,29 @@ impl BudgetCoordinator {
             ledger.revision += 1;
         }
         Ok(())
+    }
+
+    /// 已确认退出的单 token 墓碑回收；不能借此清除同会话仍活动的其它代际。
+    pub(crate) fn forget_released(
+        &self,
+        token: u64,
+        session: &str,
+        generation: u64,
+    ) -> Result<bool, LedgerError> {
+        let mut ledger = self
+            .ledger
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if Self::find_checked(&mut ledger, token, session, generation)?.state
+            != ReservationState::Released
+        {
+            return Ok(false);
+        }
+        ledger
+            .reservations
+            .retain(|reservation| reservation.token != token);
+        ledger.revision += 1;
+        Ok(true)
     }
 
     /// 会话销毁：宿主确认 controller/context 清理完成后一次性清除该会话的

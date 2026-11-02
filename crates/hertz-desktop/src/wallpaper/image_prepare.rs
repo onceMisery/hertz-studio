@@ -25,7 +25,7 @@ pub(crate) const PIPELINE: &str = "image-srgb-v1";
 const IMPORTER: &str = "hertz-native-image";
 const MAX_FILE: u64 = 32 * 1024 * 1024;
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ImagePurpose {
     Preview,
@@ -34,7 +34,7 @@ pub(crate) enum ImagePurpose {
     High,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ImageFit {
     Cover,
@@ -42,7 +42,7 @@ pub(crate) enum ImageFit {
 }
 
 /// width/height 是调用方按实际输出、画质和设备预算规划后的像素，非 CSS 尺寸。
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct ImageTarget {
     pub width: u32,
@@ -145,6 +145,29 @@ impl Options {
 
 pub(crate) fn validate_target(target: Option<ImageTarget>) -> Result<()> {
     Options::new(target).map(|_| ())
+}
+
+/// 规划与准备共用相同像素约束，避免预览尺寸和派生键出现两套算法。
+pub(crate) fn normalize_target(target: ImageTarget) -> Result<ImageTarget> {
+    let pixels = Options::new(Some(target))?
+        .target
+        .expect("requested target");
+    Ok(ImageTarget {
+        width: pixels.width,
+        height: pixels.height,
+        ..target
+    })
+}
+
+pub(crate) fn target_dimensions(
+    width: u32,
+    height: u32,
+    target: ImageTarget,
+) -> Result<(u32, u32)> {
+    if width == 0 || height == 0 {
+        return Err(JobError::invalid_input("媒体尺寸不能为零"));
+    }
+    Ok(Options::new(Some(target))?.dimensions(width, height))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -251,6 +274,35 @@ pub(crate) async fn prepare(
     let prefix = PathBuf::from(&input.media.entry.sha256)
         .join(PIPELINE)
         .join(&cache_key);
+    if let Some(image) = cached(store, library, input, target, cancel).await? {
+        return Ok(image);
+    }
+    let estimate = workspace(
+        input.metadata.encoded_width,
+        input.metadata.encoded_height,
+        input.media.entry.bytes,
+    )?;
+    let reservation = probe.image_workspace(estimate)?;
+    // 同步函数返回时 decoder/像素/ICC/编码缓冲均已退出，才归还工作区。
+    let result = generate(store, job, input, prefix, &options, cancel);
+    reservation.finish();
+    result
+}
+
+/// 只查询并核验既有不可变产物；缺失/损坏返回 None，不在 resolve/load 中生成。
+pub(crate) async fn cached(
+    store: &AssetStore,
+    library: &Library,
+    input: &DecodeInput,
+    target: Option<ImageTarget>,
+    cancel: &AtomicBool,
+) -> Result<Option<PreparedImage>> {
+    cancelled(cancel)?;
+    let options = Options::new(target)?;
+    let cache_key = key(&input.media.entry.sha256, &options.canonical());
+    let prefix = PathBuf::from(&input.media.entry.sha256)
+        .join(PIPELINE)
+        .join(&cache_key);
     let cached: Option<(String,)> =
         sqlx::query_as("SELECT path FROM derived_entries WHERE cache_key = ?")
             .bind(&cache_key)
@@ -283,27 +335,20 @@ pub(crate) async fn prepare(
                     .execute(library.pool())
                     .await
                     .map_err(|error| JobError::database(error.to_string()))?;
-                    return Ok(PreparedImage {
+                    cancelled(cancel)?;
+                    return Ok(Some(PreparedImage {
                         receipt,
                         directory,
                         relative,
                         staged: false,
                         lease: Some(lease),
-                    });
+                    }));
                 }
             }
         }
     }
-    let estimate = workspace(
-        input.metadata.encoded_width,
-        input.metadata.encoded_height,
-        input.media.entry.bytes,
-    )?;
-    let reservation = probe.image_workspace(estimate)?;
-    // 同步函数返回时 decoder/像素/ICC/编码缓冲均已退出，才归还工作区。
-    let result = generate(store, job, input, prefix, &options, cancel);
-    reservation.finish();
-    result
+    cancelled(cancel)?;
+    Ok(None)
 }
 
 fn generate(

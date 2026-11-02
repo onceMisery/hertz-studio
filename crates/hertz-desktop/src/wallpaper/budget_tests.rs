@@ -384,3 +384,30 @@ fn constants_are_self_consistent() {
     const _: () = assert!(MAX_PREPARE_TASKS == 1);
     const _: () = assert!(MAX_DECODER_SLOTS == 2);
 }
+
+#[test]
+fn tombstone_cleanup_checks_owner_generation_and_leaves_other_allocations_intact() {
+    let budget = BudgetCoordinator::new();
+    let old = budget.grant(&req(OwnerKind::Desktop, "session")).unwrap();
+    let mut next = req(OwnerKind::Desktop, "session");
+    next.generation = 2;
+    let active = budget.grant(&next).unwrap();
+    assert!(!budget.forget_released(old, "session", 1).unwrap());
+    budget.release(old, "session", 1).unwrap();
+    assert!(!budget.forget_released(old, "session", 1).unwrap());
+    assert_eq!(
+        budget.forget_released(old, "other", 1),
+        Err(LedgerError::OwnerMismatch)
+    );
+    assert_eq!(
+        budget.forget_released(old, "session", 2),
+        Err(LedgerError::GenerationMismatch)
+    );
+    budget.confirm_exit(old, "session", 1).unwrap();
+    assert!(budget.forget_released(old, "session", 1).unwrap());
+    assert_eq!(budget.usage().targets, 1);
+    assert!(!budget.forget_released(active, "session", 2).unwrap());
+    budget.confirm_exit(active, "session", 2).unwrap();
+    assert!(budget.forget_released(active, "session", 2).unwrap());
+    assert_eq!(budget.usage(), Default::default());
+}

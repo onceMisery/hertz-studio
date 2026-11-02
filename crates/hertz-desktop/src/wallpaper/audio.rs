@@ -5,15 +5,15 @@
 //!
 //! `AudioInput` 是互斥联合：none、hertz、system。system 选择 WASAPI render
 //! endpoint 的 shared/event loopback（不是麦克风，也不是 IAudioRenderClient
-//! 输出路径——采集线程属下一片 WASAPI 接线）；本片交付与播放器逐位一致的
-//! 频带分析、有界环形缓冲与切换代际语义。
+//! 输出路径）。本模块提供与播放器逐位一致的频带分析、有界环形缓冲；
+//! 实际采集生命周期由 audio_service::AudioService 唯一持有。
 //!
 //! 频带映射复用播放器 2048 点 Hann FFT 的算法（vmusic-audio/render.rs）：
 //! 二次方间隔频带、`norm/√bins` → sqrt → 峰值归一（0.02 底）→ 快攻 0.55 /
 //! 慢放 0.14 平滑。壁纸在 hertz 源与 system 源下必须同一观感，黄金向量测试
 //! 把两份实现对同一信号的输出钉死（rustfft 与播放器同版本、同 workspace 锁）。
 //!
-//! 采集线程合同（本片先钉数据面，WASAPI 接线随下一片）：只做有界格式转换
+//! 采集线程合同：只做有界格式转换
 //! （交织多声道→单声道平均）与环形缓冲写入，不分配、不写日志；缓冲最多
 //! 250 ms，过载丢最旧并计数；分析输出 ≤30 Hz 由消费节拍保证。
 

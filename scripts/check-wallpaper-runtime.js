@@ -8,9 +8,9 @@ const vm = require('node:vm');
 const source = fs.readFileSync(path.join(__dirname, '../crates/hertz-desktop/assets/wallpaper-scene.js'), 'utf8');
 const url = 'https://' + 'a'.repeat(32) + '.' + 'b'.repeat(32) + '.wallpaper.invalid/files/assets/bg.webm';
 
-function fixture() {
+function fixture(options = {}) {
   let nextId = 1, now = 0, selections = 0;
-  const rafs = new Map(), timers = new Map(), events = [], elements = [], frames = [];
+  const rafs = new Map(), timers = new Map(), events = [], elements = [], frames = [], selected = [];
   const host = { style: {}, appendChild() {} };
   function element(kind) {
     const listeners = new Map();
@@ -23,7 +23,8 @@ function fixture() {
       remove() { this.removed = true; },
       play() { this.paused = false; return Promise.resolve(); },
       pause() { this.paused = true; }, load() { this.loads++; },
-      requestVideoFrameCallback(callback) { this.frameReady = callback; },
+      requestVideoFrameCallback: options.noVideoFrames ? undefined : function(callback) { this.frameReady = callback; return 1; },
+      cancelVideoFrameCallback() { this.frameCancelled = true; },
       decode() { return new Promise(resolve => { resolveDecode = resolve; }); },
       finishDecode() { resolveDecode(); }, emit(name) { listeners.get(name)?.(); },
     };
@@ -31,14 +32,16 @@ function fixture() {
     return el;
   }
   const runtime = {
-    catalog: () => [{ id: 'coast', camera: {} }],
+    catalog: () => [{ id: 'coast', camera: {} }, { id: 'reactor', camera: {} }],
     create: () => ({
-      select: async id => { selections++; return { id }; },
-      frame: frame => { frames.push(frame); return true; },
+      select: async (id, state) => { selections++; selected.push({ id, params: state.params }); return { id, params: state.params }; },
+      setParams(params) { selected.push({ id: selected.at(-1).id, params }); return { params }; },
+      frame: frame => { frames.push(frame); return options.submitted ? options.submitted() : true; },
       dispose() {}, setServices() {}, resize() {}, setRig() {}, stats: () => ({}),
     }),
   };
   const window = { HertzStageRuntime: { SpaceStagePure: runtime }, ipc: { postMessage: message => events.push(message) } };
+  if (options.binding) window.__hertzWallpaperBinding = options.binding;
   window.parent = window;
   const context = {
     window, document: { getElementById: () => host, createElement: element },
@@ -50,7 +53,7 @@ function fixture() {
   };
   vm.runInNewContext(source, context);
   return {
-    api: window.hertzWallpaper, events, frames, elements, timers,
+    api: window.hertzWallpaper, events, frames, elements, timers, selected, host,
     get selections() { return selections; },
     tick(stamp) { now = stamp; const callbacks = [...rafs.values()]; rafs.clear(); callbacks.forEach(callback => callback(now)); },
   };
@@ -76,6 +79,62 @@ async function main() {
     f.api.unmount();
   }
 
+  const binding = { sessionId: 'a'.repeat(32), generation: 9 };
+  const receipts = f => f.events.filter(event => event.startsWith('wallpaper_session ')).map(event => JSON.parse(event.slice('wallpaper_session '.length)));
+  let submitted = false;
+  const bound = fixture({ binding, submitted: () => submitted });
+  assert.deepEqual(receipts(bound), [{ ...binding, event: 'pageHandshake' }]);
+  assert.equal(bound.host.style.visibility, 'hidden');
+  assert.equal(bound.api.reveal(), false, 'no reveal before an actual frame');
+  bound.api.start(); await flush();
+  assert.equal(receipts(bound).length, 1, 'mount completion is not firstFrame');
+  for (let i = 1; i <= 4; i++) bound.tick(i * 1000 / 60);
+  assert.equal(receipts(bound).length, 1, 'attempted submissions cannot report ready');
+  submitted = true;
+  for (let i = 5; i <= 8; i++) bound.tick(i * 1000 / 60);
+  assert.deepEqual(receipts(bound)[1], { ...binding, event: 'firstFrame', frameKind: 'gl' });
+  assert.equal(receipts(bound).length, 2, 'one firstFrame per native identity');
+  assert.equal(bound.host.style.visibility, 'hidden', 'native host decides when all four facts hold');
+  assert.equal(bound.api.reveal(), true);
+  assert.equal(bound.host.style.visibility, 'visible');
+  bound.api.unmount();
+
+  const boundImage = fixture({ binding });
+  boundImage.api.applyMedia({ kind: 'image', url });
+  assert.equal(receipts(boundImage).length, 1);
+  boundImage.elements.at(-1).finishDecode(); await flush();
+  assert.deepEqual(receipts(boundImage)[1], { ...binding, event: 'firstFrame', frameKind: 'image' });
+  boundImage.api.unmount();
+
+  const boundVideo = fixture({ binding });
+  boundVideo.api.applyMedia({ kind: 'video', url });
+  const liveVideo = boundVideo.elements.at(-1);
+  liveVideo.emit('loadeddata');
+  assert.equal(receipts(boundVideo).length, 1, 'loadeddata is not a presented video frame');
+  liveVideo.frameReady(); await flush();
+  assert.deepEqual(receipts(boundVideo)[1], { ...binding, event: 'firstFrame', frameKind: 'video' });
+  boundVideo.api.unmount();
+  assert.equal(liveVideo.frameCancelled, true);
+
+  const unsupported = fixture({ binding, noVideoFrames: true });
+  assert.equal(unsupported.api.applyMedia({ kind: 'video', url }), false);
+  unsupported.elements.at(-1).emit('loadeddata'); await flush();
+  assert.equal(unsupported.api.debug().media.state, 'failed');
+  assert.equal(unsupported.api.debug().media.error, 'media_frame_callback_unsupported');
+  assert.equal(receipts(unsupported).length, 1);
+  unsupported.api.unmount();
+
+  const followed = fixture();
+  followed.api.applyConfig({ source: 'follow', scene: 'coast', params: { speed: .5 } });
+  followed.api.start(); await flush();
+  assert.equal(followed.selected.at(-1).params.speed, .5);
+  followed.api.applyFeed({ valid: true, playing: true, spectrum: { bands: Array(64).fill(0), energy: 0, ageMs: 0 }, space: { scene: 'reactor', params: { speed: 2 } } });
+  await flush(); assert.equal(followed.api.debug().scene, 'reactor');
+  followed.api.applyFeed(null); await flush();
+  assert.equal(followed.api.debug().scene, 'coast', 'lost source restores explicit idle selection');
+  assert.equal(followed.selected.at(-1).params.speed, .5, 'idle parameters remain saved');
+  followed.api.unmount();
+
   const f = fixture();
   f.api.start(); await flush();
   assert.equal(f.api.applyMedia({ kind: 'video', url }), true);
@@ -98,6 +157,44 @@ async function main() {
   f.api.applyMedia(null); await flush();
   assert.equal(f.api.debug().backend, 'space', 'clearing media must restore the scene');
   f.api.unmount();
-  console.log('wallpaper runtime checks passed: 15/30/60 fps integration, resume, quality, failure release and late callbacks');
+  const audio = fixture();
+  const hertzFeed = { valid: true, playing: false, positionMs: 2345, spectrum: { bands: Array(64).fill(.9), energy: .9, ageMs: 0 } };
+  const systemInput = { kind: 'system', device: { kind: 'default' }, gain: 2, attackMs: 100, releaseMs: 500 };
+  const systemFrame = (generation, seq, value, ageMs = 0, pageDispatchMs) => ({ generation, seq, bands: Array(64).fill(value), ageMs, pageDispatchMs });
+  audio.api.applyConfig({ source:'fixed', scene:'coast', audioInput:systemInput });
+  audio.api.applyFeed(hertzFeed);
+  assert.equal(audio.api.debug(0).feedPeak, 0, 'Hertz spectrum cannot leak into a system consumer');
+  assert.equal(audio.api.applyAudio(systemFrame(2,1,.2)), true);
+  assert.ok(Math.abs(audio.api.debug(0).feedPeak - .4) < .00001, 'each consumer applies its gain');
+  assert.equal(audio.api.debug(0).positionMs, 2345, 'system spectrum never forges the Hertz clock');
+  assert.equal(audio.api.debug(0).playing, false, 'system spectrum never forges playback state');
+  assert.equal(audio.api.applyAudio(systemFrame(1,100,.8)), false, 'old capture generation rejected');
+  assert.equal(audio.api.applyAudio(systemFrame(2,1,.8)), false, 'same-generation duplicate rejected');
+  assert.equal(audio.api.applyAudio({ ...systemFrame(99,2,.8), bands:[NaN] }), false, 'malformed input cannot advance the generation');
+  assert.equal(audio.api.debug(0).audioGeneration, 2);
+  assert.equal(audio.api.applyAudio({...systemFrame(99,2,.8),sourceKey:'fixed:old-device'}),false,'queued old-device frames cannot enter a new source configuration');
+  assert.ok(Math.abs(audio.api.debug(750).feedPeak - .2) < .00001, 'system data decays after 500ms');
+  assert.equal(audio.api.debug(1000).feedPeak, 0, 'system data reaches exact zero by one second');
+  audio.api.start(60); await flush();
+  audio.tick(16); const attack1 = audio.frames.at(-1).level;
+  audio.tick(116); const attack2 = audio.frames.at(-1).level;
+  assert.ok(attack1 > 0 && attack1 < attack2 && attack2 < .4, 'attack smoothing reaches the scene gradually');
+  audio.api.applyAudio(systemFrame(2,2,0)); audio.tick(216);
+  const released = audio.frames.at(-1).level;
+  assert.ok(released > 0 && released < attack2, 'release smoothing is independent from attack');
+  audio.tick(1200); assert.equal(audio.frames.at(-1).level, 0, 'long release cannot keep stale audio alive');
+  audio.api.applyAudio({generation:3,seq:0,bands:null});
+  assert.equal(audio.api.applyAudio(systemFrame(2,3,.8)), false, 'invalidation preserves the generation barrier');
+  audio.api.applyConfig({audioInput:{kind:'hertz',gain:1,attackMs:0,releaseMs:0}});
+  assert.equal(audio.api.applyAudio(systemFrame(4,1,.8)), false, 'system frames are isolated from Hertz consumers');
+  audio.api.applyConfig({audioInput:{kind:'none'}});
+  assert.equal(audio.api.debug(1200).feedPeak, 0, 'none always clears audio response');
+  audio.api.applyConfig({audioInput:systemInput});
+  assert.equal(audio.api.applyAudio(systemFrame(4,1,.8,1000)), false, 'queued stale PCM is rejected');
+  assert.equal(audio.api.applyAudio(systemFrame(5,1,.2,0,0)), false, 'page dispatch delay contributes to sample age');
+  audio.api.applyConfig({audioInput:{...systemInput,device:{id:'endpoint-a',kind:'fixed'}}});
+  assert.equal(audio.api.applyAudio({...systemFrame(6,1,.2),sourceKey:'fixed:endpoint-a'}),true,'fixed device identity is independent of JSON property order');
+  audio.api.unmount();
+  console.log('wallpaper runtime checks passed: 15/30/60 fps integration, resume, quality, source isolation, spectrum freshness, gain/attack/release, native identity, actual first frames, failure release and late callbacks');
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

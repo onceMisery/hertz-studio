@@ -510,7 +510,7 @@ sequenceDiagram
 
 图片准备器接受已规划的实际目标像素（width/height、preview/low/medium/high 用途和 cover/contain）；调用方先按画质与设备预算确定像素，不在准备器复制一套质量表。先应用 EXIF 方向，再保持原图宽高比缩放：cover 使用能覆盖目标的比例，contain 使用能完整容纳的比例；均不放大小图、不裁切原稿，并受 4096 单边/8,294,400 像素上限约束。preview 将目标矩形等比限制在 960×540 内，派生解码图另限 960 单边/518,400 像素；极端宽高比或触及上限时以收据中的实际尺寸计量，不能声称仍提供完整目标分辨率。无目标的初次导入继续生成有界通用图。
 
-规范化的目标像素、fit 和实际约束进入 canonicalOptions，low/medium/high 标签本身不改变算法或单独复制相同参数的缓存。相同输入/目标复用已经验证的代际；不同目标有独立键和目录，沿用同一准备槽、工作区、资格缓存、2 GiB LRU 与取消清理。原稿仍只保存一份，派生 `contentKey` 固定为 derivedKey＋render 文件完整 hash；核验同时检查收据中的源尺寸/方向、按目标应得尺寸、产物 hash 与 PNG 实际尺寸。缺失目标变体由后台准备，不在渲染帧中生成；TargetPlanner/库 UI 的产品入口仍按 P1-04/05 接线。
+规范化的目标像素、fit 和实际约束进入 canonicalOptions，low/medium/high 标签本身不改变算法或单独复制相同参数的缓存。相同输入/目标复用已经验证的代际；不同目标有独立键和目录，沿用同一准备槽、工作区、资格缓存、2 GiB LRU 与取消清理。原稿仍只保存一份，派生 `contentKey` 固定为 derivedKey＋render 文件完整 hash；核验同时检查收据中的源尺寸/方向、按目标应得尺寸、产物 hash 与 PNG 实际尺寸。缺失目标变体由后台准备，不在渲染帧中生成；单媒体 TargetPlanner 和已安装包补图内核已接通，真实显示器/质量及库 UI 的产品入口仍按 P1-04/05 接线。
 
 ## 8. 引擎资源接入合同
 
@@ -551,6 +551,8 @@ interface AssetProvider {
 这是新增合同的类型说明，不要求前端改用 TypeScript。类型专用 schema 规定 metadata 的必需字段：图片必有规范化宽高；视频必有编码/显示尺寸、方向、像素宽高比、codec/profile、时长、CFR 的 sourceFps 或 VFR 的 fpsUpperBound。显示尺寸用于适配，编码尺寸与帧率上界用于解码预算，不能把可选字段当作允许漏掉成本真值。`read` 单次最多 1 MiB；大视频不经过 read/JSON/base64，而由原生文件流供 WebView 解码。控制消息不传媒体 Blob。
 
 AssetRef 是文档逻辑引用，ResolvedAsset 是一次规划选择的不可变实体：原包 variant 的 contentKey 为文件完整 hash，派生资源为 derivedKey＋输出文件 hash；url 和租约必须固定到该实体。转换器升级生成新 contentKey，旧 session 继续引用旧实体，不能让同一个 variantId 悄悄换字节。缺少所需派生时返回 prepare_required 并启动已有准备任务，不在 loader 内隐式转码。
+
+单媒体原生入口（2026-11-02）：`target_planner::resolve` 先核验逻辑引用与固定包，依据原生实测显示尺寸选择最小足够输入，编码像素、字节和路径提供确定性排序；作者填写的尺寸/用途不作为准入真值，显式 variantId 不自动替换。图片只查询同一准备器的已核验不可变缓存，缺失/损坏返回 PrepareRequest；调用方通过 `ImportJobs::prepare_asset` 使用原 worker 从已安装包补图，沿用全局单槽、写门、工作区、资格探测和取消退出，不重新打开导入源。ResolvedMedia 固定规范化目标、逻辑引用与字节事实，只提供只读访问；`budget_request` 不再接受另一套尺寸/用途，改变目标必须重新 resolve。`WallpaperSession::admit_media` 在当前 attaching 代际中统一取得整笔预算与精确文件 scope，桌面会话拒绝预览目标；预算失败保留旧准入，controller 拒绝旧代际时只撤回本次未启动资源的额度。准入前的帧不计入本次就绪，后续必须收到当前媒体后端对应的图片 decode 或视频首帧事实。resolve 的 ready 不等于会话 ready 或跨环境永久可播。第十四轮已接入 app、库版本选择与独立媒体预览：桌面按实测物理尺寸规划，预览按原生固定 client 尺寸规划；质量标签不冒充视频降采样。每次选择还要经过同一准备 owner 的当前环境资格检查（可命中资格缓存）。多资源总保留与 GL 资源租约仍待后续接线。
 
 资源地址使用每包隔离的保留域 `https://<hash前32位>.<hash后32位>.wallpaper.invalid/`，由 WebView2 `WebResourceRequested` 在本机拦截，不做 DNS 请求；拆分标签避免超过单个 DNS 标签 63 字符限制。只允许已索引路径的 GET/HEAD；可信引擎资源和作品资源使用不同 origin。hash URL 不是授权：原生按发起请求的 controller/session/generation 检查当前准入包及派生资源集合；未知域/路径或已撤销租约在本机失败，不漏到网络。导入探测只得到该 job 的临时集合，不开放 staging 目录。
 
@@ -1070,6 +1072,9 @@ TargetPlanner 取得整个 session 的保留额度，内部资源 acquire 从该
 
 可信页面销毁后，宿主在 controller/context 清理完成时释放其 token；不可信 worker 只在受控进程树确实退出后归还。某个释放没有确认时保留占用并报告，而不是为下一实例无条件腾账。所有额度消息都带原生绑定的 session/generation，不接收网页自称的 usage 作为授权依据。
 
+当前单媒体会话内核在 apply 换代、失败、缺屏和停用时，将准入移入待回收集合并撤销自己的 scope；已撤销 scope 的读者屏障独立于新授权，旧回收不能清空新集合。宿主必须关闭对应代际的独立 controller 并销毁 surface，之后才提交 `media_controller_closed`；`reap_media` 同时检查所有已排队/克隆文件读者退出，释放最后固定句柄后仅归还并清理该 token。页面 stop/emptied、超时以及 Rust Drop 都不构成退出证明，缺回执时保留占用并可由 stuck 诊断。第十四轮 app 的桌面候选与独立媒体预览均已驱动此退出 owner；全局预算继续计入旧桌面、预览及退出中的实例，窗口/CDP target 退出先于文件读者退出时仍不归还额度。
+
+
 读取候选所有资源的**派生元数据**，先计算新旧资源交接峰值，再尝试分配：
 
 1. 给预览保留小额度，但未打开时不创建资源。
@@ -1128,9 +1133,13 @@ ready 要求资源准入成功、原生窗口挂载/可见确认、当前 genera
 
 首帧揭幕：窗口先以透明/极低 alpha 存在，`firstFrameReady` 后再渐显，避免用户瞥见未上色的黑矩形；就绪轮询从 16 ms 起步，1.5 s 后转 250 ms，再指数退避到 4 s 上限。轮询必须受 generation 约束，旧代际的迟到 ready 不能揭幕新窗口。此项为 P2 收尾，不阻塞 P1 的 ready 判定。
 
+显示器缺席后重新建窗使用新 generation；`display_restored` 成功后宿主读取新的 `generation()`，重新准入并等待四项事实。缺席前的页面握手、帧或旧 controller 关闭回执不能作用于恢复后的实例。
+
 恢复预算沿用 120 秒最多 3 次，但按故障域记账：单会话故障计会话预算；Explorer 全局重挂计一次全局预算，不按屏幕数消耗四次。全局恢复串行建窗，不并行产生 GPU 峰值。超额进入终止态，只接受用户明确重试；时间经过不会自动解锁。
 
 强制暂停原因生效时立即卸载视频和需回收的动态资源，不等待 5 分钟；软暂停停止运动与解码后可短暂保留已记账的资源，持续 5 分钟必须释放 decoder/GPU scope 和非必要 feed，仅保留作品引用、媒体位置与静态图。预算紧张时允许提前释放。暂停保留的租约未释放就不能授予其它会话；卸载后恢复先重新准入，单屏继续原位置，mirror 采样当前组时间，不能假设旧预算仍可用。退出按订阅、scheduler、视频、scope、controller、worker 的顺序回收；只处理明确归属本组件的进程。
+
+当前接线边界（第十四轮）：内置桌面、单媒体桌面候选与独立媒体预览 controller 均持有 WallpaperSession。原生初始化脚本固定随机 sessionId 与当前 generation，typed pageHandshake/firstFrame 同时核对 controller、身份、代际和后端；GL 以真实 submitted=true 为准，图片以 decode、视频以 requestVideoFrameCallback 为准。媒体候选以极低原生窗口透明度保持合成，四事实完成后揭幕并将旧画面交给原生退出 owner；失败保留旧画面，保存的 revision/意图与运行失败分别报告。Close 成功并销毁 WebView/HWND 后，还要等待文件读者退出才归还预算；关闭失败仍保留占用。桌面媒体硬暂停立即进入回收、软暂停继续计账并在 300 秒后卸载；恢复需重新准入。预览忽略 desktopOnly 暂停，继承电池/会话/息屏并可独立关闭。内置宿主的 resourceAdmitted 仍不能等同于 GL/GPU 全局预算闭环；内置原地参数更新的 appliedRevision 也还没有与新媒体会话完全统一。
 
 ### 13.4 预览租约
 
@@ -1163,6 +1172,18 @@ ready 要求资源准入成功、原生窗口挂载/可见确认、当前 genera
 配置写入不能靠“JSON 与 SQLite 各自原子”宣称跨文件原子。P0 起使用单活动提交日志：先在 operations/requestId 写入并 flush 意图和候选配置，记录调用 SID、payloadDigest、baseRevision/baseDigest、targetRevision/targetConfigDigest；候选根对象写 lastCommit；再原子替换 config；最后把日志标记 committed。完成最后一步前不接受下一次配置提交，运行应用状态另行更新。
 
 启动先协调日志再接受命令：config 的 lastCommit/摘要吻合则补写 committed；config 仍吻合 base 则记录 not_committed、不自动补提交；两者都不吻合则进入 config_conflict，保留文件并拒绝写入。日志总量最多 16 MiB、终态记录最多 256，至少保留 10 分钟；容量不足拒绝新持久命令，不提前淘汰保护期记录。过期查询返回 operation_unknown，不假称从未提交，客户端仍须重读 revision。安装记录独立保留到任务/版本清理，查询入口按 command 类别查询，不混为同一事务。
+
+当前接线（2026-11-02，第十一轮）：正式库/导入子集已通过原设置中心和同一管理管道受理，能力、状态、分页库、原生选文件、导入、任务和操作查询共用 16/64 KiB 上限与四调用准入。设置页的“本地作品”展开后才打开库；导入不启用壁纸。fileToken 只发给当前原生设置代际，管道调用不能借用该 owner。接受的导入请求先在 install_jobs 同事务保存 requestId/payloadDigest/queued；重新查询与重启重试返回原 job，不重新消费令牌。失去回执的页面查询原操作，不直接重导。未完成任务在启动恢复时标记 interrupted，已安装内容另按固定包恢复。
+
+原生输入可为 HWPK 或 PNG/JPEG/WebP/MP4/WebM。裸媒体先固定快照，按实际魔数确认格式，再在原准备槽与内容写门内生成 HWPK；其原包、投影、后续图片准备、真实 WebView2 解码和资格缓存走同一管线。相同媒体字节使用确定内容身份，改名后复用第一次保存的 manifest；不把源路径写进作品，也不为导入视频增加播放声音。正式 settingsSchema=5 已落盘并迁移旧配置；场景参数从现有 registry 导出的目录补全，旧 GDI 显示器只在明确匹配时迁成固定身份，未匹配编码为 `{kind:"unresolved",legacyName}` 等待认领；primary 保持自动主屏策略。迁移先验证并 flush 原文件备份，再替换配置。
+
+第十二轮已接入单活动配置日志：同一进程提交锁与配置目录的原生独占文件锁共同串行化提交、恢复和操作查询，覆盖另一 Windows 会话使用同一目录的情况。日志先持久化调用 SID、请求摘要、base/target revision 与完整候选，配置携带 lastCommit；记录和配置均 flush 后以 write-through 改名。启动先核对记录：目标摘要与 lastCommit 一致则补 committed，仍为 base 则 not_committed，均不符则保留文件并阻止写入。活动记录完成前不能接受下一笔；终态去除候选正文，总量最多 16 MiB、最多 256 条、完成后至少保留 10 分钟。容量不足返回 journal_full；过期无记录为 operation_unknown。新写入、旧管理入口和内部设置保存共用该边界，不另写一套配置。
+
+作品选择后台入口（第十四轮）已由正式媒体 apply、冷启动恢复和独立媒体预览调用：核对 workKey/packageHash 的 installed 版本归属，从权威 manifest 解析单图片/单视频，通过既有 TargetPlanner/ImportJobs 补图及核验当前环境资格。它与正式管理命令共用四个 admission 名额，正式 apply 移交已保留的名额而不重复申请；取消等待真实 worker 终态再归还。后台结束后重新核对 settings owner、draftRevision、profile/config 基线及显示器几何，再通过同一配置提交日志保存。暂停后挂载前再次核对固定目标，几何改变即重新规划。预检失败不写配置，提交后的首帧失败保留新保存意图和旧实际画面；operations.get 在日志尚未写入的预检期间也能查询原请求。
+
+正式设置中心现已使用 settings 草稿的 create/update/discard、wallpaper.apply 和 preview.acquire/update/renew/release。草稿只在内存中，随机 id 绑定当前原生设置代际与 profile/config 基线，独立 draftRevision，更新一次 1–32 个类型化操作，校验失败不留下半批修改。当前操作为 replaceWallpaper/replaceLyrics，合计最多 64 KiB，单请求继续受 16 KiB 限制；work 草稿与其 save 尚未提供。应用保存回执与实时运行状态分开；同 requestId/摘要的已提交配置操作可在重启/关闭原设置会话后读回原结果，不把旧草稿重新作用于当前画面。页面失去回执先按原请求查询，不自动改 expectedRevision 重放。operations.get 的 payload 可指定 command=wallpaper.apply/config.commit/wallpaper.import.begin 路由持久记录，导入不会与配置日志混成一个事务。
+
+预览租约使用原生随机 128 位句柄，15 秒过期、5 秒续租，绑定当前 settings owner。内置预览仍用受租约约束的 iframe；单媒体预览使用设置窗口拥有的独立原生窗口和 WebView2 controller，共用文件 scope、预算与退出屏障，不分配额外 GL context。固定预览 client 最大 640×360 物理像素，挂载前核对原生实际尺寸，尺寸变化终止该预览并要求重试；视频按真实源帧率与编码尺寸计账。切页、关闭、应用、换来源、加载失败和过期均可独立回收媒体预览。当前能力为 settingsDrafts=true、previewBuiltin=true、mediaApply=true、previewMedia=true；正式呈现接受单个 single 组的 builtin/followHertz/package，音源仍限 none/Hertz，旧业务命令仍只接受内置选择。普通构建已能从库里选择固定图片/视频版本、预览、应用并按稳定引用重启恢复；原生文件对话框的正向用户操作、视频封面、删除时版本引用保护和设备/长稳验收仍待补齐，不能据此宣布 P1-05 整包通过。
 
 ### 14.2 命令目录
 
@@ -1589,6 +1610,19 @@ AI 不接入 FrameInput、render/update、FFT 回调或轮播时钟；生成关�
 
 以下是同一设计中的可独立验收工作包，不另产出互相冲突的子方案。每包遵循：先写失败用例 → 确认测试能失败 → 最小实现 → 反例/真实运行验证 → 更新证据；只在用户授权时创建提交。
 
+实施状态核对（2026-11-02）：下方工作包表保留完整交付范围，不代表全部尚未实施。已实现与验证的细项以[复核记录](desktop-wallpaper-review-2026-11-01.md)为依据；完成底层子项不等于整个工作包通过产品验收。
+
+| 工作包 / 子项 | 当前状态 | 剩余范围 |
+| --- | --- | --- |
+| P0 运行底座 | 主要运行路径已实现，并已修复保存、时钟、策略、帧率、释放和显示器身份等已发现问题 | 真实设备/拓扑、电池/休眠/RDP、发布候选安装升级及长稳验收 |
+| P1-01 包校验 | 包合同、哈希及有界校验已有实现与回归，已被正式库导入使用 | 更多畸形输入与设备发布验收 |
+| P1-02 本地库与任务 | 固定快照、安装事务、恢复/取消/重复导入、跨实例写门与 20 GiB 实际字节配额已实现；库/导入、固定版本选择和重启恢复已接线 | 删除时的配置版本引用保护与完整用户导入操作验收 |
+| P1-03 图片准备与缓存 | EXIF、RGB ICC、线性透明缩放、缩略图、不可变派生、2 GiB 租约保护 LRU、环境资格缓存与目标像素变体已实现；按真实桌面/预览目标选图和补图已接线 | 视频封面；更多图像边界、峰值内存、1080p/4K 及硬解验收 |
+| P1-03 媒体交付 | 原生有界流、Range/seek、精确准入/撤销与轻后端已有原生回归；正式版本选择、桌面/独立媒体预览与跨重启恢复已接线 | 正向原生文件选择操作、大视频/设备资格及长期性能 |
+| P1-04 / P1-06 | budget/session、单媒体 TargetPlanner 和系统采集内核已实现；媒体候选、实测物理目标、四事实、两道退出屏障和桌面/预览全局预算已接线 | GL 与多资源总保留/子额度、JS 资源租约、单个系统音源 owner/设备生命周期、五分钟软暂停卸载与失败关闭的设备实测 |
+| P1-05 / P1-07 / P1-08 / P1-M0～M2 | 正式库导入、进度、config v5/提交日志、settings 草稿与单媒体选择/独立预览/应用/重启已接线 | 原生文件对话框正向验收、work 草稿、多屏、收藏轮播、舞台持久媒体及各工作包完整出口 |
+| P2 / P3 / AI | 尚未交付对应工作包 | 组合创作、安全隔离与分发、受管 AI 流程 |
+
 ### 20.1 P0：先修真实运行合同
 
 | 任务 | 文件与具体变更 | 交付证据 |
@@ -1674,6 +1708,7 @@ P3-03 可与 G3-S 并行，社区先分发声明式包；但**完整 P3** 必须
 | `crates/hertz-desktop/src/wallpaper/` 内模块测试 | 策略、状态、预算、引用、取消、恢复与迁移 |
 | `scripts/check-wallpaper-package.js` | 生成真实资源 fixture、导入导出往返、失败无副作用 |
 | `scripts/check-wallpaper-runtime.js` | 资源池并发、生命周期、时钟、dirty、适配器合同 |
+| `scripts/check-wallpaper-config-native.js` | 原生设置 owner/草稿修订/只读预览、保存失败、重复请求、持久操作查询、配置替换后日志未终结的磁盘检查点重启恢复与冲突保护；不冒充定时断电/OS 崩溃注入 |
 | `crates/hertz-studio/src/stage_media/`、`crates/vmusic-store/src/{stage_media,settings,backup}.rs` 模块测试与真实服务集成用例 | 分块/去重修复/发布事务/配额、删除各阶段崩溃及同 hash 重导入、双进程锁、原子预置 revision、备份/通用 settings 不旁路、DataDir/租约隔离 |
 | `scripts/check-stage-media-browser.js` 与现有舞台/SpaceLayers 检查增量 | File→持久导入→保存→关闭→重启恢复、删除原文件、已导入素材找回、快速替换/双客户端/空库迁移、回滚不删副本、本机/分享投影分离 |
 | `scripts/check-stage-media-dbx.js` | 实际发行宿主的流协议版本、顶层片段合同、无 Range/大 Range/seek/循环/取消、CSP/纹理、6 小时到期与 8 小时恢复；旧 mediaUrl 布尔能力不冒充流资格 |

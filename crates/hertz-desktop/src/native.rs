@@ -106,7 +106,14 @@ pub(crate) fn to_wide(value: &str) -> Vec<u16> {
 pub(crate) fn replace_file(from: &Path, to: &Path) -> Result<()> {
     let from = to_wide(&from.to_string_lossy());
     let to = to_wide(&to.to_string_lossy());
-    let ok = unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), MOVEFILE_REPLACE_EXISTING) };
+    let ok = unsafe {
+        MoveFileExW(
+            from.as_ptr(),
+            to.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING
+                | windows_sys::Win32::Storage::FileSystem::MOVEFILE_WRITE_THROUGH,
+        )
+    };
     if ok == 0 {
         bail!("MoveFileExW 失败");
     }
@@ -504,9 +511,8 @@ fn refresh_rate_hz(device: &[u16]) -> u32 {
         dmSize: std::mem::size_of::<DEVMODEW>() as u16,
         ..Default::default()
     };
-    let ok = unsafe {
-        EnumDisplaySettingsExW(device.as_ptr(), ENUM_CURRENT_SETTINGS, &mut mode, 0)
-    };
+    let ok =
+        unsafe { EnumDisplaySettingsExW(device.as_ptr(), ENUM_CURRENT_SETTINGS, &mut mode, 0) };
     if ok == 0 {
         return 60;
     }
@@ -597,7 +603,10 @@ fn display_identity(device: &str) -> (Option<String>, Option<String>) {
 }
 
 fn from_wide(buffer: &[u16]) -> String {
-    let end = buffer.iter().position(|value| *value == 0).unwrap_or(buffer.len());
+    let end = buffer
+        .iter()
+        .position(|value| *value == 0)
+        .unwrap_or(buffer.len());
     String::from_utf16_lossy(&buffer[..end])
 }
 
@@ -1141,6 +1150,22 @@ pub(crate) fn mount_wallpaper(hwnd: HWND, monitor: &WallpaperMonitor) -> Result<
             SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_FRAMECHANGED,
         );
         ShowWindow(hwnd, SW_SHOW);
+    }
+    Ok(())
+}
+
+/// Keep a candidate composited but unobtrusive until its native first-frame gate opens.
+pub(crate) fn wallpaper_opacity(hwnd: HWND, alpha: u8) -> Result<()> {
+    unsafe {
+        let style = windows_sys::Win32::UI::WindowsAndMessaging::GWL_EXSTYLE;
+        let old = GetWindowLongPtrW(hwnd, style) as u32;
+        SetWindowLongPtrW(hwnd, style, (old | WS_EX_LAYERED) as isize);
+        if SetLayeredWindowAttributes(hwnd, 0, alpha, LWA_ALPHA) == 0 {
+            bail!(
+                "设置壁纸候选透明度失败：{}",
+                std::io::Error::last_os_error()
+            );
+        }
     }
     Ok(())
 }

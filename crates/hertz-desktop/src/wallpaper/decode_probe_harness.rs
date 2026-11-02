@@ -37,6 +37,8 @@ pub(crate) fn command(body: &str, proxy: EventLoopProxy<UserEvent>) {
         content_capacity_bytes: Option<u64>,
         #[serde(default)]
         image_target: Option<super::super::image_prepare::ImageTarget>,
+        #[serde(default)]
+        reference: Option<super::super::target_planner::AssetRef>,
     }
     let Ok(command) = serde_json::from_str::<Command>(body) else {
         return;
@@ -83,7 +85,7 @@ pub(crate) fn command(body: &str, proxy: EventLoopProxy<UserEvent>) {
             }
             send(serde_json::json!({"held": false}));
         }
-        "begin" if !guard.running => {
+        "begin" | "prepare" | "resolve" if !guard.running => {
             guard.running = true;
             drop(guard);
             std::thread::spawn(move || {
@@ -101,14 +103,46 @@ pub(crate) fn command(body: &str, proxy: EventLoopProxy<UserEvent>) {
                     let probe = ProbeClient::native(proxy.clone())
                         .suppress_frames_for_test(command.suppress_frames)
                         .force_probe_for_test(command.force_probe);
+                    if command.action == "resolve" {
+                        let reference = command.reference.as_ref().ok_or_else(|| JobError::invalid_input("缺少 AssetRef"))?;
+                        let target = command.image_target.ok_or_else(|| JobError::invalid_input("缺少目标"))?;
+                        let resolution = super::super::target_planner::resolve(
+                            &assets, &library, reference, target,
+                            &["image/png".into(), "video/mp4".into(), "video/webm".into()],
+                            &AtomicBool::new(false),
+                        ).await?;
+                        return Ok::<_, JobError>(match resolution {
+                            super::super::target_planner::Resolution::PrepareRequired(request) => serde_json::json!({
+                                "resolution": "prepare_required", "request": request,
+                            }),
+                            super::super::target_planner::Resolution::Ready(media) => {
+                                let request = media.budget_request("harness-plan".into(), 1)?;
+                                serde_json::json!({
+                                    "resolution": "ready", "reference": media.reference(), "target": media.target(),
+                                    "contentKey": media.content_key(), "url": media.url(),
+                                    "width": media.input().metadata.display_width, "height": media.input().metadata.display_height,
+                                    "metadata": media.input().metadata,
+                                    "decoderSlotsRequired": request.decoders, "cpuBytesRequired": request.cpu_bytes,
+                                    "gpuBytesRequired": request.gpu_bytes, "decodePixelRate": request.decode_pixel_rate,
+                                    "outputPixelRate": request.output_pixel_rate,
+                                })
+                            }
+                        });
+                    }
                     let jobs = Arc::new(ImportJobs::start(library, assets, probe.clone()));
                     state().lock().unwrap().jobs = Some(Arc::clone(&jobs));
-                    jobs.submit_for_target(
-                        command.name.clone(),
-                        base.join("probe-inputs")
-                            .join(format!("{}.hwpkg", command.name)),
-                        command.image_target,
-                    )?;
+                    if command.action == "prepare" {
+                        jobs.prepare_asset(command.name.clone(), super::super::target_planner::PrepareRequest {
+                            reference: command.reference.ok_or_else(|| JobError::invalid_input("缺少 AssetRef"))?,
+                            target: command.image_target.ok_or_else(|| JobError::invalid_input("缺少目标"))?,
+                        })?;
+                    } else {
+                        jobs.submit_for_target(
+                            command.name.clone(),
+                            base.join("probe-inputs").join(format!("{}.hwpkg", command.name)),
+                            command.image_target,
+                        )?;
+                    }
                     loop {
                         if let Some(status) = jobs.status(&command.name) {
                             if matches!(

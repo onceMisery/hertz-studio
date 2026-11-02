@@ -38,7 +38,8 @@ use windows_sys::Win32::{
     },
 };
 
-pub const MESSAGE_LIMIT: usize = 8192;
+pub const REQUEST_LIMIT: usize = 16 * 1024;
+pub const RESPONSE_LIMIT: usize = 64 * 1024;
 const POLL: Duration = Duration::from_millis(10);
 
 fn invalid(message: &str) -> io::Error {
@@ -275,8 +276,8 @@ pub fn create_server(name: &str) -> io::Result<Server> {
             PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE,
             PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
             1,
-            MESSAGE_LIMIT as u32,
-            MESSAGE_LIMIT as u32,
+            RESPONSE_LIMIT as u32,
+            REQUEST_LIMIT as u32,
             1000,
             &attributes,
         )
@@ -322,20 +323,29 @@ impl Drop for Connection {
 }
 
 fn read_message(handle: HANDLE, cancel: &Cancellation, deadline: Instant) -> io::Result<Value> {
-    let mut bytes = [0u8; MESSAGE_LIMIT];
+    read_limited(handle, cancel, deadline, REQUEST_LIMIT)
+}
+
+fn read_limited(
+    handle: HANDLE,
+    cancel: &Cancellation,
+    deadline: Instant,
+    limit: usize,
+) -> io::Result<Value> {
+    let mut bytes = vec![0u8; limit];
     let read = Operation::new(handle)?
         .run(cancel, Some(deadline), |overlapped| unsafe {
             ReadFile(
                 handle,
                 bytes.as_mut_ptr(),
-                MESSAGE_LIMIT as u32,
+                limit as u32,
                 std::ptr::null_mut(),
                 overlapped,
             )
         })
         .map_err(|error| {
             if error.raw_os_error() == Some(ERROR_MORE_DATA as i32) {
-                invalid("management message exceeds 8192 bytes")
+                invalid(&format!("management message exceeds {limit} bytes"))
             } else {
                 error
             }
@@ -445,8 +455,8 @@ impl Connection {
         if !response.is_object() {
             return Err(invalid("management reply must be an object"));
         }
-        let bytes = serialize_bounded(&response, MESSAGE_LIMIT).unwrap_or_else(|_| {
-            br#"{"ok":false,"error":"control response exceeds 8192 bytes"}"#.to_vec()
+        let bytes = serialize_bounded(&response, RESPONSE_LIMIT).unwrap_or_else(|_| {
+            br#"{"ok":false,"error":"control response exceeds 65536 bytes"}"#.to_vec()
         });
         check(cancel, deadline)?;
         if !extra.peer_open()? {
@@ -478,7 +488,7 @@ pub fn request_until(
     if !payload.is_object() {
         return Err(invalid("management request must be an object"));
     }
-    let bytes = serialize_bounded(payload, MESSAGE_LIMIT)?;
+    let bytes = serialize_bounded(payload, REQUEST_LIMIT)?;
     let name = name_wide(name)?;
     let connecting = until.map_or_else(
         || Instant::now() + CONNECT_TIMEOUT,
@@ -543,7 +553,7 @@ pub fn request_until(
 }
 
 fn read_response(handle: HANDLE, cancel: &Cancellation, deadline: Instant) -> io::Result<Value> {
-    let response = read_message(handle, cancel, deadline)?;
+    let response = read_limited(handle, cancel, deadline, RESPONSE_LIMIT)?;
     check(cancel, deadline)?;
     match ExtraMessageRead::new(handle) {
         Ok(mut extra) => {
@@ -664,13 +674,13 @@ mod tests {
             },
             0
         );
-        let mut buffer = [0u8; MESSAGE_LIMIT];
+        let mut buffer = [0u8; REQUEST_LIMIT];
         assert_ne!(
             unsafe {
                 ReadFile(
                     pipe.as_raw_handle(),
                     buffer.as_mut_ptr(),
-                    MESSAGE_LIMIT as u32,
+                    REQUEST_LIMIT as u32,
                     &mut size,
                     std::ptr::null_mut(),
                 )
@@ -713,8 +723,8 @@ mod tests {
                         | PIPE_WAIT
                         | PIPE_REJECT_REMOTE_CLIENTS,
                     1,
-                    MESSAGE_LIMIT as u32,
-                    MESSAGE_LIMIT as u32,
+                    REQUEST_LIMIT as u32,
+                    REQUEST_LIMIT as u32,
                     2000,
                     std::ptr::null(),
                 )
@@ -729,14 +739,14 @@ mod tests {
                 );
             }
             assert_eq!(peer(handle, true, None).unwrap().pid, std::process::id());
-            let mut buffer = [0u8; MESSAGE_LIMIT];
+            let mut buffer = [0u8; REQUEST_LIMIT];
             let mut size = 0;
             assert_ne!(
                 unsafe {
                     ReadFile(
                         handle,
                         buffer.as_mut_ptr(),
-                        MESSAGE_LIMIT as u32,
+                        REQUEST_LIMIT as u32,
                         &mut size,
                         std::ptr::null_mut(),
                     )
@@ -782,7 +792,7 @@ mod tests {
             br#"{} {}"#.to_vec(),
             br#"{}x"#.to_vec(),
             b"[]".to_vec(),
-            vec![b'x'; MESSAGE_LIMIT + 1],
+            vec![b'x'; REQUEST_LIMIT + 1],
         ];
         for bytes in cases {
             let (name, worker) = fixture(1, |_, _| panic!("invalid request reached GUI"));
@@ -953,16 +963,16 @@ mod tests {
     #[test]
     fn oversized_response_becomes_complete_small_error_and_request_serialization_is_bounded() {
         let (name, worker) = fixture(1, |_, _| {
-            reply(json!({"large":"x".repeat(MESSAGE_LIMIT * 2)}))
+            reply(json!({"large":"x".repeat(RESPONSE_LIMIT * 2)}))
         });
         let response = request(&name, &json!({}), &Cancellation::new()).unwrap();
         assert_eq!(response["ok"], false);
-        assert!(response["error"].as_str().unwrap().contains("8192"));
+        assert!(response["error"].as_str().unwrap().contains("65536"));
         assert!(worker.join().unwrap().pop().unwrap().is_ok());
         assert_eq!(
             request(
                 &name,
-                &json!({"large":"x".repeat(MESSAGE_LIMIT * 2)}),
+                &json!({"large":"x".repeat(REQUEST_LIMIT * 2)}),
                 &Cancellation::new()
             )
             .unwrap_err()
@@ -1103,7 +1113,7 @@ mod tests {
             uuid::Uuid::new_v4()
         );
         let wide = name_wide(&name).unwrap();
-        // A tiny quota ensures the 8192-byte write cannot complete into the kernel buffer.
+        // A tiny quota ensures the request-sized write cannot complete into the kernel buffer.
         let handle = unsafe {
             CreateNamedPipeW(
                 wide.as_ptr(),
@@ -1141,7 +1151,7 @@ mod tests {
             }
             trigger.cancel();
         });
-        let bytes = [b'x'; MESSAGE_LIMIT];
+        let bytes = [b'x'; REQUEST_LIMIT];
         let started = Instant::now();
         let error = Operation::new(client.as_raw_handle())
             .unwrap()
@@ -1150,7 +1160,7 @@ mod tests {
                     WriteFile(
                         client.as_raw_handle(),
                         bytes.as_ptr(),
-                        MESSAGE_LIMIT as u32,
+                        REQUEST_LIMIT as u32,
                         std::ptr::null_mut(),
                         overlapped,
                     )
@@ -1183,7 +1193,7 @@ mod tests {
             b"{} {}".to_vec(),
             b"{}x".to_vec(),
             b"[]".to_vec(),
-            vec![b'x'; MESSAGE_LIMIT + 1],
+            vec![b'x'; RESPONSE_LIMIT + 1],
         ] {
             let name = format!(
                 r"\\.\pipe\hertz-desktop-control-test-{}",
@@ -1256,15 +1266,31 @@ mod tests {
     }
 
     #[test]
+    fn request_and_response_have_independent_full_size_limits() {
+        let (name, worker) = fixture(1, |body, _| {
+            assert_eq!(body["padding"].as_str().unwrap().len(), 16 * 1024 - 14);
+            reply(json!({"padding":"s".repeat(64 * 1024 - 14)}))
+        });
+        let response = request(
+            &name,
+            &json!({"padding":"r".repeat(16 * 1024 - 14)}),
+            &Cancellation::new(),
+        )
+        .unwrap();
+        assert_eq!(serde_json::to_vec(&response).unwrap().len(), 64 * 1024);
+        assert!(worker.join().unwrap().pop().unwrap().is_ok());
+    }
+
+    #[test]
     fn message_budget_is_exact_and_whitespace_is_allowed() {
         let (name, worker) = fixture(1, |body, _| {
-            assert_eq!(body["padding"].as_str().unwrap().len(), MESSAGE_LIMIT - 14);
+            assert_eq!(body["padding"].as_str().unwrap().len(), REQUEST_LIMIT - 14);
             reply(json!({"ok":true}))
         });
         let pipe = raw_client(&name, true);
         mode_message(&pipe);
-        let bytes = format!("{{\"padding\":\"{}\"}}", "x".repeat(MESSAGE_LIMIT - 14));
-        assert_eq!(bytes.len(), MESSAGE_LIMIT);
+        let bytes = format!("{{\"padding\":\"{}\"}}", "x".repeat(REQUEST_LIMIT - 14));
+        assert_eq!(bytes.len(), REQUEST_LIMIT);
         raw_write(&pipe, bytes.as_bytes()).unwrap();
         assert_eq!(
             read_message(

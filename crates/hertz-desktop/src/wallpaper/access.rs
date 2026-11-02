@@ -33,6 +33,35 @@ impl Drain {
     }
 }
 
+/// 单次准入的原生所有权；撤销只作用于自己的 scope，不影响后来授权。
+/// Drop 只撤销访问，不能证明 controller/decoder 已退出。
+pub(crate) struct MediaGrant {
+    access: MediaAccess,
+    generation: u64,
+    scope: Arc<Scope>,
+}
+
+impl MediaGrant {
+    pub(crate) fn revoke(&self) -> Drain {
+        self.scope.active.store(false, Ordering::Release);
+        let mut state = self
+            .access
+            .0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if state.generation == self.generation {
+            state.resources.clear();
+        }
+        Drain(Arc::clone(&self.scope))
+    }
+}
+
+impl Drop for MediaGrant {
+    fn drop(&mut self) {
+        self.revoke();
+    }
+}
+
 pub(crate) struct ReadPermit {
     pub(crate) generation: u64,
     scope: Arc<Scope>,
@@ -90,9 +119,10 @@ impl MediaAccess {
             generation,
             resources.iter().cloned().map(|key| (key, None)).collect(),
         )
+        .is_some()
     }
 
-    fn replace_resources(&self, generation: u64, resources: Resources) -> bool {
+    fn replace_resources(&self, generation: u64, resources: Resources) -> Option<Arc<Scope>> {
         if resources.len() > 512
             || resources.keys().any(|(hash, path)| {
                 hash.len() != 64
@@ -102,11 +132,11 @@ impl MediaAccess {
                     || hertz_wallpaper::validate_rel_path(path).is_err()
             })
         {
-            return false;
+            return None;
         }
         let mut state = self.0.lock().unwrap_or_else(|error| error.into_inner());
         if generation <= state.generation {
-            return false;
+            return None;
         }
         state.scope.active.store(false, Ordering::Release);
         state.generation = generation;
@@ -115,11 +145,11 @@ impl MediaAccess {
             readers: AtomicUsize::new(0),
         });
         state.resources = resources;
-        true
+        Some(Arc::clone(&state.scope))
     }
 
-    /// 原生导入管线传入已校验且拒绝写/删除共享的单个文件，页面不能提供根路径。
-    pub(crate) fn grant_probe(
+    /// 原生规划/导入管线传入已校验且拒绝写/删除共享的单个文件，页面不能提供根路径。
+    pub(crate) fn grant_pinned(
         &self,
         generation: u64,
         hash: String,
@@ -127,6 +157,24 @@ impl MediaAccess {
     ) -> bool {
         let key = (hash, media.entry.path.clone());
         self.replace_resources(generation, [(key, Some(media))].into_iter().collect())
+            .is_some()
+    }
+
+    /// 会话持有 scope 收据直到关闭/流屏障；旧代际回收不触碰新代际集合。
+    pub(crate) fn grant_scoped_pinned(
+        &self,
+        generation: u64,
+        hash: String,
+        media: Arc<super::assets::PinnedMedia>,
+    ) -> Option<MediaGrant> {
+        let key = (hash, media.entry.path.clone());
+        let scope =
+            self.replace_resources(generation, [(key, Some(media))].into_iter().collect())?;
+        Some(MediaGrant {
+            access: self.clone(),
+            generation,
+            scope,
+        })
     }
 
     pub(crate) fn permit(&self, hash: &str, path: &str) -> Option<ReadPermit> {
@@ -201,6 +249,35 @@ mod tests {
         assert!(!new.is_active());
         assert!(access.permit(&resources[0].0, &resources[0].1).is_none());
         assert!(!access.replace(5, &resources));
+    }
+
+    #[test]
+    fn scoped_retirement_waits_for_old_readers_and_cannot_revoke_new_grant() {
+        let access = MediaAccess::new();
+        let hash = "a".repeat(64);
+        let key = (hash.clone(), "assets/a.png".into());
+        let scope = access
+            .replace_resources(1, [(key.clone(), None)].into_iter().collect())
+            .unwrap();
+        let grant = MediaGrant {
+            access: access.clone(),
+            generation: 1,
+            scope,
+        };
+        let reader = access.permit(&hash, "assets/a.png").unwrap();
+        let queued = reader.clone();
+        assert!(access.replace(2, &[key]));
+        let next = access.permit(&hash, "assets/a.png").unwrap();
+        let drain = grant.revoke();
+        assert!(!reader.is_active());
+        assert!(!drain.is_drained());
+        drop(reader);
+        assert!(!drain.is_drained());
+        drop(queued);
+        assert!(drain.is_drained());
+        drop(grant);
+        assert!(next.is_active());
+        assert!(access.permit(&hash, "assets/a.png").is_some());
     }
 
     #[test]

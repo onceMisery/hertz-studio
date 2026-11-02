@@ -9,7 +9,7 @@
 //! 准入、Range 流内核、保留域拦截与页面轻后端。
 //! P1-04：预算账本（budget，§12.1/§12.3）与会话状态机（session，§13.3）。
 //! P1-06：系统音频分析管线与输入 owner（audio，§11.3；WASAPI loopback
-//! 采集线程随下一片接线）。
+//! 采集与分析由共享 owner 按实际运行消费者启停）。
 
 #[allow(dead_code)] // replace 由 P1-05 TargetPlanner 接入；当前生产默认空集合。
 pub(crate) mod access;
@@ -17,23 +17,27 @@ pub(crate) mod access;
 // P1-02/P1-04/P1-06 内核在本包内自测；接线到 app/管理协议属 P1-05（§20.2 依赖链
 // 01→02→03/04→05），接线后移除 dead_code 放行。
 #[allow(dead_code)]
+pub(crate) mod api;
+#[allow(dead_code)]
 pub(crate) mod assets;
 #[allow(dead_code)]
 pub(crate) mod audio;
 #[allow(dead_code)]
 pub(crate) mod audio_capture;
+pub(crate) mod audio_devices;
+pub(crate) mod audio_service;
 #[allow(dead_code)]
 pub(crate) mod budget;
+#[allow(dead_code)]
+pub(crate) mod config;
 #[allow(dead_code)] // AssetStore 的持久内容计量与单写者发布。
 pub(crate) mod content_quota;
 #[allow(dead_code)] // ImportJobs 的产品管理入口随 P1-05 接入。
 pub(crate) mod decode_probe;
-#[allow(dead_code)] // 本机环境资格，不授予文件或会话访问权限。
-pub(crate) mod qualification;
-#[allow(dead_code)]
-pub(crate) mod probe_environment;
 #[allow(dead_code)] // AssetStore 派生缓存的发布/回收与原生目录租约。
 pub(crate) mod derived_cache;
+#[allow(dead_code)]
+pub(crate) mod file_tokens;
 #[allow(dead_code)] // 派生描述符供后续 TargetPlanner 消费。
 pub(crate) mod image_prepare;
 #[allow(dead_code)]
@@ -46,7 +50,20 @@ pub(crate) mod library;
 pub(crate) mod media;
 #[allow(dead_code)]
 pub(crate) mod media_stream;
+pub(crate) mod page_events;
 pub(crate) mod policy;
 #[allow(dead_code)]
+pub(crate) mod probe_environment;
+#[allow(dead_code)] // 本机环境资格，不授予文件或会话访问权限。
+pub(crate) mod qualification;
+pub(crate) mod raw_import;
+#[allow(dead_code)] // app 接入真实媒体会话时消费的后台选择入口。
+pub(crate) mod selection_plan;
+#[allow(dead_code)]
+pub(crate) mod service;
+#[allow(dead_code)] // 内置 app 已接四事实；媒体交接/恢复与多资源编排继续接线。
 pub(crate) mod session;
+pub(crate) mod settings_drafts;
+#[allow(dead_code)] // 原生目标规划内核；正式选择入口随 P1-05 接入。
+pub(crate) mod target_planner;
 pub(crate) mod webresource;

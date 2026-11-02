@@ -58,7 +58,7 @@ pub(crate) fn pause_reasons(inputs: &PolicyInputs) -> Vec<&'static str> {
     if inputs.manual_pause {
         reasons.push(REASON_MANUAL_PAUSE);
     }
-    if inputs.fullscreen {
+    if inputs.fullscreen && inputs.wallpaper.pause_on_fullscreen {
         reasons.push(REASON_FULLSCREEN);
     }
     if inputs.session_unavailable {
@@ -87,7 +87,7 @@ pub(crate) fn pause_reasons(inputs: &PolicyInputs) -> Vec<&'static str> {
 pub(crate) fn renderable(inputs: &PolicyInputs) -> bool {
     !battery_pause(inputs)
         && !(inputs.manual_pause
-            || inputs.fullscreen
+            || (inputs.fullscreen && inputs.wallpaper.pause_on_fullscreen)
             || inputs.session_unavailable
             || inputs.display_off
             || inputs.display_missing)
@@ -269,7 +269,11 @@ mod tests {
         let reasons = preview_pause_reasons(&wallpaper, true, true, PowerState::Battery);
         assert_eq!(
             reasons,
-            vec![REASON_SESSION_UNAVAILABLE, REASON_DISPLAY_OFF, REASON_BATTERY]
+            vec![
+                REASON_SESSION_UNAVAILABLE,
+                REASON_DISPLAY_OFF,
+                REASON_BATTERY
+            ]
         );
         // 全屏与目标缺失不进入预览投影。
         let reasons = preview_pause_reasons(&wallpaper, false, false, PowerState::Ac);
@@ -286,7 +290,10 @@ mod tests {
         assert_eq!(gate.update(false, t0 + Duration::from_millis(100)), None);
         assert_eq!(gate.update(true, t0 + Duration::from_millis(200)), None);
         assert_eq!(gate.update(true, t0 + Duration::from_millis(700)), None);
-        assert_eq!(gate.update(true, t0 + Duration::from_millis(950)), Some(true));
+        assert_eq!(
+            gate.update(true, t0 + Duration::from_millis(950)),
+            Some(true)
+        );
         assert!(gate.stable());
         // 恢复快：150 ms 即回落。
         assert_eq!(gate.update(false, t0 + Duration::from_millis(1000)), None);

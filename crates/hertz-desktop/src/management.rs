@@ -74,7 +74,7 @@ pub(crate) fn reply(mut response: Value, request_id: Option<&str>) -> Value {
     response["requestId"] = request_id.map(Value::from).unwrap_or(Value::Null);
     if hertz_desktop_ipc::frame::serialize_bounded(
         &response,
-        hertz_desktop_ipc::management::MESSAGE_LIMIT,
+        hertz_desktop_ipc::management::RESPONSE_LIMIT,
     )
     .is_ok()
     {
@@ -206,7 +206,9 @@ impl Request {
                 }
             }
             if let Some(motion) = config.get("motion") {
-                let ok = motion.as_f64().is_some_and(|value| (0.0..=1.0).contains(&value));
+                let ok = motion
+                    .as_f64()
+                    .is_some_and(|value| (0.0..=1.0).contains(&value));
                 if !ok {
                     return Err(error("invalid_value"));
                 }
@@ -222,9 +224,9 @@ impl Request {
                 }
             }
             if let Some(display_id) = config.get("displayId") {
-                let ok = display_id.as_str().is_none_or(|value| {
-                    !value.trim().is_empty() && value.len() <= 256
-                });
+                let ok = display_id
+                    .as_str()
+                    .is_none_or(|value| !value.trim().is_empty() && value.len() <= 256);
                 if !ok {
                     return Err(error("invalid_value"));
                 }
@@ -334,14 +336,17 @@ mod tests {
     #[test]
     fn transport_size_fallback_preserves_valid_correlation_without_reflecting_invalid_ids() {
         let response = reply(
-            json!({"ok":true,"profile":"x".repeat(8192)}),
+            json!({"ok":true,"profile":"x".repeat(hertz_desktop_ipc::management::RESPONSE_LIMIT)}),
             Some("query-9"),
         );
         assert_eq!(response["requestId"], "query-9");
         assert_eq!(response["managementProtocol"], 2);
         assert_eq!(response["desktopBuildId"], crate::component::BUILD_ID);
         assert_eq!(response["error"], "management_response_too_large");
-        assert!(serde_json::to_vec(&response).unwrap().len() < 8192);
+        assert!(
+            serde_json::to_vec(&response).unwrap().len()
+                < hertz_desktop_ipc::management::RESPONSE_LIMIT
+        );
         assert!(reply(error("invalid_request_id"), Some(&"x".repeat(8192)))["requestId"].is_null());
         assert!(reply(error("invalid_request_id"), Some("line\nbreak"))["requestId"].is_null());
     }

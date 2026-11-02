@@ -21,7 +21,8 @@ type Result<T> = std::result::Result<T, JobError>;
 /// 本机作品的固定来源 id（§4.2：本机新作品属于固定 local 来源）。
 pub const LOCAL_SOURCE: &str = "local";
 
-#[derive(Debug, Clone, FromRow)]
+#[derive(Debug, Clone, serde::Serialize, FromRow)]
+#[serde(rename_all = "camelCase")]
 pub struct WorkRow {
     pub work_key: String,
     pub source_id: String,
@@ -59,6 +60,21 @@ pub struct InstallWork {
     pub package_bytes: u64,
     pub version: u32,
     pub source_id: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, sqlx::FromRow)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct VersionRow {
+    pub version_key: String,
+    pub version: i64,
+    pub package_hash: String,
+    pub state: String,
+}
+
+#[derive(sqlx::FromRow)]
+pub(crate) struct ImportOperation {
+    pub job_id: String,
+    pub payload_digest: String,
 }
 
 pub struct Library {
@@ -212,6 +228,12 @@ impl Library {
         Ok(())
     }
 
+    /// 裸媒体按固定字节身份复用最初生成的 manifest，改名后再次导入仍幂等。
+    pub(crate) async fn local_manifest(&self, remote_work_id: &str) -> Result<Option<String>> {
+        sqlx::query_scalar("SELECT p.manifest_json FROM works w JOIN versions v ON v.work_key = w.work_key JOIN packages p ON p.package_hash = v.package_hash WHERE w.source_id = 'local' AND w.remote_work_id = ?1 AND v.version = 1 LIMIT 1")
+            .bind(remote_work_id).fetch_optional(&self.pool).await.map_err(|error| JobError::database(error.to_string()))
+    }
+
     /// 包是否已索引（崩溃恢复与重复导入的判据）。
     pub async fn is_installed(&self, package_hash: &str) -> Result<bool> {
         let count: i64 =
@@ -300,6 +322,105 @@ impl Library {
             .fetch_optional(&self.pool)
             .await
             .map_err(|error| JobError::database(error.to_string()))
+    }
+
+    /// A fixed selection must belong to this work, including versions outside a UI page.
+    pub(crate) async fn contains_version(
+        &self,
+        work_key: &str,
+        package_hash: &str,
+    ) -> Result<bool> {
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM versions v JOIN packages p ON p.package_hash=v.package_hash WHERE v.work_key=?1 AND v.package_hash=?2 AND p.state='installed')")
+            .bind(work_key).bind(package_hash).fetch_one(&self.pool).await
+            .map_err(|error| JobError::database(error.to_string()))
+    }
+
+    pub(crate) async fn versions(&self, work_key: &str) -> Result<Vec<VersionRow>> {
+        sqlx::query_as("SELECT v.version_key, v.version, v.package_hash, p.state FROM versions v JOIN packages p ON p.package_hash = v.package_hash WHERE v.work_key = ?1 ORDER BY v.version DESC LIMIT 100")
+            .bind(work_key).fetch_all(&self.pool).await.map_err(|error| JobError::database(error.to_string()))
+    }
+
+    pub(crate) async fn import_operation(
+        &self,
+        request_id: &str,
+    ) -> Result<Option<ImportOperation>> {
+        sqlx::query_as("SELECT job_id, payload_digest FROM install_jobs WHERE request_id = ?1")
+            .bind(request_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|error| JobError::database(error.to_string()))
+    }
+
+    /// 请求身份与 queued 状态同一短事务落盘；不受内存历史淘汰影响。
+    pub(crate) async fn accept_import(
+        &self,
+        status: &super::jobs::JobStatus,
+        identity: &super::jobs::ImportIdentity,
+    ) -> Result<String> {
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(|error| JobError::database(error.to_string()))?;
+        let existing: Option<ImportOperation> =
+            sqlx::query_as("SELECT job_id, payload_digest FROM install_jobs WHERE request_id = ?1")
+                .bind(&identity.request_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|error| JobError::database(error.to_string()))?;
+        if let Some(existing) = existing {
+            if existing.payload_digest != identity.payload_digest {
+                return Err(JobError::new(
+                    "request_id_conflict",
+                    "相同请求 id 对应另一份输入",
+                ));
+            }
+            return Ok(existing.job_id);
+        }
+        sqlx::query("INSERT INTO install_jobs(job_id, request_id, payload_digest, state, progress, updated_at) VALUES (?1, ?2, ?3, 'queued', ?4, ?5)")
+            .bind(&status.job_id).bind(&identity.request_id).bind(&identity.payload_digest)
+            .bind(serde_json::to_string(status).map_err(|error| JobError::invalid_input(error.to_string()))?)
+            .bind(now_secs()).execute(&mut *tx).await.map_err(|error| JobError::database(error.to_string()))?;
+        tx.commit()
+            .await
+            .map_err(|error| JobError::database(error.to_string()))?;
+        Ok(status.job_id.clone())
+    }
+
+    pub(crate) async fn persisted_job(
+        &self,
+        job_id: &str,
+    ) -> Result<Option<super::jobs::JobStatus>> {
+        let row: Option<(String, Option<String>, Option<String>)> =
+            sqlx::query_as("SELECT state, progress, error FROM install_jobs WHERE job_id = ?1")
+                .bind(job_id)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(|error| JobError::database(error.to_string()))?;
+        row.map(|(state, progress, error)| {
+            if let Some(status) =
+                progress.and_then(|json| serde_json::from_str::<super::jobs::JobStatus>(&json).ok())
+            {
+                return Ok(status);
+            }
+            let state = serde_json::from_value(serde_json::Value::String(state))
+                .map_err(|error| JobError::database(error.to_string()))?;
+            Ok(super::jobs::JobStatus {
+                job_id: job_id.to_string(),
+                state,
+                error,
+                package_hash: None,
+                staged_bytes: 0,
+                generation: 0,
+            })
+        })
+        .transpose()
+    }
+
+    pub(crate) async fn interrupt_imports(&self) -> Result<()> {
+        sqlx::query("UPDATE install_jobs SET state = 'failed', error = 'interrupted: 宿主退出前任务未完成', progress = NULL, updated_at = ?1 WHERE state IN ('queued', 'preparing', 'publishing')")
+            .bind(now_secs()).execute(&self.pool).await.map_err(|error| JobError::database(error.to_string()))?;
+        Ok(())
     }
 
     /// 收尾任务记录（jobs.rs 在受理与终态写入）。

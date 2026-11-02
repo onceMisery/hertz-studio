@@ -61,6 +61,22 @@ function makePackage(kind, bytes, ordinal, imageFormat = 'png') {
   return buildZip([['manifest.json', Buffer.from(JSON.stringify(manifest))], [file, bytes]]);
 }
 
+function makeVariantsPackage(source, tiny, sufficient) {
+  const files = [['assets/source.png', source], ['assets/tiny.png', tiny], ['assets/sufficient.png', sufficient]];
+  const manifest = {
+    formatVersion: 1, workId: 'c17ed10a-5c55-4a52-85dc-000000000019', version: 1,
+    title: '包内变体规划', description: '', content: { kind: 'image', asset: 'background' },
+    assets: [{ id: 'background', kind: 'image', source: files[0][0], variants: [
+      { id: 'claimed-high', file: files[1][0], purpose: 'high', width: 9999, height: 9999 },
+      { id: 'sufficient', file: files[2][0], purpose: 'preview', width: 1, height: 1 },
+    ] }],
+    files: files.map(([file, bytes]) => ({ path: file, bytes: bytes.length, sha256: digest(bytes), mime: 'image/png' })),
+    properties: [], permissions: { audioSpectrum: false, pointer: false },
+    license: { code: 'none', assets: 'CC0-1.0', attribution: '' },
+  };
+  return buildZip([['manifest.json', Buffer.from(JSON.stringify(manifest))], ...files]);
+}
+
 function corruptFrames(bytes) {
   const result = Buffer.from(bytes);
   // VP8 keyframe 的帧头和压缩数据；保留 EBML/轨道/时间戳结构供第一道检查通过。
@@ -165,6 +181,9 @@ async function main() {
   const corruptImage = Buffer.concat([FIXTURE_PNG.subarray(0, 33), emptyIdat, FIXTURE_PNG.subarray(-12)]);
   const cases = {
     image: makePackage('image', FIXTURE_PNG, 1),
+    'raw-png': FIXTURE_PNG,
+    'raw-video': video,
+    'raw-bad': Buffer.from('not a supported media container'),
     video: makePackage('video', video, 2),
     'bad-image': makePackage('image', corruptImage, 3),
     'bad-video': makePackage('video', corruptFrames(video), 4),
@@ -228,13 +247,21 @@ async function main() {
       canvas.width = 1280; canvas.height = 640;
       context.fillStyle = '#3180aa'; context.fillRect(0, 0, canvas.width, canvas.height);
       result.push(canvas.toDataURL('image/png').split(',')[1]);
+      for (const [width, height] of [[80, 40], [160, 80]]) {
+        canvas.width = width; canvas.height = height;
+        context.fillStyle = '#3180aa'; context.fillRect(0, 0, width, height);
+        result.push(canvas.toDataURL('image/png').split(',')[1]);
+      }
       return result;
     });
     const jpeg = Buffer.from(encoded[0], 'base64');
     cases.jpeg = makePackage('image', jpeg, 10, 'jpeg');
+    cases['raw-jpeg'] = jpeg;
+    cases['raw-webp'] = Buffer.from(encoded[1], 'base64');
     cases.webp = makePackage('image', Buffer.from(encoded[1], 'base64'), 11, 'webp');
     cases.wide = makePackage('image', Buffer.from(encoded[2], 'base64'), 16);
     cases.target = makePackage('image', Buffer.from(encoded[3], 'base64'), 18);
+    cases.variants = makeVariantsPackage(...[3, 4, 5].map(index => Buffer.from(encoded[index], 'base64')));
     // 标准 TIFF EXIF Orientation=6；编码 3×2，浏览器显示必须为 2×3。
     const exif = Buffer.alloc(32);
     exif.write('Exif\0\0II', 0, 'binary'); exif.writeUInt16LE(42, 8); exif.writeUInt32LE(8, 10);
@@ -248,7 +275,7 @@ async function main() {
     exif.writeUInt16LE(5, 24);
     const transposed = Buffer.concat([jpeg.subarray(0, 2), Buffer.from([0xff, 0xe1, 0, 34]), exif, jpeg.subarray(2)]);
     cases.transposed = makePackage('image', transposed, 15, 'jpeg');
-    for (const name of ['jpeg', 'webp', 'rotated', 'mirrored', 'transposed', 'wide', 'target']) fs.writeFileSync(path.join(inputs, name + '.hwpkg'), cases[name]);
+    for (const name of ['jpeg', 'webp', 'rotated', 'mirrored', 'transposed', 'wide', 'target', 'variants', 'raw-jpeg', 'raw-webp']) fs.writeFileSync(path.join(inputs, name + '.hwpkg'), cases[name]);
     for (const context of browser.contexts()) context.on('page', page => {
       const log = { url: '', messages: [] };
       evidence.probes.push(log);
@@ -257,10 +284,10 @@ async function main() {
       page.on('domcontentloaded', () => { log.url = page.url(); });
     });
     let nonce = 0;
-    async function send(action, name, suppressFrames = false, contentCapacityBytes = null, imageTarget = null) {
+    async function send(action, name, suppressFrames = false, contentCapacityBytes = null, imageTarget = null, reference = null) {
       const id = ++nonce;
       await wallpaper.evaluate(command => window.ipc.postMessage('wallpaper_probe_import ' + JSON.stringify(command)), {
-        nonce: id, action, name, suppressFrames, contentCapacityBytes, imageTarget,
+        nonce: id, action, name, suppressFrames, contentCapacityBytes, imageTarget, reference,
         forceProbe: ['timeout', 'cancel', 'cancel-window', 'busy'].includes(name),
       });
       return id;
@@ -281,7 +308,7 @@ async function main() {
       assert.equal(value.activeStreams, 0, '回执必须等所有真实流退出');
       assert.ok(!pages().some(page => page.url().includes('/wallpaper-probe.html')), '独立 controller 必须先关闭');
       assert.ok(!fs.existsSync(path.join(configDir, 'staging', name)), '所有终态均清 staging');
-      const installed = fs.existsSync(path.join(configDir, 'packages', digest(cases[name])));
+      const installed = fs.existsSync(path.join(configDir, 'packages', value.packageHash || digest(cases[name])));
       assert.equal(installed, expected === 'done', '失败或取消不能发布');
       assert.equal(child.exitCode, null, '关闭探测不能关闭主程序');
       assert.equal(settings.isClosed(), false, '关闭探测不能关闭设置中心');
@@ -360,12 +387,81 @@ async function main() {
     assert.deepEqual([rotatedTarget.render.width, rotatedTarget.render.height], [1, 2], '先按 EXIF 转正再规划尺寸');
     verifyDerived(rotatedTarget);
     evidence.targetVariants = { receipts: targetReceipts, reusedGeneration: true, originalPreserved: true, rotatedTarget };
+    const reference = { packageHash: digest(cases.target), assetId: 'background', variantId: null };
+    const plannedTarget = { width: 41, height: 41, fit: 'cover', purpose: 'low' };
+    const plan = async (ref = reference, target = plannedTarget) => result(await send('resolve', 'planner', false, null, target, ref));
+    const missingPlan = await plan();
+    assert.equal(missingPlan.resolution, 'prepare_required', JSON.stringify(missingPlan));
+    assert.equal(targeted().length, 3, 'resolve 不隐式生成变体');
+    fs.unlinkSync(path.join(inputs, 'target.hwpkg'));
+    const preparedPlan = await result(await send('prepare', 'planned-image', false, null, plannedTarget, reference));
+    assert.equal(preparedPlan.state, 'done', JSON.stringify(preparedPlan));
+    assert.equal(preparedPlan.stagedBytes, 0, '补图只读已安装原包，不复制已删除的导入源');
+    assert.equal(preparedPlan.probeRuns, 1, '新产物通过真实 WebView2 解码');
+    assert.equal(preparedPlan.prepareTasks, 0);
+    assert.equal(preparedPlan.prepareCpuBytes, 0);
+    assert.equal(preparedPlan.activeStreams, 0);
+    const readyPlan = await plan();
+    assert.equal(readyPlan.resolution, 'ready', JSON.stringify(readyPlan));
+    assert.deepEqual(readyPlan.target, plannedTarget, '准入成本绑定在已解析的固定目标上');
+    assert.deepEqual([readyPlan.width, readyPlan.height], [82, 41]);
+    assert.equal(readyPlan.decoderSlotsRequired, 0);
+    assert.equal(readyPlan.cpuBytesRequired, 82 * 41 * 8);
+    assert.equal(readyPlan.gpuBytesRequired, 82 * 41 * 4);
+    assert.equal(readyPlan.outputPixelRate, 0, '静态图片不启动连续帧循环');
+    assert.match(readyPlan.url, /^https:\/\/[a-f0-9]{32}\.[a-f0-9]{32}\.wallpaper\.invalid\/files\/prepared\//);
+    assert.ok(!readyPlan.url.includes(configDir));
+    const repeatedPlan = await plan();
+    assert.equal(repeatedPlan.contentKey, readyPlan.contentKey);
+    assert.equal(repeatedPlan.url, readyPlan.url);
+    assert.equal(targeted().length, 4, '相同规划复用原代际');
+    const invalidPlan = await plan({ ...reference, assetId: '../background' });
+    assert.match(invalidPlan.error, /^invalid_input:/);
+    const unknownPlan = await plan({ ...reference, assetId: 'unknown' });
+    assert.match(unknownPlan.error, /^asset_not_found:/);
+    evidence.targetPlanner = { missingPlan, preparedPlan, readyPlan, repeatedPlan, invalidPlan, unknownPlan, sourceDeleted: true };
+    await begin('variants', 'done', false, null, null, coverTarget);
+    const variantRef = { ...reference, packageHash: digest(cases.variants) };
+    const selectedVariant = await plan(variantRef, coverTarget);
+    assert.equal(selectedVariant.resolution, 'ready', JSON.stringify(selectedVariant));
+    assert.equal(selectedVariant.reference.variantId, 'sufficient', '依据实测像素选择最小足够输入，忽略作者宽高和用途标签');
+    assert.deepEqual([selectedVariant.width, selectedVariant.height], [160, 80]);
+    const explicitVariant = await plan({ ...variantRef, variantId: 'claimed-high' }, coverTarget);
+    assert.equal(explicitVariant.reference.variantId, 'claimed-high');
+    assert.deepEqual([explicitVariant.width, explicitVariant.height], [80, 40], '显式变体不换成其他输入，也不放大');
+    const missingVariant = await plan({ ...variantRef, variantId: 'missing' }, coverTarget);
+    assert.match(missingVariant.error, /^asset_not_found:/);
+    evidence.targetPlanner.variants = { selectedVariant, explicitVariant, missingVariant };
     const vid = await begin('video', 'done');
     assert.equal(vid.decoderSlots, 0);
     assert.equal(vid.probeRuns, 1);
     const cachedVideo = await begin('video', 'done');
     assert.equal(cachedVideo.cacheHits, 1);
     assert.equal(cachedVideo.probeRuns, 0);
+    const videoPlan = await plan({ ...reference, packageHash: digest(cases.video) }, { width: 3840, height: 2160, fit: 'cover', purpose: 'preview' });
+    assert.equal(videoPlan.resolution, 'ready', JSON.stringify(videoPlan));
+    assert.deepEqual(videoPlan.target, { width: 960, height: 540, fit: 'cover', purpose: 'preview' }, '视频预算和页面描述共用规范化目标');
+    assert.equal(videoPlan.decoderSlotsRequired, 1);
+    const sourceRate = videoPlan.metadata.fpsUpperBound ?? videoPlan.metadata.sourceFps;
+    assert.ok(sourceRate > 11 && sourceRate < 13, '固定 VP8 fixture 约 12 fps，毫秒时间戳给出可信上界');
+    assert.equal(videoPlan.outputPixelRate, Math.ceil(960 * 540 * sourceRate), '预览按容器实测源速率计账');
+    assert.equal(videoPlan.decodePixelRate, Math.ceil(64 * 48 * sourceRate));
+    evidence.targetPlanner.video = videoPlan;
+    const rawResults = [];
+    for (const name of ['raw-png', 'raw-jpeg', 'raw-webp', 'raw-video']) {
+      const imported = await begin(name, 'done');
+      assert.notEqual(imported.packageHash, digest(cases[name]), 'raw bytes are packaged into immutable HWPK');
+      const original = path.join(configDir, 'packages', imported.packageHash, 'original.hwpkg');
+      assert.equal(digest(fs.readFileSync(original)), imported.packageHash);
+      const projected = fs.readdirSync(path.join(configDir, 'packages', imported.packageHash, 'files/assets'));
+      assert.equal(projected.length, 1);
+      assert.equal(digest(fs.readFileSync(path.join(configDir, 'packages', imported.packageHash, 'files/assets', projected[0]))), digest(cases[name]));
+      rawResults.push({ name, packageHash: imported.packageHash });
+    }
+    const rawAgain = await begin('raw-png', 'done');
+    assert.equal(rawAgain.packageHash, rawResults[0].packageHash);
+    await begin('raw-bad', 'failed');
+    evidence.rawImports = rawResults;
     const badImage = await begin('bad-image', 'failed');
     assert.match(badImage.error, /^decode_failed:/, '必须通过结构检查后在像素解码失败');
     const badVideo = await begin('bad-video', 'failed');

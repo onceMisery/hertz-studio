@@ -11,10 +11,9 @@
 //! 推进样本时钟（SILENT 标记按全零入环），频谱据此自然归零。设备格式变更
 //! /失效以错误退线呈现，重开（重建分析器）由编排层按代际执行。
 //!
-//! 切换顺序（§11.3，与 [`super::audio::AudioInputOwner`] 配合）：取消旧输入
-//! （stop_and_join 等旧线程真实退出）→ 代际已递增 → 清空频谱和滤波（switch
-//! 已做）→ 打开新输入 → 首个合法样本生效。所有消费者暂停/静态时由编排层
-//! 关闭采集（不追旧样本）。
+//! 切换由 [`super::audio_service::AudioService`] 单一 owner 编排：代际递增并
+//! 清除输出 → stop_and_join 等旧线程真实退出 → 清空样本与分析器 → 打开新输入
+//! → 首个合法样本生效。所有消费者暂停/静态时关闭采集（不追旧样本）。
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -33,10 +32,10 @@ use windows::Win32::System::Com::{
 };
 use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
 
-use super::audio::{downmix_interleaved, SampleRing};
+use super::audio::{downmix_interleaved, SampleRing, FFT_SIZE};
 
 #[cfg(test)]
-use super::audio::{SpectrumAnalyzer, BANDS, FFT_SIZE};
+use super::audio::{SpectrumAnalyzer, BANDS};
 #[cfg(test)]
 use std::time::Duration;
 
@@ -61,16 +60,35 @@ pub(crate) struct CaptureExit {
     pub(crate) dropped: u64,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CaptureInfo {
+    pub(crate) device_id: String,
+    pub(crate) sample_rate: u32,
+    pub(crate) channels: usize,
+}
+
 /// 采集线程句柄：`stop_and_join` 等旧线程真实退出后才算取消完成（§11.3）。
 pub(crate) struct CaptureHandle {
     generation: u64,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<CaptureExit>>,
+    info: Arc<Mutex<Option<CaptureInfo>>>,
 }
 
 impl CaptureHandle {
     pub(crate) fn generation(&self) -> u64 {
         self.generation
+    }
+
+    pub(crate) fn is_finished(&self) -> bool {
+        self.thread.as_ref().is_none_or(JoinHandle::is_finished)
+    }
+    pub(crate) fn info(&self) -> Option<CaptureInfo> {
+        self.info
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
     }
 
     /// 停止并等待真实退出。返回线程回执；线程 panic 也折叠为结构化错误。
@@ -111,14 +129,17 @@ pub(crate) fn spawn_loopback(
 ) -> Result<CaptureHandle, String> {
     let stop = Arc::new(AtomicBool::new(false));
     let thread_stop = Arc::clone(&stop);
+    let info = Arc::new(Mutex::new(None));
+    let thread_info = Arc::clone(&info);
     let thread = std::thread::Builder::new()
         .name("hertz-wallpaper-audio".into())
-        .spawn(move || run_capture(device, ring, generation, thread_stop))
+        .spawn(move || run_capture(device, ring, generation, thread_stop, thread_info))
         .map_err(|error| format!("启动采集线程失败：{error}"))?;
     Ok(CaptureHandle {
         generation,
         stop,
         thread: Some(thread),
+        info,
     })
 }
 
@@ -127,8 +148,9 @@ fn run_capture(
     ring: Arc<Mutex<SampleRing>>,
     generation: u64,
     stop: Arc<AtomicBool>,
+    info: Arc<Mutex<Option<CaptureInfo>>>,
 ) -> CaptureExit {
-    let result = capture_loop(&device, &ring, &stop);
+    let result = capture_loop(&device, &ring, &stop, &info);
     let dropped = ring.lock().map(|ring| ring.dropped()).unwrap_or_default();
     match result {
         Ok(()) => CaptureExit {
@@ -148,6 +170,7 @@ fn capture_loop(
     device: &Option<String>,
     ring: &Mutex<SampleRing>,
     stop: &AtomicBool,
+    info: &Mutex<Option<CaptureInfo>>,
 ) -> Result<(), String> {
     unsafe {
         // 采集线程自有 COM 单元（MTA）；S_FALSE（此前已初始化）同样可继续，
@@ -156,7 +179,7 @@ fn capture_loop(
         if hr.is_err() {
             return Err(format!("COM 初始化失败：{hr:?}"));
         }
-        let outcome = open_and_capture(device, ring, stop);
+        let outcome = open_and_capture(device, ring, stop, info);
         windows::Win32::System::Com::CoUninitialize();
         outcome
     }
@@ -166,6 +189,7 @@ unsafe fn open_and_capture(
     device: &Option<String>,
     ring: &Mutex<SampleRing>,
     stop: &AtomicBool,
+    info: &Mutex<Option<CaptureInfo>>,
 ) -> Result<(), String> {
     let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
         .map_err(|error| format!("枚举音频设备失败：{error}"))?;
@@ -177,6 +201,12 @@ unsafe fn open_and_capture(
             .GetDefaultAudioEndpoint(eRender, eMultimedia)
             .map_err(|error| format!("没有默认渲染设备：{error}"))?,
     };
+    let device_id = endpoint
+        .GetId()
+        .map_err(|error| format!("读取渲染设备身份失败：{error}"))?;
+    let id = device_id.to_string();
+    CoTaskMemFree(Some(device_id.0.cast()));
+    let id = id.map_err(|error| format!("读取渲染设备身份失败：{error}"))?;
     let client: IAudioClient = endpoint
         .Activate(CLSCTX_ALL, None)
         .map_err(|error| format!("激活音频客户端失败：{error}"))?;
@@ -226,6 +256,13 @@ unsafe fn open_and_capture(
         client
             .Start()
             .map_err(|error| format!("启动采集失败：{error}"))?;
+        // The source rate sets the 250 ms cap before the first captured packet.
+        *ring.lock().unwrap_or_else(|error| error.into_inner()) = SampleRing::new(sample_rate);
+        *info.lock().unwrap_or_else(|error| error.into_inner()) = Some(CaptureInfo {
+            device_id: id,
+            sample_rate,
+            channels,
+        });
         // 热路径零分配：线程内一次性预热 1 秒单声道 + 原始缓冲容量。
         let mut mono: Vec<f32> = Vec::with_capacity(sample_rate as usize);
         capture_packets(&capture, stop, ring, channels, event, &mut mono)
@@ -268,6 +305,9 @@ unsafe fn validate_format(format: *mut WAVEFORMATEX) -> Result<(usize, u32), Str
     let channels = channels_raw as usize;
     if channels == 0 || channels > MAX_CHANNELS || rate == 0 || rate > MAX_SAMPLE_RATE {
         return Err(format!("混合格式越界：{channels} 声道 @ {rate} Hz"));
+    }
+    if rate < (FFT_SIZE * 4) as u32 {
+        return Err("采样率不足以在 250 ms 缓冲内提供 2048 点分析窗".into());
     }
     if bits != 32 || usize::from(align) != channels * size_of::<f32>() {
         return Err("IEEE float 必须为 32 位且帧对齐与声道数一致".into());
@@ -367,6 +407,12 @@ mod tests {
         fmt.wBitsPerSample = 32;
         fmt.nBlockAlign = 8;
         assert_eq!(unsafe { validate_format(&mut fmt) }.unwrap(), (2, 48_000));
+        fmt.nSamplesPerSec = 8_000;
+        assert!(unsafe { validate_format(&mut fmt) }
+            .unwrap_err()
+            .contains("250 ms"));
+        fmt.nSamplesPerSec = 96_000;
+        assert_eq!(unsafe { validate_format(&mut fmt) }.unwrap(), (2, 96_000));
 
         fmt.nChannels = 64;
         assert!(unsafe { validate_format(&mut fmt) }
@@ -426,8 +472,8 @@ mod tests {
         let handle = spawn_loopback(None, Arc::clone(&ring), 1).expect("loopback 必须可开");
         std::thread::sleep(Duration::from_millis(200));
 
-        // 自绘 1.2s 测试音（polled render；不动用户音量，幅度 0.2）。
-        unsafe { render_tone(Duration::from_millis(1200), 440.0, 0.2) }
+        // 自绘 1.2s 测试音（polled render；不动用户音量，幅度 0.02）。
+        unsafe { render_tone(Duration::from_millis(1200), 440.0, 0.02) }
             .expect("测试音渲染必须成功");
 
         let exit = handle.stop_and_join();

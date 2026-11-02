@@ -173,6 +173,8 @@ function snapshot(playing, seq) {
       })}`);
     }
 
+    // Observe the required four heartbeats directly; shader/startup speed must not set the window.
+    await page.waitForFunction(() => window.__events.filter(event => event.startsWith('wallpaper_heartbeat ')).length > 3, null, { timeout: 10000 });
     const heartbeats = await page.evaluate(() =>
       window.__events.filter(event => event.startsWith('wallpaper_heartbeat ')).length);
     assert.ok(heartbeats > 3, '心跳必须持续上报（原生以 draws 采样实测帧率）');
