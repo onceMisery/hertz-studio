@@ -894,7 +894,9 @@ async fn desktop_mini_control(
 }
 
 /// 小窗请求回主窗口：广播 expand-capsule，不新增订阅协议。
-async fn desktop_mini_restore(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
+async fn desktop_mini_restore(
+    State(state): State<Arc<AppState>>,
+) -> ApiResult<Json<serde_json::Value>> {
     crate::desktop_mini::request_restore(&state).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }

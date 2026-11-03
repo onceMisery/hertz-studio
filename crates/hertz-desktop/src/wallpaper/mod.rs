@@ -38,10 +38,10 @@ pub(crate) mod decode_probe;
 pub(crate) mod derived_cache;
 #[allow(dead_code)]
 pub(crate) mod file_tokens;
-pub(crate) mod gl_plan;
 pub(crate) mod follow;
-pub(crate) mod handoff;
 pub(crate) mod frame_window;
+pub(crate) mod gl_plan;
+pub(crate) mod handoff;
 #[allow(dead_code)] // 派生描述符供后续 TargetPlanner 消费。
 pub(crate) mod image_prepare;
 #[allow(dead_code)]
@@ -70,5 +70,5 @@ pub(crate) mod session;
 pub(crate) mod settings_drafts;
 #[allow(dead_code)] // 原生目标规划内核；正式选择入口随 P1-05 接入。
 pub(crate) mod target_planner;
-pub(crate) mod webresource;
 pub(crate) mod video_poster;
+pub(crate) mod webresource;

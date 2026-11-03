@@ -673,6 +673,50 @@
     {
       "script": "check-desktop-mini-native.js",
       "purpose": "小窗播放（桌面宠物）原生集成：reopen 自启、宠物收起态窗体随皮肤尺寸、不透明包围盒命中穿透（WM_NCHITTEST）、悬停展开成播放胶囊、播放/待机素材切换、封面经自定义协议注入、拖拽吸附落盘、点击回主窗口广播。需要已构建的 hertz-desktop、Playwright 与无运行中的桌面实例。"
+    },
+    {
+      "script": "check-wallpaper-media-native.js",
+      "purpose": "隔离配置下真实 WorkerW/WebView2 的 P1 原生冒烟：保留域 GET/HEAD/Range、50 次 seek、图片与视频首帧、静音、冻结/恢复、伪造收据必须拒绝、失败与卸载；WALLPAPER_MEDIA_SOAK_SECONDS 可加验 WorkerW 长播。需 cargo build -p hertz-desktop --features wallpaper-media-probe、Playwright 且无运行中的桌面实例；正式构建不含测试准入入口。"
+    },
+    {
+      "script": "check-wallpaper-import-native.js",
+      "purpose": "真实 ImportJobs → staging Broker → 独立可见 WebView2 → Close/流退出 → 发布：PNG/JPEG/WebP/EXIF 旋转、重复导入、坏源拒绝、视频首帧/中段/尾部、15 秒无帧、IPC 与原生窗口取消、两 decoder 被占满时拒绝及释放后重试；--close-failure 另在独立 ProbeHost 的实际 Close 边界注入失败，核对原生预算、SQLite 资格与派生索引、staging、来源隔离与终态回执。需显式 feature 构建、Playwright 且无运行中的桌面实例。"
+    },
+    {
+      "script": "check-wallpaper-presentation-native.js",
+      "purpose": "普通构建的真实 GL/图片/视频桌面与独立预览：typed 首帧与揭幕、只读草稿、跨类型换代、原生窗口与 owner/租约/心跳退出、恢复及媒体 decoder 计账；--seed 预置夹具，--handoff/--follow-handoff/--close-failure/--builtin-preview 各走静态交接与故障注入分支。需已构建的二进制、Playwright 且无运行中的桌面实例。"
+    },
+    {
+      "script": "check-wallpaper-library-native.js",
+      "purpose": "只操作隔离测试库的原生素材列表：从既有样本库只读 SQLite backup 并复制不可变包，验证控件与失败边界；--crash 在受控 SQL 等待点终止本次宿主 PID，核对重启后标 unavailable 且不复活包、显式重试删除完成。需已构建的二进制、Playwright、一个 presentation --seed 夹具目录且无运行中的桌面实例。"
+    },
+    {
+      "script": "check-wallpaper-poster-native.js",
+      "purpose": "普通 WebView2 的有界静态海报读取、损坏、准备与重启，所有改动都发生在 presentation --seed 夹具的私有副本。需已构建的二进制、Playwright 且无运行中的桌面实例。"
+    },
+    {
+      "script": "check-wallpaper-audio-native.js",
+      "purpose": "真实 WASAPI loopback + 普通 WebView2 宿主：音频设备 owner 与独立桌面/预览消费者、频谱新鲜度、设备冲突、none/Hertz/system 切换；只使用隔离配置目录与安静测试音。物理默认切换、热拔与休眠另需实机验收。"
+    },
+    {
+      "script": "check-wallpaper-config-native.js",
+      "purpose": "隔离原生设置：owner、草稿修订与只读预览、保存失败、重复请求、持久操作查询、配置替换后日志未终结的磁盘检查点重启恢复与冲突保护；不冒充定时断电或 OS 崩溃注入。需已构建的二进制、Playwright 且无运行中的桌面实例。"
+    },
+    {
+      "script": "check-wallpaper-pointer-native.js",
+      "purpose": "真实 Win32 指针/按键采样在 Explorer 图标层之后：开关保存、真实桌面移动与点击、前台应用排除和关闭清理。需已构建的二进制、Playwright 且无运行中的桌面实例。"
+    },
+    {
+      "script": "check-wallpaper-gl-browser.js",
+      "purpose": "真实浏览器的壁纸 GL 额度：陈旧原生分配保持关闭、超额存储要等实际退出才记账、低画质档的峰值字节与像素预算不越界、检查结束额度归零。直接装配 crates/hertz-desktop/assets 的场景；需 Playwright 与 Chrome。"
+    },
+    {
+      "script": "check-wallpaper-handoff-browser.js",
+      "purpose": "真实浏览器的壁纸静态帧交接：GL/图片/视频的实际像素、边界、身份与揭幕回执。需 Playwright 与 Chrome。"
+    },
+    {
+      "script": "check-wallpaper-pointer-browser.js",
+      "purpose": "真实浏览器的指针水波：zodiac/coast 两套场景后端与图片/视频呈现上的可见像素、左右键、闲置、减少动态与关闭。需 Playwright 与 Chrome。"
     }
   ]
 }

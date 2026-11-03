@@ -548,7 +548,10 @@ fn planner_prepares_installed_asset_without_source_and_admits_only_after_budget(
     let old_permit = access.permit(&hash, &path).unwrap();
     let held = budget.usage();
     assert_eq!(held.session_reservations, 1);
-    assert_eq!(held.resource_allocations, 2, "解码与呈现只分配父计划的子额度");
+    assert_eq!(
+        held.resource_allocations, 2,
+        "解码与呈现只分配父计划的子额度"
+    );
     let allocated = session.media_allocation().unwrap();
     assert_eq!(allocated.reserved, allocated.allocated);
     assert_eq!(
@@ -626,7 +629,11 @@ fn planner_prepares_installed_asset_without_source_and_admits_only_after_budget(
         "活动代际不能被退出回执释放"
     );
     assert!(session.controller_closed(first_generation));
-    assert_eq!(budget.usage().resource_release_pending, 2, "controller Close 不能代替文件读者退出");
+    assert_eq!(
+        budget.usage().resource_release_pending,
+        2,
+        "controller Close 不能代替文件读者退出"
+    );
     assert!(
         session.reap_resources().is_empty(),
         "controller 关闭仍须等待文件流"
@@ -1529,7 +1536,11 @@ fn media_readiness_rejects_wrong_backend_and_frames_before_admission() {
         }
         assert_eq!(session.state(), SessionState::Ready);
         assert_eq!(session.diagnostics().frame_kind, Some(FrameKind::Image));
-        assert_eq!(session.request_media_pause(std::time::Instant::now()), None, "images need no video drain proof");
+        assert_eq!(
+            session.request_media_pause(std::time::Instant::now()),
+            None,
+            "images need no video drain proof"
+        );
         session.disable();
         assert!(
             session.reap_resources().is_empty(),
@@ -1698,7 +1709,11 @@ fn video_session_counts_handoff_peak_and_holds_last_decoder_until_physical_exit(
     assert!(!session.record_media_position(old, u64::MAX));
     assert_eq!(session.media_position_ms(), Some(duration / 2));
     let paused_at = std::time::Instant::now();
-    assert_eq!(session.request_media_pause(paused_at), None, "first frame must precede a pause check");
+    assert_eq!(
+        session.request_media_pause(paused_at),
+        None,
+        "first frame must precede a pause check"
+    );
     assert!(!session.frame_submitted(old, FrameKind::Image));
     assert!(!session.frame_submitted(old, FrameKind::Gl));
     assert!(session.frame_submitted(old, FrameKind::Video));
@@ -1707,29 +1722,54 @@ fn video_session_counts_handoff_peak_and_holds_last_decoder_until_physical_exit(
     assert_eq!(session.state(), SessionState::Ready);
     let pause_token = session.request_media_pause(paused_at).unwrap();
     assert_eq!(session.media_pause_confirmed(), Some(false));
-    assert_eq!(session.request_media_pause(paused_at + Duration::from_secs(1)), Some(pause_token));
+    assert_eq!(
+        session.request_media_pause(paused_at + Duration::from_secs(1)),
+        Some(pause_token)
+    );
     assert!(!session.confirm_media_pause(old + 1, pause_token, paused_at));
     assert!(!session.confirm_media_pause(old, pause_token + 1, paused_at));
     assert!(!session.media_pause_expired(paused_at + Duration::from_millis(1999)));
     assert!(session.clear_media_pause(paused_at + Duration::from_millis(1999)));
     assert_eq!(session.media_pause_confirmed(), None);
     assert!(!session.confirm_media_pause(old, pause_token, paused_at + Duration::from_secs(2)));
-    let next_pause = session.request_media_pause(paused_at + Duration::from_secs(2)).unwrap();
+    let next_pause = session
+        .request_media_pause(paused_at + Duration::from_secs(2))
+        .unwrap();
     assert_ne!(next_pause, pause_token);
     assert!(!session.confirm_media_pause(old, pause_token, paused_at + Duration::from_secs(2)));
     assert!(session.confirm_media_pause(old, next_pause, paused_at + Duration::from_millis(2200)));
     assert_eq!(session.media_pause_confirmed(), Some(true));
     assert!(!session.media_pause_expired(paused_at + Duration::from_secs(300)));
-    assert_eq!(budget.usage().decoder_slots, 1, "confirmed soft pause keeps its decoder reservation");
+    assert_eq!(
+        budget.usage().decoder_slots,
+        1,
+        "confirmed soft pause keeps its decoder reservation"
+    );
     assert!(session.clear_media_pause(paused_at + Duration::from_secs(301)));
     let timeout_at = paused_at + Duration::from_secs(302);
     let timeout_token = session.request_media_pause(timeout_at).unwrap();
-    assert_eq!(session.request_media_pause(timeout_at + Duration::from_secs(1)), Some(timeout_token));
-    assert!(session.media_pause_expired(timeout_at + Duration::from_secs(2)), "repeated stop cannot extend the deadline");
-    assert!(!session.confirm_media_pause(old, timeout_token, timeout_at + Duration::from_secs(2)), "late proof cannot erase a missed deadline");
-    assert!(!session.clear_media_pause(timeout_at + Duration::from_secs(2)), "late resume cannot erase an expired native deadline");
+    assert_eq!(
+        session.request_media_pause(timeout_at + Duration::from_secs(1)),
+        Some(timeout_token)
+    );
+    assert!(
+        session.media_pause_expired(timeout_at + Duration::from_secs(2)),
+        "repeated stop cannot extend the deadline"
+    );
+    assert!(
+        !session.confirm_media_pause(old, timeout_token, timeout_at + Duration::from_secs(2)),
+        "late proof cannot erase a missed deadline"
+    );
+    assert!(
+        !session.clear_media_pause(timeout_at + Duration::from_secs(2)),
+        "late resume cannot erase an expired native deadline"
+    );
     assert_eq!(session.media_pause_confirmed(), Some(false));
-    assert_eq!(budget.usage().decoder_slots, 1, "timeout itself is not physical exit");
+    assert_eq!(
+        budget.usage().decoder_slots,
+        1,
+        "timeout itself is not physical exit"
+    );
     let next = attaching_media_session(&mut session, &recovery, 2);
     assert_eq!(
         session.media_position_ms(),
@@ -1759,10 +1799,7 @@ fn video_session_counts_handoff_peak_and_holds_last_decoder_until_physical_exit(
     assert_eq!(budget.usage().decoder_slots, 2);
     assert!(session.controller_closed(old));
     assert_eq!(session.reap_resources(), vec![old]);
-    assert!(
-        !session.controller_closed(old),
-        "重复关闭不命中新代际"
-    );
+    assert!(!session.controller_closed(old), "重复关闭不命中新代际");
     assert_eq!(budget.usage().decoder_slots, 1);
     let token = budget.grant(&third).unwrap();
     budget.confirm_exit(token, "third", 1).unwrap();

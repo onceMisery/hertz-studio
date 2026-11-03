@@ -162,10 +162,7 @@ pub(crate) async fn snapshot(state: &AppState) -> Value {
 /// 切换与暂停反馈都随它 ≤1 s 送达），频谱帧只跟脏标记（≤30 Hz）。
 /// 纯函数便于测试节拍合同。
 fn plan_push(spectrum_dirty: bool, since_status: Duration) -> (bool, bool) {
-    (
-        since_status >= STATUS_PUSH_INTERVAL,
-        spectrum_dirty,
-    )
+    (since_status >= STATUS_PUSH_INTERVAL, spectrum_dirty)
 }
 
 /// 壁纸事件流 v2：首发合并帧；33 ms 频谱节拍只推频谱帧（≤30 Hz），
@@ -326,7 +323,11 @@ mod tests {
         let spectrum = merged["spectrumSeq"].as_u64().unwrap();
 
         let frame = state.wallpaper.frame(&state, false, true);
-        assert_eq!(frame["seq"].as_u64().unwrap(), status, "频谱帧不得动状态序号");
+        assert_eq!(
+            frame["seq"].as_u64().unwrap(),
+            status,
+            "频谱帧不得动状态序号"
+        );
         assert!(frame["spectrumSeq"].as_u64().unwrap() > spectrum);
 
         let status_frame = state.wallpaper.frame(&state, true, false);
@@ -362,7 +363,10 @@ mod tests {
         assert_eq!(plan_push(true, Duration::from_millis(100)), (false, true));
         // 状态到 1 s：即使频谱不脏也发状态帧（space 刷新与暂停反馈的保底）。
         assert_eq!(plan_push(false, STATUS_PUSH_INTERVAL), (true, false));
-        assert_eq!(plan_push(false, STATUS_PUSH_INTERVAL + Duration::from_secs(5)), (true, false));
+        assert_eq!(
+            plan_push(false, STATUS_PUSH_INTERVAL + Duration::from_secs(5)),
+            (true, false)
+        );
         // 双脏同 tick：一帧双递增。
         assert_eq!(plan_push(true, STATUS_PUSH_INTERVAL), (true, true));
         // 全静默且未到 1 s：不发。

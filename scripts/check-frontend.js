@@ -168,6 +168,8 @@ const STEPS = [
     why: '三维空间的相机运行时是纯数学：角度环绕、钳制、combo→镜头映射、60/144Hz 变帧率一致性、基线表唯一 owner，错了不报错、只是镜头「手感不对」。' },
   { script: 'check-space-post.js', stage: 'behavior', why: '空间后处理参数范围与默认关闭契约，真实 GPU 像素检查可用 --browser 运行。' },
   { script: 'check-space-layers.js', stage: 'behavior', why: '空间装饰的有界几何、歌词擦除、背景归还与暂停时钟。' },
+  { script: 'check-space-resource-leases.js', stage: 'behavior',
+    why: '共享空间素材的租约：并发消费者合并成一次真实加载，取消/重复释放/同键换代都不能碰别人的纹理——错了只是素材泄漏或画面停在旧图，不报错。' },
   { script: 'check-stanza-sonnet.js', stage: 'behavior',
     why: '商籁：构图数、逐字时间轴、镜头包络都只表现为「画面变得不对」，不报错。' },
   { script: 'check-stanza-tempera.js', stage: 'behavior',
@@ -176,6 +178,8 @@ const STEPS = [
     why: '星诞导演。' },
   { script: 'check-sonnet-palette.js', stage: 'behavior',
     why: '调色板纯函数部分（含真实 Chrome 的 --browser 分支留给本地视觉验收）。' },
+  { script: 'check-wallpaper-runtime.js', stage: 'behavior',
+    why: '壁纸场景运行时的确定性回归：帧率档位与资源池并发、生命周期与 dirty、适配器合同、频谱新鲜度、真实首帧与迟到回调的释放。像素错位在浏览器里才看得见，但接线错在这里只会悄悄停绘。' },
 ];
 
 // CI 暂不跑、但本地值得随手跑的无浏览器检查。

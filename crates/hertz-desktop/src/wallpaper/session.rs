@@ -33,8 +33,8 @@ use std::time::{Duration, Instant};
 
 use super::access::{Drain, MediaAccess, MediaGrant};
 use super::budget::{Allocation, AllocationSnapshot, BudgetCoordinator, BudgetRequest, OwnerKind};
-use super::jobs::JobError;
 use super::gl_plan::GlAdmission;
+use super::jobs::JobError;
 use super::media::Container;
 use super::target_planner::ResolvedMedia;
 
@@ -463,9 +463,16 @@ impl WallpaperSession {
     }
 
     pub(crate) fn admit_gl(&mut self, mut admission: GlAdmission) -> Result<(), JobError> {
-        if admission.generation() != self.generation || admission.owner() != self.owner
-            || self.state != SessionState::Attaching || self.gl.is_some() || self.media.is_some() {
-            return Err(JobError::new("stale_generation", "GL 准入必须属于尚未加载的当前代际"));
+        if admission.generation() != self.generation
+            || admission.owner() != self.owner
+            || self.state != SessionState::Attaching
+            || self.gl.is_some()
+            || self.media.is_some()
+        {
+            return Err(JobError::new(
+                "stale_generation",
+                "GL 准入必须属于尚未加载的当前代际",
+            ));
         }
         admission.published = true;
         self.gl = Some(admission);
@@ -474,7 +481,9 @@ impl WallpaperSession {
         Ok(())
     }
 
-    pub(crate) fn gl(&self) -> Option<&GlAdmission> { self.gl.as_ref() }
+    pub(crate) fn gl(&self) -> Option<&GlAdmission> {
+        self.gl.as_ref()
+    }
 
     /// 页面加载描述只读借用当前已准入计划，不能替换目标或资源。
     pub(crate) fn media(&self) -> Option<&ResolvedMedia> {
@@ -598,7 +607,11 @@ impl WallpaperSession {
     /// 仅在对应原生 controller Close 成功且其 surface 销毁后调用。
     /// 活动代际/未知代际拒绝；页面 stop、emptied、错误或超时均不能调用本方法。
     pub(crate) fn controller_closed(&mut self, generation: u64) -> bool {
-        if let Some(gl) = self.retiring_gl.iter_mut().find(|gl| gl.generation() == generation) {
+        if let Some(gl) = self
+            .retiring_gl
+            .iter_mut()
+            .find(|gl| gl.generation() == generation)
+        {
             gl.controller_closed();
             return true;
         }
@@ -617,7 +630,12 @@ impl WallpaperSession {
     pub(crate) fn reap_resources(&mut self) -> Vec<u64> {
         let mut finished = Vec::new();
         self.retiring_gl.retain_mut(|gl| {
-            if gl.finish() { finished.push(gl.generation()); false } else { true }
+            if gl.finish() {
+                finished.push(gl.generation());
+                false
+            } else {
+                true
+            }
         });
         self.retiring_media.retain_mut(|media| {
             if media.finish() {
@@ -665,10 +683,11 @@ impl WallpaperSession {
     }
 
     pub(crate) fn frame_submitted(&mut self, generation: u64, kind: FrameKind) -> bool {
-        if (self.gl.is_some() && kind != FrameKind::Gl) || self
-            .media
-            .as_ref()
-            .is_some_and(|media| media.frame_kind != kind)
+        if (self.gl.is_some() && kind != FrameKind::Gl)
+            || self
+                .media
+                .as_ref()
+                .is_some_and(|media| media.frame_kind != kind)
             || (self.last_media_generation == Some(generation) && self.media.is_none())
         {
             return false;
