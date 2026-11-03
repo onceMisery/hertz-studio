@@ -601,12 +601,13 @@ ok(CS.importJSON('[1,2,3]').ok === false, '错误形状的 JSON 被拒绝');
   //    症状与"泛光过曝"一模一样，但改后处理链永远修不好。
   const stageCss = fs.readFileSync(path.join(WEB, 'stage.css'), 'utf8');
   const styleCss = fs.readFileSync(path.join(WEB, 'style.css'), 'utf8');
+  const designBaseCss = fs.readFileSync(path.join(WEB, 'design', 'design-base.css'), 'utf8');
   const themesSrc = fs.readFileSync(path.join(WEB, 'themes.js'), 'utf8');
   const altDecl = (stageCss.match(/--music-highlight-alt-rgb:\s*([^;]+);/) || [])[1];
   ok(!!altDecl && /--accent-2-rgb/.test(altDecl),
     '第二支高亮色指向 --accent-2-rgb 而不是 --accent-rgb（指向后者会让两支同色）');
-  ok(/--accent-2-rgb:\s*[^;]+;/.test(styleCss),
-    '--accent-2-rgb 在 style.css 的 :root 有定义（否则引用悬空，退回固定青）');
+  ok(/--accent-2-rgb:\s*[^;]+;/.test(designBaseCss),
+    '--accent-2-rgb 在 design/design-base.css 的 :root 有定义（否则引用悬空，退回固定青）');
   // 这一条断言的是「同一个 forEach 里同时派生两支」，所以只认列表字面量。
   // 列表后来扩到四支（加了 --text / --bg，外观层要在 rgba() 里用它们），
   // 断言跟着放宽成"前两项仍是 accent 与 accent-2"——放宽的是**长度**，

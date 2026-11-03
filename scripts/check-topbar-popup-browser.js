@@ -38,31 +38,29 @@ const { startFixture } = require('./ui-browser-fixture');
 
     const visible = sel => page.locator(sel).isVisible();
 
-    // ① 开着主题色去点皮肤按钮：主题色必须先收（修复前两个叠着开）。
+    // 自 e80af65 起主题色/界面皮肤按钮收进 #top-more-menu：菜单收起时按钮不可点，
+    // 所以每段交互都先开更多工具菜单再点目标按钮。互斥判定口径不变。
+    // ① 从更多工具菜单里开主题色菜单：更多工具必须先收（广播互斥，
+    //    修复前两个叠着开）。
+    await page.click('#top-more-btn');
     await page.click('#theme-btn');
     assert.ok(await visible('#theme-menu'), '主题色菜单能打开');
+    assert.equal(await visible('#top-more-menu'), false, '开主题色菜单时更多工具必须收起');
+
+    // ② 再从更多工具开皮肤菜单：主题色与更多工具都必须收（反向同理）。
+    await page.click('#top-more-btn');
     await page.click('#skin-btn');
     assert.ok(await visible('#skin-menu'), '皮肤菜单能打开');
+    assert.equal(await visible('#top-more-menu'), false, '开皮肤菜单时更多工具必须收起');
     assert.equal(await visible('#theme-menu'), false, '开皮肤菜单时主题色菜单必须收起');
 
-    // ② 更多工具对另外两个也一样；反向（皮肤开着点主题色）再验一遍。
+    // ③ 原有开合路径一个都不能被广播破坏（按钮在收起的菜单里，重按 toggle
+    //    已不可达，关闭路径只剩 Escape 与点外部）。
     await page.click('#top-more-btn');
-    assert.ok(await visible('#top-more-menu'), '更多工具菜单能打开');
-    assert.equal(await visible('#skin-menu'), false, '开更多工具时皮肤菜单必须收起');
-    assert.equal(await visible('#theme-menu'), false, '开更多工具时主题色菜单必须收起');
-    await page.click('#skin-btn');
-    assert.ok(await visible('#skin-menu'), '皮肤菜单反向能打开');
-    assert.equal(await visible('#top-more-menu'), false, '开皮肤菜单时更多工具必须收起');
-    await page.click('#theme-btn');
-    assert.ok(await visible('#theme-menu'), '主题色菜单反向能打开');
-    assert.equal(await visible('#skin-menu'), false, '开主题色时皮肤菜单必须收起');
-
-    // ③ 原有开合路径一个都不能被广播破坏。
-    await page.click('#theme-btn'); // 再点一下照常关
-    assert.equal(await visible('#theme-menu'), false, '按钮再点一下照常收起');
     await page.click('#theme-btn');
     await page.keyboard.press('Escape');
     assert.equal(await visible('#theme-menu'), false, 'Escape 照常收起主题色菜单');
+    await page.click('#top-more-btn');
     await page.click('#skin-btn');
     await page.mouse.click(400, 500); // 点外部照常收
     assert.equal(await visible('#skin-menu'), false, '点外部照常收起皮肤菜单');

@@ -1,0 +1,27 @@
+/* SPDX-License-Identifier: MIT */
+/* 应用外壳的区域显隐与工作区模式（AppShell 层，从 room.css 迁入的跨页面规则）。
+   这里只描述「公共 chrome 与布局容器」对两个信号的响应，信号与规则分离：
+   - body.room-view：外壳活动视图是房间工作区（由 HertzShell.navigate 写入）；
+   - body.room-active：一起听房间持有播放权（业务信号，由房间传输层写入）。
+   各页面内部的样式归各页面：room.css 只描述房间工作区自身。 */
+
+/* 房间工作区替换宿主导航，活动房间单独持有舞台；这些规则随模式与信号消失，
+   一个在收听的房间永远不会顶掉 Hertz 的其余部分。 */
+.room-view #stage,.room-active #stage { display:none !important; }
+html body.room-view { padding:0 !important; gap:0 !important; background:var(--bg); }
+body.room-view .topbar,body.room-view #rail,body.room-view #playback-bar,body.room-view #bar-restore,body.room-view #capsule,body.room-view .orbit-queue { display:none !important; }
+body.room-view .app,html[data-skin] body.room-view .app { grid-template-columns:minmax(0,1fr) !important; grid-template-rows:minmax(0,1fr) !important; padding:0 !important; gap:0 !important; }
+body.room-view #column,body.room-view .orbit-main,html[data-skin] body.room-view .orbit-main { padding:0 !important; border:0 !important; border-radius:0 !important; box-shadow:none !important; background:var(--bg) !important; min-width:0; min-height:0; }
+html[data-skin] body.room-view #view-room { padding:0 !important; border-radius:0; }
+
+/* 房间在后台收听：桌面宽度去掉舞台列让位单列；全局播放条、恢复按钮与胶囊
+   交给房间迷你播放器（其自身样式与业务规则仍在房间传输层）。 */
+@media(min-width:1241px) { body.room-active:not(.room-view) .app { grid-template-columns:var(--rail-w) minmax(0,1fr); } }
+[data-skin="orbit"] body.room-active .orbit-queue { display:none; }
+@media(min-width:601px) {
+  [data-skin="orbit"] body.room-active:not(.room-view) .app { grid-template-columns:var(--orbit-rail) minmax(0,1fr); }
+  [data-skin="orbit"] body.room-active:not(.room-view) .app.orbit-nav-hidden { grid-template-columns:minmax(0,1fr); }
+}
+.room-active #playback-bar,.room-active #bar-restore,.room-active #capsule { display:none !important; }
+body.room-active:not(.room-view):not(.room-player-collapsed) .app { margin-bottom:108px; }
+@media(max-width:700px) { body.room-active:not(.room-view):not(.room-player-collapsed) .app { margin-bottom:154px; } }

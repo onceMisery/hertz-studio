@@ -19,7 +19,7 @@
   let coverRead = null, lyricState = 'empty';
   const validAvatar = value => global.HertzRoomWorkspace.avatarPresets.some(item => item[0] === value) || ['disc', 'phones', 'heart', 'radio', 'queue', 'crown', 'user', 'play'].includes(value);
   const h = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = String(text); return e; };
-  function button(text, fn, cls) { const e = h('button', 'btn ' + (cls || ''), text); e.type = 'button'; e.onclick = () => run(fn); return e; }
+  function button(text, fn, cls) { const e = h('button', 'btn touch flat ' + (cls || ''), text); e.type = 'button'; e.onclick = () => run(fn); return e; }
   function field(parent, label, type, value) { const l = h('label', 'room-field', label), e = h(type === 'textarea' ? 'textarea' : 'input'); if (type !== 'textarea') e.type = type; e.value = value == null ? '' : value; l.append(e); parent.append(l); return e; }
   function select(parent, label, choices) { const l = h('label', 'room-field', label), e = h('select'); e.setAttribute('aria-label', label); choices.forEach(([value, text]) => { const o = h('option', '', text); o.value = value; e.append(o); }); l.append(e); parent.append(l); return e; }
   function status(text, error) { if (chrome) chrome.notice(text, error); [refs.notice, refs.entryNotice, refs.stageNotice].filter(Boolean).forEach(node => { node.textContent = text || ''; node.classList.toggle('room-error', !!error); node.hidden = !text; }); }
@@ -853,7 +853,7 @@
         }
       }).catch(() => {});
       if (chrome) chrome.destroy();
-      chrome = global.HertzRoomTransport.create({ open: () => { document.querySelector('[data-view="room"]').click(); global.HertzRoom.navigate('play'); }, playback: action => global.HertzRoom.playback(action), seek: (instance_id, position) => run(() => playback('seek', { instance_id, position_ms: String(position) })), volume: volume => run(() => global.HertzRoom.localVolume(volume)) });
+      chrome = global.HertzRoomTransport.create({ open: () => { document.querySelector('[data-view="room"]').click(); global.HertzRoom.navigate('play'); }, playback: action => global.HertzRoom.playback(action), seek: (instance_id, position) => run(() => playback('seek', { instance_id, position_ms: String(position) })), volume: volume => run(() => global.HertzRoom.localVolume(volume)) }, { mountTo: options.floatingRegion });
       view = createView(); mounted = ''; mount();
       if (timer) clearInterval(timer);
       timer = setInterval(async () => {

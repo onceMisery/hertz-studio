@@ -30,10 +30,13 @@ const ok = (cond, label, extra) => {
   // 记账，多余的错误照样红（与 check-qingfeng-browser.js 同一套）。
   let quote5xx = 0;
   let beatmap404 = 0;
+  let desktopControl5xx = 0;
   const badUrls = [];
   page.on('response', (r) => {
     if (r.status() >= 500 && /\/v1\/home\/quote/.test(r.url())) quote5xx += 1;
     if (r.status() === 404 && /\/v1\/stage\/beatmap/.test(r.url())) beatmap404 += 1;
+    // null 后端 / 未装桌面组件的实例上桌面组件探测回 503，前端 catch 住只隐藏设置行。
+    if (r.status() >= 500 && /\/v1\/desktop\/control/.test(r.url())) desktopControl5xx += 1;
     if (r.status() >= 400 && r.status() !== 401) badUrls.push(`${r.status()} ${r.url()}`);
   });
   page.on('pageerror', (e) => errors.push(String(e)));
@@ -45,7 +48,7 @@ const ok = (cond, label, extra) => {
     errors.push(m.text());
   });
   const settleSoft = () => {
-    const forgivable = quote5xx + beatmap404;
+    const forgivable = quote5xx + beatmap404 + desktopControl5xx;
     return softErrors.length <= forgivable ? [] : softErrors.slice(forgivable);
   };
 

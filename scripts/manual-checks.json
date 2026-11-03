@@ -135,6 +135,10 @@
       "purpose": "Post-change acceptance against a dedicated null backend and workspace assets."
     },
     {
+      "script": "check-shell-navigation-browser.js",
+      "purpose": "应用外壳导航冒烟：活动视图、房间工作区模式、公共 chrome 显隐、换肤下模式保持、无效导航拒绝与播放条 pin，须配隔离 null 后端实例。"
+    },
+    {
       "script": "check-browser-preflight.js",
       "purpose": "浏览器类检查的前置自检：node scripts/check-browser-preflight.js"
     },

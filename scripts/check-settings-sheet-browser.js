@@ -39,7 +39,7 @@ const EXPECTED = [
   ['外观', ['界面皮肤', '外观', '主题与壁纸', '导航', '海报墙']],
   ['播放', ['音效与均衡器', '播放', '歌词', '歌词输出（OBS 浮层）', '歌词视频导出', '窗口与舞台', '创意舞台', '快捷键']],
   ['数据与在线', ['在线音源', '远程来源（WebDAV）', '在线缓存', '数据备份']],
-  ['高级', ['开发者选项']],
+  ['高级', ['AI 与外部连接', '开发者选项']],
 ];
 const EXPECTED_LABELS = EXPECTED.reduce((a, c) => a.concat(c[1]), []);
 const EXPECTED_TOTAL = EXPECTED_LABELS.length;

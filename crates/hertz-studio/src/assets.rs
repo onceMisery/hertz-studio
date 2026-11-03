@@ -158,6 +158,14 @@ ui_assets! {
     "/video-export.js", JS => const VIDEO_EXPORT_JS: &str = edition_ui!("video-export.js");
     "/obs-css.js", JS => const OBS_CSS_JS: &str = edition_ui!("obs-css.js");
     "/style.css", CSS => const STYLE_CSS: &str = edition_ui!("style.css");
+    // 设计源生成物（design/definition.json → scripts/generate-design.js）：
+    // :root 令牌层排 style.css 之前，主题目录数据排 themes.js 之前。
+    "/design/design-base.css", CSS => const DESIGN_BASE_CSS: &str = edition_ui!("design/design-base.css");
+    "/design/design-themes.js", JS => const DESIGN_THEMES_JS: &str = edition_ui!("design/design-themes.js");
+    "/components/button.css", CSS => const COMPONENT_BUTTON_CSS: &str = edition_ui!("components/button.css");
+    // 应用外壳：工作区模式与公共 chrome 显隐；index.html 排在 style.css 之后。
+    "/shell/shell.css", CSS => const SHELL_CSS: &str = edition_ui!("shell/shell.css");
+    "/shell/shell.js", JS => const SHELL_JS: &str = edition_ui!("shell/shell.js");
     "/stage.css", CSS => const STAGE_CSS: &str = edition_ui!("stage.css");
     "/emotion.css", CSS => const EMOTION_CSS: &str = edition_ui!("emotion.css");
     "/creative.css", CSS => const CREATIVE_CSS: &str = edition_ui!("creative.css");

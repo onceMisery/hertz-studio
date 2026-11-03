@@ -14,7 +14,17 @@
      控制台里留一条无意义的红字。 -->
 <link rel="icon" href="data:,">
 <title>hertz-studio</title>
+<!-- 设计源（生成物，design/definition.json → scripts/generate-design.js）：
+     :root 令牌的唯一来源，必须排在 style.css 之前。 -->
+<link rel="stylesheet" href="design/design-base.css">
+<!-- 公共组件：按钮唯一实现（基础形态 + primary/tiny/touch/flat 变体）。
+     排在 style.css 之前：同特异性的跨组件时值手感（按压分档）在 style.css
+     尾部，必须后到；皮肤层的度量覆盖在更后面，仍然生效。 -->
+<link rel="stylesheet" href="components/button.css">
 <link rel="stylesheet" href="style.css">
+<!-- 外壳层：工作区模式与公共 chrome 显隐（body.room-view / body.room-active 的
+     消费方）。排在 style.css 之后、页面样式之前；页面 CSS 不得再藏全局 chrome。 -->
+<link rel="stylesheet" href="shell/shell.css">
 <link rel="stylesheet" href="now-playing.css">
 <link rel="stylesheet" href="skins/skin.classic.css" data-skin-css="classic" disabled>
 <link rel="stylesheet" href="stage.css">
@@ -2495,6 +2505,8 @@
      皮肤宿主之前加载（registerLifecycle 要先于 Skins.init）。 -->
 <script defer src="skins/skin.heijiao.js"></script>
 <script defer src="skins/skin.orbit.js"></script>
+<!-- 设计源（生成物）：内置主题目录数据，先于 themes.js 装载。 -->
+<script defer src="design/design-themes.js"></script>
 <script defer src="themes.js"></script>
 <script defer src="theme-picker.js"></script>
 <script defer src="anime-interactions.js"></script>
@@ -2537,6 +2549,8 @@
      CreativeStage.applyIntent；排在编排层之后、工坊之前。 -->
 <script defer src="creative-prompt.js"></script>
 <script defer src="ai-ledger.js"></script>
+<!-- 应用外壳：活动视图、工作区模式与装配区域；app.js 启动时 initShell() 注册视图。 -->
+<script defer src="shell/shell.js"></script>
 <script defer src="room-transport.js"></script>
 <script defer src="room-workspace.js"></script>
 <script defer src="room-view.js"></script>

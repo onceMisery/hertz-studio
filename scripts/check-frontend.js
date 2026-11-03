@@ -98,6 +98,8 @@ const STEPS = [
     why: '改名之后的负面不变量：上游项目名不许回到标识符与界面文案（注释里的历史出处按第二档放行）。' },
   { script: 'api-routes.js', stage: 'guard', args: ['--check'],
     why: 'docs/api-routes.md 的 REST 清单是生成物。放开手写必然漂移，改了 routes.rs / main.rs 就重跑生成器。' },
+  { script: 'check-design-source.js', stage: 'guard',
+    why: '设计单源（definition.json → 生成物）不得手改漂移；style.css 残留默认值副本与运行时/生成器派生不一致都在这里拦下。' },
   { script: 'check-css-tokens.js', stage: 'guard',
     why: '颜色/间距只走令牌：硬编码色值在换肤与浅色主题下会变成看不见的字。' },
   { script: 'check-plugin-assets.js', stage: 'guard',

@@ -44,6 +44,8 @@ async function main() {
         return route.fulfill({ path: file });
       });
       await page.goto('http://capsule.test/');
+      // index.html 的装载顺序：设计目录数据（生成物）先于 themes.js。
+      await page.addScriptTag({ path: path.join(web, 'design', 'design-themes.js') });
       await page.addScriptTag({ path: path.join(web, 'themes.js') });
       await page.evaluate(fit => {
         window.ui = { capsule: document.getElementById('capsule') };

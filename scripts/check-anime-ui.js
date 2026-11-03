@@ -52,6 +52,9 @@ const INTERACTIONS_JS = read('anime-interactions.js');
 const CEL_UI = read('cel-ui.css');
 const INDEX = read('index.html');
 const THEME_STUDIO = read('theme-studio.js');
+// 内置主题的配色数据（fx / look 声明）已迁到 definition.json（生成目录的单源）。
+// themes.js 只留机制；这里对数据的断言读源文件，对机制的断言仍读 themes.js。
+const DEFINITION = JSON.parse(read('design/definition.json'));
 const CEL_THEMES = ['kiminona', 'spirited'];
 const GLASS_THEMES = ['celestial', 'starrail', 'liyue'];
 
@@ -129,11 +132,10 @@ ok(/el\.setAttribute\(LOOK_ATTR,\s*theme\.look \|\| DEFAULT_LOOK\)/.test(THEMES)
   '只在有 look 时写的话，切到无 look 的主题会留着上一套的外观）');
 
 for (const id of CEL_THEMES.concat(GLASS_THEMES)) {
-  const at = THEMES.indexOf("id: '" + id + "'");
-  ok(at >= 0, `themes.js 登记了 ${id}`);
-  if (at < 0) continue;
-  const block = THEMES.slice(at, THEMES.indexOf('\n    {', at + 10) < 0 ? undefined : THEMES.indexOf('\n    {', at + 10));
-  const look = (block.match(/look:\s*'(\w+)'/) || [])[1];
+  const entry = DEFINITION.themes.find((t) => t.id === id);
+  ok(!!entry, `definition.json 登记了 ${id}`);
+  if (!entry) continue;
+  const look = entry.look;
   const want = CEL_THEMES.includes(id) ? 'cel' : 'glass';
   ok(look === want, `${id} 声明 look: '${want}'（实得 '${look}'；` +
     `认错族 = 配色是这一套、材质是那一套，比纯换色还难查）`);
@@ -147,7 +149,7 @@ section('点击特效：三方名单一致（themes.js ↔ EFFECTS ↔ CSS 原�
 // 出 html[data-fx="…"] 原型。任何一边漏名都是静默的：
 //   EFFECTS 缺名 → enabled() 恒 false → 特效压根不触发；
 //   CSS 缺原型 → 粒子照放但没有形状没有动画，视觉上"反馈坏了"。
-const declaredFx = [...THEMES.matchAll(/fx:\s*'(\w+)'/g)].map(m => m[1]);
+const declaredFx = DEFINITION.themes.filter((t) => t.fx).map((t) => t.fx);
 const studioFx = [...THEME_STUDIO.matchAll(/fx:\s*'(\w+)'/g)].map(m => m[1]);
 const registrySrc = INTERACTIONS_JS.slice(
   INTERACTIONS_JS.indexOf('var EFFECTS = {'),

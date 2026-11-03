@@ -32,6 +32,7 @@ const WEB = path.join(ROOT, 'plugin', 'ui');
 const APP = fs.readFileSync(path.join(WEB, 'app.js'), 'utf8').replace(/\r\n/g, '\n');
 const read = (p) => fs.readFileSync(p, 'utf8').replace(/\r\n/g, '\n');
 const SKINS_JS = read(path.join(WEB, 'skins', 'skins.js'));
+const DESIGN_DATA_JS = read(path.join(WEB, 'design', 'design-themes.js'));
 const THEMES_JS = read(path.join(WEB, 'themes.js'));
 const STUDIO_JS = read(path.join(WEB, 'theme-studio.js'));
 
@@ -123,9 +124,10 @@ function makeApp(store) {
   };
   sandbox.window = sandbox;
   vm.createContext(sandbox);
-  // index.html 的加载顺序：skins.js → themes.js → theme-studio.js（中间那些
-  // 与观感无关的模块略过）。
+  // index.html 的加载顺序：skins.js → design/design-themes.js（生成目录数据）
+  // → themes.js → theme-studio.js（中间那些与观感无关的模块略过）。
   vm.runInContext(SKINS_JS, sandbox, { filename: 'skins.js' });
+  vm.runInContext(DESIGN_DATA_JS, sandbox, { filename: 'design/design-themes.js' });
   vm.runInContext(THEMES_JS, sandbox, { filename: 'themes.js' });
   vm.runInContext(STUDIO_JS, sandbox, { filename: 'theme-studio.js' });
   return { sandbox, html, links, store, events, nodes };

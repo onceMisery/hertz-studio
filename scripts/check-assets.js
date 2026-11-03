@@ -144,6 +144,9 @@ const REQUIRE_BEFORE = [
   ['stage.js', 'stage-immersive.js'],         // 沉浸入口模块依赖 Stage 帧门
   ['creative-stage.js', 'stage-immersive.js'], // 舞台坞读 CreativeStage.scenes/preset
   ['stage-immersive.js', 'app.js'],
+  ['shell/shell.js', 'room-transport.js'],   // 房间浮动播放条装配进外壳区域
+  ['shell/shell.js', 'app.js'],              // app.js 启动时 initShell() 注册视图
+  ['design/design-themes.js', 'themes.js'],  // 主题目录数据（生成物）先于机制
   ['themes.js', 'theme-picker.js'],
   ['theme-picker.js', 'room-workspace.js'],
   ['theme-picker.js', 'app.js'],

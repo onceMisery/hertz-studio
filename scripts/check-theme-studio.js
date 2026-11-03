@@ -43,9 +43,10 @@ const RS_WALLPAPERS = new Map();
   while ((m = re.exec(MAIN_RS)) !== null) RS_WALLPAPERS.set(m[1], m[2]);
 }
 
-/// 内置主题（themes.js 的 CATALOG）里的 id。"每套主题都要有背景图"这句话里的
-/// "每套"包括它们，不能只验二次元那七套。
-const BUILTIN_THEME_IDS = [...THEMES_JS.matchAll(/^\s*id:\s*'([^']+)',\s*$/gm)].map((m) => m[1]);
+/// 内置主题（design/definition.json 的目录，themes.js 消费生成物）里的 id。
+/// "每套主题都要有背景图"这句话里的"每套"包括它们，不能只验二次元那七套。
+const BUILTIN_THEME_IDS = JSON.parse(read(path.join(WEB, 'design', 'definition.json')))
+  .themes.map((t) => t.id);
 const ANIME_THEME_IDS = [...STUDIO.matchAll(/^\s*id:\s*'(anime-[^']+)',/gm)].map((m) => m[1]);
 
 let failures = 0;

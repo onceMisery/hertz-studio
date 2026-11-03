@@ -992,10 +992,11 @@ function contrastOf(a, b) {
 function checkChaoxiThemes() {
   section('主题：潮汐·夜 / 潮汐·昼 的对比度');
 
-  const themes = read(path.join(WEB, 'themes.js'));
-  const night = themeTokens(themes, 'chaoxi-night');
-  const day = themeTokens(themes, 'chaoxi-day');
-  ok(night && day, 'themes.js 登记了 chaoxi-night / chaoxi-day 两套主题');
+  // 主题数据已迁到 design/definition.json（生成目录的单源）；这里读源文件本身。
+  const definition = JSON.parse(read(path.join(WEB, 'design', 'definition.json')));
+  const night = (definition.themes.find((t) => t.id === 'chaoxi-night') || {}).tokens;
+  const day = (definition.themes.find((t) => t.id === 'chaoxi-day') || {}).tokens;
+  ok(night && day, 'definition.json 登记了 chaoxi-night / chaoxi-day 两套主题');
 
   if (night) {
     const cText = contrastOf(night['--text'], night['--bg']);
@@ -1022,7 +1023,7 @@ function checkChaoxiThemes() {
       '昼：--brand 与 --brand-ink 是两档（图形一档、文字一档）');
     ok(day['--accent'] !== day['--accent-2'], '昼：accent 与 accent-2 不同');
 
-    // 浅色必须自带玻璃令牌覆盖：style.css 的玻璃体系是为暗底写的（靠叠白提亮），
+    // 浅色必须自带玻璃令牌覆盖：design-base.css 的玻璃体系是为暗底写的（靠叠白提亮），
     // 翻到浅底后白叠白等于什么都没叠 —— 卡片糊成一片、描边消失、轨道看不见。
     for (const k of ['--glass-bg', '--glass-border', '--glass-bg-strong', '--surface-line', '--track', '--field-bg']) {
       ok(!!day[k], `昼：自带 ${k} 覆盖（浅底上的白叠层必须翻转）`);

@@ -22,8 +22,10 @@ const path = require('path');
 
 const webDir = process.argv[2] || path.join(__dirname, '..', 'plugin', 'ui');
 
-// 共享令牌：全站只有一个定义处，即 style.css 的 :root。
-// stage.css 只允许声明自己独占的 --stage-*。
+// 共享令牌：全站只有一个定义处，即 design/design-base.css 的 :root（设计源
+// definition.json 的生成物；设计收敛 §6.1 起 style.css 不再定义 :root 默认值，
+// 唯一性由 scripts/check-design-source.js 的漂移比对保证，这里管消费边界：
+// 任何其他 CSS——含 stage.css——都不得再声明这些令牌）。
 const SHARED_TOKENS = [
   '--glass-bg',
   '--glass-border',
@@ -35,7 +37,7 @@ const SHARED_TOKENS = [
   '--press-scale',
   '--hover',
 ];
-const OWNER_FILE = 'style.css';
+const OWNER_FILE = 'design/design-base.css';
 
 // 实心按钮的 hover 契约：.ctrl:hover / .btn:hover 这类基础态 hover 的特异性
 // 可能高于实心态自身，若 hover 规则只写 box-shadow 而不重新声明 background，

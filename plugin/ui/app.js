@@ -342,7 +342,6 @@ const ui = {
 const Stage = window.Stage;
 
 const state = {
-  view: 'library',
   tracks: [],
   total: 0,
   q: '',
@@ -383,6 +382,14 @@ const state = {
   connected: false,
   modeLabel: { repeat: '列表循环', repeat_one: '单曲循环', shuffle: '随机播放' },
 };
+
+// 活动视图的唯一权威在外壳（HertzShell.navigate，唯一写入点）；state.view 只是
+// 只读投影，供尚未迁移的旧消费者（daily-view / favorites）继续读取。外壳初始化
+// 之前保持旧的首屏值 'library'。不得在此之外出现第二个可写副本。
+Object.defineProperty(state, 'view', {
+  get() { return (window.HertzShell && window.HertzShell.activeView()) || 'library'; },
+  enumerable: true,
+});
 
 // ---------------------------------------------------------------------------
 // Transport：HTTP / WebSocket 或演示后端
@@ -5638,52 +5645,80 @@ async function loadDevices() {
 // 导航
 // ---------------------------------------------------------------------------
 
-function setView(name, options) {
-  if (state.view === 'reader' && name !== 'reader' && window.Reader) window.Reader.onViewExit();
-  if (state.view === 'online' && name !== 'online' && window.Online) Online.cancelSearch();
-  if (state.view === 'room' && name !== 'room' && window.HertzRoom) window.HertzRoom.onViewExit();
-  state.view = name;
-  document.body.classList.toggle('room-view', name === 'room');
-  for (const [key, el] of Object.entries(ui.views)) el.hidden = key !== name;
-  ui.rail.querySelectorAll('.rail-item').forEach((b) => b.classList.toggle('active', b.dataset.view === name));
-  if (ui.settingsEntry) {
-    ui.settingsEntry.classList.toggle('active', name === 'settings');
-    ui.settingsEntry.setAttribute('aria-pressed', String(name === 'settings'));
-  }
-  document.body.classList.remove('column-open');
-  if (name === 'online') {
-    if (window.TopSearch && window.TopSearch.onOnlineViewEnter) window.TopSearch.onOnlineViewEnter();
-    if (!(options && options.historyOnly) && window.Online) window.Online.onViewEnter();
-  }
-  if (name === 'room' && window.HertzRoom) window.HertzRoom.onViewEnter();
-  if (name === 'podcasts' && window.Podcasts) window.Podcasts.onViewEnter();
-  if (name === 'reader' && window.Reader) window.Reader.onViewEnter();
-  // 设置页里的诊断日志大小是「现在有多少内容」：不进页面就不刷新，用户开着
-  // 日志录了一晚上，这里还停在「还没有内容」，等于把功能自己的状态说错了。
-  if (name === 'settings') loadDiagnostics();
-  // 在线歌单可能在歌单视图没渲染期间到达（登录、刷新），进入时补一次同步。
-  if (name === 'playlists') renderOnlinePlaylistSection();
-  // 队列页的高亮由快照实时同步，但隐藏期间没有布局可滚；进入时把当前曲定位回来。
-  if (name === 'queue') syncQueuePlaying(state.snapshot, true);
-  // 收藏与每日推荐同理：进入时才拉，避免启动时多打两条请求。
-  if (name === 'favorites' && window.Favorites) window.Favorites.onViewEnter();
-  // 每日推荐独立页：数据与首页那条推荐条同源，只是换了个地方展示。
-  if (name === 'daily' && window.DailyView) window.DailyView.onViewEnter();
-  if (name === 'library') {
-    if (typeof HomeDashboard !== 'undefined') HomeDashboard.onViewEnter();
-    if (window.Daily) window.Daily.load({ silent: true });
-    // 专辑/歌手浏览面：编辑/扫描可能改过 facet，进入时对齐一次。
-    loadFacets();
-  }
-  // 缓存占用是随时会变的数字，进设置页才刷新。
-  if (name === 'settings') {
-    // 恢复默认视图（包括已保存的 settings）不代表用户请求桌面检测。
-    if (!(options && options.skipDesktopDetection) && window.HertzDesktopSettings) window.HertzDesktopSettings.onSettingsEnter();
-    if (window.__loadCacheStats) window.__loadCacheStats();
-    if (window.__loadDspSettings) window.__loadDspSettings();
-    if (window.__loadRemoteRoots) window.__loadRemoteRoots();
-  }
+// ---------------------------------------------------------------------------
+// 导航
+// ---------------------------------------------------------------------------
+
+// 视图登记与切换已迁入外壳（shell/shell.js 的 HertzShell）：它持有活动视图、
+// 工作区模式与公共区域显隐；app.js 只提供各页面的进入/退出钩子（包装既有
+// onViewEnter/onViewExit 语义，不重写内部业务）与这份登记。
+
+// 退出钩子：离开页面时停止该页面的展示工作（阅读全屏、进行中的搜索、房间浮层）。
+// 隐藏页面不等于销毁业务会话——离开房间页不结束一起听，这里只归还展示权。
+function leaveReaderView() { if (window.Reader) window.Reader.onViewExit(); }
+function leaveOnlineView() { if (window.Online) Online.cancelSearch(); }
+function leaveRoomView() { if (window.HertzRoom) window.HertzRoom.onViewExit(); }
+
+// 进入钩子：页面获得呈现区域后执行原刷新与焦点策略；异步内容不阻塞全局导航。
+function enterOnlineView(ctx) {
+  const options = (ctx && ctx.options) || {};
+  if (window.TopSearch && window.TopSearch.onOnlineViewEnter) window.TopSearch.onOnlineViewEnter();
+  if (!options.historyOnly && window.Online) window.Online.onViewEnter();
 }
+function enterRoomView() { if (window.HertzRoom) window.HertzRoom.onViewEnter(); }
+function enterPodcastsView() { if (window.Podcasts) window.Podcasts.onViewEnter(); }
+function enterReaderView() { if (window.Reader) window.Reader.onViewEnter(); }
+// 设置页里的诊断日志大小是「现在有多少内容」：不进页面就不刷新，用户开着
+// 日志录了一晚上，这里还停在「还没有内容」，等于把功能自己的状态说错了。
+function enterSettingsView(ctx) {
+  const options = (ctx && ctx.options) || {};
+  loadDiagnostics();
+  // 缓存占用是随时会变的数字，进设置页才刷新。
+  // 恢复默认视图（包括已保存的 settings）不代表用户请求桌面检测。
+  if (!options.skipDesktopDetection && window.HertzDesktopSettings) window.HertzDesktopSettings.onSettingsEnter();
+  if (window.__loadCacheStats) window.__loadCacheStats();
+  if (window.__loadDspSettings) window.__loadDspSettings();
+  if (window.__loadRemoteRoots) window.__loadRemoteRoots();
+}
+// 在线歌单可能在歌单视图没渲染期间到达（登录、刷新），进入时补一次同步。
+function enterPlaylistsView() { renderOnlinePlaylistSection(); }
+// 队列页的高亮由快照实时同步，但隐藏期间没有布局可滚；进入时把当前曲定位回来。
+function enterQueueView() { syncQueuePlaying(state.snapshot, true); }
+// 收藏与每日推荐同理：进入时才拉，避免启动时多打两条请求。
+function enterFavoritesView() { if (window.Favorites) window.Favorites.onViewEnter(); }
+// 每日推荐独立页：数据与首页那条推荐条同源，只是换了个地方展示。
+function enterDailyView() { if (window.DailyView) window.DailyView.onViewEnter(); }
+function enterLibraryView() {
+  if (typeof HomeDashboard !== 'undefined') HomeDashboard.onViewEnter();
+  if (window.Daily) window.Daily.load({ silent: true });
+  // 专辑/歌手浏览面：编辑/扫描可能改过 facet，进入时对齐一次。
+  loadFacets();
+}
+
+function initShell() {
+  window.HertzShell.init({
+    rail: ui.rail,
+    settingsEntry: ui.settingsEntry,
+    views: [
+      { id: 'library', el: ui.views.library, enter: enterLibraryView },
+      { id: 'online', el: ui.views.online, enter: enterOnlineView, leave: leaveOnlineView },
+      { id: 'podcasts', el: ui.views.podcasts, enter: enterPodcastsView },
+      { id: 'reader', el: ui.views.reader, enter: enterReaderView, leave: leaveReaderView },
+      { id: 'playlists', el: ui.views.playlists, enter: enterPlaylistsView },
+      { id: 'daily', el: ui.views.daily, enter: enterDailyView },
+      { id: 'queue', el: ui.views.queue, enter: enterQueueView },
+      { id: 'room', el: ui.views.room, mode: 'room', enter: enterRoomView, leave: leaveRoomView },
+      { id: 'favorites', el: ui.views.favorites, enter: enterFavoritesView },
+      { id: 'settings', el: ui.views.settings, enter: enterSettingsView },
+    ],
+  });
+}
+
+// 旧 setView 转发入口（兼容载体，退役条件见设计 §11.1）：切页职责已迁入
+// HertzShell，这里只保留注入点形状——Reader / TopSearch / favHost / daily-view
+// 拿到的导航函数、房间 onReturn/onNavigate 闭包仍用它。内部不得出现第二份
+// 切页实现；最后一个旧调用点改用 HertzShell.navigate 后删除本入口。
+function setView(name, options) { window.HertzShell.navigate(name, options); }
 
 function refreshAll() {
   if (window.HertzCapsuleOnly) return refreshFloatingCapsule();
@@ -8411,8 +8446,12 @@ async function startApp() {
   if (window.Online && window.Online.seedFromStore) window.Online.seedFromStore();
   transport = await chooseTransport();
   initMainVisibility();
+  // 外壳先于一切视图接线就位：房间 onReturn/onNavigate、换肤对账都经由它切页。
+  initShell();
   if (window.HertzRoom) window.HertzRoom.init({
     root: ui.views.room, transport, confirm: message => modal().confirm(message),
+    // 房间外浮动播放条装配进外壳的明确区域（设计 §5.4），不再自行挂 body。
+    floatingRegion: window.HertzShell.region('floating'),
     onReturn: () => setView('library'),
     onNavigate: name => { if (['library', 'favorites', 'online', 'room'].includes(name)) setView(name); },
     onOpenStage: () => { if (window.Stage3D) Stage3D.open(); },

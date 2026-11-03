@@ -17,7 +17,10 @@
   }
 
   global.HertzRoomTransport = {
-    create(actions) {
+    // options.mountTo：页面外播放条的挂载区。宿主（app.js）传外壳的浮动装配区
+    // （设计 §5.4：由外壳装配到明确区域）；缺省回退 body，兼容旧调用与契约沙箱。
+    create(actions, options) {
+      const mountTo = (options && options.mountTo) || document.body;
       const bar = element('footer', 'room-global');
       bar.setAttribute('aria-label', '一起听播放器');
       bar.hidden = true;
@@ -100,7 +103,7 @@
       collapse.onclick = () => { closeVolume(false); collapsed = !collapsed; updateVisibility(); };
       const notice = element('span', 'room-global-notice'); notice.setAttribute('role', 'status'); notice.hidden = true;
       bar.append(info, controls, progress, volumeControl, returnButton, collapse, notice);
-      document.body.append(bar);
+      mountTo.append(bar);
       updateVisibility();
       return {
         render(snapshot) {

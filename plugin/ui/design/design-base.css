@@ -1,0 +1,245 @@
+/* SPDX-License-Identifier: MIT
+   Copyright (c) 2026 hertz-studio contributors
+
+   生成物：由 scripts/generate-design.js 从 design/definition.json 生成——禁止手改。
+   修改设计请编辑 definition.json 后运行 node scripts/generate-design.js；
+   check-design-source（CI）会重新生成并比对，手改会被拒绝。
+   本文件是 :root 设计令牌（静态尺度 + 默认主题颜色 + 派生 rgb + 环境回退）的唯一来源。
+   */
+
+:root {
+  /*
+  破坏性操作的文字色（删除歌单、清空队列）。以前只写在 .t-act-danger:hover
+  的字面量里，没有可复用的名字，所以每加一个删除按钮就要再抄一遍色值。
+  
+  成功 / 警告。与 --danger 同理：状态色要能被复用，而不是每处重抄。
+  三个值都按暗底反推过（正文 AA），语义表面（--ok-wash 等）留给主题，
+  浅色主题在 themes.js 里连同表面一起翻成浅填充。
+  */
+  --danger: #ff9b9b;
+  --ok: #7bd88f;
+  --warn: #ffcc66;
+
+  /*
+  Physical vinyl stays dark under both light and dark themes.
+  
+  面板圆角。曾经是 18px，而组件层的 --r-xl 是 16px —— 同一批面板
+  （导航轨 / 内容列 / 舞台 / 播放条）在新旧两套规则里各拿一个值，
+  谁生效取决于哪条规则排在后面，等于随机。对齐到 --r-xl 的 16px。
+  */
+  --radius: 12px;
+  --record-base: #0c0b13;
+  --record-groove: #1f1c2c;
+  --record-glint: rgba(255, 255, 255, 0.22);
+  --radius-lg: 16px;
+  --shadow: 0 12px 32px rgba(0, 0, 0, 0.42);
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+
+  /*
+  ======================================================================
+  设计令牌层
+  ----------------------------------------------------------------------
+  设计体系对齐参考项目：字体族、字号阶梯、间距、圆角、缓动时长、
+  玻璃质感、焦点环与「品牌色 / 高亮色」两个强调角色。
+  规则只有一条：组件里不允许再出现裸的 px/rgba 字面量，一律取令牌。
+  主题（themes.js）只改颜色，不改这里的尺度。
+  ======================================================================
+  
+  字体：中文在前、西文在后
+  */
+  --font-sans: "Noto Sans SC", "PingFang SC", "HarmonyOS Sans SC", "Alibaba PuHuiTi", "Inter", system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+  --font-mono: "JetBrains Mono", "Geist Mono", "SF Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  /*
+  字号阶梯：密集的小字（10/11/12）承载元信息，正文 13–14，标题 18–20
+  */
+  --fs-3xs: 9px;
+  --fs-2xs: 10px;
+  --fs-xs: 11px;
+  --fs-1xs: 11.5px;
+  --fs-sm: 12px;
+  --fs-1sm: 12.5px;
+  --fs-md: 13px;
+  --fs-base: 14px;
+  --fs-lg: 16px;
+  --fs-xl: 18px;
+  --fs-2xl: 20px;
+
+  /*
+  间距：4 起步的偶数阶梯
+  */
+  --sp-1: 4px;
+  --sp-2: 6px;
+  --sp-3: 8px;
+  --sp-4: 10px;
+  --sp-5: 12px;
+  --sp-6: 16px;
+  --sp-7: 20px;
+  --sp-8: 24px;
+
+  /*
+  圆角：卡片 12、控件 10、小件 8、胶囊 999
+  */
+  --r-sm: 8px;
+  --r-md: 10px;
+  --r-lg: 12px;
+  --r-xl: 16px;
+  --r-pill: 999px;
+
+  /*
+  动效：主缓动 cubic-bezier(.16,1,.3,1) + 18/22/28ms 三档
+  
+  按压分档：压下要「快」（不跟手就钝），回弹要「缓」（回弹有弹性）。
+  一条 transition 两头同速是手感发木的根因。
+  
+  视图切换入场。0.26s 是"看得见但不等待"的上限。
+  */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --dur-fast: 0.16s;
+  --dur-base: 0.18s;
+  --dur-slow: 0.22s;
+  --dur-slower: 0.28s;
+  --dur-press: 0.08s;
+  --dur-release: 0.24s;
+  --dur-enter: 0.26s;
+
+  /*
+  玻璃曲面：顶部高光 → 底部回落的三段中性叠层。
+  
+  ⚠ 色停**绝不能再混 --bg**。--bg 是近黑（#0A0A0A），拿它混 74–84%
+  会让整条渐变塌成「比底色还暗的一层黑」：顶栏 / 导航轨 / 内容列 /
+  舞台 / 播放条五块面板于是全部糊成一片，只剩 1px 描边能看出边界 ——
+  玻璃质感全靠描边硬撑，卡片坐在面板上也分不出层级（面板 +4 个明度级，
+  卡片 +9，肉眼几乎不可分）。
+  
+  现在改成纯白叠层：面板稳定比 --bg 亮 8–12 个明度级（≈ #161618），
+  卡片再叠 --surface-1 又能往上跳一级，层级才是「暗底 → 面 → 卡」三层。
+  角度用 168deg（几近垂直）而不是 112deg：大面板上斜向渐变会在右上角
+  攒出一条比其余三边亮得多的描边，看着像漏光。
+  
+  两档阴影：
+  大面积面板（.column/.rail/.stage/.bar）用**无彩辉光**的这一档 ——
+  给几千像素宽的面板套一圈 34px 彩色辉光，会在边缘糊出可见的色晕。
+  弹出层（菜单/抽屉/toast）才用带品牌色辉光的那一档，因为它们本来就
+  应该是「浮起来」的视觉层级。
+  
+  强玻璃底：弹层/抽屉/浮起件。比常驻面更不透明，背后内容不穿透。
+  
+  内描边高光：只作颜色用，1px 宽度由使用处（或玻璃阴影令牌）给出。
+  绝不能拼进 var(--glass-border)——那是 "1px solid <color>" 完整简写，
+  拼接会产出非法值（check-css-tokens 契约 C）；内高光一律走 inset box-shadow。
+  
+  按压档位：图标按钮 80ms 压下、240ms 回弹（见 .ctrl/.ctrl:active）。
+  */
+  --glass-bg: linear-gradient( 168deg, color-mix(in srgb, var(--text) 5%, transparent), color-mix(in srgb, var(--text) 2.2%, transparent) 46%, color-mix(in srgb, var(--text) 1.2%, transparent) );
+  --glass-border: 1px solid rgba(255, 255, 255, 0.095);
+  --glass-shadow: 0 22px 64px rgba(0, 0, 0, 0.3), inset 0 1px 0 var(--glass-line), inset 0 -24px 58px rgba(0, 0, 0, 0.16);
+  --glass-shadow-glow: 0 22px 64px rgba(0, 0, 0, 0.34), 0 0 34px rgba(var(--brand-rgb, 0, 245, 212), 0.07), inset 0 1px 0 var(--glass-line), inset 0 -24px 58px rgba(0, 0, 0, 0.16);
+  --glass-blur: 22px;
+  --glass-bg-strong: rgba(18, 20, 28, 0.78);
+  --glass-line: rgba(255, 255, 255, 0.10);
+  --press-scale: 0.97;
+
+  /*
+  焦点环：键盘可达性。任何元素都不允许「去掉 outline 却不给替代」。
+  1px 在近黑底上只有一根发丝，低亮度屏上基本读不到；2px + 60% 品牌色
+  是「一眼能确认焦点在哪」的最低成本档位。
+  */
+  --focus-ring: 2px solid rgba(var(--brand-rgb, 0, 245, 212), 0.6);
+  --focus-offset: 2px;
+
+  /*
+  表单控件与列表的通用底色
+  */
+  --field-bg: rgba(255, 255, 255, 0.03);
+  --field-bg-hover: rgba(255, 255, 255, 0.055);
+  --field-border: rgba(255, 255, 255, 0.095);
+  --field-border-strong: rgba(255, 255, 255, 0.18);
+
+  /*
+  曲面三级：暗底 → 面板（--glass-bg）→ 卡片（--surface-1）→ 卡片悬停（--surface-2）。
+  卡片底色以前散落着 --panel-2 / --hover / 各自的 rgba 字面量，
+  同一个视觉层级在三个地方是三组数，改一处不动另外两处必然漂移。
+  统一收在这里，新增卡片一律取令牌。
+  
+  顶部内高光：只作 box-shadow 的一个分量用。1px 宽的「受光边」是卡片
+  能读出厚度而不靠加重描边的关键。
+  
+  卡片悬停时投出的影子。低于 --glass-shadow 一整档——卡片只是"抬了 1px"，
+  用面板级的 22px 阴影会把它从面板上掀起来。
+  */
+  --surface-1: rgba(255, 255, 255, 0.042);
+  --surface-2: rgba(255, 255, 255, 0.075);
+  --surface-line: rgba(255, 255, 255, 0.075);
+  --surface-line-strong: rgba(255, 255, 255, 0.15);
+  --surface-hi: inset 0 1px 0 rgba(255, 255, 255, 0.055);
+  --surface-lift: 0 8px 20px rgba(0, 0, 0, 0.3);
+
+  /*
+  轨道（进度条 / 音量条）的底色。以前这个值在 stage.css 里以
+  rgba(255, 255, 255, 0.12) 的字面量重复了三遍（.progress-wrap::before、
+  webkit 轨道、moz 轨道），style.css 的 .progress-wrap::before 又是另一支
+  --hover（7% 白，静止态几乎看不见轨道）。收成一个令牌：
+  轨道要多亮只改这里。
+  
+  元信息排版：小号大写标签（表头、kicker、徽标）的字距。
+  以前 .lib-head 写 0.6px、.daily-kicker 写 0.14em，同一个角色两套数。
+  */
+  --track: rgba(255, 255, 255, 0.12);
+  --meta-tracking: 0.12em;
+
+  /*
+  v2 新增：结构性尺寸令牌
+  */
+  --topbar-h: 58px;
+  --rail-w: 86px;
+  --stage-w: 460px;
+  --bar-h: 72px;
+  --row-h: 52px;
+
+  /*
+  封面占位音符的遮罩图。放在 :root 是因为用它的地方不止 .t-art：首页的
+  正在播放位、歌单墙卡片都要画同一个音符。用 mask 而不是 background-image，
+  是因为内联 SVG 里的颜色写不进 var()——烧成字面量就会跟着主题换色时慢半拍。
+  mask 只取形状，颜色交给 background-color: var(--muted)，换肤自动跟随。
+  */
+  --art-glyph: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cellipse cx='8' cy='17' rx='4.4' ry='3.4'/%3E%3Crect x='11.4' y='4' width='1.9' height='13'/%3E%3Cpath d='M11.4 4c3.4.5 6 1.5 7 3.6-1.7-1-4.1-1.4-7-1.5z'/%3E%3C/svg%3E");
+
+  /* 默认主题（页面加载到 Theme.init() 之间由这里保证首帧配色；
+     themes.js apply() 之后由行内变量接管）。 */
+  --bg: #0A0A0A;
+  --panel: rgba(20, 20, 21, 0.72);
+  --panel-solid: #121213;
+  --panel-2: rgba(255, 255, 255, 0.05);
+  --line: #1C1D20;
+  --line-strong: #26272B;
+  --text: #E8ECEF;
+  --muted: #8A9099;
+  --accent: #FFFFFF;
+  --accent-2: #00F5D4;
+  --accent-ink: #0A0A0A;
+  --brand: #00F5D4;
+  --brand-rgb: 0, 245, 212;
+  --highlight: #F4D28A;
+  --highlight-rgb: 244, 210, 138;
+  --hover: rgba(255, 255, 255, 0.07);
+  /*
+  accent 的 rgb 三元组，供 rgba() 透明度合成使用（舞台高亮的默认回退）。
+  themes.js 换肤时会按 accent 自动重算。
+  --accent-2-rgb 是第二支强调色的同一形式。**它必须存在**：舞台的第二支
+  高亮色（--music-highlight-alt-rgb）历史上被误写成 var(--accent-rgb)，
+  于是两支颜色永远相同 —— 创意工坊的 64 根频谱柱全部染成同一个颜色，
+  加性混合一叠就是一块实心白，看不出任何结构。之前一直当成"泛光过曝"，
+  查了半天的 bloom 与 tone mapping 都不是根因。
+  由 defaultTheme 的 --accent / --accent-2 派生（与 themes.js apply() 的运行时派生同一规则）。
+  */
+  --accent-rgb: 255, 255, 255;
+  --accent-2-rgb: 0, 245, 212;
+}
+
+/* 不支持 backdrop-filter 的环境（旧内核/企业策略禁用）：强玻璃底退为实色，保证弹层/抽屉文字对比，不靠背后模糊也能读。 */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  :root {
+    --glass-bg-strong: #12141c;
+  }
+}

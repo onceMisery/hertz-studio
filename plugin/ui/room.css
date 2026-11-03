@@ -6,28 +6,28 @@
 }
 #view-room *,#view-room *::before,#view-room *::after { box-sizing:border-box; }
 #view-room [hidden] { display:none !important; }
-#view-room button,#view-room input,#view-room select,#view-room textarea { font:inherit; }
-#view-room .btn { min-height:44px; padding:10px 14px; border:1px solid transparent; border-radius:8px; color:var(--text); background:var(--panel-2); cursor:pointer; font-size:13px; font-weight:600; box-shadow:none; transition:background .18s ease,transform .18s cubic-bezier(.16,1,.3,1),border-color .18s ease; }
-#view-room .btn:hover { background:var(--hover); border-color:var(--line-strong); }
-#view-room .btn:active { transform:scale(.98); }
-#view-room .btn.primary { color:var(--accent-ink); background:var(--accent); border-color:var(--accent); }
-#view-room .btn:disabled { opacity:.4; cursor:not-allowed; transform:none; }
+#view-room button,#view-room input,#view-room select,#view-room textarea { font-family:inherit; font-size:inherit; line-height:inherit; }
+/* 房间按钮 = 公共按钮（components/button.css）+ touch/flat 变体，由
+   room-view.js / room.js / room-workspace.js 的工厂挂类。基础行为
+   （hover/active/disabled/focus/过渡）只归组件；本段只把房间的档位度量
+   钉在皮肤控制语言（skins.css 的 `& .btn`，四套皮肤的自有 chrome 语言）
+   之上——它早于分层契约，会漫进页面内部，旧实现靠 id 级基础规则获得同等
+   效力。这里的值全部重述公开变体自身，不是第二份实现；R4 把 skins.css
+   的控制度量收进令牌与皮肤自有区域后，整段删除（退役矩阵 §11.1）。 */
+#view-room .btn.touch {
+  min-height:44px; padding:10px 14px; border-radius:var(--r-sm);
+  font-weight:600; background:var(--panel-2); color:var(--text);
+  border-color:transparent; box-shadow:none;
+}
+#view-room .btn.touch:hover:not(:disabled) { background:var(--hover); border-color:var(--line-strong); transform:none; }
+#view-room .btn.touch:active:not(:disabled) { transform:scale(.98); }
+#view-room .btn.touch:disabled { opacity:.4; cursor:not-allowed; transform:none; }
+#view-room .btn.touch.primary { background:var(--accent); border-color:var(--accent); color:var(--accent-ink); }
+#view-room .btn.touch.primary:hover:not(:disabled) { background:var(--hover); border-color:var(--line-strong); }
 #view-room :focus-visible { outline:var(--focus-ring); outline-offset:4px; }
 #view-room .room-page-title:focus { outline:none; }
-.room-view #stage,.room-active #stage { display:none !important; }
-/* Entering the workspace replaces the host navigation. These rules disappear
-   with room-view; a live room alone never replaces the rest of Hertz. */
-html body.room-view { padding:0 !important; gap:0 !important; background:var(--bg); }
-body.room-view .topbar,body.room-view #rail,body.room-view #playback-bar,body.room-view #bar-restore,body.room-view #capsule,body.room-view .orbit-queue { display:none !important; }
-body.room-view .app,html[data-skin] body.room-view .app { grid-template-columns:minmax(0,1fr) !important; grid-template-rows:minmax(0,1fr) !important; padding:0 !important; gap:0 !important; }
-body.room-view #column,body.room-view .orbit-main,html[data-skin] body.room-view .orbit-main { padding:0 !important; border:0 !important; border-radius:0 !important; box-shadow:none !important; background:var(--bg) !important; min-width:0; min-height:0; }
-html[data-skin] body.room-view #view-room { padding:0 !important; border-radius:0; }
-@media(min-width:1241px) { body.room-active:not(.room-view) .app { grid-template-columns:var(--rail-w) minmax(0,1fr); } }
-[data-skin="orbit"] body.room-active .orbit-queue { display:none; }
-@media(min-width:601px) {
-  [data-skin="orbit"] body.room-active:not(.room-view) .app { grid-template-columns:var(--orbit-rail) minmax(0,1fr); }
-  [data-skin="orbit"] body.room-active:not(.room-view) .app.orbit-nav-hidden { grid-template-columns:minmax(0,1fr); }
-}
+/* 跨页面布局（body.room-view / body.room-active 对公共 chrome 的显隐与让位）
+   已迁入外壳层 shell/shell.css；本文件只描述房间工作区内部。 */
 #view-room .room-workspace { display:grid; grid-template-columns:264px minmax(0,1fr); min-height:100%; background:var(--bg); }
 #view-room .room-sidebar { padding:30px 22px 24px; border-right:1px solid var(--line); background:var(--panel-solid); display:flex; flex-direction:column; gap:24px; min-width:0; }
 #view-room .room-brand { display:flex; align-items:center; gap:13px; font-size:20px; font-weight:720; letter-spacing:-.5px; }
@@ -361,9 +361,7 @@ html[data-skin] body.room-view #view-room { padding:0 !important; border-radius:
   #view-room .room-stage-chat-dock .room-chat-form .btn { padding:8px 10px; font-size:11px; }
   #view-room .room-play-aside { display:grid; gap:12px; margin-top:16px; }
 }
-@media(prefers-reduced-motion:reduce) { #view-room .room-danmaku { display:none; } #view-room .btn { transition:none; } }
-.room-active #playback-bar,.room-active #bar-restore,.room-active #capsule { display:none !important; }
-body.room-active:not(.room-view):not(.room-player-collapsed) .app { margin-bottom:108px; }
+@media(prefers-reduced-motion:reduce) { #view-room .room-danmaku { display:none; } }
 .room-global { position:fixed; bottom:max(16px,env(safe-area-inset-bottom)); left:24px; right:24px; z-index:35; display:grid; grid-template-columns:minmax(150px,1fr) auto minmax(150px,1.3fr) 44px auto 44px; gap:20px; align-items:center; padding:16px 18px; color:var(--text); background:var(--panel-solid); border:1px solid var(--line-strong); border-radius:20px; box-shadow:0 8px 32px color-mix(in srgb,var(--bg) 32%,transparent); font-size:var(--fs-base,14px); animation:room-player-enter .2s ease-out; }
 .room-global,.room-global * { box-sizing:border-box; }
 .room-global [hidden],.room-global[hidden] { display:none !important; }
@@ -517,7 +515,6 @@ body.room-active:not(.room-view):not(.room-player-collapsed) .app { margin-botto
 }
 @media(max-width:1100px) { .room-global { grid-template-columns:minmax(100px,1fr) auto minmax(80px,1fr) 44px auto 44px; gap:10px; } }
 @media(max-width:700px) {
-  body.room-active:not(.room-view):not(.room-player-collapsed) .app { margin-bottom:154px; }
   .room-global { left:12px; right:12px; bottom:max(12px,env(safe-area-inset-bottom)); grid-template-columns:minmax(0,1fr) 44px 44px 44px; gap:8px; padding:12px; border-radius:18px; }
   .room-global-info { grid-column:1; grid-row:1; gap:8px; }
   .room-global-mark { width:36px; height:36px; border-radius:11px; }

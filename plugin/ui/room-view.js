@@ -5,7 +5,7 @@
   global.HertzRoomView = {
     create(api) {
       const { h, button, field, select, section, refs, selection, metadata, command, control, playback, run, status, sessionKey, current, confirmAction, loadLocal, appendResource, mutateQueue, loadChat, resetChat, sendChat } = api;
-  function navigationButton(text, action, cls) { const node = h('button', 'btn ' + (cls || ''), text); node.type = 'button'; node.onclick = action; return node; }
+  function navigationButton(text, action, cls) { const node = h('button', 'btn touch flat ' + (cls || ''), text); node.type = 'button'; node.onclick = action; return node; }
   function iconButton(node, name, label) { node.replaceChildren(global.HertzRoomWorkspace.icon(name), h('span', 'room-visually-hidden', label)); node.setAttribute('aria-label', label); node.title = label; }
   function stageIcon(node, name) { const svg = global.HertzRoomWorkspace.icon(name); svg.setAttribute('class', 'room-stage-ic'); node.prepend(svg); return node; }
   const avatarPresets = global.HertzRoomWorkspace.avatarPresets;
@@ -312,7 +312,7 @@
     refs.chatOperation = h('div', 'room-operations'); composer.append(refs.chatOperation);
     refs.chatSongPending = h('p', 'room-song-message'); refs.chatSongPending.hidden = true; composer.append(refs.chatSongPending);
     const form = h('form', 'room-chat-form'); refs.chatInput = field(form, '说点什么（最多 200 字）', 'textarea'); refs.chatInput.maxLength = 400;
-    refs.chatSend = h('button', 'btn primary', '发送'); refs.chatSend.type = 'submit'; form.append(refs.chatSend);
+    refs.chatSend = h('button', 'btn touch flat primary', '发送'); refs.chatSend.type = 'submit'; form.append(refs.chatSend);
     window.hertzHost.onSubmit(form, () => run(() => sendChat())); composer.append(form);
     refs.chatInput.placeholder = '发条弹幕，一起聊聊这首歌';
     const show = field(composer, '显示实时弹幕', 'checkbox');
@@ -651,7 +651,7 @@
     panel.append(h('p', 'room-sub', '搜索喜欢的歌，加入共同队列。歌曲由房主提供给房间，大家无需分别登录音源。'));
     const form = h('form', 'room-online-search');
     const source = select(form, '音源', []), query = field(form, '搜索在线歌曲', 'search'); query.maxLength = 128; query.placeholder = '输入歌名或歌手，按回车搜索';
-    const submit = h('button', 'btn primary', '搜索在线歌曲'); submit.type = 'submit'; form.append(submit);
+    const submit = h('button', 'btn touch flat primary', '搜索在线歌曲'); submit.type = 'submit'; form.append(submit);
     const feedback = h('p', 'room-sub'); feedback.setAttribute('role', 'status'); feedback.setAttribute('aria-live', 'polite');
     const results = h('div', 'room-online-results'), more = navigationButton('加载更多歌曲', () => search(true)); more.hidden = true;
     const footer = h('div', 'room-toolbar'); footer.append(navigationButton('查看共同队列', () => { picker.close(); api.workspace().navigate('collaborate', true); }), navigationButton('浏览在线歌单 / 登录音源', () => { picker.close(); api.onNavigate('online'); }));

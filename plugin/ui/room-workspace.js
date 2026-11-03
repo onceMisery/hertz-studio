@@ -89,7 +89,7 @@
     icon, avatarPresets, createMenu, closeMenus,
     create(root, actions) {
       const { h, refs } = actions;
-      function button(text, action, cls) { const node = h('button', 'btn ' + (cls || ''), text); node.type = 'button'; node.onclick = action; return node; }
+      function button(text, action, cls) { const node = h('button', 'btn touch flat ' + (cls || ''), text); node.type = 'button'; node.onclick = action; return node; }
       let page = actions.active ? 'play' : 'lobby';
       const shell = h('div', 'room-workspace'), sidebar = h('aside', 'room-sidebar');
       const brand = h('div', 'room-brand'); brand.append(h('span', 'room-brand-mark', 'H'), h('div', '', 'Hertz · 一起听'));

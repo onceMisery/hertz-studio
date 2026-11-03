@@ -37,17 +37,20 @@ const { clickPoster } = require('./qf-wall-helpers.js');
   // 401 是既有正常行为：online-login.js 的 loadAccounts() 对每个源并发探测
   // 账号态，「未登录/失败一律按未登录」，catch 里已吞掉、不弹错。
   // 浏览器仍会把 network 401 记成 console error —— 那不是 JS 报错。
-  // 另两类「优雅失手」的探测同理：一言端点（/v1/home/quote）代理上游抓句，
+  // 另三类「优雅失手」的探测同理：一言端点（/v1/home/quote）代理上游抓句，
   // 隔离实例里上游偶发超时回 504；舞台对没有 beatmap 的曲目探 /v1/stage/
-  // beatmap 回 404 后走默认视觉。两者都由前端 catch 住、不影响功能。
+  // beatmap 回 404 后走默认视觉；桌面组件探测（/v1/desktop/control）在 null
+  // 后端与未装桌面组件的实例上回 503，前端 catch 住只隐藏对应设置行。
   // 豁免按「该端点确实失手的次数」记账，多余的错误照样红。
   const isExpected401 = (t) => /status of 401/.test(t);
   let quote5xx = 0;
   let beatmap404 = 0;
+  let desktopControl5xx = 0;
   const badUrls = [];
   page.on('response', (r) => {
     if (r.status() >= 500 && /\/v1\/home\/quote/.test(r.url())) quote5xx += 1;
     if (r.status() === 404 && /\/v1\/stage\/beatmap/.test(r.url())) beatmap404 += 1;
+    if (r.status() >= 500 && /\/v1\/desktop\/control/.test(r.url())) desktopControl5xx += 1;
     // 401 同上豁免；其余 4xx/5xx 记下 URL，控制台报错没有 URL，排查全靠这份。
     if (r.status() >= 400 && r.status() !== 401) badUrls.push(`${r.status()} ${r.url()}`);
   });
@@ -66,10 +69,10 @@ const { clickPoster } = require('./qf-wall-helpers.js');
 
   section('启动：默认皮肤与无报错');
   const bootSkin = await page.getAttribute('html', 'data-skin');
-  ok(bootSkin === 'classic' || bootSkin === null, `启动落在默认皮肤（${bootSkin}）`);
+  ok(bootSkin === 'orbit' || bootSkin === null, `启动落在默认皮肤（${bootSkin}；默认档自星轨上线起是 orbit，见 skins.js DEFAULT_ID）`);
   // 结算软错误：5xx/404 只有在被记账端点（一言 5xx / beatmap 404）认领时才豁免
   const settleSoft = () => {
-    const forgivable = quote5xx + beatmap404;
+    const forgivable = quote5xx + beatmap404 + desktopControl5xx;
     return softErrors.length <= forgivable ? [] : softErrors.slice(forgivable);
   };
   const bootErrs = errors.concat(settleSoft());
