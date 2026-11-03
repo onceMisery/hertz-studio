@@ -2,7 +2,10 @@
 (function () {
   'use strict';
 
-  var moves = window.SkinShared.createMoves('orbit-anchor', 'data-orbit-anchor');
+  // 布局装配走外壳（HertzShell.beginLayout，设计 §7.1/§7.2）：外壳记录原位、
+  // 严格逆还原；响应式组（playerMoves）复用同一套。句柄在 mount 时建立、
+  // unmount 时 restore + release。
+  var layout = null;
   var built = window.SkinShared.createBuilt();
   var mounted = false;
   var observer = null;
@@ -17,7 +20,7 @@
   var homeEpoch = 0;
   var homeLoading = false;
   var homeLoaded = false;
-  var playerMoves = window.SkinShared.createMoves('orbit-anchor', 'data-orbit-anchor');
+  var playerLayout = null;
   // 队列折叠是纯表现层偏好：只记一个开关，不动队列数据本身。
   var QUEUE_COLLAPSED_KEY = 'vmusic.skin.orbit.queue.collapsed';
 
@@ -278,13 +281,13 @@
     });
     listen(window.matchMedia('(max-width: 767px)'), 'change', function (event) {
       if (!event.matches) closeMobileMenu();
-      playerMoves.restore();
+      playerLayout.restore();
       if (event.matches) movesPlayerTools();
       if (event.matches && mobileHome) refreshMobileHome();
     });
     function movesPlayerTools() {
       var volume = document.querySelector('#np-modal .np-volume');
-      if (volume) playerMoves.relocate(volume, byId('np-tools'));
+      if (volume) playerLayout.move(volume, byId('np-tools'));
     }
     if (window.matchMedia('(max-width: 767px)').matches) movesPlayerTools();
     listen(byId('search'), 'input', function () {
@@ -509,19 +512,22 @@
   function mount() {
     if (mounted) return;
     mounted = true;
+    // 布局装配与响应式播放器组都登记在外壳（§7.1）；unmount 时 restore + release。
+    layout = window.HertzShell.beginLayout('orbit');
+    playerLayout = window.HertzShell.beginLayout('orbit-player');
     var app = document.querySelector('.app');
     var column = byId('column');
     var stage = byId('stage');
     var rail = byId('rail');
     var main = make('div', 'orbit-main');
     app.insertBefore(main, column);
-    moves.relocate(stage, main);
-    moves.relocate(column, main);
+    layout.move(stage, main);
+    layout.move(column, main);
     var brand = document.querySelector('.topbar .brand');
-    if (brand) moves.relocate(brand, rail, rail.firstChild);
+    if (brand) layout.move(brand, rail, rail.firstChild);
     var skinName = make('div', 'orbit-skin-name', null, '星轨');
     rail.insertBefore(skinName, brand ? brand.nextSibling : rail.firstChild);
-    moves.relocate(document.querySelector('.topbar'), main, stage);
+    layout.move(document.querySelector('.topbar'), main, stage);
     var topbar = document.querySelector('.topbar');
     refs.navToggle = button(topbar, 'orbit-nav-toggle', 'iconbtn orbit-nav-toggle', '收起导航栏', 'arrow-left', function () {
       var hidden = app.classList.toggle('orbit-nav-hidden');
@@ -537,9 +543,9 @@
     refs.libraryCount = make('strong', '', library);
 
     var info = make('div', 'orbit-info', stage);
-    moves.relocate(stage.querySelector('.stage-head'), info);
-    moves.relocate(byId('now-title'), info);
-    moves.relocate(byId('now-artist'), info);
+    layout.move(stage.querySelector('.stage-head'), info);
+    layout.move(byId('now-title'), info);
+    layout.move(byId('now-artist'), info);
     var actions = make('div', 'orbit-actions', info);
     refs.play = button(actions, 'orbit-play', 'btn primary orbit-play', '播放', 'play', function () {
       window.Skins.request('toggle-play');
@@ -580,7 +586,7 @@
       refs.recordToggle.setAttribute('aria-pressed', String(centered));
       refs.recordToggle.title = centered ? '切换为外圈封面' : '切换为中心封面';
     });
-    moves.relocate(stage.querySelector('.disc-wrap'), refs.recordToggle);
+    layout.move(stage.querySelector('.disc-wrap'), refs.recordToggle);
     var arm = make('div', 'orbit-tonearm', refs.rig);
     arm.setAttribute('aria-hidden', 'true');
     refs.next = button(refs.turntable, 'orbit-next', 'orbit-float orbit-next', '下一首', 'disc', function () {
@@ -660,7 +666,9 @@
     homeEpoch += 1;
     homeLoading = false;
     homeLoaded = false;
-    playerMoves.restore();
+    playerLayout.restore();
+    window.HertzShell.releaseLayout('orbit-player');
+    playerLayout = null;
     listeners.forEach(function (remove) { remove(); });
     listeners = [];
     if (window.SkinSettingsSheet) window.SkinSettingsSheet.unmount();
@@ -669,7 +677,9 @@
     resetTilt();
     if (refs.libraryHead) refs.libraryHead.classList.remove('orbit-filters-open');
     if (refs.libraryTools) refs.libraryTools.removeAttribute('id');
-    moves.restore();
+    layout.restore();
+    window.HertzShell.releaseLayout('orbit');
+    layout = null;
     built.remove();
     refs = {};
     queueKey = '';

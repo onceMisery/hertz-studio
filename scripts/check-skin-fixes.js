@@ -61,18 +61,22 @@ async function applySkin(page, id) {
         return !v.hidden && cs.display !== 'none' && v.getBoundingClientRect().height > 8;
       });
       const lib = document.getElementById('view-library');
+      const online = document.getElementById('view-online');
       return {
         visible: vis.map((v) => v.id),
         settingsVisible: vis.some((v) => v.id === 'view-settings'),
+        // 换肤后外壳按契约落回默认视图（在线曲库，见 app.js DEFAULT_VIEW 注释）；
+        // library 只在它自己成为默认时可见，故内容断言跟默认视图走。
+        defaultH: online ? Math.round(online.getBoundingClientRect().height) : 0,
+        defaultHasContent: online ? online.querySelectorAll('.online-row, .empty-card, .hint').length : 0,
         libH: lib ? Math.round(lib.getBoundingClientRect().height) : 0,
-        libHasContent: lib ? lib.querySelectorAll('.track, .daily-strip, .pl-card, .empty-card, .hint').length : 0,
         colH: Math.round(col.getBoundingClientRect().height),
       };
     });
     ok(m.visible.length > 0, `切到 ${target}：中栏有可见视图`, JSON.stringify(m.visible));
-    ok(m.libH > 100, `切到 ${target}：首页有实际高度`, 'libH=' + m.libH);
+    ok(m.defaultH > 100, `切到 ${target}：换肤落位的默认在线曲库有实际高度`, 'defaultH=' + m.defaultH);
     ok(!m.settingsVisible, `切到 ${target}：不停在设置页`, 'visible=' + JSON.stringify(m.visible));
-    ok(m.libHasContent > 0, `切到 ${target}：首页有内容节点`, 'nodes=' + m.libHasContent);
+    ok(m.defaultHasContent > 0, `切到 ${target}：默认视图有内容节点`, 'nodes=' + m.defaultHasContent);
     await page.screenshot({ path: `${OUT}/fix-switch-${target}.png` });
   }
 

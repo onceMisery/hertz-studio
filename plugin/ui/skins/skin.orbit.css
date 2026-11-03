@@ -24,7 +24,6 @@
   --skin-h-album: 12px;
   --skin-track-wide: 0px;
 }
-[data-skin="orbit"] .orbit-anchor { display: none; }
 [data-skin="orbit"] body { padding: 24px 24px 16px; gap: 0; letter-spacing: 0; background: var(--panel-solid); }
 [data-skin="orbit"] body::before,
 [data-skin="orbit"] #ambient,

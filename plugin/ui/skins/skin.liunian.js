@@ -36,8 +36,9 @@
   var SKIN_ID = 'liunian';
 
   var mounted = false;
-  // 搬运控制器：原位留 <span class="ln-anchor" data-ln="1">，卸载时 LIFO 还原。
-  var moves = window.SkinShared.createMoves('ln-anchor', 'data-ln');
+  // 布局装配走外壳（HertzShell.beginLayout，设计 §7.1/§7.2）：外壳记录原位、
+  // 严格逆还原。句柄在 mount 时建立、unmount 时 restore + release。
+  var layout = null;
   // 自建节点登记：卸载时统一 remove。
   var built = window.SkinShared.createBuilt();
   var observer = null;
@@ -144,11 +145,11 @@
   // -------------------------------------------------------------------------
 
   function relocate(node, parent, before) {
-    return moves.relocate(node, parent, before);
+    return layout.move(node, parent, before);
   }
 
   function restoreMoves() {
-    moves.restore();
+    layout.restore();
   }
 
   // -------------------------------------------------------------------------
@@ -1081,6 +1082,9 @@
     var bar = $('.bar');
     var app = $('.app');
     if (!rail || !column || !stage || !bar || !app) return; // DOM 未就绪
+    // beginLayout 先于一切 DOM 改动：挂载中途抛错时 unmount 仍能 restore 完整
+    // 归还（§7.3 失败回滚）。DOM 未就绪的早退在它之前，不占登记。
+    layout = window.HertzShell.beginLayout('liunian');
 
     mounted = true;
     refs.rail = rail;
@@ -1154,6 +1158,8 @@
     if (window.HertzShell && window.HertzShell.isViewAttached('settings')) window.HertzShell.detachView('settings');
     releaseGroups();
     restoreMoves();
+    window.HertzShell.releaseLayout('liunian');
+    layout = null;
     refs.bar.classList.remove('ln-capsule');
     delete refs.column.dataset.lnView;
     removeBuilt();

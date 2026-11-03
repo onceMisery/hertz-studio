@@ -119,12 +119,7 @@
   display: none;
 }
 
-/* 锚点是纯 DOM 定位标记，绝不参与布局：stage 搬进 .ln-right 后留在
-   .app 里的锚点否则会作为 grid item 凭空添出一行，把右栏挤成内容高。
-   display:none 不影响 restoreMoves 时 insertBefore(node, anchor)。 */
-[data-skin="liunian"] .ln-anchor {
-  display: none;
-}
+/* 锚点搬运层已退役（R4：迁移走外壳受控装配，无锚点）。 */
 
 /* 原导航项一并钉住（选择器保留以对齐皮肤覆盖契约）。 */
 [data-skin="liunian"] .rail-item,

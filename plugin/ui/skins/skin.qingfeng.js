@@ -57,8 +57,10 @@
   var applyImg = window.SkinShared.applyImg;
 
   var mounted = false;
-  // 搬运控制器：原位留 <span class="qf-anchor" data-qf="1">，卸载时 LIFO 还原。
-  var moves = window.SkinShared.createMoves('qf-anchor', 'data-qf');
+  // 布局装配句柄经外壳记录原位并严格逆还原（见 mount/unmount 的接线）。
+  // 布局装配走外壳（HertzShell.beginLayout，设计 §7.1/§7.2）；句柄在 mount
+  // 时建立、unmount 时 restore + release。
+  var layout = null;
   // 自建节点登记：卸载时统一 remove。
   var built = window.SkinShared.createBuilt();
   var observer = null;
@@ -214,11 +216,11 @@
   // -------------------------------------------------------------------------
 
   function relocate(node, parent, before) {
-    return moves.relocate(node, parent, before);
+    return layout.move(node, parent, before);
   }
 
   function restoreMoves() {
-    moves.restore();
+    layout.restore();
   }
 
   function make(tag, cls, parent) {
@@ -348,15 +350,13 @@
   function buildBrandGroup() {
     var brand = $('.brand');
     if (!brand) return;
-    // 品牌与设置按钮编成一组，整体贴左上角。brand 是业务节点，必须走锚点
-    // 搬运：裸搬进自建组的话，卸载时 removeBuilt 拆组会把 brand 连带删掉，
-    // 下次挂载 $('.brand') 找不到 —— 左上角设置按钮从此不再出现
-    // （实测：清风 → 任意皮肤 → 清风，第二颗设置按钮就没了）。
+    // 品牌与设置按钮编成一组，整体贴左上角。brand 是壳层节点，走外壳布局
+    // 装配（§7.1）；组经 placeAtOriginal 顶替 brand 的原位 —— 卸载 restore
+    // 把 brand 送回记录原位，removeBuilt 再拆组 —— brand 与组解耦，
+    // 反复切换不丢节点（裸搬进自建组会让 removeBuilt 连带删掉 brand）。
     var group = make('div', 'qf-brand-group');
-    var anchor = relocate(brand, group);
-    // 组占 brand 的原位（锚点处）：卸载 restore 先把 brand 送回锚点处、
-    // 摘掉锚点，removeBuilt 再拆组 —— brand 与组解耦，反复切换不丢节点。
-    if (anchor && anchor.parentNode) anchor.parentNode.insertBefore(group, anchor);
+    relocate(brand, group);
+    layout.placeAtOriginal(brand, group);
 
     var btn = make('button', 'qf-settings-btn', group);
     btn.type = 'button';
@@ -2585,8 +2585,12 @@
 
   function mount() {
     if (mounted) return;
+    // beginLayout 先于一切 DOM 改动：挂载中途抛错时 unmount 仍能 restore 完整
+    // 归还（§7.3 失败回滚）。DOM 未就绪的早退要连带 release。
+    var layoutHandle = window.HertzShell.beginLayout('qingfeng');
+    layout = layoutHandle;
     var app = $('.app');
-    if (!app) return;
+    if (!app) { window.HertzShell.releaseLayout('qingfeng'); layout = null; return; }
     refs.rail = byId('rail');
     refs.column = byId('column');
     if (!refs.rail || !refs.column) return;
@@ -2708,6 +2712,8 @@
     if (window.HertzShell && window.HertzShell.isViewAttached('settings')) window.HertzShell.detachView('settings');
     showAll();
     restoreMoves();
+    window.HertzShell.releaseLayout('qingfeng');
+    layout = null;
     if (refs.nav) refs.nav.removeEventListener('click', onNavClick);
     if (sheet.nav) sheet.nav.removeEventListener('click', onNavClick);
     removeBuilt();

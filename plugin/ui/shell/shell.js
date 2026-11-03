@@ -99,6 +99,73 @@
 
   function isViewAttached(id) { return attachedViews.has(id); }
 
+  // 布局装配（设计 §7.1/§7.2）：皮肤以受控步骤声明壳层 chrome（舞台、内容列、
+  // 顶栏及其内部件）的排列——这就是布局描述的运行形态；外壳记录每一步的原位
+  // （父节点 + 插入点）并在 restore 时严格逆还原（LIFO），皮肤不再自持锚点与
+  // 还原账本。restore 不销毁装配组：响应式重排（星轨的播放器音量条）先 restore
+  // 再 move 复用同一组。已登记视图的根节点拒收——业务根只能走 attachView。
+  var layoutAssemblies = new Map();
+  function beginLayout(id) {
+    if (!initialized) throw new Error('外壳尚未初始化');
+    if (layoutAssemblies.has(id)) throw new Error('布局装配已存在：' + id);
+    var records = [];
+    var handle = {
+      id: id,
+      move: function (node, parent, before) {
+        if (!node || !parent || node.nodeType !== 1 || parent.nodeType !== 1) {
+          throw new TypeError('布局装配只收元素节点与目标容器');
+        }
+        var values = views.values();
+        var entry;
+        while ((entry = values.next()).done === false) {
+          if (entry.value.el === node) {
+            throw new Error('业务视图根须经 attachView 装配（' + entry.value.id + '）');
+          }
+        }
+        records.push({ node: node, parent: node.parentNode, next: node.nextSibling });
+        if (before) parent.insertBefore(node, before);
+        else parent.appendChild(node);
+        return node;
+      },
+      restore: function () {
+        var count = 0;
+        for (var i = records.length - 1; i >= 0; i -= 1) {
+          var record = records[i];
+          if (record.parent) {
+            if (record.next && record.next.parentNode === record.parent) record.parent.insertBefore(record.node, record.next);
+            else record.parent.appendChild(record.node);
+          }
+          count += 1;
+        }
+        records.length = 0;
+        return count;
+      },
+      // 把 container 放到 node 被搬走前所占的原位（本装配组记录的父节点与
+      // 插入点）。用于「节点包进自建容器、容器顶替原位」的组包场景：
+      // restore 时节点按记录回到原位、自建容器另经登记工厂拆毁，二者解耦。
+      placeAtOriginal: function (node, container) {
+        if (!container || container.nodeType !== 1) throw new TypeError('placeAtOriginal 需要元素容器');
+        for (var i = records.length - 1; i >= 0; i -= 1) {
+          if (records[i].node === node) {
+            var record = records[i];
+            if (record.next && record.next.parentNode === record.parent) record.parent.insertBefore(container, record.next);
+            else if (record.parent) record.parent.appendChild(container);
+            return container;
+          }
+        }
+        throw new Error('节点不在本装配组的记录里');
+      },
+      size: function () { return records.length; },
+    };
+    layoutAssemblies.set(id, handle);
+    return handle;
+  }
+
+  // 卸载收尾：释放装配登记，让下一次挂载能重新 beginLayout。调用前应先 restore。
+  function releaseLayout(id) { layoutAssemblies.delete(id); }
+
+  function isLayoutAssembled(id) { return layoutAssemblies.has(id); }
+
   // 导航请求。options 沿用既有语义：historyOnly（在线页只切视图不拉数据）、
   // skipDesktopDetection（设置页恢复不探测可选桌面组件）。无效目标保持当前页面。
   function navigate(name, options) {
@@ -161,6 +228,9 @@
     attachView: attachView,
     detachView: detachView,
     isViewAttached: isViewAttached,
+    beginLayout: beginLayout,
+    releaseLayout: releaseLayout,
+    isLayoutAssembled: isLayoutAssembled,
     hasView: hasView,
   };
 })();

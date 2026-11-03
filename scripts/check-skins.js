@@ -1086,8 +1086,8 @@ function checkWiring() {
     'skin.liunian.js 排在 app.js 之前');
   ok(/Skins\.registerLifecycle\(SKIN_ID, \{ mount: mount, unmount: unmount \}\)/.test(LIUNIAN_JS),
     '重编排层向 Skins 注册生命周期，由宿主排序挂卸载');
-  ok(/ln-anchor/.test(LIUNIAN_JS),
-    '搬运节点带锚点（切走皮肤可还原）');
+  ok(/beginLayout\('liunian'\)/.test(LIUNIAN_JS) && /releaseLayout\('liunian'\)/.test(LIUNIAN_JS),
+    '搬运经外壳布局装配登记与释放（切走皮肤可严格还原，§7.1）');
   ok(/MutationObserver/.test(LIUNIAN_JS),
     '视图联动用 MutationObserver');
 
