@@ -1,0 +1,73 @@
+/* SPDX-License-Identifier: MIT */
+/* 公共表单组件：Field / Select / Switch(checkbox) / Slider(range) 的全站唯一
+   基础实现（设计收敛 §6.3）。
+   基础形态与交互态只在这里定义；页面与皮肤通过容器级规则组合差异（宽度、
+   行内布局、个别 accent 覆写），不得整段重定义基础。
+   令牌来自 design/design-base.css；玻璃面规则本文件即 resting 权威——style.css
+   与皮肤层不再有同特异性的 input/select 基础块。 */
+
+/* 文本族 + 下拉：text/search/select 坐在玻璃面上（半透明深玻璃底 + 8px 模糊）；
+   number/password/textarea 多在模态卡内，用实色 field 令牌。 */
+input[type="text"],
+input[type="search"],
+select {
+  font-family: var(--font-sans);
+  font-size: var(--fs-md);
+  color: var(--text);
+  background: color-mix(in srgb, var(--glass-bg-strong) 42%, transparent);
+  border: 1px solid var(--glass-line);
+  border-radius: var(--r-md);
+  padding: var(--sp-2) var(--sp-4);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+input[type="number"],
+input[type="password"],
+textarea {
+  font-family: var(--font-sans);
+  font-size: var(--fs-md);
+  color: var(--text);
+  background: var(--field-bg);
+  border: 1px solid var(--field-border);
+  border-radius: var(--r-md);
+  padding: var(--sp-2) var(--sp-4);
+}
+input[type="text"]:hover, input[type="search"]:hover, select:hover,
+input[type="number"]:hover, input[type="password"]:hover, textarea:hover {
+  background: var(--field-bg-hover);
+  border-color: var(--field-border-strong);
+}
+input[type="text"]:focus, input[type="search"]:focus, select:focus,
+input[type="number"]:focus, input[type="password"]:focus, textarea:focus {
+  background: rgba(var(--brand-rgb), 0.05);
+  border-color: rgba(var(--brand-rgb), 0.34);
+  outline: none;
+  box-shadow: inset 0 0 0 1px rgba(var(--brand-rgb), 0.12);
+}
+input::placeholder, textarea::placeholder { color: var(--muted); }
+select { padding-right: 8px; cursor: pointer; }
+select option { background: var(--panel-solid); color: var(--text); }
+
+/* Switch（开关勾选）：原生 checkbox + 主题 accent 的统一约定。
+   个别功能面（歌词情绪等）按页面语义覆写 accent，是公开变体式组合。 */
+input[type="checkbox"] { accent-color: var(--accent); cursor: pointer; }
+
+/* Slider（range）：扁平轨道，hover 变粗。 */
+input[type="range"] {
+  -webkit-appearance: none; appearance: none;
+  width: 100%; background: transparent; cursor: pointer; height: 18px;
+}
+input[type="range"]::-webkit-slider-runnable-track {
+  height: 5px; border-radius: 99px; background: transparent;
+  transition: height 0.2s var(--ease);
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 13px; height: 13px; margin-top: -4px;
+  border-radius: 50%; background: var(--accent); border: none;
+  box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 25%, transparent);
+  transition: box-shadow 0.2s var(--ease), margin-top 0.2s var(--ease);
+}
+input[type="range"]:hover::-webkit-slider-thumb { margin-top: -5.5px; box-shadow: 0 0 0 6px color-mix(in srgb, var(--accent) 18%, transparent); }
+input[type="range"]::-moz-range-track { height: 5px; border-radius: 99px; background: transparent; }
+input[type="range"]::-moz-range-thumb { width: 13px; height: 13px; border: none; border-radius: 50%; background: var(--accent); }

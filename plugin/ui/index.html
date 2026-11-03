@@ -21,6 +21,10 @@
      排在 style.css 之前：同特异性的跨组件时值手感（按压分档）在 style.css
      尾部，必须后到；皮肤层的度量覆盖在更后面，仍然生效。 -->
 <link rel="stylesheet" href="components/button.css">
+<!-- 公共组件：表单（Field/Select/Switch/Slider）唯一实现。
+     玻璃面规则在此即 resting 权威；style.css 与皮肤层不再有同特异性的
+     input/select 基础块，只保留容器级组合（宽度、行布局、accent 覆写）。 -->
+<link rel="stylesheet" href="components/form.css">
 <link rel="stylesheet" href="style.css">
 <!-- 外壳层：工作区模式与公共 chrome 显隐（body.room-view / body.room-active 的
      消费方）。排在 style.css 之后、页面样式之前；页面 CSS 不得再藏全局 chrome。 -->
