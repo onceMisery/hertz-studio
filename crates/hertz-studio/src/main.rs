@@ -126,8 +126,15 @@ const PLATFORM_ICONS: &[(&str, &[u8])] = &[
 
 const HTML: &str = "text/html; charset=utf-8";
 
+#[cfg(feature = "native-window")]
+mod window;
+
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    #[cfg(feature = "native-window")]
+    if args.window {
+        return window::run_window(args);
+    }
     let mcp_stdio = args.mcp_stdio;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -297,6 +304,15 @@ async fn run(args: Args) -> anyhow::Result<()> {
     // 浏览器拿到的是会话 cookie，之后的刷新与书签都不需要凭据出现在地址里。
     let entry = state.issue_entry_ticket();
     let url = format!("http://{}/?ticket={}", host_port(shown, actual_port), entry);
+    // --window 原型：服务就绪事实回传窗口线程（一次性票据 URL 即首跳凭据，§2.3）。
+    #[cfg(feature = "native-window")]
+    if let Some(tx) = &args.notify {
+        let _ = tx.send(window::WindowStart::Listening {
+            bind_ip: shown,
+            port: actual_port,
+            entry_url: url.clone(),
+        });
+    }
     tracing::info!("listening on {bind}:{actual_port}");
     println!("hertz-studio v{}", env!("CARGO_PKG_VERSION"));
     if let Some(warning) = exposure_warning(local.ip(), actual_port) {
@@ -919,6 +935,11 @@ fn init_logging_stderr(level: &str) {
 struct Args {
     help: bool,
     open: bool,
+    // --window 原型开关（常驻：非 native 构建在 parse 即给出明确报错）。
+    window: bool,
+    // 服务线程就绪后回传给窗口线程的通道（--window 模式内部接线，非 CLI）。
+    #[cfg(feature = "native-window")]
+    notify: Option<std::sync::mpsc::Sender<window::WindowStart>>,
     bind: Option<String>,
     port: Option<u16>,
     data_dir: Option<std::path::PathBuf>,
@@ -932,6 +953,9 @@ impl Args {
         let mut args = Self {
             help: false,
             open: false,
+            window: false,
+            #[cfg(feature = "native-window")]
+            notify: None,
             bind: None,
             port: None,
             data_dir: None,
@@ -945,6 +969,7 @@ impl Args {
                 "-h" | "--help" => args.help = true,
                 "--version" => args.version = true,
                 "--open" => args.open = true,
+                "--window" => args.window = true,
                 "--mcp-stdio" => args.mcp_stdio = true,
                 "--grant" => args.grant = iter.next(),
                 "--bind" => args.bind = iter.next(),

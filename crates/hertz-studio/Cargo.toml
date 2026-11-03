@@ -11,9 +11,16 @@ description = "The hertz-studio service binary: HTTP + WebSocket API and web UI"
 [features]
 default = []
 full = ["dep:aes", "dep:cbc", "dep:num-bigint", "dep:num-traits"]
+# R5 原生主窗口原型（--window）：默认关——CI 三平台矩阵不引入 GTK/WebView2
+# 依赖；交付形态的默认开关在原型验证通过后于 R5 实施评审中定。
+native-window = ["dep:tao", "dep:wry"]
 
 [dependencies]
 vmusic-core = { workspace = true }
+# R5 --window 原型的窗口与 WebView（版本与 hertz-desktop 锁定同一组，
+# 见 crates/hertz-desktop/Cargo.toml）。
+tao = { version = "=0.37.1", optional = true, default-features = false, features = ["rwh_06"] }
+wry = { version = "=0.57.0", optional = true, default-features = false, features = ["os-webview"] }
 vmusic-audio = { workspace = true }
 vmusic-lan = { workspace = true }
 zeroize = "1"
