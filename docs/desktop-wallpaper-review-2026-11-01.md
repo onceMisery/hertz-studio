@@ -411,6 +411,24 @@ cargo test -p hertz-desktop loopback_ -- --ignored --nocapture --test-threads=1
 
 恢复源码后的显式 feature 构建通过 **18 组原生 Close 故障及呈现回归**，包含五组实际桌面/预览/视频退出反例，证据为 `output/playwright/wallpaper-presentation-native-1793715672040/presentation-report.json`，二进制 SHA-256 为 `e3a8921f4712bd9c048fef8c3d254db3c5cb78306d1347f413c8491f77b548dd`。随后重新构建普通无 feature 二进制，同一构建通过 **19 组桌面交接**（`output/playwright/wallpaper-presentation-native-1793715875869/presentation-report.json`）及 **23 组独立预览/呈现**（`output/playwright/wallpaper-presentation-native-1793715964817/presentation-report.json`）。三个套件最终全部预算、分配记录及 controller/静态交接退出记录归零；普通构建默认拒绝授权、导入及 Close 故障探针，两个媒体请求均为 404，见 `output/playwright/wallpaper-media-native-1793716100543/media-requests.json`。当前普通二进制 SHA-256 为 `8888cf5d03bf4d3152d94e885453e2600387268cea5e49aa086c1995a40ee751`，汇总与源码恢复核对为 `output/wallpaper-close-failure-review-2026-11-03.json`。使用私有测试目录，未创建提交，无遗留测试宿主；整体壁纸计划仍在进行中。
 
+## 独立解码探测 Close 失败屏障续审（2026-11-03）
+
+继续检查 ImportJobs 导入与已安装媒体补图依赖的 ProbeHost 退出屏障。该 owner 保留自己的独立 WebView2、文件 scope 和探测预算；成功解码、取消及首帧/seek 期限都只决定结果，必须等实际 Close 和全部文件活动退出后才回执给准备 worker。正式状态增加单实例 decodeProbe 诊断，包含原 probeId、启动/结果、controller 与文件读者的独立退出状态、Close 尝试/错误/持续时间及调用耗时。修正相同 Close 错误在每次轮询时重复写日志的问题，改为只在 HRESULT 改变时记录，保留完整尝试计数。
+
+显式 wallpaper-media-probe＋debug_assertions 构建可以在该 owner 的真实 Close 调用边界注入 E_FAIL，注入在创建探测实例时固定，避免首帧完成过快造成验收竞态；解除只接受该探测页自身 native callback 的 probeId，错误 id、普通壁纸页来源与非法载荷均不能越过屏障。新开关保留正常资格缓存管线，成功/取消案例使用只改变封装标签、保留原压缩帧的不同内容样本。验收直接检查真实 SQLite 资格与派生索引、staging、准备槽及 decoder 占用；补图案例继续使用已删除导入源的不可变已安装原包。
+
+设计 C53 的“15 秒内终结等待”细化为在期限内结束首帧/seek 等待并进入回收，终态回执仍等待真实退出，与既有两道屏障一致。此轮增加关闭故障可观测性与去重日志，并验证既有释放规则；真实 COM 故障、通用 provider 逐资源租约、设备/Explorer 矩阵、完整峰值及长稳仍待后续验收，先前管理管道超时也尚未定位。
+
+普通 Rust **411 项通过**（desktop 356、IPC 36、wallpaper 19），all-features **413 项通过**（desktop 358，其余相同；本轮新增一项仅 debug 的探针来源/载荷边界测试），两项音频硬件测试仍忽略。Clippy all-targets/all-features `-D warnings`、Rust 1.88 all-targets/all-features `--locked` 及限定文件格式、JS 语法与差异空白检查均通过。
+
+显式 feature 构建通过 **36 个原有导入/重试场景及 4 组原生 Close 故障反例**，其中原有场景包含四种原始媒体正向导入、重复原始图片和错误容器拒绝。最终证据为 `output/playwright/wallpaper-import-native-1793718719501/evidence.json`，二进制 SHA-256 为 `d95528120b815eeab222624817d66999f555613b2ac9e1b4660cd7e9ac93fde2`。成功视频已收到真实首帧/中段/近尾帧、文件读者已退出时，仍保留 **1 个 decoder 与 1 个准备槽**；失败 Close 不发布包、资格或派生索引。随后取消可覆盖待发送的成功，仍保留 staging 和准备 owner，实际 Close 后才回执 cancelled。真实 15 秒首帧期限到达同样只改变结果，保留未退出实例与预算。删除导入源后的图片补图生成 **106×53** 目标，Close 受阻时保留 **44,944 字节解码 CPU 额度**与准备槽，退出后才发布索引，原包 hash 不变。最终停用测试桌面后全部全局预算、分配记录及退出记录归零。
+
+定向反证临时移除 ProbeHost 的失败 Close 返回后，原生验收按预期在“failed Close keeps the real probe, budget and unpublished job”失败；测试私有库已经提前出现 close-success 的 original.hwpkg，确认是实际提前发布，非仅缺少诊断字段。反证为 `output/wallpaper-probe-close-mutation-review-2026-11-03.json`，随后只恢复该处源码，前后 SHA-256 均为 `046a32df35240d701b6ba9385b2eebc260c001e3aa26a637386ee43f89efc3ea`。
+
+保留两次未完成验收的证据：首次 `output/playwright/wallpaper-import-native-1793717867349/evidence.json` 在 5000×1000 大图 CPU 准备阶段超出旧脚本 25 秒总观察窗口，尚未创建该任务的独立探测页；任务回执观察改为 60 秒，15 秒探测阶段仍单独断言，未据此宣称准备性能已优化。第二次 `output/playwright/wallpaper-import-native-1793718468267/evidence.json` 已完成全部原有场景及两组关闭反例，随后日志出现 tray rebuilt、wallpaper surface unavailable; recovering 与新桌面页；脚本原先持有的壁纸页关闭，因此第三组未完成。新的隔离目录完整通过四组；该 surface 失效的原因尚未确认，完整 Explorer/设备矩阵仍待验收。
+
+最后恢复普通无 feature 构建，同一二进制通过 **19 组桌面交接**（`output/playwright/wallpaper-presentation-native-1793719052162/presentation-report.json`）及 **23 组独立预览/呈现**（`output/playwright/wallpaper-presentation-native-1793719126368/presentation-report.json`）。两个套件最终全部预算和资源记录归零，decodeProbe 为 null，controller 与静态交接退出记录均为空。普通构建的授权、导入与播放 controller Close 测试入口默认拒绝，两个媒体请求均为 404，见 `output/playwright/wallpaper-media-native-1793719231129/media-requests.json`。当前普通二进制 SHA-256 为 `b24efda12101a8731d28ec739452ae97e08052709f26478ac7d7cae5ad503046`，汇总、源码恢复及中断观察为 `output/wallpaper-probe-close-review-2026-11-03.json`。未创建提交，无遗留测试宿主；整体壁纸计划仍在进行中。
+
 ## 后续工作与所缺证据
 
 | 工作包 | 剩余实现 / 接线 | 已有证据与剩余验收 |

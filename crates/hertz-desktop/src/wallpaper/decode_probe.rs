@@ -67,7 +67,8 @@ impl Reservation {
             self.budget
                 .confirm_exit(self.token, &self.request.session, self.request.generation);
         // 每笔探测/准备使用独立 session，退出后无需永久保留墓碑。
-        self.budget.purge_session(&self.request.session, self.request.generation);
+        self.budget
+            .purge_session(&self.request.session, self.request.generation);
     }
 }
 
@@ -217,7 +218,7 @@ impl ProbeClient {
     }
     pub(super) fn cache_allowed(&self) -> bool {
         #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
-        if self.force_probe || self.suppress_frames || self.block_close {
+        if self.force_probe || self.suppress_frames {
             return false;
         }
         true
@@ -756,12 +757,15 @@ fn create_surface(
         }).build(&window).map_err(|error| JobError::new("probe_inconclusive", error.to_string()))?;
     let access = super::webresource::install(&webview, proxy)
         .map_err(|error| JobError::new("probe_inconclusive", error))?;
-    Ok((Surface {
-        webview,
-        window,
-        #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
-        close_probe_blocked: false,
-    }, access))
+    Ok((
+        Surface {
+            webview,
+            window,
+            #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+            close_probe_blocked: false,
+        },
+        access,
+    ))
 }
 
 #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]

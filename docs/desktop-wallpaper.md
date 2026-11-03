@@ -1094,6 +1094,8 @@ TargetPlanner 取得整个 session 的保留额度，内部资源 acquire 从该
 
 controller 关闭故障诊断（2026-11-03）：同一 RetiringWallpaper owner 记录每次真实 Close 的尝试次数、最近调用耗时、当前失败 HRESULT 与持续时间；正式原生状态的 retirements 列表（最多 64 条，retiringControllers 仍报告总数）给出其原代际、仍存活的原 sessionId、controllerClosed 与 fileReadersDrained。Close 失败时继续持有原 surface、会话父/子额度及静态采集工作区，不能提交源退出或创建后继；消费者释放、预览租约结束或配置停用也不能越过此屏障。后续 Close 成功后才销毁旧 WebView/窗口、通知该原代际退出，并按独立文件读者屏障回收资源。测试构建的故障注入仅在 wallpaper-media-probe＋debug_assertions 下存在，事件只能匹配发送页面自身的原生绑定，包含退出中的旧页面；普通构建不接收该入口。此注入证明失败控制流及资源归属，不代替实际 COM/设备故障资格。
 
+独立解码探测器沿用其 ProbeHost owner 和同样的两道退出屏障。正式状态的 decodeProbe 给出当前 probeId、是否启动、已获得的解码结果、controllerClosed/fileReadersDrained，以及 Close 尝试次数、失败 HRESULT、持续时间和最近调用耗时；没有探测实例时为 null。相同 HRESULT 的重复失败只计数，不反复写日志。成功帧、15 秒首帧/seek 期限或取消决定探测结果，终态回执和准备槽归还仍须等待实际 controller 与文件活动退出；关闭受阻期间不得发布新包、派生索引或成功资格。debug 测试可以在该 owner 的真实 Close 边界注入失败，解除仅接受探测页自身原生 callback 的 probeId；该开关不改变正常资格缓存路径，超时抑制首帧的测试仍沿用已有不缓存规则。
+
 解码竞争验收（2026-11-03）：真实桌面与独立预览持有两个视频 decoder 时，第三个导入在创建 controller 前被拒；释放预览后导入可使用最后一个槽，取消须等真实退出，再次导入才能成功。正式预览在准备期间取消最后消费者也已验证：资格 controller 关闭、准备槽归还，旧完成不创建预览，新申请可重新取得 decoder。该验收仅以显式测试 feature 提供导入源/抑制探测首帧，不虚构资源预留或 Close 回执；仍不覆盖通用共享池的多等待者、共享纹理、COM Close 失败与大媒体峰值。
 
 
@@ -1769,6 +1771,7 @@ P3-03 可与 G3-S 并行，社区先分发声明式包；但**完整 P3** 必须
 | `scripts/check-wallpaper-handoff-browser.js`、`scripts/wallpaper-handoff-checks.js` | GL/图片/视频有界采集；`check-wallpaper-presentation-native.js --handoff` 复制测试库后验证静态帧原生提交、旧 controller 退出后准入、揭幕前实际选择不变、失败/超时/暂停/连续切换、所属 HWND 丢失与全部额度回收 |
 | `scripts/wallpaper-follow-checks.js` | `check-wallpaper-presentation-native.js --follow-handoff` 创建独立只读 HTTP 来源与私有库，验证 Follow Hertz 原生场景/参数解析、最新投影合并、断连/无效输入待机、候选失败、桌面/预览独立静态交接、GL/图片/视频更新、采集超时和租约释放 |
 | `scripts/wallpaper-close-checks.js` | `check-wallpaper-presentation-native.js --close-failure` 使用显式测试 feature 和私有库，在真实桌面/预览/视频 owner 的原生 Close 边界注入 E_FAIL，验证失败时保持源及预算、连续草稿合并、跨 controller 拒绝、预览释放/停用及实际 Close 成功后回收；普通构建默认拒绝该入口 |
+| `scripts/wallpaper-probe-close-checks.js` | `check-wallpaper-import-native.js --close-failure` 在独立 ProbeHost 的实际 Close 边界注入失败，覆盖真实视频成功后的延迟发布、成功后取消、15 秒无帧期限与删除导入源后的图片补图；核对原生预算、SQLite 资格/派生索引、staging、来源隔离、日志去重和实际退出后的终态 |
 | `scripts/check-wallpaper-audio-native.js` | 真实 WASAPI owner 与独立桌面/预览消费者、频谱新鲜度、设备冲突、none/Hertz/system 切换；物理默认切换、热拔与休眠另需实机验收 |
 | `scripts/check-wallpaper-config-native.js` | 原生设置 owner/草稿修订/只读预览、保存失败、重复请求、持久操作查询、配置替换后日志未终结的磁盘检查点重启恢复与冲突保护；不冒充定时断电/OS 崩溃注入 |
 | `crates/hertz-studio/src/stage_media/`、`crates/vmusic-store/src/{stage_media,settings,backup}.rs` 模块测试与真实服务集成用例 | 分块/去重修复/发布事务/配额、删除各阶段崩溃及同 hash 重导入、双进程锁、原子预置 revision、备份/通用 settings 不旁路、DataDir/租约隔离 |
@@ -1840,7 +1843,7 @@ P3-03 可与 G3-S 并行，社区先分发声明式包；但**完整 P3** 必须
 | C50 | 源在快照前不可读/复制失败，快照后源被移动/删除，或已安装包损坏/磁盘满 | 快照失败明确终止；快照成功后不再依赖源；包缺失/损坏标记 unavailable/quarantined，仅临时显示封面/系统壁纸并保留原选择与错误，不隐式改配置 |
 | C51 | 设置页提交绝对路径、相对路径或 URL，或重放过期 fileToken | 拒绝；只接受一次性 token；不读取任意路径 |
 | C52 | MP4 的 moov 在尾部，WebM 无可靠帧率，VFR 尖峰或元数据超限 | 有界解析后取可靠帧率上界或明确拒绝；不从 loadedmetadata/平均 FPS 伪造准入数据 |
-| C53 | 隐藏探测页无首帧，play 被拒绝，探测中取消或旧帧迟到 | 报告可区分的失败/不确定状态；15 秒内终结等待；旧代际不成功入库，实际清理后归还槽 |
+| C53 | 隐藏探测页无首帧，play 被拒绝，探测中取消、旧帧迟到或 controller Close 失败 | 报告可区分的失败/不确定状态；15 秒内结束首帧/seek 等待并进入回收；Close 失败保留实例、预算及 staging；旧代际不成功入库，终态回执和槽归还等待实际清理 |
 | C54 | APNG/动画 WebP 伪装静态图，带 EXIF 旋转的照片、非方形像素/旋转视频 | 动画拒绝；方向/宽高/适配在预览与桌面一致；contain/cover/stretch 无额外 decoder |
 | C55 | 两个桌面视频占满，再导入/播放预览；或 60 fps 源用于 15 fps 预览 | 不启动第三个 decoder；封面可显示；源解码成本真实计量，释放预览后应用不重复占槽 |
 | C56 | 软暂停后请求新视频，随后锁屏/恢复；pause 后 decoder 仍持缓冲 | 保留资源仍记账；不提前还槽；强制卸载后释放，恢复重新准入，2 秒排空后无持续解码 |

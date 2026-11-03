@@ -12,6 +12,7 @@ const path = require('node:path');
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const { buildZip, FIXTURE_PNG } = require('./check-wallpaper-media-native');
 const root = path.resolve(__dirname, '..');
+const closeFailure = process.argv.includes('--close-failure');
 const output = path.join(root, 'output/playwright/wallpaper-import-native-' + Date.now());
 const digest = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -195,6 +196,16 @@ async function main() {
     busy: makePackage('video', video, 7),
     'quota-new': makePackage('image', FIXTURE_PNG, 17),
   };
+  if (closeFailure) {
+    const muxer = video.indexOf('Lavf');
+    assert.ok(muxer > 0, 'fixed VP8 fixture has a muxer label');
+    for (const [index, name] of ['close-success', 'close-cancel', 'close-timeout'].entries()) {
+      // Change only the muxer label. The frame bytes remain intact, while each
+      // real qualification uses a fresh content hash and the normal cache path.
+      const unique = Buffer.from(video); unique[muxer] = 65 + index;
+      cases[name] = makePackage('video', unique, 20 + index);
+    }
+  }
   for (const [name, bytes] of Object.entries(cases)) fs.writeFileSync(path.join(inputs, name + '.hwpkg'), bytes);
   const profile = { kind: 'standalone', dataDir: path.join(output, 'player'), edition: 'full' };
   const lyrics = { enabled: false, locked: true, layout: 'double', secondary: 'next', fontFamily: 'Segoe UI', fontSize: 32, fontWeight: 600, sungColor: '#8fe3ff', unsungColor: '#ffffff', outlineColor: '#000000', outlineWidth: 2, opacity: .92, width: 900, anchorX: .5, anchorY: .84, monitor: null };
@@ -208,7 +219,7 @@ async function main() {
     env: { ...process.env, HERTZ_DESKTOP_CONFIG_DIR: configDir, WEBVIEW2_USER_DATA_FOLDER: path.join(output, 'webview2'), WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: '--remote-debugging-port=' + port },
   });
   let browser;
-  const evidence = { output, results: [], probes: [] };
+  const evidence = { output, passed:false, requiredFeature: 'wallpaper-media-probe', binarySha256: digest(fs.readFileSync(path.join(root, 'target/debug/hertz-desktop.exe'))), results: [], probes: [] };
   try {
     for (let i = 0; i < 75; i++) {
       try { browser = await chromium.connectOverCDP('http://127.0.0.1:' + port); break; } catch {}
@@ -284,16 +295,18 @@ async function main() {
       page.on('domcontentloaded', () => { log.url = page.url(); });
     });
     let nonce = 0;
-    async function send(action, name, suppressFrames = false, contentCapacityBytes = null, imageTarget = null, reference = null) {
+    async function send(action, name, suppressFrames = false, contentCapacityBytes = null, imageTarget = null, reference = null, blockClose = false) {
       const id = ++nonce;
       await wallpaper.evaluate(command => window.ipc.postMessage('wallpaper_probe_import ' + JSON.stringify(command)), {
-        nonce: id, action, name, suppressFrames, contentCapacityBytes, imageTarget, reference,
+        nonce: id, action, name, suppressFrames, contentCapacityBytes, imageTarget, reference, blockClose,
         forceProbe: ['timeout', 'cancel', 'cancel-window', 'busy'].includes(name),
       });
       return id;
     }
     async function result(id) {
-      await wallpaper.waitForFunction(id => !!window.__nativeImportProbes?.[id], id, { timeout: 25000 });
+      // A job includes CPU preparation and physical cleanup. The native
+      // 15-second frame/seek deadline is checked independently below.
+      await wallpaper.waitForFunction(id => !!window.__nativeImportProbes?.[id], id, { timeout: 60000 });
       return wallpaper.evaluate(id => window.__nativeImportProbes[id], id);
     }
     async function begin(name, expected, suppressFrames = false, afterStart = null, contentCapacityBytes = null, imageTarget = null) {
@@ -510,6 +523,10 @@ async function main() {
     await result(await send('release', 'budget'));
     await begin('busy', 'done');
     await begin('quota-new', 'done');
+    if (closeFailure) {
+      await require('./wallpaper-probe-close-checks')({output,configDir,inputs,cases,evidence,pages,wallpaper,settings,child,send,result,reference,derivedReceipts});
+    }
+    evidence.passed = true;
     console.log('wallpaper import native checks passed');
   } finally {
     if (fs.existsSync(path.join(configDir, 'desktop.log'))) evidence.nativeProbeLog = fs.readFileSync(path.join(configDir, 'desktop.log'), 'utf8').split(/\r?\n/).filter(line => line.includes('decode probe'));
