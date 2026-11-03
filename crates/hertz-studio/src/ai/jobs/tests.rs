@@ -777,6 +777,18 @@ async fn await_usage_entry(state: &Arc<AppState>, id: &str) -> store::UsageEntry
     panic!("usage entry missing");
 }
 
+// 终态行是在结算尝试里提交的，而 worker owner 要等整轮结算（含超时分支）走完才摘
+// （ai/jobs.rs 的 cancel_worker_after_signal 末尾），所以「库里已终态」不等于「owner 已释放」。
+async fn await_input_released(state: &Arc<AppState>, id: &str) {
+    for _ in 0..2000 {
+        if !state.ai_runtime.inputs.lock().await.contains_key(id) {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    panic!("worker input still owned after the terminal state");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn worker_panics_interrupt_and_settle_according_to_dispatch_state() {
     let (state, handle) = jobs_state().await;
@@ -4669,12 +4681,7 @@ async fn consent_revocation_cancels_queued_worker_after_ledger_failure() {
         .unwrap();
     assert_eq!(usage.usage_state, "released");
     assert_eq!(usage.accounted_micro_usd, 0);
-    assert!(!state
-        .ai_runtime
-        .inputs
-        .lock()
-        .await
-        .contains_key(&job.job_id));
+    await_input_released(&state, &job.job_id).await;
 
     gate.store(true, std::sync::atomic::Ordering::SeqCst);
     drop(slot);
@@ -4938,10 +4945,8 @@ async fn token_only_generation_ignores_legacy_accounting_guards() {
             .unwrap();
     }
     assert_eq!(view.state, "succeeded");
-    let entry = store::find_usage_entry(&state.db, &job.job_id)
-        .await
-        .unwrap()
-        .unwrap();
+    // 账本行是结果提交后另开事务补写的，「已 succeeded」不保证「账本已落库」。
+    let entry = await_usage_entry(&state, &job.job_id).await;
     assert_eq!(entry.usage_state, "unpriced");
     let usage: TrustedUsage =
         serde_json::from_str(entry.reported_usage.as_deref().unwrap()).unwrap();

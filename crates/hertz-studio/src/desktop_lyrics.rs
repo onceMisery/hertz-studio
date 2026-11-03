@@ -677,11 +677,11 @@ mod tests {
         db.close().await;
         // SQLx can report the pool closed while a return task still closes its SQLite
         // worker. Wait for actual pool accounting before deleting Windows DB files.
-        // The deadline is scheduling slack, not a behaviour bound: on a fully loaded
-        // macOS/Windows runner 2 s is exhausted before the worker is descheduled onto.
+        // Poll on a timer instead of yield_now: with the suite's parallelism, cooperating
+        // spinners starve the closer future on a small runner, so no deadline would hold.
         tokio::time::timeout(Duration::from_secs(10), async {
             while db.size() != 0 {
-                tokio::task::yield_now().await;
+                tokio::time::sleep(Duration::from_millis(5)).await;
             }
         })
         .await
