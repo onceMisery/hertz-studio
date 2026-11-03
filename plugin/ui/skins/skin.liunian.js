@@ -773,9 +773,10 @@
   // 设置浮层
   // -------------------------------------------------------------------------
   //
-  // 流年把「设置」从中栏视图改成浮层：#view-settings 整个搬进 .ln-modal 的
-  // .ln-modal-body（relocate 留锚点，切皮肤时严格回位），业务节点与事件原样
-  // 跟着走，所以设置项的增删改完全不用两处维护。
+  // 流年把「设置」从中栏视图改成浮层：#view-settings 整个装配进 .ln-modal
+  // 的 .ln-set-pane。业务根的迁移走外壳受控装配（HertzShell.attachView，设计
+  // §7.2：外壳记录原位、detach 严格还原），业务节点与事件原样跟着走，设置项
+  // 的增删改完全不用两处维护。其余布局节点（唱片/播放卡/舞台）仍走 relocate。
   //
   // 层级：浮层挂在 body 末尾、z-index 高于所有底层面板（.app 6 / np 96 /
   // stage3d 90 / online 弹窗 100），因此舞台、搜索面板、播放卡都在它之下，
@@ -813,7 +814,7 @@
     var nav = make('nav', 'ln-set-nav', layout);
     nav.setAttribute('aria-label', '设置分类');
     var pane = make('div', 'ln-set-pane', layout);
-    relocate(view, pane);        // 原位留锚点，卸载时回位
+    window.HertzShell.attachView('settings', pane);   // 外壳记录原位，卸载时 detach 还原
 
     buildSetNav(nav, view);
 
@@ -1147,8 +1148,10 @@
     document.body.classList.remove('ln-modal-open');
     abortPending();
     clearTimeout(panel.debounce);
-    // 先把设置视图放回中栏原位（锚点在 column 里），再拆浮层，
-    // 否则 removeBuilt 会连着搬过去的业务节点一起删掉。
+    // 先把设置视图放回中栏原位（外壳 detach 严格还原），再处理其余布局节点
+    // 的锚点还原，最后拆浮层 —— 否则 removeBuilt 会连着装配过去的业务节点
+    // 一起删掉。
+    if (window.HertzShell && window.HertzShell.isViewAttached('settings')) window.HertzShell.detachView('settings');
     releaseGroups();
     restoreMoves();
     refs.bar.classList.remove('ln-capsule');

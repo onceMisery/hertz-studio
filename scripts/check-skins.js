@@ -774,10 +774,11 @@ function checkLiunianNavigation() {
 function checkLiunianSettingsSheet() {
   section('流年：设置浮层（遮罩 / 过渡 / 关闭 / 层级）');
 
-  // 1) 设置视图被搬进浮层，且用 relocate 留锚点（切皮肤严格回位）。
+  // 1) 设置视图装配进浮层（R4：业务根迁移走外壳 attachView 受控装配，
+  // 外壳记录原位、detach 严格还原；锚点搬运工具只留给布局节点）。
   ok(/function buildSettingsSheet/.test(LIUNIAN_JS), '构建设置浮层');
-  ok(/relocate\(view, pane\)/.test(LIUNIAN_JS),
-    '设置视图经 relocate 搬进浮层右栏（原位留锚点，可还原）');
+  ok(/attachView\('settings', pane\)/.test(LIUNIAN_JS) && !/relocate\(view, pane\)/.test(LIUNIAN_JS),
+    '设置视图经外壳 attachView 装配进浮层右栏（受控装配，可还原）');
   // 浮层内容切成两栏：左栏分类导航 + 右栏设置视图。两者都在 .ln-modal-body 里，
   // 少一个就退化成单列长滚动（等于这个特性没生效）。
   ok(/make\('div', 'ln-set-layout', body\)/.test(LIUNIAN_JS)
@@ -2139,9 +2140,11 @@ function checkSkinSwitchViewHandoff() {
   // 那样 setView 里的 hidden 语义会与实际可见性脱节。
   // 只钉「搬进浮层」这个语义，不钉局部变量名（流年叫 pane、清风叫
   // sheet.pane，钉死名字就成了改名即失败的死断言）。
-  ok(/relocate\(view,\s*(sheet\.)?pane\)/.test(LIUNIAN_JS)
+  // 空白中栏的成因守卫：两套重编排皮肤都把设置视图装配进各自浮层。
+  // 流年已走外壳 attachView（R4 切片），清风仍走 relocate（迁移时同步本断言）。
+  ok(/attachView\('settings', pane\)/.test(LIUNIAN_JS)
     && /relocate\(view,\s*(sheet\.)?pane\)/.test(QINGFENG_JS),
-    '流年/清风都把设置视图搬进浮层（空白中栏的成因，钉住别改回中栏）');
+    '流年（外壳受控装配）/清风（锚点搬运，待迁）都把设置视图搬进浮层（钉住别改回中栏）');
   ok(/if \(!sheet\.viewEl\.hidden\) sheet\.viewEl\.hidden = true;/.test(LIUNIAN_JS)
     && /sheet\.viewEl\.hidden = true;/.test(QINGFENG_JS),
     '浮层关着时设置视图确实被隐藏（换肤对账的就是这个 hidden）');
