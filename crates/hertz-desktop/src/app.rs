@@ -4344,6 +4344,7 @@ impl App {
         wallpaper_status["glAllocation"] = serde_json::json!(gl.and_then(|gl| gl.snapshot()));
         wallpaper_status["glLimits"] = serde_json::json!(gl.map(|gl| &gl.limits));
         wallpaper_status["handoff"] = self.handoff_diagnostics();
+        wallpaper_status["decodeProbe"] = self.wallpaper_probe.diagnostics();
         wallpaper_status["retirements"] = serde_json::json!(self
             .wallpaper_retiring
             .iter()

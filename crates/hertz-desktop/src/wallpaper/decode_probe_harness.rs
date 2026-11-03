@@ -34,6 +34,8 @@ pub(crate) fn command(body: &str, proxy: EventLoopProxy<UserEvent>) {
         #[serde(default)]
         force_probe: bool,
         #[serde(default)]
+        block_close: bool,
+        #[serde(default)]
         content_capacity_bytes: Option<u64>,
         #[serde(default)]
         image_target: Option<super::super::image_prepare::ImageTarget>,
@@ -102,7 +104,8 @@ pub(crate) fn command(body: &str, proxy: EventLoopProxy<UserEvent>) {
                     }
                     let probe = ProbeClient::native(proxy.clone())
                         .suppress_frames_for_test(command.suppress_frames)
-                        .force_probe_for_test(command.force_probe);
+                        .force_probe_for_test(command.force_probe)
+                        .block_close_for_test(command.block_close);
                     if command.action == "resolve" {
                         let reference = command.reference.as_ref().ok_or_else(|| JobError::invalid_input("缺少 AssetRef"))?;
                         let target = command.image_target.ok_or_else(|| JobError::invalid_input("缺少目标"))?;

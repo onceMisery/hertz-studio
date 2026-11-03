@@ -142,6 +142,8 @@ pub(crate) struct ProbeClient {
     suppress_frames: bool,
     #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
     force_probe: bool,
+    #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+    block_close: bool,
 }
 
 #[derive(Default)]
@@ -181,6 +183,8 @@ impl ProbeClient {
             suppress_frames: false,
             #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
             force_probe: false,
+            #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+            block_close: false,
         }
     }
 
@@ -196,6 +200,12 @@ impl ProbeClient {
         self
     }
 
+    #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+    pub(crate) fn block_close_for_test(mut self, blocked: bool) -> Self {
+        self.block_close = blocked;
+        self
+    }
+
     pub(crate) fn stats(&self) -> (u64, u64) {
         (
             self.counts.hits.load(Ordering::Relaxed),
@@ -207,7 +217,7 @@ impl ProbeClient {
     }
     pub(super) fn cache_allowed(&self) -> bool {
         #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
-        if self.force_probe || self.suppress_frames {
+        if self.force_probe || self.suppress_frames || self.block_close {
             return false;
         }
         true
@@ -257,6 +267,8 @@ impl ProbeClient {
             suppress_frames: false,
             #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
             force_probe: false,
+            #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+            block_close: false,
         }
     }
 
@@ -306,6 +318,8 @@ impl ProbeClient {
                     poster,
                     #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
                     suppress_frames: self.suppress_frames,
+                    #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+                    block_close: self.block_close,
                 };
                 proxy
                     .send_event(UserEvent::WallpaperProbe(Box::new(request)))
@@ -369,12 +383,26 @@ pub(crate) struct ProbeRequest {
     poster: bool,
     #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
     suppress_frames: bool,
+    #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+    block_close: bool,
 }
 
 struct Surface {
     // WebView 先于窗口销毁。
     webview: WebView,
     window: Window,
+    #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+    close_probe_blocked: bool,
+}
+
+impl Surface {
+    fn close_controller(&self) -> Result<(), i32> {
+        #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+        if self.close_probe_blocked {
+            return Err(0x80004005_u32 as i32);
+        }
+        unsafe { self.webview.controller().Close() }.map_err(|error| error.code().0)
+    }
 }
 
 struct HostedProbe {
@@ -391,6 +419,10 @@ struct HostedProbe {
     drain: Option<Drain>,
     reservation: Option<Reservation>,
     outcome: Option<Result<(), JobError>>,
+    close_attempts: u64,
+    close_error: Option<i32>,
+    close_failed_since: Option<Instant>,
+    last_close_ms: u64,
 }
 
 #[derive(Default)]
@@ -459,6 +491,11 @@ impl ProbeHost {
                 return;
             }
         };
+        #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+        let surface = Surface {
+            close_probe_blocked: request.block_close,
+            ..surface
+        };
         let url = super::webresource::files_url(
             &request.input.package_hash,
             &request.input.media.entry.path,
@@ -488,11 +525,19 @@ impl ProbeHost {
             reservation: Some(reservation),
             outcome: (!granted || url.is_none())
                 .then(|| Err(JobError::new("probe_inconclusive", "探测准入失败"))),
+            close_attempts: 0,
+            close_error: None,
+            close_failed_since: None,
+            last_close_ms: 0,
         });
         self.tick();
     }
 
     pub(crate) fn page(&mut self, id: u64, body: &str) {
+        #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+        if self.handle_close_probe(id, body) {
+            return;
+        }
         self.tick();
         let Some(probe) = self
             .current
@@ -581,6 +626,25 @@ impl ProbeHost {
             .map(|_| Instant::now() + Duration::from_millis(25))
     }
 
+    pub(crate) fn diagnostics(&self) -> serde_json::Value {
+        self.current.as_ref().map_or(serde_json::Value::Null, |probe| {
+            serde_json::json!({
+                "probeId": probe.id,
+                "started": probe.started,
+                "outcome": probe.outcome.as_ref().map(|outcome| match outcome {
+                    Ok(()) => "ok",
+                    Err(error) => error.code,
+                }),
+                "controllerClosed": probe.surface.is_none(),
+                "fileReadersDrained": probe.drain.as_ref().is_some_and(Drain::is_drained),
+                "closeAttempts": probe.close_attempts,
+                "closeError": probe.close_error.map(|error| format!("0x{:08X}", error as u32)),
+                "closeFailedAgeMs": probe.close_failed_since.map(|at| at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64),
+                "lastCloseMs": probe.last_close_ms,
+            })
+        })
+    }
+
     pub(crate) fn tick(&mut self) {
         let Some(probe) = self.current.as_mut() else {
             return;
@@ -609,10 +673,23 @@ impl ProbeHost {
         }
         if let Some(surface) = probe.surface.as_ref() {
             // 单个媒体元素的 emptied 不足以证明 decoder 退出，关闭独立 controller。
-            if let Err(error) = unsafe { surface.webview.controller().Close() } {
-                crate::app::log(&format!("probe controller close pending: {error}"));
+            probe.close_attempts = probe.close_attempts.saturating_add(1);
+            let started = Instant::now();
+            let result = surface.close_controller();
+            probe.last_close_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+            if let Err(error) = result {
+                if probe.close_error != Some(error) {
+                    crate::app::log(&format!(
+                        "probe controller close pending id={} HRESULT=0x{:08X}",
+                        probe.id, error as u32
+                    ));
+                }
+                probe.close_error = Some(error);
+                probe.close_failed_since.get_or_insert_with(Instant::now);
                 return;
             }
+            probe.close_error = None;
+            probe.close_failed_since = None;
             probe.surface.take();
         }
         if !probe.drain.as_ref().is_some_and(Drain::is_drained) {
@@ -679,8 +756,17 @@ fn create_surface(
         }).build(&window).map_err(|error| JobError::new("probe_inconclusive", error.to_string()))?;
     let access = super::webresource::install(&webview, proxy)
         .map_err(|error| JobError::new("probe_inconclusive", error))?;
-    Ok((Surface { webview, window }, access))
+    Ok((Surface {
+        webview,
+        window,
+        #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+        close_probe_blocked: false,
+    }, access))
 }
+
+#[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+#[path = "decode_probe_close.rs"]
+mod close_probe;
 
 #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
 #[path = "decode_probe_harness.rs"]
