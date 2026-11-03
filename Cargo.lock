@@ -1739,6 +1739,7 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "tray-icon",
  "tungstenite 0.28.0",
  "unicode-normalization",
  "uuid",

@@ -1,18 +1,19 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 hertz-studio contributors
 //
-// R5 原生主窗口原型（`--window`，feature = native-window）。
+// R5 原生主窗口（`--window`，feature = native-window）。
 //
 // 设计与门禁：docs/aegis/specs/2026-11-04-r5-native-main-window-design.md。
-// 本文件对应 §3 原型清单的代码面：
+// §3 原型清单的代码面：
 //   1. Tao event loop 留主线程，整条既有服务 bootstrap + HTTP 原样跑在派生线程；
 //   2. WebView 用户数据目录 = <data_dir>/webview/main/，首跳凭据消费服务端的
 //      一次性票据 URL（token 不进地址栏）；
-//   3. 拖动 = 页内 6px 顶条经 IPC 触发 drag_window，原生边框/系统菜单/贴靠保留；
+//   3. 拖动 = 页内窗口控制条经 IPC 触发 drag_window，原生边框/系统菜单/贴靠保留；
 //   4. 双实例握手 = 通道端口（服务端口+1），第二实例发 "focus" 聚焦既有窗口；
 //   5. DPI = 读数与 ScaleFactorChanged 日志（三档对照为真机人工项）。
-// 语义红线（设计 §2.2）：关闭窗口只隐藏，绝不触碰播放与服务；退出仅走服务的
-// 显式退出通道（页面退出钮 / Ctrl-C），服务线程结束即进程退出。
+// 语义红线（设计 §2.2）：关闭窗口只隐藏，绝不触碰播放与服务；**退出仅显式命令**
+// （托盘菜单「退出」或页面退出钮），并轨服务的优雅停机通道（exiting watch），
+// 服务线程结束即进程退出。
 
 use anyhow::Context as _;
 use std::io::{Read as _, Write as _};
@@ -43,8 +44,10 @@ pub enum WindowStart {
 enum UserEvent {
     /// wry IPC：页面里 window.ipc.postMessage 的 JSON 消息。
     Ipc(String),
-    /// 握手通道收到 "focus"：前置/恢复主窗口。
+    /// 握手通道收到 "focus" 或托盘「打开主窗口」：前置/恢复主窗口。
     FocusWindow,
+    /// 托盘「退出 hertz-studio」：显式退出命令（§2.2），并轨服务优雅停机。
+    QuitRequested,
     /// 服务线程结束（None=优雅退出，Some=错误摘要）。
     ServerExited { error: Option<String> },
 }
@@ -59,32 +62,111 @@ fn handshake_addr(bind_ip: std::net::IpAddr, port: u16) -> std::net::SocketAddr 
     std::net::SocketAddr::new(ip, port + 1)
 }
 
-/// 顶条注入脚本：窗口宿主能力 + 拖动条（§2.5：能力就绪才注入，页面不得自实现退出）。
+/// 原型托盘图标：32×32 RGBA，暗底 + 品牌青方块（正式图标随实施评审定稿）。
+fn tray_icon_rgba() -> Vec<u8> {
+    let mut rgba = Vec::with_capacity(32 * 32 * 4);
+    for y in 0..32i32 {
+        for x in 0..32i32 {
+            if (x - 16).abs() <= 9 && (y - 16).abs() <= 9 {
+                rgba.extend_from_slice(&[0x00, 0xF5, 0xD4, 0xFF]);
+            } else {
+                rgba.extend_from_slice(&[0x0A, 0x0A, 0x0A, 0x00]);
+            }
+        }
+    }
+    rgba
+}
+
+/// 显式退出的执行体（§2.2）：并轨服务的优雅停机通道——与页面退出钮
+/// （POST /v1/system/shutdown）和 Ctrl-C 走同一条 `exiting` watch，
+/// 不另开任何第二条停机路径。
+fn request_graceful_shutdown(port: u16, token: &str) -> anyhow::Result<()> {
+    let mut stream = std::net::TcpStream::connect(("127.0.0.1", port))
+        .context("连接服务失败（退出命令未送达）")?;
+    let request = format!(
+        "POST /v1/system/shutdown HTTP/1.1\r\n\
+         Host: 127.0.0.1:{port}\r\n\
+         Authorization: Bearer {token}\r\n\
+         Content-Length: 0\r\n\
+         Connection: close\r\n\
+         \r\n"
+    );
+    stream.write_all(request.as_bytes())?;
+    stream.flush()?;
+    let mut response = Vec::new();
+    let _ = stream.read_to_end(&mut response);
+    Ok(())
+}
+
+/// 窗口控制条注入脚本（设计 §5.1 的窗口控制区落地，§2.5：能力就绪才注入，
+/// 页面不得自实现退出）。
+///
+/// 40px 控制条占据窗口顶部：左侧拖动区（含双击最大化切换），右侧
+/// 最小化 / 最大化切换 / 关闭按钮簇；页面内容整体下移（html padding-top）。
+/// 颜色全部取页面已有的设计令牌；关闭键 hover 用 --danger。
+/// `documentElement.dataset.hertzWindowHost = "1"` 供外壳/样式按能力分支。
 const HOST_SCRIPT: &str = r#"
 (function () {
   var post = function (kind) {
     if (window.ipc) window.ipc.postMessage(JSON.stringify({ kind: kind }));
   };
   window.__hertzWindowHost = {
+    kind: 'window-host',
     close: function () { post('close'); },
     minimize: function () { post('minimize'); },
     maximizeToggle: function () { post('maximize-toggle'); },
     drag: function () { post('drag'); },
   };
-  var strip = document.createElement('div');
-  strip.id = 'hertz-window-dragstrip';
-  strip.style.cssText = 'position:fixed;top:0;left:0;right:0;height:6px;z-index:2147483647;';
-  strip.addEventListener('mousedown', function (event) {
-    if (event.button === 0) post('drag');
+  document.documentElement.dataset.hertzWindowHost = '1';
+
+  var bar = document.createElement('div');
+  bar.id = 'hertz-window-chrome';
+  bar.innerHTML =
+    '<div class="hzwc-drag" aria-hidden="true"></div>' +
+    '<div class="hzwc-buttons">' +
+    '<button type="button" data-hzwc="minimize" aria-label="最小化" title="最小化">' +
+    '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></button>' +
+    '<button type="button" data-hzwc="maximize-toggle" aria-label="最大化或还原" title="最大化/还原">' +
+    '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.8"/></svg></button>' +
+    '<button type="button" data-hzwc="close" class="hzwc-close" aria-label="关闭窗口" title="关闭窗口（隐藏到托盘）">' +
+    '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></button>' +
+    '</div>';
+
+  bar.addEventListener('mousedown', function (event) {
+    var button = event.target.closest('[data-hzwc]');
+    if (button || event.button !== 0) return;
+    post('drag');
   });
-  document.documentElement.appendChild(strip);
+  bar.addEventListener('dblclick', function (event) {
+    if (event.target.closest('[data-hzwc]')) return;
+    post('maximize-toggle');
+  });
+  bar.addEventListener('click', function (event) {
+    var button = event.target.closest('[data-hzwc]');
+    if (button) post(button.getAttribute('data-hzwc'));
+  });
+
   var style = document.createElement('style');
-  style.textContent = 'html { box-sizing: border-box; padding-top: 6px; }';
+  style.textContent =
+    'html { box-sizing: border-box; padding-top: 40px; }' +
+    '#hertz-window-chrome { position: fixed; top: 0; left: 0; right: 0; height: 40px;' +
+    '  z-index: 2147483647; display: flex; align-items: stretch; user-select: none;' +
+    '  background: color-mix(in srgb, var(--glass-bg-strong) 88%, transparent);' +
+    '  border-bottom: 1px solid var(--glass-line); }' +
+    '#hertz-window-chrome .hzwc-drag { flex: 1; min-width: 0; }' +
+    '#hertz-window-chrome .hzwc-buttons { display: flex; align-items: stretch; }' +
+    '#hertz-window-chrome .hzwc-buttons button { width: 46px; padding: 0; border: 0;' +
+    '  background: transparent; color: var(--text); cursor: pointer;' +
+    '  display: grid; place-items: center; }' +
+    '#hertz-window-chrome .hzwc-buttons button:hover { background: var(--hover); }' +
+    '#hertz-window-chrome .hzwc-buttons button.hzwc-close:hover { background: var(--danger); color: #0A0A0A; }' +
+    '#hertz-window-chrome svg { width: 14px; height: 14px; }';
   document.head.appendChild(style);
+  document.documentElement.appendChild(bar);
 })();
 "#;
 
-/// `--window` 原型入口：服务线程 + 主线程窗口。调用前 args.window 必为 true。
+/// `--window` 入口：服务线程 + 主线程窗口 + 托盘。调用前 args.window 必为 true。
 pub fn run_window(mut args: Args) -> anyhow::Result<()> {
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
     let proxy = event_loop.create_proxy();
@@ -97,9 +179,8 @@ pub fn run_window(mut args: Args) -> anyhow::Result<()> {
             .as_path(),
     )?;
     let config = hertz_studio::config::Config::load(&data_dir)
-        .context("读取配置失败（--window 原型需要有效数据目录）")?;
+        .context("读取配置失败（--window 需要有效数据目录）")?;
     let port = args.port.unwrap_or(config.server.port);
-    eprintln!("[window] stage: config resolved port={port}");
 
     // 第二实例判定：已有 --window 实例在跑时，它的握手通道端口会应答。
     if std::net::TcpStream::connect_timeout(
@@ -119,7 +200,6 @@ pub fn run_window(mut args: Args) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    eprintln!("[window] stage: handshake probe done");
     // 服务线程：整条 bootstrap（数据库迁移、音频初始化、HTTP）原样跑在派生线程。
     let (start_tx, start_rx) = channel::<WindowStart>();
     args.notify = Some(start_tx.clone());
@@ -146,7 +226,6 @@ pub fn run_window(mut args: Args) -> anyhow::Result<()> {
         })
         .context("启动服务线程失败")?;
 
-    eprintln!("[window] stage: server thread spawned, waiting");
     // 等待服务就绪（bootstrap 含迁移与音频初始化；上限 90 秒）。
     let deadline = std::time::Instant::now() + Duration::from_secs(90);
     let started = loop {
@@ -198,9 +277,8 @@ pub fn run_window(mut args: Args) -> anyhow::Result<()> {
             }
         }
     };
-    eprintln!("[window] stage: started received");
     let (bind_ip, port, entry_url) = started;
-    println!("  window   http://{bind_ip}:{port}/  （原生主窗口形态；关闭窗口=隐藏）");
+    println!("  window   http://{bind_ip}:{port}/  （原生主窗口形态；关闭窗口=隐藏到托盘）");
 
     // 握手通道：仅回环单用途 socket（设计 §2.1），承接后续实例的聚焦请求。
     let handshake_listener = std::net::TcpListener::bind(handshake_addr(bind_ip, port))
@@ -221,6 +299,41 @@ pub fn run_window(mut args: Args) -> anyhow::Result<()> {
         })
         .context("启动握手监听线程失败")?;
 
+    // 托盘（设计 §2.2）：左键开菜单之外，「打开主窗口」承担隐藏后的恢复入口，
+    // 「退出 hertz-studio」是唯一由窗口侧发起的显式退出命令。
+    let tray_menu = tray_icon::menu::Menu::new();
+    let tray_open = tray_icon::menu::MenuItem::with_id("hz-open", "打开主窗口", true, None);
+    let tray_quit = tray_icon::menu::MenuItem::with_id("hz-quit", "退出 hertz-studio", true, None);
+    tray_menu
+        .append_items(&[&tray_open, &tray_quit])
+        .context("构建托盘菜单失败")?;
+    let _tray = tray_icon::TrayIconBuilder::new()
+        .with_id("hertz-studio")
+        .with_menu(Box::new(tray_menu))
+        .with_menu_on_left_click(false)
+        .with_tooltip("hertz-studio（原生主窗口）")
+        .with_icon(tray_icon::Icon::from_rgba(tray_icon_rgba(), 32, 32)?)
+        .build()
+        .context("创建托盘图标失败")?;
+    let proxy_for_tray = proxy.clone();
+    std::thread::Builder::new()
+        .name("hertz-studio-tray".into())
+        .spawn(move || {
+            let receiver = tray_icon::menu::MenuEvent::receiver();
+            for event in receiver.iter() {
+                match event.id().as_ref() {
+                    "hz-open" => {
+                        let _ = proxy_for_tray.send_event(UserEvent::FocusWindow);
+                    }
+                    "hz-quit" => {
+                        let _ = proxy_for_tray.send_event(UserEvent::QuitRequested);
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .context("启动托盘事件线程失败")?;
+
     // 主线程窗口：保留原生装饰（设计 §2.5 红线——不用 OVERLAY_FRAME_STYLES）。
     let window = WindowBuilder::new()
         .with_title("hertz-studio")
@@ -231,13 +344,14 @@ pub fn run_window(mut args: Args) -> anyhow::Result<()> {
 
     // WebView 用户数据目录：<data_dir>/webview/main/（§2.3，与桌面组件互斥隔离）。
     let mut web_context = WebContext::new(Some(data_dir.join("webview").join("main")));
+    let proxy_for_ipc = proxy.clone();
     let webview = wry::WebViewBuilder::new_with_web_context(&mut web_context)
         .with_url(&entry_url)
         .with_initialization_script(HOST_SCRIPT)
         .with_ipc_handler(move |request| {
             let body = request.body();
             if body.len() <= 256 {
-                let _ = proxy.send_event(UserEvent::Ipc(body.clone()));
+                let _ = proxy_for_ipc.send_event(UserEvent::Ipc(body.clone()));
             }
         })
         .build(&window)
@@ -250,6 +364,14 @@ pub fn run_window(mut args: Args) -> anyhow::Result<()> {
         "  webview  数据目录 {}",
         data_dir.join("webview").join("main").display()
     );
+    println!("  tray     打开主窗口 / 退出 hertz-studio");
+
+    // 退出命令所需的凭据：data-dir 的长期 token（本进程自持，不进地址栏）。
+    let exit_token = std::fs::read_to_string(data_dir.join("token"))
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let exit_port = port;
 
     event_loop.run(move |event, _target, control_flow| {
         *control_flow = ControlFlow::Wait;
@@ -257,7 +379,9 @@ pub fn run_window(mut args: Args) -> anyhow::Result<()> {
             Event::NewEvents(StartCause::Init) => {
                 println!("  display  event loop 就绪");
             }
-            Event::UserEvent(UserEvent::Ipc(body)) => match body.as_str() {
+            Event::UserEvent(UserEvent::Ipc(body)) => {
+                eprintln!("[window] ipc: {body}");
+                match body.as_str() {
                 "{\"kind\":\"drag\"}" => {
                     let _ = window.drag_window();
                 }
@@ -274,11 +398,30 @@ pub fn run_window(mut args: Args) -> anyhow::Result<()> {
                     window.set_visible(false);
                 }
                 _ => {}
-            },
+                }
+            }
             Event::UserEvent(UserEvent::FocusWindow) => {
                 window.set_minimized(false);
                 window.set_visible(true);
                 window.set_focus();
+            }
+            Event::UserEvent(UserEvent::QuitRequested) => {
+                // §2.2：唯一的窗口侧显式退出命令——并轨服务优雅停机通道后，
+                // ServerExited 事件会关闭事件循环。这里不做任何直接 kill。
+                let token = exit_token.clone();
+                let proxy_for_quit = proxy.clone();
+                std::thread::Builder::new()
+                    .name("hertz-studio-quit".into())
+                    .spawn(move || {
+                        if let Err(error) = request_graceful_shutdown(exit_port, &token) {
+                            // 送达失败绝不静默改 kill：如实回事件循环并在窗口侧
+                            // 报告（服务仍在放音，用户可重试或用 Ctrl-C）。
+                            let _ = proxy_for_quit.send_event(UserEvent::ServerExited {
+                                error: Some(format!("退出命令送达失败：{error}（服务仍在运行）")),
+                            });
+                        }
+                    })
+                    .ok();
             }
             Event::UserEvent(UserEvent::ServerExited { error }) => {
                 // 服务生命周期=进程生命周期（§2.1）：服务线程结束即退出事件循环。
