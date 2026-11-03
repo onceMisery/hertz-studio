@@ -1591,8 +1591,8 @@ function checkQingfengSettings() {
     && /make\('nav', 'qf-set-nav', layout\)/.test(QINGFENG_JS)
     && /make\('div', 'qf-set-pane', layout\)/.test(QINGFENG_JS),
     '浮层内容分两栏：左栏 .qf-set-nav + 右栏 .qf-set-pane');
-  ok(/relocate\(view, sheet\.pane\)/.test(QINGFENG_JS),
-    '设置视图经 relocate 搬进浮层（原位留锚点，可还原）');
+  ok(/attachView\('settings', sheet\.pane\)/.test(QINGFENG_JS),
+    '设置视图经外壳 attachView 装配进浮层（受控装配，可还原）');
 
   // 3) 「帮助」页签已按需求去掉，这里反向钉死：那条路曾经存在过一个
   //    点不动的死页签（buildHelp 把内容 append 到 pane，而 pane 是
@@ -2140,11 +2140,11 @@ function checkSkinSwitchViewHandoff() {
   // 那样 setView 里的 hidden 语义会与实际可见性脱节。
   // 只钉「搬进浮层」这个语义，不钉局部变量名（流年叫 pane、清风叫
   // sheet.pane，钉死名字就成了改名即失败的死断言）。
-  // 空白中栏的成因守卫：两套重编排皮肤都把设置视图装配进各自浮层。
-  // 流年已走外壳 attachView（R4 切片），清风仍走 relocate（迁移时同步本断言）。
+  // 空白中栏的成因守卫：两套重编排皮肤都把设置视图装配进各自浮层，
+  // 且都走外壳 attachView 受控装配（R4；锚点搬运只留给布局节点）。
   ok(/attachView\('settings', pane\)/.test(LIUNIAN_JS)
-    && /relocate\(view,\s*(sheet\.)?pane\)/.test(QINGFENG_JS),
-    '流年（外壳受控装配）/清风（锚点搬运，待迁）都把设置视图搬进浮层（钉住别改回中栏）');
+    && /attachView\('settings', sheet\.pane\)/.test(QINGFENG_JS),
+    '流年/清风都经外壳受控装配把设置视图搬进浮层（钉住别改回中栏）');
   ok(/if \(!sheet\.viewEl\.hidden\) sheet\.viewEl\.hidden = true;/.test(LIUNIAN_JS)
     && /sheet\.viewEl\.hidden = true;/.test(QINGFENG_JS),
     '浮层关着时设置视图确实被隐藏（换肤对账的就是这个 hidden）');

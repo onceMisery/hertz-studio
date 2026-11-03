@@ -1857,7 +1857,9 @@
     var view = byId('view-settings');
     if (!view) return;
     sheet.viewEl = view;
-    relocate(view, sheet.pane);
+    // 业务根的迁移走外壳受控装配（HertzShell.attachView，设计 §7.2）：
+    // 外壳记录原位、detach 严格还原；其余布局节点仍走锚点搬运。
+    window.HertzShell.attachView('settings', sheet.pane);
 
     var groups = Array.prototype.slice.call(view.querySelectorAll('.set-group'));
     // 认领必须走「文案 → 语义 key」这一层间接，不能直接 byKey[item[0]]。
@@ -2698,10 +2700,12 @@
     clearTimeout(wall.reflowTimer);
     wall.reflowTimer = 0;
     document.body.classList.remove('qf-modal-open', 'qf-lattice-open');
-    // 先把设置视图放回中栏原位（锚点在 column 里），再拆浮层，
-    // 否则 removeBuilt 会连着搬过去的业务节点一起删掉。
-    // showAll：把皮肤加的 hidden 全部摘掉再搬回原位 —— 留着会跟着切到别的皮肤，
+    // 先把设置视图放回中栏原位（外壳 detach 严格还原），再处理其余布局节点
+    // 的锚点还原，最后拆浮层 —— 否则 removeBuilt 会连着装配过去的业务节点
+    // 一起删掉。
+    // showAll：把皮肤加的 hidden 全部摘掉再还原 —— 留着会跟着切到别的皮肤，
     // 表现为「设置里其它项都不见了」。
+    if (window.HertzShell && window.HertzShell.isViewAttached('settings')) window.HertzShell.detachView('settings');
     showAll();
     restoreMoves();
     if (refs.nav) refs.nav.removeEventListener('click', onNavClick);
