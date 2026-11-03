@@ -17,6 +17,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const root = path.resolve(__dirname, '..');
 const target = path.join(root, 'crates/hertz-wallpaper/contracts/catalog.json');
+const budgetTarget = path.join(root, 'crates/hertz-wallpaper/contracts/gl-budgets.json');
+let budgets;
 
 function loadCatalog() {
   const manifest = JSON.parse(
@@ -36,6 +38,10 @@ function loadCatalog() {
     { timeout: 15000 },
   );
   const catalog = api.catalog();
+  budgets = Object.fromEntries(['low', 'medium', 'high'].map(quality => [quality, {
+    pixelBudget: Math.max(api.qualityProfiles[quality].pixelBudget, sandbox.HertzStageRuntime.ZodiacStagePure.qualityProfiles[quality].budget),
+    gpuBytes: api.qualityProfiles[quality].memoryBytes,
+  }]));
   if (!Array.isArray(catalog) || catalog.length === 0) throw new Error('registry catalog is empty');
   // 只保留纯 metadata 字段；create/迁移函数等实现体永不进入合同。
   return catalog.map(def => ({
@@ -65,9 +71,10 @@ function main() {
   const check = process.argv.includes('--check');
   const scenes = loadCatalog();
   const { file, registryHash } = buildFile(scenes);
+  const budgetFile = JSON.stringify(budgets, null, 2) + '\n';
   if (check) {
     const current = fs.readFileSync(target, 'utf8');
-    if (current !== file) {
+    if (current !== file || fs.readFileSync(budgetTarget, 'utf8') !== budgetFile) {
       console.error('wallpaper contract is stale; run: node scripts/export-wallpaper-contracts.mjs');
       process.exit(1);
     }
@@ -76,6 +83,7 @@ function main() {
   }
   fs.mkdirSync(path.dirname(target), { recursive: true });
   fs.writeFileSync(target, file);
+  fs.writeFileSync(budgetTarget, budgetFile);
   console.log('wallpaper contract written: registryHash=' + registryHash + ' scenes=' + scenes.length);
 }
 

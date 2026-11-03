@@ -63,6 +63,7 @@ hertz-desktop-ipc = { path = "../hertz-desktop-ipc" }
 hertz-wallpaper = { path = "../hertz-wallpaper" }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
+base64 = { workspace = true }
 # 流式 PNG 像素/CRC 复核；WebView2 会将部分损坏 PNG 容忍为空白图。
 png = "0.18.1"
 image = { version = "=0.25.10", default-features = false, features = ["jpeg", "png", "webp"] }
@@ -74,6 +75,7 @@ windows = { version = "0.62", features = [
   "Win32_Devices_FunctionDiscovery",
   "Win32_UI_Shell_PropertiesSystem",
   "Win32_System_Com_StructuredStorage",
+  "Win32_System_Performance",
   "Win32_Foundation",
   "Win32_Graphics_Dxgi",
   "Win32_Graphics_Dxgi_Common",

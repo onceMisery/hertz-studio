@@ -14,6 +14,54 @@ use crate::wallpaper::{
 
 type JobResult<T> = std::result::Result<T, JobError>;
 
+/// One runtime checkpoint, with no file handles, decoder or budget token. It is
+/// used only after requalification resolves the same revision and media bytes,
+/// and consumed after the resumed candidate really presents its first frame.
+pub(super) struct PlaybackResume {
+    revision: u64,
+    binding: crate::wallpaper::page_events::PageBinding,
+    reference: crate::wallpaper::target_planner::AssetRef,
+    content_key: String,
+    duration_ms: u64,
+    position_ms: u64,
+}
+impl PlaybackResume {
+    fn position_for(
+        &self,
+        revision: u64,
+        reference: &crate::wallpaper::target_planner::AssetRef,
+        content_key: &str,
+        metadata: &crate::wallpaper::media::MediaProbe,
+    ) -> Option<u64> {
+        (self.revision == revision
+            && self.reference.package_hash == reference.package_hash
+            && self.reference.asset_id == reference.asset_id
+            && self.reference.variant_id == reference.variant_id
+            && self.content_key == content_key
+            && metadata.container != crate::wallpaper::media::Container::Image
+            && metadata.duration_ms == Some(self.duration_ms)
+            && self.position_ms < self.duration_ms)
+            .then_some(self.position_ms)
+    }
+
+    pub(super) fn observe(&mut self, revision: u64, generation: u64, event: &str) -> bool {
+        if self.revision != revision || self.binding.generation() != generation {
+            return false;
+        }
+        if let Some(PageEvent::MediaPosition(position)) = self.binding.parse(event) {
+            if position < self.duration_ms {
+                self.position_ms = position;
+            }
+            return true;
+        }
+        false
+    }
+
+    pub(super) fn position_at(&self, revision: u64) -> Option<u64> {
+        (self.revision == revision).then_some(self.position_ms)
+    }
+}
+
 pub(super) struct PendingApply {
     request: api::Request,
     owner: u64,
@@ -29,12 +77,34 @@ pub(super) struct SelectionTask {
     monitor: native::WallpaperMonitor,
     pub(super) apply: Option<PendingApply>,
 }
+impl SelectionTask {
+    /// 删除保护：准备中的固定版本仍可能被本次任务读取。
+    pub(super) fn references_package(
+        &self,
+        work_key: Option<&str>,
+        package_hash: Option<&str>,
+    ) -> bool {
+        self.configuration
+            .references_package(work_key, package_hash)
+    }
+}
 
 pub(super) struct Prepared {
     media: Option<ResolvedMedia>,
+    static_poster: bool,
     configuration: config::WallpaperConfig,
     revision: u64,
     monitor: native::WallpaperMonitor,
+}
+impl Prepared {
+    pub(super) fn references_package(
+        &self,
+        work_key: Option<&str>,
+        package_hash: Option<&str>,
+    ) -> bool {
+        self.configuration
+            .references_package(work_key, package_hash)
+    }
 }
 
 fn same_config(a: &config::WallpaperConfig, b: &config::WallpaperConfig) -> bool {
@@ -65,6 +135,39 @@ fn target(
 }
 
 impl App {
+    pub(super) fn tick_wallpaper_follow(&mut self, target: &EventLoopWindowTarget<UserEvent>) {
+        if !self.config.wallpaper.follows_hertz()
+            || !(self.config.wallpaper.enabled || self.wallpaper_forced)
+            || self.wallpaper_media_failed_revision == Some(self.config.revision)
+            || self.wallpaper_recovery_terminal
+            || !self.wallpaper_render_allowed(&self.config.wallpaper)
+        {
+            return;
+        }
+        let desired =
+            crate::wallpaper::follow::resolve(&self.config.wallpaper, self.wallpaper_last.as_ref());
+        let pending_changed = self
+            .wallpaper_candidate
+            .as_ref()
+            .is_some_and(|surface| surface.runtime_builtin != desired);
+        if pending_changed {
+            self.cancel_wallpaper_transition();
+        }
+        if self.wallpaper_candidate.is_some() || self.wallpaper_prepared.is_some() {
+            return;
+        }
+        if pending_changed
+            || self
+                .wallpaper
+                .as_ref()
+                .is_some_and(|surface| surface.runtime_builtin != desired)
+        {
+            if let Err(error) = self.stage_builtin_wallpaper(target) {
+                self.wallpaper_apply_error = Some(error.to_string());
+            }
+        }
+    }
+
     pub(super) fn is_media_apply(&self, request: &api::Request, owner: u64) -> bool {
         match request.typed() {
             Ok(api::Command::Apply {
@@ -174,7 +277,7 @@ impl App {
         Ok(())
     }
 
-    fn finish_media_request(&self, apply: PendingApply, result: JobResult<serde_json::Value>) {
+    fn finish_media_request(&mut self, apply: PendingApply, result: JobResult<serde_json::Value>) {
         let mut receipt = api::response(Some(&apply.request.request_id), result, None);
         receipt["configRevision"] = receipt["result"]["configRevision"]
             .as_u64()
@@ -188,7 +291,7 @@ impl App {
     pub(super) fn finish_wallpaper_selection(
         &mut self,
         id: u64,
-        result: JobResult<ResolvedMedia>,
+        result: std::result::Result<ResolvedMedia, crate::wallpaper::selection_plan::Failure>,
         loop_target: &EventLoopWindowTarget<UserEvent>,
     ) {
         if !self
@@ -200,18 +303,37 @@ impl App {
         }
         let task = self.wallpaper_selection.take().expect("selection task");
         let result = if task.cancel.load(Ordering::Acquire) {
-            Err(JobError::new("cancelled", "作品准备已取消并退出"))
+            Err(JobError::new("cancelled", "作品准备已取消并退出").into())
         } else {
             result
         };
         let media = match result {
             Ok(media) => media,
-            Err(error) => {
+            Err(failure) => {
+                let error = failure.error;
                 if let Some(apply) = task.apply {
                     self.finish_media_request(apply, Err(error));
-                } else if error.code != "cancelled" {
+                } else if error.code != "cancelled"
+                    && task.revision == self.config.revision
+                    && same_config(&task.configuration, &self.config.wallpaper)
+                {
+                    self.wallpaper_playback = None;
                     self.wallpaper_media_failed_revision = Some(task.revision);
                     self.wallpaper_apply_error = Some(error.to_string());
+                    if self.wallpaper.is_none() {
+                        if let Some(poster) = failure.poster {
+                            self.wallpaper_prepared = Some(Prepared {
+                                media: Some(*poster),
+                                static_poster: true,
+                                configuration: task.configuration,
+                                revision: task.revision,
+                                monitor: task.monitor,
+                            });
+                            if let Err(error) = self.try_stage_wallpaper(loop_target) {
+                                log(&format!("startup poster could not be staged: {error}"));
+                            }
+                        }
+                    }
                     self.send_settings_status(self.wallpaper_apply_error.as_deref(), None);
                 }
                 return;
@@ -266,6 +388,7 @@ impl App {
                     self.retire_wallpaper_candidate();
                     self.wallpaper_prepared = Some(Prepared {
                         media: Some(media),
+                        static_poster: false,
                         configuration: task.configuration.clone(),
                         revision: self.config.revision,
                         monitor: task.monitor,
@@ -292,6 +415,7 @@ impl App {
         {
             self.wallpaper_prepared = Some(Prepared {
                 media: Some(media),
+                static_poster: false,
                 configuration: task.configuration,
                 revision: task.revision,
                 monitor: task.monitor,
@@ -309,6 +433,8 @@ impl App {
         validate_configured_presentation(&self.config.wallpaper).map_err(anyhow::Error::msg)?;
         if self.wallpaper.as_ref().is_some_and(|surface| {
             same_config(&surface.configuration, &self.config.wallpaper)
+                && (!surface.static_poster
+                    || self.wallpaper_media_failed_revision == Some(self.config.revision))
                 && native::wallpaper_alive(surface.hwnd())
         }) {
             return Ok(());
@@ -333,7 +459,7 @@ impl App {
             .map_err(|error| anyhow::anyhow!(error.to_string()))
     }
 
-    fn wallpaper_render_allowed(&self, configuration: &config::WallpaperConfig) -> bool {
+    pub(super) fn wallpaper_render_allowed(&self, configuration: &config::WallpaperConfig) -> bool {
         policy::renderable(&policy::PolicyInputs {
             enabled: true,
             wallpaper: configuration,
@@ -358,6 +484,7 @@ impl App {
                 .ok_or_else(|| anyhow::anyhow!("目标显示器未连接"))?;
         self.wallpaper_prepared = Some(Prepared {
             media: None,
+            static_poster: false,
             configuration,
             revision: self.config.revision,
             monitor,
@@ -394,8 +521,8 @@ impl App {
         if monitor.display_id() != prepared.monitor.display_id()
             || monitor_geometry_changed(&monitor, &prepared.monitor)
         {
-            let prepared = self.wallpaper_prepared.take().expect("prepared selection");
-            if prepared.media.is_some() {
+            let mut prepared = self.wallpaper_prepared.take().expect("prepared selection");
+            if prepared.media.is_some() && !prepared.static_poster {
                 let slot = self
                     .wallpaper_library
                     .reserve()
@@ -403,6 +530,13 @@ impl App {
                 return self
                     .begin_wallpaper_selection(prepared.configuration, None, slot)
                     .map_err(|error| anyhow::anyhow!(error.to_string()));
+            }
+            if prepared.static_poster {
+                if let Some(media) = prepared.media.take() {
+                    prepared.media = Some(
+                        media.retarget_static_image(target(&prepared.configuration, &monitor))?,
+                    );
+                }
             }
             self.wallpaper_prepared = Some(Prepared {
                 monitor,
@@ -412,6 +546,15 @@ impl App {
         self.poll_wallpaper_retirements();
         if !self.wallpaper_retiring.is_empty() {
             return Ok(());
+        }
+        match self.prepare_wallpaper_handoff() {
+            Ok(true) => {}
+            Ok(false) => return Ok(()),
+            Err(error) => {
+                self.wallpaper_prepared = None;
+                self.wallpaper_media_failed_revision = Some(self.config.revision);
+                return Err(error);
+            }
         }
         let prepared = self.wallpaper_prepared.take().expect("prepared selection");
         self.wallpaper_generation += 1;
@@ -431,7 +574,21 @@ impl App {
                 return Err(error);
             }
         };
+        surface.static_poster = prepared.static_poster;
+        surface.runtime_builtin =
+            crate::wallpaper::follow::resolve(&surface.configuration, self.wallpaper_last.as_ref());
         if let Some(media) = prepared.media {
+            let resume = self.wallpaper_playback.as_ref().and_then(|resume| {
+                resume.position_for(
+                    prepared.revision,
+                    media.reference(),
+                    media.content_key(),
+                    &media.input().metadata,
+                )
+            });
+            if resume.is_none() {
+                self.wallpaper_playback = None;
+            }
             let owner = format!("desktop-{}", generation);
             if let Err(error) = surface.session.admit_media(
                 generation,
@@ -444,6 +601,9 @@ impl App {
                     .push(RetiringWallpaper::new(surface));
                 self.wallpaper_media_failed_revision = Some(self.config.revision);
                 return Err(anyhow::anyhow!(error.to_string()));
+            }
+            if let Some(position) = resume {
+                surface.session.record_media_position(generation, position);
             }
         }
         self.wallpaper_candidate = Some(surface);
@@ -469,13 +629,106 @@ impl App {
     }
 
     fn fail_wallpaper_candidate(&mut self, message: String) {
+        self.wallpaper_playback = None;
         if let Some(surface) = self.wallpaper_candidate.take() {
+            if self.wallpaper.is_none() && self.wallpaper_handoff.is_none() {
+                self.wallpaper_prepared = self.poster_for_surface(&surface);
+            }
             self.wallpaper_retiring
                 .push(RetiringWallpaper::new(surface));
         }
         self.wallpaper_media_failed_revision = Some(self.config.revision);
         self.wallpaper_apply_error = Some(message);
         self.send_settings_status(self.wallpaper_apply_error.as_deref(), None);
+    }
+
+    fn poster_for_surface(&self, surface: &WallpaperSurface) -> Option<Prepared> {
+        if surface.static_poster || !same_config(&surface.configuration, &self.config.wallpaper) {
+            return None;
+        }
+        Some(Prepared {
+            media: Some(surface.session.media()?.poster()?.clone()),
+            static_poster: true,
+            configuration: surface.configuration.clone(),
+            revision: self.config.revision,
+            monitor: surface.monitor.clone(),
+        })
+    }
+
+    pub(super) fn prepare_failed_wallpaper_poster(&mut self) {
+        self.wallpaper_playback = None;
+        if self.wallpaper_prepared.is_none() && self.wallpaper_candidate.is_none() {
+            self.wallpaper_prepared = self
+                .wallpaper
+                .as_ref()
+                .and_then(|surface| self.poster_for_surface(surface));
+        }
+    }
+
+    pub(super) fn retain_static_wallpaper_poster(&mut self) {
+        if let Some(surface) = self
+            .wallpaper
+            .as_ref()
+            .filter(|surface| surface.static_poster)
+            .or_else(|| {
+                self.wallpaper_candidate
+                    .as_ref()
+                    .filter(|surface| surface.static_poster)
+            })
+        {
+            if self.wallpaper_prepared.is_none()
+                && same_config(&surface.configuration, &self.config.wallpaper)
+            {
+                self.wallpaper_prepared = Some(Prepared {
+                    media: surface.session.media().cloned(),
+                    static_poster: true,
+                    configuration: surface.configuration.clone(),
+                    revision: self.config.revision,
+                    monitor: surface.monitor.clone(),
+                });
+            }
+        }
+    }
+
+    pub(super) fn retain_wallpaper_playback(&mut self) {
+        let Some(surface) = self.wallpaper.as_ref().filter(|surface| {
+            !surface.static_poster
+                && surface.first_frame_ready()
+                && same_config(&surface.configuration, &self.config.wallpaper)
+                && surface.session.diagnostics().desired_revision == Some(self.config.revision)
+        }) else {
+            return;
+        };
+        let Some(media) = surface.session.media() else {
+            return;
+        };
+        let Some(position_ms) = surface.session.media_position_ms() else {
+            return;
+        };
+        let Some(duration_ms) = media.input().metadata.duration_ms else {
+            return;
+        };
+        self.wallpaper_playback = Some(PlaybackResume {
+            revision: self.config.revision,
+            binding: surface.binding.clone(),
+            reference: media.reference().clone(),
+            content_key: media.content_key().into(),
+            duration_ms,
+            position_ms,
+        });
+    }
+
+    pub(super) fn retry_media_wallpaper(&mut self, target: &EventLoopWindowTarget<UserEvent>) {
+        if self
+            .wallpaper_prepared
+            .as_ref()
+            .is_some_and(|prepared| prepared.static_poster)
+        {
+            self.wallpaper_prepared = None;
+        }
+        if let Err(error) = self.ensure_media_wallpaper(target) {
+            self.wallpaper_apply_error = Some(error.to_string());
+        }
     }
 
     fn promote_wallpaper_candidate(&mut self) {
@@ -490,11 +743,25 @@ impl App {
             return;
         }
         let surface = self.wallpaper_candidate.take().expect("ready candidate");
+        self.wallpaper_playback = None;
         self.retire_wallpaper_surface();
         self.wallpaper = Some(surface);
+        self.handoff_wait_for_reveal(
+            self.wallpaper
+                .as_ref()
+                .expect("promoted candidate")
+                .binding
+                .generation(),
+        );
         self.wallpaper_page_ready = true;
         self.wallpaper_monitor_missing = false;
-        self.wallpaper_apply_error = None;
+        if !self
+            .wallpaper
+            .as_ref()
+            .is_some_and(|surface| surface.static_poster)
+        {
+            self.wallpaper_apply_error = None;
+        }
         self.reset_wallpaper_page_stats();
         self.wallpaper_heartbeat_at = Some(Instant::now());
         self.recompute_wallpaper();
@@ -522,7 +789,10 @@ impl App {
                 .page_clock = Some(clock);
             return true;
         }
-        if event.starts_with("wallpaper_media_failed ") || event == "wallpaper_mount_failed" {
+        if event.starts_with("wallpaper_media_failed ")
+            || event.starts_with("wallpaper_gl_failed ")
+            || event == "wallpaper_mount_failed"
+        {
             self.fail_wallpaper_candidate(event.chars().take(256).collect());
             return true;
         }
@@ -539,6 +809,14 @@ impl App {
                     surface.session.start_presentation(Instant::now());
                     self.promote_wallpaper_candidate();
                 }
+            }
+            Some(PageEvent::MediaPosition(position)) => {
+                surface.session.record_media_position(generation, position);
+            }
+            Some(PageEvent::MediaPaused(token)) => {
+                surface
+                    .session
+                    .confirm_media_pause(generation, token, Instant::now());
             }
             _ => {}
         }
@@ -562,6 +840,8 @@ impl App {
             || self.policy.display_off
             || self.wallpaper_power != native::PowerState::Ac;
         if hard_pause {
+            self.retain_wallpaper_playback();
+            self.retain_static_wallpaper_poster();
             if self
                 .wallpaper
                 .as_ref()
@@ -580,6 +860,10 @@ impl App {
         if let Some(surface) = self.wallpaper_candidate.as_ref() {
             if surface.session.diagnostics().desired_revision != Some(self.config.revision) {
                 self.retire_wallpaper_candidate();
+            } else if surface.session.media_pause_expired(Instant::now()) {
+                self.fail_wallpaper_candidate(
+                    "media_pause_unconfirmed: 作品未在 2 秒内确认暂停".into(),
+                );
             } else if surface
                 .frame_wait_since
                 .is_some_and(|at| at.elapsed() > HEARTBEAT_STALE)
@@ -587,9 +871,18 @@ impl App {
             {
                 self.fail_wallpaper_candidate("作品未在期限内提交首帧，保留原画面".into());
             } else if !self.wallpaper_render_allowed(&surface.configuration) {
-                let surface = self.wallpaper_candidate.as_mut().expect("candidate");
-                surface.stop();
-                surface.frame_wait_since = None;
+                if surface.session.media().is_some_and(|media| {
+                    media.input().metadata.container != crate::wallpaper::media::Container::Image
+                }) {
+                    // A candidate has no presented frame to preserve. In particular,
+                    // loading video cannot use the ready-only soft-pause proof.
+                    // Close its real controller now and requalify on resume.
+                    self.retire_wallpaper_candidate();
+                } else {
+                    let surface = self.wallpaper_candidate.as_mut().expect("candidate");
+                    surface.stop();
+                    surface.frame_wait_since = None;
+                }
             } else if surface.first_frame_ready() {
                 self.promote_wallpaper_candidate();
             } else if surface.page_clock.is_some() {
@@ -597,6 +890,17 @@ impl App {
                 surface.start(surface.configuration.presentation().fps);
                 surface.frame_wait_since.get_or_insert_with(Instant::now);
             }
+        }
+        if let Some(generation) = self
+            .wallpaper
+            .as_ref()
+            .filter(|surface| surface.session.media_pause_expired(Instant::now()))
+            .map(|surface| surface.binding.generation())
+        {
+            self.handle_wallpaper_page(
+                generation,
+                "wallpaper_media_failed media_pause_unconfirmed",
+            );
         }
         if self.wallpaper.as_ref().is_some_and(|surface| {
             surface.session.media().is_some()
@@ -606,6 +910,8 @@ impl App {
                     .paused_at
                     .is_some_and(|at| at.elapsed() >= Duration::from_secs(300))
         }) {
+            self.retain_wallpaper_playback();
+            self.retain_static_wallpaper_poster();
             self.retire_wallpaper_surface();
             self.wallpaper_page_ready = false;
             self.wallpaper_visible = false;
@@ -630,5 +936,97 @@ impl App {
                 self.wallpaper_apply_error = Some(error.to_string());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod playback_tests {
+    use super::*;
+    use crate::wallpaper::{
+        media::{Container, MediaProbe},
+        page_events::PageBinding,
+        target_planner::AssetRef,
+    };
+
+    #[test]
+    fn resume_checkpoint_matches_revision_package_asset_variant_and_actual_bytes() {
+        let reference = AssetRef {
+            package_hash: "a".repeat(64),
+            asset_id: "video".into(),
+            variant_id: None,
+        };
+        let mut metadata = MediaProbe {
+            container: Container::Webm,
+            codec: "vp8".into(),
+            profile: None,
+            encoded_width: 64,
+            encoded_height: 48,
+            display_width: 64,
+            display_height: 48,
+            rotation_degrees: 0,
+            pixel_aspect_ratio: 1.0,
+            duration_ms: Some(3000),
+            source_fps: Some(10.0),
+            fps_upper_bound: Some(10.0),
+        };
+        let mut resume = PlaybackResume {
+            revision: 42,
+            binding: PageBinding::new(7).unwrap(),
+            reference: reference.clone(),
+            content_key: "b".repeat(64),
+            duration_ms: 3000,
+            position_ms: 1500,
+        };
+        let key = resume.content_key.clone();
+        assert_eq!(
+            resume.position_for(42, &reference, &key, &metadata),
+            Some(1500)
+        );
+        assert_eq!(resume.position_for(43, &reference, &key, &metadata), None);
+        assert_eq!(
+            resume.position_for(42, &reference, &"c".repeat(64), &metadata),
+            None
+        );
+        for changed in [
+            AssetRef {
+                package_hash: "d".repeat(64),
+                ..reference.clone()
+            },
+            AssetRef {
+                asset_id: "other".into(),
+                ..reference.clone()
+            },
+            AssetRef {
+                variant_id: Some("other".into()),
+                ..reference.clone()
+            },
+        ] {
+            assert_eq!(resume.position_for(42, &changed, &key, &metadata), None);
+        }
+        metadata.container = Container::Image;
+        assert_eq!(resume.position_for(42, &reference, &key, &metadata), None);
+        metadata.container = Container::Webm;
+        metadata.duration_ms = Some(2000);
+        assert_eq!(resume.position_for(42, &reference, &key, &metadata), None);
+        let receipt = |binding: &PageBinding, position: u64| {
+            let mut value = serde_json::to_value(binding).unwrap();
+            value["event"] = "mediaPosition".into();
+            value["positionMs"] = position.into();
+            format!("wallpaper_session {value}")
+        };
+        let current = receipt(&resume.binding, 1700);
+        assert!(!resume.observe(43, 7, &current));
+        assert!(!resume.observe(42, 8, &current));
+        assert!(!resume.observe(42, 7, &receipt(&PageBinding::new(7).unwrap(), 1600)));
+        assert_eq!(resume.position_at(42), Some(1500));
+        assert!(resume.observe(42, 7, &current));
+        assert_eq!(resume.position_at(42), Some(1700));
+        assert_eq!(resume.position_at(43), None);
+        assert!(resume.observe(42, 7, &receipt(&resume.binding, 3000)));
+        assert_eq!(
+            resume.position_at(42),
+            Some(1700),
+            "out-of-range receipt leaves the last valid position intact"
+        );
     }
 }

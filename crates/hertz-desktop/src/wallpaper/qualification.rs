@@ -104,6 +104,18 @@ impl ProbeClient {
         input: DecodeInput,
         cancel: Arc<AtomicBool>,
     ) -> Result<()> {
+        self.qualify_with_poster(library, input, cancel, false)
+            .await
+            .map(|_| ())
+    }
+
+    pub(super) async fn qualify_with_poster(
+        &self,
+        library: &Library,
+        input: DecodeInput,
+        cancel: Arc<AtomicBool>,
+        poster: bool,
+    ) -> Result<Option<String>> {
         cancelled(&cancel)?;
         self.check_metadata(&input.metadata)?;
         let environment = if self.cache_allowed() {
@@ -116,12 +128,12 @@ impl ProbeClient {
             .as_ref()
             .map(|env| key(&input.media.entry, &input.metadata, env))
             .transpose()?;
-        if let Some(key) = &key {
+        if let Some(key) = key.as_ref().filter(|_| !poster) {
             match hit(library, key, now_secs()).await {
                 Ok(true) => {
                     cancelled(&cancel)?;
                     self.note_cache_hit();
-                    return Ok(());
+                    return Ok(None);
                 }
                 Ok(false) => {}
                 Err(error) => {
@@ -130,11 +142,11 @@ impl ProbeClient {
             }
         }
         // 此回执等待独立 controller 关闭、文件活动归零与资源配额归还。
-        let actual_browser = self.run(input, Arc::clone(&cancel)).await?;
+        let actual = self.run(input, Arc::clone(&cancel), poster).await?;
         cancelled(&cancel)?;
         if let (Some(before), Some(key)) = (environment, key) {
             let after = self.environment().await;
-            if actual_browser.as_deref() == Some(before.browser.as_str())
+            if actual.browser.as_deref() == Some(before.browser.as_str())
                 && after.as_ref() == Some(&before)
             {
                 cancelled(&cancel)?;
@@ -146,7 +158,8 @@ impl ProbeClient {
                 crate::app::log("decode qualification environment changed; success not cached");
             }
         }
-        cancelled(&cancel)
+        cancelled(&cancel)?;
+        Ok(actual.poster)
     }
 }
 

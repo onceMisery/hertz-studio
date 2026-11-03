@@ -18,26 +18,27 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use windows::core::GUID;
 use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0, WAIT_TIMEOUT};
 use windows::Win32::Media::Audio::{
     eMultimedia, eRender, IAudioCaptureClient, IAudioClient, IMMDevice, IMMDeviceEnumerator,
-    MMDeviceEnumerator, AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED,
+    MMDeviceEnumerator, AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY, AUDCLNT_BUFFERFLAGS_SILENT,
+    AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR, AUDCLNT_SHAREMODE_SHARED,
     AUDCLNT_STREAMFLAGS_EVENTCALLBACK, AUDCLNT_STREAMFLAGS_LOOPBACK, WAVEFORMATEX,
     WAVEFORMATEXTENSIBLE,
 };
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_ALL, COINIT_MULTITHREADED,
 };
+use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
 
 use super::audio::{downmix_interleaved, SampleRing, FFT_SIZE};
 
 #[cfg(test)]
 use super::audio::{SpectrumAnalyzer, BANDS};
-#[cfg(test)]
-use std::time::Duration;
 
 /// WAVE_FORMAT_IEEE_FLOAT（windows crate 未在 Media::Audio 导出，已知常量）。
 const WAVE_FORMAT_IEEE_FLOAT: u16 = 3;
@@ -265,7 +266,14 @@ unsafe fn open_and_capture(
         });
         // 热路径零分配：线程内一次性预热 1 秒单声道 + 原始缓冲容量。
         let mut mono: Vec<f32> = Vec::with_capacity(sample_rate as usize);
-        capture_packets(&capture, stop, ring, channels, event, &mut mono)
+        capture_packets(
+            &capture,
+            stop,
+            ring,
+            (channels, sample_rate),
+            event,
+            &mut mono,
+        )
     });
 
     let _ = client.Stop();
@@ -321,10 +329,16 @@ unsafe fn capture_packets(
     capture: &IAudioCaptureClient,
     stop: &AtomicBool,
     ring: &Mutex<SampleRing>,
-    channels: usize,
+    shape: (usize, u32),
     event: windows::Win32::Foundation::HANDLE,
     mono: &mut Vec<f32>,
 ) -> Result<(), String> {
+    let (channels, sample_rate) = shape;
+    let mut frequency = 0;
+    QueryPerformanceFrequency(&mut frequency).map_err(|error| error.to_string())?;
+    if frequency <= 0 {
+        return Err("采集时钟频率无效".into());
+    }
     loop {
         if stop.load(Ordering::Relaxed) {
             return Ok(());
@@ -348,9 +362,38 @@ unsafe fn capture_packets(
             }
             let mut data: *mut u8 = core::ptr::null_mut();
             let mut flags: u32 = 0;
+            let mut packet_qpc = 0;
             capture
-                .GetBuffer(&mut data, &mut frames, &mut flags, None, None)
+                .GetBuffer(
+                    &mut data,
+                    &mut frames,
+                    &mut flags,
+                    None,
+                    Some(&mut packet_qpc),
+                )
                 .map_err(|error| format!("读取采集缓冲失败：{error}"))?;
+            let mut counter = 0;
+            let clock = QueryPerformanceCounter(&mut counter);
+            let now = Instant::now();
+            let captured_at = if clock.is_ok()
+                && counter >= 0
+                && flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR.0 as u32 == 0
+            {
+                // WASAPI reports the FIRST sample in 100 ns units, not raw QPC ticks.
+                let qpc_now = (counter as u128 * 10_000_000 / frequency as u128) as u64;
+                packet_time(now, qpc_now, packet_qpc, frames, sample_rate)
+            } else {
+                None
+            };
+            let Some(captured_at) = captured_at else {
+                ring.lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .discontinue();
+                capture
+                    .ReleaseBuffer(frames)
+                    .map_err(|error| error.to_string())?;
+                continue;
+            };
             if frames as usize > mono.capacity()
                 || (data.is_null()
                     && frames > 0
@@ -371,7 +414,10 @@ unsafe fn capture_packets(
                 }
             }
             if let Ok(mut guard) = ring.lock() {
-                guard.push(mono);
+                if flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY.0 as u32 != 0 {
+                    guard.discontinue();
+                }
+                guard.push_at(mono, captured_at);
             }
             capture
                 .ReleaseBuffer(frames)
@@ -380,9 +426,34 @@ unsafe fn capture_packets(
     }
 }
 
+fn packet_time(
+    now: Instant,
+    qpc_now: u64,
+    first_sample: u64,
+    frames: u32,
+    rate: u32,
+) -> Option<Instant> {
+    let span = u64::from(frames.checked_sub(1)?) * 10_000_000 / u64::from(rate);
+    let age = qpc_now.checked_sub(first_sample.checked_add(span)?)?;
+    now.checked_sub(Duration::from_nanos(age.checked_mul(100)?))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn packet_clock_uses_wasapi_first_sample_time_and_actual_rate() {
+        let now = Instant::now();
+        // 480 frames at 48 kHz: last sample was 9.9791 ms after the first.
+        let stamp = packet_time(now, 10_000_000, 9_000_000, 480, 48_000).unwrap();
+        assert_eq!(now.duration_since(stamp), Duration::from_nanos(90_020_900));
+        let high_rate = packet_time(now, 10_000_000, 9_000_000, 480, 96_000).unwrap();
+        assert!(high_rate < stamp);
+        assert!(packet_time(now, 10_000_000, 10_000_001, 1, 48_000).is_none());
+        assert!(packet_time(now, 10_000_000, 0, 0, 48_000).is_none());
+        assert!(packet_time(now, u64::MAX, u64::MAX, 480, 48_000).is_none());
+    }
 
     /// 非 float 混合格式明确拒绝（不偷换设备，§11.3）。
     #[test]
@@ -476,14 +547,7 @@ mod tests {
         unsafe { render_tone(Duration::from_millis(1200), 440.0, 0.02) }
             .expect("测试音渲染必须成功");
 
-        let exit = handle.stop_and_join();
-        assert_eq!(exit.generation, 1);
-        assert!(
-            exit.error.is_none(),
-            "COM/初始化路径必须干净：{:?}",
-            exit.error
-        );
-
+        // Read while the samples are current; joining can wait through an idle device event.
         let (len, dropped) = {
             let guard = ring.lock().unwrap();
             (guard.len(), guard.dropped())
@@ -499,6 +563,14 @@ mod tests {
         let peak = bands.iter().cloned().fold(0.0f32, f32::max);
         println!("频带峰值 {peak:.3}（440Hz 预期落中低频带）");
         assert!(peak > 0.05, "端到端频谱必须非平凡：peak={peak}");
+
+        let exit = handle.stop_and_join();
+        assert_eq!(exit.generation, 1);
+        assert!(
+            exit.error.is_none(),
+            "COM/初始化路径必须干净：{:?}",
+            exit.error
+        );
 
         // 恢复重开（§11.3）：真实退出后可再次打开。
         let handle2 = spawn_loopback(None, ring, 2).expect("复绑");

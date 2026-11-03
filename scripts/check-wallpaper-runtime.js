@@ -17,6 +17,7 @@ function fixture(options = {}) {
     let resolveDecode;
     const el = {
       kind, style: {}, paused: true, loads: 0, removed: false, src: '',
+      getContext: () => ({ setTransform() {}, clearRect() {}, beginPath() {}, arc() {}, stroke() {}, fill() {}, createRadialGradient: () => ({ addColorStop() {} }) }),
       addEventListener(name, callback) { listeners.set(name, callback); },
       removeEventListener(name) { listeners.delete(name); },
       setAttribute() {}, removeAttribute(name) { if (name === 'src') this.src = ''; },
@@ -56,11 +57,44 @@ function fixture(options = {}) {
     api: window.hertzWallpaper, events, frames, elements, timers, selected, host,
     get selections() { return selections; },
     tick(stamp) { now = stamp; const callbacks = [...rafs.values()]; rafs.clear(); callbacks.forEach(callback => callback(now)); },
+    runTimers(stamp) { now = stamp; const callbacks = [...timers.values()]; timers.clear(); callbacks.forEach(callback => callback()); },
   };
 }
 
 async function flush() { await Promise.resolve(); await Promise.resolve(); }
 async function main() {
+  const pointer = fixture();
+  pointer.api.applyConfig({ source: 'fixed', scene: 'coast' });
+  pointer.api.start(30); await flush();
+  const press = serial => ({ active: true, x: .4, y: .5, click: { serial, x: .4, y: .5 } });
+  assert.equal(pointer.api.applyPointer(press(1)), false, 'pointer remains opt-in');
+  pointer.api.applyConfig({ source: 'fixed', scene: 'coast', pointer: true });
+  assert.equal(pointer.api.applyPointer(press(1)), true);
+  pointer.api.applyPointer(press(1));
+  assert.equal(pointer.api.debug().pointer.clicks, 1, 'a sampled press must trigger only once');
+  assert.equal(pointer.api.applyPointer({ ...press(2), x: NaN }), false);
+  pointer.tick(500);
+  assert.equal(pointer.api.applyPointer({ ...press(2), pageDispatchMs: 0 }), false, 'queued stale input is discarded');
+  for (let i = 2; i < 100; i++) pointer.api.applyPointer(press(i));
+  assert.equal(pointer.api.debug().pointer.waves, 24, 'effects have a fixed memory/work bound');
+  pointer.api.stop();
+  assert.equal(pointer.api.debug().pointer.waves, 0);
+  assert.equal(pointer.elements.filter(el => el.id === 'wallpaper-pointer-effects' && !el.removed).length, 0);
+  pointer.api.start();
+  pointer.api.applyConfig({ source: 'fixed', scene: 'coast', pointer: true, motion: 0 });
+  assert.equal(pointer.api.applyPointer(press(101)), false, 'frozen wallpaper has no pointer motion');
+  pointer.api.applyConfig({ source: 'fixed', scene: 'coast', pointer: true, motion: 1, params: { reduced: true } });
+  assert.equal(pointer.api.applyPointer(press(101)), false, 'reduced scene motion also suppresses effects');
+  pointer.api.applyConfig({ source: 'fixed', scene: 'coast', pointer: true, motion: 1 });
+  pointer.api.applyMedia({ kind: 'image', url });
+  pointer.elements.at(-1).finishDecode(); await flush();
+  pointer.api.applyPointer(press(101));
+  assert.equal(pointer.api.debug().pointer.mediaAnimating, true, 'static media animates only on input');
+  for (let i = 1; i <= 90; i++) pointer.tick(500 + i * 1000 / 60);
+  assert.equal(pointer.api.debug().pointer.waves, 0);
+  assert.equal(pointer.api.debug().pointer.mediaAnimating, false, 'the media effect loop sleeps once ripples fade');
+  pointer.api.unmount();
+
   for (const fps of [15, 30, 60]) {
     const f = fixture();
     f.api.applyConfig({ source: 'fixed', scene: 'coast', motion: 1 });
@@ -97,6 +131,11 @@ async function main() {
   assert.equal(bound.host.style.visibility, 'hidden', 'native host decides when all four facts hold');
   assert.equal(bound.api.reveal(), true);
   assert.equal(bound.host.style.visibility, 'visible');
+  const beforeLoss = bound.api.debug().draws;
+  bound.elements.find(el => el.kind === 'canvas').emit('webglcontextlost');
+  assert.match(bound.events.at(-1), /^wallpaper_heartbeat \d+ \d+ 0 1$/, 'context loss reaches native even though RAF stops');
+  bound.tick(1000);
+  assert.equal(bound.api.debug().draws, beforeLoss, 'lost context stops GL submissions');
   bound.api.unmount();
 
   const boundImage = fixture({ binding });
@@ -116,13 +155,118 @@ async function main() {
   boundVideo.api.unmount();
   assert.equal(liveVideo.frameCancelled, true);
 
+  function pausableVideo() {
+    const f = fixture({binding});
+    f.api.applyConfig({motion:1}); f.api.start(30); f.api.applyMedia({kind:'video',url});
+    const el = f.elements.at(-1);
+    el.currentTime = 1.25; el.totalFrames = 15;
+    el.getVideoPlaybackQuality = () => ({totalVideoFrames:el.totalFrames});
+    el.frameReady(0,{mediaTime:1.25});
+    return {f,el};
+  }
+  const {f:confirmedPause,el:confirmedEl} = pausableVideo();
+  confirmedPause.api.stop(7);
+  assert.equal(confirmedEl.paused,true);
+  assert.equal(receipts(confirmedPause).filter(item=>item.event==='mediaPaused').length,0,'pause() alone is not proof');
+  const pendingProof = [...confirmedPause.timers.values()][0];
+  confirmedPause.api.stop(7);
+  assert.equal(confirmedPause.timers.size,1,'repeated stop retains one check and deadline');
+  confirmedPause.runTimers(200);
+  assert.deepEqual(receipts(confirmedPause).at(-1),{...binding,event:'mediaPaused',pauseToken:7});
+  assert.equal(confirmedPause.timers.size,0,'a confirmed pause does not start a permanent polling loop');
+  confirmedPause.api.stop(7);
+  assert.equal(confirmedPause.timers.size,0,'confirmed token is idempotent');
+  confirmedPause.api.start(30);
+  assert.equal(confirmedEl.paused,false);
+  confirmedPause.api.stop(8);
+  const previousCount = receipts(confirmedPause).length;
+  pendingProof();
+  assert.equal(receipts(confirmedPause).length,previousCount,'old check cannot acknowledge a later pause');
+  confirmedPause.runTimers(400);
+  assert.deepEqual(receipts(confirmedPause).at(-1),{...binding,event:'mediaPaused',pauseToken:8});
+  confirmedPause.api.start(30); confirmedPause.api.stop(9);
+  const releasedProof = [...confirmedPause.timers.values()][0];
+  confirmedPause.api.unmount(); releasedProof();
+  assert.equal(confirmedPause.timers.size,0);
+  assert.equal(receipts(confirmedPause).some(item=>item.pauseToken===9),false,'released media cannot confirm a pause');
+
+  for (const mode of ['pause-ignored','clock-advances','frames-advance']) {
+    const {f,el} = pausableVideo();
+    if(mode==='pause-ignored') el.pause = () => {};
+    f.api.stop(1);
+    for(let elapsed=200;elapsed<=1800;elapsed+=200) {
+      if(mode==='clock-advances')el.currentTime+=.1;
+      if(mode==='frames-advance')el.totalFrames++;
+      f.runTimers(elapsed);
+    }
+    assert.equal(f.api.debug().media.state,'failed',mode+' must fail within the bounded drain period');
+    assert.equal(el.removed,true);
+    assert.equal(receipts(f).some(item=>item.event==='mediaPaused'),false);
+    assert.ok(f.events.includes('wallpaper_media_failed media_pause_unconfirmed'));
+    f.api.unmount();
+  }
+
   const unsupported = fixture({ binding, noVideoFrames: true });
   assert.equal(unsupported.api.applyMedia({ kind: 'video', url }), false);
   unsupported.elements.at(-1).emit('loadeddata'); await flush();
   assert.equal(unsupported.api.debug().media.state, 'failed');
+  const resume = fixture();
+  resume.api.applyConfig({motion:1});resume.api.start(30);
+  resume.api.applyMedia({kind:'video',url});
+  const resumedVideo=resume.elements.at(-1);resumedVideo.frameReady();await flush();
+  resume.api.stop();
+  resumedVideo.play=()=>Promise.reject(new Error('resume rejected'));
+  resume.api.start(30);await flush();
+  assert.equal(resume.api.debug().media.state,'failed','rejected resume must enter the native failure/cover path');
+  assert.equal(resumedVideo.removed,true);
+  assert.ok(resume.events.includes('wallpaper_media_failed media_play_rejected'));
+  const paused = fixture();
+  paused.api.applyConfig({motion:1});paused.api.start(30);paused.api.applyMedia({kind:'video',url});
+  const pausedVideo=paused.elements.at(-1);pausedVideo.frameReady();await flush();
+  let rejectPlay;
+  pausedVideo.play=()=>new Promise((_,reject)=>{rejectPlay=reject;});
+  paused.api.stop();paused.api.start(30);paused.api.stop();
+  rejectPlay(new Error('interrupted by pause'));await flush();
+  assert.equal(paused.api.debug().media.state,'ready','an intentional pause supersedes an earlier play attempt');
   assert.equal(unsupported.api.debug().media.error, 'media_frame_callback_unsupported');
   assert.equal(receipts(unsupported).length, 1);
   unsupported.api.unmount();
+
+  const restored = fixture({binding});
+  restored.api.applyConfig({motion:1});restored.api.start(30);
+  assert.equal(restored.api.applyMedia({kind:'video',url,resumePositionMs:1250}),true);
+  const restoredVideo=restored.elements.at(-1);
+  restoredVideo.duration=4;restoredVideo.currentTime=0;
+  assert.equal(restoredVideo.paused,true,'restoring must not play the file start');
+  assert.equal(restoredVideo.frameReady,undefined,'no start-frame callback is registered before the seek');
+  restoredVideo.emit('loadedmetadata');
+  assert.equal(restoredVideo.currentTime,1.25);
+  restoredVideo.seeking=true;restoredVideo.emit('seeked');
+  assert.equal(restoredVideo.frameReady,undefined,'a spurious seeked event cannot finish an active seek');
+  restoredVideo.seeking=false;restoredVideo.emit('seeked');
+  assert.equal(restoredVideo.paused,false);assert.equal(restored.api.debug().media.state,'loading');
+  assert.match(restoredVideo.style.cssText,/visibility:hidden/);
+  assert.notEqual(restoredVideo.style.visibility,'visible','seek completion alone is not a presented frame');
+  restoredVideo.frameReady(0,{mediaTime:1.25});await flush();
+  assert.equal(restored.api.debug().media.state,'ready');
+  assert.equal(restored.api.debug().media.firstFrameTimeMs,1250);
+  assert.deepEqual(receipts(restored).filter(item=>item.event==='firstFrame'),[{...binding,event:'firstFrame',frameKind:'video'}]);
+  restoredVideo.currentTime=2.1;restored.api.stop();
+  assert.deepEqual(receipts(restored).at(-1),{...binding,event:'mediaPosition',positionMs:2100});
+  const count=receipts(restored).length;restored.api.stop();
+  assert.equal(receipts(restored).length,count,'repeated native stop does not flood position receipts');
+  const staleFrame=restoredVideo.frameReady;
+  restored.api.applyMedia({kind:'video',url,resumePositionMs:500});
+  const replacement=restored.elements.at(-1);
+  restoredVideo.emit('seeked');staleFrame(0,{mediaTime:2.1});
+  assert.equal(restored.api.debug().media.state,'loading','old seek/frame cannot reveal a replacement');
+  replacement.duration=.4;replacement.emit('loadedmetadata');
+  assert.equal(restored.api.debug().media.error,'media_resume_out_of_range');
+  assert.equal(replacement.removed,true);
+  for(const position of [-1,NaN,Infinity,'500',.5]) {
+    assert.equal(fixture().api.applyMedia({kind:'video',url,resumePositionMs:position}),false);
+  }
+  assert.equal(fixture().api.applyMedia({kind:'image',url,resumePositionMs:5}),false);
 
   const followed = fixture();
   followed.api.applyConfig({ source: 'follow', scene: 'coast', params: { speed: .5 } });

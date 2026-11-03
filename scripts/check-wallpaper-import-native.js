@@ -435,9 +435,16 @@ async function main() {
     const vid = await begin('video', 'done');
     assert.equal(vid.decoderSlots, 0);
     assert.equal(vid.probeRuns, 1);
+    const poster = derivedReceipts(configDir).find(receipt=>receipt.pipeline==='video-poster-v1' && receipt.inputHash===digest(video));
+    assert.ok(poster,'real qualification must capture a static poster');
+    const posterBytes=fs.readFileSync(path.join(path.dirname(poster.file),'poster.jpg'));
+    assert.ok(posterBytes.length<=24*1024);assert.equal(digest(posterBytes),poster.sha256);
+    assert.deepEqual([poster.width,poster.height],[64,48],'small video posters are not upscaled');
+    evidence.videoPoster={...poster,bytes:posterBytes.length};
     const cachedVideo = await begin('video', 'done');
     assert.equal(cachedVideo.cacheHits, 1);
     assert.equal(cachedVideo.probeRuns, 0);
+    assert.deepEqual(derivedReceipts(configDir).filter(receipt=>receipt.pipeline==='video-poster-v1'),[poster],'repeat import reuses the same poster generation');
     const videoPlan = await plan({ ...reference, packageHash: digest(cases.video) }, { width: 3840, height: 2160, fit: 'cover', purpose: 'preview' });
     assert.equal(videoPlan.resolution, 'ready', JSON.stringify(videoPlan));
     assert.deepEqual(videoPlan.target, { width: 960, height: 540, fit: 'cover', purpose: 'preview' }, '视频预算和页面描述共用规范化目标');

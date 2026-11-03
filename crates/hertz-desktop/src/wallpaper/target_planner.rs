@@ -10,7 +10,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use super::assets::{AssetStore, DecodeInput, StagedPackage};
-use super::budget::{BudgetRequest, OwnerKind};
+use super::budget::{BudgetRequest, OwnerKind, ResourceAmounts, ResourcePlan, SessionPlan};
 use super::image_prepare::{self, ImagePurpose, ImageTarget};
 use super::jobs::JobError;
 use super::library::Library;
@@ -55,15 +55,49 @@ pub(crate) enum Resolution {
 }
 
 /// 解析后目标与字节事实不可修改；准入和页面描述使用同一份目标。
+#[derive(Clone)]
 pub(crate) struct ResolvedMedia {
     reference: AssetRef,
     content_key: String,
     url: String,
     input: Box<DecodeInput>,
     target: ImageTarget,
+    poster: Option<Box<ResolvedMedia>>,
 }
 
 impl ResolvedMedia {
+    pub(super) fn from_input(
+        reference: AssetRef,
+        input: DecodeInput,
+        content_key: String,
+        target: ImageTarget,
+    ) -> Result<Self> {
+        reference.validate()?;
+        let target = image_prepare::normalize_target(target)?;
+        let url = super::webresource::files_url(&reference.package_hash, &input.media.entry.path)
+            .ok_or_else(|| JobError::invalid_input("媒体 URL 不能由已核验路径生成"))?;
+        Ok(Self {
+            reference,
+            content_key,
+            url,
+            input: Box::new(input),
+            target,
+            poster: None,
+        })
+    }
+
+    pub(crate) fn poster(&self) -> Option<&ResolvedMedia> {
+        self.poster.as_deref()
+    }
+
+    pub(crate) fn retarget_static_image(mut self, target: ImageTarget) -> Result<Self> {
+        if self.input.metadata.container != Container::Image {
+            return Err(JobError::invalid_input("视频目标变化必须重新规划"));
+        }
+        self.target = image_prepare::normalize_target(target)?;
+        Ok(self)
+    }
+
     pub(crate) fn reference(&self) -> &AssetRef {
         &self.reference
     }
@@ -88,6 +122,36 @@ impl ResolvedMedia {
     /// 多目标和交接时旧 token 保持占用，不能用新计划覆盖旧账。
     pub(crate) fn budget_request(&self, session: String, generation: u64) -> Result<BudgetRequest> {
         presentation_request(&self.input.metadata, self.target, session, generation)
+    }
+
+    /// Both consumers draw from one fixed target plan. Decoder/CPU and presentation
+    /// allocations do not each reserve another global target, preview or copy of the bytes.
+    pub(crate) fn budget_plan(&self, session: String, generation: u64) -> Result<SessionPlan> {
+        let request = self.budget_request(session, generation)?;
+        let decoded = ResourceAmounts {
+            decoders: u64::from(request.decoders),
+            decode_pixel_rate: request.decode_pixel_rate,
+            cpu_bytes: request.cpu_bytes,
+            ..Default::default()
+        };
+        let presented = ResourceAmounts {
+            gpu_bytes: request.gpu_bytes,
+            output_pixel_rate: request.output_pixel_rate,
+            ..Default::default()
+        };
+        SessionPlan::new(
+            request,
+            vec![
+                ResourcePlan {
+                    id: "decoded-media".into(),
+                    maximum: decoded,
+                },
+                ResourcePlan {
+                    id: "media-presentation".into(),
+                    maximum: presented,
+                },
+            ],
+        )
     }
 }
 
@@ -271,15 +335,20 @@ pub(crate) async fn resolve(
         (source, key)
     };
     cancelled(cancel)?;
-    let url = super::webresource::files_url(&reference.package_hash, &input.media.entry.path)
-        .ok_or_else(|| JobError::invalid_input("媒体 URL 不能由已核验路径生成"))?;
-    Ok(Resolution::Ready(ResolvedMedia {
-        reference,
-        input: Box::new(input),
-        content_key,
-        url,
-        target,
-    }))
+    let poster = if input.metadata.container != Container::Image {
+        super::video_poster::resolve_for_media(store, library, &reference, &input, target)
+            .await
+            .unwrap_or_else(|error| {
+                crate::app::log(&format!("optional presentation poster skipped: {error}"));
+                None
+            })
+    } else {
+        None
+    };
+    cancelled(cancel)?;
+    let mut media = ResolvedMedia::from_input(reference, input, content_key, target)?;
+    media.poster = poster.map(Box::new);
+    Ok(Resolution::Ready(media))
 }
 
 fn presentation_request(

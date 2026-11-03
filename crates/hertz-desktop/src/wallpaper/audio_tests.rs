@@ -242,6 +242,93 @@ fn consumed_history_is_not_overload_and_stalled_samples_are_not_fresh() {
     assert_eq!(ring.dropped(), 0, "常规 30 Hz 消费不应报告缓冲过载");
 }
 
+#[test]
+fn delayed_analysis_preserves_capture_time_and_discards_expired_pcm() {
+    let mut ring = SampleRing::new(96_000);
+    assert_eq!(ring.capacity(), 24_000);
+    let captured = std::time::Instant::now();
+    let mut window = [0.0; FFT_SIZE];
+    ring.push_at(&[0.5; FFT_SIZE], captured);
+    let stamp = ring
+        .take_window_at(
+            &mut window,
+            captured + std::time::Duration::from_millis(200),
+        )
+        .unwrap();
+    assert_eq!(
+        stamp.captured_at, captured,
+        "analysis must not renew sample age"
+    );
+    ring.push_at(
+        &[0.5; FFT_SIZE],
+        captured + std::time::Duration::from_millis(1),
+    );
+    assert!(ring
+        .take_window_at(
+            &mut window,
+            captured + std::time::Duration::from_millis(252)
+        )
+        .is_none());
+    assert_eq!(ring.len(), 0);
+    assert_eq!(ring.dropped(), FFT_SIZE as u64);
+}
+
+#[test]
+fn capture_gap_requires_an_entire_new_window_and_resets_filter_history() {
+    let mut ring = SampleRing::new(48_000);
+    let before = std::time::Instant::now();
+    let after = before + std::time::Duration::from_secs(2);
+    let mut window = [0.0; FFT_SIZE];
+    ring.push_at(&[1.0; FFT_SIZE], before);
+    assert!(
+        ring.take_window_at(&mut window, before)
+            .unwrap()
+            .discontinuity
+    );
+    ring.push_at(&[0.0; FFT_SIZE / 2], after);
+    assert!(
+        ring.take_window_at(&mut window, after).is_none(),
+        "old signal cannot complete a new silence window"
+    );
+    ring.push_at(
+        &[0.0; FFT_SIZE / 2],
+        after + std::time::Duration::from_millis(20),
+    );
+    assert!(
+        ring.take_window_at(&mut window, after + std::time::Duration::from_millis(20))
+            .unwrap()
+            .discontinuity
+    );
+    assert!(window.iter().all(|sample| *sample == 0.0));
+    ring.push_at(&[0.0; 100], after + std::time::Duration::from_millis(30));
+    assert!(
+        !ring
+            .take_window_at(&mut window, after + std::time::Duration::from_millis(30))
+            .unwrap()
+            .discontinuity
+    );
+}
+
+#[test]
+fn queued_older_packets_and_empty_writes_cannot_refresh_a_window() {
+    let mut ring = SampleRing::new(48_000);
+    let now = std::time::Instant::now();
+    let mut window = [0.0; FFT_SIZE];
+    ring.push_at(&[0.25; FFT_SIZE], now);
+    ring.push_at(&[0.9; FFT_SIZE], now - std::time::Duration::from_millis(10));
+    ring.push_at(&[], now + std::time::Duration::from_secs(2));
+    assert_eq!(
+        ring.take_window_at(&mut window, now).unwrap().captured_at,
+        now
+    );
+    assert!(window.iter().all(|sample| *sample == 0.25));
+    ring.discontinue();
+    ring.push_at(&[0.0; 100], now + std::time::Duration::from_millis(1));
+    assert!(ring
+        .take_window_at(&mut window, now + std::time::Duration::from_millis(1))
+        .is_none());
+}
+
 /// 交织立体声 → 单声道平均；单声道直通。
 #[test]
 fn downmix_averages_channels() {

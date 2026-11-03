@@ -33,11 +33,12 @@ import {
 } from './zodiac.js';
 import { createWorld } from './world.js';
 
-const QUALITY = {
-  low: { prCap: 1.0, budget: 1900000 },
-  medium: { prCap: 1.15, budget: 3600000 },
-  high: { prCap: 1.55, budget: 6200000 },
-};
+export const qualityProfiles = Object.freeze({
+  low: Object.freeze({ prCap: 1.0, budget: 1900000 }),
+  medium: Object.freeze({ prCap: 1.15, budget: 3600000 }),
+  high: Object.freeze({ prCap: 1.55, budget: 6200000 }),
+});
+const QUALITY = qualityProfiles;
 const BIN_COUNT = 24;
 const PAUSE_RENDER_MS = 250;
 // 兜底清屏色（天空穹顶盖满时看不到）：取天空最暗那一段的值，不留黑边。
@@ -304,7 +305,8 @@ export function unmount() {
 function computeDpr(width, height, quality) {
   const q = QUALITY[quality];
   const dev = (typeof window !== 'undefined' && window.devicePixelRatio) || 1;
-  const budgetCap = Math.sqrt(q.budget / Math.max(1, width * height));
+  const nativePixels = globalThis.HertzGlBudget?.limits?.pixelBudget || Infinity;
+  const budgetCap = Math.sqrt(Math.min(q.budget, nativePixels) / Math.max(1, width * height));
   let maxSize = Infinity;
   try {
     const gl = st && st.renderer.getContext();

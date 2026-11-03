@@ -13,7 +13,7 @@ const root = path.resolve(__dirname, '..'), output = path.join(root, 'output/pla
     page.on('pageerror', error => errors.push(error.message));
     page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
     await page.setContent('<body style="margin:0;background:#030405"><canvas style="display:block;width:100vw;height:100vh"></canvas>');
-    await page.addScriptTag({ path: path.join(root, 'plugin/ui/vendor/stage-runtime.js') });
+    await page.addScriptTag({ path: process.env.STAGE_RUNTIME_BUNDLE || path.join(root, 'plugin/ui/vendor/stage-runtime.js') });
     await page.addScriptTag({ path: path.join(root, 'plugin/ui/vendor/space-stage.js') });
     await page.evaluate(() => {
       const canvas = document.querySelector('canvas'), original = canvas.getContext.bind(canvas);
@@ -50,8 +50,7 @@ const root = path.resolve(__dirname, '..'), output = path.join(root, 'output/pla
     });
     for (const id of ['cover-sphere', 'cover-wall']) {
       await page.evaluate(async id => { current = 'proxy:0'; host.setRig(null); await host.select(id); host.resize(innerWidth, innerHeight); frame(); }, id);
-      await page.waitForFunction(() => host.stats().coverTextures > 0);
-      await page.waitForTimeout(150);
+      await page.waitForFunction(() => host.stats().coverTextures > 0 && host.stats().tasks === 0);
       const first = await page.evaluate(() => frame());
       assert.ok(first.red > 1000, id + ' displays current artwork with an empty queue through proxy resolution');
       await page.screenshot({ path: path.join(output, id + '-desktop.png') });
@@ -61,7 +60,12 @@ const root = path.resolve(__dirname, '..'), output = path.join(root, 'output/pla
         host.setRig({ ...baseline, theta: .45, phi: .16 }); return frame(0);
       }, id);
       assert.notEqual(first.hash, rotated.hash, id + ' has real camera depth'); assert.ok(rotated.red > 500);
-      await page.evaluate(() => { current = 'proxy:1'; host.setRig(null); frame(); }); await page.waitForTimeout(150);
+      await page.evaluate(() => { current = 'proxy:1'; host.setRig(null); frame(); });
+      await page.waitForFunction(() => host.stats().tasks === 0);
+      // The scene advances its crossfade through frame dt, not wall-clock sleep.
+      await page.evaluate(() => {
+        for(let i=0;i<60;i++)host.frame({now:performance.now(),time:0,sceneTime:0,dynamicDt:1/60,dt:1/60,playing:true,bands:{},level:0});
+      });
       const changed = await page.evaluate(() => frame()); assert.ok(changed.cyan > 1000 && changed.red < first.red * .15, id + ' replaces artwork');
       const frozen = await page.evaluate(() => [frame(1, true), frame(30, true)]); assert.equal(frozen[0].hash, frozen[1].hash, id + ' reduced motion freezes');
       await page.setViewportSize({ width: 390, height: 844 });

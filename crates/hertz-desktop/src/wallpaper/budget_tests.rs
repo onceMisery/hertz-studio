@@ -11,6 +11,24 @@ use super::{
     PREVIEW_RESERVED_OUTPUT_RATE,
 };
 
+#[test]
+fn static_preview_storage_cannot_create_a_renderer_or_decoder() {
+    let budget = BudgetCoordinator::new();
+    let mut request = req(OwnerKind::PreviewFrame, "preview-frame");
+    request.contexts = 1;
+    assert!(budget.grant(&request).is_err());
+    request.contexts = 0;
+    request.decoders = 1;
+    assert!(budget.grant(&request).is_err());
+    request.decoders = 0;
+    request.output_pixel_rate = 1;
+    assert!(budget.grant(&request).is_err());
+    request.output_pixel_rate = 0;
+    request.decode_pixel_rate = 1;
+    assert!(budget.grant(&request).is_err());
+    assert_eq!(budget.usage(), Default::default());
+}
+
 fn req(owner: OwnerKind, session: &str) -> BudgetRequest {
     BudgetRequest {
         owner,
@@ -188,9 +206,20 @@ fn purge_session_clears_all_states() {
         .confirm_exit(token2, "session-a", 1)
         .expect("a2 已退出");
 
-    assert_eq!(budget.purge_session("session-a"), 2, "pending+墓碑都清除");
+    let mut later = req(OwnerKind::Desktop, "session-a");
+    later.generation = 2;
+    let later_token = budget.grant(&later).unwrap();
+    assert_eq!(
+        budget.purge_session("session-a", 1),
+        2,
+        "pending+墓碑都清除"
+    );
     assert_eq!(budget.usage().decoder_slots, 1, "只残留 b 的槽");
-    assert_eq!(budget.purge_session("session-a"), 0, "重复 purge 幂等");
+    assert_eq!(budget.purge_session("session-a", 1), 0, "重复 purge 幂等");
+    assert!(
+        budget.release(later_token, "session-a", 2).is_ok(),
+        "旧 controller 退出不能清后继代际"
+    );
     assert_eq!(
         budget.release(token1, "session-a", 1),
         Err(LedgerError::UnknownToken),

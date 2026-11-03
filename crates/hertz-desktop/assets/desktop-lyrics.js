@@ -16,6 +16,7 @@
     lastPosition: null, lastSession: null, lastSeq: -1, lastSnapshotAt: 0, lastClockBeacon: -Infinity,
     renderedKey: null, renderedGroup: -99, signature: '', nodes: new Map(), words: [],
     raf: 0, lastPaint: 0, staleTimer: 0, panelFrame: 0, panelHeight: -1,
+    fitFrame: 0, fitWidth: 0, toolbarWidth: 0,
     optionsOpen: false, hoverTimer: 0, pendingControl: false, controlTimer: 0,
   };
   function ipc(payload) {
@@ -66,9 +67,11 @@
     $('unsung-color').value = colorValue(config.unsungColor, '#ffffff');
     setLocked(config.locked);
     state.signature = '';
+    state.fitWidth = 0;
     render();
     scheduleLayout();
     schedulePanelMeasure();
+    scheduleFit();
     updateLoop();
   }
   function setLocked(locked) {
@@ -88,6 +91,7 @@
     if (open) { $('options-panel').scrollTop = 0; $('options-panel').focus({ preventScroll: true }); }
     else if (restoreFocus) $('style-open').focus({ preventScroll: true });
     schedulePanelMeasure();
+    scheduleFit();
   }
   function schedulePanelMeasure() {
     if (state.panelFrame) return;
@@ -98,6 +102,52 @@
       state.panelHeight = height;
       root.style.setProperty('--panel-height', `${height}px`);
       ipc({ cmd: 'panel', value: height });
+    });
+  }
+  // offsetWidth 不受邻居行的 scale 变换影响；临时 max-content 只在本帧内存在，不会画出来。
+  function naturalWidth(el, css) {
+    const before = el.getAttribute('style');
+    el.setAttribute('style', `${before || ''};${css}`);
+    const width = el.offsetWidth;
+    if (before == null) el.removeAttribute('style'); else el.setAttribute('style', before);
+    return width;
+  }
+  function visibleDistances() {
+    if (state.config.layout === 'triple') return ['-1', '0', '1'];
+    if (state.config.layout === 'double') return ['0', '1'];
+    return ['0'];
+  }
+  function fitRequiredWidth() {
+    const shell = $('shell');
+    const style = getComputedStyle(shell);
+    const chrome = (parseFloat(style.paddingLeft) || 0) + (parseFloat(style.paddingRight) || 0);
+    let content = 0;
+    if (shell.classList.contains('is-empty')) {
+      content = naturalWidth($('notice'), 'width:max-content;padding:0;') + chrome;
+    } else {
+      const visible = visibleDistances();
+      for (const node of state.nodes.values()) {
+        if (!visible.includes(node.dataset.distance)) continue;
+        content = Math.max(content, naturalWidth(node, 'width:max-content;') + chrome);
+      }
+    }
+    const toolbar = $('toolbar').offsetWidth;
+    // 锁定后工具条 display:none 读不到宽度，用历史最大值兜底，避免窗口在锁定时突然变窄。
+    if (toolbar) state.toolbarWidth = Math.max(state.toolbarWidth, toolbar);
+    let required = Math.max(content, state.toolbarWidth + 12);
+    // 面板实测宽度会被当前窗口反过来压窄，所以按它的 CSS 目标宽度 320 + 左右 16 留白来要。
+    if (state.optionsOpen) required = Math.max(required, 352);
+    return Math.ceil(required);
+  }
+  function scheduleFit() {
+    if (state.fitFrame) return;
+    state.fitFrame = requestAnimationFrame(() => {
+      state.fitFrame = 0;
+      const required = fitRequiredWidth();
+      // 变宽必须立刻跟上否则裁字；收窄要攒够 24 DIP 才动，免得每句都抖一次窗口。
+      if (state.fitWidth && required <= state.fitWidth + 2 && required >= state.fitWidth - 24) return;
+      state.fitWidth = required;
+      ipc({ cmd: 'fit', value: required });
     });
   }
   function setActive(active) {
@@ -217,8 +267,12 @@
     return '暂无歌词';
   }
   function setNotice(text) {
-    $('shell').classList.toggle('is-empty', Boolean(text));
-    if ($('notice').textContent !== text) $('notice').textContent = text;
+    const shell = $('shell');
+    const wasEmpty = shell.classList.contains('is-empty');
+    shell.classList.toggle('is-empty', Boolean(text));
+    const textChanged = $('notice').textContent !== text;
+    if (textChanged) $('notice').textContent = text;
+    if (textChanged || wasEmpty !== Boolean(text)) scheduleFit();
   }
   function clearLines() {
     $('lyric-column').replaceChildren();
@@ -322,6 +376,7 @@
       column.style.transition = '';
       column.style.transform = `translateY(${center - (state.renderedGroup - first) * groupHeight}px)`;
     }
+    scheduleFit();
   }
   let layoutFrame = 0;
   function scheduleLayout() {
@@ -406,7 +461,7 @@
     new ResizeObserver(schedulePanelMeasure).observe($('options-panel'));
     new ResizeObserver(scheduleLayout).observe($('viewport'));
   }
-  document.fonts?.ready.then(scheduleLayout);
+  document.fonts?.ready.then(() => { scheduleLayout(); scheduleFit(); });
   document.addEventListener('contextmenu', event => event.preventDefault());
   document.addEventListener('keydown', event => {
     if (state.locked) return;

@@ -65,7 +65,16 @@ async function tone() {
 }
 async function previewReady() {
   await until(async()=>(await status()).wallpaper.previewActive,'preview lease');
-  return until(async()=>{const state=await settings.locator('#preview-renderer').evaluate(frame=>frame.contentWindow.hertzWallpaper?.debug()).catch(()=>null);return state?.audioSource==='system'&&state.audioSequence>0?state:null;},'system preview received audio');
+  return until(async()=>{const state=await previewDebug();return state?.audioSource==='system'&&state.audioSequence>0?state:null;},'system preview received audio');
+}
+async function previewDebug() {
+  const binding=(await status()).wallpaper.mediaPreview?.binding;
+  if(!binding)return null;
+  for(const page of pages().filter(page=>page.url().includes('/wallpaper.html'))) {
+    const state=await page.evaluate(()=>window.hertzWallpaper?.debug()).catch(()=>null);
+    if(state?.session?.sessionId===binding.sessionId)return state;
+  }
+  return null;
 }
 async function main() {
   assert.equal(process.platform,'win32');
@@ -96,7 +105,8 @@ async function main() {
   assert.equal(state.wallpaper.audio.info.deviceId,defaultEndpoint.id);
   assert.ok(state.wallpaper.audio.info.sampleRate>0);
   const generation=state.wallpaper.audio.generation;
-  const previewState=await settings.locator('#preview-renderer').evaluate(frame=>frame.contentWindow.hertzWallpaper.debug());
+  const previewState=await previewDebug();
+  assert.equal(await settings.locator('#preview-renderer,iframe').count(),0,'audio preview owns an independent controller');
   assert.equal(previewState.positionMs,0);assert.equal(previewState.playing,false,'system audio never forges player state');assert.ok(previewState.feedPeak>0);
   checks.push({case:'preview-system-loopback-real-tone',audio:state.wallpaper.audio,renderer:previewState});
   await settings.screenshot({path:path.join(output,'system-preview.png')});
@@ -169,7 +179,7 @@ async function main() {
 }
 main().catch(async error=>{
   console.error(error);
-  const diagnostic={status:await status().catch(()=>null),desktop:await desktop?.evaluate(()=>window.hertzWallpaper?.debug()).catch(()=>null),preview:await settings?.locator('#preview-renderer').evaluate(frame=>frame.contentWindow.hertzWallpaper?.debug()).catch(()=>null)};
+  const diagnostic={status:await status().catch(()=>null),desktop:await desktop?.evaluate(()=>window.hertzWallpaper?.debug()).catch(()=>null),preview:await previewDebug().catch(()=>null)};
   if(fs.existsSync(output))fs.writeFileSync(path.join(output,'audio-failure.json'),JSON.stringify({error:error.stack,checks,errors,diagnostic},null,2));process.exitCode=1;
 }).finally(async()=>{
   if(settings&&!settings.isClosed())await settings.evaluate(()=>window.nativeAudioTone?.context.close()).catch(()=>{});

@@ -156,16 +156,26 @@ async function main() {
     const canceled = await page.evaluate(async () => {
       await host.select('cover-particles');
       for (let i = 0; i < 16; i++) { current = 'late:' + i; draw(); await Promise.resolve(); await Promise.resolve(); }
-      const retained = host.stats().coverTextures;
+      const retained = host.stats().coverTextures, pendingTasks = host.stats().tasks, pendingResolvers = resolvers.length;
       await host.select('gravity-sphere'); current = ''; resolvers.forEach(resolve => resolve(covers[0]));
       await new Promise(resolve => setTimeout(resolve, 50)); draw();
-      return { retained, stats: host.stats() };
+      return { retained, pendingTasks, pendingResolvers, stats: host.stats() };
     });
-    assert.equal(canceled.retained, 1, 'rapid cover replacement retains only the live request');
+    assert.ok(canceled.retained <= 1, 'rapid cover replacement retains at most the live cover');
+    assert.equal(canceled.pendingTasks,12,'unsettled cancelled resolvers retain the bounded load slots');
+    assert.equal(canceled.pendingResolvers,12,'new requests cannot bypass pending cancellation');
     assert.equal(canceled.stats.coverTextures, 0, 'late cover completions cannot revive disposed scenes');
+    assert.equal(canceled.stats.tasks,0,'actual resolver settlement releases the pending load slots');
     const disposed = await page.evaluate(() => { host.dispose(); return host.stats(); });
     assert.equal(disposed.resources, 0); assert.equal(disposed.coverTextures, 0);
     await page.close();
+
+    if(process.argv.includes('--scenes-only')) {
+      assert.deepEqual(errors,[]);
+      fs.writeFileSync(path.join(output,'evidence-scenes.json'),JSON.stringify({...evidence,scope:'scenes-only',canceled,disposed,errors},null,2));
+      console.log('Space particle scenes: real artwork, crossfade, pointer, portrait, bounded cancelled resolvers and disposal passed; app UI not run');
+      return;
+    }
 
     const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
     let settings;

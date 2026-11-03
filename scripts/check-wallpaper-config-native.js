@@ -15,7 +15,7 @@ const pipe = '\\\\.\\pipe\\hertz-desktop-control-' + (process.env.USERNAME || ''
 const port = Number(process.env.DESKTOP_CDP_PORT || 19438);
 const configFile = path.join(output, 'config.json');
 const checks = [];
-let child, browser, page, sequence = 0;
+let child, browser, page, sequence = 0, launches = 0;
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
 async function until(check, label, timeout = 15000) {
@@ -24,9 +24,10 @@ async function until(check, label, timeout = 15000) {
   throw new Error(label);
 }
 async function start() {
-  child = spawn(binary, ['--settings'], { cwd: root, windowsHide: true, stdio: 'ignore', env: { ...process.env, HERTZ_DESKTOP_CONFIG_DIR: output, WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: '--remote-debugging-port=' + port } });
-  await until(async () => { if (child.exitCode !== null) throw new Error('host exited ' + child.exitCode); try { return (await fetch('http://127.0.0.1:' + port + '/json/version')).ok; } catch (_) { return false; } }, 'native CDP startup');
-  browser = await chromium.connectOverCDP('http://127.0.0.1:' + port);
+  const currentPort=port+launches++;
+  child = spawn(binary, ['--settings'], { cwd: root, windowsHide: true, stdio: 'ignore', env: { ...process.env, HERTZ_DESKTOP_CONFIG_DIR: output, WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: '--remote-debugging-port=' + currentPort } });
+  await until(async () => { if (child.exitCode !== null) throw new Error('host exited ' + child.exitCode); try { return (await fetch('http://127.0.0.1:' + currentPort + '/json/version')).ok; } catch (_) { return false; } }, 'native CDP startup');
+  browser = await chromium.connectOverCDP('http://127.0.0.1:' + currentPort);
   page = await until(() => browser.contexts().flatMap(context => context.pages()).find(page => page.url().includes('/settings.html')), 'native settings page');
   await page.waitForSelector('#preview:enabled');
 }
@@ -47,7 +48,14 @@ async function inPage(request) {
     catch (error) { return error.receipt || { ok: false, error: { code: error.code, message: error.message } }; }
   }, request);
 }
-const formal = (command, payload, expectedRevision, requestId) => requestManagement(pipe, envelope(command, payload, expectedRevision, requestId));
+// Retry only connection failures before any operation bytes were sent.
+async function nativeRequest(request) {
+  for(let attempt=0;;attempt++) {
+    try {return await requestManagement(pipe,request);}
+    catch(error) {if(!['ENOENT','ECONNREFUSED'].includes(error.code)||attempt>=20)throw error;await delay(50);}
+  }
+}
+const formal = (command, payload, expectedRevision, requestId) => nativeRequest(envelope(command, payload, expectedRevision, requestId));
 const stored = () => JSON.parse(fs.readFileSync(configFile));
 const domain = config => config.activeProfile ? config.profiles.find(profile => JSON.stringify(profile.profile) === JSON.stringify(config.activeProfile)) : config.unboundDomain;
 const reference = result => ({ draftId: result.draftId, draftRevision: result.draftRevision });
@@ -82,22 +90,30 @@ async function main() {
   assert.equal(fs.readFileSync(configFile, 'utf8'), original, 'typed updates are readonly for live and persisted intent');
   const preview = (await inPage(envelope('wallpaper.preview.acquire', reference(updated)))).result;
   assert.match(preview.leaseId, /^[a-f0-9]{32}$/);
-  await page.waitForFunction(() => document.querySelector('#preview-renderer')?.contentDocument?.querySelector('canvas'));
+  const previewState=await until(async()=>{const status=await nativeRequest({command:'status'});return status.wallpaper.mediaPreview?.firstFrameReady?status.wallpaper.mediaPreview:null;},'independent preview first frame');
+  const previewPage=await until(async()=>{
+    for(const candidate of browser.contexts().flatMap(context=>context.pages()).filter(item=>item.url().includes('/wallpaper.html'))) {
+      try {if(await candidate.evaluate(id=>window.hertzWallpaper?.debug().session?.sessionId===id,previewState.binding.sessionId))return candidate;}catch{}
+    }
+    return null;
+  },'independent native preview page');
+  assert.equal(await previewPage.locator('canvas').count(),1);
+  assert.equal(await page.locator('iframe,canvas').count(),0);
   assert.equal((await formal('wallpaper.preview.renew', { leaseId: preview.leaseId })).error.code, 'settings_session_required');
   assert.equal((await inPage(envelope('wallpaper.preview.renew', { leaseId: 'wrong-owner' }))).error.code, 'preview_lease_invalid');
   assert.equal((await inPage(envelope('wallpaper.preview.update', { leaseId: preview.leaseId, ...reference(updated) }))).ok, true);
   assert.equal((await inPage(envelope('wallpaper.preview.renew', { leaseId: preview.leaseId }))).ok, true);
   assert.equal((await inPage(envelope('wallpaper.preview.release', { leaseId: preview.leaseId }))).ok, true);
-  await page.waitForFunction(() => !document.querySelector('#preview-renderer'));
+  await until(async()=>{const status=await nativeRequest({command:'status'});return !status.wallpaper.previewActive&&status.wallpaper.retiringControllers===0&&previewPage.isClosed();},'native preview exit');
   assert.equal(fs.readFileSync(configFile, 'utf8'), original, 'native preview does not save');
   const apply = envelope('wallpaper.apply', reference(updated), baseline.revision);
   const receipt = await inPage(apply);
   assert.equal(receipt.ok, true); assert.equal(receipt.result.saved, true);
   assert.equal(stored().revision, baseline.revision + 1); assert.equal(domain(stored()).lyrics.fontSize, 42);
   const firstSaved = fs.readFileSync(configFile, 'utf8');
-  assert.deepEqual(await requestManagement(pipe, apply), receipt, 'committed retry returns the retained receipt');
+  assert.deepEqual(await nativeRequest(apply), receipt, 'committed retry returns the retained receipt');
   assert.equal(fs.readFileSync(configFile, 'utf8'), firstSaved, 'duplicate apply cannot replay effects');
-  assert.equal((await requestManagement(pipe, { ...apply, payload: { ...apply.payload, draftRevision: 99 } })).error.code, 'request_id_conflict');
+  assert.equal((await nativeRequest({ ...apply, payload: { ...apply.payload, draftRevision: 99 } })).error.code, 'request_id_conflict');
   assert.equal((await formal('wallpaper.operations.get', { requestId: apply.requestId, command: "wallpaper.apply" })).result.saved, true);
   assert.equal(fs.existsSync(path.join(output, 'wallpaper.db')), false, 'settings-only operations do not open the content DB');
   checks.push('native owner + typed draft + preview + durable apply + replay identity');
@@ -128,8 +144,8 @@ async function main() {
   assert.equal(recovered.state, 'committed'); assert.equal(recovered.configRevision, finalRevision);
   assert.equal(fs.readFileSync(configFile, 'utf8'), checkpoint.target, 'recovery only finalizes the receipt');
   assert.equal(JSON.parse(fs.readFileSync(checkpoint.recordFile)).state, 'committed');
-  assert.equal((await requestManagement(pipe, finalApply)).result.configRevision, finalRevision, 'retry survives loss of old settings owner and in-memory cache');
-  assert.equal((await requestManagement(pipe, apply)).result.configRevision, receipt.result.configRevision, 'older receipt remains queryable after a later commit');
+  assert.equal((await nativeRequest(finalApply)).result.configRevision, finalRevision, 'retry survives loss of old settings owner and in-memory cache');
+  assert.equal((await nativeRequest(apply)).result.configRevision, receipt.result.configRevision, 'older receipt remains queryable after a later commit');
   checks.push('restart after config-replaced checkpoint finalizes original request and revision without rewriting config');
 
   await stop();

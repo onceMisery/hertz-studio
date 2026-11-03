@@ -147,6 +147,10 @@ impl SettingsDrafts {
         self.draft = Some(next);
         Ok(self.draft.as_ref().expect("updated draft"))
     }
+    /// 删除保护只读快照：未应用的草稿同样可能引用作品版本。
+    pub(crate) fn current(&self) -> Option<&Draft> {
+        self.draft.as_ref()
+    }
     pub(crate) fn discard(&mut self, owner: u64, id: &str, revision: u64) -> Result<(), JobError> {
         self.get(owner, id, revision)?;
         self.draft = None;

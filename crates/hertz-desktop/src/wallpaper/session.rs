@@ -27,18 +27,21 @@
 //! 宿主确认独立 controller 关闭且文件读者退出后才归还。窗口、订阅与 scheduler
 //! 的真实操作仍由宿主执行，超时/页面暂停不能充当关闭事实。
 
+use std::cell::Cell;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::access::{Drain, MediaAccess, MediaGrant};
-use super::budget::{BudgetCoordinator, BudgetRequest, OwnerKind};
+use super::budget::{Allocation, AllocationSnapshot, BudgetCoordinator, BudgetRequest, OwnerKind};
 use super::jobs::JobError;
+use super::gl_plan::GlAdmission;
 use super::media::Container;
 use super::target_planner::ResolvedMedia;
 
 /// 恢复预算窗口与次数（§13.3）。
 pub(crate) const RECOVERY_WINDOW: Duration = Duration::from_secs(120);
 pub(crate) const MAX_RECOVERY_ATTEMPTS: usize = 3;
+pub(crate) const MEDIA_PAUSE_LIMIT: Duration = Duration::from_secs(2);
 
 /// 会话状态（§13.3）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,13 +152,24 @@ pub(crate) enum ApplyError {
 }
 
 /// 单次媒体准入的生命周期；仅 WallpaperSession 持有，不能复制资源所有权。
+#[derive(Clone, Copy)]
+struct PauseCheck {
+    token: u64,
+    requested_at: Instant,
+    confirmed: bool,
+}
+
 struct MediaAdmission {
     media: Option<ResolvedMedia>,
     grant: MediaGrant,
     budget: Arc<BudgetCoordinator>,
     request: BudgetRequest,
     token: u64,
+    allocations: Vec<Allocation>,
     frame_kind: FrameKind,
+    position_ms: Option<u64>,
+    pause_sequence: Cell<u64>,
+    pause_check: Cell<Option<PauseCheck>>,
     drain: Option<Drain>,
     controller_closed: bool,
     finished: bool,
@@ -190,6 +204,15 @@ impl MediaAdmission {
         }
         // 释放自身的固定句柄/派生目录租约后才归还额度。
         self.media.take();
+        for &allocation in &self.allocations {
+            if self
+                .budget
+                .confirm_resource_exit(allocation, &self.request.session, self.request.generation)
+                .is_err()
+            {
+                return false;
+            }
+        }
         if self
             .budget
             .confirm_exit(self.token, &self.request.session, self.request.generation)
@@ -234,6 +257,8 @@ pub(crate) struct WallpaperSession {
     media: Option<MediaAdmission>,
     retiring_media: Vec<MediaAdmission>,
     last_media_generation: Option<u64>,
+    gl: Option<GlAdmission>,
+    retiring_gl: Vec<GlAdmission>,
 }
 
 impl Default for WallpaperSession {
@@ -257,6 +282,8 @@ impl WallpaperSession {
             media: None,
             retiring_media: Vec::new(),
             last_media_generation: None,
+            gl: None,
+            retiring_gl: Vec::new(),
         }
     }
 
@@ -299,7 +326,7 @@ impl WallpaperSession {
         if recovery.is_terminal(FaultDomain::Session) {
             return Err(ApplyError::RecoveryExhausted);
         }
-        self.retire_current_media();
+        self.retire_current_resources();
         self.generation += 1;
         self.desired_revision = Some(desired_revision);
         self.applied_revision = None;
@@ -340,6 +367,7 @@ impl WallpaperSession {
         if generation != self.generation
             || self.state != SessionState::Attaching
             || self.media.is_some()
+            || self.gl.is_some()
             || self.last_media_generation == Some(generation)
         {
             return Err(JobError::new(
@@ -347,13 +375,36 @@ impl WallpaperSession {
                 "媒体准入必须属于尚未加载的当前代际",
             ));
         }
-        let request = media.budget_request(owner_session, generation)?;
+        let plan = media.budget_plan(owner_session, generation)?;
+        let request = plan.request().clone();
         if request.owner != self.owner {
             return Err(JobError::invalid_input("呈现目标与会话预算 owner 不匹配"));
         }
-        let token = budget.grant(&request).map_err(|error| {
-            JobError::new("budget_busy", format!("{}: {}", error.quota, error.message))
-        })?;
+        let token = budget.grant_session(&plan)?;
+        let mut allocations = Vec::with_capacity(plan.resources().len());
+        for resource in plan.resources() {
+            match budget.allocate_resource(
+                token,
+                &request.session,
+                generation,
+                &resource.id,
+                resource.maximum,
+            ) {
+                Ok(allocation) => allocations.push(allocation),
+                Err(error) => {
+                    // No scope, page descriptor or I/O was started. Roll back only this
+                    // new reservation; another controller's resources stay untouched.
+                    let _ = budget.release(token, &request.session, generation);
+                    for allocation in allocations {
+                        let _ =
+                            budget.confirm_resource_exit(allocation, &request.session, generation);
+                    }
+                    let _ = budget.confirm_exit(token, &request.session, generation);
+                    let _ = budget.forget_released(token, &request.session, generation);
+                    return Err(error);
+                }
+            }
+        }
         let grant = access.grant_scoped_pinned(
             generation,
             media.reference().package_hash.clone(),
@@ -362,6 +413,9 @@ impl WallpaperSession {
         let Some(grant) = grant else {
             // 尚未启动媒体/创建读者，只清本笔 token，不 purge 其它代际。
             let _ = budget.release(token, &request.session, generation);
+            for allocation in allocations {
+                let _ = budget.confirm_resource_exit(allocation, &request.session, generation);
+            }
             let _ = budget.confirm_exit(token, &request.session, generation);
             let _ = budget.forget_released(token, &request.session, generation);
             return Err(JobError::new(
@@ -380,7 +434,11 @@ impl WallpaperSession {
             budget,
             request,
             token,
+            allocations,
             frame_kind,
+            position_ms: None,
+            pause_sequence: Cell::new(0),
+            pause_check: Cell::new(None),
             drain: None,
             controller_closed: false,
             finished: false,
@@ -392,12 +450,136 @@ impl WallpaperSession {
         Ok(())
     }
 
+    pub(crate) fn media_allocation(&self) -> Option<AllocationSnapshot> {
+        let media = self.media.as_ref()?;
+        media
+            .budget
+            .allocation_snapshot(
+                media.token,
+                &media.request.session,
+                media.request.generation,
+            )
+            .ok()
+    }
+
+    pub(crate) fn admit_gl(&mut self, mut admission: GlAdmission) -> Result<(), JobError> {
+        if admission.generation() != self.generation || admission.owner() != self.owner
+            || self.state != SessionState::Attaching || self.gl.is_some() || self.media.is_some() {
+            return Err(JobError::new("stale_generation", "GL 准入必须属于尚未加载的当前代际"));
+        }
+        admission.published = true;
+        self.gl = Some(admission);
+        self.facts.frame_submitted = None;
+        self.set_fact(self.generation, |facts| facts.resource_admitted = true);
+        Ok(())
+    }
+
+    pub(crate) fn gl(&self) -> Option<&GlAdmission> { self.gl.as_ref() }
+
     /// 页面加载描述只读借用当前已准入计划，不能替换目标或资源。
     pub(crate) fn media(&self) -> Option<&ResolvedMedia> {
         self.media.as_ref()?.media.as_ref()
     }
 
-    fn retire_current_media(&mut self) {
+    pub(crate) fn media_position_ms(&self) -> Option<u64> {
+        self.media.as_ref()?.position_ms
+    }
+
+    /// Position belongs to the currently admitted video, never to retired/image scopes.
+    pub(crate) fn record_media_position(&mut self, generation: u64, position_ms: u64) -> bool {
+        let Some(admission) = self.media.as_mut().filter(|admission| {
+            generation == self.generation && admission.frame_kind == FrameKind::Video
+        }) else {
+            return false;
+        };
+        let duration = admission
+            .media
+            .as_ref()
+            .and_then(|media| media.input().metadata.duration_ms);
+        if !duration.is_some_and(|duration| duration > 0 && position_ms < duration) {
+            return false;
+        }
+        admission.position_ms = Some(position_ms);
+        true
+    }
+
+    /// A stop command is not evidence that the media clock has stopped. Repeated
+    /// native stop calls keep the original token and deadline until an actual resume.
+    pub(crate) fn request_media_pause(&self, now: Instant) -> Option<u64> {
+        let admission = self.media.as_ref().filter(|admission| {
+            admission.frame_kind == FrameKind::Video
+                && self.facts.frame_submitted == Some(FrameKind::Video)
+        })?;
+        if let Some(check) = admission.pause_check.get() {
+            return Some(check.token);
+        }
+        let token = admission.pause_sequence.get().wrapping_add(1).max(1);
+        admission.pause_sequence.set(token);
+        admission.pause_check.set(Some(PauseCheck {
+            token,
+            requested_at: now,
+            confirmed: false,
+        }));
+        Some(token)
+    }
+
+    /// Once the deadline has elapsed, a late resume cannot erase the pending fault
+    /// before the host's next lifecycle tick retires the controller.
+    pub(crate) fn clear_media_pause(&self, now: Instant) -> bool {
+        if self.media_pause_expired(now) {
+            return false;
+        }
+        if let Some(admission) = self.media.as_ref() {
+            admission.pause_check.set(None);
+        }
+        true
+    }
+
+    pub(crate) fn confirm_media_pause(&self, generation: u64, token: u64, now: Instant) -> bool {
+        let Some(admission) = self
+            .media
+            .as_ref()
+            .filter(|_| generation == self.generation)
+        else {
+            return false;
+        };
+        let Some(mut check) = admission.pause_check.get() else {
+            return false;
+        };
+        if check.token != token
+            || (!check.confirmed
+                && now.saturating_duration_since(check.requested_at) >= MEDIA_PAUSE_LIMIT)
+        {
+            return false;
+        }
+        check.confirmed = true;
+        admission.pause_check.set(Some(check));
+        true
+    }
+
+    pub(crate) fn media_pause_expired(&self, now: Instant) -> bool {
+        self.media
+            .as_ref()
+            .and_then(|admission| admission.pause_check.get())
+            .is_some_and(|check| {
+                !check.confirmed
+                    && now.saturating_duration_since(check.requested_at) >= MEDIA_PAUSE_LIMIT
+            })
+    }
+
+    pub(crate) fn media_pause_confirmed(&self) -> Option<bool> {
+        self.media
+            .as_ref()?
+            .pause_check
+            .get()
+            .map(|check| check.confirmed)
+    }
+
+    fn retire_current_resources(&mut self) {
+        if let Some(mut gl) = self.gl.take() {
+            gl.retire();
+            self.retiring_gl.push(gl);
+        }
         if let Some(mut media) = self.media.take() {
             media.retire();
             self.retiring_media.push(media);
@@ -405,16 +587,21 @@ impl WallpaperSession {
     }
 
     /// 宿主仍需关闭这些代际各自的 controller；超时不自动清除它们。
-    pub(crate) fn retiring_media_generations(&self) -> Vec<u64> {
+    pub(crate) fn retiring_generations(&self) -> Vec<u64> {
         self.retiring_media
             .iter()
             .map(|media| media.request.generation)
+            .chain(self.retiring_gl.iter().map(GlAdmission::generation))
             .collect()
     }
 
     /// 仅在对应原生 controller Close 成功且其 surface 销毁后调用。
     /// 活动代际/未知代际拒绝；页面 stop、emptied、错误或超时均不能调用本方法。
-    pub(crate) fn media_controller_closed(&mut self, generation: u64) -> bool {
+    pub(crate) fn controller_closed(&mut self, generation: u64) -> bool {
+        if let Some(gl) = self.retiring_gl.iter_mut().find(|gl| gl.generation() == generation) {
+            gl.controller_closed();
+            return true;
+        }
         let Some(media) = self
             .retiring_media
             .iter_mut()
@@ -427,8 +614,11 @@ impl WallpaperSession {
     }
 
     /// 非阻塞检查关闭与文件流两道屏障；只归还已退出代际自己的 token。
-    pub(crate) fn reap_media(&mut self) -> Vec<u64> {
+    pub(crate) fn reap_resources(&mut self) -> Vec<u64> {
         let mut finished = Vec::new();
+        self.retiring_gl.retain_mut(|gl| {
+            if gl.finish() { finished.push(gl.generation()); false } else { true }
+        });
         self.retiring_media.retain_mut(|media| {
             if media.finish() {
                 finished.push(media.request.generation);
@@ -442,7 +632,7 @@ impl WallpaperSession {
 
     /// 停用撤销所有当前事实；旧媒体继续等宿主的物理退出回执。
     pub(crate) fn disable(&mut self) {
-        self.retire_current_media();
+        self.retire_current_resources();
         self.generation += 1;
         self.state = SessionState::Disabled;
         self.desired_revision = None;
@@ -454,6 +644,7 @@ impl WallpaperSession {
 
     // ---- ready 四事实 ----
 
+    #[cfg(test)]
     pub(crate) fn admit_resources(&mut self, generation: u64) -> bool {
         // 非媒体后端的宿主事实；媒体不得绕过原子准入或复用已回收代际。
         if self.last_media_generation == Some(generation) {
@@ -474,7 +665,7 @@ impl WallpaperSession {
     }
 
     pub(crate) fn frame_submitted(&mut self, generation: u64, kind: FrameKind) -> bool {
-        if self
+        if (self.gl.is_some() && kind != FrameKind::Gl) || self
             .media
             .as_ref()
             .is_some_and(|media| media.frame_kind != kind)
@@ -524,7 +715,7 @@ impl WallpaperSession {
         if generation != self.generation {
             return false;
         }
-        self.retire_current_media();
+        self.retire_current_resources();
         self.facts.clear();
         self.error = Some(SessionError {
             code: code.to_string(),
@@ -549,7 +740,7 @@ impl WallpaperSession {
         ) {
             return false;
         }
-        self.retire_current_media();
+        self.retire_current_resources();
         self.facts.clear();
         self.paused_at = None;
         self.state = SessionState::WaitingDisplay;

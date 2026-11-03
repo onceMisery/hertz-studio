@@ -780,7 +780,7 @@ fn covers(window: RECT, monitor: RECT) -> bool {
         && window.bottom >= monitor.bottom - TOLERANCE
 }
 
-fn class_name(hwnd: HWND) -> String {
+pub(crate) fn class_name(hwnd: HWND) -> String {
     let mut buffer = [0u16; 256];
     let len = unsafe { GetClassNameW(hwnd, buffer.as_mut_ptr(), buffer.len() as i32) };
     if len <= 0 {

@@ -11,6 +11,7 @@ const assets = path.join(root, 'crates/hertz-desktop/assets');
 const read = name => fs.readFileSync(path.join(assets, name), 'utf8');
 const lyrics = '<!doctype html><html><meta charset="utf-8"><style>' + read('desktop-lyrics.css') + '</style><body>' + read('desktop-lyrics.html') + '<script>' + read('desktop-lyrics.js') + '</script></body></html>';
 const wallpaper = read('wallpaper-scene.html')
+  .replace('__GL_BUDGET__', () => read('wallpaper-gl-budget.js'))
   .replace('__RUNTIME__', fs.readFileSync(path.join(root, 'plugin/ui/vendor/stage-runtime.js'), 'utf8'))
   .replace('__SHIM__', fs.readFileSync(path.join(root, 'plugin/ui/vendor/zodiac-stage.js'), 'utf8'))
   .replace('__SCENE__', read('wallpaper-scene.js'));

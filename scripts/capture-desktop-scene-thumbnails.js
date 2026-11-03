@@ -6,7 +6,7 @@ const fs=require('node:fs'),path=require('node:path'),http=require('node:http');
 const {chromium}=require(process.env.PLAYWRIGHT_MODULE||'playwright');
 const root=path.resolve(__dirname,'..'),assets=path.join(root,'crates/hertz-desktop/assets');
 const read=file=>fs.readFileSync(file,'utf8');
-const html=read(path.join(assets,'wallpaper-scene.html')).replace('__RUNTIME__',read(path.join(root,'plugin/ui/vendor/stage-runtime.js'))).replace('__SHIM__',read(path.join(root,'plugin/ui/vendor/zodiac-stage.js'))).replace('__SCENE__',read(path.join(assets,'wallpaper-scene.js')));
+const html=read(path.join(assets,'wallpaper-scene.html')).replace('__GL_BUDGET__',()=>read(path.join(assets,'wallpaper-gl-budget.js'))).replace('__RUNTIME__',read(path.join(root,'plugin/ui/vendor/stage-runtime.js'))).replace('__SHIM__',read(path.join(root,'plugin/ui/vendor/zodiac-stage.js'))).replace('__SCENE__',read(path.join(assets,'wallpaper-scene.js')));
 const scenes=[...read(path.join(root,'crates/hertz-desktop/src/config.rs')).matchAll(/^    \("([a-z-]+)", "([^"]+)"\),$/gm)].map(match=>match[1]);
 async function main(){
  const output=path.join(assets,'scene-thumbnails');fs.mkdirSync(output,{recursive:true});

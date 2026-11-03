@@ -44,7 +44,7 @@ function fixture() {
         if (request.cmd !== 'panel') window.hertzLyrics.applyConfig(f.config);
         if (request.cmd === 'panel') f.panel = request.value;
         const count = {single:1,double:2,triple:3}[f.config.layout];
-        parent.postMessage({height:f.config.fontSize*(innerWidth<=360?(f.config.bilingual?4.5:3.25):(f.config.bilingual?2.55:2))*count+108+(f.panel||0)}, '*');
+        parent.postMessage({height:f.config.fontSize*(innerWidth<=360?(f.config.bilingual?4.5:3.25):(f.config.bilingual?2.55:2))*count+(f.config.layout==='single'?70:94)+(f.panel||0)}, '*');
       }
       if (['play','pause','seek'].includes(request.cmd)) {
         if(request.cmd === 'seek') f.snapshot.positionMs = request.value;
@@ -61,7 +61,7 @@ const lyricsHtml = '<!doctype html><html lang="zh-CN"><meta charset="utf-8"><sty
 const wrapper = `<!doctype html><html><meta charset="utf-8"><style>
 body{margin:0;height:100vh;overflow:hidden;background:radial-gradient(ellipse at 20% 24%,#2b3fb0,transparent 60%),radial-gradient(ellipse at 78% 16%,#5a2a8c,transparent 60%),radial-gradient(ellipse at 66% 86%,#0e5e6b,transparent 64%),#0b1020}
 body.light{background:radial-gradient(ellipse at 18% 22%,#ffcfa8,transparent 62%),radial-gradient(ellipse at 62% 88%,#bfd9ff,transparent 64%),#f4f1ec}
-iframe{border:0;position:absolute;left:50%;top:80px;transform:translateX(-50%);width:550px;height:337.5px}
+iframe{border:0;position:absolute;left:50%;top:80px;transform:translateX(-50%);width:550px;height:323.5px}
 </style><iframe src="/lyrics" title="桌面歌词"></iframe><script>addEventListener('message',e=>{if(e.data.height)document.querySelector('iframe').style.height=e.data.height+'px'});</script></html>`;
 const server = http.createServer((request,response)=>{
   response.setHeader('Content-Type','text/html; charset=utf-8');
@@ -85,6 +85,31 @@ async function main() {
     await frame.evaluate(()=>hertzLyrics.applyConfig({}));
     assert.deepEqual(await frame.evaluate(()=>({layout:document.body.dataset.layout,surface:document.body.dataset.surface,bilingual:document.body.dataset.bilingual})),{layout:'single',surface:'bare',bilingual:'false'});
     assert.equal(await current.locator('.sub').isVisible(),false);
+    // 窗口宽度贴合这一句歌词，而不是撑满设定宽度；工具条永远是下界。
+    const fits = async () => frame.evaluate(()=>commands.filter(c=>c.cmd==='fit').map(c=>c.value));
+    const toolbarWidth = await frame.locator('#toolbar').evaluate(e=>e.offsetWidth);
+    const goTo = async (positionMs,generation,index) => {
+      const before = (await fits()).length;
+      await frame.evaluate(({positionMs,generation})=>{fixture.snapshot.positionMs=positionMs;fixture.snapshot.generation=generation;fixture.send();},{positionMs,generation});
+      await frame.waitForFunction(i=>document.querySelector('.lyric-group[data-distance="0"]')?.dataset.index===String(i),index);
+      // 贴合命令由页面的 rAF 量完才发出，等它真的多出一条再取值，别靠固定等待。
+      await frame.waitForFunction(n=>commands.filter(c=>c.cmd==='fit').length>n,before);
+      return (await fits()).at(-1);
+    };
+    const longFit = await goTo(10000,'21',2);
+    assert.ok(longFit>=toolbarWidth+12,`Fit never clips the toolbar (${longFit} < ${toolbarWidth})`);
+    assert.ok(longFit<550,`A phrase shorter than the saved width shrinks the window (${longFit})`);
+    const shortFit = await goTo(20000,'22',4);
+    assert.ok(shortFit<longFit,`A shorter phrase narrows the window (${longFit} -> ${shortFit})`);
+    assert.ok(shortFit>=toolbarWidth+12,`The toolbar is the floor (${shortFit})`);
+    // 字号变大要立刻跟上，否则字会被裁。
+    const beforeBig = (await fits()).length;
+    await frame.evaluate(()=>{fixture.config.fontSize=72;hertzLyrics.applyConfig(fixture.config);});
+    await frame.waitForFunction(n=>commands.filter(c=>c.cmd==='fit').length>n,beforeBig);
+    const bigFit = (await fits()).at(-1);
+    assert.ok(bigFit>shortFit,`A bigger phrase widens the window right away (${shortFit} -> ${bigFit})`);
+    await frame.evaluate(()=>{fixture.config.fontSize=30;hertzLyrics.applyConfig({});fixture.snapshot.positionMs=17000;fixture.send();});
+    await frame.waitForFunction(()=>document.querySelector('.lyric-group[data-distance="0"]')?.dataset.index==='3');
     await frame.waitForFunction(()=>getComputedStyle(document.querySelector('.pane')).opacity==='0');
     await page.waitForTimeout(650);
     await page.locator('iframe').screenshot({path:path.join(output,'default-lyrics.png')});

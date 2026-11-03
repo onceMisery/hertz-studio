@@ -547,6 +547,10 @@ fn planner_prepares_installed_asset_without_source_and_admits_only_after_budget(
         .unwrap();
     let old_permit = access.permit(&hash, &path).unwrap();
     let held = budget.usage();
+    assert_eq!(held.session_reservations, 1);
+    assert_eq!(held.resource_allocations, 2, "解码与呈现只分配父计划的子额度");
+    let allocated = session.media_allocation().unwrap();
+    assert_eq!(allocated.reserved, allocated.allocated);
     assert_eq!(
         session
             .admit_media(
@@ -600,6 +604,7 @@ fn planner_prepares_installed_asset_without_source_and_admits_only_after_budget(
     assert_eq!(candidate.state(), SessionState::Attaching);
     assert!(old_permit.is_active(), "候选预算失败不撤销当前壁纸");
     budget.confirm_exit(other, "other", 1).unwrap();
+    budget.forget_released(other, "other", 1).unwrap();
 
     let second_generation = attaching_media_session(&mut session, &recovery, 2);
     assert!(!old_permit.is_active(), "换代先撤销旧读取");
@@ -614,13 +619,16 @@ fn planner_prepares_installed_asset_without_source_and_admits_only_after_budget(
         .unwrap();
     assert_eq!(budget.usage().targets, 2, "新旧代际按交接峰值一起计账");
     assert_eq!(budget.usage().release_pending, 1);
+    assert_eq!(budget.usage().resource_allocations, 4);
+    assert_eq!(budget.usage().resource_release_pending, 2);
     assert!(
-        !session.media_controller_closed(second_generation),
+        !session.controller_closed(second_generation),
         "活动代际不能被退出回执释放"
     );
-    assert!(session.media_controller_closed(first_generation));
+    assert!(session.controller_closed(first_generation));
+    assert_eq!(budget.usage().resource_release_pending, 2, "controller Close 不能代替文件读者退出");
     assert!(
-        session.reap_media().is_empty(),
+        session.reap_resources().is_empty(),
         "controller 关闭仍须等待文件流"
     );
     assert!(
@@ -628,12 +636,14 @@ fn planner_prepares_installed_asset_without_source_and_admits_only_after_budget(
         "旧回收不能撤销新授权"
     );
     drop(old_permit);
-    assert_eq!(session.reap_media(), vec![first_generation]);
+    assert_eq!(session.reap_resources(), vec![first_generation]);
     assert_eq!(budget.usage().targets, 1, "只归还已退出的旧代际");
+    assert_eq!(budget.usage().resource_allocations, 2);
+    assert_eq!(budget.usage().resource_release_pending, 0);
     session.disable();
     assert_eq!(session.state(), SessionState::Disabled);
-    assert!(session.media_controller_closed(second_generation));
-    assert_eq!(session.reap_media(), vec![second_generation]);
+    assert!(session.controller_closed(second_generation));
+    assert_eq!(session.reap_resources(), vec![second_generation]);
     assert_eq!(budget.usage(), Default::default());
     assert_eq!(
         std::fs::read(env.jobs.assets().package_dir(&hash).join("original.hwpkg")).unwrap(),
@@ -1519,13 +1529,14 @@ fn media_readiness_rejects_wrong_backend_and_frames_before_admission() {
         }
         assert_eq!(session.state(), SessionState::Ready);
         assert_eq!(session.diagnostics().frame_kind, Some(FrameKind::Image));
+        assert_eq!(session.request_media_pause(std::time::Instant::now()), None, "images need no video drain proof");
         session.disable();
         assert!(
-            session.reap_media().is_empty(),
+            session.reap_resources().is_empty(),
             "无读者也不能代替 controller 关闭"
         );
-        assert!(session.media_controller_closed(generation));
-        assert_eq!(session.reap_media(), vec![generation]);
+        assert!(session.controller_closed(generation));
+        assert_eq!(session.reap_resources(), vec![generation]);
         assert_eq!(budget.usage(), Default::default());
     }
 }
@@ -1557,11 +1568,11 @@ fn restored_media_uses_new_generation_and_failure_keeps_reservation_until_exit()
     assert!(session.start_presentation(std::time::Instant::now()));
     assert!(session.display_missing(generation));
     assert!(access.permit(&hash, &path).is_none());
-    assert_eq!(session.retiring_media_generations(), vec![generation]);
-    assert!(session.reap_media().is_empty());
+    assert_eq!(session.retiring_generations(), vec![generation]);
+    assert!(session.reap_resources().is_empty());
     assert_eq!(budget.usage().targets, 1);
-    assert!(session.media_controller_closed(generation));
-    assert_eq!(session.reap_media(), vec![generation]);
+    assert!(session.controller_closed(generation));
+    assert_eq!(session.reap_resources(), vec![generation]);
     assert!(session.display_restored(generation));
     assert!(
         !session.frame_submitted(generation, FrameKind::Image),
@@ -1601,8 +1612,8 @@ fn restored_media_uses_new_generation_and_failure_keeps_reservation_until_exit()
     assert_eq!(session.state(), SessionState::Failed);
     assert_eq!(budget.usage().targets, 1);
     assert_eq!(budget.usage().release_pending, 1);
-    assert!(session.media_controller_closed(next));
-    assert_eq!(session.reap_media(), vec![next]);
+    assert!(session.controller_closed(next));
+    assert_eq!(session.reap_resources(), vec![next]);
     assert_eq!(budget.usage(), Default::default());
 }
 
@@ -1643,6 +1654,7 @@ fn dropping_session_revokes_access_but_does_not_claim_physical_exit() {
 #[test]
 fn video_session_counts_handoff_peak_and_holds_last_decoder_until_physical_exit() {
     use super::super::session::{FrameKind, RecoveryLedger, SessionState, WallpaperSession};
+    use std::time::Duration;
     let mut env = env("session-video");
     env.bytes = package_with_media(
         include_bytes!("../../../../scripts/fixtures/wallpaper-vp8.webm"),
@@ -1672,13 +1684,58 @@ fn video_session_counts_handoff_peak_and_holds_last_decoder_until_physical_exit(
     session
         .admit_media(old, first, Arc::clone(&budget), &access, "video".into())
         .unwrap();
+    let duration = session
+        .media()
+        .unwrap()
+        .input()
+        .metadata
+        .duration_ms
+        .unwrap();
+    assert_eq!(session.media_position_ms(), None);
+    assert!(session.record_media_position(old, duration / 2));
+    assert!(!session.record_media_position(old + 1, 5));
+    assert!(!session.record_media_position(old, duration));
+    assert!(!session.record_media_position(old, u64::MAX));
+    assert_eq!(session.media_position_ms(), Some(duration / 2));
+    let paused_at = std::time::Instant::now();
+    assert_eq!(session.request_media_pause(paused_at), None, "first frame must precede a pause check");
     assert!(!session.frame_submitted(old, FrameKind::Image));
     assert!(!session.frame_submitted(old, FrameKind::Gl));
     assert!(session.frame_submitted(old, FrameKind::Video));
     assert!(session.page_handshake(old));
     assert!(session.native_attached(old));
     assert_eq!(session.state(), SessionState::Ready);
+    let pause_token = session.request_media_pause(paused_at).unwrap();
+    assert_eq!(session.media_pause_confirmed(), Some(false));
+    assert_eq!(session.request_media_pause(paused_at + Duration::from_secs(1)), Some(pause_token));
+    assert!(!session.confirm_media_pause(old + 1, pause_token, paused_at));
+    assert!(!session.confirm_media_pause(old, pause_token + 1, paused_at));
+    assert!(!session.media_pause_expired(paused_at + Duration::from_millis(1999)));
+    assert!(session.clear_media_pause(paused_at + Duration::from_millis(1999)));
+    assert_eq!(session.media_pause_confirmed(), None);
+    assert!(!session.confirm_media_pause(old, pause_token, paused_at + Duration::from_secs(2)));
+    let next_pause = session.request_media_pause(paused_at + Duration::from_secs(2)).unwrap();
+    assert_ne!(next_pause, pause_token);
+    assert!(!session.confirm_media_pause(old, pause_token, paused_at + Duration::from_secs(2)));
+    assert!(session.confirm_media_pause(old, next_pause, paused_at + Duration::from_millis(2200)));
+    assert_eq!(session.media_pause_confirmed(), Some(true));
+    assert!(!session.media_pause_expired(paused_at + Duration::from_secs(300)));
+    assert_eq!(budget.usage().decoder_slots, 1, "confirmed soft pause keeps its decoder reservation");
+    assert!(session.clear_media_pause(paused_at + Duration::from_secs(301)));
+    let timeout_at = paused_at + Duration::from_secs(302);
+    let timeout_token = session.request_media_pause(timeout_at).unwrap();
+    assert_eq!(session.request_media_pause(timeout_at + Duration::from_secs(1)), Some(timeout_token));
+    assert!(session.media_pause_expired(timeout_at + Duration::from_secs(2)), "repeated stop cannot extend the deadline");
+    assert!(!session.confirm_media_pause(old, timeout_token, timeout_at + Duration::from_secs(2)), "late proof cannot erase a missed deadline");
+    assert!(!session.clear_media_pause(timeout_at + Duration::from_secs(2)), "late resume cannot erase an expired native deadline");
+    assert_eq!(session.media_pause_confirmed(), Some(false));
+    assert_eq!(budget.usage().decoder_slots, 1, "timeout itself is not physical exit");
     let next = attaching_media_session(&mut session, &recovery, 2);
+    assert_eq!(
+        session.media_position_ms(),
+        None,
+        "retired position cannot leak into a new media generation"
+    );
     session
         .admit_media(
             next,
@@ -1688,25 +1745,33 @@ fn video_session_counts_handoff_peak_and_holds_last_decoder_until_physical_exit(
             "video".into(),
         )
         .unwrap();
+    assert!(!session.record_media_position(old, 0));
+    assert_eq!(session.media_pause_confirmed(), None);
+    assert!(!session.confirm_media_pause(old, next_pause, paused_at));
+    assert_eq!(session.media_position_ms(), None);
+    assert!(session.record_media_position(next, 0));
     assert_eq!(budget.usage().decoder_slots, 2);
     assert_eq!(budget.grant(&third).unwrap_err().quota, "decoder_slots");
     assert!(
-        session.reap_media().is_empty(),
+        session.reap_resources().is_empty(),
         "流已退出也须等独立 controller 关闭"
     );
     assert_eq!(budget.usage().decoder_slots, 2);
-    assert!(session.media_controller_closed(old));
-    assert_eq!(session.reap_media(), vec![old]);
+    assert!(session.controller_closed(old));
+    assert_eq!(session.reap_resources(), vec![old]);
     assert!(
-        !session.media_controller_closed(old),
+        !session.controller_closed(old),
         "重复关闭不命中新代际"
     );
     assert_eq!(budget.usage().decoder_slots, 1);
     let token = budget.grant(&third).unwrap();
     budget.confirm_exit(token, "third", 1).unwrap();
+    budget.forget_released(token, "third", 1).unwrap();
     session.disable();
-    assert!(session.media_controller_closed(next));
-    assert_eq!(session.reap_media(), vec![next]);
+    assert_eq!(session.media_position_ms(), None);
+    assert!(!session.record_media_position(next, 10));
+    assert!(session.controller_closed(next));
+    assert_eq!(session.reap_resources(), vec![next]);
     assert_eq!(budget.usage(), Default::default());
 }
 
@@ -1938,7 +2003,7 @@ fn preview_session_admits_only_preview_targets_and_waits_for_real_exit() {
         1,
         "requesting release is not an exit"
     );
-    assert!(session.media_controller_closed(generation));
-    assert_eq!(session.reap_media(), vec![generation]);
+    assert!(session.controller_closed(generation));
+    assert_eq!(session.reap_resources(), vec![generation]);
     assert_eq!(budget.usage(), Default::default());
 }

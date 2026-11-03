@@ -142,6 +142,44 @@
   function mainGroup(wallpaper) { return wallpaper.groups[0]; }
   function presentation(wallpaper) { return mainGroup(wallpaper).presentation; }
   var selectedWorkMetadata = null, selectedWorkLookup = '';
+  // All cover consumers share one bounded request queue and a small static-image cache.
+  var posterCache = new Map(), posterPending = new Map(), posterQueue = Promise.resolve(), posterRevision = 0;
+  function readPoster(workKey, packageHash) {
+    var key = workKey + ':' + packageHash;
+    if (posterCache.has(key)) return Promise.resolve(posterCache.get(key));
+    if (posterPending.has(key)) return posterPending.get(key);
+    if (posterPending.size >= 16) return Promise.resolve(null);
+    var task = posterQueue.then(async function () {
+      var poster, revision;
+      do {
+        revision = posterRevision; poster = null;
+        for (var attempt = 0; attempt < 3 && revision === posterRevision; attempt++) {
+          try {
+            var receipt = await requestManagement('wallpaper.library.poster', { workKey: workKey, packageHash: packageHash });
+            var value = receipt.result.poster;
+            if (value && Number.isInteger(value.width) && Number.isInteger(value.height) && value.width > 0 && value.height > 0 && Math.max(value.width, value.height) <= 320 && typeof value.data === 'string' && value.data.length <= 32768 && /^[A-Za-z0-9+/]+={0,2}$/.test(value.data)) poster = 'data:image/jpeg;base64,' + value.data;
+            break;
+          } catch (error) {
+            if (!['budget_busy','query_timeout','service_starting'].includes(error.code)) break;
+            if (attempt < 2) await new Promise(resolve => setTimeout(resolve, 200));
+          }
+        }
+        // Keep the same queue slot while replacing a read that crossed preparation/refresh.
+      } while (revision !== posterRevision);
+      if (posterCache.size >= 32) posterCache.delete(posterCache.keys().next().value);
+      posterCache.set(key, poster); posterPending.delete(key);
+      return poster;
+    });
+    posterPending.set(key, task); posterQueue = task.catch(function () {});
+    return task;
+  }
+  function invalidatePosters() {
+    posterRevision++;
+    posterCache.clear();
+    if (selectedWorkMetadata) delete selectedWorkMetadata.poster;
+    if (draft) renderPreview();
+    window.dispatchEvent(new Event('wallpaper-posters-invalidated'));
+  }
   function packageSelection(wallpaper) { var selection = mainGroup(wallpaper).selection; return selection.kind === 'package' ? selection : null; }
   function mediaMetadata(wallpaper) { var selection = packageSelection(wallpaper); return selection && selectedWorkMetadata && selectedWorkMetadata.workKey === selection.workKey && selectedWorkMetadata.packageHash === selection.packageHash ? selectedWorkMetadata : null; }
   function readSelectedWork(wallpaper) {
@@ -160,14 +198,21 @@
   function canChooseLibraryVersion() { return ready && !!draft && !editing && !pending; }
   async function chooseLibraryVersion(work, version) {
     if (!canChooseLibraryVersion() || version.state !== 'installed' || !['image','video'].includes(work.kind)) return false;
-    if (previewActive) await releaseNativePreview();
-    if (editing || pending) return false;
-    mainGroup(draft.wallpaper).selection = { kind: 'package', workKey: work.workKey, packageHash: version.packageHash };
-    draft.wallpaper.audioInput = { kind: 'none' };
-    selectedWorkLookup = '';
-    selectedWorkMetadata = { workKey: work.workKey, packageHash: version.packageHash, title: work.title, kind: work.kind, version: version.version };
-    changed(true); renderForm();
-    return true;
+    var input = clone(draft), base = revision, epoch = draftEpoch;
+    mainGroup(input.wallpaper).selection = { kind: 'package', workKey: work.workKey, packageHash: version.packageHash };
+    input.wallpaper.audioInput = { kind: 'none' };
+    pending = true; syncControls();
+    try {
+      if (previewActive) await releaseNativePreview();
+      // Register the reference before showing selection as complete. Other clients then
+      // share the native draft's deletion guard even before Preview or Apply is clicked.
+      await serialNative(function () { return updateNativeDraft(input, base, epoch); });
+      draft = input;
+      selectedWorkLookup = '';
+      selectedWorkMetadata = { workKey: work.workKey, packageHash: version.packageHash, title: work.title, kind: work.kind, version: version.version };
+      changed(true); renderForm();
+      return true;
+    } finally { pending = false; syncControls(); }
   }
   function follows(wallpaper) { return mainGroup(wallpaper).selection.kind === 'followHertz'; }
   function builtin(wallpaper) { var selection = mainGroup(wallpaper).selection; return selection.kind === 'followHertz' ? selection.idleBuiltin : selection.kind === 'builtin' ? selection : null; }
@@ -250,6 +295,7 @@
     $('quality').value = presentation(wallpaper).quality || 'low';
     $('brightness').value = String(presentation(wallpaper).brightness == null ? 1 : presentation(wallpaper).brightness);
     $('motion').value = String(presentation(wallpaper).motion == null ? 1 : presentation(wallpaper).motion);
+    $('pointer').checked = presentation(wallpaper).pointer === true;
     $('brightness-value').textContent = Math.round(($('brightness').value || 1) * 100) + '%';
     $('motion-value').textContent = Math.round(($('motion').value == null ? 100 : $('motion').value * 100)) + '%';
     if (latest) renderMetadata(latest);
@@ -270,8 +316,13 @@
     $('scene-heading').textContent = selection ? metadata && metadata.title || '本地作品' : sceneLabel(current);
     $('scene-following').textContent = !follows(wallpaper) ? '固定场景 · ' + sceneLabel(current) : (spaceScene ? '跟随三维空间 · ' : '等待来源 · ') + sceneLabel(current);
     if (selection) $('scene-following').textContent = (metadata && metadata.kind === 'video' ? '视频' : metadata && metadata.kind === 'image' ? '图片' : '本地作品') + (metadata && metadata.version ? ' · 版本 ' + metadata.version : ' · 固定版本');
-    $('preview-placeholder-title').textContent = selection ? previewActive ? '独立预览窗口已打开' : '本地作品已选入草稿' : '先看效果，再应用到桌面';
-    $('preview-placeholder-text').textContent = selection ? mediaPreviewAvailable ? previewActive ? '可在预览窗口查看当前草稿。结束预览或切换页面会关闭窗口；桌面保持已应用的画面。' : '点击开始预览，在独立窗口查看图片或静音视频。应用后，桌面会在新作品就绪时切换。' : '点击应用后在桌面查看。媒体实时预览尚未提供；当前桌面画面会保留到新作品就绪。' : '使用真实场景与当前音乐预览，不会修改已保存的设置。';
+    $('preview-placeholder-title').textContent = previewActive ? '独立预览窗口已打开' : selection ? '本地作品已选入草稿' : '先看效果，再应用到桌面';
+    $('preview-placeholder-text').textContent = previewActive ? '可在预览窗口查看当前草稿。结束预览或切换页面会关闭窗口；桌面保持已应用的画面。' : selection ? mediaPreviewAvailable ? '点击开始预览，在独立窗口查看图片或静音视频。应用后，桌面会在新作品就绪时切换。' : '点击应用后在桌面查看。媒体实时预览尚未提供；当前桌面画面会保留到新作品就绪。' : '点击开始预览，在独立窗口查看真实场景与当前音乐效果，不会修改已保存的设置。';
+    var previewState = latest && latest.mediaPreview;
+    if (previewActive && previewState && previewState.handoff) {
+      $('preview-placeholder-title').textContent = previewState.error ? '新预览未能显示 · 保留上一帧' : '正在更新预览 · 保留上一帧';
+      $('preview-placeholder-text').textContent = previewState.error || '新画面就绪后自动显示。结束预览会关闭窗口。';
+    }
     if (current && !scenes.some(scene => scene.id === current)) $('scene-following').textContent += '（暂不支持壁纸）';
     document.querySelectorAll('[data-scene]').forEach(node => node.setAttribute('aria-pressed', String(!follows(wallpaper) && node.dataset.scene === selectedScene(wallpaper))));
     var preset = currentPreset(lyrics);
@@ -279,14 +330,28 @@
     $('lyrics-preset-status').textContent = preset ? ({single:'单行预设',double:'双行预设',triple:'三行景深预设',translation:'翻译预设'})[preset] : '自定义样式';
     var staticScene = scenes.find(scene => scene.id === current) || scenes.find(scene => scene.id === selectedScene(wallpaper));
     var staticImage = $('scene-static');
-    if (staticScene) {
+    if (selection && metadata && metadata.kind === 'video' && metadata.poster === undefined) {
+      var coverRevision = posterRevision;
+      metadata.poster = null;
+      readPoster(selection.workKey, selection.packageHash).then(function (poster) {
+        if (coverRevision !== posterRevision) return;
+        metadata.poster = poster;
+        if (draft && mediaMetadata(draft.wallpaper) === metadata) renderPreview();
+      });
+    }
+    var cover = selection && metadata && metadata.poster;
+    if (cover) {
+      if (staticImage.getAttribute('src') !== cover) staticImage.src = cover;
+      staticImage.alt = metadata.title + ' · 视频封面';
+    } else if (staticScene && !selection) {
       var thumbnail = '/scene-thumbnails/' + staticScene.id + '.jpg';
       if (staticImage.getAttribute('src') !== thumbnail) staticImage.src = thumbnail;
       staticImage.alt = sceneLabel(staticScene.id) + ' · 真实场景静态参考';
-    }
-    staticImage.hidden = previewActive || !staticScene;
-    $('preview-placeholder').hidden = (previewActive && !selection) || !!staticScene;
-    $('preview-kind').textContent = selection ? '本地作品' : previewActive ? '实时效果预览' : '真实场景静态参考';
+    } else { staticImage.removeAttribute('src'); }
+    staticImage.style.objectFit = selection ? presentation(wallpaper).fit === 'stretch' ? 'fill' : presentation(wallpaper).fit : 'cover';
+    staticImage.hidden = previewActive || !(cover || !selection && staticScene);
+    $('preview-placeholder').hidden = !staticImage.hidden;
+    $('preview-kind').textContent = previewActive ? '独立窗口预览' : selection ? cover ? '视频封面' : '本地作品' : '真实场景静态参考';
     var style = $('lyrics-preview').style;
     style.setProperty('--font-size', lyrics.fontSize + 'px'); style.setProperty('--font-weight', String(lyrics.fontWeight));
     style.setProperty('--font-family', lyrics.fontFamily); style.setProperty('--sung', lyrics.sungColor); style.setProperty('--unsung', lyrics.unsungColor);
@@ -300,6 +365,7 @@
     $('opacity-value').textContent = Math.round(lyrics.opacity * 100) + '%';
   }
   function syncControls() {
+    $('pointer').disabled = !ready || editing || pending || conflict;
     var disabled = !ready || editing || pending;
     ['enabled','monitor','fps','quality','brightness','motion','music','scene-source','lyrics-enabled','lyrics-locked','lyrics-size','lyrics-weight','lyrics-sung','lyrics-unsung','lyrics-outline','lyrics-stroke','lyrics-opacity','profile'].forEach(id => $(id).disabled = disabled);
     $('scene-fixed').disabled = disabled || !draft || !builtin(draft.wallpaper);
@@ -315,7 +381,7 @@
     $('audio-options').hidden = !!mediaSelection || !audioInput || audioInput.kind === 'none';
     var audioRuntime = latest && latest.runtime && latest.runtime.wallpaper && latest.runtime.wallpaper.audio;
     $('audio-retry').disabled = disabled || !audioRuntime || !audioRuntime.requested;
-    $('motion').disabled = disabled || (!!mediaSelection && !isVideo);
+    $('motion').disabled = disabled || (!!mediaSelection && !isVideo && !presentation(draft.wallpaper).pointer);
     $('media-fit-field').hidden = !mediaSelection;
     $('media-fit').disabled = disabled || !mediaSelection;
     $('media-rate-note').hidden = !mediaSelection;
@@ -332,13 +398,13 @@
     $('autostart').disabled = disabled || dirty || !latest || latest.launchAtLogin == null;
     $('preview').disabled = !ready || editing || pending || (!!mediaSelection && !mediaPreviewAvailable);
     $('preview').textContent = previewActive ? '结束预览' : '开始预览';
-    $('settings-state').textContent = !ready ? '读取中' : editing ? '正在调整位置' : pending ? '正在应用' : conflict ? '草稿需要重读' : dirty ? '未应用修改' : '设置已保存';
+    $('settings-state').textContent = !ready ? '读取中' : editing ? '正在调整位置' : pending ? (applyInFlight ? '正在应用' : '正在处理') : conflict ? '草稿需要重读' : dirty ? '未应用修改' : '设置已保存';
     $('settings-state').dataset.dirty = String(dirty);
     $('conflict').hidden = !conflict;
     $('discard-close').disabled = pending;
     if (!dirty && !pending) $('close-confirm').hidden = true;
     updateProfilePath();
-    document.querySelectorAll('[data-library-select]').forEach(function (button) { button.disabled = disabled; });
+    document.querySelectorAll('[data-library-select], .library-delete').forEach(function (button) { button.disabled = disabled; });
   }
   function renderRuntime(payload) {
     var runtime = payload.runtime || {}, wallpaper = runtime.wallpaper || {}, policy = runtime.policy || {}, diagnostics = runtime.diagnostics || {};
@@ -348,11 +414,14 @@
     var waitingForScene = payload.config && follows(payload.config) && !payload.spaceScene;
     var unsupportedScene = payload.config && follows(payload.config) && payload.spaceScene && !scenes.some(scene => scene.id === payload.spaceScene);
     if (wallpaper.enabled && wallpaper.visible && (waitingForScene || unsupportedScene)) state = '等待来源 · ' + sceneLabel(selectedScene(payload.config));
+    if (wallpaper.visible && wallpaper.staticPoster) state = '视频播放失败 · 显示静态封面';
     if (wallpaper.selectionPreparing || wallpaper.candidateLoading) state = wallpaper.visible ? '正在准备新壁纸 · 旧画面继续显示' : '壁纸正在准备';
-    var running = wallpaper.visible;
+    if (wallpaper.handoff && wallpaper.handoff.visible) state = wallpaper.applyError ? '新壁纸未能显示 · 保留上一帧' : '正在切换壁纸 · 保留上一帧';
+    var running = wallpaper.visible && !wallpaper.staticPoster && !(wallpaper.handoff && wallpaper.handoff.visible);
     $('wallpaper-state').textContent = state;
     $('wallpaper-dot').className = 'state-dot' + (running ? ' running' : state.includes('失败') ? ' error' : '');
-    var detail = wallpaper.applyError ? '设置已保存，但运行存在问题：' + wallpaper.applyError
+    var detail = wallpaper.staticPoster ? '原视频选择已保留，当前显示封面且未占用视频解码器。点击重新挂载壁纸可重试。' + (wallpaper.applyError ? ' 原因：' + wallpaper.applyError : '')
+      : wallpaper.applyError ? '设置已保存，但运行存在问题：' + wallpaper.applyError
       : wallpaper.monitorMissing ? '重新连接目标显示器，或选择其他显示器后应用。'
       : unsupportedScene ? '当前空间场景暂不支持壁纸，正在显示你选择的等待场景。'
       : waitingForScene ? '正在显示等待场景；播放器提供合格场景后将自动跟随。'
@@ -415,7 +484,7 @@
     renderPreview(); syncControls();
     if (wallpaperChanged && previewActive) { clearTimeout(previewTimer); previewTimer = setTimeout(function () { startNativePreview(true); }, 180); }
   }
-  ['enabled','fps','music','audio-device','audio-gain','audio-attack','audio-release','monitor','scene-source','scene-fixed','quality','brightness','motion','media-fit'].forEach(function (id) {
+  ['enabled','fps','music','audio-device','audio-gain','audio-attack','audio-release','monitor','scene-source','scene-fixed','quality','brightness','motion','media-fit','pointer'].forEach(function (id) {
     $(id).addEventListener('change', function () {
       if (!draft) return;
       var wallpaper = draft.wallpaper, group = mainGroup(wallpaper);
@@ -434,6 +503,7 @@
       else if (id === 'scene-source') setBuiltin(wallpaper, selectedScene(wallpaper) || 'zodiac', this.value === 'follow');
       else if (id === 'scene-fixed') setBuiltin(wallpaper, this.value, follows(wallpaper));
       else if (id === 'media-fit') group.presentation.fit = this.value;
+      else if (id === 'pointer') group.presentation.pointer = this.checked;
       else group.presentation[id] = id === 'quality' ? this.value : Number(this.value);
       changed(true);
       if (id === 'music') renderForm();
@@ -462,19 +532,25 @@
   $('continue-editing').addEventListener('click', function () { $('close-confirm').hidden = true; $('close').focus(); });
   $('discard-close').addEventListener('click', function () { dirty = false; send('close'); });
   ['position-begin','position-done','position-cancel','wallpaper-show','wallpaper-retry','lyrics-show'].forEach(id => $(id).addEventListener('click', () => send(id)));
-  function unmountPreview() { var frame = $('preview-renderer'); if (frame) frame.remove(); $('preview-placeholder').hidden = false; clearTimeout(previewTimer); previewActive = false; renderPreview(); }
+  function unmountPreview() { clearTimeout(previewTimer); previewActive = false; previewLease = null; invalidatePosters(); }
   window.hertzWallpaperSettings = {
     applyStatus: applyStatus, setTab: setTab, requestClose: requestClose,
     requestManagement: requestManagement, applyManagement: applyManagement,
     chooseLibraryVersion: chooseLibraryVersion,
     canChooseLibraryVersion: canChooseLibraryVersion,
-    mountPreview: function (lease) { previewLease = lease || previewLease; setTab('wallpaper'); if ($('preview-renderer')) return; var frame = document.createElement('iframe'); frame.id = 'preview-renderer'; frame.title = '桌面壁纸效果预览'; frame.tabIndex = -1; frame.setAttribute('aria-hidden', 'true'); frame.src = '/wallpaper.html'; $('wallpaper-preview').appendChild(frame); $('preview-placeholder').hidden = true; $('scene-static').hidden = true; },
-    unmountPreview: unmountPreview,
-    evalAudio: function (lease, script) { if (lease !== previewLease) return; var frame = $('preview-renderer'); if (frame && frame.contentWindow) frame.contentWindow.eval(script); },
-    evalPreview: function (script) { var frame = $('preview-renderer'); if (frame && frame.contentWindow) frame.contentWindow.eval(script); },
-    previewEvent: function (event, source) { var frame = $('preview-renderer'); if (!frame || frame.contentWindow !== source) return; send('preview-event', { event: event, lease: previewLease }); }
+    readPoster: readPoster,
+    invalidatePosters: invalidatePosters,
+    unmountPreview: unmountPreview
   };
-  setInterval(function () { if (previewActive && !document.hidden && activeTab === 'wallpaper') requestManagement('wallpaper.preview.renew', { leaseId: previewLease }).catch(managementError); }, 5000);
+  setInterval(function () {
+    if (!previewActive || document.hidden || activeTab !== 'wallpaper') return;
+    var lease = previewLease;
+    requestManagement('wallpaper.preview.renew', { leaseId: lease }).catch(function (error) {
+      // A closing/replaced preview can leave one renewal in flight. Its late
+      // receipt must not replace the current preview's status or failure reason.
+      if (previewActive && previewLease === lease) managementError(error);
+    });
+  }, 5000);
   document.addEventListener('visibilitychange', function () { if (document.hidden && previewActive) releaseNativePreview(); });
   window.addEventListener('pagehide', function () { if (previewLease) requestManagement('wallpaper.preview.release', { leaseId: previewLease }).catch(function () {}); send('position-cancel'); });
   send('ready');

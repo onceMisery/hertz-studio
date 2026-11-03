@@ -22,6 +22,16 @@
 
 use std::sync::{Arc, Mutex, OnceLock};
 
+#[path = "budget_allocations.rs"]
+mod allocations;
+pub(crate) use allocations::{
+    Allocation, AllocationSnapshot, ResourceAmounts, ResourcePlan, SessionPlan,
+};
+use allocations::{SessionResources, SubReservation};
+
+/// Native metadata is bounded independently of resource byte quotas.
+const MAX_RESERVATIONS: usize = 64;
+
 /// 进程内唯一生产账本。导入准备/探测已接入；桌面与预览规划器沿用此 owner。
 pub(crate) fn global() -> Arc<BudgetCoordinator> {
     static BUDGET: OnceLock<Arc<BudgetCoordinator>> = OnceLock::new();
@@ -60,6 +70,8 @@ pub(crate) enum OwnerKind {
     Desktop,
     /// 实时预览（§13.4 租约；预览转应用先释放预览再为桌面申请）。
     Preview,
+    /// Static storage within the existing preview owner; never another renderer.
+    PreviewFrame,
     /// 导入期真实解码探测（§7.1；只解码，不呈现）。
     Probe,
 }
@@ -114,6 +126,8 @@ pub(crate) enum LedgerError {
     OwnerMismatch,
     /// sessionGeneration 不匹配（旧代际不得改写新账本）。
     GenerationMismatch,
+    /// A total reservation cannot exit while its allocated resources still have owners.
+    ChildrenPending,
 }
 
 /// token 的三段状态：占用（计入额度）→ 释放中（仍占用，等真实退出）
@@ -133,10 +147,13 @@ struct Reservation {
     /// 授予时的 allocationRevision（§12.3）；本切片只记录，降档联动随
     /// 质量/会话工作包进入。
     allocation_revision: u64,
+    resources: Option<SessionResources>,
+    children: Vec<SubReservation>,
 }
 
 /// 当前占用快照（§12.4 最低诊断的账本侧字段）。
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct BudgetUsage {
     pub targets: u32,
     pub contexts: u32,
@@ -150,6 +167,11 @@ pub(crate) struct BudgetUsage {
     pub prepare_tasks: u32,
     /// release 后未 confirm_exit 的 token 数（"某个释放没有确认时保留占用并报告"）。
     pub release_pending: u32,
+    pub session_reservations: u32,
+    pub resource_allocations: u32,
+    pub resource_release_pending: u32,
+    pub reservation_records: u32,
+    pub resource_records: u32,
 }
 
 #[derive(Debug)]
@@ -163,6 +185,8 @@ impl Ledger {
     fn active_usage(&self) -> BudgetUsage {
         let mut usage = BudgetUsage::default();
         for reservation in &self.reservations {
+            usage.reservation_records += 1;
+            usage.resource_records += reservation.children.len() as u32;
             // ReleasePending 仍占用额度（C24：真实退出前不还给下一任务）；
             // 只有确认退出的墓碑不计。
             if reservation.state == ReservationState::Released {
@@ -180,6 +204,17 @@ impl Ledger {
             usage.prepare_tasks += request.prepare_tasks;
             if request.owner == OwnerKind::Preview {
                 usage.preview_instances += 1;
+            }
+            if reservation.resources.is_some() {
+                usage.session_reservations += 1;
+                for child in &reservation.children {
+                    if child.state != ReservationState::Released {
+                        usage.resource_allocations += 1;
+                    }
+                    if child.state == ReservationState::ReleasePending {
+                        usage.resource_release_pending += 1;
+                    }
+                }
             }
         }
         usage.release_pending = self
@@ -241,7 +276,24 @@ impl BudgetCoordinator {
             .ledger
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        Self::grant_locked(&mut ledger, request, None)
+    }
+
+    fn grant_locked(
+        ledger: &mut Ledger,
+        request: &BudgetRequest,
+        resources: Option<SessionResources>,
+    ) -> Result<u64, BudgetRejection> {
         Self::validate_shape(request)?;
+        if ledger.reservations.len() >= MAX_RESERVATIONS {
+            return Err(Ledger::reject(
+                "reservation_metadata",
+                MAX_RESERVATIONS as u64,
+                ledger.reservations.len() as u64,
+                1,
+                "等待退出确认并回收已结束的原生资源记录",
+            ));
+        }
         let usage = ledger.active_usage();
 
         if request.targets > 0 {
@@ -330,7 +382,7 @@ impl BudgetCoordinator {
             // live 侧不共享预览保留带：预览占用独立于 live 上限之外。
             let live_held = usage
                 .output_pixel_rate
-                .saturating_sub(Self::preview_output_held(&ledger));
+                .saturating_sub(Self::preview_output_held(ledger));
             let cap = ledger.live_output_cap();
             if request.output_pixel_rate > cap.saturating_sub(live_held) {
                 return Err(Ledger::reject(
@@ -392,6 +444,8 @@ impl BudgetCoordinator {
             request: request.clone(),
             state: ReservationState::Active,
             allocation_revision,
+            resources,
+            children: Vec::new(),
         });
         Ok(token)
     }
@@ -422,7 +476,7 @@ impl BudgetCoordinator {
                     });
                 }
             }
-            OwnerKind::Preview | OwnerKind::Probe => {
+            OwnerKind::Preview | OwnerKind::PreviewFrame | OwnerKind::Probe => {
                 if request.targets != 0 {
                     return Err(BudgetRejection {
                         quota: "request_shape",
@@ -433,6 +487,21 @@ impl BudgetCoordinator {
                     });
                 }
             }
+        }
+        if request.owner == OwnerKind::PreviewFrame
+            && (request.contexts != 0
+                || request.decoders != 0
+                || request.decode_pixel_rate != 0
+                || request.output_pixel_rate != 0
+                || request.prepare_tasks != 0)
+        {
+            return Err(Ledger::reject(
+                "request_shape",
+                0,
+                0,
+                1,
+                "静态预览帧只能持有位图和采集工作区",
+            ));
         }
         if request.owner == OwnerKind::Probe && request.output_pixel_rate != 0 {
             return Err(BudgetRejection {
@@ -470,6 +539,11 @@ impl BudgetCoordinator {
         let reservation = Self::find_checked(&mut ledger, token, session, generation)?;
         if reservation.state == ReservationState::Active {
             reservation.state = ReservationState::ReleasePending;
+            for child in &mut reservation.children {
+                if child.state == ReservationState::Active {
+                    child.state = ReservationState::ReleasePending;
+                }
+            }
             ledger.revision += 1;
         }
         Ok(())
@@ -488,6 +562,13 @@ impl BudgetCoordinator {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let reservation = Self::find_checked(&mut ledger, token, session, generation)?;
+        if reservation
+            .children
+            .iter()
+            .any(|child| child.state != ReservationState::Released)
+        {
+            return Err(LedgerError::ChildrenPending);
+        }
         if reservation.state != ReservationState::Released {
             reservation.state = ReservationState::Released;
             ledger.revision += 1;
@@ -519,17 +600,17 @@ impl BudgetCoordinator {
     }
 
     /// 会话销毁：宿主确认 controller/context 清理完成后一次性清除该会话的
-    /// 全部 token（含 pending 与墓碑），不依赖逐 token 回执（§12.3）。
+    /// 指定代际的全部 token（含 pending 与墓碑），不影响同名会话的后继代际。
     /// 返回清除的 token 数。
-    pub(crate) fn purge_session(&self, session: &str) -> usize {
+    pub(crate) fn purge_session(&self, session: &str, generation: u64) -> usize {
         let mut ledger = self
             .ledger
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let before = ledger.reservations.len();
-        ledger
-            .reservations
-            .retain(|reservation| reservation.request.session != session);
+        ledger.reservations.retain(|reservation| {
+            reservation.request.session != session || reservation.request.generation != generation
+        });
         let removed = before - ledger.reservations.len();
         if removed > 0 {
             ledger.revision += 1;
@@ -589,3 +670,7 @@ impl BudgetCoordinator {
 #[cfg(test)]
 #[path = "budget_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "budget_allocations_tests.rs"]
+mod allocation_tests;

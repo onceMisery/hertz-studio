@@ -3,15 +3,17 @@
 import { layoutLyricText } from './text-layout.js';
 export function createSpatialResources(THREE, onInvalidate, resolveCover = url => url) {
   let disposed = false, stamp = null, uploaded = false;
-  const texts = new Map(), covers = new Map(), queue = [];
+  const texts = new Map(), covers = new Map(), queue = [], leases = new WeakMap(), coverLoads = new Set();
   function canvas(w, h) {
     if (typeof document === 'undefined') return null;
     const el = document.createElement('canvas'); el.width = w; el.height = h; return el;
   }
   function remove(map, key, entry) {
-    if (entry.refs > 0) return;
+    if (entry.consumers.size || entry.retired) return;
+    entry.retired = true;
     const pending = queue.indexOf(entry); if (pending >= 0) queue.splice(pending, 1);
-    entry.cancel?.(); entry.texture?.dispose(); map.delete(key);
+    entry.cancel?.(); entry.texture?.dispose(); entry.texture = null;
+    if (map.get(key) === entry) map.delete(key);
   }
   function trim(map, limit) {
     for (const [key, entry] of map) {
@@ -19,62 +21,100 @@ export function createSpatialResources(THREE, onInvalidate, resolveCover = url =
       remove(map, key, entry);
     }
   }
-  function release(map, key) {
-    const entry = map.get(key); if (!entry) return;
-    entry.refs = Math.max(0, entry.refs - 1);
-    if (!entry.refs) remove(map, key, entry);
+  function release(map, lease) {
+    const consumer = leases.get(lease);
+    if (!consumer || !consumer.active || consumer.map !== map) return;
+    consumer.active = false;
+    consumer.signal?.removeEventListener('abort', consumer.abort);
+    const entry = consumer.entry;
+    entry.consumers.delete(consumer);
+    remove(map, entry.key, entry);
+  }
+  function retain(map, entry, signal) {
+    const consumer = {map, entry, signal, active: true, abort: null};
+    const lease = {};
+    // Consumers observe one shared result but cannot spend another consumer's lease.
+    for (const field of ['key', 'line', 'font', 'maxWidth', 'aspect', 'layout', 'start', 'end', 'failed']) {
+      Object.defineProperty(lease, field, {enumerable: true, get: () => entry[field]});
+    }
+    Object.defineProperty(lease, 'texture', {enumerable: true, get: () => consumer.active ? entry.texture : null});
+    consumer.abort = () => release(map, lease);
+    leases.set(lease, consumer);
+    entry.consumers.add(consumer);
+    signal?.addEventListener('abort', consumer.abort, {once: true});
+    return Object.freeze(lease);
+  }
+  function coverUnits() {
+    let count = covers.size;
+    for (const entry of coverLoads) if (covers.get(entry.key) !== entry) count++;
+    return count;
+  }
+  function loadCover(entry) {
+    const controller = new AbortController(), img = new Image();
+    let resolving = true, loading = false;
+    coverLoads.add(entry);
+    const alive = () => !disposed && !entry.retired && entry.consumers.size > 0 && covers.get(entry.key) === entry;
+    const finish = () => { if (!resolving && !loading) coverLoads.delete(entry); };
+    const fail = () => {
+      loading = false;
+      if (alive()) { entry.failed = true; onInvalidate?.(); }
+      finish();
+    };
+    img.crossOrigin = 'anonymous'; img.decoding = 'async';
+    entry.cancel = () => {
+      controller.abort();
+      img.onload = img.onerror = null; img.src = ''; loading = false;
+      // A resolver that ignores abort still owns a bounded slot until it settles.
+      finish();
+    };
+    img.onload = () => {
+      loading = false;
+      if (!alive()) { finish(); return; }
+      const el = canvas(768, 768), ctx = el?.getContext('2d');
+      if (!ctx) { fail(); return; }
+      try {
+        const side = Math.min(img.naturalWidth, img.naturalHeight);
+        ctx.drawImage(img, (img.naturalWidth - side) / 2, (img.naturalHeight - side) / 2, side, side, 0, 0, 768, 768);
+        entry.texture = new THREE.CanvasTexture(el); entry.texture.colorSpace = THREE.SRGBColorSpace;
+        entry.texture.userData.spaceShared = true;
+        entry.texture.minFilter = THREE.LinearMipmapLinearFilter;
+        img.onload = img.onerror = null;
+        onInvalidate?.();
+      } catch { fail(); }
+      finish();
+    };
+    img.onerror = fail;
+    Promise.resolve().then(() => controller.signal.aborted ? null : resolveCover(entry.key, controller.signal)).then(url => {
+      if (!alive()) return;
+      if (url) { loading = true; img.src = url; } else fail();
+    }).catch(fail).finally(() => { resolving = false; finish(); });
   }
   const text = {
     acquire(value, font = 'sans-serif', maxWidth = 1792) {
+      if (disposed) return null;
       const line = String(value || '').slice(0, 120).replace(/[\uD800-\uDBFF]$/, ''), key = font + ':' + maxWidth + ':' + line;
       let entry = texts.get(key);
       if (!entry && texts.size < 7) {
-        entry = { key, line, font, maxWidth, refs: 0, texture: null, aspect: 8 };
+        entry = { key, line, font, maxWidth, consumers: new Set(), texture: null, aspect: 8 };
         texts.set(key, entry); queue.push(entry);
       }
       if (!entry) return null;
-      entry.refs++; return entry;
+      return retain(texts, entry);
     },
-    release(entry) { if (entry) release(texts, entry.key); }
+    release(lease) { if (lease) release(texts, lease); }
   };
   const cover = {
     acquire(url, signal) {
       if (!url || disposed || signal?.aborted) return null;
       const key = String(url); let entry = covers.get(key);
-      if (!entry && covers.size < 12) {
-        entry = { key, refs: 0, texture: null, failed: false }; covers.set(key, entry);
-        if (typeof Image !== 'undefined') {
-          const img = new Image(); img.crossOrigin = 'anonymous'; img.decoding = 'async';
-          let canceled = false;
-          const fail = () => {
-            if (canceled || disposed || signal?.aborted || !entry.refs) return;
-            entry.failed = true; onInvalidate?.();
-          };
-          entry.cancel = () => { canceled = true; img.onload = img.onerror = null; img.src = ''; };
-          img.onload = () => {
-            if (canceled || disposed || signal?.aborted || !entry.refs) return;
-            const el = canvas(768, 768), ctx = el?.getContext('2d');
-            if (!ctx) { fail(); return; }
-            try {
-              const side = Math.min(img.naturalWidth, img.naturalHeight);
-              ctx.drawImage(img, (img.naturalWidth - side) / 2, (img.naturalHeight - side) / 2, side, side, 0, 0, 768, 768);
-              entry.texture = new THREE.CanvasTexture(el); entry.texture.colorSpace = THREE.SRGBColorSpace;
-              entry.texture.userData.spaceShared = true;
-              entry.texture.minFilter = THREE.LinearMipmapLinearFilter;
-              onInvalidate?.();
-            } catch { fail(); }
-          };
-          img.onerror = fail;
-          Promise.resolve().then(() => resolveCover(key)).then(url => {
-            if (canceled || disposed || signal?.aborted || !entry.refs) return;
-            if (url) img.src = url; else fail();
-          }).catch(fail);
-        }
+      if (!entry && coverUnits() < 12) {
+        entry = { key, consumers: new Set(), texture: null, failed: false }; covers.set(key, entry);
+        if (typeof Image !== 'undefined') loadCover(entry);
       }
       if (!entry) return null;
-      entry.refs++; return entry;
+      return retain(covers, entry, signal);
     },
-    release(entry) { if (entry) release(covers, entry.key); }
+    release(lease) { if (lease) release(covers, lease); }
   };
   return {
     text, cover,
@@ -84,7 +124,7 @@ export function createSpatialResources(THREE, onInvalidate, resolveCover = url =
       if (uploaded) return;
       while (queue.length) {
         const entry = queue.shift();
-        if (!entry.refs || !texts.has(entry.key)) continue;
+        if (!entry.consumers.size || texts.get(entry.key) !== entry) continue;
         const el = canvas(1, 1), ctx = el?.getContext('2d');
         if (!ctx) break;
         const layout = layoutLyricText(ctx, entry.line, entry.font, entry.maxWidth);
@@ -100,11 +140,16 @@ export function createSpatialResources(THREE, onInvalidate, resolveCover = url =
       trim(texts, 7); trim(covers, 12);
       if (queue.length) onInvalidate?.();
     },
-    stats() { return { textTextures: texts.size, coverTextures: covers.size, queued: queue.length,
-      bytes: [...texts.values()].reduce((sum, entry) => sum + (entry.layout ? entry.layout.width * entry.layout.height * 4 : 0), 0) + covers.size * 768 * 768 * 4 * 4 / 3 }; },
+    stats() { return { textTextures: texts.size, coverTextures: covers.size, coverLoads: coverLoads.size, queued: queue.length,
+      bytes: [...texts.values()].reduce((sum, entry) => sum + (entry.layout ? entry.layout.width * entry.layout.height * 4 : 0), 0) + coverUnits() * 768 * 768 * 4 * 4 / 3 }; },
     dispose() {
       if (disposed) return; disposed = true;
-      for (const map of [texts, covers]) { for (const entry of map.values()) { entry.refs = 0; entry.cancel?.(); entry.texture?.dispose(); } map.clear(); }
+      for (const map of [texts, covers]) for (const entry of [...map.values()]) {
+        for (const consumer of entry.consumers) {
+          consumer.active = false; consumer.signal?.removeEventListener('abort', consumer.abort);
+        }
+        entry.consumers.clear(); remove(map, entry.key, entry);
+      }
       queue.length = 0;
     }
   };

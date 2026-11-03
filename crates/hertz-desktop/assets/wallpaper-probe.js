@@ -7,6 +7,23 @@
   const error = (code) => Object.assign(new Error(code), { code });
   const post = (value) => window.ipc.postMessage(typeof value === 'string' ? value : JSON.stringify(value));
 
+  function poster(media) {
+    // One readback during preparation, never a playback frame loop or another decoder.
+    const canvas = document.createElement('canvas');
+    const scale = Math.min(1, 320 / Math.max(media.videoWidth, media.videoHeight));
+    canvas.width = Math.max(1, Math.floor(media.videoWidth * scale));
+    canvas.height = Math.max(1, Math.floor(media.videoHeight * scale));
+    try {
+      canvas.getContext('2d', {alpha:false}).drawImage(media, 0, 0, canvas.width, canvas.height);
+      for (const quality of [.8, .6, .4, .2, .1]) {
+        const data = canvas.toDataURL('image/jpeg', quality);
+        if (data.startsWith('data:image/jpeg;base64,') && data.length <= 32791) return data.slice(23);
+      }
+    } catch (_) { /* Optional poster failure keeps the media and its verified decode result. */ }
+    finally { canvas.width = canvas.height = 0; }
+    return null;
+  }
+
   function stop() {
     const state = current;
     if (!state) return;
@@ -87,6 +104,7 @@
         if (!media.requestVideoFrameCallback) throw error('probe_inconclusive');
         if (!media.canPlayType(config.mime)) throw error('format_unsupported');
         media.muted = true;
+        media.crossOrigin = 'anonymous';
         media.defaultMuted = true;
         media.volume = 0;
         media.playsInline = true;
@@ -106,6 +124,7 @@
         state.stage = 'first_frame';
         const first = await Promise.all([frame(state), play()]);
         const frames = state.frames;
+        let cover = null;
         frames.push(first[0]);
         media.pause();
         for (const target of [duration * 0.5, duration * 0.9]) {
@@ -117,9 +136,10 @@
           const evidence = await Promise.all([arrived, seeked, play()]);
           frames.push(evidence[0]);
           media.pause();
+          if (config.poster && frames.length === 2) cover = poster(media);
         }
         if (media.error) throw error('decode_failed');
-        result = { ok: true, code: '', stage: state.stage, frames, width: media.videoWidth, height: media.videoHeight };
+        result = { ok: true, code: '', stage: state.stage, frames, width: media.videoWidth, height: media.videoHeight, poster: cover };
       }
     } catch (failure) {
       result = { ok: false, code: failure.code === 'format_unsupported' ? 'format_unsupported' : failure.code === 'probe_inconclusive' ? 'probe_inconclusive' : 'decode_failed', stage: state.stage, frames: state.frames, width: 0, height: 0 };

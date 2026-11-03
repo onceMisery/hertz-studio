@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 hertz-studio contributors
 
-//! Settings-owned media previews use the same fixed plan, resource ledger and physical exit
-//! barrier as desktop candidates, with a separate native controller and expiring lease.
+//! All settings previews share one native controller owner, typed readiness and exit barrier.
+use super::wallpaper_handoff::Handoff;
 use super::*;
 use crate::wallpaper::{
     api,
@@ -15,46 +15,76 @@ use crate::wallpaper::{
 
 type JobResult<T> = std::result::Result<T, JobError>;
 
-pub(super) struct MediaPreview {
+enum PreviewContent {
+    Builtin,
+    Media(ResolvedMedia),
+}
+
+pub(super) struct PreviewOwner {
     id: u64,
     owner: u64,
-    draft_id: String,
-    draft_revision: u64,
+    draft: Option<(String, u64)>,
     pub(super) lease_id: String,
     pub(super) lease_until: Instant,
     cancel: Arc<AtomicBool>,
     configuration: config::WallpaperConfig,
+    configured_fps: u8,
     monitor: native::WallpaperMonitor,
+    prepared: Option<PreviewContent>,
     pub(super) surface: Option<WallpaperSurface>,
+    pub(super) frame: Option<Handoff>,
+    error: Option<String>,
     heartbeat_at: Instant,
+}
+impl PreviewOwner {
+    pub(super) fn references_package(
+        &self,
+        work_key: Option<&str>,
+        package_hash: Option<&str>,
+    ) -> bool {
+        self.configuration
+            .references_package(work_key, package_hash)
+            || self.surface.as_ref().is_some_and(|surface| {
+                surface
+                    .configuration
+                    .references_package(work_key, package_hash)
+            })
+            || self.frame.as_ref().is_some_and(|frame| {
+                frame
+                    .configuration
+                    .references_package(work_key, package_hash)
+            })
+    }
+}
+
+fn preview_monitor() -> JobResult<native::WallpaperMonitor> {
+    let mut monitor = native::wallpaper_monitors()
+        .into_iter()
+        .find(|monitor| monitor.primary)
+        .ok_or_else(|| JobError::new("display_missing", "当前没有可用显示器"))?;
+    let width = (monitor.width / 2).clamp(1, 640);
+    let height = (monitor.height / 2).clamp(1, 360);
+    monitor.left += (monitor.width - width) / 2;
+    monitor.top += (monitor.height - height) / 2;
+    monitor.width = width;
+    monitor.height = height;
+    Ok(monitor)
 }
 
 impl App {
-    pub(super) fn media_preview_request(&self, request: &api::Request, owner: u64) -> bool {
-        let reference = match request.typed() {
-            Ok(api::Command::PreviewAcquire {
-                draft_id,
-                draft_revision,
-            })
-            | Ok(api::Command::PreviewUpdate {
-                draft_id,
-                draft_revision,
-                ..
-            }) => (draft_id, draft_revision),
-            _ => return false,
-        };
-        self.settings_drafts
-            .get(owner, &reference.0, reference.1)
-            .is_ok_and(|draft| {
-                matches!(draft.wallpaper.main().selection, Selection::Package { .. })
-            })
+    pub(super) fn preview_request(&self, request: &api::Request) -> bool {
+        matches!(
+            request.typed(),
+            Ok(api::Command::PreviewAcquire { .. } | api::Command::PreviewUpdate { .. })
+        )
     }
 
-    pub(super) fn begin_media_preview(
+    pub(super) fn begin_preview(
         &mut self,
         request: &api::Request,
         owner: u64,
         slot: crate::wallpaper::service::Slot,
+        target: &EventLoopWindowTarget<UserEvent>,
     ) -> JobResult<serde_json::Value> {
         let (draft_id, draft_revision, lease_id) = match request.typed()? {
             api::Command::PreviewAcquire {
@@ -85,9 +115,49 @@ impl App {
             .get(owner, &draft_id, draft_revision)?
             .clone();
         draft.check_apply(draft.base_revision, &self.config)?;
-        validate_configured_presentation(&draft.wallpaper).map_err(JobError::invalid_input)?;
+        self.prepare_preview(
+            draft.wallpaper,
+            Some((draft_id, draft_revision)),
+            lease_id,
+            slot,
+            target,
+        )
+    }
+
+    /// Legacy local controls enter the same owner; they never create an iframe or another renderer.
+    pub(super) fn open_preview(
+        &mut self,
+        target: &EventLoopWindowTarget<UserEvent>,
+        candidate: &WallpaperCandidate,
+    ) -> Result<(), String> {
+        let configuration = candidate.normalized()?;
+        self.open_settings(target);
+        if self.settings.is_none() {
+            return Err("无法打开桌面设置".into());
+        }
+        let slot = self
+            .wallpaper_library
+            .reserve()
+            .map_err(|error| error.to_string())?;
+        let lease = new_lease_id()?;
+        self.prepare_preview(configuration, None, lease, slot, target)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+
+    fn prepare_preview(
+        &mut self,
+        mut configuration: config::WallpaperConfig,
+        draft: Option<(String, u64)>,
+        lease_id: String,
+        slot: crate::wallpaper::service::Slot,
+        target: &EventLoopWindowTarget<UserEvent>,
+    ) -> JobResult<serde_json::Value> {
+        validate_configured_presentation(&configuration).map_err(JobError::invalid_input)?;
+        self.validate_preview_audio(&configuration)
+            .map_err(|error| JobError::new("audio_busy", error))?;
         if !policy::preview_pause_reasons(
-            &draft.wallpaper,
+            &configuration,
             self.policy.session_unavailable,
             self.policy.display_off,
             self.wallpaper_power,
@@ -96,80 +166,97 @@ impl App {
         {
             return Err(JobError::new(
                 "preview_paused",
-                "当前电源或会话状态暂停媒体预览",
+                "当前电源或会话状态暂停预览",
             ));
         }
-        let Selection::Package {
-            work_key,
-            package_hash,
-        } = &draft.wallpaper.main().selection
-        else {
-            return Err(JobError::invalid_input("需要固定作品版本"));
+        let monitor = preview_monitor()?;
+        let configured_fps = configuration.presentation().fps;
+        let selection = match &configuration.main().selection {
+            Selection::Package {
+                work_key,
+                package_hash,
+            } => Some(crate::wallpaper::selection_plan::Request {
+                work_key: work_key.clone(),
+                package_hash: package_hash.clone(),
+                target: ImageTarget {
+                    width: monitor.width as u32,
+                    height: monitor.height as u32,
+                    purpose: ImagePurpose::Preview,
+                    fit: if matches!(
+                        configuration.presentation().fit,
+                        crate::wallpaper::config::Fit::Contain
+                    ) {
+                        ImageFit::Contain
+                    } else {
+                        ImageFit::Cover
+                    },
+                },
+            }),
+            _ => {
+                // Preview quality never rewrites the user's draft or saved presentation cap.
+                configuration.main_mut().presentation.fps = configured_fps.min(15);
+                None
+            }
         };
-        // A fixed physical client size gives the output ledger an authoritative native target.
-        let mut monitor = native::wallpaper_monitors()
-            .into_iter()
-            .find(|monitor| monitor.primary)
-            .ok_or_else(|| JobError::new("display_missing", "当前没有可用显示器"))?;
-        let width = (monitor.width / 2).clamp(1, 640);
-        let height = (monitor.height / 2).clamp(1, 360);
-        monitor.left += (monitor.width - width) / 2;
-        monitor.top += (monitor.height - height) / 2;
-        monitor.width = width;
-        monitor.height = height;
-        let target = ImageTarget {
-            width: width as u32,
-            height: height as u32,
-            purpose: ImagePurpose::Preview,
-            fit: if matches!(
-                draft.wallpaper.presentation().fit,
-                crate::wallpaper::config::Fit::Contain
-            ) {
-                ImageFit::Contain
-            } else {
-                ImageFit::Cover
-            },
-        };
-        let selection = crate::wallpaper::selection_plan::Request {
-            work_key: work_key.clone(),
-            package_hash: package_hash.clone(),
-            target,
-        };
-        self.close_preview();
+        self.wallpaper_audio_dispatch.invalidate();
         self.wallpaper_generation += 1;
         let id = self.wallpaper_generation;
         let cancel = Arc::new(AtomicBool::new(false));
-        let proxy = self.proxy.clone();
-        self.wallpaper_library.resolve_selection_reserved(
-            selection,
-            Arc::clone(&cancel),
-            slot,
-            move |result| {
-                let _ =
-                    proxy.send_event(UserEvent::MediaPreviewSelection(id, result.map(Box::new)));
-            },
-        )?;
-        self.media_preview = Some(MediaPreview {
+        let media = selection.is_some();
+        if let Some(selection) = selection {
+            let proxy = self.proxy.clone();
+            self.wallpaper_library.resolve_selection_reserved(
+                selection,
+                Arc::clone(&cancel),
+                slot,
+                move |result| {
+                    let _ = proxy.send_event(UserEvent::MediaPreviewSelection(
+                        id,
+                        result.map(Box::new).map_err(|failure| failure.error),
+                    ));
+                },
+            )?;
+        } else {
+            drop(slot);
+        }
+        let previous = self.preview.take();
+        let (surface, frame) = if let Some(mut previous) = previous {
+            previous.cancel.store(true, Ordering::Release);
+            if let Some(frame) = &mut previous.frame {
+                frame.reveal = None;
+            }
+            (previous.surface.take(), previous.frame.take())
+        } else {
+            (None, None)
+        };
+        self.preview = Some(PreviewOwner {
             id,
-            owner,
-            draft_id,
-            draft_revision,
+            owner: self.settings_generation,
+            draft,
             lease_id: lease_id.clone(),
             lease_until: Instant::now() + PREVIEW_LEASE,
             cancel,
-            configuration: draft.wallpaper,
+            configuration,
+            configured_fps,
             monitor,
-            surface: None,
+            prepared: (!media).then_some(PreviewContent::Builtin),
+            surface,
+            frame,
+            error: None,
             heartbeat_at: Instant::now(),
         });
+        if let Err(error) = self.stage_preview(target) {
+            self.fail_preview(error.to_string());
+            return Err(JobError::new("preview_failed", error.to_string()));
+        }
         self.send_settings_status(None, None);
         Ok(
-            serde_json::json!({"leaseId":lease_id,"generation":id,"expiresInMs":15000,"kind":"media"}),
+            serde_json::json!({"leaseId":lease_id,"generation":id,"expiresInMs":15000,"kind":if media {"media"} else {"builtin"}}),
         )
     }
 
-    pub(super) fn close_media_preview(&mut self) -> bool {
-        let Some(mut preview) = self.media_preview.take() else {
+    pub(super) fn close_preview_owner(&mut self) -> bool {
+        let Some(mut preview) = self.preview.take() else {
             return false;
         };
         preview.cancel.store(true, Ordering::Release);
@@ -177,21 +264,328 @@ impl App {
             self.wallpaper_retiring
                 .push(RetiringWallpaper::new(surface));
         }
+        if let Some(mut frame) = preview.frame.take() {
+            frame.retire();
+            self.wallpaper_handoff_retiring.push(frame);
+        }
         self.poll_wallpaper_retirements();
         true
     }
 
-    pub(super) fn finish_media_preview(
+    fn stage_preview(&mut self, target: &EventLoopWindowTarget<UserEvent>) -> Result<()> {
+        // A successor cannot overlap an old controller whose Close has not completed.
+        self.poll_wallpaper_retirements();
+        if !self.wallpaper_retiring.is_empty()
+            || self
+                .wallpaper_handoff_retiring
+                .iter()
+                .any(|frame| frame.window.is_some())
+        {
+            return Ok(());
+        }
+        let Some(preview) = self
+            .preview
+            .as_ref()
+            .filter(|preview| preview.prepared.is_some())
+        else {
+            return Ok(());
+        };
+        if preview.error.is_some() {
+            return Ok(());
+        }
+        if let Some(surface) = &preview.surface {
+            if surface.binding.generation() == preview.id {
+                return Ok(());
+            }
+            if preview
+                .frame
+                .as_ref()
+                .is_some_and(|frame| frame.window.is_some())
+                || !surface.first_frame_ready()
+            {
+                let preview = self.preview.as_mut().expect("preview");
+                if let Some(frame) = &mut preview.frame {
+                    frame.reveal = None;
+                }
+                if let Some(surface) = preview.surface.take() {
+                    self.wallpaper_retiring
+                        .push(RetiringWallpaper::new(surface));
+                }
+                return Ok(());
+            }
+            if preview.frame.is_none() {
+                let owner = self
+                    .settings
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("预览所属设置已关闭"))?
+                    .window
+                    .hwnd() as HWND;
+                let (frame, script) = Handoff::begin(surface, Some(owner))?;
+                surface.eval(&script);
+                self.preview.as_mut().expect("preview").frame = Some(frame);
+            }
+            return Ok(());
+        }
+        if preview
+            .frame
+            .as_ref()
+            .is_some_and(|frame| !frame.hold.source_has_closed() || frame.window.is_none())
+        {
+            return Ok(());
+        }
+        if let Some((id, revision)) = &preview.draft {
+            let draft = self
+                .settings_drafts
+                .get(preview.owner, id, *revision)
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            draft
+                .check_apply(draft.base_revision, &self.config)
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        }
+        let owner = self
+            .settings
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("预览所属设置已关闭"))?
+            .window
+            .hwnd() as HWND;
+        let mut surface = create_presentation(
+            target,
+            self.proxy.clone(),
+            preview.id,
+            preview
+                .draft
+                .as_ref()
+                .map_or(self.config.revision, |(_, revision)| *revision),
+            preview.configuration.clone(),
+            preview.monitor.clone(),
+            PresentationWindow::Preview { owner },
+        )?;
+        surface.runtime_builtin =
+            crate::wallpaper::follow::resolve(&surface.configuration, self.wallpaper_last.as_ref());
+        let preview = self.preview.as_mut().expect("preview owner");
+        if let Some(PreviewContent::Media(media)) = preview.prepared.take() {
+            if let Err(error) = surface.session.admit_media(
+                preview.id,
+                media,
+                crate::wallpaper::budget::global(),
+                &surface._media_access,
+                format!("preview-{}", preview.lease_id),
+            ) {
+                self.wallpaper_retiring
+                    .push(RetiringWallpaper::new(surface));
+                return Err(anyhow::anyhow!(error.to_string()));
+            }
+        }
+        if let Some(frame) = &preview.frame {
+            if let Some(window) = &frame.window {
+                if let Err(error) = window.raise() {
+                    self.wallpaper_retiring
+                        .push(RetiringWallpaper::new(surface));
+                    return Err(error);
+                }
+            }
+        }
+        preview.surface = Some(surface);
+        preview.heartbeat_at = Instant::now();
+        Ok(())
+    }
+
+    pub(super) fn finish_preview_selection(
         &mut self,
         id: u64,
         result: JobResult<ResolvedMedia>,
         target: &EventLoopWindowTarget<UserEvent>,
     ) {
-        let Some(preview) = self
-            .media_preview
-            .as_ref()
-            .filter(|preview| preview.id == id)
+        let Some(preview) = self.preview.as_mut().filter(|preview| preview.id == id) else {
+            return;
+        };
+        match result {
+            Ok(media) => preview.prepared = Some(PreviewContent::Media(media)),
+            Err(error) => {
+                self.fail_preview(format!("预览未能呈现：{error}"));
+                return;
+            }
+        }
+        self.tick_preview(target);
+    }
+
+    fn fail_preview(&mut self, message: String) {
+        if let Some(preview) = self.preview.as_mut() {
+            let retained = preview
+                .frame
+                .as_ref()
+                .is_some_and(|frame| frame.window.is_some());
+            let old_live = preview
+                .surface
+                .as_ref()
+                .is_some_and(|surface| surface.binding.generation() != preview.id);
+            if retained || old_live {
+                preview.error = Some(message.clone());
+                preview.prepared = None;
+                if retained {
+                    if let Some(frame) = &mut preview.frame {
+                        frame.reveal = None;
+                    }
+                    if let Some(surface) = preview.surface.take() {
+                        self.wallpaper_retiring
+                            .push(RetiringWallpaper::new(surface));
+                    }
+                }
+                self.send_settings_status(Some(&message), None);
+                return;
+            }
+        }
+        self.close_preview();
+        self.send_settings_status(Some(&message), None);
+    }
+
+    pub(super) fn handle_preview_capture(&mut self, generation: u64, message: &str) -> bool {
+        let Some(frame) = self
+            .preview
+            .as_mut()
+            .and_then(|preview| preview.frame.as_mut())
+            .filter(|frame| frame.hold.request.generation == generation)
         else {
+            return false;
+        };
+        let Some(result) = frame.accept(message) else {
+            return true;
+        };
+        if let Err(error) = result {
+            self.fail_preview_capture(error.to_string());
+        } else if let Some(surface) = self
+            .preview
+            .as_mut()
+            .and_then(|preview| preview.surface.take())
+        {
+            self.wallpaper_retiring
+                .push(RetiringWallpaper::new(surface));
+        }
+        true
+    }
+
+    fn fail_preview_capture(&mut self, message: String) {
+        if let Some(preview) = &mut self.preview {
+            if let Some(mut frame) = preview.frame.take() {
+                frame.retire();
+                self.wallpaper_handoff_retiring.push(frame);
+            }
+        }
+        self.fail_preview(message);
+    }
+
+    pub(super) fn handle_preview_page(&mut self, generation: u64, event: &str) -> bool {
+        let Some(preview) = self.preview.as_mut().filter(|preview| {
+            preview
+                .surface
+                .as_ref()
+                .is_some_and(|surface| surface.binding.generation() == generation)
+        }) else {
+            return false;
+        };
+        if preview.lease_until <= Instant::now() || preview.owner != self.settings_generation {
+            self.close_preview();
+            return true;
+        }
+        let failed = event.starts_with("wallpaper_media_failed ")
+            || event.starts_with("wallpaper_gl_failed ")
+            || event == "wallpaper_mount_failed"
+            || parse_wallpaper_heartbeat(event).is_some_and(|(_, _, _, lost)| lost);
+        if failed
+            && generation != preview.id
+            && preview
+                .frame
+                .as_ref()
+                .is_some_and(|frame| frame.window.is_some())
+        {
+            // A superseded candidate cannot cancel the newer draft. Its old frame
+            // is already retained, so only this obsolete renderer must exit.
+            if let Some(surface) = preview.surface.take() {
+                self.wallpaper_retiring
+                    .push(RetiringWallpaper::new(surface));
+            }
+            return true;
+        }
+        let Some(surface) = preview.surface.as_mut() else {
+            return true;
+        };
+        if let Some(clock) = parse_page_clock(event) {
+            surface.page_clock = Some(clock);
+            return true;
+        }
+        if let Some((_, _, mounted, lost)) = parse_wallpaper_heartbeat(event) {
+            if mounted && !lost {
+                preview.heartbeat_at = Instant::now();
+            }
+            if lost {
+                self.fail_preview("预览图形上下文已丢失，请重新预览".into());
+            }
+            return true;
+        }
+        if event.starts_with("wallpaper_media_failed ")
+            || event.starts_with("wallpaper_gl_failed ")
+            || event == "wallpaper_mount_failed"
+        {
+            self.fail_preview(format!(
+                "预览加载失败：{}",
+                event.chars().take(256).collect::<String>()
+            ));
+            return true;
+        }
+        match surface.binding.parse(event) {
+            Some(PageEvent::Revealed) => {
+                if preview.id == generation
+                    && preview.frame.as_ref().is_some_and(|frame| {
+                        frame
+                            .reveal
+                            .is_some_and(|(expected, _)| expected == generation)
+                    })
+                {
+                    if let Some(mut frame) = preview.frame.take() {
+                        frame.retire();
+                        self.wallpaper_handoff_retiring.push(frame);
+                    }
+                }
+                return true;
+            }
+            Some(PageEvent::Handshake) => {
+                if surface.session.page_handshake(generation) {
+                    if let Some(snapshot) = self.wallpaper_last.as_ref() {
+                        surface.apply_feed(snapshot);
+                    }
+                    surface.load_media_page();
+                }
+            }
+            Some(PageEvent::FirstFrame(kind)) => {
+                if kind == surface.media_frame_kind() {
+                    surface.session.frame_submitted(generation, kind);
+                }
+            }
+            Some(PageEvent::MediaPaused(token)) => {
+                surface
+                    .session
+                    .confirm_media_pause(generation, token, Instant::now());
+            }
+            _ => {}
+        }
+        // Recording one receipt does not itself prove all four readiness facts.
+        // Reveal only on the actual Ready -> Running transition, regardless of receipt order.
+        if surface.session.start_presentation(Instant::now()) {
+            if let Err(error) = native::wallpaper_opacity(surface.hwnd(), 255) {
+                self.fail_preview(error.to_string());
+            } else {
+                if let Some(frame) = preview.frame.as_mut().filter(|_| preview.id == generation) {
+                    frame.reveal = Some((generation, Instant::now()));
+                }
+                surface.eval("window.hertzWallpaper && window.hertzWallpaper.reveal();");
+                self.send_settings_status(None, None);
+            }
+        }
+        true
+    }
+
+    pub(super) fn tick_preview(&mut self, target: &EventLoopWindowTarget<UserEvent>) {
+        let Some(preview) = self.preview.as_ref() else {
             return;
         };
         if preview.cancel.load(Ordering::Acquire)
@@ -209,125 +603,57 @@ impl App {
             self.close_preview();
             return;
         }
-        let result = (|| -> Result<WallpaperSurface> {
-            let draft = self
-                .settings_drafts
-                .get(preview.owner, &preview.draft_id, preview.draft_revision)
-                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-            draft
-                .check_apply(draft.base_revision, &self.config)
-                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-            let media = result.map_err(|error| anyhow::anyhow!(error.to_string()))?;
-            let owner = self
-                .settings
-                .as_ref()
-                .expect("settings owner")
-                .window
-                .hwnd() as HWND;
-            let mut surface = create_presentation(
-                target,
-                self.proxy.clone(),
-                id,
-                preview.draft_revision,
-                preview.configuration.clone(),
-                preview.monitor.clone(),
-                PresentationWindow::Preview { owner },
-            )?;
-            if let Err(error) = surface.session.admit_media(
-                id,
-                media,
-                crate::wallpaper::budget::global(),
-                &surface._media_access,
-                format!("preview-{}", preview.lease_id),
-            ) {
-                self.wallpaper_retiring
-                    .push(RetiringWallpaper::new(surface));
-                return Err(anyhow::anyhow!(error.to_string()));
-            }
-            Ok(surface)
-        })();
-        match result {
-            Ok(surface) => {
-                let preview = self.media_preview.as_mut().expect("preview owner");
-                preview.surface = Some(surface);
-                preview.heartbeat_at = Instant::now();
-            }
-            Err(error) => self.fail_media_preview(format!("媒体预览未能呈现：{error}")),
-        }
-    }
-
-    fn fail_media_preview(&mut self, message: String) {
-        self.close_preview();
-        self.send_settings_status(Some(&message), None);
-    }
-
-    pub(super) fn handle_media_preview_page(&mut self, generation: u64, event: &str) -> bool {
-        let Some(preview) = self
-            .media_preview
-            .as_mut()
-            .filter(|preview| preview.id == generation)
-        else {
-            return false;
-        };
-        if preview.lease_until <= Instant::now() || preview.owner != self.settings_generation {
-            self.close_preview();
-            return true;
-        }
-        let Some(surface) = preview.surface.as_mut() else {
-            return true;
-        };
-        if let Some(clock) = parse_page_clock(event) {
-            surface.page_clock = Some(clock);
-            return true;
-        }
-        if event.starts_with("wallpaper_heartbeat ") {
-            preview.heartbeat_at = Instant::now();
-            return true;
-        }
-        if event.starts_with("wallpaper_media_failed ") || event == "wallpaper_mount_failed" {
-            self.fail_media_preview(format!(
-                "媒体预览加载失败：{}",
-                event.chars().take(256).collect::<String>()
-            ));
-            return true;
-        }
-        match surface.binding.parse(event) {
-            Some(PageEvent::Handshake) => {
-                if surface.session.page_handshake(generation) {
-                    surface.load_media_page();
-                }
-            }
-            Some(PageEvent::FirstFrame(kind)) => {
-                let expected = surface.media_frame_kind();
-                if kind == expected && surface.session.frame_submitted(generation, kind) {
-                    surface.session.start_presentation(Instant::now());
-                    if let Err(error) = native::wallpaper_opacity(surface.hwnd(), 255) {
-                        self.fail_media_preview(error.to_string());
-                    } else {
-                        self.send_settings_status(None, None);
-                    }
-                }
-            }
-            _ => {}
-        }
-        true
-    }
-
-    pub(super) fn tick_media_preview(&mut self) {
-        let Some(preview) = self.media_preview.as_ref() else {
-            return;
-        };
-        if preview.lease_until <= Instant::now()
-            || self.settings.is_none()
-            || !policy::preview_pause_reasons(
-                &preview.configuration,
-                self.policy.session_unavailable,
-                self.policy.display_off,
-                self.wallpaper_power,
-            )
-            .is_empty()
+        if preview
+            .frame
+            .as_ref()
+            .is_some_and(|frame| frame.hold.expired())
         {
-            self.close_preview();
+            self.fail_preview_capture("预览静态采集超时，保留原画面".into());
+            return;
+        }
+        if preview
+            .frame
+            .as_ref()
+            .is_some_and(|frame| frame.window.as_ref().is_some_and(|window| !window.alive()))
+        {
+            self.fail_preview_capture("预览静态窗口已关闭，请重新预览".into());
+            return;
+        }
+        if preview.frame.as_ref().is_some_and(|frame| {
+            frame
+                .reveal
+                .is_some_and(|(_, at)| at.elapsed() > Duration::from_secs(3))
+        }) {
+            self.fail_preview("新预览未确认显示，继续保留静态画面".into());
+            return;
+        }
+        if preview.error.is_some() {
+            return;
+        }
+        if preview.configuration.follows_hertz() && preview.prepared.is_none() {
+            let desired = crate::wallpaper::follow::resolve(
+                &preview.configuration,
+                self.wallpaper_last.as_ref(),
+            );
+            if preview
+                .surface
+                .as_ref()
+                .is_some_and(|surface| surface.runtime_builtin != desired)
+            {
+                self.wallpaper_generation += 1;
+                let preview = self.preview.as_mut().expect("preview");
+                preview.id = self.wallpaper_generation;
+                if let Some(frame) = &mut preview.frame {
+                    frame.reveal = None;
+                }
+                preview.prepared = Some(PreviewContent::Builtin);
+            }
+        }
+        let preview = self.preview.as_ref().expect("preview");
+        if preview.prepared.is_some() {
+            if let Err(error) = self.stage_preview(target) {
+                self.fail_preview(format!("预览未能呈现：{error}"));
+            }
             return;
         }
         if let Some(surface) = preview.surface.as_ref() {
@@ -335,37 +661,53 @@ impl App {
             if size.width != preview.monitor.width as u32
                 || size.height != preview.monitor.height as u32
             {
-                self.fail_media_preview("预览窗口尺寸已变化，请重新预览".into());
+                self.fail_preview("预览窗口尺寸已变化，请重新预览".into());
             } else if (!surface.first_frame_ready()
                 && surface.created_at.elapsed() > HEARTBEAT_STALE)
                 || (surface.first_frame_ready() && preview.heartbeat_at.elapsed() > HEARTBEAT_STALE)
             {
-                self.fail_media_preview("媒体预览未在期限内提交首帧或心跳".into());
+                self.fail_preview("预览未在期限内提交首帧或心跳".into());
             }
+        } else if let Err(error) = self.stage_preview(target) {
+            self.fail_preview(format!("预览未能呈现：{error}"));
         }
     }
 
     pub(super) fn preview_active(&self) -> bool {
-        self.preview.is_some() || self.media_preview.is_some()
+        self.preview.is_some()
     }
     pub(super) fn preview_lease(&self) -> Option<&str> {
         self.preview
             .as_ref()
             .map(|preview| preview.lease_id.as_str())
-            .or_else(|| {
-                self.media_preview
-                    .as_ref()
-                    .map(|preview| preview.lease_id.as_str())
-            })
+    }
+    pub(super) fn preview_surface(&self) -> Option<&WallpaperSurface> {
+        self.preview.as_ref()?.surface.as_ref()
+    }
+    pub(super) fn renew_preview(&mut self, lease: Option<&str>) {
+        if let Some(preview) = self.preview.as_mut().filter(|preview| {
+            Some(preview.lease_id.as_str()) == lease && preview.lease_until > Instant::now()
+        }) {
+            preview.lease_until = Instant::now() + PREVIEW_LEASE;
+            self.send_settings_status(None, None);
+        } else {
+            self.send_settings_status(Some("预览租约已过期或不匹配"), None);
+        }
     }
     pub(super) fn preview_diagnostics(&self) -> serde_json::Value {
-        let Some(preview) = self.media_preview.as_ref() else {
+        let Some(preview) = self.preview.as_ref() else {
             return serde_json::Value::Null;
         };
         let surface = preview.surface.as_ref();
-        serde_json::json!({"kind":"media","preparing":surface.is_none(),"leaseId":preview.lease_id,
-            "generation":preview.id,"firstFrameReady":surface.is_some_and(WallpaperSurface::first_frame_ready),
-            "binding":surface.map(|surface| &surface.binding),"width":preview.monitor.width,"height":preview.monitor.height,
-            "selection":preview.configuration.main().selection})
+        serde_json::json!({"kind":if preview.configuration.builtin().is_some() {"builtin"} else {"media"},
+            "preparing":surface.is_none(),"leaseId":preview.lease_id,"generation":preview.id,
+            "firstFrameReady":surface.is_some_and(|surface| surface.binding.generation() == preview.id && surface.first_frame_ready()),"binding":surface.map(|surface| &surface.binding),
+            "handoff":preview.frame.as_ref().map(Handoff::diagnostics),"error":preview.error,
+            "runtimeBuiltin":preview.frame.as_ref().and_then(|frame| frame.runtime_builtin.as_ref()).or_else(|| surface.and_then(|surface| surface.runtime_builtin.as_ref())),
+            "mediaAllocation":surface.and_then(|surface| surface.session.media_allocation()),
+            "glAllocation":surface.and_then(|surface| surface.session.gl()).and_then(|gl| gl.snapshot()),
+            "glLimits":surface.and_then(|surface| surface.session.gl()).map(|gl| &gl.limits),
+            "width":preview.monitor.width,"height":preview.monitor.height,"selection":preview.configuration.main().selection,
+            "configuredFps":preview.configured_fps,"effectiveFps":preview.configuration.presentation().fps})
     }
 }

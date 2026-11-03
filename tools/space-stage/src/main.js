@@ -35,6 +35,7 @@ export const register = definition => registry.register(definition);
 export const resolveId = id => registry.resolve(id) || null;
 export const normalizeState = (id, state) => registry.normalizeState(id, state);
 export { normalizeQualityMode };
+export { PROFILES as qualityProfiles } from './quality.js';
 
 function rigPose(pose) {
   if (!pose) return null;
@@ -56,7 +57,7 @@ export function create(canvas, options = {}) {
   if (!canvas || typeof canvas.addEventListener !== 'function') throw new Error('Stage requires a canvas');
   const quality = createQuality(options.qualityMode, options.deviceTier);
   const lifetime = createScope();
-  const spatialResources = createSpatialResources(THREE, options.onInvalidate, url => services.resolveCover ? services.resolveCover(url) : url);
+  const spatialResources = createSpatialResources(THREE, options.onInvalidate, (url, signal) => services.resolveCover ? services.resolveCover(url, signal) : url);
   lifetime.defer(() => spatialResources.dispose());
   let renderer;
   try { renderer = new THREE.WebGLRenderer({ canvas, antialias: false, powerPreference: 'high-performance' }); }
@@ -79,7 +80,7 @@ export function create(canvas, options = {}) {
       textures: info.memory.textures, programs: info.programs ? info.programs.length : 0,
       physicalPixels: canvas.width * canvas.height, memorySource: 'tracked-resource-estimate',
       ...scoped, resources: scoped.resources + lyricStats.resources, estimatedBytes: scoped.estimatedBytes + lyricStats.estimatedBytes + shared.bytes + post.bytes,
-      textTextures: shared.textTextures, coverTextures: shared.coverTextures, tasks: scoped.tasks + lyricStats.tasks + shared.queued,
+      textTextures: shared.textTextures, coverTextures: shared.coverTextures, tasks: scoped.tasks + lyricStats.tasks + shared.queued + shared.coverLoads,
       sceneStats: active?.instance?.stats?.() || null };
   }
   function notify() { if (typeof options.onStatus === 'function') options.onStatus(stats()); }
@@ -128,7 +129,8 @@ export function create(canvas, options = {}) {
   function resize(w, h) {
     if (disposed) return;
     width = Math.max(2, Math.floor(Number(w) || 2)); height = Math.max(2, Math.floor(Number(h) || 2));
-    renderer.setPixelRatio(quality.dpr(width, height, globalThis.devicePixelRatio || 1));
+    const nativePixels = globalThis.HertzGlBudget?.limits?.pixelBudget || Infinity;
+    renderer.setPixelRatio(Math.min(quality.dpr(width, height, globalThis.devicePixelRatio || 1), Math.sqrt(nativePixels / (width * height))));
     renderer.setSize(width, height, false);
     quality.warmup(null);
     if (active) {

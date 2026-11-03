@@ -55,12 +55,14 @@ pub struct AssetStore {
 pub(crate) struct PinnedMedia {
     pub(crate) entry: hertz_wallpaper::VerifiedEntry,
     pub(crate) path: PathBuf,
-    _pins: [std::fs::File; 2],
+    _package_pin: Option<std::fs::File>,
+    _file_pin: std::fs::File,
     // 派生输入的目录租约随所有 Broker/流持有者退出，不能随准备描述符提前归还。
     _derived_lease: Option<Arc<std::fs::File>>,
 }
 
 /// 结构与摘要已复核，真实解码期间持续固定这份字节。
+#[derive(Clone)]
 pub(crate) struct DecodeInput {
     pub(crate) package_hash: String,
     pub(crate) media: Arc<PinnedMedia>,
@@ -101,6 +103,22 @@ impl AssetStore {
         self.root.join("packages").join(package_hash)
     }
 
+    /// 删除已卸载的不可变包目录。调用方必须先确认没有配置/草稿/预览引用，
+    /// 并在整个操作期间持有内容写门；活动读者会让删除失败而不是静默留下半包。
+    pub(crate) async fn remove_installed(&self, package_hash: &str) -> Result<()> {
+        if package_hash.len() != 64 || !package_hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(JobError::invalid_input("包 hash 格式无效"));
+        }
+        match tokio::fs::remove_dir_all(self.package_dir(package_hash)).await {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(JobError::new(
+                "asset_in_use",
+                format!("包目录仍被占用，删除未完成：{error}"),
+            )),
+        }
+    }
+
     pub(crate) fn root(&self) -> &Path {
         &self.root
     }
@@ -112,13 +130,63 @@ impl AssetStore {
         entry: hertz_wallpaper::VerifiedEntry,
         lease: Option<Arc<std::fs::File>>,
     ) -> Result<DecodeInput> {
+        Self::pin_derived(
+            &input.package_hash,
+            input
+                .media
+                ._package_pin
+                .as_ref()
+                .map(std::fs::File::try_clone)
+                .transpose()
+                .map_err(|error| JobError::io(error.to_string()))?,
+            path,
+            entry,
+            lease,
+        )
+    }
+
+    /// A verified cached JPEG can outlive its original video. It never grants access to that video.
+    pub(super) fn pin_poster(
+        &self,
+        package_hash: &str,
+        path: PathBuf,
+        entry: hertz_wallpaper::VerifiedEntry,
+        lease: Arc<std::fs::File>,
+    ) -> Result<DecodeInput> {
+        if !hertz_wallpaper::valid_sha256_hex(package_hash)
+            || entry.mime.as_deref() != Some("image/jpeg")
+            || entry.bytes > 24 * 1024
+        {
+            return Err(JobError::invalid_input("静态封面身份或大小无效"));
+        }
+        Self::pin_derived(package_hash, None, path, entry, Some(lease))
+    }
+
+    fn pin_derived(
+        package_hash: &str,
+        package_pin: Option<std::fs::File>,
+        path: PathBuf,
+        entry: hertz_wallpaper::VerifiedEntry,
+        lease: Option<Arc<std::fs::File>>,
+    ) -> Result<DecodeInput> {
         let file = open_immutable(&path)?;
+        if file
+            .metadata()
+            .map_err(|error| JobError::io(error.to_string()))?
+            .len()
+            != entry.bytes
+        {
+            return Err(JobError::new("hash_mismatch", "派生图固定前大小发生变化"));
+        }
         let mut reader = file
             .try_clone()
             .map_err(|error| JobError::io(error.to_string()))?;
         let mut digest = Sha256::new();
-        let bytes = std::io::copy(&mut reader, &mut digest)
-            .map_err(|error| JobError::io(error.to_string()))?;
+        let bytes = std::io::copy(
+            &mut (&mut reader).take(entry.bytes.saturating_add(1)),
+            &mut digest,
+        )
+        .map_err(|error| JobError::io(error.to_string()))?;
         if bytes != entry.bytes || format!("{:x}", digest.finalize()) != entry.sha256 {
             return Err(JobError::new("hash_mismatch", "派生图固定前字节发生变化"));
         }
@@ -128,17 +196,13 @@ impl AssetStore {
         let metadata = super::media::probe(&mut reader)
             .map_err(|error| JobError::new(error.code, error.message))?;
         Ok(DecodeInput {
-            package_hash: input.package_hash.clone(),
+            package_hash: package_hash.to_string(),
             metadata,
             media: Arc::new(PinnedMedia {
                 entry,
                 path,
-                _pins: [
-                    input.media._pins[0]
-                        .try_clone()
-                        .map_err(|error| JobError::io(error.to_string()))?,
-                    file,
-                ],
+                _package_pin: package_pin,
+                _file_pin: file,
                 _derived_lease: lease,
             }),
         })
@@ -385,12 +449,12 @@ impl AssetStore {
                     media: Arc::new(PinnedMedia {
                         entry: entry.clone(),
                         path: files.join(path),
-                        _pins: [
+                        _package_pin: Some(
                             original
                                 .try_clone()
                                 .map_err(|error| JobError::io(error.to_string()))?,
-                            file,
-                        ],
+                        ),
+                        _file_pin: file,
                         _derived_lease: None,
                     }),
                 });
@@ -551,7 +615,8 @@ impl AssetStore {
         Ok(Some(PinnedMedia {
             entry,
             path: path_buf,
-            _pins: [original, projection],
+            _package_pin: Some(original),
+            _file_pin: projection,
             _derived_lease: None,
         }))
     }
@@ -811,5 +876,26 @@ mod tests {
         .is_err());
         drop(pinned);
         assert!(std::fs::write(projection, b"tampered").is_ok());
+    }
+
+    #[tokio::test]
+    async fn remove_installed_rejects_invalid_hash_and_removes_only_the_named_package() {
+        let (store, _dir) = store("remove-installed");
+        let keep = hash_of(7);
+        let drop = hash_of(8);
+        for (name, bytes) in [(&keep, 11u32), (&drop, 22u32)] {
+            let dir = store.package_dir(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("original.hwpkg"), vec![0; bytes as usize]).unwrap();
+        }
+        assert!(store.remove_installed("../escape").await.is_err());
+        store.remove_installed(&drop).await.unwrap();
+        assert!(!store.package_dir(&drop).exists());
+        assert!(store.package_dir(&keep).exists());
+        assert!(store.remove_installed(&drop).await.is_ok(), "重复删除幂等");
+    }
+
+    fn hash_of(tag: u8) -> String {
+        format!("{tag:064x}")
     }
 }

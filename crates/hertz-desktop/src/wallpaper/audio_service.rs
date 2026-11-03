@@ -366,14 +366,18 @@ fn run(shared: Arc<Shared>, mut backend: Box<dyn Backend>) {
             last_analysis = Instant::now();
             if let Some(capture) = capture.as_ref() {
                 let info = capture.info();
-                let (fresh, dropped) = {
+                let (stamp, dropped) = {
                     let mut ring = ring.lock().unwrap();
                     (
-                        info.is_some() && ring.take_window(&mut window),
+                        info.as_ref()
+                            .and_then(|_| ring.take_window_at(&mut window, Instant::now())),
                         ring.dropped(),
                     )
                 };
-                let frame = if fresh {
+                let frame = if let Some(stamp) = stamp {
+                    if stamp.discontinuity {
+                        analyzer.reset();
+                    }
                     let mut bands = [0.0; BANDS];
                     analyzer.analyze(&window, &mut bands);
                     sequence += 1;
@@ -381,7 +385,7 @@ fn run(shared: Arc<Shared>, mut backend: Box<dyn Backend>) {
                         generation: current_generation,
                         seq: sequence,
                         bands,
-                        captured_at: Instant::now(),
+                        captured_at: stamp.captured_at,
                     })
                 } else {
                     None

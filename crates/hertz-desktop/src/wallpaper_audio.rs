@@ -89,10 +89,10 @@ impl App {
     fn preview_audio_device(&self) -> Option<AudioDevice> {
         self.preview
             .as_ref()
-            .filter(|preview| {
-                preview.ready && !preview.paused && preview.lease_until > Instant::now()
-            })
-            .and_then(|preview| system_device(&preview.config))
+            .filter(|preview| preview.lease_until > Instant::now())
+            .and_then(|preview| preview.surface.as_ref())
+            .filter(|surface| surface.first_frame_ready())
+            .and_then(|surface| system_device(&surface.configuration))
     }
     pub(super) fn validate_preview_audio(
         &self,
@@ -154,25 +154,35 @@ impl App {
         } else {
             self.wallpaper_audio_dispatch.prepare(0, None, (0, 0));
         }
-        if let Some(preview) = self.preview.as_ref() {
-            let target = (preview.ready && system_device(&preview.config).is_some())
-                .then(|| format!("preview:{}:{}", self.settings_generation, preview.lease_id));
+        if let Some(surface) = self
+            .preview
+            .as_ref()
+            .and_then(|preview| preview.surface.as_ref())
+        {
+            let target = (surface.first_frame_ready()
+                && system_device(&surface.configuration).is_some())
+            .then(|| format!("preview:{}", surface.binding.generation()));
             let frame = if preview_allowed { frame } else { None };
             if let Some(token) = self.wallpaper_audio_dispatch.prepare(
                 1,
                 target,
                 (state.generation, frame.map_or(0, |frame| frame.seq)),
             ) {
-                let payload = audio_payload(&state, frame, preview.page_clock, &preview.config);
-                let script = serde_json::to_string(&format!(
+                let payload =
+                    audio_payload(&state, frame, surface.page_clock, &surface.configuration);
+                let script = format!(
                     "window.hertzWallpaper && window.hertzWallpaper.applyAudio({payload});"
-                ))
-                .unwrap();
-                let lease = serde_json::to_string(&preview.lease_id).unwrap();
+                );
                 let proxy = self.proxy.clone();
-                if preview.webview.evaluate_script_with_callback(&format!("window.hertzWallpaperSettings && window.hertzWallpaperSettings.evalAudio({lease}, {script});"), move |_| {
-                    let _ = proxy.send_event(UserEvent::WallpaperAudioDelivered(1, token));
-                }).is_err() { self.wallpaper_audio_dispatch.acknowledge(1, token); }
+                if surface
+                    .webview
+                    .evaluate_script_with_callback(&script, move |_| {
+                        let _ = proxy.send_event(UserEvent::WallpaperAudioDelivered(1, token));
+                    })
+                    .is_err()
+                {
+                    self.wallpaper_audio_dispatch.acknowledge(1, token);
+                }
             }
         } else {
             self.wallpaper_audio_dispatch.prepare(1, None, (0, 0));

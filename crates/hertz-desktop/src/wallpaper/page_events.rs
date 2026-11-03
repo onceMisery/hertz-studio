@@ -18,7 +18,10 @@ pub(crate) struct PageBinding {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PageEvent {
     Handshake,
+    Revealed,
     FirstFrame(FrameKind),
+    MediaPosition(u64),
+    MediaPaused(u64),
 }
 
 #[derive(Deserialize)]
@@ -28,13 +31,18 @@ struct Receipt {
     generation: u64,
     event: Event,
     frame_kind: Option<Backend>,
+    position_ms: Option<u64>,
+    pause_token: Option<u64>,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 enum Event {
     PageHandshake,
+    Revealed,
     FirstFrame,
+    MediaPosition,
+    MediaPaused,
 }
 
 #[derive(Deserialize)]
@@ -56,6 +64,9 @@ impl PageBinding {
     pub(crate) fn generation(&self) -> u64 {
         self.generation
     }
+    pub(crate) fn session_id(&self) -> &str {
+        &self.session_id
+    }
 
     pub(crate) fn initialization_script(&self) -> String {
         format!("Object.defineProperty(window,'__hertzWallpaperBinding',{{value:Object.freeze({}),writable:false,configurable:false}});", serde_json::to_string(self).expect("native binding"))
@@ -70,13 +81,41 @@ impl PageBinding {
             return None;
         }
         Some(match receipt.event {
-            Event::PageHandshake if receipt.frame_kind.is_none() => PageEvent::Handshake,
+            Event::PageHandshake
+                if receipt.frame_kind.is_none()
+                    && receipt.position_ms.is_none()
+                    && receipt.pause_token.is_none() =>
+            {
+                PageEvent::Handshake
+            }
             Event::PageHandshake => return None,
-            Event::FirstFrame => PageEvent::FirstFrame(match receipt.frame_kind? {
-                Backend::Image => FrameKind::Image,
-                Backend::Video => FrameKind::Video,
-                Backend::Gl => FrameKind::Gl,
-            }),
+            Event::Revealed
+                if receipt.frame_kind.is_none()
+                    && receipt.position_ms.is_none()
+                    && receipt.pause_token.is_none() =>
+            {
+                PageEvent::Revealed
+            }
+            Event::FirstFrame if receipt.position_ms.is_none() && receipt.pause_token.is_none() => {
+                PageEvent::FirstFrame(match receipt.frame_kind? {
+                    Backend::Image => FrameKind::Image,
+                    Backend::Video => FrameKind::Video,
+                    Backend::Gl => FrameKind::Gl,
+                })
+            }
+            Event::MediaPosition
+                if receipt.frame_kind.is_none() && receipt.pause_token.is_none() =>
+            {
+                PageEvent::MediaPosition(receipt.position_ms?)
+            }
+            Event::MediaPaused if receipt.frame_kind.is_none() && receipt.position_ms.is_none() => {
+                let token = receipt.pause_token?;
+                if token == 0 {
+                    return None;
+                }
+                PageEvent::MediaPaused(token)
+            }
+            _ => return None,
         })
     }
 }
@@ -125,6 +164,89 @@ mod tests {
             "\"event\":\"pageHandshake\",\"extra\":true",
         ] {
             assert_eq!(binding.parse(&message(&binding, invalid)), None);
+        }
+    }
+
+    #[test]
+    fn playback_positions_require_identity_and_integer_values_without_readiness_fields() {
+        let binding = PageBinding::new(9).unwrap();
+        let position = message(&binding, "\"event\":\"mediaPosition\",\"positionMs\":1250");
+        assert_eq!(
+            binding.parse(&position),
+            Some(PageEvent::MediaPosition(1250))
+        );
+        assert_eq!(PageBinding::new(9).unwrap().parse(&position), None);
+        assert_eq!(PageBinding::new(10).unwrap().parse(&position), None);
+        for invalid in [
+            "\"event\":\"mediaPosition\"",
+            "\"event\":\"mediaPosition\",\"positionMs\":-1",
+            "\"event\":\"mediaPosition\",\"positionMs\":0.5",
+            "\"event\":\"mediaPosition\",\"positionMs\":5,\"frameKind\":\"video\"",
+            "\"event\":\"firstFrame\",\"frameKind\":\"video\",\"positionMs\":5",
+            "\"event\":\"pageHandshake\",\"positionMs\":5",
+        ] {
+            assert_eq!(binding.parse(&message(&binding, invalid)), None);
+        }
+    }
+
+    #[test]
+    fn pause_confirmation_requires_current_identity_and_positive_typed_token() {
+        let binding = PageBinding::new(11).unwrap();
+        let paused = message(&binding, "\"event\":\"mediaPaused\",\"pauseToken\":3");
+        assert_eq!(binding.parse(&paused), Some(PageEvent::MediaPaused(3)));
+        assert_eq!(PageBinding::new(11).unwrap().parse(&paused), None);
+        let next = PageBinding {
+            generation: 12,
+            ..binding.clone()
+        };
+        assert_eq!(next.parse(&paused), None);
+        for invalid in [
+            "\"event\":\"mediaPaused\"",
+            "\"event\":\"mediaPaused\",\"pauseToken\":0",
+            "\"event\":\"mediaPaused\",\"pauseToken\":-1",
+            "\"event\":\"mediaPaused\",\"pauseToken\":0.5",
+            "\"event\":\"mediaPaused\",\"pauseToken\":\"3\"",
+            "\"event\":\"mediaPaused\",\"pauseToken\":3,\"positionMs\":5",
+            "\"event\":\"mediaPaused\",\"pauseToken\":3,\"frameKind\":\"video\"",
+            "\"event\":\"mediaPosition\",\"positionMs\":5,\"pauseToken\":3",
+            "\"event\":\"firstFrame\",\"frameKind\":\"video\",\"pauseToken\":3",
+            "\"event\":\"pageHandshake\",\"pauseToken\":3",
+        ] {
+            assert_eq!(
+                binding.parse(&message(&binding, invalid)),
+                None,
+                "{invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn reveal_requires_current_identity_and_no_unrelated_payload() {
+        let binding = PageBinding::new(12).unwrap();
+        let reveal = message(&binding, "\"event\":\"revealed\"");
+        assert_eq!(binding.parse(&reveal), Some(PageEvent::Revealed));
+        assert_eq!(PageBinding::new(12).unwrap().parse(&reveal), None);
+        assert_eq!(
+            PageBinding {
+                generation: 13,
+                ..binding.clone()
+            }
+            .parse(&reveal),
+            None
+        );
+        for field in [
+            "\"frameKind\":\"gl\"",
+            "\"positionMs\":0",
+            "\"pauseToken\":1",
+            "\"extra\":true",
+        ] {
+            assert_eq!(
+                binding.parse(&message(
+                    &binding,
+                    &format!("\"event\":\"revealed\",{field}")
+                )),
+                None
+            );
         }
     }
 }

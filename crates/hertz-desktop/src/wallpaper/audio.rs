@@ -17,7 +17,10 @@
 //! （交织多声道→单声道平均）与环形缓冲写入，不分配、不写日志；缓冲最多
 //! 250 ms，过载丢最旧并计数；分析输出 ≤30 Hz 由消费节拍保证。
 
-use std::sync::Arc;
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use rustfft::FftPlanner;
 
@@ -27,6 +30,7 @@ pub(crate) const FFT_SIZE: usize = 2048;
 pub(crate) const BANDS: usize = 64;
 /// 环形缓冲时长上限（§11.3：最多 250 ms，过载丢最旧）。
 const RING_MS: u64 = 250;
+const RING_AGE: Duration = Duration::from_millis(RING_MS);
 /// 峰值归一底：低于此认为近似静音，不做放大（与播放器一致）。
 const PEAK_FLOOR: f32 = 0.02;
 /// 平滑系数：快攻慢放读作"音乐感"（与播放器一致）。
@@ -127,6 +131,13 @@ pub(crate) struct SampleRing {
     len: usize,
     pending: usize,
     dropped: u64,
+    captured_at: Option<Instant>,
+    discontinuity: bool,
+}
+
+pub(crate) struct WindowStamp {
+    pub captured_at: Instant,
+    pub discontinuity: bool,
 }
 
 impl SampleRing {
@@ -139,6 +150,8 @@ impl SampleRing {
             len: 0,
             pending: 0,
             dropped: 0,
+            captured_at: None,
+            discontinuity: true,
         }
     }
 
@@ -150,13 +163,30 @@ impl SampleRing {
         self.len
     }
 
-    /// 被过载丢弃的样本累计（设备切换时归零，按代际记账）。
+    /// 过载、过期或中断时丢弃的未消费样本累计（设备切换时归零）。
     pub(crate) fn dropped(&self) -> u64 {
         self.dropped
     }
 
-    /// 追加单声道样本；容量不足覆盖最旧并计数。
+    #[cfg(test)]
     pub(crate) fn push(&mut self, mono: &[f32]) {
+        self.push_at(mono, Instant::now());
+    }
+
+    /// Timestamp the newest sample at capture, never at analysis or dispatch.
+    pub(crate) fn push_at(&mut self, mono: &[f32], captured_at: Instant) {
+        if mono.is_empty() {
+            return;
+        }
+        if let Some(previous) = self.captured_at {
+            if captured_at <= previous {
+                return;
+            }
+            if captured_at.duration_since(previous) > RING_AGE {
+                self.discontinue();
+            }
+        }
+        self.captured_at = Some(captured_at);
         for &sample in mono {
             if self.len < self.samples.len() {
                 self.len += 1;
@@ -172,9 +202,26 @@ impl SampleRing {
     }
 
     /// 取最新 FFT 窗并确认消费；保留滑窗历史，没有新样本时不重复刷新频谱。
+    #[cfg(test)]
     pub(crate) fn take_window(&mut self, out: &mut [f32; FFT_SIZE]) -> bool {
+        self.take_window_at(out, Instant::now()).is_some()
+    }
+
+    pub(crate) fn take_window_at(
+        &mut self,
+        out: &mut [f32; FFT_SIZE],
+        now: Instant,
+    ) -> Option<WindowStamp> {
+        let captured_at = self.captured_at?;
+        if now
+            .checked_duration_since(captured_at)
+            .is_none_or(|age| age > RING_AGE)
+        {
+            self.discontinue();
+            return None;
+        }
         if self.len < FFT_SIZE || self.pending == 0 {
-            return false;
+            return None;
         }
         let cap = self.samples.len();
         let newest = (self.write_pos + cap - 1) % cap;
@@ -183,14 +230,25 @@ impl SampleRing {
             *slot = self.samples[idx];
         }
         self.pending = 0;
-        true
+        Some(WindowStamp {
+            captured_at,
+            discontinuity: std::mem::take(&mut self.discontinuity),
+        })
+    }
+
+    /// A packet gap must not splice old PCM or filter history into the next window.
+    pub(crate) fn discontinue(&mut self) {
+        self.dropped += self.pending as u64;
+        self.write_pos = 0;
+        self.len = 0;
+        self.pending = 0;
+        self.captured_at = None;
+        self.discontinuity = true;
     }
 
     /// 清空（§11.3 切换顺序：代际递增后清空频谱和滤波，丢弃计数一并归零）。
     pub(crate) fn clear(&mut self) {
-        self.write_pos = 0;
-        self.len = 0;
-        self.pending = 0;
+        self.discontinue();
         self.dropped = 0;
     }
 }

@@ -8,6 +8,7 @@
   var nativeBinding = window.__hertzWallpaperBinding || null;
   var firstFrameKind = null;
   var revealed = !nativeBinding;
+  var revealReceiptSent = false;
   if (nativeBinding && host) host.style.visibility = 'hidden';
   var runtime = window.HertzStageRuntime || {};
   var zodiac = window.ZodiacStagePure || runtime.ZodiacStagePure || null;
@@ -33,6 +34,7 @@
     audioInput: { kind: 'hertz', gain: 1, attackMs: 40, releaseMs: 250 },
     brightness: 1,
     motion: 1,
+    pointer: false,
     quality: 'low',
     refreshHz: 60
   };
@@ -47,6 +49,7 @@
   var enabled = false;
   var error = null;
   var selectToken = 0;
+  var pendingCapture = null;
   var raf = 0;
   var last = 0;
   var cap = 30;
@@ -70,6 +73,142 @@
   var MEDIA_HEARTBEAT_MS = 2000;
   var media = null;
   var mediaToken = 0;
+  var nativePointer = window.__hertzWallpaperNativePointer === true;
+  var reducedPointer = window.matchMedia ? window.matchMedia('(prefers-reduced-motion: reduce)') : null;
+  var pointer = { active: false, x: 0.5, y: 0.5, at: 0, emittedAt: -Infinity, clickSerial: 0 };
+  var pointerWaves = [], pointerCanvas = null, pointerContext = null, pointerRaf = 0, pointerFrames = 0;
+  var pointerMoves = 0, pointerClicks = 0, localClickSerial = 0;
+
+  function pointerAllowed() {
+    var params = config.source === 'follow' && followSpace ? followSpace.params : config.params;
+    return enabled && config.pointer && config.motion > 0 && !lost && !document.hidden
+      && !(reducedPointer && reducedPointer.matches) && !(params && params.reduced)
+      && (media ? media.state === 'ready' : mounted);
+  }
+
+  function clearPointer() {
+    pointer.active = false;
+    pointer.emittedAt = -Infinity;
+    pointerWaves.length = 0;
+    if (pointerRaf) cancelAnimationFrame(pointerRaf);
+    pointerRaf = 0;
+    pointerFrames = 0;
+    if (pointerCanvas) pointerCanvas.remove();
+    pointerCanvas = pointerContext = null;
+  }
+
+  function pointerSurface() {
+    if (pointerCanvas) return true;
+    pointerCanvas = document.createElement('canvas');
+    pointerCanvas.id = 'wallpaper-pointer-effects';
+    pointerCanvas.setAttribute('aria-hidden', 'true');
+    pointerCanvas.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:1';
+    // A bounded transparent surface, including on 4K/high-DPI desktops.
+    var scale = Math.min(window.devicePixelRatio || 1, 1.5, 1920 / innerWidth, 1080 / innerHeight);
+    pointerCanvas.width = Math.max(1, Math.round(innerWidth * scale));
+    pointerCanvas.height = Math.max(1, Math.round(innerHeight * scale));
+    pointerContext = pointerCanvas.getContext('2d');
+    if (!pointerContext) { clearPointer(); return false; }
+    pointerContext.setTransform(scale, 0, 0, scale, 0, 0);
+    host.appendChild(pointerCanvas);
+    return true;
+  }
+
+  function addWave(x, y, now, click) {
+    if (!pointerSurface()) return;
+    if (pointerWaves.length >= 24) pointerWaves.shift();
+    pointerWaves.push({ x: x, y: y, at: now, click: click });
+  }
+
+  function drawPointer(now) {
+    if (!pointerAllowed()) { clearPointer(); return; }
+    if (now - pointer.at > 250) pointer.active = false;
+    if (!pointerContext) return;
+    var ctx = pointerContext;
+    ctx.clearRect(0, 0, innerWidth, innerHeight);
+    for (var i = pointerWaves.length - 1; i >= 0; i--) {
+      var wave = pointerWaves[i], age = (now - wave.at) / (wave.click ? 1100 : 780);
+      if (age >= 1) { pointerWaves.splice(i, 1); continue; }
+      var x = wave.x * innerWidth, y = wave.y * innerHeight;
+      var fade = Math.pow(1 - age, 1.7);
+      var radius = 4 + (wave.click ? 128 : 48) * (1 - Math.pow(1 - age, 2));
+      var rings = wave.click ? 3 : 2;
+      for (var ring = 0; ring < rings; ring++) {
+        var r = radius - ring * (wave.click ? 15 : 8);
+        if (r <= 1) continue;
+        // Dark refraction edge and a narrow cool highlight stay legible on light and dark art.
+        ctx.beginPath(); ctx.arc(x, y + 1.2, r, 0, Math.PI * 2);
+        ctx.strokeStyle = 'rgba(5,25,38,' + fade * (wave.click ? 0.30 : 0.16) + ')';
+        ctx.lineWidth = wave.click ? 3 : 2; ctx.stroke();
+        ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2);
+        ctx.strokeStyle = 'rgba(192,234,249,' + fade * (wave.click ? 0.72 : 0.36) / (1 + ring * 0.55) + ')';
+        ctx.lineWidth = ring ? 0.8 : 1.3; ctx.stroke();
+      }
+      if (wave.click) {
+        var glow = ctx.createRadialGradient(x, y, 0, x, y, Math.max(1, radius * 0.7));
+        glow.addColorStop(0, 'rgba(205,240,255,' + fade * 0.13 + ')');
+        glow.addColorStop(1, 'rgba(205,240,255,0)');
+        ctx.fillStyle = glow; ctx.beginPath(); ctx.arc(x, y, radius * 0.7, 0, Math.PI * 2); ctx.fill();
+        // A short spray makes a press distinct from the quieter movement wake.
+        for (var dot = 0; dot < 8; dot++) {
+          var angle = dot * Math.PI / 4 + 0.2;
+          var distance = 8 + age * 92;
+          ctx.beginPath(); ctx.arc(x + Math.cos(angle) * distance, y + Math.sin(angle) * distance + age * age * 18,
+            Math.max(0.3, (1 - age) * 1.8), 0, Math.PI * 2);
+          ctx.fillStyle = 'rgba(220,245,255,' + fade * 0.72 + ')'; ctx.fill();
+        }
+      }
+    }
+  }
+
+  function mediaPointerLoop(now) {
+    pointerRaf = 0;
+    if (!pointerAllowed() || !media) { clearPointer(); return; }
+    if (++pointerFrames % gate.divisor === 0) drawPointer(now);
+    if (pointerWaves.length) pointerRaf = requestAnimationFrame(mediaPointerLoop);
+  }
+
+  function applyPointer(snapshot) {
+    if (!pointerAllowed()) { clearPointer(); return false; }
+    var now = performance.now();
+    if (!snapshot || snapshot.active !== true) { pointer.active = false; return false; }
+    function coordinate(value) { return Number.isFinite(value) && value >= 0 && value <= 1; }
+    if (!coordinate(snapshot.x) || !coordinate(snapshot.y)
+      || (Number.isFinite(snapshot.pageDispatchMs) && now - snapshot.pageDispatchMs > 250)) {
+      pointer.active = false; return false;
+    }
+    var dx = (snapshot.x - pointer.x) * innerWidth, dy = (snapshot.y - pointer.y) * innerHeight;
+    if (!pointer.active || (Math.hypot(dx, dy) >= 10 && now - pointer.emittedAt >= 45)) {
+      addWave(snapshot.x, snapshot.y, now, false);
+      pointerMoves++;
+      pointer.x = snapshot.x; pointer.y = snapshot.y; pointer.emittedAt = now;
+    }
+    pointer.active = true; pointer.at = now;
+    var click = snapshot.click;
+    if (click && Number.isSafeInteger(click.serial) && click.serial > pointer.clickSerial
+      && coordinate(click.x) && coordinate(click.y)) {
+      pointer.clickSerial = click.serial;
+      addWave(click.x, click.y, now, true);
+      pointerClicks++;
+    }
+    if (media && pointerWaves.length && !pointerRaf) pointerRaf = requestAnimationFrame(mediaPointerLoop);
+    return true;
+  }
+
+  function localPointer(event) {
+    if (nativePointer || event.isPrimary === false) return;
+    var click = event.type === 'pointerdown';
+    if (click && event.button !== 0) return;
+    var x = event.clientX / innerWidth, y = event.clientY / innerHeight;
+    applyPointer({ active: true, x: x, y: y, click: click ? { serial: ++localClickSerial, x: x, y: y } : null });
+  }
+  addEventListener('pointermove', localPointer);
+  addEventListener('pointerdown', localPointer);
+  addEventListener('pointerout', function (event) { if (!nativePointer && !event.relatedTarget) pointer.active = false; });
+  addEventListener('blur', function () { if (!nativePointer) clearPointer(); });
+  addEventListener('pagehide', clearPointer);
+  if (reducedPointer && reducedPointer.addEventListener) reducedPointer.addEventListener('change', clearPointer);
+  if (document.addEventListener) document.addEventListener('visibilitychange', clearPointer);
   var feed = {
     valid: false,
     playing: false,
@@ -119,10 +258,12 @@
     return true;
   }
 
-  function sessionEvent(event, kind) {
+  function sessionEvent(event, kind, positionMs, pauseToken) {
     if (!nativeBinding) return;
     var receipt = { sessionId: nativeBinding.sessionId, generation: nativeBinding.generation, event: event };
     if (kind) receipt.frameKind = kind;
+    if (positionMs != null) receipt.positionMs = positionMs;
+    if (pauseToken != null) receipt.pauseToken = pauseToken;
     notify('wallpaper_session ' + JSON.stringify(receipt));
   }
 
@@ -136,6 +277,10 @@
     if (nativeBinding && !firstFrameKind) return false;
     if (host) host.style.visibility = 'visible';
     revealed = true;
+    if (nativeBinding && !revealReceiptSent) {
+      revealReceiptSent = true;
+      requestAnimationFrame(function(){requestAnimationFrame(function(){sessionEvent('revealed');});});
+    }
     return true;
   }
 
@@ -162,11 +307,54 @@
   }
 
   function notify(message) {
-    if (window.parent !== window && window.parent.hertzWallpaperSettings) {
-      window.parent.hertzWallpaperSettings.previewEvent(message, window);
-      return;
-    }
     if (window.ipc && window.ipc.postMessage) window.ipc.postMessage(message);
+  }
+
+  function captureFrame() {
+    var request = pendingCapture;
+    if (!request) return;
+    pendingCapture = null;
+    clearTimeout(request.timer);
+    var receipt = { token: request.token, sessionId: request.sessionId, generation: request.generation, width: request.width, height: request.height };
+    var target = null;
+    try {
+      var source = media ? media.el : canvas;
+      if (!source || lost || (media && media.state !== 'ready')) throw new Error('capture_source_unavailable');
+      target = document.createElement('canvas');target.width=request.width;target.height=request.height;
+      var context = target.getContext('2d', { alpha:false, willReadFrequently:true });
+      if (!context) throw new Error('capture_context_unavailable');
+      context.fillStyle='#030405';context.fillRect(0,0,target.width,target.height);
+      context.filter='brightness('+config.brightness+')';
+      var sourceWidth=source.videoWidth||source.naturalWidth||source.width,sourceHeight=source.videoHeight||source.naturalHeight||source.height;
+      if (!(sourceWidth>0&&sourceHeight>0)) throw new Error('capture_empty_source');
+      if (media && media.fit!=='stretch') {
+        var ratio=media.fit==='contain'?Math.min(target.width/sourceWidth,target.height/sourceHeight):Math.max(target.width/sourceWidth,target.height/sourceHeight);
+        var width=sourceWidth*ratio,height=sourceHeight*ratio;
+        context.drawImage(source,(target.width-width)/2,(target.height-height)/2,width,height);
+      } else context.drawImage(source,0,0,target.width,target.height);
+      if(pointerCanvas)context.drawImage(pointerCanvas,0,0,target.width,target.height);
+      var rgba=context.getImageData(0,0,target.width,target.height).data,parts=[];
+      for(var at=0;at<rgba.length;at+=32768)parts.push(String.fromCharCode.apply(null,rgba.subarray(at,at+32768)));
+      receipt.rgba=btoa(parts.join(''));
+    } catch(failure) { receipt.error=String(failure).slice(0,128); }
+    finally { if(target){target.width=target.height=1;} }
+    notify('wallpaper_capture '+JSON.stringify(receipt));
+  }
+
+  // Issued only after the native capture workspace and bitmap have been reserved.
+  // GL readback runs directly after a real render, before its buffer is discarded.
+  function requestCapture(request) {
+    if (!nativeBinding || pendingCapture || !request || request.sessionId!==nativeBinding.sessionId || request.generation!==nativeBinding.generation
+      || !/^[0-9a-f]{32}$/.test(request.token) || !Number.isInteger(request.width) || request.width<1 || request.width>960
+      || !Number.isInteger(request.height) || request.height<1 || request.height>540) return false;
+    pendingCapture=Object.assign({},request);
+    pendingCapture.timer=setTimeout(function(){
+      if(!pendingCapture||pendingCapture.token!==request.token)return;
+      pendingCapture=null;
+      notify('wallpaper_capture '+JSON.stringify({token:request.token,sessionId:request.sessionId,generation:request.generation,width:request.width,height:request.height,error:'capture_frame_timeout'}));
+    },2000);
+    if(media)requestAnimationFrame(captureFrame);
+    return true;
   }
 
   function catalog() {
@@ -325,6 +513,7 @@
     // 整数分频帧门：只提交第 N 帧；rAF 仍持续用于心跳与 feed 时效。
     frameCount++;
     if (frameCount % gate.divisor !== 0) return;
+    drawPointer(now);
     var frameDt = pendingDt;
     pendingDt = 0;
     var bands = shapedAudio(now);
@@ -368,6 +557,7 @@
       if (submitted === true) {
         draws++;
         firstFrame('gl');
+        captureFrame();
       }
     } catch (failure) {
       error = String(failure);
@@ -382,11 +572,13 @@
   }
 
   function start(fps) {
+    if (window.HertzGlBudget && HertzGlBudget.limits) fps = Math.min(fps || cap, HertzGlBudget.limits.fps);
     cap = fps || cap;
     gate = computeGate(cap, config.refreshHz);
     resetGate();
     enabled = true;
     if (media) {
+      cancelMediaPauseCheck(media);
       applyMediaMotion(); // 当前呈现是媒体：恢复播放，不重复挂场景
       return true;
     }
@@ -395,21 +587,27 @@
     return true;
   }
 
-  function stop() {
+  function stop(pauseToken) {
     enabled = false;
+    clearPointer();
     if (raf) cancelAnimationFrame(raf);
     raf = 0;
     if (backend === 'zodiac' && mounted && zodiac) {
       zodiac.setTime({ time: sceneTime / 1000, playing: false });
     }
     applyMediaMotion();
+    if (media) checkMediaPaused(media, pauseToken);
   }
 
   function onLost(event) {
     if (event) event.preventDefault();
     lost = true;
+    clearPointer();
     if (raf) cancelAnimationFrame(raf);
     raf = 0;
+    // The stopped frame loop cannot send its next heartbeat. Report loss now so
+    // the native preview can retire its controller without waiting for staleness.
+    notify('wallpaper_heartbeat ' + ticks + ' ' + draws + ' 0 1');
   }
 
   function onRestored() {
@@ -422,6 +620,7 @@
 
   function attachCanvas() {
     canvas = document.createElement('canvas');
+    canvas.width = canvas.height = 1;
     canvas.style.cssText = 'display:block;width:100%;height:100%';
     canvas.addEventListener('webglcontextlost', onLost);
     canvas.addEventListener('webglcontextrestored', onRestored);
@@ -429,9 +628,14 @@
   }
 
   function teardown() {
+    clearPointer();
     if (raf) cancelAnimationFrame(raf);
     raf = 0;
     selectToken++;
+    if (canvas) {
+      canvas.removeEventListener('webglcontextlost', onLost);
+      canvas.removeEventListener('webglcontextrestored', onRestored);
+    }
     if (backend === 'zodiac' && zodiac) {
       try { zodiac.unmount(); } catch (_) { /* context already gone */ }
     }
@@ -497,6 +701,8 @@
     teardown();
     var token = ++selectToken;
     try {
+      if (window.HertzGlBudget) await HertzGlBudget.idle();
+      if (token !== selectToken) return false;
       if (nextBackend === 'zodiac') {
         mountZodiac(initial);
         zodiac.setPrefs(Object.assign({}, params || config.params, { interactive: false }));
@@ -542,6 +748,11 @@
       if (token !== selectToken) return false;
       error = String(failure);
       teardown();
+      if (nativeBinding || String(failure).includes('gl_budget:') || (window.HertzGlBudget && HertzGlBudget.stats().error)) {
+        switching = false;
+        notify('wallpaper_gl_failed ' + String(failure).slice(0, 220));
+        return false;
+      }
       if (id !== DEFAULT_SCENE) {
         return selectScene(DEFAULT_SCENE, null, initial, true);
       }
@@ -629,14 +840,61 @@
     notify('wallpaper_ready');
   }
 
+  function reportMediaPosition(record) {
+    if (media !== record || record.kind !== 'video' || record.state !== 'ready' || !record.el || record.el.seeking) return;
+    var position = Math.floor(record.el.currentTime * 1000);
+    if (!Number.isSafeInteger(position) || position < 0 || position === record.reportedPosition) return;
+    record.reportedPosition = position;
+    sessionEvent('mediaPosition', null, position);
+  }
+
+  function cancelMediaPauseCheck(record) {
+    if (record.pauseCheck) clearTimeout(record.pauseCheck.timer);
+    record.pauseCheck = null;
+  }
+
+  function checkMediaPaused(record, token) {
+    if (record.kind !== 'video' || record.state !== 'ready' || !record.el || !Number.isSafeInteger(token) || token <= 0) return;
+    if (record.pauseCheck && record.pauseCheck.token === token) return;
+    cancelMediaPauseCheck(record);
+    var el = record.el;
+    function sample() {
+      var quality = typeof el.getVideoPlaybackQuality === 'function' ? el.getVideoPlaybackQuality() : null;
+      return { time: el.currentTime, paused: el.paused === true,
+        frames: quality && Number.isSafeInteger(quality.totalVideoFrames) ? quality.totalVideoFrames : null };
+    }
+    var check = { token: token, timer: 0, last: sample(), deadline: performance.now() + 1800 };
+    record.pauseCheck = check;
+    function verify() {
+      if (media !== record || record.el !== el || record.pauseCheck !== check || record.state !== 'ready') return;
+      var current = sample(), previous = check.last;
+      if (current.paused && Number.isFinite(current.time) && Number.isFinite(previous.time)
+        && Math.abs(current.time - previous.time) <= .001 && current.frames === previous.frames) {
+        check.timer = 0;
+        reportMediaPosition(record);
+        sessionEvent('mediaPaused', null, null, token);
+        return;
+      }
+      if (performance.now() >= check.deadline) { failMedia('media_pause_unconfirmed'); return; }
+      check.last = current;
+      check.timer = setTimeout(verify, 200);
+    }
+    check.timer = setTimeout(verify, 200);
+  }
+
   // motion=0 或停用 → 视频冻结到当前帧（§10.1：不降 playbackRate 伪装静态）。
   function applyMediaMotion() {
     if (!media || media.kind !== 'video' || media.state !== 'ready' || !media.el) return;
+    var record = media, el = record.el;
+    var playAttempt = record.playAttempt = (record.playAttempt || 0) + 1;
     if (enabled && config.motion > 0) {
-      var attempt = media.el.play();
-      if (attempt && attempt.catch) attempt.catch(function () { /* 恢复被拒：保持冻结 */ });
+      var attempt = el.play();
+      if (attempt && attempt.catch) attempt.catch(function () {
+        if (media === record && record.el === el && record.playAttempt === playAttempt && enabled && config.motion > 0) failMedia('media_play_rejected');
+      });
     } else {
-      media.el.pause();
+      el.pause();
+      reportMediaPosition(record);
     }
   }
 
@@ -653,6 +911,7 @@
   }
 
   function releaseMediaElement(record) {
+    cancelMediaPauseCheck(record);
     var el = record.el;
     record.el = null;
     if (!el) return;
@@ -678,7 +937,8 @@
     var kind = desc && (desc.kind === 'image' || desc.kind === 'video') ? desc.kind : null;
     var url = typeof desc.url === 'string' ? desc.url : '';
     var fit = desc.fit === 'contain' || desc.fit === 'stretch' ? desc.fit : 'cover';
-    if (!kind || !MEDIA_URL.test(url) || url.split('/').slice(4).some(part => !part || part === '.' || part === '..') || !host) {
+    var resumeMs = desc.resumePositionMs == null ? 0 : desc.resumePositionMs;
+    if (!kind || !Number.isSafeInteger(resumeMs) || resumeMs < 0 || (kind !== 'video' && resumeMs !== 0) || !MEDIA_URL.test(url) || url.split('/').slice(4).some(part => !part || part === '.' || part === '..') || !host) {
       notify('wallpaper_media_failed media_invalid_selection');
       return false;
     }
@@ -708,6 +968,7 @@
       if (token !== mediaToken) { clearInterval(record.timer); return; }
       record.ticks++;
       notify('wallpaper_heartbeat ' + record.ticks + ' 0 1 0');
+      reportMediaPosition(record);
     }, MEDIA_HEARTBEAT_MS);
     host.appendChild(el);
     record.deadline = setTimeout(function () {
@@ -734,6 +995,8 @@
       el.playsInline = true;
       el.setAttribute('playsinline', '');
       var settled = false;
+      var seekStarted = false, resumeStarted = false;
+      el.addEventListener('pause', function () { reportMediaPosition(record); });
       var markReady = function () {
         if (settled || token !== mediaToken || record.state !== 'loading') return;
         settled = true;
@@ -743,19 +1006,48 @@
         firstFrame('video');
         mediaReady();
         applyMediaMotion();
+        reportMediaPosition(record);
       };
       // loadeddata proves metadata/data availability, never presentation of an actual frame.
       if (typeof el.requestVideoFrameCallback !== 'function') {
         failMedia('media_frame_callback_unsupported');
         return false;
       }
-      record.frameCallback = el.requestVideoFrameCallback(function () { markReady(); });
+      function waitForFrame() {
+        record.frameCallback = el.requestVideoFrameCallback(function (_, metadata) {
+          if (token !== mediaToken || record.state !== 'loading') return;
+          record.firstFrameTimeMs = metadata && Number.isFinite(metadata.mediaTime) ? metadata.mediaTime * 1000 : null;
+          markReady();
+        });
+      }
+      function playVideo() {
+        var attempt = el.play();
+        if (attempt && attempt.catch) attempt.catch(function () {
+          if (settled || token !== mediaToken) return;
+          failMedia('media_play_rejected');
+        });
+      }
+      if (resumeMs > 0) {
+        el.addEventListener('loadedmetadata', function () {
+          if (token !== mediaToken || record.state !== 'loading' || seekStarted) return;
+          if (!Number.isFinite(el.duration) || resumeMs >= el.duration * 1000) { failMedia('media_resume_out_of_range'); return; }
+          seekStarted = true;
+          try { el.currentTime = resumeMs / 1000; }
+          catch (_) { failMedia('media_resume_seek_failed'); }
+        });
+        el.addEventListener('seeked', function () {
+          if (token !== mediaToken || record.state !== 'loading' || !seekStarted || resumeStarted || el.seeking) return;
+          if (Math.abs(el.currentTime * 1000 - resumeMs) > 1) { failMedia('media_resume_seek_failed'); return; }
+          resumeStarted = true;
+          // No first-frame callback or playback exists before this seek completes.
+          // Register now so an earlier frame at the file's start cannot reveal the page.
+          waitForFrame();
+          playVideo();
+        });
+      }
       el.src = url;
-      var attempt = el.play();
-      if (attempt && attempt.catch) attempt.catch(function () {
-        if (settled || token !== mediaToken) return;
-        failMedia('media_play_rejected');
-      });
+      if (resumeMs === 0) { waitForFrame(); playVideo(); }
+      else { el.preload = 'auto'; el.load(); }
     }
     return true;
   }
@@ -787,12 +1079,18 @@
     if (previousAudio !== JSON.stringify(config.audioInput)) resetAudio();
     if (Number.isFinite(Number(next.brightness))) config.brightness = Math.min(1, Math.max(0.25, Number(next.brightness)));
     if (Number.isFinite(Number(next.motion))) config.motion = Math.min(1, Math.max(0, Number(next.motion)));
+    if (typeof next.pointer === 'boolean') config.pointer = next.pointer;
     if (next.quality === 'low' || next.quality === 'medium' || next.quality === 'high') config.quality = next.quality;
     if (Number.isFinite(Number(next.refreshHz)) && Number(next.refreshHz) >= 5) config.refreshHz = Number(next.refreshHz);
+    if (window.HertzGlBudget && HertzGlBudget.limits) {
+      config.quality = HertzGlBudget.limits.quality;
+      config.refreshHz = HertzGlBudget.limits.refreshHz;
+    }
     var nextScene = allowedScene(next.scene) ? next.scene : config.scene;
     config.source = nextSource;
     config.scene = nextScene;
     config.params = next.params && typeof next.params === 'object' ? next.params : {};
+    if (!pointerAllowed()) clearPointer();
     gate = computeGate(cap, config.refreshHz);
     resetGate();
     applyBrightness();
@@ -904,7 +1202,9 @@
       renderedAudioPeak: Math.max.apply(null, audioShaped),
       brightness: config.brightness,
       motion: config.motion,
+      pointer: { enabled: config.pointer, active: pointer.active, waves: pointerWaves.length, moves: pointerMoves, clicks: pointerClicks, mediaAnimating: !!pointerRaf },
       quality: config.quality,
+      glBudget: window.HertzGlBudget ? HertzGlBudget.stats() : null,
       refreshHz: config.refreshHz,
       gate: gate,
       sceneParams: sceneParams,
@@ -923,6 +1223,7 @@
         state: media.state,
         error: media.error,
         ticks: media.ticks,
+        firstFrameTimeMs: media.firstFrameTimeMs == null ? null : media.firstFrameTimeMs,
         muted: media.kind === 'video' && media.el ? media.el.muted === true : null,
         paused: media.kind === 'video' && media.el ? media.el.paused === true : null,
         timeMs: media.kind === 'video' && media.el ? Math.round((media.el.currentTime || 0) * 1000) : null,
@@ -935,6 +1236,7 @@
   }
 
   addEventListener('resize', function () {
+    clearPointer();
     if (!mounted) return;
     if (backend === 'zodiac' && zodiac) {
       zodiac.resize(innerWidth, innerHeight);
@@ -948,6 +1250,7 @@
   window.hertzWallpaper = {
     applyFeed: applyFeed,
     applyAudio: applyAudio,
+    applyPointer: applyPointer,
     applyConfig: applyConfig,
     applyMedia: applyMedia,
     start: start,
@@ -955,7 +1258,8 @@
     mount: mount,
     reveal: reveal,
     unmount: unmount,
-    debug: debug
+    debug: debug,
+    requestCapture: requestCapture
   };
 
   notify('wallpaper_clock ' + performance.now());

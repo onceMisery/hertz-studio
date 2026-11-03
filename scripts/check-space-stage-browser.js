@@ -115,6 +115,36 @@ async function main() {
       snapshot(lyricFrame);const latestLyric=host.stats().lyricId;
       await host.select('zodiac');snapshot(lyricFrame);const retainedLyric=host.stats().lyricId;
       await host.selectLyrics(null);
+      let finishSharedCover, sharedResolves=0, sharedPool, sharedSignal;
+      const sharedLeases=[];
+      host.setServices({resolveCover(_url,signal){sharedResolves++;sharedSignal=signal;return new Promise(resolve=>{finishSharedCover=resolve;});}});
+      const createSharedCover=ctx=>{
+        sharedPool=ctx.services.spatialResources;
+        const entry=sharedPool.cover.acquire('shared-scene-and-lyric-cover',ctx.signal);sharedLeases.push(entry);
+        const material=ctx.scope.track(new ctx.THREE.MeshBasicMaterial({color:0xffffff}));
+        ctx.scene.add(new ctx.THREE.Mesh(ctx.scope.track(new ctx.THREE.PlaneGeometry(4,4)),material));
+        return {update(){if(entry.texture&&material.map!==entry.texture){material.map=entry.texture;material.needsUpdate=true;}},dispose(){sharedPool.cover.release(entry);}};
+      };
+      SpaceStagePure.register({...definition,id:'browser-shared-cover-world',create:createSharedCover});
+      SpaceStagePure.register({...definition,id:'browser-shared-cover-lyric',capabilities:{...definition.capabilities,ownsLyrics:true},create:createSharedCover});
+      await host.select('browser-shared-cover-world');await host.selectLyrics('browser-shared-cover-lyric');
+      await host.select('browser-contract'); // The first consumer's real scene scope aborts here.
+      const resolverSurvived=!sharedSignal.aborted;
+      finishSharedCover(coverUrl);
+      for(let attempts=0;attempts<100&&!sharedLeases[1].texture;attempts++)await new Promise(resolve=>setTimeout(resolve,20));
+      const sharedTexture=sharedLeases[1].texture;
+      if(!sharedTexture)throw new Error('remaining lyric consumer did not receive shared cover');
+      let sharedUploads=0, sharedDisposals=0;
+      sharedTexture.onUpdate=()=>sharedUploads++;
+      sharedTexture.addEventListener('dispose',()=>sharedDisposals++);
+      sharedPool.cover.release(sharedLeases[0]);sharedPool.cover.release(sharedLeases[0]);
+      snapshot(lyricFrame);
+      const remainingBeforeLast=host.stats().coverTextures, disposedBeforeLast=sharedDisposals, glTexturesBeforeLast=host.stats().textures;
+      await host.selectLyrics(null);sharedPool.cover.release(sharedLeases[0]);
+      const sharedCover={resolves:sharedResolves,resolverSurvived,firstReleased:sharedLeases[0].texture===null,uploads:sharedUploads,
+        remainingBeforeLast,disposedBeforeLast,glTexturesBeforeLast,glTexturesAfterLast:host.stats().textures,
+        disposals:sharedDisposals,remainingAfterLast:host.stats().coverTextures};
+      host.setServices({});
       SpaceStagePure.register({...definition,id:'browser-delayed',create(ctx){ctx.scope.track({dispose(){releases++;}});return new Promise(resolve=>{held=()=>resolve({update(){updates+=10000;},dispose(){releases++;}});});}});
       const delayed=host.select('browser-delayed');
       await host.select('browser-contract');held();await delayed;
@@ -138,7 +168,7 @@ async function main() {
       const freshHost=SpaceStagePure.create(freshCanvas,{qualityMode:'medium',deviceTier:2});await freshHost.select('browser-contract');freshHost.resize(640,360);
       freshHost.frame({now:performance.now(),dt:.016,time:0,playing:true});const fresh=freshHost.stats();freshHost.dispose();freshCanvas.remove();
       HTMLCanvasElement.prototype.getContext=original;
-      return {initial,changed,reused,rendererCount,staleUpdated,failure,failed,counts,disposed,releases,draws,worldCounts,frozenWorlds,coverBefore,coverAfter,coverInvalidated,contextLost,lostSelect,fresh,
+      return {initial,changed,reused,rendererCount,staleUpdated,failure,failed,counts,disposed,releases,draws,worldCounts,frozenWorlds,coverBefore,coverAfter,coverInvalidated,sharedCover,contextLost,lostSelect,fresh,
         combinations,cameraPreserved,baseCreates,baseDisposes,layerResources,portrait,offStats,offHash,baseHash,invalidLyric,staleLyricUpdates,staleLyricDisposes,latestLyric,retainedLyric};
     });
     assert.ok(evidence.initial>0,'nonblank registered scene');
@@ -160,6 +190,12 @@ async function main() {
     }
     assert.ok(evidence.coverInvalidated,'asynchronous paused cover asks Stage for a supplemental frame');
     assert.notEqual(evidence.coverBefore,evidence.coverAfter,'supplemental frame binds loaded paused cover');
+    assert.equal(evidence.sharedCover.resolves,1,'world and lyric scopes share one real cover load');
+    assert.equal(evidence.sharedCover.resolverSurvived,true);assert.equal(evidence.sharedCover.firstReleased,true);
+    assert.ok(evidence.sharedCover.uploads>0,'remaining consumer uploads the shared texture to the real GL renderer');
+    assert.equal(evidence.sharedCover.remainingBeforeLast,1);assert.equal(evidence.sharedCover.disposedBeforeLast,0);
+    assert.equal(evidence.sharedCover.disposals,1);assert.equal(evidence.sharedCover.remainingAfterLast,0);
+    assert.equal(evidence.sharedCover.glTexturesBeforeLast-evidence.sharedCover.glTexturesAfterLast,1,'last lease frees the actual uploaded GL texture');
     assert.equal(evidence.staleUpdated,false,'superseded async instance never updated');
     assert.match(evidence.failure,/Deliberate/);assert.equal(evidence.failed.resources,0);assert.equal(evidence.failed.tasks,0);
     assert.equal(evidence.disposed.state,'disposed');assert.equal(evidence.disposed.resources,0);assert.ok(evidence.releases>=5);

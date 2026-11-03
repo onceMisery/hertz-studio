@@ -112,7 +112,7 @@ pub(crate) enum Selection {
         playlist_id: String,
     },
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct BuiltinState {
     pub scene_id: String,
@@ -186,6 +186,23 @@ impl WallpaperConfig {
     }
     pub(crate) fn main_mut(&mut self) -> &mut WallpaperGroup {
         &mut self.groups[0]
+    }
+    /// 删除保护：任一显示组仍固定引用该作品或该包时不删库/不删包。
+    pub(crate) fn references_package(
+        &self,
+        work_key: Option<&str>,
+        package_hash: Option<&str>,
+    ) -> bool {
+        self.groups.iter().any(|group| match &group.selection {
+            Selection::Package {
+                work_key: selected_work,
+                package_hash: selected_package,
+            } => {
+                work_key.is_some_and(|key| key == selected_work)
+                    || package_hash.is_some_and(|hash| hash == selected_package)
+            }
+            _ => false,
+        })
     }
     pub(crate) fn presentation(&self) -> &Presentation {
         &self.main().presentation
@@ -343,7 +360,11 @@ fn id_valid(id: &str) -> bool {
 }
 
 /// 从 registry 导出的同一份目录补默认值、校验类型与范围；不维护第二份场景参数表。
-fn normalize_builtin(id: &str, version: u32, params: &mut Map<String, Value>) -> Result<()> {
+pub(super) fn normalize_builtin(
+    id: &str,
+    version: u32,
+    params: &mut Map<String, Value>,
+) -> Result<()> {
     if !crate::config::wallpaper_scene_allowed(id) {
         bail!("场景不具备桌面资格");
     }
@@ -464,5 +485,20 @@ mod tests {
             package_hash: "../path".into(),
         };
         assert!(invalid.normalize().is_err());
+    }
+
+    #[test]
+    fn deletion_reference_check_covers_work_and_package_without_builtin_false_positives() {
+        let mut config = WallpaperConfig::default();
+        assert!(!config.references_package(Some("work"), None));
+        assert!(!config.references_package(None, Some(&"a".repeat(64))));
+        config.main_mut().selection = Selection::Package {
+            work_key: "work".into(),
+            package_hash: "a".repeat(64),
+        };
+        assert!(config.references_package(Some("work"), None));
+        assert!(config.references_package(None, Some(&"a".repeat(64))));
+        assert!(!config.references_package(Some("other"), None));
+        assert!(!config.references_package(None, Some(&"b".repeat(64))));
     }
 }

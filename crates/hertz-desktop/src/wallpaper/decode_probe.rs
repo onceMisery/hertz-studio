@@ -24,6 +24,7 @@ use super::media::{Container, MediaProbe};
 use crate::app::UserEvent;
 
 const PROBE_LIMIT: Duration = Duration::from_secs(15);
+const REPORT_LIMIT: usize = 40 * 1024;
 static NEXT_PROBE: AtomicU64 = AtomicU64::new(1);
 
 /// Drop 仅标记 release，不能证明物理退出。调用方必须在清理屏障后 finish。
@@ -66,7 +67,7 @@ impl Reservation {
             self.budget
                 .confirm_exit(self.token, &self.request.session, self.request.generation);
         // 每笔探测/准备使用独立 session，退出后无需永久保留墓碑。
-        self.budget.purge_session(&self.request.session);
+        self.budget.purge_session(&self.request.session, self.request.generation);
     }
 }
 
@@ -162,6 +163,11 @@ enum Backend {
 #[cfg(test)]
 type ProbeFuture =
     std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), JobError>> + Send>>;
+
+pub(super) struct ProbeOutput {
+    pub browser: Option<String>,
+    pub poster: Option<String>,
+}
 
 impl ProbeClient {
     pub(crate) fn native(proxy: EventLoopProxy<UserEvent>) -> Self {
@@ -271,7 +277,8 @@ impl ProbeClient {
         &self,
         input: DecodeInput,
         cancel: Arc<AtomicBool>,
-    ) -> Result<Option<String>, JobError> {
+        poster: bool,
+    ) -> Result<ProbeOutput, JobError> {
         if cancel.load(Ordering::Acquire) {
             return Err(JobError::new("cancelled", "解码探测已取消"));
         }
@@ -296,6 +303,7 @@ impl ProbeClient {
                     cancel,
                     reply,
                     deadline: Instant::now() + PROBE_LIMIT,
+                    poster,
                     #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
                     suppress_frames: self.suppress_frames,
                 };
@@ -308,9 +316,17 @@ impl ProbeClient {
                     .map_err(|_| JobError::new("probe_inconclusive", "解码宿主未完成回收回执"))?
             }
             #[cfg(test)]
-            Backend::Test(probe) => probe(input, cancel)
-                .await
-                .map(|_| Some("test-webview2".into())),
+            Backend::Test(probe) => {
+                let frame = if poster {
+                    super::video_poster::test_frame(&input.metadata)
+                } else {
+                    None
+                };
+                probe(input, cancel).await.map(|_| ProbeOutput {
+                    browser: Some("test-webview2".into()),
+                    poster: frame,
+                })
+            }
         }
     }
 }
@@ -348,8 +364,9 @@ pub(crate) struct ProbeRequest {
     id: u64,
     input: DecodeInput,
     cancel: Arc<AtomicBool>,
-    reply: oneshot::Sender<Result<Option<String>, JobError>>,
+    reply: oneshot::Sender<Result<ProbeOutput, JobError>>,
     deadline: Instant,
+    poster: bool,
     #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
     suppress_frames: bool,
 }
@@ -363,8 +380,9 @@ struct Surface {
 struct HostedProbe {
     id: u64,
     cancel: Arc<AtomicBool>,
-    reply: Option<oneshot::Sender<Result<Option<String>, JobError>>>,
+    reply: Option<oneshot::Sender<Result<ProbeOutput, JobError>>>,
     browser: Option<String>,
+    poster: Option<String>,
     deadline: Instant,
     config: serde_json::Value,
     started: bool,
@@ -408,7 +426,13 @@ impl ProbeHost {
             return;
         }
         let result = decode_request(&request.input.metadata, format!("probe-{}", request.id))
-            .and_then(|budget| Reservation::grant(global_budget(), budget));
+            .and_then(|mut budget| {
+                if request.poster {
+                    budget.cpu_bytes += 2 * 1024 * 1024;
+                    budget.gpu_bytes += 320 * 320 * 4;
+                }
+                Reservation::grant(global_budget(), budget)
+            });
         let reservation = match result {
             Ok(reservation) => reservation,
             Err(error) => {
@@ -444,6 +468,7 @@ impl ProbeHost {
             "kind": if request.input.metadata.container == Container::Image { "image" } else { "video" },
             "mime": request.input.media.entry.mime,
             "metadata": request.input.metadata,
+            "poster": request.poster,
         });
         let granted =
             access.grant_pinned(request.id, request.input.package_hash, request.input.media);
@@ -453,6 +478,7 @@ impl ProbeHost {
             cancel: request.cancel,
             reply: Some(request.reply),
             browser,
+            poster: None,
             deadline: request.deadline,
             config,
             started: false,
@@ -485,7 +511,7 @@ impl ProbeHost {
             }) {
                 probe.outcome = Some(Err(JobError::new("probe_inconclusive", "探测脚本未能启动")));
             }
-        } else if probe.started && body.len() <= 8192 {
+        } else if probe.started && body.len() <= REPORT_LIMIT {
             #[derive(serde::Deserialize)]
             #[serde(deny_unknown_fields)]
             struct Report {
@@ -495,6 +521,8 @@ impl ProbeHost {
                 frames: Vec<f64>,
                 width: u32,
                 height: u32,
+                #[serde(default)]
+                poster: Option<String>,
             }
             if let Ok(report) = serde_json::from_str::<Report>(body) {
                 crate::app::log(&format!(
@@ -512,6 +540,11 @@ impl ProbeHost {
                             .all(|time| time.is_finite() && *time >= 0.0)
                         && report.frames.windows(2).all(|pair| pair[1] > pair[0])
                 };
+                if report.ok && valid_frames && probe.config["poster"] == true && !image {
+                    probe.poster = report
+                        .poster
+                        .filter(|image| image.len() <= super::video_poster::ENCODED_LIMIT);
+                }
                 probe.outcome = Some(
                     if report.ok && valid_frames && report.width > 0 && report.height > 0 {
                         Ok(())
@@ -596,7 +629,10 @@ impl ProbeHost {
             if outcome.is_ok() { "ok" } else { "failed" }
         ));
         if let Some(reply) = probe.reply.take() {
-            let _ = reply.send(outcome.map(|_| probe.browser));
+            let _ = reply.send(outcome.map(|_| ProbeOutput {
+                browser: probe.browser,
+                poster: probe.poster,
+            }));
         }
     }
 }
@@ -637,7 +673,7 @@ fn create_surface(
         .with_navigation_handler(|url| url == "http://hertz.localhost/wallpaper-probe.html" || url == "hertz://localhost/wallpaper-probe.html")
         .with_url("hertz://localhost/wallpaper-probe.html")
         .with_ipc_handler(move |request| {
-            if request.body().len() <= 8192 {
+            if request.body().len() <= REPORT_LIMIT {
                 let _ = page_proxy.send_event(UserEvent::WallpaperProbePage(id, request.body().clone()));
             }
         }).build(&window).map_err(|error| JobError::new("probe_inconclusive", error.to_string()))?;

@@ -11,9 +11,10 @@ const root = path.resolve(__dirname, '..');
 const assets = path.join(root, 'crates/hertz-desktop/assets');
 const html = fs.readFileSync(path.join(assets, 'wallpaper-settings.html'), 'utf8').replace('__SETTINGS__', fs.readFileSync(path.join(assets, 'wallpaper-settings.js'), 'utf8')).replace('__LIBRARY__', fs.readFileSync(path.join(assets, 'wallpaper-library.js'), 'utf8'));
 const sceneHtml = fs.readFileSync(path.join(assets, 'wallpaper-scene.html'), 'utf8')
-  .replace('__RUNTIME__', fs.readFileSync(path.join(root, 'plugin/ui/vendor/stage-runtime.js'), 'utf8'))
-  .replace('__SHIM__', fs.readFileSync(path.join(root, 'plugin/ui/vendor/zodiac-stage.js'), 'utf8'))
-  .replace('__SCENE__', fs.readFileSync(path.join(assets, 'wallpaper-scene.js'), 'utf8'));
+  .replace('__GL_BUDGET__', () => fs.readFileSync(path.join(assets, 'wallpaper-gl-budget.js'), 'utf8'))
+  .replace('__RUNTIME__', () => fs.readFileSync(path.join(root, 'plugin/ui/vendor/stage-runtime.js'), 'utf8'))
+  .replace('__SHIM__', () => fs.readFileSync(path.join(root, 'plugin/ui/vendor/zodiac-stage.js'), 'utf8'))
+  .replace('__SCENE__', () => fs.readFileSync(path.join(assets, 'wallpaper-scene.js'), 'utf8'));
 const scenePairs = [...fs.readFileSync(path.join(root, 'crates/hertz-desktop/src/config.rs'), 'utf8').matchAll(/^    \("([a-z-]+)", "([^"]+)"\),$/gm)];
 const initial = {
   revision: 9,
@@ -33,12 +34,17 @@ async function main() {
   const page = await browser.newPage({ viewport: { width: 1120, height: 700 }, reducedMotion: 'reduce' });
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
+  page.on('dialog', dialog => dialog.accept());
   try {
     await page.addInitScript(() => {
+      const interval=window.setInterval;
+      window.settingsTestIntervals=[];
+      window.setInterval=function(callback,ms){if(ms===5000)settingsTestIntervals.push(callback);return interval(callback,ms);};
       window.desktopRequests = []; window.nativeTestRevision = 9; window.nativeTestDraft = null;
       window.nativeLibraryWorks = [
-        { workKey:'image-work', title:'图片 <img src=x onerror=alert(1)>', kind:'image' },
-        { workKey:'video-work', title:'本地视频', kind:'video' },
+        { workKey:'image-work', title:'图片 <img src=x onerror=alert(1)>', kind:'image', favorite:0 },
+        { workKey:'video-work', title:'本地视频', kind:'video', favorite:0 },
+        { workKey:'delete-work', title:'待删除作品', kind:'image', favorite:0 },
       ];
       window.ipc = { postMessage: text => {
         const request = JSON.parse(text); window.desktopRequests.push(request);
@@ -49,8 +55,19 @@ async function main() {
         if (request.command === 'wallpaper.draft.discard') { window.nativeTestDraft = null; result = { discarded: true }; }
         if (request.command === 'wallpaper.preview.acquire') result = { leaseId: 'browser-lease', generation: 1, expiresInMs: 15000 };
         if (request.command === 'wallpaper.preview.release') result = { released: true };
-        if (request.command === 'wallpaper.library.list') result = { works:window.nativeLibraryWorks, nextCursor:null };
-        if (request.command === 'wallpaper.library.get') result = { work:window.nativeLibraryWorks.find(work=>work.workKey===request.payload.workKey), versions:[{version:3,state:'installed',packageHash:request.payload.workKey==='image-work'?'a'.repeat(64):'b'.repeat(64)}] };
+        if (request.command === 'wallpaper.preview.renew') {
+          if(window.holdPreviewRenewal)return;
+          result={leaseId:request.payload.leaseId,expiresInMs:15000};
+        }
+        if (request.command === 'wallpaper.library.list') result = { works:request.payload.favoritesOnly?window.nativeLibraryWorks.filter(work=>work.favorite):window.nativeLibraryWorks, nextCursor:null };
+        if (request.command === 'wallpaper.library.get') result = { work:window.nativeLibraryWorks.find(work=>work.workKey===request.payload.workKey), versions:[{version:3,state:'installed',packageHash:request.payload.workKey==='image-work'?'a'.repeat(64):request.payload.workKey==='video-work'?'b'.repeat(64):'c'.repeat(64)}] };
+        if (request.command === 'wallpaper.library.poster') {
+          const canvas=document.createElement('canvas');canvas.width=24;canvas.height=16;
+          const context=canvas.getContext('2d');context.fillStyle='#256080';context.fillRect(0,0,24,16);
+          result={poster:window.nativePosterMissing?null:{width:24,height:16,data:canvas.toDataURL('image/jpeg').split(',')[1]}};
+        }
+        if (request.command === 'wallpaper.library.favorite') { const work=window.nativeLibraryWorks.find(work=>work.workKey===request.payload.workKey); work.favorite=request.payload.favorite?1:0; result={workKey:work.workKey,favorite:work.favorite}; }
+        if (request.command === 'wallpaper.library.deleteVersion' || request.command === 'wallpaper.library.deleteWork') result = { deleted:true, workKey:request.payload.workKey, workDeleted:request.command==='wallpaper.library.deleteWork', versions:1, packages:1 };
         if (request.command === 'wallpaper.status') result = { activeJob:null, capabilities:{mediaApply:true,previewMedia:false} };
         if (result) queueMicrotask(() => window.hertzWallpaperSettings.applyManagement({ protocol: 2, requestId: request.requestId, ok: true, configRevision: window.nativeTestRevision, jobId: null, result, error: null }));
       } };
@@ -126,6 +143,7 @@ async function main() {
     await page.evaluate(payload => { window.nativeTestRevision = payload.revision; window.hertzWallpaperSettings.applyStatus(payload); }, external);
     await page.locator('#tab-wallpaper').click();
     await page.locator('[data-scene=coast]').click();
+    await page.locator('#pointer').check();
     assert.equal(await page.locator('#scene-source').inputValue(), 'fixed');
     assert.equal(await page.locator('#scene-fixed').inputValue(), 'coast');
     await page.locator('#preview').click();
@@ -134,15 +152,25 @@ async function main() {
     assert.equal(preview.payload.draftId, 'browser-draft');
     const previewUpdate = await page.evaluate(() => window.desktopRequests.filter(request => request.command === 'wallpaper.draft.update').at(-1));
     assert.equal(previewUpdate.payload.operations[0].wallpaper.groups[0].selection.sceneId, 'coast');
-    await page.evaluate(payload => { window.hertzWallpaperSettings.applyStatus(payload); window.hertzWallpaperSettings.mountPreview('browser-lease'); }, { ...external, previewActive: true, previewLease: 'browser-lease' });
-    await page.waitForFunction(() => window.desktopRequests.some(request => request.cmd === 'preview-event' && request.event === 'wallpaper_dom_ready'));
-    // This is the same renderer/config/start bridge used by the native preview lease.
-    await page.evaluate(() => window.hertzWallpaperSettings.evalPreview("window.hertzWallpaper.applyConfig({source:'fixed',scene:'coast',musicResponse:true}); window.hertzWallpaper.start(15);"));
-    await page.waitForFunction(() => document.querySelector('#preview-renderer').contentDocument.querySelector('canvas'));
-    await page.waitForTimeout(500);
+    assert.equal(previewUpdate.payload.operations[0].wallpaper.groups[0].presentation.pointer, true, 'pointer preference reaches the native preview draft');
+    await page.evaluate(payload => window.hertzWallpaperSettings.applyStatus(payload), { ...external, previewActive: true, previewLease: 'browser-lease', mediaPreview:{kind:'builtin',firstFrameReady:true} });
+    assert.equal(await page.locator('#preview-renderer,iframe,video').count(),0,'builtin preview does not create a renderer in settings');
+    assert.equal(await page.locator('#preview-placeholder').isVisible(),true);
+    assert.match(await page.locator('#preview-placeholder-title').innerText(),/独立预览窗口/);
+    assert.equal(await page.evaluate(()=>typeof window.hertzWallpaperSettings.evalPreview),'undefined','settings cannot execute an iframe preview bridge');
     const out = path.join(root, 'output/playwright/desktop-settings'); fs.mkdirSync(out, { recursive: true });
     await page.evaluate(() => document.querySelector('main').scrollTop = 0);
     await page.screenshot({ path: path.join(out, 'wallpaper-1120.png') });
+    await page.evaluate(payload=>{
+      window.holdPreviewRenewal=true;settingsTestIntervals.forEach(callback=>callback());
+      const renewal=desktopRequests.filter(request=>request.command==='wallpaper.preview.renew').at(-1);
+      if(!renewal)throw new Error('renewal was not sent');
+      hertzWallpaperSettings.applyStatus({...payload,previewActive:false,previewLease:null,error:'预览心跳超时，已关闭预览'});
+      hertzWallpaperSettings.applyManagement({protocol:2,requestId:renewal.requestId,ok:false,error:{code:'preview_lease_invalid',message:'旧预览租约已失效'}});
+      window.holdPreviewRenewal=false;
+    },external);
+    assert.equal(await page.locator('#status').innerText(),'预览心跳超时，已关闭预览','late renewal cannot overwrite the native close reason');
+    await page.evaluate(payload=>hertzWallpaperSettings.applyStatus(payload),{...external,previewActive:true,previewLease:'browser-lease',mediaPreview:{kind:'builtin',firstFrameReady:true}});
     await page.locator('#tab-lyrics').click();
     await page.waitForFunction(() => window.desktopRequests.some(request => request.command === 'wallpaper.preview.release'));
     assert.equal((await page.evaluate(() => window.desktopRequests.filter(request => request.command === 'wallpaper.preview.release').at(-1))).payload.leaseId, 'browser-lease');
@@ -183,15 +211,51 @@ async function main() {
     const videoWork=page.locator('#library-works > li').filter({has:page.getByText('本地视频',{exact:true})});
     await imageWork.getByRole('button',{name:'查看版本',exact:true}).click();
     await videoWork.getByRole('button',{name:'查看版本',exact:true}).click();
-    assert.equal(await page.locator('#library-works img').count(),0,'untrusted titles stay text');
+    assert.equal(await imageWork.locator('img').count(),0,'untrusted titles stay text');
+    await videoWork.locator('.library-poster').scrollIntoViewIfNeeded();
+    await videoWork.locator('.library-poster img').waitFor();
+    assert.equal(await page.locator('#library-works video').count(),0,'browsing covers never creates a video decoder');
+    const deleteWork=page.locator('#library-works > li').filter({has:page.getByText('待删除作品',{exact:true})});
+    await deleteWork.getByRole('button',{name:'查看版本',exact:true}).click();
+    await deleteWork.getByRole('button',{name:'删除版本',exact:true}).click();
+    await page.waitForFunction(()=>desktopRequests.some(request=>request.command==='wallpaper.library.deleteVersion'));
+    const deleteVersionRequest=await page.evaluate(()=>desktopRequests.filter(request=>request.command==='wallpaper.library.deleteVersion').at(-1));
+    assert.deepEqual(deleteVersionRequest.payload,{workKey:'delete-work',version:3,packageHash:'c'.repeat(64)},'version deletion names the exact fixed package');
+    await deleteWork.getByRole('button',{name:'删除作品',exact:true}).click();
+    await page.waitForFunction(()=>desktopRequests.some(request=>request.command==='wallpaper.library.deleteWork'));
+    const deleteWorkRequest=await page.evaluate(()=>desktopRequests.filter(request=>request.command==='wallpaper.library.deleteWork').at(-1));
+    assert.deepEqual(deleteWorkRequest.payload,{workKey:'delete-work'});
+    await imageWork.getByRole('button',{name:'查看版本',exact:true}).click();
+    await videoWork.getByRole('button',{name:'查看版本',exact:true}).click();
     const applyCount=await page.evaluate(()=>desktopRequests.filter(request=>request.command==='wallpaper.apply').length);
+    const beforeSelectionHeading = await page.locator('#scene-heading').innerText();
+    await page.evaluate(() => {
+      const send = ipc.postMessage;
+      window.restoreSelectionRequest = () => { ipc.postMessage = send; };
+      ipc.postMessage = text => {
+        if (JSON.parse(text).command !== 'wallpaper.draft.update') return send(text);
+        window.releaseSelectionRequest = () => send(text);
+      };
+    });
     await imageWork.getByRole('button',{name:'选择此版本',exact:true}).click();
+    await page.waitForFunction(() => !!window.releaseSelectionRequest);
+    assert.equal(await page.locator('#scene-heading').innerText(), beforeSelectionHeading, 'selection completes only after native reference registration');
+    assert.equal(await page.locator('#apply').isDisabled(), true);
+    assert.equal(await page.locator('#preview').isDisabled(), true);
+    assert.equal(await imageWork.getByRole('button',{name:'删除作品',exact:true}).isDisabled(), true);
+    await page.evaluate(() => { releaseSelectionRequest(); restoreSelectionRequest(); });
+    await page.waitForFunction(() => hertzWallpaperSettings.canChooseLibraryVersion());
+    const selectionRegistration = await page.evaluate(() => desktopRequests.filter(request => request.command === 'wallpaper.draft.update').at(-1));
+    assert.deepEqual(selectionRegistration.payload.operations[0].wallpaper.groups[0].selection, {kind:'package',workKey:'image-work',packageHash:'a'.repeat(64)});
     assert.equal(await page.locator('#scene-heading').innerText(),'图片 <img src=x onerror=alert(1)>');
     assert.equal(await page.locator('#scene-source').inputValue(),'library');
     assert.equal(await page.locator('#scene-fixed').locator('..').isVisible(),false);
     assert.equal(await page.locator('#scene-static').isVisible(),false);
     assert.match(await page.locator('#preview-placeholder-text').innerText(),/媒体实时预览尚未提供/);
     for(const id of ['fps','quality','music','motion','preview'])assert.equal(await page.locator('#'+id).isDisabled(),true,id+' is honest for static media');
+    await page.locator('#pointer').check();
+    assert.equal(await page.locator('#motion').isEnabled(),true,'image ripple motion can be resumed after a frozen scene');
+    await page.locator('#pointer').uncheck();
     assert.equal(await page.locator('#media-fit').isEnabled(),true);await page.locator('#media-fit').selectOption('contain');
     await page.evaluate(payload=>hertzWallpaperSettings.applyStatus(payload),{...external,mediaPreviewAvailable:true});
     assert.equal(await page.locator('#preview').isEnabled(),true,'native media capability enables explicit preview');
@@ -209,8 +273,51 @@ async function main() {
     await page.locator('#tab-wallpaper').click();
     assert.equal(await page.evaluate(()=>desktopRequests.filter(request=>request.command==='wallpaper.apply').length),applyCount,'version choice never applies automatically');
     await page.locator('#discard').click();assert.equal(await page.locator('#media-fit-field').isVisible(),false);assert.equal(await page.locator('#preview').isEnabled(),true);
+    await page.evaluate(() => {
+      const send = ipc.postMessage;
+      ipc.postMessage = text => {
+        const request = JSON.parse(text);
+        if (request.command === 'wallpaper.draft.update') {
+          ipc.postMessage = send;
+          queueMicrotask(() => hertzWallpaperSettings.applyManagement({protocol:2,requestId:request.requestId,ok:false,error:{code:'conflict',message:'selection registration rejected'}}));
+          return;
+        }
+        return send(text);
+      };
+    });
+    const beforeRejectedSelection = await page.locator('#scene-heading').innerText();
+    await videoWork.getByRole('button',{name:'选择此版本',exact:true}).click();
+    await page.waitForFunction(() => document.getElementById('library-message').textContent === 'selection registration rejected');
+    assert.equal(await page.locator('#scene-heading').innerText(), beforeRejectedSelection, 'rejected native registration preserves the previous draft');
     await videoWork.getByRole('button',{name:'选择此版本',exact:true}).click();
     assert.equal(await page.locator('#motion').isEnabled(),true);assert.match(await page.locator('#media-rate-note').innerText(),/原速静音/);
+    await page.waitForFunction(()=>document.querySelector('#scene-static').src.startsWith('data:image/jpeg;base64,') && document.querySelector('#scene-static').naturalWidth===24);
+    assert.equal(await page.locator('#preview-renderer, video').count(),0,'selected video cover stays static');
+    assert.equal(await page.locator('#preview-kind').innerText(),'视频封面');
+    await page.evaluate(()=>{window.nativePosterMissing=true;hertzWallpaperSettings.invalidatePosters();});
+    await page.waitForFunction(()=>document.querySelector('#scene-static').hidden && !document.querySelector('#preview-placeholder').hidden);
+    await page.evaluate(()=>{window.nativePosterMissing=false;hertzWallpaperSettings.invalidatePosters();});
+    await page.waitForFunction(()=>!document.querySelector('#scene-static').hidden);
+    // Hold a missing-cover response across a completed preparation/cache invalidation.
+    await page.evaluate(() => {
+      const send = ipc.postMessage;
+      ipc.postMessage = text => {
+        const request = JSON.parse(text);
+        if (request.command !== 'wallpaper.library.poster') return send(text);
+        ipc.postMessage = send;
+        window.releaseOldPoster = () => hertzWallpaperSettings.applyManagement({protocol:2,requestId:request.requestId,ok:true,result:{poster:null}});
+      };
+      hertzWallpaperSettings.invalidatePosters();
+    });
+    await page.waitForFunction(() => !!window.releaseOldPoster);
+    const refreshedPoster = await page.evaluate(async () => {
+      hertzWallpaperSettings.invalidatePosters();
+      const result = hertzWallpaperSettings.readPoster('video-work', 'b'.repeat(64));
+      releaseOldPoster();
+      return result;
+    });
+    assert.ok(refreshedPoster, 'a delayed missing-cover response must not overwrite a refreshed cover');
+    await page.waitForFunction(()=>!document.querySelector('#scene-static').hidden);
     await page.locator('#media-fit').selectOption('stretch');
     await page.locator('#apply').click();
     await page.waitForFunction(count=>desktopRequests.filter(request=>request.command==='wallpaper.apply').length>count,applyCount);
@@ -228,6 +335,20 @@ async function main() {
     assert.equal(await page.locator('#scene-heading').innerText(),'本地视频','failed Apply preserves media draft');
     await page.screenshot({path:path.join(out,'local-video-1120.png')});
     await page.locator('#discard').click();assert.equal(await page.locator('#media-fit-field').isVisible(),false);
+    await imageWork.getByRole('button',{name:'☆ 收藏',exact:true}).click();
+    await page.waitForFunction(()=>desktopRequests.some(request=>request.command==='wallpaper.library.favorite'));
+    const favoriteRequest=await page.evaluate(()=>desktopRequests.filter(request=>request.command==='wallpaper.library.favorite').at(-1));
+    assert.deepEqual(favoriteRequest.payload,{workKey:'image-work',favorite:true});
+    assert.equal(await imageWork.getByRole('button',{name:'★ 已收藏',exact:true}).count(),1,'favorite state updates without a full reload');
+    const listCount=await page.evaluate(()=>desktopRequests.filter(request=>request.command==='wallpaper.library.list').length);
+    await page.locator('#library-favorites-only').check();
+    await page.waitForFunction(count=>desktopRequests.filter(request=>request.command==='wallpaper.library.list'&&request.payload.favoritesOnly).length>0&&desktopRequests.filter(request=>request.command==='wallpaper.library.list').length>count,listCount);
+    assert.equal(await page.locator('#library-works > li').count(),1,'favorites filter hides non-favorites');
+    assert.match(await page.locator('#library-works').innerText(),/图片/);
+    const filteredCount=await page.evaluate(()=>desktopRequests.filter(request=>request.command==='wallpaper.library.list').length);
+    await page.locator('#library-favorites-only').uncheck();
+    await page.waitForFunction(count=>desktopRequests.filter(request=>request.command==='wallpaper.library.list').length>count,filteredCount);
+    assert.equal(await page.locator('#library-works > li').count(),3,'clearing the filter restores all works');
     const endpointName = '扬声器 <img src=x onerror=alert(1)>';
     const audioStatus = { ...external, runtime: { ...external.runtime, wallpaper: { ...external.runtime.wallpaper, audio: { phase:'idle', captureActive:false, requested:null, endpoints:[{id:'render-a',name:endpointName,isDefault:true}] } } } };
     await page.evaluate(payload=>hertzWallpaperSettings.applyStatus(payload), audioStatus);
@@ -262,7 +383,7 @@ async function main() {
     assert.equal(await page.locator('#audio-device-field').isVisible(),false);
     assert.equal(await page.locator('#audio-gain').isDisabled(),true);
     assert.deepEqual(errors, []);
-    console.log('desktop settings browser checks passed: draft/apply/discard, dirty close guard, presets, static thumbnails, conflict, real renderer, leases, position, monitor recovery, responsive layout, local media version selection, pending guard, system audio drafts, missing devices and retry');
+    console.log('desktop settings browser checks passed: draft/apply/discard, dirty close guard, presets, static thumbnails, conflict, independent preview controls, leases, position, monitor recovery, responsive layout, local media version selection, version/work deletion, favorites filter, pending guard, system audio drafts, missing devices and retry');
     console.log('screenshots: ' + out);
   } finally { await browser.close(); await new Promise(resolve => server.close(resolve)); }
 }

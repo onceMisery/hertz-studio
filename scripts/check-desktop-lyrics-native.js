@@ -85,6 +85,7 @@ $origin=New-Object LyricsFrame+Point
   assert.equal(frame.origin.y,frame.window.top,stage+': no title bar');
   assert.equal(frame.client.right,frame.window.right-frame.window.left,stage+': full client width');
   assert.equal(frame.client.bottom,frame.window.bottom-frame.window.top,stage+': full client height');
+  return frame;
 }
 async function main(){
   assert.equal(execFileSync('powershell.exe',['-NoProfile','-Command','@(Get-Process hertz-desktop -ErrorAction SilentlyContinue).Count'],{encoding:'utf8',windowsHide:true}).trim(),'0','Native checks require no existing desktop instance');
@@ -108,13 +109,20 @@ async function main(){
     // Tao rebuilds GWL_STYLE from its own flags when window state changes.
     await assertBorderless('framework style refresh',true);
     assert.equal(await page.evaluate(()=>document.body.dataset.layout),'triple');
+    // 窗口贴合这句歌词：不再撑满设定的 550 DIP，也不收到 360 DIP 窄栏档以下（那一档槽位更高）。
+    await page.waitForFunction(()=>innerWidth<550);
     const baseSize=await page.evaluate(()=>({width:innerWidth,height:innerHeight}));
+    const toolbarWidth=await page.locator('#toolbar').evaluate(e=>e.offsetWidth);
+    assert.ok(baseSize.width>=toolbarWidth,'Toolbar stays fully inside the window');
+    assert.ok(baseSize.width>=361,'The fit stays out of the two-line slot bucket');
+    assert.ok(baseSize.height<340,'Hugging the phrase does not inflate the lyric slot');
+    await assertBorderless('fitted');
     await page.locator('#stage').hover();await page.locator('#style-open').click();
     await page.waitForFunction(()=>innerHeight>500);
     const expanded=await page.evaluate(()=>({stage:document.getElementById('stage').clientHeight,height:innerHeight,panel:document.getElementById('options-panel').getBoundingClientRect().toJSON()}));
     console.log('Native lyrics expanded geometry', JSON.stringify({baseSize,expanded}));
     assert.ok(expanded.panel.bottom<=expanded.height);
-    assert.ok(Math.abs(expanded.stage-(baseSize.height-84))<3,'Opening settings preserves lyric height');
+    assert.ok(Math.abs(expanded.stage-(baseSize.height-70))<3,'Opening settings preserves lyric height');
     await assertBorderless('settings expanded');
     // Exercise the actual expand/collapse path, including native activation/frame
     // redraws. A single launch check misses captions that return after interaction.

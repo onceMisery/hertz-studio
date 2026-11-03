@@ -88,7 +88,9 @@ pub(crate) fn install(hwnd: HWND) {
             &mut children as *mut Vec<HWND> as LPARAM,
         );
     }
-    let mut map = chrome_map().lock().unwrap_or_else(|error| error.into_inner());
+    let mut map = chrome_map()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
     for target in std::iter::once(hwnd).chain(
         children
             .into_iter()
@@ -275,7 +277,15 @@ pub(crate) fn set_topmost(hwnd: HWND, on: bool) {
 
 pub(crate) fn move_window(hwnd: HWND, x: i32, y: i32, width: i32, height: i32) {
     unsafe {
-        SetWindowPos(hwnd, std::ptr::null_mut(), x, y, width, height, SWP_NOACTIVATE | SWP_NOZORDER);
+        SetWindowPos(
+            hwnd,
+            std::ptr::null_mut(),
+            x,
+            y,
+            width,
+            height,
+            SWP_NOACTIVATE | SWP_NOZORDER,
+        );
     }
 }
 

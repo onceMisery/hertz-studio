@@ -1,0 +1,14 @@
+{
+  "low": {
+    "pixelBudget": 1900000,
+    "gpuBytes": 67108864
+  },
+  "medium": {
+    "pixelBudget": 3600000,
+    "gpuBytes": 134217728
+  },
+  "high": {
+    "pixelBudget": 6200000,
+    "gpuBytes": 201326592
+  }
+}

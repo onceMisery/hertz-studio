@@ -458,6 +458,23 @@ impl Default for LyricsConfig {
 }
 
 impl Config {
+    /// Inactive profiles and the saved unbound domain still need their immutable packages.
+    pub(crate) fn references_wallpaper_package(
+        &self,
+        work_key: Option<&str>,
+        package_hash: Option<&str>,
+    ) -> bool {
+        self.wallpaper.references_package(work_key, package_hash)
+            || self
+                .profiles
+                .iter()
+                .any(|domain| domain.wallpaper.references_package(work_key, package_hash))
+            || self
+                .unbound_domain
+                .as_ref()
+                .is_some_and(|domain| domain.wallpaper.references_package(work_key, package_hash))
+    }
+
     pub(crate) fn sanitize(&mut self) {
         sanitize_lyrics(&mut self.lyrics);
         sanitize_mini(&mut self.mini);
@@ -1380,6 +1397,37 @@ mod tests {
 
     fn profile(name: &str) -> Profile {
         standalone(PathBuf::from(format!(r"C:\profiles\{name}")), "full")
+    }
+
+    #[test]
+    fn deletion_protects_inactive_profiles_and_saved_unbound_wallpaper() {
+        use crate::wallpaper::config::Selection;
+        let mut config = Config::default();
+        config.wallpaper.enabled = false;
+        config.wallpaper.main_mut().selection = Selection::Package {
+            work_key: "unbound-work".into(),
+            package_hash: "a".repeat(64),
+        };
+        config.activate_profile(profile("a")).unwrap();
+        config.wallpaper.main_mut().selection = Selection::Package {
+            work_key: "profile-work".into(),
+            package_hash: "b".repeat(64),
+        };
+        config.activate_profile(profile("b")).unwrap();
+        let (mut loaded, _) = parse_config(&encode_config(&config).unwrap()).unwrap();
+        assert!(!loaded
+            .wallpaper
+            .references_package(Some("profile-work"), None));
+        assert!(loaded.references_wallpaper_package(Some("profile-work"), None));
+        assert!(loaded.references_wallpaper_package(None, Some(&"b".repeat(64))));
+        assert!(loaded.references_wallpaper_package(Some("unbound-work"), None));
+        assert!(loaded.references_wallpaper_package(None, Some(&"a".repeat(64))));
+        assert!(!loaded.references_wallpaper_package(Some("other-work"), Some(&"c".repeat(64))));
+        loaded.activate_profile(profile("a")).unwrap();
+        loaded.wallpaper = WallpaperConfig::default();
+        loaded.store_active().unwrap();
+        assert!(!loaded.references_wallpaper_package(Some("profile-work"), None));
+        assert!(loaded.references_wallpaper_package(Some("unbound-work"), None));
     }
 
     #[test]

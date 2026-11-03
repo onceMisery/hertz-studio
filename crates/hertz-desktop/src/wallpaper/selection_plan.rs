@@ -16,6 +16,29 @@ use super::target_planner::{self, AssetRef, Resolution, ResolvedMedia};
 
 type Result<T> = std::result::Result<T, JobError>;
 
+pub(crate) struct Failure {
+    pub error: JobError,
+    pub poster: Option<Box<ResolvedMedia>>,
+}
+
+impl From<JobError> for Failure {
+    fn from(error: JobError) -> Self {
+        Self {
+            error,
+            poster: None,
+        }
+    }
+}
+
+impl std::fmt::Debug for Failure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SelectionFailure")
+            .field("error", &self.error)
+            .field("has_poster", &self.poster.is_some())
+            .finish()
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct Request {
     pub work_key: String,
@@ -69,6 +92,37 @@ pub(crate) async fn resolve(
     jobs: Arc<ImportJobs>,
     request: Request,
     cancel: Arc<AtomicBool>,
+) -> std::result::Result<ResolvedMedia, Failure> {
+    request.validate()?;
+    match resolve_media(Arc::clone(&jobs), request.clone(), Arc::clone(&cancel)).await {
+        Ok(media) => Ok(media),
+        Err(error) if error.code == "cancelled" || cancel.load(Ordering::Acquire) => {
+            Err(JobError::new("cancelled", "媒体选择已取消并退出").into())
+        }
+        Err(error) => {
+            let runtime = tokio::runtime::Handle::current();
+            let poster = tokio::task::spawn_blocking(move || {
+                runtime.block_on(super::video_poster::resolve_recorded(
+                    jobs.assets(),
+                    jobs.library(),
+                    &request,
+                ))
+            })
+            .await;
+            cancelled(&cancel)?;
+            let poster = match poster {
+                Ok(Ok(poster)) => poster.map(Box::new),
+                _ => None,
+            };
+            Err(Failure { error, poster })
+        }
+    }
+}
+
+async fn resolve_media(
+    jobs: Arc<ImportJobs>,
+    request: Request,
+    cancel: Arc<AtomicBool>,
 ) -> Result<ResolvedMedia> {
     request.validate()?;
     cancelled(&cancel)?;
@@ -77,10 +131,11 @@ pub(crate) async fn resolve(
         .contains_version(&request.work_key, &request.package_hash)
         .await?
     {
-        return Err(JobError::new(
-            "version_not_found",
-            "所选版本不属于该作品，或尚未安装",
-        ));
+        // An explicit retry can recover restored bytes of an unavailable recorded version.
+        // This metadata check does not grant playback; immutable bytes are reverified below.
+        jobs.library()
+            .cover_manifest(&request.work_key, &request.package_hash)
+            .await?;
     }
     // Read the authoritative installed manifest, never infer a resource from UI summaries/URLs.
     let source = Arc::clone(&jobs);
@@ -88,6 +143,12 @@ pub(crate) async fn resolve(
     let source_cancel = Arc::clone(&cancel);
     let reference = tokio::task::spawn_blocking(move || {
         cancelled(&source_cancel)?;
+        if source.assets().verify_installed(&hash)?.is_none() {
+            return Err(JobError::new(
+                "asset_unavailable",
+                "已保存作品的原包或投影缺失、损坏",
+            ));
+        }
         let package = source.assets().read_installed_manifest(&hash)?;
         cancelled(&source_cancel)?;
         let asset_id = match package.manifest.content {
@@ -107,7 +168,21 @@ pub(crate) async fn resolve(
         })
     })
     .await
-    .map_err(|_| JobError::new("worker_unavailable", "媒体选择线程已退出"))??;
+    .map_err(|_| JobError::new("worker_unavailable", "媒体选择线程已退出"))?;
+    let reference = match reference {
+        Ok(reference) => reference,
+        Err(error) => {
+            if matches!(
+                error.code,
+                "asset_unavailable" | "package_invalid" | "hash_mismatch" | "io"
+            ) {
+                jobs.library()
+                    .mark_unavailable(&request.package_hash)
+                    .await?;
+            }
+            return Err(error);
+        }
+    };
     let preparation = match resolve_target(
         Arc::clone(&jobs),
         reference.clone(),
@@ -155,9 +230,17 @@ pub(crate) async fn resolve(
                 _ => tokio::time::sleep(Duration::from_millis(50)).await,
             }
         }
-        match resolve_target(jobs, reference, request.target, Arc::clone(&cancel)).await? {
+        match resolve_target(
+            Arc::clone(&jobs),
+            reference,
+            request.target,
+            Arc::clone(&cancel),
+        )
+        .await?
+        {
             Resolution::Ready(media) => {
                 cancelled(&cancel)?;
+                jobs.library().mark_available(&request.package_hash).await?;
                 Ok(media)
             }
             Resolution::PrepareRequired(_) => Err(JobError::new(

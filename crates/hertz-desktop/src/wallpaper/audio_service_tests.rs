@@ -15,6 +15,8 @@ struct Control {
     delay_stop: Mutex<bool>,
     release: Condvar,
     failed: AtomicBool,
+    first_sample_time: Mutex<Option<Instant>>,
+    ring: Mutex<Option<Arc<Mutex<SampleRing>>>>,
 }
 impl Default for Control {
     fn default() -> Self {
@@ -30,6 +32,8 @@ impl Default for Control {
             delay_stop: Mutex::new(false),
             release: Condvar::new(),
             failed: AtomicBool::new(false),
+            first_sample_time: Mutex::new(None),
+            ring: Mutex::new(None),
         }
     }
 }
@@ -107,7 +111,14 @@ impl Backend for FakeBackend {
         self.0.maximum.fetch_max(active, Ordering::AcqRel);
         self.0.stopping.store(false, Ordering::Release);
         *ring.lock().unwrap() = SampleRing::new(96_000);
-        ring.lock().unwrap().push(&[0.2; FFT_SIZE]);
+        let captured_at = self
+            .0
+            .first_sample_time
+            .lock()
+            .unwrap()
+            .unwrap_or_else(Instant::now);
+        ring.lock().unwrap().push_at(&[0.2; FFT_SIZE], captured_at);
+        *self.0.ring.lock().unwrap() = Some(ring);
         Ok(Box::new(FakeCapture {
             control: Arc::clone(&self.0),
             generation,
@@ -324,4 +335,48 @@ fn fixed_removal_restoration_and_format_changes_each_use_the_real_exit_barrier()
     until(|| control.starts.load(Ordering::Acquire) == 3 && service.snapshot().frame.is_some());
     assert!(service.snapshot().generation > restored);
     assert_eq!(control.maximum.load(Ordering::Acquire), 1);
+}
+
+#[test]
+fn owner_drops_expired_pcm_and_preserves_capture_timestamp_on_recovery() {
+    let control = Arc::new(Control::default());
+    *control.first_sample_time.lock().unwrap() = Some(Instant::now() - Duration::from_secs(2));
+    let service = service(Arc::clone(&control));
+    service.request(Some(AudioDevice::Default));
+    until(|| service.snapshot().dropped == FFT_SIZE as u64);
+    assert!(
+        service.snapshot().frame.is_none(),
+        "queued stale PCM never becomes a fresh frame"
+    );
+    let ring = control.ring.lock().unwrap().clone().unwrap();
+    let captured_at = Instant::now();
+    ring.lock().unwrap().push_at(&[0.2; FFT_SIZE], captured_at);
+    until(|| service.snapshot().frame.is_some());
+    assert_eq!(service.snapshot().frame.unwrap().captured_at, captured_at);
+    assert_eq!(control.starts.load(Ordering::Acquire), 1);
+}
+
+#[test]
+fn owner_does_not_replay_filter_energy_after_a_capture_discontinuity() {
+    let control = Arc::new(Control::default());
+    let service = service(Arc::clone(&control));
+    service.request(Some(AudioDevice::Default));
+    until(|| service.snapshot().frame.is_some());
+    let before = service.snapshot().frame.unwrap();
+    assert!(before.bands.iter().any(|band| *band > 0.0));
+    let ring = control.ring.lock().unwrap().clone().unwrap();
+    {
+        let mut ring = ring.lock().unwrap();
+        ring.discontinue();
+        ring.push_at(&[0.0; FFT_SIZE], Instant::now());
+    }
+    until(|| {
+        service
+            .snapshot()
+            .frame
+            .is_some_and(|frame| frame.seq > before.seq)
+    });
+    let after = service.snapshot().frame.unwrap();
+    assert!(after.bands.iter().all(|band| *band == 0.0));
+    assert_eq!(after.generation, before.generation);
 }

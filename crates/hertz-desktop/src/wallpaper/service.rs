@@ -30,7 +30,10 @@ enum Work {
 struct ResolveCall {
     request: super::selection_plan::Request,
     cancel: Arc<AtomicBool>,
-    reply: Box<dyn FnOnce(Result<super::target_planner::ResolvedMedia, JobError>) + Send>,
+    reply: Box<
+        dyn FnOnce(Result<super::target_planner::ResolvedMedia, super::selection_plan::Failure>)
+            + Send,
+    >,
     _slot: Slot,
 }
 struct Call {
@@ -62,6 +65,7 @@ struct State {
     tokens: Arc<FileTokens>,
     dialog_open: Arc<AtomicBool>,
     history: Mutex<HashMap<String, Record>>,
+    poster_reader: Arc<tokio::sync::Semaphore>,
 }
 
 pub(crate) struct LibraryService {
@@ -82,6 +86,7 @@ impl LibraryService {
             tokens: Arc::new(FileTokens::default()),
             dialog_open: Arc::new(AtomicBool::new(false)),
             history: Mutex::new(HashMap::new()),
+            poster_reader: Arc::new(tokio::sync::Semaphore::new(1)),
         });
         let worker = Arc::clone(&state);
         std::thread::Builder::new().name("hertz-wallpaper-management".into()).spawn(move || {
@@ -100,9 +105,9 @@ impl LibraryService {
                                     Work::Command(call) => { let _slot = call._slot; let value = state.handle(&call.request, call.owner, call.hwnd).await; (call.reply)(value); }
                                     Work::Resolve(call) => {
                                         let _slot = call._slot;
-                                        let result = if call.cancel.load(Ordering::Acquire) { Err(JobError::new("cancelled", "媒体选择已取消")) } else { match state.jobs().await {
+                                        let result = if call.cancel.load(Ordering::Acquire) { Err(JobError::new("cancelled", "媒体选择已取消").into()) } else { match state.jobs().await {
                                             Ok(jobs) => super::selection_plan::resolve(Arc::clone(jobs), call.request, call.cancel).await,
-                                            Err(error) => Err(error),
+                                            Err(error) => Err(error.into()),
                                         }};
                                         (call.reply)(result);
                                     }
@@ -147,7 +152,9 @@ impl LibraryService {
         &self,
         request: super::selection_plan::Request,
         cancel: Arc<AtomicBool>,
-        reply: impl FnOnce(Result<super::target_planner::ResolvedMedia, JobError>) + Send + 'static,
+        reply: impl FnOnce(Result<super::target_planner::ResolvedMedia, super::selection_plan::Failure>)
+            + Send
+            + 'static,
     ) -> Result<(), JobError> {
         let slot = self.reserve()?;
         self.resolve_selection_reserved(request, cancel, slot, reply)
@@ -158,7 +165,9 @@ impl LibraryService {
         request: super::selection_plan::Request,
         cancel: Arc<AtomicBool>,
         slot: Slot,
-        reply: impl FnOnce(Result<super::target_planner::ResolvedMedia, JobError>) + Send + 'static,
+        reply: impl FnOnce(Result<super::target_planner::ResolvedMedia, super::selection_plan::Failure>)
+            + Send
+            + 'static,
     ) -> Result<(), JobError> {
         request.validate()?;
         self.tx
@@ -246,6 +255,38 @@ impl State {
         }
     }
 
+    /// 删除顺序：内容写门 → 只读计划 → 移除不再被引用的包目录 → 库行事务。
+    /// app 在提交前已检查配置/草稿/预览引用；这里再核对 UI 给出的版本与包绑定。
+    async fn delete_library(
+        self: &Arc<Self>,
+        work_key: String,
+        version: Option<i64>,
+        package_hash: Option<String>,
+    ) -> Result<Value, JobError> {
+        let jobs = self.jobs().await?;
+        let _writer = jobs.assets().content_writer()?;
+        let plan = jobs.library().plan_deletion(&work_key, version).await?;
+        if let Some(package_hash) = package_hash.as_ref() {
+            if plan.versions.len() != 1 || &plan.versions[0].package_hash != package_hash {
+                return Err(JobError::new(
+                    "version_not_found",
+                    "版本与包 hash 不匹配，请刷新作品库后重试",
+                ));
+            }
+        }
+        for hash in &plan.package_hashes {
+            jobs.assets().remove_installed(hash).await?;
+        }
+        jobs.library().delete_rows(&plan).await?;
+        Ok(json!({
+            "deleted": true,
+            "workKey": plan.work_key,
+            "workDeleted": plan.delete_work,
+            "versions": plan.versions.len(),
+            "packages": plan.package_hashes.len(),
+        }))
+    }
+
     fn begin_request(&self, request: &Request) -> Result<Option<Value>, JobError> {
         let digest = request.digest();
         let mut history = self
@@ -303,6 +344,7 @@ impl State {
                 | Command::Status
                 | Command::LibraryList { .. }
                 | Command::LibraryGet { .. }
+                | Command::LibraryPoster { .. }
                 | Command::JobsGet { .. }
                 | Command::OperationsGet { .. })
         );
@@ -357,11 +399,11 @@ impl State {
                 ))
             }
             Command::Capabilities => {
-                json!({"protocol":2,"library":true,"import":true,"importFormats":["hwpkg","png","jpeg","webp","mp4","webm"],"nativeFilePicker":true,"settingsDrafts":true,"previewBuiltin":true,"mediaApply":true,"previewMedia":true,"settingsSchema":5,"layouts":["single"],"audioInputs":["none","hertz","system"],"requestBytes":hertz_desktop_ipc::management::REQUEST_LIMIT,"responseBytes":hertz_desktop_ipc::management::RESPONSE_LIMIT})
+                json!({"protocol":2,"library":true,"libraryDelete":true,"videoPosters":true,"import":true,"importFormats":["hwpkg","png","jpeg","webp","mp4","webm"],"nativeFilePicker":true,"settingsDrafts":true,"previewBuiltin":true,"mediaApply":true,"previewMedia":true,"settingsSchema":5,"layouts":["single"],"audioInputs":["none","hertz","system"],"requestBytes":hertz_desktop_ipc::management::REQUEST_LIMIT,"responseBytes":hertz_desktop_ipc::management::RESPONSE_LIMIT})
             }
             Command::Status => {
                 let usage = super::budget::global().usage();
-                json!({"decoderSlots":usage.decoder_slots,"prepareTasks":usage.prepare_tasks,"pendingFileSelection":self.dialog_open.load(Ordering::Acquire),"activeJob":self.jobs.get().and_then(|jobs| jobs.active_status())})
+                json!({"decoderSlots":usage.decoder_slots,"prepareTasks":usage.prepare_tasks,"budget":usage,"pendingFileSelection":self.dialog_open.load(Ordering::Acquire),"activeJob":self.jobs.get().and_then(|jobs| jobs.active_status())})
             }
             Command::FilePick => {
                 self.check_owner(owner)?;
@@ -394,12 +436,16 @@ impl State {
                     None => json!({"cancelled":true}),
                 }
             }
-            Command::LibraryList { limit, cursor } => {
+            Command::LibraryList {
+                limit,
+                cursor,
+                favorites_only,
+            } => {
                 let (works, next) = self
                     .jobs()
                     .await?
                     .library()
-                    .list_works(limit, cursor.as_deref())
+                    .list_works_filtered(limit, cursor.as_deref(), favorites_only)
                     .await?;
                 // 描述在详情读取；列表按最大标题/50 项仍能落在 64 KiB 内。
                 let summaries: Vec<Value> = works.into_iter().map(|work| json!({"workKey":work.work_key,"title":work.title,"kind":work.kind,"favorite":work.favorite,"archived":work.archived,"updatedAt":work.updated_at})).collect();
@@ -412,6 +458,49 @@ impl State {
                     .await?
                     .ok_or_else(|| JobError::new("work_not_found", "作品不存在"))?;
                 json!({"work":work,"versions":library.versions(&work_key).await?})
+            }
+            Command::LibraryPoster {
+                work_key,
+                package_hash,
+            } => {
+                let jobs = Arc::clone(self.jobs().await?);
+                let permit = Arc::clone(&self.poster_reader)
+                    .try_acquire_owned()
+                    .map_err(|_| JobError::new("budget_busy", "正在读取视频封面，请稍后重试"))?;
+                let runtime = tokio::runtime::Handle::current();
+                let poster = tokio::task::spawn_blocking(move || {
+                    // A query timeout cannot release the reader until the actual I/O exits.
+                    let _permit = permit;
+                    runtime.block_on(super::video_poster::read(
+                        jobs.assets(),
+                        jobs.library(),
+                        &work_key,
+                        &package_hash,
+                    ))
+                })
+                .await
+                .map_err(|error| JobError::io(error.to_string()))??;
+                json!({"poster":poster})
+            }
+            Command::LibraryFavorite { work_key, favorite } => {
+                let work = self
+                    .jobs()
+                    .await?
+                    .library()
+                    .set_favorite(&work_key, favorite)
+                    .await?;
+                json!({"workKey":work.work_key,"favorite":work.favorite})
+            }
+            Command::LibraryDeleteWork { work_key } => {
+                self.delete_library(work_key, None, None).await?
+            }
+            Command::LibraryDeleteVersion {
+                work_key,
+                version,
+                package_hash,
+            } => {
+                self.delete_library(work_key, Some(i64::from(version)), Some(package_hash))
+                    .await?
             }
             Command::ImportBegin { file_token } => {
                 let jobs = self.jobs().await?;
@@ -593,6 +682,84 @@ mod tests {
             0,
         );
         assert_eq!(unknown["error"]["code"], "operation_unknown");
+    }
+
+    #[test]
+    fn deleting_a_version_removes_the_unreferenced_package_directory_and_rows() {
+        use crate::wallpaper::library::{InstallWork, LOCAL_SOURCE};
+        let root = tempfileish::temp_dir("service-delete");
+        let service = LibraryService::start(root.path().to_path_buf(), probe());
+        let list = call(
+            &service,
+            request("list", "wallpaper.library.list", json!({})),
+            0,
+        );
+        assert_eq!(list["ok"], true, "初始化作品库");
+        let hash = "a".repeat(64);
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let (library, package_dir) = runtime.block_on(async {
+            let library = Library::open(root.path()).await.unwrap();
+            library
+                .install(&InstallWork {
+                    remote_work_id: "uuid-delete".into(),
+                    work_key: "key-delete".into(),
+                    title: "待删除".into(),
+                    description: String::new(),
+                    kind: "image".into(),
+                    package_hash: hash.clone(),
+                    manifest_json: "{}".into(),
+                    package_bytes: 70,
+                    version: 1,
+                    source_id: LOCAL_SOURCE.into(),
+                })
+                .await
+                .unwrap();
+            let package_dir = root.path().join("packages").join(&hash);
+            std::fs::create_dir_all(&package_dir).unwrap();
+            std::fs::write(package_dir.join("original.hwpkg"), b"installed").unwrap();
+            (library, package_dir)
+        });
+        let favorite = call(
+            &service,
+            request(
+                "favorite",
+                "wallpaper.library.favorite",
+                json!({"workKey":"key-delete","favorite":true}),
+            ),
+            0,
+        );
+        assert_eq!(favorite["ok"], true, "{}", favorite["error"]);
+        assert_eq!(favorite["result"]["favorite"], 1);
+        let filtered = call(
+            &service,
+            request(
+                "favorites",
+                "wallpaper.library.list",
+                json!({"favoritesOnly":true}),
+            ),
+            0,
+        );
+        assert_eq!(filtered["result"]["works"].as_array().unwrap().len(), 1);
+        let receipt = call(
+            &service,
+            request(
+                "delete",
+                "wallpaper.library.deleteVersion",
+                json!({"workKey":"key-delete","version":1,"packageHash":hash}),
+            ),
+            0,
+        );
+        assert_eq!(receipt["ok"], true, "{}", receipt["error"]);
+        assert_eq!(receipt["result"]["packages"], 1);
+        assert!(!package_dir.exists(), "包目录先于库行移除");
+        runtime.block_on(async {
+            assert!(library.get_work("key-delete").await.unwrap().is_none());
+            let packages: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM packages")
+                .fetch_one(library.pool())
+                .await
+                .unwrap();
+            assert_eq!(packages, 0);
+        });
     }
 
     #[test]
@@ -825,11 +992,11 @@ mod tests {
             receive.recv_timeout(Duration::from_secs(5)).unwrap()
         };
         assert_eq!(
-            plan("another-work".into(), false).err().unwrap().code,
+            plan("another-work".into(), false).err().unwrap().error.code,
             "version_not_found"
         );
         assert_eq!(
-            plan(work_key.clone(), true).err().unwrap().code,
+            plan(work_key.clone(), true).err().unwrap().error.code,
             "cancelled"
         );
         armed.store(true, Ordering::Release);
@@ -873,6 +1040,7 @@ mod tests {
                 .unwrap()
                 .err()
                 .unwrap()
+                .error
                 .code,
             "cancelled"
         );

@@ -286,7 +286,10 @@ impl MiniFeed {
         key: &str,
         snapshot: &MiniSnapshot,
     ) -> Result<Option<Vec<u8>>> {
-        let wanted = snapshot.track.as_ref().and_then(|track| track.cover_key.clone());
+        let wanted = snapshot
+            .track
+            .as_ref()
+            .and_then(|track| track.cover_key.clone());
         let Some(wanted) = wanted else {
             self.cover_key = None;
             return Ok(None);

@@ -112,13 +112,24 @@ async function main() {
     await page.waitForSelector('#preview:enabled');
     const persisted=fs.readFileSync(configFile,'utf8');
     await page.locator('#preview').click();
-    await page.waitForFunction(()=>document.querySelector('#preview-renderer')?.contentDocument?.querySelector('canvas'));
+    let previewPage;
+    for(let i=0;i<100&&!previewPage;i++) {
+      const preview=(await command('status')).wallpaper.mediaPreview;
+      if(preview?.firstFrameReady)for(const candidate of browser.contexts().flatMap(context=>context.pages())) {
+        if(candidate.url().includes('/wallpaper.html')&&await candidate.evaluate(id=>window.hertzWallpaper?.debug().session?.sessionId===id,preview.binding.sessionId))previewPage=candidate;
+      }
+      if(!previewPage)await page.waitForTimeout(100);
+    }
+    assert.ok(previewPage,'independent builtin preview reaches a real first frame');
+    assert.ok(await previewPage.locator('canvas').count());
+    assert.equal(await page.locator('#preview-renderer,iframe').count(),0);
     await page.waitForTimeout(1000);
-    assert.equal(fs.readFileSync(configFile,'utf8'),persisted,'Real embedded preview remains readonly');
+    assert.equal(fs.readFileSync(configFile,'utf8'),persisted,'Independent preview remains readonly');
     assert.equal((await command('status')).wallpaper.previewActive,true);
     await page.screenshot({path:path.join(output,'native-wallpaper-preview.png')});
     await page.locator('#tab-lyrics').click();
-    await page.waitForFunction(()=>!document.querySelector('#preview-renderer'));
+    for(let i=0;i<50&&!previewPage.isClosed();i++)await page.waitForTimeout(100);
+    assert.equal(previewPage.isClosed(),true,'switching settings tabs closes the preview controller');
     assert.equal((await command('status')).wallpaper.previewActive,false);
     await page.locator('#lyrics-size').fill('41');await page.locator('#apply').click();
     await page.waitForFunction(()=>document.querySelector('#settings-state').textContent==='设置已保存');

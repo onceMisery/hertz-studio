@@ -342,9 +342,7 @@ impl MiniHost {
                 if !edge_hide || cursor_inside {
                     return MiniAction::None;
                 }
-                let settled = self
-                    .settled_at
-                    .is_some_and(|at| at.elapsed() >= PEEK_DELAY);
+                let settled = self.settled_at.is_some_and(|at| at.elapsed() >= PEEK_DELAY);
                 if !settled {
                     return MiniAction::None;
                 }
@@ -679,7 +677,10 @@ mod tests {
             std::path::PathBuf::from("C:\\d"),
             "full",
         ));
-        assert!(matches!(host.handle(MiniEvent::Enter(EnterReason::User)), MiniAction::Show));
+        assert!(matches!(
+            host.handle(MiniEvent::Enter(EnterReason::User)),
+            MiniAction::Show
+        ));
         // 第二次进入：已经在小窗里，只重新落位。
         assert!(matches!(
             host.handle(MiniEvent::Enter(EnterReason::User)),
@@ -722,7 +723,10 @@ mod tests {
         ));
         host.auto_on_main_hidden = true;
         host.handle(MiniEvent::Enter(EnterReason::MainHidden));
-        assert!(matches!(host.handle(MiniEvent::MainVisible), MiniAction::Hide));
+        assert!(matches!(
+            host.handle(MiniEvent::MainVisible),
+            MiniAction::Hide
+        ));
         assert_eq!(host.phase, MiniPhase::Hidden);
     }
 

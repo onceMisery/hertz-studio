@@ -551,9 +551,8 @@ async fn run_import(
         )
         .await?;
         cancelled(&request.cancel)?;
-        for image in &mut prepared {
-            image.publish(assets, library).await?;
-        }
+        prepared.publish(assets, library).await?;
+        cancelled(&request.cancel)?;
         library.mark_available(&package.package_hash).await?;
         return Ok(package.package_hash.clone());
     }
@@ -573,9 +572,8 @@ async fn run_import(
     cancelled(&request.cancel)?;
     // ⑥ Install：flush → 原子改名到 packageHash 目录（拒绝覆盖）。
     set_state(&request.status, JobState::Publishing);
-    for image in &mut prepared {
-        image.publish(assets, library).await?;
-    }
+    prepared.publish(assets, library).await?;
+    cancelled(&request.cancel)?;
     // 所有派生代际已移出，空的准备目录不进入不可变原包投影。
     let derived = assets.staging_dir(&request.job_id).join("derived");
     if derived.exists() {
@@ -641,9 +639,19 @@ async fn run_prepare(
         &["image/png".into(), "video/mp4".into(), "video/webm".into()],
     )?;
     if input.metadata.container != super::media::Container::Image {
-        probe
-            .qualify(library, input, Arc::clone(&request.cancel))
-            .await?;
+        let poster = super::video_poster::prepare(
+            assets,
+            library,
+            probe,
+            &request.job_id,
+            input,
+            Arc::clone(&request.cancel),
+        )
+        .await?;
+        cancelled(&request.cancel)?;
+        if let Some(mut poster) = poster {
+            poster.publish_optional(assets, library).await;
+        }
         cancelled(&request.cancel)?;
         return Ok(package.package_hash);
     }
@@ -670,18 +678,36 @@ async fn run_prepare(
     Ok(package.package_hash)
 }
 
+#[derive(Default)]
+struct PreparedMedia {
+    images: Vec<super::image_prepare::PreparedImage>,
+    posters: Vec<super::video_poster::PreparedPoster>,
+}
+impl PreparedMedia {
+    async fn publish(&mut self, assets: &AssetStore, library: &Library) -> Result<(), JobError> {
+        for image in &mut self.images {
+            image.publish(assets, library).await?;
+        }
+        for poster in &mut self.posters {
+            poster.publish_optional(assets, library).await;
+        }
+        Ok(())
+    }
+}
+
 async fn qualify_media(
     request: &JobRequest,
     library: &Library,
     assets: &AssetStore,
     probe: &ProbeClient,
     inputs: Vec<super::assets::DecodeInput>,
-) -> Result<Vec<super::image_prepare::PreparedImage>, JobError> {
-    let mut prepared: Vec<super::image_prepare::PreparedImage> = Vec::new();
+) -> Result<PreparedMedia, JobError> {
+    let mut prepared = PreparedMedia::default();
     for input in inputs {
         cancelled(&request.cancel)?;
         if input.metadata.container == super::media::Container::Image {
             if let Some(image) = prepared
+                .images
                 .iter()
                 .find(|image| image.receipt.input_hash == input.media.entry.sha256)
             {
@@ -710,12 +736,21 @@ async fn qualify_media(
                         Arc::clone(&request.cancel),
                     )
                     .await?;
-                prepared.push(image);
+                prepared.images.push(image);
             }
         } else {
-            probe
-                .qualify(library, input, Arc::clone(&request.cancel))
-                .await?;
+            if let Some(poster) = super::video_poster::prepare(
+                assets,
+                library,
+                probe,
+                &request.job_id,
+                input,
+                Arc::clone(&request.cancel),
+            )
+            .await?
+            {
+                prepared.posters.push(poster);
+            }
         }
     }
     Ok(prepared)

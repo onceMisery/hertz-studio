@@ -8,6 +8,7 @@
 //! 安装事务固定顺序：packages（原包不可变）→ works（(source,remote) 幂等映射）
 //! → versions（同 work+version 幂等 / 同版本异 hash 拒绝）。
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
@@ -75,6 +76,16 @@ pub(crate) struct VersionRow {
 pub(crate) struct ImportOperation {
     pub job_id: String,
     pub payload_digest: String,
+}
+
+/// 已校验的删除计划：先移除不再被任何版本引用的包目录，再删除库行。
+#[derive(Debug, Clone)]
+pub(crate) struct Deletion {
+    pub(crate) work_key: String,
+    pub(crate) delete_work: bool,
+    pub(crate) versions: Vec<VersionRow>,
+    /// 删除这些版本后不再被任何版本引用的包 hash；共享包保留。
+    pub(crate) package_hashes: Vec<String>,
 }
 
 pub struct Library {
@@ -284,19 +295,49 @@ impl Library {
         limit: u32,
         cursor: Option<&str>,
     ) -> Result<(Vec<WorkRow>, Option<String>)> {
+        self.list_works_filtered(limit, cursor, false).await
+    }
+
+    /// 收藏筛选与普通分页共用同一游标；收藏状态变化后由设置页重新读取。
+    pub(crate) async fn list_works_filtered(
+        &self,
+        limit: u32,
+        cursor: Option<&str>,
+        favorites_only: bool,
+    ) -> Result<(Vec<WorkRow>, Option<String>)> {
         let limit = limit.clamp(1, 50) as i64;
-        let rows: Vec<WorkRow> = match cursor {
-            None => sqlx::query_as(
+        let rows: Vec<WorkRow> = match (cursor, favorites_only) {
+            (None, false) => sqlx::query_as(
                 "SELECT * FROM works ORDER BY created_at DESC, work_key DESC LIMIT ?1",
             )
             .bind(limit + 1)
             .fetch_all(&self.pool)
             .await
             .map_err(|error| JobError::database(error.to_string()))?,
-            Some(cursor) => {
+            (None, true) => sqlx::query_as(
+                "SELECT * FROM works WHERE favorite = 1 ORDER BY created_at DESC, work_key DESC LIMIT ?1",
+            )
+            .bind(limit + 1)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|error| JobError::database(error.to_string()))?,
+            (Some(cursor), false) => {
                 let (created_at, key) = parse_cursor(cursor)?;
                 sqlx::query_as(
                     "SELECT * FROM works WHERE (created_at < ?1) OR (created_at = ?1 AND work_key < ?2)
+                     ORDER BY created_at DESC, work_key DESC LIMIT ?3",
+                )
+                .bind(created_at)
+                .bind(key)
+                .bind(limit + 1)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|error| JobError::database(error.to_string()))?
+            }
+            (Some(cursor), true) => {
+                let (created_at, key) = parse_cursor(cursor)?;
+                sqlx::query_as(
+                    "SELECT * FROM works WHERE favorite = 1 AND ((created_at < ?1) OR (created_at = ?1 AND work_key < ?2))
                      ORDER BY created_at DESC, work_key DESC LIMIT ?3",
                 )
                 .bind(created_at)
@@ -324,6 +365,25 @@ impl Library {
             .map_err(|error| JobError::database(error.to_string()))
     }
 
+    /// 收藏只改变展示状态，不触碰包/版本引用。
+    pub(crate) async fn set_favorite(&self, work_key: &str, favorite: bool) -> Result<WorkRow> {
+        let changed =
+            sqlx::query("UPDATE works SET favorite = ?1, updated_at = ?2 WHERE work_key = ?3")
+                .bind(i64::from(favorite))
+                .bind(now_secs())
+                .bind(work_key)
+                .execute(&self.pool)
+                .await
+                .map_err(|error| JobError::database(error.to_string()))?
+                .rows_affected();
+        if changed == 0 {
+            return Err(JobError::new("work_not_found", "作品不存在"));
+        }
+        self.get_work(work_key)
+            .await?
+            .ok_or_else(|| JobError::new("work_not_found", "作品不存在"))
+    }
+
     /// A fixed selection must belong to this work, including versions outside a UI page.
     pub(crate) async fn contains_version(
         &self,
@@ -335,9 +395,127 @@ impl Library {
             .map_err(|error| JobError::database(error.to_string()))
     }
 
+    /// Bounded metadata from a completed installation, including subsequently unavailable bytes.
+    /// This is not decode qualification: playback still verifies the immutable package itself.
+    pub(crate) async fn cover_manifest(
+        &self,
+        work_key: &str,
+        package_hash: &str,
+    ) -> Result<hertz_wallpaper::Manifest> {
+        let json: Option<String> = sqlx::query_scalar("SELECT p.manifest_json FROM versions v JOIN packages p ON p.package_hash=v.package_hash WHERE v.work_key=?1 AND v.package_hash=?2 AND p.state IN ('installed','unavailable') AND length(CAST(p.manifest_json AS BLOB))<=?3 LIMIT 1")
+            .bind(work_key).bind(package_hash).bind(hertz_wallpaper::MAX_MANIFEST_BYTES as i64)
+            .fetch_optional(&self.pool).await.map_err(|error| JobError::database(error.to_string()))?;
+        let json = json.ok_or_else(|| {
+            JobError::new("version_not_found", "作品没有这个已登记版本或其清单无效")
+        })?;
+        hertz_wallpaper::validate_manifest_bytes(json.as_bytes()).map_err(Into::into)
+    }
+
     pub(crate) async fn versions(&self, work_key: &str) -> Result<Vec<VersionRow>> {
         sqlx::query_as("SELECT v.version_key, v.version, v.package_hash, p.state FROM versions v JOIN packages p ON p.package_hash = v.package_hash WHERE v.work_key = ?1 ORDER BY v.version DESC LIMIT 100")
             .bind(work_key).fetch_all(&self.pool).await.map_err(|error| JobError::database(error.to_string()))
+    }
+
+    /// 删除计划必须看到该作品的全部版本，不能受详情页最多 100 条的展示上限影响。
+    async fn all_versions(&self, work_key: &str) -> Result<Vec<VersionRow>> {
+        sqlx::query_as("SELECT v.version_key, v.version, v.package_hash, p.state FROM versions v JOIN packages p ON p.package_hash = v.package_hash WHERE v.work_key = ?1 ORDER BY v.version DESC")
+            .bind(work_key)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|error| JobError::database(error.to_string()))
+    }
+
+    /// 只读计划：在一个作品或单个版本上计算要删的版本行与不再被引用的包。
+    /// 调用方必须在整个删除期间持有内容写门，避免并发的同 hash 安装改变引用。
+    pub(crate) async fn plan_deletion(
+        &self,
+        work_key: &str,
+        version: Option<i64>,
+    ) -> Result<Deletion> {
+        let work = self
+            .get_work(work_key)
+            .await?
+            .ok_or_else(|| JobError::new("work_not_found", "作品不存在"))?;
+        let versions = self.all_versions(work_key).await?;
+        let targets: Vec<VersionRow> = match version {
+            Some(version) => versions
+                .iter()
+                .filter(|row| row.version == version)
+                .cloned()
+                .collect(),
+            None => versions.clone(),
+        };
+        if version.is_some() && targets.is_empty() {
+            return Err(JobError::new("version_not_found", "作品版本不存在"));
+        }
+        let target_keys: HashSet<&str> =
+            targets.iter().map(|row| row.version_key.as_str()).collect();
+        let delete_work = versions
+            .iter()
+            .all(|row| target_keys.contains(row.version_key.as_str()));
+        let mut package_hashes = Vec::new();
+        let mut seen = HashSet::new();
+        for target in &targets {
+            if !seen.insert(target.package_hash.clone()) {
+                continue;
+            }
+            let referenced: Vec<String> =
+                sqlx::query_scalar("SELECT version_key FROM versions WHERE package_hash = ?1")
+                    .bind(&target.package_hash)
+                    .fetch_all(&self.pool)
+                    .await
+                    .map_err(|error| JobError::database(error.to_string()))?;
+            if referenced
+                .iter()
+                .all(|key| target_keys.contains(key.as_str()))
+            {
+                package_hashes.push(target.package_hash.clone());
+            }
+        }
+        Ok(Deletion {
+            work_key: work.work_key,
+            delete_work,
+            versions: targets,
+            package_hashes,
+        })
+    }
+
+    /// 库行短事务。包目录已在此之前移除；若此处失败，损坏的包在下一次启动
+    /// 恢复中标记 unavailable，而不会把已删除目录重新导入成作品。
+    pub(crate) async fn delete_rows(&self, plan: &Deletion) -> Result<()> {
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(|error| JobError::database(error.to_string()))?;
+        for version in &plan.versions {
+            sqlx::query("DELETE FROM versions WHERE version_key = ?1")
+                .bind(&version.version_key)
+                .execute(&mut *tx)
+                .await
+                .map_err(|error| JobError::database(error.to_string()))?;
+        }
+        if plan.delete_work {
+            sqlx::query("DELETE FROM works WHERE work_key = ?1")
+                .bind(&plan.work_key)
+                .execute(&mut *tx)
+                .await
+                .map_err(|error| JobError::database(error.to_string()))?;
+        }
+        for package_hash in &plan.package_hashes {
+            sqlx::query(
+                "DELETE FROM packages WHERE package_hash = ?1
+                 AND NOT EXISTS (SELECT 1 FROM versions WHERE package_hash = ?1)",
+            )
+            .bind(package_hash)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| JobError::database(error.to_string()))?;
+        }
+        tx.commit()
+            .await
+            .map_err(|error| JobError::database(error.to_string()))?;
+        Ok(())
     }
 
     pub(crate) async fn import_operation(
@@ -536,6 +714,124 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.code, "version_hash_conflict");
+    }
+
+    #[tokio::test]
+    async fn favorites_update_and_filter_with_the_same_cursor() {
+        let (library, _dir) = temp_library("favorites").await;
+        for index in 0..3u32 {
+            library
+                .install(&work(&hash(index as u8 + 1), &format!("uuid-{index}"), 1))
+                .await
+                .unwrap();
+        }
+        library.set_favorite("key-uuid-1-1", true).await.unwrap();
+        library.set_favorite("key-uuid-2-1", true).await.unwrap();
+        assert_eq!(
+            library
+                .set_favorite("missing", true)
+                .await
+                .unwrap_err()
+                .code,
+            "work_not_found"
+        );
+        let mut seen = Vec::new();
+        let mut cursor = None;
+        loop {
+            let (rows, next) = library
+                .list_works_filtered(1, cursor.as_deref(), true)
+                .await
+                .unwrap();
+            assert_eq!(rows.len(), 1);
+            seen.extend(rows.into_iter().map(|row| row.work_key));
+            match next {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+        }
+        assert_eq!(seen.len(), 2);
+        assert!(seen.iter().all(|key| key != "key-uuid-0-1"));
+        library.set_favorite("key-uuid-1-1", false).await.unwrap();
+        let (rows, _) = library.list_works_filtered(50, None, true).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].work_key, "key-uuid-2-1");
+    }
+
+    #[tokio::test]
+    async fn deletion_plan_keeps_shared_packages_and_removes_last_work_row() {
+        let (library, _dir) = temp_library("delete-plan").await;
+        library.install(&work(&hash(1), "uuid-a", 1)).await.unwrap();
+        library.install(&work(&hash(2), "uuid-a", 2)).await.unwrap();
+        let key = "key-uuid-a-1";
+        let plan = library.plan_deletion(key, Some(1)).await.unwrap();
+        assert_eq!(plan.versions.len(), 1);
+        assert!(!plan.delete_work, "删除旧版本不能删除仍存在新版本的作品");
+        assert_eq!(plan.package_hashes, vec![hash(1)]);
+        library.delete_rows(&plan).await.unwrap();
+        assert!(library.get_work(key).await.unwrap().is_some());
+        let versions = library.versions(key).await.unwrap();
+        assert_eq!(versions.len(), 1);
+        assert_eq!(versions[0].package_hash, hash(2));
+        let packages: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM packages")
+            .fetch_one(library.pool())
+            .await
+            .unwrap();
+        assert_eq!(packages, 1, "只删除不再被任何版本引用的包行");
+
+        let plan = library.plan_deletion(key, Some(2)).await.unwrap();
+        assert!(plan.delete_work, "最后一个版本删除时清理作品行");
+        library.delete_rows(&plan).await.unwrap();
+        assert!(library.get_work(key).await.unwrap().is_none());
+        let packages: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM packages")
+            .fetch_one(library.pool())
+            .await
+            .unwrap();
+        assert_eq!(packages, 0);
+    }
+
+    #[tokio::test]
+    async fn deletion_plan_preserves_package_shared_with_another_work() {
+        let (library, _dir) = temp_library("delete-shared").await;
+        library.install(&work(&hash(7), "uuid-a", 1)).await.unwrap();
+        let mut other = work(&hash(7), "uuid-b", 1);
+        other.title = "共享包".into();
+        library.install(&other).await.unwrap();
+        let plan = library.plan_deletion("key-uuid-a-1", None).await.unwrap();
+        assert!(plan.delete_work);
+        assert!(
+            plan.package_hashes.is_empty(),
+            "另一个作品仍引用同一包时不能删除包目录"
+        );
+        library.delete_rows(&plan).await.unwrap();
+        assert!(library.get_work("key-uuid-a-1").await.unwrap().is_none());
+        assert!(library.get_work("key-uuid-b-1").await.unwrap().is_some());
+        let packages: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM packages")
+            .fetch_one(library.pool())
+            .await
+            .unwrap();
+        assert_eq!(packages, 1);
+    }
+
+    #[tokio::test]
+    async fn deletion_plan_rejects_missing_work_and_version() {
+        let (library, _dir) = temp_library("delete-missing").await;
+        library.install(&work(&hash(1), "uuid-a", 1)).await.unwrap();
+        assert_eq!(
+            library
+                .plan_deletion("missing", None)
+                .await
+                .unwrap_err()
+                .code,
+            "work_not_found"
+        );
+        assert_eq!(
+            library
+                .plan_deletion("key-uuid-a-1", Some(9))
+                .await
+                .unwrap_err()
+                .code,
+            "version_not_found"
+        );
     }
 
     #[tokio::test]

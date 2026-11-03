@@ -242,9 +242,14 @@ async function main() {
         nonce: 1, generation: 1, resources,
       })), imageResources);
       await wallpaperPage.evaluate(() => window.ipc.postMessage('wallpaper_probe_import ' + JSON.stringify({ nonce: 1, action: 'begin', name: 'untrusted' })));
+      await wallpaperPage.evaluate(() => {
+        const binding = hertzWallpaper.debug().session;
+        window.ipc.postMessage('wallpaper_probe_close ' + JSON.stringify({nonce:1,sessionId:binding.sessionId,generation:binding.generation,blocked:true}));
+      });
       await wallpaperPage.waitForTimeout(500);
       assert.equal(await wallpaperPage.evaluate(() => window.__nativeMediaProbe), undefined, '正式构建不得包含页面授权入口');
       assert.equal(await wallpaperPage.evaluate(() => window.__nativeImportProbes), undefined, '正式构建不得包含页面测试导入入口');
+      assert.equal(await wallpaperPage.evaluate(() => window.__nativeCloseProbe), undefined, '正式构建不得包含 controller Close 故障注入入口');
       assert.equal((await fetchInfo(base + '/files/assets/background.png')).status, 404);
       console.log('PASS production default deny: page cannot grant its own resource access');
       return;

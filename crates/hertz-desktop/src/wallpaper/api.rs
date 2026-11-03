@@ -56,9 +56,26 @@ pub(crate) enum Command {
     LibraryList {
         limit: u32,
         cursor: Option<String>,
+        favorites_only: bool,
     },
     LibraryGet {
         work_key: String,
+    },
+    LibraryPoster {
+        work_key: String,
+        package_hash: String,
+    },
+    LibraryFavorite {
+        work_key: String,
+        favorite: bool,
+    },
+    LibraryDeleteWork {
+        work_key: String,
+    },
+    LibraryDeleteVersion {
+        work_key: String,
+        version: u32,
+        package_hash: String,
     },
     FilePick,
     ImportBegin {
@@ -133,11 +150,32 @@ impl Request {
             limit: u32,
             #[serde(default)]
             cursor: Option<String>,
+            #[serde(default)]
+            favorites_only: bool,
         }
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase", deny_unknown_fields)]
         struct Work {
             work_key: String,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct Favorite {
+            work_key: String,
+            favorite: bool,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct Poster {
+            work_key: String,
+            package_hash: String,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct Version {
+            work_key: String,
+            version: u32,
+            package_hash: String,
         }
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -209,6 +247,13 @@ impl Request {
                 Ok(value)
             } else {
                 Err(JobError::invalid_input("标识格式无效"))
+            }
+        }
+        fn package_hash(value: String) -> Result<String, JobError> {
+            if value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                Ok(value.to_ascii_lowercase())
+            } else {
+                Err(JobError::invalid_input("包 hash 格式无效"))
             }
         }
         Ok(match self.command.as_str() {
@@ -308,12 +353,44 @@ impl Request {
                 Command::LibraryList {
                     limit: value.limit,
                     cursor: value.cursor,
+                    favorites_only: value.favorites_only,
                 }
             }
             "wallpaper.library.get" => {
                 let value: Work = decode(&self.payload)?;
                 Command::LibraryGet {
                     work_key: id(value.work_key)?,
+                }
+            }
+            "wallpaper.library.favorite" => {
+                let value: Favorite = decode(&self.payload)?;
+                Command::LibraryFavorite {
+                    work_key: id(value.work_key)?,
+                    favorite: value.favorite,
+                }
+            }
+            "wallpaper.library.poster" => {
+                let value: Poster = decode(&self.payload)?;
+                Command::LibraryPoster {
+                    work_key: id(value.work_key)?,
+                    package_hash: package_hash(value.package_hash)?,
+                }
+            }
+            "wallpaper.library.deleteWork" => {
+                let value: Work = decode(&self.payload)?;
+                Command::LibraryDeleteWork {
+                    work_key: id(value.work_key)?,
+                }
+            }
+            "wallpaper.library.deleteVersion" => {
+                let value: Version = decode(&self.payload)?;
+                if value.version == 0 {
+                    return Err(JobError::invalid_input("版本号必须为正整数"));
+                }
+                Command::LibraryDeleteVersion {
+                    work_key: id(value.work_key)?,
+                    version: value.version,
+                    package_hash: package_hash(value.package_hash)?,
                 }
             }
             "wallpaper.import.begin" => {
@@ -443,6 +520,88 @@ mod tests {
         assert!(Request::parse(request(
             "wallpaper.operations.get",
             json!({"requestId":"a","command":"arbitrary"})
+        ))
+        .is_err());
+    }
+
+    #[test]
+    fn library_delete_requires_typed_version_and_package_hash() {
+        let request = |command: &str, payload: Value| json!({"protocol":2,"requestId":"delete-1","command":command,"payload":payload});
+        let hash = "a".repeat(64);
+        assert!(Request::parse(request(
+            "wallpaper.library.deleteWork",
+            json!({"workKey":"w-1"})
+        ))
+        .is_ok());
+        assert!(Request::parse(request(
+            "wallpaper.library.deleteVersion",
+            json!({"workKey":"w-1","version":2,"packageHash":hash})
+        ))
+        .is_ok());
+        assert!(Request::parse(request(
+            "wallpaper.library.deleteVersion",
+            json!({"workKey":"w-1","version":0,"packageHash":hash})
+        ))
+        .is_err());
+        assert!(Request::parse(request(
+            "wallpaper.library.deleteVersion",
+            json!({"workKey":"w-1","version":2,"packageHash":"short"})
+        ))
+        .is_err());
+        assert!(Request::parse(request(
+            "wallpaper.library.deleteVersion",
+            json!({"workKey":"w-1","version":2,"packageHash":hash,"path":"C:/secret"})
+        ))
+        .is_err());
+        assert!(Request::parse(request(
+            "wallpaper.library.deleteWork",
+            json!({"workKey":""})
+        ))
+        .is_err());
+    }
+
+    #[test]
+    fn library_favorite_and_filter_are_typed() {
+        let request = |command: &str, payload: Value| json!({"protocol":2,"requestId":"favorite-1","command":command,"payload":payload});
+        assert!(Request::parse(request(
+            "wallpaper.library.list",
+            json!({"favoritesOnly":true})
+        ))
+        .is_ok());
+        assert!(Request::parse(request(
+            "wallpaper.library.list",
+            json!({"favoritesOnly":"yes"})
+        ))
+        .is_err());
+        assert!(Request::parse(request(
+            "wallpaper.library.favorite",
+            json!({"workKey":"w-1","favorite":true})
+        ))
+        .is_ok());
+        assert!(Request::parse(request(
+            "wallpaper.library.favorite",
+            json!({"workKey":"w-1","favorite":1})
+        ))
+        .is_err());
+        assert!(Request::parse(request(
+            "wallpaper.library.favorite",
+            json!({"workKey":"w-1"})
+        ))
+        .is_err());
+    }
+
+    #[test]
+    fn poster_reads_require_exact_version_identity_and_reject_paths() {
+        let request = |payload: Value| json!({"protocol":2,"requestId":"poster-1","command":"wallpaper.library.poster","payload":payload});
+        let hash = "a".repeat(64);
+        assert!(Request::parse(request(json!({"workKey":"work","packageHash":hash}))).is_ok());
+        assert!(Request::parse(request(json!({"workKey":"work"}))).is_err());
+        assert!(Request::parse(request(
+            json!({"workKey":"work","packageHash":"../outside"})
+        ))
+        .is_err());
+        assert!(Request::parse(request(
+            json!({"workKey":"work","packageHash":hash,"path":"C:/secret"})
         ))
         .is_err());
     }
