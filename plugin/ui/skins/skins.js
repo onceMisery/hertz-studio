@@ -324,47 +324,19 @@
   var entryMenu = null;
   var entryOpen = false;
 
+  // 生命周期与定位在 components/popup.js 一处实现；这里只保留皮肤侧的
+  // 开层钩子（render + 聚焦当前行）与给既有调用方的 setOpen 形状。
+  var entryPopup = null;
   function setEntryOpen(open, returnFocus) {
-    if (!entryBtn || !entryMenu) return;
-    entryOpen = !!open;
-    entryMenu.hidden = !entryOpen;
-    entryBtn.classList.toggle('active', entryOpen);
-    entryBtn.setAttribute('aria-expanded', String(entryOpen));
-    if (entryOpen) {
-      renderMenu();
-      positionEntryMenu();
-      try {
-        document.dispatchEvent(new CustomEvent(POPUP_EVENT, { detail: { id: 'skin' } }));
-      } catch (e) { /* 老浏览器没有 CustomEvent 构造器 */ }
-      // 焦点直接落在当前皮肤那一行：开弹层的意图就是「看看现在是哪套」。
-      var at = entryMenu.querySelector('.skin-option.is-on') || entryMenu.firstElementChild;
-      if (at && at.focus) at.focus();
-    } else if (returnFocus && entryBtn.focus) {
-      entryBtn.focus();
-    }
+    if (!entryPopup) return;
+    entryPopup.setOpen(!!open);
+    if (!open && returnFocus && entryBtn.focus) entryBtn.focus();
   }
 
-  /// 菜单已经不在按钮下面了（见 bindEntry 里搬 body 那段），位置只能自己算 ——
-  /// 与 app.js 的 positionThemeMenu 同一套判据：右对齐按钮，下方放不下就翻上去。
-  /// 入口被收进 ⋮ 之后，触发项会随那张菜单收起，所以锚点换成常驻的 ⋮ 按钮。
+  /// 菜单已经不在按钮下面了（模块搬 body 那段），锚点解析成常驻的 ⋮ 按钮。
   function entryAnchor() {
     var host = entryBtn.closest && entryBtn.closest('.top-more-menu');
     return (host && el('top-more-btn')) || entryBtn;
-  }
-
-  function positionEntryMenu() {
-    if (!entryMenu || entryMenu.hidden || !entryBtn) return;
-    var anchor = entryAnchor();
-    var r = anchor.getBoundingClientRect();
-    var w = entryMenu.offsetWidth || 246;
-    var h = entryMenu.offsetHeight || 0;
-    var gap = 8, pad = 8;
-    var left = Math.max(pad, Math.min(r.right - w, window.innerWidth - w - pad));
-    var top = r.bottom + gap;
-    if (top + h > window.innerHeight - pad && r.top - h - gap >= pad) top = r.top - h - gap;
-    top = Math.max(pad, Math.min(top, Math.max(pad, window.innerHeight - h - pad)));
-    entryMenu.style.left = Math.round(left) + 'px';
-    entryMenu.style.top = Math.round(top) + 'px';
   }
 
   function closeEntry(returnFocus) { setEntryOpen(false, returnFocus); }
@@ -378,54 +350,16 @@
     entryMenu = el('skin-menu');
     // 契约脚本的沙箱只给 #skins-list，这里安静地不绑就行（模块其余部分照旧可用）。
     if (!entryBtn || !entryMenu) return;
-
-    // 关键一步（与 app.js 的 #theme-menu 同源）：把弹层搬出 .topbar。顶栏是
-    // relative + z-index:40 + backdrop-filter，自己就是一个层叠上下文，弹层写多高
-    // 的 z-index 都出不去；舞台抽屉是 fixed + z-index:58，整张菜单会被它盖住
-    // （实测两点命中都是 #stage）。搬进 body 后它就是根上下文里的 fixed 元素。
-    document.body.appendChild(entryMenu);
-
-    entryBtn.onclick = function (e) {
-      e.stopPropagation();
-      setEntryOpen(!entryOpen, false);
-    };
-
-    document.addEventListener('click', function (e) {
-      // contains 而不是 ===：按钮里是个 svg，点图标时 target 落在 svg 上。
-      if (entryOpen && !entryMenu.contains(e.target) && !entryBtn.contains(e.target)) {
-        setEntryOpen(false, false);
-      }
-    });
-
-    // 别的顶栏弹层（主题色 / 更多工具）开了就收起，见顶部 POPUP_EVENT 注释。
-    document.addEventListener(POPUP_EVENT, function (e) {
-      if (entryOpen && e.detail && e.detail.id !== 'skin') setEntryOpen(false, false);
-    });
-
-    entryMenu.addEventListener('keydown', function (e) {
-      var rows = entryRows();
-      if (!rows.length) return;
-      var idx = rows.indexOf(document.activeElement);
-      if (e.key === 'Escape') {
-        e.stopPropagation();
-        setEntryOpen(false, true);
-      } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
-        e.preventDefault();
-        var next = idx < 0 ? 0 : idx + (e.key === 'ArrowDown' ? 1 : -1);
-        if (next < 0) next = rows.length - 1;
-        if (next >= rows.length) next = 0;
-        rows[next].focus();
-      } else if (e.key === 'Home') {
-        e.preventDefault();
-        rows[0].focus();
-      } else if (e.key === 'End') {
-        e.preventDefault();
-        rows[rows.length - 1].focus();
-      }
-    });
-
-    window.addEventListener('resize', function () {
-      if (entryOpen) setEntryOpen(false, false);
+    entryPopup = window.HertzPopup.create({
+      id: 'skin', trigger: entryBtn, menu: entryMenu, fallbackW: 246,
+      itemSelector: '.skin-option',
+      getAnchor: entryAnchor,
+      onOpen: function () {
+        renderMenu();
+        // 焦点直接落在当前皮肤那一行：开弹层的意图就是「看看现在是哪套」。
+        var at = entryMenu.querySelector('.skin-option.is-on') || entryMenu.firstElementChild;
+        if (at && at.focus) at.focus();
+      },
     });
   }
 

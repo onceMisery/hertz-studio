@@ -197,6 +197,8 @@
   }
   window.NowPlaying = { init: init, open: open, close: close, back: back, isOpen: function () { return opened; },
     lyricState: function (status) { lyricStatus = status; emptyState(); }, update: tick,
+    // 队列切页的公开入口：播放条队列钮等外部组件走它，不模拟 np-queue 的 click。
+    showQueue: function (show) { showQueue(!!show); },
     preview: function (position, duration) { if (opened) { el.elapsed.textContent = time(position); el.duration.textContent = time(duration); } }
   };
 })();

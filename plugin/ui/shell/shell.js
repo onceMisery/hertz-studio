@@ -70,6 +70,35 @@
     return regions[name];
   }
 
+  // 受控装配（设计 §7.2）：已登记视图的根节点由外壳持有显隐与登记；宿主表面
+  // （设置浮层右栏等）经 attach/detach 迁移根节点，而不是用通用搬运工具自行
+  // 移动业务根。attach 记录原位，detach 严格还原父节点与插入点。
+  var attachedViews = new Map();
+  function attachView(id, container) {
+    if (!initialized) throw new Error('外壳尚未初始化');
+    var def = views.get(id);
+    if (!def) throw new Error('未登记的视图：' + id);
+    if (!container) throw new TypeError('装配目标容器缺失');
+    if (attachedViews.has(id)) throw new Error('视图已装配在其他表面：' + id);
+    attachedViews.set(id, { parent: def.el.parentNode, next: def.el.nextSibling });
+    container.appendChild(def.el);
+    return def.el;
+  }
+
+  function detachView(id) {
+    var def = views.get(id);
+    var record = attachedViews.get(id);
+    if (!def || !record) return false;
+    attachedViews.delete(id);
+    if (record.parent) {
+      if (record.next && record.next.parentNode === record.parent) record.parent.insertBefore(def.el, record.next);
+      else record.parent.appendChild(def.el);
+    }
+    return true;
+  }
+
+  function isViewAttached(id) { return attachedViews.has(id); }
+
   // 导航请求。options 沿用既有语义：historyOnly（在线页只切视图不拉数据）、
   // skipDesktopDetection（设置页恢复不探测可选桌面组件）。无效目标保持当前页面。
   function navigate(name, options) {
@@ -129,6 +158,9 @@
     mode: mode,
     generation: viewGeneration,
     region: region,
+    attachView: attachView,
+    detachView: detachView,
+    isViewAttached: isViewAttached,
     hasView: hasView,
   };
 })();

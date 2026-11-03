@@ -28,6 +28,7 @@ const WEB = path.join(ROOT, 'plugin', 'ui');
 const SKINS = path.join(WEB, 'skins');
 const read = (p) => fs.readFileSync(p, 'utf8').replace(/\r\n/g, '\n');
 const SKINS_JS = read(path.join(SKINS, 'skins.js'));
+const POPUP_JS = read(path.join(WEB, 'components', 'popup.js'));
 const CLASSIC = read(path.join(SKINS, 'skin.classic.css'));
 const LIUNIAN = read(path.join(SKINS, 'skin.liunian.css'));
 const QINGFENG = read(path.join(SKINS, 'skin.qingfeng.css'));
@@ -81,7 +82,11 @@ function makeEl(id) {
     setAttribute(k, v) { this.attrs[k] = String(v); },
     getAttribute(k) { return this.attrs[k] || null; },
     appendChild(c) { this.children.push(c); return c; },
-    addEventListener() {},
+    // 弹层骨架（components/popup.js）用 addEventListener 绑触发钮；记录下来
+    // 供断言用 dispatch 派发（以前直接赋 onclick 的形状已退役）。
+    listeners: {},
+    addEventListener(type, fn) { (this.listeners[type] = this.listeners[type] || []).push(fn); },
+    dispatch(type, event) { (this.listeners[type] || []).forEach((fn) => fn(event)); },
     focus() {},
     // 只服务模块真正用到的那一种选择器：`.a.b`（在直接子节点里找同时带这两个类的）。
     querySelector(sel) {
@@ -154,6 +159,8 @@ function makeSandbox(cssIds, carrier) {
   };
   sandbox.window = sandbox;
   vm.createContext(sandbox);
+  // index.html 的装载顺序：components/popup.js（弹层骨架）先于 skins.js。
+  vm.runInContext(POPUP_JS, sandbox, { filename: 'components/popup.js' });
   vm.runInContext(SKINS_JS, sandbox, { filename: 'skins.js' });
   sandbox.Skins.register({ id: 'orbit', name: '星轨', note: '侧栏导航、立体唱片与常驻队列' });
   return { sandbox, root, body: sandboxBody, links, listHost, skinBtn, skinMenu, store, events };
@@ -277,7 +284,7 @@ function checkSkinEntry() {
   // 弹层的行是在**展开那一刻**渲染的（init 只绑不画），所以先点按钮再读。
   // 「初始收起」看的是 index.html 上那个 hidden 属性 —— 桩里的元素没有属性可反射。
   ok(/id="skin-menu"[^>]*\shidden/.test(HTML), 'index.html 里弹层默认 hidden（开机不挂一份展开的菜单）');
-  skinBtn.onclick({ stopPropagation() {} });
+  skinBtn.dispatch('click', { stopPropagation() {} });
   eq(skinMenu.hidden, false, '点按钮展开弹层');
   eq(skinBtn.getAttribute('aria-expanded'), 'true', 'aria-expanded 跟着展开');
 
@@ -316,14 +323,19 @@ function checkSkinEntry() {
     '.skin-menu 改成 fixed（搬进 body 后不再跟着按钮的 absolute 盒）');
   const skinMenuZ = (read(path.join(WEB, 'style.css')).match(/\.skin-menu\s*\{[^}]*z-index:\s*(\d+)/) || [])[1];
   ok(Number(skinMenuZ) > 58, '弹层压过舞台抽屉的 z-index:58', 'skin-menu z=' + skinMenuZ);
-  // 搬出去之后位置没人算了不行：开层那一刻必须按按钮矩形重算一次。
-  ok(/renderMenu\(\);\s*positionEntryMenu\(\);/.test(SKINS_JS),
+  // 搬出去之后位置没人算了不行：开层那一刻必须按按钮矩形重算一次
+  // （render 在模块的 onOpen 钩子里，定位归 components/popup.js）。
+  ok(/onOpen: function \(\) \{/.test(SKINS_JS) && /renderMenu\(\);/.test(SKINS_JS)
+    && /window\.HertzPopup\.create\(\{/.test(SKINS_JS),
     '开弹层时按按钮矩形算位置（搬进 body 后 CSS 里的 top/right 都不成立了）');
   // 顶栏三颗弹层是同一个坑：.topbar 自己就是层叠上下文，留在里面的浮层会被舞台
   // 那块 fixed + z-index:58 的抽屉整块盖住。#theme-menu 早就搬了 body，另两颗
   // 照它做 —— 少搬一颗就是「这个弹窗又被挡住了」原地复发。
   const styleTop = read(path.join(WEB, 'style.css'));
-  ok(/document\.body\.appendChild\(menu\)/.test(APP)
+  // 搬 body 的动作在 components/popup.js 一处实现（moveOutOfTopbar）；
+  // app.js 侧以 create() 声明。
+  ok(/document\.body\.appendChild\(menu\)/.test(POPUP_JS)
+    && /window\.HertzPopup\.create\(\{/.test(APP)
     && /\.top-more-menu\s*\{[^}]*position:\s*fixed/.test(styleTop),
     '「更多工具」弹层也搬出顶栏（实测命中是 #stage）');
   ok(/document\.body\.appendChild\(menu\)/.test(read(path.join(WEB, 'theme-picker.js')))
@@ -1451,12 +1463,12 @@ function checkQingfengWall() {
     '上一首/下一首发 step-track（按播放队列前后走，不按墙上那一列）');
   ok(!/emit\('activate', \{ item: tile, delta/.test(qfCodeWall),
     '上一首/下一首不再走 activate+delta（那是「永远停在第一首」的写法）');
-  ok(/d\.action === 'step-track'/.test(APP) && /playQueueStep\(d\.delta\)/.test(APP),
+  ok(/'step-track': \(d\)/.test(APP) && /playQueueStep\(d\.delta\)/.test(APP),
     'app.js 侧 step-track 落到 playQueueStep（按正在放的那首算邻居）');
   // 左下角浮条的播放/暂停：走 toggle-play，复用业务既有的 togglePlay。
   ok(/qf-queue-peek-play/.test(QINGFENG) && /qf-queue-peek-play/.test(qfCodeWall),
     '左下角浮条有播放/暂停按钮（CSS 与 JS 两侧都在）');
-  ok(/emit\('toggle-play'\)/.test(qfCodeWall) && /d\.action === 'toggle-play'/.test(APP)
+  ok(/emit\('toggle-play'\)/.test(qfCodeWall) && /'toggle-play': \(\)/.test(APP)
     && /togglePlay\(\)/.test(APP),
     '浮条播/停走 toggle-play（复用业务路径，不自己拼 post）');
   // 展开卡与浮条上那两颗播放键要跟着实时播放态翻面。海报节点是键控复用的、
@@ -1530,7 +1542,7 @@ function checkQingfengWall() {
   ok(/window\.Skins\.request\(action, extra\)/.test(QINGFENG_JS), '清风使用同一皮肤请求接口');
   ok(/function queueSnapshot/.test(APP) && /d\.queue = queueSnapshot\(\)/.test(APP),
     'queue-request 回一份队列快照给海报墙');
-  ok(/function playQueueIndex/.test(APP) && /d\.action === 'play-index'/.test(APP),
+  ok(/function playQueueIndex/.test(APP) && /'play-index': \(d\)/.test(APP),
     '桥接分流 play-index');
   // 桥接是同步回填：皮肤 dispatch 之后立刻读 detail.queue，
   // 若 app.js 改成异步回填，海报墙会永远拿到空队列且不报错。
@@ -2263,7 +2275,8 @@ function checkLifecycleAndHost() {
     loadDiagnostics: () => business.push(['diagnostics']),
     __loadCacheStats: () => business.push(['cache'])
   });
-  const start = APP.indexOf('function initSkinBridge() {');
+  // 动作门面（skinActions）与 initSkinBridge 一起切片：处理器引用门面常量。
+  const start = APP.indexOf('const skinActions = {');
   const end = APP.indexOf('\n// 队列快照：', start);
   vm.runInContext(APP.slice(start, end) + '\ninitSkinBridge();', sandbox);
   eq(api.request('source-request').source.key, 'library', '快照经真实宿主同步返回');

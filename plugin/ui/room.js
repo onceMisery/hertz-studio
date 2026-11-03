@@ -853,7 +853,9 @@
         }
       }).catch(() => {});
       if (chrome) chrome.destroy();
-      chrome = global.HertzRoomTransport.create({ open: () => { document.querySelector('[data-view="room"]').click(); global.HertzRoom.navigate('play'); }, playback: action => global.HertzRoom.playback(action), seek: (instance_id, position) => run(() => playback('seek', { instance_id, position_ms: String(position) })), volume: volume => run(() => global.HertzRoom.localVolume(volume)) }, { mountTo: options.floatingRegion });
+      // 返回房间走宿主注入的导航（外壳 API），不再模拟 rail 按钮的 click；
+      // 缺省回退保留给契约沙箱（它没有外壳，只有桩 DOM）。
+      chrome = global.HertzRoomTransport.create({ open: () => { if (options.openRoom) options.openRoom(); else { const rail = document.querySelector('[data-view="room"]'); if (rail) rail.click(); } global.HertzRoom.navigate('play'); }, playback: action => global.HertzRoom.playback(action), seek: (instance_id, position) => run(() => playback('seek', { instance_id, position_ms: String(position) })), volume: volume => run(() => global.HertzRoom.localVolume(volume)) }, { mountTo: options.floatingRegion });
       view = createView(); mounted = ''; mount();
       if (timer) clearInterval(timer);
       timer = setInterval(async () => {

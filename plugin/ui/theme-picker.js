@@ -23,12 +23,8 @@
   }
   function position() {
     if (!menu || menu.hidden || !panelAnchor) return;
-    const r = panelAnchor.getBoundingClientRect(), pad = 8, gap = 8;
-    const width = menu.offsetWidth, height = menu.offsetHeight;
-    let top = r.bottom + gap;
-    if (top + height > innerHeight - pad && r.top - height - gap >= pad) top = r.top - height - gap;
-    menu.style.left = Math.max(pad, Math.min(r.right - width, innerWidth - width - pad)) + 'px';
-    menu.style.top = Math.max(pad, Math.min(top, innerHeight - height - pad)) + 'px';
+    // 定位与顶栏菜单族同一份实现（components/popup.js）。
+    global.HertzPopup.position(panelAnchor, menu);
   }
   function render() {
     const focusedId = menu.contains(document.activeElement) && document.activeElement.dataset.themeId;

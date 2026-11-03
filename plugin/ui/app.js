@@ -6087,37 +6087,9 @@ function applyTheme(id) {
 /// 三个入口（主题色 / 界面皮肤 / 更多工具）都得把弹层搬出 .topbar 才压得住后面
 /// 那些玻璃面板（顶栏自己就是层叠上下文，见 theme-picker.js），而搬
 /// 出来之后 CSS 的 top/right 就都不成立了，位置只能由 JS 按按钮矩形算。
-function positionAnchoredMenu(btn, menu, fallbackW) {
-  if (!btn || !menu || menu.hidden) return;
-  const r = btn.getBoundingClientRect();
-  const w = menu.offsetWidth || fallbackW;
-  const h = menu.offsetHeight || 0;
-  const gap = 8;
-  const pad = 8;
+// 锚定弹层的定位与 topbar:popup 互斥广播已收进 components/popup.js
+// （HertzPopup.position / HertzPopup.broadcast）。
 
-  let left = r.right - w;
-  left = Math.min(left, window.innerWidth - w - pad);
-  left = Math.max(pad, left);
-
-  let top = r.bottom + gap;
-  if (top + h > window.innerHeight - pad && r.top - h - gap >= pad) {
-    top = r.top - h - gap; // 下方不够就翻上去
-  }
-  top = Math.max(pad, Math.min(top, Math.max(pad, window.innerHeight - h - pad)));
-
-  menu.style.left = `${Math.round(left)}px`;
-  menu.style.top = `${Math.round(top)}px`;
-}
-
-/// 顶栏弹层的互斥广播：三个入口（主题色 / 界面皮肤 / 更多工具）的按钮 onclick
-/// 都 stopPropagation，彼此那套「点外部就关」的 document 监听收不到对方的按钮
-/// 点击，两个面板会叠着开。约定 topbar:popup —— 谁开谁喊一声，其余弹层听见
-/// 不是自己开的就收起。skins.js 的 #skin-menu 监听并发出同一条事件。
-function broadcastTopbarPopup(id) {
-  try {
-    document.dispatchEvent(new CustomEvent('topbar:popup', { detail: { id: id } }));
-  } catch (e) { /* 老浏览器没有 CustomEvent 构造器 */ }
-}
 
 function initTheme() {
   if (!Theme) return;
@@ -6168,84 +6140,14 @@ function initStageControl() {
 }
 
 function initTopMoreMenu() {
-  const root = $('top-more');
   const btn = $('top-more-btn');
   const menu = $('top-more-menu');
-  if (!root || !btn || !menu) return;
-
-  // 与 #theme-menu / #skin-menu 同一件事：把弹层搬出 .topbar 的层叠上下文。留在
-  // 原处的话舞台抽屉那块 fixed + z-index:58 的面板会整块盖住它（实测命中 #stage）。
-  document.body.appendChild(menu);
-
-  let open = false;
-  const items = () => Array.prototype.slice.call(menu.querySelectorAll('.menu-item'));
-
-  function setOpen(next) {
-    open = !!next;
-    menu.hidden = !open;
-    btn.classList.toggle('active', open);
-    btn.setAttribute('aria-expanded', String(open));
-    if (open) {
-      positionAnchoredMenu(btn, menu, 188);
-      broadcastTopbarPopup('more');
-    }
-  }
-
-  btn.addEventListener('click', (e) => {
-    e.stopPropagation();
-    setOpen(!open);
+  // 生命周期（搬 body、状态机、点外部/Escape/漫游键/resize、互斥广播）
+  // 在 components/popup.js 一处实现；这里只声明身份与语义。
+  if (btn && menu) window.HertzPopup.create({
+    id: 'more', trigger: btn, menu, fallbackW: 188,
+    closeOnItemClick: true, closeOnFocusOut: true,
   });
-
-  // 先让菜单项自己的 click 处理器执行，再收起菜单；不阻止默认行为。
-  menu.addEventListener('click', (e) => {
-    if (e.target.closest && e.target.closest('.menu-item')) {
-      setOpen(false);
-      btn.focus();
-    }
-  });
-
-  document.addEventListener('click', (e) => {
-    // 菜单已经不在 root 里了，判据得把它算上 —— 否则点菜单空白处会先被这里关掉。
-    if (open && !root.contains(e.target) && !menu.contains(e.target)) setOpen(false);
-  });
-
-  // 搬出按钮的 relative 盒之后，位置是开层那一刻算的：窗口一变就作废，直接收。
-  window.addEventListener('resize', () => { if (open) setOpen(false); });
-
-  // 别的顶栏弹层开了就收起（见 broadcastTopbarPopup 上方注释）
-  document.addEventListener('topbar:popup', (e) => {
-    if (e.detail && e.detail.id !== 'more' && open) setOpen(false);
-  });
-
-  menu.addEventListener('keydown', (e) => {
-    const list = items();
-    if (!list.length) return;
-    const idx = list.indexOf(document.activeElement);
-
-    if (e.key === 'Escape') {
-      e.stopPropagation();
-      setOpen(false);
-      btn.focus();
-    } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
-      e.preventDefault();
-      let next = idx < 0 ? 0 : idx + (e.key === 'ArrowDown' ? 1 : -1);
-      if (next < 0) next = list.length - 1;
-      if (next >= list.length) next = 0;
-      list[next].focus();
-    } else if (e.key === 'Home') {
-      e.preventDefault();
-      list[0].focus();
-    } else if (e.key === 'End') {
-      e.preventDefault();
-      list[list.length - 1].focus();
-    }
-  });
-
-  menu.addEventListener('focusout', (e) => {
-    if (open && !menu.contains(e.relatedTarget)) setOpen(false);
-  });
-
-  window.addEventListener('resize', () => setOpen(false));
 }
 
 // 在线曲库的全部 UI/状态机已迁到 web/online.js（window.Online），
@@ -6855,7 +6757,7 @@ function initPalette() {
       id: 'queue-save-playlist', group: '队列', title: '把队列存为歌单',
       description: '本地曲目收进本地歌单，在线曲目按音源存到对应平台',
       keywords: 'save playlist 歌单 保存',
-      run: () => { if (ui.queueSave) ui.queueSave.click(); else setView('queue'); },
+      run: () => saveQueueToPlaylist(),
     },
 
     // --- 舞台 ---
@@ -7012,104 +6914,142 @@ function bindShortcuts() {
 }
 
 // ---------------------------------------------------------------------------
-// 皮肤宿主：通用动作与只读快照，复用现有业务入口
+// 动作门面（设计收敛 §8）：皮肤经 Skins.request 的有限动作与查询。
+// 每个动作只是对既有业务入口的具名委托——门面不保存第二套业务状态，也
+// 不再往里收全局函数；皮肤自己的意图（打开设置、切视图）走对应动作，
+// 不得以按钮类名或 DOM click() 模拟另一个页面的业务入口。
 // ---------------------------------------------------------------------------
+const skinActions = {
+  'open-player': () => {
+    openNowPlaying();
+  },
+
+  'settings-enter': (d) => {
+    // 流年/清风的显式打开事件不经 setView；同一次打开的请求由模块本地合并。
+    if (window.HertzDesktopSettings) window.HertzDesktopSettings.onSettingsEnter();
+    loadDiagnostics();
+    const refreshers = { cache: window.__loadCacheStats, dsp: window.__loadDspSettings, remote: window.__loadRemoteRoots };
+    (Array.isArray(d.sections) ? d.sections : []).forEach(section => {
+      if (typeof refreshers[section] === 'function') refreshers[section]();
+    });
+  },
+
+  'play-local': (d) => {
+    playTrack(String(d.id), state.queue.slice());
+  },
+
+  'play-online': (d) => {
+    if (window.Online && d.track) {
+      window.Online.playAll([Object.assign({ playable: true }, d.track)], 0);
+    }
+  },
+
+  'view-local': (d) => {
+    const q = d.q || '';
+    if (d.artist !== undefined) {
+      state.libFilter.artist = String(d.artist);
+      state.libFilter.album = '';
+      ui.libArtistFilter.value = state.libFilter.artist;
+      ui.libAlbumFilter.value = '';
+    }
+    ui.search.value = q;
+    ui.searchClear.hidden = !q;
+    state.q = q.trim();
+    setView('library');
+    loadTracks(true);
+  },
+
+  'view-online': (d) => {
+    const q = d.q || '';
+    const wasOnline = state.view === 'online';
+    ui.onlineQ.value = q;
+    // Online.state 导出的是 onlineState 对象本身（非函数），直接写属性。
+    if (window.Online) window.Online.state.q = q;
+    setView('online');
+    // 已在在线页且已有旧结果时 onViewEnter 早退，补一次显式搜索新关键词。
+    if (wasOnline && window.Online) window.Online.search();
+  },
+
+  'queue-request': (d) => {
+    d.queue = queueSnapshot();
+  },
+
+  'home-request': (d) => {
+    d.result = mobileHomeSnapshot();
+  },
+
+  'source-request': (d) => {
+    // 按当前 tab 取源 —— 队列拼接墙的正式入口。
+    // 保留 queue-request 是因为播放队列 tab 走的就是它（kind==='queue'，
+    // 那一路的项带 queueItem 标记，播放分派与原逻辑逐字一致）。
+    d.source = viewSnapshot();
+  },
+
+  'activate': (d) => {
+    // 传整个 detail：函数签名收的是信封（item + delta 都在里面）。
+    // 传 d.item 的话函数里 `const item = d.item` 拿到 undefined，
+    // `if (!item) return` 静默吞掉——墙上点播放/点海报全部无反应。
+    activateSourceItem(d);
+  },
+
+  'playlist-drill': (d) => {
+    // 歌单墙的第二层：取数，不播。异步，所以这里只发起、把 promise 交回去，
+    // 皮肤那边自己管 loading / 失败提示。
+    d.result = window.OnlinePlaylists && window.OnlinePlaylists.drillTracks
+      ? window.OnlinePlaylists.drillTracks(d.source, d.playlistId)
+      : Promise.resolve({ error: '歌单展开功能还没准备好' });
+  },
+
+  'play-index': (d) => {
+    // 队列语义：按播放队列下标。只有播放队列 tab 会发这个。
+    playQueueIndex(d.index);
+  },
+
+  'play-step': (d) => {
+    playQueueStep(d.delta);
+  },
+
+  'step-track': (d) => {
+    // 「上一首 / 下一首」= 播放队列里前后各一首，与**正在放的那首**相邻，
+    // 不是墙上那一列的前后两项。
+    //
+    // 两者的差别在墙开着的时候最明显：展开卡是 focusPoster 聚焦的那张，
+    // 用户完全可能停在第 3 张上（还没点播）就按了「下一首」，期望是
+    // 播放队列往前走一格。按 activate+delta 走会拿墙上的第 3 项去
+    // queueSnapshot 里 findIndex —— 而队列里根本没有这一项（曲库 tab 的墙
+    // 序号与队列下标毫无关系），findIndex 返 -1，落到 `delta > 0 ? 0 : …`
+    // 那个兜底，于是**永远停在队列第一首**：听感就是「按了没反应」。
+    // 用户实测正是这个现象 —— 歌点得开、进度在走、唯独上/下一曲不动。
+    //
+    // 正在放的是在线曲时不能走 playQueueStep：它落到 playQueueIndex，
+    // 队列里的 online: 虚拟 id 会撞上「已失效」守卫，表现为在线队列里
+    // 上/下一曲永远没反应。服务端自己持有队列与游标，next/previous 与
+    // 主播放条 / 键盘 / MediaSession 同一条链路，本地与在线队列都认。
+    if (String(state.snapshot.track_id || '').startsWith('online:')) {
+      post(d.delta > 0 ? '/v1/player/next' : '/v1/player/previous');
+    } else {
+      playQueueStep(d.delta);
+    }
+  },
+
+  'toggle-play': () => {
+    // 左下角浮条上的播放/暂停。复用业务既有的 togglePlay —— 它带
+    // 「没在放任何东西时先起播当前选中项」的回落，皮肤自己拼 post 会丢。
+    togglePlay();
+  },
+
+  'seek': (d) => {
+    // 复用 seekTo：它带了 epoch 竞态保护、时长夹取与失败提示，
+    // 自己拼一条 post 会把这三样都丢掉。
+    const total = playbackDuration(state.snapshot);
+    if (total) seekTo(Math.round(total * d.ratio));
+  },
+};
+
 function initSkinBridge() {
   window.Skins.connectHost((d) => {
-    if (d.action === 'open-player') {
-      openNowPlaying();
-    } else if (d.action === 'settings-enter') {
-      // 流年/清风的显式打开事件不经 setView；同一次打开的请求由模块本地合并。
-      if (window.HertzDesktopSettings) window.HertzDesktopSettings.onSettingsEnter();
-      loadDiagnostics();
-      const refreshers = { cache: window.__loadCacheStats, dsp: window.__loadDspSettings, remote: window.__loadRemoteRoots };
-      (Array.isArray(d.sections) ? d.sections : []).forEach(section => {
-        if (typeof refreshers[section] === 'function') refreshers[section]();
-      });
-    } else if (d.action === 'play-local') {
-      playTrack(String(d.id), state.queue.slice());
-    } else if (d.action === 'play-online') {
-      if (window.Online && d.track) {
-        window.Online.playAll([Object.assign({ playable: true }, d.track)], 0);
-      }
-    } else if (d.action === 'view-local') {
-      const q = d.q || '';
-      if (d.artist !== undefined) {
-        state.libFilter.artist = String(d.artist);
-        state.libFilter.album = '';
-        ui.libArtistFilter.value = state.libFilter.artist;
-        ui.libAlbumFilter.value = '';
-      }
-      ui.search.value = q;
-      ui.searchClear.hidden = !q;
-      state.q = q.trim();
-      setView('library');
-      loadTracks(true);
-    } else if (d.action === 'view-online') {
-      const q = d.q || '';
-      const wasOnline = state.view === 'online';
-      ui.onlineQ.value = q;
-      // Online.state 导出的是 onlineState 对象本身（非函数），直接写属性。
-      if (window.Online) window.Online.state.q = q;
-      setView('online');
-      // 已在在线页且已有旧结果时 onViewEnter 早退，补一次显式搜索新关键词。
-      if (wasOnline && window.Online) window.Online.search();
-    } else if (d.action === 'queue-request') {
-      d.queue = queueSnapshot();
-    } else if (d.action === 'home-request') {
-      d.result = mobileHomeSnapshot();
-    } else if (d.action === 'source-request') {
-      // 按当前 tab 取源 —— 队列拼接墙的正式入口。
-      // 保留 queue-request 是因为播放队列 tab 走的就是它（kind==='queue'，
-      // 那一路的项带 queueItem 标记，播放分派与原逻辑逐字一致）。
-      d.source = viewSnapshot();
-    } else if (d.action === 'activate') {
-      // 传整个 detail：函数签名收的是信封（item + delta 都在里面）。
-      // 传 d.item 的话函数里 `const item = d.item` 拿到 undefined，
-      // `if (!item) return` 静默吞掉——墙上点播放/点海报全部无反应。
-      activateSourceItem(d);
-    } else if (d.action === 'playlist-drill') {
-      // 歌单墙的第二层：取数，不播。异步，所以这里只发起、把 promise 交回去，
-      // 皮肤那边自己管 loading / 失败提示。
-      d.result = window.OnlinePlaylists && window.OnlinePlaylists.drillTracks
-        ? window.OnlinePlaylists.drillTracks(d.source, d.playlistId)
-        : Promise.resolve({ error: '歌单展开功能还没准备好' });
-    } else if (d.action === 'play-index') {
-      // 队列语义：按播放队列下标。只有播放队列 tab 会发这个。
-      playQueueIndex(d.index);
-    } else if (d.action === 'play-step') {
-      playQueueStep(d.delta);
-    } else if (d.action === 'step-track') {
-      // 「上一首 / 下一首」= 播放队列里前后各一首，与**正在放的那首**相邻，
-      // 不是墙上那一列的前后两项。
-      //
-      // 两者的差别在墙开着的时候最明显：展开卡是 focusPoster 聚焦的那张，
-      // 用户完全可能停在第 3 张上（还没点播）就按了「下一首」，期望是
-      // 播放队列往前走一格。按 activate+delta 走会拿墙上的第 3 项去
-      // queueSnapshot 里 findIndex —— 而队列里根本没有这一项（曲库 tab 的墙
-      // 序号与队列下标毫无关系），findIndex 返 -1，落到 `delta > 0 ? 0 : …`
-      // 那个兜底，于是**永远停在队列第一首**：听感就是「按了没反应」。
-      // 用户实测正是这个现象 —— 歌点得开、进度在走、唯独上/下一曲不动。
-      //
-      // 正在放的是在线曲时不能走 playQueueStep：它落到 playQueueIndex，
-      // 队列里的 online: 虚拟 id 会撞上「已失效」守卫，表现为在线队列里
-      // 上/下一曲永远没反应。服务端自己持有队列与游标，next/previous 与
-      // 主播放条 / 键盘 / MediaSession 同一条链路，本地与在线队列都认。
-      if (String(state.snapshot.track_id || '').startsWith('online:')) {
-        post(d.delta > 0 ? '/v1/player/next' : '/v1/player/previous');
-      } else {
-        playQueueStep(d.delta);
-      }
-    } else if (d.action === 'toggle-play') {
-      // 左下角浮条上的播放/暂停。复用业务既有的 togglePlay —— 它带
-      // 「没在放任何东西时先起播当前选中项」的回落，皮肤自己拼 post 会丢。
-      togglePlay();
-    } else if (d.action === 'seek') {
-      // 复用 seekTo：它带了 epoch 竞态保护、时长夹取与失败提示，
-      // 自己拼一条 post 会把这三样都丢掉。
-      const total = playbackDuration(state.snapshot);
-      if (total) seekTo(Math.round(total * d.ratio));
-    }
+    const action = skinActions[d.action];
+    if (action) action(d);
   });
 }
 
@@ -8161,7 +8101,8 @@ function initNowPlayingModal() {
   np.close.onclick = closeNowPlaying;
   np.scrim.onclick = closeNowPlaying;
   $('bar-player-expand').onclick = openNowPlaying;
-  $('bar-queue').onclick = () => { openNowPlaying(); $('np-queue').click(); };
+  // 队列标签切页走 now-playing 的公开 API，不再模拟 np-queue 的 click。
+  $('bar-queue').onclick = () => { openNowPlaying(); if (window.NowPlaying) window.NowPlaying.showQueue(true); };
 
   // 点击/回车「正在播放」区打开弹窗；Enter 与 Space 都要能用（role=button）。
   if (ui.stageBtn) {
@@ -8452,6 +8393,7 @@ async function startApp() {
     root: ui.views.room, transport, confirm: message => modal().confirm(message),
     // 房间外浮动播放条装配进外壳的明确区域（设计 §5.4），不再自行挂 body。
     floatingRegion: window.HertzShell.region('floating'),
+    openRoom: () => setView('room'),
     onReturn: () => setView('library'),
     onNavigate: name => { if (['library', 'favorites', 'online', 'room'].includes(name)) setView(name); },
     onOpenStage: () => { if (window.Stage3D) Stage3D.open(); },
@@ -9293,8 +9235,8 @@ async function startApp() {
   // 队列存为歌单（folia 的 saveCurrentQueueAsLocalPlaylist）：本地曲目收进
   // 本地歌单；在线曲目按音源拆组，各存进对应平台的在线歌单（仅限已登录且
   // 具备 playlist_write 能力的源）。各部分独立成败，最后汇总提示。
-  if (ui.queueSave) {
-    ui.queueSave.onclick = async () => {
+  // 具名函数：命令面板的「保存队列」走同一入口，不再模拟按钮 click。
+  async function saveQueueToPlaylist() {
       const localIds = state.queue.filter((id) => !id.startsWith('online:'));
       const onlineGroups = {};
       let onlineCount = 0;
@@ -9368,8 +9310,8 @@ async function startApp() {
       } else if (problems.length) {
         toast(`保存歌单失败：${problems.join('；')}`, 'error');
       }
-    };
-  }
+    }
+  if (ui.queueSave) ui.queueSave.onclick = saveQueueToPlaylist;
 
   ui.setDevice.onchange = () => transport.post('/v1/devices/select', { id: ui.setDevice.value })
     .catch((err) => toast(errText('切换输出设备失败', err), 'error'));

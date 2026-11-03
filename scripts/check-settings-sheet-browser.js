@@ -260,12 +260,15 @@ async function openViaRail(page, skin) {
         total: groups.length,
         hidden: groups.filter((g) => g.hidden).length,
         anchors: document.querySelectorAll('.skset-anchor').length,
+        copies: document.querySelectorAll('#view-settings').length,
       };
     });
+    // 原位锚点机制已退役（R4 首切片：#view-settings 改走外壳 attachView 的
+    // 结构性还原，无需 DOM 锚点）。出现 .skset-anchor 即旧搬运工具回流；
+    // 视图必须恰好一份、住在浮层右栏（外壳 attach 不可能复制节点）。
+    eq(rebuilt.anchors, 0, '旧锚点搬运工具已退役（出现即残留信号）');
+    eq(rebuilt.copies, 1, '设置视图恰好一份（外壳受控装配不复制节点）');
     eq(rebuilt.total, EXPECTED_TOTAL, `切到 orbit 后 ${EXPECTED_TOTAL} 个分组都在（没被误删）`);
-    // 原位锚点：视图住在浮层里，column 里应该恰好留一个锚点 ——
-    // 数出两个才是真泄漏（上一次挂载的还原没跑干净）。
-    eq(rebuilt.anchors, 1, '原位锚点恰好一个（不是上次挂载残留的第二个）');
     await page.evaluate(() => { window.Skins.apply('classic'); });
     await page.waitForFunction(() => {
       const groups = document.querySelectorAll('#view-settings .set-group');
@@ -277,12 +280,14 @@ async function openViaRail(page, skin) {
         total: groups.length,
         hidden: groups.filter((g) => g.hidden).length,
         anchors: document.querySelectorAll('.skset-anchor').length,
+        copies: document.querySelectorAll('#view-settings').length,
         viewInPane: !!document.querySelector('.skset-pane #view-settings'),
       };
     });
     eq(restored.total, EXPECTED_TOTAL, `切回 classic 后 ${EXPECTED_TOTAL} 个分组都在`);
     eq(restored.hidden, 0, '切回 classic 后没有任何分组残留 hidden（漏掉就是「设置里其它项全没了」）');
-    eq(restored.anchors, 1, '切回 classic 后原位锚点恰好一个（没有累积）');
+    eq(restored.anchors, 0, '切回 classic 后无锚点残留（没有累积）');
+    eq(restored.copies, 1, '切回 classic 后设置视图仍恰好一份（attach/detach 对称）');
     ok(restored.viewInPane, 'classic 下设置视图重新住进共享浮层');
 
     // --- 9) 剩余皮肤逐个过一遍：orbit 在自己的

@@ -29,7 +29,7 @@
 // 契约
 // ----
 //   · 只搬运 #view-settings + 切 .set-group 的 hidden，不改业务 JS 的状态；
-//     搬运走 SkinShared 的锚点机制，卸载时严格回位、原顺序保持；
+//     #view-settings 的迁移走 HertzShell.attachView（外壳受控装配，§7.2）；
 //   · 认领分组靠 .set-title 的**文案**（与清风/流年同一份语义表），认领不到
 //     的统一落进「其它」，业务新增设置表现为「多一项」而不是「消失」；
 //   · hidden 是皮肤加的，卸载时必须全部摘掉（showAll），否则会跟着切到
@@ -117,7 +117,6 @@
     // true = 这次打开来自业务 setView('settings') 的拦截（关闭时要送回首页）。
     openedViaView: false,
   };
-  var moves = null;
   var built = null;
   var viewObserver = null;
   var keyHandler = null;
@@ -298,6 +297,12 @@
   /// 会 setView('settings') 把浮层再次拉起。走 rail 条目的正常点击路径，
   /// 业务的高亮 / 钩子全部照常。
   function restoreAppView() {
+    // 走外壳导航 API（页面请求切页的正路，高亮/钩子照常）；沙箱等无外壳
+    // 环境回退 rail 点击。
+    if (window.HertzShell && window.HertzShell.hasView('library')) {
+      window.HertzShell.navigate('library');
+      return;
+    }
     var item = document.querySelector('.rail-item[data-view="library"]');
     if (item && item.click) item.click();
   }
@@ -393,9 +398,11 @@
     if (mounted) return;
     var view = byId('view-settings');
     if (!view) return;
-    if (!window.SkinShared) return;
+    // 自建浮层节点仍走 SkinShared 的登记工厂；#view-settings 的迁移改走外壳
+    // 的受控装配（HertzShell.attachView，设计 §7.2）——业务根节点不再用通用
+    // 锚点搬运工具自行搬移。沙箱没有外壳时安静不挂（与旧 SkinShared 守卫同法）。
+    if (!window.SkinShared || !window.HertzShell) return;
     mounted = true;
-    moves = window.SkinShared.createMoves('skset-anchor', 'data-skset');
     built = window.SkinShared.createBuilt();
 
     var root = make('div', 'skset-modal');
@@ -445,8 +452,8 @@
     st.closing = false;
     st.openedViaView = false;
 
-    // 搬进浮层右栏（原位留锚点，卸载时严格回位），回中栏时收着。
-    moves.relocate(view, pane);
+    // 装配进浮层右栏（外壳 detach 严格回位），回中栏时收着。
+    window.HertzShell.attachView('settings', pane);
     view.hidden = true;
     claimGroups();
 
@@ -468,9 +475,9 @@
     if (st.nav) st.nav.removeEventListener('click', onNavClick);
     showAll();
     if (st.viewEl) st.viewEl.hidden = true;
-    // 先还原业务节点，再拆自建浮层 —— 反过来的话 removeBuilt 会连着
-    // view-settings 一起删（它此刻还挂在浮层里）。
-    if (moves) { moves.restore(); moves = null; }
+    // 先还原业务节点（外壳 detach 严格回位），再拆自建浮层 —— 反过来的话
+    // removeBuilt 会连着 view-settings 一起删（它此刻还挂在浮层里）。
+    if (window.HertzShell) window.HertzShell.detachView('settings');
     if (built) { built.remove(); built = null; }
     st.root = null;
     st.card = null;

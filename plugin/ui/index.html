@@ -2488,6 +2488,8 @@
 <!-- 演示后端（prototype/mock.js）不随服务发布：app.js 探不到 /v1/health 时
      会自动退到 ServerTransport，不需要这段 script 也能正常工作。
      下面五个是创意舞台：内核 → 表现层 → 编排 → 工坊，顺序即依赖顺序。 -->
+<!-- 公共组件：锚定弹层的生命周期与定位（更多工具/皮肤菜单/主题色菜单共用）。 -->
+<script defer src="components/popup.js"></script>
 <script defer src="skins/skins.js"></script>
 <!-- 皮肤公共段（锚点搬运 / 自建节点登记 / 封面位图回填）：必须在两张重编排
      皮肤（流年 / 清风）之前加载。 -->

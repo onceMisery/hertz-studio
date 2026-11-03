@@ -146,6 +146,9 @@ const REQUIRE_BEFORE = [
   ['stage-immersive.js', 'app.js'],
   ['shell/shell.js', 'room-transport.js'],   // 房间浮动播放条装配进外壳区域
   ['shell/shell.js', 'app.js'],              // app.js 启动时 initShell() 注册视图
+  ['components/popup.js', 'skins/skins.js'], // 皮肤菜单消费弹层骨架
+  ['components/popup.js', 'theme-picker.js'],
+  ['components/popup.js', 'app.js'],         // 更多工具菜单消费弹层骨架
   ['design/design-themes.js', 'themes.js'],  // 主题目录数据（生成物）先于机制
   ['themes.js', 'theme-picker.js'],
   ['theme-picker.js', 'room-workspace.js'],
