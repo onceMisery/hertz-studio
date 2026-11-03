@@ -180,6 +180,7 @@ impl LibraryService {
             .map_err(|_| JobError::new("budget_busy", "媒体选择管理正在退出或暂不可用"))
     }
 
+    #[allow(deprecated)] // MSRV 1.88 还没有 try_update，理由见 vmusic-lan/src/buffer.rs
     pub(crate) fn reserve(&self) -> Result<Slot, JobError> {
         self.pending
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
