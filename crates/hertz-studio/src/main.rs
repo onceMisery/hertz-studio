@@ -316,10 +316,11 @@ async fn run(args: Args) -> anyhow::Result<()> {
     // --window 原型：服务就绪事实回传窗口线程（一次性票据 URL 即首跳凭据，§2.3）。
     #[cfg(feature = "native-window")]
     if let Some(tx) = &args.notify {
-        let _ = tx.send(window::WindowStart::Listening {
+        tx.send(window::WindowStart::Listening {
             bind_ip: shown,
             port: actual_port,
             entry_url: url.clone(),
+            exit_request: state.exit_request(),
         });
     }
     tracing::info!("listening on {bind}:{actual_port}");
@@ -948,7 +949,7 @@ struct Args {
     window: bool,
     // 服务线程就绪后回传给窗口线程的通道（--window 模式内部接线，非 CLI）。
     #[cfg(feature = "native-window")]
-    notify: Option<std::sync::mpsc::Sender<window::WindowStart>>,
+    notify: Option<window::WindowNotifier>,
     bind: Option<String>,
     port: Option<u16>,
     data_dir: Option<std::path::PathBuf>,

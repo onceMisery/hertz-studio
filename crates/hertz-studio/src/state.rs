@@ -920,6 +920,20 @@ pub struct AppState {
 /// 否则按一次 F5 就停一次播。
 pub(crate) const DEPART_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
 
+/// Thread-safe request to enter the existing service shutdown barrier. Native
+/// hosts may request shutdown without a Tokio context or an HTTP credential;
+/// only the service that observes `exiting_signal` performs the actual cleanup.
+#[derive(Clone, Debug)]
+pub struct ExitRequest {
+    exiting: tokio::sync::watch::Sender<bool>,
+}
+
+impl ExitRequest {
+    pub fn request(&self) {
+        self.exiting.send_replace(true);
+    }
+}
+
 impl AppState {
     pub(crate) fn require_local_playback(&self) -> Result<(), vmusic_core::CoreError> {
         if self.room.is_active() || self.audio.exclusively_owned() {
@@ -940,6 +954,12 @@ impl AppState {
     /// 与上面 `server_instance_id` 同一套「bin 走方法、不直接摸字段」的边界。
     pub fn exiting_signal(&self) -> tokio::sync::watch::Receiver<bool> {
         self.exiting.subscribe()
+    }
+
+    pub fn exit_request(&self) -> ExitRequest {
+        ExitRequest {
+            exiting: self.exiting.clone(),
+        }
     }
 
     /// Shared shutdown barrier for the service binary and embedded hosts.
@@ -3902,10 +3922,10 @@ impl AppState {
     /// 首页那颗退出钮：拉退出信号。先留 150 ms 让这次 POST 的应答发完——进程要是
     /// 抢在应答之前没掉，浏览器只看到一个失败请求，用户分不清按没按成。
     pub(crate) fn request_exit(&self) {
-        let exiting = self.exiting.clone();
+        let request = self.exit_request();
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-            let _ = exiting.send(true);
+            request.request();
         });
     }
 
@@ -4727,6 +4747,22 @@ pub(crate) mod tests {
         assert!(
             *exiting.borrow_and_update(),
             "信号必须能被 serve 那边的订阅读到"
+        );
+        drop(state);
+        handle.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn native_exit_request_uses_the_service_watch_without_a_runtime_context() {
+        let (state, handle) = playback_state().await;
+        let mut exiting = state.exiting_signal();
+        let request = state.exit_request();
+        std::thread::spawn(move || request.request()).join().unwrap();
+        exiting.changed().await.unwrap();
+        assert!(*exiting.borrow_and_update());
+        assert!(
+            *state.exiting_signal().borrow(),
+            "late subscribers see the same latch"
         );
         drop(state);
         handle.join().unwrap();
