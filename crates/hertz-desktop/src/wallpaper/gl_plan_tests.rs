@@ -23,13 +23,24 @@ fn target_plan_uses_integer_frame_gate_and_counts_peak() {
     let first = plan(&budget, OwnerKind::Desktop, 1);
     assert_eq!(first.limits.frame_divisor, 3);
     assert_eq!(first.session.request().output_pixel_rate, 1920 * 1080 * 48);
+    // 共享资源信封来自合同文件，且 gl-renderer 与 shared-assets 合计不超父保留。
+    assert_eq!(first.limits.shared_assets.max_entries, 7);
+    assert_eq!(first.limits.shared_assets.max_entry_bytes, 2048 * 1088 * 4);
+    let asset_cpu = first.limits.shared_assets.cpu_bytes;
+    assert_eq!(first.session.request().asset_cpu_bytes, asset_cpu);
+    assert_eq!(first.session.resources().len(), 2);
     let held = GlAdmission::new(first, Arc::clone(&budget)).unwrap();
     let second = plan(&budget, OwnerKind::Desktop, 2);
     assert!(second.limits.pixel_budget < 1920 * 1080);
     let second = GlAdmission::new(second, Arc::clone(&budget)).unwrap();
     assert_eq!(budget.usage().contexts, 2);
     assert_eq!(budget.usage().targets, 2);
-    assert_eq!(budget.usage().resource_allocations, 2);
+    assert_eq!(budget.usage().resource_allocations, 4);
+    assert_eq!(budget.usage().asset_cpu_bytes, asset_cpu * 2);
+    assert!(
+        asset_cpu * 2 <= budget::MAX_ASSET_CPU_BYTES,
+        "双 GL 会话共享资源信封必须能在专用上限内并存"
+    );
     assert!(
         budget.usage().output_pixel_rate
             <= budget::MAX_OUTPUT_PIXEL_RATE - budget::PREVIEW_RESERVED_OUTPUT_RATE
@@ -94,7 +105,7 @@ fn published_generation_cannot_return_resources_before_controller_close() {
     );
     session.disable();
     assert_eq!(budget.usage().release_pending, 1);
-    assert_eq!(budget.usage().resource_release_pending, 1);
+    assert_eq!(budget.usage().resource_release_pending, 2);
     assert!(session.reap_resources().is_empty());
     assert!(!session.controller_closed(generation + 1));
     assert!(session.controller_closed(generation));
@@ -111,7 +122,12 @@ fn dropped_published_owner_retains_charge_without_close_receipt() {
     drop(admission);
     assert_eq!(budget.usage().contexts, 1);
     assert_eq!(budget.usage().release_pending, 1);
-    assert_eq!(budget.usage().resource_release_pending, 1);
+    assert_eq!(budget.usage().resource_release_pending, 2);
+    assert_eq!(
+        budget.usage().asset_cpu_bytes,
+        7 * 2048 * 1088 * 4,
+        "未确认退出的会话继续按合同信封计量共享资源"
+    );
 }
 
 #[test]

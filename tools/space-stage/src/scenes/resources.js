@@ -1,18 +1,29 @@
 // SPDX-License-Identifier: MIT
 // Visible resources only: callers retain current/neighbor rows and covers.
+// 池资源受原生 shared-assets 信封约束时，逐资源在装载前记账（§8.1 先取预算再解码）；
+// 没有原生信封的宿主（播放器页）沿用池自身条目上限。
 import { layoutLyricText } from './text-layout.js';
-export function createSpatialResources(THREE, onInvalidate, resolveCover = url => url) {
+export function createSpatialResources(THREE, onInvalidate, resolveCover = url => url,
+  ledger = (typeof window !== 'undefined' && window.HertzSharedAssets) || null) {
   let disposed = false, stamp = null, uploaded = false;
   const texts = new Map(), covers = new Map(), queue = [], leases = new WeakMap(), coverLoads = new Set();
   function canvas(w, h) {
     if (typeof document === 'undefined') return null;
     const el = document.createElement('canvas'); el.width = w; el.height = h; return el;
   }
+  // The pool itself owns this discrimination: pool textures are never trackTree'd,
+  // scopes release consumer leases explicitly instead.
+  function own(texture) {
+    Object.defineProperty(texture, 'poolOwned', { value: true });
+    return texture;
+  }
   function remove(map, key, entry) {
     if (entry.consumers.size || entry.retired) return;
     entry.retired = true;
     const pending = queue.indexOf(entry); if (pending >= 0) queue.splice(pending, 1);
     entry.cancel?.(); entry.texture?.dispose(); entry.texture = null;
+    if (entry.asset !== undefined) ledger.release(entry.asset);
+    entry.asset = undefined;
     if (map.get(key) === entry) map.delete(key);
   }
   function trim(map, limit) {
@@ -75,8 +86,7 @@ export function createSpatialResources(THREE, onInvalidate, resolveCover = url =
       try {
         const side = Math.min(img.naturalWidth, img.naturalHeight);
         ctx.drawImage(img, (img.naturalWidth - side) / 2, (img.naturalHeight - side) / 2, side, side, 0, 0, 768, 768);
-        entry.texture = new THREE.CanvasTexture(el); entry.texture.colorSpace = THREE.SRGBColorSpace;
-        entry.texture.userData.spaceShared = true;
+        entry.texture = own(new THREE.CanvasTexture(el)); entry.texture.colorSpace = THREE.SRGBColorSpace;
         entry.texture.minFilter = THREE.LinearMipmapLinearFilter;
         img.onload = img.onerror = null;
         onInvalidate?.();
@@ -95,7 +105,9 @@ export function createSpatialResources(THREE, onInvalidate, resolveCover = url =
       const line = String(value || '').slice(0, 120).replace(/[\uD800-\uDBFF]$/, ''), key = font + ':' + maxWidth + ':' + line;
       let entry = texts.get(key);
       if (!entry && texts.size < 7) {
-        entry = { key, line, font, maxWidth, consumers: new Set(), texture: null, aspect: 8 };
+        const asset = ledger?.admit('text');
+        if (ledger && asset === null) return null;
+        entry = { key, line, font, maxWidth, consumers: new Set(), texture: null, aspect: 8, asset: asset ?? undefined };
         texts.set(key, entry); queue.push(entry);
       }
       if (!entry) return null;
@@ -108,7 +120,9 @@ export function createSpatialResources(THREE, onInvalidate, resolveCover = url =
       if (!url || disposed || signal?.aborted) return null;
       const key = String(url); let entry = covers.get(key);
       if (!entry && coverUnits() < 12) {
-        entry = { key, consumers: new Set(), texture: null, failed: false }; covers.set(key, entry);
+        const asset = ledger?.admit('cover');
+        if (ledger && asset === null) return null;
+        entry = { key, consumers: new Set(), texture: null, failed: false, asset: asset ?? undefined }; covers.set(key, entry);
         if (typeof Image !== 'undefined') loadCover(entry);
       }
       if (!entry) return null;
@@ -133,8 +147,7 @@ export function createSpatialResources(THREE, onInvalidate, resolveCover = url =
         entry.start = layout.rows[0].left; entry.end = layout.rows[0].right;
         ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = '#ffffff';
         layout.rows.forEach(row => ctx.fillText(entry.line.slice(row.start, row.end), layout.width / 2, row.baseline));
-        entry.texture = new THREE.CanvasTexture(el); entry.texture.generateMipmaps = false;
-        entry.texture.userData.spaceShared = true;
+        entry.texture = own(new THREE.CanvasTexture(el)); entry.texture.generateMipmaps = false;
         entry.texture.minFilter = THREE.LinearFilter; uploaded = true; break;
       }
       trim(texts, 7); trim(covers, 12);

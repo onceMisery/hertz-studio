@@ -254,7 +254,7 @@ async function run() {
     const receipt=await applyWallpaper(changed,'gl-new-envelope');assert.equal(receipt.receipt.ok,true,JSON.stringify(receipt));
     const next=await until(async()=>{const state=(await formal('status')).wallpaper;return state.firstFrameReady&&state.session.binding.sessionId!==original.wallpaper.session.binding.sessionId&&state.retiringControllers===0&&!state.handoff&&!state.retiringHandoffs?state:null;},'quality and FPS change admits a new GL controller');
     assert.equal(next.glLimits.requestedQuality,'high');assert.equal(next.glLimits.requestedFps,60);
-    assert.equal(next.budget.contexts,1);assert.equal(next.budget.sessionReservations,1);assert.equal(next.budget.resourceAllocations,1);
+    assert.equal(next.budget.contexts,1);assert.equal(next.budget.sessionReservations,1);assert.equal(next.budget.resourceAllocations,2);
     assert.equal(next.budget.outputPixelRate,next.glAllocation.reserved.outputPixelRate);
     assert.ok(next.budget.outputPixelRate<=112000000);
     checks.push({name:'GL quality and FPS changes reserve a fresh controller while counting the old presentation peak',status:next});

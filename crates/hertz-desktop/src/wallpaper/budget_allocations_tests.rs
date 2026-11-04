@@ -17,6 +17,7 @@ fn plan(owner: OwnerKind, session: &str, generation: u64) -> SessionPlan {
             output_pixel_rate: 200,
             cpu_bytes: 300,
             prepare_cpu_bytes: 0,
+            asset_cpu_bytes: 0,
             gpu_bytes: 400,
             prepare_tasks: 0,
         },

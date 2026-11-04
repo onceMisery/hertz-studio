@@ -12,7 +12,12 @@ const html=fs.readFileSync(path.join(assets,'wallpaper-scene.html'),'utf8')
   .replace('__SHIM__',()=>fs.readFileSync(path.join(root,'plugin/ui/vendor/zodiac-stage.js'),'utf8'))
   .replace('__SCENE__',()=>fs.readFileSync(path.join(assets,'wallpaper-scene.js'),'utf8'));
 const output=path.join(root,'output/playwright/wallpaper-gl-browser');
-const limits={quality:'low',requestedQuality:'low',fps:30,refreshHz:60,pixelBudget:1900000,gpuBytes:64*1048576,generation:1};
+const sharedContract=JSON.parse(fs.readFileSync(path.join(root,'crates/hertz-wallpaper/contracts/shared-assets.json'),'utf8'));
+// 受信页面只计划歌词纹理池；信封数值与原生 GlPlan 用同一合同推导。
+const sharedAssets={maxEntries:sharedContract.maxTexts,maxEntryBytes:sharedContract.maxTextBytes,
+  cpuBytes:sharedContract.maxTexts*sharedContract.maxTextBytes};
+const limits={quality:'low',requestedQuality:'low',fps:30,refreshHz:60,pixelBudget:1900000,gpuBytes:64*1048576,
+  sharedAssets,generation:1};
 (async()=>{
   fs.mkdirSync(output,{recursive:true});
   const browser=await chromium.launch({channel:process.env.PLAYWRIGHT_CHANNEL||'chrome',headless:true,args:['--use-angle=swiftshader','--enable-webgl']});
@@ -44,6 +49,37 @@ const limits={quality:'low',requestedQuality:'low',fps:30,refreshHz:60,pixelBudg
     let page=await pageFor(null);
     assert.deepEqual(await page.evaluate(()=>({context:document.createElement('canvas').getContext('webgl2'),calls:driverCalls.contexts})),{context:null,calls:0});
     await page.close();results.push('media/unadmitted pages cannot create a GL context');
+    page=await pageFor({...limits,sharedAssets:undefined});
+    const envelopeLess=await page.evaluate(()=>{let error;try{document.createElement('canvas').getContext('webgl2');}catch(failure){error=String(failure);}return {error,calls:driverCalls.contexts,ledger:window.HertzSharedAssets===undefined};});
+    assert.match(envelopeLess.error,/invalid shared asset allocation/);
+    assert.equal(envelopeLess.calls,0);assert.equal(envelopeLess.ledger,true);
+    results.push({type:'GL allocation without the shared-asset envelope is rejected',...envelopeLess});await page.close();
+    page=await pageFor(limits);
+    const ledger=await page.evaluate(()=>{
+      const tokens=[];let last;
+      for(let i=0;i<7;i++)tokens.push(HertzSharedAssets.admit('text'));
+      const overflow=HertzSharedAssets.admit('text');
+      const admitted=HertzSharedAssets.stats();
+      HertzSharedAssets.release(tokens[0]);
+      const afterRelease=HertzSharedAssets.stats();
+      last=HertzSharedAssets.admit('text');
+      // 协议违背是致命错误，放在本页最后一个动作：重复释放同一 token。
+      let repeated;try{HertzSharedAssets.release(tokens[0]);}catch(failure){repeated=String(failure);}
+      return {tokens,overflow,admitted,afterRelease,last,repeated,glStats:HertzGlBudget.stats().sharedAssets};
+    });
+    assert.equal(ledger.tokens.filter(Boolean).length,7);
+    assert.equal(ledger.overflow,null,'an exhausted envelope denies admission gracefully');
+    assert.equal(ledger.admitted.entries,7);assert.equal(ledger.admitted.bytes,ledger.admitted.cpuBytes);
+    assert.equal(ledger.afterRelease.entries,6);
+    assert.ok(ledger.last,'released capacity admits again');
+    assert.match(ledger.repeated,/unknown shared-asset token/);
+    assert.deepEqual(ledger.glStats,{entries:7,maxEntries:7,bytes:sharedAssets.cpuBytes,cpuBytes:sharedAssets.cpuBytes});
+    results.push({type:'shared-asset ledger enforces the frozen envelope',...ledger});await page.close();
+    page=await pageFor(limits);
+    const unplanned=await page.evaluate(()=>{let error;try{HertzSharedAssets.admit('cover');}catch(failure){error=String(failure);}return {error,receipts:receipts.filter(text=>text.startsWith('wallpaper_gl_failed')).length};});
+    assert.match(unplanned.error,/asset kind not in the native plan/);
+    assert.equal(unplanned.receipts,1,'unplanned asset kinds fail the trusted page loudly');
+    results.push({type:'unplanned asset kind fails the page',...unplanned});await page.close();
     page=await pageFor({...limits,generation:2});
     const stale=await page.evaluate(()=>{let error;try{document.createElement('canvas').getContext('webgl2');}catch(failure){error=String(failure);}return {error,calls:driverCalls.contexts};});
     assert.match(stale.error,/invalid native allocation/);assert.equal(stale.calls,0);results.push({type:'stale native allocation stays closed',...stale});await page.close();

@@ -23,6 +23,7 @@ pub(crate) struct ResourceAmounts {
     pub output_pixel_rate: u64,
     pub cpu_bytes: u64,
     pub prepare_cpu_bytes: u64,
+    pub asset_cpu_bytes: u64,
     pub gpu_bytes: u64,
     pub prepare_tasks: u64,
 }
@@ -37,6 +38,7 @@ impl ResourceAmounts {
             output_pixel_rate: request.output_pixel_rate,
             cpu_bytes: request.cpu_bytes,
             prepare_cpu_bytes: request.prepare_cpu_bytes,
+            asset_cpu_bytes: request.asset_cpu_bytes,
             gpu_bytes: request.gpu_bytes,
             prepare_tasks: u64::from(request.prepare_tasks),
         }
@@ -53,6 +55,7 @@ impl ResourceAmounts {
             output_pixel_rate,
             cpu_bytes,
             prepare_cpu_bytes,
+            asset_cpu_bytes,
             gpu_bytes,
             prepare_tasks
         ))
@@ -71,6 +74,7 @@ impl ResourceAmounts {
             output_pixel_rate,
             cpu_bytes,
             prepare_cpu_bytes,
+            asset_cpu_bytes,
             gpu_bytes,
             prepare_tasks
         );
@@ -90,6 +94,7 @@ impl ResourceAmounts {
             output_pixel_rate,
             cpu_bytes,
             prepare_cpu_bytes,
+            asset_cpu_bytes,
             gpu_bytes
         );
         Ok(())

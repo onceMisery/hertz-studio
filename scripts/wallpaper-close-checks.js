@@ -31,13 +31,13 @@ module.exports=async function({output,settings,baseline,fixture,checks,pages,unt
  await apply(next,'close-failed-desktop');const intent=saved();
  const blocked=await until(async()=>{const value=await state();return value.handoff?.captured&&value.handoff.visible&&retirement(value,oldBinding)?.closeError?value:null;},'Close failure keeps the captured frame and original controller');
  assertBlocked(blocked,oldBinding);assert.equal(blocked.handoff.sourceClosed,false);assert.equal(blocked.handoff.workspaceReleased,false);
- assert.equal(blocked.budget.contexts,1);assert.equal(blocked.budget.resourceAllocations,3);assert.ok(blocked.budget.prepareCpuBytes>0);
+ assert.equal(blocked.budget.contexts,1);assert.equal(blocked.budget.resourceAllocations,5,'旧 GL 两个子额度加采集工作区与静态位图');assert.ok(blocked.budget.prepareCpuBytes>0);
  assert.equal(blocked.firstFrameReady,false);assert.equal(oldPage.isClosed(),false);assert.equal(pages().filter(page=>page.url().includes('/wallpaper.html')).length,1);
  const wrong=await probe(oldPage,{...oldBinding,generation:oldBinding.generation+1},false);assert.equal(wrong.accepted,false);assert.equal(wrong.blocked,true);
  await delay(3200);const stillBlocked=await state();assertBlocked(stillBlocked,oldBinding);
  assert.equal(stillBlocked.handoff.hwnd,blocked.handoff.hwnd);assert.equal(stillBlocked.handoff.sourceClosed,false);assert.equal(stillBlocked.handoff.workspaceReleased,false);
  assert.equal(stillBlocked.budget.prepareCpuBytes,blocked.budget.prepareCpuBytes);assert.equal(saved(),intent);assert.equal(settings.isClosed(),false);
- await probe(oldPage,oldBinding,false,false);current=await steady();assert.equal(oldPage.isClosed(),true);assert.equal(current.budget.contexts,1);assert.equal(current.budget.prepareCpuBytes,0);assert.equal(current.budget.resourceAllocations,1);
+ await probe(oldPage,oldBinding,false,false);current=await steady();assert.equal(oldPage.isClosed(),true);assert.equal(current.budget.contexts,1);assert.equal(current.budget.prepareCpuBytes,0);assert.equal(current.budget.resourceAllocations,2);
  checks.push({name:'failed native desktop Close retains source, captured frame and all budgets past the timeout; matching source release permits a real successor',blocked,stillBlocked,current});
 
  let draft=await checked('wallpaper.draft.create',{kind:'settings'});
@@ -49,7 +49,7 @@ module.exports=async function({output,settings,baseline,fixture,checks,pages,unt
  reference=await update(next);await checked('wallpaper.preview.update',{...reference,leaseId:lease.leaseId});
  const previewBlocked=await until(async()=>{const value=await state();return value.mediaPreview?.handoff?.captured&&retirement(value,oldBinding)?.closeError?value:null;},'preview update waits for failed Close');
  assertBlocked(previewBlocked,oldBinding);assert.equal(previewBlocked.mediaPreview.handoff.sourceClosed,false);assert.equal(previewBlocked.mediaPreview.handoff.workspaceReleased,false);
- assert.equal(previewBlocked.budget.contexts,2);assert.equal(previewBlocked.budget.previewInstances,1);assert.equal(previewBlocked.budget.resourceAllocations,4);
+ assert.equal(previewBlocked.budget.contexts,2);assert.equal(previewBlocked.budget.previewInstances,1);assert.equal(previewBlocked.budget.resourceAllocations,6,'桌面与旧预览 GL 各两个子额度加采集工作区与位图');
  const desktopPage=await pageFor(current.session.binding.sessionId);
  assert.equal((await probe(desktopPage,oldBinding,false)).accepted,false,'one native controller cannot release another controller gate');
  const newest=structuredClone(next);newest.groups[0].selection={kind:'builtin',sceneId:'reactor',stateVersion:1,params:{}};
@@ -70,7 +70,7 @@ module.exports=async function({output,settings,baseline,fixture,checks,pages,unt
  assert.equal(released.budget.contexts,2);assert.ok(released.budget.prepareCpuBytes>0);assert.equal(oldPage.isClosed(),false);
  await probe(oldPage,oldBinding,false,false);
  const drained=await until(async()=>{const value=await state();return !value.previewActive&&!value.retiringHandoffs&&value.retiringControllers===0?value:null;},'released preview eventually drains real native and bitmap exits');
- assert.equal(oldPage.isClosed(),true);assert.equal(drained.budget.previewInstances,0);assert.equal(drained.budget.contexts,1);assert.equal(drained.budget.prepareCpuBytes,0);assert.equal(drained.budget.resourceAllocations,1);assert.equal(saved(),intent);
+ assert.equal(oldPage.isClosed(),true);assert.equal(drained.budget.previewInstances,0);assert.equal(drained.budget.contexts,1);assert.equal(drained.budget.prepareCpuBytes,0);assert.equal(drained.budget.resourceAllocations,2);assert.equal(saved(),intent);
  checks.push({name:'preview release while Close fails ends the lease but retains all exit ownership and budgets until its real source closes',released,drained});
 
  const video=structuredClone(baseline);video.groups[0].selection={kind:'package',...fixture.video};

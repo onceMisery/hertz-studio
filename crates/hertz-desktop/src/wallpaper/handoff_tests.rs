@@ -163,6 +163,7 @@ fn captured_workspace_returns_after_source_and_staging_exit_while_bitmap_stays_c
             output_pixel_rate: 0,
             cpu_bytes: 0,
             prepare_cpu_bytes: super::super::budget::MAX_PREPARE_CPU_BYTES,
+            asset_cpu_bytes: 0,
             gpu_bytes: 0,
             prepare_tasks: 1,
         };

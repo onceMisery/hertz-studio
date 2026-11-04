@@ -15,6 +15,35 @@
     throw new Error(failed);
   }
   function integer(value) { return Number.isSafeInteger(value) && value >= 0; }
+  // 受信页面纹理池的逐资源信封：原生在准入时冻结，页面只能消耗，不能放大。
+  // 校验延迟到 getContext 包装就位之后，与代际校验同处，拒绝时驱动零调用。
+  var sharedAssets = (allocation && allocation.sharedAssets) || null;
+  var sharedAssetsValid = !!sharedAssets && integer(sharedAssets.maxEntries) && sharedAssets.maxEntries >= 1
+    && integer(sharedAssets.maxEntryBytes) && sharedAssets.maxEntryBytes >= 1
+    && integer(sharedAssets.cpuBytes) && sharedAssets.cpuBytes >= sharedAssets.maxEntries * sharedAssets.maxEntryBytes;
+  if (native && allocation && !sharedAssetsValid) sharedAssets = null;
+  var assetEntries = new Map(), assetToken = 0;
+  if (sharedAssets) {
+    Object.defineProperty(window, 'HertzSharedAssets', { value: Object.freeze({
+      admit: function (kind) {
+        if (failed) throw new Error(failed);
+        // 受信页面只计划歌词纹理池；封面入口未进入原生计划的页面即合同违背。
+        if (kind !== 'text') fail('asset kind not in the native plan: ' + kind);
+        if (assetEntries.size >= sharedAssets.maxEntries) return null;
+        var token = ++assetToken;
+        assetEntries.set(token, sharedAssets.maxEntryBytes);
+        return token;
+      },
+      release: function (token) {
+        if (failed) throw new Error(failed);
+        if (!integer(token) || !assetEntries.delete(token)) fail('unknown shared-asset token');
+      },
+      stats: function () {
+        return { entries: assetEntries.size, maxEntries: sharedAssets.maxEntries,
+          bytes: assetEntries.size * sharedAssets.maxEntryBytes, cpuBytes: sharedAssets.cpuBytes };
+      }
+    }), writable: false, configurable: false });
+  }
   function bytesProduct() {
     var value = 1;
     for (var n of arguments) { if (!integer(n) || !Number.isSafeInteger(value *= n)) fail('invalid allocation dimensions'); }
@@ -207,6 +236,7 @@
     if(allocation && (allocation.generation!==window.__hertzWallpaperBinding.generation
       || !integer(allocation.pixelBudget) || allocation.pixelBudget<1
       || !integer(allocation.gpuBytes) || allocation.gpuBytes<1))fail('invalid native allocation');
+    if(allocation && !sharedAssetsValid)fail('invalid shared asset allocation');
   }
   Object.defineProperty(window,'HertzGlBudget',{value:Object.freeze({
     limits:allocation,
@@ -214,6 +244,7 @@
       if(!native||contexts.size===0)return Promise.resolve();
       return new Promise((resolve,reject)=>{var timer=setTimeout(()=>{var at=waiters.indexOf(done);if(at>=0)waiters.splice(at,1);reject(new Error('gl_budget: old context exit timed out'));},2000);function done(){clearTimeout(timer);resolve();}waiters.push(done);});
     },
-    stats:function(){return Object.assign(totals(),{contexts:contexts.size,peakBytes:peakBytes,uploadBytes:uploads,error:failed});}
+    stats:function(){return Object.assign(totals(),{contexts:contexts.size,peakBytes:peakBytes,uploadBytes:uploads,error:failed,
+      sharedAssets:sharedAssets?{entries:assetEntries.size,maxEntries:sharedAssets.maxEntries,bytes:assetEntries.size*sharedAssets.maxEntryBytes,cpuBytes:sharedAssets.cpuBytes}:null});}
   }),writable:false,configurable:false});
 })();

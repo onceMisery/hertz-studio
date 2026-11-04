@@ -24,7 +24,7 @@ module.exports = async function verify({output,settings,baseline,fixture,checks,
   const initialResources=await resources();
   assert.equal(initialResources.budget.contexts,1);
   assert.equal(initialResources.budget.sessionReservations,1);
-  assert.equal(initialResources.budget.resourceAllocations,1);
+  assert.equal(initialResources.budget.resourceAllocations,2,'GL 会话含 gl-renderer 与 shared-assets 两个子额度');
   assert.equal(desktop.glAllocation.reserved.contexts,1);
   async function unchanged() {
     const current=(await formal('status')).wallpaper;
@@ -168,7 +168,7 @@ module.exports = async function verify({output,settings,baseline,fixture,checks,
     assert.notEqual(current.status.binding.sessionId,old.status.binding.sessionId);
     const usage=await resources();assert.equal(usage.decoderSlots,kind==='video'?1:0);assert.equal(usage.prepareTasks,0);
     assert.equal(usage.budget.sessionReservations,2);
-    assert.equal(usage.budget.resourceAllocations,kind==='gl'?2:3);
+    assert.equal(usage.budget.resourceAllocations,4,'桌面与预览各持 gl-renderer+shared-assets 或 decoded+present 两个子额度');
     assert.equal(usage.budget.previewInstances,1,'all preview backends share the global preview limit');
     assert.equal(usage.budget.contexts,kind==='gl'?2:1);
     transitions.push({kind,oldClosedMs:closedAt-began,readyMs:performance.now()-began,binding:current.status.binding,resources:usage});

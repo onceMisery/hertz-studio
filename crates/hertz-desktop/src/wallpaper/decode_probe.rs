@@ -92,6 +92,7 @@ fn empty_request(session: String) -> BudgetRequest {
         output_pixel_rate: 0,
         cpu_bytes: 0,
         prepare_cpu_bytes: 0,
+        asset_cpu_bytes: 0,
         gpu_bytes: 0,
         prepare_tasks: 0,
     }

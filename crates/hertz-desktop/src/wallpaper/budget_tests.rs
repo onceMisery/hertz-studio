@@ -43,6 +43,7 @@ fn req(owner: OwnerKind, session: &str) -> BudgetRequest {
         output_pixel_rate: 0,
         cpu_bytes: 0,
         prepare_cpu_bytes: 0,
+        asset_cpu_bytes: 0,
         gpu_bytes: 0,
         prepare_tasks: 0,
     }
@@ -68,6 +69,37 @@ fn image_workspace_is_separate_bounded_and_held_until_exit() {
     next.prepare_cpu_bytes = u64::MAX;
     assert_eq!(budget.grant(&next).unwrap_err().quota, "prepare_cpu_bytes");
     assert_eq!(budget.usage().cpu_bytes, MAX_CPU_DECODED_BYTES);
+}
+
+/// 通用共享资源信封独立计量：GL 会话不挤占媒体解码 CPU，退出前持续占用。
+#[test]
+fn shared_assets_are_ledgered_on_a_dedicated_cap() {
+    use super::MAX_ASSET_CPU_BYTES;
+    let budget = BudgetCoordinator::new();
+    let mut gl_desktop = req(OwnerKind::Desktop, "gl-desktop");
+    gl_desktop.asset_cpu_bytes = 7 * 2048 * 1088 * 4;
+    let gl = budget.grant(&gl_desktop).unwrap();
+    // 媒体解码 CPU 不受共享资源信封影响。
+    let mut media = req(OwnerKind::Probe, "media");
+    media.cpu_bytes = MAX_CPU_DECODED_BYTES;
+    budget.grant(&media).unwrap();
+    let mut preview = req(OwnerKind::Preview, "gl-preview");
+    preview.asset_cpu_bytes = 7 * 2048 * 1088 * 4;
+    budget.grant(&preview).unwrap();
+    assert_eq!(
+        budget.usage().asset_cpu_bytes,
+        14 * 2048 * 1088 * 4,
+        "双 GL 会话信封必须在专用上限内并存"
+    );
+    let mut third = req(OwnerKind::Desktop, "gl-third");
+    third.asset_cpu_bytes = MAX_ASSET_CPU_BYTES;
+    assert_eq!(budget.grant(&third).unwrap_err().quota, "asset_cpu_bytes");
+    third.asset_cpu_bytes = u64::MAX;
+    assert_eq!(budget.grant(&third).unwrap_err().quota, "asset_cpu_bytes");
+    budget.release(gl, "gl-desktop", 1).unwrap();
+    assert_eq!(budget.usage().asset_cpu_bytes, 14 * 2048 * 1088 * 4);
+    budget.confirm_exit(gl, "gl-desktop", 1).unwrap();
+    assert_eq!(budget.usage().asset_cpu_bytes, 7 * 2048 * 1088 * 4);
 }
 
 #[test]

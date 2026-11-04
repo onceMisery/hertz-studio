@@ -200,7 +200,9 @@ export function createParticles(ctx, kind, palette = [0x67d9cf, 0xfb7298, 0x8fb9
   const points = new T.Points(geometry, material); points.frustumCulled = false; group.add(points);
   let profile = ctx.quality, params = { ...ctx.params }, entry = null, coverKey = '';
   const resources = ctx.services.spatialResources || createSpatialResources(T), local = !ctx.services.spatialResources;
-  ctx.scope.defer(() => { resources.cover.release(entry); if (local) resources.dispose(); });
+  // 池资源只经 scope.lease 释放租约；私有对象仍走 track/dispose。
+  ctx.scope.lease({ release() { resources.cover.release(entry); } });
+  if (local) ctx.scope.defer(() => resources.dispose());
   function density() { geometry.setDrawRange(0, Math.floor(count * qualityDensity(profile) * (params.density ?? 1))); }
   density();
   return basicInstance(group, params, profile, {

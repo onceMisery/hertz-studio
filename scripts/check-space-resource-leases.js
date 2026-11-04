@@ -81,6 +81,56 @@ async function main() {
   for(const complete of completions)complete(null);await flush();
   assert.equal(pending.stats().coverLoads,0);assert.equal(pending.stats().bytes,0);
   assert.ok(textures.every(item=>item.disposals===1),'every allocated shared texture is released once');
-  console.log('shared resource leases passed: merged load, independent abort, idempotent/stale release, bounded cancellation, late callbacks and disposal');
+
+  // ---- 原生 shared-assets 信封：装载前逐资源记账，退出时按条目归还 ----
+  const liveTokens=new Set(); let nextToken=0, unplanned=[];
+  const enforced=createSpatialResources(THREE,()=>invalidations++,url=>url,{
+    admit(kind) {
+      if (kind!=='text') { unplanned.push(kind); return null; }
+      if (liveTokens.size>=2) return null;
+      const token=++nextToken; liveTokens.add(token); return token;
+    },
+    release(token) { if(!liveTokens.delete(token)) throw new Error('unknown envelope token'); }
+  });
+  const textA=enforced.text.acquire('信封-一行'); assert.ok(textA,'envelope budget is reserved before any layout work');
+  const textB=enforced.text.acquire('信封-第二行'); assert.ok(textB);
+  assert.equal(enforced.text.acquire('信封-第三行'),null,'bounded envelope denies admission beyond its plan');
+  enforced.beginFrame(3);
+  assert.ok(textA.texture&&textA.texture.poolOwned,'pool marks its own textures as pool-owned');
+  assert.equal(unplanned.length,0);
+  const denied=enforced.cover.acquire('cover-url'); assert.equal(denied,null,'unplanned asset kind cannot bypass the native envelope');
+  assert.equal(unplanned.length,1,'unplanned kind is surfaced to the trusted caller');
+  enforced.text.release(textA); assert.equal(liveTokens.size,1,'entry eviction releases its envelope token exactly once');
+  const textC=enforced.text.acquire('信封-第三行'); assert.ok(textC,'released envelope capacity admits new entries');
+  enforced.dispose();
+  assert.equal(liveTokens.size,0,'pool disposal releases every remaining envelope token');
+
+  const full=createSpatialResources(THREE,()=>invalidations++,url=>url,{admit:()=>null,release(){throw new Error('never');}});
+  assert.equal(full.text.acquire('超限'),null,'an exhausted envelope denies admission before creating an entry');
+  assert.equal(full.stats().textTextures,0);
+
+  // ---- scope.lease：池资源只释放租约，私有对象继续 track/dispose ----
+  const {createScope} = await import(pathToFileURL(path.resolve(__dirname,'../tools/space-stage/src/scope.js')));
+  const scope=createScope();
+  let leaseReleases=0, privateDisposals=0;
+  const textureLike={poolOwned:true,isTexture:true,dispose(){throw new Error('pool textures must not be disposed via scope track');}};
+  const material={uniforms:{},map:textureLike,dispose(){privateDisposals++;}};
+  const scene={traverse(fn){fn({material});}};
+  scope.lease({release(){leaseReleases++;}});
+  scope.track({dispose(){privateDisposals++;}});
+  scope.trackTree(scene);
+  assert.equal(privateDisposals,0);
+  assert.equal(leaseReleases,0);
+  scope.dispose();
+  assert.equal(privateDisposals,2,'only private resources are disposed');
+  assert.equal(leaseReleases,1,'pool lease is released exactly once at scope exit');
+  assert.equal(scope.stats().leases,0);
+  const disposedScope=createScope();
+  disposedScope.dispose();
+  let lateReleases=0;
+  disposedScope.lease({release(){lateReleases++;}});
+  assert.equal(lateReleases,1,'leasing a disposed scope releases immediately');
+  assert.throws(()=>createScope().lease({}),'lease requires a releasable object');
+  console.log('shared resource leases passed: merged load, independent abort, idempotent/stale release, bounded cancellation, late callbacks, native envelope accounting, pool-owned discrimination and scope leases');
 }
 main().catch(error=>{console.error(error);process.exitCode=1;});

@@ -40,10 +40,10 @@ module.exports=async function({output,settings,baseline,checks,pages,until,forma
  const candidate=await until(()=>pages().find(page=>page.url().includes('/wallpaper.html')),'new GL candidate');
  await candidate.waitForFunction(()=>!!window.handoffHeldFrame);
  const pending=await state();assert.equal(pending.firstFrameReady,false);assert.equal(pending.budget.contexts,1);
- assert.equal(pending.budget.sessionReservations,2);assert.equal(pending.budget.resourceAllocations,2);
+ assert.equal(pending.budget.sessionReservations,2);assert.equal(pending.budget.resourceAllocations,3,'旧 GL 两个子额度加保留位图');
  assert.equal(pending.budget.prepareCpuBytes,0,'exited capture workspace returns before the retained bitmap reveals');
  assert.equal(pending.budget.cpuBytes,pending.handoff.width*pending.handoff.height*4);
- assert.equal(pending.budget.resourceRecords,3,'workspace tombstone stays bounded under the still-live frame parent');
+ assert.equal(pending.budget.resourceRecords,4,'workspace tombstone stays bounded under the still-live frame parent');
  assert.equal(pending.budget.targets,2);assert.equal(pending.budget.decoderSlots,0);
  const limits=await candidate.evaluate(()=>HertzGlBudget.limits);
  assert.equal(limits.quality,'high');assert.equal(limits.gpuBytes,192*1048576);
@@ -81,14 +81,14 @@ $bitmap.Save('${capturePath.replace(/'/g,"''")}',[System.Drawing.Imaging.ImageFo
  const beforeReveal=await state();assert.equal(beforeReveal.handoff.bgraSha256,frozen.handoff.bgraSha256);assert.ok(beforeReveal.handoff.visible);
  assert.equal(beforeReveal.appliedRevision,original.appliedRevision);assert.deepEqual(beforeReveal.appliedSelection,original.appliedSelection);
  await candidate.evaluate(()=>handoffNativePost(handoffHeldReveal));
- let current=await steady();assert.equal(current.budget.contexts,1);assert.equal(current.budget.resourceAllocations,1);assert.equal(current.budget.prepareCpuBytes,0);
+ let current=await steady();assert.equal(current.budget.contexts,1);assert.equal(current.budget.resourceAllocations,2);assert.equal(current.budget.prepareCpuBytes,0);
  checks.push({name:'full GL envelope switches through a painted native bitmap; old controller exits before new admission and bitmap stays until typed reveal',original,frozen,pending,beforeReveal,current,capturePath});
 
  await mode('fail-gl');oldPage=await findPage(current.session.binding.sessionId);
  await apply(high,'handoff-candidate-failure');
  const failed=await until(async()=>{const value=await state();return value.applyError&&!value.candidateLoading&&!value.session&&value.handoff?.visible&&value.handoff.workspaceReleased&&value.retiringControllers===0?value:null;},'failed new GL keeps native old frame after workspace exit');
  assert.equal(oldPage.isClosed(),true);assert.equal(failed.budget.contexts,0);assert.equal(failed.budget.decoderSlots,0);
- assert.equal(failed.budget.sessionReservations,1);assert.equal(failed.budget.resourceAllocations,1);
+ assert.equal(failed.budget.sessionReservations,1);assert.equal(failed.budget.resourceAllocations,1,'旧 GL 已真实退出；仅保留位图子额度');
  assert.equal(failed.budget.prepareCpuBytes,0);
  assert.equal(failed.budget.gpuBytes,failed.handoff.targetWidth*failed.handoff.targetHeight*8);
  const intent=fs.readFileSync(path.join(output,'config.json'),'utf8');

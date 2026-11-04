@@ -113,6 +113,7 @@ impl CaptureHold {
             output_pixel_rate: 0,
             cpu_bytes: pixels * 4,
             prepare_cpu_bytes,
+            asset_cpu_bytes: 0,
             gpu_bytes: pixels * 12 + target_pixels * 8,
             prepare_tasks: 0,
         };

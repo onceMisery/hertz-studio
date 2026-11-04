@@ -54,6 +54,9 @@ pub(crate) const MAX_DECODE_PIXEL_RATE: u64 = 125_000_000;
 pub(crate) const MAX_OUTPUT_PIXEL_RATE: u64 = 120_000_000;
 /// CPU 常驻解码资产上限（§12.1；导入工作区另计）。
 pub(crate) const MAX_CPU_DECODED_BYTES: u64 = 128 * 1024 * 1024;
+/// 通用共享资源（受信页面纹理池）的 CPU 常驻上限；与解码/准备工作区分开计量，
+/// 避免内置 GL 会话挤占媒体解码额度。
+pub(crate) const MAX_ASSET_CPU_BYTES: u64 = 128 * 1024 * 1024;
 /// 原图准备的独立 CPU 工作区（§6.3；不占常驻解码额度）。
 pub(crate) const MAX_PREPARE_CPU_BYTES: u64 = 320 * 1024 * 1024;
 /// GPU 跟踪资源估计上限（§12.1；tracked estimate，不是实测显存）。
@@ -101,6 +104,8 @@ pub(crate) struct BudgetRequest {
     /// CPU 常驻解码字节。
     pub cpu_bytes: u64,
     pub prepare_cpu_bytes: u64,
+    /// 通用共享资源（受信页面纹理池等）的 CPU 常驻字节。
+    pub asset_cpu_bytes: u64,
     /// GPU 跟踪字节（纹理/几何/RT/骨骼/字形/闲置池，§12.2）。
     pub gpu_bytes: u64,
     /// 资源准备任务槽数。
@@ -163,6 +168,7 @@ pub(crate) struct BudgetUsage {
     pub output_pixel_rate: u64,
     pub cpu_bytes: u64,
     pub prepare_cpu_bytes: u64,
+    pub asset_cpu_bytes: u64,
     pub gpu_bytes: u64,
     pub prepare_tasks: u32,
     /// release 后未 confirm_exit 的 token 数（"某个释放没有确认时保留占用并报告"）。
@@ -200,6 +206,7 @@ impl Ledger {
             usage.output_pixel_rate += request.output_pixel_rate;
             usage.cpu_bytes += request.cpu_bytes;
             usage.prepare_cpu_bytes += request.prepare_cpu_bytes;
+            usage.asset_cpu_bytes += request.asset_cpu_bytes;
             usage.gpu_bytes += request.gpu_bytes;
             usage.prepare_tasks += request.prepare_tasks;
             if request.owner == OwnerKind::Preview {
@@ -411,6 +418,15 @@ impl BudgetCoordinator {
                 usage.prepare_cpu_bytes,
                 request.prepare_cpu_bytes,
                 "图片准备工作区不足；使用更小输入或等待准备退出",
+            ));
+        }
+        if request.asset_cpu_bytes > MAX_ASSET_CPU_BYTES.saturating_sub(usage.asset_cpu_bytes) {
+            return Err(Ledger::reject(
+                "asset_cpu_bytes",
+                MAX_ASSET_CPU_BYTES,
+                usage.asset_cpu_bytes,
+                request.asset_cpu_bytes,
+                "通用共享资源常驻额度不足；等待旧呈现退出",
             ));
         }
         if request.gpu_bytes > MAX_GPU_TRACKED_BYTES.saturating_sub(usage.gpu_bytes) {

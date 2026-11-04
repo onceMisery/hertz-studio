@@ -93,7 +93,7 @@ exports.verify=async({output,settings,baseline,fixture,checks,pages,until,envelo
  await candidate.evaluate(()=>followNativePost(followHeldFrame));await candidate.waitForFunction(()=>!!window.followHeldReveal);
  const beforeReveal=await until(async()=>{const value=await state();return value.mediaPreview?.handoff?.visible&&!value.handoff&&!value.retiringHandoffs&&value.retiringControllers===0?value:null;},'only preview bitmap remains before reveal');
  assert.equal(beforeReveal.mediaPreview.runtimeBuiltin.sceneId,'reactor');assert.ok(beforeReveal.mediaPreview.handoff.visible);
- assert.equal(beforeReveal.budget.prepareCpuBytes,0);assert.equal(beforeReveal.budget.resourceAllocations,3);
+ assert.equal(beforeReveal.budget.prepareCpuBytes,0);assert.equal(beforeReveal.budget.resourceAllocations,5,'桌面与新预览 GL 各两个子额度加保留位图');
  assert.equal(beforeReveal.budget.gpuBytes,beforeReveal.glLimits.gpuBytes+beforeReveal.mediaPreview.glLimits.gpuBytes+beforeReveal.mediaPreview.handoff.targetWidth*beforeReveal.mediaPreview.handoff.targetHeight*8);
  await candidate.evaluate(()=>{const receipt=JSON.parse(followHeldReveal.slice(18));followNativePost('wallpaper_session '+JSON.stringify({...receipt,generation:receipt.generation+1}));});
  assert.ok((await state()).mediaPreview.handoff,'wrong reveal generation cannot retire preview bitmap');
@@ -128,7 +128,7 @@ exports.verify=async({output,settings,baseline,fixture,checks,pages,until,envelo
  reference=await update(next);await checked('wallpaper.preview.update',{...reference,leaseId:lease.leaseId});
  const previewFailed=await until(async()=>{const value=await state();return value.mediaPreview?.error&&value.mediaPreview.handoff?.visible&&value.mediaPreview.handoff.workspaceReleased&&value.retiringControllers===0?value:null;},'failed preview retains static image after workspace exit');
  assert.equal(previewFailed.budget.contexts,1);assert.equal(previewFailed.budget.previewInstances,0);assert.equal(saved(),intent);
- assert.equal(previewFailed.budget.prepareCpuBytes,0);assert.equal(previewFailed.budget.resourceAllocations,2);
+ assert.equal(previewFailed.budget.prepareCpuBytes,0);assert.equal(previewFailed.budget.resourceAllocations,3,'桌面 GL 两个子额度加保留位图');
  assert.equal(previewFailed.budget.gpuBytes,previewFailed.glLimits.gpuBytes+previewFailed.mediaPreview.handoff.targetWidth*previewFailed.mediaPreview.handoff.targetHeight*8);
  await mode(null);await checked('wallpaper.preview.update',{...reference,leaseId:lease.leaseId});const retry=await preview('coast');assert.equal(retry.leaseId,lease.leaseId);
  const retryPage=await pageFor(retry.binding.sessionId);
@@ -149,7 +149,7 @@ exports.verify=async({output,settings,baseline,fixture,checks,pages,until,envelo
  await until(async()=>(await state()).mediaPreview?.handoff&&!((await state()).mediaPreview.handoff.captured),'preview capture pending at release');
  await checked('wallpaper.preview.release',{leaseId:lease.leaseId});await checked('wallpaper.draft.discard',reference);
  const drained=await until(async()=>{const value=await state();return !value.previewActive&&!value.retiringHandoffs&&value.retiringControllers===0?value:null;},'preview frame and source fully exit');
- assert.equal(drained.budget.sessionReservations,1);assert.equal(drained.budget.resourceAllocations,1);assert.equal(drained.budget.prepareCpuBytes,0);
+ assert.equal(drained.budget.sessionReservations,1);assert.equal(drained.budget.resourceAllocations,2);assert.equal(drained.budget.prepareCpuBytes,0);
  assert.equal(finalPage.isClosed(),true);
  checks.push({name:'failed updated preview keeps its bitmap and lease; updating again retries, release drains every snapshot and controller resource',previewFailed,retry,drained});
  assert.equal((await applyWallpaper(baseline,'follow-restore-baseline')).receipt.ok,true);await desktop('zodiac');
