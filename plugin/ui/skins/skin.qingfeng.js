@@ -22,8 +22,7 @@
 // ----
 //   · 只搬运/包裹已有节点 + 新建带 qf-*/bar-row1 类名的结构节点，不改任何业务 JS
 //     的状态与事件（原有监听器随节点一起走，不丢）；
-//   · 每个搬运的节点原位留一个 <span class="qf-anchor">，还原时 insertBefore 回
-//     锚点再删锚点，原顺序严格保持；
+//   · 品牌、账号按钮通过公共组件布局声明装配，原位恢复由外壳持有；
 //   · 视图切换联动用 MutationObserver（观察 .view 的 hidden），不 hook 业务代码；
 //   · 播放/取数经 document 上的 `Skins.request` 通用请求交给 app.js 分流。
 //
@@ -53,13 +52,13 @@
   var SKIN_ID = 'qingfeng';
 
   // 低层工具复用 skins/skin-shared.js（顺序加载保证它先于本模块）：
-  // 封面位图回填、带锚点的搬运与还原、自建节点登记。
+  // 封面位图回填、自建节点登记。
   var applyImg = window.SkinShared.applyImg;
 
   var mounted = false;
   // 布局装配句柄经外壳记录原位并严格逆还原（见 mount/unmount 的接线）。
-  // 布局装配走外壳（HertzShell.beginLayout，设计 §7.1/§7.2）；句柄在 mount
-  // 时建立、unmount 时 restore + release。
+  // 布局装配走外壳（HertzShell.assembleLayout，设计 §7.1/§7.2）；句柄在 mount
+  // 时建立、unmount 时 dispose。
   var layout = null;
   // 自建节点登记：卸载时统一 remove。
   var built = window.SkinShared.createBuilt();
@@ -215,14 +214,6 @@
   // 节点搬运（锚点还原）
   // -------------------------------------------------------------------------
 
-  function relocate(node, parent, before) {
-    return layout.move(node, parent, before);
-  }
-
-  function restoreMoves() {
-    layout.restore();
-  }
-
   function make(tag, cls, parent) {
     return built.make(tag, cls, parent);
   }
@@ -348,15 +339,7 @@
   // -------------------------------------------------------------------------
 
   function buildBrandGroup() {
-    var brand = $('.brand');
-    if (!brand) return;
-    // 品牌与设置按钮编成一组，整体贴左上角。brand 是壳层节点，走外壳布局
-    // 装配（§7.1）；组经 placeAtOriginal 顶替 brand 的原位 —— 卸载 restore
-    // 把 brand 送回记录原位，removeBuilt 再拆组 —— brand 与组解耦，
-    // 反复切换不丢节点（裸搬进自建组会让 removeBuilt 连带删掉 brand）。
-    var group = make('div', 'qf-brand-group');
-    relocate(brand, group);
-    layout.placeAtOriginal(brand, group);
+    var group = layout.region('brandGroup');
 
     var btn = make('button', 'qf-settings-btn', group);
     btn.type = 'button';
@@ -372,13 +355,12 @@
   }
 
   function buildAccount() {
-    var box = make('div', 'qf-account');
+    var box = layout.region('accountBox');
 
     // 头像直接搬顶栏那颗登录按钮（#online-account-btn）：它身上已经挂着
     // 业务监听器与在线角标，复制一个头像壳子出来只会得到一个不会更新的假头像。
     var face = byId('online-account-btn');
     if (face) {
-      relocate(face, box);
       refs.accountFace = face;
     }
 
@@ -391,7 +373,6 @@
     arrow.addEventListener('click', openStage);
     refs.accountArrow = arrow;
 
-    document.body.appendChild(box);
   }
 
   function openStage() {
@@ -2585,15 +2566,18 @@
 
   function mount() {
     if (mounted) return;
-    // beginLayout 先于一切 DOM 改动：挂载中途抛错时 unmount 仍能 restore 完整
-    // 归还（§7.3 失败回滚）。DOM 未就绪的早退要连带 release。
-    var layoutHandle = window.HertzShell.beginLayout('qingfeng');
-    layout = layoutHandle;
-    var app = $('.app');
-    if (!app) { window.HertzShell.releaseLayout('qingfeng'); layout = null; return; }
-    refs.rail = byId('rail');
-    refs.column = byId('column');
-    if (!refs.rail || !refs.column) return;
+    refs.rail = window.HertzShell.region('navigation');
+    refs.column = window.HertzShell.region('content');
+    layout = window.HertzShell.assembleLayout('qingfeng', {
+      regions: {
+        brandGroup: { className: 'qf-brand-group', parent: 'topbar', before: 'brand' },
+        accountBox: { className: 'qf-account', parent: 'floating' },
+      },
+      placements: [
+        { component: 'brand', target: 'brandGroup' },
+      ].concat(window.HertzShell.hasComponent('account')
+        ? [{ component: 'account', target: 'accountBox' }] : []),
+    });
 
     // 从第一次改动 DOM 起就允许卸载，挂载中途失败也能归还业务节点。
     mounted = true;
@@ -2711,8 +2695,7 @@
     // 表现为「设置里其它项都不见了」。
     if (window.HertzShell && window.HertzShell.isViewAttached('settings')) window.HertzShell.detachView('settings');
     showAll();
-    restoreMoves();
-    window.HertzShell.releaseLayout('qingfeng');
+    if (layout) layout.dispose();
     layout = null;
     if (refs.nav) refs.nav.removeEventListener('click', onNavClick);
     if (sheet.nav) sheet.nav.removeEventListener('click', onNavClick);

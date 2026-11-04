@@ -3,6 +3,10 @@
   "note": "check-* scripts that are deliberate manual/browser/diagnostic entry points. New unregistered check-* files fail scripts/check-scripts.js until they are either registered in check-frontend.js / a workflow or added here.",
   "scripts": [
     {
+      "script": "check-shell-layout-browser.js",
+      "purpose": "真实浏览器验证公共组件的独占装配、失败回滚、五皮肤切换、响应式释放及深浅主题按钮交互态；使用隔离静音服务与工作区前端资源。"
+    },
+    {
       "script": "check-stage-fluid-browser.js",
       "purpose": "Real Stage/StageControl/WebGL pixels, pause, host boundaries, 20 resource cycles, partial GPU failures and opaque DBX storage hydration/failure. Requires Playwright and Chrome."
     },

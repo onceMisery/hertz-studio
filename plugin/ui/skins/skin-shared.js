@@ -8,7 +8,7 @@
 //   · 自建节点登记（make/remove）：卸载时统一拆掉本皮肤新建的结构节点。
 //
 // 节点搬运（原 relocate/restore 锚点控制器）已于 R4 退役：壳层 chrome 与业务
-// 根的迁移统一走外壳受控装配（HertzShell.beginLayout / attachView，设计
+// 根的迁移统一走外壳声明式装配（HertzShell.assembleLayout / attachView，设计
 // §7.1/§7.2），外壳记录原位并严格逆还原，皮肤不再自持锚点与还原账本。
 //
 // 加载约定与其它前端模块一致：全局命名空间 + <script defer> 顺序加载，

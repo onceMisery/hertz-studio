@@ -2,9 +2,7 @@
 (function () {
   'use strict';
 
-  // 布局装配走外壳（HertzShell.beginLayout，设计 §7.1/§7.2）：外壳记录原位、
-  // 严格逆还原；响应式组（playerMoves）复用同一套。句柄在 mount 时建立、
-  // unmount 时 restore + release。
+  // 皮肤只声明公共组件的排列与专属容器，外壳执行装配和响应式还原。
   var layout = null;
   var built = window.SkinShared.createBuilt();
   var mounted = false;
@@ -281,15 +279,12 @@
     });
     listen(window.matchMedia('(max-width: 767px)'), 'change', function (event) {
       if (!event.matches) closeMobileMenu();
-      playerLayout.restore();
-      if (event.matches) movesPlayerTools();
       if (event.matches && mobileHome) refreshMobileHome();
     });
-    function movesPlayerTools() {
-      var volume = document.querySelector('#np-modal .np-volume');
-      if (volume) playerLayout.move(volume, byId('np-tools'));
-    }
-    if (window.matchMedia('(max-width: 767px)').matches) movesPlayerTools();
+    playerLayout = window.HertzShell.assembleLayout('orbit-player', {
+      media: '(max-width: 767px)',
+      placements: [{ component: 'nowPlaying.volume', target: 'nowPlaying.tools' }],
+    });
     listen(byId('search'), 'input', function () {
       if (window.TopSearch && window.TopSearch.kind() === 'local') { setMobileHome(false); syncMobileNav(); }
     });
@@ -512,23 +507,31 @@
   function mount() {
     if (mounted) return;
     mounted = true;
-    // 布局装配与响应式播放器组都登记在外壳（§7.1）；unmount 时 restore + release。
-    layout = window.HertzShell.beginLayout('orbit');
-    playerLayout = window.HertzShell.beginLayout('orbit-player');
-    var app = document.querySelector('.app');
-    var column = byId('column');
-    var stage = byId('stage');
-    var rail = byId('rail');
-    var main = make('div', 'orbit-main');
-    app.insertBefore(main, column);
-    layout.move(stage, main);
-    layout.move(column, main);
-    var brand = document.querySelector('.topbar .brand');
-    if (brand) layout.move(brand, rail, rail.firstChild);
+    layout = window.HertzShell.assembleLayout('orbit', {
+      regions: {
+        main: { className: 'orbit-main', parent: 'app', before: 'content' },
+        info: { className: 'orbit-info', parent: 'stage' },
+        turntable: { className: 'orbit-turntable', parent: 'stage' },
+        rig: { className: 'orbit-rig', parent: 'turntable' },
+        record: { tag: 'button', className: 'orbit-record-toggle', parent: 'rig' },
+      },
+      placements: [
+        { component: 'topbar', target: 'main' },
+        { component: 'stage', target: 'main' },
+        { component: 'content', target: 'main' },
+        { component: 'brand', target: 'navigation', first: true },
+        { component: 'stage.heading', target: 'info' },
+        { component: 'stage.title', target: 'info' },
+        { component: 'stage.artist', target: 'info' },
+        { component: 'stage.artwork', target: 'record' },
+      ],
+    });
+    var app = window.HertzShell.region('app');
+    var stage = window.HertzShell.region('stage');
+    var rail = window.HertzShell.region('navigation');
     var skinName = make('div', 'orbit-skin-name', null, '星轨');
-    rail.insertBefore(skinName, brand ? brand.nextSibling : rail.firstChild);
-    layout.move(document.querySelector('.topbar'), main, stage);
-    var topbar = document.querySelector('.topbar');
+    rail.insertBefore(skinName, rail.children[1] || null);
+    var topbar = window.HertzShell.region('topbar');
     refs.navToggle = button(topbar, 'orbit-nav-toggle', 'iconbtn orbit-nav-toggle', '收起导航栏', 'arrow-left', function () {
       var hidden = app.classList.toggle('orbit-nav-hidden');
       refs.navToggle.setAttribute('aria-expanded', String(!hidden));
@@ -542,10 +545,7 @@
     make('span', '', library, '音乐库');
     refs.libraryCount = make('strong', '', library);
 
-    var info = make('div', 'orbit-info', stage);
-    layout.move(stage.querySelector('.stage-head'), info);
-    layout.move(byId('now-title'), info);
-    layout.move(byId('now-artist'), info);
+    var info = layout.region('info');
     var actions = make('div', 'orbit-actions', info);
     refs.play = button(actions, 'orbit-play', 'btn primary orbit-play', '播放', 'play', function () {
       window.Skins.request('toggle-play');
@@ -567,15 +567,18 @@
       refs[entry[1]] = make('dd', '', cell);
     });
 
-    refs.turntable = make('div', 'orbit-turntable', stage);
-    refs.rig = make('div', 'orbit-rig', refs.turntable);
-    make('div', 'orbit-ground-shadow', refs.rig).setAttribute('aria-hidden', 'true');
+    refs.turntable = layout.region('turntable');
+    refs.rig = layout.region('rig');
+    refs.recordToggle = layout.region('record');
+    var shadow = make('div', 'orbit-ground-shadow', refs.rig);
+    shadow.setAttribute('aria-hidden', 'true');
+    refs.rig.insertBefore(shadow, refs.recordToggle);
     for (var z = 0; z < 14; z++) {
       var depth = make('div', 'orbit-depth', refs.rig);
       depth.style.transform = 'translateZ(' + z + 'px)';
       depth.setAttribute('aria-hidden', 'true');
+      refs.rig.insertBefore(depth, refs.recordToggle);
     }
-    refs.recordToggle = make('button', 'orbit-record-toggle', refs.rig);
     refs.recordToggle.id = 'orbit-record-toggle';
     refs.recordToggle.type = 'button';
     refs.recordToggle.title = '切换为中心封面';
@@ -586,7 +589,6 @@
       refs.recordToggle.setAttribute('aria-pressed', String(centered));
       refs.recordToggle.title = centered ? '切换为外圈封面' : '切换为中心封面';
     });
-    layout.move(stage.querySelector('.disc-wrap'), refs.recordToggle);
     var arm = make('div', 'orbit-tonearm', refs.rig);
     arm.setAttribute('aria-hidden', 'true');
     refs.next = button(refs.turntable, 'orbit-next', 'orbit-float orbit-next', '下一首', 'disc', function () {
@@ -666,8 +668,7 @@
     homeEpoch += 1;
     homeLoading = false;
     homeLoaded = false;
-    playerLayout.restore();
-    window.HertzShell.releaseLayout('orbit-player');
+    if (playerLayout) playerLayout.dispose();
     playerLayout = null;
     listeners.forEach(function (remove) { remove(); });
     listeners = [];
@@ -677,8 +678,7 @@
     resetTilt();
     if (refs.libraryHead) refs.libraryHead.classList.remove('orbit-filters-open');
     if (refs.libraryTools) refs.libraryTools.removeAttribute('id');
-    layout.restore();
-    window.HertzShell.releaseLayout('orbit');
+    if (layout) layout.dispose();
     layout = null;
     built.remove();
     refs = {};

@@ -21,25 +21,19 @@
   --ui-content-surface: color-mix(in srgb, var(--panel-solid) 92%, transparent);
   --ui-control-surface: color-mix(in srgb, var(--text) 4%, var(--panel-solid));
 
-  & .btn {
-    min-height: var(--ui-control-h);
-    padding: 7px 14px;
-    border: 1px solid var(--field-border);
-    border-radius: var(--ui-control-r);
-    background: var(--ui-control-surface);
-    color: var(--text);
-    font-size: 13px;
-    font-weight: 500;
-    line-height: 1.4;
-    box-shadow: none;
-    backdrop-filter: none;
-    transition: background-color 160ms var(--ease-out), border-color 160ms var(--ease-out), color 160ms var(--ease-out);
-  }
-  & .btn:hover { background: var(--hover); border-color: var(--field-border-strong); box-shadow: none; }
-  & .btn.primary { background: var(--accent); border-color: transparent; color: var(--accent-ink); box-shadow: none; }
-  & .btn.primary:hover { background: color-mix(in srgb, var(--accent) 90%, var(--panel-solid)); color: var(--accent-ink); }
-  & .btn:active { transform: translateY(1px); }
-  & .btn:disabled { transform: none; }
+  /* 皮肤仅给公共按钮的默认参数；touch/flat 等显式变体持有自己的度量和状态。 */
+  --button-height: var(--ui-control-h);
+  --button-padding: 7px 14px;
+  --button-radius: var(--ui-control-r);
+  --button-background: var(--ui-control-surface);
+  --button-color: var(--text);
+  --button-font-size: 13px;
+  --button-weight: 500;
+  --button-line-height: 1.4;
+  --button-primary-shadow: none;
+  --button-hover-background: var(--hover);
+  --button-primary-hover-background: color-mix(in srgb, var(--accent) 90%, var(--panel-solid));
+  --button-active-transform: translateY(1px);
 
   & .col-head { align-items: center; gap: 16px; }
   & .col-tools { align-items: center; gap: 8px; }
@@ -136,9 +130,6 @@
     & .home-primary { gap: 12px; padding: 12px; }
     & .home-quote-text { font-size: 14px; }
     & .home-link { padding: 12px; }
-  }
-  @media (prefers-reduced-motion: reduce) {
-    & .btn { transition: none; }
   }
 }
 

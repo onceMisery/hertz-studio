@@ -375,8 +375,8 @@
   与服务断开连接 — 正在自动重连，播放控制暂时不可用
 </div>
 
-<header class="topbar">
-  <div class="brand" aria-label="Hertz Studio"><span class="brand-mark" aria-hidden="true">h<span>z</span></span><span class="brand-wordmark" aria-hidden="true"><strong>Hertz</strong><small>STUDIO</small></span></div>
+<header class="topbar" data-shell-component="topbar" data-shell-region="topbar">
+  <div class="brand" data-shell-component="brand" aria-label="Hertz Studio"><span class="brand-mark" aria-hidden="true">h<span>z</span></span><span class="brand-wordmark" aria-hidden="true"><strong>Hertz</strong><small>STUDIO</small></span></div>
 
   <div class="topsearch">
     <svg class="si" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-search"/></svg>
@@ -392,7 +392,7 @@
   <!-- 顶栏只留常驻动作：状态、最小化、三维舞台、更多、头像（皮肤注入的右侧折叠也在这一簇）。
        三维空间 / 主题色 / 界面皮肤 / 退出服务 收进 #top-more-menu——它们要么低频，要么
        一键就能关掉整个服务，摊在这一排只会让误点有机会发生。 -->
-  <div class="top-right">
+  <div class="top-right" data-shell-region="topbar.actions">
     <span id="demo-badge" class="badge-demo" hidden>演示模式</span>
     <div id="conn" class="conn">连接中…</div>
     <button id="capsule-entry" class="iconbtn" title="最小化为胶囊" aria-label="最小化为胶囊播放器" aria-controls="capsule">
@@ -453,7 +453,7 @@
     <div class="skin-menu" id="skin-menu" role="menu" aria-label="界面皮肤" hidden></div>
 
     <!-- edition:full -->
-    <button id="online-account-btn" class="iconbtn" title="登录音源" aria-label="登录在线音源账号" aria-haspopup="dialog">
+    <button id="online-account-btn" data-shell-component="account" class="iconbtn" title="登录音源" aria-label="登录在线音源账号" aria-haspopup="dialog">
       <span class="iconbtn-face" id="online-account-face">
         <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-user"/></svg>
         <span id="online-account-dot" class="icon-dot" hidden></span>
@@ -464,10 +464,10 @@
   </div>
 </header>
 
-<div class="app">
+<div class="app" data-shell-region="app">
 
   <!-- 导航轨：四个一级目的地，选中态常驻，不再依赖记忆 -->
-  <nav class="rail" id="rail" aria-label="主导航">
+  <nav class="rail" id="rail" data-shell-component="navigation" data-shell-region="navigation" aria-label="主导航">
     <button type="button" class="rail-toggle" id="rail-toggle" aria-label="收缩导航" title="收缩导航" aria-controls="rail" aria-expanded="true" hidden>
       <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-chevron-down"/></svg>
       <span>导航</span>
@@ -513,16 +513,16 @@
   </nav>
 
   <!-- 内容列：一个时间只呈现一个视图 -->
-  <section class="column" id="column">
+  <section class="column" id="column" data-shell-component="content" data-shell-region="content">
 
     <!-- 曲库 -->
     <div class="view" id="view-library">
-      <div class="col-head">
+      <div class="col-head" data-shell-region="library.header">
         <div class="col-head-left">
           <h1 class="col-title">曲库</h1>
           <span id="lib-count" class="count">—</span>
         </div>
-        <div class="col-tools">
+        <div class="col-tools" data-shell-component="library.toolbar">
           <select id="lib-artist-filter" aria-label="按歌手筛选">
             <option value="">全部歌手</option>
           </select>
@@ -1923,8 +1923,8 @@
   </section>
 
   <!-- 演出舞台：整屏的视觉重心 -->
-  <aside class="stage" id="stage" data-mode="karaoke">
-    <div class="stage-head">
+  <aside class="stage" id="stage" data-shell-component="stage" data-shell-region="stage" data-mode="karaoke">
+    <div class="stage-head" data-shell-component="stage.heading">
       <span class="stage-kicker">正在播放</span>
       <div class="stage-modes" id="stage-modes" role="group" aria-label="歌词展示模式">
         <button class="stage-mode" data-mode="cover" aria-pressed="false"
@@ -1946,13 +1946,13 @@
     </div>
     <button type="button" class="emotion-entry" data-emotion-open aria-haspopup="dialog" aria-controls="emotion-dialog">情绪字体 <span>字形随情绪起伏</span></button>
 
-    <div class="disc-wrap">
+    <div class="disc-wrap" data-shell-component="stage.artwork">
       <div class="disc is-empty" id="cover"></div>
       <div class="disc-ring" id="disc-ring" aria-hidden="true"></div>
     </div>
 
-    <div class="stage-title" id="now-title">未在播放</div>
-    <div class="stage-artist" id="now-artist">从左侧曲库里挑一首</div>
+    <div class="stage-title" id="now-title" data-shell-component="stage.title">未在播放</div>
+    <div class="stage-artist" id="now-artist" data-shell-component="stage.artist">从左侧曲库里挑一首</div>
 
     <div class="stage-progress">
       <div class="stage-times"><span id="stage-time">0:00 / 0:00</span></div>
@@ -1970,12 +1970,12 @@
   <div id="emotion-dialog-content"></div>
 </dialog>
 
-<footer class="bar" id="playback-bar">
+<footer class="bar" id="playback-bar" data-shell-component="player" data-shell-region="player">
   <!-- 空态不写占位符：原来这里放了一个 em dash「—」，在满屏 SVG 图标中间
        它看起来像一个坏掉的图标（笔画、尺寸、风格都和旁边的图标对不上）。
        没有曲目时这一格就该是空的，标题由 app.js 在载入曲目后写入。 -->
   <!-- 正在播放区：点开底部播放控制弹窗（旧 stage-btn 移除后的接替入口）。 -->
-  <div class="bar-summary" id="bar-summary">
+  <div class="bar-summary" id="bar-summary" data-shell-component="player.summary">
     <div class="bar-track" id="bar-track" role="button" tabindex="0" title="正在播放"
        aria-label="展开播放页">
       <span id="bar-art" class="bar-art" aria-hidden="true"></span>
@@ -1988,7 +1988,7 @@
     </button>
   </div>
 
-  <div class="bar-controls">
+  <div class="bar-controls" data-shell-region="player.controls">
     <button id="prev" class="ctrl" title="上一首" aria-label="上一首">
       <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-prev"/></svg>
     </button>
@@ -2004,7 +2004,7 @@
     </button>
   </div>
 
-  <div class="bar-progress">
+  <div class="bar-progress" data-shell-component="player.progress">
     <span id="bar-time" class="bar-time">0:00 / 0:00</span>
     <div class="progress-wrap">
       <div class="progress-ghost" id="progress-ghost"></div>
@@ -2014,14 +2014,14 @@
 
   <div class="bar-right">
     <button id="bar-queue" class="ctrl" type="button" title="播放队列" aria-label="播放队列"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-queue"/></svg></button>
-    <button id="bar-desktop-settings" class="ctrl" type="button" title="桌面歌词与壁纸" aria-label="桌面歌词与壁纸" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-desktop"/></svg></button>
-    <button id="bar-player-expand" class="ctrl" type="button" title="展开播放页" aria-label="展开播放页"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-expand"/></svg></button>
+    <button id="bar-desktop-settings" data-shell-component="player.desktop" class="ctrl" type="button" title="桌面歌词与壁纸" aria-label="桌面歌词与壁纸" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-desktop"/></svg></button>
+    <button id="bar-player-expand" data-shell-component="player.expand" class="ctrl" type="button" title="展开播放页" aria-label="展开播放页"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-expand"/></svg></button>
     <button id="sleep-timer" class="btn-pill st-pill" title="睡眠定时器" aria-label="睡眠定时器" aria-pressed="false">
       <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-timer"/></svg>
       <span id="sleep-timer-label" class="st-label" hidden></span>
     </button>
-    <button id="mode" class="btn-pill" title="播放模式">列表循环</button>
-    <div class="bar-volume">
+    <button id="mode" data-shell-component="player.mode" class="btn-pill" title="播放模式">列表循环</button>
+    <div class="bar-volume" data-shell-component="player.volume">
       <span class="hint">音量</span>
       <input id="volume" type="range" min="0" max="100" value="80" aria-label="音量">
     </div>
@@ -2446,12 +2446,12 @@
       </button>
     </div>
 
-    <div class="np-volume">
+    <div class="np-volume" data-shell-component="nowPlaying.volume">
       <button type="button" id="np-mute" class="np-ctrl" title="静音" aria-label="静音"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-volume"/></svg></button>
       <input id="np-volume" type="range" min="0" max="100" value="80" aria-label="音量">
     </div>
     </footer>
-    <section id="np-tools" class="np-tools" aria-label="播放工具" hidden>
+    <section id="np-tools" data-shell-region="nowPlaying.tools" class="np-tools" aria-label="播放工具" hidden>
       <header><h2>播放工具</h2><button type="button" id="np-tools-close" class="np-ctrl" title="关闭工具" aria-label="关闭工具"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-close"/></svg></button></header>
       <div class="np-tool-actions">
         <button type="button" id="np-eq" class="btn">均衡器</button>

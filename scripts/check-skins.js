@@ -705,9 +705,9 @@ function checkLiunianNavigation() {
     '键盘焦点环画在盒内（容器是滚动容器，外扩的环会被裁掉）');
 
   // 3) 右栏包裹器：上搜索面板 + 下舞台。
-  ok(/make\('div', 'ln-right', app\)/.test(LIUNIAN_JS), '创建右栏包裹器');
+  ok(/right: \{ className: 'ln-right', parent: 'app' \}/.test(LIUNIAN_JS), '声明右栏包裹区域');
   ok(/buildSearchPanel\(refs\.rightWrap\)/.test(LIUNIAN_JS), '搜索面板挂入右栏上部');
-  ok(/relocate\(stage, refs\.rightWrap\)/.test(LIUNIAN_JS), '舞台搬入右栏下部（带锚点可还原）');
+  ok(/component: 'stage', target: 'right'/.test(LIUNIAN_JS), '舞台通过公共组件契约装配到右栏');
   ok(/\[data-skin="liunian"\]\s+\.ln-right\s*\{[\s\S]{0,220}?display:\s*flex/.test(LIUNIAN),
     '右栏包裹器为纵向 flex 分区');
 
@@ -938,8 +938,8 @@ function checkLiunianSettingsNav() {
   ok(/function releaseGroups/.test(LIUNIAN_JS)
     && /if \(entry\.group\) entry\.group\.hidden = false/.test(LIUNIAN_JS),
     '卸载时把全部分组的 hidden 摘掉（切回其它皮肤设置项完整）');
-  ok(/releaseGroups\(\);\s*\n\s*restoreMoves\(\);/.test(LIUNIAN_JS),
-    'releaseGroups 在 restoreMoves 之前（先摘 hidden 再搬回原位）');
+  ok(/releaseGroups\(\);\s*\n\s*if \(layout\) layout\.dispose\(\);/.test(LIUNIAN_JS),
+    '先摘分组 hidden 再释放布局');
 
   // 7) 焦点：分类切换后焦点不能掉到 body；重开浮层要能找回当前类的分组。
   ok(/nav\.addEventListener\('click'/.test(LIUNIAN_JS)
@@ -1086,8 +1086,12 @@ function checkWiring() {
     'skin.liunian.js 排在 app.js 之前');
   ok(/Skins\.registerLifecycle\(SKIN_ID, \{ mount: mount, unmount: unmount \}\)/.test(LIUNIAN_JS),
     '重编排层向 Skins 注册生命周期，由宿主排序挂卸载');
-  ok(/beginLayout\('liunian'\)/.test(LIUNIAN_JS) && /releaseLayout\('liunian'\)/.test(LIUNIAN_JS),
-    '搬运经外壳布局装配登记与释放（切走皮肤可严格还原，§7.1）');
+  ok(/assembleLayout\('liunian',/.test(LIUNIAN_JS) && /layout\.dispose\(\)/.test(LIUNIAN_JS),
+    '皮肤声明公共组件布局并对称释放（§7.1）');
+  for (const [name, source] of [['流年', LIUNIAN_JS], ['清风', QINGFENG_JS], ['星轨', ORBIT_JS]]) {
+    ok(!/\b(?:beginLayout|placeAtOriginal|restoreMoves|relocate)\s*\(|\blayout\.move\s*\(/.test(source),
+      name + '不再提供任意节点搬运接口');
+  }
   ok(/MutationObserver/.test(LIUNIAN_JS),
     '视图联动用 MutationObserver');
 
@@ -1993,8 +1997,8 @@ function checkQingfengSettings() {
     'hideAll 之后紧跟着露出目标组');
   ok(!/relocate\(group/.test(QINGFENG_JS) && !/relocate\(entry\.group/.test(QINGFENG_JS),
     '分组节点没有进 moves（没有第二套锚点要维护）');
-  ok(/showAll\(\);\s*\n\s*restoreMoves\(\);/.test(QINGFENG_JS),
-    'showAll 在 restoreMoves 之前（先摘 hidden 再搬回原位）');
+  ok(/showAll\(\);\s*\n\s*if \(layout\) layout\.dispose\(\);/.test(QINGFENG_JS),
+    '先摘分组 hidden 再释放布局');
 
   // 10) hidden 归属：设置视图的 hidden 有两条写入路径（浮层自己 + app.js 的
   //     setView）。开着或退场期间必须以浮层为准。
@@ -2064,7 +2068,7 @@ function checkQingfengWiring() {
   // 重编排层的挂载机制：不主动 hook 业务代码，挂在 skin:changed 上。
   ok(/Skins\.registerLifecycle\(SKIN_ID, \{ mount: mount, unmount: unmount \}\)/.test(QINGFENG_JS),
     '重编排层向 Skins 注册生命周期，由宿主排序挂卸载');
-  ok(/qf-anchor/.test(QINGFENG_JS), '搬运节点带锚点（切走皮肤可还原）');
+  ok(/assembleLayout\('qingfeng',/.test(QINGFENG_JS) && /layout\.dispose\(\)/.test(QINGFENG_JS), '清风声明式装配与释放对称');
   ok(/MutationObserver/.test(QINGFENG_JS), '视图联动用 MutationObserver');
   ok(/function unmount/.test(QINGFENG_JS) && /removeBuilt\(\)/.test(QINGFENG_JS),
     '卸载时拆掉自建节点');

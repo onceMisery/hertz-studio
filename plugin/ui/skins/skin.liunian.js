@@ -36,8 +36,8 @@
   var SKIN_ID = 'liunian';
 
   var mounted = false;
-  // 布局装配走外壳（HertzShell.beginLayout，设计 §7.1/§7.2）：外壳记录原位、
-  // 严格逆还原。句柄在 mount 时建立、unmount 时 restore + release。
+  // 布局装配走外壳（HertzShell.assembleLayout，设计 §7.1/§7.2）：外壳记录原位、
+  // 严格逆还原。句柄在 mount 时建立、unmount 时 dispose。
   var layout = null;
   // 自建节点登记：卸载时统一 remove。
   var built = window.SkinShared.createBuilt();
@@ -141,18 +141,6 @@
   function transport() { return window.VMusicTransport; }
 
   // -------------------------------------------------------------------------
-  // 节点搬运（锚点还原）
-  // -------------------------------------------------------------------------
-
-  function relocate(node, parent, before) {
-    return layout.move(node, parent, before);
-  }
-
-  function restoreMoves() {
-    layout.restore();
-  }
-
-  // -------------------------------------------------------------------------
   // 新建结构节点
   // -------------------------------------------------------------------------
 
@@ -168,27 +156,6 @@
   // 播放卡重排
   // -------------------------------------------------------------------------
 
-  function rearrangeBar(bar) {
-    // 行1：唱片（变方封面）+ 曲目信息
-    var row1 = make('div', 'bar-row1');
-    relocate($('.disc-wrap', refs.stage), row1);
-    relocate(byId('bar-summary'), row1);
-    bar.insertBefore(row1, bar.firstChild);
-
-    // 行2：进度（bar-progress 提到 bar-controls 之前；track 移走后 controls 在首）
-    var controls = $('.bar-controls', bar);
-    var progress = $('.bar-progress', bar);
-    // 全部走 relocate：原位留锚点，unmount 经 restoreMoves 严格回位
-    // （直接 DOM 操作会让切走皮肤后 progress/controls 顺序错乱）。
-    if (progress && controls) relocate(progress, bar, controls);
-
-    // 行3：模式按钮进 controls 最左，音量进 controls 最右（VMusic 控制序）。
-    var mode = byId('mode');
-    var volume = $('.bar-volume', bar);
-    if (mode) relocate(mode, controls, controls.firstChild);
-    if (volume) relocate(volume, controls);
-  }
-
   function setCapsule(compact, silent) {
     refs.bar.classList.toggle('ln-capsule', compact);
     refs.capsuleBtn.textContent = compact ? '展开' : '收起';
@@ -201,12 +168,11 @@
   }
 
   function buildPlayerChrome() {
-    var heading = make('div', 'ln-player-heading');
-    refs.bar.insertBefore(heading, refs.bar.firstChild);
-    make('span', 'ln-player-label', heading).textContent = '此刻，听见';
-    var actions = make('div', 'ln-player-actions', heading);
-    relocate(byId('bar-desktop-settings'), actions);
-    relocate(byId('bar-player-expand'), actions);
+    var heading = layout.region('playerHeading');
+    var label = make('span', 'ln-player-label', heading);
+    label.textContent = '此刻，听见';
+    heading.prepend(label);
+    var actions = layout.region('playerActions');
     var stageButton = make('button', 'ln-stage-entry', actions);
     stageButton.type = 'button';
     stageButton.textContent = '凝彩舞台 ↗';
@@ -277,12 +243,10 @@
   }
 
   function buildHomeChrome() {
-    var tools = $('#view-library .col-tools');
-    if (tools) {
-      var wrap = make('details', 'ln-library-tools', tools.parentNode);
-      make('summary', '', wrap).textContent = '曲库管理';
-      relocate(tools, wrap);
-    }
+    var wrap = layout.region('libraryTools');
+    var summary = make('summary', '', wrap);
+    summary.textContent = '曲库管理';
+    wrap.prepend(summary);
     var dailyHead = $('#daily-strip .daily-head');
     if (dailyHead) {
       var more = make('button', 'ln-daily-more', dailyHead);
@@ -353,6 +317,7 @@
 
   function buildSearchPanel(host) {
     var sp = make('section', 'ln-sp', host);
+    host.prepend(sp);
 
     // 第一行：检索范围
     var scopeBar = make('div', 'ln-sp-scope', sp);
@@ -777,7 +742,7 @@
   // 流年把「设置」从中栏视图改成浮层：#view-settings 整个装配进 .ln-modal
   // 的 .ln-set-pane。业务根的迁移走外壳受控装配（HertzShell.attachView，设计
   // §7.2：外壳记录原位、detach 严格还原），业务节点与事件原样跟着走，设置项
-  // 的增删改完全不用两处维护。其余布局节点（唱片/播放卡/舞台）仍走 relocate。
+  // 的增删改完全不用两处维护。唱片、播放卡与舞台使用公共组件布局声明。
   //
   // 层级：浮层挂在 body 末尾、z-index 高于所有底层面板（.app 6 / np 96 /
   // stage3d 90 / online 弹窗 100），因此舞台、搜索面板、播放卡都在它之下，
@@ -1076,15 +1041,31 @@
 
   function mount() {
     if (mounted) return;
-    var rail = byId('rail');
-    var column = byId('column');
-    var stage = byId('stage');
-    var bar = $('.bar');
-    var app = $('.app');
-    if (!rail || !column || !stage || !bar || !app) return; // DOM 未就绪
-    // beginLayout 先于一切 DOM 改动：挂载中途抛错时 unmount 仍能 restore 完整
-    // 归还（§7.3 失败回滚）。DOM 未就绪的早退在它之前，不占登记。
-    layout = window.HertzShell.beginLayout('liunian');
+    var rail = window.HertzShell.region('navigation');
+    var column = window.HertzShell.region('content');
+    var stage = window.HertzShell.region('stage');
+    var bar = window.HertzShell.region('player');
+    layout = window.HertzShell.assembleLayout('liunian', {
+      regions: {
+        right: { className: 'ln-right', parent: 'app' },
+        playerRow: { className: 'bar-row1', parent: 'player', first: true },
+        playerHeading: { className: 'ln-player-heading', parent: 'player', first: true },
+        playerActions: { className: 'ln-player-actions', parent: 'playerHeading' },
+        libraryTools: { tag: 'details', className: 'ln-library-tools', parent: 'library.header' },
+      },
+      placements: [
+        { component: 'stage', target: 'right' },
+        { component: 'player', target: 'content', first: true },
+        { component: 'stage.artwork', target: 'playerRow' },
+        { component: 'player.summary', target: 'playerRow' },
+        { component: 'player.progress', target: 'player', before: 'player.controls' },
+        { component: 'player.mode', target: 'player.controls', first: true },
+        { component: 'player.volume', target: 'player.controls' },
+        { component: 'player.desktop', target: 'playerActions' },
+        { component: 'player.expand', target: 'playerActions' },
+        { component: 'library.toolbar', target: 'libraryTools' },
+      ],
+    });
 
     mounted = true;
     refs.rail = rail;
@@ -1093,17 +1074,12 @@
     refs.bar = bar;
 
     // 1) 右栏包裹器：上搜索面板 + 下舞台
-    refs.rightWrap = make('div', 'ln-right', app);
+    refs.rightWrap = layout.region('right');
 
     // 2) 搜索面板（先建，位于包裹器顶部）
     buildSearchPanel(refs.rightWrap);
 
-    // 3) 舞台搬入包裹器下部（原位留锚点）
-    relocate(stage, refs.rightWrap);
-
-    // 4) 播放卡搬进中栏最前并重排；再建胶囊导航（导航在播放卡之上）
-    relocate(bar, column, column.firstChild);
-    rearrangeBar(bar);
+    // 舞台与播放卡已按声明装配；只添加皮肤专属呈现与交互。
     buildPlayerChrome();
     buildNavigation();
     buildHomeChrome();
@@ -1157,8 +1133,7 @@
     // 一起删掉。
     if (window.HertzShell && window.HertzShell.isViewAttached('settings')) window.HertzShell.detachView('settings');
     releaseGroups();
-    restoreMoves();
-    window.HertzShell.releaseLayout('liunian');
+    if (layout) layout.dispose();
     layout = null;
     refs.bar.classList.remove('ln-capsule');
     delete refs.column.dataset.lnView;

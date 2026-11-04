@@ -2364,8 +2364,8 @@ body.qf-stage-dragging [data-skin="qingfeng"] .stage,
   outline-offset: var(--skin-focus-offset);
 }
 
-[data-skin="qingfeng"] .btn {
-  border-radius: var(--r-pill);
+:root[data-skin="qingfeng"] {
+  --button-radius: var(--r-pill);
 }
 
 [data-skin="qingfeng"] .iconbtn {

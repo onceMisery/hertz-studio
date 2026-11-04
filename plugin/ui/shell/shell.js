@@ -25,6 +25,8 @@
   var generation = 0;
   var initialized = false;
   var regions = null;
+  var components = new Map();
+  var componentOwners = new Map();
 
   function registerView(def) {
     if (!def || typeof def.id !== 'string' || !def.el) {
@@ -51,6 +53,20 @@
     settingsEntry = options.settingsEntry || null;
     (options.views || []).forEach(registerView);
     regions = { floating: createFloatingRegion() };
+    // HTML 只在初始化时声明公共组件根与装配区域。皮肤不能登记任意节点，
+    // 也不能传选择器；组件内部的 DOM 形状不属于布局接口。
+    document.querySelectorAll('[data-shell-component], [data-shell-region]').forEach(function (node) {
+      var component = node.getAttribute('data-shell-component');
+      var slot = node.getAttribute('data-shell-region');
+      if (component) {
+        if (components.has(component)) throw new Error('公共组件重复：' + component);
+        components.set(component, node);
+      }
+      if (slot) {
+        if (Object.prototype.hasOwnProperty.call(regions, slot)) throw new Error('公共区域重复：' + slot);
+        regions[slot] = node;
+      }
+    });
     initialized = true;
   }
 
@@ -99,70 +115,171 @@
 
   function isViewAttached(id) { return attachedViews.has(id); }
 
-  // 布局装配（设计 §7.1/§7.2）：皮肤以受控步骤声明壳层 chrome（舞台、内容列、
-  // 顶栏及其内部件）的排列——这就是布局描述的运行形态；外壳记录每一步的原位
-  // （父节点 + 插入点）并在 restore 时严格逆还原（LIFO），皮肤不再自持锚点与
-  // 还原账本。restore 不销毁装配组：响应式重排（星轨的播放器音量条）先 restore
-  // 再 move 复用同一组。已登记视图的根节点拒收——业务根只能走 attachView。
+  // 声明式布局：regions 只描述由外壳创建的容器，placements 只引用公共组件
+  // 和区域的名字。没有 move(node, parent) 或 selector 回门。区域为容器；组件
+  // 为整体迁移单元（包括显式公开的 artwork/volume 等子组件），业务状态不重建。
   var layoutAssemblies = new Map();
-  function beginLayout(id) {
+  function assembleLayout(id, description) {
     if (!initialized) throw new Error('外壳尚未初始化');
+    if (typeof id !== 'string' || !id) throw new TypeError('布局需要 id');
     if (layoutAssemblies.has(id)) throw new Error('布局装配已存在：' + id);
+    description = description || {};
+    // 外壳持有不可变的布局值。不能保存调用方数组引用，否则媒体切换时调用方
+    // 可把已认领的组件换成另一组件，绕过独占检查与还原账本。
+    function copySpec(value, fields) {
+      if (!value || typeof value !== 'object' || value.nodeType || Array.isArray(value)) {
+        throw new TypeError('布局项必须是字段描述');
+      }
+      var copy = {};
+      Object.keys(value).forEach(function (key) {
+        if (!Object.prototype.hasOwnProperty.call(fields, key) || typeof value[key] !== fields[key]) {
+          throw new TypeError('不支持的布局字段：' + key);
+        }
+        copy[key] = value[key];
+      });
+      return Object.freeze(copy);
+    }
+    var sourceRegions = description.regions || {};
+    if (typeof sourceRegions !== 'object' || sourceRegions.nodeType || Array.isArray(sourceRegions)) throw new TypeError('regions 必须是描述表');
+    var definitions = Object.create(null);
+    Object.keys(sourceRegions).forEach(function (name) {
+      definitions[name] = copySpec(sourceRegions[name], { tag: 'string', className: 'string', parent: 'string', before: 'string', first: 'boolean' });
+    });
+    if (description.placements !== undefined && !Array.isArray(description.placements)) throw new TypeError('placements 必须是数组');
+    var placements = (description.placements || []).map(function (item) {
+      return copySpec(item, { component: 'string', target: 'string', before: 'string', first: 'boolean' });
+    });
+    var mediaQuery = description.media;
+    if (mediaQuery !== undefined && typeof mediaQuery !== 'string') throw new TypeError('media 必须是查询字符串');
+    var local = Object.create(null);
+    var created = [];
     var records = [];
-    var handle = {
-      id: id,
-      move: function (node, parent, before) {
-        if (!node || !parent || node.nodeType !== 1 || parent.nodeType !== 1) {
-          throw new TypeError('布局装配只收元素节点与目标容器');
+    var claimed = new Set();
+    var active = false;
+    var disposed = false;
+    var media = null;
+
+    function target(name) {
+      if (typeof name !== 'string') throw new TypeError('区域必须使用名称');
+      return local[name] || region(name);
+    }
+    function insert(node, parent, spec) {
+      if (spec.before) {
+        if (typeof spec.before !== 'string') throw new TypeError('插入点必须使用名称');
+        var before = local[spec.before] || components.get(spec.before) || regions[spec.before];
+        if (!before || before.parentNode !== parent) throw new Error('插入点不属于目标区域：' + spec.before);
+        parent.insertBefore(node, before);
+      } else if (spec.first) parent.insertBefore(node, parent.firstChild);
+      else parent.appendChild(node);
+    }
+    function validatePlacements() {
+      // 按声明顺序模拟父关系，未激活的媒体分支也必须通过相同校验。
+      var parents = new Map();
+      function parentOf(node) { return parents.has(node) ? parents.get(node) : node.parentNode; }
+      placements.forEach(function (item) {
+        var node = components.get(item.component);
+        var parent = target(item.target);
+        for (var ancestor = parent; ancestor; ancestor = parentOf(ancestor)) {
+          if (ancestor === node) throw new Error('布局不能形成组件循环：' + item.component);
         }
-        var values = views.values();
-        var entry;
-        while ((entry = values.next()).done === false) {
-          if (entry.value.el === node) {
-            throw new Error('业务视图根须经 attachView 装配（' + entry.value.id + '）');
-          }
+        if (item.before) {
+          if (typeof item.before !== 'string') throw new TypeError('插入点必须使用名称');
+          var before = local[item.before] || components.get(item.before) || regions[item.before];
+          if (!before || parentOf(before) !== parent) throw new Error('插入点不属于目标区域：' + item.before);
         }
-        records.push({ node: node, parent: node.parentNode, next: node.nextSibling });
-        if (before) parent.insertBefore(node, before);
-        else parent.appendChild(node);
-        return node;
-      },
-      restore: function () {
-        var count = 0;
-        for (var i = records.length - 1; i >= 0; i -= 1) {
-          var record = records[i];
-          if (record.parent) {
-            if (record.next && record.next.parentNode === record.parent) record.parent.insertBefore(record.node, record.next);
-            else record.parent.appendChild(record.node);
-          }
-          count += 1;
+        parents.set(node, parent);
+      });
+    }
+    function restore() {
+      // 每个组件在原位留下真实节点锚点，原兄弟也参加装配时仍可精确还原。
+      // 锚点只由外壳持有，皮肤看不到还原账本。
+      for (var i = records.length - 1; i >= 0; i -= 1) {
+        var record = records[i];
+        if (record.anchor.parentNode) record.anchor.parentNode.insertBefore(record.node, record.anchor);
+      }
+      active = false;
+    }
+    function apply() {
+      try {
+        placements.forEach(function (item) { insert(components.get(item.component), target(item.target), item); });
+        active = true;
+      } catch (error) {
+        restore();
+        throw error;
+      }
+    }
+    function updateMedia() {
+      if (disposed) return;
+      if (!media || media.matches) {
+        if (!active) {
+          try { validatePlacements(); apply(); }
+          catch (error) { dispose(); throw error; }
         }
-        records.length = 0;
-        return count;
-      },
-      // 把 container 放到 node 被搬走前所占的原位（本装配组记录的父节点与
-      // 插入点）。用于「节点包进自建容器、容器顶替原位」的组包场景：
-      // restore 时节点按记录回到原位、自建容器另经登记工厂拆毁，二者解耦。
-      placeAtOriginal: function (node, container) {
-        if (!container || container.nodeType !== 1) throw new TypeError('placeAtOriginal 需要元素容器');
-        for (var i = records.length - 1; i >= 0; i -= 1) {
-          if (records[i].node === node) {
-            var record = records[i];
-            if (record.next && record.next.parentNode === record.parent) record.parent.insertBefore(container, record.next);
-            else if (record.parent) record.parent.appendChild(container);
-            return container;
-          }
-        }
-        throw new Error('节点不在本装配组的记录里');
-      },
-      size: function () { return records.length; },
-    };
-    layoutAssemblies.set(id, handle);
-    return handle;
+      } else if (active) restore();
+    }
+    function dispose() {
+      if (disposed) return;
+      disposed = true;
+      if (media) media.removeEventListener('change', updateMedia);
+      restore();
+      records.forEach(function (record) { record.anchor.remove(); });
+      created.reverse().forEach(function (node) { node.remove(); });
+      claimed.forEach(function (name) { componentOwners.delete(name); });
+      layoutAssemblies.delete(id);
+    }
+
+    // 先验证全部组件及所有权；再创建区域与锚点。任何失败都撤销本次装配。
+    placements.forEach(function (item) {
+      if (!item || typeof item.component !== 'string' || !components.has(item.component)) {
+        throw new Error('未公开的布局组件：' + (item && item.component));
+      }
+      if (claimed.has(item.component) || componentOwners.has(item.component)) {
+        throw new Error('组件已被其他布局持有：' + item.component);
+      }
+      claimed.add(item.component);
+    });
+    claimed.forEach(function (name) { componentOwners.set(name, id); });
+    try {
+      claimed.forEach(function (name) {
+        var node = components.get(name);
+        var anchor = document.createComment('shell-component:' + name);
+        node.parentNode.insertBefore(anchor, node);
+        records.push({ node: node, anchor: anchor });
+      });
+      Object.keys(definitions).forEach(function (name) {
+        if (regions[name] || components.has(name)) throw new Error('局部区域不得覆盖公共名称：' + name);
+        var def = definitions[name];
+        if (!def || typeof def !== 'object' || def.nodeType) throw new TypeError('区域必须是创建描述');
+        var tag = def.tag || 'div';
+        if (!/^(div|section|aside|header|nav|button|details)$/.test(tag)) throw new Error('不支持的区域容器：' + tag);
+        var node = document.createElement(tag);
+        node.className = def.className || '';
+        if (tag === 'button') node.type = 'button';
+        created.push(node);
+        // 父区域必须已经声明；前向引用和循环直接拒绝。
+        insert(node, target(def.parent), def);
+        local[name] = node;
+      });
+      // 即使响应式分支当前未激活，也验证目标区域，避免错误推迟到 resize。
+      validatePlacements();
+      if (mediaQuery) media = window.matchMedia(mediaQuery);
+      updateMedia();
+      if (media) media.addEventListener('change', updateMedia);
+      var handle = Object.freeze({
+        region: function (name) {
+          if (disposed || !local[name]) throw new Error('布局区域不可用：' + name);
+          return local[name];
+        },
+        dispose: dispose,
+      });
+      layoutAssemblies.set(id, handle);
+      return handle;
+    } catch (error) {
+      dispose();
+      throw error;
+    }
   }
 
-  // 卸载收尾：释放装配登记，让下一次挂载能重新 beginLayout。调用前应先 restore。
-  function releaseLayout(id) { layoutAssemblies.delete(id); }
 
   function isLayoutAssembled(id) { return layoutAssemblies.has(id); }
 
@@ -225,11 +342,11 @@
     mode: mode,
     generation: viewGeneration,
     region: region,
+    hasComponent: function (name) { return components.has(name); },
     attachView: attachView,
     detachView: detachView,
     isViewAttached: isViewAttached,
-    beginLayout: beginLayout,
-    releaseLayout: releaseLayout,
+    assembleLayout: assembleLayout,
     isLayoutAssembled: isLayoutAssembled,
     hasView: hasView,
   };

@@ -6,6 +6,9 @@
 # core.autocrlf=true 的机器上默认是 CRLF，所以这里强行钉死 LF，
 # 优先级高于 core.autocrlf。
 *.sql text eol=lf
+# Design outputs are compared byte-for-byte with the LF-emitting generator.
+plugin/ui/design/design-base.css text eol=lf
+plugin/ui/design/design-themes.js text eol=lf
 # Frozen evaluation artifacts are byte-hashed; preserve the same bytes on Windows.
 evals/**/*.json text eol=lf
 evals/**/*.jsonl text eol=lf
