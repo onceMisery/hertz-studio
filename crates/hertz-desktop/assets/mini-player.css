@@ -1,5 +1,7 @@
 /* 小窗播放（桌面宠物）。与桌面歌词同一套变量约定：深/浅色各一组，
-   尺寸走 --scale，颜色不写死在结构里。 */
+   尺寸走 --scale，颜色不写死在结构里。功能 accent 绑用户已唱色
+   （--lyric-sung，native 随 applyConfig 下发；白默认按主题落中性），
+   面板中性色与设置中心同族（暖石墨）；宠物素材是内容层，颜色归素材。 */
 :root {
   --scale: 1;
   --radius: 28px;
@@ -8,11 +10,11 @@
 * { box-sizing: border-box; }
 html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: transparent; }
 body {
-  --surface: rgba(25, 25, 27, .96);
+  --surface: rgba(28, 28, 25, .96);
   --stroke: rgba(255, 255, 255, .08);
-  --text: #ededed;
-  --text-dim: #a1a1a6;
-  --accent: #ff7a2f;
+  --text: #eeeae1;
+  --text-dim: #aaa79c;
+  --accent: var(--lyric-sung, var(--text));
   --shadow: 0 4px 12px rgba(0, 0, 0, .16);
   font-family: var(--font-family, "Segoe UI"), "Microsoft YaHei UI", system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
@@ -21,11 +23,11 @@ body {
   cursor: default;
 }
 body[data-theme="light"] {
-  --surface: rgba(250, 250, 250, .98);
+  --surface: rgba(246, 243, 236, .98);
   --stroke: rgba(23, 23, 23, .10);
-  --text: #171717;
-  --text-dim: #525252;
-  --accent: #ff7a2f;
+  --text: #24241f;
+  --text-dim: #5d574a;
+  --accent: var(--lyric-sung, var(--text));
   --shadow: 0 4px 12px rgba(0, 0, 0, .08);
 }
 [hidden] { display: none !important; }
@@ -54,7 +56,7 @@ body.dragging #capsule { box-shadow: var(--shadow), inset 0 0 0 1px var(--stroke
 }
 #cover-img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
 #cover-img[hidden] { display: none; }
-#cover-glyph { font-size: calc(16px * var(--scale)); opacity: .45; }
+#cover-glyph { width: calc(16px * var(--scale)); height: calc(16px * var(--scale)); display: block; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; opacity: .45; }
 #cover-img:not([hidden]) ~ #cover-glyph { display: none; }
 
 #meta { flex: 1 1 auto; min-width: 0; }

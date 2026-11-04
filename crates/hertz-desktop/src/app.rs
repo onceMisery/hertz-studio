@@ -2100,6 +2100,8 @@ impl App {
         self.wallpaper_forced = false;
         self.wallpaper_recovery_terminal = false;
         self.wallpaper_recovery_attempts.clear();
+        // 歌词已唱色随配置提交同步给小窗 accent（无小窗时是空操作）。
+        self.mini_send_config();
         // 保存成功与运行失败分离（设计 C01/C02）：以下任何运行失败都保留
         // 新 revision 与意图，只把错误独立呈现给设置页，不回写旧配置。
         let mut run_error = None;
@@ -3160,6 +3162,7 @@ impl App {
             "theme": "auto",
             "scale": mini.scale,
             "opacity": mini.opacity,
+            "sung": self.config.lyrics.sung_color.as_str(),
             "pet": mini.pet,
             "locked": mini.locked,
             "topmost": mini.always_on_top,
@@ -3820,6 +3823,7 @@ impl App {
                 if *slot != color {
                     *slot = color;
                     self.send_config();
+                    self.mini_send_config();
                     self.schedule_save();
                 }
             }

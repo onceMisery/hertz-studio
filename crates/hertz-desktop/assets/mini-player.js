@@ -5,7 +5,7 @@
   const systemTheme = matchMedia('(prefers-color-scheme: light)');
 
   const state = {
-    config: { theme: 'auto', scale: 1, opacity: 1, pet: false, locked: false, topmost: true, edgeHide: false, dock: 'none' },
+    config: { theme: 'auto', scale: 1, opacity: 1, pet: false, locked: false, topmost: true, edgeHide: false, dock: 'none', sung: '' },
     snapshot: null,
     // 拖拽阈值：小于这个位移仍然算点击（走展开），与主界面胶囊一致。
     dragPx: 4,
@@ -255,12 +255,24 @@
 
   // --- 配置 -----------------------------------------------------------------
 
+  // 与桌面歌词同一规则：显式颜色直接用；白（或无效）按主题落中性。
+  // 小窗的功能 accent（进度/焦点环/贴边残条）绑用户已唱色，由 native 随 applyConfig 下发。
+  function sungAccent(value, theme) {
+    const text = String(value || '').trim();
+    let hex = null;
+    if (/^#[0-9a-f]{6,8}$/i.test(text)) hex = text.slice(0, 7).toLowerCase();
+    else if (/^#[0-9a-f]{3}$/i.test(text)) hex = '#' + [...text.slice(1)].map(c => c + c).join('');
+    if (!hex || hex === '#ffffff') return theme === 'light' ? '#0b0d11' : '#ffffff';
+    return hex;
+  }
+
   function applyConfig(value) {
     if (!value) return;
     state.config = Object.assign({}, state.config, value);
     const c = state.config;
     const theme = c.theme === 'auto' ? (systemTheme.matches ? 'light' : 'dark') : c.theme;
     document.body.dataset.theme = theme;
+    root.style.setProperty('--lyric-sung', sungAccent(c.sung, theme));
     document.body.dataset.pet = String(!!c.pet);
     document.body.dataset.locked = String(!!c.locked);
     document.body.dataset.peek = String(!!c.peek);

@@ -340,7 +340,10 @@
       for (let i = start; i <= stop; i++) {
         if (!state.nodes.has(i)) state.nodes.set(i, buildNode(i, i === index, i === index && interlude));
         const node = state.nodes.get(i);
-        node.dataset.distance = Math.abs(i - index) > 2 ? 'hidden' : String(i - index);
+        const distance = Math.abs(i - index) > 2 ? 'hidden' : String(i - index);
+        node.dataset.distance = distance;
+        // 读屏只读当前行：淡出/隐藏的邻行不进无障碍树，与视觉可见性一致。
+        node.setAttribute('aria-hidden', String(distance !== '0'));
         $('lyric-column').appendChild(node);
       }
       state.renderedGroup = index;

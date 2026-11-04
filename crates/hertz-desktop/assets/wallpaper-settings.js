@@ -300,7 +300,8 @@
     $('motion-value').textContent = Math.round(($('motion').value == null ? 100 : $('motion').value * 100)) + '%';
     if (latest) renderMetadata(latest);
     $('lyrics-enabled').checked = !!lyrics.enabled; $('lyrics-locked').checked = !!lyrics.locked;
-    $('lyrics-secondary').value = lyrics.secondary;
+    // 「翻译」选项已并入译文；存量 translation 值按译文显示，草稿保持原值直到用户主动改选。
+    $('lyrics-secondary').value = lyrics.secondary === 'translation' ? 'next' : lyrics.secondary;
     $('lyrics-size').value = String(lyrics.fontSize); $('lyrics-weight').value = String(lyrics.fontWeight);
     // Native config also accepts shorthand/alpha hex; color inputs display its RGB component without changing the draft.
     function rgb(value) { var hex = String(value || '#ffffff'); return hex.length === 4 ? '#' + hex.slice(1).split('').map(c => c + c).join('') : hex.slice(0, 7); }
@@ -361,7 +362,7 @@
     $('lyrics-preview').classList.toggle('has-depth', lyrics.layout === 'triple');
     $('lyric-secondary').hidden = lyrics.bilingual === false;
     $('lyric-secondary').textContent = lyrics.secondary === 'romanization' ? 'Rang yin yue liu zai ci ke' : 'Let the music stay in this moment';
-    $('lyrics-secondary').value = lyrics.secondary;
+    $('lyrics-secondary').value = lyrics.secondary === 'translation' ? 'next' : lyrics.secondary;
     $('opacity-value').textContent = Math.round(lyrics.opacity * 100) + '%';
   }
   function syncControls() {
@@ -496,7 +497,8 @@
       }
       else if (id === 'audio-device') wallpaper.audioInput.device = this.value ? { kind: 'fixed', id: this.value } : { kind: 'default' };
       else if (id.startsWith('audio-')) {
-        if (!this.validity.valid || this.value === '') { dirty = true; status('请填写有效的音频增益与响应时长。', true); syncControls(); return; }
+        if (!this.validity.valid || this.value === '') { dirty = true; this.setAttribute('aria-invalid', 'true'); status('请填写有效的音频增益与响应时长。', true); syncControls(); return; }
+        this.removeAttribute('aria-invalid');
         wallpaper.audioInput[{ 'audio-gain':'gain', 'audio-attack':'attackMs', 'audio-release':'releaseMs' }[id]] = Number(this.value);
       }
       else if (id === 'monitor') group.displays = this.value ? [{ kind: 'fixed', displayId: this.value }] : [{ kind: 'primary' }];
@@ -510,7 +512,7 @@
     });
   });
   var lyricsFields = { 'lyrics-enabled':['enabled','check'], 'lyrics-locked':['locked','check'], 'lyrics-secondary':['secondary','text'], 'lyrics-size':['fontSize','number'], 'lyrics-weight':['fontWeight','number'], 'lyrics-sung':['sungColor','text'], 'lyrics-unsung':['unsungColor','text'], 'lyrics-outline':['outlineColor','text'], 'lyrics-stroke':['outlineWidth','number'], 'lyrics-opacity':['opacity','number'] };
-  Object.keys(lyricsFields).forEach(function (id) { $(id).addEventListener('input', function () { if (!draft) return; if (this.validity && !this.validity.valid || this.type === 'number' && this.value === '') { dirty = true; status('请填写有效的字号或描边宽度。', true); syncControls(); return; } var field = lyricsFields[id]; draft.lyrics[field[0]] = field[1] === 'check' ? this.checked : field[1] === 'number' ? Number(this.value) : this.value; changed(false); }); });
+  Object.keys(lyricsFields).forEach(function (id) { $(id).addEventListener('input', function () { if (!draft) return; if (this.validity && !this.validity.valid || this.type === 'number' && this.value === '') { dirty = true; this.setAttribute('aria-invalid', 'true'); status('请填写有效的字号或描边宽度。', true); syncControls(); return; } this.removeAttribute('aria-invalid'); var field = lyricsFields[id]; draft.lyrics[field[0]] = field[1] === 'check' ? this.checked : field[1] === 'number' ? Number(this.value) : this.value; changed(false); }); });
   document.querySelectorAll('[data-preset]').forEach(node => node.addEventListener('click', function () { if (!draft) return; Object.assign(draft.lyrics, presets[node.dataset.preset]); changed(false); renderForm(); }));
   function setTab(tab) {
     if (!['wallpaper','lyrics','runtime'].includes(tab)) return;
@@ -526,7 +528,7 @@
   $('switch-source').addEventListener('click', function () { var profile = profiles.find(profile => profileKey(profile) === $('profile').value); if (profile && !dirty) { pending = true; syncControls(); send('switch-source', { profile: profile, expectedRevision: revision }); } });
   $('autostart').addEventListener('change', function () { send('autostart', { enabled: this.checked }); });
   $('preview').addEventListener('click', function () { if (previewActive) releaseNativePreview(); else startNativePreview(false); });
-  $('apply').addEventListener('click', function () { if (!dirty || conflict || editing) return; if (!document.querySelectorAll('#panel-lyrics input:invalid').length) { applyNativeDraft(); } else status('请检查字号和描边宽度的有效范围。', true); });
+  $('apply').addEventListener('click', function () { if (!dirty || conflict || editing) return; if (!document.querySelector('#panel-lyrics input:invalid, #panel-wallpaper input:invalid')) { applyNativeDraft(); } else status('请检查字号、描边宽度与音频参数的有效范围。', true); });
   $('discard').addEventListener('click', function () { dirty = false; conflict = false; pending = false; draft = clone(saved); revision = latest.revision; releaseNativePreview(); releaseNativeDraft(); renderForm(); status('已放弃草稿，读取最新保存的设置。', false); });
   $('close').addEventListener('click', requestClose);
   $('continue-editing').addEventListener('click', function () { $('close-confirm').hidden = true; $('close').focus(); });
