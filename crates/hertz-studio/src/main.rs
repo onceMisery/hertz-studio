@@ -139,7 +139,9 @@ fn main() -> anyhow::Result<()> {
     if args.window {
         // 非 native 构建收到 --window：parse 已置位（字段常驻），这里给出明确
         // 报错而不是静默降级成无窗口服务——用户要的是窗口形态。
-        eprintln!("--window 需要本构建启用 native-window feature（cargo build --features native-window）");
+        eprintln!(
+            "--window 需要本构建启用 native-window feature（cargo build --features native-window）"
+        );
         std::process::exit(2);
     }
     let mcp_stdio = args.mcp_stdio;

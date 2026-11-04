@@ -107,62 +107,70 @@ fn request_graceful_shutdown(port: u16, token: &str) -> anyhow::Result<()> {
 /// `documentElement.dataset.hertzWindowHost = "1"` 供外壳/样式按能力分支。
 const HOST_SCRIPT: &str = r#"
 (function () {
-  var post = function (kind) {
-    if (window.ipc) window.ipc.postMessage(JSON.stringify({ kind: kind }));
-  };
-  window.__hertzWindowHost = {
-    kind: 'window-host',
-    close: function () { post('close'); },
-    minimize: function () { post('minimize'); },
-    maximizeToggle: function () { post('maximize-toggle'); },
-    drag: function () { post('drag'); },
-  };
-  document.documentElement.dataset.hertzWindowHost = '1';
-
-  var bar = document.createElement('div');
-  bar.id = 'hertz-window-chrome';
-  bar.innerHTML =
-    '<div class="hzwc-drag" aria-hidden="true"></div>' +
-    '<div class="hzwc-buttons">' +
-    '<button type="button" data-hzwc="minimize" aria-label="最小化" title="最小化">' +
-    '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></button>' +
-    '<button type="button" data-hzwc="maximize-toggle" aria-label="最大化或还原" title="最大化/还原">' +
-    '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.8"/></svg></button>' +
-    '<button type="button" data-hzwc="close" class="hzwc-close" aria-label="关闭窗口" title="关闭窗口（隐藏到托盘）">' +
-    '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></button>' +
-    '</div>';
-
-  bar.addEventListener('mousedown', function (event) {
-    var button = event.target.closest('[data-hzwc]');
-    if (button || event.button !== 0) return;
-    post('drag');
-  });
-  bar.addEventListener('dblclick', function (event) {
-    if (event.target.closest('[data-hzwc]')) return;
-    post('maximize-toggle');
-  });
-  bar.addEventListener('click', function (event) {
-    var button = event.target.closest('[data-hzwc]');
-    if (button) post(button.getAttribute('data-hzwc'));
-  });
-
-  var style = document.createElement('style');
-  style.textContent =
-    'html { box-sizing: border-box; padding-top: 40px; }' +
-    '#hertz-window-chrome { position: fixed; top: 0; left: 0; right: 0; height: 40px;' +
-    '  z-index: 2147483647; display: flex; align-items: stretch; user-select: none;' +
-    '  background: color-mix(in srgb, var(--glass-bg-strong) 88%, transparent);' +
-    '  border-bottom: 1px solid var(--glass-line); }' +
-    '#hertz-window-chrome .hzwc-drag { flex: 1; min-width: 0; }' +
-    '#hertz-window-chrome .hzwc-buttons { display: flex; align-items: stretch; }' +
-    '#hertz-window-chrome .hzwc-buttons button { width: 46px; padding: 0; border: 0;' +
-    '  background: transparent; color: var(--text); cursor: pointer;' +
-    '  display: grid; place-items: center; }' +
-    '#hertz-window-chrome .hzwc-buttons button:hover { background: var(--hover); }' +
-    '#hertz-window-chrome .hzwc-buttons button.hzwc-close:hover { background: var(--danger); color: #0A0A0A; }' +
-    '#hertz-window-chrome svg { width: 14px; height: 14px; }';
-  document.head.appendChild(style);
-  document.documentElement.appendChild(bar);
+  function post(kind, extra) {
+    if (window.ipc) window.ipc.postMessage(JSON.stringify(extra ? Object.assign({ kind: kind }, extra) : { kind: kind }));
+  }
+  function setup() {
+    try {
+      window.__hertzWindowHost = {
+        kind: 'window-host',
+        close: function () { post('close'); },
+        minimize: function () { post('minimize'); },
+        maximizeToggle: function () { post('maximize-toggle'); },
+        drag: function () { post('drag'); },
+      };
+      document.documentElement.dataset.hertzWindowHost = '1';
+      var bar = document.createElement('div');
+      bar.id = 'hertz-window-chrome';
+      bar.innerHTML = '<style>' +
+        'html { box-sizing: border-box; padding-top: 40px; }' +
+        '#hertz-window-chrome { position: fixed; top: 0; left: 0; right: 0; height: 40px;' +
+        '  z-index: 2147483647; display: flex; align-items: stretch; user-select: none;' +
+        '  background: color-mix(in srgb, var(--glass-bg-strong) 88%, transparent);' +
+        '  border-bottom: 1px solid var(--glass-line); }' +
+        '#hertz-window-chrome .hzwc-drag { flex: 1; min-width: 0; }' +
+        '#hertz-window-chrome .hzwc-buttons { display: flex; align-items: stretch; }' +
+        '#hertz-window-chrome .hzwc-buttons button { width: 46px; padding: 0; border: 0;' +
+        '  background: transparent; color: var(--text); cursor: pointer;' +
+        '  display: grid; place-items: center; }' +
+        '#hertz-window-chrome .hzwc-buttons button:hover { background: var(--hover); }' +
+        '#hertz-window-chrome .hzwc-buttons button.hzwc-close:hover { background: var(--danger); color: #0A0A0A; }' +
+        '#hertz-window-chrome svg { width: 14px; height: 14px; }' +
+        '</style>' +
+        '<div class="hzwc-drag" aria-hidden="true"></div>' +
+        '<div class="hzwc-buttons">' +
+        '<button type="button" data-hzwc="minimize" aria-label="最小化" title="最小化">' +
+        '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></button>' +
+        '<button type="button" data-hzwc="maximize-toggle" aria-label="最大化或还原" title="最大化/还原">' +
+        '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.8"/></svg></button>' +
+        '<button type="button" data-hzwc="close" class="hzwc-close" aria-label="关闭窗口" title="关闭窗口（隐藏到托盘）">' +
+        '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></button>' +
+        '</div>';
+      bar.addEventListener('mousedown', function (event) {
+        if (event.button !== 0) return;
+        if (event.target.closest && event.target.closest('[data-hzwc]')) return;
+        post('drag');
+      });
+      bar.addEventListener('dblclick', function (event) {
+        if (event.target.closest && event.target.closest('[data-hzwc]')) return;
+        post('maximize-toggle');
+      });
+      bar.addEventListener('click', function (event) {
+        var button = event.target.closest && event.target.closest('[data-hzwc]');
+        if (button) post(button.getAttribute('data-hzwc'));
+      });
+      document.body.appendChild(bar);
+      post('chrome-ready');
+    } catch (error) {
+      post('chrome-error', { message: String(error && error.message || error) });
+    }
+  }
+  // document-created 阶段 head/body 尚未解析：就绪后再装控制条。
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', setup);
+  } else {
+    setup();
+  }
 })();
 "#;
 
@@ -382,22 +390,22 @@ pub fn run_window(mut args: Args) -> anyhow::Result<()> {
             Event::UserEvent(UserEvent::Ipc(body)) => {
                 eprintln!("[window] ipc: {body}");
                 match body.as_str() {
-                "{\"kind\":\"drag\"}" => {
-                    let _ = window.drag_window();
-                }
-                "{\"kind\":\"minimize\"}" => window.set_minimized(true),
-                "{\"kind\":\"maximize-toggle\"}" => {
-                    if window.is_maximized() {
-                        window.set_maximized(false);
-                    } else {
-                        window.set_maximized(true);
+                    "{\"kind\":\"drag\"}" => {
+                        let _ = window.drag_window();
                     }
-                }
-                "{\"kind\":\"close\"}" => {
-                    // §2.2：关闭窗口只隐藏，不触碰播放与服务。
-                    window.set_visible(false);
-                }
-                _ => {}
+                    "{\"kind\":\"minimize\"}" => window.set_minimized(true),
+                    "{\"kind\":\"maximize-toggle\"}" => {
+                        if window.is_maximized() {
+                            window.set_maximized(false);
+                        } else {
+                            window.set_maximized(true);
+                        }
+                    }
+                    "{\"kind\":\"close\"}" => {
+                        // §2.2：关闭窗口只隐藏，不触碰播放与服务。
+                        window.set_visible(false);
+                    }
+                    _ => {}
                 }
             }
             Event::UserEvent(UserEvent::FocusWindow) => {
