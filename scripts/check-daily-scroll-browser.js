@@ -2,27 +2,13 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 hertz-studio contributors
 //
-// 每日推荐滚动链 + iOS 齿轮隐藏 + 各皮肤行节奏（浏览器验收，需 Playwright + 服务）。
-//
-//   SETTINGS_NAV_URL=http://127.0.0.1:18790/ \
-//   NODE_PATH=<装有 playwright 的 node_modules 路径> \
-//   node scripts/check-daily-scroll-browser.js
-//
-// NODE_PATH 要指到**装 playwright 的那个 node_modules**。若 playwright 是
-// 装在隔离的托管 workspace 里（而非全局），全局 require 会失败，
-// 此时把 NODE_PATH 指到那个 workspace 的 node_modules。
-//
-// 为什么必须浏览器：这三条的失败模式全是**静默**的 ——
-//   · .dv-body 少一条 overflow-y，页面不报错、不少元素，只是矮了一截，
-//     很容易读成"今天就推了 10 首"；
-//   · iOS 齿轮用 visibility 隐藏，按钮仍占位、仍在 Tab 序里，
-//     截图上"好像少了一个"，量几何才分得开；
-//   · .dv-row 的行距差 10px，正则断言与"正常"完全同形。
-// 三者在纯 Node 契约里都和通过长得一模一样，只能靠真实布局分出来。
+// Hertz 每日推荐滚动链：真实服务和浏览器，30行夹具证明末行可达。
+// SETTINGS_NAV_URL=<isolated service> VMUSIC_DATA_DIR=<isolated data>
+// HERTZ_SOURCE_ASSETS=1 enables current workspace assets; omit for embedded acceptance.
 
 'use strict';
 
-const { chromium } = require('playwright');
+const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const { uiUrl } = require('./ui-token');
 
 const URL = process.env.SETTINGS_NAV_URL || 'http://127.0.0.1:7634/';
@@ -98,7 +84,6 @@ async function gotoDaily(page) {
 async function setSkin(page, id) {
   await page.evaluate((skin) => {
     window.Skins.apply(skin);
-    document.documentElement.setAttribute('data-skin', skin);
   }, id);
   await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
 }
@@ -122,8 +107,10 @@ const geom = (page, sel) => page.evaluate((s) => {
 }, sel);
 
 (async () => {
+  require('node:fs').mkdirSync(SHOTS, { recursive: true });
   const browser = await chromium.launch({ channel: 'chrome' });
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  if (process.env.HERTZ_SOURCE_ASSETS === '1') await require('./ui-source-assets').routeSourceAssets(page, { base: URL.replace(/\/$/, ''), dataDir: process.env.VMUSIC_DATA_DIR });
   const errors = [];
   page.on('pageerror', (e) => errors.push(String(e)));
 
@@ -131,83 +118,26 @@ const geom = (page, sel) => page.evaluate((s) => {
     await page.goto(uiUrl(URL), { timeout: 30000, waitUntil: 'domcontentloaded' });
     await page.waitForFunction(() => window.Skins && window.Theme, null, { timeout: 15000 });
 
-    // ---------------------------------------------------------- 滚动链
-    section('每日推荐：内容体自己滚（classic 下的基线行为）');
-    await setSkin(page, 'classic');
-    await gotoDaily(page);
-
-    const body = await geom(page, '#dv-body');
-    ok(!!body, '#dv-body 存在');
-    ok(body.display !== 'none', '#dv-body 可见', `display=${body && body.display}`);
-
-    // 这条是本次修复的核心：内容必然溢出容器（30 行 vs 一屏）。
-    ok(body.canScroll, '#dv-body 内容溢出容器（否则下面几条全是假通过）',
-      `scrollHeight=${body.scrollHeight} clientHeight=${body.clientHeight}`);
-
-    // 三件套的实际生效值
-    ok(body.flex === '1 1 0%' || /flex:\s*1/.test(body.flex), '#dv-body 的 flex 真的生效', `flex=${body.flex}`);
-    ok(body.minHeight === '0px', '#dv-body 的 min-height:0 真的生效', `min-height=${body.minHeight}`);
-    ok(body.overflowY === 'auto', '#dv-body 的 overflow-y:auto 真的生效', `overflow-y=${body.overflowY}`);
-
-    // 真的能滚：滚到底，最后一行必须进视口。
-    const scrolled = await page.evaluate(async () => {
-      const el = document.getElementById('dv-body');
-      el.scrollTop = el.scrollHeight;
-      await new Promise((r) => setTimeout(r, 120));
-      const rows = el.querySelectorAll('.dv-row');
-      const last = rows[rows.length - 1].getBoundingClientRect();
-      const box = el.getBoundingClientRect();
-      return {
-        scrollTop: Math.round(el.scrollTop),
-        rows: rows.length,
-        lastBottom: Math.round(last.bottom),
-        boxBottom: Math.round(box.bottom),
-        // 最后一行下沿应当落进容器内（留 2px 容差）
-        lastVisible: last.bottom <= box.bottom + 2,
-      };
-    });
-    ok(scrolled.scrollTop > 0, '滚得动（scrollTop 真的变了）', `scrollTop=${scrolled.scrollTop}`);
-    ok(scrolled.rows === ROWS, `渲染了 ${ROWS} 行`, `rows=${scrolled.rows}`);
-    ok(scrolled.lastVisible, '滚到底时最后一行在容器内（内容没被 .column 裁掉）',
-      `lastBottom=${scrolled.lastBottom} boxBottom=${scrolled.boxBottom}`);
-
-    // 容器不能长出视口（min-height:0 漏掉时 .column 会被撑高）
-    const inViewport = await page.evaluate(() => {
-      const r = document.getElementById('dv-body').getBoundingClientRect();
-      return { bottom: Math.round(r.bottom), vh: window.innerHeight };
-    });
-    ok(inViewport.bottom <= inViewport.vh + 2, '#dv-body 没有长出视口',
-      `bottom=${inViewport.bottom} vh=${inViewport.vh}`);
-
-    await page.screenshot({ path: `${SHOTS}/daily-classic-bottom.png` });
-
-    // 滚回顶再看一眼头部没被吸走
-    await page.evaluate(() => { document.getElementById('dv-body').scrollTop = 0; });
-    await page.screenshot({ path: `${SHOTS}/daily-classic-top.png` });
-
-    // ------------------------------------------------ 其它皮肤没被带坏
-    section('回归：其余皮肤下每日推荐仍能滚');
-    for (const skin of ['liunian', 'qingfeng']) {
-      await setSkin(page, skin);
+    section('Hertz 每日推荐：桌面与触屏末行可达');
+    await setSkin(page, 'hertz');
+    for (const width of [1440, 1024, 390, 320]) {
+      await page.setViewportSize({ width, height: width < 900 ? 844 : 900 });
       await gotoDaily(page);
-      const r = await page.evaluate(async () => {
-        const el = document.getElementById('dv-body');
-        el.scrollTop = el.scrollHeight;
-        await new Promise((r2) => setTimeout(r2, 100));
-        const rows = el.querySelectorAll('.dv-row');
-        const last = rows[rows.length - 1].getBoundingClientRect();
-        const box = el.getBoundingClientRect();
-        return {
-          overflowY: getComputedStyle(el).overflowY,
-          canScroll: el.scrollHeight > el.clientHeight,
-          scrolled: el.scrollTop > 0,
-          lastVisible: last.bottom <= box.bottom + 2,
-          count: rows.length,
-        };
+      const scroll = await page.evaluate(async () => {
+        const last = document.querySelector('#dv-body .dv-row:last-child');
+        const owner = document.getElementById('column');
+        owner.scrollTop = owner.scrollHeight;
+        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        const row = last.getBoundingClientRect(), box = owner.getBoundingClientRect();
+        const hit = document.elementFromPoint(row.x + row.width / 2, row.y + row.height / 2);
+        return { rows: document.querySelectorAll('#dv-body .dv-row').length,
+          overflow: owner.scrollHeight > owner.clientHeight, scrolled: owner.scrollTop > 0,
+          fits: row.left >= 0 && row.right <= innerWidth && row.top >= box.top && row.bottom <= Math.min(box.bottom, innerHeight),
+          hit: !!hit && last.contains(hit) };
       });
-      ok(r.overflowY === 'auto', `${skin}：overflow-y 仍是 auto`);
-      ok(r.scrolled, `${skin}：滚得动`);
-      ok(r.lastVisible, `${skin}：最后一行没被裁掉`);
+      ok(scroll.rows === ROWS && scroll.overflow, width + 'px fixture exceeds the canonical scroll owner');
+      ok(scroll.scrolled && scroll.fits && scroll.hit, width + 'px last daily row is visible and reachable', JSON.stringify(scroll));
+      await page.screenshot({ path: `${SHOTS}/daily-hertz-${width}.png` });
     }
 
     ok(errors.length === 0, '全程无页面 JS 报错', errors.slice(0, 3).join(' | '));
@@ -221,6 +151,6 @@ const geom = (page, sel) => page.evaluate((s) => {
   }
 
   console.log('\n────────────────────────────────────────────────────────────');
-  console.log(`每日推荐滚动 / iOS 齿轮 / OS风改名：${checks} 项，${failures} 项失败`);
+  console.log(`Hertz 每日推荐滚动：${checks} 项，${failures} 项失败`);
   process.exit(failures ? 1 : 0);
 })();

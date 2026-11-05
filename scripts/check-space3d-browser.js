@@ -20,17 +20,13 @@ const sourceMode = process.argv.includes('--source');
 const viewport = { width: 1707, height: 898 };
 const assets = ['app.js', 'space3d.js', 'space3d.css', 'space-camera.js', 'space-fields.js', 'space-post.js',
   'space-layers.js', 'space-layers.css', 'creative-gl.js', 'creative-stage.js', 'backgrounds.js',
-  'vendor/stage-runtime.js', 'stage.js', 'handdrawn.js', 'stage-coast.js', 'vendor/coast-stage.js', 'stage-zodiac.js', 'vendor/zodiac-stage.js', 'skins/skin-settings-sheet.js'];
+  'vendor/stage-runtime.js', 'stage.js', 'handdrawn.js', 'stage-coast.js', 'vendor/coast-stage.js', 'stage-zodiac.js', 'vendor/zodiac-stage.js', 'skins/skin.hertz.js'];
 const normalize = text => text.replace(/\r\n/g, '\n').trim();
 
 function registeredAssets() {
-  const registry = fs.readFileSync(path.join(root, 'crates/hertz-studio/src/assets.rs'), 'utf8'), map = new Map();
-  const re = /"(\/[^"\s]+)",\s*(JS|CSS)\s*=>[^;]+include_str!\("([^"]+)"\)/g;
-  for (const match of registry.matchAll(re)) {
-    const file = path.resolve(root, 'crates/hertz-studio/src', match[3]);
-    assert.ok(file.startsWith(path.resolve(web) + path.sep), 'registered source stays in plugin/ui');
-    map.set(match[1], { file, contentType: match[2] === 'JS' ? 'application/javascript' : 'text/css' });
-  }
+  const map = new Map(require('./ui-assets').readAssets().map(asset => [asset.path, {
+    file: asset.file, contentType: asset.mime === 'JS' ? 'application/javascript' : 'text/css',
+  }]));
   for (const asset of assets) assert.ok(map.has('/' + asset), 'asset is registered: ' + asset);
   return map;
 }

@@ -546,6 +546,7 @@
     if (global.SkinSettingsSheet && SkinSettingsSheet.isOpen()) { returnFocus=$('space3d-entry'); SkinSettingsSheet.close({immediate:true,focusTarget:root}); }
     background = [];
     Array.prototype.forEach.call(document.body.children,function (node) {
+      // 窗口控制由原生宿主持有，保持可点按；这里只屏蔽页面背景。
       if (node === root || /^(SCRIPT|STYLE|SVG)$/.test(node.tagName)) return;
       background.push({node:node,inert:node.inert}); node.inert = true;
     });
@@ -908,6 +909,10 @@
     target.style.setProperty('--sp-tilt-y',((px-.5)*2*(card?11:strength)).toFixed(2)+'deg');
     if(card){target.style.setProperty('--sp-glare-x',(px*100).toFixed(1)+'%');target.style.setProperty('--sp-glare-y',(py*100).toFixed(1)+'%');}
   }
+  function surfacePointer(e){
+    var rect=root.getBoundingClientRect(),y=e.clientY-rect.top;
+    return {x:(e.clientX-rect.left)/Math.max(1,rect.width)*2-1,y:1-y/Math.max(1,rect.height)*2,atBottom:y>rect.height-28};
+  }
   function bindGestures(){
     root.addEventListener('pointerenter',poke);
     root.addEventListener('pointermove',floatPointer,{passive:true});
@@ -918,13 +923,13 @@
       if(camera.isFreeActive()){requestLock();e.preventDefault();return;}
       dragging=true;pointer=e.pointerId;point={x:e.clientX,y:e.clientY,t:performance.now()};camera.setRotating(true);if(root.setPointerCapture)root.setPointerCapture(pointer);touch();
       downPoint={x:e.clientX,y:e.clientY};frame.pointer.down=true;frame.pointer.dragging=false;clearTimeout(holdTimer);
-      frame.pointer.x=e.clientX/Math.max(1,root.clientWidth)*2-1;frame.pointer.y=1-e.clientY/Math.max(1,root.clientHeight)*2;frame.pointer.active=true;
+      var cursor=surfacePointer(e);frame.pointer.x=cursor.x;frame.pointer.y=cursor.y;frame.pointer.active=true;
       holdTimer=setTimeout(function(){holdTimer=0;if(frame.pointer.down){charging=true;syncHud();}},350);
     });
     root.addEventListener('pointermove',function(e){
-      if(page==='closed')return;poke();var wasActive=frame.pointer.active;frame.pointer.x=e.clientX/Math.max(1,root.clientWidth)*2-1;frame.pointer.y=1-e.clientY/Math.max(1,root.clientHeight)*2;frame.pointer.active=!isControl(e.target);
+      if(page==='closed')return;poke();var wasActive=frame.pointer.active,cursor=surfacePointer(e);frame.pointer.x=cursor.x;frame.pointer.y=cursor.y;frame.pointer.active=!isControl(e.target);
       if(frame.pointer.active||wasActive)touch(750);
-      if (e.clientY > root.clientHeight - 28 && !root.classList.contains('sp-immersive')) revealPlayer();
+      if (cursor.atBottom && !root.classList.contains('sp-immersive')) revealPlayer();
       if(document.pointerLockElement===root&&camera&&camera.isFreeActive()){camera.freeLook(e.movementX||0,e.movementY||0);touch();return;}
       if(!dragging||e.pointerId!==pointer||!point)return;var now=performance.now();
       if(downPoint&&!frame.pointer.dragging&&Math.hypot(e.clientX-downPoint.x,e.clientY-downPoint.y)>5){frame.pointer.dragging=true;frame.pointer.down=false;clearTimeout(holdTimer);holdTimer=0;if(charging){charging=false;syncHud();}}
@@ -936,7 +941,7 @@
       if(e.type==='pointerup'&&downPoint&&!frame.pointer.dragging){
         // A double-click resets the camera; it must not release a second particle burst.
         var clickAt=performance.now();
-        if(clickAt-lastClickAt>250){lastClickAt=clickAt;frame.pointer.click={x:e.clientX/Math.max(1,root.clientWidth)*2-1,y:1-e.clientY/Math.max(1,root.clientHeight)*2,serial:++clickSerial};}
+        if(clickAt-lastClickAt>250){lastClickAt=clickAt;var cursor=surfacePointer(e);frame.pointer.click={x:cursor.x,y:cursor.y,serial:++clickSerial};}
       }
       downPoint=null;frame.pointer.down=false;frame.pointer.dragging=false;clearTimeout(holdTimer);holdTimer=0;if(charging){charging=false;syncHud();}
       dragging=false;point=null;pointer=null;if(camera)camera.setRotating(false);scheduleSave();touch();

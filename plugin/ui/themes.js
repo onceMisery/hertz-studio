@@ -24,7 +24,7 @@
   // 唯一的例外是旧默认值本身：它会被一次性换到新默认，见 migrateDefault()。
   var STORE_KEY = 'vmusic.theme.v2';
   var ATTR = 'data-theme';
-  var DEFAULT_ID = 'mineral';
+  var DEFAULT_ID = 'hertz-dark';
   // 默认档从「晴空绘卷」换成「矿石黑」。旧默认值要走一次性迁移，
   // 理由见 migrateDefault()。
   var PREVIOUS_DEFAULT_ID = 'celestial';

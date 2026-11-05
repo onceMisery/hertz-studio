@@ -81,7 +81,7 @@ function makeEl(tag, id) {
 function makeApp(store) {
   const html = makeEl('html');
   const body = makeEl('body');
-  const links = ['liunian', 'qingfeng'].map((id) => {
+  const links = ['hertz'].map((id) => {
     const l = makeEl('link');
     l.setAttribute('data-skin-css', id);
     l.disabled = true;
@@ -108,6 +108,7 @@ function makeApp(store) {
       body,
       documentElement: html,
       getElementById(id) {
+        if (['skins-list', 'skin-btn', 'skin-menu', 'rail-toggle'].includes(id)) return null;
         if (!nodes.has(id)) nodes.set(id, makeEl('div', id));
         return nodes.get(id);
       },
@@ -157,30 +158,25 @@ function enabledSkin(app) {
 // ---------------------------------------------------------------------------
 
 function checkSkinRestore() {
-  section('布局皮肤：刷新后 data-skin 与配套 CSS 的启用状态都还在');
-
+  section('唯一布局：hertz 刷新恢复与所有旧皮肤迁移');
   const store = new Map();
   const first = boot(makeApp(store));
-  first.sandbox.Skins.apply('liunian');
-  eq(store.get('vmusic.skin'), 'liunian', '选择写进 localStorage');
-
+  first.sandbox.Skins.apply('hertz');
+  eq(store.get('vmusic.skin'), 'hertz', '有效布局写进 localStorage');
   const second = boot(makeApp(store));
-  eq(second.html.getAttribute('data-skin'), 'liunian', '刷新后 html 上还是这套皮肤');
-  eq(enabledSkin(second), 'liunian', '刷新后启用的还是这套皮肤的 CSS');
-  eq(second.sandbox.Skins.currentId(), 'liunian', 'Skins.currentId 与之一致');
-
-  // 换回去也要成立，否则只是"记住了第一次"。
-  second.sandbox.Skins.apply('qingfeng');
-  const third = boot(makeApp(store));
-  eq(third.html.getAttribute('data-skin'), 'qingfeng', '改成另一套后刷新仍然保持');
-  eq(enabledSkin(third), 'qingfeng', 'CSS 跟着换到清风');
-
-  const bad = new Map([['vmusic.skin', 'no-such-skin']]);
-  const fourth = boot(makeApp(bad));
-  eq(fourth.sandbox.Skins.currentId(), 'classic', '存了不认识的皮肤回落 classic（不写无效值）');
-
-  const empty = boot(makeApp(new Map()));
-  eq(empty.sandbox.Skins.currentId(), 'classic', '没存过就是默认皮肤');
+  eq(second.html.getAttribute('data-skin'), 'hertz', '刷新后恢复 hertz DOM 标记');
+  eq(enabledSkin(second), 'hertz', '刷新后仅启用 hertz CSS');
+  eq(second.sandbox.Skins.currentId(), 'hertz', 'currentId 与 DOM、CSS 一致');
+  for (const oldId of ['classic', 'liunian', 'qingfeng', 'heijiao', 'orbit', 'no-such-skin']) {
+    const legacy = new Map([['vmusic.skin', oldId], ['vmusic.skin.default', 'orbit'], ['vmusic.theme.v2', 'sakura']]);
+    const migrated = boot(makeApp(legacy));
+    eq(migrated.sandbox.Skins.currentId(), 'hertz', oldId + ' 迁移到唯一布局');
+    eq(legacy.get('vmusic.skin'), 'hertz', oldId + ' 旧值被有效值替换');
+    eq(enabledSkin(migrated), 'hertz', oldId + ' 迁移同步启用 CSS');
+    eq(migrated.sandbox.Theme.current().id, 'sakura', oldId + ' 布局迁移保留独立主题偏好');
+    eq(boot(makeApp(legacy)).sandbox.Skins.currentId(), 'hertz', oldId + ' 迁移结果刷新仍在');
+  }
+  eq(boot(makeApp(new Map())).sandbox.Skins.currentId(), 'hertz', '空存储使用唯一默认布局');
 }
 
 // ---------------------------------------------------------------------------
@@ -201,34 +197,47 @@ function checkBuiltinThemeRestore() {
   eq(second.html.style.getPropertyValue('--accent'), '#ff8c94', '令牌值跟着主题走');
 
   const unknown = boot(makeApp(new Map([['vmusic.theme.v2', 'not-a-theme']])));
-  eq(unknown.sandbox.Theme.current().id, 'mineral', '不认识的主题 id 回落到默认');
+  eq(unknown.sandbox.Theme.current().id, 'hertz-dark', '不认识的主题 id 回落到默认');
+}
+
+function checkHertzAppearanceRestore() {
+  section('Hertz 外观：深浅主题与显式关闭点击粒子均能恢复');
+  for (const id of ['hertz-dark', 'hertz-light']) {
+    const first = boot(makeApp(new Map()));
+    first.sandbox.Theme.apply(id);
+    const restored = boot(makeApp(first.store));
+    eq(restored.sandbox.Theme.current().id, id, id + ' 保存与刷新恢复');
+    eq(restored.html.getAttribute('data-fx'), 'none', id + ' 不回退到默认点击粒子');
+    eq(restored.html.getAttribute('data-look'), 'plain', id + ' 不遗留其它主题材质');
+    eq(restored.sandbox.ThemeStudio.state.id, '', id + ' 未手选壁纸时保持无壁纸');
+  }
 }
 
 // ---------------------------------------------------------------------------
-// 2b. 默认配色本身：矿石黑 + 旧默认值的一次性迁移
+// 2b. 默认配色本身：Hertz 夜色 + 历史默认值的一次性迁移
 // ---------------------------------------------------------------------------
 
 function checkDefaultTheme() {
-  section('默认配色：没存过就是矿石黑');
+  section('默认配色：没存过就是Hertz 夜色');
 
   const store = new Map();
   const fresh = boot(makeApp(store));
-  eq(fresh.sandbox.Theme.current().id, 'mineral', '空存储落在矿石黑');
-  eq(fresh.html.getAttribute('data-theme'), 'mineral', 'html 标记同步');
-  eq(fresh.html.style.getPropertyValue('--accent'), '#FFFFFF', '矿石黑的纯白强调真的落到令牌上');
+  eq(fresh.sandbox.Theme.current().id, 'hertz-dark', '空存储落在Hertz 夜色');
+  eq(fresh.html.getAttribute('data-theme'), 'hertz-dark', 'html 标记同步');
+  eq(fresh.html.style.getPropertyValue('--accent'), '#f4f3f1', 'Hertz 夜色的强调色真的落到令牌上');
   eq(store.has('vmusic.theme.v2'), false, '兜底那趟不写存储（写了就把"没选过"钉成"选过"）');
   eq(store.has('vmusic.theme.mineral-default'), false, '没旧值可迁时不落标记');
 
   const listed = fresh.sandbox.Theme.list();
-  eq(listed[0].id, 'mineral', '菜单把默认档排在最前');
-  ok(listed[0].name === '矿石黑（默认）', '「（默认）」这个标记跟着换过来了');
+  eq(listed[0].id, 'hertz-dark', '菜单把默认档排在最前');
+  ok(listed[0].name === '夜色（默认）', '「（默认）」这个标记跟着换过来了');
   eq(listed.filter((t) => t.id === 'celestial')[0].name, '晴空绘卷', '旧默认不再自称默认');
 
   section('默认配色：旧默认值只迁一次');
   const migrated = new Map([['vmusic.theme.v2', 'celestial']]);
   const first = boot(makeApp(migrated));
-  eq(first.sandbox.Theme.current().id, 'mineral', '存着旧默认的换成矿石黑');
-  eq(migrated.get('vmusic.theme.v2'), 'mineral', '存储里的旧值一起改掉，别下次开机又读回来');
+  eq(first.sandbox.Theme.current().id, 'hertz-dark', '存着旧默认的换成Hertz 夜色');
+  eq(migrated.get('vmusic.theme.v2'), 'hertz-dark', '存储里的旧值一起改掉，别下次开机又读回来');
   eq(migrated.get('vmusic.theme.mineral-default'), '1', '落下一次性标记');
 
   // 迁移之后用户主动选回晴空绘卷：标记在，就不该再被改回去。
@@ -357,6 +366,7 @@ function checkBootOrder() {
 (function main() {
   checkSkinRestore();
   checkBuiltinThemeRestore();
+  checkHertzAppearanceRestore();
   checkDefaultTheme();
   checkLateThemeRestore();
   checkCustomRestore();

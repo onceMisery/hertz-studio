@@ -597,6 +597,8 @@ struct App {
     tray_actions: Option<TrayActions>,
     config: Config,
     committed_config: Config,
+    /// 全局恢复快捷键注册事务（§5.1）；None 仅在事务执行瞬间出现。
+    hotkey: Option<crate::hotkey::Manager>,
     dbx: Option<crate::dbx_feed::Controller>,
     dbx_session: Option<String>,
     source_health: crate::management::SourceHealth,
@@ -1557,6 +1559,32 @@ impl App {
         WallpaperCandidate::Current(self.config.wallpaper.clone())
     }
 
+    /// 已保存偏好与真实注册状态分别上报（§5.1：不用配置值冒充已生效）。
+    fn recovery_hotkey_json(&self) -> serde_json::Value {
+        let saved = self.config.recovery_hotkey.clone();
+        let (registered, error) = match self.hotkey.as_ref() {
+            Some(manager) => {
+                let status = manager.status(saved.as_ref());
+                (
+                    serde_json::Value::Array(
+                        status
+                            .registered
+                            .iter()
+                            .map(|shortcut| serde_json::Value::String(shortcut.as_str().to_owned()))
+                            .collect(),
+                    ),
+                    status.error.clone().map(serde_json::Value::String),
+                )
+            }
+            None => (serde_json::Value::Array(Vec::new()), None),
+        };
+        serde_json::json!({
+            "saved": saved.as_ref().map(|shortcut| shortcut.as_str()),
+            "registered": registered,
+            "error": error,
+        })
+    }
+
     fn send_settings_status(&self, error: Option<&str>, message: Option<&str>) {
         let Some(settings) = self.settings.as_ref() else {
             return;
@@ -1611,6 +1639,7 @@ impl App {
             "lyricsConfig": self.position_edit.as_ref().map(|edit| &edit.lyrics).unwrap_or(&self.config.lyrics),
             "runtime": self.status_json(),
             "launchAtLogin": native::autostart_enabled().ok(),
+            "recoveryHotkey": self.recovery_hotkey_json(),
             "positionEditing": self.position_edit.is_some(),
             "sourceMessage": self.source_message,
             "navigationRequest": { "id": self.settings_navigation, "tab": self.settings_tab },
@@ -2696,6 +2725,8 @@ impl App {
             enabled: Option<bool>,
             #[serde(default)]
             lease: Option<String>,
+            #[serde(default)]
+            hotkey: Option<String>,
         }
         let Ok(command) = serde_json::from_str::<Command>(body) else {
             self.send_settings_status(Some("设置请求格式无效"), None);
@@ -2772,6 +2803,55 @@ impl App {
                     .err()
                     .map(|error| format!("开机启动设置失败：{error:#}"));
                 self.send_settings_status(error.as_deref(), None);
+            }
+            "recovery-hotkey" => {
+                let Some(expected_revision) = command.expected_revision else {
+                    self.send_settings_status(Some("缺少设置修订号"), None);
+                    return;
+                };
+                if expected_revision != self.config.revision {
+                    self.send_settings_status(Some("设置已变化，请读取最新状态后重试"), None);
+                    return;
+                }
+                let desired = match command.hotkey.as_deref() {
+                    None | Some("") => None,
+                    Some(value) => match value.parse::<crate::hotkey::Shortcut>() {
+                        Ok(shortcut) => Some(shortcut),
+                        Err(error) => {
+                            self.send_settings_status(Some(&error), None);
+                            return;
+                        }
+                    },
+                };
+                let saved_before = self.config.recovery_hotkey.clone();
+                let mut manager = self.hotkey.take();
+                // Manager 在事务期间移出 App，让持久化闭包独占 self.config；
+                // 每次成功提交（含补偿写回）都把 self.config 推进到磁盘真实状态。
+                let result = match manager.as_mut() {
+                    Some(manager) => manager.replace(saved_before.as_ref(), desired, |desired| {
+                        let mut next = self.config.clone();
+                        next.recovery_hotkey = desired.cloned();
+                        match config::commit(&mut self.config, next) {
+                            Ok(()) => crate::hotkey::PersistOutcome {
+                                saved: self.config.recovery_hotkey.clone(),
+                                result: Ok(()),
+                            },
+                            Err(error) => crate::hotkey::PersistOutcome {
+                                saved: self.config.recovery_hotkey.clone(),
+                                result: Err(format!("{error:#}")),
+                            },
+                        }
+                    }),
+                    None => Err("快捷键模块不可用".into()),
+                };
+                self.hotkey = manager;
+                // 事务收尾时 config::commit 已把内存推进到与磁盘一致；
+                // committed_config 同步为真实保存值，避免普通歌词编辑回滚到旧修订。
+                self.committed_config = self.config.clone();
+                self.send_settings_status(
+                    result.as_ref().err().map(String::as_str),
+                    result.is_ok().then_some("已更新恢复快捷键"),
+                );
             }
             "wallpaper-retry" => {
                 self.retry_wallpaper(target);
@@ -4496,6 +4576,17 @@ impl App {
                     self.recompute_wallpaper();
                 }
             }
+            NativeEvent::HotkeyFired(id) => {
+                // 复用托盘同款恢复命令：只表达解锁并定位的意图，不绕过会话/全屏策略。
+                if self
+                    .hotkey
+                    .as_ref()
+                    .is_some_and(|manager| manager.handles(id))
+                {
+                    log("recovery hotkey fired; unlock and locate lyrics");
+                    self.locate();
+                }
+            }
         }
     }
 
@@ -5115,6 +5206,17 @@ pub(crate) fn run() -> Result<()> {
         tray: None,
         tray_actions: None,
         committed_config: config.clone(),
+        hotkey: {
+            // 快捷键宿主窗口属于主事件循环线程；注册失败保留偏好，
+            // 托盘与设置页仍可更换/清空（§5.1）。
+            let mut manager = crate::hotkey::Manager::new(native::install_hotkey_window()?);
+            if let Some(saved) = config.recovery_hotkey.as_ref() {
+                if let Err(error) = manager.initialize(Some(saved)) {
+                    log(&format!("hotkey startup register failed: {error}"));
+                }
+            }
+            Some(manager)
+        },
         config,
         dbx: None,
         dbx_session: None,
@@ -5498,6 +5600,12 @@ pub(crate) fn run() -> Result<()> {
                 // 还窗口过程并清注册表，避免收尾回调打在已销毁的窗上。
                 if let Some(mini) = app.mini.take() {
                     mini_native::uninstall(mini.hwnd);
+                }
+                // 退出前注销本宿主全部全局快捷键（§5.1）。
+                if let Some(manager) = app.hotkey.as_mut() {
+                    if let Err(error) = manager.shutdown() {
+                        log(&format!("hotkey shutdown incomplete: {error}"));
+                    }
                 }
                 log("event loop destroyed");
             }

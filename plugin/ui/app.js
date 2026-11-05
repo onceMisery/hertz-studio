@@ -38,6 +38,7 @@ const ui = {
   rail: $('rail'),
   column: $('column'),
   views: {
+    home: $('view-home'),
     library: $('view-library'),
     online: $('view-online'),
     podcasts: $('view-podcasts'),
@@ -2271,7 +2272,7 @@ function applySnapshot(snap) {
         if (window.Stage3D) Stage3D.open(Stage3D.stageId ? Stage3D.stageId() : undefined);
       } catch (e) { try { Stage3D.open(); } catch (e2) { /* 舞台不可用就当没设 */ } }
     } else if (entry === 'wall') {
-      // 墙是清风皮肤的地盘：广播意图，皮肤在就开、不在就当不跳转。
+      // 独立封面墙监听同一播放入口意图。
       document.dispatchEvent(new CustomEvent('playback:entry-wall'));
     }
   }
@@ -3238,7 +3239,7 @@ const NAV_TOGGLE_VIEWS = [
 // 动效分面降级（folia 的 reduce_motion_surfaces）：全局「减少动效」之外的单项
 // 开关。面名写进 body[data-rm]（空格分隔），各面的 CSS 在自己文件里认领 token
 // —— style.css 管界面微动效、theme-studio.css 管背景纹理、stanza.css 管歌词
-// 排版、skin.qingfeng.css 管海报墙。canvas 舞台不归 CSS 管，仍由全局开关与
+// 排版、cover-wall.css 管封面墙。canvas 舞台不归 CSS 管，仍由全局开关与
 // 渲染模式控制。
 // ---------------------------------------------------------------------------
 
@@ -3258,67 +3259,11 @@ function applyMotionSurfaces() {
 }
 
 // ---------------------------------------------------------------------------
-// 换肤后的视图对账
-//
-// 用户最常见的换肤路径是「在设置页里点皮肤」（皮肤列表就在设置页里），于是
-// 换肤那一刻 state.view 停在 'settings'。各皮肤对设置视图的处理完全不同：
-//
-//   · liunian / qingfeng —— 把 #view-settings **搬进自己的浮层**
-//     （ln-set-pane / qf-set-pane），并把它的 hidden 置 true
-//     （浮层没开时不该露出来）；
-//   · classic / heijiao / orbit —— 设置走共享的清风同款
-//     浮层（skins/skin-settings-sheet.js），视图同样被搬走并隐藏，
-//     setView('settings') 被它的 MutationObserver 拦截成开浮层。
-//
-// 于是「设置页里切皮肤」这一步之后，state.view 仍是 'settings'，而：
-//
-//   · 切到流年/清风/共享浮层的皮肤 → 设置视图被搬走且隐藏，
-//     中栏**一个可见视图都没有** → 首页整片空白（用户报「首页为空」）。
-//
-// 症状一模一样，根因同一处：换肤没有重新对账视图。修法是让「换完肤一定落在
-// 一个能看见东西的视图上」成为**统一**规则，而不是让每个皮肤各自在 mount 里
-// 补一遍 —— 后者必然漏（现在就是漏的）。
-//
-// 落点选 library（首页）而不是「原视图」：设置视图在不同皮肤里的物理位置
-// 完全不同（浮层 / 中栏），跨皮肤保持同一个视图号没有意义；而换肤后回到首页
-// 也正是用户期待的动作 —— 他刚换完皮，立刻要看到新皮肤长什么样。
-//
-// 收尾动作放这里而不是「指望每条换肤调用路径都记得调」：换肤入口有设置页
-// 列表、顶栏胶囊、清风左栏等多条，漏一条就复现。
-//
-// 无论原本在哪个视图，换完一律落到首页并重跑 setView：它既是落点，也是把
-// 换肤期间被皮肤改动过的 hidden 统一对回去的唯一入口（跑 setView 而不直接
-// 改 hidden，是为了让曲库/在线/队列的进入钩子照常跑一遍）。
-//
-// **必须防住「启动期」**：Skins.init() 自己也会广播一次 skin:changed，
-// 而这个监听是在它之前注册的（同一段 startApp 里），所以启动时必然先走这里
-// —— 那时 Daily.bind() / DailyView.bind() 都还没执行（它们在后面两百行）。
-//
-// 不防的后果很隐蔽：setView('library') → Daily.load() → render() 读 `H.ui`
-// 抛错（`H` 还是 null）→ **异常把 load() 打断在发请求之前**，
-// 于是 `localBusy/onlineBusy` 永远停在 true、`loading` 永远为真。
-// 之后 startApp 自己那次 setView('library') 撞上 `if (loading && !force) return`
-// 被挡掉 → 首页每日推荐**永远不发请求**，而页面上没有任何报错：
-// 副标题停在「正在汇总各平台每日推荐…」，卡片区空白。
-// 独立页 DailyView 是另一套状态、另一条 fetch，所以它照常显示歌曲 ——
-// 「独立页有、首页没有」正是这个 bug 的指纹。
-//
-// 判据用「视图模块是否已就绪」而不是「启动完了没有」：bind 一完成就设标记。
-// 这样即使将来调整 startApp 里各 init 的顺序，闸门也跟着对。
-//
-// 两个变量必须声明在 onSkinChangedForViews **之前**：函数体在启动早期就要执行
-// （Skins.init 的广播），那时若它们还在 TDZ 里，读 `pendingSkinViewHandoff`
-// 会抛 ReferenceError —— 正是这个 bug 最初「无报错」表现不出来的那类坑。
-// 默认视图：**所有皮肤**一致，都是在线曲库。
+// 布局恢复后由外壳重新对账活动视图。启动广播须等 Daily.bind 就绪，
+// 避免进入钩子在业务宿主尚未绑定时调用。保存的默认页仍可恢复，
+// 显式导航的曲库/在线等入口保持各自原有含义。
 // ---------------------------------------------------------------------------
-// 为什么不是本地曲库：本地库要用户先填一个音乐目录才有内容，新装/刚迁移的
-// 机器点开就是「曲库还是空的」大引导卡；在线曲库开机就有可听的东西。
-//
-// 边界（这条最容易做错）：只改「回首页」语义 —— 启动、换肤后回默认、
-// 当前视图被隐藏后的兜底。**不改显式导航**：用户点导航里的「曲库」仍然去
-// 本地曲库，那是他自己的选择，不是默认值该替他做的决定。
-// 把 rail 的点击也改掉的表现是「本地曲库再也回不去了」。
-var DEFAULT_VIEW = 'online';
+var DEFAULT_VIEW = 'home';
 const DEFAULT_VIEW_KEY = 'vmusic.defaultView';
 
 function defaultView() {
@@ -3762,7 +3707,7 @@ function renderQueue() {
     // 封面走与曲库行同一套 paintArt（懒加载 / 远程代理 / 稳定色占位）。
     // 本地曲有 has_cover 才给 URL；在线曲的元数据自带远程封面地址；
     // 都没有就画占位。行列表的轨道按无封面排的，.q-art 默认由 style.css
-    // 隐藏，黑胶的卡片几何显式放开它（skin.heijiao.css）。
+    // 隐藏；Hertz 队列抽屉另使用同一封面快照。
     paintArt(row, track.has_cover ? transport.coverUrl(track.id) : (track.cover || null));
     if (id.startsWith('online:') && window.Online) {
       // 与歌单详情同一套平台徽标：混合队列里一眼分清本地与在线。
@@ -4144,6 +4089,7 @@ function initShelf() {
     if (art) paintRowArt(art, id);
     const card = gridArts.get(id);
     if (card) paintGridArt(card, id);
+    if (window.HertzSkin && state.view === 'home') window.HertzSkin.refreshHome(true);
   });
 
   // 启动顺序不该决定架子上有没有歌单。loadPlaylists() 只在 shelf 已经建好时
@@ -5211,8 +5157,8 @@ async function loadSettings() {
   if (ui.setRelay) ui.setRelay.checked = state.settings.online_auto_relay !== false;
   paintLyricSettings();
   refreshEmotionAiStatus();
-  // 封面取色会盖掉用户选的主题，默认不这么做：设置表里没有这项时按关闭回填。
-  setCoverFollow(state.settings.cover_follow === true, false);
+  // 原型默认开启封面氛围；已保存的关闭偏好仍有效。
+  setCoverFollow(state.settings.cover_follow !== false, false);
   // 导航里「每日推荐」的可见性：关掉就把入口摘掉，其它菜单项不受影响。
   // 放在设置到手之后而不是启动时——早于这一步挂载的话，设置里是关的就白挂了。
   if (window.DailyView) window.DailyView.applySettings(state.settings);
@@ -5689,7 +5635,6 @@ function enterFavoritesView() { if (window.Favorites) window.Favorites.onViewEnt
 // 每日推荐独立页：数据与首页那条推荐条同源，只是换了个地方展示。
 function enterDailyView() { if (window.DailyView) window.DailyView.onViewEnter(); }
 function enterLibraryView() {
-  if (typeof HomeDashboard !== 'undefined') HomeDashboard.onViewEnter();
   if (window.Daily) window.Daily.load({ silent: true });
   // 专辑/歌手浏览面：编辑/扫描可能改过 facet，进入时对齐一次。
   loadFacets();
@@ -5700,6 +5645,7 @@ function initShell() {
     rail: ui.rail,
     settingsEntry: ui.settingsEntry,
     views: [
+      { id: 'home', el: ui.views.home, enter: () => { if (window.HomeDashboard) HomeDashboard.onViewEnter(); if (window.HertzSkin) HertzSkin.refreshHome(); } },
       { id: 'library', el: ui.views.library, enter: enterLibraryView },
       { id: 'online', el: ui.views.online, enter: enterOnlineView, leave: leaveOnlineView },
       { id: 'podcasts', el: ui.views.podcasts, enter: enterPodcastsView },
@@ -6925,7 +6871,7 @@ const skinActions = {
   },
 
   'settings-enter': (d) => {
-    // 流年/清风的显式打开事件不经 setView；同一次打开的请求由模块本地合并。
+    // 播放页工具按需读取原设置；同次请求由模块合并。
     if (window.HertzDesktopSettings) window.HertzDesktopSettings.onSettingsEnter();
     loadDiagnostics();
     const refreshers = { cache: window.__loadCacheStats, dsp: window.__loadDspSettings, remote: window.__loadRemoteRoots };
@@ -6935,22 +6881,25 @@ const skinActions = {
   },
 
   'play-local': (d) => {
-    playTrack(String(d.id), state.queue.slice());
+    const ids = Array.isArray(d.list) ? d.list.filter(item => item.source === 'local').map(item => item.id) : state.queue.slice();
+    playTrack(String(d.id), ids);
   },
 
   'play-online': (d) => {
     if (window.Online && d.track) {
-      window.Online.playAll([Object.assign({ playable: true }, d.track)], 0);
+      const tracks = Array.isArray(d.list) ? d.list.filter(item => item.source !== 'local').map(item => item.raw) : [d.track];
+      const at = tracks.findIndex(item => item && item.id === d.track.id && item.source === d.track.source);
+      window.Online.playAll((at >= 0 ? tracks : [d.track]).map(item => Object.assign({ playable: true }, item)), Math.max(0, at));
     }
   },
 
   'view-local': (d) => {
     const q = d.q || '';
-    if (d.artist !== undefined) {
-      state.libFilter.artist = String(d.artist);
-      state.libFilter.album = '';
+    if (d.artist !== undefined || d.album !== undefined) {
+      state.libFilter.artist = String(d.artist || '');
+      state.libFilter.album = String(d.album || '');
       ui.libArtistFilter.value = state.libFilter.artist;
-      ui.libAlbumFilter.value = '';
+      ui.libAlbumFilter.value = state.libFilter.album;
     }
     ui.search.value = q;
     ui.searchClear.hidden = !q;
@@ -6976,6 +6925,19 @@ const skinActions = {
 
   'home-request': (d) => {
     d.result = mobileHomeSnapshot();
+  },
+
+  'library-browse': (d) => {
+    d.result = libraryBrowseSnapshot(d);
+  },
+
+  'library-play': (d) => {
+    d.result = playLibrarySelection(d.shuffle === true);
+  },
+
+  'playlist-open': (d) => {
+    setView('playlists');
+    if (d.id) openPlaylist(String(d.id));
   },
 
   'source-request': (d) => {
@@ -7056,10 +7018,12 @@ function initSkinBridge() {
 // Mobile home is a read-only projection. Track activation still uses the shared
 // source-item actions, and history/catalogue reads use the normal transport.
 async function mobileHomeSnapshot() {
-  const [history, library, artists] = await Promise.allSettled([
+  const [history, library, artists, albums, playlists] = await Promise.allSettled([
     transport.get('/v1/history?limit=8&offset=0'),
     transport.get('/v1/tracks?sort=added&limit=12&offset=0'),
     transport.get('/v1/tracks/facets?kind=artist'),
+    libraryBrowseSnapshot({ kind: 'album', limit: 8 }),
+    libraryBrowseSnapshot({ kind: 'playlist', limit: 6 }),
   ]);
   const added = library.status === 'fulfilled' ? (library.value.tracks || []) : [];
   added.forEach(track => state.byId.set(track.id, track));
@@ -7091,7 +7055,67 @@ async function mobileHomeSnapshot() {
       const track = added.find(item => item.artist === artist.name);
       return { name: artist.name, count: artist.count, cover: track && track.has_cover ? transport.coverUrl(track.id) : '' };
     }) : [],
+    albums: albums.status === 'fulfilled' ? albums.value.items : [], albumsError: albums.status === 'rejected',
+    playlists: playlists.status === 'fulfilled' ? playlists.value.items : [], playlistsError: playlists.status === 'rejected',
   };
+}
+
+// 只读的专辑/歌手/歌单浏览投影。精确筛选与整库播放沿用原曲库入口。
+// 一页最多 40 项，封面查询并发最多 4 条；分页由 UI 显式继续读取。
+async function libraryBrowseSnapshot({ kind = 'album', q = '', offset = 0, limit = 40, signal } = {}) {
+  const size = Math.max(1, Math.min(40, Number(limit) || 40));
+  const start = Math.max(0, Number(offset) || 0), query = String(q).trim().toLocaleLowerCase();
+  if (kind === 'playlist') {
+    const data = await transport.get('/v1/playlists', { signal });
+    const items = (data.playlists || []).filter(item => !query || item.name.toLocaleLowerCase().includes(query));
+    const incoming = items.slice(start, start + size).map(item => ({ id: item.id, name: item.name,
+      count: item.track_count || 0, kind: 'playlist', cover: '', subtitle: (item.track_count || 0) + ' 首歌曲' }));
+    if (plCovers) incoming.forEach(item => {
+      const result = plCovers.state(item.id);
+      if (result.s === 'url') item.cover = result.url;
+    });
+    return { items: incoming, total: items.length, nextOffset: start + incoming.length };
+  }
+  if (kind !== 'album' && kind !== 'artist') throw new Error('未知曲库分类');
+  const data = await transport.get('/v1/tracks/facets?kind=' + kind, { signal });
+  const items = (data.facets || []).filter(item => !query || item.name.toLocaleLowerCase().includes(query));
+  const incoming = items.slice(start, start + size).map(item => ({ ...item, kind, cover: '', subtitle: item.count + ' 首歌曲' }));
+  let cursor = 0;
+  await Promise.all(Array.from({ length: Math.min(4, incoming.length) }, async () => {
+    while (cursor < incoming.length && !(signal && signal.aborted)) {
+      const item = incoming[cursor++];
+      try {
+        const page = await transport.get('/v1/tracks?' + new URLSearchParams({ [kind]: item.name, sort: 'added', limit: 1, offset: 0 }), { signal });
+        const track = (page.tracks || [])[0];
+        if (track) {
+          state.byId.set(track.id, track);
+          item.cover = track.has_cover ? transport.coverUrl(track.id) : '';
+          item.subtitle = (kind === 'album' && track.artist ? track.artist + ' · ' : '') + item.count + ' 首歌曲';
+        }
+      } catch (error) {
+        if (signal && signal.aborted) throw error;
+        // 封面是装饰，个别封面读不到时仍能进入真实筛选结果。
+      }
+    }
+  }));
+  pruneLibraryMetadata();
+  return { items: incoming, total: items.length, nextOffset: start + incoming.length };
+}
+
+async function playLibrarySelection(shuffle) {
+  const ticket = PlaybackIntent.begin();
+  try {
+    const ids = await libraryTrackIds();
+    if (!PlaybackIntent.current(ticket)) return;
+    if (!ids.length) { toast('当前曲库筛选没有可播放的歌曲'); return; }
+    if (shuffle) {
+      await transport.post('/v1/player/mode', { mode: 'shuffle' });
+      if (!PlaybackIntent.current(ticket)) return;
+    }
+    await playTrack(ids[0], ids);
+  } catch (error) {
+    if (PlaybackIntent.current(ticket)) toast(errText('播放曲库失败', error), 'error');
+  }
 }
 
 // 队列快照：海报墙要的每项就是「id / 标题 / 艺人 / 封面 / 序号 / 在不在放」。
@@ -7645,12 +7669,10 @@ function initBarVisibility() {
   try { collapsed = localStorage.getItem(STORE_KEY) === '0'; } catch (e) { /* 本次会话仍可操作 */ }
 
   function sync() {
-    // 流年把同一个节点搬成文档流播放卡，其折叠由皮肤自己管理。
-    const inlinePlayer = document.documentElement.dataset.skin === 'liunian';
-    const hidden = collapsed && !inlinePlayer;
+    const hidden = collapsed;
     bar.classList.toggle('is-hidden', hidden);
     document.body.classList.toggle('bar-hidden', hidden);
-    toggleBtn.hidden = inlinePlayer;
+    toggleBtn.hidden = false;
     toggleBtn.setAttribute('aria-expanded', String(!hidden));
     restoreBtn.hidden = !hidden;
   }
@@ -7898,15 +7920,34 @@ function fitFloatingWindowToCapsule() {
 /// 容器列名单——皮肤会改栅格的类名与层级，列名单必然漏。播放不受影响：最小化
 /// 只是把文档流里的界面藏起来，音频与事件链路照旧跑。
 function setCapsuleMinimized(min) {
+  const nativeHost = window.__hertzWindowHost;
+  const native = !!(nativeHost && typeof nativeHost.capsule === 'function');
+  if (native) {
+    if (min) {
+      // Overlays are closed through their owners before the one native window
+      // becomes a capsule, keeping the restore action and focus path intact.
+      window.NowPlaying?.close(); window.HertzCoverWall?.close();
+      window.Space3D?.close(); window.Stage3D?.close();
+      window.HertzVolumeControls?.close();
+      document.querySelectorAll('dialog[open]').forEach(dialog => dialog.close());
+      if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+      ui.capsule.style.removeProperty('left'); ui.capsule.style.removeProperty('top');
+      ui.capsule.style.removeProperty('right'); ui.capsule.style.removeProperty('bottom');
+      document.documentElement.dataset.hertzWindowMode = 'capsule';
+    } else {
+      delete document.documentElement.dataset.hertzWindowMode;
+    }
+  }
   state.capsuleMin = !!min;
   document.body.classList.toggle('is-capsule', !!min);
   ui.capsule.hidden = !min;
   if (!min) refreshCapsuleMarquee();
-  try { localStorage.setItem(CAPSULE_KEY, min ? '1' : ''); } catch (err) { /* 偏好丢一次无所谓 */ }
+  try { localStorage.setItem(CAPSULE_KEY, min && !native ? '1' : ''); } catch (err) { /* 偏好丢一次无所谓 */ }
   if (min) {
-    restoreCapsulePos();
+    if (!native) restoreCapsulePos();
     syncCapsule(state.current, lastNowCover);
   }
+  if (native) nativeHost.capsule(!!min);
 }
 
 /// 胶囊态的提示出口。最小化两态（页内 `is-capsule`、浮窗 `is-floating-capsule`）
@@ -8180,6 +8221,7 @@ function initNowPlayingModal() {
 // ---------------------------------------------------------------------------
 
 function initCapsuleControls() {
+  window.addEventListener('hertz-native-capsule-restore', () => setCapsuleMinimized(false));
   // 胶囊播放器：顶栏按钮收进去；胶囊上直接给传输三键与展开，不展开也能操作。
   // 页内最小化态整块可拖、靠边吸附、位置记进 localStorage；浮动实例改由宿主窗口
   // 承担移动与吸附（见下面的 pointerdown）。
@@ -8268,19 +8310,28 @@ function initCapsuleControls() {
     const box = ui.capsule.getBoundingClientRect();
     const offX = startX - box.left, offY = startY - box.top;
     const floating = window.HertzCapsuleOnly ? floatingApi() : null;
+    const native = document.documentElement.dataset.hertzWindowMode === 'capsule' ? window.__hertzWindowHost : null;
     let dragging = false;
-    let dragMode = floating ? 'pending' : 'page';
+    let dragMode = floating || native ? 'pending' : 'page';
     const move = (ev) => {
+      if (native && dragging && ev.buttons === 0) { cleanup(); return; }
       if (!dragging) {
         if (Math.hypot(ev.clientX - startX, ev.clientY - startY) < CAPSULE_DRAG_PX) return;
         dragging = true;
         capsuleJustDragged = true;
         ui.capsule.classList.add('is-dragging');
         // 抓住指针：拖出 iframe 之外事件也还回这里，不然一过边界就丢拖拽。
-        try { ui.capsule.setPointerCapture(e.pointerId); } catch (err) { /* 拿不到就算了 */ }
-        if (floating) {
+        if (native) {
+          // The OS owns desktop coordinates, monitor transitions and DPI during
+          // this drag; never clamp a native capsule to the old page viewport.
+          dragMode = 'native';
+          native.drag();
+        } else if (floating) {
+          try { ui.capsule.setPointerCapture(e.pointerId); } catch (err) { /* 拿不到就算了 */ }
           dragMode = 'host';
           floating.beginDrag().catch((err) => { console.warn('[hertz] 浮窗拖动起手失败：', err); dragMode = 'off'; });
+        } else {
+          try { ui.capsule.setPointerCapture(e.pointerId); } catch (err) { /* optional pointer capture */ }
         }
       }
       // host 形态下移动由操作系统接管，这里什么都不做；pending/off 也不动页内 DOM。
@@ -8326,7 +8377,7 @@ function initCapsuleControls() {
   // 宿主改窗口尺寸后把越界的位置夹回来。浮动实例没有页内坐标可夹（胶囊就是窗口
   // 的全部内容，位置归宿主窗口管），直接跳过。
   window.addEventListener('resize', () => {
-    if (window.HertzCapsuleOnly) return;
+    if (window.HertzCapsuleOnly || document.documentElement.dataset.hertzWindowMode === 'capsule') return;
     if (!ui.capsule.style.left || ui.capsule.hidden) return;
     const r = ui.capsule.getBoundingClientRect();
     placeCapsule(r.left, r.top);
@@ -8336,7 +8387,11 @@ function initCapsuleControls() {
   try { capsuleMin = localStorage.getItem(CAPSULE_KEY) === '1'; } catch (err) { capsuleMin = false; }
   // 浮动实例的形态由 surface 决定，不读 tab 那份偏好：两个 surface 共用宿主 storage
   // 的同一个键空间，互相读会把对方的初始态改错（还会顺手写脏偏好）。
-  if (capsuleMin && !window.HertzCapsuleOnly) setCapsuleMinimized(true);
+  if (window.__hertzWindowHost?.capsule) {
+    // A prior browser session may have stored the page-only minimized flag.
+    // The native host always opens a usable main window on a fresh launch.
+    try { localStorage.setItem(CAPSULE_KEY, ''); } catch (err) { /* optional preference */ }
+  } else if (capsuleMin && !window.HertzCapsuleOnly) setCapsuleMinimized(true);
 }
 
 // Floating windows share transport, commands and metadata with the full player.
@@ -9442,18 +9497,11 @@ async function startApp() {
     if (!button) continue;
     button.onclick = () => {
       if (window.hertzHost && window.hertzHost.isDbx) {
-        const skin = window.Skins && window.Skins.currentId();
-        const sheet = document.querySelector(skin === 'qingfeng' ? '.qf-modal' : skin === 'liunian' ? '.ln-modal' : '.skset-modal');
-        if (skin === 'qingfeng' || skin === 'liunian') {
-          // 这两套皮肤有自己的打开入口；setView 只会隐藏它们已搬走的设置视图。
-          if (sheet && sheet.hidden) {
-            const opener = skin === 'qingfeng' ? document.querySelector('.qf-settings-btn') : ui.settingsEntry;
-            if (opener) opener.click();
-          }
-        } else setView('settings');
+        setView('settings');
+        if (window.HertzSkin) window.HertzSkin.selectSettings('lyrics');
         // 若已打开则显式重新检测；入口已发出的同次检测会被本地合并。
         if (window.HertzDesktopSettings) window.HertzDesktopSettings.onSettingsEnter();
-        // 皮肤先完成现有浮层搬运/分类还原，再聚焦歌词组里的桌面区。
+        // 分类显隐完成后聚焦歌词组里的桌面区。
         requestAnimationFrame(() => window.HertzDesktopSettings && window.HertzDesktopSettings.focus());
         return;
       }
@@ -9644,7 +9692,7 @@ async function startApp() {
       if (entries[0].isIntersecting && state.tracks.length < state.total && !state.loading) {
         loadTracks(false);
       }
-    }, { root: ui.column.querySelector('#view-library') }).observe(ui.libSentinel);
+    }, { root: ui.column }).observe(ui.libSentinel);
   }
 
   // 界面皮肤排在 initTheme() 之前：先定布局（data-skin + 启用对应 CSS），

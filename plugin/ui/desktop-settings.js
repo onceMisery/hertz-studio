@@ -147,9 +147,7 @@
 
   function focus() {
     if (!refs) return;
-    // Existing skin category buttons own group visibility. Select their lyrics entry.
-    const link = document.querySelector('.skset-link[data-skset-key="lyrics"], .qf-set-link[data-qf-key="lyrics"], .ln-set-link[data-ln-key="lyrics"]');
-    if (link) link.click();
+    if (window.HertzSkin) window.HertzSkin.selectSettings('lyrics');
     refs.root.scrollIntoView({ block: 'nearest' });
     refs.root.focus({ preventScroll: true });
   }

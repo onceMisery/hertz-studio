@@ -364,7 +364,7 @@ function sandboxWithFullCatalog() {
 }
 
 function checkThemeBackgrounds() {
-  section('主题 → 背景图：每一套主题都解析出一张真实存在的图');
+  section('主题 → 背景图：Hertz 保持无壁纸，其余主题映射真实资源');
 
   ok(BUILTIN_THEME_IDS.length >= 10, `内置主题被抽出来验证（${BUILTIN_THEME_IDS.length} 套）`);
   ok(ANIME_THEME_IDS.length >= 5, `二次元主题被抽出来验证（${ANIME_THEME_IDS.length} 套）`);
@@ -380,6 +380,10 @@ function checkThemeBackgrounds() {
   for (const id of all) {
     const wall = S.wallpaperForTheme(id);
     resolved.set(id, wall);
+    if (id === 'hertz-dark' || id === 'hertz-light') {
+      ok(wall === '', id + ' 明确声明无默认壁纸');
+      continue;
+    }
     ok(!!wall, `${id} 解析出了背景图（${wall}）`);
     if (!wall) continue;
     ok(onDisk.has(wall), `${id} 的 ${wall} 在 JS 壁纸目录里`);
@@ -435,6 +439,26 @@ function checkThemeBackgrounds() {
   const animeSeen = new Set(ANIME_THEME_IDS.map((id) => T.wallpaperForTheme(id)));
   ok(animeSeen.size === ANIME_THEME_IDS.length,
     `七套二次元主题各有一张不同的背景图（${animeSeen.size}/${ANIME_THEME_IDS.length}）`);
+
+  section('Hertz 深浅主题：跟随时清空默认壁纸，手选壁纸保持');
+  for (const id of ['hertz-dark', 'hertz-light']) {
+    const clean = sandboxWithFullCatalog();
+    clean.sandbox.ThemeStudio.init();
+    clean.sandbox.Theme.apply('anime-shinobi');
+    clean.sandbox.Theme.apply(id);
+    ok(clean.sandbox.ThemeStudio.state.id === '', id + ' 清除上一主题的自动背景');
+    ok(clean.sandbox.ThemeStudio.state.pinned === false, id + ' 无壁纸默认不会误记为用户固定选择');
+    clean.sandbox.ThemeStudio.setWallpaper('night-02.jpg', { keepTheme: true });
+    clean.sandbox.Theme.apply(id === 'hertz-dark' ? 'hertz-light' : 'hertz-dark');
+    ok(clean.sandbox.ThemeStudio.state.id === 'night-02.jpg', id + ' 手选固定壁纸在切换深浅主题后保留');
+    ok(clean.sandbox.ThemeStudio.state.pinned === true, id + ' 保留用户固定标记');
+    const saved = clean.store.get('vmusic.wallpaper.v1');
+    const reload = sandboxWithFullCatalog();
+    reload.store.set('vmusic.wallpaper.v1', saved);
+    reload.sandbox.Theme.apply(id);
+    reload.sandbox.ThemeStudio.init();
+    ok(reload.sandbox.ThemeStudio.state.id === 'night-02.jpg', id + ' 手选壁纸刷新仍可恢复');
+  }
 
   section('主题 → 背景图：用户手动指定后不再被主题覆盖');
 

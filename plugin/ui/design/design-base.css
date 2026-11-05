@@ -207,22 +207,33 @@
 
   /* 默认主题（页面加载到 Theme.init() 之间由这里保证首帧配色；
      themes.js apply() 之后由行内变量接管）。 */
-  --bg: #0A0A0A;
-  --panel: rgba(20, 20, 21, 0.72);
-  --panel-solid: #121213;
-  --panel-2: rgba(255, 255, 255, 0.05);
-  --line: #1C1D20;
-  --line-strong: #26272B;
-  --text: #E8ECEF;
-  --muted: #8A9099;
-  --accent: #FFFFFF;
-  --accent-2: #00F5D4;
-  --accent-ink: #0A0A0A;
-  --brand: #00F5D4;
-  --brand-rgb: 0, 245, 212;
-  --highlight: #F4D28A;
-  --highlight-rgb: 244, 210, 138;
-  --hover: rgba(255, 255, 255, 0.07);
+  --bg: #0b0b0d;
+  --panel: rgba(18,18,21,0.8);
+  --panel-solid: #17171b;
+  --panel-2: rgba(255,255,255,0.055);
+  --line: #242428;
+  --line-strong: #35353a;
+  --text: #f4f3f1;
+  --muted: #969498;
+  --accent: #f4f3f1;
+  --accent-2: #b1acbf;
+  --accent-ink: #141416;
+  --brand: #d7d2df;
+  --brand-rgb: 215, 210, 223;
+  --highlight: #e6dfcf;
+  --highlight-rgb: 230, 223, 207;
+  --hover: rgba(255,255,255,0.075);
+  --glass-bg-strong: #18181d;
+  --glass-line: #29292f;
+  --field-bg: rgba(255,255,255,0.045);
+  --field-bg-hover: rgba(255,255,255,0.075);
+  --field-border: #323238;
+  --field-border-strong: #54545c;
+  --surface-1: rgba(255,255,255,0.035);
+  --surface-2: rgba(255,255,255,0.065);
+  --surface-line: #29292e;
+  --surface-line-strong: #44444c;
+  --track: rgba(255,255,255,0.14);
   /*
   accent 的 rgb 三元组，供 rgba() 透明度合成使用（舞台高亮的默认回退）。
   themes.js 换肤时会按 accent 自动重算。
@@ -233,8 +244,8 @@
   查了半天的 bloom 与 tone mapping 都不是根因。
   由 defaultTheme 的 --accent / --accent-2 派生（与 themes.js apply() 的运行时派生同一规则）。
   */
-  --accent-rgb: 255, 255, 255;
-  --accent-2-rgb: 0, 245, 212;
+  --accent-rgb: 244, 243, 241;
+  --accent-2-rgb: 177, 172, 191;
 }
 
 /* 不支持 backdrop-filter 的环境（旧内核/企业策略禁用）：强玻璃底退为实色，保证弹层/抽屉文字对比，不靠背后模糊也能读。 */

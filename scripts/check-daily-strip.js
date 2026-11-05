@@ -6,7 +6,7 @@
 // 不需要服务、也不需要用凭据开页面（`/` 已收紧，开首页得先出示凭据，见
 // scripts/ui-token.js），离线夹具更快也更稳。而这次改动的接线全在 index.html 的
 // id 与 daily.js 里，两者都能离线取到 —— 量到的是同一批 id、同一份 CSS。
-const { chromium } = require('playwright');
+const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const fs = require('fs');
 const path = require('path');
 
@@ -39,7 +39,7 @@ const LOCAL = {
   fs.mkdirSync(OUT, { recursive: true });
   const styleCss = fs.readFileSync(path.join(ROOT, 'plugin/ui/style.css'), 'utf8');
   const stageCss = fs.readFileSync(path.join(ROOT, 'plugin/ui/stage.css'), 'utf8');
-  const skinsCss = fs.readFileSync(path.join(ROOT, 'plugin/ui/skins/skins.css'), 'utf8');
+  const skinsCss = fs.readFileSync(path.join(ROOT, 'plugin/ui/skins/skin.hertz.css'), 'utf8');
   const dailyJs = fs.readFileSync(path.join(ROOT, 'plugin/ui/daily.js'), 'utf8');
   const htmlSrc = fs.readFileSync(path.join(ROOT, 'plugin/ui/index.html'), 'utf8');
 
@@ -52,9 +52,9 @@ const LOCAL = {
     ? htmlSrc.slice(stripStart, htmlSrc.indexOf('<div class="lib-empty"', stripStart))
     : '<div class="daily-strip" id="daily-strip"><div class="daily-list" id="daily-list"></div></div>';
 
-  const page_html = `<!doctype html><html lang="zh-CN" data-skin="classic"><head>
+  const page_html = `<!doctype html><html lang="zh-CN" data-skin="hertz"><head>
 <meta charset="utf-8"><title>曲库 · 每日推荐</title>
-<style>${styleCss}</style><style>${stageCss}</style><style>${skinsCss}</style>
+<style>${fs.readFileSync(path.join(ROOT, 'plugin/ui/design/design-base.css'), 'utf8')}</style><style>${styleCss}</style><style>${stageCss}</style><style>${skinsCss}</style>
 <style>
  body{margin:0;background:#0A0A0A;color:#E8ECEF;font:14px/1.6 system-ui,sans-serif}
  .shell{padding:16px;max-width:1080px}

@@ -1091,3 +1091,27 @@ body.space3d-open #toast { z-index: 100; border-radius: 8px; }
   #sp-reading { left: 6%; right: 6%; bottom: 166px; height: 100px; }
   #sp-reading .sl-line { font-size: 20px; }
 }
+
+/* 与主播放器相同的轻量操作面，避免独立的大圆按钮盖住场景。 */
+html[data-skin="hertz"] :is(#stage3d #s3d-settings-toggle, #space3d .sp-fab, #space3d .sp-head > .sp-head-btn) {
+  width: 44px;
+  height: 44px;
+  border: 0;
+  border-radius: 12px;
+  background: rgba(24, 24, 27, .48);
+  color: rgba(244, 243, 241, .78);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .08);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+}
+html[data-skin="hertz"] :is(#stage3d #s3d-settings-toggle, #space3d .sp-fab, #space3d .sp-head > .sp-head-btn):hover {
+  color: #f4f3f1;
+  background: rgba(44, 44, 48, .72);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .08);
+  transform: none;
+}
+html[data-skin="hertz"] :is(#stage3d #s3d-settings-toggle, #space3d .sp-fab, #space3d .sp-head > .sp-head-btn):focus-visible {
+  outline: 2px solid #f4f3f1;
+  outline-offset: 3px;
+}
+html[data-skin="hertz"] :is(#stage3d #s3d-settings-toggle, #space3d .sp-fab, #space3d .sp-head > .sp-head-btn) svg { width: 19px; height: 19px; }

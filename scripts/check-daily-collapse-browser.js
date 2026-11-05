@@ -25,7 +25,7 @@
 
 'use strict';
 
-const { chromium } = require('playwright');
+const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const path = require('node:path');
 const { uiUrl } = require('./ui-token');
 
@@ -85,15 +85,9 @@ async function setSkin(page, id) {
 }
 
 async function gotoLibrary(page) {
-  // 不点 rail：流年把侧栏收成胶囊、清风隐藏左侧栏，
-  // `.rail-item[data-view=library]` 在那两套皮肤下存在却被 Playwright 判不可见。
-  // 直接调它自己的 onclick，走的仍是业务路径（app.js 里就是 setView(...)）。
-  await page.evaluate(() => {
-    const item = document.querySelector('.rail-item[data-view="library"]');
-    if (item && typeof item.onclick === 'function') item.onclick();
-    else if (typeof setView === 'function') setView('library');
-  });
+  await page.evaluate(() => window.HertzShell.navigate('library'));
   await page.waitForSelector('#view-library:not([hidden])', { timeout: 8000 });
+  await page.locator('#daily-strip').scrollIntoViewIfNeeded();
   await page.evaluate(FREEZE);
   await settle(page);
 }
@@ -150,10 +144,7 @@ async function clickToggle(page) {
   catch (e) { return e.name; }
 }
 
-/// 每日推荐条在**某套皮肤**下的通用判据：按钮拿得到、不溢出、文案没被挤成竖排、
-/// 且真的能收起与展开。逐皮肤跑这一组，是因为皮肤的布局全是 `[data-skin=...]`
-/// 包起来的：classic 上成立不代表别的皮肤上成立 —— 而这次报障的诉求恰恰是
-/// "除清风外每套皮肤都要有这个按钮"。
+/// 量实际按钮、文案与收起/展开行为。
 async function checkSkin(page, skin, label) {
   await setSkin(page, skin);
   await gotoLibrary(page);
@@ -208,7 +199,7 @@ async function checkSkin(page, skin, label) {
 /// 曲库行的勾选框：选中之后，鼠标移到下一首歌时它的勾选框**必须还在**。
 /// 这就是报障的复现路径（"选下一首歌的时候选中的勾选框没展示"）。
 async function checkRowCheckbox(page) {
-  await setSkin(page, 'classic');
+  await setSkin(page, 'hertz');
   await gotoLibrary(page);
   // 这一组要的是**真实按压行为**，所以把冻结撤掉（理由见 FREEZE 上面那段）。
   // 代价是读 opacity 前要等过渡走完（0.2s），下面每次点击后都显式等 350ms。
@@ -247,6 +238,7 @@ async function checkRowCheckbox(page) {
   });
   ok(injected === 3, '造出 3 行曲库行（走真实渲染路径）', `rows=${injected}`);
   if (injected !== 3) return;
+  await page.locator('#lib-list').scrollIntoViewIfNeeded();
 
   // 前置：冻结真的撤干净了。
   //
@@ -299,6 +291,8 @@ async function checkRowCheckbox(page) {
     });
   });
 
+  await page.mouse.move(8, 8);
+  await page.waitForTimeout(350);
   const before = await readRows();
   ok(before.length === 3 && before.every((r) => !r.selected && r.opacity < 0.1),
     '（前置）未勾选时三行的操作区都是收起的',
@@ -394,6 +388,7 @@ async function checkRowCheckbox(page) {
   fs.mkdirSync(SHOTS, { recursive: true });
   const browser = await chromium.launch({ channel: 'chrome' });
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  if (process.env.HERTZ_SOURCE_ASSETS === '1') await require('./ui-source-assets').routeSourceAssets(page, { base: URL.replace(/\/$/, ''), dataDir: process.env.VMUSIC_DATA_DIR });
   const errors = [];
   page.on('pageerror', (e) => errors.push(String(e)));
 
@@ -402,8 +397,8 @@ async function checkRowCheckbox(page) {
     await page.waitForFunction(() => window.Skins && window.Daily, null, { timeout: 15000 });
 
     // ---------------------------------------------------------------- 基线
-    section('经典：折叠按钮的基本行为');
-    await setSkin(page, 'classic');
+    section('Hertz：折叠按钮的基本行为');
+    await setSkin(page, 'hertz');
     await gotoLibrary(page);
     const openBox = await stripState(page);
     ok(!openBox.missing, '每日推荐条与折叠按钮都在');
@@ -430,10 +425,9 @@ async function checkRowCheckbox(page) {
       `display=${restored.listDisplay}`);
 
     // ------------------------------------------------------- 逐皮肤
-    section('各套皮肤都要拿得到这颗按钮');
+    section('Hertz 推荐条控件可达性');
     for (const [id, label] of [
-      ['classic', '经典'],
-      ['liunian', '流年'], ['qingfeng', '清风'],
+      ['hertz', 'Hertz'],
     ]) {
       await checkSkin(page, id, label);
     }
@@ -443,7 +437,7 @@ async function checkRowCheckbox(page) {
     // 「三列还撑着、但内容栏已经很紧」的一档。
     section('窄窗口：按钮不能被压掉、文案不能竖排');
     await page.setViewportSize({ width: 969, height: 800 });
-    for (const [id, label] of [['classic', '经典'], ['qingfeng', '清风']]) {
+    for (const [id, label] of [['hertz', 'Hertz']]) {
       await setSkin(page, id);
       await gotoLibrary(page);
       const s = await stripState(page);

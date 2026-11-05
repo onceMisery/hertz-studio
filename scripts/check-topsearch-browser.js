@@ -26,7 +26,7 @@ const TOKEN = fs
 const OUT = process.env.TS_OUT || path.resolve(__dirname, '..', 'output', 'topsearch-shots');
 fs.mkdirSync(OUT, { recursive: true });
 
-const SKINS = (process.env.TS_SKINS || 'classic,liunian,qingfeng,heijiao,orbit').split(',');
+const SKINS = (process.env.TS_SKINS || 'hertz').split(',');
 
 let failures = 0;
 const ok = (cond, label, extra) => {
@@ -175,7 +175,7 @@ const ok = (cond, label, extra) => {
     () => window.TopSearch && window.Online && window.Online.sources().length > 0,
     { timeout: 30000 }
   );
-  await page.evaluate(() => window.Skins.apply('classic'));
+  await page.evaluate(() => window.Skins.apply('hertz'));
   const jumpWord = await typeAndPreview('周杰伦');
   ok(!!jumpWord, '歌曲预览渲染（回车前置）');
   await page.keyboard.press('Enter');

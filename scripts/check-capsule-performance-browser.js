@@ -44,7 +44,7 @@ async function main() {
     });
     await page.addInitScript(() => {
       window.audit = { raf: 0, ticks: 0, measures: 0, hiddenMutations: 0, sizes: [], actions: [] };
-      localStorage.setItem('vmusic.skin', 'orbit');
+      localStorage.setItem('vmusic.skin', 'hertz');
       if (!localStorage.getItem('vmusic.theme.v2')) localStorage.setItem('vmusic.theme.v2', 'mineral');
       const nativeRaf = window.requestAnimationFrame;
       window.requestAnimationFrame = function (fn) {

@@ -21,6 +21,8 @@ pub(crate) const MAX_CONFIG_BYTES: usize = 64 * 1024;
 pub(crate) struct Config {
     pub(crate) revision: u64,
     pub(crate) launch_at_login: bool,
+    /// 全局“解锁并定位歌词”组合键；唯一宿主持有一份，不随来源切换（设计 §5.1）。
+    pub(crate) recovery_hotkey: Option<crate::hotkey::Shortcut>,
     pub(crate) active_profile: Option<Profile>,
     pub(crate) profiles: Vec<ProfileDomain>,
     pub(crate) unbound_domain: Option<StandalonePreferences>,
@@ -132,6 +134,8 @@ struct StoredConfigV4 {
     schema_version: u32,
     revision: u64,
     launch_at_login: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    recovery_hotkey: Option<crate::hotkey::Shortcut>,
     active_profile: Option<Profile>,
     #[serde(default)]
     profiles: Vec<ProfileDomain>,
@@ -395,6 +399,7 @@ impl Default for Config {
         Self {
             revision: 1,
             launch_at_login: false,
+            recovery_hotkey: None,
             active_profile: None,
             profiles: Vec::new(),
             unbound_domain: None,
@@ -897,6 +902,7 @@ fn parse_config(bytes: &[u8]) -> Result<(Config, bool)> {
             Config {
                 revision: stored.revision,
                 launch_at_login: stored.launch_at_login,
+                recovery_hotkey: None,
                 active_profile: active.clone(),
                 profiles: active
                     .into_iter()
@@ -932,6 +938,7 @@ fn parse_config(bytes: &[u8]) -> Result<(Config, bool)> {
             Config {
                 revision: stored.revision,
                 launch_at_login: stored.launch_at_login,
+                recovery_hotkey: None,
                 active_profile: stored
                     .active_profile
                     .map(LegacyProfile::migrate)
@@ -950,6 +957,7 @@ fn parse_config(bytes: &[u8]) -> Result<(Config, bool)> {
             Config {
                 revision: stored.revision,
                 launch_at_login: stored.launch_at_login,
+                recovery_hotkey: None,
                 active_profile: stored.active_profile,
                 profiles: stored.profiles,
                 unbound_domain: stored.unbound_standalone,
@@ -965,6 +973,7 @@ fn parse_config(bytes: &[u8]) -> Result<(Config, bool)> {
             Config {
                 revision: stored.revision,
                 launch_at_login: stored.launch_at_login,
+                recovery_hotkey: stored.recovery_hotkey,
                 active_profile: stored.active_profile,
                 profiles: stored.profiles,
                 unbound_domain: stored.unbound_domain,
@@ -1045,6 +1054,7 @@ fn encode_config(config: &Config) -> Result<Vec<u8>> {
         schema_version: SCHEMA_VERSION,
         revision: copy.revision,
         launch_at_login: copy.launch_at_login,
+        recovery_hotkey: copy.recovery_hotkey.clone(),
         active_profile: copy.active_profile,
         profiles: copy.profiles,
         unbound_domain: copy.unbound_domain,
@@ -1678,6 +1688,45 @@ mod tests {
         let mut invalid = value;
         invalid["schemaVersion"] = 3.into();
         assert!(parse_config(&serde_json::to_vec(&invalid).unwrap()).is_err());
+    }
+    #[test]
+    fn recovery_hotkey_is_global_defaults_empty_and_survives_roundtrip() {
+        // 旧配置没有该字段：默认空，revision 不因此变化。
+        let legacy =
+            serde_json::json!({"schemaVersion":5,"revision":4,"launchAtLogin":false,"activeProfile":null});
+        let (config, migrated) = parse_config(&serde_json::to_vec(&legacy).unwrap()).unwrap();
+        assert!(!migrated);
+        assert_eq!(config.recovery_hotkey, None);
+        assert_eq!(config.revision, 4);
+        // 组合键是宿主全局字段：跨来源切换保持不变，roundtrip 保留原文。
+        let mut config = Config::default();
+        config.recovery_hotkey = Some("Ctrl+Alt+L".parse().unwrap());
+        let encoded = encode_config(&config).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(value["recoveryHotkey"], "Ctrl+Alt+L");
+        let (mut config, _) = parse_config(&encoded).unwrap();
+        assert_eq!(
+            config.recovery_hotkey.as_ref().map(crate::hotkey::Shortcut::as_str),
+            Some("Ctrl+Alt+L")
+        );
+        config.activate_profile(dbx("dbx")).unwrap();
+        assert_eq!(
+            config.recovery_hotkey.as_ref().map(crate::hotkey::Shortcut::as_str),
+            Some("Ctrl+Alt+L")
+        );
+        // 存量文件里的非法组合键按配置损坏处理，不静默丢弃。
+        for stored in ["Ctrl+Alt+F12", "Ctrl+L", "Win+Ctrl+L", "不是快捷键"] {
+            let invalid =
+                serde_json::json!({"schemaVersion":5,"revision":4,"launchAtLogin":false,"activeProfile":null,"recoveryHotkey":stored});
+            assert!(
+                parse_config(&serde_json::to_vec(&invalid).unwrap()).is_err(),
+                "unexpectedly accepted {stored}"
+            );
+        }
+        // 未设置时编码不出现该字段，保持旧宿主可读。
+        let value: serde_json::Value =
+            serde_json::from_slice(&encode_config(&Config::default()).unwrap()).unwrap();
+        assert!(value.get("recoveryHotkey").is_none());
     }
     #[test]
     fn rejects_duplicate_identity_active_ninth_overflow_and_oversize() {

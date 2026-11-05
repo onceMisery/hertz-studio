@@ -7,9 +7,11 @@ const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const ui = path.resolve(__dirname, '../plugin/ui');
 const read = file => fs.readFileSync(path.join(ui, file), 'utf8');
 async function main() {
-  const browser = await chromium.launch({ channel: process.env.PLAYWRIGHT_CHANNEL || 'chrome', headless: true });
+  let page;
+  const server = await chromium.launchServer({ channel: process.env.PLAYWRIGHT_CHANNEL || 'chrome', headless: true });
+  const browser = await chromium.connect(server.wsEndpoint());
   try {
-    const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+    page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
     await page.setContent('<iframe sandbox="allow-scripts" style="width:100%;height:760px" srcdoc="<body></body>"></iframe>');
     const frame = page.frames().find(item => item !== page.mainFrame());
     await frame.addScriptTag({ content: read('host.js') });
@@ -34,11 +36,12 @@ async function main() {
     await frame.getByRole('button', { name: '发送弹幕', exact: true }).click();
     assert.equal(await frame.evaluate(() => counts.chat), 1);
 
+    await page.goto('about:blank');
     await page.setContent('<section id="view-online"><div id="rows"></div></section>');
-    for (const file of ['style.css', 'online.css', 'skins/skin.orbit.css']) await page.addStyleTag({ content: read(file) });
+    for (const file of [...read('index.html').matchAll(/<link[^>]+href="([^"]+\.css)"/g)].map(match => match[1])) await page.addStyleTag({ content: read(file) });
     await page.addScriptTag({ content: read('online.js') });
     await page.evaluate(() => {
-      document.documentElement.dataset.skin = 'orbit';
+      document.documentElement.dataset.skin = 'hertz';
       window.HertzRoom = { addOnline: async () => {} };
       window.Favorites = { attachHeart(parent) { const button = document.createElement('button'); button.className = 't-act'; button.textContent = '♡'; parent.prepend(button); } };
       Online.bind({ state: {}, fmt: () => '4:35', paintArt() {}, addToPlaylistMenu() {} });
@@ -51,14 +54,18 @@ async function main() {
         const rect = element => { const r = element.getBoundingClientRect(); return { x: r.x, y: r.y, right: r.right, bottom: r.bottom, width: r.width, height: r.height }; };
         const duration = rect(row.querySelector('.t-dur')), buttons = [...row.querySelectorAll('.t-actions button')].map(rect);
         const overlaps = (a, b) => a.x < b.right && b.x < a.right && a.y < b.bottom && b.y < a.bottom;
-        return { buttons: buttons.length, safe: buttons.every((a, i) => a.width >= 28 && a.height >= 28 && a.x >= 0 && a.right <= innerWidth && !overlaps(a, duration) && buttons.slice(i + 1).every(b => !overlaps(a, b))) };
+        return { details: { buttons, duration }, buttons: buttons.length, safe: buttons.every((a, i) => a.width >= 28 && a.height >= 28 && a.x >= 0 && a.right <= innerWidth && !overlaps(a, duration) && buttons.slice(i + 1).every(b => !overlaps(a, b))) };
       });
       assert.equal(geometry.buttons, 4);
-      assert.ok(geometry.safe, 'online controls fit without overlapping duration at width ' + width);
+      assert.ok(geometry.safe, 'online controls fit without overlapping duration at width ' + width + ': ' + JSON.stringify(geometry.details));
     }
     const output = path.resolve(__dirname, '../output/playwright/dbx-ui'); fs.mkdirSync(output, { recursive: true });
     await page.screenshot({ path: path.join(output, 'online-row-390.png') });
     console.log('PASS DBX sandbox: click/Enter/validation/newlines; online row controls and duration at eight widths');
-  } finally { await browser.close(); }
+  } catch (error) { console.error(error.message); throw error; } finally {
+    // This source-only sandbox fixture owns the complete temporary browser.
+    // Chrome can hang graceful shutdown after removing an opaque srcdoc frame.
+    await server.kill();
+  }
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

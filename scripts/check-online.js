@@ -954,6 +954,8 @@ async function loginScenario(pollStates, opts) {
     env.sandbox.addEventListener = function () {};
     env.sandbox.innerWidth = 1280;
     env.doc.getElementById('search').getBoundingClientRect = () => ({ width: 400, left: 200, bottom: 60 });
+    env.doc.getElementById('search').closest = selector => selector === '.topsearch'
+      ? { getBoundingClientRect: () => ({ width: 440, left: 180, bottom: 60 }) } : null;
     vm.runInContext(fs.readFileSync(path.join(WEB, 'topsearch.js'), 'utf8'), env.sandbox, { filename: 'topsearch.js' });
     const top = env.sandbox.TopSearch;
     top.bind({});

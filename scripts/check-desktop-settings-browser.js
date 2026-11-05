@@ -98,7 +98,8 @@ async function main() {
     assert.equal(await page.locator('#close-confirm').isVisible(),true);
     await page.locator('#continue-editing').click();
     assert.equal(await page.locator('#apply').isEnabled(), true);
-    assert.equal(await page.locator('#lyrics-secondary').inputValue(), 'translation');
+    // Legacy translation keeps its draft value, while the unified UI shows next.
+    assert.equal(await page.locator('#lyrics-secondary').inputValue(), 'next');
     assert.equal((await page.evaluate(() => window.desktopRequests)).some(request => request.command === 'wallpaper.apply' || request.cmd === 'lyrics-apply'), false, 'style preview must not submit changes');
     await page.evaluate(payload => window.hertzWallpaperSettings.applyStatus(payload), initial);
     assert.equal(await page.locator('#lyrics-size').inputValue(), '42', 'polling must preserve dirty input');

@@ -124,7 +124,7 @@ async function run() {
           await page.goto(host === 'standalone' ? service.base : 'http://127.0.0.1:' + server.address().port + '/host');
           const view = host === 'standalone' ? page : await (await page.waitForSelector('iframe')).contentFrame();
           await view.waitForFunction(() => document.getElementById('conn')?.textContent === '服务已连接');
-          await view.evaluate(() => { Skins.apply('classic'); Theme.apply('mineral'); });
+          await view.evaluate(() => { Skins.apply('hertz'); Theme.apply('mineral'); });
           await view.evaluate(drive, { cover, snapshot: snap });
           await view.evaluate(particles => StageControl.set({ fluidEnabled: false, dust: particles, ripples: particles }), particles);
           await page.waitForTimeout(4200);

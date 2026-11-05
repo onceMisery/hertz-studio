@@ -20,7 +20,7 @@
     },
     {
       "script": "check-dbx-desktop-settings-browser.js",
-      "purpose": "Production plugin UI in a real allow-scripts opaque iframe: all five skins' settings/reopen/desktop entries, explicit consent, independent component/authorization/source facts, partial failures, revoke races, no startup detection/polling and inline guide fallback. Controlled API replies; requires Playwright and Chrome."
+      "purpose": "Production Hertz UI in a real opaque allow-scripts iframe: settings/reopen/desktop entries, consent, independent capability facts, partial failures, revoke races, startup privacy and guide fallback. --settings-default checks saved settings startup."
     },
     {
       "script": "check-desktop-management-native.js",
@@ -115,10 +115,6 @@
       "purpose": "Real WebGL pixels plus the workshop journey against an isolated null backend."
     },
     {
-      "script": "check-anime-ui-browser.js",
-      "purpose": "Browser acceptance for the celestial UI, against a rebuilt isolated null service."
-    },
-    {
       "script": "check-anime-ui-look-browser.js",
       "purpose": "!/usr/bin/env node"
     },
@@ -136,7 +132,7 @@
     },
     {
       "script": "check-shell-navigation-browser.js",
-      "purpose": "应用外壳导航冒烟：活动视图、房间工作区模式、公共 chrome 显隐、换肤下模式保持、无效导航拒绝与播放条 pin，须配隔离 null 后端实例。"
+      "purpose": "Hertz shell navigation, room workspace boundaries, repeat layout admission, invalid navigation, settings state, shortcuts and persistent transport/queue ownership; isolated null service."
     },
     {
       "script": "check-browser-preflight.js",
@@ -255,20 +251,12 @@
       "purpose": "!/usr/bin/env node"
     },
     {
-      "script": "check-heijiao-browser.js",
-      "purpose": "浏览器验收：黑胶皮肤（heijiao）"
-    },
-    {
       "script": "check-home-card-browser.js",
       "purpose": "首页卡片改版（封面左置 + 右侧名言）的浏览器实测。"
     },
     {
       "script": "check-home-dashboard-browser.js",
       "purpose": "!/usr/bin/env node"
-    },
-    {
-      "script": "check-liunian-settings-nav-browser.js",
-      "purpose": "流年设置分类导航的浏览器验收（Node 契约脚本跑不到的部分）。"
     },
     {
       "script": "check-lyric-import-browser.js",
@@ -281,10 +269,6 @@
     {
       "script": "check-mcp-stdio.js",
       "purpose": "真实 MCP stdio 客户端端到端检查（技术路线 §12.1 MCP 反例的协议层实现）。"
-    },
-    {
-      "script": "check-narrow-topbar-browser.js",
-      "purpose": "Real layout/click regression. Build first, then run with Playwright on NODE_PATH."
     },
     {
       "script": "check-now-playing-browser.js",
@@ -303,20 +287,12 @@
       "purpose": "Run against an isolated instance with VMUSIC_DATA_DIR and OPEN_MUSIC_URL set."
     },
     {
-      "script": "check-orbit-browser.js",
-      "purpose": "浏览器手工验收（原文件未写说明）"
-    },
-    {
-      "script": "check-orbit-mobile-browser.js",
-      "purpose": "隔离服务与源码资源实测手机首页、侧边菜单、筛选、独立播放器及换肤清理。"
-    },
-    {
       "script": "check-perf-probe-browser.js",
       "purpose": "!/usr/bin/env node"
     },
     {
       "script": "check-player-browser.js",
-      "purpose": "浏览器手工验收（原文件未写说明）"
+      "purpose": "Real null-backend playback, seek/cancel, mode, volume, queue, list scroll and playlist business regression. Hertz settings geometry and local player palette are checked by focused suites."
     },
     {
       "script": "check-player-races.js",
@@ -339,18 +315,6 @@
       "purpose": "真实浏览器 + 隔离服务：四段构图、火焰/蛋壳像素、低画质预算、完整应用鼠标/触摸/相机与竖屏。"
     },
     {
-      "script": "check-qf-nav-visual.js",
-      "purpose": "清风「本地选项卡」（顶部胶囊主菜单）改版后的浏览器实测。"
-    },
-    {
-      "script": "check-qingfeng-browser.js",
-      "purpose": "清风皮肤的浏览器实测（一次性验收脚本，非契约）。"
-    },
-    {
-      "script": "check-qingfeng-wall.js",
-      "purpose": "一次性：往播放队列里灌一批曲目，然后跑队列拼接页的密排/展开/关灯实测。"
-    },
-    {
       "script": "check-queue-cross-surface-browser.js",
       "purpose": "Reconcile a queue change made after startup reads but before the first event subscription."
     },
@@ -368,7 +332,7 @@
     },
     {
       "script": "check-room-player-browser.js",
-      "purpose": "Offline real-browser room player: five skins, light/dark themes, responsive expand/collapse, keyboard, return navigation, playback permissions and lifecycle."
+      "purpose": "Offline real-browser room player on Hertz, light/dark themes, responsive expand/collapse, keyboard, return navigation, permissions and lifecycle."
     },
     {
       "script": "check-room-theme-browser.js",
@@ -389,22 +353,6 @@
     {
       "script": "check-search-pressure-alternation.js",
       "purpose": "Equal actual start times are not a reversal and have no new latency threshold."
-    },
-    {
-      "script": "check-settings-sheet-browser.js",
-      "purpose": "共享设置浮层（skins/skin-settings-sheet.js）的浏览器验收。"
-    },
-    {
-      "script": "check-sidebar-browser.js",
-      "purpose": "hover 会给这行铺底色（两套皮肤都有），量基线前先把指针挪开并等过渡走完，"
-    },
-    {
-      "script": "check-skin-fixes.js",
-      "purpose": "六个皮肤问题的浏览器实测验收。每一项都量**真实几何/计算样式**，"
-    },
-    {
-      "script": "check-skin-matrix-browser.js",
-      "purpose": "!/usr/bin/env node"
     },
     {
       "script": "check-space-artwork-browser.js",
@@ -604,7 +552,7 @@
     },
     {
       "script": "check-topsearch-browser.js",
-      "purpose": "顶栏在线搜索（topsearch.js）的七套公开皮肤浏览器实测（验收脚本，非契约）。"
+      "purpose": "Global top-search song/artist/playlist controls on Hertz; requires isolated service and configured online source responses."
     },
     {
       "script": "check-video-export-browser.js",
@@ -721,6 +669,139 @@
     {
       "script": "check-wallpaper-pointer-browser.js",
       "purpose": "真实浏览器的指针水波：zodiac/coast 两套场景后端与图片/视频呈现上的可见像素、左右键、闲置、减少动态与关闭。需 Playwright 与 Chrome。"
+    },
+    {
+      "script": "check-hertz-ui-browser.js",
+      "purpose": "Post-implementation Hertz desktop/tablet/H5 acceptance with an isolated real service and 224 tagged songs: homepage sources, library/detail/full queue pagination, settings, sidebar collapse/native swipes/focus/modal boundaries, batch touch controls, scroll ownership, real lyrics/EQ and responsive overflow. HERTZ_EMBEDDED=1 validates rebuilt binary assets."
+    },
+    {
+      "script": "check-cover-wall-browser.js",
+      "purpose": "Isolated real service and source assets: retained independent cover wall, current track, native drag/pinch, 320px source scrolling, NowPlaying return and repeated lifecycle."
+    },
+    {
+      "script": "check-cover-wall-layout-browser.js",
+      "purpose": "Migrated Qingfeng poster geometry on sole Hertz layout: density, expanded reflow, dimming, keyboard navigation and exit cleanup with isolated service and controlled source snapshot."
+    }
+  ],
+  "retiredLayouts": [
+    {
+      "script": "check-heijiao-browser.js",
+      "reason": "Removed vinyl layout, tonearm/drag inertia and its queue modes.",
+      "coverage": [
+        "check-now-playing-browser.js",
+        "check-player-browser.js",
+        "check-skins.js"
+      ]
+    },
+    {
+      "script": "check-liunian-settings-nav-browser.js",
+      "reason": "Removed Liunian settings categories, moved-node navigation and modal.",
+      "coverage": [
+        "check-hertz-ui-browser.js",
+        "check-dbx-desktop-settings-browser.js",
+        "check-skins.js"
+      ]
+    },
+    {
+      "script": "check-settings-sheet-browser.js",
+      "reason": "Removed shared SkinSettingsSheet overlay and its layout lifecycle.",
+      "coverage": [
+        "check-hertz-ui-browser.js",
+        "check-dbx-desktop-settings-browser.js",
+        "check-skins.js"
+      ]
+    },
+    {
+      "script": "check-orbit-browser.js",
+      "reason": "Removed Orbit layout, sidebar, turntable and skin-switch geometry.",
+      "coverage": [
+        "check-hertz-ui-browser.js",
+        "check-skins.js",
+        "check-now-playing-browser.js"
+      ]
+    },
+    {
+      "script": "check-orbit-mobile-browser.js",
+      "reason": "Removed Orbit four-tab/drawer prototype. Current mobile navigation, library, filter, playback, retry and empty states belong to Hertz.",
+      "coverage": [
+        "check-hertz-ui-browser.js",
+        "check-player-browser.js",
+        "check-search-journey-browser.js"
+      ]
+    },
+    {
+      "script": "check-qf-nav-visual.js",
+      "reason": "Removed Qingfeng capsule navigation layout.",
+      "coverage": [
+        "check-hertz-ui-browser.js",
+        "check-shell-navigation-browser.js"
+      ]
+    },
+    {
+      "script": "check-qingfeng-browser.js",
+      "reason": "Removed Qingfeng chrome/settings choreography. Retained independent wall, playback and navigation have dedicated checks.",
+      "coverage": [
+        "check-cover-wall-browser.js",
+        "check-cover-wall-layout-browser.js",
+        "check-hertz-ui-browser.js",
+        "check-skins.js"
+      ]
+    },
+    {
+      "script": "check-qingfeng-wall.js",
+      "reason": "Renamed and migrated to the independent cover wall; dense layout, reflow, dimming, keyboard and cleanup retained.",
+      "coverage": [
+        "check-cover-wall-layout-browser.js"
+      ]
+    },
+    {
+      "script": "check-skin-fixes.js",
+      "reason": "Removed old layout swapping and settings-modal rollback choreography. Registry rollback and wall actions remain covered.",
+      "coverage": [
+        "check-skins.js",
+        "check-cover-wall-browser.js",
+        "check-cover-wall-layout-browser.js"
+      ]
+    },
+    {
+      "script": "check-sidebar-browser.js",
+      "reason": "Removed classic rail implementation. Hertz uses its own collapsible desktop rail, sliding H5 drawer and retained bottom navigation.",
+      "coverage": [
+        "check-hertz-ui-browser.js",
+        "check-shell-navigation-browser.js"
+      ]
+    },
+    {
+      "script": "check-narrow-topbar-browser.js",
+      "reason": "Removed multi-layout toolbar/skin-menu geometry. Current header and mobile actions are checked by Hertz UI; top-search by search journey.",
+      "coverage": [
+        "check-hertz-ui-browser.js",
+        "check-search-journey-browser.js",
+        "check-dbx-ui-browser.js"
+      ]
+    },
+    {
+      "script": "check-skin-matrix-browser.js",
+      "reason": "Removed multi-layout/theme geometry matrix. Current theme and responsive coverage is Hertz UI; restore, palette and declarations remain independent checks.",
+      "coverage": [
+        "check-hertz-ui-browser.js",
+        "check-appearance-restore.js",
+        "check-theme-contrast-browser.js"
+      ]
+    },
+    {
+      "script": "check-anime-ui-browser.js",
+      "reason": "Removed celestial-default whole-shell choreography and alternate layout geometry. Themes, FX, workshop controls, library, Daily and menus retain focused checks.",
+      "coverage": [
+        "check-hertz-ui-browser.js",
+        "check-anime-ui.js",
+        "check-anime-ui-look-browser.js",
+        "check-click-fx-browser.js",
+        "check-workshop-looks-browser.js",
+        "check-daily-strip.js",
+        "check-daily-collapse-browser.js",
+        "check-now-playing-browser.js"
+      ]
     }
   ]
 }

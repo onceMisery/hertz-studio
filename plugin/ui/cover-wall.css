@@ -1,0 +1,1007 @@
+/* SPDX-License-Identifier: MIT
+ * Independent cover wall; retained Qingfeng lattice geometry and motion. */
+
+.qf-lattice {
+  position: fixed;
+  inset: var(--hz-window-inset, 0px) 0 0;
+  z-index: 40;
+  overflow: hidden;
+  user-select: none;
+  /* 必须给底色：参考项目的墙是 absolute 铺满**自己的容器**，底下没别的东西；
+     这里是 fixed 盖全屏，底下压着业务视图 —— 全透明会把曲库页整个透出来
+   （实测截图里「曲库 共0首」和歌单卡整片可见，墙读作一层半透明贴纸）。
+   提到 96% 而不是 100%：留一丝壁纸透感，仍读作「在主页面上浮起一层」。 */
+  background: color-mix(in srgb, var(--bg) 96%, transparent);
+  backdrop-filter: blur(28px) saturate(140%);
+  -webkit-backdrop-filter: blur(28px) saturate(140%);
+  cursor: grab;
+  /* The field handles gestures; the header must keep native horizontal
+     scrolling when its six sources do not fit on a narrow phone. */
+  touch-action: auto;
+}
+
+.qf-lattice:fullscreen { top: 0; }
+
+.qf-lattice:active {
+  cursor: grabbing;
+}
+
+.qf-lattice-world {
+  position: absolute;
+  top: 0;
+  left: 0;
+  transform-origin: 0 0;
+  will-change: transform;
+}
+
+.qf-lattice .qf-poster {
+  position: absolute;
+  overflow: hidden;
+  display: flex;
+  align-items: flex-end;
+  padding: 17px;
+  border-radius: 0; /* 「一切都方角」是这套视觉最强的识别特征 */
+  background: var(--surface-2);
+  box-shadow: 0 0 0 1px var(--skin-line-soft);
+  cursor: pointer;
+  contain: layout paint;
+  transition: box-shadow 600ms var(--ease), filter 600ms var(--ease),
+              transform 260ms var(--ease);
+  /* 平移/换源露出的新卡默认走一次轻上浮（从 0.94 缩放淡入），
+     不重播入场波 —— folia 的「pan 露出的卡不pop成整卡」。 */
+  animation: qf-rise 320ms var(--ease) backwards;
+}
+
+/* 入场波里的卡（开墙那一批）：从上方 90 世界单位落回格位，带一点
+   过冲（贝塞尔 y>1 读作「着落」），延时按到视口左上角的距离逐级展开，
+   由 JS 写进 --qf-land-delay。backwards 填充：等延时期间停在起点，
+   播完不驻留 —— 之后 hover 的 transform 才能接管。 */
+.qf-lattice .qf-poster.is-landing {
+  animation:
+    qf-land 720ms cubic-bezier(0.3, 1.28, 0.42, 1) backwards,
+    qf-land-fade 300ms ease-out backwards;
+  animation-delay: var(--qf-land-delay, 0s), var(--qf-land-delay, 0s);
+}
+
+@keyframes qf-land {
+  from { transform: translateY(-90px) scale(0.88); }
+}
+
+@keyframes qf-land-fade {
+  from { opacity: 0; }
+}
+
+@keyframes qf-rise {
+  from { opacity: 0; transform: scale(0.94); }
+}
+
+/* 退场波：反向于入场，卡片沿原路飞回去（folia 的退出反向波）。
+   both 填充：等延时期间保持隐形，播完停在隐形（root 由 JS 摘）。 */
+.qf-lattice.is-closing {
+  pointer-events: none;
+  cursor: default;
+}
+
+.qf-lattice.is-closing .qf-poster {
+  animation: qf-leave 280ms cubic-bezier(0.4, 0, 1, 1) both;
+  animation-delay: var(--qf-exit-delay, 0s);
+}
+
+@keyframes qf-leave {
+  to { transform: translateY(-90px) scale(0.88); opacity: 0; }
+}
+
+/* 展开让位：块内卡片的 left/top/width/height 只在这一小段时间带过渡
+   （滑到让位表的新格位），平时绝不能带 —— 平移写位置必须 1:1 跟手。 */
+.qf-lattice.is-reflow .qf-poster {
+  transition: left 480ms var(--ease), top 480ms var(--ease),
+              width 480ms var(--ease), height 480ms var(--ease),
+              box-shadow 600ms var(--ease), filter 600ms var(--ease),
+              transform 260ms var(--ease);
+}
+
+.qf-lattice .qf-poster img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  z-index: 0;
+}
+
+/* 底部压暗 scrim：文字压在封面上，必须有这层才读得出来 */
+.qf-lattice .qf-poster-shade {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  background: linear-gradient(
+    180deg,
+    transparent 34%,
+    color-mix(in srgb, var(--bg) 24%, transparent) 56%,
+    color-mix(in srgb, var(--bg) 92%, transparent) 100%
+  );
+}
+
+.qf-lattice .qf-poster:hover {
+  z-index: 3;
+  filter: saturate(1.08) brightness(1.05);
+  /* hover pop（folia 同款）：四条边各向外长出一个 GAP。系数由 JS 按卡
+     自身宽高写在 --qf-popx/--qf-popy —— 非方形卡也恰好各长出一格缝。 */
+  transform: scale(var(--qf-popx, 1), var(--qf-popy, 1));
+}
+
+/* 序号徽章：不用 backdrop-filter —— 每张卡一个模糊层会把整墙提升为
+   N 个合成层，是海报墙最大的 GPU 开销。 */
+.qf-lattice .qf-poster-badge {
+  position: absolute;
+  top: 14px;
+  left: 14px;
+  z-index: 3;
+  padding: 5px 8px;
+  border-radius: var(--r-sm);
+  background: color-mix(in srgb, var(--bg) 62%, transparent);
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  font-variant-numeric: tabular-nums;
+  font-family: var(--font-mono);
+}
+
+.qf-lattice .qf-poster-copy {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+  color: var(--text);
+}
+
+.qf-lattice .qf-poster-copy strong {
+  font-size: clamp(15px, 1.4vw, 22px);
+  font-weight: 700;
+  line-height: 0.98;
+  letter-spacing: -0.04em;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.qf-lattice .qf-poster-copy small {
+  font-size: 12px;
+  font-weight: 500;
+  opacity: 0.78;
+}
+
+/* 正在播放的海报：向内构建的强调边框（卡片 overflow:hidden，画不出外框） */
+.qf-lattice .qf-poster.is-current::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+  border: 2px solid var(--brand);
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--bg) 52%, transparent),
+    inset 0 0 15px -7px color-mix(in srgb, var(--brand) 46%, transparent);
+  transition: box-shadow 300ms var(--ease);
+}
+
+/* 键盘焦点环用 box-shadow 而非 outline，好跟随卡片形状且没有直角 */
+.qf-lattice .qf-poster.is-focused {
+  z-index: 4;
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--bg) 62%, transparent),
+    0 0 0 4px var(--highlight),
+    0 0 0 5px color-mix(in srgb, var(--bg) 38%, transparent),
+    0 12px 32px color-mix(in srgb, var(--bg) 45%, transparent);
+  transform: scale(var(--qf-popx, 1), var(--qf-popy, 1));
+}
+
+/* 展开的大卡：占据中央，抬升 + 更大的投影。
+   transform 必须归位 —— 本条写在 :hover/.is-focused 之后，
+   展开卡不参与 pop（它已经是全场最大的那张）。 */
+.qf-lattice .qf-poster.is-expanded {
+  z-index: 5;
+  padding: 32px;
+  box-shadow: 0 42px 110px color-mix(in srgb, var(--bg) 74%, transparent);
+  filter: none;
+  transform: none;
+  /* 底部留出控件条的高度：曲名是 flex-end 贴在底边的，控件条是
+     bottom:28px 绝对定位，两片都锚底 → 不留就叠在一起
+     （实测截图里曲名正压在暂停键与时长上）。 */
+  padding-bottom: calc(28px + 44px * 2 + 10px + 14px);
+}
+
+/* Keep the real keyboard focus visible even on the expanded card, whose
+   shadow deliberately overrides the selection shadow above. */
+.qf-lattice .qf-poster:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: -4px;
+}
+
+.qf-lattice .qf-poster.is-expanded .qf-poster-shade {
+  background:
+    linear-gradient(
+      0deg,
+      color-mix(in srgb, var(--bg) 86%, transparent) 0%,
+      color-mix(in srgb, var(--bg) 62%, transparent) 14%,
+      color-mix(in srgb, var(--bg) 26%, transparent) 30%,
+      transparent 46%
+    ),
+    linear-gradient(
+      90deg,
+      color-mix(in srgb, var(--bg) 88%, transparent),
+      color-mix(in srgb, var(--bg) 50%, transparent) 52%,
+      transparent
+    );
+}
+
+.qf-lattice .qf-poster.is-expanded .qf-poster-copy {
+  max-width: 82%;
+  min-width: 0;
+}
+
+/* 字号跟着**卡片实际宽度**走，不能跟视口走：卡片尺寸由模板块的
+   [x,y,w,h] 决定（1×8 的竖条只有 128×1080，6×6 的方卡有 808×808），
+   用 vw 算会在窄竖条上写出撑出卡外的巨字（实测 407px 宽的卡上
+   4.6vw=66px，「曲目 4 · 拼接测试」直接溢出到卡外）。
+   cqi 跟着卡片自身宽度走，pad 越宽字越大，与卡片尺寸自动匹配。 */
+.qf-lattice .qf-poster {
+  container-type: inline-size;
+}
+
+.qf-lattice .qf-poster.is-expanded .qf-poster-copy strong {
+  font-size: clamp(22px, 11cqi, 58px);
+  line-height: 1.04;
+  overflow-wrap: anywhere;
+}
+
+.qf-lattice .qf-poster.is-expanded .qf-poster-copy small {
+  margin-top: 7px;
+  font-size: clamp(12px, 4.4cqi, 16px);
+  overflow-wrap: anywhere;
+}
+
+/* 关灯：非当前海报压黑，只留正在播放那张是亮的 */
+.qf-lattice.is-lights-out .qf-poster:not(.is-current) {
+  opacity: 0.82;
+}
+
+.qf-lattice.is-lights-out .qf-poster:not(.is-current)::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  background: var(--bg);
+  opacity: 0.55;
+}
+
+.qf-lattice.is-lights-out .qf-poster {
+  transition: opacity 260ms var(--ease);
+}
+
+/* 四角暗角（设置页「海报墙 → 四角暗角」）：一层径向渐变盖在整墙上，
+   中央全透、边缘压向底色。层级放在展开档(5)之上、浮件(10/12/20)之下 ——
+   角落的浮件不被压暗。pointer-events:none，不挡拖拽与点击。 */
+.qf-lattice.is-vignette::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  pointer-events: none;
+  background: radial-gradient(
+    120% 95% at 50% 42%,
+    transparent 52%,
+    color-mix(in srgb, var(--bg) 52%, transparent) 100%
+  );
+}
+
+/* 海报统一着色（「海报统一着色」）：色值与强度来自设置页的取色器/滑杆，
+   经根节点上的 --qf-tint-color / --qf-tint-opacity 内联变量进来 —— 皮肤 CSS
+   不放颜色字面量，这条只消费变量。层序：封面(0) < 着色(1) = scrim(1) < 文字(2)。 */
+.qf-lattice .qf-poster-tint {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  background: var(--qf-tint-color, transparent);
+  opacity: 0;
+  transition: opacity 400ms var(--ease);
+}
+
+.qf-lattice.is-tint .qf-poster-tint {
+  opacity: var(--qf-tint-opacity, 0.35);
+}
+
+/* 减弱动效：入/退场波、上浮、让位滑移全部停用，位置与内容直接到位 */
+@media (prefers-reduced-motion: reduce) {
+  .qf-lattice .qf-poster,
+  .qf-lattice .qf-poster.is-landing,
+  .qf-lattice.is-closing .qf-poster {
+    animation: none;
+  }
+  .qf-lattice.is-reflow .qf-poster,
+  .qf-lattice .qf-poster {
+    transition: box-shadow 600ms var(--ease), filter 600ms var(--ease);
+  }
+  .qf-lattice .qf-poster:hover,
+  .qf-lattice .qf-poster.is-focused {
+    transform: none;
+  }
+}
+
+/* 海报墙上的播放控件 */
+/* 控件条占多高：由行高 + 两行之间的间距 + 距卡底距离算出来，
+   写成令牌好让展开态的曲名按它让位（两片都锚在卡底，不让必然重叠）。 */
+.qf-lattice .qf-poster-controls {
+  --qf-ctl-h: 28px + 44px * 2 + 10px;
+  position: absolute;
+  right: 24px;
+  bottom: 28px;
+  left: 32px;
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.qf-lattice .qf-chrome {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: min(100%, 460px);
+  color: var(--text);
+}
+
+.qf-lattice .qf-chrome-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 44px;
+}
+
+.qf-lattice .qf-chrome button {
+  width: 44px;
+  height: 44px;
+  display: grid;
+  place-items: center;
+  flex: none;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  opacity: 0.72;
+  transition: opacity var(--dur-1) var(--ease),
+              background var(--dur-1) var(--ease),
+              border-color var(--dur-1) var(--ease);
+}
+
+.qf-lattice .qf-chrome button svg {
+  width: 20px;
+  height: 20px;
+}
+
+.qf-lattice .qf-chrome button:hover {
+  opacity: 1;
+  background: color-mix(in srgb, currentColor 16%, transparent);
+  border-color: color-mix(in srgb, currentColor 26%, transparent);
+}
+
+.qf-lattice .qf-chrome button:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: -2px;
+}
+
+.qf-lattice .qf-chrome button:disabled {
+  opacity: 0.28;
+  cursor: default;
+}
+
+.qf-lattice .qf-chrome-play {
+  border-radius: var(--r-pill) !important;
+  background: var(--text) !important;
+  color: var(--bg) !important;
+  opacity: 1;
+}
+
+/* 歌单那列的主按钮是「打开歌单」，带文字。
+   .qf-chrome button 给的是方形固定尺寸（20px 图标那种），直接放文字会被
+   压成一行挤掉的乱码 —— 所以这一条把它放回 auto 宽度并补内边距。
+   歌单不是曲，不该跟曲共用「圆点播放」的读法。
+   用显式 .is-labelled 而不是 :has(span)：:has() 在旧内核上不成立时会
+   静默退回上面那条方形规则，表现为文字被压扁 —— 又是那种不报错的坏。 */
+.qf-lattice .qf-chrome-play.is-labelled {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  width: auto;
+  padding: 0 18px;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+.qf-lattice .qf-chrome-time {
+  margin-left: auto;
+  padding-left: 8px;
+  font-size: 12px;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  opacity: 0.6;
+}
+
+/* 墙内进度线：2px 细线 + 撑开的透明命中区 */
+.qf-lattice .qf-progress {
+  position: relative;
+  height: 2px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text) 22%, transparent);
+}
+
+.qf-lattice .qf-progress-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: inherit;
+  background: var(--text);
+}
+
+.qf-lattice .qf-progress input[type="range"] {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 36px;
+  margin: 0;
+  transform: translateY(-50%);
+  top: 50%;
+  opacity: 0;
+  cursor: pointer;
+}
+
+/* 墙内空态 */
+.qf-lattice-empty {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+  text-align: center;
+  pointer-events: none;
+}
+
+.qf-lattice-empty strong {
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+}
+
+.qf-lattice-empty span {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* 墙左上角的来源标签。
+   墙是全屏浮层，盖住了底下的页面 —— 用户看得到歌名却看不到自己是从哪个
+   tab 点进来的，两列内容又可能一模一样（歌单页的墙和队列页的墙都是一列
+   曲目）。所以墙上必须自己标明来源。
+   .is-drill 是第二层：那时标签是歌单名，带一个返回键。 */
+.qf-lattice-tag {
+  position: absolute;
+  left: 24px;
+  top: 24px;
+  z-index: 12;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: calc(100vw - 200px);
+  padding: 9px 16px;
+  border-radius: var(--r-lg);
+  border: 1px solid var(--skin-line-soft);
+  background: var(--skin-surface);
+  box-shadow: var(--skin-shadow);
+  backdrop-filter: saturate(180%) blur(20px);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+}
+
+.qf-lattice-tag strong {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  color: var(--text);
+  /* 歌单名可能很长（「日本 City Pop 精选 30 首」），别把标签撑爆整屏。 */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.qf-lattice-tag span {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 第二层：歌单名高亮成强调色，和第一层的「来源名」一眼能分开。 */
+.qf-lattice-tag.is-drill strong {
+  color: var(--highlight);
+}
+
+.qf-lattice-back {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  margin-left: 2px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: color-mix(in srgb, var(--skin-surface) 70%, var(--text) 8%);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.qf-lattice-back:hover {
+  background: color-mix(in srgb, var(--skin-surface) 55%, var(--text) 16%);
+}
+
+.qf-lattice-back[hidden] {
+  display: none;
+}
+
+/* 海报墙左下角的「当前队列」浮条 */
+.qf-lattice .qf-queue-peek {
+  position: absolute;
+  left: 24px;
+  bottom: 24px;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: 340px;
+  padding: 8px 10px 8px 8px;
+  border-radius: 16px;
+  border: 1px solid color-mix(in srgb, var(--text) 10%, transparent);
+  background: color-mix(in srgb, var(--panel-solid) 82%, transparent);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--text) 5%, transparent);
+  backdrop-filter: saturate(180%) blur(20px);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+}
+
+.qf-lattice .qf-queue-peek-art {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  flex: none;
+  border-radius: 10px;
+  background: var(--surface-2);
+  background-size: cover;
+  background-position: center;
+}
+.qf-lattice .qf-queue-peek-art > svg { width: 20px; height: 20px; color: var(--muted); }
+.qf-lattice .qf-queue-peek-art.has-cover > svg { visibility: hidden; }
+
+/* 浮条上的播放/暂停按钮：悬停浮条才浮现。
+   显隐只切 opacity + pointer-events（不切 display）——
+   display:none 的元素不吃命中测试，切换那一帧指针会落到浮条本体上，
+   点下去变成「聚焦这一项」而不是「播这一首」。 */
+.qf-lattice .qf-queue-peek-play {
+  position: absolute;
+  inset: 0;
+  width: 44px;
+  height: 44px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: inherit;
+  background: rgba(12, 12, 14, .64);
+  color: #f4f3f1;
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--dur-2) var(--ease), transform var(--dur-2) var(--ease);
+}
+
+.qf-lattice .qf-queue-peek-play svg {
+  width: 22px;
+  height: 22px;
+  fill: currentColor;
+  pointer-events: none;
+}
+
+.qf-lattice .qf-queue-peek:hover .qf-queue-peek-play,
+.qf-lattice .qf-queue-peek:focus-within .qf-queue-peek-play {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* 未播放时的歌单占位仍沿用同一封面触点。 */
+.qf-lattice .qf-queue-peek-play.is-labelled {
+  width: 44px;
+  height: 44px;
+}
+
+.qf-lattice .qf-queue-peek-play.is-labelled span {
+  font-size: var(--fs-2xs);
+  white-space: nowrap;
+}
+
+/* 浮条右端的舞台入口。**常驻可见**，不像上面那颗播放键 hover 才浮现 ——
+   墙开着时顶栏与胶囊导航被 .qf-lattice-open 隐藏、迷你卡又被这条浮条压住，
+   藏起来就等于墙上没有进舞台的路（用户报的正是这个）。平时压成 muted，
+   悬停才提亮，不跟歌名抢注意力。 */
+.qf-lattice .qf-queue-peek-stage {
+  width: 30px;
+  height: 30px;
+  flex: none;
+  margin-left: auto;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.qf-lattice .qf-queue-peek-stage:hover {
+  color: var(--text);
+  background: var(--hover);
+}
+.qf-lattice :is(.qf-queue-peek-play, .qf-queue-peek-stage):focus-visible { outline: var(--focus-ring); outline-offset: 2px; }
+.qf-lattice .qf-queue-peek-stage svg { width: 16px; height: 16px; pointer-events: none; }
+
+.qf-lattice .qf-queue-peek-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.qf-lattice .qf-queue-peek-copy strong {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.qf-lattice .qf-queue-peek-copy span {
+  font-size: var(--fs-2xs);
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 右下角工具共用一层玻璃，单个按钮只在交互时显底。面板不挤动工具。 */
+.qf-lattice .qf-tools {
+  position: absolute;
+  right: 24px;
+  bottom: 24px;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 4px;
+  border-radius: 14px;
+  border: 1px solid color-mix(in srgb, var(--text) 10%, transparent);
+  background: color-mix(in srgb, var(--panel-solid) 80%, transparent);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--text) 5%, transparent);
+  backdrop-filter: saturate(180%) blur(20px);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+}
+
+.qf-lattice .qf-tools-btn {
+  width: 42px;
+  height: 42px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  transition: transform var(--dur-press) var(--ease),
+              background-color var(--dur-1) var(--ease),
+              color var(--dur-1) var(--ease);
+}
+
+.qf-lattice .qf-tools-btn svg {
+  width: 19px;
+  height: 19px;
+}
+
+.qf-lattice .qf-tools-btn:hover {
+  color: var(--text);
+  background-color: color-mix(in srgb, var(--text) 9%, transparent);
+}
+
+.qf-lattice .qf-tools-btn:active {
+  transform: scale(0.92);
+}
+
+/* 环收在盘外 2px：3px 会越过坞的 6px 内边距、压到相邻那颗上。 */
+.qf-lattice .qf-tools-btn:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: 2px;
+}
+
+/* 已启用状态使用中性浅底，与相邻幽灵按钮区分。 */
+.qf-lattice .qf-tools-btn.is-on {
+  color: var(--text);
+  background-color: color-mix(in srgb, var(--text) 12%, transparent);
+}
+
+.qf-lattice .qf-tools-btn.is-on:hover {
+  background-color: color-mix(in srgb, var(--text) 18%, transparent);
+}
+
+/* 面板浮在坞上方，绝对定位 —— 留在 flex 流里会把三颗按钮劈成两截。 */
+.qf-lattice .qf-tools-panel {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 10px);
+  width: max-content;
+  max-width: min(300px, calc(100vw - 48px));
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px;
+  border-radius: 20px;
+  border: 1px solid var(--skin-line-soft);
+  background: var(--skin-surface);
+  box-shadow: var(--skin-shadow);
+  backdrop-filter: saturate(180%) blur(24px);
+  -webkit-backdrop-filter: saturate(180%) blur(24px);
+  transform-origin: 100% 100%;
+}
+
+.qf-lattice .qf-tools-panel[hidden] {
+  display: none;
+}
+
+/* 键盘说明不是可点项，却复用了设置列表的 .qf-set-subitem —— 那会带上
+   cursor:pointer、hover 底色和 62% 透明度。就地收掉，不改 DOM。 */
+.qf-lattice .qf-tools-panel .qf-set-subitem {
+  padding: 3px 6px 5px;
+  font-size: var(--fs-2xs);
+  letter-spacing: .02em;
+  opacity: .78;
+  cursor: default;
+}
+
+.qf-lattice .qf-tools-panel .qf-set-subitem:hover {
+  background: transparent;
+  opacity: .78;
+}
+
+.qf-lattice .qf-tools-action {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 38px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: var(--r-md);
+  background: transparent;
+  color: var(--text);
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--dur-1) var(--ease),
+              color var(--dur-1) var(--ease);
+}
+
+.qf-lattice .qf-tools-action svg {
+  width: 17px;
+  height: 17px;
+  flex: none;
+  opacity: 0.72;
+}
+
+/* 面板里目前只有「清空队列」这一条动作，它是不可逆的：悬停转危险色，
+   免得和上面那行只读说明用同一种灰。 */
+.qf-lattice .qf-tools-action:hover {
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+  color: var(--danger);
+}
+
+.qf-lattice .qf-tools-action:hover svg {
+  opacity: 1;
+}
+
+.qf-lattice .qf-tools-action:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: -2px;
+}
+
+/* The feature supplies its own floating surfaces; the hertz page keeps its
+   existing layout beneath it. Every token override is local to the wall. */
+.qf-lattice {
+  --qf-scale: .76;
+  --skin-surface: var(--glass-bg-strong, var(--panel-solid));
+  --skin-line-soft: var(--surface-line, var(--line));
+  --skin-shadow: var(--glass-shadow, var(--shadow));
+  --skin-shadow-card: var(--surface-lift, var(--shadow));
+  --qf-cell: 128px;
+  --qf-cell-gap: 8px;
+  z-index: 92;
+  color: var(--text);
+  overscroll-behavior: none;
+}
+.qf-lattice[hidden], .qf-lattice [hidden] { display: none !important; }
+.qf-lattice-field { position: absolute; inset: 0; touch-action: none; }
+.qf-lattice .qf-wall-header {
+  position: absolute;
+  top: max(20px, env(safe-area-inset-top));
+  left: max(24px, env(safe-area-inset-left));
+  right: max(24px, env(safe-area-inset-right));
+  z-index: 12;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  pointer-events: none;
+}
+.qf-lattice .qf-lattice-tag {
+  position: static;
+  max-width: 100%;
+  min-height: 52px;
+  padding: 4px 16px 4px 4px;
+  pointer-events: auto;
+  border-radius: 14px;
+  border-color: color-mix(in srgb, var(--text) 10%, transparent);
+  background: color-mix(in srgb, var(--panel-solid) 82%, transparent);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--text) 5%, transparent);
+}
+.qf-lattice .qf-lattice-tag strong { letter-spacing: 0; }
+.qf-lattice .qf-lattice-back { width: 44px; height: 44px; border-radius: 10px; background: transparent; }
+.qf-lattice .qf-lattice-back:hover { background: var(--hover); }
+.qf-lattice .qf-lattice-back svg { width: 18px; height: 18px; }
+.qf-lattice .qf-wall-sources {
+  display: flex;
+  max-width: 100%;
+  gap: 4px;
+  padding: 4px;
+  overflow-x: auto;
+  border: 1px solid color-mix(in srgb, var(--text) 10%, transparent);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--panel-solid) 82%, transparent);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--text) 5%, transparent);
+  backdrop-filter: blur(20px);
+  pointer-events: auto;
+  touch-action: pan-x;
+  scrollbar-width: thin;
+}
+.qf-lattice .qf-wall-source {
+  flex: none;
+  min-height: 44px;
+  padding: 0 16px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.qf-lattice .qf-wall-source:hover { background: var(--hover); color: var(--text); }
+.qf-lattice .qf-wall-source[aria-pressed="true"] { background: var(--text); color: var(--bg); }
+.qf-lattice .qf-wall-source:disabled { opacity: .4; cursor: default; }
+.qf-lattice :is(.qf-wall-source, .qf-lattice-back):focus-visible { outline: var(--focus-ring); outline-offset: -2px; }
+.qf-lattice .qf-queue-peek {
+  left: max(24px, env(safe-area-inset-left));
+  bottom: max(24px, env(safe-area-inset-bottom));
+  max-width: min(440px, calc(100vw - 368px));
+  min-height: 62px;
+}
+.qf-lattice .qf-queue-peek-copy { flex: 1; }
+.qf-lattice .qf-queue-peek-stage { width: 44px; height: 44px; }
+.qf-lattice .qf-tools {
+  flex-direction: row;
+  right: max(24px, env(safe-area-inset-right));
+  bottom: max(24px, env(safe-area-inset-bottom));
+  border-radius: 14px;
+}
+.qf-lattice .qf-tools-btn { width: 44px; height: 44px; border-radius: 10px; }
+.qf-lattice .qf-wall-zoom { font-size: 24px; font-weight: 400; }
+.qf-lattice .qf-tools-panel { border-radius: 12px; }
+.qf-lattice .qf-tools-panel .qf-set-subitem { white-space: normal; line-height: 1.6; }
+.qf-lattice .qf-lattice-empty { width: min(420px, calc(100vw - 48px)); }
+.qf-lattice .qf-lattice-empty strong { letter-spacing: 0; }
+
+/* Counter camera scaling for touch controls: the screen target remains 44px
+   even while the 808-unit expanded card fits a narrow viewport. */
+.qf-lattice .qf-poster.is-expanded {
+  padding: calc(24px / var(--qf-scale));
+  padding-bottom: calc(110px / var(--qf-scale));
+}
+.qf-lattice .qf-poster.is-expanded .qf-poster-copy { max-width: 100%; }
+.qf-lattice .qf-poster.is-expanded .qf-poster-copy strong { font-size: calc(26px / var(--qf-scale)); line-height: 1.2; }
+.qf-lattice .qf-poster.is-expanded .qf-poster-copy small { font-size: calc(13px / var(--qf-scale)); line-height: 1.5; }
+.qf-lattice .qf-poster-controls {
+  left: calc(24px / var(--qf-scale));
+  right: calc(24px / var(--qf-scale));
+  bottom: calc(26px / var(--qf-scale));
+  gap: calc(18px / var(--qf-scale));
+}
+.qf-lattice .qf-chrome { width: 100%; }
+.qf-lattice .qf-chrome-row { gap: calc(10px / var(--qf-scale)); }
+.qf-lattice .qf-chrome button { width: calc(44px / var(--qf-scale)); height: calc(44px / var(--qf-scale)); }
+.qf-lattice .qf-chrome button svg { width: calc(20px / var(--qf-scale)); height: calc(20px / var(--qf-scale)); }
+.qf-lattice .qf-chrome-play.is-labelled { width: auto; font-size: calc(13px / var(--qf-scale)); }
+.qf-lattice .qf-chrome-time { font-size: calc(12px / var(--qf-scale)); }
+.qf-lattice .qf-progress { height: calc(2px / var(--qf-scale)); }
+.qf-lattice .qf-progress input[type="range"] { height: calc(44px / var(--qf-scale)); }
+
+[data-skin="hertz"] body.qf-lattice-open :is(.topbar,.bar,.bar-restore,#bar-restore,#capsule,.hz-mobile-nav,.hz-queue-pane,.hz-queue-scrim) {
+  visibility: hidden;
+  pointer-events: none;
+}
+/* NowPlaying owns its overlay and restores this exact wall on close. */
+body.np-expanded .qf-lattice { visibility: hidden; pointer-events: none; }
+
+@media (max-width: 700px) {
+  .qf-lattice .qf-wall-header {
+    top: max(12px, env(safe-area-inset-top));
+    left: max(12px, env(safe-area-inset-left));
+    right: max(12px, env(safe-area-inset-right));
+    gap: 8px;
+  }
+  .qf-lattice .qf-lattice-tag { min-height: 48px; }
+  .qf-lattice .qf-wall-source { padding: 0 12px; }
+  .qf-lattice .qf-queue-peek {
+    left: max(12px, env(safe-area-inset-left));
+    right: max(12px, env(safe-area-inset-right));
+    bottom: max(12px, env(safe-area-inset-bottom));
+    max-width: none;
+    padding-right: 10px;
+    gap: 8px;
+  }
+  .qf-lattice .qf-tools {
+    right: max(12px, env(safe-area-inset-right));
+    bottom: calc(max(12px, env(safe-area-inset-bottom)) + 82px);
+    gap: 4px;
+  }
+  .qf-lattice .qf-tools-panel { max-width: calc(100vw - 36px); }
+  .qf-lattice .qf-poster.is-expanded .qf-poster-copy strong { font-size: calc(21px / var(--qf-scale)); }
+}
+@media (max-height: 540px) and (min-width: 701px) {
+  .qf-lattice .qf-wall-header { flex-direction: row; align-items: center; }
+  .qf-lattice .qf-lattice-tag { max-width: 35%; }
+  .qf-lattice .qf-wall-sources { flex: 1; }
+}
+body[data-rm~="wall"] .qf-lattice .qf-poster,
+body[data-rm~="wall"] .qf-lattice .qf-poster::before {
+  animation: none !important;
+  transition: none !important;
+}
+@media (prefers-reduced-motion: reduce) {
+  .qf-lattice .qf-poster, .qf-lattice .qf-poster::before { animation: none !important; transition: none !important; }
+  .qf-lattice .qf-queue-peek-play, .qf-lattice .qf-tools-btn { transition: none; }
+}
+/* Touch has no hover: keep the cover visible and reveal its action with a
+   small corner glyph; the complete 44px cover remains the touch target. */
+@media (hover: none), (pointer: coarse) {
+  .qf-lattice .qf-queue-peek-play { opacity: 1; pointer-events: auto; background: transparent; place-items: end; padding: 2px; }
+  .qf-lattice .qf-queue-peek-play svg { width: 21px; height: 21px; padding: 4px; border-radius: 50%; background: rgba(12, 12, 14, .78); }
+}

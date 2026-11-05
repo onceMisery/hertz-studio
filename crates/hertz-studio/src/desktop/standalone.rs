@@ -4,6 +4,7 @@ use crate::{
     error::{bad_request, internal, ApiError, ApiResult},
     state::AppState,
 };
+use anyhow::Context as _;
 use axum::http::StatusCode;
 use serde::Deserialize;
 pub(crate) const CONTROL_BODY_BYTES: usize = 2 * 1024;
@@ -83,33 +84,38 @@ pub(crate) fn launch(state: &AppState, wallpaper: bool) -> ApiResult<serde_json:
         Some(candidate),
     )
 }
-fn launch_desktop_host(
-    state: &AppState,
-    extra_args: &[&str],
-    followup: &str,
-    followup_value: Option<serde_json::Value>,
-) -> ApiResult<serde_json::Value> {
-    let exe = std::env::current_exe().map_err(|error| internal(error.to_string()))?;
+/// 桌面组件启动失败的两类原因：安装位置缺失与真实启动失败分开，
+/// 调用方各自决定报错形态（REST 404/500，托盘置灰提示）。
+pub(crate) enum SpawnError {
+    /// 服务 exe 同目录没有组件。
+    Missing(std::path::PathBuf),
+    Failed(anyhow::Error),
+}
+
+/// 桌面组件的唯一安装位置：与配对服务 exe 同目录。
+pub(crate) fn host_path() -> Result<std::path::PathBuf, anyhow::Error> {
+    let exe = std::env::current_exe().context("无法定位服务进程")?;
     let Some(dir) = exe.parent() else {
-        return Err(internal("无法定位服务所在目录".to_string()));
+        anyhow::bail!("无法定位服务所在目录");
     };
-    let host = dir.join(if cfg!(windows) {
+    Ok(dir.join(if cfg!(windows) {
         "hertz-desktop.exe"
     } else {
         "hertz-desktop"
-    });
+    }))
+}
+
+/// 以本服务的数据目录启动桌面组件；已有实例时新进程会因单实例退出。
+pub(crate) fn spawn_host(
+    data_dir: &std::path::Path,
+    extra_args: &[&str],
+) -> Result<(), SpawnError> {
+    let host = host_path().map_err(SpawnError::Failed)?;
     if !host.is_file() {
-        return Err(ApiError::new(
-            StatusCode::NOT_FOUND,
-            "desktop_component_missing",
-            format!(
-                "未找到桌面组件 {}；请安装与本服务匹配的桌面组件",
-                host.display()
-            ),
-        ));
+        return Err(SpawnError::Missing(host));
     }
     let mut command = std::process::Command::new(&host);
-    command.arg("--data-dir").arg(&state.data_dir);
+    command.arg("--data-dir").arg(data_dir);
     for arg in extra_args {
         command.arg(arg);
     }
@@ -121,7 +127,29 @@ fn launch_desktop_host(
     }
     command
         .spawn()
-        .map_err(|error| internal(format!("启动桌面组件失败：{error}")))?;
+        .map_err(|error| SpawnError::Failed(anyhow::anyhow!("启动桌面组件失败：{error}")))?;
+    Ok(())
+}
+
+fn launch_desktop_host(
+    state: &AppState,
+    extra_args: &[&str],
+    followup: &str,
+    followup_value: Option<serde_json::Value>,
+) -> ApiResult<serde_json::Value> {
+    if let Err(error) = spawn_host(&state.data_dir, extra_args) {
+        return Err(match error {
+            SpawnError::Missing(host) => ApiError::new(
+                StatusCode::NOT_FOUND,
+                "desktop_component_missing",
+                format!(
+                    "未找到桌面组件 {}；请安装与本服务匹配的桌面组件",
+                    host.display()
+                ),
+            ),
+            SpawnError::Failed(message) => internal(format!("{message:#}")),
+        });
+    }
     // 已有宿主时新进程会因单实例退出；给正在运行的那个补一次幂等命令。
     let followup = followup.to_string();
     std::thread::spawn(move || {

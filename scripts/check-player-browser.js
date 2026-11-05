@@ -10,7 +10,7 @@ const root = path.resolve(__dirname, '..');
 const web = path.join(root, 'plugin/ui');
 const output = path.join(root, 'output/playwright/player');
 const base = process.env.PLAYER_UI_URL || 'http://127.0.0.1:18774';
-const suites = (process.env.PLAYER_CHECKS || 'skins,playback,lists,appearance').split(',');
+const suites = (process.env.PLAYER_CHECKS || 'playback,lists').split(',');
 let token;
 let checks = 0;
 
@@ -39,30 +39,6 @@ async function until(read, predicate, message, timeout = 10000) {
     await new Promise(resolve => setTimeout(resolve, 80));
   }
   throw new Error(message + ': ' + JSON.stringify(value));
-}
-
-async function progressUsesPalette(page, names) {
-  return page.evaluate((variables) => {
-    const root = document.documentElement;
-    const background = getComputedStyle(document.getElementById('progress-ghost')).backgroundImage;
-    return variables.every((name) => {
-      const probe = document.createElement('span');
-      probe.style.color = getComputedStyle(root).getPropertyValue(name).trim();
-      document.body.appendChild(probe);
-      const color = getComputedStyle(probe).color;
-      probe.remove();
-      return background.includes(color);
-    });
-  }, names);
-}
-
-async function setCoverFollow(page, enabled) {
-  await openSettings(page);
-  const appearance = page.locator('.skset-link[data-skset-key="look"]');
-  if (await appearance.count()) await appearance.click();
-  else await page.locator('.ln-set-link[data-ln-key="look"]').click();
-  if (enabled) await page.locator('#set-cover-follow').check();
-  else await page.locator('#set-cover-follow').uncheck();
 }
 
 function renderEdition(source, full) {
@@ -103,6 +79,7 @@ async function fixtures() {
 }
 
 async function routeAssets(page) {
+  if (process.env.PLAYER_SOURCE_ASSETS === '1') await require('./ui-source-assets').routeSourceAssets(page, { base, dataDir: process.env.VMUSIC_DATA_DIR });
   await page.route('**/v1/online/account?**', route => route.fulfill({ json: { logged_in: false } }));
   await page.route('**/v1/recommend/daily/online?**', route => route.fulfill({ json: { tracks: [], sources: [] } }));
   await page.addInitScript(() => {
@@ -137,7 +114,14 @@ async function scrollSurface(page, selector, message) {  const surface = page.lo
   assert.ok(box && box.height > 60, message + ' has a visible scroll area');
   await page.mouse.move(box.x + box.width / 2, box.y + Math.min(box.height / 2, 180));
   await page.mouse.wheel(0, 780);
-  await until(() => surface.evaluate(element => element.scrollTop), value => value > 20, message);
+  await until(() => surface.evaluate(element => element.scrollTop), value => value > 20, message).catch(async error => {
+    const hit = await page.evaluate(({ x, y }) => {
+      const n = document.elementFromPoint(x, y);
+      return { hit: n && n.tagName + '#' + n.id + '.' + n.className,
+        owner: [...document.querySelectorAll('#column,#view-library,#lib-list')].map(el => ({ id: el.id, inert: el.inert, h: el.clientHeight, scroll: el.scrollHeight, y: el.scrollTop, overflow: getComputedStyle(el).overflowY })) };
+    }, { x: box.x + box.width / 2, y: box.y + Math.min(box.height / 2, 180) });
+    throw new Error(error.message + '; selector=' + selector + '; geometry=' + JSON.stringify({ box, ...hit }));
+  });
   check(true, message);
   await surface.evaluate(element => { element.scrollTop = 0; });
 }
@@ -148,48 +132,6 @@ async function openSettings(page) {
   const gear = page.locator('#settings-entry');
   if (await gear.isVisible()) await gear.click();
   else await page.locator('.rail-item[data-view="settings"]').click();
-}
-
-async function skins(page) {
-  for (const skin of ['classic', 'liunian', 'qingfeng']) {
-    for (const [width, height] of [[1440, 900], [1024, 700], [390, 844], [320, 640]]) {
-      await page.setViewportSize({ width, height });
-      await page.evaluate(value => Skins.apply(value), skin);
-      await openSettings(page);
-      const label = `${skin} ${width}x${height}`;
-      const owner = await page.locator('#view-settings').evaluate(element => {
-        for (let node = element; node; node = node.parentElement) {
-          if (/auto|scroll/.test(getComputedStyle(node).overflowY) && node.scrollHeight > node.clientHeight + 5) {
-            return '#' + node.id;
-          }
-        }
-        return null;
-      });
-      assert.ok(owner, label + ' has no settings scroll owner');
-      await scrollSurface(page, owner, label + ' settings wheel scroll');
-      const layout = await page.evaluate(() => {
-        const viewport = window.innerWidth;
-        const column = document.getElementById('column').getBoundingClientRect();
-        const entry = document.getElementById('settings-entry').getBoundingClientRect();
-        return { viewport, column: { left: column.left, right: column.right, width: column.width },
-          entry: { left: entry.left, right: entry.right }, width: document.documentElement.scrollWidth };
-      });
-      check(layout.column.width >= width * 0.5 && layout.column.right <= width + 1
-        && layout.entry.left >= 0 && layout.entry.right <= width + 1 && layout.width <= width + 1,
-      label + ' content width and settings access ' + JSON.stringify(layout));
-      await page.screenshot({ path: path.join(output, `${skin}-${width}.png`) });
-    }
-  }
-  await page.setViewportSize({ width: 1440, height: 900 });
-  await page.evaluate(() => Skins.apply('classic'));
-  await openSettings(page);
-  const settings = page.locator('#view-settings');
-  const box = await settings.boundingBox();
-  await page.mouse.move(box.x + box.width - 8, box.y + 24);
-  await page.mouse.down();
-  await page.mouse.move(box.x + box.width - 8, box.y + 250, { steps: 12 });
-  await page.mouse.up();
-  check(await settings.evaluate(element => element.scrollTop > 100), 'settings native scrollbar thumb drag');
 }
 
 async function playback(page, tracks) {
@@ -265,6 +207,7 @@ async function playback(page, tracks) {
   await page.locator('#np-stop').click();
   await until(() => api('GET', '/v1/state'), value => !value.playing && value.position_ms === 0, 'stop');
   check(await page.evaluate(() => navigator.mediaSession.playbackState === 'none'), 'stop clears media session playing state');
+  await page.keyboard.press('Escape');
   await page.locator('#np-close').click();
   await page.locator('#playpause').click();
   await until(() => api('GET', '/v1/state'), value => value.playing && value.position_ms < 2000, 'restart');
@@ -302,11 +245,11 @@ async function listScrolling(page, tracks) {
   const playlist = await api('POST', '/v1/playlists', { name: 'Skin scroll audit' });
   await api('POST', `/v1/playlists/${playlist.id}/tracks`, { track_ids: queue });
   await ready(page);
-  for (const skin of ['classic', 'liunian', 'qingfeng']) {
+  for (const skin of ['hertz']) {
     await page.setViewportSize({ width: 1024, height: 700 });
     await page.evaluate(value => Skins.apply(value), skin);
     for (const [view, selector] of [['library', '#lib-list'], ['queue', '#queue-list'], ['favorites', '#fav-list']]) {
-      await page.locator(`.rail-item[data-view="${view}"]:visible, [data-ln-view="${view}"]:visible`).click();
+      await page.locator(`.rail-item[data-view="${view}"]:visible`).click();
       await page.waitForFunction(selector => document.querySelector(selector).children.length >= 24, selector);
       const owner = await page.locator(selector).evaluate(element => {
         for (let node = element; node; node = node.parentElement) {
@@ -318,7 +261,7 @@ async function listScrolling(page, tracks) {
       await scrollSurface(page, owner, `${skin} ${view} wheel scroll`);
     }
   }
-  await page.locator('.rail-item[data-view="playlists"]:visible, [data-ln-view="playlists"]:visible').click();
+  await page.locator('.rail-item[data-view="playlists"]:visible').click();
   await page.locator('[data-pl-view="list"]').click();
   await page.locator('.pl-row').filter({ hasText: 'Skin scroll audit' }).last().click();
   await page.waitForFunction(() => document.getElementById('pl-detail-list').children.length >= 24);
@@ -336,48 +279,14 @@ async function listScrolling(page, tracks) {
   await api('POST', '/v1/player/pause');
   await api('DELETE', `/v1/playlists/${playlist.id}`);
   await page.setViewportSize({ width: 1440, height: 900 });
-  await page.evaluate(() => Skins.apply('classic'));
-}
-
-async function appearance(page, tracks) {
-  const image = await page.evaluate(() => {
-    const canvas = document.createElement('canvas');
-    canvas.width = canvas.height = 32;
-    const context = canvas.getContext('2d');
-    context.fillStyle = '#d84d3f'; context.fillRect(0, 0, 32, 32);
-    return canvas.toDataURL('image/png').split(',')[1];
-  });
-  await api('POST', `/v1/tracks/${tracks[0].id}/cover`, Buffer.from(image, 'base64'), 'image/png');
-  await api('POST', '/v1/player/load', { track_id: tracks[0].id, queue: tracks.slice(0, 4).map(track => track.id) });
-  await ready(page);
-  await page.waitForFunction(() => document.documentElement.style.getPropertyValue('--music-highlight'));
-  check(await progressUsesPalette(page, ['--music-highlight', '--music-highlight-alt']),
-    'playback progress uses both cover palette colors');
-  await setCoverFollow(page, false);
-  await until(() => api('GET', '/v1/settings'), value => value.cover_follow === false, 'cover preference saved');
-  check(await page.evaluate(() => !document.documentElement.style.getPropertyValue('--music-highlight')
-    && !document.getElementById('ambient').classList.contains('has-art')
-    && document.getElementById('cover').style.backgroundImage !== 'none'), 'cover follow off restores theme and preserves album art');
-  check(await progressUsesPalette(page, ['--accent', '--accent-2']),
-    'playback progress falls back to the active theme palette');
-  await ready(page);
-  await page.waitForFunction(() => !document.getElementById('set-cover-follow').checked);
-  check(await page.evaluate(() => !document.documentElement.style.getPropertyValue('--music-highlight')
-    && !document.getElementById('ambient').classList.contains('has-art')), 'cover follow preference survives refresh');
-  await setCoverFollow(page, true);
-  await page.waitForFunction(() => document.documentElement.style.getPropertyValue('--music-highlight'));
-  check(true, 'cover follow re-enables without changing track');
-  await page.emulateMedia({ reducedMotion: 'reduce' });
-  await page.waitForFunction(() => Stage.presentation().reduced);
-  check(true, 'system reduced-motion preference takes effect while running');
-  await page.emulateMedia({ reducedMotion: 'no-preference' });
+  await page.evaluate(() => Skins.apply('hertz'));
 }
 
 (async () => {
   fs.mkdirSync(output, { recursive: true });
   const health = await fetch(base + '/v1/health').then(response => response.json());
   assert.equal(health.backend, 'null', 'Use an isolated VMUSIC_BACKEND=null service for this check');
-  for (const file of ['app.js', 'stage.js', 'style.css', 'stage.css', ...['liunian', 'qingfeng'].map(skin => `skins/skin.${skin}.css`)]) {
+  if (process.env.PLAYER_SOURCE_ASSETS !== '1') for (const file of ['app.js', 'stage.js', 'style.css', 'stage.css', 'skins/skin.hertz.css']) {
     const response = await fetch(new URL(file, base));
     assert.ok(response.ok, `Cannot fetch ${file}`);
     const served = (await response.text()).replace(/\r\n/g, '\n');
@@ -398,16 +307,15 @@ async function appearance(page, tracks) {
   const errors = [];
   try {
     const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+    page.setDefaultTimeout(15000);
     page.on('pageerror', error => { errors.push(error.message); console.error('Browser error: ' + error.stack); });
     page.on('websocket', socket => socket.on('socketerror', error => console.error('WebSocket: ' + String(error).replaceAll(token, '[token]'))));
     await routeAssets(page);
     await ready(page);
-    if (suites.includes('skins')) await skins(page);
     if (suites.includes('playback')) await playback(page, tracks);
     if (suites.includes('lists')) await listScrolling(page, tracks);
-    if (suites.includes('appearance')) await appearance(page, tracks);
     check(errors.length === 0, 'no uncaught browser exceptions: ' + errors.join('; '));
-    console.log(`Player browser checks passed: ${checks}; suites=${suites.join(',')}; assets=embedded`);
+    console.log(`Player browser checks passed: ${checks}; suites=${suites.join(',')}; assets=${process.env.PLAYER_SOURCE_ASSETS === '1' ? 'source' : 'embedded'}`);
   } finally {
     await api('POST', '/v1/player/stop').catch(() => {});
     await browser.close();

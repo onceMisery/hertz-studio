@@ -57,11 +57,11 @@
   };
 
   var PLACEHOLDERS = {
-    song: '搜索在线歌曲，回车看全部',
-    playlist: '搜索在线歌单，回车看全部',
-    artist: '搜索歌手，回车看全部',
-    album: '搜索在线专辑，回车看全部',
-    local: '在本地曲库中搜索标题、艺术家、专辑',
+    song: '搜索在线歌曲',
+    playlist: '搜索在线歌单',
+    artist: '搜索歌手',
+    album: '搜索在线专辑',
+    local: '搜索本地歌曲、歌手或专辑',
   };
 
   var state = {
@@ -188,8 +188,8 @@
 
   function place() {
     if (!menu) return;
-    var r = input.getBoundingClientRect();
-    var w = Math.min(Math.max(Math.round(r.width), 380), 480, window.innerWidth - 24);
+    var r = (input.closest('.topsearch') || input).getBoundingClientRect();
+    var w = Math.min(Math.round(r.width), window.innerWidth - 24);
     var left = Math.round(r.left);
     var maxLeft = window.innerWidth - w - 12;
     if (left > maxLeft) left = Math.max(12, maxLeft);
@@ -232,7 +232,7 @@
     var hint = document.createElement('div');
     hint.className = 'ts-hint';
     hint.textContent = effectiveKind() === 'local'
-      ? '本地档：输入即筛选曲库列表。'
+      ? '输入歌名、歌手或专辑，实时筛选本地曲库'
       : '输入关键词搜索' + labelOf(effectiveKind()) + '，回车进「在线」页看全部。';
     body.appendChild(hint);
   }

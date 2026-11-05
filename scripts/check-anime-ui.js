@@ -32,6 +32,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const vm = require('vm');
 
 const webDir = process.argv[2] || path.join(__dirname, '..', 'plugin', 'ui');
 const read = (...p) => fs.readFileSync(path.join(webDir, ...p), 'utf8');
@@ -150,6 +151,8 @@ section('点击特效：三方名单一致（themes.js ↔ EFFECTS ↔ CSS 原�
 //   EFFECTS 缺名 → enabled() 恒 false → 特效压根不触发；
 //   CSS 缺原型 → 粒子照放但没有形状没有动画，视觉上"反馈坏了"。
 const declaredFx = DEFINITION.themes.filter((t) => t.fx).map((t) => t.fx);
+const enabledFx = declaredFx.filter(fx => fx !== 'none');
+const disabledThemes = DEFINITION.themes.filter(t => t.fx === 'none').map(t => t.id);
 const studioFx = [...THEME_STUDIO.matchAll(/fx:\s*'(\w+)'/g)].map(m => m[1]);
 const registrySrc = INTERACTIONS_JS.slice(
   INTERACTIONS_JS.indexOf('var EFFECTS = {'),
@@ -164,12 +167,12 @@ ok(/el\.setAttribute\(FX_ATTR,\s*theme\.fx \|\| LOOK_FX\[theme\.look \|\| DEFAUL
   '只在有 fx 时写的话，切到未声明的主题会留着上一套的粒子原型）');
 ok(declaredFx.length >= 20, '内置目录大面积声明了 fx（实得 ' + declaredFx.length + ' 套；' +
   '这是"每套主题一种手感"的验收硬要求，漏声明 = 该主题静默退到族兜底）');
-ok(declaredFx.every(fx => registryFx.includes(fx)),
+ok(enabledFx.every(fx => registryFx.includes(fx)),
   'themes.js 的每个 fx 都在 EFFECTS 注册表里（缺名 = 特效不触发）: ' +
-    uniq(declaredFx.filter(fx => !registryFx.includes(fx))).join(', '));
-ok(declaredFx.every(fx => cssFx.includes(fx)),
+    uniq(enabledFx.filter(fx => !registryFx.includes(fx))).join(', '));
+ok(enabledFx.every(fx => cssFx.includes(fx)),
   'themes.js 的每个 fx 都有 CSS 原型（缺 = 粒子隐形）: ' +
-    uniq(declaredFx.filter(fx => !cssFx.includes(fx))).join(', '));
+    uniq(enabledFx.filter(fx => !cssFx.includes(fx))).join(', '));
 ok(studioFx.every(fx => registryFx.includes(fx) && cssFx.includes(fx)),
   'theme-studio.js 的每个 fx 都是登记过的原型: ' +
     uniq(studioFx.filter(fx => !registryFx.includes(fx) || !cssFx.includes(fx))).join(', '));
@@ -181,9 +184,69 @@ ok(cssFx.every(fx => registryFx.includes(fx)),
     uniq(cssFx.filter(fx => !registryFx.includes(fx))).join(', '));
 // "不同主题色的特效应该不同"——内置 23 套的主题特效两两不同。
 // theme-studio 的二次元批次允许与内置共用原型（批次的气质归 palette 区分）。
-ok(uniq(declaredFx).length === declaredFx.length,
-  '内置目录的 fx 两两不同（实得 ' + uniq(declaredFx).length + '/' + declaredFx.length + '；' +
+ok(uniq(enabledFx).length === enabledFx.length,
+  '启用特效的内置主题 fx 两两不同（实得 ' + uniq(enabledFx).length + '/' + enabledFx.length + '；' +
   '两套主题共用一种手感 = 验收要求被悄悄打了折）');
+
+section('明确关闭点击反馈：Hertz 深浅主题不回退 spark');
+ok(disabledThemes.includes('hertz-dark') && disabledThemes.includes('hertz-light'), '两个 Hertz 主题显式声明 fx:none');
+ok(!registryFx.includes('none') && !cssFx.includes('none'), 'none 是禁用值，不伪造粒子原型');
+
+// Run the actual theme writer and interaction engine. A positive control
+// proves this DOM reaches the burst path before testing the disabled value.
+(function checkDisabledFeedback() {
+  const observers = [], listeners = new Map(), timers = new Map();
+  let created = 0, clock = 0, timerId = 0;
+  function node() {
+    const attrs = {};
+    return {
+      nodeType: 1, isConnected: true, className: '', children: [], parentNode: null,
+      style: { setProperty(k,v) { this[k]=v; }, removeProperty(k) { delete this[k]; } },
+      classList: { contains() { return false; } }, matches() { return false; },
+      setAttribute(k,v) { attrs[k]=String(v); observers.forEach(o=>{ if(o.targets.has(this))o.callback([{attributeName:k}]); }); },
+      getAttribute(k) { return attrs[k] || null; },
+      appendChild(child) { child.parentNode=this;this.children.push(child);return child; },
+      remove() { if(this.parentNode)this.parentNode.children=this.parentNode.children.filter(n=>n!==this);this.parentNode=null; },
+      addEventListener() {}, removeEventListener() {},
+      get firstElementChild() { return this.children[0] || null; },
+    };
+  }
+  const root = node(), body = node();
+  const button = node();
+  button.closest = selector => selector.includes('button') ? button : null;
+  button.getBoundingClientRect = () => ({left:0,top:0,right:44,bottom:44,width:44,height:44});
+  const sandbox = {
+    console, Object, Array, JSON, String, Number, Math, Map, Set,
+    localStorage: { getItem() { return null; },setItem() {} },
+    document: { documentElement:root,body,hidden:false,fullscreenElement:null,
+      createElement() { created++;return node(); },
+      addEventListener(type,fn) { if(!listeners.has(type))listeners.set(type,new Set());listeners.get(type).add(fn); },
+      removeEventListener(type,fn) { if(listeners.has(type))listeners.get(type).delete(fn); } },
+    getComputedStyle:()=>({visibility:'visible'}),performance:{now:()=>clock+=1000},
+    setTimeout(fn) { const id=++timerId;timers.set(id,fn);return id; },clearTimeout(id) { timers.delete(id); },
+    addEventListener() {},removeEventListener() {},
+    matchMedia:()=>({matches:false,addEventListener(){},removeEventListener(){}}),
+    MutationObserver: class { constructor(callback) { this.callback=callback;this.targets=new Set();observers.push(this); } observe(target) { this.targets.add(target); } disconnect() { this.targets.clear(); } },
+  };
+  sandbox.window=sandbox;
+  vm.createContext(sandbox);
+  vm.runInContext(read('design/design-themes.js'),sandbox,{filename:'design/design-themes.js'});
+  vm.runInContext(THEMES,sandbox,{filename:'themes.js'});
+  sandbox.Theme.init();
+  vm.runInContext(INTERACTIONS_JS,sandbox,{filename:'anime-interactions.js'});
+  const click=()=>listeners.get('click').forEach(fn=>fn({target:button,detail:1,button:0,clientX:22,clientY:22}));
+  for(const id of ['hertz-dark','hertz-light']) {
+    sandbox.Theme.apply('emerald');click();
+    ok(body.children.length>0 && timers.size>0, '启用主题仍能创建真实点击反馈');
+    sandbox.Theme.apply(id);
+    ok(root.getAttribute('data-fx')==='none',id+' 实际 apply 写入 none');
+    ok(body.children.length===0 && timers.size===0,id+' 切换时释放上个主题的粒子与计时器');
+    const before=created;click();
+    ok(created===before && timers.size===0,id+' 点击不创建粒子、不回退 spark');
+  }
+  sandbox.AnimeInteractions.destroy();
+  ok(listeners.get('click').size===0,'禁用后仍能完整卸载反馈监听');
+})();
 
 // ---------------------------------------------------------------------------
 section('外观族：cel-ui.css 的接线与材质');

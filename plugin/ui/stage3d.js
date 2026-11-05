@@ -3589,6 +3589,7 @@
       returnFocus = document.activeElement;
       backgroundNodes = [];
       Array.prototype.forEach.call(document.body.children, function (node) {
+        // 宿主的窗口控制区独立于页面背景，舞台打开后仍须可操作。
         if (node === root || /^(SCRIPT|STYLE|SVG)$/.test(node.tagName)) return;
         // 舞台控制舱不静音：它 z 在本舞台之上，开着时要能在三维演出中实时调参。
         // inert 元素照常绘制但整体退出命中测试——静音了它，z-index 提到多高都

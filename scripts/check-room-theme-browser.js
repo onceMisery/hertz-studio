@@ -24,7 +24,7 @@ async function main() {
       return route.fulfill({ contentType: file.endsWith('.css') ? 'text/css' : 'text/html', body });
     });
     await page.goto('http://room-theme.test/');
-    for (const file of ['host.js', 'themes.js', 'theme-picker.js', 'favorites.js', 'room-workspace.js', 'room-view.js', 'room.js']) await page.addScriptTag({ content: source(file) });
+    for (const file of ['host.js', 'design/design-themes.js', 'themes.js', 'theme-picker.js', 'favorites.js', 'room-workspace.js', 'room-view.js', 'room.js']) await page.addScriptTag({ content: source(file) });
     await page.evaluate(async () => {
       Theme.init();
       ThemePicker.bind(document.querySelector('#theme-btn'));
@@ -41,9 +41,9 @@ async function main() {
     const measureFavorite = () => page.evaluate(() => {
       const badge = document.querySelector('.fav-row .src-badge'), action = document.querySelector('.fav-room-append');
       const row = document.querySelector('.fav-row'), b = badge.getBoundingClientRect(), a = action.getBoundingClientRect(), r = row.getBoundingClientRect();
-      return { badgeWidth: b.width, badgeHeight: b.height, badgeOverflow: badge.scrollHeight > badge.clientHeight, actionVisible: getComputedStyle(action).display !== 'none' && +getComputedStyle(action.parentElement).opacity === 1, actionWidth: a.width, actionHeight: a.height, contained: a.left >= r.left && a.right <= r.right && a.top >= r.top && a.bottom <= r.bottom, noOverflow: document.documentElement.scrollWidth <= innerWidth };
+      return { row: r.toJSON(), action: a.toJSON(), columns: getComputedStyle(row).gridTemplateColumns, badgeWidth: b.width, badgeHeight: b.height, badgeOverflow: badge.scrollHeight > badge.clientHeight, actionVisible: getComputedStyle(action).display !== 'none' && +getComputedStyle(action.parentElement).opacity === 1, actionWidth: a.width, actionHeight: a.height, contained: a.left >= r.left && a.right <= r.right && a.top >= r.top && a.bottom <= r.bottom, noOverflow: document.documentElement.scrollWidth <= innerWidth };
     });
-    for (const skin of ['classic', 'heijiao', 'liunian', 'orbit', 'qingfeng']) {
+    for (const skin of ['hertz']) {
       await page.evaluate(skin => {
         document.documentElement.dataset.skin = skin;
         document.querySelectorAll('link[data-skin-css]').forEach(link => { link.disabled = link.dataset.skinCss !== skin; });
@@ -583,7 +583,7 @@ async function main() {
     await page.keyboard.press('Tab');
     assert.equal(await menu.isVisible(), false, 'Tab closes the popup');
     await theme.click();
-    await page.locator('#view-room h1').click();
+    await page.mouse.click(1, (await page.evaluate(() => innerHeight)) - 2);
     assert.equal(await menu.isVisible(), false, 'outside click closes the popup');
     // Room profile editing keeps drafts until the native service confirms the write.
     await page.evaluate(async () => { window.__snapshot = { ...window.__hostSnapshot, session_id: 'cover-host' }; await HertzRoom.onViewEnter(); HertzRoom.navigate('settings'); });
@@ -708,6 +708,7 @@ async function main() {
     await page.waitForFunction(() => window.__snapshot.mode === 'local' && document.querySelector('#view-room').dataset.roomPage === 'summary');
     await choose('room-custom');
     await page.evaluate(() => { document.body.classList.remove('room-view'); document.querySelector('#view-room').hidden = true; });
+    await page.setViewportSize({ width: 1440, height: 1000 });
     const outer = page.locator('#theme-btn');
     // 这个 fixture 只注入 themes/theme-picker/room 几个模块，不跑 app.js 的
     // initTopMoreMenu，所以「更多工具」容器还是初始 hidden——主题入口现在住在里面，
@@ -730,7 +731,7 @@ async function main() {
     await page.setContent('<body style="margin:0;background:#202328"><iframe title="DBX plugin" sandbox="allow-scripts" src="http://room-theme.test/" style="display:block;margin-top:88px;width:100%;height:880px;border:0"></iframe></body>');
     const embedded = page.frames().find(frame => frame !== page.mainFrame());
     await embedded.waitForSelector('#view-room', { state: 'attached' });
-    for (const file of ['host.js', 'themes.js', 'favorites.js', 'room-workspace.js', 'room-view.js', 'room.js']) await embedded.addScriptTag({ content: source(file) });
+    for (const file of ['host.js', 'design/design-themes.js', 'themes.js', 'favorites.js', 'room-workspace.js', 'room-view.js', 'room.js']) await embedded.addScriptTag({ content: source(file) });
     await embedded.evaluate(async () => {
       Theme.init(); Theme.apply('emerald');
       document.body.classList.add('room-view');

@@ -18,6 +18,8 @@
     send('close');
   }
   var previewTimer = 0, pending = false, activeTab = 'wallpaper', navigationId = -1;
+  // 全局恢复快捷键（§5.1）：页面录入只采集按键，不充当全局快捷键实现。
+  var hotkeyPending = false, recording = false, captured = null;
   function clone(value) { return JSON.parse(JSON.stringify(value)); }
   function send(cmd, extra) {
     if (window.ipc && window.ipc.postMessage) window.ipc.postMessage(JSON.stringify(Object.assign({ cmd: cmd }, extra || {})));
@@ -397,6 +399,11 @@
     $('position-begin').title = dirty ? '请先应用或放弃草稿，再调整桌面位置' : '';
     $('position-session').hidden = !editing; $('position-begin').hidden = editing;
     $('autostart').disabled = disabled || dirty || !latest || latest.launchAtLogin == null;
+    $('hotkey-edit').disabled = disabled || dirty || hotkeyPending || recording;
+    $('hotkey-clear').disabled = disabled || dirty || hotkeyPending || recording;
+    $('hotkey-record').disabled = hotkeyPending;
+    $('hotkey-save').disabled = hotkeyPending || !captured;
+    $('hotkey-cancel').disabled = hotkeyPending;
     $('preview').disabled = !ready || editing || pending || (!!mediaSelection && !mediaPreviewAvailable);
     $('preview').textContent = previewActive ? '结束预览' : '开始预览';
     $('settings-state').textContent = !ready ? '读取中' : editing ? '正在调整位置' : pending ? (applyInFlight ? '正在应用' : '正在处理') : conflict ? '草稿需要重读' : dirty ? '未应用修改' : '设置已保存';
@@ -448,6 +455,19 @@
     if (payload.launchAtLogin != null) $('autostart').checked = !!payload.launchAtLogin;
     $('autostart-state').textContent = payload.launchAtLogin == null ? '无法读取 Windows 启动项' : payload.launchAtLogin ? '系统启动项已启用' : '系统启动项未启用';
   }
+  // 保存的组合键与真实注册状态分别展示（§5.1）；旧宿主状态缺字段时保留现状。
+  function renderHotkey(payload) {
+    if (!payload.recoveryHotkey) return;
+    var hk = payload.recoveryHotkey;
+    $('hotkey-saved').textContent = hk.saved || '未设置';
+    $('hotkey-edit').textContent = hk.saved ? '修改快捷键' : '设置快捷键';
+    $('hotkey-clear').hidden = !hk.saved && !(hk.registered && hk.registered.length);
+    var detail = [];
+    if (hk.registered && hk.registered.length) detail.push('当前生效：' + hk.registered.join('、'));
+    else if (hk.saved) detail.push('当前未生效：可重新保存以重试注册。');
+    if (hk.error) detail.push(hk.error);
+    $('hotkey-actual').textContent = detail.join(' ');
+  }
   function applyStatus(payload) {
     if (!payload) return;
     latest = payload;
@@ -474,8 +494,13 @@
     renderMetadata(payload);
     // Status polling never rewrites inputs while the user is typing.
     var activeInput = document.activeElement && /^(INPUT|SELECT)$/.test(document.activeElement.tagName);
+    if (hotkeyPending) {
+      hotkeyPending = false;
+      if (payload.message === '已更新恢复快捷键') exitHotkeyCapture();
+    }
     if ((!dirty && !activeInput) || applied && !applyInFlight) renderForm(); else { renderPreview(); syncControls(); }
     renderRuntime(payload);
+    renderHotkey(payload);
   }
   function changed(wallpaperChanged) {
     if (!draft) return;
@@ -527,6 +552,63 @@
   $('audio-retry').addEventListener('click', function () { send('audio-retry'); });
   $('switch-source').addEventListener('click', function () { var profile = profiles.find(profile => profileKey(profile) === $('profile').value); if (profile && !dirty) { pending = true; syncControls(); send('switch-source', { profile: profile, expectedRevision: revision }); } });
   $('autostart').addEventListener('change', function () { send('autostart', { enabled: this.checked }); });
+  function modifierList(event) { var parts = []; if (event.ctrlKey) parts.push('Ctrl'); if (event.altKey) parts.push('Alt'); if (event.shiftKey) parts.push('Shift'); return parts.join('+'); }
+  // 与宿主 hotkey.rs 同一组合键文法：Ctrl/Alt/Shift 至少两个，主键 A–Z、0–9、F1–F11、F13–F24；不含 Win 与 F12。
+  function canonicalHotkey(event) {
+    var main = null, key = event.key;
+    if (/^[a-zA-Z]$/.test(key)) main = key.toUpperCase();
+    else if (/^[0-9]$/.test(key)) main = key;
+    else if (/^F\d+$/.test(key)) {
+      var number = Number(key.slice(1));
+      if (number >= 1 && number <= 24 && number !== 12 && String(number) === key.slice(1)) main = 'F' + number;
+      else $('hotkey-progress').textContent = number === 12 ? 'F12 由系统保留，请换一个功能键。' : '功能键支持 F1–F11、F13–F24。';
+    }
+    if (!main) {
+      if (!/^F\d+$/.test(key)) $('hotkey-progress').textContent = '主键请使用字母、数字或 F1–F11、F13–F24。';
+      return null;
+    }
+    if ((event.ctrlKey ? 1 : 0) + (event.altKey ? 1 : 0) + (event.shiftKey ? 1 : 0) < 2) { $('hotkey-progress').textContent = '请至少同时按住 Ctrl、Alt、Shift 中的两个。'; return null; }
+    return modifierList(event) + '+' + main;
+  }
+  function enterHotkeyCapture() {
+    recording = true; captured = null;
+    $('hotkey-idle').hidden = true; $('hotkey-capture').hidden = false;
+    $('hotkey-record').textContent = '按下组合键…';
+    $('hotkey-progress').textContent = '按住修饰键后按主键；Esc 取消。';
+    $('hotkey-record').focus();
+    syncControls();
+  }
+  function exitHotkeyCapture() {
+    recording = false; captured = null;
+    $('hotkey-capture').hidden = true; $('hotkey-idle').hidden = false;
+    $('hotkey-record').textContent = '按下组合键…';
+    $('hotkey-progress').textContent = '';
+    syncControls();
+  }
+  $('hotkey-edit').addEventListener('click', enterHotkeyCapture);
+  $('hotkey-cancel').addEventListener('click', exitHotkeyCapture);
+  $('hotkey-record').addEventListener('keydown', function (event) {
+    if (!recording) return;
+    event.preventDefault();
+    if (event.key === 'Escape') { exitHotkeyCapture(); return; }
+    if (['Control', 'Alt', 'Shift'].includes(event.key)) { $('hotkey-progress').textContent = '已按 ' + (modifierList(event) || '…') + '，请继续按主键。'; return; }
+    if (event.metaKey) { $('hotkey-progress').textContent = '不使用 Windows 系统键。'; return; }
+    var combo = canonicalHotkey(event);
+    if (!combo) return;
+    captured = combo;
+    $('hotkey-record').textContent = '已选择 ' + combo;
+    $('hotkey-progress').textContent = '确认无误后点击保存；重新按键可更换。';
+    syncControls();
+  });
+  $('hotkey-save').addEventListener('click', function () {
+    if (!captured) return;
+    hotkeyPending = true; syncControls();
+    send('recovery-hotkey', { hotkey: captured, expectedRevision: revision });
+  });
+  $('hotkey-clear').addEventListener('click', function () {
+    hotkeyPending = true; syncControls();
+    send('recovery-hotkey', { hotkey: null, expectedRevision: revision });
+  });
   $('preview').addEventListener('click', function () { if (previewActive) releaseNativePreview(); else startNativePreview(false); });
   $('apply').addEventListener('click', function () { if (!dirty || conflict || editing) return; if (!document.querySelector('#panel-lyrics input:invalid, #panel-wallpaper input:invalid')) { applyNativeDraft(); } else status('请检查字号、描边宽度与音频参数的有效范围。', true); });
   $('discard').addEventListener('click', function () { dirty = false; conflict = false; pending = false; draft = clone(saved); revision = latest.revision; releaseNativePreview(); releaseNativeDraft(); renderForm(); status('已放弃草稿，读取最新保存的设置。', false); });

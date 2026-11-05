@@ -26,6 +26,8 @@ mod dbx_feed;
 #[cfg(windows)]
 mod feed;
 #[cfg(windows)]
+mod hotkey;
+#[cfg(windows)]
 mod management;
 #[cfg(windows)]
 mod mini;

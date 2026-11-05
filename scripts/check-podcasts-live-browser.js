@@ -37,7 +37,7 @@ async function search(page, query, country) {
       await page.goto(uiUrl(base), { waitUntil: 'load' });
       await page.addStyleTag({ content: '*,*::before,*::after{animation:none!important;transition:none!important}' });
       await page.waitForFunction(() => window.Podcasts && window.Skins);
-      await page.evaluate(() => Skins.apply('classic'));
+      await page.evaluate(() => Skins.apply('hertz'));
       await page.locator('.rail-item[data-view="podcasts"]').click();
       await search(page, 'Planet Money', 'US');
       await page.locator('.podcast-show').filter({ hasText: 'Planet Money' }).first().click();

@@ -51,7 +51,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     HWND_TOPMOST, LWA_ALPHA, MSG, PBT_APMRESUMEAUTOMATIC, PBT_APMRESUMESUSPEND, PBT_APMSUSPEND,
     PBT_POWERSETTINGCHANGE, SMTO_NORMAL, STYLESTRUCT, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
     SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_HIDE, SW_RESTORE, SW_SHOW, SW_SHOWNOACTIVATE,
-    WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCHITTEST, WM_NCPAINT, WM_POWERBROADCAST, WM_STYLECHANGING,
+    WM_HOTKEY, WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCHITTEST, WM_NCPAINT, WM_POWERBROADCAST, WM_STYLECHANGING,
     WM_WTSSESSION_CHANGE, WNDCLASSW, WNDPROC, WS_CAPTION, WS_CHILD, WS_EX_APPWINDOW, WS_EX_LAYERED,
     WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_MAXIMIZEBOX,
     WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU, WS_THICKFRAME, WTS_SESSION_LOCK, WTS_SESSION_LOGOFF,
@@ -72,6 +72,8 @@ pub(crate) enum NativeEvent {
     TaskbarCreated,
     SessionUnavailable(bool),
     DisplayOff(bool),
+    /// WM_HOTKEY 命中；载荷是 RegisterHotKey 的窗口局部 id（设计 §5.1）。
+    HotkeyFired(i32),
 }
 
 #[derive(Clone, Debug)]
@@ -985,6 +987,67 @@ unsafe fn create_message_window() -> Result<()> {
     };
     crate::app::log("message window ready");
     Ok(())
+}
+
+/// 全局恢复快捷键的隐藏宿主窗口。RegisterHotKey/WM_HOTKEY 都绑定创建线程；
+/// 在主事件循环线程创建，hotkey::Manager 也必须在同一线程调用。
+pub(crate) fn install_hotkey_window() -> Result<HWND> {
+    let class = to_wide("HertzDesktopHotkey");
+    let instance = unsafe { GetModuleHandleW(std::ptr::null()) };
+    if instance.is_null() {
+        bail!("GetModuleHandleW 失败");
+    }
+    let window_class = WNDCLASSW {
+        style: 0,
+        lpfnWndProc: Some(hotkey_wndproc),
+        cbClsExtra: 0,
+        cbWndExtra: 0,
+        hInstance: instance,
+        hIcon: std::ptr::null_mut(),
+        hCursor: std::ptr::null_mut(),
+        hbrBackground: std::ptr::null_mut(),
+        lpszMenuName: std::ptr::null(),
+        lpszClassName: class.as_ptr(),
+    };
+    let atom = unsafe { RegisterClassW(&window_class) };
+    if atom == 0 {
+        bail!("RegisterClassW 失败");
+    }
+    let title = to_wide("HertzDesktopHotkey");
+    let hwnd = unsafe {
+        CreateWindowExW(
+            0,
+            class.as_ptr(),
+            title.as_ptr(),
+            0,
+            0,
+            0,
+            0,
+            0,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            instance,
+            std::ptr::null(),
+        )
+    };
+    if hwnd.is_null() {
+        bail!("创建快捷键窗口失败");
+    }
+    crate::app::log("hotkey window ready");
+    Ok(hwnd)
+}
+
+unsafe extern "system" fn hotkey_wndproc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    if msg == WM_HOTKEY {
+        emit(NativeEvent::HotkeyFired(wparam as i32));
+        return 0;
+    }
+    unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
 }
 
 unsafe extern "system" fn message_wndproc(

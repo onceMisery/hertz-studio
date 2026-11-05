@@ -1,16 +1,13 @@
-// 一次性：往播放队列里灌一批曲目，然后跑队列拼接页的密排/展开/关灯实测。
-// 为什么单独写：check-qingfeng-browser.js 跑的是空队列分支，
-// 海报墙最该验的三件事（密排缝、方角、展开卡）全在非空分支里。
+// SPDX-License-Identifier: MIT
+// 独立封面墙密排、展开重排、当前曲关灯、键盘与退出清理。真实隔离服务，受控队列快照。
 'use strict';
-const { chromium } = require('playwright');
+const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const BASE = process.env.QF_BASE || 'http://127.0.0.1:7891';
-const DATA_DIR = process.env.QF_DATA_DIR || path.join(os.tmpdir(), 'qf-data2');
-const TOKEN = fs.readFileSync(path.join(DATA_DIR, 'token'), 'utf8').trim();
-const OUT = path.resolve(__dirname, '..', 'output', 'qingfeng-verify');
+const { startFixture } = require('./ui-browser-fixture');
+const OUT = path.resolve(__dirname, '..', 'output', 'cover-wall-layout');
 fs.mkdirSync(OUT, { recursive: true });
 const { clickPoster, clickFirstPoster } = require('./qf-wall-helpers.js');
 
@@ -21,13 +18,19 @@ const ok = (cond, label, extra) => {
 };
 
 (async () => {
-  const browser = await chromium.launch({ channel: 'chrome', headless: true });
-  const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  const fixture = await startFixture();
+  let browser;
+  try {
+  browser = await chromium.launch({ channel: 'chrome', headless: true });
+  const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+  await fixture.connect(context);
+  const page = await context.newPage();
+  await require('./ui-source-assets').routeSourceAssets(page, fixture);
   const errors = [];
   // 401 是账号探测的既有正常行为；一言（/v1/home/quote）上游偶发 504、
   // 舞台对无 beatmap 曲目探 /v1/stage/beatmap 回 404 后走默认视觉 ——
   // 都是前端 catch 住的「优雅失手」，不是 JS 报错。豁免按端点失手次数
-  // 记账，多余的错误照样红（与 check-qingfeng-browser.js 同一套）。
+  // 记账，多余的错误照样红（按实际端点计数）。
   let quote5xx = 0;
   let beatmap404 = 0;
   let desktopControl5xx = 0;
@@ -52,9 +55,10 @@ const ok = (cond, label, extra) => {
     return softErrors.length <= forgivable ? [] : softErrors.slice(forgivable);
   };
 
-  await page.goto(`${BASE}/?token=${TOKEN}`, { waitUntil: 'networkidle' });
+  await page.goto(fixture.base, { waitUntil: 'domcontentloaded' });
+  await page.waitForFunction(() => window.HertzCoverWall && document.getElementById('conn').textContent === '服务已连接');
   await page.waitForTimeout(1200);
-  await page.evaluate(() => window.Skins.apply('qingfeng'));
+  await page.evaluate(() => window.Skins.apply('hertz'));
   await page.waitForTimeout(600);
 
   // 直接注入队列快照：走真实播放路径需要真实音频文件，
@@ -110,7 +114,7 @@ const ok = (cond, label, extra) => {
   await page.waitForTimeout(500);
 
   console.log('打开海报墙');
-  await page.click('.qf-nav-icon');
+  await page.getByRole('button', { name: '封面模式', exact: true }).click();
   // 入场波：在波的中段读（约 250ms）—— 卡片带着 is-landing 与逐级递增的
   // 延时（左上角先落）；波播完后类还在但动画已结束，读了等于没读。
   await page.waitForTimeout(250);
@@ -129,7 +133,7 @@ const ok = (cond, label, extra) => {
 
   const wall = await page.evaluate(() => ({
     posters: document.querySelectorAll('.qf-poster').length,
-    count: window.__qfSkin.posterCount(),
+    count: document.querySelectorAll('.qf-poster').length,
     empty: !!document.querySelector('.qf-lattice-empty:not([hidden])'),
   }));
   ok(wall.posters > 0 && !wall.empty, '渲染出海报', `posters=${wall.posters} count=${wall.count}`);
@@ -196,14 +200,14 @@ const ok = (cond, label, extra) => {
   const overlay = await page.evaluate(() => {
     const vis = (sel) => {
       const n = document.querySelector(sel);
-      return n ? getComputedStyle(n).display !== 'none' : false;
+      return n ? getComputedStyle(n).display !== 'none' && getComputedStyle(n).visibility !== 'hidden' && n.getBoundingClientRect().width > 0 : false;
     };
     return {
-      topbar: vis('.topbar'), nav: vis('.qf-nav'), bar: vis('.bar'),
-      acct: vis('.qf-account'), set: vis('.qf-settings-btn'),
+      topbar: vis('.topbar'), nav: vis('.hz-mobile-nav'), bar: vis('.bar'),
+      queue: vis('.hz-queue-pane'), capsule: vis('#capsule'),
     };
   });
-  ok(!overlay.topbar && !overlay.nav && !overlay.bar && !overlay.acct && !overlay.set,
+  ok(!overlay.topbar && !overlay.nav && !overlay.bar && !overlay.queue && !overlay.capsule,
     '墙开着时底层浮件全部收起（不叠在海报上）', JSON.stringify(overlay));
 
   // 墙必须自己铺底色：底下压着业务视图，全透明会把曲库页透出来，
@@ -388,55 +392,58 @@ const ok = (cond, label, extra) => {
   const tools = await page.$$('.qf-tools-btn');
   ok(tools.length >= 3, '右下角有工具按钮组', `${tools.length} 个`);
   const lightsBefore = await page.$eval('.qf-lattice', (n) => n.className);
-  await page.click('.qf-tools-btn >> nth=0');
+  await page.getByRole('button', { name: /^关灯：|^开灯：/ }).click();
   await page.waitForTimeout(600);
   const lightsAfter = await page.$eval('.qf-lattice', (n) => n.className);
   ok(lightsBefore !== lightsAfter, '关灯切换生效', `${lightsBefore} → ${lightsAfter}`);
   await page.screenshot({ path: path.join(OUT, '05-lattice-lightsout.png') });
 
-  // 方向键移动焦点
-  await page.keyboard.press('ArrowRight');
-  await page.keyboard.press('ArrowRight');
-  await page.waitForTimeout(500);
-  const focused = await page.evaluate(() => {
-    const f = document.querySelector('.qf-poster.is-focused');
-    return f ? { found: true, w: Math.round(f.getBoundingClientRect().width) } : { found: false };
-  });
-  ok(focused.found, '方向键移动焦点');
+  // 从真正的控件焦点经 Tab 进入海报，不能把视觉 is-focused 当作 DOM 焦点。
+  let posterReached = false;
+  for (let i = 0; i < 40; i += 1) {
+    await page.keyboard.press('Tab');
+    if (await page.evaluate(() => document.activeElement.matches('.qf-poster[tabindex="0"]'))) {
+      posterReached = true;
+      break;
+    }
+  }
+  ok(posterReached, '工具按钮经 Tab 可达海报本体');
+  let keyboardStayed = posterReached;
+  const visited = new Set();
+  for (let i = 0; i < 12 && posterReached; i += 1) {
+    await page.keyboard.press('ArrowRight');
+    await page.waitForTimeout(460);
+    const focused = await page.evaluate(() => {
+      const f = document.activeElement;
+      return { found: f.matches('.qf-poster.is-focused'), key: f.dataset.qfKey,
+        stops: document.querySelectorAll('.qf-poster[tabindex="0"]').length };
+    });
+    keyboardStayed = keyboardStayed && focused.found && focused.stops === 1;
+    visited.add(focused.key);
+  }
+  ok(keyboardStayed && visited.size === 12, '连续方向键跨块平移与节点回收后保留真实焦点和唯一 Tab 入口', `${visited.size} 个格位`);
   await page.screenshot({ path: path.join(OUT, '06-lattice-focus.png') });
 
   await page.keyboard.press('Escape');
   // 退场波：root 要等反向波播完（延时 0.34s + 飞回 0.28s）才藏、海报才回收，
   // isWallOpen/body 标记则是立即摘的 —— 所以这里等足 1s 再断言回收。
   await page.waitForTimeout(1000);
-  ok(await page.evaluate(() => !window.__qfSkin.isWallOpen()), 'Esc 退出海报墙');
+  ok(await page.evaluate(() => !window.HertzCoverWall.isOpen()), 'Esc 退出海报墙');
   ok(await page.evaluate(() => !document.body.classList.contains('qf-lattice-open')), 'body 标记已摘');
   ok(await page.evaluate(() => document.querySelectorAll('.qf-poster').length === 0), '海报实例已回收');
 
-  console.log('\n设置浮层（非空队列下再开一次，确认不受影响）');
-  await page.click('.qf-settings-btn');
-  await page.waitForTimeout(800);
-  ok(await page.evaluate(() => {
-    const m = document.querySelector('.qf-modal');
-    return m && !m.hidden && getComputedStyle(m).zIndex >= 200;
-  }), '设置浮层正常打开');
-  await page.screenshot({ path: path.join(OUT, '07-settings.png') });
-  await page.keyboard.press('Escape');
-  await page.waitForTimeout(600);
-  // 关键回归：关掉设置后底层必须还能点（qf-modal-open 漏摘的回归点）
-  const clickable = await page.evaluate(() => {
-    const el = document.elementFromPoint(window.innerWidth / 2, 300);
-    return !!el && el.closest('.app') !== null;
-  });
-  ok(clickable, '关掉设置后底层恢复可点（body 隔离标记已摘）');
+  await page.locator('.rail-item[data-view="settings"]').click();
+  ok(await page.locator('#view-settings').isVisible(), '退出墙后 Hertz 设置页可达');
+  await page.locator('.hz-settings-nav [data-category="lyrics"]').click();
+  ok(await page.locator('.hz-settings-nav [data-category="lyrics"]').getAttribute('aria-selected') === 'true', '设置分类仍可操作');
 
   const real = errors.concat(settleSoft()).filter((e) => !/favicon|ERR_ABORTED/i.test(e));
   ok(real.length === 0, '全流程无 JS 报错',
     real.slice(0, 2).join(' | ') + (badUrls.length ? '   [4xx/5xx: ' + badUrls.slice(0, 5).join(' , ') + ']' : ''));
 
-  await browser.close();
   console.log('\n' + '─'.repeat(56));
   console.log(`截图目录：${OUT}`);
-  if (failures) { console.error(`队列拼接非空态实测：${failures} 项失败`); process.exit(1); }
-  console.log('队列拼接非空态实测：全部通过');
-})().catch((e) => { console.error(e); process.exit(1); });
+  if (failures) { console.error(`队列拼接非空态实测：${failures} 项失败`); process.exitCode = 1; }
+  if (!failures) console.log('队列拼接非空态实测：全部通过');
+  } finally { if (browser) await browser.close(); await fixture.close(); }
+})().catch((e) => { console.error(e); process.exitCode = 1; });

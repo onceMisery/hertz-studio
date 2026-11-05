@@ -2,21 +2,19 @@
 <!-- SPDX-License-Identifier: MIT
      Copyright (c) 2026 hertz-studio contributors
 
-     v2 原型。DOM 契约相对 v1 有变化：曲库不再是 JS 注入进侧栏的裸列表，
-     而是静态声明的三个区域（导航轨 / 内容列 / 演出舞台）+ 底部播放条。
-     注释见 style.css 与 README.md。 -->
+     HertzStudio Music Player 中文界面：既有业务 DOM，由响应式布局装配。 -->
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#0d1530">
-<!-- 空图标：没有 favicon 路由时浏览器会去请求 /favicon.ico 并拿到 401，
-     控制台里留一条无意义的红字。 -->
-<link rel="icon" href="data:,">
-<title>hertz-studio</title>
+<meta name="theme-color" content="#0b0b0d">
+<!-- 与原生窗口共用 Hertz 声波字母图标，内联后离线与插件宿主均可显示。 -->
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%22256%22%20height%3D%22256%22%20viewBox%3D%220%200%20256%20256%22%3E%0A%20%20%3Ctitle%3EHertz%20Studio%3C%2Ftitle%3E%0A%20%20%3Crect%20x%3D%228%22%20y%3D%228%22%20width%3D%22240%22%20height%3D%22240%22%20rx%3D%2260%22%20fill%3D%22%23171719%22%2F%3E%0A%20%20%3Crect%20x%3D%228.5%22%20y%3D%228.5%22%20width%3D%22239%22%20height%3D%22239%22%20rx%3D%2259.5%22%20fill%3D%22none%22%20stroke%3D%22%23484746%22%2F%3E%0A%20%20%3Cg%20fill%3D%22%23f4f1e9%22%3E%0A%20%20%20%20%3Crect%20x%3D%2243%22%20y%3D%22108%22%20width%3D%2214%22%20height%3D%2240%22%20rx%3D%227%22%2F%3E%0A%20%20%20%20%3Crect%20x%3D%2276%22%20y%3D%2262%22%20width%3D%2220%22%20height%3D%22132%22%20rx%3D%2210%22%2F%3E%0A%20%20%20%20%3Crect%20x%3D%2291%22%20y%3D%22119%22%20width%3D%2274%22%20height%3D%2218%22%20rx%3D%229%22%2F%3E%0A%20%20%20%20%3Crect%20x%3D%22120%22%20y%3D%2294%22%20width%3D%2216%22%20height%3D%2268%22%20rx%3D%228%22%2F%3E%0A%20%20%20%20%3Crect%20x%3D%22160%22%20y%3D%2262%22%20width%3D%2220%22%20height%3D%22132%22%20rx%3D%2210%22%2F%3E%0A%20%20%20%20%3Crect%20x%3D%22199%22%20y%3D%22108%22%20width%3D%2214%22%20height%3D%2240%22%20rx%3D%227%22%2F%3E%0A%20%20%3C%2Fg%3E%0A%3C%2Fsvg%3E">
+<title>Hertz Studio · 音乐播放器</title>
 <!-- 设计源（生成物，design/definition.json → scripts/generate-design.js）：
      :root 令牌的唯一来源，必须排在 style.css 之前。 -->
 <link rel="stylesheet" href="design/design-base.css">
+<link rel="stylesheet" href="fonts/brand.css">
 <!-- 公共组件：按钮唯一实现（基础形态 + primary/tiny/touch/flat 变体）。
      排在 style.css 之前：同特异性的跨组件时值手感（按压分档）在 style.css
      尾部，必须后到；皮肤层的度量覆盖在更后面，仍然生效。 -->
@@ -30,7 +28,6 @@
      消费方）。排在 style.css 之后、页面样式之前；页面 CSS 不得再藏全局 chrome。 -->
 <link rel="stylesheet" href="shell/shell.css">
 <link rel="stylesheet" href="now-playing.css">
-<link rel="stylesheet" href="skins/skin.classic.css" data-skin-css="classic" disabled>
 <link rel="stylesheet" href="stage.css">
 <link rel="stylesheet" href="creative.css">
 <link rel="stylesheet" href="stage3d.css">
@@ -66,14 +63,11 @@
      （点击反馈已按主题声明 fx，原型全在 anime-interactions.css，
      cel-ui.css 不再碰粒子，与它的先后无关。） -->
 <link rel="stylesheet" href="cel-ui.css">
-<!-- 界面皮肤：默认全部 disabled，切到哪套由 skins.js 解开哪套。
-     排在其它样式表之后——皮肤做的是覆盖，必须在最后。
-     skins.css 是"选皮肤的地方"，常驻加载，不带 data-skin-css。 -->
-<link rel="stylesheet" href="skins/skins.css">
-<link rel="stylesheet" href="skins/skin.liunian.css" data-skin-css="liunian" disabled>
-<link rel="stylesheet" href="skins/skin.qingfeng.css" data-skin-css="qingfeng" disabled>
-<link rel="stylesheet" href="skins/skin.heijiao.css" data-skin-css="heijiao" disabled>
-<link rel="stylesheet" href="skins/skin.orbit.css" data-skin-css="orbit" disabled>
+<!-- 唯一布局与独立封面墙，排在业务样式后。 -->
+<link rel="stylesheet" href="cover-wall.css">
+<link rel="stylesheet" href="skins/skin.hertz.css" data-skin-css="hertz">
+<link rel="stylesheet" href="volume-controls.css">
+<link rel="stylesheet" href="native-capsule.css">
 </head>
 <body>
 <script>
@@ -100,6 +94,10 @@
 <!-- 统一图标库：全站只维护这一份 24×24 SVG symbol；页面中通过
      use 节点引用对应 symbol，避免同形图标散落多份。 -->
 <svg id="icon-sprite" width="0" height="0" aria-hidden="true" focusable="false" style="position:absolute">
+<symbol id="i-hz-wave" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M3 10v4M7 5v14M7 12h10M12 9v6M17 5v14M21 10v4"/></symbol>
+<symbol id="i-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5"/></symbol>
+<symbol id="i-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M20 14A8.5 8.5 0 0 1 10 4a8.5 8.5 0 1 0 10 10Z"/></symbol>
+<symbol id="i-grid" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></symbol>
   <symbol id="i-headphones" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
     <path d="M4 13v-2a8 8 0 0 1 16 0v2"/>
     <rect x="3" y="12" width="4" height="8" rx="1.5"/><rect x="17" y="12" width="4" height="8" rx="1.5"/>
@@ -153,10 +151,9 @@
   <symbol id="i-equalizer" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
     <path d="M4.5 13v7M9.5 5v15M14.5 9v11M19.5 3v17"/>
   </symbol>
+  <symbol id="i-menu" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h16"/></symbol>
   <symbol id="i-library" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-    <ellipse cx="12" cy="6" rx="7" ry="3"/>
-    <path d="M5 6v11c0 1.7 3.1 3 7 3s7-1.3 7-3V6M5 11c0 1.7 3.1 3 7 3s7-1.3 7-3"/>
-    <circle cx="12" cy="6" r="1.1" fill="currentColor" stroke="none"/>
+    <path d="M5 4v16M10 4v16M14.5 5.5l4.5 14" stroke-width="1.5"/>
   </symbol>
   <symbol id="i-globe" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
     <circle cx="12" cy="12" r="9"/><ellipse cx="12" cy="12" rx="3.5" ry="9"/>
@@ -198,8 +195,7 @@
     <path d="M18.4 6.6a9 9 0 1 1-12.8 0"/>
   </symbol>
   <symbol id="i-settings" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-    <path d="M9.7 3h4.6l.5 2.7a7 7 0 0 1 1.8 1.1l2.6-.9 2.3 4-2.1 1.8v.6l2.1 1.8-2.3 4-2.6-.9a7 7 0 0 1-1.8 1.1l-.5 2.7H9.7l-.5-2.7a7 7 0 0 1-1.8-1.1l-2.6.9-2.3-4 2.1-1.8v-.6L2.5 9.9l2.3-4 2.6.9a7 7 0 0 1 1.8-1.1Z"/>
-    <circle cx="12" cy="12" r="3"/>
+    <path d="M4 7h9M19 7h1M4 17h1M11 17h9" stroke-width="1.5"/><circle cx="16" cy="7" r="2.2" stroke-width="1.5"/><circle cx="8" cy="17" r="2.2" stroke-width="1.5"/>
   </symbol>
   <symbol id="i-prev" viewBox="0 0 24 24" fill="currentColor">
     <path d="M7 6v12H5V6h2zm12 0v12l-9-6 9-6z"/>
@@ -382,7 +378,7 @@
     <svg class="si" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-search"/></svg>
     <!-- 顶栏搜索：默认搜在线歌曲，歌单/歌手/专辑/本地档由 topsearch.js 的
          下拉面板切换，placeholder 跟着档位改写。 -->
-    <input id="search" type="search" placeholder="搜索在线歌曲，回车看全部" autocomplete="off" aria-label="搜索在线曲库">
+    <input id="search" type="search" placeholder="搜索在线歌曲" autocomplete="off" aria-label="搜索在线曲库">
     <button id="search-clear" class="search-clear" aria-label="清空搜索" hidden>
       <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-close"/></svg>
     </button>
@@ -421,12 +417,6 @@
           <span>主题色</span>
         </button>
 
-        <!-- 界面皮肤：菜单项由 skins.js 从同一份 CATALOG 渲染，与设置页那组共用真源。 -->
-        <button type="button" id="skin-btn" class="iconbtn menu-item" role="menuitem" title="界面皮肤" aria-label="切换界面皮肤" aria-expanded="false">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-skin"/></svg>
-          <span>界面皮肤</span>
-        </button>
-
         <button type="button" id="workshop-btn" class="iconbtn menu-item" role="menuitem" title="创意工坊" aria-label="打开创意工坊" aria-expanded="false">
           <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-workshop"/></svg>
           <span>创意工坊</span>
@@ -450,7 +440,6 @@
          z-index:40 的层叠上下文，留在里面会被舞台抽屉盖住）；写在这里只表示它们与
          #theme-btn / #skin-btn 的从属关系，锚点统一是 #top-more-btn。 -->
     <div class="theme-menu" id="theme-menu" role="listbox" aria-label="主题色列表" hidden></div>
-    <div class="skin-menu" id="skin-menu" role="menu" aria-label="界面皮肤" hidden></div>
 
     <!-- edition:full -->
     <button id="online-account-btn" class="iconbtn" title="登录音源" aria-label="登录在线音源账号" aria-haspopup="dialog">
@@ -468,10 +457,7 @@
 
   <!-- 导航轨：四个一级目的地，选中态常驻，不再依赖记忆 -->
   <nav class="rail" id="rail" aria-label="主导航">
-    <button type="button" class="rail-toggle" id="rail-toggle" aria-label="收缩导航" title="收缩导航" aria-controls="rail" aria-expanded="true" hidden>
-      <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-chevron-down"/></svg>
-      <span>导航</span>
-    </button>
+    <button class="rail-item" data-view="home" aria-label="首页"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-home"/></svg><span>首页</span></button>
     <button class="rail-item active" data-view="library" aria-label="曲库">
       <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-library"/></svg>
       <span>曲库</span>
@@ -516,6 +502,7 @@
   <section class="column" id="column">
 
     <!-- 曲库 -->
+    <section class="view" id="view-home" aria-label="首页" hidden></section>
     <div class="view" id="view-library">
       <div class="col-head">
         <div class="col-head-left">
@@ -610,7 +597,7 @@
       <div class="daily-strip" id="daily-strip">
         <div class="daily-head">
           <div class="daily-copy">
-            <span class="daily-kicker">DAILY MIX · 每日推荐</span>
+            <span class="daily-kicker">每日推荐</span>
             <span class="daily-title" id="daily-date">—</span>
             <span class="daily-sub" id="daily-sub">每天换一批，规则跑在本机</span>
           </div>
@@ -1138,12 +1125,35 @@
     <div class="view" id="view-settings" hidden>
       <div class="col-head"><div class="col-head-left"><h1 class="col-title">设置</h1></div></div>
 
-      <!-- 界面皮肤：只换布局（导航形式 / 分区 / 栅格 / 信息密度），
-           配色与主题色一律沿用当前主题，两者互不影响。列表由 skins.js 渲染。 -->
-      <div class="set-group">
-        <h2 class="set-title">界面皮肤</h2>
-        <div class="skins-list" id="skins-list" role="group" aria-label="界面皮肤"></div>
-        <div class="hint">皮肤只管布局。换皮肤不会动主题色，换主题也不会破坏皮肤。</div>
+      <div class="set-group hz-appearance" id="hz-appearance">
+        <h2 class="set-title">外观</h2>
+        <div class="hz-setting-row">
+          <div><p>界面颜色</p><small>沉浸播放页始终使用深色外观</small></div>
+          <div class="hz-segmented" role="group" aria-label="界面颜色">
+            <button type="button" id="hz-theme-dark" aria-pressed="true">夜色</button>
+            <button type="button" id="hz-theme-light" aria-pressed="false">暖白</button>
+          </div>
+        </div>
+        <div class="hz-setting-row" id="hz-intensity-row">
+          <label for="hz-ambient-intensity">氛围光强度</label>
+          <div class="hz-range-control"><input id="hz-ambient-intensity" type="range" min="0" max="100" value="70"><output id="hz-ambient-value" for="hz-ambient-intensity">70%</output></div>
+        </div>
+        <div class="hz-setting-row">
+          <div><label for="hz-ambient-animated">背景缓慢流动</label><small>让封面色彩在播放时轻轻移动</small></div>
+          <input id="hz-ambient-animated" type="checkbox" checked>
+        </div>
+        <p class="hint">配色、壁纸与舞台的细节设置保留在本页下方。</p>
+      </div>
+      <div class="set-group hz-player-preferences" id="hz-player-preferences">
+        <h2 class="set-title">播放页歌词</h2>
+        <div class="hz-setting-row">
+          <div><label for="hz-word-sync">逐字高亮</label><small>按歌曲的歌词时间，逐字点亮当前句</small></div>
+          <input id="hz-word-sync" type="checkbox" checked>
+        </div>
+        <div class="hz-setting-row">
+          <label for="hz-lyric-size">文字大小</label>
+          <select id="hz-lyric-size"><option value="small">小</option><option value="medium" selected>标准</option><option value="large">大</option></select>
+        </div>
       </div>
 
       <div class="set-group">
@@ -1189,8 +1199,7 @@
       <!-- 播放：与播放行为有关、但与音频处理无关的偏好（DSP 之上一层的语义）。
            「加入队列的默认行为」管的是列表行的快捷按钮与右键菜单那条动作；
            「开始播放时自动进入」是播放落点（folia 的 playback_entry_view）：
-           手动开始播放时要不要跳进某个全屏界面。队列拼接墙只有清风皮肤有，
-           其它皮肤下选它等效于不跳转。 -->
+           手动开始播放时可进入沉浸声场或独立封面墙。 -->
       <div class="set-group">
         <h2 class="set-title">播放</h2>
         <div class="set-row">
@@ -1205,7 +1214,7 @@
           <select id="set-playback-entry">
             <option value="none">不跳转</option>
             <option value="stage">沉浸声场</option>
-            <option value="wall">队列拼接墙（仅清风皮肤）</option>
+            <option value="wall">封面拼接墙</option>
           </select>
         </div>
         <div class="set-row">
@@ -1525,26 +1534,24 @@
         <p class="hint">把沉浸声场的画面与当前歌词行录成视频（可选系统声音），横屏 / 竖屏画幅可选。录制开始后自动打开声场，点悬浮的「停止」生成文件。录制期间请保持本页面在前台：切到别的标签页或最小化后画面会停住（声音不受影响）。</p>
       </div>
 
-      <!-- 海报墙：队列拼接（清风皮肤的特色页）的观感与跟随行为。设置页是
-           各皮肤共享的，这组在任何皮肤下都显示，不生效的项有说明。
-           配置存在皮肤自己的 localStorage 键里（vmusic.qf-wall-*），
-           由 skin.qingfeng.js 读写，不进服务端设置表。 -->
+      <!-- 封面墙延续清风的拼接与跟随行为；cover-wall.js 保留原本的
+           vmusic.qf-wall-* 偏好键。 -->
       <div class="set-group">
         <h2 class="set-title">海报墙</h2>
         <div class="set-row">
           <label for="set-wall-follow">换歌时自动聚焦</label>
           <input id="set-wall-follow" type="checkbox">
-          <span class="hint">墙开着的时候切歌，相机飞到正在播放那张并展开它（仅清风皮肤）</span>
+          <span class="hint">切歌时，封面墙自动移到正在播放的歌曲并展开封面</span>
         </div>
         <div class="set-row">
           <label for="set-wall-vignette">四角暗角</label>
           <input id="set-wall-vignette" type="checkbox">
-          <span class="hint">整墙边缘压暗一圈，视线更聚在中央（仅清风皮肤）</span>
+          <span class="hint">压暗封面墙的边缘，让视线更聚在中央</span>
         </div>
         <div class="set-row">
           <label for="set-wall-tint">海报统一着色</label>
           <input id="set-wall-tint" type="checkbox">
-          <span class="hint">给所有封面压一层同色调，花哨封面多的时候整墙更整齐（仅清风皮肤）</span>
+          <span class="hint">为封面增加统一色调，并保留原有图像细节</span>
         </div>
         <div class="set-row">
           <label for="set-wall-tint-color">着色与强度</label>
@@ -1621,16 +1628,16 @@
       </div>
 
       <div class="set-group">
-        <h2 class="set-title">外观</h2>
+        <h2 class="set-title">高级外观与设备</h2>
         <div class="set-row">
           <label for="set-theme">主题色</label>
           <select id="set-theme"></select>
         </div>
         <div class="theme-swatches" id="theme-swatches" role="group" aria-label="主题色快选"></div>
         <div class="set-row">
-          <label for="set-cover-follow">界面随歌曲封面变化</label>
+          <label for="set-cover-follow">封面氛围光</label>
           <input id="set-cover-follow" type="checkbox" aria-describedby="set-cover-follow-note">
-          <span class="hint" id="set-cover-follow-note">开启时背景与舞台高亮跟随封面；关闭后使用所选主题，保留歌曲封面。即时生效并自动保存。</span>
+          <span class="hint" id="set-cover-follow-note">从封面提取背景与舞台高亮色，即时生效并自动保存。</span>
         </div>
         <div class="set-row">
           <label for="set-device">输出设备</label>
@@ -1805,11 +1812,7 @@
         <span class="hint">关掉的分区从导航里消失；本地曲库与播放队列始终显示。正停在被关掉的分区时退回本地曲库。</span>
       </div>
 
-      <!-- 窗口与舞台：沉浸声场与胶囊播放器的入口。
-           这两个入口原本只挂在顶栏右上角，但清风皮肤把控制入口统一收到
-           左上角的设置按钮里，顶栏那几个图标对清风是冗余的（见 skin.qingfeng.css）。
-           隐藏顶栏按钮前必须在这里补上，否则这两条路就断了 ——
-           快捷键 V / 方向键仍然有效，但没有任何可发现的入口。 -->
+      <!-- 窗口与舞台：设置页和更多工具共用原本的沉浸声场与胶囊入口。 -->
       <div class="set-group">
         <h2 class="set-title">窗口与舞台</h2>
         <div class="set-row">
@@ -2375,6 +2378,7 @@
 
 <div id="np-scrim" class="np-scrim" hidden></div>
 <div id="np-modal" class="np-modal" role="dialog" aria-modal="true" aria-label="正在播放" hidden>
+  <div class="np-ambient" aria-hidden="true"></div>
   <div class="np-card">
     <header class="np-head">
       <div class="np-head-text">
@@ -2417,7 +2421,8 @@
       <div id="np-empty" class="np-empty" role="status">播放一首音乐</div>
       <button type="button" id="np-follow" class="btn" hidden>回到当前句</button>
     </section>
-    <section id="np-queue-pane" class="np-queue-pane" aria-label="播放队列" hidden>
+    <button type="button" id="np-queue-scrim" class="np-queue-scrim" tabindex="-1" aria-hidden="true" hidden></button>
+    <section id="np-queue-pane" class="np-queue-pane" role="dialog" aria-modal="true" aria-label="播放队列" hidden>
       <header><h2>播放队列 <span id="np-queue-count"></span></h2><button type="button" id="np-queue-close" class="np-ctrl" title="收起队列" aria-label="收起队列"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-close"/></svg></button></header>
       <div id="np-queue-list"></div>
     </section>
@@ -2454,6 +2459,7 @@
     <section id="np-tools" class="np-tools" aria-label="播放工具" hidden>
       <header><h2>播放工具</h2><button type="button" id="np-tools-close" class="np-ctrl" title="关闭工具" aria-label="关闭工具"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-close"/></svg></button></header>
       <div class="np-tool-actions">
+        <button type="button" id="np-stage-mobile" class="btn">沉浸声场</button>
         <button type="button" id="np-eq" class="btn">均衡器</button>
         <button type="button" id="np-sleep" class="btn">睡眠定时</button>
         <button type="button" id="np-fullscreen" class="btn" aria-pressed="false">全屏播放页</button>
@@ -2492,25 +2498,14 @@
 <!-- 演示后端（prototype/mock.js）不随服务发布：app.js 探不到 /v1/health 时
      会自动退到 ServerTransport，不需要这段 script 也能正常工作。
      下面五个是创意舞台：内核 → 表现层 → 编排 → 工坊，顺序即依赖顺序。 -->
-<!-- 公共组件：锚定弹层的生命周期与定位（更多工具/皮肤菜单/主题色菜单共用）。 -->
+<!-- 公共组件：更多工具与主题菜单的生命周期和定位。 -->
 <script defer src="components/popup.js"></script>
 <script defer src="skins/skins.js"></script>
-<!-- 皮肤公共段（锚点搬运 / 自建节点登记 / 封面位图回填）：必须在两张重编排
-     皮肤（流年 / 清风）之前加载。 -->
+<!-- 布局公共段：自建节点登记与封面位图回填。 -->
 <script defer src="skins/skin-shared.js"></script>
-<!-- 共享设置浮层（清风同款）：classic 的生命周期由它代管，heijiao / orbit
-     在自己的生命周期里调用；依赖 skins.js 与 skin-shared.js。 -->
-<script defer src="skins/skin-settings-sheet.js"></script>
-<!-- 流年皮肤的 DOM 重编排层：在 Skins 上登记挂载与卸载，
-     必须在 app.js 初始化皮肤宿主之前加载。 -->
-<script defer src="skins/skin.liunian.js"></script>
-<!-- 清风皮肤同样登记生命周期；队列快照与业务动作经 Skins 公共宿主接口交接，
-     必须在 app.js 初始化皮肤宿主之前加载。 -->
-<script defer src="skins/skin.qingfeng.js"></script>
-<!-- 黑胶同款：唱片卡的歌词展开 + 唱片拖转旋钮。必须在 app.js 初始化
-     皮肤宿主之前加载（registerLifecycle 要先于 Skins.init）。 -->
-<script defer src="skins/skin.heijiao.js"></script>
-<script defer src="skins/skin.orbit.js"></script>
+<!-- 独立封面墙与 Hertz 布局在宿主初始化之前登记生命周期。 -->
+<script defer src="cover-wall.js"></script>
+<script defer src="skins/skin.hertz.js"></script>
 <!-- 设计源（生成物）：内置主题目录数据，先于 themes.js 装载。 -->
 <script defer src="design/design-themes.js"></script>
 <script defer src="themes.js"></script>
@@ -2825,6 +2820,7 @@
 </div>
 
 <script defer src="desktop-settings.js"></script>
+<script defer src="volume-controls.js"></script>
 <script defer src="app.js"></script>
 </body>
 </html>

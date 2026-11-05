@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 //! One desktop management owner for REST and DBX. Construction and cached reads do no I/O.
 
-mod standalone;
+pub(crate) mod standalone;
 #[cfg(all(windows, target_arch = "x86_64"))]
 mod windows;
 

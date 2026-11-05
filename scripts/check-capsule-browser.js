@@ -8,7 +8,7 @@ const path = require('node:path');
 const playwright = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const web = path.resolve(__dirname, '../plugin/ui');
 const output = path.resolve(__dirname, '../output/playwright/capsule');
-const skins = ['orbit', 'classic', 'liunian', 'qingfeng', 'heijiao'];
+const skins = ['hertz'];
 const source = fs.readFileSync(path.join(web, 'index.html'), 'utf8');
 const html = source.replace(/<script\b[^>]*>[\s\S]*?<\/script>/g, '');
 const app = fs.readFileSync(path.join(web, 'app.js'), 'utf8');
@@ -30,6 +30,7 @@ async function main() {
   fs.mkdirSync(output, { recursive: true });
   const engine = process.env.CAPSULE_BROWSER || 'chromium';
   const launchOptions = { headless: true };
+  if (engine === 'chromium') launchOptions.channel = process.env.PLAYWRIGHT_CHANNEL || 'chrome';
   if (process.env.PLAYWRIGHT_EXECUTABLE_PATH) launchOptions.executablePath = process.env.PLAYWRIGHT_EXECUTABLE_PATH;
   const browser = await playwright[engine].launch(launchOptions);
   const evidence = [];
@@ -97,7 +98,7 @@ async function main() {
               assert.ok(contrast(child.color, layout.background) >= 4.5, label + ' readable ' + child.selector);
             }
           }
-          if (skin === 'orbit' && scale === 2) await page.screenshot({ path: path.join(output, `${engine}-${theme}.png`) });
+          if (skin === 'hertz' && scale === 2) await page.screenshot({ path: path.join(output, `${engine}-${theme}.png`) });
           // Active mode must also be independent of the temporary preboot marker.
           await page.evaluate(() => document.documentElement.classList.remove('hertz-floating-preboot'));
           assert.equal(await page.locator('body').evaluate(el => getComputedStyle(el).padding), '0px', label + ' active mode has no skin padding');

@@ -25,7 +25,7 @@ async function main() {
       return route.fulfill({ contentType: file.endsWith('.css') ? 'text/css' : 'text/html', body });
     });
     await page.goto('http://room-player.test/');
-    for (const file of ['host.js', 'themes.js', 'favorites.js', 'room-transport.js', 'room-workspace.js', 'room-view.js', 'room.js']) await page.addScriptTag({ content: source(file) });
+    for (const file of ['host.js', 'design/design-themes.js', 'themes.js', 'favorites.js', 'room-transport.js', 'room-workspace.js', 'room-view.js', 'room.js']) await page.addScriptTag({ content: source(file) });
     await page.evaluate(async () => {
       Theme.init(); Theme.apply('orbit-fog');
       window.__requests = [];
@@ -62,7 +62,7 @@ async function main() {
       const overlapping = boxes.some((a, i) => boxes.slice(i + 1).some(b => Math.min(a.right, b.right) - Math.max(a.left, b.left) > 1 && Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top) > 1));
       return { width: bounds.width, height: bounds.height, fits: bounds.left >= 0 && bounds.right <= innerWidth && bounds.bottom <= innerHeight, contained: boxes.every(box => box.left >= bounds.left && box.right <= bounds.right && box.top >= bounds.top && box.bottom <= bounds.bottom), targets: visible.filter(item => item.tagName === 'BUTTON').every(item => item.getBoundingClientRect().height >= 44), overlapping, overflow: document.documentElement.scrollWidth > innerWidth };
     });
-    for (const skin of ['classic', 'heijiao', 'liunian', 'orbit', 'qingfeng']) {
+    for (const skin of ['hertz']) {
       await page.evaluate(skin => {
         document.documentElement.dataset.skin = skin;
         document.querySelectorAll('link[data-skin-css]').forEach(link => { link.disabled = link.dataset.skinCss !== skin; });

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// 清风皮肤回归：自动启动独立 Null 后端，先验空态，再扫描/加载带标签的 WAV。
+// Hertz 播放条与在线歌单回归：自动启动独立 Null 后端，先验空态，再扫描/加载带标签的 WAV。
 // 先 cargo build --locked -p hertz-studio；可用 HERTZ_BIN 指定独立构建。
 //
 // 四个都不是「看一眼觉得不对」，而是能量出来的东西：
@@ -12,7 +12,7 @@ const fs = require('fs');
 const path = require('path');
 const { startFixture, TITLE, ARTIST } = require('./ui-browser-fixture');
 
-const OUT = process.env.SKIN_SHOT_DIR || 'output/verify-qf';
+const OUT = process.env.SKIN_SHOT_DIR || 'output/verify-hertz-bar';
 let pass = 0, fail = 0;
 const failures = [];
 function ok(c, n, d) { if (c) { pass++; console.log('  PASS  ' + n + (d ? '   [' + d + ']' : '')); } else { fail++; failures.push(n); console.log('  FAIL  ' + n + (d ? '   [' + d + ']' : '')); } }
@@ -26,23 +26,24 @@ function ok(c, n, d) { if (c) { pass++; console.log('  PASS  ' + n + (d ? '   ['
   const context = await browser.newContext({ viewport: { width: 1075, height: 640 }, reducedMotion: 'reduce' });
   await fixture.connect(context);
   const page = await context.newPage();
+  await require('./ui-source-assets').routeSourceAssets(page, fixture);
   const errs = [];
   page.on('pageerror', (e) => errs.push('PAGEERROR: ' + e.message.slice(0, 160)));
   page.on('console', (m) => { if (m.type() === 'error' && m.text().indexOf('401') < 0) errs.push('CONSOLE: ' + m.text().slice(0, 160)); });
 
-  // 直接把皮肤存成清风，模拟「从别的皮肤切过来」
+  // 使用当前生产布局，先验空播放器再加载实际标签。
   await page.addInitScript(() => {
-    try { localStorage.setItem('vmusic.skin', 'qingfeng'); } catch (e) {}
+    try { localStorage.setItem('vmusic.skin', 'hertz'); } catch (e) {}
   });
   await page.goto(fixture.base, { waitUntil: 'domcontentloaded' });
-  await page.waitForFunction(() => window.Skins && document.querySelector('#conn.ok') && window.__qfSkin);
-  await page.evaluate(() => Skins.apply('qingfeng'));
-  await page.waitForFunction(() => !!document.querySelector('link[data-skin-css="qingfeng"]').sheet);
+  await page.waitForFunction(() => window.Skins && document.querySelector('#conn.ok') && window.HertzCoverWall);
+  await page.evaluate(() => Skins.apply('hertz'));
+  await page.waitForFunction(() => !!document.querySelector('link[data-skin-css="hertz"]').sheet);
   await page.evaluate(() => document.fonts.ready);
 
   const skin = await page.evaluate(() => document.documentElement.getAttribute('data-skin'));
   console.log('\n当前皮肤: ' + skin);
-  ok(skin === 'qingfeng', '切到清风皮肤', 'data-skin=' + skin);
+  ok(skin === 'hertz', '切到 Hertz 布局', 'data-skin=' + skin);
 
   const empty = await page.evaluate(() => ({
     title: document.getElementById('bar-title').textContent,
@@ -108,15 +109,16 @@ function ok(c, n, d) { if (c) { pass++; console.log('  PASS  ' + n + (d ? '   ['
 
   // ---------- 问题 3：顶部 tab 选中态文字可见性 ----------
   const tabs = await page.evaluate(() => {
-    const sels = ['.topbar .chip', '.topbar .tab', '.topbar button', '#daily-modes .chip', '.cap-tabs .chip'];
+    const sels = ['.hz-view-switch button', '.hz-library-tabs button', '.hz-settings-nav button', '#daily-modes .chip'];
     const out = [];
     sels.forEach((s) => {
       document.querySelectorAll(s).forEach((e) => {
-        const on = e.classList.contains('active') || e.getAttribute('aria-pressed') === 'true'
+        const on = e.classList.contains('active') || e.classList.contains('is-active') || e.getAttribute('aria-pressed') === 'true'
           || e.getAttribute('aria-selected') === 'true';
         if (!on) return;
         const cs = getComputedStyle(e);
         const b = e.getBoundingClientRect();
+        if (b.width === 0 || b.height === 0 || cs.visibility === 'hidden') return;
         out.push({ sel: s, text: (e.textContent || '').trim().slice(0, 12),
           color: cs.color, bg: cs.backgroundColor, opacity: cs.opacity,
           w: Math.round(b.width), h: Math.round(b.height) });
@@ -126,6 +128,7 @@ function ok(c, n, d) { if (c) { pass++; console.log('  PASS  ' + n + (d ? '   ['
   });
   console.log('\n[3] 选中态 tab:');
   tabs.forEach((t) => console.log('  ' + JSON.stringify(t)));
+  ok(tabs.length > 0, '至少测量一个真实可见的选中态按钮');
 
   // 对比度：把 color 解析成 rgb 再算与 bg 的差距
   function lum(c) {

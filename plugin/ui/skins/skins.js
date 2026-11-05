@@ -1,100 +1,25 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 hertz-studio contributors
 //
-// 界面皮肤：只管**布局**，不管配色。
-//
-// 一套皮肤 = 一个 id + 一份 CSS（`skins/skin.<id>.css`）+ 可选布局生命周期。
-// 切换先卸载旧布局，再更新 data-skin / CSS，挂载新布局后通知观察者。配色一律
-// 沿用当前主题的 token，皮肤 CSS 里不出现任何颜色字面量——所以换皮肤不会
-// 把主题色带跑，换主题也不会破坏皮肤。
-//
-// 加一套新皮肤（完整步骤见 docs/extension-guide.md）：
-//   1. 新建 `skins/skin.<id>.css`，规则用 `[data-skin="<id>"]` 包起来；
-//   2. register({ id, name, note, lifecycle? })，并在 index.html 声明 CSS/JS；
-//   3. 在 assets.rs 的资源清单登记文件，自动获得 HTTP 路由和缓存指纹。
-// 其余（切换、持久化、设置页列表与顶栏弹层这两个宿主、事件广播）都由这里统一处理。
+// 布局生命周期和业务请求桥。副本只提供 HertzStudio 布局；保留扩展接口，
+// 让桌面与插件宿主继续共享 CSS 启用、偏好恢复和有序装配。
 
 (function () {
   'use strict';
 
   var ATTR = 'data-skin';
   var KEY = 'vmusic.skin';
-  var DEFAULT_ID = 'orbit';
-  // 经典没有独立 CSS，是随时可用的兜底布局；默认皮肤缺失时回落到它。
-  var FALLBACK_ID = 'classic';
+  var DEFAULT_ID = 'hertz';
+  var FALLBACK_ID = 'hertz';
   var DEFAULT_MARKER = 'vmusic.skin.default';
   var EVENT = 'skin:changed';
-  // 顶栏弹层互斥广播，与 app.js 的 broadcastTopbarPopup 同一条约定：谁开谁喊
-  // 一声，其余弹层（主题色 / 更多工具）听见不是自己开的就收起。按钮 onclick
-  // 都 stopPropagation，「点外部就关」的 document 监听帮不上忙，只能广播。
-  var POPUP_EVENT = 'topbar:popup';
-
-  /// 皮肤目录。经典和其他皮肤分别覆盖共用的业务布局基线。
-  var CATALOG = [
-    {
-      id: 'classic',
-      name: '经典',
-      note: '侧栏与全宽曲库，底栏展开封面与歌词播放页',
-    },
-    {
-      id: 'liunian',
-      name: '流年',
-      note: '清晰导航、暖调播放卡与凝彩舞台，可收为胶囊，手机端直接浏览歌曲',
-    },
-    {
-      id: 'qingfeng',
-      name: '清风',
-      note: '全宽展墙：顶部胶囊主菜单、方形海报墙队列拼接、浮层式设置面板',
-    },
-    {
-      id: 'heijiao',
-      name: '黑胶',
-      note: '双卡片布局：左侧常驻可拖转的唱片卡（点击展开歌词）、右侧内容网格卡片',
-    },
-  ];
+  var CATALOG = [{ id: 'hertz', name: 'HertzStudio', note: '音乐播放器 · 桌面与移动端 · 封面拼接墙' }];
 
   var current = DEFAULT_ID;
   var listeners = [];
   var activeLifecycle = null;
   var initialized = false;
   var host = null;
-  var railPreferences = {};
-  var RAIL_KEY = 'vmusic.sidebar.';
-
-  function syncSidebar(id) {
-    var button = document.getElementById('rail-toggle');
-    if (!button) return;
-    var supported = id === 'classic';
-    if (supported && !(id in railPreferences)) {
-      var saved = null;
-      try { saved = localStorage.getItem(RAIL_KEY + id); } catch (e) { /* Privacy mode. */ }
-      railPreferences[id] = saved === 'expanded' || saved === 'collapsed' ? saved : null;
-    }
-    var state = supported && railPreferences[id] || (id === 'classic' && window.innerWidth <= 1100 ? 'collapsed' : 'expanded');
-    document.documentElement.setAttribute('data-rail-state', supported ? state : '');
-    button.hidden = !supported;
-    button.setAttribute('aria-expanded', String(state === 'expanded'));
-    var label = state === 'expanded' ? '收缩导航' : '展开导航';
-    button.setAttribute('aria-label', label);
-    button.title = label;
-  }
-
-  function bindSidebar() {
-    var button = document.getElementById('rail-toggle');
-    var rail = document.getElementById('rail');
-    if (!button || !rail) return;
-    rail.querySelectorAll('.rail-item[aria-label]').forEach(function (item) {
-      item.title = item.getAttribute('aria-label');
-    });
-    button.onclick = function () {
-      if (current !== 'classic') return;
-      var state = button.getAttribute('aria-expanded') === 'true' ? 'collapsed' : 'expanded';
-      railPreferences[current] = state;
-      try { localStorage.setItem(RAIL_KEY + current, state); } catch (e) { /* Keep the in-memory preference. */ }
-      syncSidebar(current);
-    };
-    window.addEventListener('resize', function () { syncSidebar(current); });
-  }
 
   function validLifecycle(value) {
     return value && typeof value.mount === 'function' && typeof value.unmount === 'function';
@@ -104,7 +29,6 @@
     var root = document.documentElement;
     if (root.getAttribute(ATTR) !== id) root.setAttribute(ATTR, id);
     syncCss(id);
-    syncSidebar(id);
   }
 
   // Hooks own their DOM resources; this owner guarantees teardown before mount.
@@ -156,32 +80,16 @@
     return null;
   }
 
-  /// 界面上给入口的那几套。`hidden` 的皮肤仍在 CATALOG 里（apply 能切过去、
-  /// 已设过它的用户不会被困住），只是不出现在任何选择器里。
-  ///
-  /// 三处宿主都从这里取——设置页那组卡片、顶栏弹层、命令面板——所以"隐藏一套
-  /// 皮肤"只动 CATALOG 一处，不存在漏改某个列表的可能。
+  // 命令面板及扩展调用方只读取可见描述。
   function visible() {
     return CATALOG.filter(function (d) { return !d.hidden; });
   }
 
-  /// 皮肤那几份 CSS 在页面上的载体。
-  ///
-  /// 独立形态下它们是 index.html 里声明的 `<link data-skin-css disabled>`；
-  /// DBX 插件形态下宿主会把 `<link rel=stylesheet>` 就地换成 `<style>`
-  /// （srcdoc 沙箱的 CSP 不放行外链样式表），属性一并搬过去，于是同一个标记
-  /// 挂在另一种元素上。两种都要认，否则插件形态下 hasCss() 永远为假、
-  /// apply() 一律回落 classic，表现是「设置里点皮肤没有反应」。
-  ///
-  /// `.disabled` 是 IDL 属性，link 与 style 都支持（style 的 disabled **内容**
-  /// 属性不生效，所以初始的关闭必须由这里在启动时做一次，见 syncCss）。
+  // 独立服务使用 link，DBX srcdoc 将其转换为 style；两者都支持 disabled。
   function sheets() {
     return document.querySelectorAll('link[data-skin-css], style[data-skin-css]');
   }
 
-  /// 皮肤 CSS 是**按需启用**的：所有皮肤都 link 在页面上但默认 disabled，
-  /// 切到谁才解开谁。这样切换是同步的、没有加载闪烁，也不必在运行时插入
-  /// <link>（插入会有一帧无样式）。
   function syncCss(id) {
     var links = sheets();
     for (var i = 0; i < links.length; i += 1) {
@@ -191,8 +99,6 @@
     }
   }
 
-  /// 声明的皮肤必须真的有那份 CSS，否则切过去等于"什么都没变"——
-  /// 这种静默失败最难查，所以启动时就把它挑出来。
   function hasCss(id) {
     var links = sheets();
     for (var i = 0; i < links.length; i += 1) {
@@ -207,7 +113,7 @@
       def = byId(FALLBACK_ID);
       id = FALLBACK_ID;
     }
-    // classic 没有 CSS 文件是设计如此；其它皮肤缺 CSS 就是漏了文件。
+    // 扩展缺失 CSS 时保留可用的默认布局。
     if (id !== FALLBACK_ID && !hasCss(id)) {
       if (window.console && console.warn) console.warn('[skins] 缺少 ' + id + ' 的 CSS，回落到 ' + FALLBACK_ID);
       id = FALLBACK_ID;
@@ -219,9 +125,6 @@
     if (!(opts && opts.silent)) {
       try { localStorage.setItem(KEY, id); } catch (e) { /* 隐私模式 */ }
     }
-    // 两处宿主（设置页那张卡列表、顶栏那颗弹层）都在这儿一起重画。放在广播
-    // 之前：订阅者可能会去读已经更新的高亮态。
-    refresh();
     // 舞台画布、3D 场景这些要按新尺寸重排，广播出去让它们自己响应——
     // 与项目里 online-playlists:changed 的做法一致，不在这里硬编码谁要重画。
     try {
@@ -241,13 +144,8 @@
       firstDefault = localStorage.getItem(DEFAULT_MARKER) === null;
     } catch (e) { saved = null; }
     var def = saved ? byId(saved) : null;
-    // 存过但不认识（比如皮肤被删了）回落默认皮肤；存的是**已隐藏**的皮肤同样
-    // 回落——界面上已经没有它的入口，继续停在里面等于把用户锁在一套换不回来
-    // 的布局里。
+    // 旧布局及隐藏扩展的保存值迁移到默认布局。
     var start = def && !def.hidden ? saved : DEFAULT_ID;
-    // 默认皮肤换过一次：未保存过、或还停在旧默认 classic 的用户迁到星轨。
-    // 只做一次并落标记——之后用户再切回 classic 是他自己的选择，不能每次开机
-    // 都被改回去。明确选过其它皮肤的用户保持原样。
     if (firstDefault) {
       if (!saved || saved === FALLBACK_ID) start = DEFAULT_ID;
       try {
@@ -260,111 +158,11 @@
       // init 走 silent 不写盘，这里补一次，避免下次继续读取无效偏好。
       try { localStorage.setItem(KEY, start); } catch (e) { /* 隐私模式 */ }
     }
-    bindEntry();
-    bindSidebar();
     return current;
   }
 
-  // ---------------------------------------------------------------------------
-  // 皮肤清单的两个宿主：设置页的卡片列表 + 顶栏的切换弹层
-  // ---------------------------------------------------------------------------
-
-  function el(id) { return document.getElementById(id); }
-
-  /// 同一份 CATALOG 渲染成两种宿主：设置页是「一张卡一套皮肤」，顶栏弹层是
-  /// 「一行一个单选项」。只有可访问性语义不同（aria-pressed vs menuitemradio），
-  /// 数据与切换动作共用，所以第二处不再复制一份清单。
-  function renderInto(host, isMenu) {
-    if (!host) return;
-    host.innerHTML = '';
-    visible().forEach(function (def) {
-      var on = def.id === current;
-      var b = document.createElement('button');
-      b.type = 'button';
-      b.className = 'skin-option' + (on ? ' is-on' : '');
-      b.setAttribute('data-skin-id', def.id);
-      if (isMenu) {
-        b.setAttribute('role', 'menuitemradio');
-        b.setAttribute('aria-checked', String(on));
-        // 弹层里说明被压成一行省略号，全文挂在 title 上。
-        b.title = def.note;
-      } else {
-        b.setAttribute('aria-pressed', String(on));
-      }
-      var name = document.createElement('strong');
-      name.className = 'skin-option-name';
-      name.textContent = def.name;
-      var note = document.createElement('span');
-      note.className = 'skin-option-note';
-      note.textContent = def.note;
-      b.appendChild(name);
-      b.appendChild(note);
-      b.onclick = function () {
-        apply(def.id);
-        if (isMenu) closeEntry(true);
-      };
-      host.appendChild(b);
-    });
-  }
-
-  function renderList() { renderInto(el('skins-list'), false); }
-  function renderMenu() { renderInto(entryMenu, true); }
-
-  /// 切肤后两处宿主都要跟上，否则「弹层里已经选了 B，设置页还高亮着 A」。
-  function refresh() {
-    renderList();
-    if (entryMenu) renderMenu();
-  }
-
-  // ---------------------------------------------------------------------------
-  // 顶栏入口：#skin-btn 开合 #skin-menu
-  // ---------------------------------------------------------------------------
-
-  var entryBtn = null;
-  var entryMenu = null;
-  var entryOpen = false;
-
-  // 生命周期与定位在 components/popup.js 一处实现；这里只保留皮肤侧的
-  // 开层钩子（render + 聚焦当前行）与给既有调用方的 setOpen 形状。
-  var entryPopup = null;
-  function setEntryOpen(open, returnFocus) {
-    if (!entryPopup) return;
-    entryPopup.setOpen(!!open);
-    if (!open && returnFocus && entryBtn.focus) entryBtn.focus();
-  }
-
-  /// 菜单已经不在按钮下面了（模块搬 body 那段），锚点解析成常驻的 ⋮ 按钮。
-  function entryAnchor() {
-    var host = entryBtn.closest && entryBtn.closest('.top-more-menu');
-    return (host && el('top-more-btn')) || entryBtn;
-  }
-
-  function closeEntry(returnFocus) { setEntryOpen(false, returnFocus); }
-
-  function entryRows() {
-    return Array.prototype.slice.call(entryMenu.querySelectorAll('.skin-option'));
-  }
-
-  function bindEntry() {
-    entryBtn = el('skin-btn');
-    entryMenu = el('skin-menu');
-    // 契约脚本的沙箱只给 #skins-list，这里安静地不绑就行（模块其余部分照旧可用）。
-    if (!entryBtn || !entryMenu) return;
-    entryPopup = window.HertzPopup.create({
-      id: 'skin', trigger: entryBtn, menu: entryMenu, fallbackW: 246,
-      itemSelector: '.skin-option',
-      getAnchor: entryAnchor,
-      onOpen: function () {
-        renderMenu();
-        // 焦点直接落在当前皮肤那一行：开弹层的意图就是「看看现在是哪套」。
-        var at = entryMenu.querySelector('.skin-option.is-on') || entryMenu.firstElementChild;
-        if (at && at.focus) at.focus();
-      },
-    });
-  }
-
   window.Skins = {
-    /// 扩展点：新皮肤走这里登记，之后切换/列表/持久化自动生效。
+    // 保留外部扩展的登记接口；本项目不再附带其它布局文件。
     register: function (def) {
       if (!def || typeof def.id !== 'string' || !/^[a-z][a-z0-9-]*$/.test(def.id) || byId(def.id)) return false;
       if (def.lifecycle && !validLifecycle(def.lifecycle)) return false;
@@ -387,8 +185,6 @@
       if (host) host(detail);
       return detail;
     },
-    /// 对外可见的皮肤清单。命令面板从这里建「皮肤：X」命令，所以隐藏一套皮肤
-    /// 也是自动生效的——搜不出来，也就切不过去。
     list: function () {
       return visible().map(function (d) { return { id: d.id, name: d.name, note: d.note }; });
     },
@@ -401,9 +197,7 @@
       return function () { var at = listeners.indexOf(fn); if (at >= 0) listeners.splice(at, 1); };
     },
     init: init,
-    render: renderList,
-    /// 契约脚本与排障用：皮肤之间的差别必须体现在布局上，不是颜色。
-    /// 与 list() 的差别是它**包含隐藏的**皮肤——排障时要看得见全貌。
+    render: function () {}, // 旧宿主接口；唯一布局没有选择器。
     catalog: function () { return CATALOG.slice(); },
   };
 })();

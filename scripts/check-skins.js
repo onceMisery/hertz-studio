@@ -1,990 +1,377 @@
 #!/usr/bin/env node
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 hertz-studio contributors
-//
-// 界面皮肤（布局皮肤）的契约检查（零依赖、不触网）。
-//
-//   node scripts/check-skins.js
-//
-// 皮肤是"只换布局、不换配色"的一层，最容易坏在四个地方，各钉一条：
-//
-//   1. **偷偷改配色**。皮肤 CSS 里一旦出现颜色字面量，换皮肤就会把主题色带跑，
-//      主题与皮肤不再正交。这里直接扫十六进制/rgb() 字面量。
-//   2. **各套皮肤没有区分度**。只是微调就失去了"换皮肤"的意义——对布局
-//      令牌逐项比对，要求真的反向取值。
-//   3. **模块覆盖不齐**。各套皮肤必须覆盖同一批模块，否则切过去会有页面
-//      落回默认布局，看起来像"切了一半"。
-//   4. **扩展点不Work**。加一套皮肤应该是"一个 CSS + 一行 register"，
-//      这里真的 register 一套进去，验证切换/列表/持久化自动生效。
-
+// Hertz layout contract: production wiring, responsive surfaces, lifecycle
+// rollback, persisted migration and the existing playback/source host.
+// No legacy layout implementation is loaded; extension behavior is exercised
+// with synthetic lifecycle owners against the real skins.js module.
 'use strict';
-
 const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
-
 const ROOT = path.join(__dirname, '..');
 const WEB = path.join(ROOT, 'plugin', 'ui');
-const SKINS = path.join(WEB, 'skins');
-const read = (p) => fs.readFileSync(p, 'utf8').replace(/\r\n/g, '\n');
-const SKINS_JS = read(path.join(SKINS, 'skins.js'));
-const POPUP_JS = read(path.join(WEB, 'components', 'popup.js'));
-const CLASSIC = read(path.join(SKINS, 'skin.classic.css'));
-const LIUNIAN = read(path.join(SKINS, 'skin.liunian.css'));
-const QINGFENG = read(path.join(SKINS, 'skin.qingfeng.css'));
-const HEIJIAO = read(path.join(SKINS, 'skin.heijiao.css'));
-const HEIJIAO_JS = read(path.join(SKINS, 'skin.heijiao.js'));
-const ORBIT = read(path.join(SKINS, 'skin.orbit.css'));
-const ORBIT_JS = read(path.join(SKINS, 'skin.orbit.js'));
-const LIUNIAN_JS = read(path.join(SKINS, 'skin.liunian.js'));
-const QINGFENG_JS = read(path.join(SKINS, 'skin.qingfeng.js'));
-const SKINS_CSS = read(path.join(SKINS, 'skins.css'));
+const read = file => fs.readFileSync(file, 'utf8').replace(/\r\n/g, '\n');
+const SKINS_JS = read(path.join(WEB, 'skins/skins.js'));
+const HERTZ_JS = read(path.join(WEB, 'skins/skin.hertz.js'));
+const HERTZ_CSS = read(path.join(WEB, 'skins/skin.hertz.css'));
+const WALL_JS = read(path.join(WEB, 'cover-wall.js'));
+const WALL_CSS = read(path.join(WEB, 'cover-wall.css'));
 const HTML = read(path.join(WEB, 'index.html'));
 const APP = read(path.join(WEB, 'app.js'));
-const STAGE3D_JS = read(path.join(WEB, 'stage3d.js'));
-const STAGE_CSS = read(path.join(WEB, 'stage.css'));
-const MAIN_RS = read(path.join(ROOT, 'crates', 'hertz-studio', 'src', 'assets.rs'));
+const ASSETS = read(path.join(ROOT, 'crates/hertz-studio/src/assets.rs'));
+const LEGACY = ['classic', 'liunian', 'qingfeng', 'heijiao', 'orbit'];
+let failures = 0, checks = 0;
+function ok(value, label) { checks++; if (!value) { failures++; console.error('  X ' + label); } }
+function eq(actual, expected, label) { ok(actual === expected, label + ' (got ' + JSON.stringify(actual) + ')'); }
+function section(label) { console.log('\n' + label); }
+function cleanCss(css) { return css.replace(/\/\*[\s\S]*?\*\//g, ' '); }
+function cleanJs(js) { return js.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/^\s*\/\/.*$/gm, ''); }
 
-let failures = 0;
-let checks = 0;
-function ok(cond, label) {
-  checks += 1;
-  if (!cond) { failures += 1; console.error('  X ' + label); }
-}
-function eq(a, b, label) { ok(a === b, label + ' (got ' + JSON.stringify(a) + ')'); }
-function section(name) { console.log('\n' + name); }
-
-// ---------------------------------------------------------------------------
-// 沙箱
-// ---------------------------------------------------------------------------
-
-function makeEl(id) {
-  const el = {
-    id: id || '',
-    disabled: false,
-    hidden: false,
-    className: '',
-    textContent: '',
-    title: '',
-    type: '',
-    attrs: {},
-    children: [],
-    _html: '',
-    // 弹层搬进 body 之后位置由 JS 写（left/top），沙箱要给这两个可写属性。
-    style: {},
-    // 定位要读按钮矩形；沙箱不需要真算出位置，给个零矩形让代码走完整条路径。
-    getBoundingClientRect() {
-      return { left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0 };
-    },
-    // skins.js 的顶栏入口会 toggle 一个 active 类；这里只当开关用，
-    // 断言看的是 aria-expanded / hidden 这两个能直接读到的状态。
-    classList: { add() {}, remove() {}, toggle() {}, contains() { return false; } },
-    setAttribute(k, v) { this.attrs[k] = String(v); },
-    getAttribute(k) { return this.attrs[k] || null; },
-    appendChild(c) { this.children.push(c); return c; },
-    // 弹层骨架（components/popup.js）用 addEventListener 绑触发钮；记录下来
-    // 供断言用 dispatch 派发（以前直接赋 onclick 的形状已退役）。
-    listeners: {},
-    addEventListener(type, fn) { (this.listeners[type] = this.listeners[type] || []).push(fn); },
-    dispatch(type, event) { (this.listeners[type] || []).forEach((fn) => fn(event)); },
-    focus() {},
-    // 只服务模块真正用到的那一种选择器：`.a.b`（在直接子节点里找同时带这两个类的）。
-    querySelector(sel) {
-      const want = String(sel).split('.').filter(Boolean);
-      for (let i = 0; i < this.children.length; i += 1) {
-        const cls = (this.children[i].className || '').split(/\s+/);
-        if (want.every((k) => cls.indexOf(k) >= 0)) return this.children[i];
-      }
-      return null;
-    },
-    get firstElementChild() { return this.children[0] || null; },
-  };
-  Object.defineProperty(el, 'innerHTML', {
-    get() { return this._html; },
-    set(v) { this._html = String(v); this.children = []; },
-  });
-  return el;
-}
-
-function makeSandbox(cssIds, carrier) {
-  // carrier 决定皮肤 CSS 在页面上以什么元素出现：
-  //   'link'（默认）独立形态——index.html 里声明的 <link data-skin-css disabled>；
-  //   'style' DBX 插件形态——宿主把 <link rel=stylesheet> 就地内联成 <style>
-  //          并搬走属性。此时 disabled **内容**属性不生效（<style> 不反射它），
-  //          所以四份皮肤 CSS 进来时全是启用的，得由 init 关掉。
-  const tag = carrier === 'style' ? 'style' : 'link';
-  const links = (cssIds || []).map((id) => {
-    const l = makeEl();
-    l.tag = tag;
-    l.setAttribute('data-skin-css', id);
-    l.disabled = tag === 'link';
-    return l;
-  });
-  const root = makeEl('html');
-  const sandboxBody = makeEl('body');
-  const listHost = makeEl('skins-list');
-  // 顶栏那颗入口的两个宿主。给齐了 skins.js 才会真去绑定（少一个就安静跳过，
-  // 上面那些只关心切换的用例走的正是这条捷径）。
-  const skinBtn = makeEl('skin-btn');
-  const skinMenu = makeEl('skin-menu');
+function makeSandbox(cssIds = ['hertz'], carrier = 'link', seed) {
+  const store = seed || new Map();
+  const root = { attrs: {}, setAttribute(k,v) { this.attrs[k]=String(v); }, getAttribute(k) { return this.attrs[k] || null; } };
+  const links = [...new Set(['hertz', ...cssIds])].map(id => ({ disabled: carrier === 'link',
+    getAttribute(key) { return key === 'data-skin-css' ? id : null; } }));
   const events = [];
-  const store = new Map();
+  const nodes = { 'np-modal': { hidden: false }, 'np-scrim': { hidden: false } };
+  let created = 0;
   const sandbox = {
-    console: { warn: () => {}, log: () => {} },
-    Object, Array, JSON, String, Number, Math, Set, Map,
-    addEventListener: () => {},
-    CustomEvent: class CustomEvent {
-      constructor(type, opts) { this.type = type; this.detail = opts && opts.detail; }
-    },
-    localStorage: {
-      getItem: (k) => (store.has(k) ? store.get(k) : null),
-      setItem: (k, v) => store.set(k, String(v)),
-    },
-    document: {
-      documentElement: root,
-      // 顶栏弹层会被搬进 body（.topbar 自己是层叠上下文，弹层留在里面会被后面
-      // 的玻璃面板盖住），沙箱得给出这个宿主，否则 skins.js 绑定阶段就抛。
-      body: sandboxBody,
-      getElementById: (id) => (
-        id === 'skins-list' ? listHost : id === 'skin-btn' ? skinBtn : id === 'skin-menu' ? skinMenu : null
-      ),
-      // 组合选择器：只把标签名对得上的那份交给调用方，与浏览器行为一致。
-      querySelectorAll: (sel) => (
-        String(sel).split(',').some((s) => s.trim() === tag + '[data-skin-css]') ? links : []
-      ),
-      createElement: () => makeEl(),
-      dispatchEvent: (e) => { events.push(e); return true; },
-      addEventListener: () => {},
-    },
+    console: {warn() {},log() {}}, Object, Array, JSON, String, Number, Math, Set, Map,
+    localStorage: { getItem:k=>store.has(k)?store.get(k):null, setItem:(k,v)=>store.set(k,String(v)) },
+    CustomEvent: class { constructor(type, options) { this.type=type;this.detail=options&&options.detail; } },
+    addEventListener() {},
+    document: { documentElement:root,body:{}, getElementById:id=>nodes[id]||null,
+      querySelectorAll: selector => selector.split(',').some(s=>s.trim()===carrier+'[data-skin-css]') ? links : [],
+      createElement() { created++; return {}; }, dispatchEvent(event) { events.push(event); return true; }, addEventListener() {} },
   };
-  sandbox.window = sandbox;
+  sandbox.window=sandbox;
   vm.createContext(sandbox);
-  // index.html 的装载顺序：components/popup.js（弹层骨架）先于 skins.js。
-  vm.runInContext(POPUP_JS, sandbox, { filename: 'components/popup.js' });
-  vm.runInContext(SKINS_JS, sandbox, { filename: 'skins.js' });
-  sandbox.Skins.register({ id: 'orbit', name: '星轨', note: '侧栏导航、立体唱片与常驻队列' });
-  return { sandbox, root, body: sandboxBody, links, listHost, skinBtn, skinMenu, store, events };
+  vm.runInContext(SKINS_JS,sandbox,{filename:'skins/skins.js'});
+  return {sandbox,root,links,store,events,nodes,created:()=>created};
 }
 
-// ---------------------------------------------------------------------------
-// 1. 注册表与切换
-// ---------------------------------------------------------------------------
-
-function checkCatalog() {
-  section('皮肤目录：星轨默认布局与可选皮肤');
-
-  const { sandbox, root, links, listHost } = makeSandbox(['liunian', 'qingfeng', 'heijiao', 'classic']);
-  const ids = sandbox.Skins.catalog().map((s) => s.id);
-  ok(ids.indexOf('classic') >= 0, '有 classic（仓库原本那套布局）');
-  ok(ids.indexOf('liunian') >= 0, '有 liunian');
-  ok(ids.indexOf('qingfeng') >= 0, '有 qingfeng');
-  ok(ids.indexOf('heijiao') >= 0, '有 heijiao');
-  ok(ids.indexOf('sheen') < 0 && ids.indexOf('chaoxi') < 0,
-    '已下架的浮光 / 潮汐不在皮肤目录里');
-  ok(sandbox.Skins.catalog().every((s) => s.name && s.note),
-    '每套皮肤都有可读的名字与说明（设置页要靠它做选择）');
-
-  section('切换：写 data-skin，并只启用对应那份 CSS');
-
-  sandbox.Skins.apply('liunian');
-  eq(root.getAttribute('data-skin'), 'liunian', 'html 上写了当前皮肤');
-  eq(links[0].disabled, false, 'liunian 的 CSS 被启用');
-  eq(links[1].disabled && links[2].disabled && links[3].disabled, true,
-    '其余皮肤 CSS 保持禁用（不能同时生效）');
-
-  sandbox.Skins.apply('qingfeng');
-  eq(root.getAttribute('data-skin'), 'qingfeng', '切到 qingfeng');
-  eq(links[1].disabled, false, 'qingfeng 的 CSS 启用');
-  eq(links[0].disabled && links[2].disabled && links[3].disabled, true, 'liunian/heijiao/classic 收起');
-
-  sandbox.Skins.apply('heijiao');
-  eq(root.getAttribute('data-skin'), 'heijiao', '切到 heijiao');
-  eq(links[2].disabled, false, 'heijiao 的 CSS 被启用');
-  eq(links.every((l, i) => i === 2 || l.disabled), true, '其余皮肤全部收起');
-
-  sandbox.Skins.apply('classic');
-  eq(links[3].disabled, false, 'classic 启用默认浏览布局 CSS');
-  eq(links.every((l, i) => i === 3 || l.disabled), true, 'classic 只启用自己的布局 CSS');
-
-  section('切换：广播事件让画布类模块自己重排');
-  const { sandbox: s2, events } = makeSandbox(['liunian', 'qingfeng']);
-  s2.Skins.apply('liunian');
-  ok(events.some((e) => e.type === 'skin:changed' && e.detail && e.detail.id === 'liunian'),
-    '切肤后广播 skin:changed（舞台/3D 这类要按新尺寸重排）');
-
-  section('持久化：选择被记住，坏数据回落而不是写个无效值');
-  const { sandbox: s3, store } = makeSandbox(['liunian', 'qingfeng', 'orbit']);
-  s3.Skins.apply('liunian');
-  eq(store.get('vmusic.skin'), 'liunian', '选择写进 localStorage');
-  store.set('vmusic.skin', 'no-such-skin');
-  s3.Skins.init();
-  eq(s3.Skins.currentId(), 'orbit', '存了不认识的皮肤时回落默认星轨');
-  eq(store.get('vmusic.skin'), 'orbit', '回落同时把无效存档冲掉（下次开页不再读回它）');
-
-  section('持久化：清风的选择能被记住并复原');
-  const { sandbox: s5, root: r5, store: st5 } = makeSandbox(['qingfeng', 'heijiao']);
-  s5.Skins.apply('qingfeng');
-  eq(st5.get('vmusic.skin'), 'qingfeng', 'qingfeng 写进 localStorage');
-  s5.Skins.init();
-  eq(r5.getAttribute('data-skin'), 'qingfeng', '重开后落回 qingfeng（不是 classic）');
-
-  section('默认皮肤：星轨');
-  const orbitDef = { id: 'orbit', name: '星轨', note: '侧栏导航、立体唱片与常驻队列' };
-  const d = makeSandbox(['orbit', 'classic']);
-  d.sandbox.Skins.register(orbitDef);
-  d.sandbox.Skins.init();
-  eq(d.root.getAttribute('data-skin'), 'orbit', '没有存过皮肤时默认星轨');
-  eq(d.links[0].disabled, false, '星轨 CSS 默认启用');
-
-  const migrated = makeSandbox(['orbit', 'classic']);
-  migrated.sandbox.Skins.register(orbitDef);
-  migrated.store.set('vmusic.skin', 'classic');
-  migrated.sandbox.Skins.init();
-  eq(migrated.root.getAttribute('data-skin'), 'orbit', '旧默认 classic 一次性迁到星轨');
-  migrated.sandbox.Skins.apply('classic');
-  migrated.sandbox.Skins.init();
-  eq(migrated.root.getAttribute('data-skin'), 'classic', '迁移过一次后尊重用户选择');
-
-  const chosen = makeSandbox(['orbit', 'liunian']);
-  chosen.sandbox.Skins.register(orbitDef);
-  chosen.store.set('vmusic.skin', 'liunian');
-  chosen.sandbox.Skins.init();
-  eq(chosen.root.getAttribute('data-skin'), 'liunian', '明确选过的其它皮肤不被默认值改动');
-
-  section('插件形态：皮肤 CSS 被内联成 <style>，切换照样生效');
-  const { sandbox: s4, root: r4, links: styles } =
-    makeSandbox(['liunian', 'qingfeng', 'heijiao', 'orbit'], 'style');
-  eq(styles.every((s) => s.disabled === false), true,
-    'style 的 disabled 内容属性不生效，进来时四份都是启用的');
-  s4.Skins.init();
-  eq(r4.getAttribute('data-skin'), 'orbit', '插件启动默认落位在星轨');
-  eq(styles.every((s) => s.getAttribute('data-skin-css') === 'orbit' ? !s.disabled : s.disabled), true,
-    '插件启动只启用星轨 CSS（其它布局不会叠在一起）');
-  s4.Skins.apply('liunian');
-  eq(r4.getAttribute('data-skin'), 'liunian', 'style 载体也认得出皮肤，没有回落 classic');
-  eq(styles[0].disabled, false, 'liunian 的 CSS 被启用');
-  eq(styles.every((s, i) => i === 0 || s.disabled), true, '其余皮肤保持禁用');
-  eq(s4.Skins.currentId(), 'liunian', 'currentId 跟着走（不是嘴上说切了）');
-  s4.Skins.apply('qingfeng');
-  eq(styles[1].disabled, false, 'style 载体下 qingfeng 也能启用');
-  eq(styles.every((s, i) => i === 1 || s.disabled), true, '切到 qingfeng 后其余保持禁用');
-}
-
-// ---------------------------------------------------------------------------
-// 顶栏的界面皮肤入口：同一份清单的第二个宿主
-// ---------------------------------------------------------------------------
-
-function checkSkinEntry() {
-  section('顶栏皮肤入口：与设置页同源，切完两处一起跟上');
-
-  const { sandbox, root, body: skinBody, listHost, skinBtn, skinMenu } =
-    makeSandbox(['liunian', 'qingfeng', 'heijiao', 'orbit']);
-  sandbox.Skins.init();
-
-  // 弹层的行是在**展开那一刻**渲染的（init 只绑不画），所以先点按钮再读。
-  // 「初始收起」看的是 index.html 上那个 hidden 属性 —— 桩里的元素没有属性可反射。
-  ok(/id="skin-menu"[^>]*\shidden/.test(HTML), 'index.html 里弹层默认 hidden（开机不挂一份展开的菜单）');
-  skinBtn.dispatch('click', { stopPropagation() {} });
-  eq(skinMenu.hidden, false, '点按钮展开弹层');
-  eq(skinBtn.getAttribute('aria-expanded'), 'true', 'aria-expanded 跟着展开');
-
-  const rows = skinMenu.children;
-  eq(rows.length, sandbox.Skins.list().length, '弹层行数等于对外可见的皮肤数（不是各存一份清单）');
-  ok(rows.every((r) => r.getAttribute('role') === 'menuitemradio'), '每行都是 menuitemradio（单选语义）');
-  const on = rows.filter((r) => r.getAttribute('aria-checked') === 'true');
-  eq(on.length, 1, '只标记一个当前项');
-  eq(on[0] && on[0].getAttribute('data-skin-id'), 'orbit', '弹层初始选中默认星轨');
-
-  const pick = rows.filter((r) => r.getAttribute('data-skin-id') === 'liunian')[0];
-  pick.onclick();
-  eq(root.getAttribute('data-skin'), 'liunian', '点弹层里的行真的换了皮肤');
-  eq(skinMenu.hidden, true, '选完收起弹层');
-  eq(skinBtn.getAttribute('aria-expanded'), 'false', 'aria-expanded 收回 false');
-  const listOn = listHost.children.filter((r) => (r.className || '').indexOf('is-on') >= 0);
-  eq(listOn.length, 1, '设置页那组也只剩一个高亮（重绘收在 apply 里，不是只改点到的那处）');
-  eq(listOn[0] && listOn[0].getAttribute('data-skin-id'), 'liunian', '设置页高亮跟着切到的那套');
-
-  // 一颗按钮只能有一个绑定者。check-assets 的「一条一主」只扫 plugin/ui 顶层，
-  // skins/ 子目录不在它范围内，所以这条得自己钉住。
-  ok(!/skin-btn/.test(APP), 'app.js 不碰 #skin-btn（绑定只在 skins.js）');
-  ok(/<symbol id="i-skin"/.test(HTML), 'i-skin 画在共享 sprite 里（不是又复制一份）');
-  // 三个入口的相对顺序仍然是契约，只是现在同住「更多工具」：主题色 → 界面皮肤。
-  const moreMenu = HTML.slice(HTML.indexOf('id="top-more-menu"'), HTML.indexOf('id="online-account-btn"'));
-  const atTheme = moreMenu.indexOf('id="theme-btn"');
-  const atSkin = moreMenu.indexOf('id="skin-btn"');
-  ok(atTheme >= 0 && atTheme < atSkin, '主题色与界面皮肤都在「更多工具」里，且主题色在前');
-
-  // 弹层必须搬出 .topbar：顶栏是 relative + z-index:40 + backdrop-filter，本身就
-  // 是一个层叠上下文，弹层写多高的 z-index 都只在顶栏内部参与比较。舞台抽屉
-  // 是 fixed + z-index:58，整张菜单会被那块玻璃盖掉（浏览器实测：菜单中心与左上角
-  // 两点 elementFromPoint 都返回 #stage，用户读成「换肤弹窗被挡住了」）。
-  ok(skinBody.children.indexOf(skinMenu) >= 0, 'init 把弹层搬进 body（真跑过绑定，不只是源码里有这行）');
-  ok(/\.skin-menu\s*\{[^}]*position:\s*fixed/.test(read(path.join(WEB, 'style.css'))),
-    '.skin-menu 改成 fixed（搬进 body 后不再跟着按钮的 absolute 盒）');
-  const skinMenuZ = (read(path.join(WEB, 'style.css')).match(/\.skin-menu\s*\{[^}]*z-index:\s*(\d+)/) || [])[1];
-  ok(Number(skinMenuZ) > 58, '弹层压过舞台抽屉的 z-index:58', 'skin-menu z=' + skinMenuZ);
-  // 搬出去之后位置没人算了不行：开层那一刻必须按按钮矩形重算一次
-  // （render 在模块的 onOpen 钩子里，定位归 components/popup.js）。
-  ok(/onOpen: function \(\) \{/.test(SKINS_JS) && /renderMenu\(\);/.test(SKINS_JS)
-    && /window\.HertzPopup\.create\(\{/.test(SKINS_JS),
-    '开弹层时按按钮矩形算位置（搬进 body 后 CSS 里的 top/right 都不成立了）');
-  // 顶栏三颗弹层是同一个坑：.topbar 自己就是层叠上下文，留在里面的浮层会被舞台
-  // 那块 fixed + z-index:58 的抽屉整块盖住。#theme-menu 早就搬了 body，另两颗
-  // 照它做 —— 少搬一颗就是「这个弹窗又被挡住了」原地复发。
-  const styleTop = read(path.join(WEB, 'style.css'));
-  // 搬 body 的动作在 components/popup.js 一处实现（moveOutOfTopbar）；
-  // app.js 侧以 create() 声明。
-  ok(/document\.body\.appendChild\(menu\)/.test(POPUP_JS)
-    && /window\.HertzPopup\.create\(\{/.test(APP)
-    && /\.top-more-menu\s*\{[^}]*position:\s*fixed/.test(styleTop),
-    '「更多工具」弹层也搬出顶栏（实测命中是 #stage）');
-  ok(/document\.body\.appendChild\(menu\)/.test(read(path.join(WEB, 'theme-picker.js')))
-    && /\.theme-menu\s*\{[^}]*position:\s*fixed/.test(read(path.join(WEB, 'stage.css'))),
-    '主题色弹层保持搬出顶栏（另两颗的判据来源）');
-}
-
-// ---------------------------------------------------------------------------
-// 2. 扩展点：加一套新皮肤只需要一个 CSS + 一行 register
-// ---------------------------------------------------------------------------
-
-function checkExtensibility() {
-  section('扩展：register 一套新皮肤后，切换/列表自动生效');
-
-  const { sandbox, root, links } = makeSandbox(['liunian', 'compact']);
-  const okReg = sandbox.Skins.register({ id: 'compact', name: '紧凑', note: '测试用的第三套' });
-  ok(okReg === true, 'register 接受新皮肤');
-  ok(sandbox.Skins.register({ id: 'compact', name: '重复' }) === false, '重复 id 被拒绝');
-  ok(sandbox.Skins.catalog().some((s) => s.id === 'compact'), '新皮肤进了目录');
-
-  sandbox.Skins.apply('compact');
-  eq(root.getAttribute('data-skin'), 'compact', '新皮肤可以切换过去');
-  eq(links[1].disabled, false, '新皮肤的 CSS 被启用');
-
-  sandbox.Skins.render();
-  const opts = sandbox.Skins.list();
-  ok(opts.length >= 4, `设置页列表会多出这一项（${opts.length} 套）`);
-
-  section('扩展：声明了皮肤但漏了 CSS 要显式回落，不能静默装作切成功');
-  const { sandbox: s2, root: r2 } = makeSandbox(['liunian']);
-  s2.Skins.register({ id: 'compact', name: '紧凑', note: '测试用的第三套' });
-  s2.Skins.apply('compact');
-  eq(r2.getAttribute('data-skin'), 'classic', '缺 CSS 的皮肤回落到 classic');
-  eq(s2.Skins.currentId(), 'classic', 'currentId 也是 classic（不是嘴上说切了）');
-}
-
-// ---------------------------------------------------------------------------
-// 3. 皮肤只管布局：不许出现颜色字面量
-// ---------------------------------------------------------------------------
-
-function checkNoColor() {
-  section('皮肤只管布局：CSS 里不许有颜色字面量');
-
-  for (const [name, css] of [['heijiao', HEIJIAO]]) {
-    // 去掉注释再扫：注释里会提到"不出现颜色"这类字样。
-    const body = css.replace(/\/\*[\s\S]*?\*\//g, '');
-    const hex = body.match(/#[0-9a-fA-F]{3,8}\b/g) || [];
-    const rgb = body.match(/\brgba?\(/g) || [];
-    // white-space 这类属性名里带颜色词，先把它们摘掉再扫，否则会误报。
-    const named = body.replace(/white-space|grey|gray/g, '')
-      .match(/\b(?:red|blue|green|white|black)\b/g) || [];
-    ok(hex.length === 0, `${name} 没有十六进制颜色${hex.length ? '（' + hex.join(',') + '）' : ''}`);
-    ok(rgb.length === 0, `${name} 没有 rgb()/rgba()`);
-    ok(named.length === 0, `${name} 没有颜色关键字${named.length ? '（' + named.join(',') + '）' : ''}`);
-    // 允许出现的"颜色"只能是变量引用。
-    ok(/\bvar\(--/.test(body), `${name} 的着色一律走 var(--…)`);
+function checkCatalogAndMigration() {
+  section('唯一生产布局：默认、迁移、持久化与插件 CSS');
+  for (const carrier of ['link','style']) {
+    const env=makeSandbox(['hertz','unused'],carrier);
+    const api=env.sandbox.Skins;
+    for (const key of ['register','registerLifecycle','connectHost','request','apply','list','current','currentId','onChange','init']) {
+      eq(typeof api[key],'function',carrier+' retains '+key);
+    }
+    eq(api.list().map(d=>d.id).join(','),'hertz','production catalog contains only hertz');
+    eq(api.init(),'hertz',carrier+' startup selects hertz without selector DOM');
+    eq(env.root.getAttribute('data-skin'),'hertz','DOM surface matches current layout');
+    eq(env.links.filter(l=>!l.disabled).map(l=>l.getAttribute('data-skin-css')).join(','),'hertz',carrier+' enables exactly the current CSS');
+    eq(env.created(),0,'startup does not reconstruct retired selector UI');
+    api.apply('not-installed');
+    eq(api.current().id,'hertz','unknown layout resolves to hertz');
+    eq(env.store.get('vmusic.skin'),'hertz','fallback persists a valid layout');
   }
-
-  section('liunian：颜色字面量同样全禁，color 只准引用主题 token');
-
-  // liunian 复刻 VMusic 的「激活行翻色」，所以它是唯一被允许写 color 的皮肤；
-  // 但值必须来自主题（var(--…))，绝不允许字面量在皮肤里把主题色带跑。
-  const lnBody = LIUNIAN.replace(/\/\*[\s\S]*?\*\//g, '');
-  const lnHex = lnBody.match(/#[0-9a-fA-F]{3,8}\b/g) || [];
-  const lnRgb = lnBody.match(/\brgba?\(/g) || [];
-  const lnNamed = lnBody.replace(/white-space|grey|gray/g, '')
-    .match(/\b(?:red|blue|green|white|black)\b/g) || [];
-  ok(lnHex.length === 0, `liunian 没有十六进制颜色${lnHex.length ? '（' + lnHex.join(',') + '）' : ''}`);
-  ok(lnRgb.length === 0, 'liunian 没有 rgb()/rgba()');
-  ok(lnNamed.length === 0, `liunian 没有颜色关键字${lnNamed.length ? '（' + lnNamed.join(',') + '）' : ''}`);
-  // 扫独立 color 属性（排除 background-color/-webkit-text-fill-color 这类带前缀的）：
-  // 每个 color: 的值都必须以 var(-- 开头。
-  const lnColors = Array.from(lnBody.matchAll(/(?:^|[\s;}])color\s*:\s*([^;}]+)/g));
-  const badColor = lnColors.filter((m) => !/^\s*var\(--/.test(m[1]));
-  ok(badColor.length === 0,
-    `liunian 的 color 只能引用主题 token${badColor.length ? '（' + badColor.map((m) => m[1].trim()).join(',') + '）' : ''}`);
-  ok(lnColors.length >= 2, 'liunian 确实做了激活行翻色（VMusic 实心底 + 深字）');
-
-  section('清风：颜色字面量同样全禁，且不重定义主题色变量');
-
-  const qfBody = QINGFENG.replace(/\/\*[\s\S]*?\*\//g, '');
-  const qfHex = qfBody.match(/#[0-9a-fA-F]{3,8}\b/g) || [];
-  const qfRgb = qfBody.match(/\brgba?\(/g) || [];
-  const qfNamed = qfBody.replace(/white-space|grey|gray/g, '')
-    .match(/\b(?:red|blue|green|white|black)\b/g) || [];
-  ok(qfHex.length === 0, `qingfeng 没有十六进制颜色${qfHex.length ? '（' + qfHex.join(',') + '）' : ''}`);
-  ok(qfRgb.length === 0, `qingfeng 没有 rgb()/rgba()${qfRgb.length ? '（' + qfRgb.join(',') + '）' : ''}`);
-  ok(qfNamed.length === 0, `qingfeng 没有颜色关键字${qfNamed.length ? '（' + qfNamed.join(',') + '）' : ''}`);
-  ok(/\bvar\(--/.test(qfBody), 'qingfeng 的着色一律走 var(--…)');
-  // 配色归 themes.js 管。皮肤若在这里重定义 --brand / --highlight，
-  // 换皮肤就会把主题色带跑，三层外观（主题/皮肤/舞台主题）就不正交了。
-  ok(!/^\s*(--bg|--text|--accent|--muted|--brand|--highlight)\s*:/m.test(qfBody),
-    'qingfeng 不重定义主题色变量（配色归 themes.js 管）');
-  // 队列拼接的方形海报是这套视觉最强的识别特征，钉住它不被"顺手加圆角"改掉。
-  ok(/\[data-skin="qingfeng"\] \.qf-poster\s*\{[^}]*border-radius:\s*0/.test(qfBody),
-    '海报墙的卡片保持方角（「一切都方角」是这套视觉的识别特征）');
-
-  section('皮肤只管布局：属性也应该是布局属性');
-  for (const [name, css] of [['heijiao', HEIJIAO]]) {
-    const body = css.replace(/\/\*[\s\S]*?\*\//g, '');
-    // 这两条是"改配色"的典型入口，皮肤不该碰；颜色只能引用主题 token。
-    ok(!/^\s*(--bg|--text|--accent|--muted|--brand|--highlight)\s*:/m.test(body),
-      `${name} 不重定义主题色变量`);
-    const colors = Array.from(body.matchAll(/(?:^|[\s;}])color\s*:\s*([^;}]+)/g));
-    ok(colors.every((m) => /^\s*var\(--/.test(m[1])),
-      `${name} 的 color 只引用主题 token`);
-  }
-}
-
-// ---------------------------------------------------------------------------
-// 4. 皮肤之间要有区分度（不是微调）
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// 4b. iOS / macOS：分层圆角、正常分栏与原生状态
-// ---------------------------------------------------------------------------
-
-// 5. 模块覆盖：各套必须覆盖同一批模块
-// ---------------------------------------------------------------------------
-
-/// 取出皮肤覆盖到的选择器。同一个规则里的多个选择器各自带 `[data-skin=…]`
-/// 前缀，归一化后才是"覆盖了哪个模块"——不然 `.lib-head` 和
-/// `[data-skin="x"] .fav-head` 会被当成两个不同的东西，比对必然不一致。
-///
-/// 必须先剥注释：CSS 允许把注释插在选择器列表中间（liunian 的 `.dv-row`
-/// 前面就有一整块说明为什么补上它），不剥的话最后一条选择器会被解析成
-/// "注释文字 + .dv-row"，与其它皮肤的 `.dv-row` 比不上 —— 报出一个
-/// 根本不存在的覆盖缺口。
-function stripCssComments(css) {
-  return css.replace(/\/\*[\s\S]*?\*\//g, ' ');
-}
-
-/// JS 侧的同一件事：断言「有没有调某个函数 / 有没有 remove 某个 class」时，
-/// 如果说明这个坑的注释里恰好写着那句话，正则会匹配到注释，断言永远绿 ——
-/// 这是给自己造一个不会失败的检查，比没有检查更糟。
-function stripJsComments(js) {
-  return js
-    .replace(/\/\*[\s\S]*?\*\//g, ' ')
-    .replace(/^\s*\/\/.*$/gm, ' ');
-}
-
-function selectorsOf(rawCss) {
-  const css = stripCssComments(rawCss);
-  const out = new Set();
-  const re = /\[data-skin="[a-z]+"\]([^{]+)\{/g;
-  let m;
-  while ((m = re.exec(css))) {
-    m[1].split(',').forEach((part) => {
-      const s = part.replace(/\[data-skin="[a-z]+"\]\s*/g, '').trim();
-      if (s) out.add(s);
-    });
-  }
-  return out;
-}
-
-function checkCoverage() {
-  section('覆盖：各套皮肤要覆盖同一批模块，不能切过去落回默认');
-
-  // 「几何模块」= 每套皮肤都必须覆盖的（漏一个 = 切过去那块的行距/内距/圆角
-  // 落回 style.css 默认，与本页其它列表节奏不一致，是真缺陷）。
-  // 三类不算在里面，理由各不相同：
-  //  a) 纯排版分档（.dv-name 的字号）：漏了只读作"没分档"，不算破相 ——
-  //     各皮肤令牌名都不一样（--skin-h2 / --skin-title），强求逐字相等
-  //     等于逼着后来者照抄别人的令牌体系。
-  //  b) 顶栏搜索框（.topsearch）：有的皮肤把它摘掉、搬到自己的胶囊里，
-  //     或者换成覆盖式搜索条。这是**皮肤间的真实差异**，不是漏覆盖。
-  //  c) 舞台内部的余量分配（.stage-lyrics / .disc-wrap）：舞台在有的皮肤里是
-  //     fixed 悬浮面板，有 min-height，于是「余量给谁」是它独有的问题；
-  //     别的皮肤舞台是栅格里的右栏或 fixed 抽屉，本来就不存在这个余量问题。
-  //  d) 面板里的曲名/艺人（.stage-title / .stage-artist）：定高 flex 列里它们
-  //     是最容易被压扁的一档；有的皮肤舞台有空间就显示，有的干脆不展示
-  //     （信息播放条里一直有），强求一致等于砍功能。
-  //  e) 顶栏的「界面皮肤」入口（#skin-picker）：把导航做成胶囊的皮肤在窄屏
-  //     没有它的位置，会摘掉这颗（皮肤列表在设置页里仍然可达）。
-  //  f) 顶栏的设置齿轮（#settings-entry）：摘不摘是各皮肤自己的入口取舍 ——
-  //     导航里已经有「设置」条目的就不需要第二份。要求每套皮肤各写一条
-  //     只会逼着某些皮肤把入口删掉（那是改设计，不是补覆盖）。
-  const GEOMETRY_OPTIONAL = /^\.(dv-name|dv-sub|dv-num|dv-src|topsearch|stage-lyrics|disc-wrap|stage-title|stage-artist)$|^#skin-picker$|^#settings-entry$/;
-  // 皮肤自造的节点 / 只在某一套里成立的交互状态，不算"没覆盖"。
-  const SKIN_OWNED = /(^|[.#:\s])(ln|qf|hj|orbit)-|\[data-rail-state=|^#sleep-timer$|^\.bar-(pin-toggle|track|art|volume|controls|right)$/;
-  const isGeometry = (s) => !GEOMETRY_OPTIONAL.test(s) && !SKIN_OWNED.test(s) && !/^[^\s]*\s/.test(s);
-
-  const geometryGap = (from, to, fromName, toName) => {
-    const have = selectorsOf(to);
-    const miss = [...selectorsOf(from)].filter((s) => isGeometry(s) && !have.has(s));
-    ok(miss.length === 0, `${toName} 覆盖了 ${fromName} 的全部几何模块（缺：${miss.join(' ') || '无'}）`);
-  };
-
-  const ln = selectorsOf(LIUNIAN);
-  const qf = selectorsOf(QINGFENG);
-
-  // 其余皮肤与经典布局比几何模块（多覆盖如 body::after、.ln-* / .qf-* 允许）。
-  geometryGap(CLASSIC, LIUNIAN, 'classic', 'liunian');
-  geometryGap(CLASSIC, QINGFENG, 'classic', 'qingfeng');
-
-  // 这些是主要模块，一套皮肤漏了任何一个，切过去那块就是"没换皮肤"。
-  const must = [
-    '.app', '.rail', '.rail-item', '.column', '.view', '.col-head', '.col-title',
-    '.track', '.q-row', '.fav-row', '.online-row', '.pl-row',
-    '.pl-grid', '.daily-strip', '.daily-list', '.set-group', '.stage', '.bar',
-    // .dv-row 在这里，是因为五套皮肤曾一致漏掉它：每日推荐的"列表画法"行
-    // 自带一套 padding/radius，既不在任何一套皮肤的行名单里，也不在上面
-    // 这批 must 里，于是它成了全站唯一"切皮肤不改"的行——每套皮肤里它都
-    // 比同页其它列表挤一号。列入 must 是为了让这个缺口不能再无声回来。
-    '.dv-row',
-  ];
-  for (const m of must) {
-    for (const [set, name] of [[ln, 'liunian'], [qf, 'qingfeng']]) {
-      ok([...set].some((s) => s.indexOf(m) >= 0), `${name} 覆盖了 ${m}`);
+  for (const id of LEGACY.concat('not-installed')) {
+    for (const marker of [null,'orbit']) {
+      const store=new Map([['vmusic.skin',id]]);
+      if (marker) store.set('vmusic.skin.default',marker);
+      const env=makeSandbox(['hertz'],'link',store);
+      env.sandbox.Skins.init();
+      eq(env.sandbox.Skins.currentId(),'hertz',id+' migrates with existing marker '+marker);
+      eq(store.get('vmusic.skin'),'hertz','migration replaces obsolete saved '+id);
+      const reload=makeSandbox(['hertz'],'link',store);reload.sandbox.Skins.init();
+      eq(reload.root.getAttribute('data-skin'),'hertz','migrated '+id+' survives reload');
     }
   }
+  const privateEnv=makeSandbox();
+  privateEnv.sandbox.localStorage={getItem(){throw new Error('private');},setItem(){throw new Error('private');}};
+  privateEnv.sandbox.Skins.init();privateEnv.sandbox.Skins.apply('hertz');
+  eq(privateEnv.sandbox.Skins.currentId(),'hertz','blocked storage does not break default layout');
+}
 
-  // 卡片列宽规则必须落在 .daily-list，不能落在 .daily-strip。
-  //
-  // .daily-strip 的直接子元素是 .daily-head 和 .daily-list 两个**块**，
-  // 卡片在 .daily-list 里。给 .daily-strip 加 display:grid + 卡片列宽后，
-  // .daily-head 成了一个网格项 —— 它内部是「左 copy（长文案）+ 右 tools
-  // （一排按钮）」的横向 flex，网格列宽由内容均分，copy 就被压到最窄的一列，
-  // 「DAILY MIX · 每日推荐」「2026-10-03」「已合并 24 首」逐字换行竖排成一条。
-  //
-  // 页面不报错、不崩、不少元素，契约的「覆盖了 .daily-strip」也照样通过 ——
-  // 所以必须单独钉这条：外壳容器不许被改成卡片网格。
-  const stripRule = (src) => {
-    const m = /\.daily-strip\s*\{([^}]*)\}/.exec(stripCssComments(src));
-    return m ? m[1] : '';
-  };
-  for (const [src, name] of [[LIUNIAN, 'liunian'], [QINGFENG, 'qingfeng'], [HEIJIAO, 'heijiao']]) {
-    const body = stripRule(src);
-    ok(!/display\s*:\s*(grid|inline-grid|flex)/.test(body),
-      `${name} 没把 .daily-strip 改成网格/弹性容器`, `实际：${body.trim().slice(0, 60)}`);
+function checkExtensions() {
+  section('扩展接口：描述、验证、晚登记、缺资源回退与请求解绑');
+  const env=makeSandbox(['extension','late','hidden']);const api=env.sandbox.Skins;
+  eq(api.register({id:'hertz'}),false,'duplicate IDs cannot replace production owner');
+  for(const def of [null,{}, {id:'../bad'}, {id:'Upper'}, {id:'has space'}]) eq(api.register(def),false,'invalid registration is rejected');
+  ok(api.register({id:'extension',name:'Fixture layout'}),'extension descriptor can register');
+  eq(api.register({id:'extension'}),false,'duplicate extension rejected');
+  api.init();api.apply('extension');
+  eq(env.root.getAttribute('data-skin'),'extension','registered extension remains usable');
+  eq(env.store.get('vmusic.skin'),'extension','extension choice persists');
+  api.register({id:'missing-css'});api.apply('missing-css');
+  eq(api.currentId(),'hertz','extension without stylesheet falls back to hertz');
+  api.register({id:'hidden',hidden:true});
+  eq(api.list().some(d=>d.id==='hidden'),false,'hidden extension omitted from public list');
+  env.store.set('vmusic.skin','hidden');api.init();
+  eq(api.currentId(),'hertz','hidden persisted layout cannot trap a user on boot');
+  let mounted=0;
+  ok(api.registerLifecycle('hertz',{mount(){mounted++;},unmount(){mounted--;}}),'late production lifecycle attaches');
+  eq(mounted,1,'late lifecycle mounts current layout immediately');
+  api.apply('hertz');eq(mounted,1,'reapplying same layout does not duplicate owner');
+  let closeOptions=null;
+  env.sandbox.NowPlaying={isOpen:()=>true,close:opts=>{closeOptions=opts;}};
+  api.apply('extension');
+  eq(mounted,0,'leaving active lifecycle cleans resources');
+  ok(closeOptions&&closeOptions.switching,'player closes before layout handoff');
+  ok(env.nodes['np-modal'].hidden&&env.nodes['np-scrim'].hidden,'player overlay is hidden on layout handoff');
+  let oldCalls=0,newCalls=0;
+  const disconnectOld=api.connectHost(()=>oldCalls++);
+  const disconnectNew=api.connectHost(d=>{newCalls++;d.source={key:'library'};});
+  disconnectOld();
+  const extra={action:'spoof',sample:1};
+  const result=api.request('source-request',extra);
+  eq(result.action,'source-request','request caller cannot overwrite action');
+  eq(result.source.key,'library','host responds synchronously on returned envelope');
+  eq(extra.action,'spoof','request does not mutate caller envelope');
+  eq(oldCalls,0,'replaced host never receives requests');eq(newCalls,1,'stale disconnect does not remove replacement host');
+  disconnectNew();api.request('source-request');eq(newCalls,1,'current disconnect removes host');
+  let invalid=false;try{api.connectHost(null);}catch(e){invalid=e.name==='TypeError';}ok(invalid,'nonfunction host rejected');
+}
+
+function checkProductionWiring() {
+  section('生产资源与所有权：hertz 布局、独立封面墙和共用业务');
+  const sheets=[...HTML.matchAll(/data-skin-css="([^"]+)"/g)].map(m=>m[1]);
+  eq(sheets.join(','),'hertz','HTML declares only hertz layout CSS');
+  for(const name of ['skins/skins.js','skins/skin-shared.js','skins/skin.hertz.js','skins/skin.hertz.css','cover-wall.js','cover-wall.css']) {
+    ok(fs.existsSync(path.join(WEB,name)),name+' exists');
+    ok(HTML.includes('"'+name+'"'),name+' declared in HTML');
+    ok(ASSETS.includes('"/'+name+'"'),name+' registered for embedded delivery');
   }
-  // 反向：清风真的把列宽搬到 .daily-list 了吗？
-  ok(/\.daily-list\s*\{[^}]*grid-template-columns/.test(QINGFENG),
-    'qingfeng 的卡片列宽落在 .daily-list 上');
-
-  // 每日推荐的行不能只是"被提到"，还得真的调过几何。只写一条空规则
-  // 骗过上面的选择器计数是可能的，所以这里断言声明真的落地。
-  ok(/\.dv-row\s*\{[^}]*padding:\s*var\(--skin-row-py\)/.test(QINGFENG),
-    'qingfeng 的 .dv-row 真的调了 padding，且跟着 --skin-row-py 走（不是空壳规则）');
-  ok(/\.dv-row\s*\{[^}]*border-radius/.test(QINGFENG),
-    'qingfeng 的 .dv-row 真的调了 border-radius');
-  ok(/\.dv-body\s*\{[^}]*gap:\s*var\(--skin-row-py\)/.test(QINGFENG),
-    'qingfeng 把 .dv-body 的行距交给皮肤令牌（否则这一屏比同页任何列表都紧）');
-}
-
-// ---------------------------------------------------------------------------
-// 5b. 每日推荐：滚动链三件套
-// ---------------------------------------------------------------------------
-// 这一条不属于任何一套皮肤，它在 style.css 里，而且是**基线缺陷**：
-// .view 只是 flex:1 + min-height:0，自己不滚；.column 是 overflow:hidden。
-// 于是作为内容体的 .dv-body 必须自己收下 flex:1 / min-height:0 /
-// overflow-y ——少一条，30 首推荐就撑到内容全高再被裁掉，表现为
-// "只能看前十几首且滚不动"。这个失败模式最坏的地方是**不报错、不崩、
-// 不少元素**，页面上只是矮了一截，很容易当成"数据就这么多"。
-//
-// 四条同类内容体（.lib-list / .pl-list / .q-list / .fav-list）早就是这套
-// 三件套，.dv-body 是唯一漏的。这里连它们一起扫，免得下次再漏一个。
-function checkDailyScroll() {
-  section('每日推荐：内容体自己滚，且与同类列表体同一套三件套');
-
-  const style = read(path.join(WEB, 'style.css'));
-
-  // 一个选择器在文件里可能有多条规则（.fav-list 一条管 flex 列向、另一条
-  // 才写滚动三件套），所以要把**全部**同名规则的声明拼起来看，而不是只取
-  // 第一条 —— 只取第一条会让 .fav-list 假失败。
-  // .dv-body 与 .dv-body-card 前缀相同，用 (?![\w-]) 断开，否则卡片那条的
-  // 声明会被算成列表这条的。选择器里的 . 要转义。
-  const declsOf = (sel) => {
-    const re = new RegExp(`${sel.replace('.', '\\.')}(?![\\w-])\\s*\\{([^}]*)\\}`, 'g');
-    return [...style.matchAll(re)].map((m) => m[1]).join('\n');
-  };
-
-  const dv = declsOf('.dv-body');
-  ok(/\bflex:\s*1\b/.test(dv), '.dv-body 有 flex:1（否则撑到内容全高被 .column 裁掉）');
-  ok(/\bmin-height:\s*0\b/.test(dv), '.dv-body 有 min-height:0（否则不缩，中栏多高它就多高）');
-  ok(/overflow-y:\s*auto/.test(dv), '.dv-body 有 overflow-y:auto（不然后面十几首滚不到）');
-  ok(/overscroll-behavior-y:\s*contain/.test(dv),
-    '.dv-body 有 overscroll-behavior-y:contain（滚到底不把外层一起带走）');
-
-  // 同类内容体逐个对照：这些是"内容体兼滚动容器"的既有正确写法。
-  for (const [sel, label] of [
-    ['.lib-list', '曲库'],
-    ['.pl-list', '歌单详情'],
-    ['.q-list', '队列'],
-    ['.fav-list', '收藏'],
-  ]) {
-    const b = declsOf(sel);
-    ok(/overflow-y:\s*auto/.test(b), `${label} ${sel} 是滚动容器（三件套齐）`);
-    ok(/\bmin-height:\s*0\b/.test(b), `${label} ${sel} 有 min-height:0`);
+  for(const id of LEGACY) {
+    ok(!HTML.includes('skins/skin.'+id+'.'),id+' no longer loaded by HTML');
+    ok(!ASSETS.includes('/skins/skin.'+id+'.'),id+' no longer embedded');
+    for (const ext of ['js','css']) ok(!fs.existsSync(path.join(WEB,'skins/skin.'+id+'.'+ext)),id+' retired '+ext+' implementation removed');
   }
+  for(const name of ['skins/skin-settings-sheet.js','skins/skins.css']) {
+    ok(!HTML.includes('"'+name+'"'),name+' retired from HTML');
+    ok(!ASSETS.includes('"/'+name+'"'),name+' retired from assets');
+  }
+  for(const id of ['skins-list','skin-btn','skin-menu']) ok(!HTML.includes('id="'+id+'"'),'removed selector DOM '+id);
+  const scripts=[...HTML.matchAll(/<script[^>]*\bsrc="([^"]+)"[^>]*>/g)].map(m=>m[1]);
+  for(const pair of [['skins/skins.js','cover-wall.js'],['skins/skin-shared.js','cover-wall.js'],['cover-wall.js','skins/skin.hertz.js'],['skins/skin.hertz.js','app.js']]) {
+    ok(scripts.indexOf(pair[0])>=0&&scripts.indexOf(pair[0])<scripts.indexOf(pair[1]),pair.join(' before '));
+  }
+  const hz=cleanJs(HERTZ_JS), wall=cleanJs(WALL_JS);
+  ok(/registerLifecycle\('hertz'/.test(hz),'hertz registers its lifecycle');
+  ok(/HertzCoverWall\.mount\(\)/.test(hz)&&/HertzCoverWall\.unmount\(\)/.test(hz),'layout owns wall lifecycle');
+  ok(!/registerLifecycle|Skins\.register\(/.test(wall),'cover wall is not another layout');
+  ok(/beginLayout\('hertz'\)/.test(hz)&&/layout\.restore\(\)/.test(hz)&&/releaseLayout\('hertz'\)/.test(hz),'layout assembly has symmetric restoration');
+  ok(/window\.Skins\.request\(/.test(hz)&&/window\.Skins\.request\(/.test(wall),'both surfaces use shared request bridge');
+  for(const [name,source] of [['hertz',hz],['wall',wall]]) {
+    ok(!/new Audio\(|AudioContext\(|fetch\(|\/v1\/player\//.test(source),name+' does not create another playback/network owner');
+    ok(!/localStorage\.setItem\([^,]*(?:theme|look)/i.test(source),name+' does not bypass appearance persistence owner');
+  }
+  const sandbox=makeSandbox().sandbox;
+  sandbox.matchMedia=()=>({matches:false,addEventListener(){},removeEventListener(){}});
+  sandbox.SkinShared={createBuilt:()=>({make(){throw new Error('DOM mutation before mount');},remove(){}}),applyImg(){}};
+  vm.runInContext(WALL_JS,sandbox,{filename:'cover-wall.js'});
+  for(const method of ['mount','open','close','toggle','unmount','isOpen']) eq(typeof sandbox.HertzCoverWall[method],'function','wall public API '+method);
+  eq(sandbox.HertzCoverWall.isOpen(),false,'wall evaluation stays closed');
+  vm.runInContext(HERTZ_JS,sandbox,{filename:'skins/skin.hertz.js'});
+  eq(sandbox.Skins.registerLifecycle('hertz',{mount(){},unmount(){}}),false,'production module already owns lifecycle without eager DOM mutations');
 }
 
-// ---------------------------------------------------------------------------
-// 6. 流年播放卡稳定性（展开态 + 胶囊态）
-// ---------------------------------------------------------------------------
-
-function checkLiunianExpandedBarStability() {
-  section('流年：播放卡（展开/胶囊）不参与底部播放栏自动隐藏');
-
-  // 实际展开/收起、换肤和窄屏命中由 check-bar-browser.js 覆盖。
-  ok(!/\.bar\.ln-capsule\.is-hidden/.test(LIUNIAN),
-    '流年不再用 CSS 强行覆盖公共隐藏状态');
-
+function checkResponsiveSurfaces() {
+  section('响应式与输入：内容收缩、滚动、安全区、键盘与减弱动效');
+  const css=cleanCss(HERTZ_CSS), wall=cleanCss(WALL_CSS);
+  ok(/grid-template-columns:\s*var\(--hz-rail-space,\s*var\(--rail-w\)\) minmax\(0,\s*1fr\)/.test(css),'desktop content can shrink beside responsive navigation');
+  ok(/@media\s*\(max-width:\s*899px\)/.test(css),'touch layout has an explicit breakpoint');
+  ok(/@media\s*\(max-width:\s*359px\)/.test(css),'small-phone controls have a compact layout');
+  ok(/\.hz-workspace\s*\{[^}]*min-width:\s*0/.test(css)&&/\.hz-workspace[^}]*min-height:\s*0/.test(css),'workspace can shrink in both dimensions');
+  ok(/\.hz-workspace > \.column\s*\{[^}]*overflow-y:\s*auto/.test(css),'content owns vertical scrolling');
+  ok(/\.hz-mobile-nav\s*\{[^}]*position:\s*fixed/.test(css),'touch navigation remains reachable');
+  ok(/env\(safe-area-inset-bottom\)/.test(css)&&/env\(safe-area-inset-top\)/.test(css),'mobile surfaces reserve safe areas');
+  ok(/#playback-bar\s*\{[^}]*bottom:\s*calc\(77px \+ env/.test(css),'mobile player clears bottom navigation');
+  ok(/prefers-reduced-motion/.test(css)&&/prefers-reduced-motion/.test(wall),'both surfaces honor reduced motion');
+  ok(/:focus-visible/.test(css)&&/:focus-visible/.test(wall),'keyboard focus remains visible');
+  const globalPalette = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
+    .filter(match => !match[1].includes('#np-modal'))
+    .some(match => /(?:^|;)\s*--(?:bg|text|accent|muted|brand|highlight)\s*:/.test(match[2]));
+  ok(!globalPalette,'layout does not overwrite shared theme colors outside the dedicated player surface');
+  ok(/\.qf-lattice-field\s*\{[^}]*touch-action:\s*none/.test(wall),'wall field owns touch drag and pinch');
+  ok(/\.qf-wall-sources\s*\{[^}]*overflow-x:\s*auto/.test(wall)&&/touch-action:\s*pan-x/.test(wall),'source navigation can scroll independently on phones');
+  ok(/height:\s*calc\(44px \/ var\(--qf-scale\)\)/.test(wall),'scaled posters keep 44px touch targets');
+  ok(/hertz:cover-wall/.test(WALL_JS)&&/hertz:cover-wall/.test(HERTZ_JS),'cover mode publishes state to the layout');
+  const stage=cleanCss(read(path.join(WEB,'stage.css')));
+  ok(/\.stage-lyrics\s*\{[^}]*overflow:\s*hidden/.test(stage),'shared stage lyrics retain clipping');
+  ok(/\.stage-modes\s*\{[^}]*min-width:\s*0/.test(stage),'shared stage modes can shrink');
+  ok(/\.stage-mode\s*\{[^}]*text-overflow:\s*ellipsis/.test(stage),'shared stage mode titles remain bounded');
 }
 
-// ---------------------------------------------------------------------------
-// 7. 流年 v3：rail 移除 + 中栏胶囊导航 + 右侧搜索面板
-// ---------------------------------------------------------------------------
+function checkCoverWallGeometry() {
+  section('独立封面墙：密排和展开让位没有空洞或重叠');
+  const start=WALL_JS.indexOf('  var LATTICE_TEMPLATES =');
+  const end=WALL_JS.indexOf('  function mixBlockCoords(',start);
+  ok(start>=0&&end>start,'wall owns the retained lattice data');
+  if(start<0||end<=start)return;
+  const data=vm.runInNewContext(WALL_JS.slice(start,end)+'; ({templates:LATTICE_TEMPLATES,reflows:LATTICE_REFLOWS})');
+  function tilesBlock(rectangles) {
+    if(!Array.isArray(rectangles)||rectangles.length!==12)return false;
+    const occupied=new Set();
+    for(const rectangle of rectangles) {
+      if(!Array.isArray(rectangle)||rectangle.length!==4||!rectangle.every(Number.isInteger))return false;
+      const [x,y,w,h]=rectangle;
+      if(x<0||y<0||w<=0||h<=0||x+w>12||y+h>8)return false;
+      for(let row=y;row<y+h;row++)for(let col=x;col<x+w;col++) {
+        const key=row*12+col;if(occupied.has(key))return false;occupied.add(key);
+      }
+    }
+    return occupied.size===96;
+  }
+  ok(data.templates.length>=4&&data.templates.every(tilesBlock),'every template exactly covers one 12×8 block with twelve cards');
+  ok(data.reflows.length===data.templates.length&&data.reflows.every(rows=>rows.length===12),'every template supplies a reflow for every possible expanded card');
+  ok(data.reflows.every(rows=>rows.every(tilesBlock)),'every expanded layout still covers the same block without overlaps or gaps');
+  ok(data.reflows.every(rows=>rows.every((cards,slot)=>cards[slot][2]===6&&cards[slot][3]===6)),'each selected card receives the 6×6 expanded slot');
+}
 
-function checkLiunianNavigation() {
-  section('流年 v3：rail 移除、中栏导航与搜索面板');
+function checkLifecycleAndHost() {
+  section('扩展生命周期：有序切换、重复选择、失败还原与通用业务请求');
+  const { sandbox, root, store } = makeSandbox(['a', 'b', 'bad']);
+  const api = sandbox.Skins;
+  const calls = [];
+  let owner = null;
+  function lifecycle(id) {
+    return {
+      mount() { eq(owner, null, '新皮肤挂载前旧皮肤已释放'); owner = id; calls.push('+' + id); },
+      unmount() { eq(owner, id, '卸载的是正在持有节点的皮肤'); owner = null; calls.push('-' + id); }
+    };
+  }
+  ok(api.register({ id: 'a', lifecycle: lifecycle('a') }), '可直接登记带生命周期的新皮肤');
+  ok(api.register({ id: 'b' }), '可先登记描述');
+  ok(api.registerLifecycle('b', lifecycle('b')), '实现可以附着到已登记描述');
+  eq(api.registerLifecycle('b', lifecycle('b')), false, '重复生命周期不覆盖 owner');
+  eq(api.register({ id: 'invalid', lifecycle: { mount() {} } }), false, '拒绝缺少清理钩子的实现');
+  store.set('vmusic.skin', 'b');
+  api.init();
+  api.apply('b');
+  eq(calls.join(','), '+b', '恢复偏好与重复选择只挂载一次');
+  const unsubscribe = api.onChange(() => calls.push('event:' + owner));
+  api.apply('a');
+  eq(calls.slice(-3).join(','), '-b,+a,event:a', '先卸载再挂载，之后广播新布局');
+  unsubscribe();
+  api.apply('b');
+  eq(calls.slice(-2).join(','), '-a,+b', '反向切换与取消订阅生效');
+  api.register({ id: 'bad', lifecycle: {
+    mount() { owner = 'bad'; throw new Error('mount failure'); },
+    unmount() { owner = null; calls.push('-bad'); }
+  } });
+  let failure = null;
+  try { api.apply('bad'); } catch (error) { failure = error.message; }
+  eq(failure, 'mount failure', '挂载错误可见');
+  eq(owner, 'b', '失败后旧皮肤重新取得节点');
+  eq(root.getAttribute('data-skin'), 'b', '失败后 CSS 与皮肤 ID 还原');
+  eq(store.get('vmusic.skin'), 'b', '失败不污染保存的选择');
 
-  // 1) rail 整体隐藏，节点保留（程序化点击其 rail-item 复用 setView）。
-  ok(/\[data-skin="liunian"\]\s+\.rail\s*\{\s*display:\s*none/.test(LIUNIAN),
-    'CSS 把左侧 rail 钉为 display:none');
-  ok(/function clickRailItem/.test(LIUNIAN_JS) && /rail-item\[data-view=/.test(LIUNIAN_JS),
-    '皮肤经程序化点击隐藏 rail 内 rail-item 切换视图');
-  ok(!/buildLeft\(/.test(LIUNIAN_JS), '不再构建旧左栏');
+  // 原皮肤恢复时也可能分配到一半失败；再次离开仍须找到它的清理钩子。
+  const recovery = makeSandbox(['a', 'bad']).sandbox.Skins;
+  let recoveryOwner = null, mounts = 0;
+  recovery.register({ id: 'a', lifecycle: {
+    mount() { recoveryOwner = 'a'; if (++mounts > 1) throw new Error('restore failure'); },
+    unmount() { recoveryOwner = null; }
+  } });
+  recovery.register({ id: 'bad', lifecycle: {
+    mount() { throw new Error('new failure'); }, unmount() {}
+  } });
+  recovery.apply('a');
+  try { recovery.apply('bad'); } catch (error) { failure = error.message; }
+  eq(failure, 'restore failure', '恢复挂载失败不会被静默吞掉');
+  recovery.apply('hertz');
+  eq(recoveryOwner, null, '恢复中途失败的 owner 仍能在离开时释放');
 
-  // 2) 中栏胶囊导航：六个一级目的地。
-  const navBlock = LIUNIAN_JS.match(/function buildNavigation[\s\S]{0,900}?\]\.forEach/);
-  ok(navBlock, '中栏顶部构建胶囊导航');
-  ok(navBlock && /'library'[\s\S]{0,60}'online'[\s\S]{0,60}'playlists'[\s\S]{0,60}'favorites'[\s\S]{0,60}'queue'[\s\S]{0,60}'settings'/.test(navBlock[0]),
-    '胶囊导航含首页/在线/歌单/收藏/队列/设置六项');
+  const business = [];
+  Object.assign(sandbox, {
+    state: { queue: ['local-a'], snapshot: { track_id: 'online:test:1' } },
+    queueSnapshot: () => ['queue-snapshot'], viewSnapshot: () => ({ key: 'library' }),
+    playTrack: (id, queue) => business.push(['local', id, queue]),
+    playQueueStep: delta => business.push(['step', delta]),
+    post: url => business.push(['post', url]),
+    togglePlay: () => business.push(['toggle']),
+    loadDiagnostics: () => business.push(['diagnostics']),
+    __loadCacheStats: () => business.push(['cache'])
+  });
+  // 动作门面（skinActions）与 initSkinBridge 一起切片：处理器引用门面常量。
+  const start = APP.indexOf('const skinActions = {');
+  const hostAt = APP.indexOf('function initSkinBridge()', start);
+  const end = APP.indexOf('\n}', hostAt) + 2;
+  vm.runInContext(APP.slice(start, end) + '\ninitSkinBridge();', sandbox);
+  eq(api.request('source-request').source.key, 'library', '快照经真实宿主同步返回');
+  eq(api.request('queue-request').queue[0], 'queue-snapshot', '队列请求经原队列快照入口返回');
+  eq(business.length, 0, '只读来源与队列请求不触发播放动作');
+  api.request('step-track', { delta: 1 });
+  eq(business[0][1], '/v1/player/next', '在线下一曲复用服务端播放意图');
+  sandbox.state.snapshot.track_id = 'local-a';
+  api.request('step-track', { delta: -1 });
+  eq(business[1][0], 'step', '本地下一曲保留原队列入口');
+  api.request('play-local', { id: 'local-a' });
+  ok(business[2][2] !== sandbox.state.queue, '播放使用队列快照，皮肤不持有业务状态');
+  api.request('settings-enter');
+  eq(business.slice(-1)[0][0], 'diagnostics', '普通设置入口保持原刷新范围');
+  api.request('settings-enter', { sections: ['cache'] });
+  eq(business.slice(-1)[0][0], 'cache', '扩展设置刷新由请求声明，不按皮肤名分支');
+  const activations = [];
+  const drillResult = Promise.resolve({ tracks: [{ id: 'fixture-song' }] });
+  Object.assign(sandbox, {
+    activateSourceItem: detail => activations.push(detail),
+    openNowPlaying: () => business.push(['open-player']),
+    OnlinePlaylists: { drillTracks(source, playlistId) { activations.push({ source, playlistId }); return drillResult; } },
+  });
+  const item = { id: 'fixture-song', source: 'netease' }, list = [item];
+  api.request('activate', { item, list });
+  ok(activations[0].item === item && activations[0].list === list, '封面墙激活保留整项与源列表，不混用队列下标');
+  eq(api.request('playlist-drill', { source: 'netease', playlistId: 'fixture-list' }).result, drillResult, '歌单钻取返回原异步结果');
+  eq(activations[1].playlistId, 'fixture-list', '歌单钻取保留平台歌单身份');
+  api.request('open-player');
+  eq(business.at(-1)[0], 'open-player', '普通播放页沿用现有业务入口');
+  const disconnect = api.connectHost(() => business.push(['new-host']));
+  disconnect();
+  const before = business.length;
+  api.request('toggle-play');
+  eq(business.length, before, '宿主可清理且不残留旧处理器');
+}
 
-  // 2b) 导航的观感是「一排独立细描边药丸」，不是「一颗容器胶囊 + 里面的裸文字项」。
-  //     容器若又长出描边/底色，或条目丢掉自带描边，就只有当前项像按钮、其余读作
-  //     标签 —— 不报错、不崩、元素一个不少，静态断言是唯一钉得住的地方。
-  //     只取**第一条**同名规则：媒体查询里还有 .ln-nav / .ln-nav-item 的覆盖
-  //     （≤1000 的 sticky 底色、≤620 的内距），拼起来看会把 base 判成失败。
-  const lnNavCss = stripCssComments(LIUNIAN);
-  const lnRule = (sel) => {
-    const re = new RegExp(`\\[data-skin="liunian"\\]\\s+${sel.replace(/\./g, '\\.')}\\s*\\{([^}]*)\\}`);
-    const m = re.exec(lnNavCss);
-    return m ? m[1] : '';
+function checkLanFavoriteSourceDispatch() {
+  section('收藏来源：皮肤与封面墙保留局域网引用');
+  const ref = 'ab'.repeat(32) + ':' + 'cd'.repeat(32);
+  const favorites = [
+    { id: 'track:local:local-one', kind: 'track', source: 'local', ref_id: 'local-one', title: 'Local' },
+    { id: 'track:lan:' + ref, kind: 'track', source: 'lan', ref_id: ref, title: 'LAN snapshot', artist: 'LAN artist', cover: 'blob:must-not-use' },
+    { id: 'track:netease:online-one', kind: 'track', source: 'netease', ref_id: 'online-one', title: 'Online' },
+  ];
+  const roomActivations = [], onlinePlays = [], localPlays = [], notices = [];
+  let adapted = [];
+  const sandbox = {
+    window: {
+      Favorites: { state: { items: favorites }, activate: favorite => roomActivations.push(favorite) },
+      Online: { state: { source: 'netease' }, safeCoverUrl: value => value, playAll: (tracks, at) => onlinePlays.push({ tracks, at }) },
+    },
+    state: { snapshot: {}, view: 'favorites', queue: [] },
+    transport: { coverUrl: id => '/cover/' + id, post: (url, body) => localPlays.push({ url, body }) },
+    toast: message => notices.push(message),
+    viewSourceDef: () => ({ items: () => adapted }),
   };
-
-  const navRow = lnRule('.ln-nav');
-  ok(/background:\s*transparent/.test(navRow) && /border:\s*0\b/.test(navRow)
-    && /border-radius:\s*0\b/.test(navRow),
-    '导航行自身不再画胶囊（透明底 + 无描边 + 无圆角）');
-  ok(/overflow-x:\s*auto/.test(navRow) && /gap:\s*8px/.test(navRow),
-    '导航行是横向滚动的纯布局行（窄屏滑动，不压扁不换行）');
-  ok(!/\.ln-nav\s*\{[^}]*var\(--panel\)/.test(lnNavCss),
-    '没有哪条规则把面板底色还给导航容器');
-
-  const navPill = lnRule('.ln-nav-item');
-  ok(/border:\s*1px solid var\(--field-border\)/.test(navPill),
-    '每个导航项自带 1px 细描边');
-  ok(/border-radius:\s*8px/.test(navPill) && /white-space:\s*nowrap/.test(navPill),
-    '导航项沿用 8px 控件圆角，且文字不折行');
-  ok(/background:\s*transparent/.test(navPill),
-    '未选中项只有描边、不铺底色');
-
-  const navHover = lnRule('.ln-nav-item:hover');
-  ok(/background:\s*var\(--hover\)/.test(navHover)
-    && /border-color:\s*var\(--field-border-strong\)/.test(navHover),
-    '悬停填色并加重描边');
-
-  const navOn = lnRule('.ln-nav-item.active');
-  ok(/background:\s*var\(--accent\)/.test(navOn) && /color:\s*var\(--accent-ink\)/.test(navOn),
-    '选中项沿用皮肤统一的「实心 + 深字」翻色');
-
-  const navFocus = lnRule('.ln-nav-item:focus-visible');
-  ok(/outline:\s*2px solid var\(--brand\)/.test(navFocus)
-    && /outline-offset:\s*-2px/.test(navFocus),
-    '键盘焦点环画在盒内（容器是滚动容器，外扩的环会被裁掉）');
-
-  // 3) 右栏包裹器：上搜索面板 + 下舞台。
-  ok(/make\('div', 'ln-right', app\)/.test(LIUNIAN_JS), '创建右栏包裹器');
-  ok(/buildSearchPanel\(refs\.rightWrap\)/.test(LIUNIAN_JS), '搜索面板挂入右栏上部');
-  ok(/relocate\(stage, refs\.rightWrap\)/.test(LIUNIAN_JS), '舞台搬入右栏下部（带锚点可还原）');
-  ok(/\[data-skin="liunian"\]\s+\.ln-right\s*\{[\s\S]{0,220}?display:\s*flex/.test(LIUNIAN),
-    '右栏包裹器为纵向 flex 分区');
-
-  // 4) 面板输入：范围切换、防抖、epoch 竞态、AbortController。
-  ok(/dataset\.scope/.test(LIUNIAN_JS) && /'all'[\s\S]{0,40}'local'[\s\S]{0,40}'online'/.test(LIUNIAN_JS),
-    '面板支持全部/本地/在线范围切换');
-  ok(/setTimeout\(function \(\) \{ runSearch\(input\.value\); \}, 250\)/.test(LIUNIAN_JS),
-    '输入防抖 250ms 后检索');
-  ok(/panel\.epoch \+= 1/.test(LIUNIAN_JS) && /searchNetwork\.cancel\(\)/.test(LIUNIAN_JS)
-    && /epoch !== panel\.epoch/.test(LIUNIAN_JS),
-    '检索带 epoch 竞态保护与共享协调器取消');
-
-  // 5) 两源取数与分类分区显示。
-  ok(/\/v1\/tracks\?q=' \+ encodeURIComponent\(q\) \+ '&limit=8'/.test(LIUNIAN_JS),
-    '本地结果走 /v1/tracks（限 8 条）');
-  ok(/\/v1\/online\/search\?/.test(LIUNIAN_JS) && /network\.get\(/.test(LIUNIAN_JS),
-    '在线结果经共享协调器逐源请求 /v1/online/search');
-  ok(/buildSection\(out, '本地歌曲'/.test(LIUNIAN_JS) && /buildSection\(out, '在线曲库'/.test(LIUNIAN_JS),
-    '结果按本地歌曲 / 在线曲库两分区显示');
-  ok(/window\.Online\.badge\(t\.source\)/.test(LIUNIAN_JS), '在线行挂音源徽标');
-  ok(/HertzSearch\.failure\(error\)/.test(LIUNIAN_JS) && /group\.more\.onclick = load/.test(LIUNIAN_JS),
-    '单个音源失败保留错误与局部重试，不伪装为空结果');
-
-  // 6) 结果点击：本地/在线直接播放，经 Skins.request 交 app.js。
-  ok(/window\.Skins\.request\(action, extra\)/.test(LIUNIAN_JS), '面板经通用皮肤宿主请求对外通信');
-  ok(/emit\('play-local', \{ id: t\.id \}\)/.test(LIUNIAN_JS), '本地结果点击派发 play-local');
-  ok(/emit\('play-online', \{ track: t \}\)/.test(LIUNIAN_JS), '在线结果点击派发 play-online');
-  ok(/emit\('view-local', \{ q: panel\.q \}\)/.test(LIUNIAN_JS)
-    && /emit\('view-online', \{ q: panel\.q \}\)/.test(LIUNIAN_JS),
-    '分区可带词跳转曲库页/在线页查看全部');
-
-  // 7) 搜索历史：规则已归 `search-history.js`（唯一的 owner），皮肤这一侧只剩
-  //    「渲染 + 委托」。这里钉的是不许长回私有存储 —— 关键词历史属于搜索能力
-  //    本身，跟着皮肤走就会让顶栏与在线框敲的词进不来、换皮肤即看不见。
-  ok(!/HISTORY_KEY/.test(LIUNIAN_JS)
-    && !/localStorage\.(setItem|getItem|removeItem)\([^)]*[Hh]istory/.test(LIUNIAN_JS),
-    '流年不再持有私有的历史存储');
-  ok(/window\.HertzSearchHistory\.all\(\)/.test(LIUNIAN_JS)
-    && /window\.HertzSearchHistory\.push\(/.test(LIUNIAN_JS),
-    '历史的读与写都委托给 owner');
-  ok(/function removeHistory/.test(LIUNIAN_JS) && /HertzSearchHistory\.remove\(/.test(LIUNIAN_JS)
-    && /HertzSearchHistory\.clear\(\)/.test(LIUNIAN_JS),
-    '支持单条删除与清空（走 owner，不是自己清 localStorage）');
-  ok(/function renderHistory/.test(LIUNIAN_JS) && /ln-sp-hist-chips/.test(LIUNIAN_JS),
-    '历史芯片仍由流年面板渲染（owner 不管界面）');
-
-  // 8) app.js 桥接。
-  ok(/function initSkinBridge/.test(APP) && /initSkinBridge\(\)/.test(APP),
-    'app.js 定义并启动面板桥接');
-  ok(/window\.Skins\.connectHost\(/.test(APP), 'app.js 连接通用皮肤宿主');
-  ok(/playTrack\(String\(d\.id\), state\.queue\.slice\(\)\)/.test(APP)
-    && /Online\.playAll\(\[Object\.assign\(\{ playable: true \}, d\.track\)\], 0\)/.test(APP),
-    '桥接分流本地 playTrack / 在线 Online.playAll');
-
-  // 9) 作用域：搜索面板只属于流年。
-  ok(!/ln-sp/.test(HEIJIAO), '其它皮肤不引入遮罩浮层');
-  ok(!/ln-right|ln-sp/.test(HTML), '业务 HTML 不内置右栏面板（皮肤自持，切走即消失）');
+  vm.createContext(sandbox);
+  const adapters = APP.slice(APP.indexOf('function localSourceItem('), APP.indexOf('function playlistSourceItems('));
+  const dispatcher = APP.slice(APP.indexOf('function queueForSourceItem('), APP.indexOf('function drillIntoPlaylist('));
+  vm.runInContext(adapters + '\n' + dispatcher, sandbox);
+  adapted = sandbox.favoriteSourceItems();
+  eq(adapted.length, 3, '所有收藏仍可展示，包含局域网收藏');
+  eq(adapted[1].source, 'lan', '封面墙项目保留局域网来源');
+  eq(adapted[1].id, favorites[1].id, '项目身份沿用收藏身份，未伪造在线虚拟 ID');
+  eq(adapted[1].title, 'LAN snapshot', '持久化标题仍可展示');
+  eq(adapted[1].cover, null, '封面墙不使用局域网旧封面 capability');
+  sandbox.playSourceItem(adapted[1], adapted);
+  eq(roomActivations.length, 1, '皮肤单项激活走同一个 Favorites.activate 入口');
+  eq(roomActivations[0].ref_id, ref, '分派保留完整房主与稳定歌曲身份');
+  eq(localPlays.length + onlinePlays.length, 0, '局域网单项不进入本地或在线播放');
+  sandbox.playSourceItem(adapted[0], adapted);
+  eq(localPlays[0].body.queue.join(','), 'local-one', '本地收藏上下文队列排除 LAN 引用');
+  sandbox.playSourceItem(adapted[2], adapted);
+  eq(onlinePlays[0].tracks.length, 1, '混合收藏墙只把可在线播放的曲目交给 Online');
+  eq(onlinePlays[0].tracks[0].id, 'online-one', '在线播放保留真实平台曲目身份');
+  ok(notices.some(message => /已跳过 1 首局域网收藏/.test(message)), '混合收藏在线播放告知跳过的局域网引用');
+  const legacy = { id: 'online:lan:' + ref, source: 'lan', favSource: 'lan', favRefId: ref };
+  sandbox.playOnlineItem(adapted[2], adapted.concat(legacy));
+  ok(onlinePlays.at(-1).tracks.every(track => track.source !== 'lan' && !String(track.id).startsWith('online:lan:')), '旧虚拟 LAN 形式也无法混入在线集合');
 }
 
-// ---------------------------------------------------------------------------
-// 6b. 流年：设置浮层（点「设置」在底层面板之上弹一层，而不是切中栏视图）
-// ---------------------------------------------------------------------------
-
-function checkLiunianSettingsSheet() {
-  section('流年：设置浮层（遮罩 / 过渡 / 关闭 / 层级）');
-
-  // 1) 设置视图装配进浮层（R4：业务根迁移走外壳 attachView 受控装配，
-  // 外壳记录原位、detach 严格还原；锚点搬运工具只留给布局节点）。
-  ok(/function buildSettingsSheet/.test(LIUNIAN_JS), '构建设置浮层');
-  ok(/attachView\('settings', pane\)/.test(LIUNIAN_JS) && !/relocate\(view, pane\)/.test(LIUNIAN_JS),
-    '设置视图经外壳 attachView 装配进浮层右栏（受控装配，可还原）');
-  // 浮层内容切成两栏：左栏分类导航 + 右栏设置视图。两者都在 .ln-modal-body 里，
-  // 少一个就退化成单列长滚动（等于这个特性没生效）。
-  ok(/make\('div', 'ln-set-layout', body\)/.test(LIUNIAN_JS)
-    && /make\('nav', 'ln-set-nav', layout\)/.test(LIUNIAN_JS)
-    && /make\('div', 'ln-set-pane', layout\)/.test(LIUNIAN_JS),
-    '浮层内容分两栏：左栏 .ln-set-nav + 右栏 .ln-set-pane');
-  ok(/make\('section', 'ln-modal-card', root\)/.test(LIUNIAN_JS)
-    && /make\('div', 'ln-modal-scrim', root\)/.test(LIUNIAN_JS),
-    '浮层由遮罩 + 卡片两层构成');
-  ok(/setAttribute\('role', 'dialog'\)/.test(LIUNIAN_JS) && /setAttribute\('aria-modal', 'true'\)/.test(LIUNIAN_JS),
-    '卡片带 dialog / aria-modal 语义');
-
-  // 2) 入口：导航「设置」与 clickRailItem('settings') 都开浮层，不切中栏视图。
-  ok(/openSettingsSheet\(button\)/.test(LIUNIAN_JS),
-    '导航「设置」打开浮层');
-  ok(/if \(view === 'settings'\) \{\s*openSettingsSheet\(\)/.test(LIUNIAN_JS),
-    'clickRailItem 对 settings 改为开浮层（避免 setView 把中栏切空）');
-  ok(/if \(sheet\.open\) closeSettingsSheet\(\);\s*else openSettingsSheet\(target\);/.test(LIUNIAN_JS)
-    && /addEventListener\('click', onDocumentClickCapture, true\)/.test(LIUNIAN_JS),
-    '顶栏设置图标被 capture 阶段拦截并开关浮层');
-
-  // 3) 关闭路径：遮罩、关闭按钮、Esc，且退场动画结束后才隐藏。
-  ok(/ln-modal-scrim'\)\.addEventListener|scrim\.addEventListener\('click', function \(\) \{ closeSettingsSheet\(\); \}\)/.test(LIUNIAN_JS),
-    '点遮罩可关闭');
-  ok(/close\.addEventListener\('click', function \(\) \{ closeSettingsSheet\(\); \}\)/.test(LIUNIAN_JS),
-    '点关闭按钮可关闭');
-  ok(/function onSheetKeydown[\s\S]{0,160}e\.key !== 'Escape'/.test(LIUNIAN_JS),
-    'Esc 可关闭');
-  ok(/classList\.add\('is-closing'\)/.test(LIUNIAN_JS) && /classList\.remove\('is-open'\)/.test(LIUNIAN_JS),
-    '关闭走 .is-closing 退场态');
-  ok(/setTimeout\(function \(\) \{[\s\S]{0,420}?root\.hidden = true/.test(LIUNIAN_JS),
-    '退场动画结束后才置 hidden（退场动画真的能播完）');
-
-  // 4) 层级：浮层必须压过所有既有浮层，且与底层面板不冲突。
-  const modalRule = LIUNIAN.match(/\[data-skin="liunian"\]\s+\.ln-modal\s*\{([^}]*)\}/);
-  ok(modalRule && /position:\s*fixed/.test(modalRule[1]), '浮层固定定位脱离文档流');
-  const z = modalRule && Number((modalRule[1].match(/z-index:\s*(\d+)/) || [])[1]);
-  ok(Number.isFinite(z) && z >= 100,
-    `浮层层级高于既有浮层（z-index=${z}，须 ≥ 在线弹窗的 100）`);
-  ok(/classList\.add\('ln-modal-open'\)/.test(LIUNIAN_JS)
-    && /classList\.remove\('ln-modal-open'\)/.test(LIUNIAN_JS),
-    '打开/关闭时给 body 打标记，供样式隔离底层');
-
-  // 4b) 隔离底层只能挡交互，不能加 filter/backdrop-filter：
-  // filter 会让 .app 变成包含块，而流年把 .bar 搬进了中栏（.app 子树内），
-  // 一旦子树里出现 fixed 后代就会被改相对定位。压暗交给遮罩。
-  const isolate = LIUNIAN.match(/\[data-skin="liunian"\]\s+body\.ln-modal-open[^{]*\{([^}]*)\}/g) || [];
-  ok(isolate.length > 0, 'body 标记确有对应样式（不是死代码）');
-  ok(isolate.every((r) => !/filter/.test(r)),
-    '底层隔离不加 filter（否则 .app 变包含块，搬进去的播放卡会错位）');
-  ok(/pointer-events:\s*none/.test(isolate.join('')), '底层隔离用 pointer-events 挡交互');
-
-  // 5) 过渡动画：进场用 animation（display 恢复自动播），退场用 transition。
-  ok(/ln-modal\.is-open \.ln-modal-card\s*\{[^}]*animation:\s*ln-modal-in/.test(LIUNIAN),
-    '进场用 keyframes 动画（hidden→可见时自动播放）');
-  ok(/ln-modal\.is-closing \.ln-modal-card\s*\{[^}]*animation:\s*none[^}]*transition-duration/.test(LIUNIAN),
-    '退场切到 transition 播反向动画');
-  ok(/backwards/.test(LIUNIAN.match(/ln-modal\.is-open \.ln-modal-card\s*\{[^}]*\}/)[0]),
-    '进场动画用 backwards（both 会留下常驻单位矩阵 transform）');
-  ok(/MODAL_EXIT_MS = \d+/.test(LIUNIAN_JS), 'JS 里显式声明退场时长，与 CSS 对齐');
-
-  // 6) 卡片不加 filter/backdrop-filter：否则设置项文字被自身背景糊掉。
-  const cardRule = LIUNIAN.match(/\[data-skin="liunian"\]\s+\.ln-modal-card\s*\{([^}]*)\}/);
-  ok(cardRule && !/backdrop-filter/.test(cardRule[1]) && !/[^-\s]filter\s*:/.test(cardRule[1]),
-    '卡片本身不做模糊/滤镜，只有遮罩模糊');
-  ok(/background:\s*var\(--panel-solid\)/.test(cardRule[1]),
-    '卡片底色取主题令牌（不写字面量）');
-
-  // 7) 卸载可逆：监听与浮层状态都要清，别把浮层留在页面上。
-  ok(/removeEventListener\('click', onDocumentClickCapture, true\)/.test(LIUNIAN_JS),
-    '卸载时摘掉 capture 监听');
-  ok(/clearTimeout\(sheet\.closeTimer\)/.test(LIUNIAN_JS)
-    && /sheet\.viewEl = null/.test(LIUNIAN_JS),
-    '卸载时清退场定时器并释放浮层引用');
-
-  // 7b) hidden 归属：设置视图的 hidden 有两条写入路径（浮层自己 + app.js 的
-  // setView，Esc 与切视图都会跑）。开着或退场期间必须以浮层为准，否则会出现
-  // 「退场动画播的是一张空壳」或「浮层开着内容没了」。
-  ok(/observer\.observe\(sheet\.viewEl,/.test(LIUNIAN_JS)
-    && /attributeFilter: \['hidden'\]/.test(LIUNIAN_JS),
-    '设置视图单独 observe（搬出中栏后仍能纠正 hidden）');
-  const sync = LIUNIAN_JS.match(/function syncSettingsVisibility\(\)[\s\S]{0,420}?\n  \}/);
-  ok(sync && /sheet\.open \|\| sheet\.closing/.test(sync[0])
-    && /if \(sheet\.viewEl\.hidden\) sheet\.viewEl\.hidden = false;/.test(sync[0]),
-    '浮层开着/退场中，hidden 以浮层为准并纠正回来');
-  ok(sync && /if \(!sheet\.viewEl\.hidden\) sheet\.viewEl\.hidden = true;/.test(sync[0]),
-    '浮层关闭后把设置视图收回隐藏（否则中栏留一片空白）');
-  ok(/if \(inReflow\) return;/.test(LIUNIAN_JS),
-    'reflow 有重入保护（观察器里纠正 hidden 不会自激）');
-
-  // 8) 业务节点不动：浮层仍复用同一个 #view-settings，事件不丢。
-  ok(!/id="view-settings"/.test(HTML.replace(/<div class="view" id="view-settings" hidden>/, '')),
-    '设置视图仍是业务 HTML 里那一个（皮肤不复制业务节点）');
-}
-
-// ---------------------------------------------------------------------------
-// 6c. 流年：设置分类导航（左栏归类 / 切换 / 可还原）
-// ---------------------------------------------------------------------------
-
-function checkLiunianSettingsNav() {
-  section('流年：设置分类导航（左栏归类 / 一次只显示一类 / 切皮肤可还原）');
-
-  // 1) 分类表覆盖设置页的每个分组，且是两级（一级分类 + 二级条目）。
-  const table = LIUNIAN_JS.match(/var SET_SECTIONS = \[[\s\S]*?\n  \];/);
-  ok(!!table, '声明了设置分类表 SET_SECTIONS');
-  const titles = [...HTML.matchAll(/<h2 class="set-title">([^<]+)<\/h2>/g)].map((m) => m[1].trim());
-  ok(titles.length >= 12, `设置页分组数量被脚本读到了（${titles.length} 组）`);
-  const tableBody = table ? table[0] : '';
-  const missing = titles.filter((t) => !tableBody.includes(`'${t}'`));
-  ok(missing.length === 0,
-    `分类表认领了全部设置分组（缺：${missing.join(' ') || '无'}）`);
-  ok(/id: 'appearance'[\s\S]*id: 'playback'/.test(tableBody)
-    && /id: 'library'/.test(tableBody) && /id: 'advanced'/.test(tableBody),
-    '一级分类至少含外观 / 播放 / 数据与在线 / 高级四类');
-
-  // 顺序也归分类表管，不归 DOM 次序。DOM 里「在线音源」排在「数据备份」
-  // 后面只是业务 HTML 的偶然位置，照它排就把最常用的一项挤到了末尾。
-  // 这条钉死渲染时遍历的是 section.items 而不是 groups。
-  ok(/section\.items\.forEach\(function \(item\) \{\s*if \(byKey\[item\[0\]\]\)/.test(LIUNIAN_JS),
-    '左栏条目顺序由 SET_SECTIONS 决定（分类表是排序权威，不照 DOM 次序）');
-
-  // 2) 认领按 .set-title 文案，不靠序号：业务新增分组会落进「其它」而不是消失。
-  ok(/querySelector\('\.set-title'\)/.test(LIUNIAN_JS),
-    '分组靠 .set-title 文案认领（不往业务 HTML 里塞属性）');
-  ok(/leftovers/.test(LIUNIAN_JS) && /textContent = '其它'/.test(LIUNIAN_JS)
-    && /if \(leftovers\.length\)/.test(LIUNIAN_JS),
-    '认领不到的分组落进「其它」分类（业务加设置时是「多一项」而不是「不见了」）');
-
-  // 3) 切换：只切 hidden，不搬 .set-group。搬节点要维护锚点，而 hidden 是
-  //    这些分组本来就有的语义（[hidden] 带 !important），别的皮肤照旧。
-  ok(/entry\.group\.hidden = entry\.key !== key/.test(LIUNIAN_JS),
-    '切换分类只切 .set-group 的 hidden，不搬业务节点');
-  ok(!/relocate\(group/.test(LIUNIAN_JS) && !/relocate\(entry\.group/.test(LIUNIAN_JS),
-    '分组节点没有进 moves（没有第二套锚点要维护）');
-
-  // 4) 选中态走 class + aria-current，且左栏与右栏一致。
-  ok(/button\.classList\.toggle\('active', on\)/.test(LIUNIAN_JS),
-    '左栏选中项用 .active 标记');
-  ok(/setAttribute\('aria-current', 'true'\)/.test(LIUNIAN_JS)
-    && /removeAttribute\('aria-current'\)/.test(LIUNIAN_JS),
-    '选中项带 aria-current（读屏能知道自己在哪一类）');
-
-  // 5) 空态与坏数据：没有分组时不建左栏；记住的 key 失效时回落而不是空屏。
-  ok(/if \(!groups\.length\) return;/.test(LIUNIAN_JS),
-    '一个分组都没有时不建左栏（设置页退化成长滚动，而不是空面板）');
-  ok(/if \(!claimed\.some\(function \(entry\) \{ return entry\.key === initial; \}\)\) \{/.test(LIUNIAN_JS),
-    '记住的分类已不存在时回落到第一类（不空屏）');
-  ok(/SECTION_KEY = 'vmusic\.ln-set-section'/.test(LIUNIAN_JS),
-    '选中分类持久化到 localStorage');
-  ok(/function readSectionKey\(\)[\s\S]{0,160}?try[\s\S]{0,120}?localStorage\.getItem[\s\S]{0,80}?catch/.test(LIUNIAN_JS)
-    && /function writeSectionKey\(key\)[\s\S]{0,200}?try[\s\S]{0,120}?localStorage\.setItem[\s\S]{0,120}?catch/.test(LIUNIAN_JS),
-    'localStorage 读写都包了 try（隐私模式 / 沙箱 iframe 里不抛）');
-
-  // 6) 可还原：hidden 是皮肤加在业务节点上的，切皮肤必须摘干净。
-  //    漏掉的话设置页在 classic / iOS 下只剩当前那一个分组——不报错、不崩，
-  //    表现为「设置里其它项都没了」，极难定位。
-  ok(/function releaseGroups/.test(LIUNIAN_JS)
-    && /if \(entry\.group\) entry\.group\.hidden = false/.test(LIUNIAN_JS),
-    '卸载时把全部分组的 hidden 摘掉（切回其它皮肤设置项完整）');
-  ok(/releaseGroups\(\);\s*\n\s*restoreMoves\(\);/.test(LIUNIAN_JS),
-    'releaseGroups 在 restoreMoves 之前（先摘 hidden 再搬回原位）');
-
-  // 7) 焦点：分类切换后焦点不能掉到 body；重开浮层要能找回当前类的分组。
-  ok(/nav\.addEventListener\('click'/.test(LIUNIAN_JS)
-    && /e\.target\.closest\('\.ln-set-link'\)/.test(LIUNIAN_JS),
-    '左栏点击在 nav 上委托（条目是按钮，冒泡即可，不必逐条挂）');
-  ok(/var activeGroup = entryGroup\(sheet\.active\);\s*\n\s*if \(activeGroup\) activeGroup\.hidden = false;/.test(LIUNIAN_JS),
-    '重开浮层时把当前类的分组带回可见（上次的焦点控件仍可聚焦）');
-  ok(/var current = sheet\.nav && sheet\.nav\.querySelector\('\.ln-set-link\.active'\)/.test(LIUNIAN_JS),
-    '打开浮层时焦点先落在左栏当前项（键盘用户能看到自己在哪一类）');
-
-  // 8) CSS：两栏 + 左栏自己裁切。缺 min-height:0 的话左栏不裁切而是把
-  //    卡片顶高，浮层就长出视口。
-  ok(/\[data-skin="liunian"\] \.ln-set-layout\s*\{[^}]*display:\s*flex[^}]*\}/.test(LIUNIAN),
-    '.ln-set-layout 是横向两栏 flex');
-  ok(/\[data-skin="liunian"\] \.ln-set-nav\s*\{[^}]*min-height:\s*0[^}]*overflow-y:\s*auto/.test(LIUNIAN),
-    '左栏 min-height:0 + 自己裁切（不会把浮层顶出视口）');
-  ok(/\[data-skin="liunian"\] \.ln-set-pane\s*\{[^}]*min-width:\s*0/.test(LIUNIAN),
-    '右栏 min-width:0（宽表单行不会把左栏挤没）');
-  ok(/@media \(max-width: 720px\)[\s\S]{0,2000}?\.ln-set-layout\s*\{\s*flex-direction:\s*column/.test(LIUNIAN),
-    '窄屏两栏改竖排（左栏收成横向胶囊条）');
-  ok(/\[data-skin="liunian"\] \.ln-set-link\.active \.ln-set-link-text\s*\{[^}]*var\(--highlight\)/.test(LIUNIAN),
-    '选中项字色走 --highlight（当前选中项的语义角色，不用 --accent）');
-  ok(/\[data-skin="liunian"\] \.ln-set-link\.active::before[\s\S]{0,240}?var\(--brand\)/.test(LIUNIAN),
-    '选中竖条走 --brand（与「正在生效」的薄荷青同源，不与字色抢）');
-}
-
-// ---------------------------------------------------------------------------
-// 7. 保留主题的对比度（潮汐·夜 / 潮汐·昼）
-// ---------------------------------------------------------------------------
-
-/// 从 themes.js 里取出某套主题的 token 表。
-/// 只认单引号包裹的字面量值（渐变值内部没有单引号，可安全切开）。
-function themeTokens(js, id) {
-  const at = js.indexOf("id: '" + id + "'");
-  if (at < 0) return null;
-  const next = js.indexOf('\n    {', at + 10);
-  const block = js.slice(at, next < 0 ? js.length : next);
-  const out = {};
-  const re = /'(--[a-z0-9-]+)':\s*'([^']+)'/g;
-  let m;
-  while ((m = re.exec(block))) out[m[1]] = m[2];
-  return out;
-}
-
-/// WCAG 相对亮度与对比度。主题表里的前景/背景都是 6 位 hex，够用。
 function luminance(hex) {
   if (!/^#[0-9a-fA-F]{6}$/.test(hex)) return null;
   const n = parseInt(hex.slice(1), 16);
@@ -1046,1694 +433,14 @@ function checkChaoxiThemes() {
   }
 }
 
-function checkWiring() {
-  section('接线：HTML / 路由 / 启动');
 
-  ok(/<link rel="stylesheet" href="skins\/skins\.css">/.test(HTML), 'skins.css 常驻引入');
-  for (const id of ['liunian', 'qingfeng', 'heijiao']) {
-    ok(new RegExp('href="skins/skin\\.' + id + '\\.css"[^>]*data-skin-css="' + id + '"').test(HTML),
-      `skin.${id}.css 引了进来并带上 data-skin-css`);
-    ok(new RegExp('data-skin-css="' + id + '"[^>]*disabled').test(HTML),
-      `skin.${id}.css 默认 disabled（默认不生效）`);
-  }
-  ok(!/skins\/skin\.(sheen|chaoxi)\.(css|js)/.test(HTML),
-    'index.html 不再引入已下架的浮光 / 潮汐资源');
-  ok(!/skin\.(sheen|chaoxi)/.test(MAIN_RS),
-    'assets.rs 不再登记已下架的浮光 / 潮汐资源');
-  ok(/src="skins\/skins\.js"/.test(HTML), 'skins.js 引了进来');
-  ok(HTML.indexOf('skins/skins.js') < HTML.indexOf('src="app.js"'),
-    'skins.js 排在 app.js 之前（app.js 启动时要能拿到它）');
-  ok(/id="skins-list"/.test(HTML), '设置页有皮肤列表容器');
-
-  for (const p of ['skins/skins.js', 'skins/skins.css', 'skins/skin.liunian.css', 'skins/skin.liunian.js', 'skins/skin.qingfeng.css', 'skins/skin.qingfeng.js', 'skins/skin.heijiao.js', 'skins/skin.heijiao.css']) {
-    ok(MAIN_RS.includes(`/skins/${p.split('/')[1]}`) || MAIN_RS.includes(p),
-      `main.rs 注册了 /${p} 路由`);
-  }
-  // 只匹配文件名后缀、不写死相对深度：前端目录搬过位置（web/ → plugin/ui/），
-  // 把深度写进断言只会让下一次搬迁假红一片。
-  ok(/edition_ui!\("skins\/skins\.js"\)/.test(MAIN_RS), 'skins.js 编进二进制');
-  ok(/edition_ui!\("skins\/skin\.liunian\.css"\)/.test(MAIN_RS),
-    'skin.liunian.css 编进二进制');
-  ok(/edition_ui!\("skins\/skin\.liunian\.js"\)/.test(MAIN_RS),
-    'skin.liunian.js 编进二进制');
-
-  section('接线：流年重编排 JS 的加载顺序与机制');
-  const lnJsAt = HTML.indexOf('src="skins/skin.liunian.js"');
-  ok(lnJsAt > 0, 'index.html 引入了 skin.liunian.js');
-  ok(lnJsAt > HTML.indexOf('src="skins/skins.js"'),
-    'skin.liunian.js 排在 skins.js 之后（要登记生命周期）');
-  ok(lnJsAt < HTML.indexOf('src="app.js"'),
-    'skin.liunian.js 排在 app.js 之前');
-  ok(/Skins\.registerLifecycle\(SKIN_ID, \{ mount: mount, unmount: unmount \}\)/.test(LIUNIAN_JS),
-    '重编排层向 Skins 注册生命周期，由宿主排序挂卸载');
-  ok(/beginLayout\('liunian'\)/.test(LIUNIAN_JS) && /releaseLayout\('liunian'\)/.test(LIUNIAN_JS),
-    '搬运经外壳布局装配登记与释放（切走皮肤可严格还原，§7.1）');
-  ok(/MutationObserver/.test(LIUNIAN_JS),
-    '视图联动用 MutationObserver');
-
-  ok(APP.includes('window.Skins.init()'), 'app.js 启动时初始化皮肤');
-  // 皮肤排主题之后：先定主题（配色）再定皮肤（布局），两者互不覆盖。
-  const skinAt = APP.indexOf('window.Skins.init()');
-  const themeAt = APP.indexOf('initTheme();');
-  ok(skinAt > 0 && themeAt > 0 && skinAt < themeAt, 'Skins.init 排在 initTheme 之前');
-
-  ok(/\.skin-option/.test(SKINS_CSS) && /\.skins-list/.test(SKINS_CSS), '皮肤选择控件有样式');
-  ok(!/data-skin-css/.test(SKINS_CSS), 'skins.css 不是皮肤本体（没有 data-skin-css 标记）');
-}
-
-// ---------------------------------------------------------------------------
-// 6d. 清风：胶囊主菜单 / 队列拼接海报墙 / 设置浮层
-// ---------------------------------------------------------------------------
-
-function checkQingfengChrome() {
-  section('清风：胶囊主菜单与首页骨架');
-
-  // 1) rail 隐藏但节点保留（程序化点击复用 setView 链路）。
-  ok(/\[data-skin="qingfeng"\]\s+\.rail\s*\{\s*display:\s*none/.test(QINGFENG),
-    'CSS 把左侧 rail 钉为 display:none');
-  ok(/function clickRailItem/.test(QINGFENG_JS) && /rail-item\[data-view=/.test(QINGFENG_JS),
-    '皮肤经程序化点击隐藏 rail 内 rail-item 切换视图');
-
-  // 2) 胶囊主菜单：用户诉求的五个目的地，顺序不能乱。
-  const nav = QINGFENG_JS.match(/var NAV_ITEMS = \[[\s\S]*?\n  \];/);
-  ok(nav, '声明了主菜单表 NAV_ITEMS');
-  const navBody = nav ? nav[0] : '';
-  ok(/'playlists'[\s\S]{0,40}'online'[\s\S]{0,40}'daily'[\s\S]{0,40}'favorites'[\s\S]{0,40}'library'/.test(navBody),
-    '主菜单依次为 歌单 / 电台 / 每日推荐 / 收藏 / 本地');
-  // 第三项进的是 daily 视图（每日推荐独立页），名字必须与页面标题一致。
-  // 早先叫「专辑」，点过去看到的是每日推荐，用户按名字找专辑浏览面永远找不到。
-  ok(/'daily',\s*'每日推荐'/.test(navBody),
-    'daily 那一项叫「每日推荐」（不是专辑）');
-  // 高亮键必须直接取自当前视图。曾经有一行把 view-daily 改写成 'online'，
-  // 于是点「每日推荐」时高亮跑到「电台」上，那颗按钮看着就像点不动。
-  const navKeyLine = stripJsComments(QINGFENG_JS).match(/var navKey = ([^\n]*)/);
-  ok(navKeyLine && !/view-daily/.test(navKeyLine[1]),
-    '导航高亮按当前视图取键（daily 不被改写成别的 tab）',
-    navKeyLine ? navKeyLine[1].trim() : 'no navKey assignment');
-  ok(!/settings/.test(navBody), '设置不在主菜单里（它在左上角，folia 同款位置关系）');
-
-  // 3) 队列拼接是主菜单末尾那个图标入口，hover 才展开文字。
-  ok(/qf-nav-icon/.test(QINGFENG_JS) && /'队列拼接'/.test(QINGFENG_JS),
-    '队列拼接入口挂在主菜单里');
-  ok(/\[data-skin="qingfeng"\] \.qf-nav-icon span\s*\{[^}]*max-width:\s*0/.test(QINGFENG),
-    '队列拼接入口文字默认收起（hover 才展开）');
-  ok(/\[data-skin="qingfeng"\] \.qf-nav-icon:hover span[\s\S]{0,120}?max-width:\s*92px/.test(QINGFENG),
-    'hover 时文字展开');
-
-  // 4) 胶囊是 fixed 且居中，z-index 要压过内容。
-  const navRule = QINGFENG.match(/\[data-skin="qingfeng"\] \.qf-nav\s*\{([^}]*)\}/);
-  ok(navRule && /position:\s*fixed/.test(navRule[1]), '主菜单胶囊固定定位脱离文档流');
-  const navZ = navRule && Number((navRule[1].match(/z-index:\s*(\d+)/) || [])[1]);
-  ok(Number.isFinite(navZ) && navZ >= 50, `胶囊层级高于内容（z-index=${navZ}）`);
-  ok(/translateX\(-50%\)/.test(navRule ? navRule[1] : ''), '胶囊水平居中');
-
-  // 5) 左上角设置、右下角头像+箭头。
-  ok(/function buildBrandGroup/.test(QINGFENG_JS) && /qf-brand-group/.test(QINGFENG_JS),
-    '品牌旁编出一组（左上角设置按钮的落位）');
-  ok(/function openStage/.test(QINGFENG_JS) && /Stage3D/.test(QINGFENG_JS),
-    '右下角箭头跳舞台播放页');
-  ok(/id="online-account-btn"/.test(QINGFENG_JS.replace(/'/g, '"')) === false
-    && /byId\('online-account-btn'\)/.test(QINGFENG_JS),
-    '右下角搬的是业务那颗登录按钮（不是复制一个不会更新的假头像）');
-
-
-}
-
-function checkQingfengWall() {
-  section('清风：队列拼接海报墙');
-
-  // 剥掉注释的源码。**必须剥**：下面几条断言的说明文字里就写着
-  // paintEmptyState / emit('activate') / step(delta, tile) 这些字符串，
-  // 不剥的话断言匹配到自己写的注释，等于永远绿。
-  const qfCodeWall = stripJsComments(QINGFENG_JS);
-  // app.js 侧的按视图取源。同样要剥注释 —— 下面几条断言的说明文字里
-  // 就写着 viewSourceDef / sourceKey 这些标识符。
-  const qfApp = stripJsComments(APP);
-
-  // 1) 墙的密排参数：与 CSS 的 --qf-cell / --qf-cell-gap 必须一致，
-  //    两处写岔的表现是「卡片之间露出一条背景色的缝」。
-  const cell = QINGFENG_JS.match(/var CELL = (\d+)/);
-  const gap = QINGFENG_JS.match(/var GAP = (\d+)/);
-  ok(cell && gap, '密排参数在 JS 里显式声明');
-  eq(cell && Number(cell[1]), Number((/--qf-cell:\s*(\d+)px/.exec(QINGFENG) || [])[1]),
-    'CELL 与 CSS 的 --qf-cell 一致');
-  eq(gap && Number(gap[1]), Number((/--qf-cell-gap:\s*(\d+)px/.exec(QINGFENG) || [])[1]),
-    'GAP 与 CSS 的 --qf-cell-gap 一致');
-
-  // 2) 墙必须整块脱离文档流，且不吃指针事件之外的东西。
-  const wallRule = QINGFENG.match(/\[data-skin="qingfeng"\] \.qf-lattice\s*\{([^}]*)\}/);
-  ok(wallRule && /position:\s*fixed/.test(wallRule[1]), '海报墙固定定位铺满视口');
-  ok(wallRule && /overflow:\s*hidden/.test(wallRule[1]), '海报墙自己裁切');
-  ok(/touch-action:\s*none/.test(wallRule ? wallRule[1] : ''), '海报墙禁掉触摸滚动（自己处理平移）');
-
-  // 3) 相机：写在 world 上而不是逐卡定位，否则平移要重排上千节点。
-  ok(/translate3d\(/.test(QINGFENG_JS) && /will-change:\s*transform/.test(QINGFENG),
-    '相机走 world 的 translate3d + will-change（平移不重排海报）');
-
-  // 4) 渲染上限：不设上限的话一次平移能建出上千节点，滚动会掉帧。
-  ok(/MAX_INSTANCES = \d+/.test(QINGFENG_JS) && /entries\.length < MAX_INSTANCES/.test(QINGFENG_JS),
-    '渲染实例数有上限（否则平移会建出上千节点）');
-  ok(/OVERSCAN = \d+/.test(QINGFENG_JS), '裁剪区有外扩余量（平移时新格子已就位）');
-
-  // 5) 展开档与焦点态：正在播放那张向内构建边框，键盘焦点用 box-shadow。
-  ok(/\[data-skin="qingfeng"\] \.qf-poster\.is-current::before/.test(QINGFENG),
-    '正在播放的海报有强调边框');
-  ok(/\[data-skin="qingfeng"\] \.qf-poster\.is-focused/.test(QINGFENG),
-    '键盘焦点态有对应样式');
-  ok(/\[data-skin="qingfeng"\] \.qf-poster\.is-expanded/.test(QINGFENG),
-    '展开大卡有对应样式');
-  // 徽章刻意不用 backdrop-filter：每张卡一个模糊层会把整墙提升为 N 个
-  // 合成层，是海报墙最大的 GPU 开销。这条钉住，免得被"优化视觉"加回去。
-  const badgeRule = QINGFENG.match(/\[data-skin="qingfeng"\] \.qf-poster-badge\s*\{([^}]*)\}/);
-  ok(badgeRule && !/backdrop-filter/.test(badgeRule[1]),
-    '序号徽章不用 backdrop-filter（否则每张卡一个合成层）');
-
-  // 5b) 右下角工具坞（关灯 / 返回 / 说明）。两条各钉一个回归：
-  //     · 玻璃材质只有一份、挂在容器上。原来三颗各自带 --skin-surface 与
-  //       --skin-shadow，只隔 8px，读成三张散落的小卡片而不是一组控件。
-  //     · 说明面板必须绝对定位。它是 .qf-tools 的 flex 子项、DOM 排在「返回」
-  //       与「说明」之间，一旦回到流里，展开面板会把三颗劈成上下两截。
-  const toolsRule = QINGFENG.match(/\[data-skin="qingfeng"\] \.qf-tools\s*\{([^}]*)\}/);
-  ok(toolsRule && /background:\s*var\(--skin-surface\)/.test(toolsRule[1]) && /backdrop-filter/.test(toolsRule[1]),
-    '工具坞容器自带一份玻璃材质（三颗按钮不再各浮各的）');
-  const toolsBtnRule = QINGFENG.match(/\[data-skin="qingfeng"\] \.qf-tools-btn\s*\{([^}]*)\}/);
-  ok(toolsBtnRule && !/--skin-surface|--skin-shadow|backdrop-filter/.test(toolsBtnRule[1]),
-    '坞内按钮不带自己的表面与阴影（否则又退回三张散卡）');
-  const toolsPanelRule = QINGFENG.match(/\[data-skin="qingfeng"\] \.qf-tools-panel\s*\{([^}]*)\}/);
-  ok(toolsPanelRule && /position:\s*absolute/.test(toolsPanelRule[1]) && /bottom:\s*calc\(100%/.test(toolsPanelRule[1]),
-    '说明面板绝对定位浮在坞上方（展开不会把三颗按钮劈成两截）');
-
-  // 5c) 关灯这颗：图标要读得出是「灯」，状态同步只能有一份真相。
-  //     原来挂的是 i-disc（唱片），放在这颗按钮上读成「切碟 / 看封面」，和它做
-  //     的事无关；而 class/aria 在「点击」与「启动恢复」各写了一遍，标题就漏在
-  //     恢复那条里 —— 刷新后灯是关着的，tooltip 仍写「关灯」。
-  ok(/icon\('lamp'\)/.test(QINGFENG_JS) && !/lights\.innerHTML = icon\('disc'\)/.test(QINGFENG_JS),
-    '关灯用灯泡图标（不是唱片）');
-  ok(/function syncLights/.test(QINGFENG_JS), '关灯状态同步抽成 syncLights 一处');
-  const syncCalls = (QINGFENG_JS.match(/^[ \t]+syncLights\(\);$/gm) || []).length;
-  ok(syncCalls >= 3, `点击与启动恢复都走 syncLights（调用 ${syncCalls} 处，须 ≥3：建好即同步 + 两处触发）`);
-  ok(!/wall\.lightsOut = saved[\s\S]{0,220}?classList\.toggle\('is-on'/.test(QINGFENG_JS),
-    '启动恢复不再自己写 is-on/aria（那份归 syncLights，否则标题必然漏改）');
-
-  // 6) 墙为空要有空态，不能是一片空白墙。
-  //    注意：墙已经**不是播放队列专属**了 —— 每个 tab 的墙展示那个 tab 的
-  //    内容，空态文案也随之变化（歌单页说「还没有歌单」、队列页说
-  //    「队列是空的」），所以不能再钉死某一句文案，要钉「文案由来源决定」。
-  ok(/qf-lattice-empty/.test(QINGFENG_JS) && /function paintEmptyState/.test(QINGFENG_JS),
-    '墙为空时有空态提示，且文案随来源变化');
-  ok(/function paintEmptyState[\s\S]{0,900}?wall\.emptyHint/.test(qfCodeWall),
-    '空态用的是该来源自己的提示文案');
-
-  // 7) 键盘：Esc 返回 / 方向键移焦点 / Enter 展开。
-  const key = QINGFENG_JS.match(/function onWallKeydown[\s\S]{0,900}?\n  \}/);
-  ok(key && /'Escape'/.test(key[0]), 'Esc 退出队列拼接');
-  ok(key && /ArrowRight/.test(key[0]) && /ArrowLeft/.test(key[0]), '方向键移动焦点');
-  ok(key && /'Enter'/.test(key[0]) && /' '/.test(key[0]), 'Enter / 空格 展开');
-
-  // 8b) 墙是**每个 tab 都有的**，展示那个 tab 的内容（不是只有播放队列）。
-  //     这组钉的是「按视图取源」这条设计：需求是这个功能的核心，
-  //     一旦退回成只服务播放队列，断言要能红。
-  ok(/function requestSource/.test(qfCodeWall) && /emit\('source-request'\)/.test(qfCodeWall),
-    '墙按当前视图取源（source-request），不是只读播放队列');
-  // 三个取源入口都必须走 requestSource。只钉 emit 存在是不够的 ——
-  // 把 openWall 里的调用换成 requestQueue()，emit 那个函数定义照样在，
-  // 断言照样绿，而墙实际已经退回只服务播放队列了。
-  for (const [fn, label] of [
-    ['openWall', '开墙'],
-    ['leaveDrill', '从歌单退回'],
-    ['reflowInner', '切 tab 换源'],
-  ]) {
-    const body = new RegExp(`function ${fn}\\([\\s\\S]{0,3000}?\\n  \\}`).exec(qfCodeWall);
-    ok(body && /requestSource\(\)/.test(body[0]), `${label}走 requestSource（按当前 tab 取源）`);
-  }
-  // 六个视图都要有源，少一个就有一个 tab 的墙是空的。
-  for (const k of ['library', 'online', 'playlists', 'daily', 'favorites', 'queue']) {
-    ok(new RegExp(`key: '${k}'`).test(qfApp), `viewSourceDef 覆盖 ${k}`);
-  }
-  ok(/label: '播放队列'/.test(qfApp) && /label: '歌单'/.test(qfApp),
-    '每个源都带来源名（墙上要标明自己在看哪一列）');
-  // 切 tab 时换源而不是关墙 —— 关掉的话这个功能就退化成
-  // 「只有队列 tab 有队列拼接」，正好是需求要避免的。
-  // **必须钉「换源那一行紧跟在 if (wall.open) 之后」**：
-  // 只测「文件里存在 applySource(requestSource())」会被 enterDrill 之外的
-  // 任意调用点满足，换成关墙照样全绿。
-  ok(/if \(wall\.open\) \{\s*\n\s*var wasDrill[\s\S]{0,700}?applySource\(requestSource\(\)\)/.test(qfCodeWall),
-    '墙开着切 tab 时换源，不关墙');
-  ok(!/if \(wall\.open\) \{ closeWall\(\); \}/.test(qfCodeWall),
-    '切 tab 没有把墙直接关掉（旧行为，已移除）');
-  // 换源前先退到第一层：第二层是「某个歌单里的歌」，跨 tab 留着就串味了。
-  ok(/if \(wall\.open\) \{[\s\S]{0,300}?wall\.drill = null;[\s\S]{0,300}?collapse\(true\)/.test(qfCodeWall),
-    '换源前先退回第一层（歌单里的歌不属于下一个 tab）');
-  // 歌单那列是两层：一张海报 = 一个歌单，点开看里面的歌而不是直接播。
-  ok(/function enterDrill/.test(qfCodeWall) && /function leaveDrill/.test(qfCodeWall),
-    '歌单墙有两层（enterDrill / leaveDrill）');
-  ok(/isPlaylist/.test(qfCodeWall) && /enterDrill\(tile\)/.test(qfCodeWall),
-    '歌单项点开走 enterDrill 而不是直接播');
-  // 钉死「卡片点击处理器里那一行」：只测文件里存在 enterDrill(tile) 的话，
-  // 把卡片点击改成 focusPoster 展开（= 直接播）也照样绿。
-  ok(/tile && tile\.isPlaylist\) \{\s*\n[\s\S]{0,300}?enterDrill\(tile\)/.test(qfCodeWall),
-    '歌单卡片点击确实进第二层');
-  // **pointerdown 里不许 setPointerCapture**。
-  //
-  // 捕获指针后 pointerup/click 会被重定向到捕获元素（field），
-  // 海报上的 click 处理器永远收不到 —— 用户在墙上点卡片就是没反应，
-  // 而且**不报任何错**。浏览器实测里只有 element.click()（不走捕获路径）
-  // 能展开，真实鼠标点击全部失效；两种结果不一致本身就是证据。
-  // 捕获必须推迟到 pointermove 越过拖拽阈值、确认是拖拽之后。
-  const dragBlock = /field\.addEventListener\('pointerdown',[\s\S]{0,800}?\n {4}\}\)/.exec(qfCodeWall);
-  ok(dragBlock && !/setPointerCapture/.test(dragBlock[0]),
-    'pointerdown 不捕获指针（捕获会把 click 重定向到 field，海报点不动）');
-  ok(/if \(!drag\.moved\) \{\s*\n\s*drag\.moved = true;[\s\S]{0,200}?setPointerCapture\(e\.pointerId\)/.test(qfCodeWall),
-    '指针捕获推迟到确认拖拽之后（纯点击全程不捕获）');
-  // 展开卡的主按钮对歌单是「打开歌单」而不是播放控件。
-  ok(/if \(tile && tile\.isPlaylist\) \{[\s\S]{0,600}?open\.className = 'qf-chrome-play is-labelled'/.test(qfCodeWall),
-    '歌单的展开卡是「打开歌单」而不是播放控件');
-  // 非当前项不给进度条：第二层（刚点开的歌单）拖了也不知道在拖谁。
-  ok(/progress\.hidden = !\(tile && tile\.current\)/.test(qfCodeWall),
-    '没在放的那张不给进度条');
-
-  // 8a) 密排模板与让位表：folia 求解器产物的两份数据必须结构完好 ——
-  //     模板精确铺满 12×8；每张让位表精确铺满、被展开的槽位恰为 6×6。
-  //     数据坏一块，墙上就是背景色漏缝，或者展开卡直接压住邻居（那是旧观感，
-  //     folia 的展开是「整块重新咬合」，靠的就是这份数据可靠）。
-  const latticeArr = (name) => {
-    const i = qfCodeWall.indexOf('var ' + name + ' = ');
-    if (i < 0) return null;
-    const start = qfCodeWall.indexOf('[', i);
-    let depth = 0;
-    for (let k = start; k < qfCodeWall.length; k += 1) {
-      if (qfCodeWall[k] === '[') depth += 1;
-      else if (qfCodeWall[k] === ']') {
-        depth -= 1;
-        if (!depth) return eval('(' + qfCodeWall.slice(start, k + 1) + ')');
-      }
-    }
-    return null;
-  };
-  const coverErr = (tables, expectGear) => {
-    if (!Array.isArray(tables)) return '表缺失';
-    for (let t = 0; t < tables.length; t += 1) {
-      const rects = tables[t];
-      if (!Array.isArray(rects) || rects.length !== 12) return `表 ${t} 槽位数不对`;
-      const g = Array.from({ length: 8 }, () => new Array(12).fill(false));
-      for (const r of rects) {
-        for (let y = r[1]; y < r[1] + r[3]; y += 1) {
-          for (let x = r[0]; x < r[0] + r[2]; x += 1) {
-            if (y < 0 || y > 7 || x < 0 || x > 11) return `表 ${t} 越界 ${JSON.stringify(r)}`;
-            if (g[y][x]) return `表 ${t} 重叠 @${x},${y}`;
-            g[y][x] = true;
-          }
-        }
-      }
-      for (let y = 0; y < 8; y += 1) {
-        for (let x = 0; x < 12; x += 1) if (!g[y][x]) return `表 ${t} 漏缝 @${x},${y}`;
-      }
-      if (expectGear) {
-        // 传进来的是展平后的 48 张让位表：t 对应 模板 = t/12、槽位 = t%12。
-        const slot = t % 12;
-        if (rects[slot][2] !== 6 || rects[slot][3] !== 6) return `表 ${t} 展开档不是 6×6`;
-      }
-    }
-    return null;
-  };
-  const tplErr = coverErr(latticeArr('LATTICE_TEMPLATES'), false);
-  ok(tplErr === null, '密排模板精确铺满 12×8（每块 12 槽）', tplErr || '');
-  const reflows = latticeArr('LATTICE_REFLOWS');
-  const reflowErr = coverErr(
-    Array.isArray(reflows) ? reflows.reduce((all, perTemplate) => all.concat(perTemplate), []) : null,
-    true,
-  );
-  ok(reflowErr === null, '让位表精确铺满 12×8 且展开档恰为 6×6', reflowErr || '');
-  // 展开走让位表而不是「中心放大压邻居」；让位过渡挂 .is-reflow，
-  // 收起对称地滑回去。
-  ok(/function expandGear/.test(qfCodeWall) && /expandGear\(index\)/.test(qfCodeWall),
-    '展开按让位表重排整块（不是大卡压邻居）');
-  // 实例身份模型：节点与格位键绑定（folia 的 instanceId 同款），卡片内容
-  // 是格位的纯函数。按数组位置复用节点的话，平移一次窗口格位键整体错位，
-  // 展开卡会在下一次重绘时被拍到别人的格位上（实测 6×6 展开档变 2×2）。
-  ok(/nodeByKey\.get\(entries\[k\]\.key\)/.test(qfCodeWall)
-    && /nodeByKey\.set\(entry\.key, el\)/.test(qfCodeWall),
-    '海报按格位键控绑定（键控差量，不按数组位置复用）');
-  ok(/function tileForKey/.test(qfCodeWall) && /cellSlot % wall\.tiles\.length/.test(qfCodeWall)
-    && /function posterTile/.test(qfCodeWall),
-    '卡片内容是格位的纯函数（cellSlot 对项数取模），跨平移不漂移');
-  // 相机飞行途中挂载集必须跟着走：落地后窗口外是空的，且格位键会整体错位。
-  const panBody = /function panTo\([\s\S]{0,1200}?\n  \}/.exec(qfCodeWall);
-  ok(panBody && /renderWall\(\)/.test(panBody[0]),
-    '相机飞行逐帧重绘（挂载集跟相机走）');
-  ok(/function kickReflowTransition/.test(qfCodeWall) && /is-reflow/.test(QINGFENG),
-    '让位滑移由 .is-reflow 短暂挂类驱动（平移期间不能带过渡）');
-  // 入场波/退场波/轻上浮三段动画的接线齐全（CSS 负责动，JS 负责延时）。
-  ok(/ENTRANCE_WINDOW = \d+/.test(qfCodeWall) && /is-landing/.test(qfCodeWall)
-    && /--qf-land-delay/.test(qfCodeWall),
-    '开墙有入场波（延时按距离写在 --qf-land-delay）');
-  ok(/is-closing/.test(qfCodeWall) && /--qf-exit-delay/.test(qfCodeWall)
-    && /@keyframes qf-leave/.test(QINGFENG),
-    '关墙有反向退场波（延时取入场补数写在 --qf-exit-delay）');
-  ok(/@keyframes qf-land/.test(QINGFENG) && /@keyframes qf-rise/.test(QINGFENG),
-    '着落/上浮关键帧在 CSS 里');
-  ok(/--qf-popx/.test(qfCodeWall) && /transform: scale\(var\(--qf-popx/.test(QINGFENG),
-    'hover/focus 的 pop 系数按卡片尺寸算（四边各长出一个 GAP）');
-  // 换源必须重建海报：卡片内容与点击闭包是建卡时的快照，复用旧节点
-  // 会挂着上一个 tab 的歌（点击还会播错歌）。
-  ok(/function applySource\([\s\S]{0,900}?clearPosters\(\)/.test(qfCodeWall),
-    '换源时清空海报按新源重建（旧卡的内容/闭包是过期快照）');
-
-  // 开墙/换源时保证聚焦的那张在视口内（否则第一张在视口外 = 一片空白）。
-  // 墙是循环铺满的，同一项有很多实例：聚焦走「就近挑实例」（folia 的
-  // locateNearestInstance），实例不在挂载集就把相机瞬时对过去再渲染。
-  ok(/function focusAndReveal\([\s\S]{0,200}?focusQueueIndex\(index, false\)/.test(qfCodeWall),
-    '开墙/换源的定位走 focusQueueIndex（纯聚焦，不展开）');
-  ok(/function focusQueueIndex\([\s\S]{0,300}?locateNearestInstance\(qi, viewportCenterWorld\(\)\)/.test(qfCodeWall)
-    && /if \(!node\) \{[\s\S]{0,600}?applyCamera\(\);[\s\S]{0,120}?renderWall\(\)/.test(qfCodeWall),
-    '聚焦就近实例；不在挂载集就瞬时对位再渲染（保证可见）');
-  // 不能把「保证可见」塞进 focusPoster：方向键每按一次就 panTo 一次，
-  // 键盘导航会没法用。所以两条路径必须分开。
-  //
-  // 这里判的是**分工**而不是「函数里没有 panTo」—— focusPoster 在 expand
-  // 分支里调 panTo 是正确行为（展开卡必须带进视口），早先写成「整个函数
-  // 里不许出现 panTo」结果把那次合法调用也判红了。所以只钉两件事：
-  //   1. panTo 只出现在 expand 分支里，且全函数只有这一处；
-  //   2. focusAndReveal 走的是不展开的纯聚焦，可见性另行判断。
-  const fp = /function focusPoster\([\s\S]{0,600}?\n  \}/.exec(qfCodeWall);
-  const fpPans = fp ? (fp[0].match(/panTo\(/g) || []).length : -1;
-  ok(fp && fpPans === 1 && /if \(expand\) \{[\s\S]{0,400}?panTo\(el\);/.test(fp[0]),
-    'focusPoster 的相机平移只在 expand 分支（展开卡要带进视口）');
-  // （focusAndReveal 的分工断言合并进上面两条 focusQueueIndex 断言。）
-  // 展开新卡前必须先收起上一张。开墙时若源里有 current 项它已被展开
-  //（开墙的 focusQueueIndex），用户再点另一张若不收，
-  // 墙上会同时铺着两张 6×6 展开档，且「展开的是哪一张」不再确定 ——
-  // 浏览器实测就是querySelector 取到第一张（旧卡）而断言全红。
-  // 键控差量下下标随重渲染漂移，收起守卫按**格位键**比较。
-  ok(/if \(wall\.expandedKey && wall\.expandedKey !== el\.dataset\.qfKey\) collapse\(true\);\s*\n\s*wall\.expanded = index;/.test(qfCodeWall),
-    '展开新卡前先收起上一张（按格位键，否则同时铺着两张 6×6 展开档）');
-  ok(/function collapse\(silent\) \{\s*\n\s*if \(!wall\.expandedKey\) return;\s*\n\s*var el = wall\.nodeByKey\.get\(wall\.expandedKey\);/.test(qfCodeWall),
-    '收起按格位键找节点（下标跨重渲染会漂移）');
-  // Esc 分层退：第二层先退回列表，再按才关墙。
-  ok(/if \(e\.key === 'Escape'\) \{[\s\S]{0,120}?if \(wall\.drill\) leaveDrill\(\);[\s\S]{0,80}?else closeWall\(\)/.test(qfCodeWall),
-    'Esc 在第二层先退回歌单列表，再按才退出墙');
-  // 展开卡的控件：歌单那列不该跟曲共用「上一首/播放/下一首」——
-  // 歌单不是在放的曲，给那组控件用户会以为点播放能直接开播。
-  ok(/qf-chrome-play is-labelled/.test(qfCodeWall) && /打开歌单/.test(qfCodeWall),
-    '歌单的展开卡是「打开歌单」而不是播放控件');
-  // 墙上要标明来源，且来源名跟着 tab 变。
-  ok(/qf-lattice-tag/.test(qfCodeWall) && /qf-lattice-tag/.test(QINGFENG),
-    '墙上有来源标签（CSS 与 JS 两侧都在）');
-  ok(/WALL_TAB_LABELS/.test(qfCodeWall) && /qf-nav-icon-text/.test(qfCodeWall),
-    '入口按钮文案跟着 tab 变（不再固定叫「队列拼接」）');
-  // 每项都要自报 sourceKey：上一首/下一首要回**同一列**里取，
-  // 不能靠皮肤缓存的列表（那会和业务状态不一致）。
-  ok(/sourceKey/.test(qfApp) && /item\.sourceKey \? viewSourceDef\(item\.sourceKey\)/.test(qfApp),
-    '每项带 sourceKey，播放分派回同一列取');
-
-  // 8) 播放路径只有一条：皮肤发意图，app.js 落 play。
-  //    这里刻意**不钉 play-index / play-step**：墙上的序号是**本视图**的下标，
-  //    而 play-index 按的是播放队列下标 —— 混用会播错歌。所以墙上点歌走
-  //    activate（带整项），由 app.js 按 id 的种类分派。
-  ok(/emit\('activate'/.test(QINGFENG_JS), '点播放发 activate 意图（带整项，不靠下标猜）');
-  // 「上一首/下一首」必须发 step-track（= 播放队列里前后各一首），
-  // **不能**再走 activate+delta。
-  //
-  // 旧实现发的是 activate + delta，由 app.js 拿**墙上那一项**去
-  // queueSnapshot 里 findIndex —— 而展开卡是 focusPoster 聚焦的那张，
-  // 用户很可能停在第 3 张（还没点播）就按了下一首，曲库/歌单/收藏这些
-  // tab 的墙上序号与队列下标毫无关系，findIndex 必返 -1，落到
-  // 「从头开始」的兜底，于是**永远停在队列第一首**。
-  // 用户实测：歌点得开、进度在走、唯独上/下一曲不动。
-  ok(/function step\(delta\)\s*\{\s*emit\('step-track', \{ delta: delta \}\)/.test(qfCodeWall),
-    '上一首/下一首发 step-track（按播放队列前后走，不按墙上那一列）');
-  ok(!/emit\('activate', \{ item: tile, delta/.test(qfCodeWall),
-    '上一首/下一首不再走 activate+delta（那是「永远停在第一首」的写法）');
-  ok(/'step-track': \(d\)/.test(APP) && /playQueueStep\(d\.delta\)/.test(APP),
-    'app.js 侧 step-track 落到 playQueueStep（按正在放的那首算邻居）');
-  // 左下角浮条的播放/暂停：走 toggle-play，复用业务既有的 togglePlay。
-  ok(/qf-queue-peek-play/.test(QINGFENG) && /qf-queue-peek-play/.test(qfCodeWall),
-    '左下角浮条有播放/暂停按钮（CSS 与 JS 两侧都在）');
-  ok(/emit\('toggle-play'\)/.test(qfCodeWall) && /'toggle-play': \(\)/.test(APP)
-    && /togglePlay\(\)/.test(APP),
-    '浮条播/停走 toggle-play（复用业务路径，不自己拼 post）');
-  // 展开卡与浮条上那两颗播放键要跟着实时播放态翻面。海报节点是键控复用的、
-  // 控制条只建一次，所以「在放哪首 / 在不在放」不能吃建卡时那份快照。
-  ok(/function posterIsCurrent\(/.test(qfCodeWall) && /function posterIsPlaying\(/.test(qfCodeWall)
-    && /document\.body\.classList\.contains\('is-playing'\)/.test(qfCodeWall),
-    '墙上播放态走实时判据（body.is-playing 由 Stage.setSnapshot 同步，不吃建卡快照）');
-  ok(!/t\.current && t\.playing/.test(qfCodeWall)
-    && !/tile && tile\.current && tile\.playing/.test(qfCodeWall),
-    '播放/暂停图标不再读 tile.playing（暂停续播都不换曲，那份快照永远是旧的）');
-  // 已经是当前曲时再发 activate = 把同一首重新 load 一遍，听起来就是「点了没反应」。
-  ok(/if \(posterIsCurrent\(tile\)\) emit\('toggle-play'\)/.test(qfCodeWall),
-    '展开卡上点当前曲走 toggle-play（播放与暂停是同一颗键）');
-  ok(/function paintPosterPlay\(/.test(qfCodeWall)
-    && /paintPosterPlay\(el\);/.test(qfCodeWall)
-    && /paintPosterPlay\(wall\.expandedKey/.test(qfCodeWall),
-    '建卡 / 复用卡 / 播放态跳变三条路径都会重画那颗键');
-  // 「换歌自动跟到当前那张」原来吃的是 tile.current 那份建卡快照 —— 换曲不会重取
-  // 源，快照永远停在上一首，表现是「换歌了墙不动」（浏览器实测抓到）。
-  ok(/function followCurrent\(\)\s*\{[\s\S]*?findIndex\(posterIsCurrent\)/.test(qfCodeWall),
-    '换歌跟随按实时判据挑当前卡（不吃 tile.current 快照）');
-  ok(!/function \([tx]\) \{ return [tx]\.current; \}/.test(qfCodeWall),
-    '墙上找当前项只剩一套判据（不再各读各的建卡快照）');
-  // 换曲只有 playback:track，暂停续播只有 Stage 的跳变沿 —— 少接一条就有一半的
-  // 按钮不翻面。卸载必须两条都摘（.stage 与墙根节点都不随皮肤重建）。
-  ok(/addEventListener\('playback:track', wallPlayHandler\)/.test(QINGFENG_JS)
-    && /addEventListener\('stage:playing-changed', wallPlayHandler\)/.test(QINGFENG_JS)
-    && /removeEventListener\('playback:track', wallPlayHandler\)/.test(QINGFENG_JS)
-    && /removeEventListener\('stage:playing-changed', wallPlayHandler\)/.test(QINGFENG_JS),
-    '播放态两条广播都接上，且卸载时都摘掉');
-  ok(/!transport\.post|transport\.post\(/.test(QINGFENG_JS) === false
-    || !/transport\.post\('\/v1\/player/.test(QINGFENG_JS),
-    '皮肤不自己发 /v1/player 请求（播放路径只有 app.js 一条）');
-
-  section('清风：墙上点播放必须把墙上那一列一起交给业务');
-  // 曾经的两级故障：皮肤只发 {item}，业务按**当前 tab** 重推一份列表 —— 在歌单
-  // tab 的第二层推出来的是**歌单记录**，于是拿平台歌单 id 当曲目 id 去取流（必
-  // 404，且服务端只会回「暂无可用音频」这种误导话术）；而 findIndex 找不到时
-  // 退回 index 0，用户点的是 A、响的是 B。
-  const wallActivate = QINGFENG_JS.match(/emit\('activate',\s*\{[^}]*\}\)/g) || [];
-  ok(wallActivate.length >= 2, `海报与左下角浮条两处都发 activate（找到 ${wallActivate.length} 处）`);
-  ok(wallActivate.every((s) => /list:\s*wall\.tiles/.test(s)),
-    '每一处 activate 都带 list: wall.tiles（皮肤不缓存列表，交的是墙上当前这一列）');
-  ok(/function playOnlineItem\(item, list\)/.test(APP), 'playOnlineItem 收发起方的列表');
-  ok(!/at >= 0 \? at : 0/.test(APP),
-    '找不到被点的那一项时不再退回第 0 项（那会播成另一首歌）');
-  ok(/Online\.playAll\(\[one\], 0\)/.test(APP), '退而播被点的那一首本身');
-
-  section('清风：顶栏让位与详情层的死控件');
-  // --qf-clear 是视口坐标（胶囊 top 按视口算），.column 本来就排在顶栏下面，
-  // 整条当 padding-top 用会把 --topbar-h 算两遍（实测白吃 58px）。
-  ok(/\.column\s*\{[^}]*padding-top:\s*calc\(var\(--qf-clear\) - var\(--topbar-h\)\)/.test(QINGFENG),
-    '.column 的让位从自身顶部算（减掉重复计算的 --topbar-h）');
-  ok(/#view-playlists\[data-layer="online-detail"\][^{]*\.col-head/.test(QINGFENG)
-    && /dataset\.layer = layer/.test(APP),
-    '详情层打开时收掉架子那一排控件，判据由 app.js 挂在 #view-playlists 上');
-
-  // 墙开着时顶栏与胶囊导航都被隐藏、迷你卡又被浮条压住 —— 浮条那颗舞台入口
-  // 是墙上唯一的通路，所以它必须常驻（不能跟着播放键一起 hover 才出现）。
-  ok(/qf-queue-peek-stage/.test(QINGFENG_JS) && /\.qf-queue-peek-stage\s*\{/.test(QINGFENG),
-    '浮条上有舞台入口（节点与样式都在）');
-  ok(!/\.qf-queue-peek:hover[^{]*\.qf-queue-peek-stage/.test(QINGFENG)
-    && !/\.qf-queue-peek-stage\s*\{[^}]*opacity:\s*0/.test(QINGFENG),
-    '这颗不参与 hover 显隐（常驻可见）');
-  ok(/peekStage\.addEventListener\('click'[\s\S]{0,200}openStage\(\)/.test(QINGFENG_JS),
-    '点它走 openStage（先关墙再进舞台），不是只改样式');
-
-  section('清风：与 app.js 的桥接接线');
-  ok(/function initSkinBridge/.test(APP) && /initSkinBridge\(\)/.test(APP),
-    'app.js 定义并启动清风桥接');
-  ok(/window\.Skins\.request\(action, extra\)/.test(QINGFENG_JS), '清风使用同一皮肤请求接口');
-  ok(/function queueSnapshot/.test(APP) && /d\.queue = queueSnapshot\(\)/.test(APP),
-    'queue-request 回一份队列快照给海报墙');
-  ok(/function playQueueIndex/.test(APP) && /'play-index': \(d\)/.test(APP),
-    '桥接分流 play-index');
-  // 桥接是同步回填：皮肤 dispatch 之后立刻读 detail.queue，
-  // 若 app.js 改成异步回填，海报墙会永远拿到空队列且不报错。
-  // 匹配的是「同一个 d 上赋值」这个结构，不绑定注释文字。
-  ok(/d\.queue = queueSnapshot\(\)/.test(APP)
-    && !/d\.queue\s*=\s*await/.test(APP) && !/d\.queue\s*=\s*\w+\.then/.test(APP),
-    '队列快照是同步回填（emit 返回即可读，不是异步 Promise）');
-  // 已有队列保留每项音源身份；皮肤跳播不能拒绝在线曲或重建成单音源歌单。
-  const pickStart = APP.indexOf('function playQueueIndex(');
-  const pickEnd = APP.indexOf('\nfunction playQueueStep(', pickStart);
-  const mixedQueue = ['local-track', 'online:netease:1', 'online:qq:2'];
-  const picks = [];
-  vm.runInNewContext(APP.slice(pickStart, pickEnd) + '\nplayQueueIndex(2); playQueueIndex(0); playQueueIndex(99);', {
-    state: { queue: mixedQueue },
-    playTrack(id, queue) { picks.push({ id, queue }); }
-  });
-  ok(picks.length === 2 && picks[0].id === 'online:qq:2' && picks[1].id === 'local-track'
-    && picks.every((pick) => JSON.stringify(pick.queue) === JSON.stringify(mixedQueue)),
-  '本地和QQ曲目共用队列跳播，保持完整混合队列，无效下标不播放');
-  // seek 复用 seekTo：自己拼 post 会丢掉 epoch 竞态保护与失败提示。
-  ok(/seekTo\(Math\.round\(total \* d\.ratio\)\)/.test(APP),
-    '墙内进度条复用 seekTo（保留竞态保护与错误提示）');
-  ok(!/function seekSnapshotRatio/.test(APP), '没有与 seekTo 重复的第二条 seek 实现');
-}
-
-function checkQingfengSettings() {
-  section('清风：设置浮层（遮罩 / 两栏分类 / 可逆）');
-
-  // 剥掉注释的源码，后面多条断言都要用。
-  // **必须剥**：这些新断言的说明文字里就写着 paintEmptyState / emit('activate')
-  // 这些字符串，不剥的话断言会匹配到自己写的注释，等于永远绿。
-  const qfCode = stripJsComments(QINGFENG_JS);
-  const qfCodeWall = qfCode;
-
-  // 1) 浮层结构：遮罩 + 卡片，卡片带 dialog 语义。
-  ok(/make\('div', 'qf-modal-scrim', root\)/.test(QINGFENG_JS)
-    && /make\('section', 'qf-modal-card', root\)/.test(QINGFENG_JS),
-    '浮层由遮罩 + 卡片两层构成');
-  ok(/setAttribute\('role', 'dialog'\)/.test(QINGFENG_JS)
-    && /setAttribute\('aria-modal', 'true'\)/.test(QINGFENG_JS),
-    '卡片带 dialog / aria-modal 语义');
-
-  // 2) 两栏：左栏分类导航 + 右栏设置视图本体。
-  ok(/make\('div', 'qf-set-layout', body\)/.test(QINGFENG_JS)
-    && /make\('nav', 'qf-set-nav', layout\)/.test(QINGFENG_JS)
-    && /make\('div', 'qf-set-pane', layout\)/.test(QINGFENG_JS),
-    '浮层内容分两栏：左栏 .qf-set-nav + 右栏 .qf-set-pane');
-  ok(/attachView\('settings', sheet\.pane\)/.test(QINGFENG_JS),
-    '设置视图经外壳 attachView 装配进浮层（受控装配，可还原）');
-
-  // 3) 「帮助」页签已按需求去掉，这里反向钉死：那条路曾经存在过一个
-  //    点不动的死页签（buildHelp 把内容 append 到 pane，而 pane 是
-  //    layout 的子节点，showHelp(true) 又把 layout.hidden 设成 true ——
-  //    内容被藏在自己的父容器下，点下去是一片空白）。
-  //    源码里还有相关注释，所以这里剥掉注释再匹配，否则会匹配到注释文本。
-  const qfJsNoComment = stripJsComments(QINGFENG_JS);
-  ok(!/tabHelp|showHelp|buildHelp|qf-modal-tab/.test(qfJsNoComment),
-    '帮助页签与其切换逻辑已彻底移除（无死代码残留）');
-  // 说明：下面两条扫的是 CSS 全文，而 QINGFENG 里还留着解释「页签已移除」的
-  // 注释，注释里就写着这些个类名 —— 不剥注释的话断言会匹配到自己的注释，永远绿。
-  // 断言必须跑在剥掉注释的源码上。
-  const qfCssNoComment = stripCssComments(QINGFENG);
-  ok(!/\.qf-modal-tab/.test(qfCssNoComment) && !/function qf-underline/.test(qfCssNoComment),
-    '帮助页签的 CSS 样式也已移除');
-
-  // 4) 顶栏的沉浸声场 / 打开设置对清风隐藏，但功能不能跟着丢：
-  //    声场在设置里必须有可发现的入口。只隐藏「设置」那颗是安全的
-  //    （左上角已有 .qf-settings-btn）。
-  //    「最小化为胶囊」不在隐藏清单里，而且这是刻意的：它收起的是整个窗口、
-  //    不是切一个视图，藏进设置浮层等于把一步动作变成三步。所以这里反过来
-  //    钉一条 —— 否则下一个人照着「清风把控制入口统一收进设置」那句话，
-  //    会把它一起收掉。
-  const qfHideRule = (qfCssNoComment.match(/\[data-skin="qingfeng"\][^{}]*\{[^}]*display:\s*none[^}]*\}/g) || [])
-    .filter((rule) => /#stage3d-entry|#settings-entry|#capsule-entry/.test(rule)).join('\n');
-  ok(/#stage3d-entry/.test(qfHideRule) && /#settings-entry/.test(qfHideRule),
-    '顶栏的声场与设置按钮对清风 display:none');
-  ok(!/#capsule-entry/.test(qfHideRule) && !/#capsule-entry/.test(qfCssNoComment),
-    '顶栏的胶囊按钮没有被清风隐藏（收起整窗是即时动作，留在顶栏）');
-  // 新分组在 index.html 里带了一整块说明注释，正则 #set-capsule-btn 会先撞上
-  // 注释里的文字。改成匹配属性赋值，真正的目标节点与 id/class 两种写法都覆盖。
-  ok(/(?:id|for)="set-capsule-btn"/.test(HTML) && /(?:id|for)="set-stage3d-btn"/.test(HTML),
-    '设置页补了「窗口与舞台」分组承接被隐藏的两个入口');
-  ok(/enterCapsule[\s\S]*set-capsule-btn/.test(APP) || /set-capsule-btn[\s\S]*enterCapsule/.test(APP),
-    '胶囊播放器的新入口复用了同一套最小化逻辑');
-  ok(/stage3d-entry', 'set-stage3d-btn/.test(STAGE3D_JS),
-    '沉浸声场的新入口进了 openers 列表');
-  // 分类表必须认领新分组，否则它会掉进末尾的「其它」——
-  // 那是「多一项」而不是「不见了」，用户要多点一次才能找到。
-  // 两张表（清风 / 流年）都得认领：业务加分组时两张是一起漏的，
-  // 只补一张会让另一套皮肤里它掉进「其它」。同样要剥注释。
-  ok(/id: 'playback'[\s\S]*'窗口与舞台'/.test(qfJsNoComment),
-    '清风把「窗口与舞台」归进「播放」分类');
-  const liunianJsNoComment = stripJsComments(LIUNIAN_JS);
-  ok(/id: 'playback'[\s\S]*'窗口与舞台'/.test(liunianJsNoComment),
-    '流年也认领了「窗口与舞台」（两张表一起补，别只改一张）');
-
-  // 5) 层级必须压过既有浮层（在线登录弹窗是 100）。
-  const modalRule = QINGFENG.match(/\[data-skin="qingfeng"\] \.qf-modal\s*\{([^}]*)\}/);
-  const z = modalRule && Number((modalRule[1].match(/z-index:\s*(\d+)/) || [])[1]);
-  ok(Number.isFinite(z) && z >= 200, `浮层层级高于既有浮层（z-index=${z}，须 ≥ 在线弹窗的 100）`);
-
-  // 5) 底层隔离只许挡交互，不许加 filter —— filter 会让 .app 变成包含块，
-  //    把子树里的 fixed 后代改成相对定位（流年踩过的坑）。
-  const isolate = QINGFENG.match(/\[data-skin="qingfeng"\] body\.qf-modal-open[^{]*\{([^}]*)\}/g) || [];
-  ok(isolate.length > 0, 'body 标记确有对应样式（不是死代码）');
-  ok(isolate.every((r) => !/filter/.test(r)),
-    '底层隔离不加 filter（否则 .app 变包含块，固定定位的播放胶囊会错位）');
-  ok(isolate.join('').includes('pointer-events'), '底层隔离用 pointer-events 挡交互');
-
-  // 6) 卡片自身不做模糊：否则设置项文字被自己的背景糊掉。
-  const cardRule = QINGFENG.match(/\[data-skin="qingfeng"\] \.qf-modal-card\s*\{([^}]*)\}/);
-  ok(cardRule && !/backdrop-filter/.test(cardRule[1]),
-    '卡片本身不做模糊（只有遮罩模糊）');
-  ok(/background:\s*var\(--panel-solid\)/.test(cardRule[1]),
-    '卡片底色取主题令牌（不写字面量）');
-
-  // 7) 进退场：进场用 animation（hidden→可见时自动播），退场用 transition。
-  ok(/qf-modal-card-in/.test(QINGFENG), '进场用 keyframes 动画');
-  // 退场必须同时满足两件事：animation 被关掉（否则 keyframes 继续盖住
-  // transition）、且有 transition 播反向。不绑定两条声明的先后顺序 ——
-  // 流年那份 CSS 里 transition 在前，这里在后，都对。
-  const closing = QINGFENG.match(/\[data-skin="qingfeng"\] \.qf-modal\.is-closing \.qf-modal-card\s*\{([^}]*)\}/);
-  ok(closing && /animation:\s*none/.test(closing[1]),
-    '退场关掉 keyframes（否则它继续盖住 transition）');
-  ok(closing && /transition:[^;}]*opacity[^;}]*transform|transition:[^;}]*transform[^;}]*opacity/.test(closing[1]),
-    '退场切到 transition 播反向动画');
-  ok(/MODAL_EXIT_MS = \d+/.test(QINGFENG_JS), 'JS 里显式声明退场时长，与 CSS 对齐');
-  ok(/setTimeout\(function \(\) \{[\s\S]{0,420}?sheet\.root\.hidden = true/.test(QINGFENG_JS),
-    '退场动画结束后才置 hidden（退场动画真的能播完）');
-
-  // 7b) body 隔离标记必须成对摘除。漏摘的后果不是「样式脏」而是
-  //     「关掉设置后整个界面点不动」—— CSS 里 qf-modal-open 是给底层
-  //     加 pointer-events:none 的，只要它还挂在 body 上就一直在隔离。
-  //     这里要求关闭路径里出现 remove，且不能写成 remove(class1, class2)
-  //     一把带走（那会把海报墙的标记也摘掉，两个浮层先后开着时误伤）。
-  ok(/document\.body\.classList\.remove\('qf-modal-open'\)/.test(stripJsComments(QINGFENG_JS)),
-    '关闭浮层时摘掉 body 隔离标记（否则关掉设置后底层永久点不动）');
-  // 关闭**单个**浮层只许摘自己的标记，不许顺带摘另一个的（两个浮层可能
-  // 先后开着 —— 海报墙上开着设置时，关设置不该把海报墙的隔离也解了）。
-  // 注意只查 closeSettingsSheet / closeWall 这两条关闭路径 —— unmount 里
-  // `remove('qf-modal-open', 'qf-lattice-open')` 是对的：卸载时两个都得关。
-  const qfCode2 = stripJsComments(QINGFENG_JS);
-  const closeFn = (name) => {
-    const m = qfCode2.match(new RegExp(`function ${name}\\(\\)[\\s\\S]*?\\n  \\}`));
-    return m ? m[0] : '';
-  };
-  const closeSheet = closeFn('closeSettingsSheet');
-  const closeWallFn = closeFn('closeWall');
-  ok(closeSheet && closeWallFn, '找得到两条关闭路径');
-  ok(/remove\('qf-modal-open'\)/.test(closeSheet), '关闭设置摘自己的标记');
-  ok(/remove\('qf-lattice-open'\)/.test(closeWallFn), '关闭海报墙摘自己的标记');
-  ok(!/qf-lattice-open/.test(closeSheet),
-    '关闭设置不连带摘海报墙的标记（海报墙上开着设置时不该被解掉隔离）');
-  ok(/qf-modal-open/.test(closeFn('unmount')),
-    'unmount 里两个标记一起清（卸载时两个浮层都得关）');
-
-  // 7c) 播放胶囊必须显式 position: fixed。业务 .bar 是 .app 栅格里的 flex
-  //     子项（默认 static），皮肤只写 left/bottom 而不写 position，偏移量
-  //     会被整份忽略，只剩 translateX(-50%) 生效 —— 胶囊被左移半个身位。
-  //     这条 Node 测不出来（纯布局），但源码可以钉死。
-  // 显隐交互由 check-bar-browser.js 验证，不再保留旧热区/计时器实现断言。
-  const barRule = QINGFENG.match(/\[data-skin="qingfeng"\] \.bar\s*\{([^}]*)\}/);
-  ok(barRule && /position:\s*fixed/.test(barRule[1]),
-    '播放胶囊显式 position: fixed（否则 left/bottom 被忽略、胶囊左移半身）');
-  ok(barRule && /left:\s*50%/.test(barRule[1]) && /translateX\(-50%\)/.test(barRule[1]),
-    '播放胶囊用 left:50% + translateX(-50%) 居中');
-  // 胶囊宽度是算出来的，不是随手取的：里面要装下曲名 + 控制 + 进度条 +
-  // 模式 + 音量五块，而且**曲名那一格必须真的拿到宽度**。
-  //
-  // 原来的断言写死成 `min(6[6-9]\dpx ...)`，把 680px 那个具体值当成了
-  // 判据 —— 结果「加宽到 860px」被判红。可那正是修法：实测右侧那组
-  // （睡眠定时器 + 模式 + 音量）325px、控制组 188px、进度条最少 120px，
-  // 三块加间隙已 675px，680px 的胶囊里曲名一格不剩，bar-track 被压到 0 宽
-  // （文本在 DOM 里，界面读不到）。
-  //
-  // 判据改成真正的意图：**宽度下限 ≥ 860px**（曲名有 150px 可分配），
-  // 上界交给视口那道 min(…, 100vw - 2*pad) 去管。
-  ok(barRule && /width:\s*min\((8[6-9]\d|9\d\d|[1-9]\d{3,})px/.test(barRule[1]),
-    '胶囊宽度够放五块（≥860px，否则曲名那格被压到 0 宽）',
-    barRule ? (barRule[1].match(/width:[^;]+/) || [''])[0].trim() : 'no rule');
-
-  // 7d) 「正在播放」侧卡（.stage）：可拖动小卡片。
-  //     拖不动 / 位置记不住 / 能被拖出屏幕是三个独立的失效，各钉一条。
-  const stageRule = QINGFENG.match(/\[data-skin="qingfeng"\] \.stage\s*\{([^}]*)\}/);
-  ok(stageRule && /width:\s*2[0-9]{2}px/.test(stageRule[1]),
-    '侧卡宽度收窄（300px → 232px，不挤主内容区）',
-    stageRule ? (stageRule[1].match(/width:[^;]+/) || [''])[0].trim() : 'no rule');
-  // 纵向必须「单锚 + max-height」：上下双向锚定会把高度拉满整屏 —— 那是
-  // 「占位过大」的根因，光改 width 治不了。默认停靠左下角，所以锚的是 bottom。
-  ok(stageRule && /top:\s*auto/.test(stageRule[1]) && /bottom:\s*\d+px/.test(stageRule[1])
-    && /max-height:/.test(stageRule[1]),
-    '侧卡高度按内容收（bottom 单锚 + max-height，不再拉满整屏）');
-  ok(stageRule && /transition:\s*none/.test(stageRule[1]),
-    '侧卡禁用 transition（拖动时补间会让卡片粘滞追不上鼠标）');
-  // ≤1240px 基础样式把 .stage 做成右侧抽屉（translateX(100% + 20px)）。清风这张
-  // 卡由皮肤自己定位，那份位移会把整卡推右 252px —— 1101~1240px 这一带停靠位与
-  // 拖动落点全歪（浏览器实测）。拖动中的 scale 在更具体的 .qf-dragging 规则里。
-  ok(stageRule && /transform:\s*none/.test(stageRule[1]),
-    '侧卡复位基础样式的抽屉位移（transform:none，窄视口下位置才不歪）');
-  // 拖动反馈：没有视觉反馈的拖拽用户不知道东西抓起来了没。
-  ok(/qf-stage-dragging|qf-dragging/.test(QINGFENG) && /scale\(1\.\d\d\)/.test(QINGFENG),
-    '拖动中有视觉反馈（抬升 + 轻微放大）');
-  // 拖拽实现三件套：把手、持久化、范围约束。缺一条就有一类失效。
-  ok(/onStageDragDown/.test(QINGFENG_JS) && /pointerdown/.test(QINGFENG_JS),
-    '侧卡有 pointerdown 拖动入口');
-  // 捕获必须在**越过阈值之后**才发生，不能在 pointerdown 里。
-  // 同一个文件的海报拖拽（buildWall）踩过：pointerdown 就捕获 →
-  // pointerup/click 被重定向到捕获元素 → 头上的按钮（模式切换/全屏/队列）
-  // 全部收不到 click，表现为「点标题栏没反应」。
-  // ⚠️ 下面两条要**先剥掉注释**再看：onStageDragDown 的注释里就写着
-  // 「绝不能 setPointerCapture」，不剥的话断言会匹配到自己写的警告语，
-  // 永远红 —— 这是本项目踩过的坑（断言跑在带注释的源码上 = 假红）。
-  const stageDownFn = stripJsComments(
-    (QINGFENG_JS.match(/function onStageDragDown\([\s\S]*?\n  \}/) || [''])[0]);
-  const stageMoveFn = stripJsComments(
-    (QINGFENG_JS.match(/function onStageDragMove\([\s\S]*?\n  \}/) || [''])[0]);
-  ok(stageDownFn.indexOf('setPointerCapture') < 0,
-    '侧卡不在 pointerdown 里就捕获指针（会吃掉标题栏按钮的 click）');
-  ok(stageMoveFn.indexOf('setPointerCapture') >= 0 && /!stageDrag\.moved/.test(stageMoveFn),
-    '侧卡越过拖动阈值后才捕获指针');
-  // 把头上的真按钮让出来：它们照常点，不该被当成拖动。
-  ok(/e\.target\.closest\('button, a, input/.test(stageDownFn),
-    '侧卡把手上的真按钮不触发拖动');
-  // ⚠️ 守卫里不能排除 [role="button"]：把手 .stage-head 自己就是 role=button
-  // （键盘可达），写进去等于把手把自己挡死 —— 浏览器实测抓过，症状是
-  // 「整张卡哪儿都拖不动、控制台干净」，契约里所有断言都还绿。
-  ok(stageDownFn.indexOf('[role="button"]') < 0,
-    '拖动守卫不排除 [role="button"]（把手自己就是 role=button，否则整卡拖不动）');
-  // 迷你卡只有一百多像素高，拖动入口必须挂在整张卡上（el），不能只挂标题带。
-  ok(/el\.addEventListener\('pointerdown', onStageDragDown\)/.test(QINGFENG_JS)
-    && !/head\.addEventListener\('pointerdown'/.test(QINGFENG_JS),
-    '拖动入口挂在整张迷你卡上（不只标题带，否则难抓）');
-  // .stage 是业务节点（切皮肤不重建），卸载必须把整卡上的 pointerdown 摘掉，
-  // 否则切走再切回来会叠加第二份拖动逻辑。
-  ok(/stageDrag\.el\.removeEventListener\('pointerdown', onStageDragDown\)/.test(QINGFENG_JS),
-    '卸载时摘掉整卡上的 pointerdown（业务节点不重建，会叠加）');
-
-  // 7d-2) 迷你播放器小卡：封面 + 歌曲信息 + 当前句歌词，高度按内容收。
-  //     改前 232×636（歌词 flex:1 把纵向撑满），盖住曲库右列 —— 光收宽度治不了。
-  //     2026-10-06 起卡不再自带进度与播放控制：默认停在视口左下角、与播放
-  //     胶囊同一水平带，按钮重复一份纯属噪音；多出来的是当前句歌词（放不下转跑马灯）。
-  ok(stageRule && /grid-template-areas:/.test(stageRule[1]) && /"lyric/.test(stageRule[1]),
-    '迷你卡用 grid 命名区域重排，且给当前句歌词留了 lyric 区');
-  ok(stageRule && /display:\s*grid/.test(stageRule[1]),
-    '迷你卡是 grid 布局（横排封面+信息，而不是竖排大卡）');
-  const qfMiniHide = QINGFENG.match(
-    /\[data-skin="qingfeng"\] \.stage-modes,([\s\S]*?)\{([^}]*)\}/);
-  ok(qfMiniHide && /display:\s*none/.test(qfMiniHide[2])
-    && /\.stage-lyrics/.test(qfMiniHide[1]) && /\.spectrum/.test(qfMiniHide[1])
-    && /\.stage-ripple/.test(qfMiniHide[1]) && /\.stage-progress/.test(qfMiniHide[1]),
-    '非核心块（模式/队列/频谱/歌词/进度/装饰层）在清风整排摘掉');
-  // 「打开舞台」是业务节点 #stage-fs（与顶栏那颗、F 键同一条路）。清风把顶栏图标
-  // 收进了左上角那颗设置按钮，再摘掉它，沉浸声场就只剩没人知道的快捷键了。
-  ok(qfMiniHide && qfMiniHide[1].indexOf('.stage-head-fs') < 0,
-    '迷你卡留着「打开舞台」（摘掉顶栏图标后它是沉浸声场的可见入口）');
-  ok(/\[data-skin="qingfeng"\] \.stage-head-fs\s*\{[^}]*margin-left:\s*auto/.test(QINGFENG),
-    '舞台按钮与关闭一起靠右（把手是 space-between，不推会摊在行中间）');
-  ok(/function buildStageMini\(/.test(QINGFENG_JS)
-    && /qf-mini-lyric/.test(QINGFENG_JS) && /qf-mini-close/.test(QINGFENG_JS),
-    '迷你卡注入当前句歌词行与关闭（不再自带播放控制行）');
-  ok(QINGFENG_JS.indexOf('qf-mini-ctrl') < 0 && QINGFENG.indexOf('qf-mini-ctrl') < 0
-    && QINGFENG_JS.indexOf('qf-mini-btn-primary') < 0,
-    '迷你卡不再自带播放控制行（胶囊就在旁边，按钮不重复一份）');
-  ok(/function tickMiniLyric\(/.test(QINGFENG_JS)
-    && /Stage\.lyrics\(\)/.test(QINGFENG_JS) && /Stage\.position\(\)/.test(QINGFENG_JS),
-    '当前句歌词读 Stage.lyrics()/Stage.position()（与全屏歌词同一份数据，不读隐藏面板的 DOM）');
-  ok(/qf-lyric-marquee/.test(QINGFENG) && /is-scrolling/.test(QINGFENG)
-    && /--qf-lyric-dur/.test(QINGFENG_JS),
-    '歌词放不下转跑马灯（JS 量宽写时长，CSS 两份拷贝无缝循环）');
-  // 第二份拷贝是跑马灯的循环垫片，不滚时必须收掉：两份并排渲染，卡片又装不
-  // 下两倍宽，右缘就露出重复半句 —— 用户读成「同一句唱两遍」。
-  // 判据要的是**默认那条**（不带 .is-scrolling 前缀），只在 reduced-motion
-  // 分支里藏第二份盖不住常规路径。
-  const lyricDup = QINGFENG.match(
-    /\[data-skin="qingfeng"\] \.qf-mini-lyric-inner span \+ span\s*\{([^}]*)\}/);
-  ok(lyricDup && /display:\s*none/.test(lyricDup[1]),
-    '不滚动时歌词第二份拷贝收掉（默认规则，不是只写在减动效分支里）');
-  ok(/\[data-skin="qingfeng"\] \.qf-mini-lyric\.is-scrolling \.qf-mini-lyric-inner span \+ span\s*\{[^}]*display:/.test(QINGFENG),
-    '滚动时才把第二份拷贝放出来喂给无缝循环');
-  // 播放路径只有一条：迷你卡没有按钮，也不允许自己发播放 HTTP。
-  const miniFns = (QINGFENG_JS.match(/function buildStageMini\([\s\S]*?\n  \}/) || [''])[0]
-    + (QINGFENG_JS.match(/function lyricLineText\([\s\S]*?\n  \}/) || [''])[0]
-    + (QINGFENG_JS.match(/function tickMiniLyric\([\s\S]*?\n  \}/) || [''])[0];
-  ok(miniFns.indexOf('fetch(') < 0 && miniFns.indexOf("post('/v1/") < 0,
-    '迷你卡不自己发 HTTP（播放落点只有胶囊/队列一条路）');
-  ok(/var MINI_CLOSED_KEY\s*=/.test(QINGFENG_JS)
-    && /localStorage\.setItem\(\s*MINI_CLOSED_KEY/.test(QINGFENG_JS)
-    && /localStorage\.getItem\(\s*MINI_CLOSED_KEY/.test(QINGFENG_JS),
-    '迷你卡收起状态有专用 key 且会写会读');
-  ok(/classList\.toggle\('qf-mini-closed'/.test(QINGFENG_JS),
-    '收起用类不用 hidden（.stage 被钉成 grid，特异性压过 UA 的 [hidden]）');
-  ok(/function onMiniTrack\(/.test(QINGFENG_JS)
-    && /addEventListener\('playback:track', mini\.trackHandler\)/.test(QINGFENG_JS)
-    && /removeEventListener\('playback:track', mini\.trackHandler\)/.test(QINGFENG_JS),
-    '换曲把收起的迷你卡放回来，且卸载时摘掉监听');
-  // 切走皮肤时 .stage 回栅格布局：清风写的内联 left/top 必须清掉。
-  ok(/stageDrag\.el\.style\.left = ''/.test(QINGFENG_JS)
-    && /stageDrag\.el\.style\.top = ''/.test(QINGFENG_JS),
-    '卸载时清掉内联定位（带到别的皮肤上就是一份脏样式）');
-  // 位置持久化：写与读都要有，且**用同一个 key**。
-  // 判据拆成「key 声明 / 写 / 读」三段而不是「setItem(key…) 出现在同一行」——
-  // 写成 `localStorage.setItem(\n  STAGE_POS_KEY, …)`（换行）或
-  // `var k = STAGE_POS_KEY; setItem(k, …)` 都过，跨行匹配会漏。
-  ok(/var STAGE_POS_KEY\s*=/.test(QINGFENG_JS), '侧卡位置有专用 storage key');
-  ok(/localStorage\.setItem\(\s*STAGE_POS_KEY/.test(QINGFENG_JS), '侧卡位置会写进 localStorage');
-  ok(/localStorage\.getItem\(\s*STAGE_POS_KEY/.test(QINGFENG_JS), '侧卡位置刷新后会读回来');
-  // 范围约束：clampStage 必须在，且真的被 applyStagePos 用上
-  //（定义了但没人调 = 有约束函数但没约束效果）。
-  ok(/function clampStage\(/.test(QINGFENG_JS) && /function stageBounds\(/.test(QINGFENG_JS),
-    '侧卡有范围约束的边界计算');
-  ok(/var p = clampStage\(el, x, y\)/.test(QINGFENG_JS),
-    '范围约束被真正应用到位置上（不是定义了没用的空函数）');
-  // 默认停靠点是视口左下角（2026-10-06 从「播放胶囊右缘」改过来）：没记忆位置
-  // 就停靠（挂载时与 resize 时），有记忆才恢复原位。挂载路径要等皮肤 CSS 生效
-  // 再量宽高（restoreOrDock），否则量到栅格旧布局，停出来的位置是歪的。
-  ok(/function dockStage\(/.test(QINGFENG_JS) && /function restoreOrDock\(/.test(QINGFENG_JS)
-    && /restoreOrDock\(saved, 240\)/.test(QINGFENG_JS)
-    && /if \(!readStagePos\(\)\) \{ dockStage\(\); return; \}/.test(QINGFENG_JS),
-    '迷你卡没记忆位置时默认停靠（等皮肤布局生效再量），resize 重新停靠，有记忆才恢复原位');
-  // 落点本身：左缘贴最小留白、纵向对齐播放胶囊那条带，且必须过 clampStage ——
-  // 卡片就停在下缘带上，不约束的话窄视口会被胶囊压住。胶囊中心要**实测矩形**：
-  // .bar 除了 bottom 还继承了 margin，照公式算低十几像素（旧版横向停靠踩过同一条）。
-  const dockFn = stripJsComments(
-    (QINGFENG_JS.match(/function dockStage\([\s\S]*?\n  \}/) || [''])[0]);
-  ok(/clampStage\(el, STAGE_MARGIN,/.test(dockFn) && /window\.innerHeight\s*-/.test(dockFn)
-    && /getBoundingClientRect\(\)/.test(dockFn),
-    '迷你卡默认停靠视口左下角（左缘留白 + 胶囊中心实测 + 边界约束）');
-  ok(stageRule && /left:\s*12px/.test(stageRule[1]) && /bottom:\s*12px/.test(stageRule[1]),
-    'CSS 兜底位同样锚左下角（JS 没跑起来时不会跳回右上）');
-  ok(/function pushOutFloaters\(/.test(QINGFENG_JS) && /pushOutFloaters\(p, w, h\)/.test(QINGFENG_JS),
-    '拖动时对播放胶囊/头像胶囊做矩形避让（推到其上缘之外，不封死下缘）');
-  // 歌词行出现/消失会让卡片变高，而停靠写的是 top：不重新停靠的话，默认位比
-  // 胶囊那条带低半截（浏览器实测差 20px）。有记忆位时不能观察 —— 位置归用户。
-  ok(/function watchStageSize\(/.test(QINGFENG_JS)
-    && /new ResizeObserver\(function \(\) \{ if \(!readStagePos\(\)\) dockStage\(\); \}\)/.test(QINGFENG_JS)
-    && /stageDrag\.ro = watchStageSize\(el\)/.test(QINGFENG_JS)
-    && /stageDrag\.ro\.disconnect\(\)/.test(QINGFENG_JS),
-    '没记忆位时卡片高度一变就重新停靠（有记忆不重停，卸载断开观察）');
-  // 「动了才记位置」：点一下把手（没拖）不该覆盖用户之前摆好的位置。
-  ok(/stageDrag\.moved/.test(QINGFENG_JS) && /if \(stageDrag\.moved/.test(QINGFENG_JS),
-    '只有真的拖过才持久化位置（点一下把手不覆盖）');
-  // 卸载必须摘干净：切到别的皮肤后 document 上不能还挂着 pointermove。
-  ok(/removeEventListener\('pointermove', stageDragHandlers\.move\)/.test(QINGFENG_JS)
-    && /removeEventListener\('pointerup', stageDragHandlers\.up\)/.test(QINGFENG_JS),
-    '卸载时摘掉 document 上的 pointer 监听（切皮肤后不留拖动残影）');
-  // 侧卡变小后，「曲名/歌手」那一格必须真的拿到宽度。
-  const trackRule = QINGFENG.match(/\[data-skin="qingfeng"\] \.bar-summary\s*\{([^}]*)\}/);
-  ok(trackRule && /flex:\s*1 1 \d+px/.test(trackRule[1]),
-    '播放条曲名格有确定 flex-basis（否则被进度条压到 0 宽）',
-    trackRule ? (trackRule[1].match(/flex:[^;]+/) || [''])[0].trim() : 'no rule');
-
-  // 7e) 顶部胶囊导航的选中态：滑块与文字必须都能看见。
-  //     原来写 `background: var(--surface-hi)` —— 那个令牌的值是
-  //     `inset 0 1px 0 rgba(255,255,255,.055)`，是给 box-shadow 用的内高光，
-  //     当颜色解析必然失败、滑块变透明，配上的 --accent-ink（#0A0A0A 近黑）
-  //     就压在深色胶囊上，文字彻底读不出来。
-  //
-  //     滑块**直接画在按钮身上**，不再用 ::before 叠一层：按钮里只有
-  //     `textContent` 写的裸文本节点，`.is-active > *` 匹配不到东西，文字就没有
-  //     z-index，而 z-index:0 的定位伪元素绘制顺序排在行内内容之上 ——
-  //     字已经是 #0A0A0A 了，仍被浅色滑块盖成一个空白格（2026-10-06 实测）。
-  ok(!/qf-nav-item\.is-active::before/.test(QINGFENG),
-    '导航选中态不用伪元素叠层（裸文本节点没有 z-index，会被盖成空白格）');
-  ok(!/qf-nav-item\.is-active\s*>\s*\*/.test(QINGFENG),
-    '导航选中态不靠 `> *` 提层（按钮里是裸文本节点，匹配不到任何东西）');
-  const navActive = QINGFENG.match(/\[data-skin="qingfeng"\] \.qf-nav-item\.is-active\s*\{([^}]*)\}/);
-  ok(navActive && /background:\s*color-mix/.test(navActive[1]),
-    '导航选中态滑块用真颜色（不能拿 box-shadow 内高光当 background）',
-    navActive ? (navActive[1].match(/background:[^;]+/) || [''])[0].trim() : 'no rule');
-  ok(navActive && !/--surface-hi/.test(navActive[1]),
-    '导航选中态不再引用 --surface-hi（那是 box-shadow 值，当颜色必失效）');
-  ok(navActive && /color:\s*var\(--accent-ink\)/.test(navActive[1]),
-    '导航选中态文字是深色（浅底 + 深字是配对的，换一个要换另一个）',
-    navActive ? (navActive[1].match(/color:[^;]+/) || [''])[0].trim() : 'no rule');
-  // 滑块必须**以文字色为主**混，而不是以胶囊底色为主混。
-  // --skin-surface 实测解析成 rgb(18,20,28,.78)（半透明深色），拿它往白里混
-  // 14% 出来是 rgb(55,57,64) 的深灰 —— 配 --accent-ink（#0A0A0A 近黑）
-  // 几乎同色，选中项还是读不出来（实测截图里那格“本地”隐进背景）。
-  // 判据：color-mix 的**第一个**参数得是 --text（占比 ≥60%）。
-  const navBg = navActive ? (navActive[1].match(/background:\s*color-mix\([^;]+/) || [''])[0] : '';
-  const navMix = navBg.match(/color-mix\(in srgb,\s*var\((--[\w-]+)\)\s+(\d+)%/);
-  ok(!!navMix && navMix[1] === '--text' && parseInt(navMix[2], 10) >= 60,
-    '选中态滑块以文字色为主混（深底色混不出承得住近黑字的亮度）',
-    navBg.trim() || 'no rule');
-
-  const progRule = QINGFENG.match(/\[data-skin="qingfeng"\] \.bar-progress\s*\{([^}]*)\}/);
-  ok(progRule && /min-width:\s*(1[2-9]\d|\d{3})px/.test(progRule[1]),
-    '进度条有 min-width 下限（否则窄胶囊里先被压没）',
-    progRule ? (progRule[1].match(/min-width:[^;]+/) || [''])[0].trim() : 'no rule');
-  // 8) 分类表：认领全部设置分组，认领不到的落进「其它」。
-  const table = QINGFENG_JS.match(/var SET_SECTIONS = \[[\s\S]*?\n  \];/);
-  ok(!!table, '声明了设置分类表 SET_SECTIONS');
-  const titles = [...HTML.matchAll(/<h2 class="set-title">([^<]+)<\/h2>/g)].map((m) => m[1].trim());
-  const tableBody = table ? table[0] : '';
-  const missing = titles.filter((t) => !tableBody.includes(`'${t}'`));
-  ok(missing.length === 0,
-    `分类表认领了全部设置分组（缺：${missing.join(' ') || '无'}）`);
-  ok(/id: 'appearance'[\s\S]*id: 'playback'/.test(tableBody)
-    && /id: 'library'/.test(tableBody) && /id: 'advanced'/.test(tableBody),
-    '一级分类至少含外观 / 播放 / 数据与在线 / 高级四类');
-  ok(/leftovers/.test(QINGFENG_JS) && /id: 'misc'/.test(QINGFENG_JS),
-    '认领不到的分组落进「其它」（业务加设置时是「多一项」而不是「不见了」）');
-  ok(/querySelector\('\.set-title'\)/.test(QINGFENG_JS),
-    '分组靠 .set-title 文案认领（不往业务 HTML 里塞属性）');
-  // claimGroups 是模块级函数，不是 sheet 的方法。写成 sheet.claimGroups()
-  // 会 TypeError 并让整个 mount() 中途静默中断 —— 页面上表现为「主菜单在、
-  // 海报墙和浮层都不存在」，不报任何错。
-  // qfCode 见函数开头（剥注释的源码，供全函数复用）。
-  // 认领必须走「文案 → 语义 key」这一层间接。byKey 的键是 .set-title 文案
-  // （"界面皮肤"、"外观"…），SET_SECTIONS.items[0] 是语义 key（'skin'、'look'…），
-  // 两套命名空间。直接 byKey[item[0]] 等于拿语义 key 查文案表，永远查不到 ——
-  // 后果是全部分组掉进 leftovers 变成 'x界面皮肤' 这样的 key，
-  // 打开浮层时 entryGroup(初始 key) 返回 null，右栏整栏空白。
-  // 症状极隐蔽：左栏条目能点能切（点击路径两边都错、但一致），
-  // 只有「打开时的初始分类」会错，不报错、不崩。
-  ok(/item\[1\] === title/.test(qfCode) && /byKey\[found\.key\]/.test(qfCode),
-    '认领走「文案 → 语义 key」的间接（byKey 用语义 key 存，不是文案）');
-  // 打开设置有两条路径（rail 的程序化点击 / 左上角那颗按钮），只有一条补了
-  // reflow()，而摘 hidden 的 syncSettingsVisibility() 只挂在 reflowInner() 里 ——
-  // 于是走按钮进来时右栏一片空白（视图搬进来了却还带着 hidden）。
-  // 所以「摘 hidden」这件事本身必须由 openSettingsSheet 负责，不能外包给调用方。
-  // 这条症状与上面「认领失败」一模一样（右栏空、左栏能点），但根因完全不同。
-  ok(/function openSettingsSheet[\s\S]{0,2000}?if \(sheet\.viewEl\) sheet\.viewEl\.hidden = false;/.test(qfCode),
-    'openSettingsSheet 自己摘设置视图的 hidden（不依赖调用方调 reflow）');
-  ok(/function claimGroups\(\)/.test(qfCode), 'claimGroups 是模块级函数');
-  ok(!/sheet\.claimGroups\s*\(/.test(qfCode),
-    '不写成 sheet.claimGroups()（那会 TypeError 中断整个挂载，且页面无报错）');
-  // claimGroups 读 sheet.pane（relocate 的落点），必须在 sheet 字段赋值齐之后调
-  const buildSheet = qfCode.match(/function buildSettingsSheet\(\)[\s\S]*?\n  \}\n/);
-  ok(buildSheet && buildSheet[0].indexOf('sheet.pane = pane')
-    < buildSheet[0].indexOf('claimGroups();'),
-  'claimGroups() 在 sheet.pane 赋值之后调用（否则搬进空落点）');
-  // 9) 分组的显隐是皮肤加的，卸载时必须全部摘掉，否则切回其它皮肤时
-  //    业务节点身上还留着 hidden，表现为「设置里其它项都没了」，极难定位。
-  //    注意这两个方向是**两件事**、两个函数：
-  //      showAll —— 卸载还原（hidden = false）
-  //      hideAll —— 切分类时先全藏（hidden = true），紧跟着一行把目标组露出来。
-  //    之前只有一个 releaseGroups 且做的是「全显」，于是切分类时右栏把
-  //    13 个分组从上到下全堆在一起：左栏选中项对、右栏标题对，只有内容错。
-  ok(/function showAll/.test(QINGFENG_JS)
-    && /if \(entry\.group\) entry\.group\.hidden = false/.test(QINGFENG_JS),
-    '卸载时把全部分组的 hidden 摘掉（切回其它皮肤设置项完整）');
-  ok(/function hideAll/.test(QINGFENG_JS)
-    && /if \(entry\.group\) entry\.group\.hidden = true/.test(QINGFENG_JS),
-    '切分类时先把全部分组收起来（否则右栏会堆出全部 13 个分组）');
-  ok(/hideAll\(\);\s*\n\s*var g = entryGroup/.test(QINGFENG_JS),
-    'hideAll 之后紧跟着露出目标组');
-  ok(!/relocate\(group/.test(QINGFENG_JS) && !/relocate\(entry\.group/.test(QINGFENG_JS),
-    '分组节点没有进 moves（没有第二套锚点要维护）');
-  ok(/showAll\(\);\s*\n\s*restoreMoves\(\);/.test(QINGFENG_JS),
-    'showAll 在 restoreMoves 之前（先摘 hidden 再搬回原位）');
-
-  // 10) hidden 归属：设置视图的 hidden 有两条写入路径（浮层自己 + app.js 的
-  //     setView）。开着或退场期间必须以浮层为准。
-  const sync = QINGFENG_JS.match(/function syncSettingsVisibility\(\)[\s\S]{0,520}?\n  \}/);
-  ok(sync && /sheet\.open \|\| sheet\.closing/.test(sync[0])
-    && /if \(sheet\.viewEl\.hidden\) sheet\.viewEl\.hidden = false;/.test(sync[0]),
-    '浮层开着/退场中，hidden 以浮层为准并纠正回来');
-  ok(sync && /else if \(!sheet\.viewEl\.hidden\)\s*\{\s*\n?\s*sheet\.viewEl\.hidden = true;/.test(sync[0]),
-    '浮层关闭后把设置视图收回隐藏（否则中栏留一片空白）');
-  ok(/observer\.observe\(sheet\.viewEl,/.test(QINGFENG_JS)
-    && /attributeFilter: \['hidden'\]/.test(QINGFENG_JS),
-    '设置视图单独 observe（搬出中栏后仍能纠正 hidden）');
-  ok(/if \(inReflow\) return;/.test(QINGFENG_JS),
-    'reflow 有重入保护（观察器里纠正 hidden 不会自激）');
-
-  // 11) 持久化：记住的分类失效时回落第一类，不空屏。
-  ok(/SECTION_KEY = 'vmusic\.qf-set-section'/.test(QINGFENG_JS), '选中分类持久化到 localStorage');
-  ok(/if \(!sheet\.entries\.some\(function \(e\) \{ return e\.key === initial; \}\)\) initial = firstKey\(\);/.test(QINGFENG_JS),
-    '记住的分类已不存在时回落到第一类（不空屏）');
-
-  // 12) CSS：两栏 + 左栏自己裁切（缺 min-height:0 会把浮层顶出视口）。
-  ok(/\[data-skin="qingfeng"\] \.qf-set-layout\s*\{[^}]*display:\s*flex[^}]*\}/.test(QINGFENG),
-    '.qf-set-layout 是横向两栏 flex');
-  ok(/\[data-skin="qingfeng"\] \.qf-set-nav\s*\{[^}]*min-height:\s*0[^}]*overflow-y:\s*auto/.test(QINGFENG),
-    '左栏 min-height:0 + 自己裁切（不会把浮层顶出视口）');
-  ok(/\[data-skin="qingfeng"\] \.qf-set-pane\s*\{[^}]*min-width:\s*0/.test(QINGFENG),
-    '右栏 min-width:0（宽表单行不会把左栏挤没）');
-  ok(/@media \(max-width: 720px\)[\s\S]{0,2400}?\.qf-set-layout|@media \(max-width: 720px\)[\s\S]{0,2400}?\.qf-set-nav\s*\{[^}]*flex-direction:\s*row/.test(QINGFENG),
-    '窄屏两栏改竖排（左栏收成横向条）');
-  ok(/\[data-skin="qingfeng"\] \.qf-set-subitem\.is-active::before[\s\S]{0,200}?var\(--brand\)/.test(QINGFENG),
-    '二级项选中竖条走 --brand（「正在生效」的语义色）');
-  ok(/\[data-skin="qingfeng"\] \.qf-set-subitem\.is-active\s*\{[^}]*var\(--text\)/.test(QINGFENG),
-    '二级项选中字色走 --text（当前选中项的语义色，不用 --accent）');
-
-  // 13) 开关与分段控件：folia 的组件形态。
-  ok(/\[data-skin="qingfeng"\] \.switch\[aria-checked="true"\]/.test(QINGFENG),
-    '设置开关有开启态样式');
-  ok(/\[data-skin="qingfeng"\] \.seg button\[aria-pressed="true"\]/.test(QINGFENG),
-    '分段控件有选中态样式');
-}
-
-function checkQingfengWiring() {
-  section('清风：接线与加载顺序');
-
-  ok(/href="skins\/skin\.qingfeng\.css"[^>]*data-skin-css="qingfeng"/.test(HTML),
-    'skin.qingfeng.css 引了进来并带上 data-skin-css');
-  ok(/data-skin-css="qingfeng"[^>]*disabled/.test(HTML), 'skin.qingfeng.css 默认 disabled');
-  // 皮肤 CSS 必须排在 style.css 之后：[data-skin=x] 与 :root 同为 (0,1,0)，
-  // 靠源码顺序决胜，排错了 --r-* 之类的覆盖不生效（不报错，只是没效果）。
-  ok(HTML.indexOf('skins/skin.qingfeng.css') > HTML.indexOf('href="style.css"'),
-    'skin.qingfeng.css 排在 style.css 之后（覆盖要靠源码顺序决胜）');
-
-  const qfJsAt = HTML.indexOf('src="skins/skin.qingfeng.js"');
-  ok(qfJsAt > 0, 'index.html 引入了 skin.qingfeng.js');
-  ok(qfJsAt > HTML.indexOf('src="skins/skins.js"'),
-    'skin.qingfeng.js 排在 skins.js 之后（要登记生命周期）');
-  ok(qfJsAt < HTML.indexOf('src="app.js"'),
-    'skin.qingfeng.js 排在 app.js 之前');
-
-  ok(/edition_ui!\("skins\/skin\.qingfeng\.css"\)/.test(MAIN_RS),
-    'skin.qingfeng.css 编进二进制');
-  ok(/edition_ui!\("skins\/skin\.qingfeng\.js"\)/.test(MAIN_RS),
-    'skin.qingfeng.js 编进二进制');
-  ok(MAIN_RS.includes('/skins/skin.qingfeng.css'), 'main.rs 注册了 /skins/skin.qingfeng.css 路由');
-  ok(MAIN_RS.includes('/skins/skin.qingfeng.js'), 'main.rs 注册了 /skins/skin.qingfeng.js 路由');
-
-  // 重编排层的挂载机制：不主动 hook 业务代码，挂在 skin:changed 上。
-  ok(/Skins\.registerLifecycle\(SKIN_ID, \{ mount: mount, unmount: unmount \}\)/.test(QINGFENG_JS),
-    '重编排层向 Skins 注册生命周期，由宿主排序挂卸载');
-  ok(/qf-anchor/.test(QINGFENG_JS), '搬运节点带锚点（切走皮肤可还原）');
-  ok(/MutationObserver/.test(QINGFENG_JS), '视图联动用 MutationObserver');
-  ok(/function unmount/.test(QINGFENG_JS) && /removeBuilt\(\)/.test(QINGFENG_JS),
-    '卸载时拆掉自建节点');
-  ok(!/addEventListener\('skin:changed'/.test(QINGFENG_JS),
-    '挂卸载不再依赖常驻事件监听器的注册顺序');
-
-  // 作用域：海报墙与设置浮层只属于清风，别漏进业务 HTML。
-  ok(!/qf-nav|qf-lattice|qf-modal|qf-poster/.test(HTML),
-    '业务 HTML 不内置清风的结构（皮肤自持，切走即消失）');
-  ok(!/qf-nav|qf-lattice|qf-modal|qf-poster/.test(LIUNIAN),
-    '其它皮肤不引入清风的结构');
-}
-
-// ---------------------------------------------------------------------------
-
-/// 换肤后中栏必须有可见视图 + 播放条显隐不许卡死。
-///
-/// 两条都是「不报错、不崩、不少元素，只是界面不对」的类型，
-/// 契约脚本钉得住的是**因果链上的关键环节**，真实几何仍靠浏览器实测。
-///
-/// 1) 换肤时 state.view 停在 'settings'：用户最常见的路径就是「在设置页里
-///    点皮肤」（皮肤列表就在设置页里）。各皮肤对设置视图的处理完全不同 ——
-///    经典系把它当中栏普通视图，流年/清风把它**搬进自己的浮层**并置
-///    hidden。于是换过去之后中栏一个可见视图都没有（首页空白），
-///    或者干脆停在设置页。修法是 app.js 订阅 Skins.onChange 统一回首页。
-///
-/// 2) **启动期那次广播必须挡住**（2026-10-06 踩到，钉在这里防复发）。
-///    `Skins.init()` 自己也会广播 skin:changed，而订阅排在它之前 ——
-///    那次广播必然先到，此时 `Daily.bind()` 还没跑。`setView('library')`
-///    → `Daily.load()` → `render()` 读 `H.ui` 抛错，异常正好打断在
-///    `load()` 发请求那两行**之前**：busy 置上了、请求一个没发。
-///    之后每次 load 都撞 `if (loading && !force) return`，首页永远空白，
-///    而独立页 DailyView 是另一套状态、照常有歌 —— 「独立页有、首页没有」
-///    正是这个 bug 的指纹。所以判据要从「函数体里有 setView」升级为
-///    「有启动期闸门 + 有补跑入口」。
-function checkSkinSwitchViewHandoff() {
-  section('换肤：设置页切皮肤后落到首页，不留空白中栏');
-
-  // 判据从 setView('library') 改成 setView(defaultView())：
-  // 默认视图现在是"在线曲库"（需求：所有皮肤默认展示在线曲库数据）。
-  // 真正要钉的是「收尾动作只有一处、统一走 defaultView()」这件事，
-  // 不是钉住哪个 id —— 以后再改默认值时这条断言不该跟着红。
-  // 恢复落点还必须显式跳过桌面检测：保存的默认视图可能是 settings。
-  ok(/Skins\.onChange\(onSkinChangedForViews\)/.test(APP)
-    && /function onSkinChangedForViews\(\)\s*\{[\s\S]{0,400}?setView\(defaultView\(\), \{ skipDesktopDetection: true \}\);/.test(APP),
-    'app.js 订阅换肤并统一回首页（收尾动作只有一处，不靠各条调用路径记得调）');
-  // 启动期闸门 + 补跑：两处都要有，缺一个就退回「首页永久空白」。
-  ok(/if \(!dailyStripBound\)\s*\{[\s\S]{0,120}?pendingSkinViewHandoff = true;[\s\S]{0,80}?return;/.test(APP),
-    '启动期的那次换肤广播被闸门挡住（不早于 Daily.bind()）');
-  ok(/function bindDailyStrip\(\)\s*\{[\s\S]{0,200}?dailyStripBound = true;[\s\S]{0,200}?setView\(defaultView\(\), \{ skipDesktopDetection: true \}\);/.test(APP),
-    'bind 之后有补跑入口 bindDailyStrip()');
-  ok(/Daily\.bind\(favHost\);[\s\S]{0,200}?bindDailyStrip\(\);/.test(APP),
-    'bindDailyStrip() 排在 Daily.bind() 之后（闸门由 bind 打开）');
-  // 变量声明必须早于函数体执行：函数声明会提升，但 var 赋值不会。
-  // 声明写在 onSkinChangedForViews 之后的话，启动期读它会撞 TDZ。
-  ok(APP.indexOf('var dailyStripBound') < APP.indexOf('function onSkinChangedForViews()')
-    && APP.indexOf('var pendingSkinViewHandoff') < APP.indexOf('function onSkinChangedForViews()'),
-    '两个闸门变量声明在 onSkinChangedForViews 之前（启动期不撞 TDZ）');
-  // 订阅仍要排在 init 之前（init() 会 apply 已存的选择并广播），但**这次
-  // 收到之后不能直接 setView** —— 那正是本条 bug 的成因。两条合起来读：
-  // 「排在前面」+「有闸门」= 启动那次广播被记账，bind 后补跑。
-  //
-  // 定位要用 `window.Skins.` 前缀：函数名 `Skins.init()` 在别处的**注释**里
-  // 也出现过（讲为什么要有启动闸门的那段），裸 indexOf 会撞上注释，
-  // 判出「订阅在 init 之后」的假象。
-  const onChangeAt = APP.indexOf('window.Skins.onChange(onSkinChangedForViews)');
-  const initAt = APP.indexOf('window.Skins.init()');
-  ok(onChangeAt > 0 && initAt > 0 && onChangeAt < initAt,
-    '订阅排在 Skins.init() 之前（启动那一次广播会到，但只记账不 setView）',
-    `onChange@${onChangeAt} init@${initAt}`);
-  // 症状侧的反向断言：流年/清风确实会把设置视图搬走并隐藏 ——
-  // 这正是空白中栏的成因，钉住它才不会有人「顺手改成不搬」，
-  // 那样 setView 里的 hidden 语义会与实际可见性脱节。
-  // 只钉「搬进浮层」这个语义，不钉局部变量名（流年叫 pane、清风叫
-  // sheet.pane，钉死名字就成了改名即失败的死断言）。
-  // 空白中栏的成因守卫：两套重编排皮肤都把设置视图装配进各自浮层，
-  // 且都走外壳 attachView 受控装配（R4；锚点搬运只留给布局节点）。
-  ok(/attachView\('settings', pane\)/.test(LIUNIAN_JS)
-    && /attachView\('settings', sheet\.pane\)/.test(QINGFENG_JS),
-    '流年/清风都经外壳受控装配把设置视图搬进浮层（钉住别改回中栏）');
-  ok(/if \(!sheet\.viewEl\.hidden\) sheet\.viewEl\.hidden = true;/.test(LIUNIAN_JS)
-    && /sheet\.viewEl\.hidden = true;/.test(QINGFENG_JS),
-    '浮层关着时设置视图确实被隐藏（换肤对账的就是这个 hidden）');
-}
-
-/// 舞台面板不该长出横向滚动条。
-///
-/// `.stage::before` 是 inset:-30% 的取色光晕（绝对定位），面板一旦
-/// `overflow:auto`，它就把面板撑宽：实测一块 420px 的悬浮舞台面板被撑宽 125px、
-/// 窄栏里被撑宽，底部那条横滚动条就是它。
-/// 基础样式 style.css 的 .stage 本来就是 overflow:hidden，
-/// 皮肤覆盖成 auto 属于覆盖过头。
-///
-/// 同时钉住 #stage-modes 的 min-width:0 —— 窄栏（右栏扣掉 padding
-/// 只剩几十像素）里两颗按钮至少要 111px，不给 min-width:0
-/// 整颗胶囊会顶出面板边界，是横向溢出的第二个来源。
-function checkStageNoHorizontalScroll() {
-  section('舞台面板：没有多余的横向滚动条');
-
-  // **断言必须跑在剥掉注释的源码上。** 我给这两条 overflow 写的说明注释里
-  // 恰好出现了「基础样式 style.css 的 .stage 本来就是 overflow:hidden」这句话
-  // —— 不剥注释的话 `/overflow:\s*hidden/` 会匹配到**注释自己**，无论实际
-  // 写的是什么值都绿。变异测试（把 overflow 改回 auto）当时就是不红的，
-  // 靠这条才发现。
-  const liunianClean = stripCssComments(LIUNIAN);
-  const stageClean = stripCssComments(STAGE_CSS);
-
-  // 取一条规则**整块**（含声明体），花括号配平 ——
-  // 只 match 到 `{` 的话拿到的是选择器本身，声明全在匹配之外。
-  //
-  // 必须要求「选择器前面是行首/换行」：stage.css 里 `.stage-lyrics` 有两处，
-  // 前一处是 `.stage[data-mode="cover"] .stage-lyrics { display: none }` ——
-  // indexOf 会先撞上它，于是「歌词区有 overflow:hidden」永远不成立。
-  // sel 传**正则元字符已转义**的选择器字面量（下面两处含 [ ] . 需要手写）。
-  const rule = (src, selRe) => {
-    const re = new RegExp('(?:^|\\n)\\s*' + selRe + '\\s*\\{');
-    const m = re.exec(src);
-    if (!m) return '';
-    const open = src.indexOf('{', m.index);
-    let depth = 0;
-    for (let j = open; j < src.length; j += 1) {
-      if (src[j] === '{') depth += 1;
-      else if (src[j] === '}') { depth -= 1; if (!depth) return src.slice(m.index, j + 1); }
-    }
-    return '';
-  };
-
-  ok(/overflow:\s*hidden/.test(rule(liunianClean, '\\[data-skin="liunian"\\] \\.stage')),
-    '流年的 .stage 面板不滚（歌词区自己滚）');
-  // 歌词区必须自己有滚动/裁剪能力，否则面板改成 hidden 之后歌词就够不着了。
-  // 注意它不是 overflow-y:auto —— 歌词滚动是 JS 用 translate3d 推
-  // .lyric-track 实现的（用 scrollTop + CSS smooth 会与 transform 打架，
-  // 出现「抖一下又回弹」），所以这里只要求「裁剪 + min-height:0 + flex:1」。
-  const lyricsRule = rule(stageClean, '.stage-lyrics');
-  ok(/overflow:\s*hidden/.test(lyricsRule)
-    && /min-height:\s*0/.test(lyricsRule)
-    && /flex:\s*1/.test(lyricsRule),
-    '歌词区自带裁剪与 flex 占位（面板不滚的前提）');
-  const modes = rule(stageClean, '.stage-modes');
-  ok(!!modes && /min-width:\s*0/.test(modes),
-    '#stage-modes 有 min-width:0（窄栏里能被压缩，不顶破面板）');
-  const mode = rule(stageClean, '.stage-mode');
-  ok(/min-width:\s*0/.test(mode) && /text-overflow:\s*ellipsis/.test(mode),
-    '.stage-mode 可收窄并省略（配合胶囊压缩）');
-}
-
-// ---------------------------------------------------------------------------
-
-function checkLifecycleAndHost() {
-  section('扩展生命周期：有序切换、重复选择、失败还原与通用业务请求');
-  const { sandbox, root, store } = makeSandbox(['a', 'b', 'bad']);
-  const api = sandbox.Skins;
-  const calls = [];
-  let owner = null;
-  function lifecycle(id) {
-    return {
-      mount() { eq(owner, null, '新皮肤挂载前旧皮肤已释放'); owner = id; calls.push('+' + id); },
-      unmount() { eq(owner, id, '卸载的是正在持有节点的皮肤'); owner = null; calls.push('-' + id); }
-    };
-  }
-  ok(api.register({ id: 'a', lifecycle: lifecycle('a') }), '可直接登记带生命周期的新皮肤');
-  ok(api.register({ id: 'b' }), '可先登记描述');
-  ok(api.registerLifecycle('b', lifecycle('b')), '实现可以附着到已登记描述');
-  eq(api.registerLifecycle('b', lifecycle('b')), false, '重复生命周期不覆盖 owner');
-  eq(api.register({ id: 'invalid', lifecycle: { mount() {} } }), false, '拒绝缺少清理钩子的实现');
-  store.set('vmusic.skin', 'b');
-  api.init();
-  api.apply('b');
-  eq(calls.join(','), '+b', '恢复偏好与重复选择只挂载一次');
-  const unsubscribe = api.onChange(() => calls.push('event:' + owner));
-  api.apply('a');
-  eq(calls.slice(-3).join(','), '-b,+a,event:a', '先卸载再挂载，之后广播新布局');
-  unsubscribe();
-  api.apply('b');
-  eq(calls.slice(-2).join(','), '-a,+b', '反向切换与取消订阅生效');
-  api.register({ id: 'bad', lifecycle: {
-    mount() { owner = 'bad'; throw new Error('mount failure'); },
-    unmount() { owner = null; calls.push('-bad'); }
-  } });
-  let failure = null;
-  try { api.apply('bad'); } catch (error) { failure = error.message; }
-  eq(failure, 'mount failure', '挂载错误可见');
-  eq(owner, 'b', '失败后旧皮肤重新取得节点');
-  eq(root.getAttribute('data-skin'), 'b', '失败后 CSS 与皮肤 ID 还原');
-  eq(store.get('vmusic.skin'), 'b', '失败不污染保存的选择');
-
-  // 原皮肤恢复时也可能分配到一半失败；再次离开仍须找到它的清理钩子。
-  const recovery = makeSandbox(['a', 'bad']).sandbox.Skins;
-  let recoveryOwner = null, mounts = 0;
-  recovery.register({ id: 'a', lifecycle: {
-    mount() { recoveryOwner = 'a'; if (++mounts > 1) throw new Error('restore failure'); },
-    unmount() { recoveryOwner = null; }
-  } });
-  recovery.register({ id: 'bad', lifecycle: {
-    mount() { throw new Error('new failure'); }, unmount() {}
-  } });
-  recovery.apply('a');
-  try { recovery.apply('bad'); } catch (error) { failure = error.message; }
-  eq(failure, 'restore failure', '恢复挂载失败不会被静默吞掉');
-  recovery.apply('classic');
-  eq(recoveryOwner, null, '恢复中途失败的 owner 仍能在离开时释放');
-
-  const business = [];
-  Object.assign(sandbox, {
-    state: { queue: ['local-a'], snapshot: { track_id: 'online:test:1' } },
-    queueSnapshot: () => ['queue-snapshot'], viewSnapshot: () => ({ key: 'library' }),
-    playTrack: (id, queue) => business.push(['local', id, queue]),
-    playQueueStep: delta => business.push(['step', delta]),
-    post: url => business.push(['post', url]),
-    togglePlay: () => business.push(['toggle']),
-    loadDiagnostics: () => business.push(['diagnostics']),
-    __loadCacheStats: () => business.push(['cache'])
-  });
-  // 动作门面（skinActions）与 initSkinBridge 一起切片：处理器引用门面常量。
-  const start = APP.indexOf('const skinActions = {');
-  const end = APP.indexOf('\n// 队列快照：', start);
-  vm.runInContext(APP.slice(start, end) + '\ninitSkinBridge();', sandbox);
-  eq(api.request('source-request').source.key, 'library', '快照经真实宿主同步返回');
-  api.request('step-track', { delta: 1 });
-  eq(business[0][1], '/v1/player/next', '在线下一曲复用服务端播放意图');
-  sandbox.state.snapshot.track_id = 'local-a';
-  api.request('step-track', { delta: -1 });
-  eq(business[1][0], 'step', '本地下一曲保留原队列入口');
-  api.request('play-local', { id: 'local-a' });
-  ok(business[2][2] !== sandbox.state.queue, '播放使用队列快照，皮肤不持有业务状态');
-  api.request('settings-enter');
-  eq(business.slice(-1)[0][0], 'diagnostics', '普通设置入口保持原刷新范围');
-  api.request('settings-enter', { sections: ['cache'] });
-  eq(business.slice(-1)[0][0], 'cache', '扩展设置刷新由请求声明，不按皮肤名分支');
-  const disconnect = api.connectHost(() => business.push(['new-host']));
-  disconnect();
-  const before = business.length;
-  api.request('toggle-play');
-  eq(business.length, before, '宿主可清理且不残留旧处理器');
-}
-
-// ---------------------------------------------------------------------------
-// 6g. 黑胶：双卡片 + 唱片拖转 + 窄屏回退
-// ---------------------------------------------------------------------------
-
-function checkHeijiaoSkin() {
-  section('黑胶：颜色字面量同样全禁，且不重定义主题色变量');
-
-  const hjBody = HEIJIAO.replace(/\/\*[\s\S]*?\*\//g, '');
-  const hjHex = hjBody.match(/#[0-9a-fA-F]{3,8}\b/g) || [];
-  const hjRgb = hjBody.match(/\brgba?\(/g) || [];
-  const hjNamed = hjBody.replace(/white-space|grey|gray/g, '')
-    .match(/\b(?:red|blue|green|white|black)\b/g) || [];
-  ok(hjHex.length === 0, `heijiao 没有十六进制颜色${hjHex.length ? '（' + hjHex.join(',') + '）' : ''}`);
-  ok(hjRgb.length === 0, `heijiao 没有 rgb()/rgba()${hjRgb.length ? '（' + hjRgb.join(',') + '）' : ''}`);
-  ok(hjNamed.length === 0, `heijiao 没有颜色关键字${hjNamed.length ? '（' + hjNamed.join(',') + '）' : ''}`);
-  ok(/\bvar\(--/.test(hjBody), 'heijiao 的着色一律走 var(--…)');
-  ok(!/^\s*(--bg|--text|--accent|--muted|--brand|--highlight)\s*:/m.test(hjBody),
-    'heijiao 不重定义主题色变量（配色归 themes.js 管）');
-  // 文字色仍归主题：允许写 color，但值必须引用 token。
-  // （hj-lyric-toggle 是皮肤自造的按钮节点，没有业务样式兜底 ——
-  //   不写 color 它会拿到浏览器默认的按钮文字色，深底上直接看不见。）
-  const hjColors = Array.from(hjBody.matchAll(/(?:^|[\s;}])color\s*:\s*([^;}]+)/g));
-  const hjBadColor = hjColors.filter((m) => !/^\s*var\(--/.test(m[1]));
-  ok(hjBadColor.length === 0,
-    `heijiao 的 color 只能引用主题 token${hjBadColor.length ? '（' + hjBadColor.map((m) => m[1].trim()).join(',') + '）' : ''}`);
-
-  section('黑胶：双卡片骨架（左 1/3 + 右 2/3）与常驻左卡');
-
-  // 壳层 .app 必须是两轨，且左边是封面卡那一轨。
-  ok(/\[data-skin="heijiao"\] \.app\s*\{[^}]*grid-template-columns:[^}]*minmax\(\s*300px\s*,\s*1fr\s*\)[^}]*minmax\(\s*0\s*,\s*2fr\s*\)/s.test(hjBody),
-    '.app 是两轨：左 300px~1fr（封面卡）+ 右 2fr（内容面板）');
-  // ⚠ 这条钉的是 style.css 里 body[data-stage-idle="1"] .app 那条 (0,2,1) 补丁。
-  // 它会把外壳改成「86px + 1fr」，而皮肤基础 .app 是 (0,2,0) 压不过 ——
-  // 症状是"切到黑胶后内容落进一条 86px 窄轨，整块布局错位"，且不报错。
-  ok(/@media \(min-width: 1241px\)[\s\S]*?\[data-skin="heijiao"\] body\[data-stage-idle="1"\] \.app\s*\{[^}]*minmax\(\s*300px\s*,\s*1fr\s*\)/.test(hjBody),
-    '钉死了 body[data-stage-idle] 的窄轨补丁（否则空闲时布局整个塌成一条）');
-  // 舞台在黑胶里是**常驻左卡**，不是可收起的侧栏：那两句 display:none /
-  // display:flex 必须成对出现，缺一条的表现都是"左卡凭空消失或收不起来"。
-  ok(/\[data-skin="heijiao"\] body\[data-stage-idle="1"\] \.stage\s*\{[^}]*display:\s*flex/.test(hjBody),
-    '空闲时左卡仍在（body[data-stage-idle] 不能把舞台 display:none）');
-  // 左卡不能是 fixed 抽屉：style.css 在 ≤1240px 把 .stage 变成 fixed，
-  // 黑胶要让栅格接管定位，继承下来会以 translateX 的姿态撑出横向滚动。
-  ok(/\[data-skin="heijiao"\] \.stage\s*\{[^}]*position:\s*relative/.test(hjBody),
-    '左卡退回常规流（position:relative），不被基础样式的 fixed 抽屉接管');
-
-  section('黑胶：列表卡片化 + 滚动权唯一');
-
-  // 卡片化的判据是 grid-template-areas 出现 —— 行列表靠列轨道数区分，
-  // 卡片靠"区域"排布。两者不能同时存在，否则 .t-album 会落进隐式行
-  //（隐式行没有 gap，症状是专辑名间距偏小，很难一眼看出成因）。
-  ok(/\[data-skin="heijiao"\] \.track\s*\{[^}]*grid-template-areas:[\s\S]*?"art\s+art"/.test(hjBody),
-    '.track 卡片化：封面跨两列排在第一行');
-  ok(/\[data-skin="heijiao"\] \.track \.t-index\s*\{[^}]*display:\s*none/.test(hjBody),
-    '索引列在卡片里摘掉（否则隐式格会在封面与曲名之间插一条空轨道）');
-  // 操作按钮浮到封面角上 → 必须绝对定位，而它的定位基准是 .track。
-  // 基础样式 .track 已是 relative，但皮肤这条同时覆写了它，显式重申更稳。
-  ok(/\[data-skin="heijiao"\] \.track\s*\{[^}]*position:\s*relative/.test(hjBody),
-    '.track 保持定位基准（操作按钮浮在封面角上）');
-  // 定高 flex 列的纪律：滚动容器里的直接子元素一律不可收缩，
-  // 否则浏览器先压扁可收缩项而不产生滚动（低密度单列皮肤栽在这上面）。
-  ok(/\[data-skin="heijiao"\] \.view > \*\s*\{[^}]*flex:\s*none/.test(hjBody),
-    '.view 的直接子元素不可收缩（否则列表被压扁而不是出滚动条）');
-  ok(/\[data-skin="heijiao"\] \.view\s*\{[^}]*overflow-y:\s*auto/.test(hjBody),
-    '滚动权收在 .view 一个容器上');
-  ok(/\[data-skin="heijiao"\] \.lib-list[\s\S]*?overflow:\s*visible/.test(hjBody),
-    '列表体不自滚（避免两层滚动条并排）');
-
-  section('黑胶：队列两档排布（卡片 / 行列表）');
-
-  // 队列从「只有卡片」变成「卡片 + 行列表」两档。判据不是"有没有写列表样式"，
-  // 恰恰相反：列表档必须**没有**皮肤自己的行样式，几何全部交回 style.css 的
-  // 行列表基线 —— 重写一份行几何迟早跟基线漂移，而基线是其余皮肤共用的。
-  const hjGridGroup = hjBody.match(/\[data-skin="heijiao"\] \.lib-list[^{]*\{/);
-  ok(!!hjGridGroup && !/\.q-list/.test(hjGridGroup[0]),
-    '队列容器已从「所有列表都是网格」那一组里拆出来（它不再恒为网格）');
-  ok(/\[data-skin="heijiao"\] \.q-list:not\(\.hj-queue-list\)\s*\{[^}]*display:\s*grid/.test(hjBody),
-    '卡片档：网格只在容器不带 hj-queue-list 时成立');
-  // 「不自滚」这条留在门控之外。基线的 .q-list 是 overflow-y:auto + flex:1，
-  // 跟着整条回退会在黑胶的 .view 里再套一层滚动容器 —— 两层滚动条并排是
-  // 本项目反复出过的体验事故，且**不报错**。
-  ok(/\[data-skin="heijiao"\] \.q-list\s*\{[^}]*overflow:\s*visible[^}]*flex:\s*none/.test(hjBody),
-    '两档都不自滚（滚动权恒在 .view，列表档也不例外）');
-  // 行规则的特异性必须与改造前逐字相同：容器限定要用 :where() 包住（恒为 0）。
-  // 直接串上去会从 (0,2,0) 涨到 (0,4,0)，反超 anime-ui.css / cel-ui.css 那两条
-  // 针对 .q-row 的 (0,2,1) 规则 —— 症状是同一屏里队列卡片的圆角/描边跟曲库
-  // 卡片不一致，而 .track 那边一切正常，最难往特异性上想。
-  ok(/\[data-skin="heijiao"\] :where\(\.q-list:not\(\.hj-queue-list\)\) \.q-row\s*\{[^}]*grid-template-areas/.test(hjBody)
-    && !/\[data-skin="heijiao"\] \.q-list:not\([^)]*\) \.q-row/.test(hjBody)
-    && !/\[data-skin="heijiao"\] \.q-row\s*\{[^}]*grid-template-areas/.test(hjBody),
-    '行规则的容器限定走 :where()（特异性不涨），且卡片几何没有一条是无门控的');
-  ok(/\[data-skin="heijiao"\] :where\(\.q-list:not\(\.hj-queue-list\)\) \.q-row\.playing\s*\{[^}]*border-color/.test(hjBody),
-    '播放高亮的 border-color 也在门控里（列表档没边框，否则行上多一条品牌色横线）');
-  ok(/\.hj-q-views/.test(hjBody), 'CSS 给自造的切换按钮组留了排布');
-
-  // JS 侧：按钮组是皮肤自造节点，必须挂进队列视图的工具行，并在卸载时归还。
-  ok(/querySelector\('#view-queue \.col-tools'\)/.test(HEIJIAO_JS)
-    && /insertBefore\(queueViews/.test(HEIJIAO_JS),
-    '切换按钮挂在队列头部（用户看到队列的地方，不在设置页里）');
-  ok(/vmusic\.heijiao\.queue/.test(HEIJIAO_JS), '排布选择落 localStorage');
-  ok(/setQueueMode\(readStored\(QUEUE_STORE_KEY\), false\)/.test(HEIJIAO_JS),
-    '开机恢复不写盘（无条件写回会把默认档钉死）');
-  const hjQueueUnmount = HEIJIAO_JS.slice(HEIJIAO_JS.indexOf('function unmount('),
-    HEIJIAO_JS.indexOf('window.Skins.registerLifecycle'));
-  ok(/queueViews\.parentNode\.removeChild\(queueViews\)/.test(hjQueueUnmount)
-    && /classList\.remove\(QUEUE_LIST_CLASS\)/.test(hjQueueUnmount),
-    '卸载摘按钮、也摘状态类（#queue-list 是业务节点，类会跨皮肤存活）');
-
-  section('黑胶：唱片拖转的机制（CSS 侧）');
-
-  // 角度只有一个通道：CSS 里那条 disc-spin 必须停掉，否则它与 JS 写的
-  // transform 互相覆盖，表现为"唱片每帧被拽回 0°"。
-  ok(/\[data-skin="heijiao"\] \.disc\s*\{[^}]*animation:\s*none/.test(hjBody),
-    '唱片停掉基础 disc-spin（角度通道归 JS 独占）');
-  ok(/\[data-skin="heijiao"\] \.disc\s*\{[^}]*transform:\s*rotate\(var\(--hj-turn/.test(hjBody),
-    '唱片角度走 --hj-turn 这一个变量');
-  // 「旋转不影响页面滚动」的唯一 CSS 保证。不写 touch-action，移动端在唱片上
-  // 纵向划动会被浏览器的滚动判定抢走（"唱片转不动"）；写 none 则是把页面
-  // 滚动一起禁掉（更糟：用户困在一张唱片里出不来），所以必须是 pan-y。
-  ok(/\[data-skin="heijiao"\] \.disc-wrap\s*\{[^}]*touch-action:\s*pan-y/.test(hjBody),
-    '唱片 touch-action:pan-y（纵向手势留给页面滚动）');
-  ok(/\[data-skin="heijiao"\] \.disc-wrap\s*\{[^}]*cursor:\s*grab/.test(hjBody),
-    '唱片给出 grab 光标（"能拖"先在手形上说一遍）');
-
-  section('黑胶：机箱台面的深度与曲名让位同源');
-
-  // 台面左右已被卡片宽度钉死（1707 下 497px 宽 vs 卡片内容宽 497，再多一像素
-  // 就被 .stage 的 overflow:hidden 裁掉一条边），所以"把底座做大"只有上下可走。
-  // 上下还必须是**同一个值**：上 4% / 下 9% 时唱片明显贴在机箱上沿、下面那条
-  // 前面板厚到像另一件家具（用户圈出来要求"上下等宽"）。
-  // 而向下长必须同时把曲名推开 —— 底板压在歌名上会变成一行脏影。
-  // 两处共用 --skin-deck-band 才算锁死：写成两个数就会漂，漂了的表现要么啃到
-  // 歌名，要么中间凭空多一条空档。
-  ok(/--skin-deck-band:\s*0\.\d+/.test(hjBody), '机箱台面的上下边深是一个令牌');
-  ok(/\.disc-wrap::before\s*\{[^}]*inset:\s*calc\(var\(--skin-deck-band\)[^;]*\)\s+calc\(var\(--skin-deck-overhang\)[^;]*\)\s*;/.test(hjBody),
-    '台面 inset 只写两段（上下共用 --skin-deck-band → 唱片在机箱里上下等宽）');
-  ok(/\.stage-title\s*\{[^}]*margin-top:\s*calc\([^;]*var\(--skin-deck-band\)[^;]*var\(--skin-disc-max\)/.test(hjBody),
-    '曲名让位 = 固定底数 + 同一比例 × 盘面上限（盘面只会比上限小 → 只会多让不会压字）');
-  // 左右外扩与盘面宽度反推必须同值，否则台面被卡片裁边、盘面看着不居中。
-  ok(/\.disc-wrap\s*\{[^}]*width:\s*min\([^;]*var\(--skin-deck-overhang\)[^;]*var\(--skin-disc-max\)/.test(hjBody),
-    '盘面宽度按 --skin-deck-overhang 反推（与台面左右同源）');
-
-  section('黑胶：两块必须显式认领栅格轨道（不能靠源序）');
-
-  // .app 的子元素源序是 rail / column / stage，而本皮肤把 .rail 设成
-  // position:fixed —— fixed 脱离栅格流不占轨道，于是源序第一格归了 .column、
-  // .stage 落进第二格：实测左卡 916px / 右面板 458px，比例整个反过来，
-  // 而页面不报错、卡片照旧渲染，看上去只是"左边那块宽了点"。
-  // 单列皮肤永远碰不到这个 —— 所以这条规则在单列布局里根本不存在，
-  // 照抄它的写法也发现不了。
-  ok(/\[data-skin="heijiao"\] \.stage\s*\{\s*grid-area:\s*1 \/ 1/.test(hjBody),
-    '左卡钉在 (1行,1列)（fixed 的 rail 不占轨道，靠源序会排反）');
-  ok(/\[data-skin="heijiao"\] \.column\s*\{\s*grid-area:\s*1 \/ 2/.test(hjBody),
-    '内容面板钉在 (1行,2列)');
-  // ⚠ 行也必须认领。只钉列的话自动行分配会把 .stage 推到下一行，
-  // 实测 gridTemplateRows 变成 "714px 50px" —— 左卡整块掉到右面板下方，
-  // 中间那道空行就是"上面一大片空白"的真身。
-  ok(!/\[data-skin="heijiao"\] \.(stage|column)\s*\{\s*grid-column:/.test(hjBody),
-    '不用 grid-column 单独认领（行也要一起钉，否则被自动分配推到下一行）');
-  // 行高必须显式给：不给的话由最高那列决定，而 .column 是 flex:0 1 auto
-  // 按内容高，于是整行塌到内容高度（实测 308px），左卡 stretch 后
-  // 内部内容溢出，表现为"左卡掉到页面下方、上方一大片空白"。
-  ok(/\[data-skin="heijiao"\] \.app\s*\{[^}]*grid-template-rows:\s*calc\(100dvh/.test(hjBody),
-    '.app 显式给行高（两列才真的撑满视口，而不是塌到内容高）');
-  // 堆叠断点必须复位：grid-area:auto 才能回到自动放置。
-  ok(/\[data-skin="heijiao"\] \.stage \{ order: -1; grid-area: auto; \}/.test(hjBody),
-    '堆叠态复位 grid-area（1/1 与 1/2 在单列下指同一格，不复位会叠在一起）');
-
-  section('黑胶：定高 flex 列的纪律（左卡不许被压扁）');
-
-  // ⚠ 这条钉的是实测踩到的：基础样式 .stage 的 flex 是 `0 1 auto`（可收缩），
-  // 左卡是栅格子项，内容超高时浏览器先压扁可收缩项而不是让栅格行长高 ——
-  // 实测左卡被压到 356px（内容需要 470px），歌词只剩地板高度；
-  // 更糟的是展开歌词那一刻卡片跟着缩到 291px，"展开后歌词变多"成了"变少"。
-  ok(/\[data-skin="heijiao"\] \.stage\s*\{[^}]*flex:\s*none/.test(hjBody),
-    '左卡 flex:none（可收缩会把整卡连歌词一起压扁）');
-  // 展开态歌词要有下限：flex:1 无地板时余量归零就只剩内容那么高。
-  ok(/body\.hj-lyrics-open \.stage-lyrics\s*\{[^}]*min-height:\s*\d+px/.test(hjBody),
-    '展开态歌词区有高度下限（不写就只剩两行）');
-  // 矮屏要有一条让左卡自身可滚的兜底：唱片按内容长高后可能超出一屏，
-  // 而基础样式是 overflow:hidden —— 内容被静默裁掉，页面不报错。
-  ok(/@media \(max-height: \d+px\)[\s\S]*?\[data-skin="heijiao"\] \.stage\s*\{[^}]*overflow-y:\s*auto/.test(hjBody),
-    '矮屏下左卡自身可滚（flex:none 后按内容长高，内容不该被 overflow:hidden 裁掉）');
-
-  section('黑胶：唱片拖转的机制（JS 侧）');
-
-  ok(/Skins\.registerLifecycle\('heijiao'/.test(HEIJIAO_JS.replace(/SKIN_ID/g, "'heijiao'")),
-    '黑胶向 Skins 注册生命周期');
-  // 只用 Pointer Events。三套分开写是这类交互最常见的 bug 源：
-  // 双写在触屏上触发两次（合成 mouse 事件），三写要处理 pointercancel 后
-  // 触摸流还在继续。
-  ok(!/addEventListener\('mouse|addEventListener\('touch(?!start)/.test(HEIJIAO_JS),
-    '只用 Pointer Events（不混 mouse/touch 监听）');
-  ok(/addEventListener\('pointerdown'/.test(HEIJIAO_JS) &&
-    /addEventListener\('pointermove'/.test(HEIJIAO_JS) &&
-    /addEventListener\('pointerup'/.test(HEIJIAO_JS) &&
-    /addEventListener\('pointercancel'/.test(HEIJIAO_JS),
-    '指针四件套齐全（含 cancel：系统打断时不该留惯性）');
-  // 捕获必须延后到"确认横向"之后：不延后的话纵向滑动会被指针捕获
-  // 劫持，页面滚不动。
-  //
-  // ⚠ 这里必须**函数级**地断言，不能只测「turned = true 附近有没有 capture」：
-  // 写成就近正则时，把 capture 提前到 pointerdown 里**照样能通过** ——
-  // 因为原文件里 turned = true 到 capture 的距离本就在窗口内。
-  // 变异测试（把 setPointerCapture 挪进 onDown）实测不红，说明那条断言
-  // 形同虚设。所以改成数「onDown 函数体内有没有 setPointerCapture」。
-  const hjOnDown = HEIJIAO_JS.slice(
-    HEIJIAO_JS.indexOf('function onDown('),
-    HEIJIAO_JS.indexOf('function onMove('));
-  ok(hjOnDown && hjOnDown.indexOf('setPointerCapture') === -1,
-    'onDown 不捕获指针（捕获会劫持纵向手势，页面滚不动）');
-  const hjOnMove = HEIJIAO_JS.slice(
-    HEIJIAO_JS.indexOf('function onMove('),
-    HEIJIAO_JS.indexOf('function onUp('));
-  ok(hjOnMove && hjOnMove.indexOf('setPointerCapture') > hjOnMove.indexOf('turned = true'),
-    'setPointerCapture 在确认横向（turned）之后才调用');
-  ok(/Math\.abs\(dx\) <= Math\.abs\(dy\)/.test(HEIJIAO_JS),
-    '横向不占优就放行（对角线上判给滚动更安全）');
-  // 惯性用 rAF 指数衰减：写成 CSS transition 会变成"松手后匀速转固定角度"，
-  // 快甩与轻推表现一样。
-  ok(/requestAnimationFrame/.test(HEIJIAO_JS) && /spinVel \*= /.test(HEIJIAO_JS),
-    '惯性走 rAF 指数衰减（不是匀速 transition）');
-  // ⚠ 「起新轮」与「续下一帧」必须分开，且续帧**不能**由 ensureLoop 承担。
-  // tick 开头把 rafId 置 0，于是 ensureLoop 里两种判据都发不出下一帧：
-  //   · 判 `!rafId` → 每帧都判定成"起新轮" → 每帧重置 lastFrame → dt 恒为 0
-  //     → 角度永不推进；
-  //   · 判 `!looping` → 续帧时 looping 仍为 true → 本帧不发下一帧 → 循环在
-  //     第一帧后就静默停住（实测 51 帧里只有第 1 帧真做过积分）。
-  // 两种症状一模一样：循环在跑、速度从 88°/s 衰减到 5°/s、角度一动不动、
-  // 控制台一行错也没有。这个 bug 抓了两轮才对，值得钉死。
-  ok(/var looping = false;/.test(HEIJIAO_JS),
-    'rAF 循环有独立的"本轮进行中"标记');
-  const hjLoop = HEIJIAO_JS.slice(
-    HEIJIAO_JS.indexOf('function ensureLoop('),
-    HEIJIAO_JS.indexOf('function tick('));
-  ok(hjLoop && /if \(needs && !looping\)/.test(hjLoop),
-    'ensureLoop 用 looping 区分起新轮（拿 rafId 判会让 dt 恒为 0）');
-  // "起新轮"那一支的条件里不能出现 rafId。取消分支里用 rafId 是对的
-  // （cancelAnimationFrame 需要句柄），别连它一起禁掉。
-  ok(!/if \(needs && [^{]*rafId/.test(hjLoop),
-    'ensureLoop 起新轮的条件不含 rafId（rafId 在 tick 开头已归零，判它就发不出下一帧）');
-  // 续帧在 tick 末尾显式重排。
-  const hjTick = HEIJIAO_JS.slice(
-    HEIJIAO_JS.indexOf('function tick(now)'),
-    HEIJIAO_JS.indexOf('function onPlayingChange('));
-  ok(hjTick && /if \(looping\) rafId = requestAnimationFrame\(tick\);/.test(hjTick),
-    'tick 末尾显式续帧（交回 ensureLoop 判会在第一帧后静默停住）');
-  // 卸载必须复位 looping：留着 true 的话下次挂载 ensureLoop 永远不成立，
-  // 表现为"切走再切回，唱片再也转不起来"，且不报错。
-  ok(/looping = false;[\s\S]{0,400}?lastFrame = 0;/.test(HEIJIAO_JS),
-    '卸载复位 looping（否则切回皮肤后唱片再也转不动）');
-  // 角度不取模：取模会在跨 360° 那帧产生 359°→0° 插值，唱片"倒转一整圈"。
-  ok(/setProperty\('--hj-turn', angle\.toFixed\(2\)/.test(HEIJIAO_JS),
-    '角度连续写出、不取模（取模会在跨 360° 时倒转一圈）');
-  // 卸载必须摘干净：--hj-turn 是皮肤写的，留着会在别的皮肤里残留一个角度。
-  ok(/removeProperty\('--hj-turn'\)/.test(HEIJIAO_JS),
-    '卸载摘掉 --hj-turn（不留残角给别的皮肤）');
-  ok(/removeEventListener\('pointerdown'/.test(HEIJIAO_JS) &&
-    /removeEventListener\('keydown'/.test(HEIJIAO_JS),
-    '卸载摘掉全部监听（含键盘旋转）');
-  // 键盘可达：唱片是这套皮肤唯一的交互，只绑指针等于纯键盘用户拿到静态图。
-  ok(/onKey/.test(HEIJIAO_JS) && /role', 'slider'/.test(HEIJIAO_JS.replace(/"/g, "'")),
-    '唱片键盘可达（方向键旋转，role=slider 可播报）');
-  // 降低动效：关掉自转与惯性，保留用户主动发起的拖转。
-  ok(/prefers-reduced-motion/.test(HEIJIAO_JS),
-    'JS 侧认 prefers-reduced-motion（关自转与惯性）');
-  ok(/prefers-reduced-motion/.test(hjBody),
-    'CSS 侧也认 prefers-reduced-motion');
-  // 设置浮层与其它皮肤同一份实现。
-  ok(/SkinSettingsSheet/.test(HEIJIAO_JS),
-    '复用共享设置浮层（持久化逻辑与其它皮肤一致）');
-
-  section('黑胶：默认视图是「在线曲库」，且只改「回首页」语义');
-
-  // 需求：所有皮肤的曲库选项卡默认展示在线曲库数据。
-  ok(/var DEFAULT_VIEW = 'online';/.test(APP),
-    '默认视图是 online（本地曲库要填过目录才有内容，开机是空引导卡）');
-  ok(/function defaultView\(\)/.test(APP), '默认视图有统一解析入口（不是各处硬编码 id）');
-  // 显式导航**不能**被改掉：用户点导航里的「曲库」仍然要去本地曲库。
-  // 把 rail 的点击也换成 defaultView() 的表现是「本地曲库再也回不去」。
-  ok(/\{ id: 'view-library', group: '导航'[\s\S]{0,120}?run: \(\) => setView\('library'\) \}/.test(APP),
-    '命令面板「转到：曲库」仍去本地曲库（显式导航不改）');
-  ok(/case '1': setView\('library'\); break;/.test(APP),
-    '快捷键 1 仍去本地曲库（显式导航不改）');
-  // 三处「回首页」都要走 defaultView()，漏一处就是"启动去了在线、
-  // 换肤后又跳回本地"这种前后不一致。
-  // 精确核对恢复选项；其它 setView 动作或任意 options 不能凑足三处。
-  eq((APP.match(/setView\(defaultView\(\), \{ skipDesktopDetection: true \}\);/g) || []).length, 3,
-    '三处回首页调用（启动 / 换肤 / bind 后补跑）统一走 defaultView()');
-  // 兜底判据：默认视图自己被关掉时（nav_visible_online=false）也必须有地方去。
-  ok(/if \(hidCurrent\) setView\(ui\.views\[DEFAULT_VIEW\] \? DEFAULT_VIEW : 'library'\)/.test(APP),
-    '当前视图被隐藏时的兜底会先试默认视图、再退 library（默认视图被关掉时不空白）');
-
-  section('黑胶：响应式断点（宽屏双栏 / 窄屏纵向堆叠）');
-
-  // 堆叠断点必须存在，且 .stage 要显式 order:-1 才能排到内容之上 ——
-  // .app 的子元素源序是 rail/column/stage（rail 是 fixed 不占位），
-  // 不写 order 的话堆叠态封面卡会跑到页面最下面。
-  ok(/@media \(max-width: 1100px\)[\s\S]*?grid-template-columns:\s*minmax\(\s*0\s*,\s*1fr\s*\)/.test(hjBody),
-    '≤1100px 收成单列（纵向堆叠）');
-  ok(/\[data-skin="heijiao"\] \.stage\s*\{\s*order:\s*-1/.test(hjBody),
-    '堆叠态封面卡排在内容之上（order:-1）');
-  // 卡片下限随宽度收窄，否则 620px 下每张卡只剩一个封面、一列字。
-  ok(/--skin-card-min:\s*132px/.test(hjBody),
-    '最窄断点把卡片下限压到 132px（一屏放得下几张）');
-}
-
-function checkLanFavoriteSourceDispatch() {
-  section('收藏来源：皮肤与封面墙保留局域网引用');
-  const ref = 'ab'.repeat(32) + ':' + 'cd'.repeat(32);
-  const favorites = [
-    { id: 'track:local:local-one', kind: 'track', source: 'local', ref_id: 'local-one', title: 'Local' },
-    { id: 'track:lan:' + ref, kind: 'track', source: 'lan', ref_id: ref, title: 'LAN snapshot', artist: 'LAN artist', cover: 'blob:must-not-use' },
-    { id: 'track:netease:online-one', kind: 'track', source: 'netease', ref_id: 'online-one', title: 'Online' },
-  ];
-  const roomActivations = [], onlinePlays = [], localPlays = [], notices = [];
-  let adapted = [];
-  const sandbox = {
-    window: {
-      Favorites: { state: { items: favorites }, activate: favorite => roomActivations.push(favorite) },
-      Online: { state: { source: 'netease' }, safeCoverUrl: value => value, playAll: (tracks, at) => onlinePlays.push({ tracks, at }) },
-    },
-    state: { snapshot: {}, view: 'favorites', queue: [] },
-    transport: { coverUrl: id => '/cover/' + id, post: (url, body) => localPlays.push({ url, body }) },
-    toast: message => notices.push(message),
-    viewSourceDef: () => ({ items: () => adapted }),
-  };
-  vm.createContext(sandbox);
-  const adapters = APP.slice(APP.indexOf('function localSourceItem('), APP.indexOf('function playlistSourceItems('));
-  const dispatcher = APP.slice(APP.indexOf('function queueForSourceItem('), APP.indexOf('function drillIntoPlaylist('));
-  vm.runInContext(adapters + '\n' + dispatcher, sandbox);
-  adapted = sandbox.favoriteSourceItems();
-  eq(adapted.length, 3, '所有收藏仍可展示，包含局域网收藏');
-  eq(adapted[1].source, 'lan', '封面墙项目保留局域网来源');
-  eq(adapted[1].id, favorites[1].id, '项目身份沿用收藏身份，未伪造在线虚拟 ID');
-  eq(adapted[1].title, 'LAN snapshot', '持久化标题仍可展示');
-  eq(adapted[1].cover, null, '封面墙不使用局域网旧封面 capability');
-  sandbox.playSourceItem(adapted[1], adapted);
-  eq(roomActivations.length, 1, '皮肤单项激活走同一个 Favorites.activate 入口');
-  eq(roomActivations[0].ref_id, ref, '分派保留完整房主与稳定歌曲身份');
-  eq(localPlays.length + onlinePlays.length, 0, '局域网单项不进入本地或在线播放');
-  sandbox.playSourceItem(adapted[0], adapted);
-  eq(localPlays[0].body.queue.join(','), 'local-one', '本地收藏上下文队列排除 LAN 引用');
-  sandbox.playSourceItem(adapted[2], adapted);
-  eq(onlinePlays[0].tracks.length, 1, '混合收藏墙只把可在线播放的曲目交给 Online');
-  eq(onlinePlays[0].tracks[0].id, 'online-one', '在线播放保留真实平台曲目身份');
-  ok(notices.some(message => /已跳过 1 首局域网收藏/.test(message)), '混合收藏在线播放告知跳过的局域网引用');
-  const legacy = { id: 'online:lan:' + ref, source: 'lan', favSource: 'lan', favRefId: ref };
-  sandbox.playOnlineItem(adapted[2], adapted.concat(legacy));
-  ok(onlinePlays.at(-1).tracks.every(track => track.source !== 'lan' && !String(track.id).startsWith('online:lan:')), '旧虚拟 LAN 形式也无法混入在线集合');
-}
-
-function checkOrbitMobileNav() {
-  section('星轨：手机形态的底栏与「更多」弹层');
-
-  const orbitBody = ORBIT.replace(/\/\*[\s\S]*?\*\//g, '');
-  const orbitJs = ORBIT_JS.replace(/\/\*[\s\S]*?\*\//g, '');
-
-  // 只取手机形态那一段媒体查询：文件里还有 1400/1100/900/620 等断点，
-  // 跨块匹配会把别的断点当成手机规则（断言要函数级切片，别整文件正则）。
-  const mobileBlock = (orbitBody.match(/@media \(max-width: 767px\) \{[\s\S]*?\n\}/) || [])[0] || '';
-  ok(mobileBlock !== '', 'CSS 里有 767px 的手机形态断点');
-
-  // 断点必须与 JS 一致：JS 用 matchMedia('(max-width: 767px)') 判定手机形态，
-  // CSS 断点若不是同一个数字，弹层会在「开着却看不见导航」的宽度上变成孤儿。
-  const jsBreakpoint = (orbitJs.match(/matchMedia\('\(max-width:\s*(\d+)px\)'\)/) || [])[1];
-  ok(jsBreakpoint === '767', `JS 的手机断点是 767px（实测 ${jsBreakpoint}）`);
-  ok(mobileBlock !== '', 'CSS 的手机断点与 JS 同为 767px');
-
-  // 底栏必须是 .app 栅格的一行、不是 fixed：fixed 会盖住播放条，
-  // 而 .bar 是 .app 的兄弟节点，底栏在栅格里才是「主区下沿、播放条之上」。
-  const navRule = (mobileBlock.match(/\[data-skin="orbit"\] \.orbit-mobile-nav\s*\{[^}]*\}/) || [])[0] || '';
-  ok(/grid-column:\s*1/.test(navRule) && /grid-row:\s*2/.test(navRule),
-    '底栏认领栅格轨道（grid-column/grid-row），不靠源序碰运气');
-  ok(!/position:\s*fixed/.test(navRule), '底栏不是 fixed（fixed 会压住播放条）');
-
-  // rail 让位时必须显式收成单列：rail 一隐藏，后面的兄弟会顶到第一格，
-  // 三列的比例整个反过来（记忆里的双栏栅格纪律）。
-  const appRule = (mobileBlock.match(/\[data-skin="orbit"\] body \.app\s*\{[^}]*\}/) || [])[0] || '';
-  ok(/grid-template-columns:\s*minmax\(0,\s*1fr\)/.test(appRule),
-    'rail 让位后 .app 显式收成单列（否则兄弟顶到第一格，比例反转）');
-  ok(/grid-template-rows:[^;]*minmax\(0,\s*1fr\)[^;]*auto/.test(appRule),
-    '底栏独占自动高度的一行，主区吃掉剩余高度');
-
-  // 弹层必须用 [open] 限定显示规则：dialog 关闭时被 display 覆盖，
-  // showModal() 会造出一个看不见却仍拦截输入的模态（页面直接僵死）。
-  ok(/\[data-skin="orbit"\] \.orbit-more-sheet:not\(\[open\]\)\s*\{\s*display:\s*none/.test(orbitBody),
-    '「更多」弹层关闭时隐藏');
-  ok(/\[data-skin="orbit"\] \.orbit-more-sheet\[open\]\s*\{/.test(orbitBody),
-    '「更多」弹层的显示规则挂在 [open] 上（不会造出隐形模态）');
-
-  // 底栏四个入口由 JS 挂载，CSS 必须给够触控高度（44px 是移动端下限）。
-  const tabRule = (mobileBlock.match(/\[data-skin="orbit"\] \.orbit-mobile-tab\s*\{[^}]*\}/) || [])[0] || '';
-  ok(/min-height:\s*4[4-9]px|min-height:\s*5\dpx/.test(tabRule),
-    '底栏按钮触控高度不低于 44px');
-  ok(/\[data-skin="orbit"\] \.orbit-mobile-tab\[aria-current="page"\]/.test(orbitBody),
-    '底栏当前项有独立的选中态（aria-current）');
-
-  // 皮肤不重定义主题色变量（配色归 themes.js 管，与其它皮肤同一条纪律）。
-  ok(!/^\s*(--bg|--text|--accent|--muted|--brand|--highlight)\s*:/m.test(orbitBody),
-    '星轨不重定义主题色变量');
-  const orbitColors = Array.from(orbitBody.matchAll(/(?:^|[\s;}])color\s*:\s*([^;}]+)/g));
-  ok(orbitColors.every((m) => /^\s*var\(--/.test(m[1])),
-    '星轨的 color 只引用主题 token');
-}
-
-(function main() {
-  checkLanFavoriteSourceDispatch();
-  checkCatalog();
-  checkLifecycleAndHost();
-  checkExtensibility();
-  checkSkinEntry();
-  checkNoColor();
-  checkCoverage();
-  checkDailyScroll();
-  checkLiunianExpandedBarStability();
-  checkLiunianNavigation();
-  checkLiunianSettingsSheet();
-  checkLiunianSettingsNav();
-  checkQingfengChrome();
-  checkQingfengWall();
-  checkQingfengSettings();
-  checkQingfengWiring();
-  checkChaoxiThemes();
-  checkHeijiaoSkin();
-  checkOrbitMobileNav();
-  checkSkinSwitchViewHandoff();
-  checkStageNoHorizontalScroll();
-  checkWiring();
-
-  console.log('\n' + '─'.repeat(60));
-  if (failures) {
-    console.error(`界面皮肤契约检查：${checks} 项，${failures} 项失败`);
-    process.exit(1);
-  }
-  console.log(`界面皮肤契约检查：${checks}/${checks} 全部通过`);
-})();
+checkCatalogAndMigration();
+checkExtensions();
+checkLifecycleAndHost();
+checkProductionWiring();
+checkResponsiveSurfaces();
+checkCoverWallGeometry();
+checkLanFavoriteSourceDispatch();
+checkChaoxiThemes();
+console.log('\n界面布局契约检查：'+(checks-failures)+'/'+checks+(failures?' 通过，'+failures+' 项失败':' 全部通过'));
+process.exitCode=failures?1:0;

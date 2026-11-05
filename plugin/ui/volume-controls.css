@@ -1,0 +1,70 @@
+/* Original range inputs, presented as compact vertical controls on every surface. */
+html[data-skin="hertz"] .hz-volume-control,
+html[data-skin="hertz"] #np-modal .np-volume.hz-volume-control {
+  display: flex; align-items: center; justify-content: center; flex: none;
+  width: 40px; min-width: 40px; gap: 0;
+}
+html[data-skin="hertz"] .hz-volume-button {
+  display: grid; place-items: center; flex: none; width: 40px; height: 40px;
+  min-width: 0; padding: 10px; border: 0; border-radius: 50%;
+  background: transparent; color: var(--muted); cursor: pointer;
+  transition: color 160ms, background-color 160ms;
+}
+html[data-skin="hertz"] .hz-volume-button svg { width: 19px; height: 19px; }
+html[data-skin="hertz"] .hz-volume-button:is(:hover, [aria-expanded="true"]) {
+  color: var(--text); background: color-mix(in srgb, var(--text) 7%, transparent);
+}
+html[data-skin="hertz"] .hz-volume-button.is-muted { opacity: .65; }
+html[data-skin="hertz"] .hz-volume-button:focus-visible { outline: 2px solid var(--text); outline-offset: 2px; }
+html[data-skin="hertz"] .hz-volume-panel {
+  position: fixed; inset: auto; margin: 0; box-sizing: border-box;
+  width: 62px; max-width: none; max-height: none; padding: 12px 10px 8px;
+  flex-direction: column; align-items: center; gap: 10px; overflow: visible;
+  border: 0; border-radius: 16px; color: var(--text);
+  background: color-mix(in srgb, var(--panel-solid) 94%, transparent);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--text) 12%, transparent), 0 12px 32px #0003;
+  backdrop-filter: blur(24px); -webkit-backdrop-filter: blur(24px);
+}
+html[data-skin="hertz"] .hz-volume-panel:popover-open,
+html[data-skin="hertz"] .sp-volume-panel.hz-volume-panel { display: flex; }
+.hz-volume-panel::backdrop { background: transparent; pointer-events: none; }
+.hz-volume-value { font: 11px/1.4 var(--font-sans, system-ui, sans-serif); font-variant-numeric: tabular-nums; color: inherit; }
+html[data-skin="hertz"] :is(#playback-bar, #np-modal, #stage3d, #space3d) .hz-volume-panel input.hz-volume-range {
+  appearance: none; -webkit-appearance: none; writing-mode: vertical-lr; direction: rtl;
+  display: block; flex: none; width: 28px; min-width: 28px; height: 116px; min-height: 116px;
+  margin: 0; padding: 0; border: 0; border-radius: 0; cursor: pointer; touch-action: none;
+  background: transparent; color: inherit; accent-color: currentColor;
+}
+html[data-skin="hertz"] :is(#playback-bar, #np-modal, #stage3d, #space3d) .hz-volume-panel input.hz-volume-range::-webkit-slider-runnable-track {
+  width: 4px; height: 100%; border: 0; border-radius: 4px;
+  background: linear-gradient(to top, currentColor var(--hz-volume-fill, 80%), color-mix(in srgb, currentColor 18%, transparent) var(--hz-volume-fill, 80%));
+}
+html[data-skin="hertz"] :is(#playback-bar, #np-modal, #stage3d, #space3d) .hz-volume-panel input.hz-volume-range::-webkit-slider-thumb {
+  appearance: none; -webkit-appearance: none; width: 12px; height: 12px;
+  margin: 0 0 0 -4px; border: 0; border-radius: 50%; background: currentColor; box-shadow: none; opacity: 1;
+}
+html[data-skin="hertz"] :is(#playback-bar, #np-modal, #stage3d, #space3d) .hz-volume-panel input.hz-volume-range::-moz-range-track {
+  width: 4px; height: 100%; border: 0; border-radius: 4px;
+  background: linear-gradient(to top, currentColor var(--hz-volume-fill, 80%), color-mix(in srgb, currentColor 18%, transparent) var(--hz-volume-fill, 80%));
+}
+html[data-skin="hertz"] :is(#playback-bar, #np-modal, #stage3d, #space3d) .hz-volume-panel input.hz-volume-range::-moz-range-thumb {
+  width: 12px; height: 12px; border: 0; border-radius: 50%; background: currentColor; box-shadow: none;
+}
+html[data-skin="hertz"] :is(#playback-bar, #np-modal, #stage3d, #space3d) .hz-volume-panel input.hz-volume-range:focus-visible { outline: 1px solid currentColor; outline-offset: 3px; border-radius: 4px; }
+html[data-skin="hertz"] :is(#playback-bar, #np-modal, #stage3d, #space3d) .hz-volume-panel .hz-volume-mute {
+  display: grid; place-items: center; flex: none; width: 32px; height: 32px; min-width: 32px; min-height: 32px;
+  padding: 7px; margin: 0; border: 0; border-radius: 50%; color: inherit; background: transparent; cursor: pointer;
+}
+html[data-skin="hertz"] .hz-volume-panel .hz-volume-mute svg { width: 18px; height: 18px; color: inherit; }
+html[data-skin="hertz"] .hz-volume-panel .hz-volume-mute::after { display: none; }
+html[data-skin="hertz"] .hz-volume-panel .hz-volume-mute:is(:hover, [aria-pressed="true"]) { background: color-mix(in srgb, currentColor 10%, transparent); }
+#stage3d:has(#s3d-volume-panel:popover-open) .s3d-player { opacity: 1; pointer-events: auto; transform: translate(-50%, 0); }
+@media (max-width: 899px) {
+  html[data-skin="hertz"] #np-modal .np-volume.hz-volume-control { width: 40px; justify-self: end; }
+}
+@media (prefers-reduced-transparency: reduce) {
+  html[data-skin="hertz"] .hz-volume-panel { background: var(--panel-solid); backdrop-filter: none; -webkit-backdrop-filter: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  html[data-skin="hertz"] .hz-volume-button { transition: none; }
+}

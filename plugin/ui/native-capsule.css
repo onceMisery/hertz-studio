@@ -1,0 +1,24 @@
+/* The native host owns desktop position and size; the page is the capsule. */
+html[data-hertz-window-mode="capsule"],
+html[data-hertz-window-mode="capsule"] body {
+  width: 100%; height: 100%; min-width: 0; min-height: 0;
+  margin: 0; padding: 0; overflow: hidden;
+  background: var(--panel-solid);
+}
+html[data-hertz-window-mode="capsule"] body > *:not(#capsule) { display: none !important; }
+html[data-hertz-window-mode="capsule"] #capsule {
+  position: fixed; inset: 0; width: 100%; height: 100%; max-width: none;
+  box-sizing: border-box; padding: 10px 12px; gap: 12px;
+  border: 0; border-radius: 0; box-shadow: none;
+  background: var(--panel-solid); backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+html[data-hertz-window-mode="capsule"] .capsule-art { width: 44px; height: 44px; border-radius: 10px; }
+html[data-hertz-window-mode="capsule"] .capsule-text { flex: 1; min-width: 0; cursor: grab; }
+html[data-hertz-window-mode="capsule"] .capsule-line { width: 100%; }
+html[data-hertz-window-mode="capsule"] .capsule-label { font-size: 10px; letter-spacing: 0; line-height: 1.3; }
+html[data-hertz-window-mode="capsule"] .capsule-line-title { font-size: 13px; line-height: 1.5; }
+html[data-hertz-window-mode="capsule"] .capsule-line-artist { font-size: 11px; line-height: 1.4; }
+html[data-hertz-window-mode="capsule"] .capsule-controls { gap: 3px; }
+html[data-hertz-window-mode="capsule"] .capsule-btn { width: 30px; height: 34px; border-radius: 10px; }
+html[data-hertz-window-mode="capsule"] .capsule-btn-primary { color: var(--bg); background: var(--text); }

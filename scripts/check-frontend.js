@@ -198,12 +198,12 @@ const EXTRA = [
   { script: 'check-creative-prompt.js', why: '创意提示词。' },
 ];
 
-// 活体检查：需要真实浏览器，默认不跑。qf-issues/narrow-topbar 自行起隔离服务。
+// 活体检查：需要真实浏览器，默认不跑。qf-issues（Hertz 播放条验收）自行起隔离服务。
 // check-lib-row-actions 不在名字里带 browser，但它硬 require playwright，
 // 所以显式列进来——按文件名猜会不会漏。
 const LIVE_EXTRA = ['check-lib-row-actions.js', 'check-qf-issues.js'];
 const LIVE_NOTE = '活体检查需要 Playwright（PLAYWRIGHT_MODULE 或 NODE_PATH）。多数检查还需要运行中的服务；'
-  + '清风与窄屏检查自行启动隔离服务，需要先构建 hertz-studio（可设 HERTZ_BIN）。';
+  + 'Hertz 播放条等检查自行启动隔离服务，需要先构建 hertz-studio（可设 HERTZ_BIN）。';
 
 // 环境缺件（playwright 没装、服务没起）不是产品坏了。把它们和真实失败分开报，
 // 否则本地一句 --extra 会得到一排假红，而假红会让人开始忽略这套检查。

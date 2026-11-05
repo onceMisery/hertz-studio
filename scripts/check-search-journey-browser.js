@@ -15,6 +15,7 @@ async function main() {
   const context = await browser.newContext({viewport:{width:1440,height:960}});
   await fixture.connect(context);
   const page = await context.newPage(), errors = [], requests = [], releases = new Map();
+  await require('./ui-source-assets').routeSourceAssets(page, fixture);
   for (const file of ['app.js', 'online.js', 'topsearch.js', 'space-home.js']) {
     await page.route('**/' + file + '*', route => route.fulfill({
       contentType: 'application/javascript',
@@ -214,49 +215,18 @@ async function main() {
     assert.equal(await page.locator('.sh-panel-body').getByText(/R1 space canceled/).count(),0);
     await page.evaluate(()=>Space3D.close());
 
-    // The persistent Liunian panel joins the same coordinator and exposes source failures.
-    failSourcesOnce = true;
-    await page.evaluate(()=>Skins.apply('liunian'));
-    await page.locator('.ln-sp-q').fill('R1 liunian');
-    const sourcesRetry = page.getByRole('button',{name:'重试读取音源',exact:true});
-    await sourcesRetry.focus();
-    await page.keyboard.press('Enter');
-    await page.waitForFunction(()=>document.querySelectorAll('.ln-sp-row').length===6
-      && document.querySelector('[data-error-code="upstream_timeout"]'));
-    assert.equal(await page.evaluate(() => document.activeElement.classList.contains('ln-sp-q')),true,
-      'Liunian source-list retry returns focus to the search field after recovery');
-    const lnError = page.locator('.ln-sp-sec').filter({hasText:'酷狗音乐'}).last();
-    assert.equal(await lnError.locator('[data-error-code="upstream_timeout"]').count(),1,
-      'Liunian provider failure belongs to the Kugou result group');
-    const lnRetry = lnError.locator('button.ln-sp-more');
-    await lnRetry.evaluate(el => { window.r1LiunianRetry = el; });
-    await lnRetry.focus();
-    await lnRetry.click();
-    await page.waitForFunction(()=>document.querySelectorAll('.ln-sp-row').length===8);
-    assert.equal(await page.evaluate(() => document.activeElement === window.r1LiunianRetry && !window.r1LiunianRetry.hidden), true,
-      'Liunian keeps the retry control focused while converting it to the next action');
-    assert.equal(count('R1 liunian','netease'),1);
-    await page.locator('.ln-sp-q').fill('R1 liunian canceled slow');
-    await page.waitForFunction(()=>document.querySelectorAll('.ln-sp-row').length===4);
-    await page.evaluate(()=>Skins.apply('default'));
-    release('R1 liunian canceled slow');
-    await page.waitForFunction(()=>!document.querySelector('.ln-sp'));
-
+    // Source retry/cancellation stays covered by the three retained search consumers above.
     const visibleSkins = await page.evaluate(() => Skins.list().map(skin => skin.id));
-    assert.deepEqual(visibleSkins, ['classic','liunian','qingfeng','heijiao','orbit'],
-      'the public skin list matches the five supported layouts');
+    assert.deepEqual(visibleSkins, ['hertz'],
+      'the public skin list matches the sole supported layout');
     await page.getByRole('button',{name:'在线曲库',exact:true}).click();
     await page.getByRole('combobox',{name:'音源',exact:true}).selectOption('netease');
     await page.locator('#search').click();
     await page.setViewportSize({width:390,height:420});
     for (const skin of visibleSkins) {
       await page.evaluate(id => Skins.apply(id), skin);
-      await page.waitForFunction(id => id === 'classic' || !!document.querySelector('link[data-skin-css="' + id + '"]').sheet, skin);
+      await page.waitForFunction(id => !!document.querySelector('link[data-skin-css="' + id + '"]').sheet, skin);
       const search = page.locator('#search');
-      if (skin === 'qingfeng') {
-        assert.equal(await search.isVisible(),false,'Qingfeng intentionally hides topbar search below 900px');
-        await page.setViewportSize({width:1440,height:420});
-      }
       await search.evaluate(el => el.focus({preventScroll:true}));
       await search.fill('R1 skin ' + skin);
       await page.locator('.ts-menu:not([hidden]) .ts-row, .ts-menu:not([hidden]) .ts-card').first().waitFor();

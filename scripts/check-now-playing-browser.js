@@ -28,6 +28,12 @@ async function enterPlayerFullscreen(page) {
   await page.waitForFunction(() => document.fullscreenElement?.id === 'np-modal');
   await page.keyboard.press('Escape');
 }
+async function closePlayer(page) {
+  if (await page.locator('#ctx-menu').isVisible()) await page.keyboard.press('Escape');
+  if (await page.locator('#np-tools').isVisible()) await page.locator('#np-tools-close').click();
+  if (await page.locator('#np-queue-pane').isVisible()) await page.locator('#np-queue-close').click();
+  await page.locator('#np-close').click();
+}
 async function fixtures() {
   const dir = path.join(root, 'output/playwright/now-playing-fixtures'); fs.mkdirSync(dir, { recursive: true });
   const samples = 8000 * 180, wav = Buffer.alloc(44 + samples * 2);
@@ -50,6 +56,7 @@ async function fixtures() {
   try {
     fs.mkdirSync(output, { recursive: true });
     const page = await browser.newPage({ viewport: { width: 1366, height: 768 } });
+    page.setDefaultTimeout(15000);
     const errors = []; page.on('pageerror', error => { errors.push(error.message); console.error('Browser: ' + error.stack); });
     page.on('console', message => { if (message.type() === 'error' && message.text().includes('[hertz]')) console.error(message.text()); });
     await page.addInitScript(() => localStorage.setItem('vmusic.defaultView', 'library'));
@@ -73,13 +80,13 @@ async function fixtures() {
     await page.waitForFunction(() => window.Skins && document.getElementById('bar-track').onclick);
     try { await page.waitForFunction(() => document.getElementById('conn').textContent === '服务已连接', null, { timeout: 20000 }); }
     catch(error) { console.error(await page.evaluate(() => ({connection:document.getElementById('conn').textContent,boot:document.querySelector('.boot-failed-card')?.textContent}))); throw error; }
-    await page.evaluate(() => Skins.apply('classic'));
+    await page.evaluate(() => Skins.apply('hertz'));
     await page.locator('#bar-track').click();
     const layout = await page.locator('#np-modal .np-card').boundingBox();
     assert.ok(layout.width >= 1366 - 2 && layout.height >= 768 - 2,
       `ordinary player must fill viewport; actual ${JSON.stringify(layout)}`);
     assert.equal(await page.evaluate(() => document.body.classList.contains('s3d-open')), false, 'opening player does not open stage');
-    await page.locator('#np-close').click();
+    await closePlayer(page);
     assert.equal(await page.locator('#np-modal').isVisible(), false, 'collapse returns to browsing');
     check(true, 'ordinary player opens full viewport and returns without entering stage');
     const tracks = await fixtures(), queue = tracks.map(t => t.id);
@@ -92,25 +99,29 @@ async function fixtures() {
     await until(() => page.evaluate(() => Stage.presentation().track?.id), id => id === queue[0]);
     await page.setViewportSize({width:1366,height:768});
     const centered = await page.locator('#playpause').boundingBox();
-    check(Math.abs(centered.x + centered.width / 2 - 683) < 2, 'classic bottom transport is centered');
+    const transportBox = await page.locator('.hz-bar-center').boundingBox();
+    check(centered.width >= 32 && centered.x >= transportBox.x && centered.x + centered.width <= transportBox.x + transportBox.width, 'Hertz transport remains inside its playback region: ' + JSON.stringify({ centered, transportBox }));
     await page.locator('#bar-track').click();
     await page.locator('#np-playpause').click();
     await until(() => api('GET', '/v1/state'), state => state.playing);
     await page.locator('#np-playpause').click();
     await until(() => api('GET', '/v1/state'), state => !state.playing);
     check(true, 'ordinary transport controls the existing backend');
+    await page.locator('#np-volume-toggle').click();
     await page.locator('#np-volume').fill('43');
     await until(() => api('GET', '/v1/state'), state => Math.abs(state.volume - .43) < .005);
     await page.locator('#np-mute').click(); await until(() => api('GET', '/v1/state'), state => state.volume === 0);
     await page.locator('#np-mute').click(); await until(() => api('GET', '/v1/state'), state => Math.abs(state.volume - .43) < .005);
+    await page.keyboard.press('Escape');
     check(true, 'volume and mute use the existing synchronized setting');
     await page.locator('#np-progress-bar').fill('200');
     await page.locator('#np-progress-bar').dispatchEvent('change');
     await until(() => api('GET', '/v1/state'), state => Math.abs(state.position_ms - 36000) < 200);
     check(true, 'ordinary seek updates the real playback position');
     await api('PUT', `/v1/tracks/${queue[0]}/lyrics/offset`, { offset_ms: 500 });
-    await page.locator('#np-close').click();
+    await closePlayer(page);
     await page.locator('#bar-track').click();
+    await page.locator('#np-tab-lyrics').click();
     await page.waitForFunction(() => document.querySelectorAll('.np-line').length === 4);
     await api('POST', '/v1/player/seek', { position_ms: 5750 });
     await until(() => page.locator('.np-line.is-active').getAttribute('data-index'), index => index === '1');
@@ -132,7 +143,7 @@ async function fixtures() {
     await until(() => api('GET', '/v1/state'), state => state.position_ms === 5500);
     check(true, 'clicking lyric seeks the calibrated timestamp');
     await page.locator('#np-queue').click();
-    check(await page.locator('.np-queue-row').count() === 8 && !await page.locator('#np-reading').isVisible(), 'queue replaces lyrics, uses existing queue');
+    check(await page.locator('.np-queue-row').count() === 8 && await page.locator('#np-queue-pane').isVisible(), 'queue drawer uses the existing queue');
     await page.locator('.np-queue-row[data-index="1"]').click();
     await until(() => api('GET', '/v1/state'), state => state.track_id === queue[1]);
     await page.keyboard.press('Escape');
@@ -186,28 +197,30 @@ async function fixtures() {
     check((await page.locator('.hz-dialog-input').locator('..').boundingBox()).width <= 432, 'fullscreen custom dialog stays compact');
     await page.keyboard.press('Escape');
     check(await page.locator('#np-tools').isVisible() && await page.evaluate(() => document.fullscreenElement?.id === 'np-modal'), 'custom dialog Escape keeps fullscreen and tools');
-    await page.locator('#np-close').click();
+    await closePlayer(page);
     await page.waitForFunction(() => !document.fullscreenElement);
     await page.locator('#bar-track').click();
     await page.locator('#np-more').click(); await page.locator('#np-sleep').click();
-    await page.evaluate(() => Skins.apply('classic'));
-    check(!await page.locator('#ctx-menu').isVisible() && !await page.locator('#np-modal').isVisible(), 'skin switch dismisses the open sleep menu');
-    await page.evaluate(() => Skins.apply('classic'));
+    await page.evaluate(() => Skins.apply('hertz'));
+    check(await page.locator('#np-modal').isVisible() && await page.locator('#np-modal').count() === 1, 'reapplying Hertz preserves the existing player without duplicate surfaces');
+    await closePlayer(page);
+    check(!await page.locator('#ctx-menu').isVisible(), 'closing player layers dismisses the owned sleep menu');
+    await page.evaluate(() => Skins.apply('hertz'));
     await page.locator('#bar-track').click();
     await page.locator('#np-more').click(); await page.locator('#np-sleep').click();
-    await page.locator('#np-close').click();
+    await closePlayer(page);
     check(!await page.locator('#ctx-menu').isVisible(), 'collapse dismisses the owned sleep menu');
     await api('POST', '/v1/player/pause');
     await api('POST', '/v1/player/load', { track_id: queue[0], queue });
     await api('POST', '/v1/player/pause');
     await until(() => page.evaluate(() => Stage.presentation().track?.id), id => id === queue[0]);
-    const skins = ['classic', 'qingfeng', 'liunian', 'heijiao'];
+    const skins = ['hertz'];
     const sizes = [[1366,768], [1920,1080], [2560,1080], [1024,600], [390,844]];
     for (const skin of skins) {
       await page.evaluate(skin => Skins.apply(skin), skin);
       await page.setViewportSize({width:1366,height:768});
       await page.waitForTimeout(300);
-      check(await page.locator('#bar-player-expand').isVisible(), skin + ' has an explicit ordinary-player entry');
+      check(await page.locator('#bar-track').isVisible(), skin + ' has an explicit ordinary-player entry');
       await page.screenshot({path:path.join(output, `${skin}-browsing.png`)});
       for (const [width,height] of sizes) {
         await page.setViewportSize({width,height});
@@ -217,31 +230,27 @@ async function fixtures() {
         await page.waitForFunction(() => document.getElementById('np-art').classList.contains('has-cover'));
         await page.waitForTimeout(280);
         const geometry = await page.evaluate(() => {
-          const ids = ['np-close','np-playpause','np-progress-bar','np-volume','np-name'];
+          const ids = ['np-close','np-playpause','np-progress-bar','np-volume-toggle','np-name'];
           return ids.map(id => { const r = document.getElementById(id).getBoundingClientRect(); return {id,x:r.x,y:r.y,w:r.width,h:r.height,right:r.right,bottom:r.bottom}; });
         });
         check(geometry.every(r => r.w > 0 && r.h > 0 && r.x >= -1 && r.y >= -1 && r.right <= width+1 && r.bottom <= height+1), `${skin} ${width}x${height} controls fit`);
         check(!await page.evaluate(() => document.body.classList.contains('s3d-open')), skin + ' never opens stage');
-        if (skin === 'heijiao') {
-          const disc = await page.locator('#np-disc-host .disc-wrap').boundingBox();
-          check(disc.width > 80 && disc.x - disc.width * .1 >= 0 && disc.x + disc.width * 1.3 <= width,
-            `${skin} ${width}x${height} disc and tonearm fit: ${JSON.stringify(disc)}`);
-        }
         if (width < 900) {
           await page.locator('#np-tab-lyrics').click();
-          check(await page.locator('#np-reading').isVisible() && !await page.locator('#np-cover-pane').isVisible(), skin + ' narrow lyric view');
+          check(await page.locator('#np-reading').isVisible() && await page.locator('#np-tab-lyrics').getAttribute('aria-pressed') === 'true', skin + ' narrow lyric view');
           await page.locator('#np-tab-cover').click();
         }
         await page.screenshot({path:path.join(output, `${skin}-${width}x${height}.png`)});
-        await page.locator('#np-close').click();
+        await closePlayer(page);
       }
       await page.evaluate(() => document.getElementById('bar-track').click());
-      await page.evaluate(() => Skins.apply('classic'));
-      if (skin !== 'classic') check(!await page.locator('#np-modal').isVisible() && !await page.evaluate(() => document.querySelector('.app').inert), skin + ' switching releases expanded surface and background');
-      else await page.locator('#np-close').click();
+      await page.evaluate(() => Skins.apply('hertz'));
+      check(await page.locator('#np-modal').isVisible() && await page.locator('#np-modal').count() === 1, skin + ' repeat layout admission preserves player');
+      await closePlayer(page);
+      check(!await page.evaluate(() => document.querySelector('.app').inert), skin + ' closing player restores background');
     }
     await page.setViewportSize({width:1366,height:768});
-    await page.evaluate(() => Skins.apply('classic'));
+    await page.evaluate(() => Skins.apply('hertz'));
     await page.locator('#bar-track').focus(); await page.keyboard.press('Enter');
     await page.locator('#np-close').focus(); await page.keyboard.press('Shift+Tab');
     check(await page.evaluate(() => document.getElementById('np-modal').contains(document.activeElement)), 'keyboard focus remains inside player');
@@ -249,23 +258,17 @@ async function fixtures() {
     check(await page.locator('#bar-track').evaluate(el => el === document.activeElement), 'collapse restores the keyboard entry focus');
     check(await page.evaluate(() => Stage.gateRates().find(gate => gate.name === 'ordinary-player').target === 0), 'closed player releases its frame budget');
 
-    await page.evaluate(() => Skins.apply('liunian'));
-    await page.locator('.ln-sp-q').fill('Player');
-    const compact = await page.locator('.bar').evaluate(el => el.classList.contains('ln-capsule'));
-    await page.locator('#bar-player-expand').click(); await page.locator('#np-close').click();
-    check(await page.locator('.ln-sp-q').inputValue() === 'Player' && await page.locator('.bar').evaluate(el => el.classList.contains('ln-capsule')) === compact, 'liunian restores search and player card state');
-    await page.evaluate(() => Skins.apply('qingfeng'));
-    await page.locator('[data-qf-view="wall"]').click();
+    await page.evaluate(() => HertzCoverWall.open());
     await page.waitForTimeout(600);
-    check(await page.locator('.qf-queue-peek-player').count() === 1, 'qingfeng wall has an ordinary-player entry');
+    check(await page.locator('.qf-queue-peek-player').count() === 1, 'cover wall has an ordinary-player entry');
     const wallState = await page.locator('.qf-lattice-world').evaluate(el => ({transform:el.style.transform,html:el.innerHTML}));
     await page.locator('.qf-queue-peek-player').click();
     check(!await page.locator('.qf-lattice').isVisible() && await page.locator('.qf-lattice').evaluate(el => el.inert), 'expanded player suspends the covered poster wall');
-    await page.locator('#np-close').click();
-    check(await page.locator('.qf-lattice').isVisible() && await page.locator('.qf-lattice-world').evaluate((el, state) => el.style.transform === state.transform && el.innerHTML === state.html, wallState), 'qingfeng restores the original poster wall and camera');
-    await page.evaluate(() => Skins.apply('classic'));
+    await closePlayer(page);
+    check(await page.locator('.qf-lattice').isVisible() && await page.locator('.qf-lattice-world').evaluate((el, state) => el.style.transform === state.transform && el.innerHTML === state.html, wallState), 'cover wall restores the original poster wall and camera');
+    await page.evaluate(() => HertzCoverWall.close());
 
-    for (const theme of ['ios-light','midnight']) {
+    for (const theme of ['hertz-light','hertz-dark']) {
       await page.evaluate(theme => Theme.apply(theme, {silent:true}), theme);
       for (const [width,height] of [[1093,614],[910,512]]) {
         await page.setViewportSize({width,height});
@@ -284,29 +287,16 @@ async function fixtures() {
         });
         check(fit, `${theme} at ${width}x${height} (125%/150% CSS viewport) long bilingual text fits`);
         await page.screenshot({path:path.join(output, `${theme}-${width}x${height}-long.png`)});
-        await page.locator('#np-close').click();
+        await closePlayer(page);
       }
     }
     await page.setViewportSize({width:1366,height:768});
     await page.emulateMedia({reducedMotion:'reduce'});
-    await page.evaluate(() => Skins.apply('heijiao'));
-    await page.locator('#bar-track').evaluate(el => el.click());
-    const disc = page.locator('#np-disc-host .disc-wrap');
-    await disc.focus(); await page.keyboard.press('Home'); await page.keyboard.press('ArrowRight');
-    check(await disc.evaluate(el => parseFloat(el.style.getPropertyValue('--hj-turn'))) === 10, 'black vinyl keyboard rotation survives relocation');
-    const rect = await disc.boundingBox();
-    await page.mouse.move(rect.x + rect.width/2, rect.y + rect.height/2); await page.mouse.down();
-    await page.mouse.move(rect.x + rect.width/2 + 80, rect.y + rect.height/2, {steps:5}); await page.mouse.up();
-    const angle = await disc.evaluate(el => parseFloat(el.style.getPropertyValue('--hj-turn')));
-    await page.waitForTimeout(180);
-    check(angle >= 49 && angle <= 51 && await disc.evaluate(el => parseFloat(el.style.getPropertyValue('--hj-turn'))) === angle, 'reduced motion retains drag with no inertia');
+    await page.locator('#bar-track').click();
     check(await page.locator('#np-modal .np-card').evaluate(el => getComputedStyle(el).animationName === 'none'), 'system reduced motion disables page entrance animation');
-    await disc.click();
-    check(await disc.evaluate(el => el.getBoundingClientRect().width > 80), 'disc click retains local lyric state without shrinking expanded artwork');
-    await page.locator('#np-close').click();
-    check(await page.locator('#stage .disc-wrap').count() === 1 && await page.locator('#np-disc-host').count() === 0, 'black vinyl restores the original disc node');
+    await closePlayer(page);
 
-    await page.evaluate(() => Skins.apply('classic'));
+    await page.evaluate(() => Skins.apply('hertz'));
     await page.evaluate(async () => {
       const original = transport.get, pending = [];
       transport.get = url => /\/lyrics$/.test(url) ? new Promise(resolve => pending.push(resolve)) : original.call(transport, url);
@@ -335,13 +325,13 @@ async function fixtures() {
     await page.locator('#bar-track').click();
     await page.waitForTimeout(350);
     check(await page.locator('#np-empty').textContent() === '歌词加载失败', 'lyric failures are distinct from a track without lyrics');
-    await page.locator('#np-close').click();
+    await closePlayer(page);
     await page.unroute('**/v1/tracks/*/lyrics');
     await page.locator('#bar-track').click();
     await page.evaluate(() => syncNpTrack(Stage.presentation().track, '/missing-cover-fixture.jpg'));
     await page.waitForTimeout(150);
     check(await page.locator('#np-art .np-art-note').isVisible() && await page.locator('#np-art').evaluate(el => !el.classList.contains('has-cover')), 'failed cover uses the stable artwork placeholder');
-    await page.locator('#np-close').click();
+    await closePlayer(page);
     await page.evaluate(() => { const modal = document.getElementById('remote-browse'); modal.hidden = false; });
     check((await page.locator('#remote-browse .np-card').boundingBox()).width <= 432, 'shared remote dialog keeps its compact geometry');
     await page.evaluate(() => document.getElementById('remote-browse').hidden = true);

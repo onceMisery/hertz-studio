@@ -382,6 +382,8 @@ window.Palette = (function () {
 
   function open(prefill) {
     ensureDom();
+    // 先交接已有抽屉，再让命令面板记录自己的背景与返回焦点。
+    document.dispatchEvent(new CustomEvent('topbar:popup', { detail: { id: 'palette' } }));
     closeSurface();          // 关掉后重开一律从命令列表起步
     overlay.hidden = false;
     releaseScope = window.hertzDialog ? window.hertzDialog.focusScope(overlay) : null;

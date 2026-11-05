@@ -19,10 +19,19 @@ pub(crate) fn control(profile: &Profile, payload: &serde_json::Value) -> Result<
     if crate::config::is_dbx(profile) {
         bail!("DBX 来源仅支持歌词读取，请在 DBX 中控制播放");
     }
+    let Some(session) = payload["session"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+    else {
+        bail!("播放来源已变化，请等待重新同步");
+    };
     let discovery = bridge::read_discovery(profile)?;
     if discovery.desktop_lyrics_protocol != Some(PROTOCOL)
-        || discovery.edition.as_deref() != Some(profile.edition())
-        || discovery.server_instance_id.as_deref() != payload["session"].as_str()
+        // --data-dir binds a custom profile to this exact discovery directory.
+        // Match the polling path: its service may be either full or standard.
+        || (profile.edition() != "custom"
+            && discovery.edition.as_deref() != Some(profile.edition()))
+        || discovery.server_instance_id.as_deref() != Some(session)
     {
         bail!("播放来源已变化，请等待重新同步");
     }
@@ -301,6 +310,89 @@ mod tests {
         io::{Read, Write},
         net::TcpListener,
     };
+
+    #[test]
+    fn custom_profile_controls_reach_bound_service_without_weakening_session_checks() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let directory =
+            std::env::temp_dir().join(format!("hertz-control-{}-{port}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(
+            directory.join("vmusicd.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "pid":1,"port":port,"version":"test","protocol_version":1,
+                "edition":"full","server_instance_id":"session","desktop_lyrics_protocol":1
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(directory.join("desktop-lyrics-key"), "a".repeat(64)).unwrap();
+        let custom = crate::config::standalone(directory.clone(), "custom");
+        let payload = serde_json::json!({"session":"session","trackId":"track","generation":"1","action":"play"});
+        assert!(control(&custom, &serde_json::json!({"session":"stale"})).is_err());
+        assert!(control(
+            &crate::config::standalone(directory.clone(), "standard"),
+            &payload
+        )
+        .is_err());
+        let discovery_path = directory.join("vmusicd.json");
+        let discovery_bytes = std::fs::read(&discovery_path).unwrap();
+        let mut missing_session: serde_json::Value =
+            serde_json::from_slice(&discovery_bytes).unwrap();
+        missing_session
+            .as_object_mut()
+            .unwrap()
+            .remove("server_instance_id");
+        std::fs::write(
+            &discovery_path,
+            serde_json::to_vec(&missing_session).unwrap(),
+        )
+        .unwrap();
+        assert!(control(&custom, &serde_json::json!({"action":"play"})).is_err());
+        missing_session["server_instance_id"] = serde_json::json!("");
+        std::fs::write(
+            &discovery_path,
+            serde_json::to_vec(&missing_session).unwrap(),
+        )
+        .unwrap();
+        assert!(control(&custom, &serde_json::json!({"session":"","action":"play"})).is_err());
+        std::fs::write(&discovery_path, discovery_bytes).unwrap();
+        let server = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            loop {
+                match listener.accept() {
+                    Ok((mut socket, _)) => {
+                        socket
+                            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                            .unwrap();
+                        let mut bytes = [0; 4096];
+                        let count = socket.read(&mut bytes).unwrap();
+                        let request = String::from_utf8_lossy(&bytes[..count]).to_string();
+                        write!(socket, "HTTP/1.1 200 OK\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{{\"ok\":true}}").unwrap();
+                        return request;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(
+                            std::time::Instant::now() < deadline,
+                            "no control request reached the bound service"
+                        );
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                    }
+                    Err(error) => panic!("{error}"),
+                }
+            }
+        });
+        let result = control(&custom, &payload);
+        let request = server.join().unwrap();
+        result.unwrap();
+        assert!(request.starts_with("POST /v1/desktop-lyrics/control HTTP/1.1"));
+        assert!(request
+            .to_lowercase()
+            .contains(&format!("authorization: desktop {}", "a".repeat(64))));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 
     #[test]
     fn same_key_document_is_replayed_after_failure_and_duplicate_track_change() {

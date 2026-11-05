@@ -1461,3 +1461,45 @@ body.s3d-open > .bar { display: none; }
 @media (max-width: 760px) {
   .s3d-editing .s3d-creative, .s3d-editing .s3d-art-overlay, .s3d-editing #s3d-stanza { right: 0; bottom: 63%; }
 }
+
+/* Hertz 的退出入口是一层安静的玻璃，不再把圆盘套进圆形胶囊。
+   保留舞台现有的 idle 隐藏和键盘唤醒；主题只影响演出层。 */
+html[data-skin="hertz"] #stage3d .s3d-head {
+  --s3d-btn: 44px;
+  --chip-top: transparent;
+  --chip-bounce: transparent;
+  --chip-drop: transparent;
+  --chip-lift: 0px;
+  padding: 0;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  box-shadow: none;
+  backdrop-filter: none;
+}
+html[data-skin="hertz"] #stage3d .s3d-head #s3d-close {
+  width: 44px;
+  height: 44px;
+  border: 0;
+  border-radius: 12px;
+  background: rgba(24, 24, 27, .48);
+  color: rgba(244, 243, 241, .78);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .08);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+  transform: none;
+  transition: color 160ms var(--ease), background-color 160ms var(--ease);
+}
+html[data-skin="hertz"] #stage3d .s3d-head #s3d-close:hover {
+  color: #f4f3f1;
+  background: rgba(44, 44, 48, .72);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .08);
+}
+html[data-skin="hertz"] #stage3d #s3d-close svg { width: 19px; height: 19px; }
+html[data-skin="hertz"] #stage3d #s3d-close:focus-visible { outline: 2px solid var(--s3d-text); outline-offset: 3px; }
+@media (max-width: 700px) {
+  html[data-skin="hertz"] #stage3d .s3d-head { top: max(12px, env(safe-area-inset-top)); right: max(12px, env(safe-area-inset-right)); }
+}
+@media (prefers-reduced-motion: reduce) {
+  html[data-skin="hertz"] #stage3d .s3d-head #s3d-close { transition: none; }
+}

@@ -157,8 +157,8 @@ const REQUIRE_BEFORE = [
   ['stage.js', 'app.js'],
   ['palette.js', 'app.js'],                      // 命令由 app.js 注册进面板
   ['vendor/qrcode.js', 'online-login.js'],      // 扫码弹窗读 window.qrcode
-  ['skins/skins.js', 'skins/skin-settings-sheet.js'],           // 设置浮层在 Skins 上登记生命周期
-  ['skins/skin-shared.js', 'skins/skin-settings-sheet.js']      // 搬运/登记工具先于浮层
+  ['skins/skins.js', 'cover-wall.js'],                       // 独立封面墙请求统一业务动作
+  ['skins/skin-shared.js', 'skins/skin.hertz.js']              // 搬运/登记工具先于 Hertz 布局
 ];
 
 REQUIRE_BEFORE.forEach((pair) => {

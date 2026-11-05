@@ -129,6 +129,8 @@
   /// 某套主题该用哪张壁纸：二次元推荐 → 内置映射表 → 默认兜底。
   /// 表里给出的文件名还要过一遍目录，写错一个名字不该让整层变空白。
   function wallForTheme(themeId) {
+    // 原型深浅外观以音乐封面为氛围；用户手选并固定的壁纸仍由 state.pinned 保留。
+    if (themeId === 'hertz-dark' || themeId === 'hertz-light') return '';
     var i;
     if (themeId) {
       for (i = 0; i < WALLPAPERS.length; i += 1) {
@@ -505,11 +507,11 @@
   var suppressFollow = 0;
 
   /// 让壁纸跟上当前主题。只在「没钉住 + 不是选壁纸引发的那次 apply」时生效，
-  /// 且目标图必须真的在目录里——映射写错不能把壁纸清成空。
+  /// 有图时必须在目录里；原型深浅主题明确使用无壁纸外观。
   function followTheme(themeId) {
     if (suppressFollow > 0 || state.pinned) return;
     var want = wallForTheme(themeId);
-    if (!want || want === state.id) return;
+    if (want === state.id || (want !== '' && !wallById(want))) return;
     state.id = want;
   }
 

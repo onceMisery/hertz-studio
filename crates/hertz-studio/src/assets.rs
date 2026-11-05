@@ -51,6 +51,10 @@ macro_rules! ui_assets {
 }
 
 ui_assets! {
+    "/fonts/brand.css", CSS => const BRAND_FONT_CSS: &str = edition_ui!("fonts/brand.css");
+    "/volume-controls.js", JS => const VOLUME_CONTROLS_JS: &str = edition_ui!("volume-controls.js");
+    "/volume-controls.css", CSS => const VOLUME_CONTROLS_CSS: &str = edition_ui!("volume-controls.css");
+    "/native-capsule.css", CSS => const NATIVE_CAPSULE_CSS: &str = edition_ui!("native-capsule.css");
     "/room-transport.js", JS => const ROOM_TRANSPORT_JS: &str = edition_ui!("room-transport.js");
     "/room-workspace.js", JS => const ROOM_WORKSPACE_JS: &str = edition_ui!("room-workspace.js");
     "/room-view.js", JS => const ROOM_VIEW_JS: &str = edition_ui!("room-view.js");
@@ -64,7 +68,6 @@ ui_assets! {
     "/now-playing.js", JS => const NOW_PLAYING_JS: &str = edition_ui!("now-playing.js");
     "/lyric-import.js", JS => const LYRIC_IMPORT_JS: &str = edition_ui!("lyric-import.js");
     "/now-playing.css", CSS => const NOW_PLAYING_CSS: &str = edition_ui!("now-playing.css");
-    "/skins/skin.classic.css", CSS => const CLASSIC_CSS: &str = edition_ui!("skins/skin.classic.css");
     "/stage.js", JS => const STAGE_JS: &str = edition_ui!("stage.js");
     "/perf-probe.js", JS => const PERF_PROBE_JS: &str = edition_ui!("perf-probe.js");
     "/home-dashboard.js", JS => const HOME_DASHBOARD_JS: &str = edition_ui!("home-dashboard.js");
@@ -190,16 +193,10 @@ ui_assets! {
     // （漏挂路由 = 404，样式全丢；漏排顺序 = 玻璃面板把平涂盖掉，只是不平涂）。
     "/cel-ui.css", CSS => const CEL_UI_CSS: &str = edition_ui!("cel-ui.css");
     "/anime-interactions.css", CSS => const ANIME_INTERACTIONS_CSS: &str = edition_ui!("anime-interactions.css");
-    "/skins/skins.css", CSS => const SKINS_CSS: &str = edition_ui!("skins/skins.css");
-    "/skins/skin.liunian.css", CSS => const SKIN_LIUNIAN_CSS: &str = edition_ui!("skins/skin.liunian.css");
-    "/skins/skin.qingfeng.css", CSS => const SKIN_QINGFENG_CSS: &str = edition_ui!("skins/skin.qingfeng.css");
-    "/skins/skin.heijiao.css", CSS => const SKIN_HEIJIAO_CSS: &str = edition_ui!("skins/skin.heijiao.css");
+    "/cover-wall.js", JS => const COVER_WALL_JS: &str = edition_ui!("cover-wall.js");
+    "/cover-wall.css", CSS => const COVER_WALL_CSS: &str = edition_ui!("cover-wall.css");
+    "/skins/skin.hertz.js", JS => const SKIN_HERTZ_JS: &str = edition_ui!("skins/skin.hertz.js");
+    "/skins/skin.hertz.css", CSS => const SKIN_HERTZ_CSS: &str = edition_ui!("skins/skin.hertz.css");
     "/skins/skin-shared.js", JS => const SKIN_SHARED_JS: &str = edition_ui!("skins/skin-shared.js");
-    "/skins/skin-settings-sheet.js", JS => const SKIN_SETTINGS_SHEET_JS: &str = edition_ui!("skins/skin-settings-sheet.js");
-    "/skins/skin.liunian.js", JS => const SKIN_LIUNIAN_JS: &str = edition_ui!("skins/skin.liunian.js");
-    "/skins/skin.qingfeng.js", JS => const SKIN_QINGFENG_JS: &str = edition_ui!("skins/skin.qingfeng.js");
-    "/skins/skin.heijiao.js", JS => const SKIN_HEIJIAO_JS: &str = edition_ui!("skins/skin.heijiao.js");
-    "/skins/skin.orbit.js", JS => const SKIN_ORBIT_JS: &str = edition_ui!("skins/skin.orbit.js");
-    "/skins/skin.orbit.css", CSS => const SKIN_ORBIT_CSS: &str = edition_ui!("skins/skin.orbit.css");
     "/stage-themes/starfall.css", CSS => const STAGE_THEME_STARFALL_CSS: &str = edition_ui!("stage-themes/starfall.css");
 }

@@ -55,7 +55,7 @@ const fixtureHtml = preferences => indexHtml.replace('<head>', '<head><script>('
 
 // Targeted production-app regression for a supported saved default. No source slicing.
 async function checkSettingsDefault(browser, baseUrl) {
-  const skins = ['classic', 'liunian', 'qingfeng', 'heijiao', 'orbit'], evidence = [];
+  const skins = ['hertz'], evidence = [];
   for (const initialSkin of skins) {
     const page = await browser.newPage({ viewport: { width: 1440, height: 1000 }, reducedMotion: 'reduce' });
     page.setDefaultTimeout(15000);
@@ -93,12 +93,7 @@ async function checkSettingsDefault(browser, baseUrl) {
       assert.deepEqual(await requests(), [], 'Escape while restored settings is active does not inspect desktop');
       await frame.evaluate(caps => { fixture.desktopReply = { status: 200, body: caps }; }, capability());
       const close = async () => {
-        await frame.waitForFunction(() => !document.querySelector('.skset-modal.is-closing, .qf-modal.is-closing, .ln-modal.is-closing'));
-        const button = frame.locator('.skset-modal:not([hidden]) .skset-modal-close, .qf-modal:not([hidden]) .qf-modal-close, .ln-modal:not([hidden]) .ln-modal-close').first();
-        if (await button.count()) {
-          await button.click();
-          await frame.waitForFunction(() => [...document.querySelectorAll('.skset-modal, .qf-modal, .ln-modal')].every(modal => modal.hidden));
-        }
+        await frame.evaluate(() => HertzShell.navigate('home'));
         await renderBoundary();
       };
       await close();
@@ -107,9 +102,8 @@ async function checkSettingsDefault(browser, baseUrl) {
       await renderBoundary();
       assert.deepEqual(await requests(), [], 'global Escape on the restored view does not inspect desktop');
       await close();
-      const entry = initialSkin === 'qingfeng' ? '.qf-settings-btn' : initialSkin === 'liunian' ? '.ln-nav-item[data-ln-view="settings"]' : '.rail-item[data-view="settings"]';
+      const entry = '.rail-item[data-view="settings"]';
       const open = async expectedCount => {
-        if (initialSkin === 'heijiao') await frame.locator('.hj-nav-handle').hover();
         await frame.locator(entry).click();
         await frame.waitForFunction(expected => fixture.requests.filter(request => request.method === 'v1/desktop/capabilities').length === expected && !document.getElementById('dbx-desktop-refresh')?.disabled, expectedCount);
         await renderBoundary();
@@ -127,7 +121,7 @@ async function checkSettingsDefault(browser, baseUrl) {
       assert.ok((await requests()).every(request => request.method === 'v1/desktop/capabilities'), 'no automatic connect/disconnect/launch');
       assert.deepEqual(errors, []);
       evidence.push({ initialSkin, savedDefaultView: 'settings', restoredView: 'settings', mounts, startupAndMountDesktopRequests: 0, userOpenReopenBarDesktopRequests: await requests(), errors });
-      console.log('PASS saved settings default:', initialSkin, 'startup + 5 skin mounts: 0 desktop requests; real open/reopen/bar: 3');
+      console.log('PASS saved settings default:', initialSkin, 'startup + Hertz remount: 0 desktop requests; real open/reopen/bar: 3');
     } finally { await page.close(); }
   }
   fs.writeFileSync(path.join(output, 'settings-default-evidence.json'), JSON.stringify(evidence, null, 2));
@@ -160,6 +154,8 @@ async function checkStandalone(browser) {
     assert.equal(await page.locator('#dbx-desktop-settings').isVisible(), false, 'Standalone optional DBX section stays hidden');
     assert.equal(await page.locator('#set-desktop-lyrics-row').isVisible(), true);
     assert.equal(await page.locator('#set-wallpaper-row').isVisible(), true);
+    assert.deepEqual(await page.evaluate(() => legacyRequests), [{ endpoint: '/v1/desktop/control', body: { command: 'status' } }], 'Standalone initial status is a read-only legacy probe');
+    await page.evaluate(() => { legacyRequests.length = 0; });
     await page.locator('#set-desktop-lyrics-open').click();
     await page.locator('#set-desktop-lyrics-locate').click();
     await page.locator('#set-wallpaper-settings').click();
@@ -189,7 +185,7 @@ async function main() {
   const server = http.createServer((request, response) => {
     const requestUrl = new URL(request.url, 'http://localhost'), pathname = requestUrl.pathname;
     const skin = requestUrl.searchParams.get('startupSkin');
-    const startupSkin = ['classic', 'liunian', 'qingfeng', 'heijiao', 'orbit'].includes(skin) ? skin : null;
+    const startupSkin = ['hertz'].includes(skin) ? skin : null;
     response.setHeader('Access-Control-Allow-Origin', '*');
     if (pathname === '/host') { response.setHeader('Content-Type', 'text/html'); return response.end('<body style="margin:0"><iframe title="DBX" sandbox="allow-scripts" src="/index.html' + (startupSkin ? '?startupSkin=' + startupSkin : '') + '" style="border:0;width:100vw;height:100vh"></iframe>'); }
     if (pathname === '/index.html') { response.setHeader('Content-Type', 'text/html; charset=utf-8'); return response.end(fixtureHtml(startupSkin ? { 'vmusic.defaultView': 'settings', 'vmusic.skin': startupSkin, 'vmusic.skin.default': 'orbit' } : {})); }
@@ -234,9 +230,8 @@ async function main() {
     };
     const text = () => frame.locator('#dbx-desktop-settings').innerText();
     const closeSheet = async () => {
-      const button = frame.locator('.skset-modal:not([hidden]) .skset-modal-close, .qf-modal:not([hidden]) .qf-modal-close, .ln-modal:not([hidden]) .ln-modal-close').first();
-      if (await button.count()) await button.click();
-      await frame.waitForTimeout(250);
+      await frame.evaluate(() => HertzShell.navigate('home'));
+      await frame.waitForTimeout(100);
     };
     assert.equal((await requests()).length, 0, 'bootstrap and initial settings load do not inspect desktop');
     await frame.evaluate(async () => { await loadSettings(); await refreshAll(); });
@@ -245,36 +240,27 @@ async function main() {
     assert.equal(await frame.locator('#set-wallpaper-row').isVisible(), false);
 
     const skins = await frame.evaluate(() => Skins.catalog().map(skin => skin.id));
-    assert.deepEqual(skins, ['classic', 'liunian', 'qingfeng', 'heijiao', 'orbit']);
+    assert.deepEqual(skins, ['hertz']);
     for (const skin of skins) {
       await frame.evaluate(skin => Skins.apply(skin), skin);
       await frame.waitForTimeout(100);
       const before = await count('v1/desktop/capabilities');
       await reply({ status: 200, body: capability() });
-      if (skin === 'heijiao') await frame.locator('.hj-nav-handle').hover();
-      const opener = skin === 'qingfeng' ? '.qf-settings-btn' : skin === 'liunian' ? '.ln-nav-item[data-ln-view="settings"]' : '.rail-item[data-view="settings"]';
+      const opener = '.rail-item[data-view="settings"]';
       const entry = opener;
       await frame.locator(entry).click();
       await frame.waitForFunction(() => !document.getElementById('dbx-desktop-refresh').disabled);
       assert.equal(await count('v1/desktop/capabilities'), before + 1, skin + ' real settings opening detects exactly once');
-      const lyricNav = frame.locator('.skset-link[data-skset-key="lyrics"], .qf-set-link[data-qf-key="lyrics"], .ln-set-link[data-ln-key="lyrics"]');
+      const lyricNav = frame.locator('.hz-settings-nav [data-category="lyrics"]');
       await lyricNav.click();
       assert.equal(await frame.locator('#dbx-desktop-settings').isVisible(), true, skin + ' unified section visible');
       assert.equal(await count('v1/desktop/connect'), 0, 'opening settings never grants consent');
       await page.screenshot({ path: path.join(output, skin + '.png'), animations: 'disabled' });
       await closeSheet();
-      if (skin === 'heijiao') await frame.locator('.hj-nav-handle').hover();
       await frame.locator(entry).click();
       await frame.waitForFunction(() => !document.getElementById('dbx-desktop-refresh').disabled);
       assert.equal(await count('v1/desktop/capabilities'), before + 2, skin + ' close and reopen detects again');
       await closeSheet();
-      if (skin === 'liunian') {
-        const captureBefore = await count('v1/desktop/capabilities');
-        await frame.locator('#settings-entry').click();
-        await frame.waitForFunction(() => !document.getElementById('dbx-desktop-refresh').disabled);
-        assert.equal(await count('v1/desktop/capabilities'), captureBefore + 1, 'liunian captured topbar entry detects once');
-        await closeSheet();
-      }
       const barBefore = await count('v1/desktop/capabilities');
       await frame.locator('#bar-desktop-settings').click();
       await frame.waitForFunction(() => document.activeElement.id === 'dbx-desktop-settings');
@@ -286,7 +272,7 @@ async function main() {
       await closeSheet();
     }
     // Flow/state fixtures below use the same fully loaded app and actual sandbox buttons.
-    await frame.evaluate(() => Skins.apply('classic'));
+    await frame.evaluate(() => Skins.apply('hertz'));
     await reply({ status: 200, body: capability() });
     await frame.locator('#bar-desktop-settings').click();
     await frame.waitForFunction(() => document.activeElement.id === 'dbx-desktop-settings');
@@ -402,7 +388,7 @@ async function main() {
     assert.deepEqual(errors, [], 'no uncaught errors in actual shipped app');
     fs.writeFileSync(path.join(output, 'evidence.json'), JSON.stringify({ skins, sandbox: 'allow-scripts', requests: await requests(), errors }, null, 2));
     await checkStandalone(browser);
-    console.log('PASS DBX desktop settings: opaque sandbox, all 5 skins real openings/reopen/bar focus, explicit consent, component/auth/source states, partial failures, revoke races, no startup/polling, guide fallback and narrow layout.');
+    console.log('PASS DBX desktop settings: opaque sandbox, Hertz real openings/reopen/bar focus, explicit consent, component/auth/source states, partial failures, revoke races, no startup/polling, guide fallback and narrow layout.');
   } finally { await browser.close(); await new Promise(resolve => server.close(resolve)); }
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

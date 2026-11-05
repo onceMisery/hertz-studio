@@ -113,8 +113,8 @@ function checkWebView2Base() {
   eq(assetUrl(opts, '/platform-icons/netease.png'),
     `http://dbx-plugin.localhost/${PLUGIN_ID}/platform-icons/netease.png`,
     '平台图标解析到 ui 根下的 platform-icons/');
-  eq(assetUrl(opts, '/skins/skins.css'),
-    `http://dbx-plugin.localhost/${PLUGIN_ID}/skins/skins.css`,
+  eq(assetUrl(opts, '/skins/skin.hertz.css'),
+    `http://dbx-plugin.localhost/${PLUGIN_ID}/skins/skin.hertz.css`,
     '皮肤 CSS 解析到 ui 根下的 skins/');
   eq(assetUrl(opts, '/stanza/stanza.css'),
     `http://dbx-plugin.localhost/${PLUGIN_ID}/stanza/stanza.css`,

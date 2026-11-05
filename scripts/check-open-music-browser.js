@@ -5,7 +5,7 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { chromium } = require('playwright');
+const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const { uiToken, uiUrl } = require('./ui-token');
 
 const base = process.env.OPEN_MUSIC_URL || 'http://127.0.0.1:7640';
@@ -22,8 +22,8 @@ async function api(method, endpoint, body) {
   return r.json();
 }
 async function settings(page) {
-  await page.evaluate(() => window.SkinSettingsSheet.open());
-  await page.locator('.skset-link').filter({ hasText: /^在线音源$/ }).click();
+  await page.evaluate(() => window.HertzShell.navigate('settings'));
+  await page.locator('.hz-settings-nav [data-category="connection"]').click();
   await page.locator('#jamendo-client-id').waitFor({ state: 'visible' });
 }
 
@@ -39,7 +39,7 @@ async function settings(page) {
       await page.goto(uiUrl(base), { waitUntil: 'load' });
       await page.addStyleTag({ content: '*,*::before,*::after{animation:none!important;transition:none!important}' });
       await page.waitForFunction(() => window.Online && Online.sources().length && window.Skins);
-      await page.evaluate(() => window.Skins.apply('classic'));
+      await page.evaluate(() => window.Skins.apply('hertz'));
       await settings(page);
       await page.waitForFunction(() => !document.querySelector('#jamendo-save').disabled);
       const rect = await page.locator('#jamendo-client-id').boundingBox();
@@ -54,8 +54,7 @@ async function settings(page) {
       await page.locator('#jamendo-save').click();
       await page.waitForFunction(() => !Online.sources().some(s => s.id === 'jamendo'));
       check(!(await api('GET', '/v1/online/sources')).sources.some(s => s.id === 'jamendo'), 'Clearing client ID disables Jamendo');
-      await page.evaluate(() => window.SkinSettingsSheet.close());
-      await page.locator('.rail-item[data-view="online"]').click();
+      await page.evaluate(() => window.HertzShell.navigate('online'));
       await page.locator('#online-source').selectOption('ccmixter');
       await page.locator('#online-q').fill('zzhertznonexistent12345678');
       await page.locator('#online-q').press('Enter');

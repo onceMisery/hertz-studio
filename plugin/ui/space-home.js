@@ -171,7 +171,7 @@
   function buildSearchModes() {
     if (!host) return;
     var seen = new Set(['all', 'local']);
-    var sources = [{id:'all',name:'All'},{id:'local',name:'本地'}].concat((host.read().sources || []).filter(function (source) {
+    var sources = [{id:'all',name:'全部'},{id:'local',name:'本地'}].concat((host.read().sources || []).filter(function (source) {
       if (!source || !source.id || seen.has(source.id)) return false;
       seen.add(source.id); return true;
     }));
@@ -271,7 +271,7 @@
     var spec = panel;
     el.panelLayer.dataset.kind = spec.kind;
     el.panelLayer.classList.toggle('is-search', spec.kind === 'search');
-    el.panelTitle.textContent = spec.kind === 'playlist' ? spec.playlist.name : { library: '音乐库', search: '搜索 · ' + (spec.q || ''), daily: '每日推荐', recent: '最近播放', radio: '电台 · 私人 FM', podcasts: 'RSS · 播客' }[spec.kind];
+    el.panelTitle.textContent = spec.kind === 'playlist' ? spec.playlist.name : { library: '音乐库', search: spec.q ? '搜索 · ' + spec.q : '搜索音乐', daily: '每日推荐', recent: '最近播放', radio: '电台 · 私人 FM', podcasts: 'RSS · 播客' }[spec.kind];
     el.panelLeading.replaceChildren(); el.panelTools.replaceChildren(); el.panelControls.replaceChildren();
     if (spec.kind === 'playlist') el.panelLeading.appendChild(button('返回歌单', 'undo', function () { open(spec.parent); }));
     el.panelTools.appendChild(button('刷新', 'reset', function () { if (spec.kind === 'radio' || spec.kind === 'podcasts') { if (surface) return run(surface.refresh); return drawPanel(); } if (spec.history) return searchHistory(); panel.items = null; loadPanel(); }));

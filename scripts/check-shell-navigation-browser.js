@@ -54,15 +54,15 @@ const pageErrors = [];
   const boot = await page.evaluate(() => ({
     active: window.HertzShell.activeView(),
     mode: window.HertzShell.mode(),
-    hidden: Object.fromEntries(['library', 'online', 'room', 'settings'].map((id) => [id, document.getElementById('view-' + id).hidden])),
+    hidden: Object.fromEntries(['home', 'library', 'online', 'room', 'settings'].map((id) => [id, document.getElementById('view-' + id).hidden])),
     railActive: document.querySelector('.rail-item.active') && document.querySelector('.rail-item.active').dataset.view,
     roomView: document.body.classList.contains('room-view'),
     generation: window.HertzShell.generation(),
   }));
-  check(boot.active === 'online', `启动落位默认在线曲库（实得 ${boot.active}）`);
+  check(boot.active === 'home', `启动落位默认首页（实得 ${boot.active}）`);
   check(boot.mode === 'default' && boot.roomView === false, '启动为普通工作区模式');
-  check(boot.hidden.online === false && boot.hidden.library === true && boot.hidden.room === true, '视图 hidden 对账正确');
-  check(boot.railActive === 'online', '导航选中态与活动视图一致');
+  check(boot.hidden.home === false && boot.hidden.library === true && boot.hidden.room === true, '视图 hidden 对账正确');
+  check(boot.railActive === 'home', '导航选中态与活动视图一致');
 
   // 2. 房间工作区：进入后公共 chrome 隐藏、外壳模式切房间。
   await page.click('.rail-item[data-view="room"]');
@@ -85,7 +85,7 @@ const pageErrors = [];
 
   // 3. 房间中换肤：换肤广播让外壳重跑落位（既有契约：换完一律落到默认视图并
   //    重跑进入对账）；房间会话不重建，公共 chrome 归属始终由外壳统一决定。
-  for (const skin of ['qingfeng', 'classic', 'orbit']) {
+  for (const skin of ['hertz']) {
     await page.evaluate((id) => window.Skins.apply(id), skin);
     await page.waitForFunction((id) => document.documentElement.dataset.skin === id, skin);
     const skinRoom = await page.evaluate(() => ({
@@ -94,14 +94,14 @@ const pageErrors = [];
       topbarDisplay: getComputedStyle(document.querySelector('.topbar')).display,
       workspaceMounted: !!document.querySelector('#view-room .room-workspace'),
     }));
-    check(skinRoom.active === 'online' && skinRoom.roomView === false && skinRoom.topbarDisplay !== 'none',
+    check(skinRoom.active === 'home' && skinRoom.roomView === false && skinRoom.topbarDisplay !== 'none',
       `房间中切到 ${skin} 皮肤：外壳按契约重新落位默认视图，chrome 恢复`);
     check(skinRoom.workspaceMounted, `切到 ${skin} 皮肤后房间会话未被重建`);
   }
 
   // 3b. 皮肤下的房间工作区：外壳的模式布局规则对 html[data-skin] 同样成立。
-  await page.evaluate(() => window.Skins.apply('qingfeng'));
-  await page.waitForFunction(() => document.documentElement.dataset.skin === 'qingfeng');
+  await page.evaluate(() => window.Skins.apply('hertz'));
+  await page.waitForFunction(() => document.documentElement.dataset.skin === 'hertz');
   // 清风把 rail 换成胶囊导航（rail 不可点），页面请求切页走外壳 API。
   await page.evaluate(() => window.HertzShell.navigate('room'));
   await page.waitForFunction(() => window.HertzShell.activeView() === 'room');
@@ -111,9 +111,9 @@ const pageErrors = [];
     roomHidden: document.getElementById('view-room').hidden,
   }));
   check(skinLayout.roomView === true && skinLayout.appColumns === 1 && skinLayout.roomHidden === false,
-    '清风皮肤下房间工作区单列占满（外壳层规则对皮肤生效）');
-  await page.evaluate(() => window.Skins.apply('orbit'));
-  await page.waitForFunction(() => document.documentElement.dataset.skin === 'orbit');
+    'Hertz 布局下房间工作区单列占满（外壳层规则对皮肤生效）');
+  await page.evaluate(() => window.Skins.apply('hertz'));
+  await page.waitForFunction(() => document.documentElement.dataset.skin === 'hertz');
 
   // 4. 退出房间：公共 chrome 恢复，房间会话外壳侧仅归还展示权。
   //    （房间模式下 rail 被外壳隐藏，切页走外壳 API —— 与页面请求路径一致。）
@@ -170,16 +170,11 @@ const pageErrors = [];
   await page.waitForFunction(() => window.HertzShell.activeView() === 'library');
   check(true, '快捷键 1 与 Esc 对账后仍落在曲库');
 
-  // 9. 播放条 pin/restore（外壳不得干扰其自有状态机）。
-  await page.click('#bar-pin-toggle');
-  await page.waitForFunction(() => document.getElementById('playback-bar').classList.contains('is-hidden'));
-  const barHidden = await page.evaluate(() => ({
-    restoreVisible: !document.getElementById('bar-restore').hidden,
-  }));
-  check(barHidden.restoreVisible, '播放条收起后恢复按钮可见');
-  await page.click('#bar-restore');
-  await page.waitForFunction(() => !document.getElementById('playback-bar').classList.contains('is-hidden'));
-  check(true, '播放条恢复');
+  // 9. Persistent player and Hertz queue drawer keep independent surface ownership.
+  await page.locator('#bar-queue').click();
+  check(await page.locator('.hz-queue-pane').isVisible(), '播放条打开队列抽屉');
+  await page.locator('.hz-queue-pane').getByRole('button', { name: '收起队列', exact: true }).click();
+  check(!await page.locator('.hz-queue-pane').isVisible() && await page.locator('#playback-bar').isVisible(), '关闭队列保留播放条');
 
   // 10. 截图存证 + 启动期无脚本异常（摘除类改动必须全页启动冒烟）。
   await page.screenshot({ path: path.join(output, 'shell-library.png') });

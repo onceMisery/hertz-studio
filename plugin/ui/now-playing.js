@@ -2,35 +2,47 @@
 // Commands and data belong to app.js; Stage owns lyric timing and the only frame loop.
 (function () {
   'use strict';
-  var el = {}, actions, opened = false, trigger, background = [], moves = [], eqMoves = [];
-  var linesRef, rows = [], active = -2, browsing = false, resize, queueKey = '', lyricStatus = 'empty', view = 'cover';
+  var el = {}, actions, opened = false, trigger, background = [], moves = [], eqMoves = [], overlayBackground = [];
+  var linesRef, rows = [], active = -2, browsing = false, resize, queueKey = '', queueLimit = 60, lyricStatus = 'empty', view = 'cover';
   function time(ms) { var s = Math.max(0, Math.floor(ms / 1000)); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); }
   function move(node, parent, records) {
     if (!node) return;
     var anchor = document.createComment('ordinary-player');
-    node.before(anchor); records.push({ node: node, anchor: anchor }); parent.appendChild(node);
+    node.before(anchor); records.push({ node: node, anchor: anchor, hidden: node.hidden }); parent.appendChild(node);
   }
-  function restore(records) { records.reverse().forEach(function (m) { m.anchor.replaceWith(m.node); }); records.length = 0; }
+  function restore(records) { records.reverse().forEach(function (m) { m.node.hidden = m.hidden; m.anchor.replaceWith(m.node); }); records.length = 0; }
+  function blockPlayer(block) {
+    overlayBackground.forEach(function (saved) { saved.node.inert = saved.inert; }); overlayBackground = [];
+    if (block) [el.modal.querySelector('.np-head'), document.getElementById('np-cover-pane'), el.reading, el.modal.querySelector('.np-footer')].forEach(function (node) {
+      overlayBackground.push({ node: node, inert: node.inert }); node.inert = true;
+    });
+  }
   function selectView(next) {
     view = next; el.modal.dataset.view = next;
     el.coverTab.setAttribute('aria-pressed', String(next === 'cover'));
     el.lyricsTab.setAttribute('aria-pressed', String(next === 'lyrics')); positionLine();
   }
   function showQueue(show) {
-    el.queuePane.hidden = !show; el.reading.hidden = show;
+    if (!opened) return;
+    if (show && !el.tools.hidden) showTools(false);
+    el.queuePane.hidden = !show; el.queueScrim.hidden = !show;
+    blockPlayer(show);
     el.queue.setAttribute('aria-expanded', String(show));
     if (show) { paintQueue(); el.queueClose.focus(); }
     else { positionLine(); el.queue.focus(); }
   }
   function showTools(show) {
+    if (show && !el.queuePane.hidden) showQueue(false);
     if (!show && actions.closeLyricImport) actions.closeLyricImport();
     el.tools.hidden = !show; el.more.setAttribute('aria-expanded', String(show));
+    blockPlayer(show);
     if (show) el.toolsClose.focus();
     else { el.eqPane.hidden = true; restore(eqMoves); el.more.focus(); }
   }
   function showEq() {
     if (!eqMoves.length) {
-      move(document.getElementById('dsp-eq-row').closest('.set-group'), el.eqPane, eqMoves);
+      var group = document.getElementById('dsp-eq-row').closest('.set-group');
+      move(group, el.eqPane, eqMoves); group.hidden = false;
       Skins.request('settings-enter', { sections: ['dsp'] });
     }
     el.eqPane.hidden = !el.eqPane.hidden;
@@ -69,13 +81,16 @@
     if (!opened) return;
     el.empty.textContent = lyricStatus === 'loading' ? '歌词加载中' : lyricStatus === 'error' ? '歌词加载失败' : Stage.presentation().track ? '暂无歌词' : '播放一首音乐';
   }
-  function paintQueue() {
+  function paintQueue(nextFocus) {
     if (!opened || el.queuePane.hidden) return;
-    var items = actions.queue(), key = JSON.stringify(items.map(function (i) { return [i.id, i.title, i.artist, i.cover, i.current]; }));
+    var items = actions.queue(), key = JSON.stringify([items.length, items.slice(0, queueLimit).map(function (i) { return [i.id, i.index, i.title, i.artist, i.cover, i.duration, i.current]; })]);
     if (key === queueKey) return;
+    var focus = document.activeElement, hadFocus = el.queueList.contains(focus);
+    var focused = hadFocus && focus.hasAttribute('data-index') ? Number(focus.dataset.index) : null;
+    var focusedMore = hadFocus && focus.classList.contains('np-queue-more');
     queueKey = key; el.queueList.replaceChildren(); el.queueCount.textContent = items.length + ' 首';
     if (!items.length) { var empty = document.createElement('p'); empty.textContent = '队列是空的'; el.queueList.appendChild(empty); }
-    items.forEach(function (item) {
+    items.slice(0, queueLimit).forEach(function (item) {
       var button = document.createElement('button'); button.type = 'button'; button.className = 'np-queue-row' + (item.current ? ' is-current' : '');
       button.setAttribute('aria-current', String(item.current)); button.dataset.index = item.index;
       var art = document.createElement('span'); art.className = 'np-queue-art'; art.textContent = item.badge;
@@ -86,6 +101,16 @@
       button.append(art, meta, duration); button.onclick = function () { actions.playIndex(item.index); };
       el.queueList.appendChild(button);
     });
+    if (items.length > queueLimit) {
+      var more = document.createElement('button'); more.type = 'button'; more.className = 'btn np-queue-more'; more.textContent = '加载更多歌曲';
+      more.onclick = function () { var firstAdded = queueLimit; queueLimit += 60; queueKey = ''; paintQueue(firstAdded); }; el.queueList.appendChild(more);
+    }
+    if (Number.isInteger(nextFocus) || focused !== null || focusedMore) {
+      var at = Number.isInteger(nextFocus) ? nextFocus : focused, buttons = el.queueList.querySelectorAll('[data-index]');
+      var target = at !== null ? el.queueList.querySelector('[data-index="' + at + '"]') : el.queueList.querySelector('.np-queue-more');
+      if (!target) target = buttons[Math.min(Math.max(0, at || 0), buttons.length - 1)] || el.queueClose;
+      target.focus({ preventScroll: !Number.isInteger(nextFocus) });
+    }
   }
   function tick() {
     if (!opened) return;
@@ -111,7 +136,7 @@
     el.favorite.querySelector('use').setAttribute('href', favorite.on ? '#i-heart' : '#i-heart-outline');
     var mode = actions.modeState(); el.mode.title = mode.label; el.mode.setAttribute('aria-label', mode.label);
     el.mode.querySelector('use').setAttribute('href', mode.icon);
-    paintQueue(); emptyState();
+    emptyState();
   }
   function fullscreenState() {
     var on = document.fullscreenElement === el.modal;
@@ -132,8 +157,8 @@
     if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); back(); return; }
     if (e.key === 'Tab') {
       var menu = document.getElementById('ctx-menu');
-      var container = !menu.hidden ? menu : el.tools.hidden ? el.modal : el.tools;
-      var focusable = Array.from(container.querySelectorAll('button,input,select,[tabindex="0"]')).filter(function (n) { return !n.disabled && n.getClientRects().length && getComputedStyle(n).visibility !== 'hidden'; });
+      var container = !menu.hidden ? menu : !el.tools.hidden ? el.tools : !el.queuePane.hidden ? el.queuePane : el.modal;
+      var focusable = Array.from(container.querySelectorAll('button,input,select,[tabindex="0"]')).filter(function (n) { return !n.disabled && n.tabIndex !== -1 && !n.closest('[inert]') && n.getClientRects().length && getComputedStyle(n).visibility !== 'hidden'; });
       var first = focusable[0], last = focusable[focusable.length - 1];
       if (!first) return;
       if (!container.contains(document.activeElement)) { e.preventDefault(); (e.shiftKey ? last : first).focus(); }
@@ -143,10 +168,11 @@
   }
   function init(hostActions) {
     actions = hostActions;
-    var ids = { modal: 'np-modal', scroll: 'np-lyric-scroll', lines: 'np-lyric-lines', empty: 'np-empty', reading: 'np-reading', follow: 'np-follow', coverTab: 'np-tab-cover', lyricsTab: 'np-tab-lyrics', queue: 'np-queue', queuePane: 'np-queue-pane', queueList: 'np-queue-list', queueClose: 'np-queue-close', queueCount: 'np-queue-count', more: 'np-more', tools: 'np-tools', toolsClose: 'np-tools-close', stage: 'np-stage', fullscreen: 'np-fullscreen', elapsed: 'np-elapsed', duration: 'np-duration', favorite: 'np-favorite', mode: 'np-mode', eqPane: 'np-eq-pane' };
+    var ids = { modal: 'np-modal', scroll: 'np-lyric-scroll', lines: 'np-lyric-lines', empty: 'np-empty', reading: 'np-reading', follow: 'np-follow', coverTab: 'np-tab-cover', lyricsTab: 'np-tab-lyrics', queue: 'np-queue', queuePane: 'np-queue-pane', queueScrim: 'np-queue-scrim', queueList: 'np-queue-list', queueClose: 'np-queue-close', queueCount: 'np-queue-count', more: 'np-more', tools: 'np-tools', toolsClose: 'np-tools-close', stage: 'np-stage', fullscreen: 'np-fullscreen', elapsed: 'np-elapsed', duration: 'np-duration', favorite: 'np-favorite', mode: 'np-mode', eqPane: 'np-eq-pane' };
     Object.keys(ids).forEach(function (key) { el[key] = document.getElementById(ids[key]); });
     el.coverTab.onclick = function () { selectView('cover'); }; el.lyricsTab.onclick = function () { selectView('lyrics'); };
     el.queue.onclick = function () { showQueue(el.queuePane.hidden); }; el.queueClose.onclick = function () { showQueue(false); };
+    el.queueScrim.onclick = function () { showQueue(false); };
     el.more.onclick = function () { showTools(el.tools.hidden); }; el.toolsClose.onclick = function () { showTools(false); };
     el.follow.onclick = resume;
     el.scroll.addEventListener('wheel', browse, { passive: true }); el.scroll.addEventListener('touchstart', browse, { passive: true });
@@ -164,6 +190,10 @@
       task.catch(function () { actions.notice('当前窗口无法进入全屏'); fullscreenState(); });
     };
     Stage.gate('ordinary-player', function () { return opened ? 30 : 0; }, tick);
+    var queueObserver = new MutationObserver(paintQueue);
+    queueObserver.observe(document.getElementById('queue-list'), { childList: true, subtree: true });
+    document.addEventListener('playback:track', paintQueue);
+    document.addEventListener('stage:playing-changed', paintQueue);
     document.addEventListener('fullscreenchange', fullscreenState); document.addEventListener('keydown', keydown, true);
   }
   function open() {
@@ -174,11 +204,6 @@
     move(document.getElementById('ctx-menu'), el.modal, moves);
     background = Array.from(document.querySelectorAll('.topbar,.app,.bar,#capsule,.qf-lattice'));
     background = background.map(function (n) { var old = n.inert; n.inert = true; return { node: n, inert: old }; });
-    if (el.modal.dataset.skin === 'heijiao') {
-      var disc = document.querySelector('#stage .disc-wrap'), parent = document.getElementById('np-art').parentElement;
-      var host = document.createElement('div'); host.id = 'np-disc-host'; parent.prepend(host);
-      move(disc, host, moves); document.getElementById('np-art').hidden = true;
-    }
     selectView(view); tick(); resize = new ResizeObserver(positionLine); resize.observe(el.scroll);
     document.getElementById('np-close').focus({ preventScroll: true });
   }
@@ -189,8 +214,8 @@
     if (document.fullscreenElement === el.modal) document.exitFullscreen().catch(function () {});
     if (resize) resize.disconnect(); resize = null;
     restore(eqMoves); restore(moves);
-    var host = document.getElementById('np-disc-host'); if (host) host.remove(); document.getElementById('np-art').hidden = false;
-    el.tools.hidden = true; el.eqPane.hidden = true; el.queuePane.hidden = true; el.reading.hidden = false;
+    blockPlayer(false);
+    el.tools.hidden = true; el.eqPane.hidden = true; el.queuePane.hidden = true; el.queueScrim.hidden = true; el.reading.hidden = false;
     el.more.setAttribute('aria-expanded', 'false'); el.queue.setAttribute('aria-expanded', 'false');
     document.body.classList.remove('np-expanded'); background.forEach(function (m) { m.node.inert = m.inert; }); background = [];
     if (!(options && options.switching) && trigger && trigger.isConnected && !trigger.inert) trigger.focus({ preventScroll: true }); trigger = null;

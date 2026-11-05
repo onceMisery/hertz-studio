@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <title>Hertz Studio</title>
+  <rect x="8" y="8" width="240" height="240" rx="60" fill="#171719"/>
+  <rect x="8.5" y="8.5" width="239" height="239" rx="59.5" fill="none" stroke="#484746"/>
+  <g fill="#f4f1e9">
+    <rect x="43" y="108" width="14" height="40" rx="7"/>
+    <rect x="76" y="62" width="20" height="132" rx="10"/>
+    <rect x="91" y="119" width="74" height="18" rx="9"/>
+    <rect x="120" y="94" width="16" height="68" rx="8"/>
+    <rect x="160" y="62" width="20" height="132" rx="10"/>
+    <rect x="199" y="108" width="14" height="40" rx="7"/>
+  </g>
+</svg>

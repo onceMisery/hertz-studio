@@ -138,11 +138,12 @@ function loadModule(seed) {
 
   section('owner 唯一，且各入口都记到这里');
   {
-    const liunian = read('plugin/ui/skins/skin.liunian.js');
-    ok(!/HISTORY_KEY/.test(liunian), '流年不再有私有的历史键常量');
-    ok(!/localStorage\.(setItem|getItem|removeItem)\([^)]*[Hh]istory/.test(liunian),
-      '流年不许再直接读写历史存储（渲染层可以，存储层不行）');
-    ok(/window\.HertzSearchHistory/.test(liunian), '流年的四个历史函数都委托给 owner');
+    for (const file of ['plugin/ui/skins/skin.hertz.js', 'plugin/ui/cover-wall.js']) {
+      const surface = read(file);
+      ok(!/HISTORY_KEY/.test(surface), file + ' 不定义私有历史键');
+      ok(!/localStorage\.(setItem|getItem|removeItem)\([^)]*[Hh]istory/.test(surface),
+        file + ' 不直接读写历史存储');
+    }
     const app = read('plugin/ui/app.js');
     const online = read('plugin/ui/online.js');
     const top = read('plugin/ui/topsearch.js');
@@ -159,7 +160,7 @@ function loadModule(seed) {
       '在线框的 oninput 同样不许记');
     // 只有一个地方写这个键。
     const writers = ['plugin/ui/search-history.js', 'plugin/ui/app.js', 'plugin/ui/online.js',
-      'plugin/ui/topsearch.js', 'plugin/ui/skins/skin.liunian.js', 'plugin/ui/palette.js']
+      'plugin/ui/topsearch.js', 'plugin/ui/skins/skin.hertz.js', 'plugin/ui/cover-wall.js', 'plugin/ui/palette.js']
       .filter((f) => /'vmusic\.search-history'|"vmusic\.search-history"/.test(read(f)));
     eq(writers.join(','), 'plugin/ui/search-history.js', '键名只在一处出现');
     ok(!/HertzSearchHistory/.test(read('plugin/ui/palette.js')),
@@ -167,9 +168,10 @@ function loadModule(seed) {
     const html = read('plugin/ui/index.html');
     const at = html.indexOf('src="search-history.js"');
     ok(at >= 0, 'index.html 引入了 owner 模块');
-    ok(at < html.indexOf('src="skins/skin.liunian.js"'),
-      '必须排在皮肤之前（defer 按文档顺序执行）');
-    ok(at < html.indexOf('src="app.js"'), '也必须排在 app.js 之前');
+    for (const consumer of ['skins/skin.hertz.js', 'cover-wall.js', 'topsearch.js', 'online.js', 'app.js']) {
+      const consumerAt = html.indexOf('src="' + consumer + '"');
+      ok(consumerAt >= 0 && at < consumerAt, '历史 owner 必须在 ' + consumer + ' 之前加载');
+    }
   }
 
   console.log(`\n搜索历史契约检查：${checks} 项` + (failures ? `，${failures} 项失败` : '全部通过'));

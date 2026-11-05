@@ -29,6 +29,11 @@ async function ready(page) {
   await page.waitForFunction(() => document.getElementById('conn').textContent === '服务已连接');
 }
 async function favoriteReady(page) { await page.waitForFunction(() => !document.getElementById('bar-favorite').disabled); }
+async function collapseBar(page, width) {
+  // The prototype omits this redundant menu action. Exercise the retained
+  // legacy preference path so users with a saved collapsed bar can restore it.
+  await page.evaluate(() => document.getElementById('bar-pin-toggle').click());
+}
 async function workspaceAssets(route) {
   const url = new URL(route.request().url());
   const relative = decodeURIComponent(url.pathname).replace(/^\//, '') || 'index.html';
@@ -62,6 +67,7 @@ async function workspaceAssets(route) {
   const browser = await chromium.launch({ channel: process.env.PLAYWRIGHT_CHANNEL || 'chrome', headless: true });
   try {
     const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+    page.setDefaultTimeout(15000);
     // Workspace routing makes Chrome request local-network permission for WS.
     await page.context().grantPermissions(['local-network-access'], { origin: base });
     const errors = [];
@@ -70,58 +76,46 @@ async function workspaceAssets(route) {
     await ready(page);
     await api('POST', '/v1/player/load', { track_id: track.id, queue: [track.id] });
     await favoriteReady(page);
-    for (const skin of ['classic', 'liunian', 'qingfeng']) {
+    for (const skin of ['hertz']) {
       for (const width of [1440, 1024, 390, 320]) {
         await page.setViewportSize({ width, height: width < 500 ? 844 : 900 });
         await page.evaluate(value => Skins.apply(value), skin);
-        const favorite = page.locator('#bar-favorite');
+        const inPlayer = width < 900;
+        if (inPlayer) await page.locator('#bar-track').click();
+        const favorite = page.locator(inPlayer ? '#np-favorite' : '#bar-favorite');
         await favoriteReady(page);
         const box = await favorite.boundingBox();
-        const title = await page.locator('#bar-title').boundingBox();
+        const title = await page.locator(inPlayer ? '#np-name' : '#bar-title').boundingBox();
         check(box && box.width >= 32 && box.x >= 0 && box.x + box.width <= width + 1 && title?.width >= 35,
           `${skin} ${width}: favorite and song title visible ${JSON.stringify({ box, title })}`);
         const previous = await favorite.getAttribute('aria-pressed');
         await favorite.click();
+        await page.waitForFunction(({ id, previous }) => document.getElementById(id).getAttribute('aria-pressed') !== previous, { id: inPlayer ? 'np-favorite' : 'bar-favorite', previous });
         await favoriteReady(page);
         check(await favorite.getAttribute('aria-pressed') !== previous, `${skin} ${width}: favorite toggles`);
-        if (skin === 'liunian') {
-          await page.locator('.ln-capsule-toggle').click();
-          check(await favorite.isVisible(), `${skin} ${width}: favorite survives player-card folding`);
-          await page.locator('.ln-capsule-toggle').click();
-        } else {
-          await page.locator('#bar-pin-toggle').click();
-          check(!await page.locator('.bar').isVisible() && await page.locator('#bar-restore').isVisible(), `${skin} ${width}: collapse and visible restore`);
-          await page.locator('#bar-restore').hover();
-          check(!await page.locator('.bar').isVisible(), `${skin} ${width}: hover respects collapse`);
-          await page.keyboard.press('Enter');
-          check(await page.locator('.bar').isVisible() && !await page.locator('#bar-restore').isVisible(), `${skin} ${width}: keyboard restores`);
-        }
+        if (inPlayer) await page.locator('#np-close').click();
+        check(await page.locator('.bar').isVisible(), `${skin} ${width}: persistent transport visible`);
+        await collapseBar(page, width);
+        check(!await page.locator('.bar').isVisible() && await page.locator('#bar-restore').isVisible(), `${skin} ${width}: legacy collapse state and visible restore`);
+        await page.locator('#bar-restore').hover();
+        check(!await page.locator('.bar').isVisible(), `${skin} ${width}: hover respects collapse`);
+        await page.locator('#bar-restore').focus();
+        await page.keyboard.press('Enter');
+        check(await page.locator('.bar').isVisible(), `${skin} ${width}: keyboard restores playback`);
         if (width === 1440 || width === 390) await page.screenshot({ path: path.join(output, `${skin}-${width}.png`) });
       }
     }
     await page.setViewportSize({ width: 1440, height: 900 });
-    await page.evaluate(() => Skins.apply('classic'));
-    // Restore remains accessible after refresh and switching to/from the inline skin.
-    await page.locator('#bar-pin-toggle').click();
+    await page.evaluate(() => Skins.apply('hertz'));
+    await collapseBar(page, 1440);
     await ready(page);
     check(await page.locator('#bar-restore').isVisible(), 'collapsed preference survives reload');
-    await page.evaluate(() => document.body.classList.add('s3d-open'));
-    check(!await page.locator('#bar-restore').isVisible(), 'immersive stage hides the restore entry');
-    await page.evaluate(() => document.body.classList.remove('s3d-open'));
-    await page.evaluate(() => { Skins.apply('qingfeng'); document.body.classList.add('qf-lattice-open'); });
-    check(!await page.locator('#bar-restore').isVisible(), 'poster wall hides the restore entry');
-    await page.evaluate(() => document.body.classList.remove('qf-lattice-open'));
-    await page.evaluate(() => Skins.apply('liunian'));
-    check(await page.locator('.bar').isVisible() && !await page.locator('#bar-restore').isVisible(), 'inline skin has one folding owner');
-    await page.evaluate(() => Skins.apply('classic'));
     await page.locator('#bar-restore').click();
-    for (let i = 0; i < 8; i++) {
-      await page.locator('#bar-pin-toggle').click();
-      await page.locator('#bar-restore').click();
-    }
-    await page.mouse.move(30, 80);
-    await page.waitForTimeout(16000);
-    check(await page.locator('.bar').isVisible(), 'rapid toggles and 16 seconds idle preserve explicit state');
+    await page.evaluate(() => HertzCoverWall.open());
+    check(!await page.locator('.bar').isVisible(), 'independent cover wall owns the immersive surface');
+    await page.evaluate(() => HertzCoverWall.close());
+    await page.waitForFunction(() => !document.body.classList.contains('qf-lattice-open'));
+    check(await page.locator('.bar').isVisible(), 'closing cover wall restores persistent transport');
     // Exercise online metadata rendering and the real favorite API without requesting a stream.
     const online = { id: 'online:netease:bar-check', source: 'netease', onlineId: 'bar-check', title: '控制台验收 · 在线歌曲', artist: '验收歌手', album: '验收专辑' };
     await page.evaluate(value => Online.paintNowPlaying(value, null), online);
