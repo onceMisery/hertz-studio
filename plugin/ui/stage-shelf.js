@@ -22,6 +22,12 @@
 (function (global) {
   'use strict';
 
+  // The Stage facade includes native parent-window suspension. Standalone consumers keep browser visibility.
+  function documentHidden() {
+    var stage = window.Stage;
+    return stage && typeof stage.isDocumentHidden === "function" ? stage.isDocumentHidden() : !!document.hidden;
+  }
+
   if (!global) return;
 
   // ---- openmusic 同款常量（GalaxyFloatingSongCard / galaxyFloatingSongCard）
@@ -97,7 +103,7 @@
     }
 
     function canRender() {
-      if (!active || mode === 'off' || !items.length || document.hidden || !chromeVisible()) return false;
+      if (!active || mode === 'off' || !items.length || documentHidden() || !chromeVisible()) return false;
       // 与窄屏 CSS 一致：队列展开时架子完全隐藏；设置面板仍保留实时预览。
       return !(narrowScreen && narrowScreen.matches && root.classList.contains('s3d-queue-open'));
     }
@@ -311,7 +317,7 @@
     // ---- 滚轮浏览（在舞台根节点捕获，贴近歌单架区域才截给架子）-------------
 
     function onPointerTrack(e) {
-      if (!active || blocked || document.hidden || reducedMotion()) return;
+      if (!active || blocked || documentHidden() || reducedMotion()) return;
       pointer.x = clamp(e.clientX / Math.max(1, global.innerWidth) * 2 - 1, -1, 1);
       pointer.y = clamp(e.clientY / Math.max(1, global.innerHeight) * 2 - 1, -1, 1);
     }
@@ -396,7 +402,7 @@
         if (nextIds.has(id)) return;
         if (el._cancelDrag) el._cancelDrag();
         // 滚出窗口直接回收；真正离队的卡片才演出退出动画。
-        if (indexOfId(id) >= 0 || !active || blocked || document.hidden || !chromeVisible() || mode === 'off' || reducedMotion()) {
+        if (indexOfId(id) >= 0 || !active || blocked || documentHidden() || !chromeVisible() || mode === 'off' || reducedMotion()) {
           if (el.parentNode) el.parentNode.removeChild(el);
         } else {
           el._pose.dead = now;
@@ -716,7 +722,7 @@
     }
 
     function onVisibilityChange() {
-      if (document.hidden) { cancelDrags(); clearDying(); setHover(null); }
+      if (documentHidden()) { cancelDrags(); clearDying(); setHover(null); }
       else if (active && Stage && Stage.kick) Stage.kick();
     }
 

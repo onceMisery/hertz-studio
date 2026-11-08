@@ -109,7 +109,10 @@ void main(){ float d=length(gl_PointCoord-.5); if(d>.5) discard;
 
 export function createStarfield(ctx, parent, { count = 1200, near = 18, far = 64, palette = [0x9fd7e8, 0xf7e4c8, 0x8ea6ff], size = [.6, 2.2], opacity = .8 } = {}) {
   const T = ctx.THREE;
+  const arrayBytes = count * 7 * 4;
+  const plan = ctx.scope.bufferPlan(arrayBytes + 24, arrayBytes, 'Space shared stellar position/color/size arrays');
   const positions = new Float32Array(count * 3), colors = new Float32Array(count * 3), sizes = new Float32Array(count);
+  plan.cpuReady(arrayBytes);
   const color = new T.Color(), tints = palette.map(hex => new T.Color(hex));
   for (let i = 0; i < count; i++) {
     const r = near + Math.pow(seed(i, 11), .7) * (far - near);
@@ -119,9 +122,9 @@ export function createStarfield(ctx, parent, { count = 1200, near = 18, far = 64
     color.toArray(colors, i * 3); sizes[i] = size[0] + Math.random() * (size[1] - size[0]);
   }
   const geometry = ctx.scope.track(new T.BufferGeometry());
-  geometry.setAttribute('position', new T.BufferAttribute(positions, 3));
-  geometry.setAttribute('aColor', new T.BufferAttribute(colors, 3));
-  geometry.setAttribute('aSize', new T.BufferAttribute(sizes, 1));
+  geometry.setAttribute('position', plan.upload(new T.BufferAttribute(positions, 3)));
+  geometry.setAttribute('aColor', plan.upload(new T.BufferAttribute(colors, 3)));
+  geometry.setAttribute('aSize', plan.upload(new T.BufferAttribute(sizes, 1)));
   const uniforms = { uTime: { value: 0 }, uPixel: { value: 1 }, uHeight: { value: 720 }, uOpacity: { value: opacity } };
   const material = ctx.scope.track(new T.ShaderMaterial({ uniforms, vertexShader: starVertex, fragmentShader: starFragment,
     transparent: true, depthWrite: false, blending: T.AdditiveBlending }));
@@ -165,14 +168,19 @@ void main(){ float d=length(vUv-.5)*2.0; float r=.12+vAge*.86;
 
 export function createShockPool(ctx, parent, { count = 6, duration = 1.1, opacity = .9 } = {}) {
   const T = ctx.THREE;
+  const geometryBytes = 4 * (3 + 3 + 2) * 4 + 6 * 2, instanceBytes = count * (1 + 3 + 16) * 4;
+  const plan = ctx.scope.bufferPlan(geometryBytes + instanceBytes + 38 * 8, geometryBytes + instanceBytes,
+    'Space shared shock PlaneGeometry and age/color/instance matrix arrays');
   const geometry = ctx.scope.track(new T.PlaneGeometry(2, 2));
+  Object.values(geometry.attributes).forEach(attribute => plan.upload(attribute)); plan.upload(geometry.index);
   const ages = new Float32Array(count).fill(1), colors = new Float32Array(count * 3).fill(1);
-  geometry.setAttribute('aAge', new T.InstancedBufferAttribute(ages, 1));
-  geometry.setAttribute('aColor', new T.InstancedBufferAttribute(colors, 3));
+  geometry.setAttribute('aAge', plan.upload(new T.InstancedBufferAttribute(ages, 1)));
+  geometry.setAttribute('aColor', plan.upload(new T.InstancedBufferAttribute(colors, 3)));
   const uniforms = { uOpacity: { value: opacity } };
   const material = ctx.scope.track(new T.ShaderMaterial({ uniforms, vertexShader: shockVertex, fragmentShader: shockFragment,
     transparent: true, depthWrite: false, depthTest: false, blending: T.AdditiveBlending }));
   const mesh = new T.InstancedMesh(geometry, material, count); mesh.frustumCulled = false; mesh.renderOrder = 5; parent.add(mesh);
+  plan.upload(mesh.instanceMatrix); plan.cpuReady(geometryBytes + instanceBytes);
   const dummy = new T.Object3D(), color = new T.Color();
   for (let i = 0; i < count; i++) { dummy.scale.setScalar(0); dummy.updateMatrix(); mesh.setMatrixAt(i, dummy.matrix); }
   mesh.instanceMatrix.needsUpdate = true;

@@ -2,6 +2,12 @@
 // Copyright (c) 2026 hertz-studio contributors
 (function (global) {
   'use strict';
+
+  // The Stage facade includes native parent-window suspension. Standalone consumers keep browser visibility.
+  function documentHidden() {
+    var stage = window.Stage;
+    return stage && typeof stage.isDocumentHidden === "function" ? stage.isDocumentHidden() : !!document.hidden;
+  }
   var root, host, callbacks, el = {}, active = false, timer = null;
   var panel = null, contexts = new Map(), lastViews = new Map(), generation = 0, returnFocus = null;
   var recent = [], discovery = [], quoteEpoch = 0, homeEpoch = 0, continueKey = '';
@@ -128,7 +134,7 @@
     });
     el.videoClear.addEventListener('click', clearVideo);
     el.nextUp.addEventListener('click', function () { var next = host && host.read().next; if (next && host.playNext) run(host.playNext, el.nextUp); else openEntry({kind:'library',source:'local',offset:0}); });
-    document.addEventListener('visibilitychange', function () { if (el.video.hidden) return; if (document.hidden || !active) el.video.pause(); else el.video.play().catch(function () {}); });
+    document.addEventListener('visibilitychange', function () { if (el.video.hidden) return; if (documentHidden() || !active) el.video.pause(); else el.video.play().catch(function () {}); });
     root.querySelector('.sh-discovery-more').addEventListener('click', function () { open({ kind: 'daily', source: 'online', offset: 0 }); });
     root.querySelector('.sh-recent-more').addEventListener('click', function () { open({ kind: 'recent', offset: 0 }); });
     el.panelLayer.querySelector('.sh-scrim').addEventListener('click', function () { closePanel(); });
@@ -572,7 +578,7 @@
   }
   function enter() {
     if (!root) return; closePanel({restoreFocus:false}); active = true; root.hidden = false; el.panelLayer.hidden = true; clock(); update();
-    if (videoUrl && !document.hidden) el.video.play().catch(function () {});
+    if (videoUrl && !documentHidden()) el.video.play().catch(function () {});
     if (!timer) timer = setInterval(clock, 1000); if (host) refreshHome();
   }
   function leave() { active = false; remember(); closePanel(); el.video.pause(); if (root) root.hidden = true; if (timer) clearInterval(timer); timer = null; clearTimeout(searchTimer); }

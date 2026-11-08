@@ -8,6 +8,12 @@
 (function () {
   'use strict';
 
+  // The Stage facade includes native parent-window suspension. Standalone consumers keep browser visibility.
+  function documentHidden() {
+    var stage = window.Stage;
+    return stage && typeof stage.isDocumentHidden === "function" ? stage.isDocumentHidden() : !!document.hidden;
+  }
+
   var HZ = 15;                  // 手绘层的目标帧率（60/120 的公因数，见 stage.js 帧门约定）
   var WAVE_POINTS = 40;         // 声波涂鸦的采样点数
 
@@ -30,7 +36,8 @@
   var initialized = false;
   var resizeObserver = null;
   var motionQuery = null;
-  var paperUri = null;
+  var paperUri = null, paperPending = false, paperError = null;
+  var paperTicket = null, frameUnsubscribe = null, sceneTimeMs = 0, advancing = false, lastFrameId = -1;
   var rngState = 20260919;
   var PRESETS = [
     { id: 'manga', label: '漫画分镜', caption: '黑白墨线 · 网点阴影',
@@ -132,11 +139,18 @@
   // -------------------------------------------------------------------------
 
   function makePaper() {
-    var size = 128, canvas = document.createElement('canvas');
+    if (documentHidden()) return null;
+    var size = 128, canvas = null, ctx = null, img = null, ticket = null, uri = null;
+    try {
+    var ledger = window.Stage && Stage.resources && Stage.resources();
+    if (!ledger) return null;
+    ticket = ledger.port('handdrawn-paper').require({ canvases: 1, drawingBufferPixels: size * size,
+      ownedCpuBytes: size * size * 8 + 200000 }, 'HandDrawn paper canvas, ImageData and bounded UTF16 PNG dataURL', 0, 'bounded-estimate');
+    canvas = document.createElement('canvas');
     canvas.width = canvas.height = size;
-    var ctx = canvas.getContext('2d');
+    ctx = canvas.getContext('2d');
     if (!ctx) return null;
-    var img = ctx.createImageData(size, size);
+    img = ctx.createImageData(size, size);
     seedAt(913);
     for (var i = 0; i < size * size; i += 1) {
       var offset = i * 4, grain = rnd();
@@ -144,7 +158,18 @@
       img.data[offset + 3] = grain > 0.80 ? Math.round(10 + grain * 24) : 0;
     }
     ctx.putImageData(img, 0, 0);
-    try { return canvas.toDataURL('image/png'); } catch (e) { return null; }
+    uri = canvas.toDataURL('image/png');
+    if (uri.length * 2 > 200000) {
+      ticket.materialize({ canvases: 1, drawingBufferPixels: size * size,
+        ownedCpuBytes: size * size * 8 + uri.length * 2 });
+      throw new Error('paper-encoding-exceeds-plan');
+    }
+    canvas.width = canvas.height = 0; canvas = ctx = img = null;
+    ticket.commit({ ownedCpuBytes: uri.length * 2 }); paperTicket = ticket; ticket = null;
+    return uri;
+    } catch (error) { paperError = error.message; return null; }
+    finally { if (canvas) canvas.width = canvas.height = 0; canvas = ctx = img = null;
+      if (ticket) ticket.release({ apiReleased: true, allocationEnded: true }); }
   }
 
   var NS = 'http://www.w3.org/2000/svg';
@@ -193,7 +218,7 @@
     };
   }
   function visible() {
-    if (!opts.on || !view || document.hidden || view.el.isConnected === false) return false;
+    if (!opts.on || !view || documentHidden() || view.el.isConnected === false) return false;
     if (hostContract && typeof hostContract.visible === 'function') return !!hostContract.visible();
     // Stage.isHidden includes the open immersive stage; that sidebar-only stop
     // signal must not hide the art layer attached to the immersive host.
@@ -334,18 +359,28 @@
     var target = Math.min(ceiling, HZ * opts.speed / 100);
     return target >= 15 ? 15 : target >= 12 ? 12 : target >= 10 ? 10 : target >= 6 ? 6 : 4;
   }
-  function tick() {
-    if (!visible() || !measure()) return;
+  function tick(dtMs, frame) {
+    if (!visible() || !measure()) { advancing = false; return; }
+    if (paperPending && opts.paper) {
+      paperPending = false; paperError = null; paperUri = makePaper();
+      view.layer.style.setProperty('--hd-paper-image', paperUri ? 'url("' + paperUri + '")' : 'none');
+    }
     var state = presentation();
-    var position = window.Stage && Stage.position ? Number(Stage.position()) : 0;
-    if (!Number.isFinite(position)) position = 0;
     var animate = state.playing && !state.reduced && !(motionQuery && motionQuery.matches);
+    if (!animate) advancing = false;
+    if (frame && frame.version === 1 && frame.frameId !== lastFrameId) {
+      lastFrameId = frame.frameId;
+      if (animate && !frame.documentHidden) {
+        sceneTimeMs += advancing && Number.isFinite(dtMs) ? Math.min(100, Math.max(0, dtMs)) : 0;
+        advancing = true;
+      } else advancing = false;
+    }
     var pulse = animate && window.Stage && Stage.energy ? Number(Stage.energy()) || 0 : 0;
     var amt = jitterAmt(Math.max(0, Math.min(1, pulse)));
-    drawFrame(view, amt, animate ? position : view.lastPosition >= 0 ? view.lastPosition : position);
-    seedAt(Math.floor(position / (1000 / HZ)) * 90 + 90);
+    drawFrame(view, amt, sceneTimeMs);
+    seedAt(Math.floor(sceneTimeMs / (1000 / HZ)) * 90 + 90);
     drawWave(view, amt, window.Stage && Stage.spectrum ? Stage.spectrum() : null);
-    drawAnnot(view, amt); view.lastPosition = position;
+    drawAnnot(view, amt); view.lastPosition = sceneTimeMs;
   }
 
   function setHostClasses(el, on) {
@@ -373,6 +408,9 @@
   function init() {
     if (initialized) return api;
     initialized = true;
+    if (window.Stage && Stage.onFrameState) frameUnsubscribe = Stage.onFrameState(function (frame) {
+      if (!frame.playing || frame.documentHidden || frame.reduced) advancing = false;
+    });
     motionQuery = window.matchMedia ? window.matchMedia('(prefers-reduced-motion: reduce)') : null;
     if (window.ResizeObserver) resizeObserver = new ResizeObserver(function () {
       if (view) view.frameKey = '';
@@ -399,7 +437,7 @@
     document.documentElement.classList.remove('hand-on', 'hand-paper');
     attachHost();
     if (!view) return api.values();
-    if (opts.on && opts.paper && !paperUri) paperUri = makePaper();
+    paperPending = !!(opts.on && opts.paper && !paperUri);
     view.layer.style.setProperty('--hd-paper-image', opts.paper && paperUri ? 'url("' + paperUri + '")' : 'none');
     view.layer.hidden = !opts.on; view.frameKey = '';
     if (opts.on) tick(); // Paused first paint, settings and host swaps are immediate.
@@ -416,6 +454,18 @@
   }
   var api = {
     init: init, apply: apply, setStageHost: setStageHost,
+    destroy: function () {
+      if (view) { setHostClasses(view.el, false); view.layer.style.setProperty('--hd-paper-image', 'none'); view.layer.remove(); }
+      view = stageHost = hostContract = null; paperUri = null; paperPending = false; paperError = null;
+      if (paperTicket) paperTicket.release({ apiReleased: true, allocationEnded: true }); paperTicket = null;
+      if (resizeObserver) resizeObserver.disconnect(); resizeObserver = null;
+      if (motionQuery && motionQuery.removeEventListener) motionQuery.removeEventListener('change', tick); motionQuery = null;
+      if (frameUnsubscribe) frameUnsubscribe(); frameUnsubscribe = null;
+      document.removeEventListener('visibilitychange', tick); document.removeEventListener('stage:playing-changed', tick);
+      document.removeEventListener('stage:retint', tick); window.removeEventListener('resize', tick);
+      if (window.Stage && Stage.removeGate) Stage.removeGate('handdrawn');
+      registered = initialized = advancing = false; sceneTimeMs = 0; lastFrameId = -1;
+    },
     frame: function () {}, // CreativeStage never creates a second drawing driver.
     refresh: tick,
     // Called after the host updates lyric DOM. The stopped art gate must not
@@ -430,7 +480,7 @@
     stats: function () {
       return { on: !!opts.on, style: opts.style, views: view ? 1 : 0, fps: targetFps(),
         host: view ? view.el.id || 'stage-art' : null,
-        jitter: Number(jitterAmt(0).toFixed(2)), hasPaper: !!paperUri };
+        jitter: Number(jitterAmt(0).toFixed(2)), hasPaper: !!paperUri, paperError: paperError, sceneTimeMs: sceneTimeMs };
     }
   };
   window.HandDrawn = api;

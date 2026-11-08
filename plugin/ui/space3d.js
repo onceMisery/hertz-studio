@@ -3,11 +3,16 @@
 // Navigation and chrome; Stage owns time, SpaceStagePure owns rendering.
 (function (global) {
   'use strict';
+
+  // The Stage facade includes native parent-window suspension. Standalone consumers keep browser visibility.
+  function documentHidden() {
+    var stage = window.Stage;
+    return stage && typeof stage.isDocumentHidden === "function" ? stage.isDocumentHidden() : !!document.hidden;
+  }
   var root, initialized = false, page = 'closed', host = null, generation = 0;
   var camera = global.SpaceCamera, returnFocus, background = [], queue = [], panels = [];
   var saveTimer = 0, idleTimer = 0, until = 0, dragging = false, pointer = null, point = null;
   var seeking = false, lockRequest = 0, status = { state: 'idle' }, lyricView;
-  var contextRetries = 0, contextRetryAt = 0, contextRetryTimer = 0;
   var performanceHost, lyricPerformance = null, performanceId = '', performanceSignature = '';
   var performances = { classic: 'StanzaClassic', cadenza: 'StanzaCadenza', sonnet: 'StanzaSonnet', tempera: 'StanzaTempera' };
   var paramEvents, playerBridge = {}, playerTimer = 0, immersiveNodes = [], immersiveFocus, immFxTimer = 0;
@@ -28,9 +33,12 @@
     sceneFxLabel: true, sceneFxAdaptive: true,
     schemaVersion: 3 };
   var labels = { auto: '自动', low: '轻量', medium: '标准', high: '高画质' };
-  var zeros = new Float32Array(64), sceneTime = 0, lastPosition = -1, lastTrack, lastSceneCover = '';
+  var zeros = null, sceneTimeMs = 0, lastPosition = -1, lastTrack, lastSceneCover = '';
+  var resourcePort = null, hostCpuTicket = null, canvasTicket = null, frameUnsubscribe = null;
+  var advancing = false, lastFrameId = -1, spectrumWatermark = 0, inputActive = false;
+  var layoutWidth = 0, layoutHeight = 0, layoutObserver = null, pendingScene = '', pendingLyrics = false;
   var lyricDocument, lyricKey = '', lyricWindow;
-  var onset = global.Onset && global.Onset.create ? global.Onset.create({}) : null;
+  var onset = null;
   var frame = { now: 0, dt: 0, time: 0, position: 0, playing: false, bands: zeros,
     level: 0, onset: 0, reduced: false, lyrics: null, pointer: { x: 0, y: 0, active: false } };
   function $(id) { return document.getElementById(id); }
@@ -476,7 +484,7 @@
     layer.appendChild(ring); ring.addEventListener('animationend',function(){ring.remove();},{once:true});
   }
   function favoriteBurst(button){
-    if(reduced()||document.hidden)return;
+    if(reduced()||documentHidden())return;
     var layer=$('sp-click-feedback'),rect=button.getBoundingClientRect(),surface=root.getBoundingClientRect();
     var burst=document.createElement('span');burst.className='sp-favorite-burst';
     burst.style.left=(rect.left+rect.width/2-surface.left)+'px';burst.style.top=(rect.top+rect.height/2-surface.top)+'px';
@@ -509,6 +517,7 @@
   }
   function setPage(next) {
     page = next; root.dataset.page = next; root.classList.remove('sp-idle'); clearPreview();
+    measureLayout();
     poke();
     $('sp-home').hidden = next !== 'home'; $('sp-canvas').hidden = next === 'closed';
     $('sp-stage-settings').hidden = next === 'closed'; $('sp-fx-toggle').hidden = next === 'closed';
@@ -530,6 +539,12 @@
   }
   function disposeStage() {
     generation++; releaseInput(); if (host) { host.dispose(); host = null; }
+    $('sp-canvas').textContent = '';
+    zeros = onset = frame.bands = null; advancing = inputActive = false; sceneTimeMs = 0; lastFrameId = -1; spectrumWatermark = 0;
+    if (frameUnsubscribe) frameUnsubscribe(); frameUnsubscribe = null;
+    [hostCpuTicket, canvasTicket].forEach(function (ticket) { if (ticket) ticket.release({ apiReleased: true, allocationEnded: true }); });
+    hostCpuTicket = canvasTicket = resourcePort = null;
+    pendingScene = ''; pendingLyrics = false;
     releasePerformance();
     $('sp-canvas').textContent = ''; status = {state:'idle'}; $('sp-failure').hidden = true;
     if (lyricView) lyricView.reset(); lyricKey = ''; lastPosition = -1; lastTrack = null;
@@ -764,31 +779,15 @@
     if (page === 'closed') return;
     var failed = next.state === 'error' || next.state === 'failed' || !!next.error;
     var errorText = String(next.error && next.error.message || next.error || '');
-    var contextLost = failed && /webgl context lost/i.test(errorText);
     if (failed) { immersive(false);if(host)disposeStage(); }
     status = next;
     $('sp-failure').hidden = !failed;
+    var resourceStatus = $('sp-resource-status');
+    if (resourceStatus) resourceStatus.hidden = failed || !(next.resourceAdmissionFailure || next.postResourceFailure || next.poolResourceFailure);
     $('sp-error-message').textContent = failed ? (errorText || '场景加载失败') : '';
-    $('sp-loading').hidden = next.state !== 'loading'; root.dataset.sceneState=next.state||'idle'; syncSettings(); syncShelf(); syncHud(); syncZodiacHud(); kick();
+    $('sp-loading').hidden = next.state !== 'loading' && next.state !== 'preparing'; root.dataset.sceneState=next.state||'idle'; syncSettings(); syncShelf(); syncHud(); syncZodiacHud(); kick();
     if (failed) finishEntryWarp();
-    if (next.state === 'ready') { contextRetries = 0; clearTimeout(contextRetryTimer); contextRetryTimer = 0; waitEntryWarpFrame(); }
-    else if (contextLost) {
-      // GPU 进程重启会带走 WebGL 上下文；浏览器会重建进程，这里等一拍再重建舞台。
-      // 每分钟最多两次，避免驱动持续崩溃时在「重建→再丢」之间空转。
-      var now = performance.now();
-      if (now - contextRetryAt > 60000) contextRetries = 0;
-      if (contextRetries < 2) {
-        contextRetries += 1; contextRetryAt = now;
-        clearTimeout(contextRetryTimer);
-        contextRetryTimer = setTimeout(function () {
-          contextRetryTimer = 0;
-          if (page === 'closed' || status.state !== 'failed') return;
-          var onStage = page === 'stage';
-          disposeStage();
-          if (onStage) enterStage(prefs.sceneSource); else ensureStage(prefs.sceneSource);
-        }, 1500);
-      }
-    }
+    if (next.state === 'ready') waitEntryWarpFrame();
   }
   async function enterStage(id) {
     if (page === 'closed') open();
@@ -798,18 +797,40 @@
     return ensureStage(next);
   }
   async function ensureStage(next) {
+    if (documentHidden() || !layoutWidth || !layoutHeight) { pendingScene = next; return false; }
     if (!host) {
-      var canvas=document.createElement('canvas'); canvas.setAttribute('aria-label','三维舞台'); $('sp-canvas').appendChild(canvas);
       try {
-        host=SpaceStagePure.create(canvas,{qualityMode:prefs.qualityMode,deviceTier:global.Stage&&Stage.tier?Stage.tier():1,onStatus:showStatus,onInvalidate:function(){if(page!=='closed')touch(200);}});
+        var ledger = global.Stage && Stage.resources && Stage.resources();
+        if (!ledger) throw new Error('resource-policy-required'); resourcePort = ledger.port('space-host');
+        hostCpuTicket = resourcePort.require({ ownedCpuBytes: (4 * 64 + 5 * 4 + 30) * 8 + 64 * 4 },
+          'Space3D original Onset arrays/history30 and silent Float32 input', 0);
+        zeros = new Float32Array(64); frame.bands = zeros;
+        onset = global.Onset && global.Onset.create ? global.Onset.create({}) : null; hostCpuTicket.commit();
+        canvasTicket = resourcePort.require({ canvases: 1 }, 'Space3D original shared renderer canvas identity', 0);
+        var canvas=document.createElement('canvas'); canvas.width = canvas.height = 0;
+        canvas.setAttribute('aria-label','三维舞台'); $('sp-canvas').appendChild(canvas); canvasTicket.commit();
+        if (Stage.onFrameState) frameUnsubscribe = Stage.onFrameState(function (value) {
+          if (!value.playing || value.reduced || value.documentHidden) {
+            advancing = inputActive = false; spectrumWatermark = value.spectrumRevision;
+            if (onset) onset.reset();
+          }
+        });
+        host=SpaceStagePure.create(canvas,{resources:ledger.port('space-renderer'),isVisible:function(){return page!=='closed'&&!documentHidden()&&!!layoutWidth&&!!layoutHeight;},qualityMode:prefs.qualityMode,deviceTier:global.Stage&&Stage.tier?Stage.tier():1,onStatus:showStatus,onInvalidate:function(){if(page!=='closed')touch(200);}});
         host.setServices({coverUrl:function(){return present().cover||'';},coverItems:function(){return queue.filter(function(t){return t.cover;});},
           resolveCover:function(url){return global.HertzCovers&&HertzCovers.resolve?HertzCovers.resolve(url):url;},
+          decodeImage:function(url,options){
+            if(!global.StageImageSource) return Promise.reject(new Error('estimate-unavailable'));
+            return StageImageSource.decode(url,Object.assign({},options,{
+              resolve:global.HertzCovers&&HertzCovers.resolve,
+              maxEncodedBytes:Math.floor(Stage.resources().snapshot().caps.ownedCpuBytes/4)
+            }));
+          },
           queue:function(){return queue;},previewTrack:function(id){nodePreview=trackById(id);syncHud();touch(1800);},
           playTrack:function(id){control('queue-play',id);touch();},onRecipe:onRecipe,zodiacEvent:onZodiacEvent,invalidate:function(){if(page!=='closed')touch(300);}}); resize();
         syncLyrics();
       } catch (error) { disposeStage(); showStatus({state:'error',error:error.message}); return false; }
     }
-    if (host && status.state === 'ready' && prefs.sceneSource === next) return true;
+    if (host && status.state === 'ready' && host.stats().id === next) return true;
     return selectScene(next);
   }
   async function selectScene(id, opts) {
@@ -820,21 +841,31 @@
     if (wantFx && page === 'stage' && host && prefs.sceneSource === id && status.state === 'ready') return true;
     prefs.sceneSource=id;
     if(page==='closed'||!host){syncSettings();scheduleSave();return true;}
+    if(documentHidden()||!layoutWidth||!layoutHeight){
+      pendingScene=id;generation++;if(host.cancelPreparation)host.cancelPreparation();syncSettings();scheduleSave();return true;
+    }
+    pendingScene='';
     var fxToken = wantFx ? sceneFxBegin(id) : 0;
-    releaseInput(); var token=++generation, current=host; showStatus({state:'loading',id:id}); hudRecipe=null; clearPreview();
-    if(camera){var baseline=scene.camera.baseline||scene.camera;camera.setBaseline(Object.assign({},baseline,{look:baseline.lookAt||baseline.look||[0,0,0]}));if(!fxToken||!prefs.sceneFxGlide||reduced())camera.snap();camera.setCinema(prefs.cinema,1);}
+    var token=++generation, current=host;
     try {
       var state=await current.select(id,prefs.sceneStates[id]);
       if(token!==generation||host!==current||page==='closed')return false;
-      prefs.sceneStates[id]=state; sceneTime=0;
+      releaseInput(); hudRecipe=null; clearPreview();
+      if(camera){var baseline=scene.camera.baseline||scene.camera;camera.setBaseline(Object.assign({},baseline,{look:baseline.lookAt||baseline.look||[0,0,0]}));if(!fxToken||!prefs.sceneFxGlide||reduced())camera.snap();camera.setCinema(prefs.cinema,1);}
+      prefs.sceneStates[id]=state; sceneTimeMs=0; advancing=false;
       if(camera&&prefs.freeCam)camera.freeLoad(prefs.freeCam);
       buildParams();buildCatalog();syncSettings();scheduleSave();touch();
       if(fxToken)sceneFxReady(fxToken);
       return true;
-    }catch(error){if(fxToken)sceneFxFail(fxToken);if(token===generation)showStatus({state:'error',id:id,error:error.message});return false;}
+    }catch(error){if(fxToken)sceneFxFail(fxToken);if(token===generation){
+      var actual=host===current&&current.stats();
+      showStatus(actual&&actual.state==='ready'?actual:{state:'error',id:id,error:error.message});
+    }return false;}
   }
   async function syncLyrics(){
     if(!host)return;
+    if(documentHidden()||!layoutWidth||!layoutHeight){pendingLyrics=true;return;}
+    pendingLyrics=false;
     var current=host,id=prefs.lyrics&&isLyric(prefs.lyricStyle)?prefs.lyricStyle:null;
     if (performanceKind(id)) id = null;
     syncPerformance(0);
@@ -846,12 +877,23 @@
     prefs.lyricStyle=id;lyricKey='';buildCatalog();buildParams();syncSettings();scheduleSave();syncLyrics();touch();return true;
   }
   function toggleLyrics(value){prefs.lyrics=value==null?!prefs.lyrics:value;lyricKey='';syncSettings();syncLyrics();scheduleSave();touch();}
-  function resize(){if(host){host.resize(root.clientWidth,root.clientHeight);if(lyricPerformance)lyricPerformance.resize();touch(200);}}
+  function measureLayout(){
+    var hadLayout=!!(layoutWidth&&layoutHeight);
+    layoutWidth=root?root.clientWidth:0;layoutHeight=root?root.clientHeight:0;
+    if(!hadLayout||!layoutWidth||!layoutHeight){advancing=inputActive=false;if(onset)onset.reset();if(global.Stage&&Stage.frameState)spectrumWatermark=Stage.frameState().spectrumRevision;}
+  }
+  function resumePreparation(){
+    if(page==='closed'||documentHidden()||!layoutWidth||!layoutHeight)return;
+    if(pendingScene){var next=pendingScene;pendingScene='';ensureStage(next);}else touch(200);
+    if(pendingLyrics&&host)syncLyrics();
+  }
+  function visibilityChanged(){measureLayout();if(documentHidden()){advancing=inputActive=false;if(onset)onset.reset();}else resumePreparation();}
+  function resize(){measureLayout();if(host&&layoutWidth&&layoutHeight){host.resize(layoutWidth,layoutHeight);if(lyricPerformance)lyricPerformance.resize();touch(200);}resumePreparation();}
   function fps(){
-    if(page==='closed'||!host||document.hidden||status.state==='failed'||status.state==='error')return 0;
+    if(page==='closed'||!host||documentHidden()||!layoutWidth||!layoutHeight||status.state==='failed'||status.state==='error'){advancing=false;return 0;}
     var p=present(),changed=p.position!==lastPosition||(p.track&&p.track.id)!==lastTrack||(p.cover||'')!==lastSceneCover;
     if (lyricPerformance && lyricPerformance.isReady && !lyricPerformance.isReady()) return 30;
-    if(!p.playing||reduced())return changed||dragging||performance.now()<until||(camera&&camera.isResetting())?30:0;
+    if(!p.playing||reduced()){advancing=false;return changed||dragging||performance.now()<until||(camera&&camera.isResetting())?30:0;}
     return host.effectiveQuality()==='low'?30:60;
   }
   function lyrics(p){
@@ -874,14 +916,14 @@
     var visible=page==='stage'&&prefs.lyrics&&prefs.lyricStyle==='subtitle';
     $('sp-reading').hidden=!visible;
     if(lyricView){lyricView.configure(visible);if(visible)lyricView.update({position:p.position||0,reduced:reduced(),track:p.track});}
-    syncPerformance(dt);
+    syncPerformance(dt, p);
   }
   function releasePerformance() {
     if (lyricPerformance) lyricPerformance.destroy();
     lyricPerformance = null; performanceId = ''; performanceSignature = '';
     if (performanceHost) { performanceHost.hidden = true; delete performanceHost.dataset.renderer; }
   }
-  function syncPerformance(dt) {
+  function syncPerformance(dt, presentation) {
     if (!performanceHost) return;
     var kind = performanceKind(prefs.lyricStyle);
     var visible = !!host && page === 'stage' && prefs.lyrics && !!kind;
@@ -903,7 +945,7 @@
     var signature = StanzaTheme.signature(theme) + JSON.stringify(params) + quiet + host.effectiveQuality();
     if (signature !== performanceSignature) { performanceSignature = signature; touch(200); }
     api.setTheme(theme); api.setFontScale(params.scale); api.setEco(host.effectiveQuality() === 'low');
-    api.setPaused(!present().playing || quiet || document.hidden);
+    api.setPaused(!(presentation || present()).playing || quiet || documentHidden());
     api.setTuning(kind === 'classic' ? Object.assign({}, params, { spacing: params.wordSpacing }) : params);
     if (api.setMotion) api.setMotion(quiet ? 0 : params.speed);
     if (api.setReactivity) api.setReactivity(reactivity);
@@ -912,19 +954,30 @@
     performanceHost.style.setProperty('--fl-sonnet-accent', theme.accentColor);
     if (dt != null) api.frame(dt);
   }
-  function tick(dt){
-    if(page==='closed'||!host||document.hidden)return;
-    var p=present();frame.now=performance.now();frame.dt=Math.min(.16,dt/1000);frame.time=(p.position||0)/1000;frame.deviceTier=global.Stage&&Stage.tier?Stage.tier():1;
-    frame.position=p.position||0;frame.playing=!!p.playing;frame.reduced=reduced();
+  function tick(dt, borrowed){
+    if(!borrowed||borrowed.version!==1||borrowed.frameId===lastFrameId)return;
+    lastFrameId=borrowed.frameId;
+    if(page==='closed'||!host||borrowed.documentHidden||!layoutWidth||!layoutHeight){
+      advancing=inputActive=false;spectrumWatermark=borrowed.spectrumRevision;if(onset)onset.reset();return;
+    }
+    var p=present(),moving=borrowed.playing&&!borrowed.reduced&&status.state==='ready';
+    p.position=borrowed.mediaPositionMs;p.playing=borrowed.playing;p.reduced=borrowed.reduced;
+    var delta=moving&&advancing&&Number.isFinite(dt)?Math.min(100,Math.max(0,dt)):0;
+    advancing=moving;sceneTimeMs+=delta;
+    frame.now=borrowed.sampledAtMs;frame.dt=delta/1000;frame.time=borrowed.mediaPositionMs/1000;frame.deviceTier=borrowed.tier;
+    frame.position=borrowed.mediaPositionMs;frame.playing=borrowed.playing;frame.reduced=borrowed.reduced;
     // P0-02 时钟分离：播放器宿主显式计算环境运动许可，保持「暂停/减少动态即冻结」的原行为。
     frame.motionActive=!!frame.playing&&!frame.reduced;
-    frame.bands=global.Stage&&Stage.spectrum?Stage.spectrum()||zeros:zeros;frame.level=global.Stage&&Stage.energy?Stage.energy():0;
-    frame.lyrics=lyrics(p);if(onset&&frame.playing&&!frame.reduced)onset.step(dt,frame.bands,frame.now);frame.onset=onset?onset.pulse||0:0;
+    var fresh=moving&&borrowed.spectrumAvailable&&borrowed.spectrumRevision>spectrumWatermark;
+    frame.bands=fresh?borrowed.spectrum:zeros;frame.level=0;
+    if(fresh){for(var bi=0;bi<frame.bands.length;bi++)frame.level+=frame.bands[bi]||0;frame.level/=Math.max(1,frame.bands.length);}
+    else {if(inputActive&&onset)onset.reset();if(!moving)spectrumWatermark=borrowed.spectrumRevision;}
+    inputActive=fresh;frame.lyrics=lyrics(p);if(onset&&fresh)onset.step(delta,frame.bands,frame.now);frame.onset=fresh&&onset?onset.pulse||0:0;
     frame.track=p.track?{id:p.track.id,cover:p.cover||''}:null;
     var preview=activePreview();frame.preview=preview?{id:preview.id,cover:preview.cover||'',title:preview.title,artist:preview.artist}:null;
-    if(frame.playing&&!frame.reduced)sceneTime+=frame.dt;frame.sceneTime=sceneTime;frame.dynamicDt=frame.playing&&!frame.reduced?frame.dt:0;
-    if(camera){camera.tick(dt,{playing:frame.playing&&!frame.reduced,reduced:frame.reduced,audioTime:frame.time,energy:frame.level,low:frame.bands[0]||0});host.setRig(camera.pose());}
-    try{host.frame(frame);}catch(error){showStatus({state:'error',error:error.message});}
+    frame.sceneTime=sceneTimeMs/1000;frame.dynamicDt=frame.dt;
+    if(camera){camera.tick(delta,{playing:frame.playing&&!frame.reduced,reduced:frame.reduced,audioTime:frame.time,energy:frame.level,low:frame.bands[0]||0});host.setRig(camera.pose());}
+    try{host.frame(frame);}catch(error){showStatus({state:'error',error:error.message});}finally{frame.bands=zeros;}
     if (performance.now() - phoenixHudAt > 90) { phoenixHudAt = performance.now(); syncPhoenixHud(); }
     lastPosition=p.position;lastTrack=p.track&&p.track.id;lastSceneCover=p.cover||'';subtitles(p,dt);
   }
@@ -1211,10 +1264,12 @@
     document.addEventListener('keyup',function(e){if(page==='stage'&&camera)camera.freeKey(e.code,false);});
     function pauseInput(){if(page==='closed')return;releaseInput();hideHome();save();}
     global.addEventListener('blur',pauseInput);global.addEventListener('pagehide',pauseInput);
-    document.addEventListener('visibilitychange',function(){if(document.hidden){pauseInput();sceneFxEnd();if(lyricPerformance)lyricPerformance.setPaused(true);}else{touch(300);syncPlayer();}});global.addEventListener('resize',resize);
+    document.addEventListener('visibilitychange',function(){advancing=false;if(documentHidden()){pauseInput();sceneFxEnd();if(lyricPerformance)lyricPerformance.setPaused(true);}else{touch(300);syncPlayer();}});global.addEventListener('resize',resize);
   }
   function init(){
     if(initialized)return true;root=$('space3d');if(!root)return false;initialized=true;
+    measureLayout();document.addEventListener('visibilitychange',visibilityChanged);
+    if(global.ResizeObserver){layoutObserver=new ResizeObserver(resize);layoutObserver.observe(root);}
     if(global.StageShelf){shelf=StageShelf.create(root,{gateId:'space3d-shelf',isVisible:shelfVisible,keyboard:true,onHover:function(id){setPanelPreview(trackById(id));}});if(shelf){shelf.setMode(prefs.shelfMode);shelf.setItems(queue);}}
     if(global.StageLyrics)lyricView=StageLyrics.init($('sp-reading'),function(ms){control('seek',ms);});
     performanceHost = document.createElement('div'); performanceHost.id = 'sp-stanza';
@@ -1222,6 +1277,15 @@
     var lyricSupport = $('sp-lyric-support'); if (lyricSupport) root.appendChild(lyricSupport);
     if(global.SpaceHome)SpaceHome.init($('sp-home'),{enterStage:enterStage,exitSpace:close,chromeRoot:root,revealPlayer:revealPlayer,beforeOpenPanel:closePanels});
     var feedback=document.createElement('div');feedback.id='sp-click-feedback';feedback.setAttribute('aria-hidden','true');root.appendChild(feedback);
+    var resourceStatus=document.createElement('aside');resourceStatus.id='sp-resource-status';resourceStatus.className='sp-resource-status';
+    resourceStatus.hidden=true;resourceStatus.setAttribute('role','status');resourceStatus.setAttribute('aria-live','polite');
+    var resourceText=document.createElement('span');resourceText.textContent='资源预算不足，部分效果暂不可用。';
+    var resourceRetry=document.createElement('button');resourceRetry.type='button';resourceRetry.textContent='重试效果';
+    resourceRetry.addEventListener('click',function(){
+      if(host&&host.stats().id!==prefs.sceneSource){selectScene(prefs.sceneSource);return;}
+      if(host&&host.retryResources&&host.retryResources())touch(300);
+    });
+    resourceStatus.append(resourceText,resourceRetry);root.appendChild(resourceStatus);
     hud=document.createElement('div');hud.id='sp-scene-hud';hud.className='sp-scene-hud';hud.setAttribute('role','status');hud.setAttribute('aria-live','polite');hud.hidden=true;
     hud.innerHTML='<i aria-hidden="true"></i><span class="sp-scene-hud-tag"></span><strong></strong><small></small>';root.appendChild(hud);
     zodiacHud=$('sp-zodiac-hud'); zodiacStarCard=$('sp-zodiac-star'); phoenixHud=$('sp-phoenix-hud');
@@ -1230,7 +1294,7 @@
     var telemetry=document.createElement('aside');telemetry.id='sp-reactor-telemetry';telemetry.className='sp-reactor-telemetry';telemetry.hidden=true;
     telemetry.innerHTML='<span class="sp-reactor-label">PARTICLE REACTOR</span><strong>粒子反应堆</strong><dl><div><dt>能量</dt><dd data-reactor-energy>—</dd></div><div><dt>偏航</dt><dd data-reactor-yaw>—</dd></div><div><dt>缩放</dt><dd data-reactor-zoom>—</dd></div><div><dt>FPS</dt><dd data-reactor-fps>—</dd></div></dl><p>拖拽环绕 · 滚轮缩放<br>点击脉冲 · 按住充能<br>悬停队列预览 · 点击切歌</p>';root.appendChild(telemetry);
     bindChrome();bindGestures();buildCatalog();syncSettings();['sp-sheet','sp-playlist','sp-player-options','sp-volume-panel'].forEach(function(id){$(id).inert=true;});
-    if(global.Stage&&Stage.gate){Stage.gate('space3d',fps,tick);Stage.gate('space3d-ui',function(){return page!=='closed'&&!document.hidden?4:0;},function(){syncPlayer();if(global.SpaceHome)SpaceHome.update();});}
+    if(global.Stage&&Stage.gate){Stage.gate('space3d',fps,tick);Stage.gate('space3d-ui',function(){return page!=='closed'&&!documentHidden()?4:0;},function(){syncPlayer();if(global.SpaceHome)SpaceHome.update();});}
     root.dataset.spReady='1';return true;
   }
   function rendererStats() {
@@ -1248,7 +1312,7 @@
     },
     setSource:selectScene,setLyricStyle:selectLyric,setField:function(id){return selectScene(global.SpaceStagePure&&SpaceStagePure.resolveId?SpaceStagePure.resolveId(id):id);},sourceId:function(){return prefs.sceneSource;},
     sceneTransition:function(){return{phase:sceneFxState.phase,target:sceneFxState.target,type:sceneFxEffectiveType(),dur:sceneFxDuration()};},
-    stats:function(){return{active:page!=='closed',page:page,source:prefs.sceneSource,renderer:rendererStats(),camera:camera?camera.pose():null,freeCam:camera?camera.isFreeEngaged():false,state:status,panels:panels.map(function(p){return p.id;}),
+    stats:function(){return{active:page!=='closed',page:page,source:prefs.sceneSource,sceneTimeMs:sceneTimeMs,spectrumWatermark:spectrumWatermark,inputActive:inputActive,renderer:rendererStats(),camera:camera?camera.pose():null,freeCam:camera?camera.isFreeEngaged():false,state:status,panels:panels.map(function(p){return p.id;}),
       transition:{phase:sceneFxState.phase,target:sceneFxState.target,type:sceneFxEffectiveType(),dur:sceneFxDuration()}};}};
   if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();
 }(window));

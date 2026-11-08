@@ -229,14 +229,14 @@ section('玻璃化契约：在线曲库面板');
 {
   const css = read('online.css');
   const style = read('style.css');
+  const form = read('components/form.css');
   ok(!/#1A1D23|#0d0f13/.test(css), 'qr-card / 歌单抽屉不再写死实色');
   ok(/\.qr-card\{[^}]*var\(--glass-bg-strong\)/.test(css), '登录卡片走强玻璃底');
   ok(/\.op-drawer\{[^}]*var\(--glass-bg-strong\)[^}]*blur\(var\(--glass-blur\)\)/.test(css),
     '歌单抽屉强玻璃底 + 令牌模糊');
-  ok(/input\[type="search"\][^}]*var\(--glass-line\)/.test(style), '通用输入描边走 --glass-line');
-  // 级联权威：玻璃底必须落在文件尾部的统一表单层（最后一条同特异性规则），
-  // 只给 search/text/select；number/password/textarea 保留 field 实色令牌。
-  ok(/input\[type="number"\],\s*input\[type="password"\],\s*textarea[\s\S]*?var\(--field-bg\)/.test(style),
+  ok(/input\[type="search"\][^}]*var\(--glass-line\)/.test(form), '公共表单 owner 的输入描边走 --glass-line');
+  // components/form.css is the current common resting-state owner.
+  ok(/input\[type="number"\],\s*input\[type="password"\],\s*textarea[\s\S]*?var\(--field-bg\)/.test(form),
     '玻璃底只给 search/text/select，模态控件保留 field 令牌');
   ok(/\.online-search input\[type="search"\]/.test(style), '在线搜索框选择器提权，blur10 盖过权威层 8px');
   ok(/input\.opl-filter\{/.test(css), '抽屉过滤框提权，resting 玻璃底不被通用规则盖掉');
@@ -250,10 +250,10 @@ section('玻璃化契约：舞台控制与工坊抽屉 + lowfx 降级');
   const stageCss = read('stage.css');
   const creativeCss = read('creative.css');
   const style = read('style.css');
-  ok(/\.stage-ctl\s*\{[^}]*var\(--glass-bg-strong\)/.test(stageCss),
-    'stage-ctl 统一到强玻璃底');
-  ok(!/\.stage-ctl\s*\{[^}]*var\(--panel-solid\)/.test(stageCss),
-    'stage-ctl 不再用 panel-solid 实色覆盖弹层玻璃');
+  ok(/\.stage-ctl\s*\{[^}]*background:\s*var\(--panel-solid\)/.test(stageCss),
+    'stage-ctl 保持当前控制舱的可读实色表面');
+  ok(/\.stage-ctl\s*\{[^}]*border-left:\s*1px solid var\(--line-strong\)/.test(stageCss),
+    'stage-ctl 表面边界继续使用公共令牌');
   ok(/\.ws-panel\s*\{[^}]*var\(--glass-bg-strong\)/.test(creativeCss),
     '工坊抽屉强玻璃底');
   ok(!/var\(--glass-border,\s*1px/.test(creativeCss) &&

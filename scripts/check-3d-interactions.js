@@ -41,6 +41,7 @@ function pointer(overrides = {}) {
 }
 
 const stage = load('stage3d.js', ['computeDpr', 'targetFps', 'controlTarget', 'onWheel', 'onPointerUp'], {
+  layoutWidth: 800, layoutHeight: 600, rawDirty: true, sceneAdvancing: false,
   window: { devicePixelRatio: 3 }, gl: null, q: () => 0,
   active: true, document: { hidden: false }, contextLost: false, post: null, sizeDirty: false,
   stanzaActive: () => false, reducedMotion: () => false,
@@ -87,6 +88,7 @@ check(!stage.dragging && !stage.pointerCount && !stage.canvas.hasPointerCapture(
 const nudges = [], taps = [];
 const cardState = load('stage-shelf.js', ['bindCard', 'onWheelCapture'], {
   active: true, blocked: false, mode: 'side', CLICK_THRESHOLD: 10, items: [1, 2],
+  options: {},
   hoverId: null, lastWheelAt: 0, WHEEL_COOLDOWN_MS: 180,
   plane: { contains: node => node === card },
   nudgeBrowse: delta => nudges.push(delta), onCardTap: id => taps.push(id),
@@ -148,7 +150,7 @@ targets.bw = 1600;
 targets.makeRT = () => null;
 targets.showFallback = () => { fallback = true; };
 targets.resizeTargets();
-check(fallback && !targets.post.scene && freed.length === 3, 'failed target allocation frees previous resources');
+check(fallback && targets.post.scene.w === 800 && freed.length === 0, 'failed target allocation preserves the previous target set');
 
 let clock = 1000, steps = 0;
 const shelf = load('shelf.js', ['onWheel'], {
@@ -200,21 +202,27 @@ const draws = [];
 const atlasContext = { clearRect() {}, measureText: text => ({ width: text.length * 30 }), fillText: (...args) => draws.push(args) };
 const atlas = { getContext: () => atlasContext };
 const lyricState = { window: {}, document: { createElement: () => atlas } };
+vm.runInNewContext(read('stage-resource-budget.js'), lyricState);
+vm.runInNewContext(read('stage-resource-policy.js'), lyricState);
 vm.runInNewContext(read('lyric3d.js'), lyricState);
+const atlasLease = lyricState.window.Lyric3D.acquire(lyricState.window.StageResourceBudget.create(lyricState.window.StageResourcePolicy).port('atlas-fixture'));
 const lyric = { index: 0, lines: [{ text: '长'.repeat(1000) }] };
 check(lyricState.window.Lyric3D.frame(lyric), 'atlas draws long line');
 check(draws.every(args => args[3] <= atlas.width), 'long glyph runs stay within atlas');
 check(!lyricState.window.Lyric3D.frame(lyric), 'unchanged atlas skips rasterization');
 lyricState.window.Lyric3D.setQuality(0);
 check(lyricState.window.Lyric3D.frame(lyric) && atlas.width === 512, 'quality resize invalidates atlas');
+atlasLease.release();
 
 let trackId = 'first';
 const seekRange = { ...surface(), value: 0, disabled: false, setAttribute() {} };
 const seekData = { duration: 200000, position: 12000 };
 const seekCommands = [];
-const seek = load('stage3d.js', ['syncSeek', 'cancelSeek', 'beginSeek', 'previewSeek', 'commitSeek', 'cancelGestures', 'onVisibilityChange', 'onVolumeInput', 'endVolumeChange'], {
+const seek = load('stage3d.js', ['syncSeek', 'cancelSeek', 'beginSeek', 'previewSeek', 'commitSeek', 'cancelGestures', 'markSizeDirty', 'onVisibilityChange', 'onVolumeInput', 'endVolumeChange'], {
   seeking: false, seekTrackId: null, seekCancelled: false, active: true,
   changingVolume: false,
+  sceneAdvancing: false, sizeDirty: false, rawDirty: false, layoutWidth: 800, layoutHeight: 600,
+  wrapEl: { clientWidth: 800, clientHeight: 600 }, gl: {}, graphicsFailure: '',
   document: { hidden: false, activeElement: seekRange }, currentTrackId: () => trackId,
   $: id => id === 's3d-seek' ? seekRange : null,
   fmt: value => String(value), text() {},

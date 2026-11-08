@@ -9,7 +9,7 @@ function harness(saved) {
   const identity={kind:'local-file-sha256-v1',sha256:'a'.repeat(64),byteLength:'1234'};
   let position=0,requests=0,onset;
   const server=JSON.parse(storage.get('test.server.stage') || '{"state":{"storeId":"test","current":{"revision":0,"initialized":false},"library":{"revision":0,"initialized":false}},"current":null,"library":null}');
-  const sandbox={window:{},console,TextEncoder,TextDecoder,Blob,CompressionStream,DecompressionStream,
+  const sandbox={window:{},console,TextEncoder,TextDecoder,Blob,CompressionStream,DecompressionStream,AbortController,DOMException,
     CustomEvent:class {constructor(type,options){this.type=type;this.detail=options.detail;}},
     btoa:s=>Buffer.from(s,'binary').toString('base64'),atob:s=>Buffer.from(s,'base64').toString('binary'),
     setTimeout:()=>1,clearTimeout(){},localStorage:{getItem:k=>storage.get(k)||null,setItem:(k,v)=>storage.set(k,v)},
@@ -28,13 +28,17 @@ function harness(saved) {
   };
   sandbox.window.Stage=sandbox.Stage;sandbox.window.VMusicTransport=sandbox.VMusicTransport;
   vm.createContext(sandbox);
-  for(const file of ['onset.js','creative-gl.js','backgrounds.js','stage-media.js','stage-persistence.js','handdrawn.js','creative-anime.js','creative-share-code.js','creative-stage.js','creative-contract.js','creative-project.js']){
+  for(const file of ['onset.js','stage-resource-budget.js','stage-resource-policy.js','creative-gl.js','backgrounds.js','stage-media.js','stage-json-source.js','stage-persistence.js','handdrawn.js','creative-anime.js','creative-share-code.js','creative-stage.js','creative-contract.js','creative-project.js']){
     vm.runInContext(fs.readFileSync(path.join(__dirname,'../plugin/ui',file),'utf8'),sandbox,{filename:file});
     Object.assign(sandbox,sandbox.window);
     if(file==='onset.js') {const create=sandbox.Onset.create;sandbox.Onset.create=function(...args){onset=create(...args);return onset;};}
+    if(file==='stage-resource-policy.js') {
+      const ledger=sandbox.StageResourceBudget.create(sandbox.StageResourcePolicy);sandbox.Stage.resources=()=>ledger;
+    }
   }
   sandbox.Backgrounds.apply=()=>{};sandbox.HandDrawn.apply=()=>{};
   const CS=sandbox.CreativeStage,P=sandbox.CreativeProject;
+  CS.init();
   return {CS,P,selection,identity,sandbox,storage,onset,requests:()=>requests,
     position(ms){position=ms;CS.patch({});},
     changed(){selection.mediaEpoch++;sandbox.document.dispatchEvent({type:'stage:track-changed'});},

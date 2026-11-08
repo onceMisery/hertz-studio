@@ -90,6 +90,7 @@
     'uniform float uTurbAmp;',
     'uniform float uTimeMs;',
     'uniform float uOpacity;',
+    'uniform float uSceneTimeMs;',
     'uniform float uDual;',
     // 双图集的混合端点：blend = (w - uWLo) / (uWHi - uWLo)。
     // 固定为 0.30 / 0.50：w=0.5（中性）必须落在 700 面，与 stanza 的
@@ -106,8 +107,8 @@
     'void main() {',
     '  vec2 uv = vUV;',
     '  if (uTurbAmp > 0.0) {',
-    '    uv += vec2(sin(vUV.y * 17.0 + uTimeMs * 0.0031),',
-    '               cos(vUV.x * 13.0 + uTimeMs * 0.0023)) * uTurbAmp;',
+    '    uv += vec2(sin(vUV.y * 17.0 + uSceneTimeMs * 0.0031),',
+    '               cos(vUV.x * 13.0 + uSceneTimeMs * 0.0023)) * uTurbAmp;',
     '  }',
     '  vec4 texel = texture(uAtlas, uv);',
     '  float dpx  = (texel.r - 0.5) * 2.0 * uRange;',
@@ -131,7 +132,7 @@
     // 笔画边缘糊出约 1.5px 的灰边，在深色背景上看着"发虚"。
     '  float aa  = max(fwidth(dpx) * 0.5, 1e-4);',
     '  float mask = smoothstep(-aa, aa, dpx - wpx);',
-    '  float wob  = uWobble * sin(vUV.y * 40.0 + uTimeMs * 0.0029);',
+    '  float wob  = uWobble * sin(vUV.y * 40.0 + uSceneTimeMs * 0.0029);',
     '  float sung = smoothstep(uClipU - uSoft + wob, uClipU + uSoft + wob, vU);',
     '  vec3  col  = mix(uIdleColor, uSungColor, sung);',
     '  float rim  = (1.0 - smoothstep(0.0, uRimWidth, abs(dpx - wpx))) * uRimAmt;',
@@ -151,7 +152,7 @@
     // P2a 片元粒子：每个 stride 字格画一颗，不新增 draw call。
     // 1 spark / 2 tear / 3 ember；t 从 0 到 1 循环，t=0/1 时淡出。
     '  if (uDecorKind > 0.5 && vDecor > 0.5) {',
-    '    float t = fract((uTimeMs + vSeed * 137.0) / max(uDecorDur, 1.0));',
+    '    float t = fract((uSceneTimeMs + vSeed * 137.0) / max(uDecorDur, 1.0));',
     '    float h1 = fract(vSeed * 0.371);',
     '    float dx = (h1 - 0.5) * 18.0;',
     // 从该字实墨迹盒的底边发射，而不是格子中心；这样粒子不会被字身盖住。
@@ -169,29 +170,21 @@
     '}'
   ].join('\n');
 
-  function compile(gl, type, src) {
+  function compile(gl, type, src, shaders) {
     var sh = gl.createShader(type);
+    if (!sh) throw new Error('glyph shader allocation failed');
+    shaders.push(sh);
     gl.shaderSource(sh, src); gl.compileShader(sh);
     if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
-      var log = gl.getShaderInfoLog(sh); gl.deleteShader(sh);
+      var log = gl.getShaderInfoLog(sh);
       throw new Error('glyph shader: ' + log);
     }
     return sh;
   }
-  function link(gl, vs, fs) {
-    var p = gl.createProgram();
-    gl.attachShader(p, compile(gl, gl.VERTEX_SHADER, vs));
-    gl.attachShader(p, compile(gl, gl.FRAGMENT_SHADER, fs));
-    gl.linkProgram(p);
-    if (!gl.getProgramParameter(p, gl.LINK_STATUS)) {
-      throw new Error('glyph link: ' + gl.getProgramInfoLog(p));
-    }
-    return p;
-  }
 
   // 取 location 时数组必须写 'name[0]'：部分驱动对裸数组名返回 null，
   // 而 uniform1fv(null) 是静默 no-op —— 表现是「场完全没生效」。
-  var UNIFORMS = ['uResolution', 'uUVSize', 'uTimeMs', 'uShear', 'uBaseY',
+  var UNIFORMS = ['uResolution', 'uUVSize', 'uTimeMs', 'uSceneTimeMs', 'uShear', 'uBaseY',
     'uCellPx', 'uPadPx', 'uDecorKind', 'uDecorStride', 'uDecorSeed', 'uDecorDur', 'uDecorColor',
     'uAmp', 'uFreq', 'uDamp', 'uCurveB[0]', 'uCurveW[0]',
     'uAtlas', 'uRange', 'uPxScale', 'uWeightGain', 'uWeightGainHi', 'uGlowK', 'uGlowAmt',
@@ -199,23 +192,93 @@
     'uWLo', 'uWHi',
     'uIdleColor', 'uSungColor', 'uGlowColor'];
 
-  function create(canvas) {
-    var gl = canvas.getContext('webgl2', {
+  var INSTANCE_BYTES = 128 * 16 * 4;
+  function create(canvas, options) {
+    options = options || {};
+    var resources = options.resources, generation = options.generation || 0;
+    if (options.admissionRequired && (!resources || resources.contractVersion !== 1)) throw new Error('resource-port-required');
+    var gl = null, prog = null, vao = null, vbo = null, tex = null, inst = null;
+    var fixed = null, surface = null, texture = null, shaders = [], destroyed = false, cleanupFailed = false;
+    var texWidth = 0, texHeight = 0, texDual = false;
+    function requirePlan(value, source, precision) {
+      return resources ? resources.require(value, source, generation, precision) : null;
+    }
+    function release(ticket, clean) {
+      if (!ticket) return;
+      ticket.cancel();
+      if (clean) ticket.release({apiReleased:true, allocationEnded:true});
+      else { ticket.settle({allocationEnded:true}); cleanupFailed = true; }
+    }
+    function materialize(ticket, value) {
+      if (ticket) { var result = ticket.materialize(value); if (!result.ok) throw new Error(result.reason); }
+    }
+    function assertLive() {
+      if (destroyed || !gl || gl.isContextLost()) throw new Error('context-lost');
+    }
+    function deleteHandle(method, handle) {
+      if (!handle || !gl || gl.isContextLost()) return true;
+      try { gl[method](handle); return true; } catch (_) { cleanupFailed = true; return false; }
+    }
+    function retireShaders() {
+      var clean = true;
+      shaders.forEach(function (shader) { if (!deleteHandle('deleteShader', shader)) clean = false; });
+      shaders = []; return clean;
+    }
+    function destroy() {
+      if (destroyed) return {apiReleased:!cleanupFailed, cleanupFailed:cleanupFailed};
+      destroyed = true;
+      var clean = retireShaders();
+      if (!deleteHandle('deleteProgram', prog)) clean = false;
+      if (!deleteHandle('deleteVertexArray', vao)) clean = false;
+      if (!deleteHandle('deleteBuffer', vbo)) clean = false;
+      var textureClean = deleteHandle('deleteTexture', tex);
+      try {
+        if (gl && !gl.isContextLost()) { var ext = gl.getExtension('WEBGL_lose_context'); if (ext) ext.loseContext(); }
+      } catch (_) { clean = false; textureClean = false; }
+      // Context loss is an API retirement proof, not physical GPU reclamation.
+      if (gl && gl.isContextLost()) clean = textureClean = true;
+      try { canvas.width = canvas.height = 0; } catch (_) { clean = false; }
+      gl = prog = vao = vbo = tex = inst = null;
+      release(fixed, clean); release(surface, clean); release(texture, textureClean);
+      if (!clean || !textureClean) cleanupFailed = true;
+      return {apiReleased:clean && textureClean, cleanupFailed:cleanupFailed};
+    }
+    try {
+      fixed = requirePlan({gpuContexts:1, programs:1, bufferDeclaredBytes:INSTANCE_BYTES, ownedCpuBytes:INSTANCE_BYTES},
+        'Glyph GL context/program and fixed 128x16 Float32 instance CPU/upload');
+      var pixels = canvas.width * canvas.height;
+      if (!Number.isSafeInteger(pixels) || pixels < 1 || !Number.isSafeInteger(pixels * 4)) throw new Error('estimate-unavailable');
+      surface = requirePlan({drawingBufferPixels:pixels, renderTargetDeclaredBytes:pixels * 4}, 'Glyph initial RGBA8 drawing surface', 'bounded-estimate');
+      gl = canvas.getContext('webgl2', {
       alpha: true, premultipliedAlpha: false, antialias: false,
       depth: false, stencil: false, powerPreference: 'low-power'
     });
-    if (!gl) return null;
+      if (!gl) { destroy(); return null; }
+      materialize(fixed, {gpuContexts:1});
+      if (surface) surface.commit();
 
-    var prog = link(gl, VERT, FRAG);
+      prog = gl.createProgram();
+      if (!prog) throw new Error('glyph program allocation failed');
+      materialize(fixed, {programs:1});
+      gl.attachShader(prog, compile(gl, gl.VERTEX_SHADER, VERT, shaders));
+      gl.attachShader(prog, compile(gl, gl.FRAGMENT_SHADER, FRAG, shaders));
+      gl.linkProgram(prog);
+      if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error('glyph link: ' + gl.getProgramInfoLog(prog));
+      if (!retireShaders()) throw new Error('glyph shader cleanup failed');
     var U = {};
     UNIFORMS.forEach(function (n) {
       U[n.replace(/\[0\]$/, '')] = gl.getUniformLocation(prog, n);
     });
 
-    var vao = gl.createVertexArray();
-    var vbo = gl.createBuffer();
+    vao = gl.createVertexArray();
+    vbo = gl.createBuffer();
+    if (!vao || !vbo) throw new Error('glyph buffer allocation failed');
     gl.bindVertexArray(vao);
     gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+    inst = new Float32Array(128 * 16);
+    materialize(fixed, {ownedCpuBytes:INSTANCE_BYTES});
+    gl.bufferData(gl.ARRAY_BUFFER, INSTANCE_BYTES, gl.DYNAMIC_DRAW);
+    materialize(fixed, {bufferDeclaredBytes:INSTANCE_BYTES});
     var stride = 16 * 4;
     gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 4, gl.FLOAT, false, stride, 0);  gl.vertexAttribDivisor(0, 1);
     gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 4, gl.FLOAT, false, stride, 16); gl.vertexAttribDivisor(1, 1);
@@ -223,33 +286,67 @@
     gl.enableVertexAttribArray(3); gl.vertexAttribPointer(3, 4, gl.FLOAT, false, stride, 48); gl.vertexAttribDivisor(3, 1);
     gl.bindVertexArray(null);
 
-    var tex = gl.createTexture();
-    gl.bindTexture(gl.TEXTURE_2D, tex);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
-
-    var inst = new Float32Array(128 * 16);
+    if (fixed) fixed.settle({allocationEnded:true});
+    } catch (error) { destroy(); error.glyphCleanupFailed = cleanupFailed; throw error; }
     var texFormat = gl.RED;
     var texInternal = gl.R8;
 
     function initTexture(w, h, dual) {
-      texFormat = dual ? gl.RG : gl.RED;
-      texInternal = dual ? gl.RG8 : gl.R8;
-      gl.bindTexture(gl.TEXTURE_2D, tex);
-      gl.texImage2D(gl.TEXTURE_2D, 0, texInternal, w, h, 0, texFormat, gl.UNSIGNED_BYTE, null);
+      assertLive();
+      if (!Number.isSafeInteger(w) || !Number.isSafeInteger(h) || w < 1 || h < 1
+          || w > gl.getParameter(gl.MAX_TEXTURE_SIZE) || h > gl.getParameter(gl.MAX_TEXTURE_SIZE)) throw new Error('estimate-unavailable');
+      if (tex && texWidth === w && texHeight === h && texDual === !!dual) return;
+      var candidateTicket = requirePlan({textureDeclaredBytes:w * h * (dual ? 2 : 1)}, 'Glyph single-context R8/RG8 atlas replacement');
+      var candidate = null, format = dual ? gl.RG : gl.RED, internal = dual ? gl.RG8 : gl.R8;
+      try {
+        candidate = gl.createTexture(); if (!candidate) throw new Error('glyph texture allocation failed');
+        gl.bindTexture(gl.TEXTURE_2D, candidate);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        gl.texImage2D(gl.TEXTURE_2D, 0, internal, w, h, 0, format, gl.UNSIGNED_BYTE, null);
+        if (gl.getError() !== gl.NO_ERROR) throw new Error('glyph texture allocation failed');
+        if (candidateTicket) candidateTicket.commit();
+      } catch (error) { release(candidateTicket, deleteHandle('deleteTexture', candidate)); throw error; }
+      release(texture, deleteHandle('deleteTexture', tex));
+      texture = candidateTicket; tex = candidate; texWidth = w; texHeight = h; texDual = !!dual;
+      texFormat = format; texInternal = internal;
+    }
+
+    function resize(w, h) {
+      assertLive();
+      if (!Number.isSafeInteger(w) || !Number.isSafeInteger(h) || w < 1 || h < 1) throw new Error('estimate-unavailable');
+      if (w === canvas.width && h === canvas.height) return;
+      var oldWidth = canvas.width, oldHeight = canvas.height, peak = Math.max(w * oldHeight, w * h);
+      if (!Number.isSafeInteger(peak * 4)) throw new Error('estimate-unavailable');
+      var next = requirePlan({drawingBufferPixels:peak, renderTargetDeclaredBytes:peak * 4}, 'Glyph resize width-first RGBA8 replacement peak', 'bounded-estimate');
+      try {
+        canvas.width = w; canvas.height = h;
+        if (gl.isContextLost() || gl.drawingBufferWidth !== w || gl.drawingBufferHeight !== h) throw new Error('glyph surface unavailable');
+        if (next) next.commit({drawingBufferPixels:w * h, renderTargetDeclaredBytes:w * h * 4});
+      } catch (error) {
+        var restored = false;
+        try { canvas.width = oldWidth; canvas.height = oldHeight; restored = !gl.isContextLost() && gl.drawingBufferWidth === oldWidth && gl.drawingBufferHeight === oldHeight; } catch (_) {}
+        release(next, restored); throw error;
+      }
+      release(surface, true); surface = next;
     }
 
     // 9 参数重载：(target, level, x, y, w, h, format, type, pixels)。
     // 少写 width/height 不会报「参数错」，只会抛 TypeError 或静默上传 0 字节。
     function uploadCell(x, y, size, bytes) {
+      assertLive();
+      if (!tex || !Number.isSafeInteger(size) || size < 1 || !Number.isSafeInteger(x) || !Number.isSafeInteger(y)
+          || x < 0 || y < 0 || x + size > texWidth || y + size > texHeight
+          || !(bytes instanceof Uint8Array) || bytes.byteLength !== size * size * (texDual ? 2 : 1)) throw new Error('glyph cell outside admitted atlas');
       gl.bindTexture(gl.TEXTURE_2D, tex);
       gl.texSubImage2D(gl.TEXTURE_2D, 0, x, y, size, size, texFormat, gl.UNSIGNED_BYTE, bytes);
     }
 
     function beginFrame(cssW, cssH) {
+      assertLive();
       gl.viewport(0, 0, canvas.width, canvas.height);   // 设备 px
       gl.clearColor(0, 0, 0, 0);
       gl.clear(gl.COLOR_BUFFER_BIT);
@@ -260,6 +357,8 @@
     }
 
     function draw(glyphs, n, o) {
+      assertLive();
+      if (!Number.isSafeInteger(n) || n < 0 || n > 128 || n > glyphs.length) throw new Error('glyph instance capacity');
       if (!n) return;
       var d = inst;
       var cellPx = o.cellPx != null ? o.cellPx : 160;
@@ -277,7 +376,7 @@
         d[k + 15] = g.box ? g.box.hy : inner / 2;
       }
       gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
-      gl.bufferData(gl.ARRAY_BUFFER, d.subarray(0, n * 16), gl.DYNAMIC_DRAW);
+      gl.bufferSubData(gl.ARRAY_BUFFER, 0, d.subarray(0, n * 16));
 
       gl.uniform2f(U.uUVSize, o.uvW, o.uvH);
       gl.uniform1f(U.uCellPx, cellPx);
@@ -288,6 +387,7 @@
       gl.uniform1f(U.uDecorDur, o.decorDur || 1800);
       gl.uniform3fv(U.uDecorColor, o.decorColor || o.glowColor || [1, 1, 1]);
       gl.uniform1f(U.uTimeMs, o.timeMs);
+      gl.uniform1f(U.uSceneTimeMs, Number.isFinite(o.sceneTimeMs) ? o.sceneTimeMs : o.timeMs);
       gl.uniform1f(U.uShear, o.shear);
       gl.uniform1f(U.uBaseY, o.baseY);
       gl.uniform1f(U.uAmp, o.amp);
@@ -328,8 +428,11 @@
 
     return {
       gl: gl, initTexture: initTexture, uploadCell: uploadCell,
-      beginFrame: beginFrame, draw: draw,
-      isLost: function () { return gl.isContextLost(); }
+      beginFrame: beginFrame, draw: draw, resize: resize,
+      destroy: destroy,
+      isLost: function () { return destroyed || !gl || gl.isContextLost(); },
+      resourceState: function () { return {destroyed:destroyed, cleanupFailed:cleanupFailed,
+        fixed:fixed && fixed.state(), surface:surface && surface.state(), texture:texture && texture.state()}; }
     };
   }
 

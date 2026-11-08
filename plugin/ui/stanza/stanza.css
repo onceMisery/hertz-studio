@@ -77,6 +77,13 @@
 .fl-glyph[hidden] { display: none; }
 .fl-glyph-canvas { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
 .fl-glyph-a11y { position: absolute; inset: 0; color: transparent; opacity: 0; pointer-events: none; user-select: none; }
+.fl-glyph[data-glyph-state="preparing"] .fl-glyph-a11y,
+.fl-glyph[data-glyph-state="failed"] .fl-glyph-a11y { display: grid; place-content: center; padding: 4vw; color: var(--glyph-ink, #f4f4f5); opacity: 1; font: 700 clamp(2.25rem, 6vw, 4.5rem) / 1.35 var(--glyph-font, system-ui, sans-serif); text-align: center; overflow-wrap: anywhere; }
+.fl-glyph-retry { position: absolute; inset-inline-start: 50%; bottom: 2rem; transform: translateX(-50%); padding: .55rem .9rem; border: 1px solid #71717a; border-radius: .35rem; background: #18181b; color: #f4f4f5; font: inherit; cursor: pointer; }
+.fl-glyph-retry:hover { background: #27272a; }
+.fl-glyph-retry:focus-visible { outline: 2px solid currentColor; outline-offset: 3px; }
+.fl-pixi-fallback { position: absolute; inset: 0; display: grid; place-content: center; padding: 4vw; color: #f4f4f5; font: 700 clamp(2.25rem, 6vw, 4.5rem) / 1.35 system-ui, sans-serif; text-align: center; overflow-wrap: anywhere; pointer-events: none; }
+.fl-pixi-fallback[hidden] { display: none; }
 .fl-glyph-hit { position: absolute; inset: 0; pointer-events: none; }
 .fl-glyph-hit .fl-glyph-hot { position: absolute; pointer-events: auto; cursor: pointer; background: transparent; }
 .fl-cline { position: absolute; display: flex; flex-wrap: wrap; width: 100%; max-width: 1152px;

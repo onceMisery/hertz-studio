@@ -70,6 +70,7 @@ const backgroundState = { spec: { type: 'mesh', depthMode: 'scene' }, attached: 
   layer: { dataset: {}, style: { removeProperty() {} } }, depthEffective: 'scene', stageState: null,
   media: { tagName: 'VIDEO', paused:true, pause() { this.paused=true; paused++; }, play() { this.paused=false; played++; return Promise.resolve(); } } };
 const backgroundContext = vm.createContext({ state: backgroundState, isVisible: () => true,
+  window: {}, advancing: false, backgroundDirty: false,
   mediaGeneration: 0, serviceOnline: true, mediaProbe: null, selectionPin: null, temporaryApply: null,
   isCanvasType: () => true, BG_FPS: 12, document: { body: { classList: { contains: () => true } } },
   destroyWall: () => { destroyed++; }, ensureWall: () => { attached++; return true; },

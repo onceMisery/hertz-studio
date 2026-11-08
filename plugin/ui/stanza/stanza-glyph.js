@@ -4,6 +4,12 @@
 // 情绪求值不在这里——它来自 LyricEmotionField，本文件只消费采样结果。
 (function (global) {
   'use strict';
+
+  // The Stage facade includes native parent-window suspension. Standalone consumers keep browser visibility.
+  function documentHidden() {
+    var stage = window.Stage;
+    return stage && typeof stage.isDocumentHidden === "function" ? stage.isDocumentHidden() : !!document.hidden;
+  }
   if (typeof window === 'undefined') return;
   var U = global.StanzaUtil;
 
@@ -14,21 +20,25 @@
 
   // 400/700 两张 SDF 交错进同一张 RG8 图集：R=细基面、G=粗基面。
   // 几何（字号/基线/槽位）由 atlas 模块统一，避免两张脸错位。
-  function createDualAtlas(fontStack) {
-    return global.LyricGlyphAtlas.createDual(fontStack);
+  function createDualAtlas(fontStack, options) {
+    return global.LyricGlyphAtlas.createDual(fontStack, options);
   }
 
-  function init(host, onSeek) {
+  function init(host, onSeek, options) {
+    options = options || {};
+    var resources = options.resources;
+    if (options.admissionRequired && (!resources || resources.contractVersion !== 1)) throw new Error('resource-port-required');
     var root = document.createElement('div');
     root.className = 'fl-glyph';
-    var canvas = document.createElement('canvas');
-    canvas.className = 'fl-glyph-canvas';
-    canvas.setAttribute('aria-hidden', 'true');
+    var canvas = null;
     var a11y = document.createElement('div');
     a11y.className = 'fl-glyph-a11y';
     var hitLayer = document.createElement('div');
     hitLayer.className = 'fl-glyph-hit';
-    root.append(canvas, a11y, hitLayer);
+    var note = document.createElement('button');
+    note.type = 'button'; note.className = 'fl-glyph-retry'; note.hidden = true;
+    note.textContent = '重新启用字形效果';
+    root.append(a11y, hitLayer, note);
     host.append(root);
 
     var theme = global.StanzaTheme.DEFAULT;
@@ -39,8 +49,48 @@
     var cssW = 1, cssH = 1, dpr = 1;
     var profile = null, emotionScale = 1;
     var emotionState = null, emotionRevision = -1;
-
-    var measureCtx = document.createElement('canvas').getContext('2d');
+    var measureCanvas = null, measureCtx = null, curveBuffers = null;
+    var canvasTicket = null, measureTicket = null, generation = 0;
+    var failure = null, resizeFailure = null, destroyed = false, submitted = false, sizeDirty = true, ro = null;
+    var sceneTimeMs = 0, advancing = false, lastFrameId = -1, stateUnsubscribe = null;
+    root.dataset.glyphState = 'preparing';
+    function requirePlan(value, source) { return resources ? resources.require(value, source, generation) : null; }
+    function retire(ticket, clean) {
+      if (!ticket) return;
+      ticket.cancel();
+      if (clean) ticket.release({apiReleased:true, allocationEnded:true}); else ticket.settle({allocationEnded:true});
+    }
+    function report() {
+      if (resources) resources.report({requestedBackend:'glyph', actualBackend:submitted ? 'webgl2' : 'dom',
+        phase:destroyed ? 'disposed' : failure ? 'failed' : submitted ? 'active' : 'preparing',
+        generation:generation, failure:failure || resizeFailure, sceneTimeMs:sceneTimeMs,
+        coverage:'glyph-typed-arrays-canvas-program-buffer-and-atlas'});
+    }
+    function disposeGraphics() {
+      var clean = true;
+      if (canvas) canvas.removeEventListener('webglcontextlost', contextLost);
+      if (gl) { try { clean = gl.destroy().apiReleased && clean; } catch (_) { clean = false; } }
+      if (atlas) { try { clean = atlas.destroy().apiReleased && clean; } catch (_) { clean = false; } }
+      try { if (canvas) { canvas.width = canvas.height = 0; canvas.remove(); } if (measureCanvas) measureCanvas.width = measureCanvas.height = 0; }
+      catch (_) { clean = false; }
+      gl = atlas = canvas = measureCanvas = measureCtx = curveBuffers = null;
+      retire(canvasTicket, clean); retire(measureTicket, clean);
+      canvasTicket = measureTicket = null; submitted = false; layout = null; curLine = null;
+      return clean;
+    }
+    function fail(error) {
+      failure = (error && error.message) || String(error);
+      if (!disposeGraphics()) failure = 'glyph-cleanup-failed';
+      root.dataset.glyphState = 'failed'; note.hidden = false; hitLayer.textContent = ''; report();
+    }
+    function contextLost(e) { e.preventDefault(); if (!destroyed) fail(new Error('context-lost')); }
+    function retry() {
+      if (destroyed || !failure || failure === 'glyph-cleanup-failed') return;
+      failure = resizeFailure = null; submitted = advancing = false; generation++; sizeDirty = true;
+      root.dataset.glyphState = 'preparing'; note.hidden = true; report();
+      if (global.Stage && Stage.kick) Stage.kick();
+    }
+    note.addEventListener('click', retry);
 
     function fontStack() { return global.StanzaTheme.fontStack(theme.fontStyle); }
 
@@ -53,24 +103,45 @@
 
     function ensureGL() {
       if (gl) return true;
-      if (global.Stage && Stage.tier && Stage.tier() === 0) return false;
-      var made = global.LyricGlyphGL.create(canvas);
-      if (!made) return false;
-      gl = made;
-      atlas = createDualAtlas(fontStack());
+      if (failure || destroyed || !cssW || !cssH || documentHidden()) return false;
+      if (global.Stage && Stage.tier && Stage.tier() === 0) throw new Error('glyph-backend-unavailable');
+      canvasTicket = requirePlan({canvases:1}, 'Glyph renderer owned canvas');
+      canvas = document.createElement('canvas'); canvas.width = canvas.height = 1;
+      canvas.className = 'fl-glyph-canvas'; canvas.setAttribute('aria-hidden', 'true');
+      canvas.addEventListener('webglcontextlost', contextLost); root.prepend(canvas);
+      if (canvasTicket) canvasTicket.commit();
+      gl = global.LyricGlyphGL.create(canvas, {resources:resources, admissionRequired:options.admissionRequired, generation:generation});
+      if (!gl) throw new Error('glyph-backend-unavailable');
+      measureTicket = requirePlan({canvases:1, ownedCpuBytes:4 + 33 * 4 * 2}, 'Glyph layout 1x1 measure canvas and two retained field curves');
+      measureCanvas = document.createElement('canvas'); measureCanvas.width = measureCanvas.height = 1;
+      measureCtx = measureCanvas.getContext('2d');
+      if (!measureCtx) throw new Error('glyph metrics unavailable');
+      curveBuffers = {b:new Float32Array(33), w:new Float32Array(33)};
+      if (measureTicket) measureTicket.commit();
+      atlas = createDualAtlas(fontStack(), {resources:resources, admissionRequired:options.admissionRequired, generation:generation});
       gl.initTexture(atlas.W, atlas.H, true);
+      gl.resize(Math.round(cssW * dpr), Math.round(cssH * dpr));
+      canvas.style.width = cssW + 'px'; canvas.style.height = cssH + 'px';
       return true;
     }
 
     function resizeCanvas() {
       var r = root.getBoundingClientRect();
-      cssW = Math.max(1, r.width);
-      cssH = Math.max(1, r.height);
-      dpr = Math.min(global.devicePixelRatio || 1, 2);
-      canvas.width = Math.round(cssW * dpr);
-      canvas.height = Math.round(cssH * dpr);
-      canvas.style.width = cssW + 'px';
-      canvas.style.height = cssH + 'px';
+      var nextW = r.width > 0 ? r.width : 0, nextH = r.height > 0 ? r.height : 0;
+      var nextDpr = Math.min(global.devicePixelRatio || 1, 2);
+      sizeDirty = false;
+      if (gl && nextW && nextH) {
+        try { gl.resize(Math.max(1, Math.round(nextW * nextDpr)), Math.max(1, Math.round(nextH * nextDpr))); }
+        catch (error) {
+          if (error.resourceFailure && submitted) { resizeFailure = error.message; report(); return; }
+          throw error;
+        }
+      }
+      cssW = nextW; cssH = nextH; dpr = nextDpr; resizeFailure = null;
+      if (!cssW || !cssH) advancing = false;
+      if (gl && cssW && cssH) {
+        canvas.style.width = cssW + 'px'; canvas.style.height = cssH + 'px';
+      }
     }
 
     // ---- 排版：tokens → 字素序列，得到每个字素的 x / advance / u 区间 ----
@@ -194,8 +265,8 @@
         global.LyricEmotion.paletteEnabled()) ? st.palette : null;
       var decorKind = 0, decorStride = 1, decorSeed = 0, decorDur = 1800, decorColor = null;
       var f = (prof && global.LyricEmotionField)
-        ? global.LyricEmotionField.sample(prof, eI, em, pulse(), 0)
-        : { b: new Float32Array(33), w: new Float32Array(33).fill(0.5),
+        ? global.LyricEmotionField.sample(prof, eI, em, pulse(), 0, curveBuffers)
+        : { b: curveBuffers.b.fill(0), w: curveBuffers.w.fill(0.5),
             turb: 0, shearTan: 0, amp: 0, freq: 0, damp: 2 };
 
       var glyphs = [];
@@ -231,7 +302,7 @@
       var dirty = atlas.takeDirty();
       for (var k = 0; k < dirty.length; k += 1) {
         var o = atlas.cellOrigin(dirty[k]);
-        gl.uploadCell(o.x, o.y, atlas.CELL, atlas.cellBytes(dirty[k]));
+        atlas.withCellBytes(dirty[k], function (bytes) { gl.uploadCell(o.x, o.y, atlas.CELL, bytes); });
       }
 
       gl.beginFrame(cssW, cssH);
@@ -240,6 +311,7 @@
         uvH: atlas.CELL / atlas.H,
         cellPx: atlas.CELL, padPx: atlas.PAD,
         timeMs: tMs,
+        sceneTimeMs:resources ? sceneTimeMs : tMs,
         shear: tuning.rotation ? f.shearTan : 0,
         baseY: layout.baseY,
         amp: f.amp, freq: f.freq, damp: f.damp,
@@ -264,19 +336,30 @@
       });
     }
 
-    function frame() {
-      if (!visible || !global.Stage) return;
-      if (!ensureGL()) return;
+    function frame(dtMs, borrowed) {
+      if (destroyed || !visible || !global.Stage || documentHidden() || (borrowed && borrowed.documentHidden)) { advancing = false; return; }
+      if (borrowed && borrowed.version === 1) {
+        if (borrowed.frameId === lastFrameId) return;
+        lastFrameId = borrowed.frameId;
+      }
       var doc = global.Stage.lyrics();
       var lines = doc ? doc.lines : [];
-      var tMs = global.Stage.position();
+      var tMs = borrowed && borrowed.version === 1 ? borrowed.mediaPositionMs : global.Stage.position();
       var idx = U.activeLineIndex(lines, tMs);
       var line = idx >= 0 ? lines[idx] : null;
+      var fallbackText = line ? line.text : '';
+      if (a11y.textContent !== fallbackText) a11y.textContent = fallbackText;
+      if (failure) { report(); return; }
+      try {
+      if (sizeDirty) resizeCanvas();
+      if (!cssW || !cssH || !ensureGL()) return;
+      var moving = !!(borrowed && borrowed.playing && !borrowed.reduced && !paused && decorAllowed());
+      var delta = moving && advancing && submitted && Number.isFinite(dtMs) ? Math.min(100, Math.max(0, dtMs)) : 0;
+      advancing = moving; sceneTimeMs += delta;
 
       if (line !== curLine) {
         curLine = line;
         layout = (line && U.hasReadable(line.text)) ? buildLayout(line, cssH / 2) : null;
-        a11y.textContent = line ? line.text : '';
         buildHit(layout);
         syncEmotion(idx);
       } else if (idx >= 0 && global.LyricEmotion && global.LyricEmotion.revision &&
@@ -284,22 +367,33 @@
         // 显式刷新/新 Cue 在同一行内提交：只重取状态，不重建排版。
         syncEmotion(idx);
       }
+      if (!layout) gl.beginFrame(cssW, cssH);
       drawLine(tMs);
+      submitted = true; root.dataset.glyphState = 'active'; note.hidden = true; report();
+      } catch (error) { fail(error); }
     }
 
-    resizeCanvas();
-    canvas.addEventListener('webglcontextlost', function (e) {
-      e.preventDefault();
-      gl = null; atlas = null; layout = null; curLine = null;
+    if (typeof ResizeObserver === 'function') { ro = new ResizeObserver(function () { sizeDirty = true; if (global.Stage && Stage.kick) Stage.kick(); }); ro.observe(root); }
+    if (resources && global.Stage && Stage.onFrameState) stateUnsubscribe = Stage.onFrameState(function (state) {
+      if (state.documentHidden || state.reduced || !state.playing) advancing = false;
     });
+    report();
 
     return {
       frame: frame,
+      isReady: function () { return !destroyed && (submitted || !!failure); },
+      getDebugSnapshot: function () { return {requestedBackend:'glyph', actualBackend:submitted ? 'webgl2' : 'dom',
+        generation:generation, failure:failure || resizeFailure, sceneTimeMs:sceneTimeMs, submitted:submitted,
+        resources:gl && gl.resourceState(), atlas:atlas && atlas.resourceState()}; },
       update: function () {},
       setTheme: function (t) {
         if (!t || global.StanzaTheme.signature(t) === global.StanzaTheme.signature(theme)) return;
         theme = t;
-        if (atlas) atlas.reset();
+        root.style.setProperty('--glyph-ink', theme.primaryColor);
+        root.style.setProperty('--glyph-font', fontStack());
+        // Font geometry and raster face belong to this atlas generation.
+        if (atlas) disposeGraphics();
+        submitted = false; root.dataset.glyphState = failure ? 'failed' : 'preparing';
         layout = null; curLine = null;
       },
       setFontScale: function (v) {
@@ -308,8 +402,8 @@
         fontScale = v; layout = null; curLine = null;
       },
       rootEl: function () { return root; },
-      setVisible: function (b) { visible = b; root.hidden = !b; },
-      setPaused: function (b) { paused = !!b; },
+      setVisible: function (b) { b = !!b; if (visible !== b) sizeDirty = true; if (!b) advancing = false; visible = b; root.hidden = !b; },
+      setPaused: function (b) { paused = !!b; if (paused) advancing = false; },
       setEco: function () {},
       setTuning: function (t) {
         tuning = {
@@ -319,17 +413,19 @@
         };
         layout = null; curLine = null;
       },
-      resize: function () { resizeCanvas(); layout = null; curLine = null; },
+      resize: function () { sizeDirty = true; layout = null; curLine = null; },
+      retryResources: retry,
       setEmotion: function (p, scale) {
         profile = p;
         emotionScale = scale == null ? 1 : scale;
       },
       destroy: function () {
-        if (gl && gl.gl) {
-          var ext = gl.gl.getExtension('WEBGL_lose_context');
-          if (ext) ext.loseContext();
-        }
-        gl = null; atlas = null; layout = null; curLine = null;
+        if (destroyed) return;
+        destroyed = true;
+        if (ro) { ro.disconnect(); ro = null; }
+        if (stateUnsubscribe) { stateUnsubscribe(); stateUnsubscribe = null; }
+        note.removeEventListener('click', retry); disposeGraphics();
+        if (resources) resources.forgetReport();
         root.remove();
       }
     };

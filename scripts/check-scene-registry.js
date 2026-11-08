@@ -28,6 +28,7 @@ function creativeContext(revision) {
     vm.runInContext(content, box, { filename: file });
   }
   box.Backgrounds.apply = box.HandDrawn.apply = () => {};
+  require('./stage-resource-fixture')(box);
   box.CreativeStage.init();
   return box;
 }

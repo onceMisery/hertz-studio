@@ -26,6 +26,7 @@ function context(sources) {
   env.window = env;
   env.applyCalls = applyCalls;
   vm.createContext(env);
+  require('./stage-resource-fixture')(env);
   for (const file of FILES) vm.runInContext(sources[file], env, { filename: file, timeout: 5000 });
   env.Backgrounds.apply = value => applyCalls.backgrounds.push(plain(value));
   env.HandDrawn.apply = value => applyCalls.handdrawn.push(plain(value));

@@ -129,7 +129,11 @@ const REQUIRE_BEFORE = [
   ['stanza/stanza-util.js', 'stanza/stanza-glyph.js'],
   ['stanza/stanza-theme.js', 'stanza/stanza-glyph.js'],
   ['creative-gl.js', 'creative-stage.js'],      // 编排层建引擎时读 window.CreativeGL
+  ['stage-json-source.js', 'stage-persistence.js'],
+  ['stage-json-source.js', 'creative-stage.js'],
   ['stage.js', 'creative-stage.js'],            // 帧门登记在 Stage 上
+  ['stage-image-source.js', 'stage.js'],         // bounded raster preparation before palette owners
+  ['stage-image-source.js', 'backgrounds.js'],
   ['stage.js', 'handdrawn.js'],
   ['stage-particles.js', 'handdrawn.js'],       // 手绘抖动读起音脉冲
   ['stage-control.js', 'creative-stage.js'],    // 三维开启时让粒子层让位

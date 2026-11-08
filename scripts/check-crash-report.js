@@ -151,54 +151,25 @@ function grabFn(src, head) {
     ok(/id="dev-diag-crash-text"/.test(html), '文本节点存在（JS 按 id 取它）');
   }
 
-  section('渲染恢复预算（执行真实模块里的纯函数）');
+  section('渲染丢失退休与显式重试（执行真实 owner）');
   {
     const src = read('plugin/ui/stage3d.js');
-    const ctx = {};
+    let releases = 0, fallback = '', chrome = 0;
+    const ctx = { contextLost: false, sceneAdvancing: true, graphicsFailure: '',
+      cancelGestures() {}, releaseGl() { releases++; }, isPlane: () => false,
+      showFallback(text) { fallback = text; }, pokeChrome() { chrome++; } };
     vm.createContext(ctx);
-    vm.runInContext(grabFn(src, 'function pruneRecoveries(') + '\n'
-      + grabFn(src, 'function takeRecovery(')
-      + '\nthis.prune = pruneRecoveries; this.take = takeRecovery;', ctx);
-    const W = 120000, MAX = 3;
-    let hist = [];
-    for (let i = 0; i < MAX; i += 1) {
-      const got = ctx.take(hist, 1000 + i * 1000, W, MAX);
-      ok(got !== null, `窗口内第 ${i + 1} 次丢失应当还允许恢复`);
-      hist = got || hist;
-    }
-    ok(ctx.take(hist, 4000, W, MAX) === null,
-      `窗口内第 ${MAX + 1} 次必须停用，不能再重建一遍着色器链`);
-    // 窗口滑走之后要能再试：一次驱动重置不该变成整场不可用。
-    ok(ctx.take(hist, 1000 + MAX * 1000 + W, W, MAX) !== null,
-      '窗口过去之后预算重新可用');
-    const kept = ctx.prune([0, 50000, 90000], 100000, W);
-    ok(kept.length === 3 && kept[0] === 0, '都在窗口内时保持顺序与内容');
-    ok(ctx.prune([0, 10], 200000, W).length === 0, '整窗之外一律剪光');
-    ok(ctx.prune([0], W, W).length === 0, '恰好等于窗口的记录算出窗（边界不许含糊）');
-    ok(ctx.take([], 0, W, 0) === null, '预算为 0 时一次都不许试');
-
-    const lost = bodyOf(src, 'function onContextLost(e)');
-    ok(lost, 'onContextLost 抓得到');
-    if (lost) {
-      ok(lost.indexOf('takeRecovery(') < lost.indexOf('contextLost = true'),
-        '先判预算再进入恢复态：反过来就是每次都重建');
-      ok(/glStopped = true/.test(lost) && /contextLost = false/.test(lost),
-        '停用时两个状态位都要落对：contextLost 留着就是谎报「正在恢复」');
-      ok(/releaseGl\(\)/.test(lost), '停用要真的摘掉画布与两个监听');
-    }
-    ok(/glFailed \|\| glStopped/.test(src), 'ensureGl 认这个停用位');
-    ok(/if \(glStopped && recoveryAt\.length\)/.test(src),
-      'ensureGl 里要有过期重评：窗口过后用户再进三维该再给一次机会');
-    const stopped = /var RECOVERY_STOPPED_TEXT = ([\s\S]{0,420}?);/.exec(src);
-    ok(stopped, '停用的文案抓得到');
-    if (stopped) {
-      ok(/开发者选项/.test(stopped[0]), '那句话要告诉用户去哪儿取证');
-      ok(/丢失/.test(stopped[0]) && /次/.test(stopped[0]), '要说清丢了几次，才解释得掉为什么停用');
-      ok(!/正在恢复/.test(stopped[0]), '停用的措辞不许再说「正在恢复」');
-    }
-    const shown = /if \(glFailed\) showFallback[\s\S]{0,300}?else if \(contextLost\)/.exec(src);
-    ok(shown && /glStopped/.test(shown[0]),
-      '回到舞台轨时按 glFailed / glStopped / contextLost 三种状态分别措辞');
+    vm.runInContext(grabFn(src, 'function onContextLost(') + '\n' + grabFn(src, 'function onContextRestored('), ctx);
+    let prevented = false; ctx.onContextLost({ preventDefault() { prevented = true; } });
+    ok(prevented && ctx.contextLost && !ctx.sceneAdvancing, '真实丢失事件停止当前几何并保留失效状态');
+    ok(releases === 1 && ctx.graphicsFailure === 'context-lost', '丢失退休自身资源并回报原因');
+    ok(/重新打开舞台可重试/.test(fallback) && !/正在恢复/.test(fallback), '失败文案说明显式重试，不能假称正在恢复');
+    const retired = { releases, fallback, chrome }; ctx.onContextRestored();
+    ok(releases === retired.releases && fallback === retired.fallback && chrome === retired.chrome && ctx.contextLost,
+      '浏览器 restored 事件不复活退休代际、不自动重建或改写提示');
+    const lost = codeOnly(bodyOf(src, 'function onContextLost(e)'));
+    ok(!/ensureGl\(|setTimeout|setInterval/.test(lost), '丢失 owner 不建立定时恢复旁路');
+    ok(!/takeRecovery|pruneRecoveries|glStopped/.test(src), '旧自动恢复窗口与停用 owner 已退休');
   }
 
   console.log(`\n崩溃报告契约检查：${checks} 项` + (failures ? `，${failures} 项失败` : '全部通过'));

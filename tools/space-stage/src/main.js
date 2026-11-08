@@ -6,7 +6,7 @@ import { createScene as createCoast } from '../../coast-stage/src/main.js';
 import { createScene as createZodiac, pure as zodiac } from '../../zodiac-stage/src/main.js';
 import { registerScenes } from './scenes/index.js';
 import { createSpatialResources } from './scenes/resources.js';
-import { registerEffects, createPostChain, composeEffects, optionalEffectSpecs } from './effects/index.js';
+import { registerEffects, createPostChain, postResourcePlan, composeEffects, optionalEffectSpecs } from './effects/index.js';
 
 const registry = createRegistry();
 const effects = createRegistry();
@@ -55,25 +55,45 @@ function rigPose(pose) {
 
 export function create(canvas, options = {}) {
   if (!canvas || typeof canvas.addEventListener !== 'function') throw new Error('Stage requires a canvas');
+  const pagePort = options.resources || null;
+  if (pagePort && pagePort.contractVersion !== 1) throw new Error('resource-policy-required');
+  let contextTicket = null, surfaceTicket = null, admissionFailure = '';
+  const releaseTicket = ticket => ticket?.release({ apiReleased: true, allocationEnded: true });
   const quality = createQuality(options.qualityMode, options.deviceTier);
   const lifetime = createScope();
-  const spatialResources = createSpatialResources(THREE, options.onInvalidate, (url, signal) => services.resolveCover ? services.resolveCover(url, signal) : url);
+  const spatialResources = createSpatialResources(THREE, options.onInvalidate,
+    (url, signal) => services.resolveCover ? services.resolveCover(url, signal) : url, undefined,
+    { resources: pagePort, decodeImage: (url, options) => services.decodeImage
+      ? services.decodeImage(url, options) : Promise.reject(new Error('estimate-unavailable')) });
   lifetime.defer(() => spatialResources.dispose());
   let renderer;
-  try { renderer = new THREE.WebGLRenderer({ canvas, antialias: false, powerPreference: 'high-performance' }); }
-  catch (error) { lifetime.dispose(); throw new Error(`WebGL initialization failed: ${error.message}`); }
+  try {
+    contextTicket = pagePort?.require({ gpuContexts: 1 }, 'SpaceStage original shared Three renderer context', 0);
+    const pixels = Math.max(1, canvas.width * canvas.height);
+    surfaceTicket = pagePort?.require({ drawingBufferPixels: pixels, renderTargetDeclaredBytes: pixels * 8 },
+      'SpaceStage original RGBA8/depth drawing buffer', 0, 'bounded-estimate');
+    renderer = new THREE.WebGLRenderer({ canvas, antialias: false, powerPreference: 'high-performance' });
+    renderer.hertzProgramResources = pagePort;
+    renderer.hertzBufferResources = pagePort;
+    contextTicket?.commit(); surfaceTicket?.commit();
+  } catch (error) {
+    lifetime.dispose(); renderer?.dispose(); renderer?.forceContextLoss();
+    canvas.width = canvas.height = 0; releaseTicket(contextTicket); releaseTicket(surfaceTicket);
+    throw new Error(`WebGL initialization failed: ${error.message}`);
+  }
   renderer.info.autoReset = false;
   let active = null, lyricLayer = null, generation = 0, lyricGeneration = 0, disposed = false, width = 640, height = 360, services = { spatialResources }, pose = null;
   let state = 'idle', error = '', contextLost = false, frameCount = 0, lastFrame = null, intervals = [], cpuMs = 0, gpuMs = null;
+  let requestId = '', requestedId = '', lastResourceFailure = '';
   function stats() {
-    const info = renderer.info;
+    const info = renderer?.info || { render: { calls: 0, points: 0, triangles: 0 }, memory: { geometries: 0, textures: 0 }, programs: [] };
     const sample = intervals.slice().sort((a,b) => a-b);
     const median = sample.length ? sample[Math.floor(sample.length / 2)] : null;
     const scoped = active ? active.scope.stats() : { resources: 0, tasks: 0, estimatedBytes: 0 };
     const lyricStats = lyricLayer ? lyricLayer.scope.stats() : { resources: 0, tasks: 0, estimatedBytes: 0 };
     const shared = spatialResources.stats();
     const post = active && active.post && active.post.stats ? active.post.stats() : { bytes: 0 };
-    return { state, id: active && active.def.id, lyricId: lyricLayer && lyricLayer.def.id, error, ...quality.status(), frameCount,
+    return { state, id: active && active.def.id, requestedId, requestId, lyricId: lyricLayer && lyricLayer.def.id, error, ...quality.status(), frameCount,
       actualFps: median ? 1000 / median : null, frameIntervalP95: sample.length ? sample[Math.floor(sample.length * .95)] : null,
       cpuUpdateRenderMs: cpuMs, gpuMs, gpuTimingSource: 'unavailable', drawCalls: info.render.calls,
       points: info.render.points, triangles: info.render.triangles, geometries: info.memory.geometries,
@@ -81,9 +101,22 @@ export function create(canvas, options = {}) {
       physicalPixels: canvas.width * canvas.height, memorySource: 'tracked-resource-estimate',
       ...scoped, resources: scoped.resources + lyricStats.resources, estimatedBytes: scoped.estimatedBytes + lyricStats.estimatedBytes + shared.bytes + post.bytes,
       textTextures: shared.textTextures, coverTextures: shared.coverTextures, tasks: scoped.tasks + lyricStats.tasks + shared.queued + shared.coverLoads,
-      sceneStats: active?.instance?.stats?.() || null };
+      sceneStats: active?.instance?.stats?.() || null, firstSubmit: !!active?.firstSubmit, resourceAdmissionFailure: admissionFailure,
+      postResourceFailure: post.resourceFailure || '', poolResourceFailure: shared.resourceFailure || '',
+      resourceCoverage: pagePort ? 'context-post-text-raster-cover-and-shared-buffer-subset' : 'original-consumer-policy' };
   }
-  function notify() { if (typeof options.onStatus === 'function') options.onStatus(stats()); }
+  function notify() {
+    const value = stats();
+    lastResourceFailure = value.resourceAdmissionFailure || value.postResourceFailure || value.poolResourceFailure || '';
+    if (pagePort) {
+      if (disposed) pagePort.forgetReport();
+      else pagePort.report({ requestId, requestedScene: requestedId, actualScene: value.id || '',
+        requestedQuality: value.qualityMode, actualQuality: value.effectiveQuality,
+        actualBackend: renderer ? 'three-webgl2' : 'none', lifecycle: value.state,
+        firstSubmit: value.firstSubmit, reason: error || lastResourceFailure, coverage: value.resourceCoverage });
+    }
+    if (typeof options.onStatus === 'function') options.onStatus(value);
+  }
   function releaseActive() {
     const previous = active; active = null;
     if (!previous) return;
@@ -102,36 +135,58 @@ export function create(canvas, options = {}) {
   async function selectLyrics(id, savedState = {}) {
     if (disposed) throw new Error('Stage disposed');
     if (contextLost) throw new Error('WebGL context is lost; recreate the stage to retry');
+    if (options.isVisible && !options.isVisible()) throw new Error('preparation-suspended');
     const normalized = id ? registry.normalizeState(id, savedState) : null;
     const def = normalized && registry.get(normalized.id);
     if (def && !def.capabilities.ownsLyrics) throw new Error('Expected a lyric effect');
     const ticket = ++lyricGeneration; releaseLyrics();
     if (!def) { notify(); return null; }
-    const scope = createScope(), scene = new THREE.Scene();
+    const scope = createScope({ resources: pagePort, generation: ticket }), scene = new THREE.Scene();
     const camera = new THREE.PerspectiveCamera(def.camera.fov || 58, width / height, .05, 900);
     camera.position.set(0, 0, def.camera.radius || 15); camera.lookAt(0, 0, 0);
-    const context = { THREE, scene, camera, renderer, scope, layer: 'lyrics', params: normalized.params, quality: quality.profile(), signal: scope.signal, services };
+    const context = { THREE, scene, camera, renderer, scope, resources: pagePort, layer: 'lyrics', params: normalized.params, quality: quality.profile(), signal: scope.signal, services };
     const candidate = { def, scene, camera, scope, context, params: normalized.params, instance: null };
     lyricLayer = candidate;
+    scope.beginAllocation();
     try {
       const instance = await def.create(context);
       if (!instance || typeof instance.update !== 'function' || typeof instance.dispose !== 'function') throw new Error('Invalid lyric instance');
       if (disposed || ticket !== lyricGeneration || scope.signal.aborted) { instance.dispose(); scope.trackTree(scene); scope.dispose(); return null; }
       candidate.instance = instance; scope.defer(() => instance.dispose()); scope.trackTree(scene);
-      instance.setParams?.(candidate.params); instance.setQuality?.(quality.profile()); instance.resize?.(width, height);
+      candidate.prepare = () => {
+        instance.setParams?.(candidate.params); instance.setQuality?.(quality.profile()); instance.resize?.(width, height);
+        candidate.prepare = null;
+      };
+      if (!options.isVisible || options.isVisible()) candidate.prepare();
       quality.warmup(null); notify(); return normalized;
     } catch (reason) {
       scope.trackTree(scene); scope.dispose();
       if (lyricLayer === candidate) { lyricLayer = null; notify(); }
       throw reason;
-    }
+    } finally { scope.endAllocation(); }
   }
   function resize(w, h) {
-    if (disposed) return;
-    width = Math.max(2, Math.floor(Number(w) || 2)); height = Math.max(2, Math.floor(Number(h) || 2));
+    if (disposed || contextLost) return false;
+    const nextWidth = Math.max(2, Math.floor(Number(w) || 2)), nextHeight = Math.max(2, Math.floor(Number(h) || 2));
     const nativePixels = globalThis.HertzGlBudget?.limits?.pixelBudget || Infinity;
-    renderer.setPixelRatio(Math.min(quality.dpr(width, height, globalThis.devicePixelRatio || 1), Math.sqrt(nativePixels / (width * height))));
-    renderer.setSize(width, height, false);
+    const dpr = Math.min(quality.dpr(nextWidth, nextHeight, globalThis.devicePixelRatio || 1), Math.sqrt(nativePixels / (nextWidth * nextHeight)));
+    const pixelWidth = Math.floor(nextWidth * dpr), pixelHeight = Math.floor(nextHeight * dpr);
+    let nextSurface = null;
+    try {
+      if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
+        const peakPixels = Math.max(pixelWidth * canvas.height, pixelWidth * pixelHeight);
+        nextSurface = pagePort?.require({ drawingBufferPixels: peakPixels, renderTargetDeclaredBytes: peakPixels * 8 },
+          'SpaceStage shared drawing buffer old/new/intermediate resize', 0, 'bounded-estimate');
+        // r186 updates CSS size, ratio and backing dimensions in one owner call.
+        renderer.setDrawingBufferSize(nextWidth, nextHeight, dpr);
+        nextSurface?.commit({ drawingBufferPixels: pixelWidth * pixelHeight, renderTargetDeclaredBytes: pixelWidth * pixelHeight * 8 });
+        releaseTicket(surfaceTicket); surfaceTicket = nextSurface;
+      }
+      admissionFailure = ''; width = nextWidth; height = nextHeight;
+    } catch (error) {
+      if (nextSurface) { canvas.width = canvas.height = 0; releaseTicket(surfaceTicket); surfaceTicket = null; releaseTicket(nextSurface); }
+      admissionFailure = error.message; return false;
+    }
     quality.warmup(null);
     if (active) {
       active.camera.aspect = width / height; active.camera.updateProjectionMatrix();
@@ -142,8 +197,10 @@ export function create(canvas, options = {}) {
       lyricLayer.camera.aspect = width / height; lyricLayer.camera.updateProjectionMatrix();
       lyricLayer.instance?.resize?.(width, height);
     }
+    return true;
   }
   function applyQuality() {
+    if (options.isVisible && !options.isVisible()) return;
     resize(width, height);
     if (active && active.instance && active.instance.setQuality) active.instance.setQuality(quality.profile());
     if (active && active.post) active.post.setQuality(quality.profile());
@@ -154,47 +211,89 @@ export function create(canvas, options = {}) {
     error = reason instanceof Error ? reason.message : String(reason);
     state = 'failed'; generation++; lyricGeneration++; releaseActive(); releaseLyrics(); notify();
   }
-  lifetime.listen(canvas, 'webglcontextlost', event => { event.preventDefault(); contextLost = true; fail('WebGL context lost'); });
-  lifetime.listen(canvas, 'webglcontextrestored', () => { contextLost = false; quality.warmup(null); state = 'idle'; notify(); });
-  resize(canvas.clientWidth || 640, canvas.clientHeight || 360);
+  function retireRenderer() {
+    if (!renderer) return;
+    renderer.dispose(); if (!renderer.getContext().isContextLost()) renderer.forceContextLoss(); renderer = null;
+    canvas.width = canvas.height = 0; releaseTicket(surfaceTicket); releaseTicket(contextTicket);
+    surfaceTicket = contextTicket = null;
+  }
+  lifetime.listen(canvas, 'webglcontextlost', event => {
+    event.preventDefault(); contextLost = true; fail('WebGL context lost'); retireRenderer();
+  });
+  // Lost generations are retired. Recreating a stage is the caller's explicit operation.
+  lifetime.listen(canvas, 'webglcontextrestored', () => { if (contextLost) notify(); });
+  if (!resize(canvas.clientWidth || 640, canvas.clientHeight || 360) && !canvas.width) {
+    lifetime.dispose(); retireRenderer(); throw new Error(admissionFailure || 'drawing-buffer-unavailable');
+  }
   return {
     selectLyrics,
+    cancelPreparation() {
+      if (disposed || !['loading', 'preparing'].includes(state)) return;
+      generation++; releaseActive(); state = 'idle'; error = ''; notify();
+    },
     async select(id, savedState = {}) {
       if (disposed) throw new Error('Stage disposed');
       if (contextLost) throw new Error('WebGL context is lost; recreate the stage to retry');
+      if (options.isVisible && !options.isVisible()) throw new Error('preparation-suspended');
       const normalized = registry.normalizeState(id, savedState), def = registry.get(normalized.id);
+      requestId = pagePort?.nextId() || String(generation + 1); requestedId = normalized.id;
+      if (pagePort && def.resourcePlan) {
+        try {
+          const declared = def.resourcePlan({ params: normalized.params, quality: quality.profile(), width, height, services });
+          if (!declared || typeof declared !== 'object' || Array.isArray(declared)) throw new Error('estimate-unavailable');
+          const resources = { ...declared };
+          const post = postResourcePlan(normalized.params, services, width, height);
+          for (const [key, value] of Object.entries(post)) resources[key] = (resources[key] || 0) + value;
+          const retiring = [...(active?.scope.retirementCandidates(renderer) || []), ...(active?.post?.retirementCandidates() || [])];
+          const result = pagePort.preflight(resources, retiring);
+          if (!result.ok) { const reason = new Error(result.reason); reason.resourceFailure = result; throw reason; }
+        } catch (reason) {
+          admissionFailure = reason.message;
+          // A refused plan has not retired or changed the committed instance.
+          if (!active) { state = 'failed'; error = reason.message; }
+          notify(); throw reason;
+        }
+      }
+      admissionFailure = '';
       const ticket = ++generation;
+      state = 'loading'; error = ''; notify();
       releaseActive();
       renderer.setRenderTarget(null); renderer.setClearColor(0x030405, 1);
       renderer.outputColorSpace = THREE.SRGBColorSpace; renderer.toneMapping = THREE.NoToneMapping;
       renderer.toneMappingExposure = 1; renderer.shadowMap.enabled = false;
-      const scope = createScope(), scene = new THREE.Scene(), camera = new THREE.PerspectiveCamera(52, width / height, .05, 900);
+      const scope = createScope({ resources: pagePort, generation: ticket }), scene = new THREE.Scene(), camera = new THREE.PerspectiveCamera(52, width / height, .05, 900);
       scene.background = new THREE.Color(0x030405);
       const baseline = def.camera;
       if (baseline.position) camera.position.fromArray(baseline.position);
       else { const cp = Math.cos(baseline.phi || 0), r = baseline.radius || 8; camera.position.set(Math.sin(baseline.theta || 0) * cp * r, Math.sin(baseline.phi || 0) * r, Math.cos(baseline.theta || 0) * cp * r); }
       camera.lookAt(...(baseline.lookAt || [0,0,0])); camera.fov = baseline.fov || 52; camera.updateProjectionMatrix();
-      const context = { THREE, scene, camera, renderer, scope, params: normalized.params, quality: quality.profile(), signal: scope.signal, services };
-      active = { def, scene, camera, scope, params: normalized.params, context, instance: null, post: null };
+      const context = { THREE, scene, camera, renderer, scope, resources: pagePort, params: normalized.params, quality: quality.profile(), signal: scope.signal, services };
+      active = { def, scene, camera, scope, params: normalized.params, context, instance: null, post: null, firstSubmit: false };
       const candidate = active; state = 'loading'; error = ''; notify();
+      scope.beginAllocation();
       try {
         const instance = await def.create(context);
         if (!instance || typeof instance.update !== 'function' || typeof instance.dispose !== 'function') throw new Error('Invalid scene instance');
         if (disposed || ticket !== generation || scope.signal.aborted) { instance.dispose(); scope.trackTree(scene); scope.dispose(); return null; }
         candidate.instance = instance; scope.defer(() => instance.dispose()); scope.trackTree(scene);
-        candidate.post = createPostChain(context); if (candidate.post) scope.defer(() => candidate.post.dispose());
-        if (instance.setParams) instance.setParams(candidate.params);
-        if (instance.setRig) instance.setRig(pose);
-        applyQuality(); state = 'ready'; lastFrame = null; intervals = []; quality.warmup(null); notify();
+        candidate.prepare = () => {
+          candidate.post = createPostChain(context); if (candidate.post) scope.defer(() => candidate.post.dispose());
+          if (instance.setParams) instance.setParams(candidate.params);
+          if (instance.setRig) instance.setRig(pose);
+          applyQuality(); candidate.prepare = null;
+        };
+        if (!options.isVisible || options.isVisible()) candidate.prepare();
+        state = 'preparing'; lastFrame = null; intervals = []; quality.warmup(null); notify();
         return normalized;
       } catch (reason) {
         scope.trackTree(scene); scope.dispose();
         if (ticket === generation && !disposed) { active = null; fail(reason); }
         throw reason;
-      }
+      } finally { scope.endAllocation(); }
     },
     frame(frame = {}) {
-      if (disposed || state !== 'ready' || !active || (typeof document !== 'undefined' && document.hidden)) return false;
+      if (disposed || !['preparing', 'ready'].includes(state) || !active?.instance || !canvas.width || !canvas.height
+          || (typeof document !== 'undefined' && document.hidden) || (options.isVisible && !options.isVisible())) return false;
       const now = Number.isFinite(frame.now) ? frame.now : performance.now();
       if (lastFrame !== null && now - lastFrame > 500) { intervals = []; lastFrame = null; quality.warmup(null); }
       const dt = Number.isFinite(frame.dt) ? Math.max(0, Math.min(frame.dt, .25)) : lastFrame === null ? .016 : Math.min((now - lastFrame) / 1000, .25);
@@ -202,6 +301,8 @@ export function create(canvas, options = {}) {
       lastFrame = now;
       const started = performance.now();
       try {
+        if (active.prepare) active.prepare();
+        if (lyricLayer?.prepare) lyricLayer.prepare();
         if (frame.deviceTier !== undefined && quality.setDeviceTier(frame.deviceTier)) applyQuality();
         spatialResources.beginFrame(now);
         active.instance.update({ ...frame, now, dt });
@@ -221,17 +322,27 @@ export function create(canvas, options = {}) {
             renderer.clearDepth(); renderer.render(lyricLayer.scene, lyricLayer.camera);
           } finally { renderer.autoClear = autoClear; renderer.toneMapping = toneMapping; renderer.toneMappingExposure = exposure; }
         }
+        if (renderer.info.programs.some(program => program.diagnostics?.runnable === false))
+          throw new Error('Three shader program failed');
         cpuMs = performance.now() - started; frameCount++;
+        if (!active.firstSubmit) { active.firstSubmit = true; state = 'ready'; notify(); }
         if (quality.sample(now, () => {
           const info = renderer.info.render, scoped = active.scope.stats(), shared = spatialResources.stats();
           const post = active.post && active.post.stats ? active.post.stats().bytes : 0;
           return { drawCalls: info.calls, points: info.points, triangles: info.triangles, estimatedBytes: scoped.estimatedBytes + (lyricLayer ? lyricLayer.scope.stats().estimatedBytes : 0) + shared.bytes + post };
         }, cpuMs)) applyQuality();
-        if (frameCount % 120 === 0) notify();
+        const currentFailure = admissionFailure || active.post?.stats?.().resourceFailure || spatialResources.stats().resourceFailure || '';
+        if (frameCount % 120 === 0 || currentFailure !== lastResourceFailure) notify();
         return true;
       } catch (reason) { fail(reason); return false; }
     },
     resize,
+    retryResources() {
+      if (disposed || contextLost || (typeof document !== 'undefined' && document.hidden)
+          || (options.isVisible && !options.isVisible())) return false;
+      active?.post?.retryResources(); spatialResources.retryResources();
+      resize(width, height); options.onInvalidate?.(); notify(); return true;
+    },
     setQualityMode(mode) { if (disposed) return; quality.setMode(mode); applyQuality(); },
     setDeviceTier(tier) { if (!disposed && quality.setDeviceTier(tier)) applyQuality(); },
     effectiveQuality() { return quality.profile().mode; },
@@ -266,7 +377,7 @@ export function create(canvas, options = {}) {
       }
     },
     setServices(value = {}) { Object.keys(services).filter(key => key !== 'spatialResources').forEach(key => delete services[key]); Object.assign(services, value, { spatialResources }); },
-    dispose() { if (disposed) return; disposed = true; generation++; lyricGeneration++; releaseActive(); releaseLyrics(); lifetime.dispose(); renderer.dispose(); renderer.forceContextLoss(); state = 'disposed'; notify(); },
+    dispose() { if (disposed) return; disposed = true; generation++; lyricGeneration++; releaseActive(); releaseLyrics(); lifetime.dispose(); retireRenderer(); state = 'disposed'; notify(); },
     stats,
   };
 }

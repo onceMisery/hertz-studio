@@ -9,6 +9,12 @@
 (function (global) {
   'use strict';
 
+  // The Stage facade includes native parent-window suspension. Standalone consumers keep browser visibility.
+  function documentHidden() {
+    var stage = window.Stage;
+    return stage && typeof stage.isDocumentHidden === "function" ? stage.isDocumentHidden() : !!document.hidden;
+  }
+
   // Node（无头契约扫描）下早退：不触碰 document/localStorage，纯文本扫描不受影响。
   if (typeof window === 'undefined') return;
 
@@ -162,7 +168,7 @@
   }
 
   function onKeyDown(e) {
-    if (!enabled || document.hidden || typingTarget(e) || e.ctrlKey || e.metaKey || e.altKey) return;
+    if (!enabled || documentHidden() || typingTarget(e) || e.ctrlKey || e.metaKey || e.altKey) return;
     if (MOVE_CODES[e.code]) {
       keys[e.code] = true;
       e.preventDefault();
@@ -181,11 +187,11 @@
   function onKeyUp(e) { if (MOVE_CODES[e.code]) keys[e.code] = false; }
   // 窗口失焦（Alt-Tab/切桌面）时 keyup 会丢：清空按键与拖拽，回来不会自己继续走。
   function onBlur() { keys = {}; dragging = false; pid = null; lastT = 0; releaseLock(); }
-  function onVisibilityChange() { if (document.hidden) onBlur(); }
+  function onVisibilityChange() { if (documentHidden()) onBlur(); }
   function onFocusIn(e) { if (typingTarget(e)) onBlur(); }
 
   function onPointerDown(e) {
-    if (!enabled || document.hidden || dragging) return;
+    if (!enabled || documentHidden() || dragging) return;
     if (e.target && e.target.closest && e.target.closest('button, a, input, select, textarea, [contenteditable], .stage-lyrics, .lp-body')) return;
     if (e.isPrimary === false) return;
     if (e.button !== 0) return;
@@ -209,7 +215,7 @@
     pid = null;
   }
   function onMouseMove(e) {
-    if (!enabled || !pose || document.hidden) return;
+    if (!enabled || !pose || documentHidden()) return;
     if (locked && typeof e.movementX === 'number') {
       pose.yawDeg -= e.movementX * LOOK_YAW;
       pose.pitchDeg = clamp(pose.pitchDeg + e.movementY * LOOK_PITCH, -PITCH_LIMIT, PITCH_LIMIT);
@@ -224,7 +230,7 @@
   function onLockChange() {
     var el = stageEl();
     locked = !!(el && document.pointerLockElement === el);
-    if (locked && (!enabled || document.hidden)) releaseLock();
+    if (locked && (!enabled || documentHidden())) releaseLock();
     if (!locked) { keys = {}; dragging = false; pid = null; }
   }
   function onLockError() { locked = false; }
@@ -284,7 +290,7 @@
   }
 
   function layer(ctx) {
-    if (document.hidden) { lastT = 0; return; }
+    if (documentHidden()) { lastT = 0; return; }
     var dt = lastT ? Math.min(100, ctx.t - lastT) : 16;
     lastT = ctx.t;
 

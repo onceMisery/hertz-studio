@@ -143,6 +143,18 @@
   // ------------------------------------------------------------------
 
   var pixiLoading = null;
+  function retireApplication(application) {
+    if (!application) return;
+    // autoDetectRenderer owns cleanup until it assigns Application.renderer.
+    // A failed Application still owns its stage, and a settled live one owns
+    // both. Keep the original recursive GraphicsContext retirement order.
+    if (application.renderer || !application.stage) {
+      if (application.stage) application.stage.removeChildren().forEach(FX.destroyDisplayTree);
+      application.destroy({removeView:true, releaseGlobalResources:false}, {children:true});
+    } else {
+      FX.destroyDisplayTree(application.stage); application.stage = null;
+    }
+  }
   function loadPixi() {
     if (global.PIXI) return Promise.resolve(global.PIXI);
     if (pixiLoading) return pixiLoading;
@@ -188,13 +200,25 @@
     this.optical = null;
     this.atmosphere = null;
     this.retirement = null;
+    this.initPromise = null;
+    this.cleanupFailure = null;
+    this.failedApplication = null;
+    this.failedRenderer = null;
   }
 
   SonnetDirector.prototype.init = function () {
     var self = this;
-    return loadPixi().then(function (PIXI) {
+    if (self.destroyed || self.initialized) return Promise.resolve();
+    if (self.initPromise) return self.initPromise;
+    var application = null, retired = false;
+    function retire() {
+      if (!application || retired) return;
+      try { retireApplication(application); retired = true; }
+      catch (error) { self.cleanupFailure = error.message; self.failedApplication = application; throw error; }
+    }
+    self.initPromise = loadPixi().then(function (PIXI) {
       if (self.destroyed) return;
-      var application = new PIXI.Application();
+      application = new PIXI.Application();
       self.app = application;
       return application.init({
         backgroundAlpha: 0,
@@ -206,7 +230,7 @@
       }).then(function () {
         // await 期间可能已被 destroy：只回收自己刚建的应用，不碰已被接管的状态。
         if (self.destroyed || self.app !== application) {
-          application.destroy({ removeView: true, releaseGlobalResources: false }, { children: true });
+          retire();
           if (self.app === application) self.app = null;
           return;
         }
@@ -246,7 +270,16 @@
         self.resize();
         if (self.pendingShot) self.buildShot.apply(self, self.pendingShot);
       });
-    });
+    }).catch(function (error) {
+      // The local application remains owned until actual init settlement,
+      // including rejection. destroy() may already have cleared self.app.
+      try { retire(); } catch (_) { /* Keep the original init failure and retained cleanup obligation. */ }
+      if (self.app === application) self.app = null;
+      self.initialized = false;
+      if (error.pixiPartialRenderer) { self.failedRenderer = error.pixiPartialRenderer; self.cleanupFailure = 'pixi-partial-renderer-cleanup-failed'; }
+      throw error;
+    }).finally(function () { self.initPromise = null; });
+    return self.initPromise;
   };
 
   SonnetDirector.prototype.resize = function () {
@@ -595,7 +628,8 @@
 
   SonnetDirector.prototype.getDebugSnapshot = function () {
     return {
-      initialized: this.initialized, camera: this.activeKind, composition: this.backgroundKind,
+      initialized: this.initialized, initializing:!!this.initPromise, cleanupFailure:this.cleanupFailure,
+      camera: this.activeKind, composition: this.backgroundKind,
       glyphs: this.words.length, phrases: this.phrases.length, orbits: this.orbits.length,
       performance: this.performance.snapshot(),
       accents: this.accents ? this.accents.snapshot() : null,
@@ -612,7 +646,7 @@
   };
 
   SonnetDirector.prototype.destroy = function () {
-    if (this.destroyed && !this.app) return;
+    if (this.destroyed && !this.app && !this.failedApplication && !this.failedRenderer) return;
     this.destroyed = true;
     this.pendingShot = null;
     this.performance.reset();
@@ -629,15 +663,23 @@
     this.postProcess = null;
     // init 被打断时 initialized 尚未置位但渲染器可能已分配：无条件回收 WebGL 上下文。
     if (this.app && this.initialized) {
-      this.app.stage.removeChildren().forEach(FX.destroyDisplayTree);
-      try { this.app.destroy({ removeView: true, releaseGlobalResources: false }, { children: true }); }
-      catch (err) { console.warn('[stanza-sonnet] PIXI cleanup failed:', err); }
+      try { retireApplication(this.app); }
+      catch (err) { this.cleanupFailure = err.message; this.failedApplication = this.app; console.warn('[stanza-sonnet] PIXI cleanup failed:', err); }
     }
     this.app = null;
     this.sceneContainer = this.geoContainer = this.hudContainer = null;
     this.atmosphereLayer = this.markLayer = null;
     this.frameDecorContainer = this.textContainer = this.trackContainer = null;
     this.initialized = false;
+    if (this.failedApplication) {
+      try { retireApplication(this.failedApplication); this.failedApplication = null; }
+      catch (_) { /* Keep the unresolved original application for a later explicit retirement attempt. */ }
+    }
+    if (this.failedRenderer) {
+      try { this.failedRenderer.destroy({removeView:true, releaseGlobalResources:false}); this.failedRenderer = null; }
+      catch (_) { /* The original partial renderer still owes API retirement. */ }
+    }
+    if (!this.failedApplication && !this.failedRenderer) this.cleanupFailure = null;
   };
 
   // ------------------------------------------------------------------
@@ -1059,7 +1101,8 @@
     var emptyEl = document.createElement('div');
     emptyEl.className = 'fl-empty';
     emptyEl.hidden = true;
-    root.append(eyebrow, hud, nextEl, emptyEl);
+    var fallback = document.createElement('div'); fallback.className = 'fl-pixi-fallback'; fallback.hidden = true;
+    root.append(eyebrow, hud, nextEl, emptyEl, fallback);
 
     // 寻句热区：主舞台模式盖当前行+后两行的排版包围盒；社论轨模式盖站点框。
     var hotspots = [0, 1, 2].map(function () {
@@ -1222,12 +1265,19 @@
       var f = buildFrame(root);
       reduced = f.reduced;
       syncEmpty(f);
+      if (initFailed) {
+        fallback.hidden = false;
+        fallback.textContent = f.activeLine ? f.activeLine.fullText : (f.track && f.track.title) || '';
+        return;
+      }
       if (!director.initialized) {
         if (!initStarted && !initFailed) {
           initStarted = true;
           director.init().catch(function (err) {
             if (destroyed) return;
             initFailed = true;
+            fallback.hidden = false;
+            fallback.textContent = f.activeLine ? f.activeLine.fullText : (f.track && f.track.title) || '';
             console.warn('[stanza-sonnet] 图形引擎不可用：', err);
             syncEmpty(f);
           });
@@ -1279,6 +1329,7 @@
         var sig = global.StanzaTheme ? StanzaTheme.signature(t) : JSON.stringify(t);
         if (sig === themeSig) return;
         theme = t;
+        fallback.style.color = theme.primaryColor;
         themeSig = sig;
         renderedKey = '';
         lastEmptyText = '';
@@ -1348,5 +1399,5 @@
 
   // loadPixi / buildFrame 对外只读暴露：凝彩 tempera 与商籁共用同一份 Pixi
   // 惰性加载（全页只注入一次 <script>）与同一套 Stage → 帧适配（含行缓存）。
-  global.StanzaSonnet = { init: init, loadPixi: loadPixi, buildFrame: buildFrame };
+  global.StanzaSonnet = { init: init, loadPixi: loadPixi, buildFrame: buildFrame, retireApplication: retireApplication };
 })(window);

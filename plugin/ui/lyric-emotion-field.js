@@ -88,10 +88,12 @@
   }
 
   // 采样 SAMPLE_N 点给 GL 当 uniform 数组。长度必须严格等于 SAMPLE_N。
-  function sample(profile, eI, emPx, pulse, accent) {
+  function sample(profile, eI, emPx, pulse, accent, target) {
     var id = basisId(profile);
-    var b = new Float32Array(SAMPLE_N);
-    var w = new Float32Array(SAMPLE_N);
+    if (target && (!(target.b instanceof Float32Array) || !(target.w instanceof Float32Array)
+        || target.b.length !== SAMPLE_N || target.w.length !== SAMPLE_N)) throw new Error('glyph-field-capacity');
+    var b = target ? target.b : new Float32Array(SAMPLE_N);
+    var w = target ? target.w : new Float32Array(SAMPLE_N);
     var i, r;
     for (i = 0; i < SAMPLE_N; i += 1) {
       r = evaluate(profile, i / (SAMPLE_N - 1), eI, emPx, pulse, accent);

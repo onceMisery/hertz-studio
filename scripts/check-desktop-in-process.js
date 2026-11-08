@@ -26,7 +26,7 @@ function pass(name) {
   console.log('  ok  ' + name);
 }
 function read(file) {
-  return fs.readFileSync(file, 'utf8');
+  return fs.readFileSync(file, 'utf8').replace(/\r\n/g, '\n');
 }
 function rustFiles(directory) {
   return fs.readdirSync(directory, { withFileTypes: true }).flatMap(entry => {

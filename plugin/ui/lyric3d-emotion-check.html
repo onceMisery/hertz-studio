@@ -8,11 +8,16 @@
 <pre id="out">running…</pre>
 <script src="lyric-emotion-field.js"></script>
 <script src="lyric-emotion.js"></script>
+<script src="stage-resource-budget.js"></script>
+<script src="stage-resource-policy.js"></script>
 <script src="lyric3d.js"></script>
 <script>
 (function () {
   'use strict';
   var EM = window.LyricEmotion;
+  var resources = StageResourceBudget.create(StageResourcePolicy);
+  var lease = Lyric3D.acquire(resources.port('atlas-fixture'));
+  window.addEventListener('pagehide', function () { lease.release(); });
   var LINES = [
     { start_ms: 0, end_ms: 5000, text: '晚风 吹过 你的 眼睛' },
     { start_ms: 5000, end_ms: 9000, text: '星光 落在 你我 之间' }

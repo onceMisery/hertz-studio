@@ -1086,10 +1086,7 @@ void main() {
   // ---------------------------------------------------------------------------
 
   function isAvailable() {
-    try {
-      var c = document.createElement('canvas');
-      return !!(window.WebGL2RenderingContext && c.getContext('webgl2'));
-    } catch (e) { return false; }
+    return !!window.WebGL2RenderingContext;
   }
 
   function clampQuality(q, fallback) {
@@ -1114,32 +1111,29 @@ void main() {
 
   function compile(gl, type, src) {
     var sh = gl.createShader(type);
+    if (!sh) throw new Error('着色器分配失败');
+    try {
     gl.shaderSource(sh, src);
     gl.compileShader(sh);
     if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
       // 编译日志要带出来：工坊里有自定义片段的入口，用户改错一行必须能定位。
       var log = gl.getShaderInfoLog(sh) || '未知错误';
-      gl.deleteShader(sh);
       throw new Error(log);
     }
     return sh;
+    } catch (error) { gl.deleteShader(sh); throw error; }
   }
 
   function link(gl, vsSrc, fsSrc) {
-    var vs = compile(gl, gl.VERTEX_SHADER, vsSrc);
-    var fs = compile(gl, gl.FRAGMENT_SHADER, fsSrc);
-    var p = gl.createProgram();
-    gl.attachShader(p, vs);
-    gl.attachShader(p, fs);
-    gl.linkProgram(p);
-    gl.deleteShader(vs);
-    gl.deleteShader(fs);
-    if (!gl.getProgramParameter(p, gl.LINK_STATUS)) {
-      var log = gl.getProgramInfoLog(p) || '链接失败';
-      gl.deleteProgram(p);
-      throw new Error(log);
-    }
-    return p;
+    var vs = null, fs = null, p = null;
+    try {
+      vs = compile(gl, gl.VERTEX_SHADER, vsSrc); fs = compile(gl, gl.FRAGMENT_SHADER, fsSrc);
+      p = gl.createProgram(); if (!p) throw new Error('程序分配失败');
+      gl.attachShader(p, vs); gl.attachShader(p, fs); gl.linkProgram(p);
+      if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p) || '链接失败');
+      return p;
+    } catch (error) { if (p) gl.deleteProgram(p); throw error; }
+    finally { if (vs) gl.deleteShader(vs); if (fs) gl.deleteShader(fs); }
   }
 
   // 粗光晕（第二级泛光）target 的短边像素地板。低于这个尺寸，1/4 降采样
@@ -1149,8 +1143,24 @@ void main() {
 
   function create(canvas, opts) {
     opts = opts || {};
+    var resources = opts.resources;
+    if (!resources || resources.contractVersion !== 1) throw new Error('resource-policy-required');
+    var fixedTicket = null, surfaceTicket = null, pendingSurfaceTicket = null;
+    var targetsTicket = null, pendingTargetsTicket = null, atlasTicket = null, pendingAtlasTicket = null, atlasLease = null;
+    var targetAllocations = [], programTickets = new Set(), ownedPrograms = new Set(), cleanup = null, disposed = false;
+    var cleanupFailed = false;
+    var currentProgramKey = null;
+    var artOwners = new Map();
+    function releaseTicket(ticket) { if (ticket) ticket.release({ apiReleased: true, allocationEnded: true }); }
     var engineQuality = clampQuality(opts.quality, 2);
     var gl = null;
+    try {
+    cleanup = dispose;
+    fixedTicket = resources.require({ gpuContexts: 1, textureDeclaredBytes: 128, ownedCpuBytes: 576 },
+      'CreativeGL R8 64x2 spectrum and seven Float32 matrices', 0);
+    var initialPixels = canvas.width * canvas.height;
+    surfaceTicket = resources.require({ drawingBufferPixels: initialPixels, renderTargetDeclaredBytes: initialPixels * 8 },
+      'CreativeGL initial RGBA8 plus bounded DEPTH24 default surface', 0, 'bounded-estimate');
     try {
       gl = canvas.getContext('webgl2', {
         alpha: true,
@@ -1160,7 +1170,7 @@ void main() {
         powerPreference: 'high-performance'
       });
     } catch (e) { gl = null; }
-    if (!gl) return null;
+    if (!gl) { dispose(); return null; }
 
     gl.disable(gl.CULL_FACE);
     gl.enable(gl.BLEND);
@@ -1168,13 +1178,16 @@ void main() {
 
     var w = 1, h = 1, dpr = 1;
     var lost = false;
-    canvas.addEventListener('webglcontextlost', function (e) {
+    function contextLost(e) {
       e.preventDefault();
       lost = true;
-    });
+      if (typeof opts.onContextLost === 'function') opts.onContextLost();
+    }
+    canvas.addEventListener('webglcontextlost', contextLost);
 
     // --- 频谱纹理 -----------------------------------------------------------
     var specTex = gl.createTexture();
+    if (!specTex) throw new Error('频谱纹理分配失败');
     var specPixels = new Uint8Array(64 * 2);
     gl.bindTexture(gl.TEXTURE_2D, specTex);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, 64, 2, 0, gl.RED, gl.UNSIGNED_BYTE, specPixels);
@@ -1186,6 +1199,7 @@ void main() {
     // --- 歌词图集纹理（TEXTURE1，懒分配）-----------------------------------
     // 图集内容由 window.Lyric3D 生成；只在当前行变化时变像素。
     var lyricTex = gl.createTexture();
+    if (!lyricTex) throw new Error('歌词纹理分配失败');
     var lyricReady = false;
     var atlasW = 0, atlasH = 0;
     // 本引擎纹理当前内容的签名。不能依赖 Lyric3D 的全局去重：舞台与全屏页各持
@@ -1195,6 +1209,7 @@ void main() {
     var lyricSig = null;
     function uploadLyric(S) {
       if (!window.Lyric3D) return;
+      if (!atlasLease) atlasLease = window.Lyric3D.acquire(opts.lyricResources);
       var q = qualityOf(S);
       window.Lyric3D.setQuality(q);
       var info = window.Lyric3D.size();
@@ -1210,6 +1225,8 @@ void main() {
       gl.activeTexture(gl.TEXTURE1);
       gl.bindTexture(gl.TEXTURE_2D, lyricTex);
       if (!lyricReady || resized) {
+        pendingAtlasTicket = resources.require({ textureDeclaredBytes: info.w * info.h * 4 },
+          'CreativeGL per-context RGBA8 lyric atlas replacement', 0);
         gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, window.Lyric3D.canvas);
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
@@ -1218,6 +1235,8 @@ void main() {
         lyricReady = true;
         atlasW = info.w;
         atlasH = info.h;
+        pendingAtlasTicket.commit(); releaseTicket(atlasTicket);
+        atlasTicket = pendingAtlasTicket; pendingAtlasTicket = null;
       } else if (changed) {
         gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, window.Lyric3D.canvas);
       }
@@ -1228,6 +1247,9 @@ void main() {
     function makeTarget(wp, hp, withDepth) {
       var fbo = gl.createFramebuffer();
       var tex = gl.createTexture();
+      var target = { fbo: fbo, tex: tex, depth: null, w: wp, h: hp };
+      targetAllocations.push(target);
+      if (!fbo || !tex) throw new Error('渲染缓冲分配失败');
       gl.bindTexture(gl.TEXTURE_2D, tex);
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, wp, hp, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
@@ -1239,24 +1261,28 @@ void main() {
       var rb = null;
       if (withDepth) {
         rb = gl.createRenderbuffer();
+        target.depth = rb;
+        if (!rb) throw new Error('深度缓冲分配失败');
         gl.bindRenderbuffer(gl.RENDERBUFFER, rb);
         gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT24, wp, hp);
         gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, rb);
       }
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-      return { fbo: fbo, tex: tex, depth: rb, w: wp, h: hp };
+      return target;
     }
 
     var sceneT = null, brightA = null, brightB = null, brightC = null, brightD = null;
 
     function disposeTargets() {
-      [sceneT, brightA, brightB, brightC, brightD].forEach(function (t) {
+      targetAllocations.forEach(function (t) {
         if (!t) return;
         gl.deleteFramebuffer(t.fbo);
         gl.deleteTexture(t.tex);
         if (t.depth) gl.deleteRenderbuffer(t.depth);
       });
-      sceneT = brightA = brightB = null;
+      targetAllocations.length = 0;
+      sceneT = brightA = brightB = brightC = brightD = null;
+      releaseTicket(targetsTicket); targetsTicket = null;
     }
 
     // --- program 缓存 -------------------------------------------------------
@@ -1272,14 +1298,24 @@ void main() {
       // 这样就不必为每个场景维护两份声明列表，也就不会出现"改了声明忘了另一边"。
       var decl = def.decl || '';
       var qualityDefs = def.qualityDefs ? def.qualityDefs(q) : '';
-      var prog = link(gl,
+      var ticket = resources.require({ programs: 1 }, 'CreativeGL current/candidate scene program ' + key, 0);
+      var prog;
+      try { prog = link(gl,
         '#version 300 es\n' + qualityDefs + COMMON + decl + def.vert,
-        '#version 300 es\n' + COMMON + decl + def.frag);
+        '#version 300 es\n' + COMMON + decl + def.frag); }
+      catch (error) { releaseTicket(ticket); throw error; }
+      ticket.commit(); programTickets.add(ticket);
+      ownedPrograms.add(prog);
       var U = collect(prog, ['uViewProj', 'uModel', 'uCamPos', 'uTime', 'uSeed',
         'uSpec', 'uAgg', 'uPulse', 'uEnergy', 'uPlay', 'uToon', 'uRes',
         'uColorA', 'uColorB'].concat(def.uniforms || []));
-      var entry = { prog: prog, U: U };
+      var entry = { prog: prog, U: U, ticket: ticket };
       progs[key] = entry;
+      // Keep current plus one candidate/cache entry. The full new peak was admitted first.
+      Object.keys(progs).filter(function (id) { return id !== key && id !== currentProgramKey; }).forEach(function (id) {
+        gl.deleteProgram(progs[id].prog); ownedPrograms.delete(progs[id].prog);
+        releaseTicket(progs[id].ticket); programTickets.delete(progs[id].ticket); delete progs[id];
+      });
       return entry;
     }
 
@@ -1292,21 +1328,25 @@ void main() {
     function postProgram(key, fsSrc) {
       if (postProgs[key]) return postProgs[key];
       var prog;
+      var ticket = null;
       // 与 sceneProgram 不同，这里原先是直接把异常抛出去的：后处理挂一次，
       // 就从 render() 里一路穿出 attach()，用户看到的是"开关拨了没反应"，
       // 而不是可读的降级原因。缓存成失败对象，由 render() 统一转成
       // {ok:false, reason:'shader'}。
       try {
+        ticket = resources.require({ programs: 1 }, 'CreativeGL post program ' + key, 0);
         prog = link(gl, POST_VS, fsSrc);
       } catch (e) {
+        releaseTicket(ticket);
         var failed = { fail: '后处理 ' + key + '：' + String(e.message || e) };
-        postProgs[key] = failed;
         return failed;
       }
+      ticket.commit(); programTickets.add(ticket);
+      ownedPrograms.add(prog);
       var U = collect(prog, ['uTex', 'uScene', 'uBloom', 'uBloom2', 'uDir', 'uTexel', 'uThresh',
         'uKnee', 'uBloomK', 'uBloom2K', 'uChroma', 'uVignette', 'uGrain', 'uToon', 'uPreserveGlyphs', 'uDirectPaint', 'uPaper',
         'uExposure', 'uSaturation', 'uGrade', 'uTime', 'uColorA', 'uColorB']);
-      var entry = { prog: prog, U: U };
+      var entry = { prog: prog, U: U, ticket: ticket };
       postProgs[key] = entry;
       return entry;
     }
@@ -1320,22 +1360,35 @@ void main() {
     mirrorMat[0] = 1; mirrorMat[5] = -1; mirrorMat[10] = 1; mirrorMat[15] = 1;
 
     var vsrc = {};
+    fixedTicket.commit(); surfaceTicket.commit();
 
     function resize(wp, hp, d) {
-      w = Math.max(1, wp | 0);
-      h = Math.max(1, hp | 0);
-      dpr = d || 1;
-      var bw = Math.max(1, Math.round(w * dpr));
-      var bh = Math.max(1, Math.round(h * dpr));
+      if (disposed || lost) return false;
+      if (!Number.isFinite(wp) || !Number.isFinite(hp) || wp <= 0 || hp <= 0 || !Number.isFinite(d) || d <= 0)
+        throw new Error('estimate-unavailable');
+      if (pendingSurfaceTicket || pendingTargetsTicket) throw new Error('resource-operation-unsettled');
+      var nextW = Math.max(1, Math.floor(wp)), nextH = Math.max(1, Math.floor(hp));
+      var bw = Math.max(1, Math.round(nextW * d)), bh = Math.max(1, Math.round(nextH * d));
+      var hw = Math.max(1, bw >> 1), hh = Math.max(1, bh >> 1);
+      var coarseShift = COARSE_MIN_PX * 2 <= Math.min(bw, bh) ? 2 : 1;
+      var qw = Math.max(1, bw >> coarseShift), qh = Math.max(1, bh >> coarseShift);
+      var peakPixels = Math.max(bw * canvas.height, bw * bh);
+      pendingSurfaceTicket = resources.require({ drawingBufferPixels: peakPixels, renderTargetDeclaredBytes: peakPixels * 8 },
+        'CreativeGL resize default RGBA8/DEPTH24 surface old plus new/intermediate', 0, 'bounded-estimate');
+      try {
+        pendingTargetsTicket = resources.require({ renderTargetDeclaredBytes: bw * bh * 8 + hw * hh * 8 + qw * qh * 8 },
+          'CreativeGL scene RGBA8/DEPTH24 and four RGBA8 bloom targets', 0, 'bounded-estimate');
+      } catch (error) { releaseTicket(pendingSurfaceTicket); pendingSurfaceTicket = null; throw error; }
       if (canvas.width !== bw || canvas.height !== bh) {
         canvas.width = bw;
         canvas.height = bh;
       }
-      canvas.style.width = w + 'px';
-      canvas.style.height = h + 'px';
+      w = nextW; h = nextH; dpr = d;
+      canvas.style.width = w + 'px'; canvas.style.height = h + 'px';
+      pendingSurfaceTicket.commit({ drawingBufferPixels: bw * bh, renderTargetDeclaredBytes: bw * bh * 8 });
+      releaseTicket(surfaceTicket); surfaceTicket = pendingSurfaceTicket; pendingSurfaceTicket = null;
       disposeTargets();
       sceneT = makeTarget(bw, bh, true);
-      var hw = Math.max(1, bw >> 1), hh = Math.max(1, bh >> 1);
       brightA = makeTarget(hw, hh, false);
       brightB = makeTarget(hw, hh, false);
       // 第二级泛光链路：1/4 分辨率。两级独立模糊，合成时各乘各的权重。
@@ -1349,10 +1402,10 @@ void main() {
       //
       // 退回半分辨率会让这一级的"散"变少（像素更多 = 核覆盖的角度更小），
       // 但那也比整屏糊白好：宁可光晕紧一点，也不要看不见结构。
-      var coarseShift = COARSE_MIN_PX * 2 <= Math.min(bw, bh) ? 2 : 1;
-      var qw = Math.max(1, bw >> coarseShift), qh = Math.max(1, bh >> coarseShift);
       brightC = makeTarget(qw, qh, false);
       brightD = makeTarget(qw, qh, false);
+      pendingTargetsTicket.commit(); targetsTicket = pendingTargetsTicket; pendingTargetsTicket = null;
+      return true;
     }
 
     function uploadSpectrum(bands, rises) {
@@ -1383,14 +1436,16 @@ void main() {
       gl.uniform2f(U.uRes, w, h);
       gl.uniform3fv(U.uColorA, S.colors[0]);
       gl.uniform3fv(U.uColorB, S.colors[1]);
-      if (def && def.setup) def.setup(gl, U, S);
+      if (def && def.setup) def.setup(gl, U, S, { resources: resources,
+        invalidate: function () { if (!disposed && !lost && opts.onInvalidate) opts.onInvalidate(); },
+        register: function (dispose) { artOwners.set(def.id, dispose); } });
     }
 
     var fullscreenVerts = 6;
     var captureGain = 2.2;
 
     function render(S) {
-      if (lost || !sceneT) return { ok: false, reason: 'context-lost' };
+      if (disposed || lost || !sceneT) return { ok: false, reason: 'context-lost' };
       var def = null;
       for (var i = 0; i < SCENES.length; i += 1) if (SCENES[i].id === S.scene) def = SCENES[i];
       if (!def) return { ok: false, reason: 'unknown-scene' };
@@ -1400,7 +1455,7 @@ void main() {
       try {
         entry = sceneProgram(def, q);
       } catch (e) {
-        return { ok: false, reason: 'shader', message: String(e.message || e) };
+        return { ok: false, reason: e.resourceFailure ? e.resourceFailure.reason : 'shader', message: String(e.message || e) };
       }
 
       // --- 相机 ---
@@ -1571,27 +1626,37 @@ void main() {
       gl.activeTexture(gl.TEXTURE0);
 
       captureGain = def.toneMapped === false ? 1 : 2.2;
+      currentProgramKey = def.id + ':' + q;
+      artOwners.forEach(function (dispose, key) { if (key !== def.id) { dispose(); artOwners.delete(key); } });
       return { ok: true, scene: def.id };
     }
 
     // 把最后一帧抓成 dataURL，供工坊做预置缩略图。
     // 必须在 render 之后、同一个任务里调用：drawingBuffer 没有 preserve，
     // 跨任务再读就是一张空图。
-    function capture(scale) {
-      if (!sceneT) return null;
+    var legacyCapture = null, captureCleanupFailed = false;
+    function captureLease(options) {
+      if (disposed || lost || !sceneT) return null;
       var wpx = 240, hpx = Math.max(1, Math.round(240 * h / w));
-      var out = document.createElement('canvas');
+      var fullPixels = sceneT.w * sceneT.h, outPixels = wpx * hpx;
+      var ticket = resources.require({ canvases: 2, drawingBufferPixels: fullPixels + outPixels,
+        ownedCpuBytes: fullPixels * 12 + outPixels * 4 },
+        'CreativeGL capture: two RGBA8 CPU surfaces, readPixels and ImageData', 0);
+      var out = null, full = null, buf = null, img = null, ctx = null, fctx = null;
+      var encodedTicket = null, retained = false, encoded = '';
+      try {
+      out = document.createElement('canvas');
       out.width = wpx; out.height = hpx;
-      var ctx = out.getContext('2d');
+      ctx = out.getContext('2d'); if (!ctx) throw new Error('缩略图画布不可用');
       // WebGL 的 y 轴朝上，readPixels 出来的行是倒的，靠 2D 的负向缩放翻回来。
-      var buf = new Uint8Array(sceneT.w * sceneT.h * 4);
+      buf = new Uint8Array(sceneT.w * sceneT.h * 4);
       gl.bindFramebuffer(gl.FRAMEBUFFER, sceneT.fbo);
       gl.readPixels(0, 0, sceneT.w, sceneT.h, gl.RGBA, gl.UNSIGNED_BYTE, buf);
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-      var full = document.createElement('canvas');
+      full = document.createElement('canvas');
       full.width = sceneT.w; full.height = sceneT.h;
-      var fctx = full.getContext('2d');
-      var img = fctx.createImageData(sceneT.w, sceneT.h);
+      fctx = full.getContext('2d'); if (!fctx) throw new Error('截图画布不可用');
+      img = fctx.createImageData(sceneT.w, sceneT.h); ticket.commit();
       // 翻转同时把行首 alpha 从 0 补齐到 255：加性混合渲染出来的 alpha 是权重和，
       // 直接塞进 ImageData 会得到一张透明度乱掉的图。
       for (var y = 0; y < sceneT.h; y += 1) {
@@ -1606,41 +1671,85 @@ void main() {
       }
       fctx.putImageData(img, 0, 0);
       ctx.drawImage(full, 0, 0, wpx, hpx);
-      return out.toDataURL('image/jpeg', 0.62);
+      var outputResources = options && options.outputResources || resources;
+      if (!outputResources || outputResources.contractVersion !== 1) throw new Error('resource-policy-required');
+      encodedTicket = outputResources.require({ ownedCpuBytes: outPixels * 16 + 2048 },
+        'CreativeGL JPEG UTF16 encoded source candidate envelope; exact result checked before retention', 0, 'bounded-estimate');
+      encoded = out.toDataURL('image/jpeg', 0.62);
+      var committed = encodedTicket.commit({ ownedCpuBytes: encoded.length * 2 });
+      if (!committed.ok) throw new Error('缩略图编码超过已声明上界');
+      retained = true; var released = false;
+      return Object.freeze({ resourceId: encodedTicket.resourceId, get url() { return encoded; },
+        release: function () { if (released) return; released = true; encoded = ''; releaseTicket(encodedTicket); } });
+      } finally {
+        var cleanupError = null;
+        [out, full].forEach(function (surface) {
+          if (!surface) return;
+          ['width', 'height'].forEach(function (dimension) {
+            try { surface[dimension] = 0; } catch (error) { cleanupError = cleanupError || error; }
+          });
+        });
+        out = full = buf = img = ctx = fctx = null;
+        if (!cleanupError) releaseTicket(ticket);
+        if (!retained || cleanupError) { encoded = ''; releaseTicket(encodedTicket); }
+        if (cleanupError) { captureCleanupFailed = true; throw cleanupError; }
+      }
+    }
+    function capture() {
+      var next = captureLease(); if (!next) return null;
+      if (legacyCapture) legacyCapture.release(); legacyCapture = next; return next.url;
     }
 
     function dispose() {
-      disposeTargets();
-      Object.keys(progs).forEach(function (k) { gl.deleteProgram(progs[k].prog); });
-      Object.keys(postProgs).forEach(function (k) { gl.deleteProgram(postProgs[k].prog); });
+      if (disposed) return;
+      disposed = lost = true;
+      if (legacyCapture) legacyCapture.release(); legacyCapture = null;
+      function clean(fn) { try { fn(); } catch (error) { cleanupFailed = true; } }
+      canvas.removeEventListener('webglcontextlost', contextLost);
+      artOwners.forEach(function (dispose) { clean(dispose); }); artOwners.clear();
+      if (gl) {
+        clean(disposeTargets);
+        ownedPrograms.forEach(function (prog) { clean(function () { gl.deleteProgram(prog); }); });
+        if (specTex) clean(function () { gl.deleteTexture(specTex); });
+        if (lyricTex) clean(function () { gl.deleteTexture(lyricTex); });
+        clean(function () { var ext = gl.getExtension('WEBGL_lose_context'); if (ext && !gl.isContextLost()) ext.loseContext(); });
+      }
       progs = {};
       postProgs = {};
-      gl.deleteTexture(specTex);
-      gl.deleteTexture(lyricTex);
-      var ext = gl.getExtension('WEBGL_lose_context');
-      if (ext) ext.loseContext();
+      clean(function () { canvas.width = 0; }); clean(function () { canvas.height = 0; });
+      if (atlasLease) clean(function () { atlasLease.release(); }); atlasLease = null;
+      specTex = lyricTex = specPixels = proj = view = viewProj = rollM = rolled = identity = mirrorMat = null;
+      ownedPrograms.clear(); targetAllocations.length = 0; gl = null;
+      if (!cleanupFailed) {
+        [fixedTicket, surfaceTicket, pendingSurfaceTicket, targetsTicket, pendingTargetsTicket, atlasTicket, pendingAtlasTicket].forEach(releaseTicket);
+        programTickets.forEach(releaseTicket); programTickets.clear();
+      }
     }
 
-    // 预编译全部场景：切预置时第一次着色器编译会卡二三百毫秒，而且会打断
-    // 正在跑的帧率探测。放在用户还看不到画面的启动阶段一次付清。
-    function warmUp() {
-      for (var i = 0; i < SCENES.length; i += 1) {
-        try { sceneProgram(SCENES[i], engineQuality); } catch (e) { /* 单个场景坏掉不影响其它 */ }
-      }
-      try { postProgram('bright', BRIGHT_FS); postProgram('blur', BLUR_FS); postProgram('composite', COMPOSITE_FS); }
-      catch (e) { /* 同上 */ }
+    // Only the requested scene and its post programs are prepared inside their tickets.
+    function warmUp(sceneId) {
+      if (disposed || lost) return false;
+      var def = SCENE_BY_ID[sceneId]; if (!def) throw new Error('unknown-scene');
+      sceneProgram(def, engineQuality);
+      var posts = [postProgram('bright', BRIGHT_FS), postProgram('blur', BLUR_FS), postProgram('composite', COMPOSITE_FS)];
+      if (posts.some(function (entry) { return entry.fail; })) throw new Error('后处理预热失败');
+      return true;
     }
 
     return {
-      gl: gl,
+      get gl() { return gl; },
       resize: resize,
       render: render,
       capture: capture,
+      captureLease: captureLease,
       warmUp: warmUp,
       dispose: dispose,
       isLost: function () { return lost; },
+      resources: function () { return { disposed: disposed, cleanupFailed: cleanupFailed, captureCleanupFailed: captureCleanupFailed,
+        programs: ownedPrograms.size, targets: targetAllocations.length, atlas: !!atlasLease }; },
       size: function () { return { w: w, h: h, dpr: dpr, bw: sceneT ? sceneT.w : 0, bh: sceneT ? sceneT.h : 0 }; }
     };
+    } catch (error) { if (cleanup) cleanup(); throw error; }
   }
 
   window.CreativeGL = {
@@ -1716,21 +1825,28 @@ void main() {
     },
     // 工坊的自定义片段走这个口子：编译失败会把 GL 的日志原文抛出来，
     // 面板把行号标到编辑器里。
-    validateFragment: function (fsSrc) {
-      var c = document.createElement('canvas');
-      var g = c.getContext('webgl2');
-      if (!g) return { ok: false, message: '本设备不支持 WebGL2' };
+    validateFragment: function (fsSrc, options) {
+      var c = null, g = null, sh = null, ticket = null;
       try {
-        var sh = g.createShader(g.FRAGMENT_SHADER);
+        if (!options || !options.resources) throw new Error('resource-policy-required');
+        ticket = options.resources.require({ canvases: 1, gpuContexts: 1, drawingBufferPixels: 1,
+          renderTargetDeclaredBytes: 8 }, 'CreativeGL bounded fragment validation probe RGBA8/DEPTH24', 0, 'bounded-estimate');
+        c = document.createElement('canvas'); c.width = c.height = 1;
+        g = c.getContext('webgl2'); if (!g) throw new Error('本设备不支持 WebGL2');
+        sh = g.createShader(g.FRAGMENT_SHADER); if (!sh) throw new Error('无法创建着色器');
         g.shaderSource(sh, '#version 300 es\n' + COMMON + fsSrc);
         g.compileShader(sh);
         var ok = g.getShaderParameter(sh, g.COMPILE_STATUS);
         var log = g.getShaderInfoLog(sh) || '';
-        g.deleteShader(sh);
+        ticket.commit();
         return { ok: !!ok, message: log };
       } catch (e) {
         return { ok: false, message: String(e.message || e) };
+      } finally {
+        if (g) { if (sh) g.deleteShader(sh); var loss = g.getExtension('WEBGL_lose_context'); if (loss) loss.loseContext(); }
+        if (c) c.width = c.height = 0; g = c = sh = null; releaseProbeTicket(ticket);
       }
     }
   };
+  function releaseProbeTicket(ticket) { if (ticket) ticket.release({ apiReleased: true, allocationEnded: true }); }
 })();

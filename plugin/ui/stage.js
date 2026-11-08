@@ -16,6 +16,11 @@
 (function () {
   'use strict';
 
+  function readDocumentHidden() {
+    var host = window.__hertzWindowHost;
+    return !!document.hidden || !!(host && host.presentationVersion === 1 && host.presentationHidden);
+  }
+
   // This document owns admission; each renderer retains its allocation and cleanup authority.
   var resourceLedger = null;
   if (window.StageResourceBudget && window.StageResourcePolicy) {
@@ -53,6 +58,7 @@
   var coverFollow = false;
   var paletteEpoch = 0;
   var lastPalette = null;
+  var paletteController = null, palettePort = null, pendingPalette = false;
 
   // 本地时钟：base 是快照给的基准点，clockAt 是挂上去的那一刻
   var basePos = 0;
@@ -184,7 +190,7 @@
     record.sampledAtMs = t;
     record.playing = playing;
     record.reduced = reduced || !!(systemMotion && systemMotion.matches);
-    record.documentHidden = hidden || !!document.hidden;
+    record.documentHidden = readDocumentHidden();
     record.stageVisible = !stageDestroyed && isStageVisible();
     record.tier = lowfx ? 0 : tier;
     record.mediaEpoch = mediaEpoch;
@@ -212,7 +218,7 @@
     frameStatePending = false;
     var visible = !stageDestroyed && isStageVisible();
     var effectiveReduced = reduced || !!(systemMotion && systemMotion.matches);
-    var documentHidden = hidden || !!document.hidden;
+    var documentHidden = readDocumentHidden();
     if (lastFrameState && lastFrameState.playing === playing &&
       lastFrameState.reduced === effectiveReduced && lastFrameState.documentHidden === documentHidden &&
       lastFrameState.stageVisible === visible && lastFrameState.mediaEpoch === mediaEpoch &&
@@ -1033,23 +1039,18 @@
     document.dispatchEvent(new CustomEvent('stage:retint'));
   }
 
-  // hsl() 字符串没法直接塞进 rgba() 的 rgb 三元位，这里用一个离屏像素换算。
-  var rgbProbe = null;
+  // Convert our generated HSL token without allocating a probe canvas or ImageData.
   function hslToRgbTriplet(color) {
-    try {
-      if (!rgbProbe) {
-        rgbProbe = document.createElement('canvas');
-        rgbProbe.width = 1; rgbProbe.height = 1;
-      }
-      var g = rgbProbe.getContext('2d');
-      g.clearRect(0, 0, 1, 1);
-      g.fillStyle = color;
-      g.fillRect(0, 0, 1, 1);
-      var d = g.getImageData(0, 0, 1, 1).data;
-      return d[0] + ', ' + d[1] + ', ' + d[2];
-    } catch (e) {
-      return '226, 176, 113';
-    }
+    var parts = /^hsl\((-?\d+) (\d+)% (\d+)%\)$/.exec(color);
+    if (!parts) return '226, 176, 113';
+    var hue = ((Number(parts[1]) % 360) + 360) % 360 / 60;
+    var saturation = Number(parts[2]) / 100, light = Number(parts[3]) / 100;
+    var chroma = (1 - Math.abs(2 * light - 1)) * saturation;
+    var x = chroma * (1 - Math.abs(hue % 2 - 1)), m = light - chroma / 2;
+    var r = hue < 1 || hue >= 5 ? chroma : hue < 2 || hue >= 4 ? x : 0;
+    var g = hue >= 1 && hue < 3 ? chroma : hue < 1 || hue < 4 && hue >= 3 ? x : 0;
+    var b = hue >= 3 && hue < 5 ? chroma : hue >= 2 && hue < 3 || hue >= 5 ? x : 0;
+    return Math.round((r + m) * 255) + ', ' + Math.round((g + m) * 255) + ', ' + Math.round((b + m) * 255);
   }
 
   /// 背景图位封面：插件形态下远程地址要经 sidecar 换成 data URL（沙箱 CSP 画不
@@ -1062,22 +1063,31 @@
 
   function extractPalette(url) {
     var epoch = ++paletteEpoch;
+    if (paletteController) paletteController.abort(); paletteController = null;
+    pendingPalette = false;
     if (!coverFollow || !url) { resetPalette(); return; }
     if (lastPalette && lastPalette.url === url) {
       applyPalette(lastPalette.hue, lastPalette.saturation);
       return;
     }
-    var img = new Image();
-    img.crossOrigin = 'anonymous';
-    img.onload = function () {
-      if (epoch !== paletteEpoch) return;
-      var c = document.createElement('canvas');
+    if (readDocumentHidden()) { pendingPalette = true; return; }
+    if (stageDestroyed || !resourceLedger || !window.StageImageSource) return;
+    if (!palettePort) palettePort = resourceLedger.port('stage-cover-palette');
+    var controller = paletteController = new AbortController();
+    StageImageSource.decode(url, { resources: palettePort, generation: epoch, signal: controller.signal,
+      resolve: window.HertzCovers && HertzCovers.resolve,
+      maxEncodedBytes: Math.floor(resourceLedger.snapshot().caps.ownedCpuBytes / 4) }).then(function (source) {
+      var c = null, g = null, data = null, ticket = null;
+      try {
+      if (epoch !== paletteEpoch || stageDestroyed || controller.signal.aborted) return;
+      ticket = palettePort.require({ canvases: 1, drawingBufferPixels: 1024, ownedCpuBytes: 8192 + 12 * 3 * 8 + 24 },
+        'Stage palette RGBA8 sampling surface, ImageData and twelve numeric buckets', epoch);
+      c = document.createElement('canvas');
       c.width = 32; c.height = 32;
-      var g = c.getContext('2d');
+      g = c.getContext('2d');
       if (!g) { resetPalette(); return; }
-      g.drawImage(img, 0, 0, 32, 32);
-      var data;
-      try { data = g.getImageData(0, 0, 32, 32).data; } catch (e) { resetPalette(); return; }
+      g.drawImage(source.image, 0, 0, 32, 32);
+      data = g.getImageData(0, 0, 32, 32).data; ticket.commit();
 
       // 12 个色相桶，按「饱和度 × 亮度权重」投票；丢掉近黑近白的像素。
       var buckets = new Array(12);
@@ -1100,21 +1110,19 @@
       if (!best || best.w <= 0) { resetPalette(); return; }
       lastPalette = { url: url, hue: best.h / best.w, saturation: best.s / best.w };
       applyPalette(lastPalette.hue, lastPalette.saturation);
-    };
-    img.onerror = function () { if (epoch === paletteEpoch) resetPalette(); };
-    // 取色要读像素，所以这里必须是能画出来的那一份。setTrack 的三个调用点里
-    // 有两个（app.js 补元数据、online.js 详情回填）传进来的是元数据里的音源
-    // https 原址——插件沙箱的 img-src 拦掉它，而且就算放行，跨域图也会污染
-    // canvas 让 getImageData 抛。先过代理换成 data URL 再喂给 img。
-    if (window.HertzCovers && window.HertzCovers.resolve) {
-      window.HertzCovers.resolve(url).then(function (resolved) {
-        if (epoch !== paletteEpoch) return;
-        if (!resolved) { resetPalette(); return; }
-        img.src = resolved;
-      });
-    } else {
-      img.src = url;
-    }
+      palettePort.report({ requestId: String(epoch), state: 'ready', actualBackend: 'canvas2d', reasons: [] });
+      } finally {
+        try {
+          if (c) c.width = c.height = 0; c = g = data = null;
+          if (ticket) ticket.release({ apiReleased: true, allocationEnded: true });
+        } finally { source.release(); }
+      }
+    }).catch(function (error) {
+      if (epoch !== paletteEpoch || stageDestroyed || controller.signal.aborted) return;
+      palettePort.report({ requestId: String(epoch), state: lastPalette ? 'retained' : 'unavailable',
+        actualBackend: lastPalette ? 'canvas2d' : 'none', reasons: [error.message] });
+      if (!lastPalette) resetPalette();
+    }).finally(function () { if (paletteController === controller) paletteController = null; });
   }
 
   function syncCoverAppearance() {
@@ -1287,6 +1295,7 @@
   // 子模块各自的 GL/DOM 资源由自己的 destroy 释放。
   function destroy() {
     stageDestroyed = true;
+    if (window.StagePersistence && StagePersistence.destroy) StagePersistence.destroy();
     if (resourceLedger) resourceLedger.close();
     notifyFrameState(true);
     gates.length = 0;
@@ -1319,6 +1328,8 @@
     // Release the old spectrum reference without mutating a currently borrowed frame.
     stageFrame = createFrameRecord();
     paletteEpoch++;
+    if (paletteController) paletteController.abort(); paletteController = null;
+    pendingPalette = false; palettePort = null; lastPalette = null;
     emotionRequestGeneration++;
     inited = false;
   }
@@ -1360,7 +1371,7 @@
   function frame() {
     rafId = 0;
     // A WebView may deliver an already queued callback after becoming hidden.
-    if (stageDestroyed || hidden || document.hidden || window.HertzCapsuleOnly) { lastFrameAt = 0; return; }
+    if (stageDestroyed || hidden || readDocumentHidden() || window.HertzCapsuleOnly) { lastFrameAt = 0; return; }
 
     // dt：lerp 要按真实帧间隔归一化，否则 30fps 的机器滚动会慢一半。
     // 标签页切回来时 dt 可能是几千毫秒，截断掉，免得一帧就冲过整段歌词。
@@ -1457,7 +1468,7 @@
 
   // 标签页不可见时 rAF 会被浏览器停掉，但循环里那些 setTimeout/计时不会。
   // 索性整个熄掉：切走的这段时间一行 DOM 都不写，回来再补一次基准。
-  var hidden = !!document.hidden;
+  var hidden = readDocumentHidden();
   function setHidden(v) {
     if (hidden === v) return;
     hidden = v;
@@ -1470,7 +1481,7 @@
   }
 
   function refreshViewport() {
-    if (hidden || document.hidden) return;
+    if (hidden || readDocumentHidden()) return;
     tier = Math.min(tier, detectTier());
     if (tier === 0) { lowfxFloored = true; setLowFx(true); }
     // Native fullscreen and display changes invalidate the startup measurements.
@@ -1491,7 +1502,7 @@
     return document.body.classList.contains('s3d-open') || document.body.classList.contains('space3d-open');
   }
   function isStageVisible() {
-    if (hidden || isVisualOccluded()) return false;
+    if (readDocumentHidden() || isVisualOccluded()) return false;
     if (!narrow) return true;
     return document.body.classList.contains('stage-open');
   }
@@ -1664,7 +1675,7 @@
     stageDestroyed = false;
     stageFrame = createFrameRecord();
     lastFrameState = null;
-    hidden = !!document.hidden;
+    hidden = readDocumentHidden();
 
     readTune();
     mountFxLayers();
@@ -1771,10 +1782,16 @@
       });
     }
 
-    listen(document, 'visibilitychange', function () {
-      setHidden(document.hidden);
-      if (!document.hidden) relayout();
-    });
+    function onVisibility() {
+      var suspended = readDocumentHidden();
+      setHidden(suspended);
+      if (suspended && paletteController) { paletteController.abort(); paletteController = null; paletteEpoch++; pendingPalette = true; }
+      if (!suspended && pendingPalette) extractPalette(coverFollow ? lastCover : null);
+      if (!suspended) relayout();
+    }
+    listen(document, 'visibilitychange', onVisibility);
+    listen(window, 'hertz-native-presentation', onVisibility);
+    listen(window, 'hertz-native-host-ready', onVisibility);
 
     // 律动幅度是驾驶舱里 JS 读进变量的数值（不落 CSS 变量）：它的初始 emit
     // 在本监听器注册之前，所以这里既监听变更又做一次冷读。
@@ -1815,6 +1832,8 @@
     destroy: destroy,
     onFrameState: onFrameState,
     resources: function () { return resourceLedger; },
+    // Includes native parent-window suspension; separate from 2D stage occlusion.
+    isDocumentHidden: readDocumentHidden,
     // Cold read only: never advances the lifecycle frame id or the gates.
     frameState: frameState,
     removeGate: removeGate,
@@ -1959,7 +1978,7 @@
     isLowFx: function () { return lowfx; },
     // Visual layers under the immersive stage stop drawing. The shared clock,
     // energy gate and Stage3D gates keep running in the host scheduler.
-    isHidden: function () { return hidden || isVisualOccluded(); },
+    isHidden: function () { return readDocumentHidden() || isVisualOccluded(); },
     // GL 层据此判断活动画布当前是否真的可见（窄屏抽屉关着 = 不可见）。
     isStageVisible: isStageVisible,
     // 已经平滑过的能量，0–1。粒子层直接吃这个值比自己重算 FFT 均值便宜，

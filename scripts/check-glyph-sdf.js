@@ -181,6 +181,22 @@ section('6. 距离场的单调性');
   ok(phi[4] > 0 && phi[0] < 0, '内部为正、外部为负');
 }
 
+section('7. Admitted reusable workspace preserves exact results across alternating inputs');
+{
+  const w=11,h=7,workspace=S.createWorkspace(w,h);
+  const actualBytes=Object.values(workspace).filter(ArrayBuffer.isView).reduce((sum,value)=>sum+value.byteLength,0);
+  ok(actualBytes===S.workspaceBytes(w,h),'workspace plan matches every retained typed array');
+  let exact=true,borrowed=true;
+  for(let i=0;i<100;i++){
+    const input=mask(w,h,[[i%w,Math.floor(i/w)%h],[(i+3)%w,(i+2)%h]]);
+    const expected=S.rasterToSdf(input,w,h,8),actual=S.rasterToSdf(input,w,h,8,{workspace});
+    if(!actual||actual.some((value,index)=>value!==expected[index]))exact=false;
+    if(actual!==workspace.encoded)borrowed=false;
+  }
+  ok(exact,'100 reused workspace results equal independently constructed SDF results');
+  ok(borrowed,'encoded result borrows the original admitted workspace');
+}
+
 // ------------------------------------------------------------------- 汇总
 console.log('\n' + (failures ? '✗ ' : '✓ ') + checks + ' 项检查，' + failures + ' 项失败');
 process.exit(failures ? 1 : 0);

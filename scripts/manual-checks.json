@@ -3,6 +3,10 @@
   "note": "check-* scripts that are deliberate manual/browser/diagnostic entry points. New unregistered check-* files fail scripts/check-scripts.js until they are either registered in check-frontend.js / a workflow or added here.",
   "scripts": [
     {
+      "script": "check-stage-engine-m1-native.js",
+      "purpose": "Actual pinned Standard/Full release Wry/WebView2 candidate on current Windows display: edition/minification source identity, isolated null audio, raw original-gate CPU/FPS samples over real 60-second combinations, optional real minimized 60-second pause/seek/resume lifecycles, and owner retirement with separate scoped process/GPU observations. Requires HERTZ_BIN, HERTZ_EDITION and PLAYWRIGHT_MODULE; run GUI candidates serially. Incomplete owner coverage, weak-machine/4K and frozen-policy qualification remain open."
+    },
+    {
       "script": "check-native-http-boundary.js",
       "purpose": "Actual Full/native listener, HTTP/WS and Windows WebView2 CSP boundary: non-loopback refusal before credentials/database, random-port Host/Origin and absolute URI rejection before ticket consumption, bearer/session/OBS compatibility, real Chromium injection/frame denial plus Pixi/Blob worker/style/image compatibility, and ordinary LAN service behavior. Requires fixed HERTZ_BIN and installed PLAYWRIGHT_MODULE; serial owned GUI/processes with null audio and isolated DataDirs."
     },

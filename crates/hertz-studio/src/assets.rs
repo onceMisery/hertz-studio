@@ -83,6 +83,7 @@ ui_assets! {
     "/stage.js", JS => const STAGE_JS: &str = edition_ui!("stage.js");
     "/stage-resource-budget.js", JS => const STAGE_RESOURCE_BUDGET_JS: &str = edition_ui!("stage-resource-budget.js");
     "/stage-resource-policy.js", JS => const STAGE_RESOURCE_POLICY_JS: &str = edition_ui!("stage-resource-policy.js");
+    "/stage-image-source.js", JS => const STAGE_IMAGE_SOURCE_JS: &str = edition_ui!("stage-image-source.js");
     "/perf-probe.js", JS => const PERF_PROBE_JS: &str = edition_ui!("perf-probe.js");
     "/home-dashboard.js", JS => const HOME_DASHBOARD_JS: &str = edition_ui!("home-dashboard.js");
     "/home-dashboard.css", CSS => const HOME_DASHBOARD_CSS: &str = edition_ui!("home-dashboard.css");
@@ -114,6 +115,7 @@ ui_assets! {
     "/handdrawn.js", JS => const HANDDRAWN_JS: &str = edition_ui!("handdrawn.js");
     "/backgrounds.js", JS => const BACKGROUNDS_JS: &str = edition_ui!("backgrounds.js");
     "/stage-media.js", JS => const STAGE_MEDIA_JS: &str = edition_ui!("stage-media.js");
+    "/stage-json-source.js", JS => const STAGE_JSON_SOURCE_JS: &str = edition_ui!("stage-json-source.js");
     "/stage-persistence.js", JS => const STAGE_PERSISTENCE_JS: &str = edition_ui!("stage-persistence.js");
     "/bgwall.js", JS => const BGWALL_JS: &str = edition_ui!("bgwall.js");
     "/lyric3d.js", JS => const LYRIC3D_JS: &str = edition_ui!("lyric3d.js");

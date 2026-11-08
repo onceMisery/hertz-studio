@@ -155,8 +155,14 @@ void main(){float r=length(gl_PointCoord-.5);if(r>.5)discard;
  #include <colorspace_fragment>
 }`;
 
+const sharedParticleCount = 24000;
+export function particlesResourcePlan() {
+  return { ownedCpuBytes: sharedParticleCount * 9 * 4 + 16 * 4, bufferDeclaredBytes: sharedParticleCount * 9 * 4 };
+}
 export function createParticles(ctx, kind, palette = [0x67d9cf, 0xfb7298, 0x8fb9ff]) {
-  const T = ctx.THREE, group = root(ctx), count = 24000;
+  const T = ctx.THREE, group = root(ctx), count = sharedParticleCount;
+  const declared = particlesResourcePlan(), arrayBytes = declared.bufferDeclaredBytes, cpuBytes = declared.ownedCpuBytes;
+  const plan = ctx.scope.bufferPlan(cpuBytes, arrayBytes, 'Space shared particle position/color/seed/uv arrays and spectrum uniform16');
   const refined = ['silk', 'sphere', 'tunnel', 'galaxy'].includes(kind);
   const pointer = createParticlePointer(ctx, group, { depth: kind === 'sphere' ? 2.8 : kind === 'tunnel' ? -5 : 0, radius: kind === 'galaxy' ? 2 : 1.4 });
   const positions = new Float32Array(count * 3), colors = new Float32Array(count * 3), seeds = new Float32Array(count), uv = new Float32Array(count * 2);
@@ -191,10 +197,12 @@ export function createParticles(ctx, kind, palette = [0x67d9cf, 0xfb7298, 0x8fb9
   const geometry = own(ctx, new T.BufferGeometry());
   geometry.setAttribute('position', new T.BufferAttribute(positions, 3)); geometry.setAttribute('color', new T.BufferAttribute(colors, 3));
   geometry.setAttribute('aSeed', new T.BufferAttribute(seeds, 1)); geometry.setAttribute('aCover', new T.BufferAttribute(uv, 2));
+  Object.values(geometry.attributes).forEach(attribute => plan.upload(attribute));
   const uniforms = { ...pointer.uniforms, uTime: { value: 0 }, uBass: { value: 0 }, uMid: { value: 0 }, uTreble: { value: 0 },
     uHeight: { value: 720 }, uRefined: { value: Number(refined) },
     uMotion: { value: .6 }, uResponse: { value: .7 }, uSize: { value: kind === 'cover' ? 1.7 : 1 }, uPixel: { value: 1 }, uArtwork: { value: kind === 'cover' ? 1 : 0 },
     uMode: { value: modes[kind] ?? 6 }, uCover: { value: null }, uHasCover: { value: 0 }, uBands: { value: new Float32Array(16) } };
+  plan.cpuReady(cpuBytes);
   const material = own(ctx, new T.ShaderMaterial({ uniforms, vertexShader: particleVertex, fragmentShader: particleFragment,
     vertexColors: true, transparent: true, depthWrite: false, blending: kind === 'cover' || refined ? T.NormalBlending : T.AdditiveBlending }));
   const points = new T.Points(geometry, material); points.frustumCulled = false; group.add(points);
@@ -229,8 +237,17 @@ export function createParticles(ctx, kind, palette = [0x67d9cf, 0xfb7298, 0x8fb9
   });
 }
 
+export function towersResourcePlan() {
+  const geometryBytes = 24 * 8 * 4 + 36 * 2, instanceBytes = 256 * (16 + 3) * 4;
+  return { ownedCpuBytes: geometryBytes + instanceBytes + (24 * 8 + 36) * 8, bufferDeclaredBytes: geometryBytes + instanceBytes };
+}
 export function createTowers(ctx, style = 'spectrum') {
   const T = ctx.THREE, group = root(ctx), count = 256;
+  // BoxGeometry:24 vertices with position/normal/uv and36 Uint16 indices.
+  const geometryBytes = 24 * 8 * 4 + 36 * 2, instanceBytes = count * (16 + 3) * 4;
+  const declared = towersResourcePlan();
+  const plan = ctx.scope.bufferPlan(declared.ownedCpuBytes, declared.bufferDeclaredBytes,
+    'Space shared towers BoxGeometry, matrix256 and lazily initialized color256');
   const geometry = own(ctx, new T.BoxGeometry(.32, 1, .32));
   const material = own(ctx, new T.ShaderMaterial({ vertexColors: true, wireframe: style === 'wire',
     vertexShader: `varying vec3 vColor;varying float vY;varying vec3 vNormal;
@@ -245,6 +262,7 @@ export function createTowers(ctx, style = 'spectrum') {
     #include <colorspace_fragment>
     }` }));
   const mesh = own(ctx, new T.InstancedMesh(geometry, material, count)), object = new T.Object3D(), color = new T.Color(); group.add(mesh);
+  Object.values(geometry.attributes).forEach(attribute => plan.upload(attribute)); plan.upload(geometry.index); plan.upload(mesh.instanceMatrix);
   function update(frame, p) {
     for (let i = 0; i < mesh.count; i++) {
       const x = i % 16 - 7.5, z = Math.floor(i / 16) - 7.5;
@@ -261,6 +279,9 @@ export function createTowers(ctx, style = 'spectrum') {
   }
   function quality(q) { mesh.count = Math.floor(count * qualityDensity(q)); }
   quality(ctx.quality); update({ time: 0 }, ctx.params);
+  // InstanceColor allocates at the original full instanceMatrix capacity.
+  if (mesh.instanceColor) plan.upload(mesh.instanceColor);
+  plan.cpuReady(geometryBytes + instanceBytes);
   return basicInstance(group, ctx.params, ctx.quality, { update, quality, stats: () => ({ instances: mesh.count, triangles: mesh.count * 12, drawCalls: 1 }) });
 }
 

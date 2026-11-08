@@ -310,13 +310,29 @@
     this.retirement = null;
     this.screenPatterns = Object.create(null);
     this.patternSize = '';
+    this.initPromise = null;
+    this.cleanupFailure = null;
+    this.failedApplication = null;
+    this.failedRenderer = null;
   }
 
   TemperaDirector.prototype.init = function () {
     var self = this;
-    return this.loadPixi().then(function (PIXI) {
+    if (self.destroyed || self.initialized) return Promise.resolve();
+    if (self.initPromise) return self.initPromise;
+    var application = null, retired = false;
+    function retire() {
+      if (!application || retired) return;
+      try {
+        var G = typeof globalThis !== 'undefined' ? globalThis : window;
+        if (G.StanzaSonnet.retireApplication) G.StanzaSonnet.retireApplication(application);
+        else application.destroy({removeView:true, releaseGlobalResources:false}, {children:true});
+        retired = true;
+      } catch (error) { self.cleanupFailure = error.message; self.failedApplication = application; throw error; }
+    }
+    self.initPromise = this.loadPixi().then(function (PIXI) {
       if (self.destroyed) return;
-      var application = new PIXI.Application();
+      application = new PIXI.Application();
       self.app = application;
       return application.init({
         backgroundAlpha: 0,
@@ -327,7 +343,7 @@
         autoDensity: true
       }).then(function () {
         if (self.destroyed || self.app !== application) {
-          application.destroy({ removeView: true, releaseGlobalResources: false }, { children: true });
+          retire();
           if (self.app === application) self.app = null;
           return;
         }
@@ -362,7 +378,14 @@
         self.resize();
         if (self.pendingShot) self.buildShot.apply(self, self.pendingShot);
       });
-    });
+    }).catch(function (error) {
+      try { retire(); } catch (_) { /* Keep the original failure and retained cleanup obligation. */ }
+      if (self.app === application) self.app = null;
+      self.initialized = false;
+      if (error.pixiPartialRenderer) { self.failedRenderer = error.pixiPartialRenderer; self.cleanupFailure = 'pixi-partial-renderer-cleanup-failed'; }
+      throw error;
+    }).finally(function () { self.initPromise = null; });
+    return self.initPromise;
   };
 
   TemperaDirector.prototype.resize = function () {
@@ -789,7 +812,8 @@
 
   TemperaDirector.prototype.getDebugSnapshot = function () {
     return {
-      initialized: this.initialized, composition: this.kind, camera: this.cameraKind,
+      initialized: this.initialized, initializing:!!this.initPromise, cleanupFailure:this.cleanupFailure,
+      composition: this.kind, camera: this.cameraKind,
       panels: this.blocks ? this.blocks.children.length : 0,
       seams: this.blocks ? this.blocks.children.filter(function (block) { return block.dataset.seam; }).length : 0,
       seamsVisible: !!(this.blocks && this.blocks.visible && this.blocks.children.some(function (block) { return block.dataset.seam; })),
@@ -806,7 +830,8 @@
   };
 
   TemperaDirector.prototype.destroy = function () {
-    if (this.destroyed && !this.app) return;
+    if (this.destroyed && !this.app && !this.failedApplication && !this.failedRenderer) return;
+    var G = typeof globalThis !== 'undefined' ? globalThis : window;
     this.destroyed = true;
     this.pendingShot = null;
     this.performance.reset();
@@ -818,9 +843,8 @@
     if (this.optical) { this.optical.destroy(); this.optical = null; }
     this.postProcess = null;
     if (this.app && this.initialized) {
-      clear(this.app.stage);
-      try { this.app.destroy({ removeView: true, releaseGlobalResources: false }, { children: true }); }
-      catch (err) { console.warn('[stanza-tempera] PIXI cleanup failed:', err); }
+      try { G.StanzaSonnet.retireApplication(this.app); }
+      catch (err) { this.cleanupFailure = err.message; this.failedApplication = this.app; console.warn('[stanza-tempera] PIXI cleanup failed:', err); }
     }
     this.app = null;
     Object.keys(this.screenPatterns).forEach(function (key) { this.screenPatterns[key].destroy(); }, this);
@@ -830,6 +854,15 @@
     this.sweepGlow = null;
     this.text = this.invert = this.sweepMask = this.flash = null;
     this.initialized = false;
+    if (this.failedApplication) {
+      try { G.StanzaSonnet.retireApplication(this.failedApplication); this.failedApplication = null; }
+      catch (_) { /* Retain an unresolved original owner rather than discard the cleanup obligation. */ }
+    }
+    if (this.failedRenderer) {
+      try { this.failedRenderer.destroy({removeView:true, releaseGlobalResources:false}); this.failedRenderer = null; }
+      catch (_) { /* Keep the original partial renderer retirement obligation. */ }
+    }
+    if (!this.failedApplication && !this.failedRenderer) this.cleanupFailure = null;
   };
 
   // ------------------------------------------------------------------
@@ -862,7 +895,8 @@
     var hot = document.createElement('div');
     hot.className = 'fl-tempera-hot';
     hot.hidden = true;
-    root.append(eyebrow, note, hot);
+    var fallback = document.createElement('div'); fallback.className = 'fl-pixi-fallback'; fallback.hidden = true;
+    root.append(eyebrow, note, hot, fallback);
     host.append(root);
 
     var sonnet = G.StanzaSonnet;
@@ -951,12 +985,17 @@
       if (destroyed || !visible || !G.Stage) return;
       var f = sonnet.buildFrame(root);
       reduced = f.reduced;
+      if (initFailed) {
+        fallback.hidden = false; fallback.textContent = f.activeLine ? f.activeLine.fullText : (f.track && f.track.title) || '';
+        return;
+      }
       if (!director.initialized) {
         if (!initStarted && !initFailed) {
           initStarted = true;
           director.init().catch(function (err) {
             if (destroyed) return;
             initFailed = true;
+            fallback.hidden = false; fallback.textContent = f.activeLine ? f.activeLine.fullText : (f.track && f.track.title) || '';
             console.warn('[stanza-tempera] 图形引擎不可用：', err);
             note.hidden = false;
             note.textContent = '图形引擎不可用 · 请切换其他歌词视觉';
@@ -996,6 +1035,7 @@
         var sig = G.StanzaTheme ? G.StanzaTheme.signature(t) : JSON.stringify(t);
         if (sig === themeSig) return;
         theme = t;
+        fallback.style.color = theme.primaryColor;
         themeSig = sig;
         renderedKey = '';
       },

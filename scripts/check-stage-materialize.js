@@ -59,6 +59,7 @@ const sandbox = {
 sandbox.globalThis = sandbox;
 vm.createContext(sandbox);
 
+require('./stage-resource-fixture')(sandbox);
 load('creative-gl.js', sandbox);
 load('backgrounds.js', sandbox);
 sandbox.Backgrounds = sandbox.window.Backgrounds;

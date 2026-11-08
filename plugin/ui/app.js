@@ -799,9 +799,9 @@ const DbxTransport = {
   async post(path, body, options) {
     return serializedPlaybackPost(path, body, dbxRequest, options);
   },
-  async put(path, body) {
+  async put(path, body, options) {
     PlaybackIntent.command(path);
-    return dbxRequest(path, { method: 'PUT', body: JSON.stringify(body || {}) });
+    return dbxRequest(path, { ...options, method: 'PUT', body: JSON.stringify(body || {}) });
   },
   async del(path) { return dbxRequest(path, { method: 'DELETE' }); },
   coverUrl: dbxCoverUrl,
@@ -866,6 +866,39 @@ function bindDbxCloseHook() {
 
 const REQUEST_TIMEOUT = 15000;
 
+// Optional source-owner envelope. The existing caller reserves before transport
+// serialization/invoke, and owns the parsed result until its last borrower exits.
+// Other routes retain their original transport contract.
+async function boundedJsonResponse(response, budget) {
+  if (!budget || !budget.ticket || !Number.isSafeInteger(budget.maxBytes) || budget.maxBytes <= 0)
+    throw new Error('resource-policy-required');
+  const declared = Number(response.headers.get('content-length'));
+  if (declared > budget.maxBytes) throw new Error('estimate-unavailable');
+  if (!response.body) throw new Error('读取设置响应失败');
+  const reader = response.body.getReader();
+  let parts = [], bytes = null, text = null, total = 0;
+  try {
+    while (true) {
+      const part = await reader.read();
+      if (part.done) break;
+      total += part.value.byteLength;
+      if (total > budget.maxBytes) {
+        // A dishonest source is a violation, never an after-the-fact reservation.
+        budget.ticket.materialize({ ownedCpuBytes: total * 16 });
+        throw new Error('JSON response exceeds declared source plan');
+      }
+      parts.push(part.value);
+    }
+    bytes = new Uint8Array(total); let offset = 0;
+    parts.forEach(part => { bytes.set(part, offset); offset += part.byteLength; });
+    text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    return JSON.parse(text);
+  } finally {
+    parts = bytes = text = null;
+    try { await reader.cancel(); } finally { reader.releaseLock(); }
+  }
+}
+
 async function request(path, options = {}, attempt = 0) {
   const method = (options.method || 'GET').toUpperCase();
   const timeoutMs = Number.isFinite(options.timeoutMs) && options.timeoutMs > 0
@@ -874,7 +907,7 @@ async function request(path, options = {}, attempt = 0) {
     : path === '/v1/stage/pitch' ? 35000
       : (path === '/v1/ai/lyrics/emotion' && method === 'POST') ? 330000
         : REQUEST_TIMEOUT;
-  const { timeoutMs: _timeoutOverride, ...fetchOptions } = options;
+  const { timeoutMs: _timeoutOverride, jsonBudget, waitForSettlement: _waitForSettlement, ...fetchOptions } = options;
   const controller = typeof AbortController === 'function' ? new AbortController() : null;
   const cancel = () => controller && controller.abort();
   if (options.signal) {
@@ -899,7 +932,7 @@ async function request(path, options = {}, attempt = 0) {
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}`, ...(options.headers || {}) },
     });
     if (!res.ok) {
-      const body = await res.json().catch(() => ({}));
+      const body = await (jsonBudget ? boundedJsonResponse(res, jsonBudget) : res.json()).catch(() => ({}));
       const err = new Error(body?.error?.message || `HTTP ${res.status}`);
       // request_id 与 code 都是后端错误契约的一部分：request_id 用来回查日志，
       // code 让前端能按判别式分流（渲染时才翻成文案，不拿服务端的句子当判据）。
@@ -908,11 +941,12 @@ async function request(path, options = {}, attempt = 0) {
       err.status = res.status;
       throw err;
     }
-    return res.status === 204 ? null : await res.json();
+    return res.status === 204 ? null : await (jsonBudget ? boundedJsonResponse(res, jsonBudget) : res.json());
   } catch (err) {
     // 网络抖动、超时、服务端 5xx：幂等读重试一次，避免偶发失败直接弹红。
     const transient = !err.status || err.status >= 500 || err.name === 'AbortError' || err.name === 'TypeError';
-    if (method === 'GET' && options.retry !== false && attempt === 0 && transient && !(options.signal && options.signal.aborted)) {
+    if (method === 'GET' && options.retry !== false && attempt === 0 && transient
+      && !(jsonBudget && jsonBudget.ticket.state().cancelled) && !(options.signal && options.signal.aborted)) {
       await new Promise((r) => setTimeout(r, 300));
       return request(path, options, attempt + 1);
     }

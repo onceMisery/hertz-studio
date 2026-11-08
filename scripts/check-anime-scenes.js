@@ -19,18 +19,20 @@ const box = {
   // connect-src 是 none，fetch 一律失败）。这里给一个"永远停在解码中"的 Image：
   // bind() 于是走它自己写的那条降级路 —— uArtOk 保持 0，着色器整幅回落全程序化底。
   // 本脚本查的是登记/参数/分享/恢复往返，纹理工件不在这里验。
-  Image: class { constructor() { this.onload = null; this.onerror = null; } },
+  Image: class { constructor() { this.onload = null; this.onerror = null; } decode() { return new Promise(() => {}); } },
   Stage: { gate() {}, kick() {}, position: () => 0 }
 };
 box.window = box;
 vm.createContext(box);
-for (const file of ['onset.js', 'creative-gl.js', 'creative-anime.js', 'backgrounds.js',
+for (const file of ['stage-resource-budget.js','stage-resource-policy.js','stage-json-source.js','onset.js', 'creative-gl.js', 'creative-anime.js', 'backgrounds.js',
   'handdrawn.js', 'creative-stage.js', 'creative-share-code.js', 'creative-prompt.js']) {
   const location = path.join(ui, file);
   if (file === 'creative-anime.js' && !fs.existsSync(location)) continue;
   vm.runInContext(fs.readFileSync(location, 'utf8'), box, { filename: file });
 }
 box.Backgrounds.apply = box.HandDrawn.apply = () => {};
+const ledger = box.StageResourceBudget.create(box.StageResourcePolicy);
+box.Stage.resources = () => ledger;
 box.CreativeStage.init();
 
 async function main() {
@@ -60,7 +62,7 @@ async function main() {
         p: GL.sceneById(scene.id).defaults,
         cam: { yaw, pitch: 0, dist: 20, fov: 55, tx: 0, ty: 0, tz: 0 },
         modelMatrix: [c,0,-s,0,0,1,0,0,s,0,c,0,0,0,0,1]
-      });
+      }, { resources: ledger.port('anime-contract'), register() {} });
       return frame;
     }
     assert.ok(Math.abs(frameAt(Math.PI - .0001, 0)[0] - frameAt(Math.PI + .0001, 0)[0]) < .1,

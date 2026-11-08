@@ -14,6 +14,10 @@ function extract(name) {
   return source.slice(start, end + 4);
 }
 const definitions = {};
+const budgetModules = { window: {} };
+for (const file of ['stage-resource-budget.js', 'stage-resource-policy.js']) {
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '..', 'plugin', 'ui', file), 'utf8'), budgetModules);
+}
 vm.runInNewContext(extract('buildField') + extract('buildPrism') + extract('buildBlank') + source.slice(source.indexOf('  var STAGES ='), source.indexOf('  var UNIFORMS =')) +
   source.slice(source.indexOf('  var UNIFORMS ='), source.indexOf('  // ---- 舞台 1')),
 definitions);
@@ -23,6 +27,7 @@ check(sphere.cam.theta === 0 && sphere.cam.phi === 0, 'reference view presents t
 assert.deepEqual(Array.from(sphere.counts), [6000, 13500, 22500]);
 
 function harness(level, field = 0) {
+  const ledger = budgetModules.window.StageResourceBudget.create(budgetModules.window.StageResourcePolicy);
   const events = [], images = [], uniforms = {};
   const state = { depth: false, write: false, blend: [], program: null, lost: false, uploadError: false };
   let programId = 0;
@@ -36,6 +41,7 @@ function harness(level, field = 0) {
     createTexture() { return {}; },
     createVertexArray() { return {}; },
     isContextLost() { return state.lost; },
+    getParameter() { return 8192; }, getError() { return gl.NO_ERROR; },
     texImage2D(...values) {
       if (state.uploadError) throw new Error('upload rejected');
       events.push({ kind: 'upload', image: values.at(-1) });
@@ -60,7 +66,8 @@ function harness(level, field = 0) {
     // 注意 extract() 返回的是**源码字符串**，不能直接当函数值塞进 env ——
     // 那会变成 'resolveCoverUrl is not a function'。这三个函数与 buildField
     // 一起在下面 runInNewContext 里求值，作用域自然连通。
-    global: { Stage: true }, Stage: { coverUrl: () => env.url },
+    global: { Stage: true, StageImageSource: true }, Stage: { coverUrl: () => env.url, resources: () => ledger, kick() {} },
+    AbortController, graphicsPort: null, graphicsGeneration: 1, graphicsAllocations: new Map(), graphicsFailure: '', rawDirty: false,
     Image: class { constructor() { images.push(this); this.naturalWidth = 1024; this.naturalHeight = 1024; } },
     uploadCommon() {}, setI: (locations, name, value) => { uniforms[name] = value; },
     setF: (locations, name, value) => { uniforms[name] = value; },
@@ -69,12 +76,19 @@ function harness(level, field = 0) {
     bw: 1440, bh: 960, time: 10, lastBeatAt: 9, audioBands: new Float32Array(64),
     pointerField: { x: 0, y: 0, active: 1, clickX: 0, clickY: 0, clickAt: 9 }
   };
+  env.StageImageSource = { decode() {
+    const image = new env.Image();
+    return { then(resolve) { image.onload = () => resolve({ image, release() {} }); } };
+  } };
   // buildField 内部还会调resolveCoverUrl（封面喂纹理那条路），
   // 那是 stage3d.js 里另一个模块级函数，必须跟 buildField 一起求值 ——
   // 少了它就是 ReferenceError，且报错点落在被测函数内部。
   vm.runInNewContext(
     extract('resolveCoverUrl') + '\n'
       + extract('applyCoverImg') + '\n'
+      + extract('graphicsResources') + '\n'
+      + extract('releaseGraphicsTicket') + '\n'
+      + extract('deleteGraphic') + '\n'
       + extract('buildField'),
     env
   );

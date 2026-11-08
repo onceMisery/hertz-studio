@@ -44,6 +44,14 @@ const SYNTAX_SKIP = new Set(['vendor']);
 // why 字段就是原来贴在 ci.yml 里的判断依据：它解释的是「这条失败意味着什么」，
 // 挪到脚本里才不会和 workflow 的 YAML 缩进互相拖累。
 const STEPS = [
+  { script: 'check-stanza-pixi-build.js', stage: 'guard',
+    why: 'Pixi 运行包须与固定版本源码和构建身份一致，部分初始化清理由原 renderer 完成。' },
+  { script: 'check-stage-resource-budget.js', stage: 'behavior',
+    why: '页面账本必须保持有限准入、旧新峰值、取消与租约隔离，串行预检不发放分配权限。' },
+  { script: 'check-stage-engine-m1-persistence.js', stage: 'behavior',
+    why: '预设 JSON 读取、复制、合并保存和快照借用必须由原 owner 准入，迟到响应须保留额度直到传输结束。' },
+  { script: 'check-stage-engine-m1-export.js', stage: 'behavior',
+    why: '录制源、临时表面与结果租约必须保持真实退出义务，迟到权限和编码结束不能提前清账。' },
   { script: 'check-native-obs-preview.js', stage: 'behavior',
     why: '原生 OBS 预览只接受当前文档回执，等待只读钥匙，浏览器保留原有延迟导航。' },
   { script: 'check-ui-preferences.js', stage: 'behavior',
@@ -211,7 +219,10 @@ const EXTRA = [
 // 活体检查：需要真实浏览器，默认不跑。qf-issues（Hertz 播放条验收）自行起隔离服务。
 // check-lib-row-actions 不在名字里带 browser，但它硬 require playwright，
 // 所以显式列进来——按文件名猜会不会漏。
-const LIVE_EXTRA = ['check-lib-row-actions.js', 'check-qf-issues.js', 'check-stage-engine-m0-browser.js'];
+const LIVE_EXTRA = ['check-lib-row-actions.js', 'check-qf-issues.js', 'check-stage-engine-m0-browser.js',
+  'check-stage-engine-m1-browser.js', 'check-stage-engine-m1-creative-browser.js', 'check-stage-engine-m1-export-browser.js',
+  'check-stage-engine-m1-fluid-browser.js', 'check-stage-engine-m1-space-browser.js', 'check-stage-engine-m1-stage3d-browser.js',
+  'check-stage-engine-m1-glyph-browser.js', 'check-stage-engine-m1-pixi-browser.js'];
 const LIVE_NOTE = '活体检查需要 Playwright（PLAYWRIGHT_MODULE 或 NODE_PATH）。多数检查还需要运行中的服务；'
   + 'Hertz 播放条等检查自行启动隔离服务，需要先构建 hertz-studio（可设 HERTZ_BIN）。';
 

@@ -93,12 +93,14 @@ export function createCoverSphere(ctx) {
     uniforms, vertexShader: vertex, fragmentShader: atmosphere, side: T.BackSide, transparent: true, depthWrite: false
   }))); globe.add(shell);
 
-  const count = 10000, positions = new Float32Array(count * 3);
+  const count = 10000, arrayBytes = count * 3 * 4;
+  const grainPlan = ctx.scope.bufferPlan(arrayBytes + 24, arrayBytes, 'Space authored cover sphere grain positions');
+  const positions = new Float32Array(count * 3); grainPlan.cpuReady(arrayBytes);
   for (let i = 0; i < count; i++) {
     const y = 1 - 2 * (i + .5) / count, r = Math.sqrt(1 - y * y), a = i * 2.39996323;
     positions.set([Math.cos(a) * r * 3.207, y * 3.207, Math.sin(a) * r * 3.207], i * 3);
   }
-  const grains = own(ctx, new T.BufferGeometry()); grains.setAttribute('position', new T.BufferAttribute(positions, 3));
+  const grains = own(ctx, new T.BufferGeometry()); grains.setAttribute('position', grainPlan.upload(new T.BufferAttribute(positions, 3)));
   const grainsMaterial = own(ctx, new T.PointsMaterial({ color: 0xe4f5f0, size: .012, transparent: true, opacity: .13, depthWrite: false }));
   globe.add(new T.Points(grains, grainsMaterial));
 
@@ -131,12 +133,15 @@ export function createCoverSphere(ctx) {
       const source = ctx.services.coverUrl, url = (typeof source === 'function' ? source() : source) || frame.coverUrl || '';
       if (url !== key) {
         key = url;
-        if (prev) { resources.cover.release(prev); prev = null; }
-        if (entry) prev = entry;
+        const lastGood = entry?.texture ? entry : prev;
+        if (prev !== lastGood) resources.cover.release(prev);
+        if (entry !== lastGood) resources.cover.release(entry);
+        prev = lastGood;
         entry = resources.cover.acquire(url, ctx.signal);
         fade = reduced || !prev ? 1 : 0;
       }
-      if (reduced) { fade = 1; if (prev) { resources.cover.release(prev); prev = null; } }
+      if (!url || reduced && entry?.texture) { fade = 1; if (prev) { resources.cover.release(prev); prev = null; } }
+      else if (prev && !entry?.texture) fade = 0;
       else if (prev && entry?.texture) fade = Math.min(1, fade + dt / .65);
       else if (!prev) fade = 1;
       if (prev && fade >= 1) { resources.cover.release(prev); prev = null; }
@@ -175,6 +180,6 @@ export function createCoverSphere(ctx) {
       shock.update(dt, reduced);
     },
     resize(w, h) { aspect = w / Math.max(1, h); }, params(next) { params = next; density(); }, quality(next) { profile = next; density(); },
-    dispose: cleanup, stats: () => ({ covers: entry?.texture ? 1 : 0, particles: grains.drawRange.count, drawCalls: 9, triangles: 15168 })
+    dispose: cleanup, stats: () => ({ covers: Number(!!entry?.texture) + Number(!!prev?.texture), particles: grains.drawRange.count, drawCalls: 9, triangles: 15168 })
   });
 }

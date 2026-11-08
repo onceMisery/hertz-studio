@@ -228,6 +228,7 @@ function makeFakeEngine() {
       return { ok: true, scene: state.scene };
     },
     capture() { return 'data:image/jpeg;base64,AAAA'; },
+    captureLease() { return { url: 'data:image/jpeg;base64,AAAA', release() {} }; },
     warmUp() {},
     dispose() { this.disposed = true; },
     isLost: () => false,
@@ -245,6 +246,24 @@ section('加载模块');
 // onset.js 必须最先加载：creative-stage.js 在模块作用域就要拿到它，
 // 否则后面每一次 attach 都会以"onset.js 未加载"降级，整套检查全废。
 load('onset.js');
+load('stage-resource-budget.js'); load('stage-resource-policy.js'); load('stage-json-source.js');
+const resourceLedger = sandbox.StageResourceBudget.create(sandbox.StageResourcePolicy);
+sandbox.Stage.resources = () => resourceLedger;
+let fixtureFrameId = 0, fixtureSpectrumRevision = 0, fixtureSpectrum = null, fixtureSpectrumAt = null;
+sandbox.Stage.frameState = () => {
+  if (spectrum !== fixtureSpectrum) { fixtureSpectrum = spectrum; fixtureSpectrumRevision++; fixtureSpectrumAt = fakeNow; }
+  return { version: 1, frameId: fixtureFrameId, sampledAtMs: fakeNow,
+    playing: sandbox.Stage.presentation ? sandbox.Stage.presentation().playing : document.body.classList.contains('is-playing'),
+    reduced: !!(sandbox.Stage.presentation && sandbox.Stage.presentation().reduced) || document.body.classList.contains('reduce-motion')
+      || documentEl.classList.contains('reduce-motion'), documentHidden: !!document.hidden || sandbox.Stage.isHidden(),
+    stageVisible: stageVisible, tier: sandbox.Stage.tier(), mediaPositionMs: songPosition,
+    positionDiscontinuityRevision: 0, spectrum: spectrum, spectrumRevision: fixtureSpectrumRevision,
+    spectrumAvailable: !!spectrum && fakeNow - fixtureSpectrumAt < 600, spectrumReceivedAtMs: fixtureSpectrumAt };
+};
+const registerGate = sandbox.Stage.gate;
+sandbox.Stage.gate = (name, fps, tick) => registerGate(name, fps, dt => {
+  fixtureFrameId++; tick(dt, sandbox.Stage.frameState());
+});
 ok(!!sandbox.Onset && typeof sandbox.Onset.create === 'function',
   'onset.js 定义了 window.Onset.create');
 ok(Array.isArray(sandbox.Onset.GROUPS) && sandbox.Onset.GROUPS.length === 4,
@@ -309,7 +328,9 @@ ok(gateRegistrations.filter((name) => name === 'creative').length === 1,
   '侧栏挂载复用初始化的帧门，不重复登记');
 // 挂上就要有一帧画面：暂停时帧门返回 0，而 stage.js 的主循环此刻可能已经停转，
 // 不补这一帧的话用户拨开开关看到的是一块空白舞台。
-ok(renderCalls.length === 1, `挂载时画布补了一帧（${renderCalls.length}）`);
+ok(renderCalls.length === 0, '挂载仅准备资源；画面由既有 Stage 帧门提交');
+gates.creative.tickFn(0);
+ok(renderCalls.length === 1, `首个有效门提交画面（${renderCalls.length}）`);
 const callsAtAttach = renderCalls.length;
 
 const stageEl = knownEls.stage;
@@ -589,8 +610,8 @@ ok(CS.importJSON('[1,2,3]').ok === false, '错误形状的 JSON 被拒绝');
   // 4) 实际演出只消费真实频谱，不能重新引入模拟预览链。
   ok(!/synthSpectrum|previewView|mountPreview/.test(csSrc),
     '模拟频谱与独立预览视图已退场');
-  ok(/var\s+sp\s*=\s*window\.Stage\s*\?\s*Stage\.spectrum\(\)/.test(csSrc),
-    '创意舞台从 Stage 读取真实频谱');
+  ok(/var\s+sp\s*=\s*frame\.spectrum/.test(csSrc) && /frame\.spectrumAvailable/.test(csSrc),
+    '创意舞台读取 Stage 同帧频谱和原始新鲜度');
 
   // 5) **双色令牌必须真的不同。** 这一条是"白色光晕"的真正根因，
   //    而且它伪装成渲染 bug —— 我先查了泛光、tone mapping、alpha 上限、
@@ -1062,6 +1083,7 @@ section('暂停手动相机：唯一帧门合并重绘后休眠');
   };
   const request = () => { if (typeof inst.requestCameraFrame === 'function') inst.requestCameraFrame(); };
   ok(typeof inst.requestCameraFrame === 'function', '导出外部相机姿态失效入口 requestCameraFrame');
+  scheduleFrames(12); // Complete the initial static submit through the production gate contract.
   const firstFrames = engine.calls.length;
   scheduleFrames(120);
   ok(gate.fpsFn() === 0 && engine.calls.length === firstFrames,
@@ -1103,6 +1125,7 @@ section('暂停手动相机：唯一帧门合并重绘后休眠');
   for (const scene of ['anime-sky', 'towers']) {
     sandbox.Workshop = { isEditingAdvanced: () => scene === 'towers' };
     inst.setPreset({ scene, director: false, cues: [], bindings: [] });
+    scheduleFrames(12); // The authored scene edit itself requires one static frame.
     const before = engine.calls.length, beforeKick = kicks;
     pose.yaw += 10; request(); scheduleFrames(120);
     ok(gate.fpsFn() === 0 && engine.calls.length === before && kicks === beforeKick,
@@ -1134,9 +1157,8 @@ section('大舞台生命周期与歌曲时间编排');
   sandbox.setTimeout = (fn, delay) => { timers.set(++timerId, { fn, delay }); return timerId; };
   sandbox.clearTimeout = (id) => timers.delete(id);
   const flushFrames = () => {
-    for (const [id, timer] of [...timers]) {
-      if (timer.delay === 16) { timers.delete(id); timer.fn(); }
-    }
+    const gate = gates.creative;
+    if (gate && gate.fpsFn() > 0) gate.tickFn(0);
   };
   knownEls.stage.children.length = 0;
   knownEls.stage.firstChild = null;
@@ -1181,8 +1203,8 @@ section('大舞台生命周期与歌曲时间编排');
   const beforeCue = frameAt(1000);
   ok(stageEngine.calls.length === beforeFrames + 1 && sidebarEngine.calls.length === sidebarFrames,
     '每 tick 只绘制实际大舞台，侧栏不空跑');
-  ok(beforeCue.t === 1000 && closeTo(beforeCue.post.bloom, 0.4),
-    '渲染时间来自歌曲位置，cue 开始前保留基础值');
+  ok(beforeCue.t === 0 && closeTo(beforeCue.post.bloom, 0.4),
+    '几何从实例相位0开始，cue按歌曲位置保留基础值');
   ok(closeTo(frameAt(2500).post.bloom, 0.9), '定时 cue 按歌曲毫秒位置线性插值');
   ok(closeTo(frameAt(3500).post.bloom, 0.9),
     '重叠 cue 按开始时间排序，从前一条在交接时的值继续');
@@ -1591,8 +1613,11 @@ section('三维歌词：图集去重契约');
   box.document = { createElement: () => fakeCanvas };
   box.window = box;
   vm.createContext(box);
+  vm.runInContext(src('stage-resource-budget.js'), box, { filename: 'stage-resource-budget.js' });
+  vm.runInContext(src('stage-resource-policy.js'), box, { filename: 'stage-resource-policy.js' });
   vm.runInContext(src('lyric3d.js'), box, { filename: 'lyric3d.js' });
   const L = box.window.Lyric3D;
+  const lease = L.acquire(box.StageResourceBudget.create(box.StageResourcePolicy).port('atlas-fixture'));
   ok(!!L && typeof L.frame === 'function' && typeof L.sig === 'function',
     'Lyric3D 导出 frame / sig');
 
@@ -1746,7 +1771,7 @@ section('性能收口：不可见画布门控（E1）');
     'targetFps 门控接 isStageVisible（不渲染不可见画布）');
   ok(/function maybeProbe\(\)[\s\S]{0,400}?isStageVisible/.test(csSrc),
     'maybeProbe 不在抽屉关闭时启动探测');
-  ok(/function tick\(dtMs\)[\s\S]{0,420}?isStageVisible[\s\S]{0,120}?return;/.test(csSrc),
+  ok(/function tick\(dtMs, frame\)[\s\S]{0,1200}?isStageVisible[\s\S]{0,120}?return;/.test(csSrc),
     'tick 内部有不可见即返回的第二道门');
 
   // app.js：点击「正在播放」打开播放控制弹窗（新契约，不再切换舞台抽屉）。

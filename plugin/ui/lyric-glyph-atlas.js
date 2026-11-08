@@ -10,8 +10,24 @@
   // 之前 BASELINE 固定取 0.78×RENDER_PX，导致 64px 中文的顶部 6px 落到内容框外：
   // getImageData 把字切出一条直边，距离场把它当成轮廓，画出来就是每个字顶上的白块。
   // 这类错误不会报异常，只会让"字看起来怪"——所以度量必须来自 measureText。
-  function measureMetrics(fontStack, weight) {
-    var probe = document.createElement('canvas').getContext('2d');
+  function requirePlan(options, amount, source) {
+    if (options && options.admissionRequired && (!options.resources || options.resources.contractVersion !== 1)) throw new Error('resource-port-required');
+    return options && options.resources ? options.resources.require(amount, source, options.generation || 0) : null;
+  }
+  function retire(ticket, clean) {
+    if (!ticket) return;
+    ticket.cancel();
+    if (clean) ticket.release({apiReleased:true, allocationEnded:true});
+    else ticket.settle({allocationEnded:true});
+  }
+  function measureMetrics(fontStack, weight, options) {
+    var ticket = requirePlan(options, {canvases:1, ownedCpuBytes:4}, 'Glyph metric probe 1x1 RGBA8 Canvas2D');
+    var canvas = null, probe = null;
+    try {
+    canvas = document.createElement('canvas'); canvas.width = canvas.height = 1;
+    probe = canvas.getContext('2d');
+    if (!probe) throw new Error('glyph metrics unavailable');
+    if (ticket) ticket.commit();
     var PROBE_PX = 100;
     probe.font = weight + ' ' + PROBE_PX + 'px ' + fontStack;
     // 取样只覆盖「歌词真正会出现的东西」：汉字、拉丁字母、数字、常用西文标点。
@@ -32,6 +48,11 @@
     if (!(desc > 0)) desc = PROBE_PX * 0.16;
     if (!(adv > 0)) adv = PROBE_PX;
     return { ascentPerPx: asc / PROBE_PX, descentPerPx: desc / PROBE_PX, advancePerPx: adv / PROBE_PX };
+    } finally {
+      var clean = true;
+      try { if (canvas) canvas.width = canvas.height = 0; } catch (_) { clean = false; }
+      canvas = probe = null; retire(ticket, clean);
+    }
   }
 
   var ATLAS_W = 2048, ATLAS_H = 1024;
@@ -78,20 +99,36 @@
     ));
   }
 
-  function create(fontStack, baseWeight, sharedGeometry) {
+  function create(fontStack, baseWeight, sharedGeometry, options) {
     // 基准字重必须可配置：Windows 的 Microsoft YaHei 没有 600 面，
     // 600 会被匹配成 700，导致粗细场只能变胖、无法变细。
     var rasterWeight = baseWeight || 600;
-    var met = measureMetrics(fontStack, rasterWeight);
+    var met = measureMetrics(fontStack, rasterWeight, options);
     var geom = sharedGeometry || geometryFor(met, maxRenderPx([met]));
     var renderPx = geom.renderPx;
     var BASELINE = geom.baseline;
 
-    var bytes = new Uint8Array(ATLAS_W * ATLAS_H);   // 全 0 = 远外部
-
-    var scratch = document.createElement('canvas');
+    var ticket = requirePlan(options, {canvases:1, ownedCpuBytes:ATLAS_W * ATLAS_H + CELL * CELL * 4 + SDF.workspaceBytes(CONTENT, CONTENT)},
+      'Glyph R8 CPU atlas, RGBA8 raster canvas and reusable exact SDF typed workspace');
+    var bytes = null, scratch = null, sctx = null, workspace = null, destroyed = false, cleanupFailed = false;
+    function destroy() {
+      if (destroyed) return {apiReleased:!cleanupFailed};
+      destroyed = true;
+      try { if (scratch) scratch.width = scratch.height = 0; } catch (_) { cleanupFailed = true; }
+      bytes = scratch = sctx = workspace = null; slots = []; index = Object.create(null); dirty = [];
+      if (api) api.bytes = null;
+      retire(ticket, !cleanupFailed); return {apiReleased:!cleanupFailed};
+    }
+    function assertLive() { if (destroyed) throw new Error('glyph atlas retired'); }
+    try {
+    bytes = new Uint8Array(ATLAS_W * ATLAS_H);   // 全 0 = 远外部
+    workspace = SDF.createWorkspace(CONTENT, CONTENT);
+    scratch = document.createElement('canvas');
     scratch.width = scratch.height = CELL;
-    var sctx = scratch.getContext('2d', { willReadFrequently: true });
+    sctx = scratch.getContext('2d', { willReadFrequently: true });
+    if (!sctx) throw new Error('glyph raster canvas unavailable');
+    if (ticket) ticket.commit();
+    } catch (error) { destroy(); throw error; }
 
     var slots = new Array(CAP);
     var index = Object.create(null);
@@ -125,15 +162,20 @@
     // 栅格化单个字素 → { sdf, box }，空白字素返回 null。
     // 不设 shadowBlur：lyric3d 靠"画两遍"做辉光，这里辉光在片元里算，字形必须干净。
     function rasterize(ch) {
+      var rasterTicket = requirePlan(options, {ownedCpuBytes:CONTENT * CONTENT * 4}, 'Glyph temporary RGBA8 raster ImageData');
+      var img = null;
+      try {
       sctx.clearRect(0, 0, CELL, CELL);
       sctx.font = fontOf(renderPx);
       sctx.textBaseline = 'alphabetic';
       sctx.fillStyle = '#fff';
       sctx.fillText(ch, PAD, PAD + BASELINE);
-      var img = sctx.getImageData(PAD, PAD, CONTENT, CONTENT);
-      var sdf = SDF.rasterToSdf(img.data, CONTENT, CONTENT, RANGE);
+      img = sctx.getImageData(PAD, PAD, CONTENT, CONTENT);
+      if (rasterTicket) rasterTicket.commit();
+      var sdf = SDF.rasterToSdf(img.data, CONTENT, CONTENT, RANGE, {workspace:workspace});
       if (!sdf) return null;
       return { sdf: sdf, box: inkBox(img) };
+      } finally { img = null; retire(rasterTicket, true); }
     }
 
     // 写进图集内容区；边距保持 0（= 距轮廓 ≥8px 的外部）。
@@ -151,6 +193,7 @@
     // advance 与字体字重、屏幕字号相关，归排版层（stanza-glyph.js）所有。
     // 图集 key 只含字形 + 栅格化字号：屏幕字号不影响 SDF，放进 key 会让拖字号滑杆时全表失效。
     function acquire(ch) {
+      assertLive();
       var key = ch + '\u0001' + renderPx;
       var slot = index[key];
       if (slot != null) { slots[slot].used = ++stamp; return slots[slot]; }
@@ -176,7 +219,26 @@
       return slots[slot];
     }
 
-    return {
+    function copyCell(slot, out, channels, channel) {
+      assertLive();
+      if (!Number.isSafeInteger(slot) || slot < 0 || slot >= CAP) throw new Error('glyph cell slot');
+      var cx = (slot % COLS) * CELL, cy = Math.floor(slot / COLS) * CELL;
+      for (var y = 0; y < CELL; y += 1) {
+        for (var x = 0; x < CELL; x += 1) out[(y * CELL + x) * channels + channel] = bytes[(cy + y) * ATLAS_W + cx + x];
+      }
+    }
+    function cellBytes(slot) {
+      if (options && options.resources) throw new Error('glyph-cell-lease-required');
+      var out = new Uint8Array(CELL * CELL); copyCell(slot, out, 1, 0); return out;
+    }
+    function withCellBytes(slot, fn) {
+      assertLive();
+      var uploadTicket = requirePlan(options, {ownedCpuBytes:CELL * CELL}, 'Glyph temporary compact R8 cell upload');
+      var out = null;
+      try { out = new Uint8Array(CELL * CELL); if (uploadTicket) uploadTicket.commit(); copyCell(slot, out, 1, 0); return fn(out); }
+      finally { out = null; retire(uploadTicket, true); }
+    }
+    var api = {
       bytes: bytes, W: ATLAS_W, H: ATLAS_H,
       CELL: CELL, PAD: PAD, CONTENT: CONTENT, BASELINE: BASELINE,
       RENDER_PX: renderPx, RANGE: RANGE, CAP: CAP, COLS: COLS, ROWS: ROWS,
@@ -185,39 +247,36 @@
         advance: met.advancePerPx * renderPx, weight: rasterWeight },
       acquire: acquire,
       takeDirty: function () { var d = dirty; dirty = []; return d; },
-      cellBytes: function (slot) {
-        // 紧凑缓冲（CELL² 字节），供 texSubImage2D 逐 cell 上传。
-        var out = new Uint8Array(CELL * CELL);
-        var cx = (slot % COLS) * CELL, cy = Math.floor(slot / COLS) * CELL;
-        for (var y = 0; y < CELL; y += 1) {
-          out.set(bytes.subarray((cy + y) * ATLAS_W + cx, (cy + y) * ATLAS_W + cx + CELL), y * CELL);
-        }
-        return out;
-      },
+      cellBytes: cellBytes, withCellBytes: withCellBytes, copyCell: copyCell, destroy: destroy,
+      resourceState: function () { return {destroyed:destroyed, cleanupFailed:cleanupFailed, ticket:ticket && ticket.state()}; },
       cellOrigin: function (slot) {
         return { x: (slot % COLS) * CELL, y: Math.floor(slot / COLS) * CELL };
       },
       reset: function () {
+        assertLive();
         used = 0; stamp = 0; index = Object.create(null);
-        slots.length = CAP; dirty.length = 0;
+        slots.fill(undefined); dirty.length = 0;
         bytes.fill(0);
       }
     };
+    return api;
   }
 
   // 双图集：R=400、G=700。两张脸必须共用字号与基线；
   // 分配槽位也必须一致，否则片元里混的是两个不同位置的字。
-  function createDual(fontStack) {
-    var m400 = measureMetrics(fontStack, 400);
-    var m700 = measureMetrics(fontStack, 700);
+  function createDual(fontStack, options) {
+    var m400 = measureMetrics(fontStack, 400, options);
+    var m700 = measureMetrics(fontStack, 700, options);
     var geom = geometryFor(
       { ascentPerPx: Math.max(m400.ascentPerPx, m700.ascentPerPx),
         descentPerPx: Math.max(m400.descentPerPx, m700.descentPerPx) },
       maxRenderPx([m400, m700])
     );
-    var lo = create(fontStack, 400, geom);
-    var hi = create(fontStack, 700, geom);
+    var lo = create(fontStack, 400, geom, options), hi;
+    try { hi = create(fontStack, 700, geom, options); } catch (error) { lo.destroy(); throw error; }
+    var destroyed = false;
     function acquire(ch) {
+      if (destroyed) throw new Error('glyph atlas retired');
       var a = lo.acquire(ch);
       var b = hi.acquire(ch);
       if (a.u0 !== b.u0 || a.v0 !== b.v0) throw new Error('dual atlas slot mismatch: ' + ch);
@@ -242,16 +301,22 @@
       takeDirty: function () { var d = lo.takeDirty(); hi.takeDirty(); return d; },
       cellOrigin: function (slot) { return lo.cellOrigin(slot); },
       cellBytes: function (slot) {
-        var a = lo.cellBytes(slot);
-        var b = hi.cellBytes(slot);
-        var out = new Uint8Array(a.length * 2);
-        for (var i = 0; i < a.length; i += 1) {
-          out[i * 2] = a[i];
-          out[i * 2 + 1] = b[i];
-        }
-        return out;
+        if (options && options.resources) throw new Error('glyph-cell-lease-required');
+        var out = new Uint8Array(CELL * CELL * 2);
+        lo.copyCell(slot, out, 2, 0); hi.copyCell(slot, out, 2, 1); return out;
       },
-      reset: function () { lo.reset(); hi.reset(); }
+      withCellBytes: function (slot, fn) {
+        if (destroyed) throw new Error('glyph atlas retired');
+        var uploadTicket = requirePlan(options, {ownedCpuBytes:CELL * CELL * 2}, 'Glyph temporary compact RG8 cell upload');
+        var out = null;
+        try {
+          out = new Uint8Array(CELL * CELL * 2); if (uploadTicket) uploadTicket.commit();
+          lo.copyCell(slot, out, 2, 0); hi.copyCell(slot, out, 2, 1); return fn(out);
+        } finally { out = null; retire(uploadTicket, true); }
+      },
+      reset: function () { lo.reset(); hi.reset(); },
+      destroy: function () { destroyed = true; var a = lo.destroy(), b = hi.destroy(); return {apiReleased:a.apiReleased && b.apiReleased}; },
+      resourceState: function () { return {destroyed:destroyed, lo:lo.resourceState(), hi:hi.resourceState()}; }
     };
   }
 

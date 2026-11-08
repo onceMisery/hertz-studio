@@ -19,13 +19,17 @@ function bootNative() {
   let timerId = 0, throwIpc = false;
   const window = { addEventListener: (name, handler) => events.set(name, handler), dispatchEvent: event => events.get(event.type)?.(event),
     ipc: { postMessage: raw => { if (throwIpc) throw new Error('IPC unavailable'); messages.push(JSON.parse(raw)); } } };
-  const document = { readyState: 'complete', documentElement: { dataset: {} } };
+  const transitions = [];
+  const document = { readyState: 'complete', hidden: false, documentElement: { dataset: {} },
+    dispatchEvent: event => transitions.push({ type: event.type, browserHidden: document.hidden }) };
   vm.runInNewContext(native, { window, document, crypto: crypto.webcrypto, URL, Blob, Map, Uint8Array,
+    Event: class { constructor(type) { this.type = type; } },
+    CustomEvent: class { constructor(type, options) { this.type = type; this.detail = options.detail; } },
     getComputedStyle: () => ({ getPropertyValue: () => '#181817' }),
     MutationObserver: class { observe() {} },
     setTimeout: callback => { const id = ++timerId; timers.set(id, callback); return id; },
     clearTimeout: id => timers.delete(id) });
-  return { host: window.__hertzWindowHost, messages,
+  return { host: window.__hertzWindowHost, messages, transitions, document,
     confirmed: value => events.get('hertz-native-host-confirmed')({ detail: value }),
     receipt: value => events.get('hertz-native-obs-preview-result')({ detail: value }),
     expire: () => { const callbacks = [...timers.values()]; timers.clear(); callbacks.forEach(callback => callback()); },
@@ -41,6 +45,21 @@ function bootAction(host, pendingKey) {
 }
 async function check(name, run) { await run(); count++; console.log('PASS ' + name); }
 (async () => {
+  await check('native presentation state is versioned, idempotent and independent of browser hidden', async () => {
+    const t = bootNative();
+    assert.equal(t.host.presentationVersion, 1); assert.equal(t.host.presentationHidden, true);
+    t.host.presentationChanged('true'); t.host.presentationChanged(false);
+    assert.equal(t.transitions.length, 0, 'invalid/repeated state produces no transition');
+    t.host.presentationChanged(true);
+    assert.equal(t.host.presentationHidden, false); assert.equal(t.document.hidden, false);
+    t.host.presentationChanged(true);
+    assert.equal(t.transitions.length, 1, 'repeat restoration produces no notification');
+    t.host.presentationChanged(false);
+    assert.equal(t.host.presentationHidden, true); assert.equal(t.document.hidden, false);
+    assert.equal(t.transitions.length, 2);
+    assert.ok(t.transitions.every(event => event.type === 'visibilitychange' && event.browserHidden === false));
+    assert.throws(() => { t.host.presentationHidden = false; }, TypeError, 'host fact is exposed through a read-only getter');
+  });
   await check('lifecycle readiness is replayed after native confirms this live document', async () => {
     const t = bootNative(); t.host.lifecycleReady(); const before = t.messages.length;
     t.confirmed({ documentId: crypto.randomUUID() }); assert.equal(t.messages.length, before);

@@ -208,6 +208,27 @@
       owner = text(owner, 'owner'); lifetimeId = text(lifetimeId || id(owner), 'lifetime-id');
       return Object.freeze({ contractVersion: 1, policyVersion: policyVersion, owner: owner, lifetimeId: lifetimeId,
         nextId: function () { return id(owner); },
+        preflight: function (resources, retiring) {
+          // Projection only: the owner must finish cleanup and reserve again.
+          // No identity, counter, release notification or allocation authority changes here.
+          function denied(reason, dimensions) { return { ok: false, reason: reason, dimensions: dimensions || [], policyVersion: policyVersion }; }
+          if (closed) return denied('page-resources-closed');
+          var amount, projected = held(), seen = new Set();
+          try { amount = vector(resources); } catch (error) { return denied(error.message); }
+          if (!Array.isArray(retiring)) return denied('invalid-retirement-plan');
+          for (var i = 0; i < retiring.length; i++) {
+            var resourceId = retiring[i], entry = entries.get(resourceId);
+            if (seen.has(resourceId)) return denied('invalid-retirement-plan');
+            seen.add(resourceId);
+            if (!entry || entry.owner !== owner || entry.lifetimeId !== lifetimeId) return denied('resource-identity-conflict');
+            if (entry.leases.size) return denied('resource-in-use');
+            KEYS.forEach(function (key) { projected[key] -= entry.pending[key] + entry.live[key]; });
+          }
+          try { projected = add(projected, amount); } catch (error) { return denied(error.message); }
+          var exceeded = KEYS.filter(function (key) { return projected[key] > caps[key]; });
+          return exceeded.length ? denied('aggregate-budget', exceeded)
+            : { ok: true, projectedHeld: projected, policyVersion: policyVersion };
+        },
         reserve: function (plan) {
           plan = plan || {};
           return reserve(Object.assign({}, plan, { owner: owner, lifetimeId: lifetimeId,

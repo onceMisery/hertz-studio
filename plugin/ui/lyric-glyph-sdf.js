@@ -30,9 +30,9 @@
   //   out[i] = min_j ( f[j] + (i - j)^2 )
   // f[j] 为种子代价（种子 0，非种子 FAR）。O(n)，与采样无关。
   // 这是整个 SDF 的数学核心，不要用两重循环替代。
-  function edt1d(f, n, out) {
-    var v = new Int32Array(n);
-    var z = new Float64Array(n + 1);
+  function edt1d(f, n, out, workspace) {
+    var v = workspace ? workspace.v : new Int32Array(n);
+    var z = workspace ? workspace.z : new Float64Array(n + 1);
     var k = 0, q, s, dq;
     v[0] = 0; z[0] = -FAR; z[1] = FAR;
     for (q = 1; q < n; q += 1) {
@@ -53,21 +53,21 @@
 
   // 二维平方距离：返回每个像素到最近种子的最小平方欧氏距离。
   // 两遍一维（先行后列），是精确解，不是近似。
-  function edt2d(seed, w, h) {
-    var grid = new Float64Array(w * h);
-    var line = new Float64Array(Math.max(w, h));
-    var res = new Float64Array(Math.max(w, h));
+  function edt2d(seed, w, h, workspace, target) {
+    var grid = target || new Float64Array(w * h);
+    var line = workspace ? workspace.line : new Float64Array(Math.max(w, h));
+    var res = workspace ? workspace.res : new Float64Array(Math.max(w, h));
     var x, y, i;
     for (i = 0; i < w * h; i += 1) grid[i] = seed[i] ? 0 : FAR;
     for (y = 0; y < h; y += 1) {
       var row = y * w;
       for (x = 0; x < w; x += 1) line[x] = grid[row + x];
-      edt1d(line, w, res);
+      edt1d(line, w, res, workspace);
       for (x = 0; x < w; x += 1) grid[row + x] = res[x];
     }
     for (x = 0; x < w; x += 1) {
       for (y = 0; y < h; y += 1) line[y] = grid[y * w + x];
-      edt1d(line, h, res);
+      edt1d(line, h, res, workspace);
       for (y = 0; y < h; y += 1) grid[y * w + x] = res[y];
     }
     return grid;
@@ -88,8 +88,11 @@
     var t = o.threshold == null ? 127.5 : o.threshold;
     var subpixel = o.subpixel !== false;
 
-    var inside = new Uint8Array(w * h);
-    var outside = new Uint8Array(w * h);
+    var workspace = o.workspace;
+    if (workspace && (workspace.width !== w || workspace.height !== h)) throw new Error('glyph-sdf-workspace-size');
+    var inside = workspace ? workspace.inside : new Uint8Array(w * h);
+    var outside = workspace ? workspace.outside : new Uint8Array(w * h);
+    if (workspace) { inside.fill(0); outside.fill(0); }
     var i, a;
     var hasIn = false, hasOut = false;
     for (i = 0; i < w * h; i += 1) {
@@ -99,9 +102,9 @@
     }
     if (!hasIn || !hasOut) return null;
 
-    var dIn = edt2d(inside, w, h);
-    var dOut = edt2d(outside, w, h);
-    var phi = new Float32Array(w * h);
+    var dIn = edt2d(inside, w, h, workspace, workspace && workspace.dIn);
+    var dOut = edt2d(outside, w, h, workspace, workspace && workspace.dOut);
+    var phi = workspace ? workspace.phi : new Float32Array(w * h);
     for (i = 0; i < w * h; i += 1) {
       if (inside[i]) {
         // 到最近外部中心再退半像素 = 到轮廓的距离
@@ -120,9 +123,9 @@
 
   // phi（Float32）→ Uint8 编码。128 表示轮廓附近，0 表示远外部，255 表示远内部。
   // 舍入到整数：着色器里按 (v/255 - 0.5) * 2 * range 解码。
-  function encodeSdf(phi, range) {
+  function encodeSdf(phi, range, target) {
     var r = range || 8;
-    var out = new Uint8Array(phi.length);
+    var out = target || new Uint8Array(phi.length);
     for (var i = 0; i < phi.length; i += 1) {
       var v = phi[i] / r;
       if (v < -1) v = -1; else if (v > 1) v = 1;
@@ -140,7 +143,23 @@
   function rasterToSdf(alpha, w, h, range, opts) {
     var phi = alphaToSignedDistance(alpha, w, h, opts);
     if (!phi) return null;
-    return encodeSdf(phi, range);
+    return encodeSdf(phi, range, opts && opts.workspace && opts.workspace.encoded);
+  }
+
+  // The atlas owner admits this fixed workspace before construction. Results
+  // borrow its phi/encoded arrays until the next call; default pure calls keep
+  // their original independently owned results.
+  function workspaceBytes(w, h) {
+    if (!Number.isSafeInteger(w) || !Number.isSafeInteger(h) || w < 1 || h < 1
+        || !Number.isSafeInteger(23 * w * h + 28 * Math.max(w, h) + 8)) throw new Error('estimate-unavailable');
+    return 23 * w * h + 28 * Math.max(w, h) + 8;
+  }
+  function createWorkspace(w, h) {
+    workspaceBytes(w, h);
+    var n = w * h, side = Math.max(w, h);
+    return { width: w, height: h, inside: new Uint8Array(n), outside: new Uint8Array(n),
+      dIn: new Float64Array(n), dOut: new Float64Array(n), phi: new Float32Array(n), encoded: new Uint8Array(n),
+      line: new Float64Array(side), res: new Float64Array(side), v: new Int32Array(side), z: new Float64Array(side + 1) };
   }
 
   return {
@@ -150,6 +169,7 @@
     alphaToSignedDistance: alphaToSignedDistance,
     encodeSdf: encodeSdf,
     decodeSdf: decodeSdf,
-    rasterToSdf: rasterToSdf
+    rasterToSdf: rasterToSdf,
+    workspaceBytes: workspaceBytes, createWorkspace: createWorkspace
   };
 });

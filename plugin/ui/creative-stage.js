@@ -26,6 +26,12 @@
 (function () {
   'use strict';
 
+  // The Stage facade includes native parent-window suspension. Standalone consumers keep browser visibility.
+  function documentHidden() {
+    var stage = window.Stage;
+    return stage && typeof stage.isDocumentHidden === "function" ? stage.isDocumentHidden() : !!document.hidden;
+  }
+
   // 帧门预算。三维 + 后处理比点精灵贵得多；原则是"降 DPR 保帧率"——
   // 快速运动的场景（隧道、副歌的塔林）在 20fps 下是肉眼可见的卡顿，
   // 而 0.55 DPR 的模糊在泛光链路里几乎看不出来。糊一点换流畅，值。
@@ -118,6 +124,16 @@
   var wanted = false;        // 用户是否要求启用三维舞台
   var stageView = null;      // 大舞台正式渲染目标，消费同一预置与真实频谱
   var stageObserver = null;
+  var sidebarObserver = null, resources = null, detectorTicket = null;
+  var pendingSidebar = false, pendingStageEl = null, mountObserver = null;
+  function hasLayout(el) {
+    if (!el || documentHidden()) return false;
+    var rect = el.getBoundingClientRect(); return rect.width > 0 && rect.height > 0;
+  }
+  function completePending() {
+    if (pendingStageEl && hasLayout(pendingStageEl)) { var el = pendingStageEl; pendingStageEl = null; attachStage(el); }
+    if (pendingSidebar && wanted && hasLayout($('stage')) && Stage.isStageVisible()) { pendingSidebar = false; attach(true); }
+  }
   var degradedBecause = null;
   var degradedByProbe = false;   // 这次降级是"量出来太贵"，不是"起不来"
 
@@ -141,19 +157,38 @@
   // band / rise / agg / feat 都是 onset.js 内部数组与字段的**别名**，不是副本：
   // 频谱纹理每帧要读 64 段，拷一次纯属浪费。检测器同时出逐段（bins / binRise）
   // 和分带（agg）两种粒度，所以两边共用一份不需要谁迁就谁的段数。
-  var onset = HAS_ONSET ? Onset.create({ groups: GROUPS, binCount: 64 }) : null;
-  var band = onset ? onset.bins : new Float32Array(64);
-  var rise = onset ? onset.binRise : new Float32Array(64);
-  var agg = onset ? onset.agg : new Float64Array(4);
-  var feat = onset;
-  var silent = new Float32Array(64);   // 断供时的静默帧
-
-  if (onset) onset.onBeat(onBeat);     // onBeat 是函数声明，已提升，这里可以直接引用
+  var onset = null, band = [], rise = [], agg = [0, 0, 0, 0], feat = { pulse: 0, energy: 0, beats: 0 };
+  var silent = null;
+  function prepareDetector() {
+    if (onset || !HAS_ONSET) return;
+    resources = window.Stage && Stage.resources && Stage.resources();
+    if (!resources) { degradedBecause = '创意舞台暂不可用'; return; }
+    var port = resources.port('creative-audio');
+    try {
+      detectorTicket = port.require({ ownedCpuBytes: (4 * 64 + 5 * GROUPS.length + 30) * 8 + 64 * 4 },
+        'original CreativeStage Onset arrays, explicit history30 and silent Float32 input', 0);
+      onset = Onset.create({ groups: GROUPS, binCount: 64, history: 30 }); silent = new Float32Array(64);
+      detectorTicket.commit(); band = onset.bins; rise = onset.binRise; agg = onset.agg; feat = onset;
+      onset.onBeat(onBeat);
+    } catch (error) {
+      onset = silent = null; band = rise = []; agg = [0, 0, 0, 0];
+      if (detectorTicket) detectorTicket.release({ apiReleased: true, allocationEnded: true });
+      detectorTicket = null; degradedBecause = '创意舞台暂不可用：' + error.message;
+    }
+  }
 
   var cam = { yaw: 0, pitch: 0, dist: 15, shakeYaw: 0, shakePitch: 0 };
   var driftPhase = 0;
   var lastSpectrum = null, lastSpectrumAt = 0;
   var lastT = 0;
+  var sceneTimeMs = 0, logicalSceneId = null, logicalGeneration = 0, advancing = false;
+  var lastFrameId = -1, spectrumWatermark = 0, primed = false, lastInputRevision = -1;
+  var frameUnsubscribe = null, currentMediaPosition = null, lastDiscontinuity = null, dirty = true;
+  function mediaPosition() { return currentMediaPosition === null ? window.Stage && Stage.position ? Stage.position() : 0 : currentMediaPosition; }
+  function freeze(frame) {
+    advancing = false; primed = false;
+    if (frame) spectrumWatermark = frame.spectrumRevision;
+  }
 
   var energyHist = [];       // 每 250ms 一个样本，用来判段落
   var lastHistAt = 0;
@@ -537,7 +572,7 @@
     keys.forEach(function (k) { from[k] = readPath(runtime, k); to[k] = set[k]; });
     animations.push({
       keys: keys, from: from, to: to,
-      start: songClock && window.Stage && Stage.position ? Stage.position() : now(),
+      start: songClock ? mediaPosition() : sceneTimeMs,
       songClock: !!songClock,
       len: Math.max(16, lenOverride || cue.len || 600),
       ease: cue.ease || 'out'
@@ -550,7 +585,7 @@
   function stepAnimations(t, fixed) {
     for (var i = animations.length - 1; i >= 0; i -= 1) {
       var a = animations[i];
-      var clock = a.songClock && window.Stage && Stage.position ? Stage.position() : t;
+      var clock = a.songClock ? mediaPosition() : t;
       var k = clamp((clock - a.start) / a.len, 0, 1);
       var e = ease(a.ease, k);
       for (var j = 0; j < a.keys.length; j += 1) {
@@ -689,7 +724,7 @@
   function stepTimeline() {
     var preset = displayedPreset();
     if (preset.project && (!window.CreativeProject || !CreativeProject.timelineAllowed(preset.project))) return;
-    var position = window.Stage && Stage.position ? Number(Stage.position()) : 0;
+    var position = Number(mediaPosition());
     if (!Number.isFinite(position)) return;
     if (!timelineCues) timelineCues = preset.cues.filter(function (c) {
       return Number.isFinite(c.at) && c.at >= 0;
@@ -871,7 +906,7 @@
       from: null,
       to: { 'look.bloom': clampPath('look.bloom', readPath(runtime, 'look.bloom') * 2.1 + 0.5),
         'look.chroma': clampPath('look.chroma', 1.4 + py * 0.6) },
-      start: now(), len: 160, ease: 'out', flash: true
+      start: sceneTimeMs, len: 160, ease: 'out', flash: true
     });
   }
 
@@ -887,7 +922,7 @@
     cam.shakeYaw = 0;
     cam.shakePitch = 0;
     animations.push({ keys: Object.keys(target), from: null, to: target,
-      start: now(), len: 550, ease: 'inout' });
+      start: sceneTimeMs, len: 550, ease: 'inout' });
     saveLocalSoon();
     emit('preset', preset);
   }
@@ -897,14 +932,9 @@
   // 暂停 + 帧门停机时，滑块的改动不会等到"下一帧"——没有下一帧。
   // 用 16ms 的短延时把一串拖动事件合并成至多约 60 次/秒的补帧，
   // 既实时，又保证松手后最后一次取值一定被画出来。
-  var kickQueued = false;
   function kickStaticFrame() {
-    if (targetFps() > 0 || kickQueued) return;
-    kickQueued = true;
-    setTimeout(function () {
-      kickQueued = false;
-      try { tick(16.7); } catch (e) { /* 页面正在拆卸等瞬态：忽略这一补帧 */ }
-    }, 16);
+    dirty = true;
+    if (window.Stage && Stage.kick) Stage.kick();
   }
 
   function setParam(path, v) {
@@ -1038,7 +1068,7 @@
     if (m.sceneSwitched) animations.length = 0;   // 旧场景的 cue 动画不跨场景续跑
     preset = m.preset;                            // 物化时已 normalize
     runtime = {};
-    resolve(now());
+    resolve(sceneTimeMs);
     applyHand();
     saveLocalSoon();
     emit('preset', preset);
@@ -1069,18 +1099,16 @@
   }
 
   function targetFps() {
-    if (!attached || (!wanted && !stageView) || !views.length || document.hidden) return 0;
+    if (!attached || (!wanted && !stageView) || !views.length || documentHidden()) return 0;
     if (!stageView && window.Stage && Stage.isHidden()) return 0;
     if (!stageView && window.Stage && typeof Stage.isStageVisible === 'function' && !Stage.isStageVisible()) return 0;
+    var target = views[stageView ? views.indexOf(stageView) : 0];
+    if (!target || !target.visible || !target.eng) { advancing = false; return 0; }
+    var frame = Stage.frameState();
+    if (!frame.playing || frame.reduced) return dirty || cameraFramePending ? 12 : 0;
     // 探测期间强制满帧：不画东西的窗口量不到代价，而"暂停且无动画"时帧门本来是 0，
     // 拿它当基准会得出一个自信的错误结论。探测一结束这条就退场，预算恢复原样。
     if (probe.pending || probe.running) return TIERS[tierIndex()].fps;
-    var playing = document.body.classList.contains('is-playing');
-    var busy = stageView ? animations.some(function (a) { return !a.songClock; })
-      : feat.pulse >= 0.01 || animations.length > 0;
-    if (!playing && !busy && !cameraFramePending) return 0;
-    if (!playing && !cameraFramePending) return 6;   // 暂停只剩余韵：6fps 是 60/120 的公因数（原来写 8，实际跑 7.5）
-    if (reducedMotion()) return Math.min(15, TIERS[tierIndex()].fps);
     return TIERS[tierIndex()].fps;
   }
 
@@ -1091,16 +1119,13 @@
       // 切挂载点时立刻给新视图补一帧：暂停状态下帧门是 0，不补这一帧的话
       // 全屏页会是一块空白，直到用户按下播放才突然出现。
       activeIdx = want;
+      advancing = false; dirty = true;
       var next = views[activeIdx];
       if (next) {
         measure(next);
         // 补的这一帧是给用户看的，静默窗口要为它让路：全屏页不能为了测得准
         // 而先空 500ms。代价是一帧重活混进了基线窗口，约 4%，方向是把损失估小
         // 一点 —— 所以 PROBE_KEEP 的余量里已经含了它。
-        var saved = probe.phase;
-        probe.phase = 'draw';
-        renderOne(next, 16);
-        probe.phase = saved;
       }
     }
     return views[activeIdx];
@@ -1110,8 +1135,10 @@
     // force 只有一处用：探测往下让档时，即使元素尺寸没变也必须重设后备缓冲，
     // 否则 DPR 折扣只写进了变量，画面还是上一档的分辨率。
     if (!v || !v.el) return false;
+    if (documentHidden() || v !== stageView && window.Stage && !Stage.isStageVisible()) return false;
     var r = v.el.getBoundingClientRect();
-    if (!r.width || !r.height) return false;
+    v.visible = r.width > 0 && r.height > 0;
+    if (!v.visible) { advancing = false; return false; }
     var quality = tierIndex();
     // 工坊开着的时候这块画布是用户正在调参数的预览：低档 0.55/0.85 的 DPR
     // 在这里读作"糊成一团"。预览场景帧率压力小，抬到 0.9 起步，聆听时不变。
@@ -1121,33 +1148,58 @@
       * Math.max(TIERS[quality].dpr, dprFloor) * DPR_STEPS[dprStep];
     if (v.w === Math.round(r.width) && v.h === Math.round(r.height)
         && v.dpr === d && v.quality === quality && !force) return true;
+    if (v.recordingUses) {
+      if (!v.recordingResizePending && window.VideoExport) VideoExport.stop('舞台尺寸或画质已改变，停止并保留此前片段。');
+      v.recordingResizePending = true;
+      return true;
+    }
     v.w = Math.round(r.width);
     v.h = Math.round(r.height);
     v.dpr = d;
     v.quality = quality;
-    if (v.eng) v.eng.resize(v.w, v.h, d);
+    if (v.eng) {
+      try { v.eng.resize(v.w, v.h, d); }
+      catch (error) {
+        v.failure = { requestId: 'creative:' + presetRevision, reason: error.resourceFailure ? error.resourceFailure.reason : 'prepare-failed' };
+        // A refused plan did not touch the old renderer; retain its actual dimensions.
+        if (!error.resourceFailure) { v.eng.dispose(); v.eng = null; v.submitted = false; }
+        var retained = v.eng ? v.eng.size() : { w: 0, h: 0, dpr: 0 };
+        v.w = retained.w; v.h = retained.h; v.dpr = retained.dpr;
+        degradedBecause = '当前画质暂不可用，请重试'; reportView(v); return false;
+      }
+    }
+    dirty = true;
     return true;
   }
 
-  function tick(dtMs) {
+  function tick(dtMs, frame) {
+    if (!frame || frame.version !== 1 || lastFrameId === frame.frameId) return;
+    lastFrameId = frame.frameId;
+    if (frame.documentHidden || !frame.playing || frame.reduced) freeze(frame);
     // 顺序要紧：先推进探测的状态，本帧才拿得到正确的静默判定；
     // 探测还没开始时，这一步顺手把它起来。
     maybeProbe();
     stepProbe(dtMs);
     var v = pickView();
     if (!v || !v.eng) return;
+    if (frame.documentHidden || !v.visible) { freeze(frame); return; }
     // 纵深第二道：正常路径里帧门 fpsFn 在不可见时已报 0、stage.js 不会把
     // tick 调进来；但补帧等旁路仍可能直接触达这里，挡住，不往不可见画布渲染。
     // 大舞台有自己的显隐生命周期，不受主页侧栏可见性限制。
     if (v !== stageView && window.Stage
         && typeof Stage.isStageVisible === 'function' && !Stage.isStageVisible()) return;
     if (!v.w || !v.h) { if (!measure(v)) return; }
-    renderOne(v, dtMs);
+    var moving = frame.playing && !frame.reduced;
+    var delta = moving && advancing && Number.isFinite(dtMs) ? Math.min(100, Math.max(0, dtMs)) : 0;
+    advancing = moving; sceneTimeMs += delta;
+    currentMediaPosition = frame.mediaPositionMs;
+    try { renderOne(v, delta, frame); }
+    finally { currentMediaPosition = null; }
   }
 
   // 一帧只在活动视图的那个引擎上跑：另一个停着不画，省下来的 GPU 时间正好
   // 留给后处理链；切回去时由 pickView 触发一次即时重绘。
-  function renderOne(v, dtMs) {
+  function renderOne(v, dtMs, frame) {
     var preset = displayedPreset();
     cameraFramePending = false;
     var definition = sceneDefinition(preset.scene);
@@ -1155,27 +1207,28 @@
     var fixed = fixedComposition();
     if (v.el.dataset.sceneFamily !== family) v.el.dataset.sceneFamily = family;
     var t = now();
-    var playing = document.body.classList.contains('is-playing');
-    var position = window.Stage && Stage.position ? Number(Stage.position()) || 0 : 0;
-    var sceneTime = v === stageView ? position : t;
-    var reduced = reducedMotion();
-    if (!reduced || v.motionTime === undefined) v.motionTime = sceneTime;
-    if (reduced) sceneTime = v.motionTime;
-    if (v === stageView) {
-      if (renderedPosition !== null && (position < renderedPosition || position - renderedPosition > 1500)) {
+    var playing = frame.playing;
+    var position = frame.mediaPositionMs;
+    var sceneTime = sceneTimeMs;
+    var reduced = frame.reduced;
+    if (lastDiscontinuity !== null && frame.positionDiscontinuityRevision !== lastDiscontinuity) {
         discardSongClockAnimations();
         energyHist.length = 0; lastHistAt = 0; sectionSince = 0;
-      }
-      renderedPosition = position;
     }
-    var sp = window.Stage ? Stage.spectrum() : null;
-    if (sp && sp.length && sp !== lastSpectrum) { lastSpectrum = sp; lastSpectrumAt = t; }
-    var fresh = !!(sp && sp.length) && lastSpectrumAt > 0 && (t - lastSpectrumAt < 600);
-    if (!reduced && (playing || v !== stageView)) onset.step(dtMs, sp && sp.length ? sp : silent, t);
+    lastDiscontinuity = frame.positionDiscontinuityRevision; renderedPosition = position;
+    var sp = frame.spectrum;
+    var fresh = playing && !reduced && frame.spectrumAvailable && frame.spectrumRevision > spectrumWatermark;
+    if (fresh && onset) {
+      if (!primed) { onset.prime(sp, frame.sampledAtMs); primed = true; }
+      else onset.step(dtMs, sp, frame.sampledAtMs, { publishBeat: frame.spectrumRevision !== lastInputRevision });
+      lastInputRevision = frame.spectrumRevision;
+    } else if (onset) {
+      band.fill(0); rise.fill(0); agg.fill(0); onset.groupRise.fill(0); feat.pulse = feat.energy = 0;
+      primed = false;
+    }
 
-    if (reduced) animations.length = 0;
-    resolve(t);
-    if (!reduced && (playing || v !== stageView)) stepDirector(sceneTime);
+    resolve(sceneTime);
+    if (!reduced && playing) stepDirector(sceneTime);
     // 导演推进去的动画没有 from（它是"从当前值到目标值"的相对运动）。
     // 补采样放在这里而不是 fire 里：此刻 runtime 还是上一帧的稳定值，
     // 补出来的起点与屏幕上正在显示的那一帧一致，不会看到一次回跳。
@@ -1190,12 +1243,11 @@
     // --- 相机：基线 → camLayers（cinema/peek/freecam）→ 漂移 → shake ---
     stepInteraction(dtMs, fixed);
     var driftBase = reduced || fixed ? 0 : readPath(runtime, 'cam.drift') / 100;
-    if (v === stageView) driftPhase = sceneTime / 1000 * 0.12 * driftBase;
-    else driftPhase += dtMs / 1000 * 0.12 * driftBase;
+    driftPhase = sceneTime / 1000 * 0.12 * driftBase;
     cam.shakeYaw *= reduced || fixed ? 0 : Math.exp(-dtMs / 130);
     cam.shakePitch *= reduced || fixed ? 0 : Math.exp(-dtMs / 130);
     var ctx = {
-      t: t,
+      t: sceneTime,
       dtMs: dtMs,
       scene: preset.scene,
       play: document.body.classList.contains('is-playing'),
@@ -1239,7 +1291,8 @@
     var sc = readPath(runtime, 'stage.scale');
 
     var state = {
-      t: sceneTime, dt: dtMs,
+      t: logicalSceneId && logicalSceneId !== preset.scene ? 0 : sceneTime,
+      dt: logicalSceneId && logicalSceneId !== preset.scene ? 0 : dtMs,
       bands: band, rises: rise, agg: agg,
       pulse: feat.pulse, energy: feat.energy,
       play: document.body.classList.contains('is-playing'),
@@ -1280,7 +1333,17 @@
     // 手绘与背景不在静默范围内：它们是另外两层，不该被算进三维的账。
     if (!probeMuted()) {
       var frameStart = now();
+      var requestedState = state;
+      if (v.failedRevision === presetRevision && v.committed) state = retainedState(v, state);
       var r = v.eng.render(state);
+      if (r && r.ok === false) {
+        v.failure = { requestId: 'creative:' + presetRevision, reason: r.reason };
+        if (v.committed && r.reason !== 'context-lost') {
+          v.failedRevision = presetRevision; degradedBecause = '目标画面暂不可用，当前画面已保留';
+          state = retainedState(v, requestedState); r = v.eng.render(state);
+          reportView(v);
+        }
+      }
       if (r && r.ok === false) {
         if (r.reason === 'shader') {
           // 着色器挂了：把 GL 的日志原文带出来（消息里会写清楚是场景还是后处理
@@ -1293,8 +1356,22 @@
         // 任何东西，而 canvas 还留在舞台上糊着一张定格画面。必须走降级，
         // 让粒子层接管并把画布摘掉 —— 只靠 webglcontextrestored 是等不来的。
         if (r.reason === 'context-lost') { degrade('WebGL 上下文在运行中丢失', false, true); return; }
+        degrade('创意舞台暂不可用，请重试', false, true); return;
       }
       if (r && r.ok) {
+        if (state === requestedState) {
+          v.failedRevision = null; v.failure = null; degradedBecause = null;
+          if (logicalSceneId !== state.scene) {
+            logicalSceneId = state.scene; logicalGeneration++; sceneTimeMs = 0; advancing = false;
+            primed = false; spectrumWatermark = frame.spectrumRevision;
+            energyHist.length = 0; lastHistAt = 0; sectionSince = 0;
+          }
+          var committedParams = v.committed && v.committedRevision === presetRevision ? v.committed.p : deep(state.p);
+          v.committedRevision = presetRevision;
+          v.committed = { scene: state.scene, p: committedParams, cam: state.cam, post: state.post,
+            quality: state.quality, seed: state.seed };
+        }
+        v.submitted = true; dirty = false; reportView(v, frame);
         var frameMs = now() - frameStart;
         var budget = 1000 / TIERS[tierIndex()].fps;
         adaptSlowMs = frameMs > budget * 1.35 ? adaptSlowMs + dtMs : 0;
@@ -1307,6 +1384,28 @@
     }
     if (window.HandDrawn) HandDrawn.frame(state);
     if (window.Backgrounds) Backgrounds.frame(state);
+  }
+  function retainedState(v, next) {
+    return Object.assign({}, next, v.committed, { t: sceneTimeMs, dt: next.dt });
+  }
+  function reportView(v, frame) {
+    if (!v.resources) return;
+    frame = frame || Stage.frameState();
+    var shown = v.visible && !frame.documentHidden && (v === stageView || wanted && frame.stageVisible);
+    var reportKey = [logicalGeneration, presetRevision, !!v.eng, v.submitted, frame.documentHidden, v.visible,
+      shown, frame.reduced, frame.playing, v.committed && v.committed.scene, v.committed && v.committed.quality,
+      v.failure && v.failure.reason, dprStep, v.dpr].join(':');
+    if (v.reportKey === reportKey) return; v.reportKey = reportKey;
+    v.resources.report({ logicalInstanceId: 'creative:' + logicalGeneration, generation: logicalGeneration,
+      requestId: 'creative:' + presetRevision, rendererId: v.rendererPort.lifetimeId,
+      lifecycle: v.eng ? v.submitted ? 'ready' : 'preparing' : 'error',
+      presentation: frame.documentHidden ? 'hidden' : !v.visible ? 'zero-size' : !shown ? 'occluded'
+        : frame.reduced ? 'reduced' : !frame.playing ? 'paused' : 'visible', visibleUses: shown ? 1 : 0,
+      requestedQuality: 'tier-' + tierIndex(), actualQuality: v.committed ? 'tier-' + v.committed.quality : 'unavailable',
+      actualBackend: v.submitted ? 'webgl2' : 'none', actualScene: v.committed ? v.committed.scene : '',
+      effectiveDpr: v.dpr,
+      candidateFailureRequestId: v.failure ? v.failure.requestId : '',
+      reasons: v.failure ? [v.failure.reason] : dprStep ? ['frame-pressure'] : [] });
   }
 
   function makeRotScale(rotY, scale, m) {
@@ -1380,6 +1479,7 @@
   }
 
   function maybeProbe() {
+    if (!views.some(function (view) { return view.submitted; })) return;
     if (!probe.pending || probe.running || probe.skip) return;
     // 页面藏着的时候不测：那时帧门本来就停着，dt 是切回来时截断出来的 200ms，
     // 拿它算出来的"帧率"是一个自信的错误结论。
@@ -1451,13 +1551,60 @@
 
   function mountView(el) {
     if (!el) return null;
-    var c = document.createElement('canvas');
+    if (!resources) throw new Error('resource-policy-required');
+    var port = resources.port('creative-view');
+    var ticket = port.require({ canvases: 1, ownedCpuBytes: 64 }, 'CreativeStage canvas and model Float32 matrix', 0);
+    var c = null;
+    try {
+    c = document.createElement('canvas'); c.width = c.height = 0;
     c.className = 'creative-canvas';
     c.setAttribute('aria-hidden', 'true');
     // 必须是第一个孩子：三维场景在最底下，歌词、唱盘、粒子层都压在它上面。
     // 反过来放会让文字被场景糊住，而且是那种"看上去只是有点脏"的糊。
     el.insertBefore(c, el.firstChild);
-    return { el: el, canvas: c, eng: null, w: 0, h: 0, dpr: 0, modelMatrix: new Float32Array(16) };
+    var view = { el: el, canvas: c, eng: null, w: 0, h: 0, dpr: 0, modelMatrix: new Float32Array(16),
+      resources: port, ticket: ticket, rendererPort: resources.port('creative-gl'),
+      lyricPort: resources.port('lyric3d-atlas'), visible: false, submitted: false };
+    ticket.commit(); return view;
+    } catch (error) {
+      if (c) { c.width = c.height = 0; c.remove(); } c = null;
+      ticket.release({ apiReleased: true, allocationEnded: true }); throw error;
+    }
+  }
+  function releaseView(v) {
+    if (v.recordingUses) {
+      v.retiring = true; v.visible = false;
+      if (v.canvas) v.canvas.remove();
+      if (v.resources) v.resources.report({ lifecycle:'retiring',reason:'recording-source-in-use' });
+      return;
+    }
+    if (v.eng) v.eng.dispose(); v.eng = null;
+    if (v.canvas) { v.canvas.width = v.canvas.height = 0; v.canvas.remove(); } v.canvas = v.modelMatrix = null;
+    if (v.ticket) v.ticket.release({ apiReleased: true, allocationEnded: true }); v.ticket = null;
+    if (v.resources) v.resources.forgetReport();
+  }
+  function recordingLease(v) {
+    if (!v || !v.eng || !v.submitted || v.retiring) throw new Error('recording-source-unavailable');
+    v.recordingUses = (v.recordingUses || 0) + 1;
+    var released = false;
+    return { canvas:v.canvas, release:function () {
+      if (released) return; released = true; v.recordingUses--;
+      if (!v.recordingUses) {
+        v.recordingResizePending = false;
+        if (v.retiring) releaseView(v);
+        else { measure(v, true); kickStaticFrame(); }
+      }
+    } };
+  }
+  function createEngine(v) {
+    return CreativeGL.create(v.canvas, { quality: tierIndex(), resources: v.rendererPort, lyricResources: v.lyricPort,
+      onInvalidate: kickStaticFrame,
+      onContextLost: function () {
+        if (!v.eng) return;
+        v.eng.dispose(); v.eng = null; v.submitted = false;
+        v.failure = { requestId: 'creative:' + presetRevision, reason: 'context-lost' };
+        degradedBecause = '图形资源已中断，请重试'; freeze(); reportView(v);
+      } });
   }
 
   // 只在两个挂载点上切可见性与那个抬层类的开关。
@@ -1481,14 +1628,14 @@
     cancelPreview();
     for (var i = 0; i < views.length; i += 1) {
       var v = views[i];
-      if (v.eng) { try { v.eng.dispose(); } catch (e) { /* 上下文没了就算了 */ } v.eng = null; }
-      if (v.canvas && v.canvas.parentNode) v.canvas.parentNode.removeChild(v.canvas);
+      releaseView(v);
       v.el.classList.remove('creative-on', 'creative-interact');
       v.el.removeAttribute('data-scene-family');
     }
     views = [];
     stageView = null;
     if (stageObserver) { stageObserver.disconnect(); stageObserver = null; }
+    if (sidebarObserver) { sidebarObserver.disconnect(); sidebarObserver = null; }
     attached = false;
     cameraFramePending = false;
     document.documentElement.classList.remove('creative-3d');
@@ -1500,21 +1647,23 @@
   function refreshViews() {
     if (!preset) return;
     var view = pickView();
-    if (view && view.eng) { measure(view); renderOne(view, 0); }
+    if (view && view.eng) { measure(view); kickStaticFrame(); }
   }
 
   // 同一个编排 owner 同时服务侧栏和大舞台；只渲染可见目标。
   // 大舞台开合不改侧栏增强渲染偏好，也不创建模拟频谱或第二个调度器。
   function attachStage(el) {
+    if (!controllerAlive) return false;
+    if (!el) pendingStageEl = null;
+    if (el && !hasLayout(el)) { pendingStageEl = el; dirty = true; return true; }
     if (!el) cancelPreview();
-    if (stageView && stageView.el === el) return true;
+    if (stageView && stageView.el === el && stageView.eng) return true;
     cameraFramePending = false;
     if (stageView) {
       var old = stageView;
       stageView = null;
       if (stageObserver) { stageObserver.disconnect(); stageObserver = null; }
-      if (old.eng) old.eng.dispose();
-      old.canvas.remove();
+      releaseView(old);
       old.el.classList.remove('creative-on', 'creative-interact');
       views = views.filter(function (v) { return v !== old; });
       activeIdx = 0;
@@ -1525,14 +1674,13 @@
       degradedBecause = !onset ? '起音检测未就绪' : '当前设备无法运行创意舞台（需要 WebGL2）';
       return false;
     }
-    var v = mountView(el);
+    var v = null;
     try {
-      v.eng = CreativeGL.create(v.canvas, { quality: tierIndex() });
+      v = mountView(el); v.eng = createEngine(v);
       if (!v.eng) throw new Error('无法创建图形上下文');
-      v.eng.warmUp();
+      v.eng.warmUp(displayedPreset().scene);
     } catch (error) {
-      if (v.eng) v.eng.dispose();
-      v.canvas.remove();
+      if (v) releaseView(v);
       degradedBecause = '创意舞台启动失败：' + error.message;
       return false;
     }
@@ -1551,7 +1699,7 @@
       stageObserver = new ResizeObserver(function () { measure(v); kickStaticFrame(); });
       stageObserver.observe(el);
     }
-    renderOne(v, 0);
+    kickStaticFrame();
     if (window.Stage && Stage.kick) Stage.kick();
     return !!stageView;
   }
@@ -1560,7 +1708,9 @@
   // 共用画布就要在切页时重建上下文（几百毫秒卡顿 + 显存抖动）。各开一个引擎之后，
   // 切页只是换一个渲染目标，预置、状态、参数全都不动。
   function attach(enable, opts) {
+    if (!controllerAlive) return 'off';
     wanted = !!enable;
+    if (!wanted) pendingSidebar = false;
     if (!wanted) {
       // 关掉只是不画：GL 上下文与探测结论都留着。用户来回拨这个开关时，
       // 不该每次都重编五个场景的着色器、也不该再被量一遍代价。
@@ -1584,6 +1734,7 @@
       teardown();
     }
     if (views.some(function (v) { return v !== stageView; })) { showViews(true); refreshViews(); return effective(); }
+    if (!hasLayout($('stage')) || !Stage.isStageVisible()) { pendingSidebar = true; return 'off'; }
 
     if (!window.CreativeGL || !CreativeGL.isAvailable()) {
       degrade(window.CreativeGL ? '本设备不支持 WebGL2' : '三维舞台模块未加载');
@@ -1594,15 +1745,16 @@
     // "活着但错着"的状态必须报出来，而不是让它悄悄跑着。
     if (!onset) { degrade('onset.js 未加载，起音检测不可用'); return 'off'; }
     var stageEl = $('stage');
-    var a = mountView(stageEl);
+    var a;
+    try { a = mountView(stageEl); } catch (error) { degradedBecause = '创意舞台暂不可用：' + error.message; return 'off'; }
     if (!a) { degrade('找不到舞台容器'); return 'off'; }
     views.push(a);
 
     [a].forEach(function (v) {
       try {
-        v.eng = CreativeGL.create(v.canvas, { quality: tierIndex() });
-      } catch (e) { v.eng = null; }
-      if (v.eng) v.eng.warmUp();
+        v.eng = createEngine(v);
+        if (v.eng) v.eng.warmUp(displayedPreset().scene);
+      } catch (e) { if (v.eng) v.eng.dispose(); v.eng = null; }
     });
     if (!a.eng) { degrade('创建 WebGL2 上下文失败'); return 'off'; }
 
@@ -1616,10 +1768,10 @@
     refreshViews();
 
     if (window.ResizeObserver) {
-      var ro = new ResizeObserver(function () {
+      sidebarObserver = new ResizeObserver(function () {
         views.forEach(function (v) { measure(v); });
       });
-      views.forEach(function (v) { ro.observe(v.el); });
+      views.forEach(function (v) { sidebarObserver.observe(v.el); });
     }
     // 一次会话只量一次代价（降到的档位是这台机器的属性，不是这一首歌的属性）。
     // 真正的测量等第一次"确实在画"时再开始，见 tick 里的 maybeProbe。
@@ -1630,7 +1782,6 @@
   function degrade(reason, byProbe, runtime) {
     degradedByProbe = !!byProbe;
     degradedBecause = reason;
-    wanted = false;
     cancelProbe();
     teardown();
     // runtime=true 表示"已经在画的过程中被摘掉"（上下文丢失、着色器失败、
@@ -1640,12 +1791,92 @@
     }));
   }
 
-  function effective() { return (wanted && !degradedBecause && views.length) ? '3d' : 'off'; }
+  function effective() { return attached && wanted && views.some(function (view) { return !!view.eng; }) ? '3d' : 'off'; }
 
   // -------------------------------------------------------------------------
   // 服务端是唯一权威。旧浏览器副本仅在尚未初始化时迁移一次。
   // -------------------------------------------------------------------------
-  var library = [], hydratePromise = Promise.resolve(), saveTimer = 0;
+  var library = null, librarySource = null, libraryPort = null, presetSources = new Map(), currentPresetLease = null;
+  var hydratePromise = Promise.resolve(), saveTimer = 0, persistenceSnapshotLease = null;
+  var controllerAlive = false, controllerGeneration = 0;
+  var thumbnailPort = null, thumbnailSources = new Map(), currentThumbnail = null, inspectionThumbnail = null;
+  function libraryResources() {
+    if (!controllerAlive) throw new Error('creative-controller-disposed');
+    if (!libraryPort) {
+      var ledger = window.Stage && Stage.resources && Stage.resources();
+      if (!ledger || !window.StageJsonSource) throw new Error('resource-policy-required');
+      libraryPort = ledger.port('creative-library');
+    }
+    return libraryPort;
+  }
+  function libraryTicket(length) {
+    return libraryResources().require({ ownedCpuBytes: 128 + length * 8 },
+      'CreativeStage editable array value slots plus bounded source/map workspace; entry data has separate sources', presetRevision, 'bounded-estimate');
+  }
+  function libraryRepresentation(value, ticket) {
+    var bytes = 128 + value.length * 8;
+    var result = ticket.commit({ ownedCpuBytes: bytes });
+    if (!result.ok) throw new Error(result.reason);
+    return StageJsonSource.representation(value, ticket, bytes, libraryResources());
+  }
+  function borrowedPreset(item, snapshot) {
+    var ticket = libraryResources().require({ ownedCpuBytes: 128 },
+      'CreativeStage bounded entry/map wrapper borrowing original snapshot metadata', presetRevision, 'bounded-estimate');
+    var lease = null;
+    try {
+      lease = StagePersistence.borrowSnapshot(snapshot); ticket.commit();
+      return StageJsonSource.representation(item, ticket, 128, libraryResources(), function () { lease.release(); lease = null; });
+    } catch (error) {
+      if (lease) lease.release(); ticket.release({ apiReleased: true, allocationEnded: true }); throw error;
+    }
+  }
+  function trimPresetSources() {
+    presetSources.forEach(function (source, item) {
+      if (library && library.indexOf(item) >= 0) return;
+      presetSources.delete(item); source.release();
+    });
+  }
+  function thumbnailResources() {
+    if (!controllerAlive) throw new Error('creative-controller-disposed');
+    if (!thumbnailPort) {
+      var ledger = window.Stage && Stage.resources && Stage.resources();
+      if (!ledger) throw new Error('resource-policy-required');
+      thumbnailPort = ledger.port('creative-thumbnail-sources');
+    }
+    return thumbnailPort;
+  }
+  function serializedThumbnail(value, snapshot) {
+    if (typeof value !== 'string' || !value) return null;
+    var borrowed = !!(snapshot && window.StagePersistence && StagePersistence.borrowSnapshot);
+    var ticket = thumbnailResources().require({ ownedCpuBytes: borrowed ? 128 : value.length * 2 },
+      borrowed ? 'CreativeStage bounded thumbnail wrapper; encoded string borrows original persistence snapshot'
+        : 'CreativeStage retained serialized UTF16 thumbnail representation handoff', presetRevision, borrowed ? 'bounded-estimate' : 'exact-declared');
+    var lease = null;
+    try { if (borrowed) lease = StagePersistence.borrowSnapshot(snapshot); }
+    catch (error) { ticket.release({ apiReleased: true, allocationEnded: true }); throw error; }
+    ticket.commit(); var released = false;
+    return { get url() { return value; }, release: function () {
+      if (released) return; released = true; value = '';
+      if (lease) lease.release(); lease = null;
+      ticket.release({ apiReleased: true, allocationEnded: true });
+    } };
+  }
+  function releaseUnusedThumbnail(source) {
+    if (!source || source === currentThumbnail || source === inspectionThumbnail) return;
+    if (Array.from(thumbnailSources.values()).indexOf(source) >= 0) return;
+    source.release();
+  }
+  function trimThumbnailSources() {
+    thumbnailSources.forEach(function (source, item) {
+      if (library.indexOf(item) >= 0) return;
+      thumbnailSources.delete(item); releaseUnusedThumbnail(source);
+    });
+  }
+  function captureThumbnail() {
+    if (!controllerAlive) return null;
+    var view = views[activeIdx];
+    return view && view.eng ? view.eng.captureLease({ outputResources: thumbnailResources() }) : null;
+  }
   function legacy(key) {
     try { var text = localStorage.getItem(key); return text ? JSON.parse(text) : null; }
     catch (_) { return null; }
@@ -1662,20 +1893,54 @@
     emit('change', preset); return pending;
   }
   function saveLocalSoon() {
+    if (!controllerAlive) return;
     presetRevision += 1;
     if (!saveTimer) saveTimer = setTimeout(function () { saveLocal(); }, 400);
   }
   function flushLocalSave() { return saveTimer ? saveLocal() : window.StagePersistence ? StagePersistence.flush('current') : Promise.resolve(); }
   function restoreSnapshot(snapshot) {
+    if (!controllerAlive) return;
+    var nextLease = window.StagePersistence && StagePersistence.borrowSnapshot ? StagePersistence.borrowSnapshot(snapshot) : null;
+    var nextPreset = null, nextLibrary = null, nextLibrarySource = null, nextTicket = null;
+    var nextSources = new Map(), nextPresetSources = new Map(), nextCurrent = null;
+    try {
+      var items = Array.isArray(snapshot.library) ? snapshot.library : null;
+      nextTicket = libraryTicket(items ? items.length : 0);
+      // Copy slots before edits can reach the immutable borrowed server array.
+      nextLibrary = items ? items.slice() : [];
+      nextLibrarySource = libraryRepresentation(nextLibrary, nextTicket); nextTicket = null;
+      nextPreset = snapshot.current ? normalize(snapshot.current) : basePreset();
+      nextCurrent = serializedThumbnail(nextPreset.thumb, snapshot);
+      nextLibrary.forEach(function (item) {
+        nextPresetSources.set(item, borrowedPreset(item, snapshot));
+        var source = serializedThumbnail(item.thumb, snapshot); if (source) nextSources.set(item, source);
+      });
+    } catch (error) {
+      nextLibrary = null;
+      if (nextTicket) nextTicket.release({ apiReleased: true, allocationEnded: true });
+      if (nextLibrarySource) nextLibrarySource.release();
+      nextPresetSources.forEach(function (source) { source.release(); });
+      if (nextCurrent) nextCurrent.release(); nextSources.forEach(function (source) { source.release(); });
+      if (nextLease) nextLease.release(); throw error;
+    }
     if (preview) cancelPreview();
-    preset = snapshot.current ? normalize(snapshot.current) : basePreset();
-    library = Array.isArray(snapshot.library) ? snapshot.library : [];
+    var previousCurrent = currentThumbnail, previousSources = Array.from(thumbnailSources.values());
+    var previousLibrary = librarySource, previousPresetSources = presetSources, previousPresetLease = currentPresetLease;
+    preset = nextPreset; library = nextLibrary; currentThumbnail = nextCurrent; thumbnailSources = nextSources;
+    librarySource = nextLibrarySource; presetSources = nextPresetSources; currentPresetLease = null;
+    var previousLease = persistenceSnapshotLease; persistenceSnapshotLease = nextLease;
     presetRevision += 1; refreshPresentation(); emit('preset', preset); emit('library', library);
+    releaseUnusedThumbnail(previousCurrent); previousSources.forEach(releaseUnusedThumbnail);
+    if (previousLibrary) previousLibrary.release();
+    previousPresetSources.forEach(function (source) { source.release(); });
+    if (previousPresetLease) previousPresetLease.release();
+    if (previousLease) previousLease.release();
   }
   function hydrate() {
     if (!window.StagePersistence) return Promise.resolve();
-    var revision = presetRevision;
+    var revision = presetRevision, generation = controllerGeneration;
     return StagePersistence.load(legacy(LOCAL_KEY), legacy(LOCAL_LIB_KEY)).then(function (snapshot) {
+      if (!controllerAlive || generation !== controllerGeneration) return;
       if (revision === presetRevision) restoreSnapshot(snapshot);
       else {
         StagePersistence.hold('读取期间舞台已修改；请重新载入服务端设置或用当前修改重试');
@@ -1691,6 +1956,7 @@
         document.dispatchEvent(new CustomEvent('stage-media:error', { detail: notice }));
       }
     }).catch(function (e) {
+      if (!controllerAlive || generation !== controllerGeneration) return;
       StagePersistence.hold('舞台设置读取失败：' + e.message);
     });
   }
@@ -1719,14 +1985,65 @@
   }
 
   function init() {
+    if (controllerAlive) return api2;
+    controllerAlive = true; controllerGeneration += 1;
+    var initialTicket = null;
+    try {
+      initialTicket = libraryTicket(0);
+      library = []; librarySource = libraryRepresentation(library, initialTicket); initialTicket = null;
+    } catch (error) {
+      library = null;
+      if (initialTicket) initialTicket.release({ apiReleased: true, allocationEnded: true });
+      degradedBecause = '创意舞台暂不可用：当前资源不足';
+      // Empty is represented by null internally. Keep the original readable
+      // preset/controller so a visual refusal cannot interrupt player startup.
+    }
+    prepareDetector();
+    document.addEventListener('stage:track-changed', onTrackChanged);
+    if (!mountObserver && window.MutationObserver) {
+      mountObserver = new MutationObserver(completePending);
+      mountObserver.observe(document.body, { subtree: true, attributes: true, attributeFilter: ['class', 'style', 'hidden'] });
+    }
+    if (!frameUnsubscribe && window.Stage && Stage.onFrameState) frameUnsubscribe = Stage.onFrameState(function (frame) {
+      if (!frame.playing || frame.documentHidden || frame.reduced) freeze(frame);
+      completePending(); views.forEach(function (view) { measure(view); reportView(view); }); kickStaticFrame();
+    });
     if (window.Backgrounds && Backgrounds.cancelTemporaryApply) Backgrounds.cancelTemporaryApply();
     preview = null; presetRevision += 1;
-    preset = basePreset(); library = [];
+    preset = basePreset();
     hydratePromise = hydrate();
     applyBackground();
     applyHand();
     if (window.Stage && Stage.gate) Stage.gate('creative', targetFps, tick);
     return api2;
+  }
+  function destroy() {
+    if (!controllerAlive) return;
+    // Persistence takes its own synchronous snapshot before controller references retire.
+    // Keep an already authorized edit in the original save queue, including failed saves.
+    if (saveTimer) saveLocal();
+    clearTimeout(saveTimer); saveTimer = 0;
+    controllerAlive = false; controllerGeneration += 1;
+    if (preview && window.Backgrounds && Backgrounds.cancelTemporaryApply) Backgrounds.cancelTemporaryApply();
+    preview = null;
+    document.removeEventListener('stage:track-changed', onTrackChanged);
+    pendingStageEl = null; pendingSidebar = false;
+    if (mountObserver) mountObserver.disconnect(); mountObserver = null;
+    teardown(); freeze();
+    if (frameUnsubscribe) frameUnsubscribe(); frameUnsubscribe = null;
+    if (window.Stage && Stage.removeGate) Stage.removeGate('creative');
+    onset = silent = null; band = rise = []; agg = [0, 0, 0, 0]; feat = { energy: 0, pulse: 0, beats: 0 };
+    if (detectorTicket) detectorTicket.release({ apiReleased: true, allocationEnded: true });
+    detectorTicket = null; resources = null;
+    var thumbnails = new Set(thumbnailSources.values()); if (currentThumbnail) thumbnails.add(currentThumbnail);
+    if (inspectionThumbnail) thumbnails.add(inspectionThumbnail);
+    preset = null; library = null; thumbnailSources.clear(); currentThumbnail = inspectionThumbnail = null;
+    if (librarySource) librarySource.release(); librarySource = null;
+    presetSources.forEach(function (source) { source.release(); }); presetSources.clear();
+    if (currentPresetLease) currentPresetLease.release(); currentPresetLease = null; libraryPort = null;
+    if (persistenceSnapshotLease) persistenceSnapshotLease.release(); persistenceSnapshotLease = null;
+    thumbnails.forEach(function (source) { source.release(); }); thumbnailPort = null;
+    animations.length = 0; energyHist.length = 0; sceneTimeMs = 0; logicalSceneId = null; lastFrameId = -1;
   }
 
   function refreshPresentation(preserveMotion) {
@@ -1736,7 +2053,7 @@
     }
     runtime = {};
     interact.dragging = false; interact.vx = interact.vy = 0; interact.zoomTarget = null;
-    resolve(now());
+    resolve(sceneTimeMs);
     applyBackground(); applyHand();
     kickStaticFrame();
     if (window.Stage && Stage.kick) Stage.kick();
@@ -1748,7 +2065,7 @@
     preview = null;
     if (window.Backgrounds && Backgrounds.cancelTemporaryApply) Backgrounds.cancelTemporaryApply();
     if (motion) {
-      var pausedFor = Math.max(0, now() - motion.startedAt);
+      var pausedFor = Math.max(0, sceneTimeMs - motion.startedAt);
       animations = motion.animations;
       animations.forEach(function (animation) {
         if (!animation.songClock) animation.start += pausedFor;
@@ -1773,7 +2090,7 @@
     if (window.Backgrounds && Backgrounds.beginTemporaryApply) Backgrounds.beginTemporaryApply();
     preview = { committedBg: committed.bg, committedHand: committed.hand, previewId: 'preview-' + (++previewSerial), baseRevision: presetRevision,
       proposalHash: String(proposalHash || ''), preset: next,
-      motion: { animations: deep(animations), timelineCues: timelineCues === null ? null : deep(timelineCues), startedAt: now() } };
+      motion: { animations: deep(animations), timelineCues: timelineCues === null ? null : deep(timelineCues), startedAt: sceneTimeMs } };
     refreshPresentation();
     emit('preview', previewStatus());
     return previewStatus();
@@ -1798,7 +2115,7 @@
   }
 
   document.addEventListener('visibilitychange', function () {
-    if (document.hidden) { flushLocalSave().catch(function () {}); cancelPreview(); }
+    if (documentHidden()) { flushLocalSave().catch(function () {}); cancelPreview(); }
   });
   if (window.addEventListener) window.addEventListener('pagehide', function () {
     flushLocalSave().catch(function () {}); cancelPreview();
@@ -1806,13 +2123,16 @@
 
   var api2 = {
     init: init,
+    destroy: destroy,
     attach: attach,
     attachStage: attachStage,
     requestCameraFrame: requestCameraFrame,
     stageActive: function () { return !!stageView; },
     recordingSurface: function () {
-      return stageView && stageView.eng && !degradedBecause
-        ? {canvas:stageView.canvas,source:'creative',ownsLyrics:api2.ownsLyrics(),requestFrame:kickStaticFrame} : null;
+      var v = stageView;
+      return v && v.eng && v.submitted && !v.retiring
+        ? {canvas:v.canvas,source:'creative',ownsLyrics:api2.ownsLyrics(),requestFrame:kickStaticFrame,
+          acquire:function () { return recordingLease(v); }} : null;
     },
     syncPosition: function () {
       if (!stageView || !window.Stage || !Stage.position) return;
@@ -1828,7 +2148,10 @@
     // 预置
     preset: function () { return deep(preset); },
     scene: currentScene,
-    ownsLyrics: function () { return !!(preset && sceneDefinition(currentScene()).ownsLyrics); },
+    ownsLyrics: function () {
+      var displayed = stageView && stageView.committed ? stageView.committed.scene : currentScene();
+      return !!(preset && sceneDefinition(displayed).ownsLyrics);
+    },
     shareSnapshot: shareSnapshot,
     beginPreview: beginPreview,
     cancelPreview: cancelPreview,
@@ -1839,29 +2162,56 @@
     flushPersistence: function () { return flushLocalSave(); },
     flushLibrary: function () { return window.StagePersistence ? StagePersistence.flush('library') : Promise.resolve(); },
     reloadPersistence: function () {
+      if (!controllerAlive) return Promise.resolve();
+      var generation = controllerGeneration;
       return StagePersistence.reload().then(function (snapshot) {
+        if (!controllerAlive || generation !== controllerGeneration) return;
         restoreSnapshot(snapshot);
         if (window.Backgrounds && Backgrounds.commitSelection) Backgrounds.commitSelection();
       });
+    },
+    retryPersistence: async function () {
+      if (!controllerAlive) throw new Error('creative-controller-disposed');
+      var status = StagePersistence.status();
+      // A refused clone leaves the editable source in this original controller.
+      // Re-admit that latest source at the explicit retry, before clearing errors.
+      for (var key of ['current', 'library']) {
+        if (!status[key].refused) continue;
+        try { await StagePersistence.save(key, key === 'current' ? preset : library); }
+        catch (error) { if (StagePersistence.status()[key].refused) throw error; }
+      }
+      return StagePersistence.retry();
     },
     normalizeSharePreset: normalizeSharePreset,
     setProjectContext: function (value) {
       var next = CreativeProject.normalizeContext(value);
       preset.project = next;
       animations.length = 0;
-      resolve(now()); saveLocalSoon(); emit('project', next);
+      resolve(sceneTimeMs); saveLocalSoon(); emit('project', next);
     },
     setPreset: function (p, opts) {
-      preset = normalize(p);
+      if (!controllerAlive) throw new Error('creative-controller-disposed');
+      var source = presetSources.get(p), nextPresetLease = source ? source.borrow() : null;
+      var next, nextThumbnail, previousThumbnail = currentThumbnail, previousPresetLease = currentPresetLease;
+      var sharedThumbnail = opts && opts.thumbnailSource;
+      try {
+        next = normalize(p);
+        var knownSource = sharedThumbnail && Array.from(thumbnailSources.values()).indexOf(sharedThumbnail) >= 0 && sharedThumbnail.url === next.thumb;
+        nextThumbnail = knownSource ? sharedThumbnail : serializedThumbnail(next.thumb);
+      } catch (error) { if (nextPresetLease) nextPresetLease.release(); throw error; }
+      preset = next; currentThumbnail = nextThumbnail;
+      currentPresetLease = nextPresetLease;
       if (!(opts && opts.keepName)) { /* 名字随预置走 */ }
       animations.length = 0;
       timelineCues = null;
       runtime = {};
-      resolve(now());
+      resolve(sceneTimeMs);
       applyBackground();
       applyHand();
       saveLocalSoon();
       emit('preset', preset);
+      releaseUnusedThumbnail(previousThumbnail);
+      if (previousPresetLease) previousPresetLease.release();
       return deep(preset);
     },
     beginNewCueTrack: function () {
@@ -1870,7 +2220,7 @@
       preset.cues = [];
       animations = animations.filter(function (animation) { return !animation.songClock; });
       timelineCues = null;
-      resolve(now());
+      resolve(sceneTimeMs);
       saveLocalSoon();
       emit('preset', preset);
       return true;
@@ -1922,10 +2272,10 @@
         Object.keys(camTo).forEach(function (k) { writePath(preset, k, clampPath(k, camTo[k])); });
       }
       runtime = {};
-      resolve(now());
+      resolve(sceneTimeMs);
       if (camTo && !fixedComposition()) {
         animations.push({ keys: Object.keys(camTo), from: camFrom, to: camTo,
-          start: now(), len: 900, ease: 'inout', entry: true });
+          start: 0, len: 900, ease: 'inout', entry: true });
       }
       saveLocalSoon();
       emit('preset', preset);
@@ -1949,7 +2299,7 @@
       Object.keys(obj || {}).forEach(function (k) {
         if (specFor(k)) writePath(preset, k, clampPath(k, obj[k]));
       });
-      resolve(now());
+      resolve(sceneTimeMs);
       saveLocalSoon();
       emit('preset', preset);
       return deep(preset);
@@ -2059,39 +2409,72 @@
     setHandDrawn: function (spec) { preset.hand = spec || { on: false }; applyHand(); saveLocalSoon(); emit('hand', preset.hand); return preset.hand; },
 
     // 预置库
-    library: function () { return deep(library); },
+    library: function () { return deep(library || []); },
     savePreset: function (name) {
-      var p = deep(preset);
-      p.name = name || p.name || '未命名舞台';
-      var thumb = preview ? null : capture();
-      if (thumb) p.thumb = thumb;
-      var sourceId = p.id;
-      var baseId = 'p' + Date.now().toString(36), id = baseId, suffix = 1;
-      while (library.some(function (item) { return item.id === id; })) {
-        id = baseId + '-' + suffix.toString(36);
-        suffix += 1;
+      if (!controllerAlive) throw new Error('creative-controller-disposed');
+      var length = library ? library.length : 0;
+      var ticket = libraryTicket(length < 40 ? length + 1 : length);
+      var source = null, nextSource = null, next = null, thumbnail = null, p = null;
+      try {
+        var savedName = name || preset.name || '未命名舞台';
+        if (typeof savedName !== 'string') throw new Error('estimate-unavailable');
+        // Bound final identity/name/optional-thumb slots as well as the copied
+        // authored metadata. Encoded thumbnail text stays with its original source.
+        source = StageJsonSource.clone(preset, { resources: libraryResources(), generation: presetRevision,
+          borrowedRootStrings: ['thumb'], metadataBytes: 256 + savedName.length * 2 });
+        p = source.value; p.name = savedName;
+        try { thumbnail = preview ? null : captureThumbnail(); } catch (_) { /* Keep saving authored metadata when capture is unavailable. */ }
+        if (thumbnail) p.thumb = thumbnail.url;
+        else if (currentThumbnail && currentThumbnail.url === p.thumb) thumbnail = currentThumbnail;
+        else if (p.thumb) thumbnail = serializedThumbnail(p.thumb);
+        var sourceId = p.id;
+        var baseId = 'p' + Date.now().toString(36), id = baseId, suffix = 1;
+        while (library && library.some(function (item) { return item.id === id; })) { id = baseId + '-' + suffix.toString(36); suffix += 1; }
+        p.id = id;
+        var oldest = length > 39 ? length - 1 : -1;
+        if (oldest >= 0 && library[oldest].id === sourceId) oldest -= 1;
+        next = [p];
+        for (var i = 0; i < length; i++) if (i !== oldest) next.push(library[i]);
+        nextSource = libraryRepresentation(next, ticket); ticket = null;
+      } catch (error) {
+        next = p = null;
+        if (nextSource) nextSource.release(); if (source) source.release();
+        releaseUnusedThumbnail(thumbnail);
+        if (ticket) ticket.release({ apiReleased: true, allocationEnded: true }); throw error;
       }
-      p.id = id;
-      library.unshift(p);
-      if (library.length > 40) {
-        var oldest = library.length - 1;
-        if (library[oldest].id === sourceId) oldest -= 1;
-        library.splice(oldest, 1);
-      }
+      var previous = librarySource; library = next; librarySource = nextSource;
+      presetSources.set(p, source); if (thumbnail) thumbnailSources.set(p, thumbnail);
+      if (previous) previous.release();
       persistLibrary();
       emit('library', library);
+      trimThumbnailSources(); trimPresetSources();
       return p;
     },
     loadPresetById: function (id) {
+      if (!library) return null;
       for (var i = 0; i < library.length; i += 1) {
-        if (library[i].id === id) return api2.setPreset(library[i]);
+        if (library[i].id === id) return api2.setPreset(library[i], { thumbnailSource: thumbnailSources.get(library[i]) });
       }
       return null;
     },
     removePreset: function (id) {
-      library = library.filter(function (p) { return p.id !== id; });
+      if (!controllerAlive) throw new Error('creative-controller-disposed');
+      if (!library) return true;
+      var count = 0;
+      for (var i = 0; i < library.length; i++) if (library[i].id !== id) count++;
+      if (count === library.length) return true;
+      var ticket = libraryTicket(count), next = null, nextSource = null;
+      try {
+        next = library.filter(function (p) { return p.id !== id; });
+        nextSource = libraryRepresentation(next, ticket); ticket = null;
+      } catch (error) {
+        next = null; if (nextSource) nextSource.release();
+        if (ticket) ticket.release({ apiReleased: true, allocationEnded: true }); throw error;
+      }
+      var previous = librarySource; library = next; librarySource = nextSource; previous.release();
       persistLibrary();
       emit('library', library);
+      trimThumbnailSources(); trimPresetSources();
       return true;
     },
     exportJSON: function () {
@@ -2115,9 +2498,10 @@
     capture: capture,
     stats: function () {
       return {
-        active: !!wanted || !!stageView, stageActive: !!stageView, scene: preset.scene, section: section,
+        active: attached && (!!wanted || !!stageView), requestedActive: wanted, stageActive: !!stageView, scene: preset.scene, section: section,
         fps: targetFps(), tier: tierIndex(), dprScale: DPR_STEPS[dprStep],
         beats: feat.beats, animations: animations.length,
+        sceneTimeMs: sceneTimeMs, logicalInstanceId: logicalGeneration, geometryAdvancing: advancing,
         energy: Number(feat.energy.toFixed(3)),
         agg: agg.map(function (v) { return Number(v.toFixed(3)); }),
         cueCount: preset.cues.length, bindCount: preset.bindings.length,
@@ -2169,16 +2553,16 @@
   // 拿它当封面会得到一张对不上的图，所以只认当前正在画的那一个引擎。
   function capture() {
     try {
-      var v = views[activeIdx];
-      return (v && v.eng) ? v.eng.capture() : null;
+      var next = captureThumbnail(); if (!next) return null;
+      var previous = inspectionThumbnail; inspectionThumbnail = next; releaseUnusedThumbnail(previous); return next.url;
     } catch (e) { return null; }
   }
 
   window.CreativeStage = api2;
-  document.addEventListener('stage:track-changed', function () {
+  function onTrackChanged() {
     discardSongClockAnimations();
     renderedPosition = null;
     energyHist.length = 0; lastHistAt = 0; sectionSince = 0;
-    resolve(now()); kickStaticFrame();
-  });
+    resolve(sceneTimeMs); kickStaticFrame();
+  }
 })();

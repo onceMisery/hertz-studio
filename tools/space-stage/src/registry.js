@@ -61,10 +61,11 @@ export function createRegistry() {
       validateValue(key, spec, spec.default);
     }
     if (input.migrateState !== undefined && typeof input.migrateState !== 'function') throw new Error('Invalid state migration');
+    if (input.resourcePlan !== undefined && typeof input.resourcePlan !== 'function') throw new Error('Invalid resource plan');
     const metadata = freeze({ apiVersion: API_VERSION, id: input.id, stateVersion: input.stateVersion,
       label: input.label, category: input.category, preview: input.preview, aliases: names.slice(1), params,
       camera: clone(input.camera || {}), capabilities: clone(input.capabilities || {}), quality: clone(input.quality || {}) });
-    const definition = Object.freeze({ ...metadata, create: input.create, migrateState: input.migrateState, metadata });
+    const definition = Object.freeze({ ...metadata, create: input.create, resourcePlan: input.resourcePlan, migrateState: input.migrateState, metadata });
     definitions.set(input.id, definition);
     names.slice(1).forEach(name => aliases.set(name, input.id));
     return metadata;

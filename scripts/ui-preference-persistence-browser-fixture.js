@@ -79,6 +79,12 @@ const recover = between(workshop, '      recover.onclick = mediaEdit(async funct
 
 async function installPersistence(frame, server, name) {
   const fixture = server.stage.add(name);
+  for (const file of ['stage-resource-budget.js', 'stage-resource-policy.js', 'stage-json-source.js'])
+    await frame.addScriptTag({ url: server.base + '/assets/' + file });
+  await frame.evaluate(() => {
+    const ledger = StageResourceBudget.create(StageResourcePolicy);
+    window.Stage = { resources: () => ledger };
+  });
   await frame.addScriptTag({ url: server.base + '/assets/stage-persistence.js' });
   await frame.addScriptTag({ content: `(function () {
     let sequence = 0;

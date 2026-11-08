@@ -1,7 +1,7 @@
 {
-  "plugin/ui/vendor/stage-fluid.js": "5bf80d64ed7eac2c",
+  "plugin/ui/vendor/stage-fluid.js": "7fda446fb1c87ce3",
   "tools/build-stage-fluid.mjs": "79af429eda548641",
   "tools/stage-fluid/LICENSE.md": "2a9a221a47f581d7",
-  "tools/stage-fluid/src/main.js": "0865999e46d1761d",
+  "tools/stage-fluid/src/main.js": "0be9e3f5c8fd026a",
   "tools/stage-fluid/src/shaders.js": "49f3d1792ccaceed"
 }

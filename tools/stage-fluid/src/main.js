@@ -26,27 +26,43 @@ export const profiles = Object.freeze({
   2: Object.freeze({ fps: 20, simulation: 64, dye: 128, pixels: 1000000 })
 });
 
-export function create(canvas, tier) {
+export function create(canvas, tier, options = {}) {
   let gl, disposed = false, fluid = null, quad = null, profile = profiles[tier];
+  const resources = options.resources;
+  if (!resources || resources.contractVersion !== 1) throw new Error('resource-policy-required');
+  if (!profile) { const error = new Error('当前画质暂不启用流体增强'); error.code = 'UNSUPPORTED_TIER'; throw error; }
+  // RG16F velocity pair, R16F pressure pair/divergence/curl, RGBA16F dye pair.
+  const declaredTargets = profile.simulation ** 2 * 16 + profile.dye ** 2 * 16;
+  const fixedTicket = resources.require({ gpuContexts: 1, programs: 9,
+    renderTargetDeclaredBytes: declaredTargets, bufferDeclaredBytes: 32, ownedCpuBytes: 12 },
+  'fluid fixed resources: RG16F/R16F/RGBA16F, no depth or MSAA', 0);
+  let surfaceTicket = null, pendingSurfaceTicket = null, cleanupFailed = false;
   const textures = [], framebuffers = [], programs = [], shaders = [];
   let bytes = 0, frames = 0, steps = 0, drawCalls = 0, strength = .35;
-  const color = new Float32Array([.65, .55, .4]);
+  let color = null;
 
   function dispose() {
     if (disposed) return;
     disposed = true;
+    function clean(fn) { try { fn(); } catch (error) { cleanupFailed = true; } }
     if (gl) {
-      textures.forEach(value => gl.deleteTexture(value));
-      framebuffers.forEach(value => gl.deleteFramebuffer(value));
-      programs.forEach(value => gl.deleteProgram(value));
-      shaders.forEach(value => gl.deleteShader(value));
-      if (quad) gl.deleteBuffer(quad);
-      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-      const loss = gl.getExtension('WEBGL_lose_context');
-      if (loss && !gl.isContextLost()) loss.loseContext();
+      textures.forEach(value => clean(() => gl.deleteTexture(value)));
+      framebuffers.forEach(value => clean(() => gl.deleteFramebuffer(value)));
+      programs.forEach(value => clean(() => gl.deleteProgram(value)));
+      shaders.forEach(value => clean(() => gl.deleteShader(value)));
+      if (quad) clean(() => gl.deleteBuffer(quad));
+      clean(() => { gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        const loss = gl.getExtension('WEBGL_lose_context');
+        if (loss && !gl.isContextLost()) loss.loseContext(); });
     }
+    clean(() => { canvas.width = 0; }); clean(() => { canvas.height = 0; });
     textures.length = framebuffers.length = programs.length = shaders.length = 0;
-    bytes = 0; quad = null; fluid = null;
+    bytes = 0; quad = null; fluid = null; gl = null; color = null;
+    if (!cleanupFailed) {
+      for (const ticket of [fixedTicket, surfaceTicket, pendingSurfaceTicket])
+        if (ticket) ticket.release({ apiReleased: true, allocationEnded: true });
+      surfaceTicket = pendingSurfaceTicket = null;
+    }
   }
   function fail(message, code) {
     const error = new Error(message); error.code = code || 'FLUID_INITIALIZATION';
@@ -104,7 +120,7 @@ export function create(canvas, tier) {
   }
   let display, splatProgram, advect, clear, divergence, curl, vorticity, pressure, gradient;
   try {
-    if (!profile) fail('当前画质暂不启用流体增强', 'UNSUPPORTED_TIER');
+    color = new Float32Array([.65, .55, .4]);
     gl = canvas.getContext('webgl2', { alpha: true, depth: false, stencil: false,
       antialias: false, premultipliedAlpha: true, powerPreference: 'low-power' });
     if (!gl || gl.isContextLost()) fail('当前设备不支持此效果', 'UNSUPPORTED_WEBGL');
@@ -118,7 +134,12 @@ export function create(canvas, tier) {
     gradient = program(vertex, FRAG_GRADIENT);
     quad = gl.createBuffer(); if (!quad) fail('流体顶点分配失败');
     gl.bindBuffer(gl.ARRAY_BUFFER, quad);
-    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
+    const uploadTicket = resources.require({ ownedCpuBytes: 32 }, 'fluid transient Float32 quad upload', 0);
+    let upload = null;
+    try {
+      upload = new Float32Array([-1,-1, 1,-1, -1,1, 1,1]);
+      uploadTicket.commit(); gl.bufferData(gl.ARRAY_BUFFER, upload, gl.STATIC_DRAW);
+    } finally { upload = null; uploadTicket.release({ apiReleased: true, allocationEnded: true }); }
     gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
     fluid = {
       velocity: pair(profile.simulation, gl.RG16F, gl.RG, filter, 4),
@@ -127,7 +148,7 @@ export function create(canvas, tier) {
       divergence: target(profile.simulation, gl.R16F, gl.RED, gl.NEAREST, 2),
       curl: target(profile.simulation, gl.R16F, gl.RED, gl.NEAREST, 2)
     };
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.disable(gl.BLEND);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.disable(gl.BLEND); fixedTicket.commit();
   } catch (error) { dispose(); throw error; }
 
   function splat(x, y, dx, dy, amount) {
@@ -196,11 +217,22 @@ export function create(canvas, tier) {
   }
   function resize(width, height) {
     if (disposed) return;
+    if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0)
+      throw new Error('estimate-unavailable');
     const ratio = Math.min(1, window.devicePixelRatio || 1,
       Math.sqrt(profile.pixels / Math.max(1, width * height)),
       gl.getParameter(gl.MAX_TEXTURE_SIZE) / Math.max(1, width, height));
-    canvas.width = Math.max(1, Math.floor(width * ratio));
-    canvas.height = Math.max(1, Math.floor(height * ratio));
+    const nextWidth = Math.max(1, Math.floor(width * ratio)), nextHeight = Math.max(1, Math.floor(height * ratio));
+    if (nextWidth === canvas.width && nextHeight === canvas.height && surfaceTicket) return;
+    const peakPixels = Math.max(nextWidth * canvas.height, nextWidth * nextHeight);
+    pendingSurfaceTicket = resources.require({ drawingBufferPixels: peakPixels,
+      renderTargetDeclaredBytes: peakPixels * 4 }, 'fluid resize RGBA8 old plus new and intermediate surface', 0);
+    // A partial setter failure leaves this reservation held until the owner disposes.
+    canvas.width = nextWidth; canvas.height = nextHeight;
+    pendingSurfaceTicket.commit({ drawingBufferPixels: nextWidth * nextHeight,
+      renderTargetDeclaredBytes: nextWidth * nextHeight * 4 });
+    if (surfaceTicket) surfaceTicket.release({ apiReleased: true, allocationEnded: true });
+    surfaceTicket = pendingSurfaceTicket; pendingSurfaceTicket = null;
   }
   return {
     splat, step, render, reset, resize, dispose,
@@ -212,7 +244,7 @@ export function create(canvas, tier) {
     stats() {
       return { contexts: disposed ? 0 : 1, textures: textures.length, framebuffers: framebuffers.length,
         programs: programs.length, buffers: quad ? 1 : 0, shaders: shaders.length, estimatedBytes: bytes,
-        outputPixels: disposed ? 0 : canvas.width * canvas.height, frames, steps, drawCalls, disposed };
+        outputPixels: disposed ? 0 : canvas.width * canvas.height, frames, steps, drawCalls, disposed, cleanupFailed };
     }
   };
 }

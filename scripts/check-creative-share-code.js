@@ -21,6 +21,7 @@ function context(capabilities = {}) {
   for (const file of ['onset.js', 'creative-gl.js', 'backgrounds.js', 'handdrawn.js', 'creative-stage.js', 'creative-share-code.js']) {
     vm.runInContext(fs.readFileSync(path.join(web, file), 'utf8'), ctx, { filename: file });
   }
+  require('./stage-resource-fixture')(ctx);
   // Pixel/DOM painting is outside the codec; effective defaults and schemas above are real modules.
   ctx.Backgrounds.apply = () => {};
   ctx.HandDrawn.apply = () => {};

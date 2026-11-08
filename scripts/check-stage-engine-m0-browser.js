@@ -625,13 +625,15 @@ async function nativeSamples(mode) {
         let initCpuMs = null;
         const initialize = () => { const started = performance.now(); StageParticles.init(); initCpuMs = performance.now() - started; };
         if (kind === 'warm') {
+          // Prime browser shader/canvas caches with a completed visible lifecycle.
+          // M1 forbids new allocation/submit behind an occluding space host.
           initialize();
-          document.body.classList.add('space3d-open'); await Promise.resolve();
-          StageParticles.attach(mode); await new Promise(resolve => setTimeout(resolve, 40));
-          if (StageParticles.stats().metrics.warmUpStatus !== 'submitted') throw new Error('warm sample was not prewarmed at target size/count');
+          StageParticles.attach(mode); Stage.kick();
+          await wait(() => StageParticles.stats().metrics.firstFrameStatus === 'submitted');
+          StageParticles.destroy();
         }
         const requestAt = performance.now();
-        if (kind === 'cold') { initialize(); StageParticles.attach(mode); } else document.body.classList.remove('space3d-open');
+        initialize(); StageParticles.attach(mode);
         Stage.kick();
         await wait(() => StageParticles.stats().metrics.firstFrameStatus === 'submitted');
         const submittedAt = performance.now(), active = StageParticles.stats();
@@ -639,7 +641,8 @@ async function nativeSamples(mode) {
         await new Promise(resolve => setTimeout(resolve, 30));
         StageParticles.destroy(); const destroyed = StageParticles.stats();
         return { kind, round, requestAt, initCpuMs, observedFirstFrameWaitMs: submittedAt - requestAt,
-          nativeClock: true, actualBackend: active.actualBackend, count: active.count, tier: active.tier, dpr: active.dpr,
+          nativeClock: true, warmBasis: kind === 'warm' ? 'completed visible prior lifecycle; browser caches' : 'unprimed lifecycle',
+          actualBackend: active.actualBackend, count: active.count, tier: active.tier, dpr: active.dpr,
           cssSize: [640, 480], metrics: active.metrics, active: active.resources, hidden: hidden.resources, retained: retained.resources, destroyed: destroyed.resources };
       }, { kind, round, mode });
       samples.push(sample);

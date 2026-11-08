@@ -12,7 +12,8 @@ const output = process.env.HERTZ_FLUID_EVIDENCE_DIR ? path.resolve(process.env.H
 const index = fs.readFileSync(path.join(web, 'index.html'), 'utf8');
 const panel = index.slice(index.indexOf('<div class="stage-ctl"'), index.indexOf('<div id="ctx-menu"'));
 const stage = index.slice(index.indexOf('<aside class="stage"'), index.indexOf('</aside>', index.indexOf('<aside class="stage"')) + 8);
-const scripts = ['design/design-themes.js', 'themes.js', 'stage.js', 'onset.js', 'stage-particles.js', 'stage-particles-gl.js',
+const scripts = ['design/design-themes.js', 'themes.js', 'stage-resource-budget.js', 'stage-resource-policy.js',
+  'stage.js', 'onset.js', 'stage-particles.js', 'stage-particles-gl.js',
   'stage-control.js', 'vendor/stage-fluid.js', 'stage-fluid.js'];
 const cover = 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="400" height="400"><rect width="400" height="400" fill="#263c39"/><circle cx="200" cy="200" r="120" fill="#d6b987"/><circle cx="200" cy="200" r="68" fill="#36534c"/><circle cx="200" cy="200" r="12" fill="#ddccaa"/></svg>');
 

@@ -1577,9 +1577,8 @@
     saveBtn.disabled = stagePreview;
     if (stagePreview) saveBtn.title = '请先确认或取消舞台预览，再保存收藏';
     saveBtn.addEventListener('click', async function () {
-      var p = CS.savePreset(nameInput.value || cur.name);
-      try { await CS.flushLibrary(); flash('已保存「' + p.name + '」'); }
-      catch (e) { flash('收藏暂未保存：' + e.message); }
+      try { var p = CS.savePreset(nameInput.value || cur.name); await CS.flushLibrary(); flash('已保存「' + p.name + '」'); }
+      catch (e) { flash('收藏暂未保存：' + (e.resourceFailure ? '当前资源不足，请关闭其它视觉效果后重试' : e.message)); }
       render();
     });
     nameRow.appendChild(saveBtn);
@@ -1762,8 +1761,8 @@
       var btns = h('div', 'ws-shot-btns');
       var load = h('button', 'btn', '载入并应用');
       load.addEventListener('click', function () {
-        CS.loadPresetById(p.id);
-        flash('已载入');
+        try { CS.loadPresetById(p.id); flash('已载入'); }
+        catch (e) { flash('载入失败：' + (e.resourceFailure ? '当前资源不足，请关闭其它视觉效果后重试' : e.message)); }
         render();
       });
       var del = h('button', 'btn danger', '删除');
@@ -1772,8 +1771,8 @@
         // 于是删除按钮点了没反应。统一走 dialogs.js，独立形态下它委托给原生。
         var dialog = window.hertzDialog || window;
         if (!(await dialog.confirm('删除收藏「' + (p.name || '未命名') + '」？'))) return;
-        CS.removePreset(p.id);
-        try { await CS.flushLibrary(); } catch (e) { flash('删除暂未保存：' + e.message); }
+        try { CS.removePreset(p.id); await CS.flushLibrary(); }
+        catch (e) { flash('删除暂未保存：' + (e.resourceFailure ? '当前资源不足，请关闭其它视觉效果后重试' : e.message)); }
         render();
       });
       btns.append(load, del);
@@ -2291,7 +2290,7 @@
       var retry = h('button', 'btn', '用当前修改重试'), reload = h('button', 'btn', '重新载入服务端');
       retry.onclick = async function () {
         retry.disabled = true;
-        try { await StagePersistence.retry(); if (window.Backgrounds) Backgrounds.commitSelection(); flash('舞台修改已保存'); }
+        try { await CreativeStage.retryPersistence(); if (window.Backgrounds) Backgrounds.commitSelection(); flash('舞台修改已保存'); }
         catch (e) { flash(e.message); }
         renderPersistenceStatus(container);
       };

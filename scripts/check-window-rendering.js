@@ -76,7 +76,7 @@ const lifecycle = {
   anyGateWants: () => false,
 };
 vm.createContext(lifecycle);
-vm.runInContext(['detectTier', 'refreshViewport', 'setHidden', 'frame', 'schedule']
+vm.runInContext(['readDocumentHidden', 'detectTier', 'refreshViewport', 'setHidden', 'frame', 'schedule']
   .map(name => grab(stage, name, '  ')).join('\n'), lifecycle);
 assert.equal(lifecycle.detectTier(), 2, 'small 1x window retains high tier');
 lifecycle.window.devicePixelRatio = 2;
@@ -113,4 +113,15 @@ assert.deepEqual(frameDurations, [16.7], 'restore starts a fresh frame instead o
 lifecycle.document.hidden = true;
 lifecycle.frame();
 assert.equal(frameDurations.length, 1, 'document visibility also guards callbacks before its listener runs');
+lifecycle.document.hidden = false;
+lifecycle.window.__hertzWindowHost = { presentationVersion: 1, presentationHidden: true };
+lifecycle.frame();
+assert.equal(frameDurations.length, 1, 'native suspension guards a late callback before the visibility listener');
+lifecycle.tier = 2;
+lifecycle.refreshViewport();
+assert.equal(lifecycle.tier, 2, 'native suspension also prevents layout and quality sampling');
+assert.equal(lifecycle.document.hidden, false, 'Stage never changes the browser visibility property');
+lifecycle.window.__hertzWindowHost.presentationHidden = false;
+lifecycle.frame();
+assert.equal(frameDurations.length, 2, 'native restoration permits the original frame owner to submit');
 console.log('Window rendering: spectrum bursts, hidden views, Retina fullscreen budgets and restore timing passed');

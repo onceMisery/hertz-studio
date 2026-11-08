@@ -19,6 +19,12 @@
 (function () {
   'use strict';
 
+  // The Stage facade includes native parent-window suspension. Standalone consumers keep browser visibility.
+  function documentHidden() {
+    var stage = window.Stage;
+    return stage && typeof stage.isDocumentHidden === "function" ? stage.isDocumentHidden() : !!document.hidden;
+  }
+
   var MAX_EDGE = 384;             // 离屏画布长边上限
   var BG_FPS = 12;                // 生成式背景的目标帧率
 
@@ -39,6 +45,7 @@
     canvas: null,
     ctx: null,
     media: null,                  // <img> 或 <video>
+    mediaLifetime: null,
     poster: null,                 // 有界静态交接帧，不持有第二个视频解码器
     mediaUrl: null,               // 仅运行时；绝不写入预设
     lease: null,
@@ -57,11 +64,29 @@
     txShown: null, tyShown: null, // 上次写出的视差位移
     inputBound: false
   };
-  var temporaryApply = null;
+  var temporaryApply = null, pendingApply = false;
   var mediaGeneration = 0, mediaKey = '', mediaReady = Promise.resolve(), mediaError = '';
   var selectionPin = null, recoverySpec = null;
   var mediaProbe = null, mediaListeners = [], mediaPresented = false, resumePoint = null;
+  var pageResources = null, canvasTicket = null, surfaceTicket = null, flowTicket = null, posterTicket = null;
+  var frameUnsubscribe = null, sceneTimeMs = 0, advancing = false, lastFrameId = -1;
+  var backgroundDirty = false, backgroundPainted = false;
+  function resources() {
+    if (!pageResources) {
+      var ledger = window.Stage && Stage.resources && Stage.resources();
+      if (!ledger) throw new Error('resource-policy-required');
+      pageResources = ledger.port('backgrounds');
+    }
+    return pageResources;
+  }
+  function releaseTicket(ticket) { if (ticket) ticket.release({ apiReleased: true, allocationEnded: true }); }
   var selectionSerial = 0, pageInactive = false, serviceOnline = true;
+  var paletteController = null, paletteGeneration = 0, coverPoll = 0;
+  function cancelPalette() {
+    paletteGeneration++;
+    if (paletteController) paletteController.abort(); paletteController = null;
+    state.palFor = null;
+  }
   function identity(spec) { return spec && spec.assetRef ? spec.assetRef.storeId + '/' + spec.assetRef.assetId : spec && spec.url || ''; }
   function abortedMedia() { var e = new Error('背景选择已变化，素材仍保存在素材库'); e.name = 'AbortError'; return e; }
   function presetRevision() { return window.CreativeStage && CreativeStage.revision ? CreativeStage.revision() : null; }
@@ -114,12 +139,14 @@
 
   function extractPalette(img) {
     var N = 32;
-    var c = document.createElement('canvas');
-    c.width = c.height = N;
-    var g = c.getContext('2d', { willReadFrequently: true });
+    var c = null, g = null, data = null, ticket = null;
     try {
+      ticket = resources().require({ canvases: 1, drawingBufferPixels: N * N, ownedCpuBytes: N * N * 8 + 64 * 10 * 8 + 96 },
+        'Backgrounds palette RGBA8 surface/ImageData and bounded numeric histogram/ranking payload', mediaGeneration);
+      c = document.createElement('canvas'); c.width = c.height = N;
+      g = c.getContext('2d', { willReadFrequently: true }); if (!g) return null;
       g.drawImage(img, 0, 0, N, N);
-      var data = g.getImageData(0, 0, N, N).data;
+      data = g.getImageData(0, 0, N, N).data; ticket.commit();
       var bins = new Array(64);
       var i, k;
       for (i = 0; i < bins.length; i += 1) bins[i] = { n: 0, r: 0, g: 0, b: 0, sat: 0 };
@@ -162,6 +189,8 @@
       return picked;
     } catch (e) {
       return null;                                   // 跨源图片会在这里抛，降级即可
+    } finally {
+      if (c) c.width = c.height = 0; c = g = data = null; releaseTicket(ticket);
     }
   }
 
@@ -250,7 +279,7 @@
       state.wallApi.setSource(wallSource());
       return true;
     }
-    var ok = window.BgWall.attach(state.layer, onWallLost);
+    var ok = window.BgWall.attach(state.layer, onWallLost, { resources: resources() });
     if (ok) {
       state.wallApi = window.BgWall;   // 留一份主人引用，window.BgWall 被换也能拆
       state.wallApi.setSource(wallSource());
@@ -261,7 +290,7 @@
   function destroyWall() {
     // 用登记时的模块实例：window.BgWall 可能已被置空/替换，但旧墙归旧实例管
     var BW = state.wallApi || window.BgWall;
-    if (BW && BW.ready && BW.ready()) BW.dispose();
+    if (BW && BW.dispose) BW.dispose();
     state.wallApi = null;
   }
 
@@ -317,10 +346,13 @@
 
   function ensureLayer() {
     if (state.layer) return state.layer;
-    var layer = document.createElement('div');
+    var ticket = null, layer = null, canvas = null;
+    try {
+    ticket = resources().require({ canvases: 1 }, 'Backgrounds movable CPU canvas identity', mediaGeneration);
+    layer = document.createElement('div');
     layer.id = 'creative-bg';
     layer.setAttribute('aria-hidden', 'true');
-    var canvas = document.createElement('canvas');
+    canvas = document.createElement('canvas'); canvas.width = canvas.height = 0;
     canvas.id = 'creative-bg-canvas';
     layer.appendChild(canvas);
     // 插在 body 最前面：它是最底下的一层，DOM 顺序本身就保证了层级，
@@ -332,7 +364,14 @@
     state.layer = layer;
     state.canvas = canvas;
     state.ctx = canvas.getContext('2d');
+    if (!state.ctx) throw new Error('背景画布不可用');
+    ticket.commit(); canvasTicket = ticket;
     return layer;
+    } catch (error) {
+      if (canvas) canvas.width = canvas.height = 0; if (layer) layer.remove();
+      state.ctx = state.canvas = state.layer = null; canvas = layer = null; releaseTicket(ticket);
+      reportMediaError(new Error('背景暂不可用，请重试当前背景')); return null;
+    }
   }
 
   // 只搬 DOM，不重新 apply：本地 ObjectURL、视频进度和 BgWall 的纹理主人都不变。
@@ -365,13 +404,14 @@
     var changed = !old !== !next || (old && next &&
       (old.paused !== next.paused || old.reduced !== next.reduced || old.flat !== next.flat));
     if (!changed) return;
+    advancing = false;
     configureDepth();
     syncMediaPlayback();
     refresh();
   }
 
   function isVisible() {
-    return !pageInactive && !document.hidden && !!state.layer && !state.layer.hidden
+    return !pageInactive && !documentHidden() && !!state.layer && !state.layer.hidden
       && (!!state.stageHost || !document.body.classList.contains('s3d-open'));
   }
 
@@ -380,7 +420,7 @@
     var active = isVisible() && serviceOnline, ready = null;
     [lease, selectionPin, temporaryApply && temporaryApply.lease].forEach(function (pin, index, all) {
       if (!pin || !pin.setActive || all.indexOf(pin) !== index) return;
-      var pending = pin.setActive(pin === lease ? active : !pageInactive && !document.hidden && serviceOnline);
+      var pending = pin.setActive(pin === lease ? active : !pageInactive && !documentHidden() && serviceOnline);
       if (pin === lease) ready = pending;
       else if (pending) pending.catch(function () {});
     });
@@ -401,14 +441,22 @@
   }
 
   function refresh() {
-    // 暂停时改色相、切背景、搬进舞台都立即补一帧，不等待音频推动帧门。
-    if (state.spec.type !== 'theme' && isVisible()) tick(0);
+    // Merge static edits into the original gate; they never advance geometry.
+    backgroundDirty = true;
     if (window.Stage && Stage.kick) Stage.kick();
   }
 
+  function onResize() {
+    if (isCanvasType()) sizeCanvas();
+    if (state.wallApi && state.wallApi.ready()) state.wallApi.resize();
+    refresh();
+  }
+
   function clearPoster() {
+    if (state.poster) state.poster.width = state.poster.height = 0;
     if (state.poster && state.poster.parentNode) state.poster.parentNode.removeChild(state.poster);
     state.poster = null;
+    releaseTicket(posterTicket); posterTicket = null;
   }
 
   function freezeMedia() {
@@ -416,13 +464,17 @@
     var source = sourceFrame();
     if (!source.ready) return;
     var scale = Math.min(1, 1024 / Math.max(source.width, source.height));
-    var poster = document.createElement('canvas');
-    poster.width = Math.max(1, Math.round(source.width * scale));
-    poster.height = Math.max(1, Math.round(source.height * scale));
-    poster.className = 'creative-bg-media';
-    try { poster.getContext('2d').drawImage(source.source, 0, 0, poster.width, poster.height); }
-    catch (_) { return; }
+    var width = Math.max(1, Math.round(source.width * scale)), height = Math.max(1, Math.round(source.height * scale));
+    var poster = null, ticket = null;
+    try {
+      ticket = resources().require({ canvases: 1, drawingBufferPixels: width * height, ownedCpuBytes: width * height * 4 },
+        'Backgrounds bounded1024 poster RGBA8 CPU surface, old plus new', mediaGeneration);
+      poster = document.createElement('canvas'); poster.width = width; poster.height = height;
+      poster.className = 'creative-bg-media'; poster.getContext('2d').drawImage(source.source, 0, 0, width, height);
+      ticket.commit();
+    } catch (_) { if (poster) poster.width = poster.height = 0; poster = null; releaseTicket(ticket); return; }
     clearPoster(); state.poster = poster; state.layer.appendChild(poster);
+    posterTicket = ticket;
   }
 
   function clearMedia(keepPoster) {
@@ -431,6 +483,7 @@
     mediaListeners.splice(0).forEach(function (remove) { remove(); });
     var wasLeased = !!state.lease;
     var lease = state.lease; state.lease = null; mediaPresented = false;
+    var lifetime = state.mediaLifetime; state.mediaLifetime = null;
     if (!keepPoster) { clearPoster(); resumePoint = null; }
     // 入口处先把「将要清掉的这个元素对应的 URL」固定下来：setLocalFile 会在
     // apply 之前改 state.mediaUrl，不先捕获的话会误撤新 URL（真实存在的隐患）。
@@ -451,19 +504,36 @@
     }
     state.media = null;
     state.mediaUrl = null;
+    if (lifetime) { lifetime.detached = true; if (lifetime.ended) releaseTicket(lifetime.ticket); }
     releaseLease(lease);
   }
 
   function sizeCanvas() {
+    if (!state.canvas || documentHidden()) return false;
     var vw = Math.max(1, state.stageHost && state.stageHost.clientWidth || window.innerWidth);
     var vh = Math.max(1, state.stageHost && state.stageHost.clientHeight || window.innerHeight);
     var scale = Math.min(1, MAX_EDGE / Math.max(vw, vh));
     var w = Math.max(64, Math.round(vw * scale));
     var h = Math.max(36, Math.round(vh * scale));
     if (state.canvas.width !== w || state.canvas.height !== h) {
+      var peak = Math.max(w * state.canvas.height, w * h), ticket = null;
+      try {
+      ticket = resources().require({ drawingBufferPixels: peak, ownedCpuBytes: peak * 4 },
+        'Backgrounds RGBA8 CPU resize old plus new/intermediate', mediaGeneration);
       state.canvas.width = w;
       state.canvas.height = h;
+      ticket.commit({ drawingBufferPixels: w * h, ownedCpuBytes: w * h * 4 });
+      releaseTicket(surfaceTicket); surfaceTicket = ticket;
+      } catch (error) {
+        if (ticket) {
+          state.canvas.width = state.canvas.height = 0; releaseTicket(ticket);
+          releaseTicket(surfaceTicket); surfaceTicket = null; state.w = state.h = 0;
+          backgroundPainted = false;
+        }
+        reportMediaError(new Error('当前背景尺寸暂不可用，请重试')); return false;
+      }
       state.w = w; state.h = h;
+      backgroundPainted = false;
       if (state.spec.type === 'flow' || state.spec.type === 'spectrogram') resetField();
       return true;
     }
@@ -494,10 +564,18 @@
 
   function resetField() {
     var n = state.w * state.h > 0 ? Math.round(Math.min(520, state.w * state.h / 220)) : 240;
+    var ticket = null, px = null, py = null, life = null;
+    try {
+      ticket = resources().require({ ownedCpuBytes: n * 12 }, 'Backgrounds three Float32 flow arrays replacement', mediaGeneration);
+      px = new Float32Array(n); py = new Float32Array(n); life = new Float32Array(n);
+      ticket.commit();
+    } catch (error) {
+      px = py = life = null; releaseTicket(ticket);
+      reportMediaError(new Error('流场背景暂不可用，请重试')); return;
+    }
+    flow.px = flow.py = flow.life = null; releaseTicket(flowTicket); flowTicket = ticket;
     flow.n = n;
-    flow.px = new Float32Array(n);
-    flow.py = new Float32Array(n);
-    flow.life = new Float32Array(n);
+    flow.px = px; flow.py = py; flow.life = life;
     for (var i = 0; i < n; i += 1) {
       flow.px[i] = rnd() * state.w;
       flow.py[i] = rnd() * state.h;
@@ -645,9 +723,12 @@
   }
 
   function targetFps() {
-    if (!state.attached || state.spec.type === 'theme' || !isVisible()) return 0;
-    if (state.stageState && (state.stageState.paused || state.stageState.reduced)) return 0;
+    if (!state.attached || state.spec.type === 'theme' || !isVisible()) { advancing = false; return 0; }
     var playing = document.body.classList.contains('is-playing');
+    var frame = window.Stage && Stage.frameState ? Stage.frameState() : null;
+    if (frame) playing = frame.playing && !frame.reduced;
+    if (state.stageState && (state.stageState.paused || state.stageState.reduced)) playing = false;
+    if (!playing) { advancing = false; return backgroundDirty ? 12 : 0; }
     var depth = state.depthEffective;
     // 墙与视差要跟着指针/视频走：30fps 才顺；非播放时降下来省点。
     if (depth === 'scene') return playing ? 30 : 10;
@@ -689,11 +770,16 @@
     }, { passive: true });
   }
 
-  function tick(dtMs) {
-    var t = state.stageState ? state.stageState.timeSec * 1000 :
-      (window.performance && performance.now ? performance.now() : Date.now());
+  function tick(dtMs, frame) {
+    if (!frame || frame.version !== 1 || frame.frameId === lastFrameId) return;
+    lastFrameId = frame.frameId;
+    if (!isVisible() || frame.documentHidden) { advancing = false; return; }
+    var moving = frame.playing && !frame.reduced && !(state.stageState && (state.stageState.paused || state.stageState.reduced));
+    var delta = moving && advancing && Number.isFinite(dtMs) ? Math.min(100, Math.max(0, dtMs)) : 0;
+    advancing = moving; sceneTimeMs += delta; backgroundDirty = false;
+    var t = sceneTimeMs;
     var depth = state.depthEffective;
-    if (depth === 'parallax' || depth === 'scene') updateParallax(dtMs || 16.7);
+    if (delta && (depth === 'parallax' || depth === 'scene')) updateParallax(delta);
 
     var bands = window.Stage && Stage.spectrum ? Stage.spectrum() : null;
     var agg = 0, pulse = 0;
@@ -709,15 +795,15 @@
       if (s.agg) agg = (s.agg[0] + s.agg[1] + s.agg[2] + s.agg[3]) / 4;
     }
     var pal = palette();
-    if (state.spec.type === 'flow') stepFlow(pal, agg, pulse);
-    else if (state.spec.type === 'spectrogram') stepSpectrogram(bands, pal, t);
+    if (state.spec.type === 'flow') { if (delta || !backgroundPainted) stepFlow(pal, agg, pulse); }
+    else if (state.spec.type === 'spectrogram') { if (delta || !backgroundPainted) stepSpectrogram(bands, pal, t); }
     else if (isCanvasType()) stepMesh(pal, agg, pulse, t);
-    if (isCanvasType() && state.ctx) invalidateSource();
+    if (isCanvasType() && state.ctx) { backgroundPainted = true; invalidateSource(); }
 
     if (depth === 'scene' && state.wallApi && state.wallApi.ready()) {
       // 墙源在媒体元素刚建出来时可能没同步上，每帧补一次 setSource（只是赋值）
       state.wallApi.setSource(wallSource());
-      state.wallApi.render(dtMs || 16.7, {
+      state.wallApi.render(delta, {
         yaw: pointer.sx * 0.24,
         pitch: -pointer.sy * 0.12,
         energy: agg
@@ -736,16 +822,24 @@
   function palette() {
     if (state.spec.type === 'cover') {
       if (state.palFor !== state.coverUrl) {
+        if (documentHidden()) return state.palette || themeColors();
+        cancelPalette();
         state.palFor = state.coverUrl;
-        state.palette = null;
         if (state.coverUrl) {
-          var target = state.coverUrl;
-          var img = new Image();
-          img.onload = function () {
-            if (state.palFor === target) { state.palette = extractPalette(img); refresh(); }
-          };
-          img.onerror = function () { if (state.palFor === target) state.palette = null; };
-          resolveCover(target, function (resolved) { if (resolved) img.src = resolved; });
+          var target = state.coverUrl, generation = paletteGeneration;
+          var controller = paletteController = new AbortController();
+          if (window.StageImageSource) StageImageSource.decode(target, { resources: resources(), generation: generation,
+            signal: controller.signal, resolve: window.HertzCovers && HertzCovers.resolve,
+            maxEncodedBytes: Math.floor(Stage.resources().snapshot().caps.ownedCpuBytes / 4) }).then(function (source) {
+            try {
+              if (generation !== paletteGeneration || controller.signal.aborted || state.spec.type !== 'cover') return;
+              state.palette = extractPalette(source.image); refresh();
+            } finally { source.release(); }
+          }).catch(function (error) {
+            if (generation !== paletteGeneration || controller.signal.aborted) return;
+            resources().report({ requestId: String(generation), state: state.palette ? 'retained' : 'unavailable',
+              actualBackend: 'canvas2d', reasons: [error.message] });
+          }).finally(function () { if (paletteController === controller) paletteController = null; });
         }
       }
       if (state.palette && state.palette.length === 3) return state.palette;
@@ -786,6 +880,11 @@
 
   function apply(spec, selecting) {
     var next = normalizeSpec(spec);
+    if (next.type !== 'cover') cancelPalette();
+    if (documentHidden() && (next.type !== state.spec.type || identity(next) !== identity(state.spec))) clearMedia(true);
+    if (next.type !== state.spec.type || identity(next) !== identity(state.spec)) {
+      sceneTimeMs = 0; advancing = false; backgroundPainted = false;
+    }
     if (!selecting && !temporaryApply && (next.type !== state.spec.type || identity(next) !== identity(state.spec))) api.commitSelection();
     state.spec = next;
     var root = document.documentElement;
@@ -793,6 +892,8 @@
 
     root.dataset.bgType = type;
     root.classList.toggle('creative-bg-on', type !== 'theme');
+    if (documentHidden()) { pendingApply = true; return state.spec; }
+    pendingApply = false;
     bindInput();
 
     if (type === 'theme') {
@@ -809,7 +910,7 @@
       return state.spec;
     }
 
-    ensureLayer();
+    if (!ensureLayer()) return state.spec;
     state.layer.hidden = false;
     state.layer.dataset.type = type;
 
@@ -834,6 +935,7 @@
         state.ctx.fillRect(0, 0, state.w, state.h);
       }
       state.specColX = 0;
+      backgroundPainted = false;
       if (type === 'flow') resetField();
     }
 
@@ -841,10 +943,9 @@
     if (!state.attached) {
       state.attached = true;
       if (window.Stage && Stage.gate) Stage.gate('background', targetFps, tick);
-      window.addEventListener('resize', function () {
-        if (isCanvasType()) sizeCanvas();
-        if (state.wallApi && state.wallApi.ready()) state.wallApi.resize();
-        refresh();
+      window.addEventListener('resize', onResize);
+      if (window.Stage && Stage.onFrameState) frameUnsubscribe = Stage.onFrameState(function (frame) {
+        if (!frame.playing || frame.documentHidden || frame.reduced) advancing = false;
       });
     }
 
@@ -902,7 +1003,7 @@
   function syncMediaVisibility() {
     if (!isVisible() && mediaProbe) { rememberPosition(); freezeMedia(); clearMedia(true); invalidateSource(); }
     if (isVisible()) resumeMedia(); else syncMediaPlayback();
-    if (!document.hidden) refresh();
+    if (!documentHidden()) refresh();
   }
 
   async function applyMedia() {
@@ -939,6 +1040,12 @@
       var src = lease ? lease.url : spec.url;
       if (!src) throw new Error('素材引用缺失，请重新导入图片或视频');
       var isVideo = spec.media === 'video' || /\.(mp4|webm|mov|m4v)$/i.test(src);
+      var bounds = lease && lease.decodeBounds;
+      if (!bounds) throw new Error('素材缺少可验证的解码上界，请从素材库重新选择');
+      var decodeTicket = resources().require({ decoderLeases: 1,
+        decodeReservedBytes: bounds.maxPixels * 4 * bounds.rgbaFrames }, bounds.basis, generation, 'bounded-estimate');
+      var lifetime = { ticket: decodeTicket, ended: false, detached: false };
+      state.mediaLifetime = lifetime;
       var el = document.createElement(isVideo ? 'video' : 'img');
       if (isVideo) {
         el.muted = true; el.loop = true; el.autoplay = false;
@@ -979,9 +1086,21 @@
           await seek(Math.min(el.duration / 4, 1));
           await seek(resumePoint && resumePoint.key === mediaKey ? Math.min(resumePoint.time, Math.max(0, el.duration - 0.01)) : 0);
         } else if (el.decode) { await el.decode(); current(); }
-        var canvas = document.createElement('canvas'); canvas.width = canvas.height = 1;
-        var ctx = canvas.getContext('2d'); ctx.drawImage(el, 0, 0, 1, 1); ctx.getImageData(0, 0, 1, 1);
+        var width = isVideo ? el.videoWidth : el.naturalWidth, height = isVideo ? el.videoHeight : el.naturalHeight;
+        var actual = { decoderLeases: 1, decodeReservedBytes: width * height * 4 * bounds.rgbaFrames };
+        var committed = decodeTicket.commit(actual);
+        if (!committed.ok || width > bounds.maxSide || height > bounds.maxSide) throw new Error('素材解码尺寸超过已声明上界');
+        var canvas = null, ctx = null, imageData = null;
+        var probeTicket = resources().require({ canvases: 1, drawingBufferPixels: 1, ownedCpuBytes: 8 },
+          'Backgrounds taint probe RGBA8 CPU canvas and ImageData', generation);
+        try {
+          canvas = document.createElement('canvas'); canvas.width = canvas.height = 1;
+          ctx = canvas.getContext('2d'); if (!ctx) throw new Error('素材验证画布不可用');
+          ctx.drawImage(el, 0, 0, 1, 1); imageData = ctx.getImageData(0, 0, 1, 1); probeTicket.commit();
+        } finally { if (canvas) canvas.width = canvas.height = 0; canvas = ctx = imageData = null; releaseTicket(probeTicket); }
       })();
+      function decodingEnded() { lifetime.ended = true; if (lifetime.detached) releaseTicket(decodeTicket); }
+      probe.then(decodingEnded, decodingEnded);
       await Promise.race([probe, new Promise(function (_, reject) {
         timeout = setTimeout(function () { reject(new Error('素材解码验证超过 15 秒，请重试或更换文件')); }, 15000);
       }), aborted]);
@@ -996,6 +1115,7 @@
       mediaListeners.push(function () { el.removeEventListener('error', failedPlayback); });
       configureDepth(); syncMediaPlayback(); refresh(); invalidateSource();
     } catch (e) {
+      if (lifetime && !probe) { lifetime.detached = lifetime.ended = true; releaseTicket(lifetime.ticket); }
       if (generation === mediaGeneration) { clearMedia(true); invalidateSource(); }
       throw e;
     } finally {
@@ -1005,7 +1125,7 @@
   }
 
   async function selectMedia(spec) {
-    if (pageInactive || document.hidden) throw abortedMedia();
+    if (pageInactive || documentHidden()) throw abortedMedia();
     var intent = ++selectionSerial, revision = presetRevision();
     if (!recoverySpec) { recoverySpec = JSON.parse(JSON.stringify(state.spec)); selectionPin = state.lease; }
     apply(spec, true);
@@ -1027,15 +1147,16 @@
   function setCover(url) {
     var next = url || null;
     if (next === state.coverUrl) return;
-    state.coverUrl = next;
+    cancelPalette(); state.coverUrl = next;
     if (state.spec.type === 'cover') refresh();
   }
 
   function init() {
+    if (coverPoll) return api;
     // 从封面读色：封面地址由 Stage 在换曲时写进 .disc 的 background-image。
     // 定时读一次比让 app.js 反过来通知本模块更省事，也不会引入新的耦合 ——
     // 一秒一次的成本可以忽略，而依赖方向保持单向（背景层读 DOM，DOM 不知道它）。
-    setInterval(function () {
+    coverPoll = setInterval(function () {
       var disc = $('cover');
       if (!disc) return;
       var bg = disc.style.backgroundImage || '';
@@ -1048,6 +1169,23 @@
 
   var api = {
     init: init,
+    destroy: function () {
+      cancelPalette(); clearInterval(coverPoll); coverPoll = 0;
+      state.palette = null;
+      clearMedia(); api.commitSelection(); destroyWall(); clearPoster();
+      state.ctx = null;
+      if (state.canvas) state.canvas.width = state.canvas.height = 0;
+      if (state.layer) state.layer.remove(); state.canvas = state.layer = null;
+      flow.px = flow.py = flow.life = null; flow.n = 0;
+      releaseTicket(flowTicket); releaseTicket(surfaceTicket); releaseTicket(canvasTicket);
+      flowTicket = surfaceTicket = canvasTicket = null;
+      state.spec = { type: 'theme' }; state.w = state.h = 0;
+      if (frameUnsubscribe) frameUnsubscribe(); frameUnsubscribe = null;
+      window.removeEventListener('resize', onResize);
+      if (window.Stage && Stage.removeGate) Stage.removeGate('background');
+      state.attached = pendingApply = backgroundDirty = backgroundPainted = advancing = false;
+      sceneTimeMs = 0; lastFrameId = -1;
+    },
     apply: apply,
     beginTemporaryApply: beginTemporaryApply,
     cancelTemporaryApply: function () { return releaseTemporaryApply(true); },
@@ -1096,14 +1234,14 @@
     },
     stats: function () {
       return {
-        type: state.spec.type, fps: targetFps(),
+        type: state.spec.type, fps: targetFps(), sceneTimeMs: sceneTimeMs,
         host: state.stageHost ? 'stage3d' : 'home',
         depthMode: state.spec.depthMode || 'flat',
         depthEffective: state.depthEffective,
         wallReady: !!(state.wallApi && state.wallApi.ready()),
         wallTex: state.wallApi && state.wallApi.ready() ? state.wallApi.textureSize() : null,
         size: state.w + 'x' + state.h,
-        palette: palette().map(function (c) {
+        palette: (state.palette || themeColors()).map(function (c) {
           return '#' + c.map(function (v) { return ('0' + Math.round(v * 255).toString(16)).slice(-2); }).join('');
         })
       };
@@ -1113,6 +1251,7 @@
   window.Backgrounds = api;
   if (window.addEventListener) {
     window.addEventListener('pagehide', function () {
+      cancelPalette();
       pageInactive = true; selectionSerial++; rememberPosition();
       clearMedia(true); api.commitSelection();
       if (temporaryApply) releaseTemporaryApply(false);
@@ -1122,7 +1261,13 @@
       if (e.persisted) resumeMedia();
     });
   }
-  document.addEventListener('visibilitychange', syncMediaVisibility);
+  document.addEventListener('visibilitychange', function () {
+    advancing = false;
+    if (documentHidden()) cancelPalette();
+    else if (state.spec.type === 'cover') refresh();
+    if (!documentHidden() && pendingApply) apply(state.spec);
+    syncMediaVisibility();
+  });
   document.addEventListener('stage:visibility', function () { Promise.resolve().then(syncMediaVisibility); });
   document.addEventListener('service:connection', function (event) {
     serviceOnline = !!event.detail.connected;

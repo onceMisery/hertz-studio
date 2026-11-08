@@ -23,6 +23,12 @@
 (function () {
   'use strict';
 
+  // The Stage facade includes native parent-window suspension. Standalone consumers keep browser visibility.
+  function documentHidden() {
+    var stage = window.Stage;
+    return stage && typeof stage.isDocumentHidden === "function" ? stage.isDocumentHidden() : !!document.hidden;
+  }
+
   var SPRITE = 32;          // 2D 光点精灵的画布边长
   var RIPPLE_POOL = 12;     // 涟漪 DOM 节点池：同时最多 12 圈
   var RIPPLE_MS = 1600;
@@ -909,7 +915,11 @@
       // GL 的最后一帧会一直糊在 canvas 上（GL 的 drawingBuffer 不受 2D clearRect 影响，
       // 但同一个 canvas 换 context 类型会直接失败，所以这里重建 canvas）。
       replaceCanvas(v);
-      if (next && !next.mount(v)) throw new Error('粒子画布创建失败');
+      if (next && !next.mount(v)) {
+        var failedResources = next.resources ? next.resources() : null;
+        var failureReason = failedResources && (failedResources.failure || failedResources.mount && failedResources.mount.reason);
+        throw new Error('粒子画布创建失败' + (failureReason ? '：' + failureReason : ''));
+      }
       currentTier = tierIndex(state.tier);
       budgetInput.tier = currentTier;
       budgetInput.dpr = Math.min(window.devicePixelRatio || 1, next.dpr[currentTier]);
@@ -1047,11 +1057,11 @@
   function tick(dtMs, frame) {
     if (!frame || frame.version !== 1 || lastFrameId === frame.frameId) return;
     lastFrameId = frame.frameId;
-    if (visible(frame) && active && active.w && active.h && !document.hidden) {
+    if (visible(frame) && active && active.w && active.h && !documentHidden()) {
       if (pendingAttachMode) attach(pendingAttachMode);
       else if (pendingFallback) { pendingFallback = false; degrade(degradedTo); }
     }
-    if (!renderer || !visible(frame) || document.hidden || !Stage.isStageVisible() || probeMuted) {
+    if (!renderer || !visible(frame) || documentHidden() || !Stage.isStageVisible() || probeMuted) {
       freeze(frame.spectrumRevision); return;
     }
     var v = pickView();

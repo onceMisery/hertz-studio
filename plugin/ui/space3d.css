@@ -28,6 +28,41 @@
 
 body.space3d-open #toast { z-index: 100; border-radius: 8px; }
 
+.sp-resource-status {
+  position: absolute;
+  z-index: 5;
+  inset-inline: 16px;
+  top: calc(80px + env(safe-area-inset-top, 0px));
+  max-width: 540px;
+  margin-inline: auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 16px;
+  border: 1px solid var(--sp-line);
+  border-radius: 8px;
+  background: var(--sp-glass-strong);
+  color: var(--sp-text);
+  font-size: 13px;
+}
+.sp-resource-status[hidden] { display: none; }
+.sp-resource-status button {
+  flex-shrink: 0;
+  padding: 6px 10px;
+  border: 1px solid var(--sp-line);
+  border-radius: 5px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.sp-resource-status button:focus-visible { outline: 2px solid var(--sp-accent); outline-offset: 3px; }
+.sp-resource-status button:active { transform: scale(.98); }
+@media (max-width: 480px) {
+  .sp-resource-status { gap: 8px; padding: 10px 12px; }
+}
+
 .sp {
   position: fixed;
   inset: 0;

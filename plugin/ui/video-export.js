@@ -26,6 +26,12 @@
 
 'use strict';
 
+  // The Stage facade includes native parent-window suspension. Standalone consumers keep browser visibility.
+  function documentHidden() {
+    var stage = window.Stage;
+    return stage && typeof stage.isDocumentHidden === "function" ? stage.isDocumentHidden() : !!document.hidden;
+  }
+
 window.VideoExport = (function () {
   // 画幅：与 folia 的 DEFAULT_VIDEO_EXPORT_PRESET_VALUES 一致
   // （1280x720 / 1920x1080 / 1080x1920）。
@@ -388,6 +394,50 @@ window.VideoExport = (function () {
   // -------------------------------------------------------------------------
 
   var session = null; // 活跃录制的全部可清理资源
+  var retiringSessions = new Set();
+
+  function releaseTicket(ticket) {
+    if (ticket) ticket.release({ apiReleased: true, allocationEnded: true });
+  }
+  function allocation(s, plan, source, precision) {
+    var ticket = s.resources.require(plan, source, 0, precision);
+    s.allocations.add(ticket); return ticket;
+  }
+  function retireAllocations(s) {
+    if (!s.cleaned || s.asyncAllocations || s.nativePending || s.cleanupFailed) return;
+    try { if (s.sourceLease) { s.sourceLease.release(); s.sourceLease = null; } }
+    catch (_) { s.cleanupFailed = true; s.resources.report({ lifecycle:'retiring',reason:'source-cleanup-failed' }); return; }
+    s.allocations.forEach(releaseTicket); s.allocations.clear();
+    retiringSessions.delete(s); s.resources.forgetReport();
+  }
+  function observeAllocation(s, promise) {
+    s.asyncAllocations++;
+    return Promise.resolve(promise).finally(function () { s.asyncAllocations--; retireAllocations(s); });
+  }
+  function releaseResult(result) {
+    if (!result || !result.release) return;
+    result.release();
+  }
+  function retainedResult(s, result) {
+    // Blob composition is charged as a distinct retained source. Its physical
+    // sharing with recorder chunks is an independent browser observation.
+    var ticket = s.resources.require({ ownedCpuBytes: s.bytes }, 'VideoExport retained encoded Blob output', 0);
+    try {
+      var blob = new Blob(s.chunks, { type:s.mimeType.split(';')[0] });
+      var committed = ticket.commit({ ownedCpuBytes: blob.size });
+      if (!committed.ok) throw new Error('contract-violation');
+      result.blob = blob; result.bytes = blob.size;
+      var consumers = 1;
+      function release() { if (consumers && !--consumers) { result.blob = null; blob = null; releaseTicket(ticket); } }
+      result.retain = function () {
+        if (!blob) throw new Error('resource-allocation-ended');
+        consumers++; var done = false;
+        return { get blob() { return blob; }, release:function () { if (!done) { done = true; release(); } } };
+      };
+      var released = false;
+      result.release = function () { if (!released) { released = true; release(); } };
+    } catch (error) { releaseTicket(ticket); throw error; }
+  }
 
   function cleanupSession(s) {
     if (!s) return;
@@ -397,14 +447,24 @@ window.VideoExport = (function () {
     s.control.abort();
     if (s.lyricAbort) s.lyricAbort.abort();
     if (s.recorder) {
-      s.recorder.ondataavailable = s.recorder.onerror = s.recorder.onstop = s.recorder.onstart = null;
+      s.recorder.onerror = s.recorder.onstart = null;
+      // A timeout revokes presentation authority, not the native encoder's
+      // allocation lifetime. Keep its final callbacks until stop really arrives.
+      if (!s.nativePending) s.recorder.ondataavailable = s.recorder.onstop = null;
       if (s.recorder.state !== 'inactive') { try { s.recorder.stop(); } catch (_) { /* Already stopped. */ } }
     }
     s.streams.forEach(function (st) {
       st.getTracks().forEach(function (t) { try { t.stop(); } catch (e) { /* 已停 */ } });
     });
     if (s.video) { s.video.onloadeddata = s.video.onerror = null; s.video.pause(); s.video.srcObject = null; s.video.remove(); }
-    if (s.out && s.out.parentNode) s.out.parentNode.removeChild(s.out);
+    if (s.endDecodeWait) { s.endDecodeWait(); s.endDecodeWait = null; }
+    if (s.out) { s.out.width = s.out.height = 0; if (s.out.parentNode) s.out.parentNode.removeChild(s.out); }
+    s.streams.length = 0; s.video = s.out = null;
+    s.cleaned = true;
+    s.allocations.forEach(function (ticket) { ticket.cancel(); });
+    retiringSessions.add(s);
+    s.resources.report({ lifecycle:'retiring', reason:s.cleanupFailed ? 'cleanup-failed' : s.nativePending ? 'encoder-unsettled' : s.asyncAllocations ? 'allocation-unsettled' : '' });
+    retireAllocations(s);
   }
 
   function revokeDownload() {
@@ -430,8 +490,7 @@ window.VideoExport = (function () {
       downloadRequested:false, message:reason || s.reason || '已停止。' };
     try {
       if (save && s.chunks.length) {
-        result.blob = new Blob(s.chunks, { type:s.mimeType.split(';')[0] });
-        result.bytes = result.blob.size;
+        retainedResult(s, result);
         var name = (s.title || 'hertz-studio').replace(/[\\/:*?"<>|\x00-\x1f]/g, '_').trim().slice(0,80) || 'hertz-studio';
         result.filename = name + '-' + s.preset.width + 'x' + s.preset.height + (s.audioMode === 'system' ? '' : '-silent') + '.' + s.extension;
         result.message += ' 已生成' + (s.reason ? '此前片段' : '视频') + '（' + audioLabel(s) + '），请确认下载已保存。';
@@ -446,7 +505,7 @@ window.VideoExport = (function () {
           if (session === s) {
             session = null; recording = false; lastResult = result;
             hidePill();
-            if (save && !document.hidden) { ensureDom(); dom.scrim.hidden = false; }
+            if (save && !documentHidden()) { ensureDom(); dom.scrim.hidden = false; }
             if (dom && !dom.scrim.hidden) renderIdle('');
           }
         } finally { s.resolve(result); }
@@ -479,20 +538,26 @@ window.VideoExport = (function () {
     if (session) throw new Error('录制正在准备、进行或保存中');
     if (!supported()) throw new Error('当前浏览器不支持录制（需要 MediaRecorder）');
     if (isDbx()) throw new Error('插件形态不支持录制');
-    if (document.hidden) throw new Error('请在前台页面开始录制');
+    if (documentHidden()) throw new Error('请在前台页面开始录制');
     opts = opts || {};
     var requested = opts.preset && opts.preset.id || '1080p';
     var preset = PRESETS.find(function (p) { return p.id === requested; });
     if (!preset) throw new Error('不支持这个录制画幅');
     if (opts.format && ['auto','mp4','webm'].indexOf(opts.format) < 0) throw new Error('不支持这个录制格式');
     if (!pickFormat(opts.format)) throw new Error('当前浏览器不支持所选录制格式');
+    var ledger = window.Stage && Stage.resources && Stage.resources();
+    if (!ledger || ledger.contractVersion !== 1) throw new Error('resource-policy-required');
     var s = {phase:'starting',preset:preset,streams:[],dispose:[],timers:new Set(),chunks:[],bytes:0,
+      resources:ledger.port('video-export'),allocations:new Set(),asyncAllocations:0,nativePending:false,
       control:new AbortController(),audioMode:opts.systemAudio ? 'pending' : 'silent',audioReason:'未请求系统声音'};
     s.done = new Promise(function (resolve) { s.resolve = resolve; });
     s.cancelled = new Promise(function (resolve) { s.cancelWait = resolve; });
+    // Reserve the original recording maximum before replacing the previous
+    // result, requesting permissions or starting an encoder.
+    s.chunkTicket = allocation(s, { ownedCpuBytes:MAX_BYTES }, 'VideoExport original256MiB recorder chunk envelope');
     session = s; recording = true;
     try {
-      revokeDownload(); lastResult = null;
+      revokeDownload(); releaseResult(lastResult); lastResult = null;
       showPill(s);
       if (dom && !dom.scrim.hidden) renderSession(s);
 
@@ -501,11 +566,11 @@ window.VideoExport = (function () {
       var audioRequest = Promise.resolve(null);
       if (opts.systemAudio && navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia) {
         try {
-          audioRequest = Promise.resolve(navigator.mediaDevices.getDisplayMedia({video:true,
+          audioRequest = observeAllocation(s, Promise.resolve(navigator.mediaDevices.getDisplayMedia({video:true,
             audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false}})).then(function (stream) {
             if (session !== s || s.finished) { stream.getTracks().forEach(function (t) { t.stop(); }); return null; }
             s.streams.push(stream); return stream;
-          }, function () { s.audioReason = '未获共享授权'; return null; });
+          }, function () { s.audioReason = '未获共享授权'; return null; }));
         } catch (_) { s.audioReason = '系统声音共享不可用'; }
       } else if (opts.systemAudio) s.audioReason = '浏览器不支持系统声音共享';
 
@@ -524,6 +589,13 @@ window.VideoExport = (function () {
       var surface = window.Stage3D && Stage3D.recordingSurface ? Stage3D.recordingSurface() : null;
       var srcCanvas = surface && surface.canvas;
       if (!srcCanvas) throw new Error('当前舞台没有可录制的三维画布，请选择沉浸声场或高级编排的三维场景');
+      if (!surface.acquire) throw new Error('当前舞台尚未提供录制资源计划，请选择高级编排的三维场景');
+      s.sourceLease = surface.acquire();
+      if (s.sourceLease.canvas !== srcCanvas) throw new Error('recording-source-unavailable');
+      var sourcePixels = srcCanvas.width * srcCanvas.height;
+      if (!Number.isSafeInteger(sourcePixels) || sourcePixels <= 0) throw new Error('estimate-unavailable');
+      var decodeTicket = allocation(s, { decoderLeases:1,decodeReservedBytes:sourcePixels * 4 * 6 },
+        'VideoExport captured source decoder six-frame workspace', 'bounded-estimate');
       var lost = function () { s.failed = true; stop('舞台图形上下文中断，尝试保留此前片段。'); };
       srcCanvas.addEventListener('webglcontextlost',lost);
       s.dispose.push(function () { srcCanvas.removeEventListener('webglcontextlost',lost); });
@@ -540,22 +612,28 @@ window.VideoExport = (function () {
       video.setAttribute('aria-hidden', 'true');
       video.style.cssText = 'position:fixed;left:-99999px;top:0;width:2px;height:2px;opacity:0;pointer-events:none;';
       var decoded = new Promise(function (resolve, reject) {
+        s.endDecodeWait = resolve;
         video.onloadeddata = resolve;
         video.onerror = function () { reject(new Error('舞台画面解码失败')); };
       });
       video.srcObject = new MediaStream([srcStream.getVideoTracks()[0]]);
+      decodeTicket.commit();
       document.body.appendChild(video);
       // A paused creative scene sleeps after its last presented frame. Its owner
       // must paint once after capture starts; do not read a discarded GL buffer
       // or change playback just to make the capture video receive its first frame.
       if (surface.requestFrame) surface.requestFrame();
-      await bounded(s,Promise.all([decoded,video.play()]),5000,'未收到舞台画面，请检查舞台是否可见');
+      await bounded(s,observeAllocation(s,Promise.all([decoded,video.play()])),5000,'未收到舞台画面，请检查舞台是否可见');
+      s.endDecodeWait = null;
       video.onloadeddata = video.onerror = null;
 
       // The display video track is never recorded or read. Keep its permission
       // lifetime until cleanup: stopping it early can also end the audio capture.
 
       // 4. 合成画布：cover 重采样到目标画幅 + 自绘歌词层。
+      var outputPixels = preset.width * preset.height;
+      var outputTicket = allocation(s, { canvases:1,drawingBufferPixels:outputPixels,ownedCpuBytes:outputPixels * 4 },
+        'VideoExport RGBA8 composition canvas');
       var out = document.createElement('canvas');
       s.out = out;
       out.width = preset.width;
@@ -563,6 +641,7 @@ window.VideoExport = (function () {
       out.setAttribute('aria-hidden', 'true');
       var ctx = out.getContext('2d', { alpha: false });
       if (!ctx) throw new Error('无法创建录制合成画布');
+      outputTicket.commit();
       ctx.imageSmoothingQuality = 'high';
 
       function drawCover() {
@@ -672,12 +751,15 @@ window.VideoExport = (function () {
         audioTracks.forEach(function (t) { outStream.addTrack(t); });
       var fmt = pickFormat(opts.format);
       if (!fmt) throw new Error('浏览器没有可用的视频编码格式');
+      var encoderTicket = allocation(s, { decoderLeases:1,decodeReservedBytes:outputPixels * 4 * 6 },
+        'VideoExport native encoder six-frame workspace', 'bounded-estimate');
       var recorder = new MediaRecorder(outStream, {
           mimeType: fmt.mimeType,
           audioBitsPerSecond: AUDIO_BITS_PER_SECOND,
           videoBitsPerSecond: videoBitsPerSecond(preset)
       });
       s.recorder = recorder;
+      encoderTicket.commit();
       s.mimeType = recorder.mimeType || fmt.mimeType;
       s.extension = /^video\/mp4(?:;|$)/.test(s.mimeType) ? 'mp4' : /^video\/webm(?:;|$)/.test(s.mimeType) ? 'webm' : null;
       if (!s.extension) throw new Error('浏览器返回了无法识别的视频格式');
@@ -693,13 +775,20 @@ window.VideoExport = (function () {
       });
       recorder.ondataavailable = function (e) {
         if (s.finished || session !== s || !e.data || !e.data.size) return;
-        if (s.bytes + e.data.size <= MAX_BYTES) { s.chunks.push(e.data); s.bytes += e.data.size; }
+        if (s.bytes + e.data.size <= MAX_BYTES) {
+          var charged = s.chunkTicket.materialize({ ownedCpuBytes:e.data.size });
+          if (!charged.ok) { s.failed = true; stop('录制数据超过资源计划，尝试保存此前片段。'); return; }
+          s.chunks.push(e.data); s.bytes += e.data.size;
+        }
         else s.reason = '录制缓冲已满，尝试保存此前片段，文件可能不完整。';
         if (s.bytes >= MAX_BYTES || s.reason) stop(s.reason || '达到录制大小限制。');
       };
       recorder.onerror = function () { s.failed = true; stop('录制器发生异常，尝试保存此前片段，文件可能不完整。'); };
       recorder.onstop = function () {
+        s.nativePending = false;
+        s.chunkTicket.settle({ allocationEnded:true });
         s.mimeType = recorder.mimeType || s.mimeType;
+        if (s.finished) { recorder.ondataavailable = recorder.onstop = null; retireAllocations(s); return; }
         finish(s,true,s.reason || '录制已停止。');
       };
       [srcStream,outStream].concat(disp ? [disp] : []).forEach(function (stream) {
@@ -711,7 +800,8 @@ window.VideoExport = (function () {
       check(s);
       lyric = {title:'',artist:'',lines:[],playing:false,positionMs:0,fetchedAt:0};
       drawCover();
-      recorder.start(1000);
+      s.nativePending = true;
+      try { recorder.start(1000); } catch (error) { s.nativePending = false; throw error; }
       (function loop() {
         if (session !== s || (s.phase !== 'starting' && s.phase !== 'recording')) return;
         try {
@@ -763,17 +853,18 @@ window.VideoExport = (function () {
   }
 
   document.addEventListener('visibilitychange',function () {
-    if (document.hidden && session) stop('页面离开前台，停止并保留此前片段。');
+    if (documentHidden() && session) stop('页面离开前台，停止并保留此前片段。');
   });
   window.addEventListener('beforeunload',function (event) {
     if (!session) return;
     event.preventDefault(); event.returnValue = '';
   });
-  window.addEventListener('pagehide',function () { if (session) stop('页面已关闭，尝试保留此前片段。'); revokeDownload(); });
+  window.addEventListener('pagehide',function () { if (session) stop('页面已关闭，尝试保留此前片段。'); revokeDownload(); releaseResult(lastResult); });
 
   return { supported:supported,open:open,close:close,begin:begin,stop:stop,isRecording:function () { return !!session; },
-    status:function () { return session ? {phase:session.phase,audioMode:session.audioMode,mimeType:session.mimeType || '',bytes:session.bytes}
+    status:function () { return session ? {phase:session.phase,audioMode:session.audioMode,mimeType:session.mimeType || '',bytes:session.bytes,retiring:retiringSessions.size}
       : {phase:'idle',audioMode:lastResult && lastResult.audioMode || null,mimeType:lastResult && lastResult.mimeType || '',
+        retiring:retiringSessions.size,
         bytes:lastResult && lastResult.bytes || 0,downloadRequested:!!(lastResult && lastResult.downloadRequested),
         failed:!!(lastResult && lastResult.failed),message:lastResult && lastResult.message || ''}; } };
 })();

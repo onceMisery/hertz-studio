@@ -1,5 +1,11 @@
 (function (global) {
   'use strict';
+
+  // The Stage facade includes native parent-window suspension. Standalone consumers keep browser visibility.
+  function documentHidden() {
+    var stage = window.Stage;
+    return stage && typeof stage.isDocumentHidden === "function" ? stage.isDocumentHidden() : !!document.hidden;
+  }
   var key = 'vmusic.player.transitions.v1', effects = ['zoom', 'flip', 'fade', 'off'];
   var prefs, current = null, media = global.matchMedia('(prefers-reduced-motion: reduce)');
   var ease = 'cubic-bezier(.4, 0, .2, 1)';
@@ -139,7 +145,7 @@
     global.addEventListener('resize', function () { cancel('cover'); });
     document.addEventListener('fullscreenchange', function () { cancel('cover'); });
     document.addEventListener('playback:track', function () { cancel('cover'); });
-    document.addEventListener('visibilitychange', function () { if (document.hidden) cancel(); });
+    document.addEventListener('visibilitychange', function () { if (documentHidden()) cancel(); });
     global.addEventListener('storage', function (event) { if (event.key === key || event.key === null) { cancel(); read(); sync(); } });
   }
   global.PlayerTransitions = { init: init, capture: capture, openPlayer: openPlayer, openStage: openStage, cancel: cancel };

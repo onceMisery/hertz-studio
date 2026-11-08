@@ -1,0 +1,5 @@
+{
+  "tools/build-stanza-pixi.mjs": "4a632ef2c2024749c21d9722924bb518e068b7cd6e337e859172a492156ea78e",
+  "tools/stanza-pixi/pixi-8.20.1.min.js": "9948591083793305468d73915a3ea85032dcf8e32eee7a1328585050d7a14d53",
+  "plugin/ui/vendor/pixi.min.js": "751e3612ec840d7b3506e7ba6c29800a935857f2b47137e4e8005918e60d9add"
+}

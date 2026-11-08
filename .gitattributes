@@ -42,6 +42,11 @@ tools/stage-fluid/LICENSE.md text eol=lf
 tools/stage-fluid/.build-manifest.json text eol=lf
 tools/build-stage-fluid.mjs text eol=lf
 plugin/ui/vendor/stage-fluid.js text eol=lf
+# Pinned Pixi inputs and generated output are byte-hashed by build-stanza-pixi.mjs.
+tools/build-stanza-pixi.mjs text eol=lf
+tools/stanza-pixi/*.js text eol=lf
+tools/stanza-pixi/.build-manifest.json text eol=lf
+plugin/ui/vendor/pixi.min.js text eol=lf
 # export-stage-contract.js --check compares these two generated files byte-for-byte.
 crates/hertz-studio/src/ai/stage-contract/stage-contract.json text eol=lf
 plugin/ui/creative-contract.js text eol=lf

@@ -36,10 +36,34 @@
   var FONT_STACK = '"PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", '
     + '"Hiragino Sans GB", system-ui, sans-serif';
 
-  var canvas = document.createElement('canvas');
-  canvas.width = ATLAS_W;
-  canvas.height = ATLAS_H;
-  var ctx = canvas.getContext('2d');
+  var canvas = null, ctx = null, sourcePort = null, canvasTicket = null, surfaceTicket = null;
+  var sourceUses = 0;
+  function releaseSource() {
+    if (sourceUses) return;
+    ctx = null; if (canvas) canvas.width = canvas.height = 0; canvas = null;
+    if (surfaceTicket) surfaceTicket.release({ apiReleased: true, allocationEnded: true });
+    if (canvasTicket) canvasTicket.release({ apiReleased: true, allocationEnded: true });
+    surfaceTicket = canvasTicket = null; sourcePort = null; lastSig = '';
+  }
+  function acquire(resources) {
+    if (!resources || resources.contractVersion !== 1) throw new Error('resource-policy-required');
+    if (!canvas) {
+      sourcePort = resources;
+      try {
+        canvasTicket = sourcePort.require({ canvases: 1 }, 'shared Lyric3D CPU atlas canvas identity', 0);
+        canvas = document.createElement('canvas'); canvas.width = canvas.height = 0;
+        canvasTicket.commit(); ctx = canvas.getContext('2d');
+        if (!ctx) throw new Error('歌词图集画布不可用');
+        setQuality(quality);
+      } catch (error) { releaseSource(); throw error; }
+    }
+    var result = resources.retain(canvasTicket.resourceId, resources.nextId());
+    if (!result.ok) throw new Error(result.reason);
+    sourceUses++; var ended = false;
+    return { release: function () {
+      if (ended) return; ended = true; result.ticket.release(); sourceUses--; releaseSource();
+    } };
+  }
 
   // 帧签名：index + 九格文本 + 有无歌词。相同就跳过重画。
   var lastSig = '';
@@ -48,15 +72,24 @@
     var next = Number(q);
     if (!isFinite(next)) next = 2;
     next = next < 0 ? 0 : next > 2 ? 2 : next | 0;
-    if (next === quality) return;
-
-    quality = next;
-    ATLAS_W = ATLAS_WIDTHS[next];
-    CELL_H = CELL_HEIGHTS[next];
-    ATLAS_H = CELLS * CELL_H;
+    if (!canvas) { quality = next; return; }
+    if (next === quality && surfaceTicket) return;
+    var width = ATLAS_WIDTHS[next], cellHeight = CELL_HEIGHTS[next], height = CELLS * cellHeight;
+    var peak = Math.max(width * canvas.height, width * height);
+    var ticket = sourcePort.require({ drawingBufferPixels: peak, ownedCpuBytes: peak * 4 },
+      'shared Lyric3D RGBA8 CPU atlas resize old plus new/intermediate surface', 0);
+    try {
+      canvas.width = width; canvas.height = height;
+      ticket.commit({ drawingBufferPixels: width * height, ownedCpuBytes: width * height * 4 });
+      if (surfaceTicket) surfaceTicket.release({ apiReleased: true, allocationEnded: true });
+      surfaceTicket = ticket;
+    } catch (error) {
+      // Setter may have partially replaced the source; clear it before ending allocation authority.
+      canvas.width = canvas.height = 0; ctx = null;
+      ticket.release({ apiReleased: true, allocationEnded: true }); throw error;
+    }
+    quality = next; ATLAS_W = width; CELL_H = cellHeight; ATLAS_H = height;
     MAX_TEXT_W = ATLAS_W - Math.round(ATLAS_W * 0.10);
-    canvas.width = ATLAS_W;
-    canvas.height = ATLAS_H;
     lastSig = '';
   }
 
@@ -167,6 +200,7 @@
   // 与上次相同，也要把图集重画成调用方要的内容。
   // 返回 true 表示图集像素本帧发生了变化（GL 侧需要 texSubImage2D）。
   function frame(lyric, force) {
+    if (!ctx || !canvas) throw new Error('resource-policy-required');
     var r = signature(lyric);
     var index = r.index;
     if (!force && r.sig === lastSig) return false;
@@ -190,10 +224,11 @@
   }
 
   window.Lyric3D = {
+    acquire: acquire,
     frame: frame,
     setQuality: setQuality,
     sig: function (lyric) { return signature(lyric).sig; },
-    canvas: canvas,
+    get canvas() { return canvas; },
     size: function () {
       return { w: ATLAS_W, h: ATLAS_H, cells: CELLS, cellH: CELL_H, mid: MID, quality: quality };
     }

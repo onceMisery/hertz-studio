@@ -9,10 +9,26 @@ export const postSpecs = {
   bloom: number('对比度辉映', 0, 0, 12, 1)
 };
 export const optionalEffectSpecs = { dust: commonParams.dust, discRing: commonParams.discRing, ripples: commonParams.ripples, ...postSpecs };
+function dustResourcePlan() { return { ownedCpuBytes: 1200 * 3 * 4, bufferDeclaredBytes: 1200 * 3 * 4 }; }
+function orbitResourcePlan() {
+  const geometryBytes = 24 * 8 * 4 + 36 * 2, matrixBytes = 64 * 16 * 4;
+  return { ownedCpuBytes: geometryBytes + matrixBytes + (24 * 8 + 36) * 8, bufferDeclaredBytes: geometryBytes + matrixBytes };
+}
+function rippleResourcePlan() {
+  const vertices = 5 * 65, indices = 6 * 4 * 64, geometryBytes = vertices * 8 * 4 + indices * 2;
+  return { ownedCpuBytes: geometryBytes + 6 * 16 * 4 + 6 * 4 + (vertices * 8 + indices) * 8, bufferDeclaredBytes: geometryBytes + 6 * 16 * 4 };
+}
+export function effectsResourcePlan() {
+  const plans = [dustResourcePlan(), orbitResourcePlan(), rippleResourcePlan()];
+  return { ownedCpuBytes: plans.reduce((sum, plan) => sum + plan.ownedCpuBytes, 0), bufferDeclaredBytes: plans.reduce((sum, plan) => sum + plan.bufferDeclaredBytes, 0) };
+}
 export function createDust(ctx) {
-  const T = ctx.THREE, group = root(ctx), count = 1200, positions = new Float32Array(count * 3);
+  const T = ctx.THREE, group = root(ctx), count = 1200;
+  const declared = dustResourcePlan(), plan = ctx.scope.bufferPlan(declared.ownedCpuBytes, declared.bufferDeclaredBytes, 'Space dust position1200');
+  const positions = new Float32Array(count * 3);
   for (let i = 0; i < count; i++) { positions[i * 3] = (seed(i, 1) - .5) * 24; positions[i * 3 + 1] = (seed(i, 2) - .5) * 16; positions[i * 3 + 2] = (seed(i, 3) - .5) * 24; }
-  const geometry = own(ctx, new T.BufferGeometry()); geometry.setAttribute('position', new T.BufferAttribute(positions, 3));
+  const geometry = own(ctx, new T.BufferGeometry()); geometry.setAttribute('position', plan.upload(new T.BufferAttribute(positions, 3)));
+  plan.cpuReady(positions.byteLength);
   const material = own(ctx, new T.PointsMaterial({ color: 0xbcdbdd, size: .035, transparent: true, opacity: .5, depthWrite: false }));
   const points = new T.Points(geometry, material); group.add(points); let profile = ctx.quality, params = ctx.params;
   function adjust() { geometry.setDrawRange(0, Math.floor(count * qualityDensity(profile) * (params.dust ?? 0))); group.visible = geometry.drawRange.count > 0; }
@@ -21,9 +37,14 @@ export function createDust(ctx) {
     params(p) { params = p; adjust(); }, quality(q) { profile = q; adjust(); }, stats: () => ({ particles: geometry.drawRange.count, drawCalls: group.visible ? 1 : 0 }) });
 }
 export function createSpectrumOrbit(ctx) {
-  const T = ctx.THREE, group = root(ctx), count = 64, geometry = own(ctx, new T.BoxGeometry(.065, 1, .065));
+  const T = ctx.THREE, group = root(ctx), count = 64;
+  const geometryBytes = 24 * 8 * 4 + 36 * 2, matrixBytes = count * 16 * 4;
+  const declared = orbitResourcePlan(), plan = ctx.scope.bufferPlan(declared.ownedCpuBytes, declared.bufferDeclaredBytes, 'Space spectrum orbit BoxGeometry and matrix64');
+  const geometry = own(ctx, new T.BoxGeometry(.065, 1, .065));
   const material = own(ctx, new T.MeshBasicMaterial({ color: 0xfca38f }));
   const mesh = own(ctx, new T.InstancedMesh(geometry, material, count)), o = new T.Object3D(); group.add(mesh); group.visible = !!ctx.params.discRing;
+  Object.values(geometry.attributes).forEach(attribute => plan.upload(attribute)); plan.upload(geometry.index); plan.upload(mesh.instanceMatrix);
+  plan.cpuReady(geometryBytes + matrixBytes);
   return basicInstance(group, ctx.params, ctx.quality, {
     update(f, p) {
       if (!p.discRing) return;
@@ -38,9 +59,14 @@ export function createSpectrumOrbit(ctx) {
   });
 }
 export function createRipple(ctx) {
-  const T = ctx.THREE, group = root(ctx), geometry = own(ctx, new T.TorusGeometry(1, .018, 4, 64));
+  const T = ctx.THREE, group = root(ctx), vertices = 5 * 65, indices = 6 * 4 * 64;
+  const geometryBytes = vertices * 8 * 4 + indices * 2, matrixBytes = 6 * 16 * 4, bornBytes = 6 * 4;
+  const declared = rippleResourcePlan(), plan = ctx.scope.bufferPlan(declared.ownedCpuBytes, declared.bufferDeclaredBytes, 'Space ripple TorusGeometry4x64, matrix6 and born6');
+  const geometry = own(ctx, new T.TorusGeometry(1, .018, 4, 64));
   const material = own(ctx, new T.MeshBasicMaterial({ color: 0x8fcdda, transparent: true, opacity: .4, depthWrite: false }));
   const mesh = own(ctx, new T.InstancedMesh(geometry, material, 6)), o = new T.Object3D(), born = new Float32Array(6).fill(-100); group.add(mesh);
+  Object.values(geometry.attributes).forEach(attribute => plan.upload(attribute)); plan.upload(geometry.index); plan.upload(mesh.instanceMatrix);
+  plan.cpuReady(geometryBytes + matrixBytes + bornBytes);
   let next = 0, previousOnset = false, previousBass = 0, last = -100;
   return basicInstance(group, ctx.params, ctx.quality, {
     update(f, p) {
@@ -115,15 +141,58 @@ void main(){
 }`;
 
 // One shared low-resolution target/pass; zero targets until a post control is enabled.
+const postGeometryBytes = (12 + 12 + 8) * 4 + 6 * 2;
+export function postResourcePlan(params, services, width, height) {
+  const active = Object.keys(postSpecs).some(key => Number(params[key] || services.post?.[key]) > 0);
+  return { programs: active ? 1 : 0, bufferDeclaredBytes: postGeometryBytes, ownedCpuBytes: postGeometryBytes,
+    renderTargetDeclaredBytes: active ? Math.max(1, Math.floor(width * .5)) * Math.max(1, Math.floor(height * .5)) * 8 : 0 };
+}
 export function createPostChain(ctx) {
   const T = ctx.THREE, scene = new T.Scene(), camera = new T.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+  const resources = ctx.resources;
+  const release = ticket => ticket?.release({ apiReleased: true, allocationEnded: true });
+  // PlaneGeometry(2,2): position/normal/uv Float32 plus six Uint16 indices.
+  const geometryBytes = postGeometryBytes;
+  const fixedTicket = resources?.require({ bufferDeclaredBytes: geometryBytes, ownedCpuBytes: geometryBytes },
+    'Space post original PlaneGeometry arrays/upload; program admitted by Three cache owner', 0);
   const uniforms = { uScene: { value: null }, uDepth: { value: null }, uPixel: { value: new T.Vector2(1, 1) },
     uTime: { value: 0 }, uNear: { value: ctx.camera.near }, uFar: { value: ctx.camera.far }, uFocus: { value: 12 }, uQuality: { value: 1 } };
   for (const key of Object.keys(postSpecs)) uniforms['u' + key[0].toUpperCase() + key.slice(1)] = { value: 0 };
-  const geometry = own(ctx, new T.PlaneGeometry(2, 2)), material = own(ctx, new T.ShaderMaterial({ uniforms, depthTest: false, depthWrite: false,
-    vertexShader: `varying vec2 vUv;void main(){vUv=uv;gl_Position=vec4(position.xy,0.0,1.0);}`, fragmentShader: postFragment }));
+  let geometry, material;
+  try {
+    geometry = own(ctx, new T.PlaneGeometry(2, 2));
+    if (fixedTicket) {
+      Object.values(geometry.attributes).forEach(attribute => { attribute.hertzBufferAdmission = fixedTicket; });
+      geometry.index.hertzBufferAdmission = fixedTicket;
+    }
+    material = own(ctx, new T.ShaderMaterial({ uniforms, depthTest: false, depthWrite: false,
+      vertexShader: `varying vec2 vUv;void main(){vUv=uv;gl_Position=vec4(position.xy,0.0,1.0);}`, fragmentShader: postFragment }));
+    fixedTicket?.materialize({ ownedCpuBytes: geometryBytes });
+  } catch (error) { if (material) ctx.scope.release(material); if (geometry) ctx.scope.release(geometry); release(fixedTicket); throw error; }
   const quad = new T.Mesh(geometry, material); quad.frustumCulled = false; scene.add(quad);
   let target = null, width = 1, height = 1, disposed = false, params = ctx.params || {}, profile = ctx.quality;
+  let targetTicket = null, rejectedSize = '', resourceFailure = '';
+  let fixedSubmitted = false;
+  function releaseTarget() {
+    uniforms.uScene.value = uniforms.uDepth.value = null;
+    target?.dispose(); target = null; release(targetTicket); targetTicket = null;
+  }
+  function candidateTarget() {
+    if (target && target.width === width && target.height === height) return null;
+    const key = width + 'x' + height;
+    if (rejectedSize === key) return null;
+    let ticket, value;
+    try {
+      ticket = resources?.require({ renderTargetDeclaredBytes: width * height * 8 },
+        'Space post RGBA8 color plus unsigned-int depth texture; old/new replacement peak', 0);
+      value = new T.WebGLRenderTarget(width, height, { minFilter: T.LinearFilter, magFilter: T.LinearFilter,
+        format: T.RGBAFormat, type: T.UnsignedByteType, stencilBuffer: false });
+      value.depthTexture = new T.DepthTexture(width, height); value.depthTexture.type = T.UnsignedIntType;
+      resourceFailure = ''; return { value, ticket };
+    } catch (error) {
+      value?.dispose(); release(ticket); rejectedSize = key; resourceFailure = error.message; return null;
+    }
+  }
   function active() { return Object.keys(postSpecs).some(key => Number(params[key] || ctx.services.post?.[key]) > 0); }
   function setParams(next) {
     params = { ...params, ...next };
@@ -131,32 +200,50 @@ export function createPostChain(ctx) {
       const value = Number(params[key] || ctx.services.post?.[key]) || 0;
       uniforms['u' + key[0].toUpperCase() + key.slice(1)].value = Math.max(spec.min, Math.min(spec.max, value));
     }
-    if (!active() && target) { target.dispose(); target = null; }
+    rejectedSize = '';
+    if (!active()) releaseTarget();
   }
   function resize(w, h) {
     if (typeof w === 'object') { h = w.height; w = w.width; }
-    width = Math.max(1, Math.floor((w || 1) * .5)); height = Math.max(1, Math.floor((h || 1) * .5));
-    target?.setSize(width, height); uniforms.uPixel.value.set(1 / width, 1 / height);
+    const nextWidth = Math.max(1, Math.floor((w || 1) * .5)), nextHeight = Math.max(1, Math.floor((h || 1) * .5));
+    if (width !== nextWidth || height !== nextHeight) rejectedSize = '';
+    width = nextWidth; height = nextHeight;
   }
   setParams(params);
   return {
+    retirementCandidates() { return disposed ? [] : [fixedTicket, targetTicket].filter(Boolean).map(ticket => ticket.resourceId); },
+    retryResources() { rejectedSize = ''; resourceFailure = ''; },
     update(frame) { uniforms.uTime.value = params.reduced ? 0 : frame.sceneTime ?? frame.time ?? 0; }, setParams,
     setQuality(q) { profile = q; uniforms.uQuality.value = q.mode === 'low' ? 0 : 1; }, resize,
     render(renderer, world, viewCamera) {
       if (disposed) return;
       if (!active()) { renderer.render(world, viewCamera); return; }
-      if (!target) {
-        target = new T.WebGLRenderTarget(width, height, { minFilter: T.LinearFilter, magFilter: T.LinearFilter });
-        target.depthTexture = new T.DepthTexture(width, height); target.depthTexture.type = T.UnsignedIntType;
-      }
-      uniforms.uScene.value = target.texture; uniforms.uDepth.value = target.depthTexture;
+      const candidate = candidateTarget(), drawingTarget = candidate?.value || target;
+      if (!drawingTarget) { renderer.render(world, viewCamera); return; }
+      uniforms.uScene.value = drawingTarget.texture; uniforms.uDepth.value = drawingTarget.depthTexture;
+      uniforms.uPixel.value.set(1 / drawingTarget.width, 1 / drawingTarget.height);
       uniforms.uNear.value = viewCamera.near; uniforms.uFar.value = viewCamera.far;
       uniforms.uFocus.value = Math.max(1, viewCamera.position.length()); uniforms.uQuality.value = profile?.mode === 'low' ? 0 : 1;
       const previousTarget = renderer.getRenderTarget(), previousAuto = renderer.autoClear;
-      try { renderer.autoClear = true; renderer.setRenderTarget(target); renderer.render(world, viewCamera); renderer.setRenderTarget(previousTarget); renderer.render(scene, camera); }
-      finally { renderer.setRenderTarget(previousTarget); renderer.autoClear = previousAuto; }
+      try {
+        renderer.autoClear = true; renderer.setRenderTarget(drawingTarget); renderer.render(world, viewCamera);
+        renderer.setRenderTarget(previousTarget); renderer.render(scene, camera);
+        if (!fixedSubmitted) { fixedTicket?.commit(); fixedSubmitted = true; }
+        if (candidate) {
+          candidate.ticket?.commit(); target?.dispose(); release(targetTicket);
+          target = candidate.value; targetTicket = candidate.ticket;
+        }
+      } catch (error) {
+        if (candidate) { candidate.value.dispose(); release(candidate.ticket); }
+        uniforms.uScene.value = target?.texture || null; uniforms.uDepth.value = target?.depthTexture || null;
+        throw error;
+      } finally { renderer.setRenderTarget(previousTarget); renderer.autoClear = previousAuto; }
     },
-    stats() { return { active: active(), drawCalls: active() ? 1 : 0, bytes: target ? width * height * 8 : 0 }; },
-    dispose() { if (disposed) return; disposed = true; target?.dispose(); target = null; quad.removeFromParent(); }
+    stats() { return { active: active(), drawCalls: active() && target ? 1 : 0,
+      bytes: target ? target.width * target.height * 8 : 0, resourceFailure }; },
+    dispose() {
+      if (disposed) return; disposed = true; quad.removeFromParent(); releaseTarget();
+      ctx.scope.release(material); ctx.scope.release(geometry); release(fixedTicket);
+    }
   };
 }

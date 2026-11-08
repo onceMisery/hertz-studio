@@ -332,10 +332,19 @@ const HOST_SCRIPT: &str = r#"
   }
   function setup() {
     try {
+      var presentationHidden = true;
       window.__hertzWindowHost = {
         kind: 'window-host',
         documentId: documentId,
         lifecycleVersion: 1,
+        presentationVersion: 1,
+        get presentationHidden() { return presentationHidden; },
+        presentationChanged: function (visible) {
+          if (typeof visible !== 'boolean' || presentationHidden === !visible) return;
+          presentationHidden = !visible;
+          window.dispatchEvent(new CustomEvent('hertz-native-presentation', { detail: { documentId: documentId, hidden: presentationHidden } }));
+          document.dispatchEvent(new Event('visibilitychange'));
+        },
         downloadVersion: 1,
         obsPreviewVersion: 1,
         fileImportVersion: fileImportSupported ? 1 : 0,
@@ -1098,6 +1107,8 @@ pub fn run_window(mut args: Args) -> anyhow::Result<()> {
         let _ = lifecycle_proxy.send_event(event);
     }));
     window.set_visible(true);
+    let mut main_webview_visible = true;
+    let mut main_presentation_state: Option<(String, bool)> = None;
     placement::record(&window, owner.as_ref(), false);
 
     println!(
@@ -1127,6 +1138,7 @@ pub fn run_window(mut args: Args) -> anyhow::Result<()> {
         *control_flow = quit_ui.deadline().map_or(ControlFlow::Wait, ControlFlow::WaitUntil);
         #[cfg(windows)]
         let Some(event) = events.map_event(event) else { return; };
+        let update_presentation = matches!(&event, Event::MainEventsCleared);
         match event {
             Event::NewEvents(StartCause::Init) => {
                 println!("  display  event loop 就绪");
@@ -1424,6 +1436,28 @@ pub fn run_window(mut args: Args) -> anyhow::Result<()> {
             }
             Event::LoopDestroyed => { obs_preview.take(); owner.take(); }
             _ => {}
+        }
+        if update_presentation {
+            // WebView2 can stop rAF while leaving document.hidden false.
+            // Native visibility belongs to this window and verified document.
+            let visible = window.is_visible() && !window.is_minimized();
+            if let Some(id) = quit_ui.document_id.as_deref() {
+                let state = (id.to_owned(), visible);
+                if main_presentation_state.as_ref() != Some(&state) {
+                    let payload = serde_json::json!({ "documentId": id, "visible": visible });
+                    let script = format!("(function(p){{var h=window.__hertzWindowHost;if(h&&h.documentId===p.documentId&&h.presentationVersion===1)h.presentationChanged(p.visible);}})({payload});");
+                    match webview.evaluate_script(&script) {
+                        Ok(()) => main_presentation_state = Some(state),
+                        Err(error) => tracing::warn!(%error, "同步主窗口呈现状态失败"),
+                    }
+                }
+            }
+            if visible != main_webview_visible {
+                match webview.set_visible(visible) {
+                    Ok(()) => main_webview_visible = visible,
+                    Err(error) => tracing::warn!(%error, "同步主窗口 WebView 可见性失败"),
+                }
+            }
         }
         if !matches!(*control_flow, ControlFlow::Exit) {
             *control_flow = quit_ui.deadline().map_or(ControlFlow::Wait, ControlFlow::WaitUntil);

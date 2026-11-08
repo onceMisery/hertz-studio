@@ -19,6 +19,12 @@
 (function () {
   'use strict';
 
+  // The Stage facade includes native parent-window suspension. Standalone consumers keep browser visibility.
+  function documentHidden() {
+    var stage = window.Stage;
+    return stage && typeof stage.isDocumentHidden === "function" ? stage.isDocumentHidden() : !!document.hidden;
+  }
+
   var DEFAULT_SCENE = 'anime-coast';
   var probeCache = null;
   var reason = null;
@@ -180,7 +186,7 @@
   // 挂载期间 visibilitychange 就够。
   document.addEventListener('visibilitychange', function () {
     if (!mounted || !host) return;
-    host.dataset.motion = document.hidden ? 'paused' : 'running';
+    host.dataset.motion = documentHidden() ? 'paused' : 'running';
   });
 
   // 帧门测得吃不住（lowfx）就摘掉音频呼吸辉光 —— transform/opacity 主层本来就

@@ -22,6 +22,12 @@
 (function () {
   'use strict';
 
+  // The Stage facade includes native parent-window suspension. Standalone consumers keep browser visibility.
+  function documentHidden() {
+    var stage = window.Stage;
+    return stage && typeof stage.isDocumentHidden === "function" ? stage.isDocumentHidden() : !!document.hidden;
+  }
+
   var MAX_TEX_EDGE = 1024;
 
   var VERT = [
@@ -125,6 +131,17 @@
   var texW = 0, texH = 0;
   var source = null;
   var onLost = null;
+  var resources = null, fixedTicket = null, surfaceTicket = null, uploadTicket = null, textureTicket = null;
+  var generation = 0, failedUpload = '', failedResize = '', failure = null;
+  function releaseTicket(ticket) { if (ticket) ticket.release({ apiReleased: true, allocationEnded: true }); }
+  function report(reason) {
+    failure = reason || null;
+    if (resources) resources.report({ requestedBackend: 'webgl2', actualBackend: gl ? 'webgl2' : 'none',
+      status: gl ? 'live' : 'unavailable', reasons: reason ? [reason] : [], logicalInstanceId: generation });
+  }
+  function contextLost(e) {
+    e.preventDefault(); var cb = onLost; api.dispose(); report('context-lost'); if (cb) cb();
+  }
 
   function compile(type, src) {
     var sh = gl.createShader(type);
@@ -149,17 +166,13 @@
     });
     if (!gl) return false;
 
-    var vs = compile(gl.VERTEX_SHADER, VERT);
-    var fs = compile(gl.FRAGMENT_SHADER, FRAG);
-    prog = gl.createProgram();
-    gl.attachShader(prog, vs);
-    gl.attachShader(prog, fs);
-    gl.linkProgram(prog);
-    gl.deleteShader(vs);
-    gl.deleteShader(fs);
-    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
-      throw new Error('program link failed: ' + gl.getProgramInfoLog(prog));
-    }
+    var vs = null, fs = null;
+    try {
+      vs = compile(gl.VERTEX_SHADER, VERT); fs = compile(gl.FRAGMENT_SHADER, FRAG);
+      prog = gl.createProgram(); if (!prog) throw new Error('program unavailable');
+      gl.attachShader(prog, vs); gl.attachShader(prog, fs); gl.linkProgram(prog);
+      if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error('program link failed: ' + gl.getProgramInfoLog(prog));
+    } finally { if (vs) gl.deleteShader(vs); if (fs) gl.deleteShader(fs); }
 
     ['uTex', 'uYaw', 'uPitch', 'uEnergy', 'uRes',
       'uAspect', 'uTexAspect', 'uHasTex'].forEach(function (n) {
@@ -167,6 +180,7 @@
       });
 
     tex = gl.createTexture();
+    if (!tex) throw new Error('texture unavailable');
     gl.bindTexture(gl.TEXTURE_2D, tex);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
@@ -174,14 +188,11 @@
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
 
     upCanvas = document.createElement('canvas');
+    upCanvas.width = upCanvas.height = 0;
     upCtx = upCanvas.getContext('2d', { willReadFrequently: false });
+    if (!upCtx) throw new Error('upload canvas unavailable');
 
-    canvas.addEventListener('webglcontextlost', function (e) {
-      e.preventDefault();
-      var cb = onLost;
-      gl = null;
-      if (cb) cb();
-    });
+    canvas.addEventListener('webglcontextlost', contextLost);
     return true;
   }
 
@@ -201,60 +212,84 @@
       dh = Math.min(sh, MAX_TEX_EDGE);
       dw = Math.max(1, Math.round(sw * dh / sh));
     }
-    if (upCanvas.width !== dw || upCanvas.height !== dh) {
-      upCanvas.width = dw;
-      upCanvas.height = dh;
-    }
+    var key = dw + 'x' + dh, nextUpload = null, nextTexture = null;
+    if (key === failedUpload) return !!texW;
     try {
+      if (upCanvas.width !== dw || upCanvas.height !== dh) {
+        var peakPixels = Math.max(dw * upCanvas.height, dw * dh);
+        nextUpload = resources.require({ drawingBufferPixels: peakPixels, ownedCpuBytes: peakPixels * 4 },
+          'BgWall bounded upload RGBA8 CPU resize coexistence/intermediate', generation);
+        nextTexture = resources.require({ textureDeclaredBytes: dw * dh * 4 },
+          'BgWall RGBA8 texture replacement old plus new', generation);
+        upCanvas.width = dw; upCanvas.height = dh;
+      }
       upCtx.drawImage(source, 0, 0, dw, dh);
+      gl.bindTexture(gl.TEXTURE_2D, tex); gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+      if (dw !== texW || dh !== texH) gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, upCanvas);
+      else gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, upCanvas);
+      if (nextUpload) {
+        nextUpload.commit({ drawingBufferPixels: dw * dh, ownedCpuBytes: dw * dh * 4 });
+        releaseTicket(uploadTicket); uploadTicket = nextUpload; nextUpload = null;
+        nextTexture.commit(); releaseTicket(textureTicket); textureTicket = nextTexture; nextTexture = null;
+      }
     } catch (e) {
-      return false; // 视频帧还没准备好 / 跨源，跳过这一帧
+      if (nextUpload) {
+        // A partial canvas setter cannot preserve its previous CPU surface.
+        upCanvas.width = upCanvas.height = 0; releaseTicket(uploadTicket); uploadTicket = null;
+      }
+      releaseTicket(nextUpload); releaseTicket(nextTexture); failedUpload = key;
+      report(e.message); return !!texW;
     }
-
-    gl.bindTexture(gl.TEXTURE_2D, tex);
-    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, upCanvas);
     texW = dw; texH = dh;
     return true;
   }
 
   function resize() {
-    if (!canvas || !gl) return;
+    if (!canvas || !gl || documentHidden()) return;
     // 背景层，DPR 压到 1：省下的像素在边缘雾化与上层压暗里根本看不出来。
     var dpr = Math.min(window.devicePixelRatio || 1, 1);
     var w = Math.max(1, Math.floor(canvas.clientWidth * dpr));
     var h = Math.max(1, Math.floor(canvas.clientHeight * dpr));
     if (canvas.width !== w || canvas.height !== h) {
-      canvas.width = w;
-      canvas.height = h;
+      var key = w + 'x' + h, ticket = null;
+      if (key === failedResize) return;
+      try {
+        var peak = Math.max(w * canvas.height, w * h);
+        ticket = resources.require({ drawingBufferPixels: peak, renderTargetDeclaredBytes: peak * 4 },
+          'BgWall RGBA8 drawing buffer old plus new/intermediate', generation);
+        canvas.width = w; canvas.height = h;
+        ticket.commit({ drawingBufferPixels: w * h, renderTargetDeclaredBytes: w * h * 4 });
+        releaseTicket(surfaceTicket); surfaceTicket = ticket;
+      } catch (e) {
+        if (ticket) { canvas.width = canvas.height = 0; releaseTicket(surfaceTicket); surfaceTicket = null; releaseTicket(ticket); }
+        failedResize = key; report(e.message);
+      }
     }
   }
 
   var api = {
     // hostEl：#creative-bg。成功时画布已挂进 DOM 且 GL 就绪。
-    attach: function (hostEl, lostCb) {
+    attach: function (hostEl, lostCb, options) {
       if (gl) return true;
-      // contextlost 后内部 canvas 变量还指着那张"死"画布，先摘掉再建新的
-      if (canvas && canvas.parentNode) canvas.parentNode.removeChild(canvas);
+      if (documentHidden() || !hostEl || !hostEl.getBoundingClientRect().width || !hostEl.getBoundingClientRect().height) return false;
+      api.dispose(); resources = options && options.resources;
+      if (!resources || resources.contractVersion !== 1) return false;
+      generation++;
       host = hostEl;
       onLost = lostCb || null;
-      canvas = document.createElement('canvas');
-      canvas.id = 'creative-bg-wall';
-      canvas.setAttribute('aria-hidden', 'true');
       try {
-        if (!initGl()) {
-          if (canvas.parentNode) canvas.parentNode.removeChild(canvas);
-          canvas = null;
-          return false;
-        }
+        fixedTicket = resources.require({ canvases: 2, gpuContexts: 1, programs: 1 },
+          'BgWall GL context/program and render/upload canvas identities', generation);
+        canvas = document.createElement('canvas'); canvas.width = canvas.height = 0;
+        canvas.id = 'creative-bg-wall'; canvas.setAttribute('aria-hidden', 'true');
+        if (!initGl()) throw new Error('context-unavailable');
+        fixedTicket.commit(); host.appendChild(canvas); resize();
+        if (!canvas.width || !canvas.height) throw new Error(failure || 'surface-unavailable');
+        report(); return true;
       } catch (e) {
-        if (canvas.parentNode) canvas.parentNode.removeChild(canvas);
-        canvas = null; gl = null;
+        api.dispose(); report(e.message);
         return false;
       }
-      host.appendChild(canvas);
-      resize();
-      return true;
     },
 
     detach: function () {
@@ -265,20 +300,27 @@
     // 彻底释放：切回主题 / 长时间不用时调用，连 GL 上下文一起还回去。
     dispose: function () {
       api.detach();
+      if (canvas) { canvas.removeEventListener('webglcontextlost', contextLost); canvas.width = canvas.height = 0; }
+      if (upCanvas) upCanvas.width = upCanvas.height = 0;
       if (gl) {
+        if (prog) gl.deleteProgram(prog); if (tex) gl.deleteTexture(tex);
         var ext = gl.getExtension('WEBGL_lose_context');
         if (ext) try { ext.loseContext(); } catch (e) { /* 忽略 */ }
       }
       canvas = null; gl = null; prog = null; tex = null;
       upCanvas = null; upCtx = null; U = {}; texW = texH = 0;
+      host = onLost = null;
+      releaseTicket(textureTicket); releaseTicket(uploadTicket); releaseTicket(surfaceTicket); releaseTicket(fixedTicket);
+      textureTicket = uploadTicket = surfaceTicket = fixedTicket = null; failedUpload = failedResize = '';
     },
 
-    setSource: function (el) { source = el; },
+    setSource: function (el) { if (source !== el) failedUpload = ''; source = el; },
 
     // o: { timeMs, yaw, pitch, energy }
     render: function (dtMs, o) {
       if (!gl) return false;
       resize();
+      if (!canvas.width || !canvas.height) return false;
       var has = upload();
       gl.viewport(0, 0, canvas.width, canvas.height);
       gl.useProgram(prog);
@@ -297,8 +339,9 @@
       return true;
     },
 
-    resize: resize,
+    resize: function () { failedResize = ''; resize(); },
     ready: function () { return !!gl; },
+    stats: function () { return { generation: generation, ready: !!gl, failure: failure }; },
     textureSize: function () { return texW ? [texW, texH] : null; }
   };
 

@@ -7,9 +7,12 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 
-function harness() {
+function harness(caps = {}) {
   let clock = 1, serial = 0;
   const timers = new Map(), frames = new Map(), tracks = [], recorders = [], requests = [], urls = new Set();
+  const ledger = require('../plugin/ui/stage-resource-budget').create({ contractVersion:1,policyVersion:'video-export-contract-only',qualification:'contract-test-only',
+    caps:{gpuContexts:16,canvases:64,drawingBufferPixels:33554432,programs:128,renderTargetDeclaredBytes:268435456,textureDeclaredBytes:268435456,
+      bufferDeclaredBytes:134217728,ownedCpuBytes:805306368,decodeReservedBytes:134217728,decoderLeases:8,...caps} });
   const env = {displayCalls:0,draws:[],downloads:[],track:{id:'track-a',title:'Fixture'},fail:'',media:null};
   class Events {
     constructor() { this.events = new Map(); }
@@ -82,14 +85,18 @@ function harness() {
   document.createElement=tag=>new Element(tag);
   const window=new Events(); window.window=window;
   const source=new Element('canvas');
-  env.surface={canvas:source,source:'creative',ownsLyrics:false};
+  env.sourceUses=0;
+  env.surface={canvas:source,source:'creative',ownsLyrics:false,acquire(){
+    env.sourceUses++; let released=false;
+    return {canvas:source,release(){if(!released){released=true;env.sourceUses--;}}};
+  }};
   const sandbox={window,document,console,Blob,Set,Promise,AbortController,HTMLCanvasElement:Element,MediaStream:Stream,MediaRecorder:Recorder,
     URL:{createObjectURL(){const url='blob:'+ ++serial;urls.add(url);return url;},revokeObjectURL(url){urls.delete(url);}},
     localStorage:{getItem(){return null;},setItem(){}},performance:{now:()=>clock},Date:{now:()=>clock},
     navigator:{mediaDevices:{getDisplayMedia(){env.displayCalls++;return env.media || Promise.resolve(new Stream([new Track('video'),new Track('audio')]));}}},
     setTimeout:timeout,clearTimeout:id=>timers.delete(id),setInterval:(fn,ms)=>timeout(fn,ms,ms),clearInterval:id=>timers.delete(id),
     requestAnimationFrame:fn=>{const id=++serial;frames.set(id,fn);return id;},cancelAnimationFrame:id=>frames.delete(id),
-    Stage3D:{open(){},recordingSurface:()=>env.surface},Stage:{presentation:()=>({track:env.track}),position:()=>1200},
+    Stage3D:{open(){},recordingSurface:()=>env.surface},Stage:{presentation:()=>({track:env.track}),position:()=>1200,resources:()=>ledger},
     fetch:async(route,opts)=>{
       requests.push({route,opts});
       if(env.fetch) return env.fetch(route,opts);
@@ -112,7 +119,7 @@ function harness() {
     throw Error('Unbounded timer loop');
   }
   const api=window.VideoExport;
-  return {api,env,tracks,recorders,requests,document,window,urls,timers,frames,Track,Stream,flush,advance,
+  return {api,ledger,env,tracks,recorders,requests,document,window,urls,timers,frames,Track,Stream,flush,advance,
     async start(opts={}) { const done=api.begin({preset:{id:'720p'},...opts}); await advance(1200); await advance(1);
       assert.equal(api.status().phase,'recording'); return {done}; },
     async frame(){clock+=16;const entries=[...frames];frames.clear();for(const [,fn]of entries)fn();await flush();},

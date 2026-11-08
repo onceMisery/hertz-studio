@@ -130,4 +130,30 @@ check('release notifications are coalesced and observers cannot alter the transa
   callbacks.shift()(); assert.deepEqual(events, ['available']);
   unsubscribe(); unsubscribe(); assert.equal(ledger.snapshot().listeners, 0);
 });
+check('serial preflight projects only this lifetime unleased resources without releasing or reserving quota', () => {
+  const ledger = budget.create(policy), port = ledger.port('renderer', 'current-lifetime');
+  const old = port.require({ ownedCpuBytes: 80 }, 'old serial scene', 1); old.commit();
+  const competitor = ledger.port('other').require({ ownedCpuBytes: 10 }, 'other live owner', 0); competitor.commit();
+  const before = ledger.snapshot(true);
+  assert.equal(port.preflight({ ownedCpuBytes: 95 }, [old.resourceId]).reason, 'aggregate-budget');
+  const projected = port.preflight({ ownedCpuBytes: 90 }, [old.resourceId]);
+  assert.equal(projected.ok, true); assert.equal(projected.projectedHeld.ownedCpuBytes, 100);
+  assert.deepEqual(ledger.snapshot(true), before);
+  assert.equal(port.preflight({ ownedCpuBytes: 90 }, [competitor.resourceId]).reason, 'resource-identity-conflict');
+  assert.equal(port.preflight({ ownedCpuBytes: 90 }, [old.resourceId, old.resourceId]).reason, 'invalid-retirement-plan');
+  const lease = port.retain(old.resourceId, 'protected-consumer').ticket;
+  assert.equal(port.preflight({ ownedCpuBytes: 90 }, [old.resourceId]).reason, 'resource-in-use');
+  lease.release(); old.release(proof);
+  const intervening = ledger.port('intervening').require({ ownedCpuBytes: 20 }, 'competing request after preflight', 0);
+  assert.throws(() => port.require({ ownedCpuBytes: 90 }, 'serial target actual reservation', 2), /aggregate-budget/);
+  intervening.release(proof); competitor.release(proof);
+});
+check('serial preflight validates finite plans and blocks closed or retired identities without side effects', () => {
+  const ledger = budget.create(policy), port = ledger.port('renderer'), before = ledger.snapshot(true);
+  assert.equal(port.preflight({ ownedCpuBytes: Infinity }, []).ok, false);
+  assert.equal(port.preflight({ nonexistent: 1 }, []).ok, false);
+  assert.equal(port.preflight({}, ['unknown']).reason, 'resource-identity-conflict');
+  assert.deepEqual(ledger.snapshot(true), before); ledger.close();
+  assert.equal(port.preflight({}, []).reason, 'page-resources-closed');
+});
 console.log(JSON.stringify({ passed: true, checks, module: 'production StageResourceBudget', scope: 'deterministic contract verification' }));

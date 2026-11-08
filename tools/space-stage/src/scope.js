@@ -1,10 +1,46 @@
-export function createScope() {
+export function createScope(options = {}) {
+  const pagePort = options.resources || null;
+  if (pagePort && pagePort.contractVersion !== 1) throw new Error('resource-policy-required');
   const controller = new AbortController();
   const resources = new Set();
   const cleanups = new Set();
   const timers = new Set();
   const leases = new Set();
-  let disposed = false;
+  const admissions = new Set();
+  let disposed = false, cleanupFailed = false, allocationTasks = 0;
+  function releaseAdmissions() {
+    if (!disposed || allocationTasks || cleanupFailed) return;
+    admissions.forEach(ticket => ticket.release({ apiReleased: true, allocationEnded: true })); admissions.clear();
+  }
+  function bufferPlan(cpuPeakBytes, bufferBytes, source) {
+    if (disposed) throw new Error('Scope disposed');
+    if (!pagePort) return { cpuReady() {}, upload(attribute) { return attribute; } };
+    let cpu, gpu;
+    try {
+      cpu = pagePort.require({ ownedCpuBytes: cpuPeakBytes }, source + ' CPU construction/retained array plan', options.generation || 0);
+      gpu = pagePort.require({ bufferDeclaredBytes: bufferBytes }, source + ' per-context buffer upload plan', options.generation || 0);
+    } catch (error) { cpu?.release({ apiReleased: true, allocationEnded: true }); throw error; }
+    admissions.add(cpu); admissions.add(gpu);
+    const uploaded = new WeakSet();
+    return {
+      cpuReady(bytes) { const result = cpu.commit({ ownedCpuBytes: bytes }); if (!result.ok) throw new Error('CPU allocation exceeds plan'); },
+      upload(attribute) {
+        const underlying = attribute.isInterleavedBufferAttribute ? attribute.data : attribute;
+        if (underlying.hertzBufferAdmission && underlying.hertzBufferAdmission !== gpu) throw new Error('buffer-plan-alias-conflict');
+        underlying.hertzBufferAdmission = gpu;
+        const previous = underlying.onUploadCallback;
+        underlying.onUpload(function () {
+          previous?.call(this);
+          if (disposed || uploaded.has(underlying)) return;
+          uploaded.add(underlying);
+          const result = gpu.materialize({ bufferDeclaredBytes: underlying.array.byteLength });
+          if (!result.ok) throw new Error('Buffer upload exceeds plan');
+          if (!gpu.state().pending.bufferDeclaredBytes) gpu.settle({ allocationEnded: true });
+        });
+        return attribute;
+      }
+    };
+  }
   function defer(fn) {
     if (typeof fn !== 'function') throw new Error('Cleanup must be a function');
     if (disposed) fn(); else cleanups.add(fn);
@@ -13,7 +49,7 @@ export function createScope() {
   function track(resource) {
     if (!resource || typeof resource.dispose !== 'function') throw new Error('Resource must be disposable');
     if (!resources.has(resource)) {
-      if (disposed) resource.dispose(); else resources.add(resource);
+      if (disposed) { try { resource.dispose(); } catch (error) { cleanupFailed = true; throw error; } } else resources.add(resource);
     }
     return resource;
   }
@@ -52,9 +88,34 @@ export function createScope() {
       } else if (resource.isWebGLRenderTarget) estimatedBytes += resource.width * resource.height * 8;
       else if (resource.isInstancedMesh) estimatedBytes += resource.instanceMatrix.array.byteLength + (resource.instanceColor ? resource.instanceColor.array.byteLength : 0);
     }
-    return { resources: resources.size, tasks: timers.size, cleanups: cleanups.size, leases: leases.size, estimatedBytes: Math.round(estimatedBytes) };
+    return { resources: resources.size, tasks: timers.size, cleanups: cleanups.size, leases: leases.size,
+      admissionTickets: admissions.size, allocationTasks, cleanupFailed, estimatedBytes: Math.round(estimatedBytes) };
   }
-  return { signal: controller.signal, track, trackTree, lease, defer, stats,
+  return { signal: controller.signal, track, trackTree, lease, defer, stats, bufferPlan,
+    retirementCandidates(renderer) {
+      // Unsettled factories and failed cleanup cannot forecast reclaimable quota.
+      if (allocationTasks || cleanupFailed) return [];
+      const ids = [...admissions].map(ticket => ticket.resourceId), programUses = new Map();
+      for (const material of resources) {
+        const attributes = material.isBufferGeometry ? [...Object.values(material.attributes), material.index,
+          ...Object.values(material.morphAttributes || {}).flat()] : material.isInstancedMesh ? [material.instanceMatrix, material.instanceColor] : [];
+        attributes.filter(Boolean).forEach(attribute => {
+          const underlying = attribute.isInterleavedBufferAttribute ? attribute.data : attribute;
+          if (underlying.hertzImplicitBufferResourceId) ids.push(underlying.hertzImplicitBufferResourceId);
+        });
+        if (!material.isMaterial || !renderer) continue;
+        const programs = renderer.properties.get(material).programs;
+        programs?.forEach(program => programUses.set(program, (programUses.get(program) || 0) + 1));
+      }
+      // Three's cache owns aliases: only forecast a program's retirement when
+      // every current material use belongs to this retiring scope.
+      programUses.forEach((count, program) => {
+        if (count === program.usedTimes && program.hertzProgramResourceId) ids.push(program.hertzProgramResourceId);
+      });
+      return [...new Set(ids)];
+    },
+    beginAllocation() { if (disposed) throw new Error('Scope disposed'); allocationTasks++; },
+    endAllocation() { if (allocationTasks) allocationTasks--; releaseAdmissions(); },
     release(resource) { if (resources.delete(resource)) resource.dispose(); },
     listen(target, event, handler, options) { target.addEventListener(event, handler, options); defer(() => target.removeEventListener(event, handler, options)); return handler; },
     timeout(fn, ms) { if (disposed) return null; const timer = setTimeout(() => { timers.delete(timer); if (!disposed) fn(); }, ms); timers.add(timer); return timer; },
@@ -64,9 +125,10 @@ export function createScope() {
       disposed = true;
       controller.abort();
       timers.forEach(clearTimeout); timers.clear();
-      [...cleanups].reverse().forEach(fn => { try { fn(); } catch (_) {} }); cleanups.clear();
-      [...leases].reverse().forEach(poolLease => { try { poolLease.release(); } catch (_) {} }); leases.clear();
-      [...resources].reverse().forEach(resource => { try { resource.dispose(); } catch (_) {} }); resources.clear();
+      [...cleanups].reverse().forEach(fn => { try { fn(); } catch (_) { cleanupFailed = true; } }); cleanups.clear();
+      [...leases].reverse().forEach(poolLease => { try { poolLease.release(); } catch (_) { cleanupFailed = true; } }); leases.clear();
+      [...resources].reverse().forEach(resource => { try { resource.dispose(); } catch (_) { cleanupFailed = true; } }); resources.clear();
+      admissions.forEach(ticket => ticket.cancel()); releaseAdmissions();
     },
   };
 }

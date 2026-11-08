@@ -645,7 +645,7 @@ function uiSourceFiles() {
     };
     ctx.window = ctx;
     vm.createContext(ctx);
-    for (const name of ['frame', 'schedule', 'setHidden']) {
+    for (const name of ['readDocumentHidden', 'frame', 'schedule', 'setHidden']) {
       const marker = 'function ' + name + '(';
       const start = stage.indexOf(marker);
       // Preserve the production parameters as well as the body: scheduling

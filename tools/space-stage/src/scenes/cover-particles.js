@@ -39,12 +39,20 @@ void main(){
  #include <colorspace_fragment>
 }`;
 
+const coverMaxGrid = 192;
+export function coverParticlesResourcePlan() {
+  const arrayBytes = coverMaxGrid * coverMaxGrid * 5 * 4;
+  return { ownedCpuBytes: arrayBytes + 3 * 8, bufferDeclaredBytes: arrayBytes };
+}
 export function createCoverParticles(ctx) {
   const T = ctx.THREE, group = root(ctx), sheet = new T.Group(); group.add(sheet);
-  const maxGrid = 192, positions = new Float32Array(maxGrid * maxGrid * 3), uvs = new Float32Array(maxGrid * maxGrid * 2);
+  const maxGrid = coverMaxGrid, declared = coverParticlesResourcePlan(), arrayBytes = declared.bufferDeclaredBytes;
+  const plan = ctx.scope.bufferPlan(declared.ownedCpuBytes, arrayBytes, 'Space authored cover particle position/UV arrays');
+  const positions = new Float32Array(maxGrid * maxGrid * 3), uvs = new Float32Array(maxGrid * maxGrid * 2);
+  plan.cpuReady(arrayBytes);
   const geometry = own(ctx, new T.BufferGeometry());
-  geometry.setAttribute('position', new T.BufferAttribute(positions, 3));
-  geometry.setAttribute('aCover', new T.BufferAttribute(uvs, 2));
+  geometry.setAttribute('position', plan.upload(new T.BufferAttribute(positions, 3)));
+  geometry.setAttribute('aCover', plan.upload(new T.BufferAttribute(uvs, 2)));
   const pointer = createParticlePointer(ctx, sheet, { surface: true, radius: 1.15 });
   const uniforms = { ...pointer.uniforms,
     uCover: { value: null }, uPrevious: { value: null }, uHasCover: { value: 0 }, uMix: { value: 1 },
@@ -80,12 +88,13 @@ export function createCoverParticles(ctx) {
     update(frame, p) {
       const source = ctx.services.coverUrl, url = (typeof source === 'function' ? source() : source) || frame.coverUrl || '';
       if (url !== key) {
-        resources.cover.release(previous); previous = null;
-        if (entry?.texture) previous = entry; else resources.cover.release(entry);
+        const lastGood = entry?.texture ? entry : previous;
+        if (previous !== lastGood) resources.cover.release(previous);
+        if (entry !== lastGood) resources.cover.release(entry);
+        previous = lastGood;
         key = url; entry = resources.cover.acquire(url, ctx.signal); uniforms.uMix.value = 0;
         if (!url) { resources.cover.release(previous); previous = null; }
       }
-      if (entry?.failed) { resources.cover.release(previous); previous = null; }
       const texture = entry?.texture || previous?.texture;
       uniforms.uCover.value = texture || null;
       uniforms.uPrevious.value = previous?.texture || texture || null;

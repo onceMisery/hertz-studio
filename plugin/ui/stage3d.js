@@ -39,6 +39,12 @@
 (function (global) {
   'use strict';
 
+  // The Stage facade includes native parent-window suspension. Standalone consumers keep browser visibility.
+  function documentHidden() {
+    var stage = window.Stage;
+    return stage && typeof stage.isDocumentHidden === "function" ? stage.isDocumentHidden() : !!document.hidden;
+  }
+
   // Node（无头契约扫描）下早退：不触碰 document / window。
   if (typeof window === 'undefined') return;
 
@@ -146,7 +152,9 @@
     create: function (host, seek) {
       if (!global.StanzaGlyph || !global.LyricGlyphGL) return null;
       if (global.Stage && Stage.tier && Stage.tier() === 0) return null;
-      return global.StanzaGlyph.init(host, seek);
+      var ledger = global.Stage && Stage.resources && Stage.resources();
+      if (!ledger) return null;
+      return global.StanzaGlyph.init(host, seek, {resources:ledger.port('stanza-glyph'), admissionRequired:true});
     },
     theme: baseLyricTheme, tuning: 'classicTuning', viewportResize: true });
   registerLyricRenderer({ id: 'cadenza', label: '心象', host: 's3d-fl-lyric',
@@ -817,35 +825,6 @@
   var gl = null;
   var glFailed = false;
   var contextLost = false;
-  // 渲染恢复预算。上下文丢失多半是一次显存回收或驱动重置，浏览器会自己恢复；
-  // 但两分钟内反复丢就是这台环境放不起来，每丢一次都重建一遍着色器链，只是把
-  // GPU 花在没人看得见的画面上，横幅还在「正在恢复」和画面之间闪。到顶就停用，
-  // 并把话说清楚（原话只有一句「可退出后重新进入」，等于把判断推给用户）。
-  var RECOVERY_WINDOW_MS = 120000, RECOVERY_MAX = 3;
-  var recoveryAt = [], glStopped = false;
-  var RECOVERY_STOPPED_TEXT = '渲染上下文在 2 分钟内已丢失 ' + RECOVERY_MAX
-    + ' 次，三维舞台已停用（音乐播放与歌词不受影响）。可在设置 → 开发者选项 导出日志，把这一段发给开发者。';
-
-  /// 剪掉窗口之外的丢失记录，返回仍在窗口内的时间戳。纯函数：真显卡重置没法
-  /// 按时间表演，预算判断只能这样才量得到。
-  function pruneRecoveries(history, now, windowMs) {
-    var out = [];
-    for (var i = 0; i < history.length; i += 1) {
-      if (now - history[i] < windowMs) out.push(history[i]);
-    }
-    return out;
-  }
-
-  /// 这次丢失还允许恢复吗。允许就把时间戳记进窗口并返回新表；预算用完返回
-  /// null（调用方据此停用，而不是继续重建）。与 prune 分开是为了让「记一次」
-  /// 这件事只有一条路径：先剪窗、再判额、再记。
-  function takeRecovery(history, now, windowMs, max) {
-    var kept = pruneRecoveries(history, now, windowMs);
-    if (kept.length >= max) return null;
-    kept.push(now);
-    return kept;
-  }
-
   var active = false;
   var fade = 0;             // 0..1 开合淡入淡出
   var fadeTarget = 0;
@@ -859,17 +838,57 @@
   var builtStages = {};     // id -> { draw, dispose, count }
   var post = null;          // 后处理资源
   var fsTri = null;
+  var graphicsPort = null, contextTicket = null, drawingTicket = null;
+  var graphicsFailure = '', graphicsGeneration = 0;
+  var inputTicket = null, inputPort = null;
+  var graphicsAllocations = new Map();
+  function deleteGraphic(kind, handle, context) {
+    if (!handle) return;
+    context = context || gl;
+    if (context) context['delete' + kind](handle);
+    releaseGraphicsTicket(graphicsAllocations.get(handle)); graphicsAllocations.delete(handle);
+  }
 
-  var time = 0;             // 秒
+  function graphicsResources() {
+    if (graphicsPort) return graphicsPort;
+    var ledger = global.Stage && Stage.resources && Stage.resources();
+    if (!ledger || ledger.contractVersion !== 1) throw new Error('resource-policy-required');
+    return graphicsPort = ledger.port('stage3d-gl');
+  }
+  function releaseGraphicsTicket(ticket) {
+    if (ticket) ticket.release({ apiReleased:true, allocationEnded:true });
+  }
+  function prepareGraphicsInput() {
+    if (inputTicket) return;
+    var ledger = global.Stage && Stage.resources && Stage.resources();
+    if (!ledger) throw new Error('resource-policy-required');
+    inputPort = ledger.port('stage3d-input');
+    var hasOnset = global.Onset && Onset.create;
+    inputTicket = inputPort.require({ ownedCpuBytes:448 + (hasOnset ? (4 * 64 + 5 * Onset.GROUPS.length + 30) * 8 : 0) },
+      'Stage3D three Float32 matrices,64 audio bins and original Onset history30 arrays', graphicsGeneration);
+    try {
+      proj = mat4(); view = mat4(); viewR = mat4(); audioBands = new Float32Array(64);
+      if (hasOnset) onset = Onset.create({ binCount:64,history:30 });
+      inputTicket.commit();
+    } catch (error) {
+      proj = view = viewR = audioBands = onset = null;
+      releaseGraphicsTicket(inputTicket); inputTicket = null; throw error;
+    }
+  }
+
+  var time = 0;             // 后端边界的秒值，唯一相位在 sceneTimeMs。
+  var sceneTimeMs = 0, sceneAdvancing = false, lastRawFrameId = -1, phaseScene = '';
+  var rawFirstSubmit = false, rawDirty = true, spectrumWatermark = 0, inputActive = false;
+  var layoutWidth = 0, layoutHeight = 0, rawFrameDisposer = null, rawFrameSignature = '', rawLastCover = null;
   var dpr = 1;
   var bw = 1, bh = 1;       // drawing buffer 尺寸
   // 只在尺寸真的动过时才去读 clientWidth：逐帧读会强制一次布局，
   // 而这一层每帧本来就不写 DOM，那次布局纯属白交。
   var sizeDirty = true;
 
-  var proj = mat4();
-  var view = mat4();
-  var viewR = mat4();
+  var proj = null;
+  var view = null;
+  var viewR = null;
 
   // 三态相机。user 只被拖拽/滚轮/舞台预设改；cine 每帧被自动演出覆写；
   // cur 是插值后的实际值，永远只被低通推着走。
@@ -891,7 +910,7 @@
   // 音频
   var onset = null;
   var au = { bass: 0, mid: 0, treble: 0, energy: 0, beat: 0 };
-  var audioBands = new Float32Array(64);
+  var audioBands = null;
   var lastBeatAt = -100, previousBeat = 0;
   var pointerField = { x: -9, y: -9, active: 0, clickX: 0, clickY: 0, clickAt: -100 };
 
@@ -947,6 +966,8 @@
 
   function compile(type, src) {
     var sh = gl.createShader(type);
+    if (!sh) throw new Error('shader-create-failed');
+    try {
     gl.shaderSource(sh, src);
     gl.compileShader(sh);
     if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
@@ -966,22 +987,28 @@
       return null;
     }
     return sh;
+    } catch (error) { gl.deleteShader(sh); throw error; }
   }
 
   // 编译并自动收集 uniform location：改着色器不用再同步改一堆 getUniformLocation。
   function buildProgram(vsSrc, fsSrc) {
-    var v = compile(gl.VERTEX_SHADER, vsSrc);
-    var f = compile(gl.FRAGMENT_SHADER, fsSrc);
-    if (!v || !f) { if (v) gl.deleteShader(v); if (f) gl.deleteShader(f); return null; }
-    var p = gl.createProgram();
+    var ticket = graphicsResources().require({ programs:1 }, 'Stage3D original program and partial shader compilation lifetime', graphicsGeneration);
+    var v = null, f = null, p = null, committed = false;
+    try {
+    v = compile(gl.VERTEX_SHADER, vsSrc);
+    f = compile(gl.FRAGMENT_SHADER, fsSrc);
+    if (!v || !f) return null;
+    p = gl.createProgram();
+    if (!p) throw new Error('program-create-failed');
     gl.attachShader(p, v);
     gl.attachShader(p, f);
     gl.linkProgram(p);
     gl.deleteShader(v);
     gl.deleteShader(f);
+    v = f = null;
     if (!gl.getProgramParameter(p, gl.LINK_STATUS)) {
       console.warn('[stage3d] 着色器链接失败：', gl.getProgramInfoLog(p));
-      gl.deleteProgram(p);
+      gl.deleteProgram(p); p = null;
       return null;
     }
     var u = {};
@@ -992,14 +1019,23 @@
       var name = String(info.name).replace(/\[0\]$/, '');
       u[name] = gl.getUniformLocation(p, name);
     }
+    ticket.commit(); graphicsAllocations.set(p, ticket); committed = true;
     return { p: p, u: u, a: function (n2) { return gl.getAttribLocation(p, n2); } };
+    } finally {
+      if (!committed) { if (v) gl.deleteShader(v); if (f) gl.deleteShader(f); if (p) gl.deleteProgram(p); releaseGraphicsTicket(ticket); }
+    }
   }
 
   function buffer(data) {
-    var b = gl.createBuffer();
+    var ticket = graphicsResources().require({ bufferDeclaredBytes:data.byteLength }, 'Stage3D original static buffer upload', graphicsGeneration);
+    var b = null;
+    try {
+    b = gl.createBuffer(); if (!b) throw new Error('buffer-create-failed');
     gl.bindBuffer(gl.ARRAY_BUFFER, b);
     gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
+    ticket.commit(); graphicsAllocations.set(b, ticket);
     return b;
+    } catch (error) { if (b) gl.deleteBuffer(b); releaseGraphicsTicket(ticket); throw error; }
   }
 
   // attribs: [{ loc, buffer, size, divisor }]
@@ -1020,7 +1056,14 @@
   }
 
   function makeRT(w, h, withDepth) {
+    var bytes = w * h * ((post.hdr ? 8 : 4) + (withDepth ? 2 : 0));
+    var ticket = graphicsResources().require({ renderTargetDeclaredBytes:bytes },
+      'Stage3D original ' + (post.hdr ? 'RGBA16F' : 'RGBA8') + (withDepth ? '/DEPTH16' : '') + ' post target', graphicsGeneration);
+    var target = { fbo:null,tex:null,rb:null,w:w,h:h,ticket:ticket };
+    try {
     var tex = gl.createTexture();
+    target.tex = tex;
+    if (!tex) throw new Error('target-create-failed');
     gl.bindTexture(gl.TEXTURE_2D, tex);
     gl.texImage2D(gl.TEXTURE_2D, 0, post.internalFmt, w, h, 0, gl.RGBA, post.texType, null);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
@@ -1028,20 +1071,25 @@
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     var fbo = gl.createFramebuffer();
+    target.fbo = fbo;
+    if (!fbo) throw new Error('target-create-failed');
     gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
     var rb = null;
     if (withDepth) {
       rb = gl.createRenderbuffer();
+      target.rb = rb;
+      if (!rb) throw new Error('target-create-failed');
       gl.bindRenderbuffer(gl.RENDERBUFFER, rb);
       gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT16, w, h);
       gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, rb);
     }
     var complete = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-    var target = { fbo: fbo, tex: tex, rb: rb, w: w, h: h };
     if (!complete) { freeRT(target); return null; }
+    ticket.commit();
     return target;
+    } catch (error) { freeRT(target); throw error; }
   }
 
   function freeRT(rt) {
@@ -1049,6 +1097,8 @@
     if (rt.fbo) gl.deleteFramebuffer(rt.fbo);
     if (rt.tex) gl.deleteTexture(rt.tex);
     if (rt.rb) gl.deleteRenderbuffer(rt.rb);
+    rt.fbo = rt.tex = rt.rb = null;
+    releaseGraphicsTicket(rt.ticket); rt.ticket = null;
   }
 
   // -------------------------------------------------------------------------
@@ -1056,6 +1106,9 @@
   // -------------------------------------------------------------------------
 
   function seeds(count) {
+    var cpu = graphicsResources().require({ ownedCpuBytes:count * 8 }, 'Stage3D original two Float32 seed construction arrays', graphicsGeneration);
+    var seed = null, lane = null;
+    try {
     var a = new Float32Array(count);
     var b = new Float32Array(count);
     for (var i = 0; i < count; i += 1) {
@@ -1063,7 +1116,9 @@
       a[i] = Math.random() * 1000 + i * 0.37;
       b[i] = Math.random();
     }
-    return { seed: buffer(a), lane: buffer(b), count: count };
+    seed = buffer(a); lane = buffer(b); return { seed:seed,lane:lane,count:count };
+    } catch (error) { deleteGraphic('Buffer',seed); deleteGraphic('Buffer',lane); throw error; }
+    finally { a = b = null; releaseGraphicsTicket(cpu); }
   }
 
   function q() {
@@ -1076,8 +1131,8 @@
     var p = buildProgram(FIELD_VS, FIELD_FS);
     var starP = buildProgram(STAR_VS, STAR_FS);
     if (!p || !starP) {
-      if (p) gl.deleteProgram(p.p);
-      if (starP) gl.deleteProgram(starP.p);
+      if (p) deleteGraphic('Program',p.p);
+      if (starP) deleteGraphic('Program',starP.p);
       return null;
     }
     var level = q(), count = def.counts[level];
@@ -1091,42 +1146,68 @@
       { loc: starP.a('aSeed'), buffer: stars.seed, size: 1 },
       { loc: starP.a('aLane'), buffer: stars.lane, size: 1 }
     ]);
-    var ctx = gl, disposed = false, artUrl = '', artReady = false, artImage = null;
+    var ctx = gl, disposed = false, artUrl = '', artReady = false, artController = null, pendingArt = null;
     var artScaleX = 1, artScaleY = 1, artLod = 0;
+    var textureTicket = graphicsResources().require({ textureDeclaredBytes:4,ownedCpuBytes:4 + 4 * 8 },
+      'Stage3D original RGBA8 artwork placeholder and construction bytes', graphicsGeneration);
     var texture = gl.createTexture();
+    if (!texture) { releaseGraphicsTicket(textureTicket); throw new Error('texture-create-failed'); }
+    graphicsAllocations.set(texture, textureTicket);
     gl.bindTexture(gl.TEXTURE_2D, texture);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([48, 76, 96, 255]));
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    textureTicket.commit({ textureDeclaredBytes:4 });
+    function clearPendingArt() {
+      if (artController) artController.abort(); artController = null;
+      if (pendingArt) pendingArt.source.release(); pendingArt = null;
+    }
+    function uploadArt() {
+      if (!pendingArt || disposed || ctx !== gl || ctx.isContextLost()) return;
+      var source = pendingArt.source, img = source.image;
+      pendingArt = null;
+      var candidate = null, ticket = null;
+      try {
+        var width = img.naturalWidth || img.width, height = img.naturalHeight || img.height;
+        if (width > ctx.getParameter(ctx.MAX_TEXTURE_SIZE) || height > ctx.getParameter(ctx.MAX_TEXTURE_SIZE)) throw new Error('estimate-unavailable');
+        var tw = width, th = height, bytes = 0;
+        while (true) { bytes += tw * th * 4; if (tw === 1 && th === 1) break; tw = Math.max(1,Math.floor(tw/2)); th = Math.max(1,Math.floor(th/2)); }
+        ticket = graphicsResources().require({ textureDeclaredBytes:bytes }, 'Stage3D RGBA8 artwork replacement complete mip upload', graphicsGeneration);
+        candidate = ctx.createTexture(); if (!candidate) throw new Error('texture-create-failed');
+        ctx.activeTexture(ctx.TEXTURE0); ctx.bindTexture(ctx.TEXTURE_2D,candidate); ctx.pixelStorei(ctx.UNPACK_FLIP_Y_WEBGL,true);
+        ctx.texImage2D(ctx.TEXTURE_2D,0,ctx.RGBA,ctx.RGBA,ctx.UNSIGNED_BYTE,img); ctx.generateMipmap(ctx.TEXTURE_2D);
+        ctx.texParameteri(ctx.TEXTURE_2D,ctx.TEXTURE_MIN_FILTER,ctx.LINEAR_MIPMAP_LINEAR);
+        ctx.texParameteri(ctx.TEXTURE_2D,ctx.TEXTURE_MAG_FILTER,ctx.LINEAR);
+        ctx.texParameteri(ctx.TEXTURE_2D,ctx.TEXTURE_WRAP_S,ctx.CLAMP_TO_EDGE); ctx.texParameteri(ctx.TEXTURE_2D,ctx.TEXTURE_WRAP_T,ctx.CLAMP_TO_EDGE);
+        if (ctx.getError() !== ctx.NO_ERROR) throw new Error('artwork-upload-failed');
+        ticket.commit(); graphicsAllocations.set(candidate,ticket);
+        deleteGraphic('Texture',texture,ctx); texture=candidate; candidate=null; ticket=null;
+        artScaleX=Math.min(1,height/width); artScaleY=Math.min(1,width/height);
+        artLod=Math.max(0,Math.log(Math.min(width,height)*.5*Math.sqrt(Math.PI/Math.floor(count*.76)))/Math.LN2);
+        artReady=true;
+      } catch (error) { if (candidate) ctx.deleteTexture(candidate); releaseGraphicsTicket(ticket); graphicsFailure=error.message; }
+      finally { ctx.pixelStorei(ctx.UNPACK_FLIP_Y_WEBGL,false); source.release(); }
+    }
     function syncArt() {
       if (def.field !== 0) return;
       var url = global.Stage && Stage.coverUrl ? Stage.coverUrl() || '' : '';
-      if (url === artUrl) return;
-      artUrl = url; artReady = false; artScaleX = artScaleY = 1; artLod = 0;
-      if (artImage) { artImage.onload = null; artImage.onerror = null; }
-      if (!url) return;
-      var img = artImage = new Image(); img.crossOrigin = 'anonymous';
-      img.onload = function () {
-        if (disposed || ctx !== gl || ctx.isContextLost() || url !== artUrl || img !== artImage) return;
-        try {
-          ctx.activeTexture(ctx.TEXTURE0); ctx.bindTexture(ctx.TEXTURE_2D, texture);
-          ctx.pixelStorei(ctx.UNPACK_FLIP_Y_WEBGL, true);
-          ctx.texImage2D(ctx.TEXTURE_2D, 0, ctx.RGBA, ctx.RGBA, ctx.UNSIGNED_BYTE, img);
-          ctx.generateMipmap(ctx.TEXTURE_2D);
-          ctx.texParameteri(ctx.TEXTURE_2D, ctx.TEXTURE_MIN_FILTER, ctx.LINEAR_MIPMAP_LINEAR);
-          var width = img.naturalWidth || img.width || 1, height = img.naturalHeight || img.height || 1;
-          artScaleX = Math.min(1, height / width); artScaleY = Math.min(1, width / height);
-          artLod = Math.max(0, Math.log(Math.min(width, height) * 0.5 * Math.sqrt(Math.PI / Math.floor(count * 0.76))) / Math.LN2);
-          artReady = true;
-        } catch (e) { artReady = false; }
-        finally { ctx.pixelStorei(ctx.UNPACK_FLIP_Y_WEBGL, false); }
-      };
-      resolveCoverUrl(url).then(function (resolved) {
-        if (!resolved || url !== artUrl || img !== artImage) return;
-        img.src = resolved;
-      });
+      if (url !== artUrl) {
+        artUrl=url; clearPendingArt();
+        if (!url) { artReady=false; artScaleX=artScaleY=1; artLod=0; }
+        else if (!global.StageImageSource) graphicsFailure='estimate-unavailable';
+        else {
+          var controller=artController=new AbortController();
+          var ledger=Stage.resources();
+          StageImageSource.decode(url,{resources:graphicsResources(),generation:graphicsGeneration,signal:controller.signal,
+            resolve:resolveCoverUrl,maxEncodedBytes:Math.floor(ledger.snapshot().caps.ownedCpuBytes/4)}).then(function(source){
+              if (disposed || ctx!==gl || ctx.isContextLost() || controller.signal.aborted || artUrl!==url) { source.release(); return; }
+              pendingArt={source:source}; rawDirty=true; if (global.Stage && Stage.kick) Stage.kick();
+            },function(error){if(!disposed&&!controller.signal.aborted)graphicsFailure=error.message;});
+        }
+      }
+      uploadArt();
     }
     return {
       count: count,
@@ -1163,10 +1244,10 @@
       },
       dispose: function () {
         disposed = true;
-        if (artImage) { artImage.onload = null; artImage.onerror = null; }
-        ctx.deleteProgram(p.p); ctx.deleteProgram(starP.p);
+        clearPendingArt();
+        deleteGraphic('Program',p.p,ctx); deleteGraphic('Program',starP.p,ctx);
         ctx.deleteVertexArray(vao); ctx.deleteVertexArray(starVao);
-        ctx.deleteBuffer(stars.seed); ctx.deleteBuffer(stars.lane); ctx.deleteTexture(texture);
+        deleteGraphic('Buffer',stars.seed,ctx); deleteGraphic('Buffer',stars.lane,ctx); deleteGraphic('Texture',texture,ctx);
       }
     };
   }
@@ -1188,8 +1269,8 @@
         gl.drawArrays(gl.POINTS, 0, s.count);
       },
       dispose: function () {
-        gl.deleteProgram(prog.p); gl.deleteVertexArray(vao);
-        gl.deleteBuffer(s.seed); gl.deleteBuffer(s.lane);
+        deleteGraphic('Program',prog.p); gl.deleteVertexArray(vao);
+        deleteGraphic('Buffer',s.seed); deleteGraphic('Buffer',s.lane);
       }
     };
   }
@@ -1219,37 +1300,51 @@
     var pBlur = buildProgram(POST_VS, BLUR_FS);
     var pComp = buildProgram(POST_VS, COMPOSITE_FS);
     if (!pBright || !pBlur || !pComp) {
-      [pBright, pBlur, pComp].forEach(function (program) { if (program) gl.deleteProgram(program.p); });
+      [pBright, pBlur, pComp].forEach(function (program) { if (program) deleteGraphic('Program',program.p); });
       post = null;
       return false;
     }
     post.bright = pBright;
     post.blur = pBlur;
     post.comp = pComp;
-    var tri = buffer(new Float32Array([-1, -1, 3, -1, -1, 3]));
+    var triCpu = graphicsResources().require({ ownedCpuBytes:24 + 6 * 8 }, 'Stage3D post triangle construction array and numeric literal', graphicsGeneration);
+    var tri;
+    try { tri = buffer(new Float32Array([-1, -1, 3, -1, -1, 3])); }
+    finally { releaseGraphicsTicket(triCpu); }
     fsTri = makeVAO([{ loc: pBright.a('aPos'), buffer: tri, size: 2 }]);
     post.tri = tri;
     return true;
   }
 
-  function resizeTargets() {
-    if (!post) return;
-    var hw = Math.max(1, bw >> 1), hh = Math.max(1, bh >> 1);
-    if (post.scene && post.scene.w === bw && post.scene.h === bh) return;
-    freeRT(post.scene); freeRT(post.a); freeRT(post.b);
-    post.scene = makeRT(bw, bh, true);
-    post.a = makeRT(hw, hh, false);
-    post.b = makeRT(hw, hh, false);
-    if (!post.scene || !post.a || !post.b) {
-      freeRT(post.scene); freeRT(post.a); freeRT(post.b);
-      post.scene = post.a = post.b = null;
-      if (post.hdr) {
+  function resizeTargets(width, height) {
+    if (!post) return false;
+    width = width || bw; height = height || bh;
+    var hw = Math.max(1, width >> 1), hh = Math.max(1, height >> 1);
+    if (post.scene && post.scene.w === width && post.scene.h === height) return true;
+    var scene = null, a = null, b = null, failure = null;
+    try {
+      scene = makeRT(width, height, true);
+      if (scene) a = makeRT(hw, hh, false);
+      if (a) b = makeRT(hw, hh, false);
+    } catch (error) { failure = error; }
+    if (!scene || !a || !b) {
+      freeRT(scene); freeRT(a); freeRT(b);
+      if (!failure && post.hdr) {
+        var oldFormat = { hdr:post.hdr,internalFmt:post.internalFmt,texType:post.texType };
         post.hdr = false;
         post.internalFmt = gl.RGBA;
         post.texType = gl.UNSIGNED_BYTE;
-        resizeTargets();
-      } else showFallback('当前设备无法分配舞台画面，请缩小窗口后重试。');
+        var fallbackReady = resizeTargets(width, height);
+        if (!fallbackReady) { post.hdr = oldFormat.hdr; post.internalFmt = oldFormat.internalFmt; post.texType = oldFormat.texType; }
+        return fallbackReady;
+      }
+      graphicsFailure = failure ? failure.message : 'prepare-failed';
+      showFallback('当前画质暂不可用，已保留原画面；请缩小窗口或重新打开舞台重试。');
+      return false;
     }
+    freeRT(post.scene); freeRT(post.a); freeRT(post.b);
+    post.scene = scene; post.a = a; post.b = b;
+    graphicsFailure = ''; return true;
   }
 
   function drawFullscreen(prog) {
@@ -1358,15 +1453,21 @@
 
   function ensureGl() {
     if (gl) return true;
-    // 停用是**有期限的**：窗口过去之后用户再进三维就该再给一次机会。永远堵死会
-    // 把一次驱动重置变成整场不可用，而那并非事实所致。
-    if (glStopped && recoveryAt.length) {
-      recoveryAt = pruneRecoveries(recoveryAt, Date.now(), RECOVERY_WINDOW_MS);
-      if (!recoveryAt.length) glStopped = false;
+    if (glFailed || !wrapEl) return false;
+    if (documentHidden() || !wrapEl.clientWidth || !wrapEl.clientHeight) return false;
+    try {
+      contextTicket = graphicsResources().require({ gpuContexts:1,canvases:1 },
+        'Stage3D original WebGL2 context and canvas identity', ++graphicsGeneration);
+      drawingTicket = graphicsResources().require({ drawingBufferPixels:1,renderTargetDeclaredBytes:8 },
+        'Stage3D initial RGBA8/depth drawing surface', graphicsGeneration, 'bounded-estimate');
+      prepareGraphicsInput();
+    } catch (error) {
+      releaseGraphicsTicket(contextTicket); releaseGraphicsTicket(drawingTicket); contextTicket = drawingTicket = null;
+      graphicsFailure = error.message; showFallback('当前图形资源不足，请关闭其它舞台后重试。'); return false;
     }
-    if (glFailed || glStopped || !wrapEl) return false;
     contextLost = false;
     canvas = document.createElement('canvas');
+    canvas.width = canvas.height = 1;
     canvas.className = 's3d-canvas';
     canvas.setAttribute('aria-hidden', 'true');
     wrapEl.appendChild(canvas);
@@ -1381,16 +1482,22 @@
       // 拿不到上下文就把画布撤掉：宁可整个舞台不出现，也不抢别人的上下文。
       if (canvas.parentNode) canvas.parentNode.removeChild(canvas);
       canvas = null;
+      releaseGraphicsTicket(contextTicket); contextTicket = null;
+      releaseGraphicsTicket(drawingTicket); drawingTicket = null;
       glFailed = true;
       showFallback('当前环境不支持 WebGL2，三维舞台不可用。');
       return false;
     }
+    contextTicket.commit();
+    drawingTicket.commit();
 
     canvas.addEventListener('webglcontextlost', onContextLost, false);
     canvas.addEventListener('webglcontextrestored', onContextRestored, false);
 
     gl.disable(gl.DITHER);
-    if (!buildPost()) {
+    var postReady = false;
+    try { postReady = buildPost(); } catch (error) { graphicsFailure = error.message; }
+    if (!postReady) {
       releaseGl();
       showFallback('三维舞台的后处理链初始化失败。');
       return false;
@@ -1401,45 +1508,16 @@
   function onContextLost(e) {
     // 不 preventDefault 就永远不会收到 restored。
     if (e && e.preventDefault) e.preventDefault();
-    var next = takeRecovery(recoveryAt, Date.now(), RECOVERY_WINDOW_MS, RECOVERY_MAX);
-    if (next === null) {
-      // 预算用完：不再假装会恢复。releaseGl 摘掉画布与这两个监听，之后所有
-      // 渲染路径都靠 `!gl` 早退；contextLost 必须留 false，否则横幅会一直说
-      // 「正在恢复」，而已经没人恢复了。
-      glStopped = true;
-      contextLost = false;
-      releaseGl();
-      if (!isPlane()) showFallback(RECOVERY_STOPPED_TEXT);
-      pokeChrome();
-      return;
-    }
-    recoveryAt = next;
     contextLost = true;
+    sceneAdvancing = false;
     cancelGestures();
-    // Detach pending cover loads before the restored context invalidates their textures.
-    disposeStages();
-    post = null;
-    // 平面布局不依赖 GL，不能让 fallback 横幅盖住 stanza；但 preventDefault/
-    // 状态位/资源释放这些恢复前置动作必须照常，否则切回三维后无法恢复。
-    if (!isPlane()) showFallback('舞台正在恢复渲染，音乐播放不受影响。');
+    releaseGl(); graphicsFailure = 'context-lost';
+    if (!isPlane()) showFallback('舞台图形资源已中断，重新打开舞台可重试；音乐播放不受影响。');
     pokeChrome();
   }
 
   function onContextRestored() {
-    contextLost = false;
-    glFailed = false;
-    if (!gl) return;
-    gl.disable(gl.DITHER);
-    if (buildPost()) {
-      builtStages = {}; sizeDirty = true;
-      $('s3d-fallback').hidden = true;
-      if (global.Stage && Stage.kick) Stage.kick();
-    } else {
-      // 一次重建失败不构成永久停用（ensureGl 下次进三维还会再试），但措辞得说出
-      // 发生了什么、去哪儿取证，而不是把判断推给用户的「退出后重新进入」。
-      releaseGl();
-      showFallback('舞台的后处理链重建失败，三维画面已暂停（音乐播放与歌词不受影响）。可在设置 → 开发者选项 导出日志，把这一段发给开发者。');
-    }
+    // Only an explicit new ensureGl request may create a new generation.
   }
 
   function releaseGl() {
@@ -1447,10 +1525,10 @@
     builtStages = {};
     if (post) {
       freeRT(post.scene); freeRT(post.a); freeRT(post.b);
-      if (post.bright) gl.deleteProgram(post.bright.p);
-      if (post.blur) gl.deleteProgram(post.blur.p);
-      if (post.comp) gl.deleteProgram(post.comp.p);
-      if (post.tri) gl.deleteBuffer(post.tri);
+      if (post.bright) deleteGraphic('Program',post.bright.p);
+      if (post.blur) deleteGraphic('Program',post.blur.p);
+      if (post.comp) deleteGraphic('Program',post.comp.p);
+      if (post.tri) deleteGraphic('Buffer',post.tri);
     }
     if (fsTri && gl) gl.deleteVertexArray(fsTri);
     post = null;
@@ -1458,12 +1536,19 @@
     if (canvas) {
       canvas.removeEventListener('webglcontextlost', onContextLost);
       canvas.removeEventListener('webglcontextrestored', onContextRestored);
-      var ext = gl.getExtension('WEBGL_lose_context');
+      var ext = gl && gl.getExtension('WEBGL_lose_context');
       if (ext) { try { ext.loseContext(); } catch (e) { /* ignore */ } }
       if (canvas.parentNode) canvas.parentNode.removeChild(canvas);
+      canvas.width = canvas.height = 0;
     }
     canvas = null;
     gl = null;
+    // All remaining partial resources belonged to this retired context. Their
+    // references and its allocation capability are now gone.
+    graphicsAllocations.forEach(releaseGraphicsTicket); graphicsAllocations.clear();
+    releaseGraphicsTicket(drawingTicket); releaseGraphicsTicket(contextTicket);
+    drawingTicket = contextTicket = null;
+    if (graphicsPort) graphicsPort.forgetReport(); graphicsPort = null;
   }
 
   function showFallback(text, source) {
@@ -1511,14 +1596,29 @@
 
   function resize() {
     if (!gl || !root) return;
-    var w = Math.max(1, Math.round(wrapEl.clientWidth || window.innerWidth));
-    var h = Math.max(1, Math.round(wrapEl.clientHeight || window.innerHeight));
-    dpr = computeDpr(w, h);
-    var nw = Math.max(1, Math.floor(w * dpr));
-    var nh = Math.max(1, Math.floor(h * dpr));
+    layoutWidth = wrapEl.clientWidth; layoutHeight = wrapEl.clientHeight;
+    if (!layoutWidth || !layoutHeight || documentHidden()) { sceneAdvancing = false; return; }
+    var w = Math.max(1, Math.round(layoutWidth));
+    var h = Math.max(1, Math.round(layoutHeight));
+    var nextDpr = computeDpr(w, h);
+    var nw = Math.max(1, Math.floor(w * nextDpr));
+    var nh = Math.max(1, Math.floor(h * nextDpr));
     if (canvas.width !== nw || canvas.height !== nh) {
+      var nextTicket = null;
+      try {
+      var peak = Math.max(nw * nh, nw * canvas.height);
+      nextTicket = graphicsResources().require({ drawingBufferPixels:peak,renderTargetDeclaredBytes:peak * 8 },
+        'Stage3D drawing buffer replacement and intermediate width-first peak', graphicsGeneration, 'bounded-estimate');
+      if (!resizeTargets(nw, nh)) { releaseGraphicsTicket(nextTicket); sizeDirty = false; return; }
       canvas.width = nw; canvas.height = nh;
+      nextTicket.commit({ drawingBufferPixels:nw * nh,renderTargetDeclaredBytes:nw * nh * 8 });
+      releaseGraphicsTicket(drawingTicket); drawingTicket = nextTicket;
+      } catch (error) {
+        releaseGraphicsTicket(nextTicket); graphicsFailure = error.message; sizeDirty = false;
+        showFallback('当前画质暂不可用，已保留原画面；请缩小窗口或重新打开舞台重试。'); return;
+      }
     }
+    dpr = nextDpr;
     bw = canvas.width; bh = canvas.height;
     resizeTargets();
     sizeDirty = false;
@@ -1542,7 +1642,7 @@
   // 球坐标 → 笛卡尔。注意 phi 是仰角（不是 three.js 那种从 +Y 量起的极角）。
   function updateCamera(dtMs) {
     // 自动演出：三条互质低频正弦叠加，周期各不相同的「呼吸」。
-    cam.cinemaT += dtMs / 1000;
+    cam.cinemaT = sceneTimeMs / 1000;
     var amount = reducedMotion() ? 0 : motion;
     var drift = cam.cruise ? amount : 0;
     var userBusy = dragging ? 0.25 : 1;   // 用户在拖的时候自动让位
@@ -1554,6 +1654,10 @@
     var tT = cam.userT + cam.cineT;
     var tP = clamp(cam.userP + cam.cineP, cam.minP, cam.maxP);
     var tR = clamp(cam.userR + cam.cineR, cam.minR, cam.maxR);
+
+    if (!dtMs && rawDirty && performance.now() < interactUntil) {
+      cam.curT = tT; cam.curP = tP; cam.curR = tR; cam.curLook = cam.look.slice();
+    }
 
     cam.curT = damp(cam.curT, tT, TAU_ANGLE, dtMs);
     cam.curP = damp(cam.curP, tP, TAU_ANGLE, dtMs);
@@ -1602,9 +1706,19 @@
   // 音频
   // -------------------------------------------------------------------------
 
-  function updateAudio(dtMs) {
-    var live = global.Stage && Stage.presentation && Stage.presentation().playing && !reducedMotion();
-    var sp = (live && Stage.spectrum) ? Stage.spectrum() : null;
+  function updateAudio(dtMs, frame) {
+    var live = frame && frame.playing && !frame.reduced && !frame.documentHidden;
+    var fresh = live && frame.spectrumAvailable && frame.spectrumRevision > spectrumWatermark;
+    var sp = fresh ? frame.spectrum : null;
+    if (!fresh) {
+      if (onset && inputActive) onset.reset();
+      inputActive = false;
+      if (!live && frame) spectrumWatermark = frame.spectrumRevision;
+      if (audioBands) audioBands.fill(0);
+      au.bass = au.mid = au.treble = au.energy = au.beat = previousBeat = 0;
+      return;
+    }
+    inputActive = true;
     var n = sp ? sp.length : 0;
     for (var b = 0; b < 64; b += 1) audioBands[b] = damp(audioBands[b], n ? clamp(Math.pow(Math.max(0, sp[Math.min(n - 1, Math.floor(b * n / 64))] || 0), 0.7) * reactivity, 0, 1.5) : 0, 65, dtMs);
     var bass = 0, mid = 0, treble = 0;
@@ -1629,12 +1743,12 @@
     au.mid = damp(au.mid, clamp(Math.pow(mid, 0.7) * reactivity, 0, 1.5), 90, dtMs);
     au.treble = damp(au.treble, clamp(Math.pow(treble, 0.7) * reactivity, 0, 1.5), 60, dtMs);
 
-    var en = (live && Stage.energy) ? Stage.energy() : 0;
+    var en = n ? sp.reduce(function (sum, value) { return sum + (value || 0); }, 0) / n : 0;
     au.energy = damp(au.energy, clamp(num(en, 0) * reactivity, 0, 1), 140, dtMs);
 
     // 起音只认 Onset 一份判定，避免「换一种渲染，律动看起来变了」。
     if (onset && n) {
-      onset.step(dtMs, sp, time * 1000);
+      onset.step(dtMs, sp, frame.sampledAtMs);
       au.beat = clamp(onset.pulse * reactivity / 1.35, 0, 1);
     } else {
       au.beat = damp(au.beat, 0, 200, dtMs);
@@ -1686,7 +1800,9 @@
   function ensureStage() {
     var def = STAGES[stageIndex];
     if (builtStages[def.id]) return builtStages[def.id];
-    var built = def.build(def);
+    var built;
+    try { built = def.build(def); }
+    catch (error) { graphicsFailure = error.message; releaseGl(); showFallback('当前场景资源不足，请关闭其它舞台后重新打开重试。'); return null; }
     if (!built) return null;
     builtStages[def.id] = built;
     return built;
@@ -1723,7 +1839,7 @@
     gl.bindVertexArray(null);
   }
 
-  function render(dtMs) {
+  function render(dtMs, frame) {
     // 3D 场景始终渲染：stanza 歌词只是透明叠加层（standalone 无 GL 回退时才没有 GL）。
     if (!gl || contextLost) return;
     // 创意编排与动画绘景都不画 GL：前者把舞台交给 CreativeStage，后者交给
@@ -1731,7 +1847,7 @@
     if (sceneSource === 'creative' || sceneSource === 'anime-svg') {
       if (sceneSource === 'creative' && global.CreativeStage && CreativeStage.syncPosition) CreativeStage.syncPosition();
       if (sizeDirty) resize();
-      updateAudio(dtMs); updateCamera(dtMs); paintWords();
+      updateAudio(dtMs, frame); updateCamera(dtMs); paintWords();
       return;
     }
     if (sceneCovered()) return;
@@ -1739,16 +1855,16 @@
     // 「关闭背景」：每帧只把画布清成一色底，几何与后处理整条 GL 链路都跳过——
     // 选它的动机就是省 GPU；歌词与 stanza 是 DOM 层，照常推进。
     if (STAGES[stageIndex].blank) {
-      updateAudio(dtMs);
+      updateAudio(dtMs, frame);
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
       gl.viewport(0, 0, bw, bh);
       gl.clearColor(0.004, 0.005, 0.009, 1);
       gl.clear(gl.COLOR_BUFFER_BIT);
       paintWords();
-      return;
+      return true;
     }
     if (!post || !post.scene || !post.a || !post.b) return;
-    updateAudio(dtMs);
+    updateAudio(dtMs, frame);
     updateCamera(dtMs);
     updateTransition(dtMs);
 
@@ -1760,6 +1876,7 @@
     drawStage(st);
     runPost();
     paintWords();
+    return true;
   }
 
   // -------------------------------------------------------------------------
@@ -1820,25 +1937,31 @@
 
   function markInteraction(holdMs) {
     interactUntil = performance.now() + (holdMs || 900);
+    rawDirty = true;
   }
 
   // 目标帧率。返回 0 表示这一层完全不需要帧，主循环据此停机。
   function targetFps() {
-    if (!active || document.hidden) return 0;
+    if (!active || documentHidden()) return 0;
+    if (!layoutWidth || !layoutHeight) { sceneAdvancing = false; return 0; }
     if (contextLost && !stanzaActive()) return 0;
     if (post && !post.scene && !sizeDirty && !stanzaActive()) return 0;
     // 无 GL 时只有 stanza 歌词视觉需要帧（纯平面回退）；有 GL 一律走原帧率。
     if (!gl) return stanzaActive() ? (reducedMotion() ? 15 : 60) : 0;
     // 240 = 「每个 rAF 都给我」，降频自己用整数除数在 tick 里做：
     // 帧率必须是刷新率的整数分之一，90fps@144Hz 会因为帧间隔不均产生 judder。
-    if (reducedMotion()) return 15;
+    if (reducedMotion()) { sceneAdvancing = false; return rawDirty || stanzaActive() ? 15 : 0; }
     var data = global.Stage && Stage.presentation ? Stage.presentation() : null;
-    if (!dragging && performance.now() > interactUntil && (!data || !data.playing)) return 30;
+    if (!data || !data.playing) { sceneAdvancing = false; return rawDirty || stanzaActive() ? 30 : 0; }
     return 240;
   }
 
-  function tick(dtMs) {
-    if (!active || document.hidden) return;
+  function tick(dtMs, frame) {
+    if (!frame || frame.version !== 1 || frame.frameId === lastRawFrameId) return;
+    lastRawFrameId = frame.frameId;
+    if (!active || frame.documentHidden || !layoutWidth || !layoutHeight) { sceneAdvancing = false; spectrumWatermark = frame.spectrumRevision; return; }
+    var moving = frame.playing && !frame.reduced && !reducedMotion() && gl && !contextLost && !sceneCovered();
+    if (!moving) { sceneAdvancing = false; spectrumWatermark = frame.spectrumRevision; }
     var t0 = performance.now();
     // 帧停摆后的一记补帧不是性能证据：内嵌视图/遮挡窗口里「偶发泵帧 + 被
     // 高估的 hz」会把压力计一路顶满，画质被永久钉在最低档——极光穹顶发糊
@@ -1857,13 +1980,17 @@
     if (perf.divisor > 1 && (perf.tick - 1) % perf.divisor !== 0) return;
     // The host gate resets its accumulator on every callback, including skipped
     // callbacks. Accumulate here so adaptive rendering cannot slow the animation.
-    var step = Math.min(pendingDt, 160);
+    var step = Math.min(pendingDt, 100);
     pendingDt = 0;
-    if (!reducedMotion()) time += step / 1000;
-    render(step);
+    if (phaseScene !== STAGES[stageIndex].id) { phaseScene = STAGES[stageIndex].id; sceneTimeMs = 0; sceneAdvancing = false; rawFirstSubmit = false; }
+    var delta = moving && sceneAdvancing && Number.isFinite(step) ? Math.max(0,step) : 0;
+    sceneAdvancing = !!moving; sceneTimeMs += delta; time = sceneTimeMs / 1000;
+    if (!rawFirstSubmit) fade = fadeTarget;
+    rawFirstSubmit = !!render(delta, frame) || rawFirstSubmit;
+    rawDirty = false;
     // 3D 歌词轨倾角只在舞台轨模式需要；stanza 接管歌词时该轨隐藏。
     if (showLyrics && !stanzaActive()) writeLyrTilt();
-    if (stanzaActive()) driveStanza(step);
+    if (stanzaActive()) driveStanza(step, frame);
     sampleCost(performance.now() - t0);
   }
 
@@ -3191,7 +3318,7 @@
     });
   }
 
-  function driveStanza(dtMs) {
+  function driveStanza(dtMs, frame) {
     if (!stanza.ready || sceneOwnsLyrics()) return;
     // 导演先决策：它可能调用 setVisual → applyStanzaConfig()，把可见性与调音推到
     // 新选中的渲染器上。顺序反了的话，当帧会驱动一个即将被隐藏的渲染器。
@@ -3204,7 +3331,7 @@
     stanza.bg.frame(dtMs);
     if (showLyrics) {
       var api = planeApi();
-      if (api && api.frame) api.frame(dtMs);
+      if (api && api.frame) api.frame(dtMs, frame);
       driveHandoff();
     }
     // 镜头与电影层是每帧的连续量，必须留在帧循环里；它们内部各自去重，值没变就不写 DOM。
@@ -3289,8 +3416,7 @@
       if (stanza.ready) applyLayerVisibility(null, false);
       // 回到舞台歌词轨：GL 已挂掉时把降级提示还给用户。
       if (glFailed) showFallback('当前设备暂不支持三维渲染，仍可播放音乐或返回曲库。');
-      else if (glStopped) showFallback(RECOVERY_STOPPED_TEXT);
-      else if (contextLost) showFallback('舞台正在恢复渲染，音乐播放不受影响。');
+      else if (contextLost) showFallback('舞台图形资源已中断，重新打开舞台可重试；音乐播放不受影响。');
     }
     syncSettingsState();
     if (global.HandDrawn && HandDrawn.refreshAnnotation) HandDrawn.refreshAnnotation();
@@ -3333,7 +3459,7 @@
   }
 
   function beginSeek(e) {
-    if (!active || document.hidden || this.disabled) return;
+    if (!active || documentHidden() || this.disabled) return;
     if (e.type === 'pointerdown' && e.button !== 0) return;
     if (e.type === 'keydown' && !/^(ArrowLeft|ArrowRight|ArrowUp|ArrowDown|Home|End|PageUp|PageDown)$/.test(e.key)) return;
     seekCancelled = false;
@@ -3342,14 +3468,14 @@
   }
 
   function previewSeek() {
-    if (!active || document.hidden || seekCancelled || (seekTrackId !== null && seekTrackId !== currentTrackId())) { cancelSeek(); return; }
+    if (!active || documentHidden() || seekCancelled || (seekTrackId !== null && seekTrackId !== currentTrackId())) { cancelSeek(); return; }
     if (!seeking) seekTrackId = currentTrackId();
     seeking = true;
     text('s3d-elapsed', fmt(Number(this.value)));
   }
 
   function commitSeek() {
-    if (!seeking || seekCancelled || !active || document.hidden || document.activeElement !== this || seekTrackId !== currentTrackId()) { cancelSeek(); return; }
+    if (!seeking || seekCancelled || !active || documentHidden() || document.activeElement !== this || seekTrackId !== currentTrackId()) { cancelSeek(); return; }
     var position = Number(this.value);
     seeking = false;
     seekTrackId = null;
@@ -3358,7 +3484,7 @@
   }
 
   function onVolumeInput() {
-    if (!active || document.hidden) { endVolumeChange(); return; }
+    if (!active || documentHidden()) { endVolumeChange(); return; }
     changingVolume = true;
     control('volume', Number(this.value) / 100);
   }
@@ -3584,7 +3710,7 @@
   var wdTimer = 0, wdLastT = -1, wdStalls = 0;
 
   function watchdog() {
-    if (!active || !gl || contextLost || document.hidden) { wdStalls = 0; return; }
+    if (!active || !gl || contextLost || documentHidden()) { wdStalls = 0; return; }
     if (time !== wdLastT) { wdLastT = time; wdStalls = 0; return; }
     wdStalls += 1;
     if (global.Stage && Stage.kick) Stage.kick();
@@ -3623,6 +3749,7 @@
       }
     }
     active = true;
+    rawDirty = true; sceneAdvancing = false;
     document.dispatchEvent(new CustomEvent('stage:visibility', { detail: { open: true } }));
     fadeTarget = 1;
     root.classList.add('s3d-open');
@@ -3670,6 +3797,7 @@
     if (lyricView) lyricView.reset();
     fadeTarget = 0;
     active = false;
+    sceneAdvancing = false;
     document.dispatchEvent(new CustomEvent('stage:visibility', { detail: { open: false } }));
     syncCreativeStage();
     syncCoastStage();
@@ -3715,6 +3843,7 @@
   // -------------------------------------------------------------------------
 
   function readTint() {
+    rawDirty = true;
     var cs = window.getComputedStyle(document.documentElement);
     tint = parseColor(cs.getPropertyValue('--accent'), [1, 1, 1]);
     tint2 = parseColor(cs.getPropertyValue('--accent-2'), [0, 0.96, 0.83]);
@@ -4303,9 +4432,10 @@
     if (global.Stage && Stage.gate) Stage.gate(GATE, targetFps, tick);
     // 副门只管「正在播放」那行字的同步：10fps 够，且 10 是 60 与 120 的公因数
     // （原来写 8，在 60Hz 上实际跑 7.5 —— 档位数字对不上实际帧率）。
-    if (global.Stage && Stage.gate) Stage.gate('stage3d-ui', function () { return active && !document.hidden ? 10 : 0; }, syncNowPlaying);
+    if (global.Stage && Stage.gate) Stage.gate('stage3d-ui', function () { return active && !documentHidden() ? 10 : 0; }, syncNowPlaying);
     // 播放态跳变沿（暂停/起播/曲尾停止）立刻刷一次，不等 8fps 门控。
-    document.addEventListener('stage:playing-changed', function () { if (active && !document.hidden) syncNowPlaying(); });
+    document.addEventListener('stage:playing-changed', onPlayingChanged);
+    if (global.Stage && Stage.onFrameState) rawFrameDisposer = Stage.onFrameState(onRawFrameState);
 
     // 窗口尺寸与 DPR 不是同步生效的：全屏切换 / 跨屏拖动时 devicePixelRatio
     // 要晚一拍才更新，所以延后补几次（参考项目的经验值是 48/140/320）。
@@ -4315,7 +4445,6 @@
     }
     window.addEventListener('resize', onViewportResize);
     document.addEventListener('visibilitychange', onVisibilityChange);
-    if (global.Onset && Onset.create) onset = Onset.create({});
     root.setAttribute('data-s3d-ready', '1');
     // silk 恢复时同样默认不展开队列：只显示舞台与歌词。
     return api;
@@ -4323,6 +4452,13 @@
 
   function markSizeDirty() {
     sizeDirty = true;
+    rawDirty = true;
+    var hadLayout = !!(layoutWidth && layoutHeight);
+    if (wrapEl) { layoutWidth = wrapEl.clientWidth; layoutHeight = wrapEl.clientHeight; }
+    if (!hadLayout || !layoutWidth || !layoutHeight) {
+      sceneAdvancing = false;
+      if (global.Stage && Stage.frameState) spectrumWatermark = Stage.frameState().spectrumRevision;
+    }
     if (active && global.Stage && Stage.kick) Stage.kick();
   }
 
@@ -4342,8 +4478,19 @@
   }
 
   function onVisibilityChange() {
-    if (document.hidden) cancelGestures();
-    if (!document.hidden && active && global.Stage && Stage.kick) Stage.kick();
+    sceneAdvancing = false;
+    if (global.Stage && Stage.frameState) spectrumWatermark = Stage.frameState().spectrumRevision;
+    if (documentHidden()) cancelGestures();
+    else { markSizeDirty(); if (active && !gl && !graphicsFailure) ensureGl(); }
+    if (!documentHidden() && active && global.Stage && Stage.kick) Stage.kick();
+  }
+  function onPlayingChanged() { sceneAdvancing = false; rawDirty = true; if (active && !documentHidden()) syncNowPlaying(); }
+  function onRawFrameState(value) {
+    var cover = global.Stage && Stage.coverUrl ? Stage.coverUrl() : null;
+    if (cover !== rawLastCover) { rawLastCover = cover; rawDirty = true; }
+    var signature = [value.playing,value.reduced,value.documentHidden,value.mediaEpoch,value.positionAnchorRevision,value.positionDiscontinuityRevision].join(':');
+    if (signature !== rawFrameSignature) { rawFrameSignature = signature; rawDirty = true; }
+    if (!value.playing || value.reduced || value.documentHidden) { sceneAdvancing = false; spectrumWatermark = value.spectrumRevision; }
   }
 
   function destroy() {
@@ -4360,8 +4507,14 @@
     resizeTimers.forEach(clearTimeout); resizeTimers = [];
     window.removeEventListener('resize', onViewportResize);
     document.removeEventListener('visibilitychange', onVisibilityChange);
+    document.removeEventListener('stage:playing-changed', onPlayingChanged);
+    if (rawFrameDisposer) rawFrameDisposer(); rawFrameDisposer = null;
     releaseGl();
+    proj = view = viewR = audioBands = onset = null;
+    releaseGraphicsTicket(inputTicket); inputTicket = null;
+    if (inputPort) inputPort.forgetReport(); inputPort = null;
     glFailed = false;
+    sceneTimeMs = time = 0; phaseScene = ''; sceneAdvancing = rawFirstSubmit = false; rawDirty = true; lastRawFrameId = -1;
     inited = false;
     if (stanzaError) throw stanzaError;
     return api;
@@ -4478,7 +4631,9 @@
         audio: { bass: au.bass, mid: au.mid, treble: au.treble, energy: au.energy, beat: au.beat },
         camera: { theta: cam.curT, phi: cam.curP, radius: cam.curR },
         time: time,
-        buffer: bw + 'x' + bh
+        sceneTimeMs: sceneTimeMs,
+        buffer: bw + 'x' + bh,
+        resources: { coverage:'raw-gl-context-input-post-program-buffer-and-raster-cover',generation:graphicsGeneration,failure:graphicsFailure }
       };
     }
   };

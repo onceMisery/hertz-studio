@@ -5,13 +5,17 @@ const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('n
 const plain=v=>JSON.parse(JSON.stringify(v));
 function env(api, overrides={}){
   const events=[],urls=[],revoked=[];
-  const context={console,Uint8Array,Int32Array,DataView,TextEncoder,Blob,Date,Math,atob,btoa,Promise,
+  const context={console,Uint8Array,Int32Array,DataView,TextEncoder,Blob,Date,Math,atob,btoa,Promise,AbortController,DOMException,
     setTimeout,clearTimeout,setInterval:()=>1,clearInterval(){},innerWidth:1280,innerHeight:720,
     URL:{createObjectURL(blob){urls.push(blob);return 'blob:test-'+urls.length;},revokeObjectURL(url){revoked.push(url);}},
     CustomEvent:class{constructor(type,options){this.type=type;this.detail=options.detail;}},
     document:{hidden:false,dispatchEvent(e){events.push(e);}},VMusicTransport:api,...overrides};
   context.window=context;vm.createContext(context);
-  for(const file of ['creative-draft.js','stage-media.js','stage-persistence.js'])vm.runInContext(fs.readFileSync(path.join(__dirname,'../plugin/ui',file),'utf8'),context,{filename:file});
+  for (const file of ['stage-resource-budget.js','stage-resource-policy.js'])
+    vm.runInContext(fs.readFileSync(path.join(__dirname,'../plugin/ui',file),'utf8'),context,{filename:file});
+  const resourceLedger = context.StageResourceBudget.create(context.StageResourcePolicy);
+  context.Stage = { resources: () => resourceLedger };
+  for(const file of ['creative-draft.js','stage-media.js','stage-json-source.js','stage-persistence.js'])vm.runInContext(fs.readFileSync(path.join(__dirname,'../plugin/ui',file),'utf8'),context,{filename:file});
   return {...context,events,urls,revoked};
 }
 function state(){return {state:{storeId:'service-a',current:{revision:0,initialized:false},library:{revision:0,initialized:false}},current:null,library:null};}

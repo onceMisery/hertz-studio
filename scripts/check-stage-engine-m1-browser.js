@@ -47,12 +47,14 @@ async function pageFor(caps = {}) {
     }, caps);
   }
   await page.evaluate(() => {
+    document.body.classList.add('stage-open');
     Stage.init(); Stage.setTrack({ id: 'm1-fixture', duration_ms: 240000 });
     harness.snapshot = (playing, position = Stage.position(), seek = false) =>
       Stage.setSnapshot({ playing, position_ms: position, duration_ms: 240000, track_id: 'm1-fixture' }, { seek });
     harness.snapshot(false);
   });
   await page.waitForTimeout(25);
+  assert.equal(await page.evaluate(() => Stage.frameState().stageVisible), true);
   return page;
 }
 async function clean(page) {
@@ -111,6 +113,7 @@ async function main() {
       const page = await pageFor();
       try {
         await mount(page);
+        assert.equal(await page.evaluate(() => StageParticles.renderer()), 'canvas2d');
         const result = await page.evaluate(async () => {
           const before = Stage.resources().snapshot(); harness.hide(true); harness.time += 60000;
           await harness.advance(30);
@@ -156,8 +159,9 @@ async function main() {
           try { StageParticles.attach('standard'); }
           finally { HTMLCanvasElement.prototype.getContext = getContext; }
           const failed = StageParticles.stats(); StageParticles.destroy();
-          return { baseline, failed, after: Stage.resources().snapshot(true) };
+          return { baseline, failed, calls, after: Stage.resources().snapshot(true) };
         });
+        assert.ok(result.calls >= 2); assert.ok(result.failed.metrics.failure);
         assert.equal(result.failed.renderer, 'none'); sameVector(result.baseline.held, result.after.held);
         assert.equal(result.after.resources, result.baseline.resources); assert.equal(result.after.pending.canvases, 0);
         assert.equal(result.after.hosts.length, 0); return result;
@@ -185,13 +189,18 @@ async function main() {
       const page = await pageFor();
       try {
         const result = await page.evaluate(async () => {
-          const baseline = Stage.resources().snapshot(), cycles = [];
+          const baseline = Stage.resources().snapshot(), cycles = [], active = [];
           for (let i = 0; i < 20; i++) {
             StageParticles.init(); StageParticles.attach(i % 2 ? 'enhanced' : 'standard'); await harness.advance(12);
+            active.push({ backend: StageParticles.renderer(), resources: Stage.resources().snapshot().resources });
             if (i === 0) for (let change = 0; change < 100; change++) StageParticles.set({ density: 20 + change % 80 });
             StageParticles.destroy(); cycles.push(Stage.resources().snapshot());
           }
-          return { baseline, cycles };
+          return { baseline, cycles, active };
+        });
+        result.active.forEach((active, index) => {
+          assert.equal(active.backend, index % 2 ? 'webgl' : 'canvas2d');
+          assert.ok(active.resources > result.baseline.resources);
         });
         for (const cycle of result.cycles) {
           sameVector(cycle.held, result.baseline.held); assert.equal(cycle.resources, result.baseline.resources);

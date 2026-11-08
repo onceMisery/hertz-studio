@@ -1163,44 +1163,88 @@ void main() {
   // 解码没完成或失败时 uArtOk 保持 0，着色器整幅回落到程序化底 —— 不能有「纹理没到=黑屏」。
   // 首帧之前不做任何 DOM/GL 动作：本文件在 Node 契约扫描里也会被求值。
   function artBase(svg) {
-    var img = null, cv = null, tex = null, h = 0, ok = false, failed = false;
-    return {
-      bind: function (gl, U) {
-        if (!svg || failed) { gl.uniform1f(U.uArtOk, 0); return; }
-        if (!img) {
-          img = new Image();
-          img.onload = function () { ok = true; };
-          img.onerror = function () { failed = true; };
-          img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+    var source = null, views = new Map();
+    function release(ticket) { if (ticket) ticket.release({ apiReleased: true, allocationEnded: true }); }
+    function retireSource(value) {
+      if (value.users.size) return;
+      value.retired = true; value.img.src = ''; value.uri = null;
+      if (source === value) source = null;
+      if (value.ended) { value.img = null; release(value.ticket); }
+    }
+    function acquireSource(owner) {
+      if (!source) {
+        var ticket = owner.resources.require({ decoderLeases: 1, decodeReservedBytes: 640 * 400 * 4,
+          ownedCpuBytes: (svg.length * 9 + 64) * 2 }, 'CreativeAnime fixed640x400 SVG image and bounded encoded URI', 0, 'bounded-estimate');
+        var value = { ticket: ticket, img: null, uri: null, users: new Set(), ready: false, failed: false, ended: false, retired: false };
+        source = value;
+        try {
+          value.img = new Image(); value.uri = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+          value.img.src = value.uri;
+          Promise.resolve(value.img.decode()).then(function () {
+            if (value.retired) return;
+            var bytes = value.img.naturalWidth * value.img.naturalHeight * 4;
+            var result = ticket.commit({ decoderLeases: 1, decodeReservedBytes: bytes, ownedCpuBytes: value.uri.length * 2 });
+            value.ready = result.ok; value.failed = !result.ok;
+          }, function () { value.failed = true; }).finally(function () {
+            value.ended = true;
+            if (value.retired) { value.img = null; release(ticket); }
+            else value.users.forEach(function (view) { if (view.invalidate) view.invalidate(); });
+          });
+        } catch (error) {
+          value.ended = value.retired = true; if (value.img) value.img.src = ''; value.img = null;
+          source = null; release(ticket); throw error;
         }
-        if (!ok) { gl.uniform1f(U.uArtOk, 0); return; }
+      }
+      return source;
+    }
+    return {
+      bind: function (gl, U, owner) {
+        if (!svg) { gl.uniform1f(U.uArtOk, 0); return; }
+        if (!owner || !owner.resources) throw new Error('resource-policy-required');
+        var view = views.get(gl);
+        if (!view) {
+          var image = acquireSource(owner), useId = owner.resources.nextId();
+          var retained = owner.resources.retain(image.ticket.resourceId, useId);
+          if (!retained.ok) throw new Error(retained.reason);
+          view = { source: image, lease: retained.ticket, cv: null, tex: null, h: 0, cpu: null, gpu: null, failed: false, invalidate: owner.invalidate };
+          views.set(gl, view); image.users.add(view);
+          owner.register(function () {
+            if (!views.delete(gl)) return;
+            if (view.tex) gl.deleteTexture(view.tex); if (view.cv) view.cv.width = view.cv.height = 0;
+            view.cv = view.tex = null; release(view.cpu); release(view.gpu);
+            image.users.delete(view); view.lease.release(); retireSource(image); view.invalidate = null;
+          });
+        }
+        if (!view.source.ready || view.source.failed || view.failed) { gl.uniform1f(U.uArtOk, 0); return; }
         // 画稿 400 单位恒铺满画布高（见 PAINT 的 drawing/art 换算），所以纹理高度
         // 直接对齐 drawingBufferHeight。上限 2048 控显存，约 10MB RGBA。
         var th = Math.max(512, Math.min(2048, gl.drawingBufferHeight | 0));
-        if (!tex) {
-          tex = gl.createTexture();
-          gl.bindTexture(gl.TEXTURE_2D, tex);
-          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-        }
-        if (h !== th) {
-          h = th;
-          if (!cv) cv = document.createElement('canvas');
-          cv.width = Math.round(th * 1.6);
-          cv.height = th;
-          var cx = cv.getContext('2d');
-          cx.clearRect(0, 0, cv.width, cv.height);
-          cx.drawImage(img, 0, 0, cv.width, cv.height);
-          gl.bindTexture(gl.TEXTURE_2D, tex);
+        if (view.h !== th) {
+          var width = Math.round(th * 1.6), pixels = width * th, cpu = null, gpu = null, cv = null, tex = null;
+          try {
+          cpu = owner.resources.require({ canvases: 1, drawingBufferPixels: pixels, ownedCpuBytes: pixels * 4 },
+            'CreativeAnime per-view RGBA8 raster old plus new', 0);
+          gpu = owner.resources.require({ textureDeclaredBytes: pixels * 4 }, 'CreativeAnime per-context RGBA8 texture old plus new', 0);
+          cv = document.createElement('canvas'); cv.width = width; cv.height = th;
+          var cx = cv.getContext('2d'); if (!cx) throw new Error('art-canvas-unavailable');
+          cx.drawImage(view.source.img, 0, 0, width, th);
+          tex = gl.createTexture(); if (!tex) throw new Error('art-texture-unavailable'); gl.bindTexture(gl.TEXTURE_2D, tex);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
           // 不翻转：着色器用 q.y/400 直接当 v，画稿 y 轴向下与 canvas 一致。
           gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
           gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
           gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, cv);
+          cpu.commit(); gpu.commit();
+          if (view.tex) gl.deleteTexture(view.tex); if (view.cv) view.cv.width = view.cv.height = 0;
+          view.tex = tex; view.cv = cv; view.h = th; release(view.cpu); release(view.gpu); view.cpu = cpu; view.gpu = gpu;
+          } catch (error) {
+            if (tex) gl.deleteTexture(tex); if (cv) cv.width = cv.height = 0;
+            release(cpu); release(gpu); view.failed = true; throw error;
+          }
         }
         gl.activeTexture(gl.TEXTURE3);
-        gl.bindTexture(gl.TEXTURE_2D, tex);
+        gl.bindTexture(gl.TEXTURE_2D, view.tex);
         gl.uniform1i(U.uArt, 3);
         gl.uniform1f(U.uArtOk, 1);
       }
@@ -1248,8 +1292,8 @@ void main() {
       // 只看 setup 的文本会把它当成"永远是 0"的参数。
       artBind: scene.base ? scene.base.bind : null,
       vert:VERT, frag:PAINT + scene.shader,
-      setup:function (gl,U,S) {
-        if (scene.base) scene.base.bind(gl, U);
+      setup:function (gl,U,S,owner) {
+        if (scene.base) scene.base.bind(gl, U, owner);
         gl.uniform3f(U.uPaint,S.p.light,S.p.motion,S.p.detail);
         // Shared camera/model controls pan and crop the drawing without adding
         // perspective. Y rotation becomes a horizontal panorama adjustment.
