@@ -95,7 +95,7 @@
 #view-room .room-sync-summary { display:flex; flex-wrap:wrap; align-items:center; gap:9px; background:var(--panel-2); padding:12px; border:1px solid var(--line); border-radius:17px; margin:24px 0; }
 #view-room .room-sync-summary .btn { margin-left:auto; color:var(--accent); background:transparent; padding:6px; font-size:11px; }
 #view-room .room-chip { color:var(--muted); font-size:11px; }
-#view-room .room-play-aside { display:grid; align-content:start; gap:24px; min-width:0; }
+#view-room .room-play-aside { display:grid; align-content:start; gap:20px; min-width:0; }
 #view-room .room-members-preview { display:grid; gap:17px; }
 #view-room .room-member-summary { display:grid; grid-template-columns:36px minmax(0,1fr); gap:12px; align-items:center; }
 #view-room .room-avatar { width:36px; height:36px; border-radius:50%; display:grid; place-items:center; color:var(--accent-ink); background:var(--accent); font-size:14px; font-weight:600; }
@@ -179,7 +179,7 @@
 #view-room .room-notice { margin:0 0 20px; border:1px solid color-mix(in srgb, var(--ok) 25%, transparent); background:color-mix(in srgb, var(--ok) 7%, transparent); padding:13px 18px; border-radius:14px; font-size:12px; overflow-wrap:anywhere; }
 #view-room .room-error { color:var(--danger); border-color:color-mix(in srgb, var(--danger) 35%, transparent); background:color-mix(in srgb, var(--danger) 7%, transparent); }
 #view-room .room-empty { color:var(--muted); font-size:13px; padding:25px 0; }
-#view-room .room-empty-state { padding:48px 32px; border:1px dashed var(--line); border-radius:25px; }
+#view-room .room-empty-state { padding:48px 32px; border:1px solid var(--line); border-radius:25px; }
 #view-room .room-empty-state h3 { font-size:23px; margin:0 0 12px; }
 #view-room .room-leave { color:var(--danger); margin:12px 0 0 10px; }
 #view-room .room-header-leave { margin:0; background:transparent; border:1px solid var(--line); font-size:var(--fs-sm,12px); white-space:nowrap; }
@@ -444,7 +444,7 @@
 #view-room .room-queue-tools .room-field { font-size:0; gap:0; margin:0; }
 #view-room .room-queue-tools select { font-size:12px; padding:8px; }
 #view-room .room-track { display:flex; flex-wrap:nowrap; align-items:center; gap:8px; padding:6px 8px; min-height:60px; position:relative; border-radius:6px; transition:background .16s ease; }
-#view-room .room-track:hover,#view-room .room-track:focus-within { background:var(--panel-2); }
+#view-room .room-track:hover,#view-room .room-track:focus-within { background:var(--hover); }
 #view-room .room-track>.room-track-copy { flex:1; min-width:0; overflow:hidden; }
 #view-room .room-track>.room-queue-index { flex:none; min-width:18px; color:var(--muted); font-size:11px; text-align:center; }
 #view-room .room-track strong { display:block; font-size:13px; font-weight:550; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
@@ -641,7 +641,7 @@ body.s3d-open #room-global-player { display:none!important; }
 #view-room .room-seek-line { font-family:var(--font-mono,monospace); font-variant-numeric:tabular-nums; font-size:11px; }
 #view-room .room-stage-tabs { padding:3px; border-radius:9px; background:var(--panel); }
 #view-room .room-stage-tabs .btn { position:relative; min-height:40px; font-size:12px; }
-#view-room .room-stage-tabs [aria-selected=true] { background:var(--panel-2); color:var(--text); }
+#view-room .room-stage-tabs [aria-selected=true] { background:var(--panel-solid); color:var(--text); }
 #view-room .room-stage-tabs [aria-selected=true]::after { content:""; position:absolute; height:2px; inset:auto 30% 0; background:var(--accent); border-radius:2px; }
 #view-room .room-aside-panel>.room-queue-section { padding:0; }
 #view-room .room-queue-section>h3 { position:absolute; width:1px; height:1px; margin:-1px; overflow:hidden; clip-path:inset(50%); }
@@ -908,21 +908,22 @@ body.s3d-open #room-global-player { display:none!important; }
 }
 
 /* RedesignListenTogether: music first, visible people, and a dedicated H5 view.
-   All surfaces keep using Theme tokens, including light and custom themes. */
+   All surfaces keep using Theme tokens, including light and custom themes.
+   主题层收敛：颜色与状态只取全站令牌，字号保持原尺度，只微调字距与间距节奏。 */
 #view-room .room-content { max-width:1440px; margin-inline:auto; padding:20px 24px; }
-#view-room .room-header { padding-bottom:16px; margin-bottom:20px; }
+#view-room .room-header { padding-bottom:16px; margin-bottom:24px; }
 #view-room .room-header-title>.room-sub { margin:4px 0 0; }
 #view-room .room-player { border:1px solid var(--line); border-radius:24px; background:var(--panel-solid); }
-#view-room .room-stage-scene { background:radial-gradient(ellipse at 85% 15%,color-mix(in srgb,var(--accent) 8%,transparent),transparent 65%),var(--panel-solid); padding:32px 28px 16px; }
+#view-room .room-stage-scene { background:radial-gradient(ellipse at 85% 15%,color-mix(in srgb,var(--accent) 5%,transparent),transparent 65%),var(--panel-solid); padding:32px 28px 16px; }
 #view-room .room-stage-label { font-size:11px; letter-spacing:0; color:var(--muted); }
 #view-room .room-stage-label::before { width:6px; height:6px; border-radius:50%; }
 #view-room .room-player .room-hero { grid-template-columns:minmax(0,1fr) clamp(140px,15vw,220px); max-width:none; gap:24px; }
 #view-room .room-player .room-hero-copy { grid-column:1; grid-row:1; text-align:left; }
-#view-room .room-player .room-art { grid-column:2; grid-row:1; width:100%; border:1px solid var(--line-strong); box-shadow:0 12px 28px color-mix(in srgb,var(--bg) 30%,transparent); }
+#view-room .room-player .room-art { grid-column:2; grid-row:1; width:100%; border:1px solid var(--line-strong); box-shadow:0 12px 28px color-mix(in srgb,var(--bg) 18%,transparent); }
 #view-room .room-art-empty { background:repeating-radial-gradient(circle,var(--panel-solid) 0 3px,var(--panel-2) 4px 5px); }
 #view-room .room-art-empty::before { inset:30%; border:0; background:var(--accent); }
 #view-room .room-art-empty>span { font-size:28px; color:var(--accent-ink); }
-#view-room .room-player .room-current { font-size:clamp(28px,2.6vw,42px); font-weight:700; letter-spacing:-.04em; line-height:1.2; margin:14px 0 12px; }
+#view-room .room-player .room-current { font-size:clamp(28px,2.6vw,42px); font-weight:700; letter-spacing:-.02em; line-height:1.2; margin:14px 0 12px; }
 #view-room .room-player .room-artist { font-size:14px; line-height:1.6; }
 #view-room .room-playing-badge { background:transparent; padding:0; font-size:11px; letter-spacing:0; }
 #view-room .room-stage-scene .room-lyrics { text-align:center; margin:20px 0 8px; }
@@ -933,33 +934,33 @@ body.s3d-open #room-global-player { display:none!important; }
 #view-room .room-player .room-player-controls .btn { width:44px; height:44px; border:0; background:transparent; color:var(--text); }
 #view-room .room-player .room-player-controls .room-play-button { width:64px; height:64px; background:var(--text); color:var(--bg); }
 #view-room .room-player .room-player-controls .room-play-button:hover { background:var(--accent); color:var(--accent-ink); }
-#view-room .room-player .room-player-quick { margin:18px 0 8px; }
+#view-room .room-player .room-player-quick { margin:20px 0 10px; }
 #view-room .room-stage-details { margin:0 28px; font-size:11px; }
 #view-room .room-stage-chat-dock:empty { display:none; }
 #view-room .room-play-aside { border:1px solid var(--line); border-radius:24px; padding:16px; background:var(--panel-solid); }
 #view-room .room-stage-tabs { background:var(--panel-2); padding:4px; border-radius:12px; }
 #view-room .room-stage-tabs .btn { font-size:13px; }
 #view-room .room-people-section>h3 { margin-bottom:4px; font-size:16px; }
-#view-room .room-people-heading { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:16px; }
+#view-room .room-people-heading { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:14px; }
 #view-room .room-people-heading .room-sub { margin:0; font-size:12px; }
 #view-room .room-people-invite { min-height:40px; padding:8px 14px; border-radius:12px; font-size:12px; }
 #view-room .room-members-preview { gap:6px; }
 #view-room button.room-member-summary { display:grid; grid-template-columns:38px minmax(0,1fr); width:100%; gap:12px; padding:12px 6px; border-radius:12px; }
-#view-room button.room-member-summary:hover { background:var(--panel-2); }
+#view-room button.room-member-summary:hover { background:var(--hover); }
 #view-room button.room-member-summary:nth-child(n) .room-avatar { width:38px; height:38px; font-size:14px; color:var(--accent); background:color-mix(in srgb,var(--accent) 12%,var(--panel-solid)); border:0; }
 #view-room .room-member-summary strong { display:flex; align-items:center; flex-wrap:wrap; gap:6px; font-size:13px; }
 #view-room .room-host-badge { padding:1px 5px; border-radius:4px; color:var(--accent); background:color-mix(in srgb,var(--accent) 12%,transparent); font-size:10px; font-weight:500; }
 #view-room .room-member-state { display:flex; align-items:center; gap:6px; margin-top:5px; line-height:1.5; }
 #view-room .room-member-state::before { content:''; flex:none; width:6px; height:6px; border-radius:50%; background:var(--muted); }
 #view-room .room-member-state[data-state=ready]::before { background:var(--accent); }
-#view-room .room-member-state[data-state=waiting]::before { background:var(--warning,var(--muted)); }
+#view-room .room-member-state[data-state=waiting]::before { background:var(--warn); }
 #view-room .room-people-section>.room-member-strip { display:none; }
 #view-room .room-people-section>.room-manage-members { width:100%; margin:16px 0 0; font-weight:500; }
 #view-room .room-people-section .room-activity:empty { display:none; }
 #view-room .room-chat-section>h3 { margin:4px 0 16px; font-size:16px; }
 #view-room .room-chat { padding:0 4px; }
 #view-room .room-chat:empty::before { content:'还没有人说话，聊聊正在听的歌吧'; display:block; padding:32px 12px; text-align:center; color:var(--muted); font-size:12px; }
-#view-room .room-chat li { padding:12px; margin:0 0 12px; border:0; border-radius:14px 14px 14px 4px; background:var(--panel-2); line-height:1.7; }
+#view-room .room-chat li { padding:12px; margin:0 0 10px; border:0; border-radius:14px 14px 14px 4px; background:var(--panel-2); line-height:1.7; }
 #view-room .room-chat li strong { display:block; margin-bottom:4px; color:var(--muted); font-size:11px; font-weight:500; }
 #view-room .room-chat li.room-message-mine { margin-left:24px; border-radius:14px 14px 4px 14px; background:color-mix(in srgb,var(--accent) 14%,var(--panel-2)); }
 #view-room .room-chat-form { display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:end; gap:8px; }
@@ -968,7 +969,7 @@ body.s3d-open #room-global-player { display:none!important; }
 #view-room .room-chat-form>.btn { border-radius:12px; }
 #view-room .room-page-lobby>.room-flow-state { padding-top:clamp(40px,8vh,100px); gap:16px; }
 #view-room[data-room-active=false] .room-page-lobby { max-width:600px; }
-#view-room .room-page-lobby>.room-flow-state h3 { font-size:clamp(26px,3vw,36px); letter-spacing:-.04em; text-wrap:balance; }
+#view-room .room-page-lobby>.room-flow-state h3 { font-size:clamp(26px,3vw,36px); letter-spacing:-.02em; text-wrap:balance; }
 #view-room .room-page-lobby>.room-flow-state>.room-sub { max-width:360px; font-size:14px; line-height:1.8; }
 
 @media(min-width:1200px) and (min-height:621px) {
