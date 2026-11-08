@@ -13,6 +13,8 @@ Jamendo、ccMixter 和公开播客，并作为 DBX 商店候选；**Full** 额�
 使用的版本。两版使用不同插件 ID 和默认数据目录，详见[双版本构建与发布](docs/editions.md)。
 
 Windows 源码目录可使用 **启动播放器.cmd** 打开原生桌面窗口，或使用 **启动网页播放器.cmd**。
+
+Windows Full 候选构建包含原生窗口，解压后通过包内 **Hertz Studio.cmd** 启动；运行说明与资料/升级边界见[Windows 便携候选](docs/windows-portable.md)。安装器、签名更新和正式发布资格仍按[交付实施记录](docs/desktop-release.md)推进。
 新版统一采用 Hertz 桌面与 H5 布局，保留封面墙、歌词舞台与原有业务功能。
 启动与构建说明见 [中文界面说明](UI预览说明.md)，实际验证范围见 [UI 验收记录](UI验收记录.md)。
 
@@ -165,7 +167,8 @@ Windows 源码目录可使用 **启动播放器.cmd** 打开原生桌面窗口�
 
 - 统一 Hertz 桌面与 H5 布局，支持侧栏收起、手机边缘滑动、专辑与歌手分类、播放页及队列抽屉。
   旧布局偏好自动迁移；封面墙作为独立共用入口保留，支持平移、缩放与播放跟随
-- 原生胶囊缩为桌面置顶小窗，拖动封面或歌曲信息移动；展开恢复原窗口尺寸、位置和最大化状态。
+- 原生胶囊缩为 320×64 桌面置顶小窗，只留传输三键；拖动封面或歌曲信息移动，
+  点击封面或歌曲信息（或托盘「打开主窗口」）展开，恢复原窗口尺寸、位置和最大化状态。
   主播放栏、播放页与三维场景使用竖向音量
 - 24 套内置主题色 + 7 套二次元主题 + 自定义配色；文字色由底色按 WCAG 反推，不是手写
 - 主题工作室：壁纸背景（内置 13 张，缩略图选择与独立压暗）、自定义配色、自动压暗、背景模糊；
@@ -211,6 +214,10 @@ npm ci --prefix tools/space-stage --no-audit --no-fund
 # 独立形态使用 Full（含六个平台音源）；去掉 --features full 得到 Standard，
 # 它只用于 DBX 商店候选与本地 Standard 验证。
 cargo build --release -p hertz-studio --features full
+
+# Windows 原生播放器候选（包含系统媒体控制及进程内桌面宿主）
+cargo build --locked --release -p hertz-studio --bin hertz-studio --features full,native-window
+node scripts/package-standalone-windows.js target/release/hertz-studio.exe dist/windows
 
 # 运行独立形态（Windows 下产物是 target\release\hertz-studio.exe）
 ./target/release/hertz-studio
@@ -574,6 +581,7 @@ pwsh -File scripts/smoke.ps1 7899 # Windows
 | LAN-L 局域网一起听 | 房主统一渲染、接收端按设备时钟同步；含受限配对/撤权、旧播控入口模式门禁，以及互动弹幕的独立有界存储。**设计提案待评审、尚未实施**，不依赖桌面专项 | [lan-listening.md](docs/lan-listening.md) |
 | 创意舞台二期（P8） | 基频轨迹已能本地分析与只读查看；工程、模板、分享码、视频导出已落地，人工视觉与音乐质量验收未做 | [pitch-track.md](docs/pitch-track.md) · [stage-projects.md](docs/stage-projects.md) · [stage-templates.md](docs/stage-templates.md) · [orchestration-art.md](docs/orchestration-art.md) · [video-export.md](docs/video-export.md) |
 | 星座场景视觉 | 逐座造型、配色与动效按文档调过一轮，可拖拽环绕、滚轮缩放、双击复位 | [zodiac-visual-tuning.md](docs/zodiac-visual-tuning.md) |
+| 舞台场景转场 | Space3D 场景切换的类型化遮罩转场（淡入淡出/擦除/缩放/倾斜/位移/组合），单 GL 上下文下的合成器方案，含连续切换与降级规则 | `docs/design/space3d-scene-transitions.md`（本地设计稿） |
 | 搜索性能基线 | 五万曲本机 P95 与受控上游时延有基线，不替代真实来源 / 弱网 / 弱机验收 | [search-performance.md](docs/search-performance.md) |
 | 资源优化 | 音频转换参数、分辨率与帧率预算不变的前提下压缩重复工作与临时分配 | [resource-optimization.md](docs/resource-optimization.md) |
 | 双发行版构建 | Standard / Full 同一分支、同一版本号，feature 决定协议模块与界面裁剪 | [editions.md](docs/editions.md) |

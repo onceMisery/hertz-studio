@@ -660,7 +660,7 @@ interface AssetAdapter<T> {
 
 ### 8.5 舞台持久媒体：原服务保存文件，设置保存稳定引用
 
-**默认行为：选择图片/视频 → 导入到当前播放器资料目录 → 保存背景选择 → 呈现；完成后重启仍恢复。** 不要求安装或启动 `hertz-desktop`，不增加 DBX 网络 listener，不把大文件写入 localStorage、DBX storage、普通 settings JSON 或分享码。以下是新增设计；当前 `setLocalFile` 仍为会话实现，不能因修改本文就宣称已交付。
+**默认行为：选择图片/视频 → 导入到当前播放器资料目录 → 保存背景选择 → 呈现；完成后重启仍恢复。** 不要求安装或启动 `hertz-desktop`，不增加 DBX 网络 listener，不把大文件写入 localStorage、DBX storage、普通 settings JSON 或分享码。2026-11-05 已接通独立版图片/视频和 DBX 图片，见[实施与验证记录](stage-media-persistence.md)；DBX 视频仍受 §8.5.4 的宿主连续流资格门限制，不能据此宣布 M0～M2 全出口或安装包发布完成。
 
 #### 8.5.1 owner、稳定引用与存储
 
@@ -896,6 +896,8 @@ context 不提供 config、shell、音乐控制或任意 fetch；factory 不持�
 ```
 
 mode 只接受 add/multiply/replace；同一目标最多一条绑定，轨道与绑定按前述顺序组合。公开参数 target 只能是 `{kind:node,nodeId,property,component}` 或 `{kind:binding,bindingId,parameter}`；调制强度应绑定 parameters.gain，而不是覆盖最终 opacity。所有路径在编译时转为槽，运行时不执行 JSONPath 或字符串表达式。
+
+2026-11-06 单内容公开属性增量沿用此 target 联合：Builtin/Image/Video 包使用保留的 `nodeId:"content"`、`component:null`。内置目标 property 为真实 registry 参数 key，图片/视频为 `asset`；不解析 JSONPath，不借此开放 composition 或 binding 执行。具体类型、约束、默认值与组覆盖合同见[公开属性实施记录](wallpaper-public-properties.md)。
 
 ### 9.4 效果与渲染图
 
@@ -1143,6 +1145,8 @@ mirror 的时间线来自组时钟，不发送逐帧变换：任一成员可运�
 
 视频镜像用相同目标时间，2 秒检查一次，偏差超过 100 ms 才校正；不承诺跨显示器逐帧锁相。span 的视频只使用一个 decoder。
 
+2026-11-06 实施增量：多个 single 组、span、图片/视频 mirror、逐组设置/预览、完整配置 Apply、共享轮播与视频组时钟已接线。镜像以实际原包/manifest 和完整列表为准，后台检查持续扫描、设置页轮询；图片最多四成员，视频最多两成员，integrated/builtin mirror 仍拒绝。当前 Windows 真实验证使用一块物理屏幕和离线 Fixed 成员，双屏同时呈现、混合 DPI、负坐标/span 边界与热拔插仍待硬件验收。实现与证据见[显示组与镜像实施记录](wallpaper-displays-mirror.md)。
+
 ### 13.2 暂停原因集合
 
 <a id="101-一份策略计算有效预算"></a>
@@ -1156,6 +1160,8 @@ mirror 的时间线来自组时钟，不发送逐帧变换：任一成员可运�
 全屏判断排除桌面壳和本组件窗口，对目标完整矩形比较并去抖 300 ms；普通最大化使用单独开关。应用规则按规范化可执行文件路径匹配，不能靠可变窗口标题；规则不得覆盖强制原因。
 
 displayMissing 先走 §13.1 的空拓扑/目标缺失宽限。遮挡/最大化去抖采用非对称：进入暂停慢（约 750 ms；若实测改用 400 ms 必须写进同一常量），恢复快（约 150 ms；预览可用 100 ms）。全屏保留 300 ms 进入去抖，恢复可更快。恢复快是为了退出全屏立刻看到画面，暂停慢是为了容忍短暂抖动。
+
+2026-11-06 实施增量：运行设置页已开放全屏/最大化开关和最多 32 条应用 Pause/Stop 规则，按规范化完整可执行路径匹配前台应用。Pause 保留冻结画面，Stop 退出呈现资源；只改规则保留 renderer、视频位置及轮播失败项。生产五分钟资源上限前通过有界静帧交接回收动态资源，恢复重新准入。11 组原生验证含实际等待 285.726 秒后的静帧保留与视频资源退出；实现和硬件边界见[窗口规则实施记录](wallpaper-window-policies.md)。
 
 ### 13.3 Session 状态机
 
@@ -1238,12 +1244,15 @@ ready 要求资源准入成功、原生窗口挂载/可见确认、当前 genera
 | `wallpaper.library.deleteWork/deleteVersion` | 删除作品全部版本，或指定 workKey/version/packageHash；检查全部保存域、原生草稿、预览与退出中的会话引用 |
 | `wallpaper.file.pick` | 原生文件选择，返回一次性 fileToken，不让页面提交任意路径 |
 | `wallpaper.import.begin` | fileToken、requestId；返回 jobId，不自动启用 |
-| `wallpaper.export.begin` | packageHash、原生输出 token |
-| `wallpaper.draft.create/update/save/discard` | 草稿单独 revision；update 一次最多 32 个类型化操作 |
+| `wallpaper.export.pick/begin/recover` | packageHash、原生输出 token；recover 按 jobId 显式重新核验未决导出 |
+| `wallpaper.draft.create/update/save/publish/discard` | 草稿单独 revision；update 一次最多 32 个类型化操作；publish 从已保存 work 草稿生成不可变版本 |
+| `wallpaper.draft.list/get/parameters/properties/schema` | work 草稿摘要、回执、按修订分页的参数/公开属性及真实场景 schema |
+| `wallpaper.properties.inspect` | 固定版本或完整列表共同属性的有界分页与快照身份 |
+| `wallpaper.library.references` | 只读查询作品或固定版本的配置、运行及持久引用，最多 32 项 / 24 KiB |
 | `wallpaper.preview.acquire/update/renew/release` | owner 租约与草稿引用 |
 | `wallpaper.apply` | expectedRevision、草稿引用；保存与应用结果分开 |
 | `wallpaper.pause/show/stop/retry` | 明确目标与 desired 状态，不用不确定 toggle 重试 |
-| `wallpaper.playlist.save/next` | 固定版本列表、顺序/随机、intervalSeconds |
+| `wallpaper.playlist.list/get/save/next` | 固定版本列表、顺序/随机、intervalSeconds；next 可显式重试失败项 |
 | `wallpaper.audio.devices/select` | 原生设备枚举、显式输入切换 |
 | `wallpaper.jobs.get/cancel` | 进度、失败和取消；不承诺取消已提交事务 |
 | `wallpaper.operations.get` | 以 requestId 查询已受理操作、jobId、是否保存及 revision；回执丢失后使用 |
@@ -1258,7 +1267,7 @@ fileToken 为随机单次能力，60 秒过期，绑定当前设置会话、只�
 
 文件/库引用提交与 GC 由同一个原生串行队列协调：提交配置前对新引用取得临时 pin，落盘成功后把 pin 转成活动配置引用，再释放旧引用；失败释放临时 pin。重启时先解析所有 profile、unboundDomain、列表和草稿，再允许 GC。用户请求永久移除仍被引用的版本时返回 content_in_use 及有界引用列表；“归档”只隐藏作品，不删除其数据。
 
-当前删除接线（2026-11-03）：正式 API 返回 `asset_in_use`，检查全部已保存 profiles 与 unboundDomain（包含停用/非活动域），以及当前桌面、原生设置草稿、预览、准备/候选和退出中的会话；暂未提供有界引用详情列表。设置页“选择此版本”须先完成原生草稿 update 才显示选择完成，期间锁住选择/删除/应用/预览，失败保留原草稿；该操作不提交配置或切换桌面。退出 owner 保留配置引用直到 controller 与文件读者两道屏障都完成。删除仍沿原内容写门先移除不再共享的包目录、再事务删除库行；原生测试覆盖拒绝时包和配置不变、收藏持久化、解除引用后删除及重启不复活，已通过普通进程在目录删除后、数据库删行提交前被终止的恢复验收：重启只标记 unavailable，显式重试可完成删除；其他文件删除中途、断电及 OS 崩溃场景仍需验证。
+当前删除接线（2026-11-03，11-06 增量）：正式 API 保持 `asset_in_use`，检查全部已保存 profiles 与 unboundDomain（包含停用/非活动域），以及当前桌面、原生设置草稿、预览、准备/候选和退出中的会话。11-06 新增 `error.details` 有界引用列表与只读查询，合并持久列表/作品草稿/待发布记录；最多 32 项、24 KiB，详情见[删除引用实施记录](wallpaper-library-references.md)。设置页“选择此版本”须先完成原生草稿 update 才显示选择完成，期间锁住选择/删除/应用/预览，失败保留原草稿；该操作不提交配置或切换桌面。退出 owner 保留配置引用直到 controller 与文件读者两道屏障都完成。删除仍沿原内容写门先移除不再共享的包目录、再事务删除库行；原生测试覆盖拒绝时包和配置不变、收藏持久化、解除引用后删除及重启不复活，已通过普通进程在目录删除后、数据库删行提交前被终止的恢复验收：重启只标记 unavailable，显式重试可完成删除；其他文件删除中途、断电及 OS 崩溃场景仍需验证。
 
 当前视频封面接线（2026-11-03）：导入或显式准备视频时，在原有单个 WebView2 探测器的中段真实帧上生成 JPEG；继续通过近尾帧验证并等待 controller/文件读者退出后，才交给后台检查像素、尺寸、字节数和摘要。封面最长边 320 px、不放大小视频、JPEG ≤24 KiB；可选生成/缓存失败不改变原视频或其解码资格。封面使用同一 2 GiB 派生缓存、不可变代际和目录租约，键绑定输入内容及探测脚本版本，损坏时在下次显式准备中重建。
 
@@ -1274,6 +1283,8 @@ fileToken 为随机单次能力，60 秒过期，绑定当前设置会话、只�
 
 轮播间隔 10–86400 秒，以可绘制时间计时；暂停冻结，恢复不补播。每组最多一个待切换，失败停止本轮并展示重试，不无限跳过错误项。随机种子按运行实例保存，不修改用户列表顺序。
 
+2026-11-05 实施增量：上述 work 草稿、内置场景包发布/选择、原包导出、固定版本轮播已接通。work 和 settings 修订保持独立，原包导出通过 60 秒单次原生输出 token，只创建新文件；持久请求和文件身份支持重启查询及同实例显式核验恢复。删除保护增加保存的作品草稿、列表及运行中实际版本引用，仍未提供完整有界引用详情。首版最多 50 个 work 草稿、100 个列表、每列表 32 项；设计中的 1000 项总上限需后续增量编辑协议承接，当前完整保存不突破 16 KiB 信封。自动轮播不写桌面 Config。11-05 原始证据为单屏 single，11-06 又接入显示组与镜像共享轮播。实现、原生验证及未验范围见[作品与轮播实施记录](wallpaper-works-playlists.md)与[显示组实施记录](wallpaper-displays-mirror.md)。本表中权限、社区、AI 等后续命令不因此次增量自动成为已实现能力。
+
 ## 15. 编辑器作为引擎客户端
 
 编辑器放在现有中心“作品 / 编辑 / 显示器 / 运行 / 社区”信息架构中；歌词入口保持独立页签，不把作品编辑状态写入歌词配置。AI 面板从“作品”的描述/推荐入口和“编辑”的生成入口展开，复用当前选定目标与唯一预览；始终分开显示生成、保存、应用状态，不能只放一个含义不清的“完成”按钮。
@@ -1286,6 +1297,8 @@ fileToken 为随机单次能力，60 秒过期，绑定当前设置会话、只�
 - 公开参数支持 number、boolean、select、color、text、asset；每项包含 id、label、default、约束、target，最多 64 项。asset 只能选择该作品包中已声明且类型兼容的资源。
 - 发布/导出从已提交草稿生成新不可变版本；保存作品不自动替换桌面，应用必须另行确认。
 - 第三方作品只有许可证允许改编才开放“另存为我的作品”；fork 生成新 workId 并保留来源与 attribution，不能覆盖原作者作品。
+
+2026-11-05 首版编辑入口为设置页的“我的场景作品”：保存/重开内置场景、真实 schema 参数表单、1 秒去抖与 CAS 保存、共享原生预览及“生成版本”已实现；预览作品使用已应用的显示/音频设置。`authored_versions` 按原生发布的确切版本核实作者归属，只允许重开本机自己生成的版本，不信任导入包声明的本地来源。2026-11-06 增量接通真实参数公开、类型化默认值/约束、发布重开和按显示组覆盖；参见[公开属性实施记录](wallpaper-public-properties.md)。通用第三方许可证改编、图层树、时间线和撤销栈仍属于后续编辑器范围。
 
 P2 的三维编辑只提供模型导入、变换、相机、灯光、材质受支持参数与动画片段选择，不建设 Blender 级网格建模、骨骼编辑或任意材质代码编辑器。
 
@@ -1679,7 +1692,9 @@ AI 不接入 FrameInput、render/update、FFT 回调或轮播时钟；生成关�
 | P1-03 图片准备与缓存 | EXIF、RGB ICC、线性透明缩放、缩略图、不可变派生、2 GiB 租约保护 LRU、环境资格缓存与目标像素变体已实现；按真实目标选图和补图、视频封面生成及库/设置页读取、桌面播放/启动/准备故障后的静态封面已接线 | 更多图像边界、峰值内存、1080p/4K 及硬解验收 |
 | P1-03 媒体交付 | 原生有界流、Range/seek、精确准入/撤销与轻后端已有原生回归；正式版本选择、桌面/独立媒体预览与跨重启恢复已接线 | 正向原生文件选择操作、大视频/设备资格及长期性能 |
 | P1-04 / P1-06 | 媒体候选、实测物理目标、四事实、两道退出屏障、GL/媒体统一独立预览及两类后端的原生会话总保留/子额度及桌面配置/Follow Hertz/预览的原生静态帧交接已接线；静态工作区按实际退出提前归还；系统音源共享 owner、设备通知、实际采集时间与过期/断流处理已通过回归 | 受信页面共享资源租约已接入总保留/子额度内核（shared-assets 子额度与逐资源记账）；仍缺组合引擎通用 AssetProvider 的动态逐资源预算、完整 GPU/进程树峰值、真实音频设备切换/热拔/休眠、五分钟软暂停卸载与失败关闭的设备实测 |
-| P1-05 / P1-07 / P1-08 / P1-M0～M2 | 正式库导入、进度、config v5/提交日志、settings 草稿与单媒体选择/独立预览/应用/重启已接线 | 原生文件对话框正向验收、work 草稿、多屏、收藏轮播、舞台持久媒体及各工作包完整出口 |
+| P1-05 / P1-08 | work 草稿/保存/内置发布、原包导出与固定版本轮播已接线并通过定向原生回归 | 原生文件对话框正向验收、大型列表增量编辑、第三方改编与更多故障资格 |
+| P1-07 | 多组 single/span、图片/视频 mirror、组时钟、逐组策略/预览和原子 Apply 已接线；一块真实屏幕及离线成员已定向验证 | 双屏同时呈现、混合 DPI/负坐标/span 边界、热拔插、两路视频同步、四目标峰值与长稳 |
+| P1-M0～M2 | 独立版图片/视频和 DBX 图片持久化已接线，保存/恢复/配额/删除/备份已定向验证 | DBX 视频连续流宿主门槛、更多设备/解码器及发行资格 |
 | P2 / P3 / AI | 尚未交付对应工作包 | 组合创作、安全隔离与分发、受管 AI 流程 |
 
 ### 20.1 P0：先修真实运行合同

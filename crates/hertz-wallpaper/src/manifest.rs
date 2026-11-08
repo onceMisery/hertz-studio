@@ -6,8 +6,8 @@
 //! 校验层次：字节预扫描（重复键/深度/大小）→ 严格反序列化（拒绝未知字段）→
 //! 值域与交叉引用（uuid/version/长度/资源引用/声明总量的界）。
 //! 单资源 kind 上限按 §6.3 对 asset 的 source 文件执行；派生 variant 文件
-//! 不重复计费。properties 的完整类型化 schema 属 P2 编辑器合同（§15），
-//! 本层只执行结构性边界（数量/大小/id 规则/必备键）。
+//! 不重复计费。properties 使用共享类型化合同，校验默认值、约束、显式目标
+//! 和当前内容的 registry / 资源引用（§9.3/§15）。
 
 use std::collections::BTreeMap;
 
@@ -65,17 +65,27 @@ pub struct License {
 /// serde 的内部标记枚举不支持 deny_unknown_fields，未知键在
 /// `validate_manifest_bytes` 的 Value 层按 `CONTENT_KEYS` 白名单拒绝。
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum Content {
-    Image { asset: String },
-    Video { asset: String },
+    Image {
+        asset: String,
+    },
+    Video {
+        asset: String,
+    },
     Builtin {
         scene_id: String,
         state_version: u32,
         #[serde(default)]
         params: serde_json::Map<String, serde_json::Value>,
     },
-    Composition { document: String },
+    Composition {
+        document: String,
+    },
     Web {
         entry: String,
         api_version: u32,
@@ -103,7 +113,12 @@ fn validate_content_keys(content: &serde_json::Value) -> Result<()> {
         .iter()
         .find(|(name, _)| *name == kind)
         .map(|(_, keys)| *keys)
-        .ok_or_else(|| PackageError::new("unsupported_content", format!("content.kind={kind} 不受支持")))?;
+        .ok_or_else(|| {
+            PackageError::new(
+                "unsupported_content",
+                format!("content.kind={kind} 不受支持"),
+            )
+        })?;
     for key in object.keys() {
         if !allowed.contains(&key.as_str()) {
             return Err(PackageError::new(
@@ -199,13 +214,15 @@ pub fn validate_manifest_bytes(bytes: &[u8]) -> Result<Manifest> {
         ));
     }
     check_bounded_json(bytes, MAX_MANIFEST_DEPTH)?;
-    let value: serde_json::Value = serde_json::from_slice(bytes)
-        .map_err(|error| PackageError::new("invalid_json", format!("manifest 不是合法 JSON：{error}")))?;
+    let value: serde_json::Value = serde_json::from_slice(bytes).map_err(|error| {
+        PackageError::new("invalid_json", format!("manifest 不是合法 JSON：{error}"))
+    })?;
     if let Some(content) = value.get("content") {
         validate_content_keys(content)?;
     }
-    let manifest: Manifest = serde_json::from_value(value)
-        .map_err(|error| PackageError::new("invalid_manifest", format!("manifest 结构不合法：{error}")))?;
+    let manifest: Manifest = serde_json::from_value(value).map_err(|error| {
+        PackageError::new("invalid_manifest", format!("manifest 结构不合法：{error}"))
+    })?;
     validate_manifest(&manifest)?;
     Ok(manifest)
 }
@@ -214,12 +231,19 @@ pub fn validate_manifest(manifest: &Manifest) -> Result<()> {
     if manifest.format_version != 1 {
         return Err(PackageError::new(
             "unsupported_format",
-            format!("formatVersion={} 不受支持，只接受 1", manifest.format_version),
+            format!(
+                "formatVersion={} 不受支持，只接受 1",
+                manifest.format_version
+            ),
         ));
     }
     // workId 必须是标准（连字符小写）UUID 字符串。
-    let parsed = Uuid::parse_str(&manifest.work_id)
-        .map_err(|_| PackageError::new("invalid_work_id", format!("workId 不是合法 UUID：{}", manifest.work_id)))?;
+    let parsed = Uuid::parse_str(&manifest.work_id).map_err(|_| {
+        PackageError::new(
+            "invalid_work_id",
+            format!("workId 不是合法 UUID：{}", manifest.work_id),
+        )
+    })?;
     if parsed.to_string() != manifest.work_id {
         return Err(PackageError::new(
             "invalid_work_id",
@@ -227,7 +251,10 @@ pub fn validate_manifest(manifest: &Manifest) -> Result<()> {
         ));
     }
     if manifest.version == 0 {
-        return Err(PackageError::new("invalid_version", "version 必须从 1 开始"));
+        return Err(PackageError::new(
+            "invalid_version",
+            "version 必须从 1 开始",
+        ));
     }
     let title_chars = manifest.title.chars().count();
     if title_chars == 0 || title_chars > 120 {
@@ -237,19 +264,36 @@ pub fn validate_manifest(manifest: &Manifest) -> Result<()> {
         ));
     }
     if manifest.description.chars().count() > 4000 {
-        return Err(PackageError::new("invalid_description", "描述最多 4000 字符"));
+        return Err(PackageError::new(
+            "invalid_description",
+            "描述最多 4000 字符",
+        ));
     }
     if manifest.license.code.is_empty() || manifest.license.code.len() > 64 {
-        return Err(PackageError::new("invalid_license", "license.code 必须是 1–64 字符"));
+        return Err(PackageError::new(
+            "invalid_license",
+            "license.code 必须是 1–64 字符",
+        ));
     }
     if manifest.license.assets.is_empty() || manifest.license.assets.len() > 64 {
-        return Err(PackageError::new("invalid_license", "license.assets 必须是 1–64 字符"));
+        return Err(PackageError::new(
+            "invalid_license",
+            "license.assets 必须是 1–64 字符",
+        ));
     }
     if manifest.license.attribution.len() > 512 {
-        return Err(PackageError::new("invalid_license", "attribution 最多 512 字符"));
+        return Err(PackageError::new(
+            "invalid_license",
+            "attribution 最多 512 字符",
+        ));
     }
-    if manifest.files.is_empty() {
-        return Err(PackageError::new("invalid_manifest", "files 不能为空"));
+    // A builtin scene's complete state lives in the manifest. Media, web and
+    // composition content still require their declared package files.
+    if manifest.files.is_empty() && !matches!(manifest.content, Content::Builtin { .. }) {
+        return Err(PackageError::new(
+            "invalid_manifest",
+            "此作品类型的 files 不能为空",
+        ));
     }
     if manifest.files.len() > MAX_FILES {
         return Err(PackageError::new(
@@ -356,9 +400,7 @@ pub fn validate_manifest(manifest: &Manifest) -> Result<()> {
                 ));
             }
         }
-        Content::Web {
-            api_version: 1, ..
-        } => {}
+        Content::Web { api_version: 1, .. } => {}
         Content::Web { api_version, .. } => {
             return Err(PackageError::new(
                 "unsupported_api_version",
@@ -375,30 +417,7 @@ pub fn validate_manifest(manifest: &Manifest) -> Result<()> {
             ));
         }
     }
-    // 公开参数：P1 只做结构边界；类型化 schema 属 P2（§15）。
-    if manifest.properties.len() > 64 {
-        return Err(PackageError::new("too_many_properties", "公开参数最多 64 项"));
-    }
-    for property in &manifest.properties {
-        let id = property
-            .get("id")
-            .and_then(|value| value.as_str())
-            .ok_or_else(|| PackageError::new("invalid_property", "公开参数缺少字符串 id"))?;
-        if !valid_local_id(id) {
-            return Err(PackageError::new(
-                "invalid_property",
-                format!("公开参数 id 不符合规则：{id}"),
-            ));
-        }
-        let encoded = serde_json::to_vec(property)
-            .map_err(|error| PackageError::new("invalid_property", format!("公开参数不可序列化：{error}")))?;
-        if encoded.len() > 2048 {
-            return Err(PackageError::new(
-                "invalid_property",
-                format!("公开参数项超过 2 KiB：{id}"),
-            ));
-        }
-    }
+    crate::properties::validate_properties(manifest)?;
     Ok(())
 }
 
@@ -423,9 +442,11 @@ fn valid_mime(mime: &str) -> bool {
     }
     let token = |value: &str| {
         !value.is_empty()
-            && value
-                .bytes()
-                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'+' | b'-'))
+            && value.bytes().all(|byte| {
+                byte.is_ascii_lowercase()
+                    || byte.is_ascii_digit()
+                    || matches!(byte, b'.' | b'+' | b'-')
+            })
     };
     token(type_part) && token(subtype)
 }
@@ -461,7 +482,8 @@ mod tests {
 
     #[test]
     fn doc_fixture_manifest_is_valid() {
-        let manifest = validate_manifest_bytes(&serde_json::to_vec(&base_manifest()).unwrap()).unwrap();
+        let manifest =
+            validate_manifest_bytes(&serde_json::to_vec(&base_manifest()).unwrap()).unwrap();
         assert_eq!(manifest.work_id, "c17ed10a-5c55-4a52-85dc-7509f9e88aae");
         assert_eq!(manifest.content_asset(), Some("background"));
     }
@@ -473,28 +495,62 @@ mod tests {
         let error = validate_manifest_bytes(&serde_json::to_vec(&value).unwrap()).unwrap_err();
         assert_eq!(error.code, "invalid_manifest");
         let raw = br#"{"formatVersion":1,"formatVersion":1}"#;
-        assert_eq!(validate_manifest_bytes(raw).unwrap_err().code, "duplicate_key");
+        assert_eq!(
+            validate_manifest_bytes(raw).unwrap_err().code,
+            "duplicate_key"
+        );
     }
 
     #[test]
     fn identity_and_bound_violations_map_to_stable_codes() {
         let mut value = base_manifest();
         value["version"] = 0.into();
-        assert_eq!(validate_manifest(&serde_json::from_value(value).unwrap()).unwrap_err().code, "invalid_version");
+        assert_eq!(
+            validate_manifest(&serde_json::from_value(value).unwrap())
+                .unwrap_err()
+                .code,
+            "invalid_version"
+        );
         let mut value = base_manifest();
         value["title"] = "标".repeat(121).into();
-        assert_eq!(validate_manifest(&serde_json::from_value(value).unwrap()).unwrap_err().code, "invalid_title");
+        assert_eq!(
+            validate_manifest(&serde_json::from_value(value).unwrap())
+                .unwrap_err()
+                .code,
+            "invalid_title"
+        );
         let mut value = base_manifest();
         value["workId"] = "not-a-uuid".into();
-        assert_eq!(validate_manifest(&serde_json::from_value(value).unwrap()).unwrap_err().code, "invalid_work_id");
+        assert_eq!(
+            validate_manifest(&serde_json::from_value(value).unwrap())
+                .unwrap_err()
+                .code,
+            "invalid_work_id"
+        );
         let mut value = base_manifest();
-        value["files"][0]["sha256"] = "ABC58d5127d7cdf313beb9ec8ee839860a9c6bfbc48c8b8eb6a3f7d8bb63de6f".into();
-        assert_eq!(validate_manifest(&serde_json::from_value(value).unwrap()).unwrap_err().code, "invalid_hash");
+        value["files"][0]["sha256"] =
+            "ABC58d5127d7cdf313beb9ec8ee839860a9c6bfbc48c8b8eb6a3f7d8bb63de6f".into();
+        assert_eq!(
+            validate_manifest(&serde_json::from_value(value).unwrap())
+                .unwrap_err()
+                .code,
+            "invalid_hash"
+        );
         let mut value = base_manifest();
         value["content"] = serde_json::json!({ "kind": "web", "entry": "index", "apiVersion": 2 });
-        assert_eq!(validate_manifest(&serde_json::from_value(value).unwrap()).unwrap_err().code, "unsupported_api_version");
+        assert_eq!(
+            validate_manifest(&serde_json::from_value(value).unwrap())
+                .unwrap_err()
+                .code,
+            "unsupported_api_version"
+        );
         let mut value = base_manifest();
         value["assets"][0]["source"] = "assets/missing.png".into();
-        assert_eq!(validate_manifest(&serde_json::from_value(value).unwrap()).unwrap_err().code, "missing_file");
+        assert_eq!(
+            validate_manifest(&serde_json::from_value(value).unwrap())
+                .unwrap_err()
+                .code,
+            "missing_file"
+        );
     }
 }

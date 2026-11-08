@@ -224,10 +224,11 @@
       empty.hidden = !!lines.length;
       if (!lines.length) {
         var title = data.track ? data.track.title || '此刻，只有音乐' : '在声音里，发现另一片宇宙';
-        if (empty.dataset.title !== title) {
-          empty.dataset.title = title; empty.textContent = '';
+        var status = Stage.lyricStatus ? Stage.lyricStatus() : 'empty';
+        if (empty.dataset.title !== title || empty.dataset.status !== status) {
+          empty.dataset.title = title; empty.dataset.status = status; empty.textContent = '';
           var heading = document.createElement('strong'); heading.textContent = title;
-          var note = document.createElement('span'); note.textContent = data.track ? '暂无歌词 · 让旋律继续' : '播放一首音乐，开始聆听';
+          var note = document.createElement('span'); note.textContent = status === 'unsupported' ? '此歌词包含多人声，舞台暂不支持；请使用桌面歌词' : data.track ? '暂无歌词 · 让旋律继续' : '播放一首音乐，开始聆听';
           empty.append(heading, note);
         }
       }
@@ -258,5 +259,13 @@
       destroy: function () { if (observer) observer.disconnect(); rail.remove(); empty.remove(); back.remove(); rows.clear(); },
       configure: function (on) { enabled = on; dirty = true; } };
   }
-  global.StageLyrics = { init: init };
+  // Host-wide status stays visible when a performance renderer hides its reading rail.
+  function supportNotice(element, enabled) {
+    if (!element) return;
+    var show = !!enabled && global.Stage && Stage.lyricStatus && Stage.lyricStatus() === 'unsupported';
+    if (element.hidden === !show) return;
+    element.hidden = !show;
+    element.textContent = show ? '此歌词包含多人声，舞台暂不支持；请使用桌面歌词' : '';
+  }
+  global.StageLyrics = { init: init, supportNotice: supportNotice };
 })(window);

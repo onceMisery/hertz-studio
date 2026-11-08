@@ -38,9 +38,15 @@ impl App {
             return true;
         };
         let surface = self
-            .wallpaper
-            .iter_mut()
-            .chain(self.wallpaper_candidate.iter_mut())
+            .desktop
+            .runtimes
+            .values_mut()
+            .flat_map(|desktop| {
+                desktop
+                    .surface
+                    .iter_mut()
+                    .chain(desktop.candidate.iter_mut())
+            })
             .chain(
                 self.preview
                     .iter_mut()

@@ -184,6 +184,38 @@ async function main() {
     await frame.evaluate(()=>{hertzLyrics.setLocked(false);fixture.document.lines[4].text='<img src=x onerror=alert(1)>';fixture.document.lines[4].words=[];fixture.snapshot.positionMs=21000;fixture.load();});
     assert.equal(await frame.locator('#stage img').count(),0);
     assert.match(await current.locator('.main').innerText(),/<img/);
+    // Leaving the deliberate single-vocal mode must restore ordinary double/triple geometry.
+    await frame.evaluate(()=>{
+      window.ordinaryBeforeVocals=structuredClone(fixture.document);
+      fixture.config.showVocals=false;hertzLyrics.applyConfig(fixture.config);
+      fixture.document={protocol:1,timing:'presentation_applied',documentKey:'vocal-mode-transition',vocalSchemaVersion:1,
+        agents:[{id:'author',kind:'person',name:'源作者'}],lines:[{startMs:0,endMs:35000,text:'单声部显示',words:[],vocal:{agentIds:['author'],role:'lead'}}]};
+      fixture.snapshot.lyrics.documentKey=fixture.document.documentKey;fixture.send();
+      hertzLyrics.applyGeometry({documentKey:fixture.document.documentKey,capacity:fixture.config.bilingual?2:1,slotHeight:88,
+        fontKey:[fixture.config.fontFamily,fixture.config.fontSize,fixture.config.fontWeight,fixture.config.outlineWidth].join('|'),
+        showVocals:false,bilingual:fixture.config.bilingual});
+      hertzLyrics.applyDocument(fixture.document);
+    });
+    assert.equal(await frame.evaluate(()=>document.body.dataset.vocalSingle),'true');
+    assert.equal(await frame.locator('#lyric-column').evaluate(e=>getComputedStyle(e).display),'flex');
+    await frame.evaluate(()=>{
+      fixture.document=ordinaryBeforeVocals;fixture.document.documentKey='ordinary-after-vocals';
+      fixture.snapshot.lyrics.documentKey=fixture.document.documentKey;fixture.config.bilingual=true;
+      hertzLyrics.applyConfig(fixture.config);fixture.load();
+    });
+    for(const layout of ['double','triple']){
+      await frame.evaluate(layout=>ipc.postMessage(JSON.stringify({cmd:'layout',text:layout})),layout);
+      await frame.waitForFunction(layout=>document.body.dataset.layout===layout,layout);
+      assert.equal(await frame.evaluate(()=>document.body.dataset.vocalSingle),'false');
+      assert.equal(await frame.locator('#lyric-column').evaluate(e=>getComputedStyle(e).display),'block');
+      await frame.waitForFunction(()=>{
+        const viewport=document.getElementById('viewport').getBoundingClientRect();
+        const current=document.querySelector('.lyric-group[data-distance="0"] .main').getBoundingClientRect();
+        const next=document.querySelector('.lyric-group[data-distance="1"] .sub').getBoundingClientRect();
+        return current.top>=viewport.top&&next.bottom<=viewport.bottom-10;
+      });
+      assert.ok(await frame.locator('.lyric-group').count()<=7);
+    }
     // Dense narrow/high-DPI text remains inside its two-line slot and settings remain usable.
     await page.setViewportSize({width:500,height:900});
     await page.locator('iframe').evaluate(e=>{e.style.width='280px';});

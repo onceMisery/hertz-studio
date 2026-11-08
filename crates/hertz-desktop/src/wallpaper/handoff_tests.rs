@@ -52,7 +52,8 @@ fn receipt_identity_pixels_and_both_exit_barriers_are_required() {
     assert!(!hold.finish(true));
     hold.source_closed(7);
     assert!(!hold.finish(false));
-    assert_eq!(budget.usage().targets, 1);
+    assert_eq!(budget.usage().targets, 0);
+    assert_eq!(budget.usage().desktop_frames, 1);
     assert!(hold.finish(true));
     assert_eq!(budget.usage(), Default::default());
 }
@@ -198,10 +199,8 @@ fn captured_workspace_returns_after_source_and_staging_exit_while_bitmap_stays_c
             (bitmap.prepare_cpu_bytes, bitmap.cpu_bytes, bitmap.gpu_bytes),
             (0, 8, 16)
         );
-        assert_eq!(
-            (bitmap.targets, bitmap.preview_instances),
-            (u32::from(!preview), 0)
-        );
+        assert_eq!((bitmap.targets, bitmap.preview_instances), (0, 0));
+        assert_eq!(bitmap.desktop_frames, u32::from(!preview));
         assert_eq!(
             (
                 bitmap.session_reservations,

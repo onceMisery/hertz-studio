@@ -212,7 +212,18 @@ pub(crate) async fn snapshot(state: &Arc<AppState>) -> Value {
 }
 
 /// 按内容标识取一份完整文档；key 不属于当前文档时返回 409，不返回另一首歌词。
+#[cfg(test)]
 pub(crate) async fn document(state: &AppState, key: &str) -> Result<Value, ApiError> {
+    document_with_capability(state, key, None).await
+}
+
+/// Capability is adjudicated only after the existing current-identity/key check.
+/// Both transports use this owner; capability never changes the document key.
+pub(crate) async fn document_with_capability(
+    state: &AppState,
+    key: &str,
+    vocal_schema_version: Option<u64>,
+) -> Result<Value, ApiError> {
     if key.is_empty() || key.len() > 128 {
         return Err(stale_document());
     }
@@ -224,7 +235,15 @@ pub(crate) async fn document(state: &AppState, key: &str) -> Result<Value, ApiEr
                 && document.state == DocumentState::Ready
                 && document.key.as_deref() == Some(key) =>
         {
-            document.body.clone().ok_or_else(stale_document)
+            let body = document.body.as_ref().ok_or_else(stale_document)?;
+            if body.get("vocalSchemaVersion").is_some() && vocal_schema_version != Some(1) {
+                return Err(ApiError::new(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "desktop_vocals_unsupported",
+                    "当前桌面歌词组件不支持此歌词，请更新组件",
+                ));
+            }
+            Ok(body.clone())
         }
         _ => Err(stale_document()),
     }
@@ -487,7 +506,7 @@ async fn build_document(
                 .map_err(|error| {
                     ApiError::new(
                         StatusCode::UNPROCESSABLE_ENTITY,
-                        if matches!(error, vmusic_lyrics::ImportError::Limit) {
+                        if matches!(error.category(), vmusic_lyrics::ImportError::Limit) {
                             "lyrics_limit"
                         } else {
                             "lyrics_invalid"
@@ -531,11 +550,14 @@ async fn build_document(
         });
     }
 
+    vmusic_lyrics::validate_presentation_document(&doc).map_err(|error| error.to_string())?;
+
     let mut body = document_body(&doc);
     let bytes = serde_json::to_vec(&body)
         .map_err(|error| error.to_string())?
         .len();
-    if bytes > DOCUMENT_MAX_BYTES {
+    // Reserve the actual key field too: the complete response has the same 2 MiB budget.
+    if bytes + "\"documentKey\":\"\"".len() + 1 + 64 > DOCUMENT_MAX_BYTES {
         return Ok(BuiltDocument {
             state: DocumentState::TooLarge,
             key: None,
@@ -552,6 +574,7 @@ async fn build_document(
 }
 
 fn document_body(doc: &vmusic_core::LyricDocument) -> Value {
+    let has_vocals = doc.has_vocals();
     let translation = doc.translation.as_deref();
     let romanization = doc.romanization.as_deref();
     let lines: Vec<Value> = doc
@@ -566,6 +589,14 @@ fn document_body(doc: &vmusic_core::LyricDocument) -> Value {
                 line.end_ms.map(Value::from).unwrap_or(Value::Null),
             );
             out.insert("text".into(), Value::String(line.text.clone()));
+            if has_vocals {
+                if let Some(vocal) = &line.vocal {
+                    out.insert(
+                        "vocal".into(),
+                        json!({ "agentIds": vocal.agent_ids, "role": vocal.role }),
+                    );
+                }
+            }
             out.insert(
                 "words".into(),
                 Value::Array(
@@ -609,6 +640,10 @@ fn document_body(doc: &vmusic_core::LyricDocument) -> Value {
     if let Some(origin) = &doc.origin {
         body["origin"] = serde_json::to_value(origin).unwrap_or(Value::Null);
     }
+    if has_vocals {
+        body["vocalSchemaVersion"] = Value::from(1);
+        body["agents"] = serde_json::to_value(&doc.agents).expect("agents are serializable");
+    }
     body
 }
 
@@ -636,6 +671,7 @@ struct SnapshotView<'a> {
 fn snapshot_json(state: &AppState, view: SnapshotView<'_>) -> Value {
     json!({
         "protocol": PROTOCOL,
+        "vocalSchemaVersions": [1],
         "seq": view.seq,
         "server": {
             "session": state.server_instance_id(),
@@ -692,6 +728,7 @@ mod tests {
 
     fn line(start: u64, end: Option<u64>, text: &str) -> vmusic_core::LyricLine {
         vmusic_core::LyricLine {
+            vocal: None,
             start_ms: start,
             end_ms: end,
             text: text.into(),
@@ -701,6 +738,7 @@ mod tests {
 
     fn document(offset: i64, lines: Vec<vmusic_core::LyricLine>) -> vmusic_core::LyricDocument {
         vmusic_core::LyricDocument {
+            agents: Vec::new(),
             source: vmusic_core::LyricSource::Imported,
             offset_ms: offset,
             lines,
@@ -710,6 +748,221 @@ mod tests {
             romanization: None,
             origin: None,
         }
+    }
+
+    fn vocal_document() -> vmusic_core::LyricDocument {
+        let mut doc = document(
+            0,
+            vec![
+                line(0, Some(10_000), "长句"),
+                line(2_000, Some(4_000), "短句"),
+            ],
+        );
+        doc.format = Some("ttml".into());
+        doc.agents = vec![
+            vmusic_core::LyricAgent {
+                id: "a".into(),
+                kind: vmusic_core::LyricAgentKind::Person,
+                name: Some("甲".into()),
+            },
+            vmusic_core::LyricAgent {
+                id: "b".into(),
+                kind: vmusic_core::LyricAgentKind::Group,
+                name: None,
+            },
+        ];
+        for (line, id) in doc.lines.iter_mut().zip(["a", "b"]) {
+            line.vocal = Some(vmusic_core::LyricVocal {
+                agent_ids: vec![id.into()],
+                role: vmusic_core::LyricVocalRole::Lead,
+            });
+        }
+        doc
+    }
+
+    #[test]
+    fn vocal_projection_is_lossless_and_identity_metadata_changes_the_key() {
+        let doc = vocal_document();
+        let body = document_body(&doc);
+        assert_eq!(body["protocol"], 1);
+        assert_eq!(body["timing"], "presentation_applied");
+        assert_eq!(body["vocalSchemaVersion"], 1);
+        assert_eq!(
+            body["agents"][0],
+            json!({"id":"a","kind":"person","name":"甲"})
+        );
+        assert_eq!(body["agents"][1], json!({"id":"b","kind":"group"}));
+        assert_eq!(
+            body["lines"][1]["vocal"],
+            json!({"agentIds":["b"],"role":"lead"})
+        );
+        assert_eq!(body["lines"][0]["endMs"], 10_000);
+        let key = document_key(&body);
+        for altered in [
+            {
+                let mut b = body.clone();
+                b["agents"][0]["name"] = json!("新名字");
+                b
+            },
+            {
+                let mut b = body.clone();
+                b["agents"][0]["kind"] = json!("character");
+                b
+            },
+            {
+                let mut b = body.clone();
+                b["agents"].as_array_mut().unwrap().swap(0, 1);
+                b
+            },
+            {
+                let mut b = body.clone();
+                b["lines"][0]["vocal"]["agentIds"] = json!(["a", "b"]);
+                b
+            },
+            {
+                let mut b = body.clone();
+                b["lines"][0]["vocal"]["role"] = json!("backing");
+                b
+            },
+            {
+                let mut b = body.clone();
+                b["vocalSchemaVersion"] = json!(2);
+                b
+            },
+        ] {
+            assert_ne!(document_key(&altered), key);
+        }
+        let mut ordinary = doc;
+        for line in &mut ordinary.lines {
+            line.vocal = None;
+        }
+        let ordinary_body = document_body(&ordinary);
+        assert!(ordinary_body.get("agents").is_none());
+        assert!(ordinary_body.get("vocalSchemaVersion").is_none());
+        assert!(ordinary_body["lines"][0].get("vocal").is_none());
+    }
+
+    #[tokio::test]
+    async fn vocal_http_capability_matrix_checks_stale_identity_before_support() {
+        let (mut state, audio, directory) = schema_state().await;
+        state.desktop_lyrics_key = "b".repeat(64);
+        state.overlay_key = "c".repeat(64);
+        sqlx::query("INSERT INTO tracks(id,path,title,added_at,updated_at) VALUES('first','first.wav','First',0,0)")
+            .execute(&state.db).await.unwrap();
+        state
+            .audio
+            .load("first.wav", Some("first".into()))
+            .await
+            .unwrap();
+        let identity = current_identity(&state).await.unwrap();
+        let mut body = document_body(&vocal_document());
+        let key = document_key(&body);
+        body["documentKey"] = json!(key);
+        state.desktop_lyrics.cache.lock().await.document = Some(CachedDocument {
+            identity,
+            state: DocumentState::Ready,
+            key: Some(key.clone()),
+            body: Some(body.clone()),
+        });
+        let state = Arc::new(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let app = crate::routes::router(state.clone()).with_state(state.clone());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        for (requested_key, extension, expected) in [
+            (key.as_str(), "", 422),
+            (key.as_str(), "&vocalSchemaVersion=2", 422),
+            (key.as_str(), "&vocalSchemaVersion=1", 200),
+            ("stale", "", 409),
+            ("stale", "&vocalSchemaVersion=2", 409),
+        ] {
+            let response = client
+                .get(format!(
+                    "{base}/v1/desktop-lyrics/document?key={requested_key}{extension}"
+                ))
+                .header(
+                    "Authorization",
+                    format!("Desktop {}", state.desktop_lyrics_key),
+                )
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected);
+            let response: Value = response.json().await.unwrap();
+            if expected == 200 {
+                assert_eq!(response, body);
+            }
+            if expected == 422 {
+                assert_eq!(response["error"]["code"], "desktop_vocals_unsupported");
+                assert_eq!(
+                    response["error"]["message"],
+                    "当前桌面歌词组件不支持此歌词，请更新组件"
+                );
+                assert!(response.get("lines").is_none());
+            }
+        }
+        // Internal phrase navigation supports the schema without adding request permissions.
+        let response = client.post(format!("{base}/v1/desktop-lyrics/control"))
+            .header("Authorization", format!("Desktop {}", state.desktop_lyrics_key))
+            .json(&json!({"action":"seek","session":state.server_instance_id(),"trackId":"first",
+                "generation":state.audio.snapshot().generation.to_string(),"documentKey":key,"positionMs":2000}))
+            .send().await.unwrap();
+        assert_eq!(response.status(), 200);
+        vmusic_store::lyrics::import(
+            &state.db, "first",
+            r#"<tt xmlns="http://www.w3.org/ns/ttml" xmlns:ttm="http://www.w3.org/ns/ttml#metadata"><head><ttm:agent xml:id="a" type="person"/></head><body><div><p begin="0s" end="10s" ttm:agent="a">声部正文</p></div></body></tt>"#,
+        ).await.unwrap();
+        let before = state.audio.snapshot();
+        let overlay = client
+            .get(format!("{base}/v1/overlay/lyric"))
+            .query(&[("key", &state.overlay_key)])
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(overlay.status(), 200);
+        let overlay: Value = overlay.json().await.unwrap();
+        assert_eq!(overlay["lyricsStatus"], "unsupported");
+        assert_eq!(overlay["error"]["code"], "lyrics_vocals_unsupported");
+        assert_eq!(overlay["lines"], json!([]));
+        assert_eq!(overlay["wordByWord"], false);
+        assert_eq!(overlay["playing"], before.playing);
+        assert_eq!(overlay["track_id"], "first");
+        let identity = current_identity(&state).await.unwrap();
+        state
+            .desktop_lyrics
+            .cache
+            .lock()
+            .await
+            .document
+            .as_mut()
+            .unwrap()
+            .identity = identity;
+        let mut ordinary = document_body(&document(0, vec![line(0, Some(1000), "普通歌词")]));
+        ordinary["documentKey"] = json!(key);
+        state
+            .desktop_lyrics
+            .cache
+            .lock()
+            .await
+            .document
+            .as_mut()
+            .unwrap()
+            .body = Some(ordinary.clone());
+        assert_eq!(super::document(&state, &key).await.unwrap(), ordinary);
+        assert_eq!(
+            document_with_capability(&state, &key, Some(99))
+                .await
+                .unwrap(),
+            ordinary
+        );
+        server.abort();
+        let _ = server.await;
+        state.audio.shutdown();
+        audio.join().unwrap();
+        close_schema_state(state, directory).await;
     }
 
     #[test]
@@ -746,6 +999,7 @@ mod tests {
         let state = Arc::new(state);
         let value = snapshot(&state).await;
         assert_eq!(value["protocol"], PROTOCOL);
+        assert_eq!(value["vocalSchemaVersions"], json!([1]));
         assert_eq!(value["timing"], "presentation_applied");
         assert_eq!(value["track"], Value::Null);
         assert_eq!(value["lyrics"]["status"], "idle");

@@ -54,7 +54,10 @@ impl Request {
         let valid_params = match (scope, self.op.as_str()) {
             (_, "snapshot") => self.params.as_object().is_some_and(|p| p.is_empty()),
             (Scope::Lyrics, "document") => self.params.as_object().is_some_and(|p| {
-                p.len() == 1
+                p.keys()
+                    .all(|key| matches!(key.as_str(), "key" | "vocalSchemaVersion"))
+                    && p.get("vocalSchemaVersion")
+                        .is_none_or(|version| version.as_u64().is_some())
                     && p.get("key")
                         .and_then(Value::as_str)
                         .is_some_and(|key| !key.is_empty())
@@ -75,6 +78,51 @@ impl Request {
             ));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod vocal_tests {
+    use super::*;
+
+    #[test]
+    fn vocal_capability_is_a_readonly_document_parameter() {
+        let mut request = Request {
+            bridge_protocol: BRIDGE_PROTOCOL,
+            request_id: "request".into(),
+            server_instance_id: "session".into(),
+            scope: Scope::Lyrics,
+            key: "credential".into(),
+            op: "document".into(),
+            params: serde_json::json!({"key":"doc"}),
+        };
+        assert!(request.validate(Scope::Lyrics, "session").is_ok());
+        for params in [
+            serde_json::json!({"key":"doc","vocalSchemaVersion":1}),
+            serde_json::json!({"key":"doc","vocalSchemaVersion":2}),
+        ] {
+            request.params = params;
+            assert!(
+                request.validate(Scope::Lyrics, "session").is_ok(),
+                "integer capability reaches the shared capability adjudicator"
+            );
+        }
+        for params in [
+            serde_json::json!({"key":"doc","vocalSchemaVersion":null}),
+            serde_json::json!({"key":"doc","vocalSchemaVersion":"1"}),
+            serde_json::json!({"key":"doc","vocalSchemaVersion":1.0}),
+            serde_json::json!({"key":"doc","vocalSchemaVersion":true}),
+            serde_json::json!({"key":"doc","vocalSchemaVersion":1,"offsetMs":10}),
+        ] {
+            request.params = params;
+            assert!(request.validate(Scope::Lyrics, "session").is_err());
+        }
+        request.params = serde_json::json!({"key":"doc","vocalSchemaVersion":1});
+        assert!(request.validate(Scope::Wallpaper, "session").is_err());
+        request.op = "snapshot".into();
+        assert!(request.validate(Scope::Lyrics, "session").is_err());
+        request.op = "seek".into();
+        assert!(request.validate(Scope::Lyrics, "session").is_err());
     }
 }
 

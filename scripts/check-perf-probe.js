@@ -129,7 +129,7 @@ function loadProbe(opts) {
   return { P: ctx.HertzPerf, clock: clock, ctx: ctx };
 }
 
-/// 四个来源面板的假实现，字段名照真实 stats() 的形状给（缺了就不该出现在快照里）。
+/// 五个来源面板的假实现，字段名照真实 stats() 的形状给（缺了就不该出现在快照里）。
 function fakePanels(overrides) {
   const base = {
     Stage: {
@@ -156,6 +156,24 @@ function fakePanels(overrides) {
       stats: () => ({
         type: 'flow', fps: 12, host: 'home', depthMode: 'flat', depthEffective: false,
         wallReady: true, wallTex: 384, size: '384x216', palette: ['#000000']
+      })
+    },
+    StageParticles: {
+      stats: () => ({
+        requestedMode: 'enhanced', actualBackend: 'webgl2', effectiveMode: 'enhanced',
+        tier: 1, fps: 30, count: 12000, dpr: 1.5, countScale: 1,
+        sceneTimeMs: 1234, mediaPositionMs: 5678, mediaTrackId: 'private title',
+        bands: [1, 0, 0, 0], pulse: 1, renderer: { context: 'private title' },
+        metrics: { attachCpuMs: 1.25, warmUpSubmitCpuMs: 0.5, firstFrameSubmitCpuMs: 0.25,
+          firstFrameLatencyMs: 16.7, warmUpStatus: 'submitted', warmUpDrawCalls: 1,
+          firstFrameStatus: 'submitted', title: 'private title' },
+        resources: { canvases: 1, rippleNodes: 12, gate: 1, resizeObservers: 1,
+          classObservers: 1, stateSubscriptions: 1, rippleAnimations: 2,
+          renderer: { contexts: 1, buffers: 1, vaos: 1, bufferBytes: 240000,
+            typedArrayBytes: 240000, surfacePixels: 460800, drawingBufferPixels: 460800,
+            cumulativeUploadBytes: 240000, handle: 'private title' },
+          peak: { contexts: 1, buffers: 1, typedArrayBytes: 240000, private: 'private title' },
+          title: 'private title' }
       })
     }
   };
@@ -445,8 +463,8 @@ function uiSourceFiles() {
     const { P, ctx } = loadProbe();
     Object.assign(ctx, panels);
     const snap = P.snapshot();
-    eq(snap.sourceCount, 4, '四个面板都在场');
-    eq(Object.keys(snap.sources).sort().join(','), 'backgrounds,creative,stage,stage3d',
+    eq(snap.sourceCount, 5, '五个面板都在场');
+    eq(Object.keys(snap.sources).sort().join(','), 'backgrounds,creative,particles,stage,stage3d',
       '快照按面板 id 汇总');
     eq(snap.sources.stage.displayHz, 119.88, 'Stage 的实测刷新率取到了（只四舍五入，不改名）');
     eq(snap.sources.stage.gates[0].name, 'particles', '帧门换算整块透传：声明档位 vs 实测 runs/s');
@@ -464,7 +482,40 @@ function uiSourceFiles() {
     eq(snap.sources.creative.probe.rounds, 4, 'DPR 代价探测的结论整块可见（糊了要能追责）');
     eq(Object.keys(snap.sources.backgrounds).sort().join(','), 'fps,size,wallTex',
       '背景层拿目标帧率与作画/纹理尺寸');
+    eq(Object.keys(snap.sources.particles).sort().join(','),
+      'actualBackend,count,countScale,dpr,effectiveMode,fps,metrics,requestedMode,resources,tier',
+      '粒子只拿真实模式、预算、提交计时与资源读数');
+    eq(snap.sources.particles.metrics.firstFrameSubmitCpuMs, 0.25, '生产首帧提交计时进快照');
+    eq(snap.sources.particles.resources.renderer.bufferBytes, 240000, 'GL API 申请字节进快照');
+    eq(snap.sources.particles.resources.owner.rippleAnimations, 2, '涟漪动画存量进快照');
+    ok(!JSON.stringify(snap).includes('private title'), '粒子媒体、音频和资源句柄不进入性能快照');
     ok(!snap.sourceErrors, '一切正常时不该有错误栏');
+  }
+  {
+    const { P, ctx } = loadProbe();
+    const raw = fakePanels().StageParticles.stats();
+    ctx.StageParticles = { stats: () => raw };
+    const snap = P.snapshot();
+    raw.metrics.attachCpuMs = 9;
+    raw.resources.renderer.bufferBytes = 1;
+    raw.resources.peak.contexts = 3;
+    raw.resources.rippleAnimations = 7;
+    eq(snap.sources.particles.metrics.attachCpuMs, 1.25, '粒子提交计时快照不持有来源引用');
+    eq(snap.sources.particles.resources.renderer.bufferBytes, 240000, 'renderer 资源快照不持有来源引用');
+    eq(snap.sources.particles.resources.peak.contexts, 1, '资源峰值快照不随来源变化');
+    eq(snap.sources.particles.resources.owner.rippleAnimations, 2, 'owner 资源快照不随来源变化');
+    snap.sources.particles.metrics.attachCpuMs = 2;
+    snap.sources.particles.resources.renderer.bufferBytes = 99;
+    snap.sources.particles.resources.peak.contexts = 99;
+    snap.sources.particles.resources.owner.rippleAnimations = 99;
+    eq(raw.metrics.attachCpuMs, 9, '修改粒子计时快照不影响来源');
+    eq(raw.resources.renderer.bufferBytes, 1, '修改 renderer 快照不影响来源');
+    eq(raw.resources.peak.contexts, 3, '修改峰值快照不影响来源');
+    eq(raw.resources.rippleAnimations, 7, '修改 owner 快照不影响来源');
+    ctx.StageParticles.stats = () => { throw new Error('private title'); };
+    const failed = P.snapshot();
+    eq(failed.sourceErrors.particles, 'stats_unavailable', '粒子诊断异常保持固定错误码');
+    ok(!JSON.stringify(failed).includes('private title'), '粒子异常文本不泄露内容');
   }
   {
     // 三种坏来源：缺席 / 抛 / 返回非对象。共同底线是 snapshot() 不抛。
@@ -529,7 +580,7 @@ function uiSourceFiles() {
     const stage = read('plugin/ui/stage.js');
     ctx.gates = [];
     ctx.gateDivisor = (target) => Math.ceil(60 / target);
-    vm.runInContext('function runGates(dt) ' + blockAfter(stage, 'function runGates('), ctx);
+    vm.runInContext('function runGates(dt, borrowedFrame) ' + blockAfter(stage, 'function runGates('), ctx);
     let frames = 0;
     ctx.gates.push({ name: 'render', fpsFn: () => 30, tickFn: () => { frames++; clock.value += 2; }, skip: 0, wait: 0 });
     ctx.gates.push({ name: 'idle', fpsFn: () => 0, tickFn: () => { throw new Error('idle ran'); }, skip: 0, wait: 0 });
@@ -583,6 +634,8 @@ function uiSourceFiles() {
     const seen = [];
     const ctx = {
       rafId: 0, lastFrameAt: 0, lastDt: 0, hidden: false, playing: true, energy: 0, lyricsDirty: false,
+      stageDestroyed: false, stageFrame: { frameId: 0 }, frameBatch: false, frameStatePending: false,
+      fillFrameRecord: record => record, notifyFrameState: () => {},
       document: { hidden: false }, gates: [],
       now: () => time, clamp: (x, a, b) => Math.max(a, Math.min(b, x)),
       runGates: () => {}, sampleDisplayHz: dt => seen.push(dt), sampleFrameRate: () => {},
@@ -659,11 +712,17 @@ function uiSourceFiles() {
     ok(/Stage3D|CreativeStage|Backgrounds/.test(src) === true,
       '来源表按 window 上的全局名寻址（面板改名会在这里红）');
 
-    // 没接的面板留在没接的状态：接不上的字段宁可不写。
+    // M0 adds the existing particle owner's explicit metrics/resources reader.
     const owners = (src.match(/owner:\s*'([^']+)'/g) || [])
       .map((s) => /'([^']+)'/.exec(s)[1]);
-    eq(owners.sort().join(','), 'Backgrounds,CreativeStage,Stage,Stage3D',
-      '来源表只有这四个全局：StageParticles/HandDrawn 的 stats() 里只有一个 fps，本批不接');
+    eq(owners.sort().join(','), 'Backgrounds,CreativeStage,Stage,Stage3D,StageParticles',
+      '来源表只有这五个真实性能 owner，未迁移 HandDrawn 或其它宿主');
+    const particleKeys = statsKeys('plugin/ui/stage-particles.js', 'stats: function () {');
+    const particleFields = ['requestedMode', 'actualBackend', 'effectiveMode', 'tier', 'fps', 'count',
+      'dpr', 'countScale', 'metrics', 'resources'];
+    ok(Array.isArray(particleKeys), '粒子 stats() 的真实字段抓得到');
+    eq(particleFields.filter(key => !particleKeys.includes(key)).join(','), '',
+      '粒子性能白名单没有发明 stats() 字段');
     ok(!/Stanza[A-Za-z]*|StageSubtitle/.test(src),
       'stanza/* 没有性能口径（那里的 stats 是逐行文本统计），探针不许冒充接了它');
   }

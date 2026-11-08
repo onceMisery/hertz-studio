@@ -38,6 +38,7 @@ use crate::state::{AppState, PlayTrigger, ScanProgress};
 pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
     // Everything except /v1/health and the UI requires the bearer token.
     let api = Router::new()
+        .merge(crate::stage_media::management_router())
         // 签发首跳票据。本条在鉴权层内（要出示长期 token）；拿到票之后
         // `<img src>`、`/ws` 这些「URL 里发不出请求头」的通道就可以只用票。
         .route("/v1/auth/ticket", post(create_ticket))
@@ -221,6 +222,14 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         )
         // 服务退出：首页那颗电源钮。停播 + 删发现文件 + 进程结束，见 `shutdown_service`。
         .route("/v1/system/shutdown", post(shutdown_service))
+        .route("/v1/window/state", get(native_window_state))
+        .route("/v1/window/focus", post(native_window_focus))
+        .route("/v1/window/media-state", get(native_media_state))
+        .route("/v1/window/settings", put(native_window_settings))
+        .route(
+            "/v1/window/sleep-timer",
+            get(native_sleep_timer).put(set_native_sleep_timer),
+        )
         // 收藏：列表 / 新增 / 删除 / 开关；membership 是给一整屏曲目批量判红的。
         .route("/v1/favorites", get(list_favorites).post(add_favorite))
         .route("/v1/favorites/membership", post(favorite_membership))
@@ -403,6 +412,7 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
     Router::new()
         .route("/v1/health", get(health))
         .merge(api)
+        .merge(crate::stage_media::resource_router())
         .merge(ai_restricted)
         .merge(desktop_lyrics)
         .merge(wallpaper)
@@ -828,7 +838,13 @@ async fn desktop_lyrics_playback(
             "播放已变化，请重试",
         ));
     }
-    let expected = Some((request.track_id.as_str(), snapshot.generation));
+    let expected = Some((
+        request.track_id.as_str(),
+        snapshot.generation,
+        state
+            .play_generation
+            .load(std::sync::atomic::Ordering::Acquire),
+    ));
     let outcome = match request.action.as_str() {
         "play" => state.resume_control_if(true, expected).await?,
         "pause" => state.pause_control_if(expected).await?,
@@ -840,7 +856,8 @@ async fn desktop_lyrics_playback(
                 .document_key
                 .as_deref()
                 .ok_or_else(|| bad_request("缺少歌词文档"))?;
-            let document = crate::desktop_lyrics::document(&state, key).await?;
+            let document =
+                crate::desktop_lyrics::document_with_capability(&state, key, Some(1)).await?;
             let is_line_start = document["lines"].as_array().is_some_and(|lines| {
                 lines.iter().any(|line| {
                     line["startMs"].as_u64() == Some(position)
@@ -914,8 +931,10 @@ async fn wallpaper_events(
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct DesktopDocumentQuery {
     key: String,
+    vocal_schema_version: Option<u64>,
 }
 
 /// 桌面歌词完整文档：documentKey 与当前文档不符时返回 409，不串曲。
@@ -924,7 +943,12 @@ async fn desktop_lyrics_document(
     Query(query): Query<DesktopDocumentQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
     Ok(Json(
-        crate::desktop_lyrics::document(&state, &query.key).await?,
+        crate::desktop_lyrics::document_with_capability(
+            &state,
+            &query.key,
+            query.vocal_schema_version,
+        )
+        .await?,
     ))
 }
 
@@ -1404,20 +1428,7 @@ async fn pause(
 }
 
 async fn stop(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
-    let commit = state.play_commit.lock().await;
-    state.require_local_playback()?;
-    state.cancel_prepared_playback().await;
-    state
-        .play_generation
-        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    state.set_buffering(false, None).await;
-    state
-        .audio
-        .stop()
-        .await
-        .map_err(vmusic_core::CoreError::Audio)?;
-    state.transport_committed().await;
-    drop(commit);
+    state.stop_control_if(None).await?;
     Ok(get_state(State(state)).await)
 }
 
@@ -1437,11 +1448,85 @@ async fn depart(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json
 /// 服务退出（首页那颗电源钮）。应答只是「已受理」：真正的收尾在 `main.rs` 的
 /// 优雅关停里——停播、删发现文件、结束进程，与 Ctrl-C 走同一条路，两条入口不许
 /// 一个干净一个留半截。150 ms 的回执窗由 `AppState::request_exit` 留着。
-async fn shutdown_service(
-    State(state): State<Arc<AppState>>,
-) -> ApiResult<Json<serde_json::Value>> {
+async fn shutdown_service(State(state): State<Arc<AppState>>) -> ApiResult<Response> {
+    if let Some(window) = state.native_window.get() {
+        let snapshot = window.request_exit(crate::window_lifecycle::QuitSource::Http);
+        return Ok((StatusCode::ACCEPTED, Json(snapshot)).into_response());
+    }
     state.request_exit();
-    Ok(Json(serde_json::json!({ "status": "exiting" })))
+    Ok(Json(serde_json::json!({ "status": "exiting" })).into_response())
+}
+
+async fn native_window_state(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    Json(match state.native_window.get() {
+        Some(window) => serde_json::json!(window.snapshot()),
+        None => serde_json::json!({ "available": false }),
+    })
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct FocusRequest {
+    server_instance_id: String,
+}
+
+async fn native_window_focus(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<FocusRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let window = state.native_window.get().ok_or_else(|| {
+        ApiError::new(
+            StatusCode::NOT_FOUND,
+            "native_window_unavailable",
+            "当前运行方式没有原生主窗口",
+        )
+    })?;
+    window.request_focus(&body.server_instance_id)?;
+    Ok(Json(
+        serde_json::json!({"focused":true,"serverInstanceId":state.server_instance_id()}),
+    ))
+}
+
+async fn native_media_state(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    Json(state.system_media.get().map_or_else(
+        || serde_json::json!({"available":false,"owned":false,"phase":"stopped"}),
+        |media| media.status(),
+    ))
+}
+
+async fn native_window_settings(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<crate::window_lifecycle::SettingsRequest>,
+) -> ApiResult<Json<crate::window_lifecycle::Snapshot>> {
+    let window = state.native_window.get().ok_or_else(|| {
+        ApiError::new(
+            StatusCode::NOT_FOUND,
+            "native_window_unavailable",
+            "当前运行方式没有原生主窗口",
+        )
+    })?;
+    Ok(Json(window.set_close_behavior(body.close_behavior).await?))
+}
+
+async fn native_sleep_timer(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    if let Some(timer) = state.native_sleep.get() {
+        let snapshot = timer.snapshot().await;
+        if snapshot.available {
+            return Json(serde_json::json!(snapshot));
+        }
+    }
+    Json(serde_json::json!({ "available": false }))
+}
+
+async fn set_native_sleep_timer(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<crate::window_sleep::Request>,
+) -> ApiResult<Json<crate::window_sleep::Snapshot>> {
+    let timer = state
+        .native_sleep
+        .get()
+        .ok_or_else(crate::window_sleep::unavailable)?;
+    Ok(Json(timer.update(body).await?))
 }
 
 async fn next(
@@ -2564,6 +2649,15 @@ pub(crate) async fn overlay_lyric_data(state: &AppState) -> serde_json::Value {
     // Match the main Stage even when the source shift saturates at zero.
     vmusic_lyrics::apply_presentation_offset(&mut doc, global_offset);
 
+    if doc.has_vocals() {
+        return serde_json::json!({
+            "track_id": track_id, "title": title, "artist": artist, "album": album, "cover": cover,
+            "playing": snap.playing, "position_ms": snap.position_ms, "duration_ms": snap.duration_ms,
+            "offset": doc.offset_ms, "wordByWord": false, "lines": [], "lyricsStatus": "unsupported",
+            "error": { "code": "lyrics_vocals_unsupported", "message": "此歌词包含多人声，OBS 浮层暂不支持；请使用桌面歌词" },
+        });
+    }
+
     let word_by_word = doc.lines.iter().any(|l| !l.words.is_empty());
     let translation = doc.translation.as_deref();
     let lines: Vec<serde_json::Value> = doc
@@ -2959,9 +3053,7 @@ async fn remove_from_playlist(
 
 /// 导出用户数据备份（JSON）。不含凭据：凭据只存系统钥匙串。
 async fn export_backup(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
-    let backup = vmusic_store::backup::export(&state.db)
-        .await
-        .map_err(|e| ApiError::from(vmusic_core::CoreError::Store(e)))?;
+    let backup = export_backup_data(&state).await?;
     let value = serde_json::to_value(&backup).map_err(|e| internal(e.to_string()))?;
     Ok(Json(value))
 }
@@ -2971,12 +3063,43 @@ async fn restore_backup(
     State(state): State<Arc<AppState>>,
     Json(body): Json<vmusic_store::backup::BackupFile>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let report = vmusic_store::backup::restore(&state.db, &body)
-        .await
-        .map_err(|e| bad_request(e.to_string()))?;
+    let report = restore_backup_data(&state, &body).await?;
     Ok(Json(
         serde_json::to_value(&report).map_err(|e| internal(e.to_string()))?,
     ))
+}
+
+/// Business JSON is portable user data, distinct from a complete SQLite restore
+/// point. Native placement belongs exclusively to this machine's window owner.
+pub(crate) async fn export_backup_data(
+    state: &Arc<AppState>,
+) -> ApiResult<vmusic_store::backup::ExportedBackup> {
+    let mut backup = vmusic_store::backup::export(&state.db)
+        .await
+        .map_err(store_err)?;
+    backup
+        .settings
+        .remove(crate::window_placement::PLACEMENT_KEY);
+    Ok(backup)
+}
+
+/// Reject the entire request before initializing stage-media or changing data.
+/// HTTP and RPC must apply this same native-setting admission rule.
+pub(crate) async fn restore_backup_data(
+    state: &Arc<AppState>,
+    backup: &vmusic_store::backup::BackupFile,
+) -> ApiResult<vmusic_store::backup::RestoreReport> {
+    crate::lyrics::validate_backup_sources(backup).await?;
+    if backup
+        .settings
+        .contains_key(crate::window_placement::PLACEMENT_KEY)
+    {
+        return Err(bad_request("普通用户备份不能修改本机主窗口位置与尺寸"));
+    }
+    crate::stage_media::store(state)
+        .await?
+        .restore_backup(backup)
+        .await
 }
 
 /// 歌单导出为 M3U8 文本（在线曲没有本地路径，不输出）。
@@ -3061,6 +3184,17 @@ pub(crate) async fn apply_settings(
     state: &Arc<AppState>,
     body: &std::collections::BTreeMap<String, serde_json::Value>,
 ) -> ApiResult<()> {
+    if body.contains_key(crate::window_lifecycle::CLOSE_BEHAVIOR_KEY) {
+        return Err(bad_request("主窗口关闭行为必须通过原生窗口设置接口修改"));
+    }
+    if body.contains_key(crate::window_placement::PLACEMENT_KEY) {
+        return Err(bad_request("主窗口位置与尺寸只能由原生窗口保存"));
+    }
+    if body.keys().any(|k| vmusic_store::stage_presets::managed(k)) {
+        return Err(bad_request(
+            "舞台预设必须通过版本化保存接口修改，不能写入通用设置",
+        ));
+    }
     if body.keys().any(|k| is_credential(k)) {
         return Err(bad_request(
             "凭据只能通过对应的凭据管理入口修改，不能写入通用设置",
@@ -4874,6 +5008,209 @@ async fn online_account(
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn ordinary_backup_http_and_rpc_exclude_native_placement_and_reject_owned_import_atomically(
+    ) {
+        use crate::rpc::{Call, Op, Rpc};
+        use crate::window_lifecycle::{CloseBehavior, WindowLifecycle, CLOSE_BEHAVIOR_KEY};
+        use crate::window_placement::{Rect, WindowPlacement, PLACEMENT_KEY};
+        use serde_json::{json, Value};
+        use std::sync::Arc;
+
+        let root =
+            std::env::temp_dir().join(format!("hertz-window-backup-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let db = vmusic_store::open(&root.join("library.sqlite"))
+            .await
+            .unwrap();
+        let geometry = WindowPlacement::new(
+            Rect::new(120, 80, 940, 720).unwrap(),
+            Rect::new(0, 0, 1920, 1040).unwrap(),
+            1.0,
+            false,
+        )
+        .unwrap();
+        vmusic_store::settings::set(&db, PLACEMENT_KEY, &json!(geometry))
+            .await
+            .unwrap();
+        vmusic_store::settings::set(&db, CLOSE_BEHAVIOR_KEY, &json!("quit"))
+            .await
+            .unwrap();
+        vmusic_store::settings::set(&db, "ui_theme", &json!("light"))
+            .await
+            .unwrap();
+        let (mut state, audio) = crate::state::tests::playback_state_with_db(db).await;
+        state.data_dir = root.clone();
+        state.token = "native-backup-fixture".into();
+        let state = Arc::new(state);
+        let lifecycle = WindowLifecycle::install(&state).await;
+        assert_eq!(lifecycle.saved_placement(), Some(geometry));
+        let original_geometry: (String, i64) =
+            sqlx::query_as("SELECT value,updated_at FROM settings WHERE key=?1")
+                .bind(PLACEMENT_KEY)
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+        let rpc = Rpc::new(state.clone());
+        let call = |op, path: &'static str, body| Call {
+            op,
+            path,
+            query: json!({}),
+            body,
+            raw: None,
+            client_operation_id: None,
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let app = super::router(state.clone()).with_state(state.clone());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+
+        let response = client
+            .get(format!("{base}/v1/backup"))
+            .bearer_auth(&state.token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        let http_backup: Value = response.json().await.unwrap();
+        let reply = rpc
+            .call(call(Op::Get, "v1/backup", Value::Null))
+            .await
+            .unwrap();
+        assert_eq!(reply.status, 200);
+        let rpc_backup = reply.body;
+        for backup in [&http_backup, &rpc_backup] {
+            assert!(backup["settings"].get(PLACEMENT_KEY).is_none());
+            assert_eq!(backup["settings"][CLOSE_BEHAVIOR_KEY], "quit");
+            assert_eq!(backup["settings"]["ui_theme"], "light");
+        }
+        // Lower-level complete store snapshots keep their existing geometry
+        // semantics; only the two portable business JSON surfaces exclude it.
+        assert_eq!(
+            vmusic_store::backup::export(&state.db)
+                .await
+                .unwrap()
+                .settings
+                .get(PLACEMENT_KEY),
+            Some(&json!(geometry))
+        );
+
+        for imported_geometry in [Value::Null, json!(geometry)] {
+            let malicious = json!({"version":1,"settings":{PLACEMENT_KEY:imported_geometry,"backup_injected":true},"playlists":[{"name":"Injected playlist","tracks":[]}]});
+            let response = client
+                .post(format!("{base}/v1/backup/restore"))
+                .bearer_auth(&state.token)
+                .json(&malicious)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), 400);
+            let error = rpc
+                .call(call(Op::Post, "v1/backup/restore", malicious))
+                .await
+                .err()
+                .expect("RPC must reject native placement import");
+            assert_eq!(error.status, 400);
+            let stored_geometry: (String, i64) =
+                sqlx::query_as("SELECT value,updated_at FROM settings WHERE key=?1")
+                    .bind(PLACEMENT_KEY)
+                    .fetch_one(&state.db)
+                    .await
+                    .unwrap();
+            assert_eq!(stored_geometry, original_geometry);
+            assert_eq!(lifecycle.saved_placement(), Some(geometry));
+            assert!(vmusic_store::settings::get(&state.db, "backup_injected")
+                .await
+                .unwrap()
+                .is_none());
+            assert_eq!(
+                sqlx::query_scalar::<_, i64>("SELECT count(*) FROM playlists")
+                    .fetch_one(&state.db)
+                    .await
+                    .unwrap(),
+                0
+            );
+            assert!(
+                state.stage_media.get().is_none(),
+                "rejected import must not initialize the stage-media owner"
+            );
+            assert!(!root.join("stage-media").exists());
+        }
+
+        // Each transport can round-trip a normal export, including the legacy
+        // close preference. Native geometry stays byte-for-byte unchanged.
+        for (use_rpc, backup) in [(false, http_backup), (true, rpc_backup)] {
+            vmusic_store::settings::set(&state.db, "ui_theme", &json!("changed"))
+                .await
+                .unwrap();
+            let report = if use_rpc {
+                let reply = rpc
+                    .call(call(Op::Post, "v1/backup/restore", backup))
+                    .await
+                    .unwrap();
+                assert_eq!(reply.status, 200);
+                reply.body
+            } else {
+                let response = client
+                    .post(format!("{base}/v1/backup/restore"))
+                    .bearer_auth(&state.token)
+                    .json(&backup)
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), 200);
+                response.json::<Value>().await.unwrap()
+            };
+            assert!(report["settings_applied"].as_u64().unwrap() >= 2);
+            assert_eq!(
+                vmusic_store::settings::get(&state.db, "ui_theme")
+                    .await
+                    .unwrap(),
+                Some(json!("light"))
+            );
+            assert_eq!(
+                vmusic_store::settings::get(&state.db, CLOSE_BEHAVIOR_KEY)
+                    .await
+                    .unwrap(),
+                Some(json!("quit"))
+            );
+            assert_eq!(lifecycle.close_behavior(), CloseBehavior::Quit);
+            lifecycle.flush_placement().await.unwrap();
+            let stored_geometry: (String, i64) =
+                sqlx::query_as("SELECT value,updated_at FROM settings WHERE key=?1")
+                    .bind(PLACEMENT_KEY)
+                    .fetch_one(&state.db)
+                    .await
+                    .unwrap();
+            assert_eq!(stored_geometry, original_geometry);
+        }
+
+        server.abort();
+        let _ = server.await;
+        state.audio.shutdown();
+        audio.join().unwrap();
+        state.db.close().await;
+        drop(rpc);
+        drop(lifecycle);
+        drop(state);
+        let cleanup_root = root.canonicalize().unwrap();
+        let temp_root = std::env::temp_dir().canonicalize().unwrap();
+        assert_eq!(cleanup_root.parent(), Some(temp_root.as_path()));
+        assert!(cleanup_root
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("hertz-window-backup-test-"));
+        for attempt in 0..10 {
+            match std::fs::remove_dir_all(&cleanup_root) {
+                Ok(()) => break,
+                Err(error) if attempt == 9 => panic!("backup fixture cleanup: {error}"),
+                Err(_) => tokio::time::sleep(std::time::Duration::from_millis(30)).await,
+            }
+        }
+    }
+
     #[tokio::test]
     async fn podcast_http_and_rpc_share_subscription_paging_and_playback_identity() {
         use crate::rpc::{Call, Op, Rpc};

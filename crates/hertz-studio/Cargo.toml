@@ -13,7 +13,7 @@ default = []
 full = ["dep:aes", "dep:cbc", "dep:num-bigint", "dep:num-traits"]
 # R5 原生主窗口原型（--window）：默认关——CI 三平台矩阵不引入 GTK/WebView2
 # 依赖；交付形态的默认开关在原型验证通过后于 R5 实施评审中定。
-native-window = ["dep:tao", "dep:wry", "dep:tray-icon"]
+native-window = ["dep:tao", "dep:wry", "dep:tray-icon", "dep:windows", "dep:webview2-com", "dep:windows-core-webview"]
 
 [dependencies]
 vmusic-core = { workspace = true }
@@ -26,6 +26,10 @@ vmusic-audio = { workspace = true }
 vmusic-lan = { workspace = true }
 zeroize = "1"
 vmusic-store = { workspace = true }
+hertz-wallpaper = { path = "../hertz-wallpaper" }
+image = { version = "=0.25.10", default-features = false, features = ["jpeg", "png", "webp"] }
+moxcms = "=0.8.1"
+png = "0.18.1"
 vmusic-library = { workspace = true }
 vmusic-lyrics = { workspace = true }
 vmusic-beats = { workspace = true }
@@ -74,7 +78,7 @@ sha2 = { workspace = true }
 
 [dev-dependencies]
 rmcp = { workspace = true, features = ["client"] }
-tokio = { workspace = true, features = ["process"] }
+tokio = { workspace = true, features = ["process", "test-util"] }
 tungstenite = { version = "0.28", default-features = false, features = ["handshake"] }
 
 [target.'cfg(any(windows, target_os = "macos"))'.dependencies]
@@ -82,12 +86,29 @@ tungstenite = { version = "0.28", default-features = false, features = ["handsha
 rfd = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
+webview2-com = { version = "=0.39.1", optional = true }
+windows-core-webview = { package = "windows-core", version = "=0.62.2", optional = true }
+windows = { version = "=0.61.1", optional = true, features = [
+  "Foundation",
+  "Media",
+  "Media_Control",
+  "Storage_Streams",
+  "Win32_Foundation",
+  "Win32_System_WinRT",
+  "Win32_System_Com",
+  "Win32_UI_Shell",
+  "Win32_UI_Shell_Common",
+] }
+# 桌面歌词/壁纸窗口已由播放器进程内直接调用，不再是配对的外部 exe。
+hertz-desktop = { path = "../hertz-desktop" }
 windows-sys = { version = "=0.61.2", features = [
   "Win32_Foundation",
   "Win32_Graphics_Dwm",
+  "Win32_Graphics_Gdi",
   "Win32_Security",
   "Win32_Security_Authorization",
   "Win32_Storage_FileSystem",
   "Win32_System_Pipes",
   "Win32_UI_WindowsAndMessaging",
+  "Win32_UI_HiDpi",
 ] }

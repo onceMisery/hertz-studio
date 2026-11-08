@@ -1662,6 +1662,7 @@ dependencies = [
  "base64 0.22.1",
  "dirs 5.0.1",
  "hertz-desktop-ipc",
+ "hertz-sqlite-lifecycle",
  "hertz-wallpaper",
  "image",
  "moxcms",
@@ -1699,6 +1700,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "hertz-sqlite-lifecycle"
+version = "0.3.2-preview"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sqlx",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "uuid",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "hertz-studio"
 version = "0.3.2-preview"
 dependencies = [
@@ -1713,13 +1730,18 @@ dependencies = [
  "fslock",
  "futures",
  "getrandom 0.3.4",
+ "hertz-desktop",
  "hertz-desktop-ipc",
+ "hertz-wallpaper",
  "hmac",
+ "image",
  "keyring",
  "md-5",
+ "moxcms",
  "notify",
  "num-bigint",
  "num-traits",
+ "png",
  "reqwest",
  "rfd",
  "rmcp",
@@ -1750,6 +1772,9 @@ dependencies = [
  "vmusic-library",
  "vmusic-lyrics",
  "vmusic-store",
+ "webview2-com",
+ "windows 0.61.1",
+ "windows-core 0.62.2",
  "windows-sys 0.61.2",
  "wry",
  "zeroize",
@@ -5483,6 +5508,7 @@ name = "vmusic-lyrics"
 version = "0.3.2-preview"
 dependencies = [
  "roxmltree",
+ "serde_json",
  "thiserror 2.0.20",
  "vmusic-core",
 ]
@@ -5492,8 +5518,10 @@ name = "vmusic-store"
 version = "0.3.2-preview"
 dependencies = [
  "anyhow",
+ "hertz-sqlite-lifecycle",
  "serde",
  "serde_json",
+ "sha2",
  "sqlx",
  "thiserror 2.0.20",
  "tokio",

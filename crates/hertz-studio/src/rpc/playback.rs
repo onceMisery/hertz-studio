@@ -74,20 +74,7 @@ pub async fn pause(state: &Arc<AppState>, client_op: Option<&str>) -> RpcResult 
 }
 
 pub async fn stop(state: &Arc<AppState>) -> RpcResult {
-    let commit = state.play_commit.lock().await;
-    state.require_local_playback()?;
-    state.cancel_prepared_playback().await;
-    state
-        .play_generation
-        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    state.set_buffering(false, None).await;
-    state
-        .audio
-        .stop()
-        .await
-        .map_err(vmusic_core::CoreError::Audio)?;
-    state.transport_committed().await;
-    drop(commit);
+    state.stop_control_if(None).await?;
     with_state(state).await
 }
 

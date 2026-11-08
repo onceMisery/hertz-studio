@@ -15,6 +15,8 @@ pub(crate) const V2_COMMANDS: &[&str] = &[
     "open-center",
     "wallpaper-settings",
     "hide",
+    "lyrics-exit",
+    "wallpaper-exit",
     "wallpaper-show",
     "wallpaper-hide",
     "wallpaper-retry",

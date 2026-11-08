@@ -94,6 +94,19 @@ pub enum GateInput {
         plan_id: u64,
         effective_at: Nanos,
     },
+    /// Immutable exclusive real-input end. It never authorizes presentation.
+    EpochEnd {
+        session: u64,
+        epoch: u64,
+        format_id: u32,
+        end_frame: u64,
+    },
+    /// An accepted control boundary, computed once in the old Plan frame domain.
+    Cutoff {
+        session: u64,
+        epoch: u64,
+        end_frame: u64,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -130,6 +143,9 @@ pub enum GateAction {
     Resync {
         to: Option<u64>,
     },
+    InvalidEnd {
+        epoch: u64,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -149,6 +165,8 @@ struct EpochBuffer {
     seq_high: Option<u64>,
     /// 已呈现范围的右开边界，包含欠载静音；独立于收包连续性。
     presented_until: u64,
+    end_frame: Option<u64>,
+    cutoff_frame: Option<u64>,
 }
 
 impl EpochBuffer {
@@ -158,6 +176,8 @@ impl EpochBuffer {
             buffered_frames: 0,
             seq_high: None,
             presented_until: join_frame,
+            end_frame: None,
+            cutoff_frame: None,
         }
     }
 
@@ -185,6 +205,9 @@ impl EpochBuffer {
         let end = frame_index
             .checked_add(u64::from(frame_count))
             .ok_or(DiscardReason::InvalidBlock)?;
+        if self.end_frame.is_some_and(|limit| end > limit) {
+            return Err(DiscardReason::InvalidBlock);
+        }
         let cutoff = due_until.unwrap_or(0).max(self.presented_until);
         // 丢掉已经过去的前缀，包括尚未出队的旧缓冲；不把晚到样本追播。
         let retained =
@@ -208,6 +231,20 @@ impl EpochBuffer {
 
     fn consume(&mut self, frames: u32) {
         self.buffered_frames = self.buffered_frames.saturating_sub(frames);
+    }
+
+    fn limit(&self) -> Option<u64> {
+        self.end_frame.into_iter().chain(self.cutoff_frame).min()
+    }
+
+    fn seal(&mut self, end: u64) -> bool {
+        if self.end_frame.is_some_and(|old| old != end)
+            || (self.seq_high.is_some() && end < self.expected_next)
+        {
+            return false;
+        }
+        self.end_frame = Some(end);
+        true
     }
 }
 
@@ -245,6 +282,7 @@ pub struct ReceiverGate {
     session: u64,
     /// 保留采样率，用有理数换算期限，避免截断单帧纳秒带来的累计漂移。
     sample_rate: u32,
+    current_format_id: u32,
     /// (epoch, plan_id, anchor, buffer)。
     current: Option<(u64, u64, Nanos, EpochBuffer)>,
     preparing: Option<Preparing>,
@@ -265,6 +303,7 @@ impl ReceiverGate {
         Self {
             session: 0,
             sample_rate: 0,
+            current_format_id: 0,
             current: None,
             preparing: None,
             intent: None,
@@ -286,12 +325,13 @@ impl ReceiverGate {
 
     /// 当前已过呈现期限的帧号（不含，即 T_present(f) ≤ now 的 f 上界+1）。
     fn due_until(&self, now: Nanos) -> Option<u64> {
-        let (_, _, anchor, _) = self.current.as_ref()?;
+        let (_, _, anchor, buffer) = self.current.as_ref()?;
         if now < *anchor {
             return Some(0);
         }
         let due = u128::from(now - anchor) * u128::from(self.sample_rate) / 1_000_000_000 + 1;
-        Some(due.min(u128::from(u64::MAX)) as u64)
+        let due = due.min(u128::from(u64::MAX)) as u64;
+        Some(buffer.limit().map_or(due, |end| due.min(end)))
     }
 
     pub fn input(&mut self, now: Nanos, event: GateInput) -> Vec<GateAction> {
@@ -305,6 +345,7 @@ impl ReceiverGate {
                 self.unmatched.clear();
                 self.unmatched_frames = 0;
                 self.sample_rate = 0;
+                self.current_format_id = 0;
                 vec![GateAction::Resync { to: None }]
             }
             GateInput::Disconnect => {
@@ -322,6 +363,11 @@ impl ReceiverGate {
             } => {
                 if session != self.session {
                     return Vec::new();
+                }
+                if self.preparing.as_ref().is_some_and(|p| {
+                    p.epoch == epoch && p.buffer.end_frame.is_some() && p.format != Some(format)
+                }) {
+                    return vec![GateAction::InvalidEnd { epoch }];
                 }
                 self.set_preparing_slot(epoch, |p| {
                     if p.format != Some(format) {
@@ -341,7 +387,11 @@ impl ReceiverGate {
                         p.plan = Some(plan);
                         p.ready_sent = false;
                         if p.buffer.seq_high.is_none() {
+                            let end_frame = p.buffer.end_frame;
+                            let cutoff_frame = p.buffer.cutoff_frame;
                             p.buffer = EpochBuffer::from_join(plan.join_frame);
+                            p.buffer.end_frame = end_frame;
+                            p.buffer.cutoff_frame = cutoff_frame;
                         }
                     }
                 });
@@ -360,6 +410,61 @@ impl ReceiverGate {
                 plan_id,
                 effective_at,
             } => self.input_commit(now, session, epoch, plan_id, effective_at),
+            GateInput::EpochEnd {
+                session,
+                epoch,
+                format_id,
+                end_frame,
+            } => {
+                if session != self.session {
+                    return Vec::new();
+                }
+                let valid = if let Some((current, _, _, buffer)) = self
+                    .current
+                    .as_mut()
+                    .filter(|(current, ..)| *current == epoch)
+                {
+                    let _ = current;
+                    self.current_format_id == format_id && buffer.seal(end_frame)
+                } else if let Some(p) = self.preparing.as_mut().filter(|p| p.epoch == epoch) {
+                    p.format.is_some_and(|f| f.format_id == format_id) && p.buffer.seal(end_frame)
+                } else if self.current_epoch().is_some_and(|current| epoch < current) {
+                    return Vec::new();
+                } else {
+                    false
+                };
+                if valid {
+                    Vec::new()
+                } else {
+                    vec![GateAction::InvalidEnd { epoch }]
+                }
+            }
+            GateInput::Cutoff {
+                session,
+                epoch,
+                end_frame,
+            } => {
+                if session == self.session {
+                    if let Some((_, _, _, buffer)) = self
+                        .current
+                        .as_mut()
+                        .filter(|(current, ..)| *current == epoch)
+                    {
+                        buffer.cutoff_frame = Some(
+                            buffer
+                                .cutoff_frame
+                                .map_or(end_frame, |old| old.min(end_frame)),
+                        );
+                    } else if let Some(p) = self.preparing.as_mut().filter(|p| p.epoch == epoch) {
+                        p.buffer.cutoff_frame = Some(
+                            p.buffer
+                                .cutoff_frame
+                                .map_or(end_frame, |old| old.min(end_frame)),
+                        );
+                    }
+                }
+                Vec::new()
+            }
         }
     }
 
@@ -435,6 +540,12 @@ impl ReceiverGate {
                 self.unmatched_frames = self.unmatched.iter().map(|u| u.frame_count).sum();
                 if timed_out {
                     actions.push(GateAction::Resync { to: resync_to });
+                }
+                if p.buffer
+                    .end_frame
+                    .is_some_and(|end| p.plan.unwrap().join_frame >= end)
+                {
+                    return actions;
                 }
                 p.ready_sent = true;
                 actions.push(GateAction::Ready {
@@ -572,6 +683,14 @@ impl ReceiverGate {
                 reason: CommitIgnoreReason::NotReady,
             }];
         }
+        if p.buffer
+            .end_frame
+            .is_some_and(|end| p.plan.unwrap().join_frame >= end)
+        {
+            return vec![GateAction::CommitIgnored {
+                reason: CommitIgnoreReason::NotReady,
+            }];
+        }
         if let Some(committed_at) = p.commit {
             // 同一 Commit 幂等；重复消息不能改写已发布的生效边界。
             return if committed_at == effective_at {
@@ -639,6 +758,7 @@ impl ReceiverGate {
                 at: p.commit.unwrap(),
             };
             self.sample_rate = format.sample_rate;
+            self.current_format_id = format.format_id;
             self.current = Some((p.epoch, plan.plan_id, plan.anchor_ns, p.buffer));
             actions.push(actions_switch);
             // 意图代际晋升为准备代际；齐备则补发 Ready。
@@ -817,12 +937,16 @@ mod tests {
         gate.input(0, plan(2, 11, 10 * MS, 0));
         gate.input(0, pcm(2, 1, 0, 100));
         let actions = gate.advance(2_000 * MS);
-        assert!(!actions
-            .iter()
-            .any(|a| matches!(a, GateAction::EpochSwitch { .. })));
-        assert!(!actions
-            .iter()
-            .any(|a| matches!(a, GateAction::Play { epoch: 2, .. })));
+        assert!(
+            !actions
+                .iter()
+                .any(|a| matches!(a, GateAction::EpochSwitch { .. }))
+        );
+        assert!(
+            !actions
+                .iter()
+                .any(|a| matches!(a, GateAction::Play { epoch: 2, .. }))
+        );
     }
 
     /// Commit 迟到（过设备提交期限）：不追播，新代际静音重同步，当前照常。
@@ -841,12 +965,16 @@ mod tests {
         assert!(actions.contains(&GateAction::Resync { to: Some(1) }));
         let later = gate.advance(800 * MS);
         // epoch 2 永不出声；epoch 1 继续按呈现时间出帧。
-        assert!(!later
-            .iter()
-            .any(|a| matches!(a, GateAction::EpochSwitch { to: 2, .. })));
-        assert!(later
-            .iter()
-            .any(|a| matches!(a, GateAction::Play { epoch: 1, .. })));
+        assert!(
+            !later
+                .iter()
+                .any(|a| matches!(a, GateAction::EpochSwitch { to: 2, .. }))
+        );
+        assert!(
+            later
+                .iter()
+                .any(|a| matches!(a, GateAction::Play { epoch: 1, .. }))
+        );
         assert_eq!(gate.current_epoch(), Some(1));
     }
 
@@ -1368,6 +1496,133 @@ mod tests {
                     frames: 11
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn integer_one_frame_end_at_44100_does_not_disappear_or_manufacture_underrun() {
+        let mut gate = prepared(44_100);
+        gate.input(
+            0,
+            GateInput::EpochEnd {
+                session: 7,
+                epoch: 1,
+                format_id: 1,
+                end_frame: 1,
+            },
+        );
+        gate.input(0, pcm(1, 1, 0, 1));
+        gate.input(0, commit(1, 10, 1_000 * MS));
+        let actions = gate.advance(2_000 * MS);
+        assert_eq!(played(&actions), 1);
+        assert!(
+            !actions
+                .iter()
+                .any(|a| matches!(a, GateAction::Underrun { .. }))
+        );
+        assert!(gate.advance(600_000 * MS).is_empty());
+    }
+
+    #[test]
+    fn finite_end_is_immutable_and_checks_pcm_in_either_order() {
+        for end_first in [false, true] {
+            let mut gate = prepared(44_100);
+            let end = GateInput::EpochEnd {
+                session: 7,
+                epoch: 1,
+                format_id: 1,
+                end_frame: 1,
+            };
+            if end_first {
+                assert!(gate.input(0, end).is_empty());
+                assert!(matches!(
+                    gate.input(0, pcm(1, 1, 0, 2)).as_slice(),
+                    [GateAction::DiscardPcm {
+                        reason: DiscardReason::InvalidBlock,
+                        ..
+                    }]
+                ));
+            } else {
+                gate.input(0, pcm(1, 1, 0, 2));
+                assert_eq!(
+                    gate.input(0, end),
+                    vec![GateAction::InvalidEnd { epoch: 1 }]
+                );
+            }
+        }
+        let mut gate = prepared(44_100);
+        let end = GateInput::EpochEnd {
+            session: 7,
+            epoch: 1,
+            format_id: 1,
+            end_frame: 1,
+        };
+        assert!(gate.input(0, end).is_empty());
+        assert!(gate.input(0, end).is_empty());
+        assert_eq!(
+            gate.input(
+                0,
+                GateInput::EpochEnd {
+                    session: 7,
+                    epoch: 1,
+                    format_id: 1,
+                    end_frame: 2
+                }
+            ),
+            vec![GateAction::InvalidEnd { epoch: 1 }]
+        );
+    }
+
+    #[test]
+    fn control_cutoff_and_natural_eof_cap_the_same_integer_gate_range() {
+        let mut gate = prepared(44_100);
+        gate.input(0, pcm(1, 1, 0, 100));
+        gate.input(
+            0,
+            GateInput::EpochEnd {
+                session: 7,
+                epoch: 1,
+                format_id: 1,
+                end_frame: 100,
+            },
+        );
+        gate.input(
+            0,
+            GateInput::Cutoff {
+                session: 7,
+                epoch: 1,
+                end_frame: 1,
+            },
+        );
+        gate.input(0, commit(1, 10, 1_000 * MS));
+        let actions = gate.advance(2_000 * MS);
+        assert_eq!(played(&actions), 1);
+        assert!(
+            !actions
+                .iter()
+                .any(|a| matches!(a, GateAction::Underrun { .. }))
+        );
+    }
+
+    #[test]
+    fn ended_rejoin_is_not_ready_even_when_end_precedes_the_plan() {
+        let mut gate = gate();
+        gate.input(0, format(1));
+        gate.input(
+            0,
+            GateInput::EpochEnd {
+                session: 7,
+                epoch: 1,
+                format_id: 1,
+                end_frame: 1,
+            },
+        );
+        assert!(gate.input(0, plan(1, 10, 1_000 * MS, 1)).is_empty());
+        assert_eq!(
+            gate.input(0, commit(1, 10, 1_000 * MS)),
+            vec![GateAction::CommitIgnored {
+                reason: CommitIgnoreReason::NotReady
+            }]
         );
     }
 }

@@ -16,12 +16,12 @@
 //! 核验缓存与流。媒体选择的 TargetPlanner 接线属 P1-05。
 
 use crate::app::UserEvent;
+use crate::native_events::EventLoopProxy;
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
-use tao::event_loop::EventLoopProxy;
 
 use super::access::{MediaAccess, ReadPermit};
 use super::assets::AssetStore;

@@ -9,6 +9,7 @@
   var firstFrameKind = null;
   var revealed = !nativeBinding;
   var revealReceiptSent = false;
+  var revealRevision = 0;
   if (nativeBinding && host) host.style.visibility = 'hidden';
   var runtime = window.HertzStageRuntime || {};
   var zodiac = window.ZodiacStagePure || runtime.ZodiacStagePure || null;
@@ -50,6 +51,7 @@
   var error = null;
   var selectToken = 0;
   var pendingCapture = null;
+  var lastRenderedFrame = null;
   var raf = 0;
   var last = 0;
   var cap = 30;
@@ -71,6 +73,9 @@
   var MEDIA_URL = /^https:\/\/[0-9a-f]{32}\.[0-9a-f]{32}\.wallpaper\.invalid\/files\/[a-z0-9\-_.\/]+$/;
   var MEDIA_FIRST_FRAME_TIMEOUT_MS = 10000;
   var MEDIA_HEARTBEAT_MS = 2000;
+  var MEDIA_CLOCK_MAX_AGE_MS = 500;
+  var MEDIA_CLOCK_DRIFT_MS = 100;
+  var MEDIA_CLOCK_ALIGN_TIMEOUT_MS = 3000;
   var media = null;
   var mediaToken = 0;
   var nativePointer = window.__hertzWallpaperNativePointer === true;
@@ -258,12 +263,13 @@
     return true;
   }
 
-  function sessionEvent(event, kind, positionMs, pauseToken) {
+  function sessionEvent(event, kind, positionMs, pauseToken, clockToken) {
     if (!nativeBinding) return;
     var receipt = { sessionId: nativeBinding.sessionId, generation: nativeBinding.generation, event: event };
     if (kind) receipt.frameKind = kind;
     if (positionMs != null) receipt.positionMs = positionMs;
     if (pauseToken != null) receipt.pauseToken = pauseToken;
+    if (clockToken != null) receipt.clockToken = clockToken;
     notify('wallpaper_session ' + JSON.stringify(receipt));
   }
 
@@ -274,12 +280,19 @@
   }
 
   function reveal() {
-    if (nativeBinding && !firstFrameKind) return false;
+    if (nativeBinding && (!firstFrameKind || !enabled)) return false;
+    var record = media, clock = record && record.clock;
+    if (clock && (!enabled || clock.held || clock.alignment || record.state !== 'ready')) return false;
     if (host) host.style.visibility = 'visible';
     revealed = true;
     if (nativeBinding && !revealReceiptSent) {
       revealReceiptSent = true;
-      requestAnimationFrame(function(){requestAnimationFrame(function(){sessionEvent('revealed');});});
+      var receiptRevision = revealRevision, revision = clock && clock.revision, clockToken = clock && clock.token;
+      requestAnimationFrame(function(){requestAnimationFrame(function(){
+        if (!enabled || receiptRevision !== revealRevision || media !== record || (record && record.state !== 'ready')) return;
+        if (clock && (media !== record || !enabled || clock.held || clock.revision !== revision || clock.token !== clockToken || record.state !== 'ready')) return;
+        sessionEvent(clock ? 'mediaClockRevealed' : 'revealed', null, null, null, clockToken);
+      });});
     }
     return true;
   }
@@ -354,6 +367,7 @@
       notify('wallpaper_capture '+JSON.stringify({token:request.token,sessionId:request.sessionId,generation:request.generation,width:request.width,height:request.height,error:'capture_frame_timeout'}));
     },2000);
     if(media)requestAnimationFrame(captureFrame);
+    else if (!enabled && mounted && !lost) requestAnimationFrame(function (now) { renderScene(now, 0, true); });
     return true;
   }
 
@@ -516,32 +530,41 @@
     drawPointer(now);
     var frameDt = pendingDt;
     pendingDt = 0;
-    var bands = shapedAudio(now);
-    var motionAllowed = motionActive();
+    renderScene(now, frameDt);
+  }
+
+  function renderScene(now, frameDt, retained) {
+    if (retained && !lastRenderedFrame) return;
+    var frame = retained ? Object.assign({}, lastRenderedFrame, { dynamicDt: 0, realDt: 0 }) : {
+      now: now, dynamicDt: frameDt * config.motion / 1000, realDt: frameDt / 1000,
+      bands: Array.from(shapedAudio(now)), sceneTime: sceneTime / 1000,
+      motionActive: motionActive(), playing: scenePlaying(), position: feed.positionMs || 0
+    };
+    var bands = frame.bands;
     try {
       var submitted = false;
       if (backend === 'zodiac') {
         if (!zodiac) return;
         zodiac.setAudio({ bands: bands, onset: false });
-        zodiac.setTime({ time: sceneTime / 1000, playing: scenePlaying() });
-        if (zodiac.setMotion) zodiac.setMotion({ active: motionAllowed });
+        zodiac.setTime({ time: frame.sceneTime, playing: frame.playing });
+        if (zodiac.setMotion) zodiac.setMotion({ active: frame.motionActive });
         // 外部时钟模式：本页是唯一调度器；旧 bundle 回退内部循环。
-        submitted = zodiac.render ? zodiac.render(now, frameDt * config.motion / 1000, frameDt / 1000) : false;
+        submitted = zodiac.render ? zodiac.render(frame.now, frame.dynamicDt, frame.realDt) : false;
       } else if (stage) {
         var shaped = bandsObject(bands);
         var level = 0;
         for (var i = 0; i < BANDS; i++) level += bands[i] || 0;
         level /= BANDS;
         submitted = stage.frame({
-          now: now,
-          dt: (frameDt * config.motion) / 1000,
-          time: (feed.positionMs || 0) / 1000,
-          position: feed.positionMs || 0,
-          playing: scenePlaying(),
-          motionActive: motionAllowed,
+          now: frame.now,
+          dt: frame.dynamicDt,
+          time: frame.position / 1000,
+          position: frame.position,
+          playing: frame.playing,
+          motionActive: frame.motionActive,
           reduced: false,
-          sceneTime: sceneTime / 1000,
-          dynamicDt: (frameDt * config.motion) / 1000,
+          sceneTime: frame.sceneTime,
+          dynamicDt: frame.dynamicDt,
           deviceTier: 1,
           level: level,
           onset: 0,
@@ -555,6 +578,7 @@
       }
       // 只在渲染真实提交后计数；尝试调用不算 GPU 完成（P0-05）。
       if (submitted === true) {
+        if (!retained) lastRenderedFrame = frame;
         draws++;
         firstFrame('gl');
         captureFrame();
@@ -579,6 +603,7 @@
     enabled = true;
     if (media) {
       cancelMediaPauseCheck(media);
+      if (media.clock && media.clock.held) hideMediaClock();
       applyMediaMotion(); // 当前呈现是媒体：恢复播放，不重复挂场景
       return true;
     }
@@ -589,11 +614,22 @@
 
   function stop(pauseToken) {
     enabled = false;
+    // A retained image also needs a new receipt after a policy pause. Fence both
+    // queued animation frames so an earlier release cannot acknowledge resume.
+    revealRevision++;
+    revealReceiptSent = false;
     clearPointer();
     if (raf) cancelAnimationFrame(raf);
     raf = 0;
     if (backend === 'zodiac' && mounted && zodiac) {
       zodiac.setTime({ time: sceneTime / 1000, playing: false });
+    }
+    if (media && media.clock) {
+      cancelMediaClockAlignment(media);
+      media.clock.held = true;
+      media.clock.revision++;
+      media.clock.resumeAfterMs = performance.now();
+      // Keep the stopped frame visible; start hides it before the next group release.
     }
     applyMediaMotion();
     if (media) checkMediaPaused(media, pauseToken);
@@ -628,6 +664,7 @@
   }
 
   function teardown() {
+    lastRenderedFrame = null;
     clearPointer();
     if (raf) cancelAnimationFrame(raf);
     raf = 0;
@@ -882,12 +919,212 @@
     check.timer = setTimeout(verify, 200);
   }
 
+  function hideMediaClock() {
+    if (host) host.style.visibility = 'hidden';
+    revealed = false;
+  }
+
+  function cancelMediaClockAlignment(record) {
+    var clock = record.clock, alignment = clock && clock.alignment;
+    if (!alignment) return;
+    clock.alignment = null;
+    clearTimeout(alignment.timer);
+    alignment.el.removeEventListener('seeked', alignment.onSeeked);
+    if (alignment.frameCallback != null && typeof alignment.el.cancelVideoFrameCallback === 'function') {
+      alignment.el.cancelVideoFrameCallback(alignment.frameCallback);
+    }
+  }
+
+  // The shortest signed distance also handles a video just either side of its loop boundary.
+  function mediaClockDrift(positionMs, targetMs, durationMs) {
+    var drift = ((positionMs - targetMs) % durationMs + durationMs) % durationMs;
+    return drift > durationMs / 2 ? drift - durationMs : drift;
+  }
+
+  function mediaClockTarget(sample, now, durationMs) {
+    var elapsed = sample.running ? Math.max(0, now - sample.at) : 0;
+    return (sample.phaseMs + elapsed) % durationMs;
+  }
+
+  function readMediaClock(request, syncing) {
+    var record = media, clock = record && record.clock, now = performance.now();
+    if (!nativeBinding || !clock || !enabled || record.state !== 'ready' || !record.el) return null;
+    function reject(reason) {
+      clock.rejected = Math.min(0xffffffff, clock.rejected + 1);
+      clock.lastRejection = reason;
+      return null;
+    }
+    if (!request || !Number.isSafeInteger(request.token) || request.token <= 0
+      || !Number.isSafeInteger(request.timeMs) || request.timeMs < 0
+      || !Number.isFinite(request.pageDispatchMs) || request.pageDispatchMs < 0
+      || typeof request.running !== 'boolean') return reject('invalid_request');
+    var age = now - request.pageDispatchMs;
+    if (age > MEDIA_CLOCK_MAX_AGE_MS || age < -MEDIA_CLOCK_MAX_AGE_MS) {
+      // A fresh beacon lets native repair its PageClock estimate before retrying.
+      if (now - lastClockBeacon >= 1000) { lastClockBeacon = now; notify('wallpaper_clock ' + now); }
+      return reject('stale_dispatch');
+    }
+    if (request.token < clock.token || request.pageDispatchMs < clock.resumeAfterMs
+      || (request.token === clock.token && request.pageDispatchMs < clock.dispatchMs)) return reject('stale_request');
+    if (syncing && (clock.held || clock.alignment || now - clock.lastSyncAt < MEDIA_HEARTBEAT_MS)) return reject('sync_not_due');
+    var durationMs = record.el.duration * 1000;
+    if (!Number.isFinite(durationMs) || durationMs <= 0 || durationMs > Number.MAX_SAFE_INTEGER
+      || !Number.isFinite(record.el.currentTime) || record.el.currentTime < 0) return reject('invalid_media_time');
+    age = Math.max(0, age);
+    return { record: record, token: request.token, dispatchMs: request.pageDispatchMs,
+      running: request.running, at: now, durationMs: durationMs, ageMs: age,
+      // Reduce before adding so a large but valid native content phase stays precise.
+      phaseMs: (request.timeMs % durationMs + (request.running ? age : 0)) % durationMs };
+  }
+
+  function applyMediaClock(request, syncing) {
+    var sample = readMediaClock(request, syncing);
+    if (!sample) return false;
+    var record = sample.record, clock = record.clock, el = record.el;
+    var pending = clock.alignment;
+    var alreadyReleased = !syncing && !clock.held && !pending && clock.token === sample.token;
+    clock.token = sample.token;
+    clock.dispatchMs = sample.dispatchMs;
+    clock.running = sample.running;
+    clock.ageMs = sample.ageMs;
+    clock.lastRejection = null;
+    if (syncing) clock.syncs = Math.min(0xffffffff, clock.syncs + 1);
+    if (alreadyReleased) { applyMediaMotion(); return true; }
+    if (pending && pending.sample.token === sample.token) {
+      // Native may retry release while a seek is draining. Update its phase without
+      // resetting the seek or extending the original three-second deadline.
+      pending.sample = sample;
+      if (!sample.running || config.motion <= 0) { record.playAttempt = (record.playAttempt || 0) + 1; el.pause(); }
+      return true;
+    }
+    var deadlineAt = pending ? pending.deadlineAt : sample.at + MEDIA_CLOCK_ALIGN_TIMEOUT_MS;
+    cancelMediaClockAlignment(record);
+    clock.lastSyncAt = sample.at;
+    if (!syncing) {
+      clock.held = true;
+      clock.revision++;
+      revealReceiptSent = false;
+      hideMediaClock();
+    }
+    // Frozen members retain their chosen frame even if the group's logical clock advances.
+    if (syncing && (!sample.running || config.motion <= 0)) { applyMediaMotion(); return true; }
+    var target = mediaClockTarget(sample, sample.at, sample.durationMs);
+    var drift = mediaClockDrift(el.currentTime * 1000, target, sample.durationMs);
+    clock.driftMs = drift;
+    function complete() {
+      cancelMediaClockAlignment(record);
+      if (!syncing) {
+        clock.held = false;
+        clock.releases = Math.min(0xffffffff, clock.releases + 1);
+      }
+      applyMediaMotion();
+      if (!syncing && record.state === 'ready') reveal();
+    }
+    if (Math.abs(drift) <= MEDIA_CLOCK_DRIFT_MS && !el.seeking && !clock.framePending) {
+      complete();
+      return true;
+    }
+    var alignment = { el: el, sample: sample, deadlineAt: deadlineAt, timer: 0,
+      frameCallback: null, onSeeked: null, seeked: false, presented: false, targetMs: target };
+    clock.alignment = alignment;
+    function current() {
+      return media === record && record.el === el && record.state === 'ready'
+        && enabled && clock.alignment === alignment;
+    }
+    function playAligned() {
+      if (!current() || !alignment.sample.running || config.motion <= 0) return;
+      var playAttempt = record.playAttempt = (record.playAttempt || 0) + 1;
+      try {
+        var attempt = el.play();
+        if (attempt && attempt.catch) attempt.catch(function () {
+          if (current() && record.playAttempt === playAttempt && alignment.sample.running && config.motion > 0) failMedia('media_play_rejected');
+        });
+      } catch (_) { if (current()) failMedia('media_play_rejected'); }
+    }
+    function finishFrame() {
+      if (!current() || !alignment.seeked || !alignment.presented || el.seeking) return;
+      if (performance.now() >= alignment.deadlineAt) { failMedia('media_clock_alignment_timeout'); return; }
+      clock.framePending = false;
+      var now = performance.now();
+      clock.driftMs = mediaClockDrift(el.currentTime * 1000,
+        mediaClockTarget(alignment.sample, now, sample.durationMs), sample.durationMs);
+      if (config.motion > 0 && Math.abs(clock.driftMs) > MEDIA_CLOCK_DRIFT_MS) { seekFrame(); return; }
+      complete();
+    }
+    function waitForFrame() {
+      alignment.frameCallback = el.requestVideoFrameCallback(function (_, metadata) {
+        alignment.frameCallback = null;
+        if (!current()) return;
+        // Sparse videos may display a frame whose mediaTime is well before the
+        // requested phase. Its actual submission must still postdate this seek.
+        if (!metadata || !Number.isFinite(metadata.presentationTime)
+          || metadata.presentationTime < alignment.frameRequestedAt) {
+          waitForFrame();
+          return;
+        }
+        alignment.presented = true;
+        finishFrame();
+      });
+    }
+    alignment.onSeeked = function () {
+      if (!current() || el.seeking) return;
+      alignment.seeked = true;
+      playAligned();
+      finishFrame();
+    };
+    function seekFrame() {
+      if (!current()) return;
+      if (performance.now() >= alignment.deadlineAt) { failMedia('media_clock_alignment_timeout'); return; }
+      record.playAttempt = (record.playAttempt || 0) + 1;
+      el.pause();
+      if (alignment.frameCallback != null) el.cancelVideoFrameCallback(alignment.frameCallback);
+      alignment.frameCallback = null;
+      alignment.presented = false;
+      alignment.targetMs = mediaClockTarget(alignment.sample, performance.now(), sample.durationMs);
+      var deviation = mediaClockDrift(el.currentTime * 1000, alignment.targetMs, sample.durationMs);
+      var needsSeek = Math.abs(deviation) > MEDIA_CLOCK_DRIFT_MS;
+      var renewProof = !syncing && clock.framePending && !el.seeking && !needsSeek;
+      if (renewProof) {
+        // A seek can finish while stopped after its observer was cancelled.
+        // Chromium elides a paused seek to the identical time, so renew the lost
+        // frame proof with a <=1us nudge inside the video. This is release-only;
+        // periodic drift correction still requires a strict >100ms deviation.
+        var positionMs = el.currentTime * 1000, nudgeMs = Math.min(.001, sample.durationMs / 4);
+        alignment.targetMs = positionMs + nudgeMs < sample.durationMs ? positionMs + nudgeMs : Math.max(0, positionMs - nudgeMs);
+        needsSeek = true;
+      }
+      alignment.seeked = !needsSeek && !el.seeking;
+      clock.framePending = true;
+      alignment.frameRequestedAt = performance.now();
+      // Subscribe before a paused seek: its single decoded frame may be submitted
+      // before seeked is delivered. Both facts are required, in either order.
+      waitForFrame();
+      if (needsSeek) {
+        if (!renewProof) clock.corrections = Math.min(0xffffffff, clock.corrections + 1);
+        try { el.currentTime = alignment.targetMs / 1000; }
+        catch (_) { failMedia('media_clock_seek_failed'); }
+      } else if (alignment.seeked) playAligned();
+    }
+    el.addEventListener('seeked', alignment.onSeeked);
+    alignment.timer = setTimeout(function () {
+      if (current()) failMedia('media_clock_alignment_timeout');
+    }, Math.max(0, deadlineAt - performance.now()));
+    seekFrame();
+    return record.state !== 'failed';
+  }
+
+  // Native binding scopes both entry points to this controller; no public config
+  // can opt an unrelated page into a group's trusted clock.
+  function revealMediaClock(request) { return applyMediaClock(request, false); }
+  function syncMediaClock(request) { return applyMediaClock(request, true); }
+
   // motion=0 或停用 → 视频冻结到当前帧（§10.1：不降 playbackRate 伪装静态）。
   function applyMediaMotion() {
     if (!media || media.kind !== 'video' || media.state !== 'ready' || !media.el) return;
     var record = media, el = record.el;
     var playAttempt = record.playAttempt = (record.playAttempt || 0) + 1;
-    if (enabled && config.motion > 0) {
+    var canPlay = enabled && config.motion > 0 && (!record.clock || (!record.clock.held && !record.clock.alignment && record.clock.running));
+    if (canPlay) {
       var attempt = el.play();
       if (attempt && attempt.catch) attempt.catch(function () {
         if (media === record && record.el === el && record.playAttempt === playAttempt && enabled && config.motion > 0) failMedia('media_play_rejected');
@@ -901,6 +1138,8 @@
   // 释放顺序（§8.2）：pause → 清 src → load → 移除元素；租约随窗口退出由原生回收。
   function unmountMedia() {
     mediaToken++;
+    revealRevision++;
+    revealReceiptSent = false;
     var record = media;
     media = null;
     if (!record) return;
@@ -912,6 +1151,7 @@
 
   function releaseMediaElement(record) {
     cancelMediaPauseCheck(record);
+    cancelMediaClockAlignment(record);
     var el = record.el;
     record.el = null;
     if (!el) return;
@@ -938,7 +1178,9 @@
     var url = typeof desc.url === 'string' ? desc.url : '';
     var fit = desc.fit === 'contain' || desc.fit === 'stretch' ? desc.fit : 'cover';
     var resumeMs = desc.resumePositionMs == null ? 0 : desc.resumePositionMs;
-    if (!kind || !Number.isSafeInteger(resumeMs) || resumeMs < 0 || (kind !== 'video' && resumeMs !== 0) || !MEDIA_URL.test(url) || url.split('/').slice(4).some(part => !part || part === '.' || part === '..') || !host) {
+    var groupClock = desc.groupClock === true;
+    if (!kind || (desc.groupClock != null && typeof desc.groupClock !== 'boolean') || (groupClock && (kind !== 'video' || !nativeBinding))
+      || !Number.isSafeInteger(resumeMs) || resumeMs < 0 || (kind !== 'video' && resumeMs !== 0) || !MEDIA_URL.test(url) || url.split('/').slice(4).some(part => !part || part === '.' || part === '..') || !host) {
       notify('wallpaper_media_failed media_invalid_selection');
       return false;
     }
@@ -949,6 +1191,14 @@
     backend = 'media';
     var token = mediaToken;
     var record = { kind: kind, url: url, fit: fit, state: 'loading', error: null, ticks: 0, timer: 0, deadline: 0, el: null };
+    if (groupClock) {
+      record.clock = { held: true, running: false, token: 0, dispatchMs: -Infinity, resumeAfterMs: 0,
+        lastSyncAt: -Infinity, alignment: null, framePending: false, revision: 0,
+        ageMs: null, driftMs: null, corrections: 0, rejected: 0, lastRejection: null,
+        firstFrameHeld: false, syncs: 0, releases: 0 };
+      revealReceiptSent = false;
+      hideMediaClock();
+    }
     media = record;
     var el = document.createElement(kind === 'video' ? 'video' : 'img');
     // 跨 origin 包资源须可作纹理（§8.1）：crossOrigin='anonymous' + 拦截层 CORS。
@@ -1003,6 +1253,10 @@
         clearTimeout(record.deadline);
         el.style.visibility = 'visible';
         record.state = 'ready';
+        if (record.clock) {
+          el.pause();
+          record.clock.firstFrameHeld = el.paused === true && !revealed && host.style.visibility === 'hidden';
+        }
         firstFrame('video');
         mediaReady();
         applyMediaMotion();
@@ -1224,6 +1478,21 @@
         error: media.error,
         ticks: media.ticks,
         firstFrameTimeMs: media.firstFrameTimeMs == null ? null : media.firstFrameTimeMs,
+        clock: media.clock ? {
+          held: media.clock.held,
+          aligning: !!media.clock.alignment,
+          running: media.clock.running,
+          firstFrameHeld: media.clock.firstFrameHeld,
+          token: media.clock.token,
+          deliveryAgeMs: media.clock.ageMs,
+          driftMs: media.clock.driftMs,
+          corrections: media.clock.corrections,
+          syncs: media.clock.syncs,
+          releases: media.clock.releases,
+          lastSyncAtMs: Number.isFinite(media.clock.lastSyncAt) ? media.clock.lastSyncAt : null,
+          rejected: media.clock.rejected,
+          lastRejection: media.clock.lastRejection
+        } : null,
         muted: media.kind === 'video' && media.el ? media.el.muted === true : null,
         paused: media.kind === 'video' && media.el ? media.el.paused === true : null,
         timeMs: media.kind === 'video' && media.el ? Math.round((media.el.currentTime || 0) * 1000) : null,
@@ -1257,6 +1526,8 @@
     stop: stop,
     mount: mount,
     reveal: reveal,
+    revealMediaClock: revealMediaClock,
+    syncMediaClock: syncMediaClock,
     unmount: unmount,
     debug: debug,
     requestCapture: requestCapture

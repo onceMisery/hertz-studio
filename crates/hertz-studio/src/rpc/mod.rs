@@ -224,6 +224,23 @@ impl Rpc {
         let raw = call.raw.as_ref();
 
         match (call.op, segments.as_slice()) {
+            (
+                op,
+                ["v1", "stage", "media"]
+                | ["v1", "stage", "presets"]
+                | ["v1", "stage", "media", "import", "chunk"],
+            ) => Ok(Reply::ok(
+                crate::stage_media::rpc(
+                    state,
+                    op,
+                    call.path.trim_start_matches('/'),
+                    query,
+                    body,
+                    raw,
+                    true,
+                )
+                .await?,
+            )),
             (Op::Get, ["v1", "desktop", "capabilities"]) => {
                 let query: crate::desktop::CapabilitiesQuery = query_as(query)?;
                 Reply::json(

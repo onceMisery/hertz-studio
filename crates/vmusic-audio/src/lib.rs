@@ -7,6 +7,7 @@
 
 pub mod actor;
 pub mod null;
+pub mod sleep_deadline;
 
 #[cfg(feature = "playback")]
 pub mod clocked_resample;
@@ -27,7 +28,10 @@ pub mod render;
 pub mod resample;
 
 #[cfg(feature = "playback")]
-pub use render::{RenderCore, RenderFormat};
+pub use render::{
+    NativeDecodedFormat, NativePcmBudget, NativePcmReservation, NativePcmUsage, RenderCore,
+    RenderFormat,
+};
 
 #[cfg(feature = "playback")]
 pub use scheduled_output::{

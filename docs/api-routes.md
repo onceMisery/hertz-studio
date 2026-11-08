@@ -1,5 +1,7 @@
 # REST 路由清单
 
+2026-11-07 桌面歌词声部扩展：快照声明 `vocalSchemaVersions:[1]`；文档查询可附整数 `vocalSchemaVersion=1`。普通文档保持v1形状，带声部文档在原鉴权及key检查后要求能力1，否则422 `desktop_vocals_unsupported`且不返回歌词正文。新文档含schema、agents与行内vocal，HTTP/DBX共用同一投影和key，详见[A10合同](aegis/specs/2026-11-07-desktop-lyrics-vocals-design.md)。备份含导入歌词时为v2，原文/偏移/修订及预算见[JSON备份](json-backup-consistency.md)。
+
 面向接口的参考清单，README 不收录这些内容。改了 `crates/hertz-studio/src/routes.rs`
 或 `crates/hertz-studio/src/main.rs` 之后重跑生成器：
 
@@ -11,7 +13,7 @@ node scripts/api-routes.js --check  # 只校验，不一致则退出码 1（CI �
 <!-- api-routes:begin -->
 <!-- 由 `node scripts/api-routes.js` 生成，勿手改；`--check` 会校验是否与源码一致。 -->
 
-REST 路由表共 186 个「方法 + 路径」（`crates/hertz-studio/src/routes.rs` 的 154 条 `.route()`），另有 `main.rs` 挂的 6 条路由与 141 条内嵌静态资源路由。
+REST 路由表共 198 个「方法 + 路径」（`crates/hertz-studio/src/routes.rs` 与 `stage_media/api.rs` 的 163 条 `.route()`），另有 `main.rs` 挂的 6 条路由与 155 条内嵌静态资源路由。
 
 | 方法 | 路径 |
 | --- | --- |
@@ -173,7 +175,13 @@ REST 路由表共 186 个「方法 + 路径」（`crates/hertz-studio/src/routes
 | GET | `/v1/stage/beatmap` |
 | POST | `/v1/stage/beatmap/retry` |
 | GET | `/v1/stage/beatmap/status` |
+| GET | `/v1/stage/media` |
+| POST | `/v1/stage/media` |
+| POST | `/v1/stage/media/import/chunk` |
+| GET | `/v1/stage/media/resource/{lease}` |
 | POST | `/v1/stage/pitch` |
+| GET | `/v1/stage/presets` |
+| PUT | `/v1/stage/presets` |
 | POST | `/v1/stage/project-media` |
 | GET | `/v1/state` |
 | POST | `/v1/system/shutdown` |
@@ -201,6 +209,12 @@ REST 路由表共 186 个「方法 + 路径」（`crates/hertz-studio/src/routes
 | POST | `/v1/ui/notice` |
 | GET | `/v1/wallpaper/events` |
 | GET | `/v1/wallpaper/snapshot` |
+| POST | `/v1/window/focus` |
+| GET | `/v1/window/media-state` |
+| PUT | `/v1/window/settings` |
+| GET | `/v1/window/sleep-timer` |
+| PUT | `/v1/window/sleep-timer` |
+| GET | `/v1/window/state` |
 
 `main.rs` 上另有：GET `/ws`，GET `/wallpapers/{name}`，GET `/platform-icons/{name}`，GET `/space-scene-preview/{name}`，GET `/`，POST `/v1/auth/session`。
 

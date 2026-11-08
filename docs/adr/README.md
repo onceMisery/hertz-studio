@@ -33,3 +33,4 @@
 | 0010 | `0010-ai-drafts-and-retention.md` | 草稿临时预览不落盘，七天任务保护与十三个月账本独立保留 |
 | 0011 | `0011-lan-rendering-and-output-ownership.md` | 房间共用渲染与队列，设备网格归接收队列，呈现和输出交接分别提交 |
 | 0012 | `0012-dbx-desktop-readonly-boundary.md` | DBX 桌面读取显式授权，原播放与退出归属保持不变，取消回收与新鲜度独立有界 |
+| 0013 | `0013-desktop-vocal-documents.md` | 作者声部进入原模型，桌面协商并读取真实区间，原文备份保持修订与墓碑 |

@@ -189,7 +189,8 @@ async function main() {
     assert.ok(requests.some(call => call.method === 'v1/player/next') && requests.some(call => call.method === 'v1/player/previous'));
     await page.evaluate(() => emit({ type: 'error', source: 'qq', message: '测试播放错误' }));
     await page.waitForFunction(() => document.getElementById('capsule-title').textContent.includes('测试播放错误'));
-    await page.locator('#capsule-expand').click();
+    // 胶囊上的展开键已移除：点歌曲信息区（整块 click）是唯一的展开入口。
+    await page.locator('#capsule .capsule-text').click();
     await page.waitForFunction(() => audit.actions.includes('close'));
     assert.deepEqual(await page.evaluate(() => audit.actions), ['open', 'close']);
     assert.deepEqual(errors, []);

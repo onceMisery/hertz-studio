@@ -107,6 +107,72 @@ async function main() {
       }
       await context.close();
     }
+
+    // —— 桌面原生胶囊：展开键退出后，三键与三行文字必须都放得下 -------------
+    // 宿主窗口尺寸是 window.rs 的 CAPSULE_*，页面排版是 native-capsule.css。
+    // 视口直接从 Rust 常量读，改尺寸却没改 CSS 会在这里报几何越界。
+    const windowSource = fs.readFileSync(path.join(__dirname, '../crates/hertz-studio/src/window.rs'), 'utf8');
+    const nativeWidth = Number(windowSource.match(/const CAPSULE_WIDTH: f64 = ([\d.]+);/)?.[1]);
+    const nativeHeight = Number(windowSource.match(/const CAPSULE_HEIGHT: f64 = ([\d.]+);/)?.[1]);
+    assert.ok(nativeWidth > 0 && nativeHeight > 0, 'native capsule size comes from window.rs');
+    const nativeContext = await browser.newContext({
+      viewport: { width: nativeWidth, height: nativeHeight }, deviceScaleFactor: 1,
+    });
+    const nativePage = await nativeContext.newPage();
+    await nativePage.route('http://capsule.test/**', route => {
+      const file = path.resolve(web, '.' + new URL(route.request().url()).pathname);
+      if (route.request().url() === 'http://capsule.test/') return route.fulfill({ contentType: 'text/html', body: html });
+      if (!file.startsWith(web + path.sep) || !fs.existsSync(file)) return route.abort();
+      return route.fulfill({ path: file });
+    });
+    await nativePage.goto('http://capsule.test/');
+    await nativePage.addScriptTag({ path: path.join(web, 'design', 'design-themes.js') });
+    await nativePage.addScriptTag({ path: path.join(web, 'themes.js') });
+    await nativePage.evaluate(() => {
+      document.documentElement.dataset.hertzWindowMode = 'capsule';
+      document.getElementById('capsule').hidden = false;
+      document.getElementById('capsule-title').textContent = '完整显示的歌曲标题';
+      document.getElementById('capsule-artist').textContent = 'Laufey · From The Start';
+    });
+    const native = await nativePage.evaluate(() => {
+      const capsule = document.getElementById('capsule');
+      const buttons = [...capsule.querySelectorAll('.capsule-btn')];
+      const parts = ['.capsule-art', '.capsule-text', '.capsule-label', '.capsule-line-title', '.capsule-line-artist']
+        .map(selector => ({ selector, rect: capsule.querySelector(selector).getBoundingClientRect().toJSON() }));
+      return {
+        rect: capsule.getBoundingClientRect().toJSON(),
+        viewport: { width: innerWidth, height: innerHeight },
+        hasExpand: !!document.getElementById('capsule-expand'),
+        parts,
+        buttons: buttons.map(button => {
+          const r = button.getBoundingClientRect();
+          const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+          return { id: button.id, rect: r.toJSON(), hit: !!hit && (hit === button || button.contains(hit)) };
+        }),
+      };
+    });
+    assert.equal(native.hasExpand, false, 'no fullscreen/expand button on the capsule');
+    assert.deepEqual(native.buttons.map(button => button.id),
+      ['capsule-prev', 'capsule-play', 'capsule-next'], 'exactly three transport keys');
+    assert.equal(native.rect.width, nativeWidth, 'capsule fills the native window width');
+    assert.equal(native.rect.height, nativeHeight, 'capsule fills the native window height');
+    for (const part of [...native.parts, ...native.buttons.map(button => ({ selector: '#' + button.id, rect: button.rect }))]) {
+      assert.ok(part.rect.left >= -0.5 && part.rect.top >= -0.5
+        && part.rect.right <= nativeWidth + 0.5 && part.rect.bottom <= nativeHeight + 0.5,
+        `${part.selector} fits ${nativeWidth}x${nativeHeight}`);
+    }
+    assert.ok(native.parts.find(part => part.selector === '.capsule-text').rect.width >= 100,
+      'song info keeps a readable width');
+    for (const button of native.buttons) assert.ok(button.hit, `${button.id} is clickable`);
+    // 展开入口只剩整块点击：app.js 的 capsule click 必须仍在调 expandCapsule。
+    const clickStart = app.indexOf("ui.capsule.addEventListener('click'");
+    assert.ok(clickStart > 0, 'capsule click handler exists');
+    assert.match(app.slice(clickStart, clickStart + 400), /expandCapsule\(\)/,
+      'clicking cover/text restores the main window');
+    evidence.push({ label: `${engine}/native-capsule/${nativeWidth}x${nativeHeight}`, ...native });
+    await nativeContext.close();
+    console.log(`PASS native capsule ${nativeWidth}x${nativeHeight}: three keys, no expand button, all parts fit`);
+
     fs.writeFileSync(path.join(output, `${engine}-evidence.json`), JSON.stringify(evidence, null, 2));
     console.log(`Capsule: ${evidence.length} layouts passed.`);
   } finally { await browser.close(); }

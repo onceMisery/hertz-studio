@@ -44,6 +44,12 @@ const SYNTAX_SKIP = new Set(['vendor']);
 // why 字段就是原来贴在 ci.yml 里的判断依据：它解释的是「这条失败意味着什么」，
 // 挪到脚本里才不会和 workflow 的 YAML 缩进互相拖累。
 const STEPS = [
+  { script: 'check-native-obs-preview.js', stage: 'behavior',
+    why: '原生 OBS 预览只接受当前文档回执，等待只读钥匙，浏览器保留原有延迟导航。' },
+  { script: 'check-ui-preferences.js', stage: 'behavior',
+    why: '界面偏好只能迁移已知类型与版本，DBX 读取和持久化失败不能丢旧值或误报成功。' },
+  { script: 'check-standalone-package.js', stage: 'behavior',
+    why: 'Windows 独立候选必须拒绝错误发行版、架构、非原生构建和伪造的编译身份。' },
   { script: 'check-desktop-mini-assets.js', stage: 'behavior',
     why: '桌宠编号帧、解码兜底、同名热重载、动画与原生菜单 IPC 必须保持可用。' },
   { script: 'check-desktop-mini-visibility.js', stage: 'behavior',
@@ -64,6 +70,8 @@ const STEPS = [
     why: '标签审阅包必须隐藏原标签、保留完整覆盖并拒绝不完整或无效的审阅答案。' },
   { script: 'check-stage-project.js', stage: 'behavior',
     why: '工程版本、媒体绑定、换曲失效与可逆绝对时间轨必须复用真实预置 owner。' },
+  { script: 'check-stage-media.js', stage: 'behavior',
+    why: '舞台素材上传与 DBX 图片读取必须有界，预设迁移、并发保存与失败回执不能丢修改。' },
   { script: 'check-stage-arrangement.js', stage: 'behavior',
     why: '手动分段检查无副作用，规则复用原 owner，替换、媒体确认、seek 和工程/分享往返必须一致。' },
   { script: 'check-stage-pitch.js', stage: 'behavior',
@@ -182,6 +190,8 @@ const STEPS = [
     why: '调色板纯函数部分（含真实 Chrome 的 --browser 分支留给本地视觉验收）。' },
   { script: 'check-wallpaper-runtime.js', stage: 'behavior',
     why: '壁纸场景运行时的确定性回归：帧率档位与资源池并发、生命周期与 dirty、适配器合同、频谱新鲜度、真实首帧与迟到回调的释放。像素错位在浏览器里才看得见，但接线错在这里只会悄悄停绘。' },
+  { script: 'check-desktop-in-process.js', stage: 'guard',
+    why: '桌面歌词必须留在播放器进程内：再造一个外部 exe 或把命令退回管理管道，只会表现为「打开设置时又弹一个进程」。' },
 ];
 
 // CI 暂不跑、但本地值得随手跑的无浏览器检查。
@@ -201,7 +211,7 @@ const EXTRA = [
 // 活体检查：需要真实浏览器，默认不跑。qf-issues（Hertz 播放条验收）自行起隔离服务。
 // check-lib-row-actions 不在名字里带 browser，但它硬 require playwright，
 // 所以显式列进来——按文件名猜会不会漏。
-const LIVE_EXTRA = ['check-lib-row-actions.js', 'check-qf-issues.js'];
+const LIVE_EXTRA = ['check-lib-row-actions.js', 'check-qf-issues.js', 'check-stage-engine-m0-browser.js'];
 const LIVE_NOTE = '活体检查需要 Playwright（PLAYWRIGHT_MODULE 或 NODE_PATH）。多数检查还需要运行中的服务；'
   + 'Hertz 播放条等检查自行启动隔离服务，需要先构建 hertz-studio（可设 HERTZ_BIN）。';
 

@@ -24,6 +24,10 @@ macro_rules! edition_ui {
     };
 }
 mod assets;
+mod build_info;
+mod database_maintenance;
+mod install_owner;
+mod native_http;
 
 // The UI registry owns JavaScript/CSS; these pages have separate HTTP behavior.
 const INDEX_HTML: &str = edition_ui!("index.html");
@@ -124,19 +128,51 @@ const PLATFORM_ICONS: &[(&str, &[u8])] = &[
     ),
 ];
 
-const HTML: &str = "text/html; charset=utf-8";
-
 #[cfg(feature = "native-window")]
 mod window;
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    if args.describe {
+        println!("{}", build_info::description());
+        return Ok(());
+    }
+    if args.version {
+        println!(
+            "hertz-studio {} ({})",
+            env!("CARGO_PKG_VERSION"),
+            hertz_studio::edition::NAME
+        );
+        return Ok(());
+    }
+    if args.help {
+        print_help();
+        return Ok(());
+    }
+    // Keep the program directory protected through window/service/runtime drop.
+    // Informational commands retain their no-filesystem-side-effect contract.
+    let evaluate_stage = std::env::args().nth(1).as_deref() == Some("--evaluate-stage");
+    let _install_owner = if evaluate_stage {
+        None
+    } else {
+        Some(install_owner::InstallOwner::acquire()?)
+    };
+    let maintenance_args: Vec<String> = std::env::args().skip(1).collect();
+    #[cfg(windows)]
+    if let Some(result) = hertz_desktop::wallpaper_maintenance(&maintenance_args) {
+        println!("{}", result?);
+        return Ok(());
+    }
+    if database_maintenance::requested(&maintenance_args) {
+        println!("{}", database_maintenance::run(&maintenance_args)?);
+        return Ok(());
+    }
     #[cfg(feature = "native-window")]
-    if args.window {
+    if args.window && !evaluate_stage {
         return window::run_window(args);
     }
     #[cfg(not(feature = "native-window"))]
-    if args.window {
+    if args.window && !evaluate_stage {
         // 非 native 构建收到 --window：parse 已置位（字段常驻），这里给出明确
         // 报错而不是静默降级成无窗口服务——用户要的是窗口形态。
         eprintln!(
@@ -165,19 +201,6 @@ async fn run(args: Args) -> anyhow::Result<()> {
     if std::env::args().nth(1).as_deref() == Some("--evaluate-stage") {
         return hertz_studio::ai::evaluation::run_stdio().await;
     }
-    if args.version {
-        println!(
-            "hertz-studio {} ({})",
-            env!("CARGO_PKG_VERSION"),
-            hertz_studio::edition::NAME
-        );
-        return Ok(());
-    }
-    if args.help {
-        print_help();
-        return Ok(());
-    }
-
     // MCP 适配进程（技术路线 §5.3）：必须在数据迁移、bootstrap、数据库、
     // 音频初始化与 HTTP 监听之前分流。它只读显式 DataDir 里的发现与凭据
     // 文件，业务副作用全在已运行的独立服务里；日志走 stderr，stdout 专属
@@ -197,11 +220,37 @@ async fn run(args: Args) -> anyhow::Result<()> {
 
     // 改名前的数据目录叫 mmusic-studio；必须在任何读写路径碰到目录之前搬完，
     // 否则 prepare 会先把新目录建成空库。
-    config::migrate_legacy_data_dir();
+    if args.data_dir.is_none() {
+        config::migrate_legacy_data_dir()?;
+    }
     let data_dir = args.data_dir.unwrap_or_else(config::default_data_dir);
     let data_dir = bootstrap::absolute_data_dir(&data_dir)?;
-    let boot_config = bootstrap::prepare(&data_dir).await?;
-    init_logging(&boot_config.log.level, &boot_config.log.format);
+    let prepared = match bootstrap::prepare(&data_dir).await {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            #[cfg(feature = "native-window")]
+            if args.window
+                && error
+                    .downcast_ref::<hertz_studio::data_owner::Busy>()
+                    .is_some()
+                && hertz_studio::window_lifecycle::focus_existing(&data_dir).await?
+            {
+                if let Some(notify) = &args.notify {
+                    let _ = notify.send(window::WindowStart::Focused);
+                }
+                return Ok(());
+            }
+            return Err(error);
+        }
+    };
+    let data_dir = prepared.data_dir().to_owned();
+    let bind = args
+        .bind
+        .clone()
+        .unwrap_or_else(|| prepared.config.server.bind.clone());
+    let port = args.port.unwrap_or(prepared.config.server.port);
+    native_http::validate_bind(args.window, &bind)?;
+    init_logging(&prepared.config.log.level, &prepared.config.log.format);
 
     // The token is the only thing standing between a local web page and full
     // control of playback, so it is generated once and kept with 0600 perms.
@@ -218,8 +267,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
 
     // `booted` 必须活到 main 结束：它持有音频 actor 的线程句柄。
     let booted = bootstrap::boot(
-        data_dir,
-        boot_config,
+        prepared,
         token.clone(),
         overlay_key,
         desktop_lyrics_key,
@@ -228,7 +276,16 @@ async fn run(args: Args) -> anyhow::Result<()> {
     )
     .await?;
     let state = booted.state.clone();
-    let config = &booted.config;
+    #[cfg(feature = "native-window")]
+    let window_lifecycle = if args.notify.is_some() {
+        Some(hertz_studio::window_lifecycle::WindowLifecycle::install(&state).await)
+    } else {
+        None
+    };
+    let listener = tokio::net::TcpListener::bind((bind.as_str(), port)).await?;
+    let local = listener.local_addr()?;
+    let actual_port = local.port();
+    let native_policy = args.window.then(|| native_http::Policy::new(actual_port));
 
     let app = Router::new()
         .route("/ws", get(ws::ws_handler))
@@ -241,8 +298,9 @@ async fn run(args: Args) -> anyhow::Result<()> {
             "/",
             get({
                 let state = state.clone();
+                let native_policy = native_policy.clone();
                 move |headers: axum::http::HeaderMap, uri: axum::http::Uri| {
-                    index(state.clone(), headers, uri)
+                    index(state.clone(), headers, uri, native_policy.clone())
                 }
             }),
         )
@@ -257,16 +315,22 @@ async fn run(args: Args) -> anyhow::Result<()> {
         )
         // OBS 浮层页：静态壳不走鉴权（没有数据），数据端点 /v1/overlay/lyric
         // 自带 token 校验，页面从 ?token= 读。与 index 同款 no-cache。
-        .route("/overlay", get(|| html_asset(HTML, OVERLAY_HTML)))
+        .route(
+            "/overlay",
+            get({
+                let native_policy = native_policy.clone();
+                move || html_asset(OVERLAY_HTML, native_policy.clone())
+            }),
+        )
         // 带内容指纹的 JS/CSS 升级成长缓存；其余（含 /v1 接口）不受影响。
         .layer(axum::middleware::from_fn(asset_cache))
+        // Outermost: reject authority/origin before credentials, body extractors
+        // or side effects, including WebSocket ticket redemption.
+        .layer(axum::middleware::from_fn_with_state(
+            native_policy,
+            native_http::guard,
+        ))
         .with_state(state.clone());
-
-    let bind = args.bind.unwrap_or_else(|| config.server.bind.clone());
-    let port = args.port.unwrap_or(config.server.port);
-    let listener = tokio::net::TcpListener::bind((bind.as_str(), port)).await?;
-    let local = listener.local_addr()?;
-    let actual_port = local.port();
     // 受限门面的开放条件（§5.5）：锁在本进程 + 实际绑定回环。0.0.0.0、
     // 具体网卡与 IPv6 一律不开放——不发布发现，也不挂认证后的受限路由。
     state.set_ai_external_ready(local.ip().is_loopback() && booted.ai_lock.is_some());
@@ -320,6 +384,12 @@ async fn run(args: Args) -> anyhow::Result<()> {
             bind_ip: shown,
             port: actual_port,
             entry_url: url.clone(),
+            overlay_key: state.overlay_key.clone(),
+            importer: hertz_studio::scan::FileImporter::new(&state),
+            lifecycle: window_lifecycle
+                .as_ref()
+                .expect("native window lifecycle installed")
+                .clone(),
         });
     }
     tracing::info!("listening on {bind}:{actual_port}");
@@ -342,6 +412,8 @@ async fn run(args: Args) -> anyhow::Result<()> {
     }
 
     let shutdown_state = state.clone();
+    #[cfg(feature = "native-window")]
+    let shutdown_window = window_lifecycle.clone();
     let mut exiting = state.exiting_signal();
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
@@ -358,7 +430,18 @@ async fn run(args: Args) -> anyhow::Result<()> {
                 }
             }
             tracing::info!("shutting down");
+            // 桌面歌词/设置窗口与播放器同一个进程：服务退出前先收宿主，
+            // 保证配置落盘、窗口与托盘一并销毁，不留悬空的 GUI 线程。
+            if let Err(error) = hertz_studio::desktop_host::shutdown() {
+                tracing::warn!("desktop host shutdown: {error:#}");
+            }
             shutdown_state.shutdown().await;
+            // Placement IO is less critical than stopping room/audio. Finish it
+            // while the native loop, database and service runtime remain alive.
+            #[cfg(feature = "native-window")]
+            if let Some(window) = shutdown_window {
+                window.finish_placement().await;
+            }
             // 只摘自己发布的那份：未持锁的第二个进程（共用 DataDir、另一端口）
             // 退出时不能把持锁进程的对接入口删掉。
             if ai_discovery_published {
@@ -514,7 +597,12 @@ async fn asset_cache(
 const TOKEN_PLACEHOLDER: &str = "__VMUSIC_TOKEN_VALUE__";
 
 fn render_index(html: &str, token: &str) -> String {
-    version_asset_urls(&html.replace(TOKEN_PLACEHOLDER, token))
+    let literal = serde_json::to_string(token)
+        .expect("a string is JSON serializable")
+        .replace('<', "\\u003c")
+        .replace('\u{2028}', "\\u2028")
+        .replace('\u{2029}', "\\u2029");
+    version_asset_urls(&html.replace(&format!("\"{TOKEN_PLACEHOLDER}\""), &literal))
 }
 
 /// 会话 cookie 名。`/` 认它，**接口层不认**（接口仍然要 Bearer）。
@@ -646,28 +734,22 @@ async fn index(
     state: Arc<AppState>,
     headers: axum::http::HeaderMap,
     uri: axum::http::Uri,
+    native_policy: Option<native_http::Policy>,
 ) -> axum::response::Response {
     if !credential_ok(&state.token, &headers, uri.query(), |id| {
         state.redeem_ticket(id)
     }) {
-        return (
+        return native_http::html_response(
+            native_policy.as_ref(),
             axum::http::StatusCode::UNAUTHORIZED,
-            [
-                (axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8"),
-                (axum::http::header::CACHE_CONTROL, "no-cache"),
-            ],
-            NO_CREDENTIAL_HTML,
-        )
-            .into_response();
+            NO_CREDENTIAL_HTML.to_owned(),
+        );
     }
-    let mut response = (
-        [
-            (axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8"),
-            (axum::http::header::CACHE_CONTROL, "no-cache"),
-        ],
+    let mut response = native_http::html_response(
+        native_policy.as_ref(),
+        axum::http::StatusCode::OK,
         render_index(INDEX_HTML, &state.token),
-    )
-        .into_response();
+    );
     if let Ok(value) = axum::http::HeaderValue::from_str(&session_cookie(&state.token)) {
         response
             .headers_mut()
@@ -689,15 +771,15 @@ async fn index(
 /// 唯一的例外是 `asset_cache`：index.html 渲染时会给引用挂上 `?v=<内容指纹>`，
 /// 那种 URL 已经随内容变化，中间件把响应升级成 immutable。裸路径（没有指纹）
 /// 仍走这里的 no-cache。
-async fn html_asset(mime: &'static str, html: &'static str) -> axum::response::Response {
-    (
-        [
-            (axum::http::header::CONTENT_TYPE, mime),
-            (axum::http::header::CACHE_CONTROL, "no-cache"),
-        ],
-        html,
+async fn html_asset(
+    html: &'static str,
+    native_policy: Option<native_http::Policy>,
+) -> axum::response::Response {
+    native_http::html_response(
+        native_policy.as_ref(),
+        axum::http::StatusCode::OK,
+        html.to_owned(),
     )
-        .into_response()
 }
 
 fn accepts_gzip(headers: &axum::http::HeaderMap) -> bool {
@@ -943,6 +1025,7 @@ fn init_logging_stderr(level: &str) {
 
 struct Args {
     help: bool,
+    describe: bool,
     open: bool,
     // --window 原型开关（常驻：非 native 构建在 parse 即给出明确报错）。
     window: bool,
@@ -961,6 +1044,7 @@ impl Args {
     fn parse() -> Self {
         let mut args = Self {
             help: false,
+            describe: false,
             open: false,
             window: false,
             #[cfg(feature = "native-window")]
@@ -977,6 +1061,7 @@ impl Args {
             match arg.as_str() {
                 "-h" | "--help" => args.help = true,
                 "--version" => args.version = true,
+                "--describe" => args.describe = true,
                 "--open" => args.open = true,
                 "--window" => args.window = true,
                 "--mcp-stdio" => args.mcp_stdio = true,
@@ -1000,6 +1085,14 @@ fn print_help() {
          --port PORT      Port, 0 for a random free port (Standard 7635, Full 7634)\n  \
          --data-dir DIR   Where the database, cache and token live\n  \
          --open           Open the UI in the default browser\n  \
+         --window         Open the native main window (requires native-window build)\n  \
+         --describe       Print build/capability JSON without starting the service\n  \
+         --list-upgrade-backups  List verified database snapshots (explicit existing --data-dir)\n  \
+         --recover-upgrade  Recover an interrupted database operation (offline)\n  \
+         --restore-upgrade-backup ID --accept-data-loss  Restore history after saving current state\n  \
+         --wallpaper-list-upgrade-backups --desktop-root DIR  List wallpaper recovery points\n  \
+         --wallpaper-recover-upgrade --desktop-root DIR  Recover interrupted wallpaper upgrade\n  \
+         --wallpaper-restore-upgrade-backup ID --accept-data-loss --desktop-root DIR  Restore wallpaper history\n  \
          --evaluate-stage --origin URL --model NAME  Evaluate one local synthetic case from stdin\n  \
          -h, --help       Show this help\n\n\
          Environment: VMUSIC_BIND, VMUSIC_PORT, VMUSIC_BACKEND, VMUSIC_LOG, VMUSIC_DATA_DIR"
@@ -1182,6 +1275,23 @@ mod tests {
             !rendered.contains("window.tok-123"),
             "the variable name was rewritten"
         );
+    }
+
+    #[test]
+    fn native_http_token_literal_cannot_close_the_owned_script() {
+        let token = "\"\\\n</script><script>attack()</script>\u{2028}\u{2029}";
+        let rendered = render_index(
+            "<script>window.__VMUSIC_TOKEN__ = \"__VMUSIC_TOKEN_VALUE__\";</script>",
+            token,
+        );
+        assert_eq!(rendered.matches("</script>").count(), 1);
+        assert!(!rendered.contains("<script>attack()"));
+        let literal = rendered
+            .strip_prefix("<script>window.__VMUSIC_TOKEN__ = ")
+            .unwrap()
+            .strip_suffix(";</script>")
+            .unwrap();
+        assert_eq!(serde_json::from_str::<String>(literal).unwrap(), token);
     }
 
     /// 回环绑定不该打扰用户——否则每次本机启动都弹一行「警告」，噪音会把真正

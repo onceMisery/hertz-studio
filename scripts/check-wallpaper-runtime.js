@@ -10,24 +10,29 @@ const url = 'https://' + 'a'.repeat(32) + '.' + 'b'.repeat(32) + '.wallpaper.inv
 
 function fixture(options = {}) {
   let nextId = 1, now = 0, selections = 0;
-  const rafs = new Map(), timers = new Map(), events = [], elements = [], frames = [], selected = [];
+  const rafs = new Map(), timers = new Map(), timerDeadlines = new Map(), events = [], elements = [], frames = [], selected = [];
   const host = { style: {}, appendChild() {} };
   function element(kind) {
     const listeners = new Map();
     let resolveDecode;
     const el = {
-      kind, style: {}, paused: true, loads: 0, removed: false, src: '',
+      kind, style: {}, paused: true, loads: 0, removed: false, src: '', frameCallbacks: new Map(), playCalls: 0,
       getContext: () => ({ setTransform() {}, clearRect() {}, beginPath() {}, arc() {}, stroke() {}, fill() {}, createRadialGradient: () => ({ addColorStop() {} }) }),
-      addEventListener(name, callback) { listeners.set(name, callback); },
-      removeEventListener(name) { listeners.delete(name); },
+      addEventListener(name, callback) { if (!listeners.has(name)) listeners.set(name, new Set()); listeners.get(name).add(callback); },
+      removeEventListener(name, callback) { listeners.get(name)?.delete(callback); },
       setAttribute() {}, removeAttribute(name) { if (name === 'src') this.src = ''; },
       remove() { this.removed = true; },
-      play() { this.paused = false; return Promise.resolve(); },
+      play() { this.playCalls++; this.paused = false; return Promise.resolve(); },
       pause() { this.paused = true; }, load() { this.loads++; },
-      requestVideoFrameCallback: options.noVideoFrames ? undefined : function(callback) { this.frameReady = callback; return 1; },
-      cancelVideoFrameCallback() { this.frameCancelled = true; },
+      requestVideoFrameCallback: options.noVideoFrames ? undefined : function(callback) {
+        const id = nextId++;
+        this.frameReady = (...args) => { this.frameCallbacks.delete(id); callback(...args); };
+        this.frameCallbacks.set(id, this.frameReady); return id;
+      },
+      cancelVideoFrameCallback(id) { this.frameCancelled = true; this.frameCallbacks.delete(id); },
       decode() { return new Promise(resolve => { resolveDecode = resolve; }); },
-      finishDecode() { resolveDecode(); }, emit(name) { listeners.get(name)?.(); },
+      finishDecode() { resolveDecode(); }, emit(name) { [...(listeners.get(name) || [])].forEach(callback => callback()); },
+      listenerCount(name) { return listeners.get(name)?.size || 0; },
     };
     elements.push(el);
     return el;
@@ -49,15 +54,17 @@ function fixture(options = {}) {
     innerWidth: 960, innerHeight: 540, performance: { now: () => now }, addEventListener() {},
     requestAnimationFrame: callback => { const id = nextId++; rafs.set(id, callback); return id; },
     cancelAnimationFrame: id => rafs.delete(id),
-    setTimeout: callback => { const id = nextId++; timers.set(id, callback); return id; },
-    clearTimeout: id => timers.delete(id), setInterval: () => nextId++, clearInterval() {},
+    setTimeout: (callback, delay) => { const id = nextId++; timers.set(id, callback); timerDeadlines.set(id, now + delay); return id; },
+    clearTimeout: id => { timers.delete(id); timerDeadlines.delete(id); }, setInterval: () => nextId++, clearInterval() {},
   };
   vm.runInNewContext(source, context);
   return {
-    api: window.hertzWallpaper, events, frames, elements, timers, selected, host,
+    api: window.hertzWallpaper, events, frames, elements, timers, timerDeadlines, selected, host,
     get selections() { return selections; },
+    get now() { return now; },
     tick(stamp) { now = stamp; const callbacks = [...rafs.values()]; rafs.clear(); callbacks.forEach(callback => callback(now)); },
-    runTimers(stamp) { now = stamp; const callbacks = [...timers.values()]; timers.clear(); callbacks.forEach(callback => callback()); },
+    setNow(stamp) { now = stamp; },
+    runTimers(stamp) { now = stamp; const callbacks = [...timers.values()]; timers.clear(); timerDeadlines.clear(); callbacks.forEach(callback => callback()); },
   };
 }
 
@@ -140,9 +147,41 @@ async function main() {
 
   const boundImage = fixture({ binding });
   boundImage.api.applyMedia({ kind: 'image', url });
+  boundImage.api.start(30);
   assert.equal(receipts(boundImage).length, 1);
   boundImage.elements.at(-1).finishDecode(); await flush();
   assert.deepEqual(receipts(boundImage)[1], { ...binding, event: 'firstFrame', frameKind: 'image' });
+  const imageReveals = () => receipts(boundImage).filter(item => item.event === 'revealed');
+  assert.equal(boundImage.api.reveal(), true);
+  boundImage.tick(16);
+  boundImage.api.stop();
+  assert.equal(boundImage.api.reveal(), false, 'a stopped image cannot acknowledge a release');
+  boundImage.tick(32);
+  assert.equal(imageReveals().length, 0, 'pause between reveal frames cancels the old image receipt');
+  boundImage.api.start(30);
+  assert.equal(boundImage.api.reveal(), true);
+  boundImage.api.reveal();
+  boundImage.tick(48);
+  boundImage.api.stop(); boundImage.api.stop(); boundImage.api.start(30);
+  assert.equal(boundImage.api.reveal(), true);
+  boundImage.tick(64);
+  assert.equal(imageReveals().length, 0, 'an earlier resume cannot acknowledge the next release');
+  boundImage.tick(80);
+  assert.deepEqual(imageReveals(), [{ ...binding, event: 'revealed' }]);
+  boundImage.api.reveal(); boundImage.tick(96); boundImage.tick(112);
+  assert.equal(imageReveals().length, 1, 'repeated reveal is idempotent within one running period');
+  boundImage.api.stop(); boundImage.api.start(30); boundImage.api.reveal();
+  boundImage.tick(128); boundImage.tick(144);
+  assert.equal(imageReveals().length, 2, 'a retained image can acknowledge a later resume');
+  boundImage.api.stop(); boundImage.api.start(30); boundImage.api.reveal();
+  boundImage.tick(160);
+  boundImage.api.applyMedia({ kind: 'image', url });
+  boundImage.elements.at(-1).finishDecode(); await flush();
+  boundImage.api.reveal(); boundImage.tick(176);
+  assert.equal(imageReveals().length, 2, 'a replaced image cannot acknowledge the current source');
+  boundImage.tick(192);
+  assert.equal(imageReveals().length, 3, 'only the replacement image produces its reveal receipt');
+  assert.equal(receipts(boundImage).filter(item => item.event === 'firstFrame').length, 1, 'resume keeps one native first-frame identity');
   boundImage.api.unmount();
 
   const boundVideo = fixture({ binding });
@@ -268,6 +307,284 @@ async function main() {
   }
   assert.equal(fixture().api.applyMedia({kind:'image',url,resumePositionMs:5}),false);
 
+  function groupVideo({positionMs = 0, durationMs = 10000, motion = 1, ready = true} = {}) {
+    const f = fixture({binding});
+    f.api.applyConfig({motion});
+    assert.equal(f.api.applyMedia({kind:'video',url,groupClock:true}),true);
+    const el = f.elements.at(-1), seeks = [];
+    let position = positionMs / 1000;
+    Object.defineProperty(el,'currentTime',{get:()=>position,set:value=>{position=value;seeks.push(value * 1000);el.seeking=true;}});
+    el.duration = durationMs / 1000;
+    el.setPosition = value => { position = value / 1000; };
+    el.finishSeek = () => { el.seeking = false; el.emit('seeked'); };
+    el.present = (value = el.currentTime * 1000, presentationTime = f.now) => el.frameReady(f.now,{mediaTime:value / 1000,presentationTime});
+    f.api.start(30);
+    if (ready) el.present();
+    return {f,el,seeks};
+  }
+  const clockRequest = (timeMs, pageDispatchMs = 0, token = 1, running = true) => ({token,timeMs,pageDispatchMs,running});
+  const revealedReceipts = f => receipts(f).filter(item=>item.event==='mediaClockRevealed');
+  assert.equal(fixture().api.applyMedia({kind:'video',url,groupClock:true}),false,'a native controller identity is required');
+  assert.equal(fixture({binding}).api.applyMedia({kind:'image',url,groupClock:true}),false);
+  assert.equal(fixture({binding}).api.applyMedia({kind:'video',url,groupClock:'true'}),false);
+
+  const held = groupVideo({ready:false});
+  assert.equal(held.el.paused,false,'hidden decoding must run until a real frame arrives');
+  held.el.emit('loadeddata');
+  assert.equal(held.f.api.debug().media.state,'loading');
+  assert.equal(held.f.api.revealMediaClock(clockRequest(0)),false);
+  held.el.present();
+  assert.equal(held.el.paused,true,'the first real group frame enters hold');
+  assert.equal(held.f.api.debug().media.clock.held,true);
+  assert.equal(held.f.api.debug().media.clock.firstFrameHeld,true);
+  assert.equal(held.f.host.style.visibility,'hidden');
+  held.f.api.start();held.f.api.applyConfig({motion:1});
+  assert.equal(held.el.paused,true,'ordinary start/config cannot release the barrier');
+  assert.equal(held.f.api.reveal(),false,'ordinary reveal cannot bypass the group clock');
+  assert.equal(held.f.api.syncMediaClock(clockRequest(0)),false,'periodic sync cannot release held video');
+  assert.equal(held.f.api.revealMediaClock(clockRequest(0)),true);
+  assert.equal(held.el.paused,false);
+  assert.equal(held.f.host.style.visibility,'visible');
+  assert.equal(held.f.api.revealMediaClock(clockRequest(0)),true,'duplicate release is idempotent before its receipt');
+  held.f.tick(16);held.f.tick(32);
+  assert.equal(revealedReceipts(held.f).length,1);
+  assert.deepEqual(revealedReceipts(held.f)[0],{...binding,event:'mediaClockRevealed',clockToken:1});
+  assert.equal(receipts(held.f).some(item=>item.event==='revealed'),false,'group releases emit only the token-bound reveal receipt');
+  assert.equal(held.f.api.debug().media.clock.releases,1);
+
+  for(const [positionMs,targetMs] of [[1100,1000],[900,1000],[9950,50],[50,9950]]) {
+    const g=groupVideo({positionMs});
+    assert.equal(g.f.api.revealMediaClock(clockRequest(targetMs)),true);
+    assert.equal(g.seeks.length,0,'exactly 100ms circular deviation must not seek');
+    assert.equal(g.f.host.style.visibility,'visible');
+    g.f.api.unmount();
+  }
+  const circular=groupVideo({positionMs:9960});
+  circular.f.api.revealMediaClock(clockRequest(40));
+  assert.equal(circular.seeks.length,0,'loop-end and loop-start may be only 80ms apart');
+  assert.equal(circular.f.api.debug().media.clock.driftMs,-80);
+
+  const aligned=groupVideo();
+  assert.equal(aligned.f.api.revealMediaClock(clockRequest(1250)),true);
+  assert.deepEqual(aligned.seeks,[1250]);
+  assert.equal(aligned.f.api.reveal(),false);
+  aligned.el.emit('loadeddata');aligned.el.emit('seeked');
+  assert.equal(aligned.f.host.style.visibility,'hidden','data and spurious seek events cannot reveal');
+  aligned.el.present(0,-1);
+  assert.equal(aligned.f.host.style.visibility,'hidden','an old pre-seek frame is not proof');
+  aligned.el.finishSeek();
+  assert.equal(aligned.f.host.style.visibility,'hidden','seek completion still needs a real aligned frame');
+  aligned.el.present(1250);
+  assert.equal(aligned.f.host.style.visibility,'visible');
+  assert.equal(aligned.el.listenerCount('seeked'),0);
+  assert.equal(aligned.el.frameCallbacks.size,0);
+  assert.equal(aligned.f.timers.size,0,'completed release clears its alignment deadline');
+  const earlyFrame=groupVideo();
+  earlyFrame.f.api.revealMediaClock(clockRequest(1500,0,1,false));
+  earlyFrame.el.present(1500);
+  assert.equal(earlyFrame.f.host.style.visibility,'hidden','a paused seek frame may precede seeked, but cannot replace it');
+  earlyFrame.el.finishSeek();
+  assert.equal(earlyFrame.f.host.style.visibility,'visible');
+  assert.equal(earlyFrame.el.paused,true);
+  earlyFrame.f.api.start();assert.equal(earlyFrame.el.paused,true,'ordinary start respects a stopped group clock');
+
+  const delivery=groupVideo();
+  delivery.f.setNow(450);
+  delivery.f.api.revealMediaClock(clockRequest(1000));
+  assert.deepEqual(delivery.seeks,[1450],'running group phase includes bounded page delivery age');
+  delivery.el.finishSeek();delivery.el.present(1450);
+  assert.equal(delivery.f.api.debug().media.clock.deliveryAgeMs,450);
+  const stoppedDelivery=groupVideo();
+  stoppedDelivery.f.setNow(450);
+  stoppedDelivery.f.api.revealMediaClock(clockRequest(1000,0,1,false));
+  assert.deepEqual(stoppedDelivery.seeks,[1000],'a stopped group phase does not include delivery age');
+  stoppedDelivery.el.finishSeek();stoppedDelivery.el.present();
+  assert.equal(stoppedDelivery.el.paused,true);
+
+  const sampled=groupVideo();
+  sampled.f.api.revealMediaClock(clockRequest(0,0,5));
+  sampled.f.setNow(1999);sampled.el.setPosition(0);
+  assert.equal(sampled.f.api.syncMediaClock(clockRequest(2000,1999,5)),false);
+  assert.equal(sampled.seeks.length,0,'sync frequency is capped at one check per 2000ms');
+  sampled.f.setNow(2000);sampled.el.setPosition(2100);
+  assert.equal(sampled.f.api.syncMediaClock(clockRequest(2000,2000,5)),true);
+  assert.equal(sampled.seeks.length,0,'periodic exact-100ms deviation also does not seek');
+  sampled.f.setNow(4000);sampled.el.setPosition(4100.01);
+  assert.equal(sampled.f.api.syncMediaClock(clockRequest(4000,4000,5)),true);
+  assert.deepEqual(sampled.seeks,[4000],'same token accepts subsequent sync and strict >100ms corrects');
+  assert.equal(sampled.f.host.style.visibility,'visible','periodic correction does not restart the hidden release barrier');
+  sampled.el.finishSeek();sampled.el.present();
+  sampled.f.setNow(6000);sampled.el.setPosition(9990);
+  assert.equal(sampled.f.api.syncMediaClock(clockRequest(20,6000,5)),true);
+  assert.equal(sampled.seeks.length,1,'periodic checks use circular distance at the loop boundary');
+  assert.equal(sampled.f.api.revealMediaClock(clockRequest(20,6000,4)),false,'a lower token cannot replace a current clock');
+  sampled.f.setNow(6100);
+  assert.equal(sampled.f.api.revealMediaClock(clockRequest(20,5999,5)),false,'queued older dispatches for the same token are stale');
+  for(const invalid of [null,{...clockRequest(0),token:0},{...clockRequest(0),token:1.5},
+    {...clockRequest(0),token:Number.MAX_SAFE_INTEGER+1},{...clockRequest(0),timeMs:-1},
+    {...clockRequest(0),timeMs:NaN},{...clockRequest(0),timeMs:.5},
+    {...clockRequest(0),pageDispatchMs:-1},{...clockRequest(0),pageDispatchMs:Infinity},
+    {...clockRequest(0),running:1}]) assert.equal(sampled.f.api.revealMediaClock(invalid),false);
+  assert.equal(sampled.f.api.debug().media.clock.token,5,'invalid requests do not consume newer tokens');
+  assert.equal(sampled.f.api.revealMediaClock(clockRequest(0,5599,6)),false,'delivery age >500ms is rejected');
+  assert.equal(sampled.f.api.revealMediaClock(clockRequest(0,6601,6)),false,'an implausibly future PageClock is rejected');
+  sampled.f.setNow(8000);sampled.el.setPosition(7000);
+  assert.equal(sampled.f.api.syncMediaClock(clockRequest(8000,8000,5,false)),true);
+  assert.equal(sampled.f.api.debug().media.clock.syncs,4);
+  assert.equal(sampled.f.api.debug().media.clock.lastSyncAtMs,8000);
+  assert.equal(sampled.el.paused,true);
+  assert.equal(sampled.el.currentTime,7,'running:false freezes the existing frame even if native content phase advances');
+  assert.equal(sampled.seeks.length,1);
+
+  const frozen=groupVideo({motion:0});
+  frozen.f.api.revealMediaClock(clockRequest(1200));
+  frozen.el.finishSeek();frozen.el.present();
+  assert.equal(frozen.el.paused,true,'release never overrides motion=0');
+  frozen.f.setNow(2000);
+  assert.equal(frozen.f.api.syncMediaClock(clockRequest(5000,2000)),true);
+  assert.deepEqual(frozen.seeks,[1200],'periodic samples cannot move a zero-motion video');
+
+  const resumedGroup=groupVideo();
+  resumedGroup.f.api.revealMediaClock(clockRequest(0));
+  resumedGroup.f.tick(16);resumedGroup.f.tick(32);
+  assert.equal(revealedReceipts(resumedGroup.f).length,1);
+  resumedGroup.f.api.stop();
+  assert.equal(resumedGroup.el.paused,true);
+  assert.equal(resumedGroup.f.host.style.visibility,'visible','policy stop retains the last frozen frame');
+  resumedGroup.f.api.start();
+  assert.equal(resumedGroup.f.host.style.visibility,'hidden','resume hides stale content before group sampling');
+  assert.equal(resumedGroup.el.paused,true);
+  assert.equal(resumedGroup.f.api.reveal(),false);
+  assert.equal(resumedGroup.f.api.revealMediaClock(clockRequest(0)),false,'queued pre-stop dispatch cannot release the resumed page');
+  resumedGroup.f.setNow(1000);
+  resumedGroup.f.api.revealMediaClock(clockRequest(1000,1000,2));
+  resumedGroup.el.finishSeek();resumedGroup.el.present();
+  resumedGroup.f.tick(1016);resumedGroup.f.tick(1032);
+  assert.equal(revealedReceipts(resumedGroup.f).length,2,'group resume rearms the existing identity reveal receipt');
+  assert.equal(revealedReceipts(resumedGroup.f).at(-1).clockToken,2);
+
+  const interrupted=groupVideo();
+  interrupted.f.api.revealMediaClock(clockRequest(1500));
+  const interruptedFrame=interrupted.el.frameReady, interruptedDeadline=[...interrupted.f.timers.values()][0];
+  interrupted.f.api.stop(7);
+  assert.equal(interrupted.el.listenerCount('seeked'),0);
+  assert.equal(interrupted.el.frameCallbacks.size,0);
+  interrupted.el.finishSeek();interruptedFrame(0,{mediaTime:1.5});interruptedDeadline();
+  assert.equal(interrupted.f.host.style.visibility,'hidden','stop fences late seek, frame, and timeout callbacks');
+  interrupted.f.runTimers(200);
+  assert.equal(receipts(interrupted.f).filter(item=>item.event==='mediaPaused').length,1,'alignment cleanup preserves ordinary pause proof');
+  assert.equal(interrupted.f.timers.size,0);
+  assert.equal(interrupted.f.api.debug().media.state,'ready');
+
+  for(const {motion,running,positionMs,stoppedPositionMs=positionMs} of [
+    {motion:0,running:false,positionMs:1500},
+    {motion:1,running:false,positionMs:0},
+    {motion:0,running:true,positionMs:0,stoppedPositionMs:9999.9995},
+  ]) {
+    const lostProof=groupVideo({motion,positionMs:positionMs===0?500:0});
+    lostProof.f.api.revealMediaClock(clockRequest(positionMs,0,1,running));
+    const cancelledFrame=lostProof.el.frameReady, cancelledDeadline=[...lostProof.f.timers.values()][0];
+    lostProof.f.api.stop();lostProof.el.setPosition(stoppedPositionMs);lostProof.el.finishSeek();
+    cancelledFrame(0,{mediaTime:positionMs/1000,presentationTime:0});
+    assert.equal(lostProof.f.api.debug().session.revealed,false);
+    lostProof.f.api.start();
+    assert.equal(lostProof.f.api.revealMediaClock(clockRequest(positionMs,0,2,running)),true);
+    assert.equal(lostProof.seeks.length,2,'release renews a lost paused-frame proof even inside drift tolerance');
+    const renewedPosition=lostProof.seeks[1];
+    assert.ok(renewedPosition>=0&&renewedPosition<10000);
+    assert.ok(Math.abs(renewedPosition-stoppedPositionMs)>0&&Math.abs(renewedPosition-stoppedPositionMs)<=.001000001,'proof seek uses at most one microsecond inside video bounds');
+    assert.equal(lostProof.el.paused,true,'proof renewal cannot run a frozen video');
+    assert.equal(lostProof.f.api.debug().media.clock.corrections,1,'proof renewal is separate from drift correction count');
+    cancelledDeadline();cancelledFrame(0,{mediaTime:positionMs/1000,presentationTime:0});
+    assert.equal(lostProof.f.host.style.visibility,'hidden','cancelled release callbacks cannot satisfy the new token');
+    lostProof.el.finishSeek();lostProof.el.present(positionMs);
+    assert.equal(lostProof.f.host.style.visibility,'visible');
+    assert.equal(lostProof.el.paused,true);
+    lostProof.f.tick(16);lostProof.f.tick(32);
+    assert.deepEqual(revealedReceipts(lostProof.f),[{...binding,event:'mediaClockRevealed',clockToken:2}]);
+    assert.equal(lostProof.f.timers.size,0);assert.equal(lostProof.el.frameCallbacks.size,0);
+    lostProof.f.runTimers(3001);
+    assert.equal(lostProof.f.api.debug().media.state,'ready','renewed proof prevents the original three-second resume timeout');
+    lostProof.f.api.unmount();
+  }
+  const sparseFrames=groupVideo({motion:0});
+  sparseFrames.f.setNow(10);
+  sparseFrames.f.api.revealMediaClock(clockRequest(1250,10,1,false));
+  sparseFrames.el.present(1000,9);
+  assert.equal(sparseFrames.f.host.style.visibility,'hidden','old presentation timestamps still cannot prove a new seek');
+  sparseFrames.el.present(1000,10);
+  assert.equal(sparseFrames.f.host.style.visibility,'hidden','fresh sparse-frame evidence still requires seeked');
+  sparseFrames.el.finishSeek();
+  assert.equal(sparseFrames.f.host.style.visibility,'visible','2fps frame PTS may precede desired phase by 250ms');
+  assert.equal(sparseFrames.el.currentTime,1.25);
+  assert.equal(sparseFrames.el.paused,true);sparseFrames.f.api.unmount();
+
+  const queuedReveal=groupVideo();
+  queuedReveal.f.api.revealMediaClock(clockRequest(0));
+  queuedReveal.f.api.stop();queuedReveal.f.tick(16);queuedReveal.f.tick(32);
+  assert.equal(revealedReceipts(queuedReveal.f).length,0,'a queued reveal receipt cannot escape after stop');
+  const replacedGroup=groupVideo();
+  replacedGroup.f.api.revealMediaClock(clockRequest(1500));
+  const staleGroupFrame=replacedGroup.el.frameReady, staleGroupDeadline=[...replacedGroup.f.timers.values()][0];
+  replacedGroup.f.api.applyMedia({kind:'video',url,groupClock:true});
+  assert.equal(replacedGroup.el.frameCallbacks.size,0);
+  staleGroupFrame(0,{mediaTime:1.5});staleGroupDeadline();replacedGroup.el.finishSeek();
+  assert.equal(replacedGroup.f.api.debug().media.state,'loading');
+  assert.equal(replacedGroup.f.api.debug().media.clock.token,0,'old callbacks cannot mutate a replacement record');
+  assert.equal(replacedGroup.f.host.style.visibility,'hidden');
+  replacedGroup.f.api.unmount();
+  assert.equal(replacedGroup.f.timers.size,0);
+
+  const slowAlign=groupVideo();
+  slowAlign.f.api.revealMediaClock(clockRequest(1000));
+  const originalDeadline=[...slowAlign.f.timerDeadlines.values()][0];
+  slowAlign.f.setNow(2500);
+  slowAlign.f.api.revealMediaClock(clockRequest(3500,2500));
+  assert.equal([...slowAlign.f.timerDeadlines.values()][0],originalDeadline,'same-token release retries cannot extend the alignment deadline');
+  slowAlign.f.setNow(2800);
+  slowAlign.f.api.revealMediaClock(clockRequest(3800,2800,2));
+  assert.equal([...slowAlign.f.timerDeadlines.values()][0],3000,'superseding alignment preserves the pending deadline too');
+  slowAlign.el.finishSeek();slowAlign.el.emit('loadeddata');
+  slowAlign.f.runTimers(3000);
+  assert.equal(slowAlign.f.api.debug().media.error,'media_clock_alignment_timeout');
+  assert.equal(slowAlign.el.paused,true);
+  assert.equal(slowAlign.el.removed,true);
+  assert.equal(slowAlign.el.frameCallbacks.size,0);
+  assert.equal(slowAlign.el.listenerCount('seeked'),0);
+  assert.equal(slowAlign.f.timers.size,0);
+  const lateAlignedFrame=groupVideo();
+  lateAlignedFrame.f.api.revealMediaClock(clockRequest(1500,0,1,false));
+  lateAlignedFrame.el.finishSeek();
+  lateAlignedFrame.f.setNow(3001);lateAlignedFrame.el.present();
+  assert.equal(lateAlignedFrame.f.api.debug().media.error,'media_clock_alignment_timeout','a delayed frame cannot beat a due timeout merely by winning task-queue order');
+  const advancingGroup=groupVideo();
+  advancingGroup.f.api.revealMediaClock(clockRequest(1000));
+  advancingGroup.f.setNow(150);advancingGroup.el.finishSeek();advancingGroup.el.present();
+  assert.deepEqual(advancingGroup.seeks,[1000,1150],'release rechecks phase after an expensive seek');
+  assert.equal(advancingGroup.f.host.style.visibility,'hidden');
+  advancingGroup.el.finishSeek();advancingGroup.el.present();
+  assert.equal(advancingGroup.f.host.style.visibility,'visible');
+  const rejectedGroupPlay=groupVideo();
+  rejectedGroupPlay.el.play=()=>Promise.reject(new Error('blocked'));
+  rejectedGroupPlay.f.api.revealMediaClock(clockRequest(1000));
+  rejectedGroupPlay.el.finishSeek();await flush();
+  assert.equal(rejectedGroupPlay.f.api.debug().media.error,'media_play_rejected');
+  assert.equal(rejectedGroupPlay.el.frameCallbacks.size,0);
+  assert.equal(rejectedGroupPlay.f.timers.size,0);
+  const interruptedGroupPlay=groupVideo();
+  let rejectGroupPlay;
+  interruptedGroupPlay.el.play=()=>new Promise((_,reject)=>{rejectGroupPlay=reject;});
+  interruptedGroupPlay.f.api.revealMediaClock(clockRequest(1000));
+  interruptedGroupPlay.el.finishSeek();interruptedGroupPlay.f.api.stop();
+  rejectGroupPlay(new Error('stopped'));await flush();
+  assert.equal(interruptedGroupPlay.f.api.debug().media.state,'ready','intentional stop supersedes rejected in-flight alignment play');
+  const tokenFencedReveal=groupVideo();
+  tokenFencedReveal.f.api.revealMediaClock(clockRequest(0));
+  tokenFencedReveal.f.api.revealMediaClock(clockRequest(0,0,2));
+  tokenFencedReveal.f.tick(16);tokenFencedReveal.f.tick(32);
+  assert.deepEqual(revealedReceipts(tokenFencedReveal.f),[{...binding,event:'mediaClockRevealed',clockToken:2}],'a superseded release cannot acknowledge the later native ticket');
+  for(const group of [held,circular,aligned,earlyFrame,delivery,stoppedDelivery,sampled,frozen,resumedGroup,interrupted,queuedReveal,slowAlign,lateAlignedFrame,advancingGroup,rejectedGroupPlay,interruptedGroupPlay,tokenFencedReveal]) group.f.api.unmount();
+
   const followed = fixture();
   followed.api.applyConfig({ source: 'follow', scene: 'coast', params: { speed: .5 } });
   followed.api.start(); await flush();
@@ -339,6 +656,28 @@ async function main() {
   audio.api.applyConfig({audioInput:{...systemInput,device:{id:'endpoint-a',kind:'fixed'}}});
   assert.equal(audio.api.applyAudio({...systemFrame(6,1,.2),sourceKey:'fixed:endpoint-a'}),true,'fixed device identity is independent of JSON property order');
   audio.api.unmount();
-  console.log('wallpaper runtime checks passed: 15/30/60 fps integration, resume, quality, source isolation, spectrum freshness, gain/attack/release, native identity, actual first frames, failure release and late callbacks');
+  {
+  const frozen = fixture({ binding });
+  frozen.api.applyConfig({ source: 'fixed', scene: 'coast', audioInput: { kind: 'hertz', gain: 1, attackMs: 0, releaseMs: 0 } });
+  frozen.api.applyFeed({ ...hertzFeed, playing: true });
+  frozen.api.start(60); await flush(); frozen.tick(16); frozen.tick(32);
+  const frozenFrame = frozen.frames.at(-1);
+  assert.ok(frozenFrame.level > 0);
+  frozen.api.stop();
+  frozen.setNow(285000);
+  frozen.api.applyFeed({ ...hertzFeed, playing: false, positionMs: 99999, spectrum: { bands: Array(64).fill(0), energy: 0, ageMs: 0 } });
+  assert.equal(frozen.api.requestCapture({ ...binding, token: 'c'.repeat(32), width: 96, height: 54 }), true);
+  frozen.tick(285016);
+  const captureFrame = frozen.frames.at(-1);
+  for (const field of ['now', 'time', 'position', 'sceneTime', 'playing', 'motionActive', 'level']) {
+    assert.equal(captureFrame[field], frozenFrame[field], 'paused capture preserves last submitted ' + field);
+  }
+  assert.deepEqual(Array.from(captureFrame.spectrum), Array.from(frozenFrame.spectrum));
+  assert.equal(captureFrame.dynamicDt, 0); assert.equal(captureFrame.dt, 0);
+  const frozenCount = frozen.frames.length; frozen.tick(285032);
+  assert.equal(frozen.frames.length, frozenCount, 'capture does not restart the paused scheduler');
+  frozen.api.unmount();
+  }
+  console.log('wallpaper runtime checks passed: scheduling, source/audio isolation, native identity, real first frames, group hold/release, circular 100ms drift, 2s sampling, pause/resume, stale clocks, bounded alignment, and callback cleanup');
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

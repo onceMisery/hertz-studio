@@ -3,6 +3,7 @@
 //! cache lease alive; weak entries only coalesce simultaneous users of a track.
 use super::contract::{RoomError, RoomResult};
 use crate::{online, state::AppState};
+use std::time::{Duration, Instant};
 use std::{
     collections::HashMap,
     io::{Read, Seek, SeekFrom},
@@ -13,7 +14,8 @@ use std::{
     },
 };
 use tokio::sync::{Mutex, OnceCell};
-use vmusic_audio::render::PreparedMedia;
+use vmusic_audio::render::{NativePcmBudget, PreparedMedia};
+use vmusic_lan::protocol::FormatMode;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -83,26 +85,57 @@ pub(super) fn error(error: crate::error::ApiError) -> RoomError {
     RoomError::new(error.code, message)
 }
 impl OnlineSources {
+    #[cfg(test)]
     pub async fn prepare(
         &self,
         state: &Arc<AppState>,
         song: &OnlineSong,
         position_ms: u64,
     ) -> RoomResult<PreparedMedia> {
-        self.prepare_with(state, song, position_ms, |quality| async move {
-            let ctx = online::Ctx::new(state.db.clone());
-            online::stream(
-                &ctx,
-                &song.source,
-                &song.id,
-                Some(&song.track_ref),
-                Some(quality),
-            )
-            .await
-            .map_err(error)
-        })
+        self.prepare_configured(
+            state,
+            song,
+            position_ms,
+            FormatMode::Fixed,
+            NativePcmBudget::default(),
+            Instant::now() + Duration::from_secs(20),
+        )
         .await
     }
+
+    pub async fn prepare_configured(
+        &self,
+        state: &Arc<AppState>,
+        song: &OnlineSong,
+        position_ms: u64,
+        format_mode: FormatMode,
+        native_budget: NativePcmBudget,
+        deadline: Instant,
+    ) -> RoomResult<PreparedMedia> {
+        self.prepare_with_configured(
+            state,
+            song,
+            position_ms,
+            format_mode,
+            native_budget,
+            deadline,
+            |quality| async move {
+                let ctx = online::Ctx::new(state.db.clone());
+                online::stream(
+                    &ctx,
+                    &song.source,
+                    &song.id,
+                    Some(&song.track_ref),
+                    Some(quality),
+                )
+                .await
+                .map_err(error)
+            },
+        )
+        .await
+    }
+
+    #[cfg(test)]
     async fn prepare_with<F, Fut>(
         &self,
         state: &Arc<AppState>,
@@ -114,8 +147,73 @@ impl OnlineSources {
         F: FnOnce(u32) -> Fut,
         Fut: std::future::Future<Output = RoomResult<online::StreamInfo>>,
     {
+        self.prepare_with_configured(
+            state,
+            song,
+            position_ms,
+            FormatMode::Fixed,
+            NativePcmBudget::default(),
+            Instant::now() + Duration::from_secs(20),
+            resolve,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn prepare_with_configured<F, Fut>(
+        &self,
+        state: &Arc<AppState>,
+        song: &OnlineSong,
+        position_ms: u64,
+        format_mode: FormatMode,
+        native_budget: NativePcmBudget,
+        deadline: Instant,
+        resolve: F,
+    ) -> RoomResult<PreparedMedia>
+    where
+        F: FnOnce(u32) -> Fut,
+        Fut: std::future::Future<Output = RoomResult<online::StreamInfo>>,
+    {
+        let cleanup = if format_mode == FormatMode::Native {
+            Duration::from_millis(500)
+        } else {
+            Duration::ZERO
+        };
+        tokio::time::timeout_at(
+            tokio::time::Instant::from_std(deadline + cleanup),
+            self.prepare_inner(
+                state,
+                song,
+                position_ms,
+                format_mode,
+                native_budget,
+                deadline,
+                resolve,
+            ),
+        )
+        .await
+        .map_err(|_| preparation_timeout(format_mode))?
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn prepare_inner<F, Fut>(
+        &self,
+        state: &Arc<AppState>,
+        song: &OnlineSong,
+        position_ms: u64,
+        format_mode: FormatMode,
+        native_budget: NativePcmBudget,
+        deadline: Instant,
+        resolve: F,
+    ) -> RoomResult<PreparedMedia>
+    where
+        F: FnOnce(u32) -> Fut,
+        Fut: std::future::Future<Output = RoomResult<online::StreamInfo>>,
+    {
+        check_deadline(deadline, format_mode)?;
         let track = song.virtual_id();
         let quality = state.online_quality_for(&song.source, &track).await;
+        check_deadline(deadline, format_mode)?;
         let key = online::cache::cache_key(&song.source, &song.id, quality.as_str());
         let session = {
             let mut sessions = self.0.lock().await;
@@ -138,15 +236,22 @@ impl OnlineSources {
                     .find_online_cached(&song.source, &song.id, quality)
                     .await
                 {
+                    check_deadline(deadline, format_mode)?;
                     return Ok(Ready {
                         cached: Some(path),
                         download: None,
                     });
                 }
-                let info = resolve(quality.bps()).await?;
+                let info = tokio::time::timeout_at(
+                    tokio::time::Instant::from_std(deadline),
+                    resolve(quality.bps()),
+                )
+                .await
+                .map_err(|_| preparation_timeout(format_mode))??;
                 state
                     .store_online_rg(&track, info.rg_gain_db, info.rg_peak)
                     .await;
+                check_deadline(deadline, format_mode)?;
                 let dl = online::progressive::start(
                     &song.source,
                     state.online_cache_dir(),
@@ -164,7 +269,16 @@ impl OnlineSources {
             })
             .await?;
         let stop = Arc::new(AtomicBool::new(false));
-        let mut cancel = CancelProbe(Some(stop.clone()));
+        let mut cancel = PreparationGuard::new(stop.clone(), deadline);
+        check_deadline(deadline, format_mode)?;
+        let eof_check: Arc<dyn Fn() -> bool + Send + Sync> = if let Some(download) = &ready.download
+        {
+            let view = download.view();
+            // Published only after successful rename and cache registration.
+            Arc::new(move || view.completed_path().is_some())
+        } else {
+            Arc::new(|| true)
+        };
         let (source, ext) = if let Some(path) = &ready.cached {
             let file = online::progressive::FileMediaSource::open(path)
                 .map_err(|_| RoomError::invalid("在线缓存不可读，请清理缓存后重试"))?;
@@ -179,6 +293,7 @@ impl OnlineSources {
                 .await
                 .map_err(|_| RoomError::new("room_online_download", "在线歌曲下载中断"))?
             {
+                check_deadline(deadline, format_mode)?;
             }
             if view
                 .needs_full_download()
@@ -186,6 +301,7 @@ impl OnlineSources {
                 .map_err(|_| RoomError::new("room_online_download", "无法读取在线歌曲头部"))?
             {
                 while !view.is_finished() {
+                    check_deadline(deadline, format_mode)?;
                     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                     view.room_prebuffer_tick(song.duration_ms)
                         .await
@@ -204,26 +320,198 @@ impl OnlineSources {
             _session: session,
             stop: stop.clone(),
         };
-        let media = tokio::task::spawn_blocking(move || {
-            let mut media =
-                PreparedMedia::open_interruptible(Box::new(source), ext.as_deref(), stop)?;
-            if position_ms > 0 {
+        let input = cancel.hold_input(source);
+        check_deadline(deadline, format_mode)?;
+        let worker_stop = stop.clone();
+        let worker = tokio::task::spawn_blocking(move || {
+            let source = input.lock().unwrap().take().ok_or_else(|| {
+                vmusic_core::AudioError::DecodeFailed("native_source_cancelled".into())
+            })?;
+            let mut media = if format_mode == FormatMode::Native {
+                PreparedMedia::open_native_interruptible(
+                    Box::new(source),
+                    ext.as_deref(),
+                    worker_stop,
+                    native_budget.clone(),
+                    deadline,
+                )?
+            } else {
+                PreparedMedia::open_interruptible(Box::new(source), ext.as_deref(), worker_stop)?
+            };
+            if format_mode == FormatMode::Native {
+                media.set_native_eof_check(eof_check);
+                if position_ms > 0 {
+                    media.seek_native(position_ms, native_budget, deadline)?;
+                } else {
+                    media.validate_native(native_budget, deadline)?;
+                }
+            } else if position_ms > 0 {
                 media.seek(position_ms)?;
             }
             Ok::<_, vmusic_core::AudioError>(media)
-        })
-        .await
-        .map_err(|_| RoomError::new("room_online_decode", "在线歌曲准备失败"))?
-        .map_err(|_| RoomError::new("room_online_decode", "在线歌曲格式无法解码"))?;
-        cancel.0.take();
+        });
+        cancel.arm_worker(&worker);
+        let media = await_prepared(worker, &stop, deadline, format_mode).await?;
+        check_deadline(deadline, format_mode)?;
+        cancel.disarm();
         Ok(media)
     }
 }
-struct CancelProbe(Option<Arc<AtomicBool>>);
-impl Drop for CancelProbe {
+pub(super) struct PreparationGuard {
+    stop: Option<Arc<AtomicBool>>,
+    watchdog: tokio::task::JoinHandle<()>,
+    worker_abort: Option<tokio::task::AbortHandle>,
+    input_cleanup: Option<Box<dyn FnOnce() + Send>>,
+}
+impl PreparationGuard {
+    pub(super) fn new(stop: Arc<AtomicBool>, deadline: Instant) -> Self {
+        let worker_stop = stop.clone();
+        let watchdog = tokio::spawn(async move {
+            tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
+            worker_stop.store(true, Ordering::Release);
+        });
+        Self {
+            stop: Some(stop),
+            watchdog,
+            worker_abort: None,
+            input_cleanup: None,
+        }
+    }
+    pub(super) fn arm_worker<T>(&mut self, worker: &tokio::task::JoinHandle<T>) {
+        self.worker_abort = Some(worker.abort_handle());
+    }
+    fn hold_input<T: Send + 'static>(&mut self, input: T) -> Arc<std::sync::Mutex<Option<T>>> {
+        let slot = Arc::new(std::sync::Mutex::new(Some(input)));
+        let cleanup = slot.clone();
+        self.input_cleanup = Some(Box::new(move || {
+            let input = cleanup.lock().unwrap().take();
+            drop(input);
+        }));
+        slot
+    }
+    pub(super) fn disarm(&mut self) {
+        self.stop.take();
+        self.watchdog.abort();
+        self.worker_abort.take();
+        self.input_cleanup.take();
+    }
+}
+impl Drop for PreparationGuard {
     fn drop(&mut self) {
-        if let Some(stop) = &self.0 {
-            stop.store(true, Ordering::Relaxed);
+        if let Some(stop) = &self.stop {
+            stop.store(true, Ordering::Release);
+        }
+        self.watchdog.abort();
+        if let Some(worker) = &self.worker_abort {
+            worker.abort();
+        }
+        if let Some(cleanup) = self.input_cleanup.take() {
+            cleanup();
+        }
+    }
+}
+
+pub(super) fn check_deadline(deadline: Instant, mode: FormatMode) -> RoomResult<()> {
+    if Instant::now() >= deadline {
+        Err(preparation_timeout(mode))
+    } else {
+        Ok(())
+    }
+}
+pub(super) fn preparation_timeout(mode: FormatMode) -> RoomError {
+    if mode == FormatMode::Native {
+        RoomError::new(
+            "native_source_preparation_timeout",
+            "原生歌曲准备超时，操作未提交，请重试",
+        )
+    } else {
+        RoomError::new(
+            "room_preparation_timeout",
+            "歌曲准备超时，操作未提交，请重试",
+        )
+    }
+}
+
+pub(super) fn native_decode_error(error: vmusic_core::AudioError) -> RoomError {
+    // Never expose decoder I/O details, source paths or signed upstream URLs.
+    let detail = match error {
+        vmusic_core::AudioError::DecodeFailed(detail)
+        | vmusic_core::AudioError::UnsupportedFormat(detail) => detail,
+        _ => return RoomError::new("native_source_decode_failed", "此歌曲无法通过原生解码验证"),
+    };
+    let reason = detail.split([':', ' ']).next().unwrap_or("");
+    for (code, message) in [
+        (
+            "native_source_rate_unsupported",
+            "此歌曲的实际采样率不支持原生传输",
+        ),
+        (
+            "native_source_layout_unsupported",
+            "原生传输仅支持明确的单声道或双声道布局",
+        ),
+        (
+            "native_source_nonfinite_samples",
+            "歌曲解码数据包含无效样本",
+        ),
+        (
+            "native_source_timeline_unverified",
+            "歌曲解码帧与容器时间线无法可靠对应",
+        ),
+        ("native_source_empty", "歌曲没有可播放的音频帧"),
+        ("native_source_incomplete", "歌曲下载不完整或已中断"),
+        ("native_source_unreadable", "歌曲文件不可读，请检查本地资源"),
+        (
+            "native_source_preparation_timeout",
+            "原生歌曲准备超时，操作未提交，请重试",
+        ),
+        ("native_source_cancelled", "歌曲准备已取消"),
+        (
+            "native_source_decoded_block_too_large",
+            "歌曲解码块超过原生资源限额",
+        ),
+        (
+            "native_pcm_budget_exceeded",
+            "原生歌曲缓冲额度已满，请稍后重试",
+        ),
+        ("native_pcm_budget_mismatch", "歌曲缓冲与当前房间不匹配"),
+    ] {
+        if reason == code {
+            return RoomError::new(code, message);
+        }
+    }
+    RoomError::new("native_source_decode_failed", "此歌曲无法通过原生解码验证")
+}
+
+pub(super) async fn await_prepared(
+    mut worker: tokio::task::JoinHandle<Result<PreparedMedia, vmusic_core::AudioError>>,
+    stop: &Arc<AtomicBool>,
+    deadline: Instant,
+    mode: FormatMode,
+) -> RoomResult<PreparedMedia> {
+    match tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), &mut worker).await {
+        Ok(result) if Instant::now() >= deadline => {
+            stop.store(true, Ordering::Release);
+            drop(result);
+            Err(preparation_timeout(mode))
+        }
+        Ok(result) => result
+            .map_err(|_| RoomError::new("room_online_decode", "歌曲准备失败"))?
+            .map_err(|error| {
+                if mode == FormatMode::Native {
+                    native_decode_error(error)
+                } else {
+                    RoomError::new("room_online_decode", "在线歌曲格式无法解码")
+                }
+            }),
+        Err(_) => {
+            stop.store(true, Ordering::Release);
+            // Tokio can cancel a blocking job that has not begun yet. A job
+            // already reading observes the same stop flag at its input wait.
+            worker.abort();
+            // HTTP source waits poll this stop at most every 250 ms. Keep the
+            // handle until cleanup completes rather than only dropping a future.
+            let _ = tokio::time::timeout(Duration::from_millis(500), worker).await;
+            Err(preparation_timeout(mode))
         }
     }
 }
@@ -236,7 +524,7 @@ impl LeasedSource {
     fn result<T>(&self, result: std::io::Result<T>) -> std::io::Result<T> {
         if self.stop.load(Ordering::Relaxed) {
             Err(std::io::Error::new(
-                std::io::ErrorKind::ConnectionAborted,
+                std::io::ErrorKind::Interrupted,
                 "source cancelled",
             ))
         } else {
@@ -291,7 +579,10 @@ mod tests {
         }
     }
     fn wave() -> Vec<u8> {
-        let size = 8000u32 * 2 * 120;
+        wave_at(8_000)
+    }
+    fn wave_at(rate: u32) -> Vec<u8> {
+        let size = rate * 2 * 120;
         let mut bytes = Vec::new();
         bytes.extend_from_slice(b"RIFF");
         bytes.extend_from_slice(&(36 + size).to_le_bytes());
@@ -299,8 +590,8 @@ mod tests {
         bytes.extend_from_slice(&16u32.to_le_bytes());
         bytes.extend_from_slice(&1u16.to_le_bytes());
         bytes.extend_from_slice(&1u16.to_le_bytes());
-        bytes.extend_from_slice(&8000u32.to_le_bytes());
-        bytes.extend_from_slice(&16000u32.to_le_bytes());
+        bytes.extend_from_slice(&rate.to_le_bytes());
+        bytes.extend_from_slice(&(rate * 2).to_le_bytes());
         bytes.extend_from_slice(&2u16.to_le_bytes());
         bytes.extend_from_slice(&16u16.to_le_bytes());
         bytes.extend_from_slice(b"data");
@@ -319,19 +610,33 @@ mod tests {
         Arc<AtomicUsize>,
         tokio::task::JoinHandle<()>,
     ) {
+        server_with_wave(first_bytes, wave()).await
+    }
+
+    async fn server_with_wave(
+        first_bytes: usize,
+        bytes: Vec<u8>,
+    ) -> (
+        String,
+        Arc<tokio::sync::Semaphore>,
+        Arc<AtomicUsize>,
+        tokio::task::JoinHandle<()>,
+    ) {
         let gate = Arc::new(tokio::sync::Semaphore::new(0));
         let hits = Arc::new(AtomicUsize::new(0));
+        let bytes = Arc::new(bytes);
         let app = axum::Router::new().route(
             "/song",
             axum::routing::get({
                 let gate = gate.clone();
                 let hits = hits.clone();
+                let bytes = bytes.clone();
                 move || {
                     let gate = gate.clone();
                     let hits = hits.clone();
+                    let bytes = bytes.clone();
                     async move {
                         hits.fetch_add(1, Ordering::SeqCst);
-                        let bytes = wave();
                         let total = bytes.len();
                         let head = axum::body::Bytes::copy_from_slice(&bytes[..first_bytes]);
                         let tail = axum::body::Bytes::copy_from_slice(&bytes[first_bytes..]);
@@ -595,6 +900,250 @@ mod tests {
             );
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
+        server.abort();
+        drop(state);
+        audio.join().unwrap();
+        tokio::fs::remove_dir_all(dir).await.unwrap();
+    }
+
+    #[test]
+    fn native_decode_errors_expose_reason_without_private_decoder_details() {
+        let error = native_decode_error(vmusic_core::AudioError::DecodeFailed("native_source_timeline_unverified: https://signed.invalid/song?secret=token D:/private/song".into()));
+        assert_eq!(error.code, "native_source_timeline_unverified");
+        assert!(!error.message.contains("signed.invalid"));
+        assert!(!error.message.contains("private"));
+        let error = native_decode_error(vmusic_core::AudioError::DecodeFailed(
+            "https://signed.invalid/song?secret=token".into(),
+        ));
+        assert_eq!(error.code, "native_source_decode_failed");
+        assert!(!error.message.contains("secret"));
+        let error = native_decode_error(vmusic_core::AudioError::DecodeFailed(
+            "read failed at https://signed.invalid/native_source_empty?secret=token".into(),
+        ));
+        assert_eq!(error.code, "native_source_decode_failed");
+    }
+
+    #[test]
+    fn cancelled_preparation_removes_a_queued_blocking_job_and_releases_its_input() {
+        struct InputLease(Arc<AtomicBool>);
+        impl Drop for InputLease {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .max_blocking_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let (release, wait) = std::sync::mpsc::channel();
+            let (entered, ready) = tokio::sync::oneshot::channel();
+            let blocker = tokio::task::spawn_blocking(move || {
+                let _ = entered.send(());
+                wait.recv().unwrap();
+            });
+            ready.await.unwrap();
+            let dropped = Arc::new(AtomicBool::new(false));
+            let called = Arc::new(AtomicBool::new(false));
+            let input = InputLease(dropped.clone());
+            let stop = Arc::new(AtomicBool::new(false));
+            let mut guard =
+                PreparationGuard::new(stop.clone(), Instant::now() + Duration::from_secs(2));
+            let input = guard.hold_input(input);
+            let worker_called = called.clone();
+            let worker = tokio::task::spawn_blocking(move || {
+                let _input = input.lock().unwrap().take();
+                worker_called.store(true, Ordering::Release);
+                Err::<PreparedMedia, _>(vmusic_core::AudioError::Other(
+                    "unused queued fixture".into(),
+                ))
+            });
+            guard.arm_worker(&worker);
+            drop(guard);
+            assert!(
+                dropped.load(Ordering::Acquire),
+                "queued input must release before the pool runs it"
+            );
+            let ended = tokio::time::timeout(Duration::from_millis(500), worker).await;
+            release.send(()).unwrap();
+            blocker.await.unwrap();
+            // Aborted Tokio blocking tasks finish their task bookkeeping when
+            // the pool services them; the input has already been released.
+            if let Ok(result) = ended {
+                assert!(result.unwrap_err().is_cancelled());
+            }
+            assert!(stop.load(Ordering::Acquire));
+            assert!(dropped.load(Ordering::Acquire));
+            assert!(!called.load(Ordering::Acquire));
+        });
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn native_online_qualification_keeps_one_download_and_cleans_a_stopped_seek_worker() {
+        let (state, audio, dir) = state().await;
+        let (url, gate, hits, server) = server_with_wave(384 * 1024, wave_at(48_000)).await;
+        let sources = OnlineSources::default();
+        let mut song = song();
+        // Keep the Standard-available provider and exercise absent online
+        // duration metadata. The downloader retains its requested cache tier
+        // when it cannot measure bitrate; native qualification still reads the
+        // WAV's real 48 kHz format and exact 120-second timeline.
+        song.duration_ms = None;
+        let budget = NativePcmBudget::default();
+        let media = sources
+            .prepare_with_configured(
+                &state,
+                &song,
+                0,
+                FormatMode::Native,
+                budget.clone(),
+                Instant::now() + Duration::from_secs(3),
+                |_| async { Ok(info(url)) },
+            )
+            .await
+            .unwrap();
+        assert_eq!(media.decoded_format().unwrap().sample_rate, 48_000);
+        assert_eq!(media.declared_info().sample_rate, Some(48_000));
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        assert_eq!(state.cache_index.stats().files, 0);
+        let initial_usage = budget.usage();
+        let started = Instant::now();
+        let error = sources
+            .prepare_with_configured(
+                &state,
+                &song,
+                90_000,
+                FormatMode::Native,
+                budget.clone(),
+                Instant::now() + Duration::from_millis(100),
+                |_| async { panic!("native seek reuses the same download") },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "native_source_preparation_timeout");
+        assert!(started.elapsed() < Duration::from_millis(750));
+        assert_eq!(budget.usage(), initial_usage);
+        let cleanup = Instant::now() + Duration::from_secs(1);
+        loop {
+            let remaining: usize = sources
+                .0
+                .lock()
+                .await
+                .values()
+                .map(Weak::strong_count)
+                .sum();
+            if remaining == 1 {
+                break;
+            }
+            assert!(
+                Instant::now() < cleanup,
+                "cancelled blocking seek still owns its cache session"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        assert_eq!(state.cache_index.clear(&[], None).await.unwrap(), 0);
+        gate.add_permits(1);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while state.cache_index.stats().files == 0 {
+            assert!(Instant::now() < deadline);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let fresh = OnlineSources::default();
+        let tail = fresh
+            .prepare_with_configured(
+                &state,
+                &song,
+                119_990,
+                FormatMode::Native,
+                budget.clone(),
+                Instant::now() + Duration::from_secs(3),
+                |_| async { panic!("successful native cache needs no new upstream resolution") },
+            )
+            .await
+            .unwrap();
+        let mut renderer = vmusic_audio::RenderCore::new_native(
+            vmusic_audio::RenderFormat {
+                sample_rate: 48_000,
+                channels: 2,
+            },
+            budget.clone(),
+        )
+        .unwrap();
+        renderer.load_prepared(tail).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !renderer.decoded_eof() {
+            assert!(Instant::now() < deadline);
+            assert!(!renderer.take_decode_failure());
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(renderer.buffered_frames(), 480);
+        drop(renderer);
+        drop(media);
+        assert_eq!(budget.usage(), Default::default());
+        assert!(state.cache_index.clear(&[], None).await.unwrap() > 0);
+        server.abort();
+        drop(state);
+        audio.join().unwrap();
+        tokio::fs::remove_dir_all(dir).await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn native_online_rejected_rate_drops_lease_and_does_not_renew_total_deadline() {
+        let (state, audio, dir) = state().await;
+        let (url, _gate, hits, server) = server(96 * 1024).await;
+        let sources = OnlineSources::default();
+        let song = song();
+        let budget = NativePcmBudget::default();
+        let error = sources
+            .prepare_with_configured(
+                &state,
+                &song,
+                0,
+                FormatMode::Native,
+                budget.clone(),
+                Instant::now() + Duration::from_secs(3),
+                |_| async { Ok(info(url)) },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error.code.as_str(),
+            "native_source_rate_unsupported" | "native_source_timeline_unverified"
+        ));
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        assert_eq!(budget.usage(), Default::default());
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while sources
+            .0
+            .lock()
+            .await
+            .values()
+            .any(|entry| entry.strong_count() != 0)
+        {
+            assert!(Instant::now() < deadline);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let started = Instant::now();
+        let error = sources
+            .prepare_with_configured(
+                &state,
+                &song,
+                0,
+                FormatMode::Native,
+                budget,
+                Instant::now() + Duration::from_millis(100),
+                |_| async {
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    panic!("resolution must stop at the original deadline")
+                },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "native_source_preparation_timeout");
+        assert!(started.elapsed() < Duration::from_millis(500));
         server.abort();
         drop(state);
         audio.join().unwrap();

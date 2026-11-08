@@ -716,7 +716,7 @@ body.reduce-motion .stage::before { transition: none; transform: none; }
   background: var(--hover);
 }
 .sc-badge svg { width: 18px; height: 18px; }
-.sc-head-text { flex: 1; min-width: 0; padding-right: 36px; }
+.sc-head-text { flex: 1; min-width: 0; padding-right: 48px; }
 .sc-title {
   margin: 0;
   font-size: 18px;
@@ -734,26 +734,30 @@ body.reduce-motion .stage::before { transition: none; transform: none; }
   position: absolute;
   top: 24px;
   right: 20px;
-  width: 32px;
-  height: 32px;
+  width: 40px;
+  height: 40px;
   display: grid;
   place-items: center;
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: 10px;
   background: transparent;
   color: var(--muted);
   font-size: 15px;
   line-height: 1;
   cursor: pointer;
+  padding: 0;
+  touch-action: manipulation;
   transition: color var(--dur-1) var(--ease), border-color var(--dur-1) var(--ease),
-    background var(--dur-1) var(--ease);
+    background var(--dur-1) var(--ease), transform var(--dur-1) var(--ease);
 }
-.sc-close:hover { color: var(--text); border-color: var(--line-strong); background: var(--hover); }
+.sc-close:hover:not(:disabled) { color: var(--text); border-color: var(--line-strong); background: var(--hover); }
+.sc-close:active:not(:disabled) { transform: scale(.96); }
+.sc-close:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 
 /* 参数搜索：命中后把用户带到那颗控件上，而不是在结果里再画一份控件。
    参考实现靠选择器反查旧 DOM 再搬进新分组，我们已由 SCHEMA 生成控件，
    搜索与结果值读同一张表就够了。 */
-.sc-close svg { width: 16px; height: 16px; }
+.sc-close svg { width: 19px; height: 19px; pointer-events: none; }
 .sc-search-row { flex: none; padding: 16px 20px; }
 .sc-search {
   width: 100%;
@@ -963,7 +967,7 @@ body.reduce-motion .stage-ctl, body.reduce-motion .sc-cell { transition: none; }
   transition: color var(--dur-1) var(--ease), border-color var(--dur-1) var(--ease),
     background var(--dur-1) var(--ease);
 }
-.sc-pill:hover { color: var(--text); border-color: var(--line-strong); }
+.sc-pill:hover:not(:disabled) { color: var(--text); border-color: var(--line-strong); }
 .sc-pill span:first-child {
   min-width: 0;
   overflow: hidden;
@@ -973,24 +977,44 @@ body.reduce-motion .stage-ctl, body.reduce-motion .sc-cell { transition: none; }
 .sc-pill .dot {
   position: relative;
   flex: none;
-  width: 30px;
-  height: 18px;
+  width: 40px;
+  height: 24px;
+  border: 1px solid var(--switch-off-border);
   border-radius: 999px;
-  background: var(--line-strong);
+  background: var(--switch-off-track);
   box-shadow: none;
-  transition: background var(--dur-1) var(--ease);
+  pointer-events: none;
 }
-.sc-pill .dot::after { content: ""; position: absolute; top: 3px; left: 3px; width: 12px; height: 12px; border-radius: 50%; background: var(--muted); transition: transform var(--dur-1) var(--ease), background-color var(--dur-1) var(--ease); }
+.sc-pill .dot::before,
+.sc-pill .dot::after { content: ""; position: absolute; transition: transform 180ms cubic-bezier(.22, 1, .36, 1); }
+.sc-pill .dot::before { top: 2px; left: 2px; width: 18px; height: 18px; border-radius: 50%; background: var(--switch-off-thumb); }
+.sc-pill .dot::after {
+  top: 6px;
+  left: 6px;
+  width: 10px;
+  height: 10px;
+  background: var(--switch-off-icon);
+  -webkit-mask: var(--switch-icon-off) center/contain no-repeat;
+  mask: var(--switch-icon-off) center/contain no-repeat;
+}
 .sc-pill.on {
   color: var(--text);
   border-color: var(--line-strong);
   background: var(--hover);
 }
 .sc-pill.on .dot {
-  background: var(--accent);
+  border-color: var(--switch-on-track);
+  background: var(--switch-on-track);
   box-shadow: none;
 }
-.sc-pill.on .dot::after { background: var(--accent-ink); transform: translateX(12px); }
+.sc-pill.on .dot::before { background: var(--switch-on-thumb); transform: translateX(16px); }
+.sc-pill.on .dot::after {
+  background: var(--switch-on-icon);
+  -webkit-mask-image: var(--switch-icon-on);
+  mask-image: var(--switch-icon-on);
+  transform: translateX(16px);
+}
+.sc-pill:disabled { opacity: .45; cursor: default; }
 .sc-pill:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 /* 分段选择：一体框内的互斥段，当前段以底色和内描边标记。
@@ -1006,9 +1030,13 @@ body.reduce-motion .stage-ctl, body.reduce-motion .sc-cell { transition: none; }
   background: var(--field-bg);
 }
 .sc-seg-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
   flex: 1;
   min-width: 0;
-  min-height: 36px;
+  min-height: 40px;
   padding: 7px 8px;
   border-radius: 5px;
   font: inherit;
@@ -1020,22 +1048,28 @@ body.reduce-motion .stage-ctl, body.reduce-motion .sc-cell { transition: none; }
   line-height: 1.4;
   white-space: normal;
   overflow-wrap: anywhere;
-  transition: color var(--dur-1) var(--ease), background var(--dur-1) var(--ease);
+  touch-action: manipulation;
+  transition: color var(--dur-1) var(--ease), background var(--dur-1) var(--ease),
+    transform var(--dur-1) var(--ease);
 }
 .sc-seg-btn + .sc-seg-btn { border-left: 0; }
-.sc-seg-btn:hover { color: var(--text); background: var(--hover); }
+.sc-seg-btn:hover:not(:disabled) { color: var(--text); background: var(--hover); }
+.sc-seg-btn:active:not(:disabled) { transform: scale(.98); }
+.sc-seg-btn:disabled { opacity: .45; cursor: default; }
 .sc-seg-btn.is-on {
   color: var(--text);
   background: var(--hover);
   box-shadow: inset 0 0 0 1px var(--line-strong);
 }
 .sc-seg-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.sc-choice-icon { width: 18px; height: 18px; flex: none; pointer-events: none; }
 #sc-stage-stagePreset { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 
 @media (prefers-reduced-motion: reduce) {
-  .sc-pill .dot, .sc-pill .dot::after { transition: none; }
+  .sc-pill .dot, .sc-pill .dot::before, .sc-pill .dot::after { transition: none; }
 }
 body.reduce-motion .sc-pill .dot,
+body.reduce-motion .sc-pill .dot::before,
 body.reduce-motion .sc-pill .dot::after { transition: none; }
 
 /* 取色器：色盘 + 「自动」按钮 */
@@ -1081,7 +1115,7 @@ body.reduce-motion .sc-pill .dot::after { transition: none; }
   border-color: transparent;
 }
 
-/* 底部只是「重置 + 关闭」两个动作，不需要一整条厚底栏 */
+/* 底部保留撤销、恢复默认和完成；图标与关闭键共用相同线条尺度。 */
 .sc-foot {
   display: flex;
   align-items: center;
@@ -1096,8 +1130,9 @@ body.reduce-motion .sc-pill .dot::after { transition: none; }
 .sc-foot .sc-undo {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  min-height: 38px;
+  justify-content: center;
+  gap: 7px;
+  min-height: 40px;
   padding: 8px 10px;
   font-size: 12px;
   color: var(--muted);
@@ -1105,16 +1140,19 @@ body.reduce-motion .sc-pill .dot::after { transition: none; }
   border: 1px solid var(--line);
   border-radius: 8px;
   cursor: pointer;
-  transition: color var(--dur-1) var(--ease), border-color var(--dur-1) var(--ease);
+  white-space: nowrap;
+  touch-action: manipulation;
+  transition: color var(--dur-1) var(--ease), border-color var(--dur-1) var(--ease),
+    background var(--dur-1) var(--ease), transform var(--dur-1) var(--ease);
 }
 .sc-foot .sc-reset svg,
-.sc-foot .sc-undo svg { width: 13px; height: 13px; fill: currentColor; }
-.sc-foot .sc-reset:hover,
-.sc-foot .sc-undo:hover { color: var(--text); border-color: var(--line-strong); }
+.sc-foot .sc-undo svg { width: 17px; height: 17px; flex: none; fill: none; pointer-events: none; }
+.sc-foot .sc-reset:hover:not(:disabled),
+.sc-foot .sc-undo:hover:not(:disabled) { color: var(--text); border-color: var(--line-strong); background: var(--hover); }
 .sc-foot .sc-undo[disabled] { opacity: .45; cursor: default; }
 .sc-foot .sc-undo[disabled]:hover { color: var(--muted); border-color: var(--line); }
 .sc-foot .sc-ok {
-  min-height: 38px;
+  min-height: 40px;
   padding: 8px 18px;
   font-size: 12px;
   font-weight: 600;
@@ -1123,9 +1161,20 @@ body.reduce-motion .sc-pill .dot::after { transition: none; }
   border: 1px solid transparent;
   border-radius: 8px;
   cursor: pointer;
-  transition: filter var(--dur-1) var(--ease);
+  touch-action: manipulation;
+  transition: filter var(--dur-1) var(--ease), transform var(--dur-1) var(--ease);
 }
-.sc-foot .sc-ok:hover { filter: brightness(1.08); }
+.sc-foot .sc-ok:hover:not(:disabled) { filter: brightness(1.08); }
+.sc-foot button:active:not(:disabled) { transform: scale(.98); }
+.sc-foot button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+body.reduce-motion :is(.sc-close, .sc-seg-btn, .sc-foot button) { transition: none; }
+@media (prefers-reduced-motion: reduce) {
+  :is(.sc-close, .sc-seg-btn, .sc-foot button) { transition: none; }
+}
+@media (pointer: coarse) {
+  .sc-close { width: 44px; height: 44px; }
+  .sc-seg-btn, .sc-foot :is(.sc-reset, .sc-undo, .sc-ok) { min-height: 44px; }
+}
 
 /* 分组说明行：来源专属的引导与「切回沉浸声场」提示要真能被读到 */
 .sc-note {
@@ -1139,7 +1188,7 @@ body.reduce-motion .sc-pill .dot::after { transition: none; }
 #sc-group-fluid[hidden], #sc-fluid-details[hidden], #sc-fluid-retry[hidden] { display: none; }
 #sc-group-fluid { gap: 10px; }
 #sc-group-fluid .sc-cell { background: transparent; border-color: transparent; padding-inline: 0; }
-#sc-group-fluid .sc-pill { min-height: 42px; border-radius: 8px; }
+#sc-group-fluid .sc-pill { min-height: 44px; border-radius: 8px; }
 #sc-group-fluid .sc-pill .dot { box-shadow: none; }
 #sc-group-fluid .sc-pill:active, .sc-fluid-retry:active { transform: scale(.98); }
 .sc-fluid-state { margin: 0; min-height: 1.6em; }

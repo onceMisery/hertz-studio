@@ -5,10 +5,11 @@
   'use strict';
   var stage = null, canvas = null, engine = null, options = null;
   var initialized = false, generation = 0, preparing = false, failure = null;
-  var observer = null, resizeObserver = null, pointerAttached = false;
+  var observer = null, resizeObserver = null, pointerAttached = false, hostHasLayout = false;
   var state = 'off', reason = '', actualTier = 0, ceiling = 2, dirty = false, resetDt = true;
   var created = 0, disposed = 0, completedFrames = 0, completedSteps = 0;
   var sceneTime = 0, lastMusic = -1, lastInput = 0, lastBeat = 0, mediaEpoch = null;
+  var beatInstance = null, beatSampledAt = null;
   var lastSpectrum = null, spectrumAt = 0, pointerX = -1, pointerY = -1, pendingPointer = false;
   var pointerSplat = new Float32Array(5), queue = new Float32Array(15 * 5), queueAt = 0, queueCount = 0;
   var rgb = new Float32Array(3), bounds = { left: 0, top: 0, width: 0, height: 0 };
@@ -31,7 +32,23 @@
   function kick() { if (global.Stage && Stage.kick) Stage.kick(); }
   function clearInput() {
     queueAt = queueCount = 0; pendingPointer = false; pointerX = pointerY = -1;
+    lastBeat = 0; beatInstance = null; beatSampledAt = null;
     resetDt = true;
+  }
+  function sharedBeat(features, now) {
+    var age = features && typeof features.sampledAt === 'number' ? now - features.sampledAt : NaN;
+    if (!features || features.available !== true || features.instanceId == null
+      || typeof features.beats !== 'number' || !isFinite(features.beats) || features.beats < 0
+      || !isFinite(age) || age < 0 || age >= 600) {
+      lastBeat = 0; beatInstance = null; beatSampledAt = null;
+      return false;
+    }
+    // 首次、换实例和缺测后的读数只重建基线，不能补发期间累积的拍。
+    var sameStream = beatInstance === features.instanceId && beatSampledAt !== null
+      && now - beatSampledAt >= 0 && now - beatSampledAt < 600;
+    var freshBeat = sameStream && features.beats > lastBeat;
+    beatInstance = features.instanceId; beatSampledAt = features.sampledAt; lastBeat = features.beats;
+    return freshBeat;
   }
   function detachPointer() {
     if (!pointerAttached || !stage) return;
@@ -57,12 +74,13 @@
   }
   function watch() {
     if (observer || typeof MutationObserver !== 'function') return;
-    observer = new MutationObserver(function () { sync(); if (engine) measure(); });
+    observer = new MutationObserver(function () { measure(); sync(); });
     observer.observe(document.body, { attributes: true, attributeFilter: ['class'] });
-    observer.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'data-stage-preset'] });
-    observer.observe(stage, { attributes: true, attributeFilter: ['class', 'hidden'] });
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'data-stage-preset', 'data-skin'] });
+    observer.observe(stage, { attributes: true, attributeFilter: ['class', 'hidden', 'style'] });
     global.addEventListener('resize', onResize);
     global.addEventListener('scroll', measure, { passive: true });
+    measure();
   }
   function queueMusic(x, y, dx, dy, amount) {
     if (queueCount === 15) { queueAt = (queueAt + 1) % 15; queueCount--; }
@@ -111,8 +129,10 @@
     engine.configure(rgb, options.fluidStrength / 100); dirty = true; kick();
   }
   function measure() {
-    if (!engine || !canvas) return;
+    if (!stage || document.hidden || !Stage.isStageVisible()) return;
     var art = stage.querySelector('.disc-wrap'), host = stage.getBoundingClientRect();
+    hostHasLayout = host.width > 0 && host.height > 0;
+    if (!engine || !canvas || !hostHasLayout) return;
     if (!art) return;
     var rect = art.getBoundingClientRect(), margin = Math.min(80, rect.width * .32);
     var left = Math.max(8, rect.left - host.left - margin), right = Math.min(host.width - 8, rect.right - host.left + margin);
@@ -150,8 +170,9 @@
     if (preparing || engine) return;
     var ticket = ++generation; preparing = true; report('preparing', '正在准备流体');
     Promise.resolve().then(function () {
+      measure();
       if (ticket !== generation || !options.fluidEnabled || !supportsHost() || document.hidden
-        || !Stage.isStageVisible()) return;
+        || !Stage.isStageVisible() || !hostHasLayout) return;
       try {
         canvas = document.createElement('canvas'); canvas.className = 'stage-fluid-canvas';
         canvas.setAttribute('aria-hidden', 'true');
@@ -160,7 +181,7 @@
         stage.insertBefore(canvas, stage.firstChild);
         measure(); color(); engine.render(); preparing = false;
         if (typeof ResizeObserver === 'function') {
-          resizeObserver = new ResizeObserver(measure);
+          resizeObserver = new ResizeObserver(onResize);
           resizeObserver.observe(stage);
           var cover = stage.querySelector('.disc-wrap'); if (cover) resizeObserver.observe(cover);
         }
@@ -193,7 +214,7 @@
     if (!options.fluidStrength || (!options.fluidAudio && !options.fluidPointer)) {
       release(); report('suspended', '调整强度或开启输入后生效'); return;
     }
-    if (document.hidden || !Stage.isStageVisible()) {
+    if (document.hidden || !Stage.isStageVisible() || !hostHasLayout) {
       if (preparing) release(); else clearInput();
       report('suspended', '舞台隐藏时流体已暂停'); return;
     }
@@ -206,7 +227,7 @@
   function targetFps() {
     if (!initialized || !options || !options.fluidEnabled) return 0;
     sync();
-    if (!engine || document.hidden || !Stage.isStageVisible()) return 0;
+    if (!engine || document.hidden || !Stage.isStageVisible() || !hostHasLayout) return 0;
     if (dirty) return HertzFluidEngine.profiles[actualTier].fps;
     if (state !== 'active') return 0;
     var spectrum = Stage.spectrum(), now = performance.now();
@@ -219,27 +240,26 @@
   function tick(dtMs) {
     if (!engine) return;
     try {
-      if (state !== 'active') { if (dirty) { engine.render(); dirty = false; } return; }
-      var dt = resetDt ? 0 : Math.min(50, dtMs) / 1000; resetDt = false; sceneTime += dt;
       var presentation = Stage.presentation();
       if (mediaEpoch !== presentation.mediaEpoch) {
         mediaEpoch = presentation.mediaEpoch; engine.reset(); clearInput(); lastMusic = -1;
       }
+      if (state !== 'active') { if (dirty) { engine.render(); dirty = false; } return; }
+      var dt = resetDt ? 0 : Math.min(50, dtMs) / 1000; resetDt = false; sceneTime += dt;
       var spectrum = Stage.spectrum(), now = performance.now();
       if (spectrum && spectrum.length && spectrum !== lastSpectrum) { lastSpectrum = spectrum; spectrumAt = now; }
       var fresh = spectrum && spectrum.length && now - spectrumAt < 600;
       var energy = fresh ? Math.max(0, Math.min(1, Stage.energy())) : 0;
       var features = global.StageParticles && StageParticles.audioFeatures ? StageParticles.audioFeatures() : null;
-      var beat = features && now - features.sampledAt < 600 ? features.beats : lastBeat;
-      if (options.fluidAudio && energy > .005 && (sceneTime - lastMusic > .13 || beat !== lastBeat)) {
-        var phase = sceneTime * .65, amount = Math.min(1.5, energy * 1.8 + (beat !== lastBeat ? .3 : 0));
+      var newBeat = sharedBeat(features, now);
+      if (options.fluidAudio && energy > .005 && (sceneTime - lastMusic > .13 || newBeat)) {
+        var phase = sceneTime * .65, amount = Math.min(1.5, energy * 1.8 + (newBeat ? .3 : 0));
         queueMusic(orbit.x + Math.cos(phase) * orbit.rx, orbit.y + Math.sin(phase) * orbit.ry,
           -Math.sin(phase) * (40 + energy * 75), Math.cos(phase) * (40 + energy * 75), amount);
         queueMusic(orbit.x - Math.cos(phase) * orbit.rx, orbit.y - Math.sin(phase) * orbit.ry,
           Math.sin(phase) * (30 + energy * 55), -Math.cos(phase) * (30 + energy * 55), amount * .65);
         lastMusic = sceneTime;
       }
-      lastBeat = beat;
       var remaining = 4, inputStrength = .55 + options.fluidStrength * .009;
       if (pendingPointer) {
         engine.splat(pointerSplat[0], pointerSplat[1], pointerSplat[2] * inputStrength,
@@ -260,11 +280,11 @@
     if (!wasEnabled && next.fluidEnabled) { failure = null; ceiling = Stage.tier(); }
     sync(); if (engine) { color(); measure(); } kick();
   }
-  function onVisibility() { sync(); kick(); }
-  function onResize() { sync(); measure(); kick(); }
+  function onVisibility() { measure(); sync(); kick(); }
+  function onResize() { measure(); sync(); kick(); }
   function onTrack() {
     clearInput(); lastSpectrum = null; spectrumAt = 0; lastMusic = -1;
-    if (engine) { engine.reset(); color(); }
+    if (engine) color();
   }
   function onPageHide() { release(); stopWatching(); }
   function retry() { failure = null; ceiling = Stage.tier(); sync(); kick(); }

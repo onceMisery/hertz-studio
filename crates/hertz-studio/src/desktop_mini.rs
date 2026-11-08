@@ -254,10 +254,15 @@ pub(crate) async fn control(
             return Err(control_stale());
         }
     }
-    let expected = player
-        .track_id
-        .as_deref()
-        .map(|track_id| (track_id, player.generation));
+    let expected = player.track_id.as_deref().map(|track_id| {
+        (
+            track_id,
+            player.generation,
+            state
+                .play_generation
+                .load(std::sync::atomic::Ordering::Acquire),
+        )
+    });
 
     // toggle 由当前真值决定方向，不读 UI 侧缓存的布尔——小窗关着的时候
     // 那份缓存没有更新来源。

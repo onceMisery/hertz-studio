@@ -101,14 +101,33 @@
   /// 丢一次写入并告警，比让调用方炸掉好。
   function installStorageShim() {
     var memory = new Map();
+    var touched = new Set();
     var timer = 0;
     var warned = false;
+    var revision = 0;
+    var savedRevision = 0;
+    var hydrated = false;
+    var hydration = null;
+    var readFailure = null;
+    var writes = Promise.resolve();
 
     function persist() {
-      if (!dbx || !dbx.storage) return;
-      var snapshot = {};
-      memory.forEach(function (value, key) { snapshot[key] = value; });
-      dbx.storage.set(STORAGE_KEY, snapshot).catch(function (err) {
+      var run = writes.catch(function () {}).then(async function () {
+        await shim.ready();
+        while (savedRevision !== revision) {
+          var currentRevision = revision;
+          var snapshot = Object.create(null);
+          memory.forEach(function (value, key) { snapshot[key] = value; });
+          await dbx.storage.set(STORAGE_KEY, snapshot);
+          savedRevision = currentRevision;
+        }
+      });
+      writes = run;
+      return run;
+    }
+
+    function backgroundPersist() {
+      persist().catch(function (err) {
         if (warned) return;
         warned = true;
         console.warn('[hertz] 界面偏好持久化失败（本次会话内仍然有效）：', err);
@@ -117,7 +136,7 @@
 
     function schedulePersist() {
       if (timer) clearTimeout(timer);
-      timer = setTimeout(function () { timer = 0; persist(); }, PERSIST_DEBOUNCE_MS);
+      timer = setTimeout(function () { timer = 0; backgroundPersist(); }, PERSIST_DEBOUNCE_MS);
     }
 
     var shim = {
@@ -125,14 +144,20 @@
         return memory.has(String(key)) ? memory.get(String(key)) : null;
       },
       setItem: function (key, value) {
-        memory.set(String(key), String(value));
+        key = String(key); value = String(value);
+        touched.add(key);
+        if (memory.get(key) === value) return;
+        memory.set(key, value); revision++;
         schedulePersist();
       },
       removeItem: function (key) {
-        if (memory.delete(String(key))) schedulePersist();
+        key = String(key); touched.add(key);
+        if (memory.delete(key)) { revision++; schedulePersist(); }
       },
       clear: function () {
+        memory.forEach(function (_, key) { touched.add(key); });
         memory.clear();
+        revision++;
         schedulePersist();
       },
       key: function (index) {
@@ -157,23 +182,95 @@
     }
 
     /// 把宿主里存的偏好读回内存。必须在任何模块读取偏好之前 await 完。
-    shim.hydrate = function () {
-      if (!dbx || !dbx.storage) return Promise.resolve();
-      return dbx.storage.get(STORAGE_KEY).then(function (snapshot) {
-        if (!snapshot || typeof snapshot !== 'object') return;
+    shim.ready = function () {
+      if (!dbx || !dbx.storage) return Promise.reject(new Error('此宿主无法持久保存界面偏好'));
+      if (readFailure) return Promise.reject(new Error('界面偏好读取失败，请重新加载页面后再试'));
+      if (hydrated) return Promise.resolve();
+      if (hydration) return hydration;
+      hydration = Promise.resolve().then(function () {
+        return dbx.storage.get(STORAGE_KEY);
+      }).then(function (snapshot) {
+        if (snapshot != null && (typeof snapshot !== 'object' || Array.isArray(snapshot))) {
+          throw new Error('宿主中的界面偏好格式无效');
+        }
+        if (!snapshot) snapshot = {};
         Object.keys(snapshot).forEach(function (key) {
           var value = snapshot[key];
-          if (typeof value === 'string') memory.set(key, value);
+          if (typeof value === 'string' && !touched.has(key)) memory.set(key, value);
         });
-      }).catch(function (err) {
-        console.warn('[hertz] 界面偏好读取失败，按首次启动处理：', err);
+        hydrated = true;
+      }).catch(function (error) {
+        // Defaults written after a failed boot read must never overwrite the
+        // unread host snapshot. Reopen the page to hydrate it before any save.
+        readFailure = error;
+        throw error;
+      }).finally(function () { hydration = null; });
+      return hydration;
+    };
+    // Normal startup retains the usable in-memory UI on host read failures.
+    // Portable export/import calls ready() directly and must observe the failure.
+    shim.hydrate = function () {
+      return shim.ready().catch(function (err) {
+        console.warn('[hertz] 界面偏好读取失败，本次使用临时设置：', err);
       });
+    };
+    shim.flush = function () {
+      if (timer) { clearTimeout(timer); timer = 0; }
+      return persist();
     };
     return shim;
   }
 
   var native = probeNativeStorage();
   var shim = native ? null : installStorageShim();
+
+  function storageReady() {
+    if (shim) return shim.ready();
+    if (!native) return Promise.reject(new Error('无法访问界面偏好存储'));
+    return Promise.resolve();
+  }
+
+  function flushStorage() {
+    return shim ? shim.flush() : storageReady();
+  }
+
+  var batchWrites = Promise.resolve();
+  function applyStorageBatch(entries) {
+    var run = batchWrites.catch(function () {}).then(async function () {
+      await storageReady();
+      await flushStorage();
+      if (!Array.isArray(entries) || entries.length > 64 || entries.some(function (entry) {
+        return !entry || typeof entry.key !== 'string' || !entry.key ||
+          (entry.value !== null && typeof entry.value !== 'string');
+      }) || new Set(entries.map(function (entry) { return entry.key; })).size !== entries.length) {
+        throw new Error('界面偏好写入格式无效');
+      }
+      var storage = shim || native;
+      var previous = entries.map(function (entry) { return { key: entry.key, value: storage.getItem(entry.key) }; });
+      function assign(entry) {
+        if (entry.value === null) storage.removeItem(entry.key);
+        else storage.setItem(entry.key, entry.value);
+      }
+      var applied = 0;
+      try {
+        entries.forEach(function (entry) { assign(entry); applied++; });
+        await flushStorage();
+      } catch (error) {
+        try {
+          previous.slice(0, applied).forEach(function (entry, index) {
+            // Preserve an unrelated newer write that arrived while SDK persistence waited.
+            if (storage.getItem(entry.key) === entries[index].value) assign(entry);
+          });
+          await flushStorage();
+        } catch (rollbackError) {
+          throw new Error('偏好保存失败，旧值恢复尚未确认；请保留此页并重试：' + String(rollbackError.message || rollbackError));
+        }
+        throw error;
+      }
+    });
+    batchWrites = run;
+    return run;
+  }
 
   // -------------------------------------------------------------------------
   // 表单提交
@@ -232,12 +329,34 @@
   // 对外
   // -------------------------------------------------------------------------
 
+  async function saveTextFile(fileName, contentType, text) {
+    var nativeHost = window.__hertzWindowHost;
+    if (nativeHost && nativeHost.downloadVersion === 1 && typeof nativeHost.saveTextFile === 'function') {
+      return nativeHost.saveTextFile(fileName, contentType, text);
+    }
+    if (dbx && typeof dbx.saveFile === 'function') {
+      await dbx.saveFile({ fileName: fileName, contentType: contentType }, new TextEncoder().encode(text));
+      return { status: 'requested' };
+    }
+    var url = URL.createObjectURL(new Blob([text], { type: contentType }));
+    var link = document.createElement('a');
+    link.href = url; link.download = fileName;
+    document.body.appendChild(link);
+    try { link.click(); }
+    finally { link.remove(); setTimeout(function () { URL.revokeObjectURL(url); }, 1000); }
+    return { status: 'requested' };
+  }
+
   window.hertzHost = {
     /// 是否跑在 DBX 插件沙箱里。传输层据此在 HTTP 与 invoke 之间选一条。
     isDbx: !!dbx,
     dbx: dbx,
     assetUrl: assetUrl,
     onSubmit: onSubmit,
+    saveTextFile: saveTextFile,
+    storageReady: storageReady,
+    flushStorage: flushStorage,
+    applyStorageBatch: applyStorageBatch,
     /// 原生 localStorage 不可用时装了替身，需要先 hydrate 再让界面读偏好。
     needsHydrate: !!shim,
     hydrate: function () {

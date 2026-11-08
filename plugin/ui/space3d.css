@@ -318,8 +318,9 @@ body.space3d-open #toast { z-index: 100; border-radius: 8px; }
   place-items: center;
   cursor: pointer;
 }
-.sp-head-btn:hover { border-color: var(--sp-accent); transform: translateY(-1px); }
-.sp-head-btn svg { width: 20px; height: 20px; }
+.sp-head-btn:hover:not(:disabled) { border-color: var(--sp-accent); }
+.sp-head-btn:active:not(:disabled) { transform: scale(.96); }
+.sp-head-btn svg { width: 20px; height: 20px; pointer-events: none; }
 
 /* —— 底部胶囊控制条（上游参考项目的形体）—— */
 .sp-bar {
@@ -464,9 +465,11 @@ body.space3d-open #toast { z-index: 100; border-radius: 8px; }
   place-items: center;
   cursor: pointer;
   z-index: 6;
+  touch-action: manipulation;
 }
-.sp-fab:hover { border-color: var(--sp-accent); }
-.sp-fab svg { width: 21px; height: 21px; }
+.sp-fab:hover:not(:disabled) { border-color: var(--sp-accent); }
+.sp-fab:active:not(:disabled) { transform: scale(.96); }
+.sp-fab svg { width: 21px; height: 21px; pointer-events: none; }
 .sp-sheet, .sp-playlist {
   position: absolute;
   top: 0;
@@ -509,7 +512,7 @@ body.space3d-open #toast { z-index: 100; border-radius: 8px; }
   backdrop-filter: blur(var(--sp-bar-blur));
   letter-spacing: 0;
 }
-.sp-sheet h2 .sp-head-btn { width: 34px; height: 34px; flex: none; border-radius: 8px; }
+.sp-sheet h2 .sp-head-btn { width: 40px; height: 40px; flex: none; border-radius: 10px; padding: 0; touch-action: manipulation; }
 .sp-sheet label { display: block; font-size: 13px; line-height: 1.5; color: var(--sp-muted); margin: 20px 0 8px; }
 .sp-sheet select, .sp-sheet input[type="range"] { width: 100%; }
 .sp-sheet select { min-height: 40px; padding: 8px 12px; border: 1px solid var(--sp-line); border-radius: 8px; color: var(--sp-text); background: var(--sp-glass-strong); font-size: 13px; box-shadow: none; }
@@ -668,7 +671,18 @@ body.space3d-open #toast { z-index: 100; border-radius: 8px; }
 #space3d .sp-nav button { background: var(--sp-glass); backdrop-filter: blur(18px); border: 1px solid var(--sp-line-soft); }
 #space3d .sp-nav button[aria-current="page"] { color: var(--sp-text); border-color: var(--sp-line); box-shadow: inset 0 1px 10px rgba(255,255,255,.12); }
 #space3d .sp-head > .sp-head-btn { flex: none; margin-left: 8px; }
-#space3d #sp-account.has-avatar { background-size:cover; background-position:center; background-repeat:no-repeat; }
+/* 头像的 background-size/position/repeat 必须压得住皮肤层的 `background` 简写。
+   hertz 那条 html[data-skin="hertz"] :is(#stage3d #s3d-settings-toggle, …) 的
+   :is() 取参数里最特异的 (2,0,0)，整条达 (2,1,1)，比原来的
+   #space3d #sp-account.has-avatar (2,1,0) 还高：简写会把三个背景子属性冲回
+   auto / 0% 0% / repeat，几十~几百像素的原图就按原始尺寸铺在顶栏按钮里，
+   用户看到的是「头像太大且只露出一角」。把选择器抬到 (2,2,1) 并收成小圆
+   头像后，任何皮肤的 background 简写都盖不过来；inline 的 background-image
+   仍是最高优先级，不会被简写清掉。 */
+html #space3d .sp-head > #sp-account.has-avatar {
+  width: 34px; height: 34px; border-radius: 50%;
+  background-size: cover; background-position: center; background-repeat: no-repeat;
+}
 #sp-account.has-avatar svg { visibility:hidden; }
 #space3d .sp-bar { box-sizing: border-box; width: min(960px,calc(100% - 48px)); min-height: 72px; bottom: 24px; gap: 14px; padding: 10px 16px; border-radius: 8px; border-color: color-mix(in srgb,white 16%,transparent); background: var(--sp-glass-strong); box-shadow: inset 0 1px 0 rgba(255,255,255,.08),0 12px 36px rgba(0,0,0,.24); transition: transform .4s var(--sp-ease),opacity .25s var(--sp-ease); }
 #space3d .sp-bar .sp-tbtn { box-sizing: border-box; flex: 0 0 36px; width: 36px; height: 36px; padding: 0; aspect-ratio: 1; color: var(--sp-muted); }
@@ -715,9 +729,175 @@ body.space3d-open #toast { z-index: 100; border-radius: 8px; }
 #space3d :is(button,[role="button"]):active { filter: brightness(1.15); }
 #space3d .sp-sheet, #space3d .sp-playlist { box-sizing: border-box; box-shadow: var(--sp-bar-shadow); }
 #space3d .sp-fx { border-radius: 8px; }
-#space3d.sp-immersive > :not(.sp-bg,.sp-canvas,.sp-vignette,#sp-reading,#sp-stanza) { opacity: 0; visibility: hidden; pointer-events: none; }
+#space3d.sp-immersive > :not(.sp-bg,.sp-canvas,.sp-vignette,#sp-scene-veil,#sp-reading,#sp-stanza,#sp-lyric-support) { opacity: 0; visibility: hidden; pointer-events: none; }
 #space3d.sp-immersive #sp-reading button { display: none; }
 #space3d.sp-immersive { cursor: none; }
+/* 沉浸切换动画：sp-imm-switching 只在切换在飞时由 JS 挂上，接管这一拍的过渡规格；
+   到点摘掉后各元素恢复自己的 transition（播放条自动隐藏、弹层开合不受影响）。
+   变换用独立属性 scale/rotate/translate，与元素既有 transform 定位合成；
+   快速连切只是同一组过渡反复重定向，不会叠加。 */
+#space3d.sp-imm-switching { perspective: 1100px; }
+#space3d.sp-imm-switching > :not(.sp-bg,.sp-canvas,.sp-vignette,#sp-reading,#sp-stanza,#sp-lyric-support) {
+  transition: opacity var(--sp-imm-dur,450ms) var(--sp-ease), transform var(--sp-imm-dur,450ms) var(--sp-ease), translate var(--sp-imm-dur,450ms) var(--sp-ease), rotate var(--sp-imm-dur,450ms) var(--sp-ease), scale var(--sp-imm-dur,450ms) var(--sp-ease), visibility 0s linear 0s;
+}
+#space3d.sp-imm-switching.sp-immersive > :not(.sp-bg,.sp-canvas,.sp-vignette,#sp-reading,#sp-stanza,#sp-lyric-support) {
+  transition-delay: 0s, 0s, 0s, 0s, 0s, var(--sp-imm-dur,450ms);
+}
+#space3d.sp-imm-switching.sp-immersive[data-imm-fx="zoom"] > :not(.sp-bg,.sp-canvas,.sp-vignette,#sp-reading,#sp-stanza,#sp-lyric-support) { scale: .9; }
+#space3d.sp-imm-switching.sp-immersive[data-imm-fx="flip"] > :not(.sp-bg,.sp-canvas,.sp-vignette,#sp-reading,#sp-stanza,#sp-lyric-support) { rotate: x 88deg; }
+#space3d.sp-imm-switching.sp-immersive[data-imm-fx="slide"] > :not(.sp-bg,.sp-canvas,.sp-vignette,#sp-reading,#sp-stanza,#sp-lyric-support) { translate: 0 28px; }
+/* —— 场景切换转场导演层（docs/design/space3d-scene-transitions.md）——
+   遮罩 z3：盖住画布与晕影，不盖歌词（#sp-reading z3 且在其后）与 chrome。
+   只动 opacity/transform；阶段由 data-phase 驱动，类型由 data-scene-fx 选择。
+   cover → hold（全遮时把画布无过渡切到入场起点）→ reveal。 */
+#sp-scene-veil {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  overflow: hidden;
+  pointer-events: none;
+  contain: strict;
+  visibility: hidden;
+  --veil-enter-x: 102%;
+  --veil-enter-y: 0%;
+  --veil-exit-x: -102%;
+  --veil-exit-y: 0%;
+  --veil-angle: 90deg;
+}
+#space3d.sp-scene-switching #sp-scene-veil { visibility: visible; }
+#sp-scene-veil[data-scene-direction="left"] { --veil-enter-x: -102%; --veil-exit-x: 102%; --veil-angle: 270deg; }
+#sp-scene-veil[data-scene-direction="up"] { --veil-enter-x: 0%; --veil-enter-y: 102%; --veil-exit-x: 0%; --veil-exit-y: -102%; --veil-angle: 0deg; }
+#sp-scene-veil[data-scene-direction="down"] { --veil-enter-x: 0%; --veil-enter-y: -102%; --veil-exit-x: 0%; --veil-exit-y: 102%; --veil-angle: 180deg; }
+#sp-scene-veil .sp-veil-sheet,
+#sp-scene-veil .sp-veil-a,
+#sp-scene-veil .sp-veil-b { position: absolute; inset: -2px; display: block; pointer-events: none; }
+#sp-scene-veil .sp-veil-sheet { background: #05070a; opacity: 0; }
+#sp-scene-veil .sp-veil-a,
+#sp-scene-veil .sp-veil-b {
+  background: linear-gradient(var(--veil-angle, 90deg), #05070a 0, #05070a calc(100% - var(--sp-scene-soft, 48px)), transparent 100%);
+  opacity: 0;
+  transform: translate3d(var(--veil-enter-x), var(--veil-enter-y), 0);
+}
+#sp-scene-veil .sp-veil-label {
+  position: absolute;
+  left: 50%;
+  top: 52%;
+  transform: translate(-50%, -50%);
+  color: var(--sp-muted);
+  font-size: 13px;
+  letter-spacing: .08em;
+  opacity: 0;
+  transition: opacity .2s var(--sp-ease);
+}
+#sp-scene-veil.sp-veil-slow .sp-veil-label { opacity: 1; }
+/* idle 收尾：立即归零，不靠正在跑的过渡自己衰减（收尾后遮罩本就不可见，数值也要干净）。 */
+#sp-scene-veil[data-phase="idle"] :is(.sp-veil-sheet, .sp-veil-a, .sp-veil-b) { transition: none; }
+#sp-scene-veil[data-phase="idle"] .sp-veil-sheet { opacity: 0; }
+#space3d.sp-scene-switching #sp-loading { opacity: 0; }
+#space3d:is([data-scene-fx="veil-fade"],[data-scene-fx="zoom"],[data-scene-fx="tilt"],[data-scene-fx="slide"],[data-scene-fx="combo"]) #sp-scene-veil[data-phase="cover"] .sp-veil-sheet {
+  opacity: 1;
+  transition: opacity calc(var(--sp-scene-fx-dur, 640ms) * .45) var(--sp-ease);
+}
+#space3d:is([data-scene-fx="veil-fade"],[data-scene-fx="zoom"],[data-scene-fx="tilt"],[data-scene-fx="slide"],[data-scene-fx="combo"]) #sp-scene-veil[data-phase="hold"] .sp-veil-sheet {
+  opacity: 1;
+  transition: none;
+}
+#space3d:is([data-scene-fx="veil-fade"],[data-scene-fx="zoom"],[data-scene-fx="tilt"],[data-scene-fx="slide"],[data-scene-fx="combo"]) #sp-scene-veil[data-phase="reveal"] .sp-veil-sheet {
+  opacity: 0;
+  transition: opacity calc(var(--sp-scene-fx-dur, 640ms) * .55) var(--sp-ease);
+}
+#space3d.sp-scene-switching[data-scene-fx="veil-wipe"] #sp-scene-veil .sp-veil-a,
+#space3d.sp-scene-switching[data-scene-fx="veil-wipe"] #sp-scene-veil .sp-veil-b { opacity: 1; }
+#space3d.sp-scene-switching[data-scene-fx="veil-wipe"] #sp-scene-veil[data-phase="cover"] .sp-veil-a {
+  transform: translate3d(0, 0, 0);
+  transition: transform calc(var(--sp-scene-fx-dur, 640ms) * .5) cubic-bezier(.33, 1, .68, 1);
+}
+#space3d.sp-scene-switching[data-scene-fx="veil-wipe"] #sp-scene-veil[data-phase="cover"] .sp-veil-b {
+  transform: translate3d(0, 0, 0);
+  transition: transform calc(var(--sp-scene-fx-dur, 640ms) * .45) cubic-bezier(.33, 1, .68, 1) calc(var(--sp-scene-fx-dur, 640ms) * .05);
+}
+#space3d.sp-scene-switching[data-scene-fx="veil-wipe"] #sp-scene-veil[data-phase="hold"] :is(.sp-veil-a, .sp-veil-b) {
+  transform: translate3d(0, 0, 0);
+  transition: none;
+}
+#space3d.sp-scene-switching[data-scene-fx="veil-wipe"] #sp-scene-veil[data-phase="reveal"] .sp-veil-a {
+  transform: translate3d(var(--veil-exit-x), var(--veil-exit-y), 0);
+  transition: transform calc(var(--sp-scene-fx-dur, 640ms) * .5) cubic-bezier(.33, 1, .68, 1);
+}
+#space3d.sp-scene-switching[data-scene-fx="veil-wipe"] #sp-scene-veil[data-phase="reveal"] .sp-veil-b {
+  transform: translate3d(var(--veil-exit-x), var(--veil-exit-y), 0);
+  transition: transform calc(var(--sp-scene-fx-dur, 640ms) * .45) cubic-bezier(.33, 1, .68, 1) calc(var(--sp-scene-fx-dur, 640ms) * .05);
+}
+#space3d.sp-scene-switching #sp-canvas { transform-origin: 50% 55%; }
+#space3d.sp-scene-switching:is([data-scene-fx="zoom"],[data-scene-fx="tilt"],[data-scene-fx="combo"]) { perspective: 1200px; }
+#space3d.sp-scene-switching[data-scene-fx="zoom"] #sp-canvas {
+  transition: transform calc(var(--sp-scene-fx-dur, 640ms) * .45) var(--sp-ease), opacity calc(var(--sp-scene-fx-dur, 640ms) * .45) var(--sp-ease);
+}
+#space3d.sp-scene-switching[data-scene-fx="zoom"]:has(#sp-scene-veil[data-phase="cover"]) #sp-canvas {
+  transform: scale(var(--sp-scene-scale, 1.08));
+  opacity: .35;
+}
+#space3d.sp-scene-switching[data-scene-fx="zoom"]:has(#sp-scene-veil[data-phase="hold"]) #sp-canvas {
+  transform: scale(calc(1 + (var(--sp-scene-scale, 1.08) - 1) * .5));
+  opacity: .35;
+  transition: none;
+}
+#space3d.sp-scene-switching[data-scene-fx="zoom"]:has(#sp-scene-veil[data-phase="reveal"]) #sp-canvas {
+  transform: scale(1);
+  opacity: 1;
+  transition: transform calc(var(--sp-scene-fx-dur, 640ms) * .55) var(--sp-ease), opacity calc(var(--sp-scene-fx-dur, 640ms) * .55) var(--sp-ease);
+}
+#space3d.sp-scene-switching[data-scene-fx="tilt"] #sp-canvas {
+  transition: transform calc(var(--sp-scene-fx-dur, 680ms) * .45) var(--sp-ease), opacity calc(var(--sp-scene-fx-dur, 680ms) * .45) var(--sp-ease);
+}
+#space3d.sp-scene-switching[data-scene-fx="tilt"]:has(#sp-scene-veil[data-phase="cover"]) #sp-canvas {
+  transform: rotateX(var(--sp-scene-tilt, 8deg)) scale(.98);
+  opacity: .35;
+}
+#space3d.sp-scene-switching[data-scene-fx="tilt"]:has(#sp-scene-veil[data-phase="hold"]) #sp-canvas {
+  transform: rotateX(calc(var(--sp-scene-tilt, 8deg) * -.75)) scale(.98);
+  opacity: .35;
+  transition: none;
+}
+#space3d.sp-scene-switching[data-scene-fx="tilt"]:has(#sp-scene-veil[data-phase="reveal"]) #sp-canvas {
+  transform: rotateX(0deg) scale(1);
+  opacity: 1;
+  transition: transform calc(var(--sp-scene-fx-dur, 680ms) * .55) var(--sp-ease), opacity calc(var(--sp-scene-fx-dur, 680ms) * .55) var(--sp-ease);
+}
+#space3d.sp-scene-switching[data-scene-fx="slide"] #sp-canvas {
+  transition: transform calc(var(--sp-scene-fx-dur, 560ms) * .45) var(--sp-ease), opacity calc(var(--sp-scene-fx-dur, 560ms) * .45) var(--sp-ease);
+}
+#space3d.sp-scene-switching[data-scene-fx="slide"]:has(#sp-scene-veil[data-phase="cover"]) #sp-canvas {
+  transform: translateY(calc(var(--sp-scene-offset, 1.5%) * -1));
+  opacity: .4;
+}
+#space3d.sp-scene-switching[data-scene-fx="slide"]:has(#sp-scene-veil[data-phase="hold"]) #sp-canvas {
+  transform: translateY(var(--sp-scene-offset, 1.5%));
+  opacity: .4;
+  transition: none;
+}
+#space3d.sp-scene-switching[data-scene-fx="slide"]:has(#sp-scene-veil[data-phase="reveal"]) #sp-canvas {
+  transform: translateY(0);
+  opacity: 1;
+  transition: transform calc(var(--sp-scene-fx-dur, 560ms) * .55) var(--sp-ease), opacity calc(var(--sp-scene-fx-dur, 560ms) * .55) var(--sp-ease);
+}
+#space3d.sp-scene-switching[data-scene-fx="combo"] #sp-canvas {
+  transition: transform calc(var(--sp-scene-fx-dur, 760ms) * .45) var(--sp-ease), opacity calc(var(--sp-scene-fx-dur, 760ms) * .45) var(--sp-ease);
+}
+#space3d.sp-scene-switching[data-scene-fx="combo"]:has(#sp-scene-veil[data-phase="cover"]) #sp-canvas {
+  transform: scale(calc(1 + (var(--sp-scene-scale, 1.08) - 1) * var(--sp-scene-intensity, 1))) rotateX(calc(var(--sp-scene-tilt, 8deg) * var(--sp-scene-intensity, 1)));
+  opacity: .35;
+}
+#space3d.sp-scene-switching[data-scene-fx="combo"]:has(#sp-scene-veil[data-phase="hold"]) #sp-canvas {
+  transform: scale(calc(1 + (var(--sp-scene-scale, 1.08) - 1) * .5 * var(--sp-scene-intensity, 1))) rotateX(calc(var(--sp-scene-tilt, 8deg) * -.75 * var(--sp-scene-intensity, 1)));
+  opacity: .35;
+  transition: none;
+}
+#space3d.sp-scene-switching[data-scene-fx="combo"]:has(#sp-scene-veil[data-phase="reveal"]) #sp-canvas {
+  transform: scale(1) rotateX(0deg);
+  opacity: 1;
+  transition: transform calc(var(--sp-scene-fx-dur, 760ms) * .55) var(--sp-ease), opacity calc(var(--sp-scene-fx-dur, 760ms) * .55) var(--sp-ease);
+}
 /* The playback shelf shares its card material and poses with the older stage. */
 #space3d .s3d-shelf {
   --s3d-sc-radius: 8px;
@@ -966,10 +1146,7 @@ body.space3d-open #toast { z-index: 100; border-radius: 8px; }
 #sp-sheet .sp-param-field:first-child > output { top: 0; }
 #sp-sheet .sp-param-field > input[type="range"] { display: block; width: 100%; height: 18px; margin: 7px 0 0; }
 #sp-sheet .sp-param-field.is-toggle { display: flex; align-items: center; gap: 10px; padding-top: 10px; }
-#sp-sheet .sp-param-field.is-toggle > input { order: 1; flex: none; margin: 0; width: 32px; height: 18px; appearance: none; border: 1px solid var(--sp-line); border-radius: 999px; background: color-mix(in srgb, var(--sp-text) 8%, transparent); cursor: pointer; position: relative; transition: background-color .18s var(--sp-ease), border-color .18s var(--sp-ease); }
-#sp-sheet .sp-param-field.is-toggle > input::after { content: ""; position: absolute; left: 3px; top: 3px; width: 10px; height: 10px; border-radius: 50%; background: var(--sp-muted); transition: transform .18s var(--sp-ease), background-color .18s var(--sp-ease); }
-#sp-sheet .sp-param-field.is-toggle > input:checked { border-color: color-mix(in srgb, var(--sp-accent) 54%, transparent); background: color-mix(in srgb, var(--sp-accent) 22%, transparent); }
-#sp-sheet .sp-param-field.is-toggle > input:checked::after { transform: translateX(14px); background: var(--sp-accent); }
+#sp-sheet .sp-param-field.is-toggle > input { order: 1; flex: none; margin: 0; }
 #sp-sheet .sp-param-field.is-toggle > label { order: 2; flex: 1; padding: 0; color: var(--sp-text); font-size: 12px; cursor: pointer; }
 #sp-sheet .sp-param-field.is-toggle > output { display: none; }
 .sp-reactor-telemetry { position: absolute; z-index: 6; left: 28px; top: 50%; transform: translateY(-50%); width: 170px; color: var(--sp-text); pointer-events: none; }
@@ -1104,14 +1281,365 @@ html[data-skin="hertz"] :is(#stage3d #s3d-settings-toggle, #space3d .sp-fab, #sp
   backdrop-filter: blur(18px);
   -webkit-backdrop-filter: blur(18px);
 }
-html[data-skin="hertz"] :is(#stage3d #s3d-settings-toggle, #space3d .sp-fab, #space3d .sp-head > .sp-head-btn):hover {
+html[data-skin="hertz"] :is(#stage3d #s3d-settings-toggle, #space3d .sp-fab, #space3d .sp-head > .sp-head-btn):hover:not(:disabled) {
   color: #f4f3f1;
   background: rgba(44, 44, 48, .72);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, .08);
   transform: none;
+}
+html[data-skin="hertz"] :is(#stage3d #s3d-settings-toggle, #space3d .sp-fab, #space3d .sp-head > .sp-head-btn):active:not(:disabled) { transform: scale(.96); }
+html[data-skin="hertz"] :is(#stage3d #s3d-settings-toggle, #space3d .sp-fab)[aria-expanded="true"] {
+  color: #f4f3f1;
+  background: rgba(54, 54, 60, .86);
+  box-shadow: inset 0 0 0 1px rgba(244, 243, 241, .2);
 }
 html[data-skin="hertz"] :is(#stage3d #s3d-settings-toggle, #space3d .sp-fab, #space3d .sp-head > .sp-head-btn):focus-visible {
   outline: 2px solid #f4f3f1;
   outline-offset: 3px;
 }
 html[data-skin="hertz"] :is(#stage3d #s3d-settings-toggle, #space3d .sp-fab, #space3d .sp-head > .sp-head-btn) svg { width: 19px; height: 19px; }
+
+/* ---------------------------------------------------------------------------
+ * 沉浸声场设置：居中弹窗（data-terminal，seed 351370453）
+ *
+ * 只覆盖 #s3d-settings，#space3d 的右侧抽屉沿用上面那套 .sp-sheet 规则，两边互不干扰。
+ * 形态上从「贴边抽屉」改成「居中对话框」：宽出的一倍空间用来把「标签 / 控件」
+ * 排成两列，一屏能读完的设置项从十来个变成二十多个；分组导航只滚动、不隐藏控件，
+ * 所以任何自动验收脚本和用户都能直接点到任意一项。
+ *
+ * 配色全部由 --sp-* / --bg 令牌派生；强调色只出现在 1px 线上（当前分组、字段聚焦、
+ * 灰显说明的引导线）与开关轨道，彩色面积控制在 3% 以内。表面靠亮度分层，不叠渐变、
+ * 不叠发光，也不用 backdrop blur 假装高级；只有这张真正浮起来的对话框有阴影。
+ * ------------------------------------------------------------------------- */
+.s3d-settings-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  background: color-mix(in srgb, var(--bg) 76%, transparent);
+}
+.s3d-settings-scrim[hidden] { display: none; }
+
+#s3d-settings {
+  /* 局部令牌：一级面板 / 实心标题栏 / 字段底 / 悬浮态 / 三级文字 */
+  --dlg-ground: color-mix(in srgb, var(--bg) 94%, var(--sp-text));
+  --dlg-solid: var(--bg);
+  --dlg-field: color-mix(in srgb, var(--sp-text) 7%, var(--bg));
+  --dlg-field-hi: color-mix(in srgb, var(--sp-text) 13%, var(--bg));
+  --dlg-ink: var(--sp-text);
+  --dlg-muted: color-mix(in srgb, var(--sp-text) 78%, transparent);
+  --dlg-rule: var(--sp-line-soft);
+
+  position: fixed;
+  inset: 0;
+  margin: auto;                 /* 居中不靠 transform，位移留给入场动效 */
+  width: min(760px, calc(100vw - 32px));
+  height: min(720px, calc(100dvh - 48px));
+  z-index: 21;
+  transform: none;              /* 覆盖共享抽屉的 translateX(106%) */
+  border: 1px solid var(--dlg-rule);
+  border-radius: 18px;
+  background: var(--dlg-ground);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, .46);
+  padding: 0 28px 32px;
+  display: grid;
+  grid-template-columns: minmax(132px, 34%) minmax(0, 1fr);
+  align-items: center;
+  align-content: start;
+  column-gap: 18px;
+  row-gap: 8px;
+  overscroll-behavior: contain;
+  opacity: 0;
+  scale: .975;
+  transition: opacity .26s var(--sp-ease), scale .26s var(--sp-ease);
+}
+#s3d-settings.sp-show { opacity: 1; scale: 1; transform: none; }
+
+/* 顶层里凡是「标签 + 控件」之外的节点都占满一整行，配对节奏才不会被打散。
+   动态插入的 <small class="s3d-setting-note"> 也走这一条。 */
+#s3d-settings > :is(h2, h3, nav, p, span, div, button, small),
+#s3d-settings > label:has(input[type="checkbox"]),
+#s3d-settings > div > :is(h3, nav, p, span, div, button, small),
+#s3d-settings > div > label:has(input[type="checkbox"]) { grid-column: 1 / -1; }
+
+/* 条件调参块是「面板里的面板」，内部沿用同一套两列栅格，形成层级而不是换一套语言。 */
+#s3d-settings > div {
+  display: grid;
+  grid-template-columns: minmax(120px, 34%) minmax(0, 1fr);
+  align-items: center;
+  align-content: start;
+  column-gap: 18px;
+  row-gap: 8px;
+  margin: 2px 0 6px;
+  padding: 12px 16px;
+  border-radius: 12px;
+  background: var(--dlg-field);
+}
+
+/* 吸顶标题栏：不透明，滚过的行不能透上来糊住标题与关闭按钮。 */
+#s3d-settings h2 {
+  position: sticky;
+  top: 0;
+  z-index: 4;
+  margin: 0 -28px;
+  padding: 22px 28px 18px;
+  border-bottom: 1px solid var(--dlg-rule);
+  background: var(--dlg-solid);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: -.01em;
+}
+
+/* 状态条：一句话说清当前生效的歌词视觉，不再把同一句理由复制到每个控件下面。 */
+#s3d-settings > #s3d-settings-status {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 16px 0 8px;
+  font-size: 12px;
+  color: var(--dlg-muted);
+}
+#s3d-settings > #s3d-settings-status::before {
+  content: '';
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--brand, var(--sp-accent));
+}
+
+/* 分组跳转条：只滚到分组，不切换视图；当前分组用一条 1px 强调线标出。 */
+#s3d-settings > .s3d-sec-nav {
+  position: sticky;
+  top: 68px;
+  z-index: 3;
+  display: flex;
+  gap: 4px;
+  margin: 0 -28px;
+  padding: 4px 28px 8px;
+  overflow-x: auto;
+  background: var(--dlg-solid);
+  border-bottom: 1px solid var(--dlg-rule);
+  scrollbar-width: none;
+}
+#s3d-settings > .s3d-sec-nav::-webkit-scrollbar { display: none; }
+#s3d-settings .s3d-sec-nav button {
+  flex: none;
+  min-height: 30px;
+  padding: 5px 11px;
+  border: 0;
+  border-bottom: 1px solid transparent;
+  background: transparent;
+  color: var(--dlg-muted);
+  font: inherit;
+  font-size: 13px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+#s3d-settings .s3d-sec-nav button:hover { color: var(--dlg-ink); }
+#s3d-settings .s3d-sec-nav button.is-current {
+  color: var(--dlg-ink);
+  border-bottom-color: var(--sp-accent);
+}
+
+/* 分组标题：一句组名 + 一句它管什么，下面一条规则线收住。 */
+#s3d-settings > .s3d-sec {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 22px 0 2px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--dlg-rule);
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--dlg-ink);
+}
+#s3d-settings > .s3d-sec small {
+  font-size: 12px;
+  font-weight: 400;
+  letter-spacing: 0;
+  color: var(--dlg-muted);
+}
+
+/* 左列标签：字段名在上，当前值在下（等宽数字，符号写进文本里）。 */
+#s3d-settings label:not(:has(input[type="checkbox"])) {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 2px;
+  min-height: 38px;
+  margin: 0;
+  padding: 4px 0;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.35;
+  color: var(--dlg-ink);
+}
+#s3d-settings output {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--dlg-muted);
+  font-variant-numeric: tabular-nums;
+}
+#s3d-settings .s3d-setting-inactive { color: var(--dlg-muted); }
+
+/* 右列控件：一块比面板亮一档的字段底，没有描边堆砌；聚焦才出现 1px 强调线。 */
+#s3d-settings select,
+#s3d-settings input[type="range"] { box-sizing: border-box; width: 100%; margin: 0; }
+#s3d-settings select {
+  min-height: 38px;
+  padding: 8px 12px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background-color: var(--dlg-field);
+  color: var(--dlg-ink);
+  font: inherit;
+  font-size: 13px;
+  box-shadow: none;
+}
+#s3d-settings select:hover { background-color: var(--dlg-field-hi); }
+#s3d-settings select:focus-visible,
+#s3d-settings input[type="range"]:focus-visible { outline-offset: 1px; }
+#s3d-settings select:focus-visible { border-bottom-color: var(--sp-accent); }
+
+/* 滑块：2px 中性轨道 + 中性把手，数值的可读性交给左列，不靠彩色填充。 */
+#s3d-settings input[type="range"] {
+  --track: color-mix(in srgb, var(--sp-text) 18%, transparent);
+  --music-highlight: var(--dlg-ink);
+  height: 24px;
+  background: transparent;
+}
+#s3d-settings input[type="range"]::-webkit-slider-runnable-track { height: 2px; border-radius: 0; }
+#s3d-settings input[type="range"]::-webkit-slider-thumb {
+  width: 10px; height: 10px; margin-top: -4px;
+  border-radius: 50%; background: var(--dlg-ink); box-shadow: none;
+}
+#s3d-settings input[type="range"]:hover::-webkit-slider-thumb { transform: scale(1.2); }
+#s3d-settings input[type="range"]::-moz-range-track { height: 2px; border-radius: 0; }
+#s3d-settings input[type="range"]::-moz-range-thumb {
+  width: 10px; height: 10px; border: 0;
+  border-radius: 50%; background: var(--dlg-ink); box-shadow: none;
+}
+
+/* 开关：ON 态用品牌强调色的淡轨道 + 一条 1px 底线，OFF 态完全中性。 */
+#s3d-settings input[type="checkbox"][role="switch"] {
+  appearance: none;
+  -webkit-appearance: none;
+  position: relative;
+  flex: none;
+  width: 32px;
+  height: 18px;
+  margin: 0;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--sp-text) 20%, transparent);
+  cursor: pointer;
+  transition: background .18s var(--sp-ease);
+}
+#s3d-settings input[type="checkbox"][role="switch"]::before {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--dlg-ink);
+  transition: transform .18s var(--sp-ease);
+}
+#s3d-settings input[type="checkbox"][role="switch"]:checked {
+  background: color-mix(in srgb, var(--sp-accent) 26%, transparent);
+  border-bottom-color: var(--sp-accent);
+}
+#s3d-settings input[type="checkbox"][role="switch"]:checked::before {
+  transform: translateX(14px);
+  background: var(--accent-ink, var(--bg));
+}
+#s3d-settings label:has(input[type="checkbox"]) {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 4px 0;
+  padding: 6px 10px;
+  border-radius: 8px;
+  font-size: 13px;
+  color: var(--dlg-ink);
+}
+#s3d-settings label:has(input[type="checkbox"]):hover { background: var(--dlg-field); }
+
+/* 动作：只有一个主操作是反相实色（进创意工坊），其余都是同一档的幽灵按钮。 */
+#s3d-settings .sp-btn-line {
+  width: 100%;
+  min-height: 36px;
+  margin: 2px 0;
+  padding: 8px 14px;
+  border: 1px solid var(--dlg-rule);
+  border-radius: 8px;
+  background: var(--dlg-field);
+  color: var(--dlg-ink);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+#s3d-settings .sp-btn-line:hover { background: var(--dlg-field-hi); }
+#s3d-settings .sp-btn-line:active { transform: translateY(1px); }
+#s3d-settings #s3d-workshop {
+  border-color: transparent;
+  background: var(--dlg-ink);
+  color: var(--bg);
+  font-weight: 600;
+}
+#s3d-settings #s3d-workshop:hover { background: color-mix(in srgb, var(--dlg-ink) 88%, var(--bg)); }
+#s3d-settings #s3d-defaults {
+  border-color: transparent;
+  background: transparent;
+  color: var(--dlg-muted);
+}
+#s3d-settings #s3d-defaults:hover { color: var(--dlg-ink); background: var(--dlg-field); }
+
+/* 灰显理由：同一句只在面板里出现一次，其余控件用 title 承载；左侧一条 1px 强调线。 */
+#s3d-settings .s3d-setting-note {
+  margin: -4px 0 4px;
+  padding-left: 12px;
+  border-left: 1px solid var(--sp-accent);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--dlg-muted);
+}
+#s3d-settings > .sp-note { margin: 4px 0 0; font-size: 12px; color: var(--dlg-muted); }
+#s3d-settings :disabled { opacity: .55; cursor: not-allowed; }
+
+/* 窄屏：单列，标签与数值并排，分组条横向滚动，触控目标保持 38px 以上。 */
+@media (max-width: 620px) {
+  #s3d-settings {
+    width: calc(100vw - 24px);
+    height: calc(100dvh - 24px);
+    padding: 0 16px 24px;
+    grid-template-columns: minmax(0, 1fr);
+    row-gap: 6px;
+  }
+  #s3d-settings > label { grid-column: 1 / -1; }
+  #s3d-settings > div { grid-template-columns: minmax(0, 1fr); padding: 12px; }
+  #s3d-settings > div > label { grid-column: 1 / -1; }
+  #s3d-settings h2 { margin: 0 -16px; padding: 16px 16px 12px; font-size: 18px; }
+  #s3d-settings > #s3d-settings-status { margin: 12px 0 10px; }
+  #s3d-settings > .s3d-sec-nav { top: 54px; margin: 0 -16px; padding: 4px 16px 8px; }
+  #s3d-settings label:not(:has(input[type="checkbox"])) {
+    flex-direction: row;
+    justify-content: space-between;
+    min-height: 0;
+    padding: 6px 0 0;
+  }
+  #s3d-settings > .s3d-sec { margin-top: 20px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  #s3d-settings,
+  #s3d-settings.sp-show { transition: none; scale: 1; }
+  #s3d-settings input[type="checkbox"][role="switch"],
+  #s3d-settings input[type="checkbox"][role="switch"]::before { transition: none; }
+}

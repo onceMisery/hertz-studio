@@ -12,6 +12,7 @@ use vmusic_core::{
 
 pub use crate::render::EQ_BANDS;
 use crate::render::{RenderCore, RenderFormat, RenderOutput};
+use crate::sleep_deadline::SleepDeadline;
 
 pub struct CpalBackend {
     renderer: RenderCore,
@@ -22,14 +23,23 @@ pub struct CpalBackend {
 
 impl CpalBackend {
     pub fn new() -> Result<Self, AudioError> {
+        Self::with_sleep_deadline(std::sync::Arc::new(SleepDeadline::new()))
+    }
+
+    pub(crate) fn with_sleep_deadline(
+        sleep_deadline: std::sync::Arc<SleepDeadline>,
+    ) -> Result<Self, AudioError> {
         let device = cpal::default_host()
             .default_output_device()
             .ok_or_else(|| AudioError::DeviceUnavailable("no default output device".into()))?;
         let config = pick_config(&device)?;
-        let renderer = RenderCore::new(RenderFormat {
-            sample_rate: config.sample_rate().0,
-            channels: config.channels(),
-        })?;
+        let renderer = RenderCore::with_sleep_deadline(
+            RenderFormat {
+                sample_rate: config.sample_rate().0,
+                channels: config.channels(),
+            },
+            Some(sleep_deadline),
+        )?;
         Ok(Self {
             renderer,
             device: Some(device),

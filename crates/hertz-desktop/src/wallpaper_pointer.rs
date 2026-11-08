@@ -75,10 +75,21 @@ impl Input {
 
 impl App {
     pub(super) fn poll_wallpaper_pointer(&mut self) -> Option<Instant> {
-        let surface = self.wallpaper.as_mut()?;
+        let mut next = None;
+        self.for_each_desktop(|app| {
+            if let Some(due) = app.poll_desktop_pointer() {
+                next = Some(next.map_or(due, |previous: Instant| previous.min(due)));
+            }
+        });
+        next
+    }
+
+    fn poll_desktop_pointer(&mut self) -> Option<Instant> {
+        let desktop = &mut *self.desktop;
+        let surface = desktop.surface.as_mut()?;
         let now = Instant::now();
-        let allowed = self.wallpaper_visible
-            && self.wallpaper_page_ready
+        let allowed = desktop.visible
+            && desktop.page_ready
             && !surface.static_poster
             && surface.configuration.presentation().pointer
             && surface.configuration.presentation().motion > 0.;

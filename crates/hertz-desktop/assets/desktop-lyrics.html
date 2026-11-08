@@ -13,13 +13,15 @@
   <main id="stage" aria-label="同步歌词">
     <div class="pane" aria-hidden="true"></div>
     <div id="viewport"><div id="lyric-column"></div></div>
+    <div id="vocal-capacity" role="status" aria-live="polite" hidden></div>
     <div id="notice" role="status" aria-live="polite"></div>
   </main>
   <section id="options-panel" role="dialog" aria-label="歌词设置" tabindex="-1" hidden>
     <div class="panel-heading"><span>歌词设置</span><button id="options-done" aria-label="收起歌词设置">完成</button></div>
     <div class="option-row"><span>主题<small>自动跟随系统明暗</small></span><div class="segmented" role="group" aria-label="主题"><button data-setting="theme" data-value="auto">自动</button><button data-setting="theme" data-value="light">浅色</button><button data-setting="theme" data-value="dark">深色</button></div></div>
     <div class="option-row"><span>背景材质</span><div class="segmented" role="group" aria-label="背景材质"><button data-setting="surface" data-value="bare">无边框</button><button data-setting="surface" data-value="glass">毛玻璃</button><button data-setting="surface" data-value="solid">纯色</button></div></div>
-    <div class="option-row"><span>显示行数</span><div class="segmented" role="group" aria-label="歌词行数"><button data-setting="layout" data-value="single">单行</button><button data-setting="layout" data-value="double">两行</button><button data-setting="layout" data-value="triple">三行</button></div></div>
+    <div class="option-row"><span>显示行数<small id="layout-note" hidden>仅用于无声部歌词</small></span><div class="segmented" role="group" aria-label="歌词行数"><button data-setting="layout" data-value="single">单行</button><button data-setting="layout" data-value="double">两行</button><button data-setting="layout" data-value="triple">三行</button></div></div>
+    <div class="option-row"><span>显示多人声<small id="vocals-help">按作者标注显示同时演唱的内容，正文和副行合计最多四槽；空间不足时减少显示并提示</small></span><button class="switch" data-toggle="showVocals" aria-label="显示多人声" aria-describedby="vocals-help" aria-pressed="true"></button></div>
     <div class="option-row"><span>对齐</span><div class="segmented" role="group" aria-label="对齐"><button data-setting="align" data-value="left">左</button><button data-setting="align" data-value="center">居中</button><button data-setting="align" data-value="right">右</button></div></div>
     <div class="option-row"><span>双语歌词<small>在原文下方显示译文</small></span><button class="switch" data-toggle="bilingual" aria-label="双语歌词" aria-pressed="true"></button></div>
     <div class="option-row" id="secondary-cell"><span>辅助文本</span><div class="segmented" role="group" aria-label="辅助文本"><button data-setting="secondary" data-value="next">译文</button><button data-setting="secondary" data-value="romanization">罗马音</button></div></div>

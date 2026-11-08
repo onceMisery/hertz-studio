@@ -100,12 +100,12 @@ impl CaptureHold {
             owner: if preview {
                 OwnerKind::PreviewFrame
             } else {
-                OwnerKind::Desktop
+                OwnerKind::DesktopFrame
             },
             session: owner.clone(),
             generation: binding.generation(),
             task_id: "static-handoff".into(),
-            targets: u32::from(!preview),
+            targets: 0,
             contexts: 0,
             decoders: 0,
             transcode_slots: 0,

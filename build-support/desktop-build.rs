@@ -22,6 +22,9 @@ pub fn emit(root: &Path, plugin: bool) {
         "crates/hertz-desktop/build.rs",
         "crates/hertz-desktop/src",
         "crates/hertz-desktop/assets",
+        "crates/hertz-desktop/migrations",
+        "crates/hertz-sqlite-lifecycle/Cargo.toml",
+        "crates/hertz-sqlite-lifecycle/src",
         "crates/hertz-desktop-ipc/Cargo.toml",
         "crates/hertz-desktop-ipc/src",
         "plugin/ui/vendor/stage-runtime.js",
@@ -107,6 +110,12 @@ pub fn emit(root: &Path, plugin: bool) {
         let context = format!("dbx/1\n{edition}\n{target}\n{desktop_context}");
         let plugin_id = digest(root, &inputs, &context);
         println!("cargo:rustc-env=HERTZ_PLUGIN_BUILD_ID={plugin_id}");
+        let native = std::env::var_os("CARGO_FEATURE_NATIVE_WINDOW").is_some();
+        let studio_context = format!("standalone/1\n{context}\nnative-window={native}");
+        println!(
+            "cargo:rustc-env=HERTZ_STUDIO_BUILD_ID={}",
+            digest(root, &inputs, &studio_context)
+        );
     }
 }
 

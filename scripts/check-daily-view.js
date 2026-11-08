@@ -15,7 +15,7 @@
 //   3. **可见性开关是真的开关**。关掉要摘掉入口，且不能把用户留在已经没有
 //      入口的页面上（必须退回曲库）。
 //
-// 另外钉住日期切换（不能翻到未来）、空态文案要区分"没登录"与"已登录但没拿到"、
+// 另外钉住空态文案要区分"没登录"与"已登录但没拿到"、
 // 以及播放走的是现有那条混合队列通道。
 
 'use strict';
@@ -189,9 +189,6 @@ function makeSandbox() {
   const ui = {
     dvBody: makeEl('div'),
     dvSub: makeEl('span'),
-    dvPrev: makeEl('button'),
-    dvNext: makeEl('button'),
-    dvDate: makeEl('button'),
     dvRefresh: makeEl('button'),
     dvPlay: makeEl('button'),
     dvModes: makeEl('div'),
@@ -339,55 +336,19 @@ function checkVisibility() {
 }
 
 // ---------------------------------------------------------------------------
-// 3. 日期切换
-// ---------------------------------------------------------------------------
-
-function checkDates() {
-  section('日期：能回看，但不能翻到未来');
-
-  const { sandbox, requests, ui } = makeSandbox();
-  sandbox.DailyView.init();
-
-  ok(sandbox.DailyView.state.day === null, '初始是今天（day 为 null）');
-  eq(ui.dvNext.disabled, true, '停在今天时「后一天」禁用');
-
-  ui.dvPrev.onclick();
-  const day = sandbox.DailyView.state.day;
-  ok(typeof day === 'number', '点「前一天」后有了具体天序号');
-  ok(requests.some((u) => u.indexOf('day=') >= 0), '请求带上了 day 参数');
-  ok(requests.some((u) => u.indexOf('day=' + day) >= 0), `day 与实际选中的那天一致（${day}）`);
-  ok(requests.some((u) => u.indexOf('/v1/recommend/daily?') >= 0), '本地推荐按天重拉');
-  ok(requests.some((u) => u.indexOf('/v1/recommend/daily/online?') >= 0), '在线汇总也按天重拉');
-
-  // 回到今天：next 从 day-1 走一步就是今天。
-  ui.dvNext.onclick();
-  ok(sandbox.DailyView.state.day !== null, '往前走了一天');
-  ui.dvDate.onclick();
-  ok(sandbox.DailyView.state.day === null, '点日期按钮回到今天（不再带偏移）');
-
-  section('日期：天序号与后端同定义（UTC）');
-  // 后端 local_offset_secs() 返回 0（按 UTC 换天）。前端一旦改用本地时区，
-  // 东八区会差一天：前端的"今天"被后端判成"其它日期"，在线那份走 history
-  // 分支，用户一进页面就看到「在线推荐只提供当天」——页面等于废了。
-  ok(!/getTimezoneOffset/.test(SRC), '天序号不掺本地时区偏移');
-  ok(/Math\.floor\(date\.getTime\(\) \/ 86400000\)/.test(SRC), '天序号 = UTC 毫秒整除一天');
-  ok(/getUTCFullYear|getUTCDate/.test(SRC), '日期显示也用 UTC，与后端 date_label 对齐');
-  // 后端那一侧的约定也要在，不然有人改了后端前端还蒙在鼓里。
-  ok(/fn local_offset_secs/.test(DAILY_RS) && /按 UTC 换天/.test(DAILY_RS),
-    '后端仍按 UTC 换天（若改了，前端要同步改）');
-
-  section('日期：今天之后的按钮无效');
-  const { sandbox: s2, ui: u2 } = makeSandbox();
-  s2.DailyView.init();
-  u2.dvNext.onclick();
-  ok(s2.DailyView.state.day === null, '今天点「后一天」不生效（明天的榜单不存在）');
-}
-
-// ---------------------------------------------------------------------------
-// 4. 空态与来源
+// 3. 空态与来源
 // ---------------------------------------------------------------------------
 
 function checkEmpty() {
+  section('取数：只有当天那一份，请求不带 day');
+
+  // 单独一个沙箱：load() 会把 loading 留在 true，会盖掉下面空态断言要看的渲染。
+  const probe = makeSandbox();
+  probe.sandbox.DailyView.init();
+  probe.sandbox.DailyView.load();
+  ok(probe.requests.some((u) => u === '/v1/recommend/daily?limit=30'), '本地那份只按 limit 取');
+  ok(probe.requests.some((u) => u === '/v1/recommend/daily/online?limit=30'), '在线汇总同理');
+
   section('空态：不同成因给不同的话');
 
   const { sandbox, ui } = makeSandbox();
@@ -409,12 +370,6 @@ function checkEmpty() {
   const html = ui.dvBody.innerHTML;
   ok(html.indexOf('网易云音乐') >= 0 && html.indexOf('已登录') >= 0, '已登录但没拿到时点名平台');
   ok(html.indexOf('还没有登录') < 0, '此时不再说"还没登录"（那是误导）');
-
-  // 历史日期 + 在线来源：要说清在线只提供当天。
-  sandbox.DailyView.state.day = 1;
-  sandbox.DailyView.render();
-  ok(ui.dvBody.innerHTML.indexOf('在线推荐只提供当天') >= 0,
-    '回看历史且选在线时说明只提供当天');
 
   section('状态解释：pending ≠ 失败，缓存 ≠ 刚抓，缺席来源带可执行动作');
   const { sandbox: se, ui: seUi, calls: seCalls } = makeSandbox();
@@ -476,7 +431,7 @@ function checkEmpty() {
 }
 
 // ---------------------------------------------------------------------------
-// 5. 排布与播放
+// 4. 排布与播放
 // ---------------------------------------------------------------------------
 
 function checkLayoutAndPlay() {
@@ -590,7 +545,7 @@ function checkLayoutAndPlay() {
 }
 
 // ---------------------------------------------------------------------------
-// 6. 接线
+// 5. 接线
 // ---------------------------------------------------------------------------
 
 function checkWiring() {
@@ -601,6 +556,9 @@ function checkWiring() {
   ok(/symbol id="i-daily"/.test(HTML), '图标 sprite 里有 #i-daily');
   ok(/id="set-nav-daily"/.test(HTML), '设置页有可见性开关');
   ok(/src="daily-view\.js"/.test(HTML), '页面引入了 daily-view.js');
+  // 各平台的每日推荐只有当天这一份，按天翻页点了也只能看到「只提供当天」，
+  // 所以这组按钮已经摘掉；接口侧的 day 参数保留，别把它当成漏删又加回来。
+  ok(!/dv-days/.test(HTML), '日期切换器没有复活');
   ok(require('./ui-assets').hasAsset('/daily-view.js'), 'main.rs 注册了 /daily-view.js 路由');
   // 只匹配文件名后缀，不写死相对深度：前端目录搬过位置（web/ → plugin/ui/）。
   ok(/edition_ui!\("daily-view\.js"\)/.test(MAIN_RS), '脚本被 include 进二进制');
@@ -654,7 +612,6 @@ function checkWiring() {
 (function main() {
   checkNavMounting();
   checkVisibility();
-  checkDates();
   checkEmpty();
   checkLayoutAndPlay();
   checkWiring();

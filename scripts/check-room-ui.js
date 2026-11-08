@@ -95,6 +95,65 @@ async function applicantFixture() {
   return f;
 }
 async function main() {
+  for (const chosenRate of [44100, 48000, 96000, 192000, 'native']) {
+    const f = fixture(); await settle(); f.set({ mode: 'local' }); await f.poll();
+    const dialog = walk(f.root).find(node => node.tagName === 'dialog' && node.attrs['aria-labelledby'] === 'room-entry-title-create');
+    const mode = f.field('采样率模式', dialog), rate = f.field('房间采样率', dialog);
+    const rateGroup = walk(dialog).find(node => node.className === 'room-create-rate');
+    assert.equal(mode.value, 'fixed', 'new rooms default to fixed mode');
+    assert.equal(rate.value, '48000', 'the existing fixed default stays 48 kHz');
+    assert.deepEqual(rate.children.map(node => node.value), ['44100', '48000', '96000', '192000'], 'the four fixed rates remain available');
+    rate.value = chosenRate === 'native' ? '192000' : String(chosenRate);
+    mode.value = 'native'; mode.onchange();
+    assert.equal(rateGroup.hidden, true, 'native mode hides the entire rate field');
+    assert.equal(rate.disabled, true, 'native mode removes the stale field from keyboard interaction');
+    assert.match(walk(dialog).find(node => node.id === mode.attrs['aria-describedby']).textContent, /按歌曲解码采样率传输；不同采样率切歌可能有间隙/);
+    if (chosenRate !== 'native') {
+      mode.value = 'fixed'; mode.onchange();
+      assert.equal(rateGroup.hidden, false); assert.equal(rate.disabled, false);
+      assert.equal(rate.value, String(chosenRate), 'switching mode preserves the fixed-rate choice');
+    }
+    f.field('局域网网卡', dialog).value = '192.0.2.10'; f.field('你的昵称', dialog).value = '采样率房主';
+    f.hooks.set('create', async request => { f.set({ mode: 'host', format_mode: request.format_mode, format: request.format_mode === 'native' ? null : { id: 1, channels: 2, sample_rate: request.sample_rate } }); return { state: 'applied' }; });
+    await f.button('创建房间').onclick(); await settle();
+    const request = f.calls.find(call => call.action === 'create');
+    assert.equal(request.format_mode, chosenRate === 'native' ? 'native' : 'fixed');
+    if (chosenRate === 'native') assert.equal(Object.hasOwn(request, 'sample_rate'), false, 'native creation omits sample_rate entirely, including null');
+    else assert.equal(request.sample_rate, chosenRate);
+    f.api.destroy();
+  }
+  {
+    const f = fixture(); await settle();
+    const formatChip = () => walk(f.root).find(node => node.className === 'room-sync-summary').children[1];
+    const metricValue = label => { const children = walk(f.root).find(node => node.className === 'room-metrics').children, index = children.findIndex(node => node.tagName === 'dt' && node.textContent === label); return index < 0 ? null : children[index + 1].textContent; };
+    f.set({ format_mode: 'native', format: null, source_rate: null, current_track: null, playing: false, ended: false, position_ms: '0', pending: { prepared: true, format: { id: 2, sample_rate: 192000, channels: 2 } }, scheduled: null }); await f.poll();
+    assert.equal(formatChip().textContent, '等待歌曲格式', 'a prepared format does not become the current format');
+    assert.equal(metricValue('房间采样率'), '等待歌曲格式');
+    assert.equal(metricValue('准备中歌曲采样率'), '192 kHz');
+    f.set({ pending: null, scheduled: { format: { id: 2, sample_rate: 192000, channels: 2 } } }); await f.poll();
+    assert.equal(formatChip().textContent, '等待歌曲格式', 'Commit still does not publish a not-yet-audible format');
+    const current = { id: 1, sample_rate: 44100, channels: 2 };
+    f.set({ format: current, source_rate: 44100, declared_source_rate: 48000, current_track: { resource_id: 'current', title: '本曲的真实末尾', duration_ms: 30000 }, track_instance_id: 'old-instance', position_ms: '29243', playing: true,
+      output: { enabled: true, ready: true, binding: { sample_rate: 48000, device: 'USB Audio' }, settings: { volume: .7 } }, dsp: { preamp_db: -3, eq_gains_db: [0, 1, 0, 0, 0, 0] }, volume: .8, loudness_mode: 'album' }); await f.poll();
+    assert.match(formatChip().textContent, /原生采样率 · 44\.1 kHz/);
+    assert.equal(metricValue('来源采样率'), '44.1 kHz'); assert.equal(metricValue('房间采样率'), '44.1 kHz'); assert.equal(metricValue('实际设备采样率'), '48 kHz');
+    assert.equal(metricValue('标称来源采样率'), '48 kHz', 'metadata stays a separate diagnostic');
+    assert.match(metricValue('房间到设备'), /采样率转换.*时钟漂移校正/); assert.match(metricValue('房间音效 / DSP'), /专辑响度归一化.*均衡器.*前置增益 -3 dB.*房间音量 80%/);
+    f.set({ playing: false, ended: true }); await f.poll();
+    const badge = walk(f.root).find(node => node.className === 'room-playing-badge'), position = walk(f.root).find(node => node.className === 'room-seek-line').children[0];
+    assert.equal(badge.textContent, '已结束 · 等待下一首'); assert.equal(position.textContent, '0:29');
+    f.advance(60000); await f.poll();
+    assert.equal(position.textContent, '0:29', 'an ended gap never extrapolates the old position'); assert.match(formatChip().textContent, /44\.1 kHz/, 'old format remains through the gap');
+    f.set({ successor_error: { instance_id: 'selected-instance', code: 'native_source_rate_unsupported', message: '此歌曲的解码采样率暂不支持。' }, scheduled: null }); await f.poll();
+    assert.equal(badge.textContent, '已结束 · 后续歌曲暂不可播');
+    const failure = walk(f.root).find(node => node.className === 'room-sub room-successor-status');
+    assert.equal(failure.hidden, false); assert.match(failure.textContent, /此歌曲的解码采样率暂不支持/); assert.match(formatChip().textContent, /44\.1 kHz/);
+    f.set({ successor_error: null, ended: false, playing: true, source_rate: 192000, declared_source_rate: 192000, format: { id: 2, sample_rate: 192000, channels: 2 }, position_ms: '0' }); await f.poll();
+    assert.match(formatChip().textContent, /192 kHz/); assert.equal(metricValue('实际设备采样率'), '48 kHz', 'native source changes do not imply a device rate change'); assert.equal(metricValue('标称来源采样率'), null); assert.equal(failure.hidden, true);
+    f.set({ output: { enabled: false, binding: null, settings: { sample_rate: 192000 } } }); await f.poll();
+    assert.equal(metricValue('实际设备采样率'), '等待设备就绪', 'requested settings never impersonate an actual device format');
+    f.api.destroy();
+  }
   {
     const f = fixture(); await settle(); f.set({ mode: 'local' }); await f.poll();
     const dialog = walk(f.root).find(node => node.tagName === 'dialog' && node.attrs['aria-labelledby'] === 'room-entry-title-join');
@@ -574,6 +633,29 @@ async function main() {
   assert.equal(artworkReads, 3, 'retries stay bounded even for a permanently broken image');
   artwork.api.destroy();
 
+  const vocalReading = fixture(); await settle();
+  let sharedLyrics = { agents: [{ id: 'a', kind: 'person' }, { id: 'b', kind: 'person' }], lines: [
+    { start_ms: 0, end_ms: 10000, text: '长句', vocal: { agent_ids: ['a'], role: 'lead' } },
+    { start_ms: 2000, end_ms: 4000, text: '短句', vocal: { agent_ids: ['b'], role: 'backing' } }
+  ] };
+  vocalReading.hooks.set('resource', async () => {
+    const bytes = Buffer.from(JSON.stringify(sharedLyrics));
+    return { total: bytes.length, offset: 0, revision: 'lyrics-version', mime: 'application/json', base64: bytes.toString('base64') };
+  });
+  const lyricRail = () => walk(vocalReading.root).find(n => n.className === 'room-lyrics');
+  async function finishLyricRead() { await new Promise(resolve => setImmediate(resolve)); await settle(); }
+  vocalReading.set({ current_track: { resource_id: 'vocal-song', title: '多人声' }, position_ms: 2000 });
+  await vocalReading.poll(); await finishLyricRead();
+  const unsupportedLyrics = '此歌词包含多人声，房间播放器暂不支持；请使用桌面歌词';
+  assert.equal(lyricRail().textContent, unsupportedLyrics);
+  vocalReading.set({ position_ms: 4000 }); await vocalReading.poll();
+  assert.equal(lyricRail().textContent, unsupportedLyrics, 'a shorter overlap ending never routes vocals to latest-start rendering');
+  sharedLyrics = { agents: sharedLyrics.agents, lines: [{ start_ms: 0, end_ms: 10000, text: '普通歌词恢复' }] };
+  vocalReading.set({ sharing_revision: '2' }); await vocalReading.poll(); await finishLyricRead();
+  assert.equal(lyricRail().textContent, '普通歌词恢复', 'unused agent declarations preserve ordinary rendering after the same resource is revised');
+  assert.equal(lyricRail().children[0].getAttribute('aria-current'), 'true');
+  vocalReading.api.destroy();
+
   const song = fixture(); await settle();
   song.hooks.set('queue_page', async () => ({ revision: '2', queue: [{ instance_id: 'song-instance', resource_id: 'shared-song' }], tracks: [{ resource_id: 'shared-song', title: 'Shared song' }] }));
   song.set({ revision: '2', current_track: { resource_id: 'shared-song', title: '<script>song</script>' + '长标题'.repeat(100), artist: 'Artist' } }); await song.poll();
@@ -801,6 +883,6 @@ async function main() {
   assert.equal(body.children[0].hidden, true, 'leaving the room removes the mini player');
   bar.render(trackSnapshot('C', 300000));
   assert.equal(collapse.getAttribute('aria-expanded'), 'true', 'a new room starts expanded');
-  console.log('Room UI: selected-track creation/no replay, application dialogs/dots/deferred review, bounded artwork recovery, background projection recovery, inline admission verification/retries, queue instance identity, reconnect receipts, history and session isolation passed.');
+  console.log('Room UI: fixed/native creation payloads, null/current/pending formats, ended position and successor errors, source/room/device diagnostics, selected-track creation/no replay, application dialogs/dots/deferred review, bounded artwork recovery, background projection recovery, inline admission verification/retries, queue instance identity, reconnect receipts, history and session isolation passed.');
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

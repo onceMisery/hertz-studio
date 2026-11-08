@@ -228,11 +228,26 @@
     return DEFAULT_ID;
   }
 
+  // 文件迁移只携带已知主题的选择。内部一次性迁移标记由这个 owner 派生，
+  // 防止用户导入当前版本的晴空绘卷后，再被旧默认升级逻辑覆盖。
+  function preferenceTransfer(value) {
+    var customId = window.ThemeStudio && typeof window.ThemeStudio.customThemeId === 'function'
+      ? window.ThemeStudio.customThemeId() : null;
+    if (typeof value !== 'string' || (!byId.has(value) && value !== customId)) {
+      throw new TypeError('主题偏好不是当前版本支持的主题');
+    }
+    return { value: value, writes: [
+      { key: STORE_KEY, value: value },
+      { key: DEFAULT_MIGRATED_KEY, value: '1' }
+    ] };
+  }
+
   window.Theme = {
     init: init,
     apply: apply,
     list: list,
     current: function () { return current; },
+    preferenceTransfer: preferenceTransfer,
     // 换肤后要做的事（重绘 canvas、重建渐变……）挂这里
     onChange: function (fn) { if (typeof fn === 'function') listeners.push(fn); },
     // 扩展方式：Theme.register({ id, name, note, tokens })。

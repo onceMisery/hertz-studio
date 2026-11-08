@@ -1,5 +1,7 @@
 # DBX 接入桌面歌词与壁纸：后续设计
 
+2026-11-07 A10实施扩展：原v1只读信封的lyrics document params可增加整数 `vocalSchemaVersion:1`，实际白名单、共享生产投影与原生统一校验已同步。仅来源快照声明 `vocalSchemaVersions:[1]`时发送该参数；无能力的旧来源保持原请求。声部文档缺失/不匹配能力时422明确拒绝且无正文，普通文档仍旧形状；不扩scope或播控权限。新候选的真实最低/当前宿主和图形验证仍单独待验，旧报告不证明本扩展已发布。
+
 日期：2026-10-27；设计复核与实施：2026-10-28–29，基线为 `1d042b8` 与当前工作树，包含已落地的歌词工具条。状态：**D0–D2 已实现并通过两阶段审查，D3a 同源配套候选和交付材料已准备；D3b 完整发布验收待完成**。独立组件启动方式固定为 manual，不能据分项通过宣称正式交付。实施进度与证据见[实施记录](./plans/2026-10-28-dbx-desktop-implementation.md)、[验证记录](./plans/2026-10-28-dbx-desktop-evidence.md)及[D-A01–D-A18 验收审计](./plans/2026-10-29-dbx-desktop-acceptance-audit.md)。
 
 最新进度（10 月 30 日，非八小时专项）：最终两版当前宿主核心无授权图形差分、已授权/未授权生命周期、12 次原生伪造播控拒绝、指定独立 Standard 三来源切换/播控恢复、GUI 保存失败/重试、zip 升级/备份恢复、实际旧 build 拒绝、重复点击/撤销重连与卸载重装均有最终产物证据。renderer crash 后约 10.6 秒自动重建并恢复同来源；CDP frozen 注入的未及时重建仍待查。三端已正常退出，22 个实际归属进程实例回收、宿主全局文件无差异。索引 `shutdown-discovery/final-nonsoak-verification.json` 绑定 15 份通过报告，保留 17 份失败尝试。原长稳约 87.75 分钟后按优先级正常结束，不计八小时通过。目录移动/自启、其余故障与系统恢复、最低宿主图形差分、资源预算和身份/平台等缺项见验收表；D3b 保持未完成。
@@ -412,3 +414,7 @@ D0 不依赖先完成所有桌面长稳；D3 必须继承现有原生验收要�
 D0 结论直接回填第 9–10 节，至少记录 DBX 版本、插件 buildId / 配套 desktopBuildId、Windows 会话、启动方式与 Job 归属、退出原因、取消后的连接 / 句柄回收及产物来源。协议检查须包含确定性晚到响应、撤销后残留钥匙重启和 connect / disconnect 交错，而非仅靠循环压测碰运气；D0 探针在相应生产测试接管后退出维护，不再另立一套兼容实现。
 
 实施完成后同步本文状态、共享宿主的发现 / 权限 / 部署章节、歌词 L3 与壁纸 DBX 范围、README 能力表、生成的 API 清单、插件 manifest / 市场材料和现行 ADR。正式发布前不能把本文的目标字段登记成当前能力，也不能把尚未通过的 D3 标为完成。
+
+## 当前Full真实PluginHost与配套组件包
+
+[真实PluginHost四组](../output/native-release-full-pluginhost-20261107/verified.json)使用release9418，在0.6.47及最低0.6.35分别验证未授权/已授权、基础SDK、当前20a30e组件要求和歌词/壁纸管道身份快照。[配套组件f030](../output/native-release-desktop-component-current-candidate-20261107/candidate.json)已release构建并生成[manual ZIP](../output/native-release-desktop-component-current-candidate-20261107/package/hertz-desktop-0.3.2-preview-windows-x64.zip)，[独立复核](../output/native-release-dbx-component-verification-20261107.json)确认721生产输入、51/50宿主本地来源、四文件包内manifest/exe/许可证/安装说明、候选摘要和测试进程退出。实际DBX stop终止进程树；两份发现文件保留且原PID已不存在，不把API停止成功改记为自然退出/发现移除。下一步须在该原生组件验证旧发现拒绝、真实live绑定、两scope呈现、来源切换与退出；Standard、完整工作台、D3b、签名/净系统/设备及其它OS仍独立开放。原版本夹具失败和旧报告保留；A07/A10/M0待审、不走TDD。

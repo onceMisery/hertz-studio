@@ -115,9 +115,32 @@
       d.energy = 0; d.pulse = 0; d.beats = 0; d.lastBeatAt = 0; d.score = 0;
     };
 
+    // 恢复后的首份频谱只建立检测基线，不把从零跳到当前响度算成起音。
+    // 不改 beats/lastBeatAt：priming 本身不是一拍，也不产生新的不应期。
+    d.prime = function (spectrum, t) {
+      var n = spectrum && spectrum.length;
+      if (!n) return;
+      var i, g, v, total = 0;
+      for (i = 0; i < NB; i += 1) {
+        v = spectrum[Math.min(n - 1, Math.floor((i + 0.5) / NB * n))] || 0;
+        fastB[i] = slowB[i] = d.bins[i] = v;
+        d.binRise[i] = 0;
+      }
+      for (g = 0; g < NG; g += 1) {
+        v = groupMean(spectrum, n, cfg.groups[g]);
+        fastG[g] = slowG[g] = prevAgg[g] = d.agg[g] = v;
+        d.groupRise[g] = 0;
+        total += v;
+      }
+      hist.fill(0);
+      histAt = 0; histN = 0; histSum = 0; histSqr = 0;
+      d.energy = total / NG; d.pulse = 0; d.score = 0; d.threshold = cfg.floor;
+    };
+
     // spectrum 可以是任意长度（服务端 spectrum_bands 可配），逐段输出固定
     // 是 binCount 长：按 (i+0.5)/NB 重采样，段数变了着色器和渲染器都不用改。
-    d.step = function (dtMs, spectrum, t) {
+    // 同一接收 revision 可继续平滑/衰减；publishBeat:false 只禁止再次发拍。
+    d.step = function (dtMs, spectrum, t, stepOptions) {
       var n = spectrum.length;
       if (!n) return;
       var aFast = alpha(dtMs, cfg.fastTau);
@@ -157,7 +180,8 @@
       var limit = mean + Math.sqrt(variance) * cfg.sigma + cfg.floor;
       d.threshold = limit;
 
-      if (score > limit && t - d.lastBeatAt > cfg.refractoryMs) {
+      if ((!stepOptions || stepOptions.publishBeat !== false)
+        && score > limit && t - d.lastBeatAt > cfg.refractoryMs) {
         d.lastBeatAt = t;
         d.beats += 1;
         // 一次起音给多少冲击按"超出阈值多少"算，而不是非 0 即 1：

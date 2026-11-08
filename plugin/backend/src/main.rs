@@ -90,18 +90,29 @@ impl PluginHandler for Plugin {
         // 二进制体（封面替换）：base64 解不开是信封非法，属协议级错误，
         // 与 `op` 不合法同一档，不能塞进带内的 {status, body}。
         let raw = match envelope_str(&params, "raw_base64")? {
-            Some(data) => Some(RawBody {
-                bytes: decode_base64(data).map_err(|error| {
-                    PluginError::new(
-                        -32602,
-                        format!("envelope.raw_base64 不是合法 base64: {error}"),
-                    )
-                })?,
-                // 缺省值与前端 dbxRequest 的缺省一致，两边不会因一边省略而错位。
-                content_type: envelope_str(&params, "raw_content_type")?
-                    .unwrap_or("application/octet-stream")
-                    .to_string(),
-            }),
+            Some(data) => {
+                // Bound the encoded envelope before allocating decoded stage chunks.
+                if method
+                    .split('/')
+                    .filter(|part| !part.is_empty())
+                    .eq(["v1", "stage", "media", "import", "chunk"])
+                    && data.len() > 4 * (256 * 1024usize).div_ceil(3)
+                {
+                    return Err(PluginError::new(-32602, "舞台素材块最多 256 KiB"));
+                }
+                Some(RawBody {
+                    bytes: decode_base64(data).map_err(|error| {
+                        PluginError::new(
+                            -32602,
+                            format!("envelope.raw_base64 不是合法 base64: {error}"),
+                        )
+                    })?,
+                    // 缺省值与前端 dbxRequest 的缺省一致，两边不会因一边省略而错位。
+                    content_type: envelope_str(&params, "raw_content_type")?
+                        .unwrap_or("application/octet-stream")
+                        .to_string(),
+                })
+            }
             None => None,
         };
 
@@ -199,19 +210,20 @@ fn envelope_result(result: RpcResult) -> Value {
 ///
 /// 手工跑这个二进制调试时该变量不存在。这时**不能**回落到独立形态的默认目录：
 /// 两个进程同时写同一个 SQLite 会互相踩。所以退到默认目录下的一个专属子目录。
-fn resolve_data_dir() -> PathBuf {
-    // sidecar 的专属子目录挂在同一个数据根下，所以根目录的改名迁移要先发生。
-    hertz_studio::config::migrate_legacy_data_dir();
+fn resolve_data_dir() -> anyhow::Result<PathBuf> {
     if let Some(dir) = std::env::var_os("DBX_PLUGIN_DATA_DIR").filter(|value| !value.is_empty()) {
         let dir = PathBuf::from(dir);
-        return if hertz_studio::edition::FULL {
+        return Ok(if hertz_studio::edition::FULL {
             dir
         } else {
             dir.join("standard")
-        };
+        });
     }
+    // Only the implicit fallback uses the old default root; an explicit DBX
+    // profile must never migrate an unrelated standalone installation.
+    hertz_studio::config::migrate_legacy_data_dir()?;
     tracing::warn!("DBX_PLUGIN_DATA_DIR 未设置，回落到独立数据目录之外的专属子目录");
-    hertz_studio::config::default_data_dir().join("dbx-plugin")
+    Ok(hertz_studio::config::default_data_dir().join("dbx-plugin"))
 }
 
 fn init_logging() {
@@ -228,14 +240,13 @@ fn init_logging() {
 /// 装配运行时。与 `Plugin::handle` 分开是因为 `runtime.block_on` 借用 runtime，
 /// 不能在同一表达式里把 runtime 移进它自己跑的 future。
 async fn boot_plugin() -> anyhow::Result<hertz_studio::bootstrap::Booted> {
-    let data_dir = hertz_studio::bootstrap::absolute_data_dir(&resolve_data_dir())?;
-    let config = hertz_studio::bootstrap::prepare(&data_dir).await?;
+    let data_dir = hertz_studio::bootstrap::absolute_data_dir(&resolve_data_dir()?)?;
+    let prepared = hertz_studio::bootstrap::prepare(&data_dir).await?;
     // stdio 天然可信，没有 HTTP 那一层的 bearer token；`AppState` 要求有值，
     // 所以填一个随机串，永不外泄也永不校验。
     let token = uuid::Uuid::new_v4().to_string();
     let booted = hertz_studio::bootstrap::boot(
-        data_dir,
-        config,
+        prepared,
         token,
         String::new(),
         String::new(),

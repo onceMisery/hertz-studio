@@ -62,6 +62,75 @@ pub(crate) struct StandalonePreferences {
     mini: MiniConfig,
 }
 
+impl Config {
+    pub(crate) fn wallpaper_references(
+        &self,
+        work_key: Option<&str>,
+        package_hash: Option<&str>,
+    ) -> crate::wallpaper::references::Report {
+        let mut report = crate::wallpaper::references::Report::default();
+        let mut collect = |wallpaper: &WallpaperConfig, id: &str, label: &str| {
+            for group in &wallpaper.groups {
+                let mut projected = wallpaper.clone();
+                projected.groups = vec![group.clone()];
+                if projected.references_package(work_key, package_hash) {
+                    report.push(
+                        "savedConfiguration",
+                        &format!("{id}:{}", group.id),
+                        label,
+                        &format!(
+                            "显示组 {} · {}。切换此组的作品并应用设置后解除引用。",
+                            group.id,
+                            if wallpaper.enabled {
+                                "已启用"
+                            } else {
+                                "已停用，选择仍被保存"
+                            }
+                        ),
+                    );
+                }
+            }
+        };
+        collect(&self.wallpaper, "current", "当前来源的壁纸选择");
+        for (index, domain) in self.profiles.iter().enumerate() {
+            collect(
+                &domain.wallpaper,
+                &format!("profile-{index}"),
+                &format!(
+                    "{} · {}",
+                    domain.profile.edition(),
+                    domain.profile.data_dir()
+                ),
+            );
+        }
+        if let Some(domain) = &self.unbound_domain {
+            collect(&domain.wallpaper, "unbound", "未绑定来源的壁纸设置");
+        }
+        report
+    }
+
+    pub(crate) fn playlist_property_overrides(
+        &self,
+        playlist_id: &str,
+    ) -> Vec<serde_json::Map<String, serde_json::Value>> {
+        let mut values = Vec::new();
+        for wallpaper in std::iter::once(&self.wallpaper)
+            .chain(self.profiles.iter().map(|profile| &profile.wallpaper))
+            .chain(self.unbound_domain.iter().map(|domain| &domain.wallpaper))
+        {
+            for group in &wallpaper.groups {
+                if !group.properties.is_empty()
+                    && matches!(&group.selection, crate::wallpaper::config::Selection::Playlist { playlist_id: selected } if selected == playlist_id)
+                    && !values.contains(&group.properties)
+                {
+                    values.push(group.properties.clone());
+                }
+            }
+        }
+        values
+    }
+}
+
 /// 小窗播放（桌面宠物）的持久化域。全部字段带 default：旧 v4 文件没有
 /// `mini` 键也照常解析，不需要 schema 迁移（设计文档 §7.6 的推荐做法）。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -377,6 +446,8 @@ pub(crate) struct LyricsConfig {
     #[serde(default)]
     pub(crate) bilingual: bool,
     #[serde(default = "default_true")]
+    pub(crate) show_vocals: bool,
+    #[serde(default = "default_true")]
     pub(crate) karaoke: bool,
     #[serde(default)]
     pub(crate) readability_boost: bool,
@@ -444,6 +515,7 @@ impl Default for LyricsConfig {
             surface: LyricSurface::Bare,
             align: LyricAlign::Center,
             bilingual: false,
+            show_vocals: true,
             karaoke: true,
             readability_boost: false,
             font_family: "Segoe UI".into(),
@@ -464,6 +536,7 @@ impl Default for LyricsConfig {
 
 impl Config {
     /// Inactive profiles and the saved unbound domain still need their immutable packages.
+    #[cfg(test)]
     pub(crate) fn references_wallpaper_package(
         &self,
         work_key: Option<&str>,
@@ -1089,6 +1162,7 @@ pub(crate) fn load_with_notice() -> Result<(Config, Option<String>)> {
         .lock()
         .map_err(|_| anyhow::anyhow!("配置保存锁不可用"))?;
     let directory = base_dir();
+    let _root_owner = crate::wallpaper_upgrade::admit_config(&directory)?;
     let _file_lock = crate::config_journal::FileLock::acquire(&directory)?;
     let recovery_notice = match reconcile_journal_at(&directory) {
         Ok(false) => None,
@@ -1200,6 +1274,7 @@ pub(crate) fn replay_request(
         .lock()
         .map_err(|_| anyhow::anyhow!("配置保存锁不可用"))?;
     let directory = base_dir();
+    let _root_owner = crate::wallpaper_upgrade::admit_config(&directory)?;
     let _file_lock = crate::config_journal::FileLock::acquire(&directory)?;
     let mut journal = crate::config_journal::Store::open(&directory)?;
     journal.reconcile(&directory)?;
@@ -1220,6 +1295,7 @@ fn commit_named_at(
     intent: &crate::config_journal::Intent,
 ) -> Result<crate::config_journal::Operation> {
     use crate::config_journal::{JournalError, Store};
+    let _root_owner = crate::wallpaper_upgrade::admit_config(directory)?;
     let _file_lock = crate::config_journal::FileLock::acquire(directory)?;
     let mut journal = Store::open(directory)?;
     journal.reconcile(directory)?;
@@ -1288,6 +1364,7 @@ pub(crate) fn operation_at(
     if !directory.exists() {
         return Ok(None);
     }
+    let _root_owner = crate::wallpaper_upgrade::admit_config(directory)?;
     let _file_lock = crate::config_journal::FileLock::acquire(directory)?;
     let mut journal = crate::config_journal::Store::open(directory)?;
     journal.reconcile(directory)?;
@@ -1295,6 +1372,46 @@ pub(crate) fn operation_at(
 }
 fn save_locked(config: &Config) -> Result<()> {
     save_at(config, &base_dir())
+}
+
+#[cfg(test)]
+mod admission_tests {
+    use super::*;
+    use crate::wallpaper::library::{tempfileish, Library};
+
+    #[tokio::test]
+    async fn commits_and_journal_reads_refuse_maintenance_and_future_database_before_mutation() {
+        let dir = tempfileish::temp_dir("config-root-admission");
+        let mut config = Config::default();
+        save_at(&config, dir.path()).unwrap();
+        let before = std::fs::read(dir.path().join("config.json")).unwrap();
+        let owner = crate::root_owner::RootOwner::exclusive(dir.path()).unwrap();
+        let intent = crate::config_journal::Intent::internal(b"root-admission").unwrap();
+        let next = config.clone();
+        assert!(commit_named_at(&mut config, next, dir.path(), &intent).is_err());
+        assert!(operation_at(dir.path(), "root-admission").is_err());
+        assert_eq!(
+            std::fs::read(dir.path().join("config.json")).unwrap(),
+            before
+        );
+        assert!(!dir.path().join("operations").exists());
+        drop(owner);
+        let library = Library::open(dir.path()).await.unwrap();
+        sqlx::query("UPDATE _sqlx_migrations SET version=99 WHERE version=6")
+            .execute(library.pool())
+            .await
+            .unwrap();
+        library.pool().close().await;
+        drop(library);
+        let next = config.clone();
+        assert!(commit_named_at(&mut config, next, dir.path(), &intent).is_err());
+        assert!(operation_at(dir.path(), "root-admission").is_err());
+        assert_eq!(
+            std::fs::read(dir.path().join("config.json")).unwrap(),
+            before
+        );
+        assert!(!dir.path().join("operations").exists());
+    }
 }
 fn save_at(config: &Config, dir: &Path) -> Result<()> {
     let bytes = encode_config(config)?;
@@ -1357,7 +1474,70 @@ pub(crate) fn detect_profiles() -> Vec<Profile> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn show_vocals_legacy_default_and_explicit_choices_preserve_other_preferences() {
+        let mut value = serde_json::to_value(super::LyricsConfig::default()).unwrap();
+        value["fontSize"] = serde_json::json!(46.0);
+        value["layout"] = serde_json::json!("triple");
+        value["bilingual"] = serde_json::json!(true);
+        value.as_object_mut().unwrap().remove("showVocals");
+        let legacy: super::LyricsConfig = serde_json::from_value(value.clone()).unwrap();
+        assert!(legacy.show_vocals);
+        for enabled in [false, true] {
+            value["showVocals"] = serde_json::json!(enabled);
+            let saved: super::LyricsConfig = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(saved.show_vocals, enabled);
+            assert_eq!(saved.font_size, 46.0);
+            assert_eq!(saved.layout, super::Layout::Triple);
+            assert!(saved.bilingual);
+        }
+    }
     use super::*;
+
+    #[test]
+    fn playlist_property_guards_include_inactive_profiles_and_unbound_intent() {
+        let mut config = Config::default();
+        config.wallpaper.main_mut().selection = crate::wallpaper::config::Selection::Playlist {
+            playlist_id: "shared-list".into(),
+        };
+        config
+            .wallpaper
+            .main_mut()
+            .properties
+            .insert("brightness".into(), serde_json::json!(0.3));
+        let mut inactive = config.wallpaper.clone();
+        inactive.enabled = false;
+        inactive
+            .main_mut()
+            .properties
+            .insert("brightness".into(), serde_json::json!(0.4));
+        config.profiles.push(ProfileDomain {
+            profile: standalone(PathBuf::from("C:/public-properties-other"), "full"),
+            lyrics: LyricsConfig::default(),
+            wallpaper: inactive,
+            mini: MiniConfig::default(),
+        });
+        let mut unbound = config.wallpaper.clone();
+        unbound
+            .main_mut()
+            .properties
+            .insert("brightness".into(), serde_json::json!(0.5));
+        config.unbound_domain = Some(StandalonePreferences {
+            lyrics: LyricsConfig::default(),
+            wallpaper: unbound,
+            mini: MiniConfig::default(),
+        });
+        let values = config.playlist_property_overrides("shared-list");
+        assert_eq!(values.len(), 3);
+        assert_eq!(
+            values
+                .iter()
+                .map(|value| value["brightness"].as_f64().unwrap())
+                .collect::<Vec<_>>(),
+            vec![0.3, 0.4, 0.5]
+        );
+        assert!(config.playlist_property_overrides("other-list").is_empty());
+    }
 
     #[test]
     fn old_lyrics_config_keeps_style_and_gets_appearance_defaults() {
@@ -1368,6 +1548,7 @@ mod tests {
             "surface",
             "align",
             "bilingual",
+            "showVocals",
             "karaoke",
             "readabilityBoost",
         ] {
@@ -1383,6 +1564,7 @@ mod tests {
         assert_eq!(lyrics.theme, LyricTheme::Auto);
         assert_eq!(lyrics.surface, LyricSurface::Bare);
         assert!(!lyrics.bilingual && lyrics.karaoke);
+        assert!(lyrics.show_vocals);
     }
 
     #[test]
@@ -1394,6 +1576,7 @@ mod tests {
         config.lyrics.surface = LyricSurface::Glass;
         config.lyrics.align = LyricAlign::Right;
         config.lyrics.bilingual = true;
+        config.lyrics.show_vocals = false;
         config.lyrics.karaoke = false;
         config.lyrics.readability_boost = true;
         let (loaded, _) = parse_config(&encode_config(&config).unwrap()).unwrap();
@@ -1402,6 +1585,7 @@ mod tests {
         assert_eq!(loaded.lyrics.surface, LyricSurface::Glass);
         assert_eq!(loaded.lyrics.align, LyricAlign::Right);
         assert!(loaded.lyrics.bilingual && !loaded.lyrics.karaoke);
+        assert!(!loaded.lyrics.show_vocals);
         assert!(loaded.lyrics.readability_boost);
     }
 
@@ -1432,6 +1616,26 @@ mod tests {
         assert!(loaded.references_wallpaper_package(None, Some(&"b".repeat(64))));
         assert!(loaded.references_wallpaper_package(Some("unbound-work"), None));
         assert!(loaded.references_wallpaper_package(None, Some(&"a".repeat(64))));
+        let inactive =
+            serde_json::to_value(loaded.wallpaper_references(Some("profile-work"), None)).unwrap();
+        assert!(inactive["references"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|reference| reference["label"]
+                .as_str()
+                .unwrap()
+                .contains(r"C:\profiles\a")));
+        let unbound =
+            serde_json::to_value(loaded.wallpaper_references(None, Some(&"a".repeat(64)))).unwrap();
+        assert!(unbound["references"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|reference| reference["id"].as_str().unwrap().starts_with("unbound:")));
+        assert!(loaded
+            .wallpaper_references(Some("other-work"), Some(&"c".repeat(64)))
+            .is_empty());
         assert!(!loaded.references_wallpaper_package(Some("other-work"), Some(&"c".repeat(64))));
         loaded.activate_profile(profile("a")).unwrap();
         loaded.wallpaper = WallpaperConfig::default();
@@ -1692,32 +1896,38 @@ mod tests {
     #[test]
     fn recovery_hotkey_is_global_defaults_empty_and_survives_roundtrip() {
         // 旧配置没有该字段：默认空，revision 不因此变化。
-        let legacy =
-            serde_json::json!({"schemaVersion":5,"revision":4,"launchAtLogin":false,"activeProfile":null});
+        let legacy = serde_json::json!({"schemaVersion":5,"revision":4,"launchAtLogin":false,"activeProfile":null});
         let (config, migrated) = parse_config(&serde_json::to_vec(&legacy).unwrap()).unwrap();
         assert!(!migrated);
         assert_eq!(config.recovery_hotkey, None);
         assert_eq!(config.revision, 4);
         // 组合键是宿主全局字段：跨来源切换保持不变，roundtrip 保留原文。
-        let mut config = Config::default();
-        config.recovery_hotkey = Some("Ctrl+Alt+L".parse().unwrap());
+        let config = Config {
+            recovery_hotkey: Some("Ctrl+Alt+L".parse().unwrap()),
+            ..Config::default()
+        };
         let encoded = encode_config(&config).unwrap();
         let value: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
         assert_eq!(value["recoveryHotkey"], "Ctrl+Alt+L");
         let (mut config, _) = parse_config(&encoded).unwrap();
         assert_eq!(
-            config.recovery_hotkey.as_ref().map(crate::hotkey::Shortcut::as_str),
+            config
+                .recovery_hotkey
+                .as_ref()
+                .map(crate::hotkey::Shortcut::as_str),
             Some("Ctrl+Alt+L")
         );
         config.activate_profile(dbx("dbx")).unwrap();
         assert_eq!(
-            config.recovery_hotkey.as_ref().map(crate::hotkey::Shortcut::as_str),
+            config
+                .recovery_hotkey
+                .as_ref()
+                .map(crate::hotkey::Shortcut::as_str),
             Some("Ctrl+Alt+L")
         );
         // 存量文件里的非法组合键按配置损坏处理，不静默丢弃。
         for stored in ["Ctrl+Alt+F12", "Ctrl+L", "Win+Ctrl+L", "不是快捷键"] {
-            let invalid =
-                serde_json::json!({"schemaVersion":5,"revision":4,"launchAtLogin":false,"activeProfile":null,"recoveryHotkey":stored});
+            let invalid = serde_json::json!({"schemaVersion":5,"revision":4,"launchAtLogin":false,"activeProfile":null,"recoveryHotkey":stored});
             assert!(
                 parse_config(&serde_json::to_vec(&invalid).unwrap()).is_err(),
                 "unexpectedly accepted {stored}"

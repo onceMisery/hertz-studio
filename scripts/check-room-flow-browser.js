@@ -22,7 +22,7 @@ async function main() {
       return route.fulfill({ contentType: file.endsWith('.css') ? 'text/css' : 'text/html', body });
     });
     await page.goto('http://room-flow.test/');
-    for (const file of ['host.js', 'themes.js', 'theme-picker.js', 'room-workspace.js', 'room-view.js', 'room.js']) await page.addScriptTag({ content: source(file) });
+    for (const file of ['host.js', 'design/design-themes.js', 'themes.js', 'theme-picker.js', 'room-workspace.js', 'room-view.js', 'room.js']) await page.addScriptTag({ content: source(file) });
     await page.evaluate(async () => {
       Theme.init(); document.body.classList.add('room-view');
       document.querySelectorAll('.view').forEach(node => { node.hidden = node.id !== 'view-room'; });
@@ -39,7 +39,7 @@ async function main() {
             if (window.__discoverMode === 'fail') throw Object.assign(new Error('网络超时'), { status: 504 });
             return { interfaces: [{ name: 'Wi-Fi', address: '192.0.2.10' }], rooms: window.__rooms, discovery_available: window.__discoverMode !== 'unavailable' };
           }
-          if (body.action === 'create') { window.__snapshot = window.__host(); return { state: 'applied' }; }
+          if (body.action === 'create') { window.__snapshot = { ...window.__host(), format_mode: body.format_mode || 'fixed', format: body.format_mode === 'native' ? null : { id: 1, channels: 2, sample_rate: body.sample_rate || 48000 } }; return { state: 'applied' }; }
           if (body.action === 'apply') return { application_id: 'application', applicant_secret: 'private-proof', expires_in_seconds: 300 };
           if (body.action === 'admission_status') return { state: window.__applicationState };
           if (body.action === 'invite') { const id = 'invite-' + window.__calls.length; window.__snapshot.invitations.push({ id, expires_in_seconds: 300 }); return { invitation: 'hertz-listen:v1:fixture', invitation_id: id, expires_in_seconds: 300 }; }
@@ -107,6 +107,18 @@ async function main() {
       assert.ok(await create.evaluate(node => node.scrollWidth <= node.clientWidth), 'avatar grid fits dialog at ' + width);
     }
     await create.getByText('封面与高级设置', { exact: true }).click();
+    const formatMode = create.getByLabel('采样率模式', { exact: true }), fixedRate = create.getByLabel('房间采样率', { exact: true });
+    assert.equal(await formatMode.inputValue(), 'fixed'); assert.equal(await fixedRate.inputValue(), '48000');
+    await fixedRate.selectOption('192000'); await formatMode.selectOption('native');
+    assert.equal(await fixedRate.isVisible(), false); assert.equal(await fixedRate.isDisabled(), true);
+    await create.getByText('按歌曲解码采样率传输；不同采样率切歌可能有间隙。', { exact: true }).waitFor();
+    for (const width of [360, 390, 1200]) {
+      await page.setViewportSize({ width, height: 900 });
+      assert.ok(await create.evaluate(node => node.scrollWidth <= node.clientWidth), 'native creation fits ' + width);
+      await shot('create-native-' + width);
+    }
+    await formatMode.selectOption('fixed'); assert.equal(await fixedRate.inputValue(), '192000'); assert.equal(await fixedRate.isVisible(), true);
+    await formatMode.selectOption('native');
     const photo = await page.evaluate(() => {
       const canvas = document.createElement('canvas'); canvas.width = 1600; canvas.height = 900;
       const ctx = canvas.getContext('2d'), pixels = ctx.createImageData(1600, 900); let seed = 42;
@@ -132,6 +144,29 @@ async function main() {
     assert.ok(await page.locator('.room-seat [data-avatar=ghost]').count());
     assert.equal(await page.evaluate(() => localStorage.getItem('hertz.room.avatar.v1')), 'ghost');
     assert.equal(await page.evaluate(() => window.__calls.find(call => call.action === 'create').cover), preparedCover, 'creation submits the prepared cover');
+    assert.equal(await page.evaluate(() => window.__calls.find(call => call.action === 'create').format_mode), 'native');
+    assert.equal(await page.evaluate(() => Object.hasOwn(window.__calls.find(call => call.action === 'create'), 'sample_rate')), false, 'native payload omits the stale fixed rate entirely');
+    assert.equal(await page.locator('.room-sync-summary .room-chip').nth(1).textContent(), '等待歌曲格式');
+    await page.evaluate(async () => {
+      window.__snapshot = { ...window.__snapshot, format_mode: 'native', format: { id: 1, channels: 2, sample_rate: 44100 }, source_rate: 44100, declared_source_rate: 48000,
+        current_track: { resource_id: 'tail', title: '最后一段晚风', artist: '林间电台', duration_ms: 30000 }, track_instance_id: 'native-tail', playing: false, ended: true, position_ms: '29243',
+        scheduled: { format: { id: 2, channels: 2, sample_rate: 192000 } }, output: { enabled: true, ready: true, binding: { device: 'USB Audio', sample_rate: 48000 }, settings: { volume: .7 } },
+        successor_error: { instance_id: 'rejected', code: 'native_source_rate_unsupported', message: '此歌曲的解码采样率暂不支持，请在共同队列中核对歌曲后重试。' } };
+      await HertzRoom.onViewEnter();
+    });
+    for (const width of [360, 1200]) {
+      await page.setViewportSize({ width, height: 900 });
+      await page.locator('.room-lyrics-toggle').click();
+      assert.ok(await page.locator('.room-successor-status').isVisible(), 'source rejection stays visible with expanded lyrics at ' + width);
+      assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'ended source status fits ' + width);
+      await shot('native-ended-' + width); await page.locator('.room-lyrics-toggle').click();
+    }
+    await page.locator('.room-stage-details > summary').click();
+    await page.getByRole('button', { name: '查看同步与输出详情', exact: true }).click();
+    const metricValue = label => page.locator('.room-metrics dt').filter({ hasText: new RegExp('^' + label + '$') }).locator('xpath=following-sibling::dd[1]').textContent();
+    assert.equal(await metricValue('来源采样率'), '44.1 kHz'); assert.equal(await metricValue('房间采样率'), '44.1 kHz'); assert.equal(await metricValue('实际设备采样率'), '48 kHz');
+    await shot('native-diagnostics-1200'); await navigate('play');
+    await page.evaluate(async () => { window.__snapshot = { ...window.__snapshot, current_track: null, track_instance_id: null, playing: false, ended: false, position_ms: '0', successor_error: null, scheduled: null }; await HertzRoom.onViewEnter(); });
     await page.getByRole('button', { name: '邀请朋友', exact: true }).click();
     const invite = page.getByRole('dialog', { name: '邀请一起听', exact: true });
     await page.evaluate(() => { window.__clipboardFail = true; }); await invite.getByRole('button', { name: '生成并复制邀请', exact: true }).click();

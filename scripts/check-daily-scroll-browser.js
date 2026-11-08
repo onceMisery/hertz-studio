@@ -117,6 +117,10 @@ const geom = (page, sel) => page.evaluate((s) => {
   try {
     await page.goto(uiUrl(URL), { timeout: 30000, waitUntil: 'domcontentloaded' });
     await page.waitForFunction(() => window.Skins && window.Theme, null, { timeout: 15000 });
+    // 皮肤 mount 是异步的：window.Skins 存在不等于当前布局已装好。
+    // 立刻 Skins.apply('hertz') 会先 unmount 一个还没 mount 完的实例，
+    // 报 "Cannot set properties of undefined (setting 'hidden')"，与产品无关。
+    await page.waitForTimeout(1200);
 
     section('Hertz 每日推荐：桌面与触屏末行可达');
     await setSkin(page, 'hertz');

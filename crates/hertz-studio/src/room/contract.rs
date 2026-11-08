@@ -183,7 +183,10 @@ pub enum LocalRequest {
         #[serde(default)]
         cover: Option<String>,
         address: std::net::SocketAddr,
-        sample_rate: u32,
+        #[serde(default)]
+        format_mode: vmusic_lan::protocol::FormatMode,
+        #[serde(default, deserialize_with = "present_sample_rate")]
+        sample_rate: Option<u32>,
         local_output: bool,
         #[serde(default = "default_discoverable")]
         discoverable: bool,
@@ -260,6 +263,31 @@ pub enum LocalRequest {
         crossfade_ms: u64,
         loudness_mode: String,
     },
+}
+
+// An omitted rate keeps the legacy default. Explicit null is still invalid,
+// and Some distinguishes a supplied rate from omission for native creation.
+fn present_sample_rate<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<u32>, D::Error> {
+    u32::deserialize(deserializer).map(Some)
+}
+pub(super) fn creation_rate(
+    mode: vmusic_lan::protocol::FormatMode,
+    rate: Option<u32>,
+) -> RoomResult<u32> {
+    if mode == vmusic_lan::protocol::FormatMode::Native && rate.is_some() {
+        return Err(RoomError::invalid("原生采样率模式须省略 sample_rate"));
+    }
+    let rate = rate.unwrap_or(48_000);
+    vmusic_lan::protocol::AudioFormat {
+        id: 1,
+        sample_rate: rate,
+        channels: 2,
+    }
+    .validate()
+    .map_err(|_| RoomError::invalid("请选择受支持的房间采样率"))?;
+    Ok(rate)
 }
 fn default_discoverable() -> bool {
     true
@@ -344,6 +372,47 @@ mod tests {
             json!({"action":"discoverable","enabled":true})
         )
         .is_err());
+    }
+
+    #[test]
+    fn native_creation_preserves_omission_and_rejects_contradictory_rates() {
+        use vmusic_lan::protocol::FormatMode;
+        let base =
+            json!({"action":"create","name":"room","address":"127.0.0.1:0","local_output":false});
+        let LocalRequest::Create {
+            format_mode,
+            sample_rate,
+            ..
+        } = serde_json::from_value(base.clone()).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(format_mode, FormatMode::Fixed);
+        assert_eq!(creation_rate(format_mode, sample_rate).unwrap(), 48_000);
+        for mode in ["fixed", "native"] {
+            let mut value = base.clone();
+            value["format_mode"] = json!(mode);
+            value["sample_rate"] = serde_json::Value::Null;
+            assert!(serde_json::from_value::<LocalRequest>(value).is_err());
+        }
+        for rate in [44_100, 48_000, 96_000, 192_000] {
+            assert_eq!(creation_rate(FormatMode::Fixed, Some(rate)).unwrap(), rate);
+            assert!(creation_rate(FormatMode::Native, Some(rate)).is_err());
+        }
+        assert!(creation_rate(FormatMode::Fixed, Some(32_000)).is_err());
+        let mut native = base.clone();
+        native["format_mode"] = json!("native");
+        assert!(matches!(
+            serde_json::from_value::<LocalRequest>(native).unwrap(),
+            LocalRequest::Create {
+                format_mode: FormatMode::Native,
+                sample_rate: None,
+                ..
+            }
+        ));
+        let mut invalid = base;
+        invalid["format_mode"] = json!("automatic");
+        assert!(serde_json::from_value::<LocalRequest>(invalid).is_err());
     }
 
     #[test]

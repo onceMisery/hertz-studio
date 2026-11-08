@@ -785,14 +785,7 @@
     var base = hex2rgb(state.bg);
     var clamped = luminance(base) > DARK_BG_CAP;
     if (clamped) {
-      var scale = 1;
-      var shrunk = base;
-      // 亮度对缩放单调，逐档缩到线下即可；40 档 0.92 足够覆盖最亮的白。
-      for (var i = 0; i < 40 && luminance(shrunk) > DARK_BG_CAP; i += 1) {
-        scale *= 0.92;
-        shrunk = [base[0] * scale, base[1] * scale, base[2] * scale];
-      }
-      state.bg = rgb2hex(shrunk);
+      state.bg = darkBackground(base);
     }
 
     registerCustom();
@@ -807,6 +800,43 @@
     paintWallpaper();
     emit();
     return { clamped: clamped, bg: state.bg };
+  }
+
+  function darkBackground(base) {
+    // The previous producer rounded capped floating RGB to bytes. That can
+    // cross the cap by half a channel step; recognize only this bounded legacy
+    // envelope and normalize it downward at the same color owner.
+    var lower = base.map(function (channel) { return Math.max(0, channel - .5); });
+    if (luminance(lower) <= DARK_BG_CAP) return rgb2hex(lower.map(Math.floor));
+    var scale = 1, shrunk = base;
+    for (var i = 0; i < 40 && luminance(shrunk) > DARK_BG_CAP; i += 1) {
+      scale *= .92;
+      shrunk = base.map(function (channel) { return channel * scale; });
+    }
+    // Flooring the final bytes preserves the proven floating-point bound.
+    return rgb2hex(shrunk.map(Math.floor));
+  }
+
+  // 完整三色 schema，拒绝亮底；仅兼容旧 owner 量化产生的半个色值步长边界。
+  function preferenceTransfer(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)
+        || (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null)) {
+      throw new TypeError('自定义配色必须是完整三色对象');
+    }
+    var keys = Object.keys(value);
+    if (keys.length !== 3 || !['bg', 'accent', 'accent2'].every(function (key) {
+      return Object.prototype.hasOwnProperty.call(value, key)
+        && typeof value[key] === 'string' && /^#[0-9a-f]{6}$/i.test(value[key]);
+    })) throw new TypeError('自定义配色仅支持 bg、accent、accent2 三个 HEX 颜色');
+    var base = hex2rgb(value.bg), bg = value.bg.toLowerCase();
+    if (luminance(base) > DARK_BG_CAP) {
+      if (luminance(base.map(function (channel) { return Math.max(0, channel - .5); })) > DARK_BG_CAP) {
+        throw new TypeError('自定义配色底色超过当前版本的暗底亮度上限');
+      }
+      bg = darkBackground(base);
+    }
+    var colors = { bg: bg, accent: value.accent.toLowerCase(), accent2: value.accent2.toLowerCase() };
+    return { value: colors, writes: [{ key: CUSTOM_KEY, value: JSON.stringify(colors) }] };
   }
 
   // -------------------------------------------------------------------------
@@ -1104,6 +1134,8 @@
     setWallpaper: setWallpaper,
     setOptions: setOptions,
     applyCustom: applyCustom,
+    preferenceTransfer: preferenceTransfer,
+    customThemeId: function () { return CUSTOM_ID; },
     artPlaceholder: artPlaceholder,
     wallpapers: function () { return WALLPAPERS.slice(); },
     /// 主题 → 背景图的唯一入口。供宿主与契约脚本做"每套主题都有背景"的检查。

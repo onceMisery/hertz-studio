@@ -1019,24 +1019,6 @@ body.stage-lowfx #creative-bg-canvas {
 /* 工坊复用参数标签，但开关仍由自己的按钮表达状态。 */
 .ws-panel .sc-cell.is-toggle { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 44px; }
 .ws-panel .sc-cell.is-toggle .sc-label { flex: 1; min-width: 0; }
-.ws-panel .sc-switch {
-  position: relative;
-  flex: none;
-  width: 44px;
-  height: 32px;
-  margin: 0;
-  padding: 0;
-  border: 0;
-  border-radius: 999px;
-  background: transparent;
-  cursor: pointer;
-}
-.ws-panel .sc-switch::before { content: ""; position: absolute; inset: 4px 0; border: 1px solid var(--line-strong); border-radius: inherit; background: var(--field-bg); transition: background-color 160ms var(--ease), border-color 160ms var(--ease); }
-.ws-panel .sc-switch::after { content: ""; position: absolute; top: 8px; left: 4px; width: 16px; height: 16px; border-radius: 50%; background: var(--muted); transition: transform 160ms var(--ease), background-color 160ms var(--ease); }
-.ws-panel .sc-switch[aria-checked="true"]::before { border-color: var(--accent); background: var(--accent); }
-.ws-panel .sc-switch[aria-checked="true"]::after { background: var(--accent-ink); transform: translateX(20px); }
-.ws-panel .sc-switch:not(:disabled):hover::before { border-color: var(--accent); }
-.ws-panel .sc-switch:disabled { opacity: .5; cursor: not-allowed; }
 .ws-panel .sc-select-wrap { min-width: 0; }
 .ws-panel .sc-select-wrap select { width: 100%; min-width: 0; min-height: 40px; padding: 9px 12px; border: 1px solid var(--field-border); border-radius: 8px; background: var(--field-bg); color: var(--text); font-size: 13px; box-shadow: none; backdrop-filter: none; }
 .ws-panel .sc-select-wrap select:hover, .ws-panel .sc-select-wrap select:focus { border-color: var(--field-border-strong); background: var(--field-bg); }
@@ -1130,8 +1112,5 @@ body.ws-open:not(.s3d-open) #lyric-page { right: 400px; width: auto; }
 }
 @media (prefers-reduced-motion: reduce) {
   .ws-look-card, .ws-look-swatch svg, .ws-defaults { transition: none; }
-  .ws-panel .sc-switch::before, .ws-panel .sc-switch::after { transition: none; }
   .ws-look-card:hover .ws-look-swatch svg, .ws-look-card:active, .ws-defaults:active { transform: none; }
 }
-body.reduce-motion .ws-panel .sc-switch::before,
-body.reduce-motion .ws-panel .sc-switch::after { transition: none; }

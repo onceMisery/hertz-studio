@@ -15,13 +15,20 @@ use vmusic_core::StoreError;
 use crate::now_ms;
 
 pub async fn get_all(pool: &SqlitePool) -> Result<BTreeMap<String, Value>, StoreError> {
+    get_all_from(pool).await
+}
+
+pub(crate) async fn get_all_from<'e, E>(executor: E) -> Result<BTreeMap<String, Value>, StoreError>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
     #[derive(sqlx::FromRow)]
     struct Row {
         key: String,
         value: String,
     }
     let rows = sqlx::query_as::<_, Row>("SELECT key, value FROM settings")
-        .fetch_all(pool)
+        .fetch_all(executor)
         .await
         .map_err(|e| StoreError::Database(e.to_string()))?;
 
@@ -37,6 +44,11 @@ pub async fn set_all(
     pool: &SqlitePool,
     values: &BTreeMap<String, Value>,
 ) -> Result<(), StoreError> {
+    if values.keys().any(|key| crate::stage_presets::managed(key)) {
+        return Err(StoreError::Serialization(
+            "舞台预设必须通过版本化保存接口修改".into(),
+        ));
+    }
     for (key, value) in values {
         let encoded =
             serde_json::to_string(value).map_err(|e| StoreError::Serialization(e.to_string()))?;

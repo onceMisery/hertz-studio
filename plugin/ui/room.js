@@ -401,7 +401,17 @@
     refs.chat.replaceChildren(); messages.forEach(m => { const e = h('li'); view.drawMessage(m, e); if (snap.mode === 'host') e.append(button('删除', async () => { if (!current(key) || !await confirmAction('删除这条聊天消息？') || !current(key)) return; await command({ action: 'chat_admin', command: { action: 'delete', message_id: m.message_id } }); if (!current(key)) return; resetChat(); await loadChat(); })); refs.chat.append(e); });
     if (refs.stageChatLog && refs.stageChatPanel && !refs.stageChatPanel.hidden) refs.stageChatLog.scrollTop = refs.stageChatLog.scrollHeight;
   }
-  function metric(label, value) { refs.metrics.append(h('dt', '', label), h('dd', 'room-mono', value == null ? '待测量' : value)); }
+  function metric(label, value, copy = false) { refs.metrics.append(h('dt', '', label), h('dd', copy ? 'room-metric-copy' : 'room-mono', value == null ? '待测量' : value)); }
+  function rateText(rate, empty = '等待歌曲格式') { const value = Number(rate); return Number.isFinite(value) && value > 0 ? value / 1000 + ' kHz' : empty; }
+  function isPlaying(value) { return !!value.playing && value.ended !== true; }
+  function dspText() {
+    const dsp = snap.dsp || {}, parts = [];
+    if (snap.loudness_mode && snap.loudness_mode !== 'off') parts.push(snap.loudness_mode === 'album' ? '专辑响度归一化' : '曲目响度归一化');
+    if ((dsp.eq_gains_db || []).some(gain => Number(gain) !== 0)) parts.push('均衡器');
+    if (Number(dsp.preamp_db || 0) !== 0) parts.push('前置增益 ' + Number(dsp.preamp_db) + ' dB');
+    if (Number(snap.volume ?? 1) !== 1) parts.push('房间音量 ' + Math.round(Number(snap.volume) * 100) + '%');
+    return parts.length ? parts.join(' · ') : '未启用额外音效';
+  }
   function drawRoomProfile() {
     if (snap.mode === 'host') { view.drawRoomProfile(snap.room_cover); return; }
     const key = sessionKey(), revision = snap.room_cover_revision || '', signature = key + ':' + revision;
@@ -420,20 +430,25 @@
     mount(); workspace.render(snap); if (mounted !== 'active') { if (snap.last_error) status(snap.last_error, true); return; }
     refs.title.textContent = snap.name || '一起听'; const host = snap.mode === 'host', p = snap.permissions || {};
     refs.connection.textContent = { host: '房主', guest: '已连接', reconnecting: '正在重连', disconnected: '连接已断开' }[snap.mode] || snap.mode;
-    refs.format.textContent = snap.format ? snap.format.sample_rate / 1000 + ' kHz · ' + snap.format.channels + ' 声道 · 无损 PCM' : '等待房间格式';
+    const native = snap.format_mode === 'native', playing = isPlaying(snap), ended = snap.ended === true;
+    refs.format.textContent = snap.format ? (native ? '原生采样率 · ' : '') + rateText(snap.format.sample_rate) + ' · ' + snap.format.channels + ' 声道 · 无损 PCM' : native ? '等待歌曲格式' : '等待房间格式';
     (snap.tracks || []).forEach(t => metadata.set(t.resource_id, t)); while (metadata.size > 2000) metadata.delete(metadata.keys().next().value);
     const item = (snap.queue || []).find(q => q.instance_id === snap.track_instance_id), track = snap.current_track || item && metadata.get(item.resource_id);
     updateCurrentFavorite(track);
     refs.current.textContent = track ? track.title : snap.playing ? '正在播放共享歌曲' : '选择一首共享歌曲'; refs.artist.textContent = track && track.artist || '共享歌曲只在当前房间内可用'; refs.position.textContent = Math.floor(Number(snap.position_ms || 0) / 60000) + ':' + String(Math.floor(Number(snap.position_ms || 0) / 1000) % 60).padStart(2, '0');
     const playbackBlocked = playbackPending && playbackPending.owner === operationOwner() && playbackPending.phase !== 'scheduled';
     const connected = snap.mode === 'host' || snap.mode === 'guest';
-    view.updatePlayButton(snap.playing); [refs.play, refs.prev, refs.next, refs.stop, refs.seekButton].forEach(b => { b.disabled = !p.transport || !connected || !!playbackBlocked; b.title = !p.transport ? '房主未授权播控' : playbackBlocked ? '请先查询原播放操作的结果' : !connected ? '等待房间恢复连接' : b.getAttribute ? b.getAttribute('aria-label') || b.textContent : b.textContent; });
+    view.updatePlayButton(playing); [refs.play, refs.prev, refs.next, refs.stop, refs.seekButton].forEach(b => { b.disabled = !p.transport || !connected || !!playbackBlocked; b.title = !p.transport ? '房主未授权播控' : playbackBlocked ? '请先查询原播放操作的结果' : !connected ? '等待房间恢复连接' : b.getAttribute ? b.getAttribute('aria-label') || b.textContent : b.textContent; });
     const duration = Number(track && track.duration_ms || 0);
     const elapsed = Math.max(0, Number(snap.position_ms || 0));
     refs.duration.textContent = Math.floor(duration / 60000) + ':' + String(Math.floor(duration / 1000) % 60).padStart(2, '0');
     if (document.activeElement !== refs.progress) refs.progress.value = duration ? Math.round(Math.min(elapsed / duration, 1) * 1000) : 0;
     refs.progress.disabled = !p.transport || !duration || !connected || !!playbackBlocked;
-    refs.playingBadge.textContent = snap.pending && !snap.pending.prepared ? '正在准备歌曲' : snap.playing ? '正在播放' : track ? '已暂停' : '等待共享歌曲';
+    const successorError = snap.successor_error;
+    refs.playingBadge.textContent = ended ? successorError ? '已结束 · 后续歌曲暂不可播' : snap.pending || snap.scheduled ? '已结束 · 等待下一首' : '已结束' : playing ? '正在播放' : snap.pending && !snap.pending.prepared ? '正在准备歌曲' : track ? '已暂停' : native && !snap.format ? '等待歌曲格式' : '等待共享歌曲';
+    refs.successorStatus.hidden = !successorError && !ended;
+    refs.successorStatus.textContent = successorError ? '下一首暂不可播放：' + (successorError.message || successorError.code || '歌曲准备失败，请在共同队列中核对后重试。') : ended ? snap.pending || snap.scheduled ? '本曲已结束，正在等待下一首。' : '本曲已结束。' : '';
+    refs.successorStatus.classList.toggle('room-error', !!successorError);
     refs.album.textContent = track && track.album || ''; refs.album.hidden = !refs.album.textContent;
     view.updatePlayMode(snap.play_mode); refs.quickMode.disabled = !p.queue;
     if (refs.refreshSongPicker) refs.refreshSongPicker();
@@ -464,8 +479,21 @@
     refs.chatStatus.textContent = p.chat_read ? snap.chat_error || snap.chat && snap.chat.error || (chatConfig.enabled === false ? '房间聊天已关闭。' : chatConfig.retained === false ? '仅实时聊天，消息不保存，重启后不可恢复。' : '文字与歌曲卡片只在房间内分享。') : '房主未授权查看聊天。';
     const o = snap.output || {}; refs.outputStatus.textContent = !o.enabled ? '本机音频已关闭' : o.error || (o.ready ? '可收听，设备已准备好' : '正在准备声音，可先查看共同队列');
     refs.quickVolume.disabled = !o.enabled; if (document.activeElement !== refs.quickVolume) refs.quickVolume.value = Math.round(Number((o.settings || {}).volume ?? 1) * 100);
-    refs.testOutput.disabled = !o.ready || !!snap.playing || !!snap.pending || !!snap.scheduled;
-    refs.metrics.replaceChildren(); metric('网络对时误差', o.clock ? (Number(o.clock.uncertainty_ns) / 1e6).toFixed(3) + ' ms' : null); metric('设备漂移', o.device ? Number(o.device.device_clock_ppm).toFixed(2) + ' ppm' : null); metric('输入缓冲', o.buffered_input_frames); metric('欠载帧数', o.underrun_frames); if (o.binding) { metric('实际设备', o.binding.device); metric('设备采样率', (o.binding.sample_rate / 1000) + ' kHz'); } if (o.preferences_error) status(o.preferences_error, true);
+    refs.testOutput.disabled = !o.ready || playing || !!snap.pending || !!snap.scheduled;
+    refs.nativeOutputHelp.hidden = !native;
+    const deviceRate = o.binding && o.binding.sample_rate;
+    refs.metrics.replaceChildren();
+    metric('采样率模式', native ? '原生采样率' : '固定采样率', true);
+    metric('来源采样率', rateText(snap.source_rate));
+    metric('房间采样率', rateText(snap.format && snap.format.sample_rate));
+    metric('实际设备采样率', rateText(deviceRate, '等待设备就绪'));
+    if (snap.declared_source_rate && Number(snap.declared_source_rate) !== Number(snap.source_rate)) metric('标称来源采样率', rateText(snap.declared_source_rate));
+    const upcoming = snap.scheduled && snap.scheduled.format || snap.pending && snap.pending.format;
+    if (upcoming) metric(snap.scheduled && snap.scheduled.format ? '已安排歌曲采样率' : '准备中歌曲采样率', rateText(upcoming.sample_rate));
+    metric('来源到房间', !snap.format ? '等待歌曲格式' : native ? '保持歌曲解码采样率' : '按房间采样率渲染', true);
+    metric('房间到设备', !o.enabled ? '本机音频已关闭' : !snap.format || !deviceRate ? '等待音频格式' : Number(deviceRate) === Number(snap.format.sample_rate) ? '同率输出，联合时钟漂移校正' : '采样率转换，联合时钟漂移校正', true);
+    metric('房间音效 / DSP', dspText(), true);
+    metric('网络对时误差', o.clock ? (Number(o.clock.uncertainty_ns) / 1e6).toFixed(3) + ' ms' : null); metric('设备漂移', o.device ? Number(o.device.device_clock_ppm).toFixed(2) + ' ppm' : null); metric('输入缓冲', o.buffered_input_frames); metric('欠载帧数', o.underrun_frames); if (o.binding) metric('实际设备', o.binding.device, true); if (o.preferences_error) status(o.preferences_error, true);
     if (revision === '') { refs.outputEnabled.checked = o.desired_enabled == null ? !!o.enabled : !!o.desired_enabled; const settings = o.settings || {}; refs.localVolume.value = Math.round((settings.volume == null ? 1 : settings.volume) * 100); if (settings.device_id) { refs.device.append(new Option(settings.device_id, settings.device_id)); refs.device.value = settings.device_id; } refs.correction.value = settings.latency_correction_ms || 0; refs.roomVolume.value = Math.round((snap.volume || 0) * 100); refs.mode.value = snap.play_mode || 'repeat'; refs.loudness.value = snap.loudness_mode || 'off'; refs.fade.value = snap.crossfade_ms || 0; refs.preamp.value = snap.dsp && snap.dsp.preamp_db || 0; refs.eq.forEach((e, i) => e.value = snap.dsp && snap.dsp.eq_gains_db[i] || 0); selection.clear(); (snap.shared_track_ids || []).forEach(id => selection.add(id)); if (host) loadLocal('').catch(() => {}); }
     const key = sessionKey(), queueKey = [snap.revision, snap.track_instance_id, snap.mode, !!queuePending, !!p.queue, !!p.transport, !!p.chat_send].join(':');
     // Background projections can race natural playback or sharing changes.
@@ -752,7 +780,7 @@
     if (resourceSignature !== signature) { resourceSignature = signature; resourceKey = id; const generation = ++resourceGeneration; lyrics = []; lyricDoc = null; lyricState = id ? 'loading' : 'empty'; refs.lyrics.replaceChildren(); delete refs.lyrics.dataset.key; refs.cover.hidden = true; if (coverUrl) URL.revokeObjectURL(coverUrl); coverUrl = '';
       coverRead = { generation, attempts: 0, pending: false, retryAt: 0 };
       if (id) {
-        resource(id, 'lyrics').then(blob => blob.text()).then(text => { if (generation !== resourceGeneration) return; const doc = JSON.parse(text); lyricDoc = doc; lyrics = Array.isArray(doc.lines) ? doc.lines : []; lyricState = lyrics.length ? 'ready' : 'empty'; drawLyrics(); syncStage(); }).catch(() => { if (generation === resourceGeneration) { lyricState = 'error'; drawLyrics(); } }); }
+        resource(id, 'lyrics').then(blob => blob.text()).then(text => { if (generation !== resourceGeneration) return; const doc = JSON.parse(text); lyricDoc = doc; lyrics = Array.isArray(doc.lines) ? doc.lines : []; lyricState = lyrics.some(line => !!line.vocal) ? 'unsupported' : lyrics.length ? 'ready' : 'empty'; drawLyrics(); syncStage(); }).catch(() => { if (generation === resourceGeneration) { lyricState = 'error'; drawLyrics(); } }); }
     }
     // A transient peer/CDN failure must not leave artwork blank for the
     // remainder of a track. Retries are bounded and revoked with the read owner.
@@ -773,6 +801,14 @@
     drawLyrics();
   }
   function drawLyrics() {
+    if (lyricState === 'unsupported') {
+      const key = [resourceKey, resourceGeneration, lyricState].join(':');
+      if (refs.lyrics.dataset.key !== key) {
+        refs.lyrics.dataset.key = key;
+        refs.lyrics.replaceChildren(h('p', 'room-lyric-empty', '此歌词包含多人声，房间播放器暂不支持；请使用桌面歌词'));
+      }
+      return;
+    }
     const position = Number(snap.position_ms || 0); let index = 0; while (index + 1 < lyrics.length && lyrics[index + 1].start_ms <= position) index++;
     const expanded = refs.playerScene.dataset.lyricsExpanded === 'true';
     const count = Math.max(3, Math.min(13, Math.floor((refs.lyrics.clientHeight || (expanded ? 300 : 156)) / (expanded ? 36 : 28))));
@@ -781,16 +817,17 @@
     const start = Math.max(0, Math.min(index - Math.floor(count / 2), lyrics.length - count));
     lyrics.slice(start, start + count).forEach((line, offset) => { const row = h('p', start + offset === index ? 'active' : '', line.text); if (start + offset === index) row.setAttribute('aria-current', 'true'); refs.lyrics.append(row); });
   }
-  function syncMediaSession() {
+  function syncMediaSession(force = false) {
+    if (global.HertzSystemMedia && global.HertzSystemMedia.ownsSession()) return;
     if (snap.mode === 'local' || !('mediaSession' in navigator)) return;
     const track = snap.current_track;
     const duration = Number(track && track.duration_ms || 0) / 1000;
     const position = Math.min(duration, Math.max(0, Number(snap.position_ms || 0) / 1000));
-    const key = JSON.stringify([snap.room_id, snap.track_instance_id, snap.playing, duration, position]);
-    if (key === mediaKey) return;
+    const playing = isPlaying(snap), key = JSON.stringify([snap.room_id, snap.track_instance_id, playing, duration, position]);
+    if (!force && key === mediaKey) return;
     try {
       navigator.mediaSession.metadata = track ? new global.MediaMetadata({ title: track.title, artist: track.artist || '', album: track.album || '' }) : null;
-      navigator.mediaSession.playbackState = track ? snap.playing ? 'playing' : 'paused' : 'none';
+      navigator.mediaSession.playbackState = track ? playing ? 'playing' : 'paused' : 'none';
       if (duration > 0) navigator.mediaSession.setPositionState({ duration, position, playbackRate: 1 });
       else navigator.mediaSession.setPositionState();
       mediaKey = key;
@@ -812,7 +849,7 @@
     if (!stageVisible || snap.mode === 'local' || !global.Stage) return;
     const track = snap.current_track, id = track ? 'room:' + snap.room_id + ':' + snap.track_instance_id : null;
     global.Stage.setTrack(track ? { ...track, id } : null, coverUrl || null);
-    global.Stage.setSnapshot({ track_id: id, playing: !!snap.playing && /^(host|guest)$/.test(snap.mode), position_ms: Number(snap.position_ms || 0), duration_ms: Number(track && track.duration_ms || 0), volume: Number((snap.output && snap.output.settings || {}).volume ?? 1) });
+    global.Stage.setSnapshot({ track_id: id, playing: isPlaying(snap) && /^(host|guest)$/.test(snap.mode), position_ms: Number(snap.position_ms || 0), duration_ms: Number(track && track.duration_ms || 0), volume: Number((snap.output && snap.output.settings || {}).volume ?? 1) });
     const key = id + ':' + resourceGeneration + ':' + !!lyricDoc;
     if (stageMediaKey !== key) { stageMediaKey = key; global.Stage.setLyrics(lyricDoc); }
   }

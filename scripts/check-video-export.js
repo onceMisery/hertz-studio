@@ -139,6 +139,7 @@ async function main() {
   const result=await h.ended(done); await stopping;
   assert.equal(result.bytes,10,'Final dataavailable must be included before download');
   assert.equal(result.downloadRequested,true);
+  assert.equal(result.failed,false);
   assert.ok(result.filename.endsWith('.webm'));
   ({done}=await h.start()); staleStop(); assert.equal(h.api.status().phase,'recording');
   h.api.stop(); await h.ended(done);
@@ -195,9 +196,15 @@ async function main() {
       recorder.chunk('last');recorder.onstop();
     }
     const partial=await h.ended(done);assert.ok(partial.bytes>=4,interruption+' preserves existing chunks');
+    if (['context','draw','recorder'].includes(interruption)) {
+      assert.equal(partial.failed,true,interruption+' remains a failed partial result');
+      assert.equal(h.api.status().failed,true,'completed status retains failure for native exit guard');
+      assert.equal(h.api.status().message,partial.message);
+    }
   }
   h=harness();({done}=await h.start());h.recorders[0].chunk('part');h.env.fail='stop-event';h.api.stop();
   await h.advance(5000);assert.equal((await h.ended(done)).bytes,4,'Missing stop event has a bounded partial-save path');
+  assert.equal(h.api.status().failed,true,'stop timeout cannot become a successful native exit prerequisite');
   h=harness();({done}=await h.start());h.recorders[0].chunk('part');
   h.recorders[0].ondataavailable({data:{size:256*1024*1024+1}});
   assert.ok(h.api.status().bytes<=256*1024*1024);

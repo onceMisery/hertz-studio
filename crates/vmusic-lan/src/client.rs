@@ -1,27 +1,31 @@
 // SPDX-License-Identifier: MIT
 //! Native pinned client. Browsers call their local service, never this TLS endpoint.
-use crate::buffer::{MemoryBudget, Reservation, ENDPOINT_BYTES};
+use crate::buffer::{MIN_PCM_RATE, PcmBudget, PcmReservation};
 use crate::clock::{ClockMapping, Estimator, MonotonicClock, TimeSample};
 use crate::members::{Paired, Permissions, Secret};
 use crate::notifications::Notifications;
-use crate::protocol::{ControlFrame, Counter, PcmBlock, StreamIdentity, MAX_MESSAGE, VERSION};
+use crate::protocol::{
+    AudioFormat, CAPABILITIES, ControlFrame, Counter, FormatMode, MAX_MESSAGE, PCM_HEADER,
+    PcmBlock, StreamIdentity, VERSION,
+};
 use crate::server::ROOM_PATH;
 use crate::tls::{self, Fingerprint};
 use futures::{SinkExt, StreamExt};
 use serde::Deserialize;
 use std::collections::VecDeque;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio_rustls::client::TlsStream;
-use tokio_tungstenite::tungstenite::{protocol::WebSocketConfig, Message};
-use tokio_tungstenite::{client_async_with_config, WebSocketStream};
+use tokio_tungstenite::tungstenite::{Message, protocol::WebSocketConfig};
+use tokio_tungstenite::{WebSocketStream, client_async_with_config};
 use uuid::Uuid;
 
 type Socket = WebSocketStream<TlsStream<TcpStream>>;
+type SharedFormats = Arc<Mutex<[Option<(u64, AudioFormat)>; 2]>>;
 const TIMEOUT: Duration = Duration::from_secs(5);
 const SEND_TIMEOUT: Duration = Duration::from_millis(500);
 const CLOCK_PROBE_INTERVAL_NS: u64 = 1_000_000_000;
@@ -64,18 +68,23 @@ pub enum ConnectionState {
 }
 pub struct ReceivedPcm {
     block: PcmBlock,
-    _reservation: Reservation,
+    reservation: PcmReservation,
 }
 impl ReceivedPcm {
     pub fn block(&self) -> &PcmBlock {
         &self.block
     }
-    /// The receiver must reserve its own bounded queue before transferring.
+    /// Legacy extraction; new pipelines transfer the token with into_parts.
+    /// A destination must reserve before invoking this method.
     pub fn into_block(self) -> PcmBlock {
         self.block
     }
+    pub fn into_parts(self) -> (PcmBlock, PcmReservation) {
+        (self.block, self.reservation)
+    }
 }
 pub struct ClientEvents {
+    pub pcm_budget: Arc<PcmBudget>,
     pub chat: Arc<Notifications>,
     pub control: mpsc::Receiver<ControlFrame>,
     pub audio: mpsc::Receiver<ReceivedPcm>,
@@ -85,12 +94,17 @@ pub struct ClientEvents {
 #[derive(Clone)]
 pub struct ClientHandle {
     pub identity: StreamIdentity,
+    pub format_mode: FormatMode,
+    pcm_budget: Arc<PcmBudget>,
     commands: mpsc::Sender<ControlFrame>,
     output: watch::Sender<OutputStatus>,
     stop: watch::Sender<bool>,
     clock: MonotonicClock,
 }
 impl ClientHandle {
+    pub fn pcm_budget(&self) -> Arc<PcmBudget> {
+        self.pcm_budget.clone()
+    }
     pub fn send(&self, frame: ControlFrame) -> Result<(), ClientError> {
         frame.encode().map_err(|_| ClientError::Protocol)?;
         if !matches!(
@@ -151,32 +165,33 @@ impl ClientConnection {
         credential: &Secret,
         mode: ConnectionMode,
     ) -> Result<(Self, ClientEvents), ClientError> {
-        let mut control = socket(address, fingerprint).await?;
-        let auth = zeroize::Zeroizing::new(
-            serde_json::json!({"channel":"control","version":VERSION,"room_id":room_id,
-            "member_id":member_id,"credential":credential.expose()})
-            .to_string(),
-        );
-        send(&mut control, Message::Text(auth.to_string().into())).await?;
-        let message = tokio::time::timeout(TIMEOUT, control.next())
-            .await
-            .map_err(|_| ClientError::Connection)?;
-        let Some(Ok(Message::Text(text))) = message else {
-            return Err(ClientError::Protocol);
-        };
-        let identity = match ControlFrame::decode(&text).map_err(|_| ClientError::Protocol)? {
-            ControlFrame::Hello { identity, .. } => identity,
-            ControlFrame::End { reason } if reason == "room_authorization_expired" => {
-                return Err(ClientError::AuthorizationExpired);
+        // TLS, authentication, Hello and native confirmation share one deadline.
+        let (control, identity, format_mode) = tokio::time::timeout(TIMEOUT, async {
+            let mut control = socket(address, fingerprint).await?;
+            let auth = zeroize::Zeroizing::new(serde_json::json!({"channel":"control","version":VERSION,"room_id":room_id,"member_id":member_id,"credential":credential.expose()}).to_string());
+            send(&mut control, Message::Text(auth.to_string().into())).await?;
+            let Some(Ok(Message::Text(text))) = control.next().await else { return Err(ClientError::Protocol); };
+            let (identity, format_mode) = match ControlFrame::decode(&text).map_err(|_| ClientError::Protocol)? {
+                ControlFrame::Hello { identity, required, .. } => (identity,
+                    if required.iter().any(|c| c == "native_rate_v1") { FormatMode::Native } else { FormatMode::Fixed }),
+                ControlFrame::End { reason } if reason == "room_authorization_expired" => return Err(ClientError::AuthorizationExpired),
+                _ => return Err(ClientError::Protocol),
+            };
+            if identity.room_id != room_id || identity.session_id.is_nil() || identity.instance_id.is_nil() {
+                return Err(ClientError::Protocol);
             }
-            _ => return Err(ClientError::Protocol),
-        };
-        if identity.room_id != room_id
-            || identity.session_id.is_nil()
-            || identity.instance_id.is_nil()
-        {
-            return Err(ClientError::Protocol);
-        }
+            if format_mode == FormatMode::Native {
+                let ack = ControlFrame::CapabilityAck { supported: CAPABILITIES.iter().map(|c| c.to_string()).collect() };
+                send(&mut control, Message::Text(ack.encode().map_err(|_| ClientError::Protocol)?.into())).await?;
+                let Some(Ok(Message::Text(text))) = control.next().await else { return Err(ClientError::Protocol); };
+                match ControlFrame::decode(&text).map_err(|_| ClientError::Protocol)? {
+                    ControlFrame::CapabilityConfirmed {} => {},
+                    ControlFrame::End { reason } => return Err(ClientError::Ended(reason)),
+                    _ => return Err(ClientError::Protocol),
+                }
+            }
+            Ok((control, identity, format_mode))
+        }).await.map_err(|_| ClientError::Connection)??;
         let audio = if mode == ConnectionMode::Listening {
             let mut audio = socket(address, fingerprint).await?;
             let auth = zeroize::Zeroizing::new(
@@ -198,6 +213,10 @@ impl ClientConnection {
         let chat = Notifications::new();
         let chat_tx = chat.clone();
         let (state_tx, state_rx) = watch::channel(ConnectionState::Connected);
+        let pcm_budget = PcmBudget::endpoint();
+        let audio_budget = pcm_budget.clone();
+        let formats = Arc::new(Mutex::new([None, None]));
+        let audio_formats = formats.clone();
         let clock = MonotonicClock::default();
         let task_clock = clock.clone();
         let task = tokio::spawn(async move {
@@ -207,11 +226,21 @@ impl ClientConnection {
             let audio_lifetime = audio_tx.clone();
             let mut stop_wait = stopped;
             let control = run_control(
-                control, task_clock, command_rx, output_rx, control_tx, mapping_tx, chat_tx,
+                control,
+                task_clock,
+                command_rx,
+                output_rx,
+                ControlDelivery {
+                    controls: control_tx,
+                    mapping: mapping_tx,
+                    chat: chat_tx,
+                    format_mode,
+                    formats,
+                },
             );
             let audio = async move {
                 if let Some(audio) = audio {
-                    run_audio(audio, identity, audio_tx).await
+                    run_audio(audio, identity, audio_tx, audio_budget, audio_formats).await
                 } else {
                     std::future::pending::<Result<(), ClientError>>().await
                 }
@@ -249,6 +278,8 @@ impl ClientConnection {
             Self {
                 handle: ClientHandle {
                     identity,
+                    format_mode,
+                    pcm_budget: pcm_budget.clone(),
                     commands,
                     output,
                     stop,
@@ -257,6 +288,7 @@ impl ClientConnection {
                 task: Some(task),
             },
             ClientEvents {
+                pcm_budget,
                 chat,
                 control: control_rx,
                 audio: audio_rx,
@@ -483,15 +515,28 @@ async fn send(socket: &mut Socket, message: Message) -> Result<(), ClientError> 
         .map_err(|_| ClientError::Connection)?
         .map_err(|_| ClientError::Connection)
 }
+struct ControlDelivery {
+    controls: mpsc::Sender<ControlFrame>,
+    mapping: watch::Sender<Option<ClockMapping>>,
+    chat: Arc<Notifications>,
+    format_mode: FormatMode,
+    formats: SharedFormats,
+}
+
 async fn run_control(
     mut socket: Socket,
     clock: MonotonicClock,
     mut commands: mpsc::Receiver<ControlFrame>,
     mut output: watch::Receiver<OutputStatus>,
-    controls: mpsc::Sender<ControlFrame>,
-    mapping: watch::Sender<Option<ClockMapping>>,
-    chat: Arc<Notifications>,
+    delivery: ControlDelivery,
 ) -> Result<(), ClientError> {
+    let ControlDelivery {
+        controls,
+        mapping,
+        chat,
+        format_mode,
+        formats,
+    } = delivery;
     let mut estimator = Estimator::default();
     let mut sequence = 0u64;
     let mut pending = VecDeque::new();
@@ -546,6 +591,14 @@ async fn run_control(
                 let Message::Text(text) = message else { if matches!(message, Message::Close(_)) { return Err(ClientError::Connection); } continue; };
                 let frame = ControlFrame::decode(&text).map_err(|_| ClientError::Protocol)?;
                 match frame {
+                    ControlFrame::Prepare { ref plan } => {
+                        if format_mode == FormatMode::Native && plan.format.channels != 2 { return Err(ClientError::Protocol); }
+                        declare_format(&formats, plan.epoch.0, plan.format)?;
+                        controls.try_send(frame).map_err(|_| ClientError::Connection)?;
+                    },
+                    ControlFrame::EpochEnd { .. } if format_mode == FormatMode::Native => {
+                        controls.try_send(frame).map_err(|_| ClientError::Connection)?;
+                    },
                     ControlFrame::TimeResponse { sequence, t1, t2, t3 } => {
                         // A delayed TCP backlog can contain replies to probes
                         // evicted during a Wi-Fi stall. They cannot refresh the
@@ -562,7 +615,7 @@ async fn run_control(
                         if text.len() > 2048 { return Err(ClientError::Protocol); }
                         chat.push(text);
                     },
-                    ControlFrame::Prepare { .. } | ControlFrame::Commit { .. } | ControlFrame::Suspend { .. } | ControlFrame::Resync { .. } | ControlFrame::Response { .. } | ControlFrame::Notification { .. } => {
+                    ControlFrame::Commit { .. } | ControlFrame::Suspend { .. } | ControlFrame::Resync { .. } | ControlFrame::Response { .. } | ControlFrame::Notification { .. } => {
                         controls.try_send(frame).map_err(|_| ClientError::Connection)?;
                     },
                     ControlFrame::End { reason } => return Err(ClientError::Ended(reason)),
@@ -572,12 +625,76 @@ async fn run_control(
         }
     }
 }
+fn declare_format(
+    formats: &Mutex<[Option<(u64, AudioFormat)>; 2]>,
+    epoch: u64,
+    format: AudioFormat,
+) -> Result<(), ClientError> {
+    let mut formats = formats.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((_, previous)) = formats.iter().flatten().find(|(e, _)| *e == epoch) {
+        return if *previous == format {
+            Ok(())
+        } else {
+            Err(ClientError::Protocol)
+        };
+    }
+    if let Some(slot) = formats.iter_mut().find(|slot| slot.is_none()) {
+        *slot = Some((epoch, format));
+    } else {
+        let index = usize::from(formats[1].unwrap().0 < formats[0].unwrap().0);
+        if epoch <= formats[index].unwrap().0 {
+            return Err(ClientError::Protocol);
+        }
+        formats[index] = Some((epoch, format));
+    }
+    Ok(())
+}
+
+fn decode_received_pcm(
+    bytes: &[u8],
+    identity: StreamIdentity,
+    budget: &Arc<PcmBudget>,
+    formats: &Mutex<[Option<(u64, AudioFormat)>; 2]>,
+) -> Result<ReceivedPcm, ClientError> {
+    if bytes.len() < PCM_HEADER || bytes.len() > MAX_MESSAGE {
+        return Err(ClientError::Protocol);
+    }
+    let epoch = u64::from_le_bytes(bytes[56..64].try_into().unwrap());
+    let format_id = u32::from_le_bytes(bytes[80..84].try_into().unwrap());
+    let frames = u32::from_le_bytes(bytes[84..88].try_into().unwrap());
+    let channels = u16::from_le_bytes(bytes[88..90].try_into().unwrap());
+    let payload_bytes = bytes.len() - PCM_HEADER;
+    crate::protocol::validate_payload(frames, channels, payload_bytes)
+        .map_err(|_| ClientError::Protocol)?;
+    let rate = formats
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .flatten()
+        .find(|(known_epoch, format)| {
+            *known_epoch == epoch && format.id == format_id && format.channels == channels
+        })
+        .map_or(MIN_PCM_RATE, |(_, format)| format.sample_rate);
+    let reservation = budget
+        .reserve_input_pcm(frames as usize, rate, bytes.len())
+        .map_err(|_| ClientError::Connection)?;
+    // decode holds a Vec while copying into Arc<[f32]>. Admit both PCM
+    // allocations before either is made; only the final block is input.
+    let decode_copy = budget
+        .reserve_pcm(frames as usize, rate, payload_bytes)
+        .map_err(|_| ClientError::Connection)?;
+    let block = PcmBlock::decode(bytes, identity).map_err(|_| ClientError::Protocol)?;
+    drop(decode_copy);
+    Ok(ReceivedPcm { block, reservation })
+}
+
 async fn run_audio(
     mut socket: Socket,
     identity: StreamIdentity,
     audio: mpsc::Sender<ReceivedPcm>,
+    budget: Arc<PcmBudget>,
+    formats: SharedFormats,
 ) -> Result<(), ClientError> {
-    let budget = MemoryBudget::new(ENDPOINT_BYTES);
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     let mut last_received = tokio::time::Instant::now();
     loop {
@@ -592,15 +709,172 @@ async fn run_audio(
                 last_received = tokio::time::Instant::now();
                 match message {
                     Message::Binary(bytes) => {
-                        let reservation = budget.reserve(bytes.len()).map_err(|_| ClientError::Connection)?;
-                        let block = PcmBlock::decode(&bytes, identity).map_err(|_| ClientError::Protocol)?;
-                        audio.try_send(ReceivedPcm { block, _reservation: reservation }).map_err(|_| ClientError::Connection)?;
+                        let received = decode_received_pcm(&bytes, identity, &budget, &formats)?;
+                        audio.try_send(received).map_err(|_| ClientError::Connection)?;
                     },
                     Message::Ping(_) | Message::Pong(_) => { tokio::time::timeout(SEND_TIMEOUT, socket.flush()).await.map_err(|_| ClientError::Connection)?.map_err(|_| ClientError::Connection)?; },
                     _ => return Err(ClientError::Protocol),
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod pcm_decode_budget_tests {
+    use super::*;
+
+    fn fixture() -> (PcmBlock, SharedFormats) {
+        let block = PcmBlock {
+            identity: StreamIdentity {
+                room_id: Uuid::from_u128(1),
+                instance_id: Uuid::from_u128(2),
+                session_id: Uuid::from_u128(3),
+            },
+            epoch: 7,
+            sequence: 1,
+            frame_index: 12,
+            format_id: 9,
+            channels: 2,
+            samples: vec![-0.0, f32::from_bits(1), -0.75, 0.5]
+                .into_iter()
+                .cycle()
+                .take(960)
+                .collect::<Vec<_>>()
+                .into(),
+        };
+        let formats = Arc::new(Mutex::new([
+            Some((
+                block.epoch,
+                AudioFormat {
+                    id: block.format_id,
+                    sample_rate: 96_000,
+                    channels: block.channels,
+                },
+            )),
+            None,
+        ]));
+        (block, formats)
+    }
+
+    fn assert_released(budget: &PcmBudget) {
+        assert_eq!(budget.frames(), 0);
+        assert_eq!(budget.bytes(), 0);
+        assert_eq!(budget.duration_ns(), 0);
+        assert_eq!(budget.input_frames(), 0);
+        assert_eq!(budget.input_bytes(), 0);
+        assert_eq!(budget.input_duration_ns(), 0);
+    }
+
+    #[test]
+    fn a_single_block_fitting_does_not_admit_an_over_budget_decode_copy() {
+        let (block, formats) = fixture();
+        let bytes = block.encode().unwrap();
+        let payload = bytes.len() - PCM_HEADER;
+        let duration = 5_000_000;
+        for budget in [
+            PcmBudget::with_limits(
+                bytes.len() + payload - 1,
+                duration * 2,
+                bytes.len(),
+                duration,
+            ),
+            PcmBudget::with_limits(
+                bytes.len() + payload,
+                duration * 2 - 1,
+                bytes.len(),
+                duration,
+            ),
+        ] {
+            // One final input block fits both limits in isolation.
+            let input = budget.reserve_input_pcm(480, 96_000, bytes.len()).unwrap();
+            drop(input);
+            assert!(matches!(
+                decode_received_pcm(&bytes, block.identity, &budget, &formats),
+                Err(ClientError::Connection)
+            ));
+            assert_released(&budget);
+        }
+    }
+
+    #[test]
+    fn decoded_pcm_keeps_one_input_token_through_transfer() {
+        let (block, formats) = fixture();
+        let bytes = block.encode().unwrap();
+        let budget = PcmBudget::with_limits(
+            bytes.len() * 2 - PCM_HEADER,
+            10_000_000,
+            bytes.len(),
+            5_000_000,
+        );
+        let received = decode_received_pcm(&bytes, block.identity, &budget, &formats).unwrap();
+        assert_eq!(budget.bytes(), bytes.len());
+        assert_eq!(budget.duration_ns(), 5_000_000);
+        assert_eq!(budget.input_bytes(), bytes.len());
+        assert_eq!(budget.input_duration_ns(), 5_000_000);
+        let (decoded, reservation) = received.into_parts();
+        assert!(reservation.is_from(&budget));
+        assert!(reservation.is_input());
+        assert_eq!(budget.frames(), 480);
+        assert_eq!(budget.input_frames(), 480);
+        assert_eq!(
+            decoded
+                .samples
+                .iter()
+                .map(|s| s.to_bits())
+                .collect::<Vec<_>>(),
+            block
+                .samples
+                .iter()
+                .map(|s| s.to_bits())
+                .collect::<Vec<_>>()
+        );
+        drop((decoded, reservation));
+        assert_released(&budget);
+    }
+
+    #[test]
+    fn rejected_decode_copy_preserves_already_owned_pcm() {
+        let (block, formats) = fixture();
+        let bytes = block.encode().unwrap();
+        let budget =
+            PcmBudget::with_limits(bytes.len() * 2, 15_000_000, bytes.len() * 2, 10_000_000);
+        let existing = budget.reserve_input_at(&block, 96_000).unwrap();
+        assert!(matches!(
+            decode_received_pcm(&bytes, block.identity, &budget, &formats),
+            Err(ClientError::Connection)
+        ));
+        assert_eq!(budget.bytes(), bytes.len());
+        assert_eq!(budget.duration_ns(), 5_000_000);
+        assert_eq!(budget.input_bytes(), bytes.len());
+        assert_eq!(budget.input_duration_ns(), 5_000_000);
+        drop(existing);
+        assert_released(&budget);
+    }
+
+    #[test]
+    fn non_finite_decode_releases_both_reservations() {
+        let (block, formats) = fixture();
+        let mut bytes = block.encode().unwrap();
+        bytes[PCM_HEADER + 4..PCM_HEADER + 8].copy_from_slice(&f32::NAN.to_bits().to_le_bytes());
+        let budget = PcmBudget::with_limits(bytes.len() * 2, 10_000_000, bytes.len(), 5_000_000);
+        assert!(matches!(
+            decode_received_pcm(&bytes, block.identity, &budget, &formats),
+            Err(ClientError::Protocol)
+        ));
+        assert_released(&budget);
+    }
+
+    #[test]
+    fn undeclared_format_uses_the_conservative_rate_for_both_copies() {
+        let (block, _) = fixture();
+        let bytes = block.encode().unwrap();
+        let budget = PcmBudget::with_limits(bytes.len() * 2, 10_000_000, bytes.len(), 20_000_000);
+        assert!(matches!(
+            decode_received_pcm(&bytes, block.identity, &budget, &Mutex::new([None, None])),
+            Err(ClientError::Connection)
+        ));
+        assert_released(&budget);
     }
 }
 

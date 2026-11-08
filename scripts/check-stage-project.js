@@ -8,18 +8,27 @@ function harness(saved) {
   const selection={track:{id:'local-a'},mediaEpoch:1,mediaTrackId:'local-a'};
   const identity={kind:'local-file-sha256-v1',sha256:'a'.repeat(64),byteLength:'1234'};
   let position=0,requests=0,onset;
+  const server=JSON.parse(storage.get('test.server.stage') || '{"state":{"storeId":"test","current":{"revision":0,"initialized":false},"library":{"revision":0,"initialized":false}},"current":null,"library":null}');
   const sandbox={window:{},console,TextEncoder,TextDecoder,Blob,CompressionStream,DecompressionStream,
+    CustomEvent:class {constructor(type,options){this.type=type;this.detail=options.detail;}},
     btoa:s=>Buffer.from(s,'binary').toString('base64'),atob:s=>Buffer.from(s,'base64').toString('binary'),
     setTimeout:()=>1,clearTimeout(){},localStorage:{getItem:k=>storage.get(k)||null,setItem:(k,v)=>storage.set(k,v)},
     document:{hidden:false,addEventListener(k,f){let list=listeners.get(k)||[];list.push(f);listeners.set(k,list);},
       dispatchEvent(e){for(const fn of listeners.get(e.type)||[])fn(e);},getElementById:()=>null,
       body:{classList:{contains:()=>false}},documentElement:{classList:{toggle(){}}}},
     Stage:{presentation:()=>selection,position:()=>position,kick(){},gate(){},tier:()=>1},
-    VMusicTransport:{async get(){return {};},async put(){},async post(){requests++;return identity;}}
+    VMusicTransport:{async get(route){return route==='/v1/stage/presets'?structuredClone(server):{};},async put(route,body){
+      if(route==='/v1/stage/presets') {
+        assert.equal(body.expectedPresetRevision,server.state[body.target].revision);
+        const receipt={requestId:body.requestId,revision:body.expectedPresetRevision+1};
+        server[body.target]=structuredClone(body.payload);server.state[body.target]={revision:receipt.revision,initialized:true,lastCommit:receipt};
+        storage.set('test.server.stage',JSON.stringify(server));return receipt;
+      }
+    },async post(){requests++;return identity;}}
   };
   sandbox.window.Stage=sandbox.Stage;sandbox.window.VMusicTransport=sandbox.VMusicTransport;
   vm.createContext(sandbox);
-  for(const file of ['onset.js','creative-gl.js','backgrounds.js','handdrawn.js','creative-anime.js','creative-share-code.js','creative-stage.js','creative-contract.js','creative-project.js']){
+  for(const file of ['onset.js','creative-gl.js','backgrounds.js','stage-media.js','stage-persistence.js','handdrawn.js','creative-anime.js','creative-share-code.js','creative-stage.js','creative-contract.js','creative-project.js']){
     vm.runInContext(fs.readFileSync(path.join(__dirname,'../plugin/ui',file),'utf8'),sandbox,{filename:file});
     Object.assign(sandbox,sandbox.window);
     if(file==='onset.js') {const create=sandbox.Onset.create;sandbox.Onset.create=function(...args){onset=create(...args);return onset;};}
@@ -177,7 +186,7 @@ async function main(){
     {every:1,len:500,ease:'in',set:{'cam.dist':18}}];
   oldPreset.project=oldContext;
   const storage=new Map([['vmusic.creative.preset',JSON.stringify(oldPreset)]]);
-  const recovered=harness(storage);recovered.CS.init();
+  const recovered=harness(storage);recovered.CS.init();await recovered.CS.hydrated();
   assert.equal(recovered.CS.preset().scene,oldPreset.scene,'A stale but structurally valid project restores its static scene');
   assert.equal(recovered.CS.preset().name,'旧版本舞台');
   assert.equal(recovered.CS.preset().cam.dist,23);
@@ -235,18 +244,19 @@ async function main(){
 
   recovered.sandbox.document.hidden=true;
   recovered.sandbox.document.dispatchEvent({type:'visibilitychange'});
-  const reopenedFresh=harness(recovered.storage);reopenedFresh.CS.init();
+  await recovered.CS.flushPersistence();
+  const reopenedFresh=harness(recovered.storage);reopenedFresh.CS.init();await reopenedFresh.CS.hydrated();
   assert.deepEqual(JSON.parse(JSON.stringify(reopenedFresh.CS.preset().legacyCues)),archived,
-    'Archived cues persist locally after leaving stale project mode');
+    'Archived cues persist on the server after leaving stale project mode');
   assert.equal(reopenedFresh.CS.preset().cues.length,1,'The active fresh track also persists locally');
 
   const resetStorage=new Map([['vmusic.creative.preset',JSON.stringify(oldPreset)]]);
-  const resetRecovery=harness(resetStorage);resetRecovery.CS.init();resetRecovery.CS.resetSettings();
+  const resetRecovery=harness(resetStorage);resetRecovery.CS.init();await resetRecovery.CS.hydrated();resetRecovery.CS.resetSettings();
   assert.equal(resetRecovery.CS.preset().project,undefined,'Reset clears stale project context');
   assert.equal(resetRecovery.CS.preset().legacyCues,undefined,'Explicit reset discards the old cue archive');
   assert.deepEqual(JSON.parse(JSON.stringify(resetRecovery.CS.preset().cues)),[]);
   const draftRecovery=harness(new Map([['vmusic.creative.preset',JSON.stringify(oldPreset)]]));
-  draftRecovery.CS.init();draftRecovery.CS.setPreset(draftRecovery.CS.canonicalBaseline('orb'));
+  draftRecovery.CS.init();await draftRecovery.CS.hydrated();draftRecovery.CS.setPreset(draftRecovery.CS.canonicalBaseline('orb'));
   assert.equal(draftRecovery.CS.preset().project,undefined,'Applying a whole new draft replaces stale context');
   assert.equal(draftRecovery.CS.preset().legacyCues,undefined,'A whole new draft clears the prior local archive');
 
@@ -258,14 +268,14 @@ async function main(){
     schemaVersion:seeded.sandbox.CreativeStageContract.schemaVersion,
     schemaHash:seeded.sandbox.CreativeStageContract.schemaHash,media:seeded.identity};
   const currentStorage=new Map([['vmusic.creative.preset',JSON.stringify(currentPreset)]]);
-  const currentRestore=harness(currentStorage);currentRestore.CS.init();
+  const currentRestore=harness(currentStorage);currentRestore.CS.init();await currentRestore.CS.hydrated();
   assert.equal(currentRestore.CS.preset().project.schemaHash,seeded.sandbox.CreativeStageContract.schemaHash,
     'Current contexts keep the ordinary restore path');
   assert.match(currentRestore.P.status(),/等待媒体内容确认/);
 
   const unsupported=JSON.parse(JSON.stringify(oldPreset));unsupported.project.version=99;
   const unsupportedStorage=new Map([['vmusic.creative.preset',JSON.stringify(unsupported)]]);
-  const unsupportedRestore=harness(unsupportedStorage);unsupportedRestore.CS.init();
+  const unsupportedRestore=harness(unsupportedStorage);unsupportedRestore.CS.init();await unsupportedRestore.CS.hydrated();
   assert.equal(unsupportedRestore.CS.preset().project,undefined,
     'Unsupported project envelope versions still fail closed to the default preset');
   console.log('Stage projects: strict envelope/import, current and stale restore, isolated legacy cues, media confirmation/races and reversible timelines passed');

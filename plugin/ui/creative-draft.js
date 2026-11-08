@@ -175,6 +175,6 @@
       proposalHash: await hash(value), persisted: false, applied: false };
   }
   window.CreativeDraft = { prepare: prepare, artifact: artifact, validateIntent: validateIntent,
-    canonical: canonical, hash: hash, commonParams: commonParams, schema: schema,
+    canonical: canonical, hash: hash, hashBytes: sha256, commonParams: commonParams, schema: schema,
     schemaFingerprint: schemaFingerprint };
 })();

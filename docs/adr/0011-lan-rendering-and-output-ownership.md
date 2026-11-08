@@ -4,7 +4,7 @@
 
 ## 决定
 
-AppState 是业务队列与模式的唯一所有者，audio actor 与 RenderCore 共享单机和房间的解码、混音与 DSP。房间 producer 在固定房间格式中提前渲染；成员只接收这份 PCM，不各自下载原文件解码。主机收听也经过原生 Receiver。房间模式下旧 HTTP、RPC、AI 和内部播控入口在原裁决边界拒绝写入，不能通过另一套队列或播放器绕过。
+AppState 是业务队列与模式的唯一所有者，audio actor 与 RenderCore 共享单机和房间的解码、混音与 DSP。房间 producer 在所选房间模式的格式中提前渲染；成员只接收这份 PCM，不各自下载原文件解码。主机收听也经过原生 Receiver。房间模式下旧 HTTP、RPC、AI 和内部播控入口在原裁决边界拒绝写入，不能通过另一套队列或播放器绕过。
 
 渲染事实和呈现事实分开提交。已生成后继 PCM 不表示听众已听到下一曲；队列游标、歌名和历史按房间呈现边界提交。Prepare/Ready/Commit 绑定实例、房间、会话和 epoch，已 Commit 的前缀不可悄悄撤回。一次未确认的 next 只查询原操作终态，不自动重发相对写命令。
 
@@ -34,6 +34,16 @@ Host 保存与队列实例绑定的点歌人、成员投票和有界活动投影
 
 ## 边界与 owner
 
+2026-11-07 A07 增量实现 `format_mode=fixed/native`，默认 fixed/48 kHz；native 创建必须省略 `sample_rate`。模式在房间生命周期内不变。原生以 seek 后同一解码器的实际 SignalSpec 为准，支持六档率及明确单/双声道，传输双声道 f32；同率沿既有 RenderCore 资格衔接，跨率保留同一个准备源并建立新代，禁止跨率 crossfade。设备会话继续使用原格式和唯一 ScheduledOutput 网格，格式转换与漂移校正合为一次。本增量的[实施与证据](../lan-native-sample-rate.md)按实验性范围记录。
+
+v3 实现能力与房间必需能力分离。fixed 的 Hello/Plan 形状和三项必需能力保持；native 追加 `native_rate_v1`，在原握手总期限内完成 ack→服务端原子协商→confirmed，客户端收到 confirmed 后才启动音频连接。仅控制成员也完成该确认，未协商会话不能占有音频租约。
+
+Producer 唯一拥有不可变的自然 `epoch_end(E)`，曲目 EOF 不自动封口同率代际。原生最终真实块截短至 E，封口后不接纳同代后继、不继续填零；晚到源只可建立新代。Host 保留代际终点，对曾声明旧代的端点发送 E，并在 Prepare 后重放已知 E。Receiver 保存整数 E 与控制截止 C，分别处理 `min(E,C)` 的旧尾和已提交新代起点；有限真实输入齐全后才补转换前视，没有下一 Plan 也独立排空。未知或冲突终点不能生成样本或播放授权。
+
+Host 的后继预留及拒绝结果绑定原实例和准备归属，失败不自动跳项或重抽随机；队列移除、显式选曲等意图变化作废尚未消费的预留，已经贡献的 PCM 和呈现事实保留。未生效 Commit 存在时第三代只留轻量意图；PCM/解码器/退休资源仍共同准入，不能由两代上限推断资源已经释放。身份与修订计数耗尽明确拒绝并结束/重建，不回绕复用。
+
+传输入口到 Receiver 使用同一可转移 PCM reservation，输入共同上限 1.3 秒/4 MiB，所有输入、转换容量及应用输出共同上限 3 秒/8 MiB；Producer 所有原生 deck、解码器 PCM、首次前缀、复制峰值、退休资源和在途事件共同上限 3 秒/8 MiB。每端发送引用含发送 await，上限 3 秒/8 MiB，全局 64 MiB。旧尾优先，预算压力停止前瞻或拒绝新准备；实际 decoder 私有与非 PCM 分配范围另列，不据此宣称整进程 RSS 受这些额度约束。
+
 在线来源于 2026-10-26 接入同一所有权边界。SharedLibrary 显式登记平台身份和解析引用；队列编辑只校验分享，不获取音频。房主在后台复用在线取流与渐进下载器，按约 1.5 秒压缩音频预缓冲（64–384 KiB，未知码率 256 KiB），尾部元数据容器等待完整下载。探测和初始 seek 在阻塞工作池完成，producer 仅安装 PreparedMedia；在线准备总期限 20 秒，本地仍为 5 秒。接收端继续只收 PCM，不取得平台直链、账号或下载职责。
 
 同曲同请求音质的并发准备共享下载会话；当前、候选、后继和未退休解码器各持媒体生命周期引用。CacheLease 在这些引用消失前保护活动 `.part`、正式缓存及降档文件，手动清理和 LRU 均复核租约。最后使用者退出取消未完成下载，停止标记也中断阻塞读和定位。单机下载启动及注册与模式切换共用 play_commit；进入房间时先作废代际并取消、回收单机下载，禁止迟到取流重建同一缓存。分享 revision、播放实例和 epoch 仍由 Host 在异步结果提交时复核。
@@ -44,8 +54,12 @@ Host 保存与队列实例绑定的点歌人、成员投票和有界活动投影
 | 单条传输消息上限（字节） | 65536 | `crates/vmusic-lan/src/protocol.rs::MAX_MESSAGE` | PCM 分块、分片累计校验与控制消息界限 |
 | 每端广播保留上限（字节） | 8388608 | `crates/vmusic-lan/src/buffer.rs::ENDPOINT_BYTES` | 慢端隔离、Arc 引用释放与全局预算 |
 | 全房间广播保留上限（字节） | 67108864 | `crates/vmusic-lan/src/buffer.rs::GLOBAL_BYTES` | 多端压力与同时排队的共享块记账 |
-| Receiver 输入上限（字节） | 4194304 | `crates/hertz-studio/src/room/receiver.rs::INPUT_BYTE_LIMIT` | 命令入口预留、取消归还与高采样率回归 |
-| Receiver 输入时长上限（纳秒） | 1300000000 | `crates/hertz-studio/src/room/receiver.rs::INPUT_DURATION_LIMIT_NS` | 源率计时、已接收帧与全部代际合计预算 |
+| 共同输入上限（字节） | 4194304 | `crates/vmusic-lan/src/buffer.rs::INPUT_BYTES` | 网络入口到 Receiver 的连续预留、取消归还与高采样率回归 |
+| 共同输入时长上限（纳秒） | 1300000000 | `crates/vmusic-lan/src/buffer.rs::INPUT_DURATION_NS` | 源率计时、已接收帧与全部代际合计预算 |
+| 每端 PCM 总量（字节） | 8388608 | `crates/vmusic-lan/src/buffer.rs::ENDPOINT_BYTES` | PcmBudget 对输入、复制、转换容量、应用输出和退休引用共同准入 |
+| 每端 PCM 总时长（纳秒） | 3000000000 | `crates/vmusic-lan/src/buffer.rs::ENDPOINT_DURATION_NS` | PcmBudget 依源采样率核算共同准入 |
+| Producer 原生 PCM 总量（字节） | 8388608 | `crates/vmusic-audio/src/render/native.rs::MAX_BYTES` | NativePcmBudget 对解码器、deck、前缀、事件与退休资源共享预留 |
+| Producer 原生 PCM 总时长（纳秒） | 3000000000 | `crates/vmusic-audio/src/render/native.rs::MAX_DURATION_NS` | NativePcmBudget 依源采样率核算共享预留 |
 | 设备提交窗口（纳秒） | 100000000 | `crates/hertz-studio/src/room/receiver.rs::HORIZON_NS` | 原生输出队列水位、转换工作量与 Commit 截止 |
 | 设备回调最大年龄（纳秒） | 250000000 | `crates/hertz-studio/src/room/receiver.rs::DEVICE_FRESHNESS_NS` | 单快照门禁、回调中断和恢复回归 |
 | 最后音频端离场宽限（秒） | 3 | `crates/hertz-studio/src/state.rs::DEPART_GRACE` | 音频租约、UI 关闭与房间暂停行为 |

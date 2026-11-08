@@ -23,6 +23,18 @@
 .qr-space .qr-sources { position:relative; display:grid; grid-template-columns:minmax(0,1fr); gap:10px; margin:0; }
 .qr-space .qr-source { position:relative; display:flex; align-items:center; gap:12px; text-align:left; width:100%; min-height:52px; height:auto; padding:12px 20px; border-radius:8px; background:var(--sp-glass); color:var(--sp-text); border:1px solid var(--sp-line); font-size:14px; }
 .qr-space .qr-source.active { border-color:var(--sp-accent); box-shadow:inset 0 1px 8px var(--sp-line-soft); }
+/* 每行前面的平台徽标：与在线面板同源的官方 app 图标（.src-badge.is-img），
+   没有位图的平台走品牌色方块 + sprite 字形；独立形态的兜底同尺寸。
+   未登录行的文字用 .qs-label 包起来，才不会被 textContent 赋值连徽标一起冲掉。 */
+.qr-space .qr-source .src-badge { width:26px; height:26px; margin:0; border-radius:7px; }
+.qr-space .qr-source .src-badge svg { width:16px; height:16px; }
+/* 没有官方 PNG 的平台（咪咕）走 sprite 字形。基类是「品牌色底 + 白字」，
+   空间视图里 --accent 恰好接近白，会变成一块看不见图标的白方块。 */
+.qr-space .qr-source .src-badge:not(.is-img) { background:var(--sp-line-soft); color:var(--sp-text); }
+.qr-space .qr-source .qs-brand-fallback { display:inline-flex; align-items:center; justify-content:center; flex:none; width:26px; height:26px; border-radius:7px; background:var(--sp-line-soft); color:var(--sp-text); font-size:12px; font-weight:700; }
+.qr-space .qr-source .qs-label { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+/* 已登录平台的端口常亮实心：一眼看得出哪些平台已经接上 Hertz Studio。 */
+.qr-space .qr-source.is-in .qs-out { background:var(--sp-accent); box-shadow:0 0 12px color-mix(in srgb,var(--sp-accent) 55%,transparent); }
 .qs-port { position:absolute; width:12px; height:12px; border:2px solid var(--sp-accent); border-radius:50%; background:var(--bg); top:50%; transform:translateY(-50%); }
 .qs-out { right:-7px; cursor:crosshair; touch-action:none; }
 .qs-in { left:-7px; }
@@ -274,6 +286,13 @@ html.qr-modal-open .app{visibility:hidden}
 .playlist-card.is-openable:focus-visible{outline:var(--focus-ring);outline-offset:var(--focus-offset)}
 
 @media(max-width:600px){
+  /* 320px 下分类 chips + 输入框 + 搜索按钮三个 flex 子项会把按钮挤出容器
+     约 4px。.online-scroll 交还滚动权后不再自己裁横向内容，那段会被
+     #column 的 overflow-x:hidden 切掉；让 chips 独占一行，输入框可收缩。 */
+  .online-search{flex-wrap:wrap;min-width:0}
+  .online-search .online-kind{flex:1 0 100%;min-width:0}
+  .online-search input[type="search"]{flex:1 1 0;min-width:0}
+  .online-search .btn.primary{flex:0 0 auto}
   #view-online>.col-head{flex-direction:column;align-items:stretch;gap:10px}
   #view-online .col-head-left{flex-wrap:wrap;gap:8px}
   #view-online .col-title{white-space:nowrap}

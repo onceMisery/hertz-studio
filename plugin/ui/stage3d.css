@@ -14,7 +14,7 @@
   --s3d-bar-shadow: 0 18px 56px rgba(0, 0, 0, 0.34),
     inset 0 1px 0 rgba(255, 255, 255, 0.11);
   --s3d-bar-blur: 26px;
-  --s3d-btn: 38px;
+  --s3d-btn: 40px;
   --s3d-dock-h: 54px;
   --s3d-gap: 10px;
   --s3d-safe-bottom: env(safe-area-inset-bottom, 0px);
@@ -269,6 +269,8 @@ body.s3d-open > .bar { display: none; }
   width: var(--s3d-btn);
   height: var(--s3d-btn);
   padding: 0;
+  flex-shrink: 0;
+  touch-action: manipulation;
   /* 幽灵按钮的 11px 圆角：胶囊上一排 999px 全圆读成「算盘珠」，方一点
      才和dock 药丸、控制舱分段同一套几何语言。 */
   border-radius: 11px;
@@ -286,16 +288,17 @@ body.s3d-open > .bar { display: none; }
     transform var(--dur-1, 0.16s) var(--ease);
 }
 
-.s3d-btn:hover {
+.s3d-btn:hover:not(:disabled) {
   background-color: var(--hover);
   color: var(--s3d-text);
 }
 
-.s3d-btn:active {
-  transform: scale(0.94);
+.s3d-btn:active:not(:disabled) {
+  transform: scale(0.96);
 }
 
-.s3d-btn[aria-pressed='true'] {
+.s3d-btn[aria-pressed='true'],
+.s3d-btn[aria-expanded='true'] {
   color: var(--s3d-accent);
   background-color: color-mix(in srgb, var(--s3d-accent) 12%, transparent);
   border-color: transparent;
@@ -304,6 +307,8 @@ body.s3d-open > .bar { display: none; }
 .s3d-btn svg {
   width: 19px;
   height: 19px;
+  flex: none;
+  pointer-events: none;
 }
 
 .s3d-btn .ic-compress {
@@ -429,6 +434,7 @@ body.s3d-open > .bar { display: none; }
   align-items: center;
   gap: 7px;
   height: 40px;
+  min-width: 40px;
   padding: 0 14px;
   border-radius: var(--r-pill);
   border: 1px solid transparent;
@@ -436,14 +442,18 @@ body.s3d-open > .bar { display: none; }
   color: var(--s3d-muted);
   font-size: var(--fs-sm);
   cursor: pointer;
+  touch-action: manipulation;
   transition: background var(--dur-1, 0.16s) var(--ease),
-    color var(--dur-1, 0.16s) var(--ease);
+    color var(--dur-1, 0.16s) var(--ease),
+    transform var(--dur-1, 0.16s) var(--ease);
 }
 
-.s3d-dock-btn:hover {
+.s3d-dock-btn:hover:not(:disabled) {
   background: var(--hover);
   color: var(--s3d-text);
 }
+.s3d-dock-btn:active:not(:disabled) { transform: scale(.96); }
+.s3d .s3d-dock-btn:focus-visible { outline-offset: -3px; }
 
 /* 场景坞当前项：与头部来源牌、控制舱分段同一套 accent 高亮语言
    （accent 字色 + 34% 描边 + 10% 底），别写成两条同名规则——后一条会整块
@@ -532,7 +542,7 @@ body.s3d-open > .bar { display: none; }
 .s3d [hidden] { display: none !important; }
 .s3d button:focus-visible, .s3d input:focus-visible { outline: 2px solid var(--s3d-accent); outline-offset: 5px; }
 .s3d button:disabled { cursor: default; }
-.s3d-btn:disabled { opacity: 0.35; }
+.s3d-btn:disabled { opacity: 0.35; transform: none; }
 .s3d-brand {
   position: absolute; top: max(30px, env(safe-area-inset-top)); left: max(40px, env(safe-area-inset-left));
   display: flex; align-items: center; gap: 13px; color: var(--s3d-text);
@@ -562,6 +572,8 @@ body.s3d-open > .bar { display: none; }
 .sl-empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 24px; text-align: center; }
 .sl-empty strong { font-size: clamp(25px,4vw,54px); font-weight: 500; line-height: 1.45; text-wrap: balance; }
 .sl-empty span { color: var(--s3d-muted); font-size: 13px; letter-spacing: .08em; }
+.lyric-support-notice { position: absolute; z-index: 4; bottom: 180px; left: 10%; width: 80%; margin: 0; color: var(--s3d-text, #dbe4e0); font: 500 14px/1.6 var(--font, system-ui, sans-serif); text-align: center; text-wrap: balance; pointer-events: none; text-shadow: 0 1px 4px #000; }
+.lyric-support-notice[hidden] { display: none; }
 .s3d[data-layout='single'] .sl-line:not([aria-current='true']) { opacity: 0; pointer-events: none; }
 /* --- 心象歌词（scatter）-------------------------------------------------
    与歌词页的心象同一手法：只有当前行参与散开，词的落位由 stage-lyrics 构建
@@ -675,7 +687,7 @@ body.s3d-open > .bar { display: none; }
 .s3d-transport { min-width: 0; }
 .s3d-play-buttons { display: flex; justify-content: center; align-items: center; gap: 22px; margin-bottom: 7px; }
 .s3d-play { background: var(--s3d-accent); color: #15231f; width: 40px; height: 40px; }
-.s3d-play:hover { background: #e4f2ec; color: #15231f; }
+.s3d-play:hover:not(:disabled) { background: #e4f2ec; color: #15231f; }
 .s3d-timeline { display: flex; align-items: center; gap: 12px; font: 10px/1.5 ui-monospace, monospace; color: var(--s3d-muted); }
 .s3d-timeline span { flex: none; min-width: 30px; }
 .s3d input[type='range'] { appearance: none; -webkit-appearance: none; height: 3px; min-width: 0; border: 0; border-radius: 4px; background: rgba(255,255,255,.16); cursor: pointer; accent-color: var(--s3d-accent); }
@@ -883,7 +895,7 @@ body.s3d-open > .bar { display: none; }
   .s3d-head {
     top: 12px;
     right: 12px;
-    --s3d-btn: 34px;
+    --s3d-btn: 40px;
   }
 
   .s3d-meta {
@@ -899,7 +911,7 @@ body.s3d-open > .bar { display: none; }
   }
 
   .s3d-dock-btn {
-    height: 36px;
+    height: 40px;
     padding: 0 10px;
     flex: none;
   }
@@ -923,7 +935,7 @@ body.s3d-open > .bar { display: none; }
   .s3d-player-extra { grid-row: 1; grid-column: 2; }
   .s3d-volume { display: none; }
   .s3d-play-buttons { gap: 28px; margin-top: -4px; }
-  .s3d-play-buttons .s3d-btn { width: 34px; height: 34px; }
+  .s3d-play-buttons .s3d-btn { width: 40px; height: 40px; }
   .s3d-hint { display: none; }
   .s3d-queue { top: 72px; bottom: 172px; width: min(86vw, 372px); }
 }
@@ -1490,11 +1502,12 @@ html[data-skin="hertz"] #stage3d .s3d-head #s3d-close {
   transform: none;
   transition: color 160ms var(--ease), background-color 160ms var(--ease);
 }
-html[data-skin="hertz"] #stage3d .s3d-head #s3d-close:hover {
+html[data-skin="hertz"] #stage3d .s3d-head #s3d-close:hover:not(:disabled) {
   color: #f4f3f1;
   background: rgba(44, 44, 48, .72);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, .08);
 }
+html[data-skin="hertz"] #stage3d .s3d-head #s3d-close:active:not(:disabled) { transform: scale(.96); }
 html[data-skin="hertz"] #stage3d #s3d-close svg { width: 19px; height: 19px; }
 html[data-skin="hertz"] #stage3d #s3d-close:focus-visible { outline: 2px solid var(--s3d-text); outline-offset: 3px; }
 @media (max-width: 700px) {

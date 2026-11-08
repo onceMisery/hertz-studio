@@ -24,20 +24,17 @@ async function until(probe){const end=Date.now()+20000; while(Date.now()<end){co
   const jobsBefore=await fixture.api('/v1/ai/jobs?limit=50');
   const budgetBefore=(await fixture.api('/v1/ai/status')).budget;
   const old=JSON.parse(fs.readFileSync(path.join(fixture.dataDir,'vmusicd.json'),'utf8'));
+  let rejection='';
   second=spawn(process.env.HERTZ_BIN,['--bind','127.0.0.1','--port','0','--data-dir',fixture.dataDir],{
-   windowsHide:true,stdio:'ignore',env:{...process.env,VMUSIC_BACKEND:'null',VMUSIC_SECRETS:'memory'}});
+   windowsHide:true,stdio:['ignore','ignore','pipe'],env:{...process.env,VMUSIC_BACKEND:'null',VMUSIC_SECRETS:'memory'}});
+  second.stderr.on('data', chunk => { rejection += chunk.toString(); });
   let launchError; second.on('error',error=>{launchError=error;});
-  const discovery=await until(()=>{
-   if(launchError) throw launchError; assert.equal(second.exitCode,null);
-   try {const doc=JSON.parse(fs.readFileSync(path.join(fixture.dataDir,'vmusicd.json'),'utf8')); return doc.pid===second.pid?doc:null;}catch{return null;}
-  });
-  assert.notEqual(discovery.pid,old.pid);
-  const secondBase='http://127.0.0.1:'+discovery.port;
-  const deniedTask=await fetch(secondBase+'/v1/ai/jobs',{method:'POST',
-   headers:{Authorization:'Bearer '+discovery.token,'Content-Type':'application/json'},
-   body:JSON.stringify({brief:'second runner budget probe'}),signal:AbortSignal.timeout(10000)});
-  assert.equal(deniedTask.status,503,'non-runner task admission must be denied even with consent enabled');
-  assert.equal((await deniedTask.json()).error.code,'ai_locked');
+  await until(()=>{ if(launchError) throw launchError; return second.exitCode !== null; });
+  assert.notEqual(second.exitCode,0,'competing service must fail before it can admit any request');
+  assert.match(rejection,/data_dir_busy/);
+  assert(!rejection.includes(synthetic));
+  const discovery=JSON.parse(fs.readFileSync(path.join(fixture.dataDir,'vmusicd.json'),'utf8'));
+  assert.deepEqual(discovery,old,'rejected service cannot overwrite discovery');
   const jobsAfter=await fixture.api('/v1/ai/jobs?limit=50');
   const budgetAfter=(await fixture.api('/v1/ai/status')).budget;
   assert.deepEqual(jobsAfter.jobs.map(job=>job.jobId),jobsBefore.jobs.map(job=>job.jobId),
@@ -46,12 +43,6 @@ async function until(probe){const end=Date.now()+20000; while(Date.now()<end){co
    'non-runner cannot reserve budget');
   assert.equal(budgetAfter.chargedMicroUsd,budgetBefore.chargedMicroUsd,
    'non-runner cannot charge budget');
-  for(const method of ['GET','PUT','DELETE']){
-   const response=await fetch(secondBase+endpoint,{method,headers:{Authorization:'Bearer '+discovery.token,'Content-Type':'application/json'},
-    body:method==='PUT'?JSON.stringify({api_key:synthetic}):undefined,signal:AbortSignal.timeout(10000)});
-   assert.equal(response.status,503,'non-runner credential management must be denied');
-   const body=await response.text(); assert.equal(JSON.parse(body).error.code,'ai_locked'); assert.ok(!body.includes(synthetic));
-  }
   assert.deepEqual(await fixture.api(endpoint),expected(true));
   assert.deepEqual(await fixture.api(endpoint,'PUT',{api_key:synthetic}),expected(true));
   assert.deepEqual(await fixture.api(endpoint,'DELETE'),expected(false));
@@ -65,8 +56,8 @@ async function until(probe){const end=Date.now()+20000; while(Date.now()<end){co
    binary:process.env.HERTZ_BIN,binarySha256:digest(process.env.HERTZ_BIN),
    harnessSha256:digest(__filename),workshopSha256:digest(path.join(root,'plugin/ui/workshop.js')),
    sources:Object.fromEntries(files.map(n=>[n,digest(path.join(root,'crates/hertz-studio/src/ai',n))])),
-   checks:['second process task submission denied with consent enabled and no task or budget mutation',
-    'primary management while generation enabled','second process GET/PUT/DELETE denied by runner ownership',
+   checks:['second process rejected before service admission with consent enabled and no task or budget mutation',
+    'primary management while generation enabled','second process cannot expose credential management or replace discovery',
     'auth','three-field status','same-key save','idempotent delete','no persisted key']};
   fs.mkdirSync(path.dirname(reportPath),{recursive:true});
   fs.writeFileSync(reportPath,JSON.stringify(report,null,2)+'\n');

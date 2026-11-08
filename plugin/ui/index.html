@@ -28,6 +28,7 @@
      消费方）。排在 style.css 之后、页面样式之前；页面 CSS 不得再藏全局 chrome。 -->
 <link rel="stylesheet" href="shell/shell.css">
 <link rel="stylesheet" href="now-playing.css">
+<link rel="stylesheet" href="desktop-lyrics-settings.css">
 <link rel="stylesheet" href="stage.css">
 <link rel="stylesheet" href="creative.css">
 <link rel="stylesheet" href="stage3d.css">
@@ -68,6 +69,9 @@
 <link rel="stylesheet" href="skins/skin.hertz.css" data-skin-css="hertz">
 <link rel="stylesheet" href="volume-controls.css">
 <link rel="stylesheet" href="native-capsule.css">
+<link rel="stylesheet" href="window-lifecycle.css">
+<link rel="stylesheet" href="ui-preferences.css">
+<link rel="stylesheet" href="native-music-import.css">
 </head>
 <body>
 <script>
@@ -528,6 +532,12 @@
       </div>
 
       <div class="scan-panel" id="scan-panel" hidden>
+        <div id="native-music-import" class="native-music-import" aria-busy="false" hidden>
+          <svg class="native-music-icon" aria-hidden="true" viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M5 19v7h22v-7M16 22V5m-6 6 6-6 6 6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <div class="native-music-copy"><strong>拖入音乐，收录到曲库</strong><p>支持音乐文件与目录；目录包含的音乐会一并收录。</p><p id="native-music-note" role="status" aria-live="polite">只收录本次选择。持续同步请使用下方添加目录。</p></div>
+          <button id="native-music-pick" class="btn" type="button">选择音乐文件…</button>
+          <input id="native-music-files" type="file" multiple accept=".mp3,.flac,.wav,.m4a,.aac,.ogg,.oga,.opus,.ape,.wma,.aiff,.aif,.alac" aria-label="选择要收录的音乐文件" hidden>
+        </div>
         <div class="scan-row">
           <input id="scan-root" type="text" placeholder="音乐目录，例如 D:\Music" autocomplete="off" aria-describedby="scan-format-note">
           <button id="scan-pick" class="btn" type="button">选目录…</button>
@@ -1056,7 +1066,7 @@
     </div>
 
     <!-- 每日推荐：一级目的地。菜单项是 daily-view.js 按配置注入的，
-         这里只提供页面容器。日期切换、刷新、列表/卡片排布都在模块里。 -->
+         这里只提供页面容器。刷新、列表/卡片排布都在模块里。 -->
     <div class="view" id="view-daily" hidden>
       <div class="col-head">
         <div class="col-head-left">
@@ -1064,13 +1074,6 @@
           <span class="col-sub" id="dv-sub">—</span>
         </div>
         <div class="col-tools">
-          <!-- 按天切换：推荐是按天生成的，所以能回看，但不能看未来
-               （明天的榜单还不存在，next 在今天时会禁用）。 -->
-          <div class="dv-days" id="dv-days" role="group" aria-label="按日期切换">
-            <button class="btn" id="dv-prev" type="button" aria-label="前一天">‹</button>
-            <button class="btn dv-date" id="dv-date" type="button" aria-label="回到今天">今天</button>
-            <button class="btn" id="dv-next" type="button" aria-label="后一天">›</button>
-          </div>
           <div class="dv-modes" id="dv-modes" role="group" aria-label="推荐来源">
             <button class="chip active" type="button" data-dv-mode="online" aria-pressed="true">在线</button>
             <button class="chip" type="button" data-dv-mode="local" aria-pressed="false">本地</button>
@@ -1140,20 +1143,38 @@
         </div>
         <div class="hz-setting-row">
           <div><label for="hz-ambient-animated">背景缓慢流动</label><small>让封面色彩在播放时轻轻移动</small></div>
-          <input id="hz-ambient-animated" type="checkbox" checked>
+          <input id="hz-ambient-animated" type="checkbox" role="switch" checked>
         </div>
+        <div class="hz-setting-row">
+          <div><label for="player-cover-transition">封面展开动画</label><small>从底栏封面平滑进入播放页</small></div>
+          <select id="player-cover-transition"><option value="zoom">缩放</option><option value="flip">翻转</option><option value="fade">淡入淡出</option><option value="off">关闭</option></select>
+        </div>
+        <div class="hz-setting-row player-transition-duration">
+          <label for="player-cover-duration">封面展开时长</label>
+          <div class="hz-range-control"><input id="player-cover-duration" type="range" min="200" max="1500" step="50" value="1000" aria-describedby="player-transition-hint"><output id="player-cover-duration-value" for="player-cover-duration">1000 ms</output></div>
+        </div>
+        <div class="hz-setting-row">
+          <div><label for="player-stage-transition">进入沉浸模式动画</label><small>从普通播放页或其他入口进入沉浸声场</small></div>
+          <select id="player-stage-transition"><option value="zoom">缩放</option><option value="flip">翻转</option><option value="fade">淡入淡出</option><option value="off">关闭</option></select>
+        </div>
+        <div class="hz-setting-row player-transition-duration">
+          <label for="player-stage-duration">沉浸转场时长</label>
+          <div class="hz-range-control"><input id="player-stage-duration" type="range" min="200" max="1500" step="50" value="1000" aria-describedby="player-transition-hint"><output id="player-stage-duration-value" for="player-stage-duration">1000 ms</output></div>
+        </div>
+        <p class="hint" id="player-transition-hint">动画设置自动保存，开启系统或应用的「减少动效」后停用</p>
         <p class="hint">配色、壁纸与舞台的细节设置保留在本页下方。</p>
       </div>
       <div class="set-group hz-player-preferences" id="hz-player-preferences">
         <h2 class="set-title">播放页歌词</h2>
         <div class="hz-setting-row">
           <div><label for="hz-word-sync">逐字高亮</label><small>按歌曲的歌词时间，逐字点亮当前句</small></div>
-          <input id="hz-word-sync" type="checkbox" checked>
+          <input id="hz-word-sync" type="checkbox" role="switch" checked>
         </div>
-        <div class="hz-setting-row">
-          <label for="hz-lyric-size">文字大小</label>
-          <select id="hz-lyric-size"><option value="small">小</option><option value="medium" selected>标准</option><option value="large">大</option></select>
+        <div class="hz-setting-row hz-lyric-size-row">
+          <div><label for="hz-lyric-size">歌词字号</label><small id="hz-lyric-size-hint">默认 28 px，调整后自动保存</small></div>
+          <div class="hz-range-control"><input id="hz-lyric-size" type="range" min="18" max="48" step="1" value="28" aria-describedby="hz-lyric-size-hint"><output id="hz-lyric-size-value" for="hz-lyric-size">28 px</output></div>
         </div>
+        <div class="hz-lyric-size-preview" aria-label="歌词字号预览">让旋律，陪你慢慢走</div>
       </div>
 
       <div class="set-group">
@@ -1219,19 +1240,19 @@
         </div>
         <div class="set-row">
           <label for="set-auto-play">启动后自动恢复播放</label>
-          <input id="set-auto-play" type="checkbox">
+          <input id="set-auto-play" type="checkbox" role="switch">
           <span class="hint">重启服务后自动接续上次会话（队列、曲目与进度）；不开则显示恢复的曲目、按播放键手动接续</span>
         </div>
         <!-- edition:full -->
         <div class="set-row">
           <label for="set-scrobble">网易云听歌打卡</label>
-          <input id="set-scrobble" type="checkbox" checked>
+          <input id="set-scrobble" type="checkbox" role="switch" checked>
           <span class="hint">在线试听满 30 秒有效收听自动计入播放量（拖动进度不算）；需要已登录网易云</span>
         </div>
         <!-- edition:end -->
         <div class="set-row">
           <label for="set-relay">曲源失效自动接力</label>
-          <input id="set-relay" type="checkbox" checked>
+          <input id="set-relay" type="checkbox" role="switch" checked>
           <span class="hint">在线曲目在原音源放不了（下架、VIP、需登录、流损坏）时，按标题与歌手在其他音源找同一首自动换源续播</span>
         </div>
         <p class="hint set-note">「加入队列」只管列表行的快捷按钮与右键菜单；点曲名本身总是立即播放那一首。「自动进入」只在手动开始播放时触发，启动恢复与自动接力不算。</p>
@@ -1292,6 +1313,77 @@
         </div>
       </div>
 
+      <fieldset class="set-group dls-settings" id="desktop-lyrics-settings" tabindex="-1" aria-describedby="dls-intro">
+        <legend class="set-title">桌面歌词</legend>
+        <div class="dls-heading">
+          <p class="dls-note" id="dls-intro">让歌词留在桌面上。在这里调整样式，应用后生效。</p>
+          <button type="button" class="btn dls-button" id="dls-refresh">读取设置</button>
+        </div>
+        <p class="dls-status" id="dls-status" role="status" aria-live="polite">尚未读取桌面歌词设置</p>
+        <p class="dls-conflict" id="dls-conflict" role="alert" hidden>桌面设置已在其他位置更新。你的草稿已保留；放弃修改并读取最新设置后可继续编辑。</p>
+        <div class="dls-workspace">
+          <fieldset class="dls-controls" id="dls-controls" disabled>
+            <legend class="dls-sr-only">歌词显示与样式</legend>
+            <label class="dls-toggle" for="dls-enabled"><span>启用桌面歌词<small>随主播放器运行，退出播放器时关闭</small></span><input id="dls-enabled" data-dls-field="enabled" type="checkbox" role="switch"></label>
+            <label class="dls-toggle" for="dls-locked"><span>锁定并穿透鼠标<small>锁定后可从系统托盘找回歌词</small></span><input id="dls-locked" data-dls-field="locked" type="checkbox" role="switch"></label>
+            <div class="dls-field-grid">
+              <label class="dls-field" for="dls-layout"><span>显示行数</span><select id="dls-layout" data-dls-field="layout"><option value="single">单行</option><option value="double">双行</option><option value="triple">三行景深</option></select></label>
+              <label class="dls-field" for="dls-font-weight"><span>字重</span><select id="dls-font-weight" data-dls-field="fontWeight" data-dls-number><option value="400">常规</option><option value="500">中等</option><option value="600">半粗</option><option value="700">粗体</option><option value="800">特粗</option></select></label>
+            </div>
+            <label class="dls-field" for="dls-font-size"><span>字号 <output id="dls-font-size-value" for="dls-font-size">30 px</output></span><input id="dls-font-size" data-dls-field="fontSize" type="range" min="18" max="72" step="1" value="30"></label>
+            <label class="dls-toggle" for="dls-bilingual"><span>显示译文或罗马音<small>与当前句一同显示，缺少内容时留空</small></span><input id="dls-bilingual" data-dls-field="bilingual" type="checkbox" role="switch"></label>
+            <label class="dls-field" for="dls-secondary"><span>辅助内容</span><select id="dls-secondary" data-dls-field="secondary"><option value="next">译文</option><option value="romanization">罗马音</option><option value="translation" hidden>译文</option></select></label>
+            <div class="dls-field-grid dls-colors">
+              <label class="dls-field" for="dls-sung-color"><span>已唱颜色</span><input id="dls-sung-color" data-dls-field="sungColor" type="color" value="#ffffff"><output id="dls-sung-color-value" for="dls-sung-color">#FFFFFF</output></label>
+              <label class="dls-field" for="dls-unsung-color"><span>未唱颜色</span><input id="dls-unsung-color" data-dls-field="unsungColor" type="color" value="#ffffff"><output id="dls-unsung-color-value" for="dls-unsung-color">#FFFFFF</output></label>
+            </div>
+            <div class="dls-field-grid">
+              <label class="dls-field" for="dls-outline-color"><span>描边颜色</span><input id="dls-outline-color" data-dls-field="outlineColor" type="color" value="#000000"></label>
+              <label class="dls-field" for="dls-outline-width"><span>描边宽度 / px</span><input id="dls-outline-width" data-dls-field="outlineWidth" type="number" min="0" max="6" step="0.5" value="0" required></label>
+            </div>
+            <label class="dls-field" for="dls-opacity"><span>不透明度 <output id="dls-opacity-value" for="dls-opacity">100%</output></span><input id="dls-opacity" data-dls-field="opacity" type="range" min="0.25" max="1" step="0.01" value="1"></label>
+            <details class="dls-more">
+              <summary>更多样式</summary>
+              <label class="dls-field" for="dls-font-family"><span>字体</span><input id="dls-font-family" data-dls-field="fontFamily" type="text" value="Segoe UI" maxlength="256" required aria-describedby="dls-font-note"><small id="dls-font-note">填写这台电脑已安装的字体名称</small></label>
+              <div class="dls-field-grid">
+                <label class="dls-field" for="dls-theme"><span>文字主题</span><select id="dls-theme" data-dls-field="theme"><option value="auto">跟随系统</option><option value="dark">深色桌面</option><option value="light">浅色桌面</option></select></label>
+                <label class="dls-field" for="dls-surface"><span>歌词底板</span><select id="dls-surface" data-dls-field="surface"><option value="bare">透明</option><option value="glass">磨砂玻璃</option><option value="solid">实色</option></select></label>
+                <label class="dls-field" for="dls-align"><span>对齐方式</span><select id="dls-align" data-dls-field="align"><option value="left">靠左</option><option value="center">居中</option><option value="right">靠右</option></select></label>
+                <label class="dls-field" for="dls-width"><span>窗口宽度 / px</span><input id="dls-width" data-dls-field="width" type="number" min="240" max="2400" step="1" value="550" required></label>
+              </div>
+              <label class="dls-toggle" for="dls-karaoke"><span>逐字高亮<small>歌曲提供逐字时间轴时生效</small></span><input id="dls-karaoke" data-dls-field="karaoke" type="checkbox" role="switch" checked></label>
+              <label class="dls-toggle" for="dls-readability-boost"><span>增强可读性<small>复杂桌面背景下增加文字衬影</small></span><input id="dls-readability-boost" data-dls-field="readabilityBoost" type="checkbox" role="switch"></label>
+            </details>
+          </fieldset>
+          <div class="dls-preview-column">
+            <figure class="dls-preview" id="dls-preview" data-layout="single" data-theme="dark" data-surface="bare" aria-label="桌面歌词样式预览">
+              <div class="dls-preview-label">样例预览</div>
+              <div class="dls-preview-pane">
+                <p class="dls-preview-context dls-preview-previous">听见风穿过耳边</p>
+                <p class="dls-preview-line"><span class="dls-preview-sung">让音乐</span><span>留在此刻</span></p>
+                <p class="dls-preview-secondary" id="dls-preview-secondary" hidden>Let the music stay in this moment</p>
+                <p class="dls-preview-context dls-preview-next">下一句，与你一起听见</p>
+              </div>
+              <figcaption>样例随草稿更新，桌面上的歌词在应用后更新。</figcaption>
+            </figure>
+            <p class="dls-runtime" id="dls-runtime">读取设置后显示桌面状态</p>
+            <div class="dls-position">
+              <h3>桌面位置</h3>
+              <p class="dls-note">先应用样式，再临时解锁歌词并拖动。完成后恢复原来的启用和锁定状态。</p>
+              <button type="button" class="btn dls-button" id="dls-position-begin" disabled>调整桌面位置</button>
+              <div id="dls-position-session" hidden>
+                <p class="dls-position-note" id="dls-position-note" role="status">正在调整位置。离开此设置页或隐藏主窗口会取消本次调整。</p>
+                <div class="dls-actions"><button type="button" class="btn dls-button" id="dls-position-cancel">取消调整</button><button type="button" class="btn primary dls-button" id="dls-position-done">完成调整</button></div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="dls-footer">
+          <p class="dls-note" id="dls-draft-note">修改后点击应用，设置会自动保存。</p>
+          <div class="dls-actions"><button type="button" class="btn dls-button" id="dls-discard" disabled>放弃修改</button><button type="button" class="btn primary dls-button" id="dls-apply" disabled>应用到桌面</button></div>
+        </div>
+      </fieldset>
+
       <!-- 歌词：跨曲目都成立的歌词偏好（folia 的 global lyric timeline offset /
            lyrics filter / staff credits policy）。逐曲偏移在「正在播放」弹窗里，
            那是每首自己的事；这里只管全局的。三件事都发生在歌词喂给舞台之前，
@@ -1305,15 +1397,15 @@
             <button id="set-desktop-lyrics-locate" class="btn">解锁并定位</button>
           </span>
         </div>
-        <p class="hint set-note" id="set-desktop-lyrics-note">Windows 11 x64 独立组件：透明置顶、锁定后鼠标穿透、托盘找回；关闭播放器页面后仍显示当前歌词。</p>
+        <p class="hint set-note" id="set-desktop-lyrics-note">随主播放器运行，支持透明置顶、锁定穿透和托盘找回。关闭主窗口后仍可显示，退出播放器时一同关闭。</p>
         <div class="set-row" id="set-wallpaper-row">
           <label>桌面壁纸</label>
           <span class="set-actions">
-            <button id="set-wallpaper-settings" class="btn">桌面歌词与壁纸</button>
+            <button id="set-wallpaper-settings" class="btn">壁纸设置</button>
             <button id="set-wallpaper-toggle" class="btn">显示/隐藏</button>
           </span>
         </div>
-        <p class="hint set-note" id="set-wallpaper-note">Windows 11 x64 独立组件，默认关闭；在设置页选择目标屏、帧率与音乐响应并预览。</p>
+        <p class="hint set-note" id="set-wallpaper-note">默认关闭；在壁纸设置中选择目标屏、帧率与音乐响应并预览，退出播放器时一同关闭。</p>
         <div class="set-row" id="set-mini-row">
           <label>桌面宠物</label>
           <span class="set-actions">
@@ -1321,7 +1413,7 @@
             <button id="set-mini-assets" class="btn">素材文件夹</button>
           </span>
         </div>
-        <p class="hint set-note" id="set-mini-note">独立组件的桌面宠物：播放时换形象、悬停展开成播放器、可拖拽贴边。素材文件夹里有命名约定说明，增删素材几秒内自动换装。</p>
+        <p class="hint set-note" id="set-mini-note">桌面宠物随主播放器运行：播放时换形象、悬停展开成播放器、可拖拽贴边。素材文件夹里有命名约定说明，增删素材几秒内自动换装。</p>
         <section id="dbx-desktop-settings" class="dbx-desktop-settings" aria-labelledby="dbx-desktop-title" tabindex="-1" hidden>
           <h3 id="dbx-desktop-title">桌面歌词与壁纸（可选）</h3>
           <p class="hint">连接后，允许独立桌面组件只读本插件的歌词与音乐响应数据。音乐来源切换、歌词与壁纸启用都由原生中心管理；打开设置或检测不会授权，也不会启用窗口。</p>
@@ -1374,7 +1466,7 @@
         <p class="hint set-note">「智能」只隐藏第一条正文行之前的制作人员行，中段出现的保留；「全部隐藏」对整首生效。</p>
         <div class="set-row">
           <label for="set-lyric-filter-on">逐行过滤</label>
-          <input id="set-lyric-filter-on" type="checkbox">
+          <input id="set-lyric-filter-on" type="checkbox" role="switch">
           <span class="hint">命中的行整行不进歌词区，与「正在播放」弹窗的原文无关</span>
         </div>
         <div class="set-row">
@@ -1426,7 +1518,7 @@
         </div>
         <div class="set-row">
           <label for="set-emotion-accent">重音词强调</label>
-          <input id="set-emotion-accent" type="checkbox">
+          <input id="set-emotion-accent" type="checkbox" role="switch">
           <span class="hint" id="set-emotion-accent-note">只加粗匹配词，不改变行级字重</span>
         </div>
         <div class="set-row">
@@ -1435,13 +1527,13 @@
         </div>
         <div class="set-row">
           <label for="set-emotion-palette">情绪配色</label>
-          <input id="set-emotion-palette" type="checkbox" checked>
+          <input id="set-emotion-palette" type="checkbox" role="switch" checked>
           <span class="hint" id="set-emotion-palette-note">关闭时保留场位移与字体参数，尊重自定义歌词色</span>
         </div>
         </details>
         <div class="set-row emotion-authorization">
           <label for="set-emotion-ai-authorized">允许歌词发送给模型</label>
-          <input id="set-emotion-ai-authorized" type="checkbox" aria-describedby="set-emotion-ai-note">
+          <input id="set-emotion-ai-authorized" type="checkbox" role="switch" aria-describedby="set-emotion-ai-note">
           <span class="hint" id="set-emotion-ai-note">仅自动分类需要；未授权时不发送歌词</span>
         </div>
         <div class="emotion-model-actions">
@@ -1540,17 +1632,17 @@
         <h2 class="set-title">海报墙</h2>
         <div class="set-row">
           <label for="set-wall-follow">换歌时自动聚焦</label>
-          <input id="set-wall-follow" type="checkbox">
+          <input id="set-wall-follow" type="checkbox" role="switch">
           <span class="hint">切歌时，封面墙自动移到正在播放的歌曲并展开封面</span>
         </div>
         <div class="set-row">
           <label for="set-wall-vignette">四角暗角</label>
-          <input id="set-wall-vignette" type="checkbox">
+          <input id="set-wall-vignette" type="checkbox" role="switch">
           <span class="hint">压暗封面墙的边缘，让视线更聚在中央</span>
         </div>
         <div class="set-row">
           <label for="set-wall-tint">海报统一着色</label>
-          <input id="set-wall-tint" type="checkbox">
+          <input id="set-wall-tint" type="checkbox" role="switch">
           <span class="hint">为封面增加统一色调，并保留原有图像细节</span>
         </div>
         <div class="set-row">
@@ -1625,6 +1717,19 @@
           </span>
         </div>
         <p class="hint">备份含歌单、收藏、设置与曲库目录，不含平台凭据。导入按名字合并歌单、收藏去重，可重复执行。</p>
+        <section id="ui-preferences-setting" class="ui-preference-setting" aria-labelledby="ui-preferences-setting-title">
+          <div class="ui-preference-setting-copy">
+            <h3 id="ui-preferences-setting-title">界面偏好</h3>
+            <p class="hint">迁移主题、布局与阅读偏好。导入前可查看覆盖项，应用后重新加载页面。</p>
+          </div>
+          <div class="set-actions ui-preference-setting-actions">
+            <button type="button" id="ui-preferences-export" class="btn">导出偏好</button>
+            <button type="button" id="ui-preferences-import" class="btn" aria-haspopup="dialog" aria-controls="ui-preferences-dialog">导入偏好</button>
+            <input type="file" id="ui-preferences-file" accept=".json,application/json" hidden>
+          </div>
+          <p class="hint ui-preference-setting-footnote">适用于浏览器、桌面窗口与 DBX；账号、播放记录与本地素材不随文件迁移</p>
+          <p class="hint" id="ui-preferences-status" role="status" aria-live="polite"></p>
+        </section>
       </div>
 
       <div class="set-group">
@@ -1636,7 +1741,7 @@
         <div class="theme-swatches" id="theme-swatches" role="group" aria-label="主题色快选"></div>
         <div class="set-row">
           <label for="set-cover-follow">封面氛围光</label>
-          <input id="set-cover-follow" type="checkbox" aria-describedby="set-cover-follow-note">
+          <input id="set-cover-follow" type="checkbox" role="switch" aria-describedby="set-cover-follow-note">
           <span class="hint" id="set-cover-follow-note">从封面提取背景与舞台高亮色，即时生效并自动保存。</span>
         </div>
         <div class="set-row">
@@ -1656,7 +1761,7 @@
              界面上会如实标成兜底（data-fallback），不留空白。 -->
         <div class="set-row">
           <label for="set-home-quote">首页显示每日名言</label>
-          <input id="set-home-quote" type="checkbox" checked aria-describedby="set-home-quote-note">
+          <input id="set-home-quote" type="checkbox" role="switch" checked aria-describedby="set-home-quote-note">
           <span class="hint" id="set-home-quote-note">在首页「正在播放」卡片右侧显示一句名言；关闭后整块不显示，卡片恢复原样</span>
         </div>
         <div class="set-row">
@@ -1670,11 +1775,11 @@
         </div>
         <div class="set-row">
           <label for="set-home-quote-click">点击名言可换一条</label>
-          <input id="set-home-quote-click" type="checkbox" checked>
+          <input id="set-home-quote-click" type="checkbox" role="switch" checked>
         </div>
         <div class="set-row">
           <label for="set-motion">减少动效</label>
-          <input id="set-motion" type="checkbox">
+          <input id="set-motion" type="checkbox" role="switch">
           <span class="hint">全局压掉所有动效；只要某一面不舒服时，用下面的分面开关更合适</span>
         </div>
         <!-- 动效分面降级（folia 的 reduce_motion_surfaces）：body[data-rm] 上是
@@ -1682,26 +1787,26 @@
              仍由上面的全局开关与「渲染模式」管。 -->
         <div class="set-row">
           <label for="set-rm-bg">分面：背景纹理动画</label>
-          <input id="set-rm-bg" type="checkbox">
+          <input id="set-rm-bg" type="checkbox" role="switch">
         </div>
         <div class="set-row">
           <label for="set-rm-lyrics">分面：歌词排版动效</label>
-          <input id="set-rm-lyrics" type="checkbox">
+          <input id="set-rm-lyrics" type="checkbox" role="switch">
         </div>
         <div class="set-row">
           <label for="set-rm-ui">分面：界面微动效</label>
-          <input id="set-rm-ui" type="checkbox">
+          <input id="set-rm-ui" type="checkbox" role="switch">
         </div>
         <div class="set-row">
           <label for="set-rm-wall">分面：海报墙动效</label>
-          <input id="set-rm-wall" type="checkbox">
+          <input id="set-rm-wall" type="checkbox" role="switch">
         </div>
         <!-- 空闲隐藏是纯布局开关：判据（有没有曲目 / 是否已按停止）在 app.js 的
              stageIdle() 里，CSS 只认 body[data-stage-idle] 这一个标记，不参与判定。
              暂停不收起——曲目还在，收起会让歌词和进度凭空消失。 -->
         <div class="set-row">
           <label for="set-stage-idle-hide">空闲时隐藏正在播放</label>
-          <input id="set-stage-idle-hide" type="checkbox">
+          <input id="set-stage-idle-hide" type="checkbox" role="switch">
           <span class="hint">没有曲目在播或已按停止时收起右侧舞台，列表占满宽度；开始播放自动恢复</span>
         </div>
         <!-- 渲染模式：默认标准渲染。选「增强」不会立刻保存，先把下面的警示块
@@ -1757,7 +1862,7 @@
         </div>
         <div class="set-row">
           <label for="ts-wall-auto">自动压暗</label>
-          <input id="ts-wall-auto" type="checkbox" checked>
+          <input id="ts-wall-auto" type="checkbox" role="switch" checked>
           <span class="hint">按壁纸亮度自动算出压暗量，保证面板上的文字仍然达到 AA</span>
         </div>
         <div class="set-row">
@@ -1794,20 +1899,20 @@
         <h2 class="set-title">导航</h2>
         <div class="set-row">
           <label for="set-nav-daily">显示「每日推荐」</label>
-          <input id="set-nav-daily" type="checkbox" checked>
+          <input id="set-nav-daily" type="checkbox" role="switch" checked>
           <span class="hint">在左侧导航里显示独立的每日推荐入口；关掉后入口消失，不影响其它菜单</span>
         </div>
         <div class="set-row">
           <label for="set-nav-playlists">显示「歌单」</label>
-          <input id="set-nav-playlists" type="checkbox" checked>
+          <input id="set-nav-playlists" type="checkbox" role="switch" checked>
         </div>
         <div class="set-row">
           <label for="set-nav-online">显示「电台」</label>
-          <input id="set-nav-online" type="checkbox" checked>
+          <input id="set-nav-online" type="checkbox" role="switch" checked>
         </div>
         <div class="set-row">
           <label for="set-nav-favorites">显示「收藏」</label>
-          <input id="set-nav-favorites" type="checkbox" checked>
+          <input id="set-nav-favorites" type="checkbox" role="switch" checked>
         </div>
         <span class="hint">关掉的分区从导航里消失；本地曲库与播放队列始终显示。正停在被关掉的分区时退回本地曲库。</span>
       </div>
@@ -1815,6 +1920,15 @@
       <!-- 窗口与舞台：设置页和更多工具共用原本的沉浸声场与胶囊入口。 -->
       <div class="set-group">
         <h2 class="set-title">窗口与舞台</h2>
+        <div class="set-row" id="window-lifecycle-setting" hidden>
+          <label for="window-lifecycle-behavior">关闭主窗口</label>
+          <select id="window-lifecycle-behavior" aria-describedby="window-lifecycle-setting-status" disabled>
+            <option value="hide">隐藏到托盘（默认）</option>
+            <option value="quit">退出播放器</option>
+          </select>
+          <p class="hint" id="window-lifecycle-setting-status" role="status">隐藏后音乐继续播放，可从系统托盘恢复主窗口。</p>
+          <button type="button" class="btn tiny" id="window-lifecycle-retry" hidden>重新读取</button>
+        </div>
         <div class="set-row">
           <label>沉浸声场</label>
           <span class="set-actions">
@@ -1892,7 +2006,7 @@
         <h2 class="set-title">开发者选项</h2>
         <div class="set-row">
           <label for="set-dev-diag">播放诊断日志</label>
-          <input id="set-dev-diag" type="checkbox" aria-describedby="set-dev-diag-note">
+          <input id="set-dev-diag" type="checkbox" role="switch" aria-describedby="set-dev-diag-note">
           <span class="hint" id="set-dev-diag-note">开启后把播放过程逐条写进日志文件：选了哪个音源与音质、走缓存还是现下载、地址是哪个（隐去签名参数）、以及失败原因。内容只与播放有关，会带上在播曲名与本地文件路径，不含账号凭据。遇到问题时先开启再复现一次，然后把下面的日志发给开发者。</span>
         </div>
         <div class="set-row" id="dev-diag-crash" hidden>
@@ -2017,7 +2131,7 @@
 
   <div class="bar-right">
     <button id="bar-queue" class="ctrl" type="button" title="播放队列" aria-label="播放队列"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-queue"/></svg></button>
-    <button id="bar-desktop-settings" class="ctrl" type="button" title="桌面歌词与壁纸" aria-label="桌面歌词与壁纸" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-desktop"/></svg></button>
+    <button id="bar-desktop-settings" class="ctrl" type="button" title="桌面歌词设置" aria-label="桌面歌词设置" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-desktop"/></svg></button>
     <button id="bar-player-expand" class="ctrl" type="button" title="展开播放页" aria-label="展开播放页"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-expand"/></svg></button>
     <button id="sleep-timer" class="btn-pill st-pill" title="睡眠定时器" aria-label="睡眠定时器" aria-pressed="false">
       <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-timer"/></svg>
@@ -2078,6 +2192,7 @@
   <div class="s3d-reading" id="s3d-reading">
     <div class="s3d-eyebrow" id="s3d-status">让音乐，拥有形状</div>
   </div>
+  <p class="lyric-support-notice" id="s3d-lyric-support" role="status" hidden></p>
   <div class="s3d-sleeve" id="s3d-sleeve" hidden>
     <div class="s3d-record-object">
       <div class="s3d-record-back" aria-hidden="true"></div>
@@ -2104,10 +2219,21 @@
   <!-- 3D 歌单架（封面流）：卡片由 stage-shelf.js 按队列生成，这里只留锚点 -->
   <div class="s3d-shelf" id="s3d-shelf" aria-hidden="true"><div class="s3d-shelf-plane" id="s3d-shelf-plane"></div></div>
   <button class="sp-fab s3d-settings-fab" id="s3d-settings-toggle" type="button" title="沉浸声场设置" aria-label="沉浸声场设置" aria-expanded="false" aria-controls="s3d-settings"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-settings"/></svg></button>
-  <aside class="sp-sheet" id="s3d-settings" aria-label="沉浸声场设置" hidden>
+  <!-- 设置弹窗的遮罩：与抽屉同开合，点它即关闭。放在 aside 之前，层级低于弹窗。 -->
+  <div class="s3d-settings-scrim" id="s3d-settings-scrim" hidden aria-hidden="true"></div>
+  <aside class="sp-sheet" id="s3d-settings" aria-label="沉浸声场设置" role="dialog" aria-modal="true" hidden>
     <h2>沉浸声场设置<button class="sp-head-btn" id="s3d-settings-close" type="button" title="收起设置" aria-label="收起设置"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-close"/></svg></button></h2>
     <p class="s3d-settings-status" id="s3d-settings-status" role="status" aria-live="polite"></p>
-    <label class="sp-check" for="s3d-lyrics-toggle"><input id="s3d-lyrics-toggle" type="checkbox" checked> 显示歌词</label>
+    <!-- 分组只跳转、不隐藏控件：任何设置项在任何时刻都能被直接操作（浏览器契约与用户都依赖这点）。 -->
+    <nav class="s3d-sec-nav" id="s3d-sec-nav" aria-label="设置分组">
+      <button type="button" data-sec="s3d-sec-view" class="is-current" aria-current="true">观看与歌词</button>
+      <button type="button" data-sec="s3d-sec-stage">舞台</button>
+      <button type="button" data-sec="s3d-sec-light">光与律动</button>
+      <button type="button" data-sec="s3d-sec-lyrics">歌词舞台</button>
+      <button type="button" data-sec="s3d-sec-reset">恢复</button>
+    </nav>
+    <h3 class="s3d-sec" id="s3d-sec-view">观看与歌词 <small>布局、歌词视觉与阅读方式</small></h3>
+    <label class="sp-check" for="s3d-lyrics-toggle"><input id="s3d-lyrics-toggle" type="checkbox" role="switch" checked> 显示歌词</label>
     <button class="sp-btn-line" id="s3d-reset" type="button" title="复位视角" aria-label="复位视角">复位视角</button>
     <button class="sp-btn-line" id="s3d-fs" type="button" title="全屏" aria-label="全屏" aria-pressed="false">进入全屏</button>
     <label for="s3d-layout">聆听布局</label>
@@ -2118,10 +2244,11 @@
     <div id="s3d-fl-starborn" hidden>
       <label for="s3d-fl-auto-lock">自动切镜间隔 <output id="s3d-fl-auto-lock-value">4.0s</output></label>
       <input id="s3d-fl-auto-lock" type="range" min="0" max="12" step="0.5" value="4">
-      <label for="s3d-fl-auto-avoid"><input id="s3d-fl-auto-avoid" type="checkbox" checked> 抑制最近用过的模式，避免连续重复</label>
+      <label for="s3d-fl-auto-avoid"><input id="s3d-fl-auto-avoid" type="checkbox" role="switch" checked> 抑制最近用过的模式，避免连续重复</label>
       <p class="s3d-fl-auto-note" id="s3d-fl-auto-note">星诞先把整首歌读成段落（句间留白 + 副歌重复 + 逐字画像），再按段落挑渲染器：副歌给凝彩／商籁这类分镜，主歌给流光／商籁，留白给心象。切镜只发生在段落第一句起唱之前，绝不打断正在唱的半句；副歌第二次到来时沿用同一张脸，只把景别与力度抬一档。</p>
       <p class="s3d-fl-auto-state" id="s3d-fl-auto-state" hidden></p>
     </div>
+    <h3 class="s3d-sec" id="s3d-sec-stage">舞台 <small>场景来源、歌单架与创意工坊</small></h3>
     <label for="s3d-scene-source">舞台来源</label>
     <!-- 「动画绘景」暂时下架：画稿还不够精美，入口先收起（开关见 workshop.js 的
          showAnimeScenery）。这里保留 option 只加 hidden，不删整项——已经停在这个
@@ -2130,30 +2257,30 @@
     <div id="s3d-coast-tuning" hidden>
       <label for="s3d-coast-tod">海岸时刻 <output id="s3d-coast-tod-value">黄昏</output></label>
       <input id="s3d-coast-tod" type="range" min="0" max="1" step="0.01" value="0">
-      <label for="s3d-coast-interact"><input id="s3d-coast-interact" type="checkbox" checked> 舞台交互（拖拽转视角）</label>
+      <label for="s3d-coast-interact"><input id="s3d-coast-interact" type="checkbox" role="switch" checked> 舞台交互（拖拽转视角）</label>
       <p class="s3d-setting-note">拖拽环绕、滚轮推拉、双击复位；静置后自动回到巡航镜头。</p>
     </div>
     <div id="s3d-zodiac-tuning" hidden>
-      <label for="s3d-zodiac-field"><input id="s3d-zodiac-field" type="checkbox" checked> 背景星云</label>
-      <label for="s3d-zodiac-interact"><input id="s3d-zodiac-interact" type="checkbox" checked> 交互旋转（拖拽环绕 / 滚轮推拉 / 双击复位）</label>
+      <label for="s3d-zodiac-field"><input id="s3d-zodiac-field" type="checkbox" role="switch" checked> 背景星云</label>
+      <label for="s3d-zodiac-interact"><input id="s3d-zodiac-interact" type="checkbox" role="switch" checked> 交互旋转（拖拽环绕 / 滚轮推拉 / 双击复位）</label>
       <p class="s3d-setting-note">粒子每 13 秒汇聚成一座星座造型，停留微摆后散开换下一座。拖拽环绕、滚轮缩放、双击复位；悬停主星、按住蓄能、松开引爆星链。关闭背景星云可换取低端设备的流畅。</p>
     </div>
     <div id="s3d-anime-tuning" hidden>
       <label for="s3d-anime-scene">绘景作品</label>
       <select id="s3d-anime-scene"></select>
-      <label for="s3d-anime-mirror"><input id="s3d-anime-mirror" type="checkbox"> 镜像对称（左右两侧一致）</label>
+      <label for="s3d-anime-mirror"><input id="s3d-anime-mirror" type="checkbox" role="switch"> 镜像对称（左右两侧一致）</label>
     </div>
-    <label for="s3d-stage-theme">舞台风格</label>
-    <select id="s3d-stage-theme"><option value="starfall">星落</option></select>
     <label for="s3d-shelf-mode">3D 歌单架</label>
     <select id="s3d-shelf-mode"><option value="stage">舞台封面流</option><option value="side">右侧歌单架</option><option value="off">关闭</option></select>
     <button class="sp-btn-line" id="s3d-workshop">进入创意工坊</button>
+    <h3 class="s3d-sec" id="s3d-sec-light">光与律动 <small>强度、镜头与背景光晕</small></h3>
     <label for="s3d-reactivity">律动强度 <output id="s3d-reactivity-value">135%</output></label>
     <input id="s3d-reactivity" type="range" min="0" max="200" value="135">
     <label for="s3d-motion">镜头动态 <output id="s3d-motion-value">65%</output></label>
     <input id="s3d-motion" type="range" min="0" max="100" value="65">
     <label for="s3d-bloom">3D 背景光晕 <output id="s3d-bloom-value">80%</output></label>
     <input id="s3d-bloom" type="range" min="0" max="150" value="80">
+    <h3 class="s3d-sec" id="s3d-sec-lyrics">歌词舞台 <small>当前歌词视觉的专属调参</small></h3>
     <div id="s3d-fl-common" hidden>
       <label for="s3d-fl-size">歌词字号 <output id="s3d-fl-size-value">100%</output></label>
       <input id="s3d-fl-size" type="range" min="0.70" max="1.50" step="0.05" value="1">
@@ -2169,12 +2296,12 @@
       </div>
       <label for="s3d-fl-opacity">封面底色浓度 <output id="s3d-fl-opacity-value">75%</output></label>
       <input id="s3d-fl-opacity" type="range" min="0" max="1" step="0.05" value="0.75">
-      <label for="s3d-fl-vignette"><input id="s3d-fl-vignette" type="checkbox" checked> 暗角</label>
-      <label for="s3d-fl-subtitle"><input id="s3d-fl-subtitle" type="checkbox" checked> 字幕条</label>
+      <label for="s3d-fl-vignette"><input id="s3d-fl-vignette" type="checkbox" role="switch" checked> 暗角</label>
+      <label for="s3d-fl-subtitle"><input id="s3d-fl-subtitle" type="checkbox" role="switch" checked> 字幕条</label>
       <label>歌词偏移 <button class="s3d-btn" id="s3d-fl-off-down" type="button">−0.1s</button> <output id="s3d-fl-off-value">+0.0s</output> <button class="s3d-btn" id="s3d-fl-off-up" type="button">+0.1s</button></label>
     </div>
     <div id="s3d-fl-classic" hidden>
-      <label for="s3d-fl-rotation"><input id="s3d-fl-rotation" type="checkbox" checked> 词旋转</label>
+      <label for="s3d-fl-rotation"><input id="s3d-fl-rotation" type="checkbox" role="switch" checked> 词旋转</label>
       <label for="s3d-fl-breathing">呼吸幅度 <output id="s3d-fl-breathing-value">1.00x</output></label>
       <input id="s3d-fl-breathing" type="range" min="0" max="2" step="0.05" value="1">
       <label for="s3d-fl-spacing">词间距 <output id="s3d-fl-spacing-value">0.70x</output></label>
@@ -2197,9 +2324,9 @@
       <select id="s3d-fl-track-layout"><option value="phrases">词组断行</option><option value="lines">整行</option><option value="staircase">阶梯</option><option value="editorial-track">社论轨（全篇路线）</option></select>
       <label for="s3d-fl-phrase">词组长度 <output id="s3d-fl-phrase-value">12</output></label>
       <input id="s3d-fl-phrase" type="range" min="4" max="24" step="1" value="12">
-      <label for="s3d-fl-decor"><input id="s3d-fl-decor" type="checkbox" checked> 取景框与 HUD 装饰</label>
-      <label for="s3d-fl-accents"><input id="s3d-fl-accents" type="checkbox" checked> 重音粒子</label>
-      <label for="s3d-fl-atmosphere"><input id="s3d-fl-atmosphere" type="checkbox" checked> 氛围光斑</label>
+      <label for="s3d-fl-decor"><input id="s3d-fl-decor" type="checkbox" role="switch" checked> 取景框与 HUD 装饰</label>
+      <label for="s3d-fl-accents"><input id="s3d-fl-accents" type="checkbox" role="switch" checked> 重音粒子</label>
+      <label for="s3d-fl-atmosphere"><input id="s3d-fl-atmosphere" type="checkbox" role="switch" checked> 氛围光斑</label>
       <label for="s3d-fl-halation">胶片溢光 <output id="s3d-fl-halation-value">0.50x</output></label>
       <input id="s3d-fl-halation" type="range" min="0" max="1" step="0.05" value="0.5">
     </div>
@@ -2208,12 +2335,13 @@
       <select id="s3d-fl-composition"><option value="auto">随歌词自动切换</option><option value="split-duo">双色分屏</option><option value="quad-grid">四色网格</option><option value="diagonal-cut">斜切色面</option><option value="triptych">三联画</option><option value="banded">横向色带</option><option value="poster-frame">海报画框</option><option value="fan-burst">扇面展开</option><option value="shutters">百叶切片</option><option value="offset-collage">错位拼贴</option></select>
       <label for="s3d-fl-color-mode">色彩表现</label>
       <select id="s3d-fl-color-mode"><option value="duo">主题双色</option><option value="mono">单色印刷</option><option value="vivid">浓彩波普</option></select>
-      <label for="s3d-fl-screens"><input id="s3d-fl-screens" type="checkbox" checked> 网点与线纹</label>
-      <label for="s3d-fl-inversion"><input id="s3d-fl-inversion" type="checkbox" checked> 逐字扫光反色</label>
-      <label for="s3d-fl-seams"><input id="s3d-fl-seams" type="checkbox" checked> 色块接缝与纸面颗粒</label>
+      <label for="s3d-fl-screens"><input id="s3d-fl-screens" type="checkbox" role="switch" checked> 网点与线纹</label>
+      <label for="s3d-fl-inversion"><input id="s3d-fl-inversion" type="checkbox" role="switch" checked> 逐字扫光反色</label>
+      <label for="s3d-fl-seams"><input id="s3d-fl-seams" type="checkbox" role="switch" checked> 色块接缝与纸面颗粒</label>
       <label for="s3d-fl-halation-t">胶片溢光 <output id="s3d-fl-halation-t-value">0.50x</output></label>
       <input id="s3d-fl-halation-t" type="range" min="0" max="1" step="0.05" value="0.5">
     </div>
+    <h3 class="s3d-sec" id="s3d-sec-reset">恢复 <small>回到舞台默认，已存工坊作品保留</small></h3>
     <button class="sp-btn-line" id="s3d-defaults" type="button" aria-describedby="s3d-defaults-note">恢复舞台默认</button>
     <p class="sp-note" id="s3d-defaults-note" role="status" aria-live="polite">恢复画面与镜头，保留已存工坊作品。</p>
     <span class="sp-note" id="s3d-motion-note">设置即时生效</span>
@@ -2512,6 +2640,8 @@
 <script defer src="theme-picker.js"></script>
 <script defer src="anime-interactions.js"></script>
 <script defer src="perf-probe.js"></script>
+<script defer src="stage-resource-budget.js"></script>
+<script defer src="stage-resource-policy.js"></script>
 <script defer src="stage.js"></script>
 <!-- 起音检测：粒子层与三维层共用同一份"鼓点是哪一刻"，必须排在两者之前 -->
 <script defer src="onset.js"></script>
@@ -2534,6 +2664,8 @@
 <script defer src="bgwall.js"></script>
 <script defer src="lyric3d.js"></script>
 <script defer src="backgrounds.js"></script>
+<script defer src="stage-media.js"></script>
+<script defer src="stage-persistence.js"></script>
 <script defer src="handdrawn.js"></script>
 <script defer src="creative-stage.js"></script>
 <!-- 二次元舞台的绘制层：与 anime-stage.css 配对，负责 canvas 上的手绘风上色。
@@ -2587,9 +2719,16 @@
   <div class="sp-canvas" id="sp-canvas"></div>
   <main id="sp-home" class="space-home" hidden></main>
   <div class="sp-vignette" aria-hidden="true"></div>
+  <div id="sp-scene-veil" aria-hidden="true" data-phase="idle" data-scene-direction="right">
+    <i class="sp-veil-sheet"></i>
+    <i class="sp-veil-a"></i>
+    <i class="sp-veil-b"></i>
+    <span class="sp-veil-label">正在切换场景</span>
+  </div>
   <div class="s3d-reading sp-reading" id="sp-reading">
     <div class="s3d-eyebrow" id="sp-status">三维空间</div>
   </div>
+  <p class="lyric-support-notice" id="sp-lyric-support" role="status" hidden></p>
   <aside class="sp-zodiac-hud" id="sp-zodiac-hud" aria-live="polite" aria-label="星座观测" hidden>
     <div class="sp-zodiac-plaque">
       <p class="sp-zodiac-kicker"><span>ZODIAC OBSERVATORY</span><span id="sp-zodiac-index">01 — XII</span></p>
@@ -2687,13 +2826,13 @@
         <details class="sp-scene-picker" open><summary>场景预设</summary><div class="sp-fx-grid" id="sp-fx-grid" role="group" aria-label="选择舞台场景"></div></details>
       </section>
       <section id="sp-console-lyrics" role="tabpanel" aria-labelledby="sp-tab-lyrics" tabindex="0" hidden>
-        <label class="sp-check" for="sp-lyrics-toggle"><input id="sp-lyrics-toggle" type="checkbox" checked> 显示歌词</label>
+        <label class="sp-check" for="sp-lyrics-toggle"><input id="sp-lyrics-toggle" type="checkbox" role="switch" checked> 显示歌词</label>
         <label for="sp-lyric-style">歌词效果</label><select id="sp-lyric-style"></select>
         <button type="button" class="sp-btn-line" data-emotion-open aria-haspopup="dialog" aria-controls="emotion-dialog">情绪字体</button>
         <div id="sp-lyric-params"></div>
       </section>
       <section id="sp-console-camera" role="tabpanel" aria-labelledby="sp-tab-camera" tabindex="0" hidden>
-        <label class="sp-check" for="sp-cinema-toggle"><input id="sp-cinema-toggle" type="checkbox" checked> 电影镜头</label>
+        <label class="sp-check" for="sp-cinema-toggle"><input id="sp-cinema-toggle" type="checkbox" role="switch" checked> 电影镜头</label>
         <div class="sp-camera-tools">
           <button class="sp-head-btn" id="sp-reset-camera" title="复位镜头" aria-label="复位镜头"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-reset"/></svg></button>
         </div>
@@ -2705,7 +2844,36 @@
     <p class="sp-note" id="sp-quality-status" role="status" hidden></p>
     <label for="sp-shelf-mode">3D 歌单架</label>
     <select id="sp-shelf-mode"><option value="side">右侧歌单架</option><option value="stage">舞台封面流</option><option value="off">关闭</option></select>
-    <label class="sp-check" for="sp-immersive-toggle"><input id="sp-immersive-toggle" type="checkbox"> 沉浸模式</label>
+    <label class="sp-check" for="sp-immersive-toggle"><input id="sp-immersive-toggle" type="checkbox" role="switch"> 沉浸模式</label>
+    <label for="sp-immersive-fx">沉浸切换动画</label>
+    <select id="sp-immersive-fx">
+      <option value="fade">淡入淡出</option>
+      <option value="flip">翻转</option>
+      <option value="zoom">缩放</option>
+      <option value="slide">滑动</option>
+      <option value="off">关闭</option>
+    </select>
+    <div class="sp-param-field">
+      <label for="sp-immersive-fx-dur">动画时长</label>
+      <output id="sp-immersive-fx-dur-val" for="sp-immersive-fx-dur">450 ms</output>
+      <input id="sp-immersive-fx-dur" type="range" min="150" max="1200" step="50" value="450" aria-label="沉浸切换动画时长（毫秒）">
+    </div>
+    <label for="sp-scene-fx">场景切换动画</label>
+    <select id="sp-scene-fx">
+      <option value="veil-fade">淡入淡出</option>
+      <option value="veil-wipe">遮罩擦除</option>
+      <option value="zoom">推拉缩放</option>
+      <option value="tilt">翻转倾斜</option>
+      <option value="slide">位移</option>
+      <option value="combo">组合</option>
+      <option value="none">关闭</option>
+    </select>
+    <div class="sp-param-field">
+      <label for="sp-scene-fx-dur">场景切换时长</label>
+      <output id="sp-scene-fx-dur-val" for="sp-scene-fx-dur">640 ms</output>
+      <input id="sp-scene-fx-dur" type="range" min="240" max="1200" step="40" value="640" aria-label="场景切换动画时长（毫秒）">
+    </div>
+    <label class="sp-check" for="sp-scene-fx-glide"><input id="sp-scene-fx-glide" type="checkbox" role="switch" checked> 切换时镜头滑移</label>
     <button class="sp-btn-line" id="sp-defaults" type="button">恢复空间默认</button>
     </section>
     </div>
@@ -2733,6 +2901,7 @@
 <script defer src="stanza/stanza-songform.js"></script>
 <script defer src="stanza/stanza-starborn.js"></script>
 <script defer src="stage-lyrics.js"></script>
+<script defer src="player-transitions.js"></script>
 <script defer src="now-playing.js"></script>
 <script defer src="lyric-import.js"></script>
 <!-- 3D 歌单架（封面流）：只依赖 Stage 只读出口，必须排在 stage3d.js 之前 -->
@@ -2788,11 +2957,12 @@
      没有它整组退化成「只能用 URL 参数」。 -->
 <script defer src="obs-css.js"></script>
 <!-- 胶囊播放器：最小化态下界面唯一可见的东西（dock 实例里则是唯一内容）。
-     信息区（封面 / 「正在播放」/ 标题 / 艺术家）整块可点 = 展开；右侧四个按钮是
-     上一首 / 播放暂停 / 下一首 / 展开——不展开也能换歌与控制播放。整块可拖、
-     靠近边或角自动吸附，位置记进 localStorage。
+     信息区（封面 / 「正在播放」/ 标题 / 艺术家）整块可点 = 展开，也是唯一的展开
+     入口；右侧只留传输三键（上一首 / 播放暂停 / 下一首），不展开也能控制播放。
+     桌面胶囊窗口只有 320×64，第四个键会把文字区挤没。整块可拖、靠近边或角
+     自动吸附，位置记进 localStorage。
      position: fixed 所以与四套皮肤正交：皮肤改的是布局栅格，胶囊浮在其上。 -->
-<div id="capsule" class="capsule" hidden role="group" aria-label="胶囊播放器">
+<div id="capsule" class="capsule" hidden role="group" aria-label="胶囊播放器" title="点击封面或歌曲信息展开播放器">
   <span class="capsule-art" id="capsule-art" aria-hidden="true"></span>
   <span class="capsule-text">
     <span class="capsule-label" id="capsule-label">正在播放</span>
@@ -2813,14 +2983,44 @@
     <button type="button" class="capsule-btn" id="capsule-next" title="下一首" aria-label="下一首">
       <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-next"/></svg>
     </button>
-    <button type="button" class="capsule-btn" id="capsule-expand" title="展开播放器" aria-label="展开播放器">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-expand"/></svg>
-    </button>
   </span>
 </div>
 
+<dialog id="window-lifecycle-dialog" aria-labelledby="window-lifecycle-title" aria-describedby="window-lifecycle-description window-lifecycle-activity window-lifecycle-recording window-lifecycle-status">
+  <h2 id="window-lifecycle-title">退出播放器？</h2>
+  <p class="window-lifecycle-description" id="window-lifecycle-description">退出后将关闭主窗口和播放服务。</p>
+  <p id="window-lifecycle-activity" hidden></p>
+  <p id="window-lifecycle-recording" hidden></p>
+  <p id="window-lifecycle-status" role="status" aria-live="polite"></p>
+  <div class="window-lifecycle-actions">
+    <button type="button" class="btn" id="window-lifecycle-cancel" autofocus>返回播放器</button>
+    <button type="button" class="btn primary" id="window-lifecycle-approve" disabled>退出播放器</button>
+  </div>
+</dialog>
 <script defer src="desktop-settings.js"></script>
+<script defer src="desktop-lyrics-settings.js"></script>
+<script defer src="window-lifecycle.js"></script>
+<script defer src="window-sleep.js"></script>
 <script defer src="volume-controls.js"></script>
+<script defer src="system-media.js"></script>
+<dialog id="ui-preferences-dialog" aria-labelledby="ui-preferences-title" aria-describedby="ui-preferences-description ui-preferences-dialog-status">
+  <h2 id="ui-preferences-title">应用界面偏好？</h2>
+  <p id="ui-preferences-description">当前舞台与预置库保存后，将应用文件中的偏好并重新加载页面</p>
+  <div class="ui-preference-table-wrap" tabindex="0" aria-label="将覆盖的界面偏好">
+    <table class="ui-preference-table">
+      <thead><tr><th scope="col">偏好</th><th scope="col">当前值</th><th scope="col">导入值</th></tr></thead>
+      <tbody id="ui-preferences-rows"></tbody>
+    </table>
+  </div>
+  <p id="ui-preferences-dialog-status" role="status" aria-live="polite"></p>
+  <div class="ui-preference-actions">
+    <button type="button" class="btn" id="ui-preferences-cancel" autofocus>取消</button>
+    <button type="button" class="btn primary" id="ui-preferences-apply">应用并重新加载</button>
+  </div>
+</dialog>
+<script defer src="ui-preferences.js"></script>
+<script defer src="ui-preference-settings.js"></script>
+<script defer src="native-music-import.js"></script>
 <script defer src="app.js"></script>
 </body>
 </html>

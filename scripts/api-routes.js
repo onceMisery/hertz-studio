@@ -26,6 +26,7 @@ const path = require('path');
 const ROOT = path.join(__dirname, '..');
 const ROUTES_RS = path.join(ROOT, 'crates', 'hertz-studio', 'src', 'routes.rs');
 const MAIN_RS = path.join(ROOT, 'crates', 'hertz-studio', 'src', 'main.rs');
+const STAGE_MEDIA_RS = path.join(ROOT, 'crates', 'hertz-studio', 'src', 'stage_media', 'api.rs');
 const DOC = path.join(ROOT, 'docs', 'api-routes.md');
 
 const BEGIN = '<!-- api-routes:begin -->';
@@ -125,7 +126,7 @@ function render(routesRs, mainRs) {
   lines.push('');
   lines.push(
     `REST 路由表共 ${pairs.length} 个「方法 + 路径」`
-    + `（\`crates/hertz-studio/src/routes.rs\` 的 ${api.length} 条 \`.route()\`），`
+    + `（\`crates/hertz-studio/src/routes.rs\` 与 \`stage_media/api.rs\` 的 ${api.length} 条 \`.route()\`），`
     + `另有 \`main.rs\` 挂的 ${other.length} 条路由与 ${assets.length} 条内嵌静态资源路由。`,
   );
   lines.push('');
@@ -146,7 +147,7 @@ function render(routesRs, mainRs) {
 
 function main() {
   const check = process.argv.includes('--check');
-  const { block, pairs } = render(parseRoutes(ROUTES_RS), parseRoutes(MAIN_RS).concat(require('./ui-assets').readAssets().map(a => ({ path: a.path, methods: ['GET'], asset: true }))));
+  const { block, pairs } = render(parseRoutes(ROUTES_RS).concat(parseRoutes(STAGE_MEDIA_RS)), parseRoutes(MAIN_RS).concat(require('./ui-assets').readAssets().map(a => ({ path: a.path, methods: ['GET'], asset: true }))));
   const doc = fs.readFileSync(DOC, 'utf8').replace(/\r\n/g, '\n');
   const begin = doc.indexOf(BEGIN);
   const end = doc.indexOf(END);

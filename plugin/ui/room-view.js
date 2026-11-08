@@ -178,14 +178,20 @@
     const hostName = nicknameField(create, '房主');
     const hostAvatar = avatarPicker(create, () => hostName.value);
     const output = field(create, '本机同时收听', 'checkbox'); output.checked = true;
+    const formatSettings = h('div', 'room-create-format'); create.append(formatSettings);
+    const formatMode = select(formatSettings, '采样率模式', [['fixed', '固定采样率'], ['native', '原生采样率']]); formatMode.value = 'fixed';
+    const formatHelp = h('p', 'room-sub room-format-help'); formatHelp.id = 'room-create-format-help'; formatSettings.append(formatHelp); formatMode.setAttribute('aria-describedby', formatHelp.id);
     const advanced = h('details', 'room-create-advanced'); advanced.append(h('summary', '', '封面与高级设置')); create.append(advanced);
     const createCover = coverEditor(advanced, null, () => name.value.trim() || '我的音乐房间'); name.oninput = () => createCover.rename();
     const address = select(create, '局域网网卡', [['', '先发现可用网卡']]);
     const networkHelp = h('p', 'room-sub'); create.append(networkHelp);
     const port = field(advanced, '端口（0 为自动选择）', 'number', '0'); port.min = 0; port.max = 65535;
-    const rate = select(advanced, '房间采样率', [['44100', '44.1 kHz'], ['48000', '48 kHz'], ['96000', '96 kHz'], ['192000', '192 kHz']]); rate.value = '48000';
+    const rateField = h('div', 'room-create-rate'); advanced.append(rateField);
+    const rate = select(rateField, '房间采样率', [['44100', '44.1 kHz'], ['48000', '48 kHz'], ['96000', '96 kHz'], ['192000', '192 kHz']]); rate.value = '48000';
+    const updateFormatMode = () => { const native = formatMode.value === 'native'; rateField.hidden = native; rate.disabled = native; formatHelp.textContent = native ? '按歌曲解码采样率传输；不同采样率切歌可能有间隙。' : '所有歌曲使用同一个房间采样率，可在高级设置中选择。'; };
+    formatMode.onchange = updateFormatMode; updateFormatMode();
     const discoverable = field(advanced, '允许附近的人发现房间', 'checkbox'); discoverable.checked = true;
-    create.append(button('创建房间', async () => { const host_name = readNickname(hostName); if (!address.value) throw new Error('请先选择网卡'); if (!name.value.trim()) throw new Error('请输入房间名称'); if (!Number.isInteger(Number(port.value)) || Number(port.value) < 0 || Number(port.value) > 65535) throw new Error('端口需为 0–65535 的整数'); hostAvatar.save(); await api.createRoom({ name: name.value.trim(), host_name, cover: createCover.value(), address: address.value + ':' + Number(port.value), sample_rate: Number(rate.value), local_output: output.checked, discoverable: discoverable.checked }); }, 'primary'));
+    create.append(button('创建房间', async () => { const host_name = readNickname(hostName); if (!address.value) throw new Error('请先选择网卡'); if (!name.value.trim()) throw new Error('请输入房间名称'); if (!Number.isInteger(Number(port.value)) || Number(port.value) < 0 || Number(port.value) > 65535) throw new Error('端口需为 0–65535 的整数'); hostAvatar.save(); await api.createRoom({ name: name.value.trim(), host_name, cover: createCover.value(), address: address.value + ':' + Number(port.value), format_mode: formatMode.value, ...(formatMode.value === 'native' ? {} : { sample_rate: Number(rate.value) }), local_output: output.checked, discoverable: discoverable.checked }); }, 'primary'));
     const join = joinDialog.body; join.append(h('p', 'room-sub', '粘贴房主发来的一次性邀请，核对主机指纹后加入。'));
     const nickname = nicknameField(join, '收听电脑');
     const avatarStep = workspace.createEntryDialog('join-avatar', '给自己一个头像');
@@ -286,6 +292,7 @@
       if (current(key)) status('已安排本机 440 Hz 测试音（250 毫秒），使用当前输出设备和本机音量。');
     }));
     output.append(h('p', 'room-sub', '输出使用原生服务。驱动时间戳有效不等于已完成扬声器的物理校准。'));
+    refs.nativeOutputHelp = h('p', 'room-sub', '设备可能保持固定采样率；房间到设备的采样率转换与时钟漂移校正合并处理。'); refs.nativeOutputHelp.hidden = true; output.append(refs.nativeOutputHelp);
   }
   function mountDsp(parent, timerParent) {
     refs.dsp = section(parent, '房间音效'); const row = h('div', 'room-form-grid'); refs.dsp.append(row);
@@ -762,7 +769,8 @@
     art.append(emptyArt, refs.cover);
     const copy = h('div', 'room-hero-copy'); refs.playingBadge = h('span', 'room-playing-badge', '等待播放');
     refs.current = h('strong', 'room-current'); refs.artist = h('p', 'room-artist'); refs.album = h('p', 'room-sub');
-    copy.append(refs.playingBadge, refs.current, refs.artist, refs.album);
+    refs.successorStatus = h('p', 'room-sub room-successor-status'); refs.successorStatus.hidden = true; refs.successorStatus.setAttribute('aria-live', 'polite');
+    stageControls.append(refs.successorStatus); copy.append(refs.playingBadge, refs.current, refs.artist, refs.album);
     hero.append(art, copy); scene.append(hero);
     const seekLine = h('div', 'room-seek-line'); refs.position = h('span', 'room-mono', '0:00'); refs.duration = h('span', 'room-mono', '0:00');
     refs.progress = h('input', 'room-progress'); refs.progress.type = 'range'; refs.progress.min = 0; refs.progress.max = 1000; refs.progress.step = 1; refs.progress.value = 0; refs.progress.setAttribute('aria-label', '房间播放进度');

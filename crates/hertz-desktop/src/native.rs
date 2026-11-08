@@ -36,6 +36,9 @@ use windows_sys::Win32::System::RemoteDesktop::{
     WTSRegisterSessionNotification, NOTIFY_FOR_THIS_SESSION,
 };
 use windows_sys::Win32::System::SystemServices::GUID_CONSOLE_DISPLAY_STATE;
+use windows_sys::Win32::System::Threading::{
+    OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
+};
 use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, GetDpiForWindow, MDT_EFFECTIVE_DPI};
 use windows_sys::Win32::UI::Shell::{
     SHQueryUserNotificationState, ShellExecuteW, QUNS_PRESENTATION_MODE,
@@ -45,17 +48,17 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallWindowProcW, CreateWindowExW, DefWindowProcW, DispatchMessageW, EnumChildWindows,
     EnumWindows, FindWindowExW, FindWindowW, GetClassNameW, GetForegroundWindow, GetMessageW,
     GetParent, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, GetWindowTextW,
-    GetWindowThreadProcessId, IsIconic, IsWindow, IsZoomed, RegisterClassW, RegisterWindowMessageW,
-    SendMessageTimeoutW, SetForegroundWindow, SetLayeredWindowAttributes, SetParent,
-    SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, GWL_STYLE, HWND_BOTTOM,
-    HWND_TOPMOST, LWA_ALPHA, MSG, PBT_APMRESUMEAUTOMATIC, PBT_APMRESUMESUSPEND, PBT_APMSUSPEND,
-    PBT_POWERSETTINGCHANGE, SMTO_NORMAL, STYLESTRUCT, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
-    SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_HIDE, SW_RESTORE, SW_SHOW, SW_SHOWNOACTIVATE,
-    WM_HOTKEY, WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCHITTEST, WM_NCPAINT, WM_POWERBROADCAST, WM_STYLECHANGING,
-    WM_WTSSESSION_CHANGE, WNDCLASSW, WNDPROC, WS_CAPTION, WS_CHILD, WS_EX_APPWINDOW, WS_EX_LAYERED,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_MAXIMIZEBOX,
-    WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU, WS_THICKFRAME, WTS_SESSION_LOCK, WTS_SESSION_LOGOFF,
-    WTS_SESSION_LOGON, WTS_SESSION_UNLOCK,
+    GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, IsZoomed, RegisterClassW,
+    RegisterWindowMessageW, SendMessageTimeoutW, SetForegroundWindow, SetLayeredWindowAttributes,
+    SetParent, SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, GWL_STYLE,
+    HWND_BOTTOM, HWND_TOPMOST, LWA_ALPHA, MSG, PBT_APMRESUMEAUTOMATIC, PBT_APMRESUMESUSPEND,
+    PBT_APMSUSPEND, PBT_POWERSETTINGCHANGE, SMTO_NORMAL, STYLESTRUCT, SWP_FRAMECHANGED,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_HIDE, SW_RESTORE,
+    SW_SHOW, SW_SHOWNOACTIVATE, WM_HOTKEY, WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCHITTEST, WM_NCPAINT,
+    WM_POWERBROADCAST, WM_STYLECHANGING, WM_WTSSESSION_CHANGE, WNDCLASSW, WNDPROC, WS_CAPTION,
+    WS_CHILD, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WS_EX_TRANSPARENT, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU, WS_THICKFRAME,
+    WTS_SESSION_LOCK, WTS_SESSION_LOGOFF, WTS_SESSION_LOGON, WTS_SESSION_UNLOCK,
 };
 
 static CLICK_THROUGH: AtomicBool = AtomicBool::new(false);
@@ -65,7 +68,13 @@ static DISPLAY_STATE_SEEN: AtomicBool = AtomicBool::new(false);
 const OVERLAY_FRAME_STYLES: u32 =
     WS_CAPTION | WS_THICKFRAME | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX;
 type Sink = Box<dyn Fn(NativeEvent) + Send>;
-static SINK: OnceLock<std::sync::Mutex<Sink>> = OnceLock::new();
+/// 进程内宿主可反复启停：消息窗口是本进程单例，每次启动只换事件接收方。
+/// 独立 exe 形态一个进程只有一份，语义不变。
+static SINK: std::sync::Mutex<Option<Sink>> = std::sync::Mutex::new(None);
+static MESSAGE_THREAD: OnceLock<()> = OnceLock::new();
+/// RegisterClassW 注册的类是进程级资源；第二次启动不能再注册同名类。
+static MESSAGE_WINDOW_CLASS: OnceLock<Result<(), String>> = OnceLock::new();
+static HOTKEY_WINDOW_CLASS: OnceLock<Result<(), String>> = OnceLock::new();
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum NativeEvent {
@@ -774,6 +783,137 @@ pub(crate) fn target_fullscreen(hwnd: HWND) -> bool {
     covers(window, monitor)
 }
 
+/// 一次拓扑巡检只采集一次前台窗口。显示组通过纯投影复用这个快照，避免
+/// 同一轮里不同屏幕读到不同的前台应用，亦不反复打开同一个进程。
+#[derive(Clone, Debug)]
+pub(crate) struct WallpaperForeground {
+    monitor: [i32; 4],
+    fullscreen: bool,
+    maximized: bool,
+    executable: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct WallpaperWindowState<'a> {
+    pub(crate) fullscreen: bool,
+    pub(crate) maximized: bool,
+    pub(crate) executable: Option<&'a str>,
+}
+
+pub(crate) fn wallpaper_foreground() -> Option<WallpaperForeground> {
+    // 必须先排除桌面壳/本组件/不可见窗口，再读取 shell 的全屏信号。
+    let (foreground, pid) = eligible_foreground()?;
+    let monitor_handle = unsafe { MonitorFromWindow(foreground, MONITOR_DEFAULTTONEAREST) };
+    let monitor = monitor_rect(monitor_handle)?;
+    let maximized = unsafe { IsZoomed(foreground) } != 0;
+    Some(WallpaperForeground {
+        monitor: [monitor.left, monitor.top, monitor.right, monitor.bottom],
+        fullscreen: foreground_fullscreen(foreground, monitor, maximized),
+        maximized,
+        // 权限不足或路径过长只影响应用规则，不丢弃窗口全屏/最大化事实。
+        executable: process_executable(pid),
+    })
+}
+
+/// 单屏/镜像仅投影到前台所在屏；跨屏的任一成员命中就作用于整个目标。
+pub(crate) fn wallpaper_window_state<'a>(
+    foreground: Option<&'a WallpaperForeground>,
+    members: &[WallpaperMonitor],
+) -> WallpaperWindowState<'a> {
+    let Some(foreground) = foreground else {
+        return WallpaperWindowState::default();
+    };
+    let [left, top, right, bottom] = foreground.monitor;
+    let affects_target = members.iter().any(|member| {
+        member.left == left
+            && member.top == top
+            && i64::from(member.left) + i64::from(member.width) == i64::from(right)
+            && i64::from(member.top) + i64::from(member.height) == i64::from(bottom)
+    });
+    if !affects_target {
+        return WallpaperWindowState::default();
+    }
+    WallpaperWindowState {
+        fullscreen: foreground.fullscreen,
+        maximized: foreground.maximized,
+        executable: foreground.executable.as_deref(),
+    }
+}
+
+fn eligible_foreground() -> Option<(HWND, u32)> {
+    let foreground = unsafe { GetForegroundWindow() };
+    if foreground.is_null()
+        || unsafe { IsIconic(foreground) } != 0
+        || unsafe { IsWindowVisible(foreground) } == 0
+    {
+        return None;
+    }
+    let mut pid = 0;
+    unsafe { GetWindowThreadProcessId(foreground, &mut pid) };
+    if pid == 0 || pid == std::process::id() || desktop_shell_class(&class_name(foreground)) {
+        return None;
+    }
+    Some((foreground, pid))
+}
+
+fn desktop_shell_class(class: &str) -> bool {
+    matches!(
+        class,
+        "Progman" | "WorkerW" | "Shell_TrayWnd" | "Shell_SecondaryTrayWnd"
+    )
+}
+
+fn monitor_rect(monitor: HMONITOR) -> Option<RECT> {
+    let mut info = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    if monitor.is_null() || unsafe { GetMonitorInfoW(monitor, &mut info) } == 0 {
+        return None;
+    }
+    Some(info.rcMonitor)
+}
+
+fn foreground_fullscreen(foreground: HWND, monitor: RECT, maximized: bool) -> bool {
+    let mut state = -1;
+    let shell_fullscreen = unsafe { SHQueryUserNotificationState(&mut state) } >= 0
+        && matches!(state, QUNS_RUNNING_D3D_FULL_SCREEN | QUNS_PRESENTATION_MODE);
+    fullscreen_from_facts(
+        shell_fullscreen,
+        maximized,
+        window_rect(foreground),
+        monitor,
+    )
+}
+
+fn fullscreen_from_facts(
+    shell_fullscreen: bool,
+    maximized: bool,
+    window: Option<RECT>,
+    monitor: RECT,
+) -> bool {
+    // 无边框最大化可能覆盖整屏，仍属于独立的最大化策略。Shell 明确报告
+    // D3D 全屏/演示状态时保留该信号，不依赖能否读取窗口矩形。
+    shell_fullscreen || (!maximized && window.is_some_and(|window| covers(window, monitor)))
+}
+
+fn process_executable(pid: u32) -> Option<String> {
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if process.is_null() {
+        return None;
+    }
+    // 固定上限 + 一次查询：不能匹配超出配置合同的路径，也不重试增大缓冲。
+    let mut buffer = [0u16; crate::wallpaper::config::MAX_EXECUTABLE_PATH_CHARS + 1];
+    let mut length = buffer.len() as u32;
+    let ok = unsafe { QueryFullProcessImageNameW(process, 0, buffer.as_mut_ptr(), &mut length) };
+    unsafe { CloseHandle(process) };
+    if ok == 0 || length == 0 || length as usize >= buffer.len() {
+        return None;
+    }
+    let path = String::from_utf16(&buffer[..length as usize]).ok()?;
+    crate::wallpaper::config::normalize_executable_path(&path).ok()
+}
+
 fn covers(window: RECT, monitor: RECT) -> bool {
     const TOLERANCE: i32 = 2;
     window.left <= monitor.left + TOLERANCE
@@ -816,6 +956,13 @@ pub(crate) fn power_state() -> PowerState {
 /// 交流电供电返回 true；读不到时按交流电处理（歌词降帧路径不额外降帧）。
 pub(crate) fn on_ac_power() -> bool {
     power_state() == PowerState::Ac
+}
+
+/// 播放器内嵌形态登记的开机启动命令：指向播放器 exe（含 `--window` 与数据目录）。
+/// 独立 exe 不设置，沿用 `current_exe()`；进程内只有一个宿主，设置一次即可。
+static AUTOSTART_COMMAND: OnceLock<String> = OnceLock::new();
+pub(crate) fn set_autostart_command(command: String) {
+    let _ = AUTOSTART_COMMAND.set(command);
 }
 
 pub(crate) fn autostart_enabled() -> Result<bool> {
@@ -876,8 +1023,11 @@ pub(crate) fn set_autostart(enabled: bool) -> Result<()> {
     }
     let name = to_wide("HertzDesktop");
     if enabled {
-        let exe = std::env::current_exe()?;
-        let value = to_wide(&format!("\"{}\"", exe.display()));
+        let command = match AUTOSTART_COMMAND.get() {
+            Some(command) => command.clone(),
+            None => format!("\"{}\"", std::env::current_exe()?.display()),
+        };
+        let value = to_wide(&command);
         let status = unsafe {
             RegSetValueExW(
                 key,
@@ -905,8 +1055,14 @@ pub(crate) fn set_autostart(enabled: bool) -> Result<()> {
 
 /// 托盘、会话与电源通知的消息窗口。独立线程的消息循环。
 pub(crate) fn install_message_window(sink: impl Fn(NativeEvent) + Send + 'static) -> Result<()> {
-    SINK.set(std::sync::Mutex::new(Box::new(sink)))
-        .map_err(|_| anyhow::anyhow!("消息窗口已安装"))?;
+    *SINK
+        .lock()
+        .map_err(|_| anyhow::anyhow!("消息窗口事件槽不可用"))? = Some(Box::new(sink));
+    // 进程内宿主可以反复启停：消息窗口线程是本进程单例，重启只换接收方，
+    // 既不重复注册窗口类，也不会留下两个会话/电源通知窗口。
+    if MESSAGE_THREAD.get().is_some() {
+        return Ok(());
+    }
     let (ready_tx, ready_rx) = std::sync::mpsc::channel();
     std::thread::Builder::new()
         .name("hertz-desktop-messages".into())
@@ -927,7 +1083,54 @@ pub(crate) fn install_message_window(sink: impl Fn(NativeEvent) + Send + 'static
         })?;
     ready_rx
         .recv_timeout(std::time::Duration::from_secs(3))
-        .map_err(|_| anyhow::anyhow!("消息窗口启动超时"))?
+        .map_err(|_| anyhow::anyhow!("消息窗口启动超时"))??;
+    let _ = MESSAGE_THREAD.set(());
+    Ok(())
+}
+
+/// 宿主退出后清空接收方：会话/电源通知不会再打进已销毁的事件循环。
+pub(crate) fn clear_message_sink() {
+    if let Ok(mut guard) = SINK.lock() {
+        *guard = None;
+    }
+}
+
+/// 窗口类是进程级资源，同名类重复注册会失败；进程内只注册一次。
+unsafe fn ensure_window_class(
+    class: &[u16],
+    wndproc: WNDPROC,
+    cache: &'static OnceLock<Result<(), String>>,
+) -> Result<()> {
+    cache
+        .get_or_init(|| {
+            let instance = unsafe { GetModuleHandleW(std::ptr::null()) };
+            if instance.is_null() {
+                return Err("GetModuleHandleW 失败".into());
+            }
+            let window_class = WNDCLASSW {
+                style: 0,
+                lpfnWndProc: wndproc,
+                cbClsExtra: 0,
+                cbWndExtra: 0,
+                hInstance: instance,
+                hIcon: std::ptr::null_mut(),
+                hCursor: std::ptr::null_mut(),
+                hbrBackground: std::ptr::null_mut(),
+                lpszMenuName: std::ptr::null(),
+                lpszClassName: class.as_ptr(),
+            };
+            let atom = unsafe { RegisterClassW(&window_class) };
+            if atom == 0 {
+                Err(format!("RegisterClassW 失败（{}）", unsafe {
+                    windows_sys::Win32::Foundation::GetLastError()
+                }))
+            } else {
+                Ok(())
+            }
+        })
+        .as_ref()
+        .map_err(|message| anyhow::anyhow!("{message}"))
+        .copied()
 }
 
 unsafe fn create_message_window() -> Result<()> {
@@ -936,22 +1139,7 @@ unsafe fn create_message_window() -> Result<()> {
     if instance.is_null() {
         bail!("GetModuleHandleW 失败");
     }
-    let window_class = WNDCLASSW {
-        style: 0,
-        lpfnWndProc: Some(message_wndproc),
-        cbClsExtra: 0,
-        cbWndExtra: 0,
-        hInstance: instance,
-        hIcon: std::ptr::null_mut(),
-        hCursor: std::ptr::null_mut(),
-        hbrBackground: std::ptr::null_mut(),
-        lpszMenuName: std::ptr::null(),
-        lpszClassName: class.as_ptr(),
-    };
-    let atom = unsafe { RegisterClassW(&window_class) };
-    if atom == 0 {
-        bail!("RegisterClassW 失败");
-    }
+    ensure_window_class(&class, Some(message_wndproc), &MESSAGE_WINDOW_CLASS)?;
     let title = to_wide("HertzDesktopMessages");
     let hwnd = unsafe {
         CreateWindowExW(
@@ -997,22 +1185,7 @@ pub(crate) fn install_hotkey_window() -> Result<HWND> {
     if instance.is_null() {
         bail!("GetModuleHandleW 失败");
     }
-    let window_class = WNDCLASSW {
-        style: 0,
-        lpfnWndProc: Some(hotkey_wndproc),
-        cbClsExtra: 0,
-        cbWndExtra: 0,
-        hInstance: instance,
-        hIcon: std::ptr::null_mut(),
-        hCursor: std::ptr::null_mut(),
-        hbrBackground: std::ptr::null_mut(),
-        lpszMenuName: std::ptr::null(),
-        lpszClassName: class.as_ptr(),
-    };
-    let atom = unsafe { RegisterClassW(&window_class) };
-    if atom == 0 {
-        bail!("RegisterClassW 失败");
-    }
+    unsafe { ensure_window_class(&class, Some(hotkey_wndproc), &HOTKEY_WINDOW_CLASS) }?;
     let title = to_wide("HertzDesktopHotkey");
     let hwnd = unsafe {
         CreateWindowExW(
@@ -1111,8 +1284,8 @@ unsafe extern "system" fn message_wndproc(
 }
 
 fn emit(event: NativeEvent) {
-    if let Some(sink) = SINK.get() {
-        if let Ok(sink) = sink.lock() {
+    if let Ok(guard) = SINK.lock() {
+        if let Some(sink) = guard.as_ref() {
             sink(event);
         }
     }
@@ -1315,6 +1488,126 @@ pub(crate) fn dialog_error(message: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn policy_monitor(name: &str, bounds: [i32; 4]) -> WallpaperMonitor {
+        WallpaperMonitor {
+            name: name.into(),
+            left: bounds[0],
+            top: bounds[1],
+            width: bounds[2] - bounds[0],
+            height: bounds[3] - bounds[1],
+            dpi: 96,
+            primary: bounds[0] == 0,
+            refresh_hz: 60,
+            device_path: None,
+            edid_digest: None,
+        }
+    }
+
+    #[test]
+    fn foreground_snapshot_only_affects_its_single_or_mirror_monitor() {
+        let first = policy_monitor("first", [0, 0, 1920, 1080]);
+        let second = policy_monitor("second", [-1440, -200, 0, 2360]);
+        let foreground = WallpaperForeground {
+            monitor: [-1440, -200, 0, 2360],
+            fullscreen: true,
+            maximized: true,
+            executable: Some(r"c:\apps\player.exe".into()),
+        };
+        assert_eq!(
+            wallpaper_window_state(Some(&foreground), std::slice::from_ref(&first)),
+            WallpaperWindowState::default()
+        );
+        assert_eq!(
+            wallpaper_window_state(Some(&foreground), std::slice::from_ref(&second)),
+            WallpaperWindowState {
+                fullscreen: true,
+                maximized: true,
+                executable: Some(r"c:\apps\player.exe"),
+            }
+        );
+        assert_eq!(
+            wallpaper_window_state(None, &[first, second]),
+            WallpaperWindowState::default()
+        );
+        assert_eq!(
+            wallpaper_window_state(Some(&foreground), &[]),
+            WallpaperWindowState::default()
+        );
+    }
+
+    #[test]
+    fn span_snapshot_matches_any_member_without_using_the_union_rectangle() {
+        let first = policy_monitor("first", [0, 0, 1920, 1080]);
+        let second = policy_monitor("second", [1920, 0, 3840, 1080]);
+        let foreground = WallpaperForeground {
+            monitor: [1920, 0, 3840, 1080],
+            fullscreen: false,
+            maximized: true,
+            executable: Some(r"c:\apps\player.exe".into()),
+        };
+        let span = wallpaper_window_state(Some(&foreground), &[first, second]);
+        assert!(span.maximized);
+        assert_eq!(span.executable, Some(r"c:\apps\player.exe"));
+        let unrelated = policy_monitor("third", [3840, 0, 5760, 1080]);
+        assert_eq!(
+            wallpaper_window_state(Some(&foreground), &[unrelated]),
+            WallpaperWindowState::default()
+        );
+    }
+
+    #[test]
+    fn unavailable_process_path_preserves_window_state() {
+        let monitor = policy_monitor("first", [0, 0, 1920, 1080]);
+        let foreground = WallpaperForeground {
+            monitor: [0, 0, 1920, 1080],
+            fullscreen: true,
+            maximized: false,
+            executable: None,
+        };
+        assert_eq!(
+            wallpaper_window_state(Some(&foreground), &[monitor]),
+            WallpaperWindowState {
+                fullscreen: true,
+                maximized: false,
+                executable: None,
+            }
+        );
+    }
+
+    #[test]
+    fn ordinary_maximize_is_independent_of_fullscreen_and_uses_full_monitor_bounds() {
+        let monitor = RECT {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1080,
+        };
+        let work_area = RECT {
+            bottom: 1040,
+            ..monitor
+        };
+        assert!(fullscreen_from_facts(false, false, Some(monitor), monitor));
+        assert!(!fullscreen_from_facts(false, true, Some(monitor), monitor));
+        assert!(!fullscreen_from_facts(
+            false,
+            false,
+            Some(work_area),
+            monitor
+        ));
+        assert!(!fullscreen_from_facts(false, false, None, monitor));
+        assert!(fullscreen_from_facts(true, true, Some(monitor), monitor));
+        assert!(fullscreen_from_facts(true, false, None, monitor));
+        for class in [
+            "Progman",
+            "WorkerW",
+            "Shell_TrayWnd",
+            "Shell_SecondaryTrayWnd",
+        ] {
+            assert!(desktop_shell_class(class));
+        }
+        assert!(!desktop_shell_class("Chrome_WidgetWin_1"));
+    }
 
     #[test]
     fn fnv1a64_is_stable_and_order_sensitive() {

@@ -1,4 +1,8 @@
-/* The native host owns desktop position and size; the page is the capsule. */
+/* The native host owns desktop position and size; the page is the capsule.
+   宿主给的逻辑窗口是 320×64（见 window.rs 的 CAPSULE_* 常量）。这里所有尺寸都按
+   这个框算：左右内距 8/10 + 封面 40 + 两处 gap 10 + 三键 88 = 178，文字区还剩
+   ~142px；三行文字 11.25 + 17.4 + 13.5 ≈ 42px，加上下内距 16px 仍在 64px 内。
+   第四个「展开」键已经去掉：它一回来，这套数字就不成立了。 */
 html[data-hertz-window-mode="capsule"],
 html[data-hertz-window-mode="capsule"] body {
   width: 100%; height: 100%; min-width: 0; min-height: 0;
@@ -8,17 +12,20 @@ html[data-hertz-window-mode="capsule"] body {
 html[data-hertz-window-mode="capsule"] body > *:not(#capsule) { display: none !important; }
 html[data-hertz-window-mode="capsule"] #capsule {
   position: fixed; inset: 0; width: 100%; height: 100%; max-width: none;
-  box-sizing: border-box; padding: 10px 12px; gap: 12px;
+  box-sizing: border-box; padding: 8px 10px; gap: 10px;
   border: 0; border-radius: 0; box-shadow: none;
   background: var(--panel-solid); backdrop-filter: none;
   -webkit-backdrop-filter: none;
 }
-html[data-hertz-window-mode="capsule"] .capsule-art { width: 44px; height: 44px; border-radius: 10px; }
-html[data-hertz-window-mode="capsule"] .capsule-text { flex: 1; min-width: 0; cursor: grab; }
+html[data-hertz-window-mode="capsule"] .capsule-art { width: 40px; height: 40px; border-radius: 9px; }
+html[data-hertz-window-mode="capsule"] .capsule-text { flex: 1; min-width: 0; cursor: pointer; }
 html[data-hertz-window-mode="capsule"] .capsule-line { width: 100%; }
-html[data-hertz-window-mode="capsule"] .capsule-label { font-size: 10px; letter-spacing: 0; line-height: 1.3; }
-html[data-hertz-window-mode="capsule"] .capsule-line-title { font-size: 13px; line-height: 1.5; }
-html[data-hertz-window-mode="capsule"] .capsule-line-artist { font-size: 11px; line-height: 1.4; }
-html[data-hertz-window-mode="capsule"] .capsule-controls { gap: 3px; }
-html[data-hertz-window-mode="capsule"] .capsule-btn { width: 30px; height: 34px; border-radius: 10px; }
+html[data-hertz-window-mode="capsule"] .capsule-label { font-size: 9px; letter-spacing: 0; line-height: 1.25; }
+html[data-hertz-window-mode="capsule"] .capsule-line-title { font-size: 12px; line-height: 1.45; }
+html[data-hertz-window-mode="capsule"] .capsule-line-artist { font-size: 10px; line-height: 1.35; }
+/* 内层 span 不跟着收紧的话，轮播文字仍按 --fs-base 撑行盒，64px 高的窗口会溢出。 */
+html[data-hertz-window-mode="capsule"] .capsule-title { font-size: 12px; }
+html[data-hertz-window-mode="capsule"] .capsule-artist { font-size: 10px; }
+html[data-hertz-window-mode="capsule"] .capsule-controls { gap: 2px; }
+html[data-hertz-window-mode="capsule"] .capsule-btn { width: 28px; height: 30px; border-radius: 9px; }
 html[data-hertz-window-mode="capsule"] .capsule-btn-primary { color: var(--bg); background: var(--text); }

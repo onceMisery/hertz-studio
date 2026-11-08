@@ -39,17 +39,96 @@ pub struct Booted {
     /// 音频 actor 的专属线程。
     pub audio_thread: std::thread::JoinHandle<()>,
     /// AI runner 锁（§5.5）：拿到才恢复了任务、才允许发布外部对接发现；
-    /// `None` = 同 DataDir 已有别的服务进程在跑。持有期 = Booted 生命周期。
+    /// 由 prepare 提前获取；生产启动失锁时已经拒绝整个服务。持有期 = Booted 生命周期。
     pub ai_lock: Option<crate::ai::lock::AiRunnerLock>,
 }
 
-/// 建好数据目录并读出配置。
+/// 建好并规范化数据目录，获得服务/AI 内核锁后才读取配置。
 ///
 /// 单独拆出来是因为日志初始化要读 `config.log`，而它必须发生在 [`boot`] 之前——
 /// 否则启动早期的日志全丢。
-pub async fn prepare(data_dir: &Path) -> anyhow::Result<Config> {
-    tokio::fs::create_dir_all(data_dir).await?;
-    Config::load(data_dir)
+pub async fn prepare(data_dir: &Path) -> anyhow::Result<Prepared> {
+    prepare_in_namespace(data_dir, dirs::data_local_dir().as_deref()).await
+}
+
+pub(crate) async fn prepare_in_namespace(
+    data_dir: &Path,
+    migration_base: Option<&Path>,
+) -> anyhow::Result<Prepared> {
+    let lock = acquire_directory(data_dir, migration_base, false).await?;
+    vmusic_store::upgrade::inspect(&lock.data_dir).await?;
+    let config = Config::load(&lock.data_dir)?;
+    Ok(Prepared {
+        data_dir: lock.data_dir,
+        config,
+        owner: lock._owner,
+        ai_lock: lock._ai_lock,
+    })
+}
+
+/// Offline maintenance uses the same admission as startup, but never loads or
+/// writes config/token, starts audio, or constructs AppState.
+pub struct MaintenanceLock {
+    data_dir: PathBuf,
+    _owner: crate::data_owner::DataOwner,
+    _ai_lock: crate::ai::lock::AiRunnerLock,
+}
+
+impl MaintenanceLock {
+    pub fn data_dir(&self) -> &Path {
+        &self.data_dir
+    }
+}
+
+pub async fn lock_for_maintenance(data_dir: &Path) -> anyhow::Result<MaintenanceLock> {
+    acquire_directory(data_dir, dirs::data_local_dir().as_deref(), true).await
+}
+
+async fn acquire_directory(
+    data_dir: &Path,
+    migration_base: Option<&Path>,
+    existing: bool,
+) -> anyhow::Result<MaintenanceLock> {
+    let data_dir = absolute_data_dir(data_dir)?;
+    if existing && !data_dir.is_dir() {
+        anyhow::bail!("database_maintenance_profile: an existing explicit DataDir is required");
+    }
+    let migration =
+        crate::data_owner::LegacyMigrationGuard::for_profile(&data_dir, migration_base)?;
+    tokio::fs::create_dir_all(&data_dir).await?;
+    let data_dir = tokio::fs::canonicalize(&data_dir).await?;
+    let _canonical_migration = if migration.is_none() {
+        crate::data_owner::LegacyMigrationGuard::for_profile(&data_dir, migration_base)?
+    } else {
+        None
+    };
+    let owner = crate::data_owner::DataOwner::acquire(&data_dir)?;
+    // Previous builds already hold this independent AI lock. Acquire it before
+    // configuration/database writes so an older live service cannot be joined.
+    let ai_lock = crate::ai::lock::AiRunnerLock::try_acquire(&data_dir)?.ok_or_else(|| {
+        crate::data_owner::Busy {
+            path: data_dir.clone(),
+        }
+    })?;
+    Ok(MaintenanceLock {
+        data_dir,
+        _owner: owner,
+        _ai_lock: ai_lock,
+    })
+}
+
+/// Non-cloneable admission proof. Only prepare can create it; boot consumes it.
+pub struct Prepared {
+    data_dir: PathBuf,
+    pub config: Config,
+    owner: crate::data_owner::DataOwner,
+    ai_lock: crate::ai::lock::AiRunnerLock,
+}
+
+impl Prepared {
+    pub fn data_dir(&self) -> &Path {
+        &self.data_dir
+    }
 }
 
 /// Resolve a caller-supplied relative data directory against the service process
@@ -66,16 +145,20 @@ pub fn absolute_data_dir(data_dir: &Path) -> std::io::Result<PathBuf> {
 /// `token` 只被 HTTP 形态用来鉴权；插件形态的 stdio 天然可信，传什么都行，
 /// 但 `AppState` 的字段要求有值，所以由调用方决定策略而不是在这里生成。
 pub async fn boot(
-    data_dir: PathBuf,
-    config: Config,
+    prepared: Prepared,
     token: String,
     overlay_key: String,
     desktop_lyrics_key: String,
     wallpaper_key: String,
     desktop_mini_key: String,
 ) -> anyhow::Result<Booted> {
-    let data_dir = absolute_data_dir(&data_dir)?;
-    let db = vmusic_store::open(&data_dir).await?;
+    let Prepared {
+        data_dir,
+        config,
+        owner,
+        ai_lock,
+    } = prepared;
+    let db = vmusic_store::open_with_resources(&data_dir, &["stage-media/objects"]).await?;
 
     let backend = match config.audio.backend.as_str() {
         "null" => BackendKind::Null,
@@ -146,12 +229,17 @@ pub async fn boot(
     online::cache::clean_parts(&online_cache_dir).await;
     let cache_index = Arc::new(online::cache::CacheIndex::load(online_cache_dir).await);
     let state = Arc::new(AppState {
+        _data_owner: Some(owner),
+        stage_media: Default::default(),
         db,
         audio,
         room: Default::default(),
         config: Arc::new(config.clone()),
         data_dir: data_dir.clone(),
         desktop: Default::default(),
+        native_window: Default::default(),
+        native_sleep: Default::default(),
+        system_media: Default::default(),
         token: token.clone(),
         overlay_key: overlay_key.clone(),
         desktop_lyrics_key: desktop_lyrics_key.clone(),
@@ -214,6 +302,9 @@ pub async fn boot(
     // 供 on_track_committed detach 'static 后台任务用；set 失败只可能是
     // 重复注入，启动路径只走一次，忽略即可。
     let _ = state.weak_self.set(Arc::downgrade(&state));
+    if let Err(error) = crate::stage_media::store(&state).await {
+        tracing::warn!(error=?error, "stage media disabled; playback remains available");
+    }
     spawn_event_pump(state.clone());
     // 会话恢复（folia 的 session restore）：把启动前读出的快照装进运行时。
     if let Some(session) = session {
@@ -268,9 +359,9 @@ pub async fn boot(
         }
     }
 
-    // AI runner 锁 + 任务恢复（§5.5/§7.2）：官方任务模式即使关闭外部 MCP
-    // 也独立获取锁并恢复未完结任务；拿不到锁则外部对接停用，本地功能不受影响。
-    let ai_lock = crate::ai::lock::AiRunnerLock::try_acquire(&data_dir)?;
+    // AI runner permission remains independent, but is acquired by prepare
+    // before any service initialization, including compatibility with old hosts.
+    let ai_lock = Some(ai_lock);
     // 锁是生成受理的门禁：失锁的第二进程即使共享同一个 DataDir，也不得
     // 受理新任务（§5.5 唯一 AI runner）。
     state

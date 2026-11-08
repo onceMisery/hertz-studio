@@ -931,8 +931,9 @@
   var lyricView = null, layout = 'focus', lyricSize = 1, lyricGlow = .45;
   // 舞台主题：只管沉浸舞台操作层的观感（见 stage-themes/）。与皮肤正交——
   // 皮肤换整个应用的布局，舞台主题换舞台 chrome，两者可任意组合。
-  // 默认星落，也是仅剩的一档：classic（没有主题层的裸样式，面板头部压不住滚过的行）
-  // 和 iOS 都已从「设置风格」里删掉，存过它们的偏好走下面的白名单校验自然回落。
+  // 现在只剩星落一档：classic（没有主题层的裸样式，面板头部压不住滚过的行）
+  // 和 iOS 都已下架，设置面板与创意工坊不再摆这个假选择；值固定写进根节点的
+  // data-stage-theme 供 starfall.css 命中。存过旧值的偏好走下面白名单校验回落。
   var stageTheme = 'starfall';
 
   function reducedMotion() {
@@ -2116,6 +2117,7 @@
     var b = $('s3d-fs');
     if (b) {
       b.setAttribute('aria-pressed', String(on));
+      b.setAttribute('aria-label', on ? '退出全屏' : '进入全屏');
       b.title = on ? '退出全屏 (F)' : '全屏 (F)';
       b.textContent = on ? '退出全屏' : '进入全屏';
     }
@@ -2221,7 +2223,8 @@
       if (global.Stage && Stage.kick) Stage.kick();
       applied = true;
       var restored = JSON.parse(JSON.stringify(preferences()));
-      return Promise.resolve(savePreferences()).then(function () { return restored; });
+      return Promise.all([savePreferences(), global.CreativeStage && CreativeStage.flushPersistence
+        ? CreativeStage.flushPersistence() : null]).then(function () { return restored; });
     }).then(function (restored) {
       resetPromise = null;
       if (button) button.disabled = false;
@@ -2370,6 +2373,8 @@
   function setSettings(on) {
     $('s3d-settings').hidden = !on;
     $('s3d-settings').classList.toggle('sp-show', !!on);
+    var scrim = $('s3d-settings-scrim');
+    if (scrim) scrim.hidden = !on;
     $('s3d-settings-toggle').setAttribute('aria-expanded', String(on));
     if (on && queueOpen) setQueuePanel(false);
     if (shelf) shelf.setBlocked(!!on || queueOpen);
@@ -2387,6 +2392,7 @@
     var button = $('s3d-queue-pin');
     if (button) {
       button.setAttribute('aria-pressed', String(queuePinned));
+      button.setAttribute('aria-label', queuePinned ? '取消固定播放队列' : '固定播放队列');
       button.textContent = queuePinned ? '已固定' : '固定';
       button.title = queuePinned ? '取消固定播放队列' : '固定播放队列，静止时保持可见';
     }
@@ -2796,10 +2802,16 @@
       panel.hidden = !state.stanza || state.effective !== id;
       panel.querySelectorAll('input, select').forEach(function (input) { input.disabled = !state.lyrics; });
     });
+    // 同一句灰显理由只在面板里显示一次：以前每个被禁用的控件下面都重复一行
+    // 「显示歌词或启用 3D 场景后生效」，整列被说明文字撑散。其余控件把原因放进
+    // title（悬停可见），aria-describedby 仍指向各自的 note，不改可访问性接线。
+    var shownReasons = Object.create(null);
     Object.keys(state.rows).forEach(function (id) {
       var input = $(id), setting = state.rows[id];
       if (!input) return;
       input.disabled = !setting.enabled;
+      if (setting.enabled) input.removeAttribute('title');
+      else if (setting.reason) input.title = setting.reason;
       var label = document.querySelector('label[for="' + id + '"]') || input.closest('label');
       if (label) label.classList.toggle('s3d-setting-inactive', !setting.enabled);
       var note = $(id + '-availability');
@@ -2809,7 +2821,10 @@
         (input.closest('label') || input).insertAdjacentElement('afterend', note);
         input.setAttribute('aria-describedby', note.id);
       }
-      note.textContent = setting.reason; note.hidden = setting.enabled;
+      note.textContent = setting.reason;
+      var first = !setting.enabled && !!setting.reason && !shownReasons[setting.reason];
+      if (first) shownReasons[setting.reason] = true;
+      note.hidden = setting.enabled || !first;
     });
     var dock = $('s3d-dock');
     if (dock) dock.hidden = !state.scene;
@@ -3251,8 +3266,6 @@
     $('s3d-lyrics-toggle').checked = showLyrics;
     var visualSel = $('s3d-lyric-visual');
     if (visualSel) visualSel.value = stanza.visual;
-    var themeSel = $('s3d-stage-theme');
-    if (themeSel) themeSel.value = stageTheme;
     $('s3d-sleeve').hidden = stanzaActive() || layout !== 'sleeve';
     var fa = stanzaActive();
     var standalone = isStandalone();
@@ -3506,6 +3519,7 @@
     text('s3d-sleeve-artist', track ? track.artist || '未知艺术家' : '从曲库开始聆听');
     // 平面布局由 stanza 渲染器接管歌词，GL lyricView 空转 update 没有意义。
     if (lyricView && showLyrics && !stanzaActive()) lyricView.update(data);
+    if (global.StageLyrics && StageLyrics.supportNotice) StageLyrics.supportNotice($('s3d-lyric-support'), showLyrics);
     if (global.HandDrawn && HandDrawn.refreshAnnotation) HandDrawn.refreshAnnotation();
     var inRoom = global.HertzRoom && HertzRoom.active(), roomContext = inRoom && HertzRoom.stageContext();
     if (inRoom) {
@@ -3537,10 +3551,12 @@
       b.className = 's3d-dock-btn';
       b.setAttribute('data-stage', String(i));
       b.setAttribute('aria-pressed', 'false');
-      b.title = s.label + ' · ' + s.desc;
+      b.setAttribute('aria-label', s.label);
+      b.setAttribute('aria-keyshortcuts', String(i + 1));
+      b.title = s.label + ' (' + (i + 1) + ') · ' + s.desc;
       b.innerHTML =
         '<svg class="s3d-dock-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
-        'stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+        'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
         (ICONS[s.id] || '') + '</svg><span class="s3d-dock-tx"></span>';
       b.querySelector('.s3d-dock-tx').textContent = s.label;
       b.addEventListener('click', function () { setStage(i, false); });
@@ -3582,6 +3598,8 @@
 
   function open(stageId) {
     if (!root) return false;
+    var entering = !active;
+    if (global.PlayerTransitions) PlayerTransitions.cancel();
     // 互斥（§4 上下文归属）：开声场先关空间。close(true) 里不会再反过来关声场。
     if (global.Space3D && Space3D.close) Space3D.close(true);
     if (!active) {
@@ -3621,7 +3639,11 @@
     if (global.Stage && Stage.kick) Stage.kick();
     var hasGl = ensureGl();
     // 无 GL 时只有 stanza 歌词视觉可以纯平面回退放行；舞台歌词/封面/单句都需要三维渲染。
-    if (!hasGl && !stanzaActive()) { showFallback('当前设备暂不支持三维渲染，仍可播放音乐或返回曲库。'); return false; }
+    if (!hasGl && !stanzaActive()) {
+      showFallback('当前设备暂不支持三维渲染，仍可播放音乐或返回曲库。');
+      if (entering && global.PlayerTransitions) PlayerTransitions.openStage(root);
+      return false;
+    }
     if (!hasGl) { var fbNoGl = $('s3d-fallback'); if (fbNoGl) fbNoGl.hidden = true; }
     sizeDirty = true;
     resize();
@@ -3637,11 +3659,13 @@
     syncFsUi();
     pokeChrome();
     if (global.Stage && Stage.kick) Stage.kick();
+    if (entering && global.PlayerTransitions) PlayerTransitions.openStage(root);
     return true;
   }
 
   function close() {
     if (!root || !active) return;
+    if (global.PlayerTransitions) PlayerTransitions.cancel('stage');
     if (global.Workshop && Workshop.isOpen()) Workshop.close();
     if (lyricView) lyricView.reset();
     fadeTarget = 0;
@@ -3661,6 +3685,8 @@
     if (chromeTimer) clearTimeout(chromeTimer);
     $('s3d-settings').hidden = true;
     $('s3d-settings').classList.remove('sp-show');
+    var scrim = $('s3d-settings-scrim');
+    if (scrim) scrim.hidden = true;
     $('s3d-settings-toggle').setAttribute('aria-expanded', 'false');
     queueOpen = false;
     root.classList.remove('s3d-queue-open');
@@ -4006,18 +4032,62 @@
     text('s3d-fl-auto-state', '当前由「' + label + '」演出' + note + ' · 已自动切镜 ' + snap.transitionCount + ' 次');
   }
 
-  // 舞台主题与皮肤正交：换主题只改 #stage3d 上的 data-stage-theme，
-  // 不碰 Skins，也不影响应用布局。
-  function bindStageTheme() {
-    var sel = $('s3d-stage-theme');
-    if (!sel || sel._bound) return;
-    sel._bound = true;
-    sel.value = stageTheme;
-    sel.addEventListener('change', function () {
-      stageTheme = sel.value;
-      syncLayout();
-      savePreferences();
+  // 设置弹窗外壳：遮罩点击关闭、分组跳转、滚动时标出当前分组。
+  // 分组只改变滚动位置，任何控件都不隐藏 —— 自动验收与用户都能直接点到每一项。
+  function bindSettingsShell() {
+    var panel = $('s3d-settings');
+    var nav = $('s3d-sec-nav');
+    var scrim = $('s3d-settings-scrim');
+    if (!panel || !nav) return;
+    var jumpTarget = '';
+    function mark(id) {
+      var buttons = nav.querySelectorAll('[data-sec]');
+      for (var j = 0; j < buttons.length; j += 1) {
+        var on = buttons[j].getAttribute('data-sec') === id;
+        buttons[j].classList.toggle('is-current', on);
+        if (on) buttons[j].setAttribute('aria-current', 'true');
+        else buttons[j].removeAttribute('aria-current');
+      }
+    }
+    // 判据量「标题此刻离面板顶端多远」，不用 offsetTop：后者与滚动位置不同基准
+    //（sticky 标题栏与栅格行会让它偏移），会把高亮留在上一个分组。
+    function syncCurrent() {
+      // 跳转后高亮一直跟着用户点的那一项，直到他自己滚动为止。内容长度有限时
+      // 末尾几组滚不到顶线，按位置自动判据会把高亮拉回上一组，读起来像没点上。
+      if (jumpTarget) { mark(jumpTarget); return; }
+      var heads = panel.querySelectorAll('.s3d-sec[id]');
+      if (!heads.length) return;
+      if (panel.scrollTop + panel.clientHeight >= panel.scrollHeight - 4) {
+        mark(heads[heads.length - 1].id); return;
+      }
+      var current = heads[0].id;
+      var panelTop = panel.getBoundingClientRect().top;
+      for (var i = 0; i < heads.length; i += 1) {
+        if (heads[i].getBoundingClientRect().top - panelTop <= 140) current = heads[i].id;
+      }
+      mark(current);
+    }
+    function releaseJump() { if (jumpTarget) { jumpTarget = ''; syncCurrent(); } }
+    nav.addEventListener('click', function (e) {
+      var btn = e.target.closest && e.target.closest('[data-sec]');
+      if (!btn) return;
+      var head = $(btn.getAttribute('data-sec'));
+      if (!head) return;
+      jumpTarget = head.id;
+      mark(jumpTarget);
+      var panelTop = panel.getBoundingClientRect().top;
+      var top = head.getBoundingClientRect().top - panelTop + panel.scrollTop - 116;
+      panel.scrollTo({ top: Math.max(0, top), behavior: reducedMotion() ? 'auto' : 'smooth' });
     });
+    panel.addEventListener('scroll', syncCurrent, { passive: true });
+    panel.addEventListener('wheel', releaseJump, { passive: true });
+    panel.addEventListener('touchstart', releaseJump, { passive: true });
+    panel.addEventListener('keydown', releaseJump);
+    if (scrim) scrim.addEventListener('click', function () {
+      setSettings(false);
+      $('s3d-settings-toggle').focus();
+    });
+    syncCurrent();
   }
 
   function coastTodLabel(v) {
@@ -4030,7 +4100,7 @@
 
   function bindUi() {
     bindLyricVisual();
-    bindStageTheme();
+    bindSettingsShell();
     $('s3d-lyrics-toggle').addEventListener('change', toggleLyrics);
     $('s3d-settings-toggle').addEventListener('click', function () { setSettings($('s3d-settings').hidden); });
     $('s3d-settings-close').addEventListener('click', function () { setSettings(false); $('s3d-settings-toggle').focus(); });

@@ -6,7 +6,7 @@
   const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
   const defaults = {
     layout: 'single', secondary: 'next', theme: 'auto', surface: 'bare', align: 'center',
-    bilingual: false, karaoke: true, readabilityBoost: false, fontFamily: 'Segoe UI',
+    bilingual: false, showVocals: true, karaoke: true, readabilityBoost: false, fontFamily: 'Segoe UI',
     fontSize: 30, fontWeight: 600, sungColor: '#ffffff', unsungColor: '#ffffff',
     outlineColor: '#000000', outlineWidth: 0, opacity: 1, frameCap: 30,
   };
@@ -17,6 +17,8 @@
     renderedKey: null, renderedGroup: -99, signature: '', nodes: new Map(), words: [],
     raf: 0, lastPaint: 0, staleTimer: 0, panelFrame: 0, panelHeight: -1,
     fitFrame: 0, fitWidth: 0, toolbarWidth: 0,
+    events: [], eventCursor: 0, activeLines: new Set(), intervalPosition: null, sortedActive: [],
+    lineMeta: [], geometry: null, seekRebuild: false, geometryMeasure: 0, sourceMessage: '',
     optionsOpen: false, hoverTimer: 0, pendingControl: false, controlTimer: 0,
   };
   function ipc(payload) {
@@ -51,6 +53,7 @@
     for (const key of ['layout', 'surface', 'align', 'bilingual']) document.body.dataset[key] = String(config[key]);
     document.body.dataset.boost = String(config.readabilityBoost);
     document.body.dataset.lowPower = String(config.frameCap <= 15);
+    root.style.setProperty('--vocal-label-size', `${Math.max(12, config.fontSize * .46)}px`);
     applyTheme();
     document.querySelectorAll('[data-setting]').forEach(button => {
       let value = config[button.dataset.setting];
@@ -66,12 +69,17 @@
     $('sung-color').value = colorValue(config.sungColor, '#ffffff');
     $('unsung-color').value = colorValue(config.unsungColor, '#ffffff');
     setLocked(config.locked);
+    if (validGeometry(config.vocalGeometry)) {
+      state.geometry = config.vocalGeometry;
+      setGeometryStyle(state.geometry);
+    }
     state.signature = '';
     state.fitWidth = 0;
     render();
     scheduleLayout();
     schedulePanelMeasure();
     scheduleFit();
+    scheduleVocalMeasure();
     updateLoop();
   }
   function setLocked(locked) {
@@ -113,6 +121,7 @@
     return width;
   }
   function visibleDistances() {
+    if (isVocalDocument()) return ['0'];
     if (state.config.layout === 'triple') return ['-1', '0', '1'];
     if (state.config.layout === 'double') return ['0', '1'];
     return ['0'];
@@ -158,11 +167,17 @@
   function resetDocument() {
     state.document = null;
     state.groups = [];
+    state.events = []; state.activeLines.clear(); state.sortedActive = []; state.lineMeta = [];
+    state.eventCursor = 0; state.intervalPosition = null; state.seekRebuild = true;
+    document.body.dataset.vocals = 'false';
+    document.body.dataset.vocalSingle = 'false';
+    $('layout-note').hidden = true;
     state.renderedKey = null;
     clearLines();
   }
   function setSource(payload) {
     state.source = payload?.state || 'error';
+    state.sourceMessage = String(payload?.message || '').slice(0, 512);
     state.lyricsControl = payload?.capabilities?.lyricsControl !== false;
     if (state.source !== 'ok') { resetDocument(); state.confirmed = false; controlDone(); stopLoop(); }
     render();
@@ -224,12 +239,20 @@
     state.staleTimer = setTimeout(() => { render(); stopLoop(); }, Math.max(0, 2020 - age));
     document.body.classList.toggle('playing', Boolean(snapshot.playing));
     $('play').setAttribute('aria-label', snapshot.playing ? '暂停' : '播放');
-    if (identityChanged) state.signature = '';
+    if (identityChanged) { state.signature = ''; state.seekRebuild = true; }
     render(); updateLoop();
   }
   function applyDocument(document) {
     if (!document) { resetDocument(); render(); stopLoop(); return; }
-    if (!state.snapshot || document.documentKey !== state.snapshot.lyrics.documentKey) return;
+    if (state.source !== 'ok' || !state.snapshot || state.snapshot.lyrics?.status !== 'ready'
+      || document.documentKey !== state.snapshot.lyrics.documentKey) return;
+    // Native HTTP and DBX share full validation. The embedded page also refuses
+    // unknown schema instead of silently applying the ordinary recent-start path.
+    if ((document.vocalSchemaVersion != null && document.vocalSchemaVersion !== 1)
+      || (document.lines || []).some(line => line.vocal) && document.vocalSchemaVersion !== 1) {
+      resetDocument(); state.snapshot.lyrics.status = 'unsupported';
+      render(); stopLoop(); return;
+    }
     state.document = document;
     state.groups = [];
     for (const line of document.lines || []) {
@@ -237,8 +260,165 @@
       if (last && last.start === line.startMs) last.lines.push(line);
       else state.groups.push({ start: line.startMs, lines: [line] });
     }
+    if (isVocalDocument()) buildIntervalIndex();
+    window.document.body.dataset.vocals = String(isVocalDocument());
+    $('layout-note').hidden = !isVocalDocument();
     clearLines();
+    scheduleVocalMeasure();
     render(); updateLoop();
+  }
+  function isVocalDocument() { return state.document?.vocalSchemaVersion === 1; }
+  function fontKey() {
+    const c = state.config;
+    return [c.fontFamily, c.fontSize, c.fontWeight, c.outlineWidth].join('|');
+  }
+  function geometryMatches() {
+    const g = state.geometry;
+    return g && g.documentKey === state.document?.documentKey && g.fontKey === fontKey()
+      && g.showVocals === state.config.showVocals && g.bilingual === state.config.bilingual;
+  }
+  function validGeometry(geometry) {
+    return Boolean(geometry && Number.isInteger(geometry.capacity) && geometry.capacity >= 0 && geometry.capacity <= 4
+      && Number.isFinite(geometry.slotHeight) && geometry.slotHeight >= 0
+      && geometry.fontKey === fontKey() && geometry.showVocals === state.config.showVocals
+      && geometry.bilingual === state.config.bilingual
+      && (!state.snapshot || geometry.documentKey === state.snapshot.lyrics?.documentKey));
+  }
+  function setGeometryStyle(geometry) {
+    root.style.setProperty('--vocal-slot-height', `${geometry.slotHeight}px`);
+    root.style.setProperty('--vocal-line-height', `${Math.max(0, (geometry.slotHeight - 8) / 2)}px`);
+  }
+  function applyGeometry(geometry) {
+    if (!validGeometry(geometry)) return;
+    state.geometry = geometry;
+    if (isVocalDocument() && geometryMatches()) {
+      setGeometryStyle(geometry);
+      state.signature = ''; render(); scheduleLayout();
+    }
+  }
+  function scheduleVocalMeasure() {
+    if (!isVocalDocument() || state.geometryMeasure) return;
+    state.geometryMeasure = requestAnimationFrame(() => {
+      state.geometryMeasure = 0;
+      if (!isVocalDocument()) return;
+      const c = state.config, context = document.createElement('canvas').getContext('2d');
+      if (!context) return;
+      context.font = `${c.fontWeight} ${c.fontSize}px ${JSON.stringify(c.fontFamily)}, "Microsoft YaHei UI", sans-serif`;
+      const metrics = context.measureText('国ÅÉgj');
+      const height = Math.ceil(2 * Math.max(c.fontSize * 1.32,
+        (metrics.fontBoundingBoxAscent || 0) + (metrics.fontBoundingBoxDescent || 0) + c.outlineWidth * 2,
+        (metrics.actualBoundingBoxAscent || 0) + (metrics.actualBoundingBoxDescent || 0) + c.outlineWidth * 2) + 8);
+      ipc({ cmd: 'vocal-measure', text: state.document.documentKey, target: fontKey(), value: height });
+    });
+  }
+  function buildIntervalIndex() {
+    const agents = new Map(), duplicateNames = new Map();
+    for (const [index, agent] of (state.document.agents || []).entries()) {
+      agents.set(agent.id, { ...agent, index });
+      if (agent.name) duplicateNames.set(agent.name, (duplicateNames.get(agent.name) || 0) + 1);
+    }
+    state.events = []; state.activeLines.clear(); state.sortedActive = []; state.lineMeta = [];
+    state.eventCursor = 0; state.intervalPosition = null; state.seekRebuild = true;
+    for (const [index, line] of state.document.lines.entries()) {
+      const ids = line.vocal?.agentIds || [];
+      state.lineMeta.push({
+        rank: line.vocal?.role === 'backing' ? 1 : line.vocal ? 0 : 2,
+        agent: agents.get(ids[0])?.index ?? Number.MAX_SAFE_INTEGER,
+        label: ids.map(id => {
+          const agent = agents.get(id);
+          return agent?.name ? (duplicateNames.get(agent.name) > 1 ? `${agent.name} (${id})` : agent.name) : id;
+        }).join(' / '),
+      });
+      if (line.endMs > line.startMs) {
+        state.events.push({ at: line.startMs, index, start: true }, { at: line.endMs, index, start: false });
+      }
+    }
+    state.events.sort((a, b) => a.at - b.at || Number(a.start) - Number(b.start) || a.index - b.index);
+  }
+  function activeIntervals(position) {
+    let changed = false;
+    if (state.seekRebuild || state.intervalPosition == null || position < state.intervalPosition) {
+      state.activeLines.clear();
+      state.document.lines.forEach((line, index) => {
+        if (line.startMs <= position && position < line.endMs) state.activeLines.add(index);
+      });
+      let lo = 0, hi = state.events.length;
+      while (lo < hi) { const mid = (lo + hi) >>> 1; if (state.events[mid].at <= position) lo = mid + 1; else hi = mid; }
+      state.eventCursor = lo; changed = true;
+    } else {
+      while (state.eventCursor < state.events.length && state.events[state.eventCursor].at <= position) {
+        const event = state.events[state.eventCursor++];
+        if (event.start) state.activeLines.add(event.index); else state.activeLines.delete(event.index);
+        changed = true;
+      }
+    }
+    state.intervalPosition = position; state.seekRebuild = false;
+    if (changed) state.sortedActive = [...state.activeLines].sort((a, b) => {
+      const x = state.lineMeta[a], y = state.lineMeta[b];
+      return x.rank - y.rank || x.agent - y.agent || a - b;
+    });
+    return state.sortedActive;
+  }
+  function makeVocalSlot(index, secondary) {
+    const line = state.document.lines[index];
+    const node = document.createElement('div');
+    node.className = `vocal-slot line ${secondary ? 'sub' : 'main'}`;
+    node.dataset.index = index; node.dataset.distance = '0'; node.dataset.kind = secondary ? 'secondary' : 'body';
+    node._words = [];
+    if (!secondary && state.lineMeta[index].label) {
+      const label = document.createElement('span'); label.className = 'vocal-label';
+      label.textContent = state.lineMeta[index].label; label.title = state.lineMeta[index].label;
+      label.setAttribute('aria-label', state.lineMeta[index].label); node.appendChild(label);
+    }
+    const text = document.createElement('span'); text.className = 'lyric-text';
+    if (secondary) text.textContent = (state.config.secondary === 'romanization' ? line.romanization : line.translation) || '';
+    else if (state.config.karaoke && line.words?.length && line.words.length <= 64
+      && line.words.map(word => word.text).join('') === line.text) {
+      line.words.forEach((word, i) => {
+        const span = makeKara(word.text, true); text.appendChild(span);
+        node._words.push({ el: span, fill: span.querySelector('.fill'), start: word.startMs,
+          end: word.endMs ?? line.words[i + 1]?.startMs ?? line.endMs });
+      });
+    } else { text.textContent = line.text; text.style.color = 'var(--lyric-sung, var(--text))'; }
+    node.appendChild(text); return node;
+  }
+  function renderVocals(position) {
+    document.body.dataset.vocalSingle = String(!state.config.showVocals);
+    if (!geometryMatches()) { if (state.nodes.size) clearLines(); setNotice('正在调整歌词窗口'); return; }
+    const capacity = state.geometry.capacity;
+    root.style.setProperty('--vocal-slot-height', `${state.geometry.slotHeight}px`);
+    const active = activeIntervals(position);
+    if (capacity === 0) {
+      if (state.nodes.size) clearLines(); setNotice('空间不足，请调整字号或屏幕设置'); return;
+    }
+    const bodies = active.slice(0, state.config.showVocals ? capacity : 1);
+    const secondary = new Set(); let remaining = capacity - bodies.length;
+    if (state.config.bilingual) for (const index of bodies) {
+      if (remaining <= 0) break;
+      const line = state.document.lines[index];
+      if (state.config.secondary === 'romanization' ? line.romanization : line.translation) { secondary.add(index); remaining--; }
+    }
+    const slots = bodies.flatMap(index => [{ index, secondary: false }, ...(secondary.has(index) ? [{ index, secondary: true }] : [])]);
+    const omitted = state.config.showVocals ? active.length - bodies.length : 0;
+    const warning = state.config.showVocals ? [capacity < 4 ? '空间不足' : '', omitted > 0 ? `还有${omitted}行` : ''].filter(Boolean).join(' · ') : '';
+    const styleKey = `${state.config.karaoke}|${state.config.secondary}`;
+    const signature = `${state.document.documentKey}|${slots.map(slot => `${slot.index}:${slot.secondary}`).join(',')}|${styleKey}`;
+    if (state.signature !== signature) {
+      const wanted = new Set(slots.map(slot => `${state.document.documentKey}:${slot.index}:${slot.secondary ? 'secondary' : 'body'}`));
+      for (const [key, node] of state.nodes) if (!wanted.has(key) || node._styleKey !== styleKey) { node.remove(); state.nodes.delete(key); }
+      state.words = [];
+      for (const slot of slots) {
+        const key = `${state.document.documentKey}:${slot.index}:${slot.secondary ? 'secondary' : 'body'}`;
+        let node = state.nodes.get(key);
+        if (!node) { node = makeVocalSlot(slot.index, slot.secondary); node._styleKey = styleKey; state.nodes.set(key, node); }
+        $('lyric-column').appendChild(node); state.words.push(...node._words);
+      }
+      state.signature = signature; layout();
+    }
+    $('vocal-capacity').hidden = !warning;
+    if ($('vocal-capacity').textContent !== warning) $('vocal-capacity').textContent = warning;
+    setNotice(bodies.length ? '' : '· · ·');
+    paintWords(position);
   }
   function displayLine(index) {
     const lines = state.groups[index]?.lines || [];
@@ -259,9 +439,11 @@
     return lo - 1;
   }
   function placeholder() {
-    if (state.source !== 'ok' || !state.snapshot) return '正在连接 Hertz 服务';
+    if (state.source !== 'ok' || !state.snapshot) return state.sourceMessage || '正在连接 Hertz 服务';
     if (!state.snapshot.track) return '暂无播放';
     const status = state.snapshot.lyrics?.status;
+    if (status === 'unsupported') return '当前桌面歌词组件不支持此歌词，请更新组件';
+    if (status === 'invalid') return '歌词内容无效，请在播放器中重新导入';
     if (status === 'loading' || status === 'ready') return '正在读取歌词';
     if (status === 'too_large') return '桌面歌词暂不支持此文档';
     return '暂无歌词';
@@ -277,6 +459,7 @@
   function clearLines() {
     $('lyric-column').replaceChildren();
     state.nodes.clear(); state.words = []; state.signature = ''; state.renderedGroup = -99;
+    $('vocal-capacity').textContent = ''; $('vocal-capacity').hidden = true;
   }
   function lineEnd(index, line) {
     return line?.endMs ?? state.groups[index + 1]?.start ?? state.snapshot?.durationMs ?? null;
@@ -324,6 +507,7 @@
       updateControls();
       return;
     }
+    if (isVocalDocument()) { renderVocals(position); updateControls(); return; }
     const index = groupIndex(position);
     const line = displayLine(index);
     const end = lineEnd(index, line);
@@ -331,7 +515,7 @@
     const signature = [state.document.documentKey, index, state.config.secondary, state.config.karaoke, interlude].join('|');
     if (state.signature !== signature) {
       const previous = state.renderedGroup;
-      const animate = previous !== -99 && Math.abs(index - previous) === 1 && !reducedMotion.matches;
+      const animate = previous !== -99 && Math.abs(index - previous) === 1 && canAnimate() && !state.seekRebuild && !reducedMotion.matches;
       const start = Math.max(-1, index - 3), stop = Math.min(state.groups.length - 1, index + 3);
       state.words = [];
       for (const [key, node] of state.nodes) {
@@ -355,18 +539,26 @@
       }
     }
     setNotice('');
+    state.seekRebuild = false;
+    paintWords(position);
+    updateControls();
+  }
+  function paintWords(position) {
     for (const word of state.words) {
       const progress = word.end == null || word.end <= word.start ? Number(position >= word.start)
         : Math.max(0, Math.min(1, (position - word.start) / (word.end - word.start)));
       if (word.progress == null || Math.abs(progress - word.progress) >= .003) {
         word.progress = progress; word.el.style.setProperty('--p', `${(progress * 100).toFixed(2)}%`);
-        word.el.querySelector('.fill').style.maskImage = progress >= 1 ? 'none' : '';
+        (word.fill || word.el.querySelector('.fill')).style.maskImage = progress >= 1 ? 'none' : '';
       }
     }
-    updateControls();
   }
   function layout(previous = null) {
     if (!state.nodes.size) return;
+    if (isVocalDocument()) {
+      $('lyric-column').style.transition = 'none'; $('lyric-column').style.transform = 'none';
+      scheduleFit(); return;
+    }
     const column = $('lyric-column');
     const groupHeight = state.nodes.values().next().value.offsetHeight;
     const first = Math.min(...state.nodes.keys());
@@ -395,7 +587,8 @@
   }
   function loop(now) {
     state.raf = 0;
-    if (now - state.lastPaint >= 1000 / Math.max(1, state.config.frameCap) - .5) { state.lastPaint = now; render(); }
+    const cap = Math.min(reducedMotion.matches || state.config.frameCap <= 15 ? 15 : 30, Math.max(1, state.config.frameCap));
+    if (now - state.lastPaint >= 1000 / cap - .5) { state.lastPaint = now; render(); }
     updateLoop();
   }
   function stopLoop() { if (state.raf) cancelAnimationFrame(state.raf); state.raf = 0; }
@@ -404,6 +597,7 @@
     if (position == null) return null;
     let index = groupIndex(position) + delta;
     if (delta > 0 && index < 0) index = 0;
+    if (isVocalDocument()) return state.groups[index]?.start ?? null;
     for (; index >= 0 && index < state.groups.length; index += delta) if (displayLine(index)) return state.groups[index].start;
     return null;
   }
@@ -460,11 +654,13 @@
   root.addEventListener('pointerleave', () => { clearTimeout(state.hoverTimer); state.hoverTimer = setTimeout(() => document.body.classList.remove('hovering'), 160); });
   $('lyric-column').addEventListener('animationend', event => event.target.classList.remove('enter'));
   systemTheme.addEventListener('change', applyTheme);
+  reducedMotion.addEventListener('change', updateLoop);
+  const observers = [];
   if (typeof ResizeObserver === 'function') {
-    new ResizeObserver(schedulePanelMeasure).observe($('options-panel'));
-    new ResizeObserver(scheduleLayout).observe($('viewport'));
+    const panel = new ResizeObserver(schedulePanelMeasure), viewport = new ResizeObserver(scheduleLayout);
+    panel.observe($('options-panel')); viewport.observe($('viewport')); observers.push(panel, viewport);
   }
-  document.fonts?.ready.then(() => { scheduleLayout(); scheduleFit(); });
+  document.fonts?.ready.then(() => { scheduleLayout(); scheduleFit(); scheduleVocalMeasure(); });
   document.addEventListener('contextmenu', event => event.preventDefault());
   document.addEventListener('keydown', event => {
     if (state.locked) return;
@@ -474,7 +670,16 @@
     else if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') { const value = targetLine(event.key === 'ArrowLeft' ? -1 : 1); if (value != null) { event.preventDefault(); control('seek', value); } }
     else if (event.key.toLowerCase() === 'l') ipc({ cmd: 'lock' });
   });
-  window.hertzLyrics = { applyConfig, applySnapshot, applyDocument, setLocked, setActive, setSource, controlDone, setOptions: open => setOptionsOpen(open, false) };
+  window.addEventListener('pagehide', () => {
+    state.active = false; stopLoop(); resetDocument(); state.snapshot = null; state.anchor = null; state.geometry = null;
+    for (const timer of [state.staleTimer, state.hoverTimer, state.controlTimer]) clearTimeout(timer);
+    for (const frame of [state.panelFrame, state.fitFrame, state.geometryMeasure, layoutFrame]) cancelAnimationFrame(frame);
+    observers.forEach(observer => observer.disconnect());
+    systemTheme.removeEventListener('change', applyTheme); reducedMotion.removeEventListener('change', updateLoop);
+  });
+  window.hertzLyrics = { applyConfig, applySnapshot, applyDocument, applyGeometry, setLocked, setActive, setSource, controlDone, setOptions: open => setOptionsOpen(open, false),
+    diagnostics: () => ({ vocalMode: isVocalDocument(), events: state.events.length, cursor: state.eventCursor,
+      slots: state.nodes.size, words: state.words.length, running: Boolean(state.raf), documentKey: state.document?.documentKey ?? null }) };
   applyConfig(defaults);
   ipc({ cmd: 'ready', value: performance.now() });
 })();

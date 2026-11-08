@@ -1,0 +1,41 @@
+/* SPDX-License-Identifier: MIT */
+.native-music-import {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 16px;
+  margin: 0 0 18px;
+  padding: 20px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius, 12px);
+  background: var(--panel, var(--bg));
+  transition: transform 180ms cubic-bezier(.16, 1, .3, 1), opacity 180ms ease;
+}
+.native-music-import[hidden] { display: none; }
+.native-music-icon { width: 30px; height: 30px; color: var(--muted); }
+.native-music-copy { min-width: 0; }
+.native-music-copy strong { display: block; font-size: 15px; font-weight: 600; color: var(--text); }
+.native-music-copy p { margin: 5px 0 0; font-size: 12px; line-height: 1.65; color: var(--muted); }
+.native-music-copy .is-error { color: var(--danger, var(--text)); }
+.native-music-import.is-dragging { border-color: var(--accent); transform: translateY(-2px); }
+.native-music-import.is-dragging .native-music-icon { color: var(--accent); }
+.native-music-import[aria-busy="true"] .native-music-icon { opacity: .5; }
+.native-music-import .btn:active { transform: scale(.98); }
+/* A file drop can start anywhere in the main page while library controls stay contextual. */
+.native-music-dragging::after {
+  content: '松开以收录音乐文件或目录';
+  position: fixed; inset: auto 24px 104px; z-index: 100;
+  pointer-events: none; padding: 16px 20px; text-align: left;
+  color: var(--text); background: var(--panel, var(--bg));
+  border: 1px solid var(--accent); border-radius: var(--radius, 12px);
+  font-size: 14px;
+}
+@media (max-width: 767px) {
+  .native-music-import { grid-template-columns: auto minmax(0, 1fr); gap: 12px; padding: 16px; }
+  .native-music-import .btn { grid-column: 2; justify-self: start; }
+  .native-music-dragging::after { inset-inline: 16px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .native-music-import { transition: none; }
+  .native-music-import.is-dragging, .native-music-import .btn:active { transform: none; }
+}

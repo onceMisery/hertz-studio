@@ -54,9 +54,6 @@ const ui = {
 
   dvBody: $('dv-body'),
   dvSub: $('dv-sub'),
-  dvPrev: $('dv-prev'),
-  dvNext: $('dv-next'),
-  dvDate: $('dv-date'),
   dvRefresh: $('dv-refresh'),
   dvPlay: $('dv-play'),
   dvModes: $('dv-modes'),
@@ -70,6 +67,8 @@ const ui = {
   setAutoPlay: $('set-auto-play'),
   setScrobble: $('set-scrobble'),
   setRelay: $('set-relay'),
+  setPlayerLyricSize: $('hz-lyric-size'),
+  setPlayerLyricSizeValue: $('hz-lyric-size-value'),
   setLyricOffsetValue: $('set-lyric-offset-value'),
   setLyricOffsetDown: $('set-lyric-offset-down'),
   setLyricOffsetUp: $('set-lyric-offset-up'),
@@ -271,7 +270,6 @@ const ui = {
   capsulePrev: $('capsule-prev'),
   capsulePlay: $('capsule-play'),
   capsuleNext: $('capsule-next'),
-  capsuleExpand: $('capsule-expand'),
 
   // 旧 stage-btn 移除后，「正在播放」入口落在播放栏的曲目标题区。
   stageBtn: $('bar-track'),
@@ -883,7 +881,11 @@ async function request(path, options = {}, attempt = 0) {
     if (options.signal.aborted) cancel();
     else options.signal.addEventListener('abort', cancel, { once: true });
   }
-  const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : 0;
+  const timer = controller ? setTimeout(() => {
+    const error = new Error('请求超时，请稍后重试');
+    error.name = 'TimeoutError'; error.code = 'request_timeout';
+    controller.abort(error);
+  }, timeoutMs) : 0;
   try {
     // rawBody：封面替换这类二进制上传走这里，不包 JSON、不改 Content-Type。
     const body = options.rawBody !== undefined
@@ -1430,7 +1432,9 @@ let hasConnected = false;
 let missedWhileOffline = false;
 
 function onConnectionChange(ok) {
+  const changed = state.connected !== ok;
   state.connected = ok;
+  if (changed) document.dispatchEvent(new CustomEvent('service:connection', { detail: { connected: ok } }));
   ui.conn.textContent = ok ? '服务已连接' : '服务已断开';
   ui.conn.className = ok ? 'conn ok' : 'conn bad';
   ui.offlineBanner.hidden = ok;
@@ -2541,9 +2545,10 @@ function lyricRe(kind, source, flags) {
 
 function stageDoc(doc) {
   if (!doc || !doc.lines || !doc.lines.length) return doc;
+  const hasVocals = doc.lines.some(line => !!line.vocal);
   const policy = lyricStaffPolicy();
-  const sRe = policy === 'keep' ? null : lyricRe('staff', String(state.settings.lyrics_staff_pattern || LYRIC_STAFF_DEFAULT), 'i');
-  const fRe = state.settings.lyrics_filter_enabled === true
+  const sRe = hasVocals || policy === 'keep' ? null : lyricRe('staff', String(state.settings.lyrics_staff_pattern || LYRIC_STAFF_DEFAULT), 'i');
+  const fRe = !hasVocals && state.settings.lyrics_filter_enabled === true
     ? lyricRe('filter', String(state.settings.lyrics_filter_pattern || ''), '')
     : null;
 
@@ -3137,6 +3142,16 @@ window.HertzEmotionAuto = {
   }
 };
 
+function paintPlayerLyricSize(value) {
+  const size = typeof value === 'number' && Number.isFinite(value)
+    ? Math.round(Math.max(18, Math.min(48, value))) : 28;
+  document.documentElement.style.setProperty('--np-lyric-font-size', `${size}px`);
+  ui.setPlayerLyricSize.value = String(size);
+  ui.setPlayerLyricSizeValue.textContent = `${size} px`;
+  ui.setPlayerLyricSize.setAttribute('aria-valuetext', `${size} 像素`);
+  return size;
+}
+
 function paintLyricSettings() {
   if (!ui.setLyricStaff) return;
   ui.setLyricStaff.value = lyricStaffPolicy();
@@ -3334,7 +3349,7 @@ async function refreshLyrics(id, track) {
   if (epoch !== lyricRefreshEpoch || !state.current || state.current.id !== id) return doc;
   if (Stage) Stage.setLyrics(staged && staged.lines && staged.lines.length ? staged : null);
   if (window.HertzEmotionAuto) window.HertzEmotionAuto.onLyricsChanged();
-  if (window.NowPlaying) NowPlaying.lyricState(doc ? 'ready' : 'empty');
+  if (window.NowPlaying) NowPlaying.lyricState(doc && Array.isArray(doc.lines) && doc.lines.some(line => !!line.vocal) ? 'unsupported' : doc ? 'ready' : 'empty');
   syncNpLyrics(id, doc);
   return doc;
 }
@@ -4726,19 +4741,12 @@ window.HertzClipboard = { write: writeClipboard };
 /// 注意 SDK 把**字符串**参数当 base64 解释，所以文本必须编码成 Uint8Array
 /// 走 ArrayBuffer 转移那条路，直接传字符串会得到一堆乱码字节。
 async function saveTextFile(fileName, contentType, text) {
-  if (window.hertzHost && window.hertzHost.isDbx && window.dbxPlugin) {
-    await window.dbxPlugin.saveFile({ fileName, contentType }, new TextEncoder().encode(text));
-    return;
-  }
-  const blob = new Blob([text], { type: contentType });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = fileName;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  return window.hertzHost.saveTextFile(fileName, contentType, text);
+}
+
+function fileSaveMessage(receipt, savedLabel) {
+  if (receipt && receipt.status === 'cancelled') return '已取消保存';
+  return receipt && receipt.status === 'saved' ? savedLabel : '已发起文件保存';
 }
 
 async function copyText(text) {
@@ -5016,6 +5024,7 @@ async function loadScanRoots() {
       const label = document.createElement('label');
       const enabled = document.createElement('input');
       enabled.type = 'checkbox';
+      enabled.setAttribute('role', 'switch');
       enabled.checked = root.enabled;
       enabled.setAttribute('aria-label', `自动同步 ${root.path}`);
       const name = document.createElement('span');
@@ -5069,7 +5078,7 @@ async function refreshScanStatus() {
     ui.scanCancel.textContent = status.cancelled ? '正在取消…' : '取消扫描';
     const pct = status.total ? Math.round(status.done / status.total * 100) : 0;
     ui.scanBar.style.width = `${pct}%`;
-    if (status.root) {
+    if (status.root || status.phase) {
       ui.scanLabel.textContent = `${phaseLabel(status.phase)} · ${status.done}/${status.total}`
         + ` · 新增 ${status.added} · 更新 ${status.updated} · 跳过 ${status.skipped}`
         + ` · 移除 ${status.removed} · 失败 ${status.failed}`
@@ -5155,6 +5164,7 @@ async function loadSettings() {
   if (ui.setAutoPlay) ui.setAutoPlay.checked = state.settings.startup_auto_play === true;
   if (ui.setScrobble) ui.setScrobble.checked = state.settings.scrobble_enabled !== false;
   if (ui.setRelay) ui.setRelay.checked = state.settings.online_auto_relay !== false;
+  paintPlayerLyricSize(state.settings.player_lyric_font_size);
   paintLyricSettings();
   refreshEmotionAiStatus();
   // 原型默认开启封面氛围；已保存的关闭偏好仍有效。
@@ -5301,7 +5311,8 @@ async function saveDiagLogFromServer() {
       toast('日志还是空的：先开启，再复现一次问题');
       return;
     }
-    await saveDiagLog(text);
+    const receipt = await saveDiagLog(text);
+    toast(fileSaveMessage(receipt, '日志已保存'));
     loadDiagnostics();
   } catch (err) {
     toast(errText('日志导出失败', err), 'error');
@@ -5449,7 +5460,7 @@ async function retryBeatmap() {
 //      卡顿里。运行期帧率不足或 GL 上下文丢失，直接退回标准渲染并说明原因。
 // ---------------------------------------------------------------------------
 
-const RENDER_MODE_LABEL = { standard: '标准渲染', enhanced: 'WebGL 增强渲染' };
+const RENDER_MODE_LABEL = { standard: '标准渲染', enhanced: 'WebGL 增强渲染', unavailable: '粒子渲染不可用' };
 let renderModePending = null;   // 用户在界面上选了但还没确认落库的值
 
 function renderWarnHtml() {
@@ -5483,6 +5494,10 @@ function showWarn(kind) {
   if (!kind) { ui.renderWarn.hidden = true; ui.renderWarn.textContent = ''; return; }
   ui.renderWarn.hidden = false;
   ui.renderWarn.className = 'render-warn is-' + kind;
+  if (kind === 'unavailable') {
+    ui.renderWarn.textContent = '舞台粒子暂不可用：' + (StageParticles.degradedBecause() || '无法创建粒子图层');
+    return;
+  }
   ui.renderWarn.innerHTML = kind === 'confirm' ? renderWarnHtml() : renderSavedHtml();
   const on = (id, fn) => { const el = document.getElementById(id); if (el) el.onclick = fn; };
   if (kind === 'confirm') {
@@ -5532,7 +5547,22 @@ function syncRenderModeUi() {
   if (!ui.setRenderMode || !window.StageParticles) return;
   const effective = StageParticles.effective();
   const requested = StageParticles.mode();
+  const unavailableOption = ui.setRenderMode.querySelector('[data-render-unavailable]');
+  if (effective !== 'unavailable' && unavailableOption) unavailableOption.remove();
   ui.setRenderMode.value = renderModePending || committedRenderMode();
+  if (effective === 'unavailable') {
+    const why = StageParticles.degradedBecause() || '当前设备无法创建粒子渲染器';
+    if (!unavailableOption) {
+      const option = document.createElement('option');
+      option.value = 'unavailable'; option.textContent = '粒子效果暂不可用'; option.disabled = true;
+      option.setAttribute('data-render-unavailable', ''); ui.setRenderMode.appendChild(option);
+    }
+    ui.setRenderMode.value = 'unavailable';
+    renderModePending = null;
+    showWarn('unavailable');
+    toast(`舞台粒子暂不可用：${why}`, 'error');
+    return;
+  }
   if (requested === 'enhanced' && effective === 'standard') {
     const why = StageParticles.degradedBecause() || '设备不支持';
     ui.setRenderMode.value = 'standard';
@@ -5622,9 +5652,29 @@ function enterSettingsView(ctx) {
   // 缓存占用是随时会变的数字，进设置页才刷新。
   // 恢复默认视图（包括已保存的 settings）不代表用户请求桌面检测。
   if (!options.skipDesktopDetection && window.HertzDesktopSettings) window.HertzDesktopSettings.onSettingsEnter();
+  if (!options.skipDesktopDetection) refreshInlineDesktopLyrics();
   if (window.__loadCacheStats) window.__loadCacheStats();
   if (window.__loadDspSettings) window.__loadDspSettings();
   if (window.__loadRemoteRoots) window.__loadRemoteRoots();
+}
+function refreshInlineDesktopLyrics() {
+  const group = $('desktop-lyrics-settings');
+  if (state.view === 'settings' && group && !group.hidden && window.HertzDesktopLyricsSettings) {
+    window.HertzDesktopLyricsSettings.refresh();
+  }
+}
+function openInlineDesktopLyrics() {
+  if (window.Stage3D) window.Stage3D.close();
+  if (window.Space3D) window.Space3D.close();
+  closeNowPlaying();
+  setView('settings');
+  if (window.HertzSkin) window.HertzSkin.selectSettings('lyrics');
+  if (window.hertzHost && window.hertzHost.isDbx) {
+    if (window.HertzDesktopSettings) window.HertzDesktopSettings.focus();
+  } else if (window.HertzDesktopLyricsSettings) {
+    window.HertzDesktopLyricsSettings.refresh();
+    requestAnimationFrame(() => window.HertzDesktopLyricsSettings.focus());
+  }
 }
 // 在线歌单可能在歌单视图没渲染期间到达（登录、刷新），进入时补一次同步。
 function enterPlaylistsView() { renderOnlinePlaylistSection(); }
@@ -6119,7 +6169,22 @@ function probeImage(url, timeoutMs = 8000) {
 // MediaSession —— 让系统媒体键在浏览器里也能控制本地播放器
 // ---------------------------------------------------------------------------
 
+const MEDIA_SESSION_ACTIONS = ['play', 'pause', 'stop', 'previoustrack', 'nexttrack', 'seekto', 'seekforward', 'seekbackward'];
+
+function clearBrowserMediaSession() {
+  if (!('mediaSession' in navigator)) return;
+  for (const name of MEDIA_SESSION_ACTIONS) {
+    try { navigator.mediaSession.setActionHandler(name, null); } catch { /* optional action */ }
+  }
+  try { navigator.mediaSession.metadata = null; } catch { /* optional */ }
+  try { navigator.mediaSession.playbackState = 'none'; } catch { /* optional */ }
+  try { navigator.mediaSession.setPositionState(); } catch { /* optional */ }
+  mediaSessionStateKey = '';
+}
+
 function updateMediaSessionMetadata(track, artUrl) {
+  if (window.HertzSystemMedia && typeof window.HertzSystemMedia.ownsSession === 'function'
+    && window.HertzSystemMedia.ownsSession()) return;
   if (window.HertzRoom && HertzRoom.active()) return;
   if (!('mediaSession' in navigator)) return;
   try {
@@ -6132,8 +6197,10 @@ function updateMediaSessionMetadata(track, artUrl) {
   } catch { /* 某些浏览器在缺字段时会抛，忽略即可 */ }
 }
 
-function syncMediaSession() {
-  if (window.HertzRoom && HertzRoom.active()) return HertzRoom.syncMediaSession();
+function syncMediaSession(force = false) {
+  if (window.HertzSystemMedia && typeof window.HertzSystemMedia.ownsSession === 'function'
+    && window.HertzSystemMedia.ownsSession()) return;
+  if (window.HertzRoom && HertzRoom.active()) return HertzRoom.syncMediaSession(force);
   if (!('mediaSession' in navigator)) return;
   const duration = playbackDuration(state.snapshot);
   const playbackState = !state.snapshot.track_id || state.stopped
@@ -6158,6 +6225,8 @@ function syncMediaSession() {
 
 function bindMediaSession() {
   if (!('mediaSession' in navigator)) return;
+  if (window.HertzSystemMedia && typeof window.HertzSystemMedia.ownsSession === 'function'
+    && window.HertzSystemMedia.ownsSession()) { clearBrowserMediaSession(); return; }
   const handlers = {
     play: () => setPlayback('play'),
     pause: () => setPlayback('pause'),
@@ -6171,8 +6240,27 @@ function bindMediaSession() {
   for (const [name, fn] of Object.entries(handlers)) {
     // 内层 .catch 吞的是「系统媒体键触发的动作没成功」（比如没有当前曲目时
     // 按下一首）：这类失败不该弹到界面上，媒体键本来就没有可报错的落点。
-    try { navigator.mediaSession.setActionHandler(name, (e) => Promise.resolve(fn(e || {})).catch(() => {})); } catch { /* 不支持的动作 */ }
+    try {
+      navigator.mediaSession.setActionHandler(name, (e) => {
+        // Ownership can change between registration and the native key event.
+        if (window.HertzSystemMedia && typeof window.HertzSystemMedia.ownsSession === 'function'
+          && window.HertzSystemMedia.ownsSession()) return Promise.resolve();
+        return Promise.resolve(fn(e || {})).catch(() => {});
+      });
+    } catch { /* 不支持的动作 */ }
   }
+}
+
+if (typeof window.addEventListener === 'function') {
+  window.addEventListener('hertz-system-media-owner-changed', () => {
+    if (window.HertzSystemMedia && typeof window.HertzSystemMedia.ownsSession === 'function'
+      && window.HertzSystemMedia.ownsSession()) clearBrowserMediaSession();
+    else {
+      bindMediaSession();
+      if (state.current) updateMediaSessionMetadata(state.current, Stage && Stage.coverUrl ? Stage.coverUrl() : state.current.cover);
+      syncMediaSession(true);
+    }
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -6367,8 +6455,8 @@ function setCoverFollow(value, persist) {
 }
 
 // ---------------------------------------------------------------------------
-// 睡眠定时器（folia 的 sleep timer）：到点暂停播放。偏好时长跨会话记住，
-// 运行中的倒计时只活在内存里——刷新/重开页面即失效，与 folia 行为一致。
+// 睡眠定时器：原生窗口由服务计时，页面只显示状态；浏览器与 DBX 保留
+// 页面内倒计时。偏好时长跨会话记住，运行中的原生计时从服务恢复。
 // ---------------------------------------------------------------------------
 
 const SLEEP_TIMER_KEY = 'vmusic.sleep-timer-preset';
@@ -6380,7 +6468,45 @@ function sleepPresetMinutes() {
 }
 
 function sleepRemainingMs() {
+  if (nativeSleepTimer()) return nativeSleepSnapshot().remainingMs;
   return sleepState.deadline ? Math.max(0, sleepState.deadline - Date.now()) : 0;
+}
+
+function nativeSleepTimer() {
+  return transport.kind !== 'dbx' && !(window.hertzHost && window.hertzHost.isDbx)
+    && !!window.__hertzWindowHost && window.__hertzWindowHost.lifecycleVersion === 1;
+}
+
+function nativeSleepSnapshot() {
+  return window.HertzWindowSleep ? window.HertzWindowSleep.snapshot()
+    : { available: false, unknown: true, remainingMs: 0, error: '原生睡眠定时暂不可用，请重载页面。' };
+}
+
+function sleepPresentation() {
+  if (!nativeSleepTimer()) {
+    const active = sleepState.deadline > 0;
+    const label = active ? sleepLabel(sleepRemainingMs()) : '未启用';
+    return { active, label, showLabel: active, canArm: true, canCancel: active, busy: false,
+      note: active ? `将在 ${label} 后暂停播放` : '选择档位或填入分钟数后点「开始」' };
+  }
+  const timer = nativeSleepSnapshot();
+  const active = timer.phase === 'armed' || timer.phase === 'failed';
+  const room = window.HertzRoom && HertzRoom.active();
+  const busy = timer.loading || timer.pending;
+  const ready = timer.available && !timer.unknown && !busy;
+  let label = '未启用';
+  let note = '原生窗口负责计时，隐藏或重载页面后仍继续。';
+  if (timer.phase === 'armed') {
+    label = timer.remainingMs > 0 ? sleepLabel(timer.remainingMs) : '待确认';
+    note = timer.remainingMs > 0 ? `将在 ${label} 后暂停播放；隐藏或重载页面后仍继续。` : '倒计时已到，等待服务确认暂停结果。';
+  } else if (timer.phase === 'failed') { label = '暂停失败'; note = timer.error; }
+  else if (timer.phase === 'expired') { label = '已暂停'; note = '服务已确认睡眠定时到点并暂停播放。'; }
+  if (timer.loading) { label = '读取中'; note = '正在读取原生睡眠定时状态…'; }
+  else if (timer.pending) { label = '更新中'; note = '正在更新原生睡眠定时…'; }
+  else if (timer.unknown || !timer.available) { label = '待确认'; note = timer.error || '睡眠定时状态未确认，请刷新状态。'; }
+  if (room) note = '一起听房间中请使用房间的睡眠定时。';
+  return { active, label, note, busy, showLabel: active || busy || timer.unknown,
+    canArm: ready && !room, canCancel: ready && active };
 }
 
 function sleepLabel(remainingMs) {
@@ -6395,15 +6521,17 @@ function sleepLabel(remainingMs) {
 
 function renderSleepTimer() {
   if (!ui.sleepTimer) return;
-  const active = sleepState.deadline > 0;
+  const { active, label, note, busy, showLabel } = sleepPresentation();
   ui.sleepTimer.classList.toggle('is-active', active);
   ui.sleepTimer.setAttribute('aria-pressed', String(active));
-  const label = active ? sleepLabel(sleepRemainingMs()) : '';
+  ui.sleepTimer.setAttribute('aria-busy', String(!!busy));
+  ui.sleepTimer.disabled = !!busy;
   if (ui.sleepTimerLabel) {
-    ui.sleepTimerLabel.hidden = !active;
-    if (active) ui.sleepTimerLabel.textContent = label;
+    ui.sleepTimerLabel.hidden = !showLabel;
+    ui.sleepTimerLabel.textContent = label;
   }
-  ui.sleepTimer.title = active ? `睡眠定时：还剩 ${label}` : '睡眠定时器';
+  ui.sleepTimer.title = nativeSleepTimer() ? `睡眠定时：${note}` : active ? `睡眠定时：还剩 ${label}` : '睡眠定时器';
+  ui.sleepTimer.setAttribute('aria-label', ui.sleepTimer.title);
 }
 
 function stopSleepTicker() {
@@ -6411,6 +6539,11 @@ function stopSleepTicker() {
 }
 
 function clearSleepTimer(silent) {
+  if (nativeSleepTimer()) {
+    stopSleepTicker();
+    if (!window.HertzWindowSleep) { toast(nativeSleepSnapshot().error, 'error'); return; }
+    return window.HertzWindowSleep.cancel().catch(error => toast(errText('取消睡眠定时失败', error), 'error'));
+  }
   sleepState.deadline = 0;
   stopSleepTicker();
   renderSleepTimer();
@@ -6419,6 +6552,14 @@ function clearSleepTimer(silent) {
 
 function armSleepTimer(minutes) {
   if (!(minutes > 0)) return;
+  if (nativeSleepTimer()) {
+    stopSleepTicker();
+    if (window.HertzRoom && HertzRoom.active()) { toast('一起听房间中请使用房间的睡眠定时。', 'error'); return; }
+    if (!window.HertzWindowSleep) { toast(nativeSleepSnapshot().error, 'error'); return; }
+    return window.HertzWindowSleep.arm(Math.round(minutes * 60)).then(saved => {
+      if (saved) localStorage.setItem(SLEEP_TIMER_KEY, String(minutes));
+    }).catch(error => toast(errText('设置睡眠定时失败', error), 'error'));
+  }
   localStorage.setItem(SLEEP_TIMER_KEY, String(minutes));
   sleepState.deadline = Date.now() + minutes * 60 * 1000;
   stopSleepTicker();
@@ -6437,15 +6578,23 @@ function armSleepTimer(minutes) {
 
 function openSleepTimerMenu(anchor) {
   const preset = sleepPresetMinutes();
+  const view = sleepPresentation();
   const items = [
-    { label: '取消定时', disabled: !sleepState.deadline, run: () => clearSleepTimer() },
+    ...(nativeSleepTimer() ? [
+      { label: view.note, disabled: true },
+      { label: '刷新定时状态', disabled: view.busy, run: () => window.HertzWindowSleep && window.HertzWindowSleep.refresh() },
+      { sep: true },
+    ] : []),
+    { label: '取消定时', disabled: !view.canCancel, run: () => clearSleepTimer() },
     { sep: true },
     ...[15, 30, 45, 60, 90].map((m) => ({
       label: `${m} 分钟${m === preset ? ' ✓' : ''}`,
+      disabled: !view.canArm,
       run: () => armSleepTimer(m),
     })),
     {
       label: '自定义分钟数…',
+      disabled: !view.canArm,
       run: async () => {
         const v = await modal().prompt('多少分钟后暂停播放？（分钟，1–1440）', String(preset));
         if (v === null) return;
@@ -6455,12 +6604,24 @@ function openSleepTimerMenu(anchor) {
       },
     },
   ];
+  ui.menu.innerHTML = '';
   buildMenu(ui.menu, items);
   const rect = anchor.getBoundingClientRect();
   showMenu(rect.left, rect.bottom + 6);
 }
 
 function initSleepTimer() {
+  if (window.HertzWindowSleep) window.HertzWindowSleep.init({
+    transport, onNotice: toast,
+    onChange(timer) {
+      if (timer.managed) {
+        stopSleepTicker();
+        // Compatibility projection for legacy consumers; this is never a clock.
+        sleepState.deadline = timer.phase === 'armed' || timer.phase === 'failed' ? 1 : 0;
+      }
+      renderSleepTimer();
+    },
+  });
   if (!ui.sleepTimer) return;
   // 菜单在同一次点击里建起，document 的 closeMenu 监听会立刻清掉它（与批量
   // 加入歌单同一坑），必须挡冒泡。
@@ -6601,6 +6762,7 @@ function initPalette() {
             <span class="palette-surface-hint">分钟后暂停播放</span>
             <button type="button" class="ps-btn ps-arm">开始</button>
             <button type="button" class="ps-btn ps-cancel">取消定时</button>
+            <button type="button" class="ps-btn ps-refresh" hidden>刷新状态</button>
           </div>
           <div class="palette-surface-hint ps-note"></div>
         </div>`;
@@ -6609,6 +6771,8 @@ function initPalette() {
       const num = host.querySelector('.ps-num');
       const note = host.querySelector('.ps-note');
       const cancel = host.querySelector('.ps-cancel');
+      const arm = host.querySelector('.ps-arm');
+      const refresh = host.querySelector('.ps-refresh');
       num.value = String(sleepPresetMinutes());
       const presets = [15, 30, 45, 60, 90].map((m) => {
         const btn = document.createElement('button');
@@ -6624,18 +6788,20 @@ function initPalette() {
         return { m, btn };
       });
       const paint = () => {
-        const active = sleepState.deadline > 0;
-        const remaining = sleepRemainingMs();
-        readout.textContent = active ? sleepLabel(remaining) : '未启用';
+        const view = sleepPresentation();
+        const active = view.active;
+        readout.textContent = view.label;
         const preset = sleepPresetMinutes();
         presets.forEach(({ m, btn }) => {
           btn.classList.toggle('is-active', !active && m === preset);
           btn.setAttribute('aria-pressed', String(!active && m === preset));
+          btn.disabled = !view.canArm;
         });
-        cancel.disabled = !active;
-        note.textContent = active
-          ? `将在 ${sleepLabel(remaining)} 后暂停播放`
-          : '选择档位或填入分钟数后点「开始」';
+        arm.disabled = !view.canArm;
+        cancel.disabled = !view.canCancel;
+        refresh.hidden = !nativeSleepTimer();
+        refresh.disabled = !!view.busy;
+        note.textContent = view.note;
       };
       host.querySelector('.ps-arm').addEventListener('click', () => {
         const m = Number(num.value);
@@ -6647,6 +6813,7 @@ function initPalette() {
         paint();
       });
       cancel.addEventListener('click', () => { clearSleepTimer(); paint(); });
+      refresh.addEventListener('click', () => { if (window.HertzWindowSleep) window.HertzWindowSleep.refresh().then(paint); });
       const tick = setInterval(paint, 500);
       paint();
       return () => clearInterval(tick);
@@ -7793,6 +7960,8 @@ function isNpOpen() {
 
 function openNowPlaying() {
   if (window.HertzRoom && HertzRoom.active()) { setView('room'); return; }
+  if (isNpOpen()) return;
+  const transitionCover = window.PlayerTransitions && PlayerTransitions.capture($('bar-art'));
   np.scrim.hidden = false;
   np.modal.hidden = false;
   if (window.NowPlaying) NowPlaying.open();
@@ -7806,6 +7975,7 @@ function openNowPlaying() {
     // 失败保持现有歌词，不打扰。
     refreshLyrics(state.current.id, state.current).catch(() => {});
   }
+  if (window.PlayerTransitions) PlayerTransitions.openPlayer(transitionCover);
 }
 
 function closeNowPlaying(options) {
@@ -8222,7 +8392,8 @@ function initNowPlayingModal() {
 
 function initCapsuleControls() {
   window.addEventListener('hertz-native-capsule-restore', () => setCapsuleMinimized(false));
-  // 胶囊播放器：顶栏按钮收进去；胶囊上直接给传输三键与展开，不展开也能操作。
+  // 胶囊播放器：顶栏按钮收进去；胶囊上只留传输三键，展开交给整块点击（封面 /
+  // 文字区），不展开也能操作。桌面原生胶囊窗口只有 320×64，第四个键会挤没文字区。
   // 页内最小化态整块可拖、靠边吸附、位置记进 localStorage；浮动实例改由宿主窗口
   // 承担移动与吸附（见下面的 pointerdown）。
   /// 宿主是否给了浮动窗口能力。capabilities 是 init 消息里的广告位：Web 宿主没有
@@ -8295,7 +8466,7 @@ function initCapsuleControls() {
   ui.capsulePrev.addEventListener('click', (e) => { e.stopPropagation(); post('/v1/player/previous'); });
   ui.capsuleNext.addEventListener('click', (e) => { e.stopPropagation(); post('/v1/player/next'); });
   ui.capsulePlay.addEventListener('click', (e) => { e.stopPropagation(); togglePlay(); });
-  ui.capsuleExpand.addEventListener('click', (e) => { e.stopPropagation(); expandCapsule(); });
+  // 展开不再有专属按钮：下面的 capsule click（非按钮区）就是唯一入口。
   // 拖拽：整块是把手，按钮除外。位移过阈值才算拖；没超过阈值的那次 pointerup 之后的
   // click 仍走展开，靠 capsuleJustDragged 挡一下。两种形态移动的东西不同：
   //   page —— 页内最小化态，移动 DOM，松手吸附到视口边缘并落盘；
@@ -8438,10 +8609,12 @@ async function startApp() {
   // 这一串 init() 拿到的全是默认值（症状：刷新后主题、皮肤、舞台参数集体丢失）。
   // 独立形态用原生 localStorage，这里是空操作。
   if (window.hertzHost) await window.hertzHost.hydrate();
+  if (window.PlayerTransitions) PlayerTransitions.init();
   // 落盘的在线元数据先喂回内存：队列行第一帧就能显示真名字，不用等补取。
   if (window.Online && window.Online.seedFromStore) window.Online.seedFromStore();
   transport = await chooseTransport();
   initMainVisibility();
+  if (window.HertzSystemMedia) await window.HertzSystemMedia.init(transport);
   // 外壳先于一切视图接线就位：房间 onReturn/onNavigate、换肤对账都经由它切页。
   initShell();
   if (window.HertzRoom) window.HertzRoom.init({
@@ -8453,7 +8626,10 @@ async function startApp() {
     onNavigate: name => { if (['library', 'favorites', 'online', 'room'].includes(name)) setView(name); },
     onOpenStage: () => { if (window.Stage3D) Stage3D.open(); },
     onModeChange(active) {
-      cancelSeek(); clearSleepTimer(true); closeNowPlaying();
+      cancelSeek();
+      if (nativeSleepTimer()) { if (window.HertzWindowSleep) window.HertzWindowSleep.refresh(); }
+      else clearSleepTimer(true);
+      closeNowPlaying();
       loadNowPlaying.epoch = (loadNowPlaying.epoch || 0) + 1; lyricRefreshEpoch++;
       if (window.Stage3D) Stage3D.close();
       if (active) document.title = '一起听 · hertz-studio';
@@ -8799,6 +8975,22 @@ async function startApp() {
       }
       if (ui.overlayOpen) {
         ui.overlayOpen.onclick = async () => {
+          // Native previews have their own read-only profile and no opener.
+          // Wait for the key before the narrowly typed native request.
+          if (window.__hertzWindowHost?.kind === 'window-host') {
+            try {
+              if (window.__hertzWindowHost.obsPreviewVersion !== 1 || typeof window.__hertzWindowHost.openObsPreview !== 'function') {
+                throw new Error('当前原生窗口不支持歌词预览');
+              }
+              await ensureOverlayKey();
+              const url = overlayUrlWithKey();
+              if (!url) throw new Error('浮层钥匙还没就绪，请稍后重试');
+              await window.__hertzWindowHost.openObsPreview(url);
+            } catch (err) {
+              toast(errText('打不开浮层预览', err), 'error');
+            }
+            return;
+          }
           // 先同步开一个空白页，避免 await 之后掉出用户手势窗口被浏览器拦截。
           const tab = window.open('', '_blank');
           try {
@@ -9120,18 +9312,28 @@ async function startApp() {
   }
 
   // 数据备份：导出下载 JSON；导入读文件后按幂等语义恢复。
+  if (window.UiPreferences && window.UiPreferenceSettings) {
+    window.UiPreferences.configure({
+      defaultViewTransfer(value) {
+        if (typeof value !== 'string' || !ui.views || !Object.prototype.hasOwnProperty.call(ui.views, value)) {
+          throw new Error('未知启动页面');
+        }
+        return { value, writes: [{ key: DEFAULT_VIEW_KEY, value }] };
+      },
+      playlistTransfer(value) {
+        if (!['shelf', 'grid', 'list'].includes(value)) throw new Error('未知歌单排布');
+        return { value, writes: [{ key: PL_VIEW_KEY, value }, { key: PL_VIEW_V2_KEY, value: '1' }] };
+      },
+    });
+    window.UiPreferenceSettings.bind();
+  }
   if (ui.backupExport) {
     ui.backupExport.onclick = async () => {
       try {
         const data = await transport.get('/v1/backup');
-        const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `mmusic-backup-${new Date().toISOString().slice(0, 10)}.json`;
-        a.click();
-        URL.revokeObjectURL(url);
-        toast('备份已导出');
+        const receipt = await saveTextFile(`mmusic-backup-${new Date().toISOString().slice(0, 10)}.json`,
+          'application/json', JSON.stringify(data, null, 2));
+        toast(fileSaveMessage(receipt, '备份已保存'));
       } catch (err) {
         toast(errText('备份导出失败', err), 'error');
       }
@@ -9203,6 +9405,15 @@ async function startApp() {
     ui.scanPanel.hidden = !ui.scanPanel.hidden;
     if (!ui.scanPanel.hidden) { loadScanRoots(); refreshScanStatus(); }
   };
+  window.addEventListener('hertz-native-import-requested', () => {
+    setView('library');
+    ui.scanPanel.hidden = false;
+    ui.scanPanel.scrollIntoView({ block: 'nearest' });
+  });
+  window.addEventListener('hertz-native-import-started', () => {
+    ui.scanPanel.hidden = false;
+    refreshScanStatus();
+  });
   $('empty-scan-btn').onclick = () => { ui.scanPanel.hidden = false; ui.scanRoot.focus(); };
   // 轻空态条上的同名按钮：同一件事，另一个入口（在线推荐来源下列表区那行提示）。
   const emptyStripScan = $('empty-strip-scan');
@@ -9259,22 +9470,23 @@ async function startApp() {
     ui.plDetailM3u.onclick = async () => {
       if (!detailPlaylistId) return;
       const encoded = encodeURIComponent(detailPlaylistId);
-      // 插件 iframe 没有 allow-popups，window.open 会被静默丢弃；而且也没有
-      // 可直连的下载 URL。改成取回文本再交给宿主的 saveFile。
-      if (window.hertzHost && window.hertzHost.isDbx) {
-        try {
-          const text = await transport.get(`/v1/playlists/${encoded}/m3u`);
-          await saveTextFile(`playlist-${detailPlaylistId}.m3u`, 'audio/x-mpegurl',
-            typeof text === 'string' ? text : '');
-          toast('已导出 m3u');
-        } catch (err) {
-          toast(errText('导出 m3u 失败', err), 'error');
+      try {
+        let text;
+        if (window.hertzHost.isDbx) {
+          text = await transport.get(`/v1/playlists/${encoded}/m3u`);
+        } else {
+          const response = await fetch(`/v1/playlists/${encoded}/m3u`, {
+            headers: { Authorization: `Bearer ${TOKEN}` },
+          });
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          text = await response.text();
         }
-        return;
+        const receipt = await saveTextFile(`playlist-${detailPlaylistId}.m3u`, 'audio/x-mpegurl',
+          typeof text === 'string' ? text : '');
+        toast(fileSaveMessage(receipt, 'm3u 已保存'));
+      } catch (err) {
+        toast(errText('导出 m3u 失败', err), 'error');
       }
-      // 走带凭据的链接下载：m3u 同 coverUrl 的「凭据只能进查询串」通道，
-      // 同样优先短时效票。
-      window.open(`/v1/playlists/${encoded}/m3u?${urlCredential()}`, '_blank');
     };
   }
   ui.plDetailBack.onclick = () => closeDetail();
@@ -9372,6 +9584,20 @@ async function startApp() {
     .catch((err) => toast(errText('切换输出设备失败', err), 'error'));
   initRenderMode();
 
+  // 播放页字号与其他播放器设置一起保存，避免窗口重开或 DBX 禁用本地存储时丢失。
+  let playerLyricSizeWrite = Promise.resolve();
+  const updatePlayerLyricSize = () => {
+    markSettingsDirty();
+    const size = paintPlayerLyricSize(Number(ui.setPlayerLyricSize.value));
+    state.settings.player_lyric_font_size = size;
+    return size;
+  };
+  ui.setPlayerLyricSize.oninput = updatePlayerLyricSize;
+  ui.setPlayerLyricSize.onchange = () => {
+    const size = updatePlayerLyricSize();
+    playerLyricSizeWrite = playerLyricSizeWrite.then(() => persistSettings({ player_lyric_font_size: size }));
+  };
+
   ui.setDensity.onchange = () => {
     markSettingsDirty();
     state.settings.ui_density = ui.setDensity.value;
@@ -9449,6 +9675,10 @@ async function startApp() {
   // 歌词设置：偏移步进 100ms（±2000 封顶），正则改完失焦即存。
   // DBX 的统一桌面区只注册事件；实际打开设置或显式桌面动作才检测。
   if (window.HertzDesktopSettings) window.HertzDesktopSettings.init(transport);
+  if (window.HertzDesktopLyricsSettings) window.HertzDesktopLyricsSettings.init(transport);
+  window.addEventListener('hertz-settings-category', refreshInlineDesktopLyrics);
+  window.addEventListener('hertz-open-desktop-lyrics-settings', openInlineDesktopLyrics);
+  if (window.WindowLifecycle) window.WindowLifecycle.init(transport);
   if (ui.barDesktopSettings) {
     ui.barDesktopSettings.hidden = false;
   }
@@ -9468,32 +9698,32 @@ async function startApp() {
     $('set-desktop-lyrics-note').hidden = !!(window.hertzHost && window.hertzHost.isDbx);
   }
   if (ui.setDesktopLyricsOpen) {
-    ui.setDesktopLyricsOpen.onclick = () => {
-      wallpaperControl('wallpaper-settings', { tab: 'lyrics' })
-        .then(() => toast('已打开桌面歌词设置'))
-        .catch((err) => toast(errText('打开桌面歌词设置失败', err), 'error'));
-    };
+    ui.setDesktopLyricsOpen.onclick = openInlineDesktopLyrics;
   }
   if (ui.setDesktopLyricsLocate) {
     ui.setDesktopLyricsLocate.onclick = () => {
-      transport.post('/v1/desktop/lyrics/control', { command: 'locate' })
+      transport.post('/v1/desktop/lyrics/launch', {}, { timeoutMs: 55000 })
         .then(() => toast('已定位桌面歌词'))
         .catch((err) => toast(errText('定位桌面歌词失败', err), 'error'));
     };
   }
+  if (ui.barDesktopSettings) ui.barDesktopSettings.onclick = openInlineDesktopLyrics;
+  let desktopLaunch = null;
   const wallpaperControl = (command, value) => {
-    const post = () => transport.post('/v1/desktop/control', { command, value }).then((result) => {
+    const post = () => transport.post('/v1/desktop/control', { command, value }, { timeoutMs: 25000 }).then((result) => {
       if (result && result.ok === false) throw new Error(result.message || result.error || '桌面宿主返回错误');
       return result;
     });
+    if (desktopLaunch) return desktopLaunch.then(post);
     return post().catch((err) => {
       if (err.code !== 'desktop_not_running') throw err;
-      return transport.post('/v1/desktop/wallpaper/launch', {})
-        .then(() => new Promise((resolve) => setTimeout(resolve, 600)))
-        .then(post);
+      // 内嵌启动最多等待 30 秒，首次开窗命令另有 20 秒预算；前端等服务的实际结果。
+      if (!desktopLaunch) desktopLaunch = transport.post('/v1/desktop/wallpaper/launch', {}, { timeoutMs: 55000 })
+        .finally(() => { desktopLaunch = null; });
+      return desktopLaunch.then(post);
     });
   };
-  for (const button of [ui.setWallpaperSettings, ui.barDesktopSettings]) {
+  for (const button of [ui.setWallpaperSettings]) {
     if (!button) continue;
     button.onclick = () => {
       if (window.hertzHost && window.hertzHost.isDbx) {
@@ -9966,11 +10196,42 @@ function showBootFailure(err) {
 /// `window.close()` 只对脚本自己开的窗口生效，普通标签页浏览器不让脚本关，所以
 /// 关不掉时整页换成一张收尾卡：比留在一个「服务已断开、正在重连」的死界面上诚实。
 async function exitService() {
+  if (window.WindowLifecycle && window.WindowLifecycle.isNative()) {
+    await window.WindowLifecycle.requestExit();
+    return;
+  }
   // 这一键会停掉播放、结束服务进程并关掉页面，毁掉的是整个会话，所以先要一次确认。
   // 收进 ⋮ 只是减少误触的第一层；确认才是「知道自己在关服务」的那层。
   if (!(await modal().confirm('退出播放服务？正在播放的音乐会停止，服务进程与这个页面都会关掉。'))) return;
   ui.serviceExit.disabled = true;
-  await transport.post('/v1/system/shutdown').catch(() => null);
+  const shutdown = await transport.post('/v1/system/shutdown').catch(() => null);
+  if (shutdown && shutdown.phase === 'pending') {
+    toast('请在原生主窗口确认退出', 'info');
+    // Only a pending native response enables these probes. Ordinary browser/DBX
+    // shutdown retains its existing path and does not query window capabilities.
+    try {
+      for (let probe = 0; probe < 60; probe += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        const state = await transport.get('/v1/window/state');
+        if (state.phase === 'cancelled' || state.phase === 'idle' || state.phase === 'failed') {
+          toast(state.phase === 'failed' ? '退出未完成，请在原生主窗口重试' : '已取消退出', 'info');
+          return;
+        }
+        if (state.phase === 'exiting') {
+          toast('服务正在退出…', 'info');
+          for (let healthProbe = 0; healthProbe < 40; healthProbe += 1) {
+            await new Promise((resolve) => setTimeout(resolve, 200));
+            const up = await fetch('/v1/health', { cache: 'no-store' }).then((res) => res.ok).catch(() => false);
+            if (!up) { showServiceExit(); return; }
+          }
+          toast('服务仍在运行，请在原生主窗口检查退出状态', 'info');
+          return;
+        }
+      }
+    } catch { /* A disconnected observer cannot infer an approved exit. */ }
+    finally { ui.serviceExit.disabled = false; }
+    return;
+  }
   window.close();
   if (window.closed) return;
   toast('服务正在退出…', 'info');

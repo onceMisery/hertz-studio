@@ -1,0 +1,41 @@
+/* SPDX-License-Identifier: MIT
+   Copyright (c) 2026 hertz-studio contributors */
+#window-lifecycle-setting[hidden],
+#window-lifecycle-dialog [hidden] { display: none; }
+#window-lifecycle-setting {
+  display: grid;
+  justify-items: start;
+  gap: var(--sp-3);
+  padding-block-end: var(--sp-6);
+  border-bottom: 1px solid var(--line);
+}
+#window-lifecycle-setting > label { width: auto; color: var(--text); }
+#window-lifecycle-setting > select { width: 100%; max-width: 20rem; }
+#window-lifecycle-setting .hint { margin: 0; }
+.window-lifecycle-error { color: var(--danger) !important; }
+#window-lifecycle-dialog {
+  width: min(28rem, calc(100vw - var(--sp-8) * 2));
+  max-height: calc(100dvh - var(--sp-8) * 2);
+  box-sizing: border-box;
+  padding: var(--sp-8);
+  border: 1px solid var(--line);
+  border-radius: var(--r-xl);
+  background: var(--panel-solid, var(--bg));
+  color: var(--text);
+  box-shadow: var(--shadow);
+  font-family: var(--font-sans);
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+#window-lifecycle-dialog::backdrop { background: color-mix(in srgb, var(--bg) 72%, transparent); }
+#window-lifecycle-dialog h2 { margin: 0 0 var(--sp-5); font-size: var(--fs-2xl); font-weight: 600; }
+#window-lifecycle-dialog p { margin: 0 0 var(--sp-5); font-size: var(--fs-base); line-height: 1.7; }
+#window-lifecycle-dialog .window-lifecycle-description { color: var(--muted); }
+#window-lifecycle-status { padding-top: var(--sp-5); border-top: 1px solid var(--line); color: var(--muted); }
+.window-lifecycle-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: var(--sp-3); margin-top: var(--sp-8); }
+.window-lifecycle-actions .btn { min-height: calc(var(--sp-7) * 2 + var(--sp-1)); }
+@media (max-width: 480px) {
+  #window-lifecycle-dialog { width: calc(100vw - var(--sp-6) * 2); padding: var(--sp-7); }
+  .window-lifecycle-actions { display: grid; grid-template-columns: 1fr; }
+  .window-lifecycle-actions .btn { width: 100%; white-space: normal; }
+}

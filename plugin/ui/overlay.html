@@ -131,9 +131,12 @@
   .obs-logo.bottom-left { bottom: 4vh; left: 4vw; }
 
   .hidden { display: none !important; }
+  #lyrics-support-status { position: fixed; left: 4vw; right: 4vw; bottom: 3vh; color: var(--fg); font: 500 18px/1.5 "Segoe UI", sans-serif; text-align: center; }
+  #lyrics-support-status[hidden] { display: none; }
 </style>
 </head>
 <body>
+  <div id="lyrics-support-status" role="status" hidden></div>
   <div class="view full hidden" id="v-full">
     <div class="lines" id="full-lines"><div class="inner" id="full-inner"></div></div>
   </div>
@@ -412,11 +415,26 @@
       var res = await fetch('/v1/overlay/lyric?' + CRED, { cache: 'no-store' });
       if (res.ok) {
         var data = await res.json();
+        var unsupported = data.lyricsStatus === 'unsupported';
+        var status = $('lyrics-support-status');
+        status.hidden = !unsupported;
+        status.textContent = unsupported ? '此歌词包含多人声，OBS 浮层暂不支持；请使用桌面歌词' : '';
+        if (unsupported) {
+          $('full-inner').replaceChildren();
+          state.lastActive = -1;
+          state.lastSingle = -1;
+          ['line-cur', 'karaoke-cur', 'min-cur'].forEach(function (id) {
+            var single = $(id);
+            single.replaceChildren();
+            single._track = null;
+            single._wordsKey = null;
+          });
+        }
         state.trackId = data.track_id || null;
         state.title = data.title || '';
         state.artist = data.artist || '';
         state.cover = data.cover || null;
-        state.lines = data.lines || [];
+        state.lines = unsupported ? [] : data.lines || [];
         state.playing = !!data.playing;
         state.positionMs = data.position_ms || 0;
         state.durationMs = data.duration_ms || 0;

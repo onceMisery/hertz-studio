@@ -648,9 +648,41 @@
     });
   }
 
-  // ------------------------------------------------------------------
-  // 重音编舞：对选点行的三个字素，各放 5 条对数螺线粒子尾迹汇聚到字上
-  // ------------------------------------------------------------------
+  function createAccentTrail(PIXI, layer, color) {
+    var core = ((Math.round((color >> 16 & 255) * 0.28 + 255 * 0.72) << 16)
+      | (Math.round((color >> 8 & 255) * 0.28 + 255 * 0.72) << 8)
+      | Math.round((color & 255) * 0.28 + 255 * 0.72));
+    return Array.from({ length: 14 }, function (_, index) {
+      var dot = new PIXI.Graphics();
+      if (index === 0) {
+        dot.circle(0, 0, 8).fill({ color: color, alpha: 0.035 });
+        dot.circle(0, 0, 4.5).fill({ color: color, alpha: 0.12 });
+        dot.poly([0, -7, 0.9, -1, 4.8, 0, 0.9, 1, 0, 7, -0.9, 1, -4.8, 0, -0.9, -1])
+          .fill({ color: color, alpha: 0.82 });
+        dot.circle(0, 0, 1.25).fill({ color: core, alpha: 1 });
+      } else {
+        dot.circle(0, 0, 1.65 * (0.28 + 0.72 * Math.pow(1 - index / 14, 0.8)))
+          .fill({ color: color, alpha: 1 });
+      }
+      layer.addChild(dot);
+      return dot;
+    });
+  }
+
+  function animateAccentSpark(dot, progress, index, count, arm, phase) {
+    var lingering = index === 0 && arm === 0;
+    var end = lingering ? 1.26 : 1;
+    dot.visible = progress >= 0 && progress < end;
+    if (!dot.visible) return;
+    var fadeStart = lingering ? 0.94 : 0.8;
+    var fade = 1 - ease((progress - fadeStart) / (end - fadeStart));
+    var shimmer = 0.86 + 0.14 * Math.sin(progress * Math.PI * 2 + phase);
+    dot.alpha = ease(progress / 0.08) * fade * Math.pow(1 - index / count, 1.5)
+      * (index === 0 ? 0.96 : 0.68) * shimmer;
+    dot.rotation = phase + clamp(progress, 0, 1) * 0.45;
+    dot.scale.set(index === 0 ? (0.82 + Math.sin(clamp(progress, 0, 1) * Math.PI) * 0.24)
+      * (0.55 + fade * 0.45) : 0.75 + fade * 0.25);
+  }
 
   function createAccentChoreography(PIXI, parent, nodes, color, seed, lyricColor) {
     var layer = new PIXI.Container();
@@ -666,12 +698,7 @@
     var particles = targets.flatMap(function (target, index) {
       var baseAngle = random() * Math.PI * 2;
       return Array.from({ length: 5 }, function (_, arm) {
-        var trail = [];
-        for (var j = 0; j < 18; j += 1) {
-          var dot = new PIXI.Graphics().circle(0, 0, j === 0 ? 3.2 : 1.6).fill({ color: color, alpha: 1 });
-          layer.addChild(dot);
-          trail.push(dot);
-        }
+        var trail = createAccentTrail(PIXI, layer, color);
         return {
           target: target, trail: trail, index: index, arm: arm,
           angle: baseAngle + arm * Math.PI * 2 / 5 + (random() - 0.5) * 0.22,
@@ -708,11 +735,13 @@
             var u = p - j * 0.014;
             var armBudget = tuning.quality === 'ultimate' ? 5
               : tuning.quality === 'energy-saving' ? 2 : 4;
-            dot.visible = u >= 0 && u <= 1 && pt.arm < armBudget
+            dot.visible = pt.arm < armBudget
               && (tuning.quality !== 'energy-saving' || (pt.index === 0 && j < 8));
             if (!dot.visible) return;
+            animateAccentSpark(dot, u, j, pt.trail.length, pt.arm, pt.angle);
+            if (!dot.visible) return;
             var sweep = Math.PI * 2.6;
-            var turn = (1 - u) * sweep;
+            var turn = (1 - clamp(u, 0, 1)) * sweep;
             // 归一化对数螺线（黄金角增长率）：大视口小字号都收敛到字上。
             var growth = Math.log(1.618034) / (Math.PI / 2);
             var reach = Math.min(viewportSpan * 0.44, Math.max(130, d.fontSize * 4.2))
@@ -720,7 +749,6 @@
             var radius = (Math.exp(turn * growth) - 1) / (Math.exp(sweep * growth) - 1) * reach;
             dot.position.set(pt.target.x + Math.cos(pt.angle + turn * pt.direction) * radius,
               pt.target.y + Math.sin(pt.angle + turn * pt.direction) * radius * 0.86);
-            dot.alpha = ease(u / 0.08) * (1 - j / pt.trail.length) * (pt.arm === 0 ? 0.8 : 0.55);
           });
         });
       },
@@ -1532,6 +1560,8 @@
     destroyDisplayTree: destroyDisplayTree,
     buildLyrics: buildLyrics, animateLyrics: animateLyrics,
     buildPhraseStage: buildPhraseStage, animatePhraseStage: animatePhraseStage,
+    createAccentTrail: createAccentTrail,
+    animateAccentSpark: animateAccentSpark,
     createAccentChoreography: createAccentChoreography,
     singingGlyph: singingGlyph, createVocalGlow: createVocalGlow,
     createOnsetDetector: createOnsetDetector, createPerformance: createPerformance,

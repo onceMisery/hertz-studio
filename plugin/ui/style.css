@@ -1446,7 +1446,7 @@ body.reduce-motion .shelf-vinyl { transition: none; }
 .set-row { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; min-width: 0; }
 .set-row label { font-size: 13px; width: 96px; flex: none; color: var(--muted); }
 .set-row select { flex: 1; max-width: 260px; }
-.set-row input[type="checkbox"] { width: 16px; height: 16px; }
+.set-row input[type="checkbox"]:not([role="switch"]) { width: 16px; height: 16px; }
 .set-row > input:not([type="checkbox"]), .set-row > select { min-width: 0; max-width: 100%; }
 .set-row > .hint { min-width: 0; flex: 1 1 140px; overflow-wrap: anywhere; }
 .set-actions { display: flex; flex-wrap: wrap; gap: 8px; min-width: 0; }
@@ -3238,7 +3238,6 @@ body.reduce-motion #online-error-close:hover { transform: translateY(-1px); }
    的做法：一个容器、两种画法，选择存 localStorage。
    ========================================================================== */
 
-.dv-days,
 .dv-modes,
 .dv-layouts {
   display: flex;
@@ -3248,12 +3247,6 @@ body.reduce-motion #online-error-close:hover { transform: translateY(-1px); }
   border: 1px solid var(--line);
   border-radius: var(--r-pill);
   background: var(--field-bg);
-}
-
-/* 日期按钮比 ‹ › 宽：它同时是"回到今天"的按钮，得放得下「今天」两个字。 */
-.dv-date {
-  min-width: 62px;
-  font-variant-numeric: tabular-nums;
 }
 
 /* 每日推荐的内容体。它是本文件里唯一一个「列表体当滚动容器」的例子，
@@ -3578,8 +3571,8 @@ body.is-capsule > *:not(#capsule) { display: none !important; }
    轮播滚，胶囊不会被提示撑宽，浮窗也就不用跟着改尺寸。 */
 .capsule.is-notice .capsule-title { color: var(--accent-2); font-weight: 500; }
 .capsule.is-notice.is-notice-error .capsule-title { color: var(--danger); font-weight: 600; }
-/* 传输三键 + 展开：不展开完整界面也能换歌、控播放。比底部播放条的 38px 小一圈，
-   胶囊是浮层，控件大了整块会笨重。 */
+/* 传输三键：不展开完整界面也能换歌、控播放；展开走整块点击（封面 / 文字区），
+   不占第四颗键的位置。比底部播放条的 38px 小一圈，胶囊是浮层，控件大了整块会笨重。 */
 .capsule-controls { display: flex; align-items: center; gap: 2px; flex: 0 0 auto; }
 .capsule-btn {
   width: 26px; height: 26px;

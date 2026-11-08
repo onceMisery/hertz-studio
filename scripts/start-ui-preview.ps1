@@ -50,14 +50,10 @@ function Open-HertzPreviewBrowser($State) {
 }
 
 function Open-HertzPreviewWindow($State) {
-    $hertzSocket = [System.Net.Sockets.TcpClient]::new()
     try {
-        if (-not $hertzSocket.ConnectAsync('127.0.0.1', [int]$State.Discovery.port + 1).Wait(1000)) { return $false }
-        $hertzFocusBytes = [System.Text.Encoding]::UTF8.GetBytes("focus`n")
-        $hertzSocket.GetStream().Write($hertzFocusBytes, 0, $hertzFocusBytes.Length)
-        return $true
+        $hertzFocus = Invoke-RestMethod -Method Post -Uri ($State.Base + '/v1/window/focus') -Headers $State.Headers -TimeoutSec 3 -ContentType 'application/json' -Body (@{ serverInstanceId = $State.Discovery.server_instance_id } | ConvertTo-Json -Compress)
+        return ($hertzFocus.focused -eq $true -and $hertzFocus.serverInstanceId -eq $State.Discovery.server_instance_id)
     } catch { return $false }
-    finally { $hertzSocket.Dispose() }
 }
 
 $hertzExisting = Read-HertzPreview

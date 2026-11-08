@@ -19,16 +19,17 @@ use std::sync::Arc;
 
 use serde_json::{json, Value};
 
-use crate::error::{bad_request, internal};
-use crate::routes::{diagnostics_json, store_err, DiagnosticsUpdate, DIAG_LOG_LIMIT};
+use crate::error::internal;
+use crate::routes::{
+    diagnostics_json, export_backup_data, restore_backup_data, store_err, DiagnosticsUpdate,
+    DIAG_LOG_LIMIT,
+};
 use crate::rpc::{body_as, Reply, RpcResult};
 use crate::state::AppState;
 
 /// 导出用户数据备份（JSON）。不含凭据：凭据只存系统钥匙串。
 pub async fn export_backup(state: &Arc<AppState>) -> RpcResult {
-    let backup = vmusic_store::backup::export(&state.db)
-        .await
-        .map_err(store_err)?;
+    let backup = export_backup_data(state).await?;
     Ok(Reply::ok(
         serde_json::to_value(&backup).map_err(|e| internal(e.to_string()))?,
     ))
@@ -37,9 +38,7 @@ pub async fn export_backup(state: &Arc<AppState>) -> RpcResult {
 /// 恢复备份：格式校验失败 400，单事务写入，幂等。
 pub async fn restore_backup(state: &Arc<AppState>, body: &Value) -> RpcResult {
     let request: vmusic_store::backup::BackupFile = body_as(body)?;
-    let report = vmusic_store::backup::restore(&state.db, &request)
-        .await
-        .map_err(|e| bad_request(e.to_string()))?;
+    let report = restore_backup_data(state, &request).await?;
     Ok(Reply::ok(
         serde_json::to_value(&report).map_err(|e| internal(e.to_string()))?,
     ))

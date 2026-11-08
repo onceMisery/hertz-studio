@@ -81,31 +81,27 @@ async function main() {
     // 住：整行文字透过标题叠成一片乱码（用户截图报的就是这个）。
     // 所以这里量两件事：① 确实有行滚到了标题底下（否则这条断言在量一个没发生的状态）；
     // ② 标题栏自身的有效不透明度 = 1。
-    for (const theme of ['starfall']) {
-      await page.selectOption('#s3d-stage-theme', theme);
-      await page.waitForTimeout(150);
-      await page.evaluate(() => { document.getElementById('s3d-settings').scrollTop = 320; });
-      await page.waitForTimeout(150);
-      const head = await page.evaluate(() => {
-        const panel = document.getElementById('s3d-settings');
-        const bar = panel.querySelector('h2');
-        const rect = bar.getBoundingClientRect();
-        const bg = getComputedStyle(bar).backgroundColor;
-        let under = 0;
-        panel.querySelectorAll('label, select, input, p, button').forEach((n) => {
-          if (n.closest('h2')) return;
-          const b = n.getBoundingClientRect();
-          if (b.height > 2 && b.bottom > rect.top + 2 && b.top < rect.bottom - 2) under += 1;
-        });
-        const m = /rgba\([^,]+,[^,]+,[^,]+,\s*([\d.]+)\)/.exec(bg) || /\/\s*([\d.]+)\s*\)/.exec(bg);
-        return { under, alpha: m ? parseFloat(m[1]) : 1, bg, scroll: Math.round(panel.scrollTop) };
-      });
-      assert.ok(head.under > 0, theme + ' 需要先让内容滚到标题底下才谈遮不遮：' + JSON.stringify(head));
-      assert.equal(head.alpha, 1, theme + ' 吸顶标题栏不能是半透明的：' + JSON.stringify(head));
-      await page.evaluate(() => { document.getElementById('s3d-settings').scrollTop = 0; });
-    }
-    await page.selectOption('#s3d-stage-theme', 'starfall');
+    // 「舞台风格」下拉只剩星落一档，已从面板收起；标题栏直接量默认态即可。
+    assert.equal(await page.locator('#s3d-stage-theme').count(), 0, '单选项的「舞台风格」下拉已删除');
+    await page.evaluate(() => { document.getElementById('s3d-settings').scrollTop = 320; });
     await page.waitForTimeout(150);
+    const head = await page.evaluate(() => {
+      const panel = document.getElementById('s3d-settings');
+      const bar = panel.querySelector('h2');
+      const rect = bar.getBoundingClientRect();
+      const bg = getComputedStyle(bar).backgroundColor;
+      let under = 0;
+      panel.querySelectorAll('label, select, input, p, button').forEach((n) => {
+        if (n.closest('h2')) return;
+        const b = n.getBoundingClientRect();
+        if (b.height > 2 && b.bottom > rect.top + 2 && b.top < rect.bottom - 2) under += 1;
+      });
+      const m = /rgba\([^,]+,[^,]+,[^,]+,\s*([\d.]+)\)/.exec(bg) || /\/\s*([\d.]+)\s*\)/.exec(bg);
+      return { under, alpha: m ? parseFloat(m[1]) : 1, bg, scroll: Math.round(panel.scrollTop) };
+    });
+    assert.ok(head.under > 0, '需要先让内容滚到标题底下才谈遮不遮：' + JSON.stringify(head));
+    assert.equal(head.alpha, 1, '吸顶标题栏不能是半透明的：' + JSON.stringify(head));
+    await page.evaluate(() => { document.getElementById('s3d-settings').scrollTop = 0; });
     for (const visual of ['classic', 'cadenza', 'sonnet', 'tempera', 'starborn']) {
       await page.selectOption('#s3d-lyric-visual', visual);
       for (const background of ['stage', 'atmosphere', 'anime', 'geometric', 'fluid', 'solid']) {

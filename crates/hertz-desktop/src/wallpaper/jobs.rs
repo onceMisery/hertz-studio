@@ -24,6 +24,7 @@ use crate::wallpaper::library::{Library, LOCAL_SOURCE};
 pub struct JobError {
     pub code: &'static str,
     pub message: String,
+    pub details: Option<Box<serde_json::Value>>,
 }
 
 impl JobError {
@@ -31,7 +32,12 @@ impl JobError {
         Self {
             code,
             message: message.into(),
+            details: None,
         }
+    }
+    pub fn with_details(mut self, details: serde_json::Value) -> Self {
+        self.details = Some(Box::new(details));
+        self
     }
     pub fn io(message: impl Into<String>) -> Self {
         Self::new("io", message)

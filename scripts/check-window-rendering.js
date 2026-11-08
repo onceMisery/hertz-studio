@@ -64,6 +64,8 @@ const lifecycle = {
   window: { innerWidth: 1280, innerHeight: 800, devicePixelRatio: 1 },
   document: { hidden: false }, navigator: { hardwareConcurrency: 10, deviceMemory: 16 },
   Math, tier: 2, rafId: 0, hidden: false, lastFrameAt: 123, lastDt: 0,
+  stageDestroyed: false, stageFrame: { frameId: 0 }, frameBatch: false, frameStatePending: false,
+  fillFrameRecord(record) { return record; }, notifyFrameState() {},
   fps: { done: true, since: 123 }, hzSamples: [16, 17], displayHz: 60,
   gates: [{ skip: 2, wait: 85 }], playing: false, energy: 0,
   requestAnimationFrame() { return ++scheduled; },

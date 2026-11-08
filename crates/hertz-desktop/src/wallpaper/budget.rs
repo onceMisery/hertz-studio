@@ -71,6 +71,9 @@ pub(crate) const MAX_TRANSCODE_SLOTS: u32 = 0;
 pub(crate) enum OwnerKind {
     /// 桌面呈现会话。
     Desktop,
+    /// Bounded static storage for an existing desktop target's handoff. This
+    /// cannot create a renderer; all bitmap/workspace bytes remain charged.
+    DesktopFrame,
     /// 实时预览（§13.4 租约；预览转应用先释放预览再为桌面申请）。
     Preview,
     /// Static storage within the existing preview owner; never another renderer.
@@ -161,6 +164,7 @@ struct Reservation {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct BudgetUsage {
     pub targets: u32,
+    pub desktop_frames: u32,
     pub contexts: u32,
     pub decoder_slots: u32,
     pub preview_instances: u32,
@@ -200,6 +204,9 @@ impl Ledger {
             }
             let request = &reservation.request;
             usage.targets += request.targets;
+            if request.owner == OwnerKind::DesktopFrame {
+                usage.desktop_frames += 1;
+            }
             usage.contexts += request.contexts;
             usage.decoder_slots += request.decoders;
             usage.decode_pixel_rate += request.decode_pixel_rate;
@@ -302,6 +309,18 @@ impl BudgetCoordinator {
             ));
         }
         let usage = ledger.active_usage();
+
+        if request.owner == OwnerKind::DesktopFrame
+            && usage.desktop_frames >= MAX_PRESENTATION_TARGETS
+        {
+            return Err(Ledger::reject(
+                "desktop_frames",
+                u64::from(MAX_PRESENTATION_TARGETS),
+                u64::from(usage.desktop_frames),
+                1,
+                "等待同一桌面目标的旧静态交接画面退出",
+            ));
+        }
 
         if request.targets > 0 {
             let cap = u64::from(MAX_PRESENTATION_TARGETS);
@@ -492,7 +511,10 @@ impl BudgetCoordinator {
                     });
                 }
             }
-            OwnerKind::Preview | OwnerKind::PreviewFrame | OwnerKind::Probe => {
+            OwnerKind::DesktopFrame
+            | OwnerKind::Preview
+            | OwnerKind::PreviewFrame
+            | OwnerKind::Probe => {
                 if request.targets != 0 {
                     return Err(BudgetRejection {
                         quota: "request_shape",
@@ -504,19 +526,21 @@ impl BudgetCoordinator {
                 }
             }
         }
-        if request.owner == OwnerKind::PreviewFrame
-            && (request.contexts != 0
-                || request.decoders != 0
-                || request.decode_pixel_rate != 0
-                || request.output_pixel_rate != 0
-                || request.prepare_tasks != 0)
+        if matches!(
+            request.owner,
+            OwnerKind::PreviewFrame | OwnerKind::DesktopFrame
+        ) && (request.contexts != 0
+            || request.decoders != 0
+            || request.decode_pixel_rate != 0
+            || request.output_pixel_rate != 0
+            || request.prepare_tasks != 0)
         {
             return Err(Ledger::reject(
                 "request_shape",
                 0,
                 0,
                 1,
-                "静态预览帧只能持有位图和采集工作区",
+                "静态交接帧只能持有位图和采集工作区",
             ));
         }
         if request.owner == OwnerKind::Probe && request.output_pixel_rate != 0 {

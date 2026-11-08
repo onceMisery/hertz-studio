@@ -21,10 +21,21 @@ async function main() {
       };
       const cancel = window.cancelAnimationFrame.bind(window);
       window.cancelAnimationFrame = id => { f.rafCancels += 1; return cancel(id); };
+      const listeners = [];
+      let frameId = 0;
+      f.frame = () => ({ version: 1, frameId: frameId++, sampledAtMs: performance.now(),
+        playing: document.body.classList.contains('is-playing'), reduced: !!f.reduced,
+        documentHidden: !!f.hidden, stageVisible: !f.hidden && !f.drawerClosed, tier: f.tier,
+        mediaEpoch: 0, mediaTrackId: null, mediaPositionMs: 0,
+        positionAnchorRevision: 0, positionDiscontinuityRevision: 0,
+        spectrum: null, spectrumRevision: 0, spectrumReceivedAtMs: null, spectrumAvailable: false });
+      f.notify = () => listeners.slice().forEach(listener => listener(f.frame()));
       window.Stage = {
         tier: () => f.tier, isHidden: () => f.hidden, isStageVisible: () => !f.hidden && !f.drawerClosed,
         presentation: () => ({ reduced: !!f.reduced }), spectrum: () => [], kick() {},
-        gate(name, fps, tick) { f.gateAdds += 1; f.gate = { fps, tick }; },
+        frameState: () => f.frame(),
+        onFrameState(listener) { listeners.push(listener); return () => listeners.splice(listeners.indexOf(listener), 1); },
+        gate(name, fps, tick) { f.gateAdds += 1; f.gate = { fps, tick: dt => { f.notify(); tick(dt, f.frame()); } }; },
         removeGate() { f.gateRemoves += 1; }
       };
     });
@@ -42,7 +53,7 @@ async function main() {
     const shading = await page.evaluate(() => {
       const canvas = document.createElement('canvas'); document.body.append(canvas);
       const view = { canvas, w: 640, h: 480, cx: 320, cy: 240, fade0: 200, fade1: 280 };
-      const renderer = ParticleGL.create(); renderer.mount(view); renderer.resize(view);
+      const renderer = ParticleGL.create(); renderer.mount(view); renderer.resize(view, { tier: 0, dpr: 1 });
       renderer.setColors('255,255,255', '255,255,255');
       const random = Math.random; let index = 0;
       const values = [0.15, 0.5, 0.85].flatMap(y => [(1.06 - y) / 1.12, 1, 0, 1, 0.5]);
@@ -63,7 +74,7 @@ async function main() {
       const air = read();
       frame.t = 0; frame.bands[3] = 0;
       view.fade1 = -1; const uniform = read();
-      fixture.tier = 2; renderer.resize(view);
+      fixture.tier = 2; renderer.resize(view, { tier: 2, dpr: 1.35 });
       const size = [canvas.width, canvas.height];
       renderer.dispose(); canvas.remove(); fixture.tier = 0;
       return { dimmed, air, uniform, size };
@@ -78,7 +89,7 @@ async function main() {
     const continuity = await page.evaluate(() => {
       const canvas = document.createElement('canvas'); document.body.append(canvas);
       const view = { canvas, w: 640, h: 480, cx: 320, cy: 240, fade0: -1, fade1: -1 };
-      const renderer = ParticleGL.create(); renderer.mount(view); renderer.resize(view);
+      const renderer = ParticleGL.create(); renderer.mount(view); renderer.resize(view, { tier: 0, dpr: 1 });
       renderer.setColors('255,255,255', '255,255,255');
       const random = Math.random;
       try { Math.random = () => 0.5; renderer.setCount(1); } finally { Math.random = random; }
@@ -113,6 +124,7 @@ async function main() {
         return draw.call(this, sprite, x, y, w, h);
       };
       try {
+        document.body.classList.add('is-playing');
         return [15, 30].map(fps => {
           time = 100; StageParticles.init(); StageParticles.attach('standard');
           fixture.gate.tick(0); const start = position.y;
@@ -121,6 +133,7 @@ async function main() {
         });
       } finally {
         Math.random = random; performance.now = now; CanvasRenderingContext2D.prototype.drawImage = draw;
+        document.body.classList.remove('is-playing');
       }
     });
     assert.ok(Math.abs(drift[0] - drift[1]) < 0.001, '2D drift depends on elapsed time, not frame count: ' + drift);
@@ -133,10 +146,10 @@ async function main() {
       const gl = document.querySelector('#stage canvas').getContext('webgl2');
       let deleted = 0; const remove = gl.deleteBuffer.bind(gl);
       gl.deleteBuffer = (...args) => { deleted += 1; return remove(...args); };
-      const idle = f.gate.fps(); f.hidden = true; const hidden = f.gate.fps(); f.hidden = false;
-      document.body.classList.add('is-playing'); const playing = f.gate.fps();
-      f.reduced = true; const reduced = f.gate.fps(); f.reduced = false;
-      f.drawerClosed = true; const drawerClosed = f.gate.fps(); f.drawerClosed = false;
+      f.gate.tick(0); const idle = f.gate.fps(); f.hidden = true; f.notify(); const hidden = f.gate.fps(); f.hidden = false;
+      document.body.classList.add('is-playing'); f.notify(); const playing = f.gate.fps();
+      f.reduced = true; f.notify(); f.gate.tick(0); const reduced = f.gate.fps(); f.reduced = false;
+      f.drawerClosed = true; f.notify(); const drawerClosed = f.gate.fps(); f.drawerClosed = false;
       f.gate.tick(16); // Starts the short A/B probe; destroy must cancel it before either measurement.
       StageParticles.destroy();
       const after = { deleted, attached: StageParticles.attached(), renderer: StageParticles.renderer(),
@@ -224,13 +237,14 @@ async function main() {
       assert.equal(result.pending, 0, result.phase + ': renderer replacement cancels pending probe callbacks');
     }
     const initialRipple = await page.evaluate(() => {
-      StageParticles.init(); StageParticles.attach('standard'); fixture.beat();
+      document.body.classList.add('is-playing');
+      StageParticles.init(); StageParticles.attach('standard'); fixture.gate.tick(0); fixture.beat();
       document.querySelector('.stage-ripple.is-live').getAnimations()[0].finish();
-      StageParticles.destroy(); StageParticles.init(); StageParticles.attach('standard'); fixture.beat();
+      StageParticles.destroy(); StageParticles.init(); StageParticles.attach('standard'); fixture.gate.tick(0); fixture.beat();
       return StageParticles.stats().ripples;
     });
     await page.waitForTimeout(60); // Let the already queued old WAAPI finish event be dispatched.
-    const currentRipple = await page.evaluate(() => { const count = StageParticles.stats().ripples; StageParticles.destroy(); return count; });
+    const currentRipple = await page.evaluate(() => { const count = StageParticles.stats().ripples; StageParticles.destroy(); document.body.classList.remove('is-playing'); return count; });
     assert.equal(initialRipple, 1, 'new lifetime starts its own ripple');
     assert.equal(currentRipple, 1, 'queued finish from the old lifetime cannot consume the new ripple');
     await page.addStyleTag({ path: path.join(web, 'stage.css') });

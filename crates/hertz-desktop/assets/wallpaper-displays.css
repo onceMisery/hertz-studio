@@ -1,0 +1,140 @@
+/* SPDX-License-Identifier: MIT */
+.hertz-displays {
+  --hd-line: var(--line, #34342f);
+  --hd-muted: var(--muted, #aaa79c);
+  --hd-accent: var(--accent, #dfdacb);
+  --hd-surface: var(--surface, #1c1c19);
+  --hd-control: var(--control, #272723);
+  color: inherit;
+  min-width: 0;
+  margin: 0 0 28px;
+  padding: 0 0 24px;
+  border-bottom: 1px solid var(--hd-line);
+  text-align: left;
+}
+.hertz-displays *, .hertz-displays *::before, .hertz-displays *::after { box-sizing: border-box; }
+.hertz-displays :where(h2, h3, p, figure) { margin: 0; }
+.hertz-displays .hd-heading, .hertz-displays .hd-editor-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+.hertz-displays .hd-heading-text { min-width: 0; }
+.hertz-displays h2 { font-size: 15px; font-weight: 600; line-height: 1.4; letter-spacing: -.015em; }
+.hertz-displays h3 { color: inherit; font-size: 13px; font-weight: 600; line-height: 1.4; }
+.hertz-displays .hd-hint { color: var(--hd-muted); font-size: 11px; line-height: 1.65; overflow-wrap: anywhere; }
+.hertz-displays .hd-heading-text .hd-hint { margin-top: 4px; font-variant-numeric: tabular-nums; }
+.hertz-displays .hd-button, .hertz-displays .hd-select {
+  min-width: 0;
+  min-height: 36px;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.5;
+  color: inherit;
+  background: var(--hd-control);
+  border: 1px solid #49483f;
+  border-radius: 6px;
+  padding: 7px 10px;
+  transition: transform 140ms cubic-bezier(.22, 1, .36, 1), opacity 140ms cubic-bezier(.22, 1, .36, 1);
+}
+.hertz-displays .hd-button { cursor: pointer; flex: none; }
+.hertz-displays .hd-select { display: block; width: 100%; text-overflow: ellipsis; }
+.hertz-displays .hd-button:hover:not(:disabled), .hertz-displays .hd-select:hover:not(:disabled) { border-color: #8b8472; background: #34342e; }
+.hertz-displays .hd-button:active:not(:disabled), .hertz-displays .hd-group:active:not(:disabled) { transform: scale(.985); }
+.hertz-displays :where(button, select):focus-visible { outline: 2px solid var(--hd-accent); outline-offset: 3px; }
+.hertz-displays :where(button, select):disabled { cursor: default; opacity: .48; }
+.hertz-displays .hd-subtle { border-color: transparent; color: var(--hd-muted); background: transparent; }
+.hertz-displays .hd-subtle:hover:not(:disabled) { color: var(--hd-accent); }
+.hertz-displays .hd-availability { margin-top: 10px; }
+.hertz-displays .hd-notice { margin-top: 12px; padding: 9px 12px; border-left: 2px solid #756e59; background: #25241e; }
+.hertz-displays .hd-attention { color: #e3cda0; }
+.hertz-displays .hd-topology { margin: 16px 0 8px; overflow: hidden; border: 1px solid var(--hd-line); border-radius: 7px; background: #181816; }
+.hertz-displays .hd-topology svg { display: block; width: 100%; height: auto; min-height: 120px; max-height: 230px; }
+.hertz-displays .hd-topology figcaption { padding: 0 14px 12px; font-size: 10px; color: var(--hd-muted); }
+.hertz-displays .hd-screen rect { fill: #22221e; stroke: #59574b; stroke-width: 1; vector-effect: non-scaling-stroke; }
+.hertz-displays .hd-screen.is-selected rect { fill: #37352c; stroke: #c2bba5; stroke-width: 1.5; }
+.hertz-displays .hd-screen.has-conflict rect { stroke: #dac18d; stroke-dasharray: 4 3; }
+.hertz-displays .hd-screen text { fill: var(--hd-accent); font: 12px "Segoe UI", "Microsoft YaHei UI", sans-serif; }
+.hertz-displays .hd-screen .hd-screen-detail { fill: var(--hd-muted); font-size: 10px; font-variant-numeric: tabular-nums; }
+.hertz-displays .hd-topology-empty { display: grid; align-content: center; gap: 6px; min-height: 136px; padding: 22px; }
+.hertz-displays .hd-topology-empty strong { font-size: 13px; font-weight: 500; }
+.hertz-displays .hd-groups { display: grid; min-width: 0; margin-top: 12px; }
+.hertz-displays .hd-group {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  min-height: 65px;
+  margin: 0;
+  padding: 12px 10px 12px 14px;
+  border: 0;
+  border-bottom: 1px solid var(--hd-line);
+  border-left: 2px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: transform 140ms cubic-bezier(.22, 1, .36, 1), opacity 140ms cubic-bezier(.22, 1, .36, 1);
+}
+.hertz-displays .hd-group:hover:not(:disabled) { background: #22221e; border-bottom-color: var(--hd-line); }
+.hertz-displays .hd-group[aria-pressed="true"] { background: #26251f; border-left-color: var(--hd-accent); }
+.hertz-displays .hd-group-content { display: grid; min-width: 0; gap: 3px; }
+.hertz-displays .hd-group-label { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.hertz-displays .hd-group-label strong { font-size: 12px; font-weight: 600; }
+.hertz-displays .hd-mode-label { color: var(--hd-muted); font-size: 10px; }
+.hertz-displays .hd-group-members { color: var(--hd-muted); font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; }
+.hertz-displays .hd-group-status { color: var(--hd-muted); font-size: 10px; line-height: 1.5; white-space: nowrap; }
+.hertz-displays .hd-group-status.hd-attention { color: #e3cda0; }
+.hertz-displays .hd-group[aria-pressed="true"] .hd-group-status:not(.hd-attention) { color: var(--hd-accent); }
+.hertz-displays .hd-editor { min-width: 0; padding: 18px 0 0; }
+.hertz-displays .hd-editor-heading { margin-bottom: 12px; }
+.hertz-displays .hd-field { display: grid; gap: 6px; min-width: 0; margin: 0; }
+.hertz-displays .hd-label { color: var(--hd-accent); font-size: 11px; line-height: 1.5; }
+.hertz-displays .hd-field + .hd-hint { margin-top: 7px; }
+.hertz-displays .hd-capability-note { margin-top: 8px; }
+.hertz-displays .hd-members { margin-top: 16px; }
+.hertz-displays .hd-member { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 6px 10px; padding: 12px 0; border-top: 1px solid var(--hd-line); }
+.hertz-displays .hd-member > .hd-field { grid-column: 1; }
+.hertz-displays .hd-member > .hd-hint { grid-column: 1 / -1; grid-row: 2; margin: 0; }
+.hertz-displays .hd-member > .hd-button { grid-column: 2; grid-row: 1; }
+.hertz-displays .hd-select[aria-invalid="true"] { border-color: #978158; }
+.hertz-displays .hd-members + .hd-button { margin-top: 2px; }
+.hertz-displays .hd-editor > .hd-button + .hd-hint { margin-top: 7px; }
+.hertz-displays .hd-property-note { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--hd-line); }
+.hertz-displays .hd-runtime { margin-top: 12px; color: var(--hd-accent); font-variant-numeric: tabular-nums; }
+.hertz-displays .hd-message:not(:empty) { margin-top: 12px; }
+.hertz-displays .hd-loading { position: relative; display: grid; gap: 12px; padding: 4px 0 8px; }
+.hertz-displays .hd-loading-label { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.hertz-displays .hd-skeleton { border-radius: 4px; background: #2c2b25; animation: hd-loading 1.6s ease-in-out infinite alternate; }
+.hertz-displays .hd-skeleton-title { width: 38%; height: 24px; margin-bottom: 4px; }
+.hertz-displays .hd-skeleton-topology { height: 150px; }
+.hertz-displays .hd-skeleton-row { height: 44px; }
+@keyframes hd-loading { from { opacity: .45; } to { opacity: .8; } }
+@media (max-width: 767px) {
+  .hertz-displays { margin-bottom: 24px; }
+  .hertz-displays .hd-topology { margin-top: 14px; }
+  .hertz-displays .hd-button, .hertz-displays .hd-select { min-height: 40px; }
+  .hertz-displays .hd-member { grid-template-columns: minmax(0, 1fr); }
+  .hertz-displays .hd-member > .hd-button { grid-column: 1; grid-row: 3; justify-self: start; }
+  .hertz-displays .hd-group { padding-left: 10px; }
+}
+@media (max-width: 380px) {
+  .hertz-displays .hd-heading { align-items: start; flex-wrap: wrap; }
+  .hertz-displays .hd-heading > .hd-button { width: 100%; }
+  .hertz-displays .hd-group { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+  .hertz-displays .hd-group-status { white-space: normal; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .hertz-displays :where(.hd-button, .hd-select, .hd-group) { transition: none; }
+  .hertz-displays .hd-skeleton { animation: none; opacity: .65; }
+}
+@media (forced-colors: active) {
+  .hertz-displays .hd-screen rect { fill: Canvas; stroke: CanvasText; }
+  .hertz-displays .hd-screen.is-selected rect { stroke: Highlight; stroke-width: 3; }
+  .hertz-displays .hd-screen text { fill: CanvasText; }
+  .hertz-displays .hd-group[aria-pressed="true"] { border-left-color: Highlight; }
+}

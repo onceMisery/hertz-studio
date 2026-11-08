@@ -53,6 +53,7 @@ impl FileLock {
             .read(true)
             .write(true)
             .share_mode(0)
+            .custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT)
             .open(directory.join("config.commit.lock"))
             .map_err(|error| {
                 if matches!(error.raw_os_error(), Some(32 | 33)) {
@@ -61,6 +62,12 @@ impl FileLock {
                     anyhow::Error::new(error).context("取得配置提交锁")
                 }
             })?;
+        let metadata = file.metadata()?;
+        crate::root_owner::ordinary(&metadata)?;
+        anyhow::ensure!(
+            metadata.is_file(),
+            "config_lock_path: expected regular file"
+        );
         Ok(Self { _file: file })
     }
 }

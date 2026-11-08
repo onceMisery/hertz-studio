@@ -50,6 +50,59 @@ fn req(owner: OwnerKind, session: &str) -> BudgetRequest {
 }
 
 #[test]
+fn four_desktops_can_keep_bounded_handoff_frames_without_creating_extra_renderers() {
+    let budget = BudgetCoordinator::new();
+    for index in 0..4 {
+        budget
+            .grant(&req(OwnerKind::Desktop, &format!("desktop-{index}")))
+            .unwrap();
+    }
+    let mut frames = Vec::new();
+    for index in 0..4 {
+        let mut request = req(OwnerKind::DesktopFrame, &format!("frame-{index}"));
+        request.cpu_bytes = 1024;
+        request.gpu_bytes = 4096;
+        frames.push(budget.grant(&request).unwrap());
+    }
+    let usage = budget.usage();
+    assert_eq!(
+        (
+            usage.targets,
+            usage.desktop_frames,
+            usage.contexts,
+            usage.decoder_slots
+        ),
+        (4, 4, 0, 0)
+    );
+    assert_eq!((usage.cpu_bytes, usage.gpu_bytes), (4096, 16384));
+    assert_eq!(
+        budget
+            .grant(&req(OwnerKind::Desktop, "fifth-target"))
+            .unwrap_err()
+            .quota,
+        "presentation_targets"
+    );
+    let frame = req(OwnerKind::DesktopFrame, "fifth-frame");
+    assert_eq!(budget.grant(&frame).unwrap_err().quota, "desktop_frames");
+    budget.release(frames[0], "frame-0", 1).unwrap();
+    assert_eq!(budget.grant(&frame).unwrap_err().quota, "desktop_frames");
+    budget.confirm_exit(frames[0], "frame-0", 1).unwrap();
+    budget.grant(&frame).unwrap();
+    for dimension in 0..6 {
+        let mut invalid = req(OwnerKind::DesktopFrame, "invalid-frame");
+        match dimension {
+            0 => invalid.targets = 1,
+            1 => invalid.contexts = 1,
+            2 => invalid.decoders = 1,
+            3 => invalid.decode_pixel_rate = 1,
+            4 => invalid.output_pixel_rate = 1,
+            _ => invalid.prepare_tasks = 1,
+        }
+        assert_eq!(budget.grant(&invalid).unwrap_err().quota, "request_shape");
+    }
+}
+
+#[test]
 fn image_workspace_is_separate_bounded_and_held_until_exit() {
     use super::MAX_PREPARE_CPU_BYTES;
     let budget = BudgetCoordinator::new();

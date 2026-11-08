@@ -1,5 +1,52 @@
 # HertzDesktop 共享宿主设计
 
+## 2026-11-08 R2 独立退出验证范围
+
+单项退出已通过原功能/配置owner实现：先停止本次运行，再尝试保存该项`enabled=false`；失败保留本次停止并显示偏好未保存。独立组件菜单分别为“退出桌面歌词”“退出桌面壁纸”“退出桌面组件”；管理通道`quit`仍退出整个组件，歌词页面的内部旧`quit`事件只表示退出该页面所属歌词功能。两项停止后仍等待设置/Mini及原延迟保存结束，再走原宿主关闭路径；内嵌形态仅关闭桌面宿主，主播放器保持。
+
+R2的[五场原生退出/保存失败/Mini核验](../output/a10-native-feature-exit-fixed-r2-20261108/native-1794081018844/verification.json)、[两场可见未保存状态](../output/a10-native-feature-exit-ui-r2-20261108/native-1794081689079/verification.json)及[六组Standard/Full HTTP/真实最低与当前PluginHost绑定](../output/a10-r2-paired-matrix-20261108/verification.json)已有分项证据。[同候选50轮](../output/a10-native-lifecycle-r2-cdp-detach-20261108/native-1794083437946/verification.json)在管理退出前断开CDP观察者，352条OS身份自然释放，显式GC后保留1文档/226节点/72监听器；连接CDP时的30秒超时失败仍保留，未证明单一因果，也未改退出owner或放宽限额。
+
+上述证据绑定728项生产端/199项组件和build `741a2da5…`，不覆盖当前共享树所有改动或完整内嵌托盘旅程。播放器两种实际托盘退出顺序与重开、DBX完整工作台/并行功能、其它DPI/K、正常heap/整机因果资源及真实长稳仍开放；逐项范围见[八项修复核对](aegis/work/2026-11-08-desktop-feature-exit/91-requirement-audit.md)。
+
+## 2026-11-05 进程模型更新：桌面歌词回到播放器进程内
+
+独立形态（HertzStudio 播放器）**不再启动 `hertz-desktop.exe`**：`crates/hertz-desktop` 改为「库 + 独立 exe 薄壳」，播放器经 `crates/hertz-studio/src/desktop_host.rs` 在**本进程**调用 `hertz_desktop::start_embedded()`，直接创建歌词窗口与「桌面歌词与壁纸」设置窗口。命令走进程内 `mpsc` 进宿主的 tao 事件循环，复用同一个 `handle_pipe_request` 业务分派；命名管理管道只属于独立 exe（原生回归脚本仍直接 spawn 它），播放器侧不再有 `Command::new` 或 `management::request`，也不再有「启动 exe → sleep → 补发命令」。
+
+启动、托盘与退出统一归播放器：
+
+| 环节 | 唯一 owner |
+| --- | --- |
+| 启动 | `desktop_host::ensure_started`；冷启动如实回 `desktop_not_running`，UI 的 launch 入口在同一进程拉起宿主并直接开窗 |
+| 托盘 | `--window` 时 `set_player_tray(true)`：宿主不建第二个图标、不抢占进程级菜单/托盘事件处理器；原宿主托盘动作并入播放器托盘 |
+| 开机启动 | 注册表写播放器 exe（带 `--window` / `--data-dir`），播放器启动时按该偏好拉起进程内宿主 |
+| 退出 | 原生托盘/页内/HTTP 退出先经过唯一确认与保存守卫，取消保留桌面宿主；批准后与 Ctrl-C 同走服务清理链中的 `desktop_host::shutdown()`，再释放房间/音频；见[主窗口生命周期](main-window-lifecycle.md) |
+
+实现要点：内嵌事件循环用 `with_any_thread(true)` + `run_return`——tao 的 `run()` 在 Windows 收尾会 `process::exit`，会把整个播放器带走；独立 exe 仍用 `run()`。窗口类与消息窗口改为进程级单例、事件接收方随宿主换，宿主因此可反复启停。歌词/设置页资产、草稿、revision、来源域与配置提交逻辑逐字复用，已修改的歌词样式与设置功能、使用效果不变。
+
+Windows 主窗口与桌面宿主的 Tao 循环统一为 `EventLoop<()>`，所有子窗口也使用 `EventLoopWindowTarget<()>`。Tao 0.37.1 按进程注册窗口类，类回调却绑定事件泛型；两个循环使用不同 `UserEvent` 时，后建窗口会进入先注册的回调，导致事件数据误读和崩溃。`native_events.rs` 将各循环的业务事件保留在独立的类型化 `mpsc` 队列中，Tao 只发送 unit 唤醒；发送与取出由同一短锁保证顺序，一次唤醒消费一个事件，原生唤醒失败时返回原事件。非业务窗口事件通过 `map_nonuser_event` 原样转交，保留 DPI 等借用事件的生命周期。
+
+**DBX 插件形态不受此改动影响**：插件侧车没有原生窗口，仍按[桌面组件分发](./desktop-component-install.md)使用可选安装的组件及其管理 v2 协议；下文该形态的既有结论继续有效。
+
+静态契约：`node scripts/check-desktop-in-process.js`（已接入 `check-frontend.js`）。
+
+2026-11-06：独立主窗口的 Windows 系统媒体控制绑定主窗口 HWND，直接消费同进程服务的曲目和播控投影；主 WebView 与旁开浏览器依据只读能力接口让出 MediaSession。隐藏或页面离场后，系统媒体动作仍走既有本地/房间播放所有者。DBX 不建立此原生会话，详见[原生系统媒体实施记录](native-system-media.md)。
+
+### 主程序内联歌词设置
+
+独立播放器的歌词设置使用已有 `POST /v1/desktop/control`。以下窄命令按需初始化进程内宿主，不打开设置中心、不调用定位；已保存 `enabled=false` 的歌词保持关闭。业务结果返回 HTTP 200 的 `{ok, revision, lyricsConfig, pendingSave, canLock, positionEditing, positionOwned, positionLeaseMs, runtime}`；失败另含 `error` 与 `message`，并带当前快照，前端保留自己的草稿。宿主初始化等基础设施失败仍返回既有 HTTP 错误信封。首个命令允许 55 秒等待，覆盖 30 秒初始化与 20 秒命令期限。
+
+| command | value | 行为 |
+| --- | --- | --- |
+| `lyrics-settings` | 可选 `{owner}` | 读取完整歌词配置、revision 与实际显示/锁定状态；匹配的位置会话续约 |
+| `lyrics-apply` | `{expectedRevision, lyrics}` | `lyrics` 为从快照复制的完整配置；仅提交歌词并增加 revision |
+| `lyrics-position-begin` | `{expectedRevision, owner}` | 临时显示并解锁歌词，以便拖动；同 owner 重复调用只续约 |
+| `lyrics-position-done` | `{owner}` | 只保存 `anchorX`、`anchorY`、`monitor`，恢复原启用、锁定与隐藏状态 |
+| `lyrics-position-cancel` | `{owner}` | 恢复调整前设置与位置，不增加 revision |
+
+歌词提交拒绝旧 revision、尚未落盘的样式条修改和活动位置编辑。落盘成功后同步原生锁定、歌词页面、窗口位置与可见性、小窗已唱色和托盘，再通知原生设置中心；壁纸配置、显示组、预览和原生中心草稿均不重建或清空，旧草稿按 revision 正常冲突。用户从停用切换为启用时清除运行期隐藏标记；全屏、会话、显示器和无内容等策略仍按实际状态决定可见性。常见错误码为 `revision_conflict`、`position_edit_active`、`invalid_value`、`tray_unavailable`、`save_failed`、`config_busy`。
+
+位置调整的 `owner` 由页面生成随机 UUID，不回显其他页面的 owner。租约为 120 秒，拥有者在调整期间每 10 秒读取一次 `lyrics-settings` 续约；页面离开时应取消，租约到期也自动恢复原设置。快照的 `lyricsConfig` 在调整期间始终是原保存配置，`runtime` 表达临时显示/解锁状态。其他页面和原生设置中心不能完成或取消这一会话；错误码为 `position_owner_mismatch` 或 `position_edit_inactive`。这些新命令只从内嵌 HostAction 入口分派，不扩展 DBX 授权或命名管道管理协议。
+
 2026-10-29 DBX 实施更新：D0–D2 的来源类型、只读命名管道、原生读取、管理与设置流程已实现并通过两阶段审查。D3a 两版同源配套候选已准备；最低 0.6.35 / 当前 0.6.47 的两版插件已验证无组件基础流程、真实定时、关闭重开、原生呈现与正常退出，当前 Full 另验真实在线取词。D3b 的物理媒体键、跨用户/会话、物理桌面恢复及长稳等仍待验，尚不能宣称正式交付。组件分发与完整验收见 [DBX 桌面接入方案](./desktop-dbx.md)及其验证记录；下文独立版的现行发现与 HTTP / WS 合同保持有效。
 
 2026-10-27 UI 更新：统一入口为「桌面歌词与壁纸」，包含壁纸、歌词、运行设置。应用内入口使用现有管理命令 `wallpaper-settings`，可附 `value: {"tab":"lyrics"}`（或 `wallpaper` / `runtime`）；旧命令仍兼容。首次启动仍通过已有桌面启动路由发现匹配组件。
@@ -23,7 +70,7 @@
 | DBX 接入的传输、来源迁移、授权与配套组件分发 | [DBX 桌面接入方案](./desktop-dbx.md)，按阶段实施与验收 |
 | 原播放/队列、音频输出、歌词解析与校准 | 原服务与现行 ADR；桌面方案不重新定义 |
 
-共享组件为可选的 `hertz-desktop.exe`，当前实现位于 `crates/hertz-desktop/`。沿用已有统一管理层；`lyrics` 和 `wallpaper` 各自拥有窗口/controller、策略和资源。歌词独立运行不要求初始化壁纸场景，也不预建第三方 surface 插件框架。
+共享宿主的窗口、配置与来源实现位于 `crates/hertz-desktop/`（库）：独立形态由播放器进程内直接调用（见文首 2026-11-05 更新），DBX 形态仍以可选安装的 `hertz-desktop.exe` 交付。沿用已有统一管理层；`lyrics` 和 `wallpaper` 各自拥有窗口/controller、策略和资源。歌词独立运行不要求初始化壁纸场景，也不预建第三方 surface 插件框架。
 
 单实例按当前 Windows 用户身份约束，并校验交互会话。首版只支持同一用户的一处有效桌面宿主；第二次启动将请求交给既有兼容宿主。同一用户另一会话存在宿主时报告会话冲突，不跨会话抢占、终止或创建竞争配置写者。会话断开时原宿主停止呈现。命名对象的 ACL、会话辨识与重新进入行为由原生验证证明。
 
@@ -31,11 +78,11 @@
 
 ## 2. 播放生命周期的当前事实
 
-当前 `AppState::schedule_depart_pause` / `pause_if_alone` 在最后播放器页面离场后等待 `DEPART_GRACE`（现为 3 秒），复核观众为零后使未完成播放意图失效，并暂停已有播放。这是当前固定策略，未发现可关闭该行为的产品设置。
+当前 `AppState::schedule_depart_pause` / `pause_if_alone` 在最后播放器页面离场后等待 `DEPART_GRACE`（现为 3 秒），复核观众、房间与实际原生 owner。普通浏览器/DBX 没有原生主窗口 owner 时仍使未完成播放意图失效并暂停；2026-11-06 `--window` 增量使用真实主窗口 RAII owner 保持后台播放，页面重载或 WebSocket 断开不再误停，见[后台播放与睡眠定时](native-background-sleep.md)。没有新增假观众或全局永久保活开关。
 
-桌面 feed 不计入播放器观众，也不连接主 `/ws` 来维持观众数。因此关闭最后播放器页面后，**音乐按原策略暂停；歌词按暂停位置冻结，壁纸继续无音乐的环境动画**。保留桌面窗口不意味着继续后台听歌；服务退出时歌词清空，壁纸进入无来源状态。
+桌面 feed 不计入播放器观众，也不连接主 `/ws` 来维持观众数。没有原生主窗口 owner 时，关闭最后播放器页面仍按原策略暂停，歌词按暂停位置冻结，壁纸继续无音乐的环境动画。仅保留歌词/壁纸组件不能保活音乐；有效原生主窗口 owner 才提供新增后台行为。
 
-如果后续要求“关网页仍播放音乐”，应先在原播放 owner 设计显式后台播放策略、入口和恢复语义，再让桌面消费结果。不得靠虚构观众、伪造 `playing` 或新增桌面播放器隐式改变此行为。
+原生 owner 退出时永久关闭本地输出许可并进入既有服务关闭流程；睡眠定时由服务和音频门控协作，独立于页面。不得靠虚构观众、伪造 `playing` 或新增桌面播放器改变普通运行方式的行为。
 
 ## 3. 来源身份与切换
 
@@ -75,6 +122,8 @@
 **当前例外与待修复项：**`crates/hertz-desktop/src/app.rs:1159–1164` 的挂载失败分支仍回写旧配置，因此不能宣称所有分支均已满足保存/运行分离。修复验收须在成功保存新 revision 后注入挂载失败，证明新意图和 revision 保留、运行失败单独可查、旧异步结果不能覆盖；重试使用已保存意图，改回旧值必须显式提交。另测落盘失败仍保持旧配置，不能把两类失败混为“应用失败”。
 
 退出某一功能优先让其安全停下，并尝试持久设置 enabled=false。落盘失败时仍停止本次运行，提示退出偏好未保存、再次启动可能恢复；不能把临时停止报告成永久关闭。两项均停用且设置关闭时退出进程。坏配置保留诊断副本并停用，未来 schema 拒绝改写；修复/迁移不能未经说明启用另一项功能。
+
+2026-11-08 独立退出修复已进入新候选验证：`lyrics-exit` 与 `wallpaper-exit` 各停止自己的功能；`quit` 保留整个桌面组件关闭语义，托盘文案明确区分。回复分别报告 `runtimeStopped`、`saved` 和 `persistenceError`；查询的 `runtimeEnabled`、`sessionStopped`、`exitPreferenceSaved` 与持久 `enabled` 分开。内联歌词快照的 `runtime.enabled` 表示本次实际启用状态，`lyricsConfig.enabled` 保持持久偏好。歌词/壁纸的迟到 HTTP 消息沿各自 stop token 拒绝，DBX 继续使用原 targetProfile/requestId/buildId 准入；两项停用后设置或 Mini 仍持有宿主时保留，自动退出消费事件时重新检查持有者。原生及配套生产端验收状态见[修复工作记录](aegis/work/2026-11-08-desktop-feature-exit/20-checkpoint.md)。
 
 ## 5. 管理协议与恢复
 

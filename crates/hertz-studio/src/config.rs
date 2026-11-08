@@ -191,46 +191,87 @@ pub fn default_data_dir() -> PathBuf {
 ///
 /// 只在「新目录不存在且旧目录存在」时动一次 rename（原子、不复制不删）；两边都在
 /// 说明用户自己开过新目录，不碰。显式设了 `VMUSIC_DATA_DIR` 时同样不碰。
-pub fn migrate_legacy_data_dir() {
+pub fn migrate_legacy_data_dir() -> anyhow::Result<()> {
     if !crate::edition::FULL || std::env::var_os("VMUSIC_DATA_DIR").is_some() {
-        return;
+        return Ok(());
     }
     let Some(base) = dirs::data_local_dir() else {
-        return;
+        return Ok(());
     };
+    migrate_legacy_at(&base)
+}
+
+fn migrate_legacy_at(base: &Path) -> anyhow::Result<()> {
     let legacy = base.join("mmusic-studio");
     let current = base.join("hertz-studio");
     if !legacy.is_dir() || current.exists() {
-        return;
+        return Ok(());
     }
-    match std::fs::rename(&legacy, &current) {
-        Ok(()) => tracing::info!(
-            from = %legacy.display(),
-            to = %current.display(),
-            "数据目录已搬到新名字下"
-        ),
-        // 搬不动就照旧跑：新目录会被创建成空库，但这条必须让人看得见——
-        // 调用点可能在日志订阅器装好之前，所以直接写 stderr（sidecar 的协议
-        // 走 stdout，写 stderr 安全）。
-        Err(error) => {
-            tracing::error!(
-                from = %legacy.display(),
-                to = %current.display(),
-                %error,
-                "数据目录改名失败，请手动把旧目录迁移到新名字"
-            );
-            eprintln!(
-                "[hertz-studio] 数据目录改名失败：{} → {}（{error}），请手动迁移",
-                legacy.display(),
-                current.display()
-            );
+    let _migration = crate::data_owner::LegacyMigrationGuard::acquire(base)?;
+    if !legacy.is_dir() || current.exists() {
+        return Ok(());
+    }
+    // Both the old standalone root and its manual DBX fallback may be active.
+    // Check their kernel locks under the outside namespace gate. Windows cannot
+    // rename the parent with open child handles; cooperating prepare calls hold
+    // the same gate and cannot enter between these checks and rename.
+    let mut owners = Vec::new();
+    for dir in [legacy.clone(), legacy.join("dbx-plugin")] {
+        if !dir.is_dir() {
+            continue;
         }
+        let service = crate::data_owner::DataOwner::acquire(&dir)?;
+        let ai = crate::ai::lock::AiRunnerLock::try_acquire(&dir)?
+            .ok_or_else(|| crate::data_owner::Busy { path: dir.clone() })?;
+        owners.push((service, ai));
     }
+    drop(owners);
+    std::fs::rename(&legacy, &current).map_err(|error| {
+        anyhow::anyhow!(
+            "资料目录迁移失败，保留原资料并停止启动：{} → {}（{error}）",
+            legacy.display(),
+            current.display()
+        )
+    })?;
+    tracing::info!(from = %legacy.display(), to = %current.display(), "数据目录已搬到新名字下");
+    Ok(())
 }
 
 #[cfg(test)]
 mod ai_config_tests {
     use super::*;
+
+    #[test]
+    fn legacy_migration_refuses_live_service_and_keeps_original_data() {
+        let base = std::env::temp_dir().join(format!("hertz-migrate-{}", uuid::Uuid::new_v4()));
+        let legacy = base.join("mmusic-studio");
+        std::fs::create_dir_all(legacy.join("dbx-plugin")).unwrap();
+        std::fs::write(legacy.join("sentinel"), b"original data").unwrap();
+        let old = crate::ai::lock::AiRunnerLock::try_acquire(&legacy)
+            .unwrap()
+            .unwrap();
+        assert!(migrate_legacy_at(&base)
+            .unwrap_err()
+            .downcast_ref::<crate::data_owner::Busy>()
+            .is_some());
+        assert!(!base.join("hertz-studio").exists());
+        drop(old);
+        let plugin = crate::data_owner::DataOwner::acquire(&legacy.join("dbx-plugin")).unwrap();
+        assert!(migrate_legacy_at(&base).is_err());
+        assert_eq!(
+            std::fs::read(legacy.join("sentinel")).unwrap(),
+            b"original data"
+        );
+        drop(plugin);
+        migrate_legacy_at(&base).unwrap();
+        assert!(!legacy.exists());
+        assert_eq!(
+            std::fs::read(base.join("hertz-studio/sentinel")).unwrap(),
+            b"original data"
+        );
+        migrate_legacy_at(&base).unwrap();
+        std::fs::remove_dir_all(base).unwrap();
+    }
 
     #[test]
     fn provider_configuration_defaults_and_roundtrips_without_secrets() {

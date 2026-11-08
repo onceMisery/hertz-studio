@@ -112,6 +112,50 @@ fn doc_fixture_round_trips_with_deflate() {
 }
 
 #[test]
+fn builtin_state_can_be_manifest_only_without_weakening_other_content_contracts() {
+    let mut manifest: serde_json::Value =
+        serde_json::from_str(&manifest_json(FIXTURE_SHA256, 70)).unwrap();
+    manifest["content"] = serde_json::json!({
+        "kind": "builtin", "sceneId": "coast", "stateVersion": 1, "params": {}
+    });
+    manifest["assets"] = serde_json::json!([]);
+    manifest["files"] = serde_json::json!([]);
+    let json = serde_json::to_vec(&manifest).unwrap();
+    let bytes = build_package(&[("manifest.json", json.clone())], false);
+    let package = validate_package(std::io::Cursor::new(bytes)).unwrap();
+    assert!(package.entries.is_empty());
+    assert!(matches!(
+        package.manifest.content,
+        hertz_wallpaper::Content::Builtin { .. }
+    ));
+
+    let extra = build_package(
+        &[("manifest.json", json), ("assets/hidden.bin", vec![1])],
+        false,
+    );
+    assert_code(
+        validate_package(std::io::Cursor::new(extra)).unwrap_err(),
+        "undeclared_file",
+    );
+    for content in [
+        serde_json::json!({"kind": "image", "asset": "background"}),
+        serde_json::json!({"kind": "video", "asset": "background"}),
+        serde_json::json!({"kind": "composition", "document": "content/scene.json"}),
+        serde_json::json!({"kind": "web", "entry": "index.html", "apiVersion": 1}),
+    ] {
+        manifest["content"] = content;
+        let bytes = build_package(
+            &[("manifest.json", serde_json::to_vec(&manifest).unwrap())],
+            false,
+        );
+        assert_code(
+            validate_package(std::io::Cursor::new(bytes)).unwrap_err(),
+            "invalid_manifest",
+        );
+    }
+}
+
+#[test]
 fn hash_and_length_mutations_are_rejected() {
     let png = fixture_png();
     // ① 哈希变异：合法格式但内容不符。

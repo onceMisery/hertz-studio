@@ -49,6 +49,17 @@ pub struct EndpointId(pub u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Revision(pub u64);
 
+/// A room counter cannot advance without reusing an identity or revision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("room counter exhausted; create a new room")]
+pub struct CounterExhausted;
+
+impl CounterExhausted {
+    pub fn code(&self) -> &'static str {
+        "room_counter_exhausted"
+    }
+}
+
 /// 操作键：命名空间 + 会话内单调序号（§8.3）。命名空间隔离播控、聊天等族。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct OperationKey {
@@ -142,6 +153,8 @@ pub enum SubmitError {
     StaleSequence,
     /// 操作键已过期/未知；不得当作新操作执行。
     OperationUnknown,
+    /// Plan, epoch or revision admission would overflow.
+    CounterExhausted,
 }
 
 impl SubmitError {
@@ -152,6 +165,7 @@ impl SubmitError {
             SubmitError::Busy => "room_busy",
             SubmitError::StaleSequence => "operation_stale",
             SubmitError::OperationUnknown => "operation_unknown",
+            SubmitError::CounterExhausted => CounterExhausted.code(),
         }
     }
 }
@@ -167,6 +181,8 @@ pub enum CommitError {
     EffectiveTooSoon,
     /// 已有一个未生效的已发布计划；先等它 applied。
     PreviousPlanPending,
+    /// Publishing would overflow the control revision.
+    CounterExhausted,
 }
 
 impl CommitError {
@@ -176,6 +192,7 @@ impl CommitError {
             CommitError::NotReady => "no_ready_endpoint",
             CommitError::EffectiveTooSoon => "effective_too_soon",
             CommitError::PreviousPlanPending => "previous_plan_pending",
+            CommitError::CounterExhausted => CounterExhausted.code(),
         }
     }
 }
@@ -227,15 +244,26 @@ impl PlanScheduler {
         true
     }
     pub fn fail_preparing(&mut self, plan: PlanId, reason: PlanFailure) -> bool {
+        self.try_fail_preparing(plan, reason).unwrap_or(false)
+    }
+
+    /// Cancel atomically, or preserve the candidate when revision is exhausted.
+    /// The bool wrapper remains available for callers that only need success.
+    pub fn try_fail_preparing(
+        &mut self,
+        plan: PlanId,
+        reason: PlanFailure,
+    ) -> Result<bool, CounterExhausted> {
         if self.preparing.as_ref().is_none_or(|p| p.plan.id != plan) {
-            return false;
+            return Ok(false);
         }
+        let revision = Revision(self.revision.0.checked_add(1).ok_or(CounterExhausted)?);
         let pending = self.preparing.take().unwrap();
         if let Some(record) = self.outcomes.get_mut(&pending.key) {
             record.outcome = Outcome::Failed { reason };
         }
-        self.revision = Revision(self.revision.0.saturating_add(1));
-        true
+        self.revision = revision;
+        Ok(true)
     }
 
     /// Natural track promotions are presentation facts from the renderer.
@@ -351,7 +379,6 @@ impl PlanScheduler {
         }
         // 已发布计划生效后前缀冻结：新命令排在已发布计划之后，从它的目标出发。
         let base = self.pending_target();
-        let plan_epoch = Epoch(self.epoch + 1);
         let target = match command {
             Command::Play => {
                 if base.playing {
@@ -407,9 +434,26 @@ impl PlanScheduler {
                 }
             }
         };
+        // Admission is complete before superseding the previous candidate or
+        // consuming the operation key. Identities and revision never wrap.
+        let plan_epoch = Epoch(
+            self.epoch
+                .checked_add(1)
+                .ok_or(SubmitError::CounterExhausted)?,
+        );
+        let next_plan = self
+            .next_plan
+            .checked_add(1)
+            .ok_or(SubmitError::CounterExhausted)?;
+        let revision = Revision(
+            self.revision
+                .0
+                .checked_add(1)
+                .ok_or(SubmitError::CounterExhausted)?,
+        );
         // 新意图取代旧准备中意图；已发布计划不受影响（不可撤销）。
         let plan_id = PlanId(self.next_plan);
-        self.next_plan += 1;
+        self.next_plan = next_plan;
         if let Some(old) = self.preparing.take() {
             self.outcomes.insert(
                 old.key,
@@ -421,7 +465,7 @@ impl PlanScheduler {
             );
             // 保留原插入序：老键已在 order 里，无需重复入队。
         }
-        self.epoch += 1;
+        self.epoch = plan_epoch.0;
         self.preparing = Some(Preparing {
             key,
             content: command,
@@ -434,7 +478,7 @@ impl PlanScheduler {
             },
             ready: Vec::new(),
         });
-        self.revision = Revision(self.revision.0 + 1);
+        self.revision = revision;
         self.record(now, key, command, Outcome::Preparing { plan: plan_id });
         Ok(Outcome::Preparing { plan: plan_id })
     }
@@ -473,13 +517,19 @@ impl PlanScheduler {
         if effective_at < now.saturating_add(min_lead) {
             return Err(CommitError::EffectiveTooSoon);
         }
+        let revision = Revision(
+            self.revision
+                .0
+                .checked_add(1)
+                .ok_or(CommitError::CounterExhausted)?,
+        );
         let key = p.key;
         let mut plan = p.plan;
         plan.effective_at = effective_at;
         self.preparing = None;
         self.published = Some(plan);
         self.has_started |= plan.target.playing;
-        self.revision = Revision(self.revision.0 + 1);
+        self.revision = revision;
         if let Some(record) = self.outcomes.get_mut(&key) {
             record.outcome = Outcome::Scheduled {
                 plan: plan.id,
@@ -774,9 +824,10 @@ mod tests {
                 .code(),
             "revision_conflict"
         );
-        assert!(room
-            .submit(0, key(2), Some(room.revision()), Command::Pause)
-            .is_ok());
+        assert!(
+            room.submit(0, key(2), Some(room.revision()), Command::Pause)
+                .is_ok()
+        );
     }
 
     /// 一个未生效已发布计划 + 一个准备中意图占满后，第三条命令 busy。
@@ -977,5 +1028,186 @@ mod tests {
         let third = room.preparing().unwrap().epoch;
         assert_ne!(second, third, "暂停换代际");
         assert_eq!(room.pending_target().track, TRACK_B);
+    }
+
+    #[test]
+    fn exhausted_counters_still_allow_noop_failure_and_duplicate_results() {
+        let mut room = PlanScheduler::new(playing(TRACK_A, 0));
+        room.epoch = u64::MAX;
+        room.next_plan = u64::MAX;
+        room.revision = Revision(u64::MAX);
+        assert_eq!(
+            room.submit(0, key(1), None, Command::Play),
+            Ok(Outcome::NoOp)
+        );
+        let stale_seek = Command::Seek {
+            track: TRACK_B,
+            position_ms: 10,
+        };
+        let failed = Outcome::Failed {
+            reason: PlanFailure::StaleTrackInstance,
+        };
+        assert_eq!(room.submit(0, key(2), None, stale_seek), Ok(failed));
+        assert_eq!(
+            room.submit(1, key(1), Some(Revision(1)), Command::Play),
+            Ok(Outcome::NoOp)
+        );
+        assert_eq!(room.submit(1, key(2), None, stale_seek), Ok(failed));
+        assert_eq!(room.revision(), Revision(u64::MAX));
+        assert_eq!(room.epoch(), Epoch(u64::MAX));
+        assert_eq!(room.next_plan, u64::MAX);
+        assert_eq!(room.high_water.get(&(MemberId(7), 1)), Some(&2));
+        assert!(room.preparing().is_none());
+    }
+
+    #[test]
+    fn each_exhausted_submit_counter_preserves_the_existing_candidate_and_key() {
+        for counter in 0..3 {
+            let mut room = PlanScheduler::new(playing(TRACK_A, 0));
+            let accepted = room
+                .submit(0, key(1), None, Command::Next { to: TRACK_B })
+                .unwrap();
+            let candidate = room.preparing().unwrap();
+            room.report_ready(EndpointId(4), candidate.id);
+            match counter {
+                0 => room.epoch = u64::MAX,
+                1 => room.next_plan = u64::MAX,
+                _ => room.revision = Revision(u64::MAX),
+            }
+            let counters = (room.epoch, room.next_plan, room.revision);
+            let order = room.order.clone();
+            let high_water = room.high_water.clone();
+            assert_eq!(
+                room.submit(1, key(2), None, Command::Next { to: TRACK_C }),
+                Err(SubmitError::CounterExhausted),
+                "counter {counter}"
+            );
+            assert_eq!((room.epoch, room.next_plan, room.revision), counters);
+            assert_eq!(room.preparing(), Some(candidate));
+            assert_eq!(room.preparing.as_ref().unwrap().ready, vec![EndpointId(4)]);
+            assert_eq!(room.published(), None);
+            assert_eq!(room.presentation(), playing(TRACK_A, 0));
+            assert_eq!(room.outcomes.len(), 1);
+            assert_eq!(room.outcomes[&key(1)].outcome, accepted);
+            assert!(!room.outcomes.contains_key(&key(2)));
+            assert_eq!(room.order, order);
+            assert_eq!(room.high_water, high_water);
+            assert_eq!(
+                room.submit(2, key(1), None, Command::Next { to: TRACK_B }),
+                Ok(accepted)
+            );
+        }
+        assert_eq!(
+            SubmitError::CounterExhausted.code(),
+            "room_counter_exhausted"
+        );
+    }
+
+    #[test]
+    fn final_plan_and_epoch_are_never_reused_after_cancellation() {
+        let mut room = PlanScheduler::new(playing(TRACK_A, 0));
+        room.next_plan = u64::MAX - 1;
+        room.epoch = u64::MAX - 1;
+        let outcome = room
+            .submit(0, key(1), None, Command::Next { to: TRACK_B })
+            .unwrap();
+        let candidate = room.preparing().unwrap();
+        assert_eq!(candidate.id, PlanId(u64::MAX - 1));
+        assert_eq!(candidate.epoch, Epoch(u64::MAX));
+        assert_eq!(room.next_plan, u64::MAX);
+        assert_eq!(
+            room.try_fail_preparing(candidate.id, PlanFailure::DecodeFailed),
+            Ok(true)
+        );
+        let failed = Outcome::Failed {
+            reason: PlanFailure::DecodeFailed,
+        };
+        assert_ne!(outcome, failed);
+        assert_eq!(
+            room.submit(1, key(1), None, Command::Next { to: TRACK_B }),
+            Ok(failed)
+        );
+        assert_eq!(
+            room.submit(1, key(2), None, Command::Next { to: TRACK_C }),
+            Err(SubmitError::CounterExhausted)
+        );
+        assert_eq!(room.epoch(), Epoch(u64::MAX));
+        assert_eq!(room.next_plan, u64::MAX);
+        assert!(room.preparing().is_none());
+        assert!(!room.outcomes.contains_key(&key(2)));
+    }
+
+    #[test]
+    fn commit_at_exhausted_revision_preserves_candidate_and_initial_start_gate() {
+        let mut room = PlanScheduler::new(stopped(TRACK_A));
+        room.revision = Revision(u64::MAX - 1);
+        let accepted = room.submit(0, key(1), None, Command::Play).unwrap();
+        let candidate = room.preparing().unwrap();
+        room.report_ready(EndpointId(1), candidate.id);
+        assert_eq!(
+            room.commit(0, 100 * MS, 100 * MS),
+            Err(CommitError::CounterExhausted)
+        );
+        assert_eq!(room.preparing(), Some(candidate));
+        assert_eq!(room.preparing.as_ref().unwrap().ready, vec![EndpointId(1)]);
+        assert_eq!(room.published(), None);
+        assert_eq!(room.presentation(), stopped(TRACK_A));
+        assert_eq!(room.revision(), Revision(u64::MAX));
+        assert!(!room.has_started);
+        assert_eq!(room.poll(0, key(1)), Ok(accepted));
+        room.advance(100 * MS);
+        assert_eq!(room.presentation(), stopped(TRACK_A));
+        assert_eq!(
+            CommitError::CounterExhausted.code(),
+            "room_counter_exhausted"
+        );
+    }
+
+    #[test]
+    fn the_final_revision_can_publish_and_apply_without_wrapping() {
+        let mut room = PlanScheduler::new(playing(TRACK_A, 0));
+        room.revision = Revision(u64::MAX - 2);
+        room.submit(0, key(1), None, Command::Pause).unwrap();
+        let plan = room.preparing().unwrap().id;
+        assert_eq!(room.commit(0, 100 * MS, 100 * MS), Ok(plan));
+        assert_eq!(room.revision(), Revision(u64::MAX));
+        room.advance(100 * MS);
+        assert_eq!(room.presentation(), stopped(TRACK_A));
+        assert_eq!(
+            room.poll(100 * MS, key(1)),
+            Ok(Outcome::Applied { plan, at: 100 * MS })
+        );
+        assert_eq!(room.control_changed(), None);
+        assert_eq!(room.revision(), Revision(u64::MAX));
+        assert_eq!(
+            room.submit(100 * MS, key(2), None, Command::Play),
+            Err(SubmitError::CounterExhausted)
+        );
+        room.advance(200 * MS);
+        assert_eq!(
+            room.poll(200 * MS, key(1)),
+            Ok(Outcome::Applied { plan, at: 100 * MS })
+        );
+    }
+
+    #[test]
+    fn cancellation_at_exhausted_revision_is_atomic_in_both_apis() {
+        let mut room = PlanScheduler::new(playing(TRACK_A, 0));
+        room.revision = Revision(u64::MAX - 1);
+        let accepted = room.submit(0, key(1), None, Command::Pause).unwrap();
+        let candidate = room.preparing().unwrap();
+        assert_eq!(
+            room.try_fail_preparing(PlanId(candidate.id.0 + 1), PlanFailure::DecodeFailed),
+            Ok(false)
+        );
+        assert_eq!(
+            room.try_fail_preparing(candidate.id, PlanFailure::DecodeFailed),
+            Err(CounterExhausted)
+        );
+        assert!(!room.fail_preparing(candidate.id, PlanFailure::DecodeFailed));
+        assert_eq!(room.preparing(), Some(candidate));
+        assert_eq!(room.poll(0, key(1)), Ok(accepted));
+        assert_eq!(room.revision(), Revision(u64::MAX));
+        assert_eq!(CounterExhausted.code(), "room_counter_exhausted");
     }
 }

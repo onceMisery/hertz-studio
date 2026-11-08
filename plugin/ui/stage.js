@@ -16,6 +16,13 @@
 (function () {
   'use strict';
 
+  // This document owns admission; each renderer retains its allocation and cleanup authority.
+  var resourceLedger = null;
+  if (window.StageResourceBudget && window.StageResourcePolicy) {
+    try { resourceLedger = StageResourceBudget.create(StageResourcePolicy); }
+    catch (e) { /* Visual entries fail closed; playback and lyrics remain independently usable. */ }
+  }
+
   // 模式合并：逐行（整行亮白）与卡拉OK 渲染管线 90% 重叠，已移除。
   // 老存档里的 'line' 在 setMode 中统一回落到 'karaoke'。
   var BASE_MODES = ['cover', 'karaoke', 'scatter'];
@@ -24,6 +31,7 @@
 
   var el = {};
   var doc = null;          // LyricDocument
+  var lyricContentStatus = 'empty';
   var views = [];          // [{ container, nodes, big }]
   var emotionReadyDoc = null;   // 已绑定摘要的歌词快照（null = 情绪层关闭）
   var emotionCueDoc = null;     // 摘要就绪前暂存的 Cue
@@ -35,8 +43,10 @@
   var playing = false;
   var track = null;
   var mediaEpoch = 0, snapshotTrackId = null;
+  var positionAnchorRevision = 0, positionDiscontinuityRevision = 0;
   function changedMedia() {
     mediaEpoch++;
+    invalidateSpectrum();
     document.dispatchEvent(new CustomEvent('stage:track-changed'));
   }
   var lastCover = null;    // 记住封面，换主题时用它重新取色（retint）
@@ -66,6 +76,12 @@
   // 本地时钟每帧的间隔，用来把 lerp 归一化，掉帧时滚动速度不会变慢
   var lastFrameAt = 0;
   var lastDt = 16.7;
+  var stageFrame = createFrameRecord();
+  var frameBatch = false, frameStatePending = false;
+  var frameStateListeners = [];
+  var lastFrameState = null;
+  var stageDisposers = [], seekCancelTimer = 0;
+  var stageDestroyed = false;
   // 抗回退：只有位置真的退回 1.5s 以上才认账（那是用户 seek），否则维持当前行
   var ROLLBACK_TOL_MS = 1500;
   var guardPos = -1;
@@ -143,9 +159,94 @@
   // -------------------------------------------------------------------------
 
   function currentPos() {
-    var p = playing ? basePos + (now() - clockAt) : basePos;
+    return positionAt(now());
+  }
+
+  function positionAt(t) {
+    var p = playing ? basePos + (t - clockAt) : basePos;
     if (durMs && p > durMs) p = durMs;
     return p < 0 ? 0 : p;
+  }
+
+  // A single record is borrowed by the synchronous gate batch. Readers must
+  // neither retain it nor mutate its spectrum; cold queries copy the record.
+  function createFrameRecord() {
+    return { version: 1, frameId: 0, sampledAtMs: 0,
+      playing: false, reduced: false, documentHidden: false, stageVisible: false, tier: 2,
+      mediaEpoch: 0, mediaTrackId: null, mediaPositionMs: 0,
+      positionAnchorRevision: 0, positionDiscontinuityRevision: 0,
+      spectrum: null, spectrumRevision: 0, spectrumReceivedAtMs: null, spectrumAvailable: false };
+  }
+
+  function fillFrameRecord(record, t) {
+    var age = spectrumReceivedAtMs === null ? -1 : t - spectrumReceivedAtMs;
+    var available = !stageDestroyed && !!(spectrum && spectrum.length && age >= 0 && age < 600);
+    record.sampledAtMs = t;
+    record.playing = playing;
+    record.reduced = reduced || !!(systemMotion && systemMotion.matches);
+    record.documentHidden = hidden || !!document.hidden;
+    record.stageVisible = !stageDestroyed && isStageVisible();
+    record.tier = lowfx ? 0 : tier;
+    record.mediaEpoch = mediaEpoch;
+    record.mediaTrackId = snapshotTrackId;
+    record.mediaPositionMs = positionAt(t);
+    record.positionAnchorRevision = positionAnchorRevision;
+    record.positionDiscontinuityRevision = positionDiscontinuityRevision;
+    record.spectrum = available ? spectrum : null;
+    record.spectrumRevision = spectrumRevision;
+    record.spectrumReceivedAtMs = available ? spectrumReceivedAtMs : null;
+    record.spectrumAvailable = available;
+    return record;
+  }
+
+  function frameState() {
+    var record = fillFrameRecord(createFrameRecord(), now());
+    record.frameId = stageFrame.frameId;
+    return Object.freeze(record);
+  }
+
+  function notifyFrameState(immediate) {
+    // Ordinary controls take effect after the borrowed batch. Hidden/destroy
+    // may immediately withdraw drawing eligibility without rewriting its input.
+    if (frameBatch && !immediate) { frameStatePending = true; return; }
+    frameStatePending = false;
+    var visible = !stageDestroyed && isStageVisible();
+    var effectiveReduced = reduced || !!(systemMotion && systemMotion.matches);
+    var documentHidden = hidden || !!document.hidden;
+    if (lastFrameState && lastFrameState.playing === playing &&
+      lastFrameState.reduced === effectiveReduced && lastFrameState.documentHidden === documentHidden &&
+      lastFrameState.stageVisible === visible && lastFrameState.mediaEpoch === mediaEpoch &&
+      lastFrameState.positionDiscontinuityRevision === positionDiscontinuityRevision) return false;
+    var state = frameState();
+    lastFrameState = state;
+    // Subscription callbacks may unsubscribe or destroy their owner.
+    frameStateListeners.slice().forEach(function (listener) { listener(state); });
+    return true;
+  }
+
+  function onFrameState(listener) {
+    if (typeof listener !== 'function') return function () {};
+    frameStateListeners.push(listener);
+    var subscribed = true;
+    return function () {
+      if (!subscribed) return;
+      subscribed = false;
+      var at = frameStateListeners.indexOf(listener);
+      if (at >= 0) frameStateListeners.splice(at, 1);
+    };
+  }
+
+  function listen(target, type, listener, options) {
+    target.addEventListener(type, listener, options);
+    stageDisposers.push(function () { target.removeEventListener(type, listener, options); });
+  }
+
+  function listenMedia(mql, listener) {
+    if (mql.addEventListener) listen(mql, 'change', listener);
+    else if (mql.addListener) {
+      mql.addListener(listener);
+      stageDisposers.push(function () { mql.removeListener(listener); });
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -267,6 +368,11 @@
 
   function createView(container, big) {
     var view = { container: container, track: null, nodes: [], big: !!big, empty: null };
+    var rowListeners = [];
+    view.clearRowListeners = function () {
+      rowListeners.forEach(function (entry) { entry.node.removeEventListener('click', entry.listener); });
+      rowListeners.length = 0;
+    };
     // 缓存几何：box = 可视高度，lo/hi = 允许的位移区间（首行/末行停在锚点）
     view.box = 0;
     view.lo = 0;
@@ -310,7 +416,7 @@
       };
       // 滚轮直接按增量累加：改写 scrollY 的同时同步 target，让自动跟随从
       // "用户停手的位置"接着走，而不是恢复的瞬间把它猛地抢回去。
-      container.addEventListener('wheel', function (e) {
+      listen(container, 'wheel', function (e) {
         if (!view.track) return;
         yieldToUser();
         view.scrollY = view.clamp(view.scrollY + e.deltaY);
@@ -359,6 +465,7 @@
     };
 
     view.build = function (d) {
+      view.clearRowListeners();
       view.nodes = [];
       view.empty = null;
       view.scrollY = 0;
@@ -378,7 +485,7 @@
       if (!d || !d.lines || !d.lines.length) {
         var hint = document.createElement('div');
         hint.className = 'lyric-empty';
-        hint.textContent = '这首歌没有可用歌词';
+        hint.textContent = lyricContentStatus === 'unsupported' ? '此歌词包含多人声，舞台暂不支持；请使用桌面歌词' : '这首歌没有可用歌词';
         view.track.appendChild(hint);
         view.empty = hint;
         return;
@@ -417,13 +524,15 @@
         }
         // 点歌词跳转：一行歌词就是一个可点击的锚点。顺手解除手动滚动，
         // 否则点了半天视口不跟回去，会让人以为没生效。
-        node.addEventListener('click', function () {
+        var onRowClick = function () {
           // 拖视角时指针也会扫过行，不拦一下会在转完头的瞬间跳歌
           if (container._justDragged) return;
           view.userScrolling = false;
           if (view.userScrollTimer) clearTimeout(view.userScrollTimer);
           emit('seek', line.start_ms);
-        });
+        };
+        node.addEventListener('click', onRowClick);
+        rowListeners.push({ node: node, listener: onRowClick });
         // 每一行自带过渡时长。一句只唱 150ms 的 ad-lib 如果套着 500ms 的入场
         // 过渡，永远到不了目标状态——看起来就是"这行没亮起来"。这个量由行长
         // 决定，是静态的，所以构建时写一次，之后每帧不再碰。
@@ -1175,13 +1284,46 @@
     }
   }
 
-  // 整体销毁：停循环、清帧门。子模块各自的 GL/DOM 资源由自己的 destroy 释放。
+  // 子模块各自的 GL/DOM 资源由自己的 destroy 释放。
   function destroy() {
+    stageDestroyed = true;
+    if (resourceLedger) resourceLedger.close();
+    notifyFrameState(true);
     gates.length = 0;
     if (rafId) { cancelAnimationFrame(rafId); rafId = 0; }
+    stageDisposers.splice(0).forEach(function (dispose) { dispose(); });
+    views.forEach(function (view) {
+      view.clearRowListeners();
+      if (view.userScrollTimer) clearTimeout(view.userScrollTimer);
+      if (view.container) view.container.textContent = '';
+    });
+    views.length = 0;
+    if (seekCancelTimer) { clearTimeout(seekCancelTimer); seekCancelTimer = 0; }
+    seeking = false;
+    activeIdx = -2;
+    guardPos = -1;
+    frameStateListeners.length = 0;
+    lastFrameState = null;
+    frameStatePending = false;
+    lastFrameAt = 0;
+    hzSamples.length = 0;
+    displayHz = 0;
+    fps.frames = 0; fps.since = 0; fps.last = 0; fps.done = false; fps.nextAt = 0; fps.good = 0;
+    systemMotion = null;
+    beatDet = null;
+    energy = 0;
+    beatShown = 0;
+    ringBars.length = 0;
+    if (el.ring) el.ring.textContent = '';
+    invalidateSpectrum();
+    // Release the old spectrum reference without mutating a currently borrowed frame.
+    stageFrame = createFrameRecord();
+    paletteEpoch++;
+    emotionRequestGeneration++;
+    inited = false;
   }
 
-  function runGates(dt) {
+  function runGates(dt, borrowedFrame) {
     for (var i = 0; i < gates.length; i += 1) {
       var g = gates[i];
       var target = g.fpsFn();
@@ -1199,7 +1341,7 @@
       // 在既有帧门边界测实际执行次数与耗时；不增加循环，也不把等待时间当渲染成本。
       var perfStart = typeof HertzPerf !== 'undefined' && HertzPerf.state.enabled ? HertzPerf.now() : null;
       try {
-        g.tickFn(spent);
+        g.tickFn(spent, borrowedFrame);
       } finally {
         if (perfStart !== null && typeof HertzPerf !== 'undefined') HertzPerf.markSince('gate.' + g.name, perfStart);
       }
@@ -1218,7 +1360,7 @@
   function frame() {
     rafId = 0;
     // A WebView may deliver an already queued callback after becoming hidden.
-    if (hidden || document.hidden || window.HertzCapsuleOnly) { lastFrameAt = 0; return; }
+    if (stageDestroyed || hidden || document.hidden || window.HertzCapsuleOnly) { lastFrameAt = 0; return; }
 
     // dt：lerp 要按真实帧间隔归一化，否则 30fps 的机器滚动会慢一半。
     // 标签页切回来时 dt 可能是几千毫秒，截断掉，免得一帧就冲过整段歌词。
@@ -1227,7 +1369,16 @@
     lastDt = frameDt;
     lastFrameAt = t;
 
-    runGates(frameDt);
+    var borrowedFrame = fillFrameRecord(stageFrame, t);
+    borrowedFrame.frameId++;
+    frameBatch = true;
+    try {
+      runGates(frameDt, borrowedFrame);
+    } finally {
+      frameBatch = false;
+      if (frameStatePending) notifyFrameState();
+    }
+    if (stageDestroyed) return;
     // tickLyrics 会把 lastDt 改成歌词门累计间隔；刷新率只采主循环自己的间隔。
     sampleDisplayHz(frameDt);
     sampleFrameRate();
@@ -1281,6 +1432,11 @@
   }
 
   var spectrum = null;
+  var spectrumRevision = 0, spectrumReceivedAtMs = null;
+  function invalidateSpectrum() {
+    spectrum = null;
+    spectrumReceivedAtMs = null;
+  }
   function sampleEnergy() {
     if (!spectrum || !spectrum.length) return 0;
     var sum = 0;
@@ -1294,7 +1450,7 @@
     if (invalidateLyrics !== false) lyricsDirty = true;
     // dock 胶囊实例不渲染舞台：那个 surface 只有窄条一块地方，跑 60fps 是纯浪费。
     // 标记由 app.js 在拿到 bridge context 之后挂到 window（见 HertzCapsuleOnly）。
-    if (rafId || hidden || window.HertzCapsuleOnly) return;
+    if (stageDestroyed || rafId || hidden || window.HertzCapsuleOnly) return;
     // 续帧保留时钟基准；只在真正停机或从隐藏恢复时重置，才能测到真实刷新率。
     rafId = requestAnimationFrame(frame);
   }
@@ -1305,6 +1461,7 @@
   function setHidden(v) {
     if (hidden === v) return;
     hidden = v;
+    notifyFrameState(v);
     lastFrameAt = 0;
     fps.since = 0;
     gates.forEach(function (g) { g.skip = 0; g.wait = 0; });
@@ -1490,14 +1647,11 @@
   // 初始化
   // -------------------------------------------------------------------------
 
-  // init 只允许跑一次：它给侧栏绑的全是一次性监听，而 destroy() 只回收帧门、
-  // **不解绑 DOM**。destroy() → init() 是允许再来一轮的，所以这里必须自己兜住：
-  // 否则第二轮会把同一颗按钮绑上第二个 handler，点一次触发两次。
+  // One listener/observer set per active lifecycle; destroy permits a clean init.
   var inited = false;
 
   function init() {
     if (inited) return;
-    inited = true;
     el.stage = $('stage');
     el.disc = $('cover');
     el.ring = $('disc-ring');
@@ -1506,21 +1660,38 @@
     el.stageTime = $('stage-time');
 
     if (!el.stage) return;
+    inited = true;
+    stageDestroyed = false;
+    stageFrame = createFrameRecord();
+    lastFrameState = null;
+    hidden = !!document.hidden;
 
     readTune();
     mountFxLayers();
 
     systemMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
     reduced = userReduced || systemMotion.matches;
-    var onMotionChange = function () { reduced = userReduced || systemMotion.matches; schedule(); };
-    if (systemMotion.addEventListener) systemMotion.addEventListener('change', onMotionChange);
-    else if (systemMotion.addListener) systemMotion.addListener(onMotionChange);
+    var onMotionChange = function () {
+      reduced = userReduced || systemMotion.matches;
+      notifyFrameState();
+      schedule();
+    };
+    listenMedia(systemMotion, onMotionChange);
     // 窄屏断点跟 CSS 的抽屉规则共用同一个数（style.css：max-width:1240）。
     var narrowMql = window.matchMedia('(max-width: 1240px)');
     narrow = narrowMql.matches;
-    var onNarrowChange = function (e) { narrow = e.matches; };
-    if (narrowMql.addEventListener) narrowMql.addEventListener('change', onNarrowChange);
-    else if (narrowMql.addListener) narrowMql.addListener(onNarrowChange);
+    var onNarrowChange = function (e) {
+      narrow = e.matches;
+      if (notifyFrameState()) schedule();
+    };
+    listenMedia(narrowMql, onNarrowChange);
+    if (window.MutationObserver && document.body) {
+      var classObserver = new MutationObserver(function () {
+        if (notifyFrameState()) schedule();
+      });
+      classObserver.observe(document.body, { attributes: true, attributeFilter: ['class'] });
+      stageDisposers.push(function () { classObserver.disconnect(); });
+    }
     tier = detectTier();
     // 弱机先按降级启动，并且这是本次会话的下限：帧率探针后面测出来够用也不会
     // 把它升回来——升档会让画面突然多出一层效果，比一直朴素着更让人不适。
@@ -1531,24 +1702,27 @@
     paintEnergy();
 
     if (el.stageRange) {
-      el.stageRange.addEventListener('pointerdown', function () { seeking = true; seekPosition = currentPos(); });
-      el.stageRange.addEventListener('input', function () {
+      listen(el.stageRange, 'pointerdown', function () { seeking = true; seekPosition = currentPos(); });
+      listen(el.stageRange, 'input', function () {
         seeking = true;
         seekPosition = Number(el.stageRange.value) || 0;
         paintProgress(seekPosition);
       });
-      el.stageRange.addEventListener('change', function () {
+      listen(el.stageRange, 'change', function () {
         seeking = false;
         emit('seek', Number(el.stageRange.value) || 0);
       });
-      el.stageRange.addEventListener('pointerup', function () { setTimeout(cancelStageSeek, 0); });
-      el.stageRange.addEventListener('pointercancel', cancelStageSeek);
-      el.stageRange.addEventListener('blur', cancelStageSeek);
-      window.addEventListener('blur', cancelStageSeek);
+      listen(el.stageRange, 'pointerup', function () {
+        if (seekCancelTimer) clearTimeout(seekCancelTimer);
+        seekCancelTimer = setTimeout(function () { seekCancelTimer = 0; cancelStageSeek(); }, 0);
+      });
+      listen(el.stageRange, 'pointercancel', cancelStageSeek);
+      listen(el.stageRange, 'blur', cancelStageSeek);
+      listen(window, 'blur', cancelStageSeek);
     }
 
     if (el.modes) {
-      el.modes.addEventListener('click', function (e) {
+      listen(el.modes, 'click', function (e) {
         var b = e.target.closest ? e.target.closest('.stage-mode') : null;
         if (!b) return;
         var m = b.getAttribute('data-mode');
@@ -1557,7 +1731,7 @@
     }
 
     var q = $('stage-queue');
-    if (q) q.addEventListener('click', function () { emit('view', 'queue'); });
+    if (q) listen(q, 'click', function () { emit('view', 'queue'); });
 
     var saved = null;
     try { saved = localStorage.getItem(STORE_KEY); } catch (e) { /* 隐私模式 */ }
@@ -1570,6 +1744,11 @@
     setMode(saved || 'karaoke', { silent: true });
 
     views = [createView($('lyrics'), false)];
+    if (doc) {
+      views[0].build(doc);
+      activeIdx = -2;
+      refresh(true);
+    }
 
     // 节拍检测器（起音 → --beat 包络）。必须在闸门启动前建好。
     beatDet = window.Onset ? Onset.create() : null;
@@ -1581,21 +1760,25 @@
     // 视口变了，缓存的行几何全部作废——尤其是窄屏下舞台变成抽屉、
     // 全屏页从 visibility:hidden 出来的那一刻，clientHeight 从 0 变成真值。
     var relayout = debounce(refreshViewport, 90);
-    window.addEventListener('resize', relayout);
+    stageDisposers.push(relayout.cancel);
+    listen(window, 'resize', relayout);
     if (window.ResizeObserver) {
       views.forEach(function (v) {
-        if (v.container) new ResizeObserver(relayout).observe(v.container);
+        if (!v.container) return;
+        var observer = new ResizeObserver(relayout);
+        observer.observe(v.container);
+        stageDisposers.push(function () { observer.disconnect(); });
       });
     }
 
-    document.addEventListener('visibilitychange', function () {
+    listen(document, 'visibilitychange', function () {
       setHidden(document.hidden);
       if (!document.hidden) relayout();
     });
 
     // 律动幅度是驾驶舱里 JS 读进变量的数值（不落 CSS 变量）：它的初始 emit
     // 在本监听器注册之前，所以这里既监听变更又做一次冷读。
-    document.addEventListener('stagecontrol:change', function (e) {
+    listen(document, 'stagecontrol:change', function (e) {
       if (e.detail && e.detail.beatAmp !== undefined) {
         beatAmp = clamp((Number(e.detail.beatAmp) || 0) / 100, 0, 2);
         schedule();
@@ -1609,15 +1792,18 @@
       }
     }
 
+    notifyFrameState();
     schedule();
   }
 
   function debounce(fn, ms) {
     var timer = 0;
-    return function () {
+    var invoke = function () {
       if (timer) clearTimeout(timer);
-      timer = setTimeout(fn, ms);
+      timer = setTimeout(function () { timer = 0; fn(); }, ms);
     };
+    invoke.cancel = function () { if (timer) clearTimeout(timer); timer = 0; };
+    return invoke;
   }
 
   // -------------------------------------------------------------------------
@@ -1626,6 +1812,11 @@
 
   window.Stage = {
     init: init,
+    destroy: destroy,
+    onFrameState: onFrameState,
+    resources: function () { return resourceLedger; },
+    // Cold read only: never advances the lifecycle frame id or the gates.
+    frameState: frameState,
     removeGate: removeGate,
     // 子系统自己的目标帧率从 0 变正（如背景从主题切到弧形墙且正暂停）时，
     // 靠它冷启动循环；循环已在转时是空操作，没人想要帧时帧循环会自行停下。
@@ -1634,6 +1825,7 @@
     setReducedMotion: function (v) {
       userReduced = !!v;
       reduced = userReduced || !!(systemMotion && systemMotion.matches);
+      notifyFrameState();
       schedule();
     },
     setCoverFollow: function (value) {
@@ -1656,6 +1848,7 @@
         el.disc.classList.toggle('is-empty', !coverUrl);
       }
       syncCoverAppearance();
+      notifyFrameState();
       schedule();
     },
 
@@ -1669,16 +1862,24 @@
       // available (null backend, or loading streams). Keep the same track's known length.
       durMs = snap.duration_ms || (track && track.id === snap.track_id && track.duration_ms) || 0;
       var nextPlaying = !!snap.playing;
+      var playingChanged = playing !== nextPlaying;
       // 服务端位置只在「明显不一致」时才覆盖本地时钟，避免每次推送都跳一下
       var srv = snap.position_ms || 0;
-      if (!playing || playing !== nextPlaying || (options && options.seek) || Math.abs(srv - currentPos()) > 700 ||
+      var explicitSeek = !!(options && options.seek);
+      var positionCorrection = playing && !playingChanged && !explicitSeek && Math.abs(srv - currentPos()) > 700;
+      if (!playing || playingChanged || explicitSeek || positionCorrection ||
         (snap.track_id && (!track || track.id !== snap.track_id))) {
+        positionAnchorRevision++;
+        if (explicitSeek || (!trackChanged && (positionCorrection ||
+          (!playing && !nextPlaying && previousPosition !== srv)))) {
+          positionDiscontinuityRevision++;
+          invalidateSpectrum();
+        }
         basePos = srv;
         clockAt = now();
         // 这是一次真跳变（换曲 / seek 生效），抗回退的基准要让出去
         guardPos = -1;
       }
-      var playingChanged = playing !== nextPlaying;
       playing = nextPlaying;
       if (document.body.classList.contains('is-playing') !== playing) document.body.classList.toggle('is-playing', playing);
       // 播放态跳变沿即时广播：舞台舱按钮/状态不依赖 8fps 门控下一帧才翻面，
@@ -1686,6 +1887,7 @@
       if (playingChanged) {
         document.dispatchEvent(new CustomEvent('stage:playing-changed', { detail: { playing: playing } }));
       }
+      notifyFrameState();
       var visualChanged = trackChanged || playingChanged || previousDuration !== durMs ||
         previousPosition !== basePos || previousVolume !== playbackVolume || (options && options.seek);
       if (playing || visualChanged) paintProgress(seeking ? seekPosition : currentPos());
@@ -1696,10 +1898,14 @@
     // 频谱只存下来，不在这里写任何样式。服务端按 33ms 一帧推 64 段，
     // 直接在回调里刷 CSS 等于绕过帧门——写 CSS 的活儿全部交给 energy 门。
     setSpectrum: function (bands) {
+      spectrumRevision++;
       spectrum = bands && bands.length ? bands : null;
+      spectrumReceivedAtMs = spectrum ? now() : null;
     },
 
     setLyrics: function (d) {
+      lyricContentStatus = d && Array.isArray(d.lines) && d.lines.some(function (line) { return !!line.vocal; }) ? 'unsupported' : d && d.lines && d.lines.length ? 'ready' : 'empty';
+      if (lyricContentStatus === 'unsupported') d = null;
       emotionRequestGeneration += 1;
       var previousEmotionDoc = emotionReadyDoc;
       var emotion = emotionApi();
@@ -1771,6 +1977,7 @@
         reduced: reduced || !!(systemMotion && systemMotion.matches) };
     },
     lyricTokens: tokensFor,
+    lyricStatus: function () { return lyricContentStatus; },
     // 本曲是否拿到真实的逐字时间轴。false 时逐字动效由字数估算（见 tokensFor），
     // 舞台据此提示用户，避免把估算当成真实唱词时间。
     hasWordLevelTiming: hasWordLevelTiming,

@@ -11,10 +11,12 @@ pub(super) struct Handoff {
     pub(super) configuration: config::WallpaperConfig,
     pub(super) applied_revision: Option<u64>,
     pub(super) runtime_builtin: Option<crate::wallpaper::config::BuiltinState>,
+    pub(super) runtime_reference: Option<crate::wallpaper::playlist::FixedVersion>,
     monitor: native::WallpaperMonitor,
     preview_owner: Option<HWND>,
     retiring: bool,
     pub(super) reveal: Option<(u64, Instant)>,
+    pub(super) pause_retained: bool,
 }
 impl Handoff {
     pub(super) fn begin(
@@ -58,10 +60,12 @@ impl Handoff {
                 configuration: surface.configuration.clone(),
                 applied_revision: surface.session.diagnostics().applied_revision,
                 runtime_builtin: surface.runtime_builtin.clone(),
+                runtime_reference: surface.runtime_reference.clone(),
                 monitor,
                 preview_owner,
                 retiring: false,
                 reveal: None,
+                pause_retained: false,
             },
             script,
         ))
@@ -92,7 +96,7 @@ impl Handoff {
             "targetWidth":self.monitor.width,"targetHeight":self.monitor.height,"runtimeBuiltin":self.runtime_builtin,
             "hwnd":self.window.as_ref().map(|window| window.hwnd() as usize),"visible":self.window.as_ref().is_some_and(|window| window.is_visible()),
             "presentations":self.window.as_ref().map(|window| window.presentations()),"paints":self.window.as_ref().map(|window| window.paints()),
-            "bgraSha256":self.window.as_ref().map(|window| window.digest()),"revealGeneration":self.reveal.map(|(generation,_)| generation)})
+            "bgraSha256":self.window.as_ref().map(|window| window.digest()),"revealGeneration":self.reveal.map(|(generation,_)| generation),"pauseRetained":self.pause_retained})
     }
 
     pub(super) fn retire(&mut self) {
@@ -118,8 +122,10 @@ impl App {
     /// message storage have returned before any global workspace capacity shrinks.
     pub(super) fn reap_handoff_workspaces(&mut self) {
         for handoff in self
-            .wallpaper_handoff
-            .iter_mut()
+            .desktop
+            .runtimes
+            .values_mut()
+            .filter_map(|desktop| desktop.handoff.as_mut())
             .chain(
                 self.preview
                     .iter_mut()
@@ -139,6 +145,25 @@ impl App {
 
     /// Returns true only when there is no live old renderer to overlap the new one.
     pub(super) fn prepare_wallpaper_handoff(&mut self) -> Result<bool> {
+        // Capture workspaces are temporary peaks. Serialize their actual exit,
+        // while independent retained bitmaps continue to hold their full bytes.
+        // This lets four mirrors switch without four simultaneous 64 MiB tasks.
+        if self.desktop.handoff.is_none()
+            && (self
+                .desktop
+                .runtimes
+                .values()
+                .filter_map(|runtime| runtime.handoff.as_ref())
+                .chain(self.wallpaper_handoff_retiring.iter())
+                .any(|handoff| !handoff.hold.workspace_released())
+                || self
+                    .preview
+                    .as_ref()
+                    .and_then(|preview| preview.frame.as_ref())
+                    .is_some_and(|handoff| !handoff.hold.workspace_released()))
+        {
+            return Ok(false);
+        }
         if self
             .wallpaper_handoff_retiring
             .iter()
@@ -147,59 +172,72 @@ impl App {
             return Ok(false);
         }
         if self
-            .wallpaper_handoff
+            .desktop
+            .handoff
             .as_ref()
             .is_some_and(|handoff| handoff.window.is_some())
-            && self.wallpaper.is_some()
+            && self.desktop.surface.is_some()
         {
             // An intent can supersede a candidate between promotion and its reveal
             // receipt. Keep the already-visible bitmap and retire that renderer too.
-            if let Some(handoff) = &mut self.wallpaper_handoff {
+            if let Some(handoff) = &mut self.desktop.handoff {
                 handoff.reveal = None;
             }
             self.retire_wallpaper_surface();
-            self.wallpaper_page_ready = false;
-            self.wallpaper_visible = false;
+            self.desktop.page_ready = false;
+            self.desktop.visible = false;
             return Ok(false);
         }
-        if let Some(handoff) = &self.wallpaper_handoff {
+        if let Some(handoff) = &self.desktop.handoff {
             return Ok(handoff.window.is_some() && handoff.hold.source_has_closed());
         }
-        let Some(surface) = self.wallpaper.as_ref() else {
+        let Some(surface) = self.desktop.surface.as_ref() else {
             return Ok(true);
         };
         if !surface.first_frame_ready() {
             self.retire_wallpaper_surface();
-            self.wallpaper_page_ready = false;
-            self.wallpaper_visible = false;
+            self.desktop.page_ready = false;
+            self.desktop.visible = false;
             return Ok(false);
         }
         let (handoff, script) = Handoff::begin(surface, None)?;
-        self.wallpaper_handoff = Some(handoff);
         surface.eval(&script);
+        self.desktop.handoff = Some(handoff);
         Ok(false)
     }
 
     fn fail_wallpaper_capture(&mut self, error: String) {
-        if let Some(mut handoff) = self.wallpaper_handoff.take() {
+        let pause_retained = self
+            .desktop
+            .handoff
+            .as_ref()
+            .is_some_and(|handoff| handoff.pause_retained);
+        if let Some(mut handoff) = self.desktop.handoff.take() {
             handoff.retire();
             self.wallpaper_handoff_retiring.push(handoff);
         }
-        self.wallpaper_prepared = None;
-        self.wallpaper_media_failed_revision = Some(self.config.revision);
-        self.wallpaper_apply_error = Some(error);
-        self.send_settings_status(self.wallpaper_apply_error.as_deref(), None);
+        if !pause_retained {
+            self.desktop.prepared = None;
+            self.desktop.failed_revision = Some(self.desktop.desired_revision);
+        } else {
+            self.retain_wallpaper_playback();
+            self.retain_static_wallpaper_poster();
+            self.retire_wallpaper_surface();
+            self.desktop.page_ready = false;
+            self.desktop.visible = false;
+            self.desktop.policy_released = true;
+        }
+        self.desktop.apply_error = Some(error);
+        self.send_settings_status(self.desktop.apply_error.as_deref(), None);
     }
 
     pub(super) fn handle_wallpaper_capture(&mut self, generation: u64, message: &str) -> bool {
         if !message.starts_with(CAPTURE_PREFIX) {
             return false;
         }
-        if self.handle_preview_capture(generation, message) {
-            return true;
-        }
         let Some(handoff) = self
-            .wallpaper_handoff
+            .desktop
+            .handoff
             .as_mut()
             .filter(|handoff| handoff.hold.request.generation == generation)
         else {
@@ -212,11 +250,14 @@ impl App {
             self.fail_wallpaper_capture(error.to_string());
             return true;
         }
+        if handoff.pause_retained {
+            self.desktop.policy_released = true;
+        }
         // The compositor accepted the bitmap while the old renderer is alive. Its
         // Close and file-reader barriers may run; the bitmap keeps the desktop filled.
         self.retire_wallpaper_surface();
-        self.wallpaper_page_ready = false;
-        self.wallpaper_visible = false;
+        self.desktop.page_ready = false;
+        self.desktop.visible = false;
         self.reset_wallpaper_page_stats();
         self.recompute_wallpaper();
         true
@@ -230,7 +271,12 @@ impl App {
         {
             handoff.hold.source_closed(generation);
         }
-        if let Some(handoff) = &mut self.wallpaper_handoff {
+        for handoff in self
+            .desktop
+            .runtimes
+            .values_mut()
+            .filter_map(|desktop| desktop.handoff.as_mut())
+        {
             handoff.hold.source_closed(generation);
         }
         for handoff in &mut self.wallpaper_handoff_retiring {
@@ -239,13 +285,13 @@ impl App {
     }
 
     pub(super) fn handoff_wait_for_reveal(&mut self, generation: u64) {
-        if let Some(handoff) = &mut self.wallpaper_handoff {
+        if let Some(handoff) = &mut self.desktop.handoff {
             handoff.reveal = Some((generation, Instant::now()));
         }
     }
 
     pub(super) fn finish_wallpaper_handoff(&mut self, generation: u64) {
-        if !self.wallpaper_handoff.as_ref().is_some_and(|handoff| {
+        if !self.desktop.handoff.as_ref().is_some_and(|handoff| {
             handoff
                 .reveal
                 .is_some_and(|(expected, _)| expected == generation)
@@ -253,10 +299,11 @@ impl App {
             return;
         }
         self.close_wallpaper_handoff();
+        self.playlist_presented(generation);
     }
 
     pub(super) fn close_wallpaper_handoff(&mut self) {
-        if let Some(mut handoff) = self.wallpaper_handoff.take() {
+        if let Some(mut handoff) = self.desktop.handoff.take() {
             handoff.retire();
             self.wallpaper_handoff_retiring.push(handoff);
         }
@@ -265,9 +312,7 @@ impl App {
     }
 
     pub(super) fn poll_wallpaper_handoff(&mut self) {
-        self.wallpaper_handoff_retiring
-            .retain_mut(|handoff| !handoff.poll());
-        if self.wallpaper_handoff.as_ref().is_some_and(|handoff| {
+        if self.desktop.handoff.as_ref().is_some_and(|handoff| {
             handoff
                 .window
                 .as_ref()
@@ -276,25 +321,27 @@ impl App {
             // Explorer may destroy the child HWND. Do not keep claiming a visible
             // retained frame, or silently retry a candidate that already failed.
             self.close_wallpaper_handoff();
-            if self.wallpaper.is_none()
-                && self.wallpaper_candidate.is_none()
-                && self.wallpaper_prepared.is_none()
+            if self.desktop.surface.is_none()
+                && self.desktop.candidate.is_none()
+                && self.desktop.prepared.is_none()
             {
-                self.wallpaper_media_failed_revision = Some(self.config.revision);
-                self.wallpaper_apply_error = Some("静态帧窗口已失效，请重新加载壁纸".into());
+                self.desktop.failed_revision = Some(self.desktop.desired_revision);
+                self.desktop.apply_error = Some("静态帧窗口已失效，请重新加载壁纸".into());
             }
         }
         if self
-            .wallpaper_handoff
+            .desktop
+            .handoff
             .as_ref()
             .is_some_and(|handoff| handoff.hold.expired())
         {
             self.fail_wallpaper_capture("旧画面未在期限内完成静态采集，保留当前桌面".into());
         }
         self.sync_wallpaper_handoff_visibility();
-        if !self.wallpaper_render_allowed(&self.config.wallpaper) {
+        if !self.wallpaper_render_allowed() {
             if let Some((_, at)) = self
-                .wallpaper_handoff
+                .desktop
+                .handoff
                 .as_mut()
                 .and_then(|handoff| handoff.reveal.as_mut())
             {
@@ -304,50 +351,64 @@ impl App {
             }
             return;
         }
-        if self.wallpaper_handoff.as_ref().is_some_and(|handoff| {
+        if self.desktop.handoff.as_ref().is_some_and(|handoff| {
             handoff
                 .reveal
                 .is_some_and(|(_, at)| at.elapsed() > Duration::from_secs(3))
         }) {
-            if let Some(handoff) = &mut self.wallpaper_handoff {
+            if let Some(handoff) = &mut self.desktop.handoff {
                 handoff.reveal = None;
             }
             self.retire_wallpaper_surface();
-            self.wallpaper_page_ready = false;
-            self.wallpaper_visible = false;
-            self.wallpaper_media_failed_revision = Some(self.config.revision);
-            self.wallpaper_apply_error = Some("新画面未确认揭幕，继续保留静态画面".into());
-            self.send_settings_status(self.wallpaper_apply_error.as_deref(), None);
+            self.desktop.page_ready = false;
+            self.desktop.visible = false;
+            self.desktop.failed_revision = Some(self.desktop.desired_revision);
+            self.desktop.apply_error = Some("新画面未确认揭幕，继续保留静态画面".into());
+            self.send_settings_status(self.desktop.apply_error.as_deref(), None);
         }
+    }
+
+    pub(super) fn poll_handoff_retirements(&mut self) {
+        self.wallpaper_handoff_retiring
+            .retain_mut(|handoff| !handoff.poll());
     }
 
     pub(super) fn sync_wallpaper_handoff_visibility(&self) {
         if let Some(window) = self
-            .wallpaper_handoff
+            .desktop
+            .handoff
             .as_ref()
             .and_then(|handoff| handoff.window.as_ref())
         {
             window.visible(
-                (self.config.wallpaper.enabled || self.wallpaper_forced)
-                    && self.wallpaper_render_allowed(&self.config.wallpaper),
+                self.wallpaper_target_running(&self.desktop.configuration)
+                    && !self
+                        .desktop
+                        .recovery
+                        .is_terminal(crate::wallpaper::session::FaultDomain::Global)
+                    && policy::retain_frame(&policy::PolicyInputs {
+                        enabled: true,
+                        wallpaper: &self.desktop.configuration,
+                        manual_pause: self.wallpaper_hidden,
+                        fullscreen: self.desktop.fullscreen_gate.stable(),
+                        maximized: self.desktop.maximized_gate.stable(),
+                        application_rule: self.desktop.application_gate.stable(),
+                        session_unavailable: self.policy.session_unavailable,
+                        display_off: self.policy.display_off,
+                        display_missing: self.desktop.monitor_missing,
+                        power: self.wallpaper_power,
+                        has_surface: true,
+                        page_ready: true,
+                    }),
             );
         }
-    }
-
-    pub(super) fn handoff_hwnd(&self) -> Option<HWND> {
-        self.wallpaper_handoff
-            .as_ref()?
-            .window
-            .as_ref()
-            .filter(|window| window.alive())
-            .map(|window| window.hwnd())
     }
 
     pub(super) fn reconcile_wallpaper_handoff_geometry(
         &mut self,
         monitor: &native::WallpaperMonitor,
     ) {
-        if self.wallpaper_handoff.as_ref().is_some_and(|handoff| {
+        if self.desktop.handoff.as_ref().is_some_and(|handoff| {
             handoff.monitor.display_id() != monitor.display_id()
                 || monitor_geometry_changed(&handoff.monitor, monitor)
         }) {
@@ -355,11 +416,5 @@ impl App {
             // A changed target must pass fresh admission, never enlarge this HWND.
             self.close_wallpaper_handoff();
         }
-    }
-
-    pub(super) fn handoff_diagnostics(&self) -> serde_json::Value {
-        self.wallpaper_handoff
-            .as_ref()
-            .map_or(serde_json::Value::Null, Handoff::diagnostics)
     }
 }

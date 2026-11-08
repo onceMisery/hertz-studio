@@ -5,9 +5,10 @@
 //!
 //! 跨平台内核文件锁（fslock：Windows `LockFileEx`、POSIX `flock`），不是
 //! 「文件存在 + PID 活着」的模拟排他。每 DataDir 的服务端 AI 初始化在启动
-//! 时获取一次，持有期就是进程生命周期；CapabilityService 与将来的 AiService
-//! 复用它的生命周期。失锁/拿不到锁则 AI 外部对接不可用，不做恢复、不发布
-//! 发现文件。适配进程不参与锁竞争——它不打开这把锁，也不打开业务数据库。
+//! 时获取一次，持有期就是进程生命周期；CapabilityService 与 AiService
+//! 复用它的生命周期。共享启动 prepare 在服务初始化前获取，以识别旧版本
+//! 已有 owner；拿不到锁时整个新服务拒绝启动。AI 业务入口仍保留独立许可校验。
+//! 适配进程不参与锁竞争——它不打开这把锁，也不打开业务数据库。
 
 use std::path::Path;
 
@@ -20,12 +21,11 @@ pub struct AiRunnerLock {
 }
 
 impl AiRunnerLock {
-    /// 尝试获取；`Ok(None)` 表示别的进程正持有——调用方据此停用 AI 外部
-    /// 对接（不发布发现文件），而不是排队等待。
+    /// 尝试获取；`Ok(None)` 表示别的句柄正持有，调用方不排队等待。
     pub fn try_acquire(data_dir: &Path) -> Result<Option<Self>, std::io::Error> {
         let dir = data_dir.join("ai");
         std::fs::create_dir_all(&dir)?;
-        let lock_path = dir.join(RUNNER_LOCK_FILE).to_string_lossy().to_string();
+        let lock_path = dir.join(RUNNER_LOCK_FILE);
         let mut lock =
             fslock::LockFile::open(&lock_path).map_err(|e| std::io::Error::other(e.to_string()))?;
         if lock

@@ -18,7 +18,7 @@ R1-L 沿用 `LyricDocument`、曲库覆盖层与 Stage 原时钟。已实现本�
 
 正在播放页 → 更多操作 → 导入歌词，选择 UTF-8 的 `.lrc`、`.ttml` 或 `.xml`。先查看格式、时间精度和前三行，再点击「应用这份歌词」。确认前不写覆盖层；导入保留每曲偏移，不改源文件。关闭、关闭工具、切歌和另选文件会作废旧响应。应用请求一旦被服务端受理，关闭界面不能撤销已经提交的写入。
 
-当前 TTML 是明确的窄子集：要求 TTML namespace、media 时间基准和 `par` 容器，只接受 `tt/body/div/p/span/br`；支持毫秒可精确表示的时钟时间、秒和毫秒。子元素 begin/end 相对父容器，遵循 [TTML 时间语义](https://www.w3.org/TR/ttml2/#time-expression-semantics)，不一律当作媒体绝对时刻。逐词必须有真实时间范围；支持并行的 `ttm:role="x-translation"` / `x-roman`。DTD、外部资源、head/style/region、frame/tick/wallclock、seq、混合无时序正文与词时间和无法表示的嵌套时间明确拒绝，不宣称兼容全部 Apple/AMLL TTML。
+当前 TTML 是明确的窄子集：要求 TTML namespace、media 时间基准和 `par` 容器，接受 `tt/head/metadata/agent/name/body/div/p/span/br` 的受控语义；支持毫秒可精确表示的时钟时间、秒和毫秒。子元素 begin/end 相对父容器，遵循 [TTML 时间语义](https://www.w3.org/TR/ttml2/#time-expression-semantics)，不一律当作媒体绝对时刻。逐词必须有真实时间范围；支持并行的 `ttm:role="x-translation"` / `x-roman`。作者声明的 agent 身份、继承覆盖与 `x-bg` 背景正文按[A10合同](aegis/specs/2026-11-07-desktop-lyrics-vocals-design.md)展开成完整规范行，重叠参与行须全部具有身份；副文本必须唯一归属。未知语义、DTD、外部资源、style/region、frame/tick/wallclock、seq、混合无时序正文与词时间明确拒绝，错误保留原始行列位置，不宣称兼容全部 Apple/AMLL TTML。
 
 ## 在线候选边界
 

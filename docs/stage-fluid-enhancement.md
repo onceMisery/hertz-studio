@@ -61,6 +61,7 @@ node scripts/check-stage-fluid.js
 
 ```sh
 node scripts/check-stage-fluid-browser.js
+node scripts/check-stage-fluid-hidden-browser.js
 node scripts/check-stage-fluid-app-browser.js
 node scripts/check-stage-fluid-app-browser.js --performance
 node scripts/check-stage-fluid-app-browser.js --visual
@@ -88,3 +89,14 @@ node scripts/check-stage-fluid-app-browser.js --visual
 本轮 `--visual` 的控制面板、三组受控频谱截图与短片在 `output/playwright/stage-fluid-visual/`，短片为 `standalone-controlled.webm`。最终 21 项流体浏览器场景、完整应用交接、原控制面板 27 项场景、原粒子、帧门、舞台设置、视频导出、资产／插件资源、ADR 和发布压缩检查通过；Standard／Full 暂存资源都保留完整上游许可，隔离验证二进制编译成功。仓库整体脚本登记检查另有两项既有壁纸脚本未登记，本次新增检查均已登记，未将这一项报告为全绿。
 
 真实静谧／节奏／人声歌曲的短视频与人工视觉收益评审仍需在目标宿主进行；受控频谱只证明响应路径与真实 GPU 输出。默认关闭和明确的不可用状态用于保留用户控制，不能替代宿主与视觉验收。
+
+## 2026-11-08 隐藏 GPU 操作修复
+
+当前 Hertz 布局通过 CSS 隐藏旧二维舞台。流体现由自身冷路径缓存宿主非零尺寸；默认隐藏时不申请效果资源，既有实例在布局变为零时暂停。抽屉关闭、页面隐藏和零布局期间，resize、参数/配色与换曲不再重设输出或清理 GPU；恢复后的可见帧更新尺寸并按原媒体 epoch 清理，暂停换曲仅提交一帧静态输出。请求值、Stage 公共可见性语义和原质量预算保持。
+
+[定向记录](aegis/work/2026-11-08-stage-fluid-hidden-gpu/20-checkpoint.md)保留两条实际根因、诊断失败和修复前字节。26 组真实 Chrome 定向检查通过；完整当前生产页面在隔离 R2 HTTP/null 音频服务上验证八项观察，默认隐藏零分配/零操作、受控重新显示可绘制、再次隐藏停绘、关闭释放。完整页面的重新显示是明确的诊断样式，不是新用户入口；来源脚本来自当前源码，不能算作已重建的安装候选。
+
+本增量不代表 M1 的全部跨宿主治理、总 GPU 峰值、弱机/多 DPI 或 M2–M4 已完成；原性能样本仍保持其冻结范围。
+
+
+随后新增[实际内嵌整合验证](aegis/work/2026-11-08-stage-fluid-hidden-gpu/92-embedded-review.md)：新Full/Standard原生release各自提供13个相符资源和完整页面八项通过观察，没有静态源码覆盖；两种DBX release完成编译/归档。原R2组件保持相同，八步编译/构建与729/199/1277输入复核记录在 `output/a09-current-embedded-20261108/embedded-qualification.json`。播放器回归和1440/390稳定设置截图另通过限定检查。这是新内嵌HTTP页面的资格，DBX实际PluginHost、原生托盘、实体GPU/DPI及M1–M4继续开放。前述源覆盖结果和诊断失败均保持其原范围。

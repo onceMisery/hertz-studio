@@ -10,7 +10,7 @@
   var sidebarKey = 'vmusic.hertz.sidebar.v1';
   var libraryTab = 'songs', libraryEpoch = 0, libraryController, libraryOffset = 0, libraryTotal = 0, libraryBusy = false;
   var libraryDetail = null, settingsTab = 'appearance', preferenceKey = 'vmusic.hertz.appearance.v1';
-  var preferences = { intensity: 70, animated: true, wordSync: true, lyricSize: 'medium' };
+  var preferences = { intensity: 70, animated: true, wordSync: true };
   var mobile = window.matchMedia('(max-width: 899px)');
   function id(value) { return document.getElementById(value); }
   function icon(name) { return `<svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-${name}"></use></svg>`; }
@@ -288,9 +288,8 @@
     document.documentElement.style.setProperty('--hz-ambient-opacity', String(preferences.intensity / 100 * .42));
     document.body.dataset.hzAnimated = String(preferences.animated);
     document.body.dataset.hzWordSync = String(preferences.wordSync);
-    document.body.dataset.hzLyricSize = preferences.lyricSize;
     id('hz-ambient-intensity').value = preferences.intensity; id('hz-ambient-value').textContent = preferences.intensity + '%';
-    id('hz-ambient-animated').checked = preferences.animated; id('hz-word-sync').checked = preferences.wordSync; id('hz-lyric-size').value = preferences.lyricSize;
+    id('hz-ambient-animated').checked = preferences.animated; id('hz-word-sync').checked = preferences.wordSync;
     if (persist) { try { localStorage.setItem(preferenceKey, JSON.stringify(preferences)); } catch (error) { /* 本次界面偏好仍然生效。 */ } }
     if (window.NowPlaying && window.NowPlaying.isOpen()) window.NowPlaying.update();
   }
@@ -300,7 +299,6 @@
       if (typeof saved.intensity === 'number' && Number.isFinite(saved.intensity)) preferences.intensity = Math.round(Math.max(0, Math.min(100, saved.intensity)));
       if (typeof saved.animated === 'boolean') preferences.animated = saved.animated;
       if (typeof saved.wordSync === 'boolean') preferences.wordSync = saved.wordSync;
-      if (['small', 'medium', 'large'].includes(saved.lyricSize)) preferences.lyricSize = saved.lyricSize;
     } catch (error) { /* 旧偏好或损坏数据使用默认值。 */ }
     ['set-cover-follow', 'set-motion'].forEach(function (key) {
       var row = id(key).closest('.set-row'); row.classList.add('hz-setting-row', 'hz-borrowed-control');
@@ -310,7 +308,6 @@
     listen(id('hz-ambient-intensity'), 'input', function (event) { preferences.intensity = Number(event.currentTarget.value); applyPreferences(true); });
     listen(id('hz-ambient-animated'), 'change', function (event) { preferences.animated = event.currentTarget.checked; applyPreferences(true); });
     listen(id('hz-word-sync'), 'change', function (event) { preferences.wordSync = event.currentTarget.checked; applyPreferences(true); });
-    listen(id('hz-lyric-size'), 'change', function (event) { preferences.lyricSize = event.currentTarget.value; applyPreferences(true); });
     listen(id('hz-theme-dark'), 'click', function () { window.Theme.apply('hertz-dark'); });
     listen(id('hz-theme-light'), 'click', function () { window.Theme.apply('hertz-light'); });
     applyPreferences(false);
@@ -323,7 +320,7 @@
     refs.settingsGroups.forEach(function (group) {
       var title = group.querySelector('.set-title').textContent, originalHidden = group.hidden;
       group.dataset.hzCategory = /AI|远程|在线音源/.test(title) ? 'connection' : /歌词/.test(title) ? 'lyrics' : /音效|^播放$|在线缓存/.test(title) ? 'playback' : /备份|快捷键|开发者/.test(title) ? 'tools' : 'appearance';
-      group.dataset.hzAvailable = String(!originalHidden && !(window.hertzHost && window.hertzHost.isDbx && ['overlay-group', 'video-export-group'].includes(group.id)));
+      group.dataset.hzAvailable = String(!originalHidden && !(window.hertzHost && window.hertzHost.isDbx && ['overlay-group', 'video-export-group', 'desktop-lyrics-settings'].includes(group.id)));
       cleanup.push(function () { group.hidden = originalHidden; delete group.dataset.hzCategory; delete group.dataset.hzAvailable; });
     });
     listen(refs.settingsNav, 'keydown', function (event) {
@@ -338,6 +335,7 @@
     settingsTab = category;
     refs.settingsNav.querySelectorAll('button').forEach(function (tab) { var active = tab.dataset.category === category; tab.setAttribute('aria-selected', String(active)); tab.tabIndex = active ? 0 : -1; });
     refs.settingsGroups.forEach(function (group) { group.hidden = group.dataset.hzAvailable === 'false' || group.dataset.hzCategory !== category; });
+    window.dispatchEvent(new CustomEvent('hertz-settings-category', { detail: { category: category } }));
   }
   function setQueue(open, trigger) {
     if (!mounted) return;

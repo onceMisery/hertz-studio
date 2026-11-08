@@ -3,8 +3,148 @@
   "note": "check-* scripts that are deliberate manual/browser/diagnostic entry points. New unregistered check-* files fail scripts/check-scripts.js until they are either registered in check-frontend.js / a workflow or added here.",
   "scripts": [
     {
+      "script": "check-native-http-boundary.js",
+      "purpose": "Actual Full/native listener, HTTP/WS and Windows WebView2 CSP boundary: non-loopback refusal before credentials/database, random-port Host/Origin and absolute URI rejection before ticket consumption, bearer/session/OBS compatibility, real Chromium injection/frame denial plus Pixi/Blob worker/style/image compatibility, and ordinary LAN service behavior. Requires fixed HERTZ_BIN and installed PLAYWRIGHT_MODULE; serial owned GUI/processes with null audio and isolated DataDirs."
+    },
+    {
+      "script": "check-standalone-installer-native.js",
+      "purpose": "Actual current-user NSIS install/update/uninstall in owned Windows output paths: exact candidate/source identity, special-character paths, multiple real profiles, data preservation, registration rollback and partial state, initial/removal/recovery markers, missing manifest, locked projection retry, portable receipt interruption and menu reparse rejection. Requires matching Full/native release HERTZ_BIN and compiled HERTZ_INSTALLER; refuses existing user registration/shortcuts. Null audio and controlled failures; signing, remote updates, clean OS and physical power loss remain separate."
+    },
+    {
+      "script": "check-native-music-import-browser.js",
+      "purpose": "Production native import UI/host script in Chromium: browser/DBX capability hiding, File versus text/internal drags, pending/errors and scoped receipts, actual production queue pointer reorder, dark/light desktop/narrow and reduced motion. Native filesystem mapping is separately qualified. Requires PLAYWRIGHT_MODULE."
+    },
+    {
+      "script": "check-native-music-import-native.js",
+      "purpose": "Owned Windows WebView2 OS-backed file and directory object import, exact selection/identity/no-prune, constructed/missing/path-string/wrong-document rejection, actual metadata errors and root scan pruning. Optional --ole adds real FileDrop from a controlled owned source and strict owned pointer checks. Requires fresh Full/native HERTZ_BIN and PLAYWRIGHT_MODULE, serial GUI. Explorer itself and other shells remain separate."
+    },
+    {
+      "script": "check-main-window-geometry-native.js",
+      "purpose": "Fresh Windows main normal/maximized placement, hide/minimize/capsule preservation, graceful restart, offline invalid/future/offscreen/DPI seeds, authenticated focus/work-area fit and generic settings key rejection. Requires Full/native HERTZ_BIN and PLAYWRIGHT_MODULE; isolated profiles and owned Win32 windows, sequential GUI execution."
+    },
+    {
+      "script": "check-native-obs-preview-native.js",
+      "purpose": "Actual native OBS settings action and independent read-only WebView profile: delayed key, strict URL admission, cookie/opener/native-capability isolation, valid lyrics versus rejected control/homepage credentials, later navigation/nested popup/download rejection, reuse/close/playback and parent cleanup. Requires fresh Full/native HERTZ_BIN and PLAYWRIGHT_MODULE; isolated owned profiles, sequential GUI execution."
+    },
+    {
+      "script": "check-ui-preferences-browser.js",
+      "purpose": "Real dual HTTP origin and opaque DBX sandbox preference export/preview/apply/reload, delayed hydration and SDK storage failure, recording and stage save guards, target rollback and rendered desktop/narrow preview. Requires PLAYWRIGHT_MODULE; isolated fixtures only."
+    },
+    {
+      "script": "check-main-window-files-native.js",
+      "purpose": "Fresh Windows Wry/WebView2 save dialogs, exact UTF-8 text and backup export, cancellation, overwrite confirmation, inaccessible paths and retry, trusted/foreign blobs and old document receipts. Requires HERTZ_BIN and PLAYWRIGHT_MODULE; private owned process/data/output only."
+    },
+    {
+      "script": "check-json-backup.js",
+      "purpose": "Real standalone HTTP and DBX SDK JSON backup export/restore in private profiles: empty and same-name playlists, per-membership online snapshots, v1 tuple scan roots, four credential-prefix exclusion, idempotence and invalid-version no-write behavior. Requires fresh HERTZ_BIN/HERTZ_PLUGIN_BIN and Python; null audio, no user profiles."
+    },
+    {
+      "script": "check-wallpaper-upgrade.js",
+      "purpose": "Real Windows desktop schema upgrade with committed WAL, complete package/staging/derived/config snapshots, legacy and admitted host exclusion, lazy fresh startup, shared player/desktop offline commands, history/rescue, invalid/tampered/future/dirty/corrupt rejection before config/UI, partial migration failure, process interruption and retry. Requires fresh HERTZ_BIN/HERTZ_DESKTOP_BIN and Python; isolated owned roots only, no existing desktop host."
+    },
+    {
+      "script": "check-database-upgrade.js",
+      "purpose": "Real SQLite old-schema fixtures, committed WAL snapshot, partially committed migration failure, future/dirty/checksum/corrupt rejection before initialization, historical restore/rescue with media, tamper/junction/path rejection, process crash and offline retry, live service/DBX maintenance locks. Requires matching Full standalone/DBX binaries and Python SQLite; uses private profiles and null audio."
+    },
+    {
+      "script": "check-install-owner-native.js",
+      "purpose": "Real Windows installation reader/writer exclusion, multiple profiles, startup before DataDir effects, evaluator/window flags, crash release, exact local package and binary identity, corruption/old capability/downgrade/path rejection, external file occupancy, rollback, crashes around atomic journal publication and abrupt updater recovery. Requires fresh Full HERTZ_BIN; HERTZ_ALLOW_DEBUG_PACKAGE=1 permits a development fixture. Isolated program/data directories, null audio; no user installation or publication."
+    },
+    {
+      "script": "check-data-owner.js",
+      "purpose": "Real Full HTTP and DBX processes sharing isolated profiles: before-config exclusion, directory aliases, separate profiles, crash/EOF/failure release, old AI lock compatibility, authenticated native focus and stale discovery rejection. Requires matching HERTZ_BIN/HERTZ_PLUGIN_BIN with native-window, Windows; optional HERTZ_LEGACY_BIN. No user profile or real audio."
+    },
+    {
+      "script": "check-standalone-package-native.js",
+      "purpose": "Actual Windows native release package: side-effect-free binary description, exact ZIP/manifest hashes, duplicate output protection, extracted launcher with Chinese/spaces/metacharacters and no Cargo/Node PATH, WebView2 ownership, second-launch focus and graceful exit. Requires fresh Full native-window HERTZ_BIN, Playwright and WebView2; uses private profile/null audio."
+    },
+    {
+      "script": "check-space-login-presentation-browser.js",
+      "purpose": "Space login presentation in real Chrome using shipped markup/CSS/modules and local fixtures: avatar cropping, platform logos, connected state and default QR account switching. Requires Playwright; no service or real account."
+    },
+    {
+      "script": "check-space-immersive-fx-browser.js",
+      "purpose": "Space3D immersive-mode transition animation in real Chrome: on/off/fade/flip/zoom/slide presets, duration wiring, mid-flight retargeting under rapid toggles, settings snap-to-end, reduced-motion bypass, defaults reset, settings persistence across reload, and untouched auto-hide/popover transition specs. Self-starting isolated fixture serving disk UI; requires PLAYWRIGHT_MODULE and a debug hertz-studio binary; null audio, no user profile."
+    },
+    {
+      "script": "check-space-scene-transitions-browser.js",
+      "purpose": "Space3D stage-scene transitions in real Chrome: veil layer order, fade/zoom/tilt/slide/wipe/combo phase timelines and container transforms, duration wiring, same-scene no-op, uninterrupted A→B→C handoff, programmatic no-transition path, reduced-motion and low-quality degradation, settings persistence across reload, immersive-mode smoke. Self-starting isolated fixture serving disk UI; requires PLAYWRIGHT_MODULE and a debug hertz-studio binary; null audio, no user profile."
+    },
+    {
+      "script": "check-hertz-scroll-chain-browser.js",
+      "purpose": "Hertz online-library and daily views: real mouse-wheel propagation to the column scroll owner at desktop and narrow layouts. Requires Chrome/Playwright and an isolated service via HERTZ_SCROLL_URL and VMUSIC_DATA_DIR; optional HERTZ_SOURCE_ASSETS overrides embedded UI."
+    },
+    {
+      "script": "check-system-media-ownership-browser.js",
+      "purpose": "Real Chrome with production ownership observer and MediaSession functions: local/room suppression, stale callbacks, fallback, failed reads, single polling flight and DBX isolation. Controlled transport; requires Playwright and Chrome."
+    },
+    {
+      "script": "check-system-media-native.js",
+      "purpose": "Isolated Windows/WebView2 and actual GSMTC API: renderer-independent metadata, media actions, stale session rejection, room controls, native ownership and shutdown. Requires fresh full,native-window HERTZ_BIN and system_media_probe example, Playwright; null audio and private data."
+    },
+    {
+      "script": "check-native-sleep-browser.js",
+      "purpose": "Native service-owned sleep timer UI with controlled clock/transport: zero waits for service, reload/CAS/stale responses, clock changes, cancellation and failures, room isolation and unchanged ordinary-browser/DBX page timers. Requires Chrome and Playwright."
+    },
+    {
+      "script": "check-desktop-lyrics-settings-browser.js",
+      "purpose": "Main-player desktop lyrics fieldset and real module with controlled transport: side-effect-free initialization, DBX isolation, draft/CAS/save failure, owner cancellation when leaving during pending positioning, and dark/light desktop/390px keyboard layouts. Requires Playwright and Chrome; no user desktop configuration."
+    },
+    {
+      "script": "check-desktop-lyrics-settings-native.js",
+      "purpose": "Isolated Windows main-window desktop lyrics editor: same-PID lazy host with no independent settings window, real save/reload, disk-write failure, stale revision protection, position owner isolation and leave cleanup, host and player restart persistence with wallpaper/mini preservation. Requires a fresh full,native-window HERTZ_BIN, Playwright and WebView2; uses private data/config and null audio."
+    },
+    {
+      "script": "check-main-window-lifecycle-browser.js",
+      "purpose": "Native lifecycle UI with controlled host: preference rollback, cancellable single confirmation, actual stage flush interfaces, recording finalization/failure, stale presentation fencing and ordinary browser/DBX isolation; requires Chrome and Playwright."
+    },
+    {
+      "script": "check-main-window-lifecycle-native.js",
+      "purpose": "Windows native-window host: actual WM_CLOSE hide/quit, playback and LAN confirmation, HTTP pending guard, reload/stale presentation, native fallback cancellation, graceful shutdown and persisted close behavior. Requires HERTZ_BIN built with full,native-window, Playwright and WebView2; isolated null audio backend and owned process cleanup."
+    },
+    {
+      "script": "check-wallpaper-library-references-browser.js",
+      "purpose": "Real library UI in Chrome with controlled bridge: bounded work/version reference details, blocked deletion receipts, read-only refresh, stale target/source/page teardown, duplicate delete admission, and refresh after deletion races with an older list response; responsive1180/390/320 layouts."
+    },
+    {
+      "script": "check-wallpaper-work-properties-browser.js",
+      "purpose": "Actual author editor and real registry schema in Chrome with controlled management bridge: expose/default/label, paged read locking, 64-definition bounded delta batches, generated-id collision protection, CAS preservation and narrow layout. Requires Playwright and Chrome; native publication and runtime are checked separately."
+    },
+    {
+      "script": "check-wallpaper-window-policy-native.js",
+      "purpose": "Isolated Windows foreground-window rules: real maximized/fullscreen detection, normalized executable path Pause/Stop, stacked reasons, unchanged playlist/failed-item Apply, decoder release and position recovery, failed poster restore. --long-pause waits through the production five-minute cap and verifies retained native bitmap plus resource exit. Requires HERTZ_DESKTOP_BIN built with wallpaper-media-probe, Playwright, and no existing host; only owned processes are closed."
+    },
+    {
+      "script": "check-desktop-embedded-native.js",
+      "purpose": "Windows 原生主窗口与内嵌桌面宿主同进程验证：窗口 PID/线程归属、并发事件、三轮启停重开与播放器正常退出；需 full,native-window 构建和 WebView2。"
+    },
+    {
+      "script": "check-wallpaper-works-native.js",
+      "purpose": "Isolated real WebView2 work editor: autosave/CAS, reopen, native preview, immutable builtin package apply, sequential playlist, pause freeze, failed-item retry and restart. Requires hertz-desktop (HERTZ_DESKTOP_BIN) and Playwright; no existing desktop host."
+    },
+    {
+      "script": "check-wallpaper-displays-native.js",
+      "purpose": "Isolated native display groups: one complete Apply/revision, offline and unresolved intent without fallback, group-specific preview, unchanged unrelated sessions, Primary transfer/exit, and Primary/Fixed collision rejection. Reports actual monitor count; two simultaneous native first frames and span union geometry run only with at least two real monitors. Requires HERTZ_DESKTOP_BIN, Playwright and no existing desktop host; never changes OS display topology."
+    },
+    {
+      "script": "check-wallpaper-display-settings.js",
+      "purpose": "Browser display-group and window-policy settings: independent drafts, group preview leases, responsive topology, asynchronous mirror inspection, bounded polling/cache invalidation, full-path rules/32 limit, focused clean external updates, and Pause/Stop/mixed-target status. Uses real settings assets with a controlled native bridge; requires Playwright and Chrome."
+    },
+    {
+      "script": "check-wallpaper-mirror-native.js",
+      "purpose": "Isolated real Windows/WebView2 Mirror: real image/video import, async eligibility and precommit whole-playlist limits, per-member release, shared next(groupId), unchanged-first-item revision, presentation Apply preserving index, pause/resume tokens, held first frame and native two-second correction of >100ms drift, real video 404/poster/retry, complete resource drain. Reports real monitor count and exact simultaneous-hardware skips when only Primary plus offline Fixed is available. Requires debug hertz-desktop with wallpaper-media-probe, Playwright and no existing desktop host; CDP19568, no OS topology mutation or fabricated receipts."
+    },
+    {
+      "script": "check-stage-media-persistence-browser.js",
+      "purpose": "Isolated real service: stage image/video import, original deletion, reload and service restart, derivative rebuild, DBX image chunk decode and CAS conflict recovery. Requires built hertz-studio and Playwright/Chrome."
+    },
+    {
       "script": "check-stage-fluid-browser.js",
       "purpose": "Real Stage/StageControl/WebGL pixels, pause, host boundaries, 20 resource cycles, partial GPU failures and opaque DBX storage hydration/failure. Requires Playwright and Chrome."
+    },
+    {
+      "script": "check-stage-fluid-hidden-browser.js",
+      "purpose": "Post-implementation real Chrome checks for production StageFluid hidden resize/control/retint/track operations, responsive/document/CSS zero-layout admission, paused static media reset, layout restoration and retained-instance release. Uses controlled media and document-hidden input; requires PLAYWRIGHT_MODULE. Full application, native windows, physical GPU budgets and M1-M4 are separately qualified."
     },
     {
       "script": "check-stage-fluid-app-browser.js",
@@ -37,6 +177,14 @@
     {
       "script": "check-desktop-lyrics-browser.js",
       "purpose": "Desktop lyrics prototype rendering, appearance settings, bounded DOM, real timing boundaries, stale snapshots, safe text and narrow layouts."
+    },
+    {
+      "script": "check-desktop-vocals-browser.js",
+      "purpose": "Run with PLAYWRIGHT_MODULE set: D:\\dev-env\\node\\node.exe scripts/check-desktop-vocals-browser.js. Production A10 renderer in an isolated Chrome fixture: V01 exact overlapping intervals and node reuse, V08 body-first capacity and subtitle ownership, label accessibility and deliberate single selection, V09 paused/buffering/seek/rejection/stale cleanup and old geometry, V13 64/65-word degradation, 256 real word units, 800 elements, linear 2N events and 100 seek/config cycles. Browser capacity fixtures do not qualify Windows DPI/work-area geometry."
+    },
+    {
+      "script": "check-desktop-vocals-native.js",
+      "purpose": "Run with exact freshly built HERTZ_DESKTOP_BIN and PLAYWRIGHT_MODULE: D:\\dev-env\\node\\node.exe scripts/check-desktop-vocals-native.js. Isolated HTTP schema1 producer and owned Windows/WebView2 process: actual DPI/work area, vocal intervals, four slots/body omission, native showVocals/bilingual/font/width settings, locked recovery owner, format rejection across sessions, 60-second real word sweep and 100 source seek anchors, CDP trace/resource/DOM evidence and graceful owned cleanup. Refuses the fixed singleton/shared pipe; never kills user PID6428 or sends shared quit. Missing DPI/capacity/tray-click/GPU conditions remain explicitly unverified."
     },
     {
       "script": "check-desktop-lyrics-native.js",
@@ -269,6 +417,10 @@
     {
       "script": "check-mcp-stdio.js",
       "purpose": "真实 MCP stdio 客户端端到端检查（技术路线 §12.1 MCP 反例的协议层实现）。"
+    },
+    {
+      "script": "check-player-transitions-browser.js",
+      "purpose": "Isolated real-service browser checks for shared cover geometry, configurable cover/stage transitions, timing, interruption, focus/inert ownership, persistence, reduced motion and narrow layouts. Requires PLAYWRIGHT_MODULE and a debug hertz-studio binary; no user profile."
     },
     {
       "script": "check-now-playing-browser.js",
@@ -681,6 +833,14 @@
     {
       "script": "check-cover-wall-layout-browser.js",
       "purpose": "Migrated Qingfeng poster geometry on sole Hertz layout: density, expanded reflow, dimming, keyboard navigation and exit cleanup with isolated service and controlled source snapshot."
+    },
+    {
+      "script": "check-recovery-hotkey-browser.js",
+      "purpose": "桌面歌词全局恢复快捷键的页面契约：设置页录入/取消/清除、脏草稿互斥、失败反馈与窄窗口。需要 Playwright 与 Chrome，本地手工执行。"
+    },
+    {
+      "script": "check-recovery-hotkey-native.js",
+      "purpose": "隔离原生宿主的快捷键验收：真实注册占用、注入按键与定向消息到解锁定位、退出释放、重启持久与启动冲突。需要 Windows WebView2 与已构建的原生二进制。"
     }
   ],
   "retiredLayouts": [

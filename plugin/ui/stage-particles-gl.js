@@ -102,16 +102,61 @@ void main() {
   frag = vec4(c * o, o);
 }`;
 
-  function tierIndex() {
-    var t = window.Stage ? Stage.tier() : 2;
-    return t < 0 ? 0 : t > 2 ? 2 : t;
+  var nextGeneration = 0;
+  var capabilityProbe = {
+    attempts: 0, contextsCreated: 0, contextReleaseRequested: 0,
+    contextReferencesReleased: 0, peakContexts: 0, failures: 0
+  };
+
+  function probeResources() {
+    return {
+      attempts: capabilityProbe.attempts,
+      contexts: 0,
+      contextsCreated: capabilityProbe.contextsCreated,
+      contextReleaseRequested: capabilityProbe.contextReleaseRequested,
+      contextReferencesReleased: capabilityProbe.contextReferencesReleased,
+      peakContexts: capabilityProbe.peakContexts,
+      failures: capabilityProbe.failures
+    };
   }
 
-  function isAvailable() {
+  function isAvailable(options) {
+    var canvas = null, gl = null, ticket = null;
+    capabilityProbe.attempts += 1;
     try {
-      var c = document.createElement('canvas');
-      return !!(window.WebGL2RenderingContext && c.getContext('webgl2'));
-    } catch (e) { return false; }
+      if (!window.WebGL2RenderingContext) return false;
+      if (!options || !options.resources) return false;
+      ticket = options.resources.require({ canvases: 1, gpuContexts: 1, drawingBufferPixels: 1,
+        renderTargetDeclaredBytes: 4 }, 'particle capability probe RGBA8', 0, 'bounded-estimate');
+      canvas = document.createElement('canvas');
+      canvas.width = canvas.height = 0;
+      gl = canvas.getContext('webgl2', { antialias: false, depth: false, stencil: false });
+      if (!gl) return false;
+      capabilityProbe.contextsCreated += 1;
+      capabilityProbe.peakContexts = 1;
+      ticket.commit();
+      return true;
+    } catch (e) {
+      capabilityProbe.failures += 1;
+      return false;
+    } finally {
+      if (gl) {
+        try {
+          var ext = gl.getExtension('WEBGL_lose_context');
+          if (ext) {
+            capabilityProbe.contextReleaseRequested += 1;
+            ext.loseContext();
+          }
+        } catch (e) { /* Reference release is separate from a driver release request. */ }
+        capabilityProbe.contextReferencesReleased += 1;
+      }
+      if (canvas) {
+        try { canvas.width = canvas.height = 0; } catch (e) { /* Best effort backing-store release. */ }
+      }
+      gl = null;
+      canvas = null;
+      if (ticket) ticket.release({ apiReleased: true, allocationEnded: true });
+    }
   }
 
   function parseRgb(str) {
@@ -122,32 +167,6 @@ void main() {
       out[i] = isFinite(n) ? Math.max(0, Math.min(255, n)) / 255 : out[i];
     }
     return out;
-  }
-
-  function compile(gl, type, src) {
-    var sh = gl.createShader(type);
-    gl.shaderSource(sh, src);
-    gl.compileShader(sh);
-    if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
-      gl.deleteShader(sh);
-      return null;
-    }
-    return sh;
-  }
-
-  function link(gl) {
-    var vs = compile(gl, gl.VERTEX_SHADER, VERT);
-    var fs = compile(gl, gl.FRAGMENT_SHADER, FRAG);
-    if (!vs || !fs) return null;
-    var p = gl.createProgram();
-    gl.attachShader(p, vs); gl.attachShader(p, fs);
-    gl.linkProgram(p);
-    gl.deleteShader(vs); gl.deleteShader(fs);
-    if (!gl.getProgramParameter(p, gl.LINK_STATUS)) {
-      gl.deleteProgram(p);
-      return null;
-    }
-    return p;
   }
 
   function seedData(n) {
@@ -164,15 +183,185 @@ void main() {
     return a;
   }
 
-  function create() {
+  function create(options) {
+    options = options || {};
+    var generation = ++nextGeneration;
+    var resourcePort = options.resources, colorTicket = null, seedTicket = null, fixedError = '';
+    function admission(resources, source) {
+      if (!resourcePort) throw new Error('resource-policy-required');
+      return resourcePort.require(resources, source, generation);
+    }
+    function releaseTicket(ticket) { if (ticket) ticket.release({ apiReleased: true, allocationEnded: true }); }
+    var onContextLost = typeof options.onContextLost === 'function' ? options.onContextLost : null;
     var contexts = [];
     var count = 0;
     var data = null;
-    var colors = [parseRgb('226, 176, 113'), parseRgb('226, 176, 113')];
+    var colors = [];
+    try {
+      colorTicket = admission({ ownedCpuBytes: 24 }, 'two particle color float32 vectors');
+      colors = [parseRgb('226, 176, 113'), parseRgb('226, 176, 113')]; colorTicket.commit();
+    } catch (e) { colors = []; releaseTicket(colorTicket); colorTicket = null; fixedError = e.message; }
+    var disposed = false, failed = !!fixedError;
+    var phase = 'idle';
+    var alive = { contexts: 0, shaders: 0, programs: 0, buffers: 0, vaos: 0, listeners: 0,
+      bufferBytes: 0, typedArrayBytes: 0, surfacePixels: 0, drawingBufferPixels: 0 };
+    var created = { contexts: 0, shaders: 0, programs: 0, buffers: 0, vaos: 0, listeners: 0 };
+    var released = { contexts: 0, shaders: 0, programs: 0, buffers: 0, vaos: 0, listeners: 0 };
+    var peak = { contexts: 0, shaders: 0, programs: 0, buffers: 0, vaos: 0, listeners: 0,
+      bufferBytes: 0, typedArrayBytes: 0, surfacePixels: 0, drawingBufferPixels: 0 };
+    var uploadBytes = 0, releaseRequests = 0, failures = 0;
+    var mountResult = { status: fixedError ? 'failed' : 'idle', phase: 'admission', reason: fixedError };
+    var warmResult = { status: 'idle', reason: '', count: 0, drawCalls: 0,
+      attempts: 0, submitted: 0, deferred: 0, failed: 0 };
+    var productionDraws = 0, productionDrawCalls = 0;
+    var neutralFrame = { t: 0, dt: 0, bands: [0, 0, 0, 0], pulse: 0, strength: 1, drift: 0 };
+
+    function copyNumbers(source) {
+      var out = {};
+      for (var key in source) if (Object.prototype.hasOwnProperty.call(source, key)) out[key] = source[key];
+      return out;
+    }
+
+    function updatePeak() {
+      for (var key in alive) if (alive[key] > peak[key]) peak[key] = alive[key];
+    }
+
+    function own(kind) {
+      alive[kind] += 1;
+      created[kind] += 1;
+      updatePeak();
+    }
+
+    function relinquish(kind) {
+      alive[kind] -= 1;
+      released[kind] += 1;
+    }
+
+    function checked(result) {
+      if (result === false || result === null) throw new Error(phase + ' returned ' + result);
+      return result;
+    }
+
+    function checkError(gl) {
+      var error = gl.getError();
+      if (error !== gl.NO_ERROR) throw new Error(phase + ' GL error ' + error);
+    }
+
+    function updateSurface(c) {
+      alive.surfacePixels -= c.surfacePixels;
+      alive.drawingBufferPixels -= c.drawingBufferPixels;
+      c.surfacePixels = c.canvas.width * c.canvas.height;
+      c.drawingBufferPixels = c.gl.drawingBufferWidth * c.gl.drawingBufferHeight;
+      alive.surfacePixels += c.surfacePixels;
+      alive.drawingBufferPixels += c.drawingBufferPixels;
+      updatePeak();
+    }
+
+    function releaseShader(c, index) {
+      var shader = c.shaders[index];
+      if (!shader) return;
+      try { c.gl.deleteShader(shader); } finally {
+        c.shaders[index] = null;
+        relinquish('shaders');
+      }
+    }
+
+    function releaseContext(c) {
+      c.active = false;
+      var gl = c.gl, canvas = c.canvas;
+      if (c.v) c.v.ctx = null;
+      if (c.listener) {
+        try { canvas.removeEventListener('webglcontextlost', c.listener); } catch (e) { /* Clear owned references below. */ }
+        c.listener = null;
+        relinquish('listeners');
+      }
+      for (var i = 0; i < c.shaders.length; i += 1) {
+        try { releaseShader(c, i); } catch (e) { /* Continue releasing sibling resources. */ }
+      }
+      var names = ['buf', 'vao', 'prog'];
+      var kinds = ['buffers', 'vaos', 'programs'];
+      var methods = ['deleteBuffer', 'deleteVertexArray', 'deleteProgram'];
+      for (var j = 0; j < names.length; j += 1) {
+        if (!c[names[j]]) continue;
+        try { gl[methods[j]](c[names[j]]); } catch (e) { /* Loss cannot prevent cleanup of the remaining handles. */ }
+        c[names[j]] = null;
+        relinquish(kinds[j]);
+      }
+      alive.bufferBytes -= c.bufferBytes;
+      alive.surfacePixels -= c.surfacePixels;
+      alive.drawingBufferPixels -= c.drawingBufferPixels;
+      c.bufferBytes = c.surfacePixels = c.drawingBufferPixels = 0;
+      try { canvas.width = canvas.height = 0; } catch (e) { /* Canvas may already be detached. */ }
+      if (gl) {
+        try {
+          var ext = gl.getExtension('WEBGL_lose_context');
+          if (ext) { releaseRequests += 1; ext.loseContext(); }
+        } catch (e) { /* Only the API request is measurable, not physical GPU reclamation. */ }
+        relinquish('contexts');
+      }
+      c.gl = c.canvas = c.v = c.u = null;
+      c.shaders.length = 0;
+      releaseTicket(c.resourceTicket); releaseTicket(c.surfaceTicket); releaseTicket(c.bufferTicket);
+      releaseTicket(c.pendingSurfaceTicket); releaseTicket(c.pendingBufferTicket);
+      c.resourceTicket = c.surfaceTicket = c.bufferTicket = c.pendingSurfaceTicket = c.pendingBufferTicket = null;
+    }
+
+    function releaseAll() {
+      for (var i = 0; i < contexts.length; i += 1) releaseContext(contexts[i]);
+      contexts.length = 0;
+      data = null;
+      colors = [];
+      releaseTicket(seedTicket); releaseTicket(colorTicket); seedTicket = colorTicket = null;
+      count = 0;
+      alive.typedArrayBytes = 0;
+    }
+
+    function fail(error) {
+      failed = true;
+      failures += 1;
+      mountResult.status = 'failed';
+      mountResult.phase = phase;
+      mountResult.reason = error && error.message ? String(error.message) : String(error || phase);
+      releaseAll();
+      return false;
+    }
+
+    function compile(c, type, src) {
+      var gl = c.gl;
+      var shader = gl.createShader(type);
+      if (!shader) throw new Error(phase + ' could not create shader');
+      c.shaders.push(shader);
+      own('shaders');
+      checked(gl.shaderSource(shader, src));
+      checked(gl.compileShader(shader));
+      if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) throw new Error(phase + ' shader compile failed');
+      return shader;
+    }
+
+    function upload(c) {
+      var gl = c.gl;
+      var bytes = data ? data.byteLength : 0;
+      var ticket = admission({ bufferDeclaredBytes: bytes }, 'particle GPU buffer full replacement capacity');
+      c.pendingBufferTicket = ticket;
+      checked(gl.bindBuffer(gl.ARRAY_BUFFER, c.buf));
+      checked(gl.bufferData(gl.ARRAY_BUFFER, data || 0, gl.STATIC_DRAW));
+      checkError(gl);
+      alive.bufferBytes -= c.bufferBytes;
+      c.bufferBytes = data ? data.byteLength : 0;
+      alive.bufferBytes += c.bufferBytes;
+      uploadBytes += c.bufferBytes;
+      ticket.commit(); releaseTicket(c.bufferTicket); c.bufferTicket = ticket; c.pendingBufferTicket = null;
+      updatePeak();
+    }
 
     function mountOne(v) {
-      var gl;
+      var gl = null, c = null, resourceTicket = null, surfaceTicket = null;
       try {
+        phase = 'context';
+        if (!v || !v.canvas) throw new Error('missing canvas');
+        resourceTicket = admission({ gpuContexts: 1, programs: 1 }, 'particle GL context and linked program');
+        var initialPixels = v.canvas.width * v.canvas.height;
+        surfaceTicket = admission({ drawingBufferPixels: initialPixels, renderTargetDeclaredBytes: initialPixels * 4 }, 'particle GL initial RGBA8 surface');
         // premultipliedAlpha 保持默认的 true：片元写的是 vec4(c*o, o)，已经乘过
         // alpha。声明 false 等于告诉合成器"还要再乘一次"，于是整层按 o² 而不是 o
         // 落地——单颗越暗掉得越狠，这一层的曝光就跟标准档的调参对不上号了。
@@ -181,51 +370,93 @@ void main() {
           preserveDrawingBuffer: false,
           powerPreference: 'high-performance'
         });
-      } catch (e) { gl = null; }
-      if (!gl) return false;
+        if (!gl) throw new Error('WebGL2 context unavailable');
+        c = { v: v, canvas: v.canvas, gl: gl, prog: null, vao: null, buf: null, u: null,
+          shaders: [], listener: null, active: true, lost: false, notified: false,
+          generation: generation, w: 0, h: 0, pixel: 1, travel: 0,
+          bufferBytes: 0, surfacePixels: 0, drawingBufferPixels: 0, resourceTicket: resourceTicket, surfaceTicket: surfaceTicket };
+        contexts.push(c);
+        own('contexts');
+        updateSurface(c);
+        surfaceTicket.commit();
+        v.__lost = false;
 
-      var prog = link(gl);
-      if (!prog) { v.canvas.__lost = true; return false; }
+        phase = 'listener';
+        c.listener = function (event) {
+          // A disposed context cannot notify a replacement renderer, even if an event was queued.
+          if (!c.active || disposed || c.generation !== generation || !c.gl || c.notified) return;
+          c.lost = true;
+          c.notified = true;
+          failed = true;
+          if (c.v) c.v.__lost = true;
+          mountResult.status = 'lost';
+          mountResult.phase = 'context-loss';
+          mountResult.reason = 'WebGL2 context lost';
+          try { event.preventDefault(); } catch (e) { /* Invalidity is already recorded. */ }
+          if (onContextLost) onContextLost(c.v, generation);
+        };
+        own('listeners');
+        checked(c.canvas.addEventListener('webglcontextlost', c.listener));
 
-      gl.disable(gl.DEPTH_TEST);
-      gl.disable(gl.CULL_FACE);
-      gl.enable(gl.BLEND);
-      gl.blendFunc(gl.ONE, gl.ONE);           // 加性：重叠光点亮度累加
+        phase = 'vertex-shader';
+        var vs = compile(c, gl.VERTEX_SHADER, VERT);
+        phase = 'fragment-shader';
+        var fs = compile(c, gl.FRAGMENT_SHADER, FRAG);
+        phase = 'program';
+        c.prog = gl.createProgram();
+        if (!c.prog) throw new Error('could not create program');
+        own('programs');
+        checked(gl.attachShader(c.prog, vs));
+        checked(gl.attachShader(c.prog, fs));
+        checked(gl.linkProgram(c.prog));
+        if (!gl.getProgramParameter(c.prog, gl.LINK_STATUS)) throw new Error('program link failed');
+        releaseShader(c, 0);
+        releaseShader(c, 1);
 
-      var vao = gl.createVertexArray();
-      var buf = gl.createBuffer();
-      gl.bindVertexArray(vao);
-      gl.bindBuffer(gl.ARRAY_BUFFER, buf);
-      if (data) gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
-
-      var loc = {
-        aSeed: gl.getAttribLocation(prog, 'aSeed'),
-        aLane: gl.getAttribLocation(prog, 'aLane'),
-        aAng: gl.getAttribLocation(prog, 'aAng'),
-        aSize: gl.getAttribLocation(prog, 'aSize'),
-        aTint: gl.getAttribLocation(prog, 'aTint'),
-        aX: gl.getAttribLocation(prog, 'aX')
-      };
-      for (var i = 0; i < STRIDE; i += 1) {
-        var key = ['aSeed', 'aLane', 'aAng', 'aSize', 'aTint', 'aX'][i];
-        var l = loc[key];
-        if (l < 0) continue;
-        gl.enableVertexAttribArray(l);
-        gl.vertexAttribPointer(l, 1, gl.FLOAT, false, STRIDE * 4, i * 4);
+        phase = 'state';
+        checked(gl.disable(gl.DEPTH_TEST));
+        checked(gl.disable(gl.CULL_FACE));
+        checked(gl.enable(gl.BLEND));
+        checked(gl.blendFunc(gl.ONE, gl.ONE)); // 加性：重叠光点亮度累加
+        phase = 'vao';
+        c.vao = gl.createVertexArray();
+        if (!c.vao) throw new Error('could not create VAO');
+        own('vaos');
+        phase = 'buffer';
+        c.buf = gl.createBuffer();
+        if (!c.buf) throw new Error('could not create buffer');
+        own('buffers');
+        checked(gl.bindVertexArray(c.vao));
+        phase = 'upload';
+        upload(c);
+        phase = 'attributes';
+        var attributes = ['aSeed', 'aLane', 'aAng', 'aSize', 'aTint', 'aX'];
+        for (var i = 0; i < STRIDE; i += 1) {
+          var loc = gl.getAttribLocation(c.prog, attributes[i]);
+          if (typeof loc !== 'number' || loc < 0) throw new Error('missing attribute ' + attributes[i]);
+          checked(gl.enableVertexAttribArray(loc));
+          checked(gl.vertexAttribPointer(loc, 1, gl.FLOAT, false, STRIDE * 4, i * 4));
+        }
+        phase = 'uniforms';
+        c.u = {};
+        var uniforms = ['uTime', 'uRes', 'uPixel', 'uTravel', 'uStrength', 'uBands', 'uPulse',
+          'uCenter', 'uFade', 'uColorA', 'uColorB', 'uSizeMul', 'uAlphaMul'];
+        for (var j = 0; j < uniforms.length; j += 1) {
+          var name = uniforms[j];
+          c.u[name] = gl.getUniformLocation(c.prog, name);
+          if (c.u[name] == null || c.u[name] === false) throw new Error('missing uniform ' + name);
+        }
+        checked(gl.bindVertexArray(null));
+        checkError(gl);
+        mountResult.status = 'ready';
+        mountResult.phase = 'mounted';
+        mountResult.reason = '';
+        resourceTicket.commit();
+        return true;
+      } catch (error) {
+        if (!c) { releaseTicket(resourceTicket); releaseTicket(surfaceTicket); }
+        return fail(error);
       }
-
-      var u = {};
-      ['uTime', 'uRes', 'uPixel', 'uTravel', 'uStrength', 'uBands', 'uPulse',
-        'uCenter', 'uFade', 'uColorA', 'uColorB', 'uSizeMul', 'uAlphaMul']
-        .forEach(function (name) { u[name] = gl.getUniformLocation(prog, name); });
-
-      var ctx = { v: v, gl: gl, prog: prog, vao: vao, buf: buf, u: u, w: 0, h: 0, travel: 0 };
-      v.canvas.addEventListener('webglcontextlost', function (e) {
-        e.preventDefault();
-        v.__lost = true;
-      });
-      contexts.push(ctx);
-      return true;
     }
 
     function find(v) {
@@ -233,114 +464,194 @@ void main() {
       return null;
     }
 
+    function ready(c) {
+      return !!(c && c.active && !c.lost && !failed && !disposed);
+    }
+
+    function finite(value, fallback) { return isFinite(value) ? Number(value) : fallback; }
+
+    function clearOne(c) {
+      checked(c.gl.clearColor(0, 0, 0, 0));
+      checked(c.gl.clear(c.gl.COLOR_BUFFER_BIT));
+    }
+
+    function submit(c, v, f, warm) {
+      var gl = c.gl, u = c.u;
+      checked(gl.useProgram(c.prog));
+      checked(gl.bindVertexArray(c.vao));
+      checked(gl.viewport(0, 0, c.w, c.h));
+      clearOne(c);
+      checked(gl.uniform1f(u.uTime, finite(f.t, 0) / 1000));
+      checked(gl.uniform2f(u.uRes, v.w, v.h));
+      checked(gl.uniform1f(u.uPixel, c.pixel));
+      if (!warm) c.travel += Math.min(100, Math.max(0, finite(f.dt, 0))) / 1000 *
+        finite(f.drift, 0) * (0.004 + finite(f.bands[2], 0) * 0.004);
+      checked(gl.uniform1f(u.uTravel, warm ? 0 : c.travel));
+      checked(gl.uniform1f(u.uStrength, finite(f.strength, 1)));
+      checked(gl.uniform4f(u.uBands, finite(f.bands[0], 0), finite(f.bands[1], 0),
+        finite(f.bands[2], 0), finite(f.bands[3], 0)));
+      checked(gl.uniform1f(u.uPulse, finite(f.pulse, 0) * finite(f.strength, 1)));
+      checked(gl.uniform2f(u.uCenter, v.cx, v.cy));
+      checked(gl.uniform3f(u.uFade, v.fade0, v.fade1, v.fade1 > 0 ? 1 : 0));
+      checked(gl.uniform3fv(u.uColorA, colors[0]));
+      checked(gl.uniform3fv(u.uColorB, colors[1]));
+      // 两遍：实点 + 更大更淡的泛光。
+      checked(gl.uniform1f(u.uSizeMul, 1.0));
+      checked(gl.uniform1f(u.uAlphaMul, 1.0));
+      checked(gl.drawArrays(gl.POINTS, 0, count));
+      checked(gl.uniform1f(u.uSizeMul, 2.0));
+      checked(gl.uniform1f(u.uAlphaMul, 0.10));
+      checked(gl.drawArrays(gl.POINTS, 0, count));
+      checked(gl.bindVertexArray(null));
+    }
+
     return {
       name: 'webgl',
       counts: COUNTS,
       dpr: DPR,
       mount: function (v) {
-        if (find(v)) return true;
+        if (disposed || failed) return false;
+        if (find(v)) return ready(find(v));
         return mountOne(v);
       },
       setColors: function (hi, alt) {
-        colors = [parseRgb(hi), parseRgb(alt)];
+        if (disposed || failed) return false;
+        var nextTicket = null;
+        try {
+          nextTicket = admission({ ownedCpuBytes: 24 }, 'particle color vector replacement peak');
+          colors = [parseRgb(hi), parseRgb(alt)];
+          nextTicket.commit(); releaseTicket(colorTicket); colorTicket = nextTicket;
+          return true;
+        } catch (e) { releaseTicket(nextTicket); return fail(e); }
       },
       setCount: function (n) {
-        if (n === count) return;
-        count = n;
-        data = seedData(n);
-        for (var i = 0; i < contexts.length; i += 1) {
-          var c = contexts[i];
-          c.gl.bindBuffer(c.gl.ARRAY_BUFFER, c.buf);
-          c.gl.bufferData(c.gl.ARRAY_BUFFER, data, c.gl.STATIC_DRAW);
-        }
+        if (disposed || failed) return false;
+        n = Math.max(0, Math.floor(finite(n, 0)));
+        if (n === count) return true;
+        var nextTicket = null;
+        try {
+          phase = 'seed-data';
+          nextTicket = admission({ ownedCpuBytes: n * STRIDE * 4 }, 'particle CPU seed full replacement peak');
+          // Count the transient old/new CPU arrays as well as retained storage.
+          var next = n ? seedData(n) : null;
+          var nextBytes = next ? next.byteLength : 0;
+          peak.typedArrayBytes = Math.max(peak.typedArrayBytes, alive.typedArrayBytes + nextBytes);
+          data = next;
+          nextTicket.commit(); releaseTicket(seedTicket); seedTicket = nextTicket; nextTicket = null;
+          count = n;
+          alive.typedArrayBytes = nextBytes;
+          phase = 'upload';
+          for (var i = 0; i < contexts.length; i += 1) upload(contexts[i]);
+          return true;
+        } catch (error) { next = null; releaseTicket(nextTicket); return fail(error); }
       },
-      resize: function (v) {
+      resize: function (v, budget) {
         var c = find(v);
-        if (!c) return;
-        var dpr = Math.min(window.devicePixelRatio || 1, DPR[tierIndex()]);
-        var bw = Math.round(v.w * dpr), bh = Math.round(v.h * dpr);
-        if (c.v.canvas.width !== bw || c.v.canvas.height !== bh) {
-          c.v.canvas.width = bw; c.v.canvas.height = bh;
-        }
-        c.v.canvas.style.width = v.w + 'px';
-        c.v.canvas.style.height = v.h + 'px';
-        c.w = bw; c.h = bh; c.pixel = dpr;
-        c.gl.viewport(0, 0, bw, bh);
+        if (!ready(c)) return false;
+        try {
+          phase = 'resize';
+          var tier = typeof budget === 'number' ? budget : budget && budget.tier;
+          tier = Math.max(0, Math.min(2, Math.floor(finite(tier, 2))));
+          var dpr = budget && typeof budget === 'object' && isFinite(budget.dpr) && budget.dpr > 0 ?
+            Number(budget.dpr) : Math.min(finite(window.devicePixelRatio, 1) || 1, DPR[tier]);
+          var width = Math.max(0, finite(v.w, 0)), height = Math.max(0, finite(v.h, 0));
+          var bw = Math.round(width * dpr), bh = Math.round(height * dpr);
+          if (c.canvas.width !== bw || c.canvas.height !== bh) {
+            var peakPixels = Math.max(bw * c.canvas.height, bw * bh);
+            c.pendingSurfaceTicket = admission({ drawingBufferPixels: peakPixels, renderTargetDeclaredBytes: peakPixels * 4 },
+              'particle GL resize including intermediate width/height RGBA8 backing');
+          }
+          if (c.canvas.width !== bw) { c.canvas.width = bw; updateSurface(c); }
+          if (c.canvas.height !== bh) { c.canvas.height = bh; updateSurface(c); }
+          if (c.pendingSurfaceTicket) {
+            c.pendingSurfaceTicket.commit({ drawingBufferPixels: bw * bh, renderTargetDeclaredBytes: bw * bh * 4 });
+            releaseTicket(c.surfaceTicket); c.surfaceTicket = c.pendingSurfaceTicket; c.pendingSurfaceTicket = null;
+          }
+          c.canvas.style.width = width + 'px';
+          c.canvas.style.height = height + 'px';
+          c.w = bw; c.h = bh; c.pixel = dpr;
+          checked(c.gl.viewport(0, 0, bw, bh));
+          updateSurface(c);
+          return true;
+        } catch (error) { return fail(error); }
       },
       clear: function (v) {
         var c = find(v);
-        if (!c || v.__lost) return;
-        c.gl.clearColor(0, 0, 0, 0);
-        c.gl.clear(c.gl.COLOR_BUFFER_BIT);
+        if (!ready(c)) return false;
+        try { phase = 'clear'; clearOne(c); return true; } catch (error) { return fail(error); }
       },
       draw: function (v, f) {
         var c = find(v);
-        if (!c) return;
-        if (v.__lost) {
-          // 上下文丢失（驱动重置、显卡切换、显存吃紧）后 WebGL2 不会自己回来，
-          // 唯一正确的处置是交还给宿主降级，而不是让画面永久停在最后一帧。
-          if (window.StageParticles) StageParticles.handleContextLost();
-          return;
-        }
-        if (!count) { this.clear(v); return; }
-        var gl = c.gl, u = c.u;
-        gl.useProgram(c.prog);
-        gl.bindVertexArray(c.vao);
-        gl.viewport(0, 0, c.w, c.h);
-        gl.clearColor(0, 0, 0, 0);
-        gl.clear(gl.COLOR_BUFFER_BIT);
-
-        gl.uniform1f(u.uTime, f.t / 1000);
-        gl.uniform2f(u.uRes, v.w, v.h);
-        gl.uniform1f(u.uPixel, c.pixel || 1);
-        c.travel += Math.min(100, Math.max(0, f.dt)) / 1000 * f.drift * (0.004 + f.bands[2] * 0.004);
-        gl.uniform1f(u.uTravel, c.travel);
-        gl.uniform1f(u.uStrength, f.strength);
-        gl.uniform4f(u.uBands, f.bands[0], f.bands[1], f.bands[2], f.bands[3]);
-        gl.uniform1f(u.uPulse, f.pulse * f.strength);
-        gl.uniform2f(u.uCenter, v.cx, v.cy);
-        gl.uniform3f(u.uFade, v.fade0, v.fade1, v.fade1 > 0 ? 1 : 0);
-        gl.uniform3fv(u.uColorA, colors[0]);
-        gl.uniform3fv(u.uColorB, colors[1]);
-
-        // 两遍：实点 + 更大更淡的泛光。比一趟全屏 bloom pass 便宜一个数量级。
-        gl.uniform1f(u.uSizeMul, 1.0);
-        gl.uniform1f(u.uAlphaMul, 1.0);
-        gl.drawArrays(gl.POINTS, 0, count);
-        gl.uniform1f(u.uSizeMul, 2.0);
-        gl.uniform1f(u.uAlphaMul, 0.10);
-        gl.drawArrays(gl.POINTS, 0, count);
-
-        gl.bindVertexArray(null);
+        if (!ready(c) || !count || !c.w || !c.h || !v.w || !v.h) return false;
+        try {
+          phase = 'draw';
+          submit(c, v, f, false);
+          productionDraws += 1;
+          productionDrawCalls += 2;
+          return true;
+        } catch (error) { return fail(error); }
       },
-      // 编译 + 链接 + 首次上传全部发生在这一帧，且不依赖音频数据。
-      warmUp: function (v) {
+      // Submit the current target to the real surface, then clear it before production.
+      // Compilation/linking/upload belong to mount/count; no GPU completion is claimed.
+      warmUp: function (v, f) {
         var c = find(v);
-        if (!c) return;
-        this.setCount(count || 1);
-        this.resize(v);
-        c.gl.useProgram(c.prog);
-        c.gl.bindVertexArray(c.vao);
-        c.gl.drawArrays(c.gl.POINTS, 0, 0);
-        c.gl.bindVertexArray(null);
+        warmResult.attempts += 1;
+        warmResult.count = count;
+        warmResult.drawCalls = 0;
+        if (!ready(c)) {
+          warmResult.status = 'failed'; warmResult.reason = 'backend unavailable'; warmResult.failed += 1;
+        } else if (!count || !c.w || !c.h || !v.w || !v.h || (f && f.dust === false)) {
+          warmResult.status = 'deferred'; warmResult.reason = !count ? 'zero count' :
+            (f && f.dust === false) ? 'dust disabled' : 'zero size'; warmResult.deferred += 1;
+        } else {
+          try {
+            phase = 'warm-up';
+            neutralFrame.strength = f ? finite(f.strength, 1) : 1;
+            submit(c, v, neutralFrame, true);
+            checkError(c.gl);
+            clearOne(c);
+            checkError(c.gl);
+            warmResult.status = 'submitted'; warmResult.reason = '';
+            warmResult.drawCalls = 2; warmResult.submitted += 1;
+          } catch (error) {
+            fail(error);
+            warmResult.status = 'failed'; warmResult.reason = mountResult.reason; warmResult.failed += 1;
+          }
+        }
+        return copyNumbers(warmResult);
       },
       dispose: function () {
-        for (var i = 0; i < contexts.length; i += 1) {
-          var c = contexts[i];
-          try {
-            c.gl.deleteBuffer(c.buf);
-            c.gl.deleteVertexArray(c.vao);
-            c.gl.deleteProgram(c.prog);
-            var ext = c.gl.getExtension('WEBGL_lose_context');
-            if (ext) ext.loseContext();
-          } catch (e) { /* 已经掉了就别再管 */ }
-        }
-        contexts.length = 0;
-        count = 0;
-        data = null;
+        if (disposed) return;
+        disposed = true;
+        releaseAll();
+        onContextLost = null;
+        colors = null;
+        neutralFrame = null;
+      },
+      resources: function () {
+        var result = copyNumbers(alive);
+        result.backend = 'webgl';
+        result.generation = generation;
+        result.ready = !disposed && !failed && alive.contexts > 0;
+        result.disposed = disposed;
+        result.count = count;
+        result.created = copyNumbers(created);
+        result.released = copyNumbers(released);
+        result.peak = copyNumbers(peak);
+        result.cumulativeUploadBytes = uploadBytes;
+        result.surfaceRgbaEstimateBytes = alive.surfacePixels * 4;
+        result.contextReleaseRequested = releaseRequests;
+        result.contextReferencesReleased = released.contexts;
+        result.failures = failures;
+        result.mount = copyNumbers(mountResult);
+        result.warmUp = copyNumbers(warmResult);
+        result.productionDraws = productionDraws;
+        result.productionDrawCalls = productionDrawCalls;
+        result.capabilityProbe = probeResources();
+        return result;
       }
     };
   }
 
-  window.ParticleGL = { isAvailable: isAvailable, create: create };
+  window.ParticleGL = { isAvailable: isAvailable, create: create, probeResources: probeResources };
 })();

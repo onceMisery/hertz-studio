@@ -218,6 +218,32 @@ function feedHz(hz, times) {
     eq(g.skip, 0, '报 0 之后帧计数被清掉');
   }
 
+  section('借用帧：同一次主帧共享第二参数，各门保留自身累计毫秒');
+  {
+    api.gates.length = 0;
+    feedHz(60);
+    const borrowed = { version: 1, frameId: 0, sampledAtMs: 0, spectrumRevision: 7 };
+    const fired = [];
+    let legacyCalls = 0;
+    api.gates.push({ name: 'fast', fpsFn: () => 60,
+      tickFn: (dt, frame) => fired.push({ gate: 'fast', dt, frame, frameId: frame.frameId }), skip: 0, wait: 0 });
+    api.gates.push({ name: 'slow', fpsFn: () => 30,
+      tickFn: (dt, frame) => fired.push({ gate: 'slow', dt, frame, frameId: frame.frameId }), skip: 0, wait: 0 });
+    api.gates.push({ name: 'legacy', fpsFn: () => 60,
+      tickFn: (dt) => { if (dt > 0) legacyCalls += 1; }, skip: 0, wait: 0 });
+    for (let frame = 1; frame <= 4; frame += 1) {
+      borrowed.frameId = frame;
+      borrowed.sampledAtMs = frame * 1000 / 60;
+      api.runGates(1000 / 60, borrowed);
+    }
+    eq(fired.length, 6, '60/30fps 两门仍给 4/2 帧');
+    ok(fired.every((f) => f.frame === borrowed), '所有 tick 借用原第二参数，不复制帧');
+    eq(fired[1].frameId, fired[2].frameId, '同主帧到期的两门取得相同 frameId');
+    ok(Math.abs(fired[1].dt - 1000 / 60) < 1e-9, '60fps 门仍取得一帧累计毫秒');
+    ok(Math.abs(fired[2].dt - 2000 / 60) < 1e-9, '30fps 门仍取得两帧累计毫秒');
+    eq(legacyCalls, 4, '原单参数消费者保持运行');
+  }
+
   section('档位表不许再说谎：写死的帧率必须同时整除 60 与 120');
   {
     const declared = [];

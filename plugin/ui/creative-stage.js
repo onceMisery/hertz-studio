@@ -45,7 +45,6 @@
 
   var LOCAL_KEY = 'vmusic.creative.preset';
   var LOCAL_LIB_KEY = 'vmusic.creative.library';
-  var SERVER_KEY = 'creative_presets';
 
   // 分带边界与起音判据都在 onset.js。两边的"鼓点"必须是同一个时刻，所以这块
   // 只能有一份实现（v1.0 之前这里是独立一份，且阈值用固定 0.055，与粒子层的
@@ -1644,79 +1643,56 @@
   function effective() { return (wanted && !degradedBecause && views.length) ? '3d' : 'off'; }
 
   // -------------------------------------------------------------------------
-  // 预置库：优先写服务端 settings（换浏览器也在），失败退回 localStorage。
-  // 这是 README 里"不依赖 localStorage 存设置"那条约定的落地：本机缓存只是
-  // 离线兜底，权威副本在 SQLite 里。
+  // 服务端是唯一权威。旧浏览器副本仅在尚未初始化时迁移一次。
   // -------------------------------------------------------------------------
-
-  var library = [];
-
-  function api() {
-    var t = window.VMusicTransport;
-    if (!t) return null;
-    return t;
+  var library = [], hydratePromise = Promise.resolve(), saveTimer = 0;
+  function legacy(key) {
+    try { var text = localStorage.getItem(key); return text ? JSON.parse(text) : null; }
+    catch (_) { return null; }
   }
-
-  function loadLibrary() {
-    var t = api();
-    if (!t) return Promise.resolve(readLocalLibrary());
-    return t.get('/v1/settings').then(function (all) {
-      var raw = all && all[SERVER_KEY];
-      if (Array.isArray(raw)) { library = raw; writeLocalLibrary(raw); return raw; }
-      var local = readLocalLibrary();
-      // 本地积压的作品集往服务端补写一次：失败无碍，本地副本才是权威，
-      // 下次读取会再试一遍。
-      if (local.length) t.put('/v1/settings', kv(SERVER_KEY, local)).catch(function () {});
-      return local;
-    }).catch(function () { return readLocalLibrary(); });
-  }
-
-  function kv(k, v) { var o = {}; o[k] = v; return o; }
-
-  function readLocalLibrary() {
-    try {
-      var raw = localStorage.getItem(LOCAL_LIB_KEY);
-      var arr = raw ? JSON.parse(raw) : [];
-      return Array.isArray(arr) ? arr : [];
-    } catch (e) { return []; }
-  }
-
-  function writeLocalLibrary(arr) {
-    try { localStorage.setItem(LOCAL_LIB_KEY, JSON.stringify(arr)); } catch (e) { /* 隐私模式 */ }
-  }
-
   function persistLibrary() {
-    writeLocalLibrary(library);
-    var t = api();
-    // 服务端副本是可选同步：本地已写（上一行），写失败不影响任何功能。
-    if (t) t.put('/v1/settings', kv(SERVER_KEY, library)).catch(function () {});
+    if (!window.StagePersistence) return Promise.resolve();
+    var pending = StagePersistence.save('library', library);
+    pending.catch(function () {}); return pending;
   }
-
-  var saveTimer = 0;
-  function saveLocal(strict) {
-    clearTimeout(saveTimer);
-    saveTimer = 0;
-    try { localStorage.setItem(LOCAL_KEY, JSON.stringify(preset)); } catch (e) { if (strict) throw e; }
-    emit('change', preset);
+  function saveLocal() {
+    clearTimeout(saveTimer); saveTimer = 0;
+    var pending = window.StagePersistence ? StagePersistence.save('current', preset) : Promise.resolve();
+    pending.catch(function () {});
+    emit('change', preset); return pending;
   }
   function saveLocalSoon() {
     presetRevision += 1;
-    if (saveTimer) return;
-    saveTimer = setTimeout(saveLocal, 400);
+    if (!saveTimer) saveTimer = setTimeout(function () { saveLocal(); }, 400);
   }
-
-  function flushLocalSave() {
-    if (!saveTimer) return;
-    clearTimeout(saveTimer);
-    saveTimer = 0;
-    try { localStorage.setItem(LOCAL_KEY, JSON.stringify(preset)); } catch (e) { /* 隐私模式 */ }
+  function flushLocalSave() { return saveTimer ? saveLocal() : window.StagePersistence ? StagePersistence.flush('current') : Promise.resolve(); }
+  function restoreSnapshot(snapshot) {
+    if (preview) cancelPreview();
+    preset = snapshot.current ? normalize(snapshot.current) : basePreset();
+    library = Array.isArray(snapshot.library) ? snapshot.library : [];
+    presetRevision += 1; refreshPresentation(); emit('preset', preset); emit('library', library);
   }
-
-  function loadLocal() {
-    try {
-      var raw = localStorage.getItem(LOCAL_KEY);
-      return raw ? normalize(JSON.parse(raw)) : null;
-    } catch (e) { return null; }
+  function hydrate() {
+    if (!window.StagePersistence) return Promise.resolve();
+    var revision = presetRevision;
+    return StagePersistence.load(legacy(LOCAL_KEY), legacy(LOCAL_LIB_KEY)).then(function (snapshot) {
+      if (revision === presetRevision) restoreSnapshot(snapshot);
+      else {
+        StagePersistence.hold('读取期间舞台已修改；请重新载入服务端设置或用当前修改重试');
+        StagePersistence.save('current', preset).catch(function () {});
+      }
+      if (snapshot.legacyMediaRemoved) {
+        var notice = '旧版临时图片或视频无法恢复，请在背景来源中重新导入一次';
+        try {
+          var noticeKey = 'hertz.stage.media-migration.' + snapshot.state.storeId;
+          if (localStorage.getItem(noticeKey)) return;
+          localStorage.setItem(noticeKey, '1');
+        } catch (_) {}
+        document.dispatchEvent(new CustomEvent('stage-media:error', { detail: notice }));
+      }
+    }).catch(function (e) {
+      StagePersistence.hold('舞台设置读取失败：' + e.message);
+    });
   }
 
   function emit(kind, detail) {
@@ -1745,8 +1721,8 @@
   function init() {
     if (window.Backgrounds && Backgrounds.cancelTemporaryApply) Backgrounds.cancelTemporaryApply();
     preview = null; presetRevision += 1;
-    preset = loadLocal() || basePreset();
-    loadLibrary();
+    preset = basePreset(); library = [];
+    hydratePromise = hydrate();
     applyBackground();
     applyHand();
     if (window.Stage && Stage.gate) Stage.gate('creative', targetFps, tick);
@@ -1822,10 +1798,10 @@
   }
 
   document.addEventListener('visibilitychange', function () {
-    if (document.hidden) { flushLocalSave(); cancelPreview(); }
+    if (document.hidden) { flushLocalSave().catch(function () {}); cancelPreview(); }
   });
   if (window.addEventListener) window.addEventListener('pagehide', function () {
-    flushLocalSave(); cancelPreview();
+    flushLocalSave().catch(function () {}); cancelPreview();
   });
 
   var api2 = {
@@ -1859,6 +1835,15 @@
     applyPreview: applyPreview,
     preview: previewStatus,
     revision: function () { return presetRevision; },
+    hydrated: function () { return hydratePromise; },
+    flushPersistence: function () { return flushLocalSave(); },
+    flushLibrary: function () { return window.StagePersistence ? StagePersistence.flush('library') : Promise.resolve(); },
+    reloadPersistence: function () {
+      return StagePersistence.reload().then(function (snapshot) {
+        restoreSnapshot(snapshot);
+        if (window.Backgrounds && Backgrounds.commitSelection) Backgrounds.commitSelection();
+      });
+    },
     normalizeSharePreset: normalizeSharePreset,
     setProjectContext: function (value) {
       var next = CreativeProject.normalizeContext(value);
@@ -2113,6 +2098,7 @@
       if (hasStaleProject()) throw new Error(CreativeProject.recoveryMessage(legacyCueCount(preset)));
       var exported = deep(preset);
       delete exported.legacyCues;
+      if (exported.bg && exported.bg.type === 'media') exported.bg = { type: 'theme' };
       return JSON.stringify(exported, null, 2);
     },
     importJSON: function (text) {

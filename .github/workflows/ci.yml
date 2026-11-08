@@ -11,6 +11,32 @@ env:
   RUSTFLAGS: -D warnings
 
 jobs:
+  native-window:
+    name: Windows native · ${{ matrix.toolchain }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: [stable, '1.88.0']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: native-window-${{ matrix.toolchain }}
+      - name: Compile native main window and system media
+        run: cargo check --locked -p hertz-studio --all-targets --features full,native-window
+      - name: Native ownership and build identity tests
+        if: matrix.toolchain == 'stable'
+        run: |
+          cargo test --locked -p hertz-studio --lib system_media --features full,native-window
+          cargo test --locked -p hertz-studio --lib data_owner --features full,native-window
+          cargo test --locked -p hertz-studio --lib focus_ --features full,native-window
+          cargo test --locked -p hertz-studio --lib legacy_migration --features full,native-window
+          cargo test --locked -p hertz-studio --bin hertz-studio build_info --features full,native-window
+
   test:
     name: ${{ matrix.edition }} · fmt · clippy · test
     runs-on: ${{ matrix.os }}

@@ -15,6 +15,9 @@ use crate::state::{AppState, ScanError, ScanProgress, WsEvent};
 
 const MAX_ERRORS: usize = 50;
 
+mod selected;
+pub use selected::FileImporter;
+
 /// 扫描落库的批大小：每批一个显式事务，见 `scan_report` 里的分批注释。
 /// 200 一首批：够摊薄逐文件提交的开销，事务持有时间也还短。
 const SCAN_TX_BATCH: usize = 200;
@@ -97,7 +100,7 @@ async fn start_job(job: ScanJob, root: PathBuf, saved_only: bool) -> Result<(), 
     let db = job.db.clone();
     let progress = job.progress.clone();
     let events = job.events.clone();
-    spawn_guarded(job.run(root.clone()), db, progress, events, root);
+    spawn_guarded(job.run(root.clone()), db, progress, events, Some(root));
     Ok(())
 }
 
@@ -117,7 +120,7 @@ fn spawn_guarded(
     db: SqlitePool,
     progress: Arc<Mutex<ScanProgress>>,
     events: broadcast::Sender<WsEvent>,
-    root: PathBuf,
+    root: Option<PathBuf>,
 ) {
     let handle = tokio::spawn(task);
     tokio::spawn(async move {
@@ -129,20 +132,26 @@ fn spawn_guarded(
         let message = "扫描任务异常中断（后台任务 panic）".to_string();
         {
             let mut p = progress.lock().await;
-            record_error(&mut p, &root, message.clone());
+            record_error(
+                &mut p,
+                root.as_deref().unwrap_or(Path::new("本次导入")),
+                message.clone(),
+            );
             if !p.cancelled {
                 p.phase = "failed".into();
             }
             p.running = false;
         }
         // 与 `run` 同序：先落库再发终态，保证状态与根目录历史一致。
-        let _ = vmusic_store::scan_roots::record_result(
-            &db,
-            &root.to_string_lossy(),
-            false,
-            Some(message.as_str()),
-        )
-        .await;
+        if let Some(root) = root {
+            let _ = vmusic_store::scan_roots::record_result(
+                &db,
+                &root.to_string_lossy(),
+                false,
+                Some(message.as_str()),
+            )
+            .await;
+        }
         let snapshot = progress.lock().await;
         let _ = events.send(WsEvent::Scan {
             phase: snapshot.phase.clone(),
@@ -241,6 +250,10 @@ impl ScanJob {
         if let Err(error) = self.scan_files(&root).await {
             self.error(&root, error).await;
         }
+        self.finish(Some(&root)).await;
+    }
+
+    async fn finish(&self, root: Option<&Path>) {
         let mut progress = self.progress.lock().await;
         progress.cancelled = self.cancel.load(Ordering::Relaxed);
         progress.phase = if progress.cancelled {
@@ -257,17 +270,19 @@ impl ScanJob {
             progress.last_error.clone()
         };
         // Persist before the terminal event, so status and root history agree.
-        if let Err(error) = vmusic_store::scan_roots::record_result(
-            &self.db,
-            &root.to_string_lossy(),
-            !progress.cancelled && progress.failed == 0,
-            saved_error.as_deref(),
-        )
-        .await
-        {
-            record_error(&mut progress, &root, error.to_string());
-            if !progress.cancelled {
-                progress.phase = "failed".into();
+        if let Some(root) = root {
+            if let Err(error) = vmusic_store::scan_roots::record_result(
+                &self.db,
+                &root.to_string_lossy(),
+                !progress.cancelled && progress.failed == 0,
+                saved_error.as_deref(),
+            )
+            .await
+            {
+                record_error(&mut progress, root, error.to_string());
+                if !progress.cancelled {
+                    progress.phase = "failed".into();
+                }
             }
         }
         progress.running = false;
@@ -289,12 +304,12 @@ impl ScanJob {
         })
         .await
         .map_err(|e| e.to_string())??;
-        self.scan_report(root, report).await
+        self.scan_report(Some(root), report).await
     }
 
     async fn scan_report(
         &self,
-        root: &Path,
+        root: Option<&Path>,
         report: vmusic_library::WalkReport,
     ) -> Result<(), String> {
         {
@@ -318,7 +333,8 @@ impl ScanJob {
         .fetch_all(&self.db)
         .await
         .map_err(|e| e.to_string())?;
-        let lookup_root = root.to_path_buf();
+        let lookup_root = root.map(Path::to_path_buf);
+        let selected_files: HashSet<_> = report.files.iter().cloned().collect();
         let cancel = self.cancel.clone();
         let existing: HashMap<_, _> = tokio::task::spawn_blocking(move || {
             let mut rows = HashMap::new();
@@ -327,7 +343,10 @@ impl ScanJob {
                     break;
                 }
                 let key = vmusic_store::track_path_key(Path::new(&path));
-                if key.starts_with(&lookup_root) {
+                if lookup_root.as_ref().map_or_else(
+                    || selected_files.contains(&key),
+                    |root| key.starts_with(root),
+                ) {
                     rows.insert(key, (path, id, mtime, size));
                 }
             }
@@ -481,7 +500,9 @@ impl ScanJob {
             }
         }
         // Traversal errors invalidate deletion evidence for the whole root.
-        if report.error_count == 0 && !self.cancel.load(Ordering::Relaxed) {
+        if let Some(root) =
+            root.filter(|_| report.error_count == 0 && !self.cancel.load(Ordering::Relaxed))
+        {
             // Also protect a disconnected drive disappearing mid-pass.
             let check_root = root.to_path_buf();
             tokio::task::spawn_blocking(move || normalize_root(&check_root))
@@ -693,6 +714,134 @@ fn watch_roots(job: ScanJob) -> tokio::task::JoinHandle<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn import(fixture: &Fixture, paths: Vec<PathBuf>) -> ScanProgress {
+        selected::start_selected(fixture.job.clone(), paths)
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let progress = fixture.job.progress.lock().await.clone();
+                if !progress.running {
+                    return progress;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn selected_import_is_exact_never_prunes_and_preserves_identity() {
+        let fixture = Fixture::new().await;
+        wav(&fixture.root.join("keep.wav"), 80);
+        let missing = fixture.root.join("later-missing.wav");
+        wav(&missing, 80);
+        fixture.scan().await;
+        std::fs::remove_file(missing).unwrap();
+        let picked = fixture.root.join("picked.wav");
+        wav(&picked, 80);
+        wav(&fixture.root.join("unselected.wav"), 80);
+        let result = import(&fixture, vec![picked.clone()]).await;
+        assert_eq!((result.added, result.removed, result.total), (1, 0, 1));
+        assert!(result.root.is_none());
+        let rows: Vec<(String, String)> =
+            sqlx::query_as("SELECT id,path FROM tracks ORDER BY path")
+                .fetch_all(&fixture.job.db)
+                .await
+                .unwrap();
+        assert_eq!(rows.len(), 3);
+        assert!(!rows
+            .iter()
+            .any(|(_, path)| path.ends_with("unselected.wav")));
+        let result = import(&fixture, vec![picked]).await;
+        assert_eq!((result.added, result.skipped, result.removed), (0, 1, 0));
+        let again: Vec<(String, String)> =
+            sqlx::query_as("SELECT id,path FROM tracks ORDER BY path")
+                .fetch_all(&fixture.job.db)
+                .await
+                .unwrap();
+        assert_eq!(rows, again);
+        fixture.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn selected_directories_recurse_deduplicate_and_do_not_add_watch_roots() {
+        let fixture = Fixture::new().await;
+        let nested = fixture.root.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        wav(&fixture.root.join("first.wav"), 80);
+        wav(&nested.join("second.wav"), 80);
+        std::fs::write(nested.join("notes.txt"), "not audio").unwrap();
+        let result = import(
+            &fixture,
+            vec![
+                fixture.root.clone(),
+                nested.clone(),
+                nested.join("second.wav"),
+            ],
+        )
+        .await;
+        assert_eq!(
+            (result.total, result.added, result.failed, result.removed),
+            (2, 2, 0, 0)
+        );
+        let roots: i64 = sqlx::query_scalar("SELECT count(*) FROM scan_roots")
+            .fetch_one(&fixture.job.db)
+            .await
+            .unwrap();
+        assert_eq!(roots, 1);
+        fixture.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn selected_import_records_failures_without_losing_good_files() {
+        let fixture = Fixture::new().await;
+        let good = fixture.root.join("good.wav");
+        wav(&good, 80);
+        let broken = fixture.root.join("broken.flac");
+        std::fs::write(&broken, b"invalid audio").unwrap();
+        let result = import(
+            &fixture,
+            vec![
+                good,
+                broken,
+                fixture.root.join("missing.wav"),
+                PathBuf::from("relative.wav"),
+            ],
+        )
+        .await;
+        assert_eq!(
+            (result.total, result.added, result.failed, result.removed),
+            (2, 1, 3, 0)
+        );
+        assert_eq!(result.phase, "failed");
+        assert_eq!(result.errors.len(), 3);
+        assert!(!result.running);
+        fixture.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn selected_import_shares_admission_and_releases_after_cancel() {
+        let fixture = Fixture::new().await;
+        fixture.job.reserve(&fixture.root).await.unwrap();
+        assert!(
+            selected::start_selected(fixture.job.clone(), vec![fixture.root.clone()])
+                .await
+                .is_err()
+        );
+        fixture.job.cancel.store(true, Ordering::Relaxed);
+        fixture.job.clone().run(fixture.root.clone()).await;
+        assert_eq!(fixture.job.progress.lock().await.phase, "cancelled");
+        let result = import(&fixture, vec![fixture.root.clone()]).await;
+        assert_eq!(result.phase, "done");
+        assert!(!result.running);
+        assert!(selected::start_selected(fixture.job.clone(), vec![])
+            .await
+            .is_err());
+        fixture.cleanup().await;
+    }
 
     struct Fixture {
         base: PathBuf,
@@ -955,7 +1104,7 @@ mod tests {
         fixture
             .job
             .scan_report(
-                &fixture.root,
+                Some(&fixture.root),
                 vmusic_library::WalkReport {
                     errors: vec![(fixture.root.join("private"), "permission denied".into())],
                     error_count: 1,
@@ -1199,7 +1348,7 @@ mod tests {
             fixture.job.db.clone(),
             fixture.job.progress.clone(),
             fixture.job.events.clone(),
-            fixture.root.clone(),
+            Some(fixture.root.clone()),
         );
         let progress = tokio::time::timeout(Duration::from_secs(10), async {
             loop {

@@ -49,6 +49,7 @@ pub struct InstalledReceipt {
 pub struct AssetStore {
     root: PathBuf,
     content_capacity: u64,
+    _root_owner: Arc<crate::root_owner::RootOwner>,
 }
 
 /// 核验缓存持有只读、拒绝写入/删除共享的句柄；命中时字节身份不能变化。
@@ -59,6 +60,7 @@ pub(crate) struct PinnedMedia {
     _file_pin: std::fs::File,
     // 派生输入的目录租约随所有 Broker/流持有者退出，不能随准备描述符提前归还。
     _derived_lease: Option<Arc<std::fs::File>>,
+    _root_owner: Arc<crate::root_owner::RootOwner>,
 }
 
 /// 结构与摘要已复核，真实解码期间持续固定这份字节。
@@ -71,6 +73,8 @@ pub(crate) struct DecodeInput {
 
 impl AssetStore {
     pub fn new(root: &Path) -> Result<Self> {
+        let root_owner = crate::wallpaper_upgrade::admit_config(root)
+            .map_err(|error| JobError::database(format!("{error:#}")))?;
         std::fs::create_dir_all(root.join("packages"))
             .and_then(|_| std::fs::create_dir_all(root.join("staging")))
             .and_then(|_| std::fs::create_dir_all(root.join("derived")))
@@ -78,6 +82,7 @@ impl AssetStore {
         Ok(Self {
             root: root.to_path_buf(),
             content_capacity: super::content_quota::CAP,
+            _root_owner: root_owner,
         })
     }
 
@@ -123,6 +128,48 @@ impl AssetStore {
         &self.root
     }
 
+    /// Export reads the original bytes through one fixed native handle.
+    pub(crate) fn open_installed_original(&self, package_hash: &str) -> Result<std::fs::File> {
+        use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT,
+        };
+        if !hertz_wallpaper::valid_sha256_hex(package_hash) {
+            return Err(JobError::invalid_input("包 hash 格式无效"));
+        }
+        let file = std::fs::File::options()
+            .read(true)
+            .share_mode(1)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(self.package_dir(package_hash).join("original.hwpkg"))
+            .map_err(|_| JobError::new("package_unavailable", "已安装的原始壁纸包不可读"))?;
+        let metadata = file
+            .metadata()
+            .map_err(|error| JobError::io(error.to_string()))?;
+        if !metadata.is_file() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(JobError::new(
+                "package_unavailable",
+                "原始壁纸包不是普通文件",
+            ));
+        }
+        hertz_wallpaper::archive::check_package_bytes(metadata.len())?;
+        Ok(file)
+    }
+
+    /// A native output capability must not write back into managed storage.
+    pub(crate) fn is_path_within_root(&self, path: &Path) -> Result<bool> {
+        let parent = path
+            .parent()
+            .ok_or_else(|| JobError::invalid_input("导出路径缺少目录"))?;
+        let root =
+            std::fs::canonicalize(&self.root).map_err(|error| JobError::io(error.to_string()))?;
+        let parent =
+            std::fs::canonicalize(parent).map_err(|error| JobError::io(error.to_string()))?;
+        let root = root.to_string_lossy().to_lowercase();
+        let parent = parent.to_string_lossy().to_lowercase();
+        Ok(parent == root || parent.starts_with(&format!("{}\\", root.trim_end_matches('\\'))))
+    }
+
     pub(crate) fn pin_prepared(
         &self,
         input: &DecodeInput,
@@ -130,7 +177,7 @@ impl AssetStore {
         entry: hertz_wallpaper::VerifiedEntry,
         lease: Option<Arc<std::fs::File>>,
     ) -> Result<DecodeInput> {
-        Self::pin_derived(
+        self.pin_derived(
             &input.package_hash,
             input
                 .media
@@ -159,10 +206,11 @@ impl AssetStore {
         {
             return Err(JobError::invalid_input("静态封面身份或大小无效"));
         }
-        Self::pin_derived(package_hash, None, path, entry, Some(lease))
+        self.pin_derived(package_hash, None, path, entry, Some(lease))
     }
 
     fn pin_derived(
+        &self,
         package_hash: &str,
         package_pin: Option<std::fs::File>,
         path: PathBuf,
@@ -199,6 +247,7 @@ impl AssetStore {
             package_hash: package_hash.to_string(),
             metadata,
             media: Arc::new(PinnedMedia {
+                _root_owner: Arc::clone(&self._root_owner),
                 entry,
                 path,
                 _package_pin: package_pin,
@@ -333,7 +382,7 @@ impl AssetStore {
         package: &StagedPackage,
         cancel: &std::sync::atomic::AtomicBool,
     ) -> Result<Vec<DecodeInput>> {
-        Self::probe_media_at(&self.staging_dir(job_id).join("files"), package, cancel)
+        self.probe_media_at(&self.staging_dir(job_id).join("files"), package, cancel)
     }
 
     pub(crate) fn probe_installed_media(
@@ -341,7 +390,7 @@ impl AssetStore {
         package: &StagedPackage,
         cancel: &std::sync::atomic::AtomicBool,
     ) -> Result<Vec<DecodeInput>> {
-        Self::probe_media_at(
+        self.probe_media_at(
             &self.package_dir(&package.package_hash).join("files"),
             package,
             cancel,
@@ -349,6 +398,7 @@ impl AssetStore {
     }
 
     fn probe_media_at(
+        &self,
         files: &Path,
         package: &StagedPackage,
         cancel: &std::sync::atomic::AtomicBool,
@@ -447,6 +497,7 @@ impl AssetStore {
                     package_hash: package.package_hash.clone(),
                     metadata,
                     media: Arc::new(PinnedMedia {
+                        _root_owner: Arc::clone(&self._root_owner),
                         entry: entry.clone(),
                         path: files.join(path),
                         _package_pin: Some(
@@ -613,6 +664,7 @@ impl AssetStore {
             return Ok(None);
         };
         Ok(Some(PinnedMedia {
+            _root_owner: Arc::clone(&self._root_owner),
             entry,
             path: path_buf,
             _package_pin: Some(original),

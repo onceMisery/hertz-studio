@@ -177,6 +177,24 @@ function checkResponsiveSurfaces() {
   ok(/@media\s*\(max-width:\s*359px\)/.test(css),'small-phone controls have a compact layout');
   ok(/\.hz-workspace\s*\{[^}]*min-width:\s*0/.test(css)&&/\.hz-workspace[^}]*min-height:\s*0/.test(css),'workspace can shrink in both dimensions');
   ok(/\.hz-workspace > \.column\s*\{[^}]*overflow-y:\s*auto/.test(css),'content owns vertical scrolling');
+  // hertz 把 .view 改成 height:auto 后，内层「三件套」容器拿不到确定高度，
+  // 会变成自身不可滚却仍带 overscroll-behavior:contain 的假滚动容器，
+  // 把滚轮截断在 #column 之外（在线曲库 / 每日推荐都这样坏过，且直接给
+  // #column.scrollTop 赋值的断言全绿 —— 它绕过了整条滚轮链）。
+  const innerScrollRule = css.match(/html\[data-skin="hertz"\] #column \.online-scroll\s*,\s*html\[data-skin="hertz"\] #column \.dv-body\s*\{([^}]*)\}/);
+  ok(!!innerScrollRule,'hertz hands inner scroll containers back to the column');
+  if (innerScrollRule) {
+    const decl = innerScrollRule[1];
+    ok(/overflow:\s*visible/.test(decl),'inner bodies stop claiming a scroll port');
+    ok(/flex:\s*none/.test(decl)&&/height:\s*auto/.test(decl)&&/min-height:\s*0/.test(decl),
+      'inner bodies grow with their content instead of being squeezed');
+    ok(/overscroll-behavior:\s*auto/.test(decl),'inner bodies stop swallowing the wheel');
+  }
+  const restoringRule = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
+    .filter(m => /html\[data-skin="hertz"\]/.test(m[1]) && /(?:\.online-scroll|\.dv-body)/.test(m[1]))
+    .some(m => /overflow(?:-y)?:\s*(?:auto|scroll|hidden)/.test(m[2]) ||
+               /overscroll-behavior[^:]*:\s*contain/.test(m[2]));
+  ok(!restoringRule,'no hertz rule gives the inner bodies their scroll containment back');
   ok(/\.hz-mobile-nav\s*\{[^}]*position:\s*fixed/.test(css),'touch navigation remains reachable');
   ok(/env\(safe-area-inset-bottom\)/.test(css)&&/env\(safe-area-inset-top\)/.test(css),'mobile surfaces reserve safe areas');
   ok(/#playback-bar\s*\{[^}]*bottom:\s*calc\(77px \+ env/.test(css),'mobile player clears bottom navigation');

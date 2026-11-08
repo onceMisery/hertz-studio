@@ -12,13 +12,9 @@
 //    再由 CSS 拉伸到全屏并加一层 blur。理由：背景是低频图像，信息量本来就低；
 //    按屏幕分辨率逐像素算，多花的代价全用在合成器一秒后就抹掉的高频上。
 //
-// 2. **用户媒体不出本机。** 图片/视频走 File API → ObjectURL，只存在于当前
-//    标签页的内存里，既不上传也不落 IndexedDB。这是"本地优先"那条承诺在
-//    背景功能上的具体含义 —— 换台机器打不开是特性，不是缺陷。
-//
-// 3. **视频背景要主动降速降分辨率。** 一个 4K 60fps 的视频当背景，解码器会
-//    一直占着 GPU，三维舞台就没得用了。所以只接受用户上传，并且强制
-//    playbackRate 降速、画布式降采样。默认关闭，要点开才用。
+// 2. 用户媒体导入当前连接的服务设备，预设只保留 assetRef。运行 URL 与租约
+//    由本模块管理，SpaceLayers/BgWall 借用同一解码元素。
+// 3. 视频准入按真实编码尺寸和帧率检查；CSS 缩小与播放降速不能降低准入预算。
 
 (function () {
   'use strict';
@@ -43,7 +39,9 @@
     canvas: null,
     ctx: null,
     media: null,                  // <img> 或 <video>
-    mediaUrl: null,               // 用户本地文件的 ObjectURL，切走时要 revoke
+    poster: null,                 // 有界静态交接帧，不持有第二个视频解码器
+    mediaUrl: null,               // 仅运行时；绝不写入预设
+    lease: null,
     w: 0, h: 0,
     attached: false,
     stageHost: null,              // 大舞台复用同一背景层，退出后归还原挂点
@@ -60,6 +58,20 @@
     inputBound: false
   };
   var temporaryApply = null;
+  var mediaGeneration = 0, mediaKey = '', mediaReady = Promise.resolve(), mediaError = '';
+  var selectionPin = null, recoverySpec = null;
+  var mediaProbe = null, mediaListeners = [], mediaPresented = false, resumePoint = null;
+  var selectionSerial = 0, pageInactive = false, serviceOnline = true;
+  function identity(spec) { return spec && spec.assetRef ? spec.assetRef.storeId + '/' + spec.assetRef.assetId : spec && spec.url || ''; }
+  function abortedMedia() { var e = new Error('背景选择已变化，素材仍保存在素材库'); e.name = 'AbortError'; return e; }
+  function presetRevision() { return window.CreativeStage && CreativeStage.revision ? CreativeStage.revision() : null; }
+  function reportMediaError(error) {
+    mediaError = error.message || String(error);
+    document.dispatchEvent(new CustomEvent('stage-media:error', { detail: mediaError }));
+  }
+  function releaseLease(lease) {
+    if (lease && lease !== selectionPin && !(temporaryApply && temporaryApply.lease === lease)) lease.release();
+  }
 
   // 视差输入：指针在视口内的归一化位置（-1..1）+ 平滑后的版本。
   // 所有「随动」都读这同一个值，墙和 DOM 位移才不会各晃各的。
@@ -68,7 +80,7 @@
 
   // Borrowers observe completed source frames, including paused async loads.
   function sourceFrame() {
-    var source = state.spec.type === 'media' ? state.media : isCanvasType() ? state.canvas : null;
+    var source = state.spec.type === 'media' ? (mediaPresented ? state.media : state.poster) : isCanvasType() ? state.canvas : null;
     var width = source && (source.videoWidth || source.naturalWidth || source.width) || 0;
     var height = source && (source.videoHeight || source.naturalHeight || source.height) || 0;
     return { source: source, version: sourceVersion, width: width, height: height,
@@ -194,9 +206,9 @@
     var s = spec && spec.type ? spec : { type: 'theme' };
     var out = { type: s.type };
     if (s.type === 'media') {
-      out.url = s.url || '';
+      if (s.assetRef) out.assetRef = JSON.parse(JSON.stringify(s.assetRef));
+      else if (s.url) out.url = s.url;
       out.media = s.media === 'video' ? 'video' : 'image';
-      if (s.name) out.name = s.name;
       if (s.rate !== undefined) out.rate = clampN(s.rate, 0.25, 2, 0.75);
     }
     if (s.type === 'cover' || s.type === 'mesh') {
@@ -229,7 +241,7 @@
 
   // 墙的纹理源：媒体类型用 <img>/<video>，生成式类型用离屏画布。
   function wallSource() {
-    return state.spec.type === 'media' ? state.media : state.canvas;
+    return sourceFrame().source;
   }
 
   function ensureWall() {
@@ -287,7 +299,7 @@
   function update(spec) {
     var next = normalizeSpec(spec);
     var structural = next.type !== state.spec.type ||
-      (next.type === 'media' && next.url !== state.spec.url);
+      (next.type === 'media' && identity(next) !== identity(state.spec));
     if (structural) return apply(spec);
     state.spec = next;
     configureFx();
@@ -325,6 +337,7 @@
 
   // 只搬 DOM，不重新 apply：本地 ObjectURL、视频进度和 BgWall 的纹理主人都不变。
   function setStageHost(host) {
+    var hostChanged = state.stageHost !== (host || null);
     state.stageHost = host || null;
     if (state.layer) {
       var parent = state.stageHost || state.homeParent || document.body;
@@ -337,6 +350,8 @@
       if (state.wallApi && state.wallApi.ready()) state.wallApi.resize();
     }
     syncMediaPlayback();
+    // Stage3D finishes its body visibility classes after moving the shared layer.
+    if (hostChanged) Promise.resolve().then(syncMediaVisibility);
     refresh();
   }
 
@@ -356,16 +371,33 @@
   }
 
   function isVisible() {
-    return !document.hidden && !!state.layer && !state.layer.hidden
+    return !pageInactive && !document.hidden && !!state.layer && !state.layer.hidden
       && (!!state.stageHost || !document.body.classList.contains('s3d-open'));
   }
 
   function syncMediaPlayback() {
-    var media = state.media;
-    if (!media || media.tagName !== 'VIDEO') return;
-    if (!isVisible() || (state.stageState && (state.stageState.paused || state.stageState.reduced))) { media.pause(); return; }
-    var playing = media.play();
-    if (playing && playing.catch) playing.catch(function () { /* 静帧仍可显示 */ });
+    var media = state.media, lease = state.lease, generation = mediaGeneration;
+    var active = isVisible() && serviceOnline, ready = null;
+    [lease, selectionPin, temporaryApply && temporaryApply.lease].forEach(function (pin, index, all) {
+      if (!pin || !pin.setActive || all.indexOf(pin) !== index) return;
+      var pending = pin.setActive(pin === lease ? active : !pageInactive && !document.hidden && serviceOnline);
+      if (pin === lease) ready = pending;
+      else if (pending) pending.catch(function () {});
+    });
+    if (!media || media.tagName !== 'VIDEO') { if (ready) ready.catch(function () {}); return; }
+    if (!active || mediaProbe || (state.stageState && (state.stageState.paused || state.stageState.reduced))) {
+      media.pause(); if (ready) ready.catch(function () {}); return;
+    }
+    function play() {
+      if (generation !== mediaGeneration || media !== state.media || !isVisible() || !serviceOnline) return;
+      if (state.stageState && (state.stageState.paused || state.stageState.reduced)) return;
+      if (!media.paused) return;
+      var playing = media.play();
+      if (playing && playing.catch) playing.catch(function (error) {
+        if (generation === mediaGeneration && isVisible() && error.name !== 'AbortError') reportMediaError(new Error('背景视频未能继续播放，请点击重试当前素材'));
+      });
+    }
+    if (ready) ready.then(play, function () {}); else play();
   }
 
   function refresh() {
@@ -374,18 +406,43 @@
     if (window.Stage && Stage.kick) Stage.kick();
   }
 
-  function clearMedia() {
+  function clearPoster() {
+    if (state.poster && state.poster.parentNode) state.poster.parentNode.removeChild(state.poster);
+    state.poster = null;
+  }
+
+  function freezeMedia() {
+    if (!mediaPresented || !state.media) return;
+    var source = sourceFrame();
+    if (!source.ready) return;
+    var scale = Math.min(1, 1024 / Math.max(source.width, source.height));
+    var poster = document.createElement('canvas');
+    poster.width = Math.max(1, Math.round(source.width * scale));
+    poster.height = Math.max(1, Math.round(source.height * scale));
+    poster.className = 'creative-bg-media';
+    try { poster.getContext('2d').drawImage(source.source, 0, 0, poster.width, poster.height); }
+    catch (_) { return; }
+    clearPoster(); state.poster = poster; state.layer.appendChild(poster);
+  }
+
+  function clearMedia(keepPoster) {
+    mediaGeneration++; mediaKey = '';
+    if (mediaProbe) { mediaProbe.abort(); mediaProbe = null; }
+    mediaListeners.splice(0).forEach(function (remove) { remove(); });
+    var wasLeased = !!state.lease;
+    var lease = state.lease; state.lease = null; mediaPresented = false;
+    if (!keepPoster) { clearPoster(); resumePoint = null; }
     // 入口处先把「将要清掉的这个元素对应的 URL」固定下来：setLocalFile 会在
     // apply 之前改 state.mediaUrl，不先捕获的话会误撤新 URL（真实存在的隐患）。
     var urlForMedia = state.mediaUrl;
-    if (!state.media) { state.mediaUrl = null; return; }
+    if (!state.media) { state.mediaUrl = null; releaseLease(lease); return; }
     if (state.media.tagName === 'VIDEO') {
       try { state.media.pause(); } catch (e) { /* 已经停了 */ }
       state.media.removeAttribute('src');
       state.media.load();
-    }
+    } else state.media.removeAttribute('src');
     if (state.media.parentNode) state.media.parentNode.removeChild(state.media);
-    if (urlForMedia) {
+    if (urlForMedia && !wasLeased) {
       if (temporaryApply) {
         if (temporaryApply.urls.indexOf(urlForMedia) < 0) temporaryApply.urls.push(urlForMedia);
       } else {
@@ -394,6 +451,7 @@
     }
     state.media = null;
     state.mediaUrl = null;
+    releaseLease(lease);
   }
 
   function sizeCanvas() {
@@ -629,10 +687,6 @@
     window.addEventListener('pointercancel', function () {
       pointer.x = pointer.y = 0;
     }, { passive: true });
-    document.addEventListener('visibilitychange', function () {
-      syncMediaPlayback();
-      if (!document.hidden) refresh();
-    });
   }
 
   function tick(dtMs) {
@@ -644,7 +698,12 @@
     var bands = window.Stage && Stage.spectrum ? Stage.spectrum() : null;
     var agg = 0, pulse = 0;
     if (window.Stage && Stage.energy) agg = Stage.energy() || 0;
-    if (window.StageParticles && StageParticles.stats) pulse = StageParticles.stats().pulse || 0;
+    var features = window.StageParticles && StageParticles.audioFeatures ? StageParticles.audioFeatures() : null;
+    if (features && features.available === true && typeof features.sampledAt === 'number') {
+      var audioNow = window.performance && performance.now ? performance.now() : Date.now();
+      var age = audioNow - features.sampledAt;
+      if (age >= 0 && age < 600 && typeof features.pulse === 'number' && isFinite(features.pulse)) pulse = features.pulse;
+    }
     if (window.CreativeStage && CreativeStage.stats) {
       var s = CreativeStage.stats();
       if (s.agg) agg = (s.agg[0] + s.agg[1] + s.agg[2] + s.agg[3]) / 4;
@@ -725,8 +784,10 @@
   // 应用
   // -------------------------------------------------------------------------
 
-  function apply(spec) {
-    state.spec = normalizeSpec(spec);
+  function apply(spec, selecting) {
+    var next = normalizeSpec(spec);
+    if (!selecting && !temporaryApply && (next.type !== state.spec.type || identity(next) !== identity(state.spec))) api.commitSelection();
+    state.spec = next;
     var root = document.documentElement;
     var type = state.spec.type;
 
@@ -736,12 +797,14 @@
 
     if (type === 'theme') {
       clearMedia();
+      mediaReady = Promise.resolve();
       destroyWall();
       state.depthEffective = 'flat';
       if (state.layer) {
         delete state.layer.dataset.depth;
         state.layer.hidden = true;
       }
+      syncMediaPlayback();
       invalidateSource();
       return state.spec;
     }
@@ -754,9 +817,13 @@
       // 同 URL 的重复 apply 必须幂等：setBackground 引发的联动会把同一 spec 再
       // 送进来一遍。真去 applyMedia 的话 clearMedia 会 revoke 这个 blob URL，
       // 紧接着又拿死 URL 建 <img>，图片永远解码失败（实测 naturalWidth=0）。
-      if (!(state.media && state.media.src === state.spec.url)) applyMedia();
+      if (mediaKey !== identity(state.spec) || (!state.media && !mediaKey)) {
+        if (isVisible()) startMedia(false);
+        else { freezeMedia(); clearMedia(true); mediaReady = Promise.resolve(); invalidateSource(); }
+      }
     } else {
       clearMedia();
+      mediaReady = Promise.resolve();
       sizeCanvas();
       // 换类型时把画布清干净：流场的拖尾、色谱的滚动列都是跨帧累积的，
       // 不清的话新背景会从旧背景的残影上长出来。
@@ -790,7 +857,7 @@
 
   function beginTemporaryApply() {
     if (temporaryApply) return;
-    temporaryApply = { spec: JSON.parse(JSON.stringify(state.spec)), urls: [] };
+    temporaryApply = { spec: JSON.parse(JSON.stringify(state.spec)), lease: state.lease, urls: [] };
   }
 
   function releaseTemporaryApply(restore) {
@@ -801,6 +868,7 @@
       try { apply(pending.spec); restored = true; } catch (e) { /* 仍需清理临时资源 */ }
     }
     temporaryApply = null;
+    if (pending.lease && pending.lease !== state.lease) pending.lease.release();
     pending.urls.forEach(function (url) {
       if (url === state.mediaUrl || (!restored && restore && pending.spec.url === url)) return;
       try { URL.revokeObjectURL(url); } catch (e) { /* 忽略 */ }
@@ -808,56 +876,152 @@
     return true;
   }
 
-  function applyMedia() {
-    clearMedia();
-    var src = state.spec.url;
-    if (!src) {
-      // 没有素材时退回主题色，而不是留一块黑 —— 用户看到的第一眼不该是"坏了"。
-      state.layer.hidden = true;
-      document.documentElement.dataset.bgType = 'theme';
-      invalidateSource();
-      return;
+  function rememberPosition() {
+    if (mediaPresented && state.media && state.media.tagName === 'VIDEO' && Number.isFinite(state.media.currentTime)) {
+      resumePoint = { key: mediaKey, time: state.media.currentTime };
     }
-    var isVideo = state.spec.media === 'video' || /\.(mp4|webm|mov|m4v)$/i.test(src);
-    var el;
-    if (isVideo) {
-      el = document.createElement('video');
-      el.muted = true;
-      el.loop = true;
-      el.autoplay = !document.hidden;
-      el.setAttribute('playsinline', '');
-      // 降速：背景视频是氛围，不是内容。放慢之后解码压力下降，移动也更耐看。
-      el.playbackRate = state.spec.rate === undefined ? 0.75 : state.spec.rate;
-      el.addEventListener('loadeddata', function () {
-        if (state.media === el) { syncMediaPlayback(); refresh(); invalidateSource(); }
-      });
-    } else {
-      el = document.createElement('img');
-      el.alt = '';
-      el.decoding = 'async';
-      el.addEventListener('load', function () { if (state.media === el) { refresh(); invalidateSource(); } });
-    }
-    el.className = 'creative-bg-media';
-    el.src = src;
-    state.layer.appendChild(el);
-    state.media = el;
-    // 记下这个元素对应的 URL，供下一次 clearMedia 精确撤销
-    state.mediaUrl = src;
-    invalidateSource();
   }
 
-  /** 用户选的本地文件。只建 ObjectURL，不上传、不落库。 */
-  function setLocalFile(file) {
-    if (!file) return apply({ type: 'theme' });
-    var url = URL.createObjectURL(file);
-    // 旧 URL 由 apply → applyMedia → clearMedia 按 state.mediaUrl 撤销，
-    // 这里不提前 revoke，避免历史上「撤错成新 URL」的问题。
-    return apply({
-      type: 'media',
-      url: url,
-      media: /^video\//.test(file.type) ? 'video' : 'image',
-      name: file.name
+  function startMedia(preservePosition) {
+    if (preservePosition) rememberPosition();
+    else if (!resumePoint || resumePoint.key !== identity(state.spec)) resumePoint = null;
+    var operation = applyMedia();
+    mediaReady = operation;
+    operation.catch(function (error) {
+      if (error.name !== 'AbortError' && mediaReady === operation) reportMediaError(error);
     });
+    return operation;
+  }
+
+  function resumeMedia() {
+    if (!isVisible() || !serviceOnline || state.spec.type !== 'media') return;
+    if (!state.media && !mediaProbe) startMedia(true);
+    else syncMediaPlayback();
+  }
+
+  function syncMediaVisibility() {
+    if (!isVisible() && mediaProbe) { rememberPosition(); freezeMedia(); clearMedia(true); invalidateSource(); }
+    if (isVisible()) resumeMedia(); else syncMediaPlayback();
+    if (!document.hidden) refresh();
+  }
+
+  async function applyMedia() {
+    freezeMedia();
+    clearMedia(true);
+    mediaError = '';
+    var spec = state.spec, generation = mediaGeneration;
+    mediaKey = identity(spec);
+    var controller = new AbortController(); mediaProbe = controller;
+    var cleanups = [], timeout;
+    var aborted = new Promise(function (_, reject) {
+      function stop() { reject(abortedMedia()); }
+      controller.signal.addEventListener('abort', stop, { once: true });
+      cleanups.push(function () { controller.signal.removeEventListener('abort', stop); });
+    });
+    var lease;
+    function current() {
+      if (generation !== mediaGeneration || controller.signal.aborted || !isVisible()) throw abortedMedia();
+    }
+    try {
+      var acquisition = spec.assetRef ? StageMedia.acquire(spec, { signal: controller.signal, onLost: function () {
+        if (generation !== mediaGeneration || state.lease !== lease || !isVisible() || !serviceOnline) return;
+        // One replacement attempt; a failed acquisition waits for reconnect, visibility
+        // or the explicit retry button instead of starting an unbounded polling loop.
+        startMedia(true);
+      } }) : Promise.resolve(null);
+      acquisition.then(function (acquired) {
+        if (acquired && (generation !== mediaGeneration || controller.signal.aborted)) acquired.release();
+      }, function () {});
+      lease = await Promise.race([acquisition, aborted]);
+      if (generation !== mediaGeneration || controller.signal.aborted) { if (lease) lease.release(); throw abortedMedia(); }
+      state.lease = lease;
+      current();
+      var src = lease ? lease.url : spec.url;
+      if (!src) throw new Error('素材引用缺失，请重新导入图片或视频');
+      var isVideo = spec.media === 'video' || /\.(mp4|webm|mov|m4v)$/i.test(src);
+      var el = document.createElement(isVideo ? 'video' : 'img');
+      if (isVideo) {
+        el.muted = true; el.loop = true; el.autoplay = false;
+        el.setAttribute('playsinline', '');
+        el.playbackRate = state.spec.rate === undefined ? 0.75 : state.spec.rate;
+      } else { el.alt = ''; el.decoding = 'async'; }
+      el.className = 'creative-bg-media'; el.hidden = true;
+      el.crossOrigin = 'anonymous';
+      state.layer.appendChild(el); state.media = el; state.mediaUrl = src;
+      invalidateSource();
+      // All probe listeners and waits belong to this generation, including play/seek.
+      function wait(type) {
+        current();
+        return new Promise(function (resolve, reject) {
+          function done() { cleanup(); resolve(); }
+          function failed() { cleanup(); reject(new Error('浏览器无法解码此素材，请选择支持的文件')); }
+          function aborted() { cleanup(); reject(abortedMedia()); }
+          function cleanup() {
+            el.removeEventListener(type, done); el.removeEventListener('error', failed);
+            controller.signal.removeEventListener('abort', aborted);
+          }
+          cleanups.push(cleanup);
+          el.addEventListener(type, done, { once: true }); el.addEventListener('error', failed, { once: true });
+          controller.signal.addEventListener('abort', aborted, { once: true });
+        });
+      }
+      async function seek(time) {
+        current();
+        if (Math.abs(el.currentTime - time) < 0.01 && el.readyState >= 2) return;
+        var seeked = wait('seeked'); el.currentTime = time; await seeked; current();
+      }
+      var probe = (async function () {
+        var loaded = wait(isVideo ? 'loadeddata' : 'load'); el.src = src;
+        await loaded; current();
+        if (isVideo) {
+          if (!Number.isFinite(el.duration) || el.duration <= 0 || !el.videoWidth || !el.videoHeight) throw new Error('视频元数据无效');
+          await el.play(); current(); el.pause();
+          await seek(Math.min(el.duration / 4, 1));
+          await seek(resumePoint && resumePoint.key === mediaKey ? Math.min(resumePoint.time, Math.max(0, el.duration - 0.01)) : 0);
+        } else if (el.decode) { await el.decode(); current(); }
+        var canvas = document.createElement('canvas'); canvas.width = canvas.height = 1;
+        var ctx = canvas.getContext('2d'); ctx.drawImage(el, 0, 0, 1, 1); ctx.getImageData(0, 0, 1, 1);
+      })();
+      await Promise.race([probe, new Promise(function (_, reject) {
+        timeout = setTimeout(function () { reject(new Error('素材解码验证超过 15 秒，请重试或更换文件')); }, 15000);
+      }), aborted]);
+      current();
+      mediaProbe = null; mediaPresented = true; el.hidden = false; clearPoster(); resumePoint = null;
+      function failedPlayback() {
+        if (generation !== mediaGeneration || state.media !== el) return;
+        rememberPosition(); freezeMedia(); clearMedia(true); invalidateSource();
+        reportMediaError(new Error('背景素材读取中断，已保留静态画面；请重试当前素材'));
+      }
+      el.addEventListener('error', failedPlayback);
+      mediaListeners.push(function () { el.removeEventListener('error', failedPlayback); });
+      configureDepth(); syncMediaPlayback(); refresh(); invalidateSource();
+    } catch (e) {
+      if (generation === mediaGeneration) { clearMedia(true); invalidateSource(); }
+      throw e;
+    } finally {
+      clearTimeout(timeout); cleanups.forEach(function (cleanup) { cleanup(); });
+      if (mediaProbe === controller) mediaProbe = null;
+    }
+  }
+
+  async function selectMedia(spec) {
+    if (pageInactive || document.hidden) throw abortedMedia();
+    var intent = ++selectionSerial, revision = presetRevision();
+    if (!recoverySpec) { recoverySpec = JSON.parse(JSON.stringify(state.spec)); selectionPin = state.lease; }
+    apply(spec, true);
+    if (!isVisible()) throw abortedMedia();
+    var selected = mediaGeneration;
+    await mediaReady;
+    if (intent !== selectionSerial || revision !== presetRevision() || selected !== mediaGeneration || identity(spec) !== identity(state.spec)) throw abortedMedia();
+    return JSON.parse(JSON.stringify(state.spec));
+  }
+  async function setLocalFile(file, progress) {
+    if (!file) throw new Error('请选择素材文件');
+    var generation = mediaGeneration, revision = presetRevision(), intent = ++selectionSerial;
+    var spec = await StageMedia.importFile(file, progress);
+    if (intent !== selectionSerial || revision !== presetRevision() || generation !== mediaGeneration) throw new Error('导入期间舞台已修改；素材已保存，可在素材库中选择');
+    if (progress) progress({ status: 'probing', percent: 100 });
+    return selectMedia(spec);
   }
 
   function setCover(url) {
@@ -899,6 +1063,24 @@
       return d ? JSON.parse(JSON.stringify(d)) : null;
     },
     setLocalFile: setLocalFile,
+    selectMedia: selectMedia,
+    ready: function () { return mediaReady; },
+    mediaError: function () { return mediaError; },
+    retryMedia: function () {
+      if (state.spec.type !== 'media' || !isVisible()) return Promise.resolve();
+      return startMedia(true);
+    },
+    cancelMediaSelection: function () {
+      selectionSerial++;
+      if (mediaProbe) { clearMedia(true); invalidateSource(); }
+    },
+    commitSelection: function () { var pin = selectionPin; selectionPin = null; recoverySpec = null; if (pin && pin !== state.lease) releaseLease(pin); },
+    recoverMedia: function () {
+      var spec = recoverySpec;
+      if (!spec) return Promise.resolve(null);
+      apply(spec, true);
+      return mediaReady.then(function () { api.commitSelection(); return spec; });
+    },
     setCover: setCover,
     frame: function () { /* 背景层有自己的帧门 */ },
     values: function () { return JSON.parse(JSON.stringify(state.spec)); },
@@ -929,4 +1111,21 @@
   };
 
   window.Backgrounds = api;
+  if (window.addEventListener) {
+    window.addEventListener('pagehide', function () {
+      pageInactive = true; selectionSerial++; rememberPosition();
+      clearMedia(true); api.commitSelection();
+      if (temporaryApply) releaseTemporaryApply(false);
+    });
+    window.addEventListener('pageshow', function (e) {
+      pageInactive = false;
+      if (e.persisted) resumeMedia();
+    });
+  }
+  document.addEventListener('visibilitychange', syncMediaVisibility);
+  document.addEventListener('stage:visibility', function () { Promise.resolve().then(syncMediaVisibility); });
+  document.addEventListener('service:connection', function (event) {
+    serviceOnline = !!event.detail.connected;
+    if (serviceOnline) resumeMedia(); else syncMediaPlayback();
+  });
 })();

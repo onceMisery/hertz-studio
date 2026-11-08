@@ -10,11 +10,13 @@ description = "SQLite persistence layer (sqlx, runtime-checked queries)"
 
 [dependencies]
 vmusic-core = { workspace = true }
+hertz-sqlite-lifecycle = { path = "../hertz-sqlite-lifecycle" }
 
 sqlx = { workspace = true }
 uuid = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }

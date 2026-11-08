@@ -6,7 +6,7 @@
 #   - 仅 workflow_dispatch 手动触发，绝不自动推送/发布/上传 Release；
 #     产物留在 workflow run 的 artifacts 里，由维护者人工检查后自行发布。
 #   - 两种产物：
-#       * 独立形态：单二进制 hertz-studio(.exe)，web 资源编译期嵌入，配 README + LICENSE。
+#       * 独立形态：单二进制 hertz-studio(.exe)，Windows 包含 native-window、启动入口和构建清单。
 #         只构建 Full（含六个平台音源）；Standard 继续用于 DBX 商店候选与本地验证，
 #         不作为独立发布产物，避免用户拿到的独立包没有平台音源。
 #       * 插件形态：.dbxp（sidecar + ui + manifest），由 dbx-plugin CLI 打包，仍按
@@ -56,12 +56,15 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             archive: zip
+            features: full,native-window
           - os: macos-latest
             target: aarch64-apple-darwin
             archive: tar
+            features: full
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             archive: tar
+            features: full
     steps:
       - uses: actions/checkout@v4
 
@@ -89,11 +92,45 @@ jobs:
       - name: Build (release)
         shell: bash
         run: |
-          features=()
-          if [ "${{ matrix.edition }}" = full ]; then features=(--features full); fi
-          cargo build --locked --release -p hertz-studio --target ${{ matrix.target }} "${features[@]}"
+          cargo build --locked --release -p hertz-studio --bin hertz-studio --target ${{ matrix.target }} --features "${{ matrix.features }}"
+
+      - name: Package Windows native player
+        if: matrix.os == 'windows-latest'
+        run: node scripts/package-standalone-windows.js target/x86_64-pc-windows-msvc/release/hertz-studio.exe dist
+
+      - name: Prepare pinned NSIS compiler
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $nsisRoot = Join-Path $env:RUNNER_TEMP 'hertz-nsis-3.11'
+          New-Item -ItemType Directory -Path $nsisRoot -Force | Out-Null
+          $nsisArchive = Join-Path $nsisRoot 'nsis-3.11.zip'
+          # SourceForge's project download page supplies the short-lived archive URL.
+          $landing = Invoke-WebRequest -Uri 'https://sourceforge.net/projects/nsis/files/NSIS%203/3.11/nsis-3.11.zip/download' -TimeoutSec 60
+          $redirect = [regex]::Match($landing.Content, 'http-equiv="refresh" content="\d+; url=([^"]+)"')
+          if (-not $redirect.Success) { throw 'NSIS project download redirect is missing.' }
+          $nsisDownload = [uri][Net.WebUtility]::HtmlDecode($redirect.Groups[1].Value)
+          if ($nsisDownload.Scheme -cne 'https' -or $nsisDownload.Host -cne 'downloads.sourceforge.net' -or $nsisDownload.AbsolutePath -cne '/project/nsis/NSIS%203/3.11/nsis-3.11.zip') {
+            throw 'Unexpected NSIS project download URL.'
+          }
+          Invoke-WebRequest -Uri $nsisDownload -OutFile $nsisArchive -TimeoutSec 120
+          if ((Get-FileHash -LiteralPath $nsisArchive -Algorithm SHA256).Hash.ToLowerInvariant() -cne 'c7d27f780ddb6cffb4730138cd1591e841f4b7edb155856901cdf5f214394fa1') {
+            throw 'NSIS archive SHA-256 mismatch.'
+          }
+          Expand-Archive -LiteralPath $nsisArchive -DestinationPath $nsisRoot
+          $nsisCompiler = Join-Path $nsisRoot 'nsis-3.11/makensis.exe'
+          if ((Get-FileHash -LiteralPath $nsisCompiler -Algorithm SHA256).Hash.ToLowerInvariant() -cne 'f497e92deb9f179f7b8f7553fcb3bd04f511bb2949e5e4a2aee80a10f7b20431') {
+            throw 'NSIS compiler SHA-256 mismatch.'
+          }
+          "HERTZ_MAKENSIS=$nsisCompiler" >> $env:GITHUB_ENV
+
+      - name: Package Windows current-user installer candidate
+        if: matrix.os == 'windows-latest'
+        run: node scripts/package-standalone-installer.js target/x86_64-pc-windows-msvc/release/hertz-studio.exe dist
 
       - name: Package
+        if: matrix.os != 'windows-latest'
         shell: bash
         run: |
           # 按名字取版本，别用 packages[0]：workspace 成员的顺序不是契约，
@@ -138,7 +175,10 @@ jobs:
           name: dist-${{ matrix.edition }}-${{ matrix.target }}
           path: |
             dist/*.zip
+            dist/*-setup.exe
             dist/*.tar.gz
+            dist/*.json
+            dist/*.sha256
           if-no-files-found: error
 
   # -------------------------------------------------------------------------
@@ -205,6 +245,8 @@ jobs:
 
       - name: Combined SHA256SUMS
         shell: bash
+        env:
+          RELEASE_NOTES: ${{ github.event.inputs.notes }}
         run: |
           cd dist
           ls -la
@@ -213,7 +255,7 @@ jobs:
           # nullglob 是必需的：某个 glob 不中时 bash 会把字面量传给 sha256sum，
           # 它会去读 stdin 把整步挂死。
           shopt -s nullglob
-          files=(./*.zip ./*.tar.gz ./*.dbxp)
+          files=(./*.zip ./*-setup.exe ./*.tar.gz ./*.dbxp)
           if [ "${#files[@]}" -eq 0 ]; then echo "no artifacts to checksum" >&2; exit 1; fi
           sha256sum "${files[@]}" | sed 's|\./||' | sort -k2 > SHA256SUMS.txt
           cat SHA256SUMS.txt
@@ -223,8 +265,8 @@ jobs:
             echo '```'
             cat SHA256SUMS.txt
             echo '```'
-            if [ -n "${{ github.event.inputs.notes }}" ]; then
-              echo "${{ github.event.inputs.notes }}"
+            if [ -n "$RELEASE_NOTES" ]; then
+              printf '%s\n' "$RELEASE_NOTES"
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 

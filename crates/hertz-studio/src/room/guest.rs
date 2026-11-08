@@ -282,11 +282,14 @@ pub(super) async fn start_session(
                         guest.mode = mode;
                         if mode == ConnectionMode::Listening {
                             let opening_settings = guest.output.clone();
-                            let opening = receiver::spawn(
+                            let opening = receiver::spawn_configured(
                                 options(&opening_settings, guest.connection.handle.clock()),
                                 guest.connection.handle.identity,
                                 guest.connection.handle.clock(),
                                 guest.receiver_registry.clone(),
+                                guest.connection.handle.format_mode
+                                    == vmusic_lan::protocol::FormatMode::Native,
+                                guest.connection.handle.pcm_budget(),
                             );
                             match guest.while_offline(&mut local, &mut stopped, opening).await {
                                 Some(Ok((receiver, events))) => {
@@ -495,6 +498,7 @@ impl Guest {
                     if closing && !matches!(frame, ControlFrame::End { .. }) {continue;}
                     match frame{
                         ControlFrame::Prepare{plan}=>{if let Some(receiver)=&self.receiver{receiver.prepare(self.connection.handle.identity,plan).map_err(error)?;}},
+                        ControlFrame::EpochEnd{epoch,format_id,end_frame}=>{if let Some(receiver)=&self.receiver{receiver.epoch_end(self.connection.handle.identity,epoch.0,format_id,end_frame.0).map_err(error)?;}},
                         ControlFrame::Commit{epoch,plan_id,effective_at}=>{if let Some(receiver)=&self.receiver{receiver.commit(self.connection.handle.identity,epoch.0,plan_id.0,effective_at.0).map_err(error)?;}},
                         ControlFrame::Suspend{epoch,plan_id,effective_at}=>{if let Some(receiver)=&self.receiver{receiver.suspend(self.connection.handle.identity,epoch.0,plan_id.0,effective_at.0).map_err(error)?;}},
                         ControlFrame::Resync{..}=>{if let Some(receiver)=&self.receiver{receiver.invalidate();}self.connection.handle.send(ControlFrame::Resync{reason:"host_invalidated".into()}).map_err(error)?;},
@@ -511,12 +515,17 @@ impl Guest {
                 block=self.events.audio.recv(),if self.receiver.is_some()=>{
                     let Some(block)=block else{return Err(error("音频连接关闭"))};
                     if closing {continue;}
-                    if let Some(receiver)=&self.receiver{receiver.pcm(block.into_block()).map_err(error)?;}
+                    if let Some(receiver)=&self.receiver{receiver.received_pcm(block).map_err(error)?;}
                 },
                 text=self.events.chat.recv()=>{self.recent.notification(&text);self.publish("guest");},
                 envelope=local.recv()=>{
                     let Some(envelope)=envelope else{break};
                     if closing {self.offline_request(envelope);continue;}
+                    if envelope.media_identity.as_ref().is_some_and(|identity| !identity.matches_room_snapshot(
+                        &self.projection.read().unwrap_or_else(|error| error.into_inner()))) {
+                        let _=envelope.reply.send(Err(RoomError::new("media_stale","系统媒体会话已变化")));
+                        continue;
+                    }
                     match envelope.request{
                         LocalRequest::TestOutput=>{
                             let receiver=self.receiver.clone().filter(|_|self.diagnostics.is_empty() && self.remote["playing"]==false && self.remote["scheduled"].is_null() && self.remote["pending"].is_null());

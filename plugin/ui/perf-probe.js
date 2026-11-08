@@ -238,6 +238,9 @@
         if (typeof api.displayHz === 'function') { out.displayHz = roundNumber(api.displayHz(), 2); taken += 1; }
         if (typeof api.tier === 'function') { out.tier = api.tier(); taken += 1; }
         if (typeof api.isLowFx === 'function') { out.lowFx = !!api.isLowFx(); taken += 1; }
+        if (typeof api.resources === 'function' && api.resources()) {
+          out.documentResources = api.resources().snapshot(); taken += 1;
+        }
         return taken ? out : null;
       }
     },
@@ -260,6 +263,32 @@
       // size / wallTex 是这层的实际作画分辨率与纹理尺寸 —— 背景是「画得很小
       // 让合成器放大」那一层，光看 fps 看不出它花了多少。
       read: pickFields(['fps', 'size', 'wallTex'])
+    },
+    {
+      id: 'particles',
+      owner: 'StageParticles',
+      // M0 reports API allocation and CPU submission facts, never physical GPU memory.
+      read: function (api) {
+        if (typeof api.stats !== 'function') return null;
+        var raw = api.stats();
+        var out = pickValues(raw, ['requestedMode', 'actualBackend', 'effectiveMode', 'tier', 'fps', 'count', 'dpr', 'countScale']);
+        if (!out) return null;
+        if (raw.metrics) out.metrics = pickValues(raw.metrics, ['attachCpuMs', 'warmUpSubmitCpuMs',
+          'firstFrameSubmitCpuMs', 'firstFrameLatencyMs', 'warmUpStatus', 'warmUpDrawCalls', 'firstFrameStatus',
+          'firstFrameInterruptions', 'warmUpCount', 'warmUpWidth', 'warmUpHeight', 'warmUpDpr']);
+        if (raw.resources) {
+          var fields = ['contexts', 'canvases', 'sprites', 'spritePixels', 'shaders', 'programs', 'buffers',
+            'vaos', 'listeners', 'bufferBytes', 'typedArrayBytes', 'surfacePixels', 'drawingBufferPixels',
+            'cumulativeUploadBytes', 'contextReleaseRequested', 'contextReferencesReleased'];
+          out.resources = {
+            renderer: pickValues(raw.resources.renderer, fields),
+            peak: pickValues(raw.resources.peak, fields),
+            owner: pickValues(raw.resources, ['canvases', 'rippleNodes', 'gate', 'resizeObservers',
+              'classObservers', 'stateSubscriptions', 'rippleAnimations'])
+          };
+        }
+        return out;
+      }
     }
   ];
 

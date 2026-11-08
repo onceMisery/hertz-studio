@@ -11,7 +11,6 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::{FromRow, SqlitePool};
 
 use crate::wallpaper::jobs::JobError;
@@ -97,25 +96,10 @@ pub struct Library {
 impl Library {
     /// 打开（或创建）wallpaper.db 并执行独立迁移。
     pub async fn open(dir: &Path) -> Result<Self> {
-        tokio::fs::create_dir_all(dir)
-            .await
-            .map_err(|error| JobError::io(format!("创建壁纸库目录失败：{error}")))?;
         let path = dir.join("wallpaper.db");
-        let options = SqliteConnectOptions::new()
-            .filename(&path)
-            .create_if_missing(true)
-            .journal_mode(SqliteJournalMode::Wal)
-            .foreign_keys(true)
-            .busy_timeout(std::time::Duration::from_secs(5));
-        let pool = SqlitePoolOptions::new()
-            .max_connections(2)
-            .connect_with(options)
+        let pool = crate::wallpaper_upgrade::open_library(dir)
             .await
-            .map_err(|error| JobError::database(error.to_string()))?;
-        sqlx::migrate!("migrations/wallpaper")
-            .run(&pool)
-            .await
-            .map_err(|error| JobError::database(format!("壁纸库迁移失败：{error}")))?;
+            .map_err(|error| JobError::database(format!("{error:#}")))?;
         Ok(Self { pool, path })
     }
 

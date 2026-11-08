@@ -1,60 +1,69 @@
 // SPDX-License-Identifier: MIT
-//! `--window` 原生主窗口托盘对桌面组件的最小控制面。
+//! `--window` 原生主窗口托盘对桌面歌词的最小控制面。
 //!
-//! 组件的安装布局（与配对服务 exe 同目录）和管理管道的传输细节都只在
-//! 这条链路上出现一次；DBX 桥接形态不受影响（宿主侧自行衔接同一管道）。
-//! 面向托盘的取舍：探测只回答一个事实、命令只收白名单内无参数动词，
-//! 其余能力（样式、预览、授权）仍走设置页的 REST。
+//! 宿主现在是播放器进程内的模块：没有组件 exe 可探测，也没有管理管道可拨。
+//! 探测只问进程内宿主的存活事实；启动/命令/退出全部经 `desktop_host` 收口。
+//! 面向托盘的取舍：命令只收白名单内无参数动词，其余能力（样式、预览、
+//! 授权）仍走设置页的 REST，最终落到同一个宿主窗口。
 
 use std::path::Path;
 
-/// 托盘视角的桌面组件状态。
+/// 托盘视角的进程内宿主状态。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HostState {
-    /// 组件 exe 不在服务同目录：模式开关置灰并如实点名。
-    Missing,
-    /// 管理管道无应答：组件未运行。
+    /// 宿主未启动（或用户已从托盘退出歌词）：模式开关可启动。
     Stopped,
-    /// 管理管道应答：组件运行中。
-    Running,
+    /// 宿主的歌词/设置窗口由本进程持有中。
+    Running { lyrics: bool, wallpaper: bool },
+    /// 宿主存活，但暂未取得功能状态；不能据此启停功能。
+    Unavailable,
 }
 
 /// 探测当前状态；托盘菜单只需要事实，不区分失败原因。
 pub fn probe() -> HostState {
-    if crate::desktop::standalone::host_path().map_or(true, |host| !host.is_file()) {
-        return HostState::Missing;
+    if !crate::desktop_host::is_running() {
+        return HostState::Stopped;
     }
-    let payload = serde_json::json!({ "command": "status" });
-    match crate::desktop_control::send(payload) {
-        Ok(_) => HostState::Running,
-        Err(_) => HostState::Stopped,
+    match crate::desktop_control::send(serde_json::json!({"command": "status"})) {
+        Ok(status) if status["ok"] == true => match (
+            status["runtimeEnabled"].as_bool(),
+            status["wallpaper"]["runtimeEnabled"].as_bool(),
+        ) {
+            (Some(lyrics), Some(wallpaper)) => HostState::Running { lyrics, wallpaper },
+            _ => HostState::Unavailable,
+        },
+        _ => HostState::Unavailable,
     }
 }
 
-/// 以普通模式启动组件：歌词与壁纸按组件自身配置自启。
+/// 在播放器进程内拉起宿主：歌词与壁纸按宿主自身配置自启。
 pub fn spawn(data_dir: &Path) -> Result<(), String> {
-    match crate::desktop::standalone::spawn_host(data_dir, &[]) {
-        Ok(()) => Ok(()),
-        Err(crate::desktop::standalone::SpawnError::Missing(host)) => Err(format!(
-            "未找到桌面组件 {}；请安装与本服务匹配的桌面组件",
-            host.display()
-        )),
-        Err(crate::desktop::standalone::SpawnError::Failed(error)) => Err(format!("{error:#}")),
-    }
+    crate::desktop_host::ensure_started(data_dir).map_err(|error| format!("{error:#}"))?;
+    command("show")
 }
 
-/// 托盘允许下发的管理命令（无参数动词；带值的操作请走设置页 REST）。
+/// 托盘允许下发的命令（无参数动词；带值的操作请走设置页 REST）。
 const TRAY_COMMANDS: &[&str] = &[
     "quit",
+    "lyrics-exit",
+    "wallpaper-exit",
     "unlock",
     "locate",
     "wallpaper-toggle",
     "wallpaper-settings",
+    "wallpaper-retry",
+    "show",
+    "hide",
+    "mini-toggle",
 ];
 
 pub fn command(name: &str) -> Result<(), String> {
     if !TRAY_COMMANDS.contains(&name) {
         return Err(format!("托盘不支持桌面命令 {name}"));
+    }
+    // 退出要等宿主保存完配置再放行；其余动词直接进宿主事件循环。
+    if name == "quit" {
+        return crate::desktop_host::shutdown().map_err(|error| format!("{error:#}"));
     }
     crate::desktop_control::send(serde_json::json!({ "command": name }))
         .map(|_| ())

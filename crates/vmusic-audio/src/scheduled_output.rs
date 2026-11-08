@@ -159,6 +159,7 @@ pub struct PresentationTime {
 struct Shared {
     samples: Box<[AtomicU32]>,
     deadlines: Box<[AtomicU64]>,
+    frame_ends: Box<[AtomicU64]>,
     epochs: Box<[AtomicU64]>,
     capacity: usize,
     channels: usize,
@@ -170,6 +171,7 @@ struct Shared {
     end_frame: AtomicU64,
     muted: AtomicBool,
     silence_from: AtomicU64,
+    silence_frame: AtomicU64,
     silence_until: AtomicU64,
     device_error: AtomicBool,
     volume: AtomicU32,
@@ -200,6 +202,7 @@ impl Shared {
         self.clear_before.fetch_max(written, Ordering::AcqRel);
         self.generation.fetch_add(1, Ordering::AcqRel);
         self.silence_from.store(u64::MAX, Ordering::Release);
+        self.silence_frame.store(u64::MAX, Ordering::Release);
         self.silence_until.store(0, Ordering::Release);
     }
 
@@ -485,6 +488,9 @@ pub struct PresentationConsumer {
     read: u64,
     next_presentation_ns: Option<f64>,
     last_deadline: Option<(u64, u64)>,
+    /// A queued run observed in the preceding physical cell owns the next
+    /// cell even if a valid presentation-phase slew crosses its midpoint.
+    pending_start: Option<(u64, u64)>,
 }
 
 impl ScheduledPcmQueue {
@@ -502,8 +508,9 @@ impl ScheduledPcmQueue {
             return Err(OutputError::Format);
         }
         let channels = usize::from(format.channels);
-        // Reserve space for Arc/control storage as well as both timestamp arrays.
-        let bytes_per_frame = channels * size_of::<AtomicU32>() + 2 * size_of::<AtomicU64>();
+        // Reserve Arc/control storage and the deadline, accepted endpoint and
+        // generation arrays. Every frame retains its own accepted grid cell.
+        let bytes_per_frame = channels * size_of::<AtomicU32>() + 3 * size_of::<AtomicU64>();
         let capacity =
             (format.sample_rate as usize * 3).min((MAX_QUEUE_BYTES - 4096) / bytes_per_frame);
         let period = 1e9 / f64::from(format.sample_rate);
@@ -512,6 +519,7 @@ impl ScheduledPcmQueue {
                 .map(|_| AtomicU32::new(0))
                 .collect(),
             deadlines: (0..capacity).map(|_| AtomicU64::new(0)).collect(),
+            frame_ends: (0..capacity).map(|_| AtomicU64::new(0)).collect(),
             epochs: (0..capacity).map(|_| AtomicU64::new(0)).collect(),
             capacity,
             channels,
@@ -523,6 +531,7 @@ impl ScheduledPcmQueue {
             end_frame: AtomicU64::new(0),
             muted: AtomicBool::new(true),
             silence_from: AtomicU64::new(u64::MAX),
+            silence_frame: AtomicU64::new(u64::MAX),
             silence_until: AtomicU64::new(0),
             device_error: AtomicBool::new(false),
             volume: AtomicU32::new(1.0f32.to_bits()),
@@ -558,6 +567,7 @@ impl ScheduledPcmQueue {
                 read: 0,
                 next_presentation_ns: None,
                 last_deadline: None,
+                pending_start: None,
             },
         ))
     }
@@ -763,6 +773,10 @@ impl ScheduledPcmQueue {
             let deadline =
                 schedule.time(schedule.frames + frame as u64, self.format.sample_rate)?;
             self.shared.deadlines[slot].store(deadline, Ordering::Release);
+            self.shared.frame_ends[slot].store(
+                schedule.time(schedule.frames + frame as u64 + 1, self.format.sample_rate)?,
+                Ordering::Release,
+            );
             self.shared.epochs[slot].store(generation, Ordering::Release);
         }
         self.written = new_written;
@@ -786,6 +800,10 @@ impl ScheduledPcmQueue {
             frames: end_frame,
             ..schedule
         });
+        let boundary = self.shared.silence_from.load(Ordering::Acquire);
+        if boundary != u64::MAX {
+            self.silence_from(boundary);
+        }
         Ok(())
     }
 
@@ -853,7 +871,79 @@ impl ScheduledPcmQueue {
     /// silence, while missing frames before it remain genuine underruns.
     /// Clearing/muting retires this boundary along with the current run.
     pub fn silence_from(&mut self, local_ns: u64) {
-        self.shared.silence_from.store(local_ns, Ordering::Release);
+        let frame = (local_ns != u64::MAX)
+            .then(|| self.silence_frame_at(local_ns))
+            .flatten();
+        if let Some(frame) = frame {
+            self.shared.silence_frame.store(frame, Ordering::Release);
+            self.shared.silence_from.store(local_ns, Ordering::Release);
+        } else {
+            // Remove the time fence first, so retiring a frame fence cannot
+            // briefly restore an earlier raw-time cutoff.
+            self.shared.silence_from.store(local_ns, Ordering::Release);
+            self.shared.silence_frame.store(u64::MAX, Ordering::Release);
+        }
+    }
+
+    fn silence_frame_at(&self, local_ns: u64) -> Option<u64> {
+        let cursor = self.scheduled_cursor()?;
+        let schedule = cursor.schedule;
+        let segment_start = schedule.time(0, self.format.sample_rate).ok()?;
+        if local_ns >= segment_start {
+            let mut frames =
+                ((local_ns - segment_start) as f64 / cursor.ns_per_frame()).round() as u64;
+            let candidate = OutputCursor {
+                schedule: Schedule { frames, ..schedule },
+                sample_rate: self.format.sample_rate,
+            };
+            match candidate.boundary_relation(local_ns).ok()? {
+                std::cmp::Ordering::Greater => frames = frames.saturating_sub(1),
+                std::cmp::Ordering::Less => frames = frames.checked_add(1)?,
+                std::cmp::Ordering::Equal => {}
+            }
+            return self
+                .written
+                .checked_sub(schedule.frames)?
+                .checked_add(frames);
+        }
+        // A period update may leave older segments queued. Their published
+        // integer deadlines retain the same midpoint cells used for writes.
+        let read = self
+            .shared
+            .read
+            .load(Ordering::Acquire)
+            .max(self.shared.clear_before.load(Ordering::Acquire))
+            .min(self.written);
+        let deadline = |frame: u64| {
+            self.shared.deadlines[(frame % self.shared.capacity as u64) as usize]
+                .load(Ordering::Acquire)
+        };
+        let mut low = read;
+        let mut high = self.written;
+        while low < high {
+            let middle = low + (high - low) / 2;
+            if deadline(middle) < local_ns {
+                low = middle + 1;
+            } else {
+                high = middle;
+            }
+        }
+        if low == read || low == self.written {
+            return Some(low);
+        }
+        let previous = deadline(low - 1);
+        // The next queued deadline can belong to a later run, so it cannot
+        // supply this cell's period. A one-frame segment still owns its exact
+        // accepted endpoint. Integer midpoints keep later-point tie ownership.
+        let endpoint = self.shared.frame_ends[((low - 1) % self.shared.capacity as u64) as usize]
+            .load(Ordering::Acquire);
+        Some(
+            if u128::from(local_ns) * 2 < u128::from(previous) + u128::from(endpoint) {
+                low - 1
+            } else {
+                low
+            },
+        )
     }
 
     pub fn set_local_volume(&mut self, volume: f32) -> Result<(), OutputError> {
@@ -957,6 +1047,7 @@ impl PresentationConsumer {
         self.shared.dropped.fetch_add(dropped, Ordering::Relaxed);
         self.next_presentation_ns = None;
         self.last_deadline = None;
+        self.pending_start = None;
     }
 
     fn acknowledge_clear(&mut self) {
@@ -970,6 +1061,23 @@ impl PresentationConsumer {
         self.shared.dropped.fetch_add(dropped, Ordering::Relaxed);
         self.next_presentation_ns = None;
         self.last_deadline = None;
+        self.pending_start = None;
+    }
+
+    fn reserve_next_start(&mut self, generation: u64, written: u64, time: f64, period: f64) {
+        self.pending_start = None;
+        if self.read < written {
+            let slot = (self.read % self.shared.capacity as u64) as usize;
+            let epoch = self.shared.epochs[slot].load(Ordering::Acquire);
+            let deadline = self.shared.deadlines[slot].load(Ordering::Acquire) as f64;
+            if epoch == generation
+                && deadline > time + period * 0.5
+                && deadline <= time + period * 1.5
+                && deadline >= self.shared.silence_until.load(Ordering::Acquire) as f64
+            {
+                self.pending_start = Some((generation, self.read));
+            }
+        }
     }
 
     /// Fill a device buffer without allocating, deallocating, locking or I/O.
@@ -1037,7 +1145,33 @@ impl PresentationConsumer {
             .next_presentation_ns
             .is_some_and(|next| first > next + period * 0.5)
         {
-            self.last_deadline = None;
+            let delta = first - self.next_presentation_ns.unwrap();
+            let generation = self.shared.generation.load(Ordering::Acquire);
+            let written = self.shared.written.load(Ordering::Acquire);
+            let finite_end = (self.shared.end_generation.load(Ordering::Acquire) == generation)
+                .then(|| self.shared.end_frame.load(Ordering::Acquire))
+                .filter(|end| *end <= written)
+                .unwrap_or(u64::MAX);
+            let silence = self.shared.silence_frame.load(Ordering::Acquire);
+            let fence = if silence <= written {
+                silence
+            } else {
+                u64::MAX
+            }
+            .min(finite_end);
+            // The final accepted cell remains owned until its exclusive EOF.
+            // A sub-cell phase shift must not replace it with virtual silence;
+            // a complete missing physical cell still releases continuity.
+            let final_cell = self.read.checked_add(1) == Some(fence)
+                && self.read < self.shared.written.load(Ordering::Acquire)
+                && first
+                    < self.shared.frame_ends[(self.read % self.shared.capacity as u64) as usize]
+                        .load(Ordering::Acquire) as f64
+                && delta < period;
+            if !final_cell {
+                self.last_deadline = None;
+            }
+            self.pending_start = None;
         }
         let generation = self.shared.generation.load(Ordering::Acquire);
         let clear_before = self.shared.clear_before.load(Ordering::Acquire);
@@ -1053,13 +1187,25 @@ impl PresentationConsumer {
         let mut future = 0u64;
         for (index, frame) in output.chunks_exact_mut(channels).enumerate() {
             let time = first + index as f64 * period;
-            if time + period * 0.5 < self.shared.silence_until.load(Ordering::Acquire) as f64 {
+            let reserved = self.pending_start.take() == Some((generation, self.read));
+            if !reserved
+                && time + period * 0.5 < self.shared.silence_until.load(Ordering::Acquire) as f64
+            {
                 self.last_deadline = None;
+                self.reserve_next_start(generation, written, time, period);
                 future += 1;
                 continue;
             }
-            if time + period * 0.5 >= self.shared.silence_from.load(Ordering::Acquire) as f64 {
+            let fence = self.shared.silence_frame.load(Ordering::Acquire);
+            let accepted_fence = fence != u64::MAX && written >= fence;
+            let idle = if accepted_fence {
+                self.read >= fence
+            } else {
+                time + period * 0.5 >= self.shared.silence_from.load(Ordering::Acquire) as f64
+            };
+            if idle {
                 self.last_deadline = None;
+                self.pending_start = None;
                 future += 1;
                 continue;
             }
@@ -1067,12 +1213,15 @@ impl PresentationConsumer {
                 let slot = (self.read % self.shared.capacity as u64) as usize;
                 let epoch = self.shared.epochs[slot].load(Ordering::Acquire);
                 let deadline = self.shared.deadlines[slot].load(Ordering::Acquire);
-                self.last_deadline
-                    .is_some_and(|(previous_epoch, previous)| {
-                        epoch == generation
-                            && previous_epoch == generation
-                            && (deadline as f64 - previous as f64 - nominal).abs() <= nominal * 0.5
-                    })
+                reserved
+                    || self
+                        .last_deadline
+                        .is_some_and(|(previous_epoch, previous)| {
+                            epoch == generation
+                                && previous_epoch == generation
+                                && (deadline as f64 - previous as f64 - nominal).abs()
+                                    <= nominal * 0.5
+                        })
             } else {
                 false
             };
@@ -1081,7 +1230,11 @@ impl PresentationConsumer {
                 // Binary-search expired frames once at a run boundary, bounded
                 // by log(capacity); continuous rendering only reads the head.
                 let mut low = self.read;
-                let mut high = written;
+                let mut high = if accepted_fence {
+                    written.min(fence)
+                } else {
+                    written
+                };
                 while low < high {
                     let middle = low + (high - low) / 2;
                     let slot = (middle % self.shared.capacity as u64) as usize;
@@ -1099,6 +1252,11 @@ impl PresentationConsumer {
                 dropped += expired;
                 self.read = low;
             }
+            if accepted_fence && self.read >= fence {
+                self.last_deadline = None;
+                future += 1;
+                continue;
+            }
             if end_frame.is_some_and(|end| self.read >= end) {
                 self.last_deadline = None;
                 future += 1;
@@ -1115,6 +1273,7 @@ impl PresentationConsumer {
             if epoch != generation || (!contiguous && deadline > time + period * 0.5) {
                 future += 1;
                 self.last_deadline = None;
+                self.reserve_next_start(generation, written, time, period);
                 continue;
             }
             for (channel, sample) in frame.iter_mut().enumerate() {
@@ -1136,6 +1295,7 @@ impl PresentationConsumer {
             dropped += played;
             played = 0;
             self.last_deadline = None;
+            self.pending_start = None;
         }
         self.next_presentation_ns = Some(first + (output.len() / channels) as f64 * period);
         self.shared.read.store(self.read, Ordering::Release);
@@ -1556,6 +1716,275 @@ mod tests {
                 }),
             );
             assert!(samples[..48].iter().all(|sample| *sample == 0.5));
+        }
+    }
+
+    #[test]
+    fn accepted_eof_cell_survives_phase_shift_and_preserves_successor_accounting() {
+        let period = 1e9 / 48_000.0;
+        for (phase, fence_phase) in [(0.49, 0.0), (0.51, 0.0), (0.51, -0.495)] {
+            let (mut queue, mut consumer) = queue(48_000, 1);
+            let start = 400_000_000;
+            queue.unmute_at(start);
+            queue
+                .write_clocked_at(start, &[0.5; 100], 300_000_000, period)
+                .unwrap();
+            let end = queue.scheduled_cursor().unwrap().time_after(0).unwrap();
+            queue.silence_from((end as f64 + fence_phase * period).round() as u64);
+            consumer.render(&mut [0.0; 99], time(start, 48_000));
+            let mut last = [0.0];
+            consumer.render(
+                &mut last,
+                time(
+                    (start as f64 + (99.0 + phase) * period).round() as u64,
+                    48_000,
+                ),
+            );
+            assert_eq!(last, [0.5]);
+            assert_eq!(queue.telemetry().played_frames, 100);
+            assert_eq!(queue.telemetry().queued_frames, 0);
+            queue
+                .write_clocked_at(650_000_000, &[0.25; 50], 550_000_000, period)
+                .unwrap();
+            queue.silence_from(u64::MAX);
+            let baseline = queue.telemetry().played_frames;
+            consumer.render(&mut [0.0; 1], time(560_000_000, 48_000));
+            assert_eq!(queue.telemetry().late_frames, 0);
+            let mut next = [0.0; 50];
+            consumer.render(&mut next, time(650_000_000, 48_000));
+            assert_eq!(next, [0.25; 50]);
+            assert_eq!(queue.telemetry().played_frames - baseline, 50);
+            assert_eq!(queue.telemetry().underrun_frames, 0);
+            assert_eq!(queue.telemetry().late_frames, 0);
+        }
+    }
+
+    #[test]
+    fn finite_terminal_cell_keeps_its_endpoint_but_a_whole_cell_gap_still_expires() {
+        let period = 1e9 / 48_000.0;
+        for phase in [0.51, 1.51] {
+            let (mut queue, mut consumer) = queue(48_000, 1);
+            let start = 400_000_000;
+            queue.unmute_at(start);
+            queue
+                .write_finite_clocked_at(start, &[0.5; 100], 300_000_000, period)
+                .unwrap();
+            consumer.render(&mut [0.0; 99], time(start, 48_000));
+            let mut last = [0.0];
+            consumer.render(
+                &mut last,
+                time(
+                    (start as f64 + (99.0 + phase) * period).round() as u64,
+                    48_000,
+                ),
+            );
+            let kept = phase < 1.0;
+            assert_eq!(last, [if kept { 0.5 } else { 0.0 }]);
+            assert_eq!(queue.telemetry().played_frames, if kept { 100 } else { 99 });
+            assert_eq!(queue.telemetry().late_frames, if kept { 0 } else { 1 });
+            assert_eq!(queue.telemetry().queued_frames, 0);
+            assert_eq!(queue.telemetry().underrun_frames, 0);
+        }
+    }
+
+    #[test]
+    fn terminal_cell_ownership_uses_only_published_accepted_endpoints() {
+        for (frames, silence, finite, expected) in [
+            (100, Some(100), false, 100),
+            (100, None, true, 100),
+            (100, Some(95), true, 95),
+            (95, Some(100), true, 95),
+            (100, Some(0), true, 0),
+        ] {
+            let (mut queue, mut consumer) = queue(1_000, 1);
+            if finite {
+                queue
+                    .write_finite_clocked_at(0, &vec![0.5; frames], 0, 1_000_000.0)
+                    .unwrap();
+            } else {
+                queue
+                    .write_clocked_at(0, &vec![0.5; frames], 0, 1_000_000.0)
+                    .unwrap();
+            }
+            if let Some(boundary) = silence {
+                queue.silence_from(boundary * 1_000_000);
+            }
+            if expected != 0 {
+                consumer.render(&mut vec![0.0; expected - 1], time(0, 1_000));
+            }
+            let mut sample = [0.0];
+            consumer.render(
+                &mut sample,
+                time(
+                    if expected == 0 {
+                        0
+                    } else {
+                        (expected as u64 - 1) * 1_000_000 + 510_000
+                    },
+                    1_000,
+                ),
+            );
+            assert_eq!(sample, [if expected == 0 { 0.0 } else { 0.5 }]);
+            assert_eq!(queue.telemetry().played_frames, expected as u64);
+            assert_eq!(queue.telemetry().queued_frames, frames - expected);
+            assert_eq!(queue.telemetry().late_frames, 0);
+            assert_eq!(queue.telemetry().underrun_frames, 0);
+        }
+        // End markers can precede the written frontier during publication.
+        // They cannot turn a not-yet-published required frame into silence.
+        for (silence, finite) in [(true, false), (false, true), (true, true)] {
+            let (mut queue, mut consumer) = queue(1_000, 1);
+            queue
+                .write_clocked_at(0, &[0.5; 99], 0, 1_000_000.0)
+                .unwrap();
+            if silence {
+                queue.silence_from(100_000_000);
+            }
+            if finite {
+                queue.shared.end_frame.store(100, Ordering::Release);
+                queue.shared.end_generation.store(
+                    queue.shared.generation.load(Ordering::Acquire),
+                    Ordering::Release,
+                );
+            }
+            consumer.render(&mut [0.0; 99], time(0, 1_000));
+            consumer.render(&mut [0.0], time(99_000_000, 1_000));
+            assert_eq!(queue.telemetry().underrun_frames, 1);
+        }
+        let (mut queue, mut consumer) = queue(1_000, 1);
+        queue
+            .write_finite_clocked_at(0, &[0.5; 100], 0, 1_000_000.0)
+            .unwrap();
+        queue
+            .shared
+            .end_generation
+            .store(u64::MAX, Ordering::Release);
+        consumer.render(&mut [0.0; 99], time(0, 1_000));
+        consumer.render(&mut [0.0], time(99_510_000, 1_000));
+        assert_eq!(
+            queue.telemetry().late_frames,
+            1,
+            "a retired generation grants no endpoint ownership"
+        );
+    }
+
+    #[test]
+    fn future_start_keeps_its_observed_device_cell_across_a_valid_phase_slew() {
+        let period = 1e9 / 48_000.0;
+        let start = 650_000_000;
+        for after_gap in [false, true] {
+            let (mut queue, mut consumer) = queue(48_000, 1);
+            if after_gap {
+                queue.unmute_at(400_000_000);
+                queue
+                    .write_clocked_at(400_000_000, &[0.5; 4], 300_000_000, period)
+                    .unwrap();
+                let end = queue.scheduled_cursor().unwrap().time_after(0).unwrap();
+                queue.silence_from(end);
+                consumer.render(&mut [0.0; 4], time(400_000_000, 48_000));
+            } else {
+                queue.unmute_at(start);
+            }
+            queue
+                .write_clocked_at(start, &[0.25; 4], 550_000_000, period)
+                .unwrap();
+            queue.silence_from(u64::MAX);
+            let before = (start as f64 - 0.51 * period).round() as u64;
+            let mut sample = [9.0];
+            consumer.render(&mut sample, time(before, 48_000));
+            assert_eq!(sample, [0.0]);
+            let next = (before as f64 + period + period / 32.0).round() as u64;
+            consumer.render(&mut sample, time(next, 48_000));
+            assert_eq!(sample, [0.25]);
+            assert_eq!(queue.telemetry().queued_frames, 3);
+            assert_eq!(queue.telemetry().late_frames, 0);
+            assert_eq!(queue.telemetry().underrun_frames, 0);
+        }
+    }
+
+    #[test]
+    fn future_cell_reservation_never_hides_late_publication_missing_pcm_or_callback_gaps() {
+        let period = 1e9 / 48_000.0;
+        let start = 650_000_000;
+        for case in 0..3 {
+            let (mut queue, mut consumer) = queue(48_000, 1);
+            queue.unmute_at(start);
+            let before = (start as f64 - 0.51 * period).round() as u64;
+            if case == 2 {
+                queue
+                    .write_clocked_at(start, &[0.25; 4], 550_000_000, period)
+                    .unwrap();
+            }
+            consumer.render(&mut [0.0], time(before, 48_000));
+            if case == 0 {
+                queue
+                    .write_clocked_at(start, &[0.25; 4], start + 1, period)
+                    .unwrap();
+            }
+            let next = (before as f64 + period + if case == 2 { period } else { period / 32.0 })
+                .round() as u64;
+            consumer.render(&mut [0.0], time(next, 48_000));
+            if case == 1 {
+                assert_eq!(queue.telemetry().underrun_frames, 1);
+            } else {
+                assert_eq!(queue.telemetry().late_frames, 1);
+            }
+        }
+    }
+
+    #[test]
+    fn accepted_silence_fence_retains_older_period_segments_and_gap_endpoints() {
+        for next_start in [14_000_000, 20_000_000] {
+            let (mut queue, mut consumer) = queue(1_000, 1);
+            queue
+                .write_clocked_at(10_000_000, &[0.75; 4], 0, 1_000_000.0)
+                .unwrap();
+            queue
+                .write_clocked_at(next_start, &[0.5; 4], 0, 1_001_000.0)
+                .unwrap();
+            let boundary = if next_start == 14_000_000 {
+                12_000_000
+            } else {
+                14_000_000
+            };
+            queue.silence_from(boundary);
+            let mut output = [9.0; 8];
+            consumer.render(&mut output, time(10_000_000, 1_000));
+            let expected = if next_start == 14_000_000 { 2 } else { 4 };
+            assert!(output[..expected].iter().all(|sample| *sample == 0.75));
+            assert!(output[expected..].iter().all(|sample| *sample == 0.0));
+            assert_eq!(queue.telemetry().played_frames, expected as u64);
+            assert_eq!(queue.telemetry().late_frames, 0);
+            assert_eq!(queue.telemetry().underrun_frames, 0);
+        }
+    }
+
+    #[test]
+    fn single_frame_segments_keep_their_accepted_endpoint_across_two_gaps() {
+        for origin in [0, 9_007_199_254_740_000] {
+            let (mut queue, mut consumer) = queue(1_000, 1);
+            queue
+                .write_clocked_at(origin, &[0.1], origin, 1_000_000.0)
+                .unwrap();
+            queue
+                .write_clocked_at(origin + 10_000_000, &[0.75], origin, 1_000_000.0)
+                .unwrap();
+            queue
+                .write_clocked_at(origin + 20_000_000, &[0.5; 2], origin, 1_001_000.0)
+                .unwrap();
+            queue.silence_from(origin + 11_000_000);
+            assert_eq!(queue.shared.silence_frame.load(Ordering::Acquire), 2);
+            let mut sample = [0.0];
+            consumer.render(&mut sample, time(origin, 1_000));
+            assert_eq!(sample, [0.1]);
+            consumer.render(&mut sample, time(origin + 10_000_000, 1_000));
+            assert_eq!(sample, [0.75]);
+            consumer.render(&mut sample, time(origin + 20_000_000, 1_000));
+            assert_eq!(sample, [0.0]);
+            assert_eq!(queue.telemetry().played_frames, 2);
+            assert_eq!(queue.telemetry().queued_frames, 2);
+            assert_eq!(queue.telemetry().late_frames, 0);
+            assert_eq!(queue.telemetry().underrun_frames, 0);
         }
     }
 
@@ -2035,7 +2464,7 @@ mod tests {
         let (mut producer, _consumer) = queue(768_000, 32);
         let capacity = producer.telemetry().capacity_frames;
         assert!(capacity <= 768_000 * 3);
-        assert!(capacity * (32 * 4 + 16) + 4096 <= MAX_QUEUE_BYTES);
+        assert!(capacity * (32 * 4 + 24) + 4096 <= MAX_QUEUE_BYTES);
         producer.write_at(0, &vec![0.5; capacity * 32], 0).unwrap();
         assert_eq!(
             producer.write_at(1_000_000_000, &[0.5; 32], 0),

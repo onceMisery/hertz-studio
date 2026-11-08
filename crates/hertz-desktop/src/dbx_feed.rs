@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: MIT
 //! Selected-source DBX reader. One contained runtime owns two snapshot operations and
 //! one independent document operation. Cancellation always reaches the actual pipe I/O.
+use crate::native_events::EventLoopProxy;
 use crate::{
     app::UserEvent,
-    feed::{Document, Snapshot},
+    feed::{parse_document, Document, DocumentError, Snapshot},
     wallpaper_feed,
 };
 use hertz_desktop_ipc::{
@@ -18,7 +19,6 @@ use std::{
     },
     time::{Duration, Instant},
 };
-use tao::event_loop::EventLoopProxy;
 use tokio::{
     sync::{mpsc, watch},
     task::JoinSet,
@@ -120,6 +120,7 @@ struct ReadError {
     source_invalid: bool,
     conflict: bool,
     scope_revoked: bool,
+    permanent: Option<DocumentError>,
 }
 impl ReadError {
     fn identity() -> Self {
@@ -128,6 +129,7 @@ impl ReadError {
             source_invalid: true,
             conflict: false,
             scope_revoked: false,
+            permanent: None,
         }
     }
     fn revoked() -> Self {
@@ -136,6 +138,7 @@ impl ReadError {
             source_invalid: false,
             conflict: false,
             scope_revoked: true,
+            permanent: None,
         }
     }
     fn unavailable() -> Self {
@@ -144,6 +147,7 @@ impl ReadError {
             source_invalid: false,
             conflict: false,
             scope_revoked: false,
+            permanent: None,
         }
     }
 }
@@ -217,6 +221,7 @@ fn validate_discovery(discovery: &Discovery, profile: &Profile) -> Result<(), Re
 struct DocIdentity {
     session: String,
     key: String,
+    capability: Option<u32>,
 }
 struct Work {
     id: u64,
@@ -278,7 +283,10 @@ fn start_job(
         };
         let mut session = String::new();
         let result = async {
-            let prepared = prepare(&profile, scope, document.as_ref().map(|d| d.key.as_str()))?;
+            let mut prepared = prepare(&profile, scope, document.as_ref().map(|d| d.key.as_str()))?;
+            if let Some(version) = document.as_ref().and_then(|identity| identity.capability) {
+                prepared.request.params["vocalSchemaVersion"] = serde_json::Value::from(version);
+            }
             session = prepared.discovery.server_instance_id.clone();
             if document.as_ref().is_some_and(|d| d.session != session) {
                 return Err(ReadError {
@@ -286,6 +294,7 @@ fn start_job(
                     source_invalid: false,
                     conflict: true,
                     scope_revoked: false,
+                    permanent: None,
                 });
             }
             let response = windows::request(
@@ -304,11 +313,16 @@ fn start_job(
             })?;
             // Never display server error bodies: they are not an authority for diagnostics.
             if response.status != 200 {
+                let permanent = (response.status == 422
+                    && response.body["error"]["code"] == "desktop_vocals_unsupported")
+                    .then_some(DocumentError::Unsupported);
                 return Err(ReadError {
-                    message: "DBX 桌面读取未授权或暂不可用",
+                    message: permanent
+                        .map_or("DBX 桌面读取未授权或暂不可用", DocumentError::message),
                     source_invalid: false,
                     conflict: response.status == 409,
                     scope_revoked: matches!(response.status, 401 | 403),
+                    permanent,
                 });
             }
             if document.is_none() {
@@ -361,6 +375,7 @@ async fn run(
     let mut seq = [None::<u64>, None];
     let mut desired_doc: Option<DocIdentity> = None;
     let mut successful_doc: Option<(DocIdentity, Arc<Document>)> = None;
+    let mut rejected_doc: Option<(DocIdentity, DocumentError)> = None;
     // Reconfirmation is separate from identity: 409/authorization errors must not
     // erase the same identity's independent retry history.
     let mut document_confirmation_after: Option<Instant> = None;
@@ -379,12 +394,12 @@ async fn run(
                 }
                 if !needs.lyrics { desired_doc = None; successful_doc = None; document_confirmation_after = None; }
             }
-            Some(()) = retry_rx.recv() => { retries[0].due = Instant::now(); retries[1].due = Instant::now(); retries[2].due = Instant::now(); }
+            Some(()) = retry_rx.recv() => { rejected_doc = None; retries[0].due = Instant::now(); retries[1].due = Instant::now(); retries[2].due = Instant::now(); }
             _ = lyrics_tick.tick() => {
                 if needs.lyrics && slots[0].is_none() && (retries[0].ready() || document_refresh) {
                     document_refresh = false; id += 1; start_job(&mut jobs, &mut slots, &profile, 0, id, None);
                 }
-                if needs.lyrics && slots[2].is_none() && retries[2].ready() && document_confirmation_after.is_none() && desired_doc.is_some() && desired_doc.as_ref() != successful_doc.as_ref().map(|(identity, _)| identity) {
+                if needs.lyrics && slots[2].is_none() && retries[2].ready() && document_confirmation_after.is_none() && desired_doc.is_some() && desired_doc.as_ref() != successful_doc.as_ref().map(|(identity, _)| identity) && desired_doc.as_ref() != rejected_doc.as_ref().map(|(identity, _)| identity) {
                     id += 1; start_job(&mut jobs, &mut slots, &profile, 2, id, desired_doc.clone());
                 }
             }
@@ -402,6 +417,14 @@ async fn run(
                 if slot == 2 && completion.document != desired_doc { continue; }
                 match completion.result {
                     Err(error) => {
+                        if slot == 2 {
+                            if let (Some(identity), Some(reason)) = (completion.document.clone(), error.permanent) {
+                                successful_doc = None;
+                                rejected_doc = Some((identity, reason));
+                                emit(Message::Failure { scope: Some(Scope::Lyrics), message: reason.message() });
+                                continue;
+                            }
+                        }
                         retries[slot].fail();
                         if slot == 0 && (error.source_invalid || error.scope_revoked) {
                             document_confirmation_after = Some(Instant::now());
@@ -426,18 +449,19 @@ async fn run(
                     Ok(value) => {
                         if slot < 2 && completion.session != session {
                             session = completion.session.clone(); seq = [None, None];
-                            desired_doc = None; successful_doc = None; document_confirmation_after = None; retries[2].success();
+                            desired_doc = None; successful_doc = None; rejected_doc = None; document_confirmation_after = None; retries[2].success();
                             for work in slots.iter().flatten() { work.cancel.cancel(); }
                             emit(Message::Session(session.clone()));
                         }
                         if slot == 0 {
                             let snapshot = serde_json::from_value::<Snapshot>(value).ok().filter(|s| s.protocol == 1 && s.timing == "presentation_applied");
-                            let Some(snapshot) = snapshot else { retries[0].fail(); continue; };
+                            let Some(mut snapshot) = snapshot else { retries[0].fail(); continue; };
                             if seq[0].is_some_and(|old| snapshot.seq <= old) { continue; }
                             seq[0] = Some(snapshot.seq); retries[0].success();
-                            let wanted = if snapshot.lyrics.status == "ready" { snapshot.lyrics.document_key.as_ref().filter(|key| valid_key(key)).map(|key| DocIdentity { session: session.clone(), key: key.clone() }) } else { None };
+                            let wanted = if snapshot.lyrics.status == "ready" { snapshot.lyrics.document_key.as_ref().filter(|key| valid_key(key)).map(|key| DocIdentity { session: session.clone(), key: key.clone(), capability: snapshot.vocal_capability() }) } else { None };
                             if desired_doc != wanted {
                                 if let Some(work) = &slots[2] { work.cancel.cancel(); }
+                                if wanted.as_ref().is_some_and(|wanted| rejected_doc.as_ref().is_some_and(|(rejected, _)| wanted != rejected)) { rejected_doc = None; }
                                 desired_doc = wanted; successful_doc = None; retries[2].success();
                             }
                             if document_confirmation_after.is_some_and(|after| completion.started >= after) {
@@ -446,6 +470,9 @@ async fn run(
                             let cached_document = successful_doc.as_ref()
                                 .filter(|(identity, _)| desired_doc.as_ref() == Some(identity))
                                 .map(|(_, document)| document.clone());
+                            if let Some((_, reason)) = rejected_doc.as_ref().filter(|(identity, _)| desired_doc.as_ref() == Some(identity)) {
+                                snapshot.lyrics.status = reason.status().into();
+                            }
                             emit(Message::Lyrics { started: completion.started, snapshot, cached_document });
                         } else if slot == 1 {
                             let snapshot = serde_json::from_value::<wallpaper_feed::Snapshot>(value).ok().filter(|s| wallpaper_feed::validate(s).is_ok());
@@ -455,11 +482,17 @@ async fn run(
                             emit(Message::Wallpaper { started: completion.started, snapshot });
                         } else {
                             let Some(identity) = completion.document else { continue; };
-                            let document = serde_json::from_value::<Document>(value).ok().filter(|d| d.protocol == 1 && d.timing == "presentation_applied" && d.document_key.as_deref() == Some(identity.key.as_str()));
-                            if let Some(document) = document {
+                            match parse_document(value, &identity.key, identity.capability) {
+                                Ok(document) => {
                                 successful_doc = Some((identity.clone(), Arc::new(document.clone()))); retries[2].success();
                                 emit(Message::Document { session: identity.session, key: identity.key, document });
-                            } else { retries[2].fail(); }
+                                }
+                                Err(DocumentError::Stale) => { retries[2].fail(); document_confirmation_after = Some(Instant::now()); document_refresh = true; }
+                                Err(reason) => {
+                                    successful_doc = None; rejected_doc = Some((identity, reason));
+                                    emit(Message::Failure { scope: Some(Scope::Lyrics), message: reason.message() });
+                                }
+                            }
                         }
                     }
                 }
@@ -575,6 +608,10 @@ mod tests {
         slow_document: AtomicBool,
         snapshot_delay_ms: AtomicU64,
         document_status: AtomicU64,
+        vocal_support: AtomicBool,
+        document_schema: AtomicU64,
+        document_invalid: AtomicBool,
+        requested_capabilities: std::sync::Mutex<Vec<Option<u64>>>,
         request_log: std::sync::Mutex<Vec<(String, Instant)>>,
     }
     async fn listener(
@@ -606,18 +643,29 @@ mod tests {
                     let body = if request.scope != scope || request.key != "a".repeat(64) { status = 403; serde_json::json!({}) }
                     else if request.op == "document" {
                         let attempt = state.documents.fetch_add(1, Ordering::SeqCst);
+                        state.requested_capabilities.lock().unwrap().push(request.params.get("vocalSchemaVersion").and_then(serde_json::Value::as_u64));
                         let forced_status = state.document_status.load(Ordering::SeqCst);
                         if forced_status != 0 { status = forced_status as u16; }
                         if attempt == 0 && state.fail_first_document.load(Ordering::SeqCst) { tokio::time::sleep(Duration::from_millis(2100)).await; }
                         else if state.slow_document.load(Ordering::SeqCst) { tokio::time::sleep(Duration::from_millis(900)).await; }
-                        serde_json::json!({"protocol":1,"timing":"presentation_applied","documentKey":request.params["key"],"lines":[{"startMs":0,"endMs":3000,"text":"fixture"}]})
+                        let mut body = serde_json::json!({"protocol":1,"timing":"presentation_applied","documentKey":request.params["key"],"lines":[{"startMs":0,"endMs":3000,"text":"fixture"}]});
+                        let schema = state.document_schema.load(Ordering::SeqCst);
+                        if schema != 0 {
+                            body["vocalSchemaVersion"] = serde_json::json!(schema);
+                            body["agents"] = serde_json::json!([{"id":"a","kind":"person"}]);
+                            body["lines"][0]["vocal"] = if state.document_invalid.load(Ordering::SeqCst) { serde_json::json!(null) } else { serde_json::json!({"agentIds":["a"],"role":"lead"}) };
+                        }
+                        if status == 422 { body = serde_json::json!({"error":{"code":"desktop_vocals_unsupported","message":"untrusted diagnostic"}}); }
+                        body
                     } else if scope == Scope::Lyrics {
                         state.snapshots.fetch_add(1, Ordering::SeqCst);
                         let forced = state.snapshot_status.load(Ordering::SeqCst);
                         if forced != 0 { status = forced as u16; }
                         let delay = state.snapshot_delay_ms.load(Ordering::SeqCst);
                         if delay != 0 { tokio::time::sleep(Duration::from_millis(delay)).await; }
-                        serde_json::json!({"protocol":if state.snapshot_invalid.load(Ordering::SeqCst) { 99 } else { 1 },"seq":if state.replay_sequence.load(Ordering::SeqCst) { 0 } else { state.sequence.fetch_add(1,Ordering::SeqCst) },"server":{"session":session,"edition":"standard","version":"fixture"},"generation":"1","positionMs":100,"durationMs":4000,"playing":true,"buffering":false,"track":{"id":"track","title":"fixture","artist":null,"album":null,"durationMs":4000},"lyrics":{"status":"ready","documentKey":key},"timing":"presentation_applied"})
+                        let mut body = serde_json::json!({"protocol":if state.snapshot_invalid.load(Ordering::SeqCst) { 99 } else { 1 },"seq":if state.replay_sequence.load(Ordering::SeqCst) { 0 } else { state.sequence.fetch_add(1,Ordering::SeqCst) },"server":{"session":session,"edition":"standard","version":"fixture"},"generation":"1","positionMs":100,"durationMs":4000,"playing":true,"buffering":false,"track":{"id":"track","title":"fixture","artist":null,"album":null,"durationMs":4000},"lyrics":{"status":"ready","documentKey":key},"timing":"presentation_applied"});
+                        if state.vocal_support.load(Ordering::SeqCst) { body["vocalSchemaVersions"] = serde_json::json!([1]); }
+                        body
                     } else {
                         state.wallpapers.fetch_add(1, Ordering::SeqCst);
                         serde_json::json!({"protocol":if state.snapshot_invalid.load(Ordering::SeqCst) { 99 } else { 1 },"seq":if state.replay_sequence.load(Ordering::SeqCst) { 0 } else { state.sequence.fetch_add(1,Ordering::SeqCst) },"server":{"session":session,"edition":"standard","version":"fixture"},"valid":true,"playing":true,"positionMs":100,"durationMs":4000,"generation":"1","spectrum":{"bands":vec![0.5;64],"energy":0.5,"ageMs":0},"timing":"presentation_applied"})
@@ -1163,5 +1211,111 @@ mod tests {
             assert_same_identity_backoff(401),
             assert_same_identity_backoff(403)
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn permanent_vocal_errors_are_single_flight_and_reconnect_or_capability_can_retry() {
+        for (schema, status, invalid, reason) in [
+            (1, 422, false, DocumentError::Unsupported),
+            (99, 0, false, DocumentError::Unsupported),
+            (1, 0, true, DocumentError::Invalid),
+        ] {
+            let fixture = Fixture::new();
+            let state = Arc::new(State::default());
+            state.vocal_support.store(true, Ordering::SeqCst);
+            state.document_schema.store(schema, Ordering::SeqCst);
+            state.document_status.store(status, Ordering::SeqCst);
+            state.document_invalid.store(invalid, Ordering::SeqCst);
+            let (server_cancel, servers) = start_servers(&fixture, state.clone());
+            let (_needs, needs_rx) = watch::channel(Needs {
+                lyrics: true,
+                wallpaper: false,
+            });
+            let (retry, retry_rx) = mpsc::unbounded_channel();
+            let cancel = Cancellation::new();
+            let (events, mut receive) = mpsc::unbounded_channel();
+            let worker = tokio::spawn(run(
+                fixture.profile.clone(),
+                move |event| {
+                    let _ = events.send(event);
+                },
+                cancel.clone(),
+                needs_rx,
+                retry_rx,
+            ));
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(4);
+            let mut failures = 0;
+            let mut rejected_snapshots = 0;
+            while rejected_snapshots < 3 {
+                match tokio::time::timeout_at(deadline, receive.recv())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                {
+                    Message::Failure {
+                        scope: Some(Scope::Lyrics),
+                        message,
+                    } => {
+                        assert_eq!(message, reason.message());
+                        failures += 1;
+                    }
+                    Message::Lyrics {
+                        snapshot,
+                        cached_document,
+                        ..
+                    } if snapshot.lyrics.status == reason.status() => {
+                        assert!(cached_document.is_none());
+                        rejected_snapshots += 1;
+                    }
+                    Message::Document { .. } => {
+                        panic!("a rejected vocal document reached the native cache")
+                    }
+                    _ => {}
+                }
+            }
+            assert_eq!(failures, 1);
+            assert_eq!(state.documents.load(Ordering::SeqCst), 1);
+            assert_eq!(*state.requested_capabilities.lock().unwrap(), vec![Some(1)]);
+            state.document_status.store(0, Ordering::SeqCst);
+            state.document_schema.store(1, Ordering::SeqCst);
+            state.document_invalid.store(false, Ordering::SeqCst);
+            retry.send(()).unwrap();
+            loop {
+                if let Message::Document { document, .. } =
+                    tokio::time::timeout(Duration::from_secs(3), receive.recv())
+                        .await
+                        .unwrap()
+                        .unwrap()
+                {
+                    assert_eq!(document.vocal_schema_version, Some(1));
+                    break;
+                }
+            }
+            assert_eq!(state.documents.load(Ordering::SeqCst), 2);
+            // An old producer has no capability array: its DBX request must keep the old shape.
+            state.vocal_support.store(false, Ordering::SeqCst);
+            state.document_schema.store(0, Ordering::SeqCst);
+            loop {
+                if let Message::Document { document, .. } =
+                    tokio::time::timeout(Duration::from_secs(3), receive.recv())
+                        .await
+                        .unwrap()
+                        .unwrap()
+                {
+                    assert_eq!(document.vocal_schema_version, None);
+                    break;
+                }
+            }
+            assert_eq!(
+                *state.requested_capabilities.lock().unwrap(),
+                vec![Some(1), Some(1), None]
+            );
+            cancel.cancel();
+            worker.await.unwrap();
+            server_cancel.cancel();
+            for server in servers {
+                server.await.unwrap();
+            }
+        }
     }
 }

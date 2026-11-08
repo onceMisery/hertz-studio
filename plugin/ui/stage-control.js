@@ -275,14 +275,39 @@
     return n;
   }
 
+  // 场景与来源复用应用的 24px / 2px 图标，标签仍保留为可读名称。
+  var CHOICE_ICONS = {
+    venue: 'lamp', diorama: 'cube', tempo: 'equalizer', still: 'disc',
+    immersive: 'orbit', coast: 'coast', zodiac: 'zodiac'
+  };
+
+  function choiceContent(button, value, label) {
+    var icon = CHOICE_ICONS[value];
+    if (icon) {
+      var svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      svg.setAttribute('class', 'sc-choice-icon');
+      svg.setAttribute('viewBox', '0 0 24 24');
+      svg.setAttribute('aria-hidden', 'true');
+      var use = document.createElementNS('http://www.w3.org/2000/svg', 'use');
+      use.setAttribute('href', '#i-' + icon);
+      svg.appendChild(use);
+      button.appendChild(svg);
+    }
+    button.appendChild(el3d('span', null, label));
+  }
+
   // 分段组：options 为 [[value,label]]；返回带 set() 的控件句柄（就地更新态）。
-  function seg3d(options, current, onPick) {
+  function seg3d(options, current, onPick, label) {
     var wrap = el3d('div', 'sc-seg');
+    wrap.setAttribute('role', 'group');
+    if (label) wrap.setAttribute('aria-label', label);
     options.forEach(function (pair) {
-      var b = el3d('button', 'sc-seg-btn', pair[1]);
+      var b = el3d('button', 'sc-seg-btn');
       b.type = 'button';
       b.dataset.value = pair[0];
+      choiceContent(b, pair[0], pair[1]);
       b.classList.toggle('is-on', pair[0] === String(current));
+      b.setAttribute('aria-pressed', String(pair[0] === String(current)));
       b.addEventListener('click', function () {
         if (b.classList.contains('is-on')) return;
         onPick(pair[0]);
@@ -294,6 +319,7 @@
       set: function (v) {
         Array.prototype.forEach.call(wrap.children, function (b) {
           b.classList.toggle('is-on', b.dataset.value === String(v));
+          b.setAttribute('aria-pressed', String(b.dataset.value === String(v)));
         });
       },
     };
@@ -305,6 +331,7 @@
     b.type = 'button';
     b.setAttribute('role', 'switch');
     b.setAttribute('aria-checked', String(!!current));
+    b.title = label;
     b.appendChild(el3d('span', null, label));
     b.appendChild(el3d('i', 'dot'));
     b.addEventListener('click', function () { onFlip(!b.classList.contains('on')); });
@@ -393,7 +420,7 @@
     var srcSeg = seg3d(SCHEMA_3D.sources, src, function (v) {
       write3D({ sceneSource: v });
       render3D(); // 来源切换后重织「来源专属」
-    });
+    }, '舞台来源');
     secSrc.appendChild(srcSeg.node);
     secSrc.appendChild(el3d('div', 'sc-note',
       '这里只调三维舞台来源；二维舞台的场景与滤镜归二维控制舱，两边不共用来源清单。'));
@@ -415,7 +442,7 @@
     var layoutSeg = seg3d(SCHEMA_3D.layouts, p.layout || 'focus', function (v) {
       write3D({ layout: v });
       layoutSeg.set(v);
-    });
+    }, '封面布局');
     var layoutCell = el3d('div', 'sc-cell');
     var layoutHead = el3d('label', 'sc-label');
     layoutHead.appendChild(el3d('span', null, '封面布局'));
@@ -457,7 +484,7 @@
         var sceneSeg = seg3d(opts, p.animeScene, function (v) {
           write3D({ animeScene: v });
           sceneSeg.set(v);
-        });
+        }, '绘景作品');
         var sCell = el3d('div', 'sc-cell');
         var sHead = el3d('label', 'sc-label');
         sHead.appendChild(el3d('span', null, '绘景作品'));
@@ -502,9 +529,6 @@
     if (!raw) return;
     try {
       var saved = JSON.parse(raw);
-      // 一次性迁移：52 是旧版默认尺寸。保留它会让"铺满短边"的新默认
-      // 永远被旧存档盖掉；删掉让其回落到新默认 100
-      if (saved.coverSize === 52) delete saved.coverSize;
       // 一次性迁移：滤镜总开关新默认是「启用」。老存档里存着 false 会把
       // 新默认盖掉（用户拖任何光学旋钮都无反应）。版本标记只做一次，
       // 迁移后用户手动关闭的选择照常被保存。
@@ -623,6 +647,38 @@
       });
     });
     return out;
+  }
+
+  // File transfer uses the same schema as live controls, but rejects coercion,
+  // unknown fields and out-of-range values instead of silently repairing them.
+  function preferenceTransfer(patch) {
+    if (!patch || typeof patch !== 'object' || Array.isArray(patch)
+        || ![Object.prototype, null].includes(Object.getPrototypeOf(patch))) {
+      throw new Error('舞台参数必须是对象');
+    }
+    var descriptors = new Map();
+    SCHEMA.forEach(function (group) {
+      (group.items || []).concat(group.selects || []).forEach(function (item) { descriptors.set(item.key, item); });
+    });
+    var clean = {};
+    Object.keys(patch).forEach(function (key) {
+      var item = descriptors.get(key), value = patch[key];
+      if (!item || key in Object.prototype) throw new Error('未知舞台参数：' + key);
+      if (item.type === 'toggle' && typeof value !== 'boolean') throw new Error('舞台开关必须是布尔值：' + key);
+      if (!item.options && item.type !== 'toggle' && item.type !== 'color'
+          && (typeof value !== 'number' || !Number.isFinite(value) || value < item.min || value > item.max)) {
+        throw new Error('舞台参数超出范围：' + key);
+      }
+      var normalized = normalize(item, value);
+      if (normalized === undefined || (typeof value === 'number' && Math.abs(normalized - value) > 1e-7)) {
+        throw new Error('舞台参数格式无效：' + key);
+      }
+      clean[key] = normalized;
+    });
+    return { value: clean, writes: [
+      { key: STORE_KEY, value: JSON.stringify(clean) },
+      { key: STORE_KEY + '.v', value: '2' }
+    ] };
   }
 
   /// 唯一写值出口：改 values、同步控件、推 CSS 变量、落盘、广播。
@@ -913,6 +969,7 @@
       pill.id = id;
       pill.className = 'sc-pill';
       pill.setAttribute('role', 'switch');
+      pill.title = it.label;
       var pillName = document.createElement('span');
       pillName.textContent = it.label;
       var pillDot = document.createElement('i');
@@ -992,9 +1049,12 @@
     var seg = document.createElement('div');
     seg.className = 'sc-seg';
     seg.id = id;
+    seg.setAttribute('role', 'group');
+    seg.setAttribute('aria-label', it.label);
     var paintSeg = function (v) {
       Array.prototype.forEach.call(seg.children, function (b) {
         b.classList.toggle('is-on', b.dataset.value === String(v));
+        b.setAttribute('aria-pressed', String(b.dataset.value === String(v)));
       });
     };
     it.options.forEach(function (pair) {
@@ -1002,7 +1062,7 @@
       b.type = 'button';
       b.className = 'sc-seg-btn';
       b.dataset.value = pair[0];
-      b.textContent = pair[1];
+      choiceContent(b, pair[0], pair[1]);
       b.addEventListener('click', function () {
         if (b.classList.contains('is-on')) return;
         beginEdit(it.key);
@@ -1155,6 +1215,7 @@
     if (btn) {
       btn.classList.toggle('active', want);
       btn.setAttribute('aria-expanded', String(want));
+      btn.setAttribute('aria-label', want ? '收起舞台控制' : '打开舞台控制');
       if (!want && panel.contains(document.activeElement)) btn.focus();
     }
     if (want) {
@@ -1191,6 +1252,10 @@
     push();
 
     var btn = $('stage-control-btn');
+    if (btn) {
+      btn.setAttribute('aria-controls', 'stage-ctl');
+      btn.setAttribute('aria-expanded', 'false');
+    }
     if (btn) btn.addEventListener('click', function () {
       setOpen();
       if (open && context === 'flat' && $('sc-search')) $('sc-search').focus({ preventScroll: true });
@@ -1271,6 +1336,7 @@
   }
 
   window.StageControl = {
+    preferenceTransfer: preferenceTransfer,
     init: init,
     open: function () { setOpen(true); },
     close: function () { setOpen(false); },

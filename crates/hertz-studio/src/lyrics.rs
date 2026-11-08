@@ -81,11 +81,12 @@ fn busy() -> ApiError {
     )
 }
 fn parse_error(error: vmusic_lyrics::ImportError) -> ApiError {
-    let code = match error {
+    let code = match error.category() {
         vmusic_lyrics::ImportError::Limit => "lyrics_limit",
         vmusic_lyrics::ImportError::Unsupported => "lyrics_unsupported",
         vmusic_lyrics::ImportError::Invalid => "lyrics_invalid",
         vmusic_lyrics::ImportError::Empty => "lyrics_empty",
+        vmusic_lyrics::ImportError::At { .. } => unreachable!("category returns a base error"),
     };
     ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, code, error.to_string())
 }
@@ -158,6 +159,37 @@ pub(crate) fn parse_saved_checked(content: &str) -> ApiResult<LyricDocument> {
     } else {
         vmusic_lyrics::parse_import(content, "auto").map_err(parse_error)
     }
+}
+
+pub(crate) async fn validate_backup_sources(
+    backup: &vmusic_store::backup::BackupFile,
+) -> ApiResult<()> {
+    vmusic_store::backup::validate_lyrics(backup).map_err(vmusic_core::CoreError::from)?;
+    if backup.lyrics.is_empty() {
+        return Ok(());
+    }
+    let content: Vec<_> = backup.lyrics.iter().map(|l| l.content.clone()).collect();
+    let permit = PARSERS.clone().try_acquire_owned().map_err(|_| busy())?;
+    let work = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        for raw in content {
+            // Empty overrides carry only an explicit per-track offset.
+            if !raw.trim().is_empty() {
+                parse_saved_checked(&raw)?;
+            }
+        }
+        Ok(())
+    });
+    tokio::time::timeout(Duration::from_secs(3), work)
+        .await
+        .map_err(|_| {
+            ApiError::new(
+                StatusCode::REQUEST_TIMEOUT,
+                "lyrics_timeout",
+                "歌词备份检查超时，请稍后再试",
+            )
+        })?
+        .map_err(|_| internal("歌词备份解析工作失败"))?
 }
 
 /// Legacy stored LRC remains tolerant; XML is checked with no fallback to LRC.
@@ -666,6 +698,152 @@ mod tests {
             state.audio.snapshot().track_id.is_none(),
             "lyric import changed playback"
         );
+        state.lyric_candidates.lock().await.clear();
+        exercise_vocal_roundtrip(state, dir, base).await?;
         Ok(())
+    }
+
+    async fn exercise_vocal_roundtrip(
+        state: &Arc<AppState>,
+        dir: &std::path::Path,
+        base: &str,
+    ) -> Result<()> {
+        let raw = r#"<tt xmlns="http://www.w3.org/ns/ttml" xmlns:m="http://www.w3.org/ns/ttml#metadata"><head><m:agent xml:id="a" type="person"/><m:agent xml:id="b" type="person"/></head><body><p begin="1s" end="10s" m:agent="a">长句<span m:role="x-translation">长译文</span></p><p begin="3s" end="4s" m:agent="b">短句</p></body></tt>"#.to_string();
+        let canonical = checked(parse_saved_checked(&raw))?;
+        ensure!(canonical.has_vocals(), "vocal source lost before candidate");
+        let initial = checked(read(state, "local").await)?;
+        let stale = checked(prepare(state, "local", prepare_body(&initial, &raw)).await)?;
+        checked(set_offset(state, "local", -750).await)?;
+        ensure!(
+            apply(state, "local", apply_body(&stale))
+                .await
+                .unwrap_err()
+                .code
+                == "lyrics_conflict",
+            "offset revision did not reject stale vocal candidate"
+        );
+        let initial = checked(read(state, "local").await)?;
+        let candidate = checked(prepare(state, "local", prepare_body(&initial, &raw)).await)?;
+        checked(apply(state, "local", apply_body(&candidate)).await)?;
+        let before = vmusic_store::lyrics::snapshot(&state.db, "local").await?;
+        ensure!(
+            before.content.as_deref() == Some(raw.as_str()) && before.offset_ms == -750,
+            "original source/offset not preserved"
+        );
+        let invalid = raw.replace("m:agent=\"b\"", "");
+        let baseline = checked(read(state, "local").await)?;
+        ensure!(
+            prepare(state, "local", prepare_body(&baseline, &invalid))
+                .await
+                .unwrap_err()
+                .code
+                == "lyrics_invalid",
+            "partial annotated overlap accepted"
+        );
+        let after = vmusic_store::lyrics::snapshot(&state.db, "local").await?;
+        ensure!(
+            after.content == before.content && after.revision == before.revision,
+            "failed candidate partially applied"
+        );
+
+        let client = reqwest::Client::builder().no_proxy().build()?;
+        let exported: Value = client
+            .get(format!("{base}/v1/backup"))
+            .bearer_auth(&state.token)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        ensure!(
+            exported["version"] == 2,
+            "raw lyric backup does not refuse legacy restore"
+        );
+        let backup: vmusic_store::backup::BackupFile = serde_json::from_value(exported)?;
+        let target_dir = dir.join("vocal-restore");
+        let db = vmusic_store::open(&target_dir).await?;
+        let (mut target, target_audio) = crate::state::tests::playback_state_with_db(db).await;
+        target.data_dir = target_dir;
+        let target = Arc::new(target);
+        let result: Result<()> = async {
+            let local_id = "local".to_owned();
+            let track = vmusic_store::get_track(&state.db, &local_id)
+                .await?
+                .unwrap();
+            vmusic_store::upsert_track(&target.db, &track).await?;
+            let report = checked(crate::routes::restore_backup_data(&target, &backup).await)?;
+            ensure!(
+                report.lyrics_applied == 1,
+                "raw backup did not restore lyric"
+            );
+            let restored = vmusic_store::lyrics::snapshot(&target.db, "local").await?;
+            ensure!(
+                restored.content == before.content
+                    && restored.offset_ms == before.offset_ms
+                    && restored.revision == before.revision,
+                "raw/offset/revision roundtrip differs"
+            );
+            let rebuilt = checked(parse_saved_checked(restored.content.as_deref().unwrap()))?;
+            ensure!(
+                serde_json::to_value(&canonical)? == serde_json::to_value(&rebuilt)?,
+                "identity/time/subtext reconstruction differs"
+            );
+            ensure!(
+                checked(crate::routes::restore_backup_data(&target, &backup).await)?.lyrics_applied
+                    == 0,
+                "repeated restore changed revision"
+            );
+            let mut rejected = backup;
+            rejected
+                .settings
+                .insert("invalid_vocal_restore_probe".into(), json!(true));
+            rejected.lyrics[0].content = invalid;
+            ensure!(
+                crate::routes::restore_backup_data(&target, &rejected)
+                    .await
+                    .unwrap_err()
+                    .code
+                    == "lyrics_invalid",
+                "invalid backup lyric accepted"
+            );
+            ensure!(
+                vmusic_store::settings::get(&target.db, "invalid_vocal_restore_probe")
+                    .await?
+                    .is_none(),
+                "invalid backup partially applied settings"
+            );
+            let rpc = crate::rpc::Rpc::new(target.clone());
+            let over_budget = json!({"version":2,"settings":{"oversize_vocal_restore_probe":true},
+                "lyrics": (0..8).map(|index| vmusic_store::backup::BackupLyric {
+                    track_id: format!("oversize-{index}"), content: "a".repeat(256*1024),
+                    offset_ms:0, revision:"1".into()
+                }).collect::<Vec<_>>()});
+            ensure!(
+                rpc.call(crate::rpc::Call {
+                    op: crate::rpc::Op::Post,
+                    path: "v1/backup/restore",
+                    query: json!({}),
+                    body: over_budget,
+                    raw: None,
+                    client_operation_id: None
+                })
+                .await
+                .is_err(),
+                "RPC accepted an over-budget complete backup"
+            );
+            ensure!(
+                vmusic_store::settings::get(&target.db, "oversize_vocal_restore_probe")
+                    .await?
+                    .is_none(),
+                "over-budget RPC restore partially applied settings"
+            );
+            Ok(())
+        }
+        .await;
+        target.audio.shutdown();
+        target_audio.join().unwrap();
+        target.db.close().await;
+        drop(target);
+        result
     }
 }

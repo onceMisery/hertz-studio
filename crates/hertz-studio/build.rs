@@ -5,6 +5,15 @@ mod desktop_build;
 mod edition_ui;
 
 fn main() {
+    for (output, input) in [
+        ("HERTZ_BUILD_TARGET", "TARGET"),
+        ("HERTZ_BUILD_PROFILE", "PROFILE"),
+    ] {
+        println!(
+            "cargo:rustc-env={output}={}",
+            std::env::var(input).expect("Cargo build identity")
+        );
+    }
     println!("cargo:rerun-if-env-changed=RUSTC");
     let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
     let compiler = std::process::Command::new(rustc)

@@ -1,43 +1,25 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 hertz-studio contributors
 
-//! Player → desktop host management. Keeps the legacy name and one raw JSON message each way.
+//! 播放器 → 桌面宿主的控制面。
+//!
+//! 旧实现是命名管道客户端（`management::request`），命令要转给另一个 exe。
+//! 现在宿主就在本进程：这里只把 JSON 意图交给 `desktop_host`，由它送进
+//! 宿主的事件循环。模块名保留，传输与转发整体退役。
 
-#[cfg(windows)]
 pub(crate) fn send(payload: serde_json::Value) -> anyhow::Result<serde_json::Value> {
-    use hertz_desktop_ipc::{management, windows::Cancellation};
-    management::request(&management::pipe_name(), &payload, &Cancellation::new())
-        .map_err(transport_error)
+    let command = payload
+        .get("command")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("桌面控制命令缺失"))?;
+    let value = payload.get("value").cloned();
+    crate::desktop_host::command(command, value)
 }
 
-#[cfg(windows)]
-fn transport_error(error: std::io::Error) -> anyhow::Error {
-    if error.kind() == std::io::ErrorKind::NotFound {
-        anyhow::anyhow!("桌面歌词未运行")
-    } else {
-        anyhow::Error::new(error).context("桌面歌词管理通道请求失败")
-    }
-}
-
-#[cfg(not(windows))]
-pub(crate) fn send(_payload: serde_json::Value) -> anyhow::Result<serde_json::Value> {
-    anyhow::bail!("桌面歌词管理通道仅支持 Windows")
-}
-
-#[cfg(all(test, windows))]
+#[cfg(test)]
 mod tests {
     #[test]
-    fn missing_listener_keeps_standalone_startup_error_mapping() {
-        use std::io::{Error, ErrorKind};
-        assert!(super::transport_error(Error::from(ErrorKind::NotFound))
-            .to_string()
-            .contains("未运行"));
-        for kind in [
-            ErrorKind::TimedOut,
-            ErrorKind::PermissionDenied,
-            ErrorKind::Interrupted,
-        ] {
-            assert!(!format!("{:#}", super::transport_error(Error::from(kind))).contains("未运行"));
-        }
+    fn commands_without_a_name_never_reach_the_host() {
+        assert!(super::send(serde_json::json!({ "value": 1 })).is_err());
     }
 }

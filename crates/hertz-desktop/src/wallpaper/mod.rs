@@ -36,11 +36,16 @@ pub(crate) mod content_quota;
 pub(crate) mod decode_probe;
 #[allow(dead_code)] // AssetStore 派生缓存的发布/回收与原生目录租约。
 pub(crate) mod derived_cache;
+#[allow(dead_code)] // Display topology and group clocks are wired by the native target coordinator.
+pub(crate) mod display;
+pub(crate) mod export_jobs;
 #[allow(dead_code)]
 pub(crate) mod file_tokens;
 pub(crate) mod follow;
 pub(crate) mod frame_window;
 pub(crate) mod gl_plan;
+#[allow(dead_code)] // Native group playback coordinates mirrored target lifecycles.
+pub(crate) mod group_playback;
 pub(crate) mod handoff;
 #[allow(dead_code)] // 派生描述符供后续 TargetPlanner 消费。
 pub(crate) mod image_prepare;
@@ -54,13 +59,17 @@ pub(crate) mod library;
 pub(crate) mod media;
 #[allow(dead_code)]
 pub(crate) mod media_stream;
+pub(crate) mod output_tokens;
 pub(crate) mod page_events;
+pub(crate) mod playlist;
 pub(crate) mod policy;
 #[allow(dead_code)]
 pub(crate) mod probe_environment;
+pub(crate) mod public_properties;
 #[allow(dead_code)] // 本机环境资格，不授予文件或会话访问权限。
 pub(crate) mod qualification;
 pub(crate) mod raw_import;
+pub(crate) mod references;
 #[allow(dead_code)] // app 接入真实媒体会话时消费的后台选择入口。
 pub(crate) mod selection_plan;
 #[allow(dead_code)]
@@ -72,3 +81,4 @@ pub(crate) mod settings_drafts;
 pub(crate) mod target_planner;
 pub(crate) mod video_poster;
 pub(crate) mod webresource;
+pub(crate) mod work_drafts;

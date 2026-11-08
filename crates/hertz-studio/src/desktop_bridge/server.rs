@@ -200,8 +200,15 @@ impl DesktopBridge {
             match (scope, request.op.as_str()) {
                 (Scope::Lyrics, "snapshot") => Ok(crate::desktop_lyrics::snapshot(&state).await),
                 (Scope::Lyrics, "document") => {
-                    crate::desktop_lyrics::document(&state, request.params["key"].as_str().unwrap())
-                        .await
+                    crate::desktop_lyrics::document_with_capability(
+                        &state,
+                        request.params["key"].as_str().unwrap(),
+                        request
+                            .params
+                            .get("vocalSchemaVersion")
+                            .and_then(serde_json::Value::as_u64),
+                    )
+                    .await
                 }
                 (Scope::Wallpaper, "snapshot") => Ok(crate::wallpaper::snapshot(&state).await),
                 _ => unreachable!("request validated before projection"),

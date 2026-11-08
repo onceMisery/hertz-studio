@@ -20,7 +20,19 @@ async function boot(page, mode) {
     await page.addScriptTag({ path: path.join(web, file) });
   }
   await page.evaluate(stageMode => {
-    const fixture = window.fixture = { time: 0, playing: true, reduced: false, nodes: [] };
+    const fixture = window.fixture = { time: 0, playing: true, reduced: false, nodes: [], trails: [] };
+    const createTrail = StanzaSonnetFx.createAccentTrail;
+    StanzaSonnetFx.createAccentTrail = (...args) => {
+      const trail = createTrail(...args);
+      fixture.trails.push(trail);
+      return trail;
+    };
+    const createAccent = StanzaSonnetFx.createAccentChoreography;
+    StanzaSonnetFx.createAccentChoreography = (...args) => {
+      const effect = createAccent(...args);
+      fixture.accentLayer = args[1].children.at(-1);
+      return effect;
+    };
     fixture.track = { id: 'motion-fixture', title: '晚风与回声', path: 'motion-fixture' };
     fixture.lines = [
       { start_ms: 0, end_ms: 3000, text: '晚风轻轻吹过' },
@@ -121,6 +133,48 @@ async function run(browser, mode, viewport) {
     await sample(2990); await sample(3000);
     const jump = await sample(9000);
     assert.equal(jump.debug.retirement.outgoingGlyphs, 0, prefix + ': seek clears outgoing lyrics');
+    if (mode === 'sonnet') {
+      for (const layout of ['phrases', 'editorial-track']) {
+        await page.evaluate(value => {
+          fixture.nodes = [];
+          fixture.renderer.setTuning({ lyricLayout: value });
+          fixture.renderer.setEco(false);
+          fixture.reduced = false;
+          fixture.sparkSnapshot = () => {
+            const dots = value === 'phrases' ? fixture.accentLayer.children
+              : fixture.trails.flat().filter(dot => !dot.destroyed);
+            return dots.map(dot => {
+              for (let node = dot; node; node = node.parent) {
+                if (!node.visible || node.alpha <= 0) return null;
+              }
+              return [dot.x, dot.y, dot.alpha, dot.rotation, dot.scale.x, dot.scale.y];
+            }).filter(Boolean);
+          };
+        }, layout);
+        await sample(1100);
+        const sparks = await page.evaluate(() => fixture.sparkSnapshot());
+        assert.ok(sparks.length > 0, prefix + '/' + layout + ': actual star trail is visible');
+        await page.screenshot({ path: path.join(output, prefix + '-' + layout + '-sparks.png') });
+        await sample(1100);
+        assert.deepEqual(await page.evaluate(() => fixture.sparkSnapshot()), sparks, prefix + '/' + layout + ': star trail freezes with clock');
+        await sample(200);
+        await sample(1100);
+        assert.deepEqual(await page.evaluate(() => fixture.sparkSnapshot()), sparks, prefix + '/' + layout + ': seeking reproduces visible stars');
+        await page.evaluate(value => fixture.renderer.setTuning({ lyricLayout: value, accents: false }), layout);
+        await sample(1100);
+        assert.equal(await page.evaluate(() => fixture.sparkSnapshot().length), 0, prefix + '/' + layout + ': accents off clears stars');
+        await page.evaluate(value => {
+          fixture.renderer.setTuning({ lyricLayout: value });
+          fixture.reduced = true;
+        }, layout);
+        await sample(1100);
+        assert.equal(await page.evaluate(() => fixture.sparkSnapshot().length), 0, prefix + '/' + layout + ': reduced motion clears stars');
+        await page.evaluate(() => { fixture.reduced = false; fixture.renderer.setEco(true); });
+        await sample(450);
+        const ecoCount = await page.evaluate(() => fixture.sparkSnapshot().length);
+        assert.ok(ecoCount > 0 && ecoCount <= (layout === 'phrases' ? 16 : 48), prefix + '/' + layout + ': eco star budget is bounded');
+      }
+    }
     assert.deepEqual(errors, [], prefix + ': no runtime or shader errors');
     await page.evaluate(() => fixture.renderer.destroy());
     assert.equal(await page.locator('canvas').count(), 0, prefix + ': renderer releases canvas');

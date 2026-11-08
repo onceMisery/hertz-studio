@@ -15,16 +15,21 @@
 //! 重复恢复同一份备份是安全的。
 
 use serde::Deserialize;
-use sqlx::SqlitePool;
+use sqlx::{SqliteConnection, SqlitePool};
 use vmusic_core::StoreError;
 
 use crate::now_ms;
 
 pub const BACKUP_VERSION: i64 = 1;
+pub const LYRICS_BACKUP_VERSION: i64 = 2;
+pub const MAX_BACKUP_LYRICS: usize = 2048;
+pub const MAX_BACKUP_LYRICS_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Debug, Deserialize)]
 pub struct BackupFile {
     pub version: i64,
+    #[serde(default)]
+    pub exported_at: Option<i64>,
     #[serde(default)]
     pub playlists: Vec<BackupPlaylist>,
     #[serde(default)]
@@ -33,16 +38,86 @@ pub struct BackupFile {
     pub settings: std::collections::BTreeMap<String, serde_json::Value>,
     #[serde(default)]
     pub scan_roots: Vec<BackupScanRoot>,
+    #[serde(default)]
+    pub lyrics: Vec<BackupLyric>,
 }
 
-#[derive(Debug, Deserialize)]
+/// Original source only. Canonical lines and vocal identities are rebuilt by
+/// the existing lyric parser when the service admits a restore.
+#[derive(Debug, Clone, serde::Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BackupLyric {
+    pub track_id: String,
+    pub content: String,
+    pub offset_ms: i64,
+    pub revision: String,
+}
+
+pub fn validate_lyrics(file: &BackupFile) -> Result<(), StoreError> {
+    if !matches!(file.version, BACKUP_VERSION | LYRICS_BACKUP_VERSION) {
+        return Err(StoreError::Serialization(
+            "不支持的备份版本（当前支持1、2）".into(),
+        ));
+    }
+    if file.version == BACKUP_VERSION && !file.lyrics.is_empty() {
+        return Err(StoreError::Serialization(
+            "带歌词原文的备份必须使用版本2".into(),
+        ));
+    }
+    validate_lyric_entries(&file.lyrics)?;
+    // HTTP and RPC admit this same canonical payload before parser work or writes.
+    // Source bytes alone omit JSON escaping and the other exported user data.
+    if file.version == LYRICS_BACKUP_VERSION
+        && serde_json::to_vec(file)
+            .map_err(|error| StoreError::Serialization(error.to_string()))?
+            .len()
+            > MAX_BACKUP_LYRICS_BYTES
+    {
+        return Err(StoreError::Serialization(
+            "歌词备份JSON超过2 MiB恢复预算".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_lyric_entries(lyrics: &[BackupLyric]) -> Result<(), StoreError> {
+    if lyrics.len() > MAX_BACKUP_LYRICS
+        || lyrics.iter().map(|l| l.content.len()).sum::<usize>() > MAX_BACKUP_LYRICS_BYTES
+    {
+        return Err(StoreError::Serialization(
+            "歌词备份超过2048项或2 MiB原文预算".into(),
+        ));
+    }
+    let mut ids = std::collections::HashSet::new();
+    for lyric in lyrics {
+        crate::limits::check_len(
+            "歌词曲目id",
+            Some(&lyric.track_id),
+            crate::limits::MAX_ID_CHARS,
+            "歌词备份",
+        )?;
+        let revision = lyric.revision.parse::<i64>().ok();
+        if lyric.track_id.trim().is_empty()
+            || !ids.insert(lyric.track_id.as_str())
+            || lyric.offset_ms.unsigned_abs() > 60_000
+            || revision.is_none_or(|r| r < 1 || r.to_string() != lyric.revision)
+        {
+            return Err(StoreError::Serialization(
+                "歌词备份身份、偏移或修订无效".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, serde::Serialize, Deserialize)]
 pub struct BackupPlaylist {
     pub name: String,
     #[serde(default)]
     pub tracks: Vec<BackupPlaylistTrack>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, serde::Serialize, Deserialize)]
 pub struct BackupPlaylistTrack {
     pub track_id: String,
     /// 在线曲目的快照（来源/标题等）；本地曲目没有。
@@ -60,7 +135,7 @@ pub struct BackupPlaylistTrack {
     pub cover: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, serde::Serialize, Deserialize)]
 pub struct BackupFavorite {
     pub kind: String,
     #[serde(default)]
@@ -77,7 +152,7 @@ pub struct BackupFavorite {
     pub cover: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, serde::Serialize, Deserialize)]
 pub struct BackupScanRoot {
     pub path: String,
     #[serde(default = "default_true")]
@@ -119,7 +194,7 @@ fn check_snapshot_strings(t: &BackupPlaylistTrack) -> Result<(), StoreError> {
     )
 }
 
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug)]
 pub struct ExportedBackup {
     pub version: i64,
     pub exported_at: i64,
@@ -127,6 +202,56 @@ pub struct ExportedBackup {
     pub favorites: Vec<ExportedFavorite>,
     pub settings: std::collections::BTreeMap<String, serde_json::Value>,
     pub scan_roots: Vec<(String, bool)>,
+    pub lyrics: Vec<BackupLyric>,
+}
+
+/// One wire shape for export and restore admission, including tuple scan roots
+/// and export metadata. The restore DTO must not inflate an admitted export.
+#[derive(serde::Serialize)]
+struct BackupWire<'a, P, F, R> {
+    version: i64,
+    exported_at: i64,
+    playlists: &'a [P],
+    favorites: &'a [F],
+    settings: &'a std::collections::BTreeMap<String, serde_json::Value>,
+    scan_roots: R,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lyrics: Option<&'a [BackupLyric]>,
+}
+
+impl serde::Serialize for ExportedBackup {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        BackupWire {
+            version: self.version,
+            exported_at: self.exported_at,
+            playlists: &self.playlists,
+            favorites: &self.favorites,
+            settings: &self.settings,
+            scan_roots: &self.scan_roots,
+            lyrics: (!self.lyrics.is_empty()).then_some(self.lyrics.as_slice()),
+        }
+        .serialize(serializer)
+    }
+}
+
+impl serde::Serialize for BackupFile {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let roots: Vec<_> = self
+            .scan_roots
+            .iter()
+            .map(|root| (root.path.as_str(), root.enabled))
+            .collect();
+        BackupWire {
+            version: self.version,
+            exported_at: self.exported_at.unwrap_or_else(now_ms),
+            playlists: &self.playlists,
+            favorites: &self.favorites,
+            settings: &self.settings,
+            scan_roots: &roots,
+            lyrics: (!self.lyrics.is_empty()).then_some(self.lyrics.as_slice()),
+        }
+        .serialize(serializer)
+    }
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -160,69 +285,66 @@ pub struct ExportedFavorite {
 
 /// 导出全部用户数据。歌单曲目带在线快照列，本地曲目这些列是 NULL。
 pub async fn export(pool: &SqlitePool) -> Result<ExportedBackup, StoreError> {
-    let playlists: Vec<(String, String)> = sqlx::query_as(
-        "SELECT p.name, pt.track_id FROM playlists p
-         LEFT JOIN playlist_tracks pt ON pt.playlist_id = p.id
-         ORDER BY p.created_at, pt.position",
-    )
-    .fetch_all(pool)
-    .await
-    .map_err(|e| StoreError::Database(e.to_string()))?;
+    // Deferred BEGIN keeps one WAL read snapshot without taking the writer lock.
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| StoreError::Database(e.to_string()))?;
+    let exported = export_snapshot(&mut tx).await?;
+    tx.commit()
+        .await
+        .map_err(|e| StoreError::Database(e.to_string()))?;
+    Ok(exported)
+}
 
-    type SnapRow = (
-        String,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<i64>,
-        Option<String>,
-    );
-    let snaps: Vec<SnapRow> = sqlx::query_as(
-        "SELECT track_id, source, title, artist, album, duration_ms, cover FROM playlist_tracks",
+async fn export_snapshot(connection: &mut SqliteConnection) -> Result<ExportedBackup, StoreError> {
+    #[derive(sqlx::FromRow)]
+    struct PlaylistRow {
+        id: String,
+        name: String,
+        track_id: Option<String>,
+        source: Option<String>,
+        title: Option<String>,
+        artist: Option<String>,
+        album: Option<String>,
+        duration_ms: Option<i64>,
+        cover: Option<String>,
+    }
+    let playlists: Vec<PlaylistRow> = sqlx::query_as(
+        "SELECT p.id, p.name, pt.track_id, pt.source, pt.title,
+                pt.artist, pt.album, pt.duration_ms, pt.cover FROM playlists p
+         LEFT JOIN playlist_tracks pt ON pt.playlist_id = p.id
+         ORDER BY p.created_at, p.id, pt.position, pt.track_id",
     )
-    .fetch_all(pool)
+    .fetch_all(&mut *connection)
     .await
     .map_err(|e| StoreError::Database(e.to_string()))?;
-    type SnapVals = (
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<i64>,
-        Option<String>,
-    );
-    let snap_by_id: std::collections::HashMap<String, SnapVals> = snaps
-        .into_iter()
-        .map(|(id, source, title, artist, album, dur, cover)| {
-            (id, (source, title, artist, album, dur, cover))
-        })
-        .collect();
 
     let mut exported: Vec<ExportedPlaylist> = Vec::new();
     let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    for (name, track_id) in playlists {
-        let pos = match index.get(&name) {
+    for row in playlists {
+        let pos = match index.get(&row.id) {
             Some(&pos) => pos,
             None => {
                 exported.push(ExportedPlaylist {
-                    name: name.clone(),
+                    name: row.name,
                     tracks: Vec::new(),
                 });
-                index.insert(name.clone(), exported.len() - 1);
+                index.insert(row.id, exported.len() - 1);
                 exported.len() - 1
             }
         };
-        let (source, title, artist, album, duration_ms, cover) =
-            snap_by_id.get(&track_id).cloned().unwrap_or_default();
+        let Some(track_id) = row.track_id else {
+            continue;
+        };
         exported[pos].tracks.push(ExportedTrack {
             track_id,
-            source,
-            title,
-            artist,
-            album,
-            duration_ms,
-            cover,
+            source: row.source,
+            title: row.title,
+            artist: row.artist,
+            album: row.album,
+            duration_ms: row.duration_ms,
+            cover: row.cover,
         });
     }
 
@@ -240,7 +362,7 @@ pub async fn export(pool: &SqlitePool) -> Result<ExportedBackup, StoreError> {
         "SELECT kind, source, ref_id, title, artist, album, duration_ms, cover
              FROM favorites ORDER BY added_at",
     )
-    .fetch_all(pool)
+    .fetch_all(&mut *connection)
     .await
     .map_err(|e| StoreError::Database(e.to_string()))?;
     let favorites = rows
@@ -269,25 +391,63 @@ pub async fn export(pool: &SqlitePool) -> Result<ExportedBackup, StoreError> {
         "remote_cred_",
     ];
     let settings: std::collections::BTreeMap<String, serde_json::Value> =
-        crate::settings::get_all(pool)
+        crate::settings::get_all_from(&mut *connection)
             .await?
             .into_iter()
-            .filter(|(key, _)| !SECRET_PREFIXES.iter().any(|prefix| key.starts_with(prefix)))
+            .filter(|(key, _)| {
+                key != crate::stage_presets::STATE
+                    && !SECRET_PREFIXES.iter().any(|prefix| key.starts_with(prefix))
+            })
             .collect();
     let roots: Vec<(String, i64)> =
         sqlx::query_as("SELECT path, enabled FROM scan_roots ORDER BY path")
-            .fetch_all(pool)
+            .fetch_all(&mut *connection)
             .await
             .map_err(|e| StoreError::Database(e.to_string()))?;
 
-    Ok(ExportedBackup {
-        version: BACKUP_VERSION,
+    let rows: Vec<(String, String, i64, i64)> = sqlx::query_as(
+        "SELECT l.track_id,l.content,l.offset_ms,r.revision FROM track_lyrics l
+         JOIN lyric_revisions r ON r.track_id=l.track_id ORDER BY l.track_id",
+    )
+    .fetch_all(&mut *connection)
+    .await
+    .map_err(|e| StoreError::Database(e.to_string()))?;
+    let lyrics: Vec<_> = rows
+        .into_iter()
+        .map(|(track_id, content, offset_ms, revision)| BackupLyric {
+            track_id,
+            content,
+            offset_ms,
+            revision: revision.to_string(),
+        })
+        .collect();
+    let result = ExportedBackup {
+        version: if lyrics.is_empty() {
+            BACKUP_VERSION
+        } else {
+            LYRICS_BACKUP_VERSION
+        },
         exported_at: now_ms(),
         playlists: exported,
         favorites,
         settings,
         scan_roots: roots.into_iter().map(|(p, e)| (p, e != 0)).collect(),
-    })
+        lyrics,
+    };
+    validate_lyric_entries(&result.lyrics)?;
+    // Respect the existing 2 MiB HTTP restore envelope. A complete backup is
+    // either admitted as a whole or rejected, never truncated.
+    if !result.lyrics.is_empty()
+        && serde_json::to_vec(&result)
+            .map_err(|e| StoreError::Serialization(e.to_string()))?
+            .len()
+            > MAX_BACKUP_LYRICS_BYTES
+    {
+        return Err(StoreError::Serialization(
+            "含歌词原文的完整备份超过2 MiB恢复预算".into(),
+        ));
+    }
+    Ok(result)
 }
 
 #[derive(Debug, Default, serde::Serialize)]
@@ -298,16 +458,20 @@ pub struct RestoreReport {
     pub favorites_added: u64,
     pub settings_applied: u64,
     pub roots_applied: u64,
+    pub lyrics_applied: u64,
 }
 
 /// 恢复：校验版本与必需字段，单个事务写入，任何失败整体回滚。
 pub async fn restore(pool: &SqlitePool, file: &BackupFile) -> Result<RestoreReport, StoreError> {
-    if file.version != BACKUP_VERSION {
+    crate::stage_presets::validate_backup(&file.settings)
+        .map_err(|e| StoreError::Serialization(e.to_string()))?;
+    if !matches!(file.version, BACKUP_VERSION | LYRICS_BACKUP_VERSION) {
         return Err(StoreError::Database(format!(
-            "不支持的备份版本 {}（当前支持 {}）",
-            file.version, BACKUP_VERSION
+            "不支持的备份版本 {}（当前支持1、2）",
+            file.version
         )));
     }
+    validate_lyrics(file)?;
     // 曲目 id 不做存在性校验：备份可能跨机器恢复，曲目尚未扫描是合法状态。
     // 数量与长度先整体过一遍（`limits` 模块）：**任何写入之前**验完，所以越界的
     // 载荷一条都进不了库，而不是「写了一半再回滚」。
@@ -528,6 +692,9 @@ pub async fn restore(pool: &SqlitePool, file: &BackupFile) -> Result<RestoreRepo
     }
 
     for (key, value) in &file.settings {
+        if crate::stage_presets::managed(key) {
+            continue;
+        }
         // updated_at 是 NOT NULL 且没有默认值，必须显式写；冲突时一并更新，口径
         // 与 settings::set_all 一致。
         sqlx::query(
@@ -556,6 +723,43 @@ pub async fn restore(pool: &SqlitePool, file: &BackupFile) -> Result<RestoreRepo
         report.roots_applied += 1;
     }
 
+    for lyric in &file.lyrics {
+        // Existing content or a deletion tombstone is an intentional local
+        // revision. Merge restores must not overwrite either.
+        let result = sqlx::query(
+            "INSERT INTO track_lyrics(track_id,content,offset_ms,updated_at)
+             SELECT ?1,?2,?3,?4 WHERE NOT EXISTS(SELECT 1 FROM lyric_revisions WHERE track_id=?1)",
+        )
+        .bind(&lyric.track_id)
+        .bind(&lyric.content)
+        .bind(lyric.offset_ms)
+        .bind(now_ms())
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| StoreError::Database(e.to_string()))?;
+        if result.rows_affected() != 0 {
+            sqlx::query("UPDATE lyric_revisions SET revision=?2 WHERE track_id=?1")
+                .bind(&lyric.track_id)
+                .bind(
+                    lyric
+                        .revision
+                        .parse::<i64>()
+                        .map_err(|e| StoreError::Serialization(e.to_string()))?,
+                )
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| StoreError::Database(e.to_string()))?;
+            report.lyrics_applied += 1;
+        }
+    }
+    crate::stage_presets::restore(&mut tx, &file.settings)
+        .await
+        .map_err(|e| StoreError::Serialization(e.to_string()))?;
+    report.settings_applied += file
+        .settings
+        .keys()
+        .filter(|key| crate::stage_presets::managed(key))
+        .count() as u64;
     tx.commit()
         .await
         .map_err(|e| StoreError::Database(e.to_string()))?;
@@ -684,6 +888,295 @@ mod tests {
         serde_json::from_value(serde_json::to_value(exported).unwrap()).unwrap()
     }
 
+    #[test]
+    fn complete_v2_restore_budget_includes_json_envelope_and_escaping() {
+        let mut file: BackupFile = serde_json::from_value(serde_json::json!({
+            "version": 2,
+            "lyrics": (0..8).map(|index| BackupLyric {
+                track_id: format!("t{index}"), content: "a".repeat(256 * 1024),
+                offset_ms: 0, revision: "1".into(),
+            }).collect::<Vec<_>>()
+        }))
+        .unwrap();
+        assert_eq!(
+            file.lyrics
+                .iter()
+                .map(|line| line.content.len())
+                .sum::<usize>(),
+            MAX_BACKUP_LYRICS_BYTES
+        );
+        assert!(validate_lyric_entries(&file.lyrics).is_ok());
+        assert!(validate_lyrics(&file).is_err());
+        file.lyrics.last_mut().unwrap().content.truncate(255 * 1024);
+        assert!(validate_lyrics(&file).is_ok());
+        // Escaped source fits the source-byte budget but exceeds the JSON budget.
+        file.lyrics[0].content = "\"".repeat(256 * 1024);
+        assert!(validate_lyric_entries(&file.lyrics).is_ok());
+        assert!(validate_lyrics(&file).is_err());
+    }
+
+    #[test]
+    fn complete_v2_budget_accepts_own_exact_limit_export_with_tuple_roots() {
+        let mut exported = ExportedBackup {
+            version: LYRICS_BACKUP_VERSION,
+            exported_at: 1_794_000_000_000,
+            playlists: vec![],
+            favorites: vec![],
+            settings: Default::default(),
+            scan_roots: (0..100)
+                .map(|index| (format!("D:/music/{index}"), true))
+                .collect(),
+            lyrics: vec![BackupLyric {
+                track_id: "t1".into(),
+                content: "[00:00]line".into(),
+                offset_ms: 0,
+                revision: "1".into(),
+            }],
+        };
+        exported
+            .settings
+            .insert("padding".into(), serde_json::json!(""));
+        let overhead = serde_json::to_vec(&exported).unwrap().len();
+        exported.settings.insert(
+            "padding".into(),
+            serde_json::json!("x".repeat(MAX_BACKUP_LYRICS_BYTES - overhead)),
+        );
+        let bytes = serde_json::to_vec(&exported).unwrap();
+        assert_eq!(bytes.len(), MAX_BACKUP_LYRICS_BYTES);
+        let restored: BackupFile = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(serde_json::to_vec(&restored).unwrap(), bytes);
+        assert!(validate_lyrics(&restored).is_ok());
+        exported.settings.insert(
+            "padding".into(),
+            serde_json::json!("x".repeat(MAX_BACKUP_LYRICS_BYTES - overhead + 1)),
+        );
+        assert!(validate_lyrics(&sample(&exported)).is_err());
+    }
+
+    #[tokio::test]
+    async fn lyric_source_offsets_and_revisions_roundtrip_without_overwriting_local_edits() {
+        let source = pool().await;
+        let target = pool().await;
+        let raw = "<tt xmlns=\"http://www.w3.org/ns/ttml\"><body><p begin=\"1s\" end=\"2s\">原文</p></body></tt>";
+        crate::lyrics::import(&source, "local", raw).await.unwrap();
+        crate::lyrics::set_offset(&source, "local", -750)
+            .await
+            .unwrap();
+        let before = crate::lyrics::snapshot(&source, "local").await.unwrap();
+        let exported = export(&source).await.unwrap();
+        assert_eq!(exported.version, LYRICS_BACKUP_VERSION);
+        let file = sample(&exported);
+        assert_eq!(file.lyrics[0].content, raw);
+        assert_eq!(file.lyrics[0].revision, before.revision.to_string());
+        assert_eq!(restore(&target, &file).await.unwrap().lyrics_applied, 1);
+        let restored = crate::lyrics::snapshot(&target, "local").await.unwrap();
+        assert_eq!(restored.content, before.content);
+        assert_eq!(restored.offset_ms, before.offset_ms);
+        assert_eq!(restored.revision, before.revision);
+        assert_eq!(restore(&target, &file).await.unwrap().lyrics_applied, 0);
+        assert_eq!(
+            crate::lyrics::snapshot(&target, "local")
+                .await
+                .unwrap()
+                .revision,
+            restored.revision
+        );
+        crate::lyrics::import(&target, "local", "[00:01.00]local edit")
+            .await
+            .unwrap();
+        assert_eq!(restore(&target, &file).await.unwrap().lyrics_applied, 0);
+        assert_eq!(
+            crate::lyrics::get(&target, "local")
+                .await
+                .unwrap()
+                .unwrap()
+                .content,
+            "[00:01.00]local edit"
+        );
+        crate::lyrics::remove(&target, "local").await.unwrap();
+        assert_eq!(restore(&target, &file).await.unwrap().lyrics_applied, 0);
+        assert!(crate::lyrics::get(&target, "local")
+            .await
+            .unwrap()
+            .is_none());
+        let empty = export(&target).await.unwrap();
+        assert_eq!(empty.version, BACKUP_VERSION);
+        assert!(serde_json::to_value(empty).unwrap().get("lyrics").is_none());
+        source.close().await;
+        target.close().await;
+    }
+
+    #[tokio::test]
+    async fn invalid_lyric_backup_is_rejected_before_other_business_writes() {
+        let db = pool().await;
+        let mut file = sample(&export(&db).await.unwrap());
+        file.settings
+            .insert("backup_probe".into(), serde_json::json!(true));
+        file.lyrics.push(BackupLyric {
+            track_id: "t".into(),
+            content: "[00:01.00]x".into(),
+            offset_ms: 0,
+            revision: "1".into(),
+        });
+        assert!(
+            restore(&db, &file).await.is_err(),
+            "version1 must not silently discard lyrics"
+        );
+        file.version = LYRICS_BACKUP_VERSION;
+        file.lyrics[0].offset_ms = 60001;
+        assert!(restore(&db, &file).await.is_err());
+        file.lyrics[0].offset_ms = 0;
+        file.lyrics[0].revision = "01".into();
+        assert!(restore(&db, &file).await.is_err());
+        file.lyrics[0].revision = "1".into();
+        file.lyrics.push(file.lyrics[0].clone());
+        assert!(restore(&db, &file).await.is_err());
+        assert!(crate::settings::get(&db, "backup_probe")
+            .await
+            .unwrap()
+            .is_none());
+        assert!(crate::lyrics::get(&db, "t").await.unwrap().is_none());
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn export_preserves_playlist_membership_empty_lists_and_version_one_restore() {
+        let db = pool().await;
+        sqlx::raw_sql(
+            "INSERT INTO playlists (id, name, created_at, updated_at) VALUES
+             ('a', 'Repeat', 1, 1), ('b', 'Repeat', 2, 2),
+             ('c', 'Other', 3, 3), ('d', 'Empty', 4, 4);
+             INSERT INTO playlist_tracks (playlist_id, track_id, position, source, title) VALUES
+             ('a', 'shared', 1, 'online', 'Snapshot A'),
+             ('a', 'local', 0, NULL, NULL),
+             ('b', 'shared', 0, 'online', 'Snapshot B'),
+             ('c', 'shared', 0, 'online', 'Snapshot C');",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        crate::scan_roots::upsert(&db, "D:/music", false)
+            .await
+            .unwrap();
+
+        let exported = export(&db).await.unwrap();
+        assert_eq!(exported.playlists.len(), 4);
+        assert_eq!(exported.playlists[0].name, "Repeat");
+        assert_eq!(exported.playlists[1].name, "Repeat");
+        assert_eq!(exported.playlists[0].tracks[0].track_id, "local");
+        assert!(exported.playlists[0].tracks[0].title.is_none());
+        assert_eq!(
+            exported.playlists[0].tracks[1].title.as_deref(),
+            Some("Snapshot A")
+        );
+        assert_eq!(
+            exported.playlists[1].tracks[0].title.as_deref(),
+            Some("Snapshot B")
+        );
+        assert_eq!(
+            exported.playlists[2].tracks[0].title.as_deref(),
+            Some("Snapshot C")
+        );
+        assert_eq!(exported.playlists[3].name, "Empty");
+        assert!(exported.playlists[3].tracks.is_empty());
+
+        // Version 1 keeps tuple roots and name-based restore merging.
+        let json = serde_json::to_value(&exported).unwrap();
+        assert_eq!(json["scan_roots"], serde_json::json!([["D:/music", false]]));
+        let fresh = pool().await;
+        let report = restore(&fresh, &sample(&exported)).await.unwrap();
+        assert_eq!(report.playlists_created, 3);
+        assert_eq!(report.playlists_merged, 1);
+        assert_eq!(report.tracks_added, 3);
+        assert_eq!(report.roots_applied, 1);
+        let restored = export(&fresh).await.unwrap();
+        let repeated = restored
+            .playlists
+            .iter()
+            .find(|p| p.name == "Repeat")
+            .unwrap();
+        assert_eq!(repeated.tracks.len(), 2);
+        assert_eq!(repeated.tracks[1].title.as_deref(), Some("Snapshot A"));
+        let other = restored
+            .playlists
+            .iter()
+            .find(|p| p.name == "Other")
+            .unwrap();
+        assert_eq!(other.tracks[0].title.as_deref(), Some("Snapshot C"));
+        assert!(restored
+            .playlists
+            .iter()
+            .find(|p| p.name == "Empty")
+            .unwrap()
+            .tracks
+            .is_empty());
+        assert_eq!(restored.scan_roots, exported.scan_roots);
+        db.close().await;
+        fresh.close().await;
+    }
+
+    #[tokio::test]
+    async fn export_snapshot_keeps_all_sections_on_one_wal_generation() {
+        let db = pool().await;
+        sqlx::raw_sql(
+            "INSERT INTO playlists (id, name, created_at, updated_at) VALUES ('p', 'Before', 1, 1);
+             INSERT INTO playlist_tracks (playlist_id, track_id, position, source, title)
+             VALUES ('p', 'track', 0, 'online', 'Before');
+             INSERT INTO favorites (id, kind, source, ref_id, title, added_at, updated_at)
+             VALUES ('track:online:track', 'track', 'online', 'track', 'Before', 1, 1);
+             INSERT INTO settings (key, value, updated_at) VALUES ('backup_generation', '\"Before\"', 1);
+             INSERT INTO scan_roots (path, enabled) VALUES ('D:/music', 1);",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        let mut reader = db.begin().await.unwrap();
+        // A real read establishes the snapshot; BEGIN alone does not.
+        let first: String = sqlx::query_scalar("SELECT name FROM playlists WHERE id = 'p'")
+            .fetch_one(&mut *reader)
+            .await
+            .unwrap();
+        assert_eq!(first, "Before");
+
+        let mut writer = crate::begin_immediate(&db).await.unwrap();
+        sqlx::raw_sql(
+            "UPDATE playlists SET name = 'After';
+             UPDATE playlist_tracks SET title = 'After';
+             UPDATE favorites SET title = 'After';
+             UPDATE settings SET value = '\"After\"' WHERE key = 'backup_generation';
+             UPDATE scan_roots SET enabled = 0;",
+        )
+        .execute(&mut *writer)
+        .await
+        .unwrap();
+        writer.commit().await.unwrap();
+
+        let before = export_snapshot(&mut reader).await.unwrap();
+        assert_eq!(before.playlists[0].name, "Before");
+        assert_eq!(
+            before.playlists[0].tracks[0].title.as_deref(),
+            Some("Before")
+        );
+        assert_eq!(before.favorites[0].title, "Before");
+        assert_eq!(
+            before.settings["backup_generation"],
+            serde_json::json!("Before")
+        );
+        assert_eq!(before.scan_roots, [("D:/music".to_owned(), true)]);
+        reader.commit().await.unwrap();
+
+        let after = export(&db).await.unwrap();
+        assert_eq!(after.playlists[0].name, "After");
+        assert_eq!(after.playlists[0].tracks[0].title.as_deref(), Some("After"));
+        assert_eq!(after.favorites[0].title, "After");
+        assert_eq!(
+            after.settings["backup_generation"],
+            serde_json::json!("After")
+        );
+        assert_eq!(after.scan_roots, [("D:/music".to_owned(), false)]);
+        db.close().await;
+    }
+
     #[tokio::test]
     async fn restore_is_idempotent_and_rejects_unknown_version() {
         let db = pool().await;
@@ -780,6 +1273,14 @@ mod tests {
             "online_cookie_kugou".into(),
             Value::String("kgmid=old".into()),
         ));
+        rows.push((
+            "online_device_fixture".into(),
+            Value::String("device-secret".into()),
+        ));
+        rows.push((
+            "remote_cred_fixture".into(),
+            Value::String("remote-secret".into()),
+        ));
         rows.push(("play_mode".into(), Value::String("repeat".into())));
         for (key, value) in &rows {
             crate::settings::set(&db, key, value).await.unwrap();
@@ -802,6 +1303,8 @@ mod tests {
     async fn restore_rejects_invalid_entries_without_partial_write() {
         let db = pool().await;
         let file = BackupFile {
+            exported_at: None,
+            lyrics: Vec::new(),
             version: BACKUP_VERSION,
             playlists: vec![BackupPlaylist {
                 name: "坏歌单".into(),
@@ -848,6 +1351,8 @@ mod tests {
             }],
         };
         let file = BackupFile {
+            exported_at: None,
+            lyrics: Vec::new(),
             version: BACKUP_VERSION,
             playlists: vec![good, bad],
             favorites: vec![],
@@ -865,6 +1370,8 @@ mod tests {
         );
 
         let many = BackupFile {
+            exported_at: None,
+            lyrics: Vec::new(),
             version: BACKUP_VERSION,
             playlists: (0..=L::MAX_PLAYLISTS_PER_BACKUP)
                 .map(|i| BackupPlaylist {
@@ -896,6 +1403,8 @@ mod tests {
         .await
         .unwrap();
         let file = BackupFile {
+            exported_at: None,
+            lyrics: Vec::new(),
             version: BACKUP_VERSION,
             playlists: vec![BackupPlaylist {
                 name: "上限内的歌单".into(),

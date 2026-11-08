@@ -11,12 +11,20 @@ pub mod archive;
 pub mod catalog;
 pub mod json;
 pub mod manifest;
+pub mod media;
 pub mod paths;
+pub mod properties;
 
 pub use archive::{validate_archive, validate_package, ValidatedPackage, VerifiedEntry};
 pub use catalog::{catalog, CatalogContract};
-pub use manifest::{validate_manifest_bytes, AssetDescriptor, AssetKind, Content, FileEntry, License, Manifest, Permissions, Variant};
+pub use manifest::{
+    validate_manifest_bytes, AssetDescriptor, AssetKind, Content, FileEntry, License, Manifest,
+    Permissions, Variant,
+};
 pub use paths::validate_rel_path;
+pub use properties::{
+    PropertyConstraints, PropertyDescriptor, PropertyTarget, PropertyType, SelectOption,
+};
 
 /// 稳定错误码（snake_case）。调用方（设置页/安装器/社区校验器）按 code 分支，
 /// message 仅用于展示；新增分支必须新增 code，不得复用旧码表达新含义。
@@ -71,7 +79,10 @@ pub fn valid_local_id(id: &str) -> bool {
 
 /// 64 位小写十六进制 SHA-256（§4.1 packageHash 同规则）。
 pub fn valid_sha256_hex(value: &str) -> bool {
-    value.len() == 64 && value.bytes().all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 /// 资源 kind 对应的单资源压缩输入上限。

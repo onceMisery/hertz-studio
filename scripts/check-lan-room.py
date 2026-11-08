@@ -3,6 +3,7 @@
 
 Build first. --native-output opens the default soundcard at local volume zero;
 it verifies scheduling, not acoustic synchronization between two computers.
+--format-mode native selects source-rate transport independently of device output.
 Only the Python standard library is needed. Credentials never enter the report.
 """
 import argparse
@@ -152,29 +153,204 @@ def wait_for(predicate, description, timeout=10):
     raise AssertionError("timed out: " + description)
 
 
+def write_fixture(path, rate, index=0):
+    with wave.open(str(path), "wb") as stream:
+        stream.setparams((2, 2, rate, 0, "NONE", "not compressed"))
+        second = bytearray()
+        for frame in range(rate):
+            sample = round(400 * math.sin(2 * math.pi * (220 + index * 110) * frame / rate))
+            second.extend(struct.pack("<hh", sample, sample))
+        for _ in range(8):
+            stream.writeframes(second)
+    path.with_suffix(".lrc").write_text("[00:00.00]LAN fixture\n[00:03.00]Shared timeline\n", encoding="utf-8")
+
+
 def fixtures(directory):
     directory.mkdir()
     for index, rate in enumerate([44100, 48000, 96000]):
-        path = directory / f"LAN fixture {index + 1}.wav"
-        with wave.open(str(path), "wb") as stream:
-            stream.setparams((2, 2, rate, 0, "NONE", "not compressed"))
-            # Eight seconds each, with deliberately different source rates.
-            second = bytearray()
-            for frame in range(rate):
-                sample = round(400 * math.sin(2 * math.pi * (220 + index * 110) * frame / rate))
-                second.extend(struct.pack("<hh", sample, sample))
-            for _ in range(8):
-                stream.writeframes(second)
-        path.with_suffix(".lrc").write_text("[00:00.00]LAN fixture\n[00:03.00]Shared timeline\n", encoding="utf-8")
+        write_fixture(directory / f"LAN fixture {index + 1}.wav", rate, index)
 
 
-def verify(host, guest, music, native, duration, samples, output_device=None):
+def create_request(name, format_mode):
+    body = {"action": "create", "name": name, "address": "127.0.0.1:0", "local_output": False}
+    if format_mode == "native":
+        body["format_mode"] = "native"
+    else:
+        body["sample_rate"] = 48000
+    return body
+
+
+def verify_native_epochs(host, guest, music, library, duration, samples, output_device):
+    checks = []
+    settings = guest.room()["output"]["settings"]
+    settings["volume"] = 0
+    if output_device is not None:
+        settings["device_id"] = output_device
+    guest.room({"action": "output", "settings": settings, "enabled": True})
+
+    def selected_ready():
+        output = guest.room().get("output", {})
+        return output if output.get("ready") and (output_device is None or
+               (output.get("binding") or {}).get("device") == output_device) else None
+
+    output = wait_for(selected_ready, "muted device for native-rate room", 20)
+    binding = output["binding"]
+    resync_baseline = int(output["resync_count"])
+    ordered = sorted(library, key=lambda track: track["sample_rate"])
+    assert [track["sample_rate"] for track in ordered] == [44100, 48000, 96000]
+    resources = {track["resource_id"]: track["sample_rate"] for track in ordered}
+    host.control("queue", items=[{"instance_id": None, "resource_id": track["resource_id"]}
+                                 for track in ordered])
+    # At least a heartbeat period gives the Host a current output lease.
+    time.sleep(1.2)
+    host.play("play")
+    wait_for(lambda: host.room().get("playing") and guest.room()["output"].get("current_epoch"),
+             "native source-rate playback", 10)
+    start = time.monotonic()
+    seen_rates = set()
+    seen_epochs = {}
+    gap_started = None
+    gap_intervals = []
+    last_presented = None
+    while time.monotonic() - start < duration:
+        snapshot = host.room()
+        output = guest.room()["output"]
+        current = snapshot.get("current_track") or {}
+        room_format = snapshot.get("format") or {}
+        rate = room_format.get("sample_rate")
+        observed_at = time.monotonic()
+        row = {"phase": "native_rates", "elapsed_seconds": round(observed_at - start, 3),
+               "format_mode": snapshot.get("format_mode"), "room_rate": rate,
+               "source_rate": snapshot.get("source_rate"), "declared_source_rate": snapshot.get("declared_source_rate"),
+               "instance": snapshot.get("track_instance_id"), "position_ms": snapshot.get("position_ms"),
+               "playing": snapshot.get("playing"), "ended": snapshot.get("ended"),
+               "pending": snapshot.get("pending"), "scheduled": snapshot.get("scheduled"),
+               "host_error": snapshot.get("error"), "successor_error": snapshot.get("successor_error"),
+               "epoch": output.get("current_epoch"), "played_frame": output.get("played_frame"),
+               "underrun_frames": output.get("underrun_frames"), "resync_count": output.get("resync_count"),
+               "error": output.get("error"), "input_frames": output.get("buffered_input_frames"),
+               "device_rate": (output.get("binding") or {}).get("sample_rate")}
+        samples.append(row)
+        assert row["format_mode"] == "native", row
+        assert rate == resources[current["resource_id"]] == row["source_rate"], row
+        assert row["declared_source_rate"] == rate, row
+        assert row["host_error"] is None and row["successor_error"] is None, row
+        assert output["binding"] == binding, row
+        assert row["error"] is None and int(row["underrun_frames"]) == 0, row
+        assert int(row["resync_count"]) == resync_baseline, row
+        assert row["input_frames"] <= 192000 * 3, row
+        if row["playing"]:
+            assert not row["ended"], row
+            if gap_started is not None:
+                gap_intervals[-1]["duration_seconds"] = round(observed_at - gap_started, 3)
+                gap_started = None
+            last_presented = (row["instance"], rate)
+            seen_rates.add(rate)
+            if (row["epoch"] and int(row["position_ms"]) >= 500 and
+                    not snapshot.get("pending") and not snapshot.get("scheduled")):
+                previous_rate = seen_epochs.setdefault(row["epoch"], rate)
+                assert previous_rate == rate, row
+        else:
+            # Cross-rate preparation may finish after E, leaving a valid gap
+            # before the new anchor. The old presentation must reach its real
+            # endpoint and keep its own rate until the next plan applies.
+            assert row["ended"] and int(row["position_ms"]) == 8000, row
+            if last_presented is not None:
+                assert (row["instance"], rate) == last_presented, row
+            if gap_started is None:
+                gap_started = observed_at
+                gap_intervals.append({"start_seconds": row["elapsed_seconds"],
+                                      "previous_instance": row["instance"], "previous_rate": rate,
+                                      "duration_seconds": 0})
+            row["gap_elapsed_seconds"] = round(observed_at - gap_started, 3)
+        time.sleep(.2)
+    if gap_started is not None:
+        gap_intervals[-1]["duration_seconds"] = round(time.monotonic() - gap_started, 3)
+    gaps = {"count": len(gap_intervals),
+            "total_seconds": round(sum(gap["duration_seconds"] for gap in gap_intervals), 3),
+            "longest_seconds": max((gap["duration_seconds"] for gap in gap_intervals), default=0),
+            "sample_interval_seconds": .2, "intervals": gap_intervals}
+    assert seen_rates == {44100, 48000, 96000}, seen_rates
+    assert len(seen_epochs) >= 3, seen_epochs
+    checks.append(f"{duration}s native-rate HTTP/TLS playback presents 44.1/48/96k epochs with one unchanged muted device binding and no underrun/resync")
+
+    host.play("pause")
+    wait_for(lambda: not host.room().get("playing") and not host.room().get("pending")
+             and not host.room().get("scheduled"), "pause before rejected native successor", 10)
+    write_fixture(music / "LAN rejected 32k successor.wav", 32000)
+    host.call("/v1/library/scan", {"root": str(music)})
+    tracks = wait_for(lambda: (lambda rows: rows if len(rows) == 4 else None)(
+        host.call("/v1/tracks?limit=32").get("tracks", [])), "32k successor fixture indexed")
+    host.room({"action": "share", "track_ids": [track["id"] for track in tracks]})
+    native_library = host.peer(action="library", offset=0, limit=32)["tracks"]
+    by_rate = {track["sample_rate"]: track for track in native_library}
+    assert set(by_rate) == {32000, 44100, 48000, 96000}, by_rate.keys()
+    host.control("queue", items=[{"instance_id": None, "resource_id": by_rate[rate]["resource_id"]}
+                                 for rate in [96000, 32000, 44100]])
+    wait_for(lambda: not host.room().get("pending") and not host.room().get("scheduled"),
+             "new native finite program queue settles", 10)
+    host.play("play")
+    wait_for(lambda: host.room().get("playing") and (host.room().get("format") or {}).get("sample_rate") == 96000,
+             "96k prefix before rejected successor", 10)
+
+    def finite_end():
+        snapshot = host.room()
+        return snapshot if snapshot.get("ended") and not snapshot.get("playing") else None
+
+    ended = wait_for(finite_end, "native finite end after the 32k successor rejection", 15)
+    assert ended["format_mode"] == "native" and ended["format"]["sample_rate"] == 96000, ended
+    assert ended["current_track"]["resource_id"] == by_rate[96000]["resource_id"], ended
+    assert ended["successor_error"] and ended["successor_error"]["code"], ended
+    assert ended["source_rate"] == ended["declared_source_rate"] == 96000, ended
+    assert int(ended["position_ms"]) == 8000, ended
+    assert not ended.get("pending") and not ended.get("scheduled"), ended
+    wait_for(lambda: guest.peer(action="snapshot").get("ended"), "guest receives authoritative native finite-end state")
+    def finite_drained():
+        output = guest.room()["output"]
+        # A drained epoch retains sealed diagnostic metadata until replacement.
+        # Its real input, accepted device tail and source count prove the EOF.
+        return output if (output.get("buffered_input_frames") == 0 and
+                          (output.get("device") or {}).get("queued_frames") == 0 and
+                          int(output.get("played_frame", "0")) == 96_000 * 8) else None
+
+    drained = wait_for(finite_drained, "native Receiver drains its final epoch", 10)
+    drained_epoch = drained.get("current_epoch")
+    for _ in range(10):
+        snapshot = host.room()
+        output = guest.room()["output"]
+        row = {"phase": "native_finite_end", "format_mode": snapshot.get("format_mode"),
+               "room_rate": (snapshot.get("format") or {}).get("sample_rate"),
+               "ended": snapshot.get("ended"), "playing": snapshot.get("playing"),
+               "position_ms": snapshot.get("position_ms"), "successor_error": snapshot.get("successor_error"),
+               "epoch": output.get("current_epoch"), "played_frame": output.get("played_frame"),
+               "input_frames": output.get("buffered_input_frames"),
+               "queued_frames": (output.get("device") or {}).get("queued_frames"),
+               "underrun_frames": output.get("underrun_frames"),
+               "resync_count": output.get("resync_count"), "error": output.get("error")}
+        samples.append(row)
+        assert row["ended"] and not row["playing"] and row["position_ms"] == ended["position_ms"], row
+        assert row["successor_error"] == ended["successor_error"], row
+        assert row["epoch"] == drained_epoch and row["error"] is None, row
+        assert row["input_frames"] == row["queued_frames"] == 0, row
+        assert int(row["played_frame"]) == 96_000 * 8, row
+        assert int(row["underrun_frames"]) == 0 and int(row["resync_count"]) == resync_baseline, row
+        assert output["binding"] == binding, row
+        time.sleep(.2)
+    guest.room({"action": "output", "settings": settings, "enabled": False})
+    checks.append("rejected 32k successor preserves the 96k prefix, exposes a persistent failure, stops at exactly 8000ms and drains the Receiver without fake underrun/resync")
+    return binding, checks, gaps
+
+
+def verify(host, guest, music, native, duration, samples, output_device=None, format_mode="fixed"):
     checks = []
     host.call("/v1/library/scan", {"root": str(music)})
     tracks = wait_for(lambda: (lambda rows: rows if len(rows) == 3 else None)(
         host.call("/v1/tracks?limit=32").get("tracks", [])), "three local tracks")
-    host.room({"action": "create", "name": "LAN acceptance", "address": "127.0.0.1:0",
-               "sample_rate": 48000, "local_output": False})
+    created = host.room(create_request("LAN acceptance", format_mode))
+    if format_mode == "native":
+        assert created["format_mode"] == "native" and created["format"] is None, created
+        assert created["ended"] is False, created
+        checks.append("native create omits sample_rate and leaves current format unknown until a presented plan")
     host.room({"action": "share", "track_ids": [track["id"] for track in tracks]})
     library = host.peer(action="library", offset=0, limit=32)["tracks"]
     assert len(library) == 3
@@ -277,6 +453,9 @@ def verify(host, guest, music, native, duration, samples, output_device=None):
     invitation = host.room({"action": "invite", "permissions": permissions})["invitation"]
     guest.room({"action": "join", "invitation": invitation, "name": "Acceptance desktop", "listen": native and output_device is None})
     wait_for(guest.connected, "guest connected with current permissions", 20)
+    if format_mode == "native":
+        assert guest.peer(action="snapshot")["format_mode"] == "native"
+        checks.append("native capability negotiation completes before the guest receives room state over pinned TLS")
     if native and output_device is None:
         wait_for(lambda: guest.connected() and guest.room().get("output", {}).get("ready"), "native device and clocks", 20)
     assert guest.peer(action="library", offset=0, limit=32)["tracks"] == library
@@ -351,8 +530,12 @@ def verify(host, guest, music, native, duration, samples, output_device=None):
     assert host.peer(action="queue_page", offset=0, limit=32)["queue"][0]["resource_id"] == online["resource_id"]
     checks.append("host shares cached online song; account-free guest sees restricted metadata and queues a mixed online/local program")
     output = None
+    native_rate_gaps = None
     transitions = set()
-    if native:
+    if native and format_mode == "native":
+        output, native_checks, native_rate_gaps = verify_native_epochs(host, guest, music, library, duration, samples, output_device)
+        checks.extend(native_checks)
+    if native and format_mode == "fixed":
         settings = guest.room()["output"]["settings"]
         settings["volume"] = 0
         if output_device is not None:
@@ -512,8 +695,7 @@ def verify(host, guest, music, native, duration, samples, output_device=None):
     wait_for(lambda: guest.room()["mode"] == "local", "host End restores guest local mode", 8)
     assert not guest.call("/v1/state").get("playing", False)
     checks.append("host End restores the connected guest to silent local mode")
-    host.room({"action": "create", "name": "Service shutdown", "address": "127.0.0.1:0",
-               "sample_rate": 48000, "local_output": False})
+    host.room(create_request("Service shutdown", format_mode))
     invitation = host.room({"action": "invite", "permissions": permissions})["invitation"]
     guest.room({"action": "join", "invitation": invitation, "name": "Shutdown observer", "listen": False})
     wait_for(guest.connected, "connected before service shutdown", 20)
@@ -523,7 +705,10 @@ def verify(host, guest, music, native, duration, samples, output_device=None):
     wait_for(lambda: host.process.poll() is not None, "host service exits after room cleanup", 8)
     assert not (host.directory / "vmusicd.json").exists()
     checks.append("host service shutdown drains End, forgets ended guest membership and removes discovery before exit")
-    return {"checks": checks, "native_output_tested": native, "output_binding": output,
+    return {"checks": checks, "format_mode": format_mode,
+            "native_rate_epochs_tested": native and format_mode == "native",
+            "native_rate_gaps": native_rate_gaps,
+            "native_output_tested": native, "output_binding": output,
             "duration_seconds": duration if native else 0, "requested_output_device": output_device, "samples": list(samples),
             "sample_retention": "Last 600 observations; every observation is checked during the run.",
             "limits": "Single Windows machine / two processes when run locally. No acoustic or cross-OS claim."}
@@ -534,6 +719,8 @@ def main():
     parser.add_argument("--binary", type=Path, required=True)
     parser.add_argument("--guest-binary", type=Path, help="Optional different guest edition for compatibility coverage")
     parser.add_argument("--native-output", action="store_true")
+    parser.add_argument("--format-mode", choices=["fixed", "native"], default="fixed",
+                        help="Room transport mode; independent of --native-output device playback")
     parser.add_argument("--duration", type=int, default=60)
     parser.add_argument("--output-device", help="Exact output device name; requires --native-output and never changes the system default")
     parser.add_argument("--report", type=Path)
@@ -548,6 +735,11 @@ def main():
     samples = deque(maxlen=600)
     identity = {"binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(), "platform": platform.platform()}
     identity["guest_binary_sha256"] = hashlib.sha256(guest_binary.read_bytes()).hexdigest()
+    def build_description(path):
+        return json.loads(subprocess.check_output([str(path), "--describe"], timeout=10,
+                          creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).decode("utf-8"))
+    identity["host_build"] = build_description(binary)
+    identity["guest_build"] = identity["host_build"] if guest_binary == binary else build_description(guest_binary)
     with tempfile.TemporaryDirectory(prefix="hertz-lan-acceptance-") as temporary:
         directory = Path(temporary)
         # Windows locks running executables; verify a copy so rebuilding the
@@ -565,7 +757,8 @@ def main():
                 profile = directory / name
                 profile.mkdir(exist_ok=True)
                 apps.append(App(app_binary, profile))
-            result = {**identity, "passed": True, **verify(*apps, directory / "music", args.native_output, args.duration, samples, args.output_device)}
+            result = {**identity, "passed": True, **verify(*apps, directory / "music", args.native_output,
+                      args.duration, samples, args.output_device, args.format_mode)}
             if args.report:
                 args.report.parent.mkdir(parents=True, exist_ok=True)
                 args.report.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -577,12 +770,14 @@ def main():
                     try:
                         snapshot = app.room()
                         states.append({key: snapshot.get(key) for key in [
-                            "mode", "playing", "position_ms", "pending", "scheduled", "error", "local_error", "output"
+                            "mode", "format_mode", "format", "source_rate", "declared_source_rate",
+                            "ended", "successor_error", "playing", "position_ms", "pending", "scheduled", "error", "local_error", "output"
                         ]})
                     except Exception:
                         states.append({"unavailable": True})
                 args.report.parent.mkdir(parents=True, exist_ok=True)
-                args.report.write_text(json.dumps({**identity, "passed": False, "error": str(error), "states": states, "samples": list(samples)[-300:]}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+                args.report.write_text(json.dumps({**identity, "format_mode": args.format_mode, "passed": False,
+                    "error": str(error), "states": states, "samples": list(samples)[-300:]}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
             raise
         finally:
             for app in reversed(apps):

@@ -290,7 +290,11 @@ impl Desktop {
     }
     pub async fn control(self: &Arc<Self>, request: ControlRequest) -> Result<Value, ApiError> {
         if self.bridge.get().is_none() {
-            return standalone::control(request).await;
+            let state = self
+                .state
+                .upgrade()
+                .ok_or_else(|| crate::error::internal("Service stopped"))?;
+            return standalone::control(&state, request).await;
         }
         match request.command.as_str() {
             "status" if request.value.as_ref().is_none_or(Value::is_null) => {
@@ -321,7 +325,7 @@ impl Desktop {
             .state
             .upgrade()
             .ok_or_else(|| crate::error::internal("Service stopped"))?;
-        let result = standalone::launch(&state, wallpaper)?;
+        let result = standalone::launch(&state, wallpaper).await?;
         #[cfg(all(windows, target_arch = "x86_64"))]
         self.runtime.launched();
         Ok(result)

@@ -19,6 +19,16 @@
 
 (function () {
   'use strict';
+  var pendingMediaEdits = 0;
+  function mediaEdit(handler) {
+    return function () {
+      pendingMediaEdits++;
+      var task;
+      try { task = Promise.resolve(handler.apply(this, arguments)); }
+      catch (error) { task = Promise.reject(error); }
+      return task.finally(function () { pendingMediaEdits--; });
+    };
+  }
 
   var tab = 'scene';
   var refs = {};
@@ -30,6 +40,7 @@
   var shareViewRevision = 0, shareEditRevision = 0;
   var resetting = false;
   var renderedPage = null;
+  var mediaPickerOpen = false, mediaPage = 0, mediaNotice = '';
   // 「动画绘景」入口暂时下架：四幅画稿的构图与配色还没到能拿出手的程度，先收起用户
   // 可见的两处入口——这里的画册，以及 index.html「舞台来源」下拉里那个 option。
   // 画稿资产、注册表、SVG 适配层与 CSS 一律原样保留，已经停在该来源的舞台不受影响；
@@ -1565,15 +1576,16 @@
     var stagePreview = !!CS.preview();
     saveBtn.disabled = stagePreview;
     if (stagePreview) saveBtn.title = '请先确认或取消舞台预览，再保存收藏';
-    saveBtn.addEventListener('click', function () {
+    saveBtn.addEventListener('click', async function () {
       var p = CS.savePreset(nameInput.value || cur.name);
-      flash('已保存「' + p.name + '」');
+      try { await CS.flushLibrary(); flash('已保存「' + p.name + '」'); }
+      catch (e) { flash('收藏暂未保存：' + e.message); }
       render();
     });
     nameRow.appendChild(saveBtn);
     body.appendChild(nameRow);
 
-    body.appendChild(h('p','sc-note','当前编排已提交并自动保存在本机，预置格式 v' + cur.version
+    body.appendChild(h('p','sc-note','当前编排自动保存到连接的服务设备，预置格式 v' + cur.version
       + (cur.project ? '，工程 / 时间线 v' + cur.project.version + ' / v' + cur.project.timelineVersion : '')
       + (stagePreview
         ? '。候选仍是临时预览；请先确认或取消，再保存当前编排为收藏。'
@@ -1761,6 +1773,7 @@
         var dialog = window.hertzDialog || window;
         if (!(await dialog.confirm('删除收藏「' + (p.name || '未命名') + '」？'))) return;
         CS.removePreset(p.id);
+        try { await CS.flushLibrary(); } catch (e) { flash('删除暂未保存：' + e.message); }
         render();
       });
       btns.append(load, del);
@@ -2224,6 +2237,73 @@
     return '<svg viewBox="0 0 320 220" preserveAspectRatio="xMidYMid slice" aria-hidden="true">' + art + '</svg>';
   }
 
+  async function renderMediaLibrary(container, CS) {
+    container.textContent = '正在读取已导入素材…';
+    try {
+      var page = await StageMedia.list(mediaPage);
+      if (container.isConnected === false) return;
+      container.textContent = '';
+      container.appendChild(h('h2', 'sc-group-title', '已导入素材 · ' + page.total + ' 项'));
+      container.appendChild(h('div', 'sc-note', (page.bytes / 1024 / 1024).toFixed(1) + ' MiB / 10 GiB · 最多 2,000 项'));
+      if (!page.items.length) container.appendChild(h('p', 'sc-note', '导入后可在这里重复使用，原文件移动或删除不影响已保存素材。'));
+      page.items.forEach(function (asset) {
+        var row = h('div', 'ws-row');
+        var status = { ready: '可用', missing: '文件缺失，请重新导入', quarantined: '文件损坏，请重新导入', deleting: '正在删除' }[asset.status] || asset.status;
+        var size = asset.bytes < 1024 * 1024 ? (asset.bytes / 1024).toFixed(1) + ' KiB' : (asset.bytes / 1024 / 1024).toFixed(1) + ' MiB';
+        row.appendChild(h('span', null, asset.name + ' · ' + (asset.media === 'video' ? '视频' : '图片') + ' · '
+          + size + ' · ' + status + (asset.referenced ? ' · 已引用' : '') + (asset.inUse ? ' · 使用中' : '')));
+        var use = h('button', 'btn', '设为背景'); use.disabled = asset.status !== 'ready';
+        use.onclick = mediaEdit(async function () {
+          use.disabled = true;
+          try {
+            if (CS.cancelPreview) CS.cancelPreview();
+            var spec = await Backgrounds.selectMedia({ type: 'media', media: asset.media, assetRef: asset.assetRef });
+            CS.setBackground(spec); await CS.flushPersistence(); Backgrounds.commitSelection();
+            mediaNotice = '背景选择已保存'; flash(mediaNotice); render();
+          } catch (e) { mediaNotice = e.message; flash(e.message); use.disabled = false; }
+        });
+        var remove = h('button', 'btn danger', '删除'); remove.disabled = asset.referenced || asset.inUse;
+        remove.onclick = async function () {
+          var dialog = window.hertzDialog || window;
+          if (!(await dialog.confirm('删除已导入素材「' + asset.name + '」？'))) return;
+          remove.disabled = true;
+          try { await StageMedia.remove(asset.assetRef); await renderMediaLibrary(container, CS); }
+          catch (e) { flash(e.message); remove.disabled = false; }
+        };
+        row.append(use, remove); container.appendChild(row);
+      });
+      var paging = h('div', 'ws-row'), prev = h('button', 'btn', '上一页'), next = h('button', 'btn', '下一页');
+      prev.disabled = mediaPage === 0; next.disabled = mediaPage + 50 >= page.total;
+      prev.onclick = function () { mediaPage = Math.max(0, mediaPage - 50); renderMediaLibrary(container, CS); };
+      next.onclick = function () { mediaPage += 50; renderMediaLibrary(container, CS); };
+      paging.append(prev, next); container.appendChild(paging);
+    } catch (e) { container.textContent = '素材库读取失败：' + e.message; }
+  }
+
+  function renderPersistenceStatus(container) {
+    if (!window.StagePersistence) return;
+    var status = StagePersistence.status(), current = status.current, library = status.library;
+    container.textContent = '';
+    var error = current.error || library.error;
+    container.appendChild(h('span', 'sc-note', error ? '尚未保存：' + error : !status.hydrated ? '正在读取舞台设置…'
+      : current.saving || library.saving ? '正在保存舞台设置…' : current.dirty || library.dirty ? '舞台修改尚未保存' : '舞台设置已保存到当前服务'));
+    if (error) {
+      var retry = h('button', 'btn', '用当前修改重试'), reload = h('button', 'btn', '重新载入服务端');
+      retry.onclick = async function () {
+        retry.disabled = true;
+        try { await StagePersistence.retry(); if (window.Backgrounds) Backgrounds.commitSelection(); flash('舞台修改已保存'); }
+        catch (e) { flash(e.message); }
+        renderPersistenceStatus(container);
+      };
+      reload.onclick = async function () {
+        var dialog = window.hertzDialog || window;
+        if (!(await dialog.confirm('放弃当前未保存的修改，重新载入服务端舞台设置？'))) return;
+        try { await CreativeStage.reloadPersistence(); render(); } catch (e) { flash(e.message); }
+      };
+      container.append(retry, reload);
+    }
+  }
+
   function renderLook(body) {
     var CS = stage_api();
     var cur = CS.preset();
@@ -2306,6 +2386,8 @@
       card.classList.toggle('on', bg.type === t[0]);
       card.appendChild(h('span', 'ws-card-name', t[1]));
       card.addEventListener('click', function () {
+        if (t[0] === 'media') { mediaPickerOpen = true; render(); return; }
+        mediaPickerOpen = false;
         var next = { type: t[0] };
         if (t[0] === 'media' && bg.type === 'media') next = Object.assign({}, bg);
         if (t[0] === 'cover') next.hue = bg.hue || 0;
@@ -2317,27 +2399,56 @@
     });
     body.appendChild(grid);
 
-    if (bg.type === 'media') {
+    if (bg.type === 'media' || mediaPickerOpen) {
       var fileRow = h('div', 'ws-row');
       var file = h('input');
       file.type = 'file';
-      file.accept = 'image/*,video/*';
-      file.addEventListener('change', function () {
+      file.accept = '.png,.jpg,.jpeg,.webp,.mp4,.webm';
+      file.disabled = window.StageMedia && StageMedia.busy();
+      var progress = h('div', 'sc-note', mediaNotice);
+      progress.setAttribute('role', 'status');
+      var cancelImport = h('button', 'btn', '取消导入');
+      cancelImport.hidden = !(window.StageMedia && StageMedia.busy());
+      cancelImport.addEventListener('click', async function () {
+        cancelImport.disabled = true;
+        if (window.Backgrounds && Backgrounds.cancelMediaSelection) Backgrounds.cancelMediaSelection();
+        try { await StageMedia.cancel(); mediaNotice = '正在结束导入…'; }
+        catch (e) { mediaNotice = e.message; }
+        progress.textContent = mediaNotice;
+      });
+      file.addEventListener('change', mediaEdit(async function () {
         var f = file.files && file.files[0];
         if (!f) return;
         if (CS.cancelPreview) CS.cancelPreview();
-        // 只有这个 ObjectURL 会离开浏览器内存，服务端从头到尾不知道有这张图。
-        var spec2 = window.Backgrounds
-          ? Backgrounds.setLocalFile(f)
-          : { type: 'theme' };
-        CS.setBackground(spec2);
-        flash('已设为背景（' + f.name + '，' + Math.round(f.size / 1024) + ' KB）');
+        file.disabled = true; cancelImport.hidden = false;
+        try {
+          var spec2 = await Backgrounds.setLocalFile(f, function (p) {
+            mediaNotice = p.status === 'uploading' ? '正在导入：' + p.percent + '%'
+              : p.status === 'preparing' ? '正在校验并保存素材…' : '素材已保存，正在验证显示…';
+            progress.textContent = mediaNotice;
+          });
+          CS.setBackground(spec2); await CS.flushPersistence(); Backgrounds.commitSelection();
+          mediaNotice = '素材与背景选择已保存，重新打开后会恢复'; flash(mediaNotice);
+        } catch (e) {
+          mediaNotice = e.message + '。导入成功的素材可在下方重新选择。'; flash(mediaNotice);
+        } finally { file.disabled = false; cancelImport.hidden = true; }
         render();
-      });
+      }));
       fileRow.appendChild(file);
-      body.appendChild(fileRow);
+      body.append(fileRow, progress, cancelImport);
       body.appendChild(h('div', 'sc-note',
-        '图片与视频仅在本次打开期间可用。重新打开应用后，请再次选择素材。'));
+        '文件将保存到当前连接的服务设备。支持 PNG / JPEG / 静态 WebP（32 MiB 内），H.264 MP4 / VP8、VP9 WebM（512 MiB 内、最高 60 fps、编码像素不超过 1920×1088，单边不超过 1920）。'));
+      if (window.hertzHost && hertzHost.isDbx) body.appendChild(h('div', 'sc-note', 'DBX 可使用图片；视频需宿主支持连续媒体流，目前可在独立版中使用。'));
+      var recovery = h('div', 'ws-row');
+      var retryMedia = h('button', 'btn', '重试当前素材');
+      retryMedia.onclick = function () { Backgrounds.retryMedia().catch(function (e) { flash(e.message); }); };
+      var recover = h('button', 'btn', '恢复之前背景');
+      recover.onclick = mediaEdit(async function () {
+        try { var old = await Backgrounds.recoverMedia(); if (old) { CS.setBackground(old); await CS.flushPersistence(); render(); } }
+        catch (e) { flash(e.message); }
+      });
+      recovery.append(retryMedia, recover); body.appendChild(recovery);
+      var imported = h('div'); body.appendChild(imported); renderMediaLibrary(imported, CS);
     }
 
     // 以下控件全部走轻量路径：改参数不拆 DOM、不重起视频/生成画布。
@@ -2862,7 +2973,7 @@
     var reading = h('div', 'ws-tuning');
     reading.appendChild(select('聆听布局', [['focus', '沉浸歌词'], ['sleeve', '封面与歌词'], ['single', '简洁单句']], prefs.layout, function (v) { edit({ layout: v }); }));
     reading.appendChild(select('歌词视觉', [['stage', '舞台 3D 歌词轨'], ['classic', '流光歌词'], ['cadenza', '心象歌词'], ['sonnet', '商籁歌词'], ['tempera', '凝彩歌词']], prefs.stanzaVisual || 'stage', function (v) { edit({ stanzaVisual: v }); }));
-    reading.appendChild(select('舞台主题', [['classic', '默认'], ['starfall', '星落']], prefs.stageTheme || 'classic', function (v) { edit({ stageTheme: v }); }));
+    // 舞台主题只剩星落一档（classic / iOS 已下架），这里不再摆一个选了也不生效的假选择。
     reading.appendChild(toggle('显示歌词', prefs.lyrics, function (v) { edit({ lyrics: v }); }));
     reading.querySelector('select').id = 'ws-layout';
     reading.querySelector('label').htmlFor = 'ws-layout';
@@ -2969,6 +3080,8 @@
     else if (tab === 'binds') renderBindings(refs.body);
     else if (tab === 'look') renderLook(refs.body);
     else renderIO(refs.body);
+    var persistence = h('div', 'ws-stage-save-status');
+    refs.body.appendChild(persistence); renderPersistenceStatus(persistence);
     refs.body.scrollTop = scroll;
     observeSceneArt();
     if (focusId && $(focusId)) $(focusId).focus({ preventScroll: true });
@@ -3151,11 +3264,17 @@
     new MutationObserver(function () { syncStageStatus(); }).observe(document.body, { attributes: true, attributeFilter: ['class'] });
     window.addEventListener('resize', revealTab);
     document.addEventListener('visibilitychange', syncSceneArt);
+    document.addEventListener('stage-persistence:change', function () {
+      var status = refs.body && refs.body.querySelector('.ws-stage-save-status');
+      if (status) renderPersistenceStatus(status);
+    });
+    document.addEventListener('stage-media:error', function (e) { mediaNotice = e.detail; flash(e.detail); });
 
     return api;
   }
 
   var api = {
+    hasPendingMediaEdits: function () { return pendingMediaEdits > 0; },
     init: init,
     open: function () { if (isOpen()) { switchTarget('immersive'); return true; } target = 'immersive'; return setOpen(true); },
     close: function () { return setOpen(false); },

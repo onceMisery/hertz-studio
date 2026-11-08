@@ -3,6 +3,9 @@
 use super::*;
 use crate::wallpaper::library::tempfileish;
 
+#[path = "public_properties_media_tests.rs"]
+mod public_properties_media_tests;
+
 async fn input(store: &AssetStore, library: &Library) -> DecodeInput {
     let file = store.root().join("source.webm");
     std::fs::write(
@@ -317,6 +320,7 @@ async fn failed_selection_retains_only_a_verified_recorded_cover_and_recovers_re
     let request = selection_plan::Request {
         work_key: format!("local-{}", package.manifest.work_id),
         package_hash: package.package_hash.clone(),
+        properties: Default::default(),
         target: ImageTarget {
             width: 1920,
             height: 1080,
@@ -425,9 +429,13 @@ async fn failed_selection_retains_only_a_verified_recorded_cover_and_recovers_re
     drop(failure);
     drop(cover);
     fail_decode.store(false, Ordering::Release);
-    let media = selection_plan::resolve(Arc::clone(&jobs), request.clone(), Arc::clone(&cancel))
-        .await
-        .unwrap();
+    let selection_plan::ResolvedSelection::Media(media) =
+        selection_plan::resolve(Arc::clone(&jobs), request.clone(), Arc::clone(&cancel))
+            .await
+            .unwrap()
+    else {
+        panic!("video work must resolve as media");
+    };
     assert_ne!(
         media.input().metadata.container,
         crate::wallpaper::media::Container::Image

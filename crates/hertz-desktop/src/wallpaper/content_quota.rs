@@ -86,6 +86,29 @@ pub(crate) struct Writer<'a> {
     _directories: [File; 3],
 }
 
+/// Shared carrier for content writers and exclusive offline desktop maintenance.
+pub(crate) fn acquire_gate(root: &Path) -> Result<File> {
+    let gate = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .share_mode(0)
+        .custom_flags(OPEN_REPARSE_POINT)
+        .open(root.join(".content-writer-lock"))
+        .map_err(|error| {
+            if matches!(error.raw_os_error(), Some(32 | 33)) {
+                JobError::new("budget_busy", "内容库正在导入或恢复，请稍后重试")
+            } else {
+                io(error)
+            }
+        })?;
+    if !checked_metadata(&gate)?.is_file() {
+        return Err(io("内容写门不是普通文件"));
+    }
+    Ok(gate)
+}
+
 impl<'a> Writer<'a> {
     pub(crate) fn acquire(store: &'a AssetStore) -> Result<Self> {
         let directories = [
@@ -93,22 +116,7 @@ impl<'a> Writer<'a> {
             pin_directory(&store.root().join("packages"))?,
             pin_directory(&store.root().join("staging"))?,
         ];
-        let gate = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .share_mode(0)
-            .custom_flags(OPEN_REPARSE_POINT)
-            .open(store.root().join(".content-writer-lock"))
-            .map_err(|error| {
-                if error.raw_os_error() == Some(32) {
-                    JobError::new("budget_busy", "内容库正在导入或恢复，请稍后重试")
-                } else {
-                    io(error)
-                }
-            })?;
-        checked_metadata(&gate)?;
+        let gate = acquire_gate(store.root())?;
         Ok(Self {
             store,
             _gate: gate,

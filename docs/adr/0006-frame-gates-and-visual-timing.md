@@ -13,6 +13,10 @@
 
 2026-10-08 复核：`gateRates().achieved` 是实测刷新率除以分频数得到的预算，不能标成已经执行的帧率。`HertzPerf` 在原有 `runGates` 边界计数与计时，实测速率取采样窗内计数差；不新增 rAF。验证必须走真实 `frame → schedule → frame`，直接调用 `runGates` 不能发现续帧时钟被清零的问题。主循环以局部 `frameDt` 采样，歌词门累积间隔不能污染刷新率估计；只有真正停机或隐藏恢复才清时钟基准。
 
+2026-11-08 M0：Stage 预分配版本 1 借用帧，在同一个真实主帧采样一次并作为 gate 第二参数共享；第一参数和原整数分频不变。播放投影、anchor/discontinuity 分类与实际频谱收帧时间/revision 保留在 Stage，粒子 owner 持有实例 sceneTime、Onset、后端选择及生命周期。暂停/隐藏/遮挡/reduced/零尺寸/停绘冻结几何，恢复首帧 delta0，并等待恢复水位之后的新输入；静态补帧由 dirty 与原 kick 合并。涟漪的 WAAPI 始终暂停，时间和到期只消费同一 sceneTime，不保留墙钟 timeout。普通重锚不能当 seek 清输入，检测历史 reset 不能令公共拍序号倒退。renderer 消费显式帧与预算，不重读 Stage，不建立第二循环/registry。
+
+M0 的创建、部分失败、真实非零预热和 context-loss 清理归各 renderer；先释放再回退，双失败显式 unavailable。HertzPerf 分开记录 attach、预热、生产首帧 CPU 提交及有效显示请求等待；API 字节和表面像素不冒充物理显存，诊断关闭不关闭原 A/B 保护。具体合同、资源口径、验证入口及 M1–M4 边界见[粒子帧合同](../stage-particles-frame-contract.md)。
+
 ## 边界与 owner
 
 | 数值 | 现在是多少 | 定义在哪 | 改它要一起改什么 |

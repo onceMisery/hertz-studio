@@ -828,12 +828,7 @@
         var random = FX.seededRandom('track-accent:' + lineIndex + ':' + line.fullText);
         targets.forEach(function (target) {
           for (var arm = 0; arm < 4; arm += 1) {
-            var trail = [];
-            for (var dotIndex = 0; dotIndex < 14; dotIndex += 1) {
-              var dot = new PIXI.Graphics().circle(0, 0, dotIndex ? 1.5 : 3).fill({ color: tertiary, alpha: 1 });
-              accentLayer.addChild(dot);
-              trail.push(dot);
-            }
+            var trail = FX.createAccentTrail(PIXI, accentLayer, tertiary);
             accent.particles.push({
               target: target, arm: arm, trail: trail,
               angle: random() * Math.PI * 2 + arm * Math.PI * 0.5,
@@ -978,16 +973,16 @@
                 : tuning.quality === 'energy-saving' ? 2 : 3;
               particle.trail.forEach(function (dot, dotIndex) {
                 var u = travel - dotIndex * 0.018;
-                dot.visible = particle.arm < armBudget && u >= 0 && u <= 1
+                dot.visible = particle.arm < armBudget
                   && (tuning.quality !== 'energy-saving' || dotIndex < 8);
                 if (!dot.visible) return;
-                var turn = (1 - u) * Math.PI * 2.35;
+                FX.animateAccentSpark(dot, u, dotIndex, particle.trail.length, particle.arm, particle.angle);
+                if (!dot.visible) return;
+                var turn = (1 - FX.clamp(u, 0, 1)) * Math.PI * 2.35;
                 var radius = (1 - FX.ease(u)) * particle.reach * Math.min(1.5, glyphStrength);
                 dot.position.set(
-                  d.baseX + Math.cos(particle.angle + turn * particle.direction) * radius,
-                  d.baseY + Math.sin(particle.angle + turn * particle.direction) * radius * 0.84);
-                dot.alpha = FX.ease(u / 0.08) * (1 - dotIndex / particle.trail.length)
-                  * (particle.arm ? 0.55 : 0.85);
+                  particle.target.x + Math.cos(particle.angle + turn * particle.direction) * radius,
+                  particle.target.y + Math.sin(particle.angle + turn * particle.direction) * radius * 0.84);
               });
             });
           }

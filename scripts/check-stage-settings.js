@@ -57,4 +57,49 @@ for (const id of ['s3d-fl-accents', 's3d-fl-atmosphere', 's3d-fl-halation']) {
 }
 const hiddenLyrics = Settings.resolve({ visual: 'sonnet', background: 'solid', lyrics: false, webgl: true });
 assert.equal(hiddenLyrics.rows['s3d-reactivity'].enabled, false); count++;
-console.log('Stage settings: ' + count + ' checks passed (mode/background/device matrix, preferences, theme ownership)');
+
+// ---- 设置弹窗：形态、分组、遮罩接线，以及「设置项一个不少」 ----
+// 只切新增的那一节 CSS，避免就近正则抓到共享抽屉里同名的旧声明。
+const html = fs.readFileSync(path.join(web, 'index.html'), 'utf8');
+const allCss = fs.readFileSync(path.join(web, 'space3d.css'), 'utf8');
+const dialogCss = allCss.slice(allCss.indexOf('沉浸声场设置：居中弹窗'));
+assert.ok(dialogCss.length > 2000, 'dialog style block exists'); count++;
+assert.match(dialogCss, /#s3d-settings\s*\{[^}]*position:\s*fixed[^}]*margin:\s*auto/,
+  'dialog is centred by margin auto, not by a transform that the drawer would fight'); count++;
+assert.match(dialogCss, /grid-template-columns:\s*minmax\(132px, 34%\) minmax\(0, 1fr\)/,
+  'field grid has a label column and a control column'); count++;
+assert.match(dialogCss, /\.s3d-settings-scrim\s*\{[^}]*position:\s*fixed/,
+  'scrim is a viewport-sized layer'); count++;
+assert.match(html, /<div class="s3d-settings-scrim" id="s3d-settings-scrim" hidden/,
+  'scrim node exists and starts hidden'); count++;
+assert.match(html, /id="s3d-settings" aria-label="沉浸声场设置" role="dialog" aria-modal="true" hidden/,
+  'settings announces itself as a modal dialog'); count++;
+const shortcuts = (html.match(/data-sec="s3d-sec-/g) || []).length;
+const sections = (html.match(/class="s3d-sec" id="s3d-sec-/g) || []).length;
+assert.equal(shortcuts, 5, 'five section shortcuts'); count++;
+assert.equal(sections, shortcuts, 'every shortcut has a section heading'); count++;
+// 分组只跳转、不隐藏：设置项全部留在 DOM，浏览器契约才能直接操作任意一项。
+for (const id of ['s3d-lyrics-toggle', 's3d-reset', 's3d-fs', 's3d-layout', 's3d-lyric-visual',
+  's3d-fl-starborn', 's3d-scene-source', 's3d-coast-tuning', 's3d-zodiac-tuning', 's3d-anime-tuning',
+  's3d-shelf-mode', 's3d-workshop', 's3d-reactivity', 's3d-motion', 's3d-bloom', 's3d-fl-common',
+  's3d-fl-classic', 's3d-fl-cadenza', 's3d-fl-sonnet', 's3d-fl-tempera', 's3d-defaults',
+  's3d-defaults-note', 's3d-settings-status', 's3d-motion-note']) {
+  assert.ok(html.includes('id="' + id + '"'), '设置项 ' + id + ' 仍在'); count++;
+}
+assert.match(source, /function bindSettingsShell\(\)/, 'shell bindings exist'); count++;
+assert.match(source, /panel\.scrollTo\(\{ top: Math\.max\(0, top\)/,
+  'section shortcuts scroll instead of hiding rows'); count++;
+assert.match(source, /head\.getBoundingClientRect\(\)\.top - panelTop/,
+  'jump target comes from the real rect (offsetTop drifted from scrollTop)'); count++;
+assert.match(source, /jumpTarget = head\.id/, 'a shortcut marks itself current immediately'); count++;
+assert.match(source, /if \(jumpTarget\) \{ mark\(jumpTarget\); return; \}/,
+  'jump highlight holds until the user scrolls (short tail sections never reach the top line)'); count++;
+assert.match(source, /panel\.addEventListener\('wheel', releaseJump/,
+  'manual wheel releases the jump highlight'); count++;
+assert.match(source, /panel\.clientHeight >= panel\.scrollHeight - 4/,
+  'scrolling to the bottom marks the last section'); count++;
+assert.match(source, /scrim\.hidden = !on/, 'scrim follows setSettings'); count++;
+assert.match(source, /shownReasons\[setting\.reason\]/, 'duplicate availability reasons collapse to one'); count++;
+assert.doesNotMatch(source, /note\.hidden = setting\.enabled;/,
+  'old per-control reason repetition is gone'); count++;
+console.log('Stage settings: ' + count + ' checks passed (mode/background/device matrix, preferences, theme ownership, dialog wiring)');

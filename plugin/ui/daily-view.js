@@ -4,8 +4,8 @@
 // 每日推荐：导航里的独立入口 + 独立路由页面。
 //
 // 首页那条推荐条（daily.js）是「曲库」页面里的一块，只能顺路看到；这里把它
-// 提成一级目的地，带自己的页面：按日期切换、刷新、列表/卡片两种排布、空态
-// 提示。数据与播放链路和首页那条完全同源（同样两个接口、同样一条
+// 提成一级目的地，带自己的页面：刷新、列表/卡片两种排布、空态提示。数据与
+// 播放链路和首页那条完全同源（同样两个接口、同样一条
 // playQueue），不另立一套取数，免得两处推荐内容对不上。
 //
 // 菜单项是**配置驱动**的：名称、图标、排序位置都写在 NAV 里，可见性由设置
@@ -59,8 +59,6 @@
   var T = null;
 
   var st = {
-    /// null 表示「今天」；具体数字是天序号（与后端 day_number() 同定义）。
-    day: null,
     /// online = 各平台汇总；local = 本机规则引擎。
     mode: 'online',
     layout: 'list',
@@ -69,48 +67,6 @@
     online: null,
     failed: false,
   };
-
-  // ---------------------------------------------------------------------------
-  // 日期：天序号与后端对齐（当天本地零点距纪元的天数）
-  // ---------------------------------------------------------------------------
-
-  /// 与后端 day_number() **严格同一套算法**：UTC 毫秒整除一天的毫秒数。
-  ///
-  /// 后端的 local_offset_secs() 返回 0（按 UTC 换天，见 daily.rs 的注释），
-  /// 所以这里绝不能改用本地时区——在东八区两边会差整整一天，于是前端认为的
-  /// "今天"被后端判成"其它日期"，在线那份直接走 history 分支，用户一进页面
-  /// 就看到「在线推荐只提供当天」。日期是两端共用的主键，必须同定义。
-  function dayNumberAt(date) {
-    return Math.floor(date.getTime() / 86400000);
-  }
-
-  function todayDay() {
-    return dayNumberAt(new Date());
-  }
-
-  /// 天序号 → Date。同上：以 UTC 为基准，不要在这里加时区偏移。
-  function dayToDate(day) {
-    return new Date(day * 86400000);
-  }
-
-  function activeDay() {
-    return st.day === null ? todayDay() : st.day;
-  }
-
-  function isToday() {
-    return activeDay() === todayDay();
-  }
-
-  /// 显示也按 UTC：与后端 date_label() 同源，否则日期标签会比后端返回的那
-  /// 个 date 字段差一天，页面顶上写着 09-28、副标题写着 09-29。
-  function dateText(day) {
-    var d = dayToDate(day);
-    var m = String(d.getUTCMonth() + 1);
-    var dayNum = String(d.getUTCDate());
-    if (m.length < 2) m = '0' + m;
-    if (dayNum.length < 2) dayNum = '0' + dayNum;
-    return d.getUTCFullYear() + '-' + m + '-' + dayNum;
-  }
 
   // ---------------------------------------------------------------------------
   // 取数
@@ -122,7 +78,7 @@
     st.failed = false;
     render();
 
-    var qs = '?limit=' + LIMIT + '&day=' + activeDay();
+    var qs = '?limit=' + LIMIT;
     // 两条来源并发取：在线挂了不影响本地出榜，反之亦然。
     // allSettled 而不是 all：任一条 reject 都不该把另一条的结果一起丢掉。
     return Promise.allSettled([
@@ -220,12 +176,7 @@
     var p = page();
     if (!p) return '';
     var n = p.total || 0;
-    if (!isToday()) {
-      // 回看历史时在线那份必然是空的（平台只给当天），说清楚省得以为是坏了。
-      return dateText(activeDay()) + ' · ' + n + ' 首'
-        + (st.mode === 'online' ? '（在线推荐只提供当天）' : '');
-    }
-    return (isToday() ? '今天' : dateText(activeDay())) + ' · ' + n + ' 首';
+    return '今天 · ' + n + ' 首';
   }
 
   function emptyText() {
@@ -233,9 +184,6 @@
     if (st.mode === 'online') {
       var p = st.online;
       if (!p) return '';
-      if (!isToday()) {
-        return '在线推荐只提供当天。回看 ' + dateText(activeDay()) + ' 请用「本地」来源。';
-      }
       var tried = (p.ready || []).slice();
       if (!tried.length) {
         tried = p.skipped.filter(function (s) {
@@ -390,10 +338,7 @@
     var p = st.online;
     var out = [];
     var pend = (p.pending || []).filter(function (x) { return !!x; });
-    var skip = (p.skipped || []).filter(function (s) {
-      // 历史日期那份必然是 history，日期与空态已经说清，这里不重复一遍。
-      return s.kind !== 'history' || isToday();
-    });
+    var skip = (p.skipped || []);
     if (pend.length) out.push(pend.join('、') + ' 还在取，稍后刷新就有');
     if (skip.length) out.push(skip.map(skipPhrase).join('；'));
     // 来源构成只在有平台缺席时才报：曲目行本身就带平台徽标，正常情况再写
@@ -491,10 +436,6 @@
     if (!H || !H.ui) return;
     var ui = H.ui;
     if (ui.dvSub) ui.dvSub.textContent = subtitle();
-    if (ui.dvDate) ui.dvDate.textContent = isToday() ? '今天' : dateText(activeDay());
-    // 未来不给看：推荐是按天生成的，明天的榜单并不存在。
-    if (ui.dvNext) ui.dvNext.disabled = isToday();
-    if (ui.dvPrev) ui.dvPrev.disabled = false;
     if (ui.dvPlay) ui.dvPlay.disabled = !items().length;
     renderChips(ui.dvModes, 'data-dv-mode', st.mode);
     renderChips(ui.dvLayouts, 'data-dv-layout', st.layout);
@@ -588,16 +529,6 @@
     st.mode = readStore(MODE_KEY, ['online', 'local']) || 'online';
 
     var ui = H && H.ui ? H.ui : {};
-    if (ui.dvPrev) ui.dvPrev.onclick = function () { st.day = activeDay() - 1; load(); };
-    if (ui.dvNext) ui.dvNext.onclick = function () {
-      var next = activeDay() + 1;
-      if (next > todayDay()) return;
-      st.day = next;
-      load();
-    };
-    // 日期按钮身兼两职：显示当前是哪天，点了就回到今天。
-    // id 是 dv-date（不是 dv-today），绑错名字会得到一个点了没反应的按钮。
-    if (ui.dvDate) ui.dvDate.onclick = function () { st.day = null; load(); };
     if (ui.dvRefresh) ui.dvRefresh.onclick = function () { load(); };
     if (ui.dvPlay) ui.dvPlay.onclick = playAll;
 
@@ -635,7 +566,7 @@
 
   /// 进入页面时才拉：启动时多打两条请求不值得，用户不一定会点开。
   function onViewEnter() {
-    // 已有数据且是今天就不重复拉；切走再回来看到的还是同一份。
+    // 已有数据就不重复拉；切走再回来看到的还是同一份。
     if (!page()) load();
     else render();
   }

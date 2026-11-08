@@ -121,7 +121,11 @@ ok(!/data-skin-css="starfall"/.test(HTML), 'index.html 没有把星落挂成皮�
 ok(/stageTheme/.test(STAGE3D_JS), 'stage3d 持有 stageTheme 偏好');
 ok(/root\.dataset\.stageTheme/.test(STAGE3D_JS), 'stage3d 把主题写进 #stage3d 的 data-stage-theme');
 ok(/stageTheme:\s*stageTheme/.test(STAGE3D_JS), 'stageTheme 随舞台偏好持久化');
-ok(/id="s3d-stage-theme"/.test(HTML), '舞台设置里有「设置风格」下拉');
+// 只剩一档时下拉本身就是个假选择（点开只有「星落」），界面上不再摆它；
+// 但主题层还要靠 #stage3d 上的 data-stage-theme 命中 starfall.css，不能连属性一起删。
+ok(!/id="s3d-stage-theme"/.test(HTML), '舞台设置里不再摆只有一个选项的「舞台风格」下拉');
+ok(!/s3d-stage-theme/.test(STAGE3D_JS), 'stage3d 不再同步/绑定这个下拉');
+ok(!/select\('舞台主题'/.test(WORKSHOP), '创意工坊里也不再摆选了不生效的「舞台主题」');
 ok(/Stage3D\.defaults\(\)/.test(WORKSHOP) && /Stage3D\.resetSettings\(\)/.test(WORKSHOP), '工坊模板与完整恢复共用舞台默认值，避免遗漏 stageTheme');
 
 // ---------------------------------------------------------------------------
@@ -171,18 +175,20 @@ ok(HTML.indexOf('href="stage3d.css"') < HTML.indexOf('href="stage-themes/starfal
 ok(/edition_ui!\("stage-themes\/starfall\.css"\)/.test(MAIN_RS), 'starfall.css 编进二进制');
 ok(/"\/stage-themes\/starfall\.css"/.test(MAIN_RS), 'main.rs 注册了 /stage-themes/starfall.css 路由');
 
-section('舞台风格只剩星落一档：classic 与 iOS 都已下架');
+section('星落是唯一一档：入口已收起，classic 与 iOS 都已下架');
 
 // 两档都不是「不好看」，是留不住：
 //  · classic 就是没有主题层的裸样式。吸顶标题栏的近不透明底色靠它自己盖住滚过的行，
 //    玻璃层各自把标题改成 12% 透明后，裸层那份反而没人管了 —— 标题被透上来的行叠成乱码。
 //  · iOS 是同一批纪律下的第二份观感，两份玻璃要同步改、同步测，而界面上只有一档在用。
-// 下架后不再给旧值留映射：存过 classic / iOS 的偏好走白名单校验，自然落回星落。
-// 只取这一个下拉的选项：'classic' 这个值在「歌词视觉」里也叫 classic（流光歌词），
-// 整份 HTML 上搜会误伤。
-const THEME_OPTIONS = (HTML.match(/<select id="s3d-stage-theme">([\s\S]*?)<\/select>/) || [, ''])[1];
-ok(/<option value="starfall">星落<\/option>/.test(THEME_OPTIONS), '下拉里有星落');
-ok(!/value="classic"|value="ios"/.test(THEME_OPTIONS), '下拉里不再给 classic / iOS 入口');
+// 下架后连下拉一起收掉：只剩一档时它只是个选不动的装饰。旧偏好不另做映射，
+// 存过 classic / iOS 的值走白名单校验自然落回星落。
+// 注意别在整份 HTML 上搜 'classic'：「歌词视觉」里也叫 classic（流光歌词），会误伤。
+ok(!/<select id="s3d-stage-theme"/.test(HTML), 'index.html 里已没有「舞台风格」下拉');
+ok(!/舞台风格/.test(HTML), '设置面板里已没有「舞台风格」标签');
+ok(/root\.dataset\.stageTheme\s*=\s*stageTheme/.test(STAGE3D_JS),
+  '主题仍固定写进 #stage3d 的 data-stage-theme（starfall.css 靠它命中）');
+ok(!/stageTheme\s*=\s*sel\.value/.test(STAGE3D_JS), '主题不再由下拉改写');
 ok(!fs.existsSync(path.join(WEB, 'stage-themes', 'ios.css')), 'stage-themes/ios.css 已删除');
 ok(!/stage-themes\/ios\.css/.test(HTML + MAIN_RS), 'ios.css 的 link 与路由一并撤掉（不留半截接线）');
 ok(/var stageTheme = 'starfall'/.test(STAGE3D_JS), '默认档是星落');
@@ -190,8 +196,8 @@ ok(!/value\.stageTheme === 'classic'|value\.stageTheme === 'ios'/.test(STAGE3D_J
   '恢复白名单不认 classic / iOS：存过它们的偏好直接落回默认档，不做旧值映射');
 
 const sharedDrawer = read(path.join(WEB, 'space3d.css'));
-ok(/\.sp-sheet h2\s*\{[^}]*position:\s*sticky[^}]*background:\s*var\(--bg\)/.test(sharedDrawer),
-  '共享设置抽屉使用不透明吸顶标题栏');
+ok(/\.sp-sheet h2\s*\{[^}]*position:\s*sticky[^}]*background:\s*var\(--sp-glass-strong\)[^}]*backdrop-filter:/.test(sharedDrawer),
+  '共享设置抽屉使用吸顶标题栏与统一玻璃材质');
 ok(/class="sp-sheet" id="s3d-settings"/.test(HTML), '声场复用三维空间的设置抽屉');
 ok(!/\.s3d-settings\b/.test(THEME), '舞台主题不覆盖共享设置抽屉');
 

@@ -161,6 +161,18 @@
     return current;
   }
 
+  // 纯迁移适配：布局仍由本模块恢复，文件不能指定内部默认迁移标记。
+  function preferenceTransfer(value) {
+    var def = typeof value === 'string' ? byId(value) : null;
+    if (!def || def.hidden || (value !== FALLBACK_ID && !hasCss(value))) {
+      throw new TypeError('布局偏好不是当前版本支持的布局');
+    }
+    return { value: value, writes: [
+      { key: KEY, value: value },
+      { key: DEFAULT_MARKER, value: DEFAULT_ID }
+    ] };
+  }
+
   window.Skins = {
     // 保留外部扩展的登记接口；本项目不再附带其它布局文件。
     register: function (def) {
@@ -189,6 +201,7 @@
       return visible().map(function (d) { return { id: d.id, name: d.name, note: d.note }; });
     },
     apply: apply,
+    preferenceTransfer: preferenceTransfer,
     current: function () { return byId(current); },
     currentId: function () { return current; },
     onChange: function (fn) {

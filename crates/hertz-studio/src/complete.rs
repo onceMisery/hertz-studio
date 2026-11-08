@@ -543,10 +543,12 @@ mod tests {
     #[test]
     fn doc_to_lrc_roundtrips_through_parse_lrc() {
         let doc = vmusic_core::LyricDocument {
+            agents: Vec::new(),
             source: vmusic_core::LyricSource::Imported,
             offset_ms: 0,
             lines: vec![
                 vmusic_core::LyricLine {
+                    vocal: None,
                     text: "晴天".into(),
                     start_ms: 165_123,
                     end_ms: Some(201_456),
@@ -564,6 +566,7 @@ mod tests {
                     ],
                 },
                 vmusic_core::LyricLine {
+                    vocal: None,
                     text: "故事的小黄花".into(),
                     start_ms: 201_456,
                     end_ms: None,

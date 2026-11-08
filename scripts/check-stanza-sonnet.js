@@ -277,5 +277,76 @@ function near(a, b, eps, msg) { ok(Math.abs(a - b) <= eps, msg + ' (got ' + a + 
   ok(chain.print.filter.destroyed && chain.halation.filter.destroyed, '两条滤镜资源一起销毁');
 })();
 
+(function () {
+  if (typeof FX.createAccentTrail !== 'function' || typeof FX.animateAccentSpark !== 'function') {
+    ok(false, '两种商籁排版共用星核与拖尾实现');
+    return;
+  }
+  class Display {
+    constructor() {
+      this.children = []; this.visible = true; this.alpha = 1; this.x = 0; this.y = 0;
+      this.scale = { x: 1, y: 1, set(x, y = x) { this.x = x; this.y = y; } };
+      this.position = { set: (x, y) => { this.x = x; this.y = y; } };
+    }
+    addChild(child) { this.children.push(child); child.parent = this; }
+    removeChildren() { return this.children.splice(0); }
+    removeFromParent() { this.parent.children.splice(this.parent.children.indexOf(this), 1); }
+    destroy() { this.destroyed = true; }
+  }
+  class Graphics extends Display {
+    constructor() { super(); this.shapes = []; }
+    circle(...args) { this.shapes.push(['circle', ...args]); return this; }
+    poly(...args) { this.shapes.push(['poly', ...args]); return this; }
+    fill(options) { this.shapes.push(['fill', options]); return this; }
+  }
+  const PIXI = { Container: Display, Graphics };
+  const layer = new Display();
+  const trail = FX.createAccentTrail(PIXI, layer, 0x789abc);
+  eq(trail.length, 14, '单臂拖尾限制为 14 个复用节点');
+  ok(trail[0].shapes.some(shape => shape[0] === 'poly'), '前端是有光芒的星核而非普通圆点');
+  const radius = node => node.shapes.find(shape => shape[0] === 'circle')[3];
+  ok(radius(trail[1]) > radius(trail.at(-1)), '拖尾几何逐渐变细');
+  FX.animateAccentSpark(trail[1], 0.5, 1, 14, 0, 0);
+  const middleAlpha = trail[1].alpha;
+  FX.animateAccentSpark(trail[1], 0.99, 1, 14, 0, 0);
+  ok(trail[1].alpha < middleAlpha * 0.05, '尾粒抵达前已柔和消隐，不带着亮度骤停');
+  FX.animateAccentSpark(trail[0], 1.1, 0, 14, 0, 0);
+  ok(trail[0].visible && trail[0].alpha > 0, '主星核抵达后保留短暂余辉');
+  FX.animateAccentSpark(trail[0], 1.3, 0, 14, 0, 0);
+  eq(trail[0].visible, false, '余辉有界并最终熄灭');
+  const nodes = Array.from({ length: 12 }, (_, i) => {
+    const node = new Display(); node.x = 150 + i * 55; node.y = 300;
+    node.dataset = { text: '星', startTime: 10 + i * 0.5, endTime: 10.5 + i * 0.5, fontSize: 44 };
+    return node;
+  });
+  const parent = new Display();
+  const fx = FX.createAccentChoreography(PIXI, parent, nodes, 0x789abc, 'test');
+  const lines = [{ startTime: 10, endTime: 16, fullText: '把星光轻轻落在你的指尖上' }];
+  const frame = { lines, activeLine: lines[0], currentLineIndex: 0, playbackTime: 11.1,
+    track: { path: 'test' }, viewport: { width: 1280, height: 720 } };
+  fx.update(frame, {});
+  const display = parent.children[0], allocated = display.children.slice();
+  const snapshot = () => JSON.stringify(display.children.map(n => n.visible
+    ? [n.x, n.y, n.alpha, n.rotation, n.scale.x, n.scale.y] : null));
+  const stable = snapshot();
+  ok(display.visible && display.children.some(n => n.visible), '重音测试确实触发可见星光');
+  eq(fx.snapshot().particles, 210, '主舞台粒子总预算由 270 降到 210');
+  fx.update(frame, {});
+  ok(snapshot() === stable, '暂停同一时间星光严格冻结');
+  fx.update({ ...frame, playbackTime: 10.2 }, {});
+  fx.update(frame, {});
+  ok(snapshot() === stable, '回拖进度后星光位姿一致');
+  ok(display.children.every((n, i) => n === allocated[i]), '逐帧与回拖不创建新粒子');
+  fx.update(frame, { quality: 'energy-saving' });
+  ok(display.children.filter(n => n.visible).length <= 16, '节能档维持两臂八点上限');
+  for (const tuning of [{ reducedMotion: true }, { accentEffects: false }, { showDecor: false }, { accentMotion: 0 }]) {
+    fx.update(frame, tuning);
+    eq(display.visible, false, '关闭条件立即收起星光 ' + JSON.stringify(tuning));
+  }
+  fx.destroy();
+  eq(parent.children.length, 0, '销毁摘除星光层');
+  ok(allocated.every(n => n.destroyed), '所有星光几何均释放');
+})();
+
 if (failures) { console.error(failures + ' 项失败'); process.exit(1); }
 console.log('check-stanza-sonnet 全部通过');

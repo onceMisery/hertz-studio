@@ -49,8 +49,13 @@ async function main(){
       return route.continue();
     });
     page=await context.newPage();page.on('pageerror',error=>errors.push(error.message));
-    await page.goto(uiUrl(base),{waitUntil:'domcontentloaded'});await page.locator('#space3d-entry').click();
-    await page.waitForFunction(()=>Space3D.stats().renderer?.state==='ready'&&Space3D.stats().renderer.frameCount>0);
+    await page.goto(uiUrl(base),{waitUntil:'domcontentloaded'});
+    // 三维空间入口收在「更多」菜单里，菜单默认是 hidden；不先展开就点它
+    // 只会让 Playwright 等 30s 的 actionability（跟被测行为无关）。
+    if(!(await page.locator('#space3d-entry').isVisible()))await page.locator('#top-more-btn').click();
+    await page.locator('#space3d-entry').click();
+    // 软件渲染（swiftshader）首帧要十几秒，主线程被 WebGL 占住时轮询也会被饿着。
+    await page.waitForFunction(()=>Space3D.stats().renderer?.state==='ready'&&Space3D.stats().renderer.frameCount>0,null,{timeout:120000});
     await page.evaluate(()=>{window.backgroundCanvas=document.querySelector('#sp-canvas canvas');});
     assert.equal(await page.locator('.sh-header h1').count(),0,'duplicate heading removed');
     const image=await page.locator('#sp-canvas canvas').screenshot();const pixels=await sharp(image).stats();
@@ -149,7 +154,10 @@ async function main(){
     await page.waitForFunction(previous=>getComputedStyle(document.querySelector('.qs-signal')).strokeDashoffset!==previous,dash,{timeout:5000});
     await page.emulateMedia({reducedMotion:'reduce'});assert.equal(await page.locator('.qs-signal').isVisible(),false,'reduced motion hides flowing signal');
     await page.emulateMedia({reducedMotion:'no-preference'});
-    assert.equal(calls.filter(call=>call.action==='start').length,0,'connecting a platform waits for explicit login');
+    // 选到未登录平台就默认出二维码，不用再点一次「开始登录」。
+    await page.waitForSelector('#qr-canvas :is(svg,img)');
+    assert.ok(calls.filter(call=>call.action==='start').length>0,'selecting a source fetches its QR code by default');
+    assert.ok(await page.locator('.qr-space .qr-source .src-badge, .qr-space .qr-source .qs-brand-fallback').count()>0,'each source row carries its platform badge');
     const port=page.locator('.qr-source[data-source="qq"] .qs-out'),hub=page.locator('.qs-hub');
     const from=await port.boundingBox(),to=await hub.boundingBox();await page.mouse.move(from.x+6,from.y+6);await page.mouse.down();await page.mouse.move(to.x+30,to.y+30,{steps:12});
     assert.equal(await page.locator('.qs-graph').evaluate(node=>node.classList.contains('is-drop-target')),true,'drag highlights the connection target');await page.mouse.up();
@@ -181,8 +189,9 @@ async function main(){
     await page.screenshot({path:path.join(output,'desktop-login-qr.png')});
     await page.keyboard.press('Escape');assert.equal(await page.locator('#qr-modal').isVisible(),false);assert.equal(await page.evaluate(()=>Space3D.stats().page),'stage');
     assert.equal(await page.locator('#sp-page-toggle').evaluate(node=>!!node.closest('[inert]')),false,'closing login restores chrome');
-    rejectQr=true;await page.locator('#sp-account').click();await page.waitForFunction(()=>document.querySelector('.qs-connection')?.textContent.includes('已接入'));
-    await page.locator('.qs-connect').click();await page.waitForFunction(()=>document.querySelector('.qs-modes [data-mode="cookie"]').getAttribute('aria-pressed')==='true');
+    // 取码失败会自动回退到 Cookie 表单，不再等用户去点「开始登录」。
+    rejectQr=true;await page.locator('#sp-account').click();
+    await page.waitForFunction(()=>document.querySelector('.qs-modes [data-mode="cookie"]')?.getAttribute('aria-pressed')==='true');
     assert.equal(await page.locator('#qr-cookie-input').isVisible(),true,'failed QR reveals the actual Cookie form');
     await page.locator('.qs-actions button').first().focus();await page.keyboard.press('Tab');
     assert.equal(await page.locator('#qr-close').evaluate(node=>node===document.activeElement),true,'login traps keyboard focus');

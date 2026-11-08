@@ -103,16 +103,35 @@
     if(!spaceView||!source)return;
     var definition=loginSources.find(function(item){return item.id===source;});if(!definition)return;
     var prev=intent;beginIntent(source,'qq');if(prev.ticket)cancelTicket(prev.source,prev.ticket);stopPolling();
-    if(accountsById[source]){enterLoggedIn(source);spaceView.drawer.classList.add('is-connected');return;}
-    var caps=definition.caps||[];spaceView.mode=(mode==='cookie'&&caps.indexOf('cookie_login')>=0)||caps.indexOf('qr_login')<0?'cookie':'qr';
+    var caps=definition.caps||[];var logged=!!accountsById[source];
+    spaceView.mode=(!logged&&((mode==='cookie'&&caps.indexOf('cookie_login')>=0)||caps.indexOf('qr_login')<0))?'cookie':'qr';
+    // 已登录的源也必须走这一整段 chrome 更新。以前它在这里提前 return，hub
+    // 一直停在「选择音源」、端口不亮，用户看不出这个平台其实已经接上了；
+    // 而且从它切到别的源时，下面的账号面板不会被清掉，看着像没切成功。
     spaceView.graph.querySelector('.qs-connection').textContent=sourceLabel(source)+' · 已接入';
+    spaceView.graph.classList.toggle('is-signed-in',logged);
     spaceView.graph.querySelectorAll('[data-mode]').forEach(function(button){button.disabled=caps.indexOf(button.dataset.mode==='qr'?'qr_login':'cookie_login')<0;button.setAttribute('aria-pressed',String(button.dataset.mode===spaceView.mode));});
-    paintSourceActive();renderLoginGuide(definition);el('qr-title').textContent=sourceLabel(source)+' 登录';
-    el('qr-canvas').innerHTML='';el('qr-canvas').hidden=true;el('qr-channels').hidden=true;
+    el('qr-title').textContent=sourceLabel(source)+(logged?'':' 登录');
+    var box=el('qr-canvas');box.innerHTML='';box.hidden=false;box.style.opacity='1';box.style.cursor='default';box.onclick=null;
+    el('qr-channels').hidden=true;
     el('qr-cookie-panel').hidden=spaceView.mode!=='cookie';el('qr-cookie-panel').open=spaceView.mode==='cookie';
     el('qr-cookie-input').value='';el('qr-cookie-save').disabled=false;
-    el('qr-status').textContent=spaceView.mode==='cookie'?'导入平台登录会话':'等待开始扫码';
-    spaceView.connect.hidden=spaceView.mode==='cookie';spaceView.drawer.classList.add('is-connected');
+    el('qr-status').textContent='';
+    spaceView.drawer.classList.add('is-connected');
+    paintSourceActive();renderLoginGuide(definition);
+    if(logged){
+      enterLoggedIn(source);spaceView.connect.hidden=true;
+      requestAnimationFrame(function(){drawSpaceLink();});return;
+    }
+    if(spaceView.mode==='cookie'){
+      box.hidden=true;spaceView.connect.hidden=true;
+      el('qr-status').textContent='此平台使用 cookie 登录，请填写下方表单';
+      requestAnimationFrame(function(){drawSpaceLink();});return;
+    }
+    // 选到未登录的扫码源就直接取码。以前停在「等待开始扫码」，要再点一次
+    // 「开始登录」才出码，二维码从来不是默认状态；该按钮改作「刷新二维码」。
+    spaceView.connect.hidden=false;
+    start(source,'qq').catch(function(e){if(window.console)console.warn('取二维码失败：',e);});
     requestAnimationFrame(function(){drawSpaceLink();});
   }
   function beginIntent(source, channel) {
@@ -488,6 +507,31 @@
     refreshTopAvatar();
   }
 
+  /// 每个登录行前面的平台徽标。与搜索结果 / 歌单菜单共用 Online.badge 那一
+  /// 份官方 app 图标表，别在登录弹窗里再抄一份平台名单；独立形态（契约沙箱）
+  /// 拿不到 Online 时用平台名首字兜底，至少这一列不是空的。
+  function platformBadge(s) {
+    var b=(window.Online&&window.Online.badge)?window.Online.badge(s.id,s.label):null;
+    if(!b){
+      b=document.createElement('span');b.className='qs-brand-fallback';
+      b.textContent=(s.label||s.id).slice(0,1);b.title=s.label||s.id;
+      b.setAttribute('aria-label',b.title);
+    }
+    // 官方 PNG 只在 full 构建里内嵌；裁剪版（或图片加载失败）会 404，
+    // 徽标就变成一块空白。补一个平台首字，图标位至少还是可辨认的。
+    var img=b.querySelector&&b.querySelector('img');
+    if(img){
+      var fallback=function(){
+        b.classList.remove('is-img');b.classList.add('qs-brand-fallback');
+        b.textContent=(s.label||s.id).slice(0,1);
+      };
+      img.onerror=fallback;
+      // 缓存里已经失败过的图不会再触发 onerror，挂载时补判一次。
+      if(img.complete&&!img.naturalWidth)fallback();
+    }
+    return b;
+  }
+
   function paintSourceTabs() {
     var box = el('qr-sources');
     box.innerHTML = '';
@@ -497,7 +541,8 @@
       b.type = 'button';
       b.className = 'qr-source' + (acc ? ' is-in' : '');
       b.dataset.source = s.id;
-
+      b.title = s.label;
+      b.appendChild(platformBadge(s));
       if (acc) {
         // 已登录：显示头像 + 昵称；点击直接进该源（不再要求登录）。
         var av = document.createElement('span');
@@ -523,8 +568,12 @@
           if (intent.source !== s.id) enterLoggedIn(s.id);
         };
       } else {
-        // 未登录：显示平台名，点击走登录取码。
-        b.textContent = s.label;
+        // 未登录：显示平台名。不能再写 b.textContent —— 那会把前面刚挂上的
+        // 平台徽标一并清掉，整列又回到光秃秃的文字。
+        var label = document.createElement('span');
+        label.className = 'qs-label';
+        label.textContent = s.label;
+        b.appendChild(label);
         b.onclick = function () {
           if (intent.source !== s.id) start(s.id, 'qq');
         };

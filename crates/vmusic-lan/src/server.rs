@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: MIT
 //! Dedicated TLS/WebSocket transport. No legacy routes or filesystem access.
 //! The application remains the only owner of queue, resources and command semantics.
-use crate::buffer::{MemoryBudget, Reservation, ENDPOINT_BYTES, GLOBAL_BYTES};
+use crate::buffer::{MemoryBudget, PcmBudget, PcmReservation, Reservation, GLOBAL_BYTES};
 use crate::clock::MonotonicClock;
 use crate::members::{AccessError, MemberRegistry, MemberView, Permissions, Secret};
 use crate::notifications::Notifications;
 use crate::protocol::{
-    AudioFormat, ControlFrame, Counter, PcmBlock, StreamIdentity, CAPABILITIES, MAX_MESSAGE,
-    VERSION,
+    required_capabilities, AudioFormat, ControlFrame, Counter, FormatMode, PcmBlock,
+    StreamIdentity, MAX_MESSAGE, VERSION,
 };
 use crate::tls::{Fingerprint, HostIdentity};
 use futures::{SinkExt, StreamExt};
@@ -84,6 +84,8 @@ pub enum TransportError {
     Audio,
     #[error("invalid room wire message")]
     Wire,
+    #[error("this room requires a client with native sample-rate support")]
+    Capability,
     #[error(transparent)]
     Access(#[from] AccessError),
     #[error(transparent)]
@@ -173,7 +175,7 @@ pub enum Inbound {
 struct OutboundPcm {
     block: PcmBlock,
     _global: Reservation,
-    _endpoint: Reservation,
+    _endpoint: PcmReservation,
 }
 struct Endpoint {
     session_id: Uuid,
@@ -184,7 +186,10 @@ struct Endpoint {
     // An attached audio socket receives PCM only after its first Prepare was
     // enqueued on control; Ready still needs PCM and must not gate delivery.
     audio_prepared: bool,
-    budget: Arc<MemoryBudget>,
+    negotiated: bool,
+    supported: Option<Vec<String>>,
+    formats: [Option<(u64, AudioFormat)>; 2],
+    budget: Arc<PcmBudget>,
 }
 struct State {
     members: MemberRegistry,
@@ -194,6 +199,7 @@ struct State {
 struct Inner {
     room_id: Uuid,
     instance_id: Uuid,
+    format_mode: FormatMode,
     state: Mutex<State>,
     events: mpsc::Sender<Inbound>,
     stop: watch::Sender<bool>,
@@ -219,6 +225,24 @@ impl RoomServer {
         identity: &HostIdentity,
         clock: MonotonicClock,
     ) -> Result<(Self, mpsc::Receiver<Inbound>), TransportError> {
+        Self::bind_with_mode(
+            address,
+            room_id,
+            instance_id,
+            identity,
+            clock,
+            FormatMode::Fixed,
+        )
+        .await
+    }
+    pub async fn bind_with_mode(
+        address: SocketAddr,
+        room_id: Uuid,
+        instance_id: Uuid,
+        identity: &HostIdentity,
+        clock: MonotonicClock,
+        format_mode: FormatMode,
+    ) -> Result<(Self, mpsc::Receiver<Inbound>), TransportError> {
         // Binding an explicit interface is intentional. No wildcard fallback.
         if address.ip().is_unspecified() || address.ip().is_multicast() {
             return Err(TransportError::Wire);
@@ -231,6 +255,7 @@ impl RoomServer {
         let inner = Arc::new(Inner {
             room_id,
             instance_id,
+            format_mode,
             state: Mutex::new(State {
                 members: MemberRegistry::new(room_id, instance_id, Instant::now()),
                 admissions: crate::admission::Admissions::new(room_id, Instant::now()),
@@ -260,7 +285,8 @@ impl RoomServer {
                         let inner = inner.clone(); let acceptor = acceptor.clone();
                         tasks.spawn(async move {
                             let _connection = connection;
-                            let negotiated = tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
+                            let deadline = tokio::time::Instant::now() + HANDSHAKE_TIMEOUT;
+                            let negotiated = tokio::time::timeout_at(deadline, async {
                                 stream.set_nodelay(true).ok()?;
                                 let tls = acceptor.accept(stream).await.ok()?;
                                 let config = tungstenite::protocol::WebSocketConfig::default()
@@ -272,9 +298,8 @@ impl RoomServer {
                                 let request: Handshake = serde_json::from_str(&text).ok()?;
                                 Some((socket, request))
                             }).await;
-                            drop(handshake);
                             if let Ok(Some((socket, request))) = negotiated {
-                                handle(inner, socket, request, source).await;
+                                handle(inner, socket, request, source, deadline, handshake).await;
                             }
                         });
                     }
@@ -322,6 +347,9 @@ impl Drop for RoomServer {
     }
 }
 impl Transport {
+    pub fn format_mode(&self) -> FormatMode {
+        self.inner.format_mode
+    }
     /// Only the application host publishes this optional, explicitly public profile.
     pub fn set_lobby_profile(
         &self,
@@ -532,6 +560,21 @@ impl Transport {
         identity: StreamIdentity,
         frame: &ControlFrame,
     ) -> Result<(), TransportError> {
+        if !matches!(
+            frame,
+            ControlFrame::Prepare { .. }
+                | ControlFrame::Commit { .. }
+                | ControlFrame::Suspend { .. }
+                | ControlFrame::EpochEnd { .. }
+                | ControlFrame::Resync { .. }
+                | ControlFrame::End { .. }
+                | ControlFrame::Response { .. }
+                | ControlFrame::Notification { .. }
+        ) || (self.inner.format_mode == FormatMode::Fixed
+            && matches!(frame, ControlFrame::EpochEnd { .. }))
+        {
+            return Err(TransportError::Wire);
+        }
         self.authorize(member, identity)?;
         let text = frame.encode().map_err(|_| TransportError::Wire)?;
         let mut state = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -539,8 +582,27 @@ impl Transport {
         let endpoint = state
             .endpoints
             .get_mut(&member)
-            .filter(|e| e.session_id == identity.session_id)
+            .filter(|e| e.session_id == identity.session_id && e.negotiated)
             .ok_or(TransportError::Closed)?;
+        if let ControlFrame::Prepare { plan } = frame {
+            if self.inner.format_mode == FormatMode::Native && plan.format.channels != 2 {
+                return Err(TransportError::Audio);
+            }
+            declare_format(&mut endpoint.formats, plan.epoch.0, plan.format)?;
+        }
+        if let ControlFrame::EpochEnd {
+            epoch, format_id, ..
+        } = frame
+        {
+            if !endpoint
+                .formats
+                .iter()
+                .flatten()
+                .any(|(e, f)| *e == epoch.0 && f.id == *format_id)
+            {
+                return Err(TransportError::Wire);
+            }
+        }
         if endpoint.high.try_send(text).is_err() {
             state.members.disconnect(member, identity.session_id);
             return Err(TransportError::Closed);
@@ -553,16 +615,21 @@ impl Transport {
     /// Chat overflow is lossy and cannot revoke audio or block Commit. The app
     /// includes history revision/cursor in snapshots so clients recover gaps.
     pub fn notify_chat(&self, frame: &ControlFrame) -> Result<(), TransportError> {
+        if !matches!(frame, ControlFrame::Notification { topic, .. } if topic.starts_with("chat_"))
+        {
+            return Err(TransportError::Wire);
+        }
         let text = frame.encode().map_err(|_| TransportError::Wire)?;
         if text.len() > 2048 {
             return Err(TransportError::Wire);
         }
         let state = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
         for (member, endpoint) in &state.endpoints {
-            if state
-                .members
-                .permissions(*member, endpoint.session_id)
-                .is_ok_and(|p| p.chat_read)
+            if endpoint.negotiated
+                && state
+                    .members
+                    .permissions(*member, endpoint.session_id)
+                    .is_ok_and(|p| p.chat_read)
             {
                 endpoint.chat.push(text.clone());
             }
@@ -593,7 +660,7 @@ impl Transport {
         let mut failed = Vec::new();
         let mut sent = 0;
         for (member, endpoint) in &state.endpoints {
-            if !endpoint.audio_prepared {
+            if !endpoint.negotiated || !endpoint.audio_prepared {
                 continue;
             }
             if !state
@@ -606,26 +673,28 @@ impl Transport {
             let Some(tx) = &endpoint.audio else {
                 continue;
             };
-            let block = PcmBlock {
-                identity: StreamIdentity {
-                    room_id: self.inner.room_id,
-                    instance_id: self.inner.instance_id,
-                    session_id: endpoint.session_id,
-                },
-                epoch,
-                sequence,
-                frame_index,
-                format_id: format.id,
-                channels: format.channels,
-                samples: samples.clone(),
-            };
-            let bytes = block.byte_len();
+            let bytes = samples.len() * std::mem::size_of::<f32>() + crate::protocol::PCM_HEADER;
             match (
                 tx.try_reserve(),
                 self.inner.memory.reserve(bytes),
-                endpoint.budget.reserve(bytes),
+                endpoint
+                    .budget
+                    .reserve_pcm(frames, format.sample_rate, bytes),
             ) {
                 (Ok(slot), Ok(global), Ok(local)) => {
+                    let block = PcmBlock {
+                        identity: StreamIdentity {
+                            room_id: self.inner.room_id,
+                            instance_id: self.inner.instance_id,
+                            session_id: endpoint.session_id,
+                        },
+                        epoch,
+                        sequence,
+                        frame_index,
+                        format_id: format.id,
+                        channels: format.channels,
+                        samples: samples.clone(),
+                    };
                     slot.send(OutboundPcm {
                         block,
                         _global: global,
@@ -647,7 +716,19 @@ impl Transport {
     }
 }
 
-async fn handle(inner: Arc<Inner>, mut socket: Socket, request: Handshake, source: SocketAddr) {
+async fn handle(
+    inner: Arc<Inner>,
+    mut socket: Socket,
+    request: Handshake,
+    source: SocketAddr,
+    deadline: tokio::time::Instant,
+    handshake: tokio::sync::OwnedSemaphorePermit,
+) {
+    // Native control negotiation remains part of the same bounded handshake.
+    let mut handshake = Some(handshake);
+    if !matches!(request, Handshake::Control { .. }) {
+        handshake.take();
+    }
     match request {
         Handshake::LobbyProfile { version, room_id }
             if version == VERSION && room_id == inner.room_id =>
@@ -750,7 +831,7 @@ async fn handle(inner: Arc<Inner>, mut socket: Socket, request: Handshake, sourc
             match session {
                 Ok(session) => {
                     let identity = session.identity;
-                    run_control(inner.clone(), socket, session).await;
+                    run_control(inner.clone(), socket, session, deadline, handshake.take()).await;
                     disconnect(&inner, member_id, identity);
                 }
                 Err(AccessError::Denied) => {
@@ -765,12 +846,16 @@ async fn handle(inner: Arc<Inner>, mut socket: Socket, request: Handshake, sourc
             member_id,
             credential,
         } if version == VERSION => {
-            let session = inner
-                .state
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .members
-                .audio(member_id, &credential, identity);
+            let session = {
+                let mut state = inner.state.lock().unwrap_or_else(|e| e.into_inner());
+                if state.endpoints.get(&member_id).is_some_and(|endpoint| {
+                    endpoint.session_id == identity.session_id && endpoint.negotiated
+                }) {
+                    state.members.audio(member_id, &credential, identity)
+                } else {
+                    Err(AccessError::Denied)
+                }
+            };
             if let Ok(session) = session {
                 run_audio(inner.clone(), socket, session).await;
                 disconnect(&inner, member_id, identity);
@@ -779,6 +864,61 @@ async fn handle(inner: Arc<Inner>, mut socket: Socket, request: Handshake, sourc
         _ => {}
     }
 }
+fn declare_format(
+    formats: &mut [Option<(u64, AudioFormat)>; 2],
+    epoch: u64,
+    format: AudioFormat,
+) -> Result<(), TransportError> {
+    if let Some((_, known)) = formats.iter().flatten().find(|(e, _)| *e == epoch) {
+        return if *known == format {
+            Ok(())
+        } else {
+            Err(TransportError::Wire)
+        };
+    }
+    if let Some(slot) = formats.iter_mut().find(|slot| slot.is_none()) {
+        *slot = Some((epoch, format));
+    } else {
+        let index = usize::from(formats[1].unwrap().0 < formats[0].unwrap().0);
+        if epoch <= formats[index].unwrap().0 {
+            return Err(TransportError::Wire);
+        }
+        formats[index] = Some((epoch, format));
+    }
+    Ok(())
+}
+
+fn acknowledge_capabilities(
+    inner: &Inner,
+    member: Uuid,
+    identity: StreamIdentity,
+    supported: Vec<String>,
+) -> Result<(), TransportError> {
+    crate::protocol::validate_capabilities(&supported).map_err(|_| TransportError::Wire)?;
+    if !required_capabilities(inner.format_mode)
+        .iter()
+        .all(|required| supported.iter().any(|s| s == required))
+    {
+        return Err(TransportError::Capability);
+    }
+    let mut state = inner.state.lock().unwrap_or_else(|e| e.into_inner());
+    state.members.permissions(member, identity.session_id)?;
+    let endpoint = state
+        .endpoints
+        .get_mut(&member)
+        .filter(|e| e.session_id == identity.session_id)
+        .ok_or(TransportError::Closed)?;
+    if let Some(previous) = &endpoint.supported {
+        if *previous != supported {
+            return Err(TransportError::Wire);
+        }
+    } else {
+        endpoint.supported = Some(supported);
+        endpoint.negotiated = true;
+    }
+    Ok(())
+}
+
 fn disconnect(inner: &Inner, member: Uuid, identity: StreamIdentity) {
     let mut state = inner.state.lock().unwrap_or_else(|e| e.into_inner());
     state.members.disconnect(member, identity.session_id);
@@ -834,6 +974,8 @@ async fn run_control(
     inner: Arc<Inner>,
     mut socket: Socket,
     mut session: crate::members::AuthorizedSession,
+    deadline: tokio::time::Instant,
+    handshake: Option<tokio::sync::OwnedSemaphorePermit>,
 ) {
     let (high, mut high_rx) = mpsc::channel(32);
     let chat = Notifications::new();
@@ -854,27 +996,68 @@ async fn run_control(
                 chat: chat.clone(),
                 audio: None,
                 audio_prepared: false,
-                budget: MemoryBudget::new(ENDPOINT_BYTES),
+                negotiated: inner.format_mode == FormatMode::Fixed,
+                supported: None,
+                formats: [None, None],
+                budget: PcmBudget::endpoint(),
             },
         );
     }
     let hello = ControlFrame::Hello {
         version: VERSION,
         identity: session.identity,
-        required: CAPABILITIES.iter().map(|c| c.to_string()).collect(),
+        required: required_capabilities(inner.format_mode)
+            .iter()
+            .map(|c| c.to_string())
+            .collect(),
     };
-    if send_text(&mut socket, hello.encode().unwrap())
-        .await
-        .is_err()
-        || inner
-            .events
-            .try_send(Inbound::Connected {
-                member_id: session.member_id,
-                identity: session.identity,
-            })
-            .is_err()
-    {
+    if !matches!(
+        tokio::time::timeout_at(deadline, send_text(&mut socket, hello.encode().unwrap())).await,
+        Ok(Ok(()))
+    ) {
         return;
+    }
+    if inner.format_mode == FormatMode::Native {
+        let negotiated = tokio::time::timeout_at(deadline, async {
+            tokio::select! {
+                biased;
+                _ = session.invalidated.changed() => Err(TransportError::Closed),
+                message = socket.next() => {
+                    let Some(Ok(Message::Text(text))) = message else { return Err(TransportError::Wire); };
+                    let ControlFrame::CapabilityAck { supported } = ControlFrame::decode(&text).map_err(|_| TransportError::Wire)? else { return Err(TransportError::Wire); };
+                    acknowledge_capabilities(&inner, session.member_id, session.identity, supported)?;
+                    send_text(&mut socket, ControlFrame::CapabilityConfirmed {}.encode().unwrap()).await
+                }
+            }
+        }).await;
+        if !matches!(negotiated, Ok(Ok(()))) {
+            if matches!(negotiated, Ok(Err(TransportError::Capability))) {
+                let _ = tokio::time::timeout_at(
+                    deadline,
+                    send_end(&mut socket, "native_rate_capability_required"),
+                )
+                .await;
+            }
+            return;
+        }
+    }
+    drop(handshake);
+    {
+        let state = inner.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state
+            .members
+            .permissions(session.member_id, session.identity.session_id)
+            .is_err()
+            || inner
+                .events
+                .try_send(Inbound::Connected {
+                    member_id: session.member_id,
+                    identity: session.identity,
+                })
+                .is_err()
+        {
+            return;
+        }
     }
     let mut last_received = Instant::now();
     let mut tick = tokio::time::interval(Duration::from_secs(1));
@@ -904,6 +1087,12 @@ async fn run_control(
                 let Ok(frame) = ControlFrame::decode(&text) else { break; };
                 let member_id = session.member_id; let identity = session.identity;
                 let event = match frame {
+                    ControlFrame::CapabilityAck { supported } if inner.format_mode == FormatMode::Native => {
+                        if acknowledge_capabilities(&inner, member_id, identity, supported).is_err()
+                            || send_text(&mut socket, ControlFrame::CapabilityConfirmed {}.encode().unwrap()).await.is_err()
+                        { break; }
+                        continue;
+                    },
                     ControlFrame::TimeRequest { sequence, t1 } => {
                         let t2 = received_at;
                         let reply = ControlFrame::TimeResponse { sequence, t1, t2: Counter(t2), t3: Counter(inner.clock.now_ns()) };
@@ -956,7 +1145,7 @@ async fn run_audio(
         let Some(endpoint) = state
             .endpoints
             .get_mut(&session.member_id)
-            .filter(|e| e.session_id == session.identity.session_id)
+            .filter(|e| e.session_id == session.identity.session_id && e.negotiated)
         else {
             return;
         };
@@ -990,17 +1179,71 @@ async fn run_audio(
             },
             block = rx.recv() => {
                 let Some(block) = block else { break; };
-                let Ok(bytes) = block.block.encode() else { break; };
-                if !matches!(tokio::time::timeout(SEND_TIMEOUT, socket.send(Message::Binary(bytes.into()))).await, Ok(Ok(()))) { break; }
+                if send_pcm(&mut socket, block).await.is_err() { break; }
             },
         }
     }
+}
+
+async fn send_pcm<S>(
+    socket: &mut WebSocketStream<S>,
+    block: OutboundPcm,
+) -> Result<(), TransportError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let bytes = block.block.encode().map_err(|_| TransportError::Audio)?;
+    tokio::time::timeout(SEND_TIMEOUT, socket.send(Message::Binary(bytes.into())))
+        .await
+        .map_err(|_| TransportError::Closed)?
+        .map_err(|_| TransportError::Closed)?;
+    // The decoded reference stays charged through encoding and the send await.
+    drop(block);
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use tungstenite::protocol::Role;
+
+    #[tokio::test]
+    async fn outbound_pcm_remains_charged_during_send_and_cancel_releases_it() {
+        let (host, _stalled_peer) = tokio::io::duplex(1);
+        let mut host = WebSocketStream::from_raw_socket(host, Role::Server, None).await;
+        let block = PcmBlock {
+            identity: StreamIdentity {
+                room_id: Uuid::nil(),
+                instance_id: Uuid::nil(),
+                session_id: Uuid::nil(),
+            },
+            epoch: 1,
+            sequence: 1,
+            frame_index: 0,
+            format_id: 1,
+            channels: 2,
+            samples: vec![0.0; 882 * 2].into(),
+        };
+        let bytes = block.byte_len();
+        let global = MemoryBudget::new(GLOBAL_BYTES);
+        let endpoint = PcmBudget::endpoint();
+        let outbound = OutboundPcm {
+            _global: global.reserve(bytes).unwrap(),
+            _endpoint: endpoint.reserve_pcm(882, 44_100, bytes).unwrap(),
+            block,
+        };
+        let sending = tokio::spawn(async move { send_pcm(&mut host, outbound).await });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(!sending.is_finished());
+        assert_eq!(global.used(), bytes);
+        assert_eq!(endpoint.bytes(), bytes);
+        assert_eq!(endpoint.duration_ns(), 20_000_000);
+        sending.abort();
+        let _ = sending.await;
+        assert_eq!(global.used(), 0);
+        assert_eq!(endpoint.bytes(), 0);
+        assert_eq!(endpoint.duration_ns(), 0);
+    }
 
     #[tokio::test]
     async fn terminal_end_waits_for_close_while_draining_queued_startup_frames() {

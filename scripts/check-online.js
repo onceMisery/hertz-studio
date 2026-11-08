@@ -1869,7 +1869,11 @@ async function loginScenario(pollStates, opts) {
     await ticks(20);
     const tab = env.doc.getElementById('qr-sources').children[0];
     ok(!tab.classList.contains('is-unverified'), '弹窗平台按钮不带验收标注类');
-    eq(textOf(tab), '酷狗音乐', '弹窗平台按钮只显示平台名称');
+    // 平台按钮现在是「平台徽标 + 平台名」：徽标是图标节点，不该往按钮里
+    // 塞进任何多余文字（尤其不能把未验收标记写成可见文案）。
+    eq(textOf(tab).trim(), '酷狗音乐', '弹窗平台按钮只显示平台名称');
+    ok(/src-badge|qs-brand-fallback/.test(String((tab.children[0] || {}).className || '')),
+      '弹窗平台按钮前面带平台徽标');
   }
 
   section('详情整盘/随机播放走 Online.playAll');

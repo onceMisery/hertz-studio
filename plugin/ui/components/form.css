@@ -48,9 +48,107 @@ input::placeholder, textarea::placeholder { color: var(--muted); }
 select { padding-right: 8px; cursor: pointer; }
 select option { background: var(--panel-solid); color: var(--text); }
 
-/* Switch（开关勾选）：原生 checkbox + 主题 accent 的统一约定。
-   个别功能面（歌词情绪等）按页面语义覆写 accent，是公开变体式组合。 */
+/* 多选仍使用原生 checkbox；布尔设置以 role="switch" 复用同一视觉。
+   保留原 input 与 change 事件；工坊的按钮开关继续读取 aria-checked。
+
+   开关的颜色只从主题令牌派生：设置里的主按钮、滑块圆点、原生 checkbox、
+   焦点环吃的都是 --accent，ON 态自然也该是它；--accent-ink 是配对的
+   前景色，保证滑块与对勾在任意主题下都有对比。旧版把 ON 态写死成淡紫
+   轨道 + 深紫滑块，成了换主题时唯一不跟色的一颗控件（浅色主题下 OFF
+   态那块深灰轨道同理）。stage.css 的 .sc-pill 只读这些令牌，无需另改。 */
 input[type="checkbox"] { accent-color: var(--accent); cursor: pointer; }
+:is(input[type="checkbox"], button.sc-switch, button.sc-pill)[role="switch"] {
+  --switch-on-track: var(--accent);
+  --switch-on-thumb: var(--accent-ink);
+  --switch-on-icon: var(--accent);
+  --switch-off-track: color-mix(in srgb, var(--text) 12%, var(--panel-solid));
+  --switch-off-border: var(--field-border-strong);
+  --switch-off-thumb: var(--muted);
+  --switch-off-icon: var(--panel-solid);
+  --switch-icon-off: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='m4 4 8 8m0-8-8 8' fill='none' stroke='black' stroke-width='2' stroke-linecap='round'/%3E%3C/svg%3E");
+  --switch-icon-on: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='m3 8 3.5 3.5L13 5' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+}
+:is(input[type="checkbox"], button.sc-switch)[role="switch"] {
+  -webkit-appearance: none;
+  appearance: none;
+  position: relative;
+  display: inline-block;
+  box-sizing: border-box;
+  flex: 0 0 52px;
+  width: 52px;
+  height: 32px;
+  min-width: 52px;
+  margin: 0;
+  padding: 0;
+  border: 2px solid var(--switch-off-border);
+  border-radius: 999px;
+  background: var(--switch-off-track);
+  box-shadow: none;
+  vertical-align: middle;
+  cursor: pointer;
+  transition: transform 160ms cubic-bezier(.22, 1, .36, 1);
+}
+:is(input[type="checkbox"], button.sc-switch)[role="switch"]::before,
+:is(input[type="checkbox"], button.sc-switch)[role="switch"]::after {
+  content: "";
+  position: absolute;
+  pointer-events: none;
+  transition: transform 180ms cubic-bezier(.22, 1, .36, 1);
+}
+:is(input[type="checkbox"], button.sc-switch)[role="switch"]::before {
+  inset: 2px auto auto 2px;
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--switch-off-thumb);
+}
+:is(input[type="checkbox"], button.sc-switch)[role="switch"]::after {
+  inset: 7px auto auto 7px;
+  width: 14px;
+  height: 14px;
+  border-radius: 0;
+  background: var(--switch-off-icon);
+  -webkit-mask: var(--switch-icon-off) center/contain no-repeat;
+  mask: var(--switch-icon-off) center/contain no-repeat;
+}
+:is(input[type="checkbox"], button.sc-switch)[role="switch"]:is(:checked, [aria-checked="true"]) {
+  border-color: var(--switch-on-track);
+  background: var(--switch-on-track);
+}
+:is(input[type="checkbox"], button.sc-switch)[role="switch"]:is(:checked, [aria-checked="true"])::before {
+  background: var(--switch-on-thumb);
+  transform: translateX(20px);
+}
+:is(input[type="checkbox"], button.sc-switch)[role="switch"]:is(:checked, [aria-checked="true"])::after {
+  background: var(--switch-on-icon);
+  -webkit-mask-image: var(--switch-icon-on);
+  mask-image: var(--switch-icon-on);
+  transform: translateX(20px);
+}
+:is(input[type="checkbox"], button.sc-switch)[role="switch"]:hover:not(:disabled):not(:focus-visible) {
+  outline: 1px solid color-mix(in srgb, var(--text, #eeeae1) 32%, transparent);
+  outline-offset: 2px;
+}
+:is(input[type="checkbox"], button.sc-switch)[role="switch"]:focus-visible {
+  outline: 2px solid var(--text, #eeeae1);
+  outline-offset: 4px;
+}
+:is(input[type="checkbox"], button.sc-switch)[role="switch"]:active:not(:disabled) { transform: scale(.96); }
+:is(input[type="checkbox"], button.sc-switch)[role="switch"]:disabled { opacity: .45; cursor: not-allowed; }
+body.reduce-motion :is(input[type="checkbox"], button.sc-switch)[role="switch"],
+body.reduce-motion :is(input[type="checkbox"], button.sc-switch)[role="switch"]::before,
+body.reduce-motion :is(input[type="checkbox"], button.sc-switch)[role="switch"]::after { transition: none; }
+@media (prefers-reduced-motion: reduce) {
+  :is(input[type="checkbox"], button.sc-switch)[role="switch"],
+  :is(input[type="checkbox"], button.sc-switch)[role="switch"]::before,
+  :is(input[type="checkbox"], button.sc-switch)[role="switch"]::after { transition: none; }
+}
+@media (forced-colors: active) {
+  input[type="checkbox"][role="switch"] { -webkit-appearance: auto; appearance: auto; width: 24px; min-width: 24px; height: 24px; flex-basis: 24px; }
+  input[type="checkbox"][role="switch"]::before,
+  input[type="checkbox"][role="switch"]::after { display: none; }
+}
 
 /* Slider（range）：扁平轨道，hover 变粗。 */
 input[type="range"] {

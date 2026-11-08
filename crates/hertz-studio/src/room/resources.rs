@@ -301,6 +301,7 @@ impl SharedLibrary {
         }
     }
 
+    #[cfg(test)]
     pub(super) async fn prepare_online(
         &self,
         state: &Arc<AppState>,
@@ -312,6 +313,36 @@ impl SharedLibrary {
             return Ok(None);
         };
         let media = self.2.prepare(state, &song, position_ms).await?;
+        if self.authorized_source(state, resource).await?.1 != revision {
+            return Err(RoomError::denied());
+        }
+        Ok(Some(media))
+    }
+
+    pub(super) async fn prepare_online_configured(
+        &self,
+        state: &Arc<AppState>,
+        resource: Uuid,
+        position_ms: u64,
+        format_mode: vmusic_lan::protocol::FormatMode,
+        native_budget: vmusic_audio::NativePcmBudget,
+        deadline: Instant,
+    ) -> RoomResult<Option<vmusic_audio::render::PreparedMedia>> {
+        let (entry, revision) = self.authorized_source(state, resource).await?;
+        let Some(song) = entry.online else {
+            return Ok(None);
+        };
+        let media = self
+            .2
+            .prepare_configured(
+                state,
+                &song,
+                position_ms,
+                format_mode,
+                native_budget,
+                deadline,
+            )
+            .await?;
         if self.authorized_source(state, resource).await?.1 != revision {
             return Err(RoomError::denied());
         }

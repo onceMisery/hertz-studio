@@ -13,6 +13,7 @@ type SharedLocalResume = Arc<std::sync::Mutex<Option<LocalResume>>>;
 pub(crate) struct Envelope {
     pub request: LocalRequest,
     pub reply: oneshot::Sender<RoomResult<Value>>,
+    pub media_identity: Option<crate::system_media::Identity>,
 }
 pub(crate) struct Session {
     pub commands: mpsc::Sender<Envelope>,
@@ -56,6 +57,10 @@ impl ModeLease {
         local_resume: SharedLocalResume,
     ) -> RoomResult<Self> {
         let _commit = state.play_commit.lock().await;
+        if let Some(timer) = state.native_sleep.get() {
+            timer.expire_if_due_locked(&state).await;
+            timer.cancel_for_room_locked(&state).await;
+        }
         let snap = state.audio.snapshot();
         let queue = state.queue.lock().await.clone();
         let cursor = *state.cursor.lock().await;
@@ -126,6 +131,9 @@ impl ModeLease {
                 .await
                 .map_err(|e| RoomError::new("room_audio", e.to_string()))?,
         );
+        if let Some(timer) = state.native_sleep.get() {
+            timer.finish_room_handoff_locked(&state).await;
+        }
         state.queue.lock().await.clear();
         *state.cursor.lock().await = None;
         *state.pending_restore_seek.lock().await = None;
@@ -275,6 +283,30 @@ impl RoomManager {
         state: Arc<AppState>,
         request: LocalRequest,
     ) -> RoomResult<Value> {
+        self.request_inner(state, request, None).await
+    }
+
+    pub(crate) async fn request_for_media(
+        &self,
+        state: Arc<AppState>,
+        request: LocalRequest,
+        identity: crate::system_media::Identity,
+    ) -> RoomResult<Value> {
+        self.request_inner(state, request, Some(identity)).await
+    }
+
+    async fn request_inner(
+        &self,
+        state: Arc<AppState>,
+        request: LocalRequest,
+        media_identity: Option<crate::system_media::Identity>,
+    ) -> RoomResult<Value> {
+        if media_identity
+            .as_ref()
+            .is_some_and(|identity| !identity.matches_room_snapshot(&self.snapshot()))
+        {
+            return Err(RoomError::new("media_stale", "系统媒体会话已变化"));
+        }
         if *state.exiting.borrow()
             && !matches!(request, LocalRequest::Snapshot | LocalRequest::SavedRoom)
         {
@@ -440,10 +472,12 @@ impl RoomManager {
                 host_name,
                 cover,
                 address,
+                format_mode,
                 sample_rate,
                 local_output,
                 discoverable,
             } => {
+                let sample_rate = super::contract::creation_rate(format_mode, sample_rate)?;
                 let _transition = self.transition.lock().await;
                 if self.is_active() {
                     return Err(RoomError::new("room_busy", "请先离开当前房间"));
@@ -463,6 +497,7 @@ impl RoomManager {
                             host_name,
                             cover,
                             address,
+                            format_mode,
                             sample_rate,
                             local_output,
                             discoverable,
@@ -559,7 +594,11 @@ impl RoomManager {
                     .ok_or_else(RoomError::inactive)?;
                 let (reply, result) = oneshot::channel();
                 sender
-                    .try_send(Envelope { request, reply })
+                    .try_send(Envelope {
+                        request,
+                        reply,
+                        media_identity,
+                    })
                     .map_err(|_| RoomError::new("room_busy", "房间操作队列繁忙"))?;
                 tokio::time::timeout(std::time::Duration::from_secs(8), result)
                     .await
@@ -1253,7 +1292,8 @@ mod tests {
                 host_name: "房主".into(),
                 cover: None,
                 address: "127.0.0.1:0".parse().unwrap(),
-                sample_rate: 48_000,
+                format_mode: vmusic_lan::protocol::FormatMode::Fixed,
+                sample_rate: Some(48_000),
                 local_output: false,
                 discoverable: false,
             },

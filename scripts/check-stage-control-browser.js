@@ -17,15 +17,18 @@ const web = path.join(root, 'plugin/ui');
 const output = path.join(root, 'output/playwright/stage-control');
 const index = fs.readFileSync(path.join(web, 'index.html'), 'utf8');
 const panel = index.slice(index.indexOf('<div class="stage-ctl"'), index.indexOf('<div id="ctx-menu"'));
+const sprite = index.slice(index.indexOf('<svg id="icon-sprite"'), index.indexOf('</svg>') + 6);
 assert.ok(panel.includes('id="sc-body"'), 'Fixture uses the current production panel');
 const fixture = `<!doctype html><html lang="zh-CN"><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="stylesheet" href="/design/design-base.css"><link rel="stylesheet" href="/components/form.css">
 <link rel="stylesheet" href="/style.css"><link rel="stylesheet" href="/stage.css">
 <title>StageControl isolated check</title><body>
 <button id="stage-control-btn" aria-controls="stage-ctl" aria-expanded="false">舞台控制</button>
-${panel}<script src="/themes.js"></script><script src="/stage-control.js"></script>
+${sprite}${panel}<script src="/design/design-themes.js"></script><script src="/themes.js"></script><script src="/stage-control.js"></script>
 <script>Theme.init(); StageControl.init();</script></body></html>`;
-const assets = new Map(['style.css', 'stage.css', 'themes.js', 'stage-control.js'].map(file =>
+const assets = new Map(['design/design-base.css', 'design/design-themes.js', 'components/form.css',
+  'style.css', 'stage.css', 'themes.js', 'stage-control.js'].map(file =>
   ['/' + file, fs.readFileSync(path.join(web, file))]));
 let checks = 0;
 const errors = [];

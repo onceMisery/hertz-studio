@@ -190,6 +190,41 @@ pub struct LyricLine {
     pub text: String,
     /// Empty when the source has no word-level timing.
     pub words: Vec<LyricWord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vocal: Option<LyricVocal>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LyricAgent {
+    pub id: String,
+    pub kind: LyricAgentKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LyricAgentKind {
+    Person,
+    Character,
+    Group,
+    Organization,
+    Other,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LyricVocal {
+    pub agent_ids: Vec<String>,
+    pub role: LyricVocalRole,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LyricVocalRole {
+    Lead,
+    Backing,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -197,6 +232,8 @@ pub struct LyricDocument {
     pub source: LyricSource,
     pub offset_ms: i64,
     pub lines: Vec<LyricLine>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agents: Vec<LyricAgent>,
     pub translation: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub format: Option<String>,
@@ -221,11 +258,16 @@ pub struct LyricOrigin {
 }
 
 impl LyricDocument {
+    pub fn has_vocals(&self) -> bool {
+        self.lines.iter().any(|line| line.vocal.is_some())
+    }
+
     pub fn empty() -> Self {
         Self {
             source: LyricSource::None,
             offset_ms: 0,
             lines: Vec::new(),
+            agents: Vec::new(),
             translation: None,
             format: None,
             timing_precision: None,

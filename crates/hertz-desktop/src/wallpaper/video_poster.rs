@@ -419,7 +419,9 @@ pub(super) async fn resolve_recorded(
     let manifest = library
         .cover_manifest(&request.work_key, &request.package_hash)
         .await?;
-    let hertz_wallpaper::Content::Video { asset } = &manifest.content else {
+    let content = hertz_wallpaper::properties::effective_content(&manifest, &request.properties)
+        .map_err(super::public_properties::property_error)?;
+    let hertz_wallpaper::Content::Video { asset } = &content else {
         return Ok(None);
     };
     let source = manifest

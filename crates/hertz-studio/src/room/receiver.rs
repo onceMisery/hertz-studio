@@ -9,7 +9,7 @@
 //! budgets and accepted cursors use that same grid, including clock updates.
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -19,6 +19,8 @@ use vmusic_audio::output_clock::ClockStatus;
 use vmusic_audio::scheduled_output::{EmergencyMute, OutputCursor};
 use vmusic_audio::{OutputError, OutputOptions, OutputTelemetry, RenderFormat, ScheduledOutput};
 use vmusic_core::room::receiver::{FormatDesc, GateAction, GateInput, PlanDesc, ReceiverGate};
+use vmusic_lan::buffer::{PcmBudget as Budget, PcmReservation as Reservation};
+use vmusic_lan::client::ReceivedPcm;
 use vmusic_lan::clock::{ClockMapping, MonotonicClock};
 use vmusic_lan::protocol::{validate_payload, AudioFormat, PcmBlock, Plan, StreamIdentity};
 
@@ -27,18 +29,15 @@ const EVENT_CAPACITY: usize = 32;
 // Includes commands waiting for the worker, not merely its active PCM deque.
 // The worker publishes its two accepted formats for exact ingress accounting;
 // unknown formats are charged at the lowest wire rate until matched. Input
-// (1.3s), two full converter histories (0.744s at 44.1kHz), device queue (0.6s),
-// and history/scratch (<0.286s even at 8kHz output) total less than 3s.
-// The separate byte limit remains 4MiB; device PCM and
-// conversion scratch keep total live PCM below 8MiB. Devices with >500ms
-// submission lead are explicitly unsupported by this policy.
-const MIN_WIRE_RATE: u32 = 44_100;
+// and copied conversion/history/output PCM use one transferable endpoint
+// budget. Conversion and output reserve their full sample storage; unsupported
+// combinations fail admission instead of exceeding 3s / 8MiB. Devices with
+// >500ms submission lead are unsupported by this policy.
 const MAX_WIRE_RATE: u32 = 192_000;
 const INPUT_DURATION_LIMIT_NS: u64 = 1_300_000_000;
 // Metadata only: actual queued PCM is constrained by its source duration.
 const GATE_UNMATCHED_FRAME_LIMIT: u32 =
     (INPUT_DURATION_LIMIT_NS * MAX_WIRE_RATE as u64 / 1_000_000_000) as u32;
-const INPUT_BYTE_LIMIT: usize = 4 * 1024 * 1024;
 const HORIZON_NS: u64 = 100_000_000;
 const SUBMIT_MARGIN_NS: u64 = 20_000_000;
 const DEVICE_FRESHNESS_NS: u64 = 250_000_000;
@@ -96,114 +95,6 @@ pub(crate) enum ReceiverEvent {
     Status(Box<ReceiverStatus>),
 }
 
-#[derive(Default)]
-struct Budget {
-    frames: AtomicUsize,
-    bytes: AtomicUsize,
-    duration_ns: AtomicU64,
-    // Never held across conversion, I/O or command processing. At most the
-    // current and preparing immutable formats are published by the worker.
-    formats: Mutex<[Option<(u64, AudioFormat)>; 2]>,
-}
-
-struct Reservation {
-    budget: Arc<Budget>,
-    frames: usize,
-    bytes: usize,
-    duration_ns: u64,
-}
-
-impl Reservation {
-    // 弃用理由同 vmusic-lan/src/buffer.rs 的 reserve：新 stable 改名 try_update，MSRV 1.88 还没稳定。
-    #[allow(deprecated)] // MSRV 1.88 还没有 try_update
-    fn acquire(budget: &Arc<Budget>, block: &PcmBlock) -> Result<Self, ReceiverError> {
-        let frames = block.frame_count() as usize;
-        let bytes = block.byte_len();
-        // Accepted formats price queued commands immediately; early PCM uses
-        // the minimum rate. Upward rounding cannot undercharge packetization.
-        let rate = budget
-            .formats
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .iter()
-            .flatten()
-            .find(|(epoch, format)| {
-                *epoch == block.epoch
-                    && format.id == block.format_id
-                    && format.channels == block.channels
-            })
-            .map_or(MIN_WIRE_RATE, |(_, format)| format.sample_rate);
-        let duration_ns = Self::duration(frames, rate);
-        if budget
-            .duration_ns
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
-                n.checked_add(duration_ns)
-                    .filter(|n| *n <= INPUT_DURATION_LIMIT_NS)
-            })
-            .is_err()
-        {
-            return Err(ReceiverError::Capacity);
-        }
-        if budget
-            .bytes
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
-                n.checked_add(bytes).filter(|n| *n <= INPUT_BYTE_LIMIT)
-            })
-            .is_err()
-        {
-            budget.duration_ns.fetch_sub(duration_ns, Ordering::AcqRel);
-            return Err(ReceiverError::Capacity);
-        }
-        budget.frames.fetch_add(frames, Ordering::AcqRel);
-        Ok(Self {
-            budget: Arc::clone(budget),
-            frames,
-            bytes,
-            duration_ns,
-        })
-    }
-
-    fn duration(frames: usize, rate: u32) -> u64 {
-        (frames as u64 * 1_000_000_000).div_ceil(u64::from(rate))
-    }
-
-    #[allow(deprecated)] // MSRV 1.88 还没有 try_update，理由见 vmusic-lan/src/buffer.rs
-    fn match_format(&mut self, rate: u32) -> Result<(), ReceiverError> {
-        // Called only after validating and matching the immutable epoch format.
-        // Unknown PCM is repriced downward. If a queued block outlives the
-        // published slot that priced it, a more expensive match must reserve
-        // the extra duration before it can be accepted into the new slot.
-        debug_assert!((MIN_WIRE_RATE..=MAX_WIRE_RATE).contains(&rate));
-        let duration_ns = Self::duration(self.frames, rate);
-        if duration_ns > self.duration_ns {
-            let extra = duration_ns - self.duration_ns;
-            self.budget
-                .duration_ns
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
-                    n.checked_add(extra)
-                        .filter(|n| *n <= INPUT_DURATION_LIMIT_NS)
-                })
-                .map_err(|_| ReceiverError::Capacity)?;
-        } else {
-            self.budget
-                .duration_ns
-                .fetch_sub(self.duration_ns - duration_ns, Ordering::AcqRel);
-        }
-        self.duration_ns = duration_ns;
-        Ok(())
-    }
-}
-
-impl Drop for Reservation {
-    fn drop(&mut self) {
-        self.budget.frames.fetch_sub(self.frames, Ordering::AcqRel);
-        self.budget.bytes.fetch_sub(self.bytes, Ordering::AcqRel);
-        self.budget
-            .duration_ns
-            .fetch_sub(self.duration_ns, Ordering::AcqRel);
-    }
-}
-
 struct Pcm {
     block: PcmBlock,
     offset_frames: usize,
@@ -223,6 +114,12 @@ enum Command {
         epoch: u64,
         plan_id: u64,
         effective_at: u64,
+    },
+    EpochEnd {
+        identity: StreamIdentity,
+        epoch: u64,
+        format_id: u32,
+        end_frame: u64,
     },
     Pcm(Pcm),
     Mapping(ClockMapping),
@@ -350,7 +247,49 @@ impl ReceiverHandle {
             self.trip.store(true, Ordering::Release);
             emergency_mute(&self.emergency);
         })?;
-        let reservation = Reservation::acquire(&self.budget, &block).inspect_err(|_| {
+        let reservation = self
+            .budget
+            .reserve_input(&block)
+            .map_err(|_| ReceiverError::Capacity)
+            .inspect_err(|_| {
+                self.generation.fetch_add(1, Ordering::AcqRel);
+                self.trip.store(true, Ordering::Release);
+                emergency_mute(&self.emergency);
+            })?;
+        self.send(Command::Pcm(Pcm {
+            block,
+            offset_frames: 0,
+            _reservation: reservation,
+        }))
+    }
+
+    pub fn epoch_end(
+        &self,
+        identity: StreamIdentity,
+        epoch: u64,
+        format_id: u32,
+        end_frame: u64,
+    ) -> Result<(), ReceiverError> {
+        self.send(Command::EpochEnd {
+            identity,
+            epoch,
+            format_id,
+            end_frame,
+        })
+    }
+
+    pub fn received_pcm(&self, pcm: ReceivedPcm) -> Result<(), ReceiverError> {
+        let (block, reservation) = pcm.into_parts();
+        if !reservation.is_from(&self.budget)
+            || !reservation.is_input()
+            || reservation.frames() != block.frame_count() as usize
+            || reservation.bytes() != block.byte_len()
+        {
+            return Err(ReceiverError::Invalid(
+                "PCM belongs to a different endpoint budget",
+            ));
+        }
+        validate_block(&block).inspect_err(|_| {
             self.generation.fetch_add(1, Ordering::AcqRel);
             self.trip.store(true, Ordering::Release);
             emergency_mute(&self.emergency);
@@ -517,17 +456,36 @@ impl ReceiverRegistry {
 /// new spawn after the prior worker's completion barrier. The lifecycle registry
 /// atomically owns the worker before it can escape, including during cancelled
 /// initialization, and rejects creation once restoration has started.
+#[allow(dead_code)] // Retained fixed-mode entry point for existing embedders.
 pub(crate) async fn spawn(
+    options: OutputOptions,
+    identity: StreamIdentity,
+    clock: MonotonicClock,
+    registry: ReceiverRegistry,
+) -> Result<(ReceiverHandle, mpsc::Receiver<ReceiverEvent>), ReceiverError> {
+    spawn_configured(
+        options,
+        identity,
+        clock,
+        registry,
+        false,
+        Budget::endpoint(),
+    )
+    .await
+}
+
+pub(crate) async fn spawn_configured(
     mut options: OutputOptions,
     identity: StreamIdentity,
     clock: MonotonicClock,
     registry: ReceiverRegistry,
+    native: bool,
+    budget: Arc<Budget>,
 ) -> Result<(ReceiverHandle, mpsc::Receiver<ReceiverEvent>), ReceiverError> {
     validate_options(&options)?;
     options.clock_origin = clock.origin();
     let (commands, mut inbox) = mpsc::channel(COMMAND_CAPACITY);
     let (events, event_rx) = mpsc::channel(EVENT_CAPACITY);
-    let budget = Arc::new(Budget::default());
     let trip = Arc::new(AtomicBool::new(false));
     let invalidated = Arc::new(AtomicBool::new(false));
     let generation = Arc::new(AtomicU64::new(0));
@@ -604,6 +562,11 @@ pub(crate) async fn spawn(
                 };
                 output.publish_emergency();
                 let mut engine = Engine::new(output, identity, budget);
+                engine.native = native;
+                if let Err(error) = engine.reserve_output_storage() {
+                    let _ = initialized.send(Err(ReceiverError::Output(error.into())));
+                    return;
+                }
                 status_tx.send_replace(engine.status(engine.observe(|| clock.now_ns())));
                 if initialized.send(Ok(())).is_err() {
                     return;
@@ -926,12 +889,18 @@ struct Epoch {
     committed: bool,
     expected_frame: u64,
     sequence: Option<u64>,
+    accepted_real_end: Option<u64>,
     pcm: VecDeque<Pcm>,
     converter: ClockedConverter,
     history: Vec<f32>,
     history_have: Vec<bool>,
     history_primed: bool,
     tail_padded: bool,
+    end_frame: Option<u64>,
+    cutoff: Option<(u64, u64, u64)>,
+    submitted_end: bool,
+    barrier: Option<OutputCursor>,
+    _storage: Option<Reservation>,
     // Only the accepted queue cursor advances this deadline. The queue keeps
     // the exact fractional sample grid, including across epoch handoffs.
     output_frames: u64,
@@ -967,13 +936,75 @@ fn submission_frames(
 }
 
 impl Epoch {
-    fn new(plan: Plan, mapping: ClockMapping, output: RenderFormat) -> Result<Self, &'static str> {
+    fn reserve_storage(
+        plan: &Plan,
+        budget: &Arc<Budget>,
+        output: RenderFormat,
+    ) -> Result<Reservation, &'static str> {
+        // The converter allocates 16,384 interleaved source frames. Its table
+        // is non-PCM; real history, lookahead and the two copied work buffers
+        // are charged simultaneously before any ingress is admitted.
+        let channels = usize::from(output.channels);
+        let source_frames = 16_384
+            + 128
+            + 1024
+            + (2048u64 * u64::from(plan.format.sample_rate)).div_ceil(u64::from(output.sample_rate))
+                as usize;
+        let bytes = (16_384 + 128 + 1024 + 2048) * channels * size_of::<f32>();
+        budget
+            .reserve_pcm(source_frames, plan.format.sample_rate, bytes)
+            .map_err(|_| "receiver conversion storage budget exhausted")
+    }
+
+    fn effective_end(&self) -> Option<u64> {
+        self.end_frame
+            .into_iter()
+            .chain(self.cutoff.map(|(frame, ..)| frame))
+            .min()
+    }
+
+    fn end_boundary(&self, mapping: ClockMapping) -> Result<Option<(u64, u64)>, &'static str> {
+        let natural = self
+            .end_frame
+            .map(|end| {
+                let host = frame_end_time(self.plan.anchor_ns.0, end, self.plan.format.sample_rate)
+                    .ok_or("source end time overflow")?;
+                let local = self
+                    .barrier
+                    .map(|cursor| cursor.time_after(0))
+                    .transpose()
+                    .map_err(|_| "output cursor overflow")?
+                    .or_else(|| mapping.local_time(host))
+                    .ok_or("source end outside local timeline")?;
+                Ok::<_, &'static str>((local, host))
+            })
+            .transpose()?;
+        Ok(natural
+            .into_iter()
+            .chain(self.cutoff.map(|(_, host, local)| (local, host)))
+            .min_by_key(|(local, _)| *local))
+    }
+
+    fn control_cutoff(&mut self, host: u64, local: u64) -> Result<u64, &'static str> {
+        let frame = self.source_end_frame(host)?;
+        if self.cutoff.is_none_or(|(_, old, _)| host < old) {
+            self.cutoff = Some((frame, host, local));
+        }
+        Ok(self.effective_end().unwrap_or(frame))
+    }
+    fn new(
+        plan: Plan,
+        mapping: ClockMapping,
+        output: RenderFormat,
+        budget: &Arc<Budget>,
+    ) -> Result<Self, &'static str> {
         plan.format.validate().map_err(|_| "invalid plan format")?;
         let host_start = frame_time(plan.anchor_ns.0, plan.join_frame.0, plan.format.sample_rate)
             .ok_or("plan time overflow")?;
         let start = mapping
             .local_time(host_start)
             .ok_or("plan start outside local domain")?;
+        let storage = Self::reserve_storage(&plan, budget, output)?;
         let converter = ClockedConverter::new(
             plan.format.sample_rate,
             output.sample_rate,
@@ -991,12 +1022,18 @@ impl Epoch {
             ready: false,
             committed: false,
             sequence: None,
+            accepted_real_end: None,
             pcm: VecDeque::new(),
             converter,
             history: vec![0.0; history_frames * usize::from(output.channels)],
             history_have,
             history_primed: false,
             tail_padded: false,
+            end_frame: None,
+            cutoff: None,
+            submitted_end: false,
+            barrier: None,
+            _storage: Some(storage),
             output_frames: 0,
             next_output_ns: start,
             drain: false,
@@ -1083,13 +1120,16 @@ impl Epoch {
         end_host_ns: u64,
         accepted: Option<OutputCursor>,
     ) -> Result<bool, &'static str> {
-        let source_end = self.source_end_frame(end_host_ns)?;
+        let source_end = match self.effective_end() {
+            Some(end) => end,
+            None => self.source_end_frame(end_host_ns)?,
+        };
         let consumed = self
             .plan
             .join_frame
             .0
             .saturating_add(self.converter.counts().0);
-        let Some(accepted) = accepted.filter(|_| self.output_frames > 0) else {
+        let Some(accepted) = self.barrier.or(accepted) else {
             return Ok(false);
         };
         Ok(self.expected_frame >= source_end
@@ -1105,7 +1145,10 @@ impl Epoch {
     }
 
     fn gate_eof_limit(&self, end_host_ns: u64) -> Result<Option<u64>, &'static str> {
-        let frames = self.source_end_frame(end_host_ns)?;
+        let frames = match self.effective_end() {
+            Some(end) => end,
+            None => self.source_end_frame(end_host_ns)?,
+        };
         if frames == 0 {
             return Ok(None);
         }
@@ -1135,6 +1178,9 @@ impl Epoch {
         if !self.committed {
             return Ok(());
         }
+        if self.submitted_end {
+            return Ok(());
+        }
         let now = snapshot.observed_at;
         let clock_fault_count = snapshot
             .telemetry
@@ -1159,11 +1205,19 @@ impl Epoch {
             .ok_or("relative device/network clock drift is unsupported")?;
         self.converter.set_drift_ppm(combined);
         let channels = usize::from(format.channels);
-        // Only a published Commit/Suspend freezes an EOF. A moving submission
-        // horizon is never permission to synthesize missing source samples.
-        let source_end = end_host_ns
-            .map(|end| self.source_end_frame(end))
-            .transpose()?;
+        // The real EOF and accepted control cutoff are integer source facts.
+        // A moving submission horizon never supplies missing source samples.
+        let source_end = match self.effective_end() {
+            Some(end) => Some(end),
+            None => end_host_ns
+                .map(|end| self.source_end_frame(end))
+                .transpose()?,
+        };
+        let end_local = self
+            .end_boundary(mapping)?
+            .map(|(local, _)| local)
+            .or(end_host_ns.and_then(|host| mapping.local_time(host)));
+        let horizon = end_local.map_or(horizon, |end| horizon.min(end));
         let mut input = Vec::with_capacity(1024 * channels);
         let mut samples = vec![0.0; 2048 * channels];
         // Bound worker work per tick even when ingress is continuously full.
@@ -1176,7 +1230,14 @@ impl Epoch {
                 format.sample_rate,
                 output.telemetry().queued_frames,
             )?;
-            if frames == 0 {
+            // Zero output frames can still consume a complete real tail. The
+            // same cursor decides whether this is a valid quantized endpoint.
+            if frames == 0
+                && (source_end.is_none()
+                    || !end_local.is_some_and(|end| {
+                        cursor.boundary_relation(end) == Ok(std::cmp::Ordering::Equal)
+                    }))
+            {
                 break;
             }
             input.clear();
@@ -1266,9 +1327,40 @@ impl Epoch {
                     .checked_add(progress.produced_frames as u64)
                     .ok_or("output frame counter overflow")?;
                 self.next_output_ns = cursor.time_after(0).map_err(|error| error.to_string())?;
+                // Publish a future run before replacing the predecessor's idle
+                // fence. A zero-frame successor keeps that fence, so the old
+                // EOF-to-new-anchor gap never becomes an empty-queue underrun.
+                let idle = end_local
+                    .map(|end| cursor.advanced(cursor.frames_until(end)?)?.time_after(0))
+                    .transpose()
+                    .map_err(|error| error.to_string())?;
+                output.silence_from(
+                    idle.into_iter()
+                        .chain(silence_from)
+                        .min()
+                        .unwrap_or(u64::MAX),
+                );
             }
             if progress.produced_frames == 0 && input.is_empty() {
                 break;
+            }
+        }
+        if source_end.is_some_and(|end| {
+            self.expected_frame >= end
+                && self
+                    .plan
+                    .join_frame
+                    .0
+                    .saturating_add(self.converter.counts().0)
+                    >= end
+        }) && end_local
+            .is_some_and(|end| cursor.boundary_relation(end) == Ok(std::cmp::Ordering::Equal))
+        {
+            self.submitted_end = true;
+            self.barrier = Some(cursor);
+            self.pcm.clear();
+            if self.output_frames > 0 {
+                output.silence_from(cursor.time_after(0).map_err(|error| error.to_string())?);
             }
         }
         Ok(())
@@ -1280,6 +1372,15 @@ fn frame_time(anchor: u64, frame: u64, rate: u32) -> Option<u64> {
         return None;
     }
     anchor.checked_add(u64::try_from(u128::from(frame) * 1_000_000_000 / u128::from(rate)).ok()?)
+}
+
+fn frame_end_time(anchor: u64, frame: u64, rate: u32) -> Option<u64> {
+    if rate == 0 {
+        return None;
+    }
+    anchor.checked_add(
+        u64::try_from((u128::from(frame) * 1_000_000_000).div_ceil(u128::from(rate))).ok()?,
+    )
 }
 
 fn relative_drift_ppm(host: f64, device: f64) -> Option<f64> {
@@ -1303,12 +1404,16 @@ struct Engine<D: DeviceOutput> {
     identity: StreamIdentity,
     budget: Arc<Budget>,
     connected: bool,
+    native: bool,
+    _output_storage: Option<Reservation>,
     mapping: Option<ClockMapping>,
     gate: ReceiverGate,
     current: Option<Epoch>,
     preparing: Option<Epoch>,
+    rejected_preparing: Option<u64>,
     intent: Option<Plan>,
     suspension: Option<(u64, u64, u64, u64)>,
+    suspension_old_only: bool,
     faults: u64,
     last_resync_reason: Option<String>,
     /// Applied epochs never move backwards, while per-endpoint rejoin tokens
@@ -1316,6 +1421,7 @@ struct Engine<D: DeviceOutput> {
     epoch_floor: u64,
     latest_plan_id: Option<u64>,
     contracts: VecDeque<(u64, u64, AudioFormat, u64, Option<u64>)>,
+    ends: VecDeque<(u64, u32, u64)>,
     unmatched: VecDeque<(u64, Pcm)>,
     volume: f32,
     last_error: Option<String>,
@@ -1331,19 +1437,153 @@ struct Engine<D: DeviceOutput> {
 }
 
 impl<D: DeviceOutput> Engine<D> {
+    fn reserve_output_storage(&mut self) -> Result<(), &'static str> {
+        let output = self.output.as_ref().ok_or("receiver output missing")?;
+        let format = output.format();
+        let bytes =
+            output.telemetry().capacity_frames * usize::from(format.channels) * size_of::<f32>();
+        // The submission horizon is at most 500ms lead + 100ms lookahead.
+        // Charge all allocated sample slots, including currently empty slots.
+        // Periods down to 99% of nominal are accepted by ScheduledOutput.
+        // Include the fastest allowed grid and one midpoint frame of slack.
+        let frames = (u64::from(format.sample_rate) * 600_000_000 * 100)
+            .div_ceil(1_000_000_000 * 99) as usize
+            + 1;
+        self._output_storage = Some(
+            self.budget
+                .reserve_pcm(frames, format.sample_rate, bytes)
+                .map_err(|_| "receiver device PCM storage budget exhausted")?,
+        );
+        Ok(())
+    }
+
+    fn epoch_end(
+        &mut self,
+        snapshot: OutputSnapshot,
+        epoch: u64,
+        format_id: u32,
+        end_frame: u64,
+        events: &mut Vec<ReceiverEvent>,
+    ) {
+        if !self.native {
+            self.fail("epoch_end requires native room mode", events);
+            return;
+        }
+        let active = [&self.current, &self.preparing]
+            .into_iter()
+            .flatten()
+            .find(|p| p.plan.epoch.0 == epoch);
+        // A declaration survives conversion-storage rejection. Its PCM has
+        // no admitted owner, but the host can still send this epoch's EOF.
+        // Validate that metadata against the same retained contract without
+        // allocating a converter or authorizing presentation.
+        let declared = active
+            .map(|p| (p.plan.anchor_ns.0, p.plan.format, p.accepted_real_end))
+            .or_else(|| {
+                self.contracts
+                    .iter()
+                    .find(|(old, ..)| self.rejected_preparing == Some(epoch) && *old == epoch)
+                    .map(|(_, anchor, format, ..)| (*anchor, *format, None))
+            });
+        let Some((anchor, format, accepted_real_end)) = declared else {
+            if epoch < self.epoch_floor || self.ends.iter().any(|(old, ..)| *old == epoch) {
+                return;
+            }
+            self.fail("epoch_end for undeclared epoch", events);
+            return;
+        };
+        if format_id != format.id
+            || self.ends.iter().any(|(old, format, end)| {
+                *old == epoch && (*format != format_id || *end != end_frame)
+            })
+            || accepted_real_end.is_some_and(|accepted| end_frame < accepted)
+            || frame_end_time(anchor, end_frame, format.sample_rate).is_none()
+        {
+            self.fail("conflicting epoch_end or accepted PCM beyond end", events);
+            return;
+        }
+        if !self.ends.iter().any(|(old, ..)| *old == epoch) {
+            self.ends.push_back((epoch, format_id, end_frame));
+            while self.ends.len() > 2 {
+                let current = self.current.as_ref().map(|old| old.plan.epoch.0);
+                let preparing = self.preparing.as_ref().map(|old| old.plan.epoch.0);
+                let retired = self
+                    .ends
+                    .iter()
+                    .position(|(old, ..)| {
+                        Some(*old) != current
+                            && Some(*old) != preparing
+                            && Some(*old) != self.rejected_preparing
+                    })
+                    .unwrap_or(0);
+                self.ends.remove(retired);
+            }
+        }
+        let slot = if self
+            .current
+            .as_ref()
+            .is_some_and(|p| p.plan.epoch.0 == epoch)
+        {
+            self.current.as_mut()
+        } else {
+            self.preparing.as_mut().filter(|p| p.plan.epoch.0 == epoch)
+        };
+        let Some(slot) = slot else {
+            return;
+        };
+        slot.end_frame = Some(end_frame);
+        if slot.ready {
+            let actions = self.gate.input(
+                snapshot.observed_at,
+                GateInput::EpochEnd {
+                    session: GATE_SESSION,
+                    epoch,
+                    format_id,
+                    end_frame,
+                },
+            );
+            if actions
+                .iter()
+                .any(|a| matches!(a, GateAction::InvalidEnd { .. }))
+            {
+                self.fail("receiver gate rejected epoch_end", events);
+                return;
+            }
+        }
+        self.ready(snapshot, events);
+    }
+
+    fn freeze_cutoff(&mut self, host: u64, local: u64, events: &mut Vec<ReceiverEvent>) -> bool {
+        let Some(old) = self.current.as_mut() else {
+            return true;
+        };
+        match old.control_cutoff(host, local) {
+            Ok(end_frame) => {
+                self.gate.input(
+                    0,
+                    GateInput::Cutoff {
+                        session: GATE_SESSION,
+                        epoch: old.plan.epoch.0,
+                        end_frame,
+                    },
+                );
+                true
+            }
+            Err(reason) => {
+                self.fail(reason, events);
+                false
+            }
+        }
+    }
     fn publish_budget_formats(&self) {
-        *self
-            .budget
-            .formats
-            .lock()
-            .unwrap_or_else(|error| error.into_inner()) = [
+        self.budget.publish_formats([
             self.current
                 .as_ref()
                 .map(|epoch| (epoch.plan.epoch.0, epoch.plan.format)),
             self.preparing
                 .as_ref()
                 .map(|epoch| (epoch.plan.epoch.0, epoch.plan.format)),
-        ];
+        ]);
     }
     fn bounded_gate_time(&self, host_now: u64) -> Result<Option<u64>, &'static str> {
         // Metadata time cannot retire the device owner before its successor's
@@ -1353,7 +1593,7 @@ impl<D: DeviceOutput> Engine<D> {
         let host_now = if let Some(next) = self
             .preparing
             .as_ref()
-            .filter(|next| next.committed && next.output_frames == 0)
+            .filter(|next| next.committed && next.output_frames == 0 && !next.submitted_end)
         {
             let start = frame_time(
                 next.plan.anchor_ns.0,
@@ -1376,9 +1616,10 @@ impl<D: DeviceOutput> Engine<D> {
         } else {
             host_now
         };
-        let Some((_, _, _, stop)) = self.suspension else {
-            return Ok(Some(host_now));
-        };
+        let stop = self
+            .suspension
+            .filter(|_| !self.suspension_old_only)
+            .map(|(_, _, _, stop)| stop);
         // ReceiverGate applies a due committed preparation before presenting
         // frames, so select the epoch it will use on this exact advance.
         let next = self.preparing.as_ref().filter(|p| {
@@ -1393,7 +1634,16 @@ impl<D: DeviceOutput> Engine<D> {
         let Some(epoch) = next.or(self.current.as_ref()) else {
             return Ok(Some(host_now));
         };
-        Ok(epoch.gate_eof_limit(stop)?.map(|limit| host_now.min(limit)))
+        let end = epoch
+            .effective_end()
+            .and_then(|end| {
+                frame_end_time(epoch.plan.anchor_ns.0, end, epoch.plan.format.sample_rate)
+            })
+            .or(stop);
+        match end {
+            Some(end) => Ok(epoch.gate_eof_limit(end)?.map(|limit| host_now.min(limit))),
+            None => Ok(Some(host_now)),
+        }
     }
     fn new(mut output: D, identity: StreamIdentity, budget: Arc<Budget>) -> Self {
         output.mute();
@@ -1410,17 +1660,22 @@ impl<D: DeviceOutput> Engine<D> {
             identity,
             budget,
             connected: true,
+            native: false,
+            _output_storage: None,
             mapping: None,
             gate,
             current: None,
             preparing: None,
+            rejected_preparing: None,
             intent: None,
             suspension: None,
+            suspension_old_only: false,
             faults: 0,
             last_resync_reason: None,
             epoch_floor: 0,
             latest_plan_id: None,
             contracts: VecDeque::new(),
+            ends: VecDeque::new(),
             unmatched: VecDeque::new(),
             volume: 1.0,
             last_error: None,
@@ -1442,8 +1697,10 @@ impl<D: DeviceOutput> Engine<D> {
         self.current = None;
         self.test_until = None;
         self.preparing = None;
+        self.rejected_preparing = None;
         self.intent = None;
         self.suspension = None;
+        self.suspension_old_only = false;
         self.unmatched.clear();
         self.publish_budget_formats();
         self.gate.input(
@@ -1686,6 +1943,11 @@ impl<D: DeviceOutput> Engine<D> {
                 plan_id,
                 effective_at,
             } if self.connected && identity == self.identity => {
+                // This epoch never acquired presentation ownership. Its
+                // control messages cannot suspend the admitted predecessor.
+                if self.rejected_preparing == Some(epoch) {
+                    return;
+                }
                 if let Some((e, p, _, h)) = self.suspension {
                     if e != epoch || p != plan_id || h != effective_at {
                         self.fail("immutable pending suspension changed", events);
@@ -1699,24 +1961,85 @@ impl<D: DeviceOutput> Engine<D> {
                     .mapping
                     .filter(|m| m.valid_at(now))
                     .and_then(|m| m.local_time(effective_at));
-                if !self.output_ready(snapshot)
-                    || local.is_none_or(|local| now.saturating_add(self.lead(snapshot)) >= local)
-                    || self
+                let old_only = self
+                    .current
+                    .as_ref()
+                    .is_some_and(|old| old.plan.epoch.0 == epoch)
+                    && self
                         .preparing
                         .as_ref()
-                        .is_some_and(|p| p.committed && local.is_some_and(|local| local <= p.start))
+                        .is_some_and(|next| next.committed && next.plan.epoch.0 != epoch);
+                if !self.output_ready(snapshot)
+                    || local.is_none_or(|local| now.saturating_add(self.lead(snapshot)) >= local)
+                    || self.preparing.as_ref().is_some_and(|p| {
+                        !old_only && p.committed && local.is_some_and(|local| local <= p.start)
+                    })
                 {
                     self.fail("suspension missed its presentation deadline", events);
                     return;
                 }
                 self.latest_plan_id = Some(plan_id);
+                if !self.freeze_cutoff(effective_at, local.unwrap(), events) {
+                    return;
+                }
+                if !old_only {
+                    if let Some(next) = self.preparing.as_mut().filter(|next| next.committed) {
+                        match next.control_cutoff(effective_at, local.unwrap()) {
+                            Ok(end_frame) => {
+                                self.gate.input(
+                                    0,
+                                    GateInput::Cutoff {
+                                        session: GATE_SESSION,
+                                        epoch: next.plan.epoch.0,
+                                        end_frame,
+                                    },
+                                );
+                            }
+                            Err(reason) => {
+                                self.fail(reason, events);
+                                return;
+                            }
+                        }
+                    }
+                }
+                self.suspension_old_only = old_only;
                 self.suspension = Some((epoch, plan_id, local.unwrap(), effective_at));
-                if let Some(output) = self.output.as_mut() {
-                    output.silence_from(local.unwrap());
+                let owner = self
+                    .preparing
+                    .as_ref()
+                    .filter(|next| next.output_frames > 0)
+                    .or(self.current.as_ref());
+                let fence = owner
+                    .and_then(|owner| {
+                        self.mapping.and_then(|mapping| {
+                            owner
+                                .end_boundary(mapping)
+                                .ok()
+                                .flatten()
+                                .map(|(local, _)| local)
+                        })
+                    })
+                    .map_or(local.unwrap(), |end| end.min(local.unwrap()));
+                if let Some(output) = self.output.as_mut().filter(|_| {
+                    !old_only
+                        || self
+                            .preparing
+                            .as_ref()
+                            .is_none_or(|next| next.output_frames == 0)
+                }) {
+                    output.silence_from(fence);
                 }
             }
             Command::Pcm(pcm) if self.connected && pcm.block.identity == self.identity => {
                 self.pcm(snapshot, pcm, events)
+            }
+            Command::EpochEnd {
+                identity,
+                epoch,
+                format_id,
+                end_frame,
+            } if self.connected && identity == self.identity => {
+                self.epoch_end(snapshot, epoch, format_id, end_frame, events);
             }
             Command::Pcm(_) => self.discarded += 1,
             _ => {}
@@ -1842,13 +2165,24 @@ impl<D: DeviceOutput> Engine<D> {
         let Some(output) = &self.output else {
             return;
         };
-        match Epoch::new(plan, mapping, output.format()) {
-            Ok(epoch)
+        // A superseded, uncommitted preparation releases its PCM before a
+        // replacement allocates. The current authorized tail keeps priority.
+        self.preparing.take();
+        let preparing_epoch = plan.epoch.0;
+        match Epoch::new(plan, mapping, output.format(), &self.budget) {
+            Ok(mut epoch)
                 if epoch.start > now.saturating_add(self.lead(snapshot))
                     && epoch.start <= now.saturating_add(3_000_000_000) =>
             {
-                self.preparing.take();
+                epoch.end_frame = self
+                    .ends
+                    .iter()
+                    .find(|(old, format, ..)| {
+                        *old == epoch.plan.epoch.0 && *format == epoch.plan.format.id
+                    })
+                    .map(|(_, _, end)| *end);
                 self.preparing = Some(epoch);
+                self.rejected_preparing = None;
                 let unmatched = std::mem::take(&mut self.unmatched);
                 for (arrived, pcm) in unmatched {
                     if now.saturating_sub(arrived) <= 500_000_000 {
@@ -1861,6 +2195,13 @@ impl<D: DeviceOutput> Engine<D> {
                 self.ready(snapshot, events);
             }
             Ok(_) => self.fail("prepared join is past device submission deadline", events),
+            Err("receiver conversion storage budget exhausted") => {
+                self.rejected_preparing = Some(preparing_epoch);
+                self.last_error = Some("receiver conversion storage budget exhausted".into());
+                // Withhold Ready and retain the authorized old tail. A Resync
+                // would make the host stop forwarding that tail; its existing
+                // candidate deadline decides whether this endpoint can join.
+            }
             Err(reason) => self.fail(reason, events),
         }
     }
@@ -1878,8 +2219,14 @@ impl<D: DeviceOutput> Engine<D> {
         let Some(epoch) = self.preparing.as_mut().filter(|p| !p.ready) else {
             return;
         };
-        let required = u64::from(epoch.plan.format.sample_rate).div_ceil(50)
+        let mut required = u64::from(epoch.plan.format.sample_rate).div_ceil(50)
             + epoch.converter.lookahead_frames();
+        if let Some(end) = epoch.end_frame {
+            if epoch.plan.join_frame.0 >= end {
+                return;
+            }
+            required = required.min(end - epoch.plan.join_frame.0);
+        }
         if epoch.expected_frame.saturating_sub(epoch.plan.join_frame.0) < required {
             return;
         }
@@ -1908,6 +2255,24 @@ impl<D: DeviceOutput> Engine<D> {
                 },
             },
         );
+        if let Some(end_frame) = epoch.end_frame {
+            let actions = self.gate.input(
+                gate_now,
+                GateInput::EpochEnd {
+                    session: GATE_SESSION,
+                    epoch: plan.epoch.0,
+                    format_id: plan.format.id,
+                    end_frame,
+                },
+            );
+            if actions
+                .iter()
+                .any(|a| matches!(a, GateAction::InvalidEnd { .. }))
+            {
+                self.fail("receiver gate rejected finite readiness", events);
+                return;
+            }
+        }
         let actions = self.gate.input(
             gate_now,
             GateInput::Plan {
@@ -2006,6 +2371,7 @@ impl<D: DeviceOutput> Engine<D> {
             return;
         }
         self.preparing.as_mut().unwrap().committed = true;
+        self.freeze_cutoff(effective_at, local, events);
     }
 
     fn pcm(&mut self, snapshot: OutputSnapshot, mut pcm: Pcm, events: &mut Vec<ReceiverEvent>) {
@@ -2024,6 +2390,10 @@ impl<D: DeviceOutput> Engine<D> {
             }
         };
         let block = &pcm.block;
+        if self.rejected_preparing == Some(block.epoch) {
+            self.discarded += 1;
+            return;
+        }
         let previous_sequence = self
             .contracts
             .iter()
@@ -2064,6 +2434,10 @@ impl<D: DeviceOutput> Engine<D> {
             }
             return;
         };
+        if epoch.end_frame.is_some_and(|end| block.end_frame() > end) {
+            self.fail("PCM exceeds immutable epoch_end", events);
+            return;
+        }
         if block.format_id != epoch.plan.format.id || block.channels != epoch.plan.format.channels {
             self.discarded += 1;
             return;
@@ -2080,6 +2454,11 @@ impl<D: DeviceOutput> Engine<D> {
         // Historical packets advance the wire highwater but never establish
         // the post-join contiguous sequence cursor or consume a PCM slot.
         let join = epoch.plan.join_frame.0;
+        epoch.accepted_real_end = Some(
+            epoch
+                .accepted_real_end
+                .map_or(block.end_frame(), |old| old.max(block.end_frame())),
+        );
         epoch.collect_history(block);
         if block.end_frame() <= join {
             if let Some((_, _, _, _, high)) = self
@@ -2191,7 +2570,7 @@ impl<D: DeviceOutput> Engine<D> {
             if self
                 .preparing
                 .as_ref()
-                .is_none_or(|next| next.output_frames == 0)
+                .is_none_or(|next| next.output_frames == 0 && !next.submitted_end)
             {
                 self.fail("device handoff has no accepted successor PCM", events);
                 return false;
@@ -2226,7 +2605,29 @@ impl<D: DeviceOutput> Engine<D> {
                 return;
             }
         }
-        if self.suspension.is_some_and(|(_, _, local, _)| now >= local) {
+        if self.suspension_old_only && self.suspension.is_some_and(|(_, _, local, _)| now >= local)
+        {
+            if self.current.as_ref().is_some_and(|old| !old.submitted_end) {
+                self.fail(
+                    "old suspension cutoff tail missed its presentation deadline",
+                    events,
+                );
+                return;
+            }
+            let (epoch, _, _, _) = self.suspension.take().unwrap();
+            self.suspension_old_only = false;
+            if self
+                .current
+                .as_ref()
+                .is_some_and(|old| old.plan.epoch.0 == epoch)
+            {
+                if let Some(old) = self.current.take() {
+                    self.played_frame = old.effective_end().unwrap_or(old.plan.join_frame.0);
+                }
+            }
+            self.epoch_floor = self.epoch_floor.max(epoch);
+            self.publish_budget_formats();
+        } else if self.suspension.is_some_and(|(_, _, local, _)| now >= local) {
             let (epoch, _, _, _) = self.suspension.take().unwrap();
             let intent = self.intent.take();
             if let Some(output) = self.output.as_mut() {
@@ -2308,9 +2709,17 @@ impl<D: DeviceOutput> Engine<D> {
             && (telemetry.underrun_frames > self.previous_underrun
                 || telemetry.late_frames > self.previous_late)
         {
+            let reason = format!(
+                "device queue underrun; fresh future join required (underrun_frames={}, previous_underrun={}, late_frames={}, previous_late={}, queued_frames={})",
+                telemetry.underrun_frames,
+                self.previous_underrun,
+                telemetry.late_frames,
+                self.previous_late,
+                telemetry.queued_frames,
+            );
             self.previous_underrun = telemetry.underrun_frames;
             self.previous_late = telemetry.late_frames;
-            self.fail("device queue underrun; fresh future join required", events);
+            self.fail(&reason, events);
             return;
         }
         self.previous_underrun = telemetry.underrun_frames;
@@ -2361,14 +2770,17 @@ impl<D: DeviceOutput> Engine<D> {
         let boundary = stop.map_or(u64::MAX, |(local, _)| local);
         let presentation_deadline = now.saturating_add(self.device_lead(snapshot).unwrap_or(0));
         let output = self.output.as_mut().unwrap();
-        let silence_from = self.suspension.map(|(_, _, local, _)| local);
+        let silence_from = self
+            .suspension
+            .filter(|_| !self.suspension_old_only)
+            .map(|(_, _, local, _)| local);
         // Once the successor has published PCM, it owns the append-only device
         // grid. The predecessor's complete queued tail remains playable, but it
         // cannot append more samples after the successor's accepted first frame.
         let successor_has_pcm = self
             .preparing
             .as_ref()
-            .is_some_and(|epoch| epoch.output_frames > 0);
+            .is_some_and(|epoch| epoch.output_frames > 0 || epoch.submitted_end);
         let result = (|| {
             if let Some(current) = self.current.as_mut() {
                 if !successor_has_pcm {
@@ -2385,13 +2797,32 @@ impl<D: DeviceOutput> Engine<D> {
                     let frames = output.telemetry().played_frames.saturating_sub(baseline);
                     self.played_frame = current.played_frame(frames.min(current.output_frames));
                 }
+                if current.submitted_end
+                    && current
+                        .end_boundary(mapping)?
+                        .is_some_and(|(local, _)| now >= local)
+                    && current.played_baseline.is_none_or(|baseline| {
+                        output.telemetry().played_frames.saturating_sub(baseline)
+                            >= current.output_frames
+                    })
+                {
+                    self.played_frame =
+                        current.effective_end().unwrap_or(current.plan.join_frame.0);
+                }
             }
             if let Some(preparing) = self.preparing.as_mut() {
                 // A positive queue gap is intentional silence to the callback.
                 // Do not let a successor turn a missing real predecessor tail
                 // into such a gap. Bounded conversion may continue next tick;
                 // missing source still fails through the source/underrun gates.
-                let predecessor_complete = match (self.current.as_ref(), stop) {
+                let old_boundary = self
+                    .current
+                    .as_ref()
+                    .map(|old| old.end_boundary(mapping))
+                    .transpose()?
+                    .flatten()
+                    .or(stop);
+                let predecessor_complete = match (self.current.as_ref(), old_boundary) {
                     (Some(current), Some((local, host))) => {
                         current.handoff_complete(local, host, output.scheduled_cursor())?
                     }
@@ -2404,12 +2835,15 @@ impl<D: DeviceOutput> Engine<D> {
                         mapping,
                         snapshot,
                         horizon.min(silence_from.unwrap_or(u64::MAX)),
-                        self.suspension.map(|(_, _, _, host)| host),
+                        self.suspension
+                            .filter(|_| !self.suspension_old_only)
+                            .map(|(_, _, _, host)| host),
                         silence_from,
                     )?;
                 }
                 if preparing.committed
                     && preparing.output_frames == 0
+                    && !preparing.submitted_end
                     && presentation_deadline >= preparing.start
                 {
                     return Err("device handoff missed its presentation submission deadline".into());
@@ -2428,7 +2862,7 @@ impl<D: DeviceOutput> Engine<D> {
             && self
                 .preparing
                 .as_ref()
-                .is_some_and(|next| next.output_frames > 0)
+                .is_some_and(|next| next.output_frames > 0 || next.submitted_end)
         {
             // The first native receipt releases the metadata boundary in this
             // same tick. Earlier metadata advancement never discarded its old
@@ -2448,7 +2882,7 @@ impl<D: DeviceOutput> Engine<D> {
             network_clock: self.mapping,
             output,
             binding: self.output.as_ref().and_then(|output| output.binding()),
-            buffered_input_frames: self.budget.frames.load(Ordering::Acquire),
+            buffered_input_frames: self.budget.input_frames(),
             played_frame: self.played_frame,
             underrun_frames: output.map_or(0, |o| o.underrun_frames),
             discarded_blocks: self.discarded,
@@ -2503,7 +2937,7 @@ mod registry_tests {
                 generation: Arc::new(AtomicU64::new(0)),
                 emergency: emergency.clone(),
                 disconnected: Arc::new(AtomicBool::new(false)),
-                budget: Arc::new(Budget::default()),
+                budget: Budget::endpoint(),
                 status,
                 done,
                 _lease: Arc::new(Lease {

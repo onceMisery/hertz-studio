@@ -7,7 +7,39 @@ use uuid::Uuid;
 pub const VERSION: u16 = 3;
 pub const MAX_MESSAGE: usize = 65_536;
 pub const PCM_HEADER: usize = 96;
-pub const CAPABILITIES: &[&str] = &["pcm_f32le", "plan_commit", "clock_v1"];
+pub const CAPABILITIES: &[&str] = &["pcm_f32le", "plan_commit", "clock_v1", "native_rate_v1"];
+const FIXED_REQUIRED_CAPABILITIES: &[&str] = &["pcm_f32le", "plan_commit", "clock_v1"];
+const NATIVE_REQUIRED_CAPABILITIES: &[&str] =
+    &["pcm_f32le", "plan_commit", "clock_v1", "native_rate_v1"];
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FormatMode {
+    #[default]
+    Fixed,
+    Native,
+}
+
+pub fn required_capabilities(mode: FormatMode) -> &'static [&'static str] {
+    match mode {
+        FormatMode::Fixed => FIXED_REQUIRED_CAPABILITIES,
+        FormatMode::Native => NATIVE_REQUIRED_CAPABILITIES,
+    }
+}
+
+pub fn validate_capabilities(capabilities: &[String]) -> Result<(), ProtocolError> {
+    if capabilities.len() > 16
+        || capabilities.iter().enumerate().any(|(index, capability)| {
+            capability.is_empty()
+                || capability.len() > 64
+                || !capability.is_ascii()
+                || capabilities[..index].contains(capability)
+        })
+    {
+        return Err(ProtocolError::Control);
+    }
+    Ok(())
+}
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum ProtocolError {
@@ -228,6 +260,10 @@ pub enum ControlFrame {
         identity: StreamIdentity,
         required: Vec<String>,
     },
+    CapabilityAck {
+        supported: Vec<String>,
+    },
+    CapabilityConfirmed {},
     TimeRequest {
         sequence: Counter,
         t1: Counter,
@@ -257,6 +293,12 @@ pub enum ControlFrame {
         plan_id: Counter,
         effective_at: Counter,
     },
+    /// Exclusive, immutable endpoint in this epoch's room PCM frame domain.
+    EpochEnd {
+        epoch: Counter,
+        format_id: u32,
+        end_frame: Counter,
+    },
     Heartbeat {
         output_ready: bool,
         played_frame: Counter,
@@ -284,6 +326,7 @@ pub enum ControlFrame {
 }
 impl ControlFrame {
     pub fn encode(&self) -> Result<String, ProtocolError> {
+        self.validate()?;
         let text = serde_json::to_string(self).map_err(|_| ProtocolError::Control)?;
         if text.len() > MAX_MESSAGE {
             return Err(ProtocolError::Control);
@@ -295,21 +338,29 @@ impl ControlFrame {
             return Err(ProtocolError::Control);
         }
         let frame: Self = serde_json::from_str(text).map_err(|_| ProtocolError::Control)?;
+        frame.validate()?;
+        Ok(frame)
+    }
+    fn validate(&self) -> Result<(), ProtocolError> {
         if let Self::Hello {
             version, required, ..
-        } = &frame
+        } = self
         {
-            if *version != VERSION
-                || required.len() > 16
-                || required.iter().any(|c| !CAPABILITIES.contains(&c.as_str()))
-            {
+            validate_capabilities(required)?;
+            if *version != VERSION || required.iter().any(|c| !CAPABILITIES.contains(&c.as_str())) {
                 return Err(ProtocolError::Version);
             }
         }
-        if let Self::Prepare { plan } = &frame {
+        if let Self::CapabilityAck { supported } = self {
+            validate_capabilities(supported)?;
+        }
+        if let Self::Prepare { plan } = self {
             plan.format.validate()?;
         }
-        Ok(frame)
+        if matches!(self, Self::EpochEnd { format_id: 0, .. }) {
+            return Err(ProtocolError::Control);
+        }
+        Ok(())
     }
 }
 
@@ -322,6 +373,87 @@ mod tests {
             instance_id: Uuid::new_v4(),
             session_id: Uuid::new_v4(),
         }
+    }
+    #[test]
+    fn fixed_and_native_capabilities_keep_wire_compatibility_explicit() {
+        assert_eq!(FormatMode::default(), FormatMode::Fixed);
+        assert_eq!(
+            serde_json::to_string(&FormatMode::Native).unwrap(),
+            "\"native\""
+        );
+        assert_eq!(
+            required_capabilities(FormatMode::Fixed),
+            &["pcm_f32le", "plan_commit", "clock_v1"]
+        );
+        assert!(required_capabilities(FormatMode::Native).contains(&"native_rate_v1"));
+        let hello = ControlFrame::Hello {
+            version: VERSION,
+            identity: identity(),
+            required: required_capabilities(FormatMode::Fixed)
+                .iter()
+                .map(|c| c.to_string())
+                .collect(),
+        };
+        let value: serde_json::Value = serde_json::from_str(&hello.encode().unwrap()).unwrap();
+        assert_eq!(value.as_object().unwrap().len(), 4);
+        let plan = Plan {
+            epoch: Counter(1),
+            plan_id: Counter(2),
+            anchor_ns: Counter(3),
+            join_frame: Counter(4),
+            format: AudioFormat {
+                id: 1,
+                sample_rate: 48_000,
+                channels: 2,
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(plan)
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .len(),
+            5
+        );
+        let end = ControlFrame::EpochEnd {
+            epoch: Counter(u64::MAX),
+            format_id: 9,
+            end_frame: Counter(u64::MAX - 1),
+        };
+        assert!(
+            matches!(ControlFrame::decode(&end.encode().unwrap()).unwrap(), ControlFrame::EpochEnd { epoch: Counter(u64::MAX), format_id: 9, end_frame: Counter(e) } if e == u64::MAX - 1)
+        );
+        assert!(ControlFrame::decode(
+            "{\"type\":\"epoch_end\",\"epoch\":\"1\",\"format_id\":0,\"end_frame\":\"1\"}"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn capability_bounds_duplicates_and_unknown_optional_names() {
+        let legal = ControlFrame::CapabilityAck {
+            supported: vec!["unknown_optional".into()],
+        };
+        assert!(ControlFrame::decode(&legal.encode().unwrap()).is_ok());
+        for supported in [
+            vec!["same".into(), "same".into()],
+            vec!["".into()],
+            vec!["x".repeat(65)],
+            vec!["非ASCII".into()],
+            (0..17).map(|n| n.to_string()).collect(),
+        ] {
+            let wire = serde_json::json!({"type":"capability_ack","supported":supported});
+            assert!(ControlFrame::decode(&wire.to_string()).is_err());
+        }
+        let unsupported = serde_json::json!({"type":"hello","version":VERSION,"identity":identity(),"required":["unknown_optional"]});
+        assert_eq!(
+            ControlFrame::decode(&unsupported.to_string()).unwrap_err(),
+            ProtocolError::Version
+        );
+        assert_eq!(
+            ControlFrame::CapabilityConfirmed {}.encode().unwrap(),
+            "{\"type\":\"capability_confirmed\"}"
+        );
     }
     fn block() -> PcmBlock {
         PcmBlock {

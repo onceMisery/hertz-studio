@@ -335,6 +335,7 @@ function makeStageSandbox() {
       return null;
     },
     createElement: (tag) => makeEl(tag),
+    createElementNS: (_namespace, tag) => makeEl(tag),
     createDocumentFragment: () => makeEl('fragment'),
     handlers: {},
     addEventListener(type, fn) { (this.handlers[type] = this.handlers[type] || []).push(fn); },
@@ -594,7 +595,9 @@ for (const k of ['lyrics', 'coastInteract', 'zodiacField', 'zodiacInteract', 'an
 
 // —— 控件语言：新样式要有规则，旧样式不留残骸 ——
 ok(/\.sc-pill\s*\{/.test(stageCss), '.sc-pill 有样式定义');
-ok(/\.sc-pill\.on\s*\{[\s\S]{0,300}?--accent/.test(stageCss), '.sc-pill ON 态走 accent（一眼可读）');
+ok(/\.sc-pill\.on \.dot\s*\{[^}]*--switch-on-track/.test(stageCss)
+  && /\.sc-pill\.on \.dot::after\s*\{[^}]*--switch-icon-on/.test(stageCss),
+  '.sc-pill ON 态复用开关色与对勾标记（一眼可读）');
 ok(/\.sc-seg-btn\.is-on\s*\{[\s\S]{0,300}?--accent/.test(stageCss), '.sc-seg-btn 当前段走 accent');
 ok(/\.sc-seg-btn\.is-on\s*\{[\s\S]{0,300}?--accent/.test(stageCss), '来源分段与布局分段共用同一套高亮');
 ok(!/\.sc-switch\b/.test(stageCss) && !/'sc-switch'|"sc-switch"/.test(controlSrc),

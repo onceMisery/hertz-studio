@@ -166,11 +166,7 @@ fn plan(epoch: u64, id: u64, anchor: u64, join: u64) -> Plan {
 }
 
 fn engine() -> Engine<FakeOutput> {
-    let mut engine = Engine::new(
-        FakeOutput::new(48_000),
-        identity(),
-        Arc::new(Budget::default()),
-    );
+    let mut engine = Engine::new(FakeOutput::new(48_000), identity(), Budget::endpoint());
     engine.command(
         engine.observe(|| 0),
         Command::Mapping(mapping(0, 0.0)),
@@ -429,7 +425,11 @@ fn pcm(engine: &Engine<FakeOutput>, epoch: u64, sequence: u64, frame: u64, frame
         samples: vec![0.5; frames].into(),
     };
     validate_block(&block).unwrap();
-    let reservation = Reservation::acquire(&engine.budget, &block).unwrap();
+    let reservation = engine
+        .budget
+        .reserve_input(&block)
+        .map_err(|_| ReceiverError::Capacity)
+        .unwrap();
     Pcm {
         block,
         offset_frames: 0,
@@ -665,7 +665,7 @@ fn gap_mutes_clears_and_requires_a_new_monotonic_join_token() {
     assert!(matches!(events.as_slice(), [ReceiverEvent::Resync { .. }]));
     assert!(engine.output.as_ref().unwrap().telemetry().muted);
     assert_eq!(engine.output.as_ref().unwrap().telemetry().queued_frames, 0);
-    assert_eq!(engine.budget.frames.load(Ordering::Acquire), 0);
+    assert_eq!(engine.budget.input_frames(), 0);
     prepare(&mut engine, original);
     assert!(engine.preparing.is_none(), "old plan cannot revive");
     // Same media epoch, immutable anchor/format, increasing future join.
@@ -849,7 +849,7 @@ fn commit_cannot_move_the_plan_boundary_and_third_epoch_has_no_pcm() {
     assert_eq!(engine.intent.as_ref().unwrap().epoch.0, 2);
     assert_eq!(engine.preparing.as_ref().unwrap().plan.epoch.0, 1);
     assert!(engine.unmatched.is_empty());
-    assert_eq!(engine.budget.frames.load(Ordering::Acquire), 0);
+    assert_eq!(engine.budget.input_frames(), 0);
 }
 
 #[test]
@@ -869,21 +869,24 @@ fn input_budget_includes_pending_commands_and_releases_on_drop() {
         samples: vec![0.0; 16_000].into(),
     };
     assert!(matches!(
-        Reservation::acquire(&engine.budget, &block),
+        engine
+            .budget
+            .reserve_input(&block)
+            .map_err(|_| ReceiverError::Capacity),
         Err(ReceiverError::Capacity)
     ));
-    assert_eq!(engine.budget.frames.load(Ordering::Acquire), 48_000);
+    assert_eq!(engine.budget.input_frames(), 48_000);
     drop(pending);
-    assert_eq!(engine.budget.frames.load(Ordering::Acquire), 0);
-    assert_eq!(engine.budget.duration_ns.load(Ordering::Acquire), 0);
-    assert_eq!(engine.budget.bytes.load(Ordering::Acquire), 0);
+    assert_eq!(engine.budget.input_frames(), 0);
+    assert_eq!(engine.budget.input_duration_ns(), 0);
+    assert_eq!(engine.budget.input_bytes(), 0);
     let waiting = pcm(&engine, 1, 0, 0, 1000);
     engine.command(engine.observe(|| 0), Command::Pcm(waiting), &mut Vec::new());
     assert!(tick(&mut engine, 501 * MS)
         .iter()
         .any(|event| matches!(event, ReceiverEvent::Resync { .. })));
-    assert_eq!(engine.budget.frames.load(Ordering::Acquire), 0);
-    assert_eq!(engine.budget.duration_ns.load(Ordering::Acquire), 0);
+    assert_eq!(engine.budget.input_frames(), 0);
+    assert_eq!(engine.budget.input_duration_ns(), 0);
 }
 
 #[test]
@@ -896,11 +899,8 @@ fn minimum_rate_input_budget_cannot_exceed_its_duration_even_before_matching() {
         pending.push(pcm(&engine, 1, sequence, sequence * 8820, 8820));
     }
     pending.push(pcm(&engine, 1, 6, 52_920, 4410));
-    assert_eq!(
-        engine.budget.duration_ns.load(Ordering::Acquire),
-        INPUT_DURATION_LIMIT_NS
-    );
-    assert_eq!(engine.budget.frames.load(Ordering::Acquire), 57_330);
+    assert_eq!(engine.budget.input_duration_ns(), INPUT_DURATION_LIMIT_NS);
+    assert_eq!(engine.budget.input_frames(), 57_330);
     let extra = PcmBlock {
         identity: identity(),
         epoch: 1,
@@ -911,23 +911,23 @@ fn minimum_rate_input_budget_cannot_exceed_its_duration_even_before_matching() {
         samples: vec![0.5].into(),
     };
     assert!(matches!(
-        Reservation::acquire(&engine.budget, &extra),
+        engine
+            .budget
+            .reserve_input(&extra)
+            .map_err(|_| ReceiverError::Capacity),
         Err(ReceiverError::Capacity)
     ));
     prepare(&mut engine, plan(1, 10, 400 * MS, 0));
     for block in pending {
         engine.command(engine.observe(|| 0), Command::Pcm(block), &mut Vec::new());
     }
-    assert_eq!(
-        engine.budget.duration_ns.load(Ordering::Acquire),
-        INPUT_DURATION_LIMIT_NS
-    );
+    assert_eq!(engine.budget.input_duration_ns(), INPUT_DURATION_LIMIT_NS);
     // Failure drops both matched and unmatched ownership, including repriced
     // reservations; no byte, frame or duration capacity may leak.
     engine.fail("test release", &mut Vec::new());
-    assert_eq!(engine.budget.frames.load(Ordering::Acquire), 0);
-    assert_eq!(engine.budget.bytes.load(Ordering::Acquire), 0);
-    assert_eq!(engine.budget.duration_ns.load(Ordering::Acquire), 0);
+    assert_eq!(engine.budget.input_frames(), 0);
+    assert_eq!(engine.budget.input_bytes(), 0);
+    assert_eq!(engine.budget.input_duration_ns(), 0);
 }
 
 #[test]
@@ -935,7 +935,7 @@ fn matching_early_pcm_reprices_duration_and_byte_rejection_rolls_it_back() {
     let mut engine = engine();
     let block = pcm(&engine, 1, 0, 0, 8820);
     engine.command(engine.observe(|| 0), Command::Pcm(block), &mut Vec::new());
-    assert_eq!(engine.budget.duration_ns.load(Ordering::Acquire), 200 * MS);
+    assert_eq!(engine.budget.input_duration_ns(), 200 * MS);
     let mut future = plan(1, 10, 400 * MS, 0);
     future.format.sample_rate = 192_000;
     assert!(matches!(
@@ -943,10 +943,10 @@ fn matching_early_pcm_reprices_duration_and_byte_rejection_rolls_it_back() {
         [ReceiverEvent::Ready { .. }]
     ));
     assert_eq!(
-        engine.budget.duration_ns.load(Ordering::Acquire),
-        Reservation::duration(8820, 192_000)
+        engine.budget.input_duration_ns(),
+        (8820u64 * 1_000_000_000).div_ceil(192_000)
     );
-    let used = engine.budget.duration_ns.load(Ordering::Acquire);
+    let used = engine.budget.input_duration_ns();
     let extra = PcmBlock {
         identity: identity(),
         epoch: 1,
@@ -956,18 +956,28 @@ fn matching_early_pcm_reprices_duration_and_byte_rejection_rolls_it_back() {
         channels: 1,
         samples: vec![0.5].into(),
     };
-    let bytes = engine.budget.bytes.swap(INPUT_BYTE_LIMIT, Ordering::AcqRel);
+    let byte_fence = engine
+        .budget
+        .reserve_pcm(
+            0,
+            44_100,
+            vmusic_lan::buffer::ENDPOINT_BYTES - engine.budget.bytes(),
+        )
+        .unwrap();
     assert!(matches!(
-        Reservation::acquire(&engine.budget, &extra),
+        engine
+            .budget
+            .reserve_input(&extra)
+            .map_err(|_| ReceiverError::Capacity),
         Err(ReceiverError::Capacity)
     ));
-    assert_eq!(engine.budget.duration_ns.load(Ordering::Acquire), used);
-    assert_eq!(engine.budget.frames.load(Ordering::Acquire), 8820);
-    engine.budget.bytes.store(bytes, Ordering::Release);
+    assert_eq!(engine.budget.input_duration_ns(), used);
+    assert_eq!(engine.budget.input_frames(), 8820);
+    drop(byte_fence);
     engine.fail("test release", &mut Vec::new());
-    assert_eq!(engine.budget.duration_ns.load(Ordering::Acquire), 0);
-    assert_eq!(engine.budget.bytes.load(Ordering::Acquire), 0);
-    assert_eq!(engine.budget.frames.load(Ordering::Acquire), 0);
+    assert_eq!(engine.budget.input_duration_ns(), 0);
+    assert_eq!(engine.budget.input_bytes(), 0);
+    assert_eq!(engine.budget.input_frames(), 0);
 }
 
 #[test]
@@ -977,27 +987,24 @@ fn repricing_a_retired_format_reserves_any_increased_duration() {
     plan.format.sample_rate = 192_000;
     prepare(&mut engine, plan);
     let mut pending = pcm(&engine, 1, 0, 0, 8820);
-    assert_eq!(
-        engine.budget.duration_ns.load(Ordering::Acquire),
-        45_937_500
-    );
+    assert_eq!(engine.budget.input_duration_ns(), 45_937_500);
     engine.fail("retire published format", &mut Vec::new());
     let others: Vec<_> = (0..6)
         .map(|sequence| pcm(&engine, 2, sequence, sequence * 8820, 8820))
         .collect();
-    let before = engine.budget.duration_ns.load(Ordering::Acquire);
+    let before = engine.budget.input_duration_ns();
     assert!(matches!(
         pending._reservation.match_format(44_100),
-        Err(ReceiverError::Capacity)
+        Err(vmusic_lan::buffer::BufferError::Capacity)
     ));
-    assert_eq!(engine.budget.duration_ns.load(Ordering::Acquire), before);
+    assert_eq!(engine.budget.input_duration_ns(), before);
     drop(others);
     pending._reservation.match_format(44_100).unwrap();
-    assert_eq!(engine.budget.duration_ns.load(Ordering::Acquire), 200 * MS);
+    assert_eq!(engine.budget.input_duration_ns(), 200 * MS);
     drop(pending);
-    assert_eq!(engine.budget.duration_ns.load(Ordering::Acquire), 0);
-    assert_eq!(engine.budget.frames.load(Ordering::Acquire), 0);
-    assert_eq!(engine.budget.bytes.load(Ordering::Acquire), 0);
+    assert_eq!(engine.budget.input_duration_ns(), 0);
+    assert_eq!(engine.budget.input_frames(), 0);
+    assert_eq!(engine.budget.input_bytes(), 0);
 }
 
 #[test]
@@ -1020,7 +1027,7 @@ fn high_rate_epoch_switch_buffers_current_and_pending_candidate_without_capacity
             let mut next = plan(2, 11, 700 * MS, 0);
             next.format.sample_rate = 192_000;
             assert!(prepare(&mut engine, next.clone()).is_empty());
-            let current_duration = engine.budget.duration_ns.load(Ordering::Acquire);
+            let current_duration = engine.budget.input_duration_ns();
             let mut pending = Vec::new();
             for (sequence, frame) in (0..38_400).step_by(4096).enumerate() {
                 pending.push(pcm(
@@ -1031,15 +1038,12 @@ fn high_rate_epoch_switch_buffers_current_and_pending_candidate_without_capacity
                     (38_400 - frame).min(4096),
                 ));
             }
-            assert!(engine.budget.frames.load(Ordering::Acquire) > 80_000);
-            assert!(engine.budget.duration_ns.load(Ordering::Acquire) <= INPUT_DURATION_LIMIT_NS);
+            assert!(engine.budget.input_frames() > 80_000);
+            assert!(engine.budget.input_duration_ns() <= INPUT_DURATION_LIMIT_NS);
             // Accepted format publication prices queued commands immediately;
             // a worker scheduling delay cannot multiply the 192kHz candidate's
             // budget by the minimum-rate/actual-rate ratio.
-            assert!(
-                engine.budget.duration_ns.load(Ordering::Acquire)
-                    <= current_duration + 200 * MS + 10
-            );
+            assert!(engine.budget.input_duration_ns() <= current_duration + 200 * MS + 10);
             for block in pending {
                 let mut events = Vec::new();
                 engine.command(engine.observe(|| now), Command::Pcm(block), &mut events);
@@ -1048,10 +1052,7 @@ fn high_rate_epoch_switch_buffers_current_and_pending_candidate_without_capacity
                     .all(|event| matches!(event, ReceiverEvent::Ready { .. })));
             }
             assert!(engine.preparing.as_ref().unwrap().ready);
-            assert!(
-                engine.budget.duration_ns.load(Ordering::Acquire)
-                    <= current_duration + 200 * MS + 10
-            );
+            assert!(engine.budget.input_duration_ns() <= current_duration + 200 * MS + 10);
             assert!(commit(&mut engine, now, &next).is_empty());
         }
         let at = now + 20 * MS;
@@ -1067,9 +1068,9 @@ fn high_rate_epoch_switch_buffers_current_and_pending_candidate_without_capacity
     );
     assert!(engine.last_error.is_none());
     engine.fail("test release", &mut Vec::new());
-    assert_eq!(engine.budget.duration_ns.load(Ordering::Acquire), 0);
-    assert_eq!(engine.budget.frames.load(Ordering::Acquire), 0);
-    assert_eq!(engine.budget.bytes.load(Ordering::Acquire), 0);
+    assert_eq!(engine.budget.input_duration_ns(), 0);
+    assert_eq!(engine.budget.input_frames(), 0);
+    assert_eq!(engine.budget.input_bytes(), 0);
 }
 
 #[test]
@@ -1304,7 +1305,7 @@ async fn shutdown_completes_after_output_drop_while_other_handle_clones_live() {
         generation: Arc::new(AtomicU64::new(0)),
         emergency: emergency.clone(),
         disconnected: Arc::new(AtomicBool::new(false)),
-        budget: Arc::new(Budget::default()),
+        budget: Budget::endpoint(),
         status,
         done,
         _lease: Arc::new(Lease {
@@ -2109,4 +2110,554 @@ fn converting_different_wire_packet_sizes_produces_identical_continuous_audio() 
         large_count > nominal_count,
         "a fast device must receive more output frames for the same source span"
     );
+}
+
+fn native_engine(device_rate: u32) -> Engine<FakeOutput> {
+    let mut engine = Engine::new(FakeOutput::new(device_rate), identity(), Budget::endpoint());
+    engine.native = true;
+    engine.reserve_output_storage().unwrap();
+    engine.command(
+        engine.observe(|| 0),
+        Command::Mapping(mapping(0, 0.0)),
+        &mut Vec::new(),
+    );
+    engine
+}
+
+fn end(engine: &mut Engine<FakeOutput>, epoch: u64, frames: u64) -> Vec<ReceiverEvent> {
+    let mut events = Vec::new();
+    engine.command(
+        engine.observe(|| 0),
+        Command::EpochEnd {
+            identity: identity(),
+            epoch,
+            format_id: 3,
+            end_frame: frames,
+        },
+        &mut events,
+    );
+    events
+}
+
+#[test]
+fn native_short_streams_ready_only_after_the_complete_real_tail_in_either_order() {
+    for frames in [1, 127, 128, 882, 1010] {
+        for end_first in [false, true] {
+            let mut engine = native_engine(48_000);
+            let plan = plan(1, 10, 400 * MS, 0);
+            prepare(&mut engine, plan.clone());
+            if end_first {
+                assert!(end(&mut engine, 1, frames).is_empty());
+            }
+            if frames > 1 {
+                let block = pcm(&engine, 1, 0, 0, frames as usize - 1);
+                engine.command(engine.observe(|| 0), Command::Pcm(block), &mut Vec::new());
+                assert!(!engine.preparing.as_ref().unwrap().ready);
+            }
+            if !end_first {
+                assert!(end(&mut engine, 1, frames).is_empty());
+            }
+            let block = pcm(&engine, 1, u64::from(frames > 1), frames - 1, 1);
+            let mut events = Vec::new();
+            engine.command(engine.observe(|| 0), Command::Pcm(block), &mut events);
+            assert!(matches!(
+                events.as_slice(),
+                [ReceiverEvent::Ready { epoch: 1, .. }]
+            ));
+            assert!(!engine.preparing.as_ref().unwrap().tail_padded);
+            assert!(engine.output.as_ref().unwrap().telemetry().muted);
+            assert!(commit(&mut engine, 0, &plan).is_empty());
+            assert!(engine.preparing.as_ref().unwrap().committed);
+        }
+    }
+}
+
+#[test]
+fn native_one_frame_eof_drains_without_next_plan_or_fake_underrun() {
+    for device_rate in [8_000, 44_100, 48_000, 192_000] {
+        for ppm in [-500.0, 0.0, 500.0] {
+            let mut engine = native_engine(device_rate);
+            engine.output.as_mut().unwrap().ppm = ppm;
+            let plan = plan(1, 10, 400 * MS, 0);
+            prepare(&mut engine, plan.clone());
+            end(&mut engine, 1, 1);
+            feed(&mut engine, 1, 0, 1);
+            commit(&mut engine, 0, &plan);
+            assert!(tick(&mut engine, 300 * MS).is_empty());
+            let epoch = engine.preparing.as_ref().unwrap();
+            assert!(epoch.submitted_end);
+            assert_eq!(epoch.end_frame, Some(1));
+            assert!(epoch.converter.counts().0 >= 1);
+            let output_frames = epoch.output_frames;
+            assert_eq!(
+                output_frames,
+                if device_rate == 8_000 {
+                    0
+                } else if device_rate == 192_000 {
+                    4
+                } else {
+                    1
+                }
+            );
+            let samples = engine.output.as_mut().unwrap().render(400 * MS, 100);
+            assert_eq!(
+                samples.iter().filter(|v| **v != 0.0).count() as u64,
+                output_frames * 2
+            );
+            assert!(
+                tick(&mut engine, 402 * MS).is_empty(),
+                "{:?}",
+                engine.last_error
+            );
+            assert!(engine
+                .output
+                .as_mut()
+                .unwrap()
+                .render(500 * MS, 100)
+                .iter()
+                .all(|v| *v == 0.0));
+            assert!(
+                tick(&mut engine, 500 * MS).is_empty(),
+                "{:?}",
+                engine.last_error
+            );
+            assert_eq!(
+                engine.output.as_ref().unwrap().telemetry().underrun_frames,
+                0
+            );
+            assert_eq!(engine.current.as_ref().unwrap().end_frame, Some(1));
+            assert_eq!(engine.played_frame, 1);
+            assert_eq!(engine.faults, 0);
+        }
+    }
+}
+
+#[test]
+fn native_short_rejoin_requires_real_history_and_never_readies_at_or_after_eof() {
+    for join in [99, 100, 101] {
+        let mut engine = native_engine(48_000);
+        let plan = plan(1, 10, 400 * MS, join);
+        prepare(&mut engine, plan.clone());
+        end(&mut engine, 1, 100);
+        if join < 100 {
+            let block = pcm(&engine, 1, 0, join, 1);
+            engine.command(engine.observe(|| 0), Command::Pcm(block), &mut Vec::new());
+            assert!(!engine.preparing.as_ref().unwrap().ready);
+            let history = pcm(&engine, 1, 1, 0, join as usize);
+            let mut events = Vec::new();
+            engine.command(engine.observe(|| 0), Command::Pcm(history), &mut events);
+            assert!(matches!(events.as_slice(), [ReceiverEvent::Ready { .. }]));
+        } else {
+            assert!(commit(&mut engine, 0, &plan).is_empty());
+            assert!(!engine.preparing.as_ref().unwrap().ready);
+            assert!(!engine.preparing.as_ref().unwrap().committed);
+        }
+    }
+}
+
+#[test]
+fn native_end_is_immutable_and_rejects_real_pcm_overrun_in_both_orders() {
+    for case in 0..4 {
+        let mut engine = native_engine(48_000);
+        prepare(&mut engine, plan(1, 10, 400 * MS, 0));
+        if case == 0 {
+            end(&mut engine, 1, 100);
+            assert!(end(&mut engine, 1, 100).is_empty());
+            assert!(matches!(
+                end(&mut engine, 1, 101).as_slice(),
+                [ReceiverEvent::Resync { .. }]
+            ));
+        } else if case == 1 {
+            feed(&mut engine, 1, 0, 101);
+            assert!(matches!(
+                end(&mut engine, 1, 100).as_slice(),
+                [ReceiverEvent::Resync { .. }]
+            ));
+        } else if case == 2 {
+            end(&mut engine, 1, 100);
+            feed(&mut engine, 1, 0, 101);
+            assert_eq!(engine.faults, 1);
+        } else {
+            assert!(matches!(
+                end(&mut engine, 99, 100).as_slice(),
+                [ReceiverEvent::Resync { .. }]
+            ));
+        }
+        assert!(engine.current.is_none());
+        assert!(engine.output.as_ref().unwrap().telemetry().muted);
+        assert_eq!(engine.budget.input_frames(), 0);
+    }
+}
+
+#[test]
+fn native_successor_waits_for_real_old_tail_and_uses_old_eof_before_a_later_start() {
+    for missing in [false, true] {
+        let mut engine = native_engine(48_000);
+        let old = plan(1, 10, 400 * MS, 0);
+        prepare(&mut engine, old.clone());
+        end(&mut engine, 1, 5000);
+        feed(&mut engine, 1, 0, if missing { 4999 } else { 5000 });
+        commit(&mut engine, 0, &old);
+        tick(&mut engine, 300 * MS);
+        engine.output.as_mut().unwrap().render(400 * MS, 480);
+        tick(&mut engine, 400 * MS);
+        let mut next = plan(2, 11, 650 * MS, 0);
+        next.format.sample_rate = 192_000;
+        prepare(&mut engine, next.clone());
+        end(&mut engine, 2, 1);
+        feed(&mut engine, 2, 0, 1);
+        tick(&mut engine, 410 * MS);
+        commit(&mut engine, 410 * MS, &next);
+        tick(&mut engine, 530 * MS);
+        if missing {
+            assert!(engine.preparing.is_none());
+            assert_eq!(engine.faults, 1);
+            assert!(engine.last_error.as_ref().unwrap().contains("source gap"));
+        } else {
+            let next = engine
+                .preparing
+                .as_ref()
+                .unwrap_or_else(|| panic!("native successor failed: {:?}", engine.last_error));
+            assert!(engine.current.as_ref().unwrap().submitted_end);
+            assert_eq!(engine.current.as_ref().unwrap().effective_end(), Some(5000));
+            assert!(next.submitted_end);
+            assert_eq!(next.output_frames, 0);
+            assert_eq!(engine.faults, 0);
+            engine.output.as_mut().unwrap().render(410 * MS, 24_000);
+            assert_eq!(
+                engine.output.as_ref().unwrap().telemetry().underrun_frames,
+                0
+            );
+            assert!(
+                tick(&mut engine, 900 * MS).is_empty(),
+                "{:?}",
+                engine.last_error
+            );
+            assert_eq!(engine.current.as_ref().unwrap().plan.epoch.0, 2);
+        }
+    }
+}
+
+#[test]
+fn native_natural_end_time_uses_ceil_and_integer_frame_limits() {
+    assert_eq!(frame_time(0, 1, 44_100), Some(22_675));
+    assert_eq!(frame_end_time(0, 1, 44_100), Some(22_676));
+    assert_eq!(frame_end_time(u64::MAX, 1, 44_100), None);
+    let mut engine = native_engine(48_000);
+    prepare(&mut engine, plan(1, 10, 400 * MS, 0));
+    end(&mut engine, 1, 1000);
+    let epoch = engine.preparing.as_mut().unwrap();
+    let host = 400 * MS + 10 * MS;
+    assert_eq!(epoch.control_cutoff(host, host).unwrap(), 441);
+    assert_eq!(epoch.effective_end(), Some(441));
+    assert_eq!(epoch.end_frame, Some(1000));
+    assert_eq!(
+        epoch
+            .control_cutoff(host + 100 * MS, host + 100 * MS)
+            .unwrap(),
+        441
+    );
+}
+
+#[test]
+fn native_endpoint_accounts_simultaneous_pcm_copies_and_preserves_old_tail_on_new_capacity_failure()
+{
+    let mut engine = native_engine(48_000);
+    let old = plan(1, 10, 400 * MS, 0);
+    prepare(&mut engine, old.clone());
+    feed(&mut engine, 1, 0, 10_000);
+    commit(&mut engine, 0, &old);
+    tick(&mut engine, 300 * MS);
+    let mut delivered_samples = engine
+        .output
+        .as_mut()
+        .unwrap()
+        .render(400 * MS, 480)
+        .iter()
+        .filter(|sample| **sample != 0.0)
+        .count();
+    tick(&mut engine, 400 * MS);
+    assert!(engine.budget.bytes() > engine.budget.input_bytes());
+    assert!(engine.budget.duration_ns() > engine.budget.input_duration_ns());
+    let old_input = engine.budget.input_frames();
+    let rejected_pcm = pcm(&engine, 2, 0, 0, 100);
+    let fence = engine
+        .budget
+        .reserve_pcm(
+            0,
+            44_100,
+            vmusic_lan::buffer::ENDPOINT_BYTES - engine.budget.bytes(),
+        )
+        .unwrap();
+    let rejected = plan(2, 11, 650 * MS, 0);
+    let events = prepare(&mut engine, rejected.clone());
+    assert!(events.is_empty());
+    assert_eq!(
+        engine.last_error.as_deref(),
+        Some("receiver conversion storage budget exhausted")
+    );
+    assert!(engine.current.is_some());
+    assert!(engine.preparing.is_none());
+    assert_eq!(engine.faults, 0);
+    assert!(!engine.output.as_ref().unwrap().telemetry().muted);
+    engine.command(
+        engine.observe(|| 400 * MS),
+        Command::Pcm(rejected_pcm),
+        &mut Vec::new(),
+    );
+    assert_eq!(engine.budget.input_frames(), old_input);
+    assert!(engine.unmatched.is_empty());
+    assert_eq!(engine.faults, 0);
+    assert!(end(&mut engine, 2, 100).is_empty());
+    assert!(end(&mut engine, 2, 100).is_empty());
+    assert!(engine.ends.contains(&(2, rejected.format.id, 100)));
+    assert!(
+        engine.preparing.is_none(),
+        "EOF must not admit rejected PCM"
+    );
+    assert_eq!(engine.current.as_ref().unwrap().plan, old);
+    assert!(commit(&mut engine, 400 * MS, &rejected).is_empty());
+    let mut events = Vec::new();
+    engine.command(
+        engine.observe(|| 400 * MS),
+        Command::Suspend {
+            identity: identity(),
+            epoch: 2,
+            plan_id: 12,
+            effective_at: 650 * MS,
+        },
+        &mut events,
+    );
+    assert!(events.is_empty());
+    assert!(engine.suspension.is_none());
+    assert!(engine.current.as_ref().unwrap().cutoff.is_none());
+    assert_eq!(engine.faults, 0);
+    assert!(!engine.output.as_ref().unwrap().telemetry().muted);
+    drop(fence);
+    assert!(end(&mut engine, 1, 10_000).is_empty());
+    for at in (410..=650).step_by(10) {
+        delivered_samples += engine
+            .output
+            .as_mut()
+            .unwrap()
+            .render(at * MS, 480)
+            .iter()
+            .filter(|sample| **sample != 0.0)
+            .count();
+        assert!(tick(&mut engine, (at + 10) * MS).is_empty());
+    }
+    assert!(engine.current.as_ref().unwrap().submitted_end);
+    assert_eq!(
+        delivered_samples,
+        engine.current.as_ref().unwrap().output_frames as usize * 2
+    );
+    assert_eq!(engine.current.as_ref().unwrap().plan, old);
+    assert_eq!(engine.played_frame, 10_000);
+    assert_eq!(engine.faults, 0);
+    assert_eq!(
+        engine.output.as_ref().unwrap().telemetry().underrun_frames,
+        0
+    );
+    let budget = engine.budget.clone();
+    drop(engine);
+    assert_eq!(budget.bytes(), 0);
+    assert_eq!(budget.duration_ns(), 0);
+    assert_eq!(budget.input_frames(), 0);
+}
+
+#[test]
+fn native_rejected_preparation_eof_validates_the_declared_format_and_immutable_total() {
+    for wrong_format in [false, true] {
+        let mut engine = native_engine(48_000);
+        let fence = engine
+            .budget
+            .reserve_pcm(
+                0,
+                44_100,
+                vmusic_lan::buffer::ENDPOINT_BYTES - engine.budget.bytes(),
+            )
+            .unwrap();
+        assert!(prepare(&mut engine, plan(2, 11, 650 * MS, 0)).is_empty());
+        assert_eq!(engine.rejected_preparing, Some(2));
+        assert!(end(&mut engine, 2, 1).is_empty());
+        let mut events = Vec::new();
+        engine.command(
+            engine.observe(|| 0),
+            Command::EpochEnd {
+                identity: identity(),
+                epoch: 2,
+                format_id: if wrong_format { 4 } else { 3 },
+                end_frame: if wrong_format { 1 } else { 2 },
+            },
+            &mut events,
+        );
+        assert!(matches!(events.as_slice(), [ReceiverEvent::Resync { .. }]));
+        assert_eq!(
+            engine.last_error.as_deref(),
+            Some("conflicting epoch_end or accepted PCM beyond end")
+        );
+        assert!(engine.ends.contains(&(2, 3, 1)));
+        assert!(engine.preparing.is_none());
+        drop(fence);
+    }
+}
+
+#[test]
+fn native_eof_midpoint_phase_shift_cannot_leave_old_pcm_for_the_successor_gap() {
+    let mut engine = native_engine(48_000);
+    let mut old = plan(1, 10, 400 * MS, 0);
+    old.format.sample_rate = 48_000;
+    prepare(&mut engine, old.clone());
+    end(&mut engine, 1, 100);
+    feed(&mut engine, 1, 0, 100);
+    commit(&mut engine, 0, &old);
+    assert!(tick(&mut engine, 300 * MS).is_empty());
+    let prefix = engine.output.as_mut().unwrap().render(400 * MS, 99);
+    assert!(prefix.iter().all(|sample| *sample != 0.0));
+    assert!(tick(&mut engine, 400 * MS).is_empty());
+    let mut next = plan(2, 11, 650 * MS, 0);
+    next.format.sample_rate = 96_000;
+    prepare(&mut engine, next.clone());
+    end(&mut engine, 2, 100);
+    feed(&mut engine, 2, 0, 100);
+    let ready = tick(&mut engine, 401 * MS);
+    assert!(matches!(
+        ready.as_slice(),
+        [ReceiverEvent::Ready {
+            epoch: 2,
+            plan_id: 11
+        }]
+    ));
+    assert!(commit(&mut engine, 401 * MS, &next).is_empty());
+    // The callback still presents before the frozen EOF boundary, but a
+    // 10.625 us phase change puts its midpoint beyond that boundary's cell.
+    // Preserve the continuous old run rather than stranding its last frame.
+    let tail = engine.output.as_mut().unwrap().render(402_073_125, 1);
+    assert!(tail.iter().all(|sample| *sample != 0.0));
+    assert_eq!(
+        engine.output.as_ref().unwrap().telemetry().played_frames,
+        100
+    );
+    assert!(
+        tick(&mut engine, 403 * MS).is_empty(),
+        "{:?}",
+        engine.last_error
+    );
+    assert_eq!(engine.played_frame, 100);
+    assert!(tick(&mut engine, 550 * MS).is_empty());
+    assert!(engine.preparing.as_ref().unwrap().output_frames > 0);
+    let gap = engine.output.as_mut().unwrap().render(560 * MS, 1);
+    assert!(gap.iter().all(|sample| *sample == 0.0));
+    assert_eq!(engine.output.as_ref().unwrap().telemetry().late_frames, 0);
+    assert!(tick(&mut engine, 560 * MS).is_empty());
+    let played = engine.output.as_mut().unwrap().render(650 * MS, 50);
+    assert!(played.iter().all(|sample| *sample != 0.0));
+    assert!(tick(&mut engine, 652 * MS).is_empty());
+    assert_eq!(engine.current.as_ref().unwrap().plan, next);
+    assert_eq!(engine.played_frame, 100);
+    assert_eq!(engine.faults, 0);
+    assert_eq!(
+        engine.output.as_ref().unwrap().telemetry().underrun_frames,
+        0
+    );
+}
+
+#[test]
+fn old_native_control_cutoff_keeps_an_already_committed_successor_and_its_grid() {
+    let mut engine = native_engine(48_000);
+    let old = plan(1, 10, 400 * MS, 0);
+    prepare(&mut engine, old.clone());
+    feed(&mut engine, 1, 0, 10_000);
+    commit(&mut engine, 0, &old);
+    tick(&mut engine, 300 * MS);
+    tick(&mut engine, 400 * MS);
+    let mut prefix = engine.output.as_mut().unwrap().render(400 * MS, 480);
+    let mut next = plan(2, 11, 800 * MS, 0);
+    next.format.sample_rate = 48_000;
+    prepare(&mut engine, next.clone());
+    end(&mut engine, 2, 1);
+    feed(&mut engine, 2, 0, 1);
+    tick(&mut engine, 410 * MS);
+    commit(&mut engine, 410 * MS, &next);
+    assert!(engine.preparing.as_ref().unwrap().committed);
+    let cutoff = frame_end_time(old.anchor_ns.0, 10_000, old.format.sample_rate).unwrap();
+    let mut events = Vec::new();
+    engine.output.as_mut().unwrap().now = 420 * MS;
+    engine.command(
+        engine.observe(|| 420 * MS),
+        Command::Suspend {
+            identity: identity(),
+            epoch: 1,
+            plan_id: 12,
+            effective_at: cutoff,
+        },
+        &mut events,
+    );
+    assert!(events.is_empty(), "{:?}", engine.last_error);
+    assert!(engine.suspension_old_only);
+    assert_eq!(
+        engine.current.as_ref().unwrap().effective_end(),
+        Some(10_000)
+    );
+    assert_eq!(engine.current.as_ref().unwrap().end_frame, None);
+    assert_eq!(engine.preparing.as_ref().unwrap().plan, next);
+    prefix.extend(engine.output.as_mut().unwrap().render(410 * MS, 5280));
+    assert!(
+        tick(&mut engine, 520 * MS).is_empty(),
+        "{:?}",
+        engine.last_error
+    );
+    let frames = engine.current.as_ref().unwrap().output_frames as usize;
+    let old_end = engine
+        .current
+        .as_ref()
+        .unwrap()
+        .barrier
+        .unwrap()
+        .time_after(0)
+        .unwrap();
+    assert!(engine.current.as_ref().unwrap().submitted_end);
+    prefix.extend(
+        engine
+            .output
+            .as_mut()
+            .unwrap()
+            .render(520 * MS, frames - 5760),
+    );
+    assert!(prefix.iter().all(|sample| *sample != 0.0));
+    assert!(
+        tick(&mut engine, 630 * MS).is_empty(),
+        "{:?}",
+        engine.last_error
+    );
+    assert!(engine.current.is_none());
+    assert_eq!(engine.played_frame, 10_000);
+    assert!(engine.preparing.as_ref().unwrap().committed);
+    assert_eq!(engine.preparing.as_ref().unwrap().plan, next);
+    assert!(!engine.output.as_ref().unwrap().telemetry().muted);
+    assert!(
+        tick(&mut engine, 690 * MS).is_empty(),
+        "{:?}",
+        engine.last_error
+    );
+    assert_eq!(engine.preparing.as_ref().unwrap().output_frames, 1);
+    let gap_frames = ((800 * MS - old_end) * 48_000 / 1_000_000_000) as usize;
+    let tail = engine
+        .output
+        .as_mut()
+        .unwrap()
+        .render(old_end, gap_frames + 1);
+    assert!(tail[..gap_frames * 2].iter().all(|sample| *sample == 0.0));
+    assert!(tail[gap_frames * 2..].iter().all(|sample| *sample != 0.0));
+    assert_eq!(
+        engine.output.as_ref().unwrap().telemetry().underrun_frames,
+        0
+    );
+    assert!(
+        tick(&mut engine, 805 * MS).is_empty(),
+        "{:?}",
+        engine.last_error
+    );
+    assert_eq!(engine.current.as_ref().unwrap().plan, next);
+    assert_eq!(engine.faults, 0);
 }

@@ -1,0 +1,52 @@
+'use strict';
+const assert = require('node:assert/strict');
+
+module.exports = async function ({ api, page, base, until, mark, snapshot }) {
+  const read = () => api('/v1/window/sleep-timer');
+  const set = (seconds, revision) => api('/v1/window/sleep-timer', 'PUT', { seconds, expectedRevision: revision });
+  assert.equal((await api('/v1/window/state')).backgroundPlayback, true);
+  let timer = await read(); assert.equal(timer.available, true); assert.equal(timer.phase, 'idle');
+  timer = await set(30, timer.revision);
+  assert.equal(timer.phase, 'armed');
+  const stale = await api('/v1/window/sleep-timer', 'PUT', { seconds: 60, expectedRevision: timer.revision - 1 }, 409);
+  assert.equal(stale.error.code, 'sleep_timer_revision_conflict');
+  const revision = timer.revision;
+  await page.reload(); await page.waitForFunction(() => window.HertzWindowSleep?.snapshot().available);
+  assert.equal((await read()).revision, revision);
+  assert.equal(await page.evaluate(() => HertzWindowSleep.snapshot().phase), 'armed');
+  timer = await set(null, revision); assert.equal(timer.phase, 'cancelled');
+  assert.equal((await api('/v1/state')).playing, true, 'cancel never pauses or resumes playback');
+  mark('native timer uses one service revision, rejects stale edits and survives actual renderer reload');
+
+  timer = await set(12, timer.revision);
+  await page.goto(base + '/v1/health');
+  const noViewers = await until(async () => { const value = await api('/v1/player/depart', 'POST', {}); return value.viewers === 0 && value; }, 'actual websocket departure');
+  await new Promise(resolve => setTimeout(resolve, 3600));
+  assert.equal((await api('/v1/state')).playing, true, 'native owner exempts zero-viewer departure after original three-second grace');
+  await until(async () => !(await api('/v1/state')).playing, 'timer worker pauses while no renderer UI exists', 14000);
+  timer = await read(); assert.equal(timer.phase, 'expired');
+  const paused = await api('/v1/state');
+  snapshot('sleep-no-renderer', { noViewers, timer, playing: paused.playing, trackId: paused.track_id, positionMs: paused.position_ms });
+  assert.ok(paused.track_id); assert.ok(paused.position_ms > 0);
+  await page.goto(base + '/'); await page.waitForFunction(() => window.HertzWindowSleep?.snapshot().available);
+  assert.equal(await page.evaluate(() => HertzWindowSleep.snapshot().phase), 'expired');
+  assert.equal((await api('/v1/state')).playing, false, 'reopening renderer cannot resume expired playback');
+  mark('real zero-WebSocket host keeps playback past departure grace; service timer expires without UI and reload preserves paused content');
+
+  await api('/v1/player/play', 'POST', {});
+  timer = await set(1, timer.revision);
+  timer = await set(20, timer.revision);
+  await new Promise(resolve => setTimeout(resolve, 1500));
+  assert.equal((await api('/v1/state')).playing, true, 'old one-second timer cannot pause replacement');
+  assert.equal((await read()).revision, timer.revision);
+  timer = await set(null, timer.revision);
+  timer = await set(20, timer.revision);
+  await api('/v1/room', 'POST', { action: 'create', name: '定时隔离验证', address: '127.0.0.1:0', sample_rate: 48000, local_output: false, discoverable: false });
+  timer = await read(); assert.equal(timer.phase, 'cancelled', 'room handoff cancels local deadline');
+  const roomRejected = await api('/v1/window/sleep-timer', 'PUT', { seconds: 1, expectedRevision: timer.revision }, 409);
+  assert.equal(roomRejected.error.code, 'sleep_timer_room_active');
+  assert.equal((await api('/v1/room')).sleep_timer_remaining_seconds, null);
+  await api('/v1/room', 'POST', { action: 'leave' });
+  assert.equal((await read()).phase, 'cancelled');
+  mark('timer replacement/cancellation never fires stale work, and actual room handoff keeps local and room timers separate');
+};

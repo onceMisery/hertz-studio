@@ -29,6 +29,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 use crate::resample::{Converter, Format as ResampleFormat, State as ResampleState};
+use crate::sleep_deadline::SleepDeadline;
 use num_complex::Complex;
 use rustfft::FftPlanner;
 use symphonia::core::audio::SampleBuffer;
@@ -43,6 +44,9 @@ use vmusic_core::{
     AudioBackend, AudioError, AudioSource, DeviceInfo, MediaInfo, NextEvent, NextTrack,
     PrepareResult,
 };
+
+mod native;
+pub use native::{NativeDecodedFormat, NativePcmBudget, NativePcmReservation, NativePcmUsage};
 
 /// Number of mono samples kept for spectrum analysis.
 const FFT_SIZE: usize = 2048;
@@ -77,6 +81,8 @@ struct Deck {
     gain_db: AtomicU32,
     decode_error: AtomicBool,
     eof: AtomicBool,
+    // Retained with the actual queue, including callback-held retired decks.
+    native_storage: Option<NativePcmReservation>,
 }
 
 impl Deck {
@@ -87,6 +93,7 @@ impl Deck {
             gain_db: AtomicU32::new(0.0f32.to_bits()),
             decode_error: AtomicBool::new(false),
             eof: AtomicBool::new(false),
+            native_storage: None,
         };
         prime(&deck.samples);
         deck
@@ -94,6 +101,23 @@ impl Deck {
 
     fn flag_decode_error(&self) {
         self.decode_error.store(true, Ordering::Release);
+    }
+
+    fn new_native(rate: u32, budget: &NativePcmBudget) -> Result<Self, AudioError> {
+        // Half-second allocations leave shared headroom for preparations and
+        // decoded blocks. Native queues never expand beyond this capacity.
+        let frames = (rate / 2) as usize;
+        let storage = budget.reserve(frames as u64, rate, frames * 2 * 4)?;
+        let deck = Self {
+            samples: Mutex::new(VecDeque::with_capacity(frames * 2)),
+            frames_played: AtomicU64::new(0),
+            gain_db: AtomicU32::new(0.0f32.to_bits()),
+            decode_error: AtomicBool::new(false),
+            eof: AtomicBool::new(false),
+            native_storage: Some(storage),
+        };
+        prime(&deck.samples);
+        Ok(deck)
     }
 }
 
@@ -129,12 +153,16 @@ enum RenderEvent {
 /// Output settings are shared by both decks; transport fades are independent
 /// of the track overlap envelope.
 struct Shared {
+    // Only local CPAL playback installs this gate. Room renderers own their
+    // scheduled transport independently and leave it absent.
+    sleep_deadline: Option<Arc<SleepDeadline>>,
     // The callback takes this with try_lock; actor readers clone briefly. This
     // avoids ArcSwap's first-use thread-local allocation on the audio thread.
     deck: Mutex<Arc<Deck>>,
     next: Mutex<Option<PreparedDeck>>,
     next_event: Mutex<Option<RenderEvent>>,
     tap: Mutex<VecDeque<f32>>,
+    tap_enabled: bool,
     volume: AtomicU32,
     playing: AtomicBool,
     /// 增益斜坡（单位：设备声道帧）。fade_frames=0 表示无斜坡，增益恒为 fade_gain。
@@ -157,12 +185,30 @@ struct Shared {
 }
 
 impl Shared {
+    #[cfg(test)]
     fn new() -> Self {
+        Self::with_sleep_deadline(None)
+    }
+
+    fn with_sleep_deadline(sleep_deadline: Option<Arc<SleepDeadline>>) -> Self {
+        Self::with_deck(sleep_deadline, Deck::new())
+    }
+
+    fn with_deck(sleep_deadline: Option<Arc<SleepDeadline>>, deck: Deck) -> Self {
+        // Room-native producers do not request renderer spectrum. Avoid an
+        // unreserved second PCM history alongside the bounded native queues.
+        let tap_enabled = deck.native_storage.is_none();
         let shared = Self {
-            deck: Mutex::new(Arc::new(Deck::new())),
+            sleep_deadline,
+            deck: Mutex::new(Arc::new(deck)),
             next: Mutex::new(None),
             next_event: Mutex::new(None),
-            tap: Mutex::new(VecDeque::with_capacity(TAP_LEN)),
+            tap: Mutex::new(if tap_enabled {
+                VecDeque::with_capacity(TAP_LEN)
+            } else {
+                VecDeque::new()
+            }),
+            tap_enabled,
             volume: AtomicU32::new(1.0f32.to_bits()),
             playing: AtomicBool::new(false),
             fade_gain: AtomicU32::new(1.0f32.to_bits()),
@@ -191,6 +237,12 @@ impl Shared {
         prime(&shared.tap);
         prime(&shared.filters);
         shared
+    }
+
+    fn sleep_expired(&self) -> bool {
+        self.sleep_deadline
+            .as_ref()
+            .is_some_and(|gate| gate.expired())
     }
 
     /// Actor/decoder setup access only. The output callback uses try_lock.
@@ -350,6 +402,7 @@ pub struct RenderCore {
     tail_armed: bool,
     /// 等旧源淡出完成后换装的新源。
     pending_load: Option<PendingLoad>,
+    native_budget: Option<NativePcmBudget>,
 }
 
 /// Exact boundaries within one pull, relative to its first output frame.
@@ -420,13 +473,47 @@ impl PreparedMedia {
         ext: Option<&str>,
         stop: Arc<AtomicBool>,
     ) -> Result<Self, AudioError> {
-        let mut media = Self::open(source, ext)?;
+        let deadline = Arc::new(Mutex::new(None));
+        let (mut opened, info) = open_media(
+            MediaSourceStream::new(
+                Box::new(native::GuardedSource {
+                    source,
+                    stop: stop.clone(),
+                    deadline: deadline.clone(),
+                }),
+                Default::default(),
+            ),
+            ext,
+        )?;
+        opened.preparation_deadline = deadline;
+        let mut media = Self { opened, info };
         media.opened.input_stop = Some(stop);
         Ok(media)
     }
     /// Performs source I/O before handing ownership to the render thread.
     pub fn seek(&mut self, position_ms: u64) -> Result<(), AudioError> {
-        let position_ms = position_ms.min(self.info.duration_ms.unwrap_or(u64::MAX));
+        let native_deadline = self.opened.native.as_ref().map(|source| source.deadline);
+        if let Some(deadline) = native_deadline {
+            *self.opened.preparation_deadline.lock().unwrap() = Some(deadline);
+        }
+        let result = self.seek_prepared(position_ms, native_deadline.is_none());
+        if native_deadline.is_some() {
+            *self.opened.preparation_deadline.lock().unwrap() = None;
+        }
+        result
+    }
+
+    fn seek_prepared(
+        &mut self,
+        position_ms: u64,
+        clamp_to_declared_duration: bool,
+    ) -> Result<(), AudioError> {
+        let native = self.opened.native.take();
+        let position_ms = if clamp_to_declared_duration {
+            position_ms.min(self.info.duration_ms.unwrap_or(u64::MAX))
+        } else {
+            position_ms
+        };
         let time = Time::new(position_ms / 1000, (position_ms % 1000) as f64 / 1000.0);
         let sought = self
             .opened
@@ -441,13 +528,21 @@ impl PreparedMedia {
             .map_err(|error| AudioError::DecodeFailed(format!("seek failed: {error}")))?;
         self.opened.decoder.reset();
         self.opened.initial_position = Some((position_ms, sought.required_ts));
+        if let Some(native) = native {
+            self.validate_native(native.budget, native.deadline)?;
+        }
         Ok(())
     }
 }
 
 impl RenderCore {
     pub fn load_prepared(&mut self, source: PreparedMedia) -> Result<MediaInfo, AudioError> {
-        self.install_opened(source.opened, source.info)
+        let mut info = source.info;
+        if let Some(format) = source.opened.native.as_ref().map(|source| source.format()) {
+            info.sample_rate = Some(format.sample_rate);
+            info.channels = Some(format.channels as u8);
+        }
+        self.install_opened(source.opened, info)
     }
     pub fn prepare_next_media_with_gain(
         &mut self,
@@ -458,13 +553,19 @@ impl RenderCore {
         if !gain_db.is_finite() {
             return Err(AudioError::Other("non-finite track gain".into()));
         }
-        self.prepare_opened_with_gain(
-            source.opened,
-            source.info,
-            next,
-            gain_db.clamp(-24.0, 12.0),
-            true,
-        )
+        if self.native_budget.is_some()
+            && !self.native_successor_eligible(&source, next.crossfade_ms, gain_db)
+        {
+            return Ok(PrepareResult::Bypassed {
+                reason: "native_successor_requires_new_epoch".into(),
+            });
+        }
+        let mut info = source.info;
+        if let Some(format) = source.opened.native.as_ref().map(|source| source.format()) {
+            info.sample_rate = Some(format.sample_rate);
+            info.channels = Some(format.channels as u8);
+        }
+        self.prepare_opened_with_gain(source.opened, info, next, gain_db.clamp(-24.0, 12.0), true)
     }
     /// Prepare a continuous room stream. Resampling can prevent a claim of
     /// sample-exact source gaplessness, but does not require a silent boundary.
@@ -519,6 +620,11 @@ impl RenderCore {
         gain_db: f32,
         continuous: bool,
     ) -> Result<PrepareResult, AudioError> {
+        if self.native_budget.is_some() {
+            return Err(AudioError::UnsupportedFormat(
+                "native_source_requires_prepared_media".into(),
+            ));
+        }
         if !gain_db.is_finite() {
             return Err(AudioError::BackendInit("non-finite track gain".into()));
         }
@@ -547,10 +653,17 @@ impl RenderCore {
     /// local playback. The caller owns the output clock and calls [`Self::render`]
     /// once for each output block, and [`Self::maintain`] on the control thread.
     pub fn new(format: RenderFormat) -> Result<Self, AudioError> {
+        Self::with_sleep_deadline(format, None)
+    }
+
+    pub(crate) fn with_sleep_deadline(
+        format: RenderFormat,
+        sleep_deadline: Option<Arc<SleepDeadline>>,
+    ) -> Result<Self, AudioError> {
         format.validate()?;
         let fft = FftPlanner::<f32>::new().plan_fft_forward(FFT_SIZE);
         let mut renderer = Self {
-            shared: Arc::new(Shared::new()),
+            shared: Arc::new(Shared::with_sleep_deadline(sleep_deadline)),
             decoder: None,
             next_decoder: None,
             output_rate: format.sample_rate,
@@ -567,6 +680,7 @@ impl RenderCore {
             transport_error: None,
             tail_armed: false,
             pending_load: None,
+            native_budget: None,
         };
         renderer.sync_dsp_context();
         Ok(renderer)
@@ -577,6 +691,34 @@ impl RenderCore {
             sample_rate: self.output_rate,
             channels: self.output_channels,
         }
+    }
+
+    pub fn new_native(format: RenderFormat, budget: NativePcmBudget) -> Result<Self, AudioError> {
+        native::validate_output_format(format)?;
+        let deck = Deck::new_native(format.sample_rate, &budget)?;
+        let fft = FftPlanner::<f32>::new().plan_fft_forward(FFT_SIZE);
+        let mut renderer = Self {
+            shared: Arc::new(Shared::with_deck(None, deck)),
+            decoder: None,
+            next_decoder: None,
+            output_rate: format.sample_rate,
+            output_channels: 2,
+            duration_ms: None,
+            source_rate: None,
+            gapless_supported: false,
+            spectrum_workspace: Mutex::new(SpectrumWorkspace::new(fft.as_ref())),
+            fft,
+            spectrum_state: Mutex::new(Vec::new()),
+            pending_pause: false,
+            pending_stop: false,
+            stop_error: None,
+            transport_error: None,
+            tail_armed: false,
+            pending_load: None,
+            native_budget: Some(budget),
+        };
+        renderer.sync_dsp_context();
+        Ok(renderer)
     }
 
     /// Fill interleaved PCM through the same mixer and DSP as the device callback.
@@ -644,6 +786,14 @@ impl RenderCore {
 
     pub(crate) fn validate_format_change(&self, format: RenderFormat) -> Result<(), AudioError> {
         format.validate()?;
+        if self.native_budget.is_some() {
+            native::validate_output_format(format)?;
+            if format != self.format() {
+                return Err(AudioError::UnsupportedFormat(
+                    "native_format_requires_new_renderer".into(),
+                ));
+            }
+        }
         let has_prepared_audio =
             self.decoder.is_some() || self.next_decoder.is_some() || self.pending_load.is_some();
         if has_prepared_audio && format != self.format() {
@@ -765,6 +915,7 @@ impl RenderCore {
         gain_db: f32,
         continuous: bool,
     ) -> Result<PrepareResult, AudioError> {
+        self.validate_native_install(&opened)?;
         self.clear_next();
         if matches!(
             *self.shared.next_event.lock().unwrap(),
@@ -800,7 +951,10 @@ impl RenderCore {
             });
         }
         let gapless_supported = opened.gapless_supported;
-        let deck = Arc::new(Deck::new());
+        let deck = Arc::new(match &self.native_budget {
+            Some(budget) => Deck::new_native(self.output_rate, budget)?,
+            None => Deck::new(),
+        });
         deck.gain_db.store(gain_db.to_bits(), Ordering::Relaxed);
         let stop = opened
             .input_stop
@@ -899,6 +1053,11 @@ impl RenderCore {
         mss: MediaSourceStream,
         ext: Option<&str>,
     ) -> Result<MediaInfo, AudioError> {
+        if self.native_budget.is_some() {
+            return Err(AudioError::UnsupportedFormat(
+                "native_source_requires_prepared_media".into(),
+            ));
+        }
         let (opened, info) = open_media(mss, ext)?;
         self.install_opened(opened, info)
     }
@@ -908,6 +1067,7 @@ impl RenderCore {
         opened: OpenedReader,
         info: MediaInfo,
     ) -> Result<MediaInfo, AudioError> {
+        self.validate_native_install(&opened)?;
         let was_playing = self.shared.playing.load(Ordering::Relaxed);
         // 播放中且仍有可闻增益才需要「先淡出再换装」；暂停态、或尾段淡出
         // 已把增益压到 0（自然播完自动接下一首）则立即换装，避免两首之间
@@ -948,7 +1108,9 @@ impl RenderCore {
         self.source_rate = info.sample_rate;
         // 解码线程创建失败不再让 load 报错：置解码错误位，actor 下一 tick
         // 经 DecodeError 事件收口（在线曲自动跳曲），状态仍按已加载发布。
-        if let Err(e) = self.spawn_now(opened) {
+        if self.native_budget.is_some() {
+            self.spawn_now(opened)?;
+        } else if let Err(e) = self.spawn_now(opened) {
             tracing::error!("spawn decoder failed: {e}");
             self.shared.flag_decode_error();
         }
@@ -1328,6 +1490,19 @@ fn write_samples_mode(
     channels: usize,
     stop_at_transition: bool,
 ) -> RenderReport {
+    let sleep_deadline = shared
+        .sleep_deadline
+        .as_ref()
+        .map(|gate| (gate, gate.callback_deadline()));
+    // Check before touching a deck, a fade, DSP or any mutex. This also runs on
+    // the first callback after OS resume, before the actor/runtime can wake.
+    if sleep_deadline.is_some_and(|(gate, captured)| gate.callback_expired(captured)) {
+        // The callback only silences PCM. The actor owns transport state and
+        // must acknowledge pause before the coordinator clears a due gate;
+        // a suspended callback must never overwrite a newer play command.
+        data.fill(0.0);
+        return RenderReport::default();
+    }
     // No complete output frame was requested. This is not a source underrun:
     // leave the deck, DSP and transport envelope untouched for both callers.
     if data.len() < channels {
@@ -1359,15 +1534,17 @@ fn write_samples_mode(
 
     // 频谱 tap：淡变前信号（舞台可视化不随淡出塌陷）。cheap, bounded, and
     // skipped entirely under contention.
-    if let Ok(mut tap) = shared.tap.try_lock() {
-        let mut i = 0;
-        while i + channels <= copied {
-            let sum: f32 = data[i..i + channels].iter().sum();
-            if tap.len() >= TAP_LEN {
-                tap.pop_front();
+    if shared.tap_enabled {
+        if let Ok(mut tap) = shared.tap.try_lock() {
+            let mut i = 0;
+            while i + channels <= copied {
+                let sum: f32 = data[i..i + channels].iter().sum();
+                if tap.len() >= TAP_LEN {
+                    tap.pop_front();
+                }
+                tap.push_back(sum / channels as f32);
+                i += channels * TAP_STRIDE;
             }
-            tap.push_back(sum / channels as f32);
-            i += channels * TAP_STRIDE;
         }
     }
 
@@ -1437,6 +1614,17 @@ fn write_samples_mode(
     for sample in data.iter_mut().skip(copied) {
         *sample = 0.0;
     }
+    #[cfg(test)]
+    tests::before_sleep_deadline_check(data);
+    // Also cover a deadline reached while this block was being rendered (or a
+    // callback that was suspended mid-block). Already-buffered device audio is
+    // outside the renderer's control, but this block must leave as silence.
+    // Retain the entry deadline: pause acknowledgement may let the coordinator
+    // clear/rearm the shared gate before this suspended callback returns.
+    if sleep_deadline.is_some_and(|(gate, captured)| gate.callback_expired(captured)) {
+        data.fill(0.0);
+        return RenderReport::default();
+    }
     RenderReport {
         source_frames: copied / channels,
         transition_frame,
@@ -1460,6 +1648,11 @@ impl AudioBackend for RenderCore {
     }
 
     fn load(&mut self, uri: &str) -> Result<MediaInfo, AudioError> {
+        if self.native_budget.is_some() {
+            return Err(AudioError::UnsupportedFormat(
+                "native_source_requires_prepared_media".into(),
+            ));
+        }
         let path = uri_to_path(uri);
         let ext = path
             .extension()
@@ -1475,6 +1668,11 @@ impl AudioBackend for RenderCore {
         source: Box<dyn AudioSource>,
         ext: Option<String>,
     ) -> Result<MediaInfo, AudioError> {
+        if self.native_budget.is_some() {
+            return Err(AudioError::UnsupportedFormat(
+                "native_source_requires_prepared_media".into(),
+            ));
+        }
         let mss = MediaSourceStream::new(
             Box::new(DynMediaSource { inner: source }),
             Default::default(),
@@ -1521,6 +1719,18 @@ impl AudioBackend for RenderCore {
     }
 
     fn pause(&mut self) -> Result<(), AudioError> {
+        if self.shared.sleep_expired() {
+            // Expiry cannot wait for the normal transport fade: the callback
+            // is already silent and deliberately no longer advances that fade.
+            // Finish the pause before the coordinator clears/replaces the gate.
+            self.shared.playing.store(false, Ordering::Relaxed);
+            self.shared.reset_fade_shared();
+            self.pending_pause = false;
+            if let Some(pending) = self.pending_load.as_mut() {
+                pending.play_after = false;
+            }
+            return Ok(());
+        }
         if self.pending_load.is_none()
             && self.shared.current_deck().eof.load(Ordering::Acquire)
             && self
@@ -1861,6 +2071,10 @@ fn decode_loop_opened(
     output_rate: u32,
     output_channels: usize,
 ) {
+    if opened.native.is_some() {
+        native::decode_loop(opened, shared, stop, seek_to, output_rate);
+        return;
+    }
     let OpenedReader {
         mut reader,
         mut decoder,
@@ -2178,6 +2392,10 @@ fn open_media(
         decoder,
         track_id,
         gapless_supported,
+        native: None,
+        native_eof_check: None,
+        preparation_deadline: Arc::new(Mutex::new(None)),
+        native_decoder_storage: None,
     };
     let info = MediaInfo {
         duration_ms,
@@ -2195,6 +2413,11 @@ struct OpenedReader {
     decoder: Box<dyn symphonia::core::codecs::Decoder>,
     track_id: u32,
     gapless_supported: bool,
+    native: Option<native::QualifiedSource>,
+    native_eof_check: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+    preparation_deadline: Arc<Mutex<Option<std::time::Instant>>>,
+    // Decoder-returned planar PCM remains live in the decoder between calls.
+    native_decoder_storage: Option<NativePcmReservation>,
 }
 
 /// Capability of the actual Symphonia 0.5 demux/decoder path, not a file suffix.
@@ -2398,6 +2621,28 @@ mod tests {
     #[global_allocator]
     static CALLBACK_ALLOCATOR: CallbackAllocator = CallbackAllocator;
 
+    thread_local! {
+        static SLEEP_CALLBACK_BARRIERS: std::cell::Cell<Option<&'static SleepCallbackBarriers>> = const { std::cell::Cell::new(None) };
+    }
+
+    struct SleepCallbackBarriers {
+        entered: Barrier,
+        release: Barrier,
+        nonzero: AtomicBool,
+    }
+
+    /// Test-only rendezvous immediately before the callback's final deadline
+    /// check. Production callbacks do not contain this branch or any barrier.
+    pub(super) fn before_sleep_deadline_check(data: &mut [f32]) {
+        if let Some(barriers) = SLEEP_CALLBACK_BARRIERS.with(|barriers| barriers.take()) {
+            barriers
+                .nonzero
+                .store(data.iter().any(|sample| *sample != 0.0), Ordering::Release);
+            barriers.entered.wait();
+            barriers.release.wait();
+        }
+    }
+
     fn measure_memory<T>(call: impl FnOnce() -> T) -> (T, CallbackMemory) {
         CALLBACK_ALLOCATIONS.with(|counts| counts.set(Some(CallbackMemory::ZERO)));
         let result = call();
@@ -2422,6 +2667,168 @@ mod tests {
     impl AudioSource for FixtureSource {
         fn media_len(&self) -> Option<u64> {
             Some(self.0.get_ref().len() as u64)
+        }
+    }
+
+    #[test]
+    fn expired_sleep_gate_silences_the_first_callback_without_consuming_or_allocating() {
+        let gate = Arc::new(SleepDeadline::new());
+        let mut renderer = RenderCore::with_sleep_deadline(
+            RenderFormat {
+                sample_rate: 8_000,
+                channels: 1,
+            },
+            Some(gate.clone()),
+        )
+        .unwrap();
+        renderer
+            .load_source(
+                Box::new(FixtureSource(std::io::Cursor::new(pcm_bytes(
+                    &[8_000; 8_000],
+                    8_000,
+                    1,
+                )))),
+                Some("wav".into()),
+            )
+            .unwrap();
+        wait_for_eof(&renderer);
+        renderer.play().unwrap();
+        let buffered = renderer.buffered_frames();
+        let fade = renderer.shared.fade_done.load(Ordering::Relaxed);
+        *renderer.shared.next.lock().unwrap() = Some(prepared_samples(&[0.25; 8], 1));
+        gate.set(Some(1));
+        let mut output = [1.0; 128];
+        let (report, memory) = measure_memory(|| renderer.render_report(&mut output));
+        assert_eq!(output, [0.0; 128]);
+        assert_eq!(report, RenderReport::default());
+        assert_eq!(memory, CallbackMemory::ZERO);
+        assert_eq!(renderer.position_frames(), 0);
+        assert_eq!(renderer.buffered_frames(), buffered);
+        assert_eq!(renderer.shared.fade_done.load(Ordering::Relaxed), fade);
+        assert_eq!(
+            renderer
+                .shared
+                .next
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .mixed_frames,
+            0
+        );
+        assert!(renderer.take_next_event().is_none());
+        assert!(renderer.shared.playing.load(Ordering::Relaxed));
+        // Model the coordinator's required pause acknowledgement before it
+        // clears an expired deadline. The callback never mutates transport.
+        renderer.pause().unwrap();
+        gate.set(None);
+        renderer.render(&mut output);
+        assert_eq!(output, [0.0; 128], "cancel alone must not resume transport");
+        renderer.play().unwrap();
+        renderer.render(&mut output);
+        assert!(output.iter().any(|sample| *sample != 0.0));
+    }
+
+    #[test]
+    fn expired_sleep_pause_finishes_without_a_callback_fade() {
+        let gate = Arc::new(SleepDeadline::new());
+        let mut renderer = RenderCore::with_sleep_deadline(
+            RenderFormat {
+                sample_rate: 8_000,
+                channels: 1,
+            },
+            Some(gate.clone()),
+        )
+        .unwrap();
+        renderer
+            .load_source(
+                Box::new(FixtureSource(std::io::Cursor::new(pcm_bytes(
+                    &[8_000; 8_000],
+                    8_000,
+                    1,
+                )))),
+                Some("wav".into()),
+            )
+            .unwrap();
+        wait_for_eof(&renderer);
+        renderer.play().unwrap();
+        gate.set(Some(1));
+        renderer.pause().unwrap();
+        assert!(!renderer.pending_pause);
+        assert!(!renderer.shared.fade_active());
+        assert!(!renderer.shared.playing.load(Ordering::Relaxed));
+        gate.set(None);
+        let mut output = [1.0; 128];
+        renderer.render(&mut output);
+        assert_eq!(output, [0.0; 128]);
+        assert_eq!(renderer.position_frames(), 0);
+    }
+
+    #[test]
+    fn sleep_cleanup_cannot_release_pcm_from_a_suspended_callback() {
+        static BARRIERS: std::sync::OnceLock<SleepCallbackBarriers> = std::sync::OnceLock::new();
+        let barriers = BARRIERS.get_or_init(|| SleepCallbackBarriers {
+            entered: Barrier::new(2),
+            release: Barrier::new(2),
+            nonzero: AtomicBool::new(false),
+        });
+        for (initial, replacement, resume) in [
+            (Some(1_000), None, false),
+            (Some(1_000), Some(2_000), false),
+            (Some(1_000), None, true),
+            (None, None, false),
+            (None, Some(2_000), true),
+            (Some(2_000), None, true),
+        ] {
+            let gate = Arc::new(SleepDeadline::new());
+            gate.set_test_now_ms(999);
+            gate.set(initial);
+            let mut renderer = RenderCore::with_sleep_deadline(
+                RenderFormat {
+                    sample_rate: 8_000,
+                    channels: 1,
+                },
+                Some(gate.clone()),
+            )
+            .unwrap();
+            renderer
+                .load_source(
+                    Box::new(FixtureSource(std::io::Cursor::new(pcm_bytes(
+                        &[8_000; 8_000],
+                        8_000,
+                        1,
+                    )))),
+                    Some("wav".into()),
+                )
+                .unwrap();
+            wait_for_eof(&renderer);
+            renderer.play().unwrap();
+            let callback = renderer.output();
+            barriers.nonzero.store(false, Ordering::Release);
+            let worker = std::thread::spawn(move || {
+                SLEEP_CALLBACK_BARRIERS.with(|hook| hook.set(Some(barriers)));
+                let mut pcm = [1.0; 128];
+                callback.render(&mut pcm, 1);
+                pcm
+            });
+            barriers.entered.wait();
+            // The block already contains audible PCM, but has not returned to
+            // the device. Simulate suspend past the deadline while the owner
+            // resumes first, acknowledges pause and clears/rearms its timer.
+            // Some cases arm/shorten the timer only after callback entry.
+            gate.set(Some(1_000));
+            gate.set_test_now_ms(1_000);
+            renderer.pause().unwrap();
+            gate.set(replacement);
+            if resume {
+                renderer.play().unwrap();
+            }
+            assert!(!gate.expired());
+            barriers.release.wait();
+            let pcm = worker.join().unwrap();
+            assert!(barriers.nonzero.load(Ordering::Acquire));
+            assert_eq!(pcm, [0.0; 128], "replacement={replacement:?}");
+            assert_eq!(renderer.shared.playing.load(Ordering::Relaxed), resume);
         }
     }
 
@@ -2471,6 +2878,757 @@ mod tests {
         assert_eq!(output, [0.0; 7]);
         assert_eq!(memory, CallbackMemory::ZERO);
         assert_eq!(renderer.position_frames(), 0);
+    }
+
+    fn native_pcm_media(samples: &[i16], rate: u32, channels: u16) -> PreparedMedia {
+        PreparedMedia::open_interruptible(
+            Box::new(FixtureSource(std::io::Cursor::new(pcm_bytes(
+                samples, rate, channels,
+            )))),
+            Some("wav"),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap()
+    }
+
+    fn qualified_scripted_media(
+        events: Vec<ScriptedReaderEvent>,
+        declared_rate: u32,
+        base_rate: u32,
+    ) -> PreparedMedia {
+        let mut params = CodecParameters::new();
+        params
+            .for_codec(symphonia::core::codecs::CODEC_TYPE_PCM_F32LE)
+            .with_sample_rate(declared_rate)
+            .with_channels(Channels::FRONT_LEFT);
+        params.time_base = Some(symphonia::core::units::TimeBase::new(1, base_rate));
+        PreparedMedia {
+            opened: OpenedReader {
+                input_stop: Some(Arc::new(AtomicBool::new(false))),
+                initial_position: None,
+                reader: Box::new(ScriptedReader {
+                    source: None,
+                    tracks: vec![Track::new(1, params.clone())],
+                    events: events.into(),
+                    metadata: MetadataLog::default(),
+                }),
+                decoder: Box::new(ScriptedDecoder {
+                    params,
+                    reset_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                }),
+                track_id: 1,
+                gapless_supported: false,
+                native: None,
+                native_eof_check: None,
+                preparation_deadline: Arc::new(Mutex::new(None)),
+                native_decoder_storage: None,
+            },
+            info: MediaInfo {
+                sample_rate: Some(declared_rate),
+                channels: Some(1),
+                duration_ms: None,
+            },
+        }
+    }
+
+    #[test]
+    fn native_six_rates_preserve_real_short_tail_and_map_mono_once() {
+        for rate in [44_100, 48_000, 88_200, 96_000, 176_400, 192_000] {
+            let budget = NativePcmBudget::default();
+            let mut media = native_pcm_media(&[8_000; 37], rate, 1);
+            assert_eq!(
+                media
+                    .validate_native(
+                        budget.clone(),
+                        std::time::Instant::now() + std::time::Duration::from_secs(2)
+                    )
+                    .unwrap(),
+                NativeDecodedFormat {
+                    sample_rate: rate,
+                    channels: 1
+                }
+            );
+            let mut renderer = RenderCore::new_native(
+                RenderFormat {
+                    sample_rate: rate,
+                    channels: 2,
+                },
+                budget.clone(),
+            )
+            .unwrap();
+            renderer.load_prepared(media).unwrap();
+            wait_for_eof(&renderer);
+            renderer.shared.playing.store(true, Ordering::Relaxed);
+            renderer
+                .shared
+                .fade_gain
+                .store(1.0f32.to_bits(), Ordering::Relaxed);
+            let mut output = [1.0; 128];
+            let (report, memory) = measure_memory(|| renderer.render_report(&mut output));
+            assert_eq!(report.source_frames, 37);
+            assert_eq!(memory, CallbackMemory::ZERO);
+            assert!(output[..74]
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .all(|frame| frame[0] == frame[1] && frame[0] > 0.0));
+            assert_eq!(&output[74..], &[0.0; 54]);
+            assert!(renderer.finished());
+            drop(renderer);
+            assert_eq!(budget.usage(), NativePcmUsage::default());
+        }
+    }
+
+    #[test]
+    fn native_prepared_seek_discards_the_old_prefix_and_revalidates_the_same_reader() {
+        let samples: Vec<i16> = (0..2_000).collect();
+        let budget = NativePcmBudget::default();
+        let mut media = native_pcm_media(&samples, 48_000, 1);
+        media
+            .validate_native(
+                budget.clone(),
+                std::time::Instant::now() + std::time::Duration::from_secs(2),
+            )
+            .unwrap();
+        media.seek(20).unwrap();
+        assert_eq!(media.decoded_format().unwrap().sample_rate, 48_000);
+        let mut renderer = RenderCore::new_native(
+            RenderFormat {
+                sample_rate: 48_000,
+                channels: 2,
+            },
+            budget,
+        )
+        .unwrap();
+        renderer.load_prepared(media).unwrap();
+        wait_for_eof(&renderer);
+        assert_eq!(renderer.buffered_frames(), 1_040);
+        let actual = renderer
+            .shared
+            .current_deck()
+            .samples
+            .lock()
+            .unwrap()
+            .front()
+            .copied()
+            .unwrap();
+        assert_eq!(actual, 960.0 / 32768.0);
+    }
+
+    #[test]
+    fn native_metadata_mismatch_requires_a_proven_packet_timeline() {
+        let packet = || ScriptedReaderEvent::Packet(Packet::new_from_slice(1, 0, 512, &[1]));
+        let mut explained = qualified_scripted_media(vec![packet()], 22_050, 44_100);
+        assert_eq!(explained.declared_info().sample_rate, Some(22_050));
+        assert_eq!(
+            explained
+                .validate_native(
+                    NativePcmBudget::default(),
+                    std::time::Instant::now() + std::time::Duration::from_secs(2)
+                )
+                .unwrap()
+                .sample_rate,
+            44_100
+        );
+        let mut unverified = qualified_scripted_media(vec![packet()], 22_050, 22_050);
+        let error = unverified
+            .validate_native(
+                NativePcmBudget::default(),
+                std::time::Instant::now() + std::time::Duration::from_secs(2),
+            )
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("native_source_timeline_unverified"));
+        let mut expansion = qualified_scripted_media(
+            vec![ScriptedReaderEvent::Packet(Packet::new_from_slice(
+                1,
+                0,
+                256,
+                &[1],
+            ))],
+            22_050,
+            22_050,
+        );
+        assert_eq!(
+            expansion
+                .validate_native(
+                    NativePcmBudget::default(),
+                    std::time::Instant::now() + std::time::Duration::from_secs(2)
+                )
+                .unwrap()
+                .sample_rate,
+            44_100
+        );
+    }
+
+    #[test]
+    fn native_first_nonempty_block_rejects_bad_rates_layouts_and_nonfinite_samples() {
+        for marker in [4, 5, 6, 8] {
+            let mut media = qualified_scripted_media(
+                vec![ScriptedReaderEvent::Packet(Packet::new_from_slice(
+                    1,
+                    0,
+                    512,
+                    &[marker],
+                ))],
+                44_100,
+                44_100,
+            );
+            assert!(
+                media
+                    .validate_native(
+                        NativePcmBudget::default(),
+                        std::time::Instant::now() + std::time::Duration::from_secs(2)
+                    )
+                    .is_err(),
+                "marker {marker}"
+            );
+            assert!(media.decoded_format().is_none());
+        }
+        let mut empty_first = qualified_scripted_media(
+            vec![
+                ScriptedReaderEvent::Packet(Packet::new_from_slice(1, 0, 0, &[7])),
+                ScriptedReaderEvent::Packet(Packet::new_from_slice(1, 0, 512, &[1])),
+            ],
+            44_100,
+            44_100,
+        );
+        assert!(empty_first
+            .validate_native(
+                NativePcmBudget::default(),
+                std::time::Instant::now() + std::time::Duration::from_secs(2)
+            )
+            .is_ok());
+    }
+
+    #[test]
+    fn native_runtime_failures_never_publish_clean_eof_or_changed_samples() {
+        for failure in [
+            ScriptedReaderEvent::Packet(Packet::new_from_slice(1, 512, 512, &[3])),
+            ScriptedReaderEvent::Packet(Packet::new_from_slice(1, 512, 512, &[4])),
+            ScriptedReaderEvent::Packet(Packet::new_from_slice(1, 512, 512, &[255])),
+            ScriptedReaderEvent::Error(SymError::ResetRequired),
+        ] {
+            let budget = NativePcmBudget::default();
+            let mut media = qualified_scripted_media(
+                vec![
+                    ScriptedReaderEvent::Packet(Packet::new_from_slice(1, 0, 512, &[1])),
+                    failure,
+                ],
+                44_100,
+                44_100,
+            );
+            media
+                .validate_native(
+                    budget.clone(),
+                    std::time::Instant::now() + std::time::Duration::from_secs(2),
+                )
+                .unwrap();
+            let mut renderer = RenderCore::new_native(
+                RenderFormat {
+                    sample_rate: 44_100,
+                    channels: 2,
+                },
+                budget,
+            )
+            .unwrap();
+            renderer.load_prepared(media).unwrap();
+            let deck = renderer.shared.current_deck();
+            wait_for_decoder_result(&deck);
+            assert!(deck.decode_error.load(Ordering::Acquire));
+            assert!(!renderer.decoded_eof());
+            assert_eq!(renderer.buffered_frames(), 512);
+            assert!(deck
+                .samples
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|sample| *sample == 0.75));
+        }
+    }
+
+    #[test]
+    fn native_download_short_eof_cancellation_and_deadline_are_not_natural_ends() {
+        let budget = NativePcmBudget::default();
+        let mut media = native_pcm_media(&[8_000; 37], 48_000, 1);
+        media.set_native_eof_check(Arc::new(|| false));
+        media
+            .validate_native(
+                budget.clone(),
+                std::time::Instant::now() + std::time::Duration::from_secs(2),
+            )
+            .unwrap();
+        let mut renderer = RenderCore::new_native(
+            RenderFormat {
+                sample_rate: 48_000,
+                channels: 2,
+            },
+            budget,
+        )
+        .unwrap();
+        renderer.load_prepared(media).unwrap();
+        wait_for_decoder_result(&renderer.shared.current_deck());
+        assert!(!renderer.decoded_eof());
+        assert!(renderer.take_decode_failure());
+        for stopped in [false, true] {
+            let mut media = native_pcm_media(&[8_000; 37], 48_000, 1);
+            let stop = media.opened.input_stop.clone().unwrap();
+            stop.store(stopped, Ordering::Release);
+            let deadline = if stopped {
+                std::time::Instant::now() + std::time::Duration::from_secs(2)
+            } else {
+                std::time::Instant::now()
+            };
+            assert!(media
+                .validate_native(NativePcmBudget::default(), deadline)
+                .is_err());
+            assert!(stop.load(Ordering::Acquire));
+            assert!(media.decoded_format().is_none());
+        }
+    }
+
+    #[test]
+    fn native_budget_covers_copies_multirate_capacity_and_retired_references() {
+        let budget = NativePcmBudget::default();
+        let prefix = budget.reserve(1, 44_100, 8).unwrap();
+        assert_eq!(prefix.usage().duration_ns, 22_676);
+        let shared = prefix.clone();
+        drop(prefix);
+        assert_eq!(budget.usage().bytes, 8);
+        drop(shared);
+        let deck = Arc::new(Deck::new_native(192_000, &budget).unwrap());
+        let retired = deck.clone();
+        drop(deck);
+        assert_eq!(
+            budget.usage(),
+            NativePcmUsage {
+                duration_ns: 500_000_000,
+                bytes: 768_000
+            }
+        );
+        let remaining = budget.reserve(110_250, 44_100, 1_000).unwrap();
+        assert!(budget.reserve(1, 192_000, 8).is_err());
+        drop(remaining);
+        drop(retired);
+        let bytes = budget.reserve(0, 48_000, 8 * 1024 * 1024).unwrap();
+        assert!(budget.reserve(0, 48_000, 1).is_err());
+        drop(bytes);
+        assert_eq!(budget.usage(), NativePcmUsage::default());
+    }
+
+    #[test]
+    fn native_decoder_planar_pcm_is_precharged_and_lives_until_worker_retirement() {
+        struct CheckedSource {
+            cursor: std::io::Cursor<Vec<u8>>,
+            budget: NativePcmBudget,
+            checked: Arc<AtomicBool>,
+        }
+        impl std::io::Read for CheckedSource {
+            fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+                let usage = self.budget.usage();
+                assert!(
+                    usage.duration_ns >= 500_000_000 && usage.bytes >= 1_536_000,
+                    "PCM reservation must precede even the decoder probe's first source read"
+                );
+                self.checked.store(true, Ordering::Release);
+                std::io::Read::read(&mut self.cursor, bytes)
+            }
+        }
+        impl std::io::Seek for CheckedSource {
+            fn seek(&mut self, position: std::io::SeekFrom) -> std::io::Result<u64> {
+                std::io::Seek::seek(&mut self.cursor, position)
+            }
+        }
+        impl AudioSource for CheckedSource {}
+        let budget = NativePcmBudget::default();
+        let checked = Arc::new(AtomicBool::new(false));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let mut media = PreparedMedia::open_native_interruptible(
+            Box::new(CheckedSource {
+                cursor: std::io::Cursor::new(pcm_bytes(&[8_000; 37], 192_000, 1)),
+                budget: budget.clone(),
+                checked: checked.clone(),
+            }),
+            Some("wav"),
+            Arc::new(AtomicBool::new(false)),
+            budget.clone(),
+            deadline,
+        )
+        .unwrap();
+        assert!(checked.load(Ordering::Acquire));
+        assert_eq!(
+            budget.usage(),
+            NativePcmUsage {
+                duration_ns: 500_000_000,
+                bytes: 1_536_000
+            }
+        );
+        media.validate_native(budget.clone(), deadline).unwrap();
+        assert!(budget.usage().duration_ns > 500_000_000);
+        assert!(budget.usage().bytes > 1_536_000);
+        let mut renderer = RenderCore::new_native(
+            RenderFormat {
+                sample_rate: 192_000,
+                channels: 2,
+            },
+            budget.clone(),
+        )
+        .unwrap();
+        renderer.load_prepared(media).unwrap();
+        wait_for_eof(&renderer);
+        assert_eq!(
+            budget.usage(),
+            NativePcmUsage {
+                duration_ns: 1_000_000_000,
+                bytes: 2_304_000
+            }
+        );
+        renderer.shared.playing.store(true, Ordering::Relaxed);
+        let mut output = [0.0; 128];
+        assert_eq!(renderer.render_report(&mut output).source_frames, 37);
+        assert_eq!(
+            budget.usage().duration_ns,
+            1_000_000_000,
+            "draining leaves actual queue allocation and decoder PCM alive"
+        );
+        renderer.stop_decoder();
+        assert_eq!(
+            budget.usage(),
+            NativePcmUsage {
+                duration_ns: 500_000_000,
+                bytes: 768_000
+            }
+        );
+        drop(renderer);
+        assert_eq!(budget.usage(), NativePcmUsage::default());
+    }
+
+    #[test]
+    fn native_preparation_waits_on_live_budget_and_stops_the_actual_worker_at_deadline() {
+        let budget = NativePcmBudget::default();
+        let held = budget.reserve(144_000, 48_000, 144_000 * 8).unwrap();
+        let mut media = native_pcm_media(&[1; 37], 48_000, 1);
+        let stop = media.opened.input_stop.clone().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(50);
+        let worker_budget = budget.clone();
+        let worker = std::thread::spawn(move || media.validate_native(worker_budget, deadline));
+        assert!(worker
+            .join()
+            .unwrap()
+            .unwrap_err()
+            .to_string()
+            .contains("native_source_preparation_timeout"));
+        assert!(stop.load(Ordering::Acquire));
+        assert_eq!(budget.usage(), held.usage());
+        drop(held);
+        assert_eq!(budget.usage(), NativePcmUsage::default());
+    }
+
+    fn native_scripted_renderer_at_gate(budget: &NativePcmBudget) -> (RenderCore, Arc<Barrier>) {
+        let entered = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let mut media = qualified_scripted_media(
+            vec![
+                ScriptedReaderEvent::Packet(Packet::new_from_slice(1, 0, 512, &[1])),
+                ScriptedReaderEvent::Gate(entered.clone(), release.clone()),
+                ScriptedReaderEvent::Packet(Packet::new_from_slice(1, 512, 512, &[1])),
+            ],
+            44_100,
+            44_100,
+        );
+        media
+            .validate_native(
+                budget.clone(),
+                std::time::Instant::now() + std::time::Duration::from_secs(2),
+            )
+            .unwrap();
+        let mut renderer = RenderCore::new_native(
+            RenderFormat {
+                sample_rate: 44_100,
+                channels: 2,
+            },
+            budget.clone(),
+        )
+        .unwrap();
+        renderer.load_prepared(media).unwrap();
+        entered.wait();
+        assert_eq!(renderer.buffered_frames(), 512);
+        (renderer, release)
+    }
+
+    #[test]
+    fn native_runtime_shared_pcm_pressure_resumes_without_decoder_failure() {
+        for byte_pressure in [false, true] {
+            let budget = NativePcmBudget::default();
+            let (renderer, release) = native_scripted_renderer_at_gate(&budget);
+            let baseline = budget.usage();
+            let held = if byte_pressure {
+                budget.reserve(0, 44_100, 8 * 1024 * 1024 - baseline.bytes)
+            } else {
+                budget.reserve(88_200, 44_100, 88_200 * 8)
+            }
+            .unwrap();
+            let pressured = budget.usage();
+            release.wait();
+            std::thread::sleep(std::time::Duration::from_millis(40));
+            assert_eq!(renderer.buffered_frames(), 512);
+            assert!(!renderer.decoded_eof());
+            assert!(!renderer
+                .shared
+                .current_deck()
+                .decode_error
+                .load(Ordering::Acquire));
+            assert!(!renderer.decoder.as_ref().unwrap().0.is_finished());
+            assert_eq!(budget.usage(), pressured, "planar PCM stays charged");
+            drop(held);
+            wait_for_eof(&renderer);
+            assert_eq!(renderer.buffered_frames(), 1_024);
+            assert_eq!(budget.usage(), baseline);
+            assert!(renderer
+                .shared
+                .current_deck()
+                .samples
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|sample| *sample == 0.75));
+            drop(renderer);
+            assert_eq!(budget.usage(), NativePcmUsage::default());
+        }
+    }
+
+    #[test]
+    fn native_runtime_shared_pcm_pressure_remains_cancellable() {
+        let budget = NativePcmBudget::default();
+        let (mut renderer, release) = native_scripted_renderer_at_gate(&budget);
+        let held = budget.reserve(88_200, 44_100, 88_200 * 8).unwrap();
+        release.wait();
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        assert!(!renderer.decoder.as_ref().unwrap().0.is_finished());
+        let started = std::time::Instant::now();
+        renderer.stop_decoder();
+        assert!(started.elapsed() < std::time::Duration::from_millis(250));
+        assert_eq!(renderer.buffered_frames(), 512);
+        assert!(!renderer.take_decode_failure());
+        assert!(!renderer.decoded_eof());
+        assert_eq!(budget.usage().duration_ns, 2_500_000_000);
+        drop(held);
+        drop(renderer);
+        assert_eq!(budget.usage(), NativePcmUsage::default());
+    }
+
+    #[test]
+    fn native_successor_waits_for_whole_packet_room_without_starving_current() {
+        let budget = NativePcmBudget::default();
+        let (mut renderer, current_release) = native_scripted_renderer_at_gate(&budget);
+        let entered = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let mut successor = qualified_scripted_media(
+            vec![
+                ScriptedReaderEvent::Packet(Packet::new_from_slice(1, 0, 512, &[1])),
+                ScriptedReaderEvent::Gate(entered.clone(), release.clone()),
+                ScriptedReaderEvent::Packet(Packet::new_from_slice(1, 512, 22_050, &[9])),
+            ],
+            44_100,
+            44_100,
+        );
+        successor
+            .validate_native(
+                budget.clone(),
+                std::time::Instant::now() + std::time::Duration::from_secs(2),
+            )
+            .unwrap();
+        assert!(matches!(
+            renderer
+                .prepare_next_media_with_gain(
+                    successor,
+                    NextTrack {
+                        uri: "memory.wav".into(),
+                        track_id: "successor".into(),
+                        generation: 1,
+                        crossfade_ms: 1,
+                    },
+                    0.0,
+                )
+                .unwrap(),
+            PrepareResult::Prepared(_)
+        ));
+        entered.wait();
+        let next_deck = renderer
+            .shared
+            .next
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .deck
+            .clone();
+        let held = budget.reserve(22_050, 44_100, 22_050 * 8).unwrap();
+        let baseline = budget.usage();
+        release.wait();
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        assert_eq!(next_deck.samples.lock().unwrap().len() / 2, 512);
+        assert_eq!(
+            budget.usage(),
+            baseline,
+            "queue wait cannot pin a mapped copy"
+        );
+        let scratch = budget.reserve(512, 44_100, 512 * 8).unwrap();
+        drop(scratch);
+        current_release.wait();
+        wait_for_eof(&renderer);
+        assert_eq!(renderer.buffered_frames(), 1_024);
+        assert!(!renderer.take_decode_failure());
+        assert!(!next_deck.decode_error.load(Ordering::Acquire));
+        let (handle, ctl) = renderer.next_decoder.as_ref().unwrap();
+        assert!(ctl
+            .seek(handle, 0, std::time::Duration::from_millis(100))
+            .unwrap_err()
+            .to_string()
+            .contains("seek failed"));
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        assert!(!next_deck.eof.load(Ordering::Acquire));
+        assert!(!next_deck.decode_error.load(Ordering::Acquire));
+        let started = std::time::Instant::now();
+        renderer.clear_next();
+        assert!(started.elapsed() < std::time::Duration::from_millis(250));
+        drop(next_deck);
+        drop(held);
+        drop(renderer);
+        assert_eq!(budget.usage(), NativePcmUsage::default());
+    }
+
+    #[test]
+    fn native_real_compressed_packets_keep_decoder_trim_and_true_lengths() {
+        for (name, frames) in [
+            ("a.mp3", 10_000),
+            ("b.mp3", 12_345),
+            ("a.flac", 10_000),
+            ("a-alac.m4a", 10_000),
+        ] {
+            let (opened, info) = open_compressed(name);
+            let mut media = PreparedMedia { opened, info };
+            let budget = NativePcmBudget::default();
+            media
+                .validate_native(
+                    budget.clone(),
+                    std::time::Instant::now() + std::time::Duration::from_secs(2),
+                )
+                .unwrap();
+            let mut renderer = RenderCore::new_native(
+                RenderFormat {
+                    sample_rate: 44_100,
+                    channels: 2,
+                },
+                budget,
+            )
+            .unwrap();
+            renderer.load_prepared(media).unwrap();
+            wait_for_decoder_result(&renderer.shared.current_deck());
+            assert!(
+                renderer.decoded_eof(),
+                "{name}: declared {:?}, buffered {}, error {}",
+                renderer.source_rate,
+                renderer.buffered_frames(),
+                renderer
+                    .shared
+                    .current_deck()
+                    .decode_error
+                    .load(Ordering::Acquire)
+            );
+            assert_eq!(renderer.buffered_frames(), frames, "{name}");
+            assert!(!renderer
+                .shared
+                .current_deck()
+                .decode_error
+                .load(Ordering::Acquire));
+        }
+    }
+
+    #[test]
+    fn native_unapplied_aac_container_tail_is_rejected_instead_of_forging_eof() {
+        let (mut opened, _) = open_compressed("a-exact-timescale.m4a");
+        let base = opened
+            .reader
+            .default_track()
+            .unwrap()
+            .codec_params
+            .time_base
+            .unwrap();
+        let mut last = None;
+        while let Ok(packet) = opened.reader.next_packet() {
+            if packet.track_id() != opened.track_id {
+                continue;
+            }
+            let decoded = opened.decoder.decode(&packet).unwrap();
+            last = Some((packet.ts(), packet.dur(), decoded.frames()));
+        }
+        let (ts, duration, frames) = last.unwrap();
+        assert_eq!(ts, 10_240);
+        assert_eq!(frames, 1_024);
+        assert_ne!(
+            u128::from(duration) * u128::from(base.numer) * 44_100,
+            frames as u128 * u128::from(base.denom)
+        );
+        let (opened, info) = open_compressed("a-exact-timescale.m4a");
+        assert!(!opened.gapless_supported);
+        let mut media = PreparedMedia { opened, info };
+        let budget = NativePcmBudget::default();
+        media
+            .validate_native(
+                budget.clone(),
+                std::time::Instant::now() + std::time::Duration::from_secs(2),
+            )
+            .unwrap();
+        let mut renderer = RenderCore::new_native(
+            RenderFormat {
+                sample_rate: 44_100,
+                channels: 2,
+            },
+            budget,
+        )
+        .unwrap();
+        renderer.load_prepared(media).unwrap();
+        wait_for_decoder_result(&renderer.shared.current_deck());
+        assert_eq!(renderer.buffered_frames(), 10_240);
+        assert!(!renderer.decoded_eof());
+        assert!(renderer.take_decode_failure());
+    }
+
+    #[test]
+    fn native_requires_qualified_media_and_preserves_unqualified_successor_for_a_new_epoch() {
+        let budget = NativePcmBudget::default();
+        let mut renderer = RenderCore::new_native(
+            RenderFormat {
+                sample_rate: 48_000,
+                channels: 2,
+            },
+            budget.clone(),
+        )
+        .unwrap();
+        assert!(renderer
+            .load_prepared(native_pcm_media(&[1; 10], 48_000, 1))
+            .is_err());
+        let mut current = native_pcm_media(&[1; 10], 48_000, 1);
+        current
+            .validate_native(
+                budget.clone(),
+                std::time::Instant::now() + std::time::Duration::from_secs(2),
+            )
+            .unwrap();
+        renderer.load_prepared(current).unwrap();
+        let mut successor = native_pcm_media(&[1; 10], 48_000, 1);
+        successor
+            .validate_native(
+                budget,
+                std::time::Instant::now() + std::time::Duration::from_secs(2),
+            )
+            .unwrap();
+        successor.opened.gapless_supported = false;
+        assert!(!renderer.native_successor_eligible(&successor, 0, 0.0));
+        assert!(successor.decoded_format().is_some());
+        assert!(renderer.native_successor_eligible(&successor, 200, 0.0));
     }
 
     #[test]
@@ -3347,10 +4505,19 @@ mod tests {
                 Some(1) => (44_100, 512, 0.75),
                 Some(2) => (44_100, 32, 0.0),
                 Some(3) => (48_000, 512, -0.75),
+                Some(4) => (44_100, 512, f32::NAN),
+                Some(5) | Some(6) => (44_100, 512, 0.25),
+                Some(7) => (0, 0, 0.0),
+                Some(8) => (32_000, 512, 0.25),
+                Some(9) => (44_100, 22_050, 0.25),
                 _ => return Err(SymError::DecodeError("unknown scripted packet")),
             };
-            let mut buffer =
-                AudioBuffer::<f32>::new(frames as u64, SignalSpec::new(rate, Channels::FRONT_LEFT));
+            let layout = match packet.buf().first().copied() {
+                Some(5) => Channels::REAR_LEFT,
+                Some(6) => Channels::REAR_LEFT | Channels::REAR_RIGHT,
+                _ => Channels::FRONT_LEFT,
+            };
+            let mut buffer = AudioBuffer::<f32>::new(frames as u64, SignalSpec::new(rate, layout));
             buffer.render_reserved(Some(frames));
             buffer.chan_mut(0).fill(value);
             Ok(AudioBufferRef::F32(Cow::Owned(buffer)))
@@ -3396,6 +4563,10 @@ mod tests {
                 decoder: Box::new(decoder),
                 track_id: 1,
                 gapless_supported: false,
+                native: None,
+                native_eof_check: None,
+                preparation_deadline: Arc::new(Mutex::new(None)),
+                native_decoder_storage: None,
             },
             reset_count,
         )

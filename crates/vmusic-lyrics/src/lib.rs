@@ -19,7 +19,8 @@ use vmusic_core::{LyricDocument, LyricLine, LyricSource, LyricWord};
 
 mod structured;
 pub use structured::validate as validate_document;
-pub use structured::{parse_import, ImportError, MAX_BYTES, MAX_LINES, MAX_TIME_MS, MAX_WORDS};
+pub use structured::validate_presentation as validate_presentation_document;
+pub use structured::{parse_import, valid_agent_id, ImportError, ImportErrorCategory, MAX_AGENTS, MAX_AGENT_BYTES, MAX_LINE_AGENTS, MAX_PRESENTATION_TIME_MS, MAX_BYTES, MAX_LINES, MAX_TIME_MS, MAX_WORDS};
 
 /// Metadata tags we pull out of the header; the rest are ignored.
 #[derive(Debug, Default)]
@@ -96,6 +97,7 @@ pub fn parse_lrc_checked(input: &str) -> Result<LyricDocument, ImportError> {
         "mixed"
     };
     Ok(LyricDocument {
+        agents: Vec::new(),
         source: if lines.is_empty() {
             LyricSource::None
         } else {
@@ -199,6 +201,7 @@ fn parse_lyric_line(raw: &str) -> Result<Vec<LyricLine>, ImportError> {
         return Ok(runs
             .into_iter()
             .map(|(start_ms, _)| LyricLine {
+                vocal: None,
                 start_ms,
                 end_ms: None,
                 text: shared.clone(),
@@ -216,6 +219,8 @@ fn parse_lyric_line(raw: &str) -> Result<Vec<LyricLine>, ImportError> {
     };
 
     Ok(vec![LyricLine {
+
+        vocal: None,
         start_ms: *start_ms,
         end_ms: None,
         text,

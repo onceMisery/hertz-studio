@@ -22,6 +22,7 @@ pub(crate) enum PageEvent {
     FirstFrame(FrameKind),
     MediaPosition(u64),
     MediaPaused(u64),
+    MediaClockRevealed(u64),
 }
 
 #[derive(Deserialize)]
@@ -33,6 +34,7 @@ struct Receipt {
     frame_kind: Option<Backend>,
     position_ms: Option<u64>,
     pause_token: Option<u64>,
+    clock_token: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -43,6 +45,7 @@ enum Event {
     FirstFrame,
     MediaPosition,
     MediaPaused,
+    MediaClockRevealed,
 }
 
 #[derive(Deserialize)]
@@ -80,6 +83,9 @@ impl PageBinding {
         if receipt.session_id != self.session_id || receipt.generation != self.generation {
             return None;
         }
+        if !matches!(receipt.event, Event::MediaClockRevealed) && receipt.clock_token.is_some() {
+            return None;
+        }
         Some(match receipt.event {
             Event::PageHandshake
                 if receipt.frame_kind.is_none()
@@ -115,6 +121,17 @@ impl PageBinding {
                 }
                 PageEvent::MediaPaused(token)
             }
+            Event::MediaClockRevealed
+                if receipt.frame_kind.is_none()
+                    && receipt.position_ms.is_none()
+                    && receipt.pause_token.is_none() =>
+            {
+                let token = receipt.clock_token?;
+                if token == 0 || token > 9_007_199_254_740_991 {
+                    return None;
+                }
+                PageEvent::MediaClockRevealed(token)
+            }
             _ => return None,
         })
     }
@@ -128,6 +145,30 @@ mod tests {
             "wallpaper_session {{\"sessionId\":\"{}\",\"generation\":{},{} }}",
             binding.session_id, binding.generation, event
         )
+    }
+    #[test]
+    fn mirror_reveal_requires_native_binding_and_positive_safe_clock_token() {
+        let binding = PageBinding::new(42).unwrap();
+        let receipt = message(
+            &binding,
+            "\"event\":\"mediaClockRevealed\",\"clockToken\":7",
+        );
+        assert_eq!(
+            binding.parse(&receipt),
+            Some(PageEvent::MediaClockRevealed(7))
+        );
+        assert_eq!(PageBinding::new(42).unwrap().parse(&receipt), None);
+        for fields in [
+            "\"event\":\"mediaClockRevealed\"",
+            "\"event\":\"mediaClockRevealed\",\"clockToken\":0",
+            "\"event\":\"mediaClockRevealed\",\"clockToken\":9007199254740992",
+            "\"event\":\"mediaClockRevealed\",\"clockToken\":7,\"pauseToken\":1",
+            "\"event\":\"mediaClockRevealed\",\"clockToken\":7,\"positionMs\":1",
+            "\"event\":\"mediaClockRevealed\",\"clockToken\":7,\"frameKind\":\"video\"",
+            "\"event\":\"revealed\",\"clockToken\":7",
+        ] {
+            assert_eq!(binding.parse(&message(&binding, fields)), None, "{fields}");
+        }
     }
     #[test]
     fn readiness_requires_current_native_identity_and_typed_backend() {

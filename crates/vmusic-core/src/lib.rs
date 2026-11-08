@@ -17,7 +17,7 @@ pub use audio::{
 };
 pub use error::{http_status, AudioError, CoreError, LibraryError, Result, StoreError};
 pub use model::{
-    DeviceInfo, Favorite, FavoriteKind, LyricDocument, LyricLine, LyricOrigin, LyricSource,
+    DeviceInfo, Favorite, FavoriteKind, LyricAgent, LyricAgentKind, LyricDocument, LyricLine, LyricOrigin, LyricSource, LyricVocal, LyricVocalRole,
     LyricWord, PlayMode, PlayerSnapshot, Playlist, PlaylistId, Track, TrackId, TrackSource,
     PROTOCOL_VERSION,
 };
@@ -46,22 +46,26 @@ mod tests {
     #[test]
     fn lyric_lookup_finds_the_active_line() {
         let doc = LyricDocument {
+            agents: Vec::new(),
             source: LyricSource::Sidecar,
             offset_ms: 0,
             lines: vec![
                 LyricLine {
+                    vocal: None,
                     start_ms: 0,
                     end_ms: Some(1000),
                     text: "a".into(),
                     words: vec![],
                 },
                 LyricLine {
+                    vocal: None,
                     start_ms: 1000,
                     end_ms: Some(2000),
                     text: "b".into(),
                     words: vec![],
                 },
                 LyricLine {
+                    vocal: None,
                     start_ms: 2000,
                     end_ms: None,
                     text: "c".into(),
@@ -81,7 +85,9 @@ mod tests {
         // Before the first line there is nothing active yet.
         assert_eq!(
             LyricDocument {
+                agents: Vec::new(),
                 lines: vec![LyricLine {
+                    vocal: None,
                     start_ms: 500,
                     end_ms: None,
                     text: "x".into(),

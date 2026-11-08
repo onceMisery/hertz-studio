@@ -81,8 +81,9 @@ button.btn {
 /* ---------- 图标按钮 ---------- */
 
 .iconbtn {
-  width: 36px;
-  height: 36px;
+  width: 40px;
+  height: 40px;
+  flex-shrink: 0;
   border-radius: var(--r-md);
   border: 1px solid var(--field-border);
   background: var(--field-bg);
@@ -92,20 +93,21 @@ button.btn {
   justify-content: center;
   cursor: pointer;
   padding: 0;
+  touch-action: manipulation;
   transition: color var(--dur-base) var(--ease-out),
     background var(--dur-base) var(--ease-out),
     border-color var(--dur-base) var(--ease-out),
     transform var(--dur-base) var(--ease-out);
 }
-.iconbtn:hover {
+.iconbtn:hover:not(:disabled) {
   background: var(--field-bg-hover);
   border-color: var(--field-border-strong);
   color: var(--text);
-  transform: translateY(-1px);
 }
-.iconbtn:active { transform: translateY(0) scale(0.94); }
+.iconbtn:active:not(:disabled) { transform: scale(0.96); }
+.iconbtn:disabled { opacity: 0.4; cursor: default; transform: none; }
 .iconbtn:focus-visible { outline: var(--focus-ring); outline-offset: var(--focus-offset); }
-.iconbtn svg { width: 19px; height: 19px; }
+.iconbtn svg { width: 19px; height: 19px; flex: none; pointer-events: none; }
 /* 开启态（主题色按钮、舞台控制按钮等）用香槟金标注「正在生效」 */
 .iconbtn.active,
 #stage-control-btn.active {
@@ -113,3 +115,8 @@ button.btn {
   border-color: rgba(var(--highlight-rgb), 0.44);
   background: rgba(var(--highlight-rgb), 0.1);
 }
+
+@media (prefers-reduced-motion: reduce) {
+  .iconbtn { transition: none; }
+}
+body.reduce-motion .iconbtn { transition: none; }

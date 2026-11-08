@@ -18,6 +18,7 @@
     });
   }
   function selectView(next) {
+    if (window.PlayerTransitions) PlayerTransitions.cancel('cover');
     view = next; el.modal.dataset.view = next;
     el.coverTab.setAttribute('aria-pressed', String(next === 'cover'));
     el.lyricsTab.setAttribute('aria-pressed', String(next === 'lyrics')); positionLine();
@@ -79,7 +80,7 @@
   }
   function emptyState() {
     if (!opened) return;
-    el.empty.textContent = lyricStatus === 'loading' ? '歌词加载中' : lyricStatus === 'error' ? '歌词加载失败' : Stage.presentation().track ? '暂无歌词' : '播放一首音乐';
+    el.empty.textContent = lyricStatus === 'unsupported' || Stage.lyricStatus && Stage.lyricStatus() === 'unsupported' ? '此歌词包含多人声，当前阅读视图暂不支持；请使用桌面歌词' : lyricStatus === 'loading' ? '歌词加载中' : lyricStatus === 'error' ? '歌词加载失败' : Stage.presentation().track ? '暂无歌词' : '播放一首音乐';
   }
   function paintQueue(nextFocus) {
     if (!opened || el.queuePane.hidden) return;
@@ -204,11 +205,12 @@
     move(document.getElementById('ctx-menu'), el.modal, moves);
     background = Array.from(document.querySelectorAll('.topbar,.app,.bar,#capsule,.qf-lattice'));
     background = background.map(function (n) { var old = n.inert; n.inert = true; return { node: n, inert: old }; });
-    selectView(view); tick(); resize = new ResizeObserver(positionLine); resize.observe(el.scroll);
+    selectView(view); tick(); resize = new ResizeObserver(positionLine); resize.observe(el.scroll); resize.observe(el.lines);
     document.getElementById('np-close').focus({ preventScroll: true });
   }
   function close(options) {
     if (!opened) return;
+    if (window.PlayerTransitions) PlayerTransitions.cancel('cover');
     opened = false;
     actions.closeTop();
     if (document.fullscreenElement === el.modal) document.exitFullscreen().catch(function () {});

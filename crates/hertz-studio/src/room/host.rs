@@ -4,7 +4,8 @@ use super::contract::*;
 use super::host_jobs::{self, Completion, PreparedAction, Reply};
 use super::manager::{Envelope, Session};
 use super::presentation::{
-    Boundaries, Boundary, MixSettings, MixerTimeline, PresentationCatalog, PresentedTrack,
+    Boundaries, Boundary, MixSettings, MixerTimeline, PositionAnchor, PresentationCatalog,
+    PresentedTrack,
 };
 use super::producer::{FailureStage, Producer, ProducerEvent, Source};
 use super::receiver::{self, ReceiverEvent, ReceiverHandle, ReceiverRegistry};
@@ -24,7 +25,9 @@ use vmusic_core::room::{
 use vmusic_core::{DspParams, PlayMode};
 use vmusic_lan::clock::{ClockMapping, MonotonicClock};
 use vmusic_lan::members::Permissions;
-use vmusic_lan::protocol::{AudioFormat, ControlFrame, Counter, PcmBlock, Plan, StreamIdentity};
+use vmusic_lan::protocol::{
+    AudioFormat, ControlFrame, Counter, FormatMode, PcmBlock, Plan, StreamIdentity,
+};
 use vmusic_lan::server::{Inbound, RoomServer};
 
 type ChatJob = std::pin::Pin<Box<dyn std::future::Future<Output = RoomResult<Value>> + Send>>;
@@ -37,6 +40,7 @@ struct Endpoint {
     audio: bool,
     last_output: Option<u64>,
     plan: Option<Plan>,
+    declared_epochs: HashSet<u64>,
     committed: bool,
     ready: bool,
     rejoin: JoinRetry,
@@ -90,6 +94,15 @@ struct SuccessorTarget {
     current: u64,
     next: u64,
 }
+enum DeferredSuccessor {
+    Prepared(Box<Source>),
+    Rejected {
+        instance: u64,
+        token: u64,
+        library_revision: u64,
+        error: RoomError,
+    },
+}
 struct Owner {
     state: Arc<AppState>,
     server: RoomServer,
@@ -98,6 +111,13 @@ struct Owner {
     host_name: String,
     cover: Option<String>,
     format: AudioFormat,
+    format_mode: FormatMode,
+    next_format_id: u32,
+    native_budget: vmusic_audio::render::NativePcmBudget,
+    epoch_ends: HashMap<u64, (AudioFormat, u64)>,
+    epoch_cutoffs: HashMap<u64, u64>,
+    deferred_successors: HashMap<u64, DeferredSuccessor>,
+    source_formats: HashMap<u64, (u32, Option<u32>)>,
     library: SharedLibrary,
     chat: Option<super::chat::ChatService>,
     chat_error: Option<String>,
@@ -168,6 +188,15 @@ fn local_mapping(now: u64) -> ClockMapping {
         observation_span_ns: 1_000_000_000,
     }
 }
+fn frame_position_ms(frames: u64, rate: u32) -> u64 {
+    // Every room rate is >= 44.1kHz, so this quotient fits u64. The
+    // intermediate product must stay in u128 for long-lived room counters.
+    (u128::from(frames) * 1000 / u128::from(rate)) as u64
+}
+fn position_frames(position_ms: u64, rate: u32) -> RoomResult<u64> {
+    u64::try_from(u128::from(position_ms) * u128::from(rate) / 1000)
+        .map_err(|_| RoomError::exhausted())
+}
 fn output_options(
     settings: &OutputSettings,
     clock: &MonotonicClock,
@@ -187,6 +216,7 @@ pub(super) struct HostOptions {
     pub host_name: String,
     pub cover: Option<String>,
     pub address: SocketAddr,
+    pub format_mode: FormatMode,
     pub sample_rate: u32,
     pub local_output: bool,
     pub discoverable: bool,
@@ -203,6 +233,7 @@ pub(crate) async fn start(
         host_name,
         cover,
         address,
+        format_mode,
         sample_rate,
         local_output,
         discoverable,
@@ -242,9 +273,16 @@ pub(crate) async fn start(
     let room = Uuid::new_v4();
     let instance = Uuid::new_v4();
     let clock = MonotonicClock::default();
-    let (server, inbound) = RoomServer::bind(address, room, instance, &identity, clock.clone())
-        .await
-        .map_err(transport_error)?;
+    let (server, inbound) = RoomServer::bind_with_mode(
+        address,
+        room,
+        instance,
+        &identity,
+        clock.clone(),
+        format_mode,
+    )
+    .await
+    .map_err(transport_error)?;
     let local_identity = StreamIdentity {
         room_id: room,
         instance_id: instance,
@@ -257,11 +295,13 @@ pub(crate) async fn start(
     let output = super::output_preferences::load(&state.db).await?;
     let preferences = super::output_preferences::Preferences::spawn(state.db.clone());
     let (local, local_events) = if local_output {
-        let (handle, events) = receiver::spawn(
+        let (handle, events) = receiver::spawn_configured(
             output_options(&output, &clock, sample_rate),
             local_identity,
             clock.clone(),
             lease.receiver.clone(),
+            format_mode == FormatMode::Native,
+            vmusic_lan::buffer::PcmBudget::endpoint(),
         )
         .await
         .map_err(transport_error)?;
@@ -292,7 +332,10 @@ pub(crate) async fn start(
         Ok(chat) => (Some(chat), None),
         Err(e) => (None, Some(e.message)),
     };
-    let (producer, render) = Producer::spawn(clock.clone()).map_err(transport_error)?;
+    let native_budget = vmusic_audio::render::NativePcmBudget::default();
+    let (producer, render) =
+        Producer::spawn_configured(clock.clone(), format_mode, native_budget.clone())
+            .map_err(transport_error)?;
     let advertisement = if discoverable {
         vmusic_lan::discovery::Advertisement::start(&name, server.address, room, server.fingerprint)
             .ok()
@@ -310,6 +353,13 @@ pub(crate) async fn start(
         host_name,
         cover,
         format,
+        format_mode,
+        next_format_id: 1,
+        native_budget,
+        epoch_ends: HashMap::new(),
+        epoch_cutoffs: HashMap::new(),
+        deferred_successors: HashMap::new(),
+        source_formats: HashMap::new(),
         library,
         chat,
         chat_error,
@@ -535,6 +585,9 @@ impl Owner {
                 "后继准备回执积压，请重新创建房间",
             ));
         }
+        if let Some(source) = &source {
+            self.remember_source_format(source);
+        }
         let instance = source.as_ref().map(|source| source.instance);
         self.producer
             .next(epoch, source, crossfade_ms)
@@ -546,6 +599,16 @@ impl Owner {
             .or_default()
             .push_back(instance);
         Ok(())
+    }
+    fn remember_source_format(&mut self, source: &Source) {
+        if let Some(media) = &source.media {
+            if let Some(format) = media.decoded_format() {
+                self.source_formats.insert(
+                    source.instance,
+                    (format.sample_rate, media.declared_info().sample_rate),
+                );
+            }
+        }
     }
     async fn remember_presentation(&mut self, instance: u64, track: &str) -> RoomResult<()> {
         let view = if let Some(resource) = self.library.resource_for(track).await {
@@ -625,6 +688,19 @@ impl Owner {
         )
     }
     async fn dispatch_local(&mut self, envelope: Envelope) -> RoomResult<()> {
+        if envelope.media_identity.as_ref().is_some_and(|identity| {
+            !identity.matches_room_snapshot(
+                &self
+                    .projection
+                    .read()
+                    .unwrap_or_else(|error| error.into_inner()),
+            )
+        }) {
+            let _ = envelope
+                .reply
+                .send(Err(RoomError::new("media_stale", "系统媒体会话已变化")));
+            return Ok(());
+        }
         match envelope.request {
             LocalRequest::TestOutput => {
                 let receiver = self.local.clone().filter(|_| {
@@ -700,13 +776,21 @@ impl Owner {
                 let clock = self.clock.clone();
                 let identity = self.local_identity;
                 let registry = self.receiver_registry.clone();
+                let native = self.format_mode == FormatMode::Native;
                 self.jobs.spawn(async move {
                     let _ = registry.close_current().await;
                     let result = if enabled {
-                        receiver::spawn(options, identity, clock, registry)
-                            .await
-                            .map(Some)
-                            .map_err(transport_error)
+                        receiver::spawn_configured(
+                            options,
+                            identity,
+                            clock,
+                            registry,
+                            native,
+                            vmusic_lan::buffer::PcmBudget::endpoint(),
+                        )
+                        .await
+                        .map(Some)
+                        .map_err(transport_error)
                     } else {
                         Ok(None)
                     };
@@ -987,7 +1071,11 @@ impl Owner {
                     Err(error) => {
                         let c = self.candidate.take().unwrap();
                         self.scheduler
-                            .fail_preparing(c.scheduler_plan, timeline::PlanFailure::DecodeFailed);
+                            .try_fail_preparing(
+                                c.scheduler_plan,
+                                timeline::PlanFailure::DecodeFailed,
+                            )
+                            .map_err(|_| RoomError::exhausted())?;
                         self.error = Some(error.message);
                     }
                 }
@@ -1007,13 +1095,59 @@ impl Owner {
                 }
                 self.source_jobs.remove(&(1, epoch));
                 if library_revision != self.library.revision().await {
-                    self.successor_targets.remove(&epoch);
+                    // A share edit expires the work, not the selected instance.
+                    // Keep that identity even when the old epoch has sealed.
+                    self.successor_tokens.remove(&epoch);
+                    if self.format_mode == FormatMode::Fixed {
+                        self.successor_targets.remove(&epoch);
+                    }
                     return self.prepare_successor_for(epoch, current).await;
                 }
                 match result {
-                    Ok(source) => self.send_successor(epoch, Some(source), self.crossfade_ms)?,
+                    Ok(source) => {
+                        let cross_rate = self.format_mode == FormatMode::Native
+                            && self.epoch_plan(epoch).is_some_and(|plan| {
+                                source
+                                    .media
+                                    .as_ref()
+                                    .and_then(|media| media.decoded_format())
+                                    .is_none_or(|format| {
+                                        format.sample_rate != plan.format.sample_rate
+                                    })
+                            });
+                        if cross_rate || self.epoch_ends.contains_key(&epoch) {
+                            let instance = source.instance;
+                            self.deferred_successors
+                                .insert(epoch, DeferredSuccessor::Prepared(Box::new(source)));
+                            if !self.epoch_ends.contains_key(&epoch) {
+                                self.send_successor(epoch, None, 0)?;
+                            } else if self.candidate.is_none() && self.scheduled.is_none() {
+                                self.internal(Playback::Pick {
+                                    instance_id: Counter(instance),
+                                })
+                                .await?;
+                            }
+                        } else {
+                            self.send_successor(epoch, Some(source), self.crossfade_ms)?;
+                        }
+                    }
                     Err(e) => {
-                        self.successor_targets.remove(&epoch);
+                        if self.format_mode == FormatMode::Native {
+                            if let Some(target) = self.successor_targets.get(&epoch) {
+                                self.error = Some(e.message.clone());
+                                self.deferred_successors.insert(
+                                    epoch,
+                                    DeferredSuccessor::Rejected {
+                                        instance: target.next,
+                                        token,
+                                        library_revision,
+                                        error: e.clone(),
+                                    },
+                                );
+                            }
+                        } else {
+                            self.successor_targets.remove(&epoch);
+                        }
                         // This is speculative work for the next track. The
                         // current source is still playing; a real Next request
                         // will retry through Source and report its own failure.
@@ -1074,6 +1208,18 @@ impl Owner {
             .checked_add(
                 u64::try_from(
                     u128::from(frame) * 1_000_000_000 / u128::from(plan.format.sample_rate),
+                )
+                .map_err(|_| RoomError::exhausted())?,
+            )
+            .ok_or_else(RoomError::exhausted)
+    }
+    fn end_time(plan: &Plan, frame: u64) -> RoomResult<u64> {
+        plan.anchor_ns
+            .0
+            .checked_add(
+                u64::try_from(
+                    (u128::from(frame) * 1_000_000_000)
+                        .div_ceil(u128::from(plan.format.sample_rate)),
                 )
                 .map_err(|_| RoomError::exhausted())?,
             )
@@ -1161,13 +1307,26 @@ impl Owner {
         ];
         self.local_pcm_epochs
             .retain(|epoch| epochs.contains(&Some(*epoch)));
+        for endpoint in self.endpoints.values_mut() {
+            endpoint
+                .declared_epochs
+                .retain(|epoch| epochs.contains(&Some(*epoch)));
+        }
         self.render_heads
             .retain(|epoch, _| epochs.contains(&Some(*epoch)));
         self.rendered_until
             .retain(|epoch, _| epochs.contains(&Some(*epoch)));
+        self.epoch_ends
+            .retain(|epoch, _| epochs.contains(&Some(*epoch)));
+        self.epoch_cutoffs
+            .retain(|epoch, _| epochs.contains(&Some(*epoch)));
+        self.deferred_successors
+            .retain(|epoch, _| epochs.contains(&Some(*epoch)));
         self.boundaries.retain_epochs(&epochs);
         let retained = self.presentation_instances();
         self.presentation_catalog.retain(&retained);
+        self.source_formats
+            .retain(|instance, _| retained.contains(instance));
         self.source_jobs.retain(|(_, epoch), task| {
             let keep = epochs.contains(&Some(*epoch));
             if !keep {
@@ -1201,12 +1360,21 @@ impl Owner {
                 .map(|b| b.at)
                 .filter(|at| *at <= now);
             match (switch, boundary) {
-                (Some(at), other) if other.is_none_or(|b| at <= b) => {
+                (Some(at), other)
+                    if other.is_none_or(|b| {
+                        at < b || (at == b && self.format_mode == FormatMode::Fixed)
+                    }) =>
+                {
                     let previous = self
                         .audible
                         .as_ref()
                         .map(|a| (a.target.track, a.target.playing));
                     self.audible = self.scheduled.take();
+                    if let Some(a) = &self.audible {
+                        if a.target.playing {
+                            self.format = a.plan.format;
+                        }
+                    }
                     if let Some(a) = &self.audible {
                         self.scheduler.observe_transition(a.target);
                     }
@@ -1216,6 +1384,18 @@ impl Owner {
                             a.target.playing && previous != Some((a.target.track, true)),
                         )
                         .await;
+                    }
+                    if let Some((epoch, head)) = self
+                        .audible
+                        .as_ref()
+                        .filter(|a| a.target.playing)
+                        .and_then(|a| {
+                            self.render_heads
+                                .get(&a.plan.epoch.0)
+                                .map(|head| (a.plan.epoch.0, *head))
+                        })
+                    {
+                        self.prepare_successor_for(epoch, head).await?;
                     }
                     if self.candidate.as_ref().is_some_and(|c| !c.materialized) {
                         self.materialize().await?;
@@ -1237,23 +1417,62 @@ impl Owner {
                             a.target.position_ms =
                                 a.target.position_ms.saturating_add(elapsed / 1_000_000);
                             a.position_frames = a.position_frames.saturating_add(
-                                (u128::from(elapsed) * u128::from(self.format.sample_rate)
+                                (u128::from(elapsed) * u128::from(a.plan.format.sample_rate)
                                     / 1_000_000_000) as u64,
                             );
                             a.target.playing = false;
+                            if self.format_mode == FormatMode::Native {
+                                a.position_frames = boundary.position_frames;
+                                a.target.position_ms = frame_position_ms(
+                                    boundary.position_frames,
+                                    a.plan.format.sample_rate,
+                                );
+                            }
                             a.position_at_ns = boundary.at;
                             self.scheduler.observe_transition(a.target);
                         }
                         if self.scheduled.is_none() && self.candidate.is_none() {
-                            if let Err(error) = self.internal(Playback::Next).await {
-                                self.error = Some(error.message);
+                            let command = if self.format_mode == FormatMode::Native
+                                && !self.epoch_ends.contains_key(&boundary.epoch)
+                            {
+                                None
+                            } else if self.format_mode == FormatMode::Native {
+                                match self.deferred_successors.get(&boundary.epoch) {
+                                    Some(DeferredSuccessor::Prepared(source)) => {
+                                        Some(Playback::Pick {
+                                            instance_id: Counter(source.instance),
+                                        })
+                                    }
+                                    Some(DeferredSuccessor::Rejected { error, .. }) => {
+                                        self.error = Some(error.message.clone());
+                                        None
+                                    }
+                                    None => None,
+                                }
+                            } else {
+                                Some(Playback::Next)
+                            };
+                            if let Some(command) = command {
+                                if let Err(error) = self.internal(command).await {
+                                    self.error = Some(error.message);
+                                }
+                            } else if self.format_mode == FormatMode::Native
+                                && self.epoch_ends.contains_key(&boundary.epoch)
+                                && self.successor_targets.contains_key(&boundary.epoch)
+                            {
+                                // A very short second epoch can seal before the
+                                // third intent is allowed to open its decoder.
+                                self.prepare_successor_for(boundary.epoch, boundary.instance)
+                                    .await?;
                             }
                         }
                     } else {
                         if let Some(a) = &mut self.audible {
                             a.target.track = TrackInstanceId(boundary.instance);
-                            a.target.position_ms = boundary.position_frames * 1000
-                                / u64::from(self.format.sample_rate);
+                            a.target.position_ms = frame_position_ms(
+                                boundary.position_frames,
+                                a.plan.format.sample_rate,
+                            );
                             a.position_at_ns = boundary.at;
                             a.position_frames = boundary.position_frames;
                             self.scheduler.observe_transition(a.target);
@@ -1281,10 +1500,12 @@ impl Owner {
             c.materialized && now.saturating_add(MIN_COMMIT_NS) > c.wire.anchor_ns.0
         }) {
             let candidate = self.candidate.take().unwrap();
-            self.scheduler.fail_preparing(
-                candidate.scheduler_plan,
-                timeline::PlanFailure::OutputNotReady,
-            );
+            self.scheduler
+                .try_fail_preparing(
+                    candidate.scheduler_plan,
+                    timeline::PlanFailure::OutputNotReady,
+                )
+                .map_err(|_| RoomError::exhausted())?;
             self.producer
                 .cancel(candidate.wire.epoch.0)
                 .map_err(transport_error)?;
@@ -1407,6 +1628,7 @@ impl Owner {
                         audio: false,
                         last_output: None,
                         plan: None,
+                        declared_epochs: HashSet::new(),
                         committed: false,
                         ready: false,
                         rejoin: JoinRetry::default(),
@@ -1539,6 +1761,11 @@ impl Owner {
                 ControlFrame::Prepare { plan } => {
                     receiver.prepare(self.local_identity, plan.clone())
                 }
+                ControlFrame::EpochEnd {
+                    epoch,
+                    format_id,
+                    end_frame,
+                } => receiver.epoch_end(self.local_identity, epoch.0, *format_id, end_frame.0),
                 ControlFrame::Commit {
                     epoch,
                     plan_id,
@@ -1573,6 +1800,11 @@ impl Owner {
     fn send_plan_frame(&mut self, member: Uuid, frame: &ControlFrame) -> RoomResult<bool> {
         if member == OWNER {
             self.send(member, frame)?;
+            if let ControlFrame::Prepare { plan } = frame {
+                if let Some(endpoint) = self.endpoints.get_mut(&member) {
+                    endpoint.declared_epochs.insert(plan.epoch.0);
+                }
+            }
             return Ok(true);
         }
         let Some(identity) = self
@@ -1583,7 +1815,14 @@ impl Owner {
             return Ok(false);
         };
         match self.server.transport.send(member, identity, frame) {
-            Ok(()) => Ok(true),
+            Ok(()) => {
+                if let ControlFrame::Prepare { plan } = frame {
+                    if let Some(endpoint) = self.endpoints.get_mut(&member) {
+                        endpoint.declared_epochs.insert(plan.epoch.0);
+                    }
+                }
+                Ok(true)
+            }
             Err(vmusic_lan::server::TransportError::Closed)
             | Err(vmusic_lan::server::TransportError::Access(
                 vmusic_lan::members::AccessError::Denied,
@@ -1660,11 +1899,21 @@ impl Owner {
             plan.join_frame = Counter(
                 u64::try_from(
                     u128::from(target.saturating_sub(plan.anchor_ns.0))
-                        * u128::from(self.format.sample_rate)
+                        * u128::from(plan.format.sample_rate)
                         / 1_000_000_000,
                 )
                 .map_err(|_| RoomError::exhausted())?,
             );
+        }
+        let limit = self
+            .epoch_ends
+            .get(&plan.epoch.0)
+            .map(|(_, end)| *end)
+            .into_iter()
+            .chain(self.epoch_cutoffs.get(&plan.epoch.0).copied())
+            .min();
+        if limit.is_some_and(|end| plan.join_frame.0 >= end) {
+            return Ok(());
         }
         if member == OWNER && !self.endpoints.contains_key(&OWNER) {
             self.endpoints.insert(
@@ -1679,6 +1928,7 @@ impl Owner {
                         .filter(|r| r.status().output_ready)
                         .map(|_| self.clock.now_ns()),
                     plan: None,
+                    declared_epochs: HashSet::new(),
                     committed: false,
                     ready: false,
                     rejoin: JoinRetry::default(),
@@ -1709,8 +1959,20 @@ impl Owner {
         endpoint.committed = false;
         endpoint.ready = false;
         let epoch = plan.epoch.0;
-        if self.send_plan_frame(member, &ControlFrame::Prepare { plan })? && member == OWNER {
-            self.local_pcm_epochs.insert(epoch);
+        if self.send_plan_frame(member, &ControlFrame::Prepare { plan })? {
+            if member == OWNER {
+                self.local_pcm_epochs.insert(epoch);
+            }
+            if let Some((format, end)) = self.epoch_ends.get(&epoch) {
+                self.send_plan_frame(
+                    member,
+                    &ControlFrame::EpochEnd {
+                        epoch: Counter(epoch),
+                        format_id: format.id,
+                        end_frame: Counter(*end),
+                    },
+                )?;
+            }
         }
         Ok(())
     }
@@ -1784,25 +2046,49 @@ impl Owner {
             Err(e) => {
                 let c = self.candidate.take().unwrap();
                 self.scheduler
-                    .fail_preparing(c.scheduler_plan, timeline::PlanFailure::DecodeFailed);
+                    .try_fail_preparing(c.scheduler_plan, timeline::PlanFailure::DecodeFailed)
+                    .map_err(|_| RoomError::exhausted())?;
                 self.error = Some(e.message);
                 return Ok(());
             }
         };
+        if self.library.resource_for(&track).await.is_none() {
+            let c = self.candidate.take().unwrap();
+            self.scheduler
+                .try_fail_preparing(c.scheduler_plan, timeline::PlanFailure::DecodeFailed)
+                .map_err(|_| RoomError::exhausted())?;
+            self.error = Some("选定歌曲已不在分享范围，操作未提交".into());
+            return Ok(());
+        }
         self.remember_presentation(target.track.0, &track).await?;
+        let reserved_epoch = self.deferred_successors.iter().find_map(|(old, successor)| {
+            matches!(successor, DeferredSuccessor::Prepared(source) if source.instance == target.track.0 && source.position_ms == target.position_ms).then_some(*old)
+        });
+        if let Some(old) = reserved_epoch {
+            if let Some(DeferredSuccessor::Prepared(source)) = self.deferred_successors.remove(&old)
+            {
+                return self.install_source(epoch, Some(*source));
+            }
+        }
         let library_revision = self.library.revision().await;
         let state = self.state.clone();
         let library = self.library.clone();
         let loudness_mode = self.loudness_mode.clone();
+        let format_mode = self.format_mode;
+        let native_budget = self.native_budget.clone();
         self.candidate.as_mut().unwrap().loading = true;
         let task = self.jobs.spawn(async move {
             let result = host_jobs::source(
                 state,
                 library,
-                track,
-                target.track.0,
-                target.position_ms,
-                loudness_mode.clone(),
+                host_jobs::SourceRequest {
+                    track,
+                    instance: target.track.0,
+                    position_ms: target.position_ms,
+                    loudness_mode: loudness_mode.clone(),
+                },
+                format_mode,
+                native_budget,
             )
             .await;
             Completion::Source {
@@ -1827,14 +2113,61 @@ impl Owner {
         {
             return Ok(());
         }
+        if let Some(source) = &source {
+            self.remember_source_format(source);
+        }
         let token = self.wire_id()?;
         let now = self.clock.now_ns();
         let position = self.position(now.saturating_add(LEAD_NS));
+        let mut at = now.checked_add(LEAD_NS).ok_or_else(RoomError::exhausted)?;
+        if self.format_mode == FormatMode::Native {
+            if let Some(old) = &self.audible {
+                if let Some((_, end)) = self.epoch_ends.get(&old.plan.epoch.0) {
+                    at = at.max(Self::end_time(&old.plan, *end)?);
+                }
+            }
+        }
+        let actual_format = if self.format_mode == FormatMode::Native {
+            if let Some(source) = &source {
+                let actual = source
+                    .media
+                    .as_ref()
+                    .and_then(|media| media.decoded_format())
+                    .ok_or_else(|| {
+                        RoomError::new(
+                            "native_source_unverified",
+                            "原生模式需要已验证的实际解码格式",
+                        )
+                    })?;
+                if self
+                    .audible
+                    .as_ref()
+                    .is_some_and(|a| a.plan.format.sample_rate == actual.sample_rate)
+                {
+                    Some(self.audible.as_ref().unwrap().plan.format)
+                } else {
+                    let id = self.next_format_id;
+                    self.next_format_id = id.checked_add(1).ok_or_else(RoomError::exhausted)?;
+                    Some(AudioFormat {
+                        id,
+                        sample_rate: actual.sample_rate,
+                        channels: 2,
+                    })
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         let c = self.candidate.as_mut().unwrap();
         if c.preserve_position && position.0 == c.target.track.0 {
             c.target.position_ms = position.1;
         }
-        c.wire.anchor_ns = Counter(now.checked_add(LEAD_NS).ok_or_else(RoomError::exhausted)?);
+        c.wire.anchor_ns = Counter(at);
+        if let Some(format) = actual_format {
+            c.wire.format = format;
+        }
         c.wire.plan_id = Counter(token);
         c.materialized = true;
         c.loading = false;
@@ -1863,6 +2196,166 @@ impl Owner {
     }
     async fn render(&mut self, event: ProducerEvent) -> RoomResult<()> {
         match event {
+            ProducerEvent::Interrupted {
+                epoch,
+                frame,
+                instance,
+                position_frames,
+                message,
+            } => {
+                let Some(plan) = self.epoch_plan(epoch) else {
+                    return Ok(());
+                };
+                self.error = Some(message.clone());
+                if self
+                    .candidate
+                    .as_ref()
+                    .is_some_and(|candidate| candidate.wire.epoch.0 == epoch)
+                {
+                    let candidate = self.candidate.take().unwrap();
+                    self.scheduler
+                        .try_fail_preparing(
+                            candidate.scheduler_plan,
+                            timeline::PlanFailure::DecodeFailed,
+                        )
+                        .map_err(|_| RoomError::exhausted())?;
+                    self.producer.cancel(epoch).map_err(transport_error)?;
+                    return Ok(());
+                }
+                if self
+                    .rendered_until
+                    .get(&epoch)
+                    .copied()
+                    .unwrap_or(plan.join_frame.0)
+                    != frame
+                {
+                    return Err(RoomError::new(
+                        "room_producer_end_conflict",
+                        "中止位置与已发布 PCM 不一致",
+                    ));
+                }
+                let at = Self::end_time(&plan, frame)?;
+                if at < self.clock.now_ns().saturating_add(MIN_COMMIT_NS) {
+                    return self.halt_presentation(&message);
+                }
+                if let Some(candidate) = self.candidate.take() {
+                    self.scheduler
+                        .try_fail_preparing(
+                            candidate.scheduler_plan,
+                            timeline::PlanFailure::OutputNotReady,
+                        )
+                        .map_err(|_| RoomError::exhausted())?;
+                    self.producer
+                        .cancel(candidate.wire.epoch.0)
+                        .map_err(transport_error)?;
+                    if let Some(task) = self.source_jobs.remove(&(0, candidate.wire.epoch.0)) {
+                        task.abort();
+                    }
+                }
+                let token = self.wire_id()?;
+                let cutoff = ControlFrame::Suspend {
+                    epoch: Counter(epoch),
+                    plan_id: Counter(token),
+                    effective_at: Counter(at),
+                };
+                let members = self
+                    .endpoints
+                    .iter()
+                    .filter_map(|(member, endpoint)| {
+                        endpoint.declared_epochs.contains(&epoch).then_some(*member)
+                    })
+                    .collect::<Vec<_>>();
+                for member in members {
+                    let _ = self.send_plan_frame(member, &cutoff)?;
+                }
+                self.epoch_cutoffs.insert(epoch, frame);
+                self.boundaries.push(Boundary {
+                    at,
+                    epoch,
+                    instance,
+                    position_frames,
+                    ended: true,
+                })?;
+                self.render_heads.remove(&epoch);
+                if let Some(task) = self.source_jobs.remove(&(1, epoch)) {
+                    task.abort();
+                }
+                self.successor_tokens.remove(&epoch);
+            }
+            ProducerEvent::SuccessorDeferred { epoch, source } => {
+                if self.epoch_plan(epoch).is_some() {
+                    let instance = source.instance;
+                    self.deferred_successors
+                        .insert(epoch, DeferredSuccessor::Prepared(source));
+                    if self.epoch_ends.contains_key(&epoch)
+                        && self.candidate.is_none()
+                        && self.scheduled.is_none()
+                    {
+                        self.internal(Playback::Pick {
+                            instance_id: Counter(instance),
+                        })
+                        .await?;
+                    }
+                }
+            }
+            ProducerEvent::EpochEnd {
+                epoch,
+                format,
+                end_frame,
+            } => {
+                let Some(plan) = self.epoch_plan(epoch) else {
+                    return Ok(());
+                };
+                if plan.format != format
+                    || self
+                        .rendered_until
+                        .get(&epoch)
+                        .copied()
+                        .unwrap_or(plan.join_frame.0)
+                        != end_frame
+                {
+                    return Err(RoomError::new(
+                        "room_producer_end_conflict",
+                        "原生代际终点与真实 PCM 不一致",
+                    ));
+                }
+                if self
+                    .epoch_ends
+                    .get(&epoch)
+                    .is_some_and(|previous| *previous != (format, end_frame))
+                {
+                    return Err(RoomError::new(
+                        "room_producer_end_conflict",
+                        "原生代际终点发生冲突",
+                    ));
+                }
+                self.epoch_ends.insert(epoch, (format, end_frame));
+                let frame = ControlFrame::EpochEnd {
+                    epoch: Counter(epoch),
+                    format_id: format.id,
+                    end_frame: Counter(end_frame),
+                };
+                let members = self
+                    .endpoints
+                    .iter()
+                    .filter_map(|(member, endpoint)| {
+                        endpoint.declared_epochs.contains(&epoch).then_some(*member)
+                    })
+                    .collect::<Vec<_>>();
+                for member in members {
+                    let _ = self.send_plan_frame(member, &frame)?;
+                }
+                if self.candidate.is_none() && self.scheduled.is_none() {
+                    if let Some(DeferredSuccessor::Prepared(source)) =
+                        self.deferred_successors.get(&epoch)
+                    {
+                        self.internal(Playback::Pick {
+                            instance_id: Counter(source.instance),
+                        })
+                        .await?;
+                    }
+                }
+            }
             ProducerEvent::SuccessorPrepared { epoch, instance } => {
                 if let Some(pending) = self.pending_successors.get_mut(&epoch) {
                     pending.pop_front();
@@ -1892,7 +2385,7 @@ impl Owner {
                 {
                     scheduled.target.track = TrackInstanceId(instance);
                     scheduled.target.position_ms =
-                        position_frames * 1000 / u64::from(self.format.sample_rate);
+                        frame_position_ms(position_frames, scheduled.plan.format.sample_rate);
                     scheduled.position_frames = position_frames;
                 }
             }
@@ -1916,6 +2409,7 @@ impl Owner {
                 frame,
                 format,
                 samples,
+                reservation: _reservation,
             } => {
                 if self.epoch_plan(epoch).is_none() {
                     return Ok(());
@@ -1924,6 +2418,16 @@ impl Owner {
                     .checked_add((samples.len() / usize::from(format.channels)) as u64)
                     .ok_or_else(RoomError::exhausted)?;
                 self.rendered_until.insert(epoch, end);
+                if self
+                    .epoch_ends
+                    .get(&epoch)
+                    .is_some_and(|(expected, e)| *expected != format || end > *e)
+                {
+                    return Err(RoomError::new(
+                        "room_producer_end_conflict",
+                        "PCM 超出已封口的代际终点",
+                    ));
+                }
                 self.server
                     .transport
                     .broadcast_pcm(epoch, sequence, frame, format, samples.clone())
@@ -1974,14 +2478,19 @@ impl Owner {
                 epoch,
                 frame,
                 instance,
+                position_frames,
             } => {
                 if let Some(plan) = self.epoch_plan(epoch) {
-                    let at = Self::time(&plan, frame)?;
+                    let at = if self.format_mode == FormatMode::Native {
+                        Self::end_time(&plan, frame)?
+                    } else {
+                        Self::time(&plan, frame)?
+                    };
                     self.boundaries.push(Boundary {
                         at,
                         epoch,
                         instance,
-                        position_frames: 0,
+                        position_frames,
                         ended: true,
                     })?;
                 }
@@ -1996,6 +2505,28 @@ impl Owner {
                 }
                 if matches!(stage, FailureStage::Successor) {
                     tracing::warn!(epoch, %message, "room successor decode failed");
+                    if self.format_mode == FormatMode::Native {
+                        if let Some(target) = self.successor_targets.get(&epoch) {
+                            let error =
+                                RoomError::new("native_successor_rejected", message.clone());
+                            let token = self
+                                .successor_tokens
+                                .get(&epoch)
+                                .copied()
+                                .ok_or_else(RoomError::inactive)?;
+                            let library_revision = self.library.revision().await;
+                            self.deferred_successors.insert(
+                                epoch,
+                                DeferredSuccessor::Rejected {
+                                    instance: target.next,
+                                    token,
+                                    library_revision,
+                                    error,
+                                },
+                            );
+                            self.error = Some(message);
+                        }
+                    }
                     self.send_successor(epoch, None, 0)?;
                     return Ok(());
                 }
@@ -2010,7 +2541,8 @@ impl Owner {
                 {
                     let c = self.candidate.take().unwrap();
                     self.scheduler
-                        .fail_preparing(c.scheduler_plan, timeline::PlanFailure::DecodeFailed);
+                        .try_fail_preparing(c.scheduler_plan, timeline::PlanFailure::DecodeFailed)
+                        .map_err(|_| RoomError::exhausted())?;
                     self.producer.cancel(epoch).map_err(transport_error)?;
                 } else if self
                     .scheduled
@@ -2038,24 +2570,28 @@ impl Owner {
         });
         if let Some(c) = self.candidate.take() {
             self.scheduler
-                .fail_preparing(c.scheduler_plan, timeline::PlanFailure::OutputNotReady);
+                .try_fail_preparing(c.scheduler_plan, timeline::PlanFailure::OutputNotReady)
+                .map_err(|_| RoomError::exhausted())?;
             self.producer
                 .cancel(c.wire.epoch.0)
                 .map_err(transport_error)?;
         }
         let now = self.clock.now_ns();
         if let Some(a) = &mut self.audible {
-            let (instance, frames, _) = self.boundaries.projected(
+            let (instance, frames, _) = self.boundaries.projected_mode(
                 a.plan.epoch.0,
                 now,
-                a.target.track.0,
-                a.position_frames,
-                a.position_at_ns,
-                self.format.sample_rate,
+                PositionAnchor {
+                    instance: a.target.track.0,
+                    frames: a.position_frames,
+                    origin_ns: a.position_at_ns,
+                },
+                a.plan.format.sample_rate,
+                self.format_mode == FormatMode::Native,
             );
             a.target = PlanTarget {
                 track: TrackInstanceId(instance),
-                position_ms: frames * 1000 / u64::from(self.format.sample_rate),
+                position_ms: frame_position_ms(frames, a.plan.format.sample_rate),
                 playing: false,
             };
             a.position_at_ns = now;
@@ -2116,6 +2652,46 @@ impl Owner {
         Ok(())
     }
     async fn prepare_successor_for(&mut self, epoch: u64, current: u64) -> RoomResult<()> {
+        // Queue edits invalidate an unconsumed selection before the reservation
+        // guard. Already rendered overlap remains in the presentation catalog.
+        let invalidated = self.format_mode == FormatMode::Native
+            && self.successor_targets.get(&epoch).is_some_and(|target| {
+                target.current != current || !self.instances.contains(&target.next)
+            });
+        if invalidated {
+            self.successor_targets.remove(&epoch);
+            self.deferred_successors.remove(&epoch);
+            self.successor_tokens.remove(&epoch);
+            self.prepared_successors.remove(&epoch);
+            if let Some(task) = self.source_jobs.remove(&(1, epoch)) {
+                task.abort();
+            }
+            if !self.epoch_ends.contains_key(&epoch) {
+                self.send_successor(epoch, None, 0)?;
+            }
+        }
+        let reserved = if self.format_mode == FormatMode::Native {
+            self.successor_targets
+                .get(&epoch)
+                .filter(|target| target.current == current)
+                .map(|target| target.next)
+        } else {
+            None
+        };
+        if reserved.is_some()
+            && (self.successor_tokens.contains_key(&epoch)
+                || self.deferred_successors.contains_key(&epoch)
+                || self.prepared_successors.contains_key(&epoch))
+        {
+            return Ok(());
+        }
+        if self.format_mode == FormatMode::Native
+            && self.epoch_ends.contains_key(&epoch)
+            && reserved.is_none()
+            && !invalidated
+        {
+            return Ok(());
+        }
         let Some(index) = self.instances.iter().position(|id| *id == current) else {
             self.successor_targets.remove(&epoch);
             if let Some(task) = self.source_jobs.remove(&(1, epoch)) {
@@ -2125,12 +2701,21 @@ impl Owner {
             return self.send_successor(epoch, None, 0);
         };
         let next = match self.mode {
+            _ if reserved.is_some() => self
+                .instances
+                .iter()
+                .position(|id| Some(*id) == reserved)
+                .unwrap_or(index),
             PlayMode::RepeatOne => index,
             PlayMode::Shuffle => random_next(self.instances.len(), index),
             _ => (index + 1) % self.instances.len(),
         };
         let mut selected = None;
-        for offset in 0..self.instances.len() {
+        for offset in 0..if self.format_mode == FormatMode::Native {
+            1
+        } else {
+            self.instances.len()
+        } {
             let index = (next + offset) % self.instances.len();
             let instance = self.instances[index];
             let track = self.track_for(instance).await?;
@@ -2140,31 +2725,101 @@ impl Owner {
             }
         }
         let Some((instance, track)) = selected else {
+            if self.format_mode == FormatMode::Native {
+                let instance = self.instances[next];
+                self.successor_targets.insert(
+                    epoch,
+                    SuccessorTarget {
+                        current,
+                        next: instance,
+                    },
+                );
+                let token = self.next_job;
+                self.next_job = token.checked_add(1).ok_or_else(RoomError::exhausted)?;
+                let library_revision = self.library.revision().await;
+                let error = RoomError::new(
+                    "native_successor_rejected",
+                    "选定的后继歌曲不在分享范围，请重新选曲",
+                );
+                self.error = Some(error.message.clone());
+                self.deferred_successors.insert(
+                    epoch,
+                    DeferredSuccessor::Rejected {
+                        instance,
+                        token,
+                        library_revision,
+                        error,
+                    },
+                );
+            }
             if let Some(task) = self.source_jobs.remove(&(1, epoch)) {
                 task.abort();
             }
             self.successor_tokens.remove(&epoch);
-            self.successor_targets.remove(&epoch);
+            if self.format_mode == FormatMode::Fixed {
+                self.successor_targets.remove(&epoch);
+            }
             return self.send_successor(epoch, None, 0);
         };
         let desired = SuccessorTarget {
             current,
             next: instance,
         };
-        if self.successor_targets.get(&epoch) == Some(&desired) {
+        if self.format_mode == FormatMode::Fixed
+            && self.successor_targets.get(&epoch) == Some(&desired)
+        {
             return Ok(());
         }
         self.remember_presentation(instance, &track).await?;
         self.successor_targets.insert(epoch, desired);
+        let overlapping_epoch = self.format_mode == FormatMode::Native
+            && (self
+                .audible
+                .as_ref()
+                .is_some_and(|a| a.plan.epoch.0 != epoch && a.target.playing)
+                || self.scheduled.is_some());
+        if overlapping_epoch {
+            if !self.epoch_ends.contains_key(&epoch) {
+                self.send_successor(epoch, None, 0)?;
+            }
+            return Ok(());
+        }
+        if self.format_mode == FormatMode::Native
+            && self.epoch_ends.contains_key(&epoch)
+            && self.candidate.is_none()
+            && self.scheduled.is_none()
+        {
+            // Only a lightweight intent survived the two-generation limit.
+            // Materialize that exact instance through the ordinary source job.
+            self.internal(Playback::Pick {
+                instance_id: Counter(instance),
+            })
+            .await?;
+            return Ok(());
+        }
         let state = self.state.clone();
         let library = self.library.clone();
         let mode = self.loudness_mode.clone();
+        let format_mode = self.format_mode;
+        let native_budget = self.native_budget.clone();
         let library_revision = library.revision().await;
         let token = self.next_job;
         self.next_job = token.checked_add(1).ok_or_else(RoomError::exhausted)?;
         self.successor_tokens.insert(epoch, token);
         let task = self.jobs.spawn(async move {
-            let result = host_jobs::source(state, library, track, instance, 0, mode).await;
+            let result = host_jobs::source(
+                state,
+                library,
+                host_jobs::SourceRequest {
+                    track,
+                    instance,
+                    position_ms: 0,
+                    loudness_mode: mode,
+                },
+                format_mode,
+                native_budget,
+            )
+            .await;
             Completion::Successor {
                 epoch,
                 current,
@@ -2211,6 +2866,20 @@ impl Owner {
         self.scheduler
             .observe_position(TrackInstanceId(current), position);
         let base = self.scheduler.pending_target();
+        let reserved_next = if self.format_mode == FormatMode::Native {
+            self.audible
+                .as_ref()
+                .and_then(|a| self.successor_targets.get(&a.plan.epoch.0))
+                .filter(|target| target.current == base.track.0)
+                .map(|target| target.next)
+                .filter(|instance| self.instances.contains(instance))
+        } else {
+            None
+        };
+        let ended = self
+            .audible
+            .as_ref()
+            .is_some_and(|a| !a.target.playing && self.epoch_ends.contains_key(&a.plan.epoch.0));
         let member_index = if member == OWNER {
             0
         } else if member == Uuid::from_u128(1) {
@@ -2223,7 +2892,11 @@ impl Owner {
         };
         let content = match command {
             Playback::Play => {
-                if base.track.0 == 0 || !self.instances.contains(&base.track.0) {
+                if self.format_mode == FormatMode::Native && ended {
+                    timeline::Command::Next {
+                        to: TrackInstanceId(reserved_next.unwrap_or(base.track.0)),
+                    }
+                } else if base.track.0 == 0 || !self.instances.contains(&base.track.0) {
                     let instance = self
                         .instances
                         .first()
@@ -2272,11 +2945,16 @@ impl Owner {
                     .unwrap_or(0);
                 let next = match command {
                     Playback::Previous => (index + self.instances.len() - 1) % self.instances.len(),
+                    _ if reserved_next.is_some() => index,
                     _ if self.mode == PlayMode::Shuffle => random_next(self.instances.len(), index),
                     _ => (index + 1) % self.instances.len(),
                 };
                 timeline::Command::Next {
-                    to: TrackInstanceId(self.instances[next]),
+                    to: TrackInstanceId(if matches!(command, Playback::Next) {
+                        reserved_next.unwrap_or(self.instances[next])
+                    } else {
+                        self.instances[next]
+                    }),
                 }
             }
         };
@@ -2300,9 +2978,30 @@ impl Owner {
                 }
             }
             let plan = self.scheduler.preparing().ok_or_else(RoomError::inactive)?;
-            let target = plan.target;
+            let (scheduler_plan, epoch, target) = (plan.id, plan.epoch.0, plan.target);
+            if self.format_mode == FormatMode::Native && member != Uuid::from_u128(1) {
+                let epochs = self
+                    .successor_targets
+                    .iter()
+                    .filter_map(|(epoch, successor)| {
+                        (successor.next != target.track.0
+                            || !target.playing
+                            || target.position_ms != 0)
+                            .then_some(*epoch)
+                    })
+                    .collect::<Vec<_>>();
+                for epoch in epochs {
+                    self.deferred_successors.remove(&epoch);
+                    self.successor_targets.remove(&epoch);
+                    self.successor_tokens.remove(&epoch);
+                    if let Some(task) = self.source_jobs.remove(&(1, epoch)) {
+                        task.abort();
+                    }
+                    self.send_successor(epoch, None, 0)?;
+                }
+            }
             let wire = Plan {
-                epoch: Counter(plan.epoch.0),
+                epoch: Counter(epoch),
                 plan_id: Counter(self.wire_id()?),
                 anchor_ns: Counter(effective),
                 join_frame: Counter(0),
@@ -2310,7 +3009,7 @@ impl Owner {
             };
             self.candidate = Some(Candidate {
                 wire,
-                scheduler_plan: plan.id,
+                scheduler_plan,
                 target,
                 prepared: false,
                 ready: false,
@@ -2363,27 +3062,33 @@ impl Owner {
                     .anchor_ns
                     .0
                     .saturating_sub(super::producer::FADE_OUT_NS);
-                let needed = (u128::from(fade_start.saturating_sub(a.plan.anchor_ns.0))
-                    * u128::from(self.format.sample_rate)
+                let mut needed = (u128::from(fade_start.saturating_sub(a.plan.anchor_ns.0))
+                    * u128::from(a.plan.format.sample_rate)
                     / 1_000_000_000) as u64;
+                if let Some((_, e)) = self.epoch_ends.get(&a.plan.epoch.0) {
+                    needed = needed.min(*e);
+                }
                 if a.target.playing && end < needed {
                     return Ok(());
                 }
                 let (instance, frames, _) = if a.target.playing {
-                    self.boundaries.projected(
+                    self.boundaries.projected_mode(
                         a.plan.epoch.0,
                         c.wire.anchor_ns.0,
-                        a.target.track.0,
-                        a.position_frames,
-                        a.position_at_ns,
-                        self.format.sample_rate,
+                        PositionAnchor {
+                            instance: a.target.track.0,
+                            frames: a.position_frames,
+                            origin_ns: a.position_at_ns,
+                        },
+                        a.plan.format.sample_rate,
+                        self.format_mode == FormatMode::Native,
                     )
                 } else {
                     (a.target.track.0, a.position_frames, false)
                 };
                 let c = self.candidate.as_mut().unwrap();
                 c.target.track = TrackInstanceId(instance);
-                c.target.position_ms = frames * 1000 / u64::from(self.format.sample_rate);
+                c.target.position_ms = frame_position_ms(frames, a.plan.format.sample_rate);
                 self.scheduler
                     .retarget_preparing(c.scheduler_plan, c.target);
             }
@@ -2397,7 +3102,8 @@ impl Owner {
         {
             let c = self.candidate.take().unwrap();
             self.scheduler
-                .fail_preparing(c.scheduler_plan, timeline::PlanFailure::OutputNotReady);
+                .try_fail_preparing(c.scheduler_plan, timeline::PlanFailure::OutputNotReady)
+                .map_err(|_| RoomError::exhausted())?;
             self.producer
                 .cancel(c.wire.epoch.0)
                 .map_err(transport_error)?;
@@ -2448,10 +3154,11 @@ impl Owner {
                 effective_at: Counter(at),
             });
         }
+        let position_frames = position_frames(target.position_ms, wire.format.sample_rate)?;
         self.scheduled = Some(Audible {
             plan: wire,
             target,
-            position_frames: target.position_ms * u64::from(self.format.sample_rate) / 1000,
+            position_frames,
             position_at_ns: at,
             preserve_position,
         });
@@ -2483,7 +3190,8 @@ impl Owner {
         if self.candidate.as_ref().is_some_and(|c| c.creator == member) {
             let c = self.candidate.take().unwrap();
             self.scheduler
-                .fail_preparing(c.scheduler_plan, timeline::PlanFailure::OutputNotReady);
+                .try_fail_preparing(c.scheduler_plan, timeline::PlanFailure::OutputNotReady)
+                .map_err(|_| RoomError::exhausted())?;
             if let Some(task) = self.source_jobs.remove(&(0, c.wire.epoch.0)) {
                 task.abort();
             }
@@ -3290,12 +3998,41 @@ impl Owner {
             "audio":self.local.is_some(),"ready":local.as_ref().is_some_and(|s|s.output_ready),
             "committed":local.as_ref().is_some_and(|s|s.current_epoch.is_some()),"last_output_age_ms":null,
             "rtt_ns":null,"acoustic_error_ms":null,"buffer_percent":null}));
-        json!({"collaboration":{"queue_order":self.collaboration.order,"activity":self.collaboration.activity},
+        let current_format = if self.format_mode == FormatMode::Fixed
+            || self
+                .audible
+                .as_ref()
+                .is_some_and(|a| self.source_formats.contains_key(&a.target.track.0))
+        {
+            Some(self.format)
+        } else {
+            None
+        };
+        let ended = self
+            .audible
+            .as_ref()
+            .is_some_and(|a| !a.target.playing && self.epoch_ends.contains_key(&a.plan.epoch.0));
+        let successor_error = self.audible.as_ref().and_then(|a| self.deferred_successors.get(&a.plan.epoch.0)).and_then(|s| match s {
+            DeferredSuccessor::Rejected { instance, token, library_revision, error } => Some(json!({"instance_id":instance.to_string(),"preparation_token":token.to_string(),"library_revision":library_revision.to_string(),"code":error.code,"message":error.message})), _ => None,
+        });
+        let source_rate = self.source_formats.get(&instance).map(|format| format.0);
+        let declared_source_rate = self
+            .source_formats
+            .get(&instance)
+            .and_then(|format| format.1)
+            .or_else(|| current_track.as_ref().and_then(|track| track.sample_rate));
+        let mut snapshot = json!({"collaboration":{"queue_order":self.collaboration.order,"activity":self.collaboration.activity},
             "library_search":true,
             "room_cover_revision":self.cover_revision(),
             "started_at_ms":self.started_at_ms.to_string(),"elapsed_ms":(now/1_000_000).to_string(),
             "member_capacity":vmusic_lan::members::MAX_MEMBERS+1,"audio_capacity":vmusic_lan::members::MAX_AUDIO_OUTPUTS,
-            "online_count":members.iter().filter(|m|m["connected"]==true).count(),"members":members,"current_track":current_track,"mode":"room","room_id":self.local_identity.room_id,"instance_id":self.local_identity.instance_id,"name":self.name,"revision":self.scheduler.revision().0.to_string(),"sharing_revision":self.library.revision().await.to_string(),"host_time_ns":now.to_string(),"playing":playing,"track_instance_id":instance.to_string(),"position_ms":position.to_string(),"queue":queue,"queue_count":tracks.len(),"tracks":self.library.views().await.into_iter().take(16).collect::<Vec<_>>(),"shared_count":self.library.views().await.len(),"format":self.format,"volume":self.volume,"pending_mix":self.mixer.pending.as_ref().and_then(|p|self.mixer.outcome(p.id)),"play_mode":self.mode,"dsp":self.dsp,"crossfade_ms":self.crossfade_ms,"loudness_mode":self.loudness_mode,"permissions":permissions,"pending":self.candidate.as_ref().map(|c|json!({"epoch":c.wire.epoch,"plan_id":c.wire.plan_id,"effective_at":c.wire.anchor_ns,"ready":c.ready,"prepared":c.prepared})),"scheduled":self.scheduled.as_ref().map(|s|json!({"epoch":s.plan.epoch,"plan_id":s.plan.plan_id,"effective_at":s.plan.anchor_ns})),"chat":self.chat.as_ref().map(|c|c.status.borrow().clone()),"chat_error":self.chat_error,"error":self.error})
+            "online_count":members.iter().filter(|m|m["connected"]==true).count(),"members":members,"current_track":current_track,"mode":"room","room_id":self.local_identity.room_id,"instance_id":self.local_identity.instance_id,"name":self.name,"revision":self.scheduler.revision().0.to_string(),"sharing_revision":self.library.revision().await.to_string(),"host_time_ns":now.to_string(),"playing":playing,"track_instance_id":instance.to_string(),"position_ms":position.to_string(),"queue":queue,"queue_count":tracks.len(),"tracks":self.library.views().await.into_iter().take(16).collect::<Vec<_>>(),"shared_count":self.library.views().await.len(),"format":current_format,"volume":self.volume,"pending_mix":self.mixer.pending.as_ref().and_then(|p|self.mixer.outcome(p.id)),"play_mode":self.mode,"dsp":self.dsp,"crossfade_ms":self.crossfade_ms,"loudness_mode":self.loudness_mode,"permissions":permissions,"pending":self.candidate.as_ref().map(|c|json!({"epoch":c.wire.epoch,"plan_id":c.wire.plan_id,"effective_at":c.wire.anchor_ns,"ready":c.ready,"prepared":c.prepared,"format":c.materialized.then_some(c.wire.format)})),"scheduled":self.scheduled.as_ref().map(|s|json!({"epoch":s.plan.epoch,"plan_id":s.plan.plan_id,"effective_at":s.plan.anchor_ns,"format":s.plan.format})),"chat":self.chat.as_ref().map(|c|c.status.borrow().clone()),"chat_error":self.chat_error,"error":self.error});
+        snapshot["format_mode"] = json!(self.format_mode);
+        snapshot["ended"] = json!(ended);
+        snapshot["successor_error"] = json!(successor_error);
+        snapshot["source_rate"] = json!(source_rate);
+        snapshot["declared_source_rate"] = json!(declared_source_rate);
+        snapshot
     }
     async fn publish(&self) {
         let mut value = self
@@ -3439,7 +4176,17 @@ pub(super) mod join_retry_tests {
         }
     }
 
-    async fn playing_owner() -> (
+    pub(super) async fn playing_owner() -> (
+        Owner,
+        std::thread::JoinHandle<()>,
+        mpsc::Receiver<ProducerEvent>,
+        mpsc::Receiver<Inbound>,
+    ) {
+        playing_owner_configured(FormatMode::Fixed).await
+    }
+    pub(super) async fn playing_owner_configured(
+        format_mode: FormatMode,
+    ) -> (
         Owner,
         std::thread::JoinHandle<()>,
         mpsc::Receiver<ProducerEvent>,
@@ -3453,12 +4200,13 @@ pub(super) mod join_retry_tests {
         let identity = vmusic_lan::tls::HostIdentity::generate().unwrap();
         let room = Uuid::new_v4();
         let instance = Uuid::new_v4();
-        let (server, inbound) = RoomServer::bind(
+        let (server, inbound) = RoomServer::bind_with_mode(
             "127.0.0.1:0".parse().unwrap(),
             room,
             instance,
             &identity,
             clock.clone(),
+            format_mode,
         )
         .await
         .unwrap();
@@ -3504,6 +4252,13 @@ pub(super) mod join_retry_tests {
             host_name: "测试房主".into(),
             cover: None,
             format,
+            format_mode,
+            next_format_id: 2,
+            native_budget: Default::default(),
+            epoch_ends: HashMap::new(),
+            epoch_cutoffs: HashMap::new(),
+            deferred_successors: HashMap::new(),
+            source_formats: HashMap::new(),
             library: SharedLibrary::default(),
             chat: None,
             chat_error: None,
@@ -3576,7 +4331,7 @@ pub(super) mod join_retry_tests {
             .reconcile(&[1], owner.requester(OWNER), wall_ms());
         (owner, audio, render, inbound)
     }
-    async fn finish_owner(mut owner: Owner, audio: std::thread::JoinHandle<()>) {
+    pub(super) async fn finish_owner(mut owner: Owner, audio: std::thread::JoinHandle<()>) {
         owner.jobs.abort_all();
         while owner.jobs.join_next().await.is_some() {}
         owner.history.shutdown().await;
@@ -3585,6 +4340,50 @@ pub(super) mod join_retry_tests {
         owner.server.shutdown().await;
         owner.state.audio.shutdown();
         audio.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn system_media_queued_action_rechecks_the_current_room_identity() {
+        let (mut owner, audio, _render, _inbound) = playing_owner().await;
+        owner.publish().await;
+        let old = owner.projection.read().unwrap().clone();
+        let identity = crate::system_media::Identity {
+            server_instance: owner.state.server_instance_id().into(),
+            mode: crate::system_media::MediaMode::Room,
+            local_generation: 0,
+            local_intent_generation: 0,
+            track_id: old["current_track"]["resource_id"]
+                .as_str()
+                .map(str::to_owned),
+            room_id: old["room_id"].as_str().map(str::to_owned),
+            room_instance: old["instance_id"].as_str().map(str::to_owned),
+            room_session: None,
+            room_member: old["member_id"].as_str().map(str::to_owned),
+            track_instance: old["track_instance_id"].as_str().map(str::to_owned),
+            media_epoch: old["output"]["current_epoch"].as_str().map(str::to_owned),
+        };
+        assert!(identity.matches_room_snapshot(&old));
+        owner.local_identity.instance_id = Uuid::new_v4();
+        owner.publish().await;
+        let (reply, result) = tokio::sync::oneshot::channel();
+        owner
+            .dispatch_local(Envelope {
+                request: LocalRequest::Peer {
+                    request: PeerRequest::Playback {
+                        operation_id: Counter(1),
+                        expected_revision: Counter(owner.scheduler.revision().0),
+                        command: Playback::Next,
+                    },
+                },
+                reply,
+                media_identity: Some(identity),
+            })
+            .await
+            .unwrap();
+        assert_eq!(result.await.unwrap().unwrap_err().code, "media_stale");
+        assert!(owner.records.is_empty());
+        assert!(owner.candidate.is_none());
+        finish_owner(owner, audio).await;
     }
 
     #[tokio::test]
@@ -3618,6 +4417,7 @@ pub(super) mod join_retry_tests {
                 sequence: 0,
                 frame: 0,
                 format: owner.format,
+                reservation: None,
                 samples: vec![0.5; 960 * 2].into(),
             })
             .await
@@ -3648,6 +4448,7 @@ pub(super) mod join_retry_tests {
                     sequence,
                     frame: plan.join_frame.0 - 960 + (sequence - 1) * 960,
                     format: owner.format,
+                    reservation: None,
                     samples: vec![0.5; 960 * 2].into(),
                 })
                 .await
@@ -4624,6 +5425,7 @@ pub(super) mod join_retry_tests {
                     audio: true,
                     last_output: Some(now),
                     plan: Some(wire.clone()),
+                    declared_epochs: HashSet::from([wire.epoch.0]),
                     committed: false,
                     ready: true,
                     rejoin: JoinRetry::default(),
@@ -4723,3 +5525,7 @@ pub(super) mod join_retry_tests {
         finish_owner(owner, audio).await;
     }
 }
+
+#[cfg(test)]
+#[path = "host_native_tests.rs"]
+mod native_tests;

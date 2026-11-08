@@ -118,7 +118,10 @@ impl SessionPlan {
     pub(crate) fn new(request: BudgetRequest, resources: Vec<ResourcePlan>) -> Result<Self> {
         if !matches!(
             request.owner,
-            OwnerKind::Desktop | OwnerKind::Preview | OwnerKind::PreviewFrame
+            OwnerKind::Desktop
+                | OwnerKind::DesktopFrame
+                | OwnerKind::Preview
+                | OwnerKind::PreviewFrame
         ) || request.session.is_empty()
             || request.session.len() > 128
             || request.generation == 0

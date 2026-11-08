@@ -25,6 +25,7 @@ use vmusic_core::{
 #[cfg(feature = "playback")]
 use crate::cpal_backend::CpalBackend;
 use crate::null::NullBackend;
+use crate::sleep_deadline::SleepDeadline;
 
 /// Which backend the actor should build. Chosen at startup.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -157,6 +158,7 @@ pub struct AudioHandle {
     /// `audio.backend` 只是「请求」，空值或拼错时它跟跑起来的东西不是一回事。
     backend: &'static str,
     ingress: std::sync::Arc<std::sync::Mutex<bool>>,
+    sleep_deadline: std::sync::Arc<SleepDeadline>,
 }
 
 /// Exclusive device ownership for a room. Acquisition is ordered after all
@@ -179,6 +181,33 @@ impl Drop for ExclusiveAudio {
 }
 
 impl AudioHandle {
+    /// Permanently silence local output when its native owner is lost. This
+    /// independent latch cannot be reopened by a racing sleep-timer cleanup.
+    /// A new actor/owner is required before local playback can resume.
+    pub fn close_local_playback(&self) {
+        self.sleep_deadline.close();
+    }
+
+    /// Set a deadline in [`crate::sleep_deadline::now_ms`]'s clock domain.
+    /// This updates the callback's atomic gate immediately, without waiting for
+    /// the actor or an async runtime. A due deadline stays closed until the
+    /// coordinator invalidates pending play work, pauses, then clears/replaces it.
+    /// The coordinator serializes explicit changes with play commits and checks
+    /// expiry immediately before accepting a replacement; this setter does not
+    /// arbitrate timer revisions or decide whether an expired timer may change.
+    /// Clearing or replacing a deadline never starts playback.
+    pub fn set_sleep_deadline(&self, deadline_ms: Option<u64>) -> Result<(), AudioError> {
+        let owned = self.ingress.lock().unwrap_or_else(|e| e.into_inner());
+        if deadline_ms.is_some() && *owned {
+            return Err(AudioError::Other("room_mode_requires_room_command".into()));
+        }
+        if deadline_ms == Some(0) {
+            return Err(AudioError::Other("sleep deadline must be nonzero".into()));
+        }
+        self.sleep_deadline.set(deadline_ms);
+        Ok(())
+    }
+
     pub fn exclusively_owned(&self) -> bool {
         *self.ingress.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -389,6 +418,8 @@ pub async fn spawn(kind: BackendKind) -> Result<(AudioHandle, JoinHandle<()>), A
     let actor_snapshot = snapshot.clone();
     let actor_events = events.clone();
     let actor_control_events = control_tx.clone();
+    let sleep_deadline = std::sync::Arc::new(SleepDeadline::new());
+    let actor_sleep_deadline = sleep_deadline.clone();
 
     let handle = std::thread::Builder::new()
         .name("vmusic-audio".into())
@@ -400,6 +431,7 @@ pub async fn spawn(kind: BackendKind) -> Result<(AudioHandle, JoinHandle<()>), A
                 actor_events,
                 actor_control_events,
                 init_tx,
+                actor_sleep_deadline,
             )
         })
         .map_err(|e| AudioError::BackendInit(e.to_string()))?;
@@ -413,6 +445,7 @@ pub async fn spawn(kind: BackendKind) -> Result<(AudioHandle, JoinHandle<()>), A
                 control_events: std::sync::Arc::new(std::sync::Mutex::new(Some(control_rx))),
                 backend,
                 ingress: Default::default(),
+                sleep_deadline,
             },
             handle,
         )),
@@ -432,10 +465,11 @@ fn run(
     events: broadcast::Sender<AudioEvent>,
     control_events: tokio::sync::mpsc::UnboundedSender<AudioEvent>,
     init_tx: oneshot::Sender<Result<&'static str, AudioError>>,
+    sleep_deadline: std::sync::Arc<SleepDeadline>,
 ) {
     let mut backend: Box<dyn AudioBackend> = match kind {
         #[cfg(feature = "playback")]
-        BackendKind::Cpal => match CpalBackend::new() {
+        BackendKind::Cpal => match CpalBackend::with_sleep_deadline(sleep_deadline.clone()) {
             Ok(b) => {
                 let _ = init_tx.send(Ok(b.name()));
                 Box::new(b)
@@ -468,6 +502,15 @@ fn run(
 
     loop {
         let command = rx.recv_timeout(TICK);
+        let expired = enforce_sleep_deadline(
+            &sleep_deadline,
+            &mut *backend,
+            &mut state,
+            &snapshot,
+            &events,
+            &control_events,
+            &mut ended_emitted,
+        );
         match &command {
             Ok(Command::SetDsp(params, _)) => restore_dsp = *params,
             Ok(Command::SetCrossfade(ms, _)) => restore_crossfade = *ms,
@@ -479,13 +522,15 @@ fn run(
         }) {
             backend.clear_next();
         }
-        if settle_transition(
-            &mut *backend,
-            &mut state,
-            &snapshot,
-            &events,
-            &control_events,
-        ) {
+        if !expired
+            && settle_transition(
+                &mut *backend,
+                &mut state,
+                &snapshot,
+                &events,
+                &control_events,
+            )
+        {
             ended_emitted = false;
         }
         match command {
@@ -503,15 +548,27 @@ fn run(
                 let _ = reply.send(Ok(()));
             }
             Ok(Command::LeaveExclusive) => {
-                backend =
-                    restore_idle_backend(kind, &state, &events, restore_dsp, restore_crossfade);
+                backend = restore_idle_backend(
+                    kind,
+                    &state,
+                    &events,
+                    restore_dsp,
+                    restore_crossfade,
+                    &sleep_deadline,
+                );
                 ended_emitted = true;
             }
             Ok(Command::SelectDevice(id, reply)) if backend.name() == "unavailable" => {
                 let mut requested = state.clone();
                 requested.device = id.clone();
-                let restored =
-                    restore_idle_backend(kind, &requested, &events, restore_dsp, restore_crossfade);
+                let restored = restore_idle_backend(
+                    kind,
+                    &requested,
+                    &events,
+                    restore_dsp,
+                    restore_crossfade,
+                    &sleep_deadline,
+                );
                 let result = if restored.name() == "unavailable" {
                     Err(AudioError::Other(
                         "selected output device is unavailable".into(),
@@ -524,7 +581,13 @@ fn run(
                 publish(&snapshot, &state);
                 let _ = reply.send(result);
             }
-            Ok(cmd) => match apply(&mut *backend, &mut state, &snapshot, cmd) {
+            Ok(cmd) => match apply_with_sleep_deadline(
+                &mut *backend,
+                &mut state,
+                &snapshot,
+                cmd,
+                &sleep_deadline,
+            ) {
                 Ok(source_reset) => {
                     if source_reset {
                         ended_emitted = false;
@@ -540,14 +603,34 @@ fn run(
 
         // 后端自己线程上的延迟状态机：淡出到点再暂停/停止、换装、尾部淡出。
         // 必须在命令处理之后、Ended 判定之前——换装会复位解码进度与门闩输入。
-        backend.maintain();
-        if settle_transition(
+        enforce_sleep_deadline(
+            &sleep_deadline,
             &mut *backend,
             &mut state,
             &snapshot,
             &events,
             &control_events,
-        ) {
+            &mut ended_emitted,
+        );
+        backend.maintain();
+        let expired = enforce_sleep_deadline(
+            &sleep_deadline,
+            &mut *backend,
+            &mut state,
+            &snapshot,
+            &events,
+            &control_events,
+            &mut ended_emitted,
+        );
+        if !expired
+            && settle_transition(
+                &mut *backend,
+                &mut state,
+                &snapshot,
+                &events,
+                &control_events,
+            )
+        {
             ended_emitted = false;
         }
         if let Some(error) = backend.take_transport_error() {
@@ -558,7 +641,7 @@ fn run(
         // 解码线程异常早夭（如边下边播的下载链路断开）：清空当前曲目，
         // 发专门事件让状态层对在线曲自动跳曲，并立即发布一帧快照。
         // ended 门闩同时上膛，避免位置恰好到尾时再补一发 Ended 双重接力。
-        if backend.take_decode_failure() {
+        if backend.take_decode_failure() && !expired {
             let track_id = state.track_id.take();
             state.playing = false;
             ended_emitted = true;
@@ -571,14 +654,16 @@ fn run(
             broadcast_snapshot(&events, &state, &mut last_broadcast);
         }
 
-        emit_ended(
-            &mut *backend,
-            &mut state,
-            &snapshot,
-            &events,
-            &control_events,
-            &mut ended_emitted,
-        );
+        if !expired {
+            emit_ended(
+                &mut *backend,
+                &mut state,
+                &snapshot,
+                &events,
+                &control_events,
+                &mut ended_emitted,
+            );
+        }
 
         state.position_ms = backend.position_ms();
         state.duration_ms = backend.duration_ms();
@@ -659,10 +744,11 @@ fn restore_idle_backend(
     _events: &broadcast::Sender<AudioEvent>,
     dsp: vmusic_core::DspParams,
     crossfade_ms: u64,
+    _sleep_deadline: &std::sync::Arc<SleepDeadline>,
 ) -> Box<dyn AudioBackend> {
     let mut backend: Box<dyn AudioBackend> = match kind {
         #[cfg(feature = "playback")]
-        BackendKind::Cpal => match CpalBackend::new() {
+        BackendKind::Cpal => match CpalBackend::with_sleep_deadline(_sleep_deadline.clone()) {
             Ok(backend) => Box::new(backend),
             Err(error) => {
                 let _ = _events.send(AudioEvent::Error(error.to_string()));
@@ -763,6 +849,65 @@ fn emit_ended(
     }
 }
 
+/// The callback is already silent; settle the owner state without waiting for
+/// a fade or allowing natural-end/decode-failure work to advance the queue.
+fn enforce_sleep_deadline(
+    gate: &SleepDeadline,
+    backend: &mut dyn AudioBackend,
+    state: &mut PlayerSnapshot,
+    sink: &ArcSwap<PlayerSnapshot>,
+    events: &broadcast::Sender<AudioEvent>,
+    control_events: &tokio::sync::mpsc::UnboundedSender<AudioEvent>,
+    ended_emitted: &mut bool,
+) -> bool {
+    if !gate.expired() {
+        return false;
+    }
+    if let Err(error) = backend.pause() {
+        if state.playing {
+            let _ = events.send(AudioEvent::Error(error.to_string()));
+        }
+    }
+    backend.clear_next();
+    // A callback may have promoted a deck immediately before expiry. Consume
+    // that already-completed edge now so clearing the gate cannot replay it as
+    // a new playing transition. Preserve the actual source in the snapshot.
+    let transitioned = if let Some(vmusic_core::NextEvent::Transitioned {
+        from_generation,
+        track_id,
+        info,
+    }) = backend.take_next_event()
+    {
+        if state.generation == from_generation {
+            state.generation += 1;
+            state.track_id = Some(track_id.clone());
+            state.duration_ms = info.duration_ms;
+            Some(AudioEvent::Transitioned {
+                from_generation,
+                generation: state.generation,
+                track_id,
+            })
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    state.playing = false;
+    state.position_ms = backend.position_ms();
+    state.duration_ms = backend.duration_ms();
+    *ended_emitted = true;
+    publish(sink, state);
+    if let Some(transitioned) = transitioned {
+        // This source switch already happened before the callback saw expiry.
+        // Preserve the control edge so the queue cursor can match the actual
+        // source, but never publish a playing snapshot or emit a natural end.
+        let _ = control_events.send(transitioned.clone());
+        let _ = events.send(transitioned);
+    }
+    true
+}
+
 fn settle_transition(
     backend: &mut dyn AudioBackend,
     state: &mut PlayerSnapshot,
@@ -812,6 +957,31 @@ fn settle_transition(
 /// 成功的 Load/Play/Seek/Stop 重新武装 Ended 门闩。
 /// 注意命令自身的业务成败走 `reply`，这里 Err 只用于真正需要上 Error 事件的
 /// 场景（当前各臂均不产生）。
+fn apply_with_sleep_deadline(
+    backend: &mut dyn AudioBackend,
+    state: &mut PlayerSnapshot,
+    sink: &ArcSwap<PlayerSnapshot>,
+    cmd: Command,
+    gate: &SleepDeadline,
+) -> Result<bool, AudioError> {
+    match cmd {
+        Command::Play(reply) if gate.expired() => {
+            let _ = backend.pause();
+            backend.clear_next();
+            state.playing = false;
+            state.position_ms = backend.position_ms();
+            publish(sink, state);
+            let _ = reply.send(Err(AudioError::Other("sleep_timer_expired".into())));
+            Ok(false)
+        }
+        Command::PrepareNext(_, reply) if gate.expired() => {
+            let _ = reply.send(Err(AudioError::Other("sleep_timer_expired".into())));
+            Ok(false)
+        }
+        cmd => apply(backend, state, sink, cmd),
+    }
+}
+
 fn apply(
     backend: &mut dyn AudioBackend,
     state: &mut PlayerSnapshot,
@@ -981,6 +1151,88 @@ fn apply(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn sleep_expiry_pauses_the_actor_and_rejects_play_until_cleared() {
+        let (audio, actor) = spawn(BackendKind::Null).await.unwrap();
+        let mut controls = audio.take_control_events().unwrap();
+        audio.load("sleep.wav", Some("sleep".into())).await.unwrap();
+        audio.play().await.unwrap();
+        audio.set_sleep_deadline(Some(1)).unwrap();
+        wait_until("sleep deadline publishes paused state", || {
+            !audio.snapshot().playing
+        });
+        assert_eq!(audio.snapshot().track_id.as_deref(), Some("sleep"));
+        assert!(audio.play().await.is_err());
+        assert!(audio
+            .prepare_next("next.wav", "next".into(), audio.snapshot().generation, 100)
+            .await
+            .is_err());
+        assert!(!audio.snapshot().playing);
+        assert!(
+            controls.try_recv().is_err(),
+            "expiry must not emit a queue advance"
+        );
+        audio.set_sleep_deadline(None).unwrap();
+        audio.set_volume(0.5).await.unwrap();
+        assert!(!audio.snapshot().playing, "clearing a timer is not play");
+        audio.play().await.unwrap();
+        assert!(audio.snapshot().playing);
+        audio.shutdown();
+        actor.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn already_queued_play_checks_the_deadline_when_consumed() {
+        let gate = SleepDeadline::new();
+        let mut backend = NullBackend::new();
+        backend.load("sleep.wav").unwrap();
+        backend.play().unwrap();
+        let mut state = PlayerSnapshot {
+            track_id: Some("sleep".into()),
+            playing: true,
+            ..Default::default()
+        };
+        let sink = ArcSwap::from_pointee(state.clone());
+        let (queued, commands) = mpsc::channel();
+        let (reply, response) = oneshot::channel();
+        queued.send(Command::Play(reply)).unwrap();
+        // Simulate a queued request that waits across sleep/resume. Expiry is
+        // checked on the actor side, after enqueue, before backend.play().
+        gate.set(Some(1));
+        apply_with_sleep_deadline(
+            &mut backend,
+            &mut state,
+            &sink,
+            commands.recv().unwrap(),
+            &gate,
+        )
+        .unwrap();
+        assert!(response.await.unwrap().is_err());
+        assert!(!sink.load().playing);
+        gate.set(None);
+        assert!(!sink.load().playing);
+    }
+
+    #[tokio::test]
+    async fn sleep_deadline_is_local_and_can_always_be_cleared() {
+        let (audio, actor) = spawn(BackendKind::Null).await.unwrap();
+        assert!(audio.set_sleep_deadline(Some(0)).is_err());
+        audio.set_sleep_deadline(Some(u64::MAX)).unwrap();
+        let lease = audio.acquire_exclusive().await.unwrap();
+        assert!(audio.set_sleep_deadline(Some(u64::MAX)).is_err());
+        audio.set_sleep_deadline(None).unwrap();
+        drop(lease);
+        audio
+            .load("restored.wav", Some("restored".into()))
+            .await
+            .unwrap();
+        audio.set_sleep_deadline(Some(1)).unwrap();
+        assert!(audio.play().await.is_err());
+        assert!(!audio.snapshot().playing);
+        audio.shutdown();
+        actor.join().unwrap();
+    }
 
     #[tokio::test]
     async fn exclusive_lease_fences_clones_and_restores_only_idle_playback() {
@@ -1280,6 +1532,73 @@ mod tests {
     fn unit_reply<T>() -> oneshot::Sender<T> {
         let (tx, _rx) = oneshot::channel();
         tx
+    }
+
+    #[test]
+    fn sleep_expiry_preserves_an_already_completed_transition_as_paused() {
+        let gate = SleepDeadline::new();
+        gate.set(Some(1));
+        let mut backend = InstantEndBackend {
+            armed: true,
+            next_prepared: true,
+            next_event: Some(vmusic_core::NextEvent::Transitioned {
+                from_generation: 7,
+                track_id: "next".into(),
+                info: MediaInfo::default(),
+            }),
+            ..Default::default()
+        };
+        let mut state = PlayerSnapshot {
+            generation: 7,
+            track_id: Some("current".into()),
+            playing: true,
+            ..Default::default()
+        };
+        let sink = ArcSwap::from_pointee(state.clone());
+        let (events, mut updates) = broadcast::channel(8);
+        let (controls, mut control_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut ended = false;
+        assert!(enforce_sleep_deadline(
+            &gate,
+            &mut backend,
+            &mut state,
+            &sink,
+            &events,
+            &controls,
+            &mut ended,
+        ));
+        assert!(!sink.load().playing);
+        assert_eq!(sink.load().track_id.as_deref(), Some("next"));
+        assert_eq!(sink.load().generation, 8);
+        assert!(!backend.next_prepared);
+        assert!(matches!(
+            control_rx.try_recv(),
+            Ok(AudioEvent::Transitioned {
+                from_generation: 7,
+                generation: 8,
+                ..
+            })
+        ));
+        assert!(matches!(
+            updates.try_recv(),
+            Ok(AudioEvent::Transitioned { .. })
+        ));
+        assert!(control_rx.try_recv().is_err());
+        assert!(updates.try_recv().is_err());
+        gate.set(None);
+        emit_ended(
+            &mut backend,
+            &mut state,
+            &sink,
+            &events,
+            &controls,
+            &mut ended,
+        );
+        assert!(
+            control_rx.try_recv().is_err(),
+            "expiry must keep natural end disarmed"
+        );
+        assert!(updates.try_recv().is_err());
     }
 
     #[tokio::test]

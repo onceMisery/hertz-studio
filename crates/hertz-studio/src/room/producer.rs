@@ -11,7 +11,7 @@ use tokio::sync::{mpsc as async_mpsc, watch};
 use vmusic_audio::{RenderCore, RenderFormat};
 use vmusic_core::{AudioBackend, DspParams, NextEvent, NextTrack};
 use vmusic_lan::clock::MonotonicClock;
-use vmusic_lan::protocol::{AudioFormat, Plan};
+use vmusic_lan::protocol::{AudioFormat, FormatMode, Plan};
 
 const AHEAD_NS: u64 = 500_000_000;
 const PREFILL_NS: u64 = 200_000_000;
@@ -41,6 +41,22 @@ pub enum FailureStage {
 }
 #[derive(Debug)]
 pub enum ProducerEvent {
+    Interrupted {
+        epoch: u64,
+        frame: u64,
+        instance: u64,
+        position_frames: u64,
+        message: String,
+    },
+    SuccessorDeferred {
+        epoch: u64,
+        source: Box<Source>,
+    },
+    EpochEnd {
+        epoch: u64,
+        format: AudioFormat,
+        end_frame: u64,
+    },
     SuccessorPrepared {
         epoch: u64,
         instance: Option<u64>,
@@ -63,6 +79,7 @@ pub enum ProducerEvent {
         frame: u64,
         format: AudioFormat,
         samples: Arc<[f32]>,
+        reservation: Option<vmusic_audio::render::NativePcmReservation>,
     },
     Boundary {
         epoch: u64,
@@ -74,6 +91,7 @@ pub enum ProducerEvent {
         epoch: u64,
         frame: u64,
         instance: u64,
+        position_frames: u64,
     },
     Error {
         epoch: u64,
@@ -128,6 +146,10 @@ struct Generation {
     pending_mix: Option<u64>,
     crossfade_override: Option<u64>,
 }
+enum Retired {
+    Generation(Box<Generation>),
+    Renderer(Box<RenderCore>),
+}
 #[derive(Clone, Copy)]
 struct FadeOut {
     epoch: u64,
@@ -162,20 +184,31 @@ pub struct Producer {
     thread: Option<std::thread::JoinHandle<()>>,
 }
 impl Producer {
+    #[cfg(test)]
     pub fn spawn(
         clock: MonotonicClock,
+    ) -> Result<(Self, async_mpsc::Receiver<ProducerEvent>), String> {
+        Self::spawn_configured(clock, FormatMode::Fixed, Default::default())
+    }
+    pub fn spawn_configured(
+        clock: MonotonicClock,
+        format_mode: FormatMode,
+        native_budget: vmusic_audio::render::NativePcmBudget,
     ) -> Result<(Self, async_mpsc::Receiver<ProducerEvent>), String> {
         let (commands, rx) = mpsc::sync_channel(16);
         let (events, event_rx) = async_mpsc::channel(128);
         let (failure, failure_rx) = watch::channel(None);
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = stop.clone();
-        let (retire_tx, retire_rx) = mpsc::sync_channel::<Generation>(2);
+        let (retire_tx, retire_rx) = mpsc::sync_channel::<Retired>(2);
         let retirement = std::thread::Builder::new()
             .name("hertz-room-retire".into())
             .spawn(move || {
-                for generation in retire_rx {
-                    drop(generation);
+                for resource in retire_rx {
+                    match resource {
+                        Retired::Generation(generation) => drop(generation),
+                        Retired::Renderer(renderer) => drop(renderer),
+                    }
                 }
             })
             .map_err(|e| e.to_string())?;
@@ -190,6 +223,8 @@ impl Producer {
                     preparing: None,
                     retired: retire_tx,
                     deferred_mix: None,
+                    format_mode,
+                    native_budget,
                 };
                 if let Err(error) = worker.run(rx) {
                     failure.send_replace(Some(error));
@@ -288,8 +323,10 @@ struct Worker {
     preparing: Option<Generation>,
     // Drop decoder owners off the time-sensitive render loop. At most two can
     // be retiring; their decoder stop/join is bounded by the existing renderer.
-    retired: mpsc::SyncSender<Generation>,
+    retired: mpsc::SyncSender<Retired>,
     deferred_mix: Option<Command>,
+    format_mode: FormatMode,
+    native_budget: vmusic_audio::render::NativePcmBudget,
 }
 impl Worker {
     fn emit(&self, event: ProducerEvent) -> Result<(), String> {
@@ -326,13 +363,30 @@ impl Worker {
             if let Some(mut generation) = self.current.take() {
                 let horizon = self.current_horizon(now, boundary);
                 if let Err(message) = self.pull(&mut generation, horizon) {
-                    self.emit(ProducerEvent::Error {
-                        epoch: generation.plan.epoch.0,
-                        stage: FailureStage::Render,
-                        message,
+                    self.emit(if self.format_mode == FormatMode::Native {
+                        ProducerEvent::Interrupted {
+                            epoch: generation.plan.epoch.0,
+                            frame: generation.frame,
+                            instance: generation.instance,
+                            position_frames: generation
+                                .renderer
+                                .as_ref()
+                                .map_or(0, |renderer| renderer.position_frames()),
+                            message,
+                        }
+                    } else {
+                        ProducerEvent::Error {
+                            epoch: generation.plan.epoch.0,
+                            stage: FailureStage::Render,
+                            message,
+                        }
                     })?;
                     generation.ended = true;
-                    generation.renderer = None;
+                    if let Some(renderer) = generation.renderer.take() {
+                        self.retired
+                            .try_send(Retired::Renderer(Box::new(renderer)))
+                            .map_err(|_| "decoder retirement is congested")?;
+                    }
                 }
                 self.current = Some(generation);
             }
@@ -349,19 +403,39 @@ impl Worker {
                     start.saturating_add(PREFILL_NS)
                 };
                 if let Err(message) = self.pull(&mut generation, horizon) {
-                    self.emit(ProducerEvent::Error {
-                        epoch: generation.plan.epoch.0,
-                        stage: FailureStage::Render,
-                        message,
+                    self.emit(if self.format_mode == FormatMode::Native {
+                        ProducerEvent::Interrupted {
+                            epoch: generation.plan.epoch.0,
+                            frame: generation.frame,
+                            instance: generation.instance,
+                            position_frames: generation
+                                .renderer
+                                .as_ref()
+                                .map_or(0, |renderer| renderer.position_frames()),
+                            message,
+                        }
+                    } else {
+                        ProducerEvent::Error {
+                            epoch: generation.plan.epoch.0,
+                            stage: FailureStage::Render,
+                            message,
+                        }
                     })?;
                     generation.ended = true;
-                    generation.renderer = None;
+                    if let Some(renderer) = generation.renderer.take() {
+                        self.retired
+                            .try_send(Retired::Renderer(Box::new(renderer)))
+                            .map_err(|_| "decoder retirement is congested")?;
+                    }
                 }
                 // A natural transition can make pull yield for its next source.
                 // Reaching the render horizon does not mean that the old PCM
                 // prefix has actually been produced through the Commit point.
                 let old_prefix_complete = match self.current.as_ref() {
-                    Some(old) => old.frame >= frames_at(&old.plan, start)?,
+                    Some(old) => {
+                        (self.format_mode == FormatMode::Native && old.ended)
+                            || old.frame >= frames_at(&old.plan, start)?
+                    }
                     None => true,
                 };
                 if generation.committed
@@ -380,7 +454,7 @@ impl Worker {
     }
     fn retire(&self, generation: Generation) -> Result<(), String> {
         self.retired
-            .try_send(generation)
+            .try_send(Retired::Generation(Box::new(generation)))
             .map_err(|_| "decoder retirement is congested".to_string())
     }
     fn overlap_started(&self) -> bool {
@@ -437,10 +511,15 @@ impl Worker {
                     return Err("cannot replace an already committed render prefix".into());
                 }
                 let (renderer, instance, gain) = if let Some(source) = source {
-                    let mut renderer = RenderCore::new(RenderFormat {
+                    let render_format = RenderFormat {
                         sample_rate: plan.format.sample_rate,
                         channels: plan.format.channels,
-                    })
+                    };
+                    let mut renderer = if self.format_mode == FormatMode::Native {
+                        RenderCore::new_native(render_format, self.native_budget.clone())
+                    } else {
+                        RenderCore::new(render_format)
+                    }
                     .map_err(|e| e.to_string())?;
                     let prepositioned = source.media.is_some();
                     match source.media {
@@ -496,7 +575,7 @@ impl Worker {
                     .filter(|g| g.plan.epoch.0 == epoch)
                     .ok_or("unknown render Commit")?;
                 g.committed = true;
-                if g.renderer.is_none() {
+                if g.renderer.is_none() && !g.ended {
                     let end_ns = g
                         .time(g.plan.join_frame.0)
                         .ok_or("room timeline overflow")?;
@@ -514,7 +593,7 @@ impl Worker {
             }
             Command::Next {
                 epoch,
-                source,
+                mut source,
                 crossfade_ms,
             } => {
                 let g = self
@@ -524,6 +603,25 @@ impl Worker {
                     .or_else(|| self.preparing.as_mut().filter(|g| g.plan.epoch.0 == epoch));
                 let mut actual = None;
                 if let Some(g) = g {
+                    if self.format_mode == FormatMode::Native && g.ended {
+                        if let Some(source) = source.take() {
+                            // EOF may have sealed this epoch before Host consumed its
+                            // event. Return the exact prepared owner for a new epoch.
+                            self.events
+                                .try_send(ProducerEvent::SuccessorDeferred {
+                                    epoch,
+                                    source: Box::new(source),
+                                })
+                                .map_err(|_| "room render event consumer is congested")?;
+                            self.events
+                                .try_send(ProducerEvent::SuccessorPrepared {
+                                    epoch,
+                                    instance: None,
+                                })
+                                .map_err(|_| "room render event consumer is congested")?;
+                            return Ok(());
+                        }
+                    }
                     g.awaiting_next = false;
                     if let Some(renderer) = g.renderer.as_mut() {
                         if renderer.prepared_next_started() {
@@ -537,6 +635,34 @@ impl Worker {
                             if let Some(mut source) = source {
                                 if let Some(gain) = g.gain_overrides.get(&source.instance) {
                                     source.track_gain_db = *gain;
+                                }
+                                if self.format_mode == FormatMode::Native {
+                                    let media = source.media.as_ref().ok_or(
+                                        "native successor requires verified PreparedMedia",
+                                    )?;
+                                    if !renderer.native_successor_eligible(
+                                        media,
+                                        g.crossfade_override.unwrap_or(crossfade_ms),
+                                        source.track_gain_db,
+                                    ) {
+                                        self.events
+                                            .try_send(ProducerEvent::SuccessorDeferred {
+                                                epoch,
+                                                source: Box::new(source),
+                                            })
+                                            .map_err(|_| {
+                                                "room render event consumer is congested"
+                                            })?;
+                                        self.events
+                                            .try_send(ProducerEvent::SuccessorPrepared {
+                                                epoch,
+                                                instance: None,
+                                            })
+                                            .map_err(|_| {
+                                                "room render event consumer is congested"
+                                            })?;
+                                        return Ok(());
+                                    }
                                 }
                                 let next = NextTrack {
                                     uri: source.path.to_string_lossy().into_owned(),
@@ -640,7 +766,7 @@ impl Worker {
                         // The producer can retire a prefix 500ms before its
                         // audible suspension/EOF. Silent render state does not
                         // make the old PCM already sent to devices disappear.
-                        let frame = if g.renderer.is_none() {
+                        let frame = if g.renderer.is_none() && !g.ended {
                             g.plan.join_frame.0
                         } else {
                             g.frame
@@ -677,6 +803,9 @@ impl Worker {
         Ok(())
     }
     fn pull(&self, g: &mut Generation, horizon: u64) -> Result<(), String> {
+        if self.format_mode == FormatMode::Native && g.ended {
+            return Ok(());
+        }
         let rate = g.plan.format.sample_rate;
         let channels = usize::from(g.plan.format.channels);
         let block_frames = (rate / 50) as usize;
@@ -728,6 +857,31 @@ impl Worker {
             if frames == 0 {
                 break;
             }
+            let reservation = if self.format_mode == FormatMode::Native {
+                match self
+                    .native_budget
+                    .reserve(frames as u64, rate, frames * channels * 4)
+                {
+                    Ok(reservation) => Some(reservation),
+                    Err(_) => break, // Old decks and queued PCM keep priority over lookahead.
+                }
+            } else {
+                None
+            };
+            // Vec -> Arc allocates the final PCM while the render buffer still
+            // exists. Admit both before consuming source frames; pressure must
+            // stop lookahead, never strand an already rendered prefix.
+            let copy_reservation = if self.format_mode == FormatMode::Native {
+                match self
+                    .native_budget
+                    .reserve(frames as u64, rate, frames * channels * 4)
+                {
+                    Ok(reservation) => Some(reservation),
+                    Err(_) => break,
+                }
+            } else {
+                None
+            };
             let mut samples = vec![0.0; frames * channels];
             let mut retry = false;
             if let Some(renderer) = g.renderer.as_mut().filter(|_| !g.ended) {
@@ -784,10 +938,15 @@ impl Worker {
                         epoch: g.plan.epoch.0,
                         frame: end,
                         instance: g.instance,
+                        position_frames: renderer.position_frames(),
                     })?;
-                    // Continue silence on the same room clock until a new plan;
-                    // never repeatedly emit EOF or replay decoder tail samples.
+                    // Fixed rooms retain legacy idle PCM. Native rooms seal the
+                    // real endpoint and stop after their truncated final block.
                     g.ended = true;
+                    if self.format_mode == FormatMode::Native {
+                        frames = report.source_frames;
+                        samples.truncate(frames * channels);
+                    }
                 } else if report.source_frames < frames && report.transition_frame.is_none() {
                     // A decoder can briefly hold the sample queue or have more
                     // data in flight. Preserve only the consumed prefix; no
@@ -798,6 +957,18 @@ impl Worker {
                 }
             }
             if frames == 0 {
+                if self.format_mode == FormatMode::Native && g.ended {
+                    self.emit(ProducerEvent::EpochEnd {
+                        epoch: g.plan.epoch.0,
+                        format: g.plan.format,
+                        end_frame: g.frame,
+                    })?;
+                    if let Some(renderer) = g.renderer.take() {
+                        self.retired
+                            .try_send(Retired::Renderer(Box::new(renderer)))
+                            .map_err(|_| "decoder retirement is congested")?;
+                    }
+                }
                 break;
             }
             if let Some(fade) = g.fade {
@@ -808,12 +979,15 @@ impl Worker {
                     }
                 }
             }
+            let samples: Arc<[f32]> = samples.into();
+            drop(copy_reservation);
             self.emit(ProducerEvent::Pcm {
                 epoch: g.plan.epoch.0,
                 sequence: g.sequence,
                 frame: g.frame,
                 format: g.plan.format,
-                samples: samples.into(),
+                samples,
+                reservation,
             })?;
             if let Some(change) = g.pending_mix.take() {
                 self.emit(ProducerEvent::MixApplied {
@@ -826,6 +1000,19 @@ impl Worker {
                 .checked_add(frames as u64)
                 .ok_or("timeline overflow")?;
             g.sequence = g.sequence.checked_add(1).ok_or("sequence overflow")?;
+            if self.format_mode == FormatMode::Native && g.ended {
+                self.emit(ProducerEvent::EpochEnd {
+                    epoch: g.plan.epoch.0,
+                    format: g.plan.format,
+                    end_frame: g.frame,
+                })?;
+                if let Some(renderer) = g.renderer.take() {
+                    self.retired
+                        .try_send(Retired::Renderer(Box::new(renderer)))
+                        .map_err(|_| "decoder retirement is congested")?;
+                }
+                break;
+            }
             if let Some(fade) = g.fade.filter(|fade| g.frame >= fade.end) {
                 self.emit(ProducerEvent::Suspended {
                     epoch: fade.epoch,
@@ -892,7 +1079,7 @@ mod tests {
     ) -> (
         Worker,
         async_mpsc::Receiver<ProducerEvent>,
-        mpsc::Receiver<Generation>,
+        mpsc::Receiver<Retired>,
     ) {
         let (events, received) = async_mpsc::channel(128);
         let (retired, _retire_rx) = mpsc::sync_channel(2);
@@ -904,6 +1091,8 @@ mod tests {
             preparing: None,
             retired,
             deferred_mix: None,
+            format_mode: FormatMode::Fixed,
+            native_budget: Default::default(),
         };
         worker
             .apply(Command::Prepare {
@@ -1070,6 +1259,8 @@ mod tests {
             preparing: None,
             retired,
             deferred_mix: None,
+            format_mode: FormatMode::Fixed,
+            native_budget: Default::default(),
         };
         worker.pull(&mut current, 0).unwrap();
         current.committed = false;
@@ -1277,6 +1468,8 @@ mod tests {
                 preparing: None,
                 retired,
                 deferred_mix: None,
+                format_mode: FormatMode::Fixed,
+                native_budget: Default::default(),
             };
             let plan = Plan {
                 epoch: Counter(1),
@@ -1412,3 +1605,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "producer_native_tests.rs"]
+mod native_tests;

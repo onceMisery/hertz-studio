@@ -12,7 +12,6 @@
 
 use std::path::{Component, Path, PathBuf};
 
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{FromRow, SqliteConnection, SqlitePool};
 use vmusic_core::{Playlist, PlaylistId, StoreError, Track, TrackId, TrackSource};
 
@@ -29,7 +28,9 @@ pub mod playlists;
 pub mod remote_roots;
 pub mod scan_roots;
 pub mod settings;
+pub mod stage_presets;
 pub mod track_edits;
+pub mod upgrade;
 
 #[derive(Debug, Clone, FromRow)]
 pub struct TrackRow {
@@ -86,31 +87,18 @@ pub async fn begin_immediate(
 }
 
 pub async fn open(data_dir: &Path) -> Result<SqlitePool, StoreError> {
-    tokio::fs::create_dir_all(data_dir)
+    open_with_resources(data_dir, &[]).await
+}
+
+/// Production callers hold their DataDir owner through schema preparation and
+/// declare immutable original-resource roots needed by a historical rollback.
+pub async fn open_with_resources(
+    data_dir: &Path,
+    roots: &[&str],
+) -> Result<SqlitePool, StoreError> {
+    upgrade::open(data_dir, roots, &upgrade::MIGRATOR)
         .await
-        .map_err(|e| StoreError::Database(e.to_string()))?;
-    let db_path = data_dir.join("vmusic.db");
-    let url = format!("sqlite://{}", db_path.display());
-
-    let options = SqliteConnectOptions::new()
-        .filename(&db_path)
-        .create_if_missing(true)
-        .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
-        .busy_timeout(std::time::Duration::from_secs(5));
-
-    let pool = SqlitePoolOptions::new()
-        .max_connections(4)
-        .connect_with(options)
-        .await
-        .map_err(|e| StoreError::Database(e.to_string()))?;
-
-    sqlx::migrate!("../../migrations")
-        .run(&pool)
-        .await
-        .map_err(|e| StoreError::Database(e.to_string()))?;
-
-    tracing::debug!("database ready at {url}");
-    Ok(pool)
+        .map_err(|error| StoreError::Database(error.to_string()))
 }
 
 // ---------------------------------------------------------------------------

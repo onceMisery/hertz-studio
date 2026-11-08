@@ -10,7 +10,7 @@
   var contextRetries = 0, contextRetryAt = 0, contextRetryTimer = 0;
   var performanceHost, lyricPerformance = null, performanceId = '', performanceSignature = '';
   var performances = { classic: 'StanzaClassic', cadenza: 'StanzaCadenza', sonnet: 'StanzaSonnet', tempera: 'StanzaTempera' };
-  var paramEvents, playerBridge = {}, playerTimer = 0, immersiveNodes = [], immersiveFocus;
+  var paramEvents, playerBridge = {}, playerTimer = 0, immersiveNodes = [], immersiveFocus, immFxTimer = 0;
   var shelf = null, shelfShown = false;
   var floatTarget = null;
   var panelPreview = null, nodePreview = null, previewTimer = 0, hud = null, hudRecipe = null, hudUntil = 0, hudTimer = 0;
@@ -22,7 +22,11 @@
   var clickSerial = 0, lastClickAt = 0, downPoint = null, holdTimer = 0, charging = false;
   var warpTimer = 0, warpHideTimer = 0, warpFrameTimer = 0, warpStarted = 0, warpActive = false, warpReady = false, bootSeq = 0;
   var prefs = { sceneSource: 'coast', sceneStates: {}, lyrics: true, lyricStyle: 'subtitle', cinema: true,
-    qualityMode: 'auto', playerAutoHide: true, shelfMode: 'side', freeCam: null, schemaVersion: 3 };
+    qualityMode: 'auto', playerAutoHide: true, shelfMode: 'side', freeCam: null, immersiveFx: 'fade', immersiveFxDur: 450,
+    sceneFx: 'veil-fade', sceneFxDur: 640, sceneFxGlide: true, sceneFxDirection: 'right',
+    sceneFxSoftness: 48, sceneFxScale: .08, sceneFxTilt: 8, sceneFxOffset: 1.5, sceneFxIntensity: 1,
+    sceneFxLabel: true, sceneFxAdaptive: true,
+    schemaVersion: 3 };
   var labels = { auto: '自动', low: '轻量', medium: '标准', high: '高画质' };
   var zeros = new Float32Array(64), sceneTime = 0, lastPosition = -1, lastTrack, lastSceneCover = '';
   var lyricDocument, lyricKey = '', lyricWindow;
@@ -74,6 +78,47 @@
     if (typeof value.lyrics === 'boolean') prefs.lyrics = value.lyrics;
     if (typeof value.cinema === 'boolean') prefs.cinema = value.cinema;
     if (typeof value.playerAutoHide === 'boolean') prefs.playerAutoHide = value.playerAutoHide;
+    if (value.immersiveFx != null || value.immersiveFxDur != null) {
+      var fxChanged = false;
+      if (value.immersiveFx != null) {
+        var nextFx = ['off','fade','flip','zoom','slide'].indexOf(value.immersiveFx) >= 0 ? value.immersiveFx : 'fade';
+        if (nextFx !== prefs.immersiveFx) { prefs.immersiveFx = nextFx; fxChanged = true; }
+      }
+      if (value.immersiveFxDur != null) {
+        var nextDur = typeof value.immersiveFxDur === 'number' && isFinite(value.immersiveFxDur) ? clamp(Math.round(value.immersiveFxDur),150,1200) : 450;
+        if (nextDur !== prefs.immersiveFxDur) { prefs.immersiveFxDur = nextDur; fxChanged = true; }
+      }
+      // 值真的变了才让在飞的切换立即落终态；自己保存触发的 settings 回声 configure
+      // 带的是同值，不能反杀正在播的过渡。
+      if (fxChanged) endImmersiveFx();
+    }
+    if (value.sceneFx != null || value.sceneFxDur != null || value.sceneFxGlide != null || value.sceneFxDirection != null ||
+        value.sceneFxSoftness != null || value.sceneFxScale != null || value.sceneFxTilt != null || value.sceneFxOffset != null ||
+        value.sceneFxIntensity != null || value.sceneFxLabel != null || value.sceneFxAdaptive != null) {
+      var sceneChanged = false;
+      if (value.sceneFx != null) {
+        var nextSceneFx = ['none','veil-fade','veil-wipe','zoom','tilt','slide','combo'].indexOf(value.sceneFx) >= 0 ? value.sceneFx : 'veil-fade';
+        if (nextSceneFx !== prefs.sceneFx) { prefs.sceneFx = nextSceneFx; sceneChanged = true; }
+      }
+      if (value.sceneFxDur != null) {
+        var nextSceneDur = typeof value.sceneFxDur === 'number' && isFinite(value.sceneFxDur) ? clamp(Math.round(value.sceneFxDur),240,1200) : 640;
+        if (nextSceneDur !== prefs.sceneFxDur) { prefs.sceneFxDur = nextSceneDur; sceneChanged = true; }
+      }
+      if (typeof value.sceneFxGlide === 'boolean' && value.sceneFxGlide !== prefs.sceneFxGlide) { prefs.sceneFxGlide = value.sceneFxGlide; sceneChanged = true; }
+      if (value.sceneFxDirection != null) {
+        var nextDir = ['right','left','up','down'].indexOf(value.sceneFxDirection) >= 0 ? value.sceneFxDirection : 'right';
+        if (nextDir !== prefs.sceneFxDirection) { prefs.sceneFxDirection = nextDir; sceneChanged = true; }
+      }
+      var sceneNums = { sceneFxSoftness: [0, 80], sceneFxScale: [.02, .15], sceneFxTilt: [2, 12], sceneFxOffset: [.5, 3], sceneFxIntensity: [.4, 1.6] };
+      Object.keys(sceneNums).forEach(function (key) {
+        if (typeof value[key] !== 'number' || !isFinite(value[key])) return;
+        var next = clamp(value[key], sceneNums[key][0], sceneNums[key][1]);
+        if (next !== prefs[key]) { prefs[key] = next; sceneChanged = true; }
+      });
+      if (typeof value.sceneFxLabel === 'boolean' && value.sceneFxLabel !== prefs.sceneFxLabel) { prefs.sceneFxLabel = value.sceneFxLabel; sceneChanged = true; }
+      if (typeof value.sceneFxAdaptive === 'boolean' && value.sceneFxAdaptive !== prefs.sceneFxAdaptive) { prefs.sceneFxAdaptive = value.sceneFxAdaptive; sceneChanged = true; }
+      if (sceneChanged) sceneFxEnd();
+    }
     prefs.shelfMode = ['side','stage','off'].indexOf(value.shelfMode) >= 0 ? value.shelfMode : 'side';
     if (shelf) shelf.setMode(prefs.shelfMode);
     prefs.qualityMode = labels[value.qualityMode] ? value.qualityMode : 'auto';
@@ -317,9 +362,30 @@
     if(root.classList.contains('sp-immersive'))return;
     root.classList.remove('sp-player-hidden'); $('sp-bar').inert = false; schedulePlayerHide(2600);
   }
+  // 沉浸切换动画：sp-imm-switching 只在切换在飞时存在，CSS 过渡天然重定向，
+  // 快速连切只是同一组过渡反复 retarget，不会叠加；时长到点摘掉 class，
+  // 各元素自己的 transition（自动隐藏、弹层开合）随即恢复。
+  function applyImmersiveFx() {
+    if (!root) return;
+    root.dataset.immFx = prefs.immersiveFx;
+    root.style.setProperty('--sp-imm-dur', prefs.immersiveFxDur + 'ms');
+    $('sp-immersive-fx-dur-val').textContent = prefs.immersiveFxDur + ' ms';
+    $('sp-immersive-fx-dur').disabled = prefs.immersiveFx === 'off';
+  }
+  function endImmersiveFx() {
+    clearTimeout(immFxTimer); immFxTimer = 0;
+    if (root) root.classList.remove('sp-imm-switching');
+  }
+  function beginImmersiveFx() {
+    clearTimeout(immFxTimer); immFxTimer = 0;
+    if (prefs.immersiveFx === 'off' || reduced()) { root.classList.remove('sp-imm-switching'); return; }
+    root.classList.add('sp-imm-switching');
+    immFxTimer = setTimeout(endImmersiveFx, prefs.immersiveFxDur + 80);
+  }
   function immersive(value) {
     var on = value == null ? !root.classList.contains('sp-immersive') : value;
     if(on===root.classList.contains('sp-immersive'))return;
+    beginImmersiveFx();
     if(on){
       immersiveFocus=document.activeElement;closePanels();if(global.SpaceHome)SpaceHome.closePanel({restoreFocus:false});
       clearTimeout(playerTimer);releaseInput();root.focus({preventScroll:true});
@@ -468,6 +534,116 @@
     $('sp-canvas').textContent = ''; status = {state:'idle'}; $('sp-failure').hidden = true;
     if (lyricView) lyricView.reset(); lyricKey = ''; lastPosition = -1; lastTrack = null;
   }
+  // -------------------------------------------------------------------------
+  // 场景切换转场导演层（design/space3d-scene-transitions.md）
+  //
+  // 宿主只有一个共享 WebGLRenderer 且 select() 先释放再建，无法在 GL 里交叉淡化。
+  // 转场全部发生在合成器层：全屏遮罩 + 画布容器 transform/opacity，不新增上下文、
+  // 不新增 rAF、不碰 vendor 运行时。阶段由 setTimeout 推进（与入场 warp 同纪律），
+  // token 令牌让连续切换只认最后一次，旧 select 结果由 generation 丢弃。
+  // -------------------------------------------------------------------------
+  var sceneFxState = { token: 0, phase: 'idle', target: '', startedAt: 0, timers: [] };
+  function sceneFxLow() {
+    return !!((host && host.effectiveQuality && host.effectiveQuality() === 'low') ||
+      (global.Stage && global.Stage.isLowFx && global.Stage.isLowFx()));
+  }
+  function sceneFxEffectiveType() {
+    if (prefs.sceneFxAdaptive !== false && sceneFxLow()) return 'veil-fade';
+    return prefs.sceneFx;
+  }
+  function sceneFxDuration() {
+    var d = clamp(Math.round(prefs.sceneFxDur), 240, 1200);
+    if (prefs.sceneFxAdaptive !== false && sceneFxLow()) d = Math.min(d, 320);
+    return d;
+  }
+  function sceneFxClearTimers() { while (sceneFxState.timers.length) clearTimeout(sceneFxState.timers.pop()); }
+  function sceneFxEnd() {
+    sceneFxClearTimers(); sceneFxState.token += 1;
+    sceneFxState.phase = 'idle'; sceneFxState.target = '';
+    if (root) root.classList.remove('sp-scene-switching');
+    var veil = $('sp-scene-veil');
+    if (veil) { veil.dataset.phase = 'idle'; veil.classList.remove('sp-veil-slow'); }
+  }
+  function sceneFxBegin(target) {
+    if (!root || page !== 'stage' || !host) return 0;
+    if (prefs.sceneFx === 'none' || reduced()) { sceneFxEnd(); return 0; }
+    sceneFxClearTimers();
+    var token = ++sceneFxState.token;
+    var wasSwitching = root.classList.contains('sp-scene-switching');
+    var type = sceneFxEffectiveType(), d = sceneFxDuration();
+    sceneFxState.phase = 'cover'; sceneFxState.target = target; sceneFxState.startedAt = performance.now();
+    root.dataset.sceneFx = type;
+    root.style.setProperty('--sp-scene-fx-dur', d + 'ms');
+    root.classList.add('sp-scene-switching');
+    var veil = $('sp-scene-veil');
+    if (veil) {
+      veil.dataset.sceneDirection = prefs.sceneFxDirection || 'right';
+      // 连切时保持当前覆盖率只回 cover（不重启成透明），避免旧帧闪过一帧。
+      if (!wasSwitching) { veil.dataset.phase = 'idle'; void veil.offsetWidth; }
+      veil.dataset.phase = 'cover';
+      veil.classList.remove('sp-veil-slow');
+      if (prefs.sceneFxLabel !== false) sceneFxState.timers.push(setTimeout(function () {
+        if (token !== sceneFxState.token) return;
+        if (sceneFxState.phase === 'cover' || sceneFxState.phase === 'hold') veil.classList.add('sp-veil-slow');
+      }, 600));
+      // 慢加载兜底：宿主迟迟不 ready 也要把遮罩收回，loading 文案接管。
+      sceneFxState.timers.push(setTimeout(function () {
+        if (token !== sceneFxState.token || sceneFxState.phase !== 'cover') return;
+        sceneFxFail(token);
+      }, 2400));
+    }
+    return token;
+  }
+  function sceneFxReady(token) {
+    if (!token || token !== sceneFxState.token) return false;
+    var d = sceneFxDuration(), cover = Math.round(d * 0.45);
+    // cover 结束前不含「已全遮」的保证：hold 从 cover 终点（或 ready 时刻，取晚者）起算，
+    // 固定 120ms 全遮停留，再进 reveal。慢加载时 cover 阶段自然延长到 ready。
+    var untilCover = Math.max(0, sceneFxState.startedAt + cover - performance.now());
+    var veil = $('sp-scene-veil');
+    sceneFxState.timers.push(setTimeout(function () {
+      if (token !== sceneFxState.token) return;
+      // 此刻遮罩已全遮：无过渡切到入场起点。
+      sceneFxState.phase = 'hold';
+      if (veil) veil.dataset.phase = 'hold';
+      if (root) void root.offsetWidth;
+      sceneFxState.timers.push(setTimeout(function () {
+        if (token !== sceneFxState.token) return;
+        sceneFxState.phase = 'reveal';
+        if (veil) { veil.dataset.phase = 'reveal'; veil.classList.remove('sp-veil-slow'); }
+        sceneFxState.timers.push(setTimeout(function () {
+          if (token !== sceneFxState.token) return;
+          sceneFxEnd();
+        }, Math.round(d * 0.55) + 60));
+      }, 120));
+    }, untilCover));
+    return true;
+  }
+  function sceneFxFail(token) {
+    if (!token || token !== sceneFxState.token) return;
+    sceneFxClearTimers();
+    sceneFxState.phase = 'reveal';
+    var veil = $('sp-scene-veil');
+    if (veil) { veil.dataset.phase = 'reveal'; veil.classList.remove('sp-veil-slow'); }
+    sceneFxState.timers.push(setTimeout(function () {
+      if (token === sceneFxState.token) sceneFxEnd();
+    }, 220));
+  }
+  function applySceneFx() {
+    if (!root) return;
+    root.dataset.sceneFx = prefs.sceneFx;
+    root.style.setProperty('--sp-scene-fx-dur', clamp(Math.round(prefs.sceneFxDur), 240, 1200) + 'ms');
+    root.style.setProperty('--sp-scene-soft', clamp(prefs.sceneFxSoftness, 0, 80) + 'px');
+    root.style.setProperty('--sp-scene-scale', (1 + clamp(prefs.sceneFxScale, .02, .15)).toFixed(3));
+    root.style.setProperty('--sp-scene-tilt', clamp(prefs.sceneFxTilt, 2, 12) + 'deg');
+    root.style.setProperty('--sp-scene-offset', clamp(prefs.sceneFxOffset, .5, 3) + '%');
+    root.style.setProperty('--sp-scene-intensity', clamp(prefs.sceneFxIntensity, .4, 1.6));
+    $('sp-scene-fx-dur-val').textContent = prefs.sceneFxDur + ' ms';
+    $('sp-scene-fx-dur').disabled = prefs.sceneFx === 'none';
+    $('sp-scene-fx-glide').checked = prefs.sceneFxGlide !== false;
+    var veil = $('sp-scene-veil');
+    if (veil) veil.dataset.sceneDirection = prefs.sceneFxDirection || 'right';
+  }
   function buildWarpSpace() {
     var gates = $('sp-warp-gates'), stars = $('sp-warp-stars');
     if (gates && !gates.childElementCount) {
@@ -575,7 +751,7 @@
   }
   function close() {
     if (page === 'closed' || !root) return;
-    immersive(false);
+    immersive(false); endImmersiveFx(); sceneFxEnd();
     if (loginOpen()) OnlineLogin.close();
     save(); closePanels(); disposeStage(); if (global.SpaceHome) SpaceHome.leave(); setPage('closed'); bootSeq++;
     document.body.classList.remove('space3d-open'); cancelEntryWarp(); root.classList.remove('sp-open','sp-idle','sp-immersive','sp-player-hidden'); root.setAttribute('aria-hidden','true');
@@ -636,19 +812,26 @@
     if (host && status.state === 'ready' && prefs.sceneSource === next) return true;
     return selectScene(next);
   }
-  async function selectScene(id) {
+  async function selectScene(id, opts) {
     if(isLyric(id))return selectLyric(id);
-    var scene=def(id); if(!isStage(id)) return false; prefs.sceneSource=id;
+    var scene=def(id); if(!isStage(id)) return false;
+    var wantFx = !!(opts && opts.fx === true);
+    // 用户重复点当前场景：不重建、不转场（程序化调用保持既有行为）。
+    if (wantFx && page === 'stage' && host && prefs.sceneSource === id && status.state === 'ready') return true;
+    prefs.sceneSource=id;
     if(page==='closed'||!host){syncSettings();scheduleSave();return true;}
+    var fxToken = wantFx ? sceneFxBegin(id) : 0;
     releaseInput(); var token=++generation, current=host; showStatus({state:'loading',id:id}); hudRecipe=null; clearPreview();
-    if(camera){var baseline=scene.camera.baseline||scene.camera;camera.setBaseline(Object.assign({},baseline,{look:baseline.lookAt||baseline.look||[0,0,0]}));camera.snap();camera.setCinema(prefs.cinema,1);}
+    if(camera){var baseline=scene.camera.baseline||scene.camera;camera.setBaseline(Object.assign({},baseline,{look:baseline.lookAt||baseline.look||[0,0,0]}));if(!fxToken||!prefs.sceneFxGlide||reduced())camera.snap();camera.setCinema(prefs.cinema,1);}
     try {
       var state=await current.select(id,prefs.sceneStates[id]);
       if(token!==generation||host!==current||page==='closed')return false;
       prefs.sceneStates[id]=state; sceneTime=0;
       if(camera&&prefs.freeCam)camera.freeLoad(prefs.freeCam);
-      buildParams();buildCatalog();syncSettings();scheduleSave();touch();return true;
-    }catch(error){if(token===generation)showStatus({state:'error',id:id,error:error.message});return false;}
+      buildParams();buildCatalog();syncSettings();scheduleSave();touch();
+      if(fxToken)sceneFxReady(fxToken);
+      return true;
+    }catch(error){if(fxToken)sceneFxFail(fxToken);if(token===generation)showStatus({state:'error',id:id,error:error.message});return false;}
   }
   async function syncLyrics(){
     if(!host)return;
@@ -687,6 +870,7 @@
     lyricWindow.progress=clamp((p.position/1000-active.start)/Math.max(.1,active.end-active.start),0,1);return lyricWindow;
   }
   function subtitles(p, dt){
+    if(global.StageLyrics&&StageLyrics.supportNotice)StageLyrics.supportNotice($('sp-lyric-support'),page==='stage'&&prefs.lyrics);
     var visible=page==='stage'&&prefs.lyrics&&prefs.lyricStyle==='subtitle';
     $('sp-reading').hidden=!visible;
     if(lyricView){lyricView.configure(visible);if(visible)lyricView.update({position:p.position||0,reduced:reduced(),track:p.track});}
@@ -820,7 +1004,7 @@
       button.classList.toggle('is-active',prefs.sceneSource===scene.id);button.setAttribute('aria-pressed',String(prefs.sceneSource===scene.id));
       if(scene.preview){var img=document.createElement('img');img.src=assetUrl(scene.preview);img.alt='';img.loading='lazy';button.appendChild(img);}
       var name=document.createElement('strong'),category=document.createElement('small');name.textContent=scene.label;category.textContent=scene.category||'空间场景';button.append(name,category);
-      button.addEventListener('click',function(){selectScene(scene.id);});grid.appendChild(button);
+      button.addEventListener('click',function(){selectScene(scene.id,{fx:true});});grid.appendChild(button);
     });select.value=prefs.sceneSource;lyricSelect.value=prefs.lyricStyle;
     if(focused){var target=Array.from(grid.children).find(function(button){return button.dataset.scene===focused;});if(target)target.focus({preventScroll:true});}
   }
@@ -854,7 +1038,7 @@
       }else{input=document.createElement('input');input.type=spec.type==='boolean'||spec.type==='toggle'?'checkbox':spec.type==='color'?'color':spec.type==='string'?'text':'range';if(input.type==='range'){input.min=spec.min;input.max=spec.max;input.step=spec.step||.01;}if(input.type==='text')input.maxLength=spec.maxLength||256;}
       if (kind && key === 'scale') { input.min = .7; input.max = 1.5; }
       if (kind && key === 'speed') input.max = 1;
-      input.id=label.htmlFor;if(input.type==='checkbox')input.checked=!!state.params[key];else input.value=state.params[key];
+      input.id=label.htmlFor;if(input.type==='checkbox'){input.setAttribute('role','switch');input.checked=!!state.params[key];}else input.value=state.params[key];
       var output=document.createElement('output');output.htmlFor=input.id;
       function display(){output.textContent=input.type==='range'?input.value+(spec.unit||''):'';}display();
       input.addEventListener(input.type==='range'?'input':'change',function(){
@@ -883,6 +1067,8 @@
     if(!initialized)return;$('sp-source').value=prefs.sceneSource;$('sp-quality').value=prefs.qualityMode;
     $('sp-lyrics-toggle').checked=prefs.lyrics;$('sp-cinema-toggle').checked=prefs.cinema;
     $('sp-shelf-mode').value=prefs.shelfMode;
+    $('sp-immersive-fx').value=prefs.immersiveFx;$('sp-immersive-fx-dur').value=prefs.immersiveFxDur;applyImmersiveFx();
+    $('sp-scene-fx').value=prefs.sceneFx;$('sp-scene-fx-dur').value=prefs.sceneFxDur;applySceneFx();
     $('sp-lyric-style').value=prefs.lyricStyle;$('sp-lyric-style').disabled=!prefs.lyrics;$('sp-lyric-params').inert=!prefs.lyrics;
     $('sp-lyric-params').classList.toggle('is-disabled',!prefs.lyrics);
     $('sp-console-toggle').setAttribute('aria-expanded',String(panels.some(function(p){return p.id==='sp-sheet';})));
@@ -963,6 +1149,13 @@
     click('sp-stage-immersive',function(){immersive();});
     click('sp-console-toggle',function(){panel('sp-sheet',null,$('sp-console-toggle'));});
     $('sp-immersive-toggle').addEventListener('change',function(){immersive(this.checked);});
+    // 设置即改即生效：在飞的切换直接落到终态，下一拍用新参数，避免旧时长残留。
+    $('sp-immersive-fx').addEventListener('change',function(){prefs.immersiveFx=this.value;endImmersiveFx();applyImmersiveFx();scheduleSave();});
+    $('sp-immersive-fx-dur').addEventListener('input',function(){prefs.immersiveFxDur=clamp(Math.round(Number(this.value)||450),150,1200);endImmersiveFx();applyImmersiveFx();scheduleSave();});
+    // 场景切换转场：设置即改即生效；在飞的切换立即收尾（不叠下一拍参数）。
+    $('sp-scene-fx').addEventListener('change',function(){prefs.sceneFx=this.value;sceneFxEnd();applySceneFx();scheduleSave();});
+    $('sp-scene-fx-dur').addEventListener('input',function(){prefs.sceneFxDur=clamp(Math.round(Number(this.value)||640),240,1200);sceneFxEnd();applySceneFx();scheduleSave();});
+    $('sp-scene-fx-glide').addEventListener('change',function(){prefs.sceneFxGlide=this.checked;sceneFxEnd();applySceneFx();scheduleSave();});
     root.querySelectorAll('[data-console-tab]').forEach(function(tab){
       tab.addEventListener('click',function(){consoleTab(tab.dataset.consoleTab);});
       tab.addEventListener('keydown',function(e){
@@ -985,8 +1178,8 @@
     click('sp-fx-toggle',function(){consoleTab('stage');panel('sp-sheet',true,$('sp-fx-toggle'));});
     click('sp-retry',function(){disposeStage();enterStage();});click('sp-failure-home',goHome);
     click('sp-reset-camera',function(){if(camera)camera.isFreeEngaged()?camera.freeReset():camera.recenter();touch(1500);});
-    click('sp-defaults',function(){prefs.sceneSource='coast';prefs.sceneStates={};prefs.lyrics=true;prefs.lyricStyle='subtitle';prefs.cinema=true;prefs.qualityMode='auto';prefs.playerAutoHide=true;prefs.shelfMode='side';if(shelf)shelf.setMode('side');syncShelf();revealPlayer();if(camera){camera.freeReset();camera.setCinema(true,1);}if(host){host.setQualityMode('auto');selectScene('coast');syncLyrics();}buildCatalog();syncSettings();scheduleSave();});
-    $('sp-source').addEventListener('change',function(){selectScene(this.value);});
+    click('sp-defaults',function(){prefs.sceneSource='coast';prefs.sceneStates={};prefs.lyrics=true;prefs.lyricStyle='subtitle';prefs.cinema=true;prefs.qualityMode='auto';prefs.playerAutoHide=true;prefs.shelfMode='side';prefs.immersiveFx='fade';prefs.immersiveFxDur=450;endImmersiveFx();prefs.sceneFx='veil-fade';prefs.sceneFxDur=640;prefs.sceneFxGlide=true;prefs.sceneFxDirection='right';prefs.sceneFxSoftness=48;prefs.sceneFxScale=.08;prefs.sceneFxTilt=8;prefs.sceneFxOffset=1.5;prefs.sceneFxIntensity=1;prefs.sceneFxLabel=true;prefs.sceneFxAdaptive=true;sceneFxEnd();if(shelf)shelf.setMode('side');syncShelf();revealPlayer();if(camera){camera.freeReset();camera.setCinema(true,1);}if(host){host.setQualityMode('auto');selectScene('coast');syncLyrics();}buildCatalog();syncSettings();scheduleSave();});
+    $('sp-source').addEventListener('change',function(){selectScene(this.value,{fx:true});});
     $('sp-lyric-style').addEventListener('change',function(){selectLyric(this.value);});
     $('sp-quality').addEventListener('change',function(){prefs.qualityMode=this.value;if(host)host.setQualityMode(this.value);scheduleSave();touch();});
     $('sp-shelf-mode').addEventListener('change',function(){prefs.shelfMode=this.value;if(shelf)shelf.setMode(this.value);syncShelf();scheduleSave();touch();});
@@ -1018,7 +1211,7 @@
     document.addEventListener('keyup',function(e){if(page==='stage'&&camera)camera.freeKey(e.code,false);});
     function pauseInput(){if(page==='closed')return;releaseInput();hideHome();save();}
     global.addEventListener('blur',pauseInput);global.addEventListener('pagehide',pauseInput);
-    document.addEventListener('visibilitychange',function(){if(document.hidden){pauseInput();if(lyricPerformance)lyricPerformance.setPaused(true);}else{touch(300);syncPlayer();}});global.addEventListener('resize',resize);
+    document.addEventListener('visibilitychange',function(){if(document.hidden){pauseInput();sceneFxEnd();if(lyricPerformance)lyricPerformance.setPaused(true);}else{touch(300);syncPlayer();}});global.addEventListener('resize',resize);
   }
   function init(){
     if(initialized)return true;root=$('space3d');if(!root)return false;initialized=true;
@@ -1026,6 +1219,7 @@
     if(global.StageLyrics)lyricView=StageLyrics.init($('sp-reading'),function(ms){control('seek',ms);});
     performanceHost = document.createElement('div'); performanceHost.id = 'sp-stanza';
     performanceHost.className = 'fl-root sp-stanza'; performanceHost.hidden = true; root.appendChild(performanceHost);
+    var lyricSupport = $('sp-lyric-support'); if (lyricSupport) root.appendChild(lyricSupport);
     if(global.SpaceHome)SpaceHome.init($('sp-home'),{enterStage:enterStage,exitSpace:close,chromeRoot:root,revealPlayer:revealPlayer,beforeOpenPanel:closePanels});
     var feedback=document.createElement('div');feedback.id='sp-click-feedback';feedback.setAttribute('aria-hidden','true');root.appendChild(feedback);
     hud=document.createElement('div');hud.id='sp-scene-hud';hud.className='sp-scene-hud';hud.setAttribute('role','status');hud.setAttribute('aria-live','polite');hud.hidden=true;
@@ -1053,6 +1247,8 @@
       if(page!=='closed'){syncHud();touch(1800);}
     },
     setSource:selectScene,setLyricStyle:selectLyric,setField:function(id){return selectScene(global.SpaceStagePure&&SpaceStagePure.resolveId?SpaceStagePure.resolveId(id):id);},sourceId:function(){return prefs.sceneSource;},
-    stats:function(){return{active:page!=='closed',page:page,source:prefs.sceneSource,renderer:rendererStats(),camera:camera?camera.pose():null,freeCam:camera?camera.isFreeEngaged():false,state:status,panels:panels.map(function(p){return p.id;})};}};
+    sceneTransition:function(){return{phase:sceneFxState.phase,target:sceneFxState.target,type:sceneFxEffectiveType(),dur:sceneFxDuration()};},
+    stats:function(){return{active:page!=='closed',page:page,source:prefs.sceneSource,renderer:rendererStats(),camera:camera?camera.pose():null,freeCam:camera?camera.isFreeEngaged():false,state:status,panels:panels.map(function(p){return p.id;}),
+      transition:{phase:sceneFxState.phase,target:sceneFxState.target,type:sceneFxEffectiveType(),dur:sceneFxDuration()}};}};
   if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();
 }(window));

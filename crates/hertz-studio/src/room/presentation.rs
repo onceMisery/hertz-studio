@@ -132,6 +132,12 @@ pub(super) struct Boundary {
     pub position_frames: u64,
     pub ended: bool,
 }
+#[derive(Clone, Copy)]
+pub(super) struct PositionAnchor {
+    pub instance: u64,
+    pub frames: u64,
+    pub origin_ns: u64,
+}
 #[derive(Default)]
 pub(super) struct Boundaries(VecDeque<Boundary>);
 impl Boundaries {
@@ -158,15 +164,41 @@ impl Boundaries {
     pub fn retain_epochs(&mut self, epochs: &[Option<u64>]) {
         self.0.retain(|b| epochs.contains(&Some(b.epoch)));
     }
+    #[cfg(test)]
     pub fn projected(
         &self,
         epoch: u64,
         at: u64,
-        mut instance: u64,
-        mut frames: u64,
-        mut origin: u64,
+        instance: u64,
+        frames: u64,
+        origin: u64,
         rate: u32,
     ) -> (u64, u64, bool) {
+        self.projected_mode(
+            epoch,
+            at,
+            PositionAnchor {
+                instance,
+                frames,
+                origin_ns: origin,
+            },
+            rate,
+            false,
+        )
+    }
+    pub fn projected_mode(
+        &self,
+        epoch: u64,
+        at: u64,
+        anchor: PositionAnchor,
+        rate: u32,
+        finite: bool,
+    ) -> (u64, u64, bool) {
+        let PositionAnchor {
+            mut instance,
+            mut frames,
+            origin_ns: mut origin,
+        } = anchor;
         let mut playing = true;
         for b in self.0.iter().filter(|b| b.epoch == epoch && b.at <= at) {
             if !b.ended {
@@ -174,10 +206,14 @@ impl Boundaries {
                 frames = b.position_frames;
                 origin = b.at;
             } else {
-                frames = frames.saturating_add(
-                    ((u128::from(b.at.saturating_sub(origin)) * u128::from(rate)) / 1_000_000_000)
-                        as u64,
-                );
+                frames = if finite {
+                    b.position_frames
+                } else {
+                    frames.saturating_add(
+                        ((u128::from(b.at.saturating_sub(origin)) * u128::from(rate))
+                            / 1_000_000_000) as u64,
+                    )
+                };
                 origin = b.at;
                 playing = false;
             }

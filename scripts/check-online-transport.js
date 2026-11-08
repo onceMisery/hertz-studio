@@ -48,7 +48,13 @@ async function run() {
   const dbxSource = source.slice(source.indexOf('const DbxTransport = {'), source.indexOf('const REQUEST_TIMEOUT'));
 
   const initialRecovery = [];
+  const connections = [];
+  const connectionEvents = {
+    document: { dispatchEvent(event) { connections.push(event.detail.connected); } },
+    CustomEvent: class { constructor(type, options) { this.type = type; this.detail = options.detail; } },
+  };
   const firstConnection = {
+    ...connectionEvents,
     state: { connected: false },
     ui: { conn: { textContent: '', className: '' }, offlineBanner: { hidden: true } },
     window: { Workshop: { onAiTask() { initialRecovery.push('aiTasks'); } } },
@@ -62,10 +68,13 @@ async function run() {
   vm.runInContext('let retries = 0; let missedWhileOffline = false; let hasConnected = false;\n'
     + connectionSource + '\nthis.connectionChanged = onConnectionChange;', firstConnection);
   firstConnection.connectionChanged(true);
+  firstConnection.connectionChanged(true);
+  assert.deepEqual(connections, [true], 'media owners receive only connection transitions');
   assert.deepEqual(initialRecovery, ['queue', 'library', 'playlists', 'aiTasks'],
     'first event connection reconciles event-backed data without reloading settings');
   firstConnection.connectionChanged(false);
   firstConnection.connectionChanged(true);
+  assert.deepEqual(connections, [true, false, true], 'reconnect reaches long-lived media owners');
   assert.deepEqual(initialRecovery,
     ['queue', 'library', 'playlists', 'aiTasks', 'fullRefresh', 'aiTasks'],
     'later reconnect keeps the full state refresh path');
@@ -74,6 +83,7 @@ async function run() {
   const workshop = { onAiTask() { recoveryReads.push('aiTasks'); } };
   let reconnects = 0, removals = 0;
   const dbx = {
+    ...connectionEvents,
     DBX_EVENT_METHOD: 'studio/event', DBX_SUBSCRIBE_METHOD: 'studio/events/subscribe',
     Workshop: workshop,
     state: { connected: false },
@@ -189,6 +199,43 @@ async function run() {
   await assert.rejects(request, { name: 'AbortError' });
   assert.equal(calls, 1, 'explicit cancellation must not retry');
   assert.equal(pending.timers.size, 0, 'cancel cleans timeout');
+
+  const timed = setup((_url, options) => new Promise((_resolve, reject) => {
+    options.signal.addEventListener('abort', () => reject(options.signal.reason), { once: true });
+  }));
+  const timedRequest = timed.box.invoke('/v1/desktop/wallpaper/launch', { method: 'POST', timeoutMs: 55000 });
+  const deadline = [...timed.timers.values()][0];
+  assert.equal(deadline.ms, 55000, 'explicit desktop startup deadline reaches fetch');
+  deadline.fn();
+  await assert.rejects(timedRequest, error => error.name === 'TimeoutError'
+    && error.code === 'request_timeout' && error.message === '请求超时，请稍后重试');
+  assert.equal(timed.timers.size, 0, 'timeout cleanup leaves no timer');
+
+  // Execute the real desktop binding: concurrent first clicks share one startup,
+  // then each original action reaches the ready host without an arbitrary sleep.
+  const desktopSource = source.slice(source.indexOf('  let desktopLaunch = null;'), source.indexOf('  for (const button of [ui.setWallpaperSettings'));
+  assert.ok(desktopSource.includes('const wallpaperControl'));
+  const desktopCalls = []; let resolveLaunch, desktopReady = false;
+  const desktopBox = { transport: { post(endpoint, body, options) {
+    desktopCalls.push({ endpoint, body, timeout: options.timeoutMs });
+    if (endpoint.endsWith('/launch')) return new Promise(resolve => { resolveLaunch = resolve; });
+    return desktopReady ? Promise.resolve({ ok: true })
+      : Promise.reject(Object.assign(new Error('未运行'), { code: 'desktop_not_running' }));
+  } } };
+  vm.createContext(desktopBox);
+  vm.runInContext(desktopSource + '\nthis.controlDesktop = wallpaperControl;', desktopBox);
+  const openLyrics = desktopBox.controlDesktop('wallpaper-settings', { tab: 'lyrics' });
+  const openWallpaper = desktopBox.controlDesktop('wallpaper-settings', { tab: 'wallpaper' });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(desktopCalls.filter(call => call.endpoint.endsWith('/launch')).length, 1, 'first clicks share one embedded startup');
+  assert.equal(desktopCalls.find(call => call.endpoint.endsWith('/launch')).timeout, 55000);
+  const locateLyrics = desktopBox.controlDesktop('locate');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(desktopCalls.length, 3, 'actions during startup wait without a shorter control timeout');
+  desktopReady = true; resolveLaunch({ started: true });
+  await Promise.all([openLyrics, openWallpaper, locateLyrics]);
+  assert.equal(desktopCalls.length, 6, 'all original actions are sent directly after startup completes');
+  assert.ok(desktopCalls.filter(call => call.endpoint.endsWith('/control')).every(call => call.timeout === 25000));
 
   let attempts = 0;
   const retry = setup(async () => {

@@ -437,6 +437,117 @@ for (const name of USAGE_TOKENS) {
   }
 }
 
+// --- 契约 I：开关配色只从主题令牌派生（web 组件 + 桌面端镜像） ---
+// 布尔开关在设置面板里到处都是。ON 态曾写死成淡紫轨道 + 深紫滑块：换主题、
+// 切浅色时它是唯一一颗不跟色的控件，还和主按钮 / 滑块圆点 / 原生 checkbox
+// 用的 --accent 对不上。stage.css 的 .sc-pill 只是消费这些令牌，所以钉住两处
+// 定义处（web 组件、桌面端独立设置页的镜像）就覆盖了全部开关。
+const SWITCH_ON = {
+  '--switch-on-track': 'var(--accent)',
+  '--switch-on-thumb': 'var(--accent-ink)',
+  '--switch-on-icon': 'var(--accent)',
+};
+function readAt(file) {
+  try {
+    return fs.readFileSync(file, 'utf8');
+  } catch (e) {
+    return '';
+  }
+}
+const SWITCH_SOURCES = [
+  {
+    file: 'components/form.css',
+    text: readAt(path.join(webDir, 'components', 'form.css')),
+  },
+  {
+    file: 'crates/hertz-desktop/assets/wallpaper-settings.html',
+    text: readAt(path.join(__dirname, '..', 'crates', 'hertz-desktop', 'assets', 'wallpaper-settings.html')),
+  },
+];
+// 只切「含 --switch-on-track 的那一个声明块」：就近正则会把注释里的说明
+// 或后面 :checked 规则的 var() 用法当成定义，测不出写死色值。
+function switchBlock(src) {
+  const at = src.indexOf('--switch-on-track');
+  if (at < 0) return '';
+  const open = src.lastIndexOf('{', at);
+  const close = src.indexOf('}', at);
+  return open < 0 || close < 0 ? '' : src.slice(open, close);
+}
+const switchOnLines = [];
+for (const source of SWITCH_SOURCES) {
+  const cleanSrc = stripComments(source.text);
+  const block = switchBlock(cleanSrc);
+  checked.fields++;
+  if (!block) {
+    problems.push({
+      file: source.file,
+      line: 1,
+      rule: '找不到 role="switch" 的开关配色声明块（--switch-on-track）',
+      why: '两处定义处都要在：web 组件与桌面端独立设置页是同一颗开关的两份实现',
+    });
+    continue;
+  }
+  for (const [prop, want] of Object.entries(SWITCH_ON)) {
+    checked.fields++;
+    const got = (new RegExp(`${prop}\\s*:\\s*([^;]+)`).exec(block) || [, ''])[1].trim();
+    if (got !== want) {
+      problems.push({
+        file: source.file,
+        line: lineOf(cleanSrc, cleanSrc.indexOf(prop)),
+        rule: `${prop} 应为 ${want}，实得 ${got || '(缺失)'}`,
+        why: '开关 ON 态必须跟随主题强调色；写死颜色会在换肤/浅色主题下变成唯一不跟色的控件',
+      });
+    }
+  }
+  switchOnLines.push(Object.keys(SWITCH_ON).map((prop) => {
+    const m = new RegExp(`${prop}\\s*:\\s*([^;]+)`).exec(block);
+    return `${prop}: ${m ? m[1].trim() : ''}`;
+  }).join('\n'));
+  checked.fields++;
+  if (/#[0-9a-f]{3,8}\b/i.test(block)) {
+    problems.push({
+      file: source.file,
+      line: lineOf(cleanSrc, cleanSrc.indexOf('--switch-on-track')),
+      rule: '开关配色声明块里还留着写死的色值',
+      why: 'OFF 态也要走 --text / --panel-solid 等令牌混色，浅色主题才不会留一块深灰轨道',
+    });
+  }
+  checked.fields++;
+  if (/#(?:cfbefa|3d2374|faf5ff)\b/i.test(source.text)) {
+    problems.push({
+      file: source.file,
+      line: 1,
+      rule: '仍残留旧版淡紫开关配色（#cfbefa / #3d2374 / #faf5ff）',
+      why: '这颗紫色不随主题变化，是本次要退役的固定色',
+    });
+  }
+}
+if (switchOnLines.length === 2 && switchOnLines[0] !== switchOnLines[1]) {
+  problems.push({
+    file: SWITCH_SOURCES[1].file,
+    line: 1,
+    rule: '桌面端镜像的开关 ON 态与 web 组件不一致',
+    why: '两份实现只要有一处单独改色，同一颗开关在网页与原生设置页就会是两种颜色',
+  });
+}
+// --accent-ink 是 ON 态滑块/对勾的对比色，两个宿主都得有定义，
+// 否则 var() 悬空会把滑块画成和轨道同色（只剩一个看不出状态的白条）。
+const accentInkOwners = [
+  { file: 'design/design-base.css', text: readAt(path.join(webDir, 'design', 'design-base.css')) },
+  { file: 'crates/hertz-desktop/assets/wallpaper-settings.html', text: SWITCH_SOURCES[1].text },
+];
+for (const owner of accentInkOwners) {
+  checked.fields++;
+  if (!/--accent-ink\s*:/.test(owner.text)) {
+    problems.push({
+      file: owner.file,
+      line: 1,
+      rule: '缺少 --accent-ink 定义',
+      why: '开关 ON 态滑块靠它和 --accent 轨道拉开对比，缺了整颗开关会糊成一块',
+    });
+  }
+}
+
 if (problems.length) {
   console.error(`CSS 令牌契约检查未通过（扫描 ${checked.rules} 条规则 / ${checked.fields} 个受检声明）\n`);
   for (const p of problems) {

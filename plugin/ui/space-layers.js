@@ -147,6 +147,7 @@
         warning = '请选择图片或视频文件'; showStatus(warning); return null;
       }
       warning = ''; var result = owner.setLocalFile(file);
+      if (result && result.then) return result.then(function (spec) { update(0, lastEnv); return spec; });
       update(0, lastEnv); return result;
     }
 

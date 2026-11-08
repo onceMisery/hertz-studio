@@ -74,6 +74,21 @@ html[data-skin="hertz"] button:focus-visible, html[data-skin="hertz"] input:focu
 html[data-skin="hertz"] .hz-workspace > .column { flex: 1; width: auto; min-width: 0; min-height: 0; padding: 10px 44px 64px; margin: 0; display: block; border: 0; border-radius: 0; box-shadow: none; background: transparent; backdrop-filter: none; overflow-y: auto; overflow-x: hidden; scrollbar-width: thin; }
 html[data-skin="hertz"] .view { height: auto; min-height: 100%; padding: 0; overflow: visible; }
 html[data-skin="hertz"] #column > .view { overflow: visible; overscroll-behavior: auto; }
+/* 整列滚动时，视图内层不能再留「假滚动容器」：.view 在 hertz 下是 height:auto，
+   内层 flex:1 / min-height:0 拿不到确定高度，于是这些 overflow-y:auto 的容器
+   被内容撑满（自己的 scrollHeight === clientHeight，压根滚不动），但
+   overscroll-behavior:contain 照样截断滚轮向 #column 的传递 —— 症状是
+   「列表在、数据在、就是滚不动」。在线曲库(.online-scroll)与每日推荐(.dv-body)
+   各踩一次；其余列表体没有 contain，滚轮能正常冒泡到 #column。
+   滚动权唯一归上面 .hz-workspace > .column，这里把它们彻底降级成普通内容块。 */
+html[data-skin="hertz"] #column .online-scroll,
+html[data-skin="hertz"] #column .dv-body {
+  flex: none;
+  height: auto;
+  min-height: 0;
+  overflow: visible;
+  overscroll-behavior: auto;
+}
 html[data-skin="hertz"] .view[hidden] { display: none; }
 html[data-skin="hertz"] .view > .col-head { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 18px; padding: 18px 0 24px; background: none; border: 0; box-shadow: none; position: static; }
 html[data-skin="hertz"] .col-title { font: 600 32px/1.25 var(--hz-heading); letter-spacing: -.6px; }
@@ -131,11 +146,14 @@ html[data-skin="hertz"] #view-settings > .set-group[hidden] { display: none; }
 .hz-setting-row p { font-size: 14px; margin: 0; }
 .hz-setting-row label { font-size: 14px; color: var(--text); }
 .hz-setting-row small { display: block; margin-top: 5px; color: var(--muted); font-size: 12px; line-height: 1.65; }
-.hz-setting-row input[type="checkbox"] { width: 19px; height: 19px; flex-shrink: 0; }
+.hz-setting-row input[type="checkbox"]:not([role="switch"]) { width: 19px; height: 19px; flex-shrink: 0; }
 .hz-setting-row select { width: 145px; flex: 0 0 auto; }
 .hz-range-control { display: flex; align-items: center; gap: 12px; flex: 0 0 220px; }
 .hz-range-control output { color: var(--muted); font-size: 11px; width: 32px; font-variant-numeric: tabular-nums; }
 .hz-range-control input { background: linear-gradient(var(--line), var(--line)) center/100% 3px no-repeat; }
+.hz-lyric-size-row .hz-range-control input { min-width: 0; flex: 1; }
+.hz-lyric-size-row output { width: auto; flex: 0 0 44px; white-space: nowrap; }
+.hz-lyric-size-preview { padding-block: 12px 20px; font: 600 var(--np-lyric-font-size, 28px)/1.55 var(--font-sans, system-ui, sans-serif); overflow-wrap: anywhere; }
 html[data-skin="hertz"] .hz-borrowed-control { column-gap: 24px; row-gap: 5px; }
 html[data-skin="hertz"] .hz-borrowed-control > label { flex: 1; width: auto; color: var(--text); }
 html[data-skin="hertz"] .hz-borrowed-control > .hint { order: 3; flex: 1 0 100%; font-size: 12px; }
@@ -284,13 +302,11 @@ html[data-skin="hertz"] #np-modal[data-view="lyrics"] .np-meta { grid-column: 1;
 html[data-skin="hertz"] #np-modal[data-view="lyrics"] .np-name { font-size: 30px; }
 html[data-skin="hertz"] #np-modal[data-view="lyrics"] .np-footer { grid-column: 1; grid-row: 4; }
 html[data-skin="hertz"] #np-modal[data-view="lyrics"] .np-reading { grid-column: 2; grid-row: 2 / 5; height: 100%; margin: 0; }
-html[data-skin="hertz"] #np-modal[data-view="lyrics"] .np-line { font-size: clamp(26px, 3vw, 43px); line-height: 1.55; padding-block: 18px; font-weight: 600; }
+html[data-skin="hertz"] #np-modal[data-view="lyrics"] .np-line { font-size: var(--np-lyric-font-size, 28px); line-height: 1.55; padding-block: .4em; font-weight: 600; }
 html[data-skin="hertz"] #np-modal .np-queue-pane { position: absolute; top: 0; right: 0; bottom: 0; width: 370px; padding: 28px; background: #17171ced; backdrop-filter: blur(24px); border-left: 1px solid #ffffff12; z-index: 5; box-shadow: -16px 0 64px #0003; }
 html[data-skin="hertz"] #np-modal .np-queue-pane header { padding-bottom: 20px; }
 html[data-skin="hertz"] #np-modal .np-tools { z-index: 6; }
 html[data-skin="hertz"] body[data-hz-word-sync="false"] #np-modal .np-word { color: inherit; background: none; }
-html[data-skin="hertz"] body[data-hz-lyric-size="small"] #np-modal[data-view="lyrics"] .np-line { font-size: clamp(22px, 2.6vw, 34px); }
-html[data-skin="hertz"] body[data-hz-lyric-size="large"] #np-modal[data-view="lyrics"] .np-line { font-size: clamp(32px, 3.7vw, 50px); }
 html[data-skin="hertz"] body:is([data-hz-animated="false"], .reduce-motion, [data-rm~="bg"]) #ambient::before,
 html[data-skin="hertz"] body:is([data-hz-animated="false"], .reduce-motion, [data-rm~="bg"]) #np-modal .np-ambient::before { animation: none; }
 @keyframes hz-ambient-drift { from { transform: translate(-2%, -1%) scale(1); } to { transform: translate(3%, 2%) scale(1.08); } }
@@ -388,6 +404,8 @@ html[data-skin="hertz"] body.room-view .hz-mobile-nav, html[data-skin="hertz"] b
   .hz-detail-content h2 { font-size: 38px; }
   .hz-setting-row { gap: 16px; }
   .hz-range-control { flex-basis: 155px; }
+  .hz-lyric-size-row { flex-wrap: wrap; }
+  .hz-lyric-size-row .hz-range-control { flex: 1 1 100%; }
   html[data-skin="hertz"] #view-settings .set-row > label { width: 100%; flex: 1 0 100%; }
   html[data-skin="hertz"] #view-settings .hz-borrowed-control > label { width: auto; flex: 1; }
   html[data-skin="hertz"] .daily-head { flex-direction: column; align-items: stretch; }
@@ -438,7 +456,6 @@ html[data-skin="hertz"] body.room-view .hz-mobile-nav, html[data-skin="hertz"] b
   html[data-skin="hertz"] #np-modal[data-view="lyrics"] .np-name { font: 15px/1.4 var(--hz-sans); }
   html[data-skin="hertz"] #np-modal[data-view="lyrics"] .np-artist { font-size: 12px; margin-top: 3px; }
   html[data-skin="hertz"] #np-modal[data-view="lyrics"] .np-reading { display: block; flex: 1; min-height: 0; height: auto; margin: 12px -2px 0; }
-  html[data-skin="hertz"] #np-modal[data-view="lyrics"] .np-line { font-size: 28px; padding-block: 14px; }
   html[data-skin="hertz"] #np-modal .np-queue-pane { width: 100%; height: 74dvh; top: auto; border-radius: 25px 25px 0 0; padding: 26px 24px max(26px, env(safe-area-inset-bottom)); }
   html[data-skin="hertz"] .set-row { flex-wrap: wrap; gap: 12px; }
   html[data-skin="hertz"] .set-row > :is(input:not([type="checkbox"]), select) { max-width: 100%; }

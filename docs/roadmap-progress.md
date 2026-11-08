@@ -1,5 +1,33 @@
 # 路线图实施状态
 
+2026-11-07 [当前优化release85ab](desktop-release.md#当前源码优化-release-候选增量)已完成720份生产输入核对、153项压缩UI、HTTP十二组、解压入口五组、setup2686/NSIS十八组、原更新器八组及配对e778 SDK/HTTP八组。[身份/清理复核](../output/native-http-release-final-verification-20261107.json)通过，全部本轮handles终态、测试进程/安装登记/快捷方式清理，既有服务保留。新安全中心PID29168占据前台，当前release正式OBS/OLE仍待用户处理；A10设计仍待审，签名/净系统/设备/其它OS与完整A01–A10目标保持开放。下文旧候选各有独立身份。
+
+2026-11-07 [原生HTTP边界](native-http-boundary.md)已接仅 `--window` 启用的bind/Host/Origin准入、可信HTML nonce/CSP和响应头。固定8af3 Full/native debug候选的十二组HTTP/WS/WebView2/Chrome157、主程序26项、普通无默认feature编译、Rust1.88与Clippy通过；源码/候选一致，测试自有进程退出。Pixi/Blob/style、无Referer远程图片与网络前阻断跨源fetch已验证。原安全中心窗口已消失，当前候选随后通过OBS正式九组；配对e778 Full DBX另通过SDK/HTTP八组及Rust1.88。下文b204/5a/4f10/8ebb保留各自身份，完整目标仍开放。
+
+同日续接补[当前8af3音乐对象/OLE十组](native-music-import.md#2026-11-07-原生-http-候选兼容增量)，新增HTTP策略下真实文件/目录对象和自有源窗的实际拖放均通过，来源/归档/运行摘要一致，自有进程正常退出。官方npm/pip清理14.43GiB。A10真实声部设计用户回复“我先审阅”，保持待审；Explorer本身、新release/NSIS候选、实机及其余A01–A10继续开放。
+
+2026-11-07 [当前用户 NSIS 安装](windows-installation.md)已接通并通过新 release 候选的十八组真实进程检查，原 ZIP 更新器八组回归通过。覆盖资料保留、未知／部分登记、原程序与投影恢复、清单暂时缺失、外部占用后重试、便携转换中断及菜单链接边界。release workflow 仅产候选 artifacts，已接固定 NSIS 来源／摘要、setup 上传和合并校验和；本地静态与实际准备步骤通过，远端未运行。候选仍为 NotSigned，签名／确定的更新源、净系统／离线运行时、真实设备和其它设计差距继续跟踪。
+
+2026-11-07 后续原生增量：[音乐文件／目录选择导入](native-music-import.md)已接通，最终 Full/native debug 候选通过实际 WebView2／Windows OLE 十组、扫描16、主程序21、前端75与浏览器7、Rust1.88/Clippy，独立静态审查已收口。文件不扫兄弟或删除未选项，目录递归，保持内部队列拖动并显示可见错误。[OBS 正式九组](native-obs-preview.md#2026-11-07-正式九组已通过)已在 b204 候选通过，原52组与b7诊断保持身份。用户已处理旧系统弹窗，自有 OLE 源窗的真实文件和目录拖放均通过；Explorer 本身、其它 shell、签名和完整产品资格不据此完成。下段记录保留前一轮停点。
+
+2026-11-07 原生恢复增量：[主窗口位置与最大化恢复](main-window-recovery.md)已通过十一组实际 Windows 场景，隐藏/最小化/胶囊保护正常矩形。修正桌面组件的进程级 WebView2 目录覆盖后，同批 Full/native 候选的文件/偏好十一组、生命周期九组、内嵌桌面六组，以及独立 debug 桌面十五组通过，共五十二组，各自候选身份见[交付记录](desktop-release.md#2026-11-07-主窗口恢复与受控-obs-预览)。[受控 OBS 预览](native-obs-preview.md)已接独立资料与只读权限；按用户指定 design-taste-frontend 修正预览白底低对比，新优化候选的前三组诊断和实际石墨底色截图通过。本段是当时的诊断范围，后续独立 b204 候选的正式九组见上段；旧前台通知不再作为当前阻塞。物理多屏/DPI、签名和其它设计缺口继续保留。
+
+2026-11-07 已完成[受控界面偏好迁移](ui-preference-transfer.md)与主窗口文本保存：18 个已知键的独立协议、导入预览、原模块校验、DBX 提交确认、异步舞台保存保护和原生保存/取消/失败回执已接通。UI 按用户指定的 design-taste-frontend 调整设置布局与窄屏比较。最终 Full/native 候选的十一组真实原生旅程、七组浏览器/DBX、100 项协议/宿主检查、前端 74 步、主程序 18 项及 Rust 1.88/Clippy 均通过；三个原生测试进程退出，完整身份与范围见[交付记录](desktop-release.md#受控界面偏好与主窗口文本保存)。主窗口恢复/辅助窗口、NSIS/签名及实机资格继续推进，整体路线仍未完成。
+
+2026-11-07 A08 安装升级前置增量：同 DataDir 的服务互斥和原生鉴权恢复已收口；程序目录另接多 profile 共享运行/独占更新、本地候选与真实 exe 身份核验、原子恢复标记、失败回滚和中断后显式恢复。最终 Full/native release 的安装八组、真实 ZIP/WebView2 五组、资料/DBX 九组通过；主程序 17 项、前端 73 步、Rust 1.88 all-targets 和 Clippy 通过。候选 `NotSigned`，未安装用户目录或发布。数据库升级前备份/回退、NSIS、签名源及净系统/设备资格保留；详见[更新实施记录](windows-install-updates.md)与[交付证据](desktop-release.md)。
+
+2026-11-06 A08 交付链增量：Windows Full workflow 已接 `native-window`，新增实际二进制只读身份和原生 ZIP 包校验/启动入口。本机优化候选、固定 Rust 1.88 all-targets、前端 73 步及中文/空格/特殊字符路径的真实解压包五组旅程通过；候选未签名、未发布。DataDir/安装目录互斥、NSIS 安装、升级回退和签名继续保留，见[交付实施记录](desktop-release.md)。
+
+2026-11-06 A08 原生系统媒体增量：[Windows SMTC](./native-system-media.md)已接通 HWND 会话、服务端元数据/缓存封面、当前身份约束下的本地与房间播控，并让同一服务的 WebView/旁开 Chrome 让出 MediaSession。实际 Windows 系统媒体 API 已验证零页面暂停/播放/定位/切歌/停止、封面替换与清理、房间播控和退出释放；物理媒体键、锁屏、跨设备、其它 OS 与正式安装/升级仍待专项资格。完整桌面产品未据此标记完成。
+
+2026-11-05 壁纸 A03 增量：[作品、导出与轮播](./wallpaper-works-playlists.md)已接通持久 work 草稿、独立 CAS/真实 schema 编辑、不可变 builtin 包发布与重开、原生输出 token/原包导出及持久恢复、固定版本顺序/随机轮播。最终普通构建真实 WebView2 10 组场景通过，包含异步草稿切换保护、自动切换、暂停冻结、缺包停播并重试同一项及重启恢复；桌面库 393 项通过、2 项按原硬件条件忽略，包含正式 service 导出集成。首版每列表最多 32 项，保存/轮播不隐式改桌面选择或配置修订；同时多屏、第三方改编、组合/网页/AI 与设备长稳仍按独立范围推进，原生保存对话框正向点击旅程尚待验收。
+
+2026-11-05 舞台素材实施增量：[本地图片 / 视频持久化](./stage-media-persistence.md)已接通播放器 DataDir 素材库、稳定引用、版本化预设保存、独立版资源流和 DBX 分块图片。已验证原文件删除后的刷新/服务重启、缓存重建及保存冲突恢复；DBX 视频宿主流仍未开放。此增量独立于下文静态盘点和历史壁纸宿主证据。
+
+同日续审补齐持续打开页面的重启/租约恢复与视频位置保留、隐藏切换、异步解码取消和预设版本保护，8 组真实 Chrome 场景与当前 72 步前端回归通过。模拟 8 小时续租验证单计时器/串行请求与释放清理，不替代真实设备长稳；完整记录见上方舞台素材实施文档。
+
+2026-11-05 静态盘点：[当前设计与实现差距](./design-implementation-audit-2026-11-05.md)重新对照专项增量、源码与发布入口，区分开发缺口、进行中的桌面宿主集成、真实环境待验和后续提案。下文历史状态未自动延伸到当前工作树；本次未新增产品运行验收结论。
+
 2026-10-28 设计缺口盘点见[设计文档实施缺口盘点](./design-implementation-audit.md)：区分未实现、部分实现、待验收与后续提案，并核对后续交付已覆盖的旧计划；本页历史增量仍保留各自的验证范围。
 
 2026-10-29 原型补充：[前端设计说明](./design/frontend-gap-prototypes.md)与[HTML 原型总览](./design/prototypes/index.html)已关联到盘点第 1.1 节，覆盖七类缺口、六个独立页面。DBX 连接按已落地候选核对界面差异；其余页面保留各自的宿主/协议依赖，原型完成不代表功能或发布验收完成。
@@ -901,3 +929,9 @@ R1-L 已有本地导入与手选在线候选增量，完整歌词专项仍未完
 - 使用 `dbx-plugin 0.1.2` 在隔离的 `target/dbx-src-20261021-132129` 中完成当前源码的 Windows x64 Standard 与 Full release sidecar 编译和 unsigned `.dbxp` 打包。包位于 `target/dbx-src-20261021-132129/target/dbx-candidate-retry/{standard,full}`；两版 manifest 身份、单 sidecar、artifact hash/size 与包体一致，Standard 裁剪指纹检查通过。hash 和构建边界见[发布验收矩阵](./release-validation.md)。
 - 构建首次发现 release UI minifier 接线错误：build.rs 将嵌入资源 OUT_DIR 传给只允许发行暂存目录的 CLI。现在 build.rs 调用同一模块的 `minifyUi` API，内部仍保留防止覆盖源码 UI 的路径检查；修改应用在当前工作树中，隔离副本经该修复完成两版构建。
 - DBX unsigned 包安全门已由用户开启，Full 0.2.1 已安装并打开。真实 DBX 页面显示服务已连接，播放状态和队列可读；这验证了 Full sidecar 启动、状态 RPC 和事件连接。未操作当前曲目或队列。Standard 安装、DBX 内实际播放控制、声卡回环/人工听测尚未完成。本地发行暂存目录及历史 `plugin/dist` 未被打包脚本覆盖；没有执行模型调用或全量测试。
+
+2026-11-07优化DBX配对补验：[release9418/85ab](../output/native-http-release-dbx-compatibility-verification-20261107.json)完成SDK/HTTP八组，721构建输入、候选归档/运行/旧摘要与自有进程退出复核通过。原e778 debug报告保留，完整PluginHost/可选组件、release正式OBS/OLE、A07/A10审阅及其余设计/发行/设备目标仍开放，不走TDD。
+
+### 2026-11-08 A07 r2 current release qualification
+
+A07 r2 implementation retained and audited against its nine revisions. Current Standard/Full release each passed the same18-check muted HTTP/TLS/WASAPI fixture over60s native-rate cycles:44.1/48/96k rooms, stable48k device, zero underrun/resync, persistent32k successor rejection and exact768000-frame/8000ms end with drained queues. Frozen729 producer/199 desktop inputs unchanged. Current [implementation and qualification](lan-native-sample-rate.md) replace the old A07 pending-review/implementation statements; dated historical records and failures remain. Cross-OS, separate-machine/acoustic, real2/4/8 clients and eight-hour qualification remain pending; experimental scope retained. No new product code, commit or publication.

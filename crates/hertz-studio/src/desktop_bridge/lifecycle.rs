@@ -1903,6 +1903,55 @@ mod tests {
         );
         assert_eq!(result.body["lines"][0]["text"], "Local phrase");
         assert_eq!(result.body["lines"][0]["startMs"], 1250);
+        vmusic_store::lyrics::import(
+            &fixture.state.db, "bridge-local",
+            r#"<tt xmlns="http://www.w3.org/ns/ttml" xmlns:ttm="http://www.w3.org/ns/ttml#metadata"><head><ttm:agent xml:id="a" type="person"><ttm:name type="full">甲</ttm:name></ttm:agent><ttm:agent xml:id="b" type="person"/></head><body><div><p begin="0s" end="10s" ttm:agent="a">长句</p><p begin="2s" end="4s" ttm:agent="b">短句</p></div></body></tt>"#,
+        ).await.unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        let vocal_key = loop {
+            let response = fixture.call(&fixture.request(Scope::Lyrics)).await;
+            assert_eq!(response.body["vocalSchemaVersions"], json!([1]));
+            if let Some(vocal_key) = response.body["lyrics"]["documentKey"]
+                .as_str()
+                .filter(|vocal_key| *vocal_key != key)
+            {
+                break vocal_key.to_owned();
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "vocal projection did not become ready"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        for capability in [None, Some(2), Some(1)] {
+            document.params = json!({"key":vocal_key});
+            if let Some(capability) = capability {
+                document.params["vocalSchemaVersion"] = json!(capability);
+            }
+            let result = fixture.call(&document).await;
+            if capability == Some(1) {
+                assert_eq!(result.status, 200);
+                assert_eq!(
+                    result.body,
+                    crate::desktop_lyrics::document_with_capability(
+                        &fixture.state,
+                        &vocal_key,
+                        Some(1)
+                    )
+                    .await
+                    .unwrap()
+                );
+                assert_eq!(result.body["vocalSchemaVersion"], 1);
+                assert_eq!(result.body["lines"][0]["vocal"]["agentIds"], json!(["a"]));
+                assert_eq!(result.body["lines"][0]["endMs"], 10250);
+            } else {
+                assert_eq!(result.status, 422);
+                assert_eq!(result.body["error"]["code"], "desktop_vocals_unsupported");
+                assert!(result.body.get("lines").is_none());
+            }
+        }
+        document.params = json!({"key":key,"vocalSchemaVersion":2});
+        assert_eq!(fixture.call(&document).await.status, 409);
         fixture.finish().await;
     }
 

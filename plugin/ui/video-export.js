@@ -118,6 +118,11 @@ window.VideoExport = (function () {
       .then(function (res) { return res.ok ? res.json() : null; })
       .then(function (data) {
         if (!data || session !== s || s.phase !== 'recording' || request.signal.aborted) return;
+        if (data.lyricsStatus === 'unsupported') {
+          lyric.lines = [];
+          stop('此歌词包含多人声，视频导出暂不支持；已停止并保留此前片段。');
+          return;
+        }
         if (s.hasPresentation && data.track_id !== s.trackId) { stop('曲目已切换，停止并保留此前片段。'); return; }
         lyric.title = data.title || '';
         lyric.artist = data.artist || '';
@@ -421,7 +426,7 @@ window.VideoExport = (function () {
   function finish(s, save, reason) {
     if (s.finished) return;
     s.finished = true; s.cancelWait();
-    var result = { audioMode:s.audioMode, mimeType:s.mimeType || '', bytes:0, filename:'',
+    var result = { audioMode:s.audioMode, mimeType:s.mimeType || '', bytes:0, filename:'', failed: !!s.failed,
       downloadRequested:false, message:reason || s.reason || '已停止。' };
     try {
       if (save && s.chunks.length) {
@@ -430,9 +435,9 @@ window.VideoExport = (function () {
         var name = (s.title || 'hertz-studio').replace(/[\\/:*?"<>|\x00-\x1f]/g, '_').trim().slice(0,80) || 'hertz-studio';
         result.filename = name + '-' + s.preset.width + 'x' + s.preset.height + (s.audioMode === 'system' ? '' : '-silent') + '.' + s.extension;
         result.message += ' 已生成' + (s.reason ? '此前片段' : '视频') + '（' + audioLabel(s) + '），请确认下载已保存。';
-        try { download(result); } catch (_) { result.message += ' 自动下载未发起，可再次下载。'; }
-      } else if (save) result.message += ' 编码器未返回视频数据，没有生成空文件；可换一种格式重新录制。';
-    } catch (_) { result.blob = null; result.message = '视频生成失败，无法生成可保存的片段。'; }
+        try { download(result); } catch (_) { result.failed = true; result.message += ' 自动下载未发起，可再次下载。'; }
+      } else if (save) { result.failed = true; result.message += ' 编码器未返回视频数据，没有生成空文件；可换一种格式重新录制。'; }
+    } catch (_) { result.failed = true; result.blob = null; result.message = '视频生成失败，无法生成可保存的片段。'; }
     finally {
       s.chunks.length = 0;
       try { cleanupSession(s); }
@@ -519,7 +524,7 @@ window.VideoExport = (function () {
       var surface = window.Stage3D && Stage3D.recordingSurface ? Stage3D.recordingSurface() : null;
       var srcCanvas = surface && surface.canvas;
       if (!srcCanvas) throw new Error('当前舞台没有可录制的三维画布，请选择沉浸声场或高级编排的三维场景');
-      var lost = function () { stop('舞台图形上下文中断，尝试保留此前片段。'); };
+      var lost = function () { s.failed = true; stop('舞台图形上下文中断，尝试保留此前片段。'); };
       srcCanvas.addEventListener('webglcontextlost',lost);
       s.dispose.push(function () { srcCanvas.removeEventListener('webglcontextlost',lost); });
 
@@ -692,7 +697,7 @@ window.VideoExport = (function () {
         else s.reason = '录制缓冲已满，尝试保存此前片段，文件可能不完整。';
         if (s.bytes >= MAX_BYTES || s.reason) stop(s.reason || '达到录制大小限制。');
       };
-      recorder.onerror = function () { stop('录制器发生异常，尝试保存此前片段，文件可能不完整。'); };
+      recorder.onerror = function () { s.failed = true; stop('录制器发生异常，尝试保存此前片段，文件可能不完整。'); };
       recorder.onstop = function () {
         s.mimeType = recorder.mimeType || s.mimeType;
         finish(s,true,s.reason || '录制已停止。');
@@ -721,7 +726,7 @@ window.VideoExport = (function () {
           }
           drawCover(); drawLyrics();
           s.raf = requestAnimationFrame(loop);
-        } catch (_) { stop('画面合成中断，尝试保留此前片段。'); }
+        } catch (_) { s.failed = true; stop('画面合成中断，尝试保留此前片段。'); }
       })();
       await bounded(s,encoderReady,10000,'视频编码器启动超时，未开始录制');
       s.phase = 'recording'; s.startedAt = Date.now();
@@ -733,7 +738,7 @@ window.VideoExport = (function () {
       if (dom && !dom.scrim.hidden) renderSession(s);
     } catch (error) {
       if (s.finished) return s.done;
-      finish(s,false,'启动录制失败，采集资源已释放。');
+      s.failed = true; finish(s,false,'启动录制失败，采集资源已释放。');
       throw error;
     }
     return s.done;
@@ -751,9 +756,9 @@ window.VideoExport = (function () {
     if (dom && !dom.scrim.hidden) renderSession(s);
     // Keep tracks until the final dataavailable/stop events. A broken recorder
     // still has a bounded finalization path and preserves already received data.
-    s.timers.add(setTimeout(function () { finish(s,true,'视频结束等待超时，尝试保留已收到的片段。'); },5000));
+    s.timers.add(setTimeout(function () { s.failed = true; finish(s,true,'视频结束等待超时，尝试保留已收到的片段。'); },5000));
     try { if (s.recorder.state !== 'inactive') s.recorder.stop(); }
-    catch (_) { s.reason = '录制器停止失败，尝试保留已收到的片段。'; }
+    catch (_) { s.failed = true; s.reason = '录制器停止失败，尝试保留已收到的片段。'; }
     return s.done;
   }
 
@@ -769,5 +774,6 @@ window.VideoExport = (function () {
   return { supported:supported,open:open,close:close,begin:begin,stop:stop,isRecording:function () { return !!session; },
     status:function () { return session ? {phase:session.phase,audioMode:session.audioMode,mimeType:session.mimeType || '',bytes:session.bytes}
       : {phase:'idle',audioMode:lastResult && lastResult.audioMode || null,mimeType:lastResult && lastResult.mimeType || '',
-        bytes:lastResult && lastResult.bytes || 0,downloadRequested:!!(lastResult && lastResult.downloadRequested)}; } };
+        bytes:lastResult && lastResult.bytes || 0,downloadRequested:!!(lastResult && lastResult.downloadRequested),
+        failed:!!(lastResult && lastResult.failed),message:lastResult && lastResult.message || ''}; } };
 })();

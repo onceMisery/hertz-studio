@@ -766,12 +766,22 @@ pub(crate) struct PendingRestore {
 }
 
 pub struct AppState {
+    pub(crate) stage_media: tokio::sync::OnceCell<
+        Result<Arc<crate::stage_media::StageMediaStore>, crate::error::ApiError>,
+    >,
     pub db: SqlitePool,
     pub audio: AudioHandle,
     pub(crate) room: crate::room::RoomManager,
     pub config: Arc<Config>,
     pub data_dir: PathBuf,
+    /// Held while any service task retains AppState, including shutdown work.
+    pub(crate) _data_owner: Option<crate::data_owner::DataOwner>,
     pub(crate) desktop: std::sync::OnceLock<Arc<crate::desktop::Desktop>>,
+    /// Installed only by the native main-window host, before HTTP admission.
+    pub(crate) native_window: std::sync::OnceLock<Arc<crate::window_lifecycle::WindowLifecycle>>,
+    /// Process-local timer; installed only when the native window owns playback.
+    pub(crate) native_sleep: std::sync::OnceLock<Arc<crate::window_sleep::WindowSleep>>,
+    pub(crate) system_media: std::sync::OnceLock<Arc<crate::system_media::SystemMedia>>,
     pub token: String,
     /// 浮层只读钥匙（见 `main.rs` 的 `load_or_create_overlay_key`）。与 token
     /// 分开是因为它会被粘进 OBS 的配置：权限只到「GET + 浮层歌词 + 曲目封面」。
@@ -921,7 +931,102 @@ pub struct AppState {
 pub(crate) const DEPART_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
 
 impl AppState {
+    fn native_sleep_due_locked(
+        &self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + '_>> {
+        Box::pin(async move {
+            match self.native_sleep.get() {
+                Some(timer) => timer.expire_if_due_locked(self).await,
+                None => false,
+            }
+        })
+    }
+
+    async fn play_with_native_deadline_locked(&self) -> Result<bool, vmusic_core::CoreError> {
+        if self.native_sleep_due_locked().await
+            || self
+                .native_window
+                .get()
+                .is_some_and(|owner| !owner.allows_local_playback())
+        {
+            return Ok(false);
+        }
+        match self.audio.play().await {
+            Ok(()) => Ok(true),
+            Err(error) => {
+                if self.native_sleep_due_locked().await
+                    || self
+                        .native_window
+                        .get()
+                        .is_some_and(|owner| !owner.allows_local_playback())
+                {
+                    Ok(false)
+                } else {
+                    Err(vmusic_core::CoreError::Audio(error))
+                }
+            }
+        }
+    }
+
+    pub(crate) async fn reconcile_sleep_cursor_locked(&self) {
+        let snapshot = self.audio.snapshot();
+        let Some(track) = snapshot.track_id.as_ref() else {
+            return;
+        };
+        let next = self.prepared_playback.lock().await.clone();
+        let queue = self.queue.lock().await;
+        let mut cursor = self.cursor.lock().await;
+        if let Some(next) = next.as_ref().filter(|next| {
+            next.actor_generation.checked_add(1) == Some(snapshot.generation)
+                && next.to_track_id == *track
+                && queue.get(next.to_index) == Some(track)
+        }) {
+            *cursor = Some(next.to_index);
+            return;
+        }
+        if cursor.and_then(|index| queue.get(index)) == Some(track) {
+            return;
+        }
+        *cursor = next
+            .filter(|next| next.to_track_id == *track && queue.get(next.to_index) == Some(track))
+            .map(|next| next.to_index)
+            .or_else(|| queue.iter().position(|item| item == track));
+    }
+
+    pub(crate) async fn native_sleep_reconcile_prepared_locked(&self) {
+        self.reconcile_sleep_cursor_locked().await;
+        let snapshot = self.audio.snapshot();
+        if let Some(next) = self.prepared_playback.lock().await.take().filter(|next| {
+            snapshot.track_id.as_ref() == Some(&next.to_track_id)
+                && next.actor_generation.checked_add(1) == Some(snapshot.generation)
+        }) {
+            let generation = self.play_generation.load(Ordering::Relaxed);
+            self.remember_committed_quality(
+                generation,
+                &next.to_track_id,
+                next.actual_quality,
+                next.actual_quality.map(|_| next.path.clone()),
+            )
+            .await;
+            let mut protected = self.protected.lock().await;
+            protected.clear();
+            if next.actual_quality.is_some() {
+                if let Some(name) = next.path.file_name().and_then(|name| name.to_str()) {
+                    protected.push(name.to_string());
+                }
+            }
+        }
+    }
     pub(crate) fn require_local_playback(&self) -> Result<(), vmusic_core::CoreError> {
+        if self
+            .native_window
+            .get()
+            .is_some_and(|owner| !owner.allows_local_playback())
+        {
+            return Err(vmusic_core::CoreError::Invalid(
+                "native_window_owner_unavailable".into(),
+            ));
+        }
         if self.room.is_active() || self.audio.exclusively_owned() {
             return Err(vmusic_core::CoreError::Invalid(
                 "room_mode_requires_room_command".into(),
@@ -1505,6 +1610,12 @@ impl AppState {
         // 「同队列秒切」都可能让迟到的提交劫持正在听的曲。
         let commit = self.play_commit.lock().await;
         self.require_local_playback()?;
+        if self.native_sleep_due_locked().await {
+            return Ok(PlayOutcome {
+                committed: false,
+                actual_quality: None,
+            });
+        }
         if let Some(expected) = reserve_gen {
             if self.play_generation.load(Ordering::Relaxed) != expected {
                 crate::diaglog!("play.stale", idx = index, reason = "队列已被替换");
@@ -1758,10 +1869,12 @@ impl AppState {
                 actual_quality: None,
             });
         }
-        self.audio
-            .play()
-            .await
-            .map_err(vmusic_core::CoreError::Audio)?;
+        if !self.play_with_native_deadline_locked().await? {
+            return Ok(PlayOutcome {
+                committed: false,
+                actual_quality: None,
+            });
+        }
         crate::diaglog!("play.commit", idx = index, gen = gen, via = "local");
         Ok(PlayOutcome {
             committed: self.attempt_alive(gen, index, &track_id).await,
@@ -2308,7 +2421,13 @@ impl AppState {
         // 漏一条就会出现「有时归一化、有时不归一化」。位置放在存活复核之后：
         // 只有真要提交的这一首才改链上的增益。
         self.apply_online_loudness(&track_id).await;
-        let play = self.audio.play().await;
+        let play = self.play_with_native_deadline_locked().await;
+        if matches!(play, Ok(false)) {
+            return Ok(PlayOutcome {
+                committed: false,
+                actual_quality: None,
+            });
+        }
         let committed = self.attempt_alive(gen, index, &track_id).await;
         if committed && play.is_ok() {
             self.remember_committed_quality(gen, &track_id, actual, None)
@@ -2384,10 +2503,9 @@ impl AppState {
         if !self.attempt_alive(gen, index, track_id).await {
             return Ok(Commit::Stale);
         }
-        self.audio
-            .play()
-            .await
-            .map_err(vmusic_core::CoreError::Audio)?;
+        if !self.play_with_native_deadline_locked().await? {
+            return Ok(Commit::Stale);
+        }
         let committed = self.attempt_alive(gen, index, track_id).await;
         if committed {
             self.remember_committed_quality(gen, track_id, actual, Some(path.to_path_buf()))
@@ -2471,7 +2589,12 @@ impl AppState {
     /// 就是锁外的非提交复核）：先取队列锁（持锁期间队列内容不可能变），再
     /// 复读代际，挡掉「读 gen 之后、拿锁之前」被 set_queue 顶代际的缝。
     pub(crate) async fn attempt_alive(&self, gen: usize, index: usize, track_id: &str) -> bool {
-        if self.room.is_active() {
+        if self.room.is_active()
+            || self
+                .native_window
+                .get()
+                .is_some_and(|owner| !owner.allows_local_playback())
+        {
             return false;
         }
         let queue = self.queue.lock().await;
@@ -2590,6 +2713,9 @@ impl AppState {
     async fn prepare_next_playback(&self) {
         let (mut next, sequence) = {
             let _commit = self.play_commit.lock().await;
+            if self.native_sleep_due_locked().await {
+                return;
+            }
             let snapshot = self.audio.snapshot();
             if !snapshot.playing || snapshot.mode == PlayMode::Shuffle {
                 return;
@@ -2704,6 +2830,9 @@ impl AppState {
         };
         let receipt = {
             let _commit = self.play_commit.lock().await;
+            if self.native_sleep_due_locked().await {
+                return;
+            }
             if self.prepare_sequence.load(Ordering::Relaxed) != sequence
                 || !self
                     .preparation_matches(&next, &self.audio.snapshot(), false)
@@ -2800,6 +2929,9 @@ impl AppState {
         track_id: &str,
     ) -> Option<PreparedPlayback> {
         let _commit = self.play_commit.lock().await;
+        if self.native_sleep_due_locked().await {
+            return None;
+        }
         let snapshot = self.audio.snapshot();
         let mut next = self.prepared_playback.lock().await.clone()?;
         if next.actor_generation != from_generation
@@ -3832,8 +3964,26 @@ impl AppState {
         &self,
         delta: isize,
     ) -> Result<ControlOutcome, vmusic_core::CoreError> {
+        self.step_by_user_if(delta, None).await
+    }
+
+    pub(crate) async fn step_by_user_if(
+        &self,
+        delta: isize,
+        expected: Option<(&str, u64, usize)>,
+    ) -> Result<ControlOutcome, vmusic_core::CoreError> {
+        if !self.playback_identity_matches(expected) {
+            return Ok(ControlOutcome::Superseded {
+                generation: self.play_generation.load(Ordering::Relaxed),
+            });
+        }
         let outcome = self
-            .step_for(delta, PlayTrigger::Step { delta }, None, None)
+            .step_for(
+                delta,
+                PlayTrigger::Step { delta },
+                expected.map(|(track, generation, _)| (generation, Some(track.to_owned()))),
+                expected.map(|(_, _, intent)| intent),
+            )
             .await?;
         if outcome.committed() {
             if let Some(arc) = self.weak_self.get().and_then(std::sync::Weak::upgrade) {
@@ -3860,16 +4010,42 @@ impl AppState {
         self.pause_control_if(None).await
     }
 
-    fn playback_identity_matches(&self, expected: Option<(&str, u64)>) -> bool {
-        expected.is_none_or(|(track, generation)| {
+    pub(crate) async fn stop_control_if(
+        &self,
+        expected: Option<(&str, u64, usize)>,
+    ) -> Result<ControlOutcome, vmusic_core::CoreError> {
+        let _commit = self.play_commit.lock().await;
+        self.require_local_playback()?;
+        if !self.playback_identity_matches(expected) {
+            return Ok(ControlOutcome::Superseded {
+                generation: self.play_generation.load(Ordering::Relaxed),
+            });
+        }
+        self.cancel_prepared_playback().await;
+        self.play_generation.fetch_add(1, Ordering::Relaxed);
+        self.set_buffering(false, None).await;
+        self.audio
+            .stop()
+            .await
+            .map_err(vmusic_core::CoreError::Audio)?;
+        self.transport_committed().await;
+        Ok(ControlOutcome::Applied {
+            generation: self.play_generation.load(Ordering::Relaxed),
+        })
+    }
+
+    fn playback_identity_matches(&self, expected: Option<(&str, u64, usize)>) -> bool {
+        expected.is_none_or(|(track, generation, intent)| {
             let snapshot = self.audio.snapshot();
-            snapshot.track_id.as_deref() == Some(track) && snapshot.generation == generation
+            snapshot.track_id.as_deref() == Some(track)
+                && snapshot.generation == generation
+                && self.play_generation.load(Ordering::Acquire) == intent
         })
     }
 
     pub(crate) async fn pause_control_if(
         &self,
-        expected: Option<(&str, u64)>,
+        expected: Option<(&str, u64, usize)>,
     ) -> Result<ControlOutcome, vmusic_core::CoreError> {
         let commit = self.play_commit.lock().await;
         self.require_local_playback()?;
@@ -3887,7 +4063,9 @@ impl AppState {
 
     /// Caller holds play_commit and has already invalidated the play intent
     /// (generation bump + prepared-playback cancellation).
-    async fn pause_audio_locked(&self) -> Result<ControlOutcome, vmusic_core::CoreError> {
+    pub(crate) async fn pause_audio_locked(
+        &self,
+    ) -> Result<ControlOutcome, vmusic_core::CoreError> {
         self.set_buffering(false, None).await;
         self.audio
             .pause()
@@ -3905,7 +4083,7 @@ impl AppState {
         let exiting = self.exiting.clone();
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-            let _ = exiting.send(true);
+            exiting.send_replace(true);
         });
     }
 
@@ -3925,7 +4103,7 @@ impl AppState {
     pub(crate) async fn resume_control_if(
         &self,
         strict: bool,
-        expected: Option<(&str, u64)>,
+        expected: Option<(&str, u64, usize)>,
     ) -> Result<ControlOutcome, vmusic_core::CoreError> {
         self.require_local_playback()?;
         if !self.playback_identity_matches(expected) {
@@ -3970,12 +4148,18 @@ impl AppState {
                 generation: self.play_generation.load(Ordering::Relaxed),
             });
         }
+        if self.native_sleep_due_locked().await {
+            return Ok(ControlOutcome::Superseded {
+                generation: self.play_generation.load(Ordering::Relaxed),
+            });
+        }
         self.cancel_prepared_playback().await;
         self.play_generation.fetch_add(1, Ordering::Relaxed);
-        self.audio
-            .play()
-            .await
-            .map_err(vmusic_core::CoreError::Audio)?;
+        if !self.play_with_native_deadline_locked().await? {
+            return Ok(ControlOutcome::Superseded {
+                generation: self.play_generation.load(Ordering::Relaxed),
+            });
+        }
         self.transport_committed().await;
         drop(commit);
         Ok(ControlOutcome::Applied {
@@ -3994,7 +4178,7 @@ impl AppState {
     pub(crate) async fn seek_control_if(
         &self,
         position_ms: u64,
-        expected: Option<(&str, u64)>,
+        expected: Option<(&str, u64, usize)>,
     ) -> Result<ControlOutcome, vmusic_core::CoreError> {
         let commit = self.play_commit.lock().await;
         self.require_local_playback()?;
@@ -4579,6 +4763,7 @@ pub(crate) mod tests {
 
     pub(crate) async fn playback_state() -> (AppState, std::thread::JoinHandle<()>) {
         let db = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
             .connect_lazy("sqlite::memory:")
             .unwrap();
         playback_state_with_db(db).await
@@ -4593,12 +4778,17 @@ pub(crate) mod tests {
             .await
             .unwrap();
         let state = AppState {
+            stage_media: Default::default(),
             db,
             audio,
             room: Default::default(),
             config: Arc::new(Config::default()),
             data_dir: PathBuf::new(),
             desktop: Default::default(),
+            native_window: Default::default(),
+            _data_owner: None,
+            native_sleep: Default::default(),
+            system_media: Default::default(),
             token: String::new(),
             overlay_key: String::new(),
             desktop_lyrics_key: String::new(),
@@ -4937,6 +5127,38 @@ pub(crate) mod tests {
         };
         *state.prepared_playback.lock().await = Some(next.clone());
         next
+    }
+
+    #[tokio::test]
+    async fn native_sleep_reconciles_repeated_id_successor_and_its_cached_media() {
+        let (state, handle) = playback_state().await;
+        let mut next = transition_fixture(&state, "first").await;
+        next.path = PathBuf::from("same-id-successor-exhigh.flac");
+        next.actual_quality = Some(crate::online::quality::Quality::Exhigh);
+        *state.prepared_playback.lock().await = Some(next.clone());
+        state
+            .audio
+            .load("same-id-successor-exhigh.flac", Some("first".into()))
+            .await
+            .unwrap();
+        {
+            let _commit = state.play_commit.lock().await;
+            state.play_generation.fetch_add(1, Ordering::Relaxed);
+            state.native_sleep_reconcile_prepared_locked().await;
+            state.cancel_prepared_playback().await;
+        }
+        assert_eq!(state.current_index().await, Some(1));
+        assert!(state
+            .protected_all()
+            .await
+            .contains(&"same-id-successor-exhigh.flac".into()));
+        let quality = state.committed_quality.lock().await;
+        let quality = quality.as_ref().unwrap();
+        assert_eq!(quality.actual, next.actual_quality);
+        assert_eq!(quality.cached_path, Some(next.path));
+        assert!(!state.audio.snapshot().playing);
+        state.audio.shutdown();
+        handle.join().unwrap();
     }
 
     #[tokio::test]
@@ -6973,9 +7195,10 @@ pub(crate) mod tests {
         let generation = state.audio.snapshot().generation;
         let commit = state.play_commit.lock().await;
         let waiting = state.clone();
+        let intent = state.play_generation.load(Ordering::Acquire);
         let task = tokio::spawn(async move {
             waiting
-                .seek_control_if(1500, Some(("first", generation)))
+                .seek_control_if(1500, Some(("first", generation, intent)))
                 .await
                 .unwrap()
         });

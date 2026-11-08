@@ -142,6 +142,10 @@ async function checkStandalone(browser) {
       window.$ = id => document.getElementById(id);
       window.ui = Object.fromEntries(['barDesktopSettings', 'setDesktopLyricsRow', 'setDesktopLyricsOpen', 'setDesktopLyricsLocate', 'setWallpaperRow', 'setWallpaperSettings', 'setWallpaperToggle', 'setWallpaperNote'].map(key => [key, $(key.replace(/[A-Z]/g, letter => '-' + letter.toLowerCase()))]));
       window.legacyRequests = []; window.legacyToasts = []; window.failNextControl = false;
+      window.inlineLyricsEntries = [];
+      window.closeNowPlaying = () => {};
+      window.setView = name => inlineLyricsEntries.push(name);
+      window.HertzDesktopLyricsSettings = { init() {}, refresh() {}, focus() {} };
       window.toast = text => legacyToasts.push(text); window.errText = (text, error) => text + error.message;
       window.transport = { async post(endpoint, body) {
         legacyRequests.push({ endpoint, body: JSON.parse(JSON.stringify(body)) });
@@ -149,6 +153,8 @@ async function checkStandalone(browser) {
         return { ok: true, wallpaper: { enabled: true, hidden: true } };
       } };
     });
+    await page.addScriptTag({ content: app.slice(app.indexOf('function openInlineDesktopLyrics()'), app.indexOf('// 在线歌单可能在歌单视图没渲染期间到达')) });
+    await page.addScriptTag({ content: 'function refreshInlineDesktopLyrics() {}' });
     await page.addScriptTag({ content: read('desktop-settings.js') });
     await page.addScriptTag({ content: bindings });
     assert.equal(await page.locator('#dbx-desktop-settings').isVisible(), false, 'Standalone optional DBX section stays hidden');
@@ -162,12 +168,11 @@ async function checkStandalone(browser) {
     await page.locator('#set-wallpaper-toggle').click();
     await page.locator('#bar-desktop-settings').click();
     assert.deepEqual(await page.evaluate(() => legacyRequests), [
-      { endpoint: '/v1/desktop/control', body: { command: 'wallpaper-settings', value: { tab: 'lyrics' } } },
-      { endpoint: '/v1/desktop/lyrics/control', body: { command: 'locate' } },
+      { endpoint: '/v1/desktop/lyrics/launch', body: {} },
       { endpoint: '/v1/desktop/control', body: { command: 'wallpaper-settings', value: { tab: 'wallpaper' } } },
       { endpoint: '/v1/desktop/control', body: { command: 'wallpaper-toggle' } },
-      { endpoint: '/v1/desktop/control', body: { command: 'wallpaper-settings', value: { tab: 'wallpaper' } } },
     ]);
+    assert.deepEqual(await page.evaluate(() => inlineLyricsEntries), ['settings', 'settings'], 'Lyrics settings and playback toolbar use the main page');
     await page.evaluate(() => { failNextControl = true; legacyRequests.length = 0; });
     await page.locator('#set-wallpaper-settings').click();
     await page.waitForFunction(() => legacyRequests.length === 3);
@@ -176,7 +181,7 @@ async function checkStandalone(browser) {
       { endpoint: '/v1/desktop/wallpaper/launch', body: {} },
       { endpoint: '/v1/desktop/control', body: { command: 'wallpaper-settings', value: { tab: 'wallpaper' } } },
     ], 'Standalone retains legacy missing-host launch/followup instead of capability detection');
-    console.log('PASS Standalone original lyrics/settings/locate/toggle/bar and missing-host launch/followup');
+    console.log('PASS Standalone inline lyrics entry, wallpaper actions and missing-host launch/followup');
   } finally { await page.close(); }
 }
 

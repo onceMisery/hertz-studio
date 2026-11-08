@@ -1,5 +1,9 @@
 # 设计文档实施缺口盘点
 
+2026-11-05 更新：当前文档与源码重新核对见[最新实施盘点](design-implementation-audit-2026-11-05.md)。恢复快捷键、小窗接线、壁纸参数/系统音频/本地媒体及原生主窗口已有后续实现；本文继续保留原时点证据，不直接作为当前未实施清单。
+
+2026-11-08 A07 定向更新：原生采样率模式已按 r2 实施。本文件的 A07 条目、P3 音质原型状态与后续顺序据此更新，其他条目仍保留各自原时点。当前合同、软件验证与设备资格边界见[A07 实施记录](lan-native-sample-rate.md)；日期化的历史盘点不据此改写。
+
 核对日期：2026-10-28。基线：`0330508` 与盘点时工作树。
 
 本文保留该基线的实施盘点。专项设计修订后的目标契约不自动改变实现状态；第 3 节的“旧说法”是修订前记录，不作为新一轮开发待办。当前开发范围以各专项正文为准，历史验收证据仍按原版本与环境分别有效。
@@ -8,7 +12,7 @@
 
 2026-10-31 补充：基线之后落地 `1d042b8`（按原型重做桌面歌词）与 `8eac246`（桌面组件收口与小窗陪伴原型），据此就地订正三处：桌面歌词 L2 改判为部分实现、新增未覆盖过的小窗陪伴一行、纠正[视频导出方案](video-export.md) 把远程媒体身份当作未完成的说法。其余行仍保持 `0330508` 基线范围，未重新运行构建、浏览器、音频或原生验收。
 
-**DBX 接入桌面歌词与壁纸（D0–D3）已落地候选**：截至 2026-10-29，D0–D2 的只读管道、授权、来源类型、schema v3、管理与设置流程已实现并通过独立审查，D3a 配套候选已准备，D3b 完整发布验收待完成。其他缺口主要分为桌面能力的后续扩展、一起听音频模式的设计差距，以及主线功能的真实环境与发布验收。桌面歌词、单屏壁纸、一起听工作区、在线点歌和个人舞台已经有实现，不应再按早期计划整体重做。
+**DBX 接入桌面歌词与壁纸（D0–D3）已落地候选**：截至 2026-10-29，D0–D2 的只读管道、授权、来源类型、schema v3、管理与设置流程已实现并通过独立审查，D3a 配套候选已准备，D3b 完整发布验收待完成。其他缺口主要分为桌面能力的后续扩展、一起听的跨平台/多端/长稳资格，以及主线功能的真实环境与发布验收。桌面歌词、单屏壁纸、一起听工作区、原生采样率模式、在线点歌和个人舞台已经有实现，不应再按早期计划整体重做。
 
 本轮对照 `docs/` 中现行方案、交付记录、路线图，以及 `docs/aegis/`、`docs/research/`、`docs/superpowers/` 中历史设计，并定向检查相关源码、配置和验证入口。属于静态盘点，没有重新运行构建、浏览器、音频、模型或原生验收；历史记录中的“通过”只沿用其原有范围。原工作树的 `space_previews.rs` 修改不属于本次整理。
 
@@ -25,10 +29,10 @@
 | 壁纸构图参数与电池策略 | 部分实现；存在设计差距 | 壁纸专属亮度、运动强度等参数；电池行为需对齐设计或明确修订，用户可切换策略另属后续 | [壁纸方案](desktop-wallpaper.md) §3.1 写明亮度/运动强度及默认电池停绘；[UI 方案](plans/2026-10-26-desktop-listening-ui-productization.md) §4.2/4.6 将相关控件后置。[WallpaperConfig](../crates/hertz-desktop/src/config.rs) 目前只有 enabled/fps/musicResponse/monitor/source/scene。宿主已有歌词侧电源降帧，但壁纸 `recompute_wallpaper()` 按配置 fps 与可见性策略起停，未见电池停绘条件；不能将歌词降帧当成壁纸电池策略 |
 | 壁纸作品化 W2 | 部分实现；后续范围 | 专用版本化配置导入导出、参数预置/收藏/轮播，及可选歌曲/封面/简洁歌词叠层 | [壁纸方案](desktop-wallpaper.md) §3.2/§11；[UI 方案](plans/2026-10-26-desktop-listening-ui-productization.md) P2。已有九个场景、固定/跟随与实时预览；[创意工程](stage-projects.md) 与播放器壁纸设置不能直接算作桌面壁纸作品格式 |
 | 壁纸系统音频、多屏与交互 W3 | 未实现；后续范围 | WASAPI loopback、设备切换；多屏同时运行/独立配置/整机预算；不干扰图标的鼠标视差 | [壁纸方案](desktop-wallpaper.md) §3.2，并明确同时多屏尚未实现。已有能力是“选择一块目标屏”，包括其混合 DPI 与恢复，不是多屏实例。现有频谱来自绑定 Hertz 服务，不是系统音频采集 |
-| 一起听原生采样率优先 | 部分实现；当前交付明确缩小范围 | 按歌曲原生采样率切换房间格式、新格式代际及预缓冲；与锁定采样率连续混音的选择/提示 | [一起听方案](lan-listening.md) §6.2 设计默认原生采样率优先，但 §15 明确当前创建时固定 44.1/48/96/192kHz、双声道 f32，逐曲格式切换未开放。[创建合同](../crates/hertz-studio/src/room/contract.rs) 也使用固定 `sample_rate`。不能把整个一起听标为未实现，也不能把此音质模式算已完成 |
+| 一起听原生采样率模式 A07 r2 | 已实施；实验性，外部设备资格待验收 | macOS/Linux 实际设备、跨机同钟/声学回录、2/4/8 真实音频端和 8 小时真实长稳 | [A07 实施记录](lan-native-sample-rate.md)、[一起听方案](lan-listening.md) §6.2/§15。创建显式 fixed/native，native 依据实际解码的六档源率逐代切换，能力确认、独立整数 EOF、有限流排空、唯一拒绝后继及跨层 PCM 预算已接通。默认 fixed/48k 和四档保持；设备率独立于房间率，不承诺设备自动换率、bit-perfect 或跨率精确 gapless |
 | 桌面歌词 L2 / 非 DBX 的 L3 | L2 部分实现（三行排版已落地）；其余为后续提案 | 内置白名单主题、多人声标识、可选校准入口；其他 OS/ARM64 与系统媒体来源 | [桌面歌词](desktop-lyrics.md) §10。`1d042b8` 已把三行接通到全链路：[config.rs](../crates/hertz-desktop/src/config.rs) 的 `Layout::Triple`、宿主行数解析、设置页的上一行开关与深度样式，因此「更细排版」不再属于缺口；槽位共三个（上一行/原文/一个副行），仍在设计的「最多 4 个文本槽」预算内，不另计缺口。未做的是命名主题预设——现只有 auto/light/dark 与 bare/glass/solid 两组独立字段。系统媒体标题/系统声音也不等于已经取得歌词 |
 | 小窗播放（桌面宠物） | 已接入（2026-11-01）：模块树、`desktop-mini-key`/discovery、路由组、`MiniConfig`（serde default 免迁移）、托盘入口、宠物资源层与悬停展开、回主窗口广播、`main-visibility` 上报全部落地；`check-desktop-mini-native.js` 真机验证通过 | 剩余：web 设置页小窗行、management 管道 mini 命令、macOS/Linux、皮肤热重载（见方案 §7 与本轮接线记录） | 方案与接线清单见[小窗原型](plans/2026-10-29-mini-window-desktop-pet.md)，页面原型 [mini-window-pet.html](prototypes/mini-window-pet.html)。`8eac246` 提交了 `mini.rs`、`mini_native.rs`、`mini_feed.rs`、`desktop_mini.rs` 与三份 `assets/mini-player.*`，但 [main.rs](../crates/hertz-desktop/src/main.rs) 与 [lib.rs](../crates/hertz-studio/src/lib.rs) 均未声明这些模块，未被 `mod` 引用的源码不参与编译，故这些文件从未被编译器检查过；全仓对 `mini-player` 在 `.rs/.toml/.yml/.mjs` 内零引用。两处依赖在服务侧不存在：小窗读取的 `desktop_mini_protocol` 不在宿主 `Discovery` 结构里，`desktop_mini_seq` 与 `desktop-mini-key` 也没有发布者 |
-| 统一 2D/3D 舞台引擎 M 系列 | 部分基础已有；整体方案未闭环 | 跨 CreativeGL/SpaceStage 的统一生命周期与质量治理；双实现场景族及其 StageIntent 契约；M4 离线新场景创作/审核/入库管线 | [引擎评估](stage-engine-feasibility.md) §7。现有 [CreativeGL](../plugin/ui/creative-gl.js)、[空间 registry](../tools/space-stage/src/registry.js) 与 Stage 时钟已存在；R4/R5 任务底座也已实现。不能照搬旧文“均未实现”的判断，也不能把各自有注册表视为 M0–M4 已整体交付；正式启动前须重做差距定标 |
+| 统一 2D/3D 舞台引擎 M 系列 | M0 同帧软件合同已实施；M1–M4 未闭环 | 跨 CreativeGL/SpaceStage 的统一生命周期与质量治理；双实现场景族及其 StageIntent 契约；M4 离线新场景创作/审核/入库管线 | [引擎评估](stage-engine-feasibility.md) §7 与 [M0 帧合同](stage-particles-frame-contract.md)。M0 已取得真实 Stage/Canvas/GL、恢复/失效/失败、每后端10冷/10暖软件基线，限定证据见[实施记录](aegis/work/2026-11-08-stage-engine-m0/20-checkpoint.md)。现有 [CreativeGL](../plugin/ui/creative-gl.js)、[空间 registry](../tools/space-stage/src/registry.js)、Stage 与 R4/R5 底座继续复用；单层证据不能代替跨宿主总峰值或真实2D/3D家族 |
 
 ### 1.1 配套前端原型与当前实施状态（2026-10-29）
 
@@ -38,7 +42,7 @@
 | --- | --- | --- | --- |
 | [P1 壁纸参数](design/prototypes/p1-wallpaper-params.html) | 壁纸构图参数与电池策略 | 亮度、运动强度、静帧、预览草稿、显示/暂停/失败状态 | 原型已备；参数、场景应用与电池停绘仍需宿主实现。按当前[壁纸引擎](desktop-wallpaper.md) P0 工作包接入，不能只搬控件 |
 | [P2 DBX 连接](design/prototypes/p2-dbx-connect.html) | DBX 桌面能力、连接/撤销及恢复反馈 | 能力卡片、组件缺失/不兼容/可连接/已连接、撤销与结果待确认 | D0–D2 和现有 `plugin/ui/desktop-settings.js` 已实现，D3a 候选已准备；此原型用于核对呈现与异常分支差异，避免重建接口或回到“DBX 完全无入口”的旧判断。剩余验收见[DBX 证据](plans/2026-10-28-dbx-desktop-evidence.md) |
-| [P3 一起听音质](design/prototypes/p3-room-quality.html) | 原生采样率优先与固定格式的差距 | 创建时音质模式、源→房间→本机链路、未知格式及旧端拒绝 | 原型已备；当前固定房间格式仍有效。原生模式须先确认产品范围并完成协议/音频实现，缺少的链路字段显示未知，不由页面推算 |
+| [P3 一起听音质](design/prototypes/p3-room-quality.html) | 固定/原生音质模式 | 创建时音质模式、源→房间→本机链路、未知格式及旧端拒绝 | A07 r2 已接通创建、协议、真实格式和链路状态；native 请求省略 sample_rate，等待和拒绝由实际后端事实投影。软件与本机证据见[A07](lan-native-sample-rate.md)，跨平台/多端/长稳仍待验收 |
 | [P4 壁纸作品库](design/prototypes/p4-wallpaper-library.html) | 壁纸作品、预置/收藏/轮播/叠层 | 新作品页、筛选、编辑与另存、版本及异常状态 | 原型已备；须接通作品协议、导入/存储和运行时。旧 W2 名称已由[壁纸引擎](desktop-wallpaper.md) P1/P2 范围替代，此页只覆盖其中一部分 |
 | P5 多屏 / 系统音频，合并在 [P1 的 W3 目标状态](design/prototypes/p1-wallpaper-params.html) | 同时多屏、整机预算、loopback 来源 | 多屏显示区示意；系统音频与鼠标视差的交互约定见文字说明 §3.5 | 没有独立 HTML 页面；按壁纸引擎当前工作包分别准入。单屏选择和 Hertz 频谱不作为这两项已经实现的依据 |
 | [P6 歌词排版](design/prototypes/p6-lyrics-typography.html) | 桌面歌词 L2 | 行距、对齐、宽度、次行比例、主题与可选校准 | 原型已备；新配置字段、排版和主题/校准桥接需按能力实现。现有单/双行与定位不重做 |
@@ -100,7 +104,7 @@
 1. **完成 DBX 桌面接入的 D3。** D0–D2 已有实现和独立审查；继续保持“DBX 单独使用无行为变化”，以实际配套候选与未覆盖环境验收结束。
 2. **收敛桌面产品差距。** 将全局恢复快捷键作为可选增强；明确壁纸电池行为与亮度/运动参数的当前范围，避免文档默认行为与代码不一致。
 3. **独立安排当前功能的验收清单。** 桌面 L1-C/W1-C、LAN 跨机/长稳及当前候选安装升级应按环境分别执行；AI 质量等待可用真实模型条件，不重复堆受控测试替代。
-4. **一起听音质模式单独决策。** 若仍要求 §6.2 的原生采样率优先，拆为明确开发包；若接受固定房间格式，应修订首版产品范围，而不是继续保留两套相互冲突的完成口径。
+4. **继续一起听原生模式的设备资格验收。** A07 r2 已实施，固定模式仍为默认；按实际候选补跨 OS、跨机、多端与长稳证据，维持实验性边界，避免重复立项。
 5. **W2/W3、M 系列、Automix 与其他建议项按需求选一条。** 不把多年期需求池、历史调研建议与当前漏实现项合成一个“全部补完”任务，也不使用旧估时相加工期。
 
 本文件用于后续定序；各专项的原始契约、验收门槛和历史失败证据仍由原文档维护。

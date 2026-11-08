@@ -14,6 +14,10 @@ description = "Hertz desktop lyrics host for Windows 11 x64"
 # 仅 debug 原生媒体/导入回归使用的驱动；正式及 release 构建不含页面测试入口。
 wallpaper-media-probe = []
 
+[lib]
+name = "hertz_desktop"
+path = "src/lib.rs"
+
 [[bin]]
 name = "hertz-desktop"
 path = "src/main.rs"
@@ -61,6 +65,7 @@ num-complex = { workspace = true }
 
 hertz-desktop-ipc = { path = "../hertz-desktop-ipc" }
 hertz-wallpaper = { path = "../hertz-wallpaper" }
+hertz-sqlite-lifecycle = { path = "../hertz-sqlite-lifecycle" }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
 base64 = { workspace = true }

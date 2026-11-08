@@ -10,10 +10,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tao::dpi::LogicalSize;
-use tao::event_loop::{EventLoopProxy, EventLoopWindowTarget};
+use tao::event_loop::EventLoopWindowTarget;
 use tao::window::{Window, WindowBuilder, WindowId};
 use tokio::sync::oneshot;
-use wry::{WebView, WebViewBuilder, WebViewExtWindows};
+use wry::{WebContext, WebView, WebViewBuilder, WebViewExtWindows};
 
 use super::access::{Drain, MediaAccess};
 use super::assets::DecodeInput;
@@ -22,6 +22,7 @@ use super::budget::{BudgetCoordinator, BudgetRequest, OwnerKind};
 use super::jobs::JobError;
 use super::media::{Container, MediaProbe};
 use crate::app::UserEvent;
+use crate::native_events::EventLoopProxy;
 
 const PROBE_LIMIT: Duration = Duration::from_secs(15);
 const REPORT_LIMIT: usize = 40 * 1024;
@@ -392,6 +393,7 @@ pub(crate) struct ProbeRequest {
 struct Surface {
     // WebView 先于窗口销毁。
     webview: WebView,
+    _web_context: WebContext,
     window: Window,
     #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
     close_probe_blocked: bool,
@@ -436,7 +438,7 @@ impl ProbeHost {
     pub(crate) fn start(
         &mut self,
         request: ProbeRequest,
-        target: &EventLoopWindowTarget<UserEvent>,
+        target: &EventLoopWindowTarget<()>,
         proxy: EventLoopProxy<UserEvent>,
     ) {
         if self.current.is_some() {
@@ -717,7 +719,7 @@ impl ProbeHost {
 }
 
 fn create_surface(
-    target: &EventLoopWindowTarget<UserEvent>,
+    target: &EventLoopWindowTarget<()>,
     proxy: EventLoopProxy<UserEvent>,
     id: u64,
     suppress_frames: bool,
@@ -741,7 +743,8 @@ fn create_surface(
     let page =
         include_str!("../../assets/wallpaper-probe.html").replace("/* PROBE_SCRIPT */", &script);
     let page_proxy = proxy.clone();
-    let webview = WebViewBuilder::new()
+    let mut web_context = WebContext::new(Some(crate::config::webview_dir()));
+    let webview = WebViewBuilder::new_with_web_context(&mut web_context)
         .with_custom_protocol("hertz".into(), move |_, request| {
             let here = request.uri().path() == "/wallpaper-probe.html";
             wry::http::Response::builder().status(if here { 200 } else { 404 })
@@ -761,6 +764,7 @@ fn create_surface(
     Ok((
         Surface {
             webview,
+            _web_context: web_context,
             window,
             #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
             close_probe_blocked: false,
