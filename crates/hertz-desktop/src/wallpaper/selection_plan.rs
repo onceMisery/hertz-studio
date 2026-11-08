@@ -19,6 +19,7 @@ type Result<T> = std::result::Result<T, JobError>;
 pub(crate) enum ResolvedSelection {
     Builtin(super::config::BuiltinState),
     Media(ResolvedMedia),
+    Composition(super::composition_plan::PreparedComposition),
 }
 pub(crate) struct ResolvedPlan {
     pub content: ResolvedSelection,
@@ -31,6 +32,9 @@ pub(crate) struct SelectionOptions {
     pub mirror_members: Option<usize>,
     pub resume: Option<PlaylistResume>,
     pub properties: serde_json::Map<String, serde_json::Value>,
+    /// Exact composition canvas fit; ImageTarget keeps the original media
+    /// preparation contract, which deliberately has no Stretch variant.
+    pub composition_fit: Option<super::config::Fit>,
 }
 
 #[derive(Clone, Debug)]
@@ -64,6 +68,7 @@ pub(crate) async fn resolve_selection_with_layout(
             mirror_members,
             resume: None,
             properties: Default::default(),
+            composition_fit: None,
         },
         cancel,
     )
@@ -156,7 +161,7 @@ pub(crate) async fn resolve_selection_with_options(
             return Err(recorded_failure(jobs, request, cancel, error).await);
         }
     }
-    let content = resolve(jobs, request, cancel).await?;
+    let content = resolve_with_fit(jobs, request, options.composition_fit, cancel).await?;
     Ok(ResolvedPlan {
         content,
         reference,
@@ -548,8 +553,24 @@ pub(crate) async fn resolve(
     request: Request,
     cancel: Arc<AtomicBool>,
 ) -> std::result::Result<ResolvedSelection, Failure> {
+    resolve_with_fit(jobs, request, None, cancel).await
+}
+
+async fn resolve_with_fit(
+    jobs: Arc<ImportJobs>,
+    request: Request,
+    composition_fit: Option<super::config::Fit>,
+    cancel: Arc<AtomicBool>,
+) -> std::result::Result<ResolvedSelection, Failure> {
     request.validate()?;
-    match resolve_media(Arc::clone(&jobs), request.clone(), Arc::clone(&cancel)).await {
+    match resolve_media(
+        Arc::clone(&jobs),
+        request.clone(),
+        composition_fit,
+        Arc::clone(&cancel),
+    )
+    .await
+    {
         Ok(media) => Ok(media),
         Err(error) if error.code == "cancelled" || cancel.load(Ordering::Acquire) => {
             Err(JobError::new("cancelled", "媒体选择已取消并退出").into())
@@ -592,6 +613,7 @@ async fn recorded_failure(
 async fn resolve_media(
     jobs: Arc<ImportJobs>,
     request: Request,
+    composition_fit: Option<super::config::Fit>,
     cancel: Arc<AtomicBool>,
 ) -> Result<ResolvedSelection> {
     request.validate()?;
@@ -612,6 +634,12 @@ async fn resolve_media(
     let hash = request.package_hash.clone();
     let properties = request.properties.clone();
     let source_cancel = Arc::clone(&cancel);
+    enum Source {
+        Ready(ResolvedSelection),
+        Media(AssetRef),
+    }
+    let runtime = tokio::runtime::Handle::current();
+    let target = request.target;
     let reference = tokio::task::spawn_blocking(move || {
         cancelled(&source_cancel)?;
         if source.assets().verify_installed(&hash)?.is_none() {
@@ -622,6 +650,24 @@ async fn resolve_media(
         }
         let package = source.assets().read_installed_manifest(&hash)?;
         cancelled(&source_cancel)?;
+        if matches!(
+            package.manifest.content,
+            hertz_wallpaper::Content::Composition { .. }
+        ) {
+            return runtime
+                .block_on(super::composition_plan::resolve(
+                    Arc::clone(&source),
+                    hash,
+                    properties,
+                    target,
+                    composition_fit.unwrap_or(match target.fit {
+                        super::image_prepare::ImageFit::Contain => super::config::Fit::Contain,
+                        super::image_prepare::ImageFit::Cover => super::config::Fit::Cover,
+                    }),
+                    source_cancel,
+                ))
+                .map(|plan| Source::Ready(ResolvedSelection::Composition(plan)));
+        }
         let effective =
             hertz_wallpaper::properties::effective_content(&package.manifest, &properties)
                 .map_err(super::public_properties::property_error)?;
@@ -633,22 +679,24 @@ async fn resolve_media(
             } => {
                 super::config::normalize_builtin(&scene_id, state_version, &mut params)
                     .map_err(|error| JobError::invalid_input(error.to_string()))?;
-                return Ok(Ok(super::config::BuiltinState {
-                    scene_id,
-                    state_version,
-                    params,
-                }));
+                return Ok(Source::Ready(ResolvedSelection::Builtin(
+                    super::config::BuiltinState {
+                        scene_id,
+                        state_version,
+                        params,
+                    },
+                )));
             }
             hertz_wallpaper::Content::Image { asset }
             | hertz_wallpaper::Content::Video { asset } => asset,
             _ => {
                 return Err(JobError::new(
                     "unsupported_content",
-                    "当前呈现入口支持内置场景、单张图片或单个视频作品",
+                    "当前呈现入口尚未准备此内容 adapter",
                 ))
             }
         };
-        Ok(Err(AssetRef {
+        Ok(Source::Media(AssetRef {
             package_hash: hash,
             asset_id,
             variant_id: None,
@@ -657,12 +705,12 @@ async fn resolve_media(
     .await
     .map_err(|_| JobError::new("worker_unavailable", "媒体选择线程已退出"))?;
     let reference = match reference {
-        Ok(Ok(builtin)) => {
+        Ok(Source::Ready(content)) => {
             cancelled(&cancel)?;
             jobs.library().mark_available(&request.package_hash).await?;
-            return Ok(ResolvedSelection::Builtin(builtin));
+            return Ok(content);
         }
-        Ok(Err(reference)) => reference,
+        Ok(Source::Media(reference)) => reference,
         Err(error) => {
             if matches!(
                 error.code,
@@ -675,10 +723,29 @@ async fn resolve_media(
             return Err(error);
         }
     };
+    let media = prepare_target(
+        Arc::clone(&jobs),
+        reference,
+        request.target,
+        Arc::clone(&cancel),
+    )
+    .await?;
+    jobs.library().mark_available(&request.package_hash).await?;
+    Ok(ResolvedSelection::Media(media))
+}
+
+/// The original single-slot media qualification pipeline, also used by fixed
+/// composition slots. Never creates another preparation worker.
+pub(crate) async fn prepare_target(
+    jobs: Arc<ImportJobs>,
+    reference: AssetRef,
+    target: ImageTarget,
+    cancel: Arc<AtomicBool>,
+) -> Result<ResolvedMedia> {
     let preparation = match resolve_target(
         Arc::clone(&jobs),
         reference.clone(),
-        request.target,
+        target,
         Arc::clone(&cancel),
     )
     .await?
@@ -722,18 +789,10 @@ async fn resolve_media(
                 _ => tokio::time::sleep(Duration::from_millis(50)).await,
             }
         }
-        match resolve_target(
-            Arc::clone(&jobs),
-            reference,
-            request.target,
-            Arc::clone(&cancel),
-        )
-        .await?
-        {
+        match resolve_target(Arc::clone(&jobs), reference, target, Arc::clone(&cancel)).await? {
             Resolution::Ready(media) => {
                 cancelled(&cancel)?;
-                jobs.library().mark_available(&request.package_hash).await?;
-                Ok(ResolvedSelection::Media(media))
+                Ok(media)
             }
             Resolution::PrepareRequired(_) => Err(JobError::new(
                 "prepare_incomplete",
@@ -801,10 +860,11 @@ mod tests {
                 json!({"kind":"image","asset":"background"}),
             ),
             "composition" => (
-                b"{}".to_vec(),
+                serde_json::to_vec(&json!({"documentVersion":1,"canvas":{"width":64,"height":64,"colorSpace":"srgb","background":"#000000"},
+                    "nodes":[{"id":"group","type":"group","stateVersion":1}],"timeline":{"durationSeconds":1,"loop":true,"tracks":[]},"bindings":[]})).unwrap(),
                 "application/json",
                 "vector",
-                json!({"kind":"composition","document":"background"}),
+                json!({"kind":"composition","document":"assets/content.bin"}),
             ),
             _ => panic!("unsupported test fixture"),
         };
@@ -1087,6 +1147,7 @@ mod tests {
             SelectionOptions {
                 mirror_members: Some(3),
                 properties: Default::default(),
+                composition_fit: None,
                 resume: Some(PlaylistResume {
                     revision: videos.revision,
                     reference: image.clone(),
@@ -1176,6 +1237,7 @@ mod tests {
         let options = |reference| SelectionOptions {
             mirror_members: Some(2),
             properties: Default::default(),
+            composition_fit: None,
             resume: Some(PlaylistResume {
                 revision: original.revision,
                 reference,
@@ -1357,6 +1419,7 @@ mod tests {
             SelectionOptions {
                 mirror_members: Some(2),
                 properties: Default::default(),
+                composition_fit: None,
                 resume: Some(PlaylistResume {
                     revision: original.revision,
                     reference: resumed_image.clone(),

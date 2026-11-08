@@ -13,6 +13,7 @@
 
 #[allow(dead_code)] // replace 由 P1-05 TargetPlanner 接入；当前生产默认空集合。
 pub(crate) mod access;
+pub(crate) mod ai;
 
 // P1-02/P1-04/P1-06 内核在本包内自测；接线到 app/管理协议属 P1-05（§20.2 依赖链
 // 01→02→03/04→05），接线后移除 dead_code 放行。
@@ -30,6 +31,7 @@ pub(crate) mod audio_service;
 pub(crate) mod budget;
 #[allow(dead_code)]
 pub(crate) mod config;
+pub(crate) mod composition_plan;
 #[allow(dead_code)] // AssetStore 的持久内容计量与单写者发布。
 pub(crate) mod content_quota;
 #[allow(dead_code)] // ImportJobs 的产品管理入口随 P1-05 接入。
@@ -82,3 +84,4 @@ pub(crate) mod target_planner;
 pub(crate) mod video_poster;
 pub(crate) mod webresource;
 pub(crate) mod work_drafts;
+pub(crate) mod worker;

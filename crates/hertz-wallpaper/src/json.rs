@@ -6,6 +6,8 @@
 //! 同一个扫描器还负责按字节精确定位顶层键的原始值（catalog 的 registryHash
 //! 契约对文件的 scenes 字节段求哈希，见 catalog.rs）。
 
+use std::collections::BTreeSet;
+
 use crate::{PackageError, Result};
 
 /// 校验 UTF-8 JSON 字节：对象键不得重复，嵌套深度不得超过 `max_depth`。
@@ -36,11 +38,7 @@ pub fn top_level_raw_value(bytes: &[u8], key: &str) -> Option<std::ops::Range<us
     }
     loop {
         scanner.skip_ws();
-        let key_range = scanner.read_string()?;
-        let matched = bytes
-            .get(key_range.start + 1..key_range.end - 1)
-            .map(|raw| raw == key.as_bytes())
-            .unwrap_or(false);
+        let matched = scanner.read_key()? == key;
         scanner.skip_ws();
         if scanner.peek() != Some(b':') {
             return None;
@@ -109,6 +107,13 @@ impl<'a> Scanner<'a> {
         }
     }
 
+    /// Keys have the same decoded identity as serde's object maps. Keep their
+    /// original span separate so locating values never rewrites source bytes.
+    fn read_key(&mut self) -> Option<String> {
+        let range = self.read_string()?;
+        serde_json::from_slice(&self.bytes[range]).ok()
+    }
+
     /// 读取任意 JSON 值的原始字节区间（不递归校验；校验走 check_value）。
     fn raw_value_range(&mut self) -> Option<std::ops::Range<usize>> {
         let start = self.pos;
@@ -123,11 +128,10 @@ impl<'a> Scanner<'a> {
         match self.peek() {
             Some(b'{') => self.check_object(depth, max_depth),
             Some(b'[') => self.check_array(depth, max_depth),
-            Some(b'"') => {
-                self.read_string()
-                    .ok_or_else(|| self.err("invalid_json", "字符串未闭合"))
-                    .map(|_| ())
-            }
+            Some(b'"') => self
+                .read_string()
+                .ok_or_else(|| self.err("invalid_json", "字符串未闭合"))
+                .map(|_| ()),
             Some(b't' | b'f' | b'n') => {
                 for literal in [b"true".as_slice(), b"false".as_slice(), b"null".as_slice()] {
                     if self.bytes[self.pos..].starts_with(literal) {
@@ -155,18 +159,16 @@ impl<'a> Scanner<'a> {
             self.pos += 1;
             return Ok(());
         }
-        let mut seen: Vec<&[u8]> = Vec::new();
+        let mut seen = BTreeSet::new();
         loop {
             self.skip_ws();
             let key = self
-                .read_string()
+                .read_key()
                 .ok_or_else(|| self.err("invalid_json", "对象键必须是字符串"))?;
-            let key_bytes = &self.bytes[key.start + 1..key.end - 1];
-            if seen.contains(&key_bytes) {
-                let key_text = String::from_utf8_lossy(key_bytes);
-                return Err(self.err("duplicate_key", format!("对象存在重复键「{key_text}」")));
+            if seen.contains(&key) {
+                return Err(self.err("duplicate_key", format!("对象存在重复键「{key}」")));
             }
-            seen.push(key_bytes);
+            seen.insert(key);
             self.skip_ws();
             if self.peek() != Some(b':') {
                 return Err(self.err("invalid_json", "对象键后缺少冒号"));
@@ -265,6 +267,37 @@ mod tests {
     }
 
     #[test]
+    fn decoded_key_aliases_are_rejected_without_collapsing_distinct_keys() {
+        for bytes in [
+            br#"{"opacity":0.1,"\u006fpacity":0.9}"#.as_slice(),
+            br#"{"\u006fpacity":1,"\u006F\u0070acity":2}"#,
+            br#"{"\\u006fpacity":1,"\u005cu006fpacity":2}"#,
+            br#"{"a/b":1,"a\/b":2}"#,
+            br#"{"\n":1,"\u000a":2}"#,
+            "{\"透明度\":1,\"\\u900f\\u660e\\u5ea6\":2}".as_bytes(),
+            "{\"🙂\":1,\"\\ud83d\\ude42\":2}".as_bytes(),
+        ] {
+            assert_eq!(
+                check_bounded_json(bytes, 16).unwrap_err().code,
+                "duplicate_key"
+            );
+        }
+        for bytes in [
+            br#"{"opacity":1,"\\u006fpacity":2}"#.as_slice(),
+            br#"{"a/b":1,"a\\/b":2}"#,
+            "{\"🙂\":1,\"\\ud83d\\ude43\":2}".as_bytes(),
+        ] {
+            check_bounded_json(bytes, 16).unwrap();
+        }
+        for bytes in [br#"{"\ud83d":1}"#.as_slice(), br#"{"\q":1}"#] {
+            assert_eq!(
+                check_bounded_json(bytes, 16).unwrap_err().code,
+                "invalid_json"
+            );
+        }
+    }
+
+    #[test]
     fn depth_limit_is_enforced() {
         let deep = "[[[[[[[[[[[[[[[[[1]]]]]]]]]]]]]]]]]";
         assert!(check_bounded_json(deep.as_bytes(), 17).is_ok());
@@ -278,11 +311,20 @@ mod tests {
     fn top_level_raw_value_is_byte_exact() {
         let bytes = br#"{"a":1,"scenes":[{"id":"zodiac"},{"id":"coast"}],"b":2}"#;
         let range = top_level_raw_value(bytes, "scenes").unwrap();
-        assert_eq!(&bytes[range.start..range.end], br#"[{"id":"zodiac"},{"id":"coast"}]"#);
+        assert_eq!(
+            &bytes[range.start..range.end],
+            br#"[{"id":"zodiac"},{"id":"coast"}]"#
+        );
         assert!(top_level_raw_value(bytes, "missing").is_none());
         // 字符串值里的花括号不影响定位。
         let tricky = br#"{"scenes":"}{","x":{"scenes":false}}"#;
         let range = top_level_raw_value(tricky, "scenes").unwrap();
         assert_eq!(&tricky[range.start..range.end], br#""}{""#);
+        let escaped = br#"{"\\u0073cenes":false,"\u0073cenes": [ {"id":"zodiac"} ] }"#;
+        let range = top_level_raw_value(escaped, "scenes").unwrap();
+        assert_eq!(&escaped[range], br#"[ {"id":"zodiac"} ]"#);
+        let unicode = "{\"\\ud83d\\ude42\": { \"value\": 1 }}";
+        let range = top_level_raw_value(unicode.as_bytes(), "🙂").unwrap();
+        assert_eq!(&unicode.as_bytes()[range], br#"{ "value": 1 }"#);
     }
 }

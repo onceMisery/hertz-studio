@@ -1248,13 +1248,14 @@
     function syncEmpty(frame) {
       var wantEmpty = initFailed || !frame.activeLine;
       emptyEl.hidden = !wantEmpty;
+      emptyEl.classList.toggle('fl-empty-failed', initFailed);
       if (!wantEmpty) { lastEmptyText = ''; return; }
       var msg = initFailed ? '图形引擎不可用 · 请切换其他歌词视觉'
         : frame.track ? '暂无歌词 · 让旋律继续' : '在声音里，发现另一片宇宙';
       if (msg !== lastEmptyText) {
         lastEmptyText = msg;
         emptyEl.style.color = theme.secondaryColor;
-        emptyEl.style.fontSize = 'clamp(' + (1.5 * fontScale).toFixed(3) + 'rem,' +
+        emptyEl.style.fontSize = initFailed ? '13px' : 'clamp(' + (1.5 * fontScale).toFixed(3) + 'rem,' +
           (3.5 * fontScale).toFixed(3) + 'vw,' + (2.25 * fontScale).toFixed(3) + 'rem)';
         emptyEl.textContent = msg;
       }

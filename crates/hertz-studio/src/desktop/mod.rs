@@ -169,6 +169,34 @@ impl Desktop {
     pub fn attach_bridge(&self, bridge: Arc<DesktopBridge>) {
         let _ = self.bridge.set(bridge);
     }
+    pub(crate) fn calibration_authorized(&self) -> bool {
+        #[cfg(all(windows, target_arch = "x86_64"))]
+        {
+            self.bridge
+                .get()
+                .is_some_and(|b| b.calibration_authorized())
+        }
+        #[cfg(not(all(windows, target_arch = "x86_64")))]
+        {
+            false
+        }
+    }
+    pub(crate) async fn calibration_authorization(
+        &self,
+        enabled: Option<bool>,
+    ) -> Result<Value, ApiError> {
+        #[cfg(all(windows, target_arch = "x86_64"))]
+        if let Some(b) = self.bridge.get() {
+            return b.calibration_authorization(enabled).await;
+        }
+        let state = self
+            .state
+            .upgrade()
+            .ok_or_else(|| bad_request("播放器来源已退出"))?;
+        state
+            .lyrics_calibration
+            .standalone_authorization(&state, enabled)
+    }
     fn source(&self) -> Option<Profile> {
         if let Some(bridge) = self.bridge.get() {
             return bridge.profile();

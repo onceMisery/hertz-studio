@@ -18,6 +18,7 @@ type JobResult<T> = std::result::Result<T, JobError>;
 enum PreviewContent {
     Builtin(Option<crate::wallpaper::config::BuiltinState>),
     Media(ResolvedMedia),
+    Composition(crate::wallpaper::composition_plan::PreparedComposition),
 }
 
 pub(super) struct PreviewOwner {
@@ -353,6 +354,7 @@ impl App {
                 },
                 crate::wallpaper::selection_plan::SelectionOptions {
                     properties: configuration.main().properties.clone(),
+                    composition_fit: Some(configuration.presentation().fit),
                     ..Default::default()
                 },
                 Arc::clone(&cancel),
@@ -505,6 +507,15 @@ impl App {
             Some(PreviewContent::Builtin(state)) => state.clone(),
             _ => None,
         };
+        let composition = if matches!(preview.prepared, Some(PreviewContent::Composition(_))) {
+            match self.preview.as_mut().expect("preview").prepared.take() {
+                Some(PreviewContent::Composition(plan)) => Some(plan),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let preview = self.preview.as_ref().expect("preview");
         let mut surface = create_resolved_presentation(
             target,
             self.proxy.clone(),
@@ -515,6 +526,7 @@ impl App {
                 .map_or(self.config.revision, |(_, revision)| *revision),
             preview.configuration.clone(),
             builtin,
+            composition,
             preview.monitor.clone(),
             PresentationWindow::Preview { owner },
         )?;
@@ -573,6 +585,10 @@ impl App {
             Ok(crate::wallpaper::selection_plan::ResolvedSelection::Builtin(builtin)) => {
                 preview.configuration.main_mut().presentation.fps = preview.configured_fps.min(15);
                 preview.prepared = Some(PreviewContent::Builtin(Some(builtin)));
+            }
+            Ok(crate::wallpaper::selection_plan::ResolvedSelection::Composition(plan)) => {
+                preview.configuration.main_mut().presentation.fps = preview.configured_fps.min(15);
+                preview.prepared = Some(PreviewContent::Composition(plan));
             }
             Err(error) => {
                 self.fail_preview(format!("预览未能呈现：{error}"));

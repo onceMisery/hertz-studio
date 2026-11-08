@@ -1,11 +1,16 @@
 import * as THREE from 'three';
 import { createRegistry } from './registry.js';
+import { nodeDefinitions, compositionInputs } from './nodes/definitions.js';
+import { effectDefinitions } from './nodes/effect-definitions.js';
 import { createScope } from './scope.js';
 import { createQuality, normalizeQualityMode } from './quality.js';
 import { createScene as createCoast } from '../../coast-stage/src/main.js';
 import { createScene as createZodiac, pure as zodiac } from '../../zodiac-stage/src/main.js';
 import { registerScenes } from './scenes/index.js';
 import { createSpatialResources } from './scenes/resources.js';
+import { createRenderContext } from './render-context.js';
+import { compilePlan } from './composition/plan.js';
+import { createCompositionRuntime } from './composition/runtime.js';
 import { registerEffects, createPostChain, postResourcePlan, composeEffects, optionalEffectSpecs } from './effects/index.js';
 
 const registry = createRegistry();
@@ -30,6 +35,11 @@ registry.register({ apiVersion: 1, id: 'zodiac', stateVersion: 1, label: '星座
 registerScenes(registry);
 registerEffects(effects);
 export const catalog = () => registry.catalog();
+// Author document interpretation remains in Rust; this is the same published
+// inert schema used for editor controls and build identity, not a renderer.
+export const compositionCatalog = () => JSON.parse(JSON.stringify({
+  nodes: nodeDefinitions, effects: effectDefinitions, inputs: compositionInputs
+}));
 export const effectCatalog = () => effects.catalog();
 export const register = definition => registry.register(definition);
 export const resolveId = id => registry.resolve(id) || null;
@@ -57,39 +67,40 @@ export function create(canvas, options = {}) {
   if (!canvas || typeof canvas.addEventListener !== 'function') throw new Error('Stage requires a canvas');
   const pagePort = options.resources || null;
   if (pagePort && pagePort.contractVersion !== 1) throw new Error('resource-policy-required');
-  let contextTicket = null, surfaceTicket = null, admissionFailure = '';
-  const releaseTicket = ticket => ticket?.release({ apiReleased: true, allocationEnded: true });
+  const preparedTarget=options.compositionTarget || null;
+  if(preparedTarget&&(!Number.isSafeInteger(preparedTarget.width)||!Number.isSafeInteger(preparedTarget.height)
+      ||preparedTarget.width<1||preparedTarget.height<1||preparedTarget.width>16384||preparedTarget.height>16384
+      ||canvas.width!==preparedTarget.width||canvas.height!==preparedTarget.height))throw new Error('composition-prepared-output-mismatch');
+  let admissionFailure = '';
   const quality = createQuality(options.qualityMode, options.deviceTier);
   const lifetime = createScope();
+  const renderContext = createRenderContext(THREE, canvas, { resources: pagePort,
+    onContextLost() { contextLost = true; fail('WebGL context lost'); renderer = null; },
+    onContextRestored() { notify(); } });
+  let renderer = renderContext.renderer;
   const spatialResources = createSpatialResources(THREE, options.onInvalidate,
     (url, signal) => services.resolveCover ? services.resolveCover(url, signal) : url, undefined,
-    { resources: pagePort, decodeImage: (url, options) => services.decodeImage
+    { resources: pagePort, pool: renderContext.pool, contextId: renderContext.contextId, decodeImage: (url, options) => services.decodeImage
       ? services.decodeImage(url, options) : Promise.reject(new Error('estimate-unavailable')) });
   lifetime.defer(() => spatialResources.dispose());
-  let renderer;
-  try {
-    contextTicket = pagePort?.require({ gpuContexts: 1 }, 'SpaceStage original shared Three renderer context', 0);
-    const pixels = Math.max(1, canvas.width * canvas.height);
-    surfaceTicket = pagePort?.require({ drawingBufferPixels: pixels, renderTargetDeclaredBytes: pixels * 8 },
-      'SpaceStage original RGBA8/depth drawing buffer', 0, 'bounded-estimate');
-    renderer = new THREE.WebGLRenderer({ canvas, antialias: false, powerPreference: 'high-performance' });
-    renderer.hertzProgramResources = pagePort;
-    renderer.hertzBufferResources = pagePort;
-    contextTicket?.commit(); surfaceTicket?.commit();
-  } catch (error) {
-    lifetime.dispose(); renderer?.dispose(); renderer?.forceContextLoss();
-    canvas.width = canvas.height = 0; releaseTicket(contextTicket); releaseTicket(surfaceTicket);
-    throw new Error(`WebGL initialization failed: ${error.message}`);
-  }
-  renderer.info.autoReset = false;
   let active = null, lyricLayer = null, generation = 0, lyricGeneration = 0, disposed = false, width = 640, height = 360, services = { spatialResources }, pose = null;
   let state = 'idle', error = '', contextLost = false, frameCount = 0, lastFrame = null, intervals = [], cpuMs = 0, gpuMs = null;
-  let requestId = '', requestedId = '', lastResourceFailure = '';
+  let requestId = '', requestedId = '', lastResourceFailure = '', compositionRequest=0;
+  if (typeof document !== 'undefined' && typeof document.addEventListener === 'function')
+    lifetime.listen(document,'visibilitychange',() => {
+      if (!document.hidden || !active?.composition) return;
+      if(active.instance?.pendingPreparation)active.instance.cancelPreparation();
+      if (['loading','preparing'].includes(state)) { generation++; releaseActive(); state='idle'; error=''; notify(); }
+      else active.instance?.suspend();
+    });
   function stats() {
     const info = renderer?.info || { render: { calls: 0, points: 0, triangles: 0 }, memory: { geometries: 0, textures: 0 }, programs: [] };
     const sample = intervals.slice().sort((a,b) => a-b);
     const median = sample.length ? sample[Math.floor(sample.length / 2)] : null;
     const scoped = active ? active.scope.stats() : { resources: 0, tasks: 0, estimatedBytes: 0 };
+    if(active?.composition&&active.instance){const children=active.instance.scopeStats();
+      for(const key of ['resources','tasks','estimatedBytes','cleanups','leases','admissionTickets','allocationTasks'])scoped[key]=(scoped[key]||0)+children[key];
+      scoped.cleanupFailed ||= children.cleanupFailed;}
     const lyricStats = lyricLayer ? lyricLayer.scope.stats() : { resources: 0, tasks: 0, estimatedBytes: 0 };
     const shared = spatialResources.stats();
     const post = active && active.post && active.post.stats ? active.post.stats() : { bytes: 0 };
@@ -103,7 +114,8 @@ export function create(canvas, options = {}) {
       textTextures: shared.textTextures, coverTextures: shared.coverTextures, tasks: scoped.tasks + lyricStats.tasks + shared.queued + shared.coverLoads,
       sceneStats: active?.instance?.stats?.() || null, firstSubmit: !!active?.firstSubmit, resourceAdmissionFailure: admissionFailure,
       postResourceFailure: post.resourceFailure || '', poolResourceFailure: shared.resourceFailure || '',
-      resourceCoverage: pagePort ? 'context-post-text-raster-cover-and-shared-buffer-subset' : 'original-consumer-policy' };
+      resourceCoverage: active?.composition ? 'composition-context-linear-target-buffer-text-media-font-planned-subset'
+        : pagePort ? 'context-post-text-raster-cover-and-shared-buffer-subset' : 'original-consumer-policy' };
   }
   function notify() {
     const value = stats();
@@ -120,7 +132,7 @@ export function create(canvas, options = {}) {
   function releaseActive() {
     const previous = active; active = null;
     if (!previous) return;
-    previous.scope.trackTree(previous.scene);
+    if (!previous.composition) previous.scope.trackTree(previous.scene);
     previous.scope.dispose();
     previous.scene.clear();
     renderer.renderLists.dispose();
@@ -168,25 +180,19 @@ export function create(canvas, options = {}) {
   function resize(w, h) {
     if (disposed || contextLost) return false;
     const nextWidth = Math.max(2, Math.floor(Number(w) || 2)), nextHeight = Math.max(2, Math.floor(Number(h) || 2));
+    if(preparedTarget){
+      if(canvas.width!==preparedTarget.width||canvas.height!==preparedTarget.height){admissionFailure='composition-prepared-output-mismatch';return false;}
+      width=nextWidth;height=nextHeight;active?.instance?.resize?.(width,height);return true;
+    }
     const nativePixels = globalThis.HertzGlBudget?.limits?.pixelBudget || Infinity;
     const dpr = Math.min(quality.dpr(nextWidth, nextHeight, globalThis.devicePixelRatio || 1), Math.sqrt(nativePixels / (nextWidth * nextHeight)));
-    const pixelWidth = Math.floor(nextWidth * dpr), pixelHeight = Math.floor(nextHeight * dpr);
-    let nextSurface = null;
-    try {
-      if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
-        const peakPixels = Math.max(pixelWidth * canvas.height, pixelWidth * pixelHeight);
-        nextSurface = pagePort?.require({ drawingBufferPixels: peakPixels, renderTargetDeclaredBytes: peakPixels * 8 },
-          'SpaceStage shared drawing buffer old/new/intermediate resize', 0, 'bounded-estimate');
-        // r186 updates CSS size, ratio and backing dimensions in one owner call.
-        renderer.setDrawingBufferSize(nextWidth, nextHeight, dpr);
-        nextSurface?.commit({ drawingBufferPixels: pixelWidth * pixelHeight, renderTargetDeclaredBytes: pixelWidth * pixelHeight * 8 });
-        releaseTicket(surfaceTicket); surfaceTicket = nextSurface;
-      }
-      admissionFailure = ''; width = nextWidth; height = nextHeight;
-    } catch (error) {
-      if (nextSurface) { canvas.width = canvas.height = 0; releaseTicket(surfaceTicket); surfaceTicket = null; releaseTicket(nextSurface); }
-      admissionFailure = error.message; return false;
+    if (active?.composition && !active.instance?.canResize(Math.floor(nextWidth*dpr),Math.floor(nextHeight*dpr))) {
+      admissionFailure='composition-target-replan-required'; notify(); return false;
     }
+    if (!renderContext.resize(nextWidth, nextHeight, dpr)) {
+      admissionFailure = renderContext.admissionFailure; return false;
+    }
+    admissionFailure = ''; width = nextWidth; height = nextHeight;
     quality.warmup(null);
     if (active) {
       active.camera.aspect = width / height; active.camera.updateProjectionMatrix();
@@ -212,22 +218,63 @@ export function create(canvas, options = {}) {
     state = 'failed'; generation++; lyricGeneration++; releaseActive(); releaseLyrics(); notify();
   }
   function retireRenderer() {
-    if (!renderer) return;
-    renderer.dispose(); if (!renderer.getContext().isContextLost()) renderer.forceContextLoss(); renderer = null;
-    canvas.width = canvas.height = 0; releaseTicket(surfaceTicket); releaseTicket(contextTicket);
-    surfaceTicket = contextTicket = null;
+    renderContext.dispose(); renderer = null;
   }
-  lifetime.listen(canvas, 'webglcontextlost', event => {
-    event.preventDefault(); contextLost = true; fail('WebGL context lost'); retireRenderer();
-  });
-  // Lost generations are retired. Recreating a stage is the caller's explicit operation.
-  lifetime.listen(canvas, 'webglcontextrestored', () => { if (contextLost) notify(); });
-  if (!resize(canvas.clientWidth || 640, canvas.clientHeight || 360) && !canvas.width) {
+  if(preparedTarget){width=Math.max(2,canvas.clientWidth||preparedTarget.width);height=Math.max(2,canvas.clientHeight||preparedTarget.height);}
+  else if (!resize(canvas.clientWidth || 640, canvas.clientHeight || 360) && !canvas.width) {
     lifetime.dispose(); retireRenderer(); throw new Error(admissionFailure || 'drawing-buffer-unavailable');
   }
   return {
     selectLyrics,
+    async selectComposition(projection) {
+      if (disposed) throw new Error('Stage disposed');
+      if (contextLost) throw new Error('WebGL context is lost; recreate the stage to retry');
+      if (!pagePort) throw new Error('composition-resource-policy-required');
+      if (options.isVisible && !options.isVisible()) throw new Error('preparation-suspended');
+      const requestTicket=++compositionRequest;
+      let plan,incrementalCandidate=null;
+      try {
+        plan = compilePlan(projection);
+        if (projection.target.width !== canvas.width || projection.target.height !== canvas.height)
+          throw new Error('composition-target-replan-required');
+        if(active?.composition&&active.instance?.canApplyPlan(plan)){
+          const candidate=active;incrementalCandidate=candidate;
+          const result=await candidate.instance.applyPlan(plan);
+          if(active!==candidate||requestTicket!==compositionRequest||disposed)return null;
+          admissionFailure='';error='';
+          if(result.changed){candidate.firstSubmit=false;state='preparing';notify();}
+          return {id:'composition',semanticKey:plan.ir.semanticKey,sessionId:projection.sessionId,generation:projection.generation,...result};
+        }
+        const retiring = [...new Set([...(active?.scope.retirementCandidates(renderer) || []), ...(active?.instance?.retirementCandidates?.() || []), ...(active?.post?.retirementCandidates() || [])])];
+        const result = pagePort?.preflight(plan.resources, retiring);
+        if (result && !result.ok) { const reason = new Error(result.reason); reason.resourceFailure = result; throw reason; }
+      } catch (reason) {
+        if(requestTicket!==compositionRequest||incrementalCandidate&&(active!==incrementalCandidate||reason.name==='AbortError'))throw reason;
+        admissionFailure=reason.message; notify(); throw reason;
+      }
+      admissionFailure=''; requestedId='composition'; requestId=pagePort?.nextId() || String(generation+1);
+      const ticket=++generation; releaseActive(); releaseLyrics(); lyricGeneration++;
+      const scope=createScope({ resources: pagePort, generation: ticket });
+      const candidate={ def:{ id:'composition', capabilities:{ownsLyrics:false}, camera:{} }, scope, instance:null,
+        scene:new THREE.Scene(), camera:new THREE.OrthographicCamera(), firstSubmit:false, post:null,
+        params:{}, context:{}, composition:true };
+      active=candidate; state='loading'; error=''; notify(); scope.beginAllocation();
+      try {
+        const instance=await createCompositionRuntime(THREE,renderContext,scope,plan,{
+          generation:ticket, isCurrent:value => !disposed && value===generation,
+          onInvalidate:options.onInvalidate });
+        if (disposed || ticket!==generation || scope.signal.aborted) { instance.dispose(); scope.dispose(); return null; }
+        candidate.instance=instance; candidate.scene=instance.scene; candidate.camera=instance.camera;
+        instance.resize(width,height); state='preparing'; lastFrame=null; intervals=[]; notify();
+        return { id:'composition', semanticKey:plan.ir.semanticKey, sessionId:projection.sessionId, generation:projection.generation };
+      } catch (reason) {
+        scope.dispose();
+        if (ticket===generation && !disposed) { active=null; fail(reason); }
+        throw reason;
+      } finally { scope.endAllocation(); }
+    },
     cancelPreparation() {
+      if(active?.composition&&active.instance?.pendingPreparation){active.instance.cancelPreparation();return;}
       if (disposed || !['loading', 'preparing'].includes(state)) return;
       generation++; releaseActive(); state = 'idle'; error = ''; notify();
     },
@@ -244,7 +291,7 @@ export function create(canvas, options = {}) {
           const resources = { ...declared };
           const post = postResourcePlan(normalized.params, services, width, height);
           for (const [key, value] of Object.entries(post)) resources[key] = (resources[key] || 0) + value;
-          const retiring = [...(active?.scope.retirementCandidates(renderer) || []), ...(active?.post?.retirementCandidates() || [])];
+          const retiring = [...new Set([...(active?.scope.retirementCandidates(renderer) || []), ...(active?.instance?.retirementCandidates?.() || []), ...(active?.post?.retirementCandidates() || [])])];
           const result = pagePort.preflight(resources, retiring);
           if (!result.ok) { const reason = new Error(result.reason); reason.resourceFailure = result; throw reason; }
         } catch (reason) {
@@ -291,6 +338,11 @@ export function create(canvas, options = {}) {
         throw reason;
       } finally { scope.endAllocation(); }
     },
+    pauseComposition(sceneTime) {
+      if (disposed || !active?.composition || !active.instance) return false;
+      try { active.instance.update({ sceneTime, paused: true }); return true; }
+      catch (reason) { fail(reason); return false; }
+    },
     frame(frame = {}) {
       if (disposed || !['preparing', 'ready'].includes(state) || !active?.instance || !canvas.width || !canvas.height
           || (typeof document !== 'undefined' && document.hidden) || (options.isVisible && !options.isVisible())) return false;
@@ -305,14 +357,17 @@ export function create(canvas, options = {}) {
         if (lyricLayer?.prepare) lyricLayer.prepare();
         if (frame.deviceTier !== undefined && quality.setDeviceTier(frame.deviceTier)) applyQuality();
         spatialResources.beginFrame(now);
-        active.instance.update({ ...frame, now, dt });
+        const prepared=active.instance.update({ ...frame, now, dt });
+        if (active.composition && prepared === false) return false;
         if (lyricLayer?.instance) {
           lyricLayer.scene.visible = !!frame.lyrics?.lines?.length && !active.def.capabilities.ownsLyrics;
           lyricLayer.instance.update({ ...frame, now, dt });
         }
         if (active.post && active.post.update) active.post.update(frame);
         renderer.info.reset();
-        if (active.post) active.post.render(renderer, active.scene, active.camera); else renderer.render(active.scene, active.camera);
+        if (active.composition) {
+          if (!active.instance.render()) return false;
+        } else if (active.post) active.post.render(renderer, active.scene, active.camera); else renderer.render(active.scene, active.camera);
         if (lyricLayer?.instance && lyricLayer.scene.visible) {
           // Preserve the world's color buffer while giving lyrics their own reading depth.
           const autoClear = renderer.autoClear, toneMapping = renderer.toneMapping, exposure = renderer.toneMappingExposure;
@@ -326,7 +381,7 @@ export function create(canvas, options = {}) {
           throw new Error('Three shader program failed');
         cpuMs = performance.now() - started; frameCount++;
         if (!active.firstSubmit) { active.firstSubmit = true; state = 'ready'; notify(); }
-        if (quality.sample(now, () => {
+        if (!active.composition && quality.sample(now, () => {
           const info = renderer.info.render, scoped = active.scope.stats(), shared = spatialResources.stats();
           const post = active.post && active.post.stats ? active.post.stats().bytes : 0;
           return { drawCalls: info.calls, points: info.points, triangles: info.triangles, estimatedBytes: scoped.estimatedBytes + (lyricLayer ? lyricLayer.scope.stats().estimatedBytes : 0) + shared.bytes + post };

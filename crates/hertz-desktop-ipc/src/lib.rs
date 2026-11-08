@@ -8,6 +8,7 @@ pub mod blocking;
 pub mod frame;
 #[cfg(windows)]
 pub mod management;
+pub mod monotonic;
 pub mod profile;
 pub mod protocol;
 #[cfg(windows)]

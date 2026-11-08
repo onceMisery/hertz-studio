@@ -8,23 +8,27 @@ pub(super) const AUTH_FILE: &str = "desktop-authorization.json";
 pub(super) const DISCOVERY_FILE: &str = "desktop-source.json";
 pub(super) const LOCK_FILE: &str = "desktop-source.lock";
 pub(super) const SCOPES: [Scope; 2] = [Scope::Lyrics, Scope::Wallpaper];
+pub(super) const ALL_SCOPES: [Scope; 3] =
+    [Scope::Lyrics, Scope::Wallpaper, Scope::LyricsCalibration];
 
 pub(super) fn index(scope: Scope) -> usize {
     match scope {
         Scope::Lyrics => 0,
         Scope::Wallpaper => 1,
+        Scope::LyricsCalibration => 2,
     }
 }
-pub(super) fn key_file(scope: Scope) -> &'static str {
+pub(crate) fn key_file(scope: Scope) -> &'static str {
     match scope {
         Scope::Lyrics => "desktop-lyrics-key",
         Scope::Wallpaper => "wallpaper-key",
+        Scope::LyricsCalibration => "desktop-lyrics-calibration-key",
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(super) struct Authorization {
+pub(crate) struct Authorization {
     pub schema_version: u32,
     pub revision: u64,
     pub scopes: Vec<Scope>,
@@ -36,9 +40,10 @@ impl Authorization {
         }
         let value: Self = serde_json::from_slice(bytes)
             .map_err(|_| invalid("invalid desktop authorization record"))?;
-        if value.schema_version != 1
+        if !matches!(value.schema_version, 1 | 2)
             || value.revision == 0
-            || value.scopes.len() > 2
+            || value.scopes.len() > 3
+            || value.schema_version == 1 && value.scopes.contains(&Scope::LyricsCalibration)
             || value
                 .scopes
                 .iter()
@@ -82,7 +87,7 @@ impl Authorization {
     }
 }
 
-pub(super) fn read_key(directory: &Path, scope: Scope) -> io::Result<Zeroizing<String>> {
+pub(crate) fn read_key(directory: &Path, scope: Scope) -> io::Result<Zeroizing<String>> {
     let bytes = Zeroizing::new(windows::read_private_bounded(
         &directory.join(key_file(scope)),
         128,
@@ -96,7 +101,7 @@ pub(super) fn read_key(directory: &Path, scope: Scope) -> io::Result<Zeroizing<S
     ))
 }
 
-pub(super) fn create_key(directory: &Path, scope: Scope) -> io::Result<Zeroizing<String>> {
+pub(crate) fn create_key(directory: &Path, scope: Scope) -> io::Result<Zeroizing<String>> {
     let mut random = Zeroizing::new([0u8; 32]);
     getrandom::fill(&mut *random)
         .map_err(|_| io::Error::other("desktop credential generation failed"))?;

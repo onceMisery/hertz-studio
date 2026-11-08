@@ -672,6 +672,7 @@ fn snapshot_json(state: &AppState, view: SnapshotView<'_>) -> Value {
     json!({
         "protocol": PROTOCOL,
         "vocalSchemaVersions": [1],
+        "lyricsCalibration": state.lyrics_calibration.capability(state, view.lyric_status == "ready"),
         "seq": view.seq,
         "server": {
             "session": state.server_instance_id(),

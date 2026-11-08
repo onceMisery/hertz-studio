@@ -3,6 +3,34 @@
   "note": "check-* scripts that are deliberate manual/browser/diagnostic entry points. New unregistered check-* files fail scripts/check-scripts.js until they are either registered in check-frontend.js / a workflow or added here.",
   "scripts": [
     {
+      "script": "check-wallpaper-ai-native.js",
+      "purpose": "Actual isolated Windows native AI-01 offline catalog and original settings authority: installed works and same-title ambiguity, explicit switch and original Apply journal, exact current target/work first-frame receipts, stale CAS/action and ordinary-pipe authority rejection, unconfirmed lyrics draft isolation and missing-target refusal. Requires a copied HERTZ_DESKTOP_BIN and PLAYWRIGHT_MODULE; serial GUI, refuses an existing standalone host. Provider/fees/pairing/MCP and wider AI/device qualification remain separate."
+    },
+    {
+      "script": "check-wallpaper-composition-native.js",
+      "purpose": "Actual current Windows WorkerW and WebView2 composition core: native package preparation/installed bytes, original settings draft and Apply, contain/cover/stretch, real first frame and exact native session, one shared video clock/decoder, original page stop/resume and complete native CPU/GPU/upload-rate retirement. Requires a copied wallpaper-media-probe debug HERTZ_DESKTOP_BIN, HERTZ_DESKTOP_BUILD_RECEIPT and PLAYWRIGHT_MODULE; serial GUI, refuses an existing standalone host. Additional adapters/editor, OS policy, pressure, long-duration and other-device qualification remain separate."
+    },
+    {
+      "script": "check-wallpaper-composition-native-page.js",
+      "purpose": "Production native wallpaper page and GlAdmission bootstrap emitted by real Rust selection in Chrome: exact target and whole-plan GPU/media budget, first frame plus continued video uploads, delayed storage fences, pause/seek, capability refusal and complete retirement. Requires prior Rust fixture output and PLAYWRIGHT_MODULE. Diagnostic budget increases are explicitly excluded from qualification; actual Windows HWND/WorkerW, driver and device eligibility remain separate."
+    },
+    {
+      "script": "check-wallpaper-composition-browser.js",
+      "purpose": "Actual Rust-compiled composition IR and shipped Three bundle in Chrome: shared renderer/context, linear alpha and painter order, canvas fitting, real same-package media/font resources, absolute time/seek, bounded admission, partial load/cancel/stale completion and lease retirement. Requires PLAYWRIGHT_MODULE; local resources. Native preparation/first-frame, OS/GPU budgets and other-device qualification remain separate."
+    },
+    {
+      "script": "check-wallpaper-sandbox-native.js",
+      "purpose": "Actual owned Windows G3-S no-network AppContainer candidate: exact worker binary/hash, private bootstrap, token/SID/capabilities and Job limit readback, WorkerW ownership/mount, isolated WebView2 process identity, rendered probe first frame and whole-Job shutdown. Uses --exe/--output-dir (optional isolated --build); product author Web remains disabled until all three qualification gates pass. Run GUI candidates serially."
+    },
+    {
+      "script": "check-desktop-lyrics-calibration-native.js",
+      "purpose": "Fresh Full/native-window Windows candidate and actual native lyrics button: original full-player consent/revocation, narrow-key isolation, visible/hidden same-source OS foreground and offset-control focus, unchanged playback/offset on handoff, explicit original offset save and owned shutdown. Requires HERTZ_BIN and PLAYWRIGHT_MODULE; isolated data/null audio, serial GUI. Debug development behavior does not qualify DBX, Standard, releases or other devices."
+    },
+    {
+      "script": "check-desktop-lyrics-calibration-browser.js",
+      "purpose": "Production desktop calibration button, player receiver/controller and existing lyric-offset controls in Chrome: explicit consent/revocation, single receiver and DBX handoff, current-track fencing, cancellation/deadline, focus failure, no offset writes, narrow layout and K=0 recovery. Requires PLAYWRIGHT_MODULE; isolated fixture transport. Actual Windows foreground focus, paired native service and DBX 0.6.35/0.6.47 acceptance remain separate."
+    },
+    {
       "script": "check-stage-engine-m1-native.js",
       "purpose": "Actual pinned Standard/Full release Wry/WebView2 candidate on current Windows display: edition/minification source identity, isolated null audio, raw original-gate CPU/FPS samples over real 60-second combinations, optional real minimized 60-second pause/seek/resume lifecycles, and owner retirement with separate scoped process/GPU observations. Requires HERTZ_BIN, HERTZ_EDITION and PLAYWRIGHT_MODULE; run GUI candidates serially. Incomplete owner coverage, weak-machine/4K and frozen-policy qualification remain open."
     },

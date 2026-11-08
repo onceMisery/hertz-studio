@@ -29,6 +29,15 @@ function fixture(preferences = {}) {
     requests: [], desktopReply: null, held: {}, hold: '',
     async request(method, params) {
       this.requests.push({ method, params: structuredClone(params) });
+      if (method === 'v1/desktop/calibration-authorization') {
+        if (params.op !== 'GET') throw Error('Passive calibration fixture cannot grant authorization');
+        return { status: 200, body: { authorized: false, persistentAuthorized: false, cleanupIncomplete: false } };
+      }
+      if (method === 'v1/desktop/calibration-ui') {
+        const action = params.body?.op;
+        if (!['register', 'claim', 'renew', 'unregister'].includes(action)) throw Error('Unexpected calibration UI action without a request');
+        return { status: 200, body: action === 'register' ? { receiverId: 'fixture-page', session: 'fixture-source' } : action === 'claim' ? { intent: null } : { renewed: true } };
+      }
       if (method.startsWith('v1/desktop/')) {
         if (this.hold === method) return new Promise(resolve => { this.held[method] = resolve; });
         return structuredClone(this.desktopReply);
@@ -52,6 +61,20 @@ function fixture(preferences = {}) {
 }
 const indexHtml = read('index.html');
 const fixtureHtml = preferences => indexHtml.replace('<head>', '<head><script>(' + fixture.toString() + ')(' + JSON.stringify(preferences) + ');</script>');
+async function checkPassiveCalibration(frame) {
+  const requests = await frame.evaluate(() => fixture.requests.filter(request => ['v1/desktop/calibration-ui', 'v1/desktop/calibration-authorization'].includes(request.method)));
+  assert.ok(requests.some(request => request.method === 'v1/desktop/calibration-ui' && request.params.body?.op === 'register'));
+  for (const request of requests) {
+    if (request.method === 'v1/desktop/calibration-authorization') assert.deepEqual(request.params, { op: 'GET', query: {} });
+    else {
+      assert.equal(request.params.op, 'POST');
+      assert.ok(['register', 'claim', 'renew', 'unregister'].includes(request.params.body?.op));
+      assert.ok(Object.keys(request.params.body).every(key => ['op', 'visible', 'kind', 'workbench', 'receiverId', 'handoff'].includes(key)));
+      if ('handoff' in request.params.body) assert.equal(request.params.body.handoff, '');
+    }
+  }
+  return requests;
+}
 
 // Targeted production-app regression for a supported saved default. No source slicing.
 async function checkSettingsDefault(browser, baseUrl) {
@@ -67,7 +90,7 @@ async function checkSettingsDefault(browser, baseUrl) {
       assert.ok(frame);
       await frame.waitForURL(/\/index\.html(?:\?|$)/, { waitUntil: 'domcontentloaded', timeout: 30000 });
       await frame.waitForFunction(() => document.getElementById('conn')?.textContent === '服务已连接', null, { timeout: 20000 });
-      const requests = () => frame.evaluate(() => fixture.requests.filter(request => request.method.startsWith('v1/desktop/')));
+      const requests = () => frame.evaluate(() => fixture.requests.filter(request => request.method.startsWith('v1/desktop/') && !['v1/desktop/calibration-ui', 'v1/desktop/calibration-authorization'].includes(request.method)));
       // Let real skin observers and their rendering work settle; no production timer gate.
       const renderBoundary = () => frame.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
       await renderBoundary();
@@ -120,7 +143,7 @@ async function checkSettingsDefault(browser, baseUrl) {
       assert.equal(await frame.locator('#dbx-desktop-settings').isVisible(), true);
       assert.ok((await requests()).every(request => request.method === 'v1/desktop/capabilities'), 'no automatic connect/disconnect/launch');
       assert.deepEqual(errors, []);
-      evidence.push({ initialSkin, savedDefaultView: 'settings', restoredView: 'settings', mounts, startupAndMountDesktopRequests: 0, userOpenReopenBarDesktopRequests: await requests(), errors });
+      evidence.push({ initialSkin, savedDefaultView: 'settings', restoredView: 'settings', mounts, startupAndMountDesktopManagementRequests: 0, userOpenReopenBarDesktopRequests: await requests(), passiveCalibrationRequests: await checkPassiveCalibration(frame), errors });
       console.log('PASS saved settings default:', initialSkin, 'startup + Hertz remount: 0 desktop requests; real open/reopen/bar: 3');
     } finally { await page.close(); }
   }
@@ -146,6 +169,9 @@ async function checkStandalone(browser) {
       window.closeNowPlaying = () => {};
       window.setView = name => inlineLyricsEntries.push(name);
       window.HertzDesktopLyricsSettings = { init() {}, refresh() {}, focus() {} };
+      // This slice checks legacy desktop actions; the full-app fixture above
+      // exercises calibration startup and asserts its passive fixed-route calls.
+      window.calibrationUi = { init() {} };
       window.toast = text => legacyToasts.push(text); window.errText = (text, error) => text + error.message;
       window.transport = { async post(endpoint, body) {
         legacyRequests.push({ endpoint, body: JSON.parse(JSON.stringify(body)) });
@@ -225,7 +251,7 @@ async function main() {
     assert.equal(await frame.evaluate(() => { try { return !!parent.document; } catch (_) { return false; } }), false, 'sandbox prevents same-URL parent DOM access');
     assert.equal(await frame.evaluate(() => { try { return !!window.localStorage; } catch (_) { return false; } }), true, 'host storage shim works in opaque sandbox');
     assert.equal(await page.locator('iframe').getAttribute('sandbox'), 'allow-scripts');
-    const requests = () => frame.evaluate(() => fixture.requests.filter(r => r.method.startsWith('v1/desktop/')));
+    const requests = () => frame.evaluate(() => fixture.requests.filter(r => r.method.startsWith('v1/desktop/') && !['v1/desktop/calibration-ui', 'v1/desktop/calibration-authorization'].includes(r.method)));
     const count = async method => (await requests()).filter(r => r.method === method).length;
     const reply = async value => frame.evaluate(value => { fixture.desktopReply = value; }, value);
     const detect = async caps => {
@@ -391,7 +417,7 @@ async function main() {
       if (request.method === 'v1/desktop/disconnect') assert.deepEqual(request.params, { op: 'POST', query: {}, body: {} });
     }
     assert.deepEqual(errors, [], 'no uncaught errors in actual shipped app');
-    fs.writeFileSync(path.join(output, 'evidence.json'), JSON.stringify({ skins, sandbox: 'allow-scripts', requests: await requests(), errors }, null, 2));
+    fs.writeFileSync(path.join(output, 'evidence.json'), JSON.stringify({ skins, sandbox: 'allow-scripts', requests: await requests(), passiveCalibrationRequests: await checkPassiveCalibration(frame), errors }, null, 2));
     await checkStandalone(browser);
     console.log('PASS DBX desktop settings: opaque sandbox, Hertz real openings/reopen/bar focus, explicit consent, component/auth/source states, partial failures, revoke races, no startup/polling, guide fallback and narrow layout.');
   } finally { await browser.close(); await new Promise(resolve => server.close(resolve)); }

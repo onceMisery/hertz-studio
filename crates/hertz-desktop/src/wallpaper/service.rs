@@ -27,6 +27,12 @@ type Initialization = Option<Result<(), Arc<JobError>>>;
 type Reply = Box<dyn FnOnce(Value) + Send>;
 enum Work {
     Command(Call),
+    AiCatalog {
+        brief: String,
+        context: super::ai::CatalogContext,
+        reply: Box<dyn FnOnce(Result<super::ai::Catalog, JobError>) + Send>,
+        slot: Slot,
+    },
     Resolve(ResolveCall),
     DraftDocument {
         id: String,
@@ -52,6 +58,7 @@ enum Work {
         cancel: Arc<AtomicBool>,
         reply: Box<dyn FnOnce(Result<(), JobError>) + Send>,
         slot: Slot,
+        ai: Option<super::ai::Authority>,
     },
 }
 struct ResolveCall {
@@ -370,6 +377,11 @@ impl LibraryService {
                             tasks.spawn_local(async move {
                                 match call {
                                     Work::Command(call) => { let _slot = call._slot; let value = state.handle(&call.request, call.owner, call.hwnd, &call.playlist_properties, &call.references).await; (call.reply)(value); }
+                                    Work::AiCatalog {brief, context, reply, slot} => {
+                                        let _slot = slot;
+                                        let result = match state.jobs().await { Ok(jobs) => super::ai::catalog(Arc::clone(jobs), brief, context).await, Err(error) => Err(error) };
+                                        reply(result);
+                                    }
                                     Work::DraftDocument { id, revision, owner, reply, slot } => {
                                         let _slot = slot;
                                         let result = async {
@@ -389,7 +401,7 @@ impl LibraryService {
                                         };
                                         reply(result);
                                     }
-                                    Work::ValidateMirrorLayouts { selections, properties, cancel, reply, slot } => {
+                                    Work::ValidateMirrorLayouts { selections, properties, cancel, reply, slot, ai } => {
                                         let _slot = slot;
                                         let result = match state.jobs().await {
                                             Ok(jobs) => {
@@ -397,6 +409,7 @@ impl LibraryService {
                                                 let runtime = tokio::runtime::Handle::current();
                                                 tokio::task::spawn_blocking(move || {
                                                     runtime.block_on(async {
+                                                        if let Some(authority) = ai.as_ref() { super::ai::revalidate(&jobs, authority).await?; }
                                                         if !selections.is_empty() {
                                                             super::selection_plan::validate_mirror_layouts(&jobs, selections, &cancel).await?;
                                                         }
@@ -432,6 +445,19 @@ impl LibraryService {
     pub(crate) fn set_settings_owner(&self, owner: u64) {
         self.state.tokens.set_owner(owner);
         self.state.output_tokens.set_owner(owner);
+    }
+
+    pub(crate) fn recommend_ai(&self, brief: String, context: super::ai::CatalogContext,
+        reply: impl FnOnce(Result<super::ai::Catalog, JobError>) + Send + 'static) -> Result<(), JobError> {
+        let slot = self.reserve()?;
+        self.tx.try_send(Work::AiCatalog {brief, context, reply: Box::new(reply), slot})
+            .map_err(|_| JobError::new("budget_busy", "原壁纸管理队列暂不可用"))
+    }
+
+    pub(crate) fn revalidate_ai(&self, authority: super::ai::Authority, cancel: Arc<AtomicBool>, slot: Slot,
+        reply: impl FnOnce(Result<(), JobError>) + Send + 'static) -> Result<(), JobError> {
+        self.tx.try_send(Work::ValidateMirrorLayouts { selections: vec![], properties: vec![], cancel, reply:Box::new(reply), slot, ai:Some(authority) })
+            .map_err(|_| JobError::new("budget_busy", "原壁纸管理队列暂不可用"))
     }
 
     pub(crate) fn read_work_document(
@@ -509,6 +535,7 @@ impl LibraryService {
                 cancel,
                 reply: Box::new(reply),
                 slot,
+                ai: None,
             })
             .map_err(|_| JobError::new("budget_busy", "作品管理正在退出或暂不可用"))
     }
@@ -1483,7 +1510,7 @@ impl State {
                 if command.is_none()
                     || matches!(
                         command.as_deref(),
-                        Some("wallpaper.apply" | "config.commit")
+                        Some("wallpaper.apply" | "config.commit" | "wallpaper.ai.recommend" | "wallpaper.ai.confirm")
                     )
                 {
                     let directory = self.base.clone();

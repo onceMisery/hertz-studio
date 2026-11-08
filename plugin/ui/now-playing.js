@@ -226,6 +226,7 @@
     lyricState: function (status) { lyricStatus = status; emptyState(); }, update: tick,
     // 队列切页的公开入口：播放条队列钮等外部组件走它，不模拟 np-queue 的 click。
     showQueue: function (show) { showQueue(!!show); },
+    showCalibration: function () { if (opened) showTools(true); },
     preview: function (position, duration) { if (opened) { el.elapsed.textContent = time(position); el.duration.textContent = time(duration); } }
   };
 })();

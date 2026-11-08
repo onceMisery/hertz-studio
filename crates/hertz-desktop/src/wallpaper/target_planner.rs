@@ -351,7 +351,7 @@ pub(crate) async fn resolve(
     Ok(Resolution::Ready(media))
 }
 
-fn presentation_request(
+pub(crate) fn presentation_request(
     metadata: &MediaProbe,
     target: ImageTarget,
     session: String,

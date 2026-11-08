@@ -7,7 +7,7 @@ use hertz_desktop_ipc::{Profile, Scope};
 use serde::Serialize;
 
 #[cfg(all(windows, target_arch = "x86_64"))]
-mod authorization;
+pub(crate) mod authorization;
 #[cfg(all(windows, target_arch = "x86_64"))]
 mod lifecycle;
 #[cfg(all(windows, target_arch = "x86_64"))]

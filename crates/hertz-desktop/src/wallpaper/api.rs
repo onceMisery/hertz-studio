@@ -862,6 +862,8 @@ impl Request {
                     !matches!(
                         command.as_str(),
                         "wallpaper.apply"
+                            | "wallpaper.ai.recommend"
+                            | "wallpaper.ai.confirm"
                             | "config.commit"
                             | "wallpaper.import.begin"
                             | "wallpaper.export.begin"

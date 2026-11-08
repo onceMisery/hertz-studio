@@ -131,6 +131,37 @@ async function main() {
   disposedScope.lease({release(){lateReleases++;}});
   assert.equal(lateReleases,1,'leasing a disposed scope releases immediately');
   assert.throws(()=>createScope().lease({}),'lease requires a releasable object');
-  console.log('shared resource leases passed: merged load, independent abort, idempotent/stale release, bounded cancellation, late callbacks, native envelope accounting, pool-owned discrimination and scope leases');
+
+  const {createResourcePool} = await import(pathToFileURL(path.resolve(__dirname,'../tools/space-stage/src/resources/pool.js')));
+  const sharedPool=createResourcePool({contextId:'scope-ownership'}), scopeA=createScope(), scopeB=createScope();
+  let sharedDisposals=0, materialDisposals=0;
+  const sharedTexture=sharedPool.markOwned({isTexture:true,dispose(){sharedDisposals++;}});
+  const identity={contentKey:'scope-shared-texture',decodeOptions:{},adapterId:'scope-test',adapterVersion:1};
+  const spec={load:()=>sharedTexture,releaseValue(value){value.dispose();}};
+  const leaseA=scopeA.lease(sharedPool.acquire(identity,{...spec,signal:scopeA.signal}));
+  const leaseB=scopeB.lease(sharedPool.acquire(identity,{...spec,signal:scopeB.signal}));
+  await Promise.all([leaseA.ready,leaseB.ready]);
+  function sharedTree() {
+    const material={map:sharedTexture,uniforms:{map:{value:sharedTexture}},dispose(){materialDisposals++;}};
+    return {traverse(fn){fn({material});}};
+  }
+  assert.equal(scopeA.track(sharedTexture),sharedTexture,'direct tracking preserves borrowed pool resource identity');
+  scopeA.trackTree(sharedTree());
+  assert.equal(scopeA.stats().resources,1,'only the private material enters the scope resource set');
+  scopeA.dispose();scopeA.dispose();leaseA.release();
+  assert.equal(materialDisposals,1,'first scope releases its private material');
+  assert.equal(sharedDisposals,0,'first direct/tree consumer exit cannot dispose the surviving shared texture');
+  assert.equal(leaseB.value,sharedTexture,'second consumer can still use the shared texture');
+  assert.deepEqual(sharedPool.stats(),{poolEntries:1,poolPending:0,poolLeases:1});
+  disposedScope.track(sharedTexture);
+  assert.equal(sharedDisposals,0,'tracking through an already disposed scope cannot dispose another consumer\'s pool texture');
+  assert.throws(()=>disposedScope.track({poolOwned:true}),'pool ownership does not bypass disposable validation');
+  scopeB.track(sharedTexture);scopeB.trackTree(sharedTree());scopeB.dispose();
+  assert.equal(materialDisposals,2,'last scope still releases its private material');
+  assert.equal(sharedDisposals,1,'the actual pool disposes its texture exactly once after the last lease exits');
+  scopeB.dispose();leaseB.release();sharedPool.dispose();sharedPool.dispose();
+  assert.equal(sharedDisposals,1,'repeated scope/lease/pool teardown cannot double dispose the texture');
+  assert.deepEqual(sharedPool.stats(),{poolEntries:0,poolPending:0,poolLeases:0});
+  console.log('shared resource leases passed: merged load, independent abort, idempotent/stale release, bounded cancellation, late callbacks, native envelope accounting, direct/tree/disposed-scope shared ownership and scope leases');
 }
 main().catch(error=>{console.error(error);process.exitCode=1;});

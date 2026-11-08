@@ -123,8 +123,19 @@ pub(crate) async fn validate_references(
         let package = jobs
             .assets()
             .read_installed_manifest(&reference.package_hash)?;
-        hertz_wallpaper::properties::effective_content(&package.manifest, properties)
-            .map_err(property_error)?;
+        if matches!(
+            package.manifest.content,
+            hertz_wallpaper::Content::Composition { .. }
+        ) {
+            super::composition_plan::validate_public_properties(
+                jobs.assets(),
+                &package,
+                properties,
+            )?;
+        } else {
+            hertz_wallpaper::properties::effective_content(&package.manifest, properties)
+                .map_err(property_error)?;
+        }
     }
     cancelled(cancel)
 }

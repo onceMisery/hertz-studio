@@ -20,6 +20,7 @@
     events: [], eventCursor: 0, activeLines: new Set(), intervalPosition: null, sortedActive: [],
     lineMeta: [], geometry: null, seekRebuild: false, geometryMeasure: 0, sourceMessage: '',
     optionsOpen: false, hoverTimer: 0, pendingControl: false, controlTimer: 0,
+    calibrationPending: false, calibrationIdentity: '', calibrationMessage: '', calibrationFailed: false,
   };
   function ipc(payload) {
     try { window.ipc.postMessage(JSON.stringify(payload)); } catch (_) { /* Browser preview. */ }
@@ -163,6 +164,45 @@
     state.active = Boolean(active);
     if (!state.active) { setOptionsOpen(false, false); stopLoop(); }
     else { render(); updateLoop(); }
+  }
+  function calibrationIdentity(snapshot) { return snapshot ? [snapshot.server?.session,trackId(snapshot),snapshot.generation].join('|') : ''; }
+  function calibrationDone(reply) {
+    state.calibrationPending = false;
+    const result = reply?.state || 'timeout';
+    const messages = {
+      shown: '校准控件已在当前播放器中打开', cancelled: '',
+      'permission-required': '请在当前播放器中允许从桌面打开校准',
+      'receiver-unavailable': '请先打开当前播放器界面或工作台',
+      'track-changed': '当前歌曲已变化，请同步后重试',
+      'focus-unavailable': '校准界面已打开，但未能切到前台，请在播放器中查看',
+      'room-active': '请在一起听房间内校准歌词',
+      'lyrics-unavailable': '这首歌暂时没有可校准的歌词',
+      'build-mismatch': '播放器与桌面组件不配套，请安装对应组件或一起更新',
+      'locked': '请从托盘解锁桌面歌词后重试',
+      'source-stale': '等待当前来源同步后重试',
+      'capability-unavailable': '当前播放器不支持校准入口，请更新配套版本',
+      timeout: '未确认校准界面已打开，请重试',
+    };
+    state.calibrationMessage = messages[result] ?? messages.timeout;
+    state.calibrationFailed = !['shown', 'cancelled'].includes(result);
+    updateCalibration(); schedulePanelMeasure();
+  }
+  function updateCalibration() {
+    const identity = calibrationIdentity(state.snapshot);
+    if (state.calibrationPending && identity !== state.calibrationIdentity) {
+      state.calibrationPending = false; state.calibrationMessage = ''; ipc({ cmd: 'calibration-cancel' });
+    }
+    const capability = state.snapshot?.lyricsCalibration;
+    const current = state.active && !state.locked && state.snapshot && performance.now() - state.lastSnapshotAt < 2000;
+    const available = current && capability?.version === 1 && capability.available === true && state.snapshot.lyrics?.status === 'ready';
+    $('calibrate').disabled = state.calibrationPending || !available;
+    $('calibrate').textContent = state.calibrationPending ? '正在打开' : state.calibrationFailed ? '重试在播放器校准' : '在播放器校准';
+    $('calibrate').setAttribute('aria-busy', String(state.calibrationPending));
+    const reason = !state.snapshot ? '请先连接当前播放器' : !current ? '等待当前来源同步' : !capability ? '当前播放器不支持校准入口，请更新配套版本'
+      : ({ 'permission-required': '请在当前播放器中允许从桌面打开校准', 'receiver-unavailable': '请先打开当前播放器界面或工作台',
+        'track-changed': '请先播放一首歌曲', 'lyrics-unavailable': '这首歌暂时没有可校准的歌词', 'room-active': '请在一起听房间内校准歌词' })[capability.reason] || '';
+    $('calibration-help').textContent = state.calibrationPending ? '正在打开当前歌曲的校准控件' : state.calibrationMessage || reason || '在当前播放器中调整这首歌的歌词时间';
+    $('calibration-help').dataset.error = String(state.calibrationFailed);
   }
   function resetDocument() {
     state.document = null;
@@ -602,6 +642,7 @@
     return null;
   }
   function updateControls() {
+    updateCalibration();
     const available = state.lyricsControl !== false && state.active && !state.locked && state.source === 'ok' && state.snapshot?.track && positionAt(performance.now()) != null && !state.pendingControl;
     for (const id of ['play', 'previous', 'next']) $(id).title = state.lyricsControl === false ? 'DBX 来源仅供读取，请在 DBX 中控制播放' : '';
     $('play').disabled = !available;
@@ -649,6 +690,12 @@
   document.querySelectorAll('[data-color]').forEach(input => input.addEventListener('input', () => ipc({ cmd: 'color', target: input.dataset.color, text: input.value })));
   $('style-open').addEventListener('click', () => setOptionsOpen(!state.optionsOpen));
   $('options-done').addEventListener('click', () => setOptionsOpen(false));
+  $('calibrate').addEventListener('click', () => {
+    updateCalibration();
+    if ($('calibrate').disabled) return;
+    state.calibrationPending = true; state.calibrationIdentity = calibrationIdentity(state.snapshot); state.calibrationMessage = ''; state.calibrationFailed = false;
+    updateCalibration(); ipc({ cmd: 'calibrate' });
+  });
   document.addEventListener('pointerdown', event => { if (state.optionsOpen && !event.target.closest('#options-panel, #style-open')) setOptionsOpen(false, false); });
   root.addEventListener('pointerenter', () => { clearTimeout(state.hoverTimer); document.body.classList.add('hovering'); });
   root.addEventListener('pointerleave', () => { clearTimeout(state.hoverTimer); state.hoverTimer = setTimeout(() => document.body.classList.remove('hovering'), 160); });
@@ -671,13 +718,14 @@
     else if (event.key.toLowerCase() === 'l') ipc({ cmd: 'lock' });
   });
   window.addEventListener('pagehide', () => {
+    if (state.calibrationPending) ipc({ cmd: 'calibration-cancel' });
     state.active = false; stopLoop(); resetDocument(); state.snapshot = null; state.anchor = null; state.geometry = null;
     for (const timer of [state.staleTimer, state.hoverTimer, state.controlTimer]) clearTimeout(timer);
     for (const frame of [state.panelFrame, state.fitFrame, state.geometryMeasure, layoutFrame]) cancelAnimationFrame(frame);
     observers.forEach(observer => observer.disconnect());
     systemTheme.removeEventListener('change', applyTheme); reducedMotion.removeEventListener('change', updateLoop);
   });
-  window.hertzLyrics = { applyConfig, applySnapshot, applyDocument, applyGeometry, setLocked, setActive, setSource, controlDone, setOptions: open => setOptionsOpen(open, false),
+  window.hertzLyrics = { applyConfig, applySnapshot, applyDocument, applyGeometry, setLocked, setActive, setSource, controlDone, calibrationDone, setOptions: open => setOptionsOpen(open, false),
     diagnostics: () => ({ vocalMode: isVocalDocument(), events: state.events.length, cursor: state.eventCursor,
       slots: state.nodes.size, words: state.words.length, running: Boolean(state.raf), documentKey: state.document?.documentKey ?? null }) };
   applyConfig(defaults);

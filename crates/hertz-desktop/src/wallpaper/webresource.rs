@@ -130,6 +130,10 @@ pub(crate) fn install(
     webview: &wry::WebView,
     proxy: EventLoopProxy<UserEvent>,
 ) -> Result<MediaAccess, String> {
+    install_with_access(webview,proxy,MediaAccess::new())
+}
+
+pub(crate) fn install_with_access(webview:&wry::WebView,proxy:EventLoopProxy<UserEvent>,access:MediaAccess) -> Result<MediaAccess,String> {
     use wry::WebViewExtWindows;
     let controller = webview.controller();
     let core: ICoreWebView2 = unsafe { controller.CoreWebView2() }
@@ -148,7 +152,6 @@ pub(crate) fn install(
     }
 
     let mut token = 0i64;
-    let access = MediaAccess::new();
     let lifetime = ControllerRequests {
         id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
         alive: Arc::new(AtomicBool::new(true)),
@@ -487,7 +490,10 @@ fn respond(
     else {
         return;
     };
-    let stream = response.stream.and_then(|stream| {
+    let payload = response.permit.as_ref().and_then(ReadPermit::payload).cloned();
+    let stream = if let Some(payload) = payload.filter(|_| window.1 > 0) {
+        response.permit.and_then(|permit| MediaIStream::from_payload(payload, permit, global_pool()).ok())
+    } else { response.stream.and_then(|stream| {
         MediaIStream::from_file_with_permit(
             stream,
             path.unwrap_or_default(),
@@ -496,7 +502,7 @@ fn respond(
             response.permit,
         )
         .ok()
-    });
+    }) };
     if path_is_required(status, window) && stream.is_none() {
         status = 503;
         // 不得用成功的 Content-Length 宣告一个空响应体。
@@ -545,6 +551,12 @@ fn resolve(work: &Work, cache: &mut VecDeque<CachedMedia>) -> Outcome {
         MediaUrlParse::BadPath => return not_found(cors),
     };
     let head = method.eq_ignore_ascii_case("HEAD");
+    if let Some(payload) = work.permit.payload() {
+        if range.is_some() { return error_response(400,cors); }
+        return Outcome::Resolved { status:200,
+            headers:format!("Content-Type: application/json\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n{}",payload.len(),cors_headers(cors,false)),
+            path:None, window:(0,if head {0} else {payload.len() as u64}) };
+    }
 
     // 每个 controller 的不可变字节只核验一次，seek 不反复哈希大视频。
     // 缓存全局最多 4 项（8 个核验句柄），关闭 controller 或 LRU 淘汰时释放。

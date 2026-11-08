@@ -37,6 +37,7 @@ pub(crate) mod feed_xml;
 pub mod history;
 pub(crate) mod idempotency;
 pub(crate) mod lyrics;
+pub(crate) mod lyrics_calibration;
 pub mod online;
 mod online_play;
 pub mod persist;

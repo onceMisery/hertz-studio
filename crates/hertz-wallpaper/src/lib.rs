@@ -7,8 +7,10 @@
 //! 无 Windows API、无音乐服务依赖、无联网副作用；桌面宿主与社区服务共用。
 //! 上限来自设计 §6.3，是准入合同而非吞吐承诺；调整必须同步边界测试。
 
+pub mod ai;
 pub mod archive;
 pub mod catalog;
+pub mod document;
 pub mod json;
 pub mod manifest;
 pub mod media;

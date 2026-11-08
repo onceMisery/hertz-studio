@@ -43,6 +43,7 @@
   var sceneId = null;
   var sceneParams = null;
   var stage = null;
+  var compositionUrl = null;
   var canvas = null;
   var mounted = false;
   var switching = false;
@@ -213,7 +214,7 @@
   addEventListener('blur', function () { if (!nativePointer) clearPointer(); });
   addEventListener('pagehide', clearPointer);
   if (reducedPointer && reducedPointer.addEventListener) reducedPointer.addEventListener('change', clearPointer);
-  if (document.addEventListener) document.addEventListener('visibilitychange', clearPointer);
+  if (document.addEventListener) document.addEventListener('visibilitychange', onVisibilityChange);
   var feed = {
     valid: false,
     playing: false,
@@ -515,7 +516,7 @@
     raf = requestAnimationFrame(loop);
     ticks++;
     heartbeat(now);
-    if (!mounted || lost) return;
+    if (!mounted || lost || document.hidden) { resetGate(); return; }
     if (!last) last = now;
     var dt = Math.min(100, now - last);
     last = now;
@@ -534,6 +535,10 @@
   }
 
   function renderScene(now, frameDt, retained) {
+    // The original native GL owner confirms the previous storage replacement
+    // fence before another composition frame can upload. The last complete
+    // output remains visible while GPU work is still in flight.
+    if(compositionUrl && window.HertzGlBudget && !HertzGlBudget.readyForFrame())return;
     if (retained && !lastRenderedFrame) return;
     var frame = retained ? Object.assign({}, lastRenderedFrame, { dynamicDt: 0, realDt: 0 }) : {
       now: now, dynamicDt: frameDt * config.motion / 1000, realDt: frameDt / 1000,
@@ -564,6 +569,7 @@
           motionActive: frame.motionActive,
           reduced: false,
           sceneTime: frame.sceneTime,
+          paused: !enabled || config.motion <= 0,
           dynamicDt: frame.dynamicDt,
           deviceTier: 1,
           level: level,
@@ -589,9 +595,25 @@
   }
 
   function startLoop() {
-    if (!raf && enabled && !lost) {
+    if (!raf && enabled && !lost && !document.hidden) {
       resetGate();
       raf = requestAnimationFrame(loop);
+    }
+  }
+
+  // This page owns sceneTime and its only scheduler. A hidden renderer skipping
+  // draw cannot freeze that clock; suspend here and restart with a fresh baseline.
+  function onVisibilityChange() {
+    clearPointer();
+    resetGate();
+    audioShaped.fill(0); audioShapedAt = null;
+    if (document.hidden) {
+      if (compositionUrl && stage && stage.pauseComposition) stage.pauseComposition(sceneTime / 1000);
+      if (backend === 'zodiac' && mounted && zodiac) zodiac.setTime({ time: sceneTime / 1000, playing: false });
+      if (raf) cancelAnimationFrame(raf);
+      raf = 0;
+    } else if (mounted) {
+      startLoop();
     }
   }
 
@@ -614,6 +636,7 @@
 
   function stop(pauseToken) {
     enabled = false;
+    if (compositionUrl && stage && stage.pauseComposition) stage.pauseComposition(sceneTime/1000);
     // A retained image also needs a new receipt after a policy pause. Fence both
     // queued animation frames so an earlier release cannot acknowledge resume.
     revealRevision++;
@@ -802,6 +825,7 @@
   }
 
   function mount() {
+    if (compositionUrl) return true;
     if (media) unmountMedia(); // 场景接管呈现（start 的场景分支/显式 mount）
     if (mounted || switching) return true;
     if (!zodiac && !spaceRuntime) {
@@ -829,6 +853,7 @@
   }
 
   function applyFollow() {
+    if (compositionUrl) return;
     if (media) return;
     if (config.source !== 'follow' || !mounted) return;
     var hasFollow = followSpace && allowedScene(canonicalScene(followSpace.scene));
@@ -1350,6 +1375,7 @@
     applyBrightness();
     if (zodiac && zodiac.setMotion && backend === 'zodiac') zodiac.setMotion({ active: motionActive() });
     applyMediaMotion();
+    if (compositionUrl) return;
     if (!mounted) return;
     if (previousQuality !== config.quality) {
       followSignature = '';
@@ -1366,6 +1392,38 @@
     }
     followSignature = '';
     applyFollow();
+  }
+
+  // Only native can issue this URI and the controller-scoped read permit.
+  // Fetch carries the fixed Rust projection outside the management frame.
+  async function applyComposition(url) {
+    var allocation=window.__hertzWallpaperGlAllocation;
+    if(!nativeBinding||!allocation||allocation.composition!==true||url!==allocation.compositionUrl
+      ||!MEDIA_URL.test(url)) { notify('wallpaper_gl_failed composition_uri_invalid'); return false; }
+    if(compositionUrl===url&&(mounted||switching))return true;
+    unmountMedia();teardown();compositionUrl=url;switching=true;
+    var token=++selectToken;
+    try {
+      var response=await fetch(url,{cache:'no-store'});
+      if(!response.ok)throw new Error('composition_projection_unavailable');
+      var projection=await response.json();
+      if(token!==selectToken)return false;
+      if(projection.sessionId!==nativeBinding.sessionId||projection.generation!==nativeBinding.generation)
+        throw new Error('composition_projection_generation');
+      await HertzGlBudget.idle();
+      if(token!==selectToken)return false;
+      attachCanvas();
+      canvas.width=projection.target.width;canvas.height=projection.target.height;
+      stage=spaceRuntime.create(canvas,{qualityMode:config.quality,deviceTier:1,resources:HertzGlBudget.resources,compositionTarget:projection.target,
+        onInvalidate:function(){},onStatus:function(status){if(status&&status.state==='failed')notify('wallpaper_gl_failed '+String(status.error).slice(0,220));}});
+      await stage.selectComposition(projection);
+      if(token!==selectToken||!stage)return false;
+      backend='space';sceneId='composition';mounted=true;lost=false;error=null;sceneTime=0;
+      switching=false;applyBrightness();startLoop();return true;
+    } catch(failure) {
+      if(token!==selectToken)return false;
+      error=String(failure);teardown();notify('wallpaper_gl_failed '+error.slice(0,220));return false;
+    } finally { if(token===selectToken)switching=false; }
   }
 
   function expireFeed() {
@@ -1522,6 +1580,7 @@
     applyPointer: applyPointer,
     applyConfig: applyConfig,
     applyMedia: applyMedia,
+    applyComposition: applyComposition,
     start: start,
     stop: stop,
     mount: mount,

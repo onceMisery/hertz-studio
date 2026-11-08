@@ -10,10 +10,16 @@ node scripts/api-routes.js          # 写回下面的生成块
 node scripts/api-routes.js --check  # 只校验，不一致则退出码 1（CI 跑这一条）
 ```
 
+桌面校准沿独立权限通道：`POST /v1/desktop-lyrics/calibration/{op}` 只接受
+`bind/request/result/cancel`，需要专用校准 key；原歌词读取 key 不获得这个权限。
+`/v1/desktop/calibration-ui` 的接收端登记、领取和完成确认以及
+`/v1/desktop/calibration-authorization` 的授权查询/修改均需要完整播放器鉴权。
+`shown` 由选中的完整播放器接收端确认；校准通道不写歌词偏移或执行播控。
+
 <!-- api-routes:begin -->
 <!-- 由 `node scripts/api-routes.js` 生成，勿手改；`--check` 会校验是否与源码一致。 -->
 
-REST 路由表共 198 个「方法 + 路径」（`crates/hertz-studio/src/routes.rs` 与 `stage_media/api.rs` 的 163 条 `.route()`），另有 `main.rs` 挂的 6 条路由与 159 条内嵌静态资源路由。
+REST 路由表共 202 个「方法 + 路径」（`crates/hertz-studio/src/routes.rs` 与 `stage_media/api.rs` 的 166 条 `.route()`），另有 `main.rs` 挂的 6 条路由与 159 条内嵌静态资源路由。
 
 | 方法 | 路径 |
 | --- | --- |
@@ -46,6 +52,7 @@ REST 路由表共 198 个「方法 + 路径」（`crates/hertz-studio/src/routes
 | POST | `/v1/auth/ticket` |
 | GET | `/v1/backup` |
 | POST | `/v1/backup/restore` |
+| POST | `/v1/desktop-lyrics/calibration/{op}` |
 | POST | `/v1/desktop-lyrics/control` |
 | GET | `/v1/desktop-lyrics/document` |
 | GET | `/v1/desktop-lyrics/snapshot` |
@@ -53,6 +60,9 @@ REST 路由表共 198 个「方法 + 路径」（`crates/hertz-studio/src/routes
 | GET | `/v1/desktop-mini/cover` |
 | POST | `/v1/desktop-mini/restore` |
 | GET | `/v1/desktop-mini/snapshot` |
+| GET | `/v1/desktop/calibration-authorization` |
+| POST | `/v1/desktop/calibration-authorization` |
+| POST | `/v1/desktop/calibration-ui` |
 | GET | `/v1/desktop/capabilities` |
 | POST | `/v1/desktop/control` |
 | POST | `/v1/desktop/lyrics/control` |

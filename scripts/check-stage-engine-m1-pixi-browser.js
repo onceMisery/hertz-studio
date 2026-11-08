@@ -49,8 +49,15 @@ async function main(){browser=await chromium.launch({channel:process.env.PLAYWRI
  await check('actual settled Application rejection retires its stage/renderer and keeps current lyrics readable through subsequent media changes',async()=>{
   const samples=[];for(const mode of ['sonnet','tempera']){const page=await boot(mode);try{
    await page.evaluate(()=>h.mount('failure'));await page.waitForFunction(()=>h.renderer.isReady());
-   const result=await page.evaluate(()=>{const before={text:document.querySelector('.fl-pixi-fallback').textContent,lost:h.gl.isContextLost(),debug:h.renderer.getDebugSnapshot()};h.lines=[{start_ms:0,end_ms:8000,text:'换句后仍可读'}];h.renderer.frame();return{before,after:document.querySelector('.fl-pixi-fallback').textContent,created:h.created,canvasCount:document.querySelectorAll('canvas').length};});
+   const result=await page.evaluate(()=>{const before={text:document.querySelector('.fl-pixi-fallback').textContent,lost:h.gl.isContextLost(),debug:h.renderer.getDebugSnapshot()};h.lines=[{start_ms:0,end_ms:8000,text:'换句后仍可读'}];h.renderer.frame();
+    const textRect=el=>{if(!el||el.hidden||!el.textContent)return null;const r=document.createRange();r.selectNodeContents(el);const b=r.getBoundingClientRect();return{top:b.top,bottom:b.bottom,left:b.left,right:b.right};};
+    const fb=textRect(document.querySelector('.fl-pixi-fallback'));
+    const guideEl=[...document.querySelectorAll('.fl-empty,.fl-tempera-note')].find(el=>!el.hidden&&el.textContent);
+    const guide=textRect(guideEl);
+    const overlap=!!(fb&&guide&&fb.top<guide.bottom&&guide.top<fb.bottom&&fb.left<guide.right&&guide.left<fb.right);
+    return{before,after:document.querySelector('.fl-pixi-fallback').textContent,created:h.created,canvasCount:document.querySelectorAll('canvas').length,overlap,guideText:guideEl&&guideEl.textContent};});
    assert.equal(result.before.lost,true);assert.equal(result.before.debug.initialized,false);assert.equal(result.before.text,'晚风送来轻轻的问候');assert.equal(result.after,'换句后仍可读');assert.equal(result.created,1);assert.equal(result.canvasCount,0);
+   assert.ok(result.guideText,'failure guidance stays visible');assert.equal(result.overlap,false,'failure guidance must not overlap the readable lyric');
    await page.screenshot({path:path.join(out,mode+'-failure-readable.png')});samples.push({mode,...result});
   }finally{await close(page);}}return samples;
  });

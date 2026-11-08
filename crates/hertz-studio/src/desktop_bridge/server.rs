@@ -211,6 +211,12 @@ impl DesktopBridge {
                     .await
                 }
                 (Scope::Wallpaper, "snapshot") => Ok(crate::wallpaper::snapshot(&state).await),
+                (Scope::LyricsCalibration, op) => {
+                    state
+                        .lyrics_calibration
+                        .receive(&state, op, request.params.clone())
+                        .await
+                }
                 _ => unreachable!("request validated before projection"),
             }
         } else {

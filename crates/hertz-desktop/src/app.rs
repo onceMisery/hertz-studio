@@ -50,6 +50,8 @@ mod lyrics_settings;
 
 #[path = "wallpaper_apply.rs"]
 mod wallpaper_apply;
+#[path = "wallpaper_ai.rs"]
+mod wallpaper_ai;
 #[path = "wallpaper_audio.rs"]
 mod wallpaper_audio;
 #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
@@ -120,6 +122,7 @@ pub(crate) enum UserEvent {
     #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
     WallpaperProbeTestResult(u64, serde_json::Value),
     SettingsPage(u64, String),
+    WallpaperAiResult(u64, crate::wallpaper::api::Request, Box<Result<crate::wallpaper::ai::Catalog, crate::wallpaper::jobs::JobError>>),
     WallpaperManagement(ApiReply, serde_json::Value),
     WorkPreviewReady(
         crate::wallpaper::api::Request,
@@ -144,6 +147,7 @@ pub(crate) enum UserEvent {
     Tick,
     Page(String),
     LyricControl(u64, Result<(), String>),
+    LyricCalibration(u64, String, serde_json::Value),
     Tray(TrayIconEvent),
     Menu(MenuEvent),
     Native(NativeEvent),
@@ -393,6 +397,10 @@ impl WallpaperSurface {
                 "resumePositionMs":self.session.media_position_ms().unwrap_or(0),
                 "groupClock":kind == "video" && self.configuration.main().mode == crate::wallpaper::config::LayoutMode::Mirror});
             self.eval(&format!("window.hertzWallpaper.applyMedia({descriptor});"));
+        }
+        if let Some(url) = self.session.gl().and_then(|gl|gl.composition_url()) {
+            let url = serde_json::to_string(url).expect("native composition URL");
+            self.eval(&format!("window.hertzWallpaper.applyComposition({url});"));
         }
         self.start(self.configuration.presentation().fps);
         self.frame_wait_since = Some(Instant::now());
@@ -732,6 +740,7 @@ struct App {
     profile: Profile,
     policy: Policy,
     last_snapshot: Option<Snapshot>,
+    calibration_pending: Option<crate::calibration::Pending>,
     last_update: Instant,
     current_track: Option<String>,
     current_document_key: Option<String>,
@@ -767,6 +776,7 @@ struct App {
     /// 正在执行的删除请求 id；期间拒绝会新增版本引用的设置变更。
     library_delete: Option<String>,
     settings_drafts: crate::wallpaper::settings_drafts::SettingsDrafts,
+    wallpaper_ai: crate::wallpaper::ai::NativeAi,
     settings_generation: u64,
     settings: Option<SettingsSurface>,
     settings_candidate: Option<Profile>,
@@ -938,6 +948,13 @@ impl App {
     }
 
     fn handle_timed_update(&mut self, update: crate::feed::FeedUpdate, started: Instant) {
+        if self
+            .calibration_pending
+            .as_ref()
+            .is_some_and(|p| !p.matches(&update.snapshot))
+        {
+            self.cancel_calibration();
+        }
         if !self.lyrics_needed() {
             return;
         }
@@ -1007,6 +1024,7 @@ impl App {
     }
 
     fn handle_feed_error(&mut self, message: String) {
+        self.cancel_calibration();
         self.source_health.fail(true);
         if self.last_feed_error.as_deref() != Some(&message) {
             log(&format!("source error: {message}"));
@@ -1942,6 +1960,7 @@ impl App {
                 log("wallpaper settings opened");
                 self.settings = Some(settings);
                 self.settings_drafts.set_owner(self.settings_generation);
+                self.wallpaper_ai.set_owner(self.settings_generation);
                 self.wallpaper_library
                     .set_settings_owner(self.settings_generation);
                 self.sync_settings_feed();
@@ -1964,6 +1983,7 @@ impl App {
         }
         self.close_preview();
         self.settings_drafts.set_owner(0);
+        self.wallpaper_ai.set_owner(0);
         self.wallpaper_library.set_settings_owner(0);
         self.settings_generation += 1;
         self.settings = None;
@@ -2294,6 +2314,7 @@ impl App {
             return Err("设置已变化，请重新打开设置后重试".into());
         }
         let profile = config::normalize_profile(profile).map_err(|error| format!("{error:#}"))?;
+        self.cancel_calibration();
         if self
             .config
             .active_profile
@@ -2608,6 +2629,10 @@ impl App {
         reply: ApiReply,
         target: &EventLoopWindowTarget<()>,
     ) {
+        if value.get("command").and_then(serde_json::Value::as_str).is_some_and(|command| command.starts_with("wallpaper.ai.")) {
+            self.handle_ai_management(value, reply, target);
+            return;
+        }
         use crate::wallpaper::{api, jobs::JobError};
         let request_id = value
             .get("requestId")
@@ -2632,6 +2657,9 @@ impl App {
             _ => 0,
         };
         let typed = request.typed().ok();
+        if typed.as_ref().is_some_and(|command| matches!(command, crate::wallpaper::api::Command::DraftUpdate {..} | crate::wallpaper::api::Command::PlaylistNext {..} | crate::wallpaper::api::Command::Apply {..})) {
+            self.wallpaper_ai.invalidate();
+        }
         if typed
             .as_ref()
             .is_some_and(crate::wallpaper::api::Command::settings_command)
@@ -3148,6 +3176,12 @@ impl App {
 
     fn handle_settings_page(&mut self, body: &str, target: &EventLoopWindowTarget<()>) {
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(body) {
+            if value.get("command").and_then(serde_json::Value::as_str).is_some_and(|command| command.starts_with("wallpaper.ai.")) {
+                if let Err(error)=hertz_wallpaper::json::check_bounded_json(body.as_bytes(),8) {
+                    self.send_wallpaper_management(ApiReply::Settings(self.settings_generation),crate::wallpaper::api::response(value["requestId"].as_str(),Err(crate::wallpaper::jobs::JobError::invalid_input(error.to_string())),None));
+                    return;
+                }
+            }
             if value.get("protocol").is_some()
                 || value
                     .get("command")
@@ -4204,6 +4238,74 @@ impl App {
         }
     }
 
+    fn cancel_calibration(&mut self) {
+        if let Some(pending) = self.calibration_pending.take() {
+            pending.cancel(self.profile.clone());
+            self.eval(
+                "window.hertzLyrics && window.hertzLyrics.calibrationDone({state:'cancelled'});",
+            );
+        }
+    }
+    fn start_calibration(&mut self) {
+        if self.calibration_pending.is_some() {
+            return;
+        }
+        let reason = if self.policy.locked {
+            Some("locked")
+        } else if !self.lyrics_running() {
+            Some("receiver-unavailable")
+        } else if self.last_update.elapsed() >= STALE_AFTER {
+            Some("source-stale")
+        } else if let Some(snapshot) = &self.last_snapshot {
+            if snapshot.track.is_none() {
+                Some("track-changed")
+            } else if snapshot.lyrics.status != "ready" {
+                Some("lyrics-unavailable")
+            } else if let Some(capability) = &snapshot.lyrics_calibration {
+                if capability["version"] != 1 {
+                    Some("capability-unavailable")
+                } else if capability["available"] != true {
+                    Some(
+                        capability["reason"]
+                            .as_str()
+                            .unwrap_or("receiver-unavailable"),
+                    )
+                } else {
+                    None
+                }
+            } else {
+                Some("capability-unavailable")
+            }
+        } else {
+            Some("receiver-unavailable")
+        };
+        if let Some(reason) = reason {
+            self.eval(&format!(
+                "window.hertzLyrics.calibrationDone({});",
+                serde_json::json!({"state":reason})
+            ));
+            return;
+        }
+        let Some(pending) = self
+            .last_snapshot
+            .as_ref()
+            .and_then(crate::calibration::Pending::new)
+        else {
+            self.eval("window.hertzLyrics.calibrationDone({state:'track-changed'});");
+            return;
+        };
+        let profile = self.profile.clone();
+        let proxy = self.proxy.clone();
+        let source_generation = self.source_generation;
+        let id = pending.id.clone();
+        let worker = pending.clone();
+        self.calibration_pending = Some(pending);
+        std::thread::spawn(move || {
+            let result = crate::calibration::run(profile, worker);
+            let _ = proxy.send_event(UserEvent::LyricCalibration(source_generation, id, result));
+        });
+    }
+
     fn page_command(&mut self, body: &str) {
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase")]
@@ -4229,6 +4331,8 @@ impl App {
             return;
         }
         match command.cmd.as_str() {
+            "calibrate" => self.start_calibration(),
+            "calibration-cancel" => self.cancel_calibration(),
             "clock" => {
                 self.page_clock = command.value.and_then(PageClock::new);
             }
@@ -5306,6 +5410,13 @@ impl App {
     }
 
     fn tick(&mut self, target: &EventLoopWindowTarget<()>) {
+        if self.calibration_pending.as_ref().is_some_and(|p| {
+            !self.lyrics_running()
+                || self.last_update.elapsed() >= STALE_AFTER
+                || self.last_snapshot.as_ref().is_none_or(|s| !p.matches(s))
+        }) {
+            self.cancel_calibration();
+        }
         self.expire_inline_position_edit();
         self.reap_handoff_workspaces();
         self.poll_wallpaper_retirements();
@@ -6074,6 +6185,7 @@ pub(crate) fn run_with(run_config: RunConfig) -> Result<()> {
             no_content: true,
         },
         last_snapshot: None,
+        calibration_pending: None,
         last_update: Instant::now(),
         current_track: None,
         current_document_key: None,
@@ -6111,6 +6223,7 @@ pub(crate) fn run_with(run_config: RunConfig) -> Result<()> {
             crate::wallpaper::decode_probe::ProbeClient::native(proxy.clone()),
         ),
         settings_drafts: Default::default(),
+        wallpaper_ai: crate::wallpaper::ai::NativeAi::new(),
         settings_generation: 0,
         settings: None,
         settings_candidate: None,
@@ -6347,6 +6460,9 @@ pub(crate) fn run_with(run_config: RunConfig) -> Result<()> {
             Event::UserEvent(UserEvent::SettingsPage(generation, body)) => {
                 if generation == app.settings_generation && app.settings.is_some() { app.handle_settings_page(&body, target); }
             }
+            Event::UserEvent(UserEvent::WallpaperAiResult(owner, request, result)) => {
+                app.finish_ai_catalog(owner, request, *result);
+            }
             Event::UserEvent(UserEvent::WallpaperManagement(reply, value)) => { app.send_wallpaper_management(reply, value); }
             Event::UserEvent(UserEvent::WorkPreviewReady(request, owner, epoch, reply, document)) => {
                 app.finish_work_preview(request, owner, epoch, reply, *document, target);
@@ -6408,6 +6524,12 @@ pub(crate) fn run_with(run_config: RunConfig) -> Result<()> {
                     app.eval(&format!("window.hertzLyrics.controlDone({});", serde_json::to_string(message).unwrap()));
                 }
             }
+            Event::UserEvent(UserEvent::LyricCalibration(generation, id, result)) => {
+                if generation == app.source_generation && app.calibration_pending.as_ref().is_some_and(|p|p.id==id && !p.cancel.load(Ordering::Acquire)) {
+                    app.calibration_pending = None;
+                    app.eval(&format!("window.hertzLyrics.calibrationDone({});",result));
+                }
+            }
             Event::UserEvent(UserEvent::Tray(event)) => app.handle_tray(event),
             Event::UserEvent(UserEvent::Menu(event)) => app.handle_menu(&event.id.0, target),
             Event::UserEvent(UserEvent::Native(event)) => app.handle_native(event, target),
@@ -6438,7 +6560,10 @@ pub(crate) fn run_with(run_config: RunConfig) -> Result<()> {
                     }
                 }
             }
-            Event::UserEvent(UserEvent::Quit) => *control_flow = ControlFlow::Exit,
+            Event::UserEvent(UserEvent::Quit) => {
+                app.cancel_calibration();
+                *control_flow = ControlFlow::Exit;
+            }
             Event::UserEvent(UserEvent::FeatureIdleExit) => {
                 if app.can_finish_feature_exit() { *control_flow = ControlFlow::Exit; }
             }
@@ -6453,7 +6578,10 @@ pub(crate) fn run_with(run_config: RunConfig) -> Result<()> {
                     // 探测窗口只取消它自己的 job；仍推进回收期限。
                 } else if window_id == app.window.id() {
                     match event {
-                        WindowEvent::CloseRequested => *control_flow = ControlFlow::Exit,
+                        WindowEvent::CloseRequested => {
+                            app.cancel_calibration();
+                            *control_flow = ControlFlow::Exit;
+                        }
                         WindowEvent::Moved(_) => app.on_moved(),
                         WindowEvent::ScaleFactorChanged { .. } => app.place(true),
                         _ => {}
@@ -6484,6 +6612,7 @@ pub(crate) fn run_with(run_config: RunConfig) -> Result<()> {
                 }
             }
             Event::LoopDestroyed => {
+                app.cancel_calibration();
                 app.close_preview();
                 app.drop_wallpaper_surface();
                 app.dbx = None;
@@ -6869,6 +6998,7 @@ fn create_resolved_presentation(
     revision: u64,
     configuration: config::WallpaperConfig,
     builtin: Option<crate::wallpaper::config::BuiltinState>,
+    composition: Option<crate::wallpaper::composition_plan::PreparedComposition>,
     monitor: native::WallpaperMonitor,
     presentation: PresentationWindow,
 ) -> Result<WallpaperSurface> {
@@ -6890,19 +7020,17 @@ fn create_resolved_presentation(
         rendering,
         monitor,
         presentation,
+        composition,
     )?;
     surface.configuration = configuration;
     Ok(surface)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn create_presentation(
-    target: &EventLoopWindowTarget<()>,
-    proxy: EventLoopProxy<UserEvent>,
-    generation: u64,
-    revision: u64,
-    configuration: config::WallpaperConfig,
-    monitor: native::WallpaperMonitor,
-    presentation: PresentationWindow,
+    target:&EventLoopWindowTarget<()>,proxy:EventLoopProxy<UserEvent>,generation:u64,revision:u64,
+    configuration:config::WallpaperConfig,monitor:native::WallpaperMonitor,presentation:PresentationWindow,
+    composition:Option<crate::wallpaper::composition_plan::PreparedComposition>,
 ) -> Result<WallpaperSurface> {
     use crate::wallpaper::session::{RecoveryLedger, WallpaperSession};
     let is_preview = matches!(presentation, PresentationWindow::Preview { .. });
@@ -6919,7 +7047,8 @@ fn create_presentation(
     session.prepared(generation);
     let binding = crate::wallpaper::page_events::PageBinding::new(generation)
         .map_err(|error| anyhow::anyhow!(error.message))?;
-    let gl = if configuration.builtin().is_some() {
+    let media_access = crate::wallpaper::access::MediaAccess::new();
+    let gl = if configuration.builtin().is_some() || composition.is_some() {
         use crate::wallpaper::{
             budget,
             gl_plan::{GlAdmission, GlPlan},
@@ -6930,7 +7059,13 @@ fn create_presentation(
         } else {
             budget::OwnerKind::Desktop
         };
-        let plan = GlPlan::new(
+        let plan = if let Some(composition) = &composition {
+            if composition.target().width != monitor.width.max(1) as u32 || composition.target().height != monitor.height.max(1) as u32
+                || composition.output_fit() != configuration.presentation().fit {
+                bail!("组合目标已变化，需要重新准备和准入");
+            }
+            composition.gl_plan(owner,format!("composition-{generation}"),generation,monitor.refresh_hz,u32::from(configuration.presentation().fps))?
+        } else { GlPlan::new(
             &budget,
             owner,
             format!(
@@ -6943,8 +7078,12 @@ fn create_presentation(
             monitor.refresh_hz,
             u32::from(configuration.presentation().fps),
             configuration.presentation().quality.as_str(),
-        )?;
-        Some(GlAdmission::new(plan, budget)?)
+        )? };
+        let mut admission = GlAdmission::new(plan,budget)?;
+        if let Some(composition) = composition {
+            admission.bind_composition(composition,&media_access,binding.session_id())?;
+        }
+        Some(admission)
     } else {
         None
     };
@@ -7022,7 +7161,7 @@ fn create_presentation(
         .build(&window)
         .map_err(|error| anyhow::anyhow!("创建壁纸 WebView 失败：{error}"))?;
     // 媒体拦截：wallpaper.invalid 保留域 → 本机 IStream（§8.1）。
-    let media_access = crate::wallpaper::webresource::install(&webview, proxy.clone())
+    let media_access = crate::wallpaper::webresource::install_with_access(&webview, proxy.clone(),media_access)
         .map_err(|error| anyhow::anyhow!("安装壁纸媒体拦截失败：{error}"))?;
     if (zoom - 1.0).abs() > 0.001 {
         webview
@@ -7172,6 +7311,8 @@ fn settings_html() -> String {
             include_str!("../assets/wallpaper-library.js"),
         )
         .replace("__WORKS__", include_str!("../assets/wallpaper-work.js"))
+        .replace("__AI_CSS__", include_str!("../assets/wallpaper-ai.css"))
+        .replace("__AI__", include_str!("../assets/wallpaper-ai.js"))
         .replace(
             "__PLAYLIST__",
             include_str!("../assets/wallpaper-playlist.js"),
@@ -7210,7 +7351,7 @@ fn wallpaper_html() -> String {
     include_str!("../assets/wallpaper-scene.html")
         .replace(
             "__GL_BUDGET__",
-            include_str!("../assets/wallpaper-gl-budget.js"),
+            &format!("{}\n{}", include_str!("../../../plugin/ui/stage-resource-budget.js"), include_str!("../assets/wallpaper-gl-budget.js")),
         )
         .replace(
             "__RUNTIME__",

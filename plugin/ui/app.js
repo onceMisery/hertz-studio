@@ -7992,7 +7992,7 @@ function isNpOpen() {
   return !!np.modal && !np.modal.hidden;
 }
 
-function openNowPlaying() {
+function openNowPlaying(options) {
   if (window.HertzRoom && HertzRoom.active()) { setView('room'); return; }
   if (isNpOpen()) return;
   const transitionCover = window.PlayerTransitions && PlayerTransitions.capture($('bar-art'));
@@ -8007,17 +8007,197 @@ function openNowPlaying() {
     syncNpTrack(state.current, Stage && Stage.coverUrl());
     // 打开时重拉一次歌词：导入/偏移可能在别的会话改过，徽标要跟服务端对齐。
     // 失败保持现有歌词，不打扰。
-    refreshLyrics(state.current.id, state.current).catch(() => {});
+    if (!(options && options.skipLyricLoad)) refreshLyrics(state.current.id, state.current).catch(() => {});
   }
   if (window.PlayerTransitions) PlayerTransitions.openPlayer(transitionCover);
 }
 
 function closeNowPlaying(options) {
+  calibrationUi.cancelLocal();
   if (lyricImporter) lyricImporter.close();
   if (window.NowPlaying) NowPlaying.close(options);
   np.scrim.hidden = true;
   np.modal.hidden = true;
 }
+
+// An authenticated page receives one source-owned intent; narrow desktop keys never enter JS.
+const calibrationUi = (() => {
+  let receiver = null, flight = null, timer = 0, active = null, stopped = false, handoffMarker = '', contextEpoch = 0;
+  const endpoint = '/v1/desktop/calibration-ui';
+  const call = body => transport.post(endpoint, { visible: document.visibilityState === 'visible', ...body });
+  const isDbx = () => !!(window.hertzHost && window.hertzHost.isDbx);
+  const workbench = () => isDbx() && !!(window.dbxPlugin && typeof window.dbxPlugin.openWorkbench === 'function'
+    && typeof window.dbxPlugin.onInit === 'function' && typeof window.dbxPlugin.onContext === 'function');
+  function contextHandoff(context) {
+    const marker = context && context.hertzCalibrationHandoff;
+    if (window.HertzCapsuleOnly || typeof marker !== 'string' || !/^[0-9a-f-]{36}$/i.test(marker) || marker === handoffMarker) return;
+    handoffMarker = marker; cancelLocal();
+    if (receiver) { const old = receiver; receiver = null; call({ op: 'unregister', receiverId: old.receiverId }).catch(() => {}); }
+    poll();
+  }
+  function local(c) {
+    return active === c && c.epoch === contextEpoch && !stopped && state.connected
+      && receiver === c.receiver && receiver && receiver.session === c.intent.session
+      && performance.now() < c.deadline && state.current && state.current.id === c.intent.trackId
+      && String(state.snapshot.generation) === c.intent.generation
+      && !(window.HertzRoom && HertzRoom.active());
+  }
+  async function valid(c) {
+    if (!local(c)) return false;
+    const started = performance.now();
+    const reply = await call({ op: 'validate', receiverId: c.receiver.receiverId, requestId: c.intent.requestId });
+    if (!local(c) || !reply.valid) return false;
+    // Subtract the complete round trip conservatively: a delayed reply must
+    // never turn the source's remaining budget into a new local deadline.
+    c.deadline = Math.min(c.deadline, started + Number(reply.remainingMs || 0));
+    return local(c);
+  }
+  async function run(c) {
+    if (!await valid(c)) return;
+    if (isDbx()) {
+      if (!workbench()) {
+        await call({ op: 'complete', receiverId: c.receiver.receiverId, requestId: c.intent.requestId, result: 'receiver-unavailable' }); return;
+      }
+      if (window.HertzCapsuleOnly) {
+        const reply = await call({ op: 'handoff', receiverId: c.receiver.receiverId, requestId: c.intent.requestId });
+        if (!await valid(c)) return;
+        if (typeof reply.handoff !== 'string' || !/^[0-9a-f-]{36}$/i.test(reply.handoff)) return;
+        try { await window.dbxPlugin.openWorkbench(playerWorkbench(), { hertzCalibrationHandoff: reply.handoff }, { target: 'tab' }); }
+        catch (_) {
+          if (await valid(c)) await call({ op: 'complete', receiverId: c.receiver.receiverId, requestId: c.intent.requestId, result: 'receiver-unavailable' });
+        }
+        return;
+      }
+      if (!await valid(c)) return;
+      await window.dbxPlugin.openWorkbench(playerWorkbench(), {}, { target: 'tab' });
+      if (!await valid(c)) return;
+    }
+    const track = state.current;
+    const doc = await (track.source && track.onlineId ? window.Online.loadLyricDoc(track)
+      : transport.get(`/v1/tracks/${encodeURIComponent(c.intent.trackId)}/lyrics`));
+    if (!await valid(c)) return;
+    if (!doc || !Array.isArray(doc.lines) || !doc.lines.length) {
+      await call({ op: 'complete', receiverId: c.receiver.receiverId, requestId: c.intent.requestId, result: 'lyrics-unavailable' }); return;
+    }
+    if (!local(c)) return;
+    openNowPlaying({ skipLyricLoad: true });
+    if (!local(c)) return;
+    syncNpLyrics(c.intent.trackId, doc);
+    if (!await valid(c)) return;
+    if (window.NowPlaying) window.NowPlaying.showCalibration();
+    if (!await valid(c)) return;
+    if (!local(c)) return;
+    window.focus();
+    if (!local(c)) return;
+    np.lyricOffsetDown.scrollIntoView({ block: 'nearest' });
+    if (!local(c)) return;
+    np.lyricOffsetDown.focus({ preventScroll: true });
+    await new Promise(resolve => requestAnimationFrame(resolve));
+    if (!await valid(c)) return;
+    const detailVisible = isNpOpen() && !np.lyricOffset.hidden && !np.lyricOffsetDown.closest('[hidden]')
+      && np.lyricOffsetDown.getBoundingClientRect().width > 0 && np.lyricOffsetDown.getBoundingClientRect().height > 0;
+    const documentVisible = document.visibilityState === 'visible', documentFocused = document.hasFocus();
+    const offsetFocused = document.activeElement === np.lyricOffsetDown;
+    if (!detailVisible || !local(c)) return;
+    await call({ op: 'complete', receiverId: c.receiver.receiverId, requestId: c.intent.requestId,
+      result: documentVisible && documentFocused && offsetFocused ? 'shown' : 'focus-unavailable',
+      detailVisible, documentVisible, documentFocused, offsetFocused });
+  }
+  async function poll() {
+    if (stopped || flight || !state.connected) return;
+    const ticket = { epoch: contextEpoch, receiver };
+    flight = ticket;
+    const current = () => !stopped && state.connected && ticket.epoch === contextEpoch
+      && flight === ticket && receiver === ticket.receiver;
+    try {
+      if (!receiver) {
+        const marker = handoffMarker;
+        const registered = await call({ op: 'register', kind: isDbx() && window.HertzCapsuleOnly ? 'floating'
+          : window.WindowLifecycle && WindowLifecycle.isNative() ? 'native' : 'full', workbench: workbench(), handoff: marker });
+        if (!current() || marker !== handoffMarker) { call({ op: 'unregister', receiverId: registered.receiverId }).catch(() => {}); return; }
+        receiver = registered;
+        ticket.receiver = registered;
+      }
+      const claimStarted = performance.now();
+      const reply = await call({ op: 'claim', receiverId: ticket.receiver.receiverId, handoff: handoffMarker });
+      if (!current()) return;
+      if (reply.intent && !active) {
+        handoffMarker = '';
+        const c = { intent: reply.intent, deadline: claimStarted + Math.min(5000, Number(reply.remainingMs || 0)),
+          epoch: ticket.epoch, receiver: ticket.receiver };
+        active = c;
+        try { await run(c); } finally { if (active === c) active = null; }
+      }
+    } catch (_) { if (current()) { active = null; receiver = null; handoffMarker = ''; } }
+    finally { if (flight === ticket) flight = null; }
+  }
+  function cancelLocal() { active = null; contextEpoch++; flight = null; }
+  function init() {
+    if (workbench()) {
+      window.dbxPlugin.onInit(contextHandoff);
+      window.dbxPlugin.onContext(contextHandoff);
+      contextHandoff(window.dbxPlugin.context);
+    }
+    timer = setInterval(() => {
+      if (flight && receiver) {
+        const renewed = receiver, epoch = contextEpoch;
+        call({ op: 'renew', receiverId: renewed.receiverId }).catch(() => {
+          if (epoch === contextEpoch && receiver === renewed) { cancelLocal(); receiver = null; }
+        });
+      }
+      else poll();
+    }, 750);
+    document.addEventListener('playback:snapshot', () => { if (active && !local(active)) cancelLocal(); });
+    document.addEventListener('service:connection', e => { if (!e.detail.connected) { cancelLocal(); receiver = null; } else poll(); });
+    window.addEventListener('pagehide', () => {
+      stopped = true; clearInterval(timer); cancelLocal();
+      if (receiver) call({ op: 'unregister', receiverId: receiver.receiverId }).catch(() => {});
+      receiver = null;
+    }, { once: true });
+    poll();
+    const toggle = $('desktop-calibration-consent'), note = $('desktop-calibration-consent-note');
+    const retry = $('desktop-calibration-revoke-retry'), retryActions = $('desktop-calibration-revoke-actions');
+    let busy = false, revokePending = false, consentEpoch = 0;
+    function updateConsent() {
+      toggle.disabled = busy || revokePending;
+      retry.disabled = busy;
+      retryActions.hidden = !revokePending;
+    }
+    async function read() {
+      const epoch = consentEpoch;
+      try {
+        const reply = await transport.get('/v1/desktop/calibration-authorization');
+        if (epoch !== consentEpoch) return;
+        toggle.checked = reply.authorized === true;
+        revokePending = !toggle.checked && (reply.persistentAuthorized === true || reply.cleanupIncomplete === true);
+        note.textContent = revokePending ? '本次校准已停用，持久撤销或凭据清理尚未完成，请重试撤销。'
+          : toggle.checked ? '已允许桌面打开当前歌曲校准；偏移仍由播放器保存。' : '默认关闭。启用只允许打开当前歌曲校准，不授予歌曲或播放操作。';
+      }
+      catch (_) { if (epoch !== consentEpoch) return; toggle.checked = false; note.textContent = '暂未确认校准授权，请重新打开设置或更新配套播放器。'; }
+      updateConsent();
+    }
+    async function save(enabled) {
+      if (busy) return;
+      consentEpoch++;
+      busy = true; updateConsent();
+      if (!enabled) cancelLocal();
+      try {
+        const reply = await transport.post('/v1/desktop/calibration-authorization', { enabled });
+        toggle.checked = reply.authorized === true; revokePending = false;
+        note.textContent = toggle.checked ? '已允许从桌面打开播放器校准。' : '已撤销校准入口授权；原读取授权保留。';
+      }
+      catch (e) {
+        toggle.checked = false; revokePending = !enabled;
+        note.textContent = e.message || (enabled ? '本次校准未启用，授权保存未确认，请重试。' : '本次校准已停用，持久撤销未确认，请重试撤销。');
+      }
+      finally { busy = false; updateConsent(); }
+    }
+    toggle.onchange = () => save(toggle.checked);
+    retry.onclick = () => save(false);
+    read();
+  }
+  return { init, cancelLocal };
+})();
 
 // 播放快照 → 弹窗（播放态 / 时间 / 进度）
 function syncNpSnapshot(snap) {
@@ -8608,6 +8788,7 @@ async function startFloatingCapsule() {
   initCapsuleControls();
   bindMediaSession();
   await refreshFloatingCapsule();
+  calibrationUi.init();
   openSocket();
 }
 
@@ -9713,6 +9894,7 @@ async function startApp() {
   window.addEventListener('hertz-settings-category', refreshInlineDesktopLyrics);
   window.addEventListener('hertz-open-desktop-lyrics-settings', openInlineDesktopLyrics);
   if (window.WindowLifecycle) window.WindowLifecycle.init(transport);
+  calibrationUi.init();
   if (ui.barDesktopSettings) {
     ui.barDesktopSettings.hidden = false;
   }

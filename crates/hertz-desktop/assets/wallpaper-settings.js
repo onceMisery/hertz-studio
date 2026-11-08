@@ -45,7 +45,7 @@
       entry.timer = setTimeout(function () {
         managementRequests.delete(id);
         reject(Object.assign(new Error('操作结果尚未确认，请查询原操作。'), { code: 'receipt_timeout', requestId: id }));
-      }, ['wallpaper.file.pick', 'wallpaper.export.pick'].includes(command) ? 300000 : command === 'wallpaper.draft.publish' ? 30000 : 5000);
+      }, ['wallpaper.file.pick', 'wallpaper.export.pick'].includes(command) ? 300000 : command.startsWith('wallpaper.ai.') ? 65000 : command === 'wallpaper.draft.publish' ? 30000 : 5000);
       managementRequests.set(id, entry);
       try { window.ipc.postMessage(JSON.stringify({ protocol: 2, requestId: id, command: command, payload: payload || {}, expectedRevision: expectedRevision })); }
       catch (error) { managementRequests.delete(id); clearTimeout(entry.timer); error.requestId = id; reject(error); }
@@ -193,6 +193,7 @@
     if (!draft || !groupById(draft.wallpaper, id) || selectedGroupId === id) return;
     if (previewLease || previewActive || previewTasks) releaseNativePreview();
     selectedGroupId = id; selectedWorkLookup = '';
+    window.dispatchEvent(new Event('wallpaper-ai-context'));
     renderForm();
     if (latest) renderRuntime(latest);
     publishRuntime();
@@ -1089,12 +1090,14 @@
     renderRuntime(payload);
     renderHotkey(payload);
     publishRuntime();
+    window.dispatchEvent(new Event('wallpaper-ai-context'));
   }
   function changed(wallpaperChanged) {
     if (!draft) return;
     dirty = JSON.stringify(draft) !== JSON.stringify(saved);
     if (!dirty) { conflict = false; revision = latest.revision; }
     if (wallpaperChanged) refreshGroupLayouts();
+    if (wallpaperChanged) window.dispatchEvent(new Event('wallpaper-ai-invalidated'));
     status('草稿尚未应用；壁纸、歌词与运行规则会一起保存。', false);
     renderPreview(); syncControls();
     if (wallpaperChanged && previewActive && previewMode === 'settings' && previewGroupId === selectedGroupId) { clearTimeout(previewTimer); previewTimer = setTimeout(function () { if (previewMode === 'settings' && !publicPropertiesError()) startNativePreview(true); }, 180); }
@@ -1273,6 +1276,7 @@
     chooseLibraryVersion: chooseLibraryVersion,
     choosePlaylist: choosePlaylist,
     currentGroupId: function () { return selectedGroupId; },
+    currentAiContext: function () { return { groupId: selectedGroupId, revision: latest && latest.revision, profile: latest && latest.profile }; },
     currentRuntime: function () { return selectedRuntime(latest); },
     currentBuiltin: function () { var state = draft && builtin(draft.wallpaper); return state ? Object.assign({ title: sceneLabel(state.sceneId) }, clone(state)) : null; },
     releasePreview: releaseNativePreview,

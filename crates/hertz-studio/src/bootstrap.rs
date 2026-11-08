@@ -286,6 +286,7 @@ pub async fn boot(
         pending_restore_seek: Default::default(),
         overlay_lyric: Default::default(),
         desktop_lyrics: Default::default(),
+        lyrics_calibration: Default::default(),
         listen: Default::default(),
         scrobble: Default::default(),
         relay_tried: Default::default(),

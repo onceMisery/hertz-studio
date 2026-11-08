@@ -87,6 +87,8 @@ pub(crate) struct Snapshot {
     pub(crate) timing: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) vocal_schema_versions: Vec<u32>,
+    #[serde(default)]
+    pub(crate) lyrics_calibration: Option<serde_json::Value>,
 }
 
 impl Snapshot {

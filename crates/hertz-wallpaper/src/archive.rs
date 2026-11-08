@@ -44,6 +44,7 @@ pub fn validate_package<R: std::io::Read + std::io::Seek>(reader: R) -> Result<V
     let manifest_bytes = read_manifest_bytes(&mut archive)?;
     let manifest = validate_manifest_bytes(&manifest_bytes)?;
     let entries = validate_archive_in_place(&mut archive, &manifest)?;
+    validate_composition_in_place(&mut archive, &manifest)?;
     Ok(ValidatedPackage { manifest, entries })
 }
 
@@ -53,7 +54,35 @@ pub fn validate_archive<R: std::io::Read + std::io::Seek>(
     manifest: &Manifest,
 ) -> Result<Vec<VerifiedEntry>> {
     let mut archive = open_archive(&mut reader)?;
-    validate_archive_in_place(&mut archive, manifest)
+    let entries = validate_archive_in_place(&mut archive, manifest)?;
+    validate_composition_in_place(&mut archive, manifest)?;
+    Ok(entries)
+}
+
+fn validate_composition_in_place<R: Read + std::io::Seek>(
+    archive: &mut ZipArchive<R>,
+    manifest: &Manifest,
+) -> Result<()> {
+    let crate::Content::Composition { document } = &manifest.content else {
+        return Ok(());
+    };
+    // Archive paths, lengths and hashes have already been verified by the same
+    // owner. Reuse that exact immutable entry, never open an external path.
+    let file = archive
+        .by_name(document)
+        .map_err(|error| PackageError::new("missing_document", error.to_string()))?;
+    if file.size() > crate::document::MAX_DOCUMENT_BYTES as u64 {
+        return Err(PackageError::new(
+            "document_too_large",
+            "组合文档超过 1 MiB",
+        ));
+    }
+    let mut bytes = Vec::new();
+    file.take(crate::document::MAX_DOCUMENT_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| PackageError::new("invalid_composition", error.to_string()))?;
+    crate::document::compile_document(&bytes, manifest)?;
+    Ok(())
 }
 
 fn open_archive<R: std::io::Read + std::io::Seek>(mut reader: R) -> Result<ZipArchive<R>> {

@@ -15,6 +15,7 @@ fn plan(owner: OwnerKind, session: &str, generation: u64) -> SessionPlan {
             transcode_slots: 0,
             decode_pixel_rate: 100,
             output_pixel_rate: 200,
+            texture_upload_bytes_per_second: 0,
             cpu_bytes: 300,
             prepare_cpu_bytes: 0,
             asset_cpu_bytes: 0,
@@ -43,6 +44,95 @@ fn plan(owner: OwnerKind, session: &str, generation: u64) -> SessionPlan {
         ],
     )
     .unwrap()
+}
+
+#[test]
+fn upload_suballocations_cannot_borrow_or_return_parent_rate_before_resource_exit() {
+    let original = plan(OwnerKind::Desktop, "upload-owner", 3);
+    let mut request = original.request().clone();
+    request.texture_upload_bytes_per_second = 100;
+    let mut resources = original.resources().to_vec();
+    resources[1].maximum.texture_upload_bytes_per_second = 100;
+    let plan = SessionPlan::new(request, resources).unwrap();
+    let budget = BudgetCoordinator::new();
+    let parent = budget.grant_session(&plan).unwrap();
+    let first = budget
+        .allocate_resource(
+            parent,
+            "upload-owner",
+            3,
+            "render",
+            ResourceAmounts {
+                texture_upload_bytes_per_second: 60,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(budget.usage().texture_upload_bytes_per_second, 100);
+    assert!(budget
+        .allocate_resource(
+            parent,
+            "upload-owner",
+            3,
+            "render",
+            ResourceAmounts {
+                texture_upload_bytes_per_second: 41,
+                ..Default::default()
+            }
+        )
+        .is_err());
+    let second = budget
+        .allocate_resource(
+            parent,
+            "upload-owner",
+            3,
+            "render",
+            ResourceAmounts {
+                texture_upload_bytes_per_second: 40,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        budget
+            .allocation_snapshot(parent, "upload-owner", 3)
+            .unwrap()
+            .allocated
+            .texture_upload_bytes_per_second,
+        100
+    );
+    assert!(budget.release_resource(first, "upload-owner", 2).is_err());
+    budget.release_resource(first, "upload-owner", 3).unwrap();
+    budget
+        .confirm_resource_exit(first, "upload-owner", 3)
+        .unwrap();
+    assert!(budget
+        .retire_resource_plan(first, "upload-owner", 3)
+        .is_err());
+    assert_eq!(budget.usage().texture_upload_bytes_per_second, 100);
+    budget.release_resource(second, "upload-owner", 3).unwrap();
+    assert!(budget
+        .retire_resource_plan(second, "upload-owner", 3)
+        .is_err());
+    budget
+        .confirm_resource_exit(second, "upload-owner", 3)
+        .unwrap();
+    budget
+        .retire_resource_plan(second, "upload-owner", 3)
+        .unwrap();
+    assert_eq!(budget.usage().texture_upload_bytes_per_second, 0);
+    assert!(budget
+        .allocate_resource(
+            parent,
+            "upload-owner",
+            3,
+            "render",
+            ResourceAmounts {
+                texture_upload_bytes_per_second: 1,
+                ..Default::default()
+            }
+        )
+        .is_err());
 }
 
 #[test]

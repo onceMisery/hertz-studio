@@ -111,6 +111,7 @@ impl CaptureHold {
             transcode_slots: 0,
             decode_pixel_rate: 0,
             output_pixel_rate: 0,
+            texture_upload_bytes_per_second: 0,
             cpu_bytes: pixels * 4,
             prepare_cpu_bytes,
             asset_cpu_bytes: 0,

@@ -36,6 +36,12 @@ pub(crate) struct Receipt<'a> {
 }
 
 impl Draft {
+    /// Private apply snapshot for a native-authorized selection. It is never
+    /// inserted into SettingsDrafts and cannot include an unconfirmed UI draft.
+    pub(crate) fn from_committed(owner: u64, config: &Config) -> Self {
+        Self { id: String::new(), owner, revision: 0, base_revision: config.revision,
+            profile: config.active_profile.clone(), wallpaper: config.wallpaper.clone(), lyrics: config.lyrics.clone() }
+    }
     pub(crate) fn receipt(&self) -> Receipt<'_> {
         Receipt {
             kind: "settings",

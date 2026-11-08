@@ -3,14 +3,16 @@
 // 池资源受原生 shared-assets 信封约束时，逐资源在装载前记账（§8.1 先取预算再解码）；
 // 播放器页另外注入页面准入和有界解码端口，不用条目上限冒充像素预算。
 import { layoutLyricText } from './text-layout.js';
+import { createResourcePool, resourceKey } from '../resources/pool.js';
 export function createSpatialResources(THREE, onInvalidate, resolveCover = url => url,
   ledger = (typeof window !== 'undefined' && window.HertzSharedAssets) || null, options = {}) {
   const pagePort = options.resources || null;
   if (pagePort && pagePort.contractVersion !== 1) throw new Error('resource-policy-required');
   const releaseTicket = ticket => ticket?.release({ apiReleased: true, allocationEnded: true });
+  const pool = options.pool || createResourcePool({ contextId: options.contextId || 'legacy-spatial', maxEntries: 19 });
   let disposed = false, stamp = null, uploaded = false;
   let resourceFailure = '';
-  const texts = new Map(), covers = new Map(), queue = [], leases = new WeakMap(), coverLoads = new Set();
+  const texts = new Map(), covers = new Map(), queue = [], leaseKinds = new WeakMap(), coverLoads = new Set();
   function canvas(w, h) {
     if (typeof document === 'undefined') return null;
     const el = document.createElement('canvas'); el.width = w; el.height = h; return el;
@@ -18,12 +20,11 @@ export function createSpatialResources(THREE, onInvalidate, resolveCover = url =
   // The pool itself owns this discrimination: pool textures are never trackTree'd,
   // scopes release consumer leases explicitly instead.
   function own(texture) {
-    Object.defineProperty(texture, 'poolOwned', { value: true });
-    return texture;
+    return pool.markOwned(texture);
   }
   function remove(map, key, entry) {
-    if (entry.consumers.size || entry.retired) return;
-    entry.retired = true;
+    if (entry.cleaned) return;
+    entry.cleaned = true;
     const pending = queue.indexOf(entry); if (pending >= 0) queue.splice(pending, 1);
     entry.cancel?.(); entry.texture?.dispose(); entry.texture = null;
     if (entry.canvas) entry.canvas.width = entry.canvas.height = 0;
@@ -43,27 +44,18 @@ export function createSpatialResources(THREE, onInvalidate, resolveCover = url =
     }
   }
   function release(map, lease) {
-    const consumer = leases.get(lease);
-    if (!consumer || !consumer.active || consumer.map !== map) return;
-    consumer.active = false;
-    consumer.signal?.removeEventListener('abort', consumer.abort);
-    const entry = consumer.entry;
-    entry.consumers.delete(consumer);
-    remove(map, entry.key, entry);
+    if (leaseKinds.get(lease) === map) pool.release(lease);
   }
   function retain(map, entry, signal) {
-    const consumer = {map, entry, signal, active: true, abort: null};
-    const lease = {};
-    // Consumers observe one shared result but cannot spend another consumer's lease.
-    for (const field of ['key', 'line', 'font', 'maxWidth', 'aspect', 'layout', 'start', 'end', 'failed']) {
-      Object.defineProperty(lease, field, {enumerable: true, get: () => entry[field]});
-    }
-    Object.defineProperty(lease, 'texture', {enumerable: true, get: () => consumer.active ? entry.texture : null});
-    consumer.abort = () => release(map, lease);
-    leases.set(lease, consumer);
-    entry.consumers.add(consumer);
-    signal?.addEventListener('abort', consumer.abort, {once: true});
-    return Object.freeze(lease);
+    const lease = pool.retain(entry, signal);
+    if (lease) leaseKinds.set(lease, map);
+    return lease;
+  }
+  function adopt(map, entry, adapterId, decodeOptions) {
+    pool.adopt(resourceKey({ contentKey: entry.key, adapterId, adapterVersion: 1, decodeOptions }, options.contextId || 'legacy-spatial'),
+      entry, () => remove(map, entry.key, entry));
+    map.set(entry.key, entry);
+    return entry;
   }
   function coverUnits() {
     let count = covers.size;
@@ -172,10 +164,9 @@ export function createSpatialResources(THREE, onInvalidate, resolveCover = url =
       if (!entry && texts.size < 7) {
         const asset = ledger?.admit('text');
         if (ledger && asset === null) return null;
-        entry = { key, line, font, maxWidth, consumers: new Set(), texture: null, aspect: 8, asset: asset ?? undefined };
+        entry = adopt(texts, { key, line, font, maxWidth, texture: null, aspect: 8, asset: asset ?? undefined }, 'legacy-lyric-text', { font, maxWidth });
         // At most120 UTF16 units plus one row sentinel per unit.
         prepareText(entry);
-        texts.set(key, entry);
       }
       if (!entry) return null;
       return retain(texts, entry);
@@ -189,7 +180,7 @@ export function createSpatialResources(THREE, onInvalidate, resolveCover = url =
       if (!entry && coverUnits() < 12) {
         const asset = ledger?.admit('cover');
         if (ledger && asset === null) return null;
-        entry = { key, consumers: new Set(), texture: null, failed: false, asset: asset ?? undefined }; covers.set(key, entry);
+        entry = adopt(covers, { key, texture: null, failed: false, asset: asset ?? undefined }, 'legacy-cover768', { crop: 'square', size: 768 });
         if (typeof Image !== 'undefined') loadCover(entry);
       }
       if (!entry) return null;
@@ -260,12 +251,10 @@ export function createSpatialResources(THREE, onInvalidate, resolveCover = url =
     dispose() {
       if (disposed) return; disposed = true;
       for (const map of [texts, covers]) for (const entry of [...map.values()]) {
-        for (const consumer of entry.consumers) {
-          consumer.active = false; consumer.signal?.removeEventListener('abort', consumer.abort);
-        }
-        entry.consumers.clear(); remove(map, entry.key, entry);
+        for (const consumer of [...entry.consumers]) consumer.lease.release();
       }
       queue.length = 0;
+      if (!options.pool) pool.dispose();
     }
   };
 }

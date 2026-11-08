@@ -1223,10 +1223,20 @@ mod tests {
     #[test]
     fn composition_and_web_accept_structure_without_claiming_execution() {
         for content in [
-            json!({"kind":"composition","document":"first"}),
-            json!({"kind":"web","entry":"first","apiVersion":1}),
+            json!({"kind":"composition","document":"content/scene.json"}),
+            json!({"kind":"web","entry":"content/index.html","apiVersion":1}),
         ] {
             let mut manifest = manifest(content);
+            manifest.files.push(crate::FileEntry {
+                path: manifest.content_file().unwrap().to_owned(),
+                bytes: 70,
+                sha256: "d".repeat(64),
+                mime: if matches!(manifest.content, Content::Composition { .. }) {
+                    "application/json".to_owned()
+                } else {
+                    "text/html".to_owned()
+                },
+            });
             let mut value = descriptor("number", json!(1), json!({"min":0,"max":2}));
             value["target"] = json!({"kind":"binding","bindingId":"pulse","parameter":"gain"});
             manifest.properties = vec![value.as_object().unwrap().clone()];

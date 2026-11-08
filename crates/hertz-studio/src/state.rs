@@ -905,6 +905,7 @@ pub struct AppState {
     pub(crate) overlay_lyric: Mutex<Option<(String, vmusic_core::LyricDocument)>>,
     /// 桌面歌词的只读快照/文档缓存；轻量快照不等待取词。
     pub(crate) desktop_lyrics: crate::desktop_lyrics::DesktopLyrics,
+    pub(crate) lyrics_calibration: crate::lyrics_calibration::LyricsCalibration,
     /// 短写幂等表（见 [`crate::idempotency`]）：带 `clientOperationId` 的播控
     /// 命令在 10 分钟窗口内按 `(principal, operation, clientOperationId)` 去重。
     pub(crate) short_writes: crate::idempotency::ShortWriteStore,
@@ -4842,6 +4843,7 @@ pub(crate) mod tests {
             pending_restore_seek: Default::default(),
             overlay_lyric: Default::default(),
             desktop_lyrics: Default::default(),
+            lyrics_calibration: Default::default(),
             listen: Default::default(),
             scrobble: Default::default(),
             relay_tried: Default::default(),

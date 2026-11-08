@@ -15,6 +15,8 @@ mod app;
 #[cfg(windows)]
 mod bridge;
 #[cfg(windows)]
+mod calibration;
+#[cfg(windows)]
 mod component;
 #[cfg(windows)]
 mod config;
@@ -72,6 +74,18 @@ pub fn describe() -> String {
 pub fn wallpaper_maintenance(args: &[String]) -> Option<anyhow::Result<String>> {
     wallpaper_upgrade::maintenance_requested(args)
         .then(|| wallpaper_upgrade::maintenance(args).map(|value| value.to_string()))
+}
+
+/// Internal restricted worker dispatch. This runs before normal host setup.
+#[cfg(windows)]
+pub fn wallpaper_worker_entry(args: &[String]) -> Option<anyhow::Result<()>> {
+    wallpaper::worker::entry(args)
+}
+
+/// Explicit sandbox qualification; it does not enable author Web packages.
+#[cfg(windows)]
+pub fn wallpaper_sandbox_probe(args: &[String]) -> Option<anyhow::Result<String>> {
+    wallpaper::worker::probe_entry(args)
 }
 
 /// 独立 exe 的致命错误落宿主日志（播放器内嵌形态由 `start_embedded` 自行记录）。

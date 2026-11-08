@@ -50,7 +50,8 @@ pub(super) struct Gate {
     pub revoking: bool,
     pub restore_allowed: bool,
     pub revision: u64,
-    pub keys: [Option<Zeroizing<String>>; 2],
+    pub keys: [Option<Zeroizing<String>>; 3],
+    calibration_disabled: bool,
     pub cancel: Cancellation,
     // Unlike the authority token, a new intent token exists even while the gate is closed.
     intent_cancel: Cancellation,
@@ -66,7 +67,7 @@ impl Gate {
         for cancel in self.senders.values() {
             cancel.cancel();
         }
-        self.keys = [None, None];
+        self.keys = [None, None, None];
         if let Some(epoch) = self.epoch.checked_add(1) {
             self.epoch = epoch;
         } else {
@@ -154,6 +155,8 @@ pub struct DesktopBridge {
     before_authorization: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     #[cfg(test)]
     after_publish: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    #[cfg(test)]
+    after_calibration_write: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl DesktopBridge {
@@ -177,6 +180,7 @@ impl DesktopBridge {
     /// Uses the already resolved business DataDir. No files, listeners, component probes,
     /// native configuration migration or process launch occur here.
     pub fn new(state: &Arc<AppState>) -> Arc<Self> {
+        state.lyrics_calibration.set_gate(false, true);
         let profile = Profile::Dbx {
             edition: crate::edition::NAME.into(),
             data_dir: state.data_dir.to_string_lossy().into_owned(),
@@ -202,7 +206,8 @@ impl DesktopBridge {
                 revoking: false,
                 restore_allowed: true,
                 revision: 0,
-                keys: [None, None],
+                keys: [None, None, None],
+                calibration_disabled: false,
                 cancel: Cancellation::new(),
                 intent_cancel: Cancellation::new(),
                 senders: HashMap::new(),
@@ -226,18 +231,179 @@ impl DesktopBridge {
             before_authorization: Mutex::new(None),
             #[cfg(test)]
             after_publish: Mutex::new(None),
+            #[cfg(test)]
+            after_calibration_write: Mutex::new(None),
         })
     }
 
     pub fn profile(&self) -> Option<Profile> {
         self.profile.clone()
     }
+
+    pub(crate) fn calibration_authorized(&self) -> bool {
+        self.capture_generation().is_some_and(|g| {
+            self.validate_authority(Scope::LyricsCalibration, &g, None)
+                .is_ok()
+        })
+    }
+
+    /// Explicit UI consent uses the existing file/writer/gate owner. Reading scopes survive.
+    pub(crate) async fn calibration_authorization(
+        self: &Arc<Self>,
+        enabled: Option<bool>,
+    ) -> Result<serde_json::Value, ApiError> {
+        if let Some(enabled) = enabled {
+            if let Some(state) = self.state.upgrade() {
+                state.lyrics_calibration.set_gate(false, true);
+            }
+            let epoch = {
+                let mut gate = lock(&self.gate);
+                if gate.shutting_down || gate.revoking {
+                    return Err(failure(
+                        "desktop_operation_cancelled",
+                        "Desktop consent change was cancelled",
+                    ));
+                }
+                gate.calibration_disabled = true;
+                gate.close();
+                gate.epoch
+            };
+            self.cleanup(false, None).await;
+            let bridge = self.clone();
+            let result =
+                hertz_desktop_ipc::blocking::Worker::start(Cancellation::new(), move || {
+                    let _file = bridge.lock_file_operation()?;
+                    bridge.acquire_writer()?;
+                    let existing = Authorization::read(&bridge.directory).map_err(|_| {
+                        failure(
+                            "desktop_authorization_invalid",
+                            "Invalid authorization record; file preserved",
+                        )
+                    })?;
+                    let mut scopes = existing
+                        .as_ref()
+                        .map_or_else(Vec::new, |r| r.scopes.clone());
+                    scopes.retain(|s| *s != Scope::LyricsCalibration);
+                    if enabled {
+                        create_key(&bridge.directory, Scope::LyricsCalibration).map_err(|_| {
+                            failure(
+                                "desktop_authorization_write_failed",
+                                "Cannot create private UI credential",
+                            )
+                        })?;
+                        scopes.push(Scope::LyricsCalibration);
+                    }
+                    let record = Authorization {
+                        schema_version: 2,
+                        revision: Authorization::next_revision(existing.as_ref()).map_err(
+                            |_| {
+                                failure(
+                                    "desktop_authorization_invalid",
+                                    "Authorization revision exhausted",
+                                )
+                            },
+                        )?,
+                        scopes,
+                    };
+                    record
+                        .write_checked(&bridge.directory, || {
+                            let gate = lock(&bridge.gate);
+                            if !Self::epoch_valid(&gate, epoch, false) {
+                                return Err(io::Error::new(
+                                    io::ErrorKind::Interrupted,
+                                    "consent superseded",
+                                ));
+                            }
+                            Ok(gate)
+                        })
+                        .map_err(|_| {
+                            failure(
+                                if enabled {
+                                    "desktop_authorization_write_failed"
+                                } else {
+                                    "desktop_calibration_revocation_incomplete"
+                                },
+                                if enabled {
+                                    "校准授权未保存，请重试"
+                                } else {
+                                    "本次校准已停用，但持久撤销未完成；重启可能恢复，请重试撤销"
+                                },
+                            )
+                        })?;
+                    if !enabled {
+                        let path = bridge.directory.join(key_file(Scope::LyricsCalibration));
+                        match windows::read_private_bounded(&path, 128) {
+                            Ok(_) => std::fs::remove_file(path).map_err(|_| {
+                                failure(
+                                    "desktop_calibration_cleanup_incomplete",
+                                    "校准已撤销，凭据清理未完成，请重试",
+                                )
+                            })?,
+                            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                            Err(_) => {
+                                return Err(failure(
+                                    "desktop_calibration_cleanup_incomplete",
+                                    "校准已撤销，凭据清理未完成，请重试",
+                                ))
+                            }
+                        }
+                    }
+                    #[cfg(test)]
+                    if let Some(hook) = lock(&bridge.after_calibration_write).take() {
+                        hook();
+                    }
+                    if enabled {
+                        let mut gate = lock(&bridge.gate);
+                        if !Self::epoch_valid(&gate, epoch, false) {
+                            return Err(failure(
+                                "desktop_operation_cancelled",
+                                "Desktop consent change was superseded",
+                            ));
+                        }
+                        gate.calibration_disabled = false;
+                    }
+                    Ok(())
+                })
+                .map_err(|_| {
+                    failure(
+                        "desktop_authorization_write_failed",
+                        "Cannot start consent worker",
+                    )
+                })?
+                .await
+                .map_err(|_| {
+                    failure(
+                        "desktop_authorization_write_failed",
+                        "Consent worker failed",
+                    )
+                })?;
+            // A superseded consent change must not restore the newer operation's
+            // gate. Current failed revokes still restore retained reading scopes.
+            if !self.admission_current(epoch) {
+                return Err(result.err().unwrap_or_else(|| {
+                    failure(
+                        "desktop_operation_cancelled",
+                        "Desktop consent change was superseded",
+                    )
+                }));
+            }
+            let restored = self.restore_at(epoch).await;
+            if let Err(e) = result {
+                self.record_error(&e);
+                return Err(e);
+            }
+            restored?;
+        }
+        Ok(
+            serde_json::json!({"authorized":self.calibration_authorized(),"persistentAuthorized":self.status().authorized_scopes.contains(&Scope::LyricsCalibration),"cleanupIncomplete":self.status().cleanup_incomplete}),
+        )
+    }
     pub fn status(&self) -> DesktopStatus {
         // All paths taking both locks use lifecycle -> gate. close never takes lifecycle.
         let mut status = lock(&self.lifecycle).status.clone();
         let gate = lock(&self.gate);
         status.active_scopes = if gate.open {
-            SCOPES
+            ALL_SCOPES
                 .into_iter()
                 .filter(|scope| gate.keys[index(*scope)].is_some())
                 .collect()
@@ -284,6 +450,10 @@ impl DesktopBridge {
 
     pub async fn restore(self: &Arc<Self>) -> Result<DesktopStatus, ApiError> {
         let epoch = self.operation_epoch(true)?;
+        self.restore_at(epoch).await
+    }
+
+    async fn restore_at(self: &Arc<Self>, epoch: u64) -> Result<DesktopStatus, ApiError> {
         let bridge = self.clone();
         let result = hertz_desktop_ipc::blocking::Worker::start(Cancellation::new(), move || {
             bridge.activate(epoch, true)
@@ -301,7 +471,7 @@ impl DesktopBridge {
                 "Desktop authorization worker failed",
             )
         })?;
-        if result.is_err() || !lock(&self.gate).open {
+        if self.admission_current(epoch) && (result.is_err() || !lock(&self.gate).open) {
             self.cleanup(false, None).await;
         }
         result
@@ -554,7 +724,7 @@ impl DesktopBridge {
                 .as_ref()
                 .is_some_and(|record| SCOPES.iter().all(|scope| record.scopes.contains(scope)));
             Authorization {
-                schema_version: 1,
+                schema_version: existing.as_ref().map_or(1, |r| r.schema_version),
                 revision: if unchanged {
                     existing.as_ref().unwrap().revision
                 } else {
@@ -565,12 +735,22 @@ impl DesktopBridge {
                         )
                     })?
                 },
-                scopes: SCOPES.to_vec(),
+                scopes: if existing
+                    .as_ref()
+                    .is_some_and(|r| r.scopes.contains(&Scope::LyricsCalibration))
+                {
+                    ALL_SCOPES.to_vec()
+                } else {
+                    SCOPES.to_vec()
+                },
             }
         };
-        let mut keys = [None, None];
+        let mut keys = [None, None, None];
         let mut scope_errors = Vec::new();
         for scope in &authorization.scopes {
+            if *scope == Scope::LyricsCalibration && lock(&self.gate).calibration_disabled {
+                continue;
+            }
             match read_key(&self.directory, *scope) {
                 Ok(key) => keys[index(*scope)] = Some(key),
                 Err(error) if !restoring && error.kind() == io::ErrorKind::NotFound => {
@@ -649,13 +829,13 @@ impl DesktopBridge {
         }
         if gate.open
             && gate.revision == authorization.revision
-            && SCOPES.iter().all(
-                |scope| match (&gate.keys[index(*scope)], &keys[index(*scope)]) {
+            && ALL_SCOPES.iter().all(|scope| {
+                match (&gate.keys[index(*scope)], &keys[index(*scope)]) {
                     (None, None) => true,
                     (Some(a), Some(b)) => equal_key(a, b),
                     _ => false,
-                },
-            )
+                }
+            })
         {
             return Ok(());
         }
@@ -671,8 +851,9 @@ impl DesktopBridge {
         let mut pipes = Pipes {
             lyrics: None,
             wallpaper: None,
+            lyrics_calibration: None,
         };
-        for scope in SCOPES {
+        for scope in ALL_SCOPES {
             if keys[index(scope)].is_none() {
                 continue;
             }
@@ -683,6 +864,7 @@ impl DesktopBridge {
             match scope {
                 Scope::Lyrics => pipes.lyrics = Some(name.clone()),
                 Scope::Wallpaper => pipes.wallpaper = Some(name.clone()),
+                Scope::LyricsCalibration => pipes.lyrics_calibration = Some(name.clone()),
             }
             servers.push((scope, name, server));
         }
@@ -770,12 +952,21 @@ impl DesktopBridge {
                 _writer: writer,
             }));
         }
+        let calibration = gate.keys[index(Scope::LyricsCalibration)].is_some();
+        drop(gate);
+        drop(life);
+        if let Some(state) = self.state.upgrade() {
+            state.lyrics_calibration.set_gate(calibration, true);
+        }
         Ok(())
     }
 
     /// The first action is synchronous gate closure/cancellation. Persistent failure never
     /// reopens this process. A later explicit connect is required after a revoke attempt.
     pub async fn disconnect(self: &Arc<Self>) -> Result<DesktopStatus, ApiError> {
+        if let Some(state) = self.state.upgrade() {
+            state.lyrics_calibration.set_gate(false, true);
+        }
         let epoch = self.close_for_revoke();
         self.disconnect_attempt(epoch).await
     }
@@ -989,7 +1180,7 @@ impl DesktopBridge {
         let delete_keys = lock(&self.lifecycle).cleanup_keys;
         let mut incomplete = self.remove_owned_discovery().is_err();
         if delete_keys {
-            for scope in SCOPES {
+            for scope in ALL_SCOPES {
                 let path = self.directory.join(key_file(scope));
                 match windows::read_private_bounded(&path, 128) {
                     Ok(_) => {
@@ -1105,6 +1296,7 @@ mod tests {
             let name = match request.scope {
                 Scope::Lyrics => discovery.pipes.lyrics.unwrap(),
                 Scope::Wallpaper => discovery.pipes.wallpaper.unwrap(),
+                Scope::LyricsCalibration => discovery.pipes.lyrics_calibration.unwrap(),
             };
             windows::request(&name, std::process::id(), request, &Cancellation::new())
                 .await
@@ -1130,7 +1322,7 @@ mod tests {
     fn authority_rejects_unknown_duplicate_future_and_overflow_without_defaults() {
         for bytes in [
             r#"{"schemaVersion":1,"revision":0,"scopes":[]}"#,
-            r#"{"schemaVersion":2,"revision":1,"scopes":["lyrics"]}"#,
+            r#"{"schemaVersion":3,"revision":1,"scopes":["lyrics"]}"#,
             r#"{"schemaVersion":1,"revision":1,"scopes":["lyrics","lyrics"]}"#,
             r#"{"schemaVersion":1,"revision":1,"scopes":["control"]}"#,
             r#"{"schemaVersion":1,"revision":1,"scopes":[],"enabled":true}"#,
@@ -1185,7 +1377,7 @@ mod tests {
         let fixture = Fixture::new().await;
         for bytes in [
             b"broken".as_slice(),
-            br#"{"schemaVersion":2,"revision":1,"scopes":["lyrics"]}"#.as_slice(),
+            br#"{"schemaVersion":3,"revision":1,"scopes":["lyrics"]}"#.as_slice(),
         ] {
             windows::write_private_atomic(&fixture.directory.join(AUTH_FILE), bytes, 8192).unwrap();
             assert_eq!(
@@ -2020,6 +2212,160 @@ mod tests {
         fixture.finish().await;
     }
 
+    #[tokio::test]
+    async fn calibration_consent_is_explicit_schema_two_and_preserves_read_keys() {
+        let fixture = Fixture::new().await;
+        crate::desktop::Desktop::for_state(&fixture.state).attach_bridge(fixture.bridge.clone());
+        fixture.bridge.connect_authorization().await.unwrap();
+        let read_keys = SCOPES.map(|s| read_key(&fixture.directory, s).unwrap().to_string());
+        assert_eq!(
+            Authorization::read(&fixture.directory)
+                .unwrap()
+                .unwrap()
+                .schema_version,
+            1
+        );
+        assert!(!fixture.bridge.calibration_authorized());
+        assert!(!fixture
+            .directory
+            .join(key_file(Scope::LyricsCalibration))
+            .exists());
+        assert_eq!(
+            fixture
+                .bridge
+                .calibration_authorization(Some(true))
+                .await
+                .unwrap()["authorized"],
+            true
+        );
+        let record = Authorization::read(&fixture.directory).unwrap().unwrap();
+        assert_eq!(record.schema_version, 2);
+        assert_eq!(record.scopes, ALL_SCOPES);
+        let ui_key = read_key(&fixture.directory, Scope::LyricsCalibration).unwrap();
+        assert!(read_keys.iter().all(|key| key.as_str() != ui_key.as_str()));
+        for (i, scope) in SCOPES.into_iter().enumerate() {
+            assert_eq!(
+                read_key(&fixture.directory, scope).unwrap().as_str(),
+                read_keys[i]
+            );
+        }
+        assert_eq!(
+            fixture
+                .bridge
+                .calibration_authorization(Some(false))
+                .await
+                .unwrap()["authorized"],
+            false
+        );
+        assert_eq!(fixture.bridge.status().active_scopes, SCOPES);
+        assert_eq!(
+            Authorization::read(&fixture.directory)
+                .unwrap()
+                .unwrap()
+                .schema_version,
+            2
+        );
+        assert!(!fixture
+            .directory
+            .join(key_file(Scope::LyricsCalibration))
+            .exists());
+        fixture.bridge.connect_authorization().await.unwrap();
+        assert!(!fixture.bridge.calibration_authorized());
+        fixture.finish().await;
+    }
+    #[tokio::test]
+    async fn calibration_revoke_write_failure_closes_ui_but_restores_reading_scopes() {
+        let fixture = Fixture::new().await;
+        crate::desktop::Desktop::for_state(&fixture.state).attach_bridge(fixture.bridge.clone());
+        fixture.bridge.connect_authorization().await.unwrap();
+        fixture
+            .bridge
+            .calibration_authorization(Some(true))
+            .await
+            .unwrap();
+        let old = std::fs::read(fixture.directory.join(AUTH_FILE)).unwrap();
+        let file = OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(fixture.directory.join(AUTH_FILE))
+            .unwrap();
+        assert_eq!(
+            fixture
+                .bridge
+                .calibration_authorization(Some(false))
+                .await
+                .unwrap_err()
+                .code,
+            "desktop_calibration_revocation_incomplete"
+        );
+        assert!(!fixture.bridge.calibration_authorized());
+        assert_eq!(fixture.bridge.status().active_scopes, SCOPES);
+        assert_eq!(
+            std::fs::read(fixture.directory.join(AUTH_FILE)).unwrap(),
+            old
+        );
+        drop(file);
+        fixture
+            .bridge
+            .calibration_authorization(Some(false))
+            .await
+            .unwrap();
+        assert_eq!(
+            Authorization::read(&fixture.directory)
+                .unwrap()
+                .unwrap()
+                .scopes,
+            SCOPES
+        );
+        fixture.finish().await;
+    }
+    #[tokio::test]
+    async fn calibration_later_revoke_supersedes_enable_before_gate_reopens() {
+        let fixture = Fixture::new().await;
+        crate::desktop::Desktop::for_state(&fixture.state).attach_bridge(fixture.bridge.clone());
+        fixture.bridge.connect_authorization().await.unwrap();
+        let (written_tx, written_rx) = tokio::sync::oneshot::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        *lock(&fixture.bridge.after_calibration_write) = Some(Box::new(move || {
+            written_tx.send(()).unwrap();
+            resume_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        }));
+        let enable_bridge = fixture.bridge.clone();
+        let enabling =
+            tokio::spawn(async move { enable_bridge.calibration_authorization(Some(true)).await });
+        tokio::time::timeout(Duration::from_secs(3), written_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        let enable_epoch = lock(&fixture.bridge.gate).epoch;
+        let revoke_bridge = fixture.bridge.clone();
+        let revoking =
+            tokio::spawn(async move { revoke_bridge.calibration_authorization(Some(false)).await });
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while lock(&fixture.bridge.gate).epoch == enable_epoch {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(lock(&fixture.bridge.gate).calibration_disabled);
+        resume_tx.send(()).unwrap();
+        assert_eq!(
+            enabling.await.unwrap().unwrap_err().code,
+            "desktop_operation_cancelled"
+        );
+        assert_eq!(revoking.await.unwrap().unwrap()["authorized"], false);
+        assert!(lock(&fixture.bridge.gate).calibration_disabled);
+        assert_eq!(fixture.bridge.status().active_scopes, SCOPES);
+        assert_eq!(
+            Authorization::read(&fixture.directory)
+                .unwrap()
+                .unwrap()
+                .scopes,
+            SCOPES
+        );
+        fixture.finish().await;
+    }
     #[tokio::test]
     async fn listener_failure_cleans_discovery_and_releases_writer_without_revoking_consent() {
         let fixture = Fixture::new().await;

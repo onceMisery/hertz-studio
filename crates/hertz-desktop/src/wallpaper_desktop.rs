@@ -102,6 +102,7 @@ impl SelectionTask {
 
 pub(super) struct Prepared {
     media: Option<ResolvedMedia>,
+    composition: Option<crate::wallpaper::composition_plan::PreparedComposition>,
     builtin: Option<crate::wallpaper::config::BuiltinState>,
     reference: Option<crate::wallpaper::playlist::FixedVersion>,
     playlist_token: Option<u64>,
@@ -218,12 +219,15 @@ impl App {
             reference,
             playlist,
         } = plan;
-        let (media, builtin) = match content {
+        let (media, builtin, composition) = match content {
             crate::wallpaper::selection_plan::ResolvedSelection::Builtin(state) => {
-                (None, Some(state))
+                (None, Some(state), None)
             }
             crate::wallpaper::selection_plan::ResolvedSelection::Media(media) => {
-                (Some(media), None)
+                (Some(media), None, None)
+            }
+            crate::wallpaper::selection_plan::ResolvedSelection::Composition(plan) => {
+                (None, None, Some(plan))
             }
         };
         let playlist_token = if self.is_mirror_target() {
@@ -238,6 +242,7 @@ impl App {
         self.desktop.prepared = Some(Prepared {
             media,
             builtin,
+            composition,
             reference: Some(reference),
             playlist_token,
             static_poster: false,
@@ -312,6 +317,7 @@ impl App {
                     .then_some(configuration.main().displays.len()),
                 resume: None,
                 properties: configuration.main().properties.clone(),
+                composition_fit: Some(configuration.presentation().fit),
             },
             Arc::clone(&cancel),
             slot,
@@ -407,6 +413,7 @@ impl App {
                             self.desktop.prepared = Some(Prepared {
                                 media: Some(*poster),
                                 builtin: None,
+                                composition: None,
                                 reference: task.reference,
                                 playlist_token: None,
                                 static_poster: true,
@@ -435,12 +442,15 @@ impl App {
             reference,
             playlist,
         } = media;
-        let (media, builtin) = match content {
+        let (media, builtin, composition) = match content {
             crate::wallpaper::selection_plan::ResolvedSelection::Builtin(state) => {
-                (None, Some(state))
+                (None, Some(state), None)
             }
             crate::wallpaper::selection_plan::ResolvedSelection::Media(media) => {
-                (Some(media), None)
+                (Some(media), None, None)
+            }
+            crate::wallpaper::selection_plan::ResolvedSelection::Composition(plan) => {
+                (None, None, Some(plan))
             }
         };
         let playlist_token = task.playlist_switch.as_ref().map(|switch| switch.token);
@@ -471,6 +481,7 @@ impl App {
             self.desktop.prepared = Some(Prepared {
                 media,
                 builtin,
+                composition,
                 reference: Some(reference),
                 playlist_token,
                 static_poster: false,
@@ -575,6 +586,7 @@ impl App {
         self.desktop.prepared = Some(Prepared {
             media: None,
             builtin: None,
+            composition: None,
             reference: None,
             playlist_token: None,
             static_poster: false,
@@ -607,7 +619,9 @@ impl App {
             || monitor_geometry_changed(&monitor, &prepared.monitor)
         {
             let mut prepared = self.desktop.prepared.take().expect("prepared selection");
-            if prepared.media.is_some() && !prepared.static_poster {
+            if (prepared.media.is_some() || prepared.composition.is_some())
+                && !prepared.static_poster
+            {
                 let slot = self
                     .wallpaper_library
                     .reserve()
@@ -665,6 +679,7 @@ impl App {
             prepared.revision,
             prepared.configuration,
             prepared.builtin,
+            prepared.composition,
             prepared.monitor,
             PresentationWindow::Desktop { candidate: true },
         ) {
@@ -797,6 +812,7 @@ impl App {
         Some(Prepared {
             media: Some(surface.session.media()?.poster()?.clone()),
             builtin: None,
+            composition: None,
             reference: surface.runtime_reference.clone(),
             playlist_token: None,
             static_poster: true,
@@ -836,6 +852,7 @@ impl App {
                 self.desktop.prepared = Some(Prepared {
                     media: surface.session.media().cloned(),
                     builtin: None,
+                    composition: None,
                     reference: surface.runtime_reference.clone(),
                     playlist_token: None,
                     static_poster: true,
@@ -934,6 +951,7 @@ impl App {
                     self.desktop.prepared = Some(Prepared {
                         media: None,
                         builtin: None,
+                        composition: None,
                         reference: None,
                         playlist_token: None,
                         static_poster: false,
@@ -1115,7 +1133,13 @@ impl App {
                 .desktop
                 .surface
                 .as_ref()
-                .is_some_and(|surface| surface.session.media().is_some())
+                .is_some_and(|surface| {
+                    surface.session.media().is_some()
+                        || surface
+                            .session
+                            .gl()
+                            .is_some_and(|gl| gl.composition_url().is_some())
+                })
             {
                 self.retire_wallpaper_surface();
                 self.desktop.page_ready = false;

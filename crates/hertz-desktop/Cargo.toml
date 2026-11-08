@@ -37,7 +37,13 @@ windows-sys = { version = "=0.61.2", features = [
   "Win32_Devices_Display",
   "Win32_Foundation",
   "Win32_Graphics_Gdi",
+  "Win32_Security",
+  "Win32_Security_Authorization",
+  "Win32_Security_Isolation",
+  "Win32_System_IO",
+  "Win32_System_JobObjects",
   "Win32_System_LibraryLoader",
+  "Win32_System_Memory",
   "Win32_Storage_FileSystem",
   "Win32_System_Pipes",
   "Win32_System_Power",
@@ -54,6 +60,7 @@ windows-sys = { version = "=0.61.2", features = [
 ] }
 serde = { workspace = true }
 serde_json = { workspace = true }
+uuid = { workspace = true }
 anyhow = { workspace = true }
 dirs = { workspace = true }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json"] }
@@ -87,6 +94,7 @@ windows = { version = "0.62", features = [
   "Win32_Media_Audio",
   "Win32_Security",
   "Win32_System_Com",
+  "Win32_UI_Shell",
 ] }
 # 与 wry/webview2-com 锁定同版本，IStream 才能交给 WebView2（设计 §8.1）。
 webview2-com = "=0.39.1"

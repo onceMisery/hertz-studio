@@ -52,6 +52,9 @@ pub(crate) const PREVIEW_RESERVED_OUTPUT_RATE: u64 = 8_000_000;
 pub(crate) const MAX_DECODE_PIXEL_RATE: u64 = 125_000_000;
 /// 输出像素工作量合计上限：呈现像素×有效 FPS（§12.1/§12.2）。
 pub(crate) const MAX_OUTPUT_PIXEL_RATE: u64 = 120_000_000;
+/// Continuous VideoTexture uploads have their own global bytes/s envelope
+/// (§10.3); a small drawing buffer does not reduce actual source texture traffic.
+pub(crate) const MAX_TEXTURE_UPLOAD_BYTES_PER_SECOND: u64 = 256 * 1024 * 1024;
 /// CPU 常驻解码资产上限（§12.1；导入工作区另计）。
 pub(crate) const MAX_CPU_DECODED_BYTES: u64 = 128 * 1024 * 1024;
 /// 通用共享资源（受信页面纹理池）的 CPU 常驻上限；与解码/准备工作区分开计量，
@@ -104,6 +107,8 @@ pub(crate) struct BudgetRequest {
     pub decode_pixel_rate: u64,
     /// 输出像素率：呈现像素×有效 FPS（Probe 必须为 0）。
     pub output_pixel_rate: u64,
+    /// Actual RGBA source texture bytes × conservative active submit FPS.
+    pub texture_upload_bytes_per_second: u64,
     /// CPU 常驻解码字节。
     pub cpu_bytes: u64,
     pub prepare_cpu_bytes: u64,
@@ -170,6 +175,7 @@ pub(crate) struct BudgetUsage {
     pub preview_instances: u32,
     pub decode_pixel_rate: u64,
     pub output_pixel_rate: u64,
+    pub texture_upload_bytes_per_second: u64,
     pub cpu_bytes: u64,
     pub prepare_cpu_bytes: u64,
     pub asset_cpu_bytes: u64,
@@ -211,6 +217,7 @@ impl Ledger {
             usage.decoder_slots += request.decoders;
             usage.decode_pixel_rate += request.decode_pixel_rate;
             usage.output_pixel_rate += request.output_pixel_rate;
+            usage.texture_upload_bytes_per_second += request.texture_upload_bytes_per_second;
             usage.cpu_bytes += request.cpu_bytes;
             usage.prepare_cpu_bytes += request.prepare_cpu_bytes;
             usage.asset_cpu_bytes += request.asset_cpu_bytes;
@@ -291,6 +298,53 @@ impl BudgetCoordinator {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         Self::grant_locked(&mut ledger, request, None)
+    }
+
+    /// Read-only eventual replacement projection. Active desktop reservations
+    /// are omitted only for native-selected generations; the real ledger keeps
+    /// every byte until its original owner confirms exit. Never grants authority.
+    pub(crate) fn project_desktop_replacement(&self, generations: &[u64]) -> Self {
+        let ledger = self
+            .ledger
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        Self {
+            ledger: Mutex::new(Ledger {
+                next_token: ledger.next_token,
+                revision: ledger.revision,
+                reservations: ledger
+                    .reservations
+                    .iter()
+                    .filter(|entry| {
+                        !(entry.state == ReservationState::Active
+                            && entry.request.owner == OwnerKind::Desktop
+                            && generations.contains(&entry.request.generation))
+                    })
+                    .map(|entry| Reservation {
+                        token: entry.token,
+                        request: entry.request.clone(),
+                        state: entry.state,
+                        allocation_revision: entry.allocation_revision,
+                        resources: None,
+                        children: vec![],
+                    })
+                    .collect(),
+            }),
+        }
+    }
+
+    /// Runs the same atomic shape/quota checks on a private projection, with no
+    /// token/usage change in the original owner. Discovery is advisory only.
+    pub(crate) fn check_requests(&self, requests: &[BudgetRequest]) -> Result<(), BudgetRejection> {
+        let projection = self.project_desktop_replacement(&[]);
+        let mut ledger = projection
+            .ledger
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        for request in requests {
+            Self::grant_locked(&mut ledger, request, None)?;
+        }
+        Ok(())
     }
 
     fn grant_locked(
@@ -402,6 +456,18 @@ impl BudgetCoordinator {
                 usage.decode_pixel_rate,
                 request.decode_pixel_rate,
                 "选择已准备的低分辨率/低帧率变体（§12.1 按编码尺寸计）",
+            ));
+        }
+        if request.texture_upload_bytes_per_second
+            > MAX_TEXTURE_UPLOAD_BYTES_PER_SECOND
+                .saturating_sub(usage.texture_upload_bytes_per_second)
+        {
+            return Err(Ledger::reject(
+                "texture_upload_bytes_per_second",
+                MAX_TEXTURE_UPLOAD_BYTES_PER_SECOND,
+                usage.texture_upload_bytes_per_second,
+                request.texture_upload_bytes_per_second,
+                "选择已准备的更小视频变体或减少组合提交帧率",
             ));
         }
         if request.output_pixel_rate > 0 && request.owner != OwnerKind::Preview {
@@ -533,6 +599,7 @@ impl BudgetCoordinator {
             || request.decoders != 0
             || request.decode_pixel_rate != 0
             || request.output_pixel_rate != 0
+            || request.texture_upload_bytes_per_second != 0
             || request.prepare_tasks != 0)
         {
             return Err(Ledger::reject(
@@ -551,6 +618,19 @@ impl BudgetCoordinator {
                 requested: request.output_pixel_rate,
                 message: "探测不呈现：output_pixel_rate 只允许 Desktop/Preview 申请".into(),
             });
+        }
+        if request.texture_upload_bytes_per_second != 0
+            && (request.contexts == 0
+                || request.decoders == 0
+                || !matches!(request.owner, OwnerKind::Desktop | OwnerKind::Preview))
+        {
+            return Err(Ledger::reject(
+                "request_shape",
+                0,
+                0,
+                request.texture_upload_bytes_per_second,
+                "持续纹理上传仅属于具有视频解码器的组合 GL 呈现",
+            ));
         }
         if request.transcode_slots > MAX_TRANSCODE_SLOTS {
             return Err(BudgetRejection {

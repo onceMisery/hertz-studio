@@ -26,6 +26,9 @@ fn static_preview_storage_cannot_create_a_renderer_or_decoder() {
     request.output_pixel_rate = 0;
     request.decode_pixel_rate = 1;
     assert!(budget.grant(&request).is_err());
+    request.decode_pixel_rate = 0;
+    request.texture_upload_bytes_per_second = 1;
+    assert!(budget.grant(&request).is_err());
     assert_eq!(budget.usage(), Default::default());
 }
 
@@ -41,12 +44,98 @@ fn req(owner: OwnerKind, session: &str) -> BudgetRequest {
         transcode_slots: 0,
         decode_pixel_rate: 0,
         output_pixel_rate: 0,
+        texture_upload_bytes_per_second: 0,
         cpu_bytes: 0,
         prepare_cpu_bytes: 0,
         asset_cpu_bytes: 0,
         gpu_bytes: 0,
         prepare_tasks: 0,
     }
+}
+
+#[test]
+fn video_upload_rate_is_independent_global_and_held_until_real_exit() {
+    use super::MAX_TEXTURE_UPLOAD_BYTES_PER_SECOND;
+    let budget = BudgetCoordinator::new();
+    let mut full_hd = req(OwnerKind::Desktop, "full-hd-small-output");
+    full_hd.contexts = 1;
+    full_hd.decoders = 1;
+    full_hd.decode_pixel_rate = 1920 * 1080 * 60;
+    full_hd.output_pixel_rate = 64 * 64 * 60;
+    full_hd.gpu_bytes = 1920 * 1080 * 8 + 64 * 64 * 16;
+    full_hd.texture_upload_bytes_per_second = 1920 * 1080 * 4 * 60;
+    assert!(full_hd.decode_pixel_rate < MAX_DECODE_PIXEL_RATE);
+    assert!(full_hd.output_pixel_rate < MAX_OUTPUT_PIXEL_RATE);
+    assert!(full_hd.gpu_bytes < MAX_GPU_TRACKED_BYTES);
+    let rejection = budget.grant(&full_hd).unwrap_err();
+    assert_eq!(rejection.quota, "texture_upload_bytes_per_second");
+    assert_eq!(rejection.cap, MAX_TEXTURE_UPLOAD_BYTES_PER_SECOND);
+    assert_eq!(budget.usage(), Default::default());
+    let mut overflow = full_hd.clone();
+    overflow.texture_upload_bytes_per_second = u64::MAX;
+    assert_eq!(budget.grant(&overflow).unwrap_err().quota, "texture_upload_bytes_per_second");
+
+    let mut desktop = full_hd.clone();
+    desktop.session = "desktop-upload".into();
+    desktop.decode_pixel_rate = 0;
+    desktop.texture_upload_bytes_per_second = MAX_TEXTURE_UPLOAD_BYTES_PER_SECOND / 2 + 1;
+    let desktop_token = budget.grant(&desktop).unwrap();
+    let mut preview = desktop.clone();
+    preview.session = "preview-upload".into();
+    preview.owner = OwnerKind::Preview;
+    preview.targets = 0;
+    preview.texture_upload_bytes_per_second = MAX_TEXTURE_UPLOAD_BYTES_PER_SECOND / 2;
+    assert_eq!(
+        budget.grant(&preview).unwrap_err().quota,
+        "texture_upload_bytes_per_second"
+    );
+    assert_eq!(
+        budget.usage().texture_upload_bytes_per_second,
+        MAX_TEXTURE_UPLOAD_BYTES_PER_SECOND / 2 + 1
+    );
+    let mut additional = req(OwnerKind::Desktop, "additional-upload");
+    additional.contexts = 1;
+    additional.decoders = 1;
+    additional.texture_upload_bytes_per_second = 1;
+    assert_eq!(
+        budget.release(desktop_token, "desktop-upload", 2),
+        Err(LedgerError::GenerationMismatch)
+    );
+    budget.release(desktop_token, "desktop-upload", 1).unwrap();
+    assert_eq!(
+        budget.usage().texture_upload_bytes_per_second,
+        MAX_TEXTURE_UPLOAD_BYTES_PER_SECOND / 2 + 1
+    );
+    assert_eq!(
+        budget.grant(&preview).unwrap_err().quota,
+        "texture_upload_bytes_per_second"
+    );
+    assert_eq!(
+        budget
+            .project_desktop_replacement(&[1])
+            .grant(&preview)
+            .unwrap_err()
+            .quota,
+        "texture_upload_bytes_per_second"
+    );
+    budget
+        .confirm_exit(desktop_token, "desktop-upload", 1)
+        .unwrap();
+    assert_eq!(budget.usage().texture_upload_bytes_per_second, 0);
+    let preview_token = budget.grant(&preview).unwrap();
+    assert_eq!(
+        budget.grant(&desktop).unwrap_err().quota,
+        "texture_upload_bytes_per_second"
+    );
+    budget.grant(&additional).unwrap();
+    assert_eq!(
+        budget.confirm_exit(preview_token, "preview-upload", 2),
+        Err(LedgerError::GenerationMismatch)
+    );
+    assert_eq!(
+        budget.usage().texture_upload_bytes_per_second,
+        MAX_TEXTURE_UPLOAD_BYTES_PER_SECOND / 2 + 1
+    );
 }
 
 #[test]

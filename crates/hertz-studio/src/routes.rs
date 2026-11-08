@@ -346,6 +346,16 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/v1/overlay/lyric", get(overlay_lyric))
         // 独立形态的桌面歌词组件启动入口；组件固定来自服务同目录，不接受路径参数。
         .route("/v1/desktop/capabilities", get(desktop_capabilities))
+        .route(
+            "/v1/desktop/calibration-authorization",
+            get(calibration_authorization_get).post(calibration_authorization_set),
+        )
+        .route(
+            "/v1/desktop/calibration-ui",
+            post(calibration_ui).layer(axum::extract::DefaultBodyLimit::max(
+                crate::lyrics_calibration::LIMIT,
+            )),
+        )
         .route("/v1/desktop/lyrics/launch", post(launch_desktop_lyrics))
         .route(
             "/v1/desktop/wallpaper/launch",
@@ -385,6 +395,19 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
             require_desktop_lyrics_key,
         ));
 
+    let calibration = Router::new()
+        .route(
+            "/v1/desktop-lyrics/calibration/{op}",
+            post(calibration_narrow),
+        )
+        .layer(axum::extract::DefaultBodyLimit::max(
+            crate::lyrics_calibration::LIMIT,
+        ))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_calibration_key,
+        ));
+
     // 壁纸只读桥：独立钥匙、独立路由组；只放行快照与事件流。
     let wallpaper = Router::new()
         .route("/v1/wallpaper/snapshot", get(wallpaper_snapshot))
@@ -415,6 +438,7 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .merge(crate::stage_media::resource_router())
         .merge(ai_restricted)
         .merge(desktop_lyrics)
+        .merge(calibration)
         .merge(wallpaper)
         .merge(desktop_mini)
 }
@@ -635,6 +659,63 @@ async fn require_desktop_lyrics_key(
         }
         _ => unauthorized().into_response(),
     }
+}
+
+async fn require_calibration_key(
+    State(state): State<Arc<AppState>>,
+    request: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    let key = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok())
+        .and_then(|h| h.strip_prefix("LyricsCalibration "));
+    if request.method() != axum::http::Method::POST
+        || !key.is_some_and(|k| state.lyrics_calibration.authenticate(&state, k))
+    {
+        return unauthorized().into_response();
+    }
+    next.run(request).await
+}
+async fn calibration_narrow(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(op): axum::extract::Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(
+        state.lyrics_calibration.receive(&state, &op, body).await?,
+    ))
+}
+async fn calibration_ui(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(state.lyrics_calibration.ui(&state, body)?))
+}
+async fn calibration_authorization_get(
+    State(state): State<Arc<AppState>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(
+        crate::desktop::Desktop::for_state(&state)
+            .calibration_authorization(None)
+            .await?,
+    ))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CalibrationAuthorization {
+    pub(crate) enabled: bool,
+}
+async fn calibration_authorization_set(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<CalibrationAuthorization>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(
+        crate::desktop::Desktop::for_state(&state)
+            .calibration_authorization(Some(body.enabled))
+            .await?,
+    ))
 }
 
 /// 壁纸的原生宿主鉴权。`Authorization: Wallpaper <key>` 与其余凭据互不通用。

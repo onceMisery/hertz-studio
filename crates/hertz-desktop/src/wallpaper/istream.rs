@@ -47,6 +47,8 @@ pub(crate) struct MediaIStream {
 
 struct StreamState {
     file: Option<MediaFileStream>,
+    payload: Option<Arc<[u8]>>,
+    payload_slot: Option<super::media_stream::StreamSlot>,
     position: u64,
     permit: Option<ReadPermit>,
 }
@@ -60,11 +62,13 @@ impl StreamState {
         {
             // 此锁也包围 Read；真实读取退出后才关闭句柄、归还流槽。
             self.file.take();
+            self.payload.take();
+            self.payload_slot.take();
             // 浏览器可继续持有 COM 外壳；它不能继续持有 staging pin 或活动计数。
             self.permit.take();
             return Err(STG_E_ACCESSDENIED.into());
         }
-        if self.file.is_none() {
+        if self.file.is_none() && self.payload.is_none() {
             return Err(STG_E_ACCESSDENIED.into());
         }
         Ok(())
@@ -130,6 +134,8 @@ impl MediaIStream {
         }
         let stream = Arc::new(Mutex::new(StreamState {
             file: Some(stream),
+            payload: None,
+            payload_slot: None,
             position: 0,
             permit,
         }));
@@ -145,6 +151,36 @@ impl MediaIStream {
             pool: Arc::clone(pool),
             base: window.0,
             len: window.1,
+        }
+        .into())
+    }
+
+    /// Native IR bytes share the existing read-only agile stream and eight-slot
+    /// pool. Clone shares immutable bytes and acquires its own cursor/permit.
+    pub(crate) fn from_payload(
+        payload: Arc<[u8]>,
+        permit: ReadPermit,
+        pool: &Arc<StreamSlotPool>,
+    ) -> Result<IStream> {
+        let len = payload.len() as u64;
+        let stream = Arc::new(Mutex::new(StreamState {
+            file: None,
+            payload: Some(payload),
+            payload_slot: Some(pool.acquire().map_err(stream_error)?),
+            position: 0,
+            permit: Some(permit),
+        }));
+        stream.lock().map_err(lock_poisoned)?.check_access()?;
+        let mut registry = registry().lock().unwrap_or_else(|error| error.into_inner());
+        registry.retain(|entry| entry.strong_count() > 0);
+        registry.push(Arc::downgrade(&stream));
+        drop(registry);
+        Ok(Self {
+            stream,
+            path: PathBuf::new(),
+            pool: Arc::clone(pool),
+            base: 0,
+            len,
         }
         .into())
     }
@@ -188,6 +224,18 @@ impl ISequentialStream_Impl for MediaIStream_Impl {
                 return error.code();
             }
             let offset = self.base + stream.position;
+            if let Some(payload) = &stream.payload {
+                let count = want - read;
+                slice[read..].copy_from_slice(&payload[offset as usize..offset as usize + count]);
+                stream.position += count as u64;
+                read += count;
+                if !pcb_read.is_null() {
+                    unsafe {
+                        *pcb_read = read as u32;
+                    }
+                }
+                continue;
+            }
             match stream
                 .file
                 .as_mut()
@@ -308,19 +356,27 @@ impl IStream_Impl for MediaIStream_Impl {
 
     /// 独立游标（§8.1/C59）：新句柄 + 对齐克隆时刻的位置，此后互不影响。
     fn Clone(&self) -> Result<IStream> {
-        let (position, permit) = {
+        let (position, permit, payload) = {
             let mut stream = self.stream.lock().map_err(lock_poisoned)?;
             stream.check_access()?;
-            (stream.position, stream.permit.clone())
+            (
+                stream.position,
+                stream.permit.clone(),
+                stream.payload.clone(),
+            )
         };
-        let file = MediaFileStream::open(&self.path, &self.pool).map_err(stream_error)?;
-        let clone = MediaIStream::from_file_with_permit(
-            file,
-            self.path.clone(),
-            &self.pool,
-            (self.base, self.len),
-            permit,
-        )?;
+        let clone = if let Some(payload) = payload {
+            MediaIStream::from_payload(payload, permit.ok_or(STG_E_ACCESSDENIED)?, &self.pool)?
+        } else {
+            let file = MediaFileStream::open(&self.path, &self.pool).map_err(stream_error)?;
+            MediaIStream::from_file_with_permit(
+                file,
+                self.path.clone(),
+                &self.pool,
+                (self.base, self.len),
+                permit,
+            )?
+        };
         unsafe {
             clone.Seek(position as i64, STREAM_SEEK_SET, None)?;
         }

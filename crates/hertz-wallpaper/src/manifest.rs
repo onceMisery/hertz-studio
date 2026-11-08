@@ -199,8 +199,16 @@ impl Manifest {
         match &self.content {
             Content::Image { asset } | Content::Video { asset } => Some(asset),
             Content::Builtin { .. } => None,
+            Content::Composition { .. } | Content::Web { .. } => None,
+        }
+    }
+
+    /// Composition/Web entry points name indexed package files, not media IDs.
+    pub fn content_file(&self) -> Option<&str> {
+        match &self.content {
             Content::Composition { document } => Some(document),
             Content::Web { entry, .. } => Some(entry),
+            _ => None,
         }
     }
 }
@@ -414,6 +422,24 @@ pub fn validate_manifest(manifest: &Manifest) -> Result<()> {
             return Err(PackageError::new(
                 "missing_asset",
                 format!("content 引用了未声明的资源：{asset_id}"),
+            ));
+        }
+    }
+    if let Some(path) = manifest.content_file() {
+        validate_referenced_file(manifest, "content", path)?;
+        let file = manifest.file(path).expect("verified indexed file");
+        let (mime, limit) = match manifest.content {
+            Content::Composition { .. } => (
+                "application/json",
+                crate::document::MAX_DOCUMENT_BYTES as u64,
+            ),
+            Content::Web { .. } => ("text/html", crate::MAX_TEXT_BYTES),
+            _ => unreachable!("file entry content"),
+        };
+        if file.mime != mime || file.bytes > limit {
+            return Err(PackageError::new(
+                "invalid_content_file",
+                "内容入口 MIME 或字节数不满足合同",
             ));
         }
     }

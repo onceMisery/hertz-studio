@@ -9,6 +9,8 @@ use std::io;
 pub enum Scope {
     Lyrics,
     Wallpaper,
+    #[serde(rename = "lyricsCalibration")]
+    LyricsCalibration,
 }
 
 impl Scope {
@@ -16,6 +18,7 @@ impl Scope {
         match self {
             Self::Lyrics => "lyrics",
             Self::Wallpaper => "wallpaper",
+            Self::LyricsCalibration => "lyricsCalibration",
         }
     }
 }
@@ -52,7 +55,43 @@ impl Request {
     /// generation and session before invoking its existing projection owner.
     pub fn validate(&self, scope: Scope, session: &str) -> io::Result<()> {
         let valid_params = match (scope, self.op.as_str()) {
-            (_, "snapshot") => self.params.as_object().is_some_and(|p| p.is_empty()),
+            (Scope::Lyrics | Scope::Wallpaper, "snapshot") => {
+                self.params.as_object().is_some_and(|p| p.is_empty())
+            }
+            (Scope::LyricsCalibration, "bind") => self.params.as_object().is_some_and(|p| {
+                p.len() == 5
+                    && p.get("deadlineClock").and_then(Value::as_str).is_some()
+                    && p.get("deadlineMonotonicMs")
+                        .and_then(Value::as_u64)
+                        .is_some()
+                    && p.get("nativeSession").and_then(Value::as_str).is_some()
+                    && p.get("requestSequence").and_then(Value::as_u64).is_some()
+                    && p.get("session").and_then(Value::as_str).is_some()
+            }),
+            (Scope::LyricsCalibration, "request") => self.params.as_object().is_some_and(|p| {
+                p.keys().all(|k| {
+                    matches!(
+                        k.as_str(),
+                        "version"
+                            | "requestId"
+                            | "bindingId"
+                            | "requestSequence"
+                            | "remainingMs"
+                            | "deadlineClock"
+                            | "deadlineMonotonicMs"
+                            | "session"
+                            | "trackId"
+                            | "generation"
+                    )
+                })
+            }),
+            (Scope::LyricsCalibration, "result" | "cancel") => {
+                self.params.as_object().is_some_and(|p| {
+                    p.len() == 2
+                        && p.get("bindingId").and_then(Value::as_str).is_some()
+                        && p.get("requestId").and_then(Value::as_str).is_some()
+                })
+            }
             (Scope::Lyrics, "document") => self.params.as_object().is_some_and(|p| {
                 p.keys()
                     .all(|key| matches!(key.as_str(), "key" | "vocalSchemaVersion"))
@@ -71,6 +110,8 @@ impl Request {
             || self.request_id.len() > 128
             || self.key.is_empty()
             || !valid_params
+            || scope == Scope::LyricsCalibration
+                && serde_json::to_vec(self).map_or(true, |bytes| bytes.len() > 4096)
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -78,6 +119,45 @@ impl Request {
             ));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod calibration_tests {
+    use super::*;
+    #[test]
+    fn calibration_wire_deadline_is_bounded_and_never_grants_read_ops() {
+        let mut request = Request {
+            bridge_protocol: BRIDGE_PROTOCOL,
+            request_id: "transport-id".into(),
+            server_instance_id: "source-session".into(),
+            scope: Scope::LyricsCalibration,
+            key: "a".repeat(64),
+            op: "bind".into(),
+            params: serde_json::json!({"deadlineClock":crate::monotonic::CLOCK,"deadlineMonotonicMs":5000,"nativeSession":"d558a440-4a52-4c70-9411-e4bff1fe9a7f","requestSequence":1,"session":"source-session"}),
+        };
+        assert!(request
+            .validate(Scope::LyricsCalibration, "source-session")
+            .is_ok());
+        request.op = "request".into();
+        request.params = serde_json::json!({"version":1,"requestId":"ui-request","bindingId":"binding","requestSequence":1,"remainingMs":5000,"deadlineClock":crate::monotonic::CLOCK,"deadlineMonotonicMs":5000,"session":"source-session","trackId":"t".repeat(512),"generation":"18446744073709551615"});
+        assert!(request
+            .validate(Scope::LyricsCalibration, "source-session")
+            .is_ok());
+        assert!(crate::frame::serialize_bounded(&request, 4096).is_ok());
+        request.params["generation"] = "g".repeat(4096).into();
+        assert!(request
+            .validate(Scope::LyricsCalibration, "source-session")
+            .is_err());
+        request.op = "snapshot".into();
+        request.params = serde_json::json!({});
+        assert!(request
+            .validate(Scope::LyricsCalibration, "source-session")
+            .is_err());
+        request.scope = Scope::Lyrics;
+        assert!(request.validate(Scope::Lyrics, "source-session").is_ok());
+        request.op = "bind".into();
+        assert!(request.validate(Scope::Lyrics, "source-session").is_err());
     }
 }
 
@@ -158,6 +238,12 @@ pub struct Pipes {
     pub lyrics: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wallpaper: Option<String>,
+    #[serde(
+        default,
+        rename = "lyricsCalibration",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub lyrics_calibration: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -184,8 +270,13 @@ impl Discovery {
             || uuid::Uuid::parse_str(&self.server_instance_id).is_err()
             || self.build_id.is_empty()
             || self.desktop_build_id.is_empty()
-            || self.pipes.lyrics.is_none() && self.pipes.wallpaper.is_none()
+            || self.pipes.lyrics.is_none()
+                && self.pipes.wallpaper.is_none()
+                && self.pipes.lyrics_calibration.is_none()
             || self.pipes.lyrics.is_some() && self.pipes.lyrics == self.pipes.wallpaper
+            || self.pipes.lyrics_calibration.is_some()
+                && (self.pipes.lyrics_calibration == self.pipes.lyrics
+                    || self.pipes.lyrics_calibration == self.pipes.wallpaper)
             || self.source.normalized()? != selected.normalized()?
             || !matches!(self.source, Profile::Dbx { .. })
         {
@@ -201,9 +292,13 @@ impl Discovery {
                 "desktop discovery Windows session mismatch",
             ));
         }
-        for pipe in [&self.pipes.lyrics, &self.pipes.wallpaper]
-            .into_iter()
-            .flatten()
+        for pipe in [
+            &self.pipes.lyrics,
+            &self.pipes.wallpaper,
+            &self.pipes.lyrics_calibration,
+        ]
+        .into_iter()
+        .flatten()
         {
             #[cfg(windows)]
             crate::windows::validate_pipe_name(pipe)?;

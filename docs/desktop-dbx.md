@@ -1,5 +1,9 @@
 # DBX 接入桌面歌词与壁纸：后续设计
 
+2026-11-08 配套构建身份补全：原 `build-support/desktop-build.rs` 现在将 `hertz-wallpaper` 的源码、清单与合同，以及原页面资源账本 `stage-resource-budget.js` 纳入 `desktopBuildId`。这些依赖变化会更新配套身份；实际字节变化和新增依赖文件的两项身份检查已通过，缺输入变异会被拒绝。新组件与插件仍需按同一身份重新构建和验收，历史候选记录保留其原身份。
+
+2026-11-08 校准协议增量：已按批准的[校准方案](aegis/specs/2026-11-08-desktop-lyrics-calibration-design.md)及[配套构建边界 A](aegis/specs/2026-11-08-a10-legacy-dbx-build-compatibility-review.md)实施。schema1保留原阅读授权，schema2的独立校准 UI scope 需要显式同意；旧组件/旧插件的构建拒绝仍先于任何业务请求，不支持未经设计的组件独立升级。活浮窗使用原校准 controller，既有工作台 SDK 的唯一 context marker 指向完整播放器接收端，旧 register/claim/renew 回调不能影响新 context；没有合格存活接收端则明确不可用。原生产 UI 分支和20项浏览器回归已通过独立复审，实际0.6.35/0.6.47工作台交接与最终配套发行资格尚未取得；旧版 PluginHost/阅读报告不覆盖本增量。
+
 2026-11-07 A10实施扩展：原v1只读信封的lyrics document params可增加整数 `vocalSchemaVersion:1`，实际白名单、共享生产投影与原生统一校验已同步。仅来源快照声明 `vocalSchemaVersions:[1]`时发送该参数；无能力的旧来源保持原请求。声部文档缺失/不匹配能力时422明确拒绝且无正文，普通文档仍旧形状；不扩scope或播控权限。新候选的真实最低/当前宿主和图形验证仍单独待验，旧报告不证明本扩展已发布。
 
 日期：2026-10-27；设计复核与实施：2026-10-28–29，基线为 `1d042b8` 与当前工作树，包含已落地的歌词工具条。状态：**D0–D2 已实现并通过两阶段审查，D3a 同源配套候选和交付材料已准备；D3b 完整发布验收待完成**。独立组件启动方式固定为 manual，不能据分项通过宣称正式交付。实施进度与证据见[实施记录](./plans/2026-10-28-dbx-desktop-implementation.md)、[验证记录](./plans/2026-10-28-dbx-desktop-evidence.md)及[D-A01–D-A18 验收审计](./plans/2026-10-29-dbx-desktop-acceptance-audit.md)。

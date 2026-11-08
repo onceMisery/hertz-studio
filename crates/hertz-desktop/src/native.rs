@@ -1312,6 +1312,30 @@ pub(crate) fn acquire_single_instance() -> Option<HANDLE> {
 
 /// 把窗口挂到 Explorer 的 WorkerW 图标层之后，并放到指定显示器的完整矩形。
 pub(crate) fn mount_wallpaper(hwnd: HWND, monitor: &WallpaperMonitor) -> Result<()> {
+    mount_wallpaper_checked(hwnd, std::process::id(), monitor).map(|_| ())
+}
+
+/// Parent-side admission for a held worker process. Win32 return values and
+/// the resulting owner, parent, style and screen rectangle are all checked.
+/// Ordinary trusted wallpaper windows use the same implementation.
+pub(crate) fn mount_wallpaper_checked(
+    hwnd: HWND,
+    expected_pid: u32,
+    monitor: &WallpaperMonitor,
+) -> Result<serde_json::Value> {
+    use windows_sys::Win32::Foundation::{GetLastError, SetLastError};
+    if expected_pid == 0 || unsafe { IsWindow(hwnd) } == 0 {
+        bail!("壁纸窗口身份无效");
+    }
+    let mut owner_pid = 0;
+    if unsafe { GetWindowThreadProcessId(hwnd, &mut owner_pid) } == 0 || owner_pid != expected_pid {
+        bail!("壁纸窗口不属于当前受理的进程");
+    }
+    let right = monitor.left.checked_add(monitor.width);
+    let bottom = monitor.top.checked_add(monitor.height);
+    if monitor.width <= 0 || monitor.height <= 0 || right.is_none() || bottom.is_none() {
+        bail!("壁纸目标矩形无效");
+    }
     const REQUEST_WORKERW: u32 = 0x052C;
     let class = to_wide("Progman");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
@@ -1326,7 +1350,7 @@ pub(crate) fn mount_wallpaper(hwnd: HWND, monitor: &WallpaperMonitor) -> Result<
         std::thread::sleep(std::time::Duration::from_millis(200));
     };
     let mut result = 0usize;
-    unsafe {
+    if unsafe {
         SendMessageTimeoutW(
             progman,
             REQUEST_WORKERW,
@@ -1335,7 +1359,10 @@ pub(crate) fn mount_wallpaper(hwnd: HWND, monitor: &WallpaperMonitor) -> Result<
             SMTO_NORMAL,
             1000,
             &mut result,
-        );
+        )
+    } == 0
+    {
+        bail!("请求 WorkerW 失败：{}", std::io::Error::last_os_error());
     }
     let workerw = loop {
         if let Some(workerw) = find_wallpaper_workerw(progman) {
@@ -1364,7 +1391,7 @@ pub(crate) fn mount_wallpaper(hwnd: HWND, monitor: &WallpaperMonitor) -> Result<
     let worker_x = vx - progman_rect.left;
     let worker_y = vy - progman_rect.top;
     unsafe {
-        SetWindowPos(
+        if SetWindowPos(
             workerw,
             HWND_BOTTOM,
             worker_x,
@@ -1372,11 +1399,17 @@ pub(crate) fn mount_wallpaper(hwnd: HWND, monitor: &WallpaperMonitor) -> Result<
             vw,
             vh,
             SWP_NOACTIVATE,
-        );
-        strip_title_bar(hwnd);
-        install_wallpaper_style(hwnd);
-        SetParent(hwnd, workerw);
-        SetWindowPos(
+        ) == 0
+        {
+            bail!("定位 WorkerW 失败：{}", std::io::Error::last_os_error());
+        }
+        install_wallpaper_style(hwnd)?;
+        // A null previous parent is legal. Clear last-error before this API.
+        SetLastError(0);
+        if SetParent(hwnd, workerw).is_null() && GetLastError() != 0 {
+            bail!("挂载壁纸窗口失败：{}", std::io::Error::last_os_error());
+        }
+        if SetWindowPos(
             hwnd,
             HWND_BOTTOM,
             monitor.left - vx,
@@ -1384,10 +1417,33 @@ pub(crate) fn mount_wallpaper(hwnd: HWND, monitor: &WallpaperMonitor) -> Result<
             monitor.width,
             monitor.height,
             SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_FRAMECHANGED,
-        );
+        ) == 0
+        {
+            bail!("定位壁纸窗口失败：{}", std::io::Error::last_os_error());
+        }
         ShowWindow(hwnd, SW_SHOW);
     }
-    Ok(())
+    let parent = unsafe { GetParent(hwnd) };
+    let actual = window_rect(hwnd).ok_or_else(|| anyhow::anyhow!("读取壁纸矩形失败"))?;
+    let mut final_pid = 0;
+    unsafe { GetWindowThreadProcessId(hwnd, &mut final_pid) };
+    if parent != workerw
+        || class_name(parent) != "WorkerW"
+        || final_pid != expected_pid
+        || unsafe { IsWindowVisible(hwnd) } == 0
+        || actual.left != monitor.left
+        || actual.top != monitor.top
+        || Some(actual.right) != right
+        || Some(actual.bottom) != bottom
+    {
+        bail!("壁纸挂载读回不符：父窗口、归属、可见性或矩形未兑现");
+    }
+    Ok(serde_json::json!({
+        "hwnd": hwnd as usize, "pid": final_pid,
+        "parentHwnd": parent as usize, "parentClass": "WorkerW",
+        "rect": [actual.left, actual.top, actual.right, actual.bottom],
+        "visible": true
+    }))
 }
 
 /// Keep a candidate composited but unobtrusive until its native first-frame gate opens.
@@ -1442,7 +1498,8 @@ fn find_wallpaper_workerw(progman: HWND) -> Option<HWND> {
     (unsafe { IsWindow(candidate) } != 0).then_some(candidate)
 }
 
-fn install_wallpaper_style(hwnd: HWND) {
+fn install_wallpaper_style(hwnd: HWND) -> Result<()> {
+    use windows_sys::Win32::Foundation::{GetLastError, SetLastError};
     let style =
         unsafe { GetWindowLongPtrW(hwnd, windows_sys::Win32::UI::WindowsAndMessaging::GWL_STYLE) }
             as u32;
@@ -1450,21 +1507,35 @@ fn install_wallpaper_style(hwnd: HWND) {
         & !(WS_POPUP | WS_CAPTION | WS_THICKFRAME | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX))
         | WS_CHILD;
     unsafe {
-        SetWindowLongPtrW(
+        SetLastError(0);
+        if SetWindowLongPtrW(
             hwnd,
             windows_sys::Win32::UI::WindowsAndMessaging::GWL_STYLE,
             next as isize,
-        );
+        ) == 0
+            && GetLastError() != 0
+        {
+            bail!("设置壁纸窗口样式失败：{}", std::io::Error::last_os_error());
+        }
     }
     let ex = ex_style(hwnd);
     let next_ex = (ex | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE) & !WS_EX_APPWINDOW;
     unsafe {
-        SetWindowLongPtrW(
+        SetLastError(0);
+        if SetWindowLongPtrW(
             hwnd,
             windows_sys::Win32::UI::WindowsAndMessaging::GWL_EXSTYLE,
             next_ex as isize,
-        );
+        ) == 0
+            && GetLastError() != 0
+        {
+            bail!("设置壁纸扩展样式失败：{}", std::io::Error::last_os_error());
+        }
     }
+    if unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) } as u32 != next || ex_style(hwnd) != next_ex {
+        bail!("壁纸窗口样式读回不符");
+    }
+    Ok(())
 }
 
 pub(crate) fn point_in_work_area(point: POINT, area: &WorkArea) -> bool {

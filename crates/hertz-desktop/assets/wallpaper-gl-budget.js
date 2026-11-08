@@ -4,9 +4,11 @@
   'use strict';
   var native = !!window.__hertzWallpaperBinding;
   var allocation = window.__hertzWallpaperGlAllocation || null;
+  var composition = !!(allocation && allocation.composition);
+  var backbufferBpp = composition ? 8 : 16;
   var contexts = new Set(), waiters = [], failed = null;
   var originalGetContext = HTMLCanvasElement.prototype.getContext;
-  var peakBytes = 0, uploads = 0;
+  var peakBytes = 0, uploads = 0, blockedFrames = 0;
   function fail(message) {
     if (!failed) {
       failed = 'gl_budget: ' + message;
@@ -23,7 +25,7 @@
     && integer(sharedAssets.cpuBytes) && sharedAssets.cpuBytes >= sharedAssets.maxEntries * sharedAssets.maxEntryBytes;
   if (native && allocation && !sharedAssetsValid) sharedAssets = null;
   var assetEntries = new Map(), assetToken = 0;
-  if (sharedAssets) {
+  if (sharedAssets && !composition) {
     Object.defineProperty(window, 'HertzSharedAssets', { value: Object.freeze({
       admit: function (kind) {
         if (failed) throw new Error(failed);
@@ -181,7 +183,7 @@
     wrap('renderbufferStorageMultisample',function(run,args){return replace(gl.getParameter(gl.RENDERBUFFER_BINDING),bytesProduct(args[3],args[4],Math.max(1,args[1]),formatBytes(gl,args[2],null,null)),()=>run.apply(gl,args));});
     function backbuffer(width,height,run) {
       if(bytesProduct(width,height)>allocation.pixelBudget)fail('drawing buffer exceeds native pixel reservation');
-      var bytes=bytesProduct(width,height,16),old=state.backbufferBytes||0;
+      var bytes=bytesProduct(width,height,backbufferBpp),old=state.backbufferBytes||0;
       check(state,state.bytes-old+bytes,state.objects.size);var result=run();state.bytes+=bytes-old;state.backbufferBytes=bytes;return result;
     }
     ['width','height'].forEach(function(key){
@@ -192,7 +194,7 @@
         // Three changes width and height separately. The final size must be admitted before draw,
         // but every intermediate allocation is still charged against GPU bytes.
         var width=key==='width'?value:canvas.width,height=key==='height'?value:canvas.height;
-        var bytes=bytesProduct(width,height,16),old=state.backbufferBytes||0;
+        var bytes=bytesProduct(width,height,backbufferBpp),old=state.backbufferBytes||0;
         state.poll();
         check(state,state.bytes+bytes,state.objects.size);
         state.bytes+=bytes;state.backbufferBytes=bytes;
@@ -229,22 +231,42 @@
       for(var state of contexts)if(state.canvas===this)return type==='webgl2'?state.gl:null;
       if(contexts.size>=1)fail('previous GL context has not exited');
       if(type!=='webgl2')return null;
-      if(bytesProduct(this.width,this.height)>allocation.pixelBudget||bytesProduct(this.width,this.height,16)>allocation.gpuBytes)fail('initial drawing buffer exceeds reservation');
+      if(bytesProduct(this.width,this.height)>allocation.pixelBudget||bytesProduct(this.width,this.height,backbufferBpp)>allocation.gpuBytes)fail('initial drawing buffer exceeds reservation');
       var gl=originalGetContext.call(this,type,Object.assign({},options,{antialias:false}));
       return gl?guard(gl,this):null;
     };
     if(allocation && (allocation.generation!==window.__hertzWallpaperBinding.generation
       || !integer(allocation.pixelBudget) || allocation.pixelBudget<1
       || !integer(allocation.gpuBytes) || allocation.gpuBytes<1))fail('invalid native allocation');
-    if(allocation && !sharedAssetsValid)fail('invalid shared asset allocation');
+    if(allocation && !composition && !sharedAssetsValid)fail('invalid shared asset allocation');
+  }
+  // Reuse the original page ledger with the exact native whole-plan caps.
+  var pageLedger = null, pagePort = null;
+  if (composition) {
+    if (!window.StageResourceBudget) fail('composition page ledger missing');
+    pageLedger = StageResourceBudget.create({ contractVersion:1, policyVersion:'native-composition-v1',
+      qualification:'native-declared-costs-device-qualification-pending', caps:allocation.pageLimits });
+    pagePort = pageLedger.port('wallpaper-composition',window.__hertzWallpaperBinding.sessionId);
   }
   Object.defineProperty(window,'HertzGlBudget',{value:Object.freeze({
     limits:allocation,
+    resources:pagePort,
+    readyForFrame:function(){
+      if(!composition)return true;
+      if(failed)throw new Error(failed);
+      var ready=true;
+      contexts.forEach(function(state){
+        state.poll();
+        if(state.pending.length || state.batches.length)ready=false;
+      });
+      if(!ready)blockedFrames++;
+      return ready;
+    },
     idle:function(){
       if(!native||contexts.size===0)return Promise.resolve();
       return new Promise((resolve,reject)=>{var timer=setTimeout(()=>{var at=waiters.indexOf(done);if(at>=0)waiters.splice(at,1);reject(new Error('gl_budget: old context exit timed out'));},2000);function done(){clearTimeout(timer);resolve();}waiters.push(done);});
     },
-    stats:function(){return Object.assign(totals(),{contexts:contexts.size,peakBytes:peakBytes,uploadBytes:uploads,error:failed,
+    stats:function(){return Object.assign(totals(),{contexts:contexts.size,peakBytes:peakBytes,uploadBytes:uploads,blockedFrames:blockedFrames,error:failed,
       sharedAssets:sharedAssets?{entries:assetEntries.size,maxEntries:sharedAssets.maxEntries,bytes:assetEntries.size*sharedAssets.maxEntryBytes,cpuBytes:sharedAssets.cpuBytes}:null});}
   }),writable:false,configurable:false});
 })();

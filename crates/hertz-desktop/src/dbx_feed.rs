@@ -125,7 +125,7 @@ struct ReadError {
 impl ReadError {
     fn identity() -> Self {
         Self {
-            message: "DBX 来源身份或组件版本不匹配",
+            message: "播放器与桌面组件不配套，请安装对应组件或一起更新",
             source_invalid: true,
             conflict: false,
             scope_revoked: false,
@@ -174,6 +174,10 @@ fn prepare(profile: &Profile, scope: Scope, key: Option<&str>) -> Result<Prepare
     let (pipe, filename) = match scope {
         Scope::Lyrics => (discovery.pipes.lyrics.clone(), "desktop-lyrics-key"),
         Scope::Wallpaper => (discovery.pipes.wallpaper.clone(), "wallpaper-key"),
+        Scope::LyricsCalibration => (
+            discovery.pipes.lyrics_calibration.clone(),
+            "desktop-lyrics-calibration-key",
+        ),
     };
     let pipe = pipe.ok_or_else(ReadError::revoked)?;
     let bytes = windows::read_private_bounded(&dir.join(filename), 128)
@@ -216,6 +220,98 @@ fn validate_discovery(discovery: &Discovery, profile: &Profile) -> Result<(), Re
         return Err(ReadError::identity());
     }
     Ok(())
+}
+
+pub(crate) fn calibration_call(
+    profile: &Profile,
+    session: &str,
+    op: &str,
+    body: serde_json::Value,
+    deadline: Instant,
+    cancel: &Arc<std::sync::atomic::AtomicBool>,
+) -> Result<serde_json::Value, &'static str> {
+    // prepare validates exact paired desktopBuildId before any business pipe request.
+    let mut prepared = prepare(profile, Scope::LyricsCalibration, None).map_err(|e| {
+        if e.source_invalid {
+            "build-mismatch"
+        } else if e.scope_revoked {
+            "permission-required"
+        } else {
+            "receiver-unavailable"
+        }
+    })?;
+    if prepared.discovery.server_instance_id != session {
+        return Err("track-changed");
+    }
+    if cancel.load(Ordering::Acquire) && op != "cancel" {
+        return Err("cancelled");
+    }
+    let left = deadline.saturating_duration_since(Instant::now());
+    if left.is_zero() {
+        return Err("timeout");
+    }
+    prepared.request.op = op.into();
+    prepared.request.params = body;
+    if op == "bind"
+        && hertz_desktop_ipc::monotonic::remaining(
+            prepared.request.params["deadlineClock"]
+                .as_str()
+                .unwrap_or_default(),
+            prepared.request.params["deadlineMonotonicMs"]
+                .as_u64()
+                .unwrap_or(0),
+        )
+        .is_none()
+    {
+        return Err("timeout");
+    }
+    if op == "request" {
+        let wire_left = hertz_desktop_ipc::monotonic::remaining(
+            prepared.request.params["deadlineClock"]
+                .as_str()
+                .unwrap_or_default(),
+            prepared.request.params["deadlineMonotonicMs"]
+                .as_u64()
+                .unwrap_or(0),
+        )
+        .ok_or("timeout")?;
+        prepared.request.params["remainingMs"] = (left.as_millis() as u64).min(wire_left).into();
+    }
+    if hertz_desktop_ipc::frame::serialize_bounded(&prepared.request, 4096).is_err() {
+        return Err("invalid-request");
+    }
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|_| "receiver-unavailable")?;
+    let response=runtime.block_on(async{
+        let token=Cancellation::new();
+        let work=windows::request(&prepared.pipe,prepared.discovery.pid,&prepared.request,&token);
+        tokio::pin!(work);
+        let mut tick=tokio::time::interval(Duration::from_millis(20));
+        loop{tokio::select!{
+            result=&mut work=>break result.map_err(|_|"timeout"),
+            _=tick.tick()=>{
+                if Instant::now()>=deadline { token.cancel();break Err("timeout"); }
+                if cancel.load(Ordering::Acquire)&&op!="cancel" { token.cancel();break Err("cancelled"); }
+            }
+        }}
+    })?;
+    if hertz_desktop_ipc::frame::serialize_bounded(&response, 4096).is_err() {
+        return Err("invalid-response");
+    }
+    if response.status == 401 || response.status == 403 {
+        return Err("permission-required");
+    }
+    if response.status != 200 {
+        return Err(match response.body["error"]["code"].as_str() {
+            Some("track-changed") => "track-changed",
+            Some("receiver-unavailable") => "receiver-unavailable",
+            Some("room-active") => "room-active",
+            _ => "timeout",
+        });
+    }
+    Ok(response.body)
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct DocIdentity {
@@ -559,6 +655,7 @@ mod tests {
                     wallpaper: Some(
                         windows::pipe_name(&profile, session, Scope::Wallpaper).unwrap(),
                     ),
+                    lyrics_calibration: None,
                 },
             };
             let fixture = Self {
@@ -698,6 +795,58 @@ mod tests {
         })
         .collect();
         (cancel, tasks)
+    }
+    #[tokio::test]
+    async fn calibration_paired_build_rejection_sends_zero_business_requests() {
+        let mut fixture = Fixture::new();
+        let name = windows::pipe_name(
+            &fixture.profile,
+            &fixture.discovery.server_instance_id,
+            Scope::LyricsCalibration,
+        )
+        .unwrap();
+        fixture.discovery.pipes.lyrics_calibration = Some(name.clone());
+        fixture.discovery.desktop_build_id = "actual-mismatched-desktop-build".into();
+        fixture.publish();
+        windows::write_private_atomic(
+            &fixture.directory.join("desktop-lyrics-calibration-key"),
+            "a".repeat(64).as_bytes(),
+            128,
+        )
+        .unwrap();
+        let state = Arc::new(State::default());
+        let (cancel, mut tasks) = start_servers(&fixture, state.clone());
+        let server = windows::create_server(&name, true).unwrap();
+        tasks.push(tokio::spawn(listener(
+            server,
+            name,
+            Scope::LyricsCalibration,
+            state.clone(),
+            cancel.clone(),
+        )));
+        let profile = fixture.profile.clone();
+        let session = fixture.discovery.server_instance_id.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            calibration_call(
+                &profile,
+                &session,
+                "bind",
+                serde_json::json!({}),
+                Instant::now() + Duration::from_secs(5),
+                &Arc::new(AtomicBool::new(false)),
+            )
+        })
+        .await
+        .unwrap();
+        assert_eq!(result.unwrap_err(), "build-mismatch");
+        assert!(state.request_log.lock().unwrap().is_empty());
+        assert_eq!(state.snapshots.load(Ordering::SeqCst), 0);
+        assert_eq!(state.documents.load(Ordering::SeqCst), 0);
+        assert_eq!(state.wallpapers.load(Ordering::SeqCst), 0);
+        cancel.cancel();
+        for task in tasks {
+            task.await.unwrap();
+        }
     }
     #[test]
     fn discovery_rejects_wrong_build_protocol_identity_and_private_acl() {

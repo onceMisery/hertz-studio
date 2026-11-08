@@ -18,11 +18,28 @@ fn main() {
 
     #[cfg(windows)]
     {
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        if let Some(result) = hertz_desktop::wallpaper_worker_entry(&args) {
+            if let Err(error) = result {
+                eprintln!("wallpaper worker failed: {error:#}");
+                std::process::exit(1);
+            }
+            return;
+        }
+        if let Some(result) = hertz_desktop::wallpaper_sandbox_probe(&args) {
+            match result {
+                Ok(value) => println!("{value}"),
+                Err(error) => {
+                    eprintln!("wallpaper sandbox probe failed: {error:#}");
+                    std::process::exit(1);
+                }
+            }
+            return;
+        }
         if std::env::args_os().skip(1).any(|arg| arg == "--describe") {
             println!("{}", hertz_desktop::describe());
             return;
         }
-        let args: Vec<String> = std::env::args().skip(1).collect();
         if let Some(result) = hertz_desktop::wallpaper_maintenance(&args) {
             match result {
                 Ok(value) => println!("{value}"),

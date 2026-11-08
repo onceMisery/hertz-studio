@@ -61,6 +61,7 @@ impl App {
     }
 
     pub(super) fn clear_lyrics_runtime(&mut self) {
+        self.cancel_calibration();
         self.lyrics_feed_stop.store(true, Ordering::Release);
         self.source_health.fail(true);
         self.last_snapshot = None;

@@ -17,7 +17,12 @@ struct AccessState {
     resources: Resources,
 }
 
-type Resources = BTreeMap<(String, String), Option<Arc<super::assets::PinnedMedia>>>;
+#[derive(Clone, Default)]
+struct Resource {
+    pinned: Option<Arc<super::assets::PinnedMedia>>,
+    payload: Option<Arc<[u8]>>,
+}
+type Resources = BTreeMap<(String, String), Resource>;
 
 struct Scope {
     active: AtomicBool,
@@ -66,6 +71,7 @@ pub(crate) struct ReadPermit {
     pub(crate) generation: u64,
     scope: Arc<Scope>,
     pinned: Option<Arc<super::assets::PinnedMedia>>,
+    payload: Option<Arc<[u8]>>,
 }
 
 impl ReadPermit {
@@ -76,6 +82,9 @@ impl ReadPermit {
     pub(crate) fn pinned(&self) -> Option<&Arc<super::assets::PinnedMedia>> {
         self.pinned.as_ref()
     }
+    pub(crate) fn payload(&self) -> Option<&Arc<[u8]>> {
+        self.payload.as_ref()
+    }
 }
 
 impl Clone for ReadPermit {
@@ -85,6 +94,7 @@ impl Clone for ReadPermit {
             generation: self.generation,
             scope: Arc::clone(&self.scope),
             pinned: self.pinned.clone(),
+            payload: self.payload.clone(),
         }
     }
 }
@@ -93,6 +103,7 @@ impl Drop for ReadPermit {
     fn drop(&mut self) {
         // 先关闭所持文件，最后才把屏障计数降为零。
         self.pinned.take();
+        self.payload.take();
         self.scope.readers.fetch_sub(1, Ordering::AcqRel);
     }
 }
@@ -117,7 +128,11 @@ impl MediaAccess {
         }
         self.replace_resources(
             generation,
-            resources.iter().cloned().map(|key| (key, None)).collect(),
+            resources
+                .iter()
+                .cloned()
+                .map(|key| (key, Resource::default()))
+                .collect(),
         )
         .is_some()
     }
@@ -156,8 +171,19 @@ impl MediaAccess {
         media: Arc<super::assets::PinnedMedia>,
     ) -> bool {
         let key = (hash, media.entry.path.clone());
-        self.replace_resources(generation, [(key, Some(media))].into_iter().collect())
-            .is_some()
+        self.replace_resources(
+            generation,
+            [(
+                key,
+                Resource {
+                    pinned: Some(media),
+                    payload: None,
+                },
+            )]
+            .into_iter()
+            .collect(),
+        )
+        .is_some()
     }
 
     /// 会话持有 scope 收据直到关闭/流屏障；旧代际回收不触碰新代际集合。
@@ -168,8 +194,62 @@ impl MediaAccess {
         media: Arc<super::assets::PinnedMedia>,
     ) -> Option<MediaGrant> {
         let key = (hash, media.entry.path.clone());
-        let scope =
-            self.replace_resources(generation, [(key, Some(media))].into_iter().collect())?;
+        let scope = self.replace_resources(
+            generation,
+            [(
+                key,
+                Resource {
+                    pinned: Some(media),
+                    payload: None,
+                },
+            )]
+            .into_iter()
+            .collect(),
+        )?;
+        Some(MediaGrant {
+            access: self.clone(),
+            generation,
+            scope,
+        })
+    }
+
+    /// One current-controller generation grants the fixed closure and its exact
+    /// native projection together. The URI itself never grants access.
+    pub(crate) fn grant_composition(
+        &self,
+        generation: u64,
+        pins: Vec<(String, Arc<super::assets::PinnedMedia>)>,
+        payload_key: (String, String),
+        payload: Arc<[u8]>,
+    ) -> Option<MediaGrant> {
+        if payload.len() > 4 * 1024 * 1024 || payload.is_empty() {
+            return None;
+        }
+        let mut resources: Resources = pins
+            .into_iter()
+            .map(|(hash, media)| {
+                (
+                    (hash, media.entry.path.clone()),
+                    Resource {
+                        pinned: Some(media),
+                        payload: None,
+                    },
+                )
+            })
+            .collect();
+        if resources
+            .insert(
+                payload_key,
+                Resource {
+                    pinned: None,
+                    payload: Some(payload),
+                },
+            )
+            .is_some()
+        {
+            return None;
+        }
+        let scope = self.replace_resources(generation, resources)?;
         Some(MediaGrant {
             access: self.clone(),
             generation,
@@ -182,12 +262,13 @@ impl MediaAccess {
         if !state.scope.active.load(Ordering::Acquire) {
             return None;
         }
-        let pinned = state.resources.get(&(hash.to_string(), path.to_string()))?;
+        let resource = state.resources.get(&(hash.to_string(), path.to_string()))?;
         state.scope.readers.fetch_add(1, Ordering::AcqRel);
         Some(ReadPermit {
             generation: state.generation,
             scope: Arc::clone(&state.scope),
-            pinned: pinned.clone(),
+            pinned: resource.pinned.clone(),
+            payload: resource.payload.clone(),
         })
     }
 
@@ -257,7 +338,10 @@ mod tests {
         let hash = "a".repeat(64);
         let key = (hash.clone(), "assets/a.png".into());
         let scope = access
-            .replace_resources(1, [(key.clone(), None)].into_iter().collect())
+            .replace_resources(
+                1,
+                [(key.clone(), Resource::default())].into_iter().collect(),
+            )
             .unwrap();
         let grant = MediaGrant {
             access: access.clone(),

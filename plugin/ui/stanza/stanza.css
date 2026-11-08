@@ -201,6 +201,8 @@ body[data-rm~="lyrics"] .fl-cword .fl-body { transform: none !important; }
   font: 600 10px/1.6 "IBM Plex Mono","SFMono-Regular",Consolas,"Microsoft YaHei",monospace;
   letter-spacing: .16em; }
 .fl-sonnet .fl-empty { z-index: 3; }
+/* 引擎失败：兜底歌词独占中央，这条提示降为底部 caption，不与歌词叠印。 */
+.fl-sonnet .fl-empty.fl-empty-failed { align-items: flex-end; padding-bottom: calc(150px + env(safe-area-inset-bottom)); opacity: .85; }
 
 /* 凝彩 tempera：与商籁共用 .fl-sonnet-layer 宿主（同一时刻只显示其一）。
    画面主体是 Pixi canvas；DOM 只有角标、空态提示与寻句热区。 */
@@ -280,6 +282,7 @@ body[data-rm~="lyrics"] .fl-cword .fl-body { transform: none !important; }
   .fl-sub-next ~ .fl-sub-next { display: none; } /* 窄屏预告只留 1 行 */
   .fl-sonnet-hud { right: 16px; bottom: calc(112px + env(safe-area-inset-bottom)); }
   .fl-sonnet-next { left: 16px; bottom: calc(112px + env(safe-area-inset-bottom)); max-width: 46vw; }
+  .fl-sonnet .fl-empty.fl-empty-failed { padding-bottom: calc(112px + env(safe-area-inset-bottom)); }
 }
 /* 横屏矮窗：歌词区收高，给底部字幕/播放坞让位 */
 @media (max-height: 500px) {

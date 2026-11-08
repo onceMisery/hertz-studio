@@ -44,6 +44,8 @@ const SYNTAX_SKIP = new Set(['vendor']);
 // why 字段就是原来贴在 ci.yml 里的判断依据：它解释的是「这条失败意味着什么」，
 // 挪到脚本里才不会和 workflow 的 YAML 缩进互相拖累。
 const STEPS = [
+  { script: 'export-wallpaper-composition.mjs', stage: 'guard', extra: true, args: ['--check'],
+    why: '组合纯声明须与 Rust 合同及实际 Stage bundle 一致；声明存在不授予图形或原生运行资格。' },
   { script: 'check-stanza-pixi-build.js', stage: 'guard',
     why: 'Pixi 运行包须与固定版本源码和构建身份一致，部分初始化清理由原 renderer 完成。' },
   { script: 'check-stage-resource-budget.js', stage: 'behavior',

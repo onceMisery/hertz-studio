@@ -31,6 +31,8 @@
     <div class="option-row"><label for="opacity">窗口不透明度 <output id="opacity-value"></output></label><input id="opacity" type="range" min="25" max="100" step="1" aria-label="窗口不透明度"></div>
     <div class="option-row colors"><span>文字颜色</span><label title="已唱颜色"><input id="sung-color" data-color="sung" type="color" aria-label="已唱颜色">已唱</label><label title="未唱颜色"><input id="unsung-color" data-color="unsung" type="color" aria-label="未唱颜色">未唱</label></div>
     <div class="option-row"><span>最大宽度<small>窗口按当前歌词长短贴合</small></span><div class="segmented"><button data-cmd="width-down" aria-label="缩小最大宽度">−</button><button data-cmd="width-up" aria-label="放大最大宽度">＋</button></div></div>
+    <div class="option-row calibration-row"><span>歌词时间<small>在当前播放器中调整这首歌的歌词时间</small></span><button id="calibrate" type="button" aria-describedby="calibration-help">在播放器校准</button></div>
+    <p id="calibration-help" class="calibration-help" role="status" aria-live="polite">请先连接当前播放器</p>
     <p class="panel-foot">空格 播放/暂停 · ← → 切句 · 托盘 解锁/恢复</p>
   </section>
   <div id="feedback" role="status" aria-live="polite" hidden></div>

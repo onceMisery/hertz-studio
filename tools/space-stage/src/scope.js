@@ -48,12 +48,13 @@ export function createScope(options = {}) {
   }
   function track(resource) {
     if (!resource || typeof resource.dispose !== 'function') throw new Error('Resource must be disposable');
+    if (resource.poolOwned) return resource;
     if (!resources.has(resource)) {
       if (disposed) { try { resource.dispose(); } catch (error) { cleanupFailed = true; throw error; } } else resources.add(resource);
     }
     return resource;
   }
-  // Pool resources never enter `track`: scope teardown releases the consumer
+  // Pool resources never enter the private set: teardown releases the consumer
   // lease and lets the pool decide whether the underlying texture can die.
   function lease(poolLease) {
     if (!poolLease || typeof poolLease.release !== 'function') throw new Error('Pool lease must be releasable');
@@ -92,6 +93,7 @@ export function createScope(options = {}) {
       admissionTickets: admissions.size, allocationTasks, cleanupFailed, estimatedBytes: Math.round(estimatedBytes) };
   }
   return { signal: controller.signal, track, trackTree, lease, defer, stats, bufferPlan,
+    releaseLease(poolLease) { if (leases.delete(poolLease)) poolLease.release(); },
     retirementCandidates(renderer) {
       // Unsettled factories and failed cleanup cannot forecast reclaimable quota.
       if (allocationTasks || cleanupFailed) return [];

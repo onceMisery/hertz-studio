@@ -7,6 +7,27 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
+const DESKTOP_INPUTS: &[&str] = &[
+    "Cargo.toml",
+    "Cargo.lock",
+    "build-support/desktop-build.rs",
+    "crates/hertz-desktop/Cargo.toml",
+    "crates/hertz-desktop/build.rs",
+    "crates/hertz-desktop/src",
+    "crates/hertz-desktop/assets",
+    "crates/hertz-desktop/migrations",
+    "crates/hertz-wallpaper/Cargo.toml",
+    "crates/hertz-wallpaper/src",
+    "crates/hertz-wallpaper/contracts",
+    "crates/hertz-sqlite-lifecycle/Cargo.toml",
+    "crates/hertz-sqlite-lifecycle/src",
+    "crates/hertz-desktop-ipc/Cargo.toml",
+    "crates/hertz-desktop-ipc/src",
+    "plugin/ui/stage-resource-budget.js",
+    "plugin/ui/vendor/stage-runtime.js",
+    "plugin/ui/vendor/zodiac-stage.js",
+];
+
 pub fn emit(root: &Path, plugin: bool) {
     // Cargo can reuse a compiled build script in another checkout sharing target/.
     // Resolve inputs from that invocation and invalidate cached output when it moves.
@@ -14,22 +35,7 @@ pub fn emit(root: &Path, plugin: bool) {
     println!("cargo:rerun-if-env-changed=RUSTC");
     println!("cargo:rerun-if-env-changed=CARGO_ENCODED_RUSTFLAGS");
     let mut desktop = BTreeSet::new();
-    for relative in [
-        "Cargo.toml",
-        "Cargo.lock",
-        "build-support/desktop-build.rs",
-        "crates/hertz-desktop/Cargo.toml",
-        "crates/hertz-desktop/build.rs",
-        "crates/hertz-desktop/src",
-        "crates/hertz-desktop/assets",
-        "crates/hertz-desktop/migrations",
-        "crates/hertz-sqlite-lifecycle/Cargo.toml",
-        "crates/hertz-sqlite-lifecycle/src",
-        "crates/hertz-desktop-ipc/Cargo.toml",
-        "crates/hertz-desktop-ipc/src",
-        "plugin/ui/vendor/stage-runtime.js",
-        "plugin/ui/vendor/zodiac-stage.js",
-    ] {
+    for relative in DESKTOP_INPUTS {
         collect(root, relative, &mut desktop);
     }
     let compiler = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
@@ -164,4 +170,98 @@ fn digest(root: &Path, inputs: &BTreeSet<PathBuf>, context: &str) -> String {
         }
     }
     format!("{:x}", hash.finalize())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    struct Fixture(PathBuf);
+    impl Fixture {
+        fn new() -> Self {
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let path = std::env::temp_dir().canonicalize().unwrap().join(format!(
+                "hertz-desktop-build-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+        fn write(&self, name: &str, bytes: &[u8]) {
+            let file = self.0.join(name);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, bytes).unwrap();
+        }
+        fn identity(&self) -> String {
+            let mut inputs = BTreeSet::new();
+            for relative in DESKTOP_INPUTS {
+                collect(&self.0, relative, &mut inputs);
+            }
+            digest(&self.0, &inputs, "desktop/2")
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            // Resolve the actual target immediately before recursive cleanup.
+            if self.0.canonicalize().ok().as_ref() == Some(&self.0)
+                && self.0.parent() == std::env::temp_dir().canonicalize().ok().as_deref()
+            {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+    }
+
+    #[test]
+    fn paired_identity_tracks_wallpaper_contract_and_page_budget_changes() {
+        let fixture = Fixture::new();
+        let files = [
+            "crates/hertz-wallpaper/Cargo.toml",
+            "crates/hertz-wallpaper/src/document.rs",
+            "crates/hertz-wallpaper/contracts/composition.json",
+            "crates/hertz-wallpaper/contracts/gl-budgets.json",
+            "plugin/ui/stage-resource-budget.js",
+        ];
+        for file in files {
+            fixture.write(file, b"before");
+        }
+        let baseline = fixture.identity();
+        for file in files {
+            fixture.write(file, b"after");
+            assert_ne!(
+                fixture.identity(),
+                baseline,
+                "paired identity omitted {file}"
+            );
+            fixture.write(file, b"before");
+            assert_eq!(
+                fixture.identity(),
+                baseline,
+                "identity is not deterministic"
+            );
+        }
+    }
+
+    #[test]
+    fn newly_added_dependency_inputs_invalidate_but_cache_files_do_not() {
+        let fixture = Fixture::new();
+        fixture.write("crates/hertz-wallpaper/src/document.rs", b"document");
+        let before = fixture.identity();
+        fixture.write(
+            "crates/hertz-wallpaper/src/document/new-adapter.rs",
+            b"adapter",
+        );
+        let extended = fixture.identity();
+        assert_ne!(extended, before);
+        fixture.write(
+            "crates/hertz-wallpaper/src/target/temporary.rs",
+            b"ignored cache",
+        );
+        fixture.write(
+            "crates/hertz-wallpaper/src/node_modules/package/index.js",
+            b"ignored dependency cache",
+        );
+        assert_eq!(fixture.identity(), extended);
+    }
 }

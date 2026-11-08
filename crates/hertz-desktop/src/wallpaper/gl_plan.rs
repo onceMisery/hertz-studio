@@ -11,6 +11,11 @@ use super::budget::{
 };
 use super::jobs::JobError;
 
+/// Three 0.186.0's original empty 2D/cube/3D/array textures retain 36 bytes.
+/// Its six cube-face storage replacements can overlap another 60 bytes under
+/// the original native GL fence discipline: 4+8+12+16+20. Reserve that real peak.
+pub(crate) const THREE_BOOTSTRAP_GPU_PEAK_BYTES: u64 = 96;
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Profile {
@@ -167,6 +172,7 @@ impl GlPlan {
             transcode_slots: 0,
             decode_pixel_rate: 0,
             output_pixel_rate: (pixels * u64::from(refresh_hz)).div_ceil(u64::from(divisor)),
+            texture_upload_bytes_per_second: 0,
             cpu_bytes: 0,
             prepare_cpu_bytes: 0,
             asset_cpu_bytes: envelope.cpu_bytes,
@@ -217,6 +223,22 @@ pub(crate) struct GlAdmission {
     retired: bool,
     closed: bool,
     finished: bool,
+    composition: Option<CompositionAccess>,
+}
+
+struct CompositionAccess {
+    _prepared: super::composition_plan::PreparedComposition,
+    grant: super::access::MediaGrant,
+    drain: Option<super::access::Drain>,
+    url: String,
+    page_limits: serde_json::Value,
+}
+impl std::fmt::Debug for CompositionAccess {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CompositionAccess")
+            .field("url", &self.url)
+            .finish()
+    }
 }
 
 impl GlAdmission {
@@ -262,7 +284,56 @@ impl GlAdmission {
             retired: false,
             closed: false,
             finished: false,
+            composition: None,
         })
+    }
+    pub(crate) fn bind_composition(
+        &mut self,
+        prepared: super::composition_plan::PreparedComposition,
+        access: &super::access::MediaAccess,
+        session_id: &str,
+    ) -> Result<(), JobError> {
+        if self.published || self.composition.is_some() {
+            return Err(JobError::new(
+                "stale_generation",
+                "组合权限只能在发布前绑定一次",
+            ));
+        }
+        let projection = prepared.projection(
+            session_id,
+            self.request.generation,
+            self.allocation.allocation_revision,
+            &self.limits,
+        )?;
+        let page_limits = projection["pageLimits"].clone();
+        let bytes: Arc<[u8]> = serde_json::to_vec(&projection)
+            .map_err(|error| JobError::io(error.to_string()))?
+            .into();
+        let hash = prepared.package_hash().to_owned();
+        let path = format!("session/{session_id}/{}.json", self.request.generation);
+        let url = super::webresource::files_url(&hash, &path)
+            .ok_or_else(|| JobError::invalid_input("组合 session URI 无效"))?;
+        let grant = access
+            .grant_composition(
+                self.request.generation,
+                prepared.pins(),
+                (hash, path),
+                bytes,
+            )
+            .ok_or_else(|| JobError::new("stale_generation", "组合闭包权限未授予"))?;
+        self.composition = Some(CompositionAccess {
+            _prepared: prepared,
+            grant,
+            drain: None,
+            url,
+            page_limits,
+        });
+        Ok(())
+    }
+    pub(crate) fn composition_url(&self) -> Option<&str> {
+        self.composition
+            .as_ref()
+            .map(|composition| composition.url.as_str())
     }
     pub(crate) fn generation(&self) -> u64 {
         self.request.generation
@@ -274,6 +345,11 @@ impl GlAdmission {
         let mut value = serde_json::to_value(&self.limits).expect("native GL limits");
         value["allocation"] = serde_json::to_value(self.allocation).expect("native GL allocation");
         value["generation"] = self.request.generation.into();
+        if let Some(composition) = &self.composition {
+            value["composition"] = true.into();
+            value["pageLimits"] = composition.page_limits.clone();
+            value["compositionUrl"] = composition.url.clone().into();
+        }
         format!("Object.defineProperty(window,'__hertzWallpaperGlAllocation',{{value:Object.freeze(Object.assign({value},{{allocation:Object.freeze({})}})),writable:false,configurable:false}});", serde_json::to_string(&self.allocation).expect("allocation"))
     }
     pub(crate) fn snapshot(&self) -> Option<AllocationSnapshot> {
@@ -287,6 +363,9 @@ impl GlAdmission {
     }
     pub(crate) fn retire(&mut self) {
         if !self.retired {
+            if let Some(composition) = &mut self.composition {
+                composition.drain = Some(composition.grant.revoke());
+            }
             let _ = self.budget.release(
                 self.allocation.parent_token,
                 &self.request.session,
@@ -305,6 +384,17 @@ impl GlAdmission {
         if !self.retired || !self.closed {
             return false;
         }
+        if self.composition.as_ref().is_some_and(|composition| {
+            !composition
+                .drain
+                .as_ref()
+                .is_some_and(super::access::Drain::is_drained)
+        }) {
+            return false;
+        }
+        // The immutable plan/payload pins leave only after Close and all native
+        // queued/stream readers have exited, before its parent budget returns.
+        self.composition.take();
         // 两个子额度都必须在真实退出后才归还：gl-renderer 随 context 销毁，
         // shared-assets 随受信页面（纹理池）销毁；两者都由 controller Close 屏障覆盖。
         if self

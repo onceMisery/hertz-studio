@@ -249,6 +249,22 @@ impl Rpc {
                         .await,
                 )
             }
+            (Op::Post, ["v1", "desktop", "calibration-ui"]) => {
+                Ok(Reply::ok(state.lyrics_calibration.ui(state, body.clone())?))
+            }
+            (Op::Get, ["v1", "desktop", "calibration-authorization"]) => Ok(Reply::ok(
+                crate::desktop::Desktop::for_state(state)
+                    .calibration_authorization(None)
+                    .await?,
+            )),
+            (Op::Post, ["v1", "desktop", "calibration-authorization"]) => {
+                let c: crate::routes::CalibrationAuthorization = body_as(body)?;
+                Ok(Reply::ok(
+                    crate::desktop::Desktop::for_state(state)
+                        .calibration_authorization(Some(c.enabled))
+                        .await?,
+                ))
+            }
             (Op::Post, ["v1", "desktop", "connect"]) => {
                 if !query.is_null() && !query.as_object().is_some_and(|q| q.is_empty()) {
                     return Err(bad_request("桌面连接不接受查询参数"));

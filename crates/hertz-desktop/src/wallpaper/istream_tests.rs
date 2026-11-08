@@ -12,6 +12,51 @@ use windows::Win32::System::Com::{
 };
 
 #[test]
+fn composition_payload_uses_original_pool_seek_clone_and_revoke_barrier() {
+    use super::super::access::MediaAccess;
+    use windows::Win32::Foundation::{STG_E_ACCESSDENIED, S_OK};
+    let access = MediaAccess::new();
+    let hash = "a".repeat(64);
+    let key = (hash.clone(), "session/abcd/4.json".to_owned());
+    let payload: std::sync::Arc<[u8]> = vec![23; 1024 * 1024 + 17].into();
+    let grant = access
+        .grant_composition(4, vec![], key.clone(), payload.clone())
+        .unwrap();
+    let pool = StreamSlotPool::new();
+    let permit = access.permit(&key.0, &key.1).unwrap();
+    let stream = MediaIStream::from_payload(payload, permit, &pool).unwrap();
+    let mut out = [0u8; 20];
+    let mut count = 0;
+    unsafe {
+        assert_eq!(
+            stream.Read(out.as_mut_ptr().cast(), 20, Some(&mut count)),
+            S_OK
+        );
+        assert_eq!(count, 20);
+    }
+    let clone = unsafe { stream.Clone().unwrap() };
+    assert_eq!(pool.active(), 2);
+    unsafe {
+        clone.Seek(3, STREAM_SEEK_SET, None).unwrap();
+        stream.Seek(20, STREAM_SEEK_SET, None).unwrap();
+        assert_eq!(clone.Write(std::ptr::null(), 0, None), STG_E_ACCESSDENIED);
+    }
+    let drain = grant.revoke();
+    assert!(!drain.is_drained());
+    super::reap_revoked_streams();
+    assert!(drain.is_drained());
+    assert_eq!(pool.active(), 0);
+    unsafe {
+        assert_eq!(
+            clone.Read(out.as_mut_ptr().cast(), 20, None),
+            STG_E_ACCESSDENIED
+        );
+        assert!(stream.Clone().is_err());
+    }
+    assert!(access.permit(&hash, "session/abcd/4.json").is_none());
+}
+
+#[test]
 fn revocation_closes_files_and_clones_even_when_com_references_survive() {
     use super::super::access::MediaAccess;
     use super::super::media_stream::MediaFileStream;
