@@ -48,6 +48,8 @@ mod feature_exit;
 #[path = "lyrics_settings.rs"]
 mod lyrics_settings;
 
+#[path = "settings_presentation.rs"]
+mod settings_presentation;
 #[path = "wallpaper_ai.rs"]
 mod wallpaper_ai;
 #[path = "wallpaper_apply.rs"]
@@ -182,6 +184,7 @@ pub(crate) struct RunConfig {
     pub(crate) host_tray: bool,
     pub(crate) commands: Option<crate::host::CommandReceiver>,
     pub(crate) ready: Option<crate::host::ReadySender>,
+    pub(crate) settings_events: Option<crate::settings_embedding::SettingsEvents>,
 }
 
 /// 初始化失败也要给 `start_embedded` 一个明确回执，不能让它干等超时。
@@ -248,7 +251,7 @@ impl PageClock {
 
 enum PresentationWindow {
     Desktop { candidate: bool },
-    Preview { owner: HWND },
+    Preview { owner: HWND, embedded: bool },
 }
 
 struct WallpaperSurface {
@@ -542,9 +545,13 @@ impl WallpaperSurface {
 }
 
 struct SettingsSurface {
-    window: Window,
+    // Drop the controller before its HWND.
     webview: Rc<wry::WebView>,
+    window: Window,
     _web_context: WebContext,
+    placement: Option<crate::settings_embedding::SettingsPlacement>,
+    preview_bounds: Option<crate::settings_embedding::SettingsBounds>,
+    ready: bool,
 }
 
 impl SettingsSurface {
@@ -783,6 +790,7 @@ struct App {
     wallpaper_ai: crate::wallpaper::ai::NativeAi,
     settings_generation: u64,
     settings: Option<SettingsSurface>,
+    settings_events: Option<crate::settings_embedding::SettingsEvents>,
     settings_candidate: Option<Profile>,
     settings_tab: String,
     settings_navigation: u64,
@@ -1951,6 +1959,16 @@ impl App {
     }
 
     fn open_settings(&mut self, target: &EventLoopWindowTarget<()>) {
+        if self.embedded {
+            if let Some(events) = &self.settings_events {
+                events(crate::settings_embedding::SettingsEvent::Navigate {
+                    tab: self.settings_tab.clone(),
+                });
+            } else {
+                log("wallpaper settings require the main player window");
+            }
+            return;
+        }
         if let Some(settings) = self.settings.as_ref() {
             native::raise(settings.window.hwnd() as HWND);
             native::focus(settings.window.hwnd() as HWND);
@@ -1959,7 +1977,7 @@ impl App {
             return;
         }
         self.settings_generation += 1;
-        match create_settings(target, self.proxy.clone(), self.settings_generation) {
+        match create_settings(target, self.proxy.clone(), self.settings_generation, None) {
             Ok(settings) => {
                 log("wallpaper settings opened");
                 self.settings = Some(settings);
@@ -1978,6 +1996,11 @@ impl App {
     }
 
     fn close_settings(&mut self) {
+        let document = self
+            .settings
+            .as_ref()
+            .and_then(|settings| settings.placement.as_ref())
+            .map(|placement| placement.document.clone());
         if self
             .position_edit
             .as_ref()
@@ -1993,6 +2016,9 @@ impl App {
         self.settings = None;
         self.settings_candidate = None;
         self.sync_settings_feed();
+        if let (Some(events), Some(document)) = (&self.settings_events, document) {
+            events(crate::settings_embedding::SettingsEvent::Closed { document });
+        }
     }
 
     fn close_preview(&mut self) {
@@ -3254,6 +3280,7 @@ impl App {
                     | "status"
                     | "preview-renew"
                     | "preview-close"
+                    | "preview-bounds"
                     | "position-begin"
                     | "position-done"
                     | "position-cancel"
@@ -3268,7 +3295,12 @@ impl App {
                 // 迁移说明只在设置页首次就绪时展示一次。
                 let notice = self.migration_notice.take();
                 self.send_settings_status(None, notice.as_deref());
+                if let Some(settings) = self.settings.as_mut() {
+                    settings.ready = true;
+                }
+                self.settings_ready();
             }
+            "preview-bounds" => self.preview_bounds(body),
             "status" => self.send_settings_status(None, None),
             "audio-retry" => {
                 self.wallpaper_audio.retry();
@@ -4756,6 +4788,9 @@ impl App {
                 });
             }
             "wallpaper-settings" | "open-center" => {
+                if self.embedded && self.settings_events.is_none() {
+                    return pipe_error("请在桌面主程序内打开壁纸设置");
+                }
                 if let Some(tab) = value
                     .and_then(|value| value.get("tab"))
                     .and_then(|tab| tab.as_str())
@@ -6030,6 +6065,7 @@ pub(crate) fn run() -> Result<()> {
         host_tray: true,
         commands: None,
         ready: None,
+        settings_events: None,
     })
 }
 
@@ -6041,6 +6077,7 @@ pub(crate) fn run_with(run_config: RunConfig) -> Result<()> {
         host_tray,
         commands,
         ready,
+        settings_events,
     } = run_config;
     let mut ready = ReadyGuard::new(ready);
     let locate_on_start = args.locate;
@@ -6254,6 +6291,7 @@ pub(crate) fn run_with(run_config: RunConfig) -> Result<()> {
         wallpaper_ai: crate::wallpaper::ai::NativeAi::new(),
         settings_generation: 0,
         settings: None,
+        settings_events,
         settings_candidate: None,
         settings_tab: "wallpaper".into(),
         settings_navigation: 0,
@@ -6575,6 +6613,7 @@ pub(crate) fn run_with(run_config: RunConfig) -> Result<()> {
             Event::UserEvent(UserEvent::Host(action)) => {
                 // 播放器进程内命令：复用同一套业务准入与分派，只是没有管道传输层。
                 match action {
+                    crate::host::HostAction::Settings(placement) => app.place_settings(placement, target),
                     crate::host::HostAction::Menu(id) => app.handle_menu(&id, target),
                     crate::host::HostAction::Command { body, reply } => {
                         if let Some(response) = app.handle_embedded_lyrics_request(&body) {
@@ -7152,8 +7191,14 @@ fn create_presentation(
         .with_focused(false)
         .with_skip_taskbar(true)
         .with_undecorated_shadow(false);
-    if let PresentationWindow::Preview { owner } = presentation {
-        builder = builder.with_owner_window(owner as _);
+    if let PresentationWindow::Preview { owner, embedded } = presentation {
+        builder = if embedded {
+            builder
+                .with_parent_window(owner as _)
+                .with_decorations(false)
+        } else {
+            builder.with_owner_window(owner as _)
+        };
     }
     let window = builder.build(target)?;
     let hwnd = window.hwnd() as HWND;
@@ -7251,6 +7296,7 @@ fn create_settings(
     target: &EventLoopWindowTarget<()>,
     proxy: EventLoopProxy<UserEvent>,
     generation: u64,
+    placement: Option<crate::settings_embedding::SettingsPlacement>,
 ) -> Result<SettingsSurface> {
     let area = native::primary_work_area();
     let (width, height) = area
@@ -7262,15 +7308,33 @@ fn create_settings(
         })
         .unwrap_or((1120.0, 740.0));
     let icon = window_icon()?;
-    let window = WindowBuilder::new()
+    let mut builder = WindowBuilder::new()
         .with_title("桌面歌词与壁纸")
         .with_window_icon(Some(icon.clone()))
         .with_taskbar_icon(Some(icon))
         .with_inner_size(tao::dpi::LogicalSize::new(width, height))
         .with_min_inner_size(tao::dpi::LogicalSize::new(320.0, 420.0))
         .with_resizable(true)
-        .with_visible(true)
-        .build(target)?;
+        .with_visible(placement.is_none());
+    if let Some(placement) = &placement {
+        builder = builder
+            .with_parent_window(placement.parent as _)
+            .with_decorations(false)
+            .with_resizable(false)
+            .with_focused(false)
+            .with_skip_taskbar(true)
+            .with_undecorated_shadow(false)
+            .with_min_inner_size(tao::dpi::PhysicalSize::new(1, 1))
+            .with_inner_size(PhysicalSize::new(
+                placement.bounds.width,
+                placement.bounds.height,
+            ))
+            .with_position(PhysicalPosition::new(
+                placement.bounds.x,
+                placement.bounds.y,
+            ));
+    }
+    let window = builder.build(target)?;
     let page_proxy = proxy.clone();
     let settings_page = settings_html().into_bytes();
     let mut web_context = WebContext::new(Some(config::webview_dir()));
@@ -7295,6 +7359,12 @@ fn create_settings(
                 .unwrap()
         })
         .with_url("hertz://localhost/settings.html")
+        .with_initialization_script(if placement.is_some() {
+            "window.__hertzEmbeddedSettings = true;"
+        } else {
+            ""
+        })
+        .with_new_window_req_handler(|_, _| wry::NewWindowResponse::Deny)
         .with_background_color((20, 20, 19, 255))
         .with_ipc_handler(move |request| {
             let body = request.body();
@@ -7308,6 +7378,9 @@ fn create_settings(
         window,
         webview: Rc::new(webview),
         _web_context: web_context,
+        placement,
+        preview_bounds: None,
+        ready: false,
     })
 }
 
@@ -7338,6 +7411,10 @@ fn scene_thumbnail(file: &str) -> Option<&'static [u8]> {
 
 fn settings_html() -> String {
     include_str!("../assets/wallpaper-settings.html")
+        .replace(
+            "__EMBEDDED_CSS__",
+            include_str!("../assets/wallpaper-embedded.css"),
+        )
         .replace(
             "__DISPLAYS_CSS__",
             include_str!("../assets/wallpaper-displays.css"),

@@ -66,6 +66,8 @@ enum UserEvent {
     FocusWindow,
     /// 托盘歌词设置在已有主窗口内编辑。
     OpenLyricsSettings,
+    #[cfg(windows)]
+    WallpaperSettings(hertz_desktop::settings_embedding::SettingsEvent),
     /// 托盘「退出 hertz-studio」：显式退出命令（§2.2），并轨服务优雅停机。
     QuitRequested,
     Lifecycle(LifecycleEvent),
@@ -706,6 +708,13 @@ pub fn run_window(mut args: Args) -> anyhow::Result<()> {
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
     #[cfg(not(windows))]
     let proxy = event_loop.create_proxy();
+    #[cfg(windows)]
+    {
+        let settings_proxy = proxy.clone();
+        hertz_studio::desktop_host::set_settings_events(std::sync::Arc::new(move |event| {
+            let _ = settings_proxy.send_event(UserEvent::WallpaperSettings(event));
+        }));
+    }
 
     // Configuration is loaded only by prepare after acquiring the DataDir lock.
     let data_dir = hertz_studio::bootstrap::absolute_data_dir(
@@ -1175,6 +1184,36 @@ pub fn run_window(mut args: Args) -> anyhow::Result<()> {
                 }
                 if document_id.is_none() || document_id != quit_ui.document_id.as_deref() { return; }
                 match kind {
+                    #[cfg(windows)]
+                    "wallpaper-editor" => {
+                        use tao::platform::windows::WindowExtWindows;
+                        use hertz_desktop::settings_embedding::{SettingsBounds, SettingsPlacement, SettingsEvent};
+                        let document = document_id.unwrap().to_string();
+                        let result = if message.get("dispose").and_then(|value| value.as_bool()) == Some(true) {
+                            hertz_studio::desktop_host::place_settings(None)
+                        } else {
+                            let bounds = message.get("bounds").cloned()
+                                .and_then(|value| serde_json::from_value::<SettingsBounds>(value).ok());
+                            let size = window.inner_size();
+                            if let Some(bounds) = bounds.filter(|bounds| bounds.x >= 0 && bounds.y >= 0
+                                && bounds.width > 0 && bounds.height > 0
+                                && bounds.x as u64 + bounds.width as u64 <= u64::from(size.width)
+                                && bounds.y as u64 + bounds.height as u64 <= u64::from(size.height)) {
+                                hertz_studio::desktop_host::place_settings(Some(SettingsPlacement {
+                                    parent: window.hwnd() as usize, document: document.clone(), bounds,
+                                    visible: message.get("visible").and_then(|value| value.as_bool()) == Some(true)
+                                        && lifecycle.background_playback_active() && main_placement.is_none(),
+                                    light: message.get("light").and_then(|value| value.as_bool()) == Some(true),
+                                    tab: message.get("tab").and_then(|value| value.as_str())
+                                        .filter(|tab| matches!(*tab, "wallpaper" | "lyrics" | "runtime")).unwrap_or("wallpaper").to_string(),
+                                }))
+                            } else { Err(anyhow::anyhow!("壁纸编辑区尺寸无效，请调整窗口后重试")) }
+                        };
+                        if let Err(error) = result {
+                            let event = SettingsEvent::Failed { document, error: error.to_string() };
+                            let _ = proxy.send_event(UserEvent::WallpaperSettings(event));
+                        }
+                    }
                     "obs-preview" => {
                         let Some(request_id) = message.get("requestId").and_then(serde_json::Value::as_str)
                             .filter(|id| uuid::Uuid::parse_str(id).is_ok()) else { return; };
@@ -1294,6 +1333,8 @@ pub fn run_window(mut args: Args) -> anyhow::Result<()> {
                 }
             }
             Event::UserEvent(UserEvent::NavigationStarted) => {
+                #[cfg(windows)]
+                let _ = hertz_studio::desktop_host::place_settings(None);
                 quit_ui.reload();
                 quit_ui.arm(&lifecycle.snapshot());
             }
@@ -1350,6 +1391,16 @@ pub fn run_window(mut args: Args) -> anyhow::Result<()> {
                         "window.dispatchEvent(new Event('hertz-open-desktop-lyrics-settings'));",
                     );
                 }
+            }
+            #[cfg(windows)]
+            Event::UserEvent(UserEvent::WallpaperSettings(event)) => {
+                if matches!(event, hertz_desktop::settings_embedding::SettingsEvent::Navigate { .. }) {
+                    let _ = proxy.send_event(UserEvent::FocusWindow);
+                }
+                let payload = serde_json::to_string(&event).unwrap();
+                let _ = webview.evaluate_script(&format!(
+                    "window.dispatchEvent(new CustomEvent('hertz-wallpaper-editor-event',{{detail:{payload}}}));"
+                ));
             }
             Event::UserEvent(UserEvent::DesktopHostState(state)) => {
                 // muda 菜单只能在创建它的线程（这里）变更：文案与可用性跟随探测事实。
@@ -1434,7 +1485,11 @@ pub fn run_window(mut args: Args) -> anyhow::Result<()> {
                 }
                 dpi_changed = false;
             }
-            Event::LoopDestroyed => { obs_preview.take(); owner.take(); }
+            Event::LoopDestroyed => {
+                #[cfg(windows)]
+                let _ = hertz_studio::desktop_host::place_settings(None);
+                obs_preview.take(); owner.take();
+            }
             _ => {}
         }
         if update_presentation {

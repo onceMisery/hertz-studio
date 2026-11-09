@@ -10,7 +10,7 @@ const root = path.resolve(__dirname, '..');
 const assets = path.join(root, 'crates/hertz-desktop/assets');
 const output = path.join(root, 'output/playwright/wallpaper-display-settings');
 let html = fs.readFileSync(path.join(assets, 'wallpaper-settings.html'), 'utf8');
-for (const [key, file] of Object.entries({ DISPLAYS_CSS:'wallpaper-displays.css', DISPLAYS:'wallpaper-displays.js', SETTINGS:'wallpaper-settings.js', LIBRARY:'wallpaper-library.js', WORKS:'wallpaper-work.js', PLAYLIST:'wallpaper-playlist.js' })) html = html.replace('__' + key + '__', () => fs.readFileSync(path.join(assets, file), 'utf8'));
+for (const [key, file] of Object.entries({ DISPLAYS_CSS:'wallpaper-displays.css', DISPLAYS:'wallpaper-displays.js', SETTINGS:'wallpaper-settings.js', LIBRARY:'wallpaper-library.js', WORKS:'wallpaper-work.js', PLAYLIST:'wallpaper-playlist.js', AI:'wallpaper-ai.js', AI_CSS:'wallpaper-ai.css', EMBEDDED_CSS:'wallpaper-embedded.css' })) html = html.replace('__' + key + '__', () => fs.readFileSync(path.join(assets, file), 'utf8'));
 const presentation = { fps:30, quality:'low', brightness:1, motion:1, fit:'cover', pointer:false };
 const payload = {
  revision:9, mediaPreviewAvailable:true, previewActive:false, previewLease:null, launchAtLogin:false, positionEditing:false,

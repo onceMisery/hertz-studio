@@ -14,8 +14,9 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// 播放器调用 `start_embedded` 时给出的进程内运行参数。
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct HostOptions {
+    pub settings_events: Option<crate::settings_embedding::SettingsEvents>,
     /// 与播放器共用的数据目录（发现文件、钥匙串、配置的唯一来源）。
     pub data_dir: PathBuf,
     /// 播放器自己已有托盘（原生主窗口形态）：宿主不建第二个托盘图标，
@@ -31,6 +32,7 @@ pub struct HostOptions {
 
 /// 一次进程内宿主动作：管理命令，或播放器托盘代收的原生菜单点击。
 pub(crate) enum HostAction {
+    Settings(Option<crate::settings_embedding::SettingsPlacement>),
     Command {
         body: Value,
         reply: mpsc::SyncSender<Value>,
@@ -92,6 +94,17 @@ pub struct HostHandle {
 }
 
 impl HostHandle {
+    /// Asynchronous: HWND/WebView operations run exclusively on the host loop.
+    pub fn place_settings(
+        &self,
+        placement: Option<crate::settings_embedding::SettingsPlacement>,
+    ) -> Result<(), String> {
+        self.menus
+            .lock()
+            .map_err(|_| "桌面设置通道不可用".to_string())?
+            .send(HostAction::Settings(placement))
+            .map_err(|_| "桌面宿主未运行".to_string())
+    }
     /// 宿主事件循环是否仍在运行（用户从托盘退出歌词后会被置为 false）。
     pub fn is_running(&self) -> bool {
         self.alive.load(Ordering::Acquire)
@@ -164,6 +177,7 @@ pub fn start_embedded(options: HostOptions) -> Result<HostHandle, String> {
         host_tray: !options.player_tray,
         commands: Some(command_receiver),
         ready: Some(ready_sender),
+        settings_events: options.settings_events,
     };
 
     std::thread::Builder::new()

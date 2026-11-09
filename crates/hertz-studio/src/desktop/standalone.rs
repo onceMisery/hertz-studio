@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 //! Standalone 形态的启动/控制契约，与 DBX 授权准入分开。
 //!
-//! 这里不再启动任何外部 exe：歌词窗口、设置窗口与托盘都由播放器进程内的
+//! 歌词窗口、主播放器内嵌设置视图与托盘都由播放器进程内的
 //! `desktop_host` 直接调用 `hertz_desktop` 库创建，命令也不再经命名管道转发。
 
 use crate::{
@@ -32,6 +32,7 @@ pub(crate) const CONTROL_COMMANDS: &[&str] = &[
     "wallpaper-exit",
     "wallpaper-status",
     "wallpaper-settings",
+    "open-center",
     "wallpaper-toggle",
     "wallpaper-show",
     "wallpaper-hide",
@@ -53,7 +54,8 @@ pub(crate) struct ControlRequest {
     pub value: Option<serde_json::Value>,
 }
 
-/// 主程序内联歌词设置按需初始化宿主，不打开设置中心或启用歌词。
+/// 主程序内联设置按需初始化宿主。壁纸和旧中心入口导航主播放器编辑区；
+/// 歌词内联入口只读取设置，两者都保留已保存的歌词启用状态。
 /// 其余命令维持原合同：宿主不在时返回 503，由显式 launch 入口启动。
 pub(crate) async fn control(
     state: &AppState,
@@ -62,9 +64,11 @@ pub(crate) async fn control(
     if !CONTROL_COMMANDS.contains(&request.command.as_str()) {
         return Err(bad_request("不支持的桌面控制命令"));
     }
-    let inline_lyrics = matches!(
+    let inline_settings = matches!(
         request.command.as_str(),
         "lyrics-settings"
+            | "wallpaper-settings"
+            | "open-center"
             | "lyrics-apply"
             | "lyrics-position-begin"
             | "lyrics-position-done"
@@ -76,9 +80,9 @@ pub(crate) async fn control(
     });
     let data_dir = state.data_dir.clone();
     let result = tokio::task::spawn_blocking(move || {
-        if inline_lyrics {
-            // Initialize the in-process host without opening the settings center
-            // or locating/enabling lyrics. Saved disabled intent stays disabled.
+        if inline_settings {
+            // Initialize without locating/enabling lyrics, then let the command
+            // navigate the requested editor. Saved disabled intent stays disabled.
             crate::desktop_host::ensure_started(&data_dir)?;
         }
         crate::desktop_control::send(payload)

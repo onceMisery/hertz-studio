@@ -1,0 +1,12 @@
+:root[data-theme=light]{color-scheme:light;color:#272723;background:#f6f5f1;--muted:#706e65;--line:#dcdad2;--accent:#4a4940;--accent-ink:#faf9f5;--surface:#eeede8;--control:#e5e3dc}
+:root[data-theme=light] button,:root[data-theme=light] select,:root[data-theme=light] input[type=number],:root[data-theme=light] input[type=text],:root[data-theme=light] input[type=color]{border-color:var(--line)}
+:root[data-theme=light] button:hover:not(:disabled){background:#d8d6cc;border-color:#8b8472}
+:root[data-theme=light] button.primary:hover:not(:disabled){background:var(--accent)}
+:root[data-theme=light] .scene-grid button[aria-pressed=true],:root[data-theme=light] .presets button[aria-pressed=true]{background:#dedbd0;border-color:#8b8472}
+:root[data-embedded=true] header{padding:14px 20px 0}
+:root[data-embedded=true] h1{font-size:16px;margin:0 0 10px}
+:root[data-embedded=true] .eyebrow{display:none}
+:root[data-embedded=true] .workspace{padding:20px;gap:20px}
+:root[data-embedded=true] footer{padding:10px 20px}
+:root[data-embedded=true] .preview-frame:not(.lyrics-sample){height:clamp(130px,24vh,210px);min-height:130px}
+:root[data-embedded=true] #wallpaper-preview{max-width:calc(640px / var(--wallpaper-preview-scale,1));max-height:calc(360px / var(--wallpaper-preview-scale,1));min-height:0}

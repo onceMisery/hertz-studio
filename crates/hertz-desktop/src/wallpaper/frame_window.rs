@@ -242,6 +242,18 @@ impl FrameWindow {
                 bail!("静态预览所属窗口已关闭");
             }
             SetWindowLongPtrW(self.hwnd, GWLP_HWNDPARENT, owner as isize);
+            use windows_sys::Win32::UI::WindowsAndMessaging::{
+                GetWindowLongPtrW, SetParent, GWL_STYLE, WS_CHILD, WS_POPUP,
+            };
+            if GetWindowLongPtrW(owner, GWL_STYLE) & WS_CHILD as isize != 0 {
+                let style = GetWindowLongPtrW(self.hwnd, GWL_STYLE);
+                SetWindowLongPtrW(
+                    self.hwnd,
+                    GWL_STYLE,
+                    (style & !(WS_POPUP as isize)) | WS_CHILD as isize,
+                );
+                SetParent(self.hwnd, owner);
+            }
             if SetWindowPos(
                 self.hwnd,
                 HWND_TOP,
@@ -257,6 +269,28 @@ impl FrameWindow {
         }
         self.upload(monitor)?;
         self.raise()
+    }
+
+    pub(crate) fn set_preview_visibility(
+        &self,
+        monitor: &crate::native::WallpaperMonitor,
+        visible: bool,
+    ) {
+        unsafe {
+            use windows_sys::Win32::UI::WindowsAndMessaging::{
+                ShowWindow, SW_HIDE, SW_SHOWNOACTIVATE,
+            };
+            SetWindowPos(
+                self.hwnd,
+                HWND_TOP,
+                monitor.left,
+                monitor.top,
+                monitor.width,
+                monitor.height,
+                SWP_NOACTIVATE,
+            );
+            ShowWindow(self.hwnd, if visible { SW_SHOWNOACTIVATE } else { SW_HIDE });
+        }
     }
 
     fn upload(&self, monitor: &crate::native::WallpaperMonitor) -> Result<()> {

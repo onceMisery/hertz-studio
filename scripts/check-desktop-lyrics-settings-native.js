@@ -232,6 +232,9 @@ ConvertTo-Json -Compress -InputObject @([LyricsSettingWindows]::Read([uint32]$Ta
       headers: { Authorization: 'Bearer ' + discovery.token, 'Content-Type': 'application/json' }, body: JSON.stringify({ command: 'status' }) });
     return response.status === 503;
   }, 'embedded host stopped');
+  // The command channel closes before the event-loop lifetime guard finishes.
+  // Wait for the real native window teardown before qualifying a fresh host.
+  await until(() => !windows().some(window => window.Title === 'Hertz 桌面歌词'), 'native host window teardown');
   assert.deepEqual((await read()).lyricsConfig, persisted); assertNoSettingsWindow();
   mark('Embedded host restart keeps the saved lyrics configuration without opening the native settings window');
   await shutdown(); await start();

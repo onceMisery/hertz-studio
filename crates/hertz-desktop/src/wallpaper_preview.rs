@@ -31,7 +31,7 @@ pub(super) struct PreviewOwner {
     configuration: config::WallpaperConfig,
     reference: Option<crate::wallpaper::playlist::FixedVersion>,
     configured_fps: u8,
-    monitor: native::WallpaperMonitor,
+    pub(super) monitor: native::WallpaperMonitor,
     prepared: Option<PreviewContent>,
     pub(super) surface: Option<WallpaperSurface>,
     pub(super) frame: Option<Handoff>,
@@ -319,7 +319,26 @@ impl App {
                 "当前电源或会话状态暂停预览",
             ));
         }
-        let monitor = preview_monitor()?;
+        let mut monitor = preview_monitor()?;
+        if let Some(settings) = self
+            .settings
+            .as_ref()
+            .filter(|settings| settings.placement.is_some())
+        {
+            let bounds = settings.preview_bounds.as_ref().ok_or_else(|| {
+                JobError::new("preview_hidden", "请先将预览区域完整显示在壁纸编辑区内")
+            })?;
+            if bounds.width > 640 || bounds.height > 360 {
+                return Err(JobError::new(
+                    "preview_size",
+                    "预览区域超出固定尺寸，请重新加载编辑区",
+                ));
+            }
+            monitor.left = bounds.x;
+            monitor.top = bounds.y;
+            monitor.width = bounds.width as i32;
+            monitor.height = bounds.height as i32;
+        }
         let configured_fps = configuration.presentation().fps;
         let selection = match &configuration.main().selection {
             Selection::Package { .. } | Selection::Playlist { .. } => {
@@ -528,7 +547,13 @@ impl App {
             builtin,
             composition,
             preview.monitor.clone(),
-            PresentationWindow::Preview { owner },
+            PresentationWindow::Preview {
+                owner,
+                embedded: self
+                    .settings
+                    .as_ref()
+                    .is_some_and(|settings| settings.placement.is_some()),
+            },
         )?;
         if surface.runtime_builtin.is_none() || surface.configuration.follows_hertz() {
             surface.runtime_builtin = crate::wallpaper::follow::resolve(
@@ -562,6 +587,7 @@ impl App {
         }
         preview.surface = Some(surface);
         preview.heartbeat_at = Instant::now();
+        self.sync_embedded_preview();
         Ok(())
     }
 
@@ -650,6 +676,7 @@ impl App {
             self.wallpaper_retiring
                 .push(RetiringWallpaper::new(surface));
         }
+        self.sync_embedded_preview();
         true
     }
 
@@ -733,6 +760,7 @@ impl App {
                     if let Some(mut frame) = preview.frame.take() {
                         frame.retire();
                         self.wallpaper_handoff_retiring.push(frame);
+                        self.send_settings_status(None, None);
                     }
                 }
                 return true;

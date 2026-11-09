@@ -22,6 +22,27 @@ static HOST: OnceLock<Mutex<Option<Arc<hertz_desktop::HostHandle>>>> = OnceLock:
 /// 播放器 `--window` 自己有托盘时，宿主不再建第二个托盘图标。
 #[cfg(windows)]
 static PLAYER_TRAY: AtomicBool = AtomicBool::new(false);
+#[cfg(windows)]
+static SETTINGS_EVENTS: OnceLock<hertz_desktop::settings_embedding::SettingsEvents> =
+    OnceLock::new();
+
+#[cfg(windows)]
+pub fn set_settings_events(events: hertz_desktop::settings_embedding::SettingsEvents) {
+    let _ = SETTINGS_EVENTS.set(events);
+}
+
+#[cfg(windows)]
+pub fn place_settings(
+    placement: Option<hertz_desktop::settings_embedding::SettingsPlacement>,
+) -> anyhow::Result<()> {
+    if let Some(handle) = current_handle() {
+        handle.place_settings(placement).map_err(anyhow::Error::msg)
+    } else if placement.is_some() {
+        anyhow::bail!("桌面宿主未运行，请重新打开壁纸设置")
+    } else {
+        Ok(())
+    }
+}
 
 /// 由原生主窗口在启动托盘时声明所有权；进程内只会有一个宿主。
 pub fn set_player_tray(enabled: bool) {
@@ -74,6 +95,7 @@ pub fn ensure_started(data_dir: &Path) -> anyhow::Result<()> {
         autostart_command,
         settings_tab: None,
         locate: false,
+        settings_events: SETTINGS_EVENTS.get().cloned(),
     })
     .map_err(anyhow::Error::msg)?;
     *guard = Some(Arc::new(handle));

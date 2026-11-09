@@ -32,6 +32,21 @@ impl Handoff {
             {
                 bail!("读取预览位置失败");
             }
+            let owner = preview_owner.expect("preview owner");
+            if unsafe {
+                windows_sys::Win32::UI::WindowsAndMessaging::GetWindowLongPtrW(
+                    owner,
+                    windows_sys::Win32::UI::WindowsAndMessaging::GWL_STYLE,
+                )
+            } & windows_sys::Win32::UI::WindowsAndMessaging::WS_CHILD as isize
+                != 0
+            {
+                if unsafe { windows_sys::Win32::Graphics::Gdi::ScreenToClient(owner, &mut origin) }
+                    == 0
+                {
+                    bail!("读取内嵌预览位置失败");
+                }
+            }
             monitor.left = origin.x;
             monitor.top = origin.y;
         }

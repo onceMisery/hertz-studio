@@ -29,6 +29,8 @@ mod feed;
 #[cfg(windows)]
 mod host;
 #[cfg(windows)]
+pub mod settings_embedding;
+#[cfg(windows)]
 mod hotkey;
 #[cfg(windows)]
 mod management;

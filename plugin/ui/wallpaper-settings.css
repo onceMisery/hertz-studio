@@ -1,0 +1,15 @@
+#wallpaper-settings-workspace{min-width:0;margin-top:24px;border-top:1px solid var(--line);padding-top:20px;scroll-margin-top:80px}
+#wallpaper-settings-workspace[hidden]{display:none}
+.wallpaper-workspace-heading h3{margin:0;font-size:15px;font-weight:600}
+.wallpaper-workspace-heading p{margin:8px 0 16px;font-size:12px;color:var(--muted)}
+#wallpaper-settings-surface{position:relative;height:clamp(480px,72dvh,760px);min-width:0;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:var(--panel-solid)}
+#wallpaper-workspace-status{margin:24px;font-size:13px;color:var(--muted)}
+#wallpaper-workspace-retry{margin:0 24px}
+.wallpaper-workspace-loading{display:grid;grid-template-columns:minmax(0,2fr) minmax(0,1fr);gap:20px;padding:28px}
+.wallpaper-workspace-loading span{height:200px;background:var(--field-bg);border-radius:6px;animation:wallpaper-loading 1.8s ease-in-out infinite}
+.wallpaper-workspace-loading span:last-child{grid-column:1/-1;height:48px}
+#wallpaper-settings-workspace[data-state=ready] .wallpaper-workspace-loading,#wallpaper-settings-workspace[data-state=error] .wallpaper-workspace-loading{display:none}
+#wallpaper-settings-workspace[data-state=error] #wallpaper-workspace-status{color:var(--danger,#c97565)}
+@keyframes wallpaper-loading{50%{opacity:.45}}
+@media(max-width:767px){#wallpaper-settings-surface{height:70dvh;min-height:420px}.wallpaper-workspace-loading{grid-template-columns:minmax(0,1fr);padding:20px}}
+@media(prefers-reduced-motion:reduce){.wallpaper-workspace-loading span{animation:none}}

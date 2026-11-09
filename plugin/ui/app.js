@@ -9891,6 +9891,7 @@ async function startApp() {
   // DBX 的统一桌面区只注册事件；实际打开设置或显式桌面动作才检测。
   if (window.HertzDesktopSettings) window.HertzDesktopSettings.init(transport);
   if (window.HertzDesktopLyricsSettings) window.HertzDesktopLyricsSettings.init(transport);
+  if (window.HertzWallpaperSettings) window.HertzWallpaperSettings.init(transport);
   window.addEventListener('hertz-settings-category', refreshInlineDesktopLyrics);
   window.addEventListener('hertz-open-desktop-lyrics-settings', openInlineDesktopLyrics);
   if (window.WindowLifecycle) window.WindowLifecycle.init(transport);
@@ -9949,6 +9950,10 @@ async function startApp() {
         if (window.HertzDesktopSettings) window.HertzDesktopSettings.onSettingsEnter();
         // 分类显隐完成后聚焦歌词组里的桌面区。
         requestAnimationFrame(() => window.HertzDesktopSettings && window.HertzDesktopSettings.focus());
+        return;
+      }
+      if (window.__hertzWindowHost && window.HertzWallpaperSettings) {
+        void window.HertzWallpaperSettings.open('wallpaper');
         return;
       }
       wallpaperControl('wallpaper-settings', { tab: 'wallpaper' })

@@ -63,6 +63,8 @@ ui_assets! {
     "/host.js", JS => const HOST_JS: &str = edition_ui!("host.js");
     "/desktop-settings.js", JS => const DESKTOP_SETTINGS_JS: &str = edition_ui!("desktop-settings.js");
     "/desktop-lyrics-settings.js", JS => const DESKTOP_LYRICS_SETTINGS_JS: &str = edition_ui!("desktop-lyrics-settings.js");
+    "/wallpaper-settings.js", JS => const WALLPAPER_SETTINGS_JS: &str = edition_ui!("wallpaper-settings.js");
+    "/wallpaper-settings.css", CSS => const WALLPAPER_SETTINGS_CSS: &str = edition_ui!("wallpaper-settings.css");
     "/desktop-lyrics-settings.css", CSS => const DESKTOP_LYRICS_SETTINGS_CSS: &str = edition_ui!("desktop-lyrics-settings.css");
     "/window-lifecycle.js", JS => const WINDOW_LIFECYCLE_JS: &str = edition_ui!("window-lifecycle.js");
     "/window-sleep.js", JS => const WINDOW_SLEEP_JS: &str = edition_ui!("window-sleep.js");

@@ -10,7 +10,7 @@ R2的[五场原生退出/保存失败/Mini核验](../output/a10-native-feature-e
 
 ## 2026-11-05 进程模型更新：桌面歌词回到播放器进程内
 
-独立形态（HertzStudio 播放器）**不再启动 `hertz-desktop.exe`**：`crates/hertz-desktop` 改为「库 + 独立 exe 薄壳」，播放器经 `crates/hertz-studio/src/desktop_host.rs` 在**本进程**调用 `hertz_desktop::start_embedded()`，直接创建歌词窗口与「桌面歌词与壁纸」设置窗口。命令走进程内 `mpsc` 进宿主的 tao 事件循环，复用同一个 `handle_pipe_request` 业务分派；命名管理管道只属于独立 exe（原生回归脚本仍直接 spawn 它），播放器侧不再有 `Command::new` 或 `management::request`，也不再有「启动 exe → sleep → 补发命令」。
+独立形态（HertzStudio 播放器）**不再启动 `hertz-desktop.exe`**：`crates/hertz-desktop` 改为「库 + 独立 exe 薄壳」，播放器经 `crates/hertz-studio/src/desktop_host.rs` 在**本进程**调用 `hertz_desktop::start_embedded()`，直接创建歌词窗口。壁纸设置与原生预览挂载为主播放器窗口内的子视图；主界面、托盘和旧管理入口统一导航到该编辑区。命令走进程内 `mpsc` 进宿主的 tao 事件循环，复用同一个 `handle_pipe_request` 业务分派；命名管理管道只属于独立 exe（原生回归脚本仍直接 spawn 它），播放器侧不再有 `Command::new` 或 `management::request`，也不再有「启动 exe → sleep → 补发命令」。
 
 启动、托盘与退出统一归播放器：
 
@@ -49,11 +49,11 @@ Windows 主窗口与桌面宿主的 Tao 循环统一为 `EventLoop<()>`，所有
 
 2026-10-29 DBX 实施更新：D0–D2 的来源类型、只读命名管道、原生读取、管理与设置流程已实现并通过两阶段审查。D3a 两版同源配套候选已准备；最低 0.6.35 / 当前 0.6.47 的两版插件已验证无组件基础流程、真实定时、关闭重开、原生呈现与正常退出，当前 Full 另验真实在线取词。D3b 的物理媒体键、跨用户/会话、物理桌面恢复及长稳等仍待验，尚不能宣称正式交付。组件分发与完整验收见 [DBX 桌面接入方案](./desktop-dbx.md)及其验证记录；下文独立版的现行发现与 HTTP / WS 合同保持有效。
 
-2026-10-27 UI 更新：统一入口为「桌面歌词与壁纸」，包含壁纸、歌词、运行设置。应用内入口使用现有管理命令 `wallpaper-settings`，可附 `value: {"tab":"lyrics"}`（或 `wallpaper` / `runtime`）；旧命令仍兼容。首次启动仍通过已有桌面启动路由发现匹配组件。
+2026-11-09 更新：统一入口为「桌面歌词与壁纸」，包含壁纸、歌词、运行设置，完整编辑器挂载在主播放器设置页。应用内 `wallpaper-settings` 和旧 `open-center` 入口均导航主窗口，可附 `value: {"tab":"lyrics"}`（或 `wallpaper` / `runtime`）。首次打开按需初始化进程内宿主，保留已保存的歌词启用状态。
 
 管理页只持有临时草稿。壁纸与歌词通过同一次带 revision 的原生提交应用；关闭按钮和原生 X 都在有草稿时提供「继续编辑 / 放弃并关闭」。外部配置更新不会覆盖草稿，冲突时必须放弃并重读。音乐来源切换前先应用或放弃草稿；系统启动项显示实际注册状态，更新失败单独反馈。
 
-实时壁纸预览内嵌在管理页，复用同一 renderer 与单活动租约，离开页签或关闭管理页释放。初始静态图片来自随包真实场景截图，不消耗持续渲染资源；捕获脚本为 `scripts/capture-desktop-scene-thumbnails.js`。管理页不再创建第二个可编辑预览窗口。
+原生播放器的实时壁纸预览是编辑区的子窗口，保留原有 640×360 物理像素上限、同一 renderer 与单活动租约。宿主在布局变化和交接回执后同步位置、可见性及窗口顺序，预览不会被编辑器覆盖，迟到的保留帧不会重新显示在隐藏区域。离开设置页隐藏编辑器、释放预览并保留未应用草稿；关闭或重载页面销毁旧编辑视图。初始静态图片来自随包真实场景截图，不消耗持续渲染资源；捕获脚本为 `scripts/capture-desktop-scene-thumbnails.js`。独立 `hertz-desktop` 诊断程序保留其窗口接口。
 
 本轮验证记录见[UI 落地记录](plans/2026-10-27-ui-productization-delivery.md)，硬件与发布待验项目仍按原生验证计划执行。
 

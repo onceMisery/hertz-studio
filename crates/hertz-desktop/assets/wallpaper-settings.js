@@ -30,6 +30,16 @@
   function send(cmd, extra) {
     if (window.ipc && window.ipc.postMessage) window.ipc.postMessage(JSON.stringify(Object.assign({ cmd: cmd }, extra || {})));
   }
+  function syncEmbeddedPreviewBounds() {
+    if (!window.__hertzEmbeddedSettings) return;
+    document.documentElement.style.setProperty('--wallpaper-preview-scale', String(devicePixelRatio));
+    var frame = $('wallpaper-preview'), rect = frame && frame.getBoundingClientRect();
+    if (!rect) return;
+    var main = document.querySelector('main').getBoundingClientRect(), scale = devicePixelRatio;
+    send('preview-bounds', { bounds: { x: Math.round(rect.left * scale), y: Math.round(rect.top * scale),
+      width: Math.round(rect.width * scale), height: Math.round(rect.height * scale) },
+      visible: activeTab === 'wallpaper' && !document.hidden && rect.top >= main.top && rect.bottom <= main.bottom });
+  }
   var managementRequests = new Map();
   function requestManagement(command, payload, requestId, expectedRevision) {
     var id = requestId || crypto.randomUUID(), input = JSON.stringify({ command: command, payload: payload || {}, expectedRevision: expectedRevision });
@@ -104,6 +114,10 @@
     return action().finally(function () { previewTasks--; renderPreview(); syncControls(); });
   }
   function startNativePreview(update) {
+    if (window.__hertzEmbeddedSettings) {
+      $('wallpaper-preview').scrollIntoView({ block: 'nearest', behavior: 'instant' });
+      syncEmbeddedPreviewBounds();
+    }
     if (!draft || !mainGroup(draft.wallpaper) || update && previewMode !== 'settings') return Promise.resolve();
     if (publicPropertiesError()) { status(publicPropertiesError(), true); return Promise.resolve(); }
     var input = clone(draft), base = revision, epoch = draftEpoch, groupId = selectedGroupId, sequence = ++previewSequence;
@@ -832,6 +846,10 @@
     if (selection) $('scene-following').textContent = (metadata && metadata.kind === 'video' ? '视频' : metadata && metadata.kind === 'image' ? '图片' : '本地作品') + (metadata && metadata.version ? ' · 版本 ' + metadata.version : ' · 固定版本');
     $('preview-placeholder-title').textContent = previewActive ? '独立预览窗口已打开' : selection ? '本地作品已选入草稿' : '先看效果，再应用到桌面';
     $('preview-placeholder-text').textContent = previewActive ? '可在预览窗口查看当前草稿。结束预览或切换页面会关闭窗口；桌面保持已应用的画面。' : selection ? mediaPreviewAvailable ? '点击开始预览，在独立窗口查看图片或静音视频。应用后，桌面会在新作品就绪时切换。' : '点击应用后在桌面查看。媒体实时预览尚未提供；当前桌面画面会保留到新作品就绪。' : '点击开始预览，在独立窗口查看真实场景与当前音乐效果，不会修改已保存的设置。';
+    if (window.__hertzEmbeddedSettings) {
+      $('preview-placeholder-title').textContent = previewActive ? '正在预览当前草稿' : '先看效果，再应用到桌面';
+      $('preview-placeholder-text').textContent = previewActive ? '结束预览或切换页面会释放预览；桌面保持已应用的画面。' : '点击开始预览，在此处查看真实场景、图片或静音视频；不会修改已保存的设置。';
+    }
     if (selection && metadata && metadata.kind === 'builtin' && !previewActive) $('preview-placeholder-text').textContent = '预览保存的场景参数与音频效果；应用后切换桌面。';
     if (playlistSelection(wallpaper)) {
       $('scene-heading').textContent = '轮播列表'; $('scene-following').textContent = '按列表中的固定版本轮播';
@@ -840,7 +858,7 @@
     var previewState = latest && latest.mediaPreview;
     if (previewActive && previewState && previewState.handoff) {
       $('preview-placeholder-title').textContent = previewState.error ? '新预览未能显示 · 保留上一帧' : '正在更新预览 · 保留上一帧';
-      $('preview-placeholder-text').textContent = previewState.error || '新画面就绪后自动显示。结束预览会关闭窗口。';
+      $('preview-placeholder-text').textContent = previewState.error || (window.__hertzEmbeddedSettings ? '新画面就绪后自动显示。结束预览会释放预览。' : '新画面就绪后自动显示。结束预览会关闭窗口。');
     }
     if (current && !scenes.some(scene => scene.id === current)) $('scene-following').textContent += '（暂不支持壁纸）';
     document.querySelectorAll('[data-scene]').forEach(node => node.setAttribute('aria-pressed', String(!follows(wallpaper) && node.dataset.scene === selectedScene(wallpaper))));
@@ -870,7 +888,7 @@
     staticImage.style.objectFit = selection ? presentation(wallpaper).fit === 'stretch' ? 'fill' : presentation(wallpaper).fit : 'cover';
     staticImage.hidden = previewActive || !(cover || !selection && staticScene);
     $('preview-placeholder').hidden = !staticImage.hidden;
-    $('preview-kind').textContent = previewActive ? '独立窗口预览' : selection ? cover ? '视频封面' : '本地作品' : '真实场景静态参考';
+    $('preview-kind').textContent = previewActive ? window.__hertzEmbeddedSettings ? '当前草稿预览' : '独立窗口预览' : selection ? cover ? '视频封面' : '本地作品' : '真实场景静态参考';
     var style = $('lyrics-preview').style;
     style.setProperty('--font-size', lyrics.fontSize + 'px'); style.setProperty('--font-weight', String(lyrics.fontWeight));
     style.setProperty('--font-family', lyrics.fontFamily); style.setProperty('--sung', lyrics.sungColor); style.setProperty('--unsung', lyrics.unsungColor);
@@ -1262,7 +1280,7 @@
     hotkeyPending = true; syncControls();
     send('recovery-hotkey', { hotkey: null, expectedRevision: revision });
   });
-  $('preview').addEventListener('click', function () { if (previewActive) releaseNativePreview(); else startNativePreview(false); });
+  $('preview').addEventListener('click', function () { syncEmbeddedPreviewBounds(); if (previewActive) releaseNativePreview(); else startNativePreview(false); });
   $('apply').addEventListener('click', function () { if (!ready || !dirty || conflict || editing || pending || this.disabled) return; if (!settingsInvalid()) { applyNativeDraft(); } else status(publicPropertiesError() || '请检查运行规则、字号、描边宽度与音频参数。', true); });
   $('discard').addEventListener('click', function () { dirty = false; conflict = false; pending = false; draft = clone(saved); revision = latest.revision; releaseNativePreview(); releaseNativeDraft(); ensureSelectedGroup(); renderForm(); if (latest) renderRuntime(latest); publishRuntime(); status('已放弃草稿，读取最新保存的设置。', false); });
   $('close').addEventListener('click', requestClose);
@@ -1281,6 +1299,10 @@
     currentBuiltin: function () { var state = draft && builtin(draft.wallpaper); return state ? Object.assign({ title: sceneLabel(state.sceneId) }, clone(state)) : null; },
     releasePreview: releaseNativePreview,
     previewWork: function (reference) {
+      if (window.__hertzEmbeddedSettings) {
+        $('wallpaper-preview').scrollIntoView({ block: 'nearest', behavior: 'instant' });
+        syncEmbeddedPreviewBounds();
+      }
       if (!draft || !mainGroup(draft.wallpaper)) return Promise.reject(new Error('请等待显示组读取完成后预览作品。'));
       clearTimeout(previewTimer);
       previewMode = 'work';
@@ -1334,5 +1356,13 @@
     propertyDisposed = true; propertyEpoch++; clearTimeout(propertyTimer); propertyEntries.clear();
     if (previewLease) requestManagement('wallpaper.preview.release', { leaseId: previewLease }).catch(function () {}); send('position-cancel');
   });
+  if (window.__hertzEmbeddedSettings) {
+    document.documentElement.dataset.embedded = 'true';
+    var previewFrame = $('wallpaper-preview');
+    new ResizeObserver(syncEmbeddedPreviewBounds).observe(previewFrame);
+    document.querySelector('main').addEventListener('scroll', syncEmbeddedPreviewBounds);
+    window.addEventListener('resize', syncEmbeddedPreviewBounds);
+    requestAnimationFrame(syncEmbeddedPreviewBounds);
+  }
   send('ready');
 })();
