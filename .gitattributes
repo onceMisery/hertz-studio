@@ -51,3 +51,6 @@ crates/hertz-wallpaper/contracts/*.json text eol=lf
 # export-stage-contract.js --check compares these two generated files byte-for-byte.
 crates/hertz-studio/src/ai/stage-contract/stage-contract.json text eol=lf
 plugin/ui/creative-contract.js text eol=lf
+# Design generation is compared byte-for-byte; Windows checkouts must retain LF.
+plugin/ui/design/design-base.css text eol=lf
+plugin/ui/design/design-themes.js text eol=lf

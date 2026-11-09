@@ -71,9 +71,11 @@ pub fn references(value: &Value) -> BTreeSet<(String, String)> {
 /// Removes only obsolete transient background data. Stable missing references survive.
 pub fn migrate(value: &mut Value) -> bool {
     if let Some(items) = value.as_array_mut() {
-        return items
-            .iter_mut()
-            .fold(false, |changed, p| migrate(p) || changed);
+        let mut changed = false;
+        for item in items {
+            changed |= migrate(item);
+        }
+        return changed;
     }
     let Some(bg) = value.get_mut("bg").and_then(Value::as_object_mut) else {
         return false;

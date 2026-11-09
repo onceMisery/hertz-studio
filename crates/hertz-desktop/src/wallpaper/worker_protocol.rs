@@ -10,6 +10,8 @@ pub const RESOURCE_CHUNK: usize = 64 * 1024;
 pub const RESOURCE_STREAM_LIMIT: usize = 1024 * 1024;
 pub const RESOURCE_CONCURRENCY: usize = 8;
 pub const CONTROL_QUEUE_FRAMES: usize = 32;
+// Rust 1.88 does not count the anonymous const assertion as a live reference.
+#[allow(dead_code)]
 pub const CONTROL_QUEUE_BYTES: usize = 256 * 1024;
 const _: () = assert!(CONTROL_QUEUE_FRAMES * CONTROL_LIMIT <= CONTROL_QUEUE_BYTES);
 

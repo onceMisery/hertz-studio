@@ -240,7 +240,12 @@ fn convert_icc(pixels: &mut image::RgbaImage, icc: &[u8]) -> ApiResult<()> {
         transform
             .transform(source, &mut row)
             .map_err(|e| bad_request(e.to_string()))?;
-        for (original, converted) in source.chunks_exact_mut(4).zip(row.chunks_exact(4)) {
+        for (original, converted) in source
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .zip(row.as_chunks::<4>().0.iter())
+        {
             original[..3].copy_from_slice(&converted[..3]);
         }
     }

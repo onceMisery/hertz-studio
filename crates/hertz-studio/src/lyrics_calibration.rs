@@ -931,11 +931,12 @@ mod tests {
             .lyrics_calibration
             .narrow(&f.state, "bind", same_sequence)
             .is_err());
-        let o = lock(&f.state.lyrics_calibration.owner);
-        assert_eq!(o.binding, bound["bindingId"].as_str().unwrap());
-        assert_eq!(o.high_water, 2);
-        assert_eq!(o.pending.as_ref().unwrap().intent.request_id, "B");
-        drop(o);
+        {
+            let o = lock(&f.state.lyrics_calibration.owner);
+            assert_eq!(o.binding, bound["bindingId"].as_str().unwrap());
+            assert_eq!(o.high_water, 2);
+            assert_eq!(o.pending.as_ref().unwrap().intent.request_id, "B");
+        }
         f.finish().await;
     }
     #[tokio::test]
@@ -976,13 +977,14 @@ mod tests {
             .lyrics_calibration
             .narrow(&f.state, "bind", late_authenticated)
             .is_err());
-        let o = lock(&f.state.lyrics_calibration.owner);
-        assert_eq!(o.binding, bound["bindingId"].as_str().unwrap());
-        assert_eq!(
-            o.pending.as_ref().unwrap().intent.request_id,
-            "after-reconsent"
-        );
-        drop(o);
+        {
+            let o = lock(&f.state.lyrics_calibration.owner);
+            assert_eq!(o.binding, bound["bindingId"].as_str().unwrap());
+            assert_eq!(
+                o.pending.as_ref().unwrap().intent.request_id,
+                "after-reconsent"
+            );
+        }
         f.finish().await;
     }
     #[tokio::test]
@@ -1317,6 +1319,7 @@ fn matches_truth(state: &AppState, i: &Intent) -> bool {
 }
 impl LyricsCalibration {
     /// DBX authorization remains owned by the bridge; gate changes invalidate all bindings.
+    #[cfg(all(windows, target_arch = "x86_64"))]
     pub(crate) fn set_gate(&self, authorized: bool, dbx: bool) {
         let mut owner = lock(&self.owner);
         owner.fence_binding();
@@ -1388,7 +1391,7 @@ impl LyricsCalibration {
         enabled: Option<bool>,
     ) -> Result<Value, ApiError> {
         self.load_standalone(state);
-        if let Some(enabled) = enabled {
+        if enabled.is_some() {
             let _file = lock(&self.file);
             {
                 let mut o = lock(&self.owner);
@@ -1401,7 +1404,7 @@ impl LyricsCalibration {
                 o.terminals.clear();
             }
             #[cfg(all(windows, target_arch = "x86_64"))]
-            {
+            if let Some(enabled) = enabled {
                 use crate::desktop_bridge::authorization::{create_key, key_file, Authorization};
                 use hertz_desktop_ipc::{windows, Scope};
                 let existing = Authorization::read(&state.data_dir)
@@ -1468,9 +1471,9 @@ impl LyricsCalibration {
                     .join(key_file(Scope::LyricsCalibration))
                     .try_exists()
                     .unwrap_or(true);
-            return Ok(
+            Ok(
                 json!({"authorized":authorized,"persistentAuthorized":persistent,"cleanupIncomplete":cleanup}),
-            );
+            )
         }
         #[cfg(not(all(windows, target_arch = "x86_64")))]
         Ok(json!({"authorized":authorized}))

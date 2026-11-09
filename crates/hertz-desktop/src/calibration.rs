@@ -31,6 +31,8 @@ impl Pending {
             hertz_desktop_ipc::monotonic::now_millis()?.checked_add(5000)?;
         // Acceptance order belongs to this native process, before any transport
         // can wait or be overtaken by a later click. A restart gets a new subject.
+        // Rust 1.88 does not have stable try_update; preserve its atomic API.
+        #[allow(deprecated)]
         let request_sequence = SEQUENCE
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_add(1))
             .ok()?

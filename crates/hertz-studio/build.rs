@@ -109,7 +109,7 @@ fn embed_windows_icon(root: &std::path::Path) -> std::io::Result<()> {
         out.extend_from_slice(&0u32.to_le_bytes()); // Version
         out.extend_from_slice(&0u32.to_le_bytes()); // Characteristics
         out.extend_from_slice(data);
-        while out.len() % 4 != 0 {
+        while !out.len().is_multiple_of(4) {
             out.push(0);
         }
     }
