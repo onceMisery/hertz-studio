@@ -5219,6 +5219,44 @@ mod tests {
             assert!(!root.join("stage-media").exists());
         }
 
+        // Invalid backup envelopes are rejected before the shared restore owner
+        // initializes, with the same client error over HTTP and RPC.
+        let mut unsupported = http_backup.clone();
+        unsupported["version"] = json!(999);
+        unsupported["settings"]["backup_injected"] = json!(true);
+        let mut legacy_lyrics = http_backup.clone();
+        legacy_lyrics["lyrics"] = json!([{
+            "track_id": "local", "content": "[00:01]test", "offset_ms": 0,
+            "revision": "test"
+        }]);
+        legacy_lyrics["settings"]["backup_injected"] = json!(true);
+        let mut oversized_id = legacy_lyrics.clone();
+        oversized_id["version"] = json!(2);
+        oversized_id["lyrics"][0]["track_id"] = json!("x".repeat(257));
+        oversized_id["lyrics"][0]["revision"] = json!("1");
+        for invalid in [unsupported, legacy_lyrics, oversized_id] {
+            let response = client
+                .post(format!("{base}/v1/backup/restore"))
+                .bearer_auth(&state.token)
+                .json(&invalid)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), 400);
+            let error = rpc
+                .call(call(Op::Post, "v1/backup/restore", invalid))
+                .await
+                .err()
+                .expect("RPC must reject an invalid backup envelope");
+            assert_eq!(error.status, 400);
+            assert!(vmusic_store::settings::get(&state.db, "backup_injected")
+                .await
+                .unwrap()
+                .is_none());
+            assert!(state.stage_media.get().is_none());
+            assert!(!root.join("stage-media").exists());
+        }
+
         // Each transport can round-trip a normal export, including the legacy
         // close preference. Native geometry stays byte-for-byte unchanged.
         for (use_rpc, backup) in [(false, http_backup), (true, rpc_backup)] {

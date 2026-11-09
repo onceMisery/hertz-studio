@@ -164,7 +164,8 @@ pub(crate) fn parse_saved_checked(content: &str) -> ApiResult<LyricDocument> {
 pub(crate) async fn validate_backup_sources(
     backup: &vmusic_store::backup::BackupFile,
 ) -> ApiResult<()> {
-    vmusic_store::backup::validate_lyrics(backup).map_err(vmusic_core::CoreError::from)?;
+    vmusic_store::backup::validate_lyrics(backup)
+        .map_err(|error| bad_request(error.to_string()))?;
     if backup.lyrics.is_empty() {
         return Ok(());
     }
