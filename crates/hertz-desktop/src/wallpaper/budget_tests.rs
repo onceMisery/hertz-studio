@@ -73,7 +73,10 @@ fn video_upload_rate_is_independent_global_and_held_until_real_exit() {
     assert_eq!(budget.usage(), Default::default());
     let mut overflow = full_hd.clone();
     overflow.texture_upload_bytes_per_second = u64::MAX;
-    assert_eq!(budget.grant(&overflow).unwrap_err().quota, "texture_upload_bytes_per_second");
+    assert_eq!(
+        budget.grant(&overflow).unwrap_err().quota,
+        "texture_upload_bytes_per_second"
+    );
 
     let mut desktop = full_hd.clone();
     desktop.session = "desktop-upload".into();

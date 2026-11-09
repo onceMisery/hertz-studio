@@ -3,8 +3,10 @@
 'use strict';
 const assert=require('node:assert/strict'), fs=require('node:fs'), path=require('node:path');
 const {execFileSync}=require('node:child_process'), {createHash}=require('node:crypto'), zlib=require('node:zlib');
+const {loadCompositionFontFixture}=require('./composition-font-fixture.js');
 const {chromium}=require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const root=path.resolve(__dirname,'..'), output=path.join(root,'output/a04-p2-20261108/composition-browser');
+const fontFixture=loadCompositionFontFixture();
 fs.mkdirSync(output,{recursive:true});
 function hash(bytes){return createHash('sha256').update(bytes).digest('hex');}
 function crc(bytes){let c=0xffffffff;for(const b of bytes){c^=b;for(let i=0;i<8;i++)c=(c>>>1)^((c&1)?0xedb88320:0);}return (c^0xffffffff)>>>0;}
@@ -20,26 +22,40 @@ const sourceAssets=[
  {assetId:'mask',kind:'image',file:'mask.png',mime:'image/png',width:8,height:8,bytes:png(8,8,()=>[128,128,128,255])},
  {assetId:'wide',kind:'image',file:'wide.png',mime:'image/png',width:16,height:8,bytes:png(16,8,(x)=>x<8?[255,0,0,255]:[0,255,0,255])},
  {assetId:'video',kind:'video',file:'video.webm',mime:'video/webm',bytes:fs.readFileSync(path.join(root,'scripts/fixtures/wallpaper-vp8.webm'))},
- {assetId:'font',kind:'font',file:'font.ttf',mime:'font/ttf',bytes:fs.readFileSync(process.env.COMPOSITION_TEST_FONT || 'C:/Windows/Fonts/arial.ttf')}
+ {assetId:'font',kind:'font',file:fontFixture.file,mime:fontFixture.mime,bytes:fontFixture.bytes}
 ];
 for(const a of sourceAssets)fs.writeFileSync(path.join(output,a.file),a.bytes);
-execFileSync('cargo',['build','-p','hertz-wallpaper','--example','export_composition_ir'],{cwd:root,stdio:'inherit'});
-const executable=path.join(root,'target/debug/examples/export_composition_ir'+(process.platform==='win32'?'.exe':''));
-let number=0;const compilerInputs=new WeakMap();
+for(const file of fontFixture.packageFiles){fs.mkdirSync(path.dirname(path.join(output,file.file)),{recursive:true});fs.writeFileSync(path.join(output,file.file),file.bytes);}
+const compilerTarget=process.env.HERTZ_COMPOSITION_COMPILER_TARGET_DIR?path.resolve(process.env.HERTZ_COMPOSITION_COMPILER_TARGET_DIR):path.join(root,'target');
+const compilerArgs=['build','-p','hertz-wallpaper','--example','export_composition_ir'];
+if(process.env.HERTZ_COMPOSITION_COMPILER_TARGET_DIR)compilerArgs.push('--target-dir',compilerTarget);
+execFileSync('cargo',compilerArgs,{cwd:root,stdio:'inherit'});
+const executable=path.join(compilerTarget,'debug/examples/export_composition_ir'+(process.platform==='win32'?'.exe':''));
+let number=0;const compilerInputs=new WeakMap(),nativeFontRequests=[];
+const fontProjectionKey=compiled=>hash(Buffer.from(JSON.stringify([compiled.ir.semanticKey,compiled.finalPublicValues])));
+function rememberFontProjection(compiled,inputs,overrides={}){
+ if(!compiled.ir.nodes.some(node=>node.nodeType==='text'))return;
+ const manifest=JSON.parse(fs.readFileSync(inputs[0],'utf8'));
+ nativeFontRequests.push({key:fontProjectionKey(compiled),document:JSON.parse(fs.readFileSync(inputs[1],'utf8')),
+  assets:manifest.assets,properties:manifest.properties,overrides,
+  files:manifest.files.filter(entry=>entry.path!=='document.json').map(entry=>({path:entry.path,mime:entry.mime,
+   source:path.join(output,entry.path.startsWith('assets/')?entry.path.slice(7):entry.path)}))});
+}
 function compile(nodes,canvas={width:64,height:64,colorSpace:'srgb',background:'#000000'},properties=[]){
  const document={documentVersion:1,canvas,nodes,timeline:{durationSeconds:2,loop:true,tracks:[]},bindings:[]};
  const bytes=Buffer.from(JSON.stringify(document)), id=++number, documentPath=path.join(output,`document-${id}.json`), manifestPath=path.join(output,`manifest-${id}.json`);
  fs.writeFileSync(documentPath,bytes);
  fs.writeFileSync(manifestPath,JSON.stringify({formatVersion:1,workId:'8bc16f98-a0ef-4df9-a9a4-aecdb4c3f772',version:1,title:'Composition browser verification',
   content:{kind:'composition',document:'document.json'},assets:sourceAssets.map(a=>({id:a.assetId,kind:a.kind,source:'assets/'+a.file})),
-  files:[{path:'document.json',bytes:bytes.length,sha256:hash(bytes),mime:'application/json'},...sourceAssets.map(a=>({path:'assets/'+a.file,bytes:a.bytes.length,sha256:hash(a.bytes),mime:a.mime}))],
-  properties,permissions:{audioSpectrum:false,pointer:false},license:{code:'MIT',assets:'test-only-local-font'}}));
+  files:[{path:'document.json',bytes:bytes.length,sha256:hash(bytes),mime:'application/json'},...sourceAssets.map(a=>({path:'assets/'+a.file,bytes:a.bytes.length,sha256:hash(a.bytes),mime:a.mime})),
+   ...fontFixture.packageFiles.map(file=>({path:file.file,bytes:file.bytes.length,sha256:hash(file.bytes),mime:file.mime}))],
+  properties,permissions:{audioSpectrum:false,pointer:false},license:{code:'MIT',...fontFixture.manifestLicense}}));
  const result=JSON.parse(execFileSync(executable,[manifestPath,documentPath],{cwd:root,encoding:'utf8'}));
- fs.writeFileSync(path.join(output,`ir-${id}.json`),JSON.stringify(result,null,2));compilerInputs.set(result,[manifestPath,documentPath]);return result;
+ fs.writeFileSync(path.join(output,`ir-${id}.json`),JSON.stringify(result,null,2));compilerInputs.set(result,[manifestPath,documentPath]);rememberFontProjection(result,[manifestPath,documentPath]);return result;
 }
 function publicValues(compiled,values){const valuePath=path.join(output,`public-values-${++number}.json`);fs.writeFileSync(valuePath,JSON.stringify(values));
  const projected=JSON.parse(execFileSync(executable,[...compilerInputs.get(compiled),valuePath],{cwd:root,encoding:'utf8'}));
- fs.writeFileSync(path.join(output,`final-projection-${number}.json`),JSON.stringify(projected,null,2));return projected;}
+ fs.writeFileSync(path.join(output,`final-projection-${number}.json`),JSON.stringify(projected,null,2));rememberFontProjection(projected,compilerInputs.get(compiled),values);return projected;}
 const property=(id,type,nodeId,field,value,constraints)=>({id,label:id,type,default:value,constraints,target:{kind:'node',nodeId,property:field,component:null}});
 const image=(id,asset,properties={},assets={})=>({id,type:'image',stateVersion:1,assets:{asset,...assets},properties:{x:0,y:0,width:64,height:64,anchorX:0,anchorY:0,fit:'stretch',...properties}});
 const alpha=compile([image('back','blue'),image('red-layer','red',{width:32,height:32,opacity:.5}),
@@ -47,20 +63,20 @@ const alpha=compile([image('back','blue'),image('red-layer','red',{width:32,heig
  image('front','green',{x:32,y:16,width:16,height:32,opacity:.5})]);
 const mask=compile([image('back','blue'),image('front','soft',{}, {maskAsset:'mask'})]);
 const fit=compile([image('wide-layer','wide',{width:64,height:64,fit:'contain'})]);
-const text=compile([{id:'label',type:'text',stateVersion:1,assets:{fontAsset:'font'},properties:{x:0,y:0,width:64,height:64,anchorX:0,anchorY:0,text:'HI',fontSize:32,color:'#ffffff'}}]);
+const text=compile([{id:'label',type:'text',stateVersion:1,assets:{fontAsset:'font'},properties:{x:0,y:0,width:64,height:64,anchorX:0,anchorY:0,text:'Hertz',fontSize:32,color:'#ffffff'}}]);
 const particles=compile([{id:'field',type:'particles',stateVersion:1,properties:{x:32,y:0,width:64,height:64,anchorX:0,anchorY:0,count:24,seed:19,lifetimeSeconds:2,speed:24,spread:50}}]);
 const video=compile([{id:'movie',type:'video',stateVersion:1,assets:{asset:'video'},properties:{x:0,y:0,width:64,height:64,anchorX:0,anchorY:0,loopStartMs:0,loopEndMs:200}}]);
 const dirtyFixture=compile([image('back','blue'),image('child','red',{width:16,height:16}),
  {id:'parent',type:'group',stateVersion:1,children:['child'],properties:{x:8,y:8,width:64,height:64,anchorX:0,anchorY:0}},
  image('unrelated','green',{x:48,y:48,width:16,height:16}),
- {id:'caption',type:'text',stateVersion:1,assets:{fontAsset:'font'},properties:{x:0,y:32,width:32,height:32,anchorX:0,anchorY:0,text:'HI',fontSize:16}}],undefined,[
+ {id:'caption',type:'text',stateVersion:1,assets:{fontAsset:'font'},properties:{x:0,y:32,width:32,height:32,anchorX:0,anchorY:0,text:'Hertz',fontSize:16}}],undefined,[
  property('parent-x','number','parent','x',8,{min:-65536,max:65536}),property('parent-opacity','number','parent','opacity',1,{min:0,max:1}),
  property('parent-visible','boolean','parent','visible',true,{}),
  property('picture','asset','child','asset','red',{kind:'image',options:['red','soft','wide']}),
- property('caption-text','text','caption','text','HI',{maxLength:4096})]);
+ property('caption-text','text','caption','text','Hertz',{maxLength:4096})]);
 const movedDirty=publicValues(dirtyFixture,{'parent-x':24}), resourceDirty=publicValues(dirtyFixture,{'parent-x':24,picture:'soft'}),
- textDirty=publicValues(dirtyFixture,{'parent-x':24,picture:'soft','caption-text':'BYE'}),
- badDirty=publicValues(dirtyFixture,{'parent-x':24,picture:'wide','caption-text':'BAD'}),
+ textDirty=publicValues(dirtyFixture,{'parent-x':24,picture:'soft','caption-text':'Studio'}),
+ badDirty=publicValues(dirtyFixture,{'parent-x':24,picture:'wide','caption-text':'Hertz Studio'}),
  hiddenDirty=publicValues(dirtyFixture,{'parent-visible':false});
 const clipping=compile([image('outside','red',{y:-16,height:96})]);
 const clippingRotated=compile([image('outside','soft',{x:32,y:32,width:96,height:96,anchorX:.5,anchorY:.5,rotation:45},{maskAsset:'mask'})]);
@@ -74,18 +90,36 @@ const particleDirty=compile([{id:'field',type:'particles',stateVersion:1,propert
  property('count','number','field','count',24,{min:0,max:65536}),property('seed','number','field','seed',19,{min:0,max:4294967295})]);
 const results=[];
 (async()=>{
+ const requestsFile=path.join(output,'native-font-requests.json'),nativeFile=path.join(output,'native-font-projections.json');
+ fs.writeFileSync(requestsFile,JSON.stringify(nativeFontRequests,null,2));
+ execFileSync('cargo',['test','--locked','-p','hertz-desktop','--lib','--features','wallpaper-media-probe',
+  'internal_browser_font_requests_export_original_prepared_projection_and_pins','--','--test-threads=1'],
+  {cwd:root,stdio:'inherit',env:{...process.env,HERTZ_COMPOSITION_BROWSER_FONT_REQUESTS:requestsFile,HERTZ_COMPOSITION_BROWSER_FONT_OUTPUT:nativeFile}});
+ const nativeFontProjections=JSON.parse(fs.readFileSync(nativeFile,'utf8')),nativeFiles=new Map();
+ for(const item of Object.values(nativeFontProjections))for(const file of item.files){
+  const bytes=fs.readFileSync(path.join(output,file.file));assert.equal(hash(bytes),file.entry.sha256);assert.equal(bytes.length,file.entry.bytes);
+  nativeFiles.set(file.url,{bytes,mime:file.entry.mime});
+ }
  const browser=await chromium.launch({channel:process.env.PLAYWRIGHT_CHANNEL||'chrome',headless:true,args:['--use-angle=swiftshader','--enable-unsafe-swiftshader']});
  try{
-  const page=await browser.newPage({viewport:{width:64,height:64}}), errors=[];
+  const page=await browser.newPage({viewport:{width:64,height:64}}), errors=[],consoleErrors=[];
   page.on('pageerror',e=>errors.push(e.message));
-  page.on('console',message=>{if(message.type()==='error')console.error(message.text());});
+  page.on('console',message=>{if(message.type()==='error'){consoleErrors.push(message.text());console.error(message.text());}});
+  await page.route('https://**.wallpaper.invalid/**',route=>{
+   const file=nativeFiles.get(route.request().url());return file?route.fulfill({body:file.bytes,contentType:file.mime}):route.fulfill({status:404,body:''});
+  });
   let delayedRoute=null;
   await page.route('http://composition.test/**',async route=>{
    const file=new URL(route.request().url()).pathname.slice(1);
    if(file==='broken.png')return route.fulfill({body:Buffer.from('bad PNG decoder input'),contentType:'image/png'});
    if(file==='delayed.png'){delayedRoute=route;return;}
    const asset=sourceAssets.find(a=>a.file===file);
-   if(asset)return route.fulfill({body:asset.bytes,contentType:asset.mime});
+   if(asset){
+    const range=asset.kind==='video'&&/^bytes=(\d+)-(\d*)$/.exec(route.request().headers().range||'');
+    if(range){const start=Number(range[1]),end=range[2]?Math.min(Number(range[2]),asset.bytes.length-1):asset.bytes.length-1;
+     return route.fulfill({status:206,contentType:asset.mime,headers:{'accept-ranges':'bytes','content-range':`bytes ${start}-${end}/${asset.bytes.length}`},body:asset.bytes.subarray(start,end+1)});}
+    return route.fulfill({body:asset.bytes,contentType:asset.mime});
+   }
    if(file.startsWith('src/'))return route.fulfill({body:fs.readFileSync(path.join(root,'tools/space-stage',file)),contentType:'text/javascript'});
    if(file==='')return route.fulfill({contentType:'text/html',body:'<body style="margin:0;background:black"><canvas width="64" height="64" style="width:64px;height:64px"></canvas></body>'});
    return route.abort();
@@ -96,7 +130,8 @@ const results=[];
   await page.addScriptTag({path:path.join(root,'plugin/ui/vendor/stage-runtime.js')});
   await page.addScriptTag({path:path.join(root,'plugin/ui/vendor/space-stage.js')});
   const actualVideo=await page.evaluate(async()=>{const v=document.createElement('video');v.muted=true;v.src='/video.webm';await new Promise((r,j)=>{v.onloadedmetadata=r;v.onerror=j;});const m={width:v.videoWidth,height:v.videoHeight,durationMs:v.duration*1000};v.removeAttribute('src');v.load();return m;});
-  const resolved=sourceAssets.map(a=>({assetId:a.assetId,kind:a.kind,width:a.width,height:a.height,...(a.kind==='video'?actualVideo:{}),
+  const nativeFont=Object.values(nativeFontProjections)[0].projection.resolvedAssets.find(asset=>asset.kind==='font');
+  const resolved=sourceAssets.map(a=>a.kind==='font'?{...nativeFont,url:'http://composition.test/'+a.file}:({assetId:a.assetId,kind:a.kind,width:a.width,height:a.height,...(a.kind==='video'?actualVideo:{}),
     contentKey:hash(a.bytes),byteLength:a.bytes.length,url:'http://composition.test/'+a.file,decodeOptions:{colorSpace:a.kind==='font'?'none':'srgb',alphaMode:'straight'},adapterId:a.kind==='font'?'fontface-v1':a.kind==='video'?'video-element-v1':'image-element-v1',adapterVersion:1}));
   const setup=await page.evaluate(()=>{window.counts={contexts:0,loads:0};let original=HTMLCanvasElement.prototype.getContext;
    const seen=new WeakSet();HTMLCanvasElement.prototype.getContext=function(type,...args){const ctx=original.call(this,type,...args);if(ctx&&type==='webgl2'&&!seen.has(ctx)){seen.add(ctx);counts.contexts++;window.gl=ctx;}return ctx;};
@@ -109,9 +144,15 @@ const results=[];
    window.snapshot=()=>{redraw();const b=new Uint8Array(64*64*4);gl.readPixels(0,0,64,64,gl.RGBA,gl.UNSIGNED_BYTE,b);return Array.from(b);};
    window.pixel=(x,y)=>{redraw();const b=new Uint8Array(4);gl.readPixels(x,63-y,1,1,gl.RGBA,gl.UNSIGNED_BYTE,b);return Array.from(b);};return {width:gl.drawingBufferWidth,height:gl.drawingBufferHeight};});
   assert.deepEqual(setup,{width:64,height:64});
-  async function select(compiled){const projection={...compiled,resolvedAssets:resolved,sessionId:'browser',generation:1,
+  const projection=compiled=>{
+   const native=nativeFontProjections[fontProjectionKey(compiled)]?.projection;
+   if(compiled.ir.nodes.some(node=>node.nodeType==='text'))assert(native,'every text fixture uses actual Rust prepared facts');
+   if(native)assert.equal(native.ir.semanticKey,compiled.ir.semanticKey,'native preparation preserves the compiler semantic identity');
+   return {...(native||compiled),resolvedAssets:native?.resolvedAssets||resolved,sessionId:'browser',generation:1,
     target:{width:64,height:64,fit:'stretch',budgetFps:30,budgetAllocationRevision:1}};
-   return page.evaluate(async p=>{await host.selectComposition(p);host.frame({sceneTime:0,paused:true});return host.stats();},projection);}
+  };
+  async function select(compiled){
+   return page.evaluate(async p=>{await host.selectComposition(p);host.frame({sceneTime:0,paused:true});return host.stats();},projection(compiled));}
   let stats=await select(alpha);assert.equal(stats.state,'ready',JSON.stringify(stats));
   const pixels=await page.evaluate(()=>({back:pixel(4,4),red:pixel(20,20),front:pixel(36,20),contexts:counts.contexts,ledger:ledger.snapshot()}));
   const near=(actual,expected)=>{for(let i=0;i<3;i++)assert.ok(Math.abs(actual[i]-expected[i])<=4,`${actual} != ${expected}`);};
@@ -125,8 +166,24 @@ const results=[];
   await select(video);try{await page.waitForFunction(()=>host.frame({sceneTime:.1,paused:true,seek:true}),null,{timeout:8000});}
   catch(error){console.error(JSON.stringify(await page.evaluate(()=>host.stats())));throw error;}
   const videoStats=await page.evaluate(()=>({stats:host.stats(),ledger:ledger.snapshot(),fonts:document.fonts.size,pixels:snapshot()}));assert.equal(videoStats.ledger.held.decoderLeases,1);assert.equal(videoStats.fonts,0);assert.ok(videoStats.pixels.some((value,index)=>index%4!==3&&value>0));results.push({case:'actual silent video texture, seek completion and obsolete font exit',videoStats});
+  // A decoded sparse frame may report an earlier timestamp. Keep the real
+  // decoder/texture, controlling only that timestamp and counting seek requests.
+  await page.evaluate(()=>{
+    const video=observedVideos.find(video=>video.getAttribute('src')),native=Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype,'currentTime');
+    window.sparseVideo=video;window.sparseSeeks=0;
+    Object.defineProperty(video,'currentTime',{configurable:true,get:()=>0,set:value=>{sparseSeeks++;native.set.call(video,value);}});
+  });
+  await page.waitForFunction(()=>host.frame({sceneTime:.19,paused:false}));
+  const sparseCompleted=await page.evaluate(()=>{
+    const completed=host.stats().sceneStats.videoClocks[0],requests=sparseSeeks;
+    for(let repeat=0;repeat<8;repeat++)if(!host.frame({sceneTime:.19,paused:true,seek:true}))throw new Error('same sparse completed phase must stay ready');
+    const after=host.stats().sceneStats.videoClocks[0];delete sparseVideo.currentTime;
+    return {completed,after,requests,afterRequests:sparseSeeks};
+  });
+  assert.equal(sparseCompleted.requests,1);assert.equal(sparseCompleted.afterRequests,1);assert.equal(sparseCompleted.completed.seekPending,false);
+  assert.equal(sparseCompleted.completed.requestedTime,.19);assert.equal(sparseCompleted.completed.currentTime,0);
+  results.push({case:'completed sparse running seek submits once and repeated explicit fixed-phase requests do not seek again',sparseCompleted});
   await select(alpha);assert.equal(await page.evaluate(()=>ledger.snapshot().held.decoderLeases),0);
-  const projection=compiled=>({...compiled,resolvedAssets:resolved,sessionId:'browser',generation:1,target:{width:64,height:64,fit:'stretch',budgetFps:30,budgetAllocationRevision:1}});
   async function commit(compiled){return page.evaluate(async p=>{const result=await host.selectComposition(p);host.frame({sceneTime:0,paused:true});return {result,stats:host.stats().sceneStats,ledger:ledger.snapshot()};},projection(compiled));}
   await select(dirtyFixture);
   const same=await page.evaluate(async p=>{const before={work:host.stats().sceneStats.work,ledger:ledger.snapshot()};const result=await host.selectComposition(p);host.frame({sceneTime:0,paused:true});return {before,result,after:{work:host.stats().sceneStats.work,ledger:ledger.snapshot()}};},projection(publicValues(dirtyFixture,{})));
@@ -153,7 +210,7 @@ const results=[];
   },projection(badDirty));
   assert.match(refusedDelta.error,/delta-refusal/);assert.equal(refusedDelta.loads,0);assert.deepEqual(refusedDelta.after,refusedDelta.before);
   results.push({case:'partial incremental require refusal precedes every new source load and restores its original quota',refusedDelta});
-  const badProjection=projection(badDirty);badProjection.resolvedAssets=resolved.map(asset=>asset.assetId==='wide'?{...asset,url:'http://composition.test/broken.png'}:asset);
+  const badProjection=projection(badDirty);badProjection.resolvedAssets=badProjection.resolvedAssets.map(asset=>asset.assetId==='wide'?{...asset,url:'http://composition.test/broken.png'}:asset);
   const badResult=await page.evaluate(async p=>{const before={work:host.stats().sceneStats.work,held:ledger.snapshot().held};let error;
     try{await host.selectComposition(p);}catch(reason){error=reason.message;}return {before,error,after:{work:host.stats().sceneStats.work,held:ledger.snapshot().held},state:host.stats().state};},badProjection);
   assert.match(badResult.error,/composition-media-decode-failed/);assert.equal(badResult.state,'ready');assert.deepEqual(badResult.after,badResult.before);
@@ -162,7 +219,7 @@ const results=[];
     document.createElement=function(tag,...args){const el=original(tag,...args);if(tag==='canvas')el.getContext=()=>null;return el;};
     try{await host.selectComposition(p);}catch(reason){error=reason.message;}finally{document.createElement=original;}return {error,before,after:ledger.snapshot().held};},projection(badDirty));
   assert.match(partial.error,/composition-text-canvas-unavailable/);assert.deepEqual(partial.after,partial.before);results.push({case:'partial node initialization releases the newly decoded image and unused raster/buffer tickets',partial});
-  const delayed=projection(badDirty);delayed.resolvedAssets=resolved.map(asset=>asset.assetId==='wide'?{...asset,url:'http://composition.test/delayed.png'}:asset);
+  const delayed=projection(badDirty);delayed.resolvedAssets=delayed.resolvedAssets.map(asset=>asset.assetId==='wide'?{...asset,url:'http://composition.test/delayed.png'}:asset);
   await page.evaluate(p=>{window.pendingProjection=host.selectComposition(p).then(()=>({ok:true}),error=>({ok:false,error:error.name}));},delayed);
   for(let attempt=0;!delayedRoute&&attempt<500;attempt++)await new Promise(resolve=>setTimeout(resolve,10));assert.ok(delayedRoute);
   const cancelled=await page.evaluate(async()=>{host.cancelPreparation();const result=await pendingProjection;return {result,state:host.stats().state,held:ledger.snapshot().held,pending:host.stats().sceneStats.preparationPending};});
@@ -183,6 +240,77 @@ const results=[];
   }results.push({case:'changed absolute particle geometry retires only the old node scope without quota growth',geometry});
   await select(sharedVideo);await page.waitForFunction(()=>host.frame({sceneTime:.15,paused:true,seek:true}));
   assert.equal(await page.evaluate(()=>ledger.snapshot().held.decoderLeases),2);
+  // Completion belongs to the whole output, including two independent sparse
+  // clocks. A ready member must neither consume its proof nor start playback
+  // while another member still waits; either completion order must work.
+  await page.evaluate(()=>{
+    window.multiVideos=observedVideos.filter(video=>video.getAttribute('src'));window.multiDelays=[false,false];
+    window.multiSeeks=[0,0];window.multiEvents=[0,0];window.multiPlays=[0,0];window.multiOriginalPlay=[];
+    const time=Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype,'currentTime'),seeking=Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype,'seeking');
+    multiVideos.forEach((video,index)=>{
+      video.addEventListener('seeked',()=>multiEvents[index]++);multiOriginalPlay[index]=video.play.bind(video);
+      video.play=function(){multiPlays[index]++;return multiOriginalPlay[index]();};
+      Object.defineProperty(video,'currentTime',{configurable:true,get:()=>0,set:value=>{multiSeeks[index]++;time.set.call(video,value);}});
+      Object.defineProperty(video,'seeking',{configurable:true,get:()=>multiDelays[index]||seeking.get.call(video)});
+    });
+  });
+  const multiSparse=[];
+  for(const delayed of [1,0]){
+    await page.waitForFunction(()=>host.frame({sceneTime:0,paused:true,seek:true}));
+    await page.evaluate(()=>{multiSeeks.fill(0);multiEvents.fill(0);multiPlays.fill(0);});
+    assert.equal(await page.evaluate(index=>{const submitted=host.frame({sceneTime:.19,paused:false});multiDelays[index]=true;return submitted;},delayed),false);
+    await page.waitForFunction(()=>multiEvents.every((count,index)=>count>=multiSeeks[index]));
+    const blocked=await page.evaluate(()=>{
+      const attempts=[];for(let repeat=0;repeat<3;repeat++)attempts.push(host.frame({sceneTime:.19,paused:false}));
+      return {attempts,seeks:[...multiSeeks],plays:[...multiPlays],stats:host.stats().sceneStats};
+    });
+    assert.deepEqual(blocked.attempts,[false,false,false]);assert.deepEqual(blocked.seeks,[1,1]);assert.deepEqual(blocked.plays,[0,0]);
+    assert(blocked.stats.videoClocks.every(clock=>clock.seekPending&&clock.paused));
+    const prepared=await page.evaluate(index=>{
+      multiDelays[index]=false;host.pauseComposition(.19);
+      return {stats:host.stats().sceneStats,seeks:[...multiSeeks],plays:[...multiPlays]};
+    },delayed);
+    assert.equal(prepared.stats.ready,true);assert(prepared.stats.videoClocks.every(clock=>clock.seekPending&&clock.paused));
+    assert.deepEqual(prepared.plays,[0,0],'update-only completion cannot start drive before output');
+    const submitted=await page.evaluate(()=>{
+      const draw=gl.drawElements;let duringOutput=null;
+      gl.drawElements=function(...args){const result=draw.apply(this,args);if(!this.getParameter(this.FRAMEBUFFER_BINDING))duringOutput={clocks:host.stats().sceneStats.videoClocks,plays:[...multiPlays]};return result;};
+      let submitted;try{submitted=host.frame({sceneTime:.19,paused:false});}finally{gl.drawElements=draw;}
+      return {submitted,duringOutput,stats:host.stats().sceneStats,seeks:[...multiSeeks],plays:[...multiPlays]};
+    });
+    assert.equal(submitted.submitted,true);assert.deepEqual(submitted.seeks,[1,1]);assert.deepEqual(submitted.plays,[1,1]);
+    assert(submitted.duringOutput.clocks.every(clock=>clock.seekPending&&clock.paused));assert.deepEqual(submitted.duringOutput.plays,[0,0]);
+    assert(submitted.stats.videoClocks.every(clock=>!clock.seekPending&&!clock.paused));
+    const retained=await page.evaluate(()=>{
+      const renders=host.stats().sceneStats.work.renders;for(let repeat=0;repeat<8;repeat++)if(!host.frame({sceneTime:.19,paused:true,seek:true}))throw new Error('same completed cohort phase must retain output');
+      return {renders,afterRenders:host.stats().sceneStats.work.renders,seeks:[...multiSeeks],stats:host.stats().sceneStats};
+    });
+    assert.equal(retained.afterRenders,retained.renders);assert.deepEqual(retained.seeks,[1,1]);
+    multiSparse.push({delayed,blocked,prepared,submitted,retained});
+  }
+  await page.evaluate(()=>multiVideos.forEach((video,index)=>{delete video.currentTime;delete video.seeking;video.play=multiOriginalPlay[index];}));
+  results.push({case:'independent sparse clocks retain completion and pause the whole cohort until actual output commits in either completion order',multiSparse});
+  // Two layers share the .2s clock; the .3s clock must keep its own completion.
+  await page.waitForFunction(()=>host.frame({sceneTime:0,paused:true,seek:true}));
+  await page.evaluate(()=>Promise.all(observedVideos.filter(video=>video.getAttribute('src')).map(video=>new Promise(resolve=>{
+    video.addEventListener('seeked',resolve,{once:true});video.currentTime=.22;
+  }))));
+  const wrappedShared=await page.evaluate(()=>({submitted:host.frame({sceneTime:.22,paused:false}),stats:host.stats().sceneStats,decoders:ledger.snapshot().held.decoderLeases}));
+  assert.equal(wrappedShared.submitted,false);assert.equal(wrappedShared.decoders,2);
+  // Runtime statistics follow asynchronous resource completion, so bind each
+  // clock to its distinct absolute request rather than its array position.
+  const clockAtRequest=(clocks,time)=>{const matches=clocks.filter(clock=>Math.abs(clock.requestedTime-time)<1e-9);assert.equal(matches.length,1,'one decoder for the exact requested phase');return matches[0];};
+  const wrappingClock=clockAtRequest(wrappedShared.stats.videoClocks,.02),alignedClock=clockAtRequest(wrappedShared.stats.videoClocks,0);
+  assert.equal(wrappingClock.seekPending,true);assert.equal(alignedClock.seekPending,false);assert(Math.abs(alignedClock.currentTime-.22)<.003);
+  await page.waitForFunction(()=>{
+    const submitted=host.frame({sceneTime:.22,paused:false});
+    if(submitted)window.completedWrapClocks=host.stats().sceneStats.videoClocks;
+    return submitted;
+  });
+  const wrapCompleted=await page.evaluate(()=>completedWrapClocks);
+  assert.deepEqual(wrapCompleted.map(clock=>clock.seekPending),[false,false]);
+  assert(Math.abs(clockAtRequest(wrapCompleted,.02).currentTime-.02)<.003);assert.equal(clockAtRequest(wrapCompleted,0).requestedTime,0);
+  results.push({case:'normal small wrap corrects stale target once for a shared two-layer decoder while the independent clock stays aligned',wrappedShared,wrapCompleted});
   const split=await page.evaluate(async p=>{const result=await host.selectComposition(p);return {result,decoders:ledger.snapshot().held.decoderLeases};},projection(independentVideo));
   assert.equal(split.decoders,3);assert.deepEqual(split.result.dirtyNodes.map(mask=>!!mask),[true,false,false]);
   await page.waitForFunction(()=>host.frame({sceneTime:.15,paused:true,seek:true}));
@@ -249,6 +377,84 @@ const results=[];
     return {reason,loads,violations:ledger.snapshot().violations};
   },{...alpha,resolvedAssets:resolved,sessionId:'refusal',generation:1,target:{width:64,height:64,fit:'stretch',budgetFps:30,budgetAllocationRevision:1}});
   assert.match(denied.reason,/planned-refusal/);assert.equal(denied.loads,0);assert.equal(denied.violations.length,0);results.push({case:'partial reservation refuses before any loader begins',denied});
+  async function prepareFailedFrame(){await page.evaluate(async compiled=>{
+    window.failureOriginalGl=gl;window.failureBefore=ledger.snapshot().held;
+    window.failureCanvas=document.createElement('canvas');failureCanvas.width=failureCanvas.height=64;
+    failureCanvas.style.width=failureCanvas.style.height='64px';document.body.append(failureCanvas);
+    const start=observedVideos.length;
+    window.failureOnReady=null;
+    window.failureHost=SpaceStagePure.create(failureCanvas,{qualityMode:'high',deviceTier:2,resources:port,onStatus(value){if(value.state==='ready')failureOnReady?.();}});
+    await failureHost.selectComposition(compiled);
+    window.failureVideos=observedVideos.slice(start);window.failureSeeks=[0,0];window.failureEvents=[0,0];window.failurePlays=[0,0];window.failurePlaySnapshots=[];
+    const time=Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype,'currentTime');
+    failureVideos.forEach((video,index)=>{
+      const play=video.play.bind(video);video.play=function(){failurePlays[index]++;failurePlaySnapshots.push({index,clocks:failureHost.stats().sceneStats.videoClocks});return play();};
+      video.addEventListener('seeked',()=>failureEvents[index]++);
+      Object.defineProperty(video,'currentTime',{configurable:true,get:()=>0,set:value=>{failureSeeks[index]++;time.set.call(video,value);}});
+    });
+    if(failureHost.frame({sceneTime:.19,paused:false}))throw new Error('new sparse phase must wait for actual decoder completion');
+  },projection(sharedVideo));
+  await page.waitForFunction(()=>failureEvents.every((count,index)=>count>=failureSeeks[index]));}
+  await prepareFailedFrame();
+  const failedOutput=await page.evaluate(()=>{
+    const driver=failureCanvas.getContext('webgl2'),draw=driver.drawElements;let duringDraw=null;
+    driver.drawElements=function(){duringDraw={clocks:failureHost.stats().sceneStats.videoClocks,plays:[...failurePlays]};throw new Error('controlled-output-submit-failure');};
+    const submitted=failureHost.frame({sceneTime:.19,paused:false});driver.drawElements=draw;
+    const failed=failureHost.stats();failureHost.dispose();failureCanvas.remove();window.gl=failureOriginalGl;
+    return {submitted,duringDraw,plays:[...failurePlays],playSnapshots:[...failurePlaySnapshots],state:failed.state,error:failed.error,before:failureBefore,after:ledger.snapshot().held};
+  });
+  assert.equal(failedOutput.submitted,false);assert.equal(failedOutput.state,'failed');assert.match(failedOutput.error,/controlled-output-submit-failure/);
+  assert(failedOutput.duringDraw.clocks.every(clock=>clock.seekPending&&clock.paused));assert.deepEqual(failedOutput.duringDraw.plays,[0,0]);
+  assert.deepEqual(failedOutput.plays,[0,0]);assert.deepEqual(failedOutput.playSnapshots,[]);
+  assert.deepEqual(failedOutput.after,failedOutput.before);
+  results.push({case:'failed real output does not consume prepared media completion or start drive and retires its full scope',failedOutput});
+  await prepareFailedFrame();const shaderErrorStart=consoleErrors.length;
+  const failedShader=await page.evaluate(()=>{
+    const driver=failureCanvas.getContext('webgl2'),source=driver.shaderSource;let injected=0,atOutputShader=null;
+    driver.shaderSource=function(shader,text){if(text.includes('uniform sampler2D inputMap')){injected++;atOutputShader={clocks:failureHost.stats().sceneStats.videoClocks,plays:[...failurePlays]};text+='\nTHIS_IS_A_REAL_INVALID_FRAGMENT_SHADER_TOKEN\n';}return source.call(this,shader,text);};
+    let submitted;try{submitted=failureHost.frame({sceneTime:.19,paused:false});}finally{driver.shaderSource=source;}
+    const failed=failureHost.stats();failureHost.dispose();failureCanvas.remove();window.gl=failureOriginalGl;
+    return {submitted,injected,atOutputShader,plays:[...failurePlays],playSnapshots:[...failurePlaySnapshots],state:failed.state,error:failed.error,before:failureBefore,after:ledger.snapshot().held};
+  });
+  failedShader.consoleErrors=consoleErrors.slice(shaderErrorStart);
+  assert.equal(failedShader.injected,1);assert.equal(failedShader.submitted,false);assert.equal(failedShader.state,'failed');assert.match(failedShader.error,/Three shader program failed/);
+  assert(failedShader.atOutputShader.clocks.every(clock=>clock.seekPending&&clock.paused));assert.deepEqual(failedShader.plays,[0,0]);assert.deepEqual(failedShader.playSnapshots,[]);
+  assert(failedShader.consoleErrors.some(text=>/Shader Error/.test(text)&&/INVALID_FRAGMENT_SHADER_TOKEN/.test(text)),'real Three program compilation reports the invalid final output shader');
+  assert.deepEqual(failedShader.after,failedShader.before);
+  results.push({case:'real final output shader link failure rejected by original Three diagnostics cannot commit media',failedShader});
+  await prepareFailedFrame();
+  await page.evaluate(async()=>{
+    SpaceStagePure.register({apiVersion:1,id:'commit-boundary-lyrics',stateVersion:1,label:'Commit boundary lyric fixture',category:'lyrics',preview:'/commit-boundary-lyrics.png',camera:{radius:15,fov:58},capabilities:{ownsLyrics:true},quality:{},
+      create(context){window.failureLyricRenderer=context.renderer;window.failureLyricScene=context.scene;return {update(){},dispose(){}};}});
+    await failureHost.selectLyrics('commit-boundary-lyrics');
+  });
+  const failedLyrics=await page.evaluate(()=>{
+    const renderer=failureLyricRenderer,render=renderer.render;let duringLyrics=null;
+    renderer.render=function(scene,...args){if(scene===failureLyricScene){duringLyrics={clocks:failureHost.stats().sceneStats.videoClocks,plays:[...failurePlays],renders:failureHost.stats().sceneStats.work.renders};throw new Error('controlled-later-lyric-output-failure');}return render.call(this,scene,...args);};
+    let submitted;try{submitted=failureHost.frame({sceneTime:.19,paused:false,lyrics:{lines:[{text:'fixture'}]}});}finally{renderer.render=render;}
+    const failed=failureHost.stats();failureHost.dispose();failureCanvas.remove();window.gl=failureOriginalGl;
+    return {submitted,duringLyrics,plays:[...failurePlays],playSnapshots:[...failurePlaySnapshots],state:failed.state,error:failed.error,before:failureBefore,after:ledger.snapshot().held};
+  });
+  assert.equal(failedLyrics.submitted,false);assert.equal(failedLyrics.state,'failed');assert.match(failedLyrics.error,/controlled-later-lyric-output-failure/);assert.equal(failedLyrics.duringLyrics.renders,1);
+  assert(failedLyrics.duringLyrics.clocks.every(clock=>clock.seekPending&&clock.paused));assert.deepEqual(failedLyrics.duringLyrics.plays,[0,0]);assert.deepEqual(failedLyrics.plays,[0,0]);assert.deepEqual(failedLyrics.playSnapshots,[]);
+  assert.deepEqual(failedLyrics.after,failedLyrics.before);
+  results.push({case:'later lyric render throw after actual composition output leaves the entire media cohort uncommitted',failedLyrics});
+  const callbackFences=[];
+  for(const throwAfterSelect of [false,true]){
+    await prepareFailedFrame();
+    const fenced=await page.evaluate(async({compiled,throwAfterSelect})=>{
+      let duringCallback=null;
+      failureOnReady=()=>{failureOnReady=null;duringCallback={clocks:failureHost.stats().sceneStats.videoClocks,plays:[...failurePlays]};window.failureReplacement=failureHost.selectComposition(compiled);if(throwAfterSelect)throw new Error('controlled-old-frame-status-failure');};
+      const submitted=failureHost.frame({sceneTime:.19,paused:false}),replacementBefore=failureHost.stats();await failureReplacement;
+      const replacementPrepared=failureHost.stats(),replacementSubmitted=failureHost.frame({sceneTime:0,paused:true}),replacementAfter=failureHost.stats();
+      failureHost.dispose();failureCanvas.remove();window.gl=failureOriginalGl;
+      return {throwAfterSelect,submitted,duringCallback,plays:[...failurePlays],playSnapshots:[...failurePlaySnapshots],replacementBefore:{state:replacementBefore.state,firstSubmit:replacementBefore.firstSubmit,error:replacementBefore.error},replacementPrepared:{state:replacementPrepared.state,firstSubmit:replacementPrepared.firstSubmit,error:replacementPrepared.error},replacementSubmitted,replacementAfter:{state:replacementAfter.state,firstSubmit:replacementAfter.firstSubmit,error:replacementAfter.error},before:failureBefore,after:ledger.snapshot().held};
+    },{compiled:{...projection(alpha),sessionId:'replacement-callback'},throwAfterSelect});
+    assert.equal(fenced.submitted,false);assert(fenced.duringCallback.clocks.every(clock=>clock.seekPending&&clock.paused));assert.deepEqual(fenced.duringCallback.plays,[0,0]);assert.deepEqual(fenced.plays,[0,0]);assert.deepEqual(fenced.playSnapshots,[]);
+    assert.deepEqual(fenced.replacementBefore,{state:'loading',firstSubmit:false,error:''});assert.deepEqual(fenced.replacementPrepared,{state:'preparing',firstSubmit:false,error:''});assert.equal(fenced.replacementSubmitted,true);assert.deepEqual(fenced.replacementAfter,{state:'ready',firstSubmit:true,error:''});assert.deepEqual(fenced.after,fenced.before);
+    callbackFences.push(fenced);
+  }
+  results.push({case:'synchronous successful-status selection and old-frame throw cannot commit or fail the replacement instance',callbackFences});
   const poolEvidence=await page.evaluate(async()=>{
     const {createResourcePool}=await import('/src/resources/pool.js'), pool=createResourcePool({contextId:'browser',maxEntries:2});
     let resolve,releases=0,loads=0,signal;const identity={contentKey:'same',decodeOptions:{b:2,a:1},adapterId:'test',adapterVersion:1};

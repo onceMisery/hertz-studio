@@ -1,6 +1,21 @@
 // SPDX-License-Identifier: MIT
 // This accepts the native compiler/planner projection, never author JSON.
 import { resourceKey } from '../resources/pool.js';
+const FONT_ADAPTER_VERSION = 'sfnt-ttf-parser-0.25.1-static-v3';
+const RASTER_ADAPTER_VERSION = 'text-raster-v2';
+const digest = value => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
+function fontCpuBytes(asset) {
+  const facts = asset.fontMetadata;
+  if (asset.adapterId !== 'prepared-sfnt-font' || asset.adapterVersion !== 1
+      || asset.decodeOptions?.fontAdapterVersion !== FONT_ADAPTER_VERSION
+      || facts?.format !== 'ttf' || asset.byteLength > 16 * 1024 * 1024
+      || facts.sfntBytes !== asset.byteLength || !Number.isSafeInteger(facts.glyphCount)
+      || facts.glyphCount < 1 || facts.glyphCount > 65535
+      || typeof facts.probeText !== 'string' || !facts.probeText || [...facts.probeText].length > 32
+      || facts.cpuBudgetBytes !== 5 * asset.byteLength + 64 * facts.glyphCount + 4096)
+    throw new Error('composition-font-preparation-required');
+  return facts.cpuBudgetBytes;
+}
 export function projectValues(ir, finalPublicValues) {
   if (!ir || ir.compilerVersion !== 1 || finalPublicValues?.semanticKey !== ir.semanticKey)
     throw new Error('composition-semantic-identity-mismatch');
@@ -38,6 +53,7 @@ export function compilePlan(projection) {
         || !asset.adapterId || !Number.isSafeInteger(asset.adapterVersion) || asset.adapterVersion < 1 || !asset.decodeOptions)
       throw new Error('composition-resolved-metadata-required');
     if (assets.has(asset.assetId)) throw new Error('composition-resource-closure-duplicate');
+    if (asset.kind === 'font') fontCpuBytes(asset);
     assets.set(asset.assetId, asset);
   }
   const uses = finalPublicValues.resourceUses, nodeResources = ir.nodes.map(() => ({}));
@@ -71,7 +87,7 @@ export function compilePlan(projection) {
   const resources = { renderTargetDeclaredBytes: pixels * 8, textureDeclaredBytes: 0, bufferDeclaredBytes: 92,
     ownedCpuBytes: 92, decodeReservedBytes: 0, decoderLeases: 0, canvases: 0, drawingBufferPixels: 0, programs: 2 };
   for (const requirement of unique.values()) {
-    if (requirement.kind === 'font') { resources.ownedCpuBytes += requirement.byteLength; continue; }
+    if (requirement.kind === 'font') { resources.ownedCpuBytes += fontCpuBytes(requirement); continue; }
     const bytes = requirement.width * requirement.height * 4;
     resources.textureDeclaredBytes += bytes;
     resources.decodeReservedBytes += bytes;
@@ -82,12 +98,9 @@ export function compilePlan(projection) {
     if (node.nodeType !== 'group' && node.nodeType !== 'particles') { resources.bufferDeclaredBytes += 92; resources.ownedCpuBytes += 92; }
     if (node.nodeType === 'text') {
       if (!result.resources.fontAsset) throw new Error('composition-font-preparation-required');
-      const width = Math.ceil(number(node, 'width')), height = Math.ceil(number(node, 'height')), text = constant(node, 'text');
-      if (typeof text !== 'string' || text.length > 4096 || width * height > 16384 * 16384)
+      const text = constant(node, 'text');
+      if (typeof text !== 'string' || text.length > 4096)
         throw new Error('composition-text-layout-plan-invalid');
-      result.textWidth = width; result.textHeight = height;
-      resources.canvases++; resources.drawingBufferPixels += width * height;
-      resources.ownedCpuBytes += width * height * 4; resources.textureDeclaredBytes += width * height * 4;
     }
     if (node.nodeType === 'particles') {
       result.count = number(node, 'count');
@@ -97,5 +110,53 @@ export function compilePlan(projection) {
     }
     return result;
   });
-  return { projection, ir, values, nodePlans, requirements: [...unique.values()], resources, pixels };
+  const textRasters = [], coveredNodes = new Set(), rasterKeys = new Set();
+  const rasterFacts = projection.textRasters || [];
+  if (!Array.isArray(rasterFacts) || rasterFacts.length > ir.nodes.length)
+    throw new Error('composition-text-raster-projection-required');
+  for (const fact of rasterFacts) {
+    if (!fact || !digest(fact.rasterKey) || !digest(fact.fontContentKey)
+        || rasterKeys.has(fact.rasterKey) || fact.adapterId !== 'prepared-text-raster'
+        || fact.adapterVersion !== RASTER_ADAPTER_VERSION
+        || !Array.isArray(fact.nodeIndices) || !fact.nodeIndices.length || fact.nodeIndices.length > ir.nodes.length
+        || !Number.isFinite(fact.logicalWidth) || fact.logicalWidth <= 0
+        || !Number.isFinite(fact.logicalHeight) || fact.logicalHeight <= 0
+        || !Number.isFinite(fact.scale) || fact.scale < 1 / 64 || !Number.isSafeInteger(fact.scale * 64)
+        || !Number.isSafeInteger(fact.widthPx) || fact.widthPx < 1 || fact.widthPx > 4096
+        || !Number.isSafeInteger(fact.heightPx) || fact.heightPx < 1 || fact.heightPx > 4096
+        || fact.widthPx * fact.heightPx > 8294400
+        || fact.widthPx !== Math.max(1, Math.ceil(fact.logicalWidth * fact.scale))
+        || fact.heightPx !== Math.max(1, Math.ceil(fact.logicalHeight * fact.scale)))
+      throw new Error('composition-text-raster-plan-invalid');
+    const representative = assets.get(fact.fontAssetId);
+    if (representative?.kind !== 'font' || representative.contentKey !== fact.fontContentKey)
+      throw new Error('composition-text-raster-font-mismatch');
+    let first = null;
+    for (const index of fact.nodeIndices) {
+      const spec = Number.isSafeInteger(index) ? nodePlans[index] : null;
+      if (!spec || spec.node.nodeType !== 'text' || coveredNodes.has(index)
+          || spec.resources.fontAsset?.kind !== 'font' || spec.resources.fontAsset.contentKey !== fact.fontContentKey
+          || spec.number('width') !== fact.logicalWidth || spec.number('height') !== fact.logicalHeight)
+        throw new Error('composition-text-raster-consumer-mismatch');
+      if (first && (['text', 'color', 'align'].some(field => first.constant(field) !== spec.constant(field))
+          || ['fontSize', 'lineHeight'].some(field => first.number(field) !== spec.number(field))))
+        throw new Error('composition-text-raster-style-mismatch');
+      first ||= spec; coveredNodes.add(index);
+    }
+    const identity = { contentKey: fact.rasterKey, adapterId: fact.adapterId, adapterVersion: 1,
+      decodeOptions: { rasterVersion: fact.adapterVersion, fontContentKey: fact.fontContentKey,
+        widthPx: fact.widthPx, heightPx: fact.heightPx, scale: fact.scale } };
+    const requirement = { ...fact, key: resourceKey(identity, 'target-plan'), identity,
+      fontRequirement: first.resources.fontAsset, text: first.constant('text'),
+      fontSize: first.number('fontSize'), color: first.constant('color'), align: first.constant('align'),
+      lineHeight: first.number('lineHeight') };
+    for (const index of fact.nodeIndices) nodePlans[index].textRaster = requirement;
+    rasterKeys.add(fact.rasterKey); textRasters.push(requirement);
+    const rasterPixels = fact.widthPx * fact.heightPx;
+    resources.canvases++; resources.drawingBufferPixels += rasterPixels;
+    resources.ownedCpuBytes += rasterPixels * 4; resources.textureDeclaredBytes += rasterPixels * 4;
+  }
+  if (nodePlans.some(spec => spec.node.nodeType === 'text' && !coveredNodes.has(spec.index)))
+    throw new Error('composition-text-raster-projection-required');
+  return { projection, ir, values, nodePlans, requirements: [...unique.values()], textRasters, resources, pixels };
 }

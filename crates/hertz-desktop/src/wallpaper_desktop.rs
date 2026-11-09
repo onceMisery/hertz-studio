@@ -1129,18 +1129,13 @@ impl App {
         if hard_pause {
             self.retain_wallpaper_playback();
             self.retain_static_wallpaper_poster();
-            if self
-                .desktop
-                .surface
-                .as_ref()
-                .is_some_and(|surface| {
-                    surface.session.media().is_some()
-                        || surface
-                            .session
-                            .gl()
-                            .is_some_and(|gl| gl.composition_url().is_some())
-                })
-            {
+            if self.desktop.surface.as_ref().is_some_and(|surface| {
+                surface.session.media().is_some()
+                    || surface
+                        .session
+                        .gl()
+                        .is_some_and(|gl| gl.composition_url().is_some())
+            }) {
                 self.retire_wallpaper_surface();
                 self.desktop.page_ready = false;
                 self.desktop.visible = false;

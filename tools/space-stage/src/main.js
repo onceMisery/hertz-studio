@@ -104,7 +104,7 @@ export function create(canvas, options = {}) {
     const lyricStats = lyricLayer ? lyricLayer.scope.stats() : { resources: 0, tasks: 0, estimatedBytes: 0 };
     const shared = spatialResources.stats();
     const post = active && active.post && active.post.stats ? active.post.stats() : { bytes: 0 };
-    return { state, id: active && active.def.id, requestedId, requestId, lyricId: lyricLayer && lyricLayer.def.id, error, ...quality.status(), frameCount,
+    return { ...renderContext.stats(), state, id: active && active.def.id, requestedId, requestId, lyricId: lyricLayer && lyricLayer.def.id, error, ...quality.status(), frameCount,
       actualFps: median ? 1000 / median : null, frameIntervalP95: sample.length ? sample[Math.floor(sample.length * .95)] : null,
       cpuUpdateRenderMs: cpuMs, gpuMs, gpuTimingSource: 'unavailable', drawCalls: info.render.calls,
       points: info.render.points, triangles: info.render.triangles, geometries: info.memory.geometries,
@@ -352,22 +352,26 @@ export function create(canvas, options = {}) {
       if (lastFrame !== null && now > lastFrame) { intervals.push(now-lastFrame); if (intervals.length > 240) intervals.shift(); }
       lastFrame = now;
       const started = performance.now();
+      const candidate = active, instance = candidate.instance, ticket = generation;
+      const current = () => !disposed && active === candidate && ticket === generation;
       try {
-        if (active.prepare) active.prepare();
+        if (candidate.prepare) candidate.prepare();
         if (lyricLayer?.prepare) lyricLayer.prepare();
         if (frame.deviceTier !== undefined && quality.setDeviceTier(frame.deviceTier)) applyQuality();
         spatialResources.beginFrame(now);
-        const prepared=active.instance.update({ ...frame, now, dt });
-        if (active.composition && prepared === false) return false;
+        if (!current()) return false;
+        const prepared=instance.update({ ...frame, now, dt });
+        if (candidate.composition && prepared === false) return false;
         if (lyricLayer?.instance) {
-          lyricLayer.scene.visible = !!frame.lyrics?.lines?.length && !active.def.capabilities.ownsLyrics;
+          lyricLayer.scene.visible = !!frame.lyrics?.lines?.length && !candidate.def.capabilities.ownsLyrics;
           lyricLayer.instance.update({ ...frame, now, dt });
         }
-        if (active.post && active.post.update) active.post.update(frame);
+        if (candidate.post && candidate.post.update) candidate.post.update(frame);
+        if (!current()) return false;
         renderer.info.reset();
-        if (active.composition) {
-          if (!active.instance.render()) return false;
-        } else if (active.post) active.post.render(renderer, active.scene, active.camera); else renderer.render(active.scene, active.camera);
+        if (candidate.composition) {
+          if (!instance.render()) return false;
+        } else if (candidate.post) candidate.post.render(renderer, candidate.scene, candidate.camera); else renderer.render(candidate.scene, candidate.camera);
         if (lyricLayer?.instance && lyricLayer.scene.visible) {
           // Preserve the world's color buffer while giving lyrics their own reading depth.
           const autoClear = renderer.autoClear, toneMapping = renderer.toneMapping, exposure = renderer.toneMappingExposure;
@@ -379,17 +383,22 @@ export function create(canvas, options = {}) {
         }
         if (renderer.info.programs.some(program => program.diagnostics?.runnable === false))
           throw new Error('Three shader program failed');
+        if (!current()) return false;
         cpuMs = performance.now() - started; frameCount++;
-        if (!active.firstSubmit) { active.firstSubmit = true; state = 'ready'; notify(); }
-        if (!active.composition && quality.sample(now, () => {
-          const info = renderer.info.render, scoped = active.scope.stats(), shared = spatialResources.stats();
-          const post = active.post && active.post.stats ? active.post.stats().bytes : 0;
+        if (!candidate.firstSubmit) { candidate.firstSubmit = true; state = 'ready'; notify(); }
+        if (!candidate.composition && quality.sample(now, () => {
+          const info = renderer.info.render, scoped = candidate.scope.stats(), shared = spatialResources.stats();
+          const post = candidate.post && candidate.post.stats ? candidate.post.stats().bytes : 0;
           return { drawCalls: info.calls, points: info.points, triangles: info.triangles, estimatedBytes: scoped.estimatedBytes + (lyricLayer ? lyricLayer.scope.stats().estimatedBytes : 0) + shared.bytes + post };
         }, cpuMs)) applyQuality();
-        const currentFailure = admissionFailure || active.post?.stats?.().resourceFailure || spatialResources.stats().resourceFailure || '';
+        const currentFailure = admissionFailure || candidate.post?.stats?.().resourceFailure || spatialResources.stats().resourceFailure || '';
         if (frameCount % 120 === 0 || currentFailure !== lastResourceFailure) notify();
+        if (!current() || (typeof document !== 'undefined' && document.hidden) || (options.isVisible && !options.isVisible())) return false;
+        // Only this frame's rendered instance can consume media completion,
+        // after every output, shader diagnostic and synchronous status callback.
+        if (candidate.composition && !instance.commitMedia()) return false;
         return true;
-      } catch (reason) { fail(reason); return false; }
+      } catch (reason) { if (current()) fail(reason); return false; }
     },
     resize,
     retryResources() {

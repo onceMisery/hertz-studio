@@ -115,10 +115,25 @@ export function createResourcePool({ contextId, maxEntries = 512, onInvalidate }
     },
     retain(entry, signal) { const lease = retain(entry, signal); if (lease) consumers.get(lease).lease = lease; return lease; },
     release,
-    retirementCandidates(lease) {
-      const consumer=consumers.get(lease),entry=consumer?.entry;
-      if(!consumer?.active||entry.loading||entry.consumers.size!==1)return [];
-      return entry.value?.retirementCandidates?.() || [];
+    retirementCandidates(leases) {
+      // Credit a shared representation only when this retiring batch owns
+      // every live consumer. Its settled value may retain dependency leases;
+      // those retire only after the representation itself releases its pixels.
+      const retiring = new Set(Array.isArray(leases) ? leases : [leases]), complete = new Set();
+      let changed = true;
+      while (changed) {
+        changed = false;
+        for (const lease of retiring) {
+          const consumer = consumers.get(lease), entry = consumer?.entry;
+          if (!consumer?.active || entry.loading || entry.retired || complete.has(entry)
+              || [...entry.consumers].some(other => !retiring.has(other.lease))) continue;
+          complete.add(entry);
+          for (const dependency of entry.value?.retirementLeases?.() || []) {
+            if (consumers.has(dependency) && !retiring.has(dependency)) { retiring.add(dependency); changed = true; }
+          }
+        }
+      }
+      return [...new Set([...complete].flatMap(entry => entry.value?.retirementCandidates?.() || []))];
     },
     owns(lease) { return consumers.has(lease); },
     markOwned(value) { Object.defineProperty(value, 'poolOwned', { value: true, configurable: false }); return value; },

@@ -9,8 +9,7 @@ use super::*;
 use crate::wallpaper::library::tempfileish;
 use sha2::{Digest, Sha256};
 
-const FIXTURE_PNG_B64: &str =
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGD4DwABBAEAX+XDSwAAAABJRU5ErkJggg==";
+const FIXTURE_PNG_B64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGD4DwABBAEAX+XDSwAAAABJRU5ErkJggg==";
 
 fn sample_package() -> Vec<u8> {
     use base64::Engine;
@@ -107,6 +106,255 @@ fn futures_block_on<T>(future: impl std::future::Future<Output = T>) -> T {
         .block_on(future)
 }
 
+fn font_fixture() -> Vec<u8> {
+    use base64::Engine;
+    let css = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../plugin/ui/fonts/brand.css"
+    ));
+    let encoded = css
+        .split("data:font/ttf;base64,")
+        .nth(1)
+        .unwrap()
+        .split('"')
+        .next()
+        .unwrap();
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .unwrap();
+    assert_eq!(bytes.len(), 8336);
+    assert_eq!(
+        format!("{:x}", Sha256::digest(&bytes)),
+        "52e207c6d3cd36d1880050598c4c31f16848575b5f419fd9a78ed486c16acbaf"
+    );
+    bytes
+}
+
+fn font_env(
+    tag: &str,
+    probe: ProbeClient,
+    font: &[u8],
+    mime: &str,
+) -> (TestEnv, FontPrepareRequest) {
+    use base64::Engine;
+    use std::io::Write;
+    let env = env_with_probe(tag, probe);
+    let png = base64::engine::general_purpose::STANDARD
+        .decode(FIXTURE_PNG_B64)
+        .unwrap();
+    let license = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../plugin/ui/fonts/InstrumentSerif-OFL.txt"
+    ));
+    assert!(license.contains("Copyright 2022 The Instrument Serif Project Authors"));
+    assert!(license.contains("SIL OPEN FONT LICENSE Version 1.1"));
+    let entry = hertz_wallpaper::VerifiedEntry {
+        path: "assets/instrument-serif.ttf".into(),
+        bytes: font.len() as u64,
+        sha256: format!("{:x}", Sha256::digest(font)),
+        mime: Some(mime.into()),
+    };
+    let manifest = serde_json::json!({
+        "formatVersion": 1, "workId": "a8e3a147-74b8-4a4b-b6e9-343b6590ff3f", "version": 1,
+        "title": "Font jobs", "description": "", "content": {"kind": "image", "asset": "background"},
+        "assets": [{"id": "background", "kind": "image", "source": "assets/background.png", "variants": []},
+            {"id": "brand-font", "kind": "font", "source": entry.path, "variants": []}],
+        "files": [{"path": "assets/background.png", "bytes": png.len(), "sha256": format!("{:x}", Sha256::digest(&png)), "mime": "image/png"},
+            {"path": entry.path, "bytes": entry.bytes, "sha256": entry.sha256, "mime": mime},
+            {"path": "licenses/instrument-serif-ofl.txt", "bytes": license.len(), "sha256": format!("{:x}", Sha256::digest(license.as_bytes())), "mime": "text/plain"}],
+        "properties": [], "permissions": {"audioSpectrum": false, "pointer": false},
+        "license": {"code": "none", "assets": "OFL-1.1", "attribution": "Copyright 2022 The Instrument Serif Project Authors; licenses/instrument-serif-ofl.txt"}
+    });
+    let mut buffer = std::io::Cursor::new(Vec::new());
+    {
+        let mut zip = zip::ZipWriter::new(&mut buffer);
+        for (path, bytes) in [
+            ("manifest.json", serde_json::to_vec(&manifest).unwrap()),
+            ("assets/background.png", png),
+            (entry.path.as_str(), font.to_vec()),
+            (
+                "licenses/instrument-serif-ofl.txt",
+                license.as_bytes().to_vec(),
+            ),
+        ] {
+            zip.start_file(path, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(&bytes).unwrap();
+        }
+        zip.finish().unwrap();
+    }
+    let source = env.root.path().join("font-source.hwpkg");
+    std::fs::write(&source, buffer.into_inner()).unwrap();
+    let receipt = env
+        .jobs
+        .assets()
+        .snapshot_input("font-fixture", &source, None)
+        .unwrap();
+    let package = env.jobs.assets().validate_staged("font-fixture").unwrap();
+    env.jobs
+        .assets()
+        .unpack_projection("font-fixture", &package)
+        .unwrap();
+    env.jobs
+        .assets()
+        .content_writer()
+        .unwrap()
+        .publish_staging("font-fixture", &package.package_hash)
+        .unwrap();
+    futures_block_on(
+        env.jobs
+            .library()
+            .install(&crate::wallpaper::library::InstallWork {
+                remote_work_id: package.manifest.work_id.clone(),
+                work_key: format!("local-{}", package.manifest.work_id),
+                title: package.manifest.title.clone(),
+                description: package.manifest.description.clone(),
+                kind: "image".into(),
+                package_hash: package.package_hash.clone(),
+                manifest_json: package.manifest_json.clone(),
+                package_bytes: receipt.bytes,
+                version: package.manifest.version,
+                source_id: LOCAL_SOURCE.into(),
+            }),
+    )
+    .unwrap();
+    let request = FontPrepareRequest {
+        reference: AssetRef {
+            package_hash: package.package_hash,
+            asset_id: "brand-font".into(),
+            variant_id: None,
+        },
+        expected_entry: entry,
+        required_texts: vec![RequiredText {
+            node_id: "title".into(),
+            text: "Hertz Studio".into(),
+        }],
+    };
+    (env, request)
+}
+
+struct HeldFontProbe {
+    probe: ProbeClient,
+    entered: std::sync::mpsc::Receiver<()>,
+    saw_cancel: std::sync::mpsc::Receiver<()>,
+    release: tokio::sync::oneshot::Sender<()>,
+    completed: Arc<AtomicBool>,
+}
+
+fn single_font_group(env: &TestEnv, font: FontPrepareRequest) -> FontGroupPrepareRequest {
+    let package = env
+        .jobs
+        .assets()
+        .read_installed_manifest(&font.reference.package_hash)
+        .unwrap();
+    let document = serde_json::json!({"documentVersion":1,
+        "canvas":{"width":64,"height":64,"colorSpace":"srgb","background":"#000000"},
+        "nodes":[{"id":"title","type":"text","stateVersion":1,"assets":{"fontAsset":font.reference.asset_id},
+            "properties":{"text":"Hertz Studio","width":16,"height":8}}],
+        "timeline":{"durationSeconds":4,"loop":true,"tracks":[]},"bindings":[]});
+    let bytes = serde_json::to_vec(&document).unwrap();
+    // In-memory compiler context for this lifecycle test only; all font bytes,
+    // reference seals and text proofs still come from the original installed pin.
+    let mut manifest = serde_json::to_value(package.manifest).unwrap();
+    manifest["content"] = serde_json::json!({"kind":"composition","document":"group.json"});
+    manifest["files"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({"path":"group.json","bytes":bytes.len(),
+        "sha256":format!("{:x}",Sha256::digest(&bytes)),"mime":"application/json"}));
+    let manifest =
+        hertz_wallpaper::validate_manifest_bytes(&serde_json::to_vec(&manifest).unwrap()).unwrap();
+    let compiled =
+        Arc::new(hertz_wallpaper::document::compile_document(&bytes, &manifest).unwrap());
+    let final_values = compiled.final_public_values(&Default::default()).unwrap();
+    let package_hash = font.reference.package_hash.clone();
+    FontGroupPrepareRequest {
+        fonts: vec![font],
+        composition: super::super::composition_plan::FontTextPreflightContext::new(
+            package_hash,
+            compiled,
+            final_values,
+            super::super::image_prepare::ImageTarget {
+                width: 64,
+                height: 64,
+                fit: super::super::image_prepare::ImageFit::Contain,
+                purpose: super::super::image_prepare::ImagePurpose::Preview,
+            },
+            super::super::config::Fit::Contain,
+        ),
+    }
+}
+
+fn held_font_probe(wait_for_cancel: bool) -> HeldFontProbe {
+    use super::super::decode_probe::ProbeInput;
+    let (entered_tx, entered) = std::sync::mpsc::channel();
+    let (cancel_tx, saw_cancel) = std::sync::mpsc::channel();
+    let (release, receive) = tokio::sync::oneshot::channel();
+    let receive = Arc::new(Mutex::new(Some(receive)));
+    let completed = Arc::new(AtomicBool::new(false));
+    let finished = Arc::clone(&completed);
+    let probe = ProbeClient::testing_input(move |input, cancel| {
+        if let ProbeInput::Font(input) = input {
+            let receive = receive
+                .lock()
+                .unwrap()
+                .take()
+                .expect("one accepted font probe");
+            let entered_tx = entered_tx.clone();
+            let cancel_tx = cancel_tx.clone();
+            let finished = Arc::clone(&finished);
+            Box::pin(async move {
+                assert_eq!(
+                    input.media.entry.sha256,
+                    format!("{:x}", Sha256::digest(font_fixture()))
+                );
+                // The callback models its own physical completion barrier; it is
+                // never evidence of a native FontFace/controller qualification.
+                entered_tx.send(()).unwrap();
+                if wait_for_cancel {
+                    while !cancel.load(Ordering::Acquire) {
+                        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+                    }
+                    cancel_tx.send(()).unwrap();
+                }
+                receive.await.expect("release qualifier cleanup");
+                finished.store(true, Ordering::Release);
+                Ok(())
+            })
+        } else {
+            Box::pin(async { Ok(()) })
+        }
+    });
+    HeldFontProbe {
+        probe,
+        entered,
+        saw_cancel,
+        release,
+        completed,
+    }
+}
+
+fn assert_font_job_drained(env: &TestEnv, probe: &ProbeClient, id: &str, state: JobState) {
+    assert!(env.jobs.active_status().is_none());
+    let status = env.jobs.status(id).unwrap();
+    assert_eq!(status.state, state);
+    assert_eq!(status.staged_bytes, 0);
+    let recorded: String = futures_block_on(
+        sqlx::query_scalar("SELECT state FROM install_jobs WHERE job_id = ?")
+            .bind(id)
+            .fetch_one(env.jobs.library().pool()),
+    )
+    .unwrap();
+    assert_eq!(recorded, job_state_db(&state));
+    assert!(!env.jobs.assets().staging_dir(id).exists());
+    drop(env.jobs.assets().content_writer().unwrap());
+    probe.prepare(format!("after-{id}")).unwrap().finish();
+    probe
+        .image_workspace(super::super::budget::MAX_PREPARE_CPU_BYTES)
+        .unwrap()
+        .finish();
+}
+
 fn wait_terminal(jobs: &ImportJobs, job_id: &str) -> JobStatus {
     for _ in 0..400 {
         if let Some(status) = jobs.status(job_id) {
@@ -120,6 +368,637 @@ fn wait_terminal(jobs: &ImportJobs, job_id: &str) -> JobStatus {
         std::thread::sleep(std::time::Duration::from_millis(25));
     }
     panic!("任务 10s 内未终结");
+}
+
+#[test]
+fn font_preparation_holds_original_slot_until_callback_and_worker_cleanup_complete() {
+    let held = held_font_probe(false);
+    let probe = held.probe.clone();
+    let font = font_fixture();
+    let (env, request) = font_env("font-job-held", held.probe, &font, "font/ttf");
+    let id = new_job_id();
+    let (returned, mut reply) = env.jobs.prepare_font(id.clone(), request.clone()).unwrap();
+    assert_eq!(returned, id);
+    held.entered
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    assert!(matches!(
+        reply.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+    assert!(!held.completed.load(Ordering::Acquire));
+    assert_eq!(env.jobs.status(&id).unwrap().state, JobState::Preparing);
+    assert_eq!(
+        env.jobs
+            .submit(new_job_id(), env.source.clone())
+            .unwrap_err()
+            .code,
+        "budget_busy"
+    );
+    assert_eq!(
+        env.jobs
+            .prepare_font(new_job_id(), request.clone())
+            .err()
+            .unwrap()
+            .code,
+        "budget_busy"
+    );
+    let image_request = super::super::target_planner::PrepareRequest {
+        reference: AssetRef {
+            asset_id: "background".into(),
+            ..request.reference.clone()
+        },
+        target: session_target(),
+    };
+    assert_eq!(
+        env.jobs
+            .prepare_asset(new_job_id(), image_request.clone())
+            .unwrap_err()
+            .code,
+        "budget_busy"
+    );
+    assert_eq!(
+        env.jobs.assets().content_writer().err().unwrap().code,
+        "budget_busy"
+    );
+    assert_eq!(
+        probe
+            .prepare("font-job-competing".into())
+            .err()
+            .unwrap()
+            .code,
+        "budget_busy"
+    );
+    assert!(std::fs::write(
+        env.jobs
+            .assets()
+            .package_dir(&request.reference.package_hash)
+            .join("files")
+            .join(&request.expected_entry.path),
+        b"cannot replace the pinned font"
+    )
+    .is_err());
+    held.release.send(()).unwrap();
+    let prepared = futures_block_on(async {
+        tokio::time::timeout(std::time::Duration::from_secs(5), reply)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+    });
+    assert!(held.completed.load(Ordering::Acquire));
+    assert_eq!(
+        prepared.reference().package_hash,
+        request.reference.package_hash
+    );
+    assert_eq!(prepared.reference().asset_id, "brand-font");
+    assert_eq!(
+        prepared.input().media.entry.sha256,
+        request.expected_entry.sha256
+    );
+    assert_eq!(prepared.input().metadata.sfnt_bytes, font.len() as u64);
+    assert_eq!(
+        prepared.url(),
+        super::super::webresource::files_url(
+            &request.reference.package_hash,
+            &request.expected_entry.path
+        )
+        .unwrap()
+    );
+    assert_font_job_drained(&env, &probe, &id, JobState::Done);
+    let derived: i64 = futures_block_on(
+        sqlx::query_scalar("SELECT COUNT(*) FROM derived_entries")
+            .fetch_one(env.jobs.library().pool()),
+    )
+    .unwrap();
+    assert_eq!(
+        derived, 0,
+        "font preparation creates no disk-derived representation"
+    );
+    assert_eq!(std::fs::read(&prepared.input().media.path).unwrap(), font);
+    // Both existing media paths remain usable after the same original slot drains.
+    let image_id = new_job_id();
+    env.jobs
+        .prepare_asset(image_id.clone(), image_request)
+        .unwrap();
+    assert_eq!(wait_terminal(&env.jobs, &image_id).state, JobState::Done);
+    let import_id = new_job_id();
+    env.jobs
+        .submit(import_id.clone(), env.source.clone())
+        .unwrap();
+    assert_eq!(wait_terminal(&env.jobs, &import_id).state, JobState::Done);
+}
+
+#[test]
+fn font_cancellation_keeps_original_slot_until_qualifier_cleanup_acknowledges_exit() {
+    let held = held_font_probe(true);
+    let probe = held.probe.clone();
+    let (env, request) = font_env("font-job-cancel", held.probe, &font_fixture(), "font/ttf");
+    let id = new_job_id();
+    let (_, mut reply) = env.jobs.prepare_font(id.clone(), request).unwrap();
+    held.entered
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    env.jobs.cancel(&id);
+    held.saw_cancel
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    assert!(!held.completed.load(Ordering::Acquire));
+    assert!(matches!(
+        reply.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+    assert_eq!(env.jobs.status(&id).unwrap().state, JobState::Preparing);
+    assert_eq!(
+        env.jobs
+            .submit(new_job_id(), env.source.clone())
+            .unwrap_err()
+            .code,
+        "budget_busy"
+    );
+    assert_eq!(
+        env.jobs.assets().content_writer().err().unwrap().code,
+        "budget_busy"
+    );
+    assert_eq!(
+        probe
+            .prepare("font-cancel-competing".into())
+            .err()
+            .unwrap()
+            .code,
+        "budget_busy"
+    );
+    held.release.send(()).unwrap();
+    // The held callback returns success after observing cancel; original
+    // qualification/job cancellation must still prevent any PreparedFont reply.
+    let error = futures_block_on(async {
+        tokio::time::timeout(std::time::Duration::from_secs(5), reply)
+            .await
+            .unwrap()
+            .unwrap()
+            .err()
+            .unwrap()
+    });
+    assert_eq!(error.code, "cancelled");
+    assert!(held.completed.load(Ordering::Acquire));
+    assert_font_job_drained(&env, &probe, &id, JobState::Cancelled);
+    let next = new_job_id();
+    env.jobs.submit(next.clone(), env.source.clone()).unwrap();
+    assert_eq!(wait_terminal(&env.jobs, &next).state, JobState::Done);
+}
+
+#[test]
+fn font_invalid_bytes_identity_mime_and_glyphs_fail_before_probe_runs() {
+    use super::super::decode_probe::ProbeInput;
+    for case in [
+        "header",
+        "hash",
+        "length",
+        "mime",
+        "request-mime",
+        "source",
+        "kind",
+        "missing",
+        "glyph",
+    ] {
+        let probe = ProbeClient::testing_input(|input, _| {
+            assert!(
+                !matches!(input, ProbeInput::Font(_)),
+                "invalid font reached probe"
+            );
+            Box::pin(async { Ok(()) })
+        });
+        let counts = probe.clone();
+        let mut font = font_fixture();
+        if case == "header" {
+            font.truncate(4);
+        }
+        let mime = if case == "mime" {
+            "font/otf"
+        } else {
+            "font/ttf"
+        };
+        let (env, mut request) = font_env(&format!("font-job-invalid-{case}"), probe, &font, mime);
+        let expected = match case {
+            "header" => "font_invalid",
+            "hash" => {
+                request.expected_entry.sha256 = "0".repeat(64);
+                "hash_mismatch"
+            }
+            "length" => {
+                request.expected_entry.bytes -= 1;
+                "hash_mismatch"
+            }
+            "mime" => "font_mime_mismatch",
+            "request-mime" => {
+                request.expected_entry.mime = Some("font/otf".into());
+                "hash_mismatch"
+            }
+            "source" => {
+                request.expected_entry.path = "assets/other.ttf".into();
+                "hash_mismatch"
+            }
+            "kind" => {
+                request.reference.asset_id = "background".into();
+                "font_asset_kind_mismatch"
+            }
+            "missing" => {
+                request.reference.package_hash = "a".repeat(64);
+                "asset_not_found"
+            }
+            "glyph" => {
+                request.required_texts[0].text = "Hertz 中".into();
+                "font_glyph_unavailable"
+            }
+            _ => unreachable!(),
+        };
+        let id = new_job_id();
+        let (_, reply) = env.jobs.prepare_font(id.clone(), request).unwrap();
+        let error = futures_block_on(async {
+            tokio::time::timeout(std::time::Duration::from_secs(5), reply)
+                .await
+                .unwrap()
+                .unwrap()
+                .err()
+                .unwrap()
+        });
+        assert_eq!(error.code, expected, "{case}: {error}");
+        if case == "glyph" {
+            assert_eq!(error.details.as_deref().unwrap()["nodeId"], "title");
+            assert_eq!(error.details.as_deref().unwrap()["codepoint"], "U+4E2D");
+            assert!(error.message.contains("title"));
+        }
+        assert_eq!(counts.stats(), (0, 0), "{case}");
+        assert_font_job_drained(&env, &counts, &id, JobState::Failed);
+    }
+}
+
+#[test]
+fn font_typed_probe_failure_preserves_error_details_after_original_slot_drains() {
+    use super::super::decode_probe::ProbeInput;
+    let probe = ProbeClient::testing_input(|input, _| {
+        Box::pin(async move {
+            match input {
+                ProbeInput::Font(_) => Err(JobError::new(
+                    "probe_inconclusive",
+                    "font callback cleanup failed",
+                )
+                .with_details(serde_json::json!({"phase": "close", "nodeId": "title"}))),
+                ProbeInput::Media(_) => Ok(()),
+            }
+        })
+    });
+    let counts = probe.clone();
+    let (env, request) = font_env("font-job-typed-error", probe, &font_fixture(), "font/ttf");
+    let id = new_job_id();
+    let (_, reply) = env.jobs.prepare_font(id.clone(), request).unwrap();
+    let error = futures_block_on(async {
+        tokio::time::timeout(std::time::Duration::from_secs(5), reply)
+            .await
+            .unwrap()
+            .unwrap()
+            .err()
+            .unwrap()
+    });
+    assert_eq!(error.code, "probe_inconclusive");
+    assert_eq!(error.message, "font callback cleanup failed");
+    assert_eq!(
+        error.details.as_deref().unwrap(),
+        &serde_json::json!({"phase": "close", "nodeId": "title"})
+    );
+    assert_eq!(counts.stats(), (0, 1));
+    assert_font_job_drained(&env, &counts, &id, JobState::Failed);
+}
+
+#[test]
+fn font_terminal_database_failure_invalidates_success_after_physical_cleanup() {
+    let held = held_font_probe(false);
+    let probe = held.probe.clone();
+    let (env, request) = font_env(
+        "font-job-terminal-db-failure",
+        held.probe,
+        &font_fixture(),
+        "font/ttf",
+    );
+    let id = new_job_id();
+    let (_, mut reply) = env.jobs.prepare_font(id.clone(), request).unwrap();
+    held.entered
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    // No font cache environment is provided. Closing the original pool while
+    // the callback is held makes the canonical terminal record fail exactly.
+    futures_block_on(env.jobs.library().pool().close());
+    assert!(env.jobs.library().pool().is_closed());
+    assert!(matches!(
+        reply.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+    held.release.send(()).unwrap();
+    let error = futures_block_on(async {
+        tokio::time::timeout(std::time::Duration::from_secs(5), reply)
+            .await
+            .unwrap()
+            .unwrap()
+            .err()
+            .unwrap()
+    });
+    assert!(held.completed.load(Ordering::Acquire));
+    assert_eq!(error.code, "database");
+    assert_eq!(error.message, sqlx::Error::PoolClosed.to_string());
+    assert!(env.jobs.active_status().is_none());
+    let status = env.jobs.status(&id).unwrap();
+    assert_eq!(status.state, JobState::Failed);
+    assert!(status.package_hash.is_none());
+    assert_eq!(
+        status.error.as_deref(),
+        Some(format!("database: {}", error.message).as_str())
+    );
+    assert!(!env.jobs.assets().staging_dir(&id).exists());
+    drop(env.jobs.assets().content_writer().unwrap());
+    probe
+        .prepare("after-font-terminal-db-failure".into())
+        .unwrap()
+        .finish();
+    probe
+        .image_workspace(super::super::budget::MAX_PREPARE_CPU_BYTES)
+        .unwrap()
+        .finish();
+    assert_eq!(probe.stats(), (0, 1));
+}
+
+#[test]
+fn font_cancel_during_terminal_database_await_records_cancelled_before_typed_reply() {
+    let held = held_font_probe(false);
+    let probe = held.probe.clone();
+    let (env, prepare) = font_env(
+        "font-job-terminal-db-cancel",
+        held.probe,
+        &font_fixture(),
+        "font/ttf",
+    );
+    let id = new_job_id();
+    let mut request = env
+        .jobs
+        .reserve(id.clone(), JobSource::PrepareFont(prepare), None)
+        .unwrap();
+    let (font_reply, mut reply) = tokio::sync::oneshot::channel();
+    let (pending_tx, pending) = std::sync::mpsc::channel();
+    request.font_reply = Some(FontPrepareReply::Single(font_reply));
+    request.terminal_pending = Some(pending_tx);
+    env.jobs.dispatch(request).unwrap();
+    held.entered
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    // This transaction begins after qualification has entered its held
+    // callback, and owns SQLite's real writer lock until the test releases it.
+    let transaction =
+        futures_block_on(env.jobs.library().pool().begin_with("BEGIN IMMEDIATE")).unwrap();
+    held.release.send(()).unwrap();
+    assert_eq!(
+        pending
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap(),
+        JobState::Done
+    );
+    assert!(held.completed.load(Ordering::Acquire));
+    assert!(matches!(
+        reply.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+    assert_eq!(env.jobs.active_status().unwrap().job_id, id);
+    assert_eq!(env.jobs.status(&id).unwrap().state, JobState::Preparing);
+    assert_eq!(
+        env.jobs
+            .submit(new_job_id(), env.source.clone())
+            .unwrap_err()
+            .code,
+        "budget_busy"
+    );
+    // The callback and physical cleanup are already complete. The remaining
+    // pending owner is the original terminal DB write, not the font probe.
+    drop(env.jobs.assets().content_writer().unwrap());
+    probe
+        .prepare("during-font-terminal-db".into())
+        .unwrap()
+        .finish();
+    env.jobs.cancel(&id);
+    {
+        let inner = env.jobs.inner.lock().unwrap();
+        assert!(inner
+            .current
+            .as_ref()
+            .unwrap()
+            .cancel
+            .load(Ordering::Acquire));
+    }
+    assert!(matches!(
+        reply.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+    futures_block_on(transaction.commit()).unwrap();
+    let error = futures_block_on(async {
+        tokio::time::timeout(std::time::Duration::from_secs(5), reply)
+            .await
+            .unwrap()
+            .unwrap()
+            .err()
+            .unwrap()
+    });
+    assert_eq!(error.code, "cancelled");
+    assert_font_job_drained(&env, &probe, &id, JobState::Cancelled);
+    let next = new_job_id();
+    env.jobs.submit(next.clone(), env.source.clone()).unwrap();
+    assert_eq!(wait_terminal(&env.jobs, &next).state, JobState::Done);
+}
+
+#[test]
+fn font_group_terminal_database_failure_never_sends_success_after_cleanup() {
+    let held = held_font_probe(false);
+    let probe = held.probe.clone();
+    let (env, font) = font_env(
+        "font-group-terminal-failure",
+        held.probe,
+        &font_fixture(),
+        "font/ttf",
+    );
+    let group = single_font_group(&env, font);
+    let id = new_job_id();
+    let (_, mut reply) = env.jobs.prepare_font_group(id.clone(), group).unwrap();
+    held.entered
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    futures_block_on(env.jobs.library().pool().close());
+    assert!(matches!(
+        reply.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+    assert!(env.jobs.active_status().is_some());
+    held.release.send(()).unwrap();
+    let error = futures_block_on(async {
+        tokio::time::timeout(std::time::Duration::from_secs(5), reply)
+            .await
+            .unwrap()
+            .unwrap()
+            .err()
+            .unwrap()
+    });
+    assert_eq!(error.code, "database");
+    assert!(held.completed.load(Ordering::Acquire));
+    assert!(env.jobs.active_status().is_none());
+    assert_eq!(env.jobs.status(&id).unwrap().state, JobState::Failed);
+    assert!(env.jobs.status(&id).unwrap().package_hash.is_none());
+    drop(env.jobs.assets().content_writer().unwrap());
+    probe
+        .prepare("after-group-terminal-failure".into())
+        .unwrap()
+        .finish();
+    assert_eq!(
+        probe.budget_for_test().usage(),
+        super::super::budget::BudgetUsage::default()
+    );
+}
+
+#[test]
+fn font_group_cancel_during_terminal_database_wait_keeps_slot_until_cancelled_record() {
+    let held = held_font_probe(false);
+    let probe = held.probe.clone();
+    let (env, font) = font_env(
+        "font-group-terminal-cancel",
+        held.probe,
+        &font_fixture(),
+        "font/ttf",
+    );
+    let group = single_font_group(&env, font);
+    let id = new_job_id();
+    let mut request = env
+        .jobs
+        .reserve(id.clone(), JobSource::PrepareFontGroup(group), None)
+        .unwrap();
+    let (reply, mut receive) = tokio::sync::oneshot::channel();
+    let (pending_tx, pending) = std::sync::mpsc::channel();
+    request.font_reply = Some(FontPrepareReply::Group(reply));
+    request.terminal_pending = Some(pending_tx);
+    env.jobs.dispatch(request).unwrap();
+    held.entered
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    let transaction =
+        futures_block_on(env.jobs.library().pool().begin_with("BEGIN IMMEDIATE")).unwrap();
+    held.release.send(()).unwrap();
+    assert_eq!(
+        pending
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap(),
+        JobState::Done
+    );
+    assert!(held.completed.load(Ordering::Acquire));
+    assert!(matches!(
+        receive.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+    assert_eq!(
+        env.jobs
+            .submit(new_job_id(), env.source.clone())
+            .unwrap_err()
+            .code,
+        "budget_busy"
+    );
+    env.jobs.cancel(&id);
+    assert!(matches!(
+        receive.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+    futures_block_on(transaction.commit()).unwrap();
+    let error = futures_block_on(async {
+        tokio::time::timeout(std::time::Duration::from_secs(5), receive)
+            .await
+            .unwrap()
+            .unwrap()
+            .err()
+            .unwrap()
+    });
+    assert_eq!(error.code, "cancelled");
+    assert_font_job_drained(&env, &probe, &id, JobState::Cancelled);
+    let next = new_job_id();
+    env.jobs.submit(next.clone(), env.source.clone()).unwrap();
+    assert_eq!(wait_terminal(&env.jobs, &next).state, JobState::Done);
+}
+
+#[test]
+fn font_group_requests_reject_incomplete_duplicate_foreign_and_stale_final_pairs_before_slot() {
+    let probe = ProbeClient::testing_input(|_, _| panic!("invalid group cannot qualify"));
+    let counts = probe.clone();
+    let (env, font) = font_env("font-group-shape", probe, &font_fixture(), "font/ttf");
+    let valid = single_font_group(&env, font);
+    for kind in [
+        "empty",
+        "duplicate",
+        "foreign",
+        "variant",
+        "node",
+        "text",
+        "oversized",
+    ] {
+        let mut group = valid.clone();
+        match kind {
+            "empty" => group.fonts.clear(),
+            "duplicate" => group.fonts.push(group.fonts[0].clone()),
+            "foreign" => group.fonts[0].reference.asset_id = "other-font".into(),
+            "variant" => group.fonts[0].reference.variant_id = Some("variant".into()),
+            "node" => group.fonts[0].required_texts[0].node_id = "other-node".into(),
+            "text" => group.fonts[0].required_texts[0].text = "H".into(),
+            "oversized" => group.fonts = vec![group.fonts[0].clone(); 129],
+            _ => unreachable!(),
+        }
+        assert_eq!(
+            env.jobs
+                .prepare_font_group(new_job_id(), group)
+                .err()
+                .unwrap()
+                .code,
+            "invalid_input",
+            "{kind}"
+        );
+        assert!(env.jobs.active_status().is_none());
+    }
+    assert_eq!(counts.stats(), (0, 0));
+}
+
+#[test]
+fn font_group_cancel_at_inspection_checkpoint_finishes_workspace_before_terminal_reply() {
+    let probe = ProbeClient::testing_input(|_, _| panic!("inspection cancellation cannot qualify"));
+    let counts = probe.clone();
+    let (env, font) = font_env(
+        "font-group-inspection-cancel",
+        probe,
+        &font_fixture(),
+        "font/ttf",
+    );
+    let group = single_font_group(&env, font);
+    let id = new_job_id();
+    let mut request = env
+        .jobs
+        .reserve(id.clone(), JobSource::PrepareFontGroup(group), None)
+        .unwrap();
+    let (reply, receive) = tokio::sync::oneshot::channel();
+    request.font_reply = Some(FontPrepareReply::Group(reply));
+    request.inspection_checkpoint = Some(|cancel| cancel.store(true, Ordering::Release));
+    env.jobs.dispatch(request).unwrap();
+    let error = futures_block_on(async {
+        tokio::time::timeout(std::time::Duration::from_secs(5), receive)
+            .await
+            .unwrap()
+            .unwrap()
+            .err()
+            .unwrap()
+    });
+    assert_eq!(error.code, "cancelled");
+    assert_eq!(counts.stats(), (0, 0));
+    assert_font_job_drained(&env, &counts, &id, JobState::Cancelled);
+    assert_eq!(
+        counts.budget_for_test().usage(),
+        super::super::budget::BudgetUsage::default()
+    );
 }
 
 #[test]

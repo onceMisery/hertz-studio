@@ -17,9 +17,9 @@ pub use audio::{
 };
 pub use error::{http_status, AudioError, CoreError, LibraryError, Result, StoreError};
 pub use model::{
-    DeviceInfo, Favorite, FavoriteKind, LyricAgent, LyricAgentKind, LyricDocument, LyricLine, LyricOrigin, LyricSource, LyricVocal, LyricVocalRole,
-    LyricWord, PlayMode, PlayerSnapshot, Playlist, PlaylistId, Track, TrackId, TrackSource,
-    PROTOCOL_VERSION,
+    DeviceInfo, Favorite, FavoriteKind, LyricAgent, LyricAgentKind, LyricDocument, LyricLine,
+    LyricOrigin, LyricSource, LyricVocal, LyricVocalRole, LyricWord, PlayMode, PlayerSnapshot,
+    Playlist, PlaylistId, Track, TrackId, TrackSource, PROTOCOL_VERSION,
 };
 
 #[cfg(test)]

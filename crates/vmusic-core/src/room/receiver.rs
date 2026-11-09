@@ -937,16 +937,12 @@ mod tests {
         gate.input(0, plan(2, 11, 10 * MS, 0));
         gate.input(0, pcm(2, 1, 0, 100));
         let actions = gate.advance(2_000 * MS);
-        assert!(
-            !actions
-                .iter()
-                .any(|a| matches!(a, GateAction::EpochSwitch { .. }))
-        );
-        assert!(
-            !actions
-                .iter()
-                .any(|a| matches!(a, GateAction::Play { epoch: 2, .. }))
-        );
+        assert!(!actions
+            .iter()
+            .any(|a| matches!(a, GateAction::EpochSwitch { .. })));
+        assert!(!actions
+            .iter()
+            .any(|a| matches!(a, GateAction::Play { epoch: 2, .. })));
     }
 
     /// Commit 迟到（过设备提交期限）：不追播，新代际静音重同步，当前照常。
@@ -965,16 +961,12 @@ mod tests {
         assert!(actions.contains(&GateAction::Resync { to: Some(1) }));
         let later = gate.advance(800 * MS);
         // epoch 2 永不出声；epoch 1 继续按呈现时间出帧。
-        assert!(
-            !later
-                .iter()
-                .any(|a| matches!(a, GateAction::EpochSwitch { to: 2, .. }))
-        );
-        assert!(
-            later
-                .iter()
-                .any(|a| matches!(a, GateAction::Play { epoch: 1, .. }))
-        );
+        assert!(!later
+            .iter()
+            .any(|a| matches!(a, GateAction::EpochSwitch { to: 2, .. })));
+        assert!(later
+            .iter()
+            .any(|a| matches!(a, GateAction::Play { epoch: 1, .. })));
         assert_eq!(gate.current_epoch(), Some(1));
     }
 
@@ -1515,11 +1507,9 @@ mod tests {
         gate.input(0, commit(1, 10, 1_000 * MS));
         let actions = gate.advance(2_000 * MS);
         assert_eq!(played(&actions), 1);
-        assert!(
-            !actions
-                .iter()
-                .any(|a| matches!(a, GateAction::Underrun { .. }))
-        );
+        assert!(!actions
+            .iter()
+            .any(|a| matches!(a, GateAction::Underrun { .. })));
         assert!(gate.advance(600_000 * MS).is_empty());
     }
 
@@ -1597,11 +1587,9 @@ mod tests {
         gate.input(0, commit(1, 10, 1_000 * MS));
         let actions = gate.advance(2_000 * MS);
         assert_eq!(played(&actions), 1);
-        assert!(
-            !actions
-                .iter()
-                .any(|a| matches!(a, GateAction::Underrun { .. }))
-        );
+        assert!(!actions
+            .iter()
+            .any(|a| matches!(a, GateAction::Underrun { .. })));
     }
 
     #[test]

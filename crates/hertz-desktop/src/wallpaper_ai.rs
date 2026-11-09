@@ -147,7 +147,7 @@ impl App {
                         .iter()
                         .any(|entry| &entry.id == group)
                 }) {
-                        self.wallpaper_ai.select_group(owner, None)?;
+                    self.wallpaper_ai.select_group(owner, None)?;
                     return Err(JobError::new(
                         "target_required",
                         "先保存这个显示组，再使用离线切换",

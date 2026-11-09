@@ -48,10 +48,10 @@ mod feature_exit;
 #[path = "lyrics_settings.rs"]
 mod lyrics_settings;
 
-#[path = "wallpaper_apply.rs"]
-mod wallpaper_apply;
 #[path = "wallpaper_ai.rs"]
 mod wallpaper_ai;
+#[path = "wallpaper_apply.rs"]
+mod wallpaper_apply;
 #[path = "wallpaper_audio.rs"]
 mod wallpaper_audio;
 #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
@@ -122,7 +122,11 @@ pub(crate) enum UserEvent {
     #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
     WallpaperProbeTestResult(u64, serde_json::Value),
     SettingsPage(u64, String),
-    WallpaperAiResult(u64, crate::wallpaper::api::Request, Box<Result<crate::wallpaper::ai::Catalog, crate::wallpaper::jobs::JobError>>),
+    WallpaperAiResult(
+        u64,
+        crate::wallpaper::api::Request,
+        Box<Result<crate::wallpaper::ai::Catalog, crate::wallpaper::jobs::JobError>>,
+    ),
     WallpaperManagement(ApiReply, serde_json::Value),
     WorkPreviewReady(
         crate::wallpaper::api::Request,
@@ -398,7 +402,7 @@ impl WallpaperSurface {
                 "groupClock":kind == "video" && self.configuration.main().mode == crate::wallpaper::config::LayoutMode::Mirror});
             self.eval(&format!("window.hertzWallpaper.applyMedia({descriptor});"));
         }
-        if let Some(url) = self.session.gl().and_then(|gl|gl.composition_url()) {
+        if let Some(url) = self.session.gl().and_then(|gl| gl.composition_url()) {
             let url = serde_json::to_string(url).expect("native composition URL");
             self.eval(&format!("window.hertzWallpaper.applyComposition({url});"));
         }
@@ -2428,7 +2432,7 @@ impl App {
         let resume_lyrics = lyrics.as_ref().is_some_and(|lyrics| lyrics.enabled);
         let mut next = self.config.clone();
         if let Some(lyrics) = lyrics {
-            if lyrics.locked && self.tray.is_none() {
+            if lyrics.locked && !self.can_lock_lyrics() {
                 return Err("托盘不可用，暂时无法锁定歌词".into());
             }
             next.lyrics = lyrics;
@@ -2629,7 +2633,11 @@ impl App {
         reply: ApiReply,
         target: &EventLoopWindowTarget<()>,
     ) {
-        if value.get("command").and_then(serde_json::Value::as_str).is_some_and(|command| command.starts_with("wallpaper.ai.")) {
+        if value
+            .get("command")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|command| command.starts_with("wallpaper.ai."))
+        {
             self.handle_ai_management(value, reply, target);
             return;
         }
@@ -2657,7 +2665,14 @@ impl App {
             _ => 0,
         };
         let typed = request.typed().ok();
-        if typed.as_ref().is_some_and(|command| matches!(command, crate::wallpaper::api::Command::DraftUpdate {..} | crate::wallpaper::api::Command::PlaylistNext {..} | crate::wallpaper::api::Command::Apply {..})) {
+        if typed.as_ref().is_some_and(|command| {
+            matches!(
+                command,
+                crate::wallpaper::api::Command::DraftUpdate { .. }
+                    | crate::wallpaper::api::Command::PlaylistNext { .. }
+                    | crate::wallpaper::api::Command::Apply { .. }
+            )
+        }) {
             self.wallpaper_ai.invalidate();
         }
         if typed
@@ -3176,9 +3191,22 @@ impl App {
 
     fn handle_settings_page(&mut self, body: &str, target: &EventLoopWindowTarget<()>) {
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(body) {
-            if value.get("command").and_then(serde_json::Value::as_str).is_some_and(|command| command.starts_with("wallpaper.ai.")) {
-                if let Err(error)=hertz_wallpaper::json::check_bounded_json(body.as_bytes(),8) {
-                    self.send_wallpaper_management(ApiReply::Settings(self.settings_generation),crate::wallpaper::api::response(value["requestId"].as_str(),Err(crate::wallpaper::jobs::JobError::invalid_input(error.to_string())),None));
+            if value
+                .get("command")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|command| command.starts_with("wallpaper.ai."))
+            {
+                if let Err(error) = hertz_wallpaper::json::check_bounded_json(body.as_bytes(), 8) {
+                    self.send_wallpaper_management(
+                        ApiReply::Settings(self.settings_generation),
+                        crate::wallpaper::api::response(
+                            value["requestId"].as_str(),
+                            Err(crate::wallpaper::jobs::JobError::invalid_input(
+                                error.to_string(),
+                            )),
+                            None,
+                        ),
+                    );
                     return;
                 }
             }
@@ -4866,7 +4894,7 @@ impl App {
             }
             "lock" => {
                 // 锁定后要有解锁入口：独立形态靠自己的托盘，内嵌形态靠播放器托盘。
-                if self.tray.is_none() && !self.embedded {
+                if !self.can_lock_lyrics() {
                     return pipe_error("tray_unavailable");
                 }
                 self.set_locked(true);
@@ -7028,9 +7056,14 @@ fn create_resolved_presentation(
 
 #[allow(clippy::too_many_arguments)]
 fn create_presentation(
-    target:&EventLoopWindowTarget<()>,proxy:EventLoopProxy<UserEvent>,generation:u64,revision:u64,
-    configuration:config::WallpaperConfig,monitor:native::WallpaperMonitor,presentation:PresentationWindow,
-    composition:Option<crate::wallpaper::composition_plan::PreparedComposition>,
+    target: &EventLoopWindowTarget<()>,
+    proxy: EventLoopProxy<UserEvent>,
+    generation: u64,
+    revision: u64,
+    configuration: config::WallpaperConfig,
+    monitor: native::WallpaperMonitor,
+    presentation: PresentationWindow,
+    composition: Option<crate::wallpaper::composition_plan::PreparedComposition>,
 ) -> Result<WallpaperSurface> {
     use crate::wallpaper::session::{RecoveryLedger, WallpaperSession};
     let is_preview = matches!(presentation, PresentationWindow::Preview { .. });
@@ -7060,28 +7093,38 @@ fn create_presentation(
             budget::OwnerKind::Desktop
         };
         let plan = if let Some(composition) = &composition {
-            if composition.target().width != monitor.width.max(1) as u32 || composition.target().height != monitor.height.max(1) as u32
-                || composition.output_fit() != configuration.presentation().fit {
+            if composition.target().width != monitor.width.max(1) as u32
+                || composition.target().height != monitor.height.max(1) as u32
+                || composition.output_fit() != configuration.presentation().fit
+            {
                 bail!("组合目标已变化，需要重新准备和准入");
             }
-            composition.gl_plan(owner,format!("composition-{generation}"),generation,monitor.refresh_hz,u32::from(configuration.presentation().fps))?
-        } else { GlPlan::new(
-            &budget,
-            owner,
-            format!(
-                "gl-{}-{generation}",
-                if is_preview { "preview" } else { "desktop" }
-            ),
-            generation,
-            monitor.width.max(1) as u32,
-            monitor.height.max(1) as u32,
-            monitor.refresh_hz,
-            u32::from(configuration.presentation().fps),
-            configuration.presentation().quality.as_str(),
-        )? };
-        let mut admission = GlAdmission::new(plan,budget)?;
+            composition.gl_plan(
+                owner,
+                format!("composition-{generation}"),
+                generation,
+                monitor.refresh_hz,
+                u32::from(configuration.presentation().fps),
+            )?
+        } else {
+            GlPlan::new(
+                &budget,
+                owner,
+                format!(
+                    "gl-{}-{generation}",
+                    if is_preview { "preview" } else { "desktop" }
+                ),
+                generation,
+                monitor.width.max(1) as u32,
+                monitor.height.max(1) as u32,
+                monitor.refresh_hz,
+                u32::from(configuration.presentation().fps),
+                configuration.presentation().quality.as_str(),
+            )?
+        };
+        let mut admission = GlAdmission::new(plan, budget)?;
         if let Some(composition) = composition {
-            admission.bind_composition(composition,&media_access,binding.session_id())?;
+            admission.bind_composition(composition, &media_access, binding.session_id())?;
         }
         Some(admission)
     } else {
@@ -7161,8 +7204,9 @@ fn create_presentation(
         .build(&window)
         .map_err(|error| anyhow::anyhow!("创建壁纸 WebView 失败：{error}"))?;
     // 媒体拦截：wallpaper.invalid 保留域 → 本机 IStream（§8.1）。
-    let media_access = crate::wallpaper::webresource::install_with_access(&webview, proxy.clone(),media_access)
-        .map_err(|error| anyhow::anyhow!("安装壁纸媒体拦截失败：{error}"))?;
+    let media_access =
+        crate::wallpaper::webresource::install_with_access(&webview, proxy.clone(), media_access)
+            .map_err(|error| anyhow::anyhow!("安装壁纸媒体拦截失败：{error}"))?;
     if (zoom - 1.0).abs() > 0.001 {
         webview
             .zoom(zoom)
@@ -7351,7 +7395,11 @@ fn wallpaper_html() -> String {
     include_str!("../assets/wallpaper-scene.html")
         .replace(
             "__GL_BUDGET__",
-            &format!("{}\n{}", include_str!("../../../plugin/ui/stage-resource-budget.js"), include_str!("../assets/wallpaper-gl-budget.js")),
+            &format!(
+                "{}\n{}",
+                include_str!("../../../plugin/ui/stage-resource-budget.js"),
+                include_str!("../assets/wallpaper-gl-budget.js")
+            ),
         )
         .replace(
             "__RUNTIME__",

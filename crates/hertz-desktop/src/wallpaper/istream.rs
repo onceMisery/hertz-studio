@@ -29,6 +29,10 @@ use windows::Win32::System::Com::{
 use super::access::ReadPermit;
 use super::media_stream::{MediaFileStream, StreamSlotPool};
 
+#[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+#[path = "istream_read_probe.rs"]
+pub(crate) mod read_probe;
+
 /// 单个 COM 流。body 是文件的窗口：200 → 全文件（base=0）；206 → 从 range
 /// start 起的连续片段——流位置 0 即 body 首字节（浏览器按 body 语义消费）。
 /// Clone 据此开独立句柄并对齐位置（§8.1：独立游标）。
@@ -38,6 +42,8 @@ use super::media_stream::{MediaFileStream, StreamSlotPool};
 /// 串行使用（COM 侧也要求调用方自行同步），锁的粒度与文件句柄一致。
 #[implement(IStream, IAgileObject)]
 pub(crate) struct MediaIStream {
+    #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+    debug_read: Option<read_probe::StreamBinding>,
     stream: Arc<Mutex<StreamState>>,
     path: PathBuf,
     pool: Arc<StreamSlotPool>,
@@ -46,6 +52,8 @@ pub(crate) struct MediaIStream {
 }
 
 struct StreamState {
+    #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+    debug_read: Option<read_probe::StreamBinding>,
     file: Option<MediaFileStream>,
     payload: Option<Arc<[u8]>>,
     payload_slot: Option<super::media_stream::StreamSlot>,
@@ -66,6 +74,10 @@ impl StreamState {
             self.payload_slot.take();
             // 浏览器可继续持有 COM 外壳；它不能继续持有 staging pin 或活动计数。
             self.permit.take();
+            #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+            if let Some(binding) = &self.debug_read {
+                binding.gate.reclaimed(binding.stream_id);
+            }
             return Err(STG_E_ACCESSDENIED.into());
         }
         if self.file.is_none() && self.payload.is_none() {
@@ -76,6 +88,19 @@ impl StreamState {
 }
 
 type StreamRegistry = Mutex<Vec<Weak<Mutex<StreamState>>>>;
+
+#[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+impl Drop for StreamState {
+    fn drop(&mut self) {
+        self.file.take();
+        self.payload.take();
+        self.payload_slot.take();
+        self.permit.take();
+        if let Some(binding) = &self.debug_read {
+            binding.gate.reclaimed(binding.stream_id);
+        }
+    }
+}
 
 fn registry() -> &'static StreamRegistry {
     static REGISTRY: OnceLock<StreamRegistry> = OnceLock::new();
@@ -92,6 +117,21 @@ pub(crate) fn reap_revoked_streams() {
             let Some(stream) = weak.upgrade() else {
                 return false;
             };
+            #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+            let mut stream = match stream.try_lock() {
+                Ok(stream) => stream,
+                Err(std::sync::TryLockError::WouldBlock) => return true,
+                Err(std::sync::TryLockError::Poisoned(error)) => {
+                    let stream = error.into_inner();
+                    if let Some(binding) = &stream.debug_read {
+                        binding
+                            .gate
+                            .release(read_probe::ReleaseReason::InternalFailure);
+                    }
+                    stream
+                }
+            };
+            #[cfg(not(all(feature = "wallpaper-media-probe", debug_assertions)))]
             let mut stream = stream.lock().unwrap_or_else(|error| error.into_inner());
             stream.check_access().is_ok()
         });
@@ -125,6 +165,27 @@ impl MediaIStream {
         window: (u64, u64),
         permit: Option<ReadPermit>,
     ) -> Result<IStream> {
+        Self::from_file_bound(
+            stream,
+            path,
+            pool,
+            window,
+            permit,
+            #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+            None,
+        )
+    }
+
+    fn from_file_bound(
+        stream: MediaFileStream,
+        path: PathBuf,
+        pool: &Arc<StreamSlotPool>,
+        window: (u64, u64),
+        permit: Option<ReadPermit>,
+        #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))] parent_stream_id: Option<
+            u64,
+        >,
+    ) -> Result<IStream> {
         if window
             .0
             .checked_add(window.1)
@@ -132,7 +193,18 @@ impl MediaIStream {
         {
             return Err(STG_E_INVALIDPARAMETER.into());
         }
+        #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+        let debug_read = permit
+            .as_ref()
+            .filter(|permit| {
+                permit.pinned().is_some_and(|pin| {
+                    pin.path == path && stream.matches_read_probe_file(&pin.path, pin.entry.bytes)
+                })
+            })
+            .and_then(|permit| permit.stream_binding_for_test(window, parent_stream_id));
         let stream = Arc::new(Mutex::new(StreamState {
+            #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+            debug_read: debug_read.clone(),
             file: Some(stream),
             payload: None,
             payload_slot: None,
@@ -146,6 +218,8 @@ impl MediaIStream {
             registry.push(Arc::downgrade(&stream));
         }
         Ok(Self {
+            #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+            debug_read,
             stream,
             path,
             pool: Arc::clone(pool),
@@ -164,6 +238,8 @@ impl MediaIStream {
     ) -> Result<IStream> {
         let len = payload.len() as u64;
         let stream = Arc::new(Mutex::new(StreamState {
+            #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+            debug_read: None,
             file: None,
             payload: Some(payload),
             payload_slot: Some(pool.acquire().map_err(stream_error)?),
@@ -176,6 +252,8 @@ impl MediaIStream {
         registry.push(Arc::downgrade(&stream));
         drop(registry);
         Ok(Self {
+            #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+            debug_read: None,
             stream,
             path: PathBuf::new(),
             pool: Arc::clone(pool),
@@ -183,6 +261,38 @@ impl MediaIStream {
             len,
         }
         .into())
+    }
+
+    fn lock_stream(&self) -> Result<std::sync::MutexGuard<'_, StreamState>> {
+        #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+        if let Some(binding) = self
+            .debug_read
+            .as_ref()
+            .filter(|binding| binding.gate.on_ui_thread())
+        {
+            return match self.stream.try_lock() {
+                Ok(stream) => Ok(stream),
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    binding.gate.ui_concurrent_call();
+                    Err(windows::Win32::Foundation::STG_E_INUSE.into())
+                }
+                Err(std::sync::TryLockError::Poisoned(error)) => {
+                    binding
+                        .gate
+                        .release(read_probe::ReleaseReason::InternalFailure);
+                    Err(lock_poisoned(error))
+                }
+            };
+        }
+        self.stream.lock().map_err(|error| {
+            #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+            if let Some(binding) = &self.debug_read {
+                binding
+                    .gate
+                    .release(read_probe::ReleaseReason::InternalFailure);
+            }
+            lock_poisoned(error)
+        })
     }
 }
 
@@ -206,44 +316,31 @@ impl ISequentialStream_Impl for MediaIStream_Impl {
         if cb == 0 {
             return windows::core::HRESULT(0);
         }
-        let mut stream = match self.stream.lock() {
+        #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+        let mut read_exit = None;
+        let mut stream = match self.lock_stream() {
             Ok(stream) => stream,
-            Err(error) => return lock_poisoned(error).into(),
+            Err(error) => return error.code(),
         };
-        if let Err(error) = stream.check_access() {
-            return error.code();
-        }
-        let remaining = self.len.saturating_sub(stream.position);
-        let want = u64::from(cb).min(remaining) as usize;
-        let slice = unsafe { std::slice::from_raw_parts_mut(pv.cast::<u8>(), want) };
-        let mut read = 0;
-        // IStream::Read 不能把内部 1 MiB 分块误报为 EOF；直接填调用方缓冲，
-        // 每次磁盘读取仍有界，无额外大分配。
-        while read < want {
+        let result = (|| {
             if let Err(error) = stream.check_access() {
                 return error.code();
             }
-            let offset = self.base + stream.position;
-            if let Some(payload) = &stream.payload {
-                let count = want - read;
-                slice[read..].copy_from_slice(&payload[offset as usize..offset as usize + count]);
-                stream.position += count as u64;
-                read += count;
-                if !pcb_read.is_null() {
-                    unsafe {
-                        *pcb_read = read as u32;
-                    }
+            let remaining = self.len.saturating_sub(stream.position);
+            let want = u64::from(cb).min(remaining) as usize;
+            let slice = unsafe { std::slice::from_raw_parts_mut(pv.cast::<u8>(), want) };
+            let mut read = 0;
+            // IStream::Read 不能把内部 1 MiB 分块误报为 EOF；直接填调用方缓冲，
+            // 每次磁盘读取仍有界，无额外大分配。
+            while read < want {
+                if let Err(error) = stream.check_access() {
+                    return error.code();
                 }
-                continue;
-            }
-            match stream
-                .file
-                .as_mut()
-                .expect("active stream file")
-                .read_at(offset, &mut slice[read..])
-            {
-                Ok(0) => return STG_E_READFAULT,
-                Ok(count) => {
+                let offset = self.base + stream.position;
+                if let Some(payload) = &stream.payload {
+                    let count = want - read;
+                    slice[read..]
+                        .copy_from_slice(&payload[offset as usize..offset as usize + count]);
                     stream.position += count as u64;
                     read += count;
                     if !pcb_read.is_null() {
@@ -251,15 +348,70 @@ impl ISequentialStream_Impl for MediaIStream_Impl {
                             *pcb_read = read as u32;
                         }
                     }
+                    continue;
                 }
-                Err(error) => return stream_error(error).into(),
+                match stream
+                    .file
+                    .as_mut()
+                    .expect("active stream file")
+                    .read_at(offset, &mut slice[read..])
+                {
+                    Ok(0) => return STG_E_READFAULT,
+                    Ok(count) => {
+                        #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+                        if let Some(binding) = &stream.debug_read {
+                            let exact = stream.payload.is_none()
+                                && stream.permit.as_ref().is_some_and(|permit| {
+                                    permit.matches_read_gate(&binding.gate)
+                                        && permit.pinned().is_some_and(|pin| {
+                                            stream.file.as_ref().is_some_and(|file| {
+                                                file.matches_read_probe_file(
+                                                    &pin.path,
+                                                    pin.entry.bytes,
+                                                )
+                                            })
+                                        })
+                                });
+                            if binding.gate.claim_and_wait(
+                                binding,
+                                offset,
+                                cb,
+                                count,
+                                exact,
+                                &mut read_exit,
+                            ) && stream
+                                .permit
+                                .as_ref()
+                                .is_none_or(|permit| !permit.is_active())
+                            {
+                                // Keep original file/slot/permit until Read leaves this lock;
+                                // only the original reaper may complete the Drain afterwards.
+                                return STG_E_ACCESSDENIED;
+                            }
+                        }
+                        stream.position += count as u64;
+                        read += count;
+                        if !pcb_read.is_null() {
+                            unsafe {
+                                *pcb_read = read as u32;
+                            }
+                        }
+                    }
+                    Err(error) => return stream_error(error).into(),
+                }
             }
+            if read < cb as usize {
+                S_FALSE
+            } else {
+                S_OK
+            }
+        })();
+        drop(stream);
+        #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+        if let Some(exit) = &mut read_exit {
+            exit.1 = Some(result.0);
         }
-        if read < cb as usize {
-            S_FALSE
-        } else {
-            S_OK
-        }
+        result
     }
 
     fn Write(
@@ -280,7 +432,7 @@ impl IAgileObject_Impl for MediaIStream_Impl {}
 impl IStream_Impl for MediaIStream_Impl {
     fn Seek(&self, dlib_move: i64, origin: STREAM_SEEK, new_position: *mut u64) -> Result<()> {
         // plibnewposition 可为 null（COM 合同）：调用方不要回值时不写出。
-        let mut stream = self.stream.lock().map_err(lock_poisoned)?;
+        let mut stream = self.lock_stream()?;
         stream.check_access()?;
         let position = stream.position;
         let target: i128 = if origin == STREAM_SEEK_SET {
@@ -357,7 +509,7 @@ impl IStream_Impl for MediaIStream_Impl {
     /// 独立游标（§8.1/C59）：新句柄 + 对齐克隆时刻的位置，此后互不影响。
     fn Clone(&self) -> Result<IStream> {
         let (position, permit, payload) = {
-            let mut stream = self.stream.lock().map_err(lock_poisoned)?;
+            let mut stream = self.lock_stream()?;
             stream.check_access()?;
             (
                 stream.position,
@@ -369,12 +521,14 @@ impl IStream_Impl for MediaIStream_Impl {
             MediaIStream::from_payload(payload, permit.ok_or(STG_E_ACCESSDENIED)?, &self.pool)?
         } else {
             let file = MediaFileStream::open(&self.path, &self.pool).map_err(stream_error)?;
-            MediaIStream::from_file_with_permit(
+            MediaIStream::from_file_bound(
                 file,
                 self.path.clone(),
                 &self.pool,
                 (self.base, self.len),
                 permit,
+                #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+                self.debug_read.as_ref().map(|binding| binding.stream_id),
             )?
         };
         unsafe {
@@ -399,4 +553,4 @@ fn stream_error(error: super::media_stream::StreamError) -> windows::core::Error
 
 #[cfg(test)]
 #[path = "istream_tests.rs"]
-mod tests;
+pub(super) mod tests;

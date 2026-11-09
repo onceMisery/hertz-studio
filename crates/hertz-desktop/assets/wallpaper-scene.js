@@ -44,6 +44,7 @@
   var sceneParams = null;
   var stage = null;
   var compositionUrl = null;
+  var compositionFramePending = false;
   var canvas = null;
   var mounted = false;
   var switching = false;
@@ -523,7 +524,9 @@
     if (feed.valid && feed.expiresAt != null && now >= feed.expiresAt) applyFeed(null);
     if (feed.valid && feed.receivedAt == null) feed.receivedAt = now;
     // 场景时间按运动强度积分；真实媒体时钟（positionMs）单独随 feed 传递。
-    sceneTime += dt * config.motion;
+    // A composition phase is one output transaction. Keep that same phase
+    // while asynchronous media seeks settle, including at running loop edges.
+    sceneTime += (compositionFramePending ? 0 : dt) * config.motion;
     pendingDt = Math.min(100, pendingDt + dt);
     // 整数分频帧门：只提交第 N 帧；rAF 仍持续用于心跳与 feed 时效。
     frameCount++;
@@ -541,7 +544,7 @@
     if(compositionUrl && window.HertzGlBudget && !HertzGlBudget.readyForFrame())return;
     if (retained && !lastRenderedFrame) return;
     var frame = retained ? Object.assign({}, lastRenderedFrame, { dynamicDt: 0, realDt: 0 }) : {
-      now: now, dynamicDt: frameDt * config.motion / 1000, realDt: frameDt / 1000,
+      now: now, dynamicDt: (compositionFramePending ? 0 : frameDt) * config.motion / 1000, realDt: frameDt / 1000,
       bands: Array.from(shapedAudio(now)), sceneTime: sceneTime / 1000,
       motionActive: motionActive(), playing: scenePlaying(), position: feed.positionMs || 0
     };
@@ -581,6 +584,7 @@
           track: null,
           preview: null
         }) === true;
+        if (compositionUrl && !retained) compositionFramePending = !submitted;
       }
       // 只在渲染真实提交后计数；尝试调用不算 GPU 完成（P0-05）。
       if (submitted === true) {
@@ -608,7 +612,10 @@
     resetGate();
     audioShaped.fill(0); audioShapedAt = null;
     if (document.hidden) {
-      if (compositionUrl && stage && stage.pauseComposition) stage.pauseComposition(sceneTime / 1000);
+      if (compositionUrl && stage && stage.pauseComposition) {
+        compositionFramePending = true;
+        stage.pauseComposition(sceneTime / 1000);
+      }
       if (backend === 'zodiac' && mounted && zodiac) zodiac.setTime({ time: sceneTime / 1000, playing: false });
       if (raf) cancelAnimationFrame(raf);
       raf = 0;
@@ -636,7 +643,10 @@
 
   function stop(pauseToken) {
     enabled = false;
-    if (compositionUrl && stage && stage.pauseComposition) stage.pauseComposition(sceneTime/1000);
+    if (compositionUrl && stage && stage.pauseComposition) {
+      compositionFramePending = true;
+      stage.pauseComposition(sceneTime/1000);
+    }
     // A retained image also needs a new receipt after a policy pause. Fence both
     // queued animation frames so an earlier release cannot acknowledge resume.
     revealRevision++;
@@ -688,6 +698,7 @@
 
   function teardown() {
     lastRenderedFrame = null;
+    compositionFramePending = false;
     clearPointer();
     if (raf) cancelAnimationFrame(raf);
     raf = 0;
@@ -1418,7 +1429,7 @@
         onInvalidate:function(){},onStatus:function(status){if(status&&status.state==='failed')notify('wallpaper_gl_failed '+String(status.error).slice(0,220));}});
       await stage.selectComposition(projection);
       if(token!==selectToken||!stage)return false;
-      backend='space';sceneId='composition';mounted=true;lost=false;error=null;sceneTime=0;
+      backend='space';sceneId='composition';mounted=true;lost=false;error=null;sceneTime=0;compositionFramePending=true;
       switching=false;applyBrightness();startLoop();return true;
     } catch(failure) {
       if(token!==selectToken)return false;

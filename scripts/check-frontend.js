@@ -44,6 +44,12 @@ const SYNTAX_SKIP = new Set(['vendor']);
 // why 字段就是原来贴在 ci.yml 里的判断依据：它解释的是「这条失败意味着什么」，
 // 挪到脚本里才不会和 workflow 的 YAML 缩进互相拖累。
 const STEPS = [
+  { script: 'check-wallpaper-text-layout.js', stage: 'behavior',
+    why: '长文本须有界整行测量，保留Unicode、换行、对齐与取消，不以单字宽度替代shaping。' },
+  { script: 'check-wallpaper-font-probe.js', stage: 'behavior',
+    why: '字体探测须等待不可取消加载实际结束并清理本页字体；无字形像素、加载失败与迟到完成不能伪造成功。' },
+  { script: 'check-wallpaper-ai-phases.js', stage: 'behavior',
+    why: '离线推荐的组级回执必须核对全部目标的确切作品与真实首帧；部分暂停、停止、旧作品或缺目标不能误报运行。' },
   { script: 'export-wallpaper-composition.mjs', stage: 'guard', extra: true, args: ['--check'],
     why: '组合纯声明须与 Rust 合同及实际 Stage bundle 一致；声明存在不授予图形或原生运行资格。' },
   { script: 'check-stanza-pixi-build.js', stage: 'guard',
@@ -206,6 +212,8 @@ const STEPS = [
 
 // CI 暂不跑、但本地值得随手跑的无浏览器检查。
 const EXTRA = [
+  { script: 'check-desktop-native-management-client.js', stage: 'behavior',
+    why: '共享原生验收客户端须仅重试连接前缺席/繁忙，保持总期限、消息边界与缺席语义，连接后失败绝不重发。' },
   { script: 'check-wallpaper-package.js', stage: 'behavior',
     why: '壁纸包的真实 Rust 校验器必须拒绝损坏、越界及未声明资源。' },
   { script: 'check-playlist-views.js', why: '歌单的几种视图形态。' },

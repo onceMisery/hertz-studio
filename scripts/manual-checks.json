@@ -3,6 +3,18 @@
   "note": "check-* scripts that are deliberate manual/browser/diagnostic entry points. New unregistered check-* files fail scripts/check-scripts.js until they are either registered in check-frontend.js / a workflow or added here.",
   "scripts": [
     {
+      "script": "check-wallpaper-font-text-native.js",
+      "purpose": "Isolated Windows licensed TTF/text journey through original import, independent preview, draft Apply, native exact session and actual GL/WorkerW pixels, public font/text overrides, missing-glyph refusal preserving the committed frame, hide/resume, restart without source HWPK, 50 text/image retirements and original page/native budgets. Requires copied HERTZ_DESKTOP_BIN, matching HERTZ_DESKTOP_BUILD_RECEIPT, new HERTZ_FONT_TEXT_NATIVE_OUTPUT and PLAYWRIGHT_MODULE. Serial GUI; existing user hosts are preserved. Pending-load/Close-failure injection, cross-device qualification and full A04 scope remain separate evidence."
+    },
+    {
+      "script": "check-wallpaper-text-raster-browser.js",
+      "purpose": "Actual Rust PreparedComposition text/font facts in the shipped GL page: exact pinned bytes, blocked font first-frame/layout refusal, shared FontFace/raster under native page caps, 100 unchanged updates and final Face/canvas retirement. Requires a fixture emitted by the original composition planner tests via HERTZ_TEXT_RASTER_FIXTURE and PLAYWRIGHT_MODULE. Internal testing qualifiers and headless browser integration do not confer Windows FontFace, Apply or device qualification."
+    },
+    {
+      "script": "check-wallpaper-font-native.js",
+      "purpose": "Isolated Windows font preparation with a copied successful source/binary receipt: licensed immutable package, real WebView2 FontFace and glyph evidence, original qualification cache, missing glyph refusal before probe, held native Close cancellation, pending-request cancellation/deadline with late settlement, and 50 preparation retirements against the original CPU/GPU baseline. Uses HERTZ_DESKTOP_BIN, HERTZ_DESKTOP_BUILD_RECEIPT, HERTZ_FONT_NATIVE_OUTPUT and PLAYWRIGHT_MODULE; serial GUI, preserves existing hosts. Composition text/raster/pool/Apply and additional devices remain separate acceptance."
+    },
+    {
       "script": "check-wallpaper-ai-native.js",
       "purpose": "Actual isolated Windows native AI-01 offline catalog and original settings authority: installed works and same-title ambiguity, explicit switch and original Apply journal, exact current target/work first-frame receipts, stale CAS/action and ordinary-pipe authority rejection, unconfirmed lyrics draft isolation and missing-target refusal. Requires a copied HERTZ_DESKTOP_BIN and PLAYWRIGHT_MODULE; serial GUI, refuses an existing standalone host. Provider/fees/pairing/MCP and wider AI/device qualification remain separate."
     },

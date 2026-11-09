@@ -917,6 +917,9 @@ mod tests {
                         Err(error) => panic!("{error}"),
                     }
                 };
+                // Windows inherits the listener's nonblocking mode on accept.
+                // The fixture uses bounded blocking reads after accepting.
+                socket.set_nonblocking(false).unwrap();
                 socket
                     .set_read_timeout(Some(std::time::Duration::from_secs(2)))
                     .unwrap();
@@ -1043,6 +1046,7 @@ mod tests {
             loop {
                 match listener.accept() {
                     Ok((mut socket, _)) => {
+                        socket.set_nonblocking(false).unwrap();
                         socket
                             .set_read_timeout(Some(std::time::Duration::from_secs(2)))
                             .unwrap();

@@ -162,6 +162,56 @@ async function main() {
   scopeB.dispose();leaseB.release();sharedPool.dispose();sharedPool.dispose();
   assert.equal(sharedDisposals,1,'repeated scope/lease/pool teardown cannot double dispose the texture');
   assert.deepEqual(sharedPool.stats(),{poolEntries:0,poolPending:0,poolLeases:0});
+
+  // Forecast shared raster retirement through its font dependency without
+  // crediting either representation while an unrelated consumer survives.
+  const dependencyPool=createResourcePool({contextId:'raster-font-retirement'}), retired=[];
+  const fontIdentity={contentKey:'same-font',adapterId:'font-test',adapterVersion:1};
+  const rasterIdentity={contentKey:'same-raster',adapterId:'raster-test',adapterVersion:1};
+  const fontSpec={load:()=>({retirementCandidates:()=>['font-token']}),releaseValue(){retired.push('font');}};
+  const fontSource=dependencyPool.acquire(fontIdentity,fontSpec);
+  await fontSource.ready;
+  let rasterFont;
+  const rasterSpec={load:async()=>{
+    rasterFont=dependencyPool.acquire(fontIdentity);
+    await rasterFont.ready;
+    return {retirementCandidates:()=>['raster-token'],retirementLeases:()=>[rasterFont]};
+  },releaseValue(){retired.push('raster');rasterFont.release();}};
+  const rasterA=dependencyPool.acquire(rasterIdentity,rasterSpec), rasterB=dependencyPool.acquire(rasterIdentity,rasterSpec);
+  await Promise.all([rasterA.ready,rasterB.ready]);
+  const beforeForecast=dependencyPool.stats();
+  assert.deepEqual(dependencyPool.retirementCandidates([fontSource,rasterA]),[],
+    'a surviving raster consumer prevents raster and dependent font retirement credit');
+  assert.deepEqual(dependencyPool.retirementCandidates([rasterA,rasterB]),['raster-token'],
+    'the direct font source independently protects font credit');
+  assert.deepEqual(new Set(dependencyPool.retirementCandidates([fontSource,rasterA,rasterB,rasterA])),
+    new Set(['font-token','raster-token']),'a complete batch credits each representation once, including its dependency');
+  assert.deepEqual(dependencyPool.stats(),beforeForecast,'forecast does not release or mutate any live lease');
+  assert.deepEqual(retired,[]);
+  const outsideFont=dependencyPool.acquire(fontIdentity);
+  await outsideFont.ready;
+  assert.deepEqual(dependencyPool.retirementCandidates([fontSource,rasterA,rasterB]),['raster-token'],
+    'a font consumer outside the retiring scene blocks dependent font credit');
+  outsideFont.release();fontSource.release();rasterA.release();
+  assert.deepEqual(retired,[],'first text layer exit preserves the remaining raster and FontFace');
+  assert.deepEqual(new Set(dependencyPool.retirementCandidates(rasterB)),new Set(['font-token','raster-token']));
+  rasterB.release();
+  assert.deepEqual(retired,['raster','font'],'pixels retire before the last dependent font');
+  assert.deepEqual(dependencyPool.retirementCandidates([fontSource,rasterA,rasterB]),[],
+    'stale leases cannot credit a replacement generation');
+  assert.deepEqual(dependencyPool.stats(),{poolEntries:0,poolPending:0,poolLeases:0});
+  let settlePending;
+  const pendingFont=dependencyPool.acquire(fontIdentity,{load:()=>new Promise(resolve=>{settlePending=resolve;}),
+    releaseValue(){retired.push('late-font');}});
+  await flush();
+  assert.deepEqual(dependencyPool.retirementCandidates(pendingFont),[],
+    'an unresolved FontFace must retain its reservation through actual settlement');
+  pendingFont.release();
+  assert.deepEqual(dependencyPool.stats(),{poolEntries:0,poolPending:1,poolLeases:0});
+  settlePending({retirementCandidates:()=>['font-token']});await flush();
+  assert.deepEqual(retired,['raster','font','late-font']);
+  assert.deepEqual(dependencyPool.stats(),{poolEntries:0,poolPending:0,poolLeases:0});
+  dependencyPool.dispose();
   console.log('shared resource leases passed: merged load, independent abort, idempotent/stale release, bounded cancellation, late callbacks, native envelope accounting, direct/tree/disposed-scope shared ownership and scope leases');
 }
 main().catch(error=>{console.error(error);process.exitCode=1;});

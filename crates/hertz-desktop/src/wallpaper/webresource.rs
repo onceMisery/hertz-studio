@@ -130,10 +130,14 @@ pub(crate) fn install(
     webview: &wry::WebView,
     proxy: EventLoopProxy<UserEvent>,
 ) -> Result<MediaAccess, String> {
-    install_with_access(webview,proxy,MediaAccess::new())
+    install_with_access(webview, proxy, MediaAccess::new())
 }
 
-pub(crate) fn install_with_access(webview:&wry::WebView,proxy:EventLoopProxy<UserEvent>,access:MediaAccess) -> Result<MediaAccess,String> {
+pub(crate) fn install_with_access(
+    webview: &wry::WebView,
+    proxy: EventLoopProxy<UserEvent>,
+    access: MediaAccess,
+) -> Result<MediaAccess, String> {
     use wry::WebViewExtWindows;
     let controller = webview.controller();
     let core: ICoreWebView2 = unsafe { controller.CoreWebView2() }
@@ -470,6 +474,14 @@ pub(crate) fn complete(id: u64, mut response: PreparedResponse) {
                 permit: None,
             };
         }
+        #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+        if response.stream.is_some()
+            && matches!(&response.outcome, Outcome::Resolved { status: 200 | 206, window: (_, len), path: Some(_), .. } if *len > 0)
+        {
+            if let Some(permit) = &mut response.permit {
+                permit.bind_response_for_test(id, pending.controller);
+            }
+        }
         respond(&pending.args, &pending.environment, response);
         let _ = unsafe { pending.deferral.Complete() };
     }
@@ -490,19 +502,37 @@ fn respond(
     else {
         return;
     };
-    let payload = response.permit.as_ref().and_then(ReadPermit::payload).cloned();
+    #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+    let read_gate = response
+        .permit
+        .as_ref()
+        .and_then(ReadPermit::read_gate_for_test);
+    #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+    let read_response = response
+        .permit
+        .as_ref()
+        .and_then(ReadPermit::native_response_for_test);
+    let payload = response
+        .permit
+        .as_ref()
+        .and_then(ReadPermit::payload)
+        .cloned();
     let stream = if let Some(payload) = payload.filter(|_| window.1 > 0) {
-        response.permit.and_then(|permit| MediaIStream::from_payload(payload, permit, global_pool()).ok())
-    } else { response.stream.and_then(|stream| {
-        MediaIStream::from_file_with_permit(
-            stream,
-            path.unwrap_or_default(),
-            global_pool(),
-            window,
-            response.permit,
-        )
-        .ok()
-    }) };
+        response
+            .permit
+            .and_then(|permit| MediaIStream::from_payload(payload, permit, global_pool()).ok())
+    } else {
+        response.stream.and_then(|stream| {
+            MediaIStream::from_file_with_permit(
+                stream,
+                path.unwrap_or_default(),
+                global_pool(),
+                window,
+                response.permit,
+            )
+            .ok()
+        })
+    };
     if path_is_required(status, window) && stream.is_none() {
         status = 503;
         // 不得用成功的 Content-Length 宣告一个空响应体。
@@ -518,6 +548,13 @@ fn respond(
             )
             .and_then(|response| args.SetResponse(&response))
     };
+    #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+    if let Some(gate) = read_gate {
+        // Binding is the original Pending native request/controller, never probeId.
+        if let Some(response) = read_response {
+            gate.response_assigned(&response, result.is_ok() && stream.is_some());
+        }
+    }
     if let Err(error) = result {
         crate::app::log(&format!("wallpaper media response failed: {error}"));
     }
@@ -552,7 +589,9 @@ fn resolve(work: &Work, cache: &mut VecDeque<CachedMedia>) -> Outcome {
     };
     let head = method.eq_ignore_ascii_case("HEAD");
     if let Some(payload) = work.permit.payload() {
-        if range.is_some() { return error_response(400,cors); }
+        if range.is_some() {
+            return error_response(400, cors);
+        }
         return Outcome::Resolved { status:200,
             headers:format!("Content-Type: application/json\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n{}",payload.len(),cors_headers(cors,false)),
             path:None, window:(0,if head {0} else {payload.len() as u64}) };

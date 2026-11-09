@@ -824,10 +824,9 @@ mod tests {
                 .code(),
             "revision_conflict"
         );
-        assert!(
-            room.submit(0, key(2), Some(room.revision()), Command::Pause)
-                .is_ok()
-        );
+        assert!(room
+            .submit(0, key(2), Some(room.revision()), Command::Pause)
+            .is_ok());
     }
 
     /// 一个未生效已发布计划 + 一个准备中意图占满后，第三条命令 busy。

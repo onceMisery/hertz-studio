@@ -45,19 +45,24 @@ async function api(command, payload = {}, expectedRevision) {
   return receipt.result;
 }
 async function commit(wallpaper) {
+  const baseRevision = stored().revision;
   let draft = await api('wallpaper.draft.create', { kind: 'settings' });
   draft = await api('wallpaper.draft.update', { ...draftRef(draft), operations: [{ kind: 'replaceWallpaper', wallpaper }] });
   const operation = await api('wallpaper.apply', draftRef(draft), draft.baseRevision);
-  assert.equal(operation.saved, true); return operation;
+  assert.equal(operation.saved, true); assert.equal(operation.state, 'committed');
+  assert.equal(operation.configRevision, baseRevision + 1); assert.equal(stored().revision, baseRevision + 1);
+  return operation;
 }
-async function running(selection) {
+async function running(selection, expectedRevision = stored().revision) {
   return until(async () => {
     const state = await status(), targets = state.wallpaper.targets;
+    evidence.lastNativeState = state.wallpaper;
     assert.ok(Array.isArray(targets));
     if (targets.some(target => target.applyError)) throw new Error(JSON.stringify(targets));
     const target = targets.find(target => target.groupId === 'native-composition');
     return target?.firstFrameReady && target.visible && target.session?.frameKind === 'gl'
       && isDeepStrictEqual(target.appliedSelection, selection)
+      && target.appliedRevision === expectedRevision && target.desiredRevision === expectedRevision
       && !target.handoff && !target.candidateLoading && !target.selectionPreparing
       && state.wallpaper.retiringControllers === 0 && state.wallpaper.retirements.length === 0 && state;
   }, 'real native composition first frame');
@@ -91,9 +96,14 @@ async function start() {
   try { const response = await fetch('http://127.0.0.1:' + port + '/json/version', { signal: AbortSignal.timeout(1000) }); assert.equal(response.ok, false, 'CDP port belongs to another browser'); }
   catch (error) { if (error.code === 'ERR_ASSERTION') throw error; }
   fs.mkdirSync(path.join(output, 'probe-inputs'), { recursive: true });
+  // Fixtures use the published canonical defaults, as native Config does.
+  // Exact selection comparison still rejects a different work or revision.
+  const coast = require('../crates/hertz-wallpaper/contracts/catalog.json').scenes.find(scene => scene.id === 'coast');
+  assert.ok(coast);
+  const coastParams = Object.fromEntries(Object.entries(coast.params).map(([key, definition]) => [key, definition.default]));
   const wallpaper = { enabled: true, audioInput: { kind: 'none' }, batteryPolicy: 'pause', pauseOnFullscreen: false,
     pauseOnMaximized: false, applicationRules: [], groups: [{ id: 'native-composition', mode: 'single', displays: [{ kind: 'primary' }],
-      selection: { kind: 'builtin', sceneId: 'coast', stateVersion: 1, params: {} },
+      selection: { kind: 'builtin', sceneId: 'coast', stateVersion: coast.stateVersion, params: coastParams },
       presentation: { fps: 15, quality: 'low', brightness: 1, motion: 1, fit: 'contain', pointer: false }, properties: {} }] };
   const lyrics = { enabled: false, locked: true, layout: 'double', secondary: 'next', fontFamily: 'Segoe UI', fontSize: 32,
     fontWeight: 600, sungColor: '#ffffff', unsungColor: '#ffffff', outlineColor: '#000000', outlineWidth: 1,
@@ -174,25 +184,37 @@ async function main() {
   assert.ok(detail.versions.some(version => version.packageHash === selection.packageHash)); fs.unlinkSync(input);
   mark('actual composition package imports through native preparation and original installed library');
   wallpaper.groups[0].selection = selection;
+  let previousSession = state.wallpaper.targets.find(target => target.groupId === 'native-composition').session.binding.sessionId;
   for (const fit of ['contain', 'cover', 'stretch']) {
     wallpaper.groups[0].presentation.fit = fit; const operation = await commit(wallpaper);
-    state = await running(selection); const page = await renderer(state);
+    state = await running(selection, operation.configRevision); const page = await renderer(state);
     await page.waitForFunction(() => hertzWallpaper.debug().draws >= 3 && hertzWallpaper.debug().stats?.sceneStats?.ready);
     const debug = await page.evaluate(() => hertzWallpaper.debug());
     assert.equal(debug.backend, 'space'); assert.equal(debug.scene, 'composition'); assert.equal(debug.error, null);
     assert.equal(debug.glBudget.contexts, 1); assert.equal(debug.glBudget.error, null);
+    assert.notEqual(debug.session.sessionId, previousSession, 'changed target plan must not borrow the old session first frame');
+    previousSession = debug.session.sessionId;
+    const projection = await page.evaluate(async () => {
+      const response = await fetch(window.__hertzWallpaperGlAllocation.compositionUrl, { cache: 'no-store' });
+      if (!response.ok) throw new Error('Current native projection unavailable');
+      return response.json();
+    });
+    assert.equal(projection.sessionId, debug.session.sessionId); assert.equal(projection.generation, debug.session.generation);
+    assert.equal(projection.target.fit, fit, 'exact current native target must use the just-committed fit');
     assert.equal(debug.stats.sceneStats.nodes, 3); assert.equal(debug.stats.sceneStats.videoClocks.length, 1, 'same media domain shares one decoder');
     assert.equal(debug.stats.sceneStats.linearOutputPasses, 1); assert.equal(state.wallpaper.budget.decoderSlots, 1);
     const windows = inspectWindows(); assert.equal(windows.length, 1);
     assert.equal(windows[0].pid, child.pid); assert.equal(windows[0].parentClass, 'WorkerW'); assert.equal(windows[0].visible, true);
     await page.screenshot({ path: path.join(output, 'native-' + fit + '.png') });
-    evidence[fit] = { operation, status: state, debug, windows };
+    evidence[fit] = { operation, status: state, debug, projection, windows };
     mark(fit + ': real native first frame, one WorkerW surface/context and one shared video clock');
   }
   const page = await renderer(state);
   await page.evaluate(() => hertzWallpaper.stop());
   await delay(200); const paused = await page.evaluate(() => hertzWallpaper.debug()); await delay(350);
   const still = await page.evaluate(() => hertzWallpaper.debug());
+  assert.equal(paused.stats.sceneStats.videoClocks.length, 1);
+  assert(paused.stats.sceneStats.videoClocks.every(video => video.paused && !video.seeking && video.seekReady));
   assert.equal(still.draws, paused.draws); assert.equal(still.sceneTime, paused.sceneTime);
   assert.deepEqual(still.stats.sceneStats.videoClocks, paused.stats.sceneStats.videoClocks);
   await page.evaluate(() => hertzWallpaper.start(15));
@@ -212,13 +234,18 @@ async function main() {
 }
 main().catch(async error => {
   errors.push(error.stack); process.exitCode = 1;
+  if (browser) evidence.pageDiagnostics = await Promise.all(pages().map(async page => ({ url: page.url(),
+    state: await page.evaluate(() => window.hertzWallpaper?.debug()).catch(error => ({ error: error.message })) })));
   if (settings) await settings.screenshot({ path: path.join(output, 'failure.png'), fullPage: true }).catch(() => {});
 }).finally(async () => {
   if (browser) await browser.close().catch(() => {});
   if (child && child.exitCode === null && child.signalCode === null) {
-    child.kill(); const end = Date.now() + 5000;
+    try { child.kill(); } catch (error) { errors.push('Owned host termination failed: ' + error.message); }
+    const end = Date.now() + 5000;
     while (child.exitCode === null && child.signalCode === null && Date.now() < end) await delay(100);
+    if (child.exitCode === null && child.signalCode === null) errors.push('Owned host exit was not confirmed within five seconds');
   }
+  if (errors.length) process.exitCode = 1;
   evidence.exit = child ? { code: child.exitCode, signal: child.signalCode, cleanup: 'owned host termination after resource verification' } : null;
   fs.mkdirSync(output, { recursive: true });
   fs.writeFileSync(path.join(output, 'report.json'), JSON.stringify({ passed: errors.length === 0, checks, errors, evidence,

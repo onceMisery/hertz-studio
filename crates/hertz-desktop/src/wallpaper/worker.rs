@@ -217,6 +217,7 @@ impl WorkerManager {
         let _active = ACTIVE
             .try_lock()
             .map_err(|_| anyhow::anyhow!("only one Web Worker may be active"))?;
+        webview::initialize_owned_geometry_context()?;
         let version = wry::webview_version().context("installed WebView2 runtime version")?;
         let folder = runtime_folder(&version)?;
         let parent_binary = VerifiedWorker::open(&std::env::current_exe()?, None)?;
@@ -504,11 +505,13 @@ impl WorkerManager {
         evidence["processLifecycle"] = launch.job.observation_evidence().unwrap_or_else(
             |error| serde_json::json!({"error":format!("{error:#}"),"observationIncomplete":true}),
         );
+        evidence["nativeQualificationClean"] = serde_json::json!(launch.job.qualification_clean());
         evidence["passed"] = serde_json::json!(
             result.is_ok()
                 && evidence["exit"]["gracefulTreeExit"] == true
                 && evidence["exit"]["activeProcesses"] == 0
                 && evidence["deadlineTerminatedJob"] == false
+                && evidence["nativeQualificationClean"] == true
         );
         if let Err(error) = result {
             evidence["error"] = serde_json::json!(format!("{error:#}"));

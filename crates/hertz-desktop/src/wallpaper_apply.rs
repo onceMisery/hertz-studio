@@ -134,14 +134,36 @@ fn property_intents_to_validate(
 }
 
 impl App {
-    pub(super) fn begin_ai_wallpaper_apply(&mut self, request: api::Request, authority: crate::wallpaper::ai::Authority,
-        reply:ApiReply, slot:service::Slot) -> JobResult<()> {
+    pub(super) fn begin_ai_wallpaper_apply(
+        &mut self,
+        request: api::Request,
+        authority: crate::wallpaper::ai::Authority,
+        reply: ApiReply,
+        slot: service::Slot,
+    ) -> JobResult<()> {
         self.validate_ai_authority(&authority)?;
-        let mut draft=crate::wallpaper::settings_drafts::Draft::from_committed(authority.binding.settings_session,&self.committed_config);
-        let group=draft.wallpaper.groups.iter_mut().find(|group|group.id==authority.binding.target_group_id)
+        let mut draft = crate::wallpaper::settings_drafts::Draft::from_committed(
+            authority.binding.settings_session,
+            &self.committed_config,
+        );
+        let group = draft
+            .wallpaper
+            .groups
+            .iter_mut()
+            .find(|group| group.id == authority.binding.target_group_id)
             .ok_or_else(crate::wallpaper::ai::stale)?;
-        group.selection=crate::wallpaper::config::Selection::Package {work_key:authority.action.work_key.clone(),package_hash:authority.action.package_hash.clone()};
-        self.begin_wallpaper_apply_snapshot(request,authority.binding.settings_session,draft,reply,slot,Some(authority))
+        group.selection = crate::wallpaper::config::Selection::Package {
+            work_key: authority.action.work_key.clone(),
+            package_hash: authority.action.package_hash.clone(),
+        };
+        self.begin_wallpaper_apply_snapshot(
+            request,
+            authority.binding.settings_session,
+            draft,
+            reply,
+            slot,
+            Some(authority),
+        )
     }
 
     pub(super) fn begin_wallpaper_apply(
@@ -175,21 +197,39 @@ impl App {
         if self.position_edit.is_some() || self.save_due.is_some() {
             return Err(JobError::new("conflict", "请先完成当前设置修改"));
         }
-        if draft.lyrics.locked && self.tray.is_none() {
+        if draft.lyrics.locked && !self.can_lock_lyrics() {
             return Err(JobError::new(
                 "tray_unavailable",
                 "托盘不可用，暂时无法锁定歌词",
             ));
         }
-        self.begin_wallpaper_apply_snapshot(request,owner,draft,reply,slot,None)
+        self.begin_wallpaper_apply_snapshot(request, owner, draft, reply, slot, None)
     }
 
-    fn begin_wallpaper_apply_snapshot(&mut self, request:api::Request, owner:u64, draft:crate::wallpaper::settings_drafts::Draft,
-        reply:ApiReply, slot:service::Slot, ai:Option<crate::wallpaper::ai::Authority>) -> JobResult<()> {
-        if self.wallpaper_apply.is_some() || self.playlist_writes>0 || self.library_delete.is_some() {
-            return Err(JobError::new("budget_busy","原设置保存、作品删除或轮播事务正在进行"));
+    fn begin_wallpaper_apply_snapshot(
+        &mut self,
+        request: api::Request,
+        owner: u64,
+        draft: crate::wallpaper::settings_drafts::Draft,
+        reply: ApiReply,
+        slot: service::Slot,
+        ai: Option<crate::wallpaper::ai::Authority>,
+    ) -> JobResult<()> {
+        if self.wallpaper_apply.is_some()
+            || self.playlist_writes > 0
+            || self.library_delete.is_some()
+        {
+            return Err(JobError::new(
+                "budget_busy",
+                "原设置保存、作品删除或轮播事务正在进行",
+            ));
         }
-        draft.check_apply(request.expected_revision.ok_or_else(||JobError::invalid_input("缺少配置修订"))?, &self.config)?;
+        draft.check_apply(
+            request
+                .expected_revision
+                .ok_or_else(|| JobError::invalid_input("缺少配置修订"))?,
+            &self.config,
+        )?;
         let plan = checked_plan(&draft.wallpaper)?;
         let preserve_failed_playback =
             only_window_policy_changed(&self.config.wallpaper, &draft.wallpaper);
@@ -247,17 +287,19 @@ impl App {
         let Some(transaction) = self.wallpaper_apply.as_ref() else {
             return;
         };
-        let source_valid = if let Some(authority)=transaction.ai.as_ref() {
+        let source_valid = if let Some(authority) = transaction.ai.as_ref() {
             self.validate_ai_authority(authority).is_ok()
-        } else { self
-            .settings_drafts
-            .get(
-                transaction.owner,
-                &transaction.draft.id,
-                transaction.draft.revision,
-            )
-            .is_ok() };
-        let valid = source_valid && transaction
+        } else {
+            self.settings_drafts
+                .get(
+                    transaction.owner,
+                    &transaction.draft.id,
+                    transaction.draft.revision,
+                )
+                .is_ok()
+        };
+        let valid = source_valid
+            && transaction
                 .draft
                 .check_apply(
                     transaction
@@ -444,7 +486,7 @@ impl App {
                         .then_some(configuration.main().displays.len()),
                     resume,
                     properties: configuration.main().properties.clone(),
-                composition_fit: Some(configuration.presentation().fit),
+                    composition_fit: Some(configuration.presentation().fit),
                 },
                 Arc::clone(&transaction.cancel),
                 slot,
@@ -461,21 +503,42 @@ impl App {
             self.wallpaper_apply = Some(transaction);
             return;
         }
-        if let Some(authority)=transaction.ai.clone().filter(|_| !transaction.ai_rechecked) {
-            let slot=match transaction.initial_slot.take().map(Ok).unwrap_or_else(||self.wallpaper_library.reserve()) {
-                Ok(slot)=>slot,Err(_)=>{self.wallpaper_apply=Some(transaction);return;}
+        if let Some(authority) = transaction.ai.clone().filter(|_| !transaction.ai_rechecked) {
+            let slot = match transaction
+                .initial_slot
+                .take()
+                .map(Ok)
+                .unwrap_or_else(|| self.wallpaper_library.reserve())
+            {
+                Ok(slot) => slot,
+                Err(_) => {
+                    self.wallpaper_apply = Some(transaction);
+                    return;
+                }
             };
-            self.wallpaper_generation+=1;
-            let id=self.wallpaper_generation;let proxy=self.proxy.clone();
-            if let Err(error)=self.wallpaper_library.revalidate_ai(authority,Arc::clone(&transaction.cancel),slot,
-                move|result|{let _=proxy.send_event(UserEvent::WallpaperApplyLayouts(id,result));}) {
-                self.finish_wallpaper_apply(transaction,Err(error));return;
+            self.wallpaper_generation += 1;
+            let id = self.wallpaper_generation;
+            let proxy = self.proxy.clone();
+            if let Err(error) = self.wallpaper_library.revalidate_ai(
+                authority,
+                Arc::clone(&transaction.cancel),
+                slot,
+                move |result| {
+                    let _ = proxy.send_event(UserEvent::WallpaperApplyLayouts(id, result));
+                },
+            ) {
+                self.finish_wallpaper_apply(transaction, Err(error));
+                return;
             }
-            transaction.layout_task=Some(id);transaction.ai_recheck_pending=true;
-            self.wallpaper_apply=Some(transaction);return;
+            transaction.layout_task = Some(id);
+            transaction.ai_recheck_pending = true;
+            self.wallpaper_apply = Some(transaction);
+            return;
         }
         let result = (|| {
-            if let Some(authority)=transaction.ai.as_ref() { self.validate_ai_authority(authority)?; }
+            if let Some(authority) = transaction.ai.as_ref() {
+                self.validate_ai_authority(authority)?;
+            }
             transaction.draft.check_apply(
                 transaction
                     .request
@@ -497,7 +560,11 @@ impl App {
                 caller_sid: crate::config_journal::caller_sid()
                     .map_err(|error| JobError::new("identity_unavailable", error.to_string()))?,
             };
-            let mut next = if transaction.ai.is_some() { self.committed_config.clone() } else { self.config.clone() };
+            let mut next = if transaction.ai.is_some() {
+                self.committed_config.clone()
+            } else {
+                self.config.clone()
+            };
             next.wallpaper = transaction.draft.wallpaper.clone();
             next.lyrics = transaction.draft.lyrics.clone();
             config::commit_request(&mut self.config, next, &intent).map_err(|error| {
@@ -534,13 +601,25 @@ impl App {
                         .monitor();
                     self.with_desktop(&key, |app| app.install_resolved_plan(resolved, monitor));
                 }
-                let preserved_drafts=transaction.ai.as_ref().map(|_|std::mem::take(&mut self.settings_drafts));
+                let preserved_drafts = transaction
+                    .ai
+                    .as_ref()
+                    .map(|_| std::mem::take(&mut self.settings_drafts));
                 let run_error = self
                     .apply_saved_wallpaper_settings(transaction.draft.wallpaper.clone(), target)
                     .err()
                     .or_else(|| reconcile_error.map(|error| error.to_string()));
-                if let Some(drafts)=preserved_drafts { self.settings_drafts=drafts; }
-                self.send_settings_status(run_error.as_deref(), Some(if transaction.ai.is_some() {"已切换壁纸（设置草稿保留）"} else {"已应用"}));
+                if let Some(drafts) = preserved_drafts {
+                    self.settings_drafts = drafts;
+                }
+                self.send_settings_status(
+                    run_error.as_deref(),
+                    Some(if transaction.ai.is_some() {
+                        "已切换壁纸（设置草稿保留）"
+                    } else {
+                        "已应用"
+                    }),
+                );
                 let receipt = if operation.state == crate::config_journal::State::Pending {
                     Err(JobError::new(
                         "operation_pending",
@@ -586,8 +665,13 @@ impl App {
         }
         match result {
             Ok(()) => {
-                if transaction.ai_recheck_pending { transaction.ai_recheck_pending=false;transaction.ai_rechecked=true; }
-                else { transaction.layouts.clear();transaction.properties.clear(); }
+                if transaction.ai_recheck_pending {
+                    transaction.ai_recheck_pending = false;
+                    transaction.ai_rechecked = true;
+                } else {
+                    transaction.layouts.clear();
+                    transaction.properties.clear();
+                }
             }
             Err(error) if error.code == "budget_busy" => {
                 self.wallpaper_apply = Some(transaction);
@@ -652,16 +736,22 @@ impl App {
         transaction: ApplyTransaction,
         result: JobResult<serde_json::Value>,
     ) {
-        let progress=transaction.ai.as_ref().map(|authority|self.finish_ai_receipt(authority,&result));
+        let progress = transaction
+            .ai
+            .as_ref()
+            .map(|authority| self.finish_ai_receipt(authority, &result));
         let mut receipt = api::response(Some(&transaction.request.request_id), result, None);
-        if let Some(progress)=progress {
-            receipt["ai"]=progress.clone();
-            if let Some(settings)=self.settings.as_ref() {
-                if progress["saved"]==true && progress["phase"]!="saved" {
-                    let mut saved=progress.clone();saved["phase"]="saved".into();
+        if let Some(progress) = progress {
+            receipt["ai"] = progress.clone();
+            if let Some(settings) = self.settings.as_ref() {
+                if progress["saved"] == true && progress["phase"] != "saved" {
+                    let mut saved = progress.clone();
+                    saved["phase"] = "saved".into();
                     settings.eval(&format!("window.hertzWallpaperAI && window.hertzWallpaperAI.applyProgress({saved});"));
                 }
-                settings.eval(&format!("window.hertzWallpaperAI && window.hertzWallpaperAI.applyProgress({progress});"));
+                settings.eval(&format!(
+                    "window.hertzWallpaperAI && window.hertzWallpaperAI.applyProgress({progress});"
+                ));
             }
         }
         receipt["configRevision"] = receipt["result"]["configRevision"]

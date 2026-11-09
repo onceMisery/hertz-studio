@@ -80,6 +80,9 @@ base64 = { workspace = true }
 png = "0.18.1"
 image = { version = "=0.25.10", default-features = false, features = ["jpeg", "png", "webp"] }
 moxcms = "=0.8.1"
+# Static single-face SFNT structure/cmap validation; MIT OR Apache-2.0.
+# Native shaping stays with FontFace; this parser must not dispatch gvar/CFF2.
+ttf-parser = { version = "=0.25.1", default-features = false, features = ["std"] }
 zip = { workspace = true }
 # 媒体流的 COM IStream 实现必须与 webview2-com/wry 锁定同一 windows 版本
 # （Cargo.lock 已是 0.62.2），否则接口不互通（设计 §8.1）。

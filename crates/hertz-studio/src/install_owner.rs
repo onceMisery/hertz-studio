@@ -63,7 +63,10 @@ mod tests {
             .to_string()
             .contains("install_recovery_required"));
         std::fs::remove_file(directory.join("hertz-update-incomplete.json")).unwrap();
-        for marker in ["hertz-setup-incomplete.json", "hertz-uninstall-incomplete.json"] {
+        for marker in [
+            "hertz-setup-incomplete.json",
+            "hertz-uninstall-incomplete.json",
+        ] {
             std::fs::write(directory.join(marker), "interrupted").unwrap();
             assert!(InstallOwner::in_directory(&directory)
                 .err()
@@ -129,9 +132,15 @@ impl InstallOwner {
             return Err(error.into());
         }
         let file = unsafe { std::fs::File::from_raw_handle(handle) };
-        for marker in ["hertz-setup-incomplete.json", "hertz-uninstall-incomplete.json"] {
+        for marker in [
+            "hertz-setup-incomplete.json",
+            "hertz-uninstall-incomplete.json",
+        ] {
             if directory.join(marker).try_exists()? {
-                anyhow::bail!("install_recovery_required: 程序安装或卸载未完成，请重新运行安装器完成恢复：{}", directory.display());
+                anyhow::bail!(
+                    "install_recovery_required: 程序安装或卸载未完成，请重新运行安装器完成恢复：{}",
+                    directory.display()
+                );
             }
         }
         if directory

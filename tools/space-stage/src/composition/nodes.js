@@ -17,7 +17,7 @@ function waitMedia(element, event, signal, ready) {
 export async function loadResource(THREE, context, requirement, signal, generation, onInvalidate, admissions) {
   const tickets = Object.values(admissions || {}).filter(Boolean);
   let texture = null, image = null, video = null, font = null, buffer = null, released = false;
-  const seekState={target:0,ready:true};
+  const seekState={target:0,ready:true,pending:false};
   const release = () => {
     if (released) return; released = true;
     texture?.dispose();
@@ -37,7 +37,8 @@ export async function loadResource(THREE, context, requirement, signal, generati
       cpu?.commit();
       const family = 'hertz-' + requirement.contentKey.replace(/[^a-zA-Z0-9]/g, '').slice(0, 80);
       font = new FontFace(family, buffer); await font.load(); assertAlive(signal);
-      document.fonts.add(font); return {font,family,release,retirementCandidates:()=>tickets.map(ticket=>ticket.resourceId)};
+      document.fonts.add(font); buffer = null;
+      return {font,family,release,retirementCandidates:()=>tickets.map(ticket=>ticket.resourceId)};
     }
     const decode = admissions?.decode, upload = admissions?.upload;
     if (requirement.kind === 'video') {
@@ -120,34 +121,79 @@ function rectangle(THREE, scope, plan) {
   geometry.setIndex(plan.upload(new THREE.BufferAttribute(new Uint16Array([0,1,2, 0,2,3]), 1)));
   plan.cpuReady(92); return geometry;
 }
-function makeText(THREE, context, scope, spec, font, generation) {
-  const width = spec.textWidth, height = spec.textHeight, ticket = spec.textTicket;
-  let canvas = null, texture = null;
+function drawTextParagraph(ctx, paragraph, width, x, y, lineHeight, signal) {
+  const offsets = [0];
+  for (const character of paragraph) offsets.push(offsets[offsets.length - 1] + character.length);
+  const count = offsets.length - 1;
+  if (!count) { ctx.fillText('', x, y); return y + lineHeight; }
+  for (let start = 0; start < count;) {
+    const remaining = count - start;
+    const fits = length => {
+      assertAlive(signal);
+      return ctx.measureText(paragraph.slice(offsets[start], offsets[start + length])).width <= width;
+    };
+    let low = 0, high = 1;
+    // Shape complete prefixes; repeated full-row shaping per scalar grows
+    // quadratically for long rows and zero-advance directional controls.
+    while (fits(high)) {
+      low = high;
+      if (high === remaining) break;
+      high = Math.min(remaining, high * 2);
+    }
+    while (low + 1 < high) {
+      const middle = low + Math.floor((high - low) / 2);
+      if (fits(middle)) low = middle;
+      else high = middle;
+    }
+    // A single overwide glyph keeps the original clipping behavior. Every
+    // longer accepted prefix was actually measured with this loaded FontFace.
+    const length = Math.max(1, low);
+    assertAlive(signal);
+    ctx.fillText(paragraph.slice(offsets[start], offsets[start + length]), x, y);
+    start += length; y += lineHeight;
+  }
+  return y;
+}
+export async function loadTextRaster(THREE, context, requirement, signal, generation, ticket) {
+  let canvas = null, texture = null, fontLease = null, released = false;
+  const release = () => {
+    if (released) return; released = true;
+    texture?.dispose();
+    if (canvas) canvas.width = canvas.height = 0;
+    // A cached raster is a font consumer independently of the scene's source
+    // lease. Retire its pixels before the final dependent Face can disappear.
+    fontLease?.release(); releaseTicket(ticket);
+  };
   try {
-    canvas = document.createElement('canvas'); canvas.width = width; canvas.height = height;
+    assertAlive(signal);
+    if (!context.pool.has(requirement.fontRequirement.identity))
+      throw new Error('composition-font-preparation-required');
+    fontLease = context.pool.acquire(requirement.fontRequirement.identity, { signal, generation });
+    if (!fontLease) throw new Error('composition-font-preparation-required');
+    const font = await fontLease.ready; assertAlive(signal);
+    if (!font?.family || font.font?.status !== 'loaded') throw new Error('composition-font-preparation-required');
+    canvas = document.createElement('canvas'); canvas.width = requirement.widthPx; canvas.height = requirement.heightPx;
     const ctx = canvas.getContext('2d'); if (!ctx) throw new Error('composition-text-canvas-unavailable');
-    ctx.font = `${spec.number('fontSize')}px "${font.family}"`; ctx.textBaseline = 'top';
-    ctx.fillStyle = spec.constant('color'); ctx.textAlign = spec.constant('align');
-    const text = spec.constant('text'), x = ctx.textAlign === 'center' ? width / 2 : ctx.textAlign === 'right' ? width : 0;
-    const lineHeight = spec.number('fontSize') * spec.number('lineHeight');
+    ctx.scale(requirement.scale, requirement.scale);
+    ctx.font = `${requirement.fontSize}px "${font.family}"`; ctx.textBaseline = 'top';
+    ctx.fillStyle = requirement.color; ctx.textAlign = requirement.align;
+    const width = requirement.logicalWidth;
+    const text = requirement.text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/\t/g, '    ');
+    const x = ctx.textAlign === 'center' ? width / 2 : ctx.textAlign === 'right' ? width : 0;
+    const lineHeight = requirement.fontSize * requirement.lineHeight;
     let y = 0;
     for (const paragraph of text.split('\n')) {
-      let row = '';
-      for (const character of paragraph) {
-        const candidate = row + character;
-        if (row && ctx.measureText(candidate).width > width) { ctx.fillText(row, x, y); y += lineHeight; row = character; }
-        else row = candidate;
-      }
-      ctx.fillText(row, x, y); y += lineHeight;
+      y = drawTextParagraph(ctx, paragraph, width, x, y, lineHeight, signal);
     }
-    texture = scope.track(new THREE.CanvasTexture(canvas)); texture.colorSpace = THREE.SRGBColorSpace;
-    texture.generateMipmaps = false; texture.minFilter = THREE.LinearFilter;
-    ticket?.materialize({ canvases: 1, drawingBufferPixels: width * height, ownedCpuBytes: width * height * 4 });
+    texture = context.pool.markOwned(new THREE.CanvasTexture(canvas)); texture.colorSpace = THREE.SRGBColorSpace;
+    texture.generateMipmaps = false; texture.minFilter = THREE.LinearFilter; texture.magFilter = THREE.LinearFilter;
+    texture.premultiplyAlpha = false;
+    const pixels = requirement.widthPx * requirement.heightPx;
+    ticket?.materialize({ canvases: 1, drawingBufferPixels: pixels, ownedCpuBytes: pixels * 4, textureDeclaredBytes: pixels * 4 });
     texture.onUpdate = () => ticket?.commit();
-    const disposeTexture=texture.dispose.bind(texture);
-    texture.dispose=() => { disposeTexture(); canvas.width=canvas.height=0; releaseTicket(ticket); };
-    spec.claimTextTicket?.(); return texture;
-  } catch (error) { texture?.dispose(); if (canvas) canvas.width = canvas.height = 0; releaseTicket(ticket); throw error; }
+    return {texture, canvas, release, retirementCandidates: () => ticket ? [ticket.resourceId] : [],
+      retirementLeases: () => fontLease ? [fontLease] : []};
+  } catch (error) { release(); throw error; }
 }
 function seedValues(seed, count) {
   const result = new Float32Array(count * 2); let state = seed >>> 0;
@@ -159,7 +205,10 @@ function seedValues(seed, count) {
 export function buildNode(THREE, context, scope, spec, assets, generation) {
   if (spec.node.nodeType === 'group') return { object: new THREE.Group(), spec, opacity: 1 };
   let texture = assets.asset?.texture || assets.spriteAsset?.texture || null;
-  if (spec.node.nodeType === 'text') texture = makeText(THREE, context, scope, spec, assets.fontAsset, generation);
+  if (spec.node.nodeType === 'text') {
+    texture = spec.textRasterLease?.texture;
+    if (!texture) throw new Error('composition-text-raster-preparation-required');
+  }
   const mat = scope.track(material(THREE, spec, texture, assets.maskAsset?.texture));
   if (spec.node.nodeType === 'particles') {
     const geometry = scope.track(new THREE.BufferGeometry()), count = spec.count;

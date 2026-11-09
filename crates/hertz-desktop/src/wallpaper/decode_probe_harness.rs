@@ -36,11 +36,17 @@ pub(crate) fn command(body: &str, proxy: EventLoopProxy<UserEvent>) {
         #[serde(default)]
         block_close: bool,
         #[serde(default)]
+        hold_font_ready: bool,
+        #[serde(default)]
+        hold_font_read_ms: Option<u32>,
+        #[serde(default)]
         content_capacity_bytes: Option<u64>,
         #[serde(default)]
         image_target: Option<super::super::image_prepare::ImageTarget>,
         #[serde(default)]
         reference: Option<super::super::target_planner::AssetRef>,
+        #[serde(default)]
+        font_text: Option<String>,
     }
     let Ok(command) = serde_json::from_str::<Command>(body) else {
         return;
@@ -58,6 +64,18 @@ pub(crate) fn command(body: &str, proxy: EventLoopProxy<UserEvent>) {
     let send = move |value| {
         let _ = reply_proxy.send_event(UserEvent::WallpaperProbeTestResult(command.nonce, value));
     };
+    if command.hold_font_read_ms.is_some_and(|milliseconds| {
+        command.action != "prepare-font"
+            || !command.force_probe
+            || !command.hold_font_ready
+            || !command.block_close
+            || !(super::super::istream::read_probe::MIN_HOLD_MS
+                ..=super::super::istream::read_probe::MAX_HOLD_MS)
+                .contains(&milliseconds)
+    }) {
+        send(serde_json::json!({"error":"invalid_input"}));
+        return;
+    }
     let mut guard = state().lock().unwrap();
     match command.action.as_str() {
         "cancel" => {
@@ -87,7 +105,7 @@ pub(crate) fn command(body: &str, proxy: EventLoopProxy<UserEvent>) {
             }
             send(serde_json::json!({"held": false}));
         }
-        "begin" | "prepare" | "resolve" if !guard.running => {
+        "begin" | "prepare" | "prepare-font" | "resolve" if !guard.running => {
             guard.running = true;
             drop(guard);
             std::thread::spawn(move || {
@@ -105,7 +123,9 @@ pub(crate) fn command(body: &str, proxy: EventLoopProxy<UserEvent>) {
                     let probe = ProbeClient::native(proxy.clone())
                         .suppress_frames_for_test(command.suppress_frames)
                         .force_probe_for_test(command.force_probe)
-                        .block_close_for_test(command.block_close);
+                        .block_close_for_test(command.block_close)
+                        .hold_font_ready_for_test(command.hold_font_ready)
+                        .hold_font_read_for_test(command.hold_font_read_ms);
                     if command.action == "resolve" {
                         let reference = command.reference.as_ref().ok_or_else(|| JobError::invalid_input("缺少 AssetRef"))?;
                         let target = command.image_target.ok_or_else(|| JobError::invalid_input("缺少目标"))?;
@@ -132,20 +152,40 @@ pub(crate) fn command(body: &str, proxy: EventLoopProxy<UserEvent>) {
                             }
                         });
                     }
+                    let font_request = if command.action == "prepare-font" {
+                        let reference = command.reference.as_ref().ok_or_else(|| JobError::invalid_input("缺少字体 AssetRef"))?;
+                        let text = command.font_text.as_ref().ok_or_else(|| JobError::invalid_input("缺少字体检查文本"))?;
+                        if text.encode_utf16().count() > 4096 {
+                            return Err(JobError::invalid_input("字体检查文本超过上限"));
+                        }
+                        let package = assets.read_installed_manifest(&reference.package_hash)?;
+                        let asset = package.manifest.assets.iter().find(|asset| asset.id == reference.asset_id)
+                            .ok_or_else(|| JobError::invalid_input("字体资源不存在"))?;
+                        let entry = package.entries.iter().find(|entry| entry.path == asset.source)
+                            .ok_or_else(|| JobError::invalid_input("字体条目不存在"))?;
+                        Some(super::super::jobs::FontPrepareRequest {
+                            reference: reference.clone(), expected_entry: entry.clone(),
+                            required_texts: vec![super::super::font_prepare::RequiredText { node_id: "probe-text".into(), text: text.clone() }],
+                        })
+                    } else { None };
                     let jobs = Arc::new(ImportJobs::start(library, assets, probe.clone()));
                     state().lock().unwrap().jobs = Some(Arc::clone(&jobs));
-                    if command.action == "prepare" {
+                    let font_reply = if let Some(request) = font_request {
+                        Some(jobs.prepare_font(command.name.clone(), request)?.1)
+                    } else if command.action == "prepare" {
                         jobs.prepare_asset(command.name.clone(), super::super::target_planner::PrepareRequest {
                             reference: command.reference.ok_or_else(|| JobError::invalid_input("缺少 AssetRef"))?,
                             target: command.image_target.ok_or_else(|| JobError::invalid_input("缺少目标"))?,
                         })?;
+                        None
                     } else {
                         jobs.submit_for_target(
                             command.name.clone(),
                             base.join("probe-inputs").join(format!("{}.hwpkg", command.name)),
                             command.image_target,
                         )?;
-                    }
+                        None
+                    };
                     loop {
                         if let Some(status) = jobs.status(&command.name) {
                             if matches!(
@@ -156,6 +196,21 @@ pub(crate) fn command(body: &str, proxy: EventLoopProxy<UserEvent>) {
                                 let (hits, runs) = probe.stats();
                                 value["cacheHits"] = serde_json::json!(hits);
                                 value["probeRuns"] = serde_json::json!(runs);
+                                if let Some(reply) = font_reply {
+                                    match reply.await.map_err(|_| JobError::new("probe_inconclusive", "字体任务回执丢失"))? {
+                                        Ok(font) => {
+                                            value["preparedFont"] = serde_json::json!({"reference":font.reference(),
+                                                "contentKey":font.content_key(),"url":font.url(),
+                                                "metadata":font.input().metadata,"adapterId":font.adapter_id(),
+                                                "adapterVersion":font.adapter_version()});
+                                        }
+                                        Err(error) => value["fontError"] = serde_json::json!({"code":error.code,
+                                            "message":error.message,"details":error.details}),
+                                    }
+                                }
+                                if let Some(snapshot) = probe.held_read_snapshot_for_test() {
+                                    value["heldIstreamRead"] = serde_json::to_value(snapshot).unwrap();
+                                }
                                 return Ok::<_, JobError>(value);
                             }
                         }
@@ -174,6 +229,8 @@ pub(crate) fn command(body: &str, proxy: EventLoopProxy<UserEvent>) {
                 value["decoderSlots"] = serde_json::json!(usage.decoder_slots);
                 value["prepareTasks"] = serde_json::json!(usage.prepare_tasks);
                 value["prepareCpuBytes"] = serde_json::json!(usage.prepare_cpu_bytes);
+                value["cpuBytes"] = serde_json::json!(usage.cpu_bytes);
+                value["gpuBytes"] = serde_json::json!(usage.gpu_bytes);
                 send(value);
             });
         }

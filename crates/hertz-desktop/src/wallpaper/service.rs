@@ -58,7 +58,7 @@ enum Work {
         cancel: Arc<AtomicBool>,
         reply: Box<dyn FnOnce(Result<(), JobError>) + Send>,
         slot: Slot,
-        ai: Option<super::ai::Authority>,
+        ai: Option<Box<super::ai::Authority>>,
     },
 }
 struct ResolveCall {
@@ -409,7 +409,7 @@ impl LibraryService {
                                                 let runtime = tokio::runtime::Handle::current();
                                                 tokio::task::spawn_blocking(move || {
                                                     runtime.block_on(async {
-                                                        if let Some(authority) = ai.as_ref() { super::ai::revalidate(&jobs, authority).await?; }
+                                                        if let Some(authority) = ai.as_deref() { super::ai::revalidate(&jobs, authority).await?; }
                                                         if !selections.is_empty() {
                                                             super::selection_plan::validate_mirror_layouts(&jobs, selections, &cancel).await?;
                                                         }
@@ -447,16 +447,39 @@ impl LibraryService {
         self.state.output_tokens.set_owner(owner);
     }
 
-    pub(crate) fn recommend_ai(&self, brief: String, context: super::ai::CatalogContext,
-        reply: impl FnOnce(Result<super::ai::Catalog, JobError>) + Send + 'static) -> Result<(), JobError> {
+    pub(crate) fn recommend_ai(
+        &self,
+        brief: String,
+        context: super::ai::CatalogContext,
+        reply: impl FnOnce(Result<super::ai::Catalog, JobError>) + Send + 'static,
+    ) -> Result<(), JobError> {
         let slot = self.reserve()?;
-        self.tx.try_send(Work::AiCatalog {brief, context, reply: Box::new(reply), slot})
+        self.tx
+            .try_send(Work::AiCatalog {
+                brief,
+                context,
+                reply: Box::new(reply),
+                slot,
+            })
             .map_err(|_| JobError::new("budget_busy", "原壁纸管理队列暂不可用"))
     }
 
-    pub(crate) fn revalidate_ai(&self, authority: super::ai::Authority, cancel: Arc<AtomicBool>, slot: Slot,
-        reply: impl FnOnce(Result<(), JobError>) + Send + 'static) -> Result<(), JobError> {
-        self.tx.try_send(Work::ValidateMirrorLayouts { selections: vec![], properties: vec![], cancel, reply:Box::new(reply), slot, ai:Some(authority) })
+    pub(crate) fn revalidate_ai(
+        &self,
+        authority: super::ai::Authority,
+        cancel: Arc<AtomicBool>,
+        slot: Slot,
+        reply: impl FnOnce(Result<(), JobError>) + Send + 'static,
+    ) -> Result<(), JobError> {
+        self.tx
+            .try_send(Work::ValidateMirrorLayouts {
+                selections: vec![],
+                properties: vec![],
+                cancel,
+                reply: Box::new(reply),
+                slot,
+                ai: Some(Box::new(authority)),
+            })
             .map_err(|_| JobError::new("budget_busy", "原壁纸管理队列暂不可用"))
     }
 
@@ -1510,7 +1533,12 @@ impl State {
                 if command.is_none()
                     || matches!(
                         command.as_deref(),
-                        Some("wallpaper.apply" | "config.commit" | "wallpaper.ai.recommend" | "wallpaper.ai.confirm")
+                        Some(
+                            "wallpaper.apply"
+                                | "config.commit"
+                                | "wallpaper.ai.recommend"
+                                | "wallpaper.ai.confirm"
+                        )
                     )
                 {
                     let directory = self.base.clone();

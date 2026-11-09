@@ -462,6 +462,75 @@ struct ObservedProcess {
     image: Option<FileIdentity>,
     physical_exit: bool,
 }
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HeldIdentityReadback {
+    pid: u32,
+    pid_error: Option<i32>,
+    created: Option<u64>,
+    creation_error: Option<i32>,
+}
+impl HeldIdentityReadback {
+    fn capture(handle: HANDLE) -> Self {
+        let pid = unsafe { GetProcessId(handle) };
+        let pid_error = (pid == 0).then(|| std::io::Error::last_os_error().raw_os_error());
+        let mut creation = FILETIME::default();
+        let mut exit = FILETIME::default();
+        let mut kernel = FILETIME::default();
+        let mut user = FILETIME::default();
+        let ok =
+            unsafe { GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user) };
+        let creation_error = (ok == 0).then(|| std::io::Error::last_os_error().raw_os_error());
+        Self {
+            pid,
+            pid_error: pid_error.flatten(),
+            created: (ok != 0).then_some(
+                (u64::from(creation.dwHighDateTime) << 32) | u64::from(creation.dwLowDateTime),
+            ),
+            creation_error: creation_error.flatten(),
+        }
+    }
+}
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HeldWaitReceipt {
+    code: u32,
+    win32_error: Option<i32>,
+    remaining_ms: u32,
+    elapsed_ms: u64,
+    physical_phase_elapsed_ms: u64,
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HeldExitDiagnostic<'a> {
+    stage: &'static str,
+    expected: &'a ProcessIdentity,
+    actual: HeldIdentityReadback,
+    wait: HeldWaitReceipt,
+    job_terminated: bool,
+    fatal_observed: bool,
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ClosePhaseDiagnostic {
+    stage: &'static str,
+    elapsed_ms: u64,
+    remaining_ms: u64,
+    grace_ms: u64,
+    reached_zero: bool,
+    job_terminated: bool,
+    fatal_observed: bool,
+}
+fn diagnostic_millis(duration: Duration) -> u64 {
+    duration.as_millis().min(u64::MAX as u128) as u64
+}
+fn exit_diagnostic_message(prefix: &str, value: &impl Serialize) -> String {
+    // Fixed typed keys, numbers and booleans only; no page/process strings.
+    match serde_json::to_string(value) {
+        Ok(value) => format!("{prefix}: {value}"),
+        Err(_) => format!("{prefix}: diagnostic serialization failed"),
+    }
+}
 #[derive(Default)]
 struct ObservationState {
     // This is the original Job owner's only process table. SDK collections
@@ -469,7 +538,6 @@ struct ObservationState {
     processes: std::collections::HashMap<u32, ObservedProcess>,
     root: Option<ProcessIdentity>,
     runtime: Option<Arc<VerifiedWorker>>,
-    failure: Option<String>,
 }
 struct JobObservation {
     state: Arc<Mutex<ObservationState>>,
@@ -478,8 +546,12 @@ struct JobObservation {
     retirement: Arc<OnceLock<ObserverRetirement>>,
     retired: Arc<OnceLock<std::result::Result<(), String>>>,
     retain_only: Arc<AtomicBool>,
+    fatal: Arc<AtomicBool>,
+    fatal_receipt: Arc<OnceLock<String>>,
     #[cfg(test)]
     test_delay: Arc<ObserverDelay>,
+    #[cfg(test)]
+    test_port: Handle,
 }
 struct ObserverRetirement {
     resources: Mutex<Option<LaunchResources>>,
@@ -493,9 +565,31 @@ struct ObserverDelay {
     before_retirement: AtomicBool,
     reached: AtomicBool,
     release: AtomicBool,
+    after_fatal: AtomicBool,
+    fatal_reached: AtomicBool,
+    fatal_release: AtomicBool,
+    before_cleanup_submission: AtomicBool,
+    caller_reached: AtomicBool,
+    caller_release: AtomicBool,
 }
 #[cfg(test)]
 impl ObserverDelay {
+    fn pause_after_fatal(&self) {
+        if self.after_fatal.load(Ordering::Acquire) {
+            self.fatal_reached.store(true, Ordering::Release);
+            while !self.fatal_release.load(Ordering::Acquire) {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+    }
+    fn pause_caller(&self) {
+        if self.before_cleanup_submission.load(Ordering::Acquire) {
+            self.caller_reached.store(true, Ordering::Release);
+            while !self.caller_release.load(Ordering::Acquire) {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+    }
     fn pause(&self, retirement: bool) {
         let enabled = if retirement {
             &self.before_retirement
@@ -510,6 +604,14 @@ impl ObserverDelay {
         }
     }
 }
+#[derive(Debug)]
+struct ObserverCancelled;
+impl std::fmt::Display for ObserverCancelled {
+    fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        output.write_str("original observer cancelled before table acquisition")
+    }
+}
+impl std::error::Error for ObserverCancelled {}
 fn before_deadline(deadline: Instant, operation: &str) -> Result<()> {
     if Instant::now() >= deadline {
         bail!("{operation} deadline expired");
@@ -538,7 +640,7 @@ fn observer_table<'a>(
 ) -> Result<MutexGuard<'a, ObservationState>> {
     loop {
         if cancel.load(Ordering::Acquire) {
-            bail!("Job observer cancelled before table acquisition");
+            return Err(anyhow::Error::new(ObserverCancelled));
         }
         match state.try_lock() {
             Ok(guard) => return Ok(guard),
@@ -583,6 +685,25 @@ impl JobObservation {
             "associate lifecycle observer before any Job assignment",
         )?;
         let owned_job = job.duplicate(JOB_OBJECT_QUERY | JOB_OBJECT_TERMINATE, false)?;
+        #[cfg(test)]
+        let test_port = {
+            let mut duplicate = null_mut();
+            win(
+                unsafe {
+                    DuplicateHandle(
+                        GetCurrentProcess(),
+                        port.0,
+                        GetCurrentProcess(),
+                        &mut duplicate,
+                        0,
+                        0,
+                        DUPLICATE_SAME_ACCESS,
+                    )
+                },
+                "hold original test IOCP",
+            )?;
+            Handle::new(duplicate, "test IOCP")?
+        };
         let state = Arc::new(Mutex::new(ObservationState::default()));
         let thread_state = state.clone();
         let cancel = Arc::new(AtomicBool::new(false));
@@ -593,6 +714,10 @@ impl JobObservation {
         let thread_retired = retired.clone();
         let retain_only = Arc::new(AtomicBool::new(false));
         let thread_retain_only = retain_only.clone();
+        let fatal = Arc::new(AtomicBool::new(false));
+        let thread_fatal = fatal.clone();
+        let fatal_receipt = Arc::new(OnceLock::new());
+        let thread_fatal_receipt = fatal_receipt.clone();
         #[cfg(test)]
         let test_delay = Arc::new(ObserverDelay::default());
         #[cfg(test)]
@@ -698,14 +823,17 @@ impl JobObservation {
                     Ok(())
                 })();
                 if let Err(error) = result {
-                    if thread_cancel.load(Ordering::Acquire) {
+                    if error.is::<ObserverCancelled>() {
                         break;
                     }
-                    if let Ok(mut state) = thread_state.try_lock() {
-                        state.failure.get_or_insert_with(|| {
-                            format!("{error:#}").chars().take(1024).collect()
-                        });
-                    }
+                    // Publication cannot depend on the process-table lock or
+                    // successful termination. The bit is authoritative even
+                    // while its bounded diagnostic receipt is still pending.
+                    thread_fatal.store(true, Ordering::Release);
+                    let _ =
+                        thread_fatal_receipt.set(format!("{error:#}").chars().take(1024).collect());
+                    #[cfg(test)]
+                    thread_test_delay.pause_after_fatal();
                     if unsafe { TerminateJobObject(observed_job.0, 0x4753) } != 0 {
                         terminated.store(true, Ordering::Release);
                     }
@@ -730,6 +858,9 @@ impl JobObservation {
                 // The same native owner retains the payload while any native
                 // verification or cleanup stalls; failed callers never join it.
                 if retirement.cleanup {
+                    if thread_fatal.load(Ordering::Acquire) {
+                        bail!("fatal original observer cannot clean session resources");
+                    }
                     if thread_retain_only.load(Ordering::Acquire) {
                         bail!("original observer cleanup retained after close failure");
                     }
@@ -742,8 +873,7 @@ impl JobObservation {
                     let mut state = thread_state.try_lock().map_err(|_| {
                         anyhow::anyhow!("Job lifecycle table unavailable at retirement")
                     })?;
-                    if state.failure.is_some() || state.processes.values().any(|p| !p.physical_exit)
-                    {
+                    if state.processes.values().any(|p| !p.physical_exit) {
                         bail!("observer cannot clean resources without complete physical exits");
                     }
                     for process in state.processes.values_mut() {
@@ -778,8 +908,12 @@ impl JobObservation {
             retirement,
             retired,
             retain_only,
+            fatal,
+            fatal_receipt,
             #[cfg(test)]
             test_delay,
+            #[cfg(test)]
+            test_port,
         })
     }
 }
@@ -991,8 +1125,25 @@ impl Job {
     pub fn observation_health(&self) -> Result<()> {
         self.observation_health_before(Instant::now() + Duration::from_millis(100))
     }
+    fn fatal_health(&self) -> Result<()> {
+        if self.observation.fatal.load(Ordering::Acquire) {
+            bail!(
+                "original Job fatal observation: {}",
+                self.observation
+                    .fatal_receipt
+                    .get()
+                    .map(String::as_str)
+                    .unwrap_or("fatal recorded; diagnostic pending")
+            );
+        }
+        Ok(())
+    }
+    pub fn qualification_clean(&self) -> bool {
+        !self.observation.fatal.load(Ordering::Acquire) && !self.terminated.load(Ordering::Acquire)
+    }
     fn observation_health_before(&self, deadline: Instant) -> Result<()> {
         before_deadline(deadline, "Job observation health")?;
+        self.fatal_health()?;
         if self
             .observation
             .thread
@@ -1001,10 +1152,7 @@ impl Job {
         {
             bail!("original Job lifecycle observer stopped");
         }
-        let state = table_before(&self.observation.state, deadline)?;
-        if let Some(error) = &state.failure {
-            bail!("original Job lifecycle observation failed: {error}");
-        }
+        self.fatal_health()?;
         before_deadline(deadline, "Job observation health")
     }
     /// Windows documents Job completion notifications as potentially lost.
@@ -1036,6 +1184,7 @@ impl Job {
                 && actual.iter().all(|pid| state.processes.contains_key(pid))
                 && (!require_exit || (accounting.ActiveProcesses == 0 && new_count == exit_count));
             drop(state);
+            self.fatal_health()?;
             before_deadline(deadline, "Job lifecycle accounting reconciliation")?;
             if matched {
                 return Ok(());
@@ -1102,12 +1251,20 @@ impl Job {
                 "physicalExitSignalled":p.physical_exit || unsafe{WaitForSingleObject(p.held.handle.0,0)}==WAIT_OBJECT_0})
         }).collect::<Vec<_>>();
         processes.sort_by_key(|p| p["identity"]["pid"].as_u64());
+        let fatal = self.observation.fatal.load(Ordering::Acquire);
+        let terminated = self.terminated.load(Ordering::Acquire);
+        let failure = self
+            .observation
+            .fatal_receipt
+            .get()
+            .cloned()
+            .or_else(|| fatal.then(|| "fatal recorded; diagnostic pending".into()));
         before_deadline(deadline, "Job observation evidence")?;
         Ok(
             serde_json::json!({"source":"originalJobCompletionPort","heldObjectLimit":32,
             "totalProcesses":accounting.TotalProcesses,"activeProcesses":accounting.ActiveProcesses,
             "inactiveProcesses":accounting.TotalProcesses.checked_sub(accounting.ActiveProcesses),
-            "failure":state.failure,"processes":processes}),
+            "fatalObserved":fatal,"jobTerminated":terminated,"failure":failure,"processes":processes}),
         )
     }
     #[cfg(test)]
@@ -1117,6 +1274,7 @@ impl Job {
         Ok(())
     }
     fn wait_physical_tree_exit(&self, deadline: Instant) -> Result<bool> {
+        let physical_started = Instant::now();
         // Keep the listener unblocked while active members can create children.
         // A completion EXIT packet is advisory; the retained object's signalled
         // kernel event is the physical-exit authority even for a never-run root.
@@ -1132,18 +1290,48 @@ impl Job {
         }
         let mut state = table_before(&self.observation.state, deadline)?;
         for process in state.processes.values_mut() {
+            self.fatal_health()?;
             before_deadline(deadline, "held process physical exit")?;
             let remaining = deadline
                 .saturating_duration_since(Instant::now())
                 .as_millis()
                 .min(u32::MAX as u128) as u32;
-            if unsafe { WaitForSingleObject(process.held.handle.0, remaining) } != WAIT_OBJECT_0
-                || created(process.held.handle.0)? != process.held.identity.created
+            let wait_started = Instant::now();
+            let wait_code = unsafe { WaitForSingleObject(process.held.handle.0, remaining) };
+            // Save WAIT_FAILED's native error before any identity getter or
+            // other native operation can overwrite this thread's last error.
+            let wait_error = (wait_code == WAIT_FAILED)
+                .then(|| std::io::Error::last_os_error().raw_os_error())
+                .flatten();
+            let wait = HeldWaitReceipt {
+                code: wait_code,
+                win32_error: wait_error,
+                remaining_ms: remaining,
+                elapsed_ms: diagnostic_millis(wait_started.elapsed()),
+                physical_phase_elapsed_ms: diagnostic_millis(physical_started.elapsed()),
+            };
+            let diagnostic = || {
+                exit_diagnostic_message(
+                    "lifecycle-held process physical exit or creation barrier incomplete",
+                    &HeldExitDiagnostic {
+                        stage: "heldProcessPhysicalExit",
+                        expected: &process.held.identity,
+                        actual: HeldIdentityReadback::capture(process.held.handle.0),
+                        wait,
+                        job_terminated: self.terminated.load(Ordering::Acquire),
+                        fatal_observed: self.observation.fatal.load(Ordering::Acquire),
+                    },
+                )
+            };
+            if wait_code != WAIT_OBJECT_0
+                || created(process.held.handle.0).with_context(diagnostic)?
+                    != process.held.identity.created
                 || unsafe { GetProcessId(process.held.handle.0) } != process.held.identity.pid
             {
-                bail!("lifecycle-held process physical exit or creation barrier incomplete");
+                bail!("{}", diagnostic());
             }
             before_deadline(deadline, "held process physical exit")?;
+            self.fatal_health()?;
             process.physical_exit = true;
         }
         drop(state);
@@ -1161,6 +1349,7 @@ impl Job {
     }
     fn retire_before(&mut self, deadline: Instant) -> Result<()> {
         before_deadline(deadline, "original observer retirement")?;
+        self.fatal_health()?;
         self.observation.cancel.store(true, Ordering::Release);
         let thread = self
             .observation
@@ -1176,6 +1365,7 @@ impl Job {
             bail!("original observer did not physically exit before retirement deadline");
         }
         before_deadline(deadline, "original observer retirement")?;
+        self.fatal_health()?;
         self.observation
             .thread
             .take()
@@ -1192,6 +1382,7 @@ impl Job {
             Err(error) => bail!("original observer retirement failed: {error}"),
         }
         before_deadline(deadline, "original observer retirement")?;
+        self.fatal_health()?;
         Ok(())
     }
     pub fn pids(&self) -> Result<Vec<u32>> {
@@ -1226,6 +1417,7 @@ impl Job {
             .map(|pid| u32::try_from(*pid).context("PID overflow"))
             .collect()
     }
+    #[cfg(test)]
     pub fn wait_zero(&self, timeout: Duration) -> Result<bool> {
         self.wait_zero_before(Instant::now() + timeout)
     }
@@ -1732,6 +1924,7 @@ impl Launch {
         exit_deadline: Instant,
         grace: Duration,
     ) -> Result<serde_json::Value> {
+        let close_started = Instant::now();
         before_deadline(exit_deadline, "original Launch close")?;
         self.control_write.take();
         // One overall deadline covers graceful exit, termination, complete
@@ -1743,9 +1936,25 @@ impl Launch {
         if !reached_zero {
             self.job.terminate()?;
         }
-        let completion_messages_complete = self.job.wait_physical_tree_exit(exit_deadline)?;
-        let was_terminated = self.job.terminated.load(Ordering::Acquire);
-        let graceful = reached_zero && !was_terminated && completion_messages_complete;
+        let completion_messages_complete = self
+            .job
+            .wait_physical_tree_exit(exit_deadline)
+            .with_context(|| {
+                exit_diagnostic_message(
+                    "original Launch close phase",
+                    &ClosePhaseDiagnostic {
+                        stage: "physicalTreeExit",
+                        elapsed_ms: diagnostic_millis(close_started.elapsed()),
+                        remaining_ms: diagnostic_millis(
+                            exit_deadline.saturating_duration_since(Instant::now()),
+                        ),
+                        grace_ms: diagnostic_millis(grace),
+                        reached_zero,
+                        job_terminated: self.job.terminated.load(Ordering::Acquire),
+                        fatal_observed: self.job.observation.fatal.load(Ordering::Acquire),
+                    },
+                )
+            })?;
         if unsafe { WaitForSingleObject(self.process.0, 0) } != WAIT_OBJECT_0
             || created(self.process.0)? != self.worker.created
         {
@@ -1757,10 +1966,16 @@ impl Launch {
             unsafe { GetExitCodeProcess(self.process.0, &mut exit) },
             "worker exit code",
         )?;
+        #[cfg(test)]
+        self.job.observation.test_delay.pause_caller();
         before_deadline(exit_deadline, "original Launch close")?;
+        self.job.fatal_health()?;
         self.enqueue_resources(true, Some(exit_deadline))?;
         self.job.retire_before(exit_deadline)?;
         before_deadline(exit_deadline, "original Launch close")?;
+        self.job.fatal_health()?;
+        let was_terminated = self.job.terminated.load(Ordering::Acquire);
+        let graceful = reached_zero && !was_terminated && completion_messages_complete;
         self.closed = true;
         Ok(
             serde_json::json!({"gracefulTreeExit":graceful,"jobTerminated":was_terminated,"activeProcesses":0,"workerExitCode":exit,"profileAndDirectoriesRemoved":true,"completionMessagesComplete":completion_messages_complete,"observerPhysicalExitConfirmed":true,"processLifecycle":lifecycle}),
@@ -1891,6 +2106,68 @@ pub fn validate_bootstrap(bootstrap: &Bootstrap, parent: HANDLE) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn held_exit_failure_diagnostics_are_complete_and_bounded() {
+        let identity = ProcessIdentity {
+            pid: u32::MAX,
+            created: u64::MAX,
+            kind: i32::MIN,
+        };
+        let held = exit_diagnostic_message(
+            "lifecycle-held process physical exit or creation barrier incomplete",
+            &HeldExitDiagnostic {
+                stage: "heldProcessPhysicalExit",
+                expected: &identity,
+                actual: HeldIdentityReadback {
+                    pid: u32::MAX,
+                    pid_error: Some(i32::MIN),
+                    created: Some(u64::MAX),
+                    creation_error: Some(i32::MIN),
+                },
+                wait: HeldWaitReceipt {
+                    code: u32::MAX,
+                    win32_error: Some(i32::MIN),
+                    remaining_ms: u32::MAX,
+                    elapsed_ms: u64::MAX,
+                    physical_phase_elapsed_ms: u64::MAX,
+                },
+                job_terminated: false,
+                fatal_observed: false,
+            },
+        );
+        let close = exit_diagnostic_message(
+            "original Launch close phase",
+            &ClosePhaseDiagnostic {
+                stage: "physicalTreeExit",
+                elapsed_ms: u64::MAX,
+                remaining_ms: u64::MAX,
+                grace_ms: u64::MAX,
+                reached_zero: false,
+                job_terminated: false,
+                fatal_observed: false,
+            },
+        );
+        let combined = format!("{close}: {held}");
+        assert!(
+            combined.len() <= 1024,
+            "diagnostic bytes={}",
+            combined.len()
+        );
+        let value: serde_json::Value = serde_json::from_str(
+            held.strip_prefix(
+                "lifecycle-held process physical exit or creation barrier incomplete: ",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(value["wait"]["code"], u32::MAX);
+        assert_eq!(value["expected"]["created"], u64::MAX);
+        assert_eq!(value["actual"]["created"], u64::MAX);
+        assert_eq!(value["wait"]["win32Error"], i32::MIN);
+        assert_eq!(value["jobTerminated"], false);
+        assert_eq!(diagnostic_millis(Duration::MAX), u64::MAX);
+    }
 
     const FIXTURE_TEST: &str = "wallpaper::worker::sandbox::tests::lifecycle_process_fixture";
     fn save_evidence(name: &str, evidence: &serde_json::Value) {
@@ -2072,6 +2349,189 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
         assert!(unsafe { DeleteAppContainerProfile(wide(name).as_ptr()) } >= 0);
         std::fs::remove_dir_all(output).unwrap();
+    }
+    fn exited_native_launch() -> Launch {
+        // This ordinary native test fixture exercises only the existing close
+        // owner/interleaving. It is never an AppContainer or product admission.
+        let fixture = NativeFixture::suspended("idle");
+        let job = Job::create().unwrap();
+        fixture.admit(&job);
+        fixture.resume();
+        wait_file(&fixture.root.join("root-ready"));
+        fixture.signal("stop-root");
+        job.wait_observed_exit(Instant::now() + Duration::from_secs(3))
+            .unwrap();
+        let worker = job.observation.state.lock().unwrap().root.clone().unwrap();
+        let profile = Profile::create().unwrap();
+        let mut source = VerifiedWorker::open(&std::env::current_exe().unwrap(), None).unwrap();
+        let staged = source.stage(&profile).unwrap();
+        let parent_identity = Handle::new(
+            unsafe {
+                OpenProcess(
+                    PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE,
+                    0,
+                    GetCurrentProcessId(),
+                )
+            },
+            "native test parent",
+        )
+        .unwrap();
+        Launch {
+            resources: Some(LaunchResources {
+                profile,
+                source,
+                staged: Some(staged),
+                process: fixture
+                    .process
+                    .duplicate(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, false)
+                    .unwrap(),
+                thread: fixture.thread.duplicate(SYNCHRONIZE, false).unwrap(),
+                parent_identity,
+                control_read: None,
+                control_write: None,
+                resource_read: None,
+                resource_write: None,
+                token: TokenEvidence {
+                    app_container: false,
+                    sid: "native-close-fixture".into(),
+                    capability_count: 0,
+                },
+                worker,
+            }),
+            job,
+            closed: false,
+            close_started: false,
+        }
+    }
+    fn post_fatal_message(job: &Job) {
+        win(
+            unsafe {
+                windows_sys::Win32::System::IO::PostQueuedCompletionStatus(
+                    job.observation.test_port.0,
+                    JOB_OBJECT_MSG_PROCESS_MEMORY_LIMIT,
+                    JOB_COMPLETION_KEY,
+                    null(),
+                )
+            },
+            "inject message into original native IOCP",
+        )
+        .unwrap();
+    }
+    #[test]
+    fn fatal_receipt_survives_main_table_lock_before_termination() {
+        let mut launch = exited_native_launch();
+        let root = launch.profile.root.clone();
+        let name = launch.profile.name.clone();
+        let delay = launch.job.observation.test_delay.clone();
+        delay.after_fatal.store(true, Ordering::Release);
+        let observer = observer_handle(&launch.job);
+        let state = launch.job.observation.state.clone();
+        let guard = state.lock().unwrap();
+        post_fatal_message(&launch.job);
+        wait_flag(&delay.fatal_reached);
+        assert!(launch.job.observation.fatal.load(Ordering::Acquire));
+        assert!(!launch.job.terminated.load(Ordering::Acquire));
+        let started = Instant::now();
+        let error = launch
+            .job
+            .observation_health_before(started + Duration::from_millis(30))
+            .unwrap_err();
+        assert!(error.to_string().contains("fatal observation"));
+        assert!(started.elapsed() < Duration::from_millis(150));
+        assert!(!launch.job.qualification_clean());
+        drop(guard);
+        let result = launch.close_before(
+            Instant::now() + Duration::from_millis(250),
+            Duration::from_millis(100),
+        );
+        assert!(result.is_err());
+        assert!(root.exists());
+        save_evidence(
+            "fatal-under-table-lock.json",
+            &serde_json::json!({"fatalPublishedWhileTableHeld":true,
+            "terminationStillDelayed":true,"closeRefused":true,"directoriesRetainedBeforeCleanup":true,
+            "observed":launch.job.observation_evidence().unwrap()}),
+        );
+        drop(launch);
+        delay.fatal_release.store(true, Ordering::Release);
+        assert_eq!(
+            unsafe { WaitForSingleObject(observer.0, 3000) },
+            WAIT_OBJECT_0
+        );
+        assert!(root.exists());
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(unsafe { DeleteAppContainerProfile(wide(name).as_ptr()) } >= 0);
+    }
+    #[test]
+    fn fatal_after_completed_snapshot_refuses_fast_close_and_late_cleanup() {
+        let mut launch = exited_native_launch();
+        let root = launch.profile.root.clone();
+        let name = launch.profile.name.clone();
+        let staged = PathBuf::from(&launch.staged.as_ref().unwrap().identity.path);
+        let delay = launch.job.observation.test_delay.clone();
+        delay.after_fatal.store(true, Ordering::Release);
+        delay
+            .before_cleanup_submission
+            .store(true, Ordering::Release);
+        let observer = observer_handle(&launch.job);
+        let port = launch
+            .job
+            .observation
+            .test_port
+            .duplicate(SYNCHRONIZE | 2, false)
+            .unwrap();
+        let state = launch.job.observation.state.clone();
+        let fatal = launch.job.observation.fatal.clone();
+        let terminated = launch.job.terminated.clone();
+        let closer = std::thread::spawn(move || {
+            let result = launch.close_before(
+                Instant::now() + Duration::from_secs(2),
+                Duration::from_millis(100),
+            );
+            (launch, result)
+        });
+        wait_flag(&delay.caller_reached);
+        let guard = state.lock().unwrap();
+        win(
+            unsafe {
+                windows_sys::Win32::System::IO::PostQueuedCompletionStatus(
+                    port.0,
+                    JOB_OBJECT_MSG_PROCESS_MEMORY_LIMIT,
+                    JOB_COMPLETION_KEY,
+                    null(),
+                )
+            },
+            "post fatal after native snapshot",
+        )
+        .unwrap();
+        wait_flag(&delay.fatal_reached);
+        assert!(fatal.load(Ordering::Acquire));
+        assert!(!terminated.load(Ordering::Acquire));
+        drop(guard);
+        delay.caller_release.store(true, Ordering::Release);
+        let (mut launch, result) = closer.join().unwrap();
+        assert!(result.is_err());
+        assert!(launch.close().is_err());
+        assert!(!launch.job.qualification_clean());
+        assert!(root.exists());
+        assert!(OpenOptions::new().write(true).open(&staged).is_err());
+        save_evidence(
+            "fatal-after-native-snapshot.json",
+            &serde_json::json!({"nativeSnapshotCompleteBeforeFatal":true,
+            "fatalReceiptPublished":true,"terminationStillDelayed":true,"fastCloseRefused":true,
+            "lateRetryRefused":true,"directoriesRetainedBeforeCleanup":true,
+            "observed":launch.job.observation_evidence().unwrap()}),
+        );
+        drop(launch);
+        assert_eq!(unsafe { WaitForSingleObject(observer.0, 0) }, WAIT_TIMEOUT);
+        delay.fatal_release.store(true, Ordering::Release);
+        assert_eq!(
+            unsafe { WaitForSingleObject(observer.0, 3000) },
+            WAIT_OBJECT_0
+        );
+        assert!(root.exists());
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(unsafe { DeleteAppContainerProfile(wide(name).as_ptr()) } >= 0);
     }
     #[test]
     fn bounded_close_cannot_wait_on_a_held_lifecycle_lock() {
@@ -2387,8 +2847,12 @@ mod tests {
         let observer = observer_handle(&launch.job);
         // Fail the original native observation seam, then exercise the real
         // explicit-close and unwind path after the actual root has exited.
-        launch.job.observation.state.lock().unwrap().failure =
-            Some("injected lost lifecycle receipt".into());
+        launch.job.observation.fatal.store(true, Ordering::Release);
+        let _ = launch
+            .job
+            .observation
+            .fatal_receipt
+            .set("injected lost lifecycle receipt".into());
         launch.job.terminate().unwrap();
         assert_eq!(
             unsafe { WaitForSingleObject(process.0, 2000) },

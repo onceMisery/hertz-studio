@@ -29,9 +29,9 @@ pub(crate) mod audio_devices;
 pub(crate) mod audio_service;
 #[allow(dead_code)]
 pub(crate) mod budget;
+pub(crate) mod composition_plan;
 #[allow(dead_code)]
 pub(crate) mod config;
-pub(crate) mod composition_plan;
 #[allow(dead_code)] // AssetStore 的持久内容计量与单写者发布。
 pub(crate) mod content_quota;
 #[allow(dead_code)] // ImportJobs 的产品管理入口随 P1-05 接入。
@@ -44,6 +44,8 @@ pub(crate) mod export_jobs;
 #[allow(dead_code)]
 pub(crate) mod file_tokens;
 pub(crate) mod follow;
+#[allow(dead_code)] // Font facts remain behind native qualification and the composition gate.
+pub(crate) mod font_prepare;
 pub(crate) mod frame_window;
 pub(crate) mod gl_plan;
 #[allow(dead_code)] // Native group playback coordinates mirrored target lifecycles.
@@ -81,6 +83,8 @@ pub(crate) mod session;
 pub(crate) mod settings_drafts;
 #[allow(dead_code)] // 原生目标规划内核；正式选择入口随 P1-05 接入。
 pub(crate) mod target_planner;
+#[allow(dead_code)] // Pure raster facts await the original composition projection owner.
+pub(crate) mod text_raster;
 pub(crate) mod video_poster;
 pub(crate) mod webresource;
 pub(crate) mod work_drafts;

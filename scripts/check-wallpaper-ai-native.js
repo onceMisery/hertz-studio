@@ -81,12 +81,28 @@ async function main() {
     const ambiguous = await query('切换到「AI 重名」'); assert.equal(ambiguous.result.ambiguous, true); assert.equal(ambiguous.result.actions.length, 2);
     assert.notEqual(second.workKey, third.workKey); checks.push('actual installed native catalog, displayed reasons and same-title ambiguity without execution');
 
-    const before = stored();
+    await page.locator('#ai-brief').fill('AI 重名'); await page.locator('#ai-query').click();
+    await until(async () => await page.locator('#ai-results li').count() === 2, 'actual ambiguous recommendation rows');
+    const rows = await page.locator('#ai-results li').evaluateAll(items => items.map(item => ({
+      hash: item.querySelector('.ai-content-id')?.title,
+      visibleIdentity: item.querySelector('.ai-content-id')?.textContent,
+      label: item.querySelector('button').getAttribute('aria-label'),
+    })));
+    assert.equal(new Set(rows.map(row => row.visibleIdentity)).size, 2, 'same title/version choices remain visibly distinguishable');
+    assert.deepEqual(rows.map(row => row.hash).sort(), [second.packageHash, third.packageHash].sort());
+    assert.ok(rows.every(row => row.label.includes(row.hash.slice(0, 12))), 'accessible action identifies the same native content');
+    const selectedIndex = rows.findIndex(row => row.hash === third.packageHash);
+    await page.locator('#ai-results li').nth(selectedIndex).locator('button').click();
+    await until(() => wallpaper(stored()).groups[0].selection.workKey === third.workKey, 'visible identified duplicate selects the exact installed work');
+    assert.equal(wallpaper(stored()).groups[0].selection.packageHash, third.packageHash);
+    checks.push('same-title/version rows display native content identity; actual identified choice commits the exact work/hash');
+
+    const before = stored(), explicitProgressStart = await page.evaluate(() => aiEvidence.progress.length);
     await page.locator('#ai-brief').fill('切换到「AI 静夜」'); await page.locator('#ai-query').click();
     await until(() => wallpaper(stored()).groups[0].selection.workKey === first.workKey, 'explicit native switch committed');
     assert.equal(stored().revision, before.revision + 1); assert.deepEqual(lyrics(stored()), lyrics(before));
     await until(async () => await page.evaluate(work => aiEvidence.progress.some(progress => progress.phase === 'saved' && progress.saved && progress.workKey === work.workKey && progress.packageHash === work.packageHash), first), 'exact disabled switch saved phase');
-    const phases = await page.evaluate(() => aiEvidence.progress);
+    const phases = await page.evaluate(start => aiEvidence.progress.slice(start), explicitProgressStart);
     const accepted = phases.find(progress => progress.phase === 'accepted'); assert.ok(accepted);
     const savedIndex = phases.findIndex(progress => progress.requestId === accepted.requestId && progress.phase === 'saved' && progress.saved);
     assert.ok(savedIndex > phases.indexOf(accepted));
@@ -142,6 +158,11 @@ async function main() {
     }, { start: progressCount, work: first }), 'enabled exact switch reaches real first-frame running phase');
     assert.equal(terminal.runtime.firstFrameReady, true); assert.equal(terminal.runtime.visible, true);
     assert.equal(terminal.runtime.appliedSelection.workKey, first.workKey); assert.equal(terminal.runtime.appliedSelection.packageHash, first.packageHash);
+    const terminalTargets = terminal.runtime.targets || [terminal.runtime]; assert.ok(terminalTargets.length > 0);
+    for (const target of terminalTargets) {
+      assert.equal(target.groupId, 'main'); assert.equal(target.firstFrameReady, true); assert.equal(target.visible, true);
+      assert.equal(target.appliedSelection.workKey, first.workKey); assert.equal(target.appliedSelection.packageHash, first.packageHash);
+    }
     checks.push('accepted then saved binds exact work/hash; disabled switch is paused and enabled switch reports running only with matching native first frame');
 
     await page.waitForSelector('#ai-query:enabled');

@@ -8,6 +8,7 @@
 //! 真实 I/O 退出并归还槽之后，任务才算终结（§7.1：「取消后先作废 job
 //! generation，待真实 I/O/解码退出才归还槽，不能提前接受第二个大任务」）。
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -17,7 +18,9 @@ use thiserror::Error;
 
 use crate::wallpaper::assets::AssetStore;
 use crate::wallpaper::decode_probe::ProbeClient;
+use crate::wallpaper::font_prepare::{FontInput, PreparedFont, RequiredText};
 use crate::wallpaper::library::{Library, LOCAL_SOURCE};
+use crate::wallpaper::target_planner::AssetRef;
 
 #[derive(Debug, Error)]
 #[error("{code}: {message}")]
@@ -117,11 +120,115 @@ struct JobRequest {
     cancel: Arc<AtomicBool>,
     generation: u64,
     target: Option<super::image_prepare::ImageTarget>,
+    font_reply: Option<FontPrepareReply>,
+    #[cfg(test)]
+    terminal_pending: Option<std::sync::mpsc::Sender<JobState>>,
+    #[cfg(test)]
+    inspection_checkpoint: Option<fn(&AtomicBool)>,
 }
 
 enum JobSource {
     Import(ImportSource),
     Prepare(super::target_planner::PrepareRequest),
+    PrepareFont(FontPrepareRequest),
+    PrepareFontGroup(FontGroupPrepareRequest),
+}
+
+/// 固定字体条目和最终文字由原准备 worker 核验；解析事实本身不授予本机资格。
+#[derive(Clone)]
+pub(crate) struct FontPrepareRequest {
+    pub(crate) reference: AssetRef,
+    pub(crate) expected_entry: hertz_wallpaper::VerifiedEntry,
+    pub(crate) required_texts: Vec<RequiredText>,
+}
+
+#[derive(Clone)]
+pub(crate) struct FontGroupPrepareRequest {
+    pub(crate) fonts: Vec<FontPrepareRequest>,
+    pub(crate) composition: super::composition_plan::FontTextPreflightContext,
+}
+
+impl FontGroupPrepareRequest {
+    fn validate(&self) -> Result<(), JobError> {
+        let limit = hertz_wallpaper::document::MAX_NODES;
+        if self.fonts.is_empty() || self.fonts.len() > limit {
+            return Err(JobError::invalid_input(
+                "字体组必须为 1 至 128 个最终字体请求",
+            ));
+        }
+        super::image_prepare::validate_target(Some(self.composition.target))?;
+        let required = super::text_raster::required_texts_by_font(
+            &self.composition.compiled,
+            &self.composition.final_values,
+        )?;
+        if required.len() != self.fonts.len() {
+            return Err(JobError::invalid_input("字体组必须覆盖全部最终字体"));
+        }
+        let mut ids = BTreeSet::new();
+        for font in &self.fonts {
+            font.reference.validate()?;
+            if font.reference.variant_id.is_some()
+                || font.reference.package_hash != self.composition.package_hash()
+                || !ids.insert(font.reference.asset_id.as_str())
+                || font.required_texts.len() > limit
+                || font.required_texts.iter().any(|text| {
+                    text.text.len() > 4 * 4096 || text.text.encode_utf16().count() > 4096
+                })
+            {
+                return Err(JobError::invalid_input("字体组引用、数量或文字边界不一致"));
+            }
+            let expected = required
+                .get(&font.reference.asset_id)
+                .ok_or_else(|| JobError::invalid_input("字体组含有非最终字体请求"))?;
+            fn pairs(texts: &[RequiredText]) -> BTreeSet<(&str, &str)> {
+                texts
+                    .iter()
+                    .map(|text| (text.node_id.as_str(), text.text.as_str()))
+                    .collect()
+            }
+            if expected.len() != font.required_texts.len()
+                || pairs(expected) != pairs(&font.required_texts)
+            {
+                return Err(JobError::invalid_input(
+                    "字体组文字必须为确切最终节点与原文字集合",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+enum FontPrepareReply {
+    Single(tokio::sync::oneshot::Sender<Result<PreparedFont, JobError>>),
+    Group(tokio::sync::oneshot::Sender<Result<BTreeMap<String, PreparedFont>, JobError>>),
+}
+
+type FontPrepareCompletion<T> = (String, tokio::sync::oneshot::Receiver<Result<T, JobError>>);
+
+impl FontPrepareReply {
+    fn send(self, outcome: Result<JobOutput, JobError>) {
+        match (self, outcome) {
+            (Self::Single(reply), Ok(JobOutput::Font(font))) => {
+                let _ = reply.send(Ok(*font));
+            }
+            (Self::Group(reply), Ok(JobOutput::Fonts(fonts))) => {
+                let _ = reply.send(Ok(fonts));
+            }
+            (Self::Single(reply), Err(error)) => {
+                let _ = reply.send(Err(error));
+            }
+            (Self::Group(reply), Err(error)) => {
+                let _ = reply.send(Err(error));
+            }
+            _ => unreachable!("typed font reply belongs to its font source"),
+        }
+    }
+}
+
+enum JobOutput {
+    Package(String),
+    Font(Box<PreparedFont>),
+    Fonts(BTreeMap<String, PreparedFont>),
 }
 
 enum ImportSource {
@@ -271,6 +378,33 @@ impl ImportJobs {
         self.enqueue(job_id, JobSource::Prepare(request), Some(target))
     }
 
+    /// 字体与导入/图片准备共用单槽；类型化回执只在原 worker 完整退出后发送。
+    pub(crate) fn prepare_font(
+        &self,
+        job_id: String,
+        request: FontPrepareRequest,
+    ) -> Result<FontPrepareCompletion<PreparedFont>, JobError> {
+        request.reference.validate()?;
+        let mut request = self.reserve(job_id, JobSource::PrepareFont(request), None)?;
+        let (reply, receive) = tokio::sync::oneshot::channel();
+        request.font_reply = Some(FontPrepareReply::Single(reply));
+        self.dispatch(request).map(|job_id| (job_id, receive))
+    }
+
+    /// One group occupies the original slot through inspection, preflight,
+    /// qualification and the same strict terminal database/cancellation guard.
+    pub(crate) fn prepare_font_group(
+        &self,
+        job_id: String,
+        request: FontGroupPrepareRequest,
+    ) -> Result<FontPrepareCompletion<BTreeMap<String, PreparedFont>>, JobError> {
+        request.validate()?;
+        let mut request = self.reserve(job_id, JobSource::PrepareFontGroup(request), None)?;
+        let (reply, receive) = tokio::sync::oneshot::channel();
+        request.font_reply = Some(FontPrepareReply::Group(reply));
+        self.dispatch(request).map(|job_id| (job_id, receive))
+    }
+
     fn enqueue(
         &self,
         job_id: String,
@@ -325,6 +459,11 @@ impl ImportJobs {
             cancel,
             generation,
             target,
+            font_reply: None,
+            #[cfg(test)]
+            terminal_pending: None,
+            #[cfg(test)]
+            inspection_checkpoint: None,
         })
     }
 
@@ -397,20 +536,38 @@ async fn worker_loop(
     // 等任务时必须继续驱动 runtime：sqlx 的连接归还也会投递异步任务。
     // 在 current_thread runtime 内阻塞 recv 会把空闲连接卡住，查询最终池超时。
     while let Some(request) = rx.recv().await {
-        let outcome = match assets.content_writer() {
+        let mut outcome = match assets.content_writer() {
             Ok(writer) => {
                 let preparation =
                     probe.prepare(format!("prepare-{}-{}", request.job_id, request.generation));
                 let outcome = match preparation.as_ref() {
                     Ok(_) => match &request.source {
                         JobSource::Import(source) => {
-                            run_import(&request, source, &library, &assets, &probe, &writer).await
+                            run_import(&request, source, &library, &assets, &probe, &writer)
+                                .await
+                                .map(JobOutput::Package)
                         }
                         JobSource::Prepare(prepare) => {
-                            run_prepare(&request, prepare, &library, &assets, &probe).await
+                            run_prepare(&request, prepare, &library, &assets, &probe)
+                                .await
+                                .map(JobOutput::Package)
+                        }
+                        JobSource::PrepareFont(prepare) => {
+                            run_prepare_font(&request, prepare, &library, &assets, &probe)
+                                .await
+                                .map(|font| JobOutput::Font(Box::new(font)))
+                        }
+                        JobSource::PrepareFontGroup(prepare) => {
+                            run_prepare_font_group(&request, prepare, &library, &assets, &probe)
+                                .await
+                                .map(JobOutput::Fonts)
                         }
                     },
-                    Err(error) => Err(JobError::new(error.code, error.message.clone())),
+                    Err(error) => Err(JobError {
+                        code: error.code,
+                        message: error.message.clone(),
+                        details: error.details.clone(),
+                    }),
                 };
                 // 写门保持到物理退出、暂存清理和准备额度归还，失败者不清理其它写者的 job。
                 assets.cleanup_staging(&request.job_id);
@@ -423,35 +580,88 @@ async fn worker_loop(
         };
         // 源能力与读取句柄也须在终态发布前退出。
         drop(request.source);
-        let mut status = request.status.lock().expect("status").clone();
-        match outcome {
-            Ok(package_hash) => {
-                status.state = JobState::Done;
-                status.package_hash = Some(package_hash);
+        loop {
+            if request.font_reply.is_some() && outcome.is_ok() {
+                if let Err(error) = cancelled(&request.cancel) {
+                    outcome = Err(error);
+                }
             }
-            Err(error) if error.code == "cancelled" => {
-                status.state = JobState::Cancelled;
-                status.error = Some(error.message);
+            let mut status = request.status.lock().expect("status").clone();
+            match &outcome {
+                Ok(output) => {
+                    status.state = JobState::Done;
+                    status.package_hash = Some(match output {
+                        JobOutput::Package(hash) => hash.clone(),
+                        JobOutput::Font(font) => font.reference().package_hash.clone(),
+                        JobOutput::Fonts(fonts) => fonts
+                            .values()
+                            .next()
+                            .expect("nonempty font group")
+                            .reference()
+                            .package_hash
+                            .clone(),
+                    });
+                }
+                Err(error) if error.code == "cancelled" => {
+                    status.state = JobState::Cancelled;
+                    status.error = Some(error.message.clone());
+                }
+                Err(error) => {
+                    status.state = JobState::Failed;
+                    status.error = Some(format!("{}: {}", error.code, error.message));
+                }
             }
-            Err(error) => {
-                status.state = JobState::Failed;
-                status.error = Some(format!("{}: {}", error.code, error.message));
-            }
-        }
-        let _ = library
-            .record_job(
+            let progress = serde_json::to_string(&status).ok();
+            let terminal = library.record_job(
                 &status.job_id,
                 None,
                 job_state_db(&status.state),
                 None,
-                serde_json::to_string(&status).ok().as_deref(),
+                progress.as_deref(),
                 status.error.as_deref(),
-            )
-            .await;
-        {
+            );
+            #[cfg(test)]
+            let terminal = {
+                let mut terminal = std::pin::pin!(terminal);
+                let mut notified = false;
+                std::future::poll_fn(|context| {
+                    let result = std::future::Future::poll(terminal.as_mut(), context);
+                    if result.is_pending() && !notified {
+                        if let Some(observer) = &request.terminal_pending {
+                            let _ = observer.send(status.state);
+                        }
+                        notified = true;
+                    }
+                    result
+                })
+                .await
+            };
+            #[cfg(not(test))]
+            let terminal = terminal.await;
+            if let Err(error) = terminal {
+                if request.font_reply.is_some() && outcome.is_ok() {
+                    // 原终态记录失败不能发字体成功证明；旧导入仍保留既有 best-effort 行为。
+                    status.state = JobState::Failed;
+                    status.package_hash = None;
+                    status.error = Some(format!("{}: {}", error.code, error.message));
+                    outcome = Err(error);
+                }
+            }
             let mut guard = inner.lock().expect("job inner");
-            guard.remember(status.clone());
+            // cancel 与归还原槽共用锁：DB 回执期间收到的取消也不能发成功字体证明。
+            if request.font_reply.is_some()
+                && outcome.is_ok()
+                && request.cancel.load(Ordering::Acquire)
+            {
+                outcome = Err(JobError::new("cancelled", "字体准备已取消并退出"));
+                continue;
+            }
+            guard.remember(status);
             guard.current = None;
+            break;
+        }
+        if let Some(reply) = request.font_reply {
+            reply.send(outcome);
         }
     }
 }
@@ -682,6 +892,113 @@ async fn run_prepare(
     set_state(&request.status, JobState::Publishing);
     image.publish(assets, library).await?;
     Ok(package.package_hash)
+}
+
+async fn run_prepare_font(
+    request: &JobRequest,
+    prepare: &FontPrepareRequest,
+    library: &Library,
+    assets: &AssetStore,
+    probe: &ProbeClient,
+) -> Result<PreparedFont, JobError> {
+    set_state(&request.status, JobState::Preparing);
+    let input = inspect_font(request, prepare, library, assets, probe).await?;
+    qualify_inspected_font(request, prepare, input, library, probe).await
+}
+
+async fn inspect_font(
+    request: &JobRequest,
+    prepare: &FontPrepareRequest,
+    library: &Library,
+    assets: &AssetStore,
+    probe: &ProbeClient,
+) -> Result<FontInput, JobError> {
+    cancelled(&request.cancel)?;
+    if !library
+        .is_installed(&prepare.reference.package_hash)
+        .await?
+    {
+        return Err(JobError::new("asset_not_found", "准备字体尚未安装或不可用"));
+    }
+    // 原准备槽/写门已持有；字体读取、目录核验和解析先取得完整 CPU 工作区。
+    let workspace = probe.image_workspace(super::font_prepare::prepare_workspace_bytes(
+        prepare.expected_entry.bytes,
+    )?)?;
+    #[cfg(test)]
+    if let Some(checkpoint) = request.inspection_checkpoint {
+        checkpoint(&request.cancel);
+    }
+    let input = super::font_prepare::pin_input(
+        assets,
+        &prepare.reference,
+        &prepare.expected_entry,
+        &prepare.required_texts,
+        &workspace,
+        &request.cancel,
+    );
+    // pin_input 同步读取与解析已实际退出，所有成功/错误路径均确认归还工作区。
+    workspace.finish();
+    input
+}
+
+async fn qualify_inspected_font(
+    request: &JobRequest,
+    prepare: &FontPrepareRequest,
+    input: FontInput,
+    library: &Library,
+    probe: &ProbeClient,
+) -> Result<PreparedFont, JobError> {
+    cancelled(&request.cancel)?;
+    let proof = probe
+        .qualify_font(library, input.clone(), Arc::clone(&request.cancel))
+        .await?;
+    cancelled(&request.cancel)?;
+    let font = PreparedFont::after_qualification(prepare.reference.clone(), input, proof)?;
+    cancelled(&request.cancel)?;
+    Ok(font)
+}
+
+async fn run_prepare_font_group(
+    request: &JobRequest,
+    prepare: &FontGroupPrepareRequest,
+    library: &Library,
+    assets: &AssetStore,
+    probe: &ProbeClient,
+) -> Result<BTreeMap<String, PreparedFont>, JobError> {
+    set_state(&request.status, JobState::Preparing);
+    cancelled(&request.cancel)?;
+    prepare.validate()?;
+    let ordered: BTreeMap<_, _> = prepare
+        .fonts
+        .iter()
+        .map(|font| (font.reference.asset_id.clone(), font))
+        .collect();
+    let mut inputs = BTreeMap::new();
+    for (id, font) in &ordered {
+        // Each temporary read/parser workspace physically finishes before the
+        // next input; only sealed pins, metadata and exact proofs survive.
+        let input = inspect_font(request, font, library, assets, probe).await?;
+        inputs.insert(id.clone(), input);
+    }
+    cancelled(&request.cancel)?;
+    let lower_bound = prepare.composition.memory_request(
+        &inputs,
+        format!("font-preflight-{}", request.job_id),
+        request.generation,
+    )?;
+    cancelled(&request.cancel)?;
+    probe.check_requests(&[lower_bound])?;
+    cancelled(&request.cancel)?;
+    let mut fonts = BTreeMap::new();
+    for (id, font) in ordered {
+        let input = inputs
+            .remove(&id)
+            .expect("every font inspected before preflight");
+        let font = qualify_inspected_font(request, font, input, library, probe).await?;
+        fonts.insert(id, font);
+    }
+    cancelled(&request.cancel)?;
+    Ok(fonts)
 }
 
 #[derive(Default)]

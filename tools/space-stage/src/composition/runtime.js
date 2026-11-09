@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-import { buildNode, loadResource, updateNodeMaterial } from './nodes.js';
+import { buildNode, loadResource, loadTextRaster, updateNodeMaterial } from './nodes.js';
 import { createScope } from '../scope.js';
 const MATRIX=1, LAYOUT=2, MATERIAL=4, VISIBILITY=8, RESOURCE=16, GEOMETRY=32, ALL=63;
 const outputVertex = `varying vec2 vUv;void main(){vUv=uv;gl_Position=vec4(position.xy,0.0,1.0);}`;
@@ -7,7 +7,15 @@ const outputFragment = `uniform sampler2D inputMap;varying vec2 vUv;
   void main(){gl_FragColor=texture2D(inputMap,vUv);
   #include <colorspace_fragment>
   }`;
+function validateTextTextureSize(context, plan) {
+  if (!plan.textRasters.length) return;
+  const maximum = context.renderer.capabilities.maxTextureSize;
+  if (!Number.isSafeInteger(maximum) || maximum < 1 || plan.textRasters.some(requirement =>
+    requirement.widthPx > maximum || requirement.heightPx > maximum))
+    throw new Error('composition-adapter-unavailable:text-texture-size');
+}
 function reserveAll(context, scope, plan, generation) {
+  validateTextTextureSize(context, plan);
   const sources = new Map(), reserved = [], programTickets = [], unclaimedPrivate = new Set();
   const nodeScopes=plan.nodePlans.map(()=>createScope({resources:context.pagePort,generation}));
   scope.defer(()=>nodeScopes.forEach(nodeScope=>nodeScope.dispose()));
@@ -25,18 +33,11 @@ function reserveAll(context, scope, plan, generation) {
         const bytes = spec.node.nodeType === 'particles' ? spec.count * 20 : 92;
         spec.bufferPlan = nodeScopes[spec.index].bufferPlan(bytes,bytes,'Composition fixed node buffers');
       }
-      if (spec.node.nodeType === 'text') {
-        const pixels=spec.textWidth*spec.textHeight;
-        spec.textTicket = require({canvases:1,drawingBufferPixels:pixels,ownedCpuBytes:pixels*4,textureDeclaredBytes:pixels*4},
-          'Composition prepared-font text raster and texture');
-        if (spec.textTicket) unclaimedPrivate.add(spec.textTicket);
-        spec.claimTextTicket = () => unclaimedPrivate.delete(spec.textTicket);
-      }
     }
     for (const requirement of plan.requirements) {
       if (context.pool.has(requirement.identity)) continue;
       let admissions;
-      if (requirement.kind === 'font') admissions={cpu:require({ownedCpuBytes:requirement.byteLength},'Composition same-package font bytes')};
+      if (requirement.kind === 'font') admissions={cpu:require({ownedCpuBytes:requirement.fontMetadata.cpuBudgetBytes},'Composition prepared same-package font')};
       else {
         const bytes=requirement.width*requirement.height*4;
         admissions={decode:require({decodeReservedBytes:requirement.kind==='video'?bytes*3:bytes,
@@ -44,6 +45,11 @@ function reserveAll(context, scope, plan, generation) {
           upload:require({textureDeclaredBytes:bytes},'Composition per-context texture upload')};
       }
       sources.set(requirement,admissions);
+    }
+    for (const requirement of plan.textRasters) if (!context.pool.has(requirement.identity)) {
+      const pixels = requirement.widthPx * requirement.heightPx;
+      sources.set(requirement, {raster: require({canvases:1, drawingBufferPixels:pixels,
+        ownedCpuBytes:pixels*4, textureDeclaredBytes:pixels*4}, 'Composition shared prepared text raster')});
     }
     // All actual reservations above complete synchronously before any loader
     // can start. Source tickets transfer to the pool adapter at acquisition.
@@ -62,7 +68,7 @@ function reserveAll(context, scope, plan, generation) {
 export async function createCompositionRuntime(THREE, context, scope, plan, options = {}) {
   const signal = scope.signal, generation = options.generation, leases = new Map(), values = new Map();
   let disposed = false, target = null, targetTicket = null, sceneTime = 0, frameReady = false, outputDirty=true;
-  let updateGeneration=0, pendingController=null, visualTime=null;
+  let updateGeneration=0, pendingController=null, visualTime=null, mediaShouldPlay=false;
   const dirty=new Uint32Array(plan.ir.nodes.length), localDirty=new Uint8Array(plan.ir.nodes.length), worldDirty=new Uint8Array(plan.ir.nodes.length);
   const work={slotChanges:0,constantChanges:0,resourceChanges:0,outputInvalidations:0,renders:0,
     matrixUpdates:new Uint32Array(plan.ir.nodes.length),materialUpdates:new Uint32Array(plan.ir.nodes.length),
@@ -90,6 +96,18 @@ export async function createCompositionRuntime(THREE, context, scope, plan, opti
     task.catch(() => {}); loading.push(task);
   }
   await Promise.all(loading);
+  if (signal.aborted) throw new DOMException('Composition cancelled', 'AbortError');
+  const textLoading = [];
+  for (const spec of plan.nodePlans) if (spec.node.nodeType === 'text') {
+    const requirement = spec.textRaster, nodeScope = allocation.nodeScopes[spec.index];
+    const lease = context.pool.acquire(requirement.identity, {signal:nodeScope.signal, generation, isCurrent:options.isCurrent,
+      load: ({signal, generation}) => loadTextRaster(THREE, context, requirement, signal, generation, allocation.sources.get(requirement)?.raster),
+      releaseValue: value => value.release()});
+    if (!lease) throw new Error('composition-resource-pool-exhausted');
+    allocation.unclaimed.delete(requirement); nodeScope.lease(lease); spec.textRasterLease = lease;
+    textLoading.push(lease.ready);
+  }
+  await Promise.all(textLoading);
   if (signal.aborted) throw new DOMException('Composition cancelled', 'AbortError');
   function nodeAssets(spec, sourceValues=values){return Object.fromEntries(Object.entries(spec.resources).map(([field, requirement])=>[field,sourceValues.get(requirement.key)]));}
   const nodes = plan.nodePlans.map(spec => buildNode(THREE, context, allocation.nodeScopes[spec.index], spec,nodeAssets(spec),generation));
@@ -197,22 +215,36 @@ export async function createCompositionRuntime(THREE, context, scope, plan, opti
         if(plan.ir.nodes[index].nodeType==='text')rebuilds.add(index);
         if(plan.ir.nodes[index].nodeType==='image')matrix(index);
       }
+      if (plan.ir.nodes[index].nodeType === 'text'
+          && plan.nodePlans[index].textRaster.key !== next.nodePlans[index].textRaster.key) {
+        rebuilds.add(index); masks[index] |= LAYOUT | MATERIAL; output = true;
+      }
     }
-    return {masks,locals,worlds,rebuilds,slots,constants,resources,output,changed:!!(slots||constants||resources)};
+    return {masks,locals,worlds,rebuilds,slots,constants,resources,output,changed:!!(slots||constants||resources||rebuilds.size)};
   }
   function reserveDelta(next,changes){
+    validateTextTextureSize(context, next);
     const newScopes=new Map(), sourceTickets=new Map(), unclaimedSources=new Set(), unusedPrivate=new Set(), programTickets=[];
     const reserved=[];const require=(amount,label)=>{const ticket=context.pagePort.require(amount,label,generation,'bounded-estimate');reserved.push(ticket);return ticket;};
     const amount={programs:0,ownedCpuBytes:0,bufferDeclaredBytes:0,textureDeclaredBytes:0,decodeReservedBytes:0,decoderLeases:0,canvases:0,drawingBufferPixels:0};
     const variants=new Set();
     for(const index of changes.rebuilds){const spec=next.nodePlans[index],bytes=spec.node.nodeType==='particles'?spec.count*20:92;
       amount.ownedCpuBytes+=bytes;amount.bufferDeclaredBytes+=bytes;variants.add(spec.node.nodeType==='particles'?'particles':'planar');
-      if(spec.node.nodeType==='text'){const pixels=spec.textWidth*spec.textHeight;amount.ownedCpuBytes+=pixels*4;amount.textureDeclaredBytes+=pixels*4;amount.drawingBufferPixels+=pixels;amount.canvases++;}
     }
     amount.programs=Math.max(0,variants.size-allocation.programTickets.length);
     for(const requirement of next.requirements)if(!leases.has(requirement.key)&&!context.pool.has(requirement.identity)){
-      if(requirement.kind==='font')amount.ownedCpuBytes+=requirement.byteLength;
+      if(requirement.kind==='font')amount.ownedCpuBytes+=requirement.fontMetadata.cpuBudgetBytes;
       else{const bytes=requirement.width*requirement.height*4;amount.textureDeclaredBytes+=bytes;amount.decodeReservedBytes+=bytes*(requirement.kind==='video'?3:1);if(requirement.kind==='video')amount.decoderLeases++;}
+    }
+    const newRasters = new Map();
+    for (const index of changes.rebuilds) {
+      const requirement = next.nodePlans[index].textRaster;
+      if (requirement && !context.pool.has(requirement.identity)) newRasters.set(requirement.key, requirement);
+    }
+    for (const requirement of newRasters.values()) {
+      const pixels = requirement.widthPx * requirement.heightPx;
+      amount.ownedCpuBytes += pixels*4; amount.textureDeclaredBytes += pixels*4;
+      amount.drawingBufferPixels += pixels; amount.canvases++;
     }
     const forecast=context.pagePort.preflight(amount,[]);if(!forecast.ok)throw new Error(forecast.reason);
     function cleanup(){
@@ -225,15 +257,18 @@ export async function createCompositionRuntime(THREE, context, scope, plan, opti
       for(let index=0;index<amount.programs;index++)programTickets.push(require({programs:1},'Composition changed-node shader cache miss'));
       for(const index of changes.rebuilds){const spec=next.nodePlans[index],nodeScope=createScope({resources:context.pagePort,generation});newScopes.set(index,nodeScope);
         const bytes=spec.node.nodeType==='particles'?spec.count*20:92;spec.bufferPlan=nodeScope.bufferPlan(bytes,bytes,'Composition changed-node fixed buffers');
-        if(spec.node.nodeType==='text'){const pixels=spec.textWidth*spec.textHeight;
-          spec.textTicket=require({canvases:1,drawingBufferPixels:pixels,ownedCpuBytes:pixels*4,textureDeclaredBytes:pixels*4},'Composition changed prepared-font raster');
-          unusedPrivate.add(spec.textTicket);spec.claimTextTicket=()=>unusedPrivate.delete(spec.textTicket);}
       }
       for(const requirement of next.requirements)if(!leases.has(requirement.key)&&!context.pool.has(requirement.identity)){
         let tickets;
-        if(requirement.kind==='font')tickets={cpu:require({ownedCpuBytes:requirement.byteLength},'Composition changed same-package font bytes')};
+        if(requirement.kind==='font')tickets={cpu:require({ownedCpuBytes:requirement.fontMetadata.cpuBudgetBytes},'Composition changed prepared same-package font')};
         else{const bytes=requirement.width*requirement.height*4;tickets={decode:require({decodeReservedBytes:bytes*(requirement.kind==='video'?3:1),...(requirement.kind==='video'?{decoderLeases:1}:{})},'Composition changed actual-media decoder'),upload:require({textureDeclaredBytes:bytes},'Composition changed per-context texture')};}
         sourceTickets.set(requirement.key,tickets);unclaimedSources.add(requirement.key);
+      }
+      for (const requirement of newRasters.values()) {
+        const pixels = requirement.widthPx * requirement.heightPx;
+        const tickets = {raster:require({canvases:1,drawingBufferPixels:pixels,ownedCpuBytes:pixels*4,
+          textureDeclaredBytes:pixels*4}, 'Composition changed shared text raster')};
+        sourceTickets.set(requirement.key, tickets); unclaimedSources.add(requirement.key);
       }
       return {newScopes,sourceTickets,unclaimedSources,unusedPrivate,programTickets,cleanup};
     }catch(error){cleanup();for(const ticket of reserved)ticket.release({apiReleased:true,allocationEnded:true});throw error;}
@@ -260,6 +295,20 @@ export async function createCompositionRuntime(THREE, context, scope, plan, opti
       }
       await Promise.all(tasks);
       if(controller.signal.aborted||updateTicket!==updateGeneration||disposed)throw new DOMException('Composition update cancelled','AbortError');
+      const textTasks = [];
+      for (const index of changes.rebuilds) {
+        const spec = next.nodePlans[index]; if (spec.node.nodeType !== 'text') continue;
+        const requirement = spec.textRaster, nodeScope = delta.newScopes.get(index);
+        const lease = context.pool.acquire(requirement.identity, {signal:nodeScope.signal, generation:updateTicket,
+          isCurrent:value=>!disposed&&!signal.aborted&&value===updateGeneration,
+          load:({signal,generation})=>loadTextRaster(THREE,context,requirement,signal,generation,delta.sourceTickets.get(requirement.key)?.raster),
+          releaseValue:value=>value.release()});
+        if (!lease) throw new Error('composition-resource-pool-exhausted');
+        delta.unclaimedSources.delete(requirement.key); nodeScope.lease(lease); spec.textRasterLease = lease;
+        textTasks.push(lease.ready);
+      }
+      await Promise.all(textTasks);
+      if(controller.signal.aborted||updateTicket!==updateGeneration||disposed)throw new DOMException('Composition update cancelled','AbortError');
       for(const index of changes.rebuilds){const spec=next.nodePlans[index];newNodes.set(index,buildNode(THREE,context,delta.newScopes.get(index),spec,nodeAssets(spec,nextValues),generation));}
       // Everything that can fail in preparation has finished. The fixed graph
       // keeps its painter order; only changed leaves/resources now retire.
@@ -272,7 +321,11 @@ export async function createCompositionRuntime(THREE, context, scope, plan, opti
       for(const [key,lease] of additions){scope.lease(lease);leases.set(key,lease);values.set(key,nextValues.get(key));}
       const needed=new Set(next.requirements.map(requirement=>requirement.key));
       plan=next;
-      for(let index=0;index<nodes.length;index++)nodes[index].spec=plan.nodePlans[index];
+      for(let index=0;index<nodes.length;index++){
+        if (nodes[index].spec.node.nodeType === 'text' && !changes.rebuilds.has(index))
+          plan.nodePlans[index].textRasterLease = nodes[index].spec.textRasterLease;
+        nodes[index].spec=plan.nodePlans[index];
+      }
       dirty.set(changes.masks);localDirty.set(changes.locals);worldDirty.set(changes.worlds);
       for(const index of plan.ir.painterOrder)if(dirty[index])applyNode(nodes[index],dirty[index],!!localDirty[index]);
       for(const [key,lease] of [...leases])if(!needed.has(key)){scope.releaseLease(lease);leases.delete(key);values.delete(key);}
@@ -340,18 +393,31 @@ export async function createCompositionRuntime(THREE, context, scope, plan, opti
       // Paused/explicit seek requests follow the absolute requested phase. A
       // sparse decoder may report the decoded frame's timestamp after seeked;
       // repeating that same completed request would prevent readiness forever.
-      const targetChanged=Math.abs(value.seekState.target-expected) > (frame.paused || frame.seek ? .001 : .06);
-      if (targetChanged && (frame.paused || frame.seek || (!video.seeking && Math.abs(video.currentTime-expected)>.06))) {
-        video.pause(); value.seekState.target=expected; value.seekState.ready=false; video.currentTime=expected; frameReady=false;
+      const explicit = frame.paused || frame.seek;
+      const targetChanged = Math.abs(value.seekState.target-expected) > .001;
+      // Preserve a completed request at its fixed phase until the whole output
+      // submits. Another clock can still be seeking after this member is ready.
+      const completed = value.seekState.pending && value.seekState.ready && !video.seeking && !targetChanged;
+      const needsSeek = explicit ? targetChanged : !completed && !video.seeking && Math.abs(video.currentTime-expected)>.06;
+      if (needsSeek) {
+        video.pause(); value.seekState.target=expected; value.seekState.ready=false; value.seekState.pending=true;
+        video.currentTime=expected; frameReady=false;
       }
       if (video.seeking || !value.seekState.ready || video.readyState < 2) frameReady=false;
-      if (frame.paused || document.hidden || frame.seek || !frameReady) video.pause();
-      else if (video.paused) video.play().catch(error => { if (!disposed) { value.playError = error; options.onInvalidate?.(); } });
       if (value.playError) throw new Error('composition-video-play-failed');
       if(timeChanged||!frame.paused||outputDirty){value.texture.needsUpdate=true;outputDirty=true;}
     }
+    mediaShouldPlay=frameReady&&!frame.paused&&!document.hidden&&!frame.seek;
+    if(!mediaShouldPlay)pause();
     if(timeChanged)for(const node of nodes)if(node.particles){node.material.uniforms.sceneTime.value=time;outputDirty=true;}
     return frameReady;
+  }
+  function commitMedia() {
+    if (!frameReady || disposed || signal.aborted) return false;
+    for(const value of videos)value.seekState.pending=false;
+    if(mediaShouldPlay&&!document.hidden)for(const value of videos)if(value.video.paused)
+      value.video.play().catch(error=>{if(!disposed){value.playError=error;options.onInvalidate?.();}});
+    return true;
   }
   function render() {
     if (!frameReady || disposed) return false;
@@ -375,15 +441,15 @@ export async function createCompositionRuntime(THREE, context, scope, plan, opti
       target.scissorTest=true;renderer.setRenderTarget(target);renderer.render(scene,camera);
       renderer.setRenderTarget(null);renderer.setScissorTest(false);renderer.outputColorSpace=THREE.SRGBColorSpace;renderer.render(outputScene,outputCamera);
       dirty.fill(0);localDirty.fill(0);worldDirty.fill(0);outputDirty=false;work.renders++;
-      return true;
     } finally {renderer.hertzProgramResources=previousPrograms;renderer.setRenderTarget(previousTarget);renderer.setScissor(previousScissor);renderer.setScissorTest(previousScissorTest);renderer.outputColorSpace=previousOutput;renderer.setClearColor(previousClear,previousAlpha);renderer.autoClear=autoClear;}
+    return true;
   }
   function dispose() {
     if (disposed) return; disposed=true;cancelPreparation(); pause(); target?.dispose(); target=null;
     targetTicket?.release({ apiReleased: true, allocationEnded: true }); targetTicket=null; scene.clear(); outputScene.clear();
   }
   scope.defer(dispose);
-  return { scene, camera, update, render, resize, suspend: pause, dispose,canApplyPlan,applyPlan,cancelPreparation,
+  return { scene, camera, update, render, commitMedia, resize, suspend: pause, dispose,canApplyPlan,applyPlan,cancelPreparation,
     get pendingPreparation(){return !!pendingController;},
     scopeStats(){return allocation.nodeScopes.reduce((sum,nodeScope)=>{
       const value=nodeScope.stats();for(const key of ['resources','tasks','estimatedBytes','cleanups','leases','admissionTickets','allocationTasks'])sum[key]+=value[key]||0;
@@ -398,7 +464,8 @@ export async function createCompositionRuntime(THREE, context, scope, plan, opti
       for(const [program,count] of programUses)if(count===program.usedTimes&&program.hertzProgramResourceId)ids.push(program.hertzProgramResourceId);
       if(targetTicket)ids.push(targetTicket.resourceId);
       for(const ticket of allocation.programTickets)if(ticket)ids.push(ticket.resourceId);
-      for(const lease of leases.values())ids.push(...context.pool.retirementCandidates(lease));
+      ids.push(...context.pool.retirementCandidates([...leases.values(),
+        ...nodes.filter(node=>node.spec.node.nodeType==='text').map(node=>node.spec.textRasterLease)]));
       return [...new Set(ids)];
     },
     canResize: (pixelWidth,pixelHeight) => pixelWidth===plan.projection.target.width && pixelHeight===plan.projection.target.height,
@@ -406,7 +473,7 @@ export async function createCompositionRuntime(THREE, context, scope, plan, opti
       sessionId:plan.projection.sessionId, generation:plan.projection.generation,
       budgetAllocationRevision:plan.projection.target.budgetAllocationRevision,
       videoClocks:videos.map(value=>({currentTime:value.video.currentTime,readyState:value.video.readyState,
-        seeking:value.video.seeking,paused:value.video.paused,requestedTime:value.seekState.target,seekReady:value.seekState.ready})),
+        seeking:value.video.seeking,paused:value.video.paused,requestedTime:value.seekState.target,seekReady:value.seekState.ready,seekPending:value.seekState.pending})),
       dirtyMasks:Array.from(dirty),work:{...work,matrixUpdates:Array.from(work.matrixUpdates),worldMatrixUpdates:Array.from(work.worldMatrixUpdates),
         materialUpdates:Array.from(work.materialUpdates),nodeRebuilds:Array.from(work.nodeRebuilds)},
       preparationPending:!!pendingController,

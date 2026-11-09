@@ -488,7 +488,7 @@ fn verify_installed_budget(
             asset
         }
         hertz_wallpaper::Content::Builtin { .. } => {
-            return type_budget_eligible(&package.manifest, &context)
+            return type_budget_eligible(&package.manifest, context)
         }
         _ => return false,
     };

@@ -21,6 +21,8 @@ struct AccessState {
 struct Resource {
     pinned: Option<Arc<super::assets::PinnedMedia>>,
     payload: Option<Arc<[u8]>>,
+    #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+    read_gate: Option<Arc<super::istream::read_probe::ReadGate>>,
 }
 type Resources = BTreeMap<(String, String), Resource>;
 
@@ -72,9 +74,64 @@ pub(crate) struct ReadPermit {
     scope: Arc<Scope>,
     pinned: Option<Arc<super::assets::PinnedMedia>>,
     payload: Option<Arc<[u8]>>,
+    #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+    read_gate: Option<Arc<super::istream::read_probe::ReadGate>>,
+    #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+    native_response: Option<Arc<super::istream::read_probe::NativeResponse>>,
 }
 
 impl ReadPermit {
+    #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+    pub(crate) fn bind_response_for_test(&mut self, request_id: u64, controller_id: u64) {
+        if self.read_gate.is_some() && self.payload.is_none() && self.pinned.is_some() {
+            self.native_response = Some(super::istream::read_probe::NativeResponse::new(
+                request_id,
+                controller_id,
+            ));
+        }
+    }
+    #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+    pub(crate) fn read_gate_for_test(&self) -> Option<Arc<super::istream::read_probe::ReadGate>> {
+        self.read_gate.clone()
+    }
+    #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+    pub(crate) fn native_response_for_test(
+        &self,
+    ) -> Option<Arc<super::istream::read_probe::NativeResponse>> {
+        self.native_response.clone()
+    }
+    #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+    pub(crate) fn matches_read_gate(&self, gate: &super::istream::read_probe::ReadGate) -> bool {
+        self.is_active()
+            && self.generation == gate.owner.generation
+            && self.payload.is_none()
+            && self
+                .read_gate
+                .as_ref()
+                .is_some_and(|own| std::ptr::eq(own.as_ref(), gate))
+            && self.pinned.as_ref().is_some_and(|pin| {
+                pin.entry.path == gate.owner.entry_path
+                    && pin.entry.sha256 == gate.owner.content_sha256
+                    && pin.entry.bytes == gate.owner.content_bytes
+            })
+    }
+    #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+    pub(crate) fn stream_binding_for_test(
+        &self,
+        window: (u64, u64),
+        parent: Option<u64>,
+    ) -> Option<super::istream::read_probe::StreamBinding> {
+        let gate = self.read_gate.as_ref()?;
+        if window.1 == 0 || !self.matches_read_gate(gate) {
+            return None;
+        }
+        Some(super::istream::read_probe::StreamBinding::new(
+            Arc::clone(gate),
+            self.native_response.clone()?,
+            window,
+            parent,
+        ))
+    }
     pub(crate) fn is_active(&self) -> bool {
         self.scope.active.load(Ordering::Acquire)
     }
@@ -95,6 +152,10 @@ impl Clone for ReadPermit {
             scope: Arc::clone(&self.scope),
             pinned: self.pinned.clone(),
             payload: self.payload.clone(),
+            #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+            read_gate: self.read_gate.clone(),
+            #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+            native_response: self.native_response.clone(),
         }
     }
 }
@@ -109,6 +170,52 @@ impl Drop for ReadPermit {
 }
 
 impl MediaAccess {
+    #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+    pub(crate) fn arm_file_read_probe_for_test(
+        &self,
+        generation: u64,
+        package_hash: &str,
+        entry_path: &str,
+        gate: Arc<super::istream::read_probe::ReadGate>,
+    ) -> bool {
+        let mut state = self.0.lock().unwrap_or_else(|error| error.into_inner());
+        if state.generation != generation
+            || !state.scope.active.load(Ordering::Acquire)
+            || gate.owner.generation != generation
+            || gate.owner.package_hash != package_hash
+            || gate.owner.entry_path != entry_path
+        {
+            return false;
+        }
+        let Some(resource) = state
+            .resources
+            .get_mut(&(package_hash.into(), entry_path.into()))
+        else {
+            return false;
+        };
+        if resource.payload.is_some()
+            || resource.read_gate.is_some()
+            || !resource.pinned.as_ref().is_some_and(|pin| {
+                pin.entry.path == gate.owner.entry_path
+                    && pin.entry.sha256 == gate.owner.content_sha256
+                    && pin.entry.bytes == gate.owner.content_bytes
+            })
+        {
+            return false;
+        }
+        resource.read_gate = Some(gate);
+        true
+    }
+    #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+    pub(crate) fn debug_scope_snapshot(&self, generation: u64) -> Option<(bool, usize)> {
+        let state = self.0.lock().unwrap_or_else(|error| error.into_inner());
+        (state.generation == generation).then(|| {
+            (
+                state.scope.active.load(Ordering::Acquire),
+                state.scope.readers.load(Ordering::Acquire),
+            )
+        })
+    }
     pub(crate) fn new() -> Self {
         Self(Arc::new(Mutex::new(AccessState {
             generation: 0,
@@ -178,6 +285,8 @@ impl MediaAccess {
                 Resource {
                     pinned: Some(media),
                     payload: None,
+                    #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+                    read_gate: None,
                 },
             )]
             .into_iter()
@@ -201,6 +310,8 @@ impl MediaAccess {
                 Resource {
                     pinned: Some(media),
                     payload: None,
+                    #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+                    read_gate: None,
                 },
             )]
             .into_iter()
@@ -233,6 +344,8 @@ impl MediaAccess {
                     Resource {
                         pinned: Some(media),
                         payload: None,
+                        #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+                        read_gate: None,
                     },
                 )
             })
@@ -243,6 +356,8 @@ impl MediaAccess {
                 Resource {
                     pinned: None,
                     payload: Some(payload),
+                    #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+                    read_gate: None,
                 },
             )
             .is_some()
@@ -269,6 +384,10 @@ impl MediaAccess {
             scope: Arc::clone(&state.scope),
             pinned: resource.pinned.clone(),
             payload: resource.payload.clone(),
+            #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+            read_gate: resource.read_gate.clone(),
+            #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+            native_response: None,
         })
     }
 

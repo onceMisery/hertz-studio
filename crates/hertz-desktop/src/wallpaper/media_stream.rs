@@ -173,6 +173,11 @@ pub struct MediaFileStream {
 }
 
 impl MediaFileStream {
+    #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+    pub(crate) fn matches_read_probe_file(&self, path: &Path, bytes: u64) -> bool {
+        self.path == path && self.total == bytes
+    }
+
     /// 以只读共享打开；写共享不授予——并发写者在打开阶段即被拒。
     pub fn open(path: &Path, pool: &Arc<StreamSlotPool>) -> Result<Self, StreamError> {
         let _slot = pool.acquire()?;

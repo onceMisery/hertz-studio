@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: MIT
 //! Native pinned client. Browsers call their local service, never this TLS endpoint.
-use crate::buffer::{MIN_PCM_RATE, PcmBudget, PcmReservation};
+use crate::buffer::{PcmBudget, PcmReservation, MIN_PCM_RATE};
 use crate::clock::{ClockMapping, Estimator, MonotonicClock, TimeSample};
 use crate::members::{Paired, Permissions, Secret};
 use crate::notifications::Notifications;
 use crate::protocol::{
-    AudioFormat, CAPABILITIES, ControlFrame, Counter, FormatMode, MAX_MESSAGE, PCM_HEADER,
-    PcmBlock, StreamIdentity, VERSION,
+    AudioFormat, ControlFrame, Counter, FormatMode, PcmBlock, StreamIdentity, CAPABILITIES,
+    MAX_MESSAGE, PCM_HEADER, VERSION,
 };
 use crate::server::ROOM_PATH;
 use crate::tls::{self, Fingerprint};
@@ -20,8 +20,8 @@ use tokio::net::TcpStream;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio_rustls::client::TlsStream;
-use tokio_tungstenite::tungstenite::{Message, protocol::WebSocketConfig};
-use tokio_tungstenite::{WebSocketStream, client_async_with_config};
+use tokio_tungstenite::tungstenite::{protocol::WebSocketConfig, Message};
+use tokio_tungstenite::{client_async_with_config, WebSocketStream};
 use uuid::Uuid;
 
 type Socket = WebSocketStream<TlsStream<TcpStream>>;

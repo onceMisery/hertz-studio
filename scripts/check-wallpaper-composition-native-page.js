@@ -9,6 +9,17 @@ const read=p=>fs.readFileSync(path.join(root,p),'utf8');
 const projection=JSON.parse(fs.readFileSync(path.join(output,'projection.json'),'utf8'));
 const uri=fs.readFileSync(path.join(output,'uri.txt'),'utf8');
 let init=fs.readFileSync(path.join(output,'native-init.js'),'utf8');
+const movie=fs.readFileSync(path.join(output,'movie.webm'));
+function routeMovie(route){
+  const range=/^bytes=(\d+)-(\d*)$/.exec(route.request().headers().range||'');
+  if(range){
+    const start=Number(range[1]),end=range[2]?Math.min(Number(range[2]),movie.length-1):movie.length-1;
+    assert(start<=end&&start<movie.length,'valid native-contract media range');
+    return route.fulfill({status:206,contentType:'video/webm',headers:{'accept-ranges':'bytes',
+      'content-range':`bytes ${start}-${end}/${movie.length}`,'content-length':String(end-start+1)},body:movie.subarray(start,end+1)});
+  }
+  return route.fulfill({status:200,contentType:'video/webm',headers:{'accept-ranges':'bytes','content-length':String(movie.length)},body:movie});
+}
 let html=read('crates/hertz-desktop/assets/wallpaper-scene.html')
   .replace('__GL_BUDGET__',()=>read('plugin/ui/stage-resource-budget.js')+'\n'+read('crates/hertz-desktop/assets/wallpaper-gl-budget.js'))
   .replace('__RUNTIME__',()=>read('plugin/ui/vendor/stage-runtime.js'))
@@ -22,19 +33,36 @@ if(diagnostic){
 (async()=>{
  const browser=await chromium.launch({channel:process.env.PLAYWRIGHT_CHANNEL||'chrome',headless:true,args:['--use-angle=swiftshader','--enable-unsafe-swiftshader']});
  try{
+  // The headless browser uses this machine's actual rAF cadence. Bind the copied
+  // fixture's scheduler metadata to it; target, files and native resource caps
+  // stay as admitted. A 60Hz default on a 165Hz browser incorrectly runs at 41fps.
+  const cadencePage=await browser.newPage();
+  const cadence=await cadencePage.evaluate(()=>new Promise(resolve=>{
+    const intervals=[];let previous=null;
+    function sample(now){if(previous!==null)intervals.push(now-previous);previous=now;
+      if(intervals.length===24)resolve(intervals);else requestAnimationFrame(sample);}
+    requestAnimationFrame(sample);
+  }));
+  await cadencePage.close();
+  const median=cadence.slice().sort((a,b)=>a-b)[Math.floor(cadence.length/2)];
+  const refreshHz=1000/median;
+  const bindCadence=source=>source.replace(/"refreshHz":\d+(?:\.\d+)?/,()=>`"refreshHz":${refreshHz}`)
+    .replace(/"frameDivisor":\d+/,()=>`"frameDivisor":${Math.ceil(refreshHz/15)}`);
+  init=bindCadence(init);
   const page=await browser.newPage({viewport:{width:64,height:64}}),errors=[];
   page.on('pageerror',error=>errors.push(error.message));
   page.on('console',message=>{if(message.type()==='error'){errors.push(message.text());console.error('browser:',message.text());}});
   await page.addInitScript(init+'\nwindow.nativeEvents=[];window.ipc={postMessage:message=>nativeEvents.push(message)};');
   await page.route('https://**.wallpaper.invalid/**',route=>{
     if(route.request().url()===uri)return route.fulfill({status:200,contentType:'application/json',body:JSON.stringify(projection)});
-    if(route.request().url()===projection.resolvedAssets[0].url)return route.fulfill({status:200,contentType:'video/webm',body:fs.readFileSync(path.join(output,'movie.webm'))});
+    if(route.request().url()===projection.resolvedAssets[0].url)return routeMovie(route);
     return route.fulfill({status:404,body:''});
   });
   await page.route('http://hertz.localhost/',route=>route.fulfill({status:200,contentType:'text/html',body:html}));
   await page.goto('http://hertz.localhost/');
   console.log('native composition page loaded');
-  const accepted=await page.evaluate(async uri=>{const pending=hertzWallpaper.applyComposition(uri);hertzWallpaper.start(15);
+  const accepted=await page.evaluate(async uri=>{hertzWallpaper.applyConfig({source:'fixed',audioInput:{kind:'none'},motion:1,quality:'low'});
+    const pending=hertzWallpaper.applyComposition(uri);hertzWallpaper.start(15);
     return Promise.race([pending,new Promise(resolve=>setTimeout(()=>resolve('preparation-timeout'),10000))]);},uri);
   assert.equal(accepted,true,JSON.stringify({errors,events:await page.evaluate(()=>nativeEvents)}));
   console.log('native composition preparation completed');
@@ -42,6 +70,11 @@ if(diagnostic){
     throw new Error(failure.message+'\n'+JSON.stringify(await page.evaluate(()=>({events:nativeEvents,stats:hertzWallpaper.debug(),budget:HertzGlBudget.stats()}))));
   });
   await page.waitForFunction(()=>hertzWallpaper.debug().draws>=3,null,{timeout:10000});
+  await page.waitForFunction(()=>hertzWallpaper.debug().sceneTime>=2200&&hertzWallpaper.debug().stats.sceneStats.ready,null,{timeout:10000});
+  const runningCadence=await page.evaluate(()=>hertzWallpaper.debug());
+  assert(runningCadence.draws>=25,'real 15fps page submits across multiple video loop boundaries');
+  assert.equal(runningCadence.gate.divisor,Math.ceil(refreshHz/15));
+  assert(runningCadence.stats.actualFps<=17,'test must exercise the native 15fps cadence');
   await page.evaluate(()=>{
     const gl=document.querySelector('#host canvas').getContext('webgl2');
     window.nativeFencePoll=gl.clientWaitSync.bind(gl);
@@ -110,19 +143,20 @@ if(diagnostic){
   const fits={};
   for(const name of ['contain','cover','stretch']){
     const directory=path.join(output,name),fitProjection=JSON.parse(fs.readFileSync(path.join(directory,'projection.json'),'utf8'));
-    const fitUri=fs.readFileSync(path.join(directory,'uri.txt'),'utf8'),fitInit=fs.readFileSync(path.join(directory,'native-init.js'),'utf8');
+    const fitUri=fs.readFileSync(path.join(directory,'uri.txt'),'utf8'),fitInit=bindCadence(fs.readFileSync(path.join(directory,'native-init.js'),'utf8'));
     const fitPage=await browser.newPage({viewport:{width:64,height:128}}),fitErrors=[];
     fitPage.on('pageerror',error=>fitErrors.push(error.message));
     fitPage.on('console',message=>{if(message.type()==='error')fitErrors.push(message.text());});
     await fitPage.addInitScript(fitInit+'\nwindow.nativeEvents=[];window.ipc={postMessage:message=>nativeEvents.push(message)};');
     await fitPage.route('https://**.wallpaper.invalid/**',route=>{
       if(route.request().url()===fitUri)return route.fulfill({status:200,contentType:'application/json',body:JSON.stringify(fitProjection)});
-      if(route.request().url()===fitProjection.resolvedAssets[0].url)return route.fulfill({status:200,contentType:'video/webm',body:fs.readFileSync(path.join(output,'movie.webm'))});
+      if(route.request().url()===fitProjection.resolvedAssets[0].url)return routeMovie(route);
       return route.fulfill({status:404,body:''});
     });
     await fitPage.route('http://hertz.localhost/',route=>route.fulfill({status:200,contentType:'text/html',body:html}));
     await fitPage.goto('http://hertz.localhost/');
-    assert.equal(await fitPage.evaluate(async url=>{const prepared=hertzWallpaper.applyComposition(url);hertzWallpaper.start(15);return await prepared;},fitUri),true);
+    assert.equal(await fitPage.evaluate(async url=>{hertzWallpaper.applyConfig({source:'fixed',audioInput:{kind:'none'},motion:1,quality:'low'});
+      const prepared=hertzWallpaper.applyComposition(url);hertzWallpaper.start(15);return await prepared;},fitUri),true);
     await fitPage.waitForFunction(()=>hertzWallpaper.debug().draws>=2);
     fits[name]=await fitPage.evaluate(()=>{
       const gl=document.querySelector('#host canvas').getContext('webgl2');
@@ -141,7 +175,7 @@ if(diagnostic){
   assert.equal(colored(fits.contain.side),false);assert.equal(colored(fits.stretch.side),false);assert.equal(colored(fits.cover.side),true);
   assert.equal(colored(fits.contain.upper),false);assert.equal(colored(fits.stretch.upper),true);assert.equal(colored(fits.cover.upper),true);
   for(const fit of Object.values(fits))assert.equal(colored(fit.center),true);
-  fs.writeFileSync(path.join(output,'native-page-evidence.json'),JSON.stringify({source:'actual Rust production selector + GlAdmission + original native page',qualification:'browser integration; controlled visibility event/state; Windows/GPU qualification pending',state,blockedBefore,blockedAfter,hiddenBefore,hiddenAfter,visibilityResumed,fits,paused,retired,errors},null,2));
+  fs.writeFileSync(path.join(output,'native-page-evidence.json'),JSON.stringify({source:'actual Rust production selector + GlAdmission + original native page',qualification:'browser integration; copied scheduler metadata matches measured headless rAF; native resource caps unchanged; controlled visibility event/state; Windows/GPU qualification pending',cadence:{intervals:cadence,refreshHz,running:runningCadence},state,blockedBefore,blockedAfter,hiddenBefore,hiddenAfter,visibilityResumed,fits,paused,retired,errors},null,2));
   console.log('PASS native composition page: real Rust projection, one context, complete frame, pause and retirement');
  }finally{await browser.close();}
 })().catch(error=>{console.error(error.stack);process.exitCode=1;});
