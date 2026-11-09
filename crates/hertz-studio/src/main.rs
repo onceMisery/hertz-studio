@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+#![cfg_attr(all(windows, feature = "native-window"), windows_subsystem = "windows")]
 // Copyright (c) 2026 hertz-studio contributors
 
 //! `hertz-studio` — the hertz-studio service binary.
@@ -133,6 +134,16 @@ mod window;
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    // Explicit CLI invocations can print to an existing terminal; GUI startup
+    // never allocates or attaches a console.
+    #[cfg(all(windows, feature = "native-window"))]
+    if !args.window || args.help || args.version || args.describe {
+        unsafe {
+            windows_sys::Win32::System::Console::AttachConsole(
+                windows_sys::Win32::System::Console::ATTACH_PARENT_PROCESS,
+            );
+        }
+    }
     if args.describe {
         println!("{}", build_info::description());
         return Ok(());
@@ -293,6 +304,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
         .merge(ui_asset_router())
         .route("/wallpapers/{name}", get(wallpaper))
         .route("/platform-icons/{name}", get(platform_icon))
+        .route("/art/default-cover.svg", get(default_cover))
         .route("/space-scene-preview/{name}", get(space_preview))
         .route(
             "/",
@@ -937,6 +949,19 @@ async fn platform_icon(Path(name): Path<String>) -> axum::response::Response {
             .into_response(),
         None => (axum::http::StatusCode::NOT_FOUND, "no such platform icon").into_response(),
     }
+}
+
+/// 首页「正在播放」卡的无封面默认图：原创矢量插画，单文件固定名。
+/// 内容可能随版本调整，用 no-cache 让刷新即得新图（与 JS/CSS 一致）。
+async fn default_cover() -> axum::response::Response {
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, "image/svg+xml"),
+            (axum::http::header::CACHE_CONTROL, "no-cache"),
+        ],
+        include_bytes!("../../../plugin/ui/art/default-cover.svg"),
+    )
+        .into_response()
 }
 
 async fn load_or_create_token(data_dir: &std::path::Path) -> anyhow::Result<String> {

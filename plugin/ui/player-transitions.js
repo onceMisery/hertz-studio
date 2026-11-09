@@ -7,20 +7,33 @@
     return stage && typeof stage.isDocumentHidden === "function" ? stage.isDocumentHidden() : !!document.hidden;
   }
   var key = 'vmusic.player.transitions.v1', effects = ['zoom', 'flip', 'fade', 'off'];
+  var DEFAULT_DURATION = 600, DURATION_MARKER = 'vmusic.player.transitions.duration600';
   var prefs, current = null, media = global.matchMedia('(prefers-reduced-motion: reduce)');
   var ease = 'cubic-bezier(.4, 0, .2, 1)';
   function read() {
     var saved;
     try { saved = JSON.parse(localStorage.getItem(key)); } catch (_) {}
     prefs = {};
+    var onboarded = true;
+    try { onboarded = localStorage.getItem(DURATION_MARKER) !== null; } catch (_) {}
+    var migrated = false;
     ['cover', 'stage'].forEach(function (kind) {
       var value = saved && saved[kind];
+      var duration = value && typeof value.duration === 'number' && Number.isFinite(value.duration)
+        ? Math.round(Math.max(200, Math.min(1500, value.duration)) / 50) * 50 : DEFAULT_DURATION;
+      // 旧默认 1000 和手选分不出来：只迁移一次旧默认；落标记后再选 1000 视为明确选择。
+      if (!onboarded && duration === 1000) { duration = DEFAULT_DURATION; migrated = true; }
       prefs[kind] = {
         effect: value && effects.indexOf(value.effect) !== -1 ? value.effect : 'zoom',
-        duration: value && typeof value.duration === 'number' && Number.isFinite(value.duration)
-          ? Math.round(Math.max(200, Math.min(1500, value.duration)) / 50) * 50 : 1000
+        duration: duration
       };
     });
+    if (!onboarded) {
+      try {
+        localStorage.setItem(DURATION_MARKER, '1');
+        if (migrated) localStorage.setItem(key, JSON.stringify(prefs));
+      } catch (_) {}
+    }
   }
   function reduced() { return media.matches || document.body.classList.contains('reduce-motion'); }
   function cancel(kind) {

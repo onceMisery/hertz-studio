@@ -52,7 +52,7 @@
     },
     {
       "script": "check-standalone-installer-native.js",
-      "purpose": "Actual current-user NSIS install/update/uninstall in owned Windows output paths: exact candidate/source identity, special-character paths, multiple real profiles, data preservation, registration rollback and partial state, initial/removal/recovery markers, missing manifest, locked projection retry, portable receipt interruption and menu reparse rejection. Requires matching Full/native release HERTZ_BIN and compiled HERTZ_INSTALLER; refuses existing user registration/shortcuts. Null audio and controlled failures; signing, remote updates, clean OS and physical power loss remain separate."
+      "purpose": "Actual current-user NSIS install/update/uninstall in owned Windows output paths: exact candidate/source identity, special-character paths, multiple real profiles, data preservation, registration rollback and partial state, initial/removal/recovery markers, missing manifest, locked projection retry, portable receipt interruption, menu/desktop shortcut ownership and reparse rejection. Requires matching Full/native release HERTZ_BIN and compiled HERTZ_INSTALLER; refuses existing user registration/shortcuts. Null audio and controlled failures; signing, remote updates, clean OS and physical power loss remain separate."
     },
     {
       "script": "check-native-music-import-browser.js",

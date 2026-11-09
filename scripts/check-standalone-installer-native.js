@@ -43,7 +43,7 @@ async function setup(expected=0,target=install){
   assert.equal(result.code,expected,result.text);assert.equal(code,expected,processChild.err||'NSIS installation exit');
 }
 async function uninstall(target=install,expected=0){const started=Date.now();const processChild=child(path.join(target,'Uninstall-Hertz.exe'),['/S']);await exited(processChild);const result=await setupResult('Uninstall',target,started);assert.equal(result.code,expected,result.text);if(expected===0)await until(()=>!fs.existsSync(path.join(target,'hertz-setup.json')),'real uninstaller finishes');}
-function registration(){return JSON.parse(command('$a=[Microsoft.Win32.Registry]::CurrentUser.OpenSubKey("Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\HertzStudioFull"); $b=[Microsoft.Win32.Registry]::CurrentUser.OpenSubKey("Software\\HertzStudio\\Desktop"); try { @{ uninstallKey=($null-ne $a);appKey=($null-ne $b);location=$(if($a){$a.GetValue("InstallLocation")});version=$(if($a){$a.GetValue("DisplayVersion")});appDir=$(if($b){$b.GetValue("InstallDir")});menu=[Environment]::GetFolderPath("Programs") }|ConvertTo-Json -Compress } finally { if($a){$a.Dispose()};if($b){$b.Dispose()} }'));}
+function registration(){return JSON.parse(command('$a=[Microsoft.Win32.Registry]::CurrentUser.OpenSubKey("Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\HertzStudioFull"); $b=[Microsoft.Win32.Registry]::CurrentUser.OpenSubKey("Software\\HertzStudio\\Desktop"); try { @{ uninstallKey=($null-ne $a);appKey=($null-ne $b);location=$(if($a){$a.GetValue("InstallLocation")});version=$(if($a){$a.GetValue("DisplayVersion")});appDir=$(if($b){$b.GetValue("InstallDir")});menu=[Environment]::GetFolderPath("Programs");desktop=[Environment]::GetFolderPath("Desktop") }|ConvertTo-Json -Compress } finally { if($a){$a.Dispose()};if($b){$b.Dispose()} }'));}
 function snapshot(directory){return Object.fromEntries(fs.readdirSync(directory).sort().filter(name=>fs.statSync(path.join(directory,name)).isFile()).map(name=>[name,sha(path.join(directory,name))]));}
 function snapshotTree(directory){const result={};const visit=current=>{for(const entry of fs.readdirSync(current,{withFileTypes:true})){const full=path.join(current,entry.name);if(entry.isDirectory())visit(full);else if(entry.isFile())result[path.relative(directory,full)]=sha(full);}};visit(directory);return result;}
 async function service(data,target=install){const processChild=child(path.join(target,'hertz-studio.exe'),['--bind','127.0.0.1','--port','0','--data-dir',data]);const discovery=await until(()=>{assert.equal(processChild.exitCode,null,processChild.err);try{const value=JSON.parse(fs.readFileSync(path.join(data,'vmusicd.json'),'utf8'));return value.pid===processChild.pid&&value;}catch{return null;}},'installed real service',60000);return {processChild,discovery,data};}
@@ -60,6 +60,7 @@ async function main(){
   for(const[file,hash]of Object.entries(installerManifest.sourceSha256))assert.equal(sha(path.join(root,file)),hash,'current compiled installer source: '+file);
   const before=registration();assert.equal(before.uninstallKey,false,'Preserve existing user installation');assert.equal(before.appKey,false,'Preserve existing user app registration');
   for(const name of ['Hertz Studio.lnk','Uninstall Hertz Studio.lnk'])assert(!fs.existsSync(path.join(before.menu,'Hertz Studio',name)),'Preserve existing user shortcuts');
+  assert(!fs.existsSync(path.join(before.desktop,'Hertz Studio.lnk')),'Preserve existing user desktop shortcut');
   mark('actual unsigned NSIS candidate and Full/native release payload match current source identities; original registration is absent');
   portable=packageStandalone(binary,path.join(output,'packages'));
   command('Add-Type -AssemblyName System.IO.Compression.FileSystem; [IO.Compression.ZipFile]::ExtractToDirectory($env:HERTZ_TEST_ZIP,$env:HERTZ_TEST_PACKAGE)',{HERTZ_TEST_ZIP:portable.archive,HERTZ_TEST_PACKAGE:path.join(output,'package')});
@@ -76,9 +77,12 @@ async function checksAfterPackage(){
   assert(!fs.existsSync(path.join(install,'hertz-setup-incomplete.json')));
   const links=JSON.parse(command('$s=New-Object -ComObject WScript.Shell; @{target=$s.CreateShortcut((Join-Path $env:HERTZ_TEST_MENU "Hertz Studio.lnk")).TargetPath;arguments=$s.CreateShortcut((Join-Path $env:HERTZ_TEST_MENU "Hertz Studio.lnk")).Arguments}|ConvertTo-Json -Compress',{HERTZ_TEST_MENU:path.join(current.menu,'Hertz Studio')}));
   assert.equal(links.target.toLowerCase(),path.join(install,'hertz-studio.exe').toLowerCase());assert.equal(links.arguments,'--window');
+  const desktopLink=JSON.parse(command('$s=New-Object -ComObject WScript.Shell; $l=$s.CreateShortcut((Join-Path $env:HERTZ_TEST_DESKTOP "Hertz Studio.lnk")); @{target=$l.TargetPath;arguments=$l.Arguments;icon=$l.IconLocation;working=$l.WorkingDirectory}|ConvertTo-Json -Compress',{HERTZ_TEST_DESKTOP:current.desktop}));
+  assert.equal(desktopLink.target.toLowerCase(),path.join(install,'hertz-studio.exe').toLowerCase());assert.equal(desktopLink.arguments,'--window');
+  assert.equal(desktopLink.icon.toLowerCase(),path.join(install,'hertz-studio.exe,0').toLowerCase());assert.equal(desktopLink.working.toLowerCase(),install.toLowerCase());
   fs.copyFileSync(path.join(install,'Uninstall-Hertz.exe'),path.join(output,'owned-uninstaller.exe'));
   const initial=snapshot(install);
-  mark('real silent current-user installation preserves an extra file and correctly registers Chinese/space/ampersand/apostrophe/dollar paths and startup shortcut');
+  mark('real silent current-user installation preserves an extra file and correctly registers Chinese/space/ampersand/apostrophe/dollar paths, startup and desktop shortcuts');
 
   const a=await service(path.join(output,'profile A')),b=await service(path.join(output,'profile B'));
   await setup(1);assert.deepEqual(snapshot(install),initial);
@@ -100,8 +104,9 @@ async function checksAfterPackage(){
   mark('a commit-callback registration failure restores original program files, uninstaller, receipt, registry and shortcut projections');
   const profilesBeforeRemoval=[snapshotTree(a.data),snapshotTree(b.data)];
   await uninstall();assert(!registration().uninstallKey);assert(!registration().appKey);assert.equal(fs.readFileSync(path.join(install,'user-kept.txt'),'utf8'),'Keep this user file.');
+  assert(!fs.existsSync(path.join(current.desktop,'Hertz Studio.lnk')),'Uninstall removes the owned desktop shortcut');
   assert.deepEqual(snapshotTree(a.data),profilesBeforeRemoval[0]);assert.deepEqual(snapshotTree(b.data),profilesBeforeRemoval[1]);
-  mark('real NSIS uninstallation removes only owned program/registration/shortcut artifacts and preserves both profiles and extra files');
+  mark('real NSIS uninstallation removes only owned program/registration/menu/desktop shortcut artifacts and preserves both profiles and extra files');
 
   const absent=path.join(output,'runtime-missing');
   rejection(()=>injected('function Get-HertzWebViewVersion{return $null}; Invoke-HertzSetupInstall $InstallDir $env:HERTZ_SETUP_PACKAGE $env:HERTZ_SETUP_UNINSTALL $false',absent),/webview2_required/);
@@ -227,6 +232,36 @@ async function reviewedBoundaryChecks(){
   assert(fs.lstatSync(menuLink).isSymbolicLink());assert.equal(fs.realpathSync(menuLink),fs.realpathSync(menuTarget));fs.unlinkSync(menuLink);
   assert(!registration().uninstallKey);assert(!registration().appKey);
   mark('menu junctions and linked ancestors reject before installation, projection reads or uninstall deletion; redirected data stays byte-identical');
+
+  const desktopHome=path.join(output,'desktop-shortcut-home');fs.mkdirSync(desktopHome);
+  const desktopInstall=path.join(output,'desktop-shortcut-install');
+  injected('$hertzDesktop=$env:HERTZ_TEST_DESKTOP;Invoke-HertzSetupInstall $InstallDir $env:HERTZ_SETUP_PACKAGE $env:HERTZ_SETUP_UNINSTALL $false',desktopInstall,{HERTZ_TEST_DESKTOP:desktopHome});
+  const ownedDesktopLink=JSON.parse(command('$s=New-Object -ComObject WScript.Shell;$l=$s.CreateShortcut((Join-Path $env:HERTZ_TEST_DESKTOP "Hertz Studio.lnk"));@{target=$l.TargetPath;arguments=$l.Arguments}|ConvertTo-Json -Compress',{HERTZ_TEST_DESKTOP:desktopHome}));
+  assert.equal(ownedDesktopLink.target.toLowerCase(),path.join(desktopInstall,'hertz-studio.exe').toLowerCase());assert.equal(ownedDesktopLink.arguments,'--window');
+  injected('$hertzDesktop=$env:HERTZ_TEST_DESKTOP;Invoke-HertzSetupUninstall $InstallDir $false',desktopInstall,{HERTZ_TEST_DESKTOP:desktopHome});
+  assert(!fs.existsSync(path.join(desktopHome,'Hertz Studio.lnk')));assert(!registration().uninstallKey);
+  mark('desktop shortcut follows the known-folder desktop, targets the installed player with --window, and uninstall removes only the owned link');
+
+  const foreignDesktop=path.join(output,'desktop-foreign');fs.mkdirSync(foreignDesktop);
+  command('$s=New-Object -ComObject WScript.Shell;$l=$s.CreateShortcut((Join-Path $env:HERTZ_TEST_DESKTOP "Hertz Studio.lnk"));$l.TargetPath=(Join-Path $env:SystemRoot "System32\\notepad.exe");$l.Save()',{HERTZ_TEST_DESKTOP:foreignDesktop});
+  const foreignInstall=path.join(output,'desktop-foreign-install');
+  rejection(()=>injected('$hertzDesktop=$env:HERTZ_TEST_DESKTOP;Invoke-HertzSetupInstall $InstallDir $env:HERTZ_SETUP_PACKAGE $env:HERTZ_SETUP_UNINSTALL $false',foreignInstall,{HERTZ_TEST_DESKTOP:foreignDesktop}),/belongs to another program/);
+  assert(!fs.existsSync(foreignInstall));assert(fs.existsSync(path.join(foreignDesktop,'Hertz Studio.lnk')));
+  mark('a desktop shortcut owned by another program rejects installation before creating the program directory and stays untouched');
+
+  const desktopTarget=path.join(output,'desktop-junction-target'),desktopJunction=path.join(output,'desktop-junction'),desktopRejected=path.join(output,'desktop-reparse-install');
+  fs.mkdirSync(desktopTarget);fs.writeFileSync(path.join(desktopTarget,'keep.txt'),'Preserve desktop junction target.');fs.symlinkSync(desktopTarget,desktopJunction,'junction');const desktopTargetBefore=snapshotTree(desktopTarget);
+  for(const location of [desktopJunction,path.join(desktopJunction,'nested')]){
+    rejection(()=>injected('$hertzDesktop=$env:HERTZ_TEST_DESKTOP;Invoke-HertzSetupInstall $InstallDir $env:HERTZ_SETUP_PACKAGE $env:HERTZ_SETUP_UNINSTALL $false',desktopRejected,{HERTZ_TEST_DESKTOP:location}),/Reparse-point/);
+    assert(!fs.existsSync(desktopRejected));assert.deepEqual(snapshotTree(desktopTarget),desktopTargetBefore);
+    rejection(()=>injected('$hertzDesktop=$env:HERTZ_TEST_DESKTOP;Get-HertzSetupProjection $InstallDir',install,{HERTZ_TEST_DESKTOP:location}),/Reparse-point/);
+  }
+  await setup();const desktopInstalledBefore=snapshot(install);
+  rejection(()=>injected('$hertzDesktop=$env:HERTZ_TEST_DESKTOP;Invoke-HertzSetupUninstall $InstallDir $false',install,{HERTZ_TEST_DESKTOP:desktopJunction}),/Reparse-point/);
+  assert.deepEqual(snapshot(install),desktopInstalledBefore);assert.deepEqual(snapshotTree(desktopTarget),desktopTargetBefore);await uninstall();
+  assert(fs.lstatSync(desktopJunction).isSymbolicLink());assert.equal(fs.realpathSync(desktopJunction),fs.realpathSync(desktopTarget));fs.unlinkSync(desktopJunction);
+  assert(!registration().uninstallKey);assert(!registration().appKey);assert(!fs.existsSync(path.join(registration().desktop,'Hertz Studio.lnk')));
+  mark('desktop junctions and linked ancestors reject before installation, projection reads or uninstall deletion; redirected data stays byte-identical');
 }
 
 main().then(checksAfterPackage).catch(async error=>{console.error(error);fs.mkdirSync(output,{recursive:true});fs.writeFileSync(path.join(output,'report.json'),JSON.stringify({passed:false,error:error.stack,checks,installer,binary,install},null,2));console.error(output);process.exitCode=1;}).finally(async()=>{for(const processChild of owned){try{processChild.kill();}catch{}}});

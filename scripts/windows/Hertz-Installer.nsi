@@ -37,7 +37,7 @@ VIAddVersionKey "LegalCopyright" "hertz-studio contributors"
 !define MUI_ICON "${PRODUCT_ICON}"
 !define MUI_UNICON "${PRODUCT_ICON}"
 !define MUI_ABORTWARNING
-!define MUI_FINISHPAGE_TEXT "Hertz Studio 已安装。可从开始菜单打开播放器。资料保留在当前用户的资料目录；卸载程序不会删除音乐与资料。"
+!define MUI_FINISHPAGE_TEXT "Hertz Studio 已安装。可从桌面或开始菜单打开播放器。资料保留在当前用户的资料目录；卸载程序不会删除音乐与资料。"
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_LICENSE "${PACKAGE_DIR}\LICENSE"
 !insertmacro MUI_PAGE_DIRECTORY

@@ -1,6 +1,8 @@
 # Windows 当前用户安装
 
-Windows 11 x64 的 Full 原生播放器提供 NSIS 安装候选。运行 `hertz-studio-full-<版本>-x86_64-pc-windows-msvc-setup.exe`，选择程序目录并完成安装，然后从开始菜单打开 Hertz Studio。安装不自动启动播放器、播放音乐或启用开机启动。
+Windows 11 x64 的 Full 原生播放器提供 NSIS 安装候选。运行 `hertz-studio-full-<版本>-x86_64-pc-windows-msvc-setup.exe`，选择程序目录并完成安装，然后从桌面或开始菜单打开 Hertz Studio。安装不自动启动播放器、播放音乐或启用开机启动。
+
+原生播放器使用 Windows GUI 子系统，从桌面或开始菜单启动时不会创建命令行窗口。
 
 默认程序位置为 `%LOCALAPPDATA%\Programs\Hertz Studio`；默认资料位置为 `%LOCALAPPDATA%\hertz-studio`。音乐、歌单、歌词与设置保存在资料目录，卸载会保留资料及程序目录中的额外文件。自定义资料目录继续使用已有 `--data-dir` 启动选项，见[便携程序说明](windows-portable.md)。
 
@@ -20,7 +22,7 @@ Windows 11 x64 的 Full 原生播放器提供 NSIS 安装候选。运行 `hertz-
 
 NSIS 使用 Unicode、当前用户权限、系统安装界面和现有图标。一次性 [setup adapter](../scripts/windows/Install-Hertz.ps1)负责登记、快捷方式、初次安装及卸载；既有 [Update-Hertz.ps1](../scripts/windows/Update-Hertz.ps1)负责完整包及真实 exe 校验、共享运行／独占替换和程序事务，不增加常驻安装服务。
 
-恢复由已验证的更新标记驱动，即使清单在替换中暂时缺失也可进入恢复。原包复算通过后，恢复提交回调在 writer 和标记仍保留时修复安装投影；投影失败保留恢复资格。归属 receipt 先于卸载器写入，便携版首次转换中断也有可验证的归属。普通卸载器修改、无归属的部分登记、其它目录登记和开始菜单目录／祖先的 reparse point 都拒绝接管。
+恢复由已验证的更新标记驱动，即使清单在替换中暂时缺失也可进入恢复。原包复算通过后，恢复提交回调在 writer 和标记仍保留时修复安装投影；投影失败保留恢复资格。归属 receipt 先于卸载器写入，便携版首次转换中断也有可验证的归属。普通卸载器修改、无归属的部分登记、其它目录登记和开始菜单／桌面目录／祖先的 reparse point 都拒绝接管。桌面快捷方式跟随当前用户的桌面已知文件夹（含 OneDrive 重定向），与开始菜单入口一样只覆盖指向本安装的快捷方式。
 
 原命令行更新的回调默认关闭。未知注册字段不进入回滚覆盖范围，安装和卸载只操作受管字段。注册与快捷方式没有跨文件／注册表的断电原子性保证；标记和程序备份提供受控失败后的重试路径。
 

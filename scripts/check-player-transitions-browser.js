@@ -30,7 +30,7 @@ const output = path.resolve(__dirname, '../output/playwright/player-transitions'
     assert.equal(await page.locator('#player-cover-transition').count(), 1, 'Appearance offers a cover transition selector');
     assert.equal(await page.locator('#player-stage-transition').count(), 1, 'Appearance offers a separate stage transition selector');
     assert.equal(await page.locator('#player-cover-transition').inputValue(), 'zoom');
-    assert.equal(await page.locator('#player-cover-duration').inputValue(), '1000');
+    assert.equal(await page.locator('#player-cover-duration').inputValue(), '600');
     await page.waitForFunction(() => getComputedStyle(document.getElementById('bar-art')).backgroundImage !== 'none');
     fs.mkdirSync(output, { recursive: true });
     await page.screenshot({ path: path.join(output, 'before.png') });
@@ -194,6 +194,21 @@ const output = path.resolve(__dirname, '../output/playwright/player-transitions'
     assert.equal(await page.locator('#player-cover-duration').inputValue(), '800');
     assert.equal(await page.locator('#player-stage-transition').inputValue(), 'flip');
     assert.equal(await page.locator('#player-stage-duration').inputValue(), '950');
+    await page.evaluate(() => {
+      localStorage.removeItem('vmusic.player.transitions.duration600');
+      localStorage.setItem('vmusic.player.transitions.v1', JSON.stringify({ cover: { effect: 'flip', duration: 1000 }, stage: { effect: 'fade', duration: 1000 } }));
+    });
+    await page.reload();
+    await page.waitForFunction(() => document.getElementById('bar-track').onclick);
+    assert.equal(await page.locator('#player-cover-duration').inputValue(), '600', 'Legacy 1000ms default migrates to 600ms once');
+    assert.equal(await page.locator('#player-stage-duration').inputValue(), '600');
+    assert.equal(await page.locator('#player-cover-transition').inputValue(), 'flip', 'Migration preserves the chosen effect');
+    await configure('cover', 'flip', 1000);
+    await page.reload();
+    await page.waitForFunction(() => document.getElementById('bar-track').onclick);
+    assert.equal(await page.locator('#player-cover-duration').inputValue(), '1000', 'Explicit 1000ms after the migration marker is preserved');
+    await configure('cover', 'zoom', 800);
+    await configure('stage', 'flip', 950);
     await page.emulateMedia({ reducedMotion: 'reduce' });
     const reduced = await enterCover('zoom');
     assert.equal(reduced.animations.length, 0, 'System reduced motion bypasses animation');

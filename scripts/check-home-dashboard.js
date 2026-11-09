@@ -73,7 +73,15 @@ async function main() {
   assert.notEqual(f.nodes['home-art-wrap'].style.props['--ph'], undefined, 'force keeps the track hue');
   f.api.update();
   assert.equal(f.arts.length, decodes + 1, 'an ordinary update on the same key still does no work');
+  // 无封面/封面落空都落到内置默认插画，而不是空占位。
+  f.set({ current: { id: 'C', title: '无封面', cover: '' } });
+  f.arts.at(-1).resolve(''); await flush();
+  assert.equal(f.nodes['home-art'].src, '/art/default-cover.svg', 'empty cover resolves to the built-in art');
+  f.set({ current: { id: 'D', title: '失败封面', cover: 'D.jpg' } });
+  f.arts.at(-1).reject(new Error('offline')); await flush();
+  assert.equal(f.nodes['home-art'].src, '/art/default-cover.svg', 'failed cover resolves to the built-in art');
   f.set({ current: null, queueLength: 0, intent: 2 });
+  assert.equal(f.nodes['home-art'].src, '/art/default-cover.svg', 'no track keeps the built-in art');
   const old = f.api.onViewEnter(); const fresh = f.api.onViewEnter();
   f.histories[1].resolve({ id: 'fresh', title: '新记录' }); await fresh;
   f.histories[0].resolve({ id: 'stale', title: '旧记录' }); await old;

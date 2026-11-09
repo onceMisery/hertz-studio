@@ -126,6 +126,9 @@ fn embed_windows_icon(root: &std::path::Path) -> std::io::Result<()> {
         group.extend_from_slice(&id.to_le_bytes());
     }
     entry(&mut resource, 14, 1, &group, 0x1030);
+    let manifest = root.join("crates/hertz-studio/hertz-studio.manifest");
+    println!("cargo:rerun-if-changed={}", manifest.display());
+    entry(&mut resource, 24, 1, &std::fs::read(manifest)?, 0x1030);
     let output = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
     let resource_path = output.join("hertz-studio-icon.res");
     std::fs::write(&resource_path, resource)?;

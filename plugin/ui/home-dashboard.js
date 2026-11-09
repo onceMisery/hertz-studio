@@ -3,7 +3,7 @@
 (function (global) {
   'use strict';
   var host = null, el = null, recent = null, recentIntent = -1;
-  var historyEpoch = 0, historyStatus = 'idle', artKey = '', actionEpoch = 0, acting = false;
+  var historyEpoch = 0, historyStatus = 'idle', artKey = null, actionEpoch = 0, acting = false;
 
   function present(snapshot) {
     var track = snapshot.current;
@@ -31,6 +31,13 @@
     var h = 0;
     for (var i = 0; i < seed.length; i += 1) h = (h * 31 + seed.charCodeAt(i)) % 360;
     return String(h);
+  }
+
+  // 无封面时的默认插画。声明保持根相对，赋给 DOM 前过宿主 assetUrl：
+  // 插件形态要补插件 id 前缀，独立形态恒等（见 host.js）。
+  function fallbackCover() {
+    var url = '/art/default-cover.svg', adapter = global.hertzHost;
+    return adapter && typeof adapter.assetUrl === 'function' ? adapter.assetUrl(url) : url;
   }
 
   function update(force) {
@@ -79,11 +86,12 @@
     if (track) el.wrap.style.setProperty('--ph', hueOf(track.id));
     else el.wrap.style.removeProperty('--ph');
     // 换曲先撤下旧图并作废旧解码；同曲新封面仍由共享封面owner解码后提交。
-    if (!track || oldId !== track.id) host.applyCover(el.art, '');
-    if (!track) return;
+    // 没有曲目或封面解析落空时，落到内置默认插画而不是空占位。
+    if (track && oldId !== track.id) host.applyCover(el.art, '');
+    if (!track) { host.applyCover(el.art, fallbackCover()); return; }
     Promise.resolve(host.cover(track)).then(function (url) {
-      if (nextKey === artKey) host.applyCover(el.art, url || '');
-    }, function () { if (nextKey === artKey) host.applyCover(el.art, ''); });
+      if (nextKey === artKey) host.applyCover(el.art, url || fallbackCover());
+    }, function () { if (nextKey === artKey) host.applyCover(el.art, fallbackCover()); });
   }
 
   async function refreshRecent() {

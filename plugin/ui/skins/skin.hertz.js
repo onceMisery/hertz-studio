@@ -109,8 +109,15 @@
   function mountHome() {
     refs.home = id('view-home');
     var dashboard = id('home-dashboard'), continuation;
+    // 继续聆听与快捷入口是首页第一屏的主体：置顶并默认展开，不再排到歌单区之后。
+    if (dashboard) {
+      continuation = make('details', 'hz-home-section hz-continuation', refs.home);
+      continuation.open = true;
+      make('summary', '', continuation, '继续聆听与快捷入口'); layout.move(dashboard, continuation);
+    }
     [['最近播放', 'recent', '听过的旋律，再听一遍'], ['最近加入', 'added', '曲库中的新声音'], ['从一张专辑开始', 'albums', '曲库里的专辑'], ['熟悉的歌手', 'artists', '从一个声音开始']].forEach(function (section) {
       var block = make('section', 'hz-home-section', refs.home);
+      block.dataset.section = section[1];
       var top = make('div', 'hz-section-head', block), titles = make('div', '', top);
       make('h2', '', titles, section[0]);
       var all = button(top, 'hz-text-link', '查看全部', '', function () {
@@ -125,15 +132,12 @@
         refs.featuredDots = make('div', 'hz-featured-dots', featuredHead); refs.featuredDots.setAttribute('aria-label', '切换精选专辑');
         refs.featuredContent = make('div', 'hz-featured-content', refs.featured);
         notice(refs.featuredContent, '正在读取专辑…');
-        continuation = make('details', 'hz-home-section hz-continuation', refs.home);
-        make('summary', '', continuation, '继续聆听与快捷入口'); layout.move(dashboard, continuation);
       }
     });
     var playlists = make('section', 'hz-home-section', refs.home), title = make('div', 'hz-section-head', playlists);
     make('h2', '', title, '把喜欢编成歌单');
     var allPlaylists = button(title, 'hz-text-link', '管理我的歌单', '', function () { navigate('playlists'); }); allPlaylists.textContent = '管理歌单';
     refs.playlists = make('div', 'hz-playlist-grid', playlists);
-    if (continuation) refs.home.appendChild(continuation);
     var quick = make('section', 'hz-quick-links', refs.home);
     [['online', '寻找新的旋律', '浏览在线曲库', 'globe'], ['playlists', '把喜欢编成歌单', '打开我的歌单', 'playlist']].forEach(function (entry) {
       var b = button(quick, 'hz-quick-link', entry[2], entry[3], function () { navigate(entry[0]); });

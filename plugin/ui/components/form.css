@@ -45,8 +45,55 @@ input[type="number"]:focus, input[type="password"]:focus, textarea:focus {
   box-shadow: inset 0 0 0 1px rgba(var(--brand-rgb), 0.12);
 }
 input::placeholder, textarea::placeholder { color: var(--muted); }
-select { padding-right: 8px; cursor: pointer; }
+select { cursor: pointer; }
 select option { background: var(--panel-solid); color: var(--text); }
+
+/* 可定制下拉（Chromium 135+ / WebView2 Evergreen）：闭合态换自定义箭头，
+   展开菜单整体走主题令牌——圆角面板、行 hover、选中勾，不再是系统灰条。
+   不支持的浏览器忽略整块 @supports，回退到上面的原生玻璃 select。 */
+@supports (appearance: base-select) {
+  select, ::picker(select) { appearance: base-select; }
+  select::picker-icon {
+    content: "";
+    width: 14px;
+    height: 14px;
+    align-self: center;
+    background: var(--muted);
+    -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='m4 6 4 4 4-4' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center/contain no-repeat;
+    mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='m4 6 4 4 4-4' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center/contain no-repeat;
+    transition: transform 180ms cubic-bezier(.22, 1, .36, 1), background 180ms;
+  }
+  select:hover::picker-icon { background: var(--text); }
+  select:open::picker-icon { transform: rotate(180deg); }
+  ::picker(select) {
+    background: var(--panel-solid);
+    border: 1px solid var(--line-strong);
+    border-radius: var(--r-lg);
+    padding: 5px;
+    margin-top: 6px;
+    box-shadow: var(--surface-lift);
+    color: var(--text);
+    font-family: var(--font-sans);
+  }
+  ::picker(select) option {
+    border-radius: 7px;
+    padding: 7px 10px;
+    font-size: var(--fs-md);
+    color: var(--text);
+    background: transparent;
+    transition: background 120ms;
+  }
+  ::picker(select) option:hover { background: var(--panel-2); }
+  ::picker(select) option:checked { background: rgba(var(--brand-rgb), 0.16); color: var(--text); }
+  ::picker(select) option::checkmark {
+    content: "";
+    width: 14px;
+    height: 14px;
+    background: var(--accent);
+    -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='m3 8 3.5 3.5L13 5' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center/contain no-repeat;
+    mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='m3 8 3.5 3.5L13 5' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center/contain no-repeat;
+  }
+}
 
 /* 多选仍使用原生 checkbox；布尔设置以 role="switch" 复用同一视觉。
    保留原 input 与 change 事件；工坊的按钮开关继续读取 aria-checked。
@@ -74,13 +121,13 @@ input[type="checkbox"] { accent-color: var(--accent); cursor: pointer; }
   position: relative;
   display: inline-block;
   box-sizing: border-box;
-  flex: 0 0 52px;
-  width: 52px;
-  height: 32px;
-  min-width: 52px;
+  flex: 0 0 40px;
+  width: 40px;
+  height: 22px;
+  min-width: 40px;
   margin: 0;
   padding: 0;
-  border: 2px solid var(--switch-off-border);
+  border: 1px solid var(--switch-off-border);
   border-radius: 999px;
   background: var(--switch-off-track);
   box-shadow: none;
@@ -97,16 +144,16 @@ input[type="checkbox"] { accent-color: var(--accent); cursor: pointer; }
 }
 :is(input[type="checkbox"], button.sc-switch)[role="switch"]::before {
   inset: 2px auto auto 2px;
-  width: 24px;
-  height: 24px;
+  width: 16px;
+  height: 16px;
   border: 0;
   border-radius: 50%;
   background: var(--switch-off-thumb);
 }
 :is(input[type="checkbox"], button.sc-switch)[role="switch"]::after {
-  inset: 7px auto auto 7px;
-  width: 14px;
-  height: 14px;
+  inset: 5px auto auto 5px;
+  width: 10px;
+  height: 10px;
   border-radius: 0;
   background: var(--switch-off-icon);
   -webkit-mask: var(--switch-icon-off) center/contain no-repeat;
@@ -118,13 +165,13 @@ input[type="checkbox"] { accent-color: var(--accent); cursor: pointer; }
 }
 :is(input[type="checkbox"], button.sc-switch)[role="switch"]:is(:checked, [aria-checked="true"])::before {
   background: var(--switch-on-thumb);
-  transform: translateX(20px);
+  transform: translateX(18px);
 }
 :is(input[type="checkbox"], button.sc-switch)[role="switch"]:is(:checked, [aria-checked="true"])::after {
   background: var(--switch-on-icon);
   -webkit-mask-image: var(--switch-icon-on);
   mask-image: var(--switch-icon-on);
-  transform: translateX(20px);
+  transform: translateX(18px);
 }
 :is(input[type="checkbox"], button.sc-switch)[role="switch"]:hover:not(:disabled):not(:focus-visible) {
   outline: 1px solid color-mix(in srgb, var(--text, #eeeae1) 32%, transparent);
@@ -132,7 +179,7 @@ input[type="checkbox"] { accent-color: var(--accent); cursor: pointer; }
 }
 :is(input[type="checkbox"], button.sc-switch)[role="switch"]:focus-visible {
   outline: 2px solid var(--text, #eeeae1);
-  outline-offset: 4px;
+  outline-offset: 3px;
 }
 :is(input[type="checkbox"], button.sc-switch)[role="switch"]:active:not(:disabled) { transform: scale(.96); }
 :is(input[type="checkbox"], button.sc-switch)[role="switch"]:disabled { opacity: .45; cursor: not-allowed; }

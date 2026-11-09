@@ -23,6 +23,8 @@ $hertzInitialMarker='hertz-setup-incomplete.json'
 $hertzRemovingMarker='hertz-uninstall-incomplete.json'
 $hertzSid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 $hertzMenu=Join-Path ([Environment]::GetFolderPath('Programs')) 'Hertz Studio'
+# Known-folder lookup follows OneDrive/redirected desktops; never guess %USERPROFILE%\Desktop.
+$hertzDesktop=[Environment]::GetFolderPath('Desktop')
 
 function Resolve-HertzSetupDirectory([string]$Path) {
     if ([string]::IsNullOrWhiteSpace($Path)) { throw 'Choose a program directory.' }
@@ -103,6 +105,10 @@ function Assert-HertzSetupMenu {
     $null=Resolve-HertzSetupDirectory $hertzMenu
 }
 
+function Assert-HertzSetupDesktop {
+    $null=Resolve-HertzSetupDirectory $hertzDesktop
+}
+
 function Assert-HertzSetupRegistration([string]$Directory,[bool]$OwnedInstallation = $false) {
     $key=[Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($hertzSetupKey)
     if ($null -ne $key) {
@@ -130,6 +136,13 @@ function Assert-HertzSetupRegistration([string]$Directory,[bool]$OwnedInstallati
             $shortcut=$shell.CreateShortcut($link)
             if ($shortcut.TargetPath -ine (Join-Path $Directory $pair[1])) { throw 'A shortcut belongs to another program; choose a different installation or remove that shortcut yourself.' }
         }
+    }
+    Assert-HertzSetupDesktop
+    $link=Join-Path $hertzDesktop 'Hertz Studio.lnk'
+    if (Test-Path -LiteralPath $link) {
+        $null=Assert-HertzFile $link
+        $shortcut=$shell.CreateShortcut($link)
+        if ($shortcut.TargetPath -ine (Join-Path $Directory 'hertz-studio.exe')) { throw 'A shortcut belongs to another program; choose a different installation or remove that shortcut yourself.' }
     }
 }
 
@@ -174,13 +187,20 @@ function Set-HertzSetupRegistration([string]$Directory,$Manifest,[string]$Uninst
         $shortcut.TargetPath=Join-Path $Directory $pair[1];$shortcut.Arguments=$pair[2]
         $shortcut.WorkingDirectory=$Directory;$shortcut.IconLocation=(Join-Path $Directory 'hertz-studio.exe')+',0';$shortcut.Save()
     }
+    [IO.Directory]::CreateDirectory($hertzDesktop)|Out-Null
+    Assert-HertzSetupDesktop
+    $shortcut=$shell.CreateShortcut((Join-Path $hertzDesktop 'Hertz Studio.lnk'))
+    $shortcut.TargetPath=Join-Path $Directory 'hertz-studio.exe';$shortcut.Arguments='--window'
+    $shortcut.WorkingDirectory=$Directory;$shortcut.IconLocation=(Join-Path $Directory 'hertz-studio.exe')+',0';$shortcut.Save()
 }
 
 function Get-HertzSetupProjection([string]$Directory) {
     Assert-HertzSetupMenu
+    Assert-HertzSetupDesktop
     $files=@{}
     foreach ($file in @((Join-Path $Directory $hertzUninstallerName),(Join-Path $Directory $hertzSetupReceipt),
-        (Join-Path $hertzMenu 'Hertz Studio.lnk'),(Join-Path $hertzMenu 'Uninstall Hertz Studio.lnk'))) {
+        (Join-Path $hertzMenu 'Hertz Studio.lnk'),(Join-Path $hertzMenu 'Uninstall Hertz Studio.lnk'),
+        (Join-Path $hertzDesktop 'Hertz Studio.lnk'))) {
         if (Test-Path -LiteralPath $file) { $null=Assert-HertzFile $file;$files[$file]=[IO.File]::ReadAllBytes($file) }
         else { $files[$file]=$null }
     }
@@ -202,6 +222,7 @@ function Get-HertzSetupProjection([string]$Directory) {
 
 function Restore-HertzSetupProjection($Projection) {
     Assert-HertzSetupMenu
+    Assert-HertzSetupDesktop
     foreach ($entry in $Projection.files.GetEnumerator()) {
         if ($null -eq $entry.Value) { if (Test-Path -LiteralPath $entry.Key) { $null=Assert-HertzFile $entry.Key;Remove-Item -LiteralPath $entry.Key } }
         else {
@@ -234,6 +255,7 @@ function Invoke-HertzSetupInstall([string]$Directory,[string]$Source,[string]$Un
     if ($null -eq $runtime) { throw 'webview2_required: Install Microsoft Edge WebView2 Evergreen Runtime from https://developer.microsoft.com/microsoft-edge/webview2/ and run this installer again.' }
     $installation=Resolve-HertzSetupDirectory $Directory
     Assert-HertzSetupMenu
+    Assert-HertzSetupDesktop
     $sourcePath=Get-HertzDirectory $Source
     if ($sourcePath -ieq $installation -or $sourcePath.StartsWith($installation+'\',[StringComparison]::OrdinalIgnoreCase) -or $installation.StartsWith($sourcePath+'\',[StringComparison]::OrdinalIgnoreCase)) { throw 'Package and installation must be separate non-nested directories.' }
     $candidate=Read-HertzPackage $sourcePath $Development
@@ -301,6 +323,7 @@ function Invoke-HertzSetupInstall([string]$Directory,[string]$Source,[string]$Un
 function Invoke-HertzSetupUninstall([string]$Directory,[bool]$Development) {
     $installation=Get-HertzDirectory $Directory
     Assert-HertzSetupMenu
+    Assert-HertzSetupDesktop
     if ((Test-Path -LiteralPath (Join-Path $installation $hertzInitialMarker)) -or (Test-Path -LiteralPath (Join-Path $installation 'hertz-update-incomplete.json'))) { throw 'Installation/update is incomplete. Run its installer or recovery before uninstalling.' }
     $owner=Open-HertzSetupOwner $installation $false
     try {
@@ -337,6 +360,8 @@ function Invoke-HertzSetupUninstall([string]$Directory,[bool]$Development) {
         Assert-HertzSetupMenu
         foreach ($name in @('Hertz Studio.lnk','Uninstall Hertz Studio.lnk')) { $file=Join-Path $hertzMenu $name;if(Test-Path -LiteralPath $file){Remove-Item -LiteralPath $file} }
         if ((Test-Path -LiteralPath $hertzMenu) -and @(Get-ChildItem -LiteralPath $hertzMenu -Force).Count -eq 0) { Remove-Item -LiteralPath $hertzMenu }
+        Assert-HertzSetupDesktop
+        $file=Join-Path $hertzDesktop 'Hertz Studio.lnk';if(Test-Path -LiteralPath $file){Remove-Item -LiteralPath $file}
         Remove-HertzSetupRegistry $hertzSetupKey $installation
         Remove-HertzSetupRegistry $hertzAppKey $installation
         foreach ($name in @('standalone-build.json',$hertzSetupReceipt)) { Remove-Item -LiteralPath (Join-Path $installation $name) }

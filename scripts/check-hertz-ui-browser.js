@@ -134,7 +134,8 @@ async function swipe(page, from, to, cancel = false) {
     await page.goto(base, { waitUntil: 'domcontentloaded' });
     await page.waitForFunction(() => window.HertzShell?.activeView() === 'home' && window.Skins?.currentId() === 'hertz' && document.querySelectorAll('#view-home .hz-music-tile').length > 10, null, { timeout: 30000 });
     await page.waitForFunction(() => document.querySelectorAll('#view-home .hz-playlist-entry').length === 4, null, { timeout: 30000 });
-    assert.equal(await page.locator('#view-home .hz-home-section').first().locator('.hz-music-tile').count(), 8);
+    assert.equal(await page.locator('#view-home .hz-home-section[data-section="recent"]').locator('.hz-music-tile').count(), 8);
+    assert.equal(await page.locator('#view-home .hz-continuation').evaluate(n => n === document.getElementById('view-home').firstElementChild && n.open && !!n.querySelector('#home-dashboard')), true, 'Continue-listening dashboard leads the home page and starts expanded');
     pass('Home renders real recent tracks, albums, artists and four playlists');
     await capture('hertz-desktop-home');
     await page.locator('#search').focus();
@@ -157,7 +158,7 @@ async function swipe(page, from, to, cancel = false) {
     await capture('hertz-desktop-tools-menu');
     await page.keyboard.press('Escape');
     pass('Search focus and dropdown align as one field; tools menu omits settings, collapse and service exit');
-    const recentStrip = '#view-home .hz-home-section:first-child .hz-music-strip';
+    const recentStrip = '#view-home .hz-home-section[data-section="recent"] .hz-music-strip';
     await checkScroll(recentStrip, async () => {
       await page.locator(recentStrip).hover(); await page.mouse.wheel(260, 0);
     }, 'left');
