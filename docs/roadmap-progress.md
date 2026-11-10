@@ -1,5 +1,7 @@
 # 路线图实施状态
 
+2026-11-11 A04/P2-03 [GLB静态BIN数值检查](wallpaper-model-resources.md)已接唯一容器读取与typed结构，新增实际索引/有限值/bounds和NORMAL/TANGENT/COLOR_0；相同布局共享扫描，重叠不同布局先受工作量上界限制。pure153、desktop assets10通过，包含源删除后的实际NaN拒绝和正确快照重开；独立SPEC定位的FLOAT bounds原始顺序误拒绝已在component精度owner修正。opaque结果绑定完整GLB hash，模型运行门保持；动画/材质图片闭包、准备/受控loader/同renderer模型仍未完成。
+
 2026-11-11 A04/P2-03 [GLB核心静态结构前置检查](wallpaper-model-resources.md)已接原Model资源source/variant校验，新增有界view/accessor、node/scene图、三角形metadata上界与同包图片/UV依赖；重复图片URI的别名引用共享不可变列表。当前pure131、桌面资源9项通过，binary_content_validated=false；实际BIN/动画/骨骼/扩展、准备、受控loader与GPU能力仍未完成，整体目标保持开放。
 
 2026-11-11 A04/P2-03 [GLB/KTX2 容器前置检查](wallpaper-model-resources.md)已接原包校验与桌面快照/重开：有界 GLB JSON/BIN、普通2D KTX2范围及压缩层规则、所有source/variant与别名角色检查。壁纸98项和桌面实际staging/install/reopen验证通过；锁定writer生成的真实Zlib KTX2也由原包入口接受。此为资源内容前置检查，model/texture运行门继续关闭；依赖/几何/动画、DFD/codec/GPU与受控loader仍按总计划继续。

@@ -1096,6 +1096,89 @@ mod tests {
     }
 
     #[test]
+    fn staged_model_numeric_content_survives_source_removal_and_rejects_nan_before_projection() {
+        use std::io::{Cursor, Write};
+        for invalid in [false, true] {
+            let (store, dir) = store("model-numeric-staging");
+            let mut json = br#"{"asset":{"version":"2.0"},"buffers":[{"byteLength":4}],"bufferViews":[{"buffer":0,"byteLength":4}],"accessors":[{"bufferView":0,"componentType":5126,"count":1,"type":"SCALAR","min":[1.2],"max":[1.2]}]}"#.to_vec();
+            while json.len() % 4 != 0 {
+                json.push(b' ');
+            }
+            let mut glb = b"glTF".to_vec();
+            glb.extend(2_u32.to_le_bytes());
+            glb.extend((32_u32 + json.len() as u32).to_le_bytes());
+            glb.extend((json.len() as u32).to_le_bytes());
+            glb.extend(b"JSON");
+            glb.extend(json);
+            glb.extend(4_u32.to_le_bytes());
+            glb.extend([b'B', b'I', b'N', 0]);
+            glb.extend(if invalid { f32::NAN } else { 1.2_f32 }.to_le_bytes());
+            hertz_wallpaper::model_structure::inspect_glb_resource(
+                Cursor::new(&glb), glb.len() as u64, &serde_json::from_value(serde_json::json!({
+                    "formatVersion":1,"workId":"c17ed10a-5c55-4a52-85dc-7509f9e88aae","version":1,"title":"Metadata",
+                    "content":{"kind":"builtin","sceneId":"zodiac","stateVersion":1,"params":{}},
+                    "assets":[],"files":[],"permissions":{"audioSpectrum":false,"pointer":false},
+                    "license":{"code":"none","assets":"CC0-1.0"}
+                })).unwrap(), "assets/model.glb",
+            ).expect("even the NaN fixture has valid static metadata");
+            let manifest = serde_json::json!({
+                "formatVersion":1,"workId":"c17ed10a-5c55-4a52-85dc-7509f9e88aae",
+                "version":1,"title":"Numeric model","content":{"kind":"builtin","sceneId":"zodiac","stateVersion":1,"params":{}},
+                "assets":[{"id":"model","kind":"model","source":"assets/model.glb","variants":[]}],
+                "files":[{"path":"assets/model.glb","bytes":glb.len(),"sha256":format!("{:x}",Sha256::digest(&glb)),"mime":"model/gltf-binary"}],
+                "properties":[],"permissions":{"audioSpectrum":false,"pointer":false},
+                "license":{"code":"none","assets":"CC0-1.0","attribution":""}
+            });
+            let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+            for (path, bytes) in [
+                ("manifest.json", serde_json::to_vec(&manifest).unwrap()),
+                ("assets/model.glb", glb),
+            ] {
+                writer
+                    .start_file(path, zip::write::SimpleFileOptions::default())
+                    .unwrap();
+                writer.write_all(&bytes).unwrap();
+            }
+            let source = write_source(
+                &dir,
+                "numeric.hwpkg",
+                &writer.finish().unwrap().into_inner(),
+            );
+            store.snapshot_input("job-numeric", &source, None).unwrap();
+            std::fs::remove_file(source).unwrap();
+            if invalid {
+                let error = store.validate_staged("job-numeric").unwrap_err();
+                assert_eq!(error.code, "package_invalid");
+                assert!(error.message.starts_with("invalid_model_binary"));
+                assert!(error.message.contains("assets/model.glb"));
+                assert!(!store.staging_dir("job-numeric").join("files").exists());
+                store.discard_staging("job-numeric");
+                assert!(!store.staging_dir("job-numeric").exists());
+            } else {
+                let staged = store.validate_staged("job-numeric").unwrap();
+                store.unpack_projection("job-numeric", &staged).unwrap();
+                store
+                    .content_writer()
+                    .unwrap()
+                    .publish_staging("job-numeric", &staged.package_hash)
+                    .unwrap();
+                assert!(store
+                    .verify_installed(&staged.package_hash)
+                    .unwrap()
+                    .is_some());
+                assert_eq!(
+                    store
+                        .read_installed_manifest(&staged.package_hash)
+                        .unwrap()
+                        .entries
+                        .len(),
+                    1
+                );
+            }
+        }
+    }
+
+    #[test]
     fn disk_space_check_rejects_oversize_request() {
         let (store, _dir) = store("disk");
         let error = store.check_disk_space(u64::MAX / 2).unwrap_err();

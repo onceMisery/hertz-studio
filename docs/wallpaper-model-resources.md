@@ -4,8 +4,15 @@
 ZIP 路径、实际长度、SHA-256 和组合合同核验后检查模型与 KTX2 纹理容器。
 桌面导入的快照校验、安装复核和原包重开沿用此入口。
 
-当前可验证的是容器结构。模型节点与 KTX2 运行适配器继续返回不可用；
-容器校验成功不能用来声称已经支持几何、动画、纹理转码或 GPU 呈现。
+当前可验证的是容器、核心静态结构及实际 accessor 数值。模型节点与 KTX2
+运行适配器继续返回不可用；这些检查不能用来声称动画、纹理转码或 GPU 呈现已支持。
+
+静态 BIN 续接使用同一 `Read` 流完成唯一 GLB framing、typed 结构及数值检查，
+不为 accessor 重开 ZIP entry。纯包 153 项通过（数值 22 项），桌面资源 10 项
+通过：实际 NaN 在 projection 前拒绝，正确数值快照在删除 source 后可安装重开。
+新增不可手构的 `CheckedGlbResource` 绑定本次完整 GLB 读取的 SHA-256，原包入口
+再次核对该 digest；内部 metadata 的 `binary_content_validated=false` 仍保留。
+此结果仅证明下列数字子集，不证明传递图片、loader 或运行资格。
 
 同日续接完成 GLB 的核心静态结构前置检查，原 Model source/variant 包入口
 先调用唯一容器 inspector，再解析有界 typed schema。纯包当前 131 项通过
@@ -14,7 +21,7 @@ ZIP 路径、实际长度、SHA-256 和组合合同核验后检查模型与 KTX2
 
 | 资源 | 已实施检查 | 仍需实施与验收 |
 | --- | --- | --- |
-| GLB | v2容器与原始有界JSON；核心静态typed依赖/BufferView/accessor范围；节点/scene单父无环与变换；mesh及所有节点实例的三角形metadata上界；同包JPEG/PNG图片source/variant、材质五槽UV引用 | 实际二进制索引/浮点与真实几何；动画/morph/skinning、扩展、实际材质/图片解码和完整成本；受控 GLTFLoader、私有实例和绝对时间采样 |
+| GLB | v2容器与有界JSON；核心静态typed依赖/view/accessor/graph/变换及三角形metadata上界；同包图片/材质五槽UV引用；真实索引上界/保留值、全部FLOAT有限值、实际bounds、NORMAL/TANGENT/COLOR_0数值 | 动画/morph/skinning/sparse、扩展、实际材质/图片解码和完整成本；受控 GLTFLoader、私有实例、绝对时间采样及GPU呈现 |
 | KTX2 | 普通 2D header、16384 单边与 64 MP、mip 索引、DFD/KVD/SGD/level 范围及溢出/重叠；按压缩方式核验长度与层对齐 | DFD/格式语义、真实 Basis worker/转码、GPU 格式选择和预算、解码选项与 context 缓存身份 |
 
 GLB 限 `model/gltf-binary`，所有 Model source/variant 都检查。Texture 中
@@ -58,6 +65,22 @@ custom UINT32，运行loader/GPU资格仍关闭；不据此声称两份来源一
 模型结构阶段的早期桌面广泛回归552项通过、2项忽略，构建早于最后规格修正，
 仅保留该版本归属；最终源的资源导入9项和纯包131项另有日志。不能把旧广泛
 回归当成最终模型或设备资格。
+
+实际数字检查按精确 offset/count/stride/component/shape 布局共享一次扫描，但
+每个 accessor 的声明 bounds 分别比较。重叠而不同的布局计入读前工作量：唯一
+布局总 elements 最多16777216、components 最多67108864，超限在首个 BIN 字节
+前拒绝。按下一个元素位置顺序读取，固定64 KiB窗口保留跨块元素；完整矩阵
+column padding及stride间隙不解释为数字。未引用BIN字节仍流读并参与hash。
+
+索引小于全部使用该布局的primitive最小vertex count，且不得含component最大
+保留值。所有FLOAT accessor（含unused/custom）拒绝NaN/Inf。所有已声明bounds
+对实际逐分量极值精确比较，normalized整数使用raw整数，FLOAT声明先round到f32。
+结构中的FLOAT min/max顺序也在f32精度下比较，保留原声明值；两份JSON值不同
+但round到同一个实际极值时可以接受，整数仍按raw值判断顺序。独立SPEC发现的
+误拒绝在该唯一component精度owner修正，真实ZIP入口修正前/后证据分别保留。
+NORMAL/TANGENT.xyz的squared length误差≤1e-4是本静态子集的显式数值容差，不
+改写向量、不称官方常量；TANGENT.w必须±1，COLOR_0 FLOAT必须在[0,1]内。
+这些都是资源内容事实；没有把作者metadata计数升级为完整准备/GPU成本。
 
 下一步沿同一包合同与资源准备、预算、pool、renderer、clock owner 完成上表
 剩余项。HWPK1 / documentVersion1 / Config5 不变；此切片不完成整个 P2-03

@@ -132,6 +132,19 @@ pub fn inspect_glb_resource<R: Read>(
 ) -> Result<GlbResource> {
     validate_rel_path(path).map_err(|error| invalid(error.message))?;
     let container = inspect_glb(input, declared_bytes)?;
+    let structure = structure_from_container(&container, manifest, path)?;
+    Ok(GlbResource {
+        container,
+        structure,
+    })
+}
+
+pub(crate) fn structure_from_container(
+    container: &GlbContainer,
+    manifest: &Manifest,
+    path: &str,
+) -> Result<ModelStructure> {
+    validate_rel_path(path).map_err(|error| invalid(error.message))?;
     let document: Schema = serde_json::from_slice(&container.json).map_err(|error| {
         let message = error.to_string();
         if message.starts_with("model_resource_unavailable:") {
@@ -142,11 +155,7 @@ pub fn inspect_glb_resource<R: Read>(
             invalid(format!("invalid glTF structure: {message}"))
         }
     })?;
-    let structure = inspect_structure(document, &container, manifest, path)?;
-    Ok(GlbResource {
-        container,
-        structure,
-    })
+    inspect_structure(document, container, manifest, path)
 }
 
 fn invalid(message: impl Into<String>) -> PackageError {
@@ -290,7 +299,7 @@ fn inspect_structure(
 }
 
 impl AccessorShape {
-    fn dimensions(self) -> (u64, u64) {
+    pub(crate) fn dimensions(self) -> (u64, u64) {
         match self {
             Self::Scalar => (1, 1),
             Self::Vec2 => (1, 2),
@@ -354,7 +363,10 @@ fn inspect_accessor(accessor: &Accessor, views: &[ModelBufferView]) -> Result<Mo
         }
     }
     if let (Some(min), Some(max)) = (&accessor.min, &accessor.max) {
-        if min.0.iter().zip(&max.0).any(|(min, max)| min > max) {
+        if min.0.iter().zip(&max.0).any(|(min, max)| {
+            component_precision(*min, accessor.component_type)
+                > component_precision(*max, accessor.component_type)
+        }) {
             return Err(invalid("accessor min exceeds max"));
         }
     }
@@ -532,6 +544,14 @@ fn inspect_view_roles(
         }
     }
     Ok(())
+}
+
+pub(crate) fn component_precision(value: f64, component_type: u32) -> f64 {
+    if component_type == 5126 {
+        f64::from(value as f32)
+    } else {
+        value
+    }
 }
 
 fn component_bound(value: f64, component_type: u32) -> bool {

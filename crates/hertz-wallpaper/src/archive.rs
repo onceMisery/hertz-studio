@@ -122,8 +122,21 @@ fn validate_resource_containers_in_place<R: Read + std::io::Seek>(
                 .by_name(path)
                 .map_err(|error| PackageError::new("missing_file", error.to_string()))?;
             let result = if model {
-                crate::model_structure::inspect_glb_resource(input, entry.bytes, manifest, path)
-                    .map(|_| ())
+                crate::model_binary::inspect_glb_resource_content(
+                    input,
+                    entry.bytes,
+                    manifest,
+                    path,
+                )
+                .and_then(|checked| {
+                    if checked.sha256_hex() != entry.sha256 {
+                        return Err(PackageError::new(
+                            "hash_mismatch",
+                            "model content check stream differs from the declared SHA-256",
+                        ));
+                    }
+                    Ok(())
+                })
             } else {
                 crate::texture_container::inspect_ktx2(input, entry.bytes).map(|_| ())
             };

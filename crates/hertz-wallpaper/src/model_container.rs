@@ -37,6 +37,16 @@ struct AssetHeader {
 }
 
 pub fn inspect_glb<R: Read>(input: R, declared_bytes: u64) -> Result<GlbContainer> {
+    inspect_glb_with(input, declared_bytes, |_, _| Ok(())).map(|(container, ())| container)
+}
+
+/// Inspect the body on the same stream that established its framing. The
+/// callback runs at the BIN start; the sole owner consumes any unused bytes.
+pub(crate) fn inspect_glb_with<R: Read, T>(
+    input: R,
+    declared_bytes: u64,
+    inspect_body: impl FnOnce(&GlbContainer, &mut ContainerReader<R>) -> Result<T>,
+) -> Result<(GlbContainer, T)> {
     if !(20..=MAX_MODEL_BYTES).contains(&declared_bytes) || declared_bytes % 4 != 0 {
         return Err(PackageError::new(
             "invalid_model_container",
@@ -117,9 +127,11 @@ pub fn inspect_glb<R: Read>(input: R, declared_bytes: u64) -> Result<GlbContaine
             offset: reader.offset(),
             bytes,
         };
-        reader.skip(bytes)?;
         Some(binary)
     };
+    let container = GlbContainer { json, binary };
+    let result = inspect_body(&container, &mut reader)?;
+    reader.skip(reader.remaining())?;
     reader.finish()?;
-    Ok(GlbContainer { json, binary })
+    Ok((container, result))
 }

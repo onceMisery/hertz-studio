@@ -24,6 +24,10 @@ RSS、音频及远程封面使用 `public_net` 的同一 URL/DNS/重定向规则
 
 同日结构续接：GLB的typed有界schema、view/accessor范围、单父图与mesh/实例metadata上界仍由原包合同持有，原Model入口在容器之后调用唯一结构inspector。同包图片只映射原Image/Texture source/variant refs，重复URI共享不可变别名metadata，未增加文件broker或运行pool。返回事实显式binary_content_validated=false；实际BIN、动画/扩展与prepared/loader/GPU资格仍独立，不能由结构解析成功开放运行。来源措辞差异与子集范围记录在上述资源实施记录，不把尚未验证的表示写进能力registry。
 
+静态BIN数字续接仍由同一纯包owner持有：唯一framing在BIN读取前调用私有结构/数值callback，固定窗口按位置扫描有界且去重的accessor布局，原metadata API合同保留。不可手构数字结果绑定同次完整GLB流digest，archive核对expected hash；不接受可手构ModelStructure作为proof输入。该数字事实不证明传递图片、动画或GPU，没有新增broker/能力registry/运行账本。退役的是Model包校验只检查metadata就接受坏实际索引/浮点的路径，原模型运行拒绝继续保留。
+
+独立SPEC发现的FLOAT bounds原始f64顺序误拒绝在结构owner修正：component精度规则供结构顺序与实际数字比较共同调用，FLOAT均先round到f32、整数保持raw精度。原作者bounds照样保留，没有消费者补丁、特殊样本例外或另一套格式解释器。
+
 2026-10-15 三维空间：SpaceHome 只消费 app 注入的业务宿主；Space3D 持有导航与通用控件，
 SpaceCamera 持有机位，SpaceStagePure 持有唯一 Three.js renderer、registry、scope 与质量策略。
 场景定义统一持有 API/state 版本、参数、机位、别名、能力和预览；菜单与设置从 registry 派生。

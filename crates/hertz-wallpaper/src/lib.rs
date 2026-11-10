@@ -14,6 +14,7 @@ pub mod document;
 pub mod json;
 pub mod manifest;
 pub mod media;
+pub mod model_binary;
 pub mod model_container;
 pub mod model_structure;
 pub mod paths;

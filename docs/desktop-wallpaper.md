@@ -1,5 +1,7 @@
 # Hertz 壁纸引擎 P0–P3 开发设计与实施计划
 
+2026-11-11 [GLB静态BIN实际数值检查](wallpaper-model-resources.md)已沿同一流接原包入口：固定64 KiB窗口、重复布局去重与读前工作上界，检查真实索引/有限FLOAT/实际bounds及法线、切线和COLOR_0。检查结果绑定完整GLB digest并在原archive再次核对。纯包153项、桌面资源10项通过；FLOAT bounds顺序与实际极值按同一f32精度比较，metadata仍不授予binary整体或模型运行资格，动画/图片codec/准备/loader/GPU继续实施。
+
 2026-11-11 [模型资源结构前置检查](wallpaper-model-resources.md)进一步接通核心静态GLB的typed有界schema、内部BIN/view/accessor范围、单父scene/node图、mesh/实例三角形上界及同包图片/材质UV引用。最终pure131与桌面资源9项通过；结果仍为binary_content_validated=false，实际BIN/动画/morph/骨骼、材质/图片解码、准备成本与受控loader/GPU呈现继续实施。模型运行门保持关闭。
 
 2026-11-11 [GLB/KTX2 容器前置检查](wallpaper-model-resources.md)已接同一包校验与桌面快照/安装重开：原始有界JSON、固定流块、source/variant与别名MIME、普通2D KTX2范围和压缩层索引规则已验证。壁纸98项、桌面资源导入8项及壁纸回归499项通过（2项沿原条件忽略）；默认并发的一次既有10秒等待超时保留，独立与4线程全回归通过。model/texture运行门保持，依赖/几何/动画、DFD/codec/GPU与受控loader按已批准计划继续。
