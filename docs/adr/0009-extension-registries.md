@@ -36,6 +36,8 @@ normalized动画续接由原结构admission接受rotation/weights的四种normal
 
 核心skin续接进一步退役合法skin字段/base属性的一概拒绝：ModelStructure仍唯一拥有joint图、全部node.skin场景与实际使用事实，model_binary私有skin子模块消费同次raw解码并保留每个group/set/role消费者。跨sets关联使用预分配joint/flags状态与active链表，完成顶点只校验一次并更新固定剩余计数；没有第二输入、转换数组、loader或运行账本。新增动态关联有效载荷16 MiB/预估工作67,108,864子限额在BIN前按实际capacity和全部作者消费者核验，原raw元素/分量计数及64 KiB窗口不变；结构摘要125,536bytes及预处理/图工作独立有界，不冒称进程RSS或GPU成本。morph的JOINTS/WEIGHTS保持明确invalid，FLOAT权重推荐与IBM尾部/singular合法性不被放严；metadata false、sparse/extensions/codec/准备/loader/私有实例/绝对动画/GPU运行资格继续独立。上述段落保留各阶段归属，本段是当前skin内容边界。
 
+静态GLB消费续接复用安装包Three0.186.0的GLTFLoader；插件读取该loader已解析JSON核对原计划事实和窄能力范围，不建立另一个JSON解释入口。mesh/node extras按该loader实际userData合并/继承语义在依赖构造前拒绝可见pivot，包括prototype carrier；检查归profile owner，未以late TRS补丁掩盖未计划路径，无害metadata保留。工厂不持有parser/cache，不自行fetch、预约预算、建立pool/renderer或scheduler；原caller持有输入/parser及backing/upload两类不同票据，取消和partial失败等已开始依赖实际settle后回收。readonly geometry/material按原pool所有权约定共享，Object3D层级/变换各实例私有；hidden默认材质与mesh原型的allocated/retained区别有真实用例。该消费切片未退休模型运行门，原固定包准备/完整成本、每实例可变材质/opacity、保守bounds及同rendererGPU首帧仍由后续原owner接线。
+
 2026-10-15 三维空间：SpaceHome 只消费 app 注入的业务宿主；Space3D 持有导航与通用控件，
 SpaceCamera 持有机位，SpaceStagePure 持有唯一 Three.js renderer、registry、scope 与质量策略。
 场景定义统一持有 API/state 版本、参数、机位、别名、能力和预览；菜单与设置从 registry 派生。

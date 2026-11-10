@@ -1,5 +1,7 @@
 # Hertz 壁纸引擎 P0–P3 开发设计与实施计划
 
+2026-11-11 [静态GLB消费续接](wallpaper-model-resources.md)增加同包Three0.186.0 GLTFLoader工厂与102项真实GLB检查：读前窄profile/精确事实、共享只读几何和私有对象实例、隐藏默认材质/mesh原型成本、取消及partial失败等待后回收。extras直接/prototype pivot来源在依赖前拒绝且无害metadata保留；旧SPEC失败证据独立归档。作者matrix保持原值，parser/cache不留在消费工厂中。该片未接模型运行门，不授予原固定包prepare、完整CPU/GPU成本、opacity组合、保守bounds或首帧；后续沿原ImportJobs/AssetStore/SessionPlan/同renderer接线，不增加解析器、pool或scheduler。
+
 2026-11-11 [GLB skin内容检查](wallpaper-model-resources.md)已在原结构/同流numeric owner验证joint图、所有node.skin场景关系、IBM前缀与逐顶点跨sets配对。全部alias消费者保留，整数权重精确sum、非零joint唯一性和zero-weight范围受检，FLOAT推荐不升级为强制。pure223（skin24）/desktop assets14及Clippy/fmt/合同/ADR通过，覆盖两个默认限额恰好接受、增加vertex后BIN0拒绝和源删除后snapshot安装/drop重开。新增16 MiB关联状态与67,108,864预估工作子限额不代表设备成本；sparse/codec/准备/受控loader/私有实例/动画求值/GPU与完整目标继续，运行门保持。
 
 2026-11-11 [GLB normalized动画内容检查](wallpaper-model-resources.md)已在原结构/数字owner接通四种normalized整数rotation/weights存储与实际旋转值。SNORM双最小端点、raw bounds、首alias原始解释、cubic/LINEAR共享角色与原1e-4单位容差有真实反例；未增加状态/数组/第二扫描。pure197（normalized11）/desktop assets13及Clippy/fmt/合同/ADR检查通过，source/variant坏旋转在删除源后无投影拒绝，正确快照安装重开。skin/sparse/codec/准备/受控loader/实际动画求值/GPU与完整目标继续，运行门保持。

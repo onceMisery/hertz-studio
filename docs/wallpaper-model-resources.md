@@ -7,6 +7,17 @@ ZIP 路径、实际长度、SHA-256 和组合合同核验后检查模型与 KTX2
 当前可验证的是容器、核心静态结构、skin/morph 存储及实际 accessor/动画数值。模型节点与 KTX2
 运行适配器继续返回不可用；这些检查不能用来声称动画播放、纹理转码或 GPU 呈现已支持。
 
+受控静态消费工厂现由同一安装包的 Three 0.186.0 GLTFLoader 实际解析 GLB，
+在依赖构造前核对单 scene、无图/无变形、packed POSITION/NORMAL 和默认 PBR 的
+计划事实。102 项真实 loader 用例覆盖共享 geometry/BufferAttribute/backing 的区别、
+私有对象实例、作者矩阵、128 层子限额、零 URI 请求及取消/失败清理。隐藏默认材质
+和 mesh 原型计入实际分配，parser/cache 不随工厂保留；共享几何与只读材质在最后
+实例释放后销毁。该模块尚未接入模型运行门：固定包准备身份、完整原生成本票据、
+每实例 opacity 私有材质、有效 Float32 保守 bounds、GPU 上传和同 renderer 首帧
+仍须由原准备/预算/呈现 owner 完成，不能用这102项消费测试替代。mesh/node extras
+直接字段与prototype carrier触发的loader pivot路径均在依赖构造前拒绝；普通无害
+metadata仍可加载。原89项及SPEC失败反例单独保留，不回写历史资格。
+
 skin 内容续接由原结构 owner 验证 joint 引用、共同祖先、skeleton、全部 node.skin
 所属 scene 和实际 mesh 使用关系；原 numeric owner 的私有子模块在同一 GLB 流中
 验证 IBM 关联前缀的 affine 第四行、全部消费者的最紧 joint 范围，以及逐顶点

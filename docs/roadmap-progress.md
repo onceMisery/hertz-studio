@@ -1,5 +1,7 @@
 # 路线图实施状态
 
+2026-11-11 静态GLB受控消费切片：同包Three0.186.0 GLTFLoader实际GLB解析、计划/实际身份核对、共享几何与私有实例、隐藏分配和取消/partial清理由102项用例记录。补齐extras直接/prototype pivot读前拒绝与无害metadata对照，旧SPEC失败证据保留。它尚未接入model运行入口；原固定包准备/完整成本/每实例opacity/Float32保守bounds/实际GPU首帧及完整A04/P2、P3/AI/A10继续。详见[模型资源实施记录](wallpaper-model-resources.md)。
+
 2026-11-11 A04/P2-03 [GLB skin内容子集](wallpaper-model-resources.md)已沿原typed graph/实际BIN owner补齐全部node.skin场景义务、IBM前缀、共享最紧joint范围及跨sets逐顶点关联；anyFLOAT近1/allzero仍为推荐边界。pure223（skin24）/desktop assets14及两crate Clippy/fmt/合同/ADR通过，默认16 MiB状态/67,108,864工作恰好接受与超额BIN0、60个非零影响和删除source后安装/drop重开有真实证据。原raw预算/alias角色/hash流保持；新增子限额不授予设备成本或模型播放，sparse/codec/准备/受控loader/私有实例/绝对动画/GPU及A04/A05/A06/A10完整目标继续。
 
 2026-11-11 A10 [校准控制器期限回收](desktop-lyrics.md)：已修复停发帧时过期flight阻止重试的问题，原timer/local/cancelLocal持有期限与代际，迟到A不能清B。Node VM before失败/after通过、Chrome21项、原歌词校准25项及前端定向检查通过；Chrome退出0，原浏览器目录证据SHA保持。Full599六项历史实机不扩展为当前或真实DBX交接资格，跨build零请求与配套恢复等剩余项继续。
