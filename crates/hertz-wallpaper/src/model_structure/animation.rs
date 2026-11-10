@@ -1,14 +1,13 @@
 // SPDX-License-Identifier: MIT
-//! Typed TRS and FLOAT morph weights storage facts owned by the structure inspector.
+//! Typed TRS and morph weights storage facts owned by the structure inspector.
 
 use std::collections::BTreeSet;
 
 use serde::{de::IgnoredAny, Deserialize, Deserializer};
 
 use super::{
-    at, checked_mul, component_precision, invalid, unavailable, AccessorShape, Limited,
-    ModelAccessor, ModelBufferView, ModelMesh, Node, Pending, MAX_MODEL_ANIMATIONS,
-    MAX_MODEL_RECORDS,
+    at, checked_mul, component_precision, invalid, AccessorShape, Limited, ModelAccessor,
+    ModelBufferView, ModelMesh, Node, Pending, MAX_MODEL_ANIMATIONS, MAX_MODEL_RECORDS,
 };
 use crate::{PackageError, Result};
 
@@ -230,16 +229,16 @@ pub(super) fn inspect_animations(
                     "animation output count disagrees with timestamp/interpolation layout",
                 ));
             }
-            if output.component_type != 5126 || output.normalized {
-                if matches!(
-                    channel.target.path,
-                    AnimationPath::Rotation | AnimationPath::Weights
-                ) && output.normalized
-                    && [5120, 5121, 5122, 5123].contains(&output.component_type)
-                {
-                    return Err(unavailable("normalized rotation/weights animation requires qualified component precision"));
-                }
-                return Err(invalid("animation output requires FLOAT components"));
+            let float_output = output.component_type == 5126 && !output.normalized;
+            let normalized_output = matches!(
+                channel.target.path,
+                AnimationPath::Rotation | AnimationPath::Weights
+            ) && output.normalized
+                && [5120, 5121, 5122, 5123].contains(&output.component_type);
+            if !float_output && !normalized_output {
+                return Err(invalid(
+                    "animation output component type disagrees with the target property",
+                ));
             }
             duration = duration.max(component_precision(
                 input.max.as_ref().expect("input bounds checked")[0],

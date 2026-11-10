@@ -7,6 +7,19 @@ ZIP 路径、实际长度、SHA-256 和组合合同核验后检查模型与 KTX2
 当前可验证的是容器、核心静态结构、morph 存储及实际 accessor/动画数值。模型节点与 KTX2
 运行适配器继续返回不可用；这些检查不能用来声称动画播放、纹理转码或 GPU 呈现已支持。
 
+normalized rotation/weights 内容续接已接受 normalized BYTE/UBYTE/SHORT/USHORT
+的 STEP/LINEAR/CUBICSPLINE 存储。原旋转值检查按有效分量计算，SNORM 的两个最小
+编码均为 -1；四元数平方长度容差仍为原 1e-4，cubic 只检查 value 的单位长度，
+不修正作者键或强制导数为单位值。整数 bounds 仍比较 raw extrema，全部实际
+base/index/timestamps 角色保持；相同布局只扫描一次，不由首个 alias 的
+normalized 字段决定旋转意义，没有新增 Job 状态、转换数组或运行解释器。
+
+本次纯包 197 项通过（normalized 11 项），桌面资源 13 项通过，覆盖四种整数
+与两种属性/三种存储模式、端点/别名/raw bounds、非 seek 短读跨 64 KiB、读前
+工作上限、source/variant 的真实 ZIP，以及 source 删除后的坏旋转无投影拒绝和
+正确快照安装重开。两个 crate Clippy/fmt、合同导出和 ADR 检查通过；原失败夹具
+日志保留。metadata false 与模型运行门不变，实际 loader 的转换与播放仍待验。
+
 FLOAT TRS 动画内容续接已复用同一 typed owner 与数字扫描：translation/rotation/
 scale 的 STEP/LINEAR/CUBICSPLINE 存储、目标引用/形状/count、真实非负严格递增
 时间键及关键帧四元数已检查。纯包 171 项通过（动画 18 项），桌面资源 11 项
@@ -29,7 +42,8 @@ mesh/node 默认 weights 保留有限作者 f64 值，负数、>1、非 unit-sum
 
 used weights 动画要求 node 实例化 M>0 的 mesh，可与 matrix 共存；FLOAT SCALAR
 output 精确为 K×M×(cubic?3:1)，每个 cubic key 按 M 个 in→M 个 value→M 个 out
-存储，所有分量均须有限。normalized rotation/weights 留在下一精度内容切片。
+存储，所有分量均须有限。normalized rotation/weights 内容检查见上文续接；
+实际 loader 转换和动画求值仍需独立验收。
 局部 targets/weights 数组各限 16384、属性 map 限 32、semantic 限 64 bytes；
 全 GLB 的显式 target objects、target refs、mesh+node 作者 weights 总数分别限 16384，
 在 typed 后、事实复制/引用遍历和首 BIN 字节前检查。唯一 layout 的读前数字上限、
@@ -49,7 +63,7 @@ output 精确为 K×M×(cubic?3:1)，每个 cubic key 按 M 个 in→M 个 value
 
 | 资源 | 已实施检查 | 仍需实施与验收 |
 | --- | --- | --- |
-| GLB | v2容器与有界JSON；核心静态typed依赖/view/accessor/graph/变换及三角形metadata上界；同包图片/材质五槽UV引用；真实索引/有限FLOAT/bounds及NORMAL/TANGENT/COLOR_0；FLOAT TRS动画；核心morph delta/defaults与FLOAT weights存储/实际值 | normalized rotation/weights动画、skinning/sparse、扩展、实际材质/图片解码和完整成本；受控 GLTFLoader、私有实例、绝对动画播放及GPU呈现 |
+| GLB | v2容器与有界JSON；核心静态typed依赖/view/accessor/graph/变换及三角形metadata上界；同包图片/材质五槽UV引用；真实索引/有限FLOAT/bounds及NORMAL/TANGENT/COLOR_0；FLOAT TRS动画；核心morph delta/defaults及FLOAT/normalized rotation/weights存储与实际值 | skinning/sparse、扩展、实际材质/图片解码和完整成本；受控 GLTFLoader、私有实例、绝对动画播放及GPU呈现 |
 | KTX2 | 普通 2D header、16384 单边与 64 MP、mip 索引、DFD/KVD/SGD/level 范围及溢出/重叠；按压缩方式核验长度与层对齐 | DFD/格式语义、真实 Basis worker/转码、GPU 格式选择和预算、解码选项与 context 缓存身份 |
 
 GLB 限 `model/gltf-binary`，所有 Model source/variant 都检查。Texture 中
@@ -88,7 +102,7 @@ primitive。正交相机 magnification 可为负但不能为零。custom scalar/
 属性保持有界；UINT32的当前 Khronos 正文为 SHOULD NOT，而 accessor schema
 辅助描述仍为旧 MUST NOT，两者措辞不一致。本metadata子集按正文接受typed
 custom UINT32，运行loader/GPU资格仍关闭；不据此声称两份来源一致。
-稀疏、normalized rotation/weights动画、骨骼和扩展payload在各自内容检查
+稀疏、骨骼和扩展payload在各自内容检查
 实施前明确不可用。
 
 模型结构阶段的早期桌面广泛回归552项通过、2项忽略，构建早于最后规格修正，
@@ -125,8 +139,8 @@ FLOAT output形状对应TRS属性，count精确为键数×1或cubic的×3；cubi
 相同布局的全部linear/cubic角色合并，不能因为另一个alias丢掉单位值约束。
 duration metadata只用非ignored channel所用input.max在f32精度下的上界，metadata
 API仍未读取实际键值。原数组索引/name保留，不虚构重名clip或运行选择规则。
-normalized动画表示需另验实际0.186 loader的精度转换；本FLOAT子集没有授予它
-资格。原数字工作量上限、固定64 KiB读取及完整GLB hash身份没有放宽。
+normalized动画的文件内容检查见上文；实际0.186 loader的表示转换仍需独立验证，
+内容接受没有授予它资格。原数字工作量上限、固定64 KiB读取及完整GLB hash身份没有放宽。
 
 下一步沿同一包合同与资源准备、预算、pool、renderer、clock owner 完成上表
 剩余项。HWPK1 / documentVersion1 / Config5 不变；此切片不完成整个 P2-03

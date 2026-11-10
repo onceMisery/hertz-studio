@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
-//! Static, morph delta and FLOAT animation values checked on one bounded GLB
-//! stream. This does not qualify normalized animation precision, image codecs,
-//! resource preparation, animation playback, loaders or the GPU.
+//! Static, morph delta and animation values checked on one bounded GLB stream.
+//! This does not qualify image codecs, resource preparation, animation playback,
+//! loaders or the GPU.
 
 use std::{
     cmp::Reverse,
@@ -343,7 +343,10 @@ fn inspect_element(
         job.previous_time = Some(values[0]);
     }
     if job.rotation_all || (job.rotation_cubic_values && element % 3 == 1) {
-        let squared_length = values[..4].iter().map(|value| value * value).sum::<f64>();
+        let squared_length = values[..4].iter().try_fold(0_f64, |sum, &raw| {
+            let value = rotation_component(raw, accessor.component_type)?;
+            Ok::<f64, PackageError>(sum + value * value)
+        })?;
         if (squared_length - 1.).abs() > UNIT_LENGTH_SQUARED_TOLERANCE {
             return Err(invalid(format!(
                 "accessor {} animation rotation value must be a unit quaternion",
@@ -397,6 +400,19 @@ fn inspect_element(
         }
     }
     Ok(())
+}
+
+fn rotation_component(raw: f64, component_type: u32) -> Result<f64> {
+    match component_type {
+        5120 => Ok((raw / 127.).max(-1.)),
+        5121 => Ok(raw / 255.),
+        5122 => Ok((raw / 32767.).max(-1.)),
+        5123 => Ok(raw / 65535.),
+        5126 => Ok(raw),
+        _ => Err(invalid(
+            "rotation component in checked structure is not supported",
+        )),
+    }
 }
 
 struct BinaryWindow<'a, R> {

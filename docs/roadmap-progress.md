@@ -2,6 +2,8 @@
 
 2026-11-11 A10 [校准控制器期限回收](desktop-lyrics.md)：已修复停发帧时过期flight阻止重试的问题，原timer/local/cancelLocal持有期限与代际，迟到A不能清B。Node VM before失败/after通过、Chrome21项、原歌词校准25项及前端定向检查通过；Chrome退出0，原浏览器目录证据SHA保持。Full599六项历史实机不扩展为当前或真实DBX交接资格，跨build零请求与配套恢复等剩余项继续。
 
+2026-11-11 A04/P2-03 [GLB normalized rotation/weights内容子集](wallpaper-model-resources.md)已接原typed admission与实际旋转值检查；四种整数/三种存储、SNORM端点、raw bounds与layout全部角色、原单位容差、跨块/短读/完整hash和读前限额保持。pure197（normalized11）/desktop assets13与两crate Clippy/fmt/合同/ADR检查通过；真实source/variant快照删除源后坏quat无投影拒绝、正确安装重开有证据。无新Job状态/转换数组或loader旁路，skin/sparse/codec/准备/受控loader/实际动画/GPU及完整目标继续，运行门保持。
+
 2026-11-11 A04/P2-03 [GLB morph/FLOAT weights内容子集](wallpaper-model-resources.md)已接同一typed/animation/数字owner：核心delta、混合/empty targets、原作者weights及checked K×M×factor权重存储/实际值受检，负/>1和非unit delta保留，隐含零/继承不展开。pure186（morph15）/desktop assets12与两个crate Clippy、fmt、合同/ADR检查通过；源删除后实际坏delta/weights无投影拒绝和正确快照安装重开有证据。normalized动画、skinning/sparse/codec、准备/受控loader/绝对动画/GPU及完整总目标仍继续，运行门保持。
 
 2026-11-11 A04/P2-03 [GLB FLOAT TRS动画内容子集](wallpaper-model-resources.md)已接同一ModelStructure与BIN扫描，验证引用/目标/count、三种插值存储、actual时间键和关键帧四元数；cubic非unit有限导数保留，layout alias全部角色合并，省略animations合法但显式空数组拒绝。pure171/动画18、desktop assets11通过，正确动画快照安装重开与坏时间键无投影拒绝有证据。运行门保持，normalized动画/morph/skinning/实际准备/loader/动画播放及完整总目标继续。

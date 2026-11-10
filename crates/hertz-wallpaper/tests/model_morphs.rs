@@ -603,14 +603,11 @@ fn weights_scalar_flattening_covers_all_interpolations() {
 }
 
 #[test]
-fn normalized_weights_remain_explicitly_unavailable() {
+fn integer_weights_require_normalization_and_exact_count() {
     for component in [5120, 5121, 5122, 5123] {
         let (mut document, data) = ordinary();
         document["accessors"][3]["componentType"] = json!(component);
         document["accessors"][3]["normalized"] = json!(true);
-        let unavailable = error(&document, &data);
-        assert_eq!(unavailable.code, "model_resource_unavailable");
-        assert!(unavailable.message.contains("precision"));
         document["accessors"][3]["count"] = json!(3);
         assert_eq!(error(&document, &data).code, "invalid_model_structure");
         document["accessors"][3]["count"] = json!(4);

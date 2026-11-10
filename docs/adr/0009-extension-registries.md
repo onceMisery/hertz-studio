@@ -32,6 +32,8 @@ FLOAT TRS动画存储续接归原ModelStructure owner，其私有animation子模
 
 morph/FLOAT weights内容续接继续由上述唯一owner持有：原ModelStructure保存作者targets、mesh M及有限f64默认/覆盖weights，私有animation消费已验证mesh事实，现有numeric job直接扫描所有delta/weights且只对真实base属性赋方向/颜色角色。局部数组/map超额前拒绝，全 GLB 作者总量在typed后、派生复制/引用与BIN前检查；不生成每primitive/node的继承或零数组。退役Primitive.targets/Mesh.weights/Node.weights的一概Pending以及合法FLOAT weights一概拒绝，保留normalized动画、skin/sparse/extensions与运行门。没有新decoder/broker/pool/scheduler/能力registry；内容有限不证明32-bit求值、保守bounds或GPU资格。
 
+normalized动画续接由原结构admission接受rotation/weights的四种normalized整数，原numeric旋转角色使用私有有效分量解释；raw解码/extrema/index/base/timestamp与唯一layout key不变，首alias的normalized标志不决定实际channel约束。整数weights的有效有限性由合法存储范围和规范公式保证，不另建状态、转换数组或逐分量冗余扫描。退役上述四种normalized动画的一概unavailable，原1e-4旋转容差与cubic值/导数区分保持；skin/sparse/extensions、准备/loader/动画播放/GPU与模型运行门继续保留。新旧官方来源身份分别记录，内容精度检查不等于锁定0.186 loader转换或设备资格。
+
 2026-10-15 三维空间：SpaceHome 只消费 app 注入的业务宿主；Space3D 持有导航与通用控件，
 SpaceCamera 持有机位，SpaceStagePure 持有唯一 Three.js renderer、registry、scope 与质量策略。
 场景定义统一持有 API/state 版本、参数、机位、别名、能力和预览；菜单与设置从 registry 派生。

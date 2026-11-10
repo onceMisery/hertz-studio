@@ -1378,6 +1378,129 @@ mod tests {
     }
 
     #[test]
+    fn staged_normalized_animation_checks_quaternions_before_projection_and_on_reopen() {
+        use std::io::{Cursor, Write};
+        fn model(invalid: bool) -> Vec<u8> {
+            let document = serde_json::json!({"asset":{"version":"2.0"},"buffers":[{"byteLength":16}],
+                "bufferViews":[{"buffer":0,"byteLength":8},{"buffer":0,"byteOffset":8,"byteLength":8}],
+                "accessors":[{"bufferView":0,"componentType":5126,"count":2,"type":"SCALAR","min":[0],"max":[1]},
+                    {"bufferView":1,"componentType":5120,"normalized":true,"count":2,"type":"VEC4","min":[0,0,0,if invalid {-127} else {-128}],"max":[0,0,0,if invalid {0} else {-127}]}],
+                "nodes":[{}],"animations":[{"samplers":[{"input":0,"output":1}],"channels":[{"sampler":0,"target":{"node":0,"path":"rotation"}}]}]});
+            let mut text = serde_json::to_vec(&document).unwrap();
+            while text.len() % 4 != 0 {
+                text.push(b' ');
+            }
+            let mut glb = b"glTF".to_vec();
+            glb.extend(2_u32.to_le_bytes());
+            glb.extend((44_u32 + text.len() as u32).to_le_bytes());
+            glb.extend((text.len() as u32).to_le_bytes());
+            glb.extend(b"JSON");
+            glb.extend(text);
+            glb.extend(16_u32.to_le_bytes());
+            glb.extend([b'B', b'I', b'N', 0]);
+            glb.extend(0_f32.to_le_bytes());
+            glb.extend(1_f32.to_le_bytes());
+            for value in [0_i8, 0, 0, if invalid { 0 } else { -128 }, 0, 0, 0, -127] {
+                glb.extend(value.to_le_bytes());
+            }
+            glb
+        }
+        for variant in [false, true] {
+            for invalid in [false, true] {
+                let (store, dir) = store("model-normalized-staging");
+                let path = if variant {
+                    "assets/low.glb"
+                } else {
+                    "assets/model.glb"
+                };
+                let glb = model(invalid);
+                let mut files = vec![(path, glb.clone())];
+                if variant {
+                    files.push(("assets/model.glb", model(false)));
+                }
+                let manifest = serde_json::json!({"formatVersion":1,"workId":"c17ed10a-5c55-4a52-85dc-7509f9e88aae",
+                    "version":1,"title":"Normalized model","content":{"kind":"builtin","sceneId":"zodiac","stateVersion":1,"params":{}},
+                    "assets":[{"id":"model","kind":"model","source":"assets/model.glb","variants":if variant {serde_json::json!([{"id":"low","file":path,"purpose":"low"}])} else {serde_json::json!([])}}],
+                    "files":files.iter().map(|(path,bytes)|serde_json::json!({"path":path,"bytes":bytes.len(),"sha256":format!("{:x}",Sha256::digest(bytes)),"mime":"model/gltf-binary"})).collect::<Vec<_>>(),
+                    "properties":[],"permissions":{"audioSpectrum":false,"pointer":false},"license":{"code":"none","assets":"CC0-1.0","attribution":""}});
+                let parsed = serde_json::from_value(manifest.clone()).unwrap();
+                let metadata = hertz_wallpaper::model_structure::inspect_glb_resource(
+                    Cursor::new(&glb),
+                    glb.len() as u64,
+                    &parsed,
+                    path,
+                )
+                .unwrap();
+                assert_eq!(metadata.structure.animations[0].duration_upper_bound, 1.);
+                assert!(!metadata.structure.binary_content_validated);
+                files.push(("manifest.json", serde_json::to_vec(&manifest).unwrap()));
+                let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+                for (path, bytes) in files {
+                    writer
+                        .start_file(path, zip::write::SimpleFileOptions::default())
+                        .unwrap();
+                    writer.write_all(&bytes).unwrap();
+                }
+                let source = write_source(
+                    &dir,
+                    "normalized.hwpkg",
+                    &writer.finish().unwrap().into_inner(),
+                );
+                store
+                    .snapshot_input("job-normalized", &source, None)
+                    .unwrap();
+                std::fs::remove_file(&source).unwrap();
+                assert!(!source.exists());
+                if invalid {
+                    let error = store.validate_staged("job-normalized").unwrap_err();
+                    assert_eq!(error.code, "package_invalid");
+                    assert!(error.message.starts_with("invalid_model_binary"));
+                    assert!(error.message.contains("unit quaternion"));
+                    assert!(error.message.contains(path));
+                    assert!(!store.staging_dir("job-normalized").join("files").exists());
+                    assert!(store.package_dirs().is_empty());
+                    store.discard_staging("job-normalized");
+                    assert!(!store.staging_dir("job-normalized").exists());
+                } else {
+                    let staged = store.validate_staged("job-normalized").unwrap();
+                    store.unpack_projection("job-normalized", &staged).unwrap();
+                    store
+                        .content_writer()
+                        .unwrap()
+                        .publish_staging("job-normalized", &staged.package_hash)
+                        .unwrap();
+                    assert!(!store.staging_dir("job-normalized").exists());
+                    assert!(store
+                        .verify_installed(&staged.package_hash)
+                        .unwrap()
+                        .is_some());
+                    drop(store);
+                    let reopened = AssetStore::new(dir.path()).unwrap();
+                    assert!(reopened
+                        .verify_installed(&staged.package_hash)
+                        .unwrap()
+                        .is_some());
+                    let installed = reopened
+                        .read_installed_manifest(&staged.package_hash)
+                        .unwrap();
+                    assert_eq!(installed.entries.len(), if variant { 2 } else { 1 });
+                    assert!(installed
+                        .entries
+                        .iter()
+                        .any(|entry| entry.path == "assets/model.glb"));
+                    if variant {
+                        assert!(installed
+                            .entries
+                            .iter()
+                            .any(|entry| entry.path == "assets/low.glb"));
+                    }
+                    assert_eq!(installed.package_hash, staged.package_hash);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn disk_space_check_rejects_oversize_request() {
         let (store, _dir) = store("disk");
         let error = store.check_disk_space(u64::MAX / 2).unwrap_err();
