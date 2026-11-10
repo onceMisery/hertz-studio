@@ -1010,7 +1010,6 @@ fn pending_content_and_nested_extension_payloads_cannot_hide_dependencies() {
         ("extensions", Value::Null),
         ("extensionsUsed", json!(["KHR_draco_mesh_compression"])),
         ("extensionsRequired", json!(["KHR_texture_basisu"])),
-        ("animations", json!([])),
         ("skins", json!([])),
     ] {
         let mut document = empty();

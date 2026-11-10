@@ -28,6 +28,8 @@ RSS、音频及远程封面使用 `public_net` 的同一 URL/DNS/重定向规则
 
 独立SPEC发现的FLOAT bounds原始f64顺序误拒绝在结构owner修正：component精度规则供结构顺序与实际数字比较共同调用，FLOAT均先round到f32、整数保持raw精度。原作者bounds照样保留，没有消费者补丁、特殊样本例外或另一套格式解释器。
 
+FLOAT TRS动画存储续接归原ModelStructure owner，其私有animation子模块返回有界引用与duration metadata；真实timestamps/quaternion继续归同一numeric布局/heap/窗口与GLB流hash，不新增播放器或scheduler。仅在已检查FLOAT TRS子集内退役animations一概Pending拒绝；normalized rotation、weights/morph/skin/extensions及模型运行门仍保留。clip数组索引/原name保持，metadata不裁决既有animationClip字符串的运行选择。实际播放继续由后续同renderer/clock资格负责。
+
 2026-10-15 三维空间：SpaceHome 只消费 app 注入的业务宿主；Space3D 持有导航与通用控件，
 SpaceCamera 持有机位，SpaceStagePure 持有唯一 Three.js renderer、registry、scope 与质量策略。
 场景定义统一持有 API/state 版本、参数、机位、别名、能力和预览；菜单与设置从 registry 派生。

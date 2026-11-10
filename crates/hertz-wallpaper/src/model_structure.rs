@@ -22,6 +22,12 @@ pub const MAX_MODEL_TRIANGLES: u64 = 1_000_000;
 pub const MAX_MODEL_RECORDS: usize = 16_384;
 pub const MAX_MODEL_IMAGE_RECORDS: usize = 4_096;
 pub const MAX_MODEL_ATTRIBUTES: usize = 32;
+pub const MAX_MODEL_ANIMATIONS: usize = 1_024;
+
+pub use animation::{
+    AnimationInterpolation, AnimationPath, ModelAnimation, ModelAnimationChannel,
+    ModelAnimationSampler,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PackageImageRef {
@@ -109,6 +115,7 @@ pub struct ModelStructure {
     pub accessors: Vec<ModelAccessor>,
     pub meshes: Vec<ModelMesh>,
     pub images: Vec<ModelImage>,
+    pub animations: Vec<ModelAnimation>,
     pub node_count: usize,
     pub mesh_triangles_upper_bound: u64,
     /// Includes every mesh-bearing node, even outside the default scene.
@@ -286,11 +293,14 @@ fn inspect_structure(
         meshes.push(result);
     }
     let instantiated_triangles_upper_bound = inspect_nodes(&document, &meshes)?;
+    let animations =
+        animation::inspect_animations(&document.animations.0, &document.nodes.0, &accessors)?;
     Ok(ModelStructure {
         buffer_views,
         accessors,
         meshes,
         images,
+        animations,
         node_count: document.nodes.0.len(),
         mesh_triangles_upper_bound,
         instantiated_triangles_upper_bound,
@@ -498,7 +508,7 @@ fn inspect_view_roles(
     let mut assign = |view: usize, role: u8| -> Result<()> {
         if roles[view] != 0 && roles[view] != role {
             return Err(invalid(
-                "bufferView cannot mix vertex, index, or image data roles",
+                "bufferView cannot mix vertex, index, animation, or image data roles",
             ));
         }
         roles[view] = role;
@@ -525,6 +535,7 @@ fn inspect_view_roles(
             }
         }
     }
+    animation::inspect_views(&document.animations.0, accessors, views, &mut assign)?;
     for image in &document.images.0 {
         if let Some(index) = image.buffer_view {
             at(views, index, "image.bufferView")?;
@@ -1041,7 +1052,9 @@ impl<'de> Deserialize<'de> for Attributes {
 struct Pending;
 impl<'de> Deserialize<'de> for Pending {
     fn deserialize<D: Deserializer<'de>>(_: D) -> std::result::Result<Self, D::Error> {
-        Err(de::Error::custom("model_resource_unavailable: extension/animation/skin/morph/sparse content is pending validation"))
+        Err(de::Error::custom(
+            "model_resource_unavailable: extension/skin/morph/sparse content is pending validation",
+        ))
     }
 }
 
@@ -1065,6 +1078,8 @@ macro_rules! named_schema {
         });
     };
 }
+mod animation;
+
 schema!(Schema {
     #[serde(rename="asset")] _asset: AssetHeader,
     #[serde(default)] buffers: Limited<Buffer,MAX_MODEL_RECORDS>,
@@ -1081,7 +1096,7 @@ schema!(Schema {
     #[serde(default)] cameras: Limited<Camera,MAX_MODEL_NODES>,
     #[serde(default)] extensions_used: Limited<String,MAX_MODEL_IMAGE_RECORDS>,
     #[serde(default)] extensions_required: Limited<String,MAX_MODEL_IMAGE_RECORDS>,
-    #[serde(default,rename="animations")] _animations: Pending,
+    #[serde(default,deserialize_with="animation::nonempty_animations")] animations: Limited<animation::Animation,MAX_MODEL_ANIMATIONS>,
     #[serde(default,rename="skins")] _skins: Pending,
 });
 schema!(AssetHeader {

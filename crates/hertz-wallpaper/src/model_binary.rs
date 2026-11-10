@@ -14,7 +14,8 @@ use crate::{
     manifest::Manifest,
     model_container::inspect_glb_with,
     model_structure::{
-        component_precision, structure_from_container, GlbResource, ModelAccessor, ModelStructure,
+        component_precision, structure_from_container, AnimationInterpolation, AnimationPath,
+        GlbResource, ModelAccessor, ModelStructure,
     },
     resource_container_io::ContainerReader,
     PackageError, Result,
@@ -136,6 +137,10 @@ struct Job {
     normal: bool,
     tangent: bool,
     color_zero: bool,
+    timestamps: bool,
+    previous_time: Option<f64>,
+    rotation_all: bool,
+    rotation_cubic_values: bool,
 }
 
 fn inspect_accessors<R: Read>(
@@ -183,6 +188,10 @@ fn inspect_accessors<R: Read>(
                 normal: false,
                 tangent: false,
                 color_zero: false,
+                timestamps: false,
+                previous_time: None,
+                rotation_all: false,
+                rotation_cubic_values: false,
             });
             layouts.insert(key, job);
             job
@@ -207,6 +216,22 @@ fn inspect_accessors<R: Read>(
             }
         }
     }
+    for animation in &structure.animations {
+        for sampler in &animation.samplers {
+            jobs[mapping[sampler.input]].timestamps = true;
+        }
+        for channel in &animation.channels {
+            if channel.target_node.is_some() && channel.path == AnimationPath::Rotation {
+                let sampler = &animation.samplers[channel.sampler];
+                let job = &mut jobs[mapping[sampler.output]];
+                if sampler.interpolation == AnimationInterpolation::CubicSpline {
+                    job.rotation_cubic_values = true;
+                } else {
+                    job.rotation_all = true;
+                }
+            }
+        }
+    }
     let mut pending = BinaryHeap::with_capacity(jobs.len());
     for (index, job) in jobs.iter().enumerate() {
         pending.push(Reverse((
@@ -221,7 +246,7 @@ fn inspect_accessors<R: Read>(
         let job = &mut jobs[index];
         let accessor = &structure.accessors[job.accessor];
         let bytes = window.element(offset, accessor.element_bytes as usize)?;
-        inspect_element(job, accessor, bytes)?;
+        inspect_element(job, accessor, bytes, element)?;
         let next = element + 1;
         if next < accessor.count {
             let next_offset = accessor
@@ -257,7 +282,12 @@ fn inspect_accessors<R: Read>(
     })
 }
 
-fn inspect_element(job: &mut Job, accessor: &ModelAccessor, bytes: &[u8]) -> Result<()> {
+fn inspect_element(
+    job: &mut Job,
+    accessor: &ModelAccessor,
+    bytes: &[u8],
+    element: u64,
+) -> Result<()> {
     let (columns, rows) = accessor.shape.dimensions();
     let width = match accessor.component_type {
         5120 | 5121 => 1,
@@ -294,6 +324,28 @@ fn inspect_element(job: &mut Job, accessor: &ModelAccessor, bytes: &[u8]) -> Res
             values[component] = value;
             job.min[component] = job.min[component].min(value);
             job.max[component] = job.max[component].max(value);
+        }
+    }
+    if job.timestamps {
+        if values[0] < 0.
+            || job
+                .previous_time
+                .is_some_and(|previous| values[0] <= previous)
+        {
+            return Err(invalid(format!(
+                "accessor {} animation timestamps must be nonnegative and strictly increasing",
+                job.accessor
+            )));
+        }
+        job.previous_time = Some(values[0]);
+    }
+    if job.rotation_all || (job.rotation_cubic_values && element % 3 == 1) {
+        let squared_length = values[..4].iter().map(|value| value * value).sum::<f64>();
+        if (squared_length - 1.).abs() > UNIT_LENGTH_SQUARED_TOLERANCE {
+            return Err(invalid(format!(
+                "accessor {} animation rotation value must be a unit quaternion",
+                job.accessor
+            )));
         }
     }
     if let Some(vertex_count) = job.index_bound {

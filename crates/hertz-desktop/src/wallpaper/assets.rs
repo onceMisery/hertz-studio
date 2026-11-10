@@ -1179,6 +1179,96 @@ mod tests {
     }
 
     #[test]
+    fn staged_trs_animation_checks_actual_timestamps_before_projection_and_on_reopen() {
+        use std::io::{Cursor, Write};
+        for invalid in [false, true] {
+            let (store, dir) = store("model-animation-staging");
+            let mut json = br#"{"asset":{"version":"2.0"},"buffers":[{"byteLength":32}],"bufferViews":[{"buffer":0,"byteLength":8},{"buffer":0,"byteOffset":8,"byteLength":24}],"accessors":[{"bufferView":0,"componentType":5126,"count":2,"type":"SCALAR","min":[0],"max":[1]},{"bufferView":1,"componentType":5126,"count":2,"type":"VEC3"}],"nodes":[{}],"animations":[{"samplers":[{"input":0,"output":1}],"channels":[{"sampler":0,"target":{"node":0,"path":"translation"}}]}]}"#.to_vec();
+            while json.len() % 4 != 0 {
+                json.push(b' ');
+            }
+            let mut glb = b"glTF".to_vec();
+            glb.extend(2_u32.to_le_bytes());
+            glb.extend((60_u32 + json.len() as u32).to_le_bytes());
+            glb.extend((json.len() as u32).to_le_bytes());
+            glb.extend(b"JSON");
+            glb.extend(json);
+            glb.extend(32_u32.to_le_bytes());
+            glb.extend([b'B', b'I', b'N', 0]);
+            for value in [0_f32, if invalid { 0. } else { 1. }, 0., 0., 0., 0., 0., 0.] {
+                glb.extend(value.to_le_bytes());
+            }
+            let manifest = serde_json::json!({
+                "formatVersion":1,"workId":"c17ed10a-5c55-4a52-85dc-7509f9e88aae",
+                "version":1,"title":"Model animation","content":{"kind":"builtin","sceneId":"zodiac","stateVersion":1,"params":{}},
+                "assets":[{"id":"model","kind":"model","source":"assets/model.glb","variants":[]}],
+                "files":[{"path":"assets/model.glb","bytes":glb.len(),"sha256":format!("{:x}",Sha256::digest(&glb)),"mime":"model/gltf-binary"}],
+                "properties":[],"permissions":{"audioSpectrum":false,"pointer":false},
+                "license":{"code":"none","assets":"CC0-1.0","attribution":""}
+            });
+            let parsed = serde_json::from_value(manifest.clone()).unwrap();
+            let metadata = hertz_wallpaper::model_structure::inspect_glb_resource(
+                Cursor::new(&glb),
+                glb.len() as u64,
+                &parsed,
+                "assets/model.glb",
+            )
+            .expect("both fixtures have valid animation metadata");
+            assert_eq!(metadata.structure.animations[0].duration_upper_bound, 1.);
+            assert!(!metadata.structure.binary_content_validated);
+            let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+            for (path, bytes) in [
+                ("manifest.json", serde_json::to_vec(&manifest).unwrap()),
+                ("assets/model.glb", glb),
+            ] {
+                writer
+                    .start_file(path, zip::write::SimpleFileOptions::default())
+                    .unwrap();
+                writer.write_all(&bytes).unwrap();
+            }
+            let source = write_source(
+                &dir,
+                "animation.hwpkg",
+                &writer.finish().unwrap().into_inner(),
+            );
+            store
+                .snapshot_input("job-animation", &source, None)
+                .unwrap();
+            std::fs::remove_file(source).unwrap();
+            if invalid {
+                let error = store.validate_staged("job-animation").unwrap_err();
+                assert_eq!(error.code, "package_invalid");
+                assert!(error.message.starts_with("invalid_model_binary"));
+                assert!(error.message.contains("timestamps"));
+                assert!(error.message.contains("assets/model.glb"));
+                assert!(!store.staging_dir("job-animation").join("files").exists());
+                store.discard_staging("job-animation");
+                assert!(!store.staging_dir("job-animation").exists());
+            } else {
+                let staged = store.validate_staged("job-animation").unwrap();
+                store.unpack_projection("job-animation", &staged).unwrap();
+                store
+                    .content_writer()
+                    .unwrap()
+                    .publish_staging("job-animation", &staged.package_hash)
+                    .unwrap();
+                assert!(store
+                    .verify_installed(&staged.package_hash)
+                    .unwrap()
+                    .is_some());
+                assert_eq!(
+                    store
+                        .read_installed_manifest(&staged.package_hash)
+                        .unwrap()
+                        .entries
+                        .len(),
+                    1
+                );
+            }
+        }
+    }
+
+    #[test]
     fn disk_space_check_rejects_oversize_request() {
         let (store, _dir) = store("disk");
         let error = store.check_disk_space(u64::MAX / 2).unwrap_err();
