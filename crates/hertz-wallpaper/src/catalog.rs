@@ -17,6 +17,9 @@ use crate::json::{check_bounded_json, top_level_raw_value};
 use crate::{valid_sha256_hex, PackageError, Result};
 
 const CATALOG_BYTES: &[u8] = include_bytes!("../contracts/catalog.json");
+// Composition resource buffers add one scalar level below the original scene
+// metadata. This generated catalog bound does not change author JSON limits.
+const CATALOG_MAX_DEPTH: usize = 9;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -63,7 +66,7 @@ pub fn catalog() -> &'static CatalogContract {
 
 /// 校验并解析一份目录合同（导出器 `--check` 与测试复用同一实现）。
 pub fn parse_catalog(bytes: &[u8]) -> Result<CatalogContract> {
-    check_bounded_json(bytes, 8)?;
+    check_bounded_json(bytes, CATALOG_MAX_DEPTH)?;
     let file: CatalogFile = serde_json::from_slice(bytes).map_err(|error| {
         PackageError::new(
             "invalid_catalog",
@@ -137,5 +140,28 @@ mod tests {
         bytes.insert(range.end - 1, b' ');
         let error = parse_catalog(&bytes).unwrap_err();
         assert_eq!(error.code, "registry_hash_mismatch");
+    }
+
+    #[test]
+    fn catalog_depth_remains_bounded_with_composition_metadata() {
+        let scene = catalog().scene("spectrum-towers").unwrap();
+        let composition = &scene["composition"];
+        assert_eq!(composition["adapterId"], "builtin-scene");
+        assert_eq!(
+            composition["qualities"]["low"]["sourceResources"]["cpuPeakBytes"],
+            90248
+        );
+        let mut nested = serde_json::Value::Null;
+        for _ in 0..CATALOG_MAX_DEPTH {
+            nested = serde_json::json!([nested]);
+        }
+        let excessive = serde_json::to_vec(&serde_json::json!({
+            "schemaVersion": 1, "registryHash": "0".repeat(64), "scenes": [nested]
+        }))
+        .unwrap();
+        assert_eq!(
+            parse_catalog(&excessive).unwrap_err().code,
+            "manifest_depth"
+        );
     }
 }

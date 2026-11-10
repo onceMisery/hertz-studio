@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // This accepts the native compiler/planner projection, never author JSON.
 import { resourceKey } from '../resources/pool.js';
+import { planBuiltin } from './builtin.js';
 const FONT_ADAPTER_VERSION = 'sfnt-ttf-parser-0.25.1-static-v3';
 const RASTER_ADAPTER_VERSION = 'text-raster-v2';
 const SVG_ADAPTER_VERSION = 'svg-static-resvg-049-usvg-049-v1';
@@ -54,7 +55,7 @@ export function projectValues(ir, finalPublicValues) {
   }
   return { numeric, constants };
 }
-export function compilePlan(projection) {
+export function compilePlan(projection, registry = null, identity = null) {
   const { ir, finalPublicValues, canvas, timeline, target, resolvedAssets, sessionId, generation } = projection || {};
   if (!sessionId || !Number.isSafeInteger(generation) || !target || !Number.isSafeInteger(target.budgetAllocationRevision)
       || !Number.isFinite(target.budgetFps) || target.budgetFps < 1 || !canvas || !timeline
@@ -65,8 +66,9 @@ export function compilePlan(projection) {
   if (ir.tracks.length) throw new Error('composition-adapter-unavailable:tracks');
   if (ir.bindings.length) throw new Error('composition-adapter-unavailable:bindings');
   if (!['contain', 'cover', 'stretch'].includes(target.fit || 'cover')) throw new Error('composition-target-fit-invalid');
+  const builtin = planBuiltin(projection,values,registry,identity);
   const supported = new Set(['image', 'video', 'text', 'group', 'particles']);
-  for (const node of ir.nodes) if (!supported.has(node.nodeType) || node.space !== '2d')
+  for (const node of ir.nodes) if (node.nodeType !== 'builtinScene' && (!supported.has(node.nodeType) || node.space !== '2d'))
     throw new Error(`composition-adapter-unavailable:${node.nodeType}:${node.space}`);
   const number = (node, name) => values.numeric[node.propertySlots[name]?.[0]];
   const constant = (node, name) => values.constants[node.constantSlots[name]];
@@ -116,6 +118,15 @@ export function compilePlan(projection) {
       || canvas.width < 1 || canvas.height < 1) throw new Error('composition-output-plan-invalid');
   const resources = { renderTargetDeclaredBytes: pixels * 8, textureDeclaredBytes: 0, bufferDeclaredBytes: 92,
     ownedCpuBytes: 92, decodeReservedBytes: 0, decoderLeases: 0, canvases: 0, drawingBufferPixels: 0, programs: 2 };
+  const primitives = {drawCalls:1,points:0,triangles:2};
+  if (builtin) {
+    const source=builtin.profile.sourceResources;
+    resources.renderTargetDeclaredBytes += pixels*4;
+    resources.bufferDeclaredBytes += source.bufferBytes;
+    resources.ownedCpuBytes += source.cpuPeakBytes+builtin.clock.inputBytes;
+    resources.programs += source.programs;
+    for (const key of Object.keys(primitives)) primitives[key] += builtin.profile.sourcePrimitives[key];
+  }
   for (const requirement of unique.values()) {
     if (requirement.kind === 'font') { resources.ownedCpuBytes += fontCpuBytes(requirement); continue; }
     const bytes = requirement.width * requirement.height * 4;
@@ -125,7 +136,9 @@ export function compilePlan(projection) {
   }
   const nodePlans = ir.nodes.map((node, index) => {
     const result = { index, node, resources: nodeResources[index], number: name => number(node, name), constant: name => constant(node, name) };
-    if (node.nodeType !== 'group' && node.nodeType !== 'particles') { resources.bufferDeclaredBytes += 92; resources.ownedCpuBytes += 92; }
+    if (node.nodeType !== 'group' && node.nodeType !== 'particles' && node.nodeType !== 'builtinScene') {
+      resources.bufferDeclaredBytes += 92; resources.ownedCpuBytes += 92; primitives.drawCalls++;primitives.triangles+=2;
+    }
     if (node.nodeType === 'text') {
       if (!result.resources.fontAsset) throw new Error('composition-font-preparation-required');
       const text = constant(node, 'text');
@@ -136,7 +149,8 @@ export function compilePlan(projection) {
       result.count = number(node, 'count');
       if (!Number.isSafeInteger(result.count) || result.count < 0 || result.count > 65536) throw new Error('composition-particle-count-invalid');
       resources.bufferDeclaredBytes += result.count * 20; resources.ownedCpuBytes += result.count * 20;
-      resources.programs = 3;
+      primitives.drawCalls++;primitives.points+=result.count;
+      resources.programs = Math.max(resources.programs,builtin?7:3);
     }
     return result;
   });
@@ -188,5 +202,19 @@ export function compilePlan(projection) {
   }
   if (nodePlans.some(spec => spec.node.nodeType === 'text' && !coveredNodes.has(spec.index)))
     throw new Error('composition-text-raster-projection-required');
-  return { projection, ir, values, nodePlans, requirements: [...unique.values()], textRasters, resources, pixels };
+  if (builtin) {
+    if (primitives.drawCalls>builtin.profile.drawCalls || primitives.points>builtin.profile.particles
+        || primitives.triangles>builtin.profile.triangles) throw new Error('composition-builtin-primitive-budget');
+    const gpu=pixels*20+resources.textureDeclaredBytes+resources.bufferDeclaredBytes
+      + [...unique.values()].filter(value=>value.kind==='video').reduce((sum,value)=>sum+value.width*value.height*4,0)+96;
+    if (gpu>builtin.profile.memoryBytes || resources.ownedCpuBytes+resources.decodeReservedBytes>builtin.profile.memoryBytes)
+      throw new Error('composition-builtin-complete-memory-budget');
+    const limits=projection.pageLimits;
+    for (const key of ['bufferDeclaredBytes','ownedCpuBytes','textureDeclaredBytes','decodeReservedBytes','decoderLeases','programs','canvases'])
+      if (!limits || limits[key] !== resources[key]) throw new Error('composition-builtin-page-projection-mismatch:'+key);
+    if (limits.renderTargetDeclaredBytes !== resources.renderTargetDeclaredBytes+pixels*8
+        || limits.drawingBufferPixels !== resources.drawingBufferPixels+pixels || limits.gpuContexts !== 1)
+      throw new Error('composition-builtin-page-projection-mismatch:output');
+  }
+  return { projection, ir, values, nodePlans, requirements: [...unique.values()], textRasters, resources, pixels, builtin, primitives };
 }

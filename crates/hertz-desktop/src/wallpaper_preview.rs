@@ -32,6 +32,9 @@ pub(super) struct PreviewOwner {
     reference: Option<crate::wallpaper::playlist::FixedVersion>,
     configured_fps: u8,
     pub(super) monitor: native::WallpaperMonitor,
+    // Request facts belong to the lease, including while selection is pending
+    // and after staging has consumed the prepared composition.
+    composition_target_facts: Option<crate::wallpaper::builtin_plan::TargetFacts>,
     prepared: Option<PreviewContent>,
     pub(super) surface: Option<WallpaperSurface>,
     pub(super) frame: Option<Handoff>,
@@ -39,6 +42,32 @@ pub(super) struct PreviewOwner {
     heartbeat_at: Instant,
 }
 impl PreviewOwner {
+    pub(super) fn composition_target_changed(
+        &self,
+        settings_hwnd: HWND,
+        bounds: &crate::settings_embedding::SettingsBounds,
+    ) -> bool {
+        let Some(facts) = &self.composition_target_facts else {
+            return false;
+        };
+        let Some(current) = native::wallpaper_monitor_for_window(settings_hwnd) else {
+            return true;
+        };
+        current.display_id() != facts.monitor_id
+            || current.refresh_hz != facts.refresh_hz
+            || native::verified_wallpaper_monitor_dpi(&current)
+                // Pending media has not yet been classified. Two unavailable
+                // DPI readings do not change its legacy image/video target;
+                // an actual builtin plan independently requires verified DPI.
+                .map_or(facts.device_scale != 0.0, |dpi| {
+                    f64::from(dpi) / 96.0 != facts.device_scale
+                })
+            || bounds.x != facts.monitor_left
+            || bounds.y != facts.monitor_top
+            || bounds.width != facts.physical_width
+            || bounds.height != facts.physical_height
+    }
+
     pub(super) fn references_package(
         &self,
         work_key: Option<&str>,
@@ -334,6 +363,10 @@ impl App {
                     "预览区域超出固定尺寸，请重新加载编辑区",
                 ));
             }
+            // An embedded preview belongs to the settings window's monitor;
+            // the primary-monitor fallback describes only standalone preview.
+            monitor = native::wallpaper_monitor_for_window(settings.window.hwnd() as HWND)
+                .ok_or_else(|| JobError::new("display_missing", "预览所属显示器不可用"))?;
             monitor.left = bounds.x;
             monitor.top = bounds.y;
             monitor.width = bounds.width as i32;
@@ -354,6 +387,13 @@ impl App {
         let id = self.wallpaper_generation;
         let cancel = Arc::new(AtomicBool::new(false));
         let media = selection.is_some();
+        let composition_target_facts = media.then(|| {
+            crate::wallpaper::builtin_plan::TargetFacts::from_monitor(
+                &monitor,
+                &configuration,
+                ImagePurpose::Preview,
+            )
+        });
         if let Some(selection) = selection {
             let proxy = self.proxy.clone();
             self.wallpaper_library.resolve_desktop_selection(
@@ -374,6 +414,7 @@ impl App {
                 crate::wallpaper::selection_plan::SelectionOptions {
                     properties: configuration.main().properties.clone(),
                     composition_fit: Some(configuration.presentation().fit),
+                    composition_target: composition_target_facts.clone(),
                     ..Default::default()
                 },
                 Arc::clone(&cancel),
@@ -409,6 +450,7 @@ impl App {
             reference: None,
             configured_fps,
             monitor,
+            composition_target_facts,
             prepared: (!media).then_some(PreviewContent::Builtin(None)),
             surface,
             frame,
@@ -606,13 +648,17 @@ impl App {
         });
         match result {
             Ok(crate::wallpaper::selection_plan::ResolvedSelection::Media(media)) => {
+                preview.composition_target_facts = None;
                 preview.prepared = Some(PreviewContent::Media(media))
             }
             Ok(crate::wallpaper::selection_plan::ResolvedSelection::Builtin(builtin)) => {
+                preview.composition_target_facts = None;
                 preview.configuration.main_mut().presentation.fps = preview.configured_fps.min(15);
                 preview.prepared = Some(PreviewContent::Builtin(Some(builtin)));
             }
             Ok(crate::wallpaper::selection_plan::ResolvedSelection::Composition(plan)) => {
+                preview.composition_target_facts =
+                    plan.builtin_target().map(|plan| plan.target_facts.clone());
                 preview.configuration.main_mut().presentation.fps = preview.configured_fps.min(15);
                 preview.prepared = Some(PreviewContent::Composition(plan));
             }
@@ -817,6 +863,18 @@ impl App {
             )
             .is_empty()
         {
+            self.close_preview();
+            return;
+        }
+        // Parent movement between equal-DPI monitors need not resize the DOM.
+        // The native lease owner checks its cached bounds on the existing tick,
+        // including while asynchronous selection is still preparing.
+        if self.settings.as_ref().is_some_and(|settings| {
+            settings.placement.is_some()
+                && settings.preview_bounds.as_ref().is_some_and(|bounds| {
+                    preview.composition_target_changed(settings.window.hwnd() as HWND, bounds)
+                })
+        }) {
             self.close_preview();
             return;
         }

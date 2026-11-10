@@ -55,6 +55,22 @@
       "purpose": "Actual Rust-compiled composition IR and shipped Three bundle in Chrome: shared renderer/context, linear alpha and painter order, canvas fitting, real same-package media/font resources, absolute time/seek, bounded admission, partial load/cancel/stale completion and lease retirement. Requires PLAYWRIGHT_MODULE; local resources. Native preparation/first-frame, OS/GPU budgets and other-device qualification remain separate."
     },
     {
+      "script": "check-wallpaper-builtin-browser.js",
+      "purpose": "Original Rust composition projections with synthetic native target facts and actual shipped registry factory, real Three renderer, Image/VideoTexture/FontFace, shared linear alpha/depth and fit. Verifies pending/committed input, pause, reverse seek, forged costs and resource retirement. Requires Rust 1.88.0 and PLAYWRIGHT_MODULE. Evidence is synthetic-target real-browser only; Windows HWND/DPI, Apply/Reopen and new frozen candidate qualification remain separate."
+    },
+    {
+      "script": "check-wallpaper-builtin-plan.js",
+      "purpose": "Production JS planner and original camera with previously exported original native projections: structural/final-slot and amount tampering, complete 64MiB/20P memory refusal, author-space fit and unchanged depth. Requires check-wallpaper-builtin-browser.js projection output; no renderer, decoder or native host."
+    },
+    {
+      "script": "check-wallpaper-builtin-lifecycle-browser.js",
+      "purpose": "Production source modules in real Chrome with original Three, scope, ledger, context and real video decoder: seven complete cap refusals before loader/factory, pause after unsubmitted seek, failed final-output commit, delayed load cancellation/successor generation, borrowed-renderer continuation, actual depth clear and forced context-loss retirement. Requires prior builtin native projection output and PLAYWRIGHT_MODULE. Synthetic targets; no Windows/monitor/editor seek qualification."
+    },
+    {
+      "script": "check-wallpaper-builtin-native.js",
+      "purpose": "Fresh source-bound Windows candidate with real WorkerW/WebView2: immutable native package import, builtin/image/font/video/particles shared output, requested high/30fps to actual low/15fps independent preview, three fits, pause/resume, natural exit/reopen, nonzero predicate refusal preserving current selection, all native allocations draining and same-connection PID-verified natural quit. Requires copied wallpaper-media-probe HERTZ_DESKTOP_BIN, HERTZ_DESKTOP_BUILD_RECEIPT, HERTZ_BUILTIN_NATIVE_OUTPUT and PLAYWRIGHT_MODULE. Serial GUI; existing hosts preserved. Other monitor/GPU, native/editor seek and long stability remain separate."
+    },
+    {
       "script": "check-wallpaper-sandbox-native.js",
       "purpose": "Actual owned Windows G3-S no-network AppContainer candidate: exact worker binary/hash, private bootstrap, token/SID/capabilities and Job limit readback, WorkerW ownership/mount, isolated WebView2 process identity, rendered probe first frame and whole-Job shutdown. Uses --exe/--output-dir (optional isolated --build); product author Web remains disabled until all three qualification gates pass. Run GUI candidates serially."
     },

@@ -516,6 +516,54 @@ pub(crate) fn wallpaper_monitors() -> Vec<WallpaperMonitor> {
     output
 }
 
+pub(crate) fn wallpaper_monitor_for_window(hwnd: HWND) -> Option<WallpaperMonitor> {
+    wallpaper_monitor_from_monitor(unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) })
+}
+
+/// Composition admission needs an actual DPI query, not the ordinary display
+/// owner's 96dpi compatibility fallback. The same native monitor identity and
+/// DPI must still be current; a topology/DPI change requires another plan.
+pub(crate) fn verified_wallpaper_monitor_dpi(target: &WallpaperMonitor) -> Option<u32> {
+    struct Query<'a> {
+        target: &'a WallpaperMonitor,
+        result: Option<u32>,
+    }
+    unsafe extern "system" fn callback(
+        handle: HMONITOR,
+        _hdc: HDC,
+        _rect: *mut RECT,
+        data: LPARAM,
+    ) -> i32 {
+        let query = &mut *(data as *mut Query<'_>);
+        let Some(current) = wallpaper_monitor_from_monitor(handle) else {
+            return 1;
+        };
+        if current.name != query.target.name || current.display_id() != query.target.display_id() {
+            return 1;
+        }
+        let mut dpi_x = 0u32;
+        let mut dpi_y = 0u32;
+        let result = GetDpiForMonitor(handle, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y);
+        if result >= 0 && dpi_x != 0 && dpi_x == dpi_y && dpi_x == query.target.dpi {
+            query.result = Some(dpi_x);
+        }
+        0
+    }
+    let mut query = Query {
+        target,
+        result: None,
+    };
+    unsafe {
+        EnumDisplayMonitors(
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            Some(callback),
+            &mut query as *mut Query<'_> as LPARAM,
+        );
+    }
+    query.result
+}
+
 /// 读取显示器当前模式刷新率；异常值（0/1 或超常）按 60 兜底。
 fn refresh_rate_hz(device: &[u16]) -> u32 {
     let mut mode = DEVMODEW {

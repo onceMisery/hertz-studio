@@ -11,6 +11,7 @@ import { createSpatialResources } from './scenes/resources.js';
 import { createRenderContext } from './render-context.js';
 import { compilePlan } from './composition/plan.js';
 import { createCompositionRuntime } from './composition/runtime.js';
+import { sourceIdentity } from './composition/builtin.js';
 import { registerEffects, createPostChain, postResourcePlan, composeEffects, optionalEffectSpecs } from './effects/index.js';
 
 const registry = createRegistry();
@@ -182,6 +183,9 @@ export function create(canvas, options = {}) {
     const nextWidth = Math.max(2, Math.floor(Number(w) || 2)), nextHeight = Math.max(2, Math.floor(Number(h) || 2));
     if(preparedTarget){
       if(canvas.width!==preparedTarget.width||canvas.height!==preparedTarget.height){admissionFailure='composition-prepared-output-mismatch';return false;}
+      if(active?.composition&&active.instance?.validateSurface?.(nextWidth,nextHeight,globalThis.devicePixelRatio||1)===false){
+        admissionFailure='composition-target-replan-required';notify();return false;
+      }
       width=nextWidth;height=nextHeight;active?.instance?.resize?.(width,height);return true;
     }
     const nativePixels = globalThis.HertzGlBudget?.limits?.pixelBudget || Infinity;
@@ -234,7 +238,15 @@ export function create(canvas, options = {}) {
       const requestTicket=++compositionRequest;
       let plan,incrementalCandidate=null;
       try {
-        plan = compilePlan(projection);
+        const identity = projection.ir?.nodes?.some(node=>node.nodeType==='builtinScene') ? await sourceIdentity(registry) : null;
+        if(requestTicket!==compositionRequest||disposed)throw new DOMException('Composition superseded','AbortError');
+        plan = compilePlan(projection,registry,identity);
+        if(plan.builtin){
+          const facts=plan.builtin.facts.targetFacts,scale=globalThis.devicePixelRatio||1;
+          if(scale!==facts.deviceScale||Math.abs(canvas.clientWidth*scale-facts.physicalWidth)>scale
+              ||Math.abs(canvas.clientHeight*scale-facts.physicalHeight)>scale)
+            throw new Error('composition-builtin-native-surface-changed');
+        }
         if (projection.target.width !== canvas.width || projection.target.height !== canvas.height)
           throw new Error('composition-target-replan-required');
         if(active?.composition&&active.instance?.canApplyPlan(plan)){
@@ -262,7 +274,7 @@ export function create(canvas, options = {}) {
       try {
         const instance=await createCompositionRuntime(THREE,renderContext,scope,plan,{
           generation:ticket, isCurrent:value => !disposed && value===generation,
-          onInvalidate:options.onInvalidate });
+          onInvalidate:options.onInvalidate, services });
         if (disposed || ticket!==generation || scope.signal.aborted) { instance.dispose(); scope.dispose(); return null; }
         candidate.instance=instance; candidate.scene=instance.scene; candidate.camera=instance.camera;
         instance.resize(width,height); state='preparing'; lastFrame=null; intervals=[]; notify();

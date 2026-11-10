@@ -18,6 +18,8 @@ RSS、音频及远程封面使用 `public_net` 的同一 URL/DNS/重定向规则
 
 创意场景定义持有参数规格、默认值、机位、别名与歌词能力，CreativeStage 消费定义并继续独占预置、cue 和音频绑定。沉浸场景描述绑定构造函数；歌词渲染器描述与实例表统一宿主分发。Stage 仍持有唯一帧时钟，starborn 仍是导演而非渲染器。
 
+2026-11-11 组合资格扩展：可组合 metadata、source profile/完整资源计划和时钟输入要求仍属于原 scene registry，经同一 catalog 导出。Rust 与 JS 查询编译器最终参数槽和结构版本，缺项拒绝，不建立另一份场景白名单或补默认值。当前只开放 root spectrum-towers v1/source low、ripple/post为零的实际验收子集；其它scene/model和文档自动化明确未支持。原native目标在资源准备前选择唯一DPI栅格，原scope持有source预留/claim，原renderer按3D→clearDepth→2D→一次sRGB输出；原帧时钟和pending/committed输入只在成功提交后换代。规格或目录可校验不等于设备可呈现，当前资格与后续边界见[实施记录](../wallpaper-builtin-composition.md)。
+
 2026-10-15 三维空间：SpaceHome 只消费 app 注入的业务宿主；Space3D 持有导航与通用控件，
 SpaceCamera 持有机位，SpaceStagePure 持有唯一 Three.js renderer、registry、scope 与质量策略。
 场景定义统一持有 API/state 版本、参数、机位、别名、能力和预览；菜单与设置从 registry 派生。

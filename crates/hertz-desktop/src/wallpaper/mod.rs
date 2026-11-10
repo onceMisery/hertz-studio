@@ -29,6 +29,7 @@ pub(crate) mod audio_devices;
 pub(crate) mod audio_service;
 #[allow(dead_code)]
 pub(crate) mod budget;
+pub(crate) mod builtin_plan;
 pub(crate) mod composition_plan;
 #[allow(dead_code)]
 pub(crate) mod config;

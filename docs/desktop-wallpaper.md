@@ -1,5 +1,7 @@
 # Hertz 壁纸引擎 P0–P3 开发设计与实施计划
 
+2026-11-11 [首个 builtinScene 组合适配器](wallpaper-builtin-composition.md)已支持 root spectrum-towers v1/source low 与既有二维、同包字体和视频共享一个 renderer。完整最终槽与成本准入、唯一 DPI 栅格、depth/单次输出、pending/committed 时间输入及退出已接通；干净源码 R5 的 Windows 10 项、browser 12、lifecycle 13、plan 18 和设置 33 项通过。当前 2560×1600/DPI144/165Hz 设备准入 raster1264×790、low/27.5fps 上限，设置页明确区分请求 high/30；字体98原图已汇总，冻结R22的历史P2及两个gap仍保留。其它scene/model、GLB/KTX2、效果/轨道/绑定、编辑器与跨设备/长稳继续按已批准总计划实施；此增量不完成整个P2或A01–A10。
+
 2026-11-09 实施记录：已批准的 AI-01 离线推荐与明确切换接入原生设置、真实已安装目录和原 Apply/journal，组与 Profile 变化后的迟到回执由原 UI receiver 拒绝。同名同版本的推荐行显示内容标识，完整包身份可通过提示查看，操作的可访问名称也包含标识。Windows 开发候选 `160f5a07…` 的 8 项真实验收通过，覆盖可辨识的重名选择及确切 work/hash 提交、受理/保存/首帧运行、CAS、外部权限拒绝、未保存歌词草稿隔离和无目标；完整 AI-02～06 与 provider、费用、配对、MCP 和性能资格仍按后续切片实施。统一检查点位于 `docs/aegis/work/2026-11-08-approved-design-implementation/`。
 
 同批 P2 核心组合修正了真实 15 fps 下的视频 seek 与页面时钟交错，以及多个稀疏视频在整帧成功前消费完成标记的问题。媒体提交由完整 `main.frame` 成功出口调用原视频事务 owner，实际输出 shader 失败、后续歌词绘制失败、同步隐藏/失效均不提前提交；独立 spec/quality 复审与永久浏览器 32 项回归通过。匹配 Windows 候选 `d4cdef26…` 的包导入、三种 Fit 首帧、共享视频、暂停恢复及窗口/资源退场共 6 项通过。G3-S 同候选连续三次完成受限 WebView2 environment/WorkerW 的 2560×1600 物理首帧、挂载与自然关闭，7 个进程每次均有完整 NEW/EXIT、映像 pin 和物理退出记录，未强制终止。此前关闭失败仍保留；新增 typed 诊断不等于已证明根治历史失败，文件/网络/句柄与压力停止的后续停止点尚未取得，Web 能力继续关闭。后续源码变更须重建匹配产物，不能借用此候选的通过记录。

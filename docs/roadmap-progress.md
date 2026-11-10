@@ -1,5 +1,7 @@
 # 路线图实施状态
 
+2026-11-11 A04/P2 [builtinScene 首个可组合子集](wallpaper-builtin-composition.md)完成当前 Windows 候选验证：原 registry 的 spectrum-towers low 背景与二维/同包字体/真实视频使用同一输出，完整目标/成本/最终槽、暂停和退场有 source-bound 证据。最终 R5 native10、browser12、lifecycle13、plan18、settings33通过；桌面库696+2ignored、壁纸83、Clippy/fmt、frontend extra95通过。两处 saved/actual 文案问题已用新原图修正，旧候选归属保留；FONT98审阅完整但UI04/D03仍有gap。用户2026-11-08已批准A04/A05/A06/A10并要求实现后验证；GLB/KTX2、效果/时间线/编辑器、社区隔离与受管AI、原生校准及设备资格仍按依赖继续，整体目标保持开放。
+
 2026-11-07 [当前优化release85ab](desktop-release.md#当前源码优化-release-候选增量)已完成720份生产输入核对、153项压缩UI、HTTP十二组、解压入口五组、setup2686/NSIS十八组、原更新器八组及配对e778 SDK/HTTP八组。[身份/清理复核](../output/native-http-release-final-verification-20261107.json)通过，全部本轮handles终态、测试进程/安装登记/快捷方式清理，既有服务保留。新安全中心PID29168占据前台，当前release正式OBS/OLE仍待用户处理；A10设计仍待审，签名/净系统/设备/其它OS与完整A01–A10目标保持开放。下文旧候选各有独立身份。
 
 2026-11-07 [原生HTTP边界](native-http-boundary.md)已接仅 `--window` 启用的bind/Host/Origin准入、可信HTML nonce/CSP和响应头。固定8af3 Full/native debug候选的十二组HTTP/WS/WebView2/Chrome157、主程序26项、普通无默认feature编译、Rust1.88与Clippy通过；源码/候选一致，测试自有进程退出。Pixi/Blob/style、无Referer远程图片与网络前阻断跨源fetch已验证。原安全中心窗口已消失，当前候选随后通过OBS正式九组；配对e778 Full DBX另通过SDK/HTTP八组及Rust1.88。下文b204/5a/4f10/8ebb保留各自身份，完整目标仍开放。

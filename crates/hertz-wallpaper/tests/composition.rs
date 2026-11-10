@@ -277,6 +277,57 @@ fn builtin_defaults_keep_the_original_registry_owner_and_background_exclusion() 
 }
 
 #[test]
+fn final_builtin_parameters_query_numeric_and_constant_slots_without_structural_fields() {
+    use std::collections::BTreeMap;
+    let mut value = base();
+    let mut builtin = node("original", "builtinScene");
+    builtin["properties"] =
+        json!({"sceneId":"spectrum-towers","params":{"speed":1.2,"density":0.2}});
+    value["nodes"].as_array_mut().unwrap().push(builtin);
+    let bytes = serde_json::to_vec(&value).unwrap();
+    let mut metadata = manifest(&bytes);
+    metadata.properties = [
+        json!({"id":"ripple","label":"涟漪","type":"number","default":0,"constraints":{"min":0,"max":1},"target":{"kind":"node","nodeId":"original","property":"ripples","component":null}}),
+        json!({"id":"director","label":"导演","type":"boolean","default":false,"constraints":{},"target":{"kind":"node","nodeId":"original","property":"director","component":null}}),
+        json!({"id":"cue","label":"段落","type":"select","default":"auto","constraints":{"options":[{"value":"auto","label":"自动"},{"value":"bridge","label":"桥段"}]},"target":{"kind":"node","nodeId":"original","property":"cue","component":null}})
+    ].into_iter().map(|value| value.as_object().unwrap().clone()).collect();
+    let compiled = compile_document(&bytes, &metadata).unwrap();
+    let defaults = compiled.final_public_values(&BTreeMap::new()).unwrap();
+    let params = compiled.final_builtin_params(1, &defaults).unwrap();
+    assert_eq!(
+        params,
+        *compiled.document().nodes[1].properties["params"]
+            .as_object()
+            .unwrap()
+    );
+    let final_values = compiled
+        .final_public_values(&BTreeMap::from([
+            ("ripple".to_owned(), json!(1)),
+            ("director".to_owned(), json!(true)),
+            ("cue".to_owned(), json!("bridge")),
+        ]))
+        .unwrap();
+    let final_params = compiled.final_builtin_params(1, &final_values).unwrap();
+    assert_eq!(final_params["ripples"].as_f64(), Some(1.0));
+    assert_eq!(final_params["director"], true);
+    assert_eq!(final_params["cue"], "bridge");
+    assert_eq!(final_params["speed"], 1.2);
+    assert_eq!(final_params["density"], 0.2);
+    assert_eq!(final_params.len(), params.len());
+    for key in ["sceneId", "stateVersion", "params", "visible"] {
+        assert!(!final_params.contains_key(key));
+    }
+    assert!(compiled.final_builtin_params(0, &final_values).is_err());
+    assert!(compiled.final_builtin_params(99, &final_values).is_err());
+    let unrelated = compile(&base())
+        .unwrap()
+        .final_public_values(&BTreeMap::new())
+        .unwrap();
+    assert!(compiled.final_builtin_params(1, &unrelated).is_err());
+    assert_eq!(compiled.final_builtin_params(1, &defaults).unwrap(), params);
+}
+
+#[test]
 fn effects_are_fixed_order_bounded_and_cannot_form_cross_node_graphs() {
     let color = json!({"id":"tint","type":"colorAdjust","stateVersion":1,"target":{"kind":"node","nodeId":"background-layer"},"properties":{}});
     let glow = json!({"id":"glow","type":"glow","stateVersion":1,"target":{"kind":"output"},"properties":{}});

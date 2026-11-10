@@ -316,6 +316,13 @@ impl App {
                 resume: None,
                 properties: configuration.main().properties.clone(),
                 composition_fit: Some(configuration.presentation().fit),
+                composition_target: Some(
+                    crate::wallpaper::builtin_plan::TargetFacts::from_monitor(
+                        &monitor,
+                        &configuration,
+                        target(&configuration, &monitor).purpose,
+                    ),
+                ),
             },
             Arc::clone(&cancel),
             slot,

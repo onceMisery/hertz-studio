@@ -9,22 +9,35 @@ export const postSpecs = {
   bloom: number('对比度辉映', 0, 0, 12, 1)
 };
 export const optionalEffectSpecs = { dust: commonParams.dust, discRing: commonParams.discRing, ripples: commonParams.ripples, ...postSpecs };
-function dustResourcePlan() { return { ownedCpuBytes: 1200 * 3 * 4, bufferDeclaredBytes: 1200 * 3 * 4 }; }
-function orbitResourcePlan() {
+function bufferResources(id, cpuPeakBytes, cpuRetainedBytes, bufferBytes, primitives) {
+  return { id, cpuPeakBytes, cpuRetainedBytes, bufferBytes, primitives,
+    ownedCpuBytes: cpuPeakBytes, bufferDeclaredBytes: bufferBytes };
+}
+function dustResourcePlan(profile) {
+  const bytes = 1200 * 3 * 4;
+  return bufferResources('dust', bytes, bytes, bytes,
+    { drawCalls: 1, points: Math.floor(1200 * qualityDensity(profile)), triangles: 0 });
+}
+function orbitResourcePlan(profile) {
   const geometryBytes = 24 * 8 * 4 + 36 * 2, matrixBytes = 64 * 16 * 4;
-  return { ownedCpuBytes: geometryBytes + matrixBytes + (24 * 8 + 36) * 8, bufferDeclaredBytes: geometryBytes + matrixBytes };
+  const retained = geometryBytes + matrixBytes;
+  return bufferResources('orbit', retained + (24 * 8 + 36) * 8, retained, retained,
+    { drawCalls: 1, points: 0, triangles: (qualityDensity(profile) < .5 ? 32 : 64) * 12 });
 }
 function rippleResourcePlan() {
   const vertices = 5 * 65, indices = 6 * 4 * 64, geometryBytes = vertices * 8 * 4 + indices * 2;
-  return { ownedCpuBytes: geometryBytes + 6 * 16 * 4 + 6 * 4 + (vertices * 8 + indices) * 8, bufferDeclaredBytes: geometryBytes + 6 * 16 * 4 };
+  const bufferBytes = geometryBytes + 6 * 16 * 4, retained = bufferBytes + 6 * 4;
+  return bufferResources('ripple', retained + (vertices * 8 + indices) * 8, retained, bufferBytes,
+    { drawCalls: 0, points: 0, triangles: 0 });
 }
-export function effectsResourcePlan() {
-  const plans = [dustResourcePlan(), orbitResourcePlan(), rippleResourcePlan()];
-  return { ownedCpuBytes: plans.reduce((sum, plan) => sum + plan.ownedCpuBytes, 0), bufferDeclaredBytes: plans.reduce((sum, plan) => sum + plan.bufferDeclaredBytes, 0) };
+export function effectsResourcePlan(profile) {
+  const buffers = [dustResourcePlan(profile), orbitResourcePlan(profile), rippleResourcePlan()];
+  return { buffers, cpuRetainedBytes: buffers.reduce((sum, plan) => sum + plan.cpuRetainedBytes, 0),
+    ownedCpuBytes: buffers.reduce((sum, plan) => sum + plan.cpuPeakBytes, 0), bufferDeclaredBytes: buffers.reduce((sum, plan) => sum + plan.bufferBytes, 0) };
 }
 export function createDust(ctx) {
   const T = ctx.THREE, group = root(ctx), count = 1200;
-  const declared = dustResourcePlan(), plan = ctx.scope.bufferPlan(declared.ownedCpuBytes, declared.bufferDeclaredBytes, 'Space dust position1200');
+  const declared = dustResourcePlan(), plan = ctx.scope.bufferPlan(declared.ownedCpuBytes, declared.bufferDeclaredBytes, 'Space dust position1200', declared.id);
   const positions = new Float32Array(count * 3);
   for (let i = 0; i < count; i++) { positions[i * 3] = (seed(i, 1) - .5) * 24; positions[i * 3 + 1] = (seed(i, 2) - .5) * 16; positions[i * 3 + 2] = (seed(i, 3) - .5) * 24; }
   const geometry = own(ctx, new T.BufferGeometry()); geometry.setAttribute('position', plan.upload(new T.BufferAttribute(positions, 3)));
@@ -39,7 +52,7 @@ export function createDust(ctx) {
 export function createSpectrumOrbit(ctx) {
   const T = ctx.THREE, group = root(ctx), count = 64;
   const geometryBytes = 24 * 8 * 4 + 36 * 2, matrixBytes = count * 16 * 4;
-  const declared = orbitResourcePlan(), plan = ctx.scope.bufferPlan(declared.ownedCpuBytes, declared.bufferDeclaredBytes, 'Space spectrum orbit BoxGeometry and matrix64');
+  const declared = orbitResourcePlan(), plan = ctx.scope.bufferPlan(declared.ownedCpuBytes, declared.bufferDeclaredBytes, 'Space spectrum orbit BoxGeometry and matrix64', declared.id);
   const geometry = own(ctx, new T.BoxGeometry(.065, 1, .065));
   const material = own(ctx, new T.MeshBasicMaterial({ color: 0xfca38f }));
   const mesh = own(ctx, new T.InstancedMesh(geometry, material, count)), o = new T.Object3D(); group.add(mesh); group.visible = !!ctx.params.discRing;
@@ -61,7 +74,7 @@ export function createSpectrumOrbit(ctx) {
 export function createRipple(ctx) {
   const T = ctx.THREE, group = root(ctx), vertices = 5 * 65, indices = 6 * 4 * 64;
   const geometryBytes = vertices * 8 * 4 + indices * 2, matrixBytes = 6 * 16 * 4, bornBytes = 6 * 4;
-  const declared = rippleResourcePlan(), plan = ctx.scope.bufferPlan(declared.ownedCpuBytes, declared.bufferDeclaredBytes, 'Space ripple TorusGeometry4x64, matrix6 and born6');
+  const declared = rippleResourcePlan(), plan = ctx.scope.bufferPlan(declared.ownedCpuBytes, declared.bufferDeclaredBytes, 'Space ripple TorusGeometry4x64, matrix6 and born6', declared.id);
   const geometry = own(ctx, new T.TorusGeometry(1, .018, 4, 64));
   const material = own(ctx, new T.MeshBasicMaterial({ color: 0x8fcdda, transparent: true, opacity: .4, depthWrite: false }));
   const mesh = own(ctx, new T.InstancedMesh(geometry, material, 6)), o = new T.Object3D(), born = new Float32Array(6).fill(-100); group.add(mesh);
@@ -79,7 +92,8 @@ export function createRipple(ctx) {
         o.position.set(0, -2.9, 0); o.rotation.x = -Math.PI / 2; o.scale.setScalar(active ? (.5 + age * 3) * (p.ripples ?? 0) : 0); o.updateMatrix(); mesh.setMatrixAt(i, o.matrix);
       }
       mesh.instanceMatrix.needsUpdate = true;
-    }, stats: () => ({ triangles: 3072, drawCalls: group.visible ? 1 : 0 })
+    }, reset() {born.fill(-100);next=0;previousOnset=false;previousBass=0;last=-100;},
+    stats: () => ({ triangles: 3072, drawCalls: group.visible ? 1 : 0 })
   });
 }
 const factories = { dust: createDust, 'spectrum-orbit': createSpectrumOrbit, ripple: createRipple };
@@ -88,6 +102,7 @@ export function createEffects(ctx, ids = Object.keys(factories)) {
   return {
     update(frame) { instances.forEach(i => i.update(frame)); }, resize(w, h) { instances.forEach(i => i.resize(w, h)); },
     setParams(params) { instances.forEach(i => i.setParams(params)); }, setQuality(profile) { instances.forEach(i => i.setQuality(profile)); },
+    resetHistory() {instances.forEach(i=>i.resetHistory?.());},
     dispose() { instances.forEach(i => i.dispose()); }, stats() { return instances.map(i => i.stats()); }
   };
 }
@@ -99,6 +114,7 @@ export function composeEffects(ctx, primary) {
     resize(w, h) { primary.resize?.(w, h); effects.resize(w, h); },
     setParams(next) { params = next; primary.setParams?.(next); effects.setParams(next); },
     setQuality(profile) { primary.setQuality?.(profile); effects.setQuality(profile); },
+    resetHistory() {primary.resetHistory?.();effects.resetHistory();},
     dispose() { effects.dispose(); primary.dispose(); },
     ...(primary.setRig ? { setRig(pose) { primary.setRig(pose); } } : {}),
     stats: () => ({ primary: primary.stats?.(), effects: effects.stats() })

@@ -54,6 +54,29 @@ fn req(owner: OwnerKind, session: &str) -> BudgetRequest {
 }
 
 #[test]
+fn planning_snapshot_is_atomic_read_only_and_keeps_pending_exit_usage() {
+    let budget = BudgetCoordinator::new();
+    let initial = budget.planning_snapshot();
+    assert_eq!(initial, (1, Default::default()));
+    assert_eq!(budget.planning_snapshot(), initial);
+    let mut request = req(OwnerKind::Desktop, "planning");
+    request.output_pixel_rate = 1_000_000;
+    let token = budget.grant(&request).unwrap();
+    let active = budget.planning_snapshot();
+    assert!(active.0 > initial.0);
+    assert_eq!(active.1.output_pixel_rate, request.output_pixel_rate);
+    budget.release(token, "planning", 1).unwrap();
+    let retiring = budget.planning_snapshot();
+    assert!(retiring.0 > active.0);
+    assert_eq!(retiring.1.output_pixel_rate, active.1.output_pixel_rate);
+    assert_eq!(budget.planning_snapshot(), retiring);
+    budget.confirm_exit(token, "planning", 1).unwrap();
+    let exited = budget.planning_snapshot();
+    assert!(exited.0 > retiring.0);
+    assert_eq!(exited.1.output_pixel_rate, 0);
+}
+
+#[test]
 fn video_upload_rate_is_independent_global_and_held_until_real_exit() {
     use super::MAX_TEXTURE_UPLOAD_BYTES_PER_SECOND;
     let budget = BudgetCoordinator::new();

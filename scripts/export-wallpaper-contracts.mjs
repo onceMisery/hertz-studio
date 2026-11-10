@@ -55,6 +55,7 @@ function loadCatalog() {
     camera: def.camera,
     capabilities: def.capabilities,
     quality: def.quality,
+    ...(def.composition ? { composition: def.composition } : {}),
   }));
 }
 

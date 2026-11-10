@@ -54,6 +54,7 @@ export function basicInstance(group, params, quality, hooks = {}) {
     resize(w, h) { hooks.resize?.(w, h); },
     setParams(next) { params = { ...params, ...next }; hooks.params?.(params); },
     setQuality(next) { quality = next; hooks.quality?.(quality); },
+    resetHistory() {hooks.reset?.();},
     dispose() { if (gone) return; gone = true; hooks.dispose?.(); group.removeFromParent(); },
     stats: () => hooks.stats?.() || {}
   };
@@ -237,9 +238,12 @@ export function createParticles(ctx, kind, palette = [0x67d9cf, 0xfb7298, 0x8fb9
   });
 }
 
-export function towersResourcePlan() {
+export function towersResourcePlan(profile) {
   const geometryBytes = 24 * 8 * 4 + 36 * 2, instanceBytes = 256 * (16 + 3) * 4;
-  return { ownedCpuBytes: geometryBytes + instanceBytes + (24 * 8 + 36) * 8, bufferDeclaredBytes: geometryBytes + instanceBytes };
+  const cpuPeakBytes = geometryBytes + instanceBytes + (24 * 8 + 36) * 8, bufferBytes = geometryBytes + instanceBytes;
+  return { id: 'towers', cpuPeakBytes, cpuRetainedBytes: bufferBytes, bufferBytes,
+    ownedCpuBytes: cpuPeakBytes, bufferDeclaredBytes: bufferBytes,
+    primitives: { drawCalls: 1, points: 0, triangles: Math.floor(256 * qualityDensity(profile)) * 12 } };
 }
 export function createTowers(ctx, style = 'spectrum') {
   const T = ctx.THREE, group = root(ctx), count = 256;
@@ -247,7 +251,7 @@ export function createTowers(ctx, style = 'spectrum') {
   const geometryBytes = 24 * 8 * 4 + 36 * 2, instanceBytes = count * (16 + 3) * 4;
   const declared = towersResourcePlan();
   const plan = ctx.scope.bufferPlan(declared.ownedCpuBytes, declared.bufferDeclaredBytes,
-    'Space shared towers BoxGeometry, matrix256 and lazily initialized color256');
+    'Space shared towers BoxGeometry, matrix256 and lazily initialized color256', declared.id);
   const geometry = own(ctx, new T.BoxGeometry(.32, 1, .32));
   const material = own(ctx, new T.ShaderMaterial({ vertexColors: true, wireframe: style === 'wire',
     vertexShader: `varying vec3 vColor;varying float vY;varying vec3 vNormal;

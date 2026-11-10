@@ -183,6 +183,7 @@ pub(crate) struct PreparedComposition {
     _document_pin: Arc<PinnedMedia>,
     target: ImageTarget,
     output_fit: super::config::Fit,
+    builtin_target: Option<Box<super::builtin_plan::BuiltinTargetPlan>>,
 }
 
 #[cfg(test)]
@@ -364,6 +365,7 @@ pub(crate) fn validate_public_properties(
 
 /// This must run on the management blocking worker: package integrity checks hash
 /// actual bytes. Every font/media qualification uses the original single slot.
+#[cfg(test)]
 pub(crate) async fn resolve(
     jobs: Arc<ImportJobs>,
     package_hash: String,
@@ -372,10 +374,43 @@ pub(crate) async fn resolve(
     output_fit: super::config::Fit,
     cancel: Arc<AtomicBool>,
 ) -> Result<PreparedComposition> {
+    resolve_with_target_facts(
+        jobs,
+        package_hash,
+        properties,
+        target,
+        output_fit,
+        None,
+        cancel,
+    )
+    .await
+}
+
+pub(crate) async fn resolve_with_target_facts(
+    jobs: Arc<ImportJobs>,
+    package_hash: String,
+    properties: serde_json::Map<String, Value>,
+    target: ImageTarget,
+    output_fit: super::config::Fit,
+    target_facts: Option<super::builtin_plan::TargetFacts>,
+    cancel: Arc<AtomicBool>,
+) -> Result<PreparedComposition> {
     check_cancel(&cancel)?;
     let package = jobs.assets().read_installed_manifest(&package_hash)?;
     let (compiled, final_values, document_pin) =
         read_document(jobs.assets(), &package, &properties)?;
+    let builtin_target = super::builtin_plan::plan(
+        &compiled,
+        &final_values,
+        target,
+        output_fit,
+        target_facts.as_ref(),
+        &super::budget::global(),
+    )?
+    .map(Box::new);
+    let target = builtin_target.as_ref().map_or(target, |plan| plan.target);
+    // Metadata/target planning is complete before any media/font/text work.
+    // Execution stays closed until costs, projection and the renderer qualify.
     validate_adapters(&compiled)?;
     validate_resource_uses(&compiled, &final_values, &package)?;
     let inputs = jobs.assets().probe_installed_media(&package, &cancel)?;
@@ -417,8 +452,19 @@ pub(crate) async fn resolve(
         _document_pin: Arc::clone(&document_pin),
         target,
         output_fit,
+        builtin_target: builtin_target.clone(),
     };
-    preliminary.media_costs_with_unprepared_vectors(true)?;
+    let mut preliminary_costs = preliminary.media_costs_with_unprepared_vectors(true)?;
+    if builtin_target.is_some() {
+        complete_costs(
+            &mut preliminary_costs,
+            &compiled,
+            &final_values,
+            &TextRasterPlan::default(),
+            target,
+            0,
+        )?;
+    }
     let assets = prepare_assets(
         &jobs,
         &package,
@@ -439,6 +485,7 @@ pub(crate) async fn resolve(
         _document_pin: document_pin,
         target,
         output_fit,
+        builtin_target,
     };
     // Range qualification consumes the combined final numeric projection, not
     // the author's defaults or requested canvas dimensions.
@@ -636,6 +683,9 @@ fn validate_structure(compiled: &CompiledDocument) -> Result<()> {
         ));
     }
     for node in compiled.ir().nodes() {
+        if node.node_type == "builtinScene" {
+            continue;
+        }
         if node.space != "2d"
             || !matches!(
                 node.node_type.as_str(),
@@ -665,6 +715,13 @@ struct Costs {
     video_upload_peak_bytes: u64,
     font_cpu_bytes: u64,
     raster_bytes: u64,
+    private_cpu_bytes: u64,
+    source_cpu_retained_bytes: u64,
+    input_bytes: u64,
+    depth_bytes_per_pixel: u64,
+    draw_calls: u64,
+    points: u64,
+    triangles: u64,
 }
 
 fn final_number(
@@ -700,22 +757,56 @@ fn geometry_costs(compiled: &CompiledDocument, final_values: &FinalPublicValues)
     validate_structure(compiled)?;
     let mut costs = Costs {
         buffer_bytes: 92,
+        private_cpu_bytes: 92,
         programs: 2,
+        draw_calls: 1,
+        triangles: 2,
         ..Default::default()
     };
+    let source = super::builtin_plan::source_costs(compiled, final_values)?;
+    if let Some((profile, clock)) = &source {
+        costs.buffer_bytes =
+            checked_sum(&[costs.buffer_bytes, profile.source_resources.buffer_bytes])?;
+        costs.private_cpu_bytes = checked_sum(&[
+            costs.private_cpu_bytes,
+            profile.source_resources.cpu_peak_bytes,
+        ])?;
+        costs.source_cpu_retained_bytes = profile.source_resources.cpu_retained_bytes;
+        costs.input_bytes = clock.input_bytes;
+        costs.depth_bytes_per_pixel = 4;
+        costs.programs += profile.source_resources.programs;
+        costs.draw_calls += profile.source_primitives.draw_calls;
+        costs.points += profile.source_primitives.points;
+        costs.triangles += profile.source_primitives.triangles;
+    }
     for (index, node) in compiled.ir().nodes().iter().enumerate() {
         let bytes = match node.node_type.as_str() {
-            "group" => 0,
+            "group" | "builtinScene" => 0,
             "particles" => {
-                costs.programs = 3;
-                checked_product(
-                    final_number(compiled, final_values, index, "count")? as u64,
-                    20,
-                )?
+                costs.programs = costs.programs.max(if source.is_some() { 7 } else { 3 });
+                let count = final_number(compiled, final_values, index, "count")? as u64;
+                costs.draw_calls += 1;
+                costs.points += count;
+                checked_product(count, 20)?
             }
-            _ => 92,
+            _ => {
+                costs.draw_calls += 1;
+                costs.triangles += 2;
+                92
+            }
         };
         costs.buffer_bytes = checked_sum(&[costs.buffer_bytes, bytes])?;
+        costs.private_cpu_bytes = checked_sum(&[costs.private_cpu_bytes, bytes])?;
+    }
+    if source.as_ref().is_some_and(|(profile, _)| {
+        costs.draw_calls > profile.draw_calls
+            || costs.points > profile.particles
+            || costs.triangles > profile.triangles
+    }) {
+        return Err(JobError::new(
+            "budget_exceeded",
+            "builtinScene 整组合 primitive 成本超出 source low profile",
+        ));
     }
     Ok(costs)
 }
@@ -754,7 +845,8 @@ fn complete_costs(
     costs.raster_bytes = rasters.raster_rgba_bytes();
     costs.cpu = checked_sum(&[
         costs.decode_bytes,
-        costs.buffer_bytes,
+        costs.private_cpu_bytes,
+        costs.input_bytes,
         costs.semantic_bytes,
         costs.font_cpu_bytes,
         costs.raster_bytes,
@@ -764,7 +856,7 @@ fn complete_costs(
     costs.gpu = checked_sum(&[
         checked_product(
             checked_product(u64::from(target.width), u64::from(target.height))?,
-            16,
+            16 + costs.depth_bytes_per_pixel,
         )?,
         costs.texture_bytes,
         costs.raster_bytes,
@@ -772,6 +864,17 @@ fn complete_costs(
         costs.video_upload_peak_bytes,
         super::gl_plan::THREE_BOOTSTRAP_GPU_PEAK_BYTES,
     ])?;
+    if super::builtin_plan::source_costs(compiled, final_values)?
+        .as_ref()
+        .is_some_and(|(profile, _)| {
+            costs.gpu > profile.memory_bytes || costs.cpu > profile.memory_bytes
+        })
+    {
+        return Err(JobError::new(
+            "budget_exceeded",
+            "builtinScene 整组合 CPU/GPU 成本超出 source low memoryBytes",
+        ));
+    }
     Ok(())
 }
 
@@ -974,12 +1077,29 @@ impl PreparedComposition {
         if !(5..=1000).contains(&refresh_hz) || !(1..=60).contains(&fps) {
             return Err(JobError::invalid_input("组合输出帧率无效"));
         }
+        if self.builtin_target.as_ref().is_some_and(|plan| {
+            let planned_owner =
+                if plan.target_facts.purpose == super::image_prepare::ImagePurpose::Preview {
+                    OwnerKind::Preview
+                } else {
+                    OwnerKind::Desktop
+                };
+            owner != planned_owner || refresh_hz != plan.allowance.refresh_hz
+        }) {
+            return Err(JobError::invalid_input(
+                "builtinScene 输出用途或刷新率已改变，必须重新规划",
+            ));
+        }
         let cost = self.costs()?;
         let fps = if owner == OwnerKind::Preview {
             fps.min(15)
         } else {
             fps
         };
+        let fps = self
+            .builtin_target
+            .as_ref()
+            .map_or(fps, |plan| fps.min(plan.allowance.effective_fps));
         let divisor = refresh_hz.div_ceil(fps);
         let pixels = checked_product(u64::from(self.target.width), u64::from(self.target.height))?;
         let request = BudgetRequest {
@@ -1010,9 +1130,15 @@ impl PreparedComposition {
         Ok(GlPlan {
             limits: GlLimits {
                 quality: "low".into(),
-                requested_quality: "low".into(),
+                requested_quality: self
+                    .builtin_target
+                    .as_ref()
+                    .map_or_else(|| "low".into(), |plan| plan.requested_quality.clone()),
                 fps,
-                requested_fps: fps,
+                requested_fps: self
+                    .builtin_target
+                    .as_ref()
+                    .map_or(fps, |plan| plan.target_facts.requested_fps),
                 refresh_hz,
                 frame_divisor: divisor,
                 pixel_budget: pixels,
@@ -1041,6 +1167,9 @@ impl PreparedComposition {
 
     pub(crate) fn target(&self) -> ImageTarget {
         self.target
+    }
+    pub(crate) fn builtin_target(&self) -> Option<&super::builtin_plan::BuiltinTargetPlan> {
+        self.builtin_target.as_deref()
     }
     pub(crate) fn output_fit(&self) -> super::config::Fit {
         self.output_fit
@@ -1137,7 +1266,16 @@ impl PreparedComposition {
             resolved_assets: identities,
             // Preserve the existing media-only cache identity. Text extends the
             // same target owner with the parser, raster and wrapping versions.
-            capability_digest: if self.assets.values().any(|asset| asset.as_font().is_some()) {
+            capability_digest: if let Some(plan) = &self.builtin_target {
+                digest(&(
+                    "p2-02-image-video-group-particles-v1",
+                    plan.identity_digest()?,
+                    super::font_prepare::ADAPTER_VERSION,
+                    text_raster::ADAPTER_ID,
+                    text_raster::ADAPTER_VERSION,
+                    text_raster::WRAP_VERSION,
+                ))?
+            } else if self.assets.values().any(|asset| asset.as_font().is_some()) {
                 digest(&(
                     "p2-02-image-video-group-particles-v1",
                     super::font_prepare::ADAPTER_VERSION,
@@ -1159,13 +1297,13 @@ impl PreparedComposition {
         ))?;
         let cost = self.costs()?;
         let pixels = checked_product(u64::from(self.target.width), u64::from(self.target.height))?;
-        let projection = json!({"semanticKey":self.compiled.ir().semantic_key(),"targetKey":target_key,"ir":self.compiled.ir(),
+        let projection = json!({"semanticKey":self.compiled.ir().semantic_key(),"targetKey":target_key,"ir":self.compiled.ir(),"builtinTarget":self.builtin_target,
             "finalPublicValues":self.final_values,"canvas":self.compiled.document().canvas,"timeline":self.compiled.document().timeline,
             "resolvedAssets":resolved_assets,"resolvedUses":self.final_values.resource_uses().iter().map(|usage|if self.assets.contains_key(&usage.asset_id){usage.asset_id.clone()}else{svg_use_id(usage)}).collect::<Vec<_>>(),"textRasters":self.text_rasters.text_rasters(),"target":{"width":self.target.width,"height":self.target.height,"fit":self.output_fit,
                 "budgetFps":identity.effective_budget_fps,"budgetAllocationRevision":allocation_revision},"sessionId":session_id,"generation":generation,
             "pageLimits":{"gpuContexts":1,"drawingBufferPixels":checked_sum(&[pixels,self.text_rasters.raster_pixels()])?,
-                "renderTargetDeclaredBytes":checked_product(pixels,16)?,"textureDeclaredBytes":checked_sum(&[cost.texture_bytes,cost.raster_bytes])?,
-                "bufferDeclaredBytes":cost.buffer_bytes,"ownedCpuBytes":checked_sum(&[cost.buffer_bytes,cost.font_cpu_bytes,cost.raster_bytes])?,"decodeReservedBytes":cost.decode_bytes,
+                "renderTargetDeclaredBytes":checked_product(pixels,16 + cost.depth_bytes_per_pixel)?,"textureDeclaredBytes":checked_sum(&[cost.texture_bytes,cost.raster_bytes])?,
+                "bufferDeclaredBytes":cost.buffer_bytes,"ownedCpuBytes":checked_sum(&[cost.private_cpu_bytes,cost.input_bytes,cost.font_cpu_bytes,cost.raster_bytes])?,"decodeReservedBytes":cost.decode_bytes,
                 "decoderLeases":cost.decoders,"programs":cost.programs,"canvases":self.text_rasters.unique_raster_count()}});
         // Match the existing MediaAccess payload ceiling before granting the
         // composition scope or loading its first page.

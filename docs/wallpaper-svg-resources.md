@@ -17,3 +17,5 @@
 本候选的真实导入、预览、应用、公开参数切换、导出重导、损坏重建、50 次卸载重开以及浏览器像素旅程已通过：原生 10 项、50 次真实切换，每次 Close 后资源归零；浏览器 3 项通过。两次完整 601 秒保持和 2680 条宿主内存样本覆盖启动、等待和退出；宿主工作集峰值 139.94 MiB，自然退出码 0。根线程再次运行 [最终证据核验脚本](../output/design-validation-r15-20261110/verify-final-evidence.py)，确认完整源码哈希、样本覆盖和 [原生报告](../output/design-validation-r15-20261110/native/report.json)、[浏览器报告](../output/design-validation-r15-20261110/native/browser/report.json) 一致。当前前端扩展检查 93 步通过、0 失败，合同导出检查通过。
 
 以上资格限当前 Windows 设备和该冻结候选。GPU 时间、GPU 进程内存、绝对设备基线、弱设备、4K、多设备和长稳资格仍需分别验证；完整 A04/P2 和 A01–A10 待办继续保留。
+
+2026-11-11 续接再次核验独立冻结的 master 验收集：候选 `ea6561be…` 的 275 份源码/物理快照、native10、50 次切换、browser3、lifecycle4、2686 个内存样本与自然退出记录一致，宿主工作集峰值 128.49 MiB。该集位于 `C:/Users/miracle/.codex/worktrees/design-validation-20261110/hertz-studio/output/design-validation-master-20261110/`；只执行证据核验，没有重跑完整 601 秒保持。此前 R15 的独立数字和失败历史保留，当前机器 SVG 子集仍不等于完整 P2 或其它设备资格。

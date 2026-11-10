@@ -150,6 +150,126 @@ async fn selected(
 }
 
 #[tokio::test]
+async fn builtin_final_admission_precedes_original_media_prepare() {
+    let root = tempfileish::temp_dir("builtin-admission-before-prepare");
+    let (jobs, hash, probes) = install(
+        root.path(),
+        json!([
+            {"id":"background","type":"builtinScene","stateVersion":1,
+                "properties":{"sceneId":"spectrum-towers","stateVersion":1,"params":{}}},
+            {"id":"movie-layer","type":"video","stateVersion":1,"assets":{"asset":"movie"},
+                "properties":{"loopStartMs":0,"loopEndMs":1000}}
+        ]),
+        json!([{"id":"ripple","label":"Ripple","type":"number","default":0,
+            "constraints":{"min":0,"max":1},
+            "target":{"kind":"node","nodeId":"background","property":"ripples","component":null}}]),
+        true,
+    )
+    .await;
+    for (value, expected) in [(0.5, "parameter=ripples")] {
+        let failure = selection_plan::resolve_selection_with_options(
+            Arc::clone(&jobs),
+            super::super::config::Selection::Package {
+                work_key: format!("local-{WORK_ID}"),
+                package_hash: hash.clone(),
+            },
+            target(),
+            selection_plan::SelectionOptions {
+                properties: json!({"ripple":value}).as_object().unwrap().clone(),
+                composition_fit: Some(super::super::config::Fit::Contain),
+                composition_target: Some(super::super::builtin_plan::TargetFacts {
+                    monitor_id: "native-preview-region".into(),
+                    monitor_left: 0,
+                    monitor_top: 0,
+                    physical_width: 64,
+                    physical_height: 64,
+                    device_scale: 1.0,
+                    requested_quality: "high".into(),
+                    requested_fps: 60,
+                    refresh_hz: 60,
+                    purpose: ImagePurpose::Preview,
+                }),
+                ..Default::default()
+            },
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await
+        .err()
+        .expect("unsupported builtin parameters remain closed before media");
+        assert_eq!(failure.error.code, "adapter_unavailable");
+        assert!(
+            failure.error.message.contains(expected),
+            "{}",
+            failure.error.message
+        );
+        assert_eq!(
+            probes.load(Ordering::Acquire),
+            0,
+            "admission/gate must precede the first media prepare"
+        );
+    }
+}
+
+#[tokio::test]
+async fn builtin_costs_keep_constructor_peak_and_charge_the_complete_depth_target() {
+    let root = tempfileish::temp_dir("builtin-complete-costs");
+    let (jobs, hash, _) = install(
+        root.path(),
+        json!([{"id":"background","type":"builtinScene","stateVersion":1,
+        "properties":{"sceneId":"spectrum-towers","stateVersion":1,"params":{}}}]),
+        json!([]),
+        false,
+    )
+    .await;
+    let package = jobs.assets().read_installed_manifest(&hash).unwrap();
+    let (compiled, values, _) =
+        read_document(jobs.assets(), &package, &Default::default()).unwrap();
+    let mut costs = geometry_costs(&compiled, &values).unwrap();
+    assert_eq!(costs.buffer_bytes, 53488 + 92);
+    assert_eq!(costs.private_cpu_bytes, 90248 + 92);
+    assert_eq!(costs.source_cpu_retained_bytes, 53512);
+    assert_eq!(costs.input_bytes, 1200);
+    assert_eq!(costs.programs, 6);
+    complete_costs(
+        &mut costs,
+        &compiled,
+        &values,
+        &TextRasterPlan::default(),
+        target(),
+        0,
+    )
+    .unwrap();
+    assert_eq!(
+        costs.gpu,
+        64 * 64 * 20 + 53488 + 92 + super::super::gl_plan::THREE_BOOTSTRAP_GPU_PEAK_BYTES
+    );
+    assert!(costs.cpu >= 90248 + 92 + 1200);
+    let mut excess = geometry_costs(&compiled, &values).unwrap();
+    let profile = super::super::builtin_plan::source_costs(&compiled, &values)
+        .unwrap()
+        .unwrap()
+        .0;
+    // This fits the former 16P calculation exactly but exceeds the real 20P.
+    excess.texture_bytes = profile.memory_bytes
+        - 64 * 64 * 16
+        - excess.buffer_bytes
+        - super::super::gl_plan::THREE_BOOTSTRAP_GPU_PEAK_BYTES;
+    assert_eq!(
+        complete_costs(
+            &mut excess,
+            &compiled,
+            &values,
+            &TextRasterPlan::default(),
+            target(),
+            0
+        )
+        .unwrap_err()
+        .code,
+        "budget_exceeded"
+    );
+}
+
+#[tokio::test]
 async fn original_selection_preserves_all_three_canvas_fits_and_target_keys() {
     use super::super::config::Fit;
     let root = tempfileish::temp_dir("composition-output-fit");
@@ -773,6 +893,7 @@ async fn prepared_internal(
         _document_pin: pin,
         target,
         output_fit: fit,
+        builtin_target: None,
     }
     .finish()
 }
@@ -796,6 +917,7 @@ fn reproject_internal(
         _document_pin: Arc::clone(&plan._document_pin),
         target,
         output_fit: fit,
+        builtin_target: None,
     }
     .finish()
 }
@@ -897,7 +1019,13 @@ fn export_internal_fixture(
 ) {
     std::fs::create_dir_all(output).unwrap();
     let uri = admission.composition_url().unwrap();
-    let hash = pins.first().unwrap().0.clone();
+    let hash = uri
+        .split('/')
+        .nth(2)
+        .unwrap()
+        .split('.')
+        .take(2)
+        .collect::<String>();
     let path = uri.split("/files/").nth(1).unwrap();
     let projection_reader = access.permit(&hash, path).unwrap();
     std::fs::write(
@@ -2167,15 +2295,47 @@ async fn internal_browser_font_requests_export_original_prepared_projection_and_
             zip::CompressionMethod::Stored,
         )
         .await;
-        let plan = prepared_internal(
-            &jobs,
-            &hash,
-            request["overrides"].clone(),
-            target(),
-            Fit::Stretch,
-        )
-        .await
-        .unwrap();
+        let plan = if let Some(native) = request.get("nativeTarget") {
+            // Synthetic target facts for browser geometry tests. Real HWND/DPI
+            // qualification is performed by the separate native journey.
+            let facts = super::super::builtin_plan::TargetFacts {
+                monitor_id: "browser-synthetic-monitor".into(),
+                monitor_left: 0,
+                monitor_top: 0,
+                physical_width: native["width"].as_u64().unwrap() as u32,
+                physical_height: native["height"].as_u64().unwrap() as u32,
+                device_scale: native["deviceScale"].as_f64().unwrap(),
+                requested_quality: "low".into(),
+                requested_fps: 15,
+                refresh_hz: 60,
+                purpose: ImagePurpose::Preview,
+            };
+            resolve_with_target_facts(
+                Arc::clone(&jobs),
+                hash.clone(),
+                request["overrides"].as_object().unwrap().clone(),
+                ImageTarget {
+                    width: facts.physical_width,
+                    height: facts.physical_height,
+                    ..target()
+                },
+                serde_json::from_value(native["fit"].clone()).unwrap(),
+                Some(facts),
+                Arc::new(AtomicBool::new(false)),
+            )
+            .await
+            .unwrap()
+        } else {
+            prepared_internal(
+                &jobs,
+                &hash,
+                request["overrides"].clone(),
+                target(),
+                Fit::Stretch,
+            )
+            .await
+            .unwrap()
+        };
         let case_directory = format!("case-{index}");
         let files: Vec<Value> = plan.assets.values().map(|asset| json!({"url":asset.url(),
             "entry":asset.pin().entry,"file":format!("{case_directory}/files/{}",asset.pin().entry.path)})).collect();

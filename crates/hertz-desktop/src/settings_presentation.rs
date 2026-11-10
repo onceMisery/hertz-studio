@@ -180,6 +180,7 @@ impl App {
         let resized = self.preview.as_ref().is_some_and(|preview| {
             preview.monitor.width != bounds.width as i32
                 || preview.monitor.height != bounds.height as i32
+                || preview.composition_target_changed(settings.window.hwnd() as HWND, &bounds)
         });
         settings.preview_bounds = visible.then_some(bounds.clone());
         if resized {

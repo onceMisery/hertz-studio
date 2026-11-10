@@ -12,6 +12,25 @@ import { createPrismGalaxy } from './prism-galaxy.js';
 import { createButterflyVortex } from './butterfly-vortex.js';
 import { createPhoenixVortex } from './phoenix-vortex.js';
 import { createEffects, effectsResourcePlan, postSpecs } from '../effects/index.js';
+import { PROFILES } from '../quality.js';
+
+function towersCompositionResources(profile) {
+  const primary = towersResourcePlan(profile), effects = effectsResourcePlan(profile), plans = [primary, ...effects.buffers];
+  return { buffers: plans.map(({ id, cpuPeakBytes, cpuRetainedBytes, bufferBytes }) => ({ id, cpuPeakBytes, cpuRetainedBytes, bufferBytes })),
+    cpuPeakBytes: plans.reduce((sum, plan) => sum + plan.cpuPeakBytes, 0),
+    cpuRetainedBytes: plans.reduce((sum, plan) => sum + plan.cpuRetainedBytes, 0),
+    bufferBytes: plans.reduce((sum, plan) => sum + plan.bufferBytes, 0), programs: 4,
+    primitives: Object.fromEntries(['drawCalls', 'points', 'triangles'].map(key => [key, plans.reduce((sum, plan) => sum + plan.primitives[key], 0)])) };
+}
+function towersComposition() {
+  const resources = towersCompositionResources(PROFILES.low), { primitives, ...sourceResources } = resources;
+  return { contractVersion: 1, adapterId: 'builtin-scene', adapterVersion: 1, supportedStateVersions: [1],
+    rootOnly: true, cameraSource: 'registry', needsDepth: true,
+    parameterEquals: Object.fromEntries(['ripples', ...Object.keys(postSpecs)].map(key => [key, 0])),
+    clock: { version: 1, timeUnit: 'seconds', sampling: 'absolute', spectrumCapacity: 64,
+      inputBankLength: 75, inputBankCount: 2, inputBytes: 2 * 75 * Float64Array.BYTES_PER_ELEMENT, neutral: 'zero' },
+    qualities: { low: { ...PROFILES.low, sourceResources, sourcePrimitives: primitives } } };
+}
 
 const definitions = [
   ['butterfly-vortex', '蝶舞星涡', 'particles', createButterflyVortex],
@@ -96,6 +115,8 @@ function definition([id, label, category, factory, aliases = []]) {
     capabilities: { interaction: true, threejs: true, depth: true, lyrics, ownsLyrics: lyrics, ...(stanzaRenderer ? { stanzaRenderer } : {}), ...(id === 'reactor' || id === 'cover-wall' ? { queuePreview: true } : {}), effects: true, director: true, cues: true, cover: id.includes('cover') },
     quality: id === 'cover-particles' ? { low: { particles: 9216, drawCalls: 16 }, medium: { particles: 20736, drawCalls: 20 }, high: { particles: 36864, drawCalls: 24 } } :
       { low: { particles: 4000, drawCalls: 16 }, medium: { particles: 7000, drawCalls: 20 }, high: { particles: 10000, drawCalls: 24 } },
+    ...(towers ? { composition: towersComposition() } : {}),
+    ...(towers ? { compositionResourcePlan: request => towersCompositionResources(request.quality) } : {}),
     resourcePlan: bufferPlanner ? () => {
       const primary = bufferPlanner(), effects = effectsResourcePlan();
       // One primary program and the three original effect materials. Hidden
@@ -115,6 +136,7 @@ function definition([id, label, category, factory, aliases = []]) {
           }
         }, resize(w, h) { primary.resize(w, h); effects.resize(w, h); },
         setParams(next) { params = next; primary.setParams(next); effects.setParams(next); }, setQuality(profile) { primary.setQuality(profile); effects.setQuality(profile); },
+        resetHistory() {primary.resetHistory?.();effects.resetHistory();},
         ...(primary.setRig ? { setRig(pose) { primary.setRig(pose); } } : {}),
         dispose() { effects.dispose(); primary.dispose(); }, stats: () => ({ primary: primary.stats?.(), effects: effects.stats() })
       };

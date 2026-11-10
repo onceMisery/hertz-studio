@@ -35,6 +35,9 @@ pub(crate) struct SelectionOptions {
     /// Exact composition canvas fit; ImageTarget keeps the original media
     /// preparation contract, which deliberately has no Stretch variant.
     pub composition_fit: Option<super::config::Fit>,
+    /// Native monitor/DPI facts are composition-only. Single media keeps its
+    /// existing ImageTarget contract and does not consume these facts.
+    pub composition_target: Option<super::builtin_plan::TargetFacts>,
 }
 
 #[derive(Clone, Debug)]
@@ -69,6 +72,7 @@ pub(crate) async fn resolve_selection_with_layout(
             resume: None,
             properties: Default::default(),
             composition_fit: None,
+            composition_target: None,
         },
         cancel,
     )
@@ -161,7 +165,14 @@ pub(crate) async fn resolve_selection_with_options(
             return Err(recorded_failure(jobs, request, cancel, error).await);
         }
     }
-    let content = resolve_with_fit(jobs, request, options.composition_fit, cancel).await?;
+    let content = resolve_with_fit(
+        jobs,
+        request,
+        options.composition_fit,
+        options.composition_target,
+        cancel,
+    )
+    .await?;
     Ok(ResolvedPlan {
         content,
         reference,
@@ -553,13 +564,14 @@ pub(crate) async fn resolve(
     request: Request,
     cancel: Arc<AtomicBool>,
 ) -> std::result::Result<ResolvedSelection, Failure> {
-    resolve_with_fit(jobs, request, None, cancel).await
+    resolve_with_fit(jobs, request, None, None, cancel).await
 }
 
 async fn resolve_with_fit(
     jobs: Arc<ImportJobs>,
     request: Request,
     composition_fit: Option<super::config::Fit>,
+    composition_target: Option<super::builtin_plan::TargetFacts>,
     cancel: Arc<AtomicBool>,
 ) -> std::result::Result<ResolvedSelection, Failure> {
     request.validate()?;
@@ -567,6 +579,7 @@ async fn resolve_with_fit(
         Arc::clone(&jobs),
         request.clone(),
         composition_fit,
+        composition_target,
         Arc::clone(&cancel),
     )
     .await
@@ -614,6 +627,7 @@ async fn resolve_media(
     jobs: Arc<ImportJobs>,
     request: Request,
     composition_fit: Option<super::config::Fit>,
+    composition_target: Option<super::builtin_plan::TargetFacts>,
     cancel: Arc<AtomicBool>,
 ) -> Result<ResolvedSelection> {
     request.validate()?;
@@ -655,7 +669,7 @@ async fn resolve_media(
             hertz_wallpaper::Content::Composition { .. }
         ) {
             return runtime
-                .block_on(super::composition_plan::resolve(
+                .block_on(super::composition_plan::resolve_with_target_facts(
                     Arc::clone(&source),
                     hash,
                     properties,
@@ -664,6 +678,7 @@ async fn resolve_media(
                         super::image_prepare::ImageFit::Contain => super::config::Fit::Contain,
                         super::image_prepare::ImageFit::Cover => super::config::Fit::Cover,
                     }),
+                    composition_target,
                     source_cancel,
                 ))
                 .map(|plan| Source::Ready(ResolvedSelection::Composition(plan)));
@@ -1148,6 +1163,7 @@ mod tests {
                 mirror_members: Some(3),
                 properties: Default::default(),
                 composition_fit: None,
+                composition_target: None,
                 resume: Some(PlaylistResume {
                     revision: videos.revision,
                     reference: image.clone(),
@@ -1238,6 +1254,7 @@ mod tests {
             mirror_members: Some(2),
             properties: Default::default(),
             composition_fit: None,
+            composition_target: None,
             resume: Some(PlaylistResume {
                 revision: original.revision,
                 reference,
@@ -1420,6 +1437,7 @@ mod tests {
                 mirror_members: Some(2),
                 properties: Default::default(),
                 composition_fit: None,
+                composition_target: None,
                 resume: Some(PlaylistResume {
                     revision: original.revision,
                     reference: resumed_image.clone(),

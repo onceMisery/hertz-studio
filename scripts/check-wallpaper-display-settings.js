@@ -8,7 +8,9 @@ const http = require('node:http');
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const root = path.resolve(__dirname, '..');
 const assets = path.join(root, 'crates/hertz-desktop/assets');
-const output = path.join(root, 'output/playwright/wallpaper-display-settings');
+const output = process.env.HERTZ_WALLPAPER_SETTINGS_OUTPUT
+  ? path.resolve(process.env.HERTZ_WALLPAPER_SETTINGS_OUTPUT)
+  : path.join(root, 'output/playwright/wallpaper-display-settings');
 let html = fs.readFileSync(path.join(assets, 'wallpaper-settings.html'), 'utf8');
 for (const [key, file] of Object.entries({ DISPLAYS_CSS:'wallpaper-displays.css', DISPLAYS:'wallpaper-displays.js', SETTINGS:'wallpaper-settings.js', LIBRARY:'wallpaper-library.js', WORKS:'wallpaper-work.js', PLAYLIST:'wallpaper-playlist.js', AI:'wallpaper-ai.js', AI_CSS:'wallpaper-ai.css', EMBEDDED_CSS:'wallpaper-embedded.css' })) html = html.replace('__' + key + '__', () => fs.readFileSync(path.join(assets, file), 'utf8'));
 const presentation = { fps:30, quality:'low', brightness:1, motion:1, fit:'cover', pointer:false };
@@ -164,6 +166,12 @@ async function checkWindowPolicies(page) {
  assert.match(await page.locator('#wallpaper-state').textContent(),/部分目标已停止/);assert.match(await page.locator('#wallpaper-detail').textContent(),/1 个正在显示.*1 个已停止/);
  await runtimeState({visible:true,applicationRule:null,diagnostics:{pauseReasons:[]}});
  assert.equal(await page.locator('#wallpaper-state').textContent(),'壁纸正在运行');
+ assert.match(await page.locator('#wallpaper-detail').textContent(),/设置帧率 30 fps.*设置画质 low/);
+ await runtimeState({visible:true,fps:30,quality:'high',glLimits:{quality:'low',requestedQuality:'high',requestedFps:30},
+   diagnostics:{pauseReasons:[],fps:{configured:30,effective:27.5,effectiveBudget:27.5,measured:19.3,refreshHz:165}}});
+ assert.match(await page.locator('#wallpaper-detail').textContent(),/帧率上限 27\.5 fps.*画质 low.*设置 30 fps.*high/);
+ assert.doesNotMatch(await page.locator('#wallpaper-detail').textContent(),/桌面实际运行.*30 fps.*high|帧率上限 19\.3/);
+ checks.push('runtime quality and frame-rate ceiling use the admitted native plan; configured values and measured throughput remain distinct');
  checks.push('controlled status receipts distinguish Pause, Stop, maximized, retained long-pause frames and partial mirror stop; irrelevant remount actions stay hidden; this browser fixture does not establish Win32 behavior');
 }
 async function checkPublicProperties(page) {
@@ -204,6 +212,14 @@ async function checkPublicProperties(page) {
  assert.equal(await resetProperty('daylight').isDisabled(),true);
  assert.equal(await page.locator('#settings-state').getAttribute('data-dirty'),'false');
  assert.equal(await page.evaluate(()=>requests.filter(request=>request.command==='wallpaper.draft.update').length),0,'schema/default reads never write a draft');
+ await input('accent').fill('red');assert.equal(await page.locator('#apply').isDisabled(),true);
+ await resetProperty('accent').click();
+ assert.equal(await page.locator('#settings-state').getAttribute('data-dirty'),'false');
+ assert.equal(await page.locator('#apply').isDisabled(),true);assert.equal(await page.locator('#discard').isDisabled(),true);
+ assert.match(await page.locator('#status').textContent(),/设置已保存/,'resetting the sole invalid override keeps the footer consistent with the saved header and disabled draft actions');
+ assert.doesNotMatch(await page.locator('#status').textContent(),/草稿尚未应用/);
+ await page.screenshot({path:path.join(output,'public-property-reset-saved.png'),fullPage:true});
+ checks.push('resetting the sole invalid public override restores the saved footer, header and disabled Apply/Discard without a backend write');
  const readCount=(await publicRequests()).length;
  await page.evaluate(value=>{for(let index=0;index<20;index++)hertzWallpaperSettings.applyStatus(value);},value);
  assert.equal((await publicRequests()).length,readCount,'ordinary status polling does not read public property metadata again');
@@ -264,9 +280,13 @@ async function checkPublicProperties(page) {
  await reset(value,{propertyFailureCode:'version_not_found'});await page.waitForFunction(()=>document.querySelector('#public-properties-retry').hidden===false);
  assert.equal(await page.locator('.public-property').count(),0);await page.locator('#enabled').uncheck();assert.equal(await page.locator('#apply').isEnabled(),true,'empty unchanged properties do not prevent disabling damaged content');
  await page.evaluate(()=>propertyFailureCode='');await page.locator('#public-properties-retry').click();await waitReady();
- await input('daylight').fill('0.5');await page.evaluate(()=>{propertyBusyReplies=5;window.dispatchEvent(new Event('wallpaper-properties-invalidated'));});
+ await input('daylight').fill('0.5');const beforeBusy=(await publicRequests()).length;
+ await page.evaluate(()=>{propertyBusyReplies=5;window.dispatchEvent(new Event('wallpaper-properties-invalidated'));});
  await page.waitForFunction(()=>document.querySelector('#public-properties-retry').hidden===false);
  assert.equal(await page.locator('#apply').isDisabled(),true);assert.equal(await page.evaluate(()=>propertyBusyReplies),0,'each of two group inspections uses a bounded three-attempt retry budget');
+ // The selected group can fail before the other group's final successful
+ // attempt. Count stability is meaningful only after both bounded journeys end.
+ await page.waitForFunction(before=>propertyPending===0&&requests.filter(request=>request.command==='wallpaper.properties.inspect').length===before+6,beforeBusy);
  const afterBusy=(await publicRequests()).length;await page.waitForTimeout(1200);assert.equal((await publicRequests()).length,afterBusy,'failed property reads stop retrying');
  await page.locator('#public-properties-retry').click();await waitReady();assert.equal(await page.locator('#apply').isEnabled(),true);
  assert.equal(await page.evaluate(()=>propertyMaxPending),1);assert.equal(new Set((await publicRequests()).map(request=>request.requestId)).size,(await publicRequests()).length);

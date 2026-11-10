@@ -264,6 +264,49 @@ impl CompiledDocument {
     pub fn normalized_bytes(&self) -> &[u8] {
         &self.normalized_bytes
     }
+
+    /// Reconstruct only builtin parameters from the compiler's final slots.
+    /// This query grants no adapter or rendering qualification; planners still
+    /// validate the source contract against these complete final values.
+    pub fn final_builtin_params(
+        &self,
+        node_index: usize,
+        final_values: &FinalPublicValues,
+    ) -> Result<Map<String, Value>> {
+        if final_values.semantic_key() != self.ir.semantic_key() {
+            return Err(invalid("最终内置参数不属于当前语义编译结果"));
+        }
+        if self
+            .ir
+            .nodes
+            .get(node_index)
+            .is_none_or(|node| node.node_type != "builtinScene")
+        {
+            return Err(invalid("最终内置参数必须指向 builtinScene 节点"));
+        }
+        let mut params = Map::new();
+        for (index, slot) in self.ir.numeric_slots.iter().enumerate() {
+            if slot.node_index != node_index || !slot.builtin_parameter {
+                continue;
+            }
+            let value = self.ir.public_properties.iter().find_map(|public| {
+                matches!(public.target, PublicTarget::Numeric { slot: target } if target == index)
+                    .then(|| final_values.values().get(&public.descriptor.id)).flatten()
+            }).cloned().unwrap_or_else(|| json!(slot.value));
+            params.insert(slot.property.clone(), value);
+        }
+        for (index, slot) in self.ir.constant_slots.iter().enumerate() {
+            if slot.node_index != node_index || !slot.builtin_parameter {
+                continue;
+            }
+            let value = self.ir.public_properties.iter().find_map(|public| {
+                matches!(public.target, PublicTarget::Constant { slot: target } if target == index)
+                    .then(|| final_values.values().get(&public.descriptor.id)).flatten()
+            }).cloned().unwrap_or_else(|| slot.value.clone());
+            params.insert(slot.property.clone(), value);
+        }
+        Ok(params)
+    }
 }
 
 pub(super) fn compile(mut document: Document, manifest: &Manifest) -> Result<CompiledDocument> {

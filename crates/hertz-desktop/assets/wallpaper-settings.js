@@ -992,13 +992,20 @@
     if (globalWallpaper.sessionStopped) { state = '桌面壁纸已退出'; running = false; }
     $('wallpaper-state').textContent = state;
     $('wallpaper-dot').className = 'state-dot' + (running ? ' running' : state.includes('失败') ? ' error' : '');
+    var admittedQuality = wallpaper.glLimits && wallpaper.glLimits.quality;
+    var effectiveFps = diagnostics.fps && diagnostics.fps.effectiveBudget;
+    var hasEffectiveFps = Number.isFinite(effectiveFps) && effectiveFps > 0;
+    var renderingDetail = '桌面正在运行 · ' + (hasEffectiveFps ? '帧率上限 ' + effectiveFps : '设置帧率 ' + wallpaper.fps)
+      + ' fps · ' + (admittedQuality ? '画质 ' + admittedQuality : '设置画质 ' + (wallpaper.quality || 'low'));
+    if (admittedQuality && admittedQuality !== wallpaper.quality || hasEffectiveFps && effectiveFps !== wallpaper.fps)
+      renderingDetail += '（设置 ' + wallpaper.fps + ' fps · ' + (wallpaper.quality || 'low') + '）';
     var detail = wallpaper.staticPoster ? '原视频选择已保留，当前显示封面且未占用视频解码器。点击重新挂载壁纸可重试。' + (wallpaper.applyError ? ' 原因：' + wallpaper.applyError : '')
       : wallpaper.applyError ? '设置已保存，但运行存在问题：' + wallpaper.applyError
       : wallpaper.monitorMissing ? '重新连接目标显示器，或选择其他显示器后应用。'
       : unsupportedScene ? '当前空间场景暂不支持壁纸，正在显示你选择的等待场景。'
       : waitingForScene ? '正在显示等待场景；播放器提供合格场景后将自动跟随。'
       : wallpaper.visible && wallpaper.media ? (wallpaper.media.kind === 'image' ? '静态图片 · 没有连续动画' : '静音视频 · 原速播放' + (wallpaper.media.sourceFps ? ' · 源帧率 ' + wallpaper.media.sourceFps + ' fps' : ''))
-      : wallpaper.visible ? '桌面实际运行 · ' + wallpaper.fps + ' fps · 画质 ' + (wallpaper.quality || 'low')
+      : wallpaper.visible ? renderingDetail
       : reasons.map(reason => reasonText[reason]).filter(Boolean).join(' · ') || '启用并应用壁纸后，将显示在桌面图标后方。';
     if (paused && !wallpaper.monitorMissing && !wallpaper.hidden) {
       var pauseDetail = reasons.map(function (reason) { return reasonText[reason]; }).filter(Boolean);
@@ -1116,7 +1123,7 @@
     if (!dirty) { conflict = false; revision = latest.revision; }
     if (wallpaperChanged) refreshGroupLayouts();
     if (wallpaperChanged) window.dispatchEvent(new Event('wallpaper-ai-invalidated'));
-    status('草稿尚未应用；壁纸、歌词与运行规则会一起保存。', false);
+    status(dirty ? '草稿尚未应用；壁纸、歌词与运行规则会一起保存。' : '设置已保存。实际显示状态见上方。', false);
     renderPreview(); syncControls();
     if (wallpaperChanged && previewActive && previewMode === 'settings' && previewGroupId === selectedGroupId) { clearTimeout(previewTimer); previewTimer = setTimeout(function () { if (previewMode === 'settings' && !publicPropertiesError()) startNativePreview(true); }, 180); }
   }

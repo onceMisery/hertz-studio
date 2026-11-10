@@ -6983,6 +6983,7 @@ fn monitor_geometry_changed(
         || left.width != right.width
         || left.height != right.height
         || left.dpi != right.dpi
+        || left.refresh_hz != right.refresh_hz
 }
 
 fn profile_options(
@@ -7132,10 +7133,24 @@ fn create_presentation(
             budget::OwnerKind::Desktop
         };
         let plan = if let Some(composition) = &composition {
-            if composition.target().width != monitor.width.max(1) as u32
-                || composition.target().height != monitor.height.max(1) as u32
-                || composition.output_fit() != configuration.presentation().fit
-            {
+            let target_changed = if let Some(plan) = composition.builtin_target() {
+                let facts = &plan.target_facts;
+                facts.monitor_id != monitor.display_id()
+                    || facts.refresh_hz != monitor.refresh_hz
+                    || facts.monitor_left != monitor.left
+                    || facts.monitor_top != monitor.top
+                    || facts.physical_width != monitor.width.max(1) as u32
+                    || facts.physical_height != monitor.height.max(1) as u32
+                    || native::verified_wallpaper_monitor_dpi(&monitor)
+                        .is_none_or(|dpi| f64::from(dpi) / 96.0 != facts.device_scale)
+                    || facts.requested_quality != configuration.presentation().quality.as_str()
+                    || facts.requested_fps.min(if is_preview { 15 } else { 60 })
+                        != u32::from(configuration.presentation().fps)
+            } else {
+                composition.target().width != monitor.width.max(1) as u32
+                    || composition.target().height != monitor.height.max(1) as u32
+            };
+            if target_changed || composition.output_fit() != configuration.presentation().fit {
                 bail!("组合目标已变化，需要重新准备和准入");
             }
             composition.gl_plan(

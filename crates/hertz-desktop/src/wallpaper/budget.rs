@@ -766,6 +766,16 @@ impl BudgetCoordinator {
             .active_usage()
     }
 
+    /// One read-only planning snapshot, including owners still awaiting exit.
+    /// The revision and usage come from the same lock; only grant can reserve.
+    pub(crate) fn planning_snapshot(&self) -> (u64, BudgetUsage) {
+        let ledger = self
+            .ledger
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        (ledger.revision, ledger.active_usage())
+    }
+
     fn find_checked<'ledger>(
         ledger: &'ledger mut Ledger,
         token: u64,

@@ -23,6 +23,73 @@ struct Profile {
     gpu_bytes: u64,
 }
 
+fn profiles() -> Result<std::collections::BTreeMap<String, Profile>, JobError> {
+    serde_json::from_str(include_str!(
+        "../../../hertz-wallpaper/contracts/gl-budgets.json"
+    ))
+    .map_err(|_| JobError::new("gl_contract", "GL 质量合同无效"))
+}
+
+fn available_output_rate(owner: OwnerKind, usage: &budget::BudgetUsage) -> u64 {
+    if owner == OwnerKind::Preview {
+        budget::PREVIEW_RESERVED_OUTPUT_RATE
+            .min(budget::MAX_OUTPUT_PIXEL_RATE.saturating_sub(usage.output_pixel_rate))
+    } else {
+        (budget::MAX_OUTPUT_PIXEL_RATE - budget::PREVIEW_RESERVED_OUTPUT_RATE)
+            .saturating_sub(usage.output_pixel_rate)
+    }
+}
+
+/// Native facts for the composition's single raster. Source limits are applied
+/// by its planner; this owner supplies only the current native ceiling/rate.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CompositionOutputAllowance {
+    pub budget_revision: u64,
+    pub pixel_ceiling: u64,
+    pub output_pixel_rate: u64,
+    pub effective_fps: u32,
+    pub refresh_hz: u32,
+    pub frame_divisor: u32,
+}
+
+pub(crate) fn composition_output_allowance(
+    budget: &BudgetCoordinator,
+    owner: OwnerKind,
+    refresh_hz: u32,
+    requested_fps: u32,
+    source_fps: u32,
+    actual_quality: &str,
+) -> Result<CompositionOutputAllowance, JobError> {
+    if !matches!(owner, OwnerKind::Desktop | OwnerKind::Preview)
+        || !(5..=1000).contains(&refresh_hz)
+        || !(1..=60).contains(&requested_fps)
+        || !(1..=60).contains(&source_fps)
+    {
+        return Err(JobError::invalid_input("组合输出帧率无效"));
+    }
+    let profiles = profiles()?;
+    let profile = profiles
+        .get(actual_quality)
+        .ok_or_else(|| JobError::new("gl_contract", "GL 质量合同缺少实际档位"))?;
+    let (budget_revision, usage) = budget.planning_snapshot();
+    if profile.gpu_bytes > budget::MAX_GPU_TRACKED_BYTES.saturating_sub(usage.gpu_bytes) {
+        return Err(JobError::new("budget_busy", "GPU 额度等待旧呈现退出"));
+    }
+    let mut effective_fps = requested_fps.min(source_fps);
+    if owner == OwnerKind::Preview {
+        effective_fps = effective_fps.min(15);
+    }
+    Ok(CompositionOutputAllowance {
+        budget_revision,
+        pixel_ceiling: profile.pixel_budget,
+        output_pixel_rate: available_output_rate(owner, &usage),
+        effective_fps,
+        refresh_hz,
+        frame_divisor: refresh_hz.div_ceil(effective_fps),
+    })
+}
+
 /// 通用共享资源（受信页面纹理池）的原生信封。数值来自单一合同文件；
 /// 页面在逐资源记账时只消耗该信封，不能放大它。
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -123,10 +190,7 @@ impl GlPlan {
         {
             return Err(JobError::invalid_input("GL 呈现目标无效"));
         }
-        let profiles: std::collections::BTreeMap<String, Profile> = serde_json::from_str(
-            include_str!("../../../hertz-wallpaper/contracts/gl-budgets.json"),
-        )
-        .map_err(|_| JobError::new("gl_contract", "GL 质量合同无效"))?;
+        let profiles = profiles()?;
         let assets = SharedAssetsContract::parse()?;
         let envelope = assets.envelope()?;
         let order = ["low", "medium", "high"];
@@ -147,13 +211,7 @@ impl GlPlan {
             fps
         };
         let divisor = refresh_hz.div_ceil(effective_fps);
-        let rate_cap = if owner == OwnerKind::Preview {
-            budget::PREVIEW_RESERVED_OUTPUT_RATE
-                .min(budget::MAX_OUTPUT_PIXEL_RATE.saturating_sub(usage.output_pixel_rate))
-        } else {
-            (budget::MAX_OUTPUT_PIXEL_RATE - budget::PREVIEW_RESERVED_OUTPUT_RATE)
-                .saturating_sub(usage.output_pixel_rate)
-        };
+        let rate_cap = available_output_rate(owner, &usage);
         let target_pixels = u64::from(width) * u64::from(height);
         let pixels = target_pixels
             .min(profile.pixel_budget)

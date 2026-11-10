@@ -1,26 +1,46 @@
 export function createScope(options = {}) {
   const pagePort = options.resources || null;
   if (pagePort && pagePort.contractVersion !== 1) throw new Error('resource-policy-required');
+  if (options.preparedBuffersRequired && !pagePort) throw new Error('prepared-buffer-resource-policy-required');
   const controller = new AbortController();
   const resources = new Set();
   const cleanups = new Set();
   const timers = new Set();
   const leases = new Set();
   const admissions = new Set();
+  const preparedBuffers = new Map();
   let disposed = false, cleanupFailed = false, allocationTasks = 0;
   function releaseAdmissions() {
     if (!disposed || allocationTasks || cleanupFailed) return;
     admissions.forEach(ticket => ticket.release({ apiReleased: true, allocationEnded: true })); admissions.clear();
+    preparedBuffers.clear();
   }
-  function bufferPlan(cpuPeakBytes, bufferBytes, source) {
-    if (disposed) throw new Error('Scope disposed');
-    if (!pagePort) return { cpuReady() {}, upload(attribute) { return attribute; } };
+  function requireBufferTickets(cpuPeakBytes, bufferBytes, source) {
     let cpu, gpu;
     try {
       cpu = pagePort.require({ ownedCpuBytes: cpuPeakBytes }, source + ' CPU construction/retained array plan', options.generation || 0);
       gpu = pagePort.require({ bufferDeclaredBytes: bufferBytes }, source + ' per-context buffer upload plan', options.generation || 0);
     } catch (error) { cpu?.release({ apiReleased: true, allocationEnded: true }); throw error; }
     admissions.add(cpu); admissions.add(gpu);
+    return { cpu, gpu };
+  }
+  function prepareBufferPlan(id, cpuPeakBytes, bufferBytes) {
+    if (disposed) throw new Error('Scope disposed');
+    if (!options.preparedBuffersRequired || !pagePort) throw new Error('prepared-buffer-scope-required');
+    if (typeof id !== 'string' || id.length > 64 || !/^[a-z][a-z0-9-]*$/.test(id) || preparedBuffers.has(id)) throw new Error('prepared-buffer-id-invalid');
+    const tickets = requireBufferTickets(cpuPeakBytes, bufferBytes, 'Composition source buffer ' + id);
+    preparedBuffers.set(id, { ...tickets, cpuPeakBytes, bufferBytes, claimed: false });
+  }
+  function bufferPlan(cpuPeakBytes, bufferBytes, source, id) {
+    if (disposed) throw new Error('Scope disposed');
+    if (!pagePort) return { cpuReady() {}, upload(attribute) { return attribute; } };
+    let tickets;
+    if (options.preparedBuffersRequired) {
+      tickets = preparedBuffers.get(id);
+      if (!tickets || tickets.cpuPeakBytes !== cpuPeakBytes || tickets.bufferBytes !== bufferBytes || tickets.claimed) throw new Error('prepared-buffer-claim-mismatch');
+      tickets.claimed = true;
+    } else tickets = requireBufferTickets(cpuPeakBytes, bufferBytes, source);
+    const { cpu, gpu } = tickets;
     const uploaded = new WeakSet();
     return {
       cpuReady(bytes) { const result = cpu.commit({ ownedCpuBytes: bytes }); if (!result.ok) throw new Error('CPU allocation exceeds plan'); },
@@ -90,9 +110,11 @@ export function createScope(options = {}) {
       else if (resource.isInstancedMesh) estimatedBytes += resource.instanceMatrix.array.byteLength + (resource.instanceColor ? resource.instanceColor.array.byteLength : 0);
     }
     return { resources: resources.size, tasks: timers.size, cleanups: cleanups.size, leases: leases.size,
-      admissionTickets: admissions.size, allocationTasks, cleanupFailed, estimatedBytes: Math.round(estimatedBytes) };
+      admissionTickets: admissions.size, allocationTasks, cleanupFailed,
+      preparedBuffers: preparedBuffers.size, unclaimedPreparedBuffers: [...preparedBuffers.values()].filter(plan => !plan.claimed).length,
+      estimatedBytes: Math.round(estimatedBytes) };
   }
-  return { signal: controller.signal, track, trackTree, lease, defer, stats, bufferPlan,
+  return { signal: controller.signal, track, trackTree, lease, defer, stats, bufferPlan, prepareBufferPlan,
     releaseLease(poolLease) { if (leases.delete(poolLease)) poolLease.release(); },
     retirementCandidates(renderer) {
       // Unsettled factories and failed cleanup cannot forecast reclaimable quota.
