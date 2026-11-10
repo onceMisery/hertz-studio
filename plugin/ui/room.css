@@ -7,23 +7,7 @@
 #view-room *,#view-room *::before,#view-room *::after { box-sizing:border-box; }
 #view-room [hidden] { display:none !important; }
 #view-room button,#view-room input,#view-room select,#view-room textarea { font-family:inherit; font-size:inherit; line-height:inherit; }
-/* 房间按钮 = 公共按钮（components/button.css）+ touch/flat 变体，由
-   room-view.js / room.js / room-workspace.js 的工厂挂类。基础行为
-   （hover/active/disabled/focus/过渡）只归组件；本段只把房间的档位度量
-   钉在皮肤控制语言（skins.css 的 `& .btn`，四套皮肤的自有 chrome 语言）
-   之上——它早于分层契约，会漫进页面内部，旧实现靠 id 级基础规则获得同等
-   效力。这里的值全部重述公开变体自身，不是第二份实现；R4 把 skins.css
-   的控制度量收进令牌与皮肤自有区域后，整段删除（退役矩阵 §11.1）。 */
-#view-room .btn.touch {
-  min-height:44px; padding:10px 14px; border-radius:var(--r-sm);
-  font-weight:600; background:var(--panel-2); color:var(--text);
-  border-color:transparent; box-shadow:none;
-}
-#view-room .btn.touch:hover:not(:disabled) { background:var(--hover); border-color:var(--line-strong); transform:none; }
-#view-room .btn.touch:active:not(:disabled) { transform:scale(.98); }
-#view-room .btn.touch:disabled { opacity:.4; cursor:not-allowed; transform:none; }
-#view-room .btn.touch.primary { background:var(--accent); border-color:var(--accent); color:var(--accent-ink); }
-#view-room .btn.touch.primary:hover:not(:disabled) { background:var(--hover); border-color:var(--line-strong); }
+/* 按钮基础和全部交互态由公共 touch/flat/primary 变体实现。 */
 #view-room :focus-visible { outline:var(--focus-ring); outline-offset:4px; }
 #view-room .room-page-title:focus { outline:none; }
 /* 跨页面布局（body.room-view / body.room-active 对公共 chrome 的显隐与让位）

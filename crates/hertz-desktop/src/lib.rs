@@ -29,8 +29,6 @@ mod feed;
 #[cfg(windows)]
 mod host;
 #[cfg(windows)]
-pub mod settings_embedding;
-#[cfg(windows)]
 mod hotkey;
 #[cfg(windows)]
 mod management;
@@ -48,6 +46,8 @@ pub mod native_events;
 mod pipe;
 #[cfg(windows)]
 mod root_owner;
+#[cfg(windows)]
+pub mod settings_embedding;
 #[cfg(windows)]
 mod wallpaper;
 #[cfg(windows)]

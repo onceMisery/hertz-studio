@@ -13,14 +13,16 @@
 .btn,
 button.btn {
   font-family: var(--font-sans);
-  font-size: var(--fs-md);
-  line-height: 1;
-  padding: 0 var(--sp-5);
-  min-height: 32px;
-  border-radius: var(--r-pill);
+  font-size: var(--button-font-size, var(--fs-md));
+  font-weight: var(--button-weight, 400);
+  line-height: var(--button-line-height, 1);
+  padding: var(--button-padding, 0 var(--sp-5));
+  min-height: var(--button-height, 32px);
+  border-radius: var(--button-radius, var(--r-pill));
   border: 1px solid var(--field-border);
-  background: var(--field-bg);
-  color: color-mix(in srgb, var(--text) 78%, transparent);
+  background: var(--button-background, var(--field-bg));
+  color: var(--button-color, color-mix(in srgb, var(--text) 78%, transparent));
+  box-shadow: var(--button-shadow, none);
   cursor: pointer;
   white-space: nowrap;
   transition: color var(--dur-base) var(--ease-out),
@@ -30,25 +32,30 @@ button.btn {
     box-shadow var(--dur-base) var(--ease-out);
 }
 .btn:hover:not(:disabled) {
-  background: var(--field-bg-hover);
+  background: var(--button-hover-background, var(--field-bg-hover));
   border-color: var(--field-border-strong);
   color: var(--text);
   transform: translateY(-1px);
 }
-.btn:active:not(:disabled) { transform: translateY(0) scale(0.96); }
+.btn:active:not(:disabled) { transform: var(--button-active-transform, translateY(0) scale(0.96)); }
 .btn:disabled { opacity: 0.42; cursor: default; }
 .btn:focus-visible { outline: var(--focus-ring); outline-offset: var(--focus-offset); }
 
 /* 主按钮：白底 + 深色字（参考项目的强调色就是纯白），外圈品牌色辉光 */
 .btn.primary {
-  background: var(--accent);
+  background: var(--button-primary-background, var(--accent));
   border-color: transparent;
-  color: var(--accent-ink);
+  color: var(--button-primary-color, var(--accent-ink));
   font-weight: 600;
-  box-shadow: 0 6px 18px rgba(var(--brand-rgb), 0.16),
-    inset 0 1px 0 rgba(255, 255, 255, 0.4);
+  box-shadow: var(--button-primary-shadow, 0 6px 18px rgba(var(--brand-rgb), 0.16),
+    inset 0 1px 0 rgba(255, 255, 255, 0.4));
 }
-.btn.primary:hover:not(:disabled) { filter: brightness(1.06); }
+.btn.primary:hover:not(:disabled) {
+  background: var(--button-primary-hover-background, var(--accent));
+  border-color: transparent;
+  color: var(--button-primary-color, var(--accent-ink));
+  filter: brightness(1.06);
+}
 .btn.tiny { padding: 0 var(--sp-3); min-height: 24px; font-size: var(--fs-xs); }
 
 /* 大触控目标：命中区域 ≥44px，方形化并加重——移动端与密交互面板的操作档位。 */
@@ -72,10 +79,16 @@ button.btn {
 .btn.flat:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
 /* 平面主按钮：保住主操作的强调底与墨色，只让辉光退场（flat 在前面靠源顺序
    压掉 primary 的背景/文字，这里在同特异性内取回组合语义）。 */
-.btn.flat.primary {
+.btn.flat.primary,
+.btn.flat.primary:hover:not(:disabled) {
   background: var(--accent);
   border-color: var(--accent);
   color: var(--accent-ink);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .btn,
+  button.btn { transition: none; }
 }
 
 /* ---------- 图标按钮 ---------- */

@@ -31,7 +31,11 @@ fn main() -> ExitCode {
                 "{{\"ok\":true,\"workId\":\"{}\",\"version\":{},\"title\":\"{}\",\"files\":{}}}",
                 package.manifest.work_id,
                 package.manifest.version,
-                package.manifest.title.replace('\\', "\\\\").replace('"', "\\\""),
+                package
+                    .manifest
+                    .title
+                    .replace('\\', "\\\\")
+                    .replace('"', "\\\""),
                 package.entries.len()
             );
             ExitCode::SUCCESS

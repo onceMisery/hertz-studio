@@ -24,7 +24,10 @@ pub fn validate_rel_path_ext(path: &str, allow_trailing_slash: bool) -> Result<(
         return reject("invalid_path", "路径不能为空".into());
     }
     if path.len() > MAX_PATH_BYTES {
-        return reject("invalid_path", format!("路径超过 {MAX_PATH_BYTES} 个字符：{path}"));
+        return reject(
+            "invalid_path",
+            format!("路径超过 {MAX_PATH_BYTES} 个字符：{path}"),
+        );
     }
     if !path.is_ascii() {
         return reject("invalid_path", format!("路径只允许 ASCII 字符：{path}"));
@@ -35,7 +38,10 @@ pub fn validate_rel_path_ext(path: &str, allow_trailing_slash: bool) -> Result<(
     let body = if allow_trailing_slash {
         path.strip_suffix('/').unwrap_or(path)
     } else if let Some(stripped) = path.strip_suffix('/') {
-        return reject("invalid_path", format!("文件路径不允许以 / 结尾：{stripped}/"));
+        return reject(
+            "invalid_path",
+            format!("文件路径不允许以 / 结尾：{stripped}/"),
+        );
     } else {
         path
     };
@@ -65,7 +71,10 @@ pub fn validate_rel_path_ext(path: &str, allow_trailing_slash: bool) -> Result<(
         }
         let stem = segment.split('.').next().unwrap_or(segment);
         if RESERVED_DEVICE_NAMES.contains(&stem) {
-            return reject("invalid_path", format!("路径段使用 Windows 保留设备名：{path}"));
+            return reject(
+                "invalid_path",
+                format!("路径段使用 Windows 保留设备名：{path}"),
+            );
         }
     }
     Ok(())

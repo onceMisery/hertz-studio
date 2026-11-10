@@ -56,15 +56,20 @@ impl CatalogContract {
 pub fn catalog() -> &'static CatalogContract {
     static CONTRACT: OnceLock<CatalogContract> = OnceLock::new();
     CONTRACT.get_or_init(|| {
-        parse_catalog(CATALOG_BYTES).expect("contracts/catalog.json 必须通过自校验（生成物过期请重跑导出器）")
+        parse_catalog(CATALOG_BYTES)
+            .expect("contracts/catalog.json 必须通过自校验（生成物过期请重跑导出器）")
     })
 }
 
 /// 校验并解析一份目录合同（导出器 `--check` 与测试复用同一实现）。
 pub fn parse_catalog(bytes: &[u8]) -> Result<CatalogContract> {
     check_bounded_json(bytes, 8)?;
-    let file: CatalogFile = serde_json::from_slice(bytes)
-        .map_err(|error| PackageError::new("invalid_catalog", format!("catalog.json 结构不合法：{error}")))?;
+    let file: CatalogFile = serde_json::from_slice(bytes).map_err(|error| {
+        PackageError::new(
+            "invalid_catalog",
+            format!("catalog.json 结构不合法：{error}"),
+        )
+    })?;
     if file.schema_version != 1 {
         return Err(PackageError::new(
             "unsupported_catalog",
@@ -72,7 +77,10 @@ pub fn parse_catalog(bytes: &[u8]) -> Result<CatalogContract> {
         ));
     }
     if !valid_sha256_hex(&file.registry_hash) {
-        return Err(PackageError::new("invalid_hash", "registryHash 必须是 64 位小写十六进制"));
+        return Err(PackageError::new(
+            "invalid_hash",
+            "registryHash 必须是 64 位小写十六进制",
+        ));
     }
     let range = top_level_raw_value(bytes, "scenes")
         .ok_or_else(|| PackageError::new("invalid_catalog", "catalog.json 缺少 scenes 字段"))?;
@@ -82,7 +90,10 @@ pub fn parse_catalog(bytes: &[u8]) -> Result<CatalogContract> {
     if digest != file.registry_hash {
         return Err(PackageError::new(
             "registry_hash_mismatch",
-            format!("scenes 字节段哈希 {digest} 与 registryHash {} 不符", file.registry_hash),
+            format!(
+                "scenes 字节段哈希 {digest} 与 registryHash {} 不符",
+                file.registry_hash
+            ),
         ));
     }
     Ok(CatalogContract {

@@ -3,6 +3,10 @@
   "note": "check-* scripts that are deliberate manual/browser/diagnostic entry points. New unregistered check-* files fail scripts/check-scripts.js until they are either registered in check-frontend.js / a workflow or added here.",
   "scripts": [
     {
+      "script": "check-shell-layout-browser.js",
+      "purpose": "Actual current Hertz shell: exclusive layout leases, failed-move rollback, exact node/order restoration, desktop/mobile theme button interactions. Requires built HERTZ_BIN and Playwright; retains legacy skin retirement."
+    },
+    {
       "script": "check-wallpaper-svg-native-helpers.js",
       "purpose": "Pure regression of the actual SVG native acceptance owners: unchanged256/600 request ledger cadence,601000ms monotonic waits, dead-child interruption, immutable session/config/asset/budget identity and complete owned memory startup/interior/exit coverage. Browser and process APIs are forbidden; no Playwright installation or native host is needed. Optional first argument saves a new JSON report."
     },

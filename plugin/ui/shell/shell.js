@@ -105,8 +105,10 @@
   // 还原账本。restore 不销毁装配组：响应式重排（星轨的播放器音量条）先 restore
   // 再 move 复用同一组。已登记视图的根节点拒收——业务根只能走 attachView。
   var layoutAssemblies = new Map();
+  var layoutOwners = new WeakMap();
   function beginLayout(id) {
     if (!initialized) throw new Error('外壳尚未初始化');
+    if (typeof id !== 'string' || !id) throw new TypeError('布局需要 id');
     if (layoutAssemblies.has(id)) throw new Error('布局装配已存在：' + id);
     var records = [];
     var handle = {
@@ -115,6 +117,9 @@
         if (!node || !parent || node.nodeType !== 1 || parent.nodeType !== 1) {
           throw new TypeError('布局装配只收元素节点与目标容器');
         }
+        if (!node.parentNode || node === parent || node.contains(parent)) throw new Error('布局不能形成循环或搬运已脱离的组件');
+        var owner = layoutOwners.get(node);
+        if (owner && owner !== id) throw new Error('组件已被其他布局持有');
         var values = views.values();
         var entry;
         while ((entry = values.next()).done === false) {
@@ -122,9 +127,22 @@
             throw new Error('业务视图根须经 attachView 装配（' + entry.value.id + '）');
           }
         }
-        records.push({ node: node, parent: node.parentNode, next: node.nextSibling });
-        if (before) parent.insertBefore(node, before);
-        else parent.appendChild(node);
+        var record;
+        var previousParent = node.parentNode, previousNext = node.nextSibling;
+        if (!owner) {
+          record = { node: node, parent: node.parentNode, next: node.nextSibling, anchor: document.createComment('shell-layout:' + id) };
+          record.parent.insertBefore(record.anchor, node);
+        }
+        try {
+          if (before) parent.insertBefore(node, before);
+          else parent.appendChild(node);
+        } catch (error) {
+          if (previousNext && previousNext.parentNode === previousParent) previousParent.insertBefore(node, previousNext);
+          else previousParent.appendChild(node);
+          if (record) record.anchor.remove();
+          throw error;
+        }
+        if (record) { records.push(record); layoutOwners.set(node, id); }
         return node;
       },
       restore: function () {
@@ -132,9 +150,12 @@
         for (var i = records.length - 1; i >= 0; i -= 1) {
           var record = records[i];
           if (record.parent) {
-            if (record.next && record.next.parentNode === record.parent) record.parent.insertBefore(record.node, record.next);
+            if (record.anchor.parentNode === record.parent) record.parent.insertBefore(record.node, record.anchor);
+            else if (record.next && record.next.parentNode === record.parent) record.parent.insertBefore(record.node, record.next);
             else record.parent.appendChild(record.node);
           }
+          record.anchor.remove();
+          layoutOwners.delete(record.node);
           count += 1;
         }
         records.length = 0;
@@ -148,7 +169,8 @@
         for (var i = records.length - 1; i >= 0; i -= 1) {
           if (records[i].node === node) {
             var record = records[i];
-            if (record.next && record.next.parentNode === record.parent) record.parent.insertBefore(container, record.next);
+            if (record.anchor.parentNode === record.parent) record.parent.insertBefore(container, record.anchor);
+            else if (record.next && record.next.parentNode === record.parent) record.parent.insertBefore(container, record.next);
             else if (record.parent) record.parent.appendChild(container);
             return container;
           }
@@ -162,7 +184,11 @@
   }
 
   // 卸载收尾：释放装配登记，让下一次挂载能重新 beginLayout。调用前应先 restore。
-  function releaseLayout(id) { layoutAssemblies.delete(id); }
+  function releaseLayout(id) {
+    var handle = layoutAssemblies.get(id);
+    if (handle) handle.restore();
+    layoutAssemblies.delete(id);
+  }
 
   function isLayoutAssembled(id) { return layoutAssemblies.has(id); }
 

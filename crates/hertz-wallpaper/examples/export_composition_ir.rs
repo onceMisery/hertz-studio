@@ -5,10 +5,14 @@ use std::collections::BTreeMap;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args().collect();
     if !(3..=4).contains(&args.len()) {
-        return Err("usage: export_composition_ir <manifest.json> <document.json> [public-values.json]".into());
+        return Err(
+            "usage: export_composition_ir <manifest.json> <document.json> [public-values.json]"
+                .into(),
+        );
     }
     let manifest = hertz_wallpaper::validate_manifest_bytes(&std::fs::read(&args[1])?)?;
-    let compiled = hertz_wallpaper::document::compile_document(&std::fs::read(&args[2])?, &manifest)?;
+    let compiled =
+        hertz_wallpaper::document::compile_document(&std::fs::read(&args[2])?, &manifest)?;
     let overrides = if args.len() == 4 {
         serde_json::from_slice(&std::fs::read(&args[3])?)?
     } else {
