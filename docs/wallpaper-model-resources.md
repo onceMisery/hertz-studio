@@ -4,8 +4,30 @@
 ZIP 路径、实际长度、SHA-256 和组合合同核验后检查模型与 KTX2 纹理容器。
 桌面导入的快照校验、安装复核和原包重开沿用此入口。
 
-当前可验证的是容器、核心静态结构、morph 存储及实际 accessor/动画数值。模型节点与 KTX2
+当前可验证的是容器、核心静态结构、skin/morph 存储及实际 accessor/动画数值。模型节点与 KTX2
 运行适配器继续返回不可用；这些检查不能用来声称动画播放、纹理转码或 GPU 呈现已支持。
+
+skin 内容续接由原结构 owner 验证 joint 引用、共同祖先、skeleton、全部 node.skin
+所属 scene 和实际 mesh 使用关系；原 numeric owner 的私有子模块在同一 GLB 流中
+验证 IBM 关联前缀的 affine 第四行、全部消费者的最紧 joint 范围，以及逐顶点
+跨所有 sets 的非零 joint 唯一性。全整数权重按 UBYTE×257/USHORT 精确求和65535；
+含 FLOAT 时只强制有限与非负，不将近1、全零或零权重 joint 的推荐升级为硬拒绝。
+混合 primitive、未绑定 mesh、IBM 多余尾矩阵和 affine singular 矩阵保留合法性。
+
+新增关联动态有效载荷上限为16 MiB、预估工作上限为67,108,864，均在首 BIN 字节前
+核验；这两项是新增 skin 准入子限额，不是进程内存或设备/GPU成本。所有别名的
+group/set/role 使用关系保留，原 raw-layout 去重、raw bounds、64 KiB窗口和原数字
+上限不变。关联状态只留关节与标志，不留转换后的值数组；每顶点完整检查后递减
+固定计数器，finish为O(1)。结构摘要独立限125,536bytes，U=0时不申请；其预处理
+工作及图/scene工作分别有界，未计入关联16 MiB或原 raw components。
+
+当前纯包223项（skin24项）、桌面资源14项及两crate Clippy/fmt、合同导出与ADR
+检查通过。真实GLB覆盖60个非零影响、跨远views同extrema错误配对、全部alias消费者、
+两默认限额恰好接受与增加一个vertex时零BIN读取拒绝；两ZIP入口和source/variant
+快照删除源后坏内容无投影拒绝、正确安装、drop后重开已验证。原失败夹具日志保留。
+只退役已验证skin字段及合法base skin属性的 blanket拒绝，morph JOINTS/WEIGHTS
+仍明确拒绝；metadata false和模型运行门保持，sparse/extensions/codec/准备成本、
+受控loader、私有实例、绝对动画求值与GPU呈现继续后续验证。
 
 normalized rotation/weights 内容续接已接受 normalized BYTE/UBYTE/SHORT/USHORT
 的 STEP/LINEAR/CUBICSPLINE 存储。原旋转值检查按有效分量计算，SNORM 的两个最小
@@ -63,7 +85,7 @@ output 精确为 K×M×(cubic?3:1)，每个 cubic key 按 M 个 in→M 个 value
 
 | 资源 | 已实施检查 | 仍需实施与验收 |
 | --- | --- | --- |
-| GLB | v2容器与有界JSON；核心静态typed依赖/view/accessor/graph/变换及三角形metadata上界；同包图片/材质五槽UV引用；真实索引/有限FLOAT/bounds及NORMAL/TANGENT/COLOR_0；FLOAT TRS动画；核心morph delta/defaults及FLOAT/normalized rotation/weights存储与实际值 | skinning/sparse、扩展、实际材质/图片解码和完整成本；受控 GLTFLoader、私有实例、绝对动画播放及GPU呈现 |
+| GLB | v2容器与有界JSON；核心静态typed依赖/view/accessor/graph/变换及三角形metadata上界；同包图片/材质五槽UV引用；真实索引/有限FLOAT/bounds及NORMAL/TANGENT/COLOR_0；FLOAT TRS动画；核心skin结构/逐顶点关联、morph delta/defaults及FLOAT/normalized rotation/weights存储与实际值 | sparse、扩展、实际材质/图片解码和完整成本；受控 GLTFLoader、私有实例、绝对动画播放及GPU呈现 |
 | KTX2 | 普通 2D header、16384 单边与 64 MP、mip 索引、DFD/KVD/SGD/level 范围及溢出/重叠；按压缩方式核验长度与层对齐 | DFD/格式语义、真实 Basis worker/转码、GPU 格式选择和预算、解码选项与 context 缓存身份 |
 
 GLB 限 `model/gltf-binary`，所有 Model source/variant 都检查。Texture 中
@@ -102,8 +124,7 @@ primitive。正交相机 magnification 可为负但不能为零。custom scalar/
 属性保持有界；UINT32的当前 Khronos 正文为 SHOULD NOT，而 accessor schema
 辅助描述仍为旧 MUST NOT，两者措辞不一致。本metadata子集按正文接受typed
 custom UINT32，运行loader/GPU资格仍关闭；不据此声称两份来源一致。
-稀疏、骨骼和扩展payload在各自内容检查
-实施前明确不可用。
+核心骨骼内容检查见上方续接；稀疏和扩展payload在各自内容检查实施前明确不可用。
 
 模型结构阶段的早期桌面广泛回归552项通过、2项忽略，构建早于最后规格修正，
 仅保留该版本归属；最终源的资源导入9项和纯包131项另有日志。不能把旧广泛

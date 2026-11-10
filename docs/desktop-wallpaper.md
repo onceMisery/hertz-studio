@@ -1,5 +1,7 @@
 # Hertz 壁纸引擎 P0–P3 开发设计与实施计划
 
+2026-11-11 [GLB skin内容检查](wallpaper-model-resources.md)已在原结构/同流numeric owner验证joint图、所有node.skin场景关系、IBM前缀与逐顶点跨sets配对。全部alias消费者保留，整数权重精确sum、非零joint唯一性和zero-weight范围受检，FLOAT推荐不升级为强制。pure223（skin24）/desktop assets14及Clippy/fmt/合同/ADR通过，覆盖两个默认限额恰好接受、增加vertex后BIN0拒绝和源删除后snapshot安装/drop重开。新增16 MiB关联状态与67,108,864预估工作子限额不代表设备成本；sparse/codec/准备/受控loader/私有实例/动画求值/GPU与完整目标继续，运行门保持。
+
 2026-11-11 [GLB normalized动画内容检查](wallpaper-model-resources.md)已在原结构/数字owner接通四种normalized整数rotation/weights存储与实际旋转值。SNORM双最小端点、raw bounds、首alias原始解释、cubic/LINEAR共享角色与原1e-4单位容差有真实反例；未增加状态/数组/第二扫描。pure197（normalized11）/desktop assets13及Clippy/fmt/合同/ADR检查通过，source/variant坏旋转在删除源后无投影拒绝，正确快照安装重开。skin/sparse/codec/准备/受控loader/实际动画求值/GPU与完整目标继续，运行门保持。
 
 2026-11-11 [GLB morph/FLOAT weights内容检查](wallpaper-model-resources.md)已沿原结构与数字owner接通核心target/defaults与权重动画：混合primitive、empty target、负/>1作者weights、delta角色和checked K×M×factor存储有真实GLB反例，读前总限额与唯一layout扫描保持。pure186（morph15）、desktop assets12及Clippy/fmt/合同/ADR检查通过。source删除后的坏delta/weights无投影拒绝和正确快照安装重开已验证；normalized动画、skin/sparse/codec/准备/受控loader/绝对求值/同renderer模型继续实施，模型运行门保持关闭。

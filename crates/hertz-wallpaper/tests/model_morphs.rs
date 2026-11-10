@@ -164,6 +164,39 @@ fn weights_fixture(interpolation: &str, times: &[f32], values: &[f32]) -> (Value
 }
 
 #[test]
+fn real_skin_vertex_attributes_cannot_become_morph_targets() {
+    for semantic in ["JOINTS_0", "WEIGHTS_0"] {
+        let (mut document, mut data) = ordinary();
+        let joints = add_accessor(
+            &mut document,
+            &mut data,
+            json!({"componentType":5121,"count":3,"type":"VEC4"}),
+            &[0; 12],
+            Some(4),
+        );
+        let weights = add_accessor(
+            &mut document,
+            &mut data,
+            json!({"componentType":5121,"normalized":true,"count":3,"type":"VEC4"}),
+            &[255, 0, 0, 0].repeat(3),
+            Some(4),
+        );
+        document["meshes"][0]["primitives"][0]["attributes"]["JOINTS_0"] = json!(joints);
+        document["meshes"][0]["primitives"][0]["attributes"]["WEIGHTS_0"] = json!(weights);
+        inspect(&document, &data);
+        document["meshes"][0]["primitives"][0]["targets"][0][semantic] =
+            json!(if semantic == "JOINTS_0" {
+                joints
+            } else {
+                weights
+            });
+        let failure = error(&document, &data);
+        assert_eq!(failure.code, "invalid_model_structure");
+        assert!(failure.message.contains("morph targets cannot contain"));
+    }
+}
+
+#[test]
 fn morph_defaults_and_float_weights_use_author_order() {
     let (document, data) = ordinary();
     let checked = inspect(&document, &data);

@@ -1010,7 +1010,6 @@ fn pending_content_and_nested_extension_payloads_cannot_hide_dependencies() {
         ("extensions", Value::Null),
         ("extensionsUsed", json!(["KHR_draco_mesh_compression"])),
         ("extensionsRequired", json!(["KHR_texture_basisu"])),
-        ("skins", json!([])),
     ] {
         let mut document = empty();
         document[field] = value;
@@ -1026,7 +1025,6 @@ fn pending_content_and_nested_extension_payloads_cannot_hide_dependencies() {
         "/bufferViews/0/extensions",
         "/accessors/0/sparse",
         "/meshes/0/primitives/0/extensions",
-        "/nodes/0/skin",
     ] {
         let mut document = triangle();
         let (object, key) = pointer.rsplit_once('/').unwrap();
@@ -1051,11 +1049,20 @@ fn pending_content_and_nested_extension_payloads_cannot_hide_dependencies() {
             "{pointer}"
         );
     }
+    let mut document = empty();
+    document["skins"] = json!([]);
+    assert_eq!(error(&document, None), "invalid_model_structure");
+    let mut document = triangle();
+    document["nodes"][0]["skin"] = json!({});
+    assert_eq!(
+        error(&document, Some(&triangle_binary())),
+        "invalid_model_structure"
+    );
     let mut document = triangle();
     document["meshes"][0]["primitives"][0]["attributes"]["JOINTS_0"] = json!(0);
     assert_eq!(
         error(&document, Some(&triangle_binary())),
-        "model_resource_unavailable"
+        "invalid_model_structure"
     );
     let mut document = empty();
     document["futureDependencies"] = json!(["https://example.test/resource"]);

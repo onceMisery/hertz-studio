@@ -114,6 +114,22 @@ pub struct ModelMesh {
     pub triangles_upper_bound: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelSkin {
+    pub joints: Vec<usize>,
+    pub skeleton: Option<usize>,
+    /// None denotes the specified identity matrices, without expanding them.
+    pub inverse_bind_matrices: Option<usize>,
+    pub common_root: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModelSkinBinding {
+    pub mesh: usize,
+    pub primitive: usize,
+    pub skin: usize,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ModelStructure {
     pub buffer_views: Vec<ModelBufferView>,
@@ -121,6 +137,10 @@ pub struct ModelStructure {
     pub meshes: Vec<ModelMesh>,
     pub images: Vec<ModelImage>,
     pub animations: Vec<ModelAnimation>,
+    pub skins: Vec<ModelSkin>,
+    pub skin_bindings: Vec<ModelSkinBinding>,
+    /// All author binding/pair consumers, before any numeric layout dedup.
+    pub skin_binding_pair_refs: u64,
     pub node_count: usize,
     /// Aligned with original node indices; None inherits the mesh defaults.
     pub node_morph_weights: Vec<Option<Vec<f64>>>,
@@ -209,6 +229,7 @@ fn inspect_structure(
     path: &str,
 ) -> Result<ModelStructure> {
     inspect_morph_totals(&document)?;
+    let skin_author = inspect_skin_author(&document)?;
     if !document.extensions_used.0.is_empty() || !document.extensions_required.0.is_empty() {
         return Err(unavailable(
             "model extensions require a qualified content adapter",
@@ -310,8 +331,8 @@ fn inspect_structure(
             triangles(mesh_triangles_upper_bound, result.triangles_upper_bound)?;
         meshes.push(result);
     }
-    let (instantiated_triangles_upper_bound, node_morph_weights) =
-        inspect_nodes(&document, &meshes)?;
+    let nodes = inspect_nodes(&document, &meshes)?;
+    let (skins, skin_bindings) = inspect_skins(&document, &accessors, &nodes.graph, &skin_author)?;
     let animations = animation::inspect_animations(
         &document.animations.0,
         &document.nodes.0,
@@ -324,10 +345,13 @@ fn inspect_structure(
         meshes,
         images,
         animations,
+        skins,
+        skin_bindings,
+        skin_binding_pair_refs: skin_author.pair_consumers,
         node_count: document.nodes.0.len(),
-        node_morph_weights,
+        node_morph_weights: nodes.morph_weights,
         mesh_triangles_upper_bound,
-        instantiated_triangles_upper_bound,
+        instantiated_triangles_upper_bound: nodes.total_triangles,
         binary_content_validated: false,
     })
 }
@@ -519,7 +543,7 @@ fn inspect_primitive(
             ));
         }
         inspect_semantic(semantic, accessor)?;
-        for prefix in ["TEXCOORD_", "COLOR_"] {
+        for prefix in ["TEXCOORD_", "COLOR_", "JOINTS_", "WEIGHTS_"] {
             if let Some(suffix) = semantic.strip_prefix(prefix) {
                 let index: u32 = suffix.parse().expect("validated semantic index");
                 if index > 0
@@ -531,6 +555,17 @@ fn inspect_primitive(
                     return Err(invalid(
                         "indexed vertex attribute semantics cannot have gaps",
                     ));
+                }
+            }
+        }
+        for (prefix, partner) in [("JOINTS_", "WEIGHTS_"), ("WEIGHTS_", "JOINTS_")] {
+            if let Some(suffix) = semantic.strip_prefix(prefix) {
+                if !primitive
+                    .attributes
+                    .0
+                    .contains_key(&format!("{partner}{suffix}"))
+                {
+                    return Err(invalid("JOINTS and WEIGHTS sets require matching partners"));
                 }
             }
         }
@@ -650,6 +685,18 @@ fn inspect_view_roles(
         }
     }
     animation::inspect_views(&document.animations.0, accessors, views, &mut assign)?;
+    for skin in &document.skins.0 {
+        if let Some(index) = skin.inverse_bind_matrices {
+            let accessor = at(accessors, index, "skin.inverseBindMatrices")?;
+            let view = &views[accessor.buffer_view];
+            if view.byte_stride.is_some() || view.target.is_some() {
+                return Err(invalid(
+                    "inverse bind matrix bufferView cannot define stride or target",
+                ));
+            }
+            assign(accessor.buffer_view, 5)?;
+        }
+    }
     for image in &document.images.0 {
         if let Some(index) = image.buffer_view {
             at(views, index, "image.bufferView")?;
@@ -730,10 +777,13 @@ fn inspect_semantic(semantic: &str, accessor: &ModelAccessor) -> Result<()> {
         name if name.starts_with("COLOR_") && semantic_set(name, "COLOR_") => {
             color_or_uv && matches!(accessor.shape, AccessorShape::Vec3 | AccessorShape::Vec4)
         }
-        name if name.starts_with("JOINTS_") || name.starts_with("WEIGHTS_") => {
-            return Err(unavailable(
-                "skinning attributes require binary and skin validation",
-            ))
+        name if semantic_set(name, "JOINTS_") => {
+            !accessor.normalized
+                && [5121, 5123].contains(&accessor.component_type)
+                && accessor.shape == AccessorShape::Vec4
+        }
+        name if semantic_set(name, "WEIGHTS_") => {
+            color_or_uv && accessor.shape == AccessorShape::Vec4
         }
         name if name.starts_with('_') => {
             if accessor.shape.dimensions().0 > 1 {
@@ -780,12 +830,12 @@ fn inspect_morph_semantic(semantic: &str, accessor: &ModelAccessor) -> Result<()
             (float || normalized)
                 && matches!(accessor.shape, AccessorShape::Vec3 | AccessorShape::Vec4)
         }
-        name if name.starts_with('_')
-            || name.starts_with("JOINTS_")
-            || name.starts_with("WEIGHTS_") =>
-        {
-            return inspect_semantic(name, accessor)
+        name if name.starts_with("JOINTS_") || name.starts_with("WEIGHTS_") => {
+            return Err(invalid(
+                "morph targets cannot contain JOINTS or WEIGHTS semantics",
+            ));
         }
+        name if name.starts_with('_') => return inspect_semantic(name, accessor),
         _ => false,
     };
     if !valid {
@@ -796,7 +846,15 @@ fn inspect_morph_semantic(semantic: &str, accessor: &ModelAccessor) -> Result<()
     Ok(())
 }
 
-fn inspect_nodes(document: &Schema, meshes: &[ModelMesh]) -> Result<(u64, Vec<Option<Vec<f64>>>)> {
+struct InspectedNodes {
+    total_triangles: u64,
+    morph_weights: Vec<Option<Vec<f64>>>,
+    graph: NodeGraph,
+}
+struct NodeGraph {
+    parents: Vec<Option<usize>>,
+}
+fn inspect_nodes(document: &Schema, meshes: &[ModelMesh]) -> Result<InspectedNodes> {
     let mut parents = vec![None; document.nodes.0.len()];
     let mut node_morph_weights = Vec::with_capacity(document.nodes.0.len());
     let mut total = 0;
@@ -869,25 +927,425 @@ fn inspect_nodes(document: &Schema, meshes: &[ModelMesh]) -> Result<(u64, Vec<Op
     if visited != document.nodes.0.len() {
         return Err(invalid("model node graph contains a cycle"));
     }
+    for camera in &document.cameras.0 {
+        inspect_camera(camera)?;
+    }
+    Ok(InspectedNodes {
+        total_triangles: total,
+        morph_weights: node_morph_weights,
+        graph: NodeGraph { parents },
+    })
+}
+
+struct SkinAuthor {
+    joints: u64,
+    uses: u64,
+    bindings: u64,
+    pair_consumers: u64,
+    mesh_ranges: Vec<MeshSkinRange>,
+    pair_primitives: Vec<u32>,
+}
+#[derive(Clone, Copy)]
+#[repr(C)]
+struct MeshSkinRange {
+    first: u32,
+    count: u32,
+    pairs: u32,
+}
+fn skin_structure_limit() -> PackageError {
+    PackageError::new(
+        "model_structure_limit",
+        "skin author totals or graph work exceed the bounded structure limit",
+    )
+}
+fn primitive_pairs(primitive: &Primitive) -> usize {
+    primitive
+        .attributes
+        .0
+        .keys()
+        .filter(|name| name.starts_with("JOINTS_"))
+        .count()
+}
+fn inspect_skin_author(document: &Schema) -> Result<SkinAuthor> {
+    let mut joints = 0_u64;
+    for skin in &document.skins.0 {
+        joints = joints
+            .checked_add(skin.joints.0.len() as u64)
+            .ok_or_else(skin_structure_limit)?;
+        if joints > MAX_MODEL_RECORDS as u64 {
+            return Err(skin_structure_limit());
+        }
+    }
+    let mut pairs = 0_u64;
+    let mut entries = 0_u64;
+    let mut primitive_total = 0_usize;
+    let mut attribute_refs = 0_u64;
+    for mesh in &document.meshes.0 {
+        primitive_total = primitive_total
+            .checked_add(mesh.primitives.0.len())
+            .ok_or_else(skin_structure_limit)?;
+        if primitive_total > MAX_MODEL_RECORDS {
+            return Err(skin_structure_limit());
+        }
+        for primitive in &mesh.primitives.0 {
+            attribute_refs = attribute_refs
+                .checked_add(primitive.attributes.0.len() as u64)
+                .ok_or_else(skin_structure_limit)?;
+            let count = primitive_pairs(primitive) as u64;
+            pairs = pairs.checked_add(count).ok_or_else(skin_structure_limit)?;
+            entries = entries
+                .checked_add(u64::from(count != 0))
+                .ok_or_else(skin_structure_limit)?;
+            if pairs > MAX_MODEL_RECORDS as u64 {
+                return Err(skin_structure_limit());
+            }
+        }
+    }
+    pairs.checked_mul(2).ok_or_else(skin_structure_limit)?;
+    let mut uses = 0_u64;
+    for node in &document.nodes.0 {
+        if let Some(skin) = node.skin {
+            at(&document.skins.0, skin, "node.skin")?;
+            let mesh = node
+                .mesh
+                .ok_or_else(|| invalid("node.skin requires a mesh"))?;
+            at(&document.meshes.0, mesh, "node.skin mesh")?;
+            uses = uses.checked_add(1).ok_or_else(skin_structure_limit)?;
+            if uses > MAX_MODEL_RECORDS as u64 {
+                return Err(skin_structure_limit());
+            }
+        }
+    }
+    if uses == 0 {
+        return Ok(SkinAuthor {
+            joints,
+            uses,
+            bindings: 0,
+            pair_consumers: 0,
+            mesh_ranges: Vec::new(),
+            pair_primitives: Vec::new(),
+        });
+    }
+    // Separate bounded author preprocessing, not graph or numeric work:
+    // two attribute/primitive passes, mesh ranges, and two node-use passes.
+    let summary_work = attribute_refs
+        .checked_mul(2)
+        .and_then(|n| {
+            (primitive_total as u64)
+                .checked_mul(2)
+                .and_then(|p| n.checked_add(p))
+        })
+        .and_then(|n| n.checked_add(document.meshes.0.len() as u64))
+        .and_then(|n| {
+            (document.nodes.0.len() as u64)
+                .checked_mul(2)
+                .and_then(|u| n.checked_add(u))
+        })
+        .ok_or_else(skin_structure_limit)?;
+    if summary_work > 67_108_864 {
+        return Err(skin_structure_limit());
+    }
+    // Admission precedes this bounded author summary. It prevents a mixed mesh
+    // with many ordinary primitives from multiplying scans for every node use.
+    let mut mesh_ranges = Vec::new();
+    let mut pair_primitives = Vec::new();
+    mesh_ranges
+        .try_reserve_exact(document.meshes.0.len())
+        .map_err(|_| skin_structure_limit())?;
+    pair_primitives
+        .try_reserve_exact(usize::try_from(entries).map_err(|_| skin_structure_limit())?)
+        .map_err(|_| skin_structure_limit())?;
+    let summary_bytes = mesh_ranges
+        .capacity()
+        .checked_mul(std::mem::size_of::<MeshSkinRange>())
+        .and_then(|n| {
+            pair_primitives
+                .capacity()
+                .checked_mul(std::mem::size_of::<u32>())
+                .and_then(|p| n.checked_add(p))
+        })
+        .ok_or_else(skin_structure_limit)?;
+    if summary_bytes > MAX_MODEL_NODES * 12 + MAX_MODEL_RECORDS * 4 {
+        return Err(skin_structure_limit());
+    }
+    for mesh in &document.meshes.0 {
+        let first = u32::try_from(pair_primitives.len()).map_err(|_| skin_structure_limit())?;
+        let mut pairs = 0_u32;
+        for (index, primitive) in mesh.primitives.0.iter().enumerate() {
+            let count =
+                u32::try_from(primitive_pairs(primitive)).map_err(|_| skin_structure_limit())?;
+            pairs = pairs.checked_add(count).ok_or_else(skin_structure_limit)?;
+            if count != 0 {
+                pair_primitives.push(u32::try_from(index).map_err(|_| skin_structure_limit())?);
+            }
+        }
+        mesh_ranges.push(MeshSkinRange {
+            first,
+            count: u32::try_from(pair_primitives.len())
+                .map_err(|_| skin_structure_limit())?
+                .checked_sub(first)
+                .ok_or_else(skin_structure_limit)?,
+            pairs,
+        });
+    }
+    let mut result = SkinAuthor {
+        joints,
+        uses,
+        bindings: 0,
+        pair_consumers: 0,
+        mesh_ranges,
+        pair_primitives,
+    };
+    for node in &document.nodes.0 {
+        if node.skin.is_some() {
+            let summary = result.mesh_ranges[node.mesh.expect("skin mesh validated")];
+            let pairs = u64::from(summary.pairs);
+            let bindings = u64::from(summary.count);
+            result.bindings = result
+                .bindings
+                .checked_add(bindings)
+                .ok_or_else(skin_structure_limit)?;
+            result.pair_consumers = result
+                .pair_consumers
+                .checked_add(pairs)
+                .ok_or_else(skin_structure_limit)?;
+            if result.uses > MAX_MODEL_RECORDS as u64
+                || result.bindings > MAX_MODEL_RECORDS as u64
+                || result.pair_consumers > (MAX_MODEL_RECORDS as u64) * 15
+            {
+                return Err(skin_structure_limit());
+            }
+        }
+    }
+    Ok(result)
+}
+
+struct SkinGraph {
+    roots: Vec<usize>,
+    depths: Vec<usize>,
+    tin: Vec<usize>,
+    tout: Vec<usize>,
+    ancestors: Vec<[usize; 13]>,
+}
+impl SkinGraph {
+    fn new(document: &Schema, parents: &[Option<usize>]) -> Result<Self> {
+        let n = parents.len();
+        let bytes = n
+            .checked_mul(13)
+            .and_then(|n| n.checked_mul(std::mem::size_of::<usize>()))
+            .ok_or_else(skin_structure_limit)?;
+        if bytes > 520_000 {
+            return Err(skin_structure_limit());
+        }
+        let mut graph = Self {
+            roots: vec![0; n],
+            depths: vec![0; n],
+            tin: vec![0; n],
+            tout: vec![0; n],
+            ancestors: vec![[0; 13]; n],
+        };
+        let mut pending = Vec::with_capacity(n.checked_mul(2).ok_or_else(skin_structure_limit)?);
+        for (index, parent) in parents.iter().enumerate() {
+            if parent.is_none() {
+                pending.push((index, false));
+            }
+        }
+        let mut clock = 0;
+        while let Some((index, exit)) = pending.pop() {
+            if exit {
+                graph.tout[index] = clock;
+                continue;
+            }
+            graph.tin[index] = clock;
+            clock += 1;
+            let parent = parents[index].unwrap_or(index);
+            graph.roots[index] = if parent == index {
+                index
+            } else {
+                graph.roots[parent]
+            };
+            graph.depths[index] = if parent == index {
+                0
+            } else {
+                graph.depths[parent] + 1
+            };
+            graph.ancestors[index][0] = parent;
+            for level in 1..13 {
+                graph.ancestors[index][level] =
+                    graph.ancestors[graph.ancestors[index][level - 1]][level - 1];
+            }
+            pending.push((index, true));
+            for &child in &document.nodes.0[index].children.0 {
+                pending.push((child, false));
+            }
+        }
+        Ok(graph)
+    }
+    fn ancestor(&self, ancestor: usize, node: usize) -> bool {
+        self.roots[ancestor] == self.roots[node]
+            && self.tin[ancestor] <= self.tin[node]
+            && self.tout[node] <= self.tout[ancestor]
+    }
+    fn lca(&self, mut left: usize, mut right: usize) -> usize {
+        if self.depths[left] < self.depths[right] {
+            std::mem::swap(&mut left, &mut right);
+        }
+        let difference = self.depths[left] - self.depths[right];
+        for level in 0..13 {
+            if difference & (1 << level) != 0 {
+                left = self.ancestors[left][level];
+            }
+        }
+        if left == right {
+            return left;
+        }
+        for level in (0..13).rev() {
+            if self.ancestors[left][level] != self.ancestors[right][level] {
+                left = self.ancestors[left][level];
+                right = self.ancestors[right][level];
+            }
+        }
+        self.ancestors[left][0]
+    }
+}
+fn inspect_scenes(
+    document: &Schema,
+    parents: &[Option<usize>],
+    relations: &[(usize, usize)],
+) -> Result<()> {
     if document
         .scene
         .is_some_and(|index| index >= document.scenes.0.len())
     {
         return Err(invalid("default scene is out of range"));
     }
+    let mut seen = vec![false; parents.len()];
     for scene in &document.scenes.0 {
-        let mut seen = vec![false; parents.len()];
-        for root in &scene.nodes.0 {
-            if at(&parents, *root, "scene root")?.is_some() || seen[*root] {
+        seen.fill(false);
+        for &root in &scene.nodes.0 {
+            if at(parents, root, "scene root")?.is_some() || seen[root] {
                 return Err(invalid("scene roots must be distinct parentless nodes"));
             }
-            seen[*root] = true;
+            seen[root] = true;
+        }
+        for &(node_root, joint_root) in relations {
+            if seen[node_root] && !seen[joint_root] {
+                return Err(invalid(
+                    "skin common root must belong to every scene containing its node",
+                ));
+            }
         }
     }
-    for camera in &document.cameras.0 {
-        inspect_camera(camera)?;
+    Ok(())
+}
+fn inspect_skins(
+    document: &Schema,
+    accessors: &[ModelAccessor],
+    nodes: &NodeGraph,
+    author: &SkinAuthor,
+) -> Result<(Vec<ModelSkin>, Vec<ModelSkinBinding>)> {
+    if document.skins.0.is_empty() {
+        inspect_scenes(document, &nodes.parents, &[])?;
+        return Ok((Vec::new(), Vec::new()));
     }
-    Ok((total, node_morph_weights))
+    let base_work = checked_add(
+        checked_add(
+            checked_add(
+                checked_mul(15, nodes.parents.len() as u64)?,
+                checked_mul(26, author.joints)?,
+            )?,
+            author.uses,
+        )?,
+        author.bindings,
+    )?;
+    if base_work > 67_108_864 {
+        return Err(skin_structure_limit());
+    }
+    let graph = SkinGraph::new(document, &nodes.parents)?;
+    let mut generations = vec![0_u32; nodes.parents.len()];
+    let mut skins = Vec::with_capacity(document.skins.0.len());
+    for (index, skin) in document.skins.0.iter().enumerate() {
+        let generation = u32::try_from(index + 1).map_err(|_| skin_structure_limit())?;
+        let first = *skin.joints.0.first().expect("nonempty skin joints");
+        at(&document.nodes.0, first, "skin joint")?;
+        let mut common_root = first;
+        for &joint in &skin.joints.0 {
+            at(&document.nodes.0, joint, "skin joint")?;
+            if generations[joint] == generation {
+                return Err(invalid("skin contains duplicate joints"));
+            }
+            generations[joint] = generation;
+            if graph.roots[joint] != graph.roots[first] {
+                return Err(invalid("skin joints must share a common ancestor"));
+            }
+            common_root = graph.lca(common_root, joint);
+        }
+        if let Some(skeleton) = skin.skeleton {
+            at(&document.nodes.0, skeleton, "skin.skeleton")?;
+            if !graph.ancestor(skeleton, common_root) {
+                return Err(invalid("skin skeleton must be an ancestor of all joints"));
+            }
+        }
+        if let Some(ibm) = skin.inverse_bind_matrices {
+            let accessor = at(accessors, ibm, "skin.inverseBindMatrices")?;
+            if accessor.component_type != 5126
+                || accessor.normalized
+                || accessor.shape != AccessorShape::Mat4
+                || accessor.count < skin.joints.0.len() as u64
+            {
+                return Err(invalid("inverse bind matrices require unnormalized FLOAT MAT4 and at least one matrix per joint"));
+            }
+        }
+        skins.push(ModelSkin {
+            joints: skin.joints.0.clone(),
+            skeleton: skin.skeleton,
+            inverse_bind_matrices: skin.inverse_bind_matrices,
+            common_root,
+        });
+    }
+    let mut cross = 0_u64;
+    for (index, node) in document.nodes.0.iter().enumerate() {
+        if let Some(skin) = node.skin {
+            cross += u64::from(graph.roots[index] != graph.roots[skins[skin].common_root]);
+        }
+    }
+    let work = checked_add(
+        base_work,
+        checked_add(
+            checked_mul(cross, cross.saturating_sub(1))?,
+            checked_mul(document.scenes.0.len() as u64, cross)?,
+        )?,
+    )?;
+    if work > 67_108_864 {
+        return Err(skin_structure_limit());
+    }
+    let mut relations =
+        Vec::with_capacity(usize::try_from(cross).map_err(|_| skin_structure_limit())?);
+    let mut bindings =
+        Vec::with_capacity(usize::try_from(author.bindings).map_err(|_| skin_structure_limit())?);
+    for (index, node) in document.nodes.0.iter().enumerate() {
+        if let Some(skin) = node.skin {
+            let relation = (graph.roots[index], graph.roots[skins[skin].common_root]);
+            if relation.0 != relation.1 && !relations.contains(&relation) {
+                relations.push(relation);
+            }
+            let mesh = node.mesh.expect("skin author mesh checked");
+            let range = author.mesh_ranges[mesh];
+            let end = range
+                .first
+                .checked_add(range.count)
+                .ok_or_else(skin_structure_limit)?;
+            for &primitive in &author.pair_primitives[range.first as usize..end as usize] {
+                bindings.push(ModelSkinBinding {
+                    mesh,
+                    primitive: primitive as usize,
+                    skin,
+                });
+            }
+        }
+    }
+    inspect_scenes(document, &nodes.parents, &relations)?;
+    Ok((skins, bindings))
 }
 
 fn inspect_matrix(matrix: &[f64; 16]) -> Result<()> {
@@ -1236,7 +1694,7 @@ struct Pending;
 impl<'de> Deserialize<'de> for Pending {
     fn deserialize<D: Deserializer<'de>>(_: D) -> std::result::Result<Self, D::Error> {
         Err(de::Error::custom(
-            "model_resource_unavailable: extension/skin/sparse content is pending validation",
+            "model_resource_unavailable: extension/sparse content is pending validation",
         ))
     }
 }
@@ -1280,7 +1738,7 @@ schema!(Schema {
     #[serde(default)] extensions_used: Limited<String,MAX_MODEL_IMAGE_RECORDS>,
     #[serde(default)] extensions_required: Limited<String,MAX_MODEL_IMAGE_RECORDS>,
     #[serde(default,deserialize_with="animation::nonempty_animations")] animations: Limited<animation::Animation,MAX_MODEL_ANIMATIONS>,
-    #[serde(default,rename="skins")] _skins: Pending,
+    #[serde(default,deserialize_with="nonempty_skins")] skins: Limited<Skin,MAX_MODEL_RECORDS>,
 });
 schema!(AssetHeader {
     #[serde(rename="version")] _version:String,
@@ -1317,10 +1775,38 @@ named_schema!(Node {
     #[serde(default)] mesh:Option<usize>, #[serde(default)] camera:Option<usize>,
     #[serde(default)] matrix:Option<[f64;16]>, #[serde(default)] translation:Option<[f64;3]>,
     #[serde(default)] rotation:Option<[f64;4]>, #[serde(default)] scale:Option<[f64;3]>,
-    #[serde(default,rename="skin")] _skin:Pending,
+    #[serde(default,deserialize_with="optional_index")] skin:Option<usize>,
     #[serde(default,deserialize_with="author_weights")] weights:Option<Limited<f64,MAX_MODEL_RECORDS>>,
 });
 named_schema!(Scene { #[serde(default)] nodes:Limited<usize,MAX_MODEL_NODES>, });
+named_schema!(Skin {
+    #[serde(deserialize_with="nonempty_joints")] joints:Limited<usize,MAX_MODEL_NODES>,
+    #[serde(default,deserialize_with="optional_index")] skeleton:Option<usize>,
+    #[serde(default,deserialize_with="optional_index")] inverse_bind_matrices:Option<usize>,
+});
+fn optional_index<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<usize>, D::Error> {
+    usize::deserialize(deserializer).map(Some)
+}
+fn nonempty_skins<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Limited<Skin, MAX_MODEL_RECORDS>, D::Error> {
+    let value = Limited::deserialize(deserializer)?;
+    if value.0.is_empty() {
+        return Err(de::Error::custom("skins must be nonempty when present"));
+    }
+    Ok(value)
+}
+fn nonempty_joints<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Limited<usize, MAX_MODEL_NODES>, D::Error> {
+    let value = Limited::deserialize(deserializer)?;
+    if value.0.is_empty() {
+        return Err(de::Error::custom("skin joints must be nonempty"));
+    }
+    Ok(value)
+}
 named_schema!(Image {
     #[serde(default)] uri:Option<String>, #[serde(default)] buffer_view:Option<usize>,
     #[serde(default)] mime_type:Option<String>,

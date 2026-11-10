@@ -28,6 +28,9 @@ const WINDOW_BYTES: usize = 64 * 1024;
 /// Numeric tolerance for this static subset; vectors are never rewritten.
 const UNIT_LENGTH_SQUARED_TOLERANCE: f64 = 1e-4;
 
+mod skin;
+pub use skin::{MAX_MODEL_SKIN_ASSOCIATION_BYTES, MAX_MODEL_SKIN_ASSOCIATION_WORK};
+
 /// Only the inspector can construct these facts. The digest covers the exact
 /// entire GLB stream whose values were checked, including unused BIN bytes.
 /// It does not attest to the caller's Manifest or transitive image content.
@@ -235,6 +238,7 @@ fn inspect_accessors<R: Read>(
             }
         }
     }
+    let mut skin = skin::prepare(structure, &mapping, &jobs, elements)?;
     let mut pending = BinaryHeap::with_capacity(jobs.len());
     for (index, job) in jobs.iter().enumerate() {
         pending.push(Reverse((
@@ -249,7 +253,10 @@ fn inspect_accessors<R: Read>(
         let job = &mut jobs[index];
         let accessor = &structure.accessors[job.accessor];
         let bytes = window.element(offset, accessor.element_bytes as usize)?;
-        inspect_element(job, accessor, bytes, element)?;
+        let values = inspect_element(job, accessor, bytes, element)?;
+        if let Some(skin) = &mut skin {
+            skin.observe(index, element, accessor.component_type, &values)?;
+        }
         let next = element + 1;
         if next < accessor.count {
             let next_offset = accessor
@@ -259,6 +266,9 @@ fn inspect_accessors<R: Read>(
                 .ok_or_else(limit)?;
             pending.push(Reverse((next_offset, index, next)));
         }
+    }
+    if let Some(skin) = &skin {
+        skin.finish()?;
     }
     for (index, accessor) in structure.accessors.iter().enumerate() {
         let job = &jobs[mapping[index]];
@@ -290,7 +300,7 @@ fn inspect_element(
     accessor: &ModelAccessor,
     bytes: &[u8],
     element: u64,
-) -> Result<()> {
+) -> Result<[f64; 16]> {
     let (columns, rows) = accessor.shape.dimensions();
     let width = match accessor.component_type {
         5120 | 5121 => 1,
@@ -399,7 +409,7 @@ fn inspect_element(
             )));
         }
     }
-    Ok(())
+    Ok(values)
 }
 
 fn rotation_component(raw: f64, component_type: u32) -> Result<f64> {
