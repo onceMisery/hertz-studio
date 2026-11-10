@@ -1,0 +1,81 @@
+// SPDX-License-Identifier: MIT
+//! Fixed-memory reads shared by the two resource container inspectors.
+
+use std::io::Read;
+
+use crate::{PackageError, Result};
+
+pub(crate) struct ContainerReader<R> {
+    input: R,
+    length: u64,
+    offset: u64,
+    code: &'static str,
+}
+
+impl<R: Read> ContainerReader<R> {
+    pub(crate) fn new(input: R, length: u64, code: &'static str) -> Self {
+        Self {
+            input,
+            length,
+            offset: 0,
+            code,
+        }
+    }
+
+    pub(crate) fn offset(&self) -> u64 {
+        self.offset
+    }
+    pub(crate) fn remaining(&self) -> u64 {
+        self.length - self.offset
+    }
+
+    pub(crate) fn error(&self, message: impl Into<String>) -> PackageError {
+        PackageError::new(
+            self.code,
+            format!("{} (byte {})", message.into(), self.offset),
+        )
+    }
+
+    pub(crate) fn read_into(&mut self, output: &mut [u8]) -> Result<()> {
+        if output.len() as u64 > self.remaining() {
+            return Err(self.error("container range exceeds the verified entry length"));
+        }
+        self.input
+            .read_exact(output)
+            .map_err(|error| self.error(format!("short or failed read: {error}")))?;
+        self.offset += output.len() as u64;
+        Ok(())
+    }
+
+    pub(crate) fn fixed<const N: usize>(&mut self) -> Result<[u8; N]> {
+        let mut bytes = [0; N];
+        self.read_into(&mut bytes)?;
+        Ok(bytes)
+    }
+
+    pub(crate) fn skip(&mut self, bytes: u64) -> Result<()> {
+        if bytes > self.remaining() {
+            return Err(self.error("container body exceeds the verified entry length"));
+        }
+        let mut remaining = bytes;
+        let mut buffer = [0; 64 * 1024];
+        while remaining > 0 {
+            let count = remaining.min(buffer.len() as u64) as usize;
+            self.read_into(&mut buffer[..count])?;
+            remaining -= count as u64;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn finish(mut self) -> Result<()> {
+        if self.remaining() != 0 {
+            return Err(self.error("unconsumed container bytes"));
+        }
+        let mut extra = [0; 1];
+        match self.input.read(&mut extra) {
+            Ok(0) => Ok(()),
+            Ok(_) => Err(self.error("bytes follow the declared container length")),
+            Err(error) => Err(self.error(format!("end-of-entry read failed: {error}"))),
+        }
+    }
+}

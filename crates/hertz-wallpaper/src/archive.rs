@@ -45,6 +45,7 @@ pub fn validate_package<R: std::io::Read + std::io::Seek>(reader: R) -> Result<V
     let manifest = validate_manifest_bytes(&manifest_bytes)?;
     let entries = validate_archive_in_place(&mut archive, &manifest)?;
     validate_composition_in_place(&mut archive, &manifest)?;
+    validate_resource_containers_in_place(&mut archive, &manifest)?;
     Ok(ValidatedPackage { manifest, entries })
 }
 
@@ -56,6 +57,7 @@ pub fn validate_archive<R: std::io::Read + std::io::Seek>(
     let mut archive = open_archive(&mut reader)?;
     let entries = validate_archive_in_place(&mut archive, manifest)?;
     validate_composition_in_place(&mut archive, manifest)?;
+    validate_resource_containers_in_place(&mut archive, manifest)?;
     Ok(entries)
 }
 
@@ -82,6 +84,53 @@ fn validate_composition_in_place<R: Read + std::io::Seek>(
         .read_to_end(&mut bytes)
         .map_err(|error| PackageError::new("invalid_composition", error.to_string()))?;
     crate::document::compile_document(&bytes, manifest)?;
+    Ok(())
+}
+
+fn validate_resource_containers_in_place<R: Read + std::io::Seek>(
+    archive: &mut ZipArchive<R>,
+    manifest: &Manifest,
+) -> Result<()> {
+    let mut inspected = HashSet::new();
+    for asset in &manifest.assets {
+        let model = asset.kind == crate::AssetKind::Model;
+        if !model && asset.kind != crate::AssetKind::Texture {
+            continue;
+        }
+        for path in
+            std::iter::once(&asset.source).chain(asset.variants.iter().map(|variant| &variant.file))
+        {
+            let entry = manifest.file(path).ok_or_else(|| {
+                PackageError::new(
+                    "missing_file",
+                    format!("resource {} references undeclared file {path}", asset.id),
+                )
+            })?;
+            // A file may have several asset aliases. Validate each role before
+            // deduplicating the immutable file's container inspection.
+            if model && entry.mime != "model/gltf-binary" {
+                return Err(PackageError::new(
+                    "model_container_unavailable",
+                    format!("model asset {path} requires the GLB container subset"),
+                ));
+            }
+            let ktx2 = asset.kind == crate::AssetKind::Texture && entry.mime == "image/ktx2";
+            if (!model && !ktx2) || !inspected.insert(path) {
+                continue;
+            }
+            let input = archive
+                .by_name(path)
+                .map_err(|error| PackageError::new("missing_file", error.to_string()))?;
+            let result = if model {
+                crate::model_container::inspect_glb(input, entry.bytes).map(|_| ())
+            } else {
+                crate::texture_container::inspect_ktx2(input, entry.bytes).map(|_| ())
+            };
+            result.map_err(|error| {
+                PackageError::new(error.code, format!("resource {path}: {}", error.message))
+            })?;
+        }
+    }
     Ok(())
 }
 

@@ -23,6 +23,69 @@ pub fn check_bounded_json(bytes: &[u8], max_depth: usize) -> Result<()> {
     Ok(())
 }
 
+/// Visit every scalar without retaining a Value tree. serde's IgnoredAny can
+/// skip an out-of-range numeric token in an unknown field; model metadata must
+/// remain finite even when only a small header is extracted afterwards.
+pub fn check_finite_json_values(bytes: &[u8]) -> Result<()> {
+    serde_json::from_slice::<FiniteValue>(bytes)
+        .map(|_| ())
+        .map_err(|error| PackageError::new("invalid_json", error.to_string()))
+}
+
+struct FiniteValue;
+impl<'de> serde::Deserialize<'de> for FiniteValue {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        deserializer.deserialize_any(FiniteVisitor)
+    }
+}
+struct FiniteVisitor;
+impl<'de> serde::de::Visitor<'de> for FiniteVisitor {
+    type Value = FiniteValue;
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("JSON containing only finite numbers")
+    }
+    fn visit_bool<E: serde::de::Error>(self, _: bool) -> std::result::Result<Self::Value, E> {
+        Ok(FiniteValue)
+    }
+    fn visit_i64<E: serde::de::Error>(self, _: i64) -> std::result::Result<Self::Value, E> {
+        Ok(FiniteValue)
+    }
+    fn visit_u64<E: serde::de::Error>(self, _: u64) -> std::result::Result<Self::Value, E> {
+        Ok(FiniteValue)
+    }
+    fn visit_f64<E: serde::de::Error>(self, value: f64) -> std::result::Result<Self::Value, E> {
+        if value.is_finite() {
+            Ok(FiniteValue)
+        } else {
+            Err(E::custom("non-finite JSON number"))
+        }
+    }
+    fn visit_str<E: serde::de::Error>(self, _: &str) -> std::result::Result<Self::Value, E> {
+        Ok(FiniteValue)
+    }
+    fn visit_unit<E: serde::de::Error>(self) -> std::result::Result<Self::Value, E> {
+        Ok(FiniteValue)
+    }
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(
+        self,
+        mut sequence: A,
+    ) -> std::result::Result<Self::Value, A::Error> {
+        while sequence.next_element::<FiniteValue>()?.is_some() {}
+        Ok(FiniteValue)
+    }
+    fn visit_map<A: serde::de::MapAccess<'de>>(
+        self,
+        mut map: A,
+    ) -> std::result::Result<Self::Value, A::Error> {
+        while map.next_key::<serde::de::IgnoredAny>()?.is_some() {
+            map.next_value::<FiniteValue>()?;
+        }
+        Ok(FiniteValue)
+    }
+}
+
 /// 返回顶层 `key` 对应值的原始字节区间（不含包裹空白）。
 /// 只在顶层（深度 1 的对象成员）查找；找不到返回 None。
 pub fn top_level_raw_value(bytes: &[u8], key: &str) -> Option<std::ops::Range<usize>> {

@@ -915,6 +915,116 @@ mod tests {
     }
 
     #[test]
+    fn staged_model_and_ktx2_containers_are_checked_before_projection_and_on_reopen() {
+        use std::io::{Cursor, Read, Write};
+        // Container fixtures only: neither proves GLTF/DFD decode admission.
+        let mut glb_json = br#"{"asset":{"version":"2.0"}}"#.to_vec();
+        while glb_json.len() % 4 != 0 {
+            glb_json.push(b' ');
+        }
+        let mut glb = b"glTF".to_vec();
+        glb.extend(2_u32.to_le_bytes());
+        glb.extend((20_u32 + glb_json.len() as u32).to_le_bytes());
+        glb.extend((glb_json.len() as u32).to_le_bytes());
+        glb.extend(b"JSON");
+        glb.extend(glb_json);
+        let mut ktx2 = vec![0_u8; 196];
+        ktx2[..12].copy_from_slice(&[
+            0xab, b'K', b'T', b'X', b' ', b'2', b'0', 0xbb, 13, 10, 26, 10,
+        ]);
+        for (offset, value) in [
+            (12, 37_u32),
+            (16, 1),
+            (20, 4),
+            (24, 4),
+            (36, 1),
+            (40, 1),
+            (48, 104),
+            (52, 28),
+            (104, 28),
+        ] {
+            ktx2[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        for (offset, value) in [(80, 132_u64), (88, 64), (96, 64)] {
+            ktx2[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+        }
+        for (kind, mime, body, error_code) in [
+            ("model", "model/gltf-binary", glb, "invalid_model_container"),
+            ("texture", "image/ktx2", ktx2, "invalid_texture_container"),
+        ] {
+            for invalid in [false, true] {
+                let (store, dir) = store("resource-container-staging");
+                let mut archive = zip::ZipArchive::new(Cursor::new(sample_package())).unwrap();
+                let mut manifest: serde_json::Value =
+                    serde_json::from_reader(archive.by_name("manifest.json").unwrap()).unwrap();
+                let mut png = Vec::new();
+                archive
+                    .by_name("assets/background.png")
+                    .unwrap()
+                    .read_to_end(&mut png)
+                    .unwrap();
+                let mut body = body.clone();
+                if invalid {
+                    body[0] = 0;
+                }
+                manifest["assets"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(serde_json::json!({
+                        "id":"resource", "kind":kind, "source":"assets/resource", "variants":[]
+                    }));
+                manifest["files"].as_array_mut().unwrap().push(serde_json::json!({
+                    "path":"assets/resource", "bytes":body.len(), "sha256":format!("{:x}", Sha256::digest(&body)), "mime":mime
+                }));
+                let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+                for (path, bytes) in [
+                    ("manifest.json", serde_json::to_vec(&manifest).unwrap()),
+                    ("assets/background.png", png),
+                    ("assets/resource", body),
+                ] {
+                    writer
+                        .start_file(path, zip::write::SimpleFileOptions::default())
+                        .unwrap();
+                    writer.write_all(&bytes).unwrap();
+                }
+                let bytes = writer.finish().unwrap().into_inner();
+                let source = write_source(&dir, "src.hwpkg", &bytes);
+                store.snapshot_input("job-1", &source, None).unwrap();
+                std::fs::remove_file(source).unwrap();
+                if invalid {
+                    let error = store.validate_staged("job-1").unwrap_err();
+                    assert_eq!(error.code, "package_invalid");
+                    assert!(error.message.starts_with(error_code));
+                    assert!(error.message.contains("assets/resource"));
+                    assert!(!store.staging_dir("job-1").join("files").exists());
+                    store.discard_staging("job-1");
+                } else {
+                    let staged = store.validate_staged("job-1").unwrap();
+                    assert_eq!(staged.entries.len(), 2);
+                    store.unpack_projection("job-1", &staged).unwrap();
+                    store
+                        .content_writer()
+                        .unwrap()
+                        .publish_staging("job-1", &staged.package_hash)
+                        .unwrap();
+                    assert!(store
+                        .verify_installed(&staged.package_hash)
+                        .unwrap()
+                        .is_some());
+                    assert_eq!(
+                        store
+                            .read_installed_manifest(&staged.package_hash)
+                            .unwrap()
+                            .entries
+                            .len(),
+                        2
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn publish_rejects_existing_hash_directory() {
         let (store, dir) = store("publish");
         let bytes = sample_package();

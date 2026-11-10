@@ -20,6 +20,8 @@ RSS、音频及远程封面使用 `public_net` 的同一 URL/DNS/重定向规则
 
 2026-11-11 组合资格扩展：可组合 metadata、source profile/完整资源计划和时钟输入要求仍属于原 scene registry，经同一 catalog 导出。Rust 与 JS 查询编译器最终参数槽和结构版本，缺项拒绝，不建立另一份场景白名单或补默认值。当前只开放 root spectrum-towers v1/source low、ripple/post为零的实际验收子集；其它scene/model和文档自动化明确未支持。原native目标在资源准备前选择唯一DPI栅格，原scope持有source预留/claim，原renderer按3D→clearDepth→2D→一次sRGB输出；原帧时钟和pending/committed输入只在成功提交后换代。规格或目录可校验不等于设备可呈现，当前资格与后续边界见[实施记录](../wallpaper-builtin-composition.md)。
 
+2026-11-11 模型资源前置检查仍归纯 `hertz-wallpaper` 包合同：原 ZIP 长度/hash 核验后检查 GLB/KTX2 source 与 variants，每个资产角色先验证 MIME，再按文件去重内容检查。检查使用原始有界 JSON 与固定流块，不引入第二个字节 broker、renderer 或格式能力 registry。容器事实不授予 loader、几何/动画、DFD/codec 或 GPU 资格，运行门保持；后续原资源准备器继续消费同一检查。范围及证据见[资源实施记录](../wallpaper-model-resources.md)。
+
 2026-10-15 三维空间：SpaceHome 只消费 app 注入的业务宿主；Space3D 持有导航与通用控件，
 SpaceCamera 持有机位，SpaceStagePure 持有唯一 Three.js renderer、registry、scope 与质量策略。
 场景定义统一持有 API/state 版本、参数、机位、别名、能力和预览；菜单与设置从 registry 派生。

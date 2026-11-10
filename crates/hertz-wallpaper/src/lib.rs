@@ -14,8 +14,11 @@ pub mod document;
 pub mod json;
 pub mod manifest;
 pub mod media;
+pub mod model_container;
 pub mod paths;
 pub mod properties;
+mod resource_container_io;
+pub mod texture_container;
 
 pub use archive::{validate_archive, validate_package, ValidatedPackage, VerifiedEntry};
 pub use catalog::{catalog, CatalogContract};
