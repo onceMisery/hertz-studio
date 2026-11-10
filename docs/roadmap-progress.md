@@ -1,5 +1,7 @@
 # 路线图实施状态
 
+2026-11-11 [GLB数值互操作](wallpaper-model-resources.md)已在原workspace serde_json配置开启正确舍入；真实16,412节点与JS逐bit一致，新增7项/包242项回归通过，旧4,103样本的1,090差异证据保留。该前置修复不提升原native预算或GPU资格，完整A04/P2、P3/AI/A10及ModelInput/jobs/成本/首帧继续。
+
 2026-11-11 [GLB静态准备事实](wallpaper-model-resources.md)已由原typed owner保留作者scene/node/变换/mode、声明数量与逻辑BIN长度，并以固定状态提取loader pivot和optional null/URI存在标记。nodes.len()取代独立node_count；父关系、原权重与64KiB/hash/layout/skin/动画owner保持。235项包测试（新增事实12）、14项桌面资源及Clippy/格式、loader102、合同/ADR检查通过。该片仅补准备输入事实；原ModelInput/JobSource/完整成本、GPU首帧及A04/P2、P3/AI/A10完整目标继续。
 
 2026-11-11 静态GLB受控消费切片：同包Three0.186.0 GLTFLoader实际GLB解析、计划/实际身份核对、共享几何与私有实例、隐藏分配和取消/partial清理由102项用例记录。补齐extras直接/prototype pivot读前拒绝与无害metadata对照，旧SPEC失败证据保留。它尚未接入model运行入口；原固定包准备/完整成本/每实例opacity/Float32保守bounds/实际GPU首帧及完整A04/P2、P3/AI/A10继续。详见[模型资源实施记录](wallpaper-model-resources.md)。

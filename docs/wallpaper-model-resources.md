@@ -1,5 +1,19 @@
 # GLB / KTX2 资源实施记录
 
+2026-11-11 数值互操作修复归原 workspace 的 `serde_json` 配置：启用锁定同库的
+`float_roundtrip`，使作者 JSON 十进制数正确舍入为与 JavaScript `JSON.parse`
+相同的 binary64。原配置在真实 4,103 节点 GLB 中有 1,090 个末位差异；修复后
+包含正负/指数的 16,412 个真实节点逐 bit 比较全部一致。7 项新增真实 GLB/HWPK
+回归和包全部 242 项检查通过，涵盖 TRS/matrix、中点舍入、负零、子正规/最大有限值、
+raw bounds/FLOAT 有效精度、source/variant 完整 hash 与有限/重复键拒绝。只修原
+解析入口，不增加容差或第二解析器，不重写包字节/旧配置。完整 ModelInput/成本、
+原 jobs/预算、有效保守 bounds 与同 renderer 首帧仍是后续资格。
+
+本次全 workspace `--all-targets` 测试通过，桌面壁纸 505 项通过（原 2 项忽略），
+两 crate Clippy、全部第一方源码格式及原 loader102/exporters/ADR 检查通过。
+全仓格式检查的唯一差异来自未修改的 vendor SDK；与 HEAD 文件逐 blob 相等，
+隔离的 HEAD 副本复现相同格式差异。该原有结果单独保留，未记为全仓格式通过。
+
 2026-11-11 静态准备的事实续接仍归原有界 `ModelStructure`：保留作者节点、场景与
 children/root 顺序、原 f64 TRS/matrix、逻辑 BIN 长度和声明数量；primitive 的省略
 mode 与显式 TRIANGLES 分别保留。节点计数直接取 `nodes.len()`，原节点权重和

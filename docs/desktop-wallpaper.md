@@ -1,5 +1,7 @@
 # Hertz 壁纸引擎 P0–P3 开发设计与实施计划
 
+2026-11-11 [GLB数值互操作](wallpaper-model-resources.md)在原workspace启用锁定serde_json的float_roundtrip，修复真实作者十进制数与JS JSON.parse的1ULP差异。16,412个真实GLB节点逐bit匹配，新增7项及包全部242项回归通过；原typed/finite/bounds/hash owner、包字节与HWPK1/Config5保持。没有新解析器或消费者容差，原ModelInput/jobs/完整成本与同renderer资格继续。
+
 2026-11-11 [GLB静态事实续接](wallpaper-model-resources.md)在原有界Schema中保留作者scene/node/children顺序、原TRS或matrix、声明数和逻辑BIN长度，以及显式/省略mode。原parents和children直接移入事实，node_count存储退出；node权重仍沿原owner。固定metadata visitor保留node/mesh pivot标记，另保留原接受的optional null/URI字段存在标记，供后续静态profile消费；不增加Value解析器或更改原格式合法性。pure235（static facts12）/desktop assets14、fmt/Clippy及loader102/合同/ADR通过，source/variant仍经完整流检查。ModelInput/原jobs、完整CPU/GPU成本及同renderer首帧继续，运行门保持。
 
 2026-11-11 [静态GLB消费续接](wallpaper-model-resources.md)增加同包Three0.186.0 GLTFLoader工厂与102项真实GLB检查：读前窄profile/精确事实、共享只读几何和私有对象实例、隐藏默认材质/mesh原型成本、取消及partial失败等待后回收。extras直接/prototype pivot来源在依赖前拒绝且无害metadata保留；旧SPEC失败证据独立归档。作者matrix保持原值，parser/cache不留在消费工厂中。该片未接模型运行门，不授予原固定包prepare、完整CPU/GPU成本、opacity组合、保守bounds或首帧；后续沿原ImportJobs/AssetStore/SessionPlan/同renderer接线，不增加解析器、pool或scheduler。
