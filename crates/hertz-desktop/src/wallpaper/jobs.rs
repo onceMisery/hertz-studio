@@ -132,6 +132,7 @@ enum JobSource {
     Prepare(super::target_planner::PrepareRequest),
     PrepareFont(FontPrepareRequest),
     PrepareFontGroup(FontGroupPrepareRequest),
+    PrepareSvg(SvgPrepareRequest),
 }
 
 /// 固定字体条目和最终文字由原准备 worker 核验；解析事实本身不授予本机资格。
@@ -198,7 +199,14 @@ impl FontGroupPrepareRequest {
     }
 }
 
+#[derive(Clone)]
+pub(crate) struct SvgPrepareRequest {
+    pub reference: AssetRef,
+    pub target: super::image_prepare::ImageTarget,
+    pub usage: String,
+}
 enum FontPrepareReply {
+    Svg(tokio::sync::oneshot::Sender<Result<super::target_planner::ResolvedMedia, JobError>>),
     Single(tokio::sync::oneshot::Sender<Result<PreparedFont, JobError>>),
     Group(tokio::sync::oneshot::Sender<Result<BTreeMap<String, PreparedFont>, JobError>>),
 }
@@ -208,6 +216,12 @@ type FontPrepareCompletion<T> = (String, tokio::sync::oneshot::Receiver<Result<T
 impl FontPrepareReply {
     fn send(self, outcome: Result<JobOutput, JobError>) {
         match (self, outcome) {
+            (Self::Svg(reply), Ok(JobOutput::Svg(media))) => {
+                let _ = reply.send(Ok(*media));
+            }
+            (Self::Svg(reply), Err(error)) => {
+                let _ = reply.send(Err(error));
+            }
             (Self::Single(reply), Ok(JobOutput::Font(font))) => {
                 let _ = reply.send(Ok(*font));
             }
@@ -226,6 +240,7 @@ impl FontPrepareReply {
 }
 
 enum JobOutput {
+    Svg(Box<super::target_planner::ResolvedMedia>),
     Package(String),
     Font(Box<PreparedFont>),
     Fonts(BTreeMap<String, PreparedFont>),
@@ -379,6 +394,23 @@ impl ImportJobs {
     }
 
     /// 字体与导入/图片准备共用单槽；类型化回执只在原 worker 完整退出后发送。
+    pub(crate) fn prepare_svg(
+        &self,
+        job_id: String,
+        prepare: SvgPrepareRequest,
+    ) -> Result<FontPrepareCompletion<super::target_planner::ResolvedMedia>, JobError> {
+        prepare.reference.validate()?;
+        super::image_prepare::validate_target(Some(prepare.target))?;
+        if prepare.reference.variant_id.is_some()
+            || !matches!(prepare.usage.as_str(), "color" | "sprite")
+        {
+            return Err(JobError::invalid_input("SVG 准备引用或 usage 无效"));
+        }
+        let mut request = self.reserve(job_id, JobSource::PrepareSvg(prepare), None)?;
+        let (reply, receive) = tokio::sync::oneshot::channel();
+        request.font_reply = Some(FontPrepareReply::Svg(reply));
+        self.dispatch(request).map(|id| (id, receive))
+    }
     pub(crate) fn prepare_font(
         &self,
         job_id: String,
@@ -552,6 +584,11 @@ async fn worker_loop(
                                 .await
                                 .map(JobOutput::Package)
                         }
+                        JobSource::PrepareSvg(prepare) => {
+                            run_prepare_svg(&request, prepare, &library, &assets, &probe)
+                                .await
+                                .map(|media| JobOutput::Svg(Box::new(media)))
+                        }
                         JobSource::PrepareFont(prepare) => {
                             run_prepare_font(&request, prepare, &library, &assets, &probe)
                                 .await
@@ -592,6 +629,7 @@ async fn worker_loop(
                     status.state = JobState::Done;
                     status.package_hash = Some(match output {
                         JobOutput::Package(hash) => hash.clone(),
+                        JobOutput::Svg(media) => media.reference().package_hash.clone(),
                         JobOutput::Font(font) => font.reference().package_hash.clone(),
                         JobOutput::Fonts(fonts) => fonts
                             .values()
@@ -729,8 +767,12 @@ async fn run_import(
             .unwrap_or("本地壁纸"),
         ImportSource::Pinned(file) => &file.name,
     };
-    let receipt =
-        super::raw_import::ensure_package(assets, library, receipt, name, &request.cancel).await?;
+    // Raw SVG probing has a small fixed maximum workspace before XML is read.
+    let wrapping_workspace = probe.image_workspace(32 * 1024 * 1024)?;
+    let wrapped =
+        super::raw_import::ensure_package(assets, library, receipt, name, &request.cancel).await;
+    wrapping_workspace.finish();
+    let receipt = wrapped?;
     set_stage_bytes(&request.status, receipt.bytes);
     cancelled(&request.cancel)?;
     // ② Prepare：对固定快照做包校验（结构/路径/哈希），取 manifest 事实。
@@ -767,6 +809,7 @@ async fn run_import(
         )
         .await?;
         cancelled(&request.cancel)?;
+        qualify_vectors(request, library, assets, probe, &package, None).await?;
         prepared.publish(assets, library).await?;
         cancelled(&request.cancel)?;
         library.mark_available(&package.package_hash).await?;
@@ -783,6 +826,15 @@ async fn run_import(
         assets,
         probe,
         assets.probe_staged_media(&request.job_id, &package, &request.cancel)?,
+    )
+    .await?;
+    qualify_vectors(
+        request,
+        library,
+        assets,
+        probe,
+        &package,
+        Some(&request.job_id),
     )
     .await?;
     cancelled(&request.cancel)?;
@@ -892,6 +944,99 @@ async fn run_prepare(
     set_state(&request.status, JobState::Publishing);
     image.publish(assets, library).await?;
     Ok(package.package_hash)
+}
+
+async fn run_prepare_svg(
+    request: &JobRequest,
+    prepare: &SvgPrepareRequest,
+    library: &Library,
+    assets: &AssetStore,
+    probe: &ProbeClient,
+) -> Result<super::target_planner::ResolvedMedia, JobError> {
+    set_state(&request.status, JobState::Preparing);
+    cancelled(&request.cancel)?;
+    if !library
+        .is_installed(&prepare.reference.package_hash)
+        .await?
+    {
+        return Err(JobError::new("asset_not_found", "SVG 原包尚未安装"));
+    }
+    let package = assets.read_installed_manifest(&prepare.reference.package_hash)?;
+    let input = super::svg_prepare::pin_input(assets, &package, &prepare.reference.asset_id, None)?;
+    let mut svg = super::svg_prepare::prepare(
+        assets,
+        library,
+        probe,
+        &request.job_id,
+        &input,
+        prepare.target,
+        &prepare.usage,
+        &request.cancel,
+    )
+    .await?;
+    probe
+        .qualify(
+            library,
+            svg.decode_input(assets, &input)?,
+            Arc::clone(&request.cancel),
+        )
+        .await?;
+    cancelled(&request.cancel)?;
+    set_state(&request.status, JobState::Publishing);
+    svg.publish(assets, library).await?;
+    cancelled(&request.cancel)?;
+    super::target_planner::ResolvedMedia::from_svg(
+        prepare.reference.clone(),
+        svg.decode_input(assets, &input)?,
+        svg.content_key(),
+        prepare.target,
+        &svg.receipt,
+    )
+}
+async fn qualify_vectors(
+    request: &JobRequest,
+    library: &Library,
+    assets: &AssetStore,
+    probe: &ProbeClient,
+    package: &super::assets::StagedPackage,
+    staging: Option<&str>,
+) -> Result<(), JobError> {
+    let target = request.target.unwrap_or(super::image_prepare::ImageTarget {
+        width: 960,
+        height: 540,
+        fit: super::image_prepare::ImageFit::Contain,
+        purpose: super::image_prepare::ImagePurpose::Preview,
+    });
+    for asset in package
+        .manifest
+        .assets
+        .iter()
+        .filter(|a| a.kind == hertz_wallpaper::AssetKind::Vector)
+    {
+        let input = super::svg_prepare::pin_input(assets, package, &asset.id, staging)?;
+        let mut svg = super::svg_prepare::prepare(
+            assets,
+            library,
+            probe,
+            &request.job_id,
+            &input,
+            target,
+            "color",
+            &request.cancel,
+        )
+        .await?;
+        probe
+            .qualify(
+                library,
+                svg.decode_input(assets, &input)?,
+                Arc::clone(&request.cancel),
+            )
+            .await?;
+        cancelled(&request.cancel)?;
+        svg.publish(assets, library).await?;
+        cancelled(&request.cancel)?;
+    }
+    Ok(())
 }
 
 async fn run_prepare_font(
@@ -1061,19 +1206,17 @@ async fn qualify_media(
                     .await?;
                 prepared.images.push(image);
             }
-        } else {
-            if let Some(poster) = super::video_poster::prepare(
-                assets,
-                library,
-                probe,
-                &request.job_id,
-                input,
-                Arc::clone(&request.cancel),
-            )
-            .await?
-            {
-                prepared.posters.push(poster);
-            }
+        } else if let Some(poster) = super::video_poster::prepare(
+            assets,
+            library,
+            probe,
+            &request.job_id,
+            input,
+            Arc::clone(&request.cancel),
+        )
+        .await?
+        {
+            prepared.posters.push(poster);
         }
     }
     Ok(prepared)

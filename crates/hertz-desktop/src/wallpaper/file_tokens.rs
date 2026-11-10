@@ -206,7 +206,7 @@ pub(crate) fn pick(owner_hwnd: isize) -> Result<Option<SelectedFile>> {
         CommDlgExtendedError, GetOpenFileNameW, OFN_DONTADDTORECENT, OFN_EXPLORER,
         OFN_FILEMUSTEXIST, OFN_NOCHANGEDIR, OFN_PATHMUSTEXIST, OPENFILENAMEW,
     };
-    let filter: Vec<u16> = "壁纸和媒体 (*.hwpkg;*.png;*.jpg;*.jpeg;*.webp;*.mp4;*.webm)\0*.hwpkg;*.png;*.jpg;*.jpeg;*.webp;*.mp4;*.webm\0壁纸包 (*.hwpkg)\0*.hwpkg\0所有文件 (*.*)\0*.*\0\0".encode_utf16().collect();
+    let filter: Vec<u16> = "壁纸和媒体 (*.hwpkg;*.png;*.jpg;*.jpeg;*.webp;*.mp4;*.webm;*.svg)\0*.hwpkg;*.png;*.jpg;*.jpeg;*.webp;*.mp4;*.webm;*.svg\0壁纸包 (*.hwpkg)\0*.hwpkg\0所有文件 (*.*)\0*.*\0\0".encode_utf16().collect();
     let title: Vec<u16> = "导入本地壁纸\0".encode_utf16().collect();
     let mut path = vec![0u16; 32768];
     let mut dialog: OPENFILENAMEW = unsafe { std::mem::zeroed() };

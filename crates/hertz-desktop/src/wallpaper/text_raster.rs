@@ -438,6 +438,20 @@ struct Affine {
     y: f64,
 }
 
+/// Shared composition canvas/ancestor transform facts for prepared vector sampling.
+pub(super) fn consumer_sampling_scale(
+    compiled: &CompiledDocument,
+    final_values: &FinalPublicValues,
+    index: usize,
+    target: ImageTarget,
+    fit: Fit,
+) -> Result<f64> {
+    let values = FinalSlots::new(compiled, final_values)?;
+    Affine::target_fit(compiled, target, fit)?
+        .multiply(values.text_matrix(index)?)?
+        .maximum_scale()
+}
+
 impl Affine {
     const IDENTITY: Self = Self {
         a: 1.0,

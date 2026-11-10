@@ -278,17 +278,15 @@ impl App {
         let mut selection = configuration.main().selection.clone();
         if let Some(switch) = &playlist_switch {
             selection = switch.reference.selection();
-        } else {
-            if let Selection::Playlist { playlist_id } = &selection {
-                if let Some(current) = self
-                    .desktop
-                    .playlist
-                    .as_ref()
-                    .filter(|runner| &runner.playlist().playlist_id == playlist_id)
-                    .and_then(|runner| runner.current())
-                {
-                    selection = current.selection();
-                }
+        } else if let Selection::Playlist { playlist_id } = &selection {
+            if let Some(current) = self
+                .desktop
+                .playlist
+                .as_ref()
+                .filter(|runner| &runner.playlist().playlist_id == playlist_id)
+                .and_then(|runner| runner.current())
+            {
+                selection = current.selection();
             }
         }
         let reference = match &selection {
@@ -370,11 +368,11 @@ impl App {
         >,
         loop_target: &EventLoopWindowTarget<()>,
     ) {
-        if !self
+        if self
             .desktop
             .selection
             .as_ref()
-            .is_some_and(|task| task.id == id)
+            .is_none_or(|task| task.id != id)
         {
             return;
         }
@@ -715,7 +713,7 @@ impl App {
             if resume.is_none() {
                 self.desktop.playback = None;
             }
-            let owner = format!("desktop-{}", generation);
+            let owner = format!("desktop-{generation}");
             if let Err(error) = surface.session.admit_media(
                 generation,
                 media,
@@ -1016,11 +1014,11 @@ impl App {
     }
 
     pub(super) fn handle_candidate_page(&mut self, generation: u64, event: &str) -> bool {
-        if !self
+        if self
             .desktop
             .candidate
             .as_ref()
-            .is_some_and(|surface| surface.binding.generation() == generation)
+            .is_none_or(|surface| surface.binding.generation() != generation)
         {
             return false;
         }

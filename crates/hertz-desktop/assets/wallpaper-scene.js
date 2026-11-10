@@ -572,6 +572,8 @@
           motionActive: frame.motionActive,
           reduced: false,
           sceneTime: frame.sceneTime,
+          // Capture must redraw the cached output before the default buffer is discarded.
+          redraw: !!pendingCapture,
           paused: !enabled || config.motion <= 0,
           dynamicDt: frame.dynamicDt,
           deviceTier: 1,

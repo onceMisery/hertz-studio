@@ -31,24 +31,56 @@ pub(crate) async fn ensure_package(
     if magic[..2] == *b"PK" {
         return Ok(receipt);
     }
-    let metadata = super::media::probe(&mut input)
-        .map_err(|error| JobError::new(error.code, error.message))?;
-    let (kind, extension, mime) = match metadata.container {
-        super::media::Container::Mp4 => ("video", "mp4", "video/mp4"),
-        super::media::Container::Webm => ("video", "webm", "video/webm"),
-        super::media::Container::Image => match metadata.codec.as_str() {
-            "png" => ("image", "png", "image/png"),
-            "jpeg" => ("image", "jpg", "image/jpeg"),
-            "webp" => ("image", "webp", "image/webp"),
-            _ => {
-                return Err(JobError::new(
-                    "format_unsupported",
-                    "图片导入支持 PNG、JPEG 和 WebP",
-                ))
-            }
-        },
+    let mut sniff = [0u8; 256];
+    let sniffed = input
+        .read(&mut sniff)
+        .map_err(|e| JobError::io(e.to_string()))?;
+    input
+        .seek(SeekFrom::Start(0))
+        .map_err(|e| JobError::io(e.to_string()))?;
+    let prefix = &sniff[..sniffed];
+    let prefix = prefix.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(prefix);
+    let is_xml = prefix.iter().copied().find(|b| !b.is_ascii_whitespace()) == Some(b'<');
+    let svg = if is_xml {
+        if receipt.bytes > super::svg_prepare::MAX_BYTES {
+            return Err(JobError::new(
+                "svg_complexity_exceeded",
+                "SVG 原稿超过 4 MiB",
+            ));
+        }
+        let mut bytes = Vec::new();
+        std::io::Read::by_ref(&mut input)
+            .take(super::svg_prepare::MAX_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|e| JobError::io(e.to_string()))?;
+        Some(super::svg_prepare::inspect(&bytes)?)
+    } else {
+        None
     };
-    let kind_limit = if kind == "image" {
+    let (kind, extension, mime) = if svg.is_some() {
+        ("vector", "svg", "image/svg+xml")
+    } else {
+        let metadata = super::media::probe(&mut input)
+            .map_err(|error| JobError::new(error.code, error.message))?;
+        match metadata.container {
+            super::media::Container::Mp4 => ("video", "mp4", "video/mp4"),
+            super::media::Container::Webm => ("video", "webm", "video/webm"),
+            super::media::Container::Image => match metadata.codec.as_str() {
+                "png" => ("image", "png", "image/png"),
+                "jpeg" => ("image", "jpg", "image/jpeg"),
+                "webp" => ("image", "webp", "image/webp"),
+                _ => {
+                    return Err(JobError::new(
+                        "format_unsupported",
+                        "图片导入支持 PNG、JPEG 和 WebP",
+                    ))
+                }
+            },
+        }
+    };
+    let kind_limit = if kind == "vector" {
+        super::svg_prepare::MAX_BYTES
+    } else if kind == "image" {
         hertz_wallpaper::MAX_IMAGE_BYTES
     } else {
         hertz_wallpaper::MAX_VIDEO_BYTES
@@ -78,12 +110,23 @@ pub(crate) async fn ensure_package(
         &id[20..]
     );
     let path = format!("assets/background.{extension}");
+    let document=svg.as_ref().map(|facts| {
+        let ratio=(4096.0/facts.width.max(facts.height)).min(1.0);
+        serde_json::to_vec(&serde_json::json!({"documentVersion":1,"canvas":{"width":(facts.width*ratio).ceil().max(1.0) as u32,"height":(facts.height*ratio).ceil().max(1.0) as u32,"colorSpace":"srgb","background":"#000000"},
+            "nodes":[{"id":"background","type":"image","stateVersion":1,"assets":{"asset":"background"},"properties":{"x":0,"y":0,"width":(facts.width*ratio).ceil().max(1.0) as u32,"height":(facts.height*ratio).ceil().max(1.0) as u32,"anchorX":0,"anchorY":0,"fit":"contain"}}],
+            "timeline":{"durationSeconds":1,"loop":true,"tracks":[]},"bindings":[]})).map_err(|e|JobError::invalid_input(e.to_string()))
+    }).transpose()?;
+    let mut files = vec![
+        serde_json::json!({"path":path,"bytes":receipt.bytes,"sha256":receipt.sha256,"mime":mime}),
+    ];
+    if let Some(bytes) = &document {
+        files.push(serde_json::json!({"path":"document.json","bytes":bytes.len(),"sha256":format!("{:x}",Sha256::digest(bytes)),"mime":"application/json"}));
+    }
     let manifest = if let Some(previous) = library.local_manifest(&work_id).await? {
         let parsed: hertz_wallpaper::Manifest = serde_json::from_str(&previous)
             .map_err(|error| JobError::database(error.to_string()))?;
-        if parsed.files.len() != 1
-            || parsed.files[0].sha256 != receipt.sha256
-            || parsed.files[0].bytes != receipt.bytes
+        if serde_json::to_value(&parsed.files).map_err(|e| JobError::database(e.to_string()))?
+            != serde_json::Value::Array(files.clone())
         {
             return Err(JobError::hash_conflict("媒体身份已绑定其他字节"));
         }
@@ -104,9 +147,9 @@ pub(crate) async fn ensure_package(
         };
         let manifest: hertz_wallpaper::Manifest = serde_json::from_value(serde_json::json!({
             "formatVersion":1,"workId":work_id,"version":1,"title":title,"description":"",
-            "content":{"kind":kind,"asset":"background"},
+            "content":if document.is_some(){serde_json::json!({"kind":"composition","document":"document.json"})}else{serde_json::json!({"kind":kind,"asset":"background"})},
             "assets":[{"id":"background","kind":kind,"source":path,"variants":[]}],
-            "files":[{"path":path,"bytes":receipt.bytes,"sha256":receipt.sha256,"mime":mime}],
+            "files":files,
             "properties":[],"permissions":{"audioSpectrum":false,"pointer":false},
             "license":{"code":"none","assets":"none","attribution":""}
         }))
@@ -131,6 +174,14 @@ pub(crate) async fn ensure_package(
     archive
         .write_all(manifest.as_bytes())
         .map_err(|error| JobError::io(error.to_string()))?;
+    if let Some(bytes) = &document {
+        archive
+            .start_file("document.json", options)
+            .map_err(|e| JobError::io(e.to_string()))?;
+        archive
+            .write_all(bytes)
+            .map_err(|e| JobError::io(e.to_string()))?;
+    }
     archive
         .start_file(&path, options)
         .map_err(|error| JobError::io(error.to_string()))?;

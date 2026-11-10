@@ -14,7 +14,7 @@ fn main() -> ExitCode {
     let bytes = match std::fs::read(&path) {
         Ok(bytes) => bytes,
         Err(error) => {
-            println!("{{\"ok\":false,\"code\":\"io_error\",\"message\":\"{}\"}}", error);
+            println!("{{\"ok\":false,\"code\":\"io_error\",\"message\":\"{error}\"}}");
             return ExitCode::SUCCESS;
         }
     };

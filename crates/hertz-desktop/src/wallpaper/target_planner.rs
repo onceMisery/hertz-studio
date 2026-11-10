@@ -63,6 +63,7 @@ pub(crate) struct ResolvedMedia {
     input: Box<DecodeInput>,
     target: ImageTarget,
     poster: Option<Box<ResolvedMedia>>,
+    svg: Option<Box<super::svg_prepare::Receipt>>,
 }
 
 impl ResolvedMedia {
@@ -83,7 +84,34 @@ impl ResolvedMedia {
             input: Box::new(input),
             target,
             poster: None,
+            svg: None,
         })
+    }
+
+    pub(crate) fn from_svg(
+        reference: AssetRef,
+        input: DecodeInput,
+        content_key: String,
+        target: ImageTarget,
+        receipt: &super::svg_prepare::Receipt,
+    ) -> Result<Self> {
+        if input.media.entry.mime.as_deref() != Some("image/png")
+            || input.metadata.codec != "png"
+            || receipt.pipeline != super::svg_prepare::PIPELINE
+            || receipt.render.sha256 != input.media.entry.sha256
+            || content_key != format!("{}:{}", receipt.cache_key, receipt.render.sha256)
+        {
+            return Err(JobError::new(
+                "svg_not_prepared",
+                "SVG 必须有固定 PNG 表示回执",
+            ));
+        }
+        let mut media = Self::from_input(reference, input, content_key, target)?;
+        media.svg = Some(Box::new(receipt.clone()));
+        Ok(media)
+    }
+    pub(crate) fn svg(&self) -> Option<&super::svg_prepare::Receipt> {
+        self.svg.as_deref()
     }
 
     pub(crate) fn poster(&self) -> Option<&ResolvedMedia> {

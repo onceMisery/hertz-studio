@@ -32,6 +32,56 @@ license, see `cargo deny list` or each crate's own LICENSE file):
     windows-sys                       (Apache-2.0 / MIT)
   - webview2-com                       (MIT)
 
+Native restricted SVG preparation dependencies (exact versions):
+
+  - resvg-0.49.0 (Apache-2.0 OR MIT)
+  - usvg-0.49.0 (Apache-2.0 OR MIT)
+  - tiny-skia-0.12.0 (BSD-3-Clause)
+  - tiny-skia-path-0.12.0 (BSD-3-Clause)
+  - svgtypes-0.16.1 (Apache-2.0 OR MIT)
+  - roxmltree-0.21.1 (MIT OR Apache-2.0)
+  - harfrust-0.12.0 (MIT)
+  - fontdb-0.24.0 (MIT)
+  - skrifa-0.44.0 (MIT OR Apache-2.0)
+  - read-fonts-0.41.0 (MIT OR Apache-2.0)
+  - font-types-0.12.7 (MIT OR Apache-2.0)
+  - kurbo-0.13.1 (Apache-2.0 OR MIT)
+  - simplecss-0.2.2 (Apache-2.0 OR MIT)
+
+The following complete BSD-3-Clause terms apply to both tiny-skia-0.12.0
+and tiny-skia-path-0.12.0:
+
+Copyright (c) 2011 Google Inc. All rights reserved.
+Copyright (c) 2020 Yevhenii Reizner All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are
+met:
+
+  * Redistributions of source code must retain the above copyright
+    notice, this list of conditions and the following disclaimer.
+
+  * Redistributions in binary form must reproduce the above copyright
+    notice, this list of conditions and the following disclaimer in
+    the documentation and/or other materials provided with the
+    distribution.
+
+  * Neither the name of the copyright holder nor the names of its
+    contributors may be used to endorse or promote products derived
+    from this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
 The Windows player package includes the Apache-2.0 license text separately.
 
 ---------------------------------------------------------------------------

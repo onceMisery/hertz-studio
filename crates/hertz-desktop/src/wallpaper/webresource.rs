@@ -448,7 +448,7 @@ fn handle_request(
         proxy: proxy.clone(),
         permit,
     };
-    if !worker().is_some_and(|tx| tx.try_send(work).is_ok()) {
+    if worker().is_none_or(|tx| tx.try_send(work).is_err()) {
         complete(
             id,
             PreparedResponse {

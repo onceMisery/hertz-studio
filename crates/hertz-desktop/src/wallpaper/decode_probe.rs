@@ -169,6 +169,12 @@ pub(crate) struct ProbeClient {
     #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
     hold_font_read_ms: Option<u32>,
     #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+    hold_media_ready: bool,
+    #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+    hold_media_read_ms: Option<u32>,
+    #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+    svg_render: Option<Arc<harness::SvgRenderProbe>>,
+    #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
     read_observation: Arc<std::sync::Mutex<Option<Arc<ReadGate>>>>,
 }
 
@@ -302,6 +308,12 @@ impl ProbeClient {
             #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
             hold_font_read_ms: None,
             #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+            hold_media_ready: false,
+            #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+            hold_media_read_ms: None,
+            #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+            svg_render: None,
+            #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
             read_observation: Arc::default(),
         }
     }
@@ -334,6 +346,36 @@ impl ProbeClient {
     pub(crate) fn hold_font_read_for_test(mut self, milliseconds: Option<u32>) -> Self {
         self.hold_font_read_ms = milliseconds;
         self
+    }
+    #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+    pub(crate) fn hold_media_read_for_test(
+        mut self,
+        ready: bool,
+        milliseconds: Option<u32>,
+    ) -> Self {
+        self.hold_media_ready = ready;
+        self.hold_media_read_ms = milliseconds;
+        self
+    }
+    #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+    pub(crate) fn svg_render_for_test(
+        mut self,
+        observation: Option<Arc<harness::SvgRenderProbe>>,
+    ) -> Self {
+        self.svg_render = observation;
+        self
+    }
+    #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+    pub(crate) fn svg_event_for_test(&self, phase: &'static str, source: Option<&str>) {
+        if let Some(svg) = &self.svg_render {
+            svg.event(phase, source);
+        }
+    }
+    #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+    pub(crate) fn svg_barrier_for_test(&self, boundary: harness::SvgBarrier) {
+        if let Some(svg) = &self.svg_render {
+            svg.barrier(boundary);
+        }
     }
     #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
     pub(crate) fn held_read_snapshot_for_test(&self) -> Option<ReadProbeSnapshot> {
@@ -428,6 +470,12 @@ impl ProbeClient {
             #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
             hold_font_read_ms: None,
             #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+            hold_media_ready: false,
+            #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+            hold_media_read_ms: None,
+            #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+            svg_render: None,
+            #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
             read_observation: Arc::default(),
         }
     }
@@ -487,6 +535,18 @@ impl ProbeClient {
         poster: bool,
     ) -> Result<ProbeOutput, JobError> {
         #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+        if self.hold_media_read_ms.is_some_and(|milliseconds| {
+            input.is_font()
+                || !self.force_probe
+                || !self.hold_media_ready
+                || !self.block_close
+                || !(500..=harness::MAX_SVG_BARRIER_MS).contains(&milliseconds)
+        }) {
+            return Err(JobError::invalid_input(
+                "held media Read requires bounded forceProbe/holdMediaReady/blockClose",
+            ));
+        }
+        #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
         if let Some(milliseconds) = self.hold_font_read_ms {
             if !input.is_font()
                 || !self.force_probe
@@ -538,6 +598,10 @@ impl ProbeClient {
                     force_probe: self.force_probe,
                     #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
                     hold_font_read_ms: self.hold_font_read_ms,
+                    #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+                    hold_media_ready: self.hold_media_ready,
+                    #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+                    hold_media_read_ms: self.hold_media_read_ms,
                     #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
                     read_observation: Arc::clone(&self.read_observation),
                 };
@@ -612,6 +676,10 @@ pub(crate) struct ProbeRequest {
     force_probe: bool,
     #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
     hold_font_read_ms: Option<u32>,
+    #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+    hold_media_ready: bool,
+    #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+    hold_media_read_ms: Option<u32>,
     #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
     read_observation: Arc<std::sync::Mutex<Option<Arc<ReadGate>>>>,
 }
@@ -692,6 +760,19 @@ impl ProbeHost {
             return;
         }
         #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+        if request.hold_media_read_ms.is_some_and(|milliseconds| {
+            request.input.is_font()
+                || !request.force_probe
+                || !request.hold_media_ready
+                || !request.block_close
+                || !(500..=harness::MAX_SVG_BARRIER_MS).contains(&milliseconds)
+        }) {
+            let _ = request.reply.send(Err(JobError::invalid_input(
+                "invalid held media Read configuration",
+            )));
+            return;
+        }
+        #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
         if request.hold_font_read_ms.is_some_and(|milliseconds| {
             !request.input.is_font()
                 || !request.force_probe
@@ -741,6 +822,8 @@ impl ProbeHost {
             request.input.is_font(),
             #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
             request.hold_font_ready,
+            #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
+            request.hold_media_ready,
         );
         let (surface, access) = match surface {
             Ok(surface) => surface,
@@ -760,42 +843,43 @@ impl ProbeHost {
         let granted = access.grant_pinned(request.id, package_hash.into(), Arc::clone(pinned));
         let admission_failed = !granted || config["url"].is_null();
         #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
-        let (read_gate, admission_failed) = if let Some(milliseconds) = request.hold_font_read_ms {
-            let gate = ReadGate::new(
-                ReadOwner {
-                    probe_id: request.id,
-                    generation: request.id,
-                    session: format!("probe-{}", request.id),
-                    package_hash: package_hash.into(),
-                    entry_path: pinned.entry.path.clone(),
-                    content_sha256: pinned.entry.sha256.clone(),
-                    content_bytes: pinned.entry.bytes,
-                },
-                milliseconds,
-                std::thread::current().id(),
-            );
-            let armed = granted
-                && gate.as_ref().is_some_and(|gate| {
-                    access.arm_file_read_probe_for_test(
-                        request.id,
-                        package_hash,
-                        &pinned.entry.path,
-                        Arc::clone(gate),
-                    )
-                });
-            if let Some(gate) = &gate {
-                if !armed {
-                    gate.release(ReleaseReason::InternalFailure);
+        let (read_gate, admission_failed) =
+            if let Some(milliseconds) = request.hold_font_read_ms.or(request.hold_media_read_ms) {
+                let gate = ReadGate::new(
+                    ReadOwner {
+                        probe_id: request.id,
+                        generation: request.id,
+                        session: format!("probe-{}", request.id),
+                        package_hash: package_hash.into(),
+                        entry_path: pinned.entry.path.clone(),
+                        content_sha256: pinned.entry.sha256.clone(),
+                        content_bytes: pinned.entry.bytes,
+                    },
+                    milliseconds,
+                    std::thread::current().id(),
+                );
+                let armed = granted
+                    && gate.as_ref().is_some_and(|gate| {
+                        access.arm_file_read_probe_for_test(
+                            request.id,
+                            package_hash,
+                            &pinned.entry.path,
+                            Arc::clone(gate),
+                        )
+                    });
+                if let Some(gate) = &gate {
+                    if !armed {
+                        gate.release(ReleaseReason::InternalFailure);
+                    }
                 }
-            }
-            *request
-                .read_observation
-                .lock()
-                .unwrap_or_else(|error| error.into_inner()) = gate.clone();
-            (gate, admission_failed || !armed)
-        } else {
-            (None, admission_failed)
-        };
+                *request
+                    .read_observation
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()) = gate.clone();
+                (gate, admission_failed || !armed)
+            } else {
+                (None, admission_failed)
+            };
         let browser = super::probe_environment::browser_version(&surface.webview);
         self.current = Some(HostedProbe {
             #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
@@ -1092,6 +1176,7 @@ fn create_surface(
     suppress_frames: bool,
     font: bool,
     #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))] hold_font_ready: bool,
+    #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))] hold_media_ready: bool,
 ) -> Result<(Surface, MediaAccess), JobError> {
     let window = WindowBuilder::new()
         .with_title(if font {
@@ -1122,6 +1207,11 @@ fn create_surface(
         script.replace(
             "window.ipc.postMessage('ready');",
             "window.__hertzFontProbeReadyHeld = true;",
+        )
+    } else if !font && hold_media_ready {
+        script.replace(
+            "post('ready');",
+            "window.__hertzMediaProbeReadyHeld = true;",
         )
     } else {
         script

@@ -3,6 +3,29 @@
 import { resourceKey } from '../resources/pool.js';
 const FONT_ADAPTER_VERSION = 'sfnt-ttf-parser-0.25.1-static-v3';
 const RASTER_ADAPTER_VERSION = 'text-raster-v2';
+const SVG_ADAPTER_VERSION = 'svg-static-resvg-049-usvg-049-v1';
+function checkSvg(asset) {
+  if (asset.adapterId !== 'prepared-svg-png') return;
+  const hashes = asset.contentKey.split(':');
+  if (asset.kind !== 'image' || asset.logicalKind !== 'vector' || asset.representationKind !== 'image'
+      || asset.mime !== 'image/png' || !digest(asset.sourceHash) || hashes.length !== 2 || !hashes.every(digest)
+      || asset.adapterVersion !== 1 || asset.decodeOptions.svgAdapterVersion !== SVG_ADAPTER_VERSION
+      || typeof asset.decodeOptions.svgCanonicalOptions !== 'string' || !Array.isArray(asset.decodeOptions.svgFontDependencies)
+      || !/\/prepared\/[0-9a-f]{64}\/render\.png$/.test(asset.url)) throw new Error('composition-svg-preparation-required');
+  const options = JSON.parse(asset.decodeOptions.svgCanonicalOptions);
+  if (options.clipPolicy !== 'flat-clip-subtree-v1'
+      || options.targetFormat !== 'png-rgba8' || options.colorSpace !== 'sRGB-SDR' || options.alpha !== 'straight'
+      || options.mipmaps !== false || options.wrap !== 'clamp' || !['color','sprite'].includes(options.usage)
+      || options.dpi !== 96 || JSON.stringify(options.languages) !== '["en"]'
+      || !options.target || !['cover','contain'].includes(options.target.fit)
+      || !['preview','low','medium','high'].includes(options.target.purpose)
+      || !Number.isInteger(asset.width) || !Number.isInteger(asset.height) || asset.width > 4096 || asset.height > 4096
+      || asset.width * asset.height > 8294400 || asset.decodeOptions.svgFontDependencies.length > 256
+      || asset.decodeOptions.svgFontDependencies.some(font => !digest(font.sha256) || font.faceIndex !== 0
+        || font.adapterVersion !== FONT_ADAPTER_VERSION || !Array.isArray(font.families) || !font.families.length)
+      || options.width !== asset.width || options.height !== asset.height) throw new Error('composition-svg-preparation-required');
+}
+
 const digest = value => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
 function fontCpuBytes(asset) {
   const facts = asset.fontMetadata;
@@ -52,20 +75,27 @@ export function compilePlan(projection) {
     if (!asset.assetId || !asset.contentKey || !asset.url || !Number.isSafeInteger(asset.byteLength) || asset.byteLength < 1
         || !asset.adapterId || !Number.isSafeInteger(asset.adapterVersion) || asset.adapterVersion < 1 || !asset.decodeOptions)
       throw new Error('composition-resolved-metadata-required');
-    if (assets.has(asset.assetId)) throw new Error('composition-resource-closure-duplicate');
+    if (/\.svg(?:[?#]|$)/i.test(asset.url) || asset.mime === 'image/svg+xml') throw new Error('composition-svg-preparation-required');
+    const representation = asset.representationId || asset.assetId;
+    if (assets.has(representation)) throw new Error('composition-resource-closure-duplicate');
+    checkSvg(asset);
     if (asset.kind === 'font') fontCpuBytes(asset);
-    assets.set(asset.assetId, asset);
+    assets.set(representation, asset);
   }
   const uses = finalPublicValues.resourceUses, nodeResources = ir.nodes.map(() => ({}));
   const unique = new Map();
-  for (const use of uses) {
-    const asset = assets.get(use.assetId);
+  if (projection.resolvedUses && (!Array.isArray(projection.resolvedUses) || projection.resolvedUses.length !== uses.length)) throw new Error('composition-resource-closure-mismatch');
+  for (const [useIndex, use] of uses.entries()) {
+    const asset = assets.get(projection.resolvedUses?.[useIndex] || use.assetId);
+    if (asset?.assetId !== use.assetId) throw new Error('composition-resource-logical-identity-mismatch');
     if (!asset || use.effectIndex !== null || !Number.isSafeInteger(use.nodeIndex)) throw new Error('composition-resource-closure-mismatch');
-    if (['vector', 'model', 'texture'].includes(asset.kind) || /svg|glb|ktx/i.test(asset.adapterId))
+    if (['vector', 'model', 'texture'].includes(asset.kind) || /glb|ktx/i.test(asset.adapterId))
       throw new Error(`composition-adapter-unavailable:${asset.kind}:${asset.adapterId}`);
     if (!['image', 'video', 'font'].includes(asset.kind)) throw new Error(`composition-adapter-unavailable:${asset.kind}`);
     if (asset.kind !== 'font' && (!Number.isSafeInteger(asset.width) || asset.width < 1 || !Number.isSafeInteger(asset.height) || asset.height < 1))
       throw new Error('composition-real-dimensions-required');
+    if (asset.logicalKind === 'vector' && (asset.adapterId !== 'prepared-svg-png' || !['color','sprite'].includes(use.usage)
+        || JSON.parse(asset.decodeOptions.svgCanonicalOptions).usage !== use.usage)) throw new Error('composition-svg-preparation-required');
     const node = ir.nodes[use.nodeIndex];
     if (!node) throw new Error('composition-resource-node-invalid');
     let clock = null;
