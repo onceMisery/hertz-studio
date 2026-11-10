@@ -81,6 +81,7 @@ pub(crate) mod service;
 #[allow(dead_code)] // 内置 app 已接四事实；媒体交接/恢复与多资源编排继续接线。
 pub(crate) mod session;
 pub(crate) mod settings_drafts;
+pub(crate) mod svg_prepare;
 #[allow(dead_code)] // 原生目标规划内核；正式选择入口随 P1-05 接入。
 pub(crate) mod target_planner;
 #[allow(dead_code)] // Pure raster facts await the original composition projection owner.

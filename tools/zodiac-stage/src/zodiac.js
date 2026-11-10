@@ -339,7 +339,8 @@ export function buildConstellation(index) {
   src.lines.forEach(([a,b]) => { links[a] += 1; links[b] += 1; });
   return { x, y, z, m, links, nodes: x.length, segments: src.lines.length,
     core: buildRibbon(x, y, src.lines, LINE_CORE_WIDTH,z),
-    halo: buildRibbon(x, y, src.lines, LINE_HALO_WIDTH,z) };
+    halo: buildRibbon(x, y, src.lines, LINE_HALO_WIDTH,z),
+    reveal: buildRibbonReveal(src.lines) };
 }
 
 // Retained pure utility for the existing public test API; artwork uses Earcut.
@@ -522,6 +523,18 @@ export function buildRibbon(x, y, lines, width, z) {
       out[s * 18 + n * 3 + 1] = v[n * 2 + 1];
       out[s * 18 + n * 3 + 2] = [az,az,bz,az,bz,bz][n];
     }
+  });
+  return out;
+}
+
+// 连线生长顺序：每段 6 顶点，a 端先亮、b 端后亮（端序与 buildRibbon 的顶点布局一致）。
+// reveal ∈ [0,1]，配合 uGrow 做「逐根连上」的描绘动画；纯函数、确定性。
+export function buildRibbonReveal(lines) {
+  const n = Math.max(1, lines.length);
+  const end = [0, 0, 1, 0, 1, 1];
+  const out = new Float32Array(lines.length * 6);
+  lines.forEach((_, s) => {
+    for (let v = 0; v < 6; v += 1) out[s * 6 + v] = (s + end[v]) / n;
   });
   return out;
 }

@@ -941,7 +941,7 @@ impl State {
                 ))
             }
             Command::Capabilities => {
-                json!({"protocol":2,"library":true,"libraryDelete":true,"videoPosters":true,"import":true,"importFormats":["hwpkg","png","jpeg","webp","mp4","webm"],"nativeFilePicker":true,"settingsDrafts":true,"workDrafts":true,"publicProperties":true,"playlists":true,"playlistMaxItems":32,"export":true,"nativeOutputPicker":true,"builtinPackages":true,"previewBuiltin":true,"mediaApply":true,"previewMedia":true,"settingsSchema":5,"multiDisplay":true,"layouts":["single","span","mirror"],"mirrorBuiltin":false,"mirrorPackages":false,"mirrorPlaylists":false,"mirrorInspection":true,"audioInputs":["none","hertz","system"],"requestBytes":hertz_desktop_ipc::management::REQUEST_LIMIT,"responseBytes":hertz_desktop_ipc::management::RESPONSE_LIMIT})
+                json!({"protocol":2,"library":true,"libraryDelete":true,"videoPosters":true,"import":true,"importFormats":["hwpkg","png","jpeg","webp","mp4","webm","svg"],"svg":super::api::svg_capability(),"nativeFilePicker":true,"settingsDrafts":true,"workDrafts":true,"publicProperties":true,"playlists":true,"playlistMaxItems":32,"export":true,"nativeOutputPicker":true,"builtinPackages":true,"previewBuiltin":true,"mediaApply":true,"previewMedia":true,"settingsSchema":5,"multiDisplay":true,"layouts":["single","span","mirror"],"mirrorBuiltin":false,"mirrorPackages":false,"mirrorPlaylists":false,"mirrorInspection":true,"audioInputs":["none","hertz","system"],"requestBytes":hertz_desktop_ipc::management::REQUEST_LIMIT,"responseBytes":hertz_desktop_ipc::management::RESPONSE_LIMIT})
             }
             Command::PropertiesInspect {
                 selection,

@@ -619,7 +619,7 @@ impl Write for LimitedWriter<'_> {
     }
 }
 
-fn write_png(path: &Path, pixels: &RgbaImage, cancel: &AtomicBool) -> Result<Output> {
+pub(super) fn write_png(path: &Path, pixels: &RgbaImage, cancel: &AtomicBool) -> Result<Output> {
     let mut file = std::fs::File::create(path).map_err(invalid)?;
     let mut encoder = png::Encoder::new(
         LimitedWriter {

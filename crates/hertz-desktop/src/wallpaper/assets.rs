@@ -192,6 +192,79 @@ impl AssetStore {
         )
     }
 
+    /// Fixed vector/font source bytes; these are never raster DecodeInput facts.
+    pub(crate) fn pin_source_entry(
+        &self,
+        package: &StagedPackage,
+        entry: &hertz_wallpaper::VerifiedEntry,
+        staging_job: Option<&str>,
+    ) -> Result<Arc<PinnedMedia>> {
+        let directory = staging_job.map_or_else(
+            || self.package_dir(&package.package_hash),
+            |job| self.staging_dir(job),
+        );
+        let mut original = open_immutable(&directory.join("original.hwpkg"))?;
+        let mut digest = Sha256::new();
+        std::io::copy(&mut original, &mut digest).map_err(|e| JobError::io(e.to_string()))?;
+        if format!("{:x}", digest.finalize()) != package.package_hash {
+            return Err(JobError::new("hash_mismatch", "准备前固定原包发生变化"));
+        }
+        if !package.entries.iter().any(|v| {
+            v.path == entry.path
+                && v.sha256 == entry.sha256
+                && v.bytes == entry.bytes
+                && v.mime == entry.mime
+        }) {
+            return Err(JobError::new("hash_mismatch", "准备条目不属于已核验包"));
+        }
+        let path = directory.join("files").join(&entry.path);
+        let mut file = open_immutable(&path)?;
+        if file
+            .metadata()
+            .map_err(|e| JobError::io(e.to_string()))?
+            .len()
+            != entry.bytes
+        {
+            return Err(JobError::new("hash_mismatch", "准备源大小发生变化"));
+        }
+        let mut digest = Sha256::new();
+        let bytes =
+            std::io::copy(&mut file, &mut digest).map_err(|e| JobError::io(e.to_string()))?;
+        if bytes != entry.bytes || format!("{:x}", digest.finalize()) != entry.sha256 {
+            return Err(JobError::new("hash_mismatch", "准备源哈希发生变化"));
+        }
+        Ok(Arc::new(PinnedMedia {
+            entry: entry.clone(),
+            path,
+            _package_pin: Some(original),
+            _file_pin: file,
+            _derived_lease: None,
+            _root_owner: Arc::clone(&self._root_owner),
+        }))
+    }
+
+    pub(crate) fn pin_svg_png(
+        &self,
+        package_hash: &str,
+        source: &PinnedMedia,
+        path: PathBuf,
+        entry: hertz_wallpaper::VerifiedEntry,
+        lease: Option<Arc<std::fs::File>>,
+    ) -> Result<DecodeInput> {
+        self.pin_derived(
+            package_hash,
+            source
+                ._package_pin
+                .as_ref()
+                .map(std::fs::File::try_clone)
+                .transpose()
+                .map_err(|e| JobError::io(e.to_string()))?,
+            path,
+            entry,
+            lease,
+        )
+    }
+
     /// A verified cached JPEG can outlive its original video. It never grants access to that video.
     pub(super) fn pin_poster(
         &self,

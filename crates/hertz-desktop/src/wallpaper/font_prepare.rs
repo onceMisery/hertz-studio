@@ -421,7 +421,7 @@ fn format(bytes: &[u8], mime: Option<&str>) -> Result<FontFormat> {
     Ok(format)
 }
 
-fn validate_bytes_with_cancel(
+pub(crate) fn validate_bytes_with_cancel(
     entry: &hertz_wallpaper::VerifiedEntry,
     bytes: &[u8],
     texts: &[RequiredText],

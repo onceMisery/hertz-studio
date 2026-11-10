@@ -647,10 +647,10 @@ impl App {
         result: JobResult<()>,
         target: &EventLoopWindowTarget<()>,
     ) {
-        if !self
+        if self
             .wallpaper_apply
             .as_ref()
-            .is_some_and(|transaction| transaction.layout_task == Some(id))
+            .is_none_or(|transaction| transaction.layout_task != Some(id))
         {
             return;
         }

@@ -154,7 +154,7 @@ fn validate_archive_in_place<R: std::io::Read + std::io::Seek>(
     if archive.len() > MAX_FILES + 8 {
         return Err(PackageError::new(
             "too_many_files",
-            format!("条目数超过 {} 上限", MAX_FILES),
+            format!("条目数超过 {MAX_FILES} 上限"),
         ));
     }
     let mut seen_lower: HashSet<String> = HashSet::new();
@@ -309,7 +309,7 @@ pub fn check_package_bytes(len: u64) -> Result<()> {
     if len > MAX_PACKAGE_BYTES {
         return Err(PackageError::new(
             "package_too_large",
-            format!("压缩包超过 {} 字节上限", MAX_PACKAGE_BYTES),
+            format!("压缩包超过 {MAX_PACKAGE_BYTES} 字节上限"),
         ));
     }
     Ok(())

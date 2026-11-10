@@ -218,11 +218,11 @@ struct Policy {
 
 impl Policy {
     fn visible(&self) -> bool {
-        !self.user_hidden
-            && !self.fullscreen
-            && !self.session_unavailable
-            && !self.display_off
-            && !(self.locked && self.no_content)
+        !(self.user_hidden
+            || self.fullscreen
+            || self.session_unavailable
+            || self.display_off
+            || self.locked && self.no_content)
     }
 }
 
@@ -1507,11 +1507,11 @@ impl App {
         if self.handle_candidate_page(generation, event) {
             return;
         }
-        if !self
+        if self
             .desktop
             .surface
             .as_ref()
-            .is_some_and(|surface| surface.binding.generation() == generation)
+            .is_none_or(|surface| surface.binding.generation() != generation)
         {
             log(&format!(
                 "ignore stale wallpaper page generation={generation} current={}",

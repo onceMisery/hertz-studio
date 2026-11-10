@@ -26,7 +26,7 @@
 import {
   ZODIAC, SIGN_COUNT, CYCLE_SECONDS, buildShape, buildCloud, buildSeeds, buildFigureMesh,
   buildConstellation, CONSTELLATION, CONSTELLATION_Z, FIGURE_Z, FIGURE_DEPTH, FIGURE_MESH_POINTS,
-  figureBackDepth, transitionStyle,
+  figureBackDepth, transitionStyle, buildRibbonReveal,
 } from './zodiac.js';
 import { clamp, damp, seededRandom } from './util.js';
 
@@ -378,7 +378,7 @@ const SHAPE_FRAG = [
   '  float along = dot(q,dir);',
   '  float across = dot(q,vec2(-dir.y,dir.x));',
   '  float d = length(vec2(along,across*vStretch));',
-  '  float halo = exp(-d*d*15.0)*0.34;',
+  '  float halo = exp(-d*d*15.0)*0.26;',
   '  float core = exp(-d*d*240.0);',
   '  float tail = mix(1.0,smoothstep(-0.5,0.15,along),clamp(vStretch-1.0,0.0,1.0));',
   '  float a = min(1.0,halo+core)*vAlpha*(0.62+tail*0.25);',
@@ -393,8 +393,10 @@ const SHAPE_FRAG = [
   // 轮廓光用座次亮色提亮边缘，背光面留一点冷调，体积才有正反两面。
   '  col = mix(col,mix(uCool,uRim,vDepth),clamp(vRim*0.65,0.0,0.65));',
   '  col *= 0.82+0.24*vDepth;',
-  '  col += core*vCore*0.17*vLight;',
-  '  col *= 1.32+vFlow*.4+vEnergy*.65;',
+  '  col += core*vCore*0.10*vLight;',
+  '  col *= 1.10+vFlow*.32+vEnergy*.5;',
+  // 加性混合会逐粒子叠加：输出前软色调映射收肩，密集区读成彩色壳层而不是纯白团。
+  '  col = col/(vec3(0.8)+col)*1.35;',
   '  gl_FragColor = vec4(col,a);',
   '}',
 ].join('\n');
@@ -463,6 +465,7 @@ const GLINT_VERT = [
   'uniform float uSurge;',
   'uniform float uHoverIndex;',
   'uniform float uHoverMix;',
+  'uniform float uIgnite;',
   'varying float vBright;',
   'void main() {',
   '  float runner = step(0.5,aRunner);',
@@ -479,6 +482,9 @@ const GLINT_VERT = [
   '  vBright = aBright*uBrightness*(1.0+uTwinkle*(0.27*sin(uTime*0.44+aPhase)+0.16*flare));',
   '  vBright *= 1.0+selected*uHoverMix*.48+uSurge*(0.35+runner*.9);',
   '  vBright *= mix(1.0,uFlow*smoothstep(0.0,0.08,progress)*(1.0-smoothstep(0.92,1.0,progress)),runner);',
+  // 主星按节点序错峰点亮（uIgnite 0→1）；沿线流光 runner 不受点亮门控。
+  '  float birth = aIndex/18.0;',
+  '  vBright *= mix(smoothstep(birth,birth+0.10,uIgnite),1.0,runner);',
   '  gl_Position = projectionMatrix * mv;',
   '}',
 ].join('\n');
@@ -609,6 +615,7 @@ function makeGlintMaterial(THREE, color) {
       uSurge: { value: 0 },
       uHoverIndex: { value: -1 },
       uHoverMix: { value: 0 },
+      uIgnite: { value: 1 },
       uColor: { value: new THREE.Color(color) },
     },
     vertexShader: GLINT_VERT,
@@ -713,17 +720,17 @@ const AURA_RING_FRAG = [
   '  float segment = step(.15,fract(phase/6.283185*12.0));',
   '  float core = stroke(r,.968,.0013)+stroke(r,.803,.0008)*.40;',
   '  float track = stroke(r,.922,.0017)*segment;',
-  '  float tickAngle = abs(fract(phase/6.283185*96.0+.5)-.5);',
+  '  float tickAngle = abs(fract(phase/6.283185*48.0+.5)-.5);',
   '  float aa = max(fwidth(phase)*15.28,.008);',
   '  float ticks = (1.0-smoothstep(.028,.028+aa,tickAngle))',
   '    *smoothstep(.837,.844,r)*(1.0-smoothstep(.872,.879,r));',
-  '  float major = pow(max(0.0,cos(phase*12.0)),240.0)',
+  '  float major = pow(max(0.0,cos(phase*12.0)),120.0)',
   '    *smoothstep(.846,.852,r)*(1.0-smoothstep(.902,.908,r));',
   '  float runner = pow(max(0.0,cos(a-uTime*.26-uSeed*2.1)),180.0);',
   '  float attention = pow(max(0.0,cos(a-uBearing)),24.0)*uAttention;',
   '  float halo = exp(-pow((r-.968)/.009,2.0))*.12;',
-  '  float alpha = (core*.62+track*.48+ticks*.42+major*.55+halo)',
-  '    *(1.0+runner*2.8+attention*1.5)*uOpacity;',
+  '  float alpha = (core*.62+track*.48+ticks*.30+major*.30+halo)',
+  '    *(1.0+runner*1.2+attention*1.5)*uOpacity;',
   '  alpha *= .85+uBass*.20+uOnset*.25+uCharge*.8;',
   '  vec3 col = mix(uColorA,uColorB,clamp(runner*.75+attention*.65+uCharge*.3,0.0,1.0));',
   '  gl_FragColor = vec4(col,clamp(alpha,0.0,1.0));',
@@ -1240,10 +1247,11 @@ export function createWorld(THREE, scene, opts) {
   ringGeo.computeVertexNormals();
   const ringMats = [];
   const ringMeshes = [];
+  // 外径收进取景框（±3.25）：正面朝向的环垂直半径也不再被裁切，退为环绕剪影的淡光晕。
   const RING_RIGS = [
-    { scale: 5.9, x: 1.08, y: 0.16, z: -0.26, seed: 0.35 },
-    { scale: 5.05, x: 0.28, y: -0.64, z: 0.32, seed: 1.60 },
-    { scale: 4.2, x: -0.52, y: 0.46, z: 0.62, seed: 2.85 },
+    { scale: 3.65, x: 1.08, y: 0.16, z: -0.26, seed: 0.35 },
+    { scale: 3.13, x: 0.28, y: -0.64, z: 0.32, seed: 1.60 },
+    { scale: 2.60, x: -0.52, y: 0.46, z: 0.62, seed: 2.85 },
   ];
   for (let i = 0; i < RING_RIGS.length; i += 1) {
     const rig = RING_RIGS[i];
@@ -1333,14 +1341,29 @@ export function createWorld(THREE, scene, opts) {
     blending: THREE.AdditiveBlending,
     toneMapped: false,
   });
+  // 连线生长：把 aReveal 注入 MeshBasicMaterial，uGrow 控制描绘进度。
+  // uniform 对象挂在 userData 上逐帧写值，不触发着色器重编译。
+  const applyLineGrow = (mat) => {
+    mat.userData.uGrow = { value: 1 };
+    mat.onBeforeCompile = (shader) => {
+      shader.uniforms.uGrow = mat.userData.uGrow;
+      shader.vertexShader = 'attribute float aReveal;\nvarying float vReveal;\n'
+        + shader.vertexShader.replace('#include <begin_vertex>', '#include <begin_vertex>\nvReveal = aReveal;');
+      shader.fragmentShader = 'uniform float uGrow;\nvarying float vReveal;\n'
+        + shader.fragmentShader.replace('#include <opaque_fragment>',
+          '#include <opaque_fragment>\ngl_FragColor.a *= smoothstep(vReveal, vReveal + 0.06, uGrow);');
+    };
+    mat.customProgramCacheKey = () => 'zodiac-line-grow';
+    return mat;
+  };
   // 两级轮廓丝带保留细肢与孔洞；主星骨架比轮廓更亮。
   // 轮廓边光会被体量挡住（背面那圈不该透过来），星座连线永远浮在最前。
   const edgeCoreMat = ribbonMat('#ffffff', 0.28, true);
   const edgeHaloMat = ribbonMat('#ffffff', 0.075, true);
   const nodeMat = makeFieldMaterial(THREE);
   nodeMat.uniforms.uSizeScale.value = 52;
-  const haloMat = ribbonMat('#ffffff', 0.20);
-  const coreMat = ribbonMat('#ffffff', 0.90);
+  const haloMat = applyLineGrow(ribbonMat('#ffffff', 0.20));
+  const coreMat = applyLineGrow(ribbonMat('#ffffff', 0.90));
   const hazeMat = makeFieldMaterial(THREE);
   hazeMat.uniforms.uSizeScale.value = 120;
   const discMat = makeGlintMaterial(THREE, '#ffffff');
@@ -1477,12 +1500,14 @@ export function createWorld(THREE, scene, opts) {
     nodeSets.push(ngeo);
     disposables.push(ecg, ehg, ngeo);
 
-    // 星座连线两级丝带
+    // 星座连线两级丝带（aReveal 驱动逐根生长）
     const hgeo = new THREE.BufferGeometry();
     hgeo.setAttribute('position', new THREE.BufferAttribute(line.halo, 3));
+    hgeo.setAttribute('aReveal', new THREE.BufferAttribute(line.reveal, 1));
     halos.push(hgeo);
     const cgeo = new THREE.BufferGeometry();
     cgeo.setAttribute('position', new THREE.BufferAttribute(line.core, 3));
+    cgeo.setAttribute('aReveal', new THREE.BufferAttribute(line.reveal, 1));
     cores.push(cgeo);
     disposables.push(hgeo, cgeo);
 
@@ -1783,7 +1808,7 @@ export function createWorld(THREE, scene, opts) {
     const effectTime = reduced ? 0 : time;
 
     shapeMat.uniforms.uTime.value = time;
-    shapeMat.uniforms.uBoost.value = 1 + bass * 0.6 + onset * 0.8;
+    shapeMat.uniforms.uBoost.value = Math.min(1.7, 1 + bass * 0.5 + onset * 0.6);
     shapeMat.uniforms.uBass.value = reduced ? 0 : bass;
     shapeMat.uniforms.uMid.value = reduced ? 0 : mid;
     shapeMat.uniforms.uTreble.value = reduced ? 0 : treble;
@@ -1851,15 +1876,17 @@ export function createWorld(THREE, scene, opts) {
     surge = reduced ? 0 : damp(surge, 0, .34, uiDt);
     parallaxX = reduced ? 0 : damp(parallaxX, allowPointer ? pointer.x : 0, .18, uiDt);
     parallaxY = reduced ? 0 : damp(parallaxY, allowPointer ? pointer.y : 0, .18, uiDt);
-    root.position.set(parallaxX * .19, parallaxY * .12, 0);
+    root.position.set(parallaxX * .19, parallaxY * .12 + Math.sin(time * 0.21 + 1.1) * (reduced ? 0 : 0.06), 0);
     dustGroup.position.set(-parallaxX * .50, -parallaxY * .28, 0);
 
-    // 造型自转改成「以播放时间为唯一输入」的微摆：seek 到任意时刻画面一致，
-    // 暂停时冻结；微摆展示立体侧面，同时保持剪影可识别。幅度比早期版本更大：
-    // 配合逐点法线，摆角一变化明暗就跟着扫过表面，侧脸不再是「一张贴片」。
-    const sway = reduced ? 0.06 : 0.54;
-    root.rotation.y = Math.sin(time * 0.30) * sway + Math.sin(time * 0.085 + 1.3) * sway * 0.42;
-    root.rotation.x = Math.sin(time * 0.19) * (reduced ? 0 : 0.19) + Math.cos(time * 0.075 + 0.5) * (reduced ? 0 : 0.06);
+    // 造型微摆以播放时间为唯一输入：seek 一致、暂停冻结。叠三个不可通约低频 + 微滚转
+    // 与垂直浮沉，打破单一正弦的钟摆感；配合逐点法线，明暗随摆角扫过表面读出立体侧面。
+    const sway = reduced ? 0.06 : 0.40;
+    root.rotation.y = Math.sin(time * 0.30) * sway + Math.sin(time * 0.085 + 1.3) * sway * 0.42
+      + Math.sin(time * 0.171 + 2.6) * sway * 0.18;
+    root.rotation.x = Math.sin(time * 0.19) * (reduced ? 0 : 0.16) + Math.cos(time * 0.075 + 0.5) * (reduced ? 0 : 0.05)
+      + Math.sin(time * 0.113 + 1.7) * (reduced ? 0 : 0.04);
+    root.rotation.z = Math.sin(time * 0.097 + 0.8) * (reduced ? 0 : 0.03);
     const breathe = 1 + (reduced ? 0 : onset * 0.025 + bass * 0.035);
     root.scale.setScalar(state === 'gather' ? breathe * (0.92 + k * 0.08) : breathe);
 
@@ -1949,6 +1976,12 @@ export function createWorld(THREE, scene, opts) {
     nodeMat.uniforms.uTwinkle.value = reduced ? 0.25 : 1;
     // 点击/悬停让星座连线与沿线飞行的光点一起增辉：读成「星链被点亮」，
     // 而不是只有一颗星单独闪一下。
+    // 连线/星点生长进度：汇聚逐根连上、停留全亮、散开 reverse 收回（figAlpha 仍作整组门控）。
+    const grow = state === 'gather' ? smooth01((k - 0.30) / 0.62)
+      : state === 'disperse' ? 1 - smooth01(k / 0.70) : 1;
+    coreMat.userData.uGrow.value = grow;
+    haloMat.userData.uGrow.value = grow;
+    discMat.uniforms.uIgnite.value = grow;
     coreMat.opacity = (0.90 + bass * 0.06 + surge * 0.46 + hoverMix * 0.10) * figAlpha;
     haloMat.opacity = (0.20 + bass * 0.16 + surge * 0.30 + hoverMix * 0.08) * figAlpha;
     discMat.uniforms.uBrightness.value = figAlpha * (1 + onset * 0.35);
@@ -1967,14 +2000,14 @@ export function createWorld(THREE, scene, opts) {
     grid.visible = auraVisible && gridAllowed;
     skyMat.uniforms.uTime.value = effectTime;
     gridMat.uniforms.uTime.value = effectTime;
-    gridMat.uniforms.uOpacity.value = 0.14 * figAlpha;
+    gridMat.uniforms.uOpacity.value = 0.06 * figAlpha;
     gridMat.uniforms.uBass.value = reduced ? 0 : bass;
     gridMat.uniforms.uOnset.value = reduced ? 0 : onset;
     gridMat.uniforms.uCharge.value = charge;
     for (let i = 0; i < ringMats.length; i += 1) {
       const material = ringMats[i], mesh = ringMeshes[i], rig = RING_RIGS[i];
       material.uniforms.uTime.value = effectTime;
-      material.uniforms.uOpacity.value = (0.70 - i * 0.08) * figAlpha;
+      material.uniforms.uOpacity.value = (0.30 - i * 0.05) * figAlpha;
       material.uniforms.uBass.value = reduced ? 0 : bass;
       material.uniforms.uOnset.value = reduced ? 0 : onset;
       material.uniforms.uCharge.value = charge;

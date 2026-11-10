@@ -218,7 +218,7 @@ pub fn validate_manifest_bytes(bytes: &[u8]) -> Result<Manifest> {
     if bytes.len() > MAX_MANIFEST_BYTES {
         return Err(PackageError::new(
             "manifest_too_large",
-            format!("manifest 超过 {} 字节上限", MAX_MANIFEST_BYTES),
+            format!("manifest 超过 {MAX_MANIFEST_BYTES} 字节上限"),
         ));
     }
     check_bounded_json(bytes, MAX_MANIFEST_DEPTH)?;

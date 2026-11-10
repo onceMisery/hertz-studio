@@ -600,11 +600,11 @@ impl App {
                 return;
             }
             app.desktop.mirror_clock_pending = None;
-            if !app
+            if app
                 .desktop
                 .surface
                 .as_ref()
-                .is_some_and(|surface| surface.binding.generation() == generation)
+                .is_none_or(|surface| surface.binding.generation() != generation)
             {
                 return;
             }

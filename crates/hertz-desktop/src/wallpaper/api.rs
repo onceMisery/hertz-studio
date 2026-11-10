@@ -909,6 +909,17 @@ pub(crate) fn response(
     json!({"protocol":2,"requestId":request_id.filter(|id|valid_id(id)),"ok":ok,"configRevision":null,"jobId":job_id,"result":result,"error":error})
 }
 
+/// Adapter facts in the original capabilities response; no independent registry.
+pub(crate) fn svg_capability() -> serde_json::Value {
+    serde_json::json!({"adapter":super::svg_prepare::ADAPTER_ID,"adapterVersion":super::svg_prepare::PIPELINE,
+        "input":"restricted-static","representation":"png-rgba8","maxInputBytes":super::svg_prepare::MAX_BYTES,
+        "uses":["image.asset","particles.spriteAsset"],"text":"same-package-exact-static-ttf-nonexpanding-gsub",
+        "stroke":"straight-only-no-dash","clipPolicy":super::svg_prepare::CLIP_POLICY,
+        "clipChildren":super::svg_prepare::CLIP_SHAPES.iter().copied().chain(["use","title","desc"]).collect::<Vec<_>>(),
+        "clipUseTargets":super::svg_prepare::CLIP_SHAPES,
+        "unsupported":["scripts","externalResources","animation","filter","mask","pattern","marker","stylesheet","nestedClip","curvedStroke","dashedStroke","expandingFontSubstitution","AAT-morx","colorFont"]})
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

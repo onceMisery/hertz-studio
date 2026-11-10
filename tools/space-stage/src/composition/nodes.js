@@ -28,6 +28,8 @@ export async function loadResource(THREE, context, requirement, signal, generati
   };
   try {
     assertAlive(signal);
+    if (requirement.logicalKind === 'vector' && (requirement.adapterId !== 'prepared-svg-png' || requirement.kind !== 'image'
+        || requirement.mime !== 'image/png' || !/\/prepared\/[0-9a-f]{64}\/render\.png$/.test(requirement.url))) throw new Error('composition-svg-preparation-required');
     if (requirement.kind === 'font') {
       const cpu = admissions?.cpu;
       const response = await fetch(requirement.url, { signal });

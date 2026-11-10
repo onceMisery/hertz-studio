@@ -83,6 +83,11 @@ moxcms = "=0.8.1"
 # Static single-face SFNT structure/cmap validation; MIT OR Apache-2.0.
 # Native shaping stays with FontFace; this parser must not dispatch gvar/CFF2.
 ttf-parser = { version = "=0.25.1", default-features = false, features = ["std"] }
+resvg = { version = "=0.49.0", default-features = false, features = ["text"] }
+usvg = { version = "=0.49.0", default-features = false, features = ["text"] }
+roxmltree = "=0.21.1"
+svgtypes = "=0.16.1"
+skrifa = { version = "=0.44.0", default-features = false, features = ["std"] }
 zip = { workspace = true }
 # 媒体流的 COM IStream 实现必须与 webview2-com/wry 锁定同一 windows 版本
 # （Cargo.lock 已是 0.62.2），否则接口不互通（设计 §8.1）。

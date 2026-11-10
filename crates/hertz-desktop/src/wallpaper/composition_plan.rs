@@ -418,7 +418,7 @@ pub(crate) async fn resolve(
         target,
         output_fit,
     };
-    preliminary.media_costs()?;
+    preliminary.media_costs_with_unprepared_vectors(true)?;
     let assets = prepare_assets(
         &jobs,
         &package,
@@ -486,7 +486,17 @@ async fn prepare_assets(
     }
     for usage in final_values.resource_uses() {
         check_cancel(cancel)?;
-        if assets.contains_key(&usage.asset_id) {
+        let vector = package
+            .manifest
+            .assets
+            .iter()
+            .any(|a| a.id == usage.asset_id && a.kind == hertz_wallpaper::AssetKind::Vector);
+        let representation = if vector {
+            svg_use_id(usage)
+        } else {
+            usage.asset_id.clone()
+        };
+        if assets.contains_key(&representation) {
             continue;
         }
         let asset = package
@@ -511,6 +521,74 @@ async fn prepare_assets(
                     .await?,
                 )
             }
+            hertz_wallpaper::AssetKind::Vector => {
+                let node_index = usage.node_index.ok_or_else(|| {
+                    JobError::new("adapter_unavailable", "SVG effect 资源尚未准备")
+                })?;
+                let scale = text_raster::consumer_sampling_scale(
+                    compiled,
+                    final_values,
+                    node_index,
+                    target,
+                    output_fit,
+                )?;
+                let node = &compiled.ir().nodes()[node_index];
+                let (width, height) = if node.node_type == "particles" {
+                    (4.0, 4.0)
+                } else {
+                    (
+                        final_number(compiled, final_values, node_index, "width")?,
+                        final_number(compiled, final_values, node_index, "height")?,
+                    )
+                };
+                let sample = |v: f64| -> Result<u32> {
+                    let pixels = (v * scale).ceil().max(1.0);
+                    if !pixels.is_finite() || pixels > 16384.0 {
+                        return Err(JobError::new("budget_exceeded", "SVG 最终采样目标超限"));
+                    }
+                    Ok(pixels as u32)
+                };
+                let fit = if node.node_type == "particles" {
+                    super::image_prepare::ImageFit::Contain
+                } else {
+                    let slot = node
+                        .constant_slots
+                        .get("fit")
+                        .ok_or_else(|| JobError::invalid_input("SVG fit 槽缺失"))?;
+                    let authored=compiled.ir().public_properties().iter().find_map(|public|if matches!(public.target,PublicTarget::Constant{slot:target} if target==*slot){final_values.values().get(&public.descriptor.id).and_then(Value::as_str)}else{None}).unwrap_or_else(||compiled.ir().constant_slots()[*slot].value.as_str().unwrap_or("contain"));
+                    if authored == "cover" || authored == "stretch" {
+                        super::image_prepare::ImageFit::Cover
+                    } else {
+                        super::image_prepare::ImageFit::Contain
+                    }
+                };
+                // Original particles shader fixes gl_PointSize=4 output pixels; ancestor
+                // transforms move centers, they do not scale the raster footprint.
+                let (width, height) = if node.node_type == "particles" {
+                    (4, 4)
+                } else {
+                    (sample(width)?, sample(height)?)
+                };
+                let vector_target = ImageTarget {
+                    width,
+                    height,
+                    fit,
+                    purpose: target.purpose,
+                };
+                let (job_id, receive) = jobs.prepare_svg(
+                    super::jobs::new_job_id(),
+                    super::jobs::SvgPrepareRequest {
+                        reference: AssetRef {
+                            package_hash: package.package_hash.clone(),
+                            asset_id: asset.id.clone(),
+                            variant_id: None,
+                        },
+                        target: vector_target,
+                        usage: usage.usage.clone(),
+                    },
+                )?;
+                CompositionAsset::Media(wait_font_reply(jobs, &job_id, receive, cancel).await?)
+            }
             hertz_wallpaper::AssetKind::Font => {
                 return Err(JobError::new("font_not_prepared", "最终字体没有文字集合"));
             }
@@ -521,10 +599,22 @@ async fn prepare_assets(
                 ));
             }
         };
-        assets.insert(asset.id.clone(), prepared);
+        assets.insert(representation, prepared);
+        if assets.len() > hertz_wallpaper::MAX_FILES {
+            return Err(JobError::new("budget_exceeded", "组合表示数超过原闭包限额"));
+        }
     }
     check_cancel(cancel)?;
     Ok(assets)
+}
+
+fn svg_use_id(usage: &hertz_wallpaper::document::ResourceUse) -> String {
+    // Author asset IDs only admit [a-z][a-z0-9-]{0,63}.
+    format!(
+        "@svg-use/{}/{}",
+        usage.node_index.unwrap_or(usize::MAX),
+        usage.field
+    )
 }
 
 fn validate_adapters(compiled: &CompiledDocument) -> Result<()> {
@@ -694,6 +784,7 @@ impl PreparedComposition {
             let asset = self
                 .assets
                 .get(&usage.asset_id)
+                .or_else(|| self.assets.get(&svg_use_id(usage)))
                 .ok_or_else(|| JobError::new("asset_not_found", "最终资源闭包未准备"))?;
             let reference = asset.reference();
             if reference.package_hash != self.package_hash
@@ -726,12 +817,17 @@ impl PreparedComposition {
         final_number(&self.compiled, &self.final_values, index, property)
     }
     fn decode_options(&self, media: &ResolvedMedia) -> Value {
+        if let Some(svg) = media.svg() {
+            return json!({"colorSpace":"srgb","alphaMode":"straight","mipmaps":false,"encodedWidth":media.input().metadata.encoded_width,"encodedHeight":media.input().metadata.encoded_height,"rotationDegrees":0,"svgAdapterVersion":super::svg_prepare::PIPELINE,"svgCanonicalOptions":svg.options,"svgFontDependencies":svg.fonts});
+        }
         json!({"colorSpace":"srgb","alphaMode":"straight","mipmaps":false,
             "encodedWidth":media.input().metadata.encoded_width,"encodedHeight":media.input().metadata.encoded_height,
             "rotationDegrees":media.input().metadata.rotation_degrees})
     }
     fn adapter(media: &ResolvedMedia) -> &'static str {
-        if media.input().metadata.container == Container::Image {
+        if media.svg().is_some() {
+            super::svg_prepare::ADAPTER_ID
+        } else if media.input().metadata.container == Container::Image {
             "prepared-srgb-image"
         } else {
             "silent-video"
@@ -746,6 +842,9 @@ impl PreparedComposition {
         }
     }
     fn media_costs(&self) -> Result<Costs> {
+        self.media_costs_with_unprepared_vectors(false)
+    }
+    fn media_costs_with_unprepared_vectors(&self, allow_unprepared: bool) -> Result<Costs> {
         let mut cost = geometry_costs(&self.compiled, &self.final_values)?;
         let mut identities = BTreeSet::new();
         for usage in self.final_values.resource_uses() {
@@ -757,8 +856,14 @@ impl PreparedComposition {
             let media = self
                 .assets
                 .get(&usage.asset_id)
-                .and_then(CompositionAsset::as_media)
-                .ok_or_else(|| JobError::new("asset_not_found", "最终资源闭包未准备"))?;
+                .or_else(|| self.assets.get(&svg_use_id(usage)))
+                .and_then(CompositionAsset::as_media);
+            let Some(media) = media else {
+                if allow_unprepared {
+                    continue;
+                }
+                return Err(JobError::new("asset_not_found", "最终资源闭包未准备"));
+            };
             let metadata = &media.input().metadata;
             let index = usage
                 .node_index
@@ -962,32 +1067,44 @@ impl PreparedComposition {
         limits: &GlLimits,
     ) -> Result<Value> {
         let resolved_assets: Vec<_> = self.assets.iter().map(|(id, asset)| match asset {
-            CompositionAsset::Media(media) => json!({"assetId":id,"contentKey":media.content_key(),
+            CompositionAsset::Media(media) => json!({"assetId":media.reference().asset_id,"representationId":id,"contentKey":media.content_key(),
+                "logicalKind":if media.svg().is_some(){"vector"}else if media.input().metadata.container==Container::Image{"image"}else{"video"},
+                "representationKind":if media.input().metadata.container==Container::Image{"image"}else{"video"},"mime":media.input().media.entry.mime,
+                "sourceHash":media.svg().map(|svg|svg.input_hash.as_str()),
                 "kind":if media.input().metadata.container == Container::Image {"image"} else {"video"},
                 "byteLength":media.input().media.entry.bytes,"width":media.input().metadata.display_width,
                 "height":media.input().metadata.display_height,"durationMs":media.input().metadata.duration_ms,
                 "url":media.url(),"decodeOptions":self.asset_decode_options(asset),"adapterId":Self::adapter(media),"adapterVersion":1}),
-            CompositionAsset::Font(font) => json!({"assetId":id,"kind":"font","contentKey":font.content_key(),
+            CompositionAsset::Font(font) => json!({"assetId":id,"representationId":id,"kind":"font","contentKey":font.content_key(),
                 "byteLength":font.input().media.entry.bytes,"url":font.url(),"adapterId":font.adapter_id(),
                 "adapterVersion":1,"decodeOptions":self.asset_decode_options(asset),"fontMetadata":font.input().metadata}),
         }).collect();
-        let identities = self
-            .assets
-            .iter()
-            .map(|(id, asset)| {
-                let dependency_keys = match asset {
-                    CompositionAsset::Media(media) => {
-                        BTreeMap::from([("adapter".into(), digest(&Self::adapter(media))?)])
+        let mut identities = BTreeMap::new();
+        let mut grouped: BTreeMap<String, Vec<(String, ResolvedAssetIdentity)>> = BTreeMap::new();
+        for (id, asset) in &self.assets {
+            let dependency_keys = match asset {
+                CompositionAsset::Media(media) => {
+                    let mut keys =
+                        BTreeMap::from([("adapter".into(), digest(&Self::adapter(media))?)]);
+                    if let Some(svg) = media.svg() {
+                        keys.insert("svgAdapterVersion".into(), digest(&svg.pipeline)?);
+                        keys.insert("svgFonts".into(), digest(&svg.fonts)?);
+                        keys.insert("sourceHash".into(), svg.input_hash.clone());
                     }
-                    CompositionAsset::Font(font) => BTreeMap::from([
-                        ("adapter".into(), digest(&font.adapter_id())?),
-                        (
-                            "fontAdapterVersion".into(),
-                            digest(&font.adapter_version())?,
-                        ),
-                    ]),
-                };
-                Ok((
+                    keys
+                }
+                CompositionAsset::Font(font) => BTreeMap::from([
+                    ("adapter".into(), digest(&font.adapter_id())?),
+                    (
+                        "fontAdapterVersion".into(),
+                        digest(&font.adapter_version())?,
+                    ),
+                ]),
+            };
+            grouped
+                .entry(asset.reference().asset_id.clone())
+                .or_default()
+                .push((
                     id.clone(),
                     ResolvedAssetIdentity {
                         content_key: asset.content_key().into(),
@@ -995,9 +1112,26 @@ impl PreparedComposition {
                         adapter_version: 1,
                         dependency_keys,
                     },
-                ))
-            })
-            .collect::<Result<BTreeMap<_, _>>>()?;
+                ));
+        }
+        for (id, representations) in grouped {
+            let identity = if representations.len() == 1 {
+                representations
+                    .into_iter()
+                    .next()
+                    .expect("one representation")
+                    .1
+            } else {
+                let hash = digest(&representations)?;
+                ResolvedAssetIdentity {
+                    content_key: hash.clone(),
+                    decode_options_hash: hash.clone(),
+                    adapter_version: 1,
+                    dependency_keys: BTreeMap::from([("representations".into(), hash)]),
+                }
+            };
+            identities.insert(id, identity);
+        }
         let identity = TargetIdentity {
             public_values: self.final_values.clone(),
             resolved_assets: identities,
@@ -1027,7 +1161,7 @@ impl PreparedComposition {
         let pixels = checked_product(u64::from(self.target.width), u64::from(self.target.height))?;
         let projection = json!({"semanticKey":self.compiled.ir().semantic_key(),"targetKey":target_key,"ir":self.compiled.ir(),
             "finalPublicValues":self.final_values,"canvas":self.compiled.document().canvas,"timeline":self.compiled.document().timeline,
-            "resolvedAssets":resolved_assets,"textRasters":self.text_rasters.text_rasters(),"target":{"width":self.target.width,"height":self.target.height,"fit":self.output_fit,
+            "resolvedAssets":resolved_assets,"resolvedUses":self.final_values.resource_uses().iter().map(|usage|if self.assets.contains_key(&usage.asset_id){usage.asset_id.clone()}else{svg_use_id(usage)}).collect::<Vec<_>>(),"textRasters":self.text_rasters.text_rasters(),"target":{"width":self.target.width,"height":self.target.height,"fit":self.output_fit,
                 "budgetFps":identity.effective_budget_fps,"budgetAllocationRevision":allocation_revision},"sessionId":session_id,"generation":generation,
             "pageLimits":{"gpuContexts":1,"drawingBufferPixels":checked_sum(&[pixels,self.text_rasters.raster_pixels()])?,
                 "renderTargetDeclaredBytes":checked_product(pixels,16)?,"textureDeclaredBytes":checked_sum(&[cost.texture_bytes,cost.raster_bytes])?,

@@ -3,6 +3,18 @@
   "note": "check-* scripts that are deliberate manual/browser/diagnostic entry points. New unregistered check-* files fail scripts/check-scripts.js until they are either registered in check-frontend.js / a workflow or added here.",
   "scripts": [
     {
+      "script": "check-wallpaper-svg-native.js",
+      "purpose": "Isolated current Windows SVG input rejection, raw original import, same-package vector and exact TTF, original preview and draft Apply, final public asset switches and aliases, native current GL first frames, real immutable archive export/reimport, renderer stop/resume, fixed-package derived rebuild, 90 real engine submission/cadence samples and 50 fresh native sessions with full resource drain and installed-open P95. Requires copied HERTZ_DESKTOP_BIN, matching HERTZ_DESKTOP_BUILD_RECEIPT, fresh HERTZ_SVG_NATIVE_OUTPUT and PLAYWRIGHT_MODULE; serial GUI, refuses existing hosts and uses only its PID-verified natural exit. Compile sources and verification scripts are separately hashed. Cancellation/Close uses the dedicated lifecycle entry; GPU timing/absolute device thresholds, physical OS policy, long duration, additional devices and the complete editor need separate evidence."
+    },
+    {
+      "script": "check-wallpaper-svg-browser.js",
+      "purpose": "Shipped page and projection consumer with real native SVG projections and fixed PNG closure: rejects changed representation and clip policy authority; checks final slots, alias pooling, nested linear alpha, page FontFace absence and complete retirement. Original PNG loader and pool/scope verify partial release, survivor pixels, differing prepared target/options and context identities with exact release counts. Requires successful check-wallpaper-svg-native.js output via HERTZ_SVG_NATIVE_OUTPUT, its exact HERTZ_DESKTOP_BUILD_RECEIPT and PLAYWRIGHT_MODULE. Current compiled sources and run artifacts must match that native receipt/report before and after execution, and native-captured projection/closure/init/URI hashes must match. Headless Chrome pixel/integration evidence does not replace actual Windows/GPU qualification."
+    },
+    {
+      "script": "check-wallpaper-svg-lifecycle-native.js",
+      "purpose": "Owned Windows SVG lifecycle and allocation-boundary evidence on a copied dev candidate with wallpaper-media-probe and debug assertions: cancellation before the existing check makes zero resvg calls; a bounded test barrier after the check holds the original slot/workspace until explicit release and real resvg exit; held media Read/Close uses original own-probe controls and explicit recovery; an over-workspace SVG is rejected before pixmap/resvg/probe allocation while preserving the old session. Requires matching HERTZ_DESKTOP_BUILD_RECEIPT, HERTZ_DESKTOP_BIN, fresh HERTZ_SVG_LIFECYCLE_NATIVE_OUTPUT, DESKTOP_CDP_PORT and PLAYWRIGHT_MODULE. --check is a pure harness check. A test barrier before resvg does not establish interruption inside the third-party synchronous call."
+    },
+    {
       "script": "check-inline-wallpaper-native.js",
       "purpose": "Real Windows/WebView2 main-window wallpaper editor and clipped native preview, original Apply/discard transactions, disk-failure draft retention, legacy navigation, reload cleanup, and native player GUI PE subsystem. Private config/data and null audio; requires fresh full,native-window HERTZ_BIN and PLAYWRIGHT_MODULE. Run serially with other native GUI checks."
     },
