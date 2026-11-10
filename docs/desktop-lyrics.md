@@ -1,5 +1,7 @@
 # Hertz 桌面歌词：产品与技术设计
 
+2026-11-11 校准控制器修复：原750ms轮询现在按同一local/绝对deadline回收失效active与flight。停发帧不再阻止后续请求领取；旧帧回调仍受epoch与请求身份约束，不能确认旧请求或清掉新请求。production controller的Node VM反例修正前失败、修正后通过，[Chrome21项检查](../output/playwright/a10-deadline-r1-20261111/report.json)及原歌词校准25项检查通过，浏览器正常退出码0。验收脚本支持独立输出目录并拒绝覆盖已有目录，原20项浏览器证据保持。此增量没有修改授权、wire、native或偏移保存，也不升级下方Full599或真实DBX/OS资格。
+
 2026-11-08 校准入口增量：已按批准的[校准方案](aegis/specs/2026-11-08-desktop-lyrics-calibration-design.md)实施。桌面只提交同一来源、歌曲与代际绑定的窄 UI 意图；完整播放器仍拥有详情、偏移和保存。独立同意开启校准 scope，撤销先关闭会话闸门，旧阅读同意保持；请求共享原生受理时的五秒绝对截止，迟到绑定、旧接收端回调和取消不能复活新请求。DBX 浮窗从真实启动分支初始化原控制器，通过既有工作台 context 交接。浏览器20项与定向 Rust25项通过，独立规格/质量复审通过；[Full 开发候选实机报告](../output/playwright/calibration-native-1794141999249/report.json)六项通过，涵盖真实前台焦点、隐藏主窗口恢复、偏移仅由显式点击保存和撤权，匹配[599份构建输入](../output/a10-calibration-20261108/native-revision3/build-receipt.json)，正常退出码0。真实最低/当前 DBX 工作台、Standard/release 和其它设备的本增量资格仍待单独取得。
 
 2026-11-08 R2最新范围：[同候选50轮释放核验](../output/a10-native-lifecycle-r2-cdp-detach-20261108/native-1794083437946/verification.json)在退出前断开CDP后通过，352条OS身份自然释放、显式GC后保留计数1/226/72。连接CDP退出的原30秒超时失败保持；该条件化通过不证明完整资源预算或长稳。[六组配套连接核验](../output/a10-r2-paired-matrix-20261108/verification.json)补齐Standard/Full的HTTP及最低0.6.35/当前0.6.47真实PluginHost来源绑定和歌词退出/显式恢复。当前R2已具备独立组件的退出/保存失败/Mini证据；播放器内嵌两种真实托盘退出顺序与重开、DBX完整工作台、真实正向TTML、旧DBX跨构建边界、多DPI/K、整机因果与八小时仍未完成。校准入口已获用户批准并实施，当前候选与未验范围见上方校准增量。旧段落保持各自候选和历史范围。

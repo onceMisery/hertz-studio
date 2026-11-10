@@ -8,7 +8,9 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const root = path.resolve(__dirname, '..'), ui = path.join(root, 'plugin/ui'), assets = path.join(root, 'crates/hertz-desktop/assets');
-const output = path.join(root, 'output/a10-calibration-20261108/browser');
+const outputIndex = process.argv.indexOf('--output');
+assert.ok(outputIndex < 0 || process.argv[outputIndex + 1] && !process.argv[outputIndex + 1].startsWith('--'), '--output requires a directory');
+const output = outputIndex < 0 ? path.join(root, 'output/playwright', 'calibration-browser-' + Date.now()) : path.resolve(process.argv[outputIndex + 1]);
 const app = fs.readFileSync(path.join(ui, 'app.js'), 'utf8'), index = fs.readFileSync(path.join(ui, 'index.html'), 'utf8');
 function fn(name) {
   const start = app.indexOf('function ' + name + '('); assert.ok(start >= 0, name);
@@ -73,6 +75,7 @@ async function refreshFloatingCapsule(){fixture.calls.push({method:'STARTUP',nam
 window.Online.bind=()=>{};
 `;
 async function main() {
+  assert.ok(!fs.existsSync(output), 'Output directory already exists: ' + output);
   fs.mkdirSync(output, { recursive: true });
   const browser = await chromium.launch({ channel: process.env.PLAYWRIGHT_CHANNEL || 'chrome', headless: true });
   const checks = [], errors = [], mark = value => { checks.push(value); console.log('PASS ' + value); };
@@ -172,6 +175,24 @@ async function main() {
       assert.equal(await page.evaluate(() => fixture.done),null);
       mark('Delayed '+hop+' reply cannot reset the remaining UI deadline');
     }
+    await player();
+    await page.evaluate(() => {
+      fixture.heldFrames = [];
+      window.requestAnimationFrame = callback => { fixture.heldFrames.push(callback); return fixture.heldFrames.length; };
+      fixture.enqueue('stalled-frame-A', 1200);
+    });
+    await page.waitForFunction(() => fixture.heldFrames.length === 1);
+    await page.evaluate(() => fixture.enqueue('next-frame-B'));
+    await page.waitForFunction(() => fixture.heldFrames.length === 2, null, { timeout: 4500 });
+    await page.evaluate(() => fixture.heldFrames[0](performance.now()));
+    await page.waitForTimeout(100);
+    assert.equal(await page.evaluate(() => fixture.done), null);
+    assert.equal(await page.evaluate(() => fixture.calls.some(c => c.body?.op === 'complete' && c.body.requestId === 'stalled-frame-A')), false);
+    await page.evaluate(() => fixture.heldFrames[1](performance.now()));
+    await page.waitForFunction(() => fixture.done?.requestId === 'next-frame-B');
+    assert.equal(await page.evaluate(() => fixture.done.result), 'shown');
+    assert.equal(await page.evaluate(() => document.activeElement.id), 'np-lyric-offset-down');
+    mark('A withheld frame cannot keep an expired flight or let a late callback clear the next request');
     for (const action of ['track', 'revoke', 'cancel', 'timeout']) {
       await player(); await page.evaluate(action => { fixture.delay=1;fixture.enqueue('late',action==='timeout'?60:4500); }, action);
       await page.waitForFunction(() => fixture.waiter !== null);
@@ -225,7 +246,8 @@ async function main() {
     await page.screenshot({path:path.join(output,'desktop-narrow.png')});
     assert.deepEqual(errors, []);
     const sources = ['plugin/ui/app.js','plugin/ui/index.html','plugin/ui/now-playing.js','crates/hertz-desktop/assets/desktop-lyrics.js','crates/hertz-desktop/assets/desktop-lyrics.html','crates/hertz-desktop/assets/desktop-lyrics.css','crates/hertz-studio/src/lyrics_calibration.rs','crates/hertz-desktop/src/calibration.rs','crates/hertz-desktop-ipc/src/monotonic.rs','crates/hertz-desktop-ipc/src/lib.rs','crates/hertz-desktop-ipc/Cargo.toml'];
-    const report={checks,errors,scope:'Production JS/markup with fixture transport; no OS/native or actual DBX host focus claim',sourceHashes:Object.fromEntries(sources.map(file=>[file,crypto.createHash('sha256').update(fs.readFileSync(path.join(root,file))).digest('hex')]))};
+    sources.push('scripts/check-desktop-lyrics-calibration-browser.js', 'scripts/check-calibration-controller.js');
+    const report={checks,errors,scope:'Production JS/markup with fixture transport; no OS/native or actual DBX host focus claim',outputDirectory:output,browserVersion:await browser.version(),sourceHashes:Object.fromEntries(sources.map(file=>[file,crypto.createHash('sha256').update(fs.readFileSync(path.join(root,file))).digest('hex')]))};
     fs.writeFileSync(path.join(output,'report.json'),JSON.stringify(report,null,2));
   } finally { await browser.close(); }
 }

@@ -1,5 +1,7 @@
 # 路线图实施状态
 
+2026-11-11 A10 [校准控制器期限回收](desktop-lyrics.md)：已修复停发帧时过期flight阻止重试的问题，原timer/local/cancelLocal持有期限与代际，迟到A不能清B。Node VM before失败/after通过、Chrome21项、原歌词校准25项及前端定向检查通过；Chrome退出0，原浏览器目录证据SHA保持。Full599六项历史实机不扩展为当前或真实DBX交接资格，跨build零请求与配套恢复等剩余项继续。
+
 2026-11-11 A04/P2-03 [GLB FLOAT TRS动画内容子集](wallpaper-model-resources.md)已接同一ModelStructure与BIN扫描，验证引用/目标/count、三种插值存储、actual时间键和关键帧四元数；cubic非unit有限导数保留，layout alias全部角色合并，省略animations合法但显式空数组拒绝。pure171/动画18、desktop assets11通过，正确动画快照安装重开与坏时间键无投影拒绝有证据。运行门保持，normalized动画/morph/skinning/实际准备/loader/动画播放及完整总目标继续。
 
 2026-11-11 A04/P2-03 [GLB静态BIN数值检查](wallpaper-model-resources.md)已接唯一容器读取与typed结构，新增实际索引/有限值/bounds和NORMAL/TANGENT/COLOR_0；相同布局共享扫描，重叠不同布局先受工作量上界限制。pure153、desktop assets10通过，包含源删除后的实际NaN拒绝和正确快照重开；独立SPEC定位的FLOAT bounds原始顺序误拒绝已在component精度owner修正。opaque结果绑定完整GLB hash，模型运行门保持；动画/材质图片闭包、准备/受控loader/同renderer模型仍未完成。

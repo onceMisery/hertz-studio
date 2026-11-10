@@ -142,6 +142,8 @@ const STEPS = [
     why: '节拍分析的调度接线：先拿并发额度再写幂等表、额度持到落盘之后、落盘失败记 NotPersisted 而不是失败、HTTP 与 RPC 两个门面消费同一个 persisted（错的一边只表现为「插件里镜头不动」）。' },
   { script: 'check-lyric-calibration.js', stage: 'guard',
     why: '每曲歌词校准对在线曲的接线：三处 online: 前缀拦截已撤、读取端三段（在线取词/浮层在线分支/RPC 门面）都查同一张表、偏移各应用一次、迟到保存不改新歌读数。' },
+  { script: 'check-calibration-controller.js', stage: 'behavior',
+    why: '校准单接收端的绝对期限独立于帧交付，过期请求释放flight，迟到回调不能确认旧请求或清除新请求。' },
   { script: 'check-crash-report.js', stage: 'guard',
     why: '崩溃可观测性：钩子在 diag::init 之后立刻装且早于装配、panic 行绕过诊断开关、裁剪两阶段写、编号走到设置页且不藏在开关后面。错的形态是「崩了什么都没留下」。' },
   { script: 'check-search-history.js', stage: 'behavior',

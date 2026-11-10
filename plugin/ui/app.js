@@ -8139,6 +8139,7 @@ const calibrationUi = (() => {
       contextHandoff(window.dbxPlugin.context);
     }
     timer = setInterval(() => {
+      if (active && !local(active)) cancelLocal();
       if (flight && receiver) {
         const renewed = receiver, epoch = contextEpoch;
         call({ op: 'renew', receiverId: renewed.receiverId }).catch(() => {
