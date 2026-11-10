@@ -10,7 +10,10 @@
 
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
 use sha2::{Digest, Sha256};
 
@@ -198,15 +201,16 @@ impl AssetStore {
         package: &StagedPackage,
         entry: &hertz_wallpaper::VerifiedEntry,
         staging_job: Option<&str>,
+        cancel: &AtomicBool,
     ) -> Result<Arc<PinnedMedia>> {
+        source_pin_cancelled(cancel)?;
         let directory = staging_job.map_or_else(
             || self.package_dir(&package.package_hash),
             |job| self.staging_dir(job),
         );
         let mut original = open_immutable(&directory.join("original.hwpkg"))?;
-        let mut digest = Sha256::new();
-        std::io::copy(&mut original, &mut digest).map_err(|e| JobError::io(e.to_string()))?;
-        if format!("{:x}", digest.finalize()) != package.package_hash {
+        let (_, original_sha256) = read_source_sha256(&mut original, cancel)?;
+        if original_sha256 != package.package_hash {
             return Err(JobError::new("hash_mismatch", "准备前固定原包发生变化"));
         }
         if !package.entries.iter().any(|v| {
@@ -227,12 +231,11 @@ impl AssetStore {
         {
             return Err(JobError::new("hash_mismatch", "准备源大小发生变化"));
         }
-        let mut digest = Sha256::new();
-        let bytes =
-            std::io::copy(&mut file, &mut digest).map_err(|e| JobError::io(e.to_string()))?;
-        if bytes != entry.bytes || format!("{:x}", digest.finalize()) != entry.sha256 {
+        let (bytes, sha256) = read_source_sha256(&mut file, cancel)?;
+        if bytes != entry.bytes || sha256 != entry.sha256 {
             return Err(JobError::new("hash_mismatch", "准备源哈希发生变化"));
         }
+        source_pin_cancelled(cancel)?;
         Ok(Arc::new(PinnedMedia {
             entry: entry.clone(),
             path,
@@ -790,6 +793,44 @@ impl AssetStore {
     }
 }
 
+fn source_pin_cancelled(cancel: &AtomicBool) -> Result<()> {
+    if cancel.load(Ordering::Acquire) {
+        Err(JobError::new("cancelled", "固定资源准备已取消并退出"))
+    } else {
+        Ok(())
+    }
+}
+
+/// Cancellation is observed after the in-flight synchronous read has returned.
+fn read_source_sha256(reader: &mut impl Read, cancel: &AtomicBool) -> Result<(u64, String)> {
+    let mut chunk = [0_u8; 64 * 1024];
+    let mut digest = Sha256::new();
+    let mut bytes = 0_u64;
+    loop {
+        source_pin_cancelled(cancel)?;
+        let result = reader.read(&mut chunk);
+        let cancellation = source_pin_cancelled(cancel);
+        // A real I/O failure remains a failure even if cancellation arrived during read.
+        if let Err(error) = &result {
+            if error.kind() != std::io::ErrorKind::Interrupted {
+                return Err(JobError::io(error.to_string()));
+            }
+        }
+        cancellation?;
+        let read = match result {
+            Ok(read) => read,
+            Err(_) => continue, // Only an uncancelled Interrupted reaches this branch.
+        };
+        if read == 0 {
+            return Ok((bytes, format!("{:x}", digest.finalize())));
+        }
+        bytes = bytes
+            .checked_add(read as u64)
+            .ok_or_else(|| JobError::io("固定资源读取字节计数溢出"))?;
+        digest.update(&chunk[..read]);
+    }
+}
+
 pub(super) fn open_immutable(path: &Path) -> Result<std::fs::File> {
     use std::os::windows::fs::OpenOptionsExt;
     std::fs::OpenOptions::new()
@@ -817,6 +858,10 @@ fn free_disk_bytes(root: &Path) -> Result<u64> {
     }
     Ok(free_to_caller)
 }
+
+#[cfg(test)]
+#[path = "assets_source_pin_tests.rs"]
+mod source_pin_tests;
 
 #[cfg(test)]
 mod tests {

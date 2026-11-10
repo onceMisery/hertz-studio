@@ -4,6 +4,8 @@
 
 ## 决定
 
+2026-11-11 固定资源取消仍归原 AssetStore/ImportJobs：source pin 的原包和投影完整 SHA 流统一使用固定 64 KiB 读取与原任务 cancel，在同步 Read 真正返回后观察取消；局部句柄清理与原单槽退出顺序保持。SVG 原稿/同包字体传同一个任务标记，退役该入口两条无取消 copy，不增文件 broker、worker、账本或兼容 wrapper。此为模型准备前置，未将读窗口视作 ZIP/typed/retained 完整预算或开启模型运行门；[SVG 记录](../wallpaper-svg-resources.md)与[模型记录](../wallpaper-model-resources.md)保留具体资格边界。
+
 2026-11-11 原workspace serde_json依赖统一启用float_roundtrip，让原typed作者十进制事实按正确binary64舍入，与JS JSON.parse严格互操作。只替换原无该feature的配置，不新增解析器、expectedFacts容差或消费者回写；原有限/有界/完整hash owner、锁定版本与HWPK1/Config5保持。实际GLB/HWPK回归和跨语言逐bit结果见[模型资源实施记录](../wallpaper-model-resources.md)；native retained费用、准备/呈现预算和同renderer资格仍单独实施。
 
 2026-11-11 静态GLB准备事实仍由原纯包typed Schema产生：作者scene/node/TRS或matrix、primitive authored mode、逻辑BIN长度与声明数量直接保留，原parents/children移动复用，退役冗余node_count与mode默认值擦除。私有固定metadata visitor只提取node/mesh loader pivot；原optional null及URI存在差异用全声明固定标记保留，不另解析Value或扩大格式拒绝。原动画模块只读同一Option视图，共享schema宏使用自身绝对路径；完整hash/数字/skin owner和metadata不授予proof的边界保持。原ModelInput/jobs/预算和同renderer资格仍后续实施，不新建准备账本、loader或scheduler；事实与验证详见[资源实施记录](../wallpaper-model-resources.md)。

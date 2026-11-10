@@ -1,5 +1,12 @@
 # GLB / KTX2 资源实施记录
 
+2026-11-11，模型原生准备前置沿原 AssetStore 补齐 source pin 的取消：原包与
+投影的完整 SHA 读取使用固定 64 KiB 窗口及原任务标记，在同步读实际返回后
+观察取消，局部句柄退出后才结束任务。现有 SVG 原稿/同包字体直接消费此入口。
+这不构成 ModelInput/source-variant 证明或完整 prepare/retained/GPU 预算；
+锁定 ZIP 库的目录及 ZIP64 附加数据在读取前分配，不能用窗口大小替代其费用。
+原 canonical 包输入、返回事实的最后引用费用、完整成本和同 renderer 首帧继续。
+
 2026-11-11 数值互操作修复归原 workspace 的 `serde_json` 配置：启用锁定同库的
 `float_roundtrip`，使作者 JSON 十进制数正确舍入为与 JavaScript `JSON.parse`
 相同的 binary64。原配置在真实 4,103 节点 GLB 中有 1,090 个末位差异；修复后

@@ -143,7 +143,9 @@ pub(crate) fn pin_input(
     package: &StagedPackage,
     asset_id: &str,
     job: Option<&str>,
+    cancel: &AtomicBool,
 ) -> Result<Input> {
+    cancelled(cancel)?;
     let asset = package
         .manifest
         .assets
@@ -162,7 +164,7 @@ pub(crate) fn pin_input(
     {
         return Err(error("SVG MIME 或原稿字节限制无效"));
     }
-    let source = store.pin_source_entry(package, entry, job)?;
+    let source = store.pin_source_entry(package, entry, job, cancel)?;
     let fonts = package
         .manifest
         .assets
@@ -174,9 +176,13 @@ pub(crate) fn pin_input(
                 .iter()
                 .find(|e| e.path == a.source)
                 .ok_or_else(|| error("SVG 字体不属于固定包"))?;
-            Ok((a.id.clone(), store.pin_source_entry(package, entry, job)?))
+            Ok((
+                a.id.clone(),
+                store.pin_source_entry(package, entry, job, cancel)?,
+            ))
         })
         .collect::<Result<Vec<_>>>()?;
+    cancelled(cancel)?;
     Ok(Input {
         package_hash: package.package_hash.clone(),
         source,

@@ -962,7 +962,13 @@ async fn run_prepare_svg(
         return Err(JobError::new("asset_not_found", "SVG 原包尚未安装"));
     }
     let package = assets.read_installed_manifest(&prepare.reference.package_hash)?;
-    let input = super::svg_prepare::pin_input(assets, &package, &prepare.reference.asset_id, None)?;
+    let input = super::svg_prepare::pin_input(
+        assets,
+        &package,
+        &prepare.reference.asset_id,
+        None,
+        &request.cancel,
+    )?;
     let mut svg = super::svg_prepare::prepare(
         assets,
         library,
@@ -1013,7 +1019,8 @@ async fn qualify_vectors(
         .iter()
         .filter(|a| a.kind == hertz_wallpaper::AssetKind::Vector)
     {
-        let input = super::svg_prepare::pin_input(assets, package, &asset.id, staging)?;
+        let input =
+            super::svg_prepare::pin_input(assets, package, &asset.id, staging, &request.cancel)?;
         let mut svg = super::svg_prepare::prepare(
             assets,
             library,

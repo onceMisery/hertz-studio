@@ -195,6 +195,41 @@ fn package_with_sources(
 fn image_document() -> serde_json::Value {
     json!({"documentVersion":1,"canvas":{"width":64,"height":64,"colorSpace":"srgb","background":"#000000"},"nodes":[{"id":"picture","type":"image","stateVersion":1,"assets":{"asset":"source"},"properties":{"width":64,"height":64,"anchorX":0,"anchorY":0,"fit":"contain"}}],"timeline":{"durationSeconds":1,"loop":true,"tracks":[]},"bindings":[]})
 }
+#[test]
+fn cancelled_pin_input_releases_real_staged_source_handles() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let directory = tempfileish::temp_dir("svg-source-pin-cancel");
+    let store = AssetStore::new(directory.path()).unwrap();
+    let source = directory.path().join("source.hwpkg");
+    std::fs::write(&source, package(image_document(), json!([]))).unwrap();
+    store.snapshot_input("cancel-pin", &source, None).unwrap();
+    let package = store.validate_staged("cancel-pin").unwrap();
+    store.unpack_projection("cancel-pin", &package).unwrap();
+    let error = pin_input(
+        &store,
+        &package,
+        "source",
+        Some("cancel-pin"),
+        &AtomicBool::new(true),
+    )
+    .err()
+    .unwrap();
+    assert_eq!(error.code, "cancelled");
+    for path in [
+        store.staging_dir("cancel-pin").join("original.hwpkg"),
+        store
+            .staging_dir("cancel-pin")
+            .join("files/assets/source.svg"),
+    ] {
+        drop(
+            std::fs::OpenOptions::new()
+                .write(true)
+                .share_mode(0)
+                .open(path)
+                .unwrap(),
+        );
+    }
+}
 #[tokio::test]
 async fn exact_same_package_ttf_is_used_and_missing_family_fails() {
     use base64::Engine;
@@ -258,7 +293,14 @@ async fn exact_same_package_ttf_is_used_and_missing_family_fails() {
         media.svg().unwrap().prepare_cpu_bytes <= crate::wallpaper::budget::MAX_PREPARE_CPU_BYTES
     );
     let manifest = jobs.assets().read_installed_manifest(&hash).unwrap();
-    let input = pin_input(jobs.assets(), &manifest, "source", None).unwrap();
+    let input = pin_input(
+        jobs.assets(),
+        &manifest,
+        "source",
+        None,
+        &AtomicBool::new(false),
+    )
+    .unwrap();
     for attributes in [
         "font-family=\"Absent family\"".to_owned(),
         format!("font-family=\"{family}\" font-weight=\"700\""),
@@ -549,7 +591,14 @@ async fn legacy_svg_options_cannot_reuse_current_clip_policy_cache() {
     std::fs::write(&source, SVG).unwrap();
     let hash = import(&jobs, &source).await;
     let package = jobs.assets().read_installed_manifest(&hash).unwrap();
-    let input = pin_input(jobs.assets(), &package, "background", None).unwrap();
+    let input = pin_input(
+        jobs.assets(),
+        &package,
+        "background",
+        None,
+        &AtomicBool::new(false),
+    )
+    .unwrap();
     let library = Library::open(dir.path()).await.unwrap();
     let probe = ProbeClient::testing(|_, _| Box::pin(async { Ok(()) }));
     let cancel = AtomicBool::new(false);
@@ -921,7 +970,14 @@ async fn raw_vector_keeps_original_png_alpha_and_cache_rebuild() {
     assert_eq!(package.entries.len(), 2);
     assert_eq!(import(&jobs, &source).await, hash);
     std::fs::remove_file(&source).unwrap();
-    let input = pin_input(jobs.assets(), &package, "background", None).unwrap();
+    let input = pin_input(
+        jobs.assets(),
+        &package,
+        "background",
+        None,
+        &AtomicBool::new(false),
+    )
+    .unwrap();
     assert_eq!(std::fs::read(&input.source.path).unwrap(), SVG.as_bytes());
     let reference = crate::wallpaper::target_planner::AssetRef {
         package_hash: hash.clone(),
