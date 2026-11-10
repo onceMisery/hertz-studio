@@ -207,6 +207,8 @@ for (let i = 0; i < 12; i += 1) {
   assert.equal(c.segments, CONSTELLATION[i].lines.length, ZODIAC[i].id + ' 骨架落地后连线数变了');
   assert.equal(c.core.length, c.segments * 18, ZODIAC[i].id + ' 连线丝带（细芯）顶点数 = 连线数 × 18');
   assert.equal(c.halo.length, c.segments * 18, ZODIAC[i].id + ' 连线丝带（光晕）顶点数 = 连线数 × 18');
+  assert.equal(c.reveal.length, c.segments * 6, ZODIAC[i].id + ' 生长顺序顶点数 = 连线数 × 6');
+  assert.ok(c.reveal.every(v => v >= 0 && v <= 1), ZODIAC[i].id + ' 生长顺序必须在 [0,1]');
   const degrees = new Array(c.nodes).fill(0);
   CONSTELLATION[i].lines.forEach(([a, b]) => { degrees[a] += 1; degrees[b] += 1; });
   for (let k = 0; k < c.nodes; k += 1) {
