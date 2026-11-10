@@ -1,5 +1,16 @@
 # GLB / KTX2 资源实施记录
 
+2026-11-11 静态准备的事实续接仍归原有界 `ModelStructure`：保留作者节点、场景与
+children/root 顺序、原 f64 TRS/matrix、逻辑 BIN 长度和声明数量；primitive 的省略
+mode 与显式 TRIANGLES 分别保留。节点计数直接取 `nodes.len()`，原节点权重和
+validated parents 不另建副本。node/mesh 的 loader pivot 只保留固定布尔投影，普通、
+nested、转义键与 null metadata 保持原合法性；历史接受的显式 optional null 与
+buffer URI 字段另留全声明标记，供后续静态准备拒绝能力，不在事实层改为坏格式。
+显式 `mode:null` 仍按原规则拒绝。235 项包回归（新增事实12项）、14 项桌面资源
+检查、两 crate Clippy/格式、原 loader102及合同/ADR检查通过；真实包 source/variant
+与完整流 hash 仍由原入口检查。它尚未构造 ModelInput/JobSource、完整资源成本或
+GPU 资格，模型运行门继续等待原准备、预算和同 renderer 首帧接线。
+
 2026-11-11：原 `hertz-wallpaper::validate_package` / `validate_archive` 已在
 ZIP 路径、实际长度、SHA-256 和组合合同核验后检查模型与 KTX2 纹理容器。
 桌面导入的快照校验、安装复核和原包重开沿用此入口。
@@ -96,7 +107,7 @@ output 精确为 K×M×(cubic?3:1)，每个 cubic key 按 M 个 in→M 个 value
 
 | 资源 | 已实施检查 | 仍需实施与验收 |
 | --- | --- | --- |
-| GLB | v2容器与有界JSON；核心静态typed依赖/view/accessor/graph/变换及三角形metadata上界；同包图片/材质五槽UV引用；真实索引/有限FLOAT/bounds及NORMAL/TANGENT/COLOR_0；FLOAT TRS动画；核心skin结构/逐顶点关联、morph delta/defaults及FLOAT/normalized rotation/weights存储与实际值 | sparse、扩展、实际材质/图片解码和完整成本；受控 GLTFLoader、私有实例、绝对动画播放及GPU呈现 |
+| GLB | v2容器与有界JSON；核心静态typed依赖/view/accessor/graph/作者scene/node/变换/mode及三角形metadata上界；同包图片/材质五槽UV引用；真实索引/有限FLOAT/bounds及NORMAL/TANGENT/COLOR_0；FLOAT TRS动画；核心skin结构/逐顶点关联、morph delta/defaults及FLOAT/normalized rotation/weights存储与实际值；静态无图GLTFLoader消费/私有实例离线回归 | sparse、扩展、实际材质/图片解码、完整ModelInput/准备与成本；私有opacity材质、有效bounds、绝对动画播放及GPU呈现 |
 | KTX2 | 普通 2D header、16384 单边与 64 MP、mip 索引、DFD/KVD/SGD/level 范围及溢出/重叠；按压缩方式核验长度与层对齐 | DFD/格式语义、真实 Basis worker/转码、GPU 格式选择和预算、解码选项与 context 缓存身份 |
 
 GLB 限 `model/gltf-binary`，所有 Model source/variant 都检查。Texture 中

@@ -126,7 +126,7 @@ fn real_glb_retains_ranges_and_metadata_without_claiming_binary_validity() {
     )
     .unwrap();
     let structure = result.structure;
-    assert_eq!(structure.node_count, 1);
+    assert_eq!(structure.nodes.len(), 1);
     assert_eq!(structure.mesh_triangles_upper_bound, 1);
     assert_eq!(structure.instantiated_triangles_upper_bound, 1);
     assert!(!structure.binary_content_validated);
@@ -649,7 +649,7 @@ fn maximum_depth_five_thousand_node_chain_uses_bounded_iterative_graph_walk() {
     document["nodes"] = json!(nodes);
     document["scenes"] = json!([{"nodes":[0]}]);
     assert_eq!(
-        inspect(&document, None).structure.node_count,
+        inspect(&document, None).structure.nodes.len(),
         MAX_MODEL_NODES
     );
     document["nodes"][MAX_MODEL_NODES - 1]["children"] = json!([0]);
@@ -674,7 +674,7 @@ fn transforms_and_camera_references_are_closed_without_changing_composition_came
     document["nodes"] = json!([{"rotation":[0,0,0,1],"camera":0}]);
     document["cameras"] =
         json!([{"type":"perspective","perspective":{"yfov":1,"znear":0.1,"zfar":100}}]);
-    assert_eq!(inspect(&document, None).structure.node_count, 1);
+    assert_eq!(inspect(&document, None).structure.nodes.len(), 1);
     document["cameras"][0]["perspective"]["zfar"] = json!(0.1);
     assert_eq!(error(&document, None), "invalid_model_structure");
     document["cameras"] =

@@ -5,7 +5,7 @@
 use std::{collections::BTreeMap, fmt, io::Read, marker::PhantomData, sync::Arc};
 
 use serde::{
-    de::{self, DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor},
+    de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor},
     Deserialize, Deserializer,
 };
 
@@ -102,6 +102,8 @@ pub struct ModelPrimitive {
     pub targets: Vec<BTreeMap<String, usize>>,
     pub indices: Option<usize>,
     pub material: Option<usize>,
+    /// Missing and explicitly authored TRIANGLES remain distinct facts.
+    pub authored_mode: Option<u32>,
     pub triangles_upper_bound: u64,
 }
 
@@ -112,6 +114,41 @@ pub struct ModelMesh {
     /// Missing means all zero; finite author f64 values remain unchanged.
     pub default_weights: Option<Vec<f64>>,
     pub triangles_upper_bound: u64,
+    pub loader_pivot: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ModelNodeTransform {
+    Matrix([f64; 16]),
+    Trs {
+        translation: [f64; 3],
+        rotation: [f64; 4],
+        scale: [f64; 3],
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ModelNode {
+    pub parent: Option<usize>,
+    pub children: Vec<usize>,
+    pub mesh: Option<usize>,
+    pub camera: Option<usize>,
+    pub skin: Option<usize>,
+    pub transform: ModelNodeTransform,
+    pub loader_pivot: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelScene {
+    pub nodes: Vec<usize>,
+}
+
+/// Authored presence needed by the later static loader profile. These flags
+/// neither reject historically accepted nulls nor establish loader validity.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ModelStaticLoaderFields {
+    pub has_buffer_uri: bool,
+    pub has_null_properties: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -141,7 +178,16 @@ pub struct ModelStructure {
     pub skin_bindings: Vec<ModelSkinBinding>,
     /// All author binding/pair consumers, before any numeric layout dedup.
     pub skin_binding_pair_refs: u64,
-    pub node_count: usize,
+    pub nodes: Vec<ModelNode>,
+    pub scenes: Vec<ModelScene>,
+    pub default_scene: Option<usize>,
+    /// Logical buffer length, excluding the GLB BIN chunk's padding.
+    pub buffer_byte_length: Option<u64>,
+    pub material_count: usize,
+    pub texture_count: usize,
+    pub sampler_count: usize,
+    pub camera_count: usize,
+    pub static_loader_fields: ModelStaticLoaderFields,
     /// Aligned with original node indices; None inherits the mesh defaults.
     pub node_morph_weights: Vec<Option<Vec<f64>>>,
     pub mesh_triangles_upper_bound: u64,
@@ -236,7 +282,7 @@ fn inspect_structure(
         ));
     }
     for buffer in &document.buffers.0 {
-        if buffer.uri.is_some() {
+        if buffer.uri.value.is_some() {
             return Err(unavailable(
                 "external/data buffer URI is not available in the BIN subset",
             ));
@@ -267,7 +313,7 @@ fn inspect_structure(
         {
             return Err(invalid("bufferView range exceeds its declared buffer"));
         }
-        if view.byte_stride.is_some_and(|stride| {
+        if view.byte_stride.value.is_some_and(|stride| {
             !(4..=252).contains(&stride) || stride % 4 != 0 || stride > view.byte_length
         }) || view
             .target
@@ -281,7 +327,7 @@ fn inspect_structure(
                 offset: checked_add(binary.offset, view.byte_offset)?,
                 bytes: view.byte_length,
             },
-            byte_stride: view.byte_stride,
+            byte_stride: view.byte_stride.value,
             target: view.target,
         });
     }
@@ -311,6 +357,7 @@ fn inspect_structure(
             morph_target_count: 0,
             default_weights: None,
             triangles_upper_bound: 0,
+            loader_pivot: mesh._extras.loader_pivot,
         };
         for primitive in &mesh.primitives.0 {
             let fact =
@@ -339,6 +386,29 @@ fn inspect_structure(
         &accessors,
         &meshes,
     )?;
+    let static_loader_fields = inspect_static_loader_fields(&document);
+    let retained_nodes = document
+        .nodes
+        .0
+        .into_iter()
+        .zip(nodes.graph.parents)
+        .map(|(node, parent)| ModelNode {
+            parent,
+            children: node.children.0,
+            mesh: node.mesh.value,
+            camera: node.camera.value,
+            skin: node.skin,
+            transform: match node.matrix.value {
+                Some(matrix) => ModelNodeTransform::Matrix(matrix),
+                None => ModelNodeTransform::Trs {
+                    translation: node.translation.value.unwrap_or([0.0; 3]),
+                    rotation: node.rotation.value.unwrap_or([0.0, 0.0, 0.0, 1.0]),
+                    scale: node.scale.value.unwrap_or([1.0; 3]),
+                },
+            },
+            loader_pivot: node._extras.loader_pivot,
+        })
+        .collect();
     Ok(ModelStructure {
         buffer_views,
         accessors,
@@ -348,12 +418,53 @@ fn inspect_structure(
         skins,
         skin_bindings,
         skin_binding_pair_refs: skin_author.pair_consumers,
-        node_count: document.nodes.0.len(),
+        nodes: retained_nodes,
+        scenes: document
+            .scenes
+            .0
+            .into_iter()
+            .map(|scene| ModelScene {
+                nodes: scene.nodes.0,
+            })
+            .collect(),
+        default_scene: document.scene.value,
+        buffer_byte_length: document.buffers.0.first().map(|buffer| buffer.byte_length),
+        material_count: document.materials.0.len(),
+        texture_count: document.textures.0.len(),
+        sampler_count: document.samplers.0.len(),
+        camera_count: document.cameras.0.len(),
+        static_loader_fields,
         node_morph_weights: nodes.morph_weights,
         mesh_triangles_upper_bound,
         instantiated_triangles_upper_bound: nodes.total_triangles,
         binary_content_validated: false,
     })
+}
+
+fn inspect_static_loader_fields(document: &Schema) -> ModelStaticLoaderFields {
+    ModelStaticLoaderFields {
+        has_buffer_uri: document.buffers.0.iter().any(|buffer| buffer.uri.present),
+        has_null_properties: document.scene.is_null()
+            || document
+                .buffer_views
+                .0
+                .iter()
+                .any(|view| view.byte_stride.is_null())
+            || document.meshes.0.iter().any(|mesh| {
+                mesh.primitives
+                    .0
+                    .iter()
+                    .any(|primitive| primitive.indices.is_null() || primitive.material.is_null())
+            })
+            || document.nodes.0.iter().any(|node| {
+                node.mesh.is_null()
+                    || node.camera.is_null()
+                    || node.matrix.is_null()
+                    || node.translation.is_null()
+                    || node.rotation.is_null()
+                    || node.scale.is_null()
+            }),
+    }
 }
 
 // Check all author totals before copying facts or traversing references. Local
@@ -508,7 +619,7 @@ fn inspect_primitive(
     views: &[ModelBufferView],
     materials: &[Material],
 ) -> Result<ModelPrimitive> {
-    if primitive.mode != 4 {
+    if primitive.mode.unwrap_or(4) != 4 {
         return Err(unavailable(
             "only TRIANGLES primitives are available in the structure subset",
         ));
@@ -592,7 +703,7 @@ fn inspect_primitive(
             inspect_morph_semantic(semantic, accessor)?;
         }
     }
-    let count = if let Some(index) = primitive.indices {
+    let count = if let Some(index) = primitive.indices.value {
         let accessor = at(accessors, index, "primitive.indices")?;
         let view = at(views, accessor.buffer_view, "indices bufferView")?;
         if accessor.shape != AccessorShape::Scalar
@@ -612,7 +723,7 @@ fn inspect_primitive(
     if count % 3 != 0 {
         return Err(invalid("TRIANGLES primitive count must be divisible by 3"));
     }
-    if let Some(index) = primitive.material {
+    if let Some(index) = primitive.material.value {
         let material = at(materials, index, "primitive.material")?;
         for tex_coord in material_texture_coordinates(material) {
             if !primitive
@@ -634,8 +745,9 @@ fn inspect_primitive(
             .iter()
             .map(|target| target.0.clone())
             .collect(),
-        indices: primitive.indices,
-        material: primitive.material,
+        indices: primitive.indices.value,
+        material: primitive.material.value,
+        authored_mode: primitive.mode,
         triangles_upper_bound: count / 3,
     })
 }
@@ -679,7 +791,7 @@ fn inspect_view_roles(
                 }
                 first.get_or_insert(*index);
             }
-            if let Some(index) = primitive.indices {
+            if let Some(index) = primitive.indices.value {
                 assign(at(accessors, index, "primitive.indices")?.buffer_view, 2)?;
             }
         }
@@ -859,16 +971,18 @@ fn inspect_nodes(document: &Schema, meshes: &[ModelMesh]) -> Result<InspectedNod
     let mut node_morph_weights = Vec::with_capacity(document.nodes.0.len());
     let mut total = 0;
     for (index, node) in document.nodes.0.iter().enumerate() {
-        if node.matrix.is_some()
-            && (node.translation.is_some() || node.rotation.is_some() || node.scale.is_some())
+        if node.matrix.value.is_some()
+            && (node.translation.value.is_some()
+                || node.rotation.value.is_some()
+                || node.scale.value.is_some())
         {
             return Err(invalid("node matrix and TRS are mutually exclusive"));
         }
         for values in [
-            node.matrix.as_ref().map(|v| v.as_slice()),
-            node.translation.as_ref().map(|v| v.as_slice()),
-            node.rotation.as_ref().map(|v| v.as_slice()),
-            node.scale.as_ref().map(|v| v.as_slice()),
+            node.matrix.value.as_ref().map(|v| v.as_slice()),
+            node.translation.value.as_ref().map(|v| v.as_slice()),
+            node.rotation.value.as_ref().map(|v| v.as_slice()),
+            node.scale.value.as_ref().map(|v| v.as_slice()),
         ]
         .into_iter()
         .flatten()
@@ -877,20 +991,21 @@ fn inspect_nodes(document: &Schema, meshes: &[ModelMesh]) -> Result<InspectedNod
                 return Err(invalid("node transforms must be finite"));
             }
         }
-        if node.rotation.is_some_and(|rotation| {
+        if node.rotation.value.is_some_and(|rotation| {
             (rotation.iter().map(|value| value * value).sum::<f64>() - 1.0).abs() > 1e-4
         }) {
             return Err(invalid("node rotation quaternion must have unit length"));
         }
-        if let Some(matrix) = &node.matrix {
+        if let Some(matrix) = &node.matrix.value {
             inspect_matrix(matrix)?;
         }
-        if let Some(mesh) = node.mesh {
+        if let Some(mesh) = node.mesh.value {
             total = triangles(total, at(meshes, mesh, "node.mesh")?.triangles_upper_bound)?;
         }
         let weights = if node.weights.is_some() {
             let mesh = node
                 .mesh
+                .value
                 .ok_or_else(|| invalid("node morph weights require a mesh"))?;
             inspect_weights(
                 node.weights.as_ref(),
@@ -900,7 +1015,7 @@ fn inspect_nodes(document: &Schema, meshes: &[ModelMesh]) -> Result<InspectedNod
             None
         };
         node_morph_weights.push(weights);
-        if let Some(camera) = node.camera {
+        if let Some(camera) = node.camera.value {
             at(&document.cameras.0, camera, "node.camera")?;
         }
         for child in &node.children.0 {
@@ -1008,6 +1123,7 @@ fn inspect_skin_author(document: &Schema) -> Result<SkinAuthor> {
             at(&document.skins.0, skin, "node.skin")?;
             let mesh = node
                 .mesh
+                .value
                 .ok_or_else(|| invalid("node.skin requires a mesh"))?;
             at(&document.meshes.0, mesh, "node.skin mesh")?;
             uses = uses.checked_add(1).ok_or_else(skin_structure_limit)?;
@@ -1098,7 +1214,7 @@ fn inspect_skin_author(document: &Schema) -> Result<SkinAuthor> {
     };
     for node in &document.nodes.0 {
         if node.skin.is_some() {
-            let summary = result.mesh_ranges[node.mesh.expect("skin mesh validated")];
+            let summary = result.mesh_ranges[node.mesh.value.expect("skin mesh validated")];
             let pairs = u64::from(summary.pairs);
             let bindings = u64::from(summary.count);
             result.bindings = result
@@ -1215,6 +1331,7 @@ fn inspect_scenes(
 ) -> Result<()> {
     if document
         .scene
+        .value
         .is_some_and(|index| index >= document.scenes.0.len())
     {
         return Err(invalid("default scene is out of range"));
@@ -1329,7 +1446,7 @@ fn inspect_skins(
             if relation.0 != relation.1 && !relations.contains(&relation) {
                 relations.push(relation);
             }
-            let mesh = node.mesh.expect("skin author mesh checked");
+            let mesh = node.mesh.value.expect("skin author mesh checked");
             let range = author.mesh_ranges[mesh];
             let end = range
                 .first
@@ -1699,6 +1816,41 @@ impl<'de> Deserialize<'de> for Pending {
     }
 }
 
+/// Missing and explicit null share their legacy Option value, but only the
+/// latter is an authored property rejected by the later static loader profile.
+struct AuthoredOptional<T> {
+    present: bool,
+    value: Option<T>,
+}
+impl<T> Default for AuthoredOptional<T> {
+    fn default() -> Self {
+        Self {
+            present: false,
+            value: None,
+        }
+    }
+}
+impl<T> AuthoredOptional<T> {
+    fn is_null(&self) -> bool {
+        self.present && self.value.is_none()
+    }
+}
+// The existing private animation inspector only needs the legacy Option view.
+impl<T> std::ops::Deref for AuthoredOptional<T> {
+    type Target = Option<T>;
+    fn deref(&self) -> &Self::Target {
+        &self.value
+    }
+}
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for AuthoredOptional<T> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        Ok(Self {
+            present: true,
+            value: Option::deserialize(deserializer)?,
+        })
+    }
+}
+
 // These are private preflight schemas, not runtime scene representations.
 macro_rules! schema {
     ($name:ident { $($fields:tt)* }) => {
@@ -1707,7 +1859,7 @@ macro_rules! schema {
         struct $name {
             $($fields)*
             #[serde(default,rename="extensions")] _extensions: Pending,
-            #[serde(default,rename="extras")] _extras: Option<IgnoredAny>,
+            #[serde(default,rename="extras")] _extras: $crate::model_structure::metadata::Extras,
         }
     };
 }
@@ -1720,6 +1872,7 @@ macro_rules! named_schema {
     };
 }
 mod animation;
+mod metadata;
 
 schema!(Schema {
     #[serde(rename="asset")] _asset: AssetHeader,
@@ -1729,7 +1882,7 @@ schema!(Schema {
     #[serde(default)] meshes: Limited<Mesh,MAX_MODEL_NODES>,
     #[serde(default)] nodes: Limited<Node,MAX_MODEL_NODES>,
     #[serde(default)] scenes: Limited<Scene,MAX_MODEL_NODES>,
-    #[serde(default)] scene: Option<usize>,
+    #[serde(default)] scene: AuthoredOptional<usize>,
     #[serde(default)] images: Limited<Image,MAX_MODEL_IMAGE_RECORDS>,
     #[serde(default)] textures: Limited<Texture,MAX_MODEL_IMAGE_RECORDS>,
     #[serde(default)] samplers: Limited<Sampler,MAX_MODEL_IMAGE_RECORDS>,
@@ -1746,10 +1899,10 @@ schema!(AssetHeader {
     #[serde(default,rename="generator")] _generator:Option<String>,
     #[serde(default,rename="copyright")] _copyright:Option<String>,
 });
-named_schema!(Buffer { byte_length:u64, #[serde(default)] uri:Option<String>, });
+named_schema!(Buffer { byte_length:u64, #[serde(default)] uri:AuthoredOptional<String>, });
 named_schema!(BufferView {
     buffer:usize, #[serde(default)] byte_offset:u64, byte_length:u64,
-    #[serde(default)] byte_stride:Option<u64>, #[serde(default)] target:Option<u32>,
+    #[serde(default)] byte_stride:AuthoredOptional<u64>, #[serde(default)] target:Option<u32>,
 });
 named_schema!(Accessor {
     #[serde(default)] buffer_view:Option<usize>, #[serde(default)] byte_offset:u64,
@@ -1763,18 +1916,20 @@ named_schema!(Mesh {
     #[serde(default,deserialize_with="author_weights")] weights:Option<Limited<f64,MAX_MODEL_RECORDS>>,
 });
 schema!(Primitive {
-    attributes:Attributes, #[serde(default)] indices:Option<usize>,
-    #[serde(default)] material:Option<usize>, #[serde(default="triangle_mode")] mode:u32,
+    attributes:Attributes, #[serde(default)] indices:AuthoredOptional<usize>,
+    #[serde(default)] material:AuthoredOptional<usize>, #[serde(default,deserialize_with="optional_mode")] mode:Option<u32>,
     #[serde(default,deserialize_with="nonempty_targets")] targets:Limited<Attributes,MAX_MODEL_RECORDS>,
 });
-fn triangle_mode() -> u32 {
-    4
+fn optional_mode<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<u32>, D::Error> {
+    u32::deserialize(deserializer).map(Some)
 }
 named_schema!(Node {
     #[serde(default)] children:Limited<usize,MAX_MODEL_NODES>,
-    #[serde(default)] mesh:Option<usize>, #[serde(default)] camera:Option<usize>,
-    #[serde(default)] matrix:Option<[f64;16]>, #[serde(default)] translation:Option<[f64;3]>,
-    #[serde(default)] rotation:Option<[f64;4]>, #[serde(default)] scale:Option<[f64;3]>,
+    #[serde(default)] mesh:AuthoredOptional<usize>, #[serde(default)] camera:AuthoredOptional<usize>,
+    #[serde(default)] matrix:AuthoredOptional<[f64;16]>, #[serde(default)] translation:AuthoredOptional<[f64;3]>,
+    #[serde(default)] rotation:AuthoredOptional<[f64;4]>, #[serde(default)] scale:AuthoredOptional<[f64;3]>,
     #[serde(default,deserialize_with="optional_index")] skin:Option<usize>,
     #[serde(default,deserialize_with="author_weights")] weights:Option<Limited<f64,MAX_MODEL_RECORDS>>,
 });

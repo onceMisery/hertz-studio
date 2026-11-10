@@ -4,6 +4,8 @@
 
 ## 决定
 
+2026-11-11 静态GLB准备事实仍由原纯包typed Schema产生：作者scene/node/TRS或matrix、primitive authored mode、逻辑BIN长度与声明数量直接保留，原parents/children移动复用，退役冗余node_count与mode默认值擦除。私有固定metadata visitor只提取node/mesh loader pivot；原optional null及URI存在差异用全声明固定标记保留，不另解析Value或扩大格式拒绝。原动画模块只读同一Option视图，共享schema宏使用自身绝对路径；完整hash/数字/skin owner和metadata不授予proof的边界保持。原ModelInput/jobs/预算和同renderer资格仍后续实施，不新建准备账本、loader或scheduler；事实与验证详见[资源实施记录](../wallpaper-model-resources.md)。
+
 皮肤、舞台、音乐渠道和 JS/CSS 资源使用内置注册定义，消除新增实现时需要同步修改的重复清单。保留原生 JS、单 exe 与 DBX 分发，不增加动态插件装载器或前端构建步骤。接入步骤见 `docs/extension-guide.md`。
 
 Provider 绑定描述、实际操作、音质、凭据与就绪策略；公开 online API 保留校验、能力门和取流截止时间。`SOURCES` 只作为从注册项派生的兼容视图。已有但未开放的功能允许保留实现，能力门继续拒绝调用。
