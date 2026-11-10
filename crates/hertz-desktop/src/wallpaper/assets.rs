@@ -1269,6 +1269,115 @@ mod tests {
     }
 
     #[test]
+    fn staged_morph_weights_checks_actual_values_before_projection_and_on_reopen() {
+        use std::io::{Cursor, Write};
+        for failure in ["none", "delta", "weights"] {
+            let (store, dir) = store("model-morph-staging");
+            let mut data = Vec::new();
+            for value in [
+                0_f32, 0., 0., 1., 0., 0., 0., 1., 0., -1., 0., 0., 0., 2., 0., 0., 0., 3., 0., 1.,
+                -0.5, 1.75, 2., -1.,
+            ] {
+                data.extend(value.to_le_bytes());
+            }
+            if failure != "none" {
+                let offset = if failure == "delta" { 36 } else { 80 };
+                data[offset..offset + 4].copy_from_slice(&f32::NAN.to_le_bytes());
+            }
+            let document = serde_json::json!({"asset":{"version":"2.0"},"buffers":[{"byteLength":96}],
+                "bufferViews":[{"buffer":0,"byteLength":36},{"buffer":0,"byteOffset":36,"byteLength":36},{"buffer":0,"byteOffset":72,"byteLength":8},{"buffer":0,"byteOffset":80,"byteLength":16}],
+                "accessors":[{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[1,1,0]},
+                    {"bufferView":1,"componentType":5126,"count":3,"type":"VEC3","min":[-1,0,0],"max":[0,2,3]},
+                    {"bufferView":2,"componentType":5126,"count":2,"type":"SCALAR","min":[0],"max":[1]},
+                    {"bufferView":3,"componentType":5126,"count":4,"type":"SCALAR"}],
+                "meshes":[{"primitives":[{"attributes":{"POSITION":0},"targets":[{"POSITION":1},{}]}],"weights":[-0.5,1.75]}],
+                "nodes":[{"mesh":0,"weights":[2,-1]},{"mesh":0}],
+                "animations":[{"samplers":[{"input":2,"output":3}],"channels":[{"sampler":0,"target":{"node":0,"path":"weights"}}]}]});
+            let mut json = serde_json::to_vec(&document).unwrap();
+            while json.len() % 4 != 0 {
+                json.push(b' ');
+            }
+            let mut glb = b"glTF".to_vec();
+            glb.extend(2_u32.to_le_bytes());
+            glb.extend((28_u32 + json.len() as u32 + data.len() as u32).to_le_bytes());
+            glb.extend((json.len() as u32).to_le_bytes());
+            glb.extend(b"JSON");
+            glb.extend(json);
+            glb.extend((data.len() as u32).to_le_bytes());
+            glb.extend([b'B', b'I', b'N', 0]);
+            glb.extend(data);
+            let manifest = serde_json::json!({"formatVersion":1,"workId":"c17ed10a-5c55-4a52-85dc-7509f9e88aae",
+                "version":1,"title":"Model morph","content":{"kind":"builtin","sceneId":"zodiac","stateVersion":1,"params":{}},
+                "assets":[{"id":"model","kind":"model","source":"assets/model.glb","variants":[]}],
+                "files":[{"path":"assets/model.glb","bytes":glb.len(),"sha256":format!("{:x}",Sha256::digest(&glb)),"mime":"model/gltf-binary"}],
+                "properties":[],"permissions":{"audioSpectrum":false,"pointer":false},"license":{"code":"none","assets":"CC0-1.0","attribution":""}});
+            let parsed = serde_json::from_value(manifest.clone()).unwrap();
+            let metadata = hertz_wallpaper::model_structure::inspect_glb_resource(
+                Cursor::new(&glb),
+                glb.len() as u64,
+                &parsed,
+                "assets/model.glb",
+            )
+            .unwrap();
+            assert_eq!(metadata.structure.meshes[0].morph_target_count, 2);
+            assert_eq!(
+                metadata.structure.node_morph_weights,
+                vec![Some(vec![2., -1.]), None]
+            );
+            assert!(!metadata.structure.binary_content_validated);
+            let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+            for (path, bytes) in [
+                ("manifest.json", serde_json::to_vec(&manifest).unwrap()),
+                ("assets/model.glb", glb),
+            ] {
+                writer
+                    .start_file(path, zip::write::SimpleFileOptions::default())
+                    .unwrap();
+                writer.write_all(&bytes).unwrap();
+            }
+            let source = write_source(&dir, "morph.hwpkg", &writer.finish().unwrap().into_inner());
+            store.snapshot_input("job-morph", &source, None).unwrap();
+            std::fs::remove_file(&source).unwrap();
+            assert!(!source.exists());
+            if failure != "none" {
+                let error = store.validate_staged("job-morph").unwrap_err();
+                assert_eq!(error.code, "package_invalid");
+                assert!(error.message.starts_with("invalid_model_binary"));
+                assert!(error.message.contains("assets/model.glb"));
+                assert!(!store.staging_dir("job-morph").join("files").exists());
+                assert!(store.package_dirs().is_empty());
+                store.discard_staging("job-morph");
+                assert!(!store.staging_dir("job-morph").exists());
+            } else {
+                let staged = store.validate_staged("job-morph").unwrap();
+                store.unpack_projection("job-morph", &staged).unwrap();
+                store
+                    .content_writer()
+                    .unwrap()
+                    .publish_staging("job-morph", &staged.package_hash)
+                    .unwrap();
+                assert!(!store.staging_dir("job-morph").exists());
+                assert!(store
+                    .verify_installed(&staged.package_hash)
+                    .unwrap()
+                    .is_some());
+                drop(store);
+                let reopened = AssetStore::new(dir.path()).unwrap();
+                assert!(reopened
+                    .verify_installed(&staged.package_hash)
+                    .unwrap()
+                    .is_some());
+                let installed = reopened
+                    .read_installed_manifest(&staged.package_hash)
+                    .unwrap();
+                assert_eq!(installed.entries.len(), 1);
+                assert_eq!(installed.entries[0].path, "assets/model.glb");
+                assert_eq!(installed.package_hash, staged.package_hash);
+            }
+        }
+    }
+
+    #[test]
     fn disk_space_check_rejects_oversize_request() {
         let (store, _dir) = store("disk");
         let error = store.check_disk_space(u64::MAX / 2).unwrap_err();

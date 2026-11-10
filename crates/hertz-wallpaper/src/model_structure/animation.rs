@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-//! Typed TRS animation storage facts owned by the model structure inspector.
+//! Typed TRS and FLOAT morph weights storage facts owned by the structure inspector.
 
 use std::collections::BTreeSet;
 
@@ -7,7 +7,8 @@ use serde::{de::IgnoredAny, Deserialize, Deserializer};
 
 use super::{
     at, checked_mul, component_precision, invalid, unavailable, AccessorShape, Limited,
-    ModelAccessor, ModelBufferView, Node, Pending, MAX_MODEL_ANIMATIONS, MAX_MODEL_RECORDS,
+    ModelAccessor, ModelBufferView, ModelMesh, Node, Pending, MAX_MODEL_ANIMATIONS,
+    MAX_MODEL_RECORDS,
 };
 use crate::{PackageError, Result};
 
@@ -132,6 +133,7 @@ pub(super) fn inspect_animations(
     animations: &[Animation],
     nodes: &[Node],
     accessors: &[ModelAccessor],
+    meshes: &[ModelMesh],
 ) -> Result<Vec<ModelAnimation>> {
     let mut total_samplers = 0_usize;
     let mut total_channels = 0_usize;
@@ -186,12 +188,19 @@ pub(super) fn inspect_animations(
                 continue;
             };
             let node = at(nodes, node_index, "animation target node")?;
-            if channel.target.path == AnimationPath::Weights {
-                return Err(unavailable(
-                    "weights animation requires qualified morph content",
-                ));
-            }
-            if node.matrix.is_some() {
+            let morph_count = if channel.target.path == AnimationPath::Weights {
+                let mesh = node
+                    .mesh
+                    .ok_or_else(|| invalid("weights animation target requires a mesh"))?;
+                let count = at(meshes, mesh, "weights animation mesh")?.morph_target_count;
+                if count == 0 {
+                    return Err(invalid("weights animation target requires morph targets"));
+                }
+                count as u64
+            } else {
+                1
+            };
+            if node.matrix.is_some() && channel.target.path != AnimationPath::Weights {
                 return Err(invalid("TRS animation cannot target a node with matrix"));
             }
             if !targets.insert((node_index, channel.target.path)) {
@@ -201,36 +210,36 @@ pub(super) fn inspect_animations(
             }
             let input = &accessors[sampler.input];
             let output = &accessors[sampler.output];
-            let shape = if channel.target.path == AnimationPath::Rotation {
-                AccessorShape::Vec4
-            } else {
-                AccessorShape::Vec3
+            let shape = match channel.target.path {
+                AnimationPath::Rotation => AccessorShape::Vec4,
+                AnimationPath::Weights => AccessorShape::Scalar,
+                _ => AccessorShape::Vec3,
             };
             if output.shape != shape {
                 return Err(invalid(
                     "animation output shape disagrees with the target property",
                 ));
             }
-            if output.component_type != 5126 || output.normalized {
-                if channel.target.path == AnimationPath::Rotation
-                    && output.normalized
-                    && [5120, 5121, 5122, 5123].contains(&output.component_type)
-                {
-                    return Err(unavailable(
-                        "normalized rotation animation requires qualified component precision",
-                    ));
-                }
-                return Err(invalid("TRS animation output requires FLOAT components"));
-            }
             let multiplier = if sampler.interpolation == AnimationInterpolation::CubicSpline {
                 3
             } else {
                 1
             };
-            if output.count != checked_mul(input.count, multiplier)? {
+            if output.count != checked_mul(checked_mul(input.count, morph_count)?, multiplier)? {
                 return Err(invalid(
                     "animation output count disagrees with timestamp/interpolation layout",
                 ));
+            }
+            if output.component_type != 5126 || output.normalized {
+                if matches!(
+                    channel.target.path,
+                    AnimationPath::Rotation | AnimationPath::Weights
+                ) && output.normalized
+                    && [5120, 5121, 5122, 5123].contains(&output.component_type)
+                {
+                    return Err(unavailable("normalized rotation/weights animation requires qualified component precision"));
+                }
+                return Err(invalid("animation output requires FLOAT components"));
             }
             duration = duration.max(component_precision(
                 input.max.as_ref().expect("input bounds checked")[0],

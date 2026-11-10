@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
-//! Static accessor values checked on one bounded GLB stream. This does not
-//! qualify image codecs, animations, resource preparation, loaders or the GPU.
+//! Static, morph delta and FLOAT animation values checked on one bounded GLB
+//! stream. This does not qualify normalized animation precision, image codecs,
+//! resource preparation, animation playback, loaders or the GPU.
 
 use std::{
     cmp::Reverse,
@@ -209,6 +210,8 @@ fn inspect_accessors<R: Read>(
                 );
             }
             for (semantic, &index) in &primitive.attributes {
+                // Only actual base attributes acquire these value roles. Morph
+                // deltas are already scanned through the unique accessor jobs.
                 let job = &mut jobs[mapping[index]];
                 job.normal |= semantic == "NORMAL";
                 job.tangent |= semantic == "TANGENT";

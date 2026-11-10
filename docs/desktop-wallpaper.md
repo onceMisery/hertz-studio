@@ -1,5 +1,7 @@
 # Hertz 壁纸引擎 P0–P3 开发设计与实施计划
 
+2026-11-11 [GLB morph/FLOAT weights内容检查](wallpaper-model-resources.md)已沿原结构与数字owner接通核心target/defaults与权重动画：混合primitive、empty target、负/>1作者weights、delta角色和checked K×M×factor存储有真实GLB反例，读前总限额与唯一layout扫描保持。pure186（morph15）、desktop assets12及Clippy/fmt/合同/ADR检查通过。source删除后的坏delta/weights无投影拒绝和正确快照安装重开已验证；normalized动画、skin/sparse/codec/准备/受控loader/绝对求值/同renderer模型继续实施，模型运行门保持关闭。
+
 2026-11-11 [GLB FLOAT TRS动画内容检查](wallpaper-model-resources.md)已在同一typed/数字owner检查三种TRS属性与STEP/LINEAR/CUBICSPLINE、真实严格递增时间键及四元数值；ignored channel、view角色、精确count、跨alias约束及显式空动画数组拒绝有反例。pure171（动画18）及desktop assets11通过。文件内容事实仍不授予模型/动画播放，normalized动画/morph/骨骼/codec/准备/loader与同renderer模型继续实施。
 
 2026-11-11 [GLB静态BIN实际数值检查](wallpaper-model-resources.md)已沿同一流接原包入口：固定64 KiB窗口、重复布局去重与读前工作上界，检查真实索引/有限FLOAT/实际bounds及法线、切线和COLOR_0。检查结果绑定完整GLB digest并在原archive再次核对。纯包153项、桌面资源10项通过；FLOAT bounds顺序与实际极值按同一f32精度比较，metadata仍不授予binary整体或模型运行资格，动画/图片codec/准备/loader/GPU继续实施。

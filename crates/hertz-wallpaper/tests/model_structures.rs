@@ -1025,11 +1025,8 @@ fn pending_content_and_nested_extension_payloads_cannot_hide_dependencies() {
         "/buffers/0/extensions",
         "/bufferViews/0/extensions",
         "/accessors/0/sparse",
-        "/meshes/0/weights",
-        "/meshes/0/primitives/0/targets",
         "/meshes/0/primitives/0/extensions",
         "/nodes/0/skin",
-        "/nodes/0/weights",
     ] {
         let mut document = triangle();
         let (object, key) = pointer.rsplit_once('/').unwrap();
@@ -1037,6 +1034,20 @@ fn pending_content_and_nested_extension_payloads_cannot_hide_dependencies() {
         assert_eq!(
             error(&document, Some(&triangle_binary())),
             "model_resource_unavailable",
+            "{pointer}"
+        );
+    }
+    for pointer in [
+        "/meshes/0/weights",
+        "/meshes/0/primitives/0/targets",
+        "/nodes/0/weights",
+    ] {
+        let mut document = triangle();
+        let (object, key) = pointer.rsplit_once('/').unwrap();
+        document.pointer_mut(object).unwrap()[key] = json!({});
+        assert_eq!(
+            error(&document, Some(&triangle_binary())),
+            "invalid_model_structure",
             "{pointer}"
         );
     }

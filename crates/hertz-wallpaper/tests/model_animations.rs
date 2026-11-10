@@ -426,6 +426,20 @@ fn normalized_rotation_weights_and_extensions_stay_explicitly_unavailable() {
     assert_eq!(error(&document, &data).code, "model_resource_unavailable");
     let (mut document, data) = ordinary();
     document["animations"][0]["channels"][0]["target"]["path"] = json!("weights");
+    document["accessors"][1]["componentType"] = json!(5123);
+    document["accessors"][1]["normalized"] = json!(true);
+    document["accessors"][1]["type"] = json!("SCALAR");
+    document["accessors"][1]["count"] = json!(4);
+    document["buffers"][0]["byteLength"] = json!(data.len() + 36);
+    document["bufferViews"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"buffer":0,"byteOffset":data.len(),"byteLength":36}));
+    document["accessors"].as_array_mut().unwrap().push(json!({"bufferView":2,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[0,0,0]}));
+    document["meshes"] = json!([{"primitives":[{"attributes":{"POSITION":2},"targets":[{},{}]}]}]);
+    document["nodes"][0]["mesh"] = json!(0);
+    let mut data = data;
+    data.extend([0; 36]);
     assert_eq!(error(&document, &data).code, "model_resource_unavailable");
     for pointer in [
         "/animations/0/extensions",

@@ -98,14 +98,19 @@ pub struct ModelAccessor {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelPrimitive {
     pub attributes: BTreeMap<String, usize>,
+    /// Author maps only; omitted targets are not expanded into zero deltas.
+    pub targets: Vec<BTreeMap<String, usize>>,
     pub indices: Option<usize>,
     pub material: Option<usize>,
     pub triangles_upper_bound: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ModelMesh {
     pub primitives: Vec<ModelPrimitive>,
+    pub morph_target_count: usize,
+    /// Missing means all zero; finite author f64 values remain unchanged.
+    pub default_weights: Option<Vec<f64>>,
     pub triangles_upper_bound: u64,
 }
 
@@ -117,6 +122,8 @@ pub struct ModelStructure {
     pub images: Vec<ModelImage>,
     pub animations: Vec<ModelAnimation>,
     pub node_count: usize,
+    /// Aligned with original node indices; None inherits the mesh defaults.
+    pub node_morph_weights: Vec<Option<Vec<f64>>>,
     pub mesh_triangles_upper_bound: u64,
     /// Includes every mesh-bearing node, even outside the default scene.
     pub instantiated_triangles_upper_bound: u64,
@@ -201,6 +208,7 @@ fn inspect_structure(
     manifest: &Manifest,
     path: &str,
 ) -> Result<ModelStructure> {
+    inspect_morph_totals(&document)?;
     if !document.extensions_used.0.is_empty() || !document.extensions_required.0.is_empty() {
         return Err(unavailable(
             "model extensions require a qualified content adapter",
@@ -279,22 +287,37 @@ fn inspect_structure(
         }
         let mut result = ModelMesh {
             primitives: Vec::with_capacity(mesh.primitives.0.len()),
+            morph_target_count: 0,
+            default_weights: None,
             triangles_upper_bound: 0,
         };
         for primitive in &mesh.primitives.0 {
             let fact =
                 inspect_primitive(primitive, &accessors, &buffer_views, &document.materials.0)?;
+            if !fact.targets.is_empty() {
+                if result.morph_target_count != 0 && result.morph_target_count != fact.targets.len()
+                {
+                    return Err(invalid("mesh primitives disagree on morph target count"));
+                }
+                result.morph_target_count = fact.targets.len();
+            }
             result.triangles_upper_bound =
                 triangles(result.triangles_upper_bound, fact.triangles_upper_bound)?;
             result.primitives.push(fact);
         }
+        result.default_weights = inspect_weights(mesh.weights.as_ref(), result.morph_target_count)?;
         mesh_triangles_upper_bound =
             triangles(mesh_triangles_upper_bound, result.triangles_upper_bound)?;
         meshes.push(result);
     }
-    let instantiated_triangles_upper_bound = inspect_nodes(&document, &meshes)?;
-    let animations =
-        animation::inspect_animations(&document.animations.0, &document.nodes.0, &accessors)?;
+    let (instantiated_triangles_upper_bound, node_morph_weights) =
+        inspect_nodes(&document, &meshes)?;
+    let animations = animation::inspect_animations(
+        &document.animations.0,
+        &document.nodes.0,
+        &accessors,
+        &meshes,
+    )?;
     Ok(ModelStructure {
         buffer_views,
         accessors,
@@ -302,10 +325,67 @@ fn inspect_structure(
         images,
         animations,
         node_count: document.nodes.0.len(),
+        node_morph_weights,
         mesh_triangles_upper_bound,
         instantiated_triangles_upper_bound,
         binary_content_validated: false,
     })
+}
+
+// Check all author totals before copying facts or traversing references. Local
+// arrays/maps were already bounded before deserializing each extra element.
+fn inspect_morph_totals(document: &Schema) -> Result<()> {
+    let mut targets = 0usize;
+    let mut references = 0usize;
+    let mut weights = 0usize;
+    let add = |total: &mut usize, count: usize| -> Result<()> {
+        *total = total.checked_add(count).ok_or_else(|| {
+            PackageError::new("model_structure_limit", "morph author total overflow")
+        })?;
+        if *total > MAX_MODEL_RECORDS {
+            return Err(PackageError::new(
+                "model_structure_limit",
+                "morph author total exceeds 16384",
+            ));
+        }
+        Ok(())
+    };
+    for mesh in &document.meshes.0 {
+        if let Some(values) = &mesh.weights {
+            add(&mut weights, values.0.len())?;
+        }
+        for primitive in &mesh.primitives.0 {
+            add(&mut targets, primitive.targets.0.len())?;
+            for target in &primitive.targets.0 {
+                add(&mut references, target.0.len())?;
+            }
+        }
+    }
+    for node in &document.nodes.0 {
+        if let Some(values) = &node.weights {
+            add(&mut weights, values.0.len())?;
+        }
+    }
+    Ok(())
+}
+
+fn inspect_weights(
+    values: Option<&Limited<f64, MAX_MODEL_RECORDS>>,
+    count: usize,
+) -> Result<Option<Vec<f64>>> {
+    values
+        .map(|values| {
+            if count == 0
+                || values.0.len() != count
+                || values.0.iter().any(|value| !value.is_finite())
+            {
+                return Err(invalid(
+                    "morph weights require a morph mesh, matching length and finite values",
+                ));
+            }
+            Ok(values.0.clone())
+        })
+        .transpose()
 }
 
 impl AccessorShape {
@@ -455,6 +535,28 @@ fn inspect_primitive(
             }
         }
     }
+    for target in &primitive.targets.0 {
+        for (semantic, index) in &target.0 {
+            if !primitive.attributes.0.contains_key(semantic) {
+                return Err(invalid(
+                    "morph target semantic must exist in base attributes",
+                ));
+            }
+            let accessor = at(accessors, *index, "morph target accessor")?;
+            let view = &views[accessor.buffer_view];
+            if accessor.count != position.count
+                || accessor.byte_offset % 4 != 0
+                || accessor.stride % 4 != 0
+                || (![5125, 5126].contains(&accessor.component_type) && view.byte_stride.is_none())
+                || view.target == Some(34963)
+            {
+                return Err(invalid(
+                    "morph target count or vertex alignment/target is invalid",
+                ));
+            }
+            inspect_morph_semantic(semantic, accessor)?;
+        }
+    }
     let count = if let Some(index) = primitive.indices {
         let accessor = at(accessors, index, "primitive.indices")?;
         let view = at(views, accessor.buffer_view, "indices bufferView")?;
@@ -491,6 +593,12 @@ fn inspect_primitive(
     }
     Ok(ModelPrimitive {
         attributes: primitive.attributes.0.clone(),
+        targets: primitive
+            .targets
+            .0
+            .iter()
+            .map(|target| target.0.clone())
+            .collect(),
         indices: primitive.indices,
         material: primitive.material,
         triangles_upper_bound: count / 3,
@@ -516,7 +624,13 @@ fn inspect_view_roles(
     };
     for mesh in &document.meshes.0 {
         for primitive in &mesh.primitives.0 {
-            for index in primitive.attributes.0.values() {
+            for index in primitive.attributes.0.values().chain(
+                primitive
+                    .targets
+                    .0
+                    .iter()
+                    .flat_map(|target| target.0.values()),
+            ) {
                 let accessor = at(accessors, *index, "primitive attribute")?;
                 assign(accessor.buffer_view, 1)?;
                 vertex_accessors[*index] = true;
@@ -647,8 +761,44 @@ fn semantic_set(name: &str, prefix: &str) -> bool {
     })
 }
 
-fn inspect_nodes(document: &Schema, meshes: &[ModelMesh]) -> Result<u64> {
+fn inspect_morph_semantic(semantic: &str, accessor: &ModelAccessor) -> Result<()> {
+    let float = accessor.component_type == 5126 && !accessor.normalized;
+    let normalized =
+        accessor.normalized && [5120, 5121, 5122, 5123].contains(&accessor.component_type);
+    let valid = match semantic {
+        "POSITION" => {
+            float
+                && accessor.shape == AccessorShape::Vec3
+                && accessor.min.is_some()
+                && accessor.max.is_some()
+        }
+        "NORMAL" | "TANGENT" => float && accessor.shape == AccessorShape::Vec3,
+        name if semantic_set(name, "TEXCOORD_") => {
+            (float || normalized) && accessor.shape == AccessorShape::Vec2
+        }
+        name if semantic_set(name, "COLOR_") => {
+            (float || normalized)
+                && matches!(accessor.shape, AccessorShape::Vec3 | AccessorShape::Vec4)
+        }
+        name if name.starts_with('_')
+            || name.starts_with("JOINTS_")
+            || name.starts_with("WEIGHTS_") =>
+        {
+            return inspect_semantic(name, accessor)
+        }
+        _ => false,
+    };
+    if !valid {
+        return Err(invalid(format!(
+            "morph target {semantic} has invalid semantic/component/type/bounds"
+        )));
+    }
+    Ok(())
+}
+
+fn inspect_nodes(document: &Schema, meshes: &[ModelMesh]) -> Result<(u64, Vec<Option<Vec<f64>>>)> {
     let mut parents = vec![None; document.nodes.0.len()];
+    let mut node_morph_weights = Vec::with_capacity(document.nodes.0.len());
     let mut total = 0;
     for (index, node) in document.nodes.0.iter().enumerate() {
         if node.matrix.is_some()
@@ -680,6 +830,18 @@ fn inspect_nodes(document: &Schema, meshes: &[ModelMesh]) -> Result<u64> {
         if let Some(mesh) = node.mesh {
             total = triangles(total, at(meshes, mesh, "node.mesh")?.triangles_upper_bound)?;
         }
+        let weights = if node.weights.is_some() {
+            let mesh = node
+                .mesh
+                .ok_or_else(|| invalid("node morph weights require a mesh"))?;
+            inspect_weights(
+                node.weights.as_ref(),
+                at(meshes, mesh, "node.mesh")?.morph_target_count,
+            )?
+        } else {
+            None
+        };
+        node_morph_weights.push(weights);
         if let Some(camera) = node.camera {
             at(&document.cameras.0, camera, "node.camera")?;
         }
@@ -725,7 +887,7 @@ fn inspect_nodes(document: &Schema, meshes: &[ModelMesh]) -> Result<u64> {
     for camera in &document.cameras.0 {
         inspect_camera(camera)?;
     }
-    Ok(total)
+    Ok((total, node_morph_weights))
 }
 
 fn inspect_matrix(matrix: &[f64; 16]) -> Result<()> {
@@ -1017,6 +1179,24 @@ impl<'de, T: Deserialize<'de>, const N: usize> Deserialize<'de> for Limited<T, N
     }
 }
 struct Attributes(BTreeMap<String, usize>);
+fn nonempty_targets<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Limited<Attributes, MAX_MODEL_RECORDS>, D::Error> {
+    let targets = Limited::deserialize(deserializer)?;
+    if targets.0.is_empty() {
+        return Err(de::Error::custom("targets must be nonempty when present"));
+    }
+    Ok(targets)
+}
+fn author_weights<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<Limited<f64, MAX_MODEL_RECORDS>>, D::Error> {
+    let values = Limited::deserialize(deserializer)?;
+    if values.0.is_empty() {
+        return Err(de::Error::custom("weights must be nonempty when present"));
+    }
+    Ok(Some(values))
+}
 impl<'de> Deserialize<'de> for Attributes {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
         struct Attrs;
@@ -1030,7 +1210,7 @@ impl<'de> Deserialize<'de> for Attributes {
                 mut map: A,
             ) -> std::result::Result<Self::Value, A::Error> {
                 let mut values = BTreeMap::new();
-                while values.len() < MAX_MODEL_ATTRIBUTES {
+                for _ in 0..MAX_MODEL_ATTRIBUTES {
                     let Some(key) = map.next_key::<String>()? else {
                         return Ok(Attributes(values));
                     };
@@ -1038,6 +1218,9 @@ impl<'de> Deserialize<'de> for Attributes {
                         return Err(de::Error::custom(
                             "model_structure_limit: attribute name exceeds 64 bytes",
                         ));
+                    }
+                    if values.contains_key(&key) {
+                        return Err(de::Error::custom("duplicate attribute semantic"));
                     }
                     values.insert(key, map.next_value()?);
                 }
@@ -1053,7 +1236,7 @@ struct Pending;
 impl<'de> Deserialize<'de> for Pending {
     fn deserialize<D: Deserializer<'de>>(_: D) -> std::result::Result<Self, D::Error> {
         Err(de::Error::custom(
-            "model_resource_unavailable: extension/skin/morph/sparse content is pending validation",
+            "model_resource_unavailable: extension/skin/sparse content is pending validation",
         ))
     }
 }
@@ -1119,12 +1302,12 @@ named_schema!(Accessor {
 });
 named_schema!(Mesh {
     primitives:Limited<Primitive,MAX_MODEL_RECORDS>,
-    #[serde(default,rename="weights")] _weights:Pending,
+    #[serde(default,deserialize_with="author_weights")] weights:Option<Limited<f64,MAX_MODEL_RECORDS>>,
 });
 schema!(Primitive {
     attributes:Attributes, #[serde(default)] indices:Option<usize>,
     #[serde(default)] material:Option<usize>, #[serde(default="triangle_mode")] mode:u32,
-    #[serde(default,rename="targets")] _targets:Pending,
+    #[serde(default,deserialize_with="nonempty_targets")] targets:Limited<Attributes,MAX_MODEL_RECORDS>,
 });
 fn triangle_mode() -> u32 {
     4
@@ -1134,7 +1317,8 @@ named_schema!(Node {
     #[serde(default)] mesh:Option<usize>, #[serde(default)] camera:Option<usize>,
     #[serde(default)] matrix:Option<[f64;16]>, #[serde(default)] translation:Option<[f64;3]>,
     #[serde(default)] rotation:Option<[f64;4]>, #[serde(default)] scale:Option<[f64;3]>,
-    #[serde(default,rename="skin")] _skin:Pending, #[serde(default,rename="weights")] _weights:Pending,
+    #[serde(default,rename="skin")] _skin:Pending,
+    #[serde(default,deserialize_with="author_weights")] weights:Option<Limited<f64,MAX_MODEL_RECORDS>>,
 });
 named_schema!(Scene { #[serde(default)] nodes:Limited<usize,MAX_MODEL_NODES>, });
 named_schema!(Image {
