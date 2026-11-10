@@ -1,24 +1,18 @@
 // SPDX-License-Identifier: MIT
 // Deep space and perspective star travel share the performance's frozen clock.
 import { own, seed } from './factories.js';
+import { phoenixColor } from './phoenix-color.js';
 
 export const phoenixAtmosphereVertex = `
 varying vec2 vUv;
 void main(){vUv=uv;gl_Position=vec4(position.xy,1.0,1.0);}
 `;
 
-export const phoenixAtmosphereFragment = `
+export const phoenixAtmosphereFragment = phoenixColor + `
 uniform float uTime,uAspect,uFlash,uHatch,uFine;
+uniform sampler2D uSpaceNoise;
 varying vec2 vUv;
-float hash(vec2 p){return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453);}
-float noise(vec2 p){
- vec2 i=floor(p),f=fract(p);f=f*f*(3.0-2.0*f);
- return mix(mix(hash(i),hash(i+vec2(1,0)),f.x),mix(hash(i+vec2(0,1)),hash(i+1.0),f.x),f.y);
-}
-float fbm(vec2 p){
- float n=noise(p)*.53+noise(p*2.03+7.1)*.28+noise(p*4.11+13.7)*.13;
- return uFine>.5?n+noise(p*8.17+21.3)*.06:n/.94;
-}
+float fbm(vec2 p){vec2 f=texture2D(uSpaceNoise,p*.25).rg;return mix(f.r,f.g,step(.5,uFine));}
 void main(){
  vec2 p=(vUv-.5)*vec2(uAspect,1.0)*18.0;
  float r=length(p),t=uTime*.025;
@@ -38,7 +32,7 @@ void main(){
  color+=vec3(.2,.075,.02)*wave;
  color+=vec3(.055,.025,.008)*uFlash*chamber;
  color*=1.0-smoothstep(.3,.85,length(vUv-.5))*.55;
- gl_FragColor=vec4(color,1.0);
+ gl_FragColor=vec4(phoenixFinish(color),1.0);
  #include <colorspace_fragment>
 }`;
 
@@ -47,7 +41,7 @@ attribute vec4 aStar;
 attribute float aEnd;
 uniform float uTravel,uSpeed,uTime,uHeight,uPixel;
 varying vec3 vColor;
-varying float vAlpha;
+varying float vAlpha,vDepth;
 void main(){
  // Integrating travel avoids position jumps as the flight slows into an egg.
  float head=14.0-mod(aStar.z*110.0-uTravel*(.65+aStar.w*.7),110.0);
@@ -58,6 +52,7 @@ void main(){
  p.xy+=vec2(sin(uTime*.42),sin(uTime*.62))*.4;
  vec4 mv=modelViewMatrix*vec4(p,1.0);
  gl_Position=projectionMatrix*mv;
+ vDepth=clamp((-mv.z-8.0)/60.0,0.0,1.0);
  float nearFade=1.0-smoothstep(9.0,14.0,head);
  float farFade=smoothstep(-96.0,-70.0,head);
  vec3 silver=mix(vec3(.25,.33,.36),vec3(.8,.85,.88),aStar.w);
@@ -71,15 +66,16 @@ void main(){
  #endif
 }`;
 
-const starFragment = `
-varying vec3 vColor;varying float vAlpha;
+const starFragment = phoenixColor + `
+varying vec3 vColor;varying float vAlpha,vDepth;
 void main(){
  float alpha=vAlpha;
  #ifndef STREAK
  float d=length(gl_PointCoord-.5);if(d>.5)discard;
  alpha*=exp(-d*d*24.0);
  #endif
- gl_FragColor=vec4(vColor,alpha);
+ vec3 tint=mix(vColor,vColor*vec3(.78,.89,1.12),vDepth*.55);
+ gl_FragColor=vec4(phoenixFinish(tint),alpha);
  #include <colorspace_fragment>
 }`;
 
@@ -90,7 +86,7 @@ float noise(vec2 p){vec2 i=floor(p),f=fract(p);f=f*f*(3.0-2.0*f);
 float smoke(vec2 p){return noise(p)*.57+noise(p*2.03+7.1)*.28+noise(p*4.1+13.7)*.15;}
 `;
 
-const ashFragment = `
+const ashFragment = phoenixColor + `
 uniform float uTime,uFlash,uGather; varying vec2 vUv;
 ${sanctumNoise}
 void main(){
@@ -104,12 +100,12 @@ void main(){
  color+=vec3(.2,.075,.012)*rim*channels*(.35+uGather*.2+uFlash*.55);
  float alpha=(.12+n*.33+drift*.24)*(1.0-smoothstep(14.0,25.0,r));
  color*=.65+drift*.75+uFlash*.25;
- gl_FragColor=vec4(color,alpha);
+ gl_FragColor=vec4(phoenixFinish(color),alpha);
  #include <colorspace_fragment>
 }`;
 
 const cinderVertex = `
-uniform float uTime; varying vec2 vUv; varying float vFade;
+uniform float uTime; varying vec2 vUv; varying float vFade,vDepth;
 void main(){
  float progress=position.x, lane=position.z, edge=position.y;
  float angle=progress*8.8+lane*2.0943951+uTime*.095;
@@ -119,11 +115,13 @@ void main(){
  p.y+=sin(angle*2.0-uTime*.28+lane)*.13+width*.45;
  vUv=vec2(progress,edge*.5+.5);
  vFade=smoothstep(0.0,.12,progress)*(1.0-smoothstep(.72,1.0,progress));
- gl_Position=projectionMatrix*modelViewMatrix*vec4(p,1.0);
+ vec4 mv=modelViewMatrix*vec4(p,1.0);
+ gl_Position=projectionMatrix*mv;
+ vDepth=clamp((-mv.z-4.0)/24.0,0.0,1.0);
 }`;
 
-const cinderFragment = `
-uniform float uTime,uFlash,uGather; varying vec2 vUv; varying float vFade;
+const cinderFragment = phoenixColor + `
+uniform float uTime,uFlash,uGather; varying vec2 vUv; varying float vFade,vDepth;
 ${sanctumNoise}
 void main(){
  float n=smoke(vec2(vUv.x*31.0-uTime*.2,vUv.y*3.0));
@@ -132,13 +130,14 @@ void main(){
  float breaks=smoothstep(.28,.68,n);
  float alpha=(thread*.5+vapor)*breaks*vFade*(.45+uGather*.3+uFlash*.6);
  vec3 color=mix(vec3(.48,.14,.028),vec3(1.1,.58,.17),thread*n);
- gl_FragColor=vec4(color,alpha);
+ color=mix(color,color*vec3(.82,.90,1.08),vDepth*.45);
+ gl_FragColor=vec4(phoenixFinish(color),alpha);
  #include <colorspace_fragment>
 }`;
 
 const nearEmberVertex = `
 attribute vec4 aEmber;
-uniform float uTime,uHeight,uPixel,uFlash; varying float vAlpha,vSeed;
+uniform float uTime,uHeight,uPixel,uFlash; varying float vAlpha,vSeed,vDepth;
 void main(){
  float life=fract(aEmber.x+uTime*(.045+aEmber.w*.045));
  float angle=aEmber.y*6.2831853+life*.8;
@@ -147,21 +146,24 @@ void main(){
  p.x+=sin(life*7.0+aEmber.w*20.0)*.4;
  vec4 mv=modelViewMatrix*vec4(p,1.0);
  gl_Position=projectionMatrix*mv;
+ vDepth=clamp((-mv.z-6.0)/26.0,0.0,1.0);
  float nearFade=smoothstep(2.0,6.0,-mv.z);
  gl_PointSize=clamp(uPixel*uHeight*(.035+aEmber.w*.09)/max(2.0,-mv.z),1.0,9.0);
  vAlpha=sin(life*3.14159265)*(.16+aEmber.w*.48)*nearFade*(1.0+uFlash*.5);
  vSeed=aEmber.w;
 }`;
 
-const nearEmberFragment = `
-varying float vAlpha,vSeed;
+const nearEmberFragment = phoenixColor + `
+varying float vAlpha,vSeed,vDepth;
 void main(){
  vec2 p=gl_PointCoord-.5;
  float angle=vSeed*6.2831853;
  p=mat2(cos(angle),-sin(angle),sin(angle),cos(angle))*p;
  float d=length(p*vec2(1.0,1.8));
  if(d>.5)discard;
- gl_FragColor=vec4(mix(vec3(.68,.23,.055),vec3(1.2,.76,.32),vSeed),exp(-d*d*18.0)*vAlpha);
+ vec3 tint=mix(vec3(.68,.23,.055),vec3(1.2,.76,.32),vSeed);
+ tint=mix(tint,tint*vec3(.80,.88,1.10),vDepth*.40);
+ gl_FragColor=vec4(phoenixFinish(tint),exp(-d*d*18.0)*vAlpha);
  #include <colorspace_fragment>
 }`;
 

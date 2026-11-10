@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Reference artwork, distant flock plumage and the shared egg surface.
-import { own } from './factories.js';
+import { own, seed } from './factories.js';
 import { unzlibSync } from 'three/examples/jsm/libs/fflate.module.js';
 import { phoenixArt } from './assets/phoenix-reference-data.js';
 
@@ -248,5 +248,86 @@ export function buildEggGeometry(ctx) {
   geometry.setIndex(indices);
   geometry.computeVertexNormals();
   return geometry;
+}
+
+// The shell fields are baked once on the CPU: the fragment shader samples them
+// instead of re-evaluating a 9-cell Voronoi loop plus 3D fbm per pixel, and the
+// hatch shards depart from the exact seams the viewer sees glowing.
+const shellHash = (x, y, salt) => {
+  let h = Math.imul(x + 193, 374761393) ^ Math.imul(y + 571, 668265263) ^ Math.imul(salt + 71, 1274126177);
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+};
+
+function fissureGap(u, v) {
+  const gx = u * 12, gy = v * 8, cx = Math.floor(gx), cy = Math.floor(gy), lx = gx - cx, ly = gy - cy;
+  let first = 9, second = 9;
+  for (let y = -1; y <= 1; y++) for (let x = -1; x <= 1; x++) {
+    const idX = ((cx + x) % 12 + 12) % 12, idY = cy + y;
+    const dx = x + .2 + shellHash(idX, idY, 1) * .6 - lx, dy = y + .2 + shellHash(idX, idY, 5) * .6 - ly;
+    const d = dx * dx + dy * dy;
+    if (d < first) { second = first; first = d; } else if (d < second) second = d;
+  }
+  return Math.sqrt(second) - Math.sqrt(first);
+}
+
+function eggSurface(u, v) {
+  const normalizedY = -Math.cos(v * Math.PI), y = normalizedY * 2.4;
+  const radius = 1.72 * Math.sin(v * Math.PI) * (1 - .21 * normalizedY), angle = u * TAU;
+  return [Math.cos(angle) * radius, y, Math.sin(angle) * radius];
+}
+
+function noise3(x, y, z) {
+  const ix = Math.floor(x), iy = Math.floor(y), iz = Math.floor(z);
+  let fx = x - ix, fy = y - iy, fz = z - iz;
+  fx *= fx * (3 - 2 * fx); fy *= fy * (3 - 2 * fy); fz *= fz * (3 - 2 * fz);
+  const c = (dx, dy, dz) => shellHash(ix + dx, iy + dy, iz + dz);
+  const x00 = c(0, 0, 0) + (c(1, 0, 0) - c(0, 0, 0)) * fx, x10 = c(0, 1, 0) + (c(1, 1, 0) - c(0, 1, 0)) * fx;
+  const x01 = c(0, 0, 1) + (c(1, 0, 1) - c(0, 0, 1)) * fx, x11 = c(0, 1, 1) + (c(1, 1, 1) - c(0, 1, 1)) * fx;
+  const y0 = x00 + (x10 - x00) * fy, y1 = x01 + (x11 - x01) * fy;
+  return y0 + (y1 - y0) * fz;
+}
+
+const fbm3 = (x, y, z) => noise3(x, y, z) * .58
+  + noise3(x * 2.03 + 4.7, y * 2.03 + 4.7, z * 2.03 + 4.7) * .27
+  + noise3(x * 4.1 + 9.2, y * 4.1 + 9.2, z * 4.1 + 9.2) * .15;
+
+// R = seam gap (x4 for sub-texel precision near the glowing cracks), G = grain,
+// B = deposit. U wraps with the shell; V clamps at the poles.
+export function createShellField(ctx) {
+  const T = ctx.THREE, width = 384, height = 192, data = new Uint8Array(width * height * 4);
+  for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
+    const u = (x + .5) / width, v = (y + .5) / height;
+    const [px, py, pz] = eggSurface(u, v);
+    const gap = fissureGap(u, v), grain = fbm3(px * 7, py * 7, pz * 7);
+    const deposit = .12 + .66 * noise3(px * 5, py * 5, pz * 5), k = (y * width + x) * 4;
+    data[k] = Math.round(255 * Math.min(1, gap * 4));
+    data[k + 1] = Math.round(255 * Math.min(1, Math.max(0, grain)));
+    data[k + 2] = Math.round(255 * Math.min(1, Math.max(0, deposit)));
+    data[k + 3] = 255;
+  }
+  const texture = own(ctx, new T.DataTexture(data, width, height, T.RGBAFormat));
+  texture.name = 'phoenix-shell-field';
+  texture.wrapS = T.RepeatWrapping; texture.wrapT = T.ClampToEdgeWrapping;
+  texture.magFilter = T.LinearFilter; texture.minFilter = T.LinearFilter;
+  texture.needsUpdate = true;
+  return texture;
+}
+
+// Even stride along the seam network keeps shards spread over the whole shell
+// at every draw count; the 1.16 factor matches the flock arrival surface.
+export function phoenixCrackPoints(count) {
+  const candidates = [], cols = 192, rows = 96;
+  for (let y = 0; y < rows; y++) for (let x = 0; x < cols; x++) {
+    const u = (x + .5) / cols, v = (y + .5) / rows;
+    if (fissureGap(u, v) < .018) candidates.push([u, v]);
+  }
+  const points = new Float32Array(count * 3);
+  for (let i = 0; i < count; i++) {
+    const [u, v] = candidates[Math.min(candidates.length - 1, Math.floor((i + seed(i, 24)) * candidates.length / count))];
+    const [x, y, z] = eggSurface(u, v);
+    points.set([x * 1.16, y * 1.16, z * 1.16], i * 3);
+  }
+  return points;
 }
 

@@ -3,9 +3,10 @@
 // shell, and release the same phoenix rig as the egg cracks and its wings unfold.
 import { basicInstance, own, qualityDensity, root, seed } from './factories.js';
 import { createParticlePointer, particleNoiseShader } from './particle-pointer.js';
-import { approach, createGlow, createShockPool, createStarfield, faceCamera, TAU } from './scene-field.js';
-import { createPhoenixArtwork, buildPhoenixReference, buildPhoenixGeometry, phoenixDeparturePoints, phoenixSkinning, phoenixDissolve, phoenixEggShape, buildEggGeometry } from './phoenix-form.js';
+import { approach, createGlow, createShockPool, createStarfield, faceCamera } from './scene-field.js';
+import { createPhoenixArtwork, buildPhoenixReference, buildPhoenixGeometry, phoenixDeparturePoints, phoenixSkinning, phoenixDissolve, phoenixEggShape, buildEggGeometry, createShellField, phoenixCrackPoints } from './phoenix-form.js';
 import { phoenixAtmosphereVertex, phoenixAtmosphereFragment, createPhoenixStarTravel, createPhoenixSanctum } from './phoenix-atmosphere.js';
+import { phoenixColor, createSpaceNoise } from './phoenix-color.js';
 
 const PHOENIXES = 16, DUST = 15000, TRAILS = 760, SHARDS = 120;
 const NEST = [0, .9, .2];
@@ -120,7 +121,7 @@ void main(){
  gl_FragColor=vec4(art.rgb*(.94+uTreble*uResponse*.22),art.a*vOpacity);
  #include <colorspace_fragment>
 }`;
-const flameFragment = artworkSampling + `
+const flameFragment = artworkSampling + phoenixColor + `
 uniform float uFire,uBurst;
 varying float vOpacity;
 void main(){
@@ -128,17 +129,17 @@ void main(){
  float shimmer=.6+.4*sin(vUv.y*53.0-uTime*4.0);
  float alpha=(fireEdge(art.a)*.7+art.a*hot*.13)*shimmer*vOpacity*uFire;
  if(alpha<.006)discard;
- gl_FragColor=vec4(vec3(1.4,.3,.012),alpha);
+ gl_FragColor=vec4(phoenixFinish(vec3(1.4,.3,.012)),alpha);
  #include <colorspace_fragment>
 }`;
 
-const emberFragment = `
+const emberFragment = phoenixColor + `
 uniform float uFire,uBurst; varying float vLife,vOpacity;
 void main(){
  float d=length(gl_PointCoord-.5);if(d>.5)discard;
  float fade=smoothstep(0.0,.12,vLife)*(1.0-smoothstep(.3,1.0,vLife));
  vec3 color=mix(vec3(2.4,1.3,.32),vec3(1.1,.09,.003),vLife);
- gl_FragColor=vec4(color,exp(-d*d*16.0)*fade*(uFire+uBurst*.7)*vOpacity*1.2);
+ gl_FragColor=vec4(phoenixFinish(color),exp(-d*d*16.0)*fade*(uFire+uBurst*.7)*vOpacity*1.2);
  #include <colorspace_fragment>
 }`;
 
@@ -208,29 +209,10 @@ void main(){
  gl_Position=projectionMatrix*mv;
 }`;
 
-const eggFragment = `
-uniform float uTime,uEgg,uFlash,uBass,uResponse,uCharge,uCrack,uStrikeAge,uHatch,uStir;
-uniform vec3 uStrike;
+const eggFragment = phoenixColor + `
+uniform float uTime,uEgg,uFlash,uBass,uResponse,uCharge,uCrack,uStrikeAge,uHatch,uStir,uGatherIn;
+uniform vec3 uStrike; uniform sampler2D uShellField;
 varying vec3 vPos,vNormalV,vView; varying vec2 vUv;
-float hash(vec3 p){return fract(sin(dot(p,vec3(127.1,311.7,74.7)))*43758.5453);}
-float noise(vec3 p){vec3 i=floor(p),f=fract(p);f=f*f*(3.0-2.0*f);
- return mix(mix(mix(hash(i),hash(i+vec3(1,0,0)),f.x),mix(hash(i+vec3(0,1,0)),hash(i+vec3(1,1,0)),f.x),f.y),
-  mix(mix(hash(i+vec3(0,0,1)),hash(i+vec3(1,0,1)),f.x),mix(hash(i+vec3(0,1,1)),hash(i+vec3(1,1,1)),f.x),f.y),f.z);}
-float fbm(vec3 p){return noise(p)*.58+noise(p*2.03+4.7)*.27+noise(p*4.1+9.2)*.15;}
-// Stable shell plates: the gaps open with heat instead of sliding over the egg.
-float fissure(vec2 uv){
- vec2 grid=uv*vec2(12.0,8.0),cell=floor(grid),local=fract(grid);
- float first=9.0,second=9.0;
- for(int y=-1;y<=1;y++)for(int x=-1;x<=1;x++){
-  vec2 offset=vec2(float(x),float(y)),id=cell+offset;
-  id.x=mod(id.x,12.0);
-  vec2 jitter=vec2(hash(vec3(id,1.7)),hash(vec3(id,5.3)));
-  vec2 delta=offset+.2+jitter*.6-local;
-  float d=dot(delta,delta);
-  if(d<first){second=first;first=d;}else{second=min(second,d);}
- }
- return sqrt(second)-sqrt(first);
-}
 void main(){
  vec3 normal=normalize(vNormalV),view=normalize(vView);
  vec3 light=normalize(vec3(-.6,.85,1.2));
@@ -240,13 +222,13 @@ void main(){
  float row=vUv.y*22.0,cell=fract(vUv.x*28.0+floor(row)*.5)-.5;
  float feather=abs(fract(row)-(.18+cell*cell*2.1));
  float engraving=exp(-feather*38.0)*smoothstep(.0,.2,vUv.y)*(1.0-smoothstep(.87,1.0,vUv.y));
- float grain=fbm(vPos*7.0);
- float gap=fissure(vUv);
+ vec3 field=texture2D(uShellField,vUv).rgb;
+ float grain=field.g,gap=field.r*.25;
  float width=.009+uCrack*.025;
  float seam=1.0-smoothstep(width,width+.012,gap);
  float warm=exp(-gap*12.0);
  float strike=exp(-pow(length(vPos-uStrike)/1.3,2.0))*exp(-uStrikeAge*2.4);
- float pulse=.65+.35*sin(uTime*2.4+vPos.y*.6);
+ float pulse=.65+.35*sin(uTime*(2.4+uGatherIn*1.8)+vPos.y*.6);
  vec3 shell=mix(vec3(.085,.009,.004),vec3(.34,.09,.018),grain);
  vec3 color=shell*(.22+diffuse*.95);
  color+=vec3(.65,.27,.055)*engraving*(.1+diffuse*.32);
@@ -254,18 +236,19 @@ void main(){
  color+=vec3(.9,.45,.15)*specular*.5;
  color+=vec3(1.0,.055,.002)*warm*(.12+uCrack*.26);
  color+=mix(vec3(1.6,.26,.012),vec3(3.0,1.45,.28),uCrack)*seam*(.4+uCrack*.8)*pulse;
+ color+=vec3(2.2,.9,.16)*seam*uGatherIn*.45;
  color+=vec3(2.0,.5,.025)*strike;
  color+=vec3(1.2,.27,.018)*fres*(.18+uCharge*.25);
  color+=vec3(2.4,1.1,.2)*uFlash*(.12+seam*.5)+vec3(1.7,.65,.07)*uHatch*.32;
- float deposit=.12+.66*noise(vPos*5.0);
+ float deposit=field.b;
  float shellMask=smoothstep(deposit,deposit+.2,uEgg);
  float alpha=shellMask*(1.0-smoothstep(0.0,.55,uHatch));
  if(alpha<.01)discard;
- gl_FragColor=vec4(color,alpha);
+ gl_FragColor=vec4(phoenixFinish(color),alpha);
  #include <colorspace_fragment>
 }`;
 
-const eclipseFragment = `
+const eclipseFragment = phoenixColor + `
 uniform float uTime,uRing,uFlash,uBass,uResponse,uCharge;
 varying vec2 vUv;
 float hash(vec2 p){return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453);}
@@ -282,11 +265,11 @@ void main(){
  vec3 color=fire*(flame*.9+glow)+vec3(2.5,1.2,.21)*rim;
  float alpha=(rim+glow+flame*.8)*uRing*(1.0+uFlash*.2);
  if(alpha<.006)discard;
- gl_FragColor=vec4(color,alpha);
+ gl_FragColor=vec4(phoenixFinish(color),alpha);
  #include <colorspace_fragment>
 }`;
 
-const runesFragment = `
+const runesFragment = phoenixColor + `
 uniform float uTime,uRunes,uFlash,uStir;
 varying vec2 vUv;
 float hash(vec2 p){return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453);}
@@ -310,11 +293,11 @@ void main(){
  vec3 color=mix(vec3(1.1,.56,.1),vec3(1.65,.95,.28),glyph*.6);
  float alpha=(glyph*1.15+inner*.36+outer*.38+mid+ticks*1.2+diamonds*.8)*uRunes*(.9+uFlash*.8);
  if(alpha<.006)discard;
- gl_FragColor=vec4(color,alpha);
+ gl_FragColor=vec4(phoenixFinish(color),alpha);
  #include <colorspace_fragment>
 }`;
 
-const ritualFragment = `
+const ritualFragment = phoenixColor + `
 uniform float uTime,uRitual,uCharge,uStir,uStrikes;
 varying vec2 vUv;
 void main(){
@@ -335,12 +318,12 @@ void main(){
  vec3 color=mix(vec3(1.7,.8,.16),vec3(2.6,1.7,.5),uCharge);
  color+=vec3(2.0,1.1,.22)*meter*.8;
  if(alpha<.006)discard;
- gl_FragColor=vec4(color,alpha);
+ gl_FragColor=vec4(phoenixFinish(color),alpha);
  #include <colorspace_fragment>
 }`;
 
 // A fire aura that hugs the shell silhouette.
-const eggFireFragment = `
+const eggFireFragment = phoenixColor + `
 uniform float uTime,uEgg,uCharge,uHatch,uBass,uResponse;
 varying vec3 vPos,vNormalV,vView; varying vec2 vUv;
 float hash(vec3 p){return fract(sin(dot(p,vec3(127.1,311.7,74.7)))*43758.5453);}
@@ -357,12 +340,12 @@ void main(){
  vec3 color=mix(vec3(1.25,.05,.003),vec3(2.9,1.5,.28),flame*.75+tips*.45);
  float alpha=fres*(.17+flame*.15+tips*.09)*(1.0+uCharge*.5)*(1.0-smoothstep(.12,.72,uHatch))*uEgg;
  if(alpha<.008)discard;
- gl_FragColor=vec4(color,alpha);
+ gl_FragColor=vec4(phoenixFinish(color),alpha);
  #include <colorspace_fragment>
 }`;
 
 // Orbital fire ribbons around the egg.
-const fireRingFragment = `
+const fireRingFragment = phoenixColor + `
 uniform float uTime,uEgg,uCharge,uHatch;
 varying vec2 vUv;
 float hash(vec2 p){return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453);}
@@ -375,13 +358,13 @@ void main(){
  vec3 color=mix(vec3(1.5,.14,.004),vec3(2.9,1.5,.32),tongues);
  float alpha=(.3+n*.32+sparks*.45)*(1.0+uCharge*.8)*(1.0-smoothstep(.08,.6,uHatch))*uEgg;
  if(alpha<.008)discard;
- gl_FragColor=vec4(color,alpha*.72);
+ gl_FragColor=vec4(phoenixFinish(color),alpha*.72);
  #include <colorspace_fragment>
 }`;
 
 // A wall of fire spiralling around the egg. Two counter-rotating shells make
 // the ritual read as a vortex instead of a static ring.
-const vortexFragment = `
+const vortexFragment = phoenixColor + `
 uniform float uTime,uEgg,uCharge,uHatch,uStir;
 varying vec2 vUv;
 float hash(vec2 p){return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453);}
@@ -397,7 +380,7 @@ void main(){
  float alpha=(tongues*.6+licks*.42)*band*(.14+uCharge*.3)*(1.0-smoothstep(.1,.75,uHatch))*uEgg;
  vec3 color=mix(vec3(1.35,.075,.003),vec3(3.0,1.55,.28),tongues*.65+licks*.35);
  if(alpha<.006)discard;
- gl_FragColor=vec4(color,alpha);
+ gl_FragColor=vec4(phoenixFinish(color),alpha);
  #include <colorspace_fragment>
 }`;
 
@@ -410,19 +393,21 @@ void main(){
  vec3 p=position;
  p.xz=mat2(cos(spin),-sin(spin),sin(spin),cos(spin))*p.xz;
  p.xy=mat2(cos(spin*.7),-sin(spin*.7),sin(spin*.7),cos(spin*.7))*p.xy;
- vec3 center=vec3(0.0,.9,.2)+aDir*(2.4+aShard*4.0)*age*uShardPower+vec3(0.0,-1.6*age*age,0.0);
+ // aDir holds a point on the baked seam surface, so shards tear out of the
+ // glowing cracks instead of popping from the nest center.
+ vec3 center=vec3(0.0,.9,.2)+aDir+normalize(aDir)*(2.4+aShard*4.0)*age*uShardPower+vec3(0.0,-1.6*age*age,0.0);
  vec4 mv=modelViewMatrix*vec4(p+center,1.0);
  gl_Position=projectionMatrix*mv;
  vLife=age;
 }`;
 
-const shardFragment = `
+const shardFragment = phoenixColor + `
 uniform float uShardPower;
 varying float vLife;
 void main(){
  float fade=(1.0-smoothstep(.35,1.1,vLife))*(1.0-smoothstep(.8,1.05,vLife));
  vec3 color=mix(vec3(2.6,1.5,.35),vec3(1.2,.08,.004),vLife);
- gl_FragColor=vec4(color,fade*.85);
+ gl_FragColor=vec4(phoenixFinish(color),fade*.85);
  #include <colorspace_fragment>
 }`;
 
@@ -430,10 +415,10 @@ const dustVertex = `
 attribute vec4 aDust; attribute float aTrail;
 uniform float uPixel,uHeight,uSize; varying vec3 vColor; varying float vAlpha;
 ${particleNoiseShader}
-uniform float uTime,uSwarm,uGather,uEgg,uBass,uTreble,uResponse,uBurst,uStir,uFlash;
+uniform float uTime,uSwarm,uGather,uEgg,uBass,uTreble,uResponse,uBurst,uStir,uFlash,uGatherIn;
 uniform vec3 uPointer; uniform float uPointerAmount;
 void main(){
- float raw=.2+pow(aDust.x,.68)*12.0;
+ float raw=(.2+pow(aDust.x,.68)*12.0)*(1.0-uGatherIn*.12);
  float arm=floor(aDust.y*3.0), lane=fract(aDust.y*3.0)-.5;
  float a=arm*2.0944+log(1.0+raw)*3.0-uTime*(.15+.95/(1.6+raw))+lane*(.14+raw*.02);
  a+=particleNoise(vec3(raw*.8,arm*7.0,uTime*.06))*.1+uStir*(.4+1.2/(1.0+raw));
@@ -459,8 +444,9 @@ void main(){
  vAlpha*=uGather*.3*(1.0-aTrail*.6);
  #endif
  gl_PointSize=clamp((.6+aDust.w*1.6)*uPixel*uHeight*.05/max(2.0,-mv.z)*uSize*(1.0+uTreble*uResponse*.2),1.0,4.4);
+ if(vAlpha<.012){gl_Position=vec4(2.0,2.0,2.0,1.0);gl_PointSize=0.0;}
 }`;
-const dustFragment = `varying vec3 vColor; varying float vAlpha;
+const dustFragment = phoenixColor + `varying vec3 vColor; varying float vAlpha;
 void main(){
  #ifndef TRAILS
  float d=length(gl_PointCoord-.5);if(d>.5)discard;
@@ -468,15 +454,14 @@ void main(){
  #else
  float alpha=vAlpha;
  #endif
- gl_FragColor=vec4(vColor,alpha);
+ if(alpha<.01)discard;
+ gl_FragColor=vec4(phoenixFinish(vColor),alpha);
  #include <colorspace_fragment>
 }`;
 
-const veilFragment = `
-uniform float uTime,uGather,uEgg,uBass,uResponse,uFlash,uFine,uStir; varying vec2 vUv;
-float hash(vec2 p){return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453);}
-float noise(vec2 p){vec2 i=floor(p),f=fract(p);f=f*f*(3.0-2.0*f);return mix(mix(hash(i),hash(i+vec2(1,0)),f.x),mix(hash(i+vec2(0,1)),hash(i+1.0),f.x),f.y);}
-float fbm(vec2 p){float n=noise(p)*.57+noise(p*2.03+4.7)*.28;return uFine>.5?n+noise(p*4.13+9.2)*.15:n/.85;}
+const veilFragment = phoenixColor + `
+uniform float uTime,uGather,uEgg,uBass,uResponse,uFlash,uFine,uStir; uniform sampler2D uVeilNoise; varying vec2 vUv;
+float fbm(vec2 p){vec2 f=texture2D(uVeilNoise,p*.25).rg;return mix(f.r,f.g,step(.5,uFine));}
 void main(){
  vec2 p=(vUv-.5)*24.0;float r=length(p),a=atan(p.y,p.x),t=uTime*.15;
  float turbulence=fbm(p*1.3+vec2(t*.22,-t*.28))*1.4;
@@ -489,9 +474,43 @@ void main(){
  alpha*=smoothstep(.16,.75,r)*(1.0-smoothstep(5.2,10.8,r))*(1.0+uFlash*.6)*(1.0+uEgg*.25);
  vec3 color=mix(vec3(.7,.025,.004),vec3(.9,.24,.025),smoothstep(.4,4.2,r));
  color*=1.0+uBass*uResponse*.2+uFlash*.3;
- gl_FragColor=vec4(color,alpha);
+ gl_FragColor=vec4(phoenixFinish(color),alpha);
  #include <colorspace_fragment>
 }`;
+
+// Periodic fbm tile: R holds the low-quality 2-octave field, G the full
+// 3-octave field. Three texture samples replace ~30 noise evaluations per
+// pixel, and baking avoids the facets a vertex-interpolated field would show.
+function createVeilNoise(ctx) {
+  const T = ctx.THREE, size = 256, data = new Uint8Array(size * size * 4);
+  const hash = (x, y, period) => {
+    const wx = ((x % period) + period) % period, wy = ((y % period) + period) % period;
+    let h = Math.imul(wx + 193, 374761393) ^ Math.imul(wy + 571, 668265263);
+    h = Math.imul(h ^ (h >>> 13), 1274126177);
+    return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+  };
+  const noise = (x, y, period) => {
+    const ix = Math.floor(x), iy = Math.floor(y);
+    let fx = x - ix, fy = y - iy;
+    fx *= fx * (3 - 2 * fx); fy *= fy * (3 - 2 * fy);
+    const a = hash(ix, iy, period), b = hash(ix + 1, iy, period), c = hash(ix, iy + 1, period), d = hash(ix + 1, iy + 1, period);
+    return (a + (b - a) * fx) * (1 - fy) + (c + (d - c) * fx) * fy;
+  };
+  for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
+    const u = (x + .5) / size, v = (y + .5) / size;
+    const broad = noise(u * 4, v * 4, 4) * .57 + noise(u * 8 + 4.7, v * 8 + 4.7, 8) * .28;
+    const fine = broad + noise(u * 16 + 9.2, v * 16 + 9.2, 16) * .15, k = (y * size + x) * 4;
+    data[k] = Math.round(255 * broad / .85);
+    data[k + 1] = Math.round(255 * fine);
+    data[k + 2] = 0; data[k + 3] = 255;
+  }
+  const texture = own(ctx, new T.DataTexture(data, size, size, T.RGBAFormat));
+  texture.name = 'phoenix-veil-noise';
+  texture.wrapS = texture.wrapT = T.RepeatWrapping;
+  texture.magFilter = T.LinearFilter; texture.minFilter = T.LinearMipmapLinearFilter;
+  texture.generateMipmaps = true; texture.needsUpdate = true;
+  return texture;
+}
 
 
 export function createPhoenixVortex(ctx) {
@@ -499,11 +518,13 @@ export function createPhoenixVortex(ctx) {
   const pointer = createParticlePointer(ctx, world, { depth: 0, radius: 3 });
   const uniforms = { ...pointer.uniforms,
     uArtwork: { value: createPhoenixArtwork(ctx) }, uHeroMatrix: { value: new T.Matrix4() }, uScatter: { value: 0 }, uDissolve: { value: 0 },
+    uShellField: { value: createShellField(ctx) }, uVeilNoise: { value: createVeilNoise(ctx) },
+    uSpaceNoise: { value: createSpaceNoise(ctx) }, uWarm: { value: 0 },
     uTime: { value: 0 }, uFlight: { value: 0 }, uSwarm: { value: 0 }, uGather: { value: 0 }, uEgg: { value: 0 }, uFlash: { value: 0 },
     uBass: { value: 0 }, uMid: { value: 0 }, uTreble: { value: 0 }, uResponse: { value: .7 },
     uCharge: { value: 0 }, uBurst: { value: 0 }, uStir: { value: 0 }, uFire: { value: 0 }, uRing: { value: 0 }, uRunes: { value: 0 },
     uRitual: { value: 0 }, uPixel: { value: 1 }, uHeight: { value: 720 }, uAspect: { value: 16 / 9 }, uSize: { value: 1 }, uFine: { value: 1 },
-    uHero: { value: 0 }, uGhost: { value: 0 }, uCrack: { value: 0 }, uHatch: { value: 0 },
+    uHero: { value: 0 }, uGhost: { value: 0 }, uCrack: { value: 0 }, uHatch: { value: 0 }, uGatherIn: { value: 0 },
     uStrike: { value: new T.Vector3(0, 1, 1) }, uStrikeAge: { value: 10 },
     uShardAge: { value: 10 }, uShardPower: { value: 1 }, uSpeed: { value: 0 }, uTravel: { value: 0 },
     uFlap: { value: 0 }, uSweep: { value: 0 }, uWingLift: { value: .02 }, uStrikes: { value: 0 } };
@@ -610,6 +631,10 @@ export function createPhoenixVortex(ctx) {
   const core = createGlow(ctx, world, { color: 0xffd9a0, opacity: 0, size: 2.2, depthTest: true }); core.mesh.position.set(NEST[0], NEST[1] + .3, NEST[2] - 1.7);
   const aura = createGlow(ctx, world, { color: 0xc23a1d, opacity: 0, size: 8, depthTest: true }); aura.mesh.position.copy(core.mesh.position);
   const flare = createGlow(ctx, world, { color: 0xffb36b, opacity: 0, size: 1, depthTest: true }); flare.mesh.position.copy(core.mesh.position); flare.mesh.scale.set(2.4, .001, 1);
+  // Third glow tier: a wide, low-opacity halo that outlives the flash. It gives
+  // the rebirth a distant bloom without touching the post chain or the silhouette.
+  const farHalo = createGlow(ctx, world, { color: 0xff7a2c, opacity: 0, size: 14, renderOrder: 5, depthTest: true });
+  farHalo.mesh.position.copy(core.mesh.position);
   const cursor = createGlow(ctx, world, { color: 0xffb06a, opacity: 0, size: .8 });
   const cursorRingGroup = new T.Group(); world.add(cursorRingGroup);
   const cursorRingMaterial = own(ctx, new T.MeshBasicMaterial({ color: 0xffa050, transparent: true, opacity: 0, depthWrite: false, depthTest: false, blending: T.AdditiveBlending, side: T.DoubleSide }));
@@ -619,12 +644,8 @@ export function createPhoenixVortex(ctx) {
 
   // Shell shards -----------------------------------------------------------
   const shardGeometry = own(ctx, new T.TetrahedronGeometry(.13, 0));
-  const shardDirs = new Float32Array(SHARDS * 3), shardSeeds = new Float32Array(SHARDS);
-  for (let i = 0; i < SHARDS; i++) {
-    const a = seed(i, 21) * TAU, y = seed(i, 22) * 2 - 1, r = Math.sqrt(1 - y * y);
-    shardDirs.set([Math.cos(a) * r, y * .6 + .2, Math.sin(a) * r], i * 3);
-    shardSeeds[i] = seed(i, 23);
-  }
+  const shardDirs = phoenixCrackPoints(SHARDS), shardSeeds = new Float32Array(SHARDS);
+  for (let i = 0; i < SHARDS; i++) shardSeeds[i] = seed(i, 23);
   shardGeometry.setAttribute('aDir', new T.InstancedBufferAttribute(shardDirs, 3));
   shardGeometry.setAttribute('aShard', new T.InstancedBufferAttribute(shardSeeds, 1));
   const shardMaterial = own(ctx, new T.ShaderMaterial({ uniforms, vertexShader: shardVertex, fragmentShader: shardFragment,
@@ -669,7 +690,8 @@ export function createPhoenixVortex(ctx) {
   let stirPhase = 0, pointerLock = null, burstCount = 0, pendingShock = null;
   let strikes = 0, strikeAge = 10, hatchAge = 10, shardAge = 10, shardPower = 1, autoHatch = false, cycleT = 0;
   let hatchStarted = false, charge = 0;
-  let timelineTime = 0, manualRitual = false, manualIdle = 0, holdFull = 0, formed = false, hatchShock = false;
+  let timelineTime = 0, manualRitual = false, manualIdle = 0, holdFull = 0, formed = false, hatchShock = false, anticipation = 0;
+  let onsetPulse = 0;
 
   function density() {
     const fraction = qualityDensity(profile) * (params.density ?? 1);
@@ -717,14 +739,21 @@ export function createPhoenixVortex(ctx) {
   }
 
   function appearance() {
-    const time = elapsed, amount = uniforms.uPointerAmount.value;
+    const time = elapsed, amount = uniforms.uPointerAmount.value, gatherIn = uniforms.uGatherIn.value;
+    // The timeline flash is a wide gaussian whose 36s checkpoints are contract
+    // pinned. Derive a sharp impact and a staggered afterglow here instead.
+    const burst = Math.exp(-Math.max(0, hatchAge) * 7.5);
+    const afterglow = Math.min(1, flash * .55 + (hatchStarted ? .45 * (1 - smooth(0, 2.6, hatchAge)) : 0));
     uniforms.uTime.value = elapsed; uniforms.uFlight.value = flight; uniforms.uSwarm.value = swarmW;
     uniforms.uGather.value = gather; uniforms.uEgg.value = eggW; uniforms.uFlash.value = flash;
+    // One colour-temperature axis for every fire/atmosphere layer: cool gold in
+    // flight, orange in the flock, ember red in the shell, white-hot rebirth.
+    uniforms.uWarm.value = Math.min(1, swarmW * .50 + gather * .68 + eggW * .88 + flash * .30);
     const ritualAmount = Math.max(gather, eggW);
     uniforms.uFire.value = smooth(.05, .4, Math.max(swarmW, gather * .82));
-    uniforms.uRing.value = Math.min(1, Math.max(gather * .25, eggW * .3) + flash * .7 + charge * .25);
-    uniforms.uRunes.value = .23 * Math.min(1, Math.max(gather * .7, eggW * .55, flash * .85) + charge * .25);
-    uniforms.uRitual.value = Math.min(1, ritualAmount * .12 + charge * .75 + flash * .2);
+    uniforms.uRing.value = Math.min(1, Math.max(gather * .25, eggW * .3) + flash * .45 + burst * .35 + charge * .25);
+    uniforms.uRunes.value = .23 * Math.min(1, Math.max(gather * .7, eggW * .55, flash * .6 + afterglow * .35) + charge * .25);
+    uniforms.uRitual.value = Math.min(1, ritualAmount * .12 + charge * .75 + flash * .12 + afterglow * .2);
     const emerging = hatchStarted || (params.performance === 'auto' && cycleT > 31.2);
     uniforms.uScatter.value = emerging ? 0 : Math.max(1 - flight, gather);
     uniforms.uDissolve.value = emerging ? 0 : 1 - flight;
@@ -765,10 +794,11 @@ export function createPhoenixVortex(ctx) {
     egg.rotation.y = Math.sin(time * .24) * .07 + uniforms.uPointer.value.x * .012;
     egg.rotation.x = Math.sin(time * .19) * .025 - uniforms.uPointer.value.y * .008;
     eggFire.visible = eggW > .03;
+    eggFire.scale.setScalar(1.035 * (1 - gatherIn * .05));
     const fireRingsOn = eggW > .03;
     fireRingA.visible = fireRingB.visible = fireRingsOn;
     if (fireRingsOn) {
-      const spread = 1 + uniforms.uHatch.value * 1.6;
+      const spread = 1 + uniforms.uHatch.value * 1.6 - gatherIn * .1;
       fireRingA.scale.setScalar(spread);
       fireRingB.scale.setScalar(spread);
       fireRingA.rotation.set(1.43 + Math.sin(time * .37) * .035, 0, time * .3 + charge * 1.5);
@@ -777,7 +807,7 @@ export function createPhoenixVortex(ctx) {
     const vortexOn = eggW > .05;
     vortexA.visible = vortexB.visible = vortexOn;
     if (vortexOn) {
-      const grow = 1 + uniforms.uHatch.value * .5;
+      const grow = 1 + uniforms.uHatch.value * .5 - gatherIn * .12;
       vortexA.scale.set(grow, 1 + uniforms.uHatch.value * .35, grow);
       vortexB.scale.set(grow, 1 + uniforms.uHatch.value * .2, grow);
       vortexA.rotation.y = time * .34 + charge * 1.15;
@@ -786,19 +816,27 @@ export function createPhoenixVortex(ctx) {
     eclipse.visible = uniforms.uRing.value > .003;
     runeGroup.visible = runePlane.visible = uniforms.uRunes.value > .003;
     ritual.visible = uniforms.uRitual.value > .003;
-    const runeScale = 1 - charge * .1;
+    const runeScale = 1 - charge * .1 - gatherIn * .05;
     runeGroup.scale.setScalar(runeScale);
     runePlane.rotation.z = time * .012 + stirPhase * .06;
-    ritual.scale.setScalar(1.12 - charge * .28 + eggW * .02);
-    core.set(undefined, eggW * (.52 + uniforms.uBass.value * uniforms.uResponse.value * .1) + flash * .26 + charge * .22 + uniforms.uGhost.value * .1, 2.2 + eggW * .5 + flash * .8 + charge * .4);
-    aura.set(undefined, eggW * .34 + flash * .22 + charge * .2 + uniforms.uGhost.value * .16, 8 + flash * 1.2 + charge * .9);
-    flare.set(undefined, flash * .2);
-    flare.mesh.scale.set(5.4 + flash * 2.2, .001 + 2.2 * flash, 1);
-    const quake = Math.min(.11, charge * .012 + (strikeAge < 1.2 ? Math.exp(-strikeAge * 6) * .045 * shardPower : 0) + uniforms.uGhost.value * .02);
+    ritual.scale.setScalar(1.12 - charge * .28 - gatherIn * .08 + eggW * .02);
+    // A sharp burst sits on the core while the wide tiers keep a longer
+    // afterglow: the glow layers stop rising and falling in perfect unison.
+    const coreOpacity = Math.min(1, (eggW * (.52 + uniforms.uBass.value * uniforms.uResponse.value * .1) + flash * .26 + charge * .22 + uniforms.uGhost.value * .1) * (1 - gatherIn * .38) + burst * .16 + onsetPulse * .04);
+    const auraOpacity = Math.min(1, (eggW * .34 + flash * .22 + charge * .2 + uniforms.uGhost.value * .16) * (1 - gatherIn * .3) + afterglow * .12 + onsetPulse * .03);
+    core.set(eggW > .55 ? 0xffa254 : 0xffd9a0, coreOpacity, 2.2 + eggW * .5 + flash * .8 + charge * .4 + burst * .5);
+    aura.set(undefined, auraOpacity, 8 + flash * 1.2 + charge * .9 + afterglow * 1.5);
+    flare.set(undefined, Math.min(1, flash * .2 + burst * .3));
+    flare.mesh.scale.set(5.4 + flash * 2.2 + burst * 1.4, .001 + 2.2 * flash + burst * 1.8, 1);
+    farHalo.set(eggW > .55 ? 0xff7a2c : 0xffb060,
+      Math.min(.42, (eggW * .11 + flash * .13 + charge * .09 + afterglow * .10 + onsetPulse * .05) * (1 - gatherIn * .4)),
+      12 + flash * 3 + charge * 2 + afterglow * 2);
+    const quake = Math.min(.11, charge * .012 + gatherIn * .006 + (strikeAge < 1.2 ? Math.exp(-strikeAge * 6) * .045 * shardPower : 0) + uniforms.uGhost.value * .02);
     world.position.set(Math.sin(time * 73) * quake, Math.cos(time * 61) * quake, 0);
     world.rotation.z = Math.sin(time * 59) * quake * .5;
     eclipse.position.y = 2.15 + uniforms.uHero.value * .85;
     faceCamera(core.mesh, ctx.camera); faceCamera(aura.mesh, ctx.camera); faceCamera(flare.mesh, ctx.camera);
+    faceCamera(farHalo.mesh, ctx.camera);
     faceCamera(eclipse, ctx.camera); faceCamera(runeGroup, ctx.camera); faceCamera(ritual, ctx.camera);
     shards.visible = shardAge < 1.35;
     shards.count = Math.max(24, Math.floor(SHARDS * Math.max(.55, qualityDensity(profile) * (params.density ?? 1))));
@@ -827,6 +865,7 @@ export function createPhoenixVortex(ctx) {
       if (performanceChanged) {
         manualRitual = false; manualIdle = 0; holdFull = 0; timelineTime = 0; strikes = 0; charge = 0;
         uniforms.uCharge.value = 0; hatchStarted = false; hatchAge = 10; shardAge = 10; formed = false; autoHatch = false;
+        anticipation = 0; uniforms.uGatherIn.value = 0;
       }
       if (performanceChanged && dt === 0) {
         ({ flight, swarm: swarmW, gather, egg: eggW, flash } = phoenixTimeline(0, p.performance));
@@ -881,6 +920,10 @@ export function createPhoenixVortex(ctx) {
         hatchShock = false;
       }
       burstAge += dt; surgeAge += dt; strikeAge += dt; hatchAge += dt; shardAge += dt;
+      // Audio onsets breathe into the ember halo; dt=0 keeps the pulse frozen
+      // together with the rest of the performance.
+      const onset = Math.max(0, Math.min(1, Number(frame.onset) || 0));
+      onsetPulse += ((onset > .3 ? 1 : 0) - onsetPulse) * approach(dt, .18);
       if (hatchStarted && hatchAge > 3.3) { strikes = 0; hatchStarted = false; }
       boost += ((burstAge < 2.2 ? 1 : 0) - boost) * approach(dt, burstAge < 2.2 ? .48 : 1.2);
       const rate = dt * (p.speed ?? .6) / .6;
@@ -914,7 +957,12 @@ export function createPhoenixVortex(ctx) {
         holdFull += dt;
         if (holdFull > 1.15) beginHatch(1.8);
       } else holdFull = 0;
-      if (p.performance === 'auto' && cycleT > 31.2 && !autoHatch && gather > .1) beginHatch(1.6);
+      // Half a beat of inward draw before the flash: the rite inhales, then
+      // the hatch releases everything it pulled in. Holding to charge joins in.
+      const anticipationTarget = (p.performance === 'auto' || manualRitual) && !hatchStarted ? smooth(29.4, 31.15, cycleT) : 0;
+      anticipation += (anticipationTarget - anticipation) * approach(dt, anticipationTarget > anticipation ? .5 : .12);
+      uniforms.uGatherIn.value = Math.max(anticipation, charge * .8);
+      if (p.performance === 'auto' && cycleT > 31.2 && !autoHatch && gather > .1) beginHatch(1.6 + anticipation * .5);
       if (cycleT < 5) autoHatch = false;
       appearance();
       uniforms.uTravel.value += rate * (1.2 + uniforms.uSpeed.value * 68);
@@ -926,7 +974,7 @@ export function createPhoenixVortex(ctx) {
     stats: () => {
       const phase = hatchStarted || (params.performance === 'auto' && cycleT > 31.2) ? 'rebirth' : manualRitual ? (eggW > .55 ? 'egg' : 'gather') : eggW > .55 ? 'egg' : gather > .12 ? 'gather' : flight > .5 ? 'flight' : 'swarm';
       return { phoenixes: swarm.count, dust: dust.geometry.drawRange.count, flight, swarm: swarmW, gather, egg: eggW, flash,
-        interactionBoost: boost, stir: stirPhase, charge, bursts: burstCount, strikes, crack: uniforms.uCrack.value, hatch: uniforms.uHatch.value,
+        interactionBoost: boost, stir: stirPhase, charge, anticipation, bursts: burstCount, strikes, crack: uniforms.uCrack.value, hatch: uniforms.uHatch.value,
         shards: shards.visible ? shards.count : 0, travel: uniforms.uTravel.value, speed: uniforms.uSpeed.value,
         elapsed, phase, manual: manualRitual, timeline: timelineTime, hold: holdFull };
     }
