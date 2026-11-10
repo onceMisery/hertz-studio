@@ -22,6 +22,8 @@ RSS、音频及远程封面使用 `public_net` 的同一 URL/DNS/重定向规则
 
 2026-11-11 模型资源前置检查仍归纯 `hertz-wallpaper` 包合同：原 ZIP 长度/hash 核验后检查 GLB/KTX2 source 与 variants，每个资产角色先验证 MIME，再按文件去重内容检查。检查使用原始有界 JSON 与固定流块，不引入第二个字节 broker、renderer 或格式能力 registry。容器事实不授予 loader、几何/动画、DFD/codec 或 GPU 资格，运行门保持；后续原资源准备器继续消费同一检查。范围及证据见[资源实施记录](../wallpaper-model-resources.md)。
 
+同日结构续接：GLB的typed有界schema、view/accessor范围、单父图与mesh/实例metadata上界仍由原包合同持有，原Model入口在容器之后调用唯一结构inspector。同包图片只映射原Image/Texture source/variant refs，重复URI共享不可变别名metadata，未增加文件broker或运行pool。返回事实显式binary_content_validated=false；实际BIN、动画/扩展与prepared/loader/GPU资格仍独立，不能由结构解析成功开放运行。来源措辞差异与子集范围记录在上述资源实施记录，不把尚未验证的表示写进能力registry。
+
 2026-10-15 三维空间：SpaceHome 只消费 app 注入的业务宿主；Space3D 持有导航与通用控件，
 SpaceCamera 持有机位，SpaceStagePure 持有唯一 Three.js renderer、registry、scope 与质量策略。
 场景定义统一持有 API/state 版本、参数、机位、别名、能力和预览；菜单与设置从 registry 派生。

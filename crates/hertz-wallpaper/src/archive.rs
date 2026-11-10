@@ -122,7 +122,8 @@ fn validate_resource_containers_in_place<R: Read + std::io::Seek>(
                 .by_name(path)
                 .map_err(|error| PackageError::new("missing_file", error.to_string()))?;
             let result = if model {
-                crate::model_container::inspect_glb(input, entry.bytes).map(|_| ())
+                crate::model_structure::inspect_glb_resource(input, entry.bytes, manifest, path)
+                    .map(|_| ())
             } else {
                 crate::texture_container::inspect_ktx2(input, entry.bytes).map(|_| ())
             };

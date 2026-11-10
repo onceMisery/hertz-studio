@@ -1,5 +1,7 @@
 # 路线图实施状态
 
+2026-11-11 A04/P2-03 [GLB核心静态结构前置检查](wallpaper-model-resources.md)已接原Model资源source/variant校验，新增有界view/accessor、node/scene图、三角形metadata上界与同包图片/UV依赖；重复图片URI的别名引用共享不可变列表。当前pure131、桌面资源9项通过，binary_content_validated=false；实际BIN/动画/骨骼/扩展、准备、受控loader与GPU能力仍未完成，整体目标保持开放。
+
 2026-11-11 A04/P2-03 [GLB/KTX2 容器前置检查](wallpaper-model-resources.md)已接原包校验与桌面快照/重开：有界 GLB JSON/BIN、普通2D KTX2范围及压缩层规则、所有source/variant与别名角色检查。壁纸98项和桌面实际staging/install/reopen验证通过；锁定writer生成的真实Zlib KTX2也由原包入口接受。此为资源内容前置检查，model/texture运行门继续关闭；依赖/几何/动画、DFD/codec/GPU与受控loader仍按总计划继续。
 
 2026-11-11 A04/P2 [builtinScene 首个可组合子集](wallpaper-builtin-composition.md)完成当前 Windows 候选验证：原 registry 的 spectrum-towers low 背景与二维/同包字体/真实视频使用同一输出，完整目标/成本/最终槽、暂停和退场有 source-bound 证据。最终 R5 native10、browser12、lifecycle13、plan18、settings33通过；桌面库696+2ignored、壁纸83、Clippy/fmt、frontend extra95通过。两处 saved/actual 文案问题已用新原图修正，旧候选归属保留；FONT98审阅完整但UI04/D03仍有gap。用户2026-11-08已批准A04/A05/A06/A10并要求实现后验证；GLB/KTX2、效果/时间线/编辑器、社区隔离与受管AI、原生校准及设备资格仍按依赖继续，整体目标保持开放。

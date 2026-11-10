@@ -1,5 +1,7 @@
 # Hertz 壁纸引擎 P0–P3 开发设计与实施计划
 
+2026-11-11 [模型资源结构前置检查](wallpaper-model-resources.md)进一步接通核心静态GLB的typed有界schema、内部BIN/view/accessor范围、单父scene/node图、mesh/实例三角形上界及同包图片/材质UV引用。最终pure131与桌面资源9项通过；结果仍为binary_content_validated=false，实际BIN/动画/morph/骨骼、材质/图片解码、准备成本与受控loader/GPU呈现继续实施。模型运行门保持关闭。
+
 2026-11-11 [GLB/KTX2 容器前置检查](wallpaper-model-resources.md)已接同一包校验与桌面快照/安装重开：原始有界JSON、固定流块、source/variant与别名MIME、普通2D KTX2范围和压缩层索引规则已验证。壁纸98项、桌面资源导入8项及壁纸回归499项通过（2项沿原条件忽略）；默认并发的一次既有10秒等待超时保留，独立与4线程全回归通过。model/texture运行门保持，依赖/几何/动画、DFD/codec/GPU与受控loader按已批准计划继续。
 
 2026-11-11 [首个 builtinScene 组合适配器](wallpaper-builtin-composition.md)已支持 root spectrum-towers v1/source low 与既有二维、同包字体和视频共享一个 renderer。完整最终槽与成本准入、唯一 DPI 栅格、depth/单次输出、pending/committed 时间输入及退出已接通；干净源码 R5 的 Windows 10 项、browser 12、lifecycle 13、plan 18 和设置 33 项通过。当前 2560×1600/DPI144/165Hz 设备准入 raster1264×790、low/27.5fps 上限，设置页明确区分请求 high/30；字体98原图已汇总，冻结R22的历史P2及两个gap仍保留。其它scene/model、GLB/KTX2、效果/轨道/绑定、编辑器与跨设备/长稳继续按已批准总计划实施；此增量不完成整个P2或A01–A10。

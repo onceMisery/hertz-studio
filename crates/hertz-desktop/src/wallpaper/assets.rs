@@ -1050,6 +1050,52 @@ mod tests {
     }
 
     #[test]
+    fn staged_model_structure_rejects_a_valid_glb_container_with_a_node_cycle() {
+        use std::io::{Cursor, Write};
+        let (store, dir) = store("model-structure-staging");
+        let mut json = br#"{"asset":{"version":"2.0"},"nodes":[{"children":[0]}]}"#.to_vec();
+        while json.len() % 4 != 0 {
+            json.push(b' ');
+        }
+        let mut glb = b"glTF".to_vec();
+        glb.extend(2_u32.to_le_bytes());
+        glb.extend((20_u32 + json.len() as u32).to_le_bytes());
+        glb.extend((json.len() as u32).to_le_bytes());
+        glb.extend(b"JSON");
+        glb.extend(json);
+        hertz_wallpaper::model_container::inspect_glb(Cursor::new(&glb), glb.len() as u64)
+            .expect("fixture has a valid container envelope");
+        let manifest = serde_json::json!({
+            "formatVersion":1,"workId":"c17ed10a-5c55-4a52-85dc-7509f9e88aae",
+            "version":1,"title":"Model structure","content":{"kind":"builtin","sceneId":"zodiac","stateVersion":1,"params":{}},
+            "assets":[{"id":"model","kind":"model","source":"assets/model.glb","variants":[]}],
+            "files":[{"path":"assets/model.glb","bytes":glb.len(),"sha256":format!("{:x}",Sha256::digest(&glb)),"mime":"model/gltf-binary"}],
+            "properties":[],"permissions":{"audioSpectrum":false,"pointer":false},
+            "license":{"code":"none","assets":"CC0-1.0","attribution":""}
+        });
+        let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        for (path, bytes) in [
+            ("manifest.json", serde_json::to_vec(&manifest).unwrap()),
+            ("assets/model.glb", glb),
+        ] {
+            writer
+                .start_file(path, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            writer.write_all(&bytes).unwrap();
+        }
+        let source = write_source(&dir, "cycle.hwpkg", &writer.finish().unwrap().into_inner());
+        store.snapshot_input("job-cycle", &source, None).unwrap();
+        std::fs::remove_file(source).unwrap();
+        let error = store.validate_staged("job-cycle").unwrap_err();
+        assert_eq!(error.code, "package_invalid");
+        assert!(error.message.starts_with("invalid_model_structure"));
+        assert!(error.message.contains("assets/model.glb"));
+        assert!(!store.staging_dir("job-cycle").join("files").exists());
+        store.discard_staging("job-cycle");
+        assert!(!store.staging_dir("job-cycle").exists());
+    }
+
+    #[test]
     fn disk_space_check_rejects_oversize_request() {
         let (store, _dir) = store("disk");
         let error = store.check_disk_space(u64::MAX / 2).unwrap_err();

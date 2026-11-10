@@ -7,9 +7,14 @@ ZIP 路径、实际长度、SHA-256 和组合合同核验后检查模型与 KTX2
 当前可验证的是容器结构。模型节点与 KTX2 运行适配器继续返回不可用；
 容器校验成功不能用来声称已经支持几何、动画、纹理转码或 GPU 呈现。
 
+同日续接完成 GLB 的核心静态结构前置检查，原 Model source/variant 包入口
+先调用唯一容器 inspector，再解析有界 typed schema。纯包当前 131 项通过
+（模型结构 33 项），最终桌面资源导入 9 项通过，包含有效容器内的坏节点环在
+资源投影前拒绝。结构结果显式保持 `binary_content_validated=false`。
+
 | 资源 | 已实施检查 | 仍需实施与验收 |
 | --- | --- | --- |
-| GLB | v2、JSON 加可选 BIN、精确总长及四字节对齐、chunk 顺序与范围；原始 JSON 的 4 MiB、重复键、16 层深度及所有有限数值；asset.version/minVersion；固定 64 KiB 流读取 BIN | 同包依赖与 URI、BufferView/accessor 和真实二进制数据、节点/三角形成本、材质/动画闭包、受控 GLTFLoader、私有骨骼实例和绝对时间采样 |
+| GLB | v2容器与原始有界JSON；核心静态typed依赖/BufferView/accessor范围；节点/scene单父无环与变换；mesh及所有节点实例的三角形metadata上界；同包JPEG/PNG图片source/variant、材质五槽UV引用 | 实际二进制索引/浮点与真实几何；动画/morph/skinning、扩展、实际材质/图片解码和完整成本；受控 GLTFLoader、私有实例和绝对时间采样 |
 | KTX2 | 普通 2D header、16384 单边与 64 MP、mip 索引、DFD/KVD/SGD/level 范围及溢出/重叠；按压缩方式核验长度与层对齐 | DFD/格式语义、真实 Basis worker/转码、GPU 格式选择和预算、解码选项与 context 缓存身份 |
 
 GLB 限 `model/gltf-binary`，所有 Model source/variant 都检查。Texture 中
@@ -34,6 +39,25 @@ projection 前拒绝、hash 错误优先于内容检查，以及两个 inspector
 默认并发先前有一项64 MiB稀疏包测试触及既有10秒等待上限，日志保留；
 该项独立运行1.04秒通过，四线程完整回归也通过。两个crate的all-target
 Clippy、fmt、两份壁纸合同exporter与ADR 414项检查通过。
+
+结构第一子集使用内部 BIN，外部 buffer URI、data URI、外链及不符合原包路径
+规则的图片 URI 明确不可用。矩阵 accessor 使用完整 column padding 和
+component 对齐；vertex 四字节对齐按 bufferView 内的局部 offset/stride检查。
+各数组在多余元素生成前限额；图片与任何 accessor 都不能占同一 view。
+节点最多5000，两个独立三角形metadata上界各限100万，不把作者的bounds/count
+当实测几何。重复图片URI共享同一不可变别名列表，避免4096图片×1000别名生成
+超过196 MiB的重复引用。包相机不会改变组合 canvas 相机。
+
+核心材质五种纹理引用要求所用 primitive 有对应 TEXCOORD；未用材质不虚构
+primitive。正交相机 magnification 可为负但不能为零。custom scalar/vector
+属性保持有界；UINT32的当前 Khronos 正文为 SHOULD NOT，而 accessor schema
+辅助描述仍为旧 MUST NOT，两者措辞不一致。本metadata子集按正文接受typed
+custom UINT32，运行loader/GPU资格仍关闭；不据此声称两份来源一致。
+稀疏、动画、骨骼、morph和扩展payload在各自内容检查实施前明确不可用。
+
+模型结构阶段的早期桌面广泛回归552项通过、2项忽略，构建早于最后规格修正，
+仅保留该版本归属；最终源的资源导入9项和纯包131项另有日志。不能把旧广泛
+回归当成最终模型或设备资格。
 
 下一步沿同一包合同与资源准备、预算、pool、renderer、clock owner 完成上表
 剩余项。HWPK1 / documentVersion1 / Config5 不变；此切片不完成整个 P2-03
