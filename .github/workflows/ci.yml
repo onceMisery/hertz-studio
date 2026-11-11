@@ -84,6 +84,8 @@ jobs:
 
       - name: Verify edition staging
         run: |
+          # The generated wrappers are checked offline; fresh runners need the pinned crates first.
+          cargo fetch --locked
           node scripts/check-release-ui.js
           node scripts/check-editions.js
 
