@@ -55,6 +55,9 @@ pub fn validate_archive<R: std::io::Read + std::io::Seek>(
     manifest: &Manifest,
 ) -> Result<Vec<VerifiedEntry>> {
     let mut archive = open_archive(&mut reader)?;
+    // Supplying an already parsed manifest must not bypass the original
+    // manifest entry's physical bounds or actual inflation ratio.
+    read_manifest_bytes(&mut archive)?;
     let entries = validate_archive_in_place(&mut archive, manifest)?;
     validate_composition_in_place(&mut archive, manifest)?;
     validate_resource_containers_in_place(&mut archive, manifest)?;
@@ -167,6 +170,7 @@ fn open_archive<R: std::io::Read + std::io::Seek>(mut reader: R) -> Result<ZipAr
 fn read_manifest_bytes<R: std::io::Read + std::io::Seek>(
     archive: &mut ZipArchive<R>,
 ) -> Result<Vec<u8>> {
+    let directory_start = archive.central_directory_start();
     let index = archive
         .index_for_name(MANIFEST_PATH)
         .ok_or_else(|| PackageError::new("missing_manifest", "包根缺少 manifest.json"))?;
@@ -190,6 +194,7 @@ fn read_manifest_bytes<R: std::io::Read + std::io::Seek>(
             "manifest.json 超过大小上限",
         ));
     }
+    check_compressed_range(&file, directory_start)?;
     let mut bytes = Vec::new();
     // 中央目录可以谎报尺寸，实际解压也必须在分配前截断。
     file.by_ref()
@@ -207,7 +212,43 @@ fn read_manifest_bytes<R: std::io::Read + std::io::Seek>(
             "manifest.json 超过大小上限",
         ));
     }
+    check_compression_ratio(&file, bytes.len() as u64)?;
     Ok(bytes)
+}
+
+fn check_compressed_range<R: Read>(
+    file: &zip::read::ZipFile<'_, R>,
+    directory_start: u64,
+) -> Result<()> {
+    if file
+        .data_start()
+        .checked_add(file.compressed_size())
+        .is_none_or(|end| end > directory_start)
+    {
+        return Err(PackageError::new(
+            "invalid_compressed_range",
+            format!("条目 {} 的压缩数据超出中央目录前的范围", file.name()),
+        ));
+    }
+    Ok(())
+}
+
+fn check_compression_ratio<R: Read>(
+    file: &zip::read::ZipFile<'_, R>,
+    uncompressed: u64,
+) -> Result<()> {
+    // ceil(E / limit) <= C is exactly E <= limit * C without overflow.
+    // E comes from the canonical manifest and is subsequently checked against
+    // the actual stream, or is the manifest's actual bounded decoded length.
+    if file.compression() == zip::CompressionMethod::Deflated
+        && uncompressed.div_ceil(MAX_COMPRESSION_RATIO) > file.compressed_size()
+    {
+        return Err(PackageError::new(
+            "ratio_exceeded",
+            format!("条目 {} 压缩比超过 {MAX_COMPRESSION_RATIO}:1", file.name()),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_archive_in_place<R: std::io::Read + std::io::Seek>(
@@ -229,6 +270,7 @@ fn validate_archive_in_place<R: std::io::Read + std::io::Seek>(
     let mut verified = Vec::new();
     let mut total_uncompressed: u64 = 0;
     let mut saw_manifest = false;
+    let directory_start = archive.central_directory_start();
 
     for index in 0..archive.len() {
         let mut file = archive.by_index(index).map_err(|error| {
@@ -262,6 +304,7 @@ fn validate_archive_in_place<R: std::io::Read + std::io::Seek>(
                 ));
             }
         }
+        check_compressed_range(&file, directory_start)?;
         let is_dir = name.ends_with('/');
         validate_rel_path_ext(&name, is_dir)?;
         let lower = name.to_ascii_lowercase();
@@ -287,17 +330,7 @@ fn validate_archive_in_place<R: std::io::Read + std::io::Seek>(
         let declared_entry = manifest
             .file(&name)
             .ok_or_else(|| PackageError::new("undeclared_file", format!("缺少声明：{name}")))?;
-        // 压缩比：只对压缩条目检查；Store 条目比率恒为 1。
-        if file.compression() == zip::CompressionMethod::Deflated {
-            let compressed = file.compressed_size();
-            let uncompressed = file.size();
-            if compressed > 0 && uncompressed / compressed > MAX_COMPRESSION_RATIO {
-                return Err(PackageError::new(
-                    "ratio_exceeded",
-                    format!("条目 {name} 压缩比超过 {MAX_COMPRESSION_RATIO}:1"),
-                ));
-            }
-        }
+        check_compression_ratio(&file, declared_entry.bytes)?;
         // 流式读取：以声明字节数 + 1 为读上限，实际计数，杜绝「虚报大小」。
         let budget = declared_entry.bytes.saturating_add(1);
         let mut hasher = Sha256::new();
@@ -329,6 +362,7 @@ fn validate_archive_in_place<R: std::io::Read + std::io::Seek>(
                 ),
             ));
         }
+        check_compression_ratio(&file, actual)?;
         total_uncompressed = total_uncompressed
             .checked_add(actual)
             .ok_or_else(|| PackageError::new("package_too_large", "解压总量溢出"))?;

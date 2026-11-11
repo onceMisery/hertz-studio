@@ -1,5 +1,16 @@
 # GLB / KTX2 资源实施记录
 
+2026-11-11，原 canonical ZIP 校验补齐压缩数据的物理范围：沿锁定 ZIP parser 的
+`data_start`、`compressed_size` 与 `central_directory_start`，在首次条目解压前
+以 checked 加法拒绝越过中央目录或溢出的范围。Deflate 的精确上限为实际
+`E <= 100C`；资源读取前先按 manifest 规范长度检查，随后核对实际长度和 SHA，
+不再用目录自报解压尺寸的整数除法。manifest 沿原 256 KiB 有界读取，以实际
+解压长度检查比例；`validate_package` 和外部 manifest 的 `validate_archive`
+共用此规则。ZIP 启动目录扫描仍会读取原始字节，这不等于条目正文解压。
+此修复使成功验证资源的 `E <= 100P` 具备物理范围依据；ZIP metadata、typed
+容量与 composition 的完整工作区、source/variant 绑定、retained 最后引用和
+同 renderer 首帧继续，尚不构成 ModelInput 或完整 320 MiB/GPU 准入。
+
 2026-11-11，模型原生准备前置沿原 AssetStore 补齐 source pin 的取消：原包与
 投影的完整 SHA 读取使用固定 64 KiB 窗口及原任务标记，在同步读实际返回后
 观察取消，局部句柄退出后才结束任务。现有 SVG 原稿/同包字体直接消费此入口。
