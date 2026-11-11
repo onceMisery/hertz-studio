@@ -1,6 +1,348 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 hertz-studio contributors
+use super::super::budget::{
+    BudgetUsage, LedgerError, ResourceAmounts, ResourcePlan, SessionPlan, MAX_ASSET_CPU_BYTES,
+    MAX_DECODER_SLOTS,
+};
 use super::*;
+
+#[test]
+fn reservation_finish_preserves_same_session_active_sibling_and_its_token() {
+    let budget = Arc::new(BudgetCoordinator::new());
+    let mut prepare_request = empty_request("shared-active".into());
+    prepare_request.task_id = "prepare".into();
+    prepare_request.prepare_tasks = 1;
+    prepare_request.prepare_cpu_bytes = 64;
+    let prepare = Reservation::grant(Arc::clone(&budget), prepare_request).unwrap();
+    let finished_token = prepare.token;
+    let mut retained_request = empty_request("shared-active".into());
+    retained_request.task_id = "retained".into();
+    retained_request.asset_cpu_bytes = 128;
+    retained_request.gpu_bytes = 256;
+    let retained = Reservation::grant(Arc::clone(&budget), retained_request.clone()).unwrap();
+    let before = budget
+        .allocation_snapshot(retained.token, &retained_request.session, 1)
+        .unwrap();
+
+    prepare.finish();
+
+    assert_eq!(
+        budget.usage(),
+        BudgetUsage {
+            asset_cpu_bytes: 128,
+            gpu_bytes: 256,
+            reservation_records: 1,
+            ..BudgetUsage::default()
+        }
+    );
+    assert_eq!(
+        budget.release(finished_token, &retained_request.session, 1),
+        Err(LedgerError::UnknownToken)
+    );
+    let after = budget
+        .allocation_snapshot(retained.token, &retained_request.session, 1)
+        .unwrap();
+    assert_eq!(
+        after.reserved,
+        ResourceAmounts::from_request(&retained_request)
+    );
+    assert_eq!(after.reserved, before.reserved);
+    assert_eq!(after.allocation_revision, before.allocation_revision);
+    assert!(budget.stuck().is_empty());
+    budget
+        .release(retained.token, &retained_request.session, 1)
+        .unwrap();
+    retained.finish();
+    assert_eq!(budget.usage(), BudgetUsage::default());
+}
+
+#[test]
+fn reservation_finish_preserves_same_session_pending_sibling_until_physical_exit() {
+    let budget = Arc::new(BudgetCoordinator::new());
+    let prepare = Reservation::prepare(Arc::clone(&budget), "shared-pending".into()).unwrap();
+    let mut retained_request = empty_request("shared-pending".into());
+    retained_request.task_id = "retained".into();
+    retained_request.asset_cpu_bytes = MAX_ASSET_CPU_BYTES;
+    let retained = Reservation::grant(Arc::clone(&budget), retained_request.clone()).unwrap();
+    retained.release();
+    let before = budget
+        .allocation_snapshot(retained.token, &retained_request.session, 1)
+        .unwrap();
+
+    prepare.finish();
+
+    assert_eq!(
+        budget.usage(),
+        BudgetUsage {
+            asset_cpu_bytes: MAX_ASSET_CPU_BYTES,
+            release_pending: 1,
+            reservation_records: 1,
+            ..BudgetUsage::default()
+        }
+    );
+    assert_eq!(
+        budget.stuck(),
+        vec![(
+            retained.token,
+            retained_request.session.clone(),
+            retained_request.task_id.clone()
+        )]
+    );
+    let after = budget
+        .allocation_snapshot(retained.token, &retained_request.session, 1)
+        .unwrap();
+    assert_eq!(after.reserved, before.reserved);
+    assert_eq!(after.allocation_revision, before.allocation_revision);
+    assert!(!budget
+        .forget_released(retained.token, &retained_request.session, 1)
+        .unwrap());
+    budget
+        .release(retained.token, &retained_request.session, 1)
+        .unwrap();
+    let mut next_request = empty_request("next-asset".into());
+    next_request.asset_cpu_bytes = 1;
+    let rejection = budget.grant(&next_request).unwrap_err();
+    assert_eq!(rejection.quota, "asset_cpu_bytes");
+    assert_eq!(rejection.held, MAX_ASSET_CPU_BYTES);
+
+    // The retained owner confirms its physical exit before the next grant.
+    retained.finish();
+    let next = Reservation::grant(Arc::clone(&budget), next_request).unwrap();
+    next.finish();
+    assert_eq!(budget.usage(), BudgetUsage::default());
+    assert!(budget.stuck().is_empty());
+}
+
+#[test]
+fn reservation_finish_preserves_same_session_next_generation_identity_and_usage() {
+    let budget = Arc::new(BudgetCoordinator::new());
+    let old = Reservation::prepare(Arc::clone(&budget), "generation-owner".into()).unwrap();
+    let mut next_request = empty_request("generation-owner".into());
+    next_request.generation = 2;
+    next_request.task_id = "retained".into();
+    next_request.asset_cpu_bytes = 128;
+    let next = Reservation::grant(Arc::clone(&budget), next_request.clone()).unwrap();
+    let before = budget
+        .allocation_snapshot(next.token, &next_request.session, 2)
+        .unwrap();
+
+    old.finish();
+
+    assert_eq!(
+        budget.usage(),
+        BudgetUsage {
+            asset_cpu_bytes: 128,
+            reservation_records: 1,
+            ..BudgetUsage::default()
+        }
+    );
+    assert_eq!(
+        budget.release(next.token, &next_request.session, 1),
+        Err(LedgerError::GenerationMismatch)
+    );
+    let after = budget
+        .allocation_snapshot(next.token, &next_request.session, 2)
+        .unwrap();
+    assert_eq!(after.reserved, before.reserved);
+    assert_eq!(after.allocation_revision, before.allocation_revision);
+    assert!(budget.stuck().is_empty());
+    budget
+        .release(next.token, &next_request.session, 2)
+        .unwrap();
+    next.finish();
+    assert_eq!(budget.usage(), BudgetUsage::default());
+}
+
+#[test]
+fn reservation_finish_keeps_parent_and_real_children_when_exit_confirmation_fails() {
+    let budget = Arc::new(BudgetCoordinator::new());
+    let mut request = empty_request("child-pending".into());
+    request.owner = OwnerKind::Desktop;
+    request.task_id = "model-parent".into();
+    request.targets = 1;
+    request.decoders = MAX_DECODER_SLOTS;
+    request.cpu_bytes = 128;
+    request.gpu_bytes = 256;
+    let amounts = ResourceAmounts::from_request(&request);
+    let plan = SessionPlan::new(
+        request.clone(),
+        vec![ResourcePlan {
+            id: "decoded-resource".into(),
+            maximum: amounts,
+        }],
+    )
+    .unwrap();
+    let parent = budget.grant_session(&plan).unwrap();
+    let child = budget
+        .allocate_resource(
+            parent,
+            &request.session,
+            request.generation,
+            "decoded-resource",
+            amounts,
+        )
+        .unwrap();
+    let before = budget
+        .allocation_snapshot(parent, &request.session, 1)
+        .unwrap();
+    assert_eq!(before.active, 1);
+    assert_eq!(before.release_pending, 0);
+    // The private wrapper uses a real granted parent, with no test budget adapter.
+    Reservation {
+        budget: Arc::clone(&budget),
+        request: request.clone(),
+        token: parent,
+    }
+    .finish();
+
+    let pending_usage = BudgetUsage {
+        targets: 1,
+        decoder_slots: MAX_DECODER_SLOTS,
+        cpu_bytes: 128,
+        gpu_bytes: 256,
+        release_pending: 1,
+        session_reservations: 1,
+        resource_allocations: 1,
+        resource_release_pending: 1,
+        reservation_records: 1,
+        resource_records: 1,
+        ..BudgetUsage::default()
+    };
+    assert_eq!(budget.usage(), pending_usage);
+    assert_eq!(
+        budget.confirm_exit(parent, &request.session, 1),
+        Err(LedgerError::ChildrenPending)
+    );
+    assert_eq!(
+        budget.stuck(),
+        vec![(parent, request.session.clone(), request.task_id.clone())]
+    );
+    let pending = budget
+        .allocation_snapshot(parent, &request.session, 1)
+        .unwrap();
+    assert_eq!(pending.allocation_revision, before.allocation_revision);
+    assert_eq!(pending.reserved, amounts);
+    assert_eq!(pending.allocated, amounts);
+    assert_eq!(pending.active, 1);
+    assert_eq!(pending.release_pending, 1);
+    assert!(!budget.forget_released(parent, &request.session, 1).unwrap());
+    assert!(!budget.forget_resource(child, &request.session, 1).unwrap());
+    budget.release_resource(child, &request.session, 1).unwrap();
+    let mut next_request = empty_request("after-child".into());
+    next_request.decoders = 1;
+    assert_eq!(
+        budget.grant(&next_request).unwrap_err().quota,
+        "decoder_slots"
+    );
+    assert_eq!(budget.usage(), pending_usage);
+
+    // Only the child's physical exit permits the original parent to be confirmed.
+    budget
+        .confirm_resource_exit(child, &request.session, 1)
+        .unwrap();
+    let exited = budget
+        .allocation_snapshot(parent, &request.session, 1)
+        .unwrap();
+    assert_eq!(exited.reserved, amounts);
+    assert_eq!(exited.allocated, ResourceAmounts::default());
+    assert_eq!(exited.active, 0);
+    assert_eq!(exited.release_pending, 0);
+    assert_eq!(
+        budget.grant(&next_request).unwrap_err().quota,
+        "decoder_slots"
+    );
+    budget.confirm_exit(parent, &request.session, 1).unwrap();
+    assert!(budget.forget_released(parent, &request.session, 1).unwrap());
+    assert_eq!(budget.usage(), BudgetUsage::default());
+    assert!(budget.stuck().is_empty());
+    let next = Reservation::grant(Arc::clone(&budget), next_request).unwrap();
+    next.finish();
+    assert_eq!(budget.usage(), BudgetUsage::default());
+}
+
+#[test]
+fn reservation_drop_keeps_quota_and_diagnostics_until_physical_exit_is_confirmed() {
+    let budget = Arc::new(BudgetCoordinator::new());
+    let mut request = empty_request("dropped-owner".into());
+    request.decoders = MAX_DECODER_SLOTS;
+    let reservation = Reservation::grant(Arc::clone(&budget), request.clone()).unwrap();
+    let token = reservation.token;
+
+    drop(reservation);
+
+    assert_eq!(
+        budget.usage(),
+        BudgetUsage {
+            decoder_slots: MAX_DECODER_SLOTS,
+            release_pending: 1,
+            reservation_records: 1,
+            ..BudgetUsage::default()
+        }
+    );
+    assert_eq!(
+        budget.stuck(),
+        vec![(token, request.session.clone(), request.task_id.clone())]
+    );
+    assert!(!budget.forget_released(token, &request.session, 1).unwrap());
+    budget.release(token, &request.session, 1).unwrap();
+    let mut next_request = empty_request("after-drop".into());
+    next_request.decoders = 1;
+    assert_eq!(
+        budget.grant(&next_request).unwrap_err().quota,
+        "decoder_slots"
+    );
+
+    // A later physical-exit barrier, not Rust Drop, returns the held quota.
+    budget.confirm_exit(token, &request.session, 1).unwrap();
+    assert!(budget.forget_released(token, &request.session, 1).unwrap());
+    let next = Reservation::grant(Arc::clone(&budget), next_request).unwrap();
+    next.finish();
+    assert_eq!(budget.usage(), BudgetUsage::default());
+    assert!(budget.stuck().is_empty());
+}
+
+#[test]
+fn repeated_reservation_finish_reclaims_its_tombstones_and_preserves_released_sibling() {
+    let budget = Arc::new(BudgetCoordinator::new());
+    let sibling_request = empty_request("repeated-finish".into());
+    let sibling = budget.grant(&sibling_request).unwrap();
+    budget
+        .release(sibling, &sibling_request.session, 1)
+        .unwrap();
+    budget
+        .confirm_exit(sibling, &sibling_request.session, 1)
+        .unwrap();
+    for _ in 0..128 {
+        let mut request = empty_request(sibling_request.session.clone());
+        request.task_id = "prepare".into();
+        request.prepare_tasks = 1;
+        let reservation = Reservation::grant(Arc::clone(&budget), request).unwrap();
+        let token = reservation.token;
+        assert_eq!(budget.usage().reservation_records, 2);
+
+        reservation.finish();
+
+        assert_eq!(
+            budget.usage(),
+            BudgetUsage {
+                reservation_records: 1,
+                ..BudgetUsage::default()
+            }
+        );
+        assert_eq!(
+            budget.release(token, &sibling_request.session, 1),
+            Err(LedgerError::UnknownToken)
+        );
+        budget
+            .release(sibling, &sibling_request.session, 1)
+            .unwrap();
+        assert!(budget.stuck().is_empty());
+    }
+    assert!(budget
+        .forget_released(sibling, &sibling_request.session, 1)
+        .unwrap());
+    assert_eq!(budget.usage(), BudgetUsage::default());
+}
 
 #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
 #[test]

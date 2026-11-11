@@ -70,12 +70,19 @@ impl Reservation {
 
     pub(crate) fn finish(self) {
         self.release();
-        let _ =
-            self.budget
-                .confirm_exit(self.token, &self.request.session, self.request.generation);
-        // 每笔探测/准备使用独立 session，退出后无需永久保留墓碑。
-        self.budget
-            .purge_session(&self.request.session, self.request.generation);
+        if self
+            .budget
+            .confirm_exit(self.token, &self.request.session, self.request.generation)
+            .is_ok()
+        {
+            // 只回收本 token 的退出墓碑；同会话其它资源仍由各自 owner 持有。
+            let _ = self.budget.forget_released(
+                self.token,
+                &self.request.session,
+                self.request.generation,
+            );
+        }
+        // 确认失败时保留 pending 占用及 stuck 诊断，不能据此销毁整个会话。
     }
 
     pub(crate) fn ensure_prepare_cpu_bytes(&self, required: u64) -> Result<(), JobError> {
