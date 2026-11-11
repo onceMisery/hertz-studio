@@ -37,7 +37,7 @@ pub struct Manifest {
     #[serde(default)]
     pub assets: Vec<AssetDescriptor>,
     pub files: Vec<FileEntry>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::json::deserialize_literal_maps")]
     pub properties: Vec<serde_json::Map<String, serde_json::Value>>,
     pub permissions: Permissions,
     pub license: License,
@@ -80,7 +80,7 @@ pub enum Content {
     Builtin {
         scene_id: String,
         state_version: u32,
-        #[serde(default)]
+        #[serde(default, deserialize_with = "crate::json::deserialize_literal_map")]
         params: serde_json::Map<String, serde_json::Value>,
     },
     Composition {
@@ -222,7 +222,7 @@ pub fn validate_manifest_bytes(bytes: &[u8]) -> Result<Manifest> {
         ));
     }
     check_bounded_json(bytes, MAX_MANIFEST_DEPTH)?;
-    let value: serde_json::Value = serde_json::from_slice(bytes).map_err(|error| {
+    let value = crate::json::literal_value_from_slice(bytes).map_err(|error| {
         PackageError::new("invalid_json", format!("manifest 不是合法 JSON：{error}"))
     })?;
     if let Some(content) = value.get("content") {

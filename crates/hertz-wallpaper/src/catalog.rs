@@ -26,7 +26,7 @@ const CATALOG_MAX_DEPTH: usize = 9;
 struct CatalogFile {
     schema_version: u32,
     registry_hash: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::json::deserialize_literal_values")]
     scenes: Vec<serde_json::Value>,
 }
 

@@ -61,6 +61,7 @@ fn required_component<'de, D: Deserializer<'de>>(
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SelectOption {
+    #[serde(deserialize_with = "crate::json::deserialize_literal_value")]
     pub value: Value,
     pub label: String,
 }
@@ -126,7 +127,9 @@ struct RawDescriptor {
     label: String,
     #[serde(rename = "type")]
     property_type: PropertyType,
+    #[serde(deserialize_with = "crate::json::deserialize_literal_value")]
     default: Value,
+    #[serde(deserialize_with = "crate::json::deserialize_literal_value")]
     constraints: Value,
     target: PropertyTarget,
 }

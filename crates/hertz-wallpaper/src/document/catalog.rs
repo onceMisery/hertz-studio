@@ -15,7 +15,7 @@ use crate::{AssetKind, PackageError, Result};
 pub struct Field {
     #[serde(rename = "type")]
     pub field_type: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::json::deserialize_literal_option")]
     pub default: Option<Value>,
     #[serde(default)]
     pub min: Option<f64>,

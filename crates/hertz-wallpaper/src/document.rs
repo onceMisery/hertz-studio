@@ -76,7 +76,10 @@ pub struct Node {
     pub children: Vec<String>,
     #[serde(default)]
     pub assets: BTreeMap<String, String>,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::json::deserialize_literal_btree_map"
+    )]
     pub properties: BTreeMap<String, Value>,
 }
 
@@ -90,7 +93,10 @@ pub struct Effect {
     pub target: EffectTarget,
     #[serde(default)]
     pub assets: BTreeMap<String, String>,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::json::deserialize_literal_btree_map"
+    )]
     pub properties: BTreeMap<String, Value>,
 }
 

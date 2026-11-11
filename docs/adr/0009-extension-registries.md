@@ -4,6 +4,8 @@
 
 ## 决定
 
+2026-11-11 开放 JSON 值的字面语义归原 json/manifest/property/document/catalog owner：同一 serde_json 字节解析器通过普通 String 键与递归 seed 直接保留原 Value/Map/Vec，退役 Value 私有 carrier 的字符串再解析路径。manifest 字节检查及所有本片递归字段使用同一语义，真实包身份入口不能从隐藏字符串取得 seal；原 catalog 字节 hash、公开类型、合法序列/null 边界及数值/容量规则保持。没有键名黑名单、第二语义树或全局关闭 raw_value。完整 manifest/ZIP 费用与 native/ModelInput/GPU 资格继续由原准备流程联结，见[模型记录](../wallpaper-model-resources.md)。
+
 2026-11-11 原 archive 读取诊断复用既有 resource_container_io 标量构造，包 seek、manifest、条目 hash 和 composition IO 不再复制任意外部错误文本。固定操作、已验证实际路径和已知 byte 位置仍归原 archive 调用点；GLB/KTX2 保留原无路径诊断文本与错误分类。此片不增加 reader wrapper、parser 或 ledger，也不授予完整 archive/manifest/native/GPU 费用资格，见[模型记录](../wallpaper-model-resources.md)。
 
 2026-11-11 原完整模型解析继续持有容量与费用：Limited 保留原语义上限并明确扩容，经过原作者总量/view-role检查的属性与target树从Schema移到原facts，退役其deep clone同存；nodes/scenes/targets/numeric jobs和图像别名由原owner分配明确容量。ModelHeapBounds的阶段最大值来自真实类型、语法跨度和同存/错误源方程，不增加语义解析器、全输入allocator hook或预算ledger。共享ContainerReader的I/O诊断由其原owner读取固定ErrorKind/raw_os_error和byte位置，退役第三方错误全文Display复制，GLB/KTX2保持原错误分类和读取退出。完整native基底、compact ModelInput/retained及GPU资格仍由后续原准备/预算/renderer闭环，见[模型记录](../wallpaper-model-resources.md)。

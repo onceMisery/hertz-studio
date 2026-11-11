@@ -6,9 +6,272 @@
 //! 同一个扫描器还负责按字节精确定位顶层键的原始值（catalog 的 registryHash
 //! 契约对文件的 scenes 字节段求哈希，见 catalog.rs）。
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+
+use serde::de::{DeserializeSeed, MapAccess, SeqAccess, Visitor};
+use serde::{Deserialize, Deserializer};
+use serde_json::{Map, Number, Value};
 
 use crate::{PackageError, Result};
+
+/// Decode the original JSON bytes without interpreting object keys as serde's
+/// private Value carriers. The parser and output tree remain serde_json's;
+/// every retained child follows the same literal seed, including from_value.
+pub(crate) fn literal_value_from_slice(bytes: &[u8]) -> serde_json::Result<Value> {
+    let mut deserializer = serde_json::Deserializer::from_slice(bytes);
+    let value = LiteralValueSeed.deserialize(&mut deserializer)?;
+    deserializer.end()?;
+    Ok(value)
+}
+
+pub(crate) fn deserialize_literal_value<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Value, D::Error> {
+    LiteralValueSeed.deserialize(deserializer)
+}
+
+#[derive(Clone, Copy)]
+struct LiteralValueSeed;
+
+impl<'de> DeserializeSeed<'de> for LiteralValueSeed {
+    type Value = Value;
+
+    fn deserialize<D: Deserializer<'de>>(
+        self,
+        deserializer: D,
+    ) -> std::result::Result<Self::Value, D::Error> {
+        deserializer.deserialize_any(LiteralValueVisitor)
+    }
+}
+
+struct LiteralValueVisitor;
+
+impl<'de> Visitor<'de> for LiteralValueVisitor {
+    type Value = Value;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("any valid JSON value")
+    }
+
+    fn visit_bool<E: serde::de::Error>(self, value: bool) -> std::result::Result<Value, E> {
+        Ok(Value::Bool(value))
+    }
+
+    fn visit_i64<E: serde::de::Error>(self, value: i64) -> std::result::Result<Value, E> {
+        Ok(Value::Number(value.into()))
+    }
+
+    fn visit_i128<E: serde::de::Error>(self, value: i128) -> std::result::Result<Value, E> {
+        Number::deserialize(serde::de::value::I128Deserializer::new(value)).map(Value::Number)
+    }
+
+    fn visit_u64<E: serde::de::Error>(self, value: u64) -> std::result::Result<Value, E> {
+        Ok(Value::Number(value.into()))
+    }
+
+    fn visit_u128<E: serde::de::Error>(self, value: u128) -> std::result::Result<Value, E> {
+        Number::deserialize(serde::de::value::U128Deserializer::new(value)).map(Value::Number)
+    }
+
+    fn visit_f64<E: serde::de::Error>(self, value: f64) -> std::result::Result<Value, E> {
+        Ok(Number::from_f64(value).map_or(Value::Null, Value::Number))
+    }
+
+    fn visit_str<E: serde::de::Error>(self, value: &str) -> std::result::Result<Value, E> {
+        self.visit_string(String::from(value))
+    }
+
+    fn visit_string<E: serde::de::Error>(self, value: String) -> std::result::Result<Value, E> {
+        Ok(Value::String(value))
+    }
+
+    fn visit_none<E: serde::de::Error>(self) -> std::result::Result<Value, E> {
+        Ok(Value::Null)
+    }
+
+    fn visit_some<D: Deserializer<'de>>(
+        self,
+        deserializer: D,
+    ) -> std::result::Result<Value, D::Error> {
+        LiteralValueSeed.deserialize(deserializer)
+    }
+
+    fn visit_unit<E: serde::de::Error>(self) -> std::result::Result<Value, E> {
+        Ok(Value::Null)
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut sequence: A) -> std::result::Result<Value, A::Error> {
+        // Match ValueVisitor: Value arrays do not preallocate from size_hint.
+        let mut values = Vec::new();
+        while let Some(value) = sequence.next_element_seed(LiteralValueSeed)? {
+            values.push(value);
+        }
+        Ok(Value::Array(values))
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, map: A) -> std::result::Result<Value, A::Error> {
+        LiteralMapVisitor.visit_map(map).map(Value::Object)
+    }
+}
+
+pub(crate) fn deserialize_literal_map<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Map<String, Value>, D::Error> {
+    LiteralMapSeed.deserialize(deserializer)
+}
+
+#[derive(Clone, Copy)]
+struct LiteralMapSeed;
+
+impl<'de> DeserializeSeed<'de> for LiteralMapSeed {
+    type Value = Map<String, Value>;
+
+    fn deserialize<D: Deserializer<'de>>(
+        self,
+        deserializer: D,
+    ) -> std::result::Result<Self::Value, D::Error> {
+        deserializer.deserialize_map(LiteralMapVisitor)
+    }
+}
+
+struct LiteralMapVisitor;
+
+impl<'de> Visitor<'de> for LiteralMapVisitor {
+    type Value = Map<String, Value>;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a map")
+    }
+
+    fn visit_unit<E: serde::de::Error>(self) -> std::result::Result<Self::Value, E> {
+        Ok(Map::new())
+    }
+
+    fn visit_map<A: MapAccess<'de>>(
+        self,
+        mut map: A,
+    ) -> std::result::Result<Self::Value, A::Error> {
+        let mut values = Map::new();
+        while let Some(key) = map.next_key::<String>()? {
+            values.insert(key, map.next_value_seed(LiteralValueSeed)?);
+        }
+        Ok(values)
+    }
+}
+
+pub(crate) fn deserialize_literal_btree_map<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<BTreeMap<String, Value>, D::Error> {
+    struct LiteralBTreeMapVisitor;
+
+    impl<'de> Visitor<'de> for LiteralBTreeMapVisitor {
+        type Value = BTreeMap<String, Value>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a map")
+        }
+
+        fn visit_map<A: MapAccess<'de>>(
+            self,
+            mut map: A,
+        ) -> std::result::Result<Self::Value, A::Error> {
+            let mut values = BTreeMap::new();
+            while let Some(key) = map.next_key::<String>()? {
+                values.insert(key, map.next_value_seed(LiteralValueSeed)?);
+            }
+            Ok(values)
+        }
+    }
+
+    deserializer.deserialize_map(LiteralBTreeMapVisitor)
+}
+
+pub(crate) fn deserialize_literal_values<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Vec<Value>, D::Error> {
+    LiteralVecSeed(LiteralValueSeed).deserialize(deserializer)
+}
+
+pub(crate) fn deserialize_literal_maps<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Vec<Map<String, Value>>, D::Error> {
+    LiteralVecSeed(LiteralMapSeed).deserialize(deserializer)
+}
+
+struct LiteralVecSeed<S>(S);
+
+impl<'de, S: DeserializeSeed<'de> + Copy> DeserializeSeed<'de> for LiteralVecSeed<S> {
+    type Value = Vec<S::Value>;
+
+    fn deserialize<D: Deserializer<'de>>(
+        self,
+        deserializer: D,
+    ) -> std::result::Result<Self::Value, D::Error> {
+        deserializer.deserialize_seq(self)
+    }
+}
+
+impl<'de, S: DeserializeSeed<'de> + Copy> Visitor<'de> for LiteralVecSeed<S> {
+    type Value = Vec<S::Value>;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a sequence")
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(
+        self,
+        mut sequence: A,
+    ) -> std::result::Result<Self::Value, A::Error> {
+        // Match serde's typed Vec cautious(size_hint), including its ZST rule.
+        const MAX_PREALLOC_BYTES: usize = 1024 * 1024;
+        let capacity = MAX_PREALLOC_BYTES
+            .checked_div(std::mem::size_of::<S::Value>())
+            .map_or(0, |max| sequence.size_hint().unwrap_or(0).min(max));
+        let mut values = Vec::with_capacity(capacity);
+        while let Some(value) = sequence.next_element_seed(self.0)? {
+            values.push(value);
+        }
+        Ok(values)
+    }
+}
+
+pub(crate) fn deserialize_literal_option<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<Value>, D::Error> {
+    struct LiteralOptionVisitor;
+
+    impl<'de> Visitor<'de> for LiteralOptionVisitor {
+        type Value = Option<Value>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("option")
+        }
+
+        fn visit_unit<E: serde::de::Error>(self) -> std::result::Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_none<E: serde::de::Error>(self) -> std::result::Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_some<D: Deserializer<'de>>(
+            self,
+            deserializer: D,
+        ) -> std::result::Result<Self::Value, D::Error> {
+            LiteralValueSeed.deserialize(deserializer).map(Some)
+        }
+
+        fn __private_visit_untagged_option<D: Deserializer<'de>>(
+            self,
+            deserializer: D,
+        ) -> std::result::Result<Self::Value, ()> {
+            Ok(LiteralValueSeed.deserialize(deserializer).ok())
+        }
+    }
+
+    deserializer.deserialize_option(LiteralOptionVisitor)
+}
 
 /// 校验 UTF-8 JSON 字节：对象键不得重复，嵌套深度不得超过 `max_depth`。
 /// 字符串内的引号/转义按 RFC 8259 处理；不校验数值合法性（交给 serde）。

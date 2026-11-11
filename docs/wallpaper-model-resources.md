@@ -1,5 +1,16 @@
 # GLB / KTX2 资源实施记录
 
+2026-11-11，manifest、公开属性和 composition/catalog 的开放 JSON 值沿原
+`json` owner 递归按字面解析。Map 的键使用普通 String，每个子值使用同一
+DeserializeSeed，直接构造原 Value/Map/Vec；桌面启用 `raw_value` 时，特殊键
+中的字符串仍是作者字符串，不会再次成为隐藏的 manifest、数值或深层数组。
+原字节扫描的重复键、深度和错误顺序与后续保留数据一致；公开字段类型、合法
+对象/序列拼写、数值舍入和原 null 拒绝规则保持。真实 Stored ZIP 身份入口也
+拒绝隐藏 manifest，catalog 的 hash 仍来自原 scenes 字节段。
+Value 数组与 typed Vec 分别保持原增长和谨慎预分配规则，未增加第二棵语义树。
+此修复建立实际消费特性下的字面一致性；完整 manifest/ZIP 费用、紧凑 ModelInput
+及原生准备/retained/GPU 联结仍须继续核验。
+
 2026-11-11，原 archive 的包尾/起点 seek、manifest、条目 SHA 和 composition
 读取失败也复用共享标量诊断构造。操作使用固定字面量，路径来自固定 manifest 名
 或前序已验证的实际条目，byte 位置记录已知的逻辑读取/seek 位置；第三方 I/O
