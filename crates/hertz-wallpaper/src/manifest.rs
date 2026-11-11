@@ -11,6 +11,9 @@
 
 use std::collections::BTreeMap;
 
+mod heap_bounds;
+pub use heap_bounds::ManifestHeapBounds;
+
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 

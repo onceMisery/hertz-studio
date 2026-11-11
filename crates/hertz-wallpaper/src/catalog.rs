@@ -16,7 +16,7 @@ use sha2::{Digest, Sha256};
 use crate::json::{check_bounded_json, top_level_raw_value};
 use crate::{valid_sha256_hex, PackageError, Result};
 
-const CATALOG_BYTES: &[u8] = include_bytes!("../contracts/catalog.json");
+pub(crate) const CATALOG_BYTES: &[u8] = include_bytes!("../contracts/catalog.json");
 // Composition resource buffers add one scalar level below the original scene
 // metadata. This generated catalog bound does not change author JSON limits.
 const CATALOG_MAX_DEPTH: usize = 9;

@@ -16,7 +16,8 @@ use zip::read::MetadataLimits;
 use zip::ZipArchive;
 
 use crate::manifest::{
-    validate_manifest_bytes, AssetDescriptor, FileEntry, Manifest, Variant, MANIFEST_PATH,
+    validate_manifest_bytes, AssetDescriptor, FileEntry, Manifest, ManifestHeapBounds, Variant,
+    MANIFEST_PATH,
 };
 use crate::paths::validate_rel_path_ext;
 use crate::resource_container_io::scalar_io_error;
@@ -57,6 +58,7 @@ pub struct ValidatedPackage {
 pub struct CanonicalPackageIdentity {
     manifest: Manifest,
     entries: Vec<VerifiedEntry>,
+    manifest_bytes: u64,
 }
 
 /// Borrowed source-or-exact-variant mapping from a canonical manifest.
@@ -75,6 +77,14 @@ impl CanonicalPackageIdentity {
 
     pub fn entries(&self) -> &[VerifiedEntry] {
         &self.entries
+    }
+
+    /// Fees from the actual original manifest entry length recorded by this
+    /// inspection. Caller-created Manifest/receipt capacities are not evidence.
+    /// ZIP, raw manifest bytes and archive-verification workspace are excluded;
+    /// the process catalog has its own cold and permanent fees.
+    pub fn manifest_heap_bounds(&self) -> Result<ManifestHeapBounds> {
+        ManifestHeapBounds::for_bytes(self.manifest_bytes)
     }
 
     pub fn model_binding(
@@ -162,7 +172,11 @@ fn inspect_identity_in_place<R: Read + std::io::Seek>(
     let manifest_bytes = read_manifest_bytes(archive)?;
     let manifest = validate_manifest_bytes(&manifest_bytes)?;
     let entries = validate_archive_in_place(archive, &manifest)?;
-    Ok(CanonicalPackageIdentity { manifest, entries })
+    Ok(CanonicalPackageIdentity {
+        manifest,
+        entries,
+        manifest_bytes: manifest_bytes.len() as u64,
+    })
 }
 
 /// 一次性校验完整包：manifest 校验 + archive 结构与内容一致性。

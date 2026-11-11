@@ -1,5 +1,24 @@
 # GLB / KTX2 资源实施记录
 
+2026-11-11，原 manifest owner 提供 `ManifestHeapBounds`，以原 256 KiB 上限内的
+实际字节数逐项计算 scanner、Value/content、partial typed、上下文、属性首次完整
+序列化、accepted clone/constraints、清理与诊断八个阶段，再取 requested heap 最大值。
+原合法对象/序列、`{select:null}`、null 拒绝和错误顺序保持；成功属性费用包含
+68 个 Map 的完整 allowance。当前锁定 64-bit alloc/serde 源下，最大 manifest 的
+工作区界为 141,607,208 bytes，成功 manifest 保留界为 8,594,075 bytes，canonical
+identity 保留界为 9,517,723 bytes。私有身份在同次原 archive 检查中记录实际
+manifest 长度，`manifest_heap_bounds()` 仅从该记录取得费用来源。
+
+费用查询借原固定 catalog 字节，以栈上 SHA 核对已证明身份，不解析或初始化目录，
+合法查询不分配 heap。首次 builtin 属性校验可能在成功或失败时初始化原 OnceLock；
+当前目录冷启动界 1,502,113 bytes、永久保留界 1,136,036 bytes 单独暴露，后续
+原生接线须由 process owner 保持相应账本占用。原调用方源字节、archive manifest
+buffer、ZIP/reader、条目验证工作区、pins/jobs、完整模型及 GPU 均另计；这些费用
+API 尚未证明整体 320 MiB 准入。当前源方程、五配置真实 parser/Stored ZIP 与独立
+冷进程证据保存于 `output/design-final-followthrough/manifest-native-fees-r20/`；
+样本验证原容量和退出，不用测量斜率代替完整源码上界。固定包 canonical 绑定、
+compact ModelInput、最后引用 retained 票据及同 renderer 首帧继续实施。
+
 2026-11-11，manifest、公开属性和 composition/catalog 的开放 JSON 值沿原
 `json` owner 递归按字面解析。Map 的键使用普通 String，每个子值使用同一
 DeserializeSeed，直接构造原 Value/Map/Vec；桌面启用 `raw_value` 时，特殊键

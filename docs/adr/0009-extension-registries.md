@@ -4,6 +4,8 @@
 
 ## 决定
 
+2026-11-11 原 manifest 的 checked 费用仍归唯一解析 owner：`ManifestHeapBounds` 从有界原字节长度计算全部八个同存/错误阶段及成功保留界，canonical identity 在同次 archive 检查记录私有实际长度作为费用来源，不接受调用方手构 Manifest 的容量证明。原 fixed catalog 字节和栈上 SHA 联结其冷启动/永久保留费用；查询不解析、初始化或创建第二份目录。首次属性校验建立的 OnceLock 永久 owner 必须在后续原生 process 生命周期保持原账本占用，不能随准备任务归还。原 JSON/校验/合法序列语义保持，不增 parser、ledger 或运行资格；caller bytes、ZIP/reader、验证工作区、compact ModelInput/pins/jobs 与 GPU 仍由原准备流程组合。源码或目录身份变化须重做原费用证明，当前界与后续资格见[模型记录](../wallpaper-model-resources.md)。
+
 2026-11-11 开放 JSON 值的字面语义归原 json/manifest/property/document/catalog owner：同一 serde_json 字节解析器通过普通 String 键与递归 seed 直接保留原 Value/Map/Vec，退役 Value 私有 carrier 的字符串再解析路径。manifest 字节检查及所有本片递归字段使用同一语义，真实包身份入口不能从隐藏字符串取得 seal；原 catalog 字节 hash、公开类型、合法序列/null 边界及数值/容量规则保持。没有键名黑名单、第二语义树或全局关闭 raw_value。完整 manifest/ZIP 费用与 native/ModelInput/GPU 资格继续由原准备流程联结，见[模型记录](../wallpaper-model-resources.md)。
 
 2026-11-11 原 archive 读取诊断复用既有 resource_container_io 标量构造，包 seek、manifest、条目 hash 和 composition IO 不再复制任意外部错误文本。固定操作、已验证实际路径和已知 byte 位置仍归原 archive 调用点；GLB/KTX2 保留原无路径诊断文本与错误分类。此片不增加 reader wrapper、parser 或 ledger，也不授予完整 archive/manifest/native/GPU 费用资格，见[模型记录](../wallpaper-model-resources.md)。
