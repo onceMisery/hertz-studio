@@ -37,6 +37,8 @@ tools/*-stage/src/**/*.gif -text
 tools/*-stage/src/**/*.ico -text
 tools/*-stage/build.mjs text eol=lf
 tools/build-stages.mjs text eol=lf
+tools/three-program-admission.mjs text eol=lf
+tools/three-buffer-admission.mjs text eol=lf
 tools/space-stage/package.json text eol=lf
 tools/space-stage/package-lock.json text eol=lf
 plugin/ui/vendor/*-stage.js text eol=lf

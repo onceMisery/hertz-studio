@@ -124,7 +124,7 @@ dependencies = [
 
 [[package]]
 name = "hertz-desktop-ipc"
-version = "0.3.2-preview"
+version = "0.3.3-preview"
 dependencies = [
  "serde",
  "serde_json",
