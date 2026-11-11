@@ -15,7 +15,9 @@ use sha2::{Digest, Sha256};
 use zip::read::MetadataLimits;
 use zip::ZipArchive;
 
-use crate::manifest::{validate_manifest_bytes, Manifest, MANIFEST_PATH};
+use crate::manifest::{
+    validate_manifest_bytes, AssetDescriptor, FileEntry, Manifest, Variant, MANIFEST_PATH,
+};
 use crate::paths::validate_rel_path_ext;
 use crate::{
     PackageError, Result, MAX_COMPRESSION_RATIO, MAX_FILES, MAX_MANIFEST_BYTES, MAX_PACKAGE_BYTES,
@@ -39,15 +41,139 @@ pub struct ValidatedPackage {
     pub entries: Vec<VerifiedEntry>,
 }
 
+/// Canonical manifest and actual archive-entry identities, owned by this parser.
+/// Composition and resource semantics are checked separately by validate_package.
+/// Caller-created manifests or receipts cannot construct this identity.
+///
+/// ```compile_fail
+/// use hertz_wallpaper::archive::CanonicalPackageIdentity;
+/// use hertz_wallpaper::{Manifest, VerifiedEntry};
+/// fn forge(manifest: Manifest, entries: Vec<VerifiedEntry>) {
+///     let _ = CanonicalPackageIdentity { manifest, entries };
+/// }
+/// ```
+#[derive(Debug)]
+pub struct CanonicalPackageIdentity {
+    manifest: Manifest,
+    entries: Vec<VerifiedEntry>,
+}
+
+/// Borrowed source-or-exact-variant mapping from a canonical manifest.
+/// This binds metadata only; it grants no model runtime or GPU qualification.
+#[derive(Debug)]
+pub struct CanonicalModelBinding<'a> {
+    asset: &'a AssetDescriptor,
+    variant: Option<&'a Variant>,
+    entry: &'a FileEntry,
+}
+
+impl CanonicalPackageIdentity {
+    pub fn manifest(&self) -> &Manifest {
+        &self.manifest
+    }
+
+    pub fn entries(&self) -> &[VerifiedEntry] {
+        &self.entries
+    }
+
+    pub fn model_binding(
+        &self,
+        asset_id: &str,
+        variant_id: Option<&str>,
+    ) -> Result<CanonicalModelBinding<'_>> {
+        let asset = self
+            .manifest
+            .assets
+            .iter()
+            .find(|asset| asset.id == asset_id && asset.kind == crate::AssetKind::Model)
+            .ok_or_else(|| {
+                PackageError::new(
+                    "invalid_model_reference",
+                    "model 引用不对应原包中的 model 资产",
+                )
+            })?;
+        let variant = variant_id
+            .map(|id| {
+                asset
+                    .variants
+                    .iter()
+                    .find(|variant| variant.id == id)
+                    .ok_or_else(|| {
+                        PackageError::new(
+                            "invalid_model_reference",
+                            "model variant 引用不对应原包中的精确变体",
+                        )
+                    })
+            })
+            .transpose()?;
+        let path = variant.map_or(asset.source.as_str(), |variant| variant.file.as_str());
+        let entry = self
+            .manifest
+            .file(path)
+            .ok_or_else(|| PackageError::new("missing_file", "canonical model 文件声明缺失"))?;
+        Ok(CanonicalModelBinding {
+            asset,
+            variant,
+            entry,
+        })
+    }
+}
+
+impl CanonicalModelBinding<'_> {
+    pub fn asset_id(&self) -> &str {
+        &self.asset.id
+    }
+
+    pub fn variant_id(&self) -> Option<&str> {
+        self.variant.map(|variant| variant.id.as_str())
+    }
+
+    pub fn entry(&self) -> &FileEntry {
+        self.entry
+    }
+}
+
+/// Inspect the canonical manifest and every actual archive entry using the
+/// original bounded ZIP/hash path. The ZIP and raw manifest buffers drop before
+/// return; the owned identity does not retain them or inspect GLB/composition.
+pub fn inspect_package_identity<R: Read + std::io::Seek>(
+    reader: R,
+) -> Result<CanonicalPackageIdentity> {
+    let mut archive = open_archive(reader)?;
+    inspect_identity_in_place(&mut archive)
+}
+
+/// Same identity phase with caller-supplied preallocation metadata limits.
+/// Limits are capped by the original physical/container limits and never raised.
+/// Native callers must hold their original workspace grant before calling this;
+/// ZIP bounds alone do not cover manifest parsing or archive-entry verification.
+pub fn inspect_package_identity_with_limits<R: Read + std::io::Seek>(
+    reader: R,
+    limits: MetadataLimits,
+) -> Result<CanonicalPackageIdentity> {
+    let mut archive = open_archive_with_limits(reader, Some(limits))?;
+    inspect_identity_in_place(&mut archive)
+}
+
+fn inspect_identity_in_place<R: Read + std::io::Seek>(
+    archive: &mut ZipArchive<R>,
+) -> Result<CanonicalPackageIdentity> {
+    let manifest_bytes = read_manifest_bytes(archive)?;
+    let manifest = validate_manifest_bytes(&manifest_bytes)?;
+    let entries = validate_archive_in_place(archive, &manifest)?;
+    Ok(CanonicalPackageIdentity { manifest, entries })
+}
+
 /// 一次性校验完整包：manifest 校验 + archive 结构与内容一致性。
 pub fn validate_package<R: std::io::Read + std::io::Seek>(reader: R) -> Result<ValidatedPackage> {
     let mut archive = open_archive(reader)?;
-    let manifest_bytes = read_manifest_bytes(&mut archive)?;
-    let manifest = validate_manifest_bytes(&manifest_bytes)?;
-    let entries = validate_archive_in_place(&mut archive, &manifest)?;
-    validate_composition_in_place(&mut archive, &manifest)?;
-    validate_resource_containers_in_place(&mut archive, &manifest)?;
-    Ok(ValidatedPackage { manifest, entries })
+    let identity = inspect_identity_in_place(&mut archive)?;
+    validate_composition_in_place(&mut archive, identity.manifest())?;
+    validate_resource_containers_in_place(&mut archive, identity.manifest())?;
+    Ok(ValidatedPackage {
+        manifest: identity.manifest,
+        entries: identity.entries,
+    })
 }
 
 /// 对已解析的 manifest 校验 archive 结构与内容（安装器的第二阶段）。
@@ -152,7 +278,14 @@ fn validate_resource_containers_in_place<R: Read + std::io::Seek>(
     Ok(())
 }
 
-fn open_archive<R: std::io::Read + std::io::Seek>(mut reader: R) -> Result<ZipArchive<R>> {
+fn open_archive<R: std::io::Read + std::io::Seek>(reader: R) -> Result<ZipArchive<R>> {
+    open_archive_with_limits(reader, None)
+}
+
+fn open_archive_with_limits<R: Read + std::io::Seek>(
+    mut reader: R,
+    requested: Option<MetadataLimits>,
+) -> Result<ZipArchive<R>> {
     let bytes = reader
         .seek(SeekFrom::End(0))
         .map_err(|error| PackageError::new("format_unsupported", error.to_string()))?;
@@ -165,16 +298,30 @@ fn open_archive<R: std::io::Read + std::io::Seek>(mut reader: R) -> Result<ZipAr
     // Preserve the original manifest/directory allowance. Variable metadata
     // cannot occupy more than the physical package; these are container bounds,
     // not the native preparation workspace's separate admission budget.
-    let limits = MetadataLimits {
+    let container_limits = MetadataLimits {
         max_raw_entries: MAX_FILES + 8,
         max_variable_bytes: metadata_bytes,
         max_zip64_extensible_bytes: metadata_bytes,
         max_eocd_comment_bytes: u16::MAX as usize,
     };
+    let limits = requested.map_or(container_limits, |limits| MetadataLimits {
+        max_raw_entries: limits.max_raw_entries.min(container_limits.max_raw_entries),
+        max_variable_bytes: limits
+            .max_variable_bytes
+            .min(container_limits.max_variable_bytes),
+        max_zip64_extensible_bytes: limits
+            .max_zip64_extensible_bytes
+            .min(container_limits.max_zip64_extensible_bytes),
+        max_eocd_comment_bytes: limits
+            .max_eocd_comment_bytes
+            .min(container_limits.max_eocd_comment_bytes),
+    });
     let archive =
         ZipArchive::with_metadata_limits(Default::default(), reader, limits).map_err(|error| {
             match error {
-                zip::result::ZipError::MetadataLimitExceeded("raw entry limit exceeded") => {
+                zip::result::ZipError::MetadataLimitExceeded("raw entry limit exceeded")
+                    if limits.max_raw_entries == MAX_FILES + 8 =>
+                {
                     PackageError::new("too_many_files", format!("条目数超过 {MAX_FILES} 上限"))
                 }
                 zip::result::ZipError::MetadataLimitExceeded(reason) => {

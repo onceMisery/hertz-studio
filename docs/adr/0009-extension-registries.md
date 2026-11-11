@@ -4,6 +4,8 @@
 
 ## 决定
 
+2026-11-11 包身份仍归原 archive owner：从完整包校验中抽出共用的 manifest/条目范围/实际长度/SHA 阶段，只有该阶段能构造字段私有的 CanonicalPackageIdentity。模型 source 与精确 variant 绑定借用其原 model 资产声明，保留同文件别名身份；手构 manifest 不取得该 seal。调用者 ZIP metadata 限额与原容器上限取小，执行于原 reader 分配前。完整包校验随后继续 composition 和所有资源语义，不引入另一解析器、身份算法或预算 owner；此 seal 不证明 GLB 内容、ModelInput/native 联合包络或 GPU 资格，见[模型记录](../wallpaper-model-resources.md)。
+
 2026-11-11，同版本 ZIP 补丁也归原发行和配套身份 owner：Standard/Full 独立 wrapper 继承根唯一 Cargo patch 表并解析原路径，发行检查核对真实 ZIP 依赖并编译包合同；desktopBuildId 输入包含 vendor manifest、provenance 和源码，原 plugin/studio 身份随之变化，独立验收 lock 与编译缓存排除。修复原入口，不增加另一套补丁配置或身份算法。
 
 2026-11-11 ZIP 元数据分配限制归同版本原 parser：工作区通过 `vendor/zip` 的 zip 2.6.1 补丁提供独立 `with_metadata_limits` 构造方法，保留 `Config`、默认读取和解码语义。源码、原许可证、发布包 checksum、VCS revision 与上游测试原件身份随补丁入库；依赖缓存保持只读。限额在原元数据分配前检查，专属 quota 不能被目录候选重试吞掉；原 parser 产生去重前条目数和 checked opening/retained/Stored-Deflate reader bounds。canonical HWPK 入口沿用 `MAX_FILES + 8` 及原物理包长度，在 manifest 解压前拒绝重复中央目录记录，避免 IndexMap 去重隐藏路径冲突。原 ledger、运行预算与资源 owner 保持；完整联合准备包络和 ModelInput/GPU 资格仍独立验证。上游提供并验证等价分配控制、原始计数及成本 API 后可移除同版本补丁，详见[补丁说明](../../vendor/zip/PATCH.md)和[模型记录](../wallpaper-model-resources.md)。

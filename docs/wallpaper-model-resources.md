@@ -1,5 +1,15 @@
 # GLB / KTX2 资源实施记录
 
+2026-11-11，原 archive owner 抽出包身份检查阶段：
+`inspect_package_identity` 沿用原 manifest、条目范围、实际长度与完整 SHA 校验，
+返回字段私有的 `CanonicalPackageIdentity`。模型绑定只从该身份中的 model 资产
+与精确 variant 取得声明，保留同文件别名的资产和变体身份；调用者手构 manifest
+不能生成该身份。`inspect_package_identity_with_limits` 将调用者 ZIP 元数据限额
+与原容器上限取小值，仍在原 reader 分配前执行，不能抬高原数量或物理界限。
+完整 `validate_package` 共用这一阶段，再继续 composition 和全部资源检查。
+身份阶段不授予 GLB 内容、ModelInput、原生联合内存包络或 GPU 资格；原准备
+任务仍须先持有完整 workspace 预约，后续接入固定包与 retained 生命周期。
+
 2026-11-11，ZIP 元数据限额在原 zip 2.6.1 reader 内维护，仓库补丁和来源见
 [vendor/zip/PATCH.md](../vendor/zip/PATCH.md)。独立 bounded 构造方法保留原
 `Config` 与默认 API，在 author count、中央目录变量、EOCD comment 和 ZIP64
