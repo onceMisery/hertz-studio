@@ -32,6 +32,13 @@ license, see `cargo deny list` or each crate's own LICENSE file):
     windows-sys                       (Apache-2.0 / MIT)
   - webview2-com                       (MIT)
 
+The ZIP reader in vendor/zip/ is zip 2.6.1 (MIT), copyright 2014 Mathijs
+van de Nes and contributors, with bounded metadata allocation controls
+maintained in the original reader. The original license is in
+vendor/zip/LICENSE; published-source checksums and the pinned upstream
+revision are in vendor/zip/UPSTREAM.json. The patch and supported allocation
+bounds are documented in vendor/zip/PATCH.md.
+
 Native restricted SVG preparation dependencies (exact versions):
 
   - resvg-0.49.0 (Apache-2.0 OR MIT)

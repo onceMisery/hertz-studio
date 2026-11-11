@@ -10,6 +10,9 @@ use sha2::{Digest, Sha256};
 const DESKTOP_INPUTS: &[&str] = &[
     "Cargo.toml",
     "Cargo.lock",
+    "vendor/zip/Cargo.toml",
+    "vendor/zip/UPSTREAM.json",
+    "vendor/zip/src",
     "build-support/desktop-build.rs",
     "crates/hertz-desktop/Cargo.toml",
     "crates/hertz-desktop/build.rs",
@@ -222,6 +225,10 @@ mod tests {
             "crates/hertz-wallpaper/contracts/composition.json",
             "crates/hertz-wallpaper/contracts/gl-budgets.json",
             "plugin/ui/stage-resource-budget.js",
+            "vendor/zip/Cargo.toml",
+            "vendor/zip/UPSTREAM.json",
+            "vendor/zip/src/read.rs",
+            "vendor/zip/src/read/metadata_limits.rs",
         ];
         for file in files {
             fixture.write(file, b"before");
@@ -262,6 +269,19 @@ mod tests {
             "crates/hertz-wallpaper/src/node_modules/package/index.js",
             b"ignored dependency cache",
         );
+        assert_eq!(fixture.identity(), extended);
+    }
+
+    #[test]
+    fn local_zip_source_growth_is_hashed_but_its_test_lock_is_not() {
+        let fixture = Fixture::new();
+        fixture.write("vendor/zip/src/read.rs", b"reader");
+        let baseline = fixture.identity();
+        fixture.write("vendor/zip/src/read/metadata_limits.rs", b"limits");
+        let extended = fixture.identity();
+        assert_ne!(extended, baseline);
+        fixture.write("vendor/zip/Cargo.lock", b"standalone test resolution");
+        fixture.write("vendor/zip/target/temporary.rs", b"compiler cache");
         assert_eq!(fixture.identity(), extended);
     }
 }

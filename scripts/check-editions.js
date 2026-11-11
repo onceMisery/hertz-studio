@@ -32,6 +32,21 @@ for (const edition of ['standard', 'full']) {
   }
   const backend = fs.readFileSync(path.join(dir, 'backend/Cargo.toml'), 'utf8');
   assert.equal(backend.includes('features = ["full"]'), edition === 'full');
+  // Resolve the generated independent Cargo root, then compile the real API
+  // consumer: staging alone can pass while it silently selects registry ZIP.
+  const host = /^host: (.+)$/m.exec(execFileSync('rustc', ['-vV'], { encoding: 'utf8' }))[1];
+  const wrapperCargo = path.join(dir, 'backend/Cargo.toml');
+  const graph = JSON.parse(execFileSync('cargo', ['metadata', '--format-version', '1',
+    '--manifest-path', wrapperCargo, '--filter-platform', host, '--locked', '--offline'],
+  { cwd: root, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 }));
+  const contract = graph.packages.find(item => item.name === 'hertz-wallpaper');
+  const consumer = graph.resolve.nodes.find(item => item.id === contract.id);
+  const zipDependency = consumer.deps.find(item => item.name === 'zip');
+  const zipSource = graph.packages.find(item => item.id === zipDependency.pkg);
+  assert.equal(path.resolve(zipSource.manifest_path), path.join(root, 'vendor/zip/Cargo.toml'),
+    edition + ': package contract must consume the original bounded ZIP patch');
+  execFileSync('cargo', ['check', '--manifest-path', wrapperCargo, '-p', 'hertz-wallpaper',
+    '--locked', '--offline'], { cwd: root, stdio: 'inherit' });
   assert(!html.includes('edition:'));
   assert.equal(staged[edition].version, '0.3.2-preview');
   for (const item of staged[edition].contributions) assert(item.id.startsWith(staged[edition].id + '.'));

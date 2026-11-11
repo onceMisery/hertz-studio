@@ -1,5 +1,25 @@
 # GLB / KTX2 资源实施记录
 
+2026-11-11，ZIP 元数据限额在原 zip 2.6.1 reader 内维护，仓库补丁和来源见
+[vendor/zip/PATCH.md](../vendor/zip/PATCH.md)。独立 bounded 构造方法保留原
+`Config` 与默认 API，在 author count、中央目录变量、EOCD comment 和 ZIP64
+extensible sector 分配前检查；专属 quota 直接传播。原 parser 的不可变 usage
+保留 IndexMap 去重前数量，checked bounds 分别覆盖打开峰值、retained metadata
+与固定 Stored/Deflate reader，不将正文大小当作 metadata 大小。
+
+两个 HWPK 校验入口使用该原 reader，保留原 `MAX_FILES + 8` 的 manifest/目录
+余量，其余变量上限来自实际物理包长度和格式长度字段。重复中央目录名字在
+manifest 解压前按原 `path_collides` 拒绝；原始数量超限沿用 `too_many_files`，
+其它 quota 使用 `zip_metadata_limit`。默认 ZIP API 仍保留最后同名条目覆盖行为，
+HWPK 规则由原 canonical owner 执行。bounded 元数据读取覆盖到实际 footer，
+仅允许完整数字签名位于目录大小之内或之后，拒绝同时少报数量和大小隐藏记录。
+Standard/Full 独立发行 wrapper 从根 Cargo 的唯一 patch 表继承同一 ZIP 源，
+检查脚本核对真实依赖图并编译两个 wrapper 的包合同。原 desktopBuildId 输入
+包含 vendor manifest、provenance 和源码，ZIP 修复同步改变配套构建身份；
+独立验收 lock 与编译缓存不参与身份。
+此波尚未接入完整 typed/manifest/composition
+联合包络、retained ModelInput 票据和同 renderer 首帧，原 320 MiB/GPU 资格继续。
+
 2026-11-11，原 canonical ZIP 校验补齐压缩数据的物理范围：沿锁定 ZIP parser 的
 `data_start`、`compressed_size` 与 `central_directory_start`，在首次条目解压前
 以 checked 加法拒绝越过中央目录或溢出的范围。Deflate 的精确上限为实际

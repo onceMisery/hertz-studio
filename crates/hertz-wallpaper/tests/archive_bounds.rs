@@ -83,6 +83,135 @@ fn change_size(bytes: &mut [u8], name: &str, field: usize, size: u32) {
     bytes[offset..offset + 4].copy_from_slice(&size.to_le_bytes());
 }
 
+fn duplicate_central_record(bytes: &mut Vec<u8>, name: &str, copies: usize) {
+    let start = central_record(bytes, name);
+    let length =
+        46 + u16_at(bytes, start + 28) + u16_at(bytes, start + 30) + u16_at(bytes, start + 32);
+    let record = bytes[start..start + length].to_vec();
+    let end = bytes.len() - 22;
+    let count = u16_at(bytes, end + 10) + copies;
+    let size = u32_at(bytes, end + 12) + copies * length;
+    let repeated = record.repeat(copies);
+    bytes.splice(end..end, repeated);
+    let end = bytes.len() - 22;
+    for field in [8, 10] {
+        bytes[end + field..end + field + 2].copy_from_slice(&(count as u16).to_le_bytes());
+    }
+    bytes[end + 12..end + 16].copy_from_slice(&(size as u32).to_le_bytes());
+}
+
+#[test]
+fn hidden_duplicate_manifest_records_are_rejected_before_inflation() {
+    let json = manifest(None);
+    let parsed = validate_manifest_bytes(&json).unwrap();
+    let mut bytes = package(&json, None, CompressionMethod::Stored);
+    let body = body_range(&bytes, "manifest.json");
+    duplicate_central_record(&mut bytes, "manifest.json", 1);
+    let ordinary = ZipArchive::new(Cursor::new(&bytes)).unwrap();
+    assert_eq!(ordinary.raw_file_count(), 2);
+    assert_eq!(ordinary.len(), 1);
+    reject_both(&bytes, &parsed, "path_collides", Some(body));
+}
+
+#[test]
+fn raw_entry_limit_precedes_name_deduplication_and_manifest_read() {
+    let json = manifest(None);
+    let parsed = validate_manifest_bytes(&json).unwrap();
+    let mut bytes = package(&json, None, CompressionMethod::Stored);
+    let body = body_range(&bytes, "manifest.json");
+    duplicate_central_record(&mut bytes, "manifest.json", hertz_wallpaper::MAX_FILES + 8);
+    assert_eq!(ZipArchive::new(Cursor::new(&bytes)).unwrap().len(), 1);
+    reject_both(&bytes, &parsed, "too_many_files", Some(body));
+}
+
+#[test]
+fn underreported_count_cannot_hide_trailing_duplicate_records() {
+    let json = manifest(None);
+    let parsed = validate_manifest_bytes(&json).unwrap();
+    let mut bytes = package(&json, None, CompressionMethod::Stored);
+    let body = body_range(&bytes, "manifest.json");
+    duplicate_central_record(&mut bytes, "manifest.json", 1);
+    let end = bytes.len() - 22;
+    for field in [8, 10] {
+        bytes[end + field..end + field + 2].copy_from_slice(&1u16.to_le_bytes());
+    }
+    reject_both(&bytes, &parsed, "format_unsupported", Some(body));
+}
+
+#[test]
+fn underreported_count_and_size_cannot_hide_records_before_the_footer() {
+    let json = manifest(None);
+    let parsed = validate_manifest_bytes(&json).unwrap();
+    let mut bytes = package(&json, None, CompressionMethod::Stored);
+    let body = body_range(&bytes, "manifest.json");
+    let original_size = u32_at(&bytes, bytes.len() - 22 + 12);
+    duplicate_central_record(&mut bytes, "manifest.json", 1);
+    let end = bytes.len() - 22;
+    for field in [8, 10] {
+        bytes[end + field..end + field + 2].copy_from_slice(&1u16.to_le_bytes());
+    }
+    bytes[end + 12..end + 16].copy_from_slice(&(original_size as u32).to_le_bytes());
+    reject_both(&bytes, &parsed, "format_unsupported", Some(body));
+}
+
+#[test]
+fn exact_central_signature_is_accepted_inside_or_after_the_declared_directory() {
+    let json = manifest(None);
+    let parsed = validate_manifest_bytes(&json).unwrap();
+    let original = package(&json, None, CompressionMethod::Stored);
+    let signature = [0x50, 0x4b, 0x05, 0x05, 3, 0, 1, 2, 3];
+    for included_bytes in 0..=signature.len() {
+        let mut bytes = original.clone();
+        let end = bytes.len() - 22;
+        let original_size = u32_at(&bytes, end + 12);
+        bytes.splice(end..end, signature);
+        let end = bytes.len() - 22;
+        bytes[end + 12..end + 16]
+            .copy_from_slice(&((original_size + included_bytes) as u32).to_le_bytes());
+        if included_bytes == 0 || included_bytes == signature.len() {
+            assert!(validate_package(Cursor::new(&bytes)).is_ok());
+            assert!(validate_archive(Cursor::new(&bytes), &parsed).is_ok());
+        } else {
+            reject_both(&bytes, &parsed, "format_unsupported", None);
+        }
+    }
+}
+
+#[test]
+fn false_author_count_hits_original_entry_limit_before_directory_allocation() {
+    let json = manifest(None);
+    let parsed = validate_manifest_bytes(&json).unwrap();
+    let mut bytes = package(&json, None, CompressionMethod::Stored);
+    let body = body_range(&bytes, "manifest.json");
+    let end = bytes.len() - 22;
+    for field in [8, 10] {
+        bytes[end + field..end + field + 2].copy_from_slice(&65534u16.to_le_bytes());
+    }
+    reject_both(&bytes, &parsed, "too_many_files", Some(body));
+}
+
+#[test]
+fn original_manifest_and_directory_entry_allowance_is_preserved() {
+    let json = manifest(None);
+    let parsed = validate_manifest_bytes(&json).unwrap();
+    let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+    writer
+        .start_file(
+            "manifest.json",
+            SimpleFileOptions::default().compression_method(CompressionMethod::Stored),
+        )
+        .unwrap();
+    writer.write_all(&json).unwrap();
+    for index in 0..hertz_wallpaper::MAX_FILES + 7 {
+        writer
+            .add_directory(format!("unused/d{index}/"), SimpleFileOptions::default())
+            .unwrap();
+    }
+    let bytes = writer.finish().unwrap().into_inner();
+    assert!(validate_package(Cursor::new(&bytes)).is_ok());
+    assert!(validate_archive(Cursor::new(&bytes), &parsed).is_ok());
+}
+
 fn body_range(bytes: &[u8], name: &str) -> (u64, u64) {
     let mut archive = ZipArchive::new(Cursor::new(bytes)).unwrap();
     let file = archive.by_name(name).unwrap();

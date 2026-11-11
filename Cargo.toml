@@ -4,6 +4,11 @@
 [workspace]
 resolver = "2"
 members = ["crates/*", "plugin/backend", "plugin/vendor/dbx-plugin-sdk"]
+exclude = ["vendor/zip"]
+
+[patch.crates-io]
+# Locked zip 2.6.1 with preallocation metadata controls; upstream provenance in vendor/zip/UPSTREAM.json.
+zip = { path = "vendor/zip" }
 
 [workspace.package]
 version = "0.3.2-preview"

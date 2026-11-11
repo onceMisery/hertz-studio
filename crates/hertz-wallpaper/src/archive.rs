@@ -12,6 +12,7 @@ use std::collections::HashSet;
 use std::io::{Read, SeekFrom};
 
 use sha2::{Digest, Sha256};
+use zip::read::MetadataLimits;
 use zip::ZipArchive;
 
 use crate::manifest::{validate_manifest_bytes, Manifest, MANIFEST_PATH};
@@ -159,12 +160,38 @@ fn open_archive<R: std::io::Read + std::io::Seek>(mut reader: R) -> Result<ZipAr
     reader
         .seek(SeekFrom::Start(0))
         .map_err(|error| PackageError::new("format_unsupported", error.to_string()))?;
-    ZipArchive::new(reader).map_err(|error| {
-        PackageError::new(
-            "format_unsupported",
-            format!("不是合法的 ZIP 容器：{error}"),
-        )
-    })
+    let metadata_bytes = usize::try_from(bytes)
+        .map_err(|_| PackageError::new("package_too_large", "包长度无法在当前平台表示"))?;
+    // Preserve the original manifest/directory allowance. Variable metadata
+    // cannot occupy more than the physical package; these are container bounds,
+    // not the native preparation workspace's separate admission budget.
+    let limits = MetadataLimits {
+        max_raw_entries: MAX_FILES + 8,
+        max_variable_bytes: metadata_bytes,
+        max_zip64_extensible_bytes: metadata_bytes,
+        max_eocd_comment_bytes: u16::MAX as usize,
+    };
+    let archive =
+        ZipArchive::with_metadata_limits(Default::default(), reader, limits).map_err(|error| {
+            match error {
+                zip::result::ZipError::MetadataLimitExceeded("raw entry limit exceeded") => {
+                    PackageError::new("too_many_files", format!("条目数超过 {MAX_FILES} 上限"))
+                }
+                zip::result::ZipError::MetadataLimitExceeded(reason) => {
+                    PackageError::new("zip_metadata_limit", reason)
+                }
+                error => PackageError::new(
+                    "format_unsupported",
+                    format!("不是合法的 ZIP 容器：{error}"),
+                ),
+            }
+        })?;
+    // IndexMap preserves the last decoded name. Reject hidden duplicate central
+    // records before even opening the manifest, along the existing path rule.
+    if archive.raw_file_count() != archive.len() {
+        return Err(PackageError::new("path_collides", "中央目录包含重复条目名"));
+    }
+    Ok(archive)
 }
 
 fn read_manifest_bytes<R: std::io::Read + std::io::Seek>(

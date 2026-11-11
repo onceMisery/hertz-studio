@@ -50,11 +50,21 @@ function prepare(edition) {
     if (!d.uses_default_features) options.push('default-features = false');
     return `${d.name} = { ${options.join(', ')} }`;
   });
-  const releaseProfile = fs.readFileSync(path.join(ROOT, 'Cargo.toml'), 'utf8').split('[profile.release]')[1];
+  const rootCargo = fs.readFileSync(path.join(ROOT, 'Cargo.toml'), 'utf8');
+  const releaseProfile = rootCargo.split('[profile.release]')[1];
+  // Cargo ignores dependency-workspace patches at an independent wrapper root.
+  // Carry the original patch table and resolve its paths from the source root.
+  const patchHeader = /^\[patch\.crates-io\][^\S\r\n]*\r?$/m.exec(rootCargo);
+  const patchBody = patchHeader
+    ? rootCargo.slice(patchHeader.index + patchHeader[0].length).split(/^\[/m)[0].trim()
+    : '';
+  const patches = patchBody.replace(/\bpath\s*=\s*("(?:[^"\\]|\\.)*")/g,
+    (_, literal) => 'path = ' + quote(path.resolve(ROOT, JSON.parse(literal))));
   fs.writeFileSync(path.join(dest, 'backend/Cargo.toml'), [
     '[workspace]', '[package]', 'name = "dbx-plugin-hertz"', `version = ${quote(backend.version)}`,
     'edition = "2021"', '[[bin]]', 'name = "dbx-plugin-hertz"',
     `path = ${quote(path.join(ROOT, 'plugin/backend/src/main.rs'))}`, '[dependencies]', ...dependencies,
+    patchBody ? '[patch.crates-io]\n' + patches : '',
     releaseProfile ? '[profile.release]' + releaseProfile : '', ''
   ].join('\n'));
   fs.copyFileSync(path.join(ROOT, 'Cargo.lock'), path.join(dest, 'backend/Cargo.lock'));

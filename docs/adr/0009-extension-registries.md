@@ -4,6 +4,10 @@
 
 ## 决定
 
+2026-11-11，同版本 ZIP 补丁也归原发行和配套身份 owner：Standard/Full 独立 wrapper 继承根唯一 Cargo patch 表并解析原路径，发行检查核对真实 ZIP 依赖并编译包合同；desktopBuildId 输入包含 vendor manifest、provenance 和源码，原 plugin/studio 身份随之变化，独立验收 lock 与编译缓存排除。修复原入口，不增加另一套补丁配置或身份算法。
+
+2026-11-11 ZIP 元数据分配限制归同版本原 parser：工作区通过 `vendor/zip` 的 zip 2.6.1 补丁提供独立 `with_metadata_limits` 构造方法，保留 `Config`、默认读取和解码语义。源码、原许可证、发布包 checksum、VCS revision 与上游测试原件身份随补丁入库；依赖缓存保持只读。限额在原元数据分配前检查，专属 quota 不能被目录候选重试吞掉；原 parser 产生去重前条目数和 checked opening/retained/Stored-Deflate reader bounds。canonical HWPK 入口沿用 `MAX_FILES + 8` 及原物理包长度，在 manifest 解压前拒绝重复中央目录记录，避免 IndexMap 去重隐藏路径冲突。原 ledger、运行预算与资源 owner 保持；完整联合准备包络和 ModelInput/GPU 资格仍独立验证。上游提供并验证等价分配控制、原始计数及成本 API 后可移除同版本补丁，详见[补丁说明](../../vendor/zip/PATCH.md)和[模型记录](../wallpaper-model-resources.md)。
+
 2026-11-11 HWPK 压缩范围与比例仍归原 archive owner：消费锁定 ZIP parser 的绝对 data_start/compressed_size/central_directory_start，在条目解压前以 checked 加法拒绝越界；资源按规范并最终实测的 E、manifest 按有界实际长度核验精确 E≤100C，退役目录自报 U/C 的整数除法。两个公开校验入口共用原 manifest 读取，不新增 ZIP parser 或依赖 fork。目录启动扫描与正文解压分别观测；原长度/SHA/路径和限额保持。完整临时阶段包络、retained、ModelInput 与 GPU 资格仍单独验证，见[模型记录](../wallpaper-model-resources.md)。
 
 2026-11-11 固定资源取消仍归原 AssetStore/ImportJobs：source pin 的原包和投影完整 SHA 流统一使用固定 64 KiB 读取与原任务 cancel，在同步 Read 真正返回后观察取消；局部句柄清理与原单槽退出顺序保持。SVG 原稿/同包字体传同一个任务标记，退役该入口两条无取消 copy，不增文件 broker、worker、账本或兼容 wrapper。此为模型准备前置，未将读窗口视作 ZIP/typed/retained 完整预算或开启模型运行门；[SVG 记录](../wallpaper-svg-resources.md)与[模型记录](../wallpaper-model-resources.md)保留具体资格边界。

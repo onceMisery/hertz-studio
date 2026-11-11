@@ -29,6 +29,8 @@ Thumbs.db
 # Build artifacts
 *.dbxp
 *.artifact.json
+# Standalone ZIP patch tests use a local lock; the workspace lock owns shipping versions.
+/vendor/zip/Cargo.lock
 
 # Local cargo home used in this sandbox (the global one is read-only here)
 .cargo-home/

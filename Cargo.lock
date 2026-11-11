@@ -6817,8 +6817,6 @@ dependencies = [
 [[package]]
 name = "zip"
 version = "2.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1dcb24d0152526ae49b9b96c1dcf71850ca1e0b882e4e28ed898a93c41334744"
 dependencies = [
  "arbitrary",
  "crc32fast",
@@ -6826,6 +6824,7 @@ dependencies = [
  "flate2",
  "indexmap",
  "memchr",
+ "miniz_oxide 0.9.1",
  "zopfli",
 ]
 

@@ -9,6 +9,8 @@
 # Design outputs are compared byte-for-byte with the LF-emitting generator.
 plugin/ui/design/design-base.css text eol=lf
 plugin/ui/design/design-themes.js text eol=lf
+# Preserve the vendored published-source and fixture bytes on every checkout.
+vendor/zip/** -text
 # Frozen evaluation artifacts are byte-hashed; preserve the same bytes on Windows.
 evals/**/*.json text eol=lf
 evals/**/*.jsonl text eol=lf
