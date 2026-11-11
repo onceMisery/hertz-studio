@@ -158,14 +158,13 @@ fn raster_inner(
     _probe.svg_event_for_test("resvg_exit", None);
     // A synchronous third-party call keeps the slot and workspace until return.
     cancelled(cancel)?;
-    for pixel in pixmap.data_mut().chunks_exact_mut(4) {
+    for pixel in pixmap.data_mut().as_chunks_mut::<4>().0 {
         let alpha = pixel[3] as u32;
-        if alpha == 0 {
-            pixel[..3].fill(0);
-        } else {
-            for c in &mut pixel[..3] {
-                *c = ((u32::from(*c) * 255 + alpha / 2) / alpha).min(255) as u8;
-            }
+        for c in &mut pixel[..3] {
+            *c = (u32::from(*c) * 255 + alpha / 2)
+                .checked_div(alpha)
+                .unwrap_or(0)
+                .min(255) as u8;
         }
     }
     image::RgbaImage::from_raw(width, height, pixmap.take())

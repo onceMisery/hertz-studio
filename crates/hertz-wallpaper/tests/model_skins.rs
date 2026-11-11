@@ -22,7 +22,7 @@ fn manifest() -> Manifest {
 }
 fn prefix(document: &Value, bin_bytes: usize) -> Vec<u8> {
     let mut text = serde_json::to_vec(document).unwrap();
-    while text.len() % 4 != 0 {
+    while !text.len().is_multiple_of(4) {
         text.push(b' ');
     }
     let mut bytes = b"glTF".to_vec();
@@ -73,7 +73,7 @@ impl Fixture {
         vertex: bool,
     ) -> usize {
         self.data.resize(self.data.len() + self.gap, 0);
-        while self.data.len() % 4 != 0 {
+        while !self.data.len().is_multiple_of(4) {
             self.data.push(0);
         }
         let offset = self.data.len();

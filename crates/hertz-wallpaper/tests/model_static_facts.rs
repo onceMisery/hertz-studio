@@ -20,7 +20,7 @@ fn glb(document: &Value, binary: Option<&[u8]>) -> Vec<u8> {
 }
 
 fn glb_json(mut json: Vec<u8>, binary: Option<&[u8]>) -> Vec<u8> {
-    while json.len() % 4 != 0 {
+    while !json.len().is_multiple_of(4) {
         json.push(b' ');
     }
     let mut binary = binary.map(<[u8]>::to_vec);

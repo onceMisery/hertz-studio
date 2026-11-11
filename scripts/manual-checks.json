@@ -3,6 +3,10 @@
   "note": "check-* scripts that are deliberate manual/browser/diagnostic entry points. New unregistered check-* files fail scripts/check-scripts.js until they are either registered in check-frontend.js / a workflow or added here.",
   "scripts": [
     {
+      "script": "check-wallpaper-model-loader.mjs",
+      "purpose": "Real GLB consumption and cleanup with the pinned Three 0.186.0 GLTFLoader, exact prepared facts, shared backing identities, private instances, early profile refusal, cancellation and partial failure. Run npm ci --prefix tools/space-stage first, then node scripts/check-wallpaper-model-loader.mjs. Requires the installed locked Three modules; no browser, service or network requests during checks. Consumption evidence keeps native ModelInput, complete costs and GPU admission separate."
+    },
+    {
       "script": "check-shell-layout-browser.js",
       "purpose": "Actual current Hertz shell: exclusive layout leases, failed-move rollback, exact node/order restoration, desktop/mobile theme button interactions. Requires built HERTZ_BIN and Playwright; retains legacy skin retirement."
     },

@@ -146,7 +146,7 @@ fn mul(a: u64, b: u64) -> Result<u64> {
 }
 fn choose2(n: u64) -> Result<u64> {
     let previous = n.saturating_sub(1);
-    if n % 2 == 0 {
+    if n.is_multiple_of(2) {
         mul(n / 2, previous)
     } else {
         mul(n, previous / 2)

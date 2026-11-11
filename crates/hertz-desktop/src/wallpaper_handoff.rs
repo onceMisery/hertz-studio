@@ -24,7 +24,7 @@ impl Handoff {
         preview_owner: Option<HWND>,
     ) -> Result<(Self, String)> {
         let mut monitor = surface.monitor.clone();
-        if preview_owner.is_some() {
+        if let Some(owner) = preview_owner {
             let mut origin = windows_sys::Win32::Foundation::POINT { x: 0, y: 0 };
             if unsafe {
                 windows_sys::Win32::Graphics::Gdi::ClientToScreen(surface.hwnd(), &mut origin)
@@ -32,7 +32,6 @@ impl Handoff {
             {
                 bail!("读取预览位置失败");
             }
-            let owner = preview_owner.expect("preview owner");
             if unsafe {
                 windows_sys::Win32::UI::WindowsAndMessaging::GetWindowLongPtrW(
                     owner,

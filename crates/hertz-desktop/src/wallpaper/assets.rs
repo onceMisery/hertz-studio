@@ -964,7 +964,7 @@ mod tests {
         use std::io::{Cursor, Read, Write};
         // Container fixtures only: neither proves GLTF/DFD decode admission.
         let mut glb_json = br#"{"asset":{"version":"2.0"}}"#.to_vec();
-        while glb_json.len() % 4 != 0 {
+        while !glb_json.len().is_multiple_of(4) {
             glb_json.push(b' ');
         }
         let mut glb = b"glTF".to_vec();
@@ -1099,7 +1099,7 @@ mod tests {
         use std::io::{Cursor, Write};
         let (store, dir) = store("model-structure-staging");
         let mut json = br#"{"asset":{"version":"2.0"},"nodes":[{"children":[0]}]}"#.to_vec();
-        while json.len() % 4 != 0 {
+        while !json.len().is_multiple_of(4) {
             json.push(b' ');
         }
         let mut glb = b"glTF".to_vec();
@@ -1146,7 +1146,7 @@ mod tests {
         for invalid in [false, true] {
             let (store, dir) = store("model-numeric-staging");
             let mut json = br#"{"asset":{"version":"2.0"},"buffers":[{"byteLength":4}],"bufferViews":[{"buffer":0,"byteLength":4}],"accessors":[{"bufferView":0,"componentType":5126,"count":1,"type":"SCALAR","min":[1.2],"max":[1.2]}]}"#.to_vec();
-            while json.len() % 4 != 0 {
+            while !json.len().is_multiple_of(4) {
                 json.push(b' ');
             }
             let mut glb = b"glTF".to_vec();
@@ -1229,7 +1229,7 @@ mod tests {
         for invalid in [false, true] {
             let (store, dir) = store("model-animation-staging");
             let mut json = br#"{"asset":{"version":"2.0"},"buffers":[{"byteLength":32}],"bufferViews":[{"buffer":0,"byteLength":8},{"buffer":0,"byteOffset":8,"byteLength":24}],"accessors":[{"bufferView":0,"componentType":5126,"count":2,"type":"SCALAR","min":[0],"max":[1]},{"bufferView":1,"componentType":5126,"count":2,"type":"VEC3"}],"nodes":[{}],"animations":[{"samplers":[{"input":0,"output":1}],"channels":[{"sampler":0,"target":{"node":0,"path":"translation"}}]}]}"#.to_vec();
-            while json.len() % 4 != 0 {
+            while !json.len().is_multiple_of(4) {
                 json.push(b' ');
             }
             let mut glb = b"glTF".to_vec();
@@ -1339,7 +1339,7 @@ mod tests {
                 "nodes":[{"mesh":0,"weights":[2,-1]},{"mesh":0}],
                 "animations":[{"samplers":[{"input":2,"output":3}],"channels":[{"sampler":0,"target":{"node":0,"path":"weights"}}]}]});
             let mut json = serde_json::to_vec(&document).unwrap();
-            while json.len() % 4 != 0 {
+            while !json.len().is_multiple_of(4) {
                 json.push(b' ');
             }
             let mut glb = b"glTF".to_vec();
@@ -1432,7 +1432,7 @@ mod tests {
                     {"bufferView":1,"componentType":5120,"normalized":true,"count":2,"type":"VEC4","min":[0,0,0,if invalid {-127} else {-128}],"max":[0,0,0,if invalid {0} else {-127}]}],
                 "nodes":[{}],"animations":[{"samplers":[{"input":0,"output":1}],"channels":[{"sampler":0,"target":{"node":0,"path":"rotation"}}]}]});
             let mut text = serde_json::to_vec(&document).unwrap();
-            while text.len() % 4 != 0 {
+            while !text.len().is_multiple_of(4) {
                 text.push(b' ');
             }
             let mut glb = b"glTF".to_vec();
@@ -1559,7 +1559,7 @@ mod tests {
                 "meshes":[{"primitives":[{"attributes":{"POSITION":0,"JOINTS_0":1,"WEIGHTS_0":2}}]}],
                 "nodes":[{"children":[1,2]},{},{},{"mesh":0,"skin":0}],"skins":[{"joints":[1,2]}],"scenes":[{"nodes":[0,3]}],"scene":0});
             let mut text = serde_json::to_vec(&document).unwrap();
-            while text.len() % 4 != 0 {
+            while !text.len().is_multiple_of(4) {
                 text.push(b' ');
             }
             let mut glb = b"glTF".to_vec();

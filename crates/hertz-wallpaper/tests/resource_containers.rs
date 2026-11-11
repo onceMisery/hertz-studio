@@ -13,7 +13,7 @@ use zip::{write::SimpleFileOptions, ZipWriter};
 
 fn glb_json(json: &[u8], binary: Option<&[u8]>) -> Vec<u8> {
     let mut json = json.to_vec();
-    while json.len() % 4 != 0 {
+    while !json.len().is_multiple_of(4) {
         json.push(b' ');
     }
     let length = 20 + json.len() + binary.map_or(0, |bytes| 8 + bytes.len());

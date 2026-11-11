@@ -140,7 +140,7 @@ pub fn inspect_ktx2<R: Read>(input: R, declared_bytes: u64) -> Result<Ktx2Contai
             .ok_or_else(|| reader.error("KTX2 level range overflow"))?;
         if level.bytes == 0
             || level.offset < index_end
-            || supercompression == 0 && level.offset % 4 != 0
+            || supercompression == 0 && !level.offset.is_multiple_of(4)
             || end > declared_bytes
         {
             return Err(reader.error("invalid KTX2 level range"));

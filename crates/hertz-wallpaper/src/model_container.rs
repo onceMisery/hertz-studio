@@ -47,7 +47,7 @@ pub(crate) fn inspect_glb_with<R: Read, T>(
     declared_bytes: u64,
     inspect_body: impl FnOnce(&GlbContainer, &mut ContainerReader<R>) -> Result<T>,
 ) -> Result<(GlbContainer, T)> {
-    if !(20..=MAX_MODEL_BYTES).contains(&declared_bytes) || declared_bytes % 4 != 0 {
+    if !(20..=MAX_MODEL_BYTES).contains(&declared_bytes) || !declared_bytes.is_multiple_of(4) {
         return Err(PackageError::new(
             "invalid_model_container",
             "GLB verified length is outside the model limit or unaligned",

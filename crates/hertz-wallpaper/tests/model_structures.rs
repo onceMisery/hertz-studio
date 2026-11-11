@@ -16,7 +16,7 @@ use zip::{write::SimpleFileOptions, ZipWriter};
 
 fn glb(document: &Value, binary: Option<&[u8]>) -> Vec<u8> {
     let mut json = serde_json::to_vec(document).unwrap();
-    while json.len() % 4 != 0 {
+    while !json.len().is_multiple_of(4) {
         json.push(b' ');
     }
     let mut binary = binary.map(|bytes| bytes.to_vec());

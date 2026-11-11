@@ -25,7 +25,7 @@ fn floats(values: &[f32]) -> Vec<u8> {
 }
 fn prefix_raw(text: &[u8], bin_bytes: usize) -> Vec<u8> {
     let mut text = text.to_vec();
-    while text.len() % 4 != 0 {
+    while !text.len().is_multiple_of(4) {
         text.push(b' ');
     }
     let mut result = b"glTF".to_vec();
@@ -84,7 +84,7 @@ fn add_accessor(
     block: &[u8],
     stride: Option<usize>,
 ) -> usize {
-    while data.len() % 4 != 0 {
+    while !data.len().is_multiple_of(4) {
         data.push(0);
     }
     let mut view = json!({"buffer":0,"byteOffset":data.len(),"byteLength":block.len()});

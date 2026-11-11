@@ -564,10 +564,10 @@ fn inspect_accessor(accessor: &Accessor, views: &[ModelBufferView]) -> Result<Mo
     let element_bytes = packed_stride;
     let stride = view.byte_stride.unwrap_or(packed_stride);
     let absolute_offset = checked_add(view.range.offset, accessor.byte_offset)?;
-    if accessor.byte_offset % component_bytes != 0
-        || absolute_offset % component_bytes != 0
+    if !accessor.byte_offset.is_multiple_of(component_bytes)
+        || !absolute_offset.is_multiple_of(component_bytes)
         || stride < packed_stride
-        || stride % component_bytes != 0
+        || !stride.is_multiple_of(component_bytes)
     {
         return Err(invalid(
             "accessor offset/stride violates component or matrix alignment",

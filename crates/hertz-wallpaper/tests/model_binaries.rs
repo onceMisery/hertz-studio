@@ -21,7 +21,7 @@ fn manifest() -> Manifest {
 }
 fn prefix(document: &Value, bin_bytes: usize) -> Vec<u8> {
     let mut text = serde_json::to_vec(document).unwrap();
-    while text.len() % 4 != 0 {
+    while !text.len().is_multiple_of(4) {
         text.push(b' ');
     }
     let mut bytes = b"glTF".to_vec();

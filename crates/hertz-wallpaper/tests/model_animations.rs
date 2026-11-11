@@ -25,7 +25,7 @@ fn floats(values: &[f32]) -> Vec<u8> {
 }
 fn glb(document: &Value, data: &[u8]) -> Vec<u8> {
     let mut text = serde_json::to_vec(document).unwrap();
-    while text.len() % 4 != 0 {
+    while !text.len().is_multiple_of(4) {
         text.push(b' ');
     }
     let length = data.len().div_ceil(4) * 4;

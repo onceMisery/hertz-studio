@@ -53,7 +53,7 @@ fn minimum(component: u32) -> i32 {
 }
 fn prefix(document: &Value, bin_bytes: usize) -> Vec<u8> {
     let mut text = serde_json::to_vec(document).unwrap();
-    while text.len() % 4 != 0 {
+    while !text.len().is_multiple_of(4) {
         text.push(b' ');
     }
     let length = bin_bytes.div_ceil(4) * 4;
@@ -79,7 +79,7 @@ fn add_accessor(
     mut accessor: Value,
     block: &[u8],
 ) -> usize {
-    while data.len() % 4 != 0 {
+    while !data.len().is_multiple_of(4) {
         data.push(0);
     }
     let views = document["bufferViews"].as_array_mut().unwrap();
