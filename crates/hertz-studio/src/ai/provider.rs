@@ -1674,7 +1674,10 @@ mod tests {
         server_task.abort();
         let _ = server_task.await;
         drop(state);
-        std::fs::remove_dir_all(dir).unwrap();
+        // Windows can briefly retain SQLite file handles after the pool closes.
+        if let Err(error) = std::fs::remove_dir_all(&dir) {
+            eprintln!("Could not remove test directory {}: {error}", dir.display());
+        }
     }
 
     #[tokio::test]
