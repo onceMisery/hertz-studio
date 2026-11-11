@@ -22,6 +22,11 @@ parser path. `Config` retains its single field and `repr(transparent)`;
 manifest accurately declares Rust 1.88.0, because the bounded decoder uses
 standard UTF8Chunks and the window checks use `Option::is_none_or`.
 
+The four file lookup return types explicitly spell the existing receiver lifetime
+as `'_` for current Rust's `mismatched_lifetime_syntaxes` lint. This preserves
+their borrowing behavior and keeps warning-denied builds compatible with the
+Rust 1.88 minimum; it does not change the metadata or allocation controls.
+
 The four usize limits are `max_raw_entries`, `max_variable_bytes` (raw central
 name + extra + comment bytes), `max_zip64_extensible_bytes`, and
 `max_eocd_comment_bytes`. Limits are checked, including checked arithmetic and

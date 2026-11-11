@@ -72,6 +72,9 @@ jobs:
         with:
           node-version: lts/*
 
+      - name: Install frontend contract dependencies
+        run: npm ci --prefix tools/space-stage --no-audit --no-fund
+
       - name: Frontend contract checks
         # 聚合入口：语法 → 静态 guard（形状/接线/禁用词）→ 行为回归（vm 沙箱跑真实
         # 模块）→ 活体（默认不跑：要真浏览器与起着的服务，环境不齐只会报环境错）。
@@ -81,7 +84,6 @@ jobs:
 
       - name: Verify edition staging
         run: |
-          npm ci --prefix tools/space-stage --no-audit --no-fund
           node scripts/check-release-ui.js
           node scripts/check-editions.js
 
