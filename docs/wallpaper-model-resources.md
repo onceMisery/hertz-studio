@@ -1,5 +1,32 @@
 # GLB / KTX2 资源实施记录
 
+2026-11-12，原 native `budget::global()` 的唯一 `OnceLock<Arc<BudgetCoordinator>>`
+在原 scene catalog 冷分配前沿完成 process 准入。费用仅取原
+`ManifestHeapBounds::for_bytes(0)` 的 checked source/layout/SHA 查询及两个
+catalog getter；查询不解析或初始化目录，资格不符先 fail-closed。原 Ledger
+同一 Mutex 内先检查既有 prepare/asset 用量，分别预约 cold workspace
+1,502,113 bytes 与 permanent asset 1,136,036 bytes；任一不足均不改账本且
+不进入 initializer。两项保守预约不表示物理峰值相加。原 `catalog()` 的
+`OnceLock<CatalogContract>` 成功返回后只作内联状态提交，prepare 归零，asset
+永久保留；panic 的 partial parser 先真实 drop，再由同账本栈 guard 退款，
+不发布假 ready。process 不占 session metadata、prepare task 或 preview 槽。
+原 grant/check_requests/grant_session、replacement projection 和 resource
+allocations 继续沿同账本准入；release/confirm_exit/forget/purge 仅改变 token，
+不能归还目录费用。独立测试用 `BudgetCoordinator::new()` 仍是空账本。
+
+普通、embedded 与 feed-test 共用的 `app::run_with` 在 init_log 后、upgrade
+prepare 和任何 Config load/default/normalize 前接入原 global；独立
+`normalize_builtin` 保留 scene eligibility 拒绝先行，再调用 global 后借原
+catalog。原 scene/catalog/manifest/model/ZIP 源方程和锁保持继承，不建立第二
+parser、cache、ledger 或 native normalizer 回调。真实 cold 子进程核对同 Arc/
+catalog 身份、双费用预约、临界拒绝、panic 顺序及原 Config/default/资源消费者，
+证据位于 `output/design-final-followthrough/canonical-model-native-r22/impl/`。
+另一个 `document/catalog.rs` 的 `composition_catalog()` 从 composition.json
+建立 `OnceLock<Contract>`，由 document compile 和 native composition plan
+触发，其费用尚未证明。composition、canonical AssetStore、compact ModelInput、
+jobs/broker 与 GPU 联合包络继续实施；本片不开放 model gate，也不证明整体
+320 MiB 准入。
+
 2026-11-11，原 archive owner 增加 `CanonicalIdentityHeapBounds::for_package_bytes::<R>`，
 在任何 ZIP 打开前以可信物理字节上界 P（先检查 ≤536,870,912）及 requested
 `MetadataLimits` 计算整个 canonical identity 的 requested heap。真实打开与查询
@@ -48,7 +75,7 @@ OS in-flight 不可中断，borrowed ZipFile Drop 不 drain，原 reader/archive
 后才 public return，API 不释放 caller grant。不增加 reader wrapper、parser 或 ledger。
 caller Read/Seek/Drop heap、预持有任意 caller error、stack、allocator overhead 及
 process catalog 从 job W 中排除；cold/permanent catalog 分别1502113/1136036，
-须由原 process owner 独立计入。原生完整目录账本、canonical AssetStore、compact
+已由原 native process owner 独立计入。composition 目录账本、canonical AssetStore、compact
 ModelInput/最后引用 retained 票据及 GPU 首帧仍继续，未证明整体320MiB准入。
 本波 source transfer、独占构建和自然退出证据位于
 `output/design-final-followthrough/canonical-model-binding-r21/repair1/impl/`；
@@ -65,8 +92,8 @@ manifest 长度，`manifest_heap_bounds()` 仅从该记录取得费用来源。
 
 费用查询借原固定 catalog 字节，以栈上 SHA 核对已证明身份，不解析或初始化目录，
 合法查询不分配 heap。首次 builtin 属性校验可能在成功或失败时初始化原 OnceLock；
-当前目录冷启动界 1,502,113 bytes、永久保留界 1,136,036 bytes 单独暴露，后续
-原生接线须由 process owner 保持相应账本占用。原调用方源字节、archive manifest
+当前目录冷启动界 1,502,113 bytes、永久保留界 1,136,036 bytes 单独暴露，原生
+process owner 已保持相应账本占用。原调用方源字节、archive manifest
 buffer、ZIP/reader、条目验证工作区、pins/jobs、完整模型及 GPU 均另计；这些费用
 API 尚未证明整体 320 MiB 准入。当前源方程、五配置真实 parser/Stored ZIP 与独立
 冷进程证据保存于 `output/design-final-followthrough/manifest-native-fees-r20/`；

@@ -6082,6 +6082,7 @@ pub(crate) fn run_with(run_config: RunConfig) -> Result<()> {
     let mut ready = ReadyGuard::new(ready);
     let locate_on_start = args.locate;
     init_log();
+    let _ = crate::wallpaper::budget::global();
     let _root_owner = crate::wallpaper_upgrade::prepare(&config::base_dir())?;
     if args.wallpaper_feed_test {
         let config = config::load()?;

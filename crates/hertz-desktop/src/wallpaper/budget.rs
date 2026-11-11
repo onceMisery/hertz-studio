@@ -35,7 +35,11 @@ const MAX_RESERVATIONS: usize = 64;
 /// 进程内唯一生产账本。导入准备/探测已接入；桌面与预览规划器沿用此 owner。
 pub(crate) fn global() -> Arc<BudgetCoordinator> {
     static BUDGET: OnceLock<Arc<BudgetCoordinator>> = OnceLock::new();
-    Arc::clone(BUDGET.get_or_init(|| Arc::new(BudgetCoordinator::new())))
+    Arc::clone(BUDGET.get_or_init(|| {
+        let budget = BudgetCoordinator::new();
+        budget.initialize_scene_catalog();
+        Arc::new(budget)
+    }))
 }
 
 /// 桌面呈现目标上限（§12.1）。
@@ -190,16 +194,116 @@ pub(crate) struct BudgetUsage {
     pub resource_records: u32,
 }
 
+/// Process storage belongs to this ledger, independently of session tokens.
+/// The cold workspace and permanent tree are separate conservative quotas;
+/// their sum is not a claim about the physical parser peak.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum SceneCatalogCharge {
+    #[default]
+    Uninitialized,
+    Constructing {
+        prepare_cpu_bytes: u64,
+        asset_cpu_bytes: u64,
+    },
+    Initialized {
+        asset_cpu_bytes: u64,
+    },
+}
+
+/// Kept on the initializer's stack under the original ledger lock. Unwinding
+/// drops partial parser resources before reaching this reservation's refund.
+struct SceneCatalogReservation<'a> {
+    ledger: &'a mut Ledger,
+    retained: u64,
+    committed: bool,
+}
+
+impl<'a> SceneCatalogReservation<'a> {
+    fn reserve(
+        ledger: &'a mut Ledger,
+        bounds: hertz_wallpaper::manifest::ManifestHeapBounds,
+    ) -> Result<Self, BudgetRejection> {
+        let usage = ledger.active_usage();
+        let cold = bounds.catalog_cold_requested_bytes();
+        let retained = bounds.catalog_retained_requested_bytes();
+        for (quota, cap, held, requested) in [
+            (
+                "prepare_cpu_bytes",
+                MAX_PREPARE_CPU_BYTES,
+                usage.prepare_cpu_bytes,
+                cold,
+            ),
+            (
+                "asset_cpu_bytes",
+                MAX_ASSET_CPU_BYTES,
+                usage.asset_cpu_bytes,
+                retained,
+            ),
+        ] {
+            if requested > cap.saturating_sub(held) {
+                return Err(Ledger::reject(
+                    quota,
+                    cap,
+                    held,
+                    requested,
+                    "进程场景目录必须在冷构造前取得全部额度",
+                ));
+            }
+        }
+        // Only the unique production OnceLock initializer enters this path.
+        assert_eq!(ledger.scene_catalog, SceneCatalogCharge::Uninitialized);
+        ledger.scene_catalog = SceneCatalogCharge::Constructing {
+            prepare_cpu_bytes: cold,
+            asset_cpu_bytes: retained,
+        };
+        Ok(Self {
+            ledger,
+            retained,
+            committed: false,
+        })
+    }
+
+    fn commit(mut self) {
+        // The original catalog has published successfully. Nothing fallible,
+        // allocating or calling another owner may run before this inline commit.
+        self.ledger.scene_catalog = SceneCatalogCharge::Initialized {
+            asset_cpu_bytes: self.retained,
+        };
+        self.committed = true;
+    }
+}
+
+impl Drop for SceneCatalogReservation<'_> {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.ledger.scene_catalog = SceneCatalogCharge::Uninitialized;
+        }
+    }
+}
+
 #[derive(Debug)]
 struct Ledger {
     next_token: u64,
     revision: u64,
+    scene_catalog: SceneCatalogCharge,
     reservations: Vec<Reservation>,
 }
 
 impl Ledger {
     fn active_usage(&self) -> BudgetUsage {
-        let mut usage = BudgetUsage::default();
+        let (prepare_cpu_bytes, asset_cpu_bytes) = match self.scene_catalog {
+            SceneCatalogCharge::Uninitialized => (0, 0),
+            SceneCatalogCharge::Constructing {
+                prepare_cpu_bytes,
+                asset_cpu_bytes,
+            } => (prepare_cpu_bytes, asset_cpu_bytes),
+            SceneCatalogCharge::Initialized { asset_cpu_bytes } => (0, asset_cpu_bytes),
+        };
+        let mut usage = BudgetUsage {
+            prepare_cpu_bytes,
+            asset_cpu_bytes,
+            ..BudgetUsage::default()
+        };
         for reservation in &self.reservations {
             usage.reservation_records += 1;
             usage.resource_records += reservation.children.len() as u32;
@@ -286,9 +390,25 @@ impl BudgetCoordinator {
             ledger: Mutex::new(Ledger {
                 next_token: 1,
                 revision: 1,
+                scene_catalog: SceneCatalogCharge::Uninitialized,
                 reservations: Vec::new(),
             }),
         }
+    }
+
+    fn initialize_scene_catalog(&self) {
+        // This checked layout/source/SHA query does not parse or initialize the
+        // catalog. Unsupported source configurations fail before its first call.
+        let bounds = hertz_wallpaper::manifest::ManifestHeapBounds::for_bytes(0)
+            .expect("scene catalog requires its verified heap source and layout");
+        let mut ledger = self
+            .ledger
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let reservation = SceneCatalogReservation::reserve(&mut ledger, bounds)
+            .expect("scene catalog requires both original CPU quotas before construction");
+        let _ = hertz_wallpaper::catalog();
+        reservation.commit();
     }
 
     /// 原子授予：全部配额一次校验，任一不过即整体拒绝（不部分入账）。
@@ -312,6 +432,7 @@ impl BudgetCoordinator {
             ledger: Mutex::new(Ledger {
                 next_token: ledger.next_token,
                 revision: ledger.revision,
+                scene_catalog: ledger.scene_catalog,
                 reservations: ledger
                     .reservations
                     .iter()
@@ -804,3 +925,7 @@ mod tests;
 #[cfg(test)]
 #[path = "budget_allocations_tests.rs"]
 mod allocation_tests;
+
+#[cfg(test)]
+#[path = "budget_catalog_tests.rs"]
+mod catalog_tests;

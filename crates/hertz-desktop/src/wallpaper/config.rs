@@ -484,6 +484,7 @@ pub(crate) fn normalize_builtin(
     if !crate::config::wallpaper_scene_allowed(id) {
         bail!("场景不具备桌面资格");
     }
+    let _ = super::budget::global();
     let scene = hertz_wallpaper::catalog()
         .scene(id)
         .ok_or_else(|| anyhow::anyhow!("场景不存在"))?;
