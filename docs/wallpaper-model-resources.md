@@ -406,3 +406,20 @@ normalized动画的文件内容检查见上文；实际0.186 loader的表示转�
 下一步沿同一包合同与资源准备、预算、pool、renderer、clock owner 完成上表
 剩余项。HWPK1 / documentVersion1 / Config5 不变；此切片不完成整个 P2-03
 或 A04/A05/A06/A10 总实施计划。
+
+纯 GLB inspector 现在提供 `inspect_glb_with_cancel` 和完整内容入口
+`inspect_glb_resource_content_with_cancel`，借用可选 `AtomicBool`；原入口继续使用
+无 token 路径。原 `ContainerReader` 的所有底层同步读取（包括整个 JSON）每次
+最多 64 KiB，前后以 Acquire 检查取消；空 read/skip 也检查但不调用底层 I/O。
+原完整 schema、数值工作量上限、缓存窗口及未用 BIN 的完整 SHA-256 保持。
+数值窗口 fill/skip 不再把 `cancelled` 改成 `invalid_model_binary`。
+有 token 时也保留原 ZIP reader 的 typed payload 取消；无 token 入口仍保留
+原 I/O 分类。识别该已知类型不会调用外部错误的 Display/Debug/Source。
+
+取消是协作式的：同步 `Read` 已阻塞时，token 不会中断该调用，资源和实际读取
+必须一直存活至调用返回、检查取消并退出。真实非 Interrupted I/O 失败优先于
+同次读取的取消，诊断仍只格式化固定上下文、ErrorKind、OS scalar 和原逻辑起点；
+成功的 CPU 阶段之间及数值循环检查取消，已产生的语义失败保留原分类。
+borrowed token 只增加栈上指针，唯一短取消诊断使用原固定 allowance；有限的
+System meter 回归检查原 `ModelHeapBounds` 下的峰值与 drop=0，不建立经验费用。
+这只是后续 native binding 的前置修复，native/ModelInput/GPU 准入门仍关闭。

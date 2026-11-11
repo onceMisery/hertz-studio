@@ -7,6 +7,7 @@ use std::{
     cmp::Reverse,
     collections::{BTreeMap, BinaryHeap},
     io::{self, Read},
+    sync::atomic::AtomicBool,
 };
 
 use sha2::{Digest, Sha256};
@@ -18,7 +19,7 @@ use crate::{
         component_precision, structure_from_container, AnimationInterpolation, AnimationPath,
         GlbResource, ModelAccessor, ModelStructure,
     },
-    resource_container_io::ContainerReader,
+    resource_container_io::{check_cancel, ContainerReader},
     PackageError, Result,
 };
 
@@ -79,6 +80,19 @@ pub fn inspect_glb_resource_content<R: Read>(
     manifest: &Manifest,
     path: &str,
 ) -> Result<CheckedGlbResource> {
+    inspect_glb_resource_content_with_cancel(input, declared_bytes, manifest, path, None)
+}
+
+/// Full original framing, schema, numeric and whole-stream digest inspection
+/// with a borrowed cooperative cancellation flag.
+pub fn inspect_glb_resource_content_with_cancel<R: Read>(
+    input: R,
+    declared_bytes: u64,
+    manifest: &Manifest,
+    path: &str,
+    cancel: Option<&AtomicBool>,
+) -> Result<CheckedGlbResource> {
+    check_cancel(cancel)?;
     // Reject before paths' diagnostic copies an unbounded caller string.
     if path.len() > crate::MAX_PATH_BYTES {
         return Err(PackageError::new(
@@ -87,18 +101,23 @@ pub fn inspect_glb_resource_content<R: Read>(
         ));
     }
     crate::paths::validate_rel_path(path)?;
+    check_cancel(cancel)?;
     let mut hashing = HashingReader {
         input,
         hash: Sha256::new(),
         bytes: 0,
     };
     let (container, (structure, facts)) =
-        inspect_glb_with(&mut hashing, declared_bytes, |container, reader| {
+        inspect_glb_with(&mut hashing, declared_bytes, cancel, |container, reader| {
+            reader.check_cancel()?;
             let structure = structure_from_container(container, manifest, path)?;
+            reader.check_cancel()?;
             let facts = inspect_accessors(&structure, reader)?;
+            reader.check_cancel()?;
             Ok((structure, facts))
         })?;
-    Ok(CheckedGlbResource {
+    check_cancel(cancel)?;
+    let checked = CheckedGlbResource {
         resource: GlbResource {
             container,
             structure,
@@ -107,7 +126,9 @@ pub fn inspect_glb_resource_content<R: Read>(
         bytes: hashing.bytes,
         source_path: path.to_owned(),
         facts,
-    })
+    };
+    check_cancel(cancel)?;
+    Ok(checked)
 }
 
 struct HashingReader<R> {
@@ -126,6 +147,13 @@ impl<R: Read> Read for HashingReader<R> {
 
 fn invalid(message: impl Into<String>) -> PackageError {
     PackageError::new("invalid_model_binary", message)
+}
+fn binary_read_error(error: PackageError) -> PackageError {
+    if error.code == "cancelled" {
+        error
+    } else {
+        invalid(error.message)
+    }
 }
 fn limit() -> PackageError {
     PackageError::new(
@@ -181,14 +209,16 @@ pub(crate) fn requested_numeric_heap_bound() -> Result<u64> {
 
 fn inspect_accessors<R: Read>(
     structure: &ModelStructure,
-    reader: &mut ContainerReader<R>,
+    reader: &mut ContainerReader<'_, R>,
 ) -> Result<NumericFacts> {
+    reader.check_cancel()?;
     let mut layouts = BTreeMap::new();
     let mut jobs = Vec::<Job>::with_capacity(structure.accessors.len());
     let mut mapping = Vec::with_capacity(structure.accessors.len());
     let mut elements = 0_u64;
     let mut components = 0_u64;
     for (index, accessor) in structure.accessors.iter().enumerate() {
+        reader.check_cancel()?;
         // normalized/bounds affect interpretation, not raw component decoding.
         let key = (
             accessor.range.offset,
@@ -235,7 +265,9 @@ fn inspect_accessors<R: Read>(
         mapping.push(job);
     }
     for mesh in &structure.meshes {
+        reader.check_cancel()?;
         for primitive in &mesh.primitives {
+            reader.check_cancel()?;
             if let Some(index) = primitive.indices {
                 let vertex_count = structure.accessors[primitive.attributes["POSITION"]].count;
                 let job = &mut jobs[mapping[index]];
@@ -255,10 +287,13 @@ fn inspect_accessors<R: Read>(
         }
     }
     for animation in &structure.animations {
+        reader.check_cancel()?;
         for sampler in &animation.samplers {
+            reader.check_cancel()?;
             jobs[mapping[sampler.input]].timestamps = true;
         }
         for channel in &animation.channels {
+            reader.check_cancel()?;
             if channel.target_node.is_some() && channel.path == AnimationPath::Rotation {
                 let sampler = &animation.samplers[channel.sampler];
                 let job = &mut jobs[mapping[sampler.output]];
@@ -270,9 +305,12 @@ fn inspect_accessors<R: Read>(
             }
         }
     }
+    reader.check_cancel()?;
     let mut skin = skin::prepare(structure, &mapping, &jobs, elements)?;
+    reader.check_cancel()?;
     let mut pending = BinaryHeap::with_capacity(jobs.len());
     for (index, job) in jobs.iter().enumerate() {
+        reader.check_cancel()?;
         pending.push(Reverse((
             structure.accessors[job.accessor].range.offset,
             index,
@@ -280,8 +318,10 @@ fn inspect_accessors<R: Read>(
         )));
     }
     // Allocated only after the work limit has passed; no BIN-sized allocation.
+    reader.check_cancel()?;
     let mut window = BinaryWindow::new(reader);
     while let Some(Reverse((offset, index, element))) = pending.pop() {
+        window.reader.check_cancel()?;
         let job = &mut jobs[index];
         let accessor = &structure.accessors[job.accessor];
         let bytes = window.element(offset, accessor.element_bytes as usize)?;
@@ -289,6 +329,7 @@ fn inspect_accessors<R: Read>(
         if let Some(skin) = &mut skin {
             skin.observe(index, element, accessor.component_type, &values)?;
         }
+        window.reader.check_cancel()?;
         let next = element + 1;
         if next < accessor.count {
             let next_offset = accessor
@@ -299,10 +340,13 @@ fn inspect_accessors<R: Read>(
             pending.push(Reverse((next_offset, index, next)));
         }
     }
+    window.reader.check_cancel()?;
     if let Some(skin) = &skin {
         skin.finish()?;
     }
+    window.reader.check_cancel()?;
     for (index, accessor) in structure.accessors.iter().enumerate() {
+        window.reader.check_cancel()?;
         let job = &jobs[mapping[index]];
         for (declared, actual, label) in [
             (&accessor.min, &job.min, "min"),
@@ -320,6 +364,7 @@ fn inspect_accessors<R: Read>(
             }
         }
     }
+    window.reader.check_cancel()?;
     Ok(NumericFacts {
         unique_layouts: jobs.len(),
         elements,
@@ -457,15 +502,15 @@ fn rotation_component(raw: f64, component_type: u32) -> Result<f64> {
     }
 }
 
-struct BinaryWindow<'a, R> {
-    reader: &'a mut ContainerReader<R>,
+struct BinaryWindow<'a, 'c, R> {
+    reader: &'a mut ContainerReader<'c, R>,
     buffer: Box<[u8; WINDOW_BYTES]>,
     start: u64,
     filled: usize,
     end: u64,
 }
-impl<'a, R: Read> BinaryWindow<'a, R> {
-    fn new(reader: &'a mut ContainerReader<R>) -> Self {
+impl<'a, 'c, R: Read> BinaryWindow<'a, 'c, R> {
+    fn new(reader: &'a mut ContainerReader<'c, R>) -> Self {
         let start = reader.offset();
         let end = start + reader.remaining();
         Self {
@@ -477,6 +522,7 @@ impl<'a, R: Read> BinaryWindow<'a, R> {
         }
     }
     fn element(&mut self, offset: u64, size: usize) -> Result<&[u8]> {
+        self.reader.check_cancel()?;
         let end = offset.checked_add(size as u64).ok_or_else(limit)?;
         if offset < self.start || end > self.end || size > 64 {
             return Err(invalid("numeric element exceeds the checked BIN stream"));
@@ -491,7 +537,7 @@ impl<'a, R: Read> BinaryWindow<'a, R> {
             } else {
                 self.reader
                     .skip(offset - loaded_end)
-                    .map_err(|error| invalid(error.message))?;
+                    .map_err(binary_read_error)?;
                 self.start = offset;
                 self.filled = 0;
             }
@@ -501,13 +547,78 @@ impl<'a, R: Read> BinaryWindow<'a, R> {
                 .min((WINDOW_BYTES - self.filled) as u64) as usize;
             self.reader
                 .read_into(&mut self.buffer[self.filled..self.filled + count])
-                .map_err(|error| invalid(error.message))?;
+                .map_err(binary_read_error)?;
             self.filled += count;
             if size > self.filled {
                 return Err(invalid("short BIN numeric element"));
             }
         }
+        self.reader.check_cancel()?;
         let local = (offset - self.start) as usize;
         Ok(&self.buffer[local..local + size])
+    }
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::*;
+    use std::{cell::Cell, io::Cursor, sync::atomic::Ordering};
+
+    struct Counted<'a> {
+        bytes: Cursor<&'a [u8]>,
+        calls: &'a Cell<usize>,
+    }
+    impl Read for Counted<'_> {
+        fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+            self.calls.set(self.calls.get() + 1);
+            self.bytes.read(output)
+        }
+    }
+
+    #[test]
+    fn cached_and_empty_numeric_elements_poll_before_returning() {
+        let token = AtomicBool::new(false);
+        let calls = Cell::new(0);
+        let bytes = [0; 8];
+        let input = Counted {
+            bytes: Cursor::new(&bytes),
+            calls: &calls,
+        };
+        let mut reader =
+            ContainerReader::new_with_cancel(input, 8, "invalid_model_container", Some(&token));
+        let mut window = BinaryWindow::new(&mut reader);
+        assert_eq!(window.element(0, 4).unwrap(), &[0; 4]);
+        assert_eq!(calls.get(), 1);
+        token.store(true, Ordering::Release);
+        assert_eq!(window.element(4, 4).unwrap_err().code, "cancelled");
+        assert_eq!(window.element(4, 0).unwrap_err().code, "cancelled");
+        assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn empty_numeric_inspection_polls_before_preparation() {
+        let token = AtomicBool::new(true);
+        let container = crate::model_container::inspect_glb(
+            Cursor::new(b"glTF\x02\x00\x00\x00\x30\x00\x00\x00\x1c\x00\x00\x00JSON{\"asset\":{\"version\":\"2.0\"}} "),
+            48,
+        ).unwrap();
+        let manifest: Manifest = serde_json::from_value(serde_json::json!({"formatVersion":1,
+            "workId":"c17ed10a-5c55-4a52-85dc-7509f9e88aae","version":1,"title":"Empty numeric",
+            "content":{"kind":"builtin","sceneId":"zodiac","stateVersion":1,"params":{}},
+            "assets":[],"files":[],"permissions":{"audioSpectrum":false,"pointer":false},
+            "license":{"code":"none","assets":"CC0-1.0"}}))
+        .unwrap();
+        let structure =
+            structure_from_container(&container, &manifest, "assets/model.glb").unwrap();
+        let mut reader = ContainerReader::new_with_cancel(
+            Cursor::new([]),
+            0,
+            "invalid_model_container",
+            Some(&token),
+        );
+        assert_eq!(
+            inspect_accessors(&structure, &mut reader).unwrap_err().code,
+            "cancelled"
+        );
     }
 }

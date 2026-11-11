@@ -3,8 +3,9 @@
 //! equations, not these finite fixtures, establish the 4 MiB input bound.
 
 use hertz_wallpaper::{
-    model_binary::inspect_glb_resource_content, model_structure::ModelHeapBounds, Manifest,
-    MAX_TEXT_BYTES,
+    model_binary::{inspect_glb_resource_content, inspect_glb_resource_content_with_cancel},
+    model_structure::ModelHeapBounds,
+    Manifest, MAX_TEXT_BYTES,
 };
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -13,7 +14,7 @@ use std::{
     cell::Cell,
     io::{self, Cursor, Read},
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
     },
 };
@@ -810,4 +811,89 @@ fn actual_parser_requested_heap_and_drop() {
         None,
         Some(0),
     );
+}
+
+struct CancelReader<'a> {
+    input: Cursor<&'a [u8]>,
+    cancel: &'a AtomicBool,
+    at: u64,
+    fired: bool,
+    after: usize,
+}
+impl Read for CancelReader<'_> {
+    fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+        assert!(output.len() <= 64 * 1024);
+        self.after += usize::from(self.fired);
+        if self.input.position() == self.at {
+            self.fired = true;
+            self.cancel.store(true, Ordering::Release);
+            return self.input.read(&mut output[..1]);
+        }
+        let count = output.len().min((self.at - self.input.position()) as usize);
+        self.input.read(&mut output[..count])
+    }
+}
+
+#[test]
+fn cancellation_stays_in_original_model_heap_bounds_and_drops_every_allocation() {
+    let manifest = manifest();
+    let text = format!(
+        r#"{{"asset":{{"version":"2.0"}},"extras":{{"padding":"{}"}},"buffers":[{{"byteLength":131072}}],"bufferViews":[{{"buffer":0,"byteLength":4}}],"accessors":[{{"bufferView":0,"componentType":5126,"count":1,"type":"SCALAR"}}]}}"#,
+        "x".repeat(70 * 1024)
+    );
+    let bytes = glb(&text, &[0; 131072], 0);
+    let json_bytes = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as u64;
+    let bin_start = 28 + json_bytes;
+    let bounds = ModelHeapBounds::for_json_bytes(json_bytes, &manifest).unwrap();
+    for (label, at, initial) in [
+        ("initial", 0, true),
+        ("JSON", 20 + 64 * 1024, false),
+        ("numeric BIN", bin_start, false),
+        ("unused BIN", bin_start + 64 * 1024, false),
+        ("footer", bytes.len() as u64, false),
+    ] {
+        let token = AtomicBool::new(initial);
+        let mut input = CancelReader {
+            input: Cursor::new(bytes.as_slice()),
+            cancel: &token,
+            at,
+            fired: false,
+            after: 0,
+        };
+        LIVE.with(|value| value.set(0));
+        PEAK.with(|value| value.set(0));
+        ENABLED.with(|value| value.set(true));
+        let error = inspect_glb_resource_content_with_cancel(
+            &mut input,
+            bytes.len() as u64,
+            &manifest,
+            "assets/model.glb",
+            Some(&token),
+        )
+        .unwrap_err();
+        let code = error.code;
+        let diagnostic_bytes = error.message.len();
+        drop(error);
+        ENABLED.with(|value| value.set(false));
+        let peak = PEAK.with(Cell::get);
+        let live = LIVE.with(Cell::get);
+        let bound = if initial || at < bin_start {
+            bounds.opening_requested_bytes()
+        } else {
+            bounds.workspace_requested_bytes()
+        };
+        println!("cancel_case={label} J={json_bytes} peak={peak} original_bound={bound} diagnostic_bytes={diagnostic_bytes} drop={live}");
+        assert_eq!(code, "cancelled");
+        assert_eq!(live, 0);
+        assert!(peak as u64 <= bound);
+        assert_eq!(diagnostic_bytes, "resource inspection cancelled".len());
+        if initial {
+            assert_eq!(
+                peak, diagnostic_bytes,
+                "only the one short diagnostic String"
+            );
+        }
+        assert_eq!(input.after, 0);
+        assert_eq!(input.fired, !initial);
+    }
 }

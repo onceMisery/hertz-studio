@@ -4,10 +4,11 @@
 
 use serde::Deserialize;
 use std::io::Read;
+use std::sync::atomic::AtomicBool;
 
 use crate::{
     json::{check_bounded_json, check_finite_json_values},
-    resource_container_io::ContainerReader,
+    resource_container_io::{check_cancel, ContainerReader},
     PackageError, Result, MAX_MANIFEST_DEPTH, MAX_MODEL_BYTES, MAX_TEXT_BYTES,
 };
 
@@ -37,7 +38,17 @@ struct AssetHeader {
 }
 
 pub fn inspect_glb<R: Read>(input: R, declared_bytes: u64) -> Result<GlbContainer> {
-    inspect_glb_with(input, declared_bytes, |_, _| Ok(())).map(|(container, ())| container)
+    inspect_glb_with_cancel(input, declared_bytes, None)
+}
+
+/// Cooperative cancellation on the original stream. A blocked synchronous
+/// Read must return before cancellation can finish and its resources drop.
+pub fn inspect_glb_with_cancel<R: Read>(
+    input: R,
+    declared_bytes: u64,
+    cancel: Option<&AtomicBool>,
+) -> Result<GlbContainer> {
+    inspect_glb_with(input, declared_bytes, cancel, |_, _| Ok(())).map(|(container, ())| container)
 }
 
 /// Inspect the body on the same stream that established its framing. The
@@ -45,15 +56,18 @@ pub fn inspect_glb<R: Read>(input: R, declared_bytes: u64) -> Result<GlbContaine
 pub(crate) fn inspect_glb_with<R: Read, T>(
     input: R,
     declared_bytes: u64,
-    inspect_body: impl FnOnce(&GlbContainer, &mut ContainerReader<R>) -> Result<T>,
+    cancel: Option<&AtomicBool>,
+    inspect_body: impl FnOnce(&GlbContainer, &mut ContainerReader<'_, R>) -> Result<T>,
 ) -> Result<(GlbContainer, T)> {
+    check_cancel(cancel)?;
     if !(20..=MAX_MODEL_BYTES).contains(&declared_bytes) || !declared_bytes.is_multiple_of(4) {
         return Err(PackageError::new(
             "invalid_model_container",
             "GLB verified length is outside the model limit or unaligned",
         ));
     }
-    let mut reader = ContainerReader::new(input, declared_bytes, "invalid_model_container");
+    let mut reader =
+        ContainerReader::new_with_cancel(input, declared_bytes, "invalid_model_container", cancel);
     let header = reader.fixed::<12>()?;
     if &header[..4] != b"glTF" {
         return Err(reader.error("GLB magic mismatch"));
@@ -86,12 +100,16 @@ pub(crate) fn inspect_glb_with<R: Read, T>(
             reader.error("JSON length exceeds its bounded text/container range or is unaligned")
         );
     }
+    reader.check_cancel()?;
     let mut json = vec![0; json_length as usize];
     reader.read_into(&mut json)?;
+    reader.check_cancel()?;
     check_bounded_json(&json, MAX_MANIFEST_DEPTH)
         .map_err(|error| reader.error(format!("invalid GLB JSON: {error}")))?;
+    reader.check_cancel()?;
     check_finite_json_values(&json)
         .map_err(|error| reader.error(format!("invalid GLB numeric value: {error}")))?;
+    reader.check_cancel()?;
     // serde ignores unrelated members without allocating a recursive Value.
     let metadata: DocumentHeader = serde_json::from_slice(&json)
         .map_err(|error| reader.error(format!("invalid GLB asset header: {error}")))?;
@@ -107,6 +125,7 @@ pub(crate) fn inspect_glb_with<R: Read, T>(
             "GLB asset version/minVersion must be 2.0",
         ));
     }
+    reader.check_cancel()?;
     let binary = if reader.remaining() == 0 {
         None
     } else {
@@ -129,9 +148,71 @@ pub(crate) fn inspect_glb_with<R: Read, T>(
         };
         Some(binary)
     };
+    reader.check_cancel()?;
     let container = GlbContainer { json, binary };
     let result = inspect_body(&container, &mut reader)?;
+    reader.check_cancel()?;
     reader.skip(reader.remaining())?;
+    reader.check_cancel()?;
     reader.finish()?;
+    check_cancel(cancel)?;
     Ok((container, result))
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::*;
+    use std::{
+        cell::Cell,
+        io::{self, Cursor},
+        sync::atomic::Ordering,
+    };
+
+    struct Counted<'a> {
+        bytes: Cursor<&'a [u8]>,
+        calls: &'a Cell<usize>,
+    }
+    impl Read for Counted<'_> {
+        fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+            self.calls.set(self.calls.get() + 1);
+            self.bytes.read(output)
+        }
+    }
+
+    #[test]
+    fn successful_callback_cancel_stops_footer_but_semantic_failure_wins() {
+        let bytes = b"glTF\x02\x00\x00\x00\x30\x00\x00\x00\x1c\x00\x00\x00JSON{\"asset\":{\"version\":\"2.0\"}} ";
+        for fail in [false, true] {
+            let token = AtomicBool::new(false);
+            let calls = Cell::new(0);
+            let input = Counted {
+                bytes: Cursor::new(bytes),
+                calls: &calls,
+            };
+            let result = inspect_glb_with(input, bytes.len() as u64, Some(&token), |_, _| {
+                token.store(true, Ordering::Release);
+                if fail {
+                    Err(PackageError::new(
+                        "invalid_model_binary",
+                        "semantic failure",
+                    ))
+                } else {
+                    Ok(())
+                }
+            });
+            assert_eq!(
+                result.unwrap_err().code,
+                if fail {
+                    "invalid_model_binary"
+                } else {
+                    "cancelled"
+                }
+            );
+            assert_eq!(
+                calls.get(),
+                3,
+                "no footer probe follows cancellation or failure"
+            );
+        }
+    }
 }
