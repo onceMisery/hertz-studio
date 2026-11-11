@@ -33,13 +33,14 @@ use allocations::{SessionResources, SubReservation};
 const MAX_RESERVATIONS: usize = 64;
 
 /// 进程内唯一生产账本。导入准备/探测已接入；桌面与预览规划器沿用此 owner。
+static BUDGET: OnceLock<Arc<BudgetCoordinator>> = OnceLock::new();
+
 pub(crate) fn global() -> Arc<BudgetCoordinator> {
-    static BUDGET: OnceLock<Arc<BudgetCoordinator>> = OnceLock::new();
-    Arc::clone(BUDGET.get_or_init(|| {
-        let budget = BudgetCoordinator::new();
-        budget.initialize_scene_catalog();
-        Arc::new(budget)
-    }))
+    // Preserve the original Arc even if the second catalog fails. Every return
+    // crosses the same ledger lock; no consumer can observe a partial ready.
+    let budget = BUDGET.get_or_init(|| Arc::new(BudgetCoordinator::new()));
+    budget.initialize_catalogs();
+    Arc::clone(budget)
 }
 
 /// 桌面呈现目标上限（§12.1）。
@@ -210,10 +211,17 @@ enum SceneCatalogCharge {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CatalogKind {
+    Scene,
+    Composition,
+}
+
 /// Kept on the initializer's stack under the original ledger lock. Unwinding
 /// drops partial parser resources before reaching this reservation's refund.
 struct SceneCatalogReservation<'a> {
     ledger: &'a mut Ledger,
+    kind: CatalogKind,
     retained: u64,
     committed: bool,
 }
@@ -223,9 +231,21 @@ impl<'a> SceneCatalogReservation<'a> {
         ledger: &'a mut Ledger,
         bounds: hertz_wallpaper::manifest::ManifestHeapBounds,
     ) -> Result<Self, BudgetRejection> {
+        Self::reserve_for(
+            ledger,
+            CatalogKind::Scene,
+            bounds.catalog_cold_requested_bytes(),
+            bounds.catalog_retained_requested_bytes(),
+        )
+    }
+
+    fn reserve_for(
+        ledger: &'a mut Ledger,
+        kind: CatalogKind,
+        cold: u64,
+        retained: u64,
+    ) -> Result<Self, BudgetRejection> {
         let usage = ledger.active_usage();
-        let cold = bounds.catalog_cold_requested_bytes();
-        let retained = bounds.catalog_retained_requested_bytes();
         for (quota, cap, held, requested) in [
             (
                 "prepare_cpu_bytes",
@@ -246,18 +266,21 @@ impl<'a> SceneCatalogReservation<'a> {
                     cap,
                     held,
                     requested,
-                    "进程场景目录必须在冷构造前取得全部额度",
+                    "进程目录必须在冷构造前取得全部额度",
                 ));
             }
         }
-        // Only the unique production OnceLock initializer enters this path.
-        assert_eq!(ledger.scene_catalog, SceneCatalogCharge::Uninitialized);
-        ledger.scene_catalog = SceneCatalogCharge::Constructing {
+        assert_eq!(
+            *ledger.catalog_charge_mut(kind),
+            SceneCatalogCharge::Uninitialized
+        );
+        *ledger.catalog_charge_mut(kind) = SceneCatalogCharge::Constructing {
             prepare_cpu_bytes: cold,
             asset_cpu_bytes: retained,
         };
         Ok(Self {
             ledger,
+            kind,
             retained,
             committed: false,
         })
@@ -266,7 +289,7 @@ impl<'a> SceneCatalogReservation<'a> {
     fn commit(mut self) {
         // The original catalog has published successfully. Nothing fallible,
         // allocating or calling another owner may run before this inline commit.
-        self.ledger.scene_catalog = SceneCatalogCharge::Initialized {
+        *self.ledger.catalog_charge_mut(self.kind) = SceneCatalogCharge::Initialized {
             asset_cpu_bytes: self.retained,
         };
         self.committed = true;
@@ -276,7 +299,7 @@ impl<'a> SceneCatalogReservation<'a> {
 impl Drop for SceneCatalogReservation<'_> {
     fn drop(&mut self) {
         if !self.committed {
-            self.ledger.scene_catalog = SceneCatalogCharge::Uninitialized;
+            *self.ledger.catalog_charge_mut(self.kind) = SceneCatalogCharge::Uninitialized;
         }
     }
 }
@@ -286,24 +309,35 @@ struct Ledger {
     next_token: u64,
     revision: u64,
     scene_catalog: SceneCatalogCharge,
+    composition_catalog: SceneCatalogCharge,
     reservations: Vec<Reservation>,
 }
 
 impl Ledger {
+    fn catalog_charge_mut(&mut self, kind: CatalogKind) -> &mut SceneCatalogCharge {
+        match kind {
+            CatalogKind::Scene => &mut self.scene_catalog,
+            CatalogKind::Composition => &mut self.composition_catalog,
+        }
+    }
+
     fn active_usage(&self) -> BudgetUsage {
-        let (prepare_cpu_bytes, asset_cpu_bytes) = match self.scene_catalog {
-            SceneCatalogCharge::Uninitialized => (0, 0),
-            SceneCatalogCharge::Constructing {
-                prepare_cpu_bytes,
-                asset_cpu_bytes,
-            } => (prepare_cpu_bytes, asset_cpu_bytes),
-            SceneCatalogCharge::Initialized { asset_cpu_bytes } => (0, asset_cpu_bytes),
-        };
-        let mut usage = BudgetUsage {
-            prepare_cpu_bytes,
-            asset_cpu_bytes,
-            ..BudgetUsage::default()
-        };
+        let mut usage = BudgetUsage::default();
+        for charge in [self.scene_catalog, self.composition_catalog] {
+            match charge {
+                SceneCatalogCharge::Uninitialized => {}
+                SceneCatalogCharge::Constructing {
+                    prepare_cpu_bytes,
+                    asset_cpu_bytes,
+                } => {
+                    usage.prepare_cpu_bytes += prepare_cpu_bytes;
+                    usage.asset_cpu_bytes += asset_cpu_bytes;
+                }
+                SceneCatalogCharge::Initialized { asset_cpu_bytes } => {
+                    usage.asset_cpu_bytes += asset_cpu_bytes;
+                }
+            }
+        }
         for reservation in &self.reservations {
             usage.reservation_records += 1;
             usage.resource_records += reservation.children.len() as u32;
@@ -391,24 +425,49 @@ impl BudgetCoordinator {
                 next_token: 1,
                 revision: 1,
                 scene_catalog: SceneCatalogCharge::Uninitialized,
+                composition_catalog: SceneCatalogCharge::Uninitialized,
                 reservations: Vec::new(),
             }),
         }
     }
 
-    fn initialize_scene_catalog(&self) {
-        // This checked layout/source/SHA query does not parse or initialize the
-        // catalog. Unsupported source configurations fail before its first call.
-        let bounds = hertz_wallpaper::manifest::ManifestHeapBounds::for_bytes(0)
-            .expect("scene catalog requires its verified heap source and layout");
+    fn initialize_catalogs(&self) {
         let mut ledger = self
             .ledger
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let reservation = SceneCatalogReservation::reserve(&mut ledger, bounds)
-            .expect("scene catalog requires both original CPU quotas before construction");
-        let _ = hertz_wallpaper::catalog();
-        reservation.commit();
+        if ledger.scene_catalog == SceneCatalogCharge::Uninitialized {
+            // Inline source/layout queries allocate nothing and never initialize.
+            let bounds = hertz_wallpaper::manifest::ManifestHeapBounds::for_bytes(0)
+                .expect("scene catalog requires its verified heap source and layout");
+            let reservation = SceneCatalogReservation::reserve(&mut ledger, bounds)
+                .expect("scene catalog requires both original CPU quotas before construction");
+            #[cfg(test)]
+            composition_catalog_tests::before_construct(CatalogKind::Scene, reservation.ledger);
+            let _ = hertz_wallpaper::catalog();
+            reservation.commit();
+        }
+        if ledger.composition_catalog == SceneCatalogCharge::Uninitialized {
+            let bounds = hertz_wallpaper::document::catalog::CompositionCatalogHeapBounds::for_embedded_catalog();
+            #[cfg(test)]
+            let bounds = composition_catalog_tests::qualify_composition(bounds);
+            let bounds =
+                bounds.expect("composition catalog requires its verified heap source and layout");
+            let reservation = SceneCatalogReservation::reserve_for(
+                &mut ledger,
+                CatalogKind::Composition,
+                bounds.cold_requested_bytes(),
+                bounds.retained_requested_bytes(),
+            )
+            .expect("composition catalog requires both original CPU quotas before construction");
+            #[cfg(test)]
+            composition_catalog_tests::before_construct(
+                CatalogKind::Composition,
+                reservation.ledger,
+            );
+            let _ = hertz_wallpaper::document::catalog::composition_catalog();
+            reservation.commit();
+        }
     }
 
     /// 原子授予：全部配额一次校验，任一不过即整体拒绝（不部分入账）。
@@ -433,6 +492,7 @@ impl BudgetCoordinator {
                 next_token: ledger.next_token,
                 revision: ledger.revision,
                 scene_catalog: ledger.scene_catalog,
+                composition_catalog: ledger.composition_catalog,
                 reservations: ledger
                     .reservations
                     .iter()
@@ -929,3 +989,7 @@ mod allocation_tests;
 #[cfg(test)]
 #[path = "budget_catalog_tests.rs"]
 mod catalog_tests;
+
+#[cfg(test)]
+#[path = "budget_composition_catalog_tests.rs"]
+mod composition_catalog_tests;

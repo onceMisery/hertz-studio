@@ -10,6 +10,14 @@ use sha2::{Digest, Sha256};
 
 use crate::{AssetKind, PackageError, Result};
 
+#[path = "catalog_heap_bounds.rs"]
+mod heap_bounds;
+pub use heap_bounds::CompositionCatalogHeapBounds;
+
+// Both the original parser and its non-initializing heap query borrow this
+// exact embedded source. There is no second catalog or copied declaration.
+const COMPOSITION_CATALOG_BYTES: &[u8] = include_bytes!("../../contracts/composition.json");
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct Field {
@@ -170,7 +178,7 @@ pub struct Contract {
 pub fn composition_catalog() -> &'static Contract {
     static CATALOG: OnceLock<Contract> = OnceLock::new();
     CATALOG.get_or_init(|| {
-        parse_catalog(include_bytes!("../../contracts/composition.json"))
+        parse_catalog(COMPOSITION_CATALOG_BYTES)
             .expect("composition metadata must match its published declaration hash")
     })
 }

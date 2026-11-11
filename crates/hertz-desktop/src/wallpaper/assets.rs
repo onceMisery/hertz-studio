@@ -76,6 +76,10 @@ pub(crate) struct DecodeInput {
 
 impl AssetStore {
     pub fn new(root: &Path) -> Result<Self> {
+        // Package verification/public properties may compile a composition
+        // before planning. The sole native factory admits both process catalogs
+        // before RootOwner, filesystem work or any package read can enter it.
+        let _ = super::budget::global();
         let root_owner = crate::wallpaper_upgrade::admit_config(root)
             .map_err(|error| JobError::database(format!("{error:#}")))?;
         std::fs::create_dir_all(root.join("packages"))

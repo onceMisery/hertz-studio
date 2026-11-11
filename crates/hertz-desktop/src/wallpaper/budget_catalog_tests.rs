@@ -53,9 +53,17 @@ fn request(session: &str) -> BudgetRequest {
     }
 }
 
-fn process_usage() -> BudgetUsage {
+fn scene_usage() -> BudgetUsage {
     BudgetUsage {
         asset_cpu_bytes: bounds().catalog_retained_requested_bytes(),
+        ..Default::default()
+    }
+}
+
+fn global_usage() -> BudgetUsage {
+    BudgetUsage {
+        asset_cpu_bytes: bounds().catalog_retained_requested_bytes()
+            + hertz_wallpaper::document::catalog::CompositionCatalogHeapBounds::for_embedded_catalog().unwrap().retained_requested_bytes(),
         ..Default::default()
     }
 }
@@ -91,15 +99,20 @@ fn cold_global_concurrent_identity_and_permanent_charge() {
             std::thread::spawn(move || {
                 barrier.wait();
                 let budget = global();
-                (budget, hertz_wallpaper::catalog())
+                (
+                    budget,
+                    hertz_wallpaper::catalog(),
+                    hertz_wallpaper::document::catalog::composition_catalog(),
+                )
             })
         })
         .collect();
     let results: Vec<_> = threads.into_iter().map(|t| t.join().unwrap()).collect();
-    for (budget, catalog) in &results {
+    for (budget, catalog, composition) in &results {
+        assert!(std::ptr::eq(*composition, results[0].2));
         assert!(Arc::ptr_eq(budget, &results[0].0));
         assert!(std::ptr::eq(*catalog, results[0].1));
-        assert_eq!(budget.usage(), process_usage());
+        assert_eq!(budget.usage(), global_usage());
     }
     assert!(Arc::ptr_eq(&global(), &results[0].0));
     assert!(std::ptr::eq(hertz_wallpaper::catalog(), results[0].1));
@@ -135,7 +148,7 @@ fn cold_original_catalog_enters_after_both_bookings() {
     })
     .unwrap();
     assert_eq!(entered.get(), 1);
-    assert_eq!(budget.usage(), process_usage());
+    assert_eq!(budget.usage(), scene_usage());
 }
 
 #[test]
@@ -288,7 +301,7 @@ fn cold_normalize_builtin_keeps_errors_and_process_charge() {
     );
     assert!(params.is_empty());
     normalize_builtin("zodiac", 1, &mut params).unwrap();
-    assert_eq!(global().usage(), process_usage());
+    assert_eq!(global().usage(), global_usage());
     let catalog = hertz_wallpaper::catalog();
     let schema = catalog.scene("zodiac").unwrap()["params"]
         .as_object()
@@ -319,7 +332,7 @@ fn cold_normalize_builtin_keeps_errors_and_process_charge() {
             format!("场景参数 {key} 无效")
         );
     }
-    assert_eq!(global().usage(), process_usage());
+    assert_eq!(global().usage(), global_usage());
 }
 
 #[test]
@@ -329,7 +342,7 @@ fn cold_config_default_normalizes_before_any_global_consumer() {
         return;
     }
     let config = crate::config::Config::default();
-    assert_eq!(global().usage(), process_usage());
+    assert_eq!(global().usage(), global_usage());
     match &config.wallpaper.main().selection {
         crate::wallpaper::config::Selection::FollowHertz { idle_builtin } => {
             let scene = hertz_wallpaper::catalog()
@@ -351,7 +364,7 @@ fn cold_global_real_consumers_preserve_retained_charge() {
         return;
     }
     let budget = global();
-    let retained = bounds().catalog_retained_requested_bytes();
+    let retained = global_usage().asset_cpu_bytes;
     let mut full = request("full-asset");
     full.asset_cpu_bytes = MAX_ASSET_CPU_BYTES - retained;
     budget.check_requests(std::slice::from_ref(&full)).unwrap();
@@ -368,7 +381,7 @@ fn cold_global_real_consumers_preserve_retained_charge() {
         "asset_cpu_bytes"
     );
     let projection = budget.project_desktop_replacement(&[1]);
-    assert_eq!(projection.usage(), process_usage());
+    assert_eq!(projection.usage(), global_usage());
     let mut over = full.clone();
     over.asset_cpu_bytes += 1;
     assert_eq!(
@@ -392,7 +405,7 @@ fn cold_global_real_consumers_preserve_retained_charge() {
     budget.confirm_exit(full_token, "full-asset", 1).unwrap();
     assert_eq!(budget.usage().asset_cpu_bytes, retained);
     budget.forget_released(full_token, "full-asset", 1).unwrap();
-    assert_eq!(budget.usage(), process_usage());
+    assert_eq!(budget.usage(), global_usage());
 
     let mut session_request = request("resource-owner");
     session_request.asset_cpu_bytes = 64;
@@ -426,7 +439,7 @@ fn cold_global_real_consumers_preserve_retained_charge() {
     budget.release(parent, "resource-owner", 1).unwrap();
     budget.confirm_exit(parent, "resource-owner", 1).unwrap();
     budget.forget_released(parent, "resource-owner", 1).unwrap();
-    assert_eq!(budget.usage(), process_usage());
+    assert_eq!(budget.usage(), global_usage());
     for quota in ["prepare_cpu_bytes", "asset_cpu_bytes"] {
         let mut oversized = request("oversized");
         if quota == "prepare_cpu_bytes" {
@@ -442,12 +455,12 @@ fn cold_global_real_consumers_preserve_retained_charge() {
                 .quota,
             quota
         );
-        assert_eq!(budget.usage(), process_usage());
+        assert_eq!(budget.usage(), global_usage());
     }
     let token = budget.grant(&request("purge-owner")).unwrap();
     budget.release(token, "purge-owner", 1).unwrap();
     assert_eq!(budget.purge_session("purge-owner", 1), 1);
-    assert_eq!(budget.usage(), process_usage());
+    assert_eq!(budget.usage(), global_usage());
     let mut metadata_request = request("metadata-owner");
     metadata_request.owner = OwnerKind::Probe;
     metadata_request.targets = 0;
@@ -459,5 +472,5 @@ fn cold_global_real_consumers_preserve_retained_charge() {
         "reservation_metadata"
     );
     assert_eq!(budget.purge_session("metadata-owner", 1), MAX_RESERVATIONS);
-    assert_eq!(budget.usage(), process_usage());
+    assert_eq!(budget.usage(), global_usage());
 }

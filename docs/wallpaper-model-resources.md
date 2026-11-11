@@ -1,31 +1,53 @@
 # GLB / KTX2 资源实施记录
 
 2026-11-12，原 native `budget::global()` 的唯一 `OnceLock<Arc<BudgetCoordinator>>`
-在原 scene catalog 冷分配前沿完成 process 准入。费用仅取原
-`ManifestHeapBounds::for_bytes(0)` 的 checked source/layout/SHA 查询及两个
-catalog getter；查询不解析或初始化目录，资格不符先 fail-closed。原 Ledger
-同一 Mutex 内先检查既有 prepare/asset 用量，分别预约 cold workspace
-1,502,113 bytes 与 permanent asset 1,136,036 bytes；任一不足均不改账本且
-不进入 initializer。两项保守预约不表示物理峰值相加。原 `catalog()` 的
-`OnceLock<CatalogContract>` 成功返回后只作内联状态提交，prepare 归零，asset
-永久保留；panic 的 partial parser 先真实 drop，再由同账本栈 guard 退款，
-不发布假 ready。process 不占 session metadata、prepare task 或 preview 槽。
-原 grant/check_requests/grant_session、replacement projection 和 resource
-allocations 继续沿同账本准入；release/confirm_exit/forget/purge 仅改变 token，
-不能归还目录费用。独立测试用 `BudgetCoordinator::new()` 仍是空账本。
+先保有原 Arc，然后每次返回前在原 Ledger 的同一 Mutex 内等待 scene 与 composition
+两目录就绪。scene 成功、composition 拒绝或 panic 时，原 Arc 与 scene 永久费用
+继续存活；没有 ready 返回，poison recovery 重试只构造未成功的 composition。
+两个 inline 三态 process record 复用原账本，不增加 ready cache、token 或 manager。
 
-普通、embedded 与 feed-test 共用的 `app::run_with` 在 init_log 后、upgrade
-prepare 和任何 Config load/default/normalize 前接入原 global；独立
-`normalize_builtin` 保留 scene eligibility 拒绝先行，再调用 global 后借原
-catalog。原 scene/catalog/manifest/model/ZIP 源方程和锁保持继承，不建立第二
-parser、cache、ledger 或 native normalizer 回调。真实 cold 子进程核对同 Arc/
-catalog 身份、双费用预约、临界拒绝、panic 顺序及原 Config/default/资源消费者，
-证据位于 `output/design-final-followthrough/canonical-model-native-r22/impl/`。
-另一个 `document/catalog.rs` 的 `composition_catalog()` 从 composition.json
-建立 `OnceLock<Contract>`，由 document compile 和 native composition plan
-触发，其费用尚未证明。composition、canonical AssetStore、compact ModelInput、
-jobs/broker 与 GPU 联合包络继续实施；本片不开放 model gate，也不证明整体
-320 MiB 准入。
+scene 费用仍取原 `ManifestHeapBounds::for_bytes(0)` 及两个 catalog getter：
+cold workspace 1,502,113 bytes，permanent asset 1,136,036 bytes。composition
+费用由原 `document::catalog` 所有权边界的字段私有 Copy
+`CompositionCatalogHeapBounds::for_embedded_catalog()` 查询给出：cold 93,356 bytes，
+permanent 91,820 bytes。查询与原 `composition_catalog()` 借同一私有 embedded
+constant，不解析、初始化或分配；64-bit 原 types/BTree witness、固定 JSON 长度/SHA、
+原 catalog/json 源码及 Cargo.lock 的编译时 text identity 失配返回 None。Rust/lock
+文本仅以栈 SHA 流式等价 LF/CRLF，不复制；bare CR 保持身份，composition JSON 保持精确 raw SHA。依赖/std 精确
+source hashes 和 wallpaper/desktop/media-probe/studio full 完整 feature graph 仍须
+独立 verified-build 审核；sizeof 加 JSON hash 不能检测任意同尺寸源码变化，变更须重审。
+已审计配置为 serde 1.0.229/serde_json 1.0.151 float_roundtrip，原 raw_value 可开启，
+preserve_order/arbitrary_precision 的布局拒绝。费用只保证原 embedded 成功源，
+不为任意无长度上限 public `parse_catalog` 输入提供 W。
+
+固定 composition JSON 14,314 bytes、509 owned Strings 共 3,396 UTF-8 bytes，
+原 nodes/effects Vec 各 capacity 8、String Vec 总 backing 516 slots、Value arrays
+24 slots、AssetKind 56 byte slots，Field maps 18 leaves/5 internals；asset/quality/cost
+6/5/5 leaves。真实原类型布局的 checked 源式得到 R=91,820。scanner 递归 frontier
+S=2,263，最大 single-grow old backing G=1,536，raw top key schemaVersion=13，
+stack SHA 的一次 hex write=64；W=max(S,R+G,R+13,R+64)=93,356 是完整 cold bound。
+原 fixed float 都走 lexical fast path，无 scratch/Bigint，成功校验借用且返回只 move。
+
+每个目录均在首分配前核 source 资格及既有 prepare/asset 两 cap，分别预约 W/R；
+任一不足不进入 initializer。原 OnceLock 成功发布后立即无 allocation/fallible/外部
+callback 内联提交 prepare=0、asset=R。panic 的 partial parser 先真实 drop，再由
+原账本 stack guard 仅退款未成功目录。两项保守预约之和不是物理峰；两目录都 ready
+时 process asset 总额为 1,227,856 bytes。process 不占 session metadata、prepare task
+或 preview 槽；grant/check_requests/grant_session、replacement projection、resource
+allocate/release/confirm_exit/forget/purge 均保留两费，独立 `BudgetCoordinator::new()` 为零。
+
+原 `AssetStore::new` 唯一生产工厂最早等待同一 global，再进入 RootOwner 与文件系统；
+覆盖原 validate_staged/verify_installed/read_installed_manifest 的 archive composition
+validate/compile 早于 plan/read_document 的路径，以及 native pin/read、public properties
+和 selection 恢复。原 app/init_log→global→upgrade/Config 与 normalize_builtin 既有
+global 入口继续；纯库不依赖 native budget。pins、不可变身份、错误与安装规则保持。
+真实 requested System old+new meter、原类型/node allocations/capacities 和 cold 子进程
+核对同 Arc/两 catalog 地址、一遍初始化、双费用预约、临界拒绝、partial drop/poison
+重试及原资源消费者，证据在
+`output/design-final-followthrough/canonical-model-composition-r23/impl/`。
+canonical AssetStore 的联合包络绑定、完整 compact ModelInput、jobs/broker anchoring、
+renderer GPU first frame 和 A04–A10 仍后续；总体目标 active，model gate closed，
+本波不授予整体 320 MiB 或 GPU 资格。
 
 2026-11-11，原 archive owner 增加 `CanonicalIdentityHeapBounds::for_package_bytes::<R>`，
 在任何 ZIP 打开前以可信物理字节上界 P（先检查 ≤536,870,912）及 requested
@@ -75,7 +97,7 @@ OS in-flight 不可中断，borrowed ZipFile Drop 不 drain，原 reader/archive
 后才 public return，API 不释放 caller grant。不增加 reader wrapper、parser 或 ledger。
 caller Read/Seek/Drop heap、预持有任意 caller error、stack、allocator overhead 及
 process catalog 从 job W 中排除；cold/permanent catalog 分别1502113/1136036，
-已由原 native process owner 独立计入。composition 目录账本、canonical AssetStore、compact
+已由原 native process owner 独立计入。composition 目录账本已由本波接入；canonical AssetStore 联合包络、compact
 ModelInput/最后引用 retained 票据及 GPU 首帧仍继续，未证明整体320MiB准入。
 本波 source transfer、独占构建和自然退出证据位于
 `output/design-final-followthrough/canonical-model-binding-r21/repair1/impl/`；
