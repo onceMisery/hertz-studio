@@ -19,6 +19,7 @@ use crate::manifest::{
     validate_manifest_bytes, AssetDescriptor, FileEntry, Manifest, Variant, MANIFEST_PATH,
 };
 use crate::paths::validate_rel_path_ext;
+use crate::resource_container_io::scalar_io_error;
 use crate::{
     PackageError, Result, MAX_COMPRESSION_RATIO, MAX_FILES, MAX_MANIFEST_BYTES, MAX_PACKAGE_BYTES,
     MAX_UNCOMPRESSED_BYTES,
@@ -212,7 +213,15 @@ fn validate_composition_in_place<R: Read + std::io::Seek>(
     let mut bytes = Vec::new();
     file.take(crate::document::MAX_DOCUMENT_BYTES as u64 + 1)
         .read_to_end(&mut bytes)
-        .map_err(|error| PackageError::new("invalid_composition", error.to_string()))?;
+        .map_err(|error| {
+            scalar_io_error(
+                "invalid_composition",
+                "composition read failed",
+                Some(document),
+                Some(bytes.len() as u64),
+                &error,
+            )
+        })?;
     crate::document::compile_document(&bytes, manifest)?;
     Ok(())
 }
@@ -286,13 +295,25 @@ fn open_archive_with_limits<R: Read + std::io::Seek>(
     mut reader: R,
     requested: Option<MetadataLimits>,
 ) -> Result<ZipArchive<R>> {
-    let bytes = reader
-        .seek(SeekFrom::End(0))
-        .map_err(|error| PackageError::new("format_unsupported", error.to_string()))?;
+    let bytes = reader.seek(SeekFrom::End(0)).map_err(|error| {
+        scalar_io_error(
+            "format_unsupported",
+            "package end seek failed",
+            None,
+            None,
+            &error,
+        )
+    })?;
     check_package_bytes(bytes)?;
-    reader
-        .seek(SeekFrom::Start(0))
-        .map_err(|error| PackageError::new("format_unsupported", error.to_string()))?;
+    reader.seek(SeekFrom::Start(0)).map_err(|error| {
+        scalar_io_error(
+            "format_unsupported",
+            "package start seek failed",
+            None,
+            Some(0),
+            &error,
+        )
+    })?;
     let metadata_bytes = usize::try_from(bytes)
         .map_err(|_| PackageError::new("package_too_large", "包长度无法在当前平台表示"))?;
     // Preserve the original manifest/directory allowance. Variable metadata
@@ -375,9 +396,12 @@ fn read_manifest_bytes<R: std::io::Read + std::io::Seek>(
         .take(MAX_MANIFEST_BYTES as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(|error| {
-            PackageError::new(
+            scalar_io_error(
                 "format_unsupported",
-                format!("manifest.json 读取失败：{error}"),
+                "manifest read failed",
+                Some(MANIFEST_PATH),
+                Some(bytes.len() as u64),
+                &error,
             )
         })?;
     if bytes.len() > MAX_MANIFEST_BYTES {
@@ -516,9 +540,12 @@ fn validate_archive_in_place<R: std::io::Read + std::io::Seek>(
                 break;
             }
             let read = file.read(&mut chunk[..want]).map_err(|error| {
-                PackageError::new(
+                scalar_io_error(
                     "format_unsupported",
-                    format!("条目 {name} 读取失败：{error}"),
+                    "archive entry read failed",
+                    Some(&name),
+                    Some(actual),
+                    &error,
                 )
             })?;
             if read == 0 {

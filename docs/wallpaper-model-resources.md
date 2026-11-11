@@ -1,5 +1,12 @@
 # GLB / KTX2 资源实施记录
 
+2026-11-11，原 archive 的包尾/起点 seek、manifest、条目 SHA 和 composition
+读取失败也复用共享标量诊断构造。操作使用固定字面量，路径来自固定 manifest 名
+或前序已验证的实际条目，byte 位置记录已知的逻辑读取/seek 位置；第三方 I/O
+错误的 Display/Debug/Source 不执行。原 PackageError 分类、ZIP 及文件校验、
+读取/EOF 顺序保持。此修改补齐原 archive 诊断入口，完整 manifest 转换、ZIP
+同存及 ModelInput/native/GPU 费用仍需由原准备流程联结。
+
 2026-11-11，完整模型检查的容量控制和费用 API 归原解析 owner：有界数组从
 1 个槽开始，按原上限扩容；已检查的属性/target 树从 Schema 移到原 facts，
 保留合法自定义 semantic（包括 `_`）、作者顺序和全部未选中声明检查。节点、

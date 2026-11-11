@@ -1,9 +1,37 @@
 // SPDX-License-Identifier: MIT
 //! Fixed-memory reads shared by the two resource container inspectors.
 
+use std::fmt::Write as _;
 use std::io::{self, Read};
 
 use crate::{PackageError, Result};
+
+/// Build one diagnostic from stored I/O scalars and the caller's known context.
+/// Operation must be a fixed literal; path must be fixed or already validated
+/// against MAX_PATH_BYTES. Offset is the known logical byte or seek target.
+pub(crate) fn scalar_io_error(
+    code: &'static str,
+    operation: &'static str,
+    path: Option<&str>,
+    offset: Option<u64>,
+    error: &io::Error,
+) -> PackageError {
+    // External Display/Debug/Source can allocate arbitrary text. Only built-in
+    // ErrorKind and Option<i32> formatting runs here. Append bounded context to
+    // the same final String; PackageError moves it without a diagnostic copy.
+    let mut message = format!(
+        "{operation}: kind={:?}, raw_os_error={:?}",
+        error.kind(),
+        error.raw_os_error(),
+    );
+    if let Some(path) = path {
+        write!(message, " (path {path})").expect("writing to String cannot fail");
+    }
+    if let Some(offset) = offset {
+        write!(message, " (byte {offset})").expect("writing to String cannot fail");
+    }
+    PackageError::new(code, message)
+}
 
 pub(crate) struct ContainerReader<R> {
     input: R,
@@ -37,21 +65,7 @@ impl<R: Read> ContainerReader<R> {
     }
 
     fn io_error(&self, operation: &'static str, error: &io::Error) -> PackageError {
-        // A caller's io::Error may have arbitrarily large or allocating
-        // Display/Debug/Source implementations. Read only its stored scalar
-        // kind and OS code; formatting those built-in types has a fixed size.
-        // The two operation literals, kind variant, Option<i32>, and u64
-        // offset need <160 message bytes on the supported alloc sources.
-        // Build one String, without first rendering external error text.
-        PackageError::new(
-            self.code,
-            format!(
-                "{operation}: kind={:?}, raw_os_error={:?} (byte {})",
-                error.kind(),
-                error.raw_os_error(),
-                self.offset,
-            ),
-        )
+        scalar_io_error(self.code, operation, None, Some(self.offset), error)
     }
 
     pub(crate) fn read_into(&mut self, output: &mut [u8]) -> Result<()> {
