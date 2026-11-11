@@ -1,5 +1,59 @@
 # GLB / KTX2 资源实施记录
 
+2026-11-11，原 archive owner 增加 `CanonicalIdentityHeapBounds::for_package_bytes::<R>`，
+在任何 ZIP 打开前以可信物理字节上界 P（先检查 ≤536,870,912）及 requested
+`MetadataLimits` 计算整个 canonical identity 的 requested heap。真实打开与查询
+共用限额因子：r=min(requested,2056)、b=x=min(requested,P)、c=min(requested,65535)；
+无 caller limits 时使用原物理容器上界。Copy 私有字段保存限额、四阶段、整体 W、
+raw retained/growth、entry verification、最大返回 R 与独立 catalog 费用；合法
+查询零 heap、零 ZIP 读取，不初始化目录。实际 identity 的 R 仍只取同次原 manifest
+记录的实际长度，不 clone/reparse 或接受 caller Manifest/手造费用作为 canonical 证明。
+
+令原 ZIP checked opening/retained 为 O/Z，Dreader 由原
+`MetadataLimits::checked_read_heap_bounds::<R>` 和 archive 的实际 usage API 共用
+size_of 因子，包含原 Crc32Reader/Decompressor/BufReader/CryptoReader Box、8192
+input buffer 与 pinned miniz InflateState。修改后的真实 System 分配重新验证
+stable1.98.1 的 Stored=8328、Deflate=51624（outer136），Rust1.88 的
+Stored=8312、Deflate=51608（outer120）；两者都从当前实际 layout 计算，并精确等于
+真实 reader 活跃 heap 增量。这些是本波新 owner 的结果，不能由旧 freeze 自动转移。
+仅资格内 Stored/Deflate rust_backend
+适用，foreign backend/未知方法仍拒绝。
+
+四个阶段分别计算后取 max：opening=O+602359；manifest read=Z+Dreader+786432+602359；
+manifest parse=Z+524288+141607208（此时无 active manifest reader）；entry verify=
+Z+524288+8594075+Dreader+2332357。最大 returned identity=9517723。
+WV 的源分项是原 std HashSet String old/new table153632、lowercase bytes370080、
+declared &str table69648、Verified slot old/new245760、verified strings759808、
+raw name/clone131070、diagnostic602359。Rust1.88 std 使用 hashbrown0.15.3，当前
+stable std 使用0.17.1，与 ZIP 的依赖独立；64-bit/String24/&str16/Verified80 和
+固定原 limits 由原 private 源核对。错误先于180-byte 作者路径规则，raw名可65535，
+ZIP CP437/lossy decoded 名可196605；diagnostic 已含其 fmt old/new overlap。
+原 manifest 64KiB loop 只 append 成功读取的 bytes，actual cap 仍 MAX+1；EOF 不
+额外 reserve。新 Stored MAX witness capacity262144，MAX+1 capacity524288、
+old+new overlap786432；Deflate 的不同 chunk 几何增长仍在相同源上界内。样本不定义费用。
+
+`inspect_package_identity_with_limits_and_cancel` 复用唯一 manifest/verify 路径，
+原 ZIP by_index、CryptoReader plaintext 与 ZipFile 直接借同一 AtomicBool，
+底层 read 前及 Ok（含 EOF）后 poll；ZipFile 的原 bulk delegation 保留
+Crc32Reader 的成功后 CRC 更新、部分 I/O 错误后的状态与 UTF-8 错误优先顺序，
+并在入口及成功返回后 poll，含空 read_exact、已缓冲输出与 EOF。无 token 的
+CryptoReader 仍委托原 Take；有 token 的 plaintext bulk 在原 owner 内用固定栈
+chunk 经过每次底层 read。read_to_string 的栈 guard 仅借 caller 原 Vec backing，
+完整追加后才确认 UTF-8；无效追加或 panic 回滚至原有效长度，真实 I/O 错误优先。
+typed `PayloadReadCancelled` 使用 Other 而非可被 std/flate2 重试的 Interrupted，
+映射稳定 `cancelled`；真实非 Interrupted I/O 在 token race 下仍保留旧错误码。
+原 manifest 对未取消 Interrupted 重试，resource read 仍 format_unsupported。
+End/Start seek、metadata/local header、parse 与 verify 在同步操作返回后再检查；
+OS in-flight 不可中断，borrowed ZipFile Drop 不 drain，原 reader/archive 自然退出
+后才 public return，API 不释放 caller grant。不增加 reader wrapper、parser 或 ledger。
+caller Read/Seek/Drop heap、预持有任意 caller error、stack、allocator overhead 及
+process catalog 从 job W 中排除；cold/permanent catalog 分别1502113/1136036，
+须由原 process owner 独立计入。原生完整目录账本、canonical AssetStore、compact
+ModelInput/最后引用 retained 票据及 GPU 首帧仍继续，未证明整体320MiB准入。
+本波 source transfer、独占构建和自然退出证据位于
+`output/design-final-followthrough/canonical-model-binding-r21/repair1/impl/`；
+未变的源方程与锁证据按 SHA 明确继承，修改后的 ZIP bulk 语义与 layout 重新验证。
+
 2026-11-11，原 manifest owner 提供 `ManifestHeapBounds`，以原 256 KiB 上限内的
 实际字节数逐项计算 scanner、Value/content、partial typed、上下文、属性首次完整
 序列化、accepted clone/constraints、清理与诊断八个阶段，再取 requested heap 最大值。

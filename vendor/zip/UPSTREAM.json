@@ -131,5 +131,5 @@
       "sha256": "4d48412693a47371fd336c8821e1d7fef532f1b9afd3a83a3ac2ef7df5382293"
     }
   },
-  "policy": "Original published source, only bounded metadata reader/provenance patch; default Config/API/decoder features preserved. See PATCH.md for modifications."
+  "policy": "Original published source with bounded metadata, shared pre-opening reader fees, and opt-in borrowed-token payload cancellation at original by_index/CryptoReader/ZipFile owners; default Config/API/decoder features and upstream provenance preserved. See PATCH.md for modifications."
 }

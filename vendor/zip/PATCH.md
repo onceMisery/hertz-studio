@@ -1,4 +1,4 @@
-# zip 2.6.1: bounded original metadata owner
+# zip 2.6.1: bounded original metadata and payload owners
 
 This is a repository patch of the published zip 2.6.1 source, VCS revision
 `1d42731efcad72e9f653a5ca46ed8306f4a3ca72`. `UPSTREAM.json`, the original
@@ -50,11 +50,36 @@ or escaping extra subfields and propagates their IO failures; the default branch
 retains upstream's ignored-extra-IO behavior.
 
 `MetadataLimits::checked_heap_bounds()` is usable before opening.
+`MetadataLimits::checked_read_heap_bounds::<R>(method)` computes the concrete
+original reader fee before opening, sharing the exact size_of factor with the
+actual-usage archive API. It constructs no dummy archive or reader.
 `ZipArchive::checked_metadata_heap_bounds()` uses actual immutable parser usage,
 and refuses a default/writer opening whose capacities were not controlled.
 `checked_metadata_read_heap_bounds(method)` adds one unencrypted concrete reader;
 `checked_file_read_heap_bounds(index)` also validates the selected file's method
 and rejects encryption. Opening bounds exclude the active file reader.
+
+`ZipArchive::by_index_with_cancel(index, &AtomicBool)` opts into cancellation at
+the original by_index, plaintext CryptoReader and borrowed ZipFile owners. The
+same borrowed token is polled before bottom reads and after successful reads,
+including EOF and Deflate's zero-output input continuation. ZipFile also polls
+buffered output/EOF and all bulk entries, including empty read_exact. Its original
+read_exact/read_to_end/read_to_string delegation preserves Crc32Reader's
+success-only bulk CRC state, partial-error retry behavior and UTF-8 precedence.
+CryptoReader retains the original no-token Take/crypto bulk delegation. Opt-in
+plaintext bulk methods traverse that original owner's polled read with a fixed
+stack chunk. The String helper's stack guard borrows only the caller's existing
+Vec backing through as_mut_vec: no str reference escapes while appended bytes
+may be invalid, and the valid length advances only after complete UTF-8
+validation. Drop truncates invalid appended bytes on an error or panic; valid
+appended bytes survive a real I/O error, which takes precedence over UTF-8.
+No additional heap backing or reader owner is introduced. Local-header operations remain synchronous
+and bounded, with a post-return poll. A typed zero-sized PayloadReadCancelled
+io::Error uses Other, avoiding std/flate2's automatic Interrupted retry loops;
+is_payload_read_cancelled recognizes it without calling caller error hooks.
+Real non-Interrupted errors win a token race unchanged. Old APIs use no token,
+and decrypt/raw/owned streaming Drop behavior remains at the original owners.
+No wrapper, broker, parser, Arc or new stream owner is introduced.
 
 ## Source and lock premises
 

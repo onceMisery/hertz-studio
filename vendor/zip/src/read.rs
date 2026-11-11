@@ -26,6 +26,7 @@ use std::mem;
 use std::mem::size_of;
 use std::ops::Deref;
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
 mod config;
@@ -143,7 +144,10 @@ pub use zip_archive::ZipArchive;
 
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum CryptoReader<'a, R: Read> {
-    Plaintext(io::Take<&'a mut R>),
+    Plaintext {
+        reader: io::Take<&'a mut R>,
+        cancel: Option<&'a AtomicBool>,
+    },
     ZipCrypto(ZipCryptoReaderValid<io::Take<&'a mut R>>),
     #[cfg(feature = "aes-crypto")]
     Aes {
@@ -152,10 +156,59 @@ pub(crate) enum CryptoReader<'a, R: Read> {
     },
 }
 
+/// Typed, bounded payload cancellation. `Other` deliberately avoids the
+/// automatic `Interrupted` retry loops in std and flate2. No caller error is
+/// formatted or wrapped, and the zero-sized payload only needs io::Error's box.
+#[derive(Debug)]
+pub struct PayloadReadCancelled {
+    _private: (),
+}
+
+impl std::fmt::Display for PayloadReadCancelled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ZIP payload read cancelled")
+    }
+}
+
+impl std::error::Error for PayloadReadCancelled {}
+
+/// Recognize the original reader's cancellation without calling error hooks.
+pub fn is_payload_read_cancelled(error: &io::Error) -> bool {
+    error
+        .get_ref()
+        .is_some_and(|error| error.is::<PayloadReadCancelled>())
+}
+
+fn poll_payload_cancel(cancel: Option<&AtomicBool>) -> io::Result<()> {
+    if cancel.is_some_and(|cancel| cancel.load(Ordering::Acquire)) {
+        Err(io::Error::other(PayloadReadCancelled { _private: () }))
+    } else {
+        Ok(())
+    }
+}
+
+fn finish_payload_read<T>(result: io::Result<T>, cancel: Option<&AtomicBool>) -> io::Result<T> {
+    match result {
+        Ok(value) => {
+            poll_payload_cancel(cancel)?;
+            Ok(value)
+        }
+        Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+            poll_payload_cancel(cancel)?;
+            Err(error)
+        }
+        // A real non-Interrupted error wins a cancellation race unchanged.
+        Err(error) => Err(error),
+    }
+}
+
 impl<R: Read> Read for CryptoReader<'_, R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         match self {
-            CryptoReader::Plaintext(r) => r.read(buf),
+            CryptoReader::Plaintext { reader, cancel } => {
+                poll_payload_cancel(*cancel)?;
+                finish_payload_read(reader.read(buf), *cancel)
+            }
             CryptoReader::ZipCrypto(r) => r.read(buf),
             #[cfg(feature = "aes-crypto")]
             CryptoReader::Aes { reader: r, .. } => r.read(buf),
@@ -163,29 +216,107 @@ impl<R: Read> Read for CryptoReader<'_, R> {
     }
 
     fn read_to_end(&mut self, buf: &mut Vec<u8>) -> io::Result<usize> {
-        match self {
-            CryptoReader::Plaintext(r) => r.read_to_end(buf),
-            CryptoReader::ZipCrypto(r) => r.read_to_end(buf),
+        let cancel = self.cancel_token();
+        poll_payload_cancel(cancel)?;
+        let result = match self {
+            CryptoReader::Plaintext {
+                reader,
+                cancel: None,
+            } => reader.read_to_end(buf),
+            CryptoReader::Plaintext {
+                cancel: Some(_), ..
+            } => self.read_plaintext_to_end(buf),
+            CryptoReader::ZipCrypto(reader) => reader.read_to_end(buf),
             #[cfg(feature = "aes-crypto")]
-            CryptoReader::Aes { reader: r, .. } => r.read_to_end(buf),
-        }
+            CryptoReader::Aes { reader, .. } => reader.read_to_end(buf),
+        };
+        finish_payload_read(result, cancel)
     }
 
     fn read_to_string(&mut self, buf: &mut String) -> io::Result<usize> {
-        match self {
-            CryptoReader::Plaintext(r) => r.read_to_string(buf),
-            CryptoReader::ZipCrypto(r) => r.read_to_string(buf),
+        let cancel = self.cancel_token();
+        poll_payload_cancel(cancel)?;
+        let result = match self {
+            CryptoReader::Plaintext {
+                reader,
+                cancel: None,
+            } => reader.read_to_string(buf),
+            CryptoReader::Plaintext {
+                cancel: Some(_), ..
+            } => self.read_plaintext_to_string(buf),
+            CryptoReader::ZipCrypto(reader) => reader.read_to_string(buf),
             #[cfg(feature = "aes-crypto")]
-            CryptoReader::Aes { reader: r, .. } => r.read_to_string(buf),
-        }
+            CryptoReader::Aes { reader, .. } => reader.read_to_string(buf),
+        };
+        finish_payload_read(result, cancel)
     }
 }
 
 impl<'a, R: Read> CryptoReader<'a, R> {
+    fn cancel_token(&self) -> Option<&'a AtomicBool> {
+        match self {
+            Self::Plaintext { cancel, .. } => *cancel,
+            _ => None,
+        }
+    }
+
+    // A cancellable plaintext bulk call must traverse this original owner's
+    // read. Delegating directly to Take would bypass bottom-read polls.
+    // Only a fixed stack chunk and the caller's existing Vec backing are used.
+    fn read_plaintext_to_end(&mut self, buf: &mut Vec<u8>) -> io::Result<usize> {
+        let start = buf.len();
+        let mut chunk = [0; READER_BUFFER_BYTES];
+        loop {
+            match self.read(&mut chunk) {
+                Ok(0) => return Ok(buf.len() - start),
+                Ok(read) => buf.extend_from_slice(&chunk[..read]),
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    fn read_plaintext_to_string(&mut self, buf: &mut String) -> io::Result<usize> {
+        // Same append/rollback rule as std's read_to_string. This stack guard
+        // borrows the original caller backing; it owns no reader or heap buffer.
+        struct Utf8Guard<'b> {
+            bytes: &'b mut Vec<u8>,
+            valid_len: usize,
+        }
+        impl Drop for Utf8Guard<'_> {
+            fn drop(&mut self) {
+                self.bytes.truncate(self.valid_len);
+            }
+        }
+        let start = buf.len();
+        // SAFETY: the guard restores the original valid prefix on error/panic.
+        // Only read_plaintext_to_end appends arbitrary bytes. The guard's valid
+        // length is advanced only after the full appended suffix passes UTF-8.
+        // No reference to str escapes while the Vec may contain invalid bytes.
+        let mut guard = Utf8Guard {
+            bytes: unsafe { buf.as_mut_vec() },
+            valid_len: start,
+        };
+        let result = self.read_plaintext_to_end(guard.bytes);
+        if std::str::from_utf8(&guard.bytes[start..]).is_err() {
+            // An actual read error wins the UTF-8 error, as in std. Invalid
+            // appended bytes still roll back even when an I/O error wins.
+            result.and_then(|_| {
+                Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "stream did not contain valid UTF-8",
+                ))
+            })
+        } else {
+            guard.valid_len = guard.bytes.len();
+            result
+        }
+    }
+
     /// Consumes this decoder, returning the underlying reader.
     pub fn into_inner(self) -> io::Take<&'a mut R> {
         match self {
-            CryptoReader::Plaintext(r) => r,
+            CryptoReader::Plaintext { reader, .. } => reader,
             CryptoReader::ZipCrypto(r) => r.into_inner(),
             #[cfg(feature = "aes-crypto")]
             CryptoReader::Aes { reader: r, .. } => r.into_inner(),
@@ -271,6 +402,9 @@ impl<'a, R: Read> ZipFileReader<'a, R> {
 pub struct ZipFile<'a, R: Read> {
     pub(crate) data: Cow<'a, ZipFileData>,
     pub(crate) reader: ZipFileReader<'a, R>,
+    // Same borrowed token as the original plaintext owner. Also covers buffered
+    // output/EOF, which need not perform a bottom read at all.
+    cancel: Option<&'a AtomicBool>,
 }
 
 /// A struct for reading and seeking a zip file
@@ -444,12 +578,36 @@ pub(crate) fn make_crypto_reader<'a, R: Read>(
             CryptoReader::ZipCrypto(ZipCryptoReader::new(reader, password).validate(validator)?)
         }
         (None, Some(_)) => return Err(InvalidPassword),
-        (None, None) => CryptoReader::Plaintext(reader),
+        (None, None) => CryptoReader::Plaintext {
+            reader,
+            cancel: None,
+        },
     };
     Ok(reader)
 }
 
 const READER_BUFFER_BYTES: usize = 8192;
+
+// One original concrete reader allocation. Both pre-opening requested quotas
+// and post-opening actual usage call this factor; no dummy archive or frozen
+// outer-reader number can hide a CryptoReader/layout change.
+pub(super) fn checked_reader_heap_bytes<R: Read>(method: CompressionMethod) -> ZipResult<usize> {
+    let outer = size_of::<Crc32Reader<Decompressor<io::BufReader<CryptoReader<'_, R>>>>>();
+    let state = match method {
+        CompressionMethod::Stored => 0,
+        #[cfg(all(
+            feature = "deflate",
+            not(any(feature = "deflate-zlib", feature = "deflate-zlib-ng"))
+        ))]
+        CompressionMethod::Deflated => size_of::<miniz_oxide::inflate::stream::InflateState>(),
+        _ => {
+            return Err(ZipError::UnsupportedArchive(
+                "reader heap bound supports Stored and pinned Deflate rust_backend only",
+            ))
+        }
+    };
+    metadata_limits::add(metadata_limits::add(outer, READER_BUFFER_BYTES)?, state)
+}
 
 pub(crate) fn make_reader<R: Read>(
     compression_method: CompressionMethod,
@@ -923,22 +1081,7 @@ impl<R: Read + Seek> ZipArchive<R> {
         &self,
         method: CompressionMethod,
     ) -> ZipResult<MetadataReadHeapBounds> {
-        let outer = size_of::<Crc32Reader<Decompressor<io::BufReader<CryptoReader<'_, R>>>>>();
-        let state = match method {
-            CompressionMethod::Stored => 0,
-            #[cfg(all(
-                feature = "deflate",
-                not(any(feature = "deflate-zlib", feature = "deflate-zlib-ng"))
-            ))]
-            CompressionMethod::Deflated => size_of::<miniz_oxide::inflate::stream::InflateState>(),
-            _ => {
-                return Err(ZipError::UnsupportedArchive(
-                    "reader heap bound supports Stored and pinned Deflate rust_backend only",
-                ))
-            }
-        };
-        let additional =
-            metadata_limits::add(metadata_limits::add(outer, READER_BUFFER_BYTES)?, state)?;
+        let additional = checked_reader_heap_bytes::<R>(method)?;
         let retained = self.checked_metadata_heap_bounds()?.retained_metadata_bytes;
         Ok(MetadataReadHeapBounds {
             additional_reader_bytes: additional,
@@ -1281,6 +1424,18 @@ impl<R: Read + Seek> ZipArchive<R> {
         self.by_index_with_optional_password(file_number, None)
     }
 
+    /// Original unencrypted file reader with a borrowed cancellation token.
+    /// Local header lookup is a bounded synchronous operation: it cannot stop an
+    /// in-flight OS call, and is polled after returning. Payload reads poll at
+    /// every bottom read, even within a Deflate zero-output continuation.
+    pub fn by_index_with_cancel<'a>(
+        &'a mut self,
+        file_number: usize,
+        cancel: &'a AtomicBool,
+    ) -> ZipResult<ZipFile<'a, R>> {
+        self.by_index_with_password_and_cancel(file_number, None, Some(cancel))
+    }
+
     /// Get a contained file by index without decompressing it
     pub fn by_index_raw(&mut self, file_number: usize) -> ZipResult<ZipFile<'_, R>> {
         let reader = &mut self.reader;
@@ -1292,14 +1447,25 @@ impl<R: Read + Seek> ZipArchive<R> {
         Ok(ZipFile {
             reader: ZipFileReader::Raw(find_content(data, reader)?),
             data: Cow::Borrowed(data),
+            cancel: None,
         })
     }
 
     fn by_index_with_optional_password(
         &mut self,
         file_number: usize,
-        mut password: Option<&[u8]>,
+        password: Option<&[u8]>,
     ) -> ZipResult<ZipFile<'_, R>> {
+        self.by_index_with_password_and_cancel(file_number, password, None)
+    }
+
+    fn by_index_with_password_and_cancel<'a>(
+        &'a mut self,
+        file_number: usize,
+        mut password: Option<&[u8]>,
+        cancel: Option<&'a AtomicBool>,
+    ) -> ZipResult<ZipFile<'a, R>> {
+        poll_payload_cancel(cancel)?;
         let (_, data) = self
             .shared
             .files
@@ -1311,13 +1477,30 @@ impl<R: Read + Seek> ZipArchive<R> {
             (Some(_), false) => password = None, //Password supplied, but none needed! Discard.
             _ => {}
         }
-        let limit_reader = find_content(data, &mut self.reader)?;
+        let limit_reader = match find_content(data, &mut self.reader) {
+            Ok(reader) => {
+                poll_payload_cancel(cancel)?;
+                reader
+            }
+            Err(ZipError::Io(error)) if error.kind() == io::ErrorKind::Interrupted => {
+                poll_payload_cancel(cancel)?;
+                return Err(ZipError::Io(error));
+            }
+            Err(error) => return Err(error),
+        };
 
-        let crypto_reader = make_crypto_reader(data, limit_reader, password, data.aes_mode)?;
+        let mut crypto_reader = make_crypto_reader(data, limit_reader, password, data.aes_mode)?;
+        if let CryptoReader::Plaintext { cancel: token, .. } = &mut crypto_reader {
+            *token = cancel;
+        }
+        poll_payload_cancel(cancel)?;
+        let reader = make_reader(data.compression_method, data.crc32, crypto_reader)?;
+        poll_payload_cancel(cancel)?;
 
         Ok(ZipFile {
             data: Cow::Borrowed(data),
-            reader: make_reader(data.compression_method, data.crc32, crypto_reader)?,
+            reader,
+            cancel,
         })
     }
 
@@ -2169,20 +2352,26 @@ impl<R: Read> HasZipMetadata for ZipFile<'_, R> {
 
 impl<R: Read> Read for ZipFile<'_, R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        self.reader.read(buf)
+        poll_payload_cancel(self.cancel)?;
+        finish_payload_read(self.reader.read(buf), self.cancel)
     }
-
     fn read_exact(&mut self, buf: &mut [u8]) -> io::Result<()> {
-        self.reader.read_exact(buf)
+        poll_payload_cancel(self.cancel)?;
+        finish_payload_read(self.reader.read_exact(buf), self.cancel)
     }
 
     fn read_to_end(&mut self, buf: &mut Vec<u8>) -> io::Result<usize> {
-        self.reader.read_to_end(buf)
+        poll_payload_cancel(self.cancel)?;
+        finish_payload_read(self.reader.read_to_end(buf), self.cancel)
     }
 
     fn read_to_string(&mut self, buf: &mut String) -> io::Result<usize> {
-        self.reader.read_to_string(buf)
+        poll_payload_cancel(self.cancel)?;
+        finish_payload_read(self.reader.read_to_string(buf), self.cancel)
     }
+    // Keep the original CRC bulk/error state and UTF-8 precedence. Polling the
+    // public entry also covers empty exact buffers and buffered output/EOF;
+    // the original plaintext owner continues to poll every bottom read.
 }
 
 impl<R: Read> Read for ZipFileSeek<'_, R> {
@@ -2269,6 +2458,7 @@ pub fn read_zipfile_from_stream<R: Read>(reader: &mut R) -> ZipResult<Option<Zip
     Ok(Some(ZipFile {
         data: Cow::Owned(result),
         reader: make_reader(result_compression_method, result_crc32, crypto_reader)?,
+        cancel: None,
     }))
 }
 
@@ -2333,6 +2523,132 @@ mod test {
     use crate::{ZipArchive, ZipWriter};
     use std::io::{Cursor, Read, Write};
     use tempfile::TempDir;
+
+    #[test]
+    fn plaintext_bulk_output_guard_and_polls() {
+        use super::CryptoReader;
+        use std::io;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct Plain<'a> {
+            bytes: &'a [u8],
+            position: usize,
+            token: &'a AtomicBool,
+            fail: Option<usize>,
+            panic_at: Option<usize>,
+            cancel_on_error: bool,
+        }
+        impl Read for Plain<'_> {
+            fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+                if self.panic_at == Some(self.position) {
+                    panic!("guard rollback witness");
+                }
+                if self.fail == Some(self.position) {
+                    self.fail = None;
+                    if self.cancel_on_error {
+                        self.token.store(true, Ordering::SeqCst);
+                    }
+                    return Err(io::Error::other("one real IO failure"));
+                }
+                if self.position == self.bytes.len() {
+                    return Ok(0);
+                }
+                out[0] = self.bytes[self.position];
+                self.position += 1;
+                Ok(1)
+            }
+        }
+        for (bytes, fail, expected, kind) in [
+            (&b"ab"[..], Some(1), "prea", Some(io::ErrorKind::Other)),
+            (
+                &[0xff, b'x'][..],
+                Some(1),
+                "pre",
+                Some(io::ErrorKind::Other),
+            ),
+            (&[0xff][..], None, "pre", Some(io::ErrorKind::InvalidData)),
+            ("é".as_bytes(), None, "preé", None),
+        ] {
+            for race in [false, true] {
+                let token = AtomicBool::new(false);
+                let mut plain = Plain {
+                    bytes,
+                    position: 0,
+                    token: &token,
+                    fail,
+                    panic_at: None,
+                    cancel_on_error: race,
+                };
+                let mut reader = CryptoReader::Plaintext {
+                    reader: (&mut plain).take(u64::MAX),
+                    cancel: Some(&token),
+                };
+                let mut destination = String::from("pre");
+                let result = reader.read_to_string(&mut destination);
+                assert_eq!(result.as_ref().err().map(io::Error::kind), kind);
+                assert_eq!(destination, expected);
+                if let Some(error) = result.err() {
+                    assert!(!super::is_payload_read_cancelled(&error));
+                }
+            }
+        }
+        // Unwinding while the original caller String backing contains invalid
+        // bytes must restore its original valid prefix before it becomes String
+        // again. No second allocation/backing or output parser is used.
+        let token = AtomicBool::new(false);
+        let mut plain = Plain {
+            bytes: &[0xff, b'x'],
+            position: 0,
+            token: &token,
+            fail: None,
+            panic_at: Some(1),
+            cancel_on_error: false,
+        };
+        let mut reader = CryptoReader::Plaintext {
+            reader: (&mut plain).take(u64::MAX),
+            cancel: Some(&token),
+        };
+        let mut destination = String::from("pre");
+        let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            reader.read_to_string(&mut destination)
+        }));
+        assert!(unwind.is_err());
+        assert_eq!(destination, "pre");
+
+        let token = AtomicBool::new(true);
+        let mut plain = Plain {
+            bytes: b"x",
+            position: 0,
+            token: &token,
+            fail: None,
+            panic_at: None,
+            cancel_on_error: false,
+        };
+        let mut reader = CryptoReader::Plaintext {
+            reader: (&mut plain).take(u64::MAX),
+            cancel: Some(&token),
+        };
+        assert!(super::is_payload_read_cancelled(
+            &reader.read_to_end(&mut Vec::new()).unwrap_err()
+        ));
+        assert!(super::is_payload_read_cancelled(
+            &reader.read_to_string(&mut String::new()).unwrap_err()
+        ));
+        drop(reader);
+        assert_eq!(plain.position, 0);
+        println!(
+            "actual reader outer={} CryptoReader={} pointer={}",
+            std::mem::size_of::<
+                crate::crc32::Crc32Reader<
+                    crate::compression::Decompressor<
+                        io::BufReader<CryptoReader<'_, Cursor<&[u8]>>>,
+                    >,
+                >,
+            >(),
+            std::mem::size_of::<CryptoReader<'_, Cursor<&[u8]>>>(),
+            std::mem::size_of::<usize>()
+        );
+    }
 
     #[test]
     fn invalid_offset() {

@@ -718,12 +718,15 @@ fn bounded_parser_allocator_and_read_contract() {
             CompressionMethod::Stored
         };
         let costs = archive.checked_metadata_read_heap_bounds(method).unwrap();
+        let metadata_live = LIVE.load(SeqCst);
         PEAK.store(LIVE.load(SeqCst), SeqCst);
         TRACK.store(true, SeqCst);
         let mut file = archive.by_index(0).unwrap();
         let mut output = [0; 1];
         assert_eq!(file.read(&mut output).unwrap(), 0);
         let read_peak = end().0;
+        let actual_reader = LIVE.load(SeqCst) - metadata_live;
+        assert_eq!(actual_reader, costs.additional_reader_bytes);
         assert!(
             read_peak <= costs.metadata_and_reader_bytes,
             "{read_peak} > {costs:?}"
@@ -732,7 +735,7 @@ fn bounded_parser_allocator_and_read_contract() {
         drop(archive);
         assert_eq!(LIVE.load(SeqCst), 0);
         println!(
-            "reader deflate={deflate} opening={opening:?} read_peak={read_peak} costs={costs:?}"
+            "reader deflate={deflate} opening={opening:?} read_peak={read_peak} actual_reader={actual_reader} costs={costs:?}"
         );
     }
     let overflow = MetadataLimits {
@@ -743,4 +746,442 @@ fn bounded_parser_allocator_and_read_contract() {
         overflow.checked_heap_bounds(),
         Err(ZipError::MetadataLimitExceeded(_))
     ));
+    payload_cancellation_and_preopening_read_fees();
+    bulk_compatibility_and_cancellation();
+}
+
+struct CancelPayload<'a> {
+    cursor: Cursor<&'a [u8]>,
+    token: &'a AtomicBool,
+    payload_start: u64,
+    bottom_reads: &'a Cell<usize>,
+    drops: &'a Cell<usize>,
+    armed: &'a Cell<bool>,
+    fail: Option<io::ErrorKind>,
+}
+impl Read for CancelPayload<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.cursor.position() >= self.payload_start && self.armed.get() {
+            self.bottom_reads.set(self.bottom_reads.get() + 1);
+            self.token.store(true, SeqCst);
+            if let Some(kind) = self.fail {
+                return Err(kind.into());
+            }
+        }
+        self.cursor.read(buf)
+    }
+}
+impl Seek for CancelPayload<'_> {
+    fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
+        self.cursor.seek(position)
+    }
+}
+impl Drop for CancelPayload<'_> {
+    fn drop(&mut self) {
+        self.drops.set(self.drops.get() + 1);
+    }
+}
+
+fn payload_cancellation_and_preopening_read_fees() {
+    let one = [record_named(b"a")];
+    for deflate in [false, true] {
+        #[cfg(not(feature = "deflate"))]
+        if deflate {
+            continue;
+        }
+        let payload = if deflate {
+            let mut zero = [0, 0, 0, 255, 255].repeat(2000);
+            zero.extend_from_slice(&[3, 0]);
+            zero
+        } else {
+            b"123456789".to_vec()
+        };
+        let mut bytes = local(payload.len() as u32, deflate);
+        if !deflate {
+            // CRC of the real Stored payload, for buffered default-reader tests.
+            u32_at(&mut bytes, 14, 0xcbf43926);
+        }
+        bytes.extend_from_slice(&payload);
+        let start = bytes.len();
+        bytes.extend_from_slice(&directory(
+            &one,
+            start as u32,
+            payload.len() as u32,
+            b"",
+            deflate,
+        ));
+        if !deflate {
+            u32_at(&mut bytes, start + 16, 0xcbf43926);
+        }
+        let quotas = limits(&one, 0, 0);
+        let method = if deflate {
+            CompressionMethod::Deflated
+        } else {
+            CompressionMethod::Stored
+        };
+        begin();
+        let before = quotas
+            .checked_read_heap_bounds::<Cursor<&[u8]>>(method)
+            .unwrap();
+        let query = end();
+        assert_eq!((query.0, query.1, query.2, query.3), (0, 0, 0, 0));
+        let mut plain =
+            ZipArchive::with_metadata_limits(Config::default(), Cursor::new(&bytes), quotas)
+                .unwrap();
+        assert_eq!(
+            before,
+            plain.checked_metadata_read_heap_bounds(method).unwrap()
+        );
+        let mut output = Vec::new();
+        plain.by_index(0).unwrap().read_to_end(&mut output).unwrap();
+        assert_eq!(
+            output,
+            if deflate {
+                b"".as_slice()
+            } else {
+                b"123456789".as_slice()
+            }
+        );
+        drop(plain);
+        println!("new reader fee method={method:?} {before:?}");
+
+        // Arm AFTER constructor completion, then cancel inside the original
+        // by_index local-header read. No payload reader may be opened/used after
+        // that bounded operation returns; borrowed Drop never drains the file.
+        let token = AtomicBool::new(false);
+        let (bottom, drops, armed) = (Cell::new(0), Cell::new(0), Cell::new(false));
+        let reader = CancelPayload {
+            cursor: Cursor::new(&bytes),
+            token: &token,
+            payload_start: 0,
+            bottom_reads: &bottom,
+            drops: &drops,
+            armed: &armed,
+            fail: None,
+        };
+        let mut archive =
+            ZipArchive::with_metadata_limits(Config::default(), reader, quotas).unwrap();
+        armed.set(true);
+        assert!(
+            matches!(archive.by_index_with_cancel(0, &token), Err(ZipError::Io(error)) if zip::read::is_payload_read_cancelled(&error))
+        );
+        assert_eq!(bottom.get(), 1);
+        drop(archive);
+        assert_eq!(drops.get(), 1);
+
+        for fail in [
+            None,
+            Some(io::ErrorKind::Interrupted),
+            Some(io::ErrorKind::Other),
+        ] {
+            let token = AtomicBool::new(false);
+            let (bottom, drops, armed) = (Cell::new(0), Cell::new(0), Cell::new(false));
+            let reader = CancelPayload {
+                cursor: Cursor::new(&bytes),
+                token: &token,
+                payload_start: 31,
+                bottom_reads: &bottom,
+                drops: &drops,
+                armed: &armed,
+                fail,
+            };
+            let mut archive =
+                ZipArchive::with_metadata_limits(Config::default(), reader, quotas).unwrap();
+            let mut file = archive.by_index_with_cancel(0, &token).unwrap();
+            armed.set(true);
+            let mut buffer = [0; 65536];
+            let error = file.read(&mut buffer).unwrap_err();
+            assert_eq!(
+                bottom.get(),
+                1,
+                "Deflate filled again after its zero-output prefix"
+            );
+            assert_eq!(
+                zip::read::is_payload_read_cancelled(&error),
+                fail != Some(io::ErrorKind::Other)
+            );
+            assert_eq!(error.kind(), io::ErrorKind::Other);
+            drop(file);
+            drop(archive);
+            assert_eq!(drops.get(), 1);
+        }
+
+        if !deflate {
+            for primed in [1, 9] {
+                for operation in 0..4 {
+                    let token = AtomicBool::new(false);
+                    let (bottom, drops, armed) = (Cell::new(0), Cell::new(0), Cell::new(false));
+                    let reader = CancelPayload {
+                        cursor: Cursor::new(&bytes),
+                        token: &token,
+                        payload_start: 31,
+                        bottom_reads: &bottom,
+                        drops: &drops,
+                        armed: &armed,
+                        fail: None,
+                    };
+                    let mut archive =
+                        ZipArchive::with_metadata_limits(Config::default(), reader, quotas)
+                            .unwrap();
+                    let mut file = archive.by_index_with_cancel(0, &token).unwrap();
+                    let mut byte = [0];
+                    let mut prime = [0; 9];
+                    file.read_exact(&mut prime[..primed]).unwrap(); // buffered data or EOF
+                    token.store(true, SeqCst);
+                    let error = match operation {
+                        0 => file.read_to_end(&mut Vec::new()).unwrap_err(),
+                        1 => file.read_to_string(&mut String::new()).unwrap_err(),
+                        2 => file.read_exact(&mut byte).unwrap_err(),
+                        _ => file.read_exact(&mut []).unwrap_err(),
+                    };
+                    assert!(zip::read::is_payload_read_cancelled(&error));
+                    assert_eq!(bottom.get(), 0);
+                    drop(file);
+                    drop(archive);
+                    assert_eq!(drops.get(), 1);
+                }
+            }
+        }
+        let token = AtomicBool::new(true);
+        let mut archive =
+            ZipArchive::with_metadata_limits(Config::default(), Cursor::new(&bytes), quotas)
+                .unwrap();
+        assert!(
+            matches!(archive.by_index_with_cancel(0, &token), Err(ZipError::Io(error)) if zip::read::is_payload_read_cancelled(&error))
+        );
+        // Old APIs do not inherit a token, including raw lookup and defaults.
+        assert!(archive.by_index_raw(0).is_ok());
+        assert!(archive.by_index(0).is_ok());
+    }
+}
+
+fn bulk_fixture(decoded: &[u8], checksum: u32, deflate: bool) -> Vec<u8> {
+    let mut payload = Vec::new();
+    if deflate {
+        let len = decoded.len() as u16;
+        payload.push(1); // one final uncompressed DEFLATE block
+        payload.extend_from_slice(&len.to_le_bytes());
+        payload.extend_from_slice(&(!len).to_le_bytes());
+    }
+    payload.extend_from_slice(decoded);
+    let mut bytes = local(payload.len() as u32, deflate);
+    u32_at(&mut bytes, 14, checksum);
+    u32_at(&mut bytes, 22, decoded.len() as u32);
+    bytes.extend_from_slice(&payload);
+    let start = bytes.len();
+    bytes.extend_from_slice(&directory(
+        &[record_named(b"a")],
+        start as u32,
+        payload.len() as u32,
+        b"",
+        deflate,
+    ));
+    u32_at(&mut bytes, start + 16, checksum);
+    u32_at(&mut bytes, start + 24, decoded.len() as u32);
+    bytes
+}
+
+struct BulkOnceError<'a> {
+    cursor: Cursor<&'a [u8]>,
+    token: &'a AtomicBool,
+    in_payload: bool,
+    fired: bool,
+    fail_at: u64,
+    chunk: usize,
+    cancel_on_error: bool,
+}
+impl Read for BulkOnceError<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.in_payload && self.cursor.position() == self.fail_at && !self.fired {
+            self.fired = true;
+            if self.cancel_on_error {
+                self.token.store(true, SeqCst);
+            }
+            return Err(io::Error::other("one real IO failure"));
+        }
+        let want = if self.in_payload {
+            buf.len().min(self.chunk)
+        } else {
+            buf.len()
+        };
+        self.cursor.read(&mut buf[..want])
+    }
+}
+impl Seek for BulkOnceError<'_> {
+    fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
+        self.in_payload = matches!(position, SeekFrom::Start(31));
+        self.cursor.seek(position)
+    }
+}
+
+fn bulk_compatibility_and_cancellation() {
+    let one = [record_named(b"a")];
+    for deflate in [false, true] {
+        #[cfg(not(feature = "deflate"))]
+        if deflate {
+            continue;
+        }
+        for cancellable in [false, true] {
+            let token = AtomicBool::new(false);
+            let bytes = bulk_fixture(b"abcde", crc32fast::hash(b"abcde"), deflate);
+            let prefix_wire = if deflate { 7 } else { 2 };
+            let reader = BulkOnceError {
+                cursor: Cursor::new(&bytes),
+                token: &token,
+                in_payload: false,
+                fired: false,
+                fail_at: 31 + prefix_wire as u64,
+                chunk: prefix_wire,
+                cancel_on_error: false,
+            };
+            let mut archive = ZipArchive::new(reader).unwrap();
+            let mut file = if cancellable {
+                archive.by_index_with_cancel(0, &token)
+            } else {
+                archive.by_index(0)
+            }
+            .unwrap();
+            let mut prefix = Vec::new();
+            let first = file.read_to_end(&mut prefix).unwrap_err();
+            assert_eq!(
+                (first.kind(), first.to_string()),
+                (io::ErrorKind::Other, "one real IO failure".into())
+            );
+            assert_eq!(prefix, b"ab");
+            let mut suffix = Vec::new();
+            let second = file.read_to_end(&mut suffix).unwrap_err();
+            assert_eq!(
+                (second.kind(), second.to_string()),
+                (io::ErrorKind::InvalidData, "Invalid checksum".into())
+            );
+            assert_eq!(suffix, b"cde");
+            println!("bulk partial deflate={deflate} token={cancellable} first={first} prefix={prefix:?} retry={second} suffix={suffix:?}");
+
+            let token = AtomicBool::new(false);
+            let bytes = bulk_fixture(&[0xff], 0, deflate);
+            let mut archive = ZipArchive::new(Cursor::new(&bytes)).unwrap();
+            let mut file = if cancellable {
+                archive.by_index_with_cancel(0, &token)
+            } else {
+                archive.by_index(0)
+            }
+            .unwrap();
+            let mut destination = String::from("pre");
+            let error = file.read_to_string(&mut destination).unwrap_err();
+            assert_eq!(
+                (error.kind(), error.to_string()),
+                (
+                    io::ErrorKind::InvalidData,
+                    "stream did not contain valid UTF-8".into()
+                )
+            );
+            assert_eq!(destination, "pre");
+            println!("bulk UTF8 precedes CRC deflate={deflate} token={cancellable} error={error} destination={destination}");
+
+            for invalid in [false, true] {
+                let decoded = if invalid { &[0xff, b'x'][..] } else { b"ab" };
+                let bytes = bulk_fixture(decoded, crc32fast::hash(decoded), deflate);
+                for race in [false, true] {
+                    let token = AtomicBool::new(false);
+                    let prefix_wire = if deflate { 6 } else { 1 };
+                    let reader = BulkOnceError {
+                        cursor: Cursor::new(&bytes),
+                        token: &token,
+                        in_payload: false,
+                        fired: false,
+                        fail_at: 31 + prefix_wire as u64,
+                        chunk: prefix_wire,
+                        cancel_on_error: race,
+                    };
+                    let mut archive = ZipArchive::new(reader).unwrap();
+                    let mut file = if cancellable {
+                        archive.by_index_with_cancel(0, &token)
+                    } else {
+                        archive.by_index(0)
+                    }
+                    .unwrap();
+                    let mut destination = String::from("pre");
+                    let error = file.read_to_string(&mut destination).unwrap_err();
+                    assert_eq!(
+                        (error.kind(), error.to_string()),
+                        (io::ErrorKind::Other, "one real IO failure".into())
+                    );
+                    assert!(!zip::read::is_payload_read_cancelled(&error));
+                    assert_eq!(destination, if invalid { "pre" } else { "prea" });
+                }
+            }
+
+            // Exact reads retain the original incremental CRC state across a
+            // real partial error, unlike the original bulk success-only CRC.
+            let token = AtomicBool::new(false);
+            let bytes = bulk_fixture(b"abcde", crc32fast::hash(b"abcde"), deflate);
+            let prefix_wire = if deflate { 7 } else { 2 };
+            let reader = BulkOnceError {
+                cursor: Cursor::new(&bytes),
+                token: &token,
+                in_payload: false,
+                fired: false,
+                fail_at: 31 + prefix_wire as u64,
+                chunk: prefix_wire,
+                cancel_on_error: false,
+            };
+            let mut archive = ZipArchive::new(reader).unwrap();
+            let mut file = if cancellable {
+                archive.by_index_with_cancel(0, &token)
+            } else {
+                archive.by_index(0)
+            }
+            .unwrap();
+            file.read_exact(&mut []).unwrap();
+            let mut prefix = [0; 5];
+            assert_eq!(
+                file.read_exact(&mut prefix).unwrap_err().kind(),
+                io::ErrorKind::Other
+            );
+            assert_eq!(&prefix[..2], b"ab");
+            let mut suffix = [0; 3];
+            file.read_exact(&mut suffix).unwrap();
+            assert_eq!(&suffix, b"cde");
+            assert_eq!(file.read(&mut [0]).unwrap(), 0);
+        }
+
+        // Each public bulk entry is checked both at entry and at each actual
+        // bottom read. Deflate includes its zero-output continuation fixture.
+        let bytes = if deflate {
+            let mut bytes = local(10002, true);
+            bytes.extend_from_slice(&[0, 0, 0, 255, 255].repeat(2000));
+            bytes.extend_from_slice(&[3, 0]);
+            let start = bytes.len();
+            bytes.extend_from_slice(&directory(&one, start as u32, 10002, b"", true));
+            bytes
+        } else {
+            bulk_fixture(b"abcde", crc32fast::hash(b"abcde"), false)
+        };
+        for operation in 0..3 {
+            let token = AtomicBool::new(false);
+            let (bottom, drops, armed) = (Cell::new(0), Cell::new(0), Cell::new(false));
+            let reader = CancelPayload {
+                cursor: Cursor::new(&bytes),
+                token: &token,
+                payload_start: 31,
+                bottom_reads: &bottom,
+                drops: &drops,
+                armed: &armed,
+                fail: None,
+            };
+            let mut archive = ZipArchive::new(reader).unwrap();
+            let mut file = archive.by_index_with_cancel(0, &token).unwrap();
+            armed.set(true);
+            let error = match operation {
+                0 => file.read_to_end(&mut Vec::new()).unwrap_err(),
+                1 => file.read_to_string(&mut String::from("pre")).unwrap_err(),
+                _ => file.read_exact(&mut [0]).unwrap_err(),
+            };
+            assert!(zip::read::is_payload_read_cancelled(&error));
+            assert_eq!(bottom.get(), 1);
+            drop(file);
+            drop(archive);
+            assert_eq!(drops.get(), 1);
+        }
+    }
 }

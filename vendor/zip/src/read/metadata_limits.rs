@@ -5,6 +5,7 @@
 use crate::result::{ZipError, ZipResult};
 use crate::types::ZipFileData;
 use crate::ExtraField;
+use std::io::Read;
 use std::mem::{align_of, size_of};
 use std::sync::atomic::AtomicUsize;
 
@@ -127,6 +128,20 @@ impl MetadataLimits {
             self.max_zip64_extensible_bytes,
             self.max_eocd_comment_bytes,
         )
+    }
+    /// Bound retained requested metadata and one original concrete unencrypted
+    /// reader before opening anything. R's own allocations are excluded.
+    /// Supports Stored and the pinned Deflate rust_backend feature closure.
+    pub fn checked_read_heap_bounds<R: Read>(
+        &self,
+        method: crate::CompressionMethod,
+    ) -> ZipResult<MetadataReadHeapBounds> {
+        let additional = super::checked_reader_heap_bytes::<R>(method)?;
+        let retained = self.checked_heap_bounds()?.retained_metadata_bytes;
+        Ok(MetadataReadHeapBounds {
+            additional_reader_bytes: additional,
+            metadata_and_reader_bytes: add(retained, additional)?,
+        })
     }
     pub(crate) fn entries(&self, n: u64) -> ZipResult<usize> {
         let n = usize::try_from(n).map_err(|_| quota("raw entry count does not fit usize"))?;

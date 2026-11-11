@@ -10,6 +10,7 @@
 
 use std::collections::HashSet;
 use std::io::{Read, SeekFrom};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use sha2::{Digest, Sha256};
 use zip::read::MetadataLimits;
@@ -25,6 +26,9 @@ use crate::{
     PackageError, Result, MAX_COMPRESSION_RATIO, MAX_FILES, MAX_MANIFEST_BYTES, MAX_PACKAGE_BYTES,
     MAX_UNCOMPRESSED_BYTES,
 };
+
+mod heap_bounds;
+pub use heap_bounds::CanonicalIdentityHeapBounds;
 
 /// 校验通过的条目（路径为校验后的规范形式）。收据序列化复用该类型。
 /// mime 由 manifest files 行填入；旧收据缺省为 None（serde default 兼容）。
@@ -85,6 +89,14 @@ impl CanonicalPackageIdentity {
     /// the process catalog has its own cold and permanent fees.
     pub fn manifest_heap_bounds(&self) -> Result<ManifestHeapBounds> {
         ManifestHeapBounds::for_bytes(self.manifest_bytes)
+    }
+
+    /// Successful identity fee from its parser-recorded actual byte length.
+    /// No clone, reparse or caller Manifest capacity is used as evidence.
+    pub fn retained_identity_requested_bytes(&self) -> Result<u64> {
+        Ok(self
+            .manifest_heap_bounds()?
+            .retained_identity_requested_bytes())
     }
 
     pub fn model_binding(
@@ -151,7 +163,7 @@ pub fn inspect_package_identity<R: Read + std::io::Seek>(
     reader: R,
 ) -> Result<CanonicalPackageIdentity> {
     let mut archive = open_archive(reader)?;
-    inspect_identity_in_place(&mut archive)
+    inspect_identity_in_place(&mut archive, None)
 }
 
 /// Same identity phase with caller-supplied preallocation metadata limits.
@@ -162,16 +174,37 @@ pub fn inspect_package_identity_with_limits<R: Read + std::io::Seek>(
     reader: R,
     limits: MetadataLimits,
 ) -> Result<CanonicalPackageIdentity> {
-    let mut archive = open_archive_with_limits(reader, Some(limits))?;
-    inspect_identity_in_place(&mut archive)
+    let mut archive = open_archive_with_limits(reader, Some(limits), None)?;
+    inspect_identity_in_place(&mut archive, None)
+}
+
+/// The same canonical owner with synchronous cancellation. In-flight OS calls,
+/// metadata and local-header operations finish before their post-operation poll;
+/// payload polling also occurs inside the original ZIP plaintext reader.
+/// Original reader/archive/ZipFile owners naturally drop before public return.
+/// The caller retains responsibility for its grant and separate process catalog.
+pub fn inspect_package_identity_with_limits_and_cancel<R: Read + std::io::Seek>(
+    reader: R,
+    limits: MetadataLimits,
+    cancel: &AtomicBool,
+) -> Result<CanonicalPackageIdentity> {
+    let mut archive = open_archive_with_limits(reader, Some(limits), Some(cancel))?;
+    let identity = inspect_identity_in_place(&mut archive, Some(cancel))?;
+    poll_cancel(Some(cancel))?;
+    Ok(identity)
 }
 
 fn inspect_identity_in_place<R: Read + std::io::Seek>(
     archive: &mut ZipArchive<R>,
+    cancel: Option<&AtomicBool>,
 ) -> Result<CanonicalPackageIdentity> {
-    let manifest_bytes = read_manifest_bytes(archive)?;
+    poll_cancel(cancel)?;
+    let manifest_bytes = read_manifest_bytes_with_cancel(archive, cancel)?;
+    poll_cancel(cancel)?;
     let manifest = validate_manifest_bytes(&manifest_bytes)?;
-    let entries = validate_archive_in_place(archive, &manifest)?;
+    poll_cancel(cancel)?;
+    let entries = validate_archive_with_cancel(archive, &manifest, cancel)?;
+    poll_cancel(cancel)?;
     Ok(CanonicalPackageIdentity {
         manifest,
         entries,
@@ -182,7 +215,7 @@ fn inspect_identity_in_place<R: Read + std::io::Seek>(
 /// 一次性校验完整包：manifest 校验 + archive 结构与内容一致性。
 pub fn validate_package<R: std::io::Read + std::io::Seek>(reader: R) -> Result<ValidatedPackage> {
     let mut archive = open_archive(reader)?;
-    let identity = inspect_identity_in_place(&mut archive)?;
+    let identity = inspect_identity_in_place(&mut archive, None)?;
     validate_composition_in_place(&mut archive, identity.manifest())?;
     validate_resource_containers_in_place(&mut archive, identity.manifest())?;
     Ok(ValidatedPackage {
@@ -302,14 +335,19 @@ fn validate_resource_containers_in_place<R: Read + std::io::Seek>(
 }
 
 fn open_archive<R: std::io::Read + std::io::Seek>(reader: R) -> Result<ZipArchive<R>> {
-    open_archive_with_limits(reader, None)
+    open_archive_with_limits(reader, None, None)
 }
 
 fn open_archive_with_limits<R: Read + std::io::Seek>(
     mut reader: R,
     requested: Option<MetadataLimits>,
+    cancel: Option<&AtomicBool>,
 ) -> Result<ZipArchive<R>> {
+    poll_cancel(cancel)?;
     let bytes = reader.seek(SeekFrom::End(0)).map_err(|error| {
+        if cancelled_io(&error, cancel) {
+            return cancel_error();
+        }
         scalar_io_error(
             "format_unsupported",
             "package end seek failed",
@@ -318,8 +356,13 @@ fn open_archive_with_limits<R: Read + std::io::Seek>(
             &error,
         )
     })?;
+    poll_cancel(cancel)?;
     check_package_bytes(bytes)?;
+    poll_cancel(cancel)?;
     reader.seek(SeekFrom::Start(0)).map_err(|error| {
+        if cancelled_io(&error, cancel) {
+            return cancel_error();
+        }
         scalar_io_error(
             "format_unsupported",
             "package start seek failed",
@@ -328,31 +371,14 @@ fn open_archive_with_limits<R: Read + std::io::Seek>(
             &error,
         )
     })?;
-    let metadata_bytes = usize::try_from(bytes)
-        .map_err(|_| PackageError::new("package_too_large", "包长度无法在当前平台表示"))?;
-    // Preserve the original manifest/directory allowance. Variable metadata
-    // cannot occupy more than the physical package; these are container bounds,
-    // not the native preparation workspace's separate admission budget.
-    let container_limits = MetadataLimits {
-        max_raw_entries: MAX_FILES + 8,
-        max_variable_bytes: metadata_bytes,
-        max_zip64_extensible_bytes: metadata_bytes,
-        max_eocd_comment_bytes: u16::MAX as usize,
-    };
-    let limits = requested.map_or(container_limits, |limits| MetadataLimits {
-        max_raw_entries: limits.max_raw_entries.min(container_limits.max_raw_entries),
-        max_variable_bytes: limits
-            .max_variable_bytes
-            .min(container_limits.max_variable_bytes),
-        max_zip64_extensible_bytes: limits
-            .max_zip64_extensible_bytes
-            .min(container_limits.max_zip64_extensible_bytes),
-        max_eocd_comment_bytes: limits
-            .max_eocd_comment_bytes
-            .min(container_limits.max_eocd_comment_bytes),
-    });
+    poll_cancel(cancel)?;
+    let limits = effective_metadata_limits(bytes, requested)?;
+    poll_cancel(cancel)?;
     let archive =
         ZipArchive::with_metadata_limits(Default::default(), reader, limits).map_err(|error| {
+            if cancelled_zip(&error, cancel) {
+                return cancel_error();
+            }
             match error {
                 zip::result::ZipError::MetadataLimitExceeded("raw entry limit exceeded")
                     if limits.max_raw_entries == MAX_FILES + 8 =>
@@ -368,6 +394,7 @@ fn open_archive_with_limits<R: Read + std::io::Seek>(
                 ),
             }
         })?;
+    poll_cancel(cancel)?;
     // IndexMap preserves the last decoded name. Reject hidden duplicate central
     // records before even opening the manifest, along the existing path rule.
     if archive.raw_file_count() != archive.len() {
@@ -376,19 +403,62 @@ fn open_archive_with_limits<R: Read + std::io::Seek>(
     Ok(archive)
 }
 
+// Shared physical/container cap for both pre-opening fees and the real owner.
+fn effective_metadata_limits(
+    bytes: u64,
+    requested: Option<MetadataLimits>,
+) -> Result<MetadataLimits> {
+    check_package_bytes(bytes)?;
+    let metadata_bytes = usize::try_from(bytes)
+        .map_err(|_| PackageError::new("package_too_large", "包长度无法在当前平台表示"))?;
+    // Preserve the original manifest/directory allowance. Variable metadata
+    // cannot occupy more than the physical package; these are container bounds,
+    // not the native preparation workspace's separate admission budget.
+    let container_limits = MetadataLimits {
+        max_raw_entries: MAX_FILES + 8,
+        max_variable_bytes: metadata_bytes,
+        max_zip64_extensible_bytes: metadata_bytes,
+        max_eocd_comment_bytes: u16::MAX as usize,
+    };
+    Ok(requested.map_or(container_limits, |limits| MetadataLimits {
+        max_raw_entries: limits.max_raw_entries.min(container_limits.max_raw_entries),
+        max_variable_bytes: limits
+            .max_variable_bytes
+            .min(container_limits.max_variable_bytes),
+        max_zip64_extensible_bytes: limits
+            .max_zip64_extensible_bytes
+            .min(container_limits.max_zip64_extensible_bytes),
+        max_eocd_comment_bytes: limits
+            .max_eocd_comment_bytes
+            .min(container_limits.max_eocd_comment_bytes),
+    }))
+}
+
 fn read_manifest_bytes<R: std::io::Read + std::io::Seek>(
     archive: &mut ZipArchive<R>,
 ) -> Result<Vec<u8>> {
+    read_manifest_bytes_with_cancel(archive, None)
+}
+
+fn read_manifest_bytes_with_cancel<R: Read + std::io::Seek>(
+    archive: &mut ZipArchive<R>,
+    cancel: Option<&AtomicBool>,
+) -> Result<Vec<u8>> {
+    poll_cancel(cancel)?;
     let directory_start = archive.central_directory_start();
     let index = archive
         .index_for_name(MANIFEST_PATH)
         .ok_or_else(|| PackageError::new("missing_manifest", "包根缺少 manifest.json"))?;
-    let mut file = archive.by_index(index).map_err(|error| {
+    let mut file = identity_file(archive, index, cancel).map_err(|error| {
+        if cancelled_zip(&error, cancel) {
+            return cancel_error();
+        }
         PackageError::new(
             "format_unsupported",
             format!("manifest.json 不可读：{error}"),
         )
     })?;
+    poll_cancel(cancel)?;
     if file.compression() != zip::CompressionMethod::Stored
         && file.compression() != zip::CompressionMethod::Deflated
     {
@@ -406,18 +476,37 @@ fn read_manifest_bytes<R: std::io::Read + std::io::Seek>(
     check_compressed_range(&file, directory_start)?;
     let mut bytes = Vec::new();
     // 中央目录可以谎报尺寸，实际解压也必须在分配前截断。
-    file.by_ref()
-        .take(MAX_MANIFEST_BYTES as u64 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|error| {
-            scalar_io_error(
-                "format_unsupported",
-                "manifest read failed",
-                Some(MANIFEST_PATH),
-                Some(bytes.len() as u64),
-                &error,
-            )
-        })?;
+    let mut chunk = [0u8; 64 * 1024];
+    while bytes.len() < MAX_MANIFEST_BYTES + 1 {
+        poll_cancel(cancel)?;
+        let want = chunk.len().min(MAX_MANIFEST_BYTES + 1 - bytes.len());
+        // Append only successfully read bytes. Empty-start growth doubles:
+        // retained <=524288, old+new overlap <=262144+524288. EOF does not
+        // reserve another buffer; central size never sets the actual read cap.
+        let read = match file.read(&mut chunk[..want]) {
+            Ok(read) => {
+                poll_cancel(cancel)?;
+                read
+            }
+            Err(error) if cancelled_io(&error, cancel) => return Err(cancel_error()),
+            // Original manifest read_to_end retried Interrupted; resources did
+            // not. Keep that distinction at the two original owners.
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => {
+                return Err(scalar_io_error(
+                    "format_unsupported",
+                    "manifest read failed",
+                    Some(MANIFEST_PATH),
+                    Some(bytes.len() as u64),
+                    &error,
+                ))
+            }
+        };
+        if read == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&chunk[..read]);
+    }
     if bytes.len() > MAX_MANIFEST_BYTES {
         return Err(PackageError::new(
             "manifest_too_large",
@@ -467,6 +556,15 @@ fn validate_archive_in_place<R: std::io::Read + std::io::Seek>(
     archive: &mut ZipArchive<R>,
     manifest: &Manifest,
 ) -> Result<Vec<VerifiedEntry>> {
+    validate_archive_with_cancel(archive, manifest, None)
+}
+
+fn validate_archive_with_cancel<R: Read + std::io::Seek>(
+    archive: &mut ZipArchive<R>,
+    manifest: &Manifest,
+    cancel: Option<&AtomicBool>,
+) -> Result<Vec<VerifiedEntry>> {
+    poll_cancel(cancel)?;
     if archive.len() > MAX_FILES + 8 {
         return Err(PackageError::new(
             "too_many_files",
@@ -485,9 +583,14 @@ fn validate_archive_in_place<R: std::io::Read + std::io::Seek>(
     let directory_start = archive.central_directory_start();
 
     for index in 0..archive.len() {
-        let mut file = archive.by_index(index).map_err(|error| {
+        poll_cancel(cancel)?;
+        let mut file = identity_file(archive, index, cancel).map_err(|error| {
+            if cancelled_zip(&error, cancel) {
+                return cancel_error();
+            }
             PackageError::new("format_unsupported", format!("条目不可读：{error}"))
         })?;
+        poll_cancel(cancel)?;
         let raw_name = file.name_raw().to_vec();
         let name = String::from_utf8(raw_name.clone())
             .map_err(|_| PackageError::new("invalid_path", "条目名不是合法 UTF-8"))?;
@@ -549,11 +652,15 @@ fn validate_archive_in_place<R: std::io::Read + std::io::Seek>(
         let mut actual: u64 = 0;
         let mut chunk = [0u8; 64 * 1024];
         loop {
+            poll_cancel(cancel)?;
             let want = std::cmp::min(chunk.len() as u64, budget - actual) as usize;
             if want == 0 {
                 break;
             }
             let read = file.read(&mut chunk[..want]).map_err(|error| {
+                if cancelled_io(&error, cancel) {
+                    return cancel_error();
+                }
                 scalar_io_error(
                     "format_unsupported",
                     "archive entry read failed",
@@ -562,6 +669,7 @@ fn validate_archive_in_place<R: std::io::Read + std::io::Seek>(
                     &error,
                 )
             })?;
+            poll_cancel(cancel)?;
             if read == 0 {
                 break;
             }
@@ -600,6 +708,7 @@ fn validate_archive_in_place<R: std::io::Read + std::io::Seek>(
             bytes: actual,
             sha256: digest,
         });
+        poll_cancel(cancel)?;
     }
     if !saw_manifest {
         return Err(PackageError::new(
@@ -613,7 +722,44 @@ fn validate_archive_in_place<R: std::io::Read + std::io::Seek>(
             format!("声明文件在包内缺失：{remaining}"),
         ));
     }
+    poll_cancel(cancel)?;
     Ok(verified)
+}
+
+fn identity_file<'a, R: Read + std::io::Seek>(
+    archive: &'a mut ZipArchive<R>,
+    index: usize,
+    cancel: Option<&'a AtomicBool>,
+) -> zip::result::ZipResult<zip::read::ZipFile<'a, R>> {
+    match cancel {
+        Some(cancel) => archive.by_index_with_cancel(index, cancel),
+        None => archive.by_index(index),
+    }
+}
+
+fn cancel_error() -> PackageError {
+    PackageError::new(
+        "cancelled",
+        "canonical package identity inspection cancelled",
+    )
+}
+
+fn poll_cancel(cancel: Option<&AtomicBool>) -> Result<()> {
+    if cancel.is_some_and(|cancel| cancel.load(Ordering::Acquire)) {
+        Err(cancel_error())
+    } else {
+        Ok(())
+    }
+}
+
+fn cancelled_io(error: &std::io::Error, cancel: Option<&AtomicBool>) -> bool {
+    zip::read::is_payload_read_cancelled(error)
+        || (error.kind() == std::io::ErrorKind::Interrupted
+            && cancel.is_some_and(|cancel| cancel.load(Ordering::Acquire)))
+}
+
+fn cancelled_zip(error: &zip::result::ZipError, cancel: Option<&AtomicBool>) -> bool {
+    matches!(error, zip::result::ZipError::Io(error) if cancelled_io(error, cancel))
 }
 
 /// 包级压缩字节上限（§6.3 512 MiB）：供安装器在读入原始包字节前预检。
