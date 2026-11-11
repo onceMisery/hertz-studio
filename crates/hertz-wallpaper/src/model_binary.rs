@@ -79,6 +79,13 @@ pub fn inspect_glb_resource_content<R: Read>(
     manifest: &Manifest,
     path: &str,
 ) -> Result<CheckedGlbResource> {
+    // Reject before paths' diagnostic copies an unbounded caller string.
+    if path.len() > crate::MAX_PATH_BYTES {
+        return Err(PackageError::new(
+            "invalid_path",
+            "model path exceeds package path byte limit",
+        ));
+    }
     crate::paths::validate_rel_path(path)?;
     let mut hashing = HashingReader {
         input,
@@ -147,12 +154,37 @@ struct Job {
     rotation_cubic_values: bool,
 }
 
+/// Original numeric owner: exact jobs/mapping/heap capacities, BTree layouts,
+/// fixed stream window and skin's prechecked exact arena. No BIN-sized copy.
+pub(crate) fn requested_numeric_heap_bound() -> Result<u64> {
+    if std::mem::size_of::<(u64, u64, u64, u32, u8)>() != 32 {
+        return Err(PackageError::new(
+            "model_heap_limit",
+            "numeric layout key requires the verified alloc layout",
+        ));
+    }
+    let accessors = crate::model_structure::MAX_MODEL_RECORDS as u64;
+    let per_accessor = std::mem::size_of::<Job>() as u64
+        + std::mem::size_of::<usize>() as u64
+        + std::mem::size_of::<Reverse<(u64, usize, u64)>>() as u64
+        // Original LayoutKey(32)->usize nodes: leaf456/internal552. B=6
+        // occupancy gives <=456+112(n-1); one unfinished split is covered
+        // by the model owner's fixed allowance.
+        + 112;
+    accessors
+        .checked_mul(per_accessor)
+        .and_then(|bytes| bytes.checked_add(456))
+        .and_then(|bytes| bytes.checked_add(WINDOW_BYTES as u64))
+        .and_then(|bytes| bytes.checked_add(MAX_MODEL_SKIN_ASSOCIATION_BYTES))
+        .ok_or_else(|| PackageError::new("model_heap_limit", "numeric heap arithmetic overflow"))
+}
+
 fn inspect_accessors<R: Read>(
     structure: &ModelStructure,
     reader: &mut ContainerReader<R>,
 ) -> Result<NumericFacts> {
     let mut layouts = BTreeMap::new();
-    let mut jobs = Vec::<Job>::new();
+    let mut jobs = Vec::<Job>::with_capacity(structure.accessors.len());
     let mut mapping = Vec::with_capacity(structure.accessors.len());
     let mut elements = 0_u64;
     let mut components = 0_u64;

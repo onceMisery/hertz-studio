@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 //! Fixed-memory reads shared by the two resource container inspectors.
 
-use std::io::Read;
+use std::io::{self, Read};
 
 use crate::{PackageError, Result};
 
@@ -36,13 +36,31 @@ impl<R: Read> ContainerReader<R> {
         )
     }
 
+    fn io_error(&self, operation: &'static str, error: &io::Error) -> PackageError {
+        // A caller's io::Error may have arbitrarily large or allocating
+        // Display/Debug/Source implementations. Read only its stored scalar
+        // kind and OS code; formatting those built-in types has a fixed size.
+        // The two operation literals, kind variant, Option<i32>, and u64
+        // offset need <160 message bytes on the supported alloc sources.
+        // Build one String, without first rendering external error text.
+        PackageError::new(
+            self.code,
+            format!(
+                "{operation}: kind={:?}, raw_os_error={:?} (byte {})",
+                error.kind(),
+                error.raw_os_error(),
+                self.offset,
+            ),
+        )
+    }
+
     pub(crate) fn read_into(&mut self, output: &mut [u8]) -> Result<()> {
         if output.len() as u64 > self.remaining() {
             return Err(self.error("container range exceeds the verified entry length"));
         }
         self.input
             .read_exact(output)
-            .map_err(|error| self.error(format!("short or failed read: {error}")))?;
+            .map_err(|error| self.io_error("short or failed read", &error))?;
         self.offset += output.len() as u64;
         Ok(())
     }
@@ -75,7 +93,7 @@ impl<R: Read> ContainerReader<R> {
         match self.input.read(&mut extra) {
             Ok(0) => Ok(()),
             Ok(_) => Err(self.error("bytes follow the declared container length")),
-            Err(error) => Err(self.error(format!("end-of-entry read failed: {error}"))),
+            Err(error) => Err(self.io_error("end-of-entry read failed", &error)),
         }
     }
 }

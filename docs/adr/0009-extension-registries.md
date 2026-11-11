@@ -4,6 +4,8 @@
 
 ## 决定
 
+2026-11-11 原完整模型解析继续持有容量与费用：Limited 保留原语义上限并明确扩容，经过原作者总量/view-role检查的属性与target树从Schema移到原facts，退役其deep clone同存；nodes/scenes/targets/numeric jobs和图像别名由原owner分配明确容量。ModelHeapBounds的阶段最大值来自真实类型、语法跨度和同存/错误源方程，不增加语义解析器、全输入allocator hook或预算ledger。共享ContainerReader的I/O诊断由其原owner读取固定ErrorKind/raw_os_error和byte位置，退役第三方错误全文Display复制，GLB/KTX2保持原错误分类和读取退出。完整native基底、compact ModelInput/retained及GPU资格仍由后续原准备/预算/renderer闭环，见[模型记录](../wallpaper-model-resources.md)。
+
 2026-11-11 包身份仍归原 archive owner：从完整包校验中抽出共用的 manifest/条目范围/实际长度/SHA 阶段，只有该阶段能构造字段私有的 CanonicalPackageIdentity。模型 source 与精确 variant 绑定借用其原 model 资产声明，保留同文件别名身份；手构 manifest 不取得该 seal。调用者 ZIP metadata 限额与原容器上限取小，执行于原 reader 分配前。完整包校验随后继续 composition 和所有资源语义，不引入另一解析器、身份算法或预算 owner；此 seal 不证明 GLB 内容、ModelInput/native 联合包络或 GPU 资格，见[模型记录](../wallpaper-model-resources.md)。
 
 2026-11-11，同版本 ZIP 补丁也归原发行和配套身份 owner：Standard/Full 独立 wrapper 继承根唯一 Cargo patch 表并解析原路径，发行检查核对真实 ZIP 依赖并编译包合同；desktopBuildId 输入包含 vendor manifest、provenance 和源码，原 plugin/studio 身份随之变化，独立验收 lock 与编译缓存排除。修复原入口，不增加另一套补丁配置或身份算法。

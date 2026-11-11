@@ -1,5 +1,21 @@
 # GLB / KTX2 资源实施记录
 
+2026-11-11，完整模型检查的容量控制和费用 API 归原解析 owner：有界数组从
+1 个槽开始，按原上限扩容；已检查的属性/target 树从 Schema 移到原 facts，
+保留合法自定义 semantic（包括 `_`）、作者顺序和全部未选中声明检查。节点、
+scene、target、numeric jobs 使用明确容量，图像别名按同一 immutable manifest
+计数后分配，原局部/全局语义和数字工作上限保持。
+`ModelHeapBounds` 以有界 JSON 长度及实际 manifest 别名为输入，分别计算
+opening、Schema/facts/scratch、numeric 和完整 checked 结果的 requested heap；
+原 JSON/根容量、单次 grow、BTree 节点/键、decoder/bigint、错误及 Vec→Arc
+同存按真实 owner 和源方程计量，不从最终长度或有限 allocator 样本外推。
+
+共享 `ContainerReader` 的 I/O 诊断只读取 `ErrorKind` 和 `raw_os_error`，保留
+原操作、byte offset 与错误代码。第三方错误的 Display/Debug/Source 不执行，
+避免错误文本脱离 JSON/manifest 界后产生无界复制；GLB 和 KTX2 共用此入口。
+完整包身份、manifest/ZIP 同存费用、紧凑 ModelInput 的最后引用票据及同 renderer
+首帧仍须继续接入；单模型费用 API 不授予原生 320 MiB 或 GPU 资格。
+
 2026-11-11，原 archive owner 抽出包身份检查阶段：
 `inspect_package_identity` 沿用原 manifest、条目范围、实际长度与完整 SHA 校验，
 返回字段私有的 `CanonicalPackageIdentity`。模型绑定只从该身份中的 model 资产

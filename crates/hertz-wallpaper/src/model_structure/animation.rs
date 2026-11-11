@@ -82,6 +82,7 @@ pub(super) fn nonempty_animations<'de, D: Deserializer<'de>>(
     Ok(animations)
 }
 
+// Visible only to the sibling heap owner for actual size_of derivation.
 schema!(Sampler {
     input: usize,
     output: usize,
@@ -96,6 +97,11 @@ schema!(Target {
     #[serde(default,deserialize_with="non_null")] node: Option<usize>,
     path: AnimationPath,
 });
+
+pub(super) const SCHEMA_SLOT_BYTES: (usize, usize) = (
+    std::mem::size_of::<Sampler>(),
+    std::mem::size_of::<Channel>(),
+);
 
 /// Missing optional fields get None through serde default; explicit null must
 /// still fail the actual field type instead of becoming an ignored channel.

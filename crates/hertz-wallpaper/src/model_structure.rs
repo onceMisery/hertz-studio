@@ -24,6 +24,8 @@ pub const MAX_MODEL_IMAGE_RECORDS: usize = 4_096;
 pub const MAX_MODEL_ATTRIBUTES: usize = 32;
 pub const MAX_MODEL_ANIMATIONS: usize = 1_024;
 
+pub use heap_bounds::ModelHeapBounds;
+
 pub use animation::{
     AnimationInterpolation, AnimationPath, ModelAnimation, ModelAnimationChannel,
     ModelAnimationSampler,
@@ -210,7 +212,7 @@ pub fn inspect_glb_resource<R: Read>(
     manifest: &Manifest,
     path: &str,
 ) -> Result<GlbResource> {
-    validate_rel_path(path).map_err(|error| invalid(error.message))?;
+    validate_model_path(path)?;
     let container = inspect_glb(input, declared_bytes)?;
     let structure = structure_from_container(&container, manifest, path)?;
     Ok(GlbResource {
@@ -224,7 +226,7 @@ pub(crate) fn structure_from_container(
     manifest: &Manifest,
     path: &str,
 ) -> Result<ModelStructure> {
-    validate_rel_path(path).map_err(|error| invalid(error.message))?;
+    validate_model_path(path)?;
     let document: Schema = serde_json::from_slice(&container.json).map_err(|error| {
         let message = error.to_string();
         if message.starts_with("model_resource_unavailable:") {
@@ -240,6 +242,12 @@ pub(crate) fn structure_from_container(
 
 fn invalid(message: impl Into<String>) -> PackageError {
     PackageError::new("invalid_model_structure", message)
+}
+fn validate_model_path(path: &str) -> Result<()> {
+    if path.len() > crate::MAX_PATH_BYTES {
+        return Err(invalid("model path exceeds package path byte limit"));
+    }
+    validate_rel_path(path).map_err(|error| invalid(error.message))
 }
 fn unavailable(message: impl Into<String>) -> PackageError {
     PackageError::new("model_resource_unavailable", message)
@@ -269,7 +277,7 @@ fn triangles(total: u64, increment: u64) -> Result<u64> {
 }
 
 fn inspect_structure(
-    document: Schema,
+    mut document: Schema,
     container: &GlbContainer,
     manifest: &Manifest,
     path: &str,
@@ -341,7 +349,7 @@ fn inspect_structure(
     let mut meshes = Vec::with_capacity(document.meshes.0.len());
     let mut mesh_triangles_upper_bound = 0;
     let mut primitive_count = 0usize;
-    for mesh in &document.meshes.0 {
+    for mesh in &mut document.meshes.0 {
         if mesh.primitives.0.is_empty() {
             return Err(invalid("mesh must contain a primitive"));
         }
@@ -359,7 +367,7 @@ fn inspect_structure(
             triangles_upper_bound: 0,
             loader_pivot: mesh._extras.loader_pivot,
         };
-        for primitive in &mesh.primitives.0 {
+        for primitive in &mut mesh.primitives.0 {
             let fact =
                 inspect_primitive(primitive, &accessors, &buffer_views, &document.materials.0)?;
             if !fact.targets.is_empty() {
@@ -387,12 +395,11 @@ fn inspect_structure(
         &meshes,
     )?;
     let static_loader_fields = inspect_static_loader_fields(&document);
-    let retained_nodes = document
-        .nodes
-        .0
-        .into_iter()
-        .zip(nodes.graph.parents)
-        .map(|(node, parent)| ModelNode {
+    // Exact original-owner capacities avoid Vec's in-place collect changing a
+    // Node allocation into a larger-capacity ModelNode allocation.
+    let mut retained_nodes = Vec::with_capacity(document.nodes.0.len());
+    for (node, parent) in document.nodes.0.into_iter().zip(nodes.graph.parents) {
+        retained_nodes.push(ModelNode {
             parent,
             children: node.children.0,
             mesh: node.mesh.value,
@@ -407,8 +414,14 @@ fn inspect_structure(
                 },
             },
             loader_pivot: node._extras.loader_pivot,
-        })
-        .collect();
+        });
+    }
+    let mut scenes = Vec::with_capacity(document.scenes.0.len());
+    for scene in document.scenes.0 {
+        scenes.push(ModelScene {
+            nodes: scene.nodes.0,
+        });
+    }
     Ok(ModelStructure {
         buffer_views,
         accessors,
@@ -419,14 +432,7 @@ fn inspect_structure(
         skin_bindings,
         skin_binding_pair_refs: skin_author.pair_consumers,
         nodes: retained_nodes,
-        scenes: document
-            .scenes
-            .0
-            .into_iter()
-            .map(|scene| ModelScene {
-                nodes: scene.nodes.0,
-            })
-            .collect(),
+        scenes,
         default_scene: document.scene.value,
         buffer_byte_length: document.buffers.0.first().map(|buffer| buffer.byte_length),
         material_count: document.materials.0.len(),
@@ -614,7 +620,7 @@ fn inspect_accessor(accessor: &Accessor, views: &[ModelBufferView]) -> Result<Mo
 }
 
 fn inspect_primitive(
-    primitive: &Primitive,
+    primitive: &mut Primitive,
     accessors: &[ModelAccessor],
     views: &[ModelBufferView],
     materials: &[Material],
@@ -738,13 +744,18 @@ fn inspect_primitive(
         }
     }
     Ok(ModelPrimitive {
-        attributes: primitive.attributes.0.clone(),
-        targets: primitive
-            .targets
-            .0
-            .iter()
-            .map(|target| target.0.clone())
-            .collect(),
+        // Author totals and view roles were checked before any facts. Later
+        // Schema users need only primitive counts/optional presence; the skin
+        // owner already holds its bounded author summary. Move these complete
+        // maps instead of keeping a second tree and key-string allocation.
+        attributes: std::mem::take(&mut primitive.attributes.0),
+        targets: {
+            let mut targets = Vec::with_capacity(primitive.targets.0.len());
+            for target in std::mem::take(&mut primitive.targets.0) {
+                targets.push(target.0);
+            }
+            targets
+        },
         indices: primitive.indices.value,
         material: primitive.material.value,
         authored_mode: primitive.mode,
@@ -1029,11 +1040,12 @@ fn inspect_nodes(document: &Schema, meshes: &[ModelMesh]) -> Result<InspectedNod
     }
     // Iterative root traversal is bounded by the nodes, including unreachable
     // nodes. A closed cycle has no root and therefore fails the visited count.
-    let mut pending: Vec<usize> = parents
-        .iter()
-        .enumerate()
-        .filter_map(|(index, parent)| parent.is_none().then_some(index))
-        .collect();
+    let mut pending = Vec::with_capacity(parents.len());
+    for (index, parent) in parents.iter().enumerate() {
+        if parent.is_none() {
+            pending.push(index);
+        }
+    }
     let mut visited = 0;
     while let Some(index) = pending.pop() {
         visited += 1;
@@ -1545,7 +1557,28 @@ fn inspect_images(
                 let references = if let Some(references) = aliases.get(&path) {
                     Arc::clone(references)
                 } else {
-                    let mut references = Vec::new();
+                    // Count on the same immutable manifest; all matching
+                    // source/variant records belong to this one path. No
+                    // amortized grow or Vec-to-Arc shrink is needed.
+                    let count = manifest
+                        .assets
+                        .iter()
+                        .filter(|asset| matches!(asset.kind, AssetKind::Image | AssetKind::Texture))
+                        .try_fold(0usize, |count, asset| {
+                            count
+                                .checked_add(usize::from(asset.source == path))
+                                .and_then(|count| {
+                                    count.checked_add(
+                                        asset
+                                            .variants
+                                            .iter()
+                                            .filter(|variant| variant.file == path)
+                                            .count(),
+                                    )
+                                })
+                                .ok_or_else(|| invalid("image reference count overflow"))
+                        })?;
+                    let mut references = Vec::with_capacity(count);
                     for asset in &manifest.assets {
                         if !matches!(asset.kind, AssetKind::Image | AssetKind::Texture) {
                             continue;
@@ -1742,7 +1775,27 @@ impl<'de, T: Deserialize<'de>, const N: usize> Deserialize<'de> for Limited<T, N
                 let mut values = Vec::new();
                 while values.len() < N {
                     match seq.next_element()? {
-                        Some(value) => values.push(value),
+                        Some(value) => {
+                            if values.len() == values.capacity() {
+                                // Global's exact RawVec request, not its default
+                                // minimum-four amortized allocation. A decoded
+                                // current item stays on the stack during grow.
+                                let capacity = values.capacity().saturating_mul(2).max(1).min(N);
+                                values.try_reserve_exact(capacity - values.len()).map_err(
+                                    |_| {
+                                        de::Error::custom(
+                                            "model_structure_limit: array allocation failed",
+                                        )
+                                    },
+                                )?;
+                                if values.capacity() != capacity {
+                                    return Err(de::Error::custom(
+                                        "model_structure_limit: unexpected array capacity",
+                                    ));
+                                }
+                            }
+                            values.push(value);
+                        }
                         None => return Ok(Limited(values)),
                     }
                 }
@@ -1872,6 +1925,7 @@ macro_rules! named_schema {
     };
 }
 mod animation;
+mod heap_bounds;
 mod metadata;
 
 schema!(Schema {
