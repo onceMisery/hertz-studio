@@ -26,10 +26,29 @@ type Result<T> = std::result::Result<T, JobError>;
 mod model_source;
 #[cfg(test)]
 pub(crate) use model_source::tests::{
-    installed as installed_model_fixture, probe as model_source_test_probe,
-    writable as model_source_writable,
+    installed as installed_model_fixture, installed_full as installed_full_model_fixture,
+    probe as model_source_test_probe, writable as model_source_writable,
 };
 pub(crate) use model_source::CanonicalModelSource;
+
+impl AssetStore {
+    pub(super) fn pin_model_input_source(
+        &self,
+        reference: &crate::wallpaper::target_planner::AssetRef,
+        probe: &crate::wallpaper::decode_probe::ProbeClient,
+        preparation: &crate::wallpaper::decode_probe::Reservation,
+        cancel: &AtomicBool,
+        controls: u64,
+    ) -> Result<CanonicalModelSource> {
+        self.pin_canonical_model_source_with_controls(
+            reference,
+            probe,
+            preparation,
+            cancel,
+            controls,
+        )
+    }
+}
 
 /// staging 快照回执：后续所有检查只读这份固定输入。
 #[derive(Debug, Clone)]

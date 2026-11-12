@@ -64,6 +64,8 @@ pub(crate) mod library;
 pub(crate) mod media;
 #[allow(dead_code)]
 pub(crate) mod media_stream;
+#[allow(dead_code)] // Full facts await canonical closure, Broker and runtime qualification.
+pub(crate) mod model_prepare;
 pub(crate) mod output_tokens;
 pub(crate) mod page_events;
 pub(crate) mod playlist;

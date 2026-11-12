@@ -29,7 +29,11 @@ const WINDOW_BYTES: usize = 64 * 1024;
 /// Numeric tolerance for this static subset; vectors are never rewritten.
 const UNIT_LENGTH_SQUARED_TOLERANCE: f64 = 1e-4;
 
+mod compact;
 mod skin;
+#[cfg(test)]
+pub(crate) use compact::record_test_allocation as record_compact_test_allocation;
+pub use compact::{CompactCheckedGlbResource, CompactModelHeapError};
 pub use skin::{MAX_MODEL_SKIN_ASSOCIATION_BYTES, MAX_MODEL_SKIN_ASSOCIATION_WORK};
 
 /// Only the inspector can construct these facts. The digest covers the exact

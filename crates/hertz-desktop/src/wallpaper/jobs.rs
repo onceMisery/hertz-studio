@@ -136,6 +136,7 @@ enum JobSource {
     PrepareFontGroup(FontGroupPrepareRequest),
     PrepareSvg(SvgPrepareRequest),
     PrepareModelSource(AssetRef),
+    PrepareModelInput(AssetRef),
 }
 
 /// 固定字体条目和最终文字由原准备 worker 核验；解析事实本身不授予本机资格。
@@ -209,6 +210,11 @@ pub(crate) struct SvgPrepareRequest {
     pub usage: String,
 }
 enum FontPrepareReply {
+    ModelInput(
+        tokio::sync::oneshot::Sender<
+            Result<super::model_prepare::ModelInput, super::model_prepare::ModelPreparationError>,
+        >,
+    ),
     ModelSource(
         tokio::sync::oneshot::Sender<Result<super::assets::CanonicalModelSource, JobError>>,
     ),
@@ -218,9 +224,39 @@ enum FontPrepareReply {
 }
 
 type FontPrepareCompletion<T> = (String, tokio::sync::oneshot::Receiver<Result<T, JobError>>);
+type ModelInputCompletion = (
+    String,
+    tokio::sync::oneshot::Receiver<
+        Result<super::model_prepare::ModelInput, super::model_prepare::ModelPreparationError>,
+    >,
+);
 
 impl FontPrepareReply {
-    fn send(self, outcome: Result<JobOutput, JobError>) {
+    fn send(
+        self,
+        outcome: Result<JobOutput, JobError>,
+        model_guard: Option<super::model_prepare::ModelErrorGuard>,
+    ) {
+        if let Self::ModelInput(reply) = self {
+            let result = match outcome {
+                Ok(JobOutput::ModelInput(input)) => {
+                    assert!(model_guard.is_none());
+                    Ok(input)
+                }
+                Err(error) => Err(super::model_prepare::ModelPreparationError::from_parts(
+                    error,
+                    model_guard,
+                )),
+                _ => unreachable!("typed model input reply belongs to its source"),
+            };
+            // A failed send owns and drops the complete input/error+guard.
+            let _ = reply.send(result);
+            return;
+        }
+        assert!(
+            model_guard.is_none(),
+            "model error guard belongs to model input reply"
+        );
         match (self, outcome) {
             (Self::ModelSource(reply), Ok(JobOutput::ModelSource(source))) => {
                 let _ = reply.send(Ok(source));
@@ -252,6 +288,7 @@ impl FontPrepareReply {
 }
 
 enum JobOutput {
+    ModelInput(super::model_prepare::ModelInput),
     ModelSource(super::assets::CanonicalModelSource),
     Svg(Box<super::target_planner::ResolvedMedia>),
     Package(String),
@@ -450,6 +487,20 @@ impl ImportJobs {
         self.dispatch(request).map(|id| (id, receive))
     }
 
+    /// Full original checked facts on the canonical installed source. Runtime
+    /// qualification is separate; completion uses the original terminal guard.
+    pub(crate) fn prepare_model_input(
+        &self,
+        job_id: String,
+        reference: AssetRef,
+    ) -> Result<ModelInputCompletion, JobError> {
+        reference.validate()?;
+        let mut request = self.reserve(job_id, JobSource::PrepareModelInput(reference), None)?;
+        let (reply, receive) = tokio::sync::oneshot::channel();
+        request.font_reply = Some(FontPrepareReply::ModelInput(reply));
+        self.dispatch(request).map(|id| (id, receive))
+    }
+
     /// One group occupies the original slot through inspection, preflight,
     /// qualification and the same strict terminal database/cancellation guard.
     pub(crate) fn prepare_font_group(
@@ -597,10 +648,16 @@ async fn worker_loop(
     // 等任务时必须继续驱动 runtime：sqlx 的连接归还也会投递异步任务。
     // 在 current_thread runtime 内阻塞 recv 会把空闲连接卡住，查询最终池超时。
     while let Some(request) = rx.recv().await {
+        // This owner stays beside the original outcome throughout terminal
+        // retries. Moving the factory JobError cannot end its charged lifetime.
+        let mut model_error_guard = None;
         let mut outcome = match assets.content_writer() {
             Ok(writer) => {
                 let session = format!("prepare-{}-{}", request.job_id, request.generation);
-                let preparation = if matches!(&request.source, JobSource::PrepareModelSource(_)) {
+                let preparation = if matches!(
+                    &request.source,
+                    JobSource::PrepareModelSource(_) | JobSource::PrepareModelInput(_)
+                ) {
                     probe.prepare_for_job(session, request.generation)
                 } else {
                     probe.prepare(session)
@@ -642,6 +699,23 @@ async fn worker_loop(
                         )
                         .await
                         .map(JobOutput::ModelSource),
+                        JobSource::PrepareModelInput(reference) => match run_prepare_model_input(
+                            &request,
+                            reference,
+                            &library,
+                            &assets,
+                            &probe,
+                            preparation.as_ref().expect("granted preparation"),
+                        )
+                        .await
+                        {
+                            Ok(input) => Ok(JobOutput::ModelInput(input)),
+                            Err(error) => {
+                                let (error, guard) = error.into_parts();
+                                model_error_guard = guard;
+                                Err(error)
+                            }
+                        },
                     },
                     Err(error) => Err(JobError {
                         code: error.code,
@@ -673,6 +747,7 @@ async fn worker_loop(
                     status.package_hash = Some(match output {
                         JobOutput::Package(hash) => hash.clone(),
                         JobOutput::ModelSource(source) => source.reference().package_hash.clone(),
+                        JobOutput::ModelInput(input) => input.reference().package_hash.clone(),
                         JobOutput::Svg(media) => media.reference().package_hash.clone(),
                         JobOutput::Font(font) => font.reference().package_hash.clone(),
                         JobOutput::Fonts(fonts) => fonts
@@ -743,7 +818,13 @@ async fn worker_loop(
             break;
         }
         if let Some(reply) = request.font_reply {
-            reply.send(outcome);
+            reply.send(outcome, model_error_guard);
+        } else {
+            // No reply: destroy the whole diagnostic/output before its guard.
+            drop(outcome);
+            if let Some(guard) = model_error_guard {
+                guard.finish();
+            }
         }
     }
 }
@@ -1135,6 +1216,44 @@ async fn run_prepare_model_source(
     Ok(source)
 }
 
+// The inline guard retains an already admitted owner without a new Box
+// allocation on a rejecting grant. Its actual oneshot layout is tested.
+#[allow(clippy::result_large_err)]
+async fn run_prepare_model_input(
+    request: &JobRequest,
+    reference: &AssetRef,
+    library: &Library,
+    assets: &AssetStore,
+    probe: &ProbeClient,
+    preparation: &super::decode_probe::Reservation,
+) -> Result<super::model_prepare::ModelInput, super::model_prepare::ModelPreparationError> {
+    set_state(&request.status, JobState::Preparing);
+    cancelled(&request.cancel)?;
+    if !library.is_installed(&reference.package_hash).await? {
+        return Err(JobError::new(
+            "asset_not_found",
+            "canonical model package is not installed/available",
+        )
+        .into());
+    }
+    #[cfg(test)]
+    if let Some(checkpoint) = request.inspection_checkpoint {
+        checkpoint(&request.cancel);
+    }
+    let outcome =
+        assets.prepare_canonical_model_input(reference, probe, preparation, &request.cancel);
+    #[cfg(test)]
+    if let Some((entered, release)) = &request.model_source_ready {
+        entered
+            .send(())
+            .expect("model input outcome ready observer");
+        tokio::time::timeout(std::time::Duration::from_secs(10), release.notified())
+            .await
+            .expect("model input outcome release");
+    }
+    outcome
+}
+
 async fn inspect_font(
     request: &JobRequest,
     prepare: &FontPrepareRequest,
@@ -1400,3 +1519,7 @@ mod tests;
 #[cfg(test)]
 #[path = "jobs_model_source_tests.rs"]
 mod model_source_tests;
+
+#[cfg(test)]
+#[path = "jobs_model_input_tests.rs"]
+mod model_input_tests;

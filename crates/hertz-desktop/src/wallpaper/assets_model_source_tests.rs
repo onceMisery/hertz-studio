@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MIT
 use super::*;
 use crate::wallpaper::{assets::StagedPackage, library::tempfileish};
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::io::{Cursor, Write};
+use std::io::{Cursor, Read, Write};
 
 pub(crate) struct Fixture {
     pub(crate) store: AssetStore,
@@ -575,4 +576,257 @@ fn identity_workspace_rejection_after_same_original_open_drops_all_partial_owner
     assert!(budget.stuck().is_empty());
     held.finish();
     preparation.finish();
+}
+
+pub(crate) fn rich_document(generator: &str) -> (Value, Vec<u8>) {
+    let mut doc = json!({"asset":{"version":"2.0","generator":generator},"buffers":[{"byteLength":1}],"bufferViews":[],"accessors":[],
+        "meshes":[],"nodes":[{"children":[1,2,3]},{},{"mesh":0,"skin":0,"weights":[-0.25],"translation":[-0.0,2.25,3.0],"extras":{"pivot":null}},
+            {"mesh":1,"matrix":[1,0,0,0,0,1,0,0,0,0,1,0,4.25,0,0,1]}],
+        "skins":[{"joints":[1],"skeleton":0}],"scenes":[{"nodes":[0]},{"nodes":[]}],"scene":0,
+        "materials":[{}],"samplers":[{}],"textures":[{"source":0,"sampler":0}],
+        "images":[{"uri":"tex.png"},{"uri":"tex.png"},{"uri":"other.png"}],
+        "cameras":[{"type":"perspective","perspective":{"yfov":1.0,"znear":0.1}}]});
+    // A separate authored root with facts outside the selected scene.
+    doc["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"mesh":1,"camera":0,"weights":[0.75,-0.0],"translation":[-0.0,9.25,0.0]}));
+    let mut bin = Vec::new();
+    fn accessor(
+        doc: &mut Value,
+        bin: &mut Vec<u8>,
+        component: u32,
+        shape: &str,
+        count: usize,
+        bytes: &[u8],
+        bounds: Option<(&[f64], &[f64])>,
+    ) -> usize {
+        while !bin.len().is_multiple_of(4) {
+            bin.push(0);
+        }
+        let view = doc["bufferViews"].as_array().unwrap().len();
+        doc["bufferViews"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"buffer":0,"byteOffset":bin.len(),"byteLength":bytes.len()}));
+        bin.extend(bytes);
+        let index = doc["accessors"].as_array().unwrap().len();
+        let mut a = json!({"bufferView":view,"componentType":component,"type":shape,"count":count});
+        if let Some((min, max)) = bounds {
+            a["min"] = json!(min);
+            a["max"] = json!(max);
+        }
+        doc["accessors"].as_array_mut().unwrap().push(a);
+        index
+    }
+    fn floats(v: &[f32]) -> Vec<u8> {
+        v.iter().flat_map(|n| n.to_le_bytes()).collect()
+    }
+    let position = accessor(
+        &mut doc,
+        &mut bin,
+        5126,
+        "VEC3",
+        3,
+        &floats(&[0., 0., 0., 1., 0., 0., 0., 1., 0.]),
+        Some((&[0., 0., 0.], &[1., 1., 0.])),
+    );
+    let target = accessor(
+        &mut doc,
+        &mut bin,
+        5126,
+        "VEC3",
+        3,
+        &[0; 36],
+        Some((&[0., 0., 0.], &[0., 0., 0.])),
+    );
+    let joints = accessor(&mut doc, &mut bin, 5121, "VEC4", 3, &[0; 12], None);
+    let weights = accessor(
+        &mut doc,
+        &mut bin,
+        5121,
+        "VEC4",
+        3,
+        &[255, 0, 0, 0].repeat(3),
+        None,
+    );
+    doc["accessors"][weights]["normalized"] = json!(true);
+    for a in [joints, weights] {
+        let v = doc["accessors"][a]["bufferView"].as_u64().unwrap() as usize;
+        doc["bufferViews"][v]["byteStride"] = json!(4);
+    }
+    let indices = accessor(
+        &mut doc,
+        &mut bin,
+        5123,
+        "SCALAR",
+        3,
+        &[0, 0, 1, 0, 2, 0],
+        None,
+    );
+    let inverse = accessor(
+        &mut doc,
+        &mut bin,
+        5126,
+        "MAT4",
+        1,
+        &floats(&[
+            1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1.,
+        ]),
+        None,
+    );
+    doc["skins"][0]["inverseBindMatrices"] = json!(inverse);
+    let times = accessor(
+        &mut doc,
+        &mut bin,
+        5126,
+        "SCALAR",
+        2,
+        &floats(&[0., 1.]),
+        Some((&[0.], &[1.])),
+    );
+    let translation = accessor(&mut doc, &mut bin, 5126, "VEC3", 2, &[0; 24], None);
+    let scale = accessor(&mut doc, &mut bin, 5126, "VEC3", 2, &floats(&[1.; 6]), None);
+    let mut rotation = vec![0.; 24];
+    rotation[7] = 1.;
+    rotation[19] = 1.;
+    let rotation = accessor(
+        &mut doc,
+        &mut bin,
+        5126,
+        "VEC4",
+        6,
+        &floats(&rotation),
+        None,
+    );
+    let morph = accessor(
+        &mut doc,
+        &mut bin,
+        5126,
+        "SCALAR",
+        2,
+        &floats(&[-0.5, 0.25]),
+        None,
+    );
+    doc["meshes"] = json!([
+        {"weights":[-0.5],"extras":{"pivot":false},"primitives":[{"attributes":{"POSITION":position,"JOINTS_0":joints,"WEIGHTS_0":weights},"indices":indices,"material":0,"mode":4,"targets":[{"POSITION":target}]}]},
+        {"weights":[0.0,-0.5],"primitives":[{"attributes":{"POSITION":position,"_":position},"targets":[{},{"_":target}]}]}]);
+    doc["animations"] = json!([{"name":"Full author animation","samplers":[
+        {"input":times,"output":translation,"interpolation":"LINEAR"},{"input":times,"output":scale,"interpolation":"STEP"},
+        {"input":times,"output":rotation,"interpolation":"CUBICSPLINE"},{"input":times,"output":morph}],
+        "channels":[{"sampler":0,"target":{"node":2,"path":"translation"}},{"sampler":1,"target":{"node":2,"path":"scale"}},
+            {"sampler":2,"target":{"node":2,"path":"rotation"}},{"sampler":3,"target":{"node":2,"path":"weights"}},{"sampler":0,"target":{"path":"translation"}}]}]);
+    while !bin.len().is_multiple_of(4) {
+        bin.push(0);
+    }
+    let view = doc["bufferViews"].as_array().unwrap().len();
+    doc["bufferViews"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"buffer":0,"byteOffset":bin.len(),"byteLength":4}));
+    bin.extend([1, 2, 3, 4]);
+    doc["images"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"bufferView":view,"mimeType":"image/png"}));
+    bin.extend([9, 8, 7, 6]); // deliberately unused bytes remain in the certificate
+    doc["buffers"][0]["byteLength"] = json!(bin.len());
+    (doc, bin)
+}
+pub(crate) fn rich_glb(doc: &Value, bin: &[u8]) -> Vec<u8> {
+    let mut text = serde_json::to_vec(doc).unwrap();
+    while !text.len().is_multiple_of(4) {
+        text.push(b' ');
+    }
+    let mut bytes = b"glTF".to_vec();
+    bytes.extend(2u32.to_le_bytes());
+    bytes.extend((28 + text.len() as u32 + bin.len() as u32).to_le_bytes());
+    bytes.extend((text.len() as u32).to_le_bytes());
+    bytes.extend(b"JSON");
+    bytes.extend(text);
+    bytes.extend((bin.len() as u32).to_le_bytes());
+    bytes.extend([b'B', b'I', b'N', 0]);
+    bytes.extend(bin);
+    bytes
+}
+
+/// Full rich model fixture, separately from the historical empty-source test.
+/// invalid_resource installs identity-valid bytes intentionally without full
+/// package/resource validation, to reach the original model diagnostic owner.
+pub(crate) fn installed_full(tag: &str, invalid_resource: bool) -> Fixture {
+    let (mut doc, bin) = rich_document("installed-rich");
+    if invalid_resource {
+        doc["accessors"][0]["type"] = json!("\0".repeat(20000));
+    }
+    let model = rich_glb(&doc, &bin);
+    let image = [1, 2, 3, 4];
+    let files = [
+        ("models/a/source.glb", model.as_slice(), "model/gltf-binary"),
+        ("models/a/low.glb", model.as_slice(), "model/gltf-binary"),
+        ("models/a/tex.png", image.as_slice(), "image/png"),
+        ("models/a/other.png", image.as_slice(), "image/png"),
+    ];
+    let manifest = json!({"formatVersion":1,"workId":"c17ed10a-5c55-4a52-85dc-7509f9e88aae","version":1,"title":"Rich canonical model","description":"Whole original metadata survives",
+        "content":{"kind":"builtin","sceneId":"zodiac","stateVersion":1,"params":{}},
+        "assets":[{"id":"first","kind":"model","source":"models/a/source.glb","variants":[{"id":"low","file":"models/a/low.glb","purpose":"low"}]},
+            {"id":"texture","kind":"texture","source":"models/a/tex.png","variants":[{"id":"same","file":"models/a/tex.png","purpose":"low"},{"id":"other","file":"models/a/other.png","purpose":"high"}]}],
+        "files":files.iter().map(|(path,bytes,mime)|json!({"path":path,"bytes":bytes.len(),"sha256":format!("{:x}",Sha256::digest(bytes)),"mime":mime})).collect::<Vec<_>>(),
+        "properties":[],"permissions":{"audioSpectrum":true,"pointer":true},"license":{"code":"MIT","assets":"CC0-1.0","attribution":"Full model fixture"}});
+    let manifest_json = serde_json::to_string(&manifest).unwrap();
+    let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    for (path, bytes) in std::iter::once(("manifest.json", manifest_json.as_bytes()))
+        .chain(files.iter().map(|(path, bytes, _)| (*path, *bytes)))
+    {
+        zip.start_file(path, zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(bytes).unwrap();
+    }
+    let original = zip.finish().unwrap().into_inner();
+    let root = tempfileish::temp_dir(tag);
+    let store = AssetStore::new(root.path()).unwrap();
+    let input = root.path().join("user-source.hwpkg");
+    std::fs::write(&input, &original).unwrap();
+    let snapshot = store.snapshot_input("install-rich", &input, None).unwrap();
+    let package = if invalid_resource {
+        // This proves canonical identity only. It is deliberately NOT a
+        // claim that validate_staged accepted the invalid model resource.
+        let identity =
+            hertz_wallpaper::archive::inspect_package_identity(Cursor::new(&original)).unwrap();
+        let mut archive = zip::ZipArchive::new(Cursor::new(&original)).unwrap();
+        let mut stored_manifest = String::new();
+        archive
+            .by_name("manifest.json")
+            .unwrap()
+            .read_to_string(&mut stored_manifest)
+            .unwrap();
+        StagedPackage {
+            package_hash: snapshot.sha256.clone(),
+            manifest: identity.manifest().clone(),
+            manifest_json: stored_manifest,
+            entries: identity.entries().to_vec(),
+        }
+    } else {
+        store.validate_staged("install-rich").unwrap()
+    };
+    store.unpack_projection("install-rich", &package).unwrap();
+    store
+        .content_writer()
+        .unwrap()
+        .publish_staging("install-rich", &package.package_hash)
+        .unwrap();
+    std::fs::remove_file(input).unwrap();
+    drop(store);
+    let store = AssetStore::new(root.path()).unwrap();
+    let reference = AssetRef {
+        package_hash: package.package_hash.clone(),
+        asset_id: "first".into(),
+        variant_id: None,
+    };
+    Fixture {
+        store,
+        root,
+        reference,
+        package,
+        original,
+    }
 }

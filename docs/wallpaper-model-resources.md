@@ -484,3 +484,76 @@ owner 控制；transfer 期间 Wc/Wi/R 保守重叠。process catalogs 1,227,856
 首帧资格门保持关闭。完整 checked GLB R207,392,124字节仍超过128 MiB，下一波
 必须在 W 内产生 compact ModelInput，不能 deep clone 或缩小完整 profile 来替代。
 完整 A01–A10、HWPK1/Config5、canonical unused entries、权限与别名保留不变。
+
+`CheckedGlbResource::into_compact` 现在消费原完整 checked owner，move 整个
+`ModelStructure`、原 BIN range、完整 SHA32、总字节、source path 和 NumericFacts，
+只释放原 JSON backing，并保留 JSON 字节数。所有 author-indexed / unselected
+记录、morph maps / weights、skin / binding、动画 name / interpolation / ignored
+channel、Matrix/TRS、mode / pivot / presence、min/max 和 image alias 均保留。
+原 metadata 的 `binary_content_validated=false` 语义不改变。没有第二 parser、
+第二 tree、flat arena、deep clone 或 shrink。compact 不能从 caller structure
+构造，也没有 Clone/Default/Deserialize 或 mutable getter。
+
+compact retained query 使用 actual Vec/String capacities，逐项包含全部 root
+数组、min/max、primitive/target/default-weight、animation sampler/channel/name、
+skin joints、node children、scene roots、node weights，以及每个 image 的实际
+path/MIME/SHA 字符串。原 String→usize BTree 的 verified x64 leaf368/internal464
+采用非空 `368+96*(m-1)`；空 map 保守计368，不把 len0 当作任意 tree 没有 backing
+的证明。key String backing 另计。shared image reference Arc 通过 preceding
+records 的 `Arc::ptr_eq` 无 scratch 去重，unique slice 计两个 AtomicUsize header、
+actual slice Layout 与全部 asset/variant id String backing；每 record 字符串仍计。
+4096 images 的 scan 最多8,386,560次 pointer comparisons。pure caller Manifest
+没有 canonical reference 字符串或总条目界，查询不采用109,935,396候选最大值。
+unsupported layout / checked Layout、转换、加乘 overflow 返回 inline Copy error，
+失败也不分配诊断。有限 System allocator fixtures只核对上述实际请求，不建立
+meter slope 或完整输入最大值定理。
+
+原 `AssetStore::prepare_canonical_model_input` 与 `ImportJobs::prepare_model_input`
+现在返回私有 outer `ModelInput`。工厂自行取得新的 canonical source；固定
+`&mut CanonicalModelSource` 操作先 `Arc::get_mut`，拒绝任何 clone 后才读取，借用
+immutable canonical Manifest、精确 entry 与原 pinned projection `&mut File`
+调用唯一完整 inspector。原 source 已 seek0；检查完整 SHA32/bytes/path 与该
+entry 相等，hex decode 使用 fixed32数组。没有 File getter、callback、try_clone、
+reopen、独立 source/media pin Arc 或 caller checked-result minting 入口。
+
+private ModelInput source mode 在 source Wc 与 source R 内显式增加
+`Cmodel=actual Arc<ModelInputInner> Layout + 2*(128+64) new W/R request String
+floor + original query diagnostic59 + ordinary Dgrant987 + fixed native literal34`。
+source-only mode仍传0。原 `ModelHeapBounds::for_json_bytes(MAX_TEXT_BYTES,
+canonical Manifest).workspace_with_live_base(actual_source_R_charge)` 在完整 model
+读取前计这个 live base，使用原320MiB W / 128MiB R 与64-record账本，不在旧
+3*192 ticket allowance 中隐藏新费用。Wi/Wc 已退出，不把 Wi 与 model W 相加。
+完整 inspector/compact 和 actual retained query在 W 下完成；只对 compact payload
+另取 ownFactsR，source R 已含 native Arc/body 和两个新 request floors，R在
+escaping Arc allocation 之前取得。最后 outer clone释放时先 drop compact，再
+drop canonical source 的 identity/Files/pins，最后 finish ownFactsR；不 purge sibling。
+
+`ModelPreparationError` 私有持有 `Option<JobError>` 与 `Option<Guard>`，不能 Clone
+或裸提取 JobError。pre-W query/grant失败保留同 source R 与 pins，直到实际 error
+consumer drop。post-W scope先在已含 source/Cmodel 的 W 下释放 partial/full facts
+和 source，再返回 W-only guard。原 model 的长诊断在 W 下释放后才构造固定 literal
+`canonical model preparation failed`，保留原 static code；不调用外部 Display/
+Debug/Source。error Drop先释放整个 JobError（含 details），再 source，再显式
+W.finish。原 worker在 terminal DB wait / retry和slot return间将guard保留在generic
+outcome旁，existing Err不被DB失败覆盖，成功input在late cancel/DB失败时释放；
+typed reply只做一次owned transfer，receiver丢失或没有reply时先释放outcome再guard。
+prepare task ticket/单槽退出与小error所持的大W是不同生命周期。
+
+真实 rich GLB/installed ZIP、source删除/store重开、exact variant、未用BIN完整hash、
+actual W/R denial、64记录、unique-source refusal、borrowed pinned File实际read返回
+后的确定取消、最后clone/pins、同session sibling、pool close、BEGIN IMMEDIATE终态
+wait/cancel与receiver loss覆盖这条原路径。long invalid-token fixture显式以
+identity-valid、故意未做full resource validation的测试安装进入model inspector，
+不声称完整package validator接受它。Config测试只比较实际文件bytes/absence和DB
+manifest，没有证明live Config5 revision journey。
+
+inline guard使原 typed oneshot payload和native async frame变大：channel allocation
+在source成功前发生，不能由之后Cmodel倒付，也不能称zero-cost。两编译器实际
+producing-thread System allocator日志和cfg(test)实际source/input future size日志
+单独记录该frontier；这些test-build future数值不宣称是production worker frame费用。
+尚未组合完整 pre-source channel/request/frame/status/history/DB/persistent controls、
+shared RootOwner/permanent ledger storage或Arc/request destructor tails。returned guard
+只保护其实际held JobError，不保护额外history/progress copies。image projections
+仍需canonical closure与真实pins/codec费用；outer input还未贯穿原Broker/cache/
+ReadPermit/stream/clone。loader/runtime/CPUready/GPU/first-frame与完整A01–A10目标
+继续开放，全部qualification gates保持关闭；此checked-facts输入不是运行成功替代。

@@ -233,15 +233,24 @@ mod tests {
     }
     unsafe impl GlobalAlloc for QueryMeter {
         unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            crate::model_binary::record_compact_test_allocation();
             if METER.with(Cell::get) {
                 REQUESTS.with(|count| count.set(count.get() + 1));
             }
             unsafe { System.alloc(layout) }
         }
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            crate::model_binary::record_compact_test_allocation();
+            if METER.with(Cell::get) {
+                REQUESTS.with(|count| count.set(count.get() + 1));
+            }
+            unsafe { System.alloc_zeroed(layout) }
+        }
         unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
             unsafe { System.dealloc(pointer, layout) };
         }
         unsafe fn realloc(&self, pointer: *mut u8, old: Layout, size: usize) -> *mut u8 {
+            crate::model_binary::record_compact_test_allocation();
             if METER.with(Cell::get) {
                 REQUESTS.with(|count| count.set(count.get() + 1));
             }

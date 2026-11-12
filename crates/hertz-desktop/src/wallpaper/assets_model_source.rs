@@ -58,6 +58,103 @@ impl Drop for Inner {
 }
 
 impl CanonicalModelSource {
+    /// Fixed operation on the freshly unique canonical owner. No File or
+    /// generic File callback escapes. The projection was seeked to zero by
+    /// its original source factory, and the full original inspector hashes
+    /// unused BIN bytes on that same pinned File.
+    pub(crate) fn inspect_model_content(
+        &mut self,
+        cancel: &AtomicBool,
+    ) -> hertz_wallpaper::Result<hertz_wallpaper::model_binary::CheckedGlbResource> {
+        self.inspect_model_content_inner(
+            cancel,
+            #[cfg(test)]
+            None,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn inspect_model_content_observed(
+        &mut self,
+        cancel: &AtomicBool,
+        observer: &mut dyn FnMut(),
+    ) -> hertz_wallpaper::Result<hertz_wallpaper::model_binary::CheckedGlbResource> {
+        self.inspect_model_content_inner(cancel, Some(observer))
+    }
+
+    fn inspect_model_content_inner(
+        &mut self,
+        cancel: &AtomicBool,
+        #[cfg(test)] observer: Option<&mut dyn FnMut()>,
+    ) -> hertz_wallpaper::Result<hertz_wallpaper::model_binary::CheckedGlbResource> {
+        let inner = Arc::get_mut(&mut self.0).ok_or_else(|| {
+            hertz_wallpaper::PackageError::new(
+                "model_source_shared",
+                "model inspection requires a unique canonical source",
+            )
+        })?;
+        let resources = inner.resources.as_mut().expect("live source");
+        #[cfg(test)]
+        let checked = if let Some(observer) = observer {
+            struct Observed<'a> {
+                file: &'a mut File,
+                observer: &'a mut dyn FnMut(),
+            }
+            impl std::io::Read for Observed<'_> {
+                fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+                    let result = std::io::Read::read(self.file, output);
+                    // A real borrowed pinned File read has returned. This is
+                    // not cancellation of an in-flight syscall.
+                    (self.observer)();
+                    result
+                }
+            }
+            hertz_wallpaper::model_binary::inspect_glb_resource_content_with_cancel(
+                Observed {
+                    file: &mut resources.media._file_pin,
+                    observer,
+                },
+                resources.media.entry.bytes,
+                resources.identity.manifest(),
+                &resources.media.entry.path,
+                Some(cancel),
+            )?
+        } else {
+            hertz_wallpaper::model_binary::inspect_glb_resource_content_with_cancel(
+                &mut resources.media._file_pin,
+                resources.media.entry.bytes,
+                resources.identity.manifest(),
+                &resources.media.entry.path,
+                Some(cancel),
+            )?
+        };
+        #[cfg(not(test))]
+        let checked = hertz_wallpaper::model_binary::inspect_glb_resource_content_with_cancel(
+            &mut resources.media._file_pin,
+            resources.media.entry.bytes,
+            resources.identity.manifest(),
+            &resources.media.entry.path,
+            Some(cancel),
+        )?;
+        if checked.bytes() != resources.media.entry.bytes
+            || checked.source_path() != resources.media.entry.path
+            || !canonical_sha_matches(checked.sha256(), &resources.media.entry.sha256)
+        {
+            return Err(hertz_wallpaper::PackageError::new(
+                "hash_mismatch",
+                "canonical model inspection tuple differs",
+            ));
+        }
+        Ok(checked)
+    }
+
+    pub(crate) fn retained_source_charge(&self) -> u64 {
+        self.0
+            .retained
+            .as_ref()
+            .expect("live source reservation")
+            .asset_requested_bytes()
+    }
     pub(crate) fn reference(&self) -> &AssetRef {
         &self.0.resources.as_ref().expect("live source").reference
     }
@@ -133,6 +230,15 @@ impl AssetStore {
         reference: &AssetRef,
         preparation: &Reservation,
     ) -> Result<SourceFactoryHeapBounds> {
+        self.model_source_factory_bounds_with_controls(reference, preparation, 0)
+    }
+
+    fn model_source_factory_bounds_with_controls(
+        &self,
+        reference: &AssetRef,
+        preparation: &Reservation,
+        model_controls: u64,
+    ) -> Result<SourceFactoryHeapBounds> {
         canonical_root(self._root_owner.root())?;
         let root_bytes = self._root_owner.root().as_os_str().as_encoded_bytes().len();
         // "\\packages\\" 10 + hash 64 + "\\files\\" 7 + canonical path 180.
@@ -182,6 +288,7 @@ impl AssetStore {
         // Reservation/Resources inline bodies already live in Inner's Arc.
         let tickets = 3 * (128 + 64);
         let controls = sum(&[
+            model_controls,
             live_base,
             path,
             directories,
@@ -212,9 +319,26 @@ impl AssetStore {
         preparation: &Reservation,
         cancel: &AtomicBool,
     ) -> Result<CanonicalModelSource> {
+        self.pin_canonical_model_source_with_controls(reference, probe, preparation, cancel, 0)
+    }
+
+    /// The private native input route explicitly charges its additional
+    /// controls in Wc and source R before any model query/grant can fail.
+    pub(super) fn pin_canonical_model_source_with_controls(
+        &self,
+        reference: &AssetRef,
+        probe: &ProbeClient,
+        preparation: &Reservation,
+        cancel: &AtomicBool,
+        model_controls: u64,
+    ) -> Result<CanonicalModelSource> {
         reference.validate()?;
         source_pin_cancelled(cancel)?;
-        let bounds = self.model_source_factory_bounds(reference, preparation)?;
+        let bounds = if model_controls == 0 {
+            self.model_source_factory_bounds(reference, preparation)?
+        } else {
+            self.model_source_factory_bounds_with_controls(reference, preparation, model_controls)?
+        };
         let workspace =
             probe.job_memory(preparation, "model-source-opening", bounds.workspace, 0)?;
         // This complete inner scope drops all partial path/File/identity owners
@@ -365,6 +489,27 @@ impl AssetStore {
         workspace.finish();
         outcome
     }
+}
+
+fn canonical_sha_matches(hash: &[u8; 32], text: &str) -> bool {
+    let mut decoded = [0u8; 32];
+    if text.len() != 64 {
+        return false;
+    }
+    fn nibble(byte: u8) -> Option<u8> {
+        match byte {
+            b'0'..=b'9' => Some(byte - b'0'),
+            b'a'..=b'f' => Some(byte - b'a' + 10),
+            _ => None,
+        }
+    }
+    for (slot, pair) in decoded.iter_mut().zip(text.as_bytes().as_chunks::<2>().0) {
+        let (Some(hi), Some(lo)) = (nibble(pair[0]), nibble(pair[1])) else {
+            return false;
+        };
+        *slot = hi * 16 + lo;
+    }
+    hash == &decoded
 }
 
 fn reset_path(path: &mut PathBuf, root: &Path, capacity: usize) -> Result<()> {

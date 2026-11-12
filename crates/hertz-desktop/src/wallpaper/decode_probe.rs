@@ -105,6 +105,10 @@ impl Reservation {
         .ok()
     }
 
+    pub(crate) fn asset_requested_bytes(&self) -> u64 {
+        self.request.asset_cpu_bytes
+    }
+
     #[cfg(test)]
     pub(crate) fn identity_for_test(&self) -> (&str, u64, &str) {
         (
@@ -543,7 +547,11 @@ impl ProbeClient {
             || preparation.request.task_id != "prepare"
             || !matches!(
                 task,
-                "model-source-opening" | "model-identity" | "model-source"
+                "model-source-opening"
+                    | "model-identity"
+                    | "model-source"
+                    | "model-inspection"
+                    | "model-input"
             )
         {
             return Err(JobError::invalid_input(
