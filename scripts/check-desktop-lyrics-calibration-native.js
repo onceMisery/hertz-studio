@@ -60,8 +60,18 @@ function wav() {
 }
 async function inlineSettings() {
   await mainPage.evaluate(() => window.dispatchEvent(new Event('hertz-open-desktop-lyrics-settings')));
+  await mainPage.locator('#desktop-lyrics-dialog').waitFor({ state: 'visible' });
   await mainPage.locator('#desktop-lyrics-settings').waitFor({ state: 'visible' });
   await mainPage.waitForFunction(() => !document.getElementById('dls-controls').disabled && !document.getElementById('dls-refresh').disabled);
+}
+// 歌词设置现在是模态弹窗：回到设置页的其它控件前必须显式收起它，
+// 否则背景处于 inert 状态，后面的点击会被浏览器拦掉。
+async function closeInlineSettings() {
+  const dialog = mainPage.locator('#desktop-lyrics-dialog');
+  if (await dialog.isVisible()) await dialog.locator('form button').click();
+  await dialog.waitFor({ state: 'hidden' });
+  // 校准授权已归到独立的「桌面」分类；弹窗打开时停在「歌词」分类。
+  await mainPage.locator('#view-settings .hz-settings-nav [data-category="desktop"]').click();
 }
 async function closePlayerViaKeyboard() {
   // The calibration control is in the original tools drawer. Escape first
@@ -163,6 +173,7 @@ ConvertTo-Json -Compress -InputObject ([CalibrationWindows]::Read($TaskPid,$Acti
   evidence.optionsInput = lyricsInput('options');
   await until(() => lyricsInput().calibration.some(button => button.name === '在播放器校准' && !button.enabled), 'actual disabled native button');
   mark('Default consent closed; real native desktop button disabled');
+  await closeInlineSettings();
   // Consent remains a real explicit action in the original full-player UI.
   await mainPage.locator('#desktop-calibration-consent').check();
   await until(async () => (await api('/v1/desktop/calibration-authorization')).authorized, 'consent persisted');
@@ -185,6 +196,7 @@ ConvertTo-Json -Compress -InputObject ([CalibrationWindows]::Read($TaskPid,$Acti
   mark('User action on original per-track control saves through existing offset owner');
   await closePlayerViaKeyboard();
   await inlineSettings();
+  await closeInlineSettings();
   await mainPage.locator('#desktop-calibration-consent').uncheck();
   await until(async () => !(await api('/v1/desktop/calibration-authorization')).authorized, 'consent revoked');
   await until(() => lyricsInput().calibration.some(button => !button.enabled), 'actual native capability revoked');

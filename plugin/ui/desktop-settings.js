@@ -147,7 +147,7 @@
 
   function focus() {
     if (!refs) return;
-    if (window.HertzSkin) window.HertzSkin.selectSettings('lyrics');
+    if (window.HertzSkin) window.HertzSkin.selectSettings('desktop');
     refs.root.scrollIntoView({ block: 'nearest' });
     refs.root.focus({ preventScroll: true });
   }

@@ -82,14 +82,18 @@ async function start() {
   page.setDefaultTimeout(18000);
   page.on('pageerror', error => errors.push(error.message));
   await page.waitForFunction(() => !!window.__hertzWindowHost && window.HertzDesktopLyricsSettings && document.getElementById('conn').textContent === '服务已连接', null, { timeout: 45000 });
+  if (process.env.HERTZ_SOURCE_UI) {
+    await require('./ui-source-assets').routeSourceAssets(page, { base: 'http://127.0.0.1:' + discovery.port, dataDir: data });
+    await page.reload();
+    await page.waitForFunction(() => !!window.__hertzWindowHost && window.HertzDesktopLyricsSettings && document.getElementById('conn').textContent === '服务已连接');
+  }
   assert.equal((await api('/v1/health')).backend, 'null');
 }
 async function openInline() {
   await page.evaluate(() => window.dispatchEvent(new Event('hertz-open-desktop-lyrics-settings')));
   await page.locator('#desktop-lyrics-settings').waitFor({ state: 'visible' });
   await page.waitForFunction(() => !document.getElementById('dls-controls').disabled && !document.getElementById('dls-refresh').disabled);
-  await page.waitForFunction(() => document.querySelector('#desktop-lyrics-settings > legend').getBoundingClientRect().top
-    >= document.querySelector('.hz-settings-nav').getBoundingClientRect().bottom);
+  assert.equal(await page.locator('#desktop-lyrics-dialog').evaluate(node => node.matches(':modal')), true);
 }
 async function settle() { await page.waitForFunction(() => !document.getElementById('dls-refresh').disabled); }
 async function shutdown() {
@@ -122,7 +126,7 @@ async function main() {
     mark('Native PE uses GUI subsystem; launching from Explorer cannot allocate a console');
   }
   await start();
-  await page.evaluate(() => { HertzShell.navigate('settings'); HertzSkin.selectSettings('lyrics'); });
+  await page.evaluate(() => { HertzShell.navigate('settings'); HertzSkin.selectSettings('desktop'); });
   await page.locator('#set-wallpaper-settings').click();
   await page.locator('#wallpaper-settings-workspace').waitFor({ state: 'visible', timeout: 12000 });
   editor = await until(() => browser.contexts().flatMap(c => c.pages()).find(p => p.url().includes('/settings.html')), 'embedded settings WebView');
@@ -143,8 +147,10 @@ async function main() {
   const settingsWindow = ownedWindows.find(w => w.Title === '桌面歌词与壁纸' && w.Child);
   assert.equal(settingsWindow.Parent, mainWindow.Handle, 'Editor HWND belongs to the main player');
   assert.equal(settingsWindow.Visible, true);
-  const viewport = await page.evaluate(() => { const rect = document.getElementById('column').getBoundingClientRect(); return { bottom: Math.round(rect.bottom * devicePixelRatio) }; });
-  assert.ok(settingsWindow.Bounds.Bottom <= mainWindow.Client.Top + viewport.bottom, 'Editor is clipped above the main player controls');
+  const viewport = await page.evaluate(() => { const rect = document.getElementById('wallpaper-settings-surface').getBoundingClientRect(); return { bottom: Math.round(rect.bottom * devicePixelRatio), width: rect.width, viewport: innerWidth }; });
+  assert.ok(settingsWindow.Bounds.Bottom <= mainWindow.Client.Top + viewport.bottom, 'Editor stays inside the modal surface');
+  assert.ok(viewport.width > Math.min(1500, viewport.viewport * 0.85), 'Modal uses the window width, independently of the sidebar');
+  assert.equal(await page.locator('#wallpaper-settings-workspace').evaluate(node => node.matches(':modal')), true);
   await editor.screenshot({ path: path.join(output, 'embedded-editor.png') });
   await page.screenshot({ path: path.join(output, 'main-workspace.png') });
   mark('Player wallpaper entry mounts the complete existing editor without a top-level settings window');
@@ -165,6 +171,15 @@ async function main() {
   await editor.locator('#discard').click();
   assert.equal(await editor.locator('#motion').inputValue(), oldMotion);
   mark('Cancel restores the saved wallpaper values');
+  await editor.locator('#motion').fill('0.5'); await editor.locator('#motion').dispatchEvent('change');
+  await page.locator('#wallpaper-settings-workspace form button').click();
+  await until(() => !windows().some(w => w.Title === '桌面歌词与壁纸' && w.Visible), 'collapsed modal hides its native child');
+  assert.equal(await page.locator('#set-wallpaper-settings').evaluate(node => node === document.activeElement), true);
+  await page.locator('#set-wallpaper-settings').click();
+  await until(() => windows().some(w => w.Title === '桌面歌词与壁纸' && w.Visible), 'reopened modal restores the native editor');
+  assert.equal(await editor.locator('#motion').inputValue(), '0.5');
+  await editor.locator('#discard').click();
+  mark('Collapsing the modal hides its native child, restores focus and retains the draft on reopening');
   await editor.locator('#motion').fill('0.4'); await editor.locator('#motion').dispatchEvent('change');
   await editor.locator('#apply').click();
   await until(async () => /设置已保存/.test(await editor.locator('#status').innerText()), 'confirmed save');

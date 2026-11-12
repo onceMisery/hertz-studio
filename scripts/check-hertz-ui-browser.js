@@ -183,7 +183,11 @@ async function swipe(page, from, to, cancel = false) {
     await page.locator('.hz-queue-toggle').click(); await page.locator('.hz-queue-row').first().waitFor();
     assert.equal(await page.locator('.hz-queue-row').count(), 8); await capture('hertz-desktop-queue');
     await page.locator('.hz-queue-head .hz-icon').click();
-    assert.equal(await page.locator('#rail > .rail-item').count(), 3, 'Primary rail matches the prototype');
+    assert.deepEqual(await page.locator('#rail > .rail-item').evaluateAll(nodes => nodes.map(node => node.dataset.view)),
+      ['home', 'library', 'online', 'playlists', 'settings'], 'Online and playlists remain in the primary navigation');
+    assert.equal(await page.locator('#rail > [data-view="online"]').isVisible(), true);
+    assert.equal(await page.locator('#rail > [data-view="playlists"]').isVisible(), true);
+    assert.equal(await page.locator('.hz-rail-playlists .hz-nav-caption').count(), 0);
     await page.locator('.hz-extra-nav > summary').click();
     await page.locator('#rail [data-view="daily"]').click();
     await page.waitForFunction(() => HertzShell.activeView() === 'daily');
@@ -264,17 +268,33 @@ async function swipe(page, from, to, cancel = false) {
     pass('EQ uses original settings and restores its DOM when tools close');
     await page.locator('#np-close').click();
     await navigate('settings'); await capture('hertz-desktop-settings');
-    for (const cat of ['appearance', 'playback', 'lyrics', 'connection', 'tools']) {
+    for (const cat of ['appearance', 'playback', 'lyrics', 'desktop', 'connection', 'tools']) {
       await page.locator('.hz-settings-nav [data-category="' + cat + '"]').click();
       assert.ok(await page.locator('#view-settings > .set-group:not([hidden])').count());
     }
+    await page.locator('.hz-settings-nav [data-category="lyrics"]').click();
+    assert.equal(await page.locator('#set-wallpaper-row').isVisible(), false);
+    assert.equal(await page.locator('#set-desktop-lyrics-open').isVisible(), true);
+    assert.equal(await page.locator('#desktop-lyrics-dialog').isVisible(), false);
+    await page.locator('.hz-settings-nav [data-category="desktop"]').click();
+    assert.equal(await page.locator('#set-wallpaper-row').isVisible(), true);
+    assert.equal(await page.locator('#set-lyric-offset-value').isVisible(), false);
+    // 弹窗开着时离开设置页：#view-settings 被 hidden 后弹窗必须跟着收起。
+    // 回归点：曾监听 nav:changed，但视图切换根本不派发它（只在导航可见性设置变化时派发）。
+    assert.ok(await page.evaluate(() => !!window.HertzDesktopLyricsSettings));
+    await page.evaluate(() => window.HertzDesktopLyricsSettings.open());
+    await page.locator('#desktop-lyrics-dialog').waitFor({ state: 'visible' });
+    await page.evaluate(() => window.HertzShell.navigate('home'));
+    await page.locator('#desktop-lyrics-dialog').waitFor({ state: 'hidden' });
+    await navigate('settings');
+    pass('Leaving the settings view closes the lyrics dialog');
     await page.locator('.hz-settings-nav [data-category="appearance"]').click(); await page.locator('#hz-theme-light').click();
     await page.waitForFunction(() => document.documentElement.dataset.theme === 'hertz-light');
     await capture('hertz-desktop-settings-light');
     await navigate('home'); await capture('hertz-desktop-home-light');
     await checkScroll('#column', async () => { await page.mouse.move(960, 490); await page.mouse.wheel(0, 380); });
     await page.evaluate(() => document.getElementById('column').scrollTop = 0);
-    pass('All five settings categories and prototype light theme work');
+    pass('Six settings categories separate desktop from lyrics; light theme works');
     for (const [width, height, label] of [[1024, 768, 'tablet'], [390, 844, 'mobile'], [320, 740, 'small-mobile']]) {
       await page.setViewportSize({ width, height }); await navigate('home'); await capture('hertz-' + label + '-home-light');
       await page.evaluate(() => window.Theme.apply('hertz-dark'));
@@ -347,7 +367,12 @@ async function swipe(page, from, to, cancel = false) {
         await checkScroll('#column', () => swipe(page, [width / 2, 510], [width / 2, 330]));
         pass(label + ' native sidebar swipes, focus, player boundaries, batch touch controls and single scroll owner');
         await page.getByRole('button', { name: '全部功能', exact: true }).click();
-        assert.ok(await page.locator('.hz-menu-tools .hz-menu-entry').count() >= 7);
+        const toolLabels = await page.locator('.hz-menu-tools .hz-menu-entry').allTextContents();
+        // 「登录音源」在 index.html 的 edition:full 块里，默认构建会被剔除，
+        // 所以工具项数量随版本变化（6 / 7）。按必备工具校验，别钉死总数。
+        for (const label of ['三维空间', '主题与配色', '创意工坊', '舞台控制', '最小化为胶囊', '沉浸声场']) {
+          assert.ok(toolLabels.some(text => text.includes(label)), label + ' 仍在全部功能菜单');
+        }
         await capture('hertz-' + label + '-more');
         await page.getByRole('button', { name: '关闭全部功能', exact: true }).click();
         await page.locator('.hz-mobile-tab[data-view="home"]').click();

@@ -5693,7 +5693,7 @@ function enterSettingsView(ctx) {
 }
 function refreshInlineDesktopLyrics() {
   const group = $('desktop-lyrics-settings');
-  if (state.view === 'settings' && group && !group.hidden && window.HertzDesktopLyricsSettings) {
+  if (state.view === 'settings' && group && group.getClientRects().length && window.HertzDesktopLyricsSettings) {
     window.HertzDesktopLyricsSettings.refresh();
   }
 }
@@ -5706,8 +5706,7 @@ function openInlineDesktopLyrics() {
   if (window.hertzHost && window.hertzHost.isDbx) {
     if (window.HertzDesktopSettings) window.HertzDesktopSettings.focus();
   } else if (window.HertzDesktopLyricsSettings) {
-    window.HertzDesktopLyricsSettings.refresh();
-    requestAnimationFrame(() => window.HertzDesktopLyricsSettings.focus());
+    window.HertzDesktopLyricsSettings.open();
   }
 }
 // 在线歌单可能在歌单视图没渲染期间到达（登录、刷新），进入时补一次同步。
@@ -9946,7 +9945,7 @@ async function startApp() {
     button.onclick = () => {
       if (window.hertzHost && window.hertzHost.isDbx) {
         setView('settings');
-        if (window.HertzSkin) window.HertzSkin.selectSettings('lyrics');
+        if (window.HertzSkin) window.HertzSkin.selectSettings('desktop');
         // 若已打开则显式重新检测；入口已发出的同次检测会被本地合并。
         if (window.HertzDesktopSettings) window.HertzDesktopSettings.onSettingsEnter();
         // 分类显隐完成后聚焦歌词组里的桌面区。

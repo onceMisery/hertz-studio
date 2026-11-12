@@ -1,5 +1,22 @@
 /* SPDX-License-Identifier: MIT */
-/* Inline desktop lyrics editor. The existing native inputs remain state owners. */
+/* The dialog presents the existing editor without duplicating its draft. */
+#desktop-lyrics-dialog { box-sizing: border-box; width: min(1200px, calc(100vw - 48px)); height: min(900px, calc(100dvh - 48px)); max-width: none; max-height: none; padding: 0; border: 1px solid var(--line); border-radius: 14px; color: var(--text); background: var(--panel-solid); overflow: hidden; overscroll-behavior: contain; }
+#desktop-lyrics-dialog[open] { display: flex; flex-direction: column; }
+#desktop-lyrics-dialog::backdrop { background: #0009; overflow: hidden; overscroll-behavior: contain; }
+.dls-dialog-header { display: flex; justify-content: space-between; align-items: center; gap: 20px; flex-shrink: 0; padding: 20px 28px; border-bottom: 1px solid var(--line); }
+.dls-dialog-header h2 { margin: 0; font-size: 20px; font-weight: 600; }
+.dls-dialog-header p { margin: 6px 0 0; color: var(--muted); font-size: 13px; }
+.dls-dialog-header .btn { min-height: 44px; }
+.dls-dialog-body { flex: 1; min-height: 0; padding: 0 28px; overflow: auto; overscroll-behavior: contain; }
+#desktop-lyrics-dialog #desktop-lyrics-settings { margin: 0; border: 0; padding: 20px 0 0; }
+#desktop-lyrics-dialog #desktop-lyrics-settings > legend { display: none; }
+#desktop-lyrics-dialog .dls-preview-column { top: 20px; }
+#desktop-lyrics-dialog .dls-footer { position: sticky; bottom: 0; margin-top: 24px; padding: 16px 0; background: var(--panel-solid); z-index: 1; }
+@media (max-width: 767px) {
+  #desktop-lyrics-dialog { width: 100%; height: 100dvh; margin: 0; border: 0; border-radius: 0; padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom); }
+  .dls-dialog-header { padding: 16px 20px; }
+  .dls-dialog-body { padding-inline: 20px; }
+}
 #desktop-lyrics-settings { min-width: 0; margin-inline: 0; scroll-margin-top: 72px; }
 #desktop-lyrics-settings > legend { padding: 0; float: left; width: 100%; margin-bottom: var(--sp-5); }
 #desktop-lyrics-settings > legend + * { clear: both; }

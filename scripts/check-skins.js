@@ -452,6 +452,28 @@ function checkChaoxiThemes() {
 }
 
 
+function checkPrimaryNavigation() {
+  section('一级导航：在线 / 歌单常驻，侧栏两段文案只删文本');
+  const js = cleanJs(HERTZ_JS);
+  const primary = js.match(/var PRIMARY_RAIL_VIEWS = \[([^\]]+)\]/);
+  ok(!!primary, '常驻入口名单存在');
+  if (primary) {
+    eq(primary[1].replace(/['"\s]/g, '').split(',').join('|'),
+      'home|library|online|playlists|settings', '常驻入口含在线与歌单');
+  }
+  const mount = js.slice(js.indexOf('function mount()'), js.indexOf('function unmount()'));
+  const sync = js.slice(js.indexOf('function syncNavigation()'), js.indexOf('function scheduleSync()'));
+  ok(mount.length > 0 && /PRIMARY_RAIL_VIEWS\.includes/.test(mount), '挂载时按同一名单保留一级入口');
+  // 回归点：syncNavigation 曾在每次同步里用旧名单把入口重新搬进「更多功能」，
+  // 页面零报错、只是两个入口又消失，浏览器之外很难发现。
+  ok(sync.length > 0 && /PRIMARY_RAIL_VIEWS\.includes/.test(sync), '同步时按同一名单保留一级入口');
+  ok(!/\['home', 'library', 'settings'\]/.test(js), '不存在把在线/歌单收回更多菜单的旧名单');
+  ok(!/make\('p', 'hz-nav-caption', playlistBlock, '我的歌单'\)/.test(js), '「我的歌单」标题文案已移除');
+  ok(!/收藏喜欢的旋律/.test(js), '「收藏喜欢的旋律」空态文案已移除');
+  ok(/setAttribute\('aria-label', '我的歌单'\)/.test(js), '歌单区仍保留可访问的导航容器');
+  ok(/navigate\('playlists'\)/.test(js), '歌单跳转入口仍在');
+}
+
 checkCatalogAndMigration();
 checkExtensions();
 checkLifecycleAndHost();
@@ -460,5 +482,6 @@ checkResponsiveSurfaces();
 checkCoverWallGeometry();
 checkLanFavoriteSourceDispatch();
 checkChaoxiThemes();
+checkPrimaryNavigation();
 console.log('\n界面布局契约检查：'+(checks-failures)+'/'+checks+(failures?' 通过，'+failures+' 项失败':' 全部通过'));
 process.exitCode=failures?1:0;

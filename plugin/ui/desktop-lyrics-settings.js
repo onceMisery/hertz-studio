@@ -3,7 +3,8 @@
 (function () {
   'use strict';
 
-  var refs = null, transport = null, owner = null;
+  var refs = null, transport = null, owner = null, dialog = null;
+  var viewRoot = null, viewObserver = null;
   var latest = null, baseline = null, draft = null, baseRevision = null;
   var pending = '', flight = null, message = '', failed = false, conflict = false;
   var invalid = new Map(), heartbeat = 0, mayOwnPosition = false, cancelOnLeave = false, cancellationPending = false;
@@ -25,7 +26,7 @@
   var ownsPosition = function () { return !!(latest && latest.positionEditing && latest.positionOwned); };
   var visible = function () {
     return refs && !document.hidden && refs.root.isConnected && !refs.root.closest('[hidden]')
-      && getComputedStyle(refs.root).display !== 'none';
+      && refs.root.getClientRects().length > 0;
   };
   var textError = function (error) { return error && error.message || '没有收到可确认的结果，请重新读取设置。'; };
 
@@ -327,12 +328,41 @@
     refs.root.focus({ preventScroll: true });
   }
 
+  function open() {
+    if (!dialog || isDbx()) return;
+    if (!dialog.open) dialog.showModal();
+    void refresh(false);
+  }
+
   function init(api) {
     if (refs) return;
     var root = document.getElementById('desktop-lyrics-settings');
     if (!root) return;
     if (isDbx()) { root.hidden = true; root.dataset.hzAvailable = 'false'; return; }
     transport = api; owner = newOwner();
+    dialog = document.createElement('dialog');
+    dialog.id = 'desktop-lyrics-dialog';
+    dialog.setAttribute('aria-labelledby', 'dls-dialog-title');
+    dialog.innerHTML = '<header class="dls-dialog-header"><div><h2 id="dls-dialog-title">桌面歌词</h2><p>调整样式与布局，应用后生效</p></div>'
+      + '<form method="dialog"><button type="submit" class="btn" autofocus>关闭</button></form></header>'
+      + '<div class="dls-dialog-body"></div>';
+    root.before(dialog);
+    dialog.querySelector('.dls-dialog-body').appendChild(root);
+    document.body.appendChild(dialog);
+    dialog.addEventListener('close', onVisibility);
+    // 点遮罩关闭：原生 dialog 的 backdrop 点击会以 dialog 自身为事件目标。
+    dialog.addEventListener('click', function (event) { if (event.target === dialog) dialog.close(); });
+    // 视图切换不派发 nav:changed（它只表示导航可见性设置变了）。离开设置页时
+    // #view-settings 会 hidden，观察它才能可靠收起弹窗。
+    viewRoot = document.getElementById('view-settings');
+    function closeIfLeftSettings() {
+      if (dialog.open && window.HertzShell && window.HertzShell.activeView() !== 'settings') dialog.close();
+    }
+    document.addEventListener('nav:changed', closeIfLeftSettings);
+    if (viewRoot) {
+      viewObserver = new MutationObserver(closeIfLeftSettings);
+      viewObserver.observe(viewRoot, { attributes: true, attributeFilter: ['hidden'] });
+    }
     var toggle = document.createElement('label');
     toggle.className = 'dls-toggle'; toggle.htmlFor = 'dls-show-vocals';
     var copy = document.createElement('span'); copy.textContent = '显示多人声';
@@ -363,8 +393,7 @@
     document.addEventListener('visibilitychange', onVisibility);
     var observer = new MutationObserver(onVisibility);
     observer.observe(root, { attributes: true, attributeFilter: ['hidden', 'class', 'style'] });
-    var settings = document.getElementById('view-settings');
-    if (settings) observer.observe(settings, { attributes: true, attributeFilter: ['hidden', 'class', 'style'] });
+    if (viewRoot) observer.observe(viewRoot, { attributes: true, attributeFilter: ['hidden', 'class', 'style'] });
     window.addEventListener('pagehide', function () {
       stopHeartbeat(); cancelOnLeave = true;
       if (mayOwnPosition && pending !== 'done') {
@@ -375,5 +404,5 @@
     render(); // Registration only: no desktop read, launch, mutation or timer.
   }
 
-  window.HertzDesktopLyricsSettings = Object.freeze({ init: init, refresh: refresh, focus: focus });
+  window.HertzDesktopLyricsSettings = Object.freeze({ init: init, refresh: refresh, focus: focus, open: open });
 })();

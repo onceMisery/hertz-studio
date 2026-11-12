@@ -83,10 +83,10 @@ async function start() {
 }
 async function openInline() {
   await page.evaluate(() => window.dispatchEvent(new Event('hertz-open-desktop-lyrics-settings')));
+  await page.locator('#desktop-lyrics-dialog').waitFor({ state: 'visible' });
   await page.locator('#desktop-lyrics-settings').waitFor({ state: 'visible' });
   await page.waitForFunction(() => !document.getElementById('dls-controls').disabled && !document.getElementById('dls-refresh').disabled);
-  await page.waitForFunction(() => document.querySelector('#desktop-lyrics-settings > legend').getBoundingClientRect().top
-    >= document.querySelector('.hz-settings-nav').getBoundingClientRect().bottom);
+  assert.equal(await page.locator('#desktop-lyrics-dialog').evaluate(node => node.matches(':modal')), true);
 }
 async function settle() { await page.waitForFunction(() => !document.getElementById('dls-refresh').disabled); }
 async function shutdown() {

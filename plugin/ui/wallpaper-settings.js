@@ -7,7 +7,11 @@
   var activeTab = 'wallpaper';
   var starting = false;
   var quitBlocked = false;
+  var viewObserver = null;
   function host() { return window.__hertzWindowHost; }
+  function show() {
+    if (!root.open) root.showModal();
+  }
   function post(extra) {
     if (host() && window.ipc) window.ipc.postMessage(JSON.stringify(Object.assign({
       kind: 'wallpaper-editor', documentId: host().documentId
@@ -17,9 +21,10 @@
     scheduled = 0;
     if (!root || !requested || !mounted || !confirmed) return;
     var rect = surface.getBoundingClientRect(), scale = devicePixelRatio;
-    var visible = !root.closest('[hidden]') && getComputedStyle(root).display !== 'none'
+    var visible = root.open
       && !document.hidden && !host().presentationHidden && !quitBlocked
-      && !document.querySelector('dialog[open]') && rect.width > 0 && rect.height > 0;
+      && !Array.from(document.querySelectorAll('dialog[open]')).some(function (dialog) { return dialog !== root; })
+      && rect.width > 0 && rect.height > 0;
     if (!visible && last) {
       var hidden = JSON.parse(last); hidden.visible = false;
       var hiddenKey = JSON.stringify(hidden);
@@ -35,8 +40,6 @@
       if (style.overflowY !== 'visible') { top = Math.max(top, area.top); bottom = Math.min(bottom, area.bottom); }
       if (style.overflowX !== 'visible') { left = Math.max(left, area.left); right = Math.min(right, area.right); }
     }
-    var nav = document.querySelector('.hz-settings-nav');
-    if (nav) top = Math.max(top, nav.getBoundingClientRect().bottom);
     visible = visible && right - left > 100 && bottom - top > 160;
     if (!visible && last) { var previous = JSON.parse(last); previous.visible = false; previous.tab = activeTab;
       var previousKey = JSON.stringify(previous); if (previousKey !== last) { last = previousKey; post(previous); } return; }
@@ -56,14 +59,15 @@
   async function open(tab) {
     if (!root) return;
     if (!host()) {
-      root.hidden = false; root.dataset.state = 'error';
+      show();
+      root.dataset.state = 'error';
       notice.textContent = '请在 Hertz 桌面主程序内打开壁纸设置。'; return;
     }
     if (window.HertzShell) window.HertzShell.navigate('settings');
-    if (window.HertzSkin) window.HertzSkin.selectSettings('lyrics');
+    if (window.HertzSkin) window.HertzSkin.selectSettings('desktop');
     activeTab = tab || activeTab;
-    requested = true; root.hidden = false;
-    root.scrollIntoView({ block: 'start' });
+    requested = true;
+    show();
     if (mounted) { last = ''; schedule(); return; }
     if (starting) return;
     var ticket = ++attempt;
@@ -81,12 +85,30 @@
   function init(value) {
     if (root || window.hertzHost && window.hertzHost.isDbx) return;
     transport = value;
-    root = document.createElement('section'); root.id = 'wallpaper-settings-workspace'; root.hidden = true;
-    root.setAttribute('aria-label', '桌面壁纸设置');
-    root.innerHTML = '<div class="wallpaper-workspace-heading"><h3>桌面壁纸设置</h3><p>修改后点击应用保存；放弃修改可恢复已保存的设置。</p></div>'
+    root = document.createElement('dialog'); root.id = 'wallpaper-settings-workspace';
+    root.setAttribute('aria-labelledby', 'wallpaper-workspace-title');
+    root.innerHTML = '<header class="wallpaper-workspace-heading"><div><h2 id="wallpaper-workspace-title">桌面设置</h2><p>壁纸与运行设置 · 收起窗口保留本次草稿</p></div>'
+      + '<form method="dialog"><button type="submit" class="btn" autofocus>收起</button></form></header>'
       + '<div id="wallpaper-settings-surface"><div class="wallpaper-workspace-loading" aria-hidden="true"><span></span><span></span><span></span></div>'
       + '<p id="wallpaper-workspace-status" role="status" aria-live="polite"></p><button id="wallpaper-workspace-retry" class="btn" hidden>重新加载</button></div>';
-    document.getElementById('set-wallpaper-note').after(root);
+    document.body.appendChild(root);
+    root.addEventListener('close', function () {
+      if (!mounted) { requested = false; ++attempt; clearTimeout(loading); }
+      // Retain the native draft; hiding the placement stops its live preview.
+      schedule();
+    });
+    // 点遮罩关闭：原生 dialog 的 backdrop 点击会以 dialog 自身为事件目标。
+    root.addEventListener('click', function (event) { if (event.target === root) root.close(); });
+    // 视图切换（HertzShell.navigate）不派发 nav:changed —— 那个事件只表示
+    // 「导航可见性设置变了」。离开设置页时 #view-settings 会被置 hidden，
+    // 观察它才是收起弹窗的可靠信号；否则弹窗会盖在首页上，只剩一块空白。
+    function closeIfLeftSettings() {
+      if (root.open && window.HertzShell && window.HertzShell.activeView() !== 'settings') root.close();
+    }
+    document.addEventListener('nav:changed', closeIfLeftSettings);
+    var settingsView = document.getElementById('view-settings');
+    if (settingsView) viewObserver = new MutationObserver(closeIfLeftSettings);
+    if (viewObserver) viewObserver.observe(settingsView, { attributes: true, attributeFilter: ['hidden'] });
     surface = document.getElementById('wallpaper-settings-surface');
     notice = document.getElementById('wallpaper-workspace-status'); retry = document.getElementById('wallpaper-workspace-retry');
     retry.addEventListener('click', function () { void open(); });
@@ -100,8 +122,8 @@
         clearTimeout(loading); root.dataset.state = 'ready'; notice.textContent = ''; retry.hidden = true;
       } else if (value.kind === 'failed' && requested) { fail(value.error); }
       else if (value.kind === 'closed') {
-        clearTimeout(loading); requested = mounted = false; ++attempt; last = ''; root.hidden = true;
-        document.getElementById('set-wallpaper-settings').focus();
+        clearTimeout(loading); requested = mounted = false; ++attempt; last = '';
+        root.close();
       }
     });
     new ResizeObserver(schedule).observe(surface);

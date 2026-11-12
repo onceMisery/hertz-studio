@@ -168,7 +168,7 @@ async function checkStandalone(browser) {
       window.inlineLyricsEntries = [];
       window.closeNowPlaying = () => {};
       window.setView = name => inlineLyricsEntries.push(name);
-      window.HertzDesktopLyricsSettings = { init() {}, refresh() {}, focus() {} };
+      window.HertzDesktopLyricsSettings = { init() {}, refresh() {}, focus() {}, open() {} };
       // This slice checks legacy desktop actions; the full-app fixture above
       // exercises calibration startup and asserts its passive fixed-route calls.
       window.calibrationUi = { init() {} };
@@ -282,7 +282,7 @@ async function main() {
       await frame.locator(entry).click();
       await frame.waitForFunction(() => !document.getElementById('dbx-desktop-refresh').disabled);
       assert.equal(await count('v1/desktop/capabilities'), before + 1, skin + ' real settings opening detects exactly once');
-      const lyricNav = frame.locator('.hz-settings-nav [data-category="lyrics"]');
+      const lyricNav = frame.locator('.hz-settings-nav [data-category="desktop"]');
       await lyricNav.click();
       assert.equal(await frame.locator('#dbx-desktop-settings').isVisible(), true, skin + ' unified section visible');
       assert.equal(await count('v1/desktop/connect'), 0, 'opening settings never grants consent');

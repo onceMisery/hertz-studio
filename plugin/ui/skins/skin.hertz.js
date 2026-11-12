@@ -11,6 +11,8 @@
   var libraryTab = 'songs', libraryEpoch = 0, libraryController, libraryOffset = 0, libraryTotal = 0, libraryBusy = false;
   var libraryDetail = null, settingsTab = 'appearance', preferenceKey = 'vmusic.hertz.appearance.v1';
   var preferences = { intensity: 70, animated: true, wordSync: true };
+  // 常驻导航轨的入口；其余一律收进「更多功能」。挂载与每次同步共用同一份名单。
+  var PRIMARY_RAIL_VIEWS = ['home', 'library', 'online', 'playlists', 'settings'];
   var mobile = window.matchMedia('(max-width: 899px)');
   function id(value) { return document.getElementById(value); }
   function icon(name) { return `<svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-${name}"></use></svg>`; }
@@ -189,7 +191,8 @@
       entry.onclick = function () { if (mobile.matches) setSidebar(false, false); window.Skins.request('playlist-open', { id: item.id }); };
       refs.railPlaylists.appendChild(entry);
     });
-    if (!items.length) text('p', 'hz-rail-empty', failed ? '暂时无法读取歌单' : '收藏喜欢的旋律', refs.railPlaylists);
+    if (!items.length && failed) text('p', 'hz-rail-empty', '暂时无法读取歌单', refs.railPlaylists);
+    refs.railPlaylists.parentElement.hidden = !items.length && !failed;
     if (!items.length) { notice(parent, failed ? '歌单暂时无法读取' : '把喜欢的歌曲收进歌单，留给下次聆听', failed); return; }
     items.forEach(function (item, index) {
       var row = document.createElement('button'); row.type = 'button'; row.className = 'hz-playlist-entry';
@@ -317,13 +320,13 @@
     applyPreferences(false);
     refs.settingsNav = make('nav', 'hz-settings-nav', id('view-settings')); refs.settingsNav.setAttribute('role', 'tablist'); refs.settingsNav.setAttribute('aria-label', '设置分类');
     id('view-settings').querySelector('.col-head').after(refs.settingsNav);
-    [['appearance', '外观'], ['playback', '播放'], ['lyrics', '歌词'], ['connection', '连接'], ['tools', '工具']].forEach(function (entry) {
+    [['appearance', '外观'], ['playback', '播放'], ['lyrics', '歌词'], ['desktop', '桌面'], ['connection', '连接'], ['tools', '工具']].forEach(function (entry) {
       var b = button(refs.settingsNav, '', entry[1], '', function () { selectSettings(entry[0]); }); b.textContent = entry[1]; b.dataset.category = entry[0]; b.setAttribute('role', 'tab');
     });
-    refs.settingsGroups = Array.from(id('view-settings').children).filter(function (group) { return group.classList.contains('set-group'); });
+    refs.settingsGroups = Array.from(id('view-settings').children).filter(function (group) { return group.classList.contains('set-group') && group.id !== 'desktop-lyrics-settings'; });
     refs.settingsGroups.forEach(function (group) {
       var title = group.querySelector('.set-title').textContent, originalHidden = group.hidden;
-      group.dataset.hzCategory = /AI|远程|在线音源/.test(title) ? 'connection' : /歌词/.test(title) ? 'lyrics' : /音效|^播放$|在线缓存/.test(title) ? 'playback' : /备份|快捷键|开发者/.test(title) ? 'tools' : 'appearance';
+      group.dataset.hzCategory = group.id === 'desktop-settings-group' ? 'desktop' : /AI|远程|在线音源/.test(title) ? 'connection' : /歌词/.test(title) ? 'lyrics' : /音效|^播放$|在线缓存/.test(title) ? 'playback' : /备份|快捷键|开发者/.test(title) ? 'tools' : 'appearance';
       group.dataset.hzAvailable = String(!originalHidden && !(window.hertzHost && window.hertzHost.isDbx && ['overlay-group', 'video-export-group', 'desktop-lyrics-settings'].includes(group.id)));
       cleanup.push(function () { group.hidden = originalHidden; delete group.dataset.hzCategory; delete group.dataset.hzAvailable; });
     });
@@ -499,9 +502,10 @@
   function syncNavigation() {
     if (!mounted) return;
     var view = window.HertzShell.activeView(), entries = Array.from(id('rail').querySelectorAll('.rail-item[data-view]'));
-    // 每日推荐等入口在设置到手后才挂载，也归入同一展开菜单。
+    // 在线 / 歌单是一级入口，常驻导航轨；其余（含设置到手后才挂载的每日推荐）
+    // 归入同一展开菜单。两处名单必须一致，否则同步时会被重新收进「更多功能」。
     entries.forEach(function (entry) {
-      if (!['home', 'library', 'settings'].includes(entry.dataset.view) && entry.parentNode !== refs.extraEntries) layout.move(entry, refs.extraEntries);
+      if (!PRIMARY_RAIL_VIEWS.includes(entry.dataset.view) && entry.parentNode !== refs.extraEntries) layout.move(entry, refs.extraEntries);
     });
     document.body.dataset.hzView = view || 'home';
     refs.nav.querySelectorAll('[data-view]').forEach(function (b) {
@@ -597,12 +601,13 @@
     var mobileBrand = make('span', 'hz-mobile-brand', topbar, 'HertzStudio'); topbar.prepend(mobileBrand);
     var libraryEntry = rail.querySelector('[data-view="library"]'), settingsEntry = rail.querySelector('[data-view="settings"]');
     layout.move(settingsEntry, rail, libraryEntry.nextSibling);
+    ['online', 'playlists'].forEach(function (view) { layout.move(rail.querySelector('[data-view="' + view + '"]'), rail, settingsEntry); });
     var moreNavigation = make('details', 'hz-extra-nav', rail); rail.insertBefore(moreNavigation, settingsEntry.nextSibling);
     var extraSummary = make('summary', '', moreNavigation); extraSummary.innerHTML = icon('grid'); make('span', '', extraSummary, '更多功能');
     var extraEntries = make('div', 'hz-extra-nav-items', moreNavigation); refs.extraEntries = extraEntries;
-    Array.from(rail.querySelectorAll('.rail-item[data-view]')).filter(function (entry) { return !['home', 'library', 'settings'].includes(entry.dataset.view); }).forEach(function (entry) { layout.move(entry, extraEntries); });
+    Array.from(rail.querySelectorAll('.rail-item[data-view]')).filter(function (entry) { return !PRIMARY_RAIL_VIEWS.includes(entry.dataset.view); }).forEach(function (entry) { layout.move(entry, extraEntries); });
     var playlistBlock = make('div', 'hz-rail-playlists', rail); moreNavigation.after(playlistBlock);
-    make('p', 'hz-nav-caption', playlistBlock, '我的歌单'); refs.railPlaylists = make('nav', '', playlistBlock); refs.railPlaylists.setAttribute('aria-label', '我的歌单');
+    refs.railPlaylists = make('nav', '', playlistBlock); refs.railPlaylists.setAttribute('aria-label', '我的歌单');
     var modes = make('div', 'hz-listening-modes', rail); make('p', 'hz-nav-caption', modes, '聆听方式');
     var group = make('div', 'hz-segmented', modes);
     var daily = button(group, 'is-active', '日常聆听', '', function () { navigate('home'); }); daily.textContent = '日常';

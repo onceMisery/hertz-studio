@@ -35,7 +35,7 @@ async function main() {
   const html = `<!doctype html><html lang="zh-CN" data-skin="hertz"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">${css.map(file => `<link rel="stylesheet" href="/ui/${file}">`).join('')}
 <style>body{display:block;min-width:0;height:auto;padding:24px;overflow:auto}main{max-width:960px;margin:auto}.set-group{max-width:100%;min-width:0}@media(max-width:500px){body{padding:12px}}</style>
-</head><body>${sprite}<main>${fieldset}</main><script src="/ui/design/design-themes.js"></script><script src="/ui/themes.js"></script><script src="/ui/desktop-lyrics-settings.js"></script></body></html>`;
+</head><body>${sprite}<button id="open-lyrics" onclick="HertzDesktopLyricsSettings.open()">歌词样式与布局</button><main>${fieldset}</main><script src="/ui/design/design-themes.js"></script><script src="/ui/themes.js"></script><script src="/ui/desktop-lyrics-settings.js"></script></body></html>`;
   const server = http.createServer((request, response) => {
     if (request.url === '/') { response.setHeader('Content-Type', 'text/html; charset=utf-8'); response.end(html); return; }
     const file = path.resolve(ui, decodeURIComponent(request.url.replace(/^\/ui\//, '').split('?')[0]));
@@ -101,7 +101,8 @@ async function main() {
     await fixture();
     assert.deepEqual(await page.evaluate(() => test.calls), [], 'init must not start a desktop host');
     await page.evaluate(() => { delete test.lyrics.showVocals; });
-    await load(); await settle();
+    assert.equal(await page.locator('#desktop-lyrics-dialog').isVisible(), false);
+    await page.locator('#open-lyrics').click(); await settle();
     assert.equal((await calls('lyrics-settings')).length, 1);
     assert.equal(await page.locator('#dls-enabled').isChecked(), false);
     assert.equal(await page.locator('#dls-locked').isChecked(), true);
@@ -132,6 +133,15 @@ async function main() {
     assert.equal(await page.evaluate(() => test.revision), 10);
     assert.equal(await page.evaluate(() => test.lyrics.showVocals), false);
     mark('Draft changes preview locally; one guarded full-lyrics save preserves anchors and unrelated domains');
+
+    await page.locator('#dls-font-size').fill('44');
+    await page.keyboard.press('Escape');
+    assert.equal(await page.locator('#desktop-lyrics-dialog').isVisible(), false);
+    assert.equal(await page.locator('#open-lyrics').evaluate(node => node === document.activeElement), true);
+    await page.locator('#open-lyrics').click(); await settle();
+    assert.equal(await page.locator('#dls-font-size').inputValue(), '44', 'Reopening preserves the unsaved draft');
+    assert.equal(await page.evaluate(() => test.lyrics.fontSize), 38, 'Closing must not save the draft');
+    mark('Native dialog Escape returns focus and reopening retains the unsaved draft');
 
     await page.locator('#dls-font-size').fill('46');
     await page.evaluate(() => { test.failApply = true; });
@@ -189,15 +199,26 @@ async function main() {
 
     for (const theme of ['hertz-dark', 'hertz-light']) {
       await page.evaluate(value => Theme.apply(value), theme);
-      for (const width of [1120, 390]) {
+      for (const width of [1120, 390, 320]) {
         await page.setViewportSize({ width, height: 900 });
+        // 视口变化后布局在下一帧才稳定；连等两帧再量用户能感知的几何。
+        await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+        // 弹窗框架自身必须完整落在视口内；窄屏（H5）应为全屏形态。
+        const frame = await page.locator('#desktop-lyrics-dialog').evaluate(el => {
+          const r = el.getBoundingClientRect();
+          return { left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width,
+            viewport: innerWidth, viewportHeight: innerHeight, cssWidth: getComputedStyle(el).width };
+        });
         const geometry = await page.locator('#desktop-lyrics-settings').evaluate(el => {
           const bounds = el.getBoundingClientRect();
           return { scroll: el.scrollWidth, client: el.clientWidth, left: bounds.left, right: bounds.right, viewport: innerWidth,
             overflow: [...el.querySelectorAll('*')].filter(node => node.getBoundingClientRect().right > innerWidth + 1).map(node => node.id || node.className) };
         });
         assert.ok(geometry.scroll <= geometry.client + 1 && geometry.left >= 0 && geometry.right <= geometry.viewport + 1,
-          theme + ' ' + width + ' no horizontal overflow: ' + JSON.stringify(geometry));
+          theme + ' ' + width + ' no horizontal overflow: ' + JSON.stringify(geometry) + ' frame=' + JSON.stringify(frame));
+        assert.ok(frame.left >= -1 && frame.right <= frame.viewport + 1 && frame.top >= -1 && frame.bottom <= frame.viewportHeight + 1,
+          theme + ' ' + width + ' modal fits the viewport: ' + JSON.stringify(frame));
+        if (width < 768) assert.ok(frame.width >= frame.viewport - 1, theme + ' ' + width + ' H5 modal uses the full width');
         await page.locator('#dls-bilingual').focus();
         const before = await page.locator('#dls-bilingual').isChecked();
         await page.keyboard.press('Space');
@@ -207,7 +228,22 @@ async function main() {
         await page.screenshot({ path: path.join(output, theme + '-' + width + '.png'), fullPage: true });
       }
     }
-    mark('Dark/light 1120px and 390px settings retain keyboard operation without horizontal overflow');
+    mark('Dark/light at 1120 / 390 / 320px keep keyboard operation, a viewport-fitting modal and no horizontal overflow');
+    // H5 首屏直接打开（视口自始至终是窄屏），而非从桌面宽度缩过来。
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.evaluate(() => document.getElementById('desktop-lyrics-dialog').close());
+    await page.locator('#open-lyrics').click();
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    const mobile = await page.locator('#desktop-lyrics-dialog').evaluate(el => {
+      const r = el.getBoundingClientRect(), body = el.querySelector('.dls-dialog-body');
+      return { left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width,
+        viewport: innerWidth, viewportHeight: innerHeight, bodyScroll: body.scrollWidth, bodyClient: body.clientWidth };
+    });
+    assert.ok(mobile.left >= -1 && mobile.right <= mobile.viewport + 1 && mobile.top >= -1 && mobile.bottom <= mobile.viewportHeight + 1,
+      'H5 direct open fits the viewport: ' + JSON.stringify(mobile));
+    assert.ok(mobile.width >= mobile.viewport - 1, 'H5 direct open uses the full width');
+    assert.ok(mobile.bodyScroll <= mobile.bodyClient + 1, 'H5 direct open has no horizontal overflow: ' + JSON.stringify(mobile));
+    mark('H5 direct open fills the screen, keeps the body scrollable and has no horizontal overflow');
     assert.deepEqual(errors, []);
     fs.writeFileSync(path.join(output, 'report.json'), JSON.stringify({ passed: true, checks, errors, scope: 'Real production module and fieldset; controlled desktop transport, no native process.' }, null, 2));
     console.log('Desktop lyrics settings browser: ' + checks.length + ' groups; ' + output);
