@@ -32,7 +32,19 @@ use windows_sys::Win32::Storage::FileSystem::{
 const DIRECTORY_PINS: usize = 3 + (hertz_wallpaper::MAX_PATH_BYTES / 2 - 1);
 
 #[derive(Clone)]
-pub(crate) struct CanonicalModelSource(Arc<Inner>);
+pub(crate) struct CanonicalModelSource(Option<Arc<Inner>>);
+
+// Inline transfer of the already granted source ticket, with no resources or
+// read capability. The model's facts-ticket strings remain paid until this
+// guard retires last. No constructor or Clone escapes this module.
+pub(crate) struct SourceReleaseGuard(Option<Reservation>);
+impl Drop for SourceReleaseGuard {
+    fn drop(&mut self) {
+        if let Some(retained) = self.0.take() {
+            retained.finish();
+        }
+    }
+}
 
 struct Resources {
     reference: AssetRef,
@@ -50,14 +62,39 @@ impl Drop for Inner {
     fn drop(&mut self) {
         // Every File, whole canonical identity and directory pin actually exits
         // before this own token can be confirmed/forgotten.
+        drop(self.retire_resources());
+    }
+}
+
+impl Inner {
+    fn retire_resources(&mut self) -> SourceReleaseGuard {
         drop(self.resources.take());
-        if let Some(retained) = self.retained.take() {
-            retained.finish();
-        }
+        SourceReleaseGuard(self.retained.take())
+    }
+}
+
+impl Drop for CanonicalModelSource {
+    fn drop(&mut self) {
+        drop(self.take_release_guard());
     }
 }
 
 impl CanonicalModelSource {
+    fn inner(&self) -> &Inner {
+        self.0.as_ref().expect("live source outer")
+    }
+
+    fn take_release_guard(&mut self) -> Option<SourceReleaseGuard> {
+        self.0
+            .take()
+            .and_then(Arc::into_inner)
+            .map(|mut inner| inner.retire_resources())
+    }
+
+    pub(crate) fn retire_resources(mut self) -> Option<SourceReleaseGuard> {
+        self.take_release_guard()
+    }
+
     /// Fixed operation on the freshly unique canonical owner. No File or
     /// generic File callback escapes. The projection was seeked to zero by
     /// its original source factory, and the full original inspector hashes
@@ -87,7 +124,7 @@ impl CanonicalModelSource {
         cancel: &AtomicBool,
         #[cfg(test)] observer: Option<&mut dyn FnMut()>,
     ) -> hertz_wallpaper::Result<hertz_wallpaper::model_binary::CheckedGlbResource> {
-        let inner = Arc::get_mut(&mut self.0).ok_or_else(|| {
+        let inner = Arc::get_mut(self.0.as_mut().expect("live source outer")).ok_or_else(|| {
             hertz_wallpaper::PackageError::new(
                 "model_source_shared",
                 "model inspection requires a unique canonical source",
@@ -149,22 +186,33 @@ impl CanonicalModelSource {
     }
 
     pub(crate) fn retained_source_charge(&self) -> u64 {
-        self.0
+        self.inner()
             .retained
             .as_ref()
             .expect("live source reservation")
             .asset_requested_bytes()
     }
     pub(crate) fn reference(&self) -> &AssetRef {
-        &self.0.resources.as_ref().expect("live source").reference
+        &self
+            .inner()
+            .resources
+            .as_ref()
+            .expect("live source")
+            .reference
     }
 
     pub(crate) fn entry(&self) -> &hertz_wallpaper::VerifiedEntry {
-        &self.0.resources.as_ref().expect("live source").media.entry
+        &self
+            .inner()
+            .resources
+            .as_ref()
+            .expect("live source")
+            .media
+            .entry
     }
 
     pub(crate) fn manifest(&self) -> &hertz_wallpaper::manifest::Manifest {
-        self.0
+        self.inner()
             .resources
             .as_ref()
             .expect("live source")
@@ -174,7 +222,38 @@ impl CanonicalModelSource {
 
     #[cfg(test)]
     pub(crate) fn reservation_identity_for_test(&self) -> (&str, u64, &str) {
-        self.0.retained.as_ref().unwrap().identity_for_test()
+        self.inner().retained.as_ref().unwrap().identity_for_test()
+    }
+    #[cfg(test)]
+    pub(crate) fn release_allocations_for_test(&self) -> (u64, [(usize, usize, usize); 4]) {
+        let arc = self.0.as_ref().unwrap();
+        let (layout, offset) = Layout::new::<[std::sync::atomic::AtomicUsize; 2]>()
+            .extend(Layout::new::<Inner>())
+            .unwrap();
+        let resources = self.inner().resources.as_ref().unwrap();
+        let (token, caller) = self
+            .inner()
+            .retained
+            .as_ref()
+            .unwrap()
+            .release_allocations_for_test();
+        (
+            token,
+            [
+                (
+                    Arc::as_ptr(arc) as usize - offset,
+                    layout.pad_to_align().size(),
+                    layout.align(),
+                ),
+                (
+                    resources._directories.as_ptr() as usize,
+                    resources._directories.capacity() * std::mem::size_of::<File>(),
+                    std::mem::align_of::<File>(),
+                ),
+                caller[0],
+                caller[1],
+            ],
+        )
     }
 }
 
@@ -481,7 +560,7 @@ impl AssetStore {
                     _directories: directories,
                 });
                 source_pin_cancelled(cancel)?;
-                Ok(CanonicalModelSource(Arc::new(inner)))
+                Ok(CanonicalModelSource(Some(Arc::new(inner))))
             })();
             identity_workspace.finish();
             outcome

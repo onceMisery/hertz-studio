@@ -161,6 +161,70 @@ fn req(owner: OwnerKind, session: &str) -> BudgetRequest {
 }
 
 #[test]
+fn atomic_ordinary_retirement_validates_without_mutating_siblings_or_nonordinary_records() {
+    let budget = BudgetCoordinator::new();
+    let mut original = req(OwnerKind::Probe, "retire-session");
+    original.asset_cpu_bytes = 79;
+    let token = budget.grant(&original).unwrap();
+    let mut next = original.clone();
+    next.generation = 2;
+    let sibling = budget.grant(&next).unwrap();
+    let before = budget.planning_snapshot();
+    for (candidate, session, generation, error) in [
+        (u64::MAX, "retire-session", 1, LedgerError::UnknownToken),
+        (token, "wrong", 1, LedgerError::OwnerMismatch),
+        (token, "retire-session", 2, LedgerError::GenerationMismatch),
+    ] {
+        assert_eq!(
+            budget.retire_ordinary(candidate, session, generation),
+            Err(error)
+        );
+        assert_eq!(budget.planning_snapshot(), before);
+    }
+    let (result, sample) =
+        super::measure_requested_heap(|| budget.retire_ordinary(token, "retire-session", 1));
+    assert!(result.is_ok());
+    assert_eq!(
+        (sample.peak, sample.retained, sample.overflow),
+        (0, 0, false)
+    );
+    assert_eq!(budget.usage().asset_cpu_bytes, 79);
+    assert_eq!(budget.planning_snapshot().0, before.0 + 3);
+    budget.release(sibling, "retire-session", 2).unwrap();
+    let pending = budget.planning_snapshot().0;
+    budget
+        .retire_ordinary(sibling, "retire-session", 2)
+        .unwrap();
+    assert_eq!(budget.planning_snapshot().0, pending + 2);
+    let tombstone = budget.grant(&original).unwrap();
+    budget.confirm_exit(tombstone, "retire-session", 1).unwrap();
+    let released = budget.planning_snapshot().0;
+    budget
+        .retire_ordinary(tombstone, "retire-session", 1)
+        .unwrap();
+    assert_eq!(budget.planning_snapshot().0, released + 1);
+    let plan = super::SessionPlan::new(
+        req(OwnerKind::Desktop, "retire-session"),
+        vec![super::ResourcePlan {
+            id: "empty-resource".into(),
+            maximum: super::ResourceAmounts::default(),
+        }],
+    )
+    .unwrap();
+    let parent = budget.grant_session(&plan).unwrap();
+    let nonordinary = budget.planning_snapshot();
+    assert_eq!(
+        budget.retire_ordinary(parent, "retire-session", 1),
+        Err(LedgerError::ChildrenPending)
+    );
+    assert_eq!(budget.planning_snapshot(), nonordinary);
+    budget.release(parent, "retire-session", 1).unwrap();
+    budget.confirm_exit(parent, "retire-session", 1).unwrap();
+    assert!(budget.forget_released(parent, "retire-session", 1).unwrap());
+    assert_eq!(budget.record_count_for_test(), 0);
+}
+
+#[test]
 fn every_owner_rejects_invalid_identity_without_changing_the_ledger() {
     for owner in [
         OwnerKind::Probe,

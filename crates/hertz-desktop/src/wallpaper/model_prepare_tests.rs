@@ -9,6 +9,137 @@ use std::{
     time::Duration,
 };
 
+#[path = "native_release_tests.rs"]
+mod native_release;
+
+fn assert_complete_facts(
+    input: &ModelInput,
+    original: &hertz_wallpaper::model_binary::CheckedGlbResource,
+) {
+    use super::native_facts::NativeModelImage;
+    use hertz_wallpaper::model_structure::{ModelImage, ModelStructure};
+    let ((), sample) = budget::measure_requested_heap(|| {
+        let f = input.facts();
+        let s = f.structure();
+        // Destructure every original field without `..`: a new original fact
+        // forces this compatibility proof to be updated at compile time.
+        let ModelStructure {
+            buffer_views,
+            accessors,
+            meshes,
+            images,
+            animations,
+            skins,
+            skin_bindings,
+            skin_binding_pair_refs,
+            nodes,
+            scenes,
+            default_scene,
+            buffer_byte_length,
+            material_count,
+            texture_count,
+            sampler_count,
+            camera_count,
+            static_loader_fields,
+            node_morph_weights,
+            mesh_triangles_upper_bound,
+            instantiated_triangles_upper_bound,
+            binary_content_validated,
+        } = &original.resource().structure;
+        assert_eq!(s.buffer_views, buffer_views);
+        assert_eq!(s.accessors, accessors);
+        assert_eq!(s.meshes, meshes);
+        assert_eq!(s.animations, animations);
+        assert_eq!(s.skins, skins);
+        assert_eq!(s.skin_bindings, skin_bindings);
+        assert_eq!(s.skin_binding_pair_refs, *skin_binding_pair_refs);
+        assert_eq!(s.nodes, nodes);
+        assert_eq!(s.scenes, scenes);
+        assert_eq!(s.default_scene, *default_scene);
+        assert_eq!(s.buffer_byte_length, *buffer_byte_length);
+        assert_eq!(s.material_count, *material_count);
+        assert_eq!(s.texture_count, *texture_count);
+        assert_eq!(s.sampler_count, *sampler_count);
+        assert_eq!(s.camera_count, *camera_count);
+        assert_eq!(s.static_loader_fields, *static_loader_fields);
+        assert_eq!(s.node_morph_weights, node_morph_weights);
+        assert_eq!(s.mesh_triangles_upper_bound, *mesh_triangles_upper_bound);
+        assert_eq!(
+            s.instantiated_triangles_upper_bound,
+            *instantiated_triangles_upper_bound
+        );
+        assert_eq!(s.binary_content_validated, *binary_content_validated);
+        assert_eq!(s.images.len(), images.len());
+        for (native, pure) in s.images.clone().zip(images) {
+            match (native, pure) {
+                (
+                    NativeModelImage::Package {
+                        path,
+                        mime,
+                        bytes,
+                        sha256,
+                        references,
+                    },
+                    ModelImage::Package {
+                        path: p,
+                        mime: m,
+                        bytes: b,
+                        sha256: h,
+                        references: r,
+                    },
+                ) => {
+                    assert_eq!(path, p);
+                    assert_eq!(mime, m);
+                    assert_eq!(bytes, *b);
+                    assert_eq!(sha256, h);
+                    assert_eq!(references, r.as_ref());
+                }
+                (
+                    NativeModelImage::Embedded {
+                        buffer_view,
+                        range,
+                        mime,
+                    },
+                    ModelImage::Embedded {
+                        buffer_view: v,
+                        range: r,
+                        mime: m,
+                    },
+                ) => {
+                    assert_eq!(buffer_view, *v);
+                    assert_eq!(range, r);
+                    assert_eq!(mime, m);
+                }
+                _ => panic!("complete image variant changed"),
+            }
+        }
+        assert_eq!(s.images.clone().rev().count(), images.len());
+        assert_eq!(f.bytes(), original.bytes());
+        assert_eq!(f.sha256(), original.sha256());
+        assert_eq!(f.source_path(), original.source_path());
+        assert_eq!(f.binary(), original.resource().container.binary.as_ref());
+        assert_eq!(
+            f.json_bytes(),
+            original.resource().container.json.len() as u64
+        );
+        assert_eq!(f.checked_accessors(), original.checked_accessors());
+        assert_eq!(f.unique_layouts(), original.unique_layouts());
+        assert_eq!(f.checked_elements(), original.checked_elements());
+        assert_eq!(f.checked_components(), original.checked_components());
+        // Exhausted iterator failure paths and copied views allocate nothing.
+        let mut empty = s.images;
+        for _ in empty.by_ref() {}
+        assert!(empty.next().is_none());
+        assert!(empty.next_back().is_none());
+        let copy = f;
+        assert_eq!(copy.sha256(), f.sha256());
+    });
+    assert_eq!(
+        (sample.peak, sample.retained, sample.overflow),
+        (0, 0, false)
+    );
+}
+
 #[test]
 fn original_installed_rich_triangle_variant_hash_facts_and_last_outer_clone() {
     let fixture = installed_full_model_fixture("model-input-full", false);
@@ -54,7 +185,7 @@ fn original_installed_rich_triangle_variant_hash_facts_and_last_outer_clone() {
             path,
         )
         .unwrap();
-        assert_eq!(input.facts().structure(), &original.resource().structure);
+        assert_complete_facts(&input, &original);
         assert_eq!(input.facts().sha256(), original.sha256());
         assert_eq!(
             input.facts().binary(),
@@ -412,6 +543,13 @@ fn model_controls_actual_native_layout_and_unchanged_original_max_j_equation() {
         model.workspace_requested_bytes() + new.retained_source_charge()
     );
     println!("native inner={} arc={} Cmodel={} query59 grant987 literal={} modelW={} sourceR={} joinedW={joined}",std::mem::size_of::<Inner>(),arc_allocation_bytes::<Inner>().unwrap(),model_controls().unwrap(),MODEL_DIAGNOSTIC.len(),model.workspace_requested_bytes(),new.retained_source_charge());
+    println!("native layouts outer={} option_arc={} reservation={} error={} guard={} facts_view={} structure_view={} image_view={} image_iterator={} borrowed_stack_session=128",
+        std::mem::size_of::<ModelInput>(), std::mem::size_of::<Option<Arc<Inner>>>(),
+        std::mem::size_of::<Reservation>(), std::mem::size_of::<ModelPreparationError>(),
+        std::mem::size_of::<ModelErrorGuard>(), std::mem::size_of::<native_facts::NativeModelFacts<'_>>(),
+        std::mem::size_of::<native_facts::NativeModelStructure<'_>>(),
+        std::mem::size_of::<native_facts::NativeModelImage<'_>>(),
+        std::mem::size_of::<native_facts::NativeModelImages<'_>>());
     drop(new);
     preparation.finish();
 }

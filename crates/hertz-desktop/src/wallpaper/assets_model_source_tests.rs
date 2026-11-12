@@ -510,6 +510,15 @@ fn checked_factory_query_has_zero_heap_activity_and_uses_actual_live_capacities(
     assert_eq!(sample.retained, 0);
     assert!(!sample.overflow);
     assert_eq!(DIRECTORY_PINS, 92);
+    println!(
+        "source layout inner={} arc={} outer={} option_arc={} release_guard={} reservation={}",
+        std::mem::size_of::<Inner>(),
+        arc_allocation_bytes::<Inner>().unwrap(),
+        std::mem::size_of::<CanonicalModelSource>(),
+        std::mem::size_of::<Option<Arc<Inner>>>(),
+        std::mem::size_of::<SourceReleaseGuard>(),
+        std::mem::size_of::<Reservation>()
+    );
     assert_eq!(
         bounds.path_capacity,
         fixture

@@ -526,7 +526,45 @@ canonical Manifest).workspace_with_live_base(actual_source_R_charge)` 在完整 
 完整 inspector/compact 和 actual retained query在 W 下完成；只对 compact payload
 另取 ownFactsR，source R 已含 native Arc/body 和两个新 request floors，R在
 escaping Arc allocation 之前取得。最后 outer clone释放时先 drop compact，再
-drop canonical source 的 identity/Files/pins，最后 finish ownFactsR；不 purge sibling。
+释放 canonical source 的 outer Arc、identity/Files/pins，将原 sourceR ticket 移入
+无资源、不可 Clone、无公开 constructor 的 inline guard。随后 finish ownFactsR，
+在 sourceR/Cmodel 仍覆盖 facts-ticket strings 时释放其 caller 与原 ledger backings，
+最后 guard.finish sourceR；不 purge sibling。
+
+native `facts()` 只返回与 `&ModelInput` 同寿命的 borrowed view，保留 stream/JSON/BIN
+长度与 range、SHA32、path、全部 NumericFacts 和每个原结构字段。无 Arc 的原数组
+借用为 immutable slices，images 使用 allocation-free ExactSize/DoubleEnded borrowed
+enum iterator，只借用 package reference slice 或 embedded range；不借出整个
+CompactCheckedGlbResource/ModelStructure/ModelImage、Arc、Weak 或 owner callback。
+pure ModelStructure/ModelImage 和完整 compact getters/Clone 合约不改。
+
+source 与 input 的每个 clone 都消费私有 `Option<Arc<Inner>>` 并调用安全
+`Arc::into_inner`；无 escaped Weak 的最后消费者在 Arc backing 的实际 deallocation
+之后才清理 move 出的 Inner。构造中失败仍有 resource-first Inner Drop fallback。
+原 Reservation 的显式 armed bool 与最多128字节 stack session 保留原 consuming
+finish 合约；caller session/task String 在 pending 占用下释放。原 coordinator 的
+ordinary retirement 在同一 mutex 下核对 token/session/generation，拒绝 resources
+或 children，保持 scalar 占用直到原 ledger request strings 与该 record 已销毁。
+普通 Drop 仍只 release，原 confirm/forget/purge/tombstone 合约保持。
+
+r28 两编译器 actual x64 layouts 单独验证：Reservation160，source Inner728/Arc744，
+input Inner624/Arc640，两个 outer 与 Option<Arc> 均8，inline source guard160，
+Cmodel2104（较 r27 增8）。source Wc/sourceR 自动按 source Arc 实际 Layout 计入
+相应增8；model W 使用 live sourceR，与已退出 Wc/Wi 分阶段。guard与 stack identity
+不是新增 heap owner。typed Result source48/input208、producing-thread oneshot
+requested104/264、cfg(test) source/input futures344/480；cfg(test) worker_loop5688
+仅为该 test build witness，完整 production worker frame 与 pre-source admission
+仍待原 control task 证明。
+
+原单一 System test allocator 的 fixed-capacity cross-thread pointer/Layout capture
+只在真实 System.dealloc 返回后记 event，before/after gates 不分配或进入预算 mutex。
+原 quota 饱和下的真实 successor grant 核对 input/source Arc、unique shared image
+backings、最后 File pin-vector、caller/ledger strings 的实际退出先后；两/八个同时
+final input clones 与两/八个 source clones 均要求 capture overflow=false、drop 分配0、
+facts refund 在 source payload 后与 source refund 最后。完整 borrowed fields 对真实
+rich installed source/exact variant 的原 inspector 逐字段比对，view 与 exhausted
+iterator 分配0；编译 fixtures 另拒绝 owner lifetime、whole structure/image、Arc/Weak
+提取，并验证原 pure Clone 仍可用。
 
 `ModelPreparationError` 私有持有 `Option<JobError>` 与 `Option<Guard>`，不能 Clone
 或裸提取 JobError。pre-W query/grant失败保留同 source R 与 pins，直到实际 error
@@ -552,7 +590,7 @@ inline guard使原 typed oneshot payload和native async frame变大：channel al
 producing-thread System allocator日志和cfg(test)实际source/input future size日志
 单独记录该frontier；这些test-build future数值不宣称是production worker frame费用。
 尚未组合完整 pre-source channel/request/frame/status/history/DB/persistent controls、
-shared RootOwner/permanent ledger storage或Arc/request destructor tails。returned guard
+shared RootOwner/permanent ledger storage与其它原 control destructor tails。returned guard
 只保护其实际held JobError，不保护额外history/progress copies。image projections
 仍需canonical closure与真实pins/codec费用；outer input还未贯穿原Broker/cache/
 ReadPermit/stream/clone。loader/runtime/CPUready/GPU/first-frame与完整A01–A10目标

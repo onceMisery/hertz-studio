@@ -39,6 +39,7 @@ pub(crate) struct Reservation {
     budget: Arc<BudgetCoordinator>,
     request: BudgetRequest,
     token: u64,
+    release_on_drop: bool,
 }
 
 impl Reservation {
@@ -50,6 +51,7 @@ impl Reservation {
             budget,
             request,
             token,
+            release_on_drop: true,
         })
     }
 
@@ -68,21 +70,26 @@ impl Reservation {
             .release(self.token, &self.request.session, self.request.generation);
     }
 
-    pub(crate) fn finish(self) {
+    pub(crate) fn finish(mut self) {
         self.release();
-        if self
-            .budget
-            .confirm_exit(self.token, &self.request.session, self.request.generation)
-            .is_ok()
-        {
-            // 只回收本 token 的退出墓碑；同会话其它资源仍由各自 owner 持有。
-            let _ = self.budget.forget_released(
-                self.token,
-                &self.request.session,
-                self.request.generation,
-            );
+        // Only granted, bounded identities enter this owner. Keep identity on
+        // the stack while its caller String backings exit under pending quota.
+        let mut session = [0_u8; 128];
+        let len = self.request.session.len();
+        if len > session.len() {
+            return; // Preserve pending occupancy for a corrupt owner.
         }
-        // 确认失败时保留 pending 占用及 stuck 诊断，不能据此销毁整个会话。
+        session[..len].copy_from_slice(self.request.session.as_bytes());
+        let token = self.token;
+        let generation = self.request.generation;
+        // Disarm ordinary Drop before destroying both caller backings. This
+        // state does not assume any sentinel value in the token namespace.
+        self.release_on_drop = false;
+        drop(std::mem::take(&mut self.request.session));
+        drop(std::mem::take(&mut self.request.task_id));
+        let session = std::str::from_utf8(&session[..len]).expect("granted UTF-8 session");
+        let _ = self.budget.retire_ordinary(token, session, generation);
+        // Failed identity/nonordinary checks retain the exact ledger record.
     }
 
     pub(crate) fn ensure_prepare_cpu_bytes(&self, required: u64) -> Result<(), JobError> {
@@ -117,11 +124,31 @@ impl Reservation {
             &self.request.task_id,
         )
     }
+    #[cfg(test)]
+    pub(crate) fn release_allocations_for_test(&self) -> (u64, [(usize, usize, usize); 2]) {
+        (
+            self.token,
+            [
+                (
+                    self.request.session.as_ptr() as usize,
+                    self.request.session.capacity(),
+                    1,
+                ),
+                (
+                    self.request.task_id.as_ptr() as usize,
+                    self.request.task_id.capacity(),
+                    1,
+                ),
+            ],
+        )
+    }
 }
 
 impl Drop for Reservation {
     fn drop(&mut self) {
-        self.release();
+        if self.release_on_drop {
+            self.release();
+        }
     }
 }
 

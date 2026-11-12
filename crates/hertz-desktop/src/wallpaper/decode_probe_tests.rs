@@ -192,6 +192,7 @@ fn reservation_finish_keeps_parent_and_real_children_when_exit_confirmation_fail
         budget: Arc::clone(&budget),
         request: request.clone(),
         token: parent,
+        release_on_drop: true,
     }
     .finish();
 

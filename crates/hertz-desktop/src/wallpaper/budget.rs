@@ -938,6 +938,42 @@ impl BudgetCoordinator {
         Ok(())
     }
 
+    /// Consuming native owners have already destroyed their physical payload
+    /// and caller request strings. Retire only their original ordinary record;
+    /// keep its occupancy and backings protected by the same grant mutex.
+    pub(crate) fn retire_ordinary(
+        &self,
+        token: u64,
+        session: &str,
+        generation: u64,
+    ) -> Result<(), LedgerError> {
+        let mut ledger = self
+            .ledger
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let reservation = Self::find_checked(&mut ledger, token, session, generation)?;
+        if reservation.resources.is_some() || !reservation.children.is_empty() {
+            return Err(LedgerError::ChildrenPending);
+        }
+        let revisions = match reservation.state {
+            ReservationState::Active => 3,
+            ReservationState::ReleasePending => 2,
+            ReservationState::Released => 1,
+        };
+        // Leave the charged scalars in the record while destroying its heap.
+        // No grant can observe an erased identity or an early Released state.
+        drop(std::mem::take(&mut reservation.request.session));
+        drop(std::mem::take(&mut reservation.request.task_id));
+        let index = ledger
+            .reservations
+            .iter()
+            .position(|entry| entry.token == token)
+            .expect("validated original token");
+        drop(ledger.reservations.remove(index));
+        ledger.revision += revisions;
+        Ok(())
+    }
+
     /// 已确认退出的单 token 墓碑回收；不能借此清除同会话仍活动的其它代际。
     pub(crate) fn forget_released(
         &self,
@@ -1027,6 +1063,38 @@ impl BudgetCoordinator {
             .len()
     }
 
+    #[cfg(test)]
+    pub(crate) fn ledger_mutex_held_for_test(&self) -> bool {
+        match self.ledger.try_lock() {
+            Ok(_) => false,
+            Err(std::sync::TryLockError::WouldBlock) => true,
+            Err(std::sync::TryLockError::Poisoned(_)) => panic!("original ledger mutex poisoned"),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn request_allocations_for_test(&self, token: u64) -> [(usize, usize, usize); 2] {
+        let ledger = self.ledger.lock().unwrap();
+        let request = &ledger
+            .reservations
+            .iter()
+            .find(|r| r.token == token)
+            .unwrap()
+            .request;
+        [
+            (
+                request.session.as_ptr() as usize,
+                request.session.capacity(),
+                1,
+            ),
+            (
+                request.task_id.as_ptr() as usize,
+                request.task_id.capacity(),
+                1,
+            ),
+        ]
+    }
+
     fn find_checked<'ledger>(
         ledger: &'ledger mut Ledger,
         token: u64,
@@ -1057,7 +1125,7 @@ mod tests;
 mod allocation_tests;
 
 #[cfg(test)]
-pub(crate) use allocation_tests::measure_requested_heap;
+pub(crate) use allocation_tests::{measure_requested_heap, PhysicalReleaseCapture};
 
 #[cfg(test)]
 #[path = "budget_catalog_tests.rs"]

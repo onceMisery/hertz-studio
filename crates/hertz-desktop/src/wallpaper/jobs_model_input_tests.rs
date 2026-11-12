@@ -447,6 +447,19 @@ fn actual_typed_oneshot_allocation_and_native_async_frame_layouts() {
         &env.probe,
         &preparation,
     );
+    let (_, receiver) = tokio::sync::mpsc::channel(1);
+    let worker_future = worker_loop(
+        receiver,
+        Arc::clone(&env.jobs.inner),
+        Arc::clone(&env.jobs.library),
+        Arc::clone(&env.jobs.assets),
+        env.probe.clone(),
+    );
+    println!(
+        "worker_loop cfg_test_future={} production_future_bound=unqualified",
+        std::mem::size_of_val(&worker_future)
+    );
+    drop(worker_future);
     println!("typed result old={} new={} oneshot old_requested={old_bytes} new_requested={new_bytes} old_source_future={} new_input_future={} overflow=false",std::mem::size_of::<Result<crate::wallpaper::assets::CanonicalModelSource,JobError>>(),std::mem::size_of::<Result<ModelInput,ModelPreparationError>>(),std::mem::size_of_val(&source_future),std::mem::size_of_val(&input_future));
     drop(source_future);
     drop(input_future);

@@ -4,7 +4,174 @@ use super::*;
 use std::{
     alloc::{GlobalAlloc, Layout, System},
     cell::Cell,
+    sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Mutex, MutexGuard,
+    },
+    time::{Duration, Instant},
 };
+
+const PHYSICAL_CAPACITY: usize = 32;
+struct PhysicalSlot {
+    pointer: AtomicUsize,
+    bytes: AtomicUsize,
+    align: AtomicUsize,
+    before: AtomicBool,
+    allow_free: AtomicBool,
+    after: AtomicUsize,
+    allow_return: AtomicBool,
+}
+impl PhysicalSlot {
+    const fn new() -> Self {
+        Self {
+            pointer: AtomicUsize::new(0),
+            bytes: AtomicUsize::new(0),
+            align: AtomicUsize::new(0),
+            before: AtomicBool::new(false),
+            allow_free: AtomicBool::new(false),
+            after: AtomicUsize::new(0),
+            allow_return: AtomicBool::new(false),
+        }
+    }
+}
+static PHYSICAL_LOCK: Mutex<()> = Mutex::new(());
+static PHYSICAL_ACTIVE: AtomicBool = AtomicBool::new(false);
+static PHYSICAL_OVERFLOW: AtomicBool = AtomicBool::new(false);
+static PHYSICAL_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
+static PHYSICAL_SLOTS: [PhysicalSlot; PHYSICAL_CAPACITY] =
+    [const { PhysicalSlot::new() }; PHYSICAL_CAPACITY];
+
+fn physical_before(pointer: *mut u8, layout: Layout) -> Option<&'static PhysicalSlot> {
+    if !PHYSICAL_ACTIVE.load(Ordering::Acquire) {
+        return None;
+    }
+    let slot = PHYSICAL_SLOTS
+        .iter()
+        .find(|slot| slot.pointer.load(Ordering::Acquire) == pointer as usize)?;
+    if slot.bytes.load(Ordering::Relaxed) != layout.size()
+        || slot.align.load(Ordering::Relaxed) != layout.align()
+        || slot.before.swap(true, Ordering::AcqRel)
+    {
+        PHYSICAL_OVERFLOW.store(true, Ordering::Release);
+    }
+    while !slot.allow_free.load(Ordering::Acquire) {
+        std::thread::yield_now();
+    }
+    Some(slot)
+}
+fn physical_after(slot: Option<&PhysicalSlot>) {
+    if let Some(slot) = slot {
+        // The caller invokes this only AFTER the actual System.dealloc returns.
+        slot.pointer.store(0, Ordering::Release); // A successor may reuse this address.
+        slot.after.store(
+            PHYSICAL_SEQUENCE.fetch_add(1, Ordering::AcqRel) + 1,
+            Ordering::Release,
+        );
+        while !slot.allow_return.load(Ordering::Acquire) {
+            std::thread::yield_now();
+        }
+    }
+}
+
+// Exact live pointers only, fixed storage and atomic signals: the allocator
+// never allocates, invokes a callback or reenters the original budget mutex.
+pub(crate) struct PhysicalReleaseCapture {
+    _exclusive: MutexGuard<'static, ()>,
+    len: usize,
+}
+impl PhysicalReleaseCapture {
+    pub(crate) fn new(allocations: &[(usize, usize, usize)]) -> Self {
+        let exclusive = PHYSICAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(!PHYSICAL_ACTIVE.load(Ordering::Acquire));
+        assert!(allocations.len() <= PHYSICAL_CAPACITY);
+        for (index, &(pointer, bytes, align)) in allocations.iter().enumerate() {
+            assert!(pointer != 0 && bytes != 0);
+            assert!(!allocations[..index].iter().any(|a| a.0 == pointer));
+            let slot = &PHYSICAL_SLOTS[index];
+            slot.bytes.store(bytes, Ordering::Relaxed);
+            slot.align.store(align, Ordering::Relaxed);
+            slot.before.store(false, Ordering::Relaxed);
+            slot.allow_free.store(false, Ordering::Relaxed);
+            slot.after.store(0, Ordering::Relaxed);
+            slot.allow_return.store(false, Ordering::Relaxed);
+            slot.pointer.store(pointer, Ordering::Release);
+        }
+        PHYSICAL_OVERFLOW.store(false, Ordering::Release);
+        PHYSICAL_SEQUENCE.store(0, Ordering::Release);
+        PHYSICAL_ACTIVE.store(true, Ordering::Release);
+        Self {
+            _exclusive: exclusive,
+            len: allocations.len(),
+        }
+    }
+    pub(crate) fn wait_before(&self, index: usize) {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !PHYSICAL_SLOTS[index].before.load(Ordering::Acquire) {
+            assert!(
+                Instant::now() < deadline,
+                "physical free gate {index} did not arrive"
+            );
+            std::thread::yield_now();
+        }
+    }
+    pub(crate) fn free(&self, index: usize) {
+        PHYSICAL_SLOTS[index]
+            .allow_free
+            .store(true, Ordering::Release);
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while PHYSICAL_SLOTS[index].after.load(Ordering::Acquire) == 0 {
+            assert!(
+                Instant::now() < deadline,
+                "System.dealloc {index} did not return"
+            );
+            std::thread::yield_now();
+        }
+    }
+    pub(crate) fn resume(&self, index: usize) {
+        PHYSICAL_SLOTS[index]
+            .allow_return
+            .store(true, Ordering::Release);
+    }
+    pub(crate) fn sequence(&self, index: usize) -> usize {
+        PHYSICAL_SLOTS[index].after.load(Ordering::Acquire)
+    }
+    pub(crate) fn event_clock() -> usize {
+        PHYSICAL_SEQUENCE.fetch_add(1, Ordering::AcqRel) + 1
+    }
+    pub(crate) fn assert_complete(&self) {
+        assert!(
+            !PHYSICAL_OVERFLOW.load(Ordering::Acquire),
+            "physical capture overflow/layout mismatch"
+        );
+        for slot in &PHYSICAL_SLOTS[..self.len] {
+            assert!(slot.after.load(Ordering::Acquire) != 0);
+        }
+    }
+    pub(crate) fn unblock(&self) {
+        for slot in &PHYSICAL_SLOTS[..self.len] {
+            slot.allow_free.store(true, Ordering::Release);
+            slot.allow_return.store(true, Ordering::Release);
+        }
+    }
+    pub(crate) fn log_evidence(&self, label: &str, allocations: &[(usize, usize, usize)]) {
+        self.assert_complete();
+        for (index, &(pointer, _, _)) in allocations.iter().enumerate() {
+            let slot = &PHYSICAL_SLOTS[index];
+            println!("physical event {label} index={index} pointer={pointer:#x} bytes={} align={} after_system_dealloc={} overflow=false",
+                slot.bytes.load(Ordering::Acquire), slot.align.load(Ordering::Acquire), self.sequence(index));
+        }
+    }
+}
+impl Drop for PhysicalReleaseCapture {
+    fn drop(&mut self) {
+        PHYSICAL_ACTIVE.store(false, Ordering::Release);
+        for slot in &PHYSICAL_SLOTS[..self.len] {
+            slot.allow_free.store(true, Ordering::Release);
+            slot.allow_return.store(true, Ordering::Release);
+            slot.pointer.store(0, Ordering::Release);
+        }
+    }
+}
 
 #[derive(Clone, Copy)]
 struct HeapRecord {
@@ -149,8 +316,10 @@ unsafe impl GlobalAlloc for ResourcePlanAllocationMeter {
     }
 
     unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+        let physical = physical_before(pointer, layout);
         heap_event(pointer, std::ptr::null_mut(), 0, false);
         unsafe { System.dealloc(pointer, layout) };
+        physical_after(physical);
     }
 
     unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {

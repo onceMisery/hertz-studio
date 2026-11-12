@@ -22,8 +22,12 @@ const MODEL_DIAGNOSTIC: &str = "canonical model preparation failed";
 const MODEL_QUERY_DIAGNOSTIC: u64 = 59;
 const MODEL_REQUEST_STRINGS: u64 = 2 * (128 + 64);
 
+#[path = "model_native_facts.rs"]
+mod native_facts;
+use native_facts::NativeModelFacts;
+
 #[derive(Clone)]
-pub(crate) struct ModelInput(Arc<Inner>);
+pub(crate) struct ModelInput(Option<Arc<Inner>>);
 struct Resources {
     facts: CompactCheckedGlbResource,
     source: CanonicalModelSource,
@@ -34,21 +38,43 @@ struct Inner {
 }
 impl Drop for Inner {
     fn drop(&mut self) {
-        if let Some(Resources { facts, source }) = self.resources.take() {
+        let source_guard = if let Some(Resources { facts, source }) = self.resources.take() {
             drop(facts);
-            drop(source);
-        }
+            source.retire_resources()
+        } else {
+            None
+        };
         if let Some(retained) = self.retained.take() {
             retained.finish();
+        }
+        drop(source_guard);
+    }
+}
+impl Drop for ModelInput {
+    fn drop(&mut self) {
+        // Every clone consumes by this path. With no escaped Weak, the final
+        // Arc allocation physically exits before the moved Inner cleans up.
+        if let Some(inner) = self.0.take().and_then(Arc::into_inner) {
+            drop(inner);
         }
     }
 }
 impl ModelInput {
-    pub(crate) fn facts(&self) -> &CompactCheckedGlbResource {
-        &self.0.resources.as_ref().expect("live model input").facts
+    fn inner(&self) -> &Inner {
+        self.0.as_ref().expect("live model outer")
+    }
+    pub(crate) fn facts(&self) -> NativeModelFacts<'_> {
+        NativeModelFacts::new(
+            &self
+                .inner()
+                .resources
+                .as_ref()
+                .expect("live model input")
+                .facts,
+        )
     }
     pub(crate) fn reference(&self) -> &AssetRef {
-        self.0
+        self.inner()
             .resources
             .as_ref()
             .expect("live model input")
@@ -57,7 +83,7 @@ impl ModelInput {
     }
     #[cfg(test)]
     pub(crate) fn reservation_identity_for_test(&self) -> (&str, u64, &str) {
-        self.0.retained.as_ref().unwrap().identity_for_test()
+        self.inner().retained.as_ref().unwrap().identity_for_test()
     }
 }
 
@@ -267,7 +293,7 @@ impl AssetStore {
             };
             // Cancellation drops inner's resources then own facts-R before W.
             cancelled(cancel)?;
-            Ok(ModelInput(Arc::new(inner)))
+            Ok(ModelInput(Some(Arc::new(inner))))
         })();
         match outcome {
             Ok(input) => {
