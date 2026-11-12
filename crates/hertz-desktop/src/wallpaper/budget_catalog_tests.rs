@@ -62,7 +62,8 @@ fn scene_usage() -> BudgetUsage {
 
 fn global_usage() -> BudgetUsage {
     BudgetUsage {
-        asset_cpu_bytes: bounds().catalog_retained_requested_bytes()
+        asset_cpu_bytes: bootstrap::retained_requested_bytes().unwrap()
+            + bounds().catalog_retained_requested_bytes()
             + hertz_wallpaper::document::catalog::CompositionCatalogHeapBounds::for_embedded_catalog().unwrap().retained_requested_bytes(),
         ..Default::default()
     }

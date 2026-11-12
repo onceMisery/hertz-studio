@@ -22,6 +22,9 @@
 
 use std::sync::{Arc, Mutex, OnceLock};
 
+#[path = "budget_bootstrap.rs"]
+mod bootstrap;
+
 #[path = "budget_allocations.rs"]
 mod allocations;
 pub(crate) use allocations::{
@@ -81,7 +84,7 @@ static BUDGET: OnceLock<Arc<BudgetCoordinator>> = OnceLock::new();
 pub(crate) fn global() -> Arc<BudgetCoordinator> {
     // Preserve the original Arc even if the second catalog fails. Every return
     // crosses the same ledger lock; no consumer can observe a partial ready.
-    let budget = BUDGET.get_or_init(|| Arc::new(BudgetCoordinator::new()));
+    let budget = BUDGET.get_or_init(BudgetCoordinator::new_process);
     budget.initialize_catalogs();
     Arc::clone(budget)
 }
@@ -360,6 +363,7 @@ impl Drop for SceneCatalogReservation<'_> {
 struct Ledger {
     next_token: u64,
     revision: u64,
+    coordinator_asset_cpu_bytes: u64,
     scene_catalog: SceneCatalogCharge,
     composition_catalog: SceneCatalogCharge,
     reservations: Vec<Reservation>,
@@ -374,7 +378,10 @@ impl Ledger {
     }
 
     fn active_usage(&self) -> BudgetUsage {
-        let mut usage = BudgetUsage::default();
+        let mut usage = BudgetUsage {
+            asset_cpu_bytes: self.coordinator_asset_cpu_bytes,
+            ..Default::default()
+        };
         for charge in [self.scene_catalog, self.composition_catalog] {
             match charge {
                 SceneCatalogCharge::Uninitialized => {}
@@ -476,6 +483,7 @@ impl BudgetCoordinator {
             ledger: Mutex::new(Ledger {
                 next_token: 1,
                 revision: 1,
+                coordinator_asset_cpu_bytes: 0,
                 scene_catalog: SceneCatalogCharge::Uninitialized,
                 composition_catalog: SceneCatalogCharge::Uninitialized,
                 reservations: Vec::new(),
@@ -543,6 +551,7 @@ impl BudgetCoordinator {
             ledger: Mutex::new(Ledger {
                 next_token: ledger.next_token,
                 revision: ledger.revision,
+                coordinator_asset_cpu_bytes: ledger.coordinator_asset_cpu_bytes,
                 scene_catalog: ledger.scene_catalog,
                 composition_catalog: ledger.composition_catalog,
                 reservations: ledger
@@ -1125,7 +1134,11 @@ mod tests;
 mod allocation_tests;
 
 #[cfg(test)]
-pub(crate) use allocation_tests::{measure_requested_heap, PhysicalReleaseCapture};
+#[path = "budget_test_support.rs"]
+mod test_support;
+
+#[cfg(test)]
+pub(crate) use test_support::{measure_requested_heap, PhysicalReleaseCapture};
 
 #[cfg(test)]
 #[path = "budget_catalog_tests.rs"]
@@ -1134,3 +1147,7 @@ mod catalog_tests;
 #[cfg(test)]
 #[path = "budget_composition_catalog_tests.rs"]
 mod composition_catalog_tests;
+
+#[cfg(test)]
+#[path = "budget_bootstrap_tests.rs"]
+mod bootstrap_tests;

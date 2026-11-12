@@ -595,3 +595,18 @@ shared RootOwner/permanent ledger storage与其它原 control destructor tails�
 仍需canonical closure与真实pins/codec费用；outer input还未贯穿原Broker/cache/
 ReadPermit/stream/clone。loader/runtime/CPUready/GPU/first-frame与完整A01–A10目标
 继续开放，全部qualification gates保持关闭；此checked-facts输入不是运行成功替代。
+
+
+2026-11-12 r29 启动准入续接：原 BudgetCoordinator在 stack Ledger中先预记
+自己 Arc及64条 Reservation的固定 backing费用，随后创建 Vec和 Arc。
+OnceLock持有该生产实例直到进程退出；confirm/forget/purge不能退回这些容量。
+原独立 stack new保持零进程费用，原 scene/composition费用和配额检查与该 floor
+相加；advisory projection保留原进程占用。checked Layout使用两个 Arc atomic
+counters与真实私有类型，并以原单一 System allocator逐工具链检查请求字节。
+
+该改动仅闭合生产账本启动及其固定 record backing；普通 request strings仍沿原
+保守 metadata费用及退出合同。advisory实际副本、RootOwner/ImportJobs、线程与
+production worker frame、request/reply/status/history/query/SQLx等仍需各自准入
+和物理退出证明。纹理闭包、Broker/SessionPlan/loader、同renderer GPU首帧和
+原 A01–A10剩余要求继续保持未验收。未发布构造 panic只释放该 stack实例；
+已发布目录失败后保持同一 Arc和常驻费用，沿原 poison恢复路径重试。

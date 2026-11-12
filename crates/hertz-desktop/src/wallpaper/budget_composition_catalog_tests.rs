@@ -52,8 +52,11 @@ fn scene_retained() -> u64 {
         .unwrap()
         .catalog_retained_requested_bytes()
 }
+fn process_scene_retained() -> u64 {
+    bootstrap::retained_requested_bytes().unwrap() + scene_retained()
+}
 fn total_retained() -> u64 {
-    scene_retained() + fees().retained_requested_bytes()
+    process_scene_retained() + fees().retained_requested_bytes()
 }
 fn calls() -> (usize, usize) {
     (
@@ -120,7 +123,10 @@ fn cold_original_both_catalog_callbacks_follow_quota_bookings_and_publish_once()
             ledger.active_usage().prepare_cpu_bytes,
             scene.catalog_cold_requested_bytes()
         );
-        assert_eq!(ledger.active_usage().asset_cpu_bytes, scene_retained());
+        assert_eq!(
+            ledger.active_usage().asset_cpu_bytes,
+            process_scene_retained()
+        );
         assert_eq!(
             ledger.composition_catalog,
             SceneCatalogCharge::Uninitialized
@@ -206,7 +212,7 @@ fn cold_composition_partial_drop_precedes_refund_and_same_static_arc_retries_onl
     assert!(dropped.load(std::sync::atomic::Ordering::SeqCst));
     let budget = Arc::clone(BUDGET.get().unwrap());
     assert_eq!(calls(), (1, 1));
-    assert_eq!(budget.usage().asset_cpu_bytes, scene_retained());
+    assert_eq!(budget.usage().asset_cpu_bytes, process_scene_retained());
     assert_eq!(budget.usage().prepare_cpu_bytes, 0);
     assert!(budget.ledger.is_poisoned());
     assert_eq!(
@@ -236,7 +242,7 @@ fn cold_source_failure_preserves_scene_and_poison_retry_uses_same_arc() {
     catch_global();
     let budget = Arc::clone(BUDGET.get().unwrap());
     assert_eq!(calls(), (1, 0));
-    assert_eq!(budget.usage().asset_cpu_bytes, scene_retained());
+    assert_eq!(budget.usage().asset_cpu_bytes, process_scene_retained());
     assert_eq!(budget.usage().prepare_cpu_bytes, 0);
     REJECT_SOURCE.with(|flag| flag.set(false));
     assert!(Arc::ptr_eq(&global(), &budget));
@@ -250,7 +256,7 @@ fn cold_scene_publish_then_composition_asset_denial_keeps_original_static_arc() 
     if child(NAME) {
         return;
     }
-    let budget = BUDGET.get_or_init(|| Arc::new(BudgetCoordinator::new()));
+    let budget = BUDGET.get_or_init(BudgetCoordinator::new_process);
     let mut held = request("same-call-denial");
     held.asset_cpu_bytes = MAX_ASSET_CPU_BYTES - total_retained() + 1;
     let token = budget.grant(&held).unwrap();
@@ -260,7 +266,7 @@ fn cold_scene_publish_then_composition_asset_denial_keeps_original_static_arc() 
     assert!(std::ptr::eq(BUDGET.get().unwrap(), budget));
     assert_eq!(
         budget.usage().asset_cpu_bytes,
-        held.asset_cpu_bytes + scene_retained()
+        held.asset_cpu_bytes + process_scene_retained()
     );
     assert_eq!(budget.usage().prepare_cpu_bytes, 0);
     let ledger = budget.ledger.lock().unwrap_err().into_inner();
@@ -322,7 +328,7 @@ fn cold_each_composition_quota_rejects_before_callback_and_retries_after_owner_e
         budget.release(token, quota, 1).unwrap();
         budget.confirm_exit(token, quota, 1).unwrap();
         budget.forget_released(token, quota, 1).unwrap();
-        assert_eq!(budget.usage().asset_cpu_bytes, scene_retained());
+        assert_eq!(budget.usage().asset_cpu_bytes, process_scene_retained());
     }
     assert!(Arc::ptr_eq(&global(), &budget));
     assert_eq!(calls(), (1, 1));
