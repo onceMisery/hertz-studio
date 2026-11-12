@@ -125,6 +125,8 @@ struct JobRequest {
     terminal_pending: Option<std::sync::mpsc::Sender<JobState>>,
     #[cfg(test)]
     inspection_checkpoint: Option<fn(&AtomicBool)>,
+    #[cfg(test)]
+    model_source_ready: Option<(std::sync::mpsc::Sender<()>, Arc<tokio::sync::Notify>)>,
 }
 
 enum JobSource {
@@ -133,6 +135,7 @@ enum JobSource {
     PrepareFont(FontPrepareRequest),
     PrepareFontGroup(FontGroupPrepareRequest),
     PrepareSvg(SvgPrepareRequest),
+    PrepareModelSource(AssetRef),
 }
 
 /// 固定字体条目和最终文字由原准备 worker 核验；解析事实本身不授予本机资格。
@@ -206,6 +209,9 @@ pub(crate) struct SvgPrepareRequest {
     pub usage: String,
 }
 enum FontPrepareReply {
+    ModelSource(
+        tokio::sync::oneshot::Sender<Result<super::assets::CanonicalModelSource, JobError>>,
+    ),
     Svg(tokio::sync::oneshot::Sender<Result<super::target_planner::ResolvedMedia, JobError>>),
     Single(tokio::sync::oneshot::Sender<Result<PreparedFont, JobError>>),
     Group(tokio::sync::oneshot::Sender<Result<BTreeMap<String, PreparedFont>, JobError>>),
@@ -216,6 +222,12 @@ type FontPrepareCompletion<T> = (String, tokio::sync::oneshot::Receiver<Result<T
 impl FontPrepareReply {
     fn send(self, outcome: Result<JobOutput, JobError>) {
         match (self, outcome) {
+            (Self::ModelSource(reply), Ok(JobOutput::ModelSource(source))) => {
+                let _ = reply.send(Ok(source));
+            }
+            (Self::ModelSource(reply), Err(error)) => {
+                let _ = reply.send(Err(error));
+            }
             (Self::Svg(reply), Ok(JobOutput::Svg(media))) => {
                 let _ = reply.send(Ok(*media));
             }
@@ -240,6 +252,7 @@ impl FontPrepareReply {
 }
 
 enum JobOutput {
+    ModelSource(super::assets::CanonicalModelSource),
     Svg(Box<super::target_planner::ResolvedMedia>),
     Package(String),
     Font(Box<PreparedFont>),
@@ -423,6 +436,20 @@ impl ImportJobs {
         self.dispatch(request).map(|job_id| (job_id, receive))
     }
 
+    /// Installed canonical source/exact variant only; the original typed
+    /// worker/terminal guard owns completion. No model/GPU qualification yet.
+    pub(crate) fn prepare_model_source(
+        &self,
+        job_id: String,
+        reference: AssetRef,
+    ) -> Result<FontPrepareCompletion<super::assets::CanonicalModelSource>, JobError> {
+        reference.validate()?;
+        let mut request = self.reserve(job_id, JobSource::PrepareModelSource(reference), None)?;
+        let (reply, receive) = tokio::sync::oneshot::channel();
+        request.font_reply = Some(FontPrepareReply::ModelSource(reply));
+        self.dispatch(request).map(|id| (id, receive))
+    }
+
     /// One group occupies the original slot through inspection, preflight,
     /// qualification and the same strict terminal database/cancellation guard.
     pub(crate) fn prepare_font_group(
@@ -496,6 +523,8 @@ impl ImportJobs {
             terminal_pending: None,
             #[cfg(test)]
             inspection_checkpoint: None,
+            #[cfg(test)]
+            model_source_ready: None,
         })
     }
 
@@ -570,8 +599,12 @@ async fn worker_loop(
     while let Some(request) = rx.recv().await {
         let mut outcome = match assets.content_writer() {
             Ok(writer) => {
-                let preparation =
-                    probe.prepare(format!("prepare-{}-{}", request.job_id, request.generation));
+                let session = format!("prepare-{}-{}", request.job_id, request.generation);
+                let preparation = if matches!(&request.source, JobSource::PrepareModelSource(_)) {
+                    probe.prepare_for_job(session, request.generation)
+                } else {
+                    probe.prepare(session)
+                };
                 let outcome = match preparation.as_ref() {
                     Ok(_) => match &request.source {
                         JobSource::Import(source) => {
@@ -599,6 +632,16 @@ async fn worker_loop(
                                 .await
                                 .map(JobOutput::Fonts)
                         }
+                        JobSource::PrepareModelSource(reference) => run_prepare_model_source(
+                            &request,
+                            reference,
+                            &library,
+                            &assets,
+                            &probe,
+                            preparation.as_ref().expect("granted preparation"),
+                        )
+                        .await
+                        .map(JobOutput::ModelSource),
                     },
                     Err(error) => Err(JobError {
                         code: error.code,
@@ -629,6 +672,7 @@ async fn worker_loop(
                     status.state = JobState::Done;
                     status.package_hash = Some(match output {
                         JobOutput::Package(hash) => hash.clone(),
+                        JobOutput::ModelSource(source) => source.reference().package_hash.clone(),
                         JobOutput::Svg(media) => media.reference().package_hash.clone(),
                         JobOutput::Font(font) => font.reference().package_hash.clone(),
                         JobOutput::Fonts(fonts) => fonts
@@ -1058,6 +1102,39 @@ async fn run_prepare_font(
     qualify_inspected_font(request, prepare, input, library, probe).await
 }
 
+async fn run_prepare_model_source(
+    request: &JobRequest,
+    reference: &AssetRef,
+    library: &Library,
+    assets: &AssetStore,
+    probe: &ProbeClient,
+    preparation: &super::decode_probe::Reservation,
+) -> Result<super::assets::CanonicalModelSource, JobError> {
+    set_state(&request.status, JobState::Preparing);
+    cancelled(&request.cancel)?;
+    if !library.is_installed(&reference.package_hash).await? {
+        return Err(JobError::new(
+            "asset_not_found",
+            "canonical model package is not installed/available",
+        ));
+    }
+    #[cfg(test)]
+    if let Some(checkpoint) = request.inspection_checkpoint {
+        checkpoint(&request.cancel);
+    }
+    let source =
+        assets.pin_canonical_model_source(reference, probe, preparation, &request.cancel)?;
+    #[cfg(test)]
+    if let Some((entered, release)) = &request.model_source_ready {
+        entered.send(()).expect("model source ready observer");
+        tokio::time::timeout(std::time::Duration::from_secs(10), release.notified())
+            .await
+            .expect("model source ready release");
+    }
+    cancelled(&request.cancel)?;
+    Ok(source)
+}
+
 async fn inspect_font(
     request: &JobRequest,
     prepare: &FontPrepareRequest,
@@ -1319,3 +1396,7 @@ pub(crate) fn new_job_id() -> String {
 #[cfg(test)]
 #[path = "jobs_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "jobs_model_source_tests.rs"]
+mod model_source_tests;

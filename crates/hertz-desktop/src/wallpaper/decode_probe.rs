@@ -94,6 +94,25 @@ impl Reservation {
         }
         Ok(())
     }
+
+    pub(crate) fn retained_control_heap_bytes(&self) -> Option<u64> {
+        u64::try_from(
+            self.request
+                .session
+                .capacity()
+                .checked_add(self.request.task_id.capacity())?,
+        )
+        .ok()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn identity_for_test(&self) -> (&str, u64, &str) {
+        (
+            &self.request.session,
+            self.request.generation,
+            &self.request.task_id,
+        )
+    }
 }
 
 impl Drop for Reservation {
@@ -494,6 +513,49 @@ impl ProbeClient {
 
     pub(crate) fn prepare(&self, session: String) -> Result<Reservation, JobError> {
         Reservation::prepare(Arc::clone(&self.budget), session)
+    }
+
+    /// Model source work inherits the actual original job generation.
+    pub(crate) fn prepare_for_job(
+        &self,
+        session: String,
+        generation: u64,
+    ) -> Result<Reservation, JobError> {
+        let mut request = empty_request(session);
+        request.generation = generation;
+        request.task_id = "prepare".into();
+        request.prepare_tasks = 1;
+        Reservation::grant(Arc::clone(&self.budget), request)
+    }
+
+    /// Memory-only child of a borrowed original preparation. No new worker,
+    /// renderer, decoder, generation registry or advisory ledger projection.
+    pub(crate) fn job_memory(
+        &self,
+        preparation: &Reservation,
+        task: &'static str,
+        workspace: u64,
+        retained: u64,
+    ) -> Result<Reservation, JobError> {
+        if !Arc::ptr_eq(&self.budget, &preparation.budget)
+            || preparation.request.owner != OwnerKind::Probe
+            || preparation.request.prepare_tasks != 1
+            || preparation.request.task_id != "prepare"
+            || !matches!(
+                task,
+                "model-source-opening" | "model-identity" | "model-source"
+            )
+        {
+            return Err(JobError::invalid_input(
+                "model memory requires its original job preparation",
+            ));
+        }
+        let mut request = empty_request(preparation.request.session.clone());
+        request.generation = preparation.request.generation;
+        request.task_id = task.into();
+        request.prepare_cpu_bytes = workspace;
+        request.asset_cpu_bytes = retained;
+        Reservation::grant(Arc::clone(&self.budget), request)
     }
 
     /// Advisory memory projection on this probe's original ledger. No grant,

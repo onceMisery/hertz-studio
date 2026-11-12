@@ -435,3 +435,52 @@ normalized动画的文件内容检查见上文；实际0.186 loader的表示转�
 borrowed token 只增加栈上指针，唯一短取消诊断使用原固定 allowance；有限的
 System meter 回归检查原 `ModelHeapBounds` 下的峰值与 drop=0，不建立经验费用。
 这只是后续 native binding 的前置修复，native/ModelInput/GPU 准入门仍关闭。
+
+`AssetStore::pin_canonical_model_source` 现在提供已安装 original File 的 canonical
+Model source / 精确 variant 工厂。它先验证有界 AssetRef，再取得原 prepare
+opening 工作区 Wc；在 RootOwner 的 absolute verbatim disk/UNC 前缀下以单个预分配
+PathBuf 逐级固定 packages/hash/files 和 canonical entry 的父目录。目录拒绝
+reparse、允许读写共享但拒绝删除；original 与 projection File 只允许读共享。
+在 Wc 下取得这个 immutable File 的实际长度，以完整原 limits 查询并取得 Wi，
+账本检查 Wc+Wi 同存不超过320 MiB，之后才读包。较大的 metadata 工作区仍会
+拒绝；不缩小原 ZIP limits，也不把包长度当成 metadata 实际用量。
+同一个 original File 完整 SHA-256 核对后 seek 到开头，借给原 canonical
+identity inspector；不重新打开 original、不信任 receipt 或 caller Manifest。
+只有 canonical Model、source 或精确 variant、model/gltf-binary，以及原声明与
+全部已验证 entry 的 path/bytes/SHA/MIME tuple 相等才可选择；投影长度与完整
+SHA 另行复核。未知资产、非 Model 和未知 variant 都失败，没有 fallback。
+
+成功工厂只 move 整个 original identity、两个原 File、目录 pins 和 RootOwner
+Arc 到私有 outer source。调用方只能 clone outer Arc 或借用引用/entry/manifest
+事实，不能取得裸 File、独立 media Arc 或自行构造 source。保留票由原 Probe
+准备票派生，继承实际 job session/generation；Wc/Wi 计原 prepare CPU quota，R
+计原 asset CPU quota，不占 decoder/context/GPU。失败 scope 先释放文件和
+identity 再确认 Wi/Wc；最后一个 outer anchor drop 时先释放全部资源再确认自身 R，
+不会 purge 同会话其它资源。原 ImportJobs 单槽、内容写门、typed oneshot、取消与
+严格终态数据库守卫复用；终态失败或等待期间取消不能发送成功 source，receiver
+丢失时返回的 source 随原 send 结果 drop。
+
+这段 checked source factory 费用来自 actual RootOwner
+path/目录 Vec capacity 与 actual Arc<T> 布局、AssetStore root 和输入 AssetRef
+实际 capacities。native path upper bound 为 canonical root encoded bytes +261；
+单个 path backing、Windows wide `(L+1)*2` 和92个 File pins均在 grant 前通过
+checked Layout，File 内联值不另造 heap。原普通 grant 元数据只计 actual private
+Reservation 布局的32→64旧新同存96个 body和64份有界128+64 request字符串；
+调用方 prepare/Wc/Wi/R 的字符串另外同存计费。Wi 使用同一个 original File
+metadata 提供的可信实际长度调用原
+`CanonicalIdentityHeapBounds::for_package_bytes::<&mut File>(actual, None)`；
+原512 MiB上界的完整 Wi 约8.41 GB，不能假称它适合320 MiB quota。
+固定 scalar I/O 诊断只分配一个
+108字节 String：已审计1.88与当前stable的最长 ErrorKind 名称为22字节
+StaleNetworkFileHandle，外部错误 Display/Debug/Source 不运行。64/128 KiB
+预owned错误的真实 System 样本核对这个请求界，样本不是经验费用公式。
+R 使用 original identity 自己记录的实际 manifest retained fee，加同存 native
+owner 控制；transfer 期间 Wc/Wi/R 保守重叠。process catalogs 1,227,856字节继续
+由原 owner 单独长期记账，不随 job 退还。
+
+此费用名义仅为 source factory bounds；没有组合 legacy JobRequest/history/channel/
+终态诊断常驻、SessionResources/projection 或完整 Nnative。尚未把 outer source
+接入当前 MediaAccess/ReadPermit/Broker 流，完整 ModelInput/native runtime/GPU/
+首帧资格门保持关闭。完整 checked GLB R207,392,124字节仍超过128 MiB，下一波
+必须在 W 内产生 compact ModelInput，不能 deep clone 或缩小完整 profile 来替代。
+完整 A01–A10、HWPK1/Config5、canonical unused entries、权限与别名保留不变。

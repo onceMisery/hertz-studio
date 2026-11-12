@@ -165,9 +165,72 @@ fn real_read_errors_keep_their_error_even_when_cancelled_during_read() {
         );
         let error = read_source_sha256(&mut reader, &cancel).unwrap_err();
         assert_eq!(error.code, "io");
-        assert_eq!(error.message, "source read denied");
+        assert_eq!(
+            error.message,
+            "read source: kind=PermissionDenied, raw_os_error=None (byte 1)"
+        );
         assert_eq!(reader.returned, 2);
         assert_eq!(reader.requests.len(), 2);
+    }
+}
+
+#[test]
+fn preowned_large_io_errors_never_format_external_error_or_escape_fixed_heap_bound() {
+    use std::sync::atomic::AtomicUsize;
+    struct ExternalError {
+        text: String,
+        displays: Arc<AtomicUsize>,
+    }
+    impl std::fmt::Display for ExternalError {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            self.displays.fetch_add(1, Ordering::Relaxed);
+            formatter.write_str(&self.text)
+        }
+    }
+    impl std::fmt::Debug for ExternalError {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            std::fmt::Display::fmt(self, formatter)
+        }
+    }
+    impl std::error::Error for ExternalError {}
+    struct FailingRead<'a> {
+        error: Option<std::io::Error>,
+        cancel: &'a AtomicBool,
+        cancel_during_read: bool,
+    }
+    impl Read for FailingRead<'_> {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            self.cancel
+                .store(self.cancel_during_read, Ordering::Release);
+            Err(self.error.take().unwrap())
+        }
+    }
+    for size in [64 * 1024, 128 * 1024] {
+        for cancel_during_read in [false, true] {
+            let cancel = AtomicBool::new(false);
+            let displays = Arc::new(AtomicUsize::new(0));
+            let mut reader = FailingRead {
+                cancel: &cancel,
+                cancel_during_read,
+                error: Some(std::io::Error::new(
+                    ErrorKind::PermissionDenied,
+                    ExternalError {
+                        text: "x".repeat(size),
+                        displays: Arc::clone(&displays),
+                    },
+                )),
+            };
+            let (error, sample) = crate::wallpaper::budget::measure_requested_heap(|| {
+                read_source_sha256(&mut reader, &cancel).unwrap_err()
+            });
+            assert_eq!(displays.load(Ordering::Relaxed), 0);
+            assert_eq!(error.code, "io");
+            assert_eq!(error.message.capacity(), SOURCE_IO_DIAGNOSTIC_MAX_BYTES);
+            assert!(!sample.overflow);
+            assert_eq!(sample.peak, SOURCE_IO_DIAGNOSTIC_MAX_BYTES);
+            assert_eq!(sample.retained, SOURCE_IO_DIAGNOSTIC_MAX_BYTES);
+            eprintln!("external error bytes={size} cancel_during_read={cancel_during_read} displays=0 peak={} retained={}",sample.peak,sample.retained);
+        }
     }
 }
 

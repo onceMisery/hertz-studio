@@ -22,6 +22,15 @@ use crate::wallpaper::jobs::JobError;
 /// 模块内 Result 别名：错误固定为 JobError（遮蔽 prelude 双参 Result）。
 type Result<T> = std::result::Result<T, JobError>;
 
+#[path = "assets_model_source.rs"]
+mod model_source;
+#[cfg(test)]
+pub(crate) use model_source::tests::{
+    installed as installed_model_fixture, probe as model_source_test_probe,
+    writable as model_source_writable,
+};
+pub(crate) use model_source::CanonicalModelSource;
+
 /// staging 快照回执：后续所有检查只读这份固定输入。
 #[derive(Debug, Clone)]
 pub struct SnapshotReceipt {
@@ -813,14 +822,13 @@ fn read_source_sha256(reader: &mut impl Read, cancel: &AtomicBool) -> Result<(u6
     loop {
         source_pin_cancelled(cancel)?;
         let result = reader.read(&mut chunk);
-        let cancellation = source_pin_cancelled(cancel);
         // A real I/O failure remains a failure even if cancellation arrived during read.
         if let Err(error) = &result {
             if error.kind() != std::io::ErrorKind::Interrupted {
-                return Err(JobError::io(error.to_string()));
+                return Err(source_scalar_io_error("read source", bytes, error));
             }
         }
-        cancellation?;
+        source_pin_cancelled(cancel)?;
         let read = match result {
             Ok(read) => read,
             Err(_) => continue, // Only an uncancelled Interrupted reaches this branch.
@@ -834,6 +842,35 @@ fn read_source_sha256(reader: &mut impl Read, cancel: &AtomicBool) -> Result<(u6
         digest.update(&chunk[..read]);
     }
 }
+
+/// Only built-in scalar formatting runs; external Error Display/Debug/Source
+/// may own or allocate unbounded diagnostics and must never be invoked here.
+fn source_scalar_io_error(
+    operation: &'static str,
+    offset: u64,
+    error: &std::io::Error,
+) -> JobError {
+    use std::fmt::Write as _;
+    let mut message = String::with_capacity(SOURCE_IO_DIAGNOSTIC_MAX_BYTES);
+    write!(
+        message,
+        "{operation}: kind={:?}, raw_os_error={:?} (byte {offset})",
+        error.kind(),
+        error.raw_os_error()
+    )
+    .expect("writing to String cannot fail");
+    JobError::io(message)
+}
+
+// Actual fixed operations <="metadata projection"; ErrorKind's longest debug
+// variant on the audited Rust 1.88/stable owner is StaleNetworkFileHandle (22).
+// Option<i32> includes Some(-2147483648); u64 includes its 20-digit maximum.
+// One pre-sized String avoids old/new grow allocation overlap altogether.
+const SOURCE_IO_DIAGNOSTIC_MAX_BYTES: usize = "metadata projection".len()
+    + "StaleNetworkFileHandle".len()
+    + "Some(-2147483648)".len()
+    + "18446744073709551615".len()
+    + ": kind=, raw_os_error= (byte )".len();
 
 pub(super) fn open_immutable(path: &Path) -> Result<std::fs::File> {
     use std::os::windows::fs::OpenOptionsExt;

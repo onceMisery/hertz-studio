@@ -6,6 +6,116 @@ use std::{
     cell::Cell,
 };
 
+#[derive(Clone, Copy)]
+struct HeapRecord {
+    pointer: usize,
+    bytes: usize,
+}
+
+struct HeapMeter {
+    active: bool,
+    records: [HeapRecord; 256],
+    live: usize,
+    peak: usize,
+    overflow: bool,
+}
+
+thread_local! {
+    static REQUESTED_HEAP: std::cell::RefCell<HeapMeter> = const { std::cell::RefCell::new(HeapMeter {
+        active: false, records: [HeapRecord { pointer: 0, bytes: 0 }; 256], live: 0, peak: 0, overflow: false,
+    }) };
+}
+
+fn heap_event(old: *mut u8, new: *mut u8, bytes: usize, reallocating: bool) {
+    let _ = REQUESTED_HEAP.try_with(|cell| {
+        let Ok(mut meter) = cell.try_borrow_mut() else {
+            return;
+        };
+        if !meter.active {
+            return;
+        }
+        let old_slot = meter
+            .records
+            .iter()
+            .position(|record| record.pointer != 0 && record.pointer == old as usize);
+        if reallocating {
+            // Conservative requested old+new overlap at the real realloc call.
+            let Some(overlap) = meter.live.checked_add(bytes) else {
+                meter.overflow = true;
+                return;
+            };
+            meter.peak = meter.peak.max(overlap);
+            if new.is_null() {
+                return;
+            }
+        }
+        if let Some(slot) = old_slot {
+            meter.live -= meter.records[slot].bytes;
+            meter.records[slot] = HeapRecord {
+                pointer: 0,
+                bytes: 0,
+            };
+        }
+        // Pre-owned frees are deliberately absent and never subtract live.
+        if new.is_null() {
+            return;
+        }
+        let Some(slot) = meter.records.iter().position(|record| record.pointer == 0) else {
+            meter.overflow = true;
+            return;
+        };
+        let Some(live) = meter.live.checked_add(bytes) else {
+            meter.overflow = true;
+            return;
+        };
+        meter.records[slot] = HeapRecord {
+            pointer: new as usize,
+            bytes,
+        };
+        meter.live = live;
+        meter.peak = meter.peak.max(live);
+    });
+}
+
+pub(crate) struct RequestedHeapSample {
+    pub(crate) peak: usize,
+    pub(crate) retained: usize,
+    pub(crate) overflow: bool,
+}
+
+pub(crate) fn measure_requested_heap<T>(run: impl FnOnce() -> T) -> (T, RequestedHeapSample) {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            REQUESTED_HEAP.with(|cell| cell.borrow_mut().active = false);
+        }
+    }
+    REQUESTED_HEAP.with(|cell| {
+        let mut meter = cell.borrow_mut();
+        assert!(!meter.active);
+        meter.records.fill(HeapRecord {
+            pointer: 0,
+            bytes: 0,
+        });
+        meter.live = 0;
+        meter.peak = 0;
+        meter.overflow = false;
+        meter.active = true;
+    });
+    let reset = Reset;
+    let result = run();
+    let sample = REQUESTED_HEAP.with(|cell| {
+        let meter = cell.borrow();
+        RequestedHeapSample {
+            peak: meter.peak,
+            retained: meter.live,
+            overflow: meter.overflow,
+        }
+    });
+    drop(reset);
+    (result, sample)
+}
+
 // Count the actual resource Vec backing request on this test thread. Other
 // allocations and parallel tests continue through the original System allocator.
 struct ResourcePlanAllocationMeter;
@@ -26,21 +136,28 @@ fn record_resource_plan_allocation(size: usize) {
 unsafe impl GlobalAlloc for ResourcePlanAllocationMeter {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         record_resource_plan_allocation(layout.size());
-        unsafe { System.alloc(layout) }
+        let pointer = unsafe { System.alloc(layout) };
+        heap_event(std::ptr::null_mut(), pointer, layout.size(), false);
+        pointer
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         record_resource_plan_allocation(layout.size());
-        unsafe { System.alloc_zeroed(layout) }
+        let pointer = unsafe { System.alloc_zeroed(layout) };
+        heap_event(std::ptr::null_mut(), pointer, layout.size(), false);
+        pointer
     }
 
     unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+        heap_event(pointer, std::ptr::null_mut(), 0, false);
         unsafe { System.dealloc(pointer, layout) };
     }
 
     unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
         record_resource_plan_allocation(size);
-        unsafe { System.realloc(pointer, layout, size) }
+        let next = unsafe { System.realloc(pointer, layout, size) };
+        heap_event(pointer, next, size, true);
+        next
     }
 }
 

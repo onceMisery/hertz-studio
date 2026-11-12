@@ -7,6 +7,16 @@ use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+/// std's repr(C) ArcInner<T>: two AtomicUsize counters followed by actual T.
+/// Layout composition includes padding without mirroring the private body.
+pub(crate) fn arc_allocation_bytes<T>() -> Option<u64> {
+    use std::alloc::Layout;
+    use std::sync::atomic::AtomicUsize;
+    let counters = Layout::array::<AtomicUsize>(2).ok()?;
+    let (layout, _) = counters.extend(Layout::new::<T>()).ok()?;
+    u64::try_from(layout.pad_to_align().size()).ok()
+}
+
 use anyhow::{ensure, Context, Result};
 use windows_sys::Win32::Foundation::GENERIC_READ;
 use windows_sys::Win32::Storage::FileSystem::{
@@ -46,6 +56,18 @@ impl RootOwner {
 
     pub(crate) fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Actual retained capacities; this query allocates and clones nothing.
+    pub(crate) fn retained_heap_bytes(&self) -> Option<u64> {
+        let paths = u64::try_from(self.root.capacity()).ok()?;
+        let pins = self
+            ._directories
+            .capacity()
+            .checked_mul(std::mem::size_of::<File>())?;
+        paths
+            .checked_add(u64::try_from(pins).ok()?)?
+            .checked_add(arc_allocation_bytes::<Self>()?)
     }
 
     fn acquire(root: &Path, exclusive: bool) -> Result<Arc<Self>> {

@@ -12,6 +12,113 @@ use super::{
 };
 
 #[test]
+fn ordinary_probe_metadata_bound_uses_original_private_layout_and_rejection_does_not_mutate() {
+    let expected = (96 * std::mem::size_of::<super::Reservation>() + 64 * (128 + 64)) as u64;
+    assert_eq!(super::ordinary_grant_metadata_heap_bytes(), Some(expected));
+    let budget = BudgetCoordinator::new();
+    let mut request = BudgetRequest {
+        owner: OwnerKind::Probe,
+        session: "x".repeat(128),
+        generation: 9,
+        task_id: "a".repeat(64),
+        targets: 0,
+        contexts: 0,
+        decoders: 0,
+        transcode_slots: 0,
+        decode_pixel_rate: 0,
+        output_pixel_rate: 0,
+        texture_upload_bytes_per_second: 0,
+        cpu_bytes: 0,
+        prepare_cpu_bytes: 0,
+        asset_cpu_bytes: 0,
+        gpu_bytes: 0,
+        prepare_tasks: 0,
+    };
+    for _ in 0..64 {
+        budget.grant(&request).unwrap();
+    }
+    let ledger = budget.ledger.lock().unwrap();
+    assert_eq!(ledger.reservations.capacity(), 64);
+    assert!(ledger
+        .reservations
+        .iter()
+        .all(|entry| entry.resources.is_none() && entry.children.is_empty()));
+    drop(ledger);
+    let before = budget.planning_snapshot();
+    request.asset_cpu_bytes = 1;
+    assert_eq!(
+        budget.grant(&request).unwrap_err().quota,
+        "reservation_metadata"
+    );
+    assert_eq!(budget.planning_snapshot(), before);
+}
+
+#[test]
+fn ordinary_memory_rejection_diagnostic_samples_fit_original_format_and_growth_bound() {
+    use crate::wallpaper::decode_probe::ProbeClient;
+    let probe = ProbeClient::testing(|_, _| Box::pin(async { Ok(()) }));
+    let preparation = probe.prepare_for_job("diagnostic".into(), 1).unwrap();
+    let (error, sample) = super::measure_requested_heap(|| {
+        probe
+            .job_memory(&preparation, "model-identity", u64::MAX, 0)
+            .err()
+            .unwrap()
+    });
+    assert_eq!(error.code, "budget_busy");
+    assert!(!sample.overflow);
+    // The bounded request's caller-owned session/task Strings overlap the error.
+    assert!(
+        sample.peak as u64
+            <= super::ordinary_memory_grant_diagnostic_heap_bytes().unwrap() + 128 + 64
+    );
+    preparation.finish();
+}
+
+#[test]
+fn job_memory_inherits_original_preparation_identity_and_cannot_cross_budget_or_task() {
+    use crate::wallpaper::decode_probe::ProbeClient;
+    let probe = ProbeClient::testing(|_, _| Box::pin(async { Ok(()) }));
+    let foreign = ProbeClient::testing(|_, _| Box::pin(async { Ok(()) }));
+    let preparation = probe.prepare_for_job("bound-job".into(), 74).unwrap();
+    let before = probe.budget_for_test().planning_snapshot();
+    assert_eq!(
+        foreign
+            .job_memory(&preparation, "model-source", 0, 1)
+            .err()
+            .unwrap()
+            .code,
+        "invalid_input"
+    );
+    assert_eq!(
+        probe
+            .job_memory(&preparation, "caller-task", 0, 1)
+            .err()
+            .unwrap()
+            .code,
+        "invalid_input"
+    );
+    assert_eq!(probe.budget_for_test().planning_snapshot(), before);
+    let memory = probe
+        .job_memory(&preparation, "model-identity", 31, 29)
+        .unwrap();
+    assert_eq!(
+        memory.identity_for_test(),
+        ("bound-job", 74, "model-identity")
+    );
+    let usage = probe.budget_for_test().usage();
+    assert_eq!(usage.prepare_tasks, 1);
+    assert_eq!(usage.prepare_cpu_bytes, 31);
+    assert_eq!(usage.asset_cpu_bytes, 29);
+    assert_eq!(usage.cpu_bytes, 0);
+    assert_eq!(usage.decoder_slots, 0);
+    assert_eq!(usage.contexts, 0);
+    assert_eq!(usage.gpu_bytes, 0);
+    memory.finish();
+    preparation.finish();
+    assert!(probe.budget_for_test().stuck().is_empty());
+}
+
+#[test]
 fn static_preview_storage_cannot_create_a_renderer_or_decoder() {
     let budget = BudgetCoordinator::new();
     let mut request = req(OwnerKind::PreviewFrame, "preview-frame");

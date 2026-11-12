@@ -31,6 +31,49 @@ use allocations::{SessionResources, SubReservation};
 
 /// Native metadata is bounded independently of resource byte quotas.
 const MAX_RESERVATIONS: usize = 64;
+const MEMORY_METADATA_QUOTA: &str = "reservation_metadata";
+const MEMORY_METADATA_HINT: &str = "等待退出确认并回收已结束的原生资源记录";
+const MEMORY_PREPARE_QUOTA: &str = "prepare_cpu_bytes";
+const MEMORY_PREPARE_HINT: &str = "图片准备工作区不足；使用更小输入或等待准备退出";
+const MEMORY_ASSET_QUOTA: &str = "asset_cpu_bytes";
+const MEMORY_ASSET_HINT: &str = "通用共享资源常驻额度不足；等待旧呈现退出";
+
+/// Only valid ordinary memory grants' three possible rejection diagnostics.
+/// Ledger::reject emits B bytes; Reservation::grant preserves its existing
+/// quota prefix and formats M=B+quota+2. Original fmt estimated capacity <=2B,
+/// String doubling has old+new <=3B. During the second format the original
+/// String <=2B overlaps the new grow <=3M: 2B+3M. No external formatting runs.
+pub(crate) fn ordinary_memory_grant_diagnostic_heap_bytes() -> Option<u64> {
+    [
+        (MEMORY_METADATA_QUOTA, MEMORY_METADATA_HINT),
+        (MEMORY_PREPARE_QUOTA, MEMORY_PREPARE_HINT),
+        (MEMORY_ASSET_QUOTA, MEMORY_ASSET_HINT),
+    ]
+    .into_iter()
+    .try_fold(0, |maximum, (quota, hint)| {
+        let body = quota
+            .len()
+            .checked_add(hint.len())?
+            .checked_add(" 超限：已占  + 申请  > 上限 ；".len())?
+            .checked_add(3 * "18446744073709551615".len())?;
+        let mapped = body.checked_add(quota.len())?.checked_add(2)?;
+        let peak = body.checked_mul(2)?.checked_add(mapped.checked_mul(3)?)?;
+        Some(maximum.max(u64::try_from(peak).ok()?))
+    })
+}
+
+/// Original ordinary grant (resources=None, empty children) metadata only.
+/// Vec::new/push/retain has a largest 32->64 reallocation: old+new=96
+/// actual private Reservation bodies. Each bounded request clone holds at most
+/// 128 session + 64 task bytes. Caller-owned ticket strings are additional.
+/// SessionResources, projections and process catalogs are excluded.
+pub(crate) fn ordinary_grant_metadata_heap_bytes() -> Option<u64> {
+    let bodies = MAX_RESERVATIONS
+        .checked_add(MAX_RESERVATIONS / 2)?
+        .checked_mul(std::mem::size_of::<Reservation>())?;
+    let strings = MAX_RESERVATIONS.checked_mul(128 + 64)?;
+    u64::try_from(bodies.checked_add(strings)?).ok()
+}
 
 /// 进程内唯一生产账本。导入准备/探测已接入；桌面与预览规划器沿用此 owner。
 static BUDGET: OnceLock<Arc<BudgetCoordinator>> = OnceLock::new();
@@ -545,11 +588,11 @@ impl BudgetCoordinator {
         Self::validate_shape(request)?;
         if ledger.reservations.len() >= MAX_RESERVATIONS {
             return Err(Ledger::reject(
-                "reservation_metadata",
+                MEMORY_METADATA_QUOTA,
                 MAX_RESERVATIONS as u64,
                 ledger.reservations.len() as u64,
                 1,
-                "等待退出确认并回收已结束的原生资源记录",
+                MEMORY_METADATA_HINT,
             ));
         }
         let usage = ledger.active_usage();
@@ -688,20 +731,20 @@ impl BudgetCoordinator {
         if request.prepare_cpu_bytes > MAX_PREPARE_CPU_BYTES.saturating_sub(usage.prepare_cpu_bytes)
         {
             return Err(Ledger::reject(
-                "prepare_cpu_bytes",
+                MEMORY_PREPARE_QUOTA,
                 MAX_PREPARE_CPU_BYTES,
                 usage.prepare_cpu_bytes,
                 request.prepare_cpu_bytes,
-                "图片准备工作区不足；使用更小输入或等待准备退出",
+                MEMORY_PREPARE_HINT,
             ));
         }
         if request.asset_cpu_bytes > MAX_ASSET_CPU_BYTES.saturating_sub(usage.asset_cpu_bytes) {
             return Err(Ledger::reject(
-                "asset_cpu_bytes",
+                MEMORY_ASSET_QUOTA,
                 MAX_ASSET_CPU_BYTES,
                 usage.asset_cpu_bytes,
                 request.asset_cpu_bytes,
-                "通用共享资源常驻额度不足；等待旧呈现退出",
+                MEMORY_ASSET_HINT,
             ));
         }
         if request.gpu_bytes > MAX_GPU_TRACKED_BYTES.saturating_sub(usage.gpu_bytes) {
@@ -975,6 +1018,15 @@ impl BudgetCoordinator {
         (ledger.revision, ledger.active_usage())
     }
 
+    #[cfg(test)]
+    pub(crate) fn record_count_for_test(&self) -> usize {
+        self.ledger
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .reservations
+            .len()
+    }
+
     fn find_checked<'ledger>(
         ledger: &'ledger mut Ledger,
         token: u64,
@@ -1003,6 +1055,9 @@ mod tests;
 #[cfg(test)]
 #[path = "budget_allocations_tests.rs"]
 mod allocation_tests;
+
+#[cfg(test)]
+pub(crate) use allocation_tests::measure_requested_heap;
 
 #[cfg(test)]
 #[path = "budget_catalog_tests.rs"]
