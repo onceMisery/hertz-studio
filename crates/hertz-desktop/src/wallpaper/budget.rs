@@ -125,6 +125,15 @@ pub(crate) struct BudgetRequest {
     pub prepare_tasks: u32,
 }
 
+impl BudgetRequest {
+    fn has_valid_identity(&self) -> bool {
+        !self.session.is_empty()
+            && self.session.len() <= 128
+            && self.generation != 0
+            && hertz_wallpaper::valid_local_id(&self.task_id)
+    }
+}
+
 /// 拒绝明细：哪个配额、占了多少、要多少、上限多少。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BudgetRejection {
@@ -531,7 +540,7 @@ impl BudgetCoordinator {
     fn grant_locked(
         ledger: &mut Ledger,
         request: &BudgetRequest,
-        resources: Option<SessionResources>,
+        resources: Option<&[ResourcePlan]>,
     ) -> Result<u64, BudgetRejection> {
         Self::validate_shape(request)?;
         if ledger.reservations.len() >= MAX_RESERVATIONS {
@@ -726,7 +735,7 @@ impl BudgetCoordinator {
             request: request.clone(),
             state: ReservationState::Active,
             allocation_revision,
-            resources,
+            resources: resources.map(SessionResources::from_plan),
             children: Vec::new(),
         });
         Ok(token)
@@ -746,6 +755,15 @@ impl BudgetCoordinator {
 
     /// 申请面静态校验：owner 与字段组合的合同（§12.1 表格的行内约束）。
     fn validate_shape(request: &BudgetRequest) -> Result<(), BudgetRejection> {
+        if !request.has_valid_identity() {
+            return Err(Ledger::reject(
+                "request_shape",
+                0,
+                0,
+                0,
+                "预算申请必须绑定有界会话、非零代际和有效任务 id",
+            ));
+        }
         match request.owner {
             OwnerKind::Desktop => {
                 if request.targets == 0 {

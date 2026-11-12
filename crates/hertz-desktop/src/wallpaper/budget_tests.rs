@@ -54,6 +54,86 @@ fn req(owner: OwnerKind, session: &str) -> BudgetRequest {
 }
 
 #[test]
+fn every_owner_rejects_invalid_identity_without_changing_the_ledger() {
+    for owner in [
+        OwnerKind::Probe,
+        OwnerKind::Desktop,
+        OwnerKind::DesktopFrame,
+        OwnerKind::Preview,
+        OwnerKind::PreviewFrame,
+    ] {
+        let budget = BudgetCoordinator::new();
+        let mut held = req(OwnerKind::Probe, "existing");
+        held.cpu_bytes = 123;
+        let token = budget.grant(&held).unwrap();
+        let before = budget.planning_snapshot();
+        for (session, generation, task) in [
+            (String::new(), 1, "task".into()),
+            ("s".repeat(129), 1, "task".into()),
+            ("会".repeat(43), 1, "task".into()),
+            ("会".repeat(42) + "abc", 1, "task".into()),
+            ("session".into(), 0, "task".into()),
+            ("session".into(), 1, String::new()),
+            ("session".into(), 1, "Task".into()),
+            ("session".into(), 1, "task:bad".into()),
+            ("session".into(), 1, "t".repeat(65)),
+        ] {
+            let mut request = req(owner, &session);
+            request.generation = generation;
+            request.task_id = task;
+            let rejection = budget.grant(&request).unwrap_err();
+            assert_eq!(rejection.quota, "request_shape", "{owner:?}");
+            assert_eq!(
+                (rejection.cap, rejection.held, rejection.requested),
+                (0, 0, 0)
+            );
+            assert_eq!(
+                rejection.message,
+                "request_shape 超限：已占 0 + 申请 0 > 上限 0；预算申请必须绑定有界会话、非零代际和有效任务 id"
+            );
+            assert_eq!(
+                budget.check_requests(std::slice::from_ref(&request)),
+                Err(rejection)
+            );
+            assert_eq!(budget.planning_snapshot(), before);
+        }
+        assert_eq!(
+            budget.grant(&req(OwnerKind::Probe, "next")).unwrap(),
+            token + 1
+        );
+    }
+}
+
+#[test]
+fn every_owner_accepts_bounded_utf8_sessions_and_maximum_local_task_ids() {
+    for owner in [
+        OwnerKind::Probe,
+        OwnerKind::Desktop,
+        OwnerKind::DesktopFrame,
+        OwnerKind::Preview,
+        OwnerKind::PreviewFrame,
+    ] {
+        for session in ["S".repeat(128), "会".repeat(42) + "ab", "UPPER:会话".into()] {
+            let budget = BudgetCoordinator::new();
+            let mut request = req(owner, &session);
+            request.task_id = "t".repeat(64);
+            budget
+                .check_requests(std::slice::from_ref(&request))
+                .unwrap();
+            let token = budget.grant(&request).unwrap();
+            budget.release(token, &session, 1).unwrap();
+            assert_eq!(
+                budget.stuck(),
+                vec![(token, session.clone(), request.task_id)]
+            );
+            budget.confirm_exit(token, &session, 1).unwrap();
+            assert!(budget.forget_released(token, &session, 1).unwrap());
+            assert_eq!(budget.usage(), Default::default());
+        }
+    }
+}
+
+#[test]
 fn planning_snapshot_is_atomic_read_only_and_keeps_pending_exit_usage() {
     let budget = BudgetCoordinator::new();
     let initial = budget.planning_snapshot();

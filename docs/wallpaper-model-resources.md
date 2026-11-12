@@ -1,5 +1,17 @@
 # GLB / KTX2 资源实施记录
 
+2026-11-12，原 `BudgetRequest` 的 grant/check_requests 与 `SessionPlan::new`
+复用同一身份规则：session 非空且最多 128 UTF-8 bytes，generation 非零，task id
+沿原 local id 规则最多 64 bytes。session 仍允许 Unicode、冒号与大写，不套用
+task 的字符规则；身份失败在 shape 校验最先拒绝，诊断不复制或格式化申请字段。
+
+`grant_session` 在原 ledger 锁内借用资源计划，全部 shape、64 条 metadata 与资源
+quota 校验成功后才建立原 `SessionResources` 的自有副本。pending 与已确认墓碑
+继续占 metadata，真实退出才归还资源额度，确认后 forget 才回收记录。
+本波只完成有界 request metadata 和准入后 clone 前置；完整 Nnative、canonical
+path/Arc 生命周期、联合 W/R、同一不可变工厂输入、ModelInput 与 GPU 接线仍待
+实施验收，不授予 native 资格或完整 320 MiB/GPU 准入。
+
 2026-11-12，原 native `budget::global()` 的唯一 `OnceLock<Arc<BudgetCoordinator>>`
 先保有原 Arc，然后每次返回前在原 Ledger 的同一 Mutex 内等待 scene 与 composition
 两目录就绪。scene 成功、composition 拒绝或 panic 时，原 Arc 与 scene 永久费用

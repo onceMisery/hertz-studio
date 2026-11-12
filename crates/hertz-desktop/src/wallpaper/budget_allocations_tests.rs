@@ -1,6 +1,69 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 hertz-studio contributors
 use super::*;
+use std::{
+    alloc::{GlobalAlloc, Layout, System},
+    cell::Cell,
+};
+
+// Count the actual resource Vec backing request on this test thread. Other
+// allocations and parallel tests continue through the original System allocator.
+struct ResourcePlanAllocationMeter;
+
+thread_local! {
+    static RESOURCE_PLAN_ALLOCS: Cell<(usize, usize)> = const { Cell::new((0, 0)) };
+}
+
+fn record_resource_plan_allocation(size: usize) {
+    let _ = RESOURCE_PLAN_ALLOCS.try_with(|meter| {
+        let (expected, count) = meter.get();
+        if expected != 0 && size == expected {
+            meter.set((expected, count + 1));
+        }
+    });
+}
+
+unsafe impl GlobalAlloc for ResourcePlanAllocationMeter {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        record_resource_plan_allocation(layout.size());
+        unsafe { System.alloc(layout) }
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        record_resource_plan_allocation(layout.size());
+        unsafe { System.alloc_zeroed(layout) }
+    }
+
+    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+        unsafe { System.dealloc(pointer, layout) };
+    }
+
+    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
+        record_resource_plan_allocation(size);
+        unsafe { System.realloc(pointer, layout, size) }
+    }
+}
+
+#[global_allocator]
+static RESOURCE_PLAN_METER: ResourcePlanAllocationMeter = ResourcePlanAllocationMeter;
+
+fn count_resource_plan_copies<T>(plan: &SessionPlan, run: impl FnOnce() -> T) -> (T, usize) {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            RESOURCE_PLAN_ALLOCS.with(|meter| meter.set((0, 0)));
+        }
+    }
+    RESOURCE_PLAN_ALLOCS.with(|meter| {
+        assert_eq!(meter.get(), (0, 0));
+        meter.set((std::mem::size_of_val(plan.resources()), 0));
+    });
+    let reset = Reset;
+    let result = run();
+    let count = RESOURCE_PLAN_ALLOCS.with(|meter| meter.get().1);
+    drop(reset);
+    (result, count)
+}
 
 fn plan(owner: OwnerKind, session: &str, generation: u64) -> SessionPlan {
     SessionPlan::new(
@@ -44,6 +107,137 @@ fn plan(owner: OwnerKind, session: &str, generation: u64) -> SessionPlan {
         ],
     )
     .unwrap()
+}
+
+#[test]
+fn quota_rejection_does_not_copy_resource_plans_or_mutate_existing_allocations() {
+    let budget = BudgetCoordinator::new();
+    let original = plan(OwnerKind::Desktop, "existing", 1);
+    let parent = budget.grant_session(&original).unwrap();
+    budget
+        .allocate_resource(
+            parent,
+            "existing",
+            1,
+            "decode",
+            original.resources()[0].maximum,
+        )
+        .unwrap();
+    let before = budget.planning_snapshot();
+    let allocations = budget.allocation_snapshot(parent, "existing", 1).unwrap();
+    let mut request = plan(OwnerKind::Desktop, "candidate", 1).request().clone();
+    request.decoders = 2;
+    let resources: Vec<_> = (0..256)
+        .map(|index| ResourcePlan {
+            id: format!("resource-{index}"),
+            maximum: ResourceAmounts::default(),
+        })
+        .collect();
+    let candidate = SessionPlan::new(request.clone(), resources).unwrap();
+    let (rejected, copies) =
+        count_resource_plan_copies(&candidate, || budget.grant_session(&candidate));
+    let error = rejected.unwrap_err();
+    assert_eq!(error.code, "budget_busy");
+    assert!(error.message.starts_with("decoder_slots:"));
+    assert_eq!(
+        copies, 0,
+        "quota rejection must precede owned resource backing allocation"
+    );
+    assert_eq!(budget.planning_snapshot(), before);
+    let after = budget.allocation_snapshot(parent, "existing", 1).unwrap();
+    assert_eq!(after.allocation_revision, allocations.allocation_revision);
+    assert_eq!(after.reserved, allocations.reserved);
+    assert_eq!(after.allocated, allocations.allocated);
+    assert_eq!((after.active, after.release_pending), (1, 0));
+
+    request.decoders = 1;
+    let candidate = SessionPlan::new(request, candidate.resources().to_vec()).unwrap();
+    let resource = candidate.resources()[0].id.clone();
+    let (admitted, copies) =
+        count_resource_plan_copies(&candidate, || budget.grant_session(&candidate));
+    let admitted = admitted.unwrap();
+    assert_eq!(
+        copies, 1,
+        "successful admission must retain its own resource plan"
+    );
+    drop(candidate);
+    budget
+        .allocate_resource(
+            admitted,
+            "candidate",
+            1,
+            &resource,
+            ResourceAmounts::default(),
+        )
+        .unwrap();
+    assert_eq!(budget.usage().resource_allocations, 2);
+}
+
+#[test]
+fn session_plans_keep_the_same_bounded_identity_rules_for_every_session_owner() {
+    let original = plan(OwnerKind::Desktop, "identity", 1);
+    for owner in [
+        OwnerKind::Desktop,
+        OwnerKind::DesktopFrame,
+        OwnerKind::Preview,
+        OwnerKind::PreviewFrame,
+    ] {
+        for (session, generation, task) in [
+            (String::new(), 1, "task".into()),
+            ("s".repeat(129), 1, "task".into()),
+            ("会".repeat(43), 1, "task".into()),
+            ("会".repeat(42) + "abc", 1, "task".into()),
+            ("session".into(), 0, "task".into()),
+            ("session".into(), 1, String::new()),
+            ("session".into(), 1, "Task".into()),
+            ("session".into(), 1, "task:bad".into()),
+            ("session".into(), 1, "t".repeat(65)),
+        ] {
+            let mut request = original.request().clone();
+            request.owner = owner;
+            request.session = session;
+            request.generation = generation;
+            request.task_id = task;
+            let error = SessionPlan::new(request, original.resources().to_vec()).unwrap_err();
+            assert_eq!(error.code, "invalid_input");
+            assert_eq!(error.message, "会话预算计划的 owner、代际或资源数量无效");
+        }
+        for session in ["S".repeat(128), "会".repeat(42) + "ab", "UPPER:会话".into()] {
+            let mut request = original.request().clone();
+            request.owner = owner;
+            request.session = session.clone();
+            request.generation = u64::MAX;
+            request.task_id = "t".repeat(64);
+            request.targets = u32::from(owner == OwnerKind::Desktop);
+            if matches!(owner, OwnerKind::DesktopFrame | OwnerKind::PreviewFrame) {
+                request.contexts = 0;
+                request.decoders = 0;
+                request.decode_pixel_rate = 0;
+                request.output_pixel_rate = 0;
+            }
+            let plan = SessionPlan::new(
+                request,
+                vec![ResourcePlan {
+                    id: "resource".into(),
+                    maximum: ResourceAmounts::default(),
+                }],
+            )
+            .unwrap();
+            assert_eq!(plan.request().session, session);
+            let budget = BudgetCoordinator::new();
+            let token = budget.grant_session(&plan).unwrap();
+            budget.release(token, &session, u64::MAX).unwrap();
+            budget.confirm_exit(token, &session, u64::MAX).unwrap();
+        }
+    }
+    let mut probe = original.request().clone();
+    probe.owner = OwnerKind::Probe;
+    assert_eq!(
+        SessionPlan::new(probe, original.resources().to_vec())
+            .unwrap_err()
+            .code,
+        "invalid_input"
+    );
 }
 
 #[test]
@@ -492,20 +686,101 @@ fn empty_flat_reservations_cannot_grow_native_metadata_without_bound() {
     request.decode_pixel_rate = 0;
     request.output_pixel_rate = 0;
     let mut tokens = Vec::new();
-    for _ in 0..MAX_RESERVATIONS {
+    for _ in 0..64 {
         tokens.push(budget.grant(&request).unwrap());
     }
+    assert_eq!(budget.usage().reservation_records, 64);
+    let before = budget.planning_snapshot();
+    let rejection = budget.grant(&request).unwrap_err();
+    assert_eq!(rejection.quota, "reservation_metadata");
+    assert_eq!(
+        (rejection.cap, rejection.held, rejection.requested),
+        (64, 64, 1)
+    );
+    assert_eq!(budget.planning_snapshot(), before);
+    assert!(!budget.forget_released(tokens[0], "metadata", 1).unwrap());
+    budget.release(tokens[0], "metadata", 1).unwrap();
+    assert_eq!(budget.usage().release_pending, 1);
+    assert_eq!(budget.usage().reservation_records, 64);
+    assert!(!budget.forget_released(tokens[0], "metadata", 1).unwrap());
     assert_eq!(
         budget.grant(&request).unwrap_err().quota,
         "reservation_metadata"
     );
     budget.confirm_exit(tokens[0], "metadata", 1).unwrap();
+    assert_eq!(budget.usage().release_pending, 0);
+    assert_eq!(budget.usage().reservation_records, 64);
     assert_eq!(
         budget.grant(&request).unwrap_err().quota,
         "reservation_metadata"
     );
     budget.forget_released(tokens[0], "metadata", 1).unwrap();
-    assert!(budget.grant(&request).is_ok());
+    let fresh = budget.grant(&request).unwrap();
+    assert!(fresh > tokens[63]);
+    assert_eq!(budget.usage().reservation_records, 64);
+    assert_eq!(
+        budget.release(tokens[0], "metadata", 1),
+        Err(LedgerError::UnknownToken)
+    );
+}
+
+#[test]
+fn metadata_rejection_keeps_actual_probe_usage_until_confirmed_exit() {
+    let budget = BudgetCoordinator::new();
+    let original = plan(OwnerKind::Desktop, "work", 1);
+    let mut request = original.request().clone();
+    request.owner = OwnerKind::Probe;
+    request.targets = 0;
+    request.contexts = 0;
+    request.output_pixel_rate = 0;
+    request.prepare_cpu_bytes = 1024;
+    let token = budget.grant(&request).unwrap();
+    let mut empty = request.clone();
+    empty.session = "empty".into();
+    empty.decoders = 0;
+    empty.decode_pixel_rate = 0;
+    empty.cpu_bytes = 0;
+    empty.gpu_bytes = 0;
+    empty.prepare_cpu_bytes = 0;
+    for _ in 0..63 {
+        budget.grant(&empty).unwrap();
+    }
+    let held = budget.usage();
+    budget.release(token, "work", 1).unwrap();
+    let pending = budget.usage();
+    assert_eq!(pending.release_pending, 1);
+    assert_eq!(pending.reservation_records, 64);
+    assert_eq!(pending.decoder_slots, held.decoder_slots);
+    assert_eq!(pending.decode_pixel_rate, held.decode_pixel_rate);
+    assert_eq!(pending.cpu_bytes, held.cpu_bytes);
+    assert_eq!(pending.gpu_bytes, held.gpu_bytes);
+    assert_eq!(pending.prepare_cpu_bytes, held.prepare_cpu_bytes);
+    assert!(!budget.forget_released(token, "work", 1).unwrap());
+    assert_eq!(
+        budget.grant(&empty).unwrap_err().quota,
+        "reservation_metadata"
+    );
+    budget.confirm_exit(token, "work", 1).unwrap();
+    let exited = budget.usage();
+    assert_eq!(
+        (
+            exited.decoder_slots,
+            exited.decode_pixel_rate,
+            exited.cpu_bytes,
+            exited.gpu_bytes,
+            exited.prepare_cpu_bytes,
+            exited.release_pending
+        ),
+        (0, 0, 0, 0, 0, 0)
+    );
+    assert_eq!(exited.reservation_records, 64);
+    assert_eq!(
+        budget.grant(&empty).unwrap_err().quota,
+        "reservation_metadata"
+    );
+    assert!(budget.forget_released(token, "work", 1).unwrap());
+    budget.grant(&empty).unwrap();
+    assert_eq!(budget.usage().reservation_records, 64);
 }
 
 #[test]

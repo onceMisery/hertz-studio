@@ -127,11 +127,7 @@ impl SessionPlan {
                 | OwnerKind::DesktopFrame
                 | OwnerKind::Preview
                 | OwnerKind::PreviewFrame
-        ) || request.session.is_empty()
-            || request.session.len() > 128
-            || request.generation == 0
-            || request.task_id.len() > 64
-            || !hertz_wallpaper::valid_local_id(&request.task_id)
+        ) || !request.has_valid_identity()
             || resources.is_empty()
             || resources.len() > MAX_RESOURCES
         {
@@ -166,6 +162,15 @@ impl SessionPlan {
 pub(super) struct SessionResources {
     plan: Vec<ResourcePlan>,
     retired: std::collections::HashSet<String>,
+}
+
+impl SessionResources {
+    pub(super) fn from_plan(plan: &[ResourcePlan]) -> Self {
+        Self {
+            plan: plan.to_vec(),
+            retired: Default::default(),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -217,15 +222,7 @@ impl BudgetCoordinator {
                 "当前会话代际已有总保留额度",
             ));
         }
-        Self::grant_locked(
-            &mut ledger,
-            &plan.request,
-            Some(SessionResources {
-                plan: plan.resources.clone(),
-                retired: Default::default(),
-            }),
-        )
-        .map_err(|error| {
+        Self::grant_locked(&mut ledger, &plan.request, Some(&plan.resources)).map_err(|error| {
             JobError::new("budget_busy", format!("{}: {}", error.quota, error.message))
         })
     }
