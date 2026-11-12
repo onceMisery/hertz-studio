@@ -130,7 +130,14 @@ async function main() {
       assert.ok(long.ticks <= 27 && long.ticks >= 20 && long.raf === 0, 'long text ticks at 2.5Hz without rAF');
       assert.equal(short.measures + long.measures, 0, 'steady text never remeasures layout');
       assert.equal(short.hiddenMutations + long.hiddenMutations, 0, 'state/spectrum bursts never update hidden app');
-      assert.ok(!startup.some(call => /tracks$|account|sources|recommend|lyrics|beatmap|devices|overlay|diagnostics|library/.test(call.method)), 'startup requests only capsule dependencies');
+      assert.ok(!startup.some(call => /tracks$|account|sources|recommend|beatmap|devices|overlay|diagnostics|library/.test(call.method)), 'startup requests only capsule dependencies');
+      // 胶囊副行要轮播歌词，精简启动允许且只允许拉一次「当前曲」的歌词。
+      // 从通用禁止列表里单独放出来并钉住次数与路径，别让整条链路退化成
+      // 启动时顺手把曲库、推荐、账号那些重资源一起拉回来。
+      const lyricCalls = startup.filter(call => /\/lyrics$/.test(call.method));
+      assert.ok(lyricCalls.length <= 1, 'capsule loads lyrics at most once');
+      assert.ok(lyricCalls.every(call => call.method.startsWith('v1/tracks/')),
+        'capsule lyrics use the per-track endpoint only');
       assert.equal(long.sizes.length, 1, 'unchanged native window size is sent once');
 
       // Test browser motion preference and visibility independently of playback events.

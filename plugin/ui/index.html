@@ -2975,16 +2975,18 @@
 <!-- 胶囊播放器：最小化态下界面唯一可见的东西（dock 实例里则是唯一内容）。
      信息区（封面 / 「正在播放」/ 标题 / 艺术家）整块可点 = 展开，也是唯一的展开
      入口；右侧只留传输三键（上一首 / 播放暂停 / 下一首），不展开也能控制播放。
-     桌面胶囊窗口只有 320×64，第四个键会把文字区挤没。整块可拖、靠近边或角
-     自动吸附，位置记进 localStorage。
-     position: fixed 所以与四套皮肤正交：皮肤改的是布局栅格，胶囊浮在其上。 -->
+     桌面胶囊窗口只有 272×48，第四个键会把文字区挤没。整块可拖、靠近边或角
+     自动吸附，推到屏幕边松手会收成一条残条，鼠标碰残条弹回；位置记进 localStorage。
+     position: fixed 所以与四套皮肤正交：皮肤改的是布局栅格，胶囊浮在其上。
+     第三行是副行：有歌词时轮播当前行（跟随进度切换），没歌词时回到歌手 · 专辑。
+     贴边隐藏后整块收成 4px 残条，capsule-edge-hit 把可唤回的命中区扩到 18px。 -->
 <div id="capsule" class="capsule" hidden role="group" aria-label="胶囊播放器" title="点击封面或歌曲信息展开播放器">
   <span class="capsule-art" id="capsule-art" aria-hidden="true"></span>
   <span class="capsule-text">
     <span class="capsule-label" id="capsule-label">正在播放</span>
-    <!-- 歌名 / 演唱人是「窄窗口 + 轮播」：窗口只有 5 字 / 3 字宽，文字比窗口长时
+    <!-- 歌名 / 副行是「窄窗口 + 轮播」：窗口只有几字宽，文字比窗口长时
          左右往返滚过去（app.js 的 tickCapsuleMarquee），比省略号能读全，
-         胶囊也因此能保持窄。 -->
+         胶囊也因此能保持窄。副行复用同一套轮播，歌词换行的瞬间重测一次。 -->
     <span class="capsule-line capsule-line-title"><span class="capsule-title" id="capsule-title">—</span></span>
     <span class="capsule-line capsule-line-artist"><span class="capsule-artist" id="capsule-artist"></span></span>
   </span>
@@ -3000,6 +3002,7 @@
       <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-next"/></svg>
     </button>
   </span>
+  <span class="capsule-edge-hit" id="capsule-edge-hit" aria-hidden="true"></span>
 </div>
 
 <dialog id="window-lifecycle-dialog" aria-labelledby="window-lifecycle-title" aria-describedby="window-lifecycle-description window-lifecycle-activity window-lifecycle-recording window-lifecycle-status">

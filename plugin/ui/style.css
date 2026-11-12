@@ -3511,16 +3511,17 @@ body.reduce-motion #online-error-close:hover { transform: translateY(-1px); }
    最小化时 body 挂 .is-capsule，除胶囊外的顶层节点全部隐藏。不逐个列容器名，
    是因为皮肤会改布局栅格的类名与层级，列名单必然漏；而胶囊是 position: fixed，
    与四套皮肤正交——皮肤管文档流里的栅格，胶囊浮在其上。
-   外形对齐参考：主题色胶囊、圆角封面、三行文字（正在播放 / 标题 / 艺术家），
-   标题与艺术家是窄窗口 + 左右轮播（5 字 / 3 字宽），整块可拖可点。 */
+   外形对齐参考：主题色胶囊、圆角封面、三行文字（正在播放 / 标题 / 副行），
+   标题与副行是窄窗口 + 左右轮播（按字宽定宽），整块可拖可点。
+   尺寸按「一条桌面小条」收：封面 30、三键 22、行高 15/13，总高约 44px。 */
 body.is-capsule > *:not(#capsule) { display: none !important; }
 
 .capsule {
-  position: fixed; right: 20px; bottom: 20px;
+  position: fixed; right: 16px; bottom: 16px;
   z-index: 90;
-  display: flex; align-items: center; gap: 10px;
-  max-width: min(340px, calc(100vw - 40px));
-  padding: 5px 8px 5px 5px;
+  display: flex; align-items: center; gap: 7px;
+  max-width: min(272px, calc(100vw - 32px));
+  padding: 4px 6px 4px 4px;
   border: 1px solid var(--line-strong);
   border-radius: var(--r-pill);
   background: var(--panel-solid);
@@ -3540,32 +3541,35 @@ body.is-capsule > *:not(#capsule) { display: none !important; }
 .capsule[hidden] { display: none; }
 .capsule-art {
   flex: 0 0 auto;
-  width: 38px; height: 38px;
-  border-radius: var(--r-md);
+  width: 30px; height: 30px;
+  border-radius: calc(var(--r-md) - 2px);
   background-color: rgba(255, 255, 255, 0.08);
   background-size: cover;
   background-position: center;
 }
 .capsule-text { display: flex; flex-direction: column; gap: 0; min-width: 0; cursor: pointer; }
-.capsule-label { font-size: var(--fs-xs); letter-spacing: 0.08em; color: var(--muted); line-height: 1.2; }
+.capsule-label { font-size: 9px; letter-spacing: 0.06em; color: var(--muted); line-height: 1.25; }
 /* 轮播窗口：宽度按「几个字」给（em 相对本行字号，CJK 一字 ≈ 1em），超出的部分由
    内层 span 平移滚过（app.js 的 tickCapsuleMarquee）。窗口定宽，胶囊就不会被
    长艺术家串撑宽——这是它变小的关键。 */
 .capsule-line { display: block; overflow: hidden; }
 /* 行高设在窗口上：行盒高度由块容器决定，设在内层 inline-block 上不生效。 */
-.capsule-line-title { width: 5em; font-size: var(--fs-base); line-height: 1.2; }
-.capsule-line-artist { width: 3em; font-size: var(--fs-xs); line-height: 1.2; }
+.capsule-line-title { width: 5em; font-size: 12px; line-height: 1.25; }
+.capsule-line-artist { width: 4em; font-size: 10px; line-height: 1.3; }
 .capsule-title {
   display: inline-block; white-space: nowrap; will-change: transform;
-  font-size: var(--fs-base); font-weight: 600; color: var(--text); line-height: 1.2;
+  font-size: 12px; font-weight: 600; color: var(--text); line-height: 1.25;
   /* 轮播是一格一格跳的（app.js 按字步进），transition 把每格抹成短滑动。 */
   transition: transform 0.22s var(--ease);
 }
 .capsule-artist {
   display: inline-block; white-space: nowrap; will-change: transform;
-  font-size: var(--fs-xs); color: var(--muted); line-height: 1.2;
+  font-size: 10px; color: var(--muted); line-height: 1.3;
   transition: transform 0.22s var(--ease);
 }
+/* 副行被歌词接管：字重提一档与歌手串区分，颜色仍走 --text（对比度由主题保证）。 */
+.capsule.has-lyric .capsule-artist { color: var(--text); font-weight: 500; }
+.capsule.has-lyric .capsule-line-artist { width: 5em; }
 /* 胶囊态的提示（app.js 的 noticeCapsule）：最小化两态把 toast 整层藏了，这句话借
    文字行来说，几秒后由 syncCapsule 换回曲名。窗口宽度不动——长句子交给上面那套
    轮播滚，胶囊不会被提示撑宽，浮窗也就不用跟着改尺寸。 */
@@ -3573,9 +3577,9 @@ body.is-capsule > *:not(#capsule) { display: none !important; }
 .capsule.is-notice.is-notice-error .capsule-title { color: var(--danger); font-weight: 600; }
 /* 传输三键：不展开完整界面也能换歌、控播放；展开走整块点击（封面 / 文字区），
    不占第四颗键的位置。比底部播放条的 38px 小一圈，胶囊是浮层，控件大了整块会笨重。 */
-.capsule-controls { display: flex; align-items: center; gap: 2px; flex: 0 0 auto; }
+.capsule-controls { display: flex; align-items: center; gap: 1px; flex: 0 0 auto; }
 .capsule-btn {
-  width: 26px; height: 26px;
+  width: 22px; height: 22px;
   display: grid; place-items: center;
   border: 0; border-radius: 50%;
   background: transparent; color: var(--muted);
@@ -3583,13 +3587,38 @@ body.is-capsule > *:not(#capsule) { display: none !important; }
   transition: color 0.2s var(--ease), background 0.2s var(--ease);
 }
 .capsule-btn:hover { background: rgba(255, 255, 255, 0.1); color: var(--text); }
-.capsule-btn svg { width: 13px; height: 13px; }
+.capsule-btn svg { width: 12px; height: 12px; }
 .capsule-btn-primary { background: var(--accent); color: var(--accent-ink); }
 .capsule-btn-primary:hover { background: var(--accent); color: var(--accent-ink); }
 /* 与底部播放条同一套图标切换：播放态显示暂停形。 */
 .capsule-btn .ic-pause { display: none; }
 body.is-playing .capsule-btn .ic-play { display: none; }
 body.is-playing .capsule-btn .ic-pause { display: block; }
+
+/* --- 靠边隐藏 ------------------------------------------------------------
+   拖到视口边缘松手，胶囊收成 4px 亮条：本体只留 --accent 一条线，内容用
+   visibility 退出命中（不是 opacity，那还会吃点击）。真正可唤回的热区是
+   胶囊自己的子元素，避免往 body 上再挂一个会被 .is-capsule 规则藏掉的节点。 */
+.capsule-edge-hit { display: none; position: absolute; z-index: 1; }
+.capsule.is-docked {
+  padding: 0; gap: 0; border: 0; border-radius: 2px;
+  background: var(--accent); box-shadow: none;
+  backdrop-filter: none; -webkit-backdrop-filter: none;
+  transition: width .2s var(--ease), height .2s var(--ease);
+}
+.capsule.is-docked > :not(.capsule-edge-hit) { visibility: hidden; }
+.capsule.is-docked .capsule-edge-hit { display: block; }
+.capsule.is-docked.edge-left, .capsule.is-docked.edge-right { width: 4px; height: var(--capsule-h, 44px); }
+.capsule.is-docked.edge-top, .capsule.is-docked.edge-bottom { height: 4px; width: var(--capsule-w, 240px); }
+.capsule.is-docked.edge-left .capsule-edge-hit { left: 0; top: 0; width: 18px; height: var(--capsule-h, 44px); }
+.capsule.is-docked.edge-right .capsule-edge-hit { right: 0; top: 0; width: 18px; height: var(--capsule-h, 44px); }
+.capsule.is-docked.edge-top .capsule-edge-hit { left: 0; top: 0; height: 18px; width: var(--capsule-w, 240px); }
+.capsule.is-docked.edge-bottom .capsule-edge-hit { left: 0; bottom: 0; height: 18px; width: var(--capsule-w, 240px); }
+/* 原生胶囊窗口被宿主推出屏幕后，页面里只剩几像素；整块染成亮条才读得出触发区。 */
+html[data-hertz-window-mode="capsule"] body.is-native-peek #capsule {
+  background: var(--accent);
+}
+html[data-hertz-window-mode="capsule"] body.is-native-peek #capsule > * { display: none; }
 
 /* 浮动实例（宿主的 surface: "window"）：这份 UI 跑在一个无边框、置顶的桌面窗口里，
    胶囊就是窗口的全部内容。于是要撤掉页内定位——position: fixed 的 right/bottom 偏移

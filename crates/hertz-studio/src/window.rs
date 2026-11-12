@@ -106,14 +106,93 @@ enum DownloadStatus {
 /// 与 SVG / ICO 同源的 64px 图标：H 字母与声波共用一组笔画。
 const BRAND_ICON: &[u8] = include_bytes!("../assets/hertz-studio-64.rgba");
 
-/// 桌面胶囊窗口的逻辑尺寸与落点留白（DIP）。原先 364×76 读起来偏大，收成 320×64。
-/// 页面排版按同一组数字算（plugin/ui/native-capsule.css）：改这里必须同步改那边，
-/// 否则封面、三行文字与传输三键会挤在一起。留白是距屏幕右边 / 底边的距离，
-/// 底部多留的一截给系统任务栏。
-const CAPSULE_WIDTH: f64 = 320.0;
-const CAPSULE_HEIGHT: f64 = 64.0;
+/// 桌面胶囊窗口的逻辑尺寸与落点留白（DIP）。原先 364×76 读起来偏大，收成 320×64；
+/// 再按「一条桌面小条」收到 272×48。页面排版按同一组数字算
+/// （plugin/ui/native-capsule.css）：改这里必须同步改那边，否则封面、三行文字与
+/// 传输三键会挤在一起。留白是距屏幕右边 / 底边的距离，底部多留的一截给系统任务栏。
+const CAPSULE_WIDTH: f64 = 272.0;
+const CAPSULE_HEIGHT: f64 = 48.0;
 const CAPSULE_MARGIN_X: f64 = 24.0;
 const CAPSULE_MARGIN_BOTTOM: f64 = 80.0;
+/// 贴边隐藏：松手时窗口边缘离屏幕边缘 ≤ 该值就把窗口收成一条残条（DIP）。
+/// 残条留在屏幕内而不是把窗口推到负坐标：负坐标会被任务栏 / DWM 吞掉，
+/// 而屏幕内的一条 6px 窗口仍然收得到鼠标事件，页面据此发 capsule-peek-out 弹回。
+const CAPSULE_EDGE_DIP: f64 = 18.0;
+const CAPSULE_PEEK_DIP: f64 = 6.0;
+
+/// 一次贴边隐藏要记住的两件事：拖完之后的原位置，以及贴的是哪条边。
+/// 恢复时按原位放回，不让窗口在屏幕上漂移。
+struct CapsuleDock {
+    restore: (i32, i32),
+    edge: &'static str,
+}
+
+/// 四条边里最近的一条够近才算「贴边」。全部用物理像素算，避免 DPI 混算。
+/// 底边不参与：Windows 任务栏默认贴底且是 topmost，收进去的残条会被它整条盖住，
+/// 用户就再也碰不到触发条了。页内胶囊没有这个问题，那边四条边都收。
+fn capsule_edge_dock(window: &tao::window::Window) -> Option<CapsuleDock> {
+    let pos = window.outer_position().ok()?;
+    let size = window.outer_size();
+    let monitor = window.current_monitor()?;
+    let origin = monitor.position();
+    let screen = monitor.size();
+    let threshold = (CAPSULE_EDGE_DIP * monitor.scale_factor()).round() as i32;
+    let mut sides = [
+        ("left", pos.x - origin.x),
+        ("right", (origin.x + screen.width as i32) - (pos.x + size.width as i32)),
+        ("top", pos.y - origin.y),
+    ];
+    sides.sort_by_key(|side| side.1);
+    if sides[0].1 > threshold || sides[0].1 < -threshold {
+        return None;
+    }
+    Some(CapsuleDock { restore: (pos.x, pos.y), edge: sides[0].0 })
+}
+
+/// 把胶囊窗口收成贴边的一条；返回要落到的物理位置，恢复时反向走一遍。
+fn capsule_enter_peek(window: &tao::window::Window, dock: &CapsuleDock) -> PhysicalPosition<i32> {
+    let monitor = window.current_monitor();
+    let (origin, screen, scale) = monitor.as_ref().map(|m| {
+        (m.position(), m.size(), m.scale_factor())
+    }).unwrap_or((PhysicalPosition::new(0, 0), PhysicalSize::new(0, 0), 1.0));
+    let peek = (CAPSULE_PEEK_DIP * scale).round() as i32;
+    let vertical = matches!(dock.edge, "left" | "right");
+    window.set_inner_size(if vertical {
+        LogicalSize::new(CAPSULE_PEEK_DIP, CAPSULE_HEIGHT)
+    } else {
+        LogicalSize::new(CAPSULE_WIDTH, CAPSULE_PEEK_DIP)
+    });
+    let (x, y) = dock.restore;
+    match dock.edge {
+        "left" => PhysicalPosition::new(origin.x, y),
+        "right" => PhysicalPosition::new(origin.x + screen.width as i32 - peek, y),
+        "top" => PhysicalPosition::new(x, origin.y),
+        _ => PhysicalPosition::new(x, origin.y + screen.height as i32 - peek),
+    }
+}
+
+fn capsule_exit_peek(window: &tao::window::Window, dock: &CapsuleDock) {
+    window.set_inner_size(LogicalSize::new(CAPSULE_WIDTH, CAPSULE_HEIGHT));
+    window.set_outer_position(PhysicalPosition::new(dock.restore.0, dock.restore.1));
+}
+
+/// 事件循环里唯一的收起入口。已有贴边状态时直接忽略，免得一次拖动叠两次。
+fn capsule_try_dock(window: &tao::window::Window, dock: &mut Option<CapsuleDock>) -> bool {
+    if dock.is_some() {
+        return false;
+    }
+    let Some(found) = capsule_edge_dock(window) else { return false; };
+    let position = capsule_enter_peek(window, &found);
+    window.set_outer_position(position);
+    *dock = Some(found);
+    true
+}
+
+fn capsule_undock(window: &tao::window::Window, dock: &mut Option<CapsuleDock>) -> bool {
+    let Some(found) = dock.take() else { return false; };
+    capsule_exit_peek(window, &found);
+    true
+}
 
 struct MainWindowPlacement {
     position: Option<PhysicalPosition<i32>>,
@@ -363,6 +442,8 @@ const HOST_SCRIPT: &str = r#"
         maximizeToggle: function () { post('maximize-toggle'); },
         drag: function () { post('drag'); },
         capsule: function (minimized) { post(minimized ? 'capsule-enter' : 'capsule-exit'); },
+        edgeCheck: function () { post('capsule-edge-check'); },
+        capsulePeekOut: function () { post('capsule-peek-out'); },
       };
       document.documentElement.dataset.hertzWindowHost = '1';
       document.documentElement.dataset.hertzWindowChrome = 'native';
@@ -1095,6 +1176,8 @@ pub fn run_window(mut args: Args) -> anyhow::Result<()> {
     #[cfg(windows)]
     let file_import_handler = file_import::install(&webview, &origin, proxy.clone())?;
     let mut main_placement: Option<MainWindowPlacement> = None;
+    // 胶囊贴边隐藏的状态只在事件循环里存一份；页面只发「检查 / 弹回」两个意图。
+    let mut capsule_dock: Option<CapsuleDock> = None;
     #[cfg(windows)]
     let mut dpi_changed = false;
     let mut quit_ui = QuitPresentation::default();
@@ -1234,6 +1317,22 @@ pub fn run_window(mut args: Args) -> anyhow::Result<()> {
                     }
                     "drag" => {
                         let _ = window.drag_window();
+                        // Windows 上 drag_window 会一直走到松手；OS 接管期间页面
+                        // 可能收不到 pointerup，所以这里也判一次贴边。页面那条
+                        // capsule-edge-check 是同一份状态的双保险（已收起就忽略）。
+                        if main_placement.is_some() && capsule_try_dock(&window, &mut capsule_dock) {
+                            let _ = webview.evaluate_script("document.body.classList.add('is-native-peek');");
+                        }
+                    }
+                    "capsule-edge-check" => {
+                        if main_placement.is_some() && capsule_try_dock(&window, &mut capsule_dock) {
+                            let _ = webview.evaluate_script("document.body.classList.add('is-native-peek');");
+                        }
+                    }
+                    "capsule-peek-out" => {
+                        if capsule_undock(&window, &mut capsule_dock) {
+                            let _ = webview.evaluate_script("document.body.classList.remove('is-native-peek');");
+                        }
                     }
                     "minimize" => window.set_minimized(true),
                     "maximize-toggle" => {
@@ -1268,12 +1367,18 @@ pub fn run_window(mut args: Args) -> anyhow::Result<()> {
                         }
                     }
                     "capsule-enter" => {
+                        capsule_dock = None;
+                        let _ = webview.evaluate_script("document.body.classList.remove('is-native-peek');");
                         if main_placement.is_none() {
                             placement::record(&window, owner.as_ref(), false);
                             main_placement = Some(enter_native_capsule(&window));
                         }
                     }
                     "capsule-exit" => {
+                        // 展开主窗口只清状态：restore_main_window 自己会设回主窗口尺寸，
+                        // 再调一次 capsule_exit_peek 反而把它写回胶囊大小。
+                        capsule_dock = None;
+                        let _ = webview.evaluate_script("document.body.classList.remove('is-native-peek');");
                         if let Some(placement) = main_placement.take() {
                             restore_main_window(&window, placement);
                             placement::revalidate(&window, false);

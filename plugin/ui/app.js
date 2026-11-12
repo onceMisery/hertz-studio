@@ -270,6 +270,7 @@ const ui = {
   capsulePrev: $('capsule-prev'),
   capsulePlay: $('capsule-play'),
   capsuleNext: $('capsule-next'),
+  capsuleEdgeHit: $('capsule-edge-hit'),
 
   // 旧 stage-btn 移除后，「正在播放」入口落在播放栏的曲目标题区。
   stageBtn: $('bar-track'),
@@ -8325,6 +8326,8 @@ function setCapsuleMinimized(min) {
   state.capsuleMin = !!min;
   document.body.classList.toggle('is-capsule', !!min);
   ui.capsule.hidden = !min;
+  // 展开时先弹回残条；收起来时也不能把上一轮的 dock 类带进新的一轮。
+  if (!min || capsuleDockEdge) undockCapsule();
   if (!min) refreshCapsuleMarquee();
   try { localStorage.setItem(CAPSULE_KEY, min && !native ? '1' : ''); } catch (err) { /* 偏好丢一次无所谓 */ }
   if (min) {
@@ -8364,6 +8367,159 @@ function clearCapsuleNotice() {
   syncCapsule(state.current, lastNowCover);
 }
 
+// --- 胶囊歌词轮播 -----------------------------------------------------------
+// 复用第三行（副行）：有歌词时显示当前行，跟着播放进度逐行往下走；没歌词、
+// 间奏、或正在显示提示时回落「歌手 · 专辑」。只在胶囊可见时取数与写 DOM，
+// 完整界面那套舞台歌词渲染完全不受影响，浮窗的精简启动也不依赖 Stage。
+// 这段必须留在 CAPSULE_MARQUEE_* 那段之前：check-capsule-performance.js 把
+// 轮播那一段整块抠进 vm 沙箱，沙箱里没有这里的依赖。
+const CAPSULE_LYRIC_CACHE = new Map();
+let capsuleLyricId = '';
+let capsuleLyricLines = [];
+let capsuleLyricBase = '';
+let capsuleLyricEpoch = 0;
+
+function capsuleLyricShown() {
+  return !capsuleNotice && capsuleShown() && !document.hidden
+    && ui.capsule && !ui.capsule.hidden;
+}
+
+function capsuleLyricText(line) {
+  return String((line && (line.text || line.vocal)) || '').trim();
+}
+
+/// 服务端已经叠好了文件/逐曲偏移，这里只补全局偏移，跟舞台同一时基。
+function capsuleLyricLinesOf(doc, id) {
+  if (!doc || !Array.isArray(doc.lines) || (doc.track_id && doc.track_id !== id)) return [];
+  const shift = globalLyricOffsetMs();
+  return doc.lines
+    .map(line => ({ start_ms: Math.max(0, (Number(line.start_ms) || 0) + shift), text: capsuleLyricText(line) }))
+    .filter(line => line.text);
+}
+
+/// 二分找 start_ms <= 当前位置 的最后一行；只在文本真的换了才写 DOM，
+/// 长句子交给已有的 marquee 引擎滚完（refreshCapsuleMarquee 重测一次宽度）。
+function syncCapsuleLyric(posMs) {
+  // 没有歌词数据时整行归 syncCapsule 管：不写 DOM、不重测轮播。逐帧快照来了也只是
+  // 一次早退，别把「值没变就别写 DOM」的纪律换成每帧一次字符串赋值。贴边残条同理：
+  // 4px 宽的盒子里没有可读的歌词，别让轮播计时器继续空转。
+  if (!capsuleLyricShown() || !capsuleLyricLines.length || capsuleDockEdge) return;
+  const pos = Number(posMs) || 0;
+  let lo = 0, hi = capsuleLyricLines.length - 1, idx = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (capsuleLyricLines[mid].start_ms <= pos) { idx = mid; lo = mid + 1; }
+    else hi = mid - 1;
+  }
+  const text = idx >= 0 ? capsuleLyricLines[idx].text : '';
+  const lyric = !!text;
+  const next = text || capsuleLyricBase;
+  if (ui.capsuleArtist.textContent === next && lyric === ui.capsule.classList.contains('has-lyric')) return;
+  ui.capsuleArtist.textContent = next;
+  ui.capsule.classList.toggle('has-lyric', lyric);
+  refreshCapsuleMarquee();
+}
+
+/// 换曲时取一份歌词。完整界面那份归舞台，换曲瞬间可能还留着上一首的 doc；
+/// 胶囊自己按曲目 id 取并缓存，避免把旧歌词挂到新曲上。在线曲走平台通道。
+async function ensureCapsuleLyrics(track) {
+  const id = track && track.id;
+  if (!id || !capsuleLyricShown() || capsuleLyricId === id) return;
+  const epoch = ++capsuleLyricEpoch;
+  capsuleLyricId = id;
+  capsuleLyricLines = [];
+  // 副行的回落由 syncCapsule 负责（它已经写了歌手串）；这里只摘掉上一首的歌词态，
+  // 别在异步取数期间再写一次 DOM，免得和轮播重测打架。
+  ui.capsule.classList.remove('has-lyric');
+  let lines = CAPSULE_LYRIC_CACHE.get(id);
+  if (!lines) {
+    let doc = null;
+    try {
+      doc = (track.source && track.onlineId) || id.indexOf('online:') === 0
+        ? (window.Online && window.Online.loadLyricDoc
+          ? await window.Online.loadLyricDoc(track) : null)
+        : await transport.get(`/v1/tracks/${encodeURIComponent(id)}/lyrics`);
+    } catch (err) { doc = null; }
+    if (epoch !== capsuleLyricEpoch || capsuleLyricId !== id) return;
+    lines = capsuleLyricLinesOf(doc, id);
+    if (CAPSULE_LYRIC_CACHE.size > 8) CAPSULE_LYRIC_CACHE.clear();
+    CAPSULE_LYRIC_CACHE.set(id, lines);
+  }
+  capsuleLyricLines = lines;
+  syncCapsuleLyric((state.snapshot && state.snapshot.position_ms) || 0);
+}
+
+// --- 靠边隐藏（页内最小化态） -----------------------------------------------
+// 原生胶囊窗口与浮动实例的位置归宿主，页内不掺和；那两条路走 window.rs 的
+// capsule-edge-check / capsule-peek-out。这里只管 Web / 页内最小化。
+const CAPSULE_HIDE_PX = 14;
+const CAPSULE_PEEK_PX = 4;
+let capsuleDockEdge = '';
+let capsuleDockPos = null;
+
+/// 只有真推到边才收起：四条边取最近的，超过阈值仍走原来的吸附（20px 留白）。
+function capsuleHideEdge(r) {
+  const vw = document.documentElement.clientWidth;
+  const vh = document.documentElement.clientHeight;
+  const sides = [['left', r.left], ['right', vw - r.right], ['top', r.top], ['bottom', vh - r.bottom]];
+  let best = sides[0];
+  for (const side of sides) if (side[1] < best[1]) best = side;
+  return best[1] <= CAPSULE_HIDE_PX ? best[0] : '';
+}
+
+function capsulePageDockable() {
+  return !window.HertzCapsuleOnly && document.documentElement.dataset.hertzWindowMode !== 'capsule';
+}
+
+function dockCapsule(edge) {
+  if (!edge || capsuleDockEdge || !capsulePageDockable()) return false;
+  const r = ui.capsule.getBoundingClientRect();
+  const vw = document.documentElement.clientWidth;
+  const vh = document.documentElement.clientHeight;
+  capsuleDockPos = { x: r.left, y: r.top };
+  ui.capsule.style.setProperty('--capsule-w', Math.ceil(r.width) + 'px');
+  ui.capsule.style.setProperty('--capsule-h', Math.ceil(r.height) + 'px');
+  let x = r.left, y = r.top;
+  // 收窄后把落点重新顶到那条边上，否则 4px 残条会留在原来胶囊的左/上边界。
+  if (edge === 'right') x = vw - CAPSULE_PEEK_PX - 8;
+  if (edge === 'bottom') y = vh - CAPSULE_PEEK_PX - 8;
+  ui.capsule.style.left = Math.round(x) + 'px';
+  ui.capsule.style.top = Math.round(y) + 'px';
+  ui.capsule.style.right = 'auto';
+  ui.capsule.style.bottom = 'auto';
+  capsuleDockEdge = edge;
+  ui.capsule.classList.add('is-docked', 'edge-' + edge);
+  ui.capsule.setAttribute('tabindex', '0');
+  // 记住展开态的位置：重启时也别把完整胶囊贴死在屏幕边上。
+  saveCapsulePos(capsuleDockPos);
+  // 残条不参与轮播：直接清掉计时器，别让 400ms 的 tick 在 4px 宽的盒子上空转。
+  clearTimeout(capsuleMarqueeTimer);
+  capsuleMarqueeTimer = 0;
+  capsuleMarqueeItems = [];
+  return true;
+}
+
+function undockCapsule() {
+  if (!capsuleDockEdge) return false;
+  const edge = capsuleDockEdge;
+  const pos = capsuleDockPos || {
+    x: parseFloat(ui.capsule.style.left) || CAPSULE_MARGIN,
+    y: parseFloat(ui.capsule.style.top) || CAPSULE_MARGIN,
+  };
+  capsuleDockEdge = '';
+  capsuleDockPos = null;
+  ui.capsule.classList.remove('is-docked', 'edge-left', 'edge-right', 'edge-top', 'edge-bottom');
+  ui.capsule.style.removeProperty('--capsule-w');
+  ui.capsule.style.removeProperty('--capsule-h');
+  ui.capsule.removeAttribute('tabindex');
+  const d = CAPSULE_MARGIN;
+  saveCapsulePos(placeCapsule(
+    pos.x + (edge === 'left' ? d : edge === 'right' ? -d : 0),
+    pos.y + (edge === 'top' ? d : edge === 'bottom' ? -d : 0)));
+  refreshCapsuleMarquee();
+  return true;
+}
+
 /// 由 syncCapsule 结尾调用：状态重绘（换曲、换封面、皮肤改字号）不能把正在显示的
 /// 提示擦掉，也不能让过期后的曲名留在原地。
 function paintCapsuleNotice() {
@@ -8373,6 +8529,7 @@ function paintCapsuleNotice() {
     return;
   }
   ui.capsule.classList.add('is-notice');
+  ui.capsule.classList.remove('has-lyric');
   ui.capsule.classList.toggle('is-notice-error', capsuleNoticeKind === 'error');
   ui.capsuleTitle.textContent = capsuleNotice;
   ui.capsuleArtist.textContent = '';
@@ -8386,16 +8543,20 @@ function syncCapsule(track, coverUrl) {
   lastNowCover = coverUrl || null;
   if (!track) {
     ui.capsuleTitle.textContent = '—';
+    capsuleLyricBase = '';
     ui.capsuleArtist.textContent = '';
     applyCoverBg(ui.capsuleArt, null);
   } else {
     ui.capsuleTitle.textContent = track.title || '未命名';
-    ui.capsuleArtist.textContent = [track.artist, track.album].filter(Boolean).join(' · ');
+    capsuleLyricBase = [track.artist, track.album].filter(Boolean).join(' · ');
+    ui.capsuleArtist.textContent = capsuleLyricBase;
     applyCoverBg(ui.capsuleArt, coverUrl);
   }
   // 提示压过曲名：状态重绘不能把刚说出来的话擦掉。
   paintCapsuleNotice();
   refreshCapsuleMarquee();
+  // 副行的歌词按曲目单独取：胶囊可见才拉，换曲时缓存命中不再请求。
+  if (track && capsuleLyricShown() && capsuleLyricId !== track.id) ensureCapsuleLyrics(track);
   // 浮动实例：文字换了尺寸就可能变，窗口跟着收一次（页内最小化态没有窗口可收）。
   if (window.HertzCapsuleOnly) fitFloatingWindowToCapsule();
 }
@@ -8607,7 +8768,7 @@ function initNowPlayingModal() {
 function initCapsuleControls() {
   window.addEventListener('hertz-native-capsule-restore', () => setCapsuleMinimized(false));
   // 胶囊播放器：顶栏按钮收进去；胶囊上只留传输三键，展开交给整块点击（封面 /
-  // 文字区），不展开也能操作。桌面原生胶囊窗口只有 320×64，第四个键会挤没文字区。
+  // 文字区），不展开也能操作。桌面原生胶囊窗口只有 272×48，第四个键会挤没文字区。
   // 页内最小化态整块可拖、靠边吸附、位置记进 localStorage；浮动实例改由宿主窗口
   // 承担移动与吸附（见下面的 pointerdown）。
   /// 宿主是否给了浮动窗口能力。capabilities 是 init 消息里的广告位：Web 宿主没有
@@ -8624,7 +8785,7 @@ function initCapsuleControls() {
     const floating = floatingApi();
     if (!floating) return Promise.resolve(null);
     return floating
-      .open({ contributionId: playerWorkbench(), title: '正在播放', width: 268, height: 55 })
+      .open({ contributionId: playerWorkbench(), title: '正在播放', width: 200, height: 44 })
       .catch((err) => {
         console.warn('[hertz] 打开浮动胶囊失败：', err);
         return null;
@@ -8735,9 +8896,15 @@ function initCapsuleControls() {
       if (dragMode === 'host') {
         // 拖拽结束通知宿主失败不回滚位置：位置本来就只是为了让窗口跟着卡片走。
         floating.endDrag().catch(() => {});
+      } else if (dragMode === 'native') {
+        // 原生胶囊的拖动由 OS 接管，页面拿不到屏幕坐标：松手时请宿主按工作区
+        // 判一次贴边，够近就把窗口推出屏幕只留一条触发条。
+        if (native && native.edgeCheck) native.edgeCheck();
       } else if (dragMode === 'page') {
         const r = ui.capsule.getBoundingClientRect();
-        saveCapsulePos(snapCapsule(r.left, r.top));
+        const edge = capsuleHideEdge(r);
+        if (edge) dockCapsule(edge);
+        else saveCapsulePos(snapCapsule(r.left, r.top));
       }
     };
     // pointercancel 不代表「拖动结束」：真机上 pointerup 会正常到达，但捕获一旦被
@@ -8747,7 +8914,9 @@ function initCapsuleControls() {
       cleanup();
       if (dragging && dragMode === 'page') {
         const r = ui.capsule.getBoundingClientRect();
-        saveCapsulePos(snapCapsule(r.left, r.top));
+        const edge = capsuleHideEdge(r);
+        if (edge) dockCapsule(edge);
+        else saveCapsulePos(snapCapsule(r.left, r.top));
       }
     };
     window.addEventListener('pointermove', move);
@@ -8757,13 +8926,35 @@ function initCapsuleControls() {
   ui.capsule.addEventListener('click', (e) => {
     if (capsuleJustDragged) return;
     if (e.target.closest('.capsule-btn')) return;
+    // 残条上的点击只唤回胶囊，不该顺手把整个界面展开。
+    if (undockCapsule()) return;
     expandCapsule();
   });
+  // 残条热区：鼠标碰到就弹回；键盘也能唤回（dock 时会给整块 tabindex）。
+  ui.capsuleEdgeHit.addEventListener('pointerenter', () => { undockCapsule(); });
+  ui.capsuleEdgeHit.addEventListener('click', (e) => { e.stopPropagation(); undockCapsule(); });
+  ui.capsule.addEventListener('keydown', (e) => {
+    if (capsuleDockEdge && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); undockCapsule(); }
+  });
+  // 原生胶囊被宿主推出屏幕后只剩几像素：鼠标进到那一小条里就请宿主拉回来。
+  ui.capsule.addEventListener('pointerenter', () => {
+    if (!document.body.classList.contains('is-native-peek')) return;
+    const host = window.__hertzWindowHost;
+    if (host && host.capsulePeekOut) host.capsulePeekOut();
+  });
+  // 歌词轮播唯一的状态源：快照帧（applySnapshot 在两种 surface 上都会派发）。
+  // 只在胶囊可见时干活；完整界面一帧都不多算。
+  document.addEventListener('playback:snapshot', (e) => {
+    if (!capsuleLyricShown()) return;
+    const track = state.current;
+    if (track && track.id !== capsuleLyricId) ensureCapsuleLyrics(track);
+    syncCapsuleLyric(e.detail && e.detail.position_ms);
+  });
   // 宿主改窗口尺寸后把越界的位置夹回来。浮动实例没有页内坐标可夹（胶囊就是窗口
-  // 的全部内容，位置归宿主窗口管），直接跳过。
+  // 的全部内容，位置归宿主窗口管），直接跳过。贴边残条也不夹：它本来就该贴着边。
   window.addEventListener('resize', () => {
     if (window.HertzCapsuleOnly || document.documentElement.dataset.hertzWindowMode === 'capsule') return;
-    if (!ui.capsule.style.left || ui.capsule.hidden) return;
+    if (capsuleDockEdge || !ui.capsule.style.left || ui.capsule.hidden) return;
     const r = ui.capsule.getBoundingClientRect();
     placeCapsule(r.left, r.top);
   });
