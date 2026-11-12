@@ -7,7 +7,7 @@
 //! groups. H_s(k)=align16(s*k)+k+16. Lowercase insertions (including pending
 //! collision) <=2056, old/new buckets <=2048+4096: H24 overlap=153632.
 //! Validated ASCII lowercase bytes <=2056*180=370080. The exact lower hint
-//! on canonical files collect allocates H16(4096)=69648 once; removals never
+//! on canonical files collect allocates at most H16(4096)=69648 once; removals never
 //! grow/shrink it. Vec<VerifiedEntry> starts empty and doubles; pending+
 //! completed <=2048, slot old/new <=1024+2048, hence 245760 at size80.
 //! Exact path/MIME/SHA strings <=(180+127+64)*2048=759808.

@@ -43,10 +43,14 @@ fn charge(bytes: usize) {
     PEAK.fetch_max(live, SeqCst);
     LARGEST.fetch_max(bytes, SeqCst);
     REQUESTS.fetch_add(1, SeqCst);
-    if bytes == 102416 {
+    // The reviewed hashbrown sources use 8-byte NEON/generic control groups
+    // or 16-byte SSE2 groups. At 4096 buckets both element backings are already
+    // aligned; only the final control group differs. The production envelope
+    // conservatively charges the 16-byte case on either architecture.
+    if matches!(bytes, 102408 | 102416) {
         LOWER_TABLE.fetch_add(1, SeqCst);
     }
-    if bytes == 69648 {
+    if matches!(bytes, 69640 | 69648) {
         DECLARED_TABLE.fetch_add(1, SeqCst);
     }
 }
