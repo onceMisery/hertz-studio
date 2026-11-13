@@ -79,6 +79,48 @@ pub(crate) fn worker_frame_bytes_for_test() -> u64 {
     WORKER_FRAME_BYTES.load(Ordering::Relaxed)
 }
 
+const IMPORT_WORKER_NAME: &str = "hertz-wallpaper-import";
+/// Prior bounds for the opaque caller-side start allocations. Each has a
+/// measured witness in `jobs_tests`; shrinking one below the witness is a test
+/// failure, widening needs the witness rerun on both toolchains.
+const STARTUP_CHANNEL_SLOTS: u64 = 32;
+const STARTUP_CHANNEL_OVERHEAD: u64 = 1024;
+const STARTUP_RUNTIME_BOUND: u64 = 64 * 1024;
+const STARTUP_PACKET_BOUND: u64 = 1024;
+
+/// A capacity-1 tokio bounded channel still allocates its block granularity of
+/// inline `JobRequest` slots plus channel metadata; sizes are known before the
+/// channel allocates and are witnessed per toolchain.
+pub(crate) fn startup_channel_bytes() -> u64 {
+    u64::try_from(std::mem::size_of::<JobRequest>())
+        .unwrap_or(u64::MAX)
+        .saturating_mul(STARTUP_CHANNEL_SLOTS)
+        .saturating_add(STARTUP_CHANNEL_OVERHEAD)
+}
+
+/// Conservative prior bound for every caller-side allocation that owns the
+/// shared import worker: the four shared Arcs, the capacity-1 request channel,
+/// the thread name/spawn packet, the current-thread runtime and the exit Arc.
+/// Channel/runtime/packet constants have measured witnesses; the Arc terms are
+/// exact type layouts. Worker-thread-internal allocations are not claimed here;
+/// the `JoinHandle` join is their physical exit receipt.
+pub(crate) fn startup_owner_bytes() -> u64 {
+    fn arc_bytes<T>() -> Option<u64> {
+        arc_allocation_bytes::<T>()
+    }
+    let arcs = arc_bytes::<Library>()
+        .and_then(|bytes| bytes.checked_add(arc_bytes::<AssetStore>()?))
+        .and_then(|bytes| bytes.checked_add(arc_bytes::<Mutex<Inner>>()?))
+        .and_then(|bytes| bytes.checked_add(arc_bytes::<AtomicU64>()?))
+        .and_then(|bytes| bytes.checked_add(arc_bytes::<AtomicBool>()?));
+    let fixed = u64::try_from(IMPORT_WORKER_NAME.len())
+        .unwrap_or(u64::MAX)
+        .saturating_add(startup_channel_bytes())
+        .saturating_add(STARTUP_RUNTIME_BOUND)
+        .saturating_add(STARTUP_PACKET_BOUND);
+    arcs.unwrap_or(u64::MAX).saturating_add(fixed)
+}
+
 impl From<hertz_wallpaper::PackageError> for JobError {
     fn from(error: hertz_wallpaper::PackageError) -> Self {
         Self::new("package_invalid", format!("{error}"))
@@ -263,13 +305,34 @@ impl Drop for ReservedSlot {
 /// 导入任务管理器：单槽 worker 线程（current_thread runtime 跑 sqlx）。
 pub struct ImportJobs {
     inner: Arc<Mutex<Inner>>,
-    submit_tx: tokio::sync::mpsc::Sender<JobRequest>,
+    submit_tx: Option<tokio::sync::mpsc::Sender<JobRequest>>,
     generation: Arc<AtomicU64>,
     library: Arc<Library>,
     assets: Arc<AssetStore>,
-    /// Same original ledger as the probe reservations; per-request controls and
-    /// the shared worker frame are admitted here before their first allocation.
+    /// Same original ledger as the probe reservations; per-request controls,
+    /// the shared worker frame and the startup owners are admitted here before
+    /// their first allocation.
     budget: Arc<BudgetCoordinator>,
+    /// Real thread handle; `Drop` closes the queue and joins it.
+    worker: Option<std::thread::JoinHandle<()>>,
+    /// Set at the very end of the worker closure after the future frame and the
+    /// runtime are gone. Production keeps it as an unqueried receipt; tests use
+    /// it to prove the join barrier.
+    _worker_exited: Arc<AtomicBool>,
+    /// Declared last so the shared Arcs, channel, runtime and spawn packet are
+    /// destroyed (and joined) before the startup fee is refunded.
+    startup_charge: ControlCharge,
+}
+
+impl Drop for ImportJobs {
+    fn drop(&mut self) {
+        // 关闭请求队列，再等待真实线程退出：runtime、future frame 与 spawn
+        // packet 都随线程结束物理消失；join 返回即退出收据，不是 drop 假设。
+        drop(self.submit_tx.take());
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
 }
 
 struct JobRequest {
@@ -523,54 +586,69 @@ pub(crate) struct ImportIdentity {
 impl ImportJobs {
     /// 启动 worker。`library` 与 `assets` 的所有权共享给任务管线。
     pub fn start(library: Library, assets: AssetStore, probe: ProbeClient) -> Self {
+        let budget = probe.budget_handle();
+        // 每一个 caller 侧共享启动 owner 都在第一次分配前取得 prior 费用；
+        // 准入失败是 fail-closed 启动错误，不构造“无 worker”的半对象。
+        let startup_charge = budget
+            .admit_working_bytes(startup_owner_bytes())
+            .expect("shared import worker requires startup admission in the prepare quota");
         let library = Arc::new(library);
         let assets = Arc::new(assets);
-        let budget = probe.budget_handle();
         // 容量 1：受理即入队；并发受 inner.current 单槽标记约束（busy 即拒）。
         let (tx, rx) = tokio::sync::mpsc::channel::<JobRequest>(1);
         let inner = Arc::new(Mutex::new(Inner {
             current: None,
             history: std::collections::VecDeque::new(),
         }));
-        let worker_inner = inner.clone();
-        let worker_library = library.clone();
-        let worker_assets = assets.clone();
-        let worker_budget = Arc::clone(&budget);
-        std::thread::Builder::new()
-            .name("hertz-wallpaper-import".into())
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("create wallpaper import runtime");
+        // future 在调用线程构造后随 closure 移入 worker；显式 Box 的请求字节
+        // 恰为该 size，frame guard 在 block_on 返回后、runtime 销毁前退款。
+        let future = worker_loop(
+            rx,
+            Arc::clone(&inner),
+            Arc::clone(&library),
+            Arc::clone(&assets),
+            probe,
+        );
+        let frame_bytes = u64::try_from(std::mem::size_of_val(&future))
+            .expect("worker frame size fits the original ledger");
+        #[cfg(test)]
+        WORKER_FRAME_BYTES.store(frame_bytes, Ordering::Relaxed);
+        let frame = budget
+            .admit_working_bytes(frame_bytes)
+            .expect("worker frame requires admission before its Box");
+        let future = Box::pin(future);
+        let worker_exited = Arc::new(AtomicBool::new(false));
+        let exited = Arc::clone(&worker_exited);
+        let worker = std::thread::Builder::new()
+            .name(IMPORT_WORKER_NAME.into())
             .spawn(move || {
-                let runtime = match tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                {
-                    Ok(runtime) => runtime,
-                    Err(_) => return,
-                };
-                // 先构造真实 future 并查询实际 frame 字节，再在同一账本
-                // 事前准入；显式 Box 的请求字节恰为该 size。guard 留在
-                // block_on 外面，随 Box 销毁后才退款。
-                let future = worker_loop(rx, worker_inner, worker_library, worker_assets, probe);
-                let Some(frame_bytes) = u64::try_from(std::mem::size_of_val(&future)).ok() else {
-                    return;
-                };
-                #[cfg(test)]
-                WORKER_FRAME_BYTES.store(frame_bytes, Ordering::Relaxed);
-                let frame = match worker_budget.admit_working_bytes(frame_bytes) {
-                    Ok(frame) => frame,
-                    Err(_) => return,
-                };
-                runtime.block_on(Box::pin(future));
+                runtime.block_on(future);
                 drop(frame);
+                drop(runtime);
+                exited.store(true, Ordering::Release);
             })
             .expect("create wallpaper import thread");
         Self {
             inner,
-            submit_tx: tx,
+            submit_tx: Some(tx),
             generation: Arc::new(AtomicU64::new(1)),
             library,
             assets,
             budget,
+            worker: Some(worker),
+            _worker_exited: worker_exited,
+            startup_charge,
         }
+    }
+
+    /// 物理退出收据：只有 worker 线程在 runtime 与 frame 都销毁后才置位。
+    #[cfg(test)]
+    pub(crate) fn worker_exited_for_test(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self._worker_exited)
     }
 
     pub(crate) fn library(&self) -> &Library {
@@ -969,7 +1047,12 @@ impl ImportJobs {
         };
         let job_id = request.job_id.clone();
         // 槽已在 inner 标记占用；若 worker 已死导致投递失败，这里同步归还槽。
-        if let Err(error) = self.submit_tx.try_send(request) {
+        if let Err(error) = self
+            .submit_tx
+            .as_ref()
+            .expect("worker request channel")
+            .try_send(request)
+        {
             let request = error.into_inner();
             drop(request.source);
             let mut status = request.status.lock().expect("status").clone();

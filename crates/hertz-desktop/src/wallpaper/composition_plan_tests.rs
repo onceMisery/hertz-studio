@@ -1588,22 +1588,25 @@ async fn internal_visible_shared_text_exports_native_final_value_and_scale_varia
     }
 }
 
-/// The import worker frame is the only inline prepare owner left after the
-/// request tail exits. Polling the exact frame (not the observed control bytes)
-/// makes a leaked per-request ControlCharge visibly fail.
+/// The shared startup owners and the import worker frame are the only inline
+/// prepare owners left after the request tail exits. Polling their exact sum
+/// (not the observed control bytes) makes a leaked per-request ControlCharge
+/// visibly fail.
 fn assert_only_worker_frame(budget: &super::super::budget::BudgetCoordinator) {
     let frame = crate::wallpaper::jobs::worker_frame_bytes_for_test();
+    let startup = crate::wallpaper::jobs::startup_owner_bytes();
     assert!(frame > 0, "worker frame was never admitted");
+    let expected = startup + frame;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
         let usage = budget.usage();
-        if usage.control_records == 1 && usage.control_prepare_cpu_bytes == frame {
+        if usage.control_records == 2 && usage.control_prepare_cpu_bytes == expected {
             assert_eq!(
                 usage,
                 super::super::budget::BudgetUsage {
-                    prepare_cpu_bytes: frame,
-                    control_prepare_cpu_bytes: frame,
-                    control_records: 1,
+                    prepare_cpu_bytes: expected,
+                    control_prepare_cpu_bytes: expected,
+                    control_records: 2,
                     ..Default::default()
                 }
             );
@@ -1611,7 +1614,7 @@ fn assert_only_worker_frame(budget: &super::super::budget::BudgetCoordinator) {
         }
         assert!(
             std::time::Instant::now() < deadline,
-            "worker frame-only baseline not reached: {usage:?}"
+            "shared startup + frame baseline not reached: {usage:?}"
         );
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
