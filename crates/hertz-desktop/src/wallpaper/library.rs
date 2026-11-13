@@ -10,9 +10,11 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use sqlx::{FromRow, SqlitePool};
 
+use crate::wallpaper::budget::BudgetCoordinator;
 use crate::wallpaper::jobs::JobError;
 
 /// 模块内 Result 别名：错误固定为 JobError（遮蔽 prelude 双参 Result）。
@@ -20,6 +22,16 @@ type Result<T> = std::result::Result<T, JobError>;
 
 /// 本机作品的固定来源 id（§4.2：本机新作品属于固定 local 来源）。
 pub const LOCAL_SOURCE: &str = "local";
+
+/// `persisted_job` 的有界读取行：三个 length 与三个 substr 前缀。
+type PersistedJobRow = (
+    Option<i64>,
+    Option<i64>,
+    Option<i64>,
+    String,
+    Option<String>,
+    Option<String>,
+);
 
 #[derive(Debug, Clone, serde::Serialize, FromRow)]
 #[serde(rename_all = "camelCase")]
@@ -518,6 +530,7 @@ impl Library {
         &self,
         status: &super::jobs::JobStatus,
         identity: &super::jobs::ImportIdentity,
+        budget: &Arc<BudgetCoordinator>,
     ) -> Result<String> {
         let mut tx = self
             .pool
@@ -539,13 +552,17 @@ impl Library {
             }
             return Ok(existing.job_id);
         }
+        // Prior fee before the JSON allocation and SQLx's owned copies; held
+        // until the transaction (and therefore its insert command) completes.
+        let (progress, charge) = super::jobs::status_json(budget, status)?;
         sqlx::query("INSERT INTO install_jobs(job_id, request_id, payload_digest, state, progress, updated_at) VALUES (?1, ?2, ?3, 'queued', ?4, ?5)")
             .bind(&status.job_id).bind(&identity.request_id).bind(&identity.payload_digest)
-            .bind(serde_json::to_string(status).map_err(|error| JobError::invalid_input(error.to_string()))?)
+            .bind(&progress)
             .bind(now_secs()).execute(&mut *tx).await.map_err(|error| JobError::database(error.to_string()))?;
         tx.commit()
             .await
             .map_err(|error| JobError::database(error.to_string()))?;
+        drop(charge);
         Ok(status.job_id.clone())
     }
 
@@ -553,29 +570,48 @@ impl Library {
         &self,
         job_id: &str,
     ) -> Result<Option<super::jobs::JobStatus>> {
-        let row: Option<(String, Option<String>, Option<String>)> =
-            sqlx::query_as("SELECT state, progress, error FROM install_jobs WHERE job_id = ?1")
-                .bind(job_id)
-                .fetch_optional(&*self.pool)
-                .await
-                .map_err(|error| JobError::database(error.to_string()))?;
-        row.map(|(state, progress, error)| {
-            if let Some(status) =
-                progress.and_then(|json| serde_json::from_str::<super::jobs::JobStatus>(&json).ok())
-            {
-                return Ok(status);
-            }
-            let state = serde_json::from_value(serde_json::Value::String(state))
-                .map_err(|error| JobError::database(error.to_string()))?;
-            Ok(super::jobs::JobStatus {
-                job_id: job_id.to_string(),
-                state,
-                error,
-                package_hash: None,
-                staged_bytes: 0,
-                generation: 0,
-            })
-        })
+        // Legacy rows have no byte CHECK on state/progress/error. `length`
+        // decides before `substr` materialises only the bounded prefix.
+        let row: Option<PersistedJobRow> = sqlx::query_as(
+            "SELECT length(state), length(progress), length(error), \
+                 substr(state, 1, ?4), substr(progress, 1, ?2), substr(error, 1, ?3) \
+                 FROM install_jobs WHERE job_id = ?1",
+        )
+        .bind(job_id)
+        .bind(super::jobs::MAX_STATUS_DB_READ_CHARS)
+        .bind(super::jobs::MAX_STATUS_DB_ERROR_CHARS)
+        .bind(super::jobs::MAX_STATUS_DB_STATE_CHARS)
+        .fetch_optional(&*self.pool)
+        .await
+        .map_err(|error| JobError::database(error.to_string()))?;
+        row.map(
+            |(state_len, progress_len, error_len, state, progress, error)| {
+                if state_len.is_some_and(|len| len > super::jobs::MAX_STATUS_DB_STATE_CHARS)
+                    || progress_len.is_some_and(|len| len > super::jobs::MAX_STATUS_DB_READ_CHARS)
+                    || error_len.is_some_and(|len| len > super::jobs::MAX_STATUS_DB_ERROR_CHARS)
+                {
+                    return Err(JobError::database(
+                        "install_jobs state exceeds the bounded status read",
+                    ));
+                }
+                if let Some(status) = progress
+                    .and_then(|json| serde_json::from_str::<super::jobs::JobStatus>(&json).ok())
+                    .and_then(|status| super::jobs::sanitize_persisted_status(status, job_id))
+                {
+                    return Ok(status);
+                }
+                let state = serde_json::from_value(serde_json::Value::String(state))
+                    .map_err(|error| JobError::database(error.to_string()))?;
+                Ok(super::jobs::JobStatus {
+                    job_id: job_id.to_string(),
+                    state,
+                    error: error.map(super::jobs::bounded_status_error),
+                    package_hash: None,
+                    staged_bytes: 0,
+                    generation: 0,
+                })
+            },
+        )
         .transpose()
     }
 

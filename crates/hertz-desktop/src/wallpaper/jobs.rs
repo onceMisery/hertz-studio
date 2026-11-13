@@ -22,7 +22,7 @@ use thiserror::Error;
 
 use crate::root_owner::arc_allocation_bytes;
 use crate::wallpaper::assets::AssetStore;
-use crate::wallpaper::budget::{BudgetCoordinator, ControlCharge, ControlRequest};
+use crate::wallpaper::budget::{BudgetCoordinator, ControlCharge, ControlRequest, StatusCharge};
 use crate::wallpaper::decode_probe::ProbeClient;
 use crate::wallpaper::font_prepare::{FontInput, PreparedFont, RequiredText};
 use crate::wallpaper::library::{Library, LOCAL_SOURCE};
@@ -65,6 +65,45 @@ impl JobError {
 /// 单槽已被占用时的原文案。测试用独立字面量钉住它，避免文案漂移；
 /// 刻意保持模块私有，避免测试误引用生产常量而让断言恒真。
 const BUSY_SLOT_DIAGNOSTIC: &str = "已有导入任务在执行，请等待完成或取消";
+
+/// Status history is a bounded byte owner, not just 32 arbitrary elements.
+const STATUS_HISTORY_CAP: usize = 32;
+const MAX_STATUS_ID_BYTES: usize = 64;
+const MAX_STATUS_ERROR_BYTES: usize = 1024;
+/// One retained/cloned status: struct, bounded id/hash/error and allocator
+/// slack. Every history entry admits this before it is pushed.
+const STATUS_ELEMENT_BYTES: u64 = 4096;
+/// Bounded SQLite read for `install_jobs.progress` / `error`; legacy rows can
+/// contain arbitrary text, so only these prefixes are materialised.
+pub(crate) const MAX_STATUS_DB_READ_CHARS: i64 = 8192;
+pub(crate) const MAX_STATUS_DB_ERROR_CHARS: i64 = 1024;
+pub(crate) const MAX_STATUS_DB_STATE_CHARS: i64 = 64;
+
+#[cfg(test)]
+static STATUS_HISTORY_PEAK: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
+pub(crate) fn status_history_peak_for_test() -> usize {
+    STATUS_HISTORY_PEAK.load(Ordering::Relaxed)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_status_history_peak_for_test() {
+    STATUS_HISTORY_PEAK.store(0, Ordering::Relaxed);
+}
+
+pub(crate) fn bounded_status_error(message: impl Into<String>) -> String {
+    let mut message = message.into();
+    if message.len() > MAX_STATUS_ERROR_BYTES {
+        let mut end = MAX_STATUS_ERROR_BYTES;
+        while !message.is_char_boundary(end) {
+            end -= 1;
+        }
+        message.truncate(end);
+        message.shrink_to_fit();
+    }
+    message
+}
 
 /// Test observation of the actual production worker-frame size queried at the
 /// original launch point; it is not a production bound or a cfg(test) oracle.
@@ -148,6 +187,65 @@ pub struct JobStatus {
     pub package_hash: Option<String>,
     pub staged_bytes: u64,
     pub generation: u64,
+}
+
+impl JobStatus {
+    fn set_error(&mut self, message: impl Into<String>) {
+        self.error = Some(bounded_status_error(message));
+    }
+}
+
+/// Upper bound for the JSON text plus the owned `job_id`/`progress`/`error`
+/// copies SQLx makes for one persistence write. JSON escaping is at most six
+/// bytes per input byte, and the write owns the JSON and the error again.
+fn status_write_bytes(status: &JobStatus) -> Option<u64> {
+    let strings = u64::try_from(status.job_id.len())
+        .ok()?
+        .checked_add(u64::try_from(status.error.as_ref().map_or(0, String::len)).ok()?)?
+        .checked_add(u64::try_from(status.package_hash.as_ref().map_or(0, String::len)).ok()?)?;
+    strings.checked_mul(6)?.checked_mul(2)?.checked_add(1024)
+}
+
+#[cfg(test)]
+pub(crate) fn status_write_bytes_for_test(status: &JobStatus) -> u64 {
+    status_write_bytes(status).unwrap_or(u64::MAX)
+}
+
+/// Serialize a status into a pre-sized buffer admitted before any allocation.
+/// The returned charge is held across the SQLx write by the caller.
+pub(crate) fn status_json(
+    budget: &Arc<BudgetCoordinator>,
+    status: &JobStatus,
+) -> Result<(String, StatusCharge), JobError> {
+    let bound = status_write_bytes(status)
+        .ok_or_else(|| JobError::new("budget_busy", "状态副本费用计算溢出"))?;
+    let charge = budget.admit_status(bound).map_err(|rejection| {
+        JobError::new(
+            "budget_busy",
+            format!("{}: {}", rejection.quota, rejection.message),
+        )
+    })?;
+    let mut json = Vec::with_capacity(usize::try_from(bound).unwrap_or(0));
+    serde_json::to_writer(&mut json, status)
+        .map_err(|error| JobError::new("status_serialize_failed", error.to_string()))?;
+    let json = String::from_utf8(json).expect("serde_json emits UTF-8");
+    Ok((json, charge))
+}
+
+/// Sanitise a status restored from a legacy row: the requested id is bounded
+/// caller input, and every retained field must fit the element bound.
+pub(crate) fn sanitize_persisted_status(mut status: JobStatus, job_id: &str) -> Option<JobStatus> {
+    if status.job_id != job_id
+        || status.job_id.len() > MAX_STATUS_ID_BYTES
+        || status
+            .package_hash
+            .as_ref()
+            .is_some_and(|hash| hash.len() != 64)
+    {
+        return None;
+    }
+    status.error = status.error.map(bounded_status_error);
+    Some(status)
 }
 
 /// 已受理任务的返回句柄。id 副本在 clone 前已准入，费用随最后一次销毁退出；
@@ -244,17 +342,41 @@ struct ActiveJob {
     cancel: Arc<AtomicBool>,
 }
 
+struct StatusEntry {
+    status: JobStatus,
+    /// Prior fee for this retained element; popped entries refund it.
+    _charge: StatusCharge,
+}
+
 struct Inner {
     current: Option<ActiveJob>,
-    history: std::collections::VecDeque<JobStatus>,
+    history: std::collections::VecDeque<StatusEntry>,
+    budget: Arc<BudgetCoordinator>,
 }
 
 impl Inner {
-    fn remember(&mut self, status: JobStatus) {
-        self.history.push_back(status);
-        while self.history.len() > 32 {
+    /// Pop before push so the deque never holds 33 elements, and admit the
+    /// element's byte bound before the owned status is retained.
+    fn remember(&mut self, status: JobStatus) -> Result<(), JobError> {
+        while self.history.len() >= STATUS_HISTORY_CAP {
             self.history.pop_front();
         }
+        let charge = self
+            .budget
+            .admit_status(STATUS_ELEMENT_BYTES)
+            .map_err(|rejection| {
+                JobError::new(
+                    "budget_busy",
+                    format!("{}: {}", rejection.quota, rejection.message),
+                )
+            })?;
+        self.history.push_back(StatusEntry {
+            status,
+            _charge: charge,
+        });
+        #[cfg(test)]
+        STATUS_HISTORY_PEAK.fetch_max(self.history.len(), Ordering::Relaxed);
+        Ok(())
     }
 }
 
@@ -599,6 +721,7 @@ impl ImportJobs {
         let inner = Arc::new(Mutex::new(Inner {
             current: None,
             history: std::collections::VecDeque::new(),
+            budget: Arc::clone(&budget),
         }));
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -721,7 +844,10 @@ impl ImportJobs {
         )?;
         let mut slot = ReservedSlot::new(&self.inner, &request.status);
         let status = request.status.lock().expect("status").clone();
-        let accepted = self.library.accept_import(&status, &identity).await;
+        let accepted = self
+            .library
+            .accept_import(&status, &identity, &self.budget)
+            .await;
         match accepted {
             Ok(accepted) if accepted == request.job_id => {
                 // 错误回执路径的第二个 id 副本同样在 clone 前准入；guard 持有到
@@ -741,16 +867,21 @@ impl ImportJobs {
                 let result = self.dispatch(request);
                 if result.is_err() {
                     if let Some(status) = self.status(&job_id) {
-                        self.library
+                        let progress = status_json(&self.budget, &status).ok();
+                        let written = self
+                            .library
                             .record_job(
                                 &job_id,
                                 None,
                                 job_state_db(&status.state),
                                 None,
-                                serde_json::to_string(&status).ok().as_deref(),
+                                progress.as_ref().map(|(json, _)| json.as_str()),
                                 status.error.as_deref(),
                             )
-                            .await?;
+                            .await;
+                        // SQLx's owned copies live until the execute completes.
+                        drop(progress);
+                        written?;
                     }
                 }
                 result
@@ -1057,9 +1188,9 @@ impl ImportJobs {
             drop(request.source);
             let mut status = request.status.lock().expect("status").clone();
             status.state = JobState::Failed;
-            status.error = Some("worker_unavailable: 导入工作线程不可用".into());
+            status.set_error("worker_unavailable: 导入工作线程不可用");
             let mut guard = self.inner.lock().expect("job inner");
-            guard.remember(status);
+            let _ = guard.remember(status);
             guard.current = None;
             return Err(JobError::new("worker_unavailable", "导入工作线程不可用"));
         }
@@ -1103,8 +1234,8 @@ impl ImportJobs {
             .history
             .iter()
             .rev()
-            .find(|status| status.job_id == job_id)
-            .cloned()
+            .find(|entry| entry.status.job_id == job_id)
+            .map(|entry| entry.status.clone())
     }
 }
 
@@ -1231,22 +1362,30 @@ async fn worker_loop(
                 }
                 Err(error) if error.code == "cancelled" => {
                     status.state = JobState::Cancelled;
-                    status.error = Some(error.message.clone());
+                    status.set_error(error.message.clone());
                 }
                 Err(error) => {
                     status.state = JobState::Failed;
-                    status.error = Some(format!("{}: {}", error.code, error.message));
+                    status.set_error(format!("{}: {}", error.code, error.message));
                 }
             }
-            let progress = serde_json::to_string(&status).ok();
-            let terminal = library.record_job(
-                &status.job_id,
-                None,
-                job_state_db(&status.state),
-                None,
-                progress.as_deref(),
-                status.error.as_deref(),
-            );
+            let progress = status_json(&probe.budget_handle(), &status).ok();
+            let terminal = async {
+                let result = library
+                    .record_job(
+                        &status.job_id,
+                        None,
+                        job_state_db(&status.state),
+                        None,
+                        progress.as_ref().map(|(json, _)| json.as_str()),
+                        status.error.as_deref(),
+                    )
+                    .await;
+                // The owned JSON/error copies live in the SQLx command until
+                // this future completes; only then is the prior fee refunded.
+                drop(progress);
+                result
+            };
             #[cfg(test)]
             let terminal = {
                 let mut terminal = std::pin::pin!(terminal);
@@ -1270,7 +1409,7 @@ async fn worker_loop(
                     // 原终态记录失败不能发字体成功证明；旧导入仍保留既有 best-effort 行为。
                     status.state = JobState::Failed;
                     status.package_hash = None;
-                    status.error = Some(format!("{}: {}", error.code, error.message));
+                    status.set_error(format!("{}: {}", error.code, error.message));
                     outcome = Err(error);
                 }
             }
@@ -1283,7 +1422,7 @@ async fn worker_loop(
                 outcome = Err(JobError::new("cancelled", "字体准备已取消并退出"));
                 continue;
             }
-            guard.remember(status);
+            let _ = guard.remember(status);
             guard.current = None;
             break;
         }

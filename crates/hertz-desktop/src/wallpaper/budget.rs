@@ -53,6 +53,8 @@ const MEMORY_ROOT_OWNER_QUOTA: &str = "root_owner_bytes";
 const MEMORY_ROOT_OWNER_HINT: &str = "桌面资料根所有者尚未退出；等待其它宿主或导出任务释放目录锁";
 const MEMORY_SQLX_POOL_QUOTA: &str = "sqlx_pool_bytes";
 const MEMORY_SQLX_POOL_HINT: &str = "壁纸数据库连接池尚未关闭；等待库查询或导出退出后重试";
+const MEMORY_STATUS_QUOTA: &str = "status_bytes";
+const MEMORY_STATUS_HINT: &str = "任务状态副本尚未退出；等待状态查询或持久化写入完成";
 
 /// Only valid ordinary memory grants' three possible rejection diagnostics.
 /// The original quota prefix maps B displayed bytes to M=B+quota+2.
@@ -133,6 +135,8 @@ pub(crate) const MAX_ROOT_OWNER_BYTES: u64 = 4 * 1024 * 1024;
 /// SQLx 连接池初始化（池内每个连接的 worker、命令/行通道与 statement cache，
 /// 以及打开期间的 inspect/snapshot 连接）的独立小额度。
 pub(crate) const MAX_SQLX_POOL_BYTES: u64 = 8 * 1024 * 1024;
+/// 任务状态历史（32 条）、查询副本与 JSON/DB 写入副本的独立小额度。
+pub(crate) const MAX_STATUS_BYTES: u64 = 2 * 1024 * 1024;
 /// GPU 跟踪资源估计上限（§12.1；tracked estimate，不是实测显存）。
 pub(crate) const MAX_GPU_TRACKED_BYTES: u64 = 384 * 1024 * 1024;
 /// 资源准备任务槽（§12.1：一个；P1 不承诺视频转码，转码槽恒 0）。
@@ -266,6 +270,20 @@ impl Drop for SqlxPoolCharge {
     }
 }
 
+/// Prior admission for one task-status owner: a retained history element, a
+/// query clone, or the JSON/SQLx owned copies of one persistence write.
+#[derive(Debug)]
+pub(crate) struct StatusCharge {
+    budget: Arc<BudgetCoordinator>,
+    bytes: u64,
+}
+
+impl Drop for StatusCharge {
+    fn drop(&mut self) {
+        self.budget.release_status(self.bytes);
+    }
+}
+
 /// 拒绝明细：哪个配额、占了多少、要多少、上限多少。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BudgetRejection {
@@ -341,6 +359,10 @@ pub(crate) struct BudgetUsage {
     pub sqlx_pool_bytes: u64,
     /// 当前仍占用该额度的 SQLx 池初始化调用数。
     pub sqlx_pool_records: u32,
+    /// 已事前准入、尚未退出的任务状态历史/查询/JSON/DB 写入副本。
+    pub status_bytes: u64,
+    /// 当前仍占用该额度的状态 owner 数。
+    pub status_records: u32,
     /// release 后未 confirm_exit 的 token 数（"某个释放没有确认时保留占用并报告"）。
     pub release_pending: u32,
     pub session_reservations: u32,
@@ -476,6 +498,10 @@ struct Ledger {
     /// allocation; released only by the awaited SQLx close receipt.
     sqlx_pool_bytes: u64,
     sqlx_pool_records: u32,
+    /// Task-status history/query/JSON/DB copies admitted before their first
+    /// allocation and released by the owning element or completed write.
+    status_bytes: u64,
+    status_records: u32,
     scene_catalog: SceneCatalogCharge,
     composition_catalog: SceneCatalogCharge,
     reservations: Vec<Reservation>,
@@ -521,6 +547,8 @@ impl Ledger {
         usage.root_owner_records = self.root_owner_records;
         usage.sqlx_pool_bytes = self.sqlx_pool_bytes;
         usage.sqlx_pool_records = self.sqlx_pool_records;
+        usage.status_bytes = self.status_bytes;
+        usage.status_records = self.status_records;
         for reservation in &self.reservations {
             usage.reservation_records += 1;
             usage.resource_records += reservation.children.len() as u32;
@@ -592,6 +620,8 @@ impl BudgetCoordinator {
                 root_owner_records: 0,
                 sqlx_pool_bytes: 0,
                 sqlx_pool_records: 0,
+                status_bytes: 0,
+                status_records: 0,
                 scene_catalog: SceneCatalogCharge::Uninitialized,
                 composition_catalog: SceneCatalogCharge::Uninitialized,
                 reservations: Vec::new(),
@@ -806,6 +836,55 @@ impl BudgetCoordinator {
         debug_assert!(ledger.sqlx_pool_records > 0);
         ledger.sqlx_pool_bytes = ledger.sqlx_pool_bytes.saturating_sub(bytes);
         ledger.sqlx_pool_records = ledger.sqlx_pool_records.saturating_sub(1);
+    }
+
+    /// Admit one task-status owner before its first clone/serialize/DB copy.
+    /// Scalars/static text only; nothing is written to the reservation table.
+    pub(crate) fn admit_status(
+        self: &Arc<Self>,
+        bytes: u64,
+    ) -> Result<StatusCharge, BudgetRejection> {
+        debug_assert!(bytes > 0);
+        let mut ledger = self
+            .ledger
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let held = ledger.status_bytes;
+        let Some(next) = held.checked_add(bytes) else {
+            return Err(Ledger::reject(
+                MEMORY_STATUS_QUOTA,
+                MAX_STATUS_BYTES,
+                held,
+                u64::MAX,
+                MEMORY_STATUS_HINT,
+            ));
+        };
+        if next > MAX_STATUS_BYTES {
+            return Err(Ledger::reject(
+                MEMORY_STATUS_QUOTA,
+                MAX_STATUS_BYTES,
+                held,
+                bytes,
+                MEMORY_STATUS_HINT,
+            ));
+        }
+        ledger.status_bytes = next;
+        ledger.status_records = ledger.status_records.saturating_add(1);
+        Ok(StatusCharge {
+            budget: Arc::clone(self),
+            bytes,
+        })
+    }
+
+    fn release_status(&self, bytes: u64) {
+        let mut ledger = self
+            .ledger
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        debug_assert!(ledger.status_bytes >= bytes);
+        debug_assert!(ledger.status_records > 0);
+        ledger.status_bytes = ledger.status_bytes.saturating_sub(bytes);
+        ledger.status_records = ledger.status_records.saturating_sub(1);
     }
 
     /// Remaining original prepare quota after every live inline/ordinary owner.
