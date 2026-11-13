@@ -852,7 +852,7 @@ fn font_group_terminal_database_failure_never_sends_success_after_cleanup() {
         .prepare("after-group-terminal-failure".into())
         .unwrap()
         .finish();
-    assert_only_inline_controls(probe.budget_for_test().usage());
+    assert_only_worker_frame(&probe.budget_for_test());
 }
 
 #[test]
@@ -992,7 +992,7 @@ fn font_group_cancel_at_inspection_checkpoint_finishes_workspace_before_terminal
     assert_eq!(error.code, "cancelled");
     assert_eq!(counts.stats(), (0, 0));
     assert_font_job_drained(&env, &counts, &id, JobState::Cancelled);
-    assert_only_inline_controls(counts.budget_for_test().usage());
+    assert_only_worker_frame(&counts.budget_for_test());
 }
 
 #[test]
@@ -3105,18 +3105,64 @@ fn invalid_job_id_rejects_before_generation_slot_or_control_construction() {
 // 退出；worker 的实际 production frame 也在 block_on/Box 前准入。下面的
 // oracle 独立复写 Arc 布局公式与文案，避免引用生产常量而恒真。
 
-/// The shared worker frame (and any request tail) remains a live inline
-/// prepare owner; everything else must have drained to the original zeros.
-fn assert_only_inline_controls(usage: super::super::budget::BudgetUsage) {
-    assert_eq!(
-        usage,
-        super::super::budget::BudgetUsage {
-            prepare_cpu_bytes: usage.control_prepare_cpu_bytes,
-            control_prepare_cpu_bytes: usage.control_prepare_cpu_bytes,
-            control_records: usage.control_records,
-            ..Default::default()
+/// The shared worker frame is the only inline owner left after the request
+/// tail exits. Polling the exact frame (not the observed control bytes) makes a
+/// leaked per-request ControlCharge visibly fail.
+fn assert_only_worker_frame(budget: &super::super::budget::BudgetCoordinator) {
+    let frame = super::worker_frame_bytes_for_test();
+    assert!(frame > 0, "worker frame was never admitted");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let usage = budget.usage();
+        if usage.control_records == 1 && usage.control_prepare_cpu_bytes == frame {
+            assert_eq!(
+                usage,
+                super::super::budget::BudgetUsage {
+                    prepare_cpu_bytes: frame,
+                    control_prepare_cpu_bytes: frame,
+                    control_records: 1,
+                    ..Default::default()
+                }
+            );
+            return;
         }
-    );
+        assert!(
+            std::time::Instant::now() < deadline,
+            "worker frame-only baseline not reached: {usage:?}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn reserved_slot_drop_clears_only_the_matching_request_and_disarm_keeps_it() {
+    let env = env("job-r33-reserved-slot");
+    let source = || JobSource::Import(ImportSource::Path(env.source.clone()));
+    let request = env.jobs.reserve(new_job_id(), source(), None).unwrap();
+    let foreign_status = Arc::new(Mutex::new(JobStatus {
+        job_id: "foreign".into(),
+        state: JobState::Queued,
+        error: None,
+        package_hash: None,
+        staged_bytes: 0,
+        generation: 1,
+    }));
+    // A guard for another request must not clear this occupied slot.
+    drop(ReservedSlot::new(&env.jobs.inner, &foreign_status));
+    assert_eq!(env.jobs.active_status().unwrap().job_id, request.job_id);
+    // Dropping the matching guard clears the slot before the request refunds.
+    let slot = ReservedSlot::new(&env.jobs.inner, &request.status);
+    drop(slot);
+    assert!(env.jobs.active_status().is_none());
+    drop(request);
+
+    let kept = env.jobs.reserve(new_job_id(), source(), None).unwrap();
+    let mut slot = ReservedSlot::new(&env.jobs.inner, &kept.status);
+    slot.disarm();
+    drop(slot);
+    assert_eq!(env.jobs.active_status().unwrap().job_id, kept.job_id);
+    env.jobs.inner.lock().expect("job inner").current = None;
+    drop(kept);
 }
 
 fn arc_requested_bytes_for_test<T>() -> u64 {

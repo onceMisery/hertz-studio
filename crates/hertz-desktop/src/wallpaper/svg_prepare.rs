@@ -254,7 +254,16 @@ pub(crate) async fn prepare(
     }
     // Reserve at most the still-unoccupied prepare cap: live inline owners
     // (the worker frame and this request's controls) already occupy bytes.
-    let reservation = probe.image_workspace(probe.remaining_prepare_workspace())?;
+    // The computed preflight still has to fit that remainder, so this stays
+    // fail-closed instead of admitting a zero/undersized workspace.
+    let available = probe.remaining_prepare_workspace();
+    if preflight > available {
+        return Err(JobError::new(
+            "probe_budget_exceeded",
+            "SVG 字体闭包超过当前可用准备工作区",
+        ));
+    }
+    let reservation = probe.image_workspace(available)?;
     #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
     probe.svg_event_for_test("workspace_reserved", Some(&input.source.entry.sha256));
     let result = async {

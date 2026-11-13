@@ -621,7 +621,7 @@ impl BudgetCoordinator {
             ));
         };
         ledger.control_prepare_cpu_bytes = next;
-        ledger.control_records += 1;
+        ledger.control_records = ledger.control_records.saturating_add(1);
         Ok(ControlCharge {
             budget: Arc::clone(self),
             bytes,

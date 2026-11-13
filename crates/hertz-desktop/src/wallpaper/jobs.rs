@@ -123,6 +123,50 @@ impl Inner {
     }
 }
 
+/// Clears this reservation's single slot if the admitting future is dropped
+/// before dispatch. Declared after the request so the slot clear (and the last
+/// status/cancel Arc release) happens before the request's control refund.
+struct ReservedSlot {
+    inner: Arc<Mutex<Inner>>,
+    /// Dropped on disarm so a later request refund is the last Arc release.
+    status: Option<Arc<Mutex<JobStatus>>>,
+    armed: bool,
+}
+
+impl ReservedSlot {
+    fn new(inner: &Arc<Mutex<Inner>>, status: &Arc<Mutex<JobStatus>>) -> Self {
+        Self {
+            inner: Arc::clone(inner),
+            status: Some(Arc::clone(status)),
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+        self.status = None;
+    }
+}
+
+impl Drop for ReservedSlot {
+    fn drop(&mut self) {
+        let Some(status) = &self.status else {
+            return;
+        };
+        if !self.armed {
+            return;
+        }
+        let mut guard = self.inner.lock().expect("job inner");
+        if guard
+            .current
+            .as_ref()
+            .is_some_and(|job| Arc::ptr_eq(&job.status, status))
+        {
+            guard.current = None;
+        }
+    }
+}
+
 /// 导入任务管理器：单槽 worker 线程（current_thread runtime 跑 sqlx）。
 pub struct ImportJobs {
     inner: Arc<Mutex<Inner>>,
@@ -438,10 +482,12 @@ impl ImportJobs {
             return Ok(existing.job_id);
         }
         let request = self.reserve(job_id, JobSource::Import(ImportSource::Pinned(file)), None)?;
+        let mut slot = ReservedSlot::new(&self.inner, &request.status);
         let status = request.status.lock().expect("status").clone();
         let accepted = self.library.accept_import(&status, &identity).await;
         match accepted {
             Ok(accepted) if accepted == request.job_id => {
+                slot.disarm();
                 let job_id = request.job_id.clone();
                 let result = self.dispatch(request);
                 if result.is_err() {
@@ -461,7 +507,7 @@ impl ImportJobs {
                 result
             }
             result => {
-                self.inner.lock().expect("job inner").current = None;
+                drop(slot);
                 result
             }
         }
