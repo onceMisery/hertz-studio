@@ -310,12 +310,17 @@ impl AssetStore {
                 .retained_requested_bytes()
                 .map_err(|_| fixed_error("model_heap_limit"))?;
             // Canonical Package texture closure: every image record binds to
-            // the installed identity's archive-verified entry tuple. The fixed
-            // record Vec is admitted on the probe's own ledger before it exists.
+            // the installed identity's archive-verified entry tuple, and each
+            // unique installed projection File is pinned and fully re-hashed.
+            // All three closure backings are admitted on the probe's own ledger
+            // before they exist.
             let textures = texture_closure::build(
+                self.root(),
+                reference.package_hash.as_str(),
                 &compact.structure().images,
                 source.entries(),
                 &probe.budget_handle(),
+                cancel,
             )?;
             // Source R already carries the actual native Arc and W/R request
             // string floor. This own facts-R accounts the compact heap only.

@@ -676,3 +676,23 @@ entry、tuple 不符、MIME 不符、空 references 一律 fail-closed。Embedde
 本批只闭合 canonical 元数据绑定：未打开纹理文件、未做真实 pins/完整 SHA
 重算/codec 费用；Broker/SessionPlan/loader/同 renderer GPU 首帧与 A04 整体
 继续开放，全部 qualification gates 保持关闭。
+
+2026-11-14 r41 纹理 pins 续接：闭包第二遍在单一预分配 PathBuf 下拼出
+`<root>/packages/<hash>/files/<canonical path>`，复用原 source factory 的
+`reset_path`/`append_segment`/`open_file`（只读共享、拒绝 reparse）打开每个唯一
+纹理；`metadata.len()` 必须等于 entry bytes，随后复用 `read_source_sha256`
+（64 KiB 栈缓冲、Acquire 取消检查）完整重算 SHA-256 并逐字符与 canonical entry
+比较，再 seek0 保留 File pin。缺失文件映射 `model_texture_missing`，长度或摘要
+不符映射 `model_texture_mismatch`；任务取消沿原协作式 token 退出。`ClosedTexture`
+增加 file_index 后仍为 56B；同 entry 的重复 image 记录复用同一 File。
+
+闭包 charge 现精确覆盖三项 backing：记录 Vec（count×56）、File pin Vec
+（count×8，唯一 pin 少于保守容量）与保留的 path 容量（root+261）；仍走独立
+`model_texture_closure_bytes` 桶，字段顺序 records→files→path→charge 保证三项
+System.dealloc 全部返回后才退款。真实 rich fixture 入账 168+24+path 容量
+（本次 root 355 → 547 字节），pin 期间纹理不可写、全部 clone 销毁后可写；
+`PhysicalReleaseCapture` 逐项 gate 三个 backing 并确认退款最后发生。三处变异
+（跳过完整 SHA 比较、pin 改为共享写/删、charge 提前声明）均按预期变红后还原。
+
+本批仍不创建 decoder/renderer/GPU：Broker/SessionPlan/loader、同 renderer
+首帧、KTX2 转码与 A04 其余矩阵继续开放。

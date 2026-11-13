@@ -602,7 +602,7 @@ fn canonical_sha_matches(hash: &[u8; 32], text: &str) -> bool {
     hash == &decoded
 }
 
-fn reset_path(path: &mut PathBuf, root: &Path, capacity: usize) -> Result<()> {
+pub(crate) fn reset_path(path: &mut PathBuf, root: &Path, capacity: usize) -> Result<()> {
     path.as_mut_os_string().clear();
     if root.as_os_str().as_encoded_bytes().len() > capacity {
         return Err(heap_error());
@@ -611,7 +611,7 @@ fn reset_path(path: &mut PathBuf, root: &Path, capacity: usize) -> Result<()> {
     Ok(())
 }
 
-fn append_segment(path: &mut PathBuf, segment: &str, capacity: usize) -> Result<()> {
+pub(crate) fn append_segment(path: &mut PathBuf, segment: &str, capacity: usize) -> Result<()> {
     let bytes = path.as_os_str().as_encoded_bytes();
     let separator = usize::from(!matches!(bytes.last(), Some(b'\\' | b'/')));
     if bytes
@@ -644,7 +644,7 @@ fn pin_directory(path: &Path, pins: &mut Vec<File>) -> Result<()> {
     Ok(())
 }
 
-fn open_file(path: &Path, operation: &'static str) -> Result<File> {
+pub(crate) fn open_file(path: &Path, operation: &'static str) -> Result<File> {
     let file = File::options()
         .read(true)
         .share_mode(FILE_SHARE_READ)
