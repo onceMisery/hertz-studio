@@ -66,8 +66,13 @@ fn process_storage_is_booked_before_both_real_allocations() {
     assert_eq!(STEPS.with(Cell::get), 2);
     assert!(!sample.overflow);
     let fee = bootstrap::retained_requested_bytes().unwrap();
-    assert_eq!(sample.peak as u64, fee);
-    assert_eq!(sample.retained as u64, fee);
+    let constructed = bootstrap::construction_requested_bytes().unwrap();
+    assert_eq!(sample.peak as u64, constructed);
+    assert_eq!(sample.retained as u64, constructed);
+    assert_eq!(
+        fee - constructed,
+        bootstrap::request_strings_requested_bytes().unwrap()
+    );
     assert_eq!(budget.usage().asset_cpu_bytes, fee);
     let (_, freed) = measure_requested_heap(|| {
         let budget = BudgetCoordinator::new_process();
@@ -102,7 +107,10 @@ fn full_record_capacity_survives_exit_forget_and_purge_without_growth() {
         );
     });
     assert!(!sample.overflow);
-    assert_eq!(sample.peak, MAX_RESERVATIONS * (128 + 64));
+    assert_eq!(
+        sample.peak as u64,
+        bootstrap::request_strings_requested_bytes().unwrap()
+    );
     assert_eq!(sample.retained, 0);
     assert_eq!(budget.usage().asset_cpu_bytes, fee);
     assert_eq!(budget.usage().reservation_records, 0);

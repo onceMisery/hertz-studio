@@ -7,7 +7,7 @@
 use super::{BudgetCoordinator, Reservation, MAX_ASSET_CPU_BYTES, MAX_RESERVATIONS};
 use std::{alloc::Layout, sync::atomic::AtomicUsize, sync::Arc};
 
-pub(super) fn retained_requested_bytes() -> Option<u64> {
+pub(super) fn construction_requested_bytes() -> Option<u64> {
     // Rust 1.88 and stable ArcInner is repr(C): two atomic counters then T.
     // Reproduce its checked extend/pad_to_align using the real private T.
     let arc = Layout::new::<[AtomicUsize; 2]>()
@@ -19,6 +19,17 @@ pub(super) fn retained_requested_bytes() -> Option<u64> {
     u64::try_from(arc.size().checked_add(records.size())?).ok()
 }
 
+pub(super) fn request_strings_requested_bytes() -> Option<u64> {
+    // BudgetRequest's validated UTF-8 session and local task id are the only
+    // owned allocations in its Clone. String/Vec clone requests their length,
+    // including partial clones; all records, even tombstones, count toward 64.
+    u64::try_from(MAX_RESERVATIONS.checked_mul(128 + 64)?).ok()
+}
+
+pub(super) fn retained_requested_bytes() -> Option<u64> {
+    construction_requested_bytes()?.checked_add(request_strings_requested_bytes()?)
+}
+
 impl BudgetCoordinator {
     pub(super) fn new_process() -> Arc<Self> {
         let retained = retained_requested_bytes()
@@ -26,8 +37,9 @@ impl BudgetCoordinator {
         assert!(retained <= MAX_ASSET_CPU_BYTES);
         let mut budget = Self::new();
         let ledger = budget.ledger.get_mut().unwrap_or_else(|e| e.into_inner());
-        // Both fees are booked before the first heap allocation. The remaining
-        // original grants and catalog initializers observe this same ledger.
+        // Arc/backing and the complete bounded request-string headroom are
+        // booked before the first heap allocation. Every original grant and
+        // catalog initializer observes this same ledger before any clone.
         ledger.coordinator_asset_cpu_bytes = retained;
         #[cfg(test)]
         super::bootstrap_tests::before_allocate("records", ledger);

@@ -259,7 +259,7 @@ fn every_owner_rejects_invalid_identity_without_changing_the_ledger() {
                 (0, 0, 0)
             );
             assert_eq!(
-                rejection.message,
+                rejection.message.to_string(),
                 "request_shape 超限：已占 0 + 申请 0 > 上限 0；预算申请必须绑定有界会话、非零代际和有效任务 id"
             );
             assert_eq!(
@@ -390,7 +390,7 @@ fn video_upload_rate_is_independent_global_and_held_until_real_exit() {
     assert_eq!(
         budget
             .project_desktop_replacement(&[1])
-            .grant(&preview)
+            .check_requests(std::slice::from_ref(&preview))
             .unwrap_err()
             .quota,
         "texture_upload_bytes_per_second"
@@ -561,7 +561,7 @@ fn third_decoder_is_budget_busy() {
     assert_eq!(rejection.quota, "decoder_slots");
     assert_eq!(rejection.cap, u64::from(MAX_DECODER_SLOTS));
     assert!(
-        rejection.message.contains("释放预览"),
+        rejection.message.to_string().contains("释放预览"),
         "拒绝必须给可操作选项：{rejection:?}"
     );
 
@@ -768,7 +768,7 @@ fn byte_caps_and_prepare_slot() {
     let rejection = budget.grant(&d).expect_err("准备任务单槽");
     assert_eq!(rejection.quota, "prepare_tasks");
     assert!(
-        rejection.message.contains("C24"),
+        rejection.message.to_string().contains("C24"),
         "拒绝话术必须提醒取消不提前归还"
     );
 }

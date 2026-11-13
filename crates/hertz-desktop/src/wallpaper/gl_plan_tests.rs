@@ -4,7 +4,7 @@ use crate::wallpaper::session::{FrameKind, RecoveryLedger, WallpaperSession};
 
 fn plan(budget: &BudgetCoordinator, owner: OwnerKind, generation: u64) -> GlPlan {
     GlPlan::new(
-        budget,
+        &budget.usage(),
         owner,
         format!("gl-{generation}"),
         generation,
@@ -59,7 +59,7 @@ fn preview_uses_reserved_rate_and_available_quality() {
     let desktop =
         GlAdmission::new(plan(&budget, OwnerKind::Desktop, 1), Arc::clone(&budget)).unwrap();
     let preview = GlPlan::new(
-        &budget,
+        &budget.usage(),
         OwnerKind::Preview,
         "preview".into(),
         2,
@@ -141,7 +141,7 @@ fn invalid_target_is_rejected_before_reservation() {
         (1920, 60, 30, "ultra"),
     ] {
         assert!(GlPlan::new(
-            &budget,
+            &budget.usage(),
             OwnerKind::Desktop,
             "invalid".into(),
             1,

@@ -386,7 +386,10 @@ fn cold_global_real_consumers_preserve_retained_charge() {
     let mut over = full.clone();
     over.asset_cpu_bytes += 1;
     assert_eq!(
-        projection.grant(&over).unwrap_err().quota,
+        projection
+            .check_requests(std::slice::from_ref(&over))
+            .unwrap_err()
+            .quota,
         "asset_cpu_bytes"
     );
     let oversized_plan = SessionPlan::new(
@@ -397,10 +400,21 @@ fn cold_global_real_consumers_preserve_retained_charge() {
         }],
     )
     .unwrap();
+    // r30: the advisory projection no longer has grant authority. The same
+    // oversized SessionPlan request is refused read-only, with the exact
+    // boundary fields and without advancing any token or revision.
     assert_eq!(
-        projection.grant_session(&oversized_plan).unwrap_err().code,
-        "budget_busy"
+        oversized_plan.request().asset_cpu_bytes,
+        full.asset_cpu_bytes + 1
     );
+    let before = budget.planning_snapshot();
+    let rejection = budget
+        .check_requests(std::slice::from_ref(oversized_plan.request()))
+        .unwrap_err();
+    assert_eq!(rejection.quota, "asset_cpu_bytes");
+    assert_eq!(rejection.held, MAX_ASSET_CPU_BYTES);
+    assert_eq!(rejection.requested, full.asset_cpu_bytes + 1);
+    assert_eq!(budget.planning_snapshot(), before);
     budget.release(full_token, "full-asset", 1).unwrap();
     assert_eq!(budget.usage().asset_cpu_bytes, MAX_ASSET_CPU_BYTES);
     budget.confirm_exit(full_token, "full-asset", 1).unwrap();

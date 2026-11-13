@@ -348,7 +348,15 @@ fn budget_projection_never_changes_or_releases_the_original_owner() {
     assert_eq!(ledger.usage(), before);
     ledger.release(token, &request.session, 77).unwrap();
     let pending = ledger.usage();
-    assert_eq!(ledger.project_desktop_replacement(&[77]).usage(), pending);
+    // The advisory view is metadata-only: compare the scalar fields it owns
+    // instead of equating a projection with the full ledger usage.
+    let after = ledger.project_desktop_replacement(&[77]).usage();
+    assert_eq!(after.targets, pending.targets);
+    assert_eq!(after.cpu_bytes, pending.cpu_bytes);
+    assert_eq!(after.gpu_bytes, pending.gpu_bytes);
+    assert_eq!(after.reservation_records, pending.reservation_records);
+    assert_eq!(after.session_reservations, 0);
+    assert_eq!(after.resource_records, 0);
     assert_eq!(ledger.usage(), pending);
 }
 

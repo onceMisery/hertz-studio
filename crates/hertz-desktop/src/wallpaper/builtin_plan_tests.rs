@@ -319,7 +319,7 @@ fn smaller_native_budget_replans_before_any_reservation_and_counts_retiring_owne
     let facts = facts(2560, 1600, 1.5);
     let first = resolved(&compiled, &facts, Fit::Cover, &budget);
     let held = gl_plan::GlPlan::new(
-        &budget,
+        &budget.usage(),
         OwnerKind::Desktop,
         "held".into(),
         1,
