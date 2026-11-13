@@ -2923,3 +2923,186 @@ fn preview_session_admits_only_preview_targets_and_waits_for_real_exit() {
     assert_eq!(session.reap_resources(), vec![generation]);
     assert_eq!(budget.usage(), Default::default());
 }
+
+// r31: 单槽 busy 判定前移到 status/cancel 构造之前。忙时只允许产出原
+// JobError 的有界静态文字；任何 Arc/Mutex/AtomicBool/job-id clone 都会
+// 让下面的精确字节断言失败。期望文案是独立于生产的字面量，改文案即红。
+const R31_BUSY_DIAGNOSTIC: &str = "已有导入任务在执行，请等待完成或取消";
+const R31_INVALID_ID_DIAGNOSTIC: &str = "jobId 必须是有界的单个目录名";
+
+fn occupy_r31_slot(env: &TestEnv) -> (Arc<Mutex<JobStatus>>, Arc<AtomicBool>) {
+    let generation = env.jobs.generation.fetch_add(1, Ordering::Relaxed);
+    let status = Arc::new(Mutex::new(JobStatus {
+        job_id: "held-job".into(),
+        state: JobState::Preparing,
+        error: None,
+        package_hash: None,
+        staged_bytes: 0,
+        generation,
+    }));
+    let cancel = Arc::new(AtomicBool::new(false));
+    let mut guard = env.jobs.inner.lock().expect("job inner");
+    assert!(guard.current.is_none(), "测试前置：单槽必须空闲");
+    guard.current = Some(ActiveJob {
+        status: Arc::clone(&status),
+        cancel: Arc::clone(&cancel),
+    });
+    drop(guard);
+    (status, cancel)
+}
+
+#[test]
+fn busy_reservation_rejects_before_constructing_status_or_cancel_controls() {
+    use crate::wallpaper::budget::measure_requested_heap;
+
+    let env = env("job-r31-busy-controls");
+    let (held_status, held_cancel) = occupy_r31_slot(&env);
+    let before_generation = env.jobs.generation.load(Ordering::Relaxed);
+    let before_history = env.jobs.inner.lock().expect("job inner").history.len();
+    let job_id = new_job_id();
+    let source = JobSource::Import(ImportSource::Path(env.source.clone()));
+    let (result, sample) = measure_requested_heap(|| env.jobs.reserve(job_id, source, None));
+    assert!(!sample.overflow);
+    // 唯一允许的分配就是 budget_busy 原文案本身，不含任何控制对象。
+    assert_eq!(sample.peak, R31_BUSY_DIAGNOSTIC.len());
+    assert_eq!(sample.retained, sample.peak);
+    let error = result.err().expect("busy reservation must be rejected");
+    assert_eq!(error.code, "budget_busy");
+    assert_eq!(error.message, R31_BUSY_DIAGNOSTIC);
+    assert_eq!(
+        env.jobs.generation.load(Ordering::Relaxed),
+        before_generation + 1,
+        "原语义：每次 reserve 调用都消耗一个代际，忙时也一样"
+    );
+    let guard = env.jobs.inner.lock().expect("job inner");
+    assert_eq!(guard.history.len(), before_history);
+    let held = guard.current.as_ref().expect("原任务仍占用单槽");
+    assert!(Arc::ptr_eq(&held.status, &held_status));
+    assert!(Arc::ptr_eq(&held.cancel, &held_cancel));
+    drop(guard);
+    assert_eq!(held_status.lock().unwrap().state, JobState::Preparing);
+    assert!(!held_cancel.load(Ordering::Relaxed));
+}
+
+// `submit_authorized` 是异步授权路径，在 import_operation 查询之后才进同一
+// reserve；其 busy 语义由同一单槽保证，不属于本同步入口清单。
+#[test]
+fn every_sync_reservation_entry_rejects_busy_with_the_original_diagnostic() {
+    fn assert_busy(error: JobError) {
+        assert_eq!(error.code, "budget_busy");
+        assert_eq!(error.message, R31_BUSY_DIAGNOSTIC);
+    }
+
+    let font = font_fixture();
+    let (env, font_request) = font_env(
+        "job-r31-entries",
+        ProbeClient::testing(|_, _| Box::pin(async { Ok(()) })),
+        &font,
+        "font/ttf",
+    );
+    occupy_r31_slot(&env);
+    let reference = font_request.reference.clone();
+    let asset_request = super::super::target_planner::PrepareRequest {
+        reference: reference.clone(),
+        target: session_target(),
+    };
+    let svg_request = SvgPrepareRequest {
+        reference: reference.clone(),
+        target: session_target(),
+        usage: "color".into(),
+    };
+    let group = single_font_group(&env, font_request.clone());
+    assert_busy(
+        env.jobs
+            .submit(new_job_id(), env.source.clone())
+            .unwrap_err(),
+    );
+    assert_busy(
+        env.jobs
+            .prepare_asset(new_job_id(), asset_request)
+            .unwrap_err(),
+    );
+    assert_busy(
+        env.jobs
+            .prepare_svg(new_job_id(), svg_request)
+            .err()
+            .unwrap(),
+    );
+    assert_busy(
+        env.jobs
+            .prepare_font(new_job_id(), font_request.clone())
+            .err()
+            .unwrap(),
+    );
+    assert_busy(
+        env.jobs
+            .prepare_font_group(new_job_id(), group)
+            .err()
+            .unwrap(),
+    );
+    assert_busy(
+        env.jobs
+            .prepare_model_source(new_job_id(), reference.clone())
+            .err()
+            .unwrap(),
+    );
+    assert_busy(
+        env.jobs
+            .prepare_model_input(new_job_id(), reference)
+            .err()
+            .unwrap(),
+    );
+    // 忙拒绝不得改动原槽：仍是 helper 造的持有任务。
+    assert_eq!(
+        env.jobs.active_status().expect("原任务仍占用单槽").job_id,
+        "held-job"
+    );
+}
+
+#[test]
+fn idle_reservation_still_constructs_controls_and_commits_the_slot() {
+    let env = env("job-r31-idle-controls");
+    let job_id = new_job_id();
+    let generation = env.jobs.generation.load(Ordering::Relaxed);
+    let request = env
+        .jobs
+        .reserve(
+            job_id.clone(),
+            JobSource::Import(ImportSource::Path(env.source.clone())),
+            None,
+        )
+        .unwrap();
+    assert_eq!(request.generation, generation);
+    assert_eq!(request.job_id, job_id);
+    let guard = env.jobs.inner.lock().expect("job inner");
+    let current = guard.current.as_ref().expect("空闲时 reserve 必须提交单槽");
+    assert!(Arc::ptr_eq(&current.status, &request.status));
+    assert!(Arc::ptr_eq(&current.cancel, &request.cancel));
+    {
+        let status = current.status.lock().unwrap();
+        assert_eq!(status.job_id, job_id);
+        assert_eq!(status.state, JobState::Queued);
+        assert_eq!(status.generation, generation);
+    }
+    assert!(!current.cancel.load(Ordering::Relaxed));
+    drop(guard);
+    // 槽由测试自身占用；env 私有的 worker 随 sender 关闭退出，无需归还。
+}
+
+#[test]
+fn invalid_job_id_rejects_before_generation_slot_or_control_construction() {
+    use crate::wallpaper::budget::measure_requested_heap;
+
+    let env = env("job-r31-invalid-id");
+    let before = env.jobs.generation.load(Ordering::Relaxed);
+    let bad_id = String::from("bad/id");
+    let source = JobSource::Import(ImportSource::Path(env.source.clone()));
+    let (result, sample) = measure_requested_heap(|| env.jobs.reserve(bad_id, source, None));
+    assert!(!sample.overflow);
+    // 与 busy 同法：独立字面量同时钉住长度与内容。
+    assert_eq!(sample.peak, R31_INVALID_ID_DIAGNOSTIC.len());
+    let error = result.err().expect("invalid id must be rejected");
+    assert_eq!(error.code, "invalid_input");
+    assert_eq!(error.message, R31_INVALID_ID_DIAGNOSTIC);
+    assert_eq!(env.jobs.generation.load(Ordering::Relaxed), before);
+}
