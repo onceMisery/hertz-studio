@@ -80,7 +80,7 @@ pub struct InstalledReceipt {
 pub struct AssetStore {
     root: PathBuf,
     content_capacity: u64,
-    _root_owner: Arc<crate::root_owner::RootOwner>,
+    _root_owner: crate::root_owner::RootOwner,
 }
 
 /// 核验缓存持有只读、拒绝写入/删除共享的句柄；命中时字节身份不能变化。
@@ -91,7 +91,7 @@ pub(crate) struct PinnedMedia {
     _file_pin: std::fs::File,
     // 派生输入的目录租约随所有 Broker/流持有者退出，不能随准备描述符提前归还。
     _derived_lease: Option<Arc<std::fs::File>>,
-    _root_owner: Arc<crate::root_owner::RootOwner>,
+    _root_owner: crate::root_owner::RootOwner,
 }
 
 /// 结构与摘要已复核，真实解码期间持续固定这份字节。
@@ -274,7 +274,7 @@ impl AssetStore {
             _package_pin: Some(original),
             _file_pin: file,
             _derived_lease: None,
-            _root_owner: Arc::clone(&self._root_owner),
+            _root_owner: self._root_owner.clone(),
         }))
     }
 
@@ -355,7 +355,7 @@ impl AssetStore {
             package_hash: package_hash.to_string(),
             metadata,
             media: Arc::new(PinnedMedia {
-                _root_owner: Arc::clone(&self._root_owner),
+                _root_owner: self._root_owner.clone(),
                 entry,
                 path,
                 _package_pin: package_pin,
@@ -605,7 +605,7 @@ impl AssetStore {
                     package_hash: package.package_hash.clone(),
                     metadata,
                     media: Arc::new(PinnedMedia {
-                        _root_owner: Arc::clone(&self._root_owner),
+                        _root_owner: self._root_owner.clone(),
                         entry: entry.clone(),
                         path: files.join(path),
                         _package_pin: Some(
@@ -772,7 +772,7 @@ impl AssetStore {
             return Ok(None);
         };
         Ok(Some(PinnedMedia {
-            _root_owner: Arc::clone(&self._root_owner),
+            _root_owner: self._root_owner.clone(),
             entry,
             path: path_buf,
             _package_pin: Some(original),

@@ -551,7 +551,7 @@ impl AssetStore {
                     _package_pin: Some(original),
                     _file_pin: file,
                     _derived_lease: None,
-                    _root_owner: Arc::clone(&self._root_owner),
+                    _root_owner: self._root_owner.clone(),
                 };
                 inner.resources = Some(Resources {
                     reference: reference.clone(),

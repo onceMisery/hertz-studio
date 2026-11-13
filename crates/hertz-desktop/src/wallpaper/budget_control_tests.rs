@@ -850,3 +850,78 @@ fn overflowing_control_request_rejects_without_allocation_or_booking() {
     );
     assert_eq!(budget.planning_snapshot(), before);
 }
+
+// r36: desktop-root owners have their own scalar quota, admitted before the
+// canonical path/pins/lock path/Arcs exist and released by their actual lease.
+
+#[test]
+fn root_owner_quota_is_separate_and_releases_only_with_its_charge() {
+    let budget = Arc::new(BudgetCoordinator::new());
+    let first = 24_576;
+    let second = 8_192;
+    let (charge, sample) = measure_requested_heap(|| budget.admit_root_owner(first).unwrap());
+    assert_no_heap(sample);
+    assert_eq!(budget.usage().root_owner_bytes, first);
+    assert_eq!(budget.usage().root_owner_records, 1);
+    assert_eq!(budget.usage().prepare_cpu_bytes, 0);
+    assert_eq!(budget.usage().control_records, 0);
+
+    let (second_charge, sample) =
+        measure_requested_heap(|| budget.admit_root_owner(second).unwrap());
+    assert_no_heap(sample);
+    assert_eq!(budget.usage().root_owner_bytes, first + second);
+    assert_eq!(budget.usage().root_owner_records, 2);
+    let (projection, sample) = measure_requested_heap(|| budget.project_desktop_replacement(&[]));
+    assert_no_heap(sample);
+    assert_eq!(projection.usage(), budget.usage());
+
+    drop(charge);
+    assert_eq!(budget.usage().root_owner_bytes, second);
+    assert_eq!(budget.usage().root_owner_records, 1);
+    drop(second_charge);
+    assert_eq!(budget.usage(), BudgetUsage::default());
+}
+
+#[test]
+fn root_owner_quota_rejects_before_booking_with_independent_diagnostics() {
+    let budget = Arc::new(BudgetCoordinator::new());
+    let held = MAX_ROOT_OWNER_BYTES - 100;
+    let _hold = budget.admit_root_owner(held).unwrap();
+    let before = budget.planning_snapshot();
+    let (rejected, sample) = measure_requested_heap(|| budget.admit_root_owner(101));
+    assert_no_heap(sample);
+    let rejected = rejected.unwrap_err();
+    assert_eq!(
+        (
+            rejected.quota,
+            rejected.cap,
+            rejected.held,
+            rejected.requested
+        ),
+        ("root_owner_bytes", MAX_ROOT_OWNER_BYTES, held, 101)
+    );
+    // Independent literals: quota name, hint and template are duplicated here.
+    assert_eq!(
+        rejected.message.to_string(),
+        format!(
+            "root_owner_bytes 超限：已占 {held} + 申请 101 > 上限 {MAX_ROOT_OWNER_BYTES}；桌面资料根所有者尚未退出；等待其它宿主或导出任务释放目录锁"
+        )
+    );
+    assert_eq!(budget.planning_snapshot(), before);
+
+    let empty = Arc::new(BudgetCoordinator::new());
+    let before = empty.planning_snapshot();
+    let (overflow, sample) = measure_requested_heap(|| empty.admit_root_owner(u64::MAX));
+    assert_no_heap(sample);
+    let overflow = overflow.unwrap_err();
+    assert_eq!(
+        (
+            overflow.quota,
+            overflow.cap,
+            overflow.held,
+            overflow.requested
+        ),
+        ("root_owner_bytes", MAX_ROOT_OWNER_BYTES, 0, u64::MAX)
+    );
+    assert_eq!(empty.planning_snapshot(), before);
+}

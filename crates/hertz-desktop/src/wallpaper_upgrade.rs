@@ -2,7 +2,6 @@
 //! Wallpaper migration set, complete resources, and desktop admission binding.
 use std::future::Future;
 use std::path::Path;
-use std::sync::Arc;
 
 use anyhow::{ensure, Context, Result};
 use hertz_sqlite_lifecycle::{self as lifecycle, Layout, ResourceSpec};
@@ -56,11 +55,11 @@ fn context(error: anyhow::Error) -> anyhow::Error {
     error.context("壁纸资料检查/恢复失败；中断恢复使用 --wallpaper-recover-upgrade --desktop-root <桌面资料目录>")
 }
 
-pub(crate) fn prepare(root: &Path) -> Result<Arc<RootOwner>> {
+pub(crate) fn prepare(root: &Path) -> Result<RootOwner> {
     blocking(prepare_async(root)).map_err(context)
 }
 
-async fn prepare_async(root: &Path) -> Result<Arc<RootOwner>> {
+async fn prepare_async(root: &Path) -> Result<RootOwner> {
     let reader = RootOwner::shared(root)?;
     let status = lifecycle::inspect(reader.root(), &layout()).await?;
     if !status.pending || status.fresh {
@@ -98,7 +97,7 @@ async fn prepare_async(root: &Path) -> Result<Arc<RootOwner>> {
 
 /// Config can initialize a fresh root, but cannot migrate an existing library
 /// under a shared guard. The app prepares it before any config read or write.
-pub(crate) fn admit_config(root: &Path) -> Result<Arc<RootOwner>> {
+pub(crate) fn admit_config(root: &Path) -> Result<RootOwner> {
     let reader = RootOwner::shared(root)?;
     blocking(async {
         let status = lifecycle::inspect(reader.root(), &layout()).await?;
@@ -119,11 +118,11 @@ pub(crate) async fn open_library(root: &Path) -> Result<SqlitePool> {
         !status.pending || status.fresh,
         "wallpaper_upgrade_pending: 既有壁纸库需要独占升级"
     );
-    let admission = Arc::clone(&reader);
+    let admission = reader.clone();
     let options = SqlitePoolOptions::new().after_connect(move |_, _| {
         // SQLx stores this callback in PoolInner. Pool clones and checked-out
         // PoolConnections keep it alive even after Library is dropped.
-        let admission = Arc::clone(&admission);
+        let admission = admission.clone();
         Box::pin(async move {
             drop(admission);
             Ok(())
