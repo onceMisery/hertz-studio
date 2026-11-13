@@ -925,3 +925,78 @@ fn root_owner_quota_rejects_before_booking_with_independent_diagnostics() {
     );
     assert_eq!(empty.planning_snapshot(), before);
 }
+
+// r37: SQLx pool initialization has its own scalar quota; the charge is
+// released by the awaited SQLx close receipt, never by dropping a handle.
+
+#[test]
+fn sqlx_pool_quota_is_separate_and_releases_only_with_its_charge() {
+    let budget = Arc::new(BudgetCoordinator::new());
+    let first = 352 * 1024;
+    let second = 64 * 1024;
+    let (charge, sample) = measure_requested_heap(|| budget.admit_sqlx_pool(first).unwrap());
+    assert_no_heap(sample);
+    assert_eq!(budget.usage().sqlx_pool_bytes, first);
+    assert_eq!(budget.usage().sqlx_pool_records, 1);
+    assert_eq!(budget.usage().prepare_cpu_bytes, 0);
+    assert_eq!(budget.usage().root_owner_bytes, 0);
+
+    let (second_charge, sample) =
+        measure_requested_heap(|| budget.admit_sqlx_pool(second).unwrap());
+    assert_no_heap(sample);
+    assert_eq!(budget.usage().sqlx_pool_bytes, first + second);
+    assert_eq!(budget.usage().sqlx_pool_records, 2);
+    let (projection, sample) = measure_requested_heap(|| budget.project_desktop_replacement(&[]));
+    assert_no_heap(sample);
+    assert_eq!(projection.usage(), budget.usage());
+
+    drop(charge);
+    assert_eq!(budget.usage().sqlx_pool_bytes, second);
+    assert_eq!(budget.usage().sqlx_pool_records, 1);
+    drop(second_charge);
+    assert_eq!(budget.usage(), BudgetUsage::default());
+}
+
+#[test]
+fn sqlx_pool_quota_rejects_before_booking_with_independent_diagnostics() {
+    let budget = Arc::new(BudgetCoordinator::new());
+    let held = MAX_SQLX_POOL_BYTES - 100;
+    let _hold = budget.admit_sqlx_pool(held).unwrap();
+    let before = budget.planning_snapshot();
+    let (rejected, sample) = measure_requested_heap(|| budget.admit_sqlx_pool(101));
+    assert_no_heap(sample);
+    let rejected = rejected.unwrap_err();
+    assert_eq!(
+        (
+            rejected.quota,
+            rejected.cap,
+            rejected.held,
+            rejected.requested
+        ),
+        ("sqlx_pool_bytes", MAX_SQLX_POOL_BYTES, held, 101)
+    );
+    // Independent literals: quota name, hint and template are duplicated here.
+    assert_eq!(
+        rejected.message.to_string(),
+        format!(
+            "sqlx_pool_bytes 超限：已占 {held} + 申请 101 > 上限 {MAX_SQLX_POOL_BYTES}；壁纸数据库连接池尚未关闭；等待库查询或导出退出后重试"
+        )
+    );
+    assert_eq!(budget.planning_snapshot(), before);
+
+    let empty = Arc::new(BudgetCoordinator::new());
+    let before = empty.planning_snapshot();
+    let (overflow, sample) = measure_requested_heap(|| empty.admit_sqlx_pool(u64::MAX));
+    assert_no_heap(sample);
+    let overflow = overflow.unwrap_err();
+    assert_eq!(
+        (
+            overflow.quota,
+            overflow.cap,
+            overflow.held,
+            overflow.requested
+        ),
+        ("sqlx_pool_bytes", MAX_SQLX_POOL_BYTES, 0, u64::MAX)
+    );
+    assert_eq!(empty.planning_snapshot(), before);
+}

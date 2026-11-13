@@ -398,3 +398,98 @@ fn offline_cli_requires_explicit_existing_root_and_loss_acceptance() {
     .is_err());
     assert!(!dir.path().join("wallpaper.db").exists());
 }
+
+// r37: SQLx pool initialization is admitted before the first connection and
+// refunded only after SQLx awaits every connection's close. The bound's
+// per-connection terms cover the default command channel (50 slots),
+// statement cache (100 entries), row channel (50 slots) and worker state.
+fn sqlx_connection_structures_within_prior_bound() {
+    // Independent copies of SQLx 0.8 defaults and conservative entry sizes.
+    let command = 50_u64 * 256;
+    let statements = 100_u64 * 192;
+    let rows = 50_u64 * 64;
+    let worker = 4096;
+    assert!(command + statements + rows + worker <= 64 * 1024);
+}
+
+#[test]
+fn sqlx_pool_admission_covers_open_peak_and_refunds_only_after_close() {
+    // The process ledger is shared with every other test's closer threads, so
+    // run this exact-state witness in a cold child.
+    const NAME: &str = "wallpaper_upgrade::tests::sqlx_pool_admission_covers_open_peak_and_refunds_only_after_close";
+    if std::env::var("HERTZ_SQLX_POOL_CHILD").as_deref() != Ok(NAME) {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", NAME, "--nocapture", "--test-threads=1"])
+            .env("HERTZ_SQLX_POOL_CHILD", NAME)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "cold child {NAME} failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+
+    use crate::wallpaper::budget::{self, measure_requested_heap};
+    sqlx_connection_structures_within_prior_bound();
+
+    let dir = tempfileish::temp_dir("sqlx-prior");
+    let budget = budget::global();
+    let before = budget.usage();
+    let requested = sqlx_pool_requested_bytes(layout().max_connections).unwrap();
+    assert_eq!(requested, 352 * 1024);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let (pool, sample) =
+        measure_requested_heap(|| runtime.block_on(open_library(dir.path())).unwrap());
+    assert!(!sample.overflow);
+    assert!(u64::try_from(sample.peak).unwrap() <= requested);
+    println!("sqlx-pool prior={requested} caller_peak={}", sample.peak);
+    assert_eq!(
+        budget.usage().sqlx_pool_bytes,
+        before.sqlx_pool_bytes + requested
+    );
+    assert_eq!(
+        budget.usage().sqlx_pool_records,
+        before.sqlx_pool_records + 1
+    );
+
+    // A checked-out connection keeps SQLx's close pending: dropping the
+    // admitted handle must not refund before the physical close.
+    let clone = (*pool).clone();
+    let connection = runtime.block_on(clone.acquire()).unwrap();
+    drop(pool);
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    assert_eq!(
+        budget.usage().sqlx_pool_bytes,
+        before.sqlx_pool_bytes + requested
+    );
+    runtime.block_on(connection.close()).unwrap();
+    drop(clone);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while budget.usage().sqlx_pool_bytes != before.sqlx_pool_bytes {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "SQLx close receipt did not arrive"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert_eq!(budget.usage(), before);
+    assert!(crate::root_owner::probe_database_handles(dir.path()).is_ok());
+
+    // Explicit close is an immediate receipt.
+    let dir = tempfileish::temp_dir("sqlx-close");
+    let before = budget.usage();
+    let pool = runtime.block_on(open_library(dir.path())).unwrap();
+    assert_eq!(
+        budget.usage().sqlx_pool_bytes,
+        before.sqlx_pool_bytes + requested
+    );
+    runtime.block_on(pool.close());
+    assert_eq!(budget.usage(), before);
+    assert!(crate::root_owner::probe_database_handles(dir.path()).is_ok());
+}
