@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
 //! Wallpaper migration set, complete resources, and desktop admission binding.
 use std::future::Future;
-use std::path::Path;
+use std::ops::Deref;
+use std::path::{Path, PathBuf};
 
 use anyhow::{ensure, Context, Result};
 use hertz_sqlite_lifecycle::{self as lifecycle, Layout, ResourceSpec};
@@ -10,11 +11,138 @@ use sqlx::SqlitePool;
 
 use crate::config_journal::FileLock;
 use crate::root_owner::RootOwner;
+use crate::wallpaper::budget;
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("migrations/wallpaper");
 // This barrier is deliberately outside rollback resources. Old export intents
 // must never delete external files after a database state has been restored.
 const EXPORT_RESET: &str = "wallpaper-export-reset.pending";
+
+/// SQLx 默认每连接命令通道 50 槽、statement cache 100 条、行通道 50 槽；
+/// 这里按 64 KiB/连接给出保守上界，覆盖 worker 状态、通道 backing、缓存
+/// 与线程名等初始化所有者。
+const SQLX_CONNECTION_PRIOR_BYTES: u64 = 64 * 1024;
+/// 池自身（PoolInner、选项、迁移器状态与 close 事件）的固定上界。
+const SQLX_POOL_BASE_BYTES: u64 = 32 * 1024;
+/// 打开期间 inspect 与 snapshot 还会各建一条直连，另留一条迁移/重试用连接。
+const SQLX_TRANSIENT_CONNECTIONS: u64 = 3;
+
+pub(crate) fn sqlx_pool_requested_bytes(max_connections: u32) -> Option<u64> {
+    u64::from(max_connections)
+        .checked_add(SQLX_TRANSIENT_CONNECTIONS)?
+        .checked_mul(SQLX_CONNECTION_PRIOR_BYTES)?
+        .checked_add(SQLX_POOL_BASE_BYTES)
+}
+
+fn sqlx_call_charge() -> Result<budget::SqlxPoolCharge> {
+    let requested = sqlx_pool_requested_bytes(layout().max_connections)
+        .context("wallpaper_sqlx_budget: SQLx 池费用计算溢出")?;
+    budget::global()
+        .admit_sqlx_pool(requested)
+        .map_err(|rejection| anyhow::anyhow!("wallpaper_sqlx_budget: {}", rejection.message))
+}
+
+/// A SQLite pool whose initialization fee is refunded only after SQLx has
+/// awaited every connection's shutdown (statement cache, command/row channels
+/// and SQLite handles included). Dropping the handle alone never refunds.
+pub(crate) struct AdmittedPool {
+    pool: Option<SqlitePool>,
+    root: PathBuf,
+    charge: Option<budget::SqlxPoolCharge>,
+}
+
+impl AdmittedPool {
+    fn new(pool: SqlitePool, root: PathBuf, charge: budget::SqlxPoolCharge) -> Self {
+        Self {
+            pool: Some(pool),
+            root,
+            charge: Some(charge),
+        }
+    }
+
+    /// Explicit receipt: `SqlitePool::close` closes idle connections, and the
+    /// OS probe covers checked-out and detached raw connections alike. The
+    /// handle is dropped before the wait so the pool's RootOwner admission is
+    /// released independently of the SQLx fee.
+    #[cfg(test)]
+    pub(crate) async fn close(mut self) {
+        if let Some(pool) = self.pool.take() {
+            pool.close().await;
+            drop(pool);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while !sqlite_physically_exited(&self.root) {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "SQLite owners did not physically exit"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+        self.charge.take();
+    }
+}
+
+/// SQLx `close()` returns while checked-out connections are still alive, and
+/// `detach` removes a raw connection from `size()`. Every SQLite connection
+/// worker holds an OS file handle for this database (and its sidecars), so the
+/// exclusive OS probe is the physical exit receipt for all of them.
+fn sqlite_physically_exited(root: &Path) -> bool {
+    crate::root_owner::probe_database_handles(root).is_ok()
+}
+
+impl Deref for AdmittedPool {
+    type Target = SqlitePool;
+
+    fn deref(&self) -> &Self::Target {
+        self.pool
+            .as_ref()
+            .expect("admitted SQLite pool is usable until close")
+    }
+}
+
+impl Drop for AdmittedPool {
+    fn drop(&mut self) {
+        let (Some(pool), Some(charge)) = (self.pool.take(), self.charge.take()) else {
+            return;
+        };
+        // SQLx Drop only signals its workers. A detached closer awaits the same
+        // shutdown SQLx documents for `close()` plus the size barrier for
+        // checked-out connections, then refunds the prior fee.
+        let root = self.root.clone();
+        std::thread::Builder::new()
+            .name("hertz-sqlite-close".into())
+            .spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("create SQLite close runtime");
+                runtime.block_on(pool.close());
+                drop(runtime);
+                // Release the pool's own RootOwner admission before waiting:
+                // checked-out connections keep their own handles for the probe.
+                drop(pool);
+                let exited = {
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                    while !sqlite_physically_exited(&root) {
+                        if std::time::Instant::now() >= deadline {
+                            break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    sqlite_physically_exited(&root)
+                };
+                if exited {
+                    drop(charge);
+                } else {
+                    // No physical receipt: keep the fee rather than refunding
+                    // an owner that may still be alive.
+                    std::mem::forget(charge);
+                }
+                drop(root);
+            })
+            .expect("create SQLite close worker");
+    }
+}
 
 #[cfg(test)]
 mod tests;
@@ -56,6 +184,10 @@ fn context(error: anyhow::Error) -> anyhow::Error {
 }
 
 pub(crate) fn prepare(root: &Path) -> Result<RootOwner> {
+    // Every SQLx owner created by inspect/snapshot and the transient migration
+    // pool is admitted before the first connection; all of them are awaited
+    // closed before `blocking` returns.
+    let _sqlx = sqlx_call_charge()?;
     blocking(prepare_async(root)).map_err(context)
 }
 
@@ -98,6 +230,9 @@ async fn prepare_async(root: &Path) -> Result<RootOwner> {
 /// Config can initialize a fresh root, but cannot migrate an existing library
 /// under a shared guard. The app prepares it before any config read or write.
 pub(crate) fn admit_config(root: &Path) -> Result<RootOwner> {
+    // The inspection connection is created and awaited closed inside
+    // `lifecycle::inspect`; admit its initialisation before that call.
+    let _sqlx = sqlx_call_charge()?;
     let reader = RootOwner::shared(root)?;
     blocking(async {
         let status = lifecycle::inspect(reader.root(), &layout()).await?;
@@ -110,7 +245,10 @@ pub(crate) fn admit_config(root: &Path) -> Result<RootOwner> {
     .map_err(context)
 }
 
-pub(crate) async fn open_library(root: &Path) -> Result<SqlitePool> {
+pub(crate) async fn open_library(root: &Path) -> Result<AdmittedPool> {
+    // Covers prepare_async's inspect/snapshot connections plus the returned
+    // pool; the same charge stays live until SQLx awaits the pool close.
+    let charge = sqlx_call_charge().map_err(context)?;
     let reader = prepare_async(root).await.map_err(context)?;
     let _commit = FileLock::acquire(reader.root())?;
     let status = lifecycle::inspect(reader.root(), &layout()).await?;
@@ -140,7 +278,7 @@ pub(crate) async fn open_library(root: &Path) -> Result<SqlitePool> {
         pool.close().await;
         return Err(error);
     }
-    Ok(pool)
+    Ok(AdmittedPool::new(pool, reader.root().to_path_buf(), charge))
 }
 
 fn revoke_external_recovery(root: &Path) -> Result<()> {

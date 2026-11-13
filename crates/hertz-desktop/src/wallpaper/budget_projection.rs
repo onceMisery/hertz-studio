@@ -21,6 +21,8 @@ impl BudgetProjection {
         usage.prepare_cpu_bytes += ledger.control_prepare_cpu_bytes;
         usage.root_owner_bytes = ledger.root_owner_bytes;
         usage.root_owner_records = ledger.root_owner_records;
+        usage.sqlx_pool_bytes = ledger.sqlx_pool_bytes;
+        usage.sqlx_pool_records = ledger.sqlx_pool_records;
         let mut preview_output_held = 0;
         for entry in &ledger.reservations {
             if entry.state == ReservationState::Active

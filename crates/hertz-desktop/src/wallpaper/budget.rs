@@ -51,6 +51,8 @@ const MEMORY_ASSET_QUOTA: &str = "asset_cpu_bytes";
 const MEMORY_ASSET_HINT: &str = "通用共享资源常驻额度不足；等待旧呈现退出";
 const MEMORY_ROOT_OWNER_QUOTA: &str = "root_owner_bytes";
 const MEMORY_ROOT_OWNER_HINT: &str = "桌面资料根所有者尚未退出；等待其它宿主或导出任务释放目录锁";
+const MEMORY_SQLX_POOL_QUOTA: &str = "sqlx_pool_bytes";
+const MEMORY_SQLX_POOL_HINT: &str = "壁纸数据库连接池尚未关闭；等待库查询或导出退出后重试";
 
 /// Only valid ordinary memory grants' three possible rejection diagnostics.
 /// The original quota prefix maps B displayed bytes to M=B+quota+2.
@@ -128,6 +130,9 @@ pub(crate) const MAX_PREPARE_CPU_BYTES: u64 = 320 * 1024 * 1024;
 /// 桌面根所有者（canonical 路径、目录 pins、lock 临时路径、共享 Arc）的
 /// 独立小额度；与媒体准备/资产常驻额度分开计量，避免文件系统准入挤占解码。
 pub(crate) const MAX_ROOT_OWNER_BYTES: u64 = 4 * 1024 * 1024;
+/// SQLx 连接池初始化（池内每个连接的 worker、命令/行通道与 statement cache，
+/// 以及打开期间的 inspect/snapshot 连接）的独立小额度。
+pub(crate) const MAX_SQLX_POOL_BYTES: u64 = 8 * 1024 * 1024;
 /// GPU 跟踪资源估计上限（§12.1；tracked estimate，不是实测显存）。
 pub(crate) const MAX_GPU_TRACKED_BYTES: u64 = 384 * 1024 * 1024;
 /// 资源准备任务槽（§12.1：一个；P1 不承诺视频转码，转码槽恒 0）。
@@ -246,6 +251,21 @@ impl Drop for RootOwnerCharge {
     }
 }
 
+/// Prior admission for one SQLx pool initialization call. Released only after
+/// SQLx has awaited every connection close (worker, command/row channel and
+/// statement cache included), never when the pool handle is merely dropped.
+#[derive(Debug)]
+pub(crate) struct SqlxPoolCharge {
+    budget: Arc<BudgetCoordinator>,
+    bytes: u64,
+}
+
+impl Drop for SqlxPoolCharge {
+    fn drop(&mut self) {
+        self.budget.release_sqlx_pool(self.bytes);
+    }
+}
+
 /// 拒绝明细：哪个配额、占了多少、要多少、上限多少。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BudgetRejection {
@@ -317,6 +337,10 @@ pub(crate) struct BudgetUsage {
     pub root_owner_bytes: u64,
     /// 当前仍存活的 `RootOwner` 数。
     pub root_owner_records: u32,
+    /// 已事前准入、尚未由 SQLx 真实关闭确认的连接池初始化费用。
+    pub sqlx_pool_bytes: u64,
+    /// 当前仍占用该额度的 SQLx 池初始化调用数。
+    pub sqlx_pool_records: u32,
     /// release 后未 confirm_exit 的 token 数（"某个释放没有确认时保留占用并报告"）。
     pub release_pending: u32,
     pub session_reservations: u32,
@@ -448,6 +472,10 @@ struct Ledger {
     /// allocation; a separate scalar quota from the media prepare workspace.
     root_owner_bytes: u64,
     root_owner_records: u32,
+    /// SQLx pool initialization admitted before the first connection or pool
+    /// allocation; released only by the awaited SQLx close receipt.
+    sqlx_pool_bytes: u64,
+    sqlx_pool_records: u32,
     scene_catalog: SceneCatalogCharge,
     composition_catalog: SceneCatalogCharge,
     reservations: Vec<Reservation>,
@@ -491,6 +519,8 @@ impl Ledger {
         usage.prepare_cpu_bytes += self.control_prepare_cpu_bytes;
         usage.root_owner_bytes = self.root_owner_bytes;
         usage.root_owner_records = self.root_owner_records;
+        usage.sqlx_pool_bytes = self.sqlx_pool_bytes;
+        usage.sqlx_pool_records = self.sqlx_pool_records;
         for reservation in &self.reservations {
             usage.reservation_records += 1;
             usage.resource_records += reservation.children.len() as u32;
@@ -560,6 +590,8 @@ impl BudgetCoordinator {
                 control_records: 0,
                 root_owner_bytes: 0,
                 root_owner_records: 0,
+                sqlx_pool_bytes: 0,
+                sqlx_pool_records: 0,
                 scene_catalog: SceneCatalogCharge::Uninitialized,
                 composition_catalog: SceneCatalogCharge::Uninitialized,
                 reservations: Vec::new(),
@@ -723,6 +755,57 @@ impl BudgetCoordinator {
         debug_assert!(ledger.root_owner_records > 0);
         ledger.root_owner_bytes = ledger.root_owner_bytes.saturating_sub(bytes);
         ledger.root_owner_records = ledger.root_owner_records.saturating_sub(1);
+    }
+
+    /// Admit one SQLx pool initialization (pool inner, per-connection workers,
+    /// command/row channels, statement caches and the transient inspect or
+    /// snapshot connections) before the first SQLx allocation. Scalars/static
+    /// text only; the media prepare and filesystem quotas are untouched.
+    pub(crate) fn admit_sqlx_pool(
+        self: &Arc<Self>,
+        bytes: u64,
+    ) -> Result<SqlxPoolCharge, BudgetRejection> {
+        debug_assert!(bytes > 0);
+        let mut ledger = self
+            .ledger
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let held = ledger.sqlx_pool_bytes;
+        let Some(next) = held.checked_add(bytes) else {
+            return Err(Ledger::reject(
+                MEMORY_SQLX_POOL_QUOTA,
+                MAX_SQLX_POOL_BYTES,
+                held,
+                u64::MAX,
+                MEMORY_SQLX_POOL_HINT,
+            ));
+        };
+        if next > MAX_SQLX_POOL_BYTES {
+            return Err(Ledger::reject(
+                MEMORY_SQLX_POOL_QUOTA,
+                MAX_SQLX_POOL_BYTES,
+                held,
+                bytes,
+                MEMORY_SQLX_POOL_HINT,
+            ));
+        }
+        ledger.sqlx_pool_bytes = next;
+        ledger.sqlx_pool_records = ledger.sqlx_pool_records.saturating_add(1);
+        Ok(SqlxPoolCharge {
+            budget: Arc::clone(self),
+            bytes,
+        })
+    }
+
+    fn release_sqlx_pool(&self, bytes: u64) {
+        let mut ledger = self
+            .ledger
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        debug_assert!(ledger.sqlx_pool_bytes >= bytes);
+        debug_assert!(ledger.sqlx_pool_records > 0);
+        ledger.sqlx_pool_bytes = ledger.sqlx_pool_bytes.saturating_sub(bytes);
+        ledger.sqlx_pool_records = ledger.sqlx_pool_records.saturating_sub(1);
     }
 
     /// Remaining original prepare quota after every live inline/ordinary owner.

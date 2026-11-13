@@ -88,7 +88,7 @@ pub(crate) struct Deletion {
 }
 
 pub struct Library {
-    pool: SqlitePool,
+    pool: crate::wallpaper_upgrade::AdmittedPool,
     #[allow(dead_code)]
     path: PathBuf,
 }
@@ -226,7 +226,7 @@ impl Library {
     /// 裸媒体按固定字节身份复用最初生成的 manifest，改名后再次导入仍幂等。
     pub(crate) async fn local_manifest(&self, remote_work_id: &str) -> Result<Option<String>> {
         sqlx::query_scalar("SELECT p.manifest_json FROM works w JOIN versions v ON v.work_key = w.work_key JOIN packages p ON p.package_hash = v.package_hash WHERE w.source_id = 'local' AND w.remote_work_id = ?1 AND v.version = 1 LIMIT 1")
-            .bind(remote_work_id).fetch_optional(&self.pool).await.map_err(|error| JobError::database(error.to_string()))
+            .bind(remote_work_id).fetch_optional(&*self.pool).await.map_err(|error| JobError::database(error.to_string()))
     }
 
     /// 包是否已索引（崩溃恢复与重复导入的判据）。
@@ -234,7 +234,7 @@ impl Library {
         let count: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM packages WHERE package_hash = ?1")
                 .bind(package_hash)
-                .fetch_one(&self.pool)
+                .fetch_one(&*self.pool)
                 .await
                 .map_err(|error| JobError::database(error.to_string()))?;
         Ok(count > 0)
@@ -243,7 +243,7 @@ impl Library {
     /// 已索引包的 hash 集合（启动恢复只对这些目录信任）。
     pub async fn installed_hashes(&self) -> Result<Vec<String>> {
         sqlx::query_scalar("SELECT package_hash FROM packages ORDER BY installed_at")
-            .fetch_all(&self.pool)
+            .fetch_all(&*self.pool)
             .await
             .map_err(|error| JobError::database(error.to_string()))
     }
@@ -251,7 +251,7 @@ impl Library {
     /// 已索引包的（hash → bytes, state）映射，恢复核对用。
     pub(crate) async fn installed_packages(&self) -> Result<Vec<PackageRow>> {
         sqlx::query_as("SELECT package_hash, bytes, state FROM packages")
-            .fetch_all(&self.pool)
+            .fetch_all(&*self.pool)
             .await
             .map_err(|error| JobError::database(error.to_string()))
     }
@@ -260,7 +260,7 @@ impl Library {
     pub async fn mark_unavailable(&self, package_hash: &str) -> Result<()> {
         sqlx::query("UPDATE packages SET state = 'unavailable' WHERE package_hash = ?1")
             .bind(package_hash)
-            .execute(&self.pool)
+            .execute(&*self.pool)
             .await
             .map_err(|error| JobError::database(error.to_string()))?;
         Ok(())
@@ -268,7 +268,7 @@ impl Library {
 
     pub(crate) async fn mark_available(&self, package_hash: &str) -> Result<()> {
         sqlx::query("UPDATE packages SET state = 'installed' WHERE package_hash = ?1 AND state = 'unavailable'")
-            .bind(package_hash).execute(&self.pool).await
+            .bind(package_hash).execute(&*self.pool).await
             .map_err(|error| JobError::database(error.to_string()))?;
         Ok(())
     }
@@ -295,14 +295,14 @@ impl Library {
                 "SELECT * FROM works ORDER BY created_at DESC, work_key DESC LIMIT ?1",
             )
             .bind(limit + 1)
-            .fetch_all(&self.pool)
+            .fetch_all(&*self.pool)
             .await
             .map_err(|error| JobError::database(error.to_string()))?,
             (None, true) => sqlx::query_as(
                 "SELECT * FROM works WHERE favorite = 1 ORDER BY created_at DESC, work_key DESC LIMIT ?1",
             )
             .bind(limit + 1)
-            .fetch_all(&self.pool)
+            .fetch_all(&*self.pool)
             .await
             .map_err(|error| JobError::database(error.to_string()))?,
             (Some(cursor), false) => {
@@ -314,7 +314,7 @@ impl Library {
                 .bind(created_at)
                 .bind(key)
                 .bind(limit + 1)
-                .fetch_all(&self.pool)
+                .fetch_all(&*self.pool)
                 .await
                 .map_err(|error| JobError::database(error.to_string()))?
             }
@@ -327,7 +327,7 @@ impl Library {
                 .bind(created_at)
                 .bind(key)
                 .bind(limit + 1)
-                .fetch_all(&self.pool)
+                .fetch_all(&*self.pool)
                 .await
                 .map_err(|error| JobError::database(error.to_string()))?
             }
@@ -344,7 +344,7 @@ impl Library {
     pub async fn get_work(&self, work_key: &str) -> Result<Option<WorkRow>> {
         sqlx::query_as("SELECT * FROM works WHERE work_key = ?1")
             .bind(work_key)
-            .fetch_optional(&self.pool)
+            .fetch_optional(&*self.pool)
             .await
             .map_err(|error| JobError::database(error.to_string()))
     }
@@ -356,7 +356,7 @@ impl Library {
                 .bind(i64::from(favorite))
                 .bind(now_secs())
                 .bind(work_key)
-                .execute(&self.pool)
+                .execute(&*self.pool)
                 .await
                 .map_err(|error| JobError::database(error.to_string()))?
                 .rows_affected();
@@ -375,7 +375,7 @@ impl Library {
         package_hash: &str,
     ) -> Result<bool> {
         sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM versions v JOIN packages p ON p.package_hash=v.package_hash WHERE v.work_key=?1 AND v.package_hash=?2 AND p.state='installed')")
-            .bind(work_key).bind(package_hash).fetch_one(&self.pool).await
+            .bind(work_key).bind(package_hash).fetch_one(&*self.pool).await
             .map_err(|error| JobError::database(error.to_string()))
     }
 
@@ -388,7 +388,7 @@ impl Library {
     ) -> Result<hertz_wallpaper::Manifest> {
         let json: Option<String> = sqlx::query_scalar("SELECT p.manifest_json FROM versions v JOIN packages p ON p.package_hash=v.package_hash WHERE v.work_key=?1 AND v.package_hash=?2 AND p.state IN ('installed','unavailable') AND length(CAST(p.manifest_json AS BLOB))<=?3 LIMIT 1")
             .bind(work_key).bind(package_hash).bind(hertz_wallpaper::MAX_MANIFEST_BYTES as i64)
-            .fetch_optional(&self.pool).await.map_err(|error| JobError::database(error.to_string()))?;
+            .fetch_optional(&*self.pool).await.map_err(|error| JobError::database(error.to_string()))?;
         let json = json.ok_or_else(|| {
             JobError::new("version_not_found", "作品没有这个已登记版本或其清单无效")
         })?;
@@ -397,14 +397,14 @@ impl Library {
 
     pub(crate) async fn versions(&self, work_key: &str) -> Result<Vec<VersionRow>> {
         sqlx::query_as("SELECT v.version_key, v.version, v.package_hash, p.state FROM versions v JOIN packages p ON p.package_hash = v.package_hash WHERE v.work_key = ?1 ORDER BY v.version DESC LIMIT 100")
-            .bind(work_key).fetch_all(&self.pool).await.map_err(|error| JobError::database(error.to_string()))
+            .bind(work_key).fetch_all(&*self.pool).await.map_err(|error| JobError::database(error.to_string()))
     }
 
     /// 删除计划必须看到该作品的全部版本，不能受详情页最多 100 条的展示上限影响。
     async fn all_versions(&self, work_key: &str) -> Result<Vec<VersionRow>> {
         sqlx::query_as("SELECT v.version_key, v.version, v.package_hash, p.state FROM versions v JOIN packages p ON p.package_hash = v.package_hash WHERE v.work_key = ?1 ORDER BY v.version DESC")
             .bind(work_key)
-            .fetch_all(&self.pool)
+            .fetch_all(&*self.pool)
             .await
             .map_err(|error| JobError::database(error.to_string()))
     }
@@ -446,7 +446,7 @@ impl Library {
             let referenced: Vec<String> =
                 sqlx::query_scalar("SELECT version_key FROM versions WHERE package_hash = ?1")
                     .bind(&target.package_hash)
-                    .fetch_all(&self.pool)
+                    .fetch_all(&*self.pool)
                     .await
                     .map_err(|error| JobError::database(error.to_string()))?;
             if referenced
@@ -508,7 +508,7 @@ impl Library {
     ) -> Result<Option<ImportOperation>> {
         sqlx::query_as("SELECT job_id, payload_digest FROM install_jobs WHERE request_id = ?1")
             .bind(request_id)
-            .fetch_optional(&self.pool)
+            .fetch_optional(&*self.pool)
             .await
             .map_err(|error| JobError::database(error.to_string()))
     }
@@ -556,7 +556,7 @@ impl Library {
         let row: Option<(String, Option<String>, Option<String>)> =
             sqlx::query_as("SELECT state, progress, error FROM install_jobs WHERE job_id = ?1")
                 .bind(job_id)
-                .fetch_optional(&self.pool)
+                .fetch_optional(&*self.pool)
                 .await
                 .map_err(|error| JobError::database(error.to_string()))?;
         row.map(|(state, progress, error)| {
@@ -581,7 +581,7 @@ impl Library {
 
     pub(crate) async fn interrupt_imports(&self) -> Result<()> {
         sqlx::query("UPDATE install_jobs SET state = 'failed', error = 'interrupted: 宿主退出前任务未完成', progress = NULL, updated_at = ?1 WHERE state IN ('queued', 'preparing', 'publishing')")
-            .bind(now_secs()).execute(&self.pool).await.map_err(|error| JobError::database(error.to_string()))?;
+            .bind(now_secs()).execute(&*self.pool).await.map_err(|error| JobError::database(error.to_string()))?;
         Ok(())
     }
 
@@ -609,7 +609,7 @@ impl Library {
         .bind(progress)
         .bind(error)
         .bind(now_secs())
-        .execute(&self.pool)
+        .execute(&*self.pool)
         .await
         .map_err(|error| JobError::database(error.to_string()))?;
         Ok(())
