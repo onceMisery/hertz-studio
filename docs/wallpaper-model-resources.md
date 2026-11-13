@@ -655,3 +655,24 @@ closure/Broker/SessionPlan/loader/GPU 首帧。另修复一个前置基线问题
 `LOCK_SOURCE_SHA` 与 0.3.4 发布提交后的 `Cargo.lock` 不一致（该提交只改第一方
 0.3.3→0.3.4 版本行，依赖图未变），刷新该 fail-closed 常量后 HEAD 才能进入
 `budget::global()`。
+
+2026-11-14 r40 纹理闭包续接：`ModelInput` 在 compact facts 之后、retained
+facts-R 之前构造 `ModelTextureClosure`。每个 `ModelImage::Package` 记录逐一
+绑定到 canonical identity 中由原 ZIP 实际长度/SHA-256 核验的 entry，要求
+path/bytes/SHA-256/MIME 与闭包事实完全相等，SHA 另解码为固定32字节；缺失
+entry、tuple 不符、MIME 不符、空 references 一律 fail-closed。Embedded image
+不进入闭包（字节已由 checked BIN 承担）。同路径别名共享同一 entry，唯一源
+字节只计一次，但聚合上界按全部 Package 记录保守求和，上限
+`MAX_MODEL_TEXTURE_SOURCE_BYTES=256 MiB`，记录数沿用 `MAX_MODEL_IMAGE_RECORDS`。
+
+闭包固定记录 `ClosedTexture`（image/entry 索引、bytes、SHA32、references）
+在分配前以 `Layout::array` 精确请求独立 `model_texture_closure_bytes` 小额度
+（2 MiB，不并入 prepare/asset）；准入仍只写账本标量、拒绝只产出静态
+`BudgetDiagnostic`。记录 Vec 先于 charge 字段声明/销毁，物理释放后才退款；
+真实 rich fixture 的 3 条 Package 记录绑定 2 个 entry、唯一源字节 8、精确入账
+168 字节，`PhysicalReleaseCapture` 证明 System.dealloc 返回且 Vec 析构未完成
+期间额度仍占用。三处变异（跳过准入、提前退款、缩小源字节 cap）均按预期变红。
+
+本批只闭合 canonical 元数据绑定：未打开纹理文件、未做真实 pins/完整 SHA
+重算/codec 费用；Broker/SessionPlan/loader/同 renderer GPU 首帧与 A04 整体
+继续开放，全部 qualification gates 保持关闭。

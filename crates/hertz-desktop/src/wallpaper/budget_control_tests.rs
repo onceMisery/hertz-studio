@@ -1074,3 +1074,90 @@ fn status_quota_rejects_before_booking_with_independent_diagnostics() {
     );
     assert_eq!(empty.planning_snapshot(), before);
 }
+
+// r40: canonical model texture-closure metadata has its own scalar quota; the
+// charge is released only with the closure owner, never from prepare/asset.
+
+#[test]
+fn model_texture_closure_quota_is_separate_and_releases_only_with_its_charge() {
+    let budget = Arc::new(BudgetCoordinator::new());
+    let first = 168;
+    let second = 56;
+    let (charge, sample) =
+        measure_requested_heap(|| budget.admit_model_texture_closure(first).unwrap());
+    assert_no_heap(sample);
+    assert_eq!(budget.usage().model_texture_closure_bytes, first);
+    assert_eq!(budget.usage().model_texture_closure_records, 1);
+    assert_eq!(budget.usage().prepare_cpu_bytes, 0);
+    assert_eq!(budget.usage().asset_cpu_bytes, 0);
+    assert_eq!(budget.usage().status_bytes, 0);
+
+    let (second_charge, sample) =
+        measure_requested_heap(|| budget.admit_model_texture_closure(second).unwrap());
+    assert_no_heap(sample);
+    assert_eq!(budget.usage().model_texture_closure_bytes, first + second);
+    assert_eq!(budget.usage().model_texture_closure_records, 2);
+    let (projection, sample) = measure_requested_heap(|| budget.project_desktop_replacement(&[]));
+    assert_no_heap(sample);
+    assert_eq!(projection.usage(), budget.usage());
+
+    drop(charge);
+    assert_eq!(budget.usage().model_texture_closure_bytes, second);
+    assert_eq!(budget.usage().model_texture_closure_records, 1);
+    drop(second_charge);
+    assert_eq!(budget.usage(), BudgetUsage::default());
+}
+
+#[test]
+fn model_texture_closure_quota_rejects_before_booking_with_independent_diagnostics() {
+    let budget = Arc::new(BudgetCoordinator::new());
+    let held = MAX_MODEL_TEXTURE_CLOSURE_BYTES - 100;
+    let _hold = budget.admit_model_texture_closure(held).unwrap();
+    let before = budget.planning_snapshot();
+    let (rejected, sample) = measure_requested_heap(|| budget.admit_model_texture_closure(101));
+    assert_no_heap(sample);
+    let rejected = rejected.unwrap_err();
+    assert_eq!(
+        (
+            rejected.quota,
+            rejected.cap,
+            rejected.held,
+            rejected.requested
+        ),
+        (
+            "model_texture_closure_bytes",
+            MAX_MODEL_TEXTURE_CLOSURE_BYTES,
+            held,
+            101
+        )
+    );
+    // Independent literals: quota name, hint and template are duplicated here.
+    assert_eq!(
+        rejected.message.to_string(),
+        format!(
+            "model_texture_closure_bytes 超限：已占 {held} + 申请 101 > 上限 {MAX_MODEL_TEXTURE_CLOSURE_BYTES}；模型纹理闭包尚未退出；等待模型准备或运行实例释放"
+        )
+    );
+    assert_eq!(budget.planning_snapshot(), before);
+
+    let empty = Arc::new(BudgetCoordinator::new());
+    let before = empty.planning_snapshot();
+    let (overflow, sample) = measure_requested_heap(|| empty.admit_model_texture_closure(u64::MAX));
+    assert_no_heap(sample);
+    let overflow = overflow.unwrap_err();
+    assert_eq!(
+        (
+            overflow.quota,
+            overflow.cap,
+            overflow.held,
+            overflow.requested
+        ),
+        (
+            "model_texture_closure_bytes",
+            MAX_MODEL_TEXTURE_CLOSURE_BYTES,
+            0,
+            u64::MAX
+        )
+    );
+    assert_eq!(empty.planning_snapshot(), before);
+}

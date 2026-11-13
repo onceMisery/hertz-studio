@@ -55,6 +55,8 @@ const MEMORY_SQLX_POOL_QUOTA: &str = "sqlx_pool_bytes";
 const MEMORY_SQLX_POOL_HINT: &str = "壁纸数据库连接池尚未关闭；等待库查询或导出退出后重试";
 const MEMORY_STATUS_QUOTA: &str = "status_bytes";
 const MEMORY_STATUS_HINT: &str = "任务状态副本尚未退出；等待状态查询或持久化写入完成";
+const MEMORY_MODEL_TEXTURE_QUOTA: &str = "model_texture_closure_bytes";
+const MEMORY_MODEL_TEXTURE_HINT: &str = "模型纹理闭包尚未退出；等待模型准备或运行实例释放";
 
 /// Only valid ordinary memory grants' three possible rejection diagnostics.
 /// The original quota prefix maps B displayed bytes to M=B+quota+2.
@@ -137,6 +139,9 @@ pub(crate) const MAX_ROOT_OWNER_BYTES: u64 = 4 * 1024 * 1024;
 pub(crate) const MAX_SQLX_POOL_BYTES: u64 = 8 * 1024 * 1024;
 /// 任务状态历史（32 条）、查询副本与 JSON/DB 写入副本的独立小额度。
 pub(crate) const MAX_STATUS_BYTES: u64 = 2 * 1024 * 1024;
+/// 模型引用纹理的 canonical 闭包元数据（每个 Package image 一条固定记录）
+/// 独立小额度；纹理源字节本身按上限校验，不进入该桶。
+pub(crate) const MAX_MODEL_TEXTURE_CLOSURE_BYTES: u64 = 2 * 1024 * 1024;
 /// GPU 跟踪资源估计上限（§12.1；tracked estimate，不是实测显存）。
 pub(crate) const MAX_GPU_TRACKED_BYTES: u64 = 384 * 1024 * 1024;
 /// 资源准备任务槽（§12.1：一个；P1 不承诺视频转码，转码槽恒 0）。
@@ -284,6 +289,22 @@ impl Drop for StatusCharge {
     }
 }
 
+/// Prior admission for one canonical model texture closure. The closure's
+/// fixed record Vec is charged before it exists and refunded only after that
+/// Vec's backing has physically released. Texture source bytes are bounded
+/// separately and are not retained by this charge.
+#[derive(Debug)]
+pub(crate) struct ModelTextureClosureCharge {
+    budget: Arc<BudgetCoordinator>,
+    bytes: u64,
+}
+
+impl Drop for ModelTextureClosureCharge {
+    fn drop(&mut self) {
+        self.budget.release_model_texture_closure(self.bytes);
+    }
+}
+
 /// 拒绝明细：哪个配额、占了多少、要多少、上限多少。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BudgetRejection {
@@ -363,6 +384,10 @@ pub(crate) struct BudgetUsage {
     pub status_bytes: u64,
     /// 当前仍占用该额度的状态 owner 数。
     pub status_records: u32,
+    /// 已事前准入、尚未退出的 canonical 模型纹理闭包元数据。
+    pub model_texture_closure_bytes: u64,
+    /// 当前仍占用该额度的纹理闭包数。
+    pub model_texture_closure_records: u32,
     /// release 后未 confirm_exit 的 token 数（"某个释放没有确认时保留占用并报告"）。
     pub release_pending: u32,
     pub session_reservations: u32,
@@ -502,6 +527,10 @@ struct Ledger {
     /// allocation and released by the owning element or completed write.
     status_bytes: u64,
     status_records: u32,
+    /// Canonical model texture-closure metadata admitted before its fixed
+    /// record Vec exists and released by the closure's physical destruction.
+    model_texture_closure_bytes: u64,
+    model_texture_closure_records: u32,
     scene_catalog: SceneCatalogCharge,
     composition_catalog: SceneCatalogCharge,
     reservations: Vec<Reservation>,
@@ -549,6 +578,8 @@ impl Ledger {
         usage.sqlx_pool_records = self.sqlx_pool_records;
         usage.status_bytes = self.status_bytes;
         usage.status_records = self.status_records;
+        usage.model_texture_closure_bytes = self.model_texture_closure_bytes;
+        usage.model_texture_closure_records = self.model_texture_closure_records;
         for reservation in &self.reservations {
             usage.reservation_records += 1;
             usage.resource_records += reservation.children.len() as u32;
@@ -622,6 +653,8 @@ impl BudgetCoordinator {
                 sqlx_pool_records: 0,
                 status_bytes: 0,
                 status_records: 0,
+                model_texture_closure_bytes: 0,
+                model_texture_closure_records: 0,
                 scene_catalog: SceneCatalogCharge::Uninitialized,
                 composition_catalog: SceneCatalogCharge::Uninitialized,
                 reservations: Vec::new(),
@@ -885,6 +918,59 @@ impl BudgetCoordinator {
         debug_assert!(ledger.status_records > 0);
         ledger.status_bytes = ledger.status_bytes.saturating_sub(bytes);
         ledger.status_records = ledger.status_records.saturating_sub(1);
+    }
+
+    /// Admit one canonical model texture closure's fixed record Vec before its
+    /// first allocation. Scalars/static text only; prepare/asset quotas and the
+    /// ordinary reservation table are untouched.
+    pub(crate) fn admit_model_texture_closure(
+        self: &Arc<Self>,
+        bytes: u64,
+    ) -> Result<ModelTextureClosureCharge, BudgetRejection> {
+        debug_assert!(bytes > 0);
+        let mut ledger = self
+            .ledger
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let held = ledger.model_texture_closure_bytes;
+        let Some(next) = held.checked_add(bytes) else {
+            return Err(Ledger::reject(
+                MEMORY_MODEL_TEXTURE_QUOTA,
+                MAX_MODEL_TEXTURE_CLOSURE_BYTES,
+                held,
+                u64::MAX,
+                MEMORY_MODEL_TEXTURE_HINT,
+            ));
+        };
+        if next > MAX_MODEL_TEXTURE_CLOSURE_BYTES {
+            return Err(Ledger::reject(
+                MEMORY_MODEL_TEXTURE_QUOTA,
+                MAX_MODEL_TEXTURE_CLOSURE_BYTES,
+                held,
+                bytes,
+                MEMORY_MODEL_TEXTURE_HINT,
+            ));
+        }
+        ledger.model_texture_closure_bytes = next;
+        ledger.model_texture_closure_records =
+            ledger.model_texture_closure_records.saturating_add(1);
+        Ok(ModelTextureClosureCharge {
+            budget: Arc::clone(self),
+            bytes,
+        })
+    }
+
+    fn release_model_texture_closure(&self, bytes: u64) {
+        let mut ledger = self
+            .ledger
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        debug_assert!(ledger.model_texture_closure_bytes >= bytes);
+        debug_assert!(ledger.model_texture_closure_records > 0);
+        ledger.model_texture_closure_bytes =
+            ledger.model_texture_closure_bytes.saturating_sub(bytes);
+        ledger.model_texture_closure_records =
+            ledger.model_texture_closure_records.saturating_sub(1);
     }
 
     /// Remaining original prepare quota after every live inline/ordinary owner.
