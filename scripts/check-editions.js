@@ -48,7 +48,7 @@ for (const edition of ['standard', 'full']) {
   execFileSync('cargo', ['check', '--manifest-path', wrapperCargo, '-p', 'hertz-wallpaper',
     '--locked', '--offline'], { cwd: root, stdio: 'inherit' });
   assert(!html.includes('edition:'));
-  assert.equal(staged[edition].version, '0.3.3');
+  assert.equal(staged[edition].version, '0.3.4');
   for (const item of staged[edition].contributions) assert(item.id.startsWith(staged[edition].id + '.'));
   for (const locale of Object.values(staged[edition].localizations)) {
     assert(locale.name.includes(edition === 'full' ? 'Full' : 'Standard'));

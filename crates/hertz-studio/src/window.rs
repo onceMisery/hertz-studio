@@ -139,22 +139,29 @@ fn capsule_edge_dock(window: &tao::window::Window) -> Option<CapsuleDock> {
     let threshold = (CAPSULE_EDGE_DIP * monitor.scale_factor()).round() as i32;
     let mut sides = [
         ("left", pos.x - origin.x),
-        ("right", (origin.x + screen.width as i32) - (pos.x + size.width as i32)),
+        (
+            "right",
+            (origin.x + screen.width as i32) - (pos.x + size.width as i32),
+        ),
         ("top", pos.y - origin.y),
     ];
     sides.sort_by_key(|side| side.1);
     if sides[0].1 > threshold || sides[0].1 < -threshold {
         return None;
     }
-    Some(CapsuleDock { restore: (pos.x, pos.y), edge: sides[0].0 })
+    Some(CapsuleDock {
+        restore: (pos.x, pos.y),
+        edge: sides[0].0,
+    })
 }
 
 /// 把胶囊窗口收成贴边的一条；返回要落到的物理位置，恢复时反向走一遍。
 fn capsule_enter_peek(window: &tao::window::Window, dock: &CapsuleDock) -> PhysicalPosition<i32> {
     let monitor = window.current_monitor();
-    let (origin, screen, scale) = monitor.as_ref().map(|m| {
-        (m.position(), m.size(), m.scale_factor())
-    }).unwrap_or((PhysicalPosition::new(0, 0), PhysicalSize::new(0, 0), 1.0));
+    let (origin, screen, scale) = monitor
+        .as_ref()
+        .map(|m| (m.position(), m.size(), m.scale_factor()))
+        .unwrap_or((PhysicalPosition::new(0, 0), PhysicalSize::new(0, 0), 1.0));
     let peek = (CAPSULE_PEEK_DIP * scale).round() as i32;
     let vertical = matches!(dock.edge, "left" | "right");
     window.set_inner_size(if vertical {
@@ -181,7 +188,9 @@ fn capsule_try_dock(window: &tao::window::Window, dock: &mut Option<CapsuleDock>
     if dock.is_some() {
         return false;
     }
-    let Some(found) = capsule_edge_dock(window) else { return false; };
+    let Some(found) = capsule_edge_dock(window) else {
+        return false;
+    };
     let position = capsule_enter_peek(window, &found);
     window.set_outer_position(position);
     *dock = Some(found);
@@ -189,7 +198,9 @@ fn capsule_try_dock(window: &tao::window::Window, dock: &mut Option<CapsuleDock>
 }
 
 fn capsule_undock(window: &tao::window::Window, dock: &mut Option<CapsuleDock>) -> bool {
-    let Some(found) = dock.take() else { return false; };
+    let Some(found) = dock.take() else {
+        return false;
+    };
     capsule_exit_peek(window, &found);
     true
 }
