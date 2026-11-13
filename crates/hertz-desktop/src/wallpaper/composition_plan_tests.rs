@@ -1607,6 +1607,10 @@ fn assert_only_worker_frame(budget: &super::super::budget::BudgetCoordinator) {
                     prepare_cpu_bytes: expected,
                     control_prepare_cpu_bytes: expected,
                     control_records: 2,
+                    // Status history is a separate bounded owner pinned by its
+                    // own tests; keep this witness about prepare controls.
+                    status_bytes: usage.status_bytes,
+                    status_records: usage.status_records,
                     ..Default::default()
                 }
             );
@@ -1951,7 +1955,11 @@ async fn group_preflight_respects_existing_active_and_release_pending_memory_on_
             if pending {
                 budget.release(held, &held_request.session, 1).unwrap();
             }
-            let usage = budget.usage();
+            // Status history is a separate bounded owner; this witness covers
+            // the inspection workspaces and the original prepare slot.
+            let mut usage = budget.usage();
+            usage.status_bytes = 0;
+            usage.status_records = 0;
             let error = prepared_internal(
                 &jobs,
                 &hash,
@@ -1973,9 +1981,11 @@ async fn group_preflight_respects_existing_active_and_release_pending_memory_on_
             assert_eq!(details["held"], cap - requested + 1);
             assert_eq!(details["requested"], requested);
             assert_eq!(counts.stats(), (0, 0));
+            let mut after = budget.usage();
+            after.status_bytes = 0;
+            after.status_records = 0;
             assert_eq!(
-                budget.usage(),
-                usage,
+                after, usage,
                 "all inspection workspaces and the original prepare slot exited"
             );
             if !pending {

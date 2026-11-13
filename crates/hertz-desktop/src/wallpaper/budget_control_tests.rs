@@ -1000,3 +1000,77 @@ fn sqlx_pool_quota_rejects_before_booking_with_independent_diagnostics() {
     );
     assert_eq!(empty.planning_snapshot(), before);
 }
+
+// r38: task-status history/query/JSON/DB copies have their own scalar quota;
+// each history element or completed persistence write owns one charge.
+
+#[test]
+fn status_quota_is_separate_and_releases_only_with_its_charge() {
+    let budget = Arc::new(BudgetCoordinator::new());
+    let first = 4096;
+    let second = 12_288;
+    let (charge, sample) = measure_requested_heap(|| budget.admit_status(first).unwrap());
+    assert_no_heap(sample);
+    assert_eq!(budget.usage().status_bytes, first);
+    assert_eq!(budget.usage().status_records, 1);
+    assert_eq!(budget.usage().prepare_cpu_bytes, 0);
+    assert_eq!(budget.usage().sqlx_pool_bytes, 0);
+
+    let (second_charge, sample) = measure_requested_heap(|| budget.admit_status(second).unwrap());
+    assert_no_heap(sample);
+    assert_eq!(budget.usage().status_bytes, first + second);
+    assert_eq!(budget.usage().status_records, 2);
+    let (projection, sample) = measure_requested_heap(|| budget.project_desktop_replacement(&[]));
+    assert_no_heap(sample);
+    assert_eq!(projection.usage(), budget.usage());
+
+    drop(charge);
+    assert_eq!(budget.usage().status_bytes, second);
+    assert_eq!(budget.usage().status_records, 1);
+    drop(second_charge);
+    assert_eq!(budget.usage(), BudgetUsage::default());
+}
+
+#[test]
+fn status_quota_rejects_before_booking_with_independent_diagnostics() {
+    let budget = Arc::new(BudgetCoordinator::new());
+    let held = MAX_STATUS_BYTES - 100;
+    let _hold = budget.admit_status(held).unwrap();
+    let before = budget.planning_snapshot();
+    let (rejected, sample) = measure_requested_heap(|| budget.admit_status(101));
+    assert_no_heap(sample);
+    let rejected = rejected.unwrap_err();
+    assert_eq!(
+        (
+            rejected.quota,
+            rejected.cap,
+            rejected.held,
+            rejected.requested
+        ),
+        ("status_bytes", MAX_STATUS_BYTES, held, 101)
+    );
+    // Independent literals: quota name, hint and template are duplicated here.
+    assert_eq!(
+        rejected.message.to_string(),
+        format!(
+            "status_bytes 超限：已占 {held} + 申请 101 > 上限 {MAX_STATUS_BYTES}；任务状态副本尚未退出；等待状态查询或持久化写入完成"
+        )
+    );
+    assert_eq!(budget.planning_snapshot(), before);
+
+    let empty = Arc::new(BudgetCoordinator::new());
+    let before = empty.planning_snapshot();
+    let (overflow, sample) = measure_requested_heap(|| empty.admit_status(u64::MAX));
+    assert_no_heap(sample);
+    let overflow = overflow.unwrap_err();
+    assert_eq!(
+        (
+            overflow.quota,
+            overflow.cap,
+            overflow.held,
+            overflow.requested
+        ),
+        ("status_bytes", MAX_STATUS_BYTES, 0, u64::MAX)
+    );
+    assert_eq!(empty.planning_snapshot(), before);
+}

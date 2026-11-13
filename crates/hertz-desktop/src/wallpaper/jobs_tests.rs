@@ -2774,7 +2774,12 @@ fn restart_marks_unfinished_accepted_imports_interrupted_and_preserves_their_ide
         request_id: "lost-request".into(),
         payload_digest: "digest".into(),
     };
-    futures_block_on(env.jobs.library.accept_import(&status, &identity)).unwrap();
+    futures_block_on(
+        env.jobs
+            .library
+            .accept_import(&status, &identity, &env.jobs.budget),
+    )
+    .unwrap();
     futures_block_on(reconcile_startup(&env.jobs.library, &env.jobs.assets)).unwrap();
     let interrupted = futures_block_on(env.jobs.library.persisted_job("lost-job"))
         .unwrap()
@@ -3124,6 +3129,10 @@ fn assert_only_worker_frame(budget: &super::super::budget::BudgetCoordinator) {
                     prepare_cpu_bytes: expected,
                     control_prepare_cpu_bytes: expected,
                     control_records: 2,
+                    // Status history is a separate bounded owner pinned by its
+                    // own tests; keep this witness about prepare controls.
+                    status_bytes: usage.status_bytes,
+                    status_records: usage.status_records,
                     ..Default::default()
                 }
             );
@@ -3770,4 +3779,138 @@ fn import_worker_thread_and_runtime_exit_before_drop_returns() {
     drop(receiver);
     drop(job);
     assert_eq!(budget.usage(), Default::default());
+}
+
+// r38: status history/query/JSON/DB copies are bounded byte owners admitted
+// before their first allocation; assertions use independent literals.
+
+#[test]
+fn status_history_is_a_bounded_byte_owner_without_a_transient_33rd_element() {
+    let env = env("job-status-history");
+    let budget = std::sync::Arc::clone(&env.jobs.budget);
+    let before = budget.usage();
+    reset_status_history_peak_for_test();
+    {
+        let mut inner = env.jobs.inner.lock().expect("job inner");
+        for index in 0..40 {
+            let status = JobStatus {
+                job_id: format!("job{index:04}"),
+                state: JobState::Failed,
+                error: Some("x".repeat(1024)),
+                package_hash: Some("a".repeat(64)),
+                staged_bytes: u64::MAX,
+                generation: 7,
+            };
+            inner.remember(status).unwrap();
+            assert!(inner.history.len() <= 32);
+        }
+        // Actual retained bytes: deque backing plus each element's String
+        // capacities, compared against the independent 32 x 4 KiB bound.
+        let retained = inner.history.capacity() * std::mem::size_of::<StatusEntry>()
+            + inner
+                .history
+                .iter()
+                .map(|entry| {
+                    entry.status.job_id.capacity()
+                        + entry.status.error.as_ref().map_or(0, String::capacity)
+                        + entry
+                            .status
+                            .package_hash
+                            .as_ref()
+                            .map_or(0, String::capacity)
+                })
+                .sum::<usize>();
+        assert!(u64::try_from(retained).unwrap() <= 32 * 4096);
+        assert_eq!(inner.history.len(), 32);
+    }
+    assert_eq!(status_history_peak_for_test(), 32);
+    assert_eq!(budget.usage().status_bytes, before.status_bytes + 32 * 4096);
+    assert_eq!(budget.usage().status_records, before.status_records + 32);
+    drop(env);
+    assert_eq!(budget.usage().status_bytes, before.status_bytes);
+    assert_eq!(budget.usage().status_records, before.status_records);
+}
+
+#[test]
+fn status_json_preallocates_the_admitted_bound_and_refunds_after_the_write() {
+    use crate::wallpaper::budget::{measure_requested_heap, BudgetCoordinator};
+    let budget = std::sync::Arc::new(BudgetCoordinator::new());
+    let status = JobStatus {
+        job_id: "job-json".into(),
+        state: JobState::Failed,
+        error: Some("\"\\\u{1}".repeat(300)),
+        package_hash: Some("b".repeat(64)),
+        staged_bytes: 1,
+        generation: 3,
+    };
+    let bound = status_write_bytes_for_test(&status);
+    let before = budget.usage();
+    let ((json, charge), sample) =
+        measure_requested_heap(|| status_json(&budget, &status).unwrap());
+    assert!(!sample.overflow);
+    assert!(u64::try_from(sample.peak).unwrap() <= bound);
+    // One pre-sized allocation: no 128-byte growth chain.
+    assert_eq!(usize::try_from(bound).unwrap(), json.capacity());
+    assert!(json.len() <= json.capacity());
+    assert_eq!(budget.usage().status_bytes, bound);
+    assert_eq!(budget.usage().status_records, 1);
+    drop(charge);
+    assert_eq!(budget.usage(), before);
+}
+
+#[test]
+fn persisted_job_rejects_legacy_oversize_text_and_bounds_restored_errors() {
+    let env = env("job-status-legacy");
+    let library = &env.jobs.library;
+    let status = |job_id: &str, error: Option<String>| JobStatus {
+        job_id: job_id.into(),
+        state: JobState::Failed,
+        error,
+        package_hash: None,
+        staged_bytes: 0,
+        generation: 1,
+    };
+
+    // Valid JSON far beyond the bounded read: rejected before materialising.
+    let huge = serde_json::to_string(&status("legacy-huge", Some("a".repeat(1 << 20)))).unwrap();
+    futures_block_on(
+        sqlx::query(
+            "INSERT INTO install_jobs(job_id, state, progress, updated_at) VALUES (?1,'failed',?2,1)",
+        )
+        .bind("legacy-huge")
+        .bind(huge)
+        .execute(library.pool()),
+    )
+    .unwrap();
+    let error = futures_block_on(library.persisted_job("legacy-huge")).unwrap_err();
+    assert!(error.message.contains("bounded status read"));
+
+    // Oversized error column is rejected before its prefix is parsed.
+    futures_block_on(
+        sqlx::query(
+            "INSERT INTO install_jobs(job_id, state, error, updated_at) VALUES (?1,'failed',?2,1)",
+        )
+        .bind("legacy-error")
+        .bind("b".repeat(1 << 20))
+        .execute(library.pool()),
+    )
+    .unwrap();
+    assert!(futures_block_on(library.persisted_job("legacy-error")).is_err());
+
+    // A normal-size row whose error exceeds the retained bound is truncated.
+    let json = serde_json::to_string(&status("legacy-truncate", Some("c".repeat(2000)))).unwrap();
+    futures_block_on(
+        sqlx::query(
+            "INSERT INTO install_jobs(job_id, state, progress, updated_at) VALUES (?1,'failed',?2,1)",
+        )
+        .bind("legacy-truncate")
+        .bind(json)
+        .execute(library.pool()),
+    )
+    .unwrap();
+    let restored = futures_block_on(library.persisted_job("legacy-truncate"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(restored.error.as_deref().map(str::len), Some(1024));
+    assert!(restored.error.as_ref().unwrap().capacity() <= 1024);
 }

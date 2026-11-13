@@ -23,6 +23,8 @@ impl BudgetProjection {
         usage.root_owner_records = ledger.root_owner_records;
         usage.sqlx_pool_bytes = ledger.sqlx_pool_bytes;
         usage.sqlx_pool_records = ledger.sqlx_pool_records;
+        usage.status_bytes = ledger.status_bytes;
+        usage.status_records = ledger.status_records;
         let mut preview_output_held = 0;
         for entry in &ledger.reservations {
             if entry.state == ReservationState::Active
