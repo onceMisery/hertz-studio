@@ -49,6 +49,8 @@ const MEMORY_PREPARE_QUOTA: &str = "prepare_cpu_bytes";
 const MEMORY_PREPARE_HINT: &str = "图片准备工作区不足；使用更小输入或等待准备退出";
 const MEMORY_ASSET_QUOTA: &str = "asset_cpu_bytes";
 const MEMORY_ASSET_HINT: &str = "通用共享资源常驻额度不足；等待旧呈现退出";
+const MEMORY_ROOT_OWNER_QUOTA: &str = "root_owner_bytes";
+const MEMORY_ROOT_OWNER_HINT: &str = "桌面资料根所有者尚未退出；等待其它宿主或导出任务释放目录锁";
 
 /// Only valid ordinary memory grants' three possible rejection diagnostics.
 /// The original quota prefix maps B displayed bytes to M=B+quota+2.
@@ -123,6 +125,9 @@ pub(crate) const MAX_CPU_DECODED_BYTES: u64 = 128 * 1024 * 1024;
 pub(crate) const MAX_ASSET_CPU_BYTES: u64 = 128 * 1024 * 1024;
 /// 原图准备的独立 CPU 工作区（§6.3；不占常驻解码额度）。
 pub(crate) const MAX_PREPARE_CPU_BYTES: u64 = 320 * 1024 * 1024;
+/// 桌面根所有者（canonical 路径、目录 pins、lock 临时路径、共享 Arc）的
+/// 独立小额度；与媒体准备/资产常驻额度分开计量，避免文件系统准入挤占解码。
+pub(crate) const MAX_ROOT_OWNER_BYTES: u64 = 4 * 1024 * 1024;
 /// GPU 跟踪资源估计上限（§12.1；tracked estimate，不是实测显存）。
 pub(crate) const MAX_GPU_TRACKED_BYTES: u64 = 384 * 1024 * 1024;
 /// 资源准备任务槽（§12.1：一个；P1 不承诺视频转码，转码槽恒 0）。
@@ -224,6 +229,23 @@ impl Drop for ControlCharge {
     }
 }
 
+/// Prior admission for one desktop-root owner: its canonical path, directory
+/// pins, temporary lock/probe paths and shared Arc backings. Like
+/// [`ControlCharge`] it owns no reservation token, so admission allocates
+/// nothing; unlike it, the separate `root_owner_bytes` quota keeps filesystem
+/// owners independent of media prepare workspace.
+#[derive(Debug)]
+pub(crate) struct RootOwnerCharge {
+    budget: Arc<BudgetCoordinator>,
+    bytes: u64,
+}
+
+impl Drop for RootOwnerCharge {
+    fn drop(&mut self) {
+        self.budget.release_root_owner(self.bytes);
+    }
+}
+
 /// 拒绝明细：哪个配额、占了多少、要多少、上限多少。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BudgetRejection {
@@ -290,6 +312,11 @@ pub(crate) struct BudgetUsage {
     pub control_prepare_cpu_bytes: u64,
     /// 上述 inline owner 的当前记录数（不占原 64 条 reservation metadata）。
     pub control_records: u32,
+    /// 已事前准入、尚未物理退出的 `RootOwner` 初始化费用（canonical 路径、
+    /// 目录 pins、lock 临时路径与 Arc backing）；独立于 prepare 额度。
+    pub root_owner_bytes: u64,
+    /// 当前仍存活的 `RootOwner` 数。
+    pub root_owner_records: u32,
     /// release 后未 confirm_exit 的 token 数（"某个释放没有确认时保留占用并报告"）。
     pub release_pending: u32,
     pub session_reservations: u32,
@@ -417,6 +444,10 @@ struct Ledger {
     /// This is a scalar, so admission never grows the reservation backing.
     control_prepare_cpu_bytes: u64,
     control_records: u32,
+    /// Desktop-root owners admitted before canonicalization or any filesystem
+    /// allocation; a separate scalar quota from the media prepare workspace.
+    root_owner_bytes: u64,
+    root_owner_records: u32,
     scene_catalog: SceneCatalogCharge,
     composition_catalog: SceneCatalogCharge,
     reservations: Vec<Reservation>,
@@ -458,6 +489,8 @@ impl Ledger {
         usage.control_prepare_cpu_bytes = self.control_prepare_cpu_bytes;
         usage.control_records = self.control_records;
         usage.prepare_cpu_bytes += self.control_prepare_cpu_bytes;
+        usage.root_owner_bytes = self.root_owner_bytes;
+        usage.root_owner_records = self.root_owner_records;
         for reservation in &self.reservations {
             usage.reservation_records += 1;
             usage.resource_records += reservation.children.len() as u32;
@@ -525,6 +558,8 @@ impl BudgetCoordinator {
                 coordinator_asset_cpu_bytes: 0,
                 control_prepare_cpu_bytes: 0,
                 control_records: 0,
+                root_owner_bytes: 0,
+                root_owner_records: 0,
                 scene_catalog: SceneCatalogCharge::Uninitialized,
                 composition_catalog: SceneCatalogCharge::Uninitialized,
                 reservations: Vec::new(),
@@ -637,6 +672,57 @@ impl BudgetCoordinator {
         debug_assert!(ledger.control_records > 0);
         ledger.control_prepare_cpu_bytes = ledger.control_prepare_cpu_bytes.saturating_sub(bytes);
         ledger.control_records = ledger.control_records.saturating_sub(1);
+    }
+
+    /// Admit one desktop-root owner's canonical path, directory pins, temporary
+    /// lock/probe paths and shared Arc backing before any of them is allocated.
+    /// The check and booking happen under the original ledger lock, use only
+    /// scalars/static text, and never touch the media prepare workspace.
+    pub(crate) fn admit_root_owner(
+        self: &Arc<Self>,
+        bytes: u64,
+    ) -> Result<RootOwnerCharge, BudgetRejection> {
+        debug_assert!(bytes > 0);
+        let mut ledger = self
+            .ledger
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let held = ledger.root_owner_bytes;
+        let Some(next) = held.checked_add(bytes) else {
+            return Err(Ledger::reject(
+                MEMORY_ROOT_OWNER_QUOTA,
+                MAX_ROOT_OWNER_BYTES,
+                held,
+                u64::MAX,
+                MEMORY_ROOT_OWNER_HINT,
+            ));
+        };
+        if next > MAX_ROOT_OWNER_BYTES {
+            return Err(Ledger::reject(
+                MEMORY_ROOT_OWNER_QUOTA,
+                MAX_ROOT_OWNER_BYTES,
+                held,
+                bytes,
+                MEMORY_ROOT_OWNER_HINT,
+            ));
+        }
+        ledger.root_owner_bytes = next;
+        ledger.root_owner_records = ledger.root_owner_records.saturating_add(1);
+        Ok(RootOwnerCharge {
+            budget: Arc::clone(self),
+            bytes,
+        })
+    }
+
+    fn release_root_owner(&self, bytes: u64) {
+        let mut ledger = self
+            .ledger
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        debug_assert!(ledger.root_owner_bytes >= bytes);
+        debug_assert!(ledger.root_owner_records > 0);
+        ledger.root_owner_bytes = ledger.root_owner_bytes.saturating_sub(bytes);
+        ledger.root_owner_records = ledger.root_owner_records.saturating_sub(1);
     }
 
     /// Remaining original prepare quota after every live inline/ordinary owner.

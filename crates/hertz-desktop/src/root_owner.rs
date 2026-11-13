@@ -3,6 +3,7 @@
 //! Shared handles admit current hosts; exclusive handles admit offline upgrade
 //! and recovery. Directory pins keep the canonical identity stable until drop.
 use std::fs::{File, Metadata, OpenOptions};
+use std::ops::Deref;
 use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -25,15 +26,87 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 
 const LOCK: &str = "desktop.root.lock";
+/// `canonicalize` may add the verbatim prefix (`\\?\`) to the caller's bytes.
+const VERBATIM_EXTRA_BYTES: u64 = 8;
+/// Windows extended-length ceiling (32,767 UTF-16 units) in WTF-8 bytes; a
+/// relative root canonicalizes against a CWD that this ceiling also bounds.
+const MAX_RELATIVE_CWD_BYTES: u64 = 3 * 32_767;
+/// Covers canonicalize's initial wide buffer and other fixed conversions that
+/// are not proportional to the path length.
+const PRIOR_FIXED_SLACK_BYTES: u64 = 16 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 #[error("desktop_root_busy: 桌面资料正在使用或维护，请正常退出使用此目录的所有宿主后重试")]
 pub(crate) struct Busy;
 
-pub(crate) struct RootOwner {
+/// The physical desktop-root payload: canonical path, directory pins and the
+/// lock handle. It exists only inside the shared lease below.
+pub(crate) struct RootOwnerPin {
     root: PathBuf,
     _lock: File,
     _directories: Vec<File>,
+}
+
+/// A shared desktop-root lease. Every clone shares one physical payload and
+/// one prior admission; the last clone's payload is deallocated (and its lock
+/// handle closed) before the charge field refunds the admitted bytes.
+pub(crate) struct RootOwner {
+    owner: Arc<RootOwnerPin>,
+    /// Declared after the payload handle: refund happens only after the pin's
+    /// canonical path, directory Vec and Arc backing physically exit.
+    charge: Arc<crate::wallpaper::budget::RootOwnerCharge>,
+}
+
+impl Clone for RootOwner {
+    fn clone(&self) -> Self {
+        Self {
+            owner: Arc::clone(&self.owner),
+            charge: Arc::clone(&self.charge),
+        }
+    }
+}
+
+impl Deref for RootOwner {
+    type Target = RootOwnerPin;
+
+    fn deref(&self) -> &Self::Target {
+        &self.owner
+    }
+}
+
+/// Conservative prior fee for one desktop-root owner, computed without any
+/// allocation from caller bytes and absolute/relative kind:
+/// - canonical path: input + verbatim prefix (relative roots add the bounded
+///   CWD they resolve against);
+/// - directory pins: at most one ancestor per two path bytes, a power-of-two
+///   `Vec<File>` capacity plus the last realloc's old+new overlap;
+/// - temporary lock/probe path joins and canonicalize/UTF-16 conversions at
+///   six times the canonical bound, plus a fixed slack;
+/// - both ArcInner blocks that the lease allocates after admission.
+fn root_owner_requested_bytes(root: &Path) -> Option<u64> {
+    let input = u64::try_from(root.as_os_str().len()).ok()?;
+    let canonical = if root.is_absolute() {
+        input.checked_add(VERBATIM_EXTRA_BYTES)?
+    } else {
+        input
+            .checked_add(MAX_RELATIVE_CWD_BYTES)?
+            .checked_add(VERBATIM_EXTRA_BYTES)?
+    };
+    let ancestors = canonical.checked_div(2)?.checked_add(4)?;
+    let slots = ancestors.checked_next_power_of_two()?;
+    let file = u64::try_from(std::mem::size_of::<File>()).ok()?;
+    let pins = slots
+        .checked_mul(file)?
+        .checked_add(slots.checked_div(2)?.checked_mul(file)?)?;
+    let temps = canonical.checked_mul(6)?;
+    canonical
+        .checked_add(pins)?
+        .checked_add(temps)?
+        .checked_add(PRIOR_FIXED_SLACK_BYTES)?
+        .checked_add(arc_allocation_bytes::<RootOwnerPin>()?)?
+        .checked_add(arc_allocation_bytes::<
+            crate::wallpaper::budget::RootOwnerCharge,
+        >()?)
 }
 
 pub(crate) fn ordinary(metadata: &Metadata) -> Result<()> {
@@ -45,20 +118,13 @@ pub(crate) fn ordinary(metadata: &Metadata) -> Result<()> {
     Ok(())
 }
 
-impl RootOwner {
-    pub(crate) fn shared(root: &Path) -> Result<Arc<Self>> {
-        Self::acquire(root, false)
-    }
-
-    pub(crate) fn exclusive(root: &Path) -> Result<Arc<Self>> {
-        Self::acquire(root, true)
-    }
-
+impl RootOwnerPin {
     pub(crate) fn root(&self) -> &Path {
         &self.root
     }
 
     /// Actual retained capacities; this query allocates and clones nothing.
+    /// Both ArcInner blocks belong to the lease that owns this payload.
     pub(crate) fn retained_heap_bytes(&self) -> Option<u64> {
         let paths = u64::try_from(self.root.capacity()).ok()?;
         let pins = self
@@ -67,10 +133,31 @@ impl RootOwner {
             .checked_mul(std::mem::size_of::<File>())?;
         paths
             .checked_add(u64::try_from(pins).ok()?)?
-            .checked_add(arc_allocation_bytes::<Self>()?)
+            .checked_add(arc_allocation_bytes::<RootOwnerPin>()?)?
+            .checked_add(arc_allocation_bytes::<
+                crate::wallpaper::budget::RootOwnerCharge,
+            >()?)
+    }
+}
+
+impl RootOwner {
+    pub(crate) fn shared(root: &Path) -> Result<Self> {
+        Self::acquire(root, false)
     }
 
-    fn acquire(root: &Path, exclusive: bool) -> Result<Arc<Self>> {
+    pub(crate) fn exclusive(root: &Path) -> Result<Self> {
+        Self::acquire(root, true)
+    }
+
+    fn acquire(root: &Path, exclusive: bool) -> Result<Self> {
+        // Every owned allocation below (canonical path, pins, lock path and
+        // both Arcs) is admitted against the original process ledger first.
+        let requested = root_owner_requested_bytes(root)
+            .context("desktop_root_budget: 桌面资料根费用计算溢出")?;
+        let budget = crate::wallpaper::budget::global();
+        let charge = budget
+            .admit_root_owner(requested)
+            .map_err(|rejection| anyhow::anyhow!("desktop_root_budget: {}", rejection.message))?;
         // Check the caller's path before canonicalization, including ancestors;
         // otherwise a junction could hide the lock's actual directory identity.
         for path in root.ancestors().filter(|path| !path.as_os_str().is_empty()) {
@@ -137,11 +224,14 @@ impl RootOwner {
             metadata.is_file(),
             "desktop_root_path: expected regular lock file"
         );
-        let owner = Arc::new(Self {
-            root,
-            _lock: file,
-            _directories: directories,
-        });
+        let owner = Self {
+            owner: Arc::new(RootOwnerPin {
+                root,
+                _lock: file,
+                _directories: directories,
+            }),
+            charge: Arc::new(charge),
+        };
         if exclusive {
             // SQLx Drop signals its SQLite worker; physical close can happen
             // after the last PoolInner callback is dropped. Exclusive admission
@@ -179,6 +269,160 @@ pub(crate) fn probe_database_handles(root: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use crate::wallpaper::library::tempfileish;
+
+    #[test]
+    fn root_owner_admission_covers_actual_peak_and_refunds_after_physical_release() {
+        use crate::wallpaper::budget::{self, measure_requested_heap, PhysicalReleaseCapture};
+        use std::alloc::Layout;
+        use std::sync::atomic::AtomicUsize;
+
+        let dir = tempfileish::temp_dir("root-owner-prior");
+        // The process ledger and both embedded catalogs are not part of a root
+        // owner's fee; warm them before measuring this owner.
+        let budget = budget::global();
+        let before = budget.usage();
+        let requested = root_owner_requested_bytes(dir.path()).unwrap();
+        let (owner, sample) = measure_requested_heap(|| RootOwner::shared(dir.path()).unwrap());
+        assert!(!sample.overflow);
+        assert!(sample.peak > 0);
+        assert!(
+            u64::try_from(sample.peak).unwrap() <= requested,
+            "peak {} exceeds prior {}",
+            sample.peak,
+            requested
+        );
+        let retained = owner.retained_heap_bytes().unwrap();
+        assert!(retained <= requested);
+        let held = budget.usage();
+        assert_eq!(held.root_owner_bytes, before.root_owner_bytes + requested);
+        assert_eq!(held.root_owner_records, before.root_owner_records + 1);
+        println!(
+            "root-owner prior={requested} peak={} retained={retained}",
+            sample.peak
+        );
+
+        // One physical payload and one charge are shared by every clone.
+        let clone = owner.clone();
+        drop(owner);
+        assert_eq!(
+            budget.usage().root_owner_bytes,
+            before.root_owner_bytes + requested
+        );
+        assert_eq!(
+            budget.usage().root_owner_records,
+            before.root_owner_records + 1
+        );
+
+        let (layout, offset) = Layout::new::<[AtomicUsize; 2]>()
+            .extend(Layout::new::<RootOwnerPin>())
+            .unwrap();
+        let arc = Arc::as_ptr(&clone.owner) as *const () as usize - offset;
+        let allocations = [
+            (
+                clone.root.as_os_str().as_encoded_bytes().as_ptr() as usize,
+                clone.root.capacity(),
+                1,
+            ),
+            (
+                clone._directories.as_ptr() as usize,
+                clone._directories.capacity() * std::mem::size_of::<File>(),
+                std::mem::align_of::<File>(),
+            ),
+            (
+                arc,
+                layout.pad_to_align().size(),
+                layout.pad_to_align().align(),
+            ),
+        ];
+        // Gate every payload deallocation: the ledger must stay charged while
+        // the canonical path, pins and Arc backing are still physically live.
+        let capture = PhysicalReleaseCapture::new(&allocations);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let dropping = Arc::clone(&budget);
+        let thread = std::thread::spawn(move || {
+            drop(clone);
+            sender.send(dropping.usage()).unwrap();
+        });
+        for index in 0..allocations.len() {
+            capture.wait_before(index);
+            assert_eq!(
+                budget.usage().root_owner_bytes,
+                before.root_owner_bytes + requested
+            );
+            assert_eq!(
+                budget.usage().root_owner_records,
+                before.root_owner_records + 1
+            );
+            capture.free(index);
+            capture.resume(index);
+        }
+        let released = receiver
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap();
+        assert_eq!(released.root_owner_bytes, before.root_owner_bytes);
+        assert_eq!(released.root_owner_records, before.root_owner_records);
+        thread.join().unwrap();
+        capture.assert_complete();
+        capture.log_evidence("root-owner", &allocations);
+        drop(capture);
+
+        // OS close receipt: exclusive admission (share_mode 0) succeeds only
+        // after the last shared lock file handle was physically closed.
+        let writer = RootOwner::exclusive(dir.path()).unwrap();
+        drop(writer);
+        assert_eq!(budget.usage(), before);
+        // Directory pins shared read/write but not delete: a successful rename
+        // is their physical exit receipt.
+        let moved = dir.path().with_extension("moved");
+        std::fs::rename(dir.path(), &moved).unwrap();
+        std::fs::rename(&moved, dir.path()).unwrap();
+    }
+
+    #[test]
+    fn rejected_and_busy_root_acquisitions_refund_the_prior_charge() {
+        let budget = crate::wallpaper::budget::global();
+        let before = budget.usage();
+        let missing = tempfileish::temp_dir("root-owner-missing");
+        assert!(RootOwner::exclusive(&missing.path().join("absent")).is_err());
+        assert_eq!(budget.usage(), before);
+
+        let dir = tempfileish::temp_dir("root-owner-refund");
+        let reader = RootOwner::shared(dir.path()).unwrap();
+        let held = budget.usage();
+        assert!(RootOwner::exclusive(dir.path()).is_err());
+        assert_eq!(budget.usage(), held);
+        drop(reader);
+        assert_eq!(budget.usage(), before);
+
+        let link = dir.path().join("alias");
+        let actual = dir.path().join("real");
+        std::fs::create_dir(&actual).unwrap();
+        let status = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(&link)
+            .arg(&actual)
+            .output()
+            .unwrap();
+        assert!(status.status.success());
+        assert!(RootOwner::shared(&link).is_err());
+        assert_eq!(budget.usage(), before);
+        std::fs::remove_dir(link).unwrap();
+    }
+
+    #[test]
+    fn root_owner_prior_bound_scales_with_path_bytes_and_kind() {
+        let short = root_owner_requested_bytes(Path::new("C:\\a")).unwrap();
+        let long = root_owner_requested_bytes(Path::new(
+            "C:\\a\\bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        ))
+        .unwrap();
+        assert!(long > short);
+        // A relative root resolves against a CWD bounded by the extended-length
+        // ceiling, so its prior fee is larger before any allocation.
+        let relative = root_owner_requested_bytes(Path::new("a")).unwrap();
+        assert!(relative > long);
+        assert!(relative <= crate::wallpaper::budget::MAX_ROOT_OWNER_BYTES);
+    }
 
     #[test]
     fn current_readers_exclude_maintenance_and_carrier_replacement_until_last_drop() {
