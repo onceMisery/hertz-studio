@@ -1588,18 +1588,33 @@ async fn internal_visible_shared_text_exports_native_final_value_and_scale_varia
     }
 }
 
-/// The import worker frame (and any request tail) is a live inline prepare
-/// owner for the whole job-manager lifetime; "everything else drained" means
-/// the remaining prepare bytes are exactly the inline control bytes.
-fn assert_only_inline_controls(budget: &super::super::budget::BudgetCoordinator) {
-    let usage = budget.usage();
-    let expected = super::super::budget::BudgetUsage {
-        prepare_cpu_bytes: usage.control_prepare_cpu_bytes,
-        control_prepare_cpu_bytes: usage.control_prepare_cpu_bytes,
-        control_records: usage.control_records,
-        ..Default::default()
-    };
-    assert_eq!(usage, expected);
+/// The import worker frame is the only inline prepare owner left after the
+/// request tail exits. Polling the exact frame (not the observed control bytes)
+/// makes a leaked per-request ControlCharge visibly fail.
+fn assert_only_worker_frame(budget: &super::super::budget::BudgetCoordinator) {
+    let frame = crate::wallpaper::jobs::worker_frame_bytes_for_test();
+    assert!(frame > 0, "worker frame was never admitted");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let usage = budget.usage();
+        if usage.control_records == 1 && usage.control_prepare_cpu_bytes == frame {
+            assert_eq!(
+                usage,
+                super::super::budget::BudgetUsage {
+                    prepare_cpu_bytes: frame,
+                    control_prepare_cpu_bytes: frame,
+                    control_records: 1,
+                    ..Default::default()
+                }
+            );
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "worker frame-only baseline not reached: {usage:?}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
 }
 
 #[tokio::test]
@@ -1718,7 +1733,7 @@ async fn aggregate_real_font_glyph_and_raster_memory_fail_before_any_native_prob
         );
         assert!(jobs.active_status().is_none());
         drop(jobs.assets().content_writer().unwrap());
-        assert_only_inline_controls(&counts.budget_for_test());
+        assert_only_worker_frame(&counts.budget_for_test());
         let access = super::super::access::MediaAccess::new();
         assert!(access.permit(&hash, "assets/font.ttf").is_none());
     }
@@ -1827,7 +1842,7 @@ async fn later_font_inspection_failure_prevents_first_font_and_first_media_nativ
     assert_eq!(error.details.unwrap()["nodeId"], "second");
     assert_eq!(counts.stats(), (0, 0));
     assert!(jobs.active_status().is_none());
-    assert_only_inline_controls(&counts.budget_for_test());
+    assert_only_worker_frame(&counts.budget_for_test());
 }
 
 #[tokio::test]
@@ -1890,7 +1905,7 @@ async fn group_qualification_failure_stops_later_fonts_and_media_after_all_works
     );
     assert_eq!(counts.stats(), (0, 2));
     assert!(jobs.active_status().is_none());
-    assert_only_inline_controls(&counts.budget_for_test());
+    assert_only_worker_frame(&counts.budget_for_test());
 }
 
 #[tokio::test]
