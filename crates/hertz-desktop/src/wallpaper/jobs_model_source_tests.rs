@@ -52,7 +52,7 @@ fn env(tag: &str) -> Env {
 }
 
 fn receive(
-    reply: tokio::sync::oneshot::Receiver<Result<CanonicalModelSource, JobError>>,
+    reply: LeasedReceiver<Result<CanonicalModelSource, JobError>>,
 ) -> Result<CanonicalModelSource, JobError> {
     block_on(async {
         tokio::time::timeout(Duration::from_secs(10), reply)
@@ -111,7 +111,7 @@ fn drained(env: &Env, id: &str, state: JobState) {
 
 type HeldRequest = (
     JobRequest,
-    tokio::sync::oneshot::Receiver<Result<CanonicalModelSource, JobError>>,
+    LeasedReceiver<Result<CanonicalModelSource, JobError>>,
     std::sync::mpsc::Receiver<()>,
     Arc<tokio::sync::Notify>,
 );
@@ -123,9 +123,10 @@ fn held_request(env: &Env, id: &str) -> HeldRequest {
             id.into(),
             JobSource::PrepareModelSource(env.reference.clone()),
             None,
+            0,
         )
         .unwrap();
-    let (sender, reply) = tokio::sync::oneshot::channel();
+    let (sender, reply) = env.jobs.attach_reply_for_test(&mut request);
     let (entered_tx, entered) = std::sync::mpsc::channel();
     let release = Arc::new(tokio::sync::Notify::new());
     request.font_reply = Some(FontPrepareReply::ModelSource(sender));
@@ -148,6 +149,8 @@ fn original_jobs_prepare_source_exact_variant_and_actual_job_generation() {
             .prepare_model_source(id.clone(), reference)
             .unwrap();
         assert_eq!(returned, id);
+        // 返回句柄的 id 副本持有自己的准入费用；frame-only 断言前显式销毁。
+        drop(returned);
         let source = receive(reply).unwrap();
         let status = terminal(&env, &id);
         assert_eq!(source.entry().path, path);
@@ -228,10 +231,11 @@ fn cancelled_inspection_uses_original_slot_and_does_not_modify_installed_manifes
             "cancelled-inspection".into(),
             JobSource::PrepareModelSource(env.reference.clone()),
             None,
+            0,
         )
         .unwrap();
     request.inspection_checkpoint = Some(|cancel| cancel.store(true, Ordering::Release));
-    let (sender, reply) = tokio::sync::oneshot::channel();
+    let (sender, reply) = env.jobs.attach_reply_for_test(&mut request);
     request.font_reply = Some(FontPrepareReply::ModelSource(sender));
     env.jobs.dispatch(request).unwrap();
     assert_eq!(receive(reply).err().unwrap().code, "cancelled");

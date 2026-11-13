@@ -58,7 +58,7 @@ fn env_with_invalid(tag: &str, invalid: bool) -> Env {
 
 #[allow(clippy::result_large_err)] // Exercise the actual inline typed reply, including its guard.
 fn receive(
-    reply: tokio::sync::oneshot::Receiver<Result<ModelInput, ModelPreparationError>>,
+    reply: LeasedReceiver<Result<ModelInput, ModelPreparationError>>,
 ) -> Result<ModelInput, ModelPreparationError> {
     block_on(async {
         tokio::time::timeout(Duration::from_secs(10), reply)
@@ -117,7 +117,7 @@ fn drained(env: &Env, id: &str, state: JobState) {
 
 type HeldRequest = (
     JobRequest,
-    tokio::sync::oneshot::Receiver<Result<ModelInput, ModelPreparationError>>,
+    LeasedReceiver<Result<ModelInput, ModelPreparationError>>,
     std::sync::mpsc::Receiver<()>,
     Arc<tokio::sync::Notify>,
 );
@@ -129,9 +129,10 @@ fn held_request(env: &Env, id: &str) -> HeldRequest {
             id.into(),
             JobSource::PrepareModelInput(env.reference.clone()),
             None,
+            0,
         )
         .unwrap();
-    let (sender, reply) = tokio::sync::oneshot::channel();
+    let (sender, reply) = env.jobs.attach_reply_for_test(&mut request);
     let (entered_tx, entered) = std::sync::mpsc::channel();
     let release = Arc::new(tokio::sync::Notify::new());
     request.font_reply = Some(FontPrepareReply::ModelInput(sender));
@@ -151,6 +152,8 @@ fn original_jobs_prepare_source_exact_variant_and_actual_job_generation() {
         reference.variant_id = variant.map(str::to_owned);
         let (returned, reply) = env.jobs.prepare_model_input(id.clone(), reference).unwrap();
         assert_eq!(returned, id);
+        // 返回句柄的 id 副本持有自己的准入费用；frame-only 断言前显式销毁。
+        drop(returned);
         let source = receive(reply).unwrap();
         let status = terminal(&env, &id);
         assert_eq!(source.facts().source_path(), path);
@@ -231,10 +234,11 @@ fn cancelled_inspection_uses_original_slot_and_does_not_modify_installed_manifes
             "cancelled-inspection".into(),
             JobSource::PrepareModelInput(env.reference.clone()),
             None,
+            0,
         )
         .unwrap();
     request.inspection_checkpoint = Some(|cancel| cancel.store(true, Ordering::Release));
-    let (sender, reply) = tokio::sync::oneshot::channel();
+    let (sender, reply) = env.jobs.attach_reply_for_test(&mut request);
     request.font_reply = Some(FontPrepareReply::ModelInput(sender));
     env.jobs.dispatch(request).unwrap();
     assert_eq!(receive(reply).err().unwrap().job_error().code, "cancelled");
@@ -444,6 +448,7 @@ fn actual_typed_oneshot_allocation_and_native_async_frame_layouts() {
             "frame".into(),
             JobSource::PrepareModelInput(env.reference.clone()),
             None,
+            0,
         )
         .unwrap();
     let preparation = env.probe.prepare_for_job("frame-layout".into(), 1).unwrap();
@@ -492,6 +497,7 @@ fn original_no_reply_drops_whole_model_error_before_finishing_held_w() {
             "no-model-reply".into(),
             JobSource::PrepareModelInput(env.reference.clone()),
             None,
+            0,
         )
         .unwrap();
     let (entered_tx, entered) = std::sync::mpsc::channel();
@@ -510,4 +516,37 @@ fn original_no_reply_drops_whole_model_error_before_finishing_held_w() {
         std::thread::sleep(Duration::from_millis(10));
     }
     drained(&env, "no-model-reply", JobState::Failed);
+}
+
+// r34: 终态发布后仍保留 typed receiver 时，共享回执费用不得提前退款。
+#[test]
+fn retained_typed_receiver_keeps_its_admitted_reply_cost_after_terminal() {
+    let env = env("model-input-reply-retained");
+    let budget = env.probe.budget_for_test();
+    let frame = super::worker_frame_bytes_for_test();
+    assert!(frame > 0, "worker frame was never admitted");
+    let reply = super::reply_lease_bytes::<Result<ModelInput, ModelPreparationError>>();
+    let (job, receiver) = env
+        .jobs
+        .prepare_model_input("reply-retained".into(), env.reference.clone())
+        .unwrap();
+    drop(job);
+    assert_eq!(terminal(&env, "reply-retained").state, JobState::Done);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let usage = budget.usage();
+        if usage.control_records == 2 && usage.control_prepare_cpu_bytes == frame + reply {
+            assert_eq!(usage.prepare_cpu_bytes, frame + reply);
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "retained reply lease not observed: {usage:?}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // 终态与槽都已释放；只有保留的 receiver 仍持有回执费用。
+    assert!(env.jobs.active_status().is_none());
+    drop(receiver);
+    drained(&env, "reply-retained", JobState::Done);
 }

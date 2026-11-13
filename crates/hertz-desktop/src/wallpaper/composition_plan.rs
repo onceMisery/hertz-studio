@@ -19,7 +19,9 @@ use super::budget::{BudgetRequest, OwnerKind, ResourceAmounts, ResourcePlan, Ses
 use super::font_prepare::{FontInput, PreparedFont, RequiredText};
 use super::gl_plan::{GlLimits, GlPlan, SharedAssetsEnvelope};
 use super::image_prepare::ImageTarget;
-use super::jobs::{FontGroupPrepareRequest, FontPrepareRequest, ImportJobs, JobError};
+use super::jobs::{
+    FontGroupPrepareRequest, FontPrepareRequest, ImportJobs, JobError, LeasedReceiver,
+};
 use super::media::Container;
 use super::target_planner::{AssetRef, ResolvedMedia};
 use super::text_raster::{self, TextRasterPlan};
@@ -295,7 +297,7 @@ fn font_prepare_request(
 async fn wait_font_reply<T>(
     jobs: &ImportJobs,
     job_id: &str,
-    mut receive: tokio::sync::oneshot::Receiver<Result<T>>,
+    mut receive: LeasedReceiver<Result<T>>,
     cancel: &AtomicBool,
 ) -> Result<T> {
     loop {
