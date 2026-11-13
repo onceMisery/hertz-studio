@@ -250,7 +250,11 @@ mod svg_lifecycle_tests {
                 );
             }
             assert_eq!(budget.usage().prepare_tasks, 0);
-            assert_eq!(budget.usage().prepare_cpu_bytes, 0);
+            // The shared worker frame remains a live inline prepare owner.
+            assert_eq!(
+                budget.usage().prepare_cpu_bytes,
+                budget.usage().control_prepare_cpu_bytes
+            );
             jobs.submit("next".into(), source).unwrap();
             let deadline = Instant::now() + Duration::from_secs(3);
             while jobs.status("next").unwrap().state != JobState::Done {
