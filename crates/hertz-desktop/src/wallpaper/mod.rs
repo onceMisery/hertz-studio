@@ -64,7 +64,8 @@ pub(crate) mod library;
 pub(crate) mod media;
 #[allow(dead_code)]
 pub(crate) mod media_stream;
-#[allow(dead_code)] // Full facts await canonical closure, Broker and runtime qualification.
+#[allow(dead_code)]
+// Canonical texture closure is bound; Broker/loader/runtime await qualification.
 pub(crate) mod model_prepare;
 pub(crate) mod output_tokens;
 pub(crate) mod page_events;

@@ -211,6 +211,17 @@ impl CanonicalModelSource {
             .entry
     }
 
+    /// Archive-verified installed entries from the original immutable package
+    /// identity. Borrowed only; no File or identity extraction.
+    pub(crate) fn entries(&self) -> &[hertz_wallpaper::VerifiedEntry] {
+        self.inner()
+            .resources
+            .as_ref()
+            .expect("live source")
+            .identity
+            .entries()
+    }
+
     pub(crate) fn manifest(&self) -> &hertz_wallpaper::manifest::Manifest {
         self.inner()
             .resources

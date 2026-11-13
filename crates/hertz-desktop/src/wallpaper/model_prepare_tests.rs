@@ -228,6 +228,85 @@ fn original_installed_rich_triangle_variant_hash_facts_and_last_outer_clone() {
 }
 
 #[test]
+fn installed_rich_model_binds_texture_closure_to_archive_entries() {
+    let fixture = installed_full_model_fixture("model-input-textures", false);
+    let probe = model_source_test_probe();
+    let preparation = probe.prepare_for_job("texture-closure".into(), 73).unwrap();
+    let baseline = probe.budget_for_test().usage();
+    let input = fixture
+        .store
+        .prepare_canonical_model_input(
+            &fixture.reference,
+            &probe,
+            &preparation,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+    // Three Package records (tex.png twice, other.png once) bind to two unique
+    // archive entries; the embedded image stays inside the checked BIN facts.
+    assert_eq!(input.texture_closure_for_test(), (3, 2, 8));
+    let usage = probe.budget_for_test().usage();
+    assert_eq!(usage.model_texture_closure_bytes, 3 * 56);
+    assert_eq!(usage.model_texture_closure_records, 1);
+    // The closure owns only its own bucket; the input's source/facts R stays in
+    // the original asset bucket and the prepare workspace has already exited.
+    assert_eq!(usage.prepare_cpu_bytes, baseline.prepare_cpu_bytes);
+    assert!(usage.asset_cpu_bytes > baseline.asset_cpu_bytes);
+    drop(input);
+    assert_eq!(probe.budget_for_test().usage(), baseline);
+    preparation.finish();
+}
+
+#[test]
+fn texture_closure_record_backing_releases_before_its_last_charge() {
+    let fixture = installed_full_model_fixture("model-input-texture-release", false);
+    let probe = model_source_test_probe();
+    let preparation = probe.prepare_for_job("texture-release".into(), 74).unwrap();
+    let budget = probe.budget_for_test();
+    let input = fixture
+        .store
+        .prepare_canonical_model_input(
+            &fixture.reference,
+            &probe,
+            &preparation,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+    let charged = budget.usage().model_texture_closure_bytes;
+    assert_eq!(charged, 3 * 56);
+    let allocation = input
+        .inner()
+        .resources
+        .as_ref()
+        .unwrap()
+        .textures
+        .release_allocations_for_test()
+        .unwrap();
+    assert_eq!(allocation.1 as u64, charged);
+    let capture = budget::PhysicalReleaseCapture::new(&[allocation]);
+    let thread = std::thread::spawn(move || {
+        let ((), sample) = budget::measure_requested_heap(|| drop(input));
+        assert_eq!(
+            (sample.peak, sample.retained, sample.overflow),
+            (0, 0, false)
+        );
+    });
+    // The record Vec is inside System.dealloc: the charge is still booked.
+    capture.wait_before(0);
+    assert_eq!(budget.usage().model_texture_closure_bytes, charged);
+    assert_eq!(budget.usage().model_texture_closure_records, 1);
+    capture.free(0);
+    // System.dealloc has returned, but the Vec destructor (and therefore the
+    // charge refund) has not completed.
+    assert_eq!(budget.usage().model_texture_closure_bytes, charged);
+    capture.resume(0);
+    thread.join().unwrap();
+    assert_eq!(budget.usage().model_texture_closure_bytes, 0);
+    assert_eq!(budget.usage().model_texture_closure_records, 0);
+    preparation.finish();
+}
+
+#[test]
 fn source_success_then_actual_model_w_rejection_keeps_source_fee_and_pins_until_error_drop() {
     let fixture = installed_full_model_fixture("model-input-W", false);
     let probe = model_source_test_probe();

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 //! Canonical full checked facts bound to their original installed source.
-//! Texture closure, loader, Broker, runtime and GPU gates remain closed.
+//! The Package texture closure is now canonical; loader, Broker, runtime and
+//! GPU gates remain closed.
 use super::{
     assets::{AssetStore, CanonicalModelSource},
     budget,
@@ -14,6 +15,10 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
+
+#[path = "model_texture_closure.rs"]
+mod texture_closure;
+use texture_closure::ModelTextureClosure;
 
 // String::from(&str) requests the literal's exact byte length. Old model
 // diagnostics drop before this is constructed. History/progress/DB copies
@@ -30,6 +35,7 @@ use native_facts::NativeModelFacts;
 pub(crate) struct ModelInput(Option<Arc<Inner>>);
 struct Resources {
     facts: CompactCheckedGlbResource,
+    textures: ModelTextureClosure,
     source: CanonicalModelSource,
 }
 struct Inner {
@@ -38,8 +44,16 @@ struct Inner {
 }
 impl Drop for Inner {
     fn drop(&mut self) {
-        let source_guard = if let Some(Resources { facts, source }) = self.resources.take() {
+        let source_guard = if let Some(Resources {
+            facts,
+            textures,
+            source,
+        }) = self.resources.take()
+        {
             drop(facts);
+            // The closure's fixed record Vec physically releases before its
+            // own ledger charge is refunded.
+            drop(textures);
             source.retire_resources()
         } else {
             None
@@ -84,6 +98,20 @@ impl ModelInput {
     #[cfg(test)]
     pub(crate) fn reservation_identity_for_test(&self) -> (&str, u64, &str) {
         self.inner().retained.as_ref().unwrap().identity_for_test()
+    }
+    #[cfg(test)]
+    pub(crate) fn texture_closure_for_test(&self) -> (usize, u32, u64) {
+        let textures = &self
+            .inner()
+            .resources
+            .as_ref()
+            .expect("live model input")
+            .textures;
+        (
+            textures.len(),
+            textures.unique_entries(),
+            textures.unique_source_bytes(),
+        )
     }
 }
 
@@ -281,12 +309,21 @@ impl AssetStore {
             let retained_bytes = compact
                 .retained_requested_bytes()
                 .map_err(|_| fixed_error("model_heap_limit"))?;
+            // Canonical Package texture closure: every image record binds to
+            // the installed identity's archive-verified entry tuple. The fixed
+            // record Vec is admitted on the probe's own ledger before it exists.
+            let textures = texture_closure::build(
+                &compact.structure().images,
+                source.entries(),
+                &probe.budget_handle(),
+            )?;
             // Source R already carries the actual native Arc and W/R request
             // string floor. This own facts-R accounts the compact heap only.
             let retained = probe.job_memory(preparation, "model-input", 0, retained_bytes)?;
             let inner = Inner {
                 resources: Some(Resources {
                     facts: compact,
+                    textures,
                     source,
                 }),
                 retained: Some(retained),
