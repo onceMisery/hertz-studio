@@ -16,6 +16,9 @@ pub(crate) struct BudgetProjection {
 impl BudgetProjection {
     pub(super) fn from_ledger(ledger: &Ledger, generations: &[u64]) -> Self {
         let mut usage = ledger.process_usage();
+        usage.control_prepare_cpu_bytes = ledger.control_prepare_cpu_bytes;
+        usage.control_records = ledger.control_records;
+        usage.prepare_cpu_bytes += ledger.control_prepare_cpu_bytes;
         let mut preview_output_held = 0;
         for entry in &ledger.reservations {
             if entry.state == ReservationState::Active

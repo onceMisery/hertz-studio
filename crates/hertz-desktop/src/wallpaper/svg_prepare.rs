@@ -252,7 +252,9 @@ pub(crate) async fn prepare(
             "SVG 字体闭包超过 320 MiB 前置工作区",
         ));
     }
-    let reservation = probe.image_workspace(super::budget::MAX_PREPARE_CPU_BYTES)?;
+    // Reserve at most the still-unoccupied prepare cap: live inline owners
+    // (the worker frame and this request's controls) already occupy bytes.
+    let reservation = probe.image_workspace(probe.remaining_prepare_workspace())?;
     #[cfg(all(feature = "wallpaper-media-probe", debug_assertions))]
     probe.svg_event_for_test("workspace_reserved", Some(&input.source.entry.sha256));
     let result = async {

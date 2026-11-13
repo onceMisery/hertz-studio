@@ -194,6 +194,22 @@ impl BudgetCoordinator {
         Ok(())
     }
 
+    /// Inline control/worker bytes use the unchanged original prepare quota.
+    /// Callers pass exact requested bytes; this check allocates nothing and
+    /// leaves the original rejection vocabulary untouched.
+    pub(super) fn check_control(bytes: u64, usage: &BudgetUsage) -> Result<(), BudgetRejection> {
+        if bytes > MAX_PREPARE_CPU_BYTES.saturating_sub(usage.prepare_cpu_bytes) {
+            return Err(Ledger::reject(
+                MEMORY_PREPARE_QUOTA,
+                MAX_PREPARE_CPU_BYTES,
+                usage.prepare_cpu_bytes,
+                bytes,
+                MEMORY_PREPARE_HINT,
+            ));
+        }
+        Ok(())
+    }
+
     /// 申请面静态校验：owner 与字段组合的合同（§12.1 表格的行内约束）。
     fn validate_shape(request: &BudgetRequest) -> Result<(), BudgetRejection> {
         if !request.has_valid_identity() {

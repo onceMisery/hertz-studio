@@ -87,9 +87,12 @@ fn drained(env: &Env, id: &str, state: JobState) {
     assert_eq!(terminal(env, id).state, state);
     assert!(env.jobs.active_status().is_none());
     assert_eq!(env.probe.stats(), (0, 0));
-    assert_eq!(env.probe.budget_for_test().usage().asset_cpu_bytes, 0);
-    assert_eq!(env.probe.budget_for_test().usage().prepare_cpu_bytes, 0);
-    assert_eq!(env.probe.budget_for_test().usage().prepare_tasks, 0);
+    let usage = env.probe.budget_for_test().usage();
+    assert_eq!(usage.asset_cpu_bytes, 0);
+    // The shared worker frame (and any request tail) remains a live inline
+    // prepare owner; no ordinary prepare reservation may survive the drain.
+    assert_eq!(usage.prepare_cpu_bytes, usage.control_prepare_cpu_bytes);
+    assert_eq!(usage.prepare_tasks, 0);
     assert_eq!(env.probe.budget_for_test().record_count_for_test(), 0);
     assert!(env.probe.budget_for_test().stuck().is_empty());
     assert!(model_source_writable(
@@ -361,8 +364,9 @@ fn original_terminal_error_preserves_guard_after_slot_return_and_pool_close() {
         .unwrap();
     sibling_preparation.finish();
     drop(error);
-    assert_eq!(env.probe.budget_for_test().usage().prepare_cpu_bytes, 0);
-    assert_eq!(env.probe.budget_for_test().usage().asset_cpu_bytes, 17);
+    let usage = env.probe.budget_for_test().usage();
+    assert_eq!(usage.prepare_cpu_bytes, usage.control_prepare_cpu_bytes);
+    assert_eq!(usage.asset_cpu_bytes, 17);
     sibling.finish();
     drained(&env, "guard-terminal", JobState::Failed);
 }

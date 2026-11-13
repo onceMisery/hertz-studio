@@ -542,6 +542,18 @@ impl ProbeClient {
         Arc::clone(&self.budget)
     }
 
+    /// The import worker admits its controls and production frame on the same
+    /// original ledger as the probe reservations.
+    pub(crate) fn budget_handle(&self) -> Arc<BudgetCoordinator> {
+        Arc::clone(&self.budget)
+    }
+
+    /// Largest prepare workspace that still composes with every live inline
+    /// owner; the subsequent grant rechecks it under the original ledger lock.
+    pub(crate) fn remaining_prepare_workspace(&self) -> u64 {
+        self.budget.remaining_prepare_cpu_bytes()
+    }
+
     pub(crate) fn prepare(&self, session: String) -> Result<Reservation, JobError> {
         Reservation::prepare(Arc::clone(&self.budget), session)
     }
