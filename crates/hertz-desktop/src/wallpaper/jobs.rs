@@ -16,7 +16,9 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::root_owner::arc_allocation_bytes;
 use crate::wallpaper::assets::AssetStore;
+use crate::wallpaper::budget::{BudgetCoordinator, ControlCharge, ControlRequest};
 use crate::wallpaper::decode_probe::ProbeClient;
 use crate::wallpaper::font_prepare::{FontInput, PreparedFont, RequiredText};
 use crate::wallpaper::library::{Library, LOCAL_SOURCE};
@@ -59,6 +61,19 @@ impl JobError {
 /// 单槽已被占用时的原文案。测试用独立字面量钉住它，避免文案漂移；
 /// 刻意保持模块私有，避免测试误引用生产常量而让断言恒真。
 const BUSY_SLOT_DIAGNOSTIC: &str = "已有导入任务在执行，请等待完成或取消";
+
+/// Test observation of the actual production worker-frame size queried at the
+/// original launch point; it is not a production bound or a cfg(test) oracle.
+#[cfg(test)]
+static WORKER_FRAME_BYTES: AtomicU64 = AtomicU64::new(0);
+
+/// The shared worker frame is a live inline prepare owner for the whole
+/// `ImportJobs` lifetime; tests that assert "everything drained" compare
+/// against it instead of zero.
+#[cfg(test)]
+pub(crate) fn worker_frame_bytes_for_test() -> u64 {
+    WORKER_FRAME_BYTES.load(Ordering::Relaxed)
+}
 
 impl From<hertz_wallpaper::PackageError> for JobError {
     fn from(error: hertz_wallpaper::PackageError) -> Self {
@@ -115,6 +130,9 @@ pub struct ImportJobs {
     generation: Arc<AtomicU64>,
     library: Arc<Library>,
     assets: Arc<AssetStore>,
+    /// Same original ledger as the probe reservations; per-request controls and
+    /// the shared worker frame are admitted here before their first allocation.
+    budget: Arc<BudgetCoordinator>,
 }
 
 struct JobRequest {
@@ -131,6 +149,9 @@ struct JobRequest {
     inspection_checkpoint: Option<fn(&AtomicBool)>,
     #[cfg(test)]
     model_source_ready: Option<(std::sync::mpsc::Sender<()>, Arc<tokio::sync::Notify>)>,
+    /// Declared last so status/cancel/job-id are destroyed before the ledger
+    /// refund. The single slot is cleared before the worker drops this request.
+    control_charge: ControlCharge,
 }
 
 enum JobSource {
@@ -316,6 +337,7 @@ impl ImportJobs {
     pub fn start(library: Library, assets: AssetStore, probe: ProbeClient) -> Self {
         let library = Arc::new(library);
         let assets = Arc::new(assets);
+        let budget = probe.budget_handle();
         // 容量 1：受理即入队；并发受 inner.current 单槽标记约束（busy 即拒）。
         let (tx, rx) = tokio::sync::mpsc::channel::<JobRequest>(1);
         let inner = Arc::new(Mutex::new(Inner {
@@ -325,6 +347,7 @@ impl ImportJobs {
         let worker_inner = inner.clone();
         let worker_library = library.clone();
         let worker_assets = assets.clone();
+        let worker_budget = Arc::clone(&budget);
         std::thread::Builder::new()
             .name("hertz-wallpaper-import".into())
             .spawn(move || {
@@ -335,13 +358,21 @@ impl ImportJobs {
                     Ok(runtime) => runtime,
                     Err(_) => return,
                 };
-                runtime.block_on(worker_loop(
-                    rx,
-                    worker_inner,
-                    worker_library,
-                    worker_assets,
-                    probe,
-                ));
+                // 先构造真实 future 并查询实际 frame 字节，再在同一账本
+                // 事前准入；显式 Box 的请求字节恰为该 size。guard 留在
+                // block_on 外面，随 Box 销毁后才退款。
+                let future = worker_loop(rx, worker_inner, worker_library, worker_assets, probe);
+                let Some(frame_bytes) = u64::try_from(std::mem::size_of_val(&future)).ok() else {
+                    return;
+                };
+                #[cfg(test)]
+                WORKER_FRAME_BYTES.store(frame_bytes, Ordering::Relaxed);
+                let frame = match worker_budget.admit_working_bytes(frame_bytes) {
+                    Ok(frame) => frame,
+                    Err(_) => return,
+                };
+                runtime.block_on(Box::pin(future));
+                drop(frame);
             })
             .expect("create wallpaper import thread");
         Self {
@@ -350,6 +381,7 @@ impl ImportJobs {
             generation: Arc::new(AtomicU64::new(1)),
             library,
             assets,
+            budget,
         }
     }
 
@@ -544,16 +576,33 @@ impl ImportJobs {
             return Err(JobError::invalid_input("jobId 必须是有界的单个目录名"));
         }
         let generation = self.generation.fetch_add(1, Ordering::Relaxed);
-        // 单槽判定先于本任务的 status/cancel 构造：忙时只产出原静态错误，
-        // 不分配 Arc/Mutex/AtomicBool，也不 clone job_id。检查、构造与提交
-        // 仍在同一把 inner 锁内完成，保持原单槽原子性。
-        let (status, cancel) = {
+        // 控制费用只由真实布局与已校验 id 长度决定；布局查询不分配。
+        let control = ControlRequest {
+            job_id_copy_bytes: u64::try_from(job_id.len()).unwrap_or(u64::MAX),
+            status_arc_bytes: arc_allocation_bytes::<Mutex<JobStatus>>().unwrap_or(u64::MAX),
+            cancel_arc_bytes: arc_allocation_bytes::<AtomicBool>().unwrap_or(u64::MAX),
+        };
+        // 单槽判定、控制准入与 status/cancel 构造在同一把 inner 锁内完成：
+        // 忙时只产出原静态错误；准入被拒时也不构造任何控制对象。
+        // 锁顺序固定 inner → budget（全仓无反向路径）。
+        let (status, cancel, control_charge) = {
             let mut guard = self.inner.lock().expect("job inner");
             if guard.current.is_some() {
                 // 拒绝路径不在单槽锁内构造错误文字；判定完成后立即放锁。
                 drop(guard);
                 return Err(JobError::new("budget_busy", BUSY_SLOT_DIAGNOSTIC));
             }
+            let control_charge = match self.budget.admit_controls(control) {
+                Ok(charge) => charge,
+                Err(rejection) => {
+                    // 与 decode_probe 的原消费边界一致；先放锁再构造文字。
+                    drop(guard);
+                    return Err(JobError::new(
+                        "budget_busy",
+                        format!("{}: {}", rejection.quota, rejection.message),
+                    ));
+                }
+            };
             let status = Arc::new(Mutex::new(JobStatus {
                 job_id: job_id.clone(),
                 state: JobState::Queued,
@@ -567,7 +616,7 @@ impl ImportJobs {
                 status: status.clone(),
                 cancel: cancel.clone(),
             });
-            (status, cancel)
+            (status, cancel, control_charge)
         };
         Ok(JobRequest {
             job_id,
@@ -583,6 +632,7 @@ impl ImportJobs {
             inspection_checkpoint: None,
             #[cfg(test)]
             model_source_ready: None,
+            control_charge,
         })
     }
 

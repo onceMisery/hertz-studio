@@ -350,7 +350,7 @@ fn assert_font_job_drained(env: &TestEnv, probe: &ProbeClient, id: &str, state: 
     drop(env.jobs.assets().content_writer().unwrap());
     probe.prepare(format!("after-{id}")).unwrap().finish();
     probe
-        .image_workspace(super::super::budget::MAX_PREPARE_CPU_BYTES)
+        .image_workspace(probe.remaining_prepare_workspace())
         .unwrap()
         .finish();
 }
@@ -720,7 +720,7 @@ fn font_terminal_database_failure_invalidates_success_after_physical_cleanup() {
         .unwrap()
         .finish();
     probe
-        .image_workspace(super::super::budget::MAX_PREPARE_CPU_BYTES)
+        .image_workspace(probe.remaining_prepare_workspace())
         .unwrap()
         .finish();
     assert_eq!(probe.stats(), (0, 1));
@@ -852,10 +852,7 @@ fn font_group_terminal_database_failure_never_sends_success_after_cleanup() {
         .prepare("after-group-terminal-failure".into())
         .unwrap()
         .finish();
-    assert_eq!(
-        probe.budget_for_test().usage(),
-        super::super::budget::BudgetUsage::default()
-    );
+    assert_only_inline_controls(probe.budget_for_test().usage());
 }
 
 #[test]
@@ -995,10 +992,7 @@ fn font_group_cancel_at_inspection_checkpoint_finishes_workspace_before_terminal
     assert_eq!(error.code, "cancelled");
     assert_eq!(counts.stats(), (0, 0));
     assert_font_job_drained(&env, &counts, &id, JobState::Cancelled);
-    assert_eq!(
-        counts.budget_for_test().usage(),
-        super::super::budget::BudgetUsage::default()
-    );
+    assert_only_inline_controls(counts.budget_for_test().usage());
 }
 
 #[test]
@@ -3105,4 +3099,248 @@ fn invalid_job_id_rejects_before_generation_slot_or_control_construction() {
     assert_eq!(error.code, "invalid_input");
     assert_eq!(error.message, R31_INVALID_ID_DIAGNOSTIC);
     assert_eq!(env.jobs.generation.load(Ordering::Relaxed), before);
+}
+
+// r33: 控制费用在 status/cancel 分配前由原账本事前准入，费用随真实 request
+// 退出；worker 的实际 production frame 也在 block_on/Box 前准入。下面的
+// oracle 独立复写 Arc 布局公式与文案，避免引用生产常量而恒真。
+
+/// The shared worker frame (and any request tail) remains a live inline
+/// prepare owner; everything else must have drained to the original zeros.
+fn assert_only_inline_controls(usage: super::super::budget::BudgetUsage) {
+    assert_eq!(
+        usage,
+        super::super::budget::BudgetUsage {
+            prepare_cpu_bytes: usage.control_prepare_cpu_bytes,
+            control_prepare_cpu_bytes: usage.control_prepare_cpu_bytes,
+            control_records: usage.control_records,
+            ..Default::default()
+        }
+    );
+}
+
+fn arc_requested_bytes_for_test<T>() -> u64 {
+    use std::alloc::Layout;
+    use std::sync::atomic::AtomicUsize;
+    let (layout, _) = Layout::new::<[AtomicUsize; 2]>()
+        .extend(Layout::new::<T>())
+        .expect("test Arc layout");
+    u64::try_from(layout.pad_to_align().size()).unwrap()
+}
+
+fn control_requested_bytes_for_test(job_id: &str) -> u64 {
+    arc_requested_bytes_for_test::<Mutex<JobStatus>>()
+        + arc_requested_bytes_for_test::<AtomicBool>()
+        + u64::try_from(job_id.len()).unwrap()
+}
+
+fn wait_for_inline_control_records(
+    budget: &crate::wallpaper::budget::BudgetCoordinator,
+    expected: u32,
+) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while budget.usage().control_records != expected {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "inline control count did not reach {expected}"
+        );
+        std::thread::yield_now();
+    }
+}
+
+fn saturate_prepare_quota(budget: &crate::wallpaper::budget::BudgetCoordinator) -> (u64, String) {
+    use crate::wallpaper::budget::{BudgetRequest, OwnerKind, MAX_PREPARE_CPU_BYTES};
+    let usage = budget.usage();
+    let session = "r33-control-hold".to_owned();
+    let request = BudgetRequest {
+        owner: OwnerKind::Probe,
+        session: session.clone(),
+        generation: 1,
+        task_id: "hold".into(),
+        targets: 0,
+        contexts: 0,
+        decoders: 0,
+        transcode_slots: 0,
+        decode_pixel_rate: 0,
+        output_pixel_rate: 0,
+        texture_upload_bytes_per_second: 0,
+        cpu_bytes: 0,
+        prepare_cpu_bytes: MAX_PREPARE_CPU_BYTES - usage.prepare_cpu_bytes,
+        asset_cpu_bytes: 0,
+        gpu_bytes: 0,
+        prepare_tasks: 0,
+    };
+    let token = budget.grant(&request).unwrap();
+    assert_eq!(budget.usage().prepare_cpu_bytes, MAX_PREPARE_CPU_BYTES);
+    (token, session)
+}
+
+#[test]
+fn idle_reservation_admits_exact_control_bytes_before_constructing_them() {
+    let env = env("job-r33-control-admission");
+    let budget = Arc::clone(&env.jobs.budget);
+    wait_for_inline_control_records(&budget, 1);
+    let before = budget.usage();
+    let job_id = new_job_id();
+    let expected = control_requested_bytes_for_test(&job_id);
+    let request = env
+        .jobs
+        .reserve(
+            job_id,
+            JobSource::Import(ImportSource::Path(env.source.clone())),
+            None,
+        )
+        .unwrap();
+    let held = budget.usage();
+    assert_eq!(held.control_records, before.control_records + 1);
+    assert_eq!(
+        held.control_prepare_cpu_bytes - before.control_prepare_cpu_bytes,
+        expected
+    );
+    assert_eq!(
+        held.prepare_cpu_bytes - before.prepare_cpu_bytes,
+        expected,
+        "控制字节必须同时计入原 prepare 配额"
+    );
+    // worker 在归还单槽后才 drop request；测试照此顺序让 guard 成为最后 owner。
+    env.jobs.inner.lock().expect("job inner").current = None;
+    drop(request);
+    let released = budget.usage();
+    assert_eq!(
+        released.control_prepare_cpu_bytes,
+        before.control_prepare_cpu_bytes
+    );
+    assert_eq!(released.control_records, before.control_records);
+}
+
+#[test]
+fn saturated_prepare_quota_rejects_before_status_or_cancel_construction() {
+    use crate::wallpaper::budget::MAX_PREPARE_CPU_BYTES;
+
+    let env = env("job-r33-control-quota");
+    let budget = Arc::clone(&env.jobs.budget);
+    wait_for_inline_control_records(&budget, 1);
+    let (token, session) = saturate_prepare_quota(&budget);
+    let generation = env.jobs.generation.load(Ordering::Relaxed);
+    let job_id = new_job_id();
+    let expected = control_requested_bytes_for_test(&job_id);
+    let source = JobSource::Import(ImportSource::Path(env.source.clone()));
+    let error = env
+        .jobs
+        .reserve(job_id, source, None)
+        .err()
+        .expect("saturated prepare quota must reject control admission");
+    assert_eq!(error.code, "budget_busy");
+    // 独立文案 oracle：quota、hint 与格式都来自测试自身。
+    assert_eq!(
+        error.message,
+        format!(
+            "prepare_cpu_bytes: prepare_cpu_bytes 超限：已占 {MAX_PREPARE_CPU_BYTES} + 申请 {expected} > 上限 {MAX_PREPARE_CPU_BYTES}；图片准备工作区不足；使用更小输入或等待准备退出"
+        )
+    );
+    assert_eq!(
+        env.jobs.generation.load(Ordering::Relaxed),
+        generation + 1,
+        "原语义：每次 reserve 调用都消耗一个代际"
+    );
+    assert!(
+        env.jobs.inner.lock().expect("job inner").current.is_none(),
+        "拒绝路径不得留下半占用槽"
+    );
+    assert_eq!(
+        budget.usage().control_records,
+        1,
+        "拒绝路径不得新增控制记录"
+    );
+    budget.release(token, &session, 1).unwrap();
+    budget.confirm_exit(token, &session, 1).unwrap();
+}
+
+#[test]
+fn every_sync_entry_rejects_a_saturated_prepare_quota_before_controls() {
+    let font = font_fixture();
+    let (env, font_request) = font_env(
+        "job-r33-entries",
+        ProbeClient::testing(|_, _| Box::pin(async { Ok(()) })),
+        &font,
+        "font/ttf",
+    );
+    let budget = Arc::clone(&env.jobs.budget);
+    wait_for_inline_control_records(&budget, 1);
+    let (token, session) = saturate_prepare_quota(&budget);
+    let reference = font_request.reference.clone();
+    let asset_request = super::super::target_planner::PrepareRequest {
+        reference: reference.clone(),
+        target: session_target(),
+    };
+    let svg_request = SvgPrepareRequest {
+        reference: reference.clone(),
+        target: session_target(),
+        usage: "color".into(),
+    };
+    let group = single_font_group(&env, font_request.clone());
+    for error in [
+        env.jobs
+            .submit(new_job_id(), env.source.clone())
+            .unwrap_err(),
+        env.jobs
+            .prepare_asset(new_job_id(), asset_request)
+            .unwrap_err(),
+        env.jobs
+            .prepare_svg(new_job_id(), svg_request)
+            .err()
+            .unwrap(),
+        env.jobs
+            .prepare_font(new_job_id(), font_request.clone())
+            .err()
+            .unwrap(),
+        env.jobs
+            .prepare_font_group(new_job_id(), group)
+            .err()
+            .unwrap(),
+        env.jobs
+            .prepare_model_source(new_job_id(), reference.clone())
+            .err()
+            .unwrap(),
+        env.jobs
+            .prepare_model_input(new_job_id(), reference)
+            .err()
+            .unwrap(),
+    ] {
+        assert_eq!(error.code, "budget_busy");
+        assert!(
+            error
+                .message
+                .starts_with("prepare_cpu_bytes: prepare_cpu_bytes 超限："),
+            "未共用的准入路径：{}",
+            error.message
+        );
+    }
+    assert!(
+        env.jobs.inner.lock().expect("job inner").current.is_none(),
+        "全部拒绝后单槽仍空闲"
+    );
+    assert_eq!(budget.usage().control_records, 1);
+    budget.release(token, &session, 1).unwrap();
+    budget.confirm_exit(token, &session, 1).unwrap();
+}
+
+#[test]
+fn production_worker_frame_is_admitted_before_block_on_and_released_at_exit() {
+    let env = env("job-r33-worker-frame");
+    let budget = Arc::clone(&env.jobs.budget);
+    wait_for_inline_control_records(&budget, 1);
+    let frame = super::WORKER_FRAME_BYTES.load(Ordering::Relaxed);
+    assert!(frame > 0, "实际 production future 必须被观测到");
+    assert_eq!(budget.usage().control_prepare_cpu_bytes, frame);
+    drop(env);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while budget.usage().control_records != 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "worker 退出后 frame 费用未归还"
+        );
+        std::thread::yield_now();
+    }
+    assert_eq!(budget.usage().control_prepare_cpu_bytes, 0);
 }

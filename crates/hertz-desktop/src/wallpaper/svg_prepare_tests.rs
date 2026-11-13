@@ -436,7 +436,12 @@ async fn clip_use_references_reject_hidden_clips_and_keep_flat_clips() {
             "no PNG qualifier can see the rejected source"
         );
         assert_eq!(budget.usage().prepare_tasks, 0);
-        assert_eq!(budget.usage().prepare_cpu_bytes, 0);
+        // The shared worker frame remains a live inline prepare owner; the
+        // rejected job must leave no ordinary workspace bytes behind.
+        assert_eq!(
+            budget.usage().prepare_cpu_bytes,
+            budget.usage().control_prepare_cpu_bytes
+        );
         assert_eq!(std::fs::read_to_string(&bad_source).unwrap(), invalid);
 
         let legal = wrapped(&format!(

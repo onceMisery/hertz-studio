@@ -1588,6 +1588,20 @@ async fn internal_visible_shared_text_exports_native_final_value_and_scale_varia
     }
 }
 
+/// The import worker frame (and any request tail) is a live inline prepare
+/// owner for the whole job-manager lifetime; "everything else drained" means
+/// the remaining prepare bytes are exactly the inline control bytes.
+fn assert_only_inline_controls(budget: &super::super::budget::BudgetCoordinator) {
+    let usage = budget.usage();
+    let expected = super::super::budget::BudgetUsage {
+        prepare_cpu_bytes: usage.control_prepare_cpu_bytes,
+        control_prepare_cpu_bytes: usage.control_prepare_cpu_bytes,
+        control_records: usage.control_records,
+        ..Default::default()
+    };
+    assert_eq!(usage, expected);
+}
+
 #[tokio::test]
 async fn aggregate_real_font_glyph_and_raster_memory_fail_before_any_native_probe() {
     use super::super::config::Fit;
@@ -1704,10 +1718,7 @@ async fn aggregate_real_font_glyph_and_raster_memory_fail_before_any_native_prob
         );
         assert!(jobs.active_status().is_none());
         drop(jobs.assets().content_writer().unwrap());
-        assert_eq!(
-            counts.budget_for_test().usage(),
-            super::super::budget::BudgetUsage::default()
-        );
+        assert_only_inline_controls(&counts.budget_for_test());
         let access = super::super::access::MediaAccess::new();
         assert!(access.permit(&hash, "assets/font.ttf").is_none());
     }
@@ -1816,10 +1827,7 @@ async fn later_font_inspection_failure_prevents_first_font_and_first_media_nativ
     assert_eq!(error.details.unwrap()["nodeId"], "second");
     assert_eq!(counts.stats(), (0, 0));
     assert!(jobs.active_status().is_none());
-    assert_eq!(
-        counts.budget_for_test().usage(),
-        super::super::budget::BudgetUsage::default()
-    );
+    assert_only_inline_controls(&counts.budget_for_test());
 }
 
 #[tokio::test]
@@ -1837,7 +1845,8 @@ async fn group_qualification_failure_stops_later_fonts_and_media_after_all_works
         let id = input.plan_facts().unwrap().reference().asset_id.clone();
         let usage = inspect_budget.get().unwrap().usage();
         assert_eq!(
-            usage.prepare_cpu_bytes, 0,
+            usage.prepare_cpu_bytes - usage.control_prepare_cpu_bytes,
+            0,
             "all parser workspaces physically exited before first qualifier"
         );
         assert_eq!(
@@ -1881,10 +1890,7 @@ async fn group_qualification_failure_stops_later_fonts_and_media_after_all_works
     );
     assert_eq!(counts.stats(), (0, 2));
     assert!(jobs.active_status().is_none());
-    assert_eq!(
-        counts.budget_for_test().usage(),
-        super::super::budget::BudgetUsage::default()
-    );
+    assert_only_inline_controls(&counts.budget_for_test());
 }
 
 #[tokio::test]

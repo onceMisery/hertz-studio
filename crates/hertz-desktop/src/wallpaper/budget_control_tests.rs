@@ -737,3 +737,116 @@ fn session_metadata_is_omitted_only_by_the_original_advisory_view() {
     assert_eq!(projected.reservation_records, actual.reservation_records);
     assert_eq!(projected.targets, actual.targets);
 }
+
+// r33: inline control bytes are checked and booked atomically under the
+// original ledger lock, composed into prepare_cpu_bytes, and released only by
+// their actual owner. Every assertion below uses independent literals.
+
+#[test]
+fn control_admission_books_and_releases_exact_inline_bytes_without_allocation() {
+    let budget = Arc::new(BudgetCoordinator::new());
+    let request = ControlRequest {
+        job_id_copy_bytes: 20,
+        status_arc_bytes: 120,
+        cancel_arc_bytes: 24,
+    };
+    let total = 164;
+    let (charge, sample) = measure_requested_heap(|| budget.admit_controls(request).unwrap());
+    assert_no_heap(sample);
+    assert_eq!(budget.usage().control_prepare_cpu_bytes, total);
+    assert_eq!(budget.usage().prepare_cpu_bytes, total);
+    assert_eq!(budget.usage().control_records, 1);
+    let (projection, sample) = measure_requested_heap(|| budget.project_desktop_replacement(&[]));
+    assert_no_heap(sample);
+    assert_eq!(projection.usage(), budget.usage());
+
+    let (second, sample) = measure_requested_heap(|| budget.admit_controls(request).unwrap());
+    assert_no_heap(sample);
+    assert_eq!(budget.usage().control_prepare_cpu_bytes, 2 * total);
+    assert_eq!(budget.usage().prepare_cpu_bytes, 2 * total);
+    assert_eq!(budget.usage().control_records, 2);
+    drop(charge);
+    assert_eq!(budget.usage().control_prepare_cpu_bytes, total);
+    assert_eq!(budget.usage().control_records, 1);
+    drop(second);
+    assert_eq!(budget.usage(), BudgetUsage::default());
+}
+
+#[test]
+fn inline_control_bytes_use_the_unchanged_prepare_quota() {
+    let budget = Arc::new(BudgetCoordinator::new());
+    let mut held = request(OwnerKind::Probe);
+    held.prepare_cpu_bytes = MAX_PREPARE_CPU_BYTES - 10;
+    let token = budget.grant(&held).unwrap();
+    let before = budget.planning_snapshot();
+    let oversized = ControlRequest {
+        job_id_copy_bytes: 4,
+        status_arc_bytes: 1,
+        cancel_arc_bytes: 6,
+    };
+    let (rejected, sample) = measure_requested_heap(|| budget.admit_controls(oversized));
+    assert_no_heap(sample);
+    let rejected = rejected.unwrap_err();
+    assert_eq!(
+        (
+            rejected.quota,
+            rejected.cap,
+            rejected.held,
+            rejected.requested
+        ),
+        (
+            "prepare_cpu_bytes",
+            MAX_PREPARE_CPU_BYTES,
+            MAX_PREPARE_CPU_BYTES - 10,
+            11
+        )
+    );
+    // Independent text: quota name, hint and layout are duplicated here.
+    assert_eq!(
+        rejected.message.to_string(),
+        format!(
+            "prepare_cpu_bytes 超限：已占 {} + 申请 11 > 上限 {}；图片准备工作区不足；使用更小输入或等待准备退出",
+            MAX_PREPARE_CPU_BYTES - 10,
+            MAX_PREPARE_CPU_BYTES
+        )
+    );
+    assert_eq!(budget.planning_snapshot(), before);
+
+    let exact = ControlRequest {
+        job_id_copy_bytes: 4,
+        status_arc_bytes: 1,
+        cancel_arc_bytes: 5,
+    };
+    let (charge, sample) = measure_requested_heap(|| budget.admit_controls(exact).unwrap());
+    assert_no_heap(sample);
+    assert_eq!(budget.usage().prepare_cpu_bytes, MAX_PREPARE_CPU_BYTES);
+    assert_eq!(
+        budget.usage().control_prepare_cpu_bytes,
+        MAX_PREPARE_CPU_BYTES - (MAX_PREPARE_CPU_BYTES - 10)
+    );
+    drop(charge);
+    assert_eq!(budget.usage().prepare_cpu_bytes, MAX_PREPARE_CPU_BYTES - 10);
+    budget.release(token, &held.session, 1).unwrap();
+    budget.confirm_exit(token, &held.session, 1).unwrap();
+    assert_eq!(budget.usage().prepare_cpu_bytes, 0);
+}
+
+#[test]
+fn overflowing_control_request_rejects_without_allocation_or_booking() {
+    let budget = Arc::new(BudgetCoordinator::new());
+    let before = budget.planning_snapshot();
+    let oversized = ControlRequest {
+        job_id_copy_bytes: u64::MAX,
+        status_arc_bytes: 1,
+        cancel_arc_bytes: 1,
+    };
+    let (rejected, sample) = measure_requested_heap(|| budget.admit_controls(oversized));
+    assert_no_heap(sample);
+    let rejected = rejected.unwrap_err();
+    assert_eq!(rejected.quota, "prepare_cpu_bytes");
+    assert_eq!(
+        (rejected.cap, rejected.held, rejected.requested),
+        (MAX_PREPARE_CPU_BYTES, 0, u64::MAX)
+    );
+    assert_eq!(budget.planning_snapshot(), before);
+}

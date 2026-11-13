@@ -631,3 +631,27 @@ production worker frame、request/reply/status/history/query/SQLx等仍需各自
 完整请求/响应、SessionResources/children、RootOwner/ImportJobs/SQLx、线程、
 production worker frame 与状态历史仍未由此闭合；纹理闭包、Broker/loader、
 同 renderer GPU 首帧及原 A01–A10 的完整验收继续开放。
+
+2026-11-13 r33 控制准入续接：`ImportJobs::reserve` 在单槽忙判定之后、
+status/cancel 构造之前，于同一把 `inner` 锁内调用原账本 `admit_controls`。
+控制费用为 `A(Mutex<JobStatus>) + A(AtomicBool) + len(job_id)`（std repr(C)
+ArcInner 布局公式），只写 inline 标量，不占 64 条 reservation metadata；
+成功与拒绝都不分配账本元数据，拒绝仍只产出静态 `BudgetDiagnostic`。
+`ControlCharge` 声明在 `JobRequest` 字段最后，随真实 request 销毁才归还；
+忙分支保持 r31 的 54B 静态文案，配额拒绝先放锁再构造 `{quota}: {diagnostic}`。
+`BudgetUsage` 新增 `control_prepare_cpu_bytes` / `control_records` 分项并计入
+原 `prepare_cpu_bytes`，advisory projection 同步保留。
+
+worker 线程在 `block_on` 前先构造真实 production future 并用 `size_of_val`
+查询实际 frame 字节，在同一账本准入后显式 `Box::pin`；guard 留在 `block_on`
+外面，worker loop 退出、Box 销毁后才退款。显式 Box 是审计允许的所有权选择，
+阈值以下也会增加一个基线 Box。SVG 准备与字体排空测试改用新增的
+`remaining_prepare_workspace()` 请求剩余未占用上限，`grant` 仍在同一锁内
+原子复核，因此控制与工作区之和可恰好达到原 cap。
+
+本批不声称 typed oneshot/reply、dispatch 返回 id clone、RootOwner/线程/
+runtime/SQLx 初始化所有权、status/history/query/JSON/DB 副本准入，或完整
+closure/Broker/SessionPlan/loader/GPU 首帧。另修复一个前置基线问题：
+`LOCK_SOURCE_SHA` 与 0.3.4 发布提交后的 `Cargo.lock` 不一致（该提交只改第一方
+0.3.3→0.3.4 版本行，依赖图未变），刷新该 fail-closed 常量后 HEAD 才能进入
+`budget::global()`。

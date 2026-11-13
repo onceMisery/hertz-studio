@@ -190,6 +190,40 @@ impl BudgetRequest {
     }
 }
 
+/// Exact requested bytes of the original per-request control objects, admitted
+/// before any status/cancel/reply allocation. `job_id_copy_bytes` is the
+/// status-owned String clone request; the caller's already-owned job-id
+/// capacity and source/model reference strings are additional owners.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct ControlRequest {
+    pub job_id_copy_bytes: u64,
+    pub status_arc_bytes: u64,
+    pub cancel_arc_bytes: u64,
+}
+
+impl ControlRequest {
+    fn checked_total(&self) -> Option<u64> {
+        self.job_id_copy_bytes
+            .checked_add(self.status_arc_bytes)?
+            .checked_add(self.cancel_arc_bytes)
+    }
+}
+
+/// Inline CPU working bytes admitted against the original prepare quota. The
+/// charge is released only when this guard drops; it never owns a reservation
+/// token, so admission itself allocates no ledger metadata.
+#[derive(Debug)]
+pub(crate) struct ControlCharge {
+    budget: Arc<BudgetCoordinator>,
+    bytes: u64,
+}
+
+impl Drop for ControlCharge {
+    fn drop(&mut self) {
+        self.budget.release_controls(self.bytes);
+    }
+}
+
 /// 拒绝明细：哪个配额、占了多少、要多少、上限多少。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BudgetRejection {
@@ -251,6 +285,11 @@ pub(crate) struct BudgetUsage {
     pub asset_cpu_bytes: u64,
     pub gpu_bytes: u64,
     pub prepare_tasks: u32,
+    /// 已事前准入、尚未物理退出的 inline 控制/共享 worker CPU 字节；已计入
+    /// `prepare_cpu_bytes`，这里只是同一账本事实的分项诊断。
+    pub control_prepare_cpu_bytes: u64,
+    /// 上述 inline owner 的当前记录数（不占原 64 条 reservation metadata）。
+    pub control_records: u32,
     /// release 后未 confirm_exit 的 token 数（"某个释放没有确认时保留占用并报告"）。
     pub release_pending: u32,
     pub session_reservations: u32,
@@ -374,6 +413,10 @@ struct Ledger {
     next_token: u64,
     revision: u64,
     coordinator_asset_cpu_bytes: u64,
+    /// Inline control/worker owners admitted before their first allocation.
+    /// This is a scalar, so admission never grows the reservation backing.
+    control_prepare_cpu_bytes: u64,
+    control_records: u32,
     scene_catalog: SceneCatalogCharge,
     composition_catalog: SceneCatalogCharge,
     reservations: Vec<Reservation>,
@@ -412,6 +455,9 @@ impl Ledger {
 
     fn active_usage(&self) -> BudgetUsage {
         let mut usage = self.process_usage();
+        usage.control_prepare_cpu_bytes = self.control_prepare_cpu_bytes;
+        usage.control_records = self.control_records;
+        usage.prepare_cpu_bytes += self.control_prepare_cpu_bytes;
         for reservation in &self.reservations {
             usage.reservation_records += 1;
             usage.resource_records += reservation.children.len() as u32;
@@ -477,6 +523,8 @@ impl BudgetCoordinator {
                 next_token: 1,
                 revision: 1,
                 coordinator_asset_cpu_bytes: 0,
+                control_prepare_cpu_bytes: 0,
+                control_records: 0,
                 scene_catalog: SceneCatalogCharge::Uninitialized,
                 composition_catalog: SceneCatalogCharge::Uninitialized,
                 reservations: Vec::new(),
@@ -530,6 +578,76 @@ impl BudgetCoordinator {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         Self::grant_locked(&mut ledger, request, None)
+    }
+
+    /// Admit exact per-request control bytes before their first allocation.
+    /// The check and the inline booking happen under the same original ledger
+    /// lock; no reservation record, token or rejection String is allocated.
+    pub(crate) fn admit_controls(
+        self: &Arc<Self>,
+        request: ControlRequest,
+    ) -> Result<ControlCharge, BudgetRejection> {
+        let total = request.checked_total().ok_or_else(|| {
+            Ledger::reject(
+                MEMORY_PREPARE_QUOTA,
+                MAX_PREPARE_CPU_BYTES,
+                0,
+                u64::MAX,
+                MEMORY_PREPARE_HINT,
+            )
+        })?;
+        self.admit_working_bytes(total)
+    }
+
+    /// Admit a bounded inline working owner (for example the actual production
+    /// worker frame). It shares the original prepare quota and the same exact
+    /// release lifetime as per-request controls.
+    pub(crate) fn admit_working_bytes(
+        self: &Arc<Self>,
+        bytes: u64,
+    ) -> Result<ControlCharge, BudgetRejection> {
+        let mut ledger = self
+            .ledger
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        Self::check_control(bytes, &ledger.active_usage())?;
+        let Some(next) = ledger.control_prepare_cpu_bytes.checked_add(bytes) else {
+            return Err(Ledger::reject(
+                MEMORY_PREPARE_QUOTA,
+                MAX_PREPARE_CPU_BYTES,
+                0,
+                u64::MAX,
+                MEMORY_PREPARE_HINT,
+            ));
+        };
+        ledger.control_prepare_cpu_bytes = next;
+        ledger.control_records += 1;
+        Ok(ControlCharge {
+            budget: Arc::clone(self),
+            bytes,
+        })
+    }
+
+    fn release_controls(&self, bytes: u64) {
+        let mut ledger = self
+            .ledger
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        debug_assert!(ledger.control_prepare_cpu_bytes >= bytes);
+        debug_assert!(ledger.control_records > 0);
+        ledger.control_prepare_cpu_bytes = ledger.control_prepare_cpu_bytes.saturating_sub(bytes);
+        ledger.control_records = ledger.control_records.saturating_sub(1);
+    }
+
+    /// Remaining original prepare quota after every live inline/ordinary owner.
+    /// Callers may only request at most this unoccupied cap; `grant` still
+    /// rechecks atomically, so this query never grants authority.
+    pub(crate) fn remaining_prepare_cpu_bytes(&self) -> u64 {
+        let ledger = self
+            .ledger
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        MAX_PREPARE_CPU_BYTES.saturating_sub(ledger.active_usage().prepare_cpu_bytes)
     }
 
     /// Read-only eventual replacement projection. Active desktop reservations
