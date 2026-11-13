@@ -1456,7 +1456,7 @@ impl State {
                     .await?;
                 // Remember the accepted operation immediately so completion between UI
                 // polls still changes the observed job identity and invalidates results.
-                self.layout_inspections.begin_import(job.clone());
+                self.layout_inspections.begin_import(job.to_string());
                 json!({"jobId":job})
             }
             Command::JobsGet { job_id } => {

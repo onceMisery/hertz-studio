@@ -739,9 +739,9 @@ fn font_cancel_during_terminal_database_await_records_cancelled_before_typed_rep
     let id = new_job_id();
     let mut request = env
         .jobs
-        .reserve(id.clone(), JobSource::PrepareFont(prepare), None)
+        .reserve(id.clone(), JobSource::PrepareFont(prepare), None, 0)
         .unwrap();
-    let (font_reply, mut reply) = tokio::sync::oneshot::channel();
+    let (font_reply, mut reply) = env.jobs.attach_reply_for_test(&mut request);
     let (pending_tx, pending) = std::sync::mpsc::channel();
     request.font_reply = Some(FontPrepareReply::Single(font_reply));
     request.terminal_pending = Some(pending_tx);
@@ -869,9 +869,9 @@ fn font_group_cancel_during_terminal_database_wait_keeps_slot_until_cancelled_re
     let id = new_job_id();
     let mut request = env
         .jobs
-        .reserve(id.clone(), JobSource::PrepareFontGroup(group), None)
+        .reserve(id.clone(), JobSource::PrepareFontGroup(group), None, 0)
         .unwrap();
-    let (reply, mut receive) = tokio::sync::oneshot::channel();
+    let (reply, mut receive) = env.jobs.attach_reply_for_test(&mut request);
     let (pending_tx, pending) = std::sync::mpsc::channel();
     request.font_reply = Some(FontPrepareReply::Group(reply));
     request.terminal_pending = Some(pending_tx);
@@ -975,9 +975,9 @@ fn font_group_cancel_at_inspection_checkpoint_finishes_workspace_before_terminal
     let id = new_job_id();
     let mut request = env
         .jobs
-        .reserve(id.clone(), JobSource::PrepareFontGroup(group), None)
+        .reserve(id.clone(), JobSource::PrepareFontGroup(group), None, 0)
         .unwrap();
-    let (reply, receive) = tokio::sync::oneshot::channel();
+    let (reply, receive) = env.jobs.attach_reply_for_test(&mut request);
     request.font_reply = Some(FontPrepareReply::Group(reply));
     request.inspection_checkpoint = Some(|cancel| cancel.store(true, Ordering::Release));
     env.jobs.dispatch(request).unwrap();
@@ -2955,7 +2955,7 @@ fn busy_reservation_rejects_before_constructing_status_or_cancel_controls() {
     let before_history = env.jobs.inner.lock().expect("job inner").history.len();
     let job_id = new_job_id();
     let source = JobSource::Import(ImportSource::Path(env.source.clone()));
-    let (result, sample) = measure_requested_heap(|| env.jobs.reserve(job_id, source, None));
+    let (result, sample) = measure_requested_heap(|| env.jobs.reserve(job_id, source, None, 0));
     assert!(!sample.overflow);
     // 唯一允许的分配就是 budget_busy 原文案本身，不含任何控制对象。
     assert_eq!(sample.peak, R31_BUSY_DIAGNOSTIC.len());
@@ -3064,6 +3064,7 @@ fn idle_reservation_still_constructs_controls_and_commits_the_slot() {
             job_id.clone(),
             JobSource::Import(ImportSource::Path(env.source.clone())),
             None,
+            0,
         )
         .unwrap();
     assert_eq!(request.generation, generation);
@@ -3091,7 +3092,7 @@ fn invalid_job_id_rejects_before_generation_slot_or_control_construction() {
     let before = env.jobs.generation.load(Ordering::Relaxed);
     let bad_id = String::from("bad/id");
     let source = JobSource::Import(ImportSource::Path(env.source.clone()));
-    let (result, sample) = measure_requested_heap(|| env.jobs.reserve(bad_id, source, None));
+    let (result, sample) = measure_requested_heap(|| env.jobs.reserve(bad_id, source, None, 0));
     assert!(!sample.overflow);
     // 与 busy 同法：独立字面量同时钉住长度与内容。
     assert_eq!(sample.peak, R31_INVALID_ID_DIAGNOSTIC.len());
@@ -3138,7 +3139,7 @@ fn assert_only_worker_frame(budget: &super::super::budget::BudgetCoordinator) {
 fn reserved_slot_drop_clears_only_the_matching_request_and_disarm_keeps_it() {
     let env = env("job-r33-reserved-slot");
     let source = || JobSource::Import(ImportSource::Path(env.source.clone()));
-    let request = env.jobs.reserve(new_job_id(), source(), None).unwrap();
+    let request = env.jobs.reserve(new_job_id(), source(), None, 0).unwrap();
     let foreign_status = Arc::new(Mutex::new(JobStatus {
         job_id: "foreign".into(),
         state: JobState::Queued,
@@ -3156,7 +3157,7 @@ fn reserved_slot_drop_clears_only_the_matching_request_and_disarm_keeps_it() {
     assert!(env.jobs.active_status().is_none());
     drop(request);
 
-    let kept = env.jobs.reserve(new_job_id(), source(), None).unwrap();
+    let kept = env.jobs.reserve(new_job_id(), source(), None, 0).unwrap();
     let mut slot = ReservedSlot::new(&env.jobs.inner, &kept.status);
     slot.disarm();
     drop(slot);
@@ -3235,6 +3236,7 @@ fn idle_reservation_admits_exact_control_bytes_before_constructing_them() {
             job_id,
             JobSource::Import(ImportSource::Path(env.source.clone())),
             None,
+            0,
         )
         .unwrap();
     let held = budget.usage();
@@ -3273,7 +3275,7 @@ fn saturated_prepare_quota_rejects_before_status_or_cancel_construction() {
     let source = JobSource::Import(ImportSource::Path(env.source.clone()));
     let error = env
         .jobs
-        .reserve(job_id, source, None)
+        .reserve(job_id, source, None, 0)
         .err()
         .expect("saturated prepare quota must reject control admission");
     assert_eq!(error.code, "budget_busy");
@@ -3389,4 +3391,243 @@ fn production_worker_frame_is_admitted_before_block_on_and_released_at_exit() {
         std::thread::yield_now();
     }
     assert_eq!(budget.usage().control_prepare_cpu_bytes, 0);
+}
+
+// r34: dispatch 返回的 id 副本与 typed reply 都由真实 owner 持有事前准入费用；
+// 下面的字节数量全部用独立公式复写，生产公式变化会让断言变红。
+
+fn hold_prepare_bytes(
+    budget: &crate::wallpaper::budget::BudgetCoordinator,
+    bytes: u64,
+) -> (u64, String) {
+    use crate::wallpaper::budget::{BudgetRequest, OwnerKind};
+    let session = "r34-limited-hold".to_owned();
+    let request = BudgetRequest {
+        owner: OwnerKind::Probe,
+        session: session.clone(),
+        generation: 1,
+        task_id: "hold".into(),
+        targets: 0,
+        contexts: 0,
+        decoders: 0,
+        transcode_slots: 0,
+        decode_pixel_rate: 0,
+        output_pixel_rate: 0,
+        texture_upload_bytes_per_second: 0,
+        cpu_bytes: 0,
+        prepare_cpu_bytes: bytes,
+        asset_cpu_bytes: 0,
+        gpu_bytes: 0,
+        prepare_tasks: 0,
+    };
+    (budget.grant(&request).unwrap(), session)
+}
+
+#[test]
+fn dispatch_admits_the_returned_id_copy_until_the_handle_drops() {
+    let mut env = env("job-r34-id-lease");
+    let budget = Arc::clone(&env.jobs.budget);
+    wait_for_inline_control_records(&budget, 1);
+    let (tx, rx) = tokio::sync::mpsc::channel::<JobRequest>(1);
+    // 换掉 sender 会让原 worker 退出并归还 frame；先等基线稳定。
+    env.jobs.submit_tx = tx;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while budget.usage().control_records != 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "replaced worker did not release its frame"
+        );
+        std::thread::yield_now();
+    }
+    let before = budget.usage();
+    assert_eq!(before, Default::default());
+    let job_id = new_job_id();
+    let request = env
+        .jobs
+        .reserve(
+            job_id.clone(),
+            JobSource::Import(ImportSource::Path(env.source.clone())),
+            None,
+            0,
+        )
+        .unwrap();
+    let control = control_requested_bytes_for_test(&job_id);
+    let returned = env.jobs.dispatch(request).unwrap();
+    assert_eq!(returned.as_ref(), job_id);
+    assert_eq!(
+        serde_json::to_value(&returned).unwrap(),
+        serde_json::json!(job_id.clone())
+    );
+    let held = budget.usage();
+    assert_eq!(held.control_records, before.control_records + 2);
+    assert_eq!(
+        held.control_prepare_cpu_bytes - before.control_prepare_cpu_bytes,
+        control + u64::try_from(job_id.len()).unwrap()
+    );
+    drop(returned);
+    let after_id = budget.usage();
+    assert_eq!(
+        after_id.control_prepare_cpu_bytes,
+        before.control_prepare_cpu_bytes + control,
+        "JobId 销毁必须精确归还自身 id 副本"
+    );
+    assert_eq!(after_id.control_records, before.control_records + 1);
+    assert_eq!(env.jobs.active_status().unwrap().job_id, job_id);
+    // 队列中的 request 仍持有单槽与控制费用；清槽后销毁它回到 frame-only。
+    env.jobs.inner.lock().expect("job inner").current = None;
+    drop(rx);
+    assert_eq!(budget.usage(), before);
+}
+
+#[test]
+fn reply_admission_rejection_refunds_control_and_never_commits_the_slot() {
+    use crate::wallpaper::budget::MAX_PREPARE_CPU_BYTES;
+
+    let env = env("job-r34-reply-quota");
+    let budget = Arc::clone(&env.jobs.budget);
+    wait_for_inline_control_records(&budget, 1);
+    let job_id = new_job_id();
+    let control = control_requested_bytes_for_test(&job_id);
+    let reply = super::reply_lease_bytes::<Result<PreparedFont, JobError>>();
+    let usage = budget.usage();
+    let free = MAX_PREPARE_CPU_BYTES - usage.prepare_cpu_bytes;
+    // 留出恰好 control + reply - 1：控制准入成功、回执准入失败。
+    let (token, session) = hold_prepare_bytes(&budget, free - (control + reply) + 1);
+    let before = budget.usage();
+    let generation = env.jobs.generation.load(Ordering::Relaxed);
+    let error = env
+        .jobs
+        .reserve(
+            job_id,
+            JobSource::Import(ImportSource::Path(env.source.clone())),
+            None,
+            reply,
+        )
+        .err()
+        .expect("reply admission must fail at the original prepare quota");
+    assert_eq!(error.code, "budget_busy");
+    assert!(
+        error
+            .message
+            .starts_with("prepare_cpu_bytes: prepare_cpu_bytes 超限："),
+        "{}",
+        error.message
+    );
+    assert_eq!(budget.usage(), before, "失败路径必须先归还已准入的控制费用");
+    assert_eq!(
+        env.jobs.generation.load(Ordering::Relaxed),
+        generation + 1,
+        "原语义：每次 reserve 调用都消耗一个代际"
+    );
+    assert!(
+        env.jobs.inner.lock().expect("job inner").current.is_none(),
+        "回执准入失败不得提交半占用槽"
+    );
+    budget.release(token, &session, 1).unwrap();
+    budget.confirm_exit(token, &session, 1).unwrap();
+}
+
+#[test]
+fn typed_reply_lease_is_shared_by_sender_and_receiver_in_either_drop_order() {
+    let env = env("job-r34-reply-lease");
+    let budget = Arc::clone(&env.jobs.budget);
+    wait_for_inline_control_records(&budget, 1);
+    let before = budget.usage();
+    let reply = super::reply_lease_bytes::<Result<PreparedFont, JobError>>();
+    let source = || JobSource::Import(ImportSource::Path(env.source.clone()));
+
+    // sender-first：request 先销毁，receiver 单独保留共享费用。
+    let first = new_job_id();
+    let first_control = control_requested_bytes_for_test(&first);
+    let mut request = env.jobs.reserve(first, source(), None, 0).unwrap();
+    let (sender, receiver) = env.jobs.attach_reply_for_test(&mut request);
+    request.font_reply = Some(FontPrepareReply::Single(sender));
+    let charged = budget.usage();
+    assert_eq!(charged.control_records, before.control_records + 2);
+    assert_eq!(
+        charged.control_prepare_cpu_bytes - before.control_prepare_cpu_bytes,
+        first_control + reply
+    );
+    env.jobs.inner.lock().expect("job inner").current = None;
+    drop(request);
+    let retained = budget.usage();
+    assert_eq!(
+        retained.control_prepare_cpu_bytes,
+        before.control_prepare_cpu_bytes + reply,
+        "sender 销毁后 receiver 必须继续持有共享费用"
+    );
+    assert_eq!(retained.control_records, before.control_records + 1);
+    drop(receiver);
+    assert_eq!(budget.usage(), before);
+
+    // receiver-first：receiver 先销毁不退款，sender 仍持有共享费用。
+    let second = new_job_id();
+    let second_control = control_requested_bytes_for_test(&second);
+    let mut request = env.jobs.reserve(second, source(), None, 0).unwrap();
+    let (sender, receiver) = env.jobs.attach_reply_for_test(&mut request);
+    request.font_reply = Some(FontPrepareReply::Single(sender));
+    let charged = budget.usage();
+    assert_eq!(
+        charged.control_prepare_cpu_bytes - before.control_prepare_cpu_bytes,
+        second_control + reply
+    );
+    drop(receiver);
+    let retained = budget.usage();
+    assert_eq!(
+        retained.control_prepare_cpu_bytes,
+        before.control_prepare_cpu_bytes + second_control + reply,
+        "receiver 销毁不得提前退还 sender 仍持有的费用"
+    );
+    assert_eq!(retained.control_records, before.control_records + 2);
+    env.jobs.inner.lock().expect("job inner").current = None;
+    drop(request);
+    assert_eq!(budget.usage(), before);
+}
+
+#[test]
+fn typed_reply_bounds_cover_actual_oneshot_and_shared_arc_requests() {
+    use crate::wallpaper::budget::measure_requested_heap;
+
+    fn witness<T>(label: &str) {
+        let ((sender, receiver), sample) =
+            measure_requested_heap(|| tokio::sync::oneshot::channel::<T>());
+        assert!(!sample.overflow, "{label}");
+        assert_eq!(sample.peak, sample.retained, "{label}");
+        assert!(
+            u64::try_from(sample.retained).unwrap() <= super::reply_bytes::<T>(),
+            "{label}: actual {} exceeds conservative bound {}",
+            sample.retained,
+            super::reply_bytes::<T>()
+        );
+        println!(
+            "typed reply {label} oneshot_requested={} conservative_bound={}",
+            sample.retained,
+            super::reply_bytes::<T>()
+        );
+        drop(sender);
+        drop(receiver);
+    }
+    witness::<Result<super::super::target_planner::ResolvedMedia, JobError>>("svg");
+    witness::<Result<PreparedFont, JobError>>("single-font");
+    witness::<Result<BTreeMap<String, PreparedFont>, JobError>>("font-group");
+    witness::<Result<super::super::assets::CanonicalModelSource, JobError>>("model-source");
+    witness::<
+        Result<
+            super::super::model_prepare::ModelInput,
+            super::super::model_prepare::ModelPreparationError,
+        >,
+    >("model-input");
+
+    // 共享 lease 的 `Arc::new` 请求字节必须恰为费用公式中的那一次分配。
+    let budget = Arc::new(crate::wallpaper::budget::BudgetCoordinator::new());
+    let (lease, sample) =
+        measure_requested_heap(|| Arc::new(budget.admit_working_bytes(0).unwrap()));
+    assert!(!sample.overflow);
+    assert_eq!(
+        u64::try_from(sample.retained).unwrap(),
+        crate::root_owner::arc_allocation_bytes::<crate::wallpaper::budget::ControlCharge>()
+            .unwrap()
+    );
+    drop(lease);
+    assert_eq!(budget.usage(), Default::default());
 }

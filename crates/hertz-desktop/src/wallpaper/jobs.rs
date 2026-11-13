@@ -9,9 +9,13 @@
 //! generation，待真实 I/O/解码退出才归还槽，不能提前接受第二个大任务」）。
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
+use std::ops::Deref;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -104,6 +108,95 @@ pub struct JobStatus {
     pub generation: u64,
 }
 
+/// 已受理任务的返回句柄。id 副本在 clone 前已准入，费用随最后一次销毁退出；
+/// 刻意不实现 `Clone`，调用方需要第二个 `String` 时必须自行准入。
+pub struct JobId {
+    id: String,
+    _lease: ControlCharge,
+}
+
+impl JobId {
+    fn new(id: String, lease: ControlCharge) -> Self {
+        Self { id, _lease: lease }
+    }
+}
+
+impl Deref for JobId {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.id
+    }
+}
+
+impl AsRef<str> for JobId {
+    fn as_ref(&self) -> &str {
+        &self.id
+    }
+}
+
+impl fmt::Display for JobId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.id)
+    }
+}
+
+impl fmt::Debug for JobId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.debug_tuple("JobId").field(&self.id).finish()
+    }
+}
+
+impl Serialize for JobId {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.id)
+    }
+}
+
+impl PartialEq for JobId {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+
+impl Eq for JobId {}
+
+impl PartialEq<str> for JobId {
+    fn eq(&self, other: &str) -> bool {
+        self.id == other
+    }
+}
+
+impl PartialEq<&str> for JobId {
+    fn eq(&self, other: &&str) -> bool {
+        self.id == *other
+    }
+}
+
+impl PartialEq<String> for JobId {
+    fn eq(&self, other: &String) -> bool {
+        self.id == *other
+    }
+}
+
+impl PartialEq<JobId> for str {
+    fn eq(&self, other: &JobId) -> bool {
+        self == other.id
+    }
+}
+
+impl PartialEq<JobId> for &str {
+    fn eq(&self, other: &JobId) -> bool {
+        *self == other.id
+    }
+}
+
+impl PartialEq<JobId> for String {
+    fn eq(&self, other: &JobId) -> bool {
+        *self == other.id
+    }
+}
+
 struct ActiveJob {
     status: Arc<Mutex<JobStatus>>,
     cancel: Arc<AtomicBool>,
@@ -193,6 +286,9 @@ struct JobRequest {
     inspection_checkpoint: Option<fn(&AtomicBool)>,
     #[cfg(test)]
     model_source_ready: Option<(std::sync::mpsc::Sender<()>, Arc<tokio::sync::Notify>)>,
+    /// Typed reply 的事前准入费用；`prepare_*` 在创建 channel 前取走并转成
+    /// sender/receiver 共享的 `Arc<ControlCharge>`。
+    reply_charge: Option<ControlCharge>,
     /// Declared last so status/cancel/job-id are destroyed before the ledger
     /// refund. The single slot is cleared before the worker drops this request.
     control_charge: ControlCharge,
@@ -278,24 +374,72 @@ pub(crate) struct SvgPrepareRequest {
     pub target: super::image_prepare::ImageTarget,
     pub usage: String,
 }
+
+/// 保守上界：Tokio `oneshot::channel::<T>()` 的私有 `Inner<T>` 布局不是 ABI
+/// 定理；本值由两个工具链上的实际分配 witness 复核（只许放宽，不许缩小）。
+fn reply_bytes<T>() -> u64 {
+    let bytes = std::mem::size_of::<Option<T>>()
+        .saturating_add(std::mem::size_of::<std::task::Waker>().saturating_mul(2))
+        .saturating_add(64);
+    u64::try_from(bytes).unwrap_or(u64::MAX)
+}
+
+/// typed reply 的总准入字节：oneshot channel 本身加上共享
+/// `Arc<ControlCharge>` 的那一次分配。
+fn reply_lease_bytes<T>() -> u64 {
+    reply_bytes::<T>().saturating_add(arc_allocation_bytes::<ControlCharge>().unwrap_or(u64::MAX))
+}
+
+/// sender 与 receiver 共享同一份已准入费用；只有两端都销毁才退款。
+struct ReplySender<T> {
+    sender: tokio::sync::oneshot::Sender<T>,
+    _lease: Arc<ControlCharge>,
+}
+
+impl<T> ReplySender<T> {
+    fn send(self, value: T) -> Result<(), T> {
+        self.sender.send(value)
+    }
+}
+
+/// 完成回执的接收端包装：poll 委托原 oneshot，费用随最后一个 owner 退出。
+pub(crate) struct LeasedReceiver<T> {
+    receiver: tokio::sync::oneshot::Receiver<T>,
+    _lease: Arc<ControlCharge>,
+}
+
+impl<T> LeasedReceiver<T> {
+    pub(crate) fn try_recv(&mut self) -> Result<T, tokio::sync::oneshot::error::TryRecvError> {
+        self.receiver.try_recv()
+    }
+}
+
+impl<T> std::future::Future for LeasedReceiver<T> {
+    type Output = Result<T, tokio::sync::oneshot::error::RecvError>;
+
+    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        // Receiver<T> 与 Arc 都是 Unpin；投影后原样委托原 future。
+        let this = self.get_mut();
+        Pin::new(&mut this.receiver).poll(context)
+    }
+}
+
 enum FontPrepareReply {
     ModelInput(
-        tokio::sync::oneshot::Sender<
+        ReplySender<
             Result<super::model_prepare::ModelInput, super::model_prepare::ModelPreparationError>,
         >,
     ),
-    ModelSource(
-        tokio::sync::oneshot::Sender<Result<super::assets::CanonicalModelSource, JobError>>,
-    ),
-    Svg(tokio::sync::oneshot::Sender<Result<super::target_planner::ResolvedMedia, JobError>>),
-    Single(tokio::sync::oneshot::Sender<Result<PreparedFont, JobError>>),
-    Group(tokio::sync::oneshot::Sender<Result<BTreeMap<String, PreparedFont>, JobError>>),
+    ModelSource(ReplySender<Result<super::assets::CanonicalModelSource, JobError>>),
+    Svg(ReplySender<Result<super::target_planner::ResolvedMedia, JobError>>),
+    Single(ReplySender<Result<PreparedFont, JobError>>),
+    Group(ReplySender<Result<BTreeMap<String, PreparedFont>, JobError>>),
 }
 
-type FontPrepareCompletion<T> = (String, tokio::sync::oneshot::Receiver<Result<T, JobError>>);
+type FontPrepareCompletion<T> = (JobId, LeasedReceiver<Result<T, JobError>>);
 type ModelInputCompletion = (
-    String,
-    tokio::sync::oneshot::Receiver<
+    JobId,
+    LeasedReceiver<
         Result<super::model_prepare::ModelInput, super::model_prepare::ModelPreparationError>,
     >,
 );
@@ -440,7 +584,7 @@ impl ImportJobs {
     /// 受理一个导入。只接受源路径由本机文件对话框产生（fileToken 的解析在
     /// P1-05 管理层；内核层只见本进程拥有的路径）。
     /// 槽占用返回 `budget_busy`；受理立即返回 jobId（§7.1）。
-    pub fn submit(&self, job_id: String, source: PathBuf) -> Result<String, JobError> {
+    pub fn submit(&self, job_id: String, source: PathBuf) -> Result<JobId, JobError> {
         self.submit_for_target(job_id, source, None)
     }
 
@@ -450,7 +594,7 @@ impl ImportJobs {
         job_id: String,
         source: PathBuf,
         target: Option<super::image_prepare::ImageTarget>,
-    ) -> Result<String, JobError> {
+    ) -> Result<JobId, JobError> {
         super::image_prepare::validate_target(target)?;
         if !source.is_file() {
             return Err(JobError::invalid_input(format!(
@@ -471,7 +615,7 @@ impl ImportJobs {
         job_id: String,
         file: super::file_tokens::SelectedFile,
         identity: ImportIdentity,
-    ) -> Result<String, JobError> {
+    ) -> Result<JobId, JobError> {
         if let Some(existing) = self.library.import_operation(&identity.request_id).await? {
             if existing.payload_digest != identity.payload_digest {
                 return Err(JobError::new(
@@ -479,14 +623,41 @@ impl ImportJobs {
                     "相同请求 id 对应另一份输入",
                 ));
             }
-            return Ok(existing.job_id);
+            let bytes = u64::try_from(existing.job_id.len()).unwrap_or(u64::MAX);
+            let lease = self
+                .budget
+                .admit_working_bytes(bytes)
+                .map_err(|rejection| {
+                    JobError::new(
+                        "budget_busy",
+                        format!("{}: {}", rejection.quota, rejection.message),
+                    )
+                })?;
+            return Ok(JobId::new(existing.job_id, lease));
         }
-        let request = self.reserve(job_id, JobSource::Import(ImportSource::Pinned(file)), None)?;
+        let request = self.reserve(
+            job_id,
+            JobSource::Import(ImportSource::Pinned(file)),
+            None,
+            0,
+        )?;
         let mut slot = ReservedSlot::new(&self.inner, &request.status);
         let status = request.status.lock().expect("status").clone();
         let accepted = self.library.accept_import(&status, &identity).await;
         match accepted {
             Ok(accepted) if accepted == request.job_id => {
+                // 错误回执路径的第二个 id 副本同样在 clone 前准入；guard 持有到
+                // 函数结束。准入失败时 ReservedSlot 仍处于 armed，随 ? 清槽。
+                let bytes = u64::try_from(request.job_id.len()).unwrap_or(u64::MAX);
+                let _id_lease = self
+                    .budget
+                    .admit_working_bytes(bytes)
+                    .map_err(|rejection| {
+                        JobError::new(
+                            "budget_busy",
+                            format!("{}: {}", rejection.quota, rejection.message),
+                        )
+                    })?;
                 slot.disarm();
                 let job_id = request.job_id.clone();
                 let result = self.dispatch(request);
@@ -508,7 +679,19 @@ impl ImportJobs {
             }
             result => {
                 drop(slot);
-                result
+                let accepted = result?;
+                // 并发重试命中已有请求：返回的既有 id 也在交付前准入。
+                let bytes = u64::try_from(accepted.len()).unwrap_or(u64::MAX);
+                let lease = self
+                    .budget
+                    .admit_working_bytes(bytes)
+                    .map_err(|rejection| {
+                        JobError::new(
+                            "budget_busy",
+                            format!("{}: {}", rejection.quota, rejection.message),
+                        )
+                    })?;
+                Ok(JobId::new(accepted, lease))
             }
         }
     }
@@ -518,7 +701,7 @@ impl ImportJobs {
         &self,
         job_id: String,
         request: super::target_planner::PrepareRequest,
-    ) -> Result<String, JobError> {
+    ) -> Result<JobId, JobError> {
         request.reference.validate()?;
         super::image_prepare::validate_target(Some(request.target))?;
         let target = request.target;
@@ -538,8 +721,13 @@ impl ImportJobs {
         {
             return Err(JobError::invalid_input("SVG 准备引用或 usage 无效"));
         }
-        let mut request = self.reserve(job_id, JobSource::PrepareSvg(prepare), None)?;
-        let (reply, receive) = tokio::sync::oneshot::channel();
+        let mut request = self.reserve(
+            job_id,
+            JobSource::PrepareSvg(prepare),
+            None,
+            reply_lease_bytes::<Result<super::target_planner::ResolvedMedia, JobError>>(),
+        )?;
+        let (reply, receive) = self.reply_channel(&mut request);
         request.font_reply = Some(FontPrepareReply::Svg(reply));
         self.dispatch(request).map(|id| (id, receive))
     }
@@ -549,8 +737,13 @@ impl ImportJobs {
         request: FontPrepareRequest,
     ) -> Result<FontPrepareCompletion<PreparedFont>, JobError> {
         request.reference.validate()?;
-        let mut request = self.reserve(job_id, JobSource::PrepareFont(request), None)?;
-        let (reply, receive) = tokio::sync::oneshot::channel();
+        let mut request = self.reserve(
+            job_id,
+            JobSource::PrepareFont(request),
+            None,
+            reply_lease_bytes::<Result<PreparedFont, JobError>>(),
+        )?;
+        let (reply, receive) = self.reply_channel(&mut request);
         request.font_reply = Some(FontPrepareReply::Single(reply));
         self.dispatch(request).map(|job_id| (job_id, receive))
     }
@@ -563,8 +756,13 @@ impl ImportJobs {
         reference: AssetRef,
     ) -> Result<FontPrepareCompletion<super::assets::CanonicalModelSource>, JobError> {
         reference.validate()?;
-        let mut request = self.reserve(job_id, JobSource::PrepareModelSource(reference), None)?;
-        let (reply, receive) = tokio::sync::oneshot::channel();
+        let mut request = self.reserve(
+            job_id,
+            JobSource::PrepareModelSource(reference),
+            None,
+            reply_lease_bytes::<Result<super::assets::CanonicalModelSource, JobError>>(),
+        )?;
+        let (reply, receive) = self.reply_channel(&mut request);
         request.font_reply = Some(FontPrepareReply::ModelSource(reply));
         self.dispatch(request).map(|id| (id, receive))
     }
@@ -577,8 +775,18 @@ impl ImportJobs {
         reference: AssetRef,
     ) -> Result<ModelInputCompletion, JobError> {
         reference.validate()?;
-        let mut request = self.reserve(job_id, JobSource::PrepareModelInput(reference), None)?;
-        let (reply, receive) = tokio::sync::oneshot::channel();
+        let mut request = self.reserve(
+            job_id,
+            JobSource::PrepareModelInput(reference),
+            None,
+            reply_lease_bytes::<
+                Result<
+                    super::model_prepare::ModelInput,
+                    super::model_prepare::ModelPreparationError,
+                >,
+            >(),
+        )?;
+        let (reply, receive) = self.reply_channel(&mut request);
         request.font_reply = Some(FontPrepareReply::ModelInput(reply));
         self.dispatch(request).map(|id| (id, receive))
     }
@@ -591,10 +799,54 @@ impl ImportJobs {
         request: FontGroupPrepareRequest,
     ) -> Result<FontPrepareCompletion<BTreeMap<String, PreparedFont>>, JobError> {
         request.validate()?;
-        let mut request = self.reserve(job_id, JobSource::PrepareFontGroup(request), None)?;
-        let (reply, receive) = tokio::sync::oneshot::channel();
+        let mut request = self.reserve(
+            job_id,
+            JobSource::PrepareFontGroup(request),
+            None,
+            reply_lease_bytes::<Result<BTreeMap<String, PreparedFont>, JobError>>(),
+        )?;
+        let (reply, receive) = self.reply_channel(&mut request);
         request.font_reply = Some(FontPrepareReply::Group(reply));
         self.dispatch(request).map(|job_id| (job_id, receive))
+    }
+
+    /// 共享费用的 typed reply channel：`reserve` 已事前准入，channel 创建前
+    /// 只做 `Arc` 包装；sender/receiver 各持一份，最后销毁者退款。
+    fn reply_channel<T>(&self, request: &mut JobRequest) -> (ReplySender<T>, LeasedReceiver<T>) {
+        let charge = request
+            .reply_charge
+            .take()
+            .expect("typed reply admission precedes the original oneshot channel");
+        let lease = Arc::new(charge);
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        (
+            ReplySender {
+                sender,
+                _lease: Arc::clone(&lease),
+            },
+            LeasedReceiver {
+                receiver,
+                _lease: lease,
+            },
+        )
+    }
+
+    /// 测试用：held request 直接构造 `JobRequest`，回执仍走生产准入/包装。
+    #[cfg(test)]
+    fn attach_reply_for_test<T>(
+        &self,
+        request: &mut JobRequest,
+    ) -> (ReplySender<T>, LeasedReceiver<T>) {
+        assert!(
+            request.reply_charge.is_none(),
+            "one typed reply per held request"
+        );
+        let charge = self
+            .budget
+            .admit_working_bytes(reply_lease_bytes::<T>())
+            .expect("held reply must fit the original prepare quota");
+        request.reply_charge = Some(charge);
+        self.reply_channel(request)
     }
 
     fn enqueue(
@@ -602,8 +854,8 @@ impl ImportJobs {
         job_id: String,
         source: JobSource,
         target: Option<super::image_prepare::ImageTarget>,
-    ) -> Result<String, JobError> {
-        let request = self.reserve(job_id, source, target)?;
+    ) -> Result<JobId, JobError> {
+        let request = self.reserve(job_id, source, target, 0)?;
         self.dispatch(request)
     }
 
@@ -612,6 +864,7 @@ impl ImportJobs {
         job_id: String,
         source: JobSource,
         target: Option<super::image_prepare::ImageTarget>,
+        reply_bytes: u64,
     ) -> Result<JobRequest, JobError> {
         if job_id.is_empty()
             || job_id.len() > 64
@@ -628,10 +881,10 @@ impl ImportJobs {
             status_arc_bytes: arc_allocation_bytes::<Mutex<JobStatus>>().unwrap_or(u64::MAX),
             cancel_arc_bytes: arc_allocation_bytes::<AtomicBool>().unwrap_or(u64::MAX),
         };
-        // 单槽判定、控制准入与 status/cancel 构造在同一把 inner 锁内完成：
+        // 单槽判定、控制/回执准入与 status/cancel 构造在同一把 inner 锁内完成：
         // 忙时只产出原静态错误；准入被拒时也不构造任何控制对象。
         // 锁顺序固定 inner → budget（全仓无反向路径）。
-        let (status, cancel, control_charge) = {
+        let (status, cancel, reply_charge, control_charge) = {
             let mut guard = self.inner.lock().expect("job inner");
             if guard.current.is_some() {
                 // 拒绝路径不在单槽锁内构造错误文字；判定完成后立即放锁。
@@ -649,6 +902,23 @@ impl ImportJobs {
                     ));
                 }
             };
+            // typed reply 在提交槽与创建 channel 之前准入；失败时先归还已准入
+            // 的控制费用，再放锁返回原 budget_busy 文案。
+            let reply_charge = if reply_bytes == 0 {
+                None
+            } else {
+                match self.budget.admit_working_bytes(reply_bytes) {
+                    Ok(charge) => Some(charge),
+                    Err(rejection) => {
+                        drop(control_charge);
+                        drop(guard);
+                        return Err(JobError::new(
+                            "budget_busy",
+                            format!("{}: {}", rejection.quota, rejection.message),
+                        ));
+                    }
+                }
+            };
             let status = Arc::new(Mutex::new(JobStatus {
                 job_id: job_id.clone(),
                 state: JobState::Queued,
@@ -662,7 +932,7 @@ impl ImportJobs {
                 status: status.clone(),
                 cancel: cancel.clone(),
             });
-            (status, cancel, control_charge)
+            (status, cancel, reply_charge, control_charge)
         };
         Ok(JobRequest {
             job_id,
@@ -678,11 +948,25 @@ impl ImportJobs {
             inspection_checkpoint: None,
             #[cfg(test)]
             model_source_ready: None,
+            reply_charge,
             control_charge,
         })
     }
 
-    fn dispatch(&self, request: JobRequest) -> Result<String, JobError> {
+    fn dispatch(&self, request: JobRequest) -> Result<JobId, JobError> {
+        // 返回 id 的副本在 clone 前准入；拒绝对本请求单槽用同一 guard 清回。
+        let id_bytes = u64::try_from(request.job_id.len()).unwrap_or(u64::MAX);
+        let lease = match self.budget.admit_working_bytes(id_bytes) {
+            Ok(lease) => lease,
+            Err(rejection) => {
+                drop(ReservedSlot::new(&self.inner, &request.status));
+                drop(request);
+                return Err(JobError::new(
+                    "budget_busy",
+                    format!("{}: {}", rejection.quota, rejection.message),
+                ));
+            }
+        };
         let job_id = request.job_id.clone();
         // 槽已在 inner 标记占用；若 worker 已死导致投递失败，这里同步归还槽。
         if let Err(error) = self.submit_tx.try_send(request) {
@@ -696,7 +980,7 @@ impl ImportJobs {
             guard.current = None;
             return Err(JobError::new("worker_unavailable", "导入工作线程不可用"));
         }
-        Ok(job_id)
+        Ok(JobId::new(job_id, lease))
     }
 
     /// 取消当前任务：只置取消代际；真实 I/O 退出后才还槽（§7.1）。
