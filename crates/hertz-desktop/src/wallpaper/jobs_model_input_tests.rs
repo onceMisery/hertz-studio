@@ -89,19 +89,20 @@ fn drained(env: &Env, id: &str, state: JobState) {
     assert_eq!(env.probe.stats(), (0, 0));
     let budget = env.probe.budget_for_test();
     let frame = super::worker_frame_bytes_for_test();
+    let expected = super::startup_owner_bytes() + frame;
     assert!(frame > 0, "worker frame was never admitted");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
         let usage = budget.usage();
-        if usage.control_records == 1 && usage.control_prepare_cpu_bytes == frame {
-            assert_eq!(usage.prepare_cpu_bytes, frame);
+        if usage.control_records == 2 && usage.control_prepare_cpu_bytes == expected {
+            assert_eq!(usage.prepare_cpu_bytes, expected);
             assert_eq!(usage.asset_cpu_bytes, 0);
             assert_eq!(usage.prepare_tasks, 0);
             break;
         }
         assert!(
             std::time::Instant::now() < deadline,
-            "worker frame-only baseline not reached: {usage:?}"
+            "shared startup + frame baseline not reached: {usage:?}"
         );
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
@@ -412,7 +413,9 @@ fn original_error_guard_survives_actual_database_wait_and_lost_receiver() {
     ));
     block_on(transaction.commit()).unwrap();
     for _ in 0..100 {
-        if env.probe.budget_for_test().usage().prepare_cpu_bytes == 0 {
+        if env.probe.budget_for_test().usage().prepare_cpu_bytes
+            == super::startup_owner_bytes() + super::worker_frame_bytes_for_test()
+        {
             break;
         }
         std::thread::sleep(Duration::from_millis(10));
@@ -509,7 +512,8 @@ fn original_no_reply_drops_whole_model_error_before_finishing_held_w() {
     release.notify_one();
     for _ in 0..100 {
         if env.jobs.active_status().is_none()
-            && env.probe.budget_for_test().usage().prepare_cpu_bytes == 0
+            && env.probe.budget_for_test().usage().prepare_cpu_bytes
+                == super::startup_owner_bytes() + super::worker_frame_bytes_for_test()
         {
             break;
         }
@@ -524,6 +528,7 @@ fn retained_typed_receiver_keeps_its_admitted_reply_cost_after_terminal() {
     let env = env("model-input-reply-retained");
     let budget = env.probe.budget_for_test();
     let frame = super::worker_frame_bytes_for_test();
+    let expected = super::startup_owner_bytes() + frame;
     assert!(frame > 0, "worker frame was never admitted");
     let reply = super::reply_lease_bytes::<Result<ModelInput, ModelPreparationError>>();
     let (job, receiver) = env
@@ -535,8 +540,8 @@ fn retained_typed_receiver_keeps_its_admitted_reply_cost_after_terminal() {
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
         let usage = budget.usage();
-        if usage.control_records == 2 && usage.control_prepare_cpu_bytes == frame + reply {
-            assert_eq!(usage.prepare_cpu_bytes, frame + reply);
+        if usage.control_records == 3 && usage.control_prepare_cpu_bytes == expected + reply {
+            assert_eq!(usage.prepare_cpu_bytes, expected + reply);
             break;
         }
         assert!(

@@ -2723,7 +2723,7 @@ fn accepted_import_dispatch_failure_is_durable_and_releases_the_source() {
     let mut env = env("dispatch-failure");
     let (tx, rx) = tokio::sync::mpsc::channel(1);
     drop(rx);
-    env.jobs.submit_tx = tx;
+    env.jobs.submit_tx = Some(tx);
     let job_id = new_job_id();
     let identity = ImportIdentity {
         request_id: "failed-dispatch".into(),
@@ -3106,22 +3106,24 @@ fn invalid_job_id_rejects_before_generation_slot_or_control_construction() {
 // 退出；worker 的实际 production frame 也在 block_on/Box 前准入。下面的
 // oracle 独立复写 Arc 布局公式与文案，避免引用生产常量而恒真。
 
-/// The shared worker frame is the only inline owner left after the request
-/// tail exits. Polling the exact frame (not the observed control bytes) makes a
-/// leaked per-request ControlCharge visibly fail.
+/// The shared startup owners and the worker frame are the only inline prepare
+/// owners left after the request tail exits. Polling their exact sum (not the
+/// observed control bytes) makes a leaked per-request ControlCharge visibly fail.
 fn assert_only_worker_frame(budget: &super::super::budget::BudgetCoordinator) {
     let frame = super::worker_frame_bytes_for_test();
+    let startup = super::startup_owner_bytes();
     assert!(frame > 0, "worker frame was never admitted");
+    let expected = startup + frame;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
         let usage = budget.usage();
-        if usage.control_records == 1 && usage.control_prepare_cpu_bytes == frame {
+        if usage.control_records == 2 && usage.control_prepare_cpu_bytes == expected {
             assert_eq!(
                 usage,
                 super::super::budget::BudgetUsage {
-                    prepare_cpu_bytes: frame,
-                    control_prepare_cpu_bytes: frame,
-                    control_records: 1,
+                    prepare_cpu_bytes: expected,
+                    control_prepare_cpu_bytes: expected,
+                    control_records: 2,
                     ..Default::default()
                 }
             );
@@ -3129,7 +3131,7 @@ fn assert_only_worker_frame(budget: &super::super::budget::BudgetCoordinator) {
         }
         assert!(
             std::time::Instant::now() < deadline,
-            "worker frame-only baseline not reached: {usage:?}"
+            "shared startup + frame baseline not reached: {usage:?}"
         );
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
@@ -3226,7 +3228,7 @@ fn saturate_prepare_quota(budget: &crate::wallpaper::budget::BudgetCoordinator) 
 fn idle_reservation_admits_exact_control_bytes_before_constructing_them() {
     let env = env("job-r33-control-admission");
     let budget = Arc::clone(&env.jobs.budget);
-    wait_for_inline_control_records(&budget, 1);
+    wait_for_inline_control_records(&budget, 2);
     let before = budget.usage();
     let job_id = new_job_id();
     let expected = control_requested_bytes_for_test(&job_id);
@@ -3267,7 +3269,7 @@ fn saturated_prepare_quota_rejects_before_status_or_cancel_construction() {
 
     let env = env("job-r33-control-quota");
     let budget = Arc::clone(&env.jobs.budget);
-    wait_for_inline_control_records(&budget, 1);
+    wait_for_inline_control_records(&budget, 2);
     let (token, session) = saturate_prepare_quota(&budget);
     let generation = env.jobs.generation.load(Ordering::Relaxed);
     let job_id = new_job_id();
@@ -3297,8 +3299,8 @@ fn saturated_prepare_quota_rejects_before_status_or_cancel_construction() {
     );
     assert_eq!(
         budget.usage().control_records,
-        1,
-        "拒绝路径不得新增控制记录"
+        2,
+        "拒绝路径不得新增控制记录（只剩共享启动 owner 与 worker frame）"
     );
     budget.release(token, &session, 1).unwrap();
     budget.confirm_exit(token, &session, 1).unwrap();
@@ -3314,7 +3316,7 @@ fn every_sync_entry_rejects_a_saturated_prepare_quota_before_controls() {
         "font/ttf",
     );
     let budget = Arc::clone(&env.jobs.budget);
-    wait_for_inline_control_records(&budget, 1);
+    wait_for_inline_control_records(&budget, 2);
     let (token, session) = saturate_prepare_quota(&budget);
     let reference = font_request.reference.clone();
     let asset_request = super::super::target_planner::PrepareRequest {
@@ -3368,7 +3370,11 @@ fn every_sync_entry_rejects_a_saturated_prepare_quota_before_controls() {
         env.jobs.inner.lock().expect("job inner").current.is_none(),
         "全部拒绝后单槽仍空闲"
     );
-    assert_eq!(budget.usage().control_records, 1);
+    assert_eq!(
+        budget.usage().control_records,
+        2,
+        "拒绝路径只保留共享启动 owner 与 worker frame"
+    );
     budget.release(token, &session, 1).unwrap();
     budget.confirm_exit(token, &session, 1).unwrap();
 }
@@ -3377,19 +3383,18 @@ fn every_sync_entry_rejects_a_saturated_prepare_quota_before_controls() {
 fn production_worker_frame_is_admitted_before_block_on_and_released_at_exit() {
     let env = env("job-r33-worker-frame");
     let budget = Arc::clone(&env.jobs.budget);
-    wait_for_inline_control_records(&budget, 1);
+    wait_for_inline_control_records(&budget, 2);
     let frame = super::WORKER_FRAME_BYTES.load(Ordering::Relaxed);
+    let startup = super::startup_owner_bytes();
     assert!(frame > 0, "实际 production future 必须被观测到");
-    assert_eq!(budget.usage().control_prepare_cpu_bytes, frame);
+    assert_eq!(
+        budget.usage().control_prepare_cpu_bytes,
+        startup + frame,
+        "共享启动 owner 与实际 production frame 都必须事先入账"
+    );
+    // Drop 关闭队列并 join；返回时线程/runtime/frame/启动 owner 已物理退出。
     drop(env);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-    while budget.usage().control_records != 0 {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "worker 退出后 frame 费用未归还"
-        );
-        std::thread::yield_now();
-    }
+    assert_eq!(budget.usage().control_records, 0);
     assert_eq!(budget.usage().control_prepare_cpu_bytes, 0);
 }
 
@@ -3427,12 +3432,12 @@ fn hold_prepare_bytes(
 fn dispatch_admits_the_returned_id_copy_until_the_handle_drops() {
     let mut env = env("job-r34-id-lease");
     let budget = Arc::clone(&env.jobs.budget);
-    wait_for_inline_control_records(&budget, 1);
+    wait_for_inline_control_records(&budget, 2);
     let (tx, rx) = tokio::sync::mpsc::channel::<JobRequest>(1);
-    // 换掉 sender 会让原 worker 退出并归还 frame；先等基线稳定。
-    env.jobs.submit_tx = tx;
+    // 换掉 sender 会让原 worker 退出并归还 frame；共享启动 owner 仍归 ImportJobs。
+    env.jobs.submit_tx = Some(tx);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-    while budget.usage().control_records != 0 {
+    while budget.usage().control_records != 1 {
         assert!(
             std::time::Instant::now() < deadline,
             "replaced worker did not release its frame"
@@ -3440,7 +3445,12 @@ fn dispatch_admits_the_returned_id_copy_until_the_handle_drops() {
         std::thread::yield_now();
     }
     let before = budget.usage();
-    assert_eq!(before, Default::default());
+    assert_eq!(before.control_records, 1);
+    assert_eq!(
+        before.control_prepare_cpu_bytes,
+        super::startup_owner_bytes(),
+        "只剩共享启动 owner"
+    );
     let job_id = new_job_id();
     let request = env
         .jobs
@@ -3485,7 +3495,7 @@ fn reply_admission_rejection_refunds_control_and_never_commits_the_slot() {
 
     let env = env("job-r34-reply-quota");
     let budget = Arc::clone(&env.jobs.budget);
-    wait_for_inline_control_records(&budget, 1);
+    wait_for_inline_control_records(&budget, 2);
     let job_id = new_job_id();
     let control = control_requested_bytes_for_test(&job_id);
     let reply = super::reply_lease_bytes::<Result<PreparedFont, JobError>>();
@@ -3531,7 +3541,7 @@ fn reply_admission_rejection_refunds_control_and_never_commits_the_slot() {
 fn typed_reply_lease_is_shared_by_sender_and_receiver_in_either_drop_order() {
     let env = env("job-r34-reply-lease");
     let budget = Arc::clone(&env.jobs.budget);
-    wait_for_inline_control_records(&budget, 1);
+    wait_for_inline_control_records(&budget, 2);
     let before = budget.usage();
     let reply = super::reply_lease_bytes::<Result<PreparedFont, JobError>>();
     let source = || JobSource::Import(ImportSource::Path(env.source.clone()));
@@ -3629,5 +3639,135 @@ fn typed_reply_bounds_cover_actual_oneshot_and_shared_arc_requests() {
             .unwrap()
     );
     drop(lease);
+    assert_eq!(budget.usage(), Default::default());
+}
+
+// r35: 共享初始化 owner 在第一次分配前准入；JoinHandle 的 join 是线程与
+// runtime 的物理退出收据。
+
+#[test]
+fn startup_owner_bytes_cover_real_caller_allocations_and_refund() {
+    use crate::wallpaper::budget::measure_requested_heap;
+
+    let root = tempfileish::temp_dir("job-r35-startup-witness");
+    let library = futures_block_on(Library::open(root.path().join("db").as_path())).unwrap();
+    let assets = AssetStore::new(root.path()).unwrap();
+    let probe = ProbeClient::testing(|_, _| Box::pin(async { Ok(()) }));
+    let budget = probe.budget_for_test();
+    let before = budget.usage();
+    let ((jobs, frame), sample) = measure_requested_heap(|| {
+        let jobs = ImportJobs::start(library, assets, probe);
+        let frame = super::WORKER_FRAME_BYTES.load(Ordering::Relaxed);
+        (jobs, frame)
+    });
+    assert!(!sample.overflow);
+    assert!(frame > 0, "worker frame was never admitted");
+    let startup = super::startup_owner_bytes();
+    let actual = u64::try_from(sample.peak).unwrap();
+    assert!(
+        actual <= startup + frame,
+        "caller-side start peak {actual} exceeds startup {startup} + frame {frame}"
+    );
+    println!("startup owner witness peak={actual} bound={startup} frame={frame}");
+
+    // 分项 witness：opaque 的三类 caller 侧分配各自 <= 生产常量。
+    let ((tx, rx), channel) =
+        measure_requested_heap(|| tokio::sync::mpsc::channel::<JobRequest>(1));
+    assert!(!channel.overflow);
+    assert!(
+        u64::try_from(channel.peak).unwrap() <= super::startup_channel_bytes(),
+        "channel requested {} > bound {}",
+        channel.peak,
+        super::startup_channel_bytes()
+    );
+    drop(tx);
+    drop(rx);
+    let (runtime, runtime_sample) = measure_requested_heap(|| {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+    });
+    assert!(!runtime_sample.overflow);
+    assert!(
+        u64::try_from(runtime_sample.peak).unwrap() <= super::STARTUP_RUNTIME_BOUND,
+        "runtime requested {} > bound {}",
+        runtime_sample.peak,
+        super::STARTUP_RUNTIME_BOUND
+    );
+    drop(runtime);
+    let (worker, spawn_sample) = measure_requested_heap(|| {
+        std::thread::Builder::new()
+            .name(super::IMPORT_WORKER_NAME.into())
+            .spawn(|| {})
+            .unwrap()
+    });
+    assert!(!spawn_sample.overflow);
+    assert!(
+        u64::try_from(spawn_sample.peak).unwrap() <= super::STARTUP_PACKET_BOUND,
+        "spawn packet requested {} > bound {}",
+        spawn_sample.peak,
+        super::STARTUP_PACKET_BOUND
+    );
+    worker.join().unwrap();
+    println!(
+        "startup component witnesses channel={} runtime={} spawn={}",
+        channel.peak, runtime_sample.peak, spawn_sample.peak
+    );
+    assert_eq!(budget.usage().control_records, before.control_records + 2);
+    assert_eq!(
+        budget.usage().control_prepare_cpu_bytes - before.control_prepare_cpu_bytes,
+        startup + frame,
+        "启动 owner 与 frame 必须按上界精确入账"
+    );
+    // Drop join 之后启动费用才归还。
+    drop(jobs);
+    assert_eq!(budget.usage(), before);
+}
+
+#[test]
+fn import_worker_thread_and_runtime_exit_before_drop_returns() {
+    let held = held_font_probe(false);
+    let (env, request) = font_env(
+        "job-r35-physical-exit",
+        held.probe,
+        &font_fixture(),
+        "font/ttf",
+    );
+    let budget = Arc::clone(&env.jobs.budget);
+    let exited = env.jobs.worker_exited_for_test();
+    let (job, receiver) = env.jobs.prepare_font(new_job_id(), request).unwrap();
+    held.entered
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    assert!(!exited.load(Ordering::Acquire));
+    let (started_tx, started) = std::sync::mpsc::channel();
+    let (dropped_tx, dropped) = std::sync::mpsc::channel();
+    let dropper = std::thread::spawn(move || {
+        started_tx.send(()).unwrap();
+        drop(env);
+        let _ = dropped_tx.send(());
+    });
+    started
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    assert!(
+        dropped
+            .recv_timeout(std::time::Duration::from_millis(300))
+            .is_err(),
+        "ImportJobs::drop must wait for the real worker thread"
+    );
+    assert!(!exited.load(Ordering::Acquire));
+    held.release.send(()).unwrap();
+    dropped
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .unwrap();
+    dropper.join().unwrap();
+    assert!(
+        exited.load(Ordering::Acquire),
+        "exit flag is set only after runtime and frame are gone"
+    );
+    drop(receiver);
+    drop(job);
     assert_eq!(budget.usage(), Default::default());
 }

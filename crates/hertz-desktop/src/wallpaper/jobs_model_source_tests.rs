@@ -83,19 +83,20 @@ fn drained(env: &Env, id: &str, state: JobState) {
     assert_eq!(env.probe.stats(), (0, 0));
     let budget = env.probe.budget_for_test();
     let frame = super::worker_frame_bytes_for_test();
+    let expected = super::startup_owner_bytes() + frame;
     assert!(frame > 0, "worker frame was never admitted");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
         let usage = budget.usage();
-        if usage.control_records == 1 && usage.control_prepare_cpu_bytes == frame {
-            assert_eq!(usage.prepare_cpu_bytes, frame);
+        if usage.control_records == 2 && usage.control_prepare_cpu_bytes == expected {
+            assert_eq!(usage.prepare_cpu_bytes, expected);
             assert_eq!(usage.asset_cpu_bytes, 0);
             assert_eq!(usage.prepare_tasks, 0);
             break;
         }
         assert!(
             std::time::Instant::now() < deadline,
-            "worker frame-only baseline not reached: {usage:?}"
+            "shared startup + frame baseline not reached: {usage:?}"
         );
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
