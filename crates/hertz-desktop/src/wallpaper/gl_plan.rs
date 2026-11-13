@@ -170,7 +170,7 @@ impl GlPlan {
     /// snapshot can only cause grant_session to reject; it cannot overdraw the ledger.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
-        budget: &BudgetCoordinator,
+        usage: &budget::BudgetUsage,
         owner: OwnerKind,
         session: String,
         generation: u64,
@@ -198,7 +198,6 @@ impl GlPlan {
             .iter()
             .position(|&mode| mode == quality)
             .ok_or_else(|| JobError::invalid_input("GL 质量档位无效"))?;
-        let usage = budget.usage();
         let available_gpu = budget::MAX_GPU_TRACKED_BYTES.saturating_sub(usage.gpu_bytes);
         let chosen = (0..=requested)
             .rev()
@@ -211,7 +210,7 @@ impl GlPlan {
             fps
         };
         let divisor = refresh_hz.div_ceil(effective_fps);
-        let rate_cap = available_output_rate(owner, &usage);
+        let rate_cap = available_output_rate(owner, usage);
         let target_pixels = u64::from(width) * u64::from(height);
         let pixels = target_pixels
             .min(profile.pixel_budget)

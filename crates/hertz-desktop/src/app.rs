@@ -7163,7 +7163,7 @@ fn create_presentation(
             )?
         } else {
             GlPlan::new(
-                &budget,
+                &budget.usage(),
                 owner,
                 format!(
                     "gl-{}-{generation}",

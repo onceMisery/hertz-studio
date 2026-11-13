@@ -599,7 +599,7 @@ fn type_budget_eligible(manifest: &hertz_wallpaper::Manifest, context: &CatalogC
                     return false;
                 }
                 let Ok(plan) = super::gl_plan::GlPlan::new(
-                    &projected,
+                    &projected.usage(),
                     budget::OwnerKind::Desktop,
                     "ai-catalog".into(),
                     1,

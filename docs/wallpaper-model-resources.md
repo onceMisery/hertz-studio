@@ -610,3 +610,24 @@ production worker frame、request/reply/status/history/query/SQLx等仍需各自
 和物理退出证明。纹理闭包、Broker/SessionPlan/loader、同renderer GPU首帧和
 原 A01–A10剩余要求继续保持未验收。未发布构造 panic只释放该 stack实例；
 已发布目录失败后保持同一 Arc和常驻费用，沿原 poison恢复路径重试。
+
+2026-11-12 r30 控制准入续接：`check_requests` 与桌面替换预检现在只构造
+固定大小的 `BudgetProjection`，保留同一锁内读取的进程费用、用量、墓碑记录数
+和预览输出占用；不复制 Reservation、请求字符串或资源计划，也不授予 token。
+仅省略指定代际的 Active Desktop；ReleasePending 与 Released 墓碑仍保留原规则。
+投影生成后保持冻结，session/child 元数据仍沿原预检口径省略。
+真实 grant 与预检共用 `budget_checks.rs` 中的一套 shape、配额及检查顺序。
+`GlPlan::new` 直接读取原用量快照，AI 继续使用同一规划器。
+
+拒绝对象与其 clone 只持有静态文字和标量；`BudgetDiagnostic::Display` 在原消费
+边界生成原完整文字，quota/cap/held/requested 与 JobError 映射保持原合同。
+此前普通 grant 诊断费用 API 的保守上界保留，但被移除的首份格式化 String
+不再列作真实存活对象；调用方格式化与响应副本仍需自己的准入。
+
+生产启动 floor 另预留 `64 * (128 + 64) = 12,288` requested bytes，覆盖同一
+账本全部有界 session/task 字符串 clone，包括未回收墓碑；它在首次 Vec/Arc
+分配前入账，退出、forget 与 purge 后保留。冷启动实际分配仍只有 Arc/backing，
+字符串 headroom 不冒充冷启动物理堆。独立 stack `new()` 保持零进程费用。
+完整请求/响应、SessionResources/children、RootOwner/ImportJobs/SQLx、线程、
+production worker frame 与状态历史仍未由此闭合；纹理闭包、Broker/loader、
+同 renderer GPU 首帧及原 A01–A10 的完整验收继续开放。
