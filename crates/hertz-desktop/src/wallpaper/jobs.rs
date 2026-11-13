@@ -56,6 +56,10 @@ impl JobError {
     }
 }
 
+/// 单槽已被占用时的原文案。测试用独立字面量钉住它，避免文案漂移；
+/// 刻意保持模块私有，避免测试误引用生产常量而让断言恒真。
+const BUSY_SLOT_DIAGNOSTIC: &str = "已有导入任务在执行，请等待完成或取消";
+
 impl From<hertz_wallpaper::PackageError> for JobError {
     fn from(error: hertz_wallpaper::PackageError) -> Self {
         Self::new("package_invalid", format!("{error}"))
@@ -540,28 +544,31 @@ impl ImportJobs {
             return Err(JobError::invalid_input("jobId 必须是有界的单个目录名"));
         }
         let generation = self.generation.fetch_add(1, Ordering::Relaxed);
-        let status = Arc::new(Mutex::new(JobStatus {
-            job_id: job_id.clone(),
-            state: JobState::Queued,
-            error: None,
-            package_hash: None,
-            staged_bytes: 0,
-            generation,
-        }));
-        let cancel = Arc::new(AtomicBool::new(false));
-        {
+        // 单槽判定先于本任务的 status/cancel 构造：忙时只产出原静态错误，
+        // 不分配 Arc/Mutex/AtomicBool，也不 clone job_id。检查、构造与提交
+        // 仍在同一把 inner 锁内完成，保持原单槽原子性。
+        let (status, cancel) = {
             let mut guard = self.inner.lock().expect("job inner");
             if guard.current.is_some() {
-                return Err(JobError::new(
-                    "budget_busy",
-                    "已有导入任务在执行，请等待完成或取消",
-                ));
+                // 拒绝路径不在单槽锁内构造错误文字；判定完成后立即放锁。
+                drop(guard);
+                return Err(JobError::new("budget_busy", BUSY_SLOT_DIAGNOSTIC));
             }
+            let status = Arc::new(Mutex::new(JobStatus {
+                job_id: job_id.clone(),
+                state: JobState::Queued,
+                error: None,
+                package_hash: None,
+                staged_bytes: 0,
+                generation,
+            }));
+            let cancel = Arc::new(AtomicBool::new(false));
             guard.current = Some(ActiveJob {
                 status: status.clone(),
                 cancel: cancel.clone(),
             });
-        }
+            (status, cancel)
+        };
         Ok(JobRequest {
             job_id,
             source,
