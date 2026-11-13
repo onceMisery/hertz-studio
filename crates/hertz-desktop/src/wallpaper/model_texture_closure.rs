@@ -2,21 +2,32 @@
 //! Canonical package texture closure for the checked model facts.
 //!
 //! Every `ModelImage::Package` record is bound to the installed package's
-//! archive-verified entry tuple (path/bytes/SHA-256/MIME). Missing entries,
-//! mismatched tuples and over-bound aggregates fail closed. The fixed record
-//! Vec is admitted against its own ledger quota before it exists and refunded
-//! only after that Vec backing has physically released.
+//! archive-verified entry tuple (path/bytes/SHA-256/MIME) and to a pinned
+//! read-only projection File whose actual length and full SHA-256 are
+//! re-verified. Missing entries/files, mismatched tuples and over-bound
+//! aggregates fail closed. The fixed record Vec, the File pin Vec and the
+//! retained path buffer are admitted against one independent ledger quota
+//! before they exist and refunded only after all three backings physically
+//! release.
 //!
-//! No File is opened here: real pins/codec work, Broker, loader, runtime and
-//! GPU first-frame gates remain closed.
+//! No decoder, renderer or GPU owner is created here; Broker, loader, runtime
+//! and GPU first-frame gates remain closed.
 
 use super::{budget, JobError};
+use crate::wallpaper::assets::{
+    append_segment, open_file, read_source_sha256, reset_path, source_pin_cancelled,
+    source_scalar_io_error,
+};
 use hertz_wallpaper::{
     archive::VerifiedEntry,
     model_structure::{ModelImage, MAX_MODEL_IMAGE_RECORDS},
+    MAX_PATH_BYTES,
 };
 use std::alloc::Layout;
-use std::sync::Arc;
+use std::fs::File;
+use std::io::{Seek, SeekFrom};
+use std::path::{Path, PathBuf};
+use std::sync::{atomic::AtomicBool, Arc};
 
 const CLOSURE_DIAGNOSTIC: &str = "canonical model texture closure failed";
 
@@ -25,6 +36,10 @@ const CLOSURE_DIAGNOSTIC: &str = "canonical model texture closure failed";
 /// entry but the bound is still enforced on the record sum.
 pub(super) const MAX_MODEL_TEXTURE_SOURCE_BYTES: u64 = 256 * 1024 * 1024;
 
+/// "\\packages\\" 10 + 64-byte package hash + "\\files\\" 7 + canonical
+/// relative path 180. The same bound as the canonical model source factory.
+const PACKAGE_PATH_PREFIX_BYTES: usize = 10 + 64 + 7 + MAX_PATH_BYTES;
+
 #[repr(C)]
 struct ClosedTexture {
     image_index: u32,
@@ -32,12 +47,16 @@ struct ClosedTexture {
     bytes: u64,
     sha256: [u8; 32],
     references: u32,
+    file_index: u32,
 }
 
-/// One closure owns the fixed record Vec and its prior admission. Field order
-/// is deliberate: `textures` physically releases before `charge` refunds.
+/// One closure owns the fixed record Vec, its unique File pins and the retained
+/// canonical path buffer. Field order is deliberate: every backing physically
+/// releases before `charge` refunds.
 pub(super) struct ModelTextureClosure {
     textures: Vec<ClosedTexture>,
+    files: Vec<File>,
+    path: PathBuf,
     unique_entries: u32,
     unique_source_bytes: u64,
     charge: Option<budget::ModelTextureClosureCharge>,
@@ -57,16 +76,28 @@ impl ModelTextureClosure {
     }
 
     #[cfg(test)]
-    pub(super) fn release_allocations_for_test(&self) -> Option<(usize, usize, usize)> {
-        let capacity = self.textures.capacity();
-        if capacity == 0 {
-            return None;
+    pub(super) fn release_allocations_for_test(&self) -> Vec<(usize, usize, usize)> {
+        let records = self.textures.capacity();
+        if records == 0 {
+            return Vec::new();
         }
-        Some((
-            self.textures.as_ptr() as usize,
-            capacity * std::mem::size_of::<ClosedTexture>(),
-            std::mem::align_of::<ClosedTexture>(),
-        ))
+        vec![
+            (
+                self.textures.as_ptr() as usize,
+                records * std::mem::size_of::<ClosedTexture>(),
+                std::mem::align_of::<ClosedTexture>(),
+            ),
+            (
+                self.files.as_ptr() as usize,
+                self.files.capacity() * std::mem::size_of::<File>(),
+                std::mem::align_of::<File>(),
+            ),
+            (
+                self.path.as_os_str().as_encoded_bytes().as_ptr() as usize,
+                self.path.capacity(),
+                1,
+            ),
+        ]
     }
 }
 
@@ -130,16 +161,14 @@ fn resolve<'a>(
     Ok((index, entry, digest, references))
 }
 
-fn build_with_limits(
+/// First pass: zero-allocation tuple validation and bounds over every Package
+/// record. Embedded images carry their bytes inside the already-checked BIN.
+fn validate_records(
     images: &[ModelImage],
     entries: &[VerifiedEntry],
-    budget: &Arc<budget::BudgetCoordinator>,
     record_limit: usize,
     source_limit: u64,
-) -> Result<ModelTextureClosure, JobError> {
-    // First pass: zero-allocation validation and bounds over every Package
-    // record. Embedded images carry their bytes inside the already-checked BIN
-    // and are not package closures.
+) -> Result<(usize, u64), JobError> {
     let mut count = 0usize;
     let mut record_bytes = 0u64;
     for image in images {
@@ -158,28 +187,113 @@ fn build_with_limits(
             return Err(fixed_error("model_texture_limit"));
         }
     }
-    // Prior admission: the exact fixed-record backing request is checked and
-    // booked under the original ledger lock before the Vec is allocated.
-    let charge = if count == 0 {
-        None
-    } else {
-        let requested = Layout::array::<ClosedTexture>(count)
-            .map_err(|_| fixed_error("model_texture_limit"))?
-            .size() as u64;
-        Some(
-            budget
-                .admit_model_texture_closure(requested)
-                .map_err(|_| fixed_error("budget_busy"))?,
-        )
-    };
-    // Second pass repeats the same deterministic validation, then fills the
-    // admitted Vec. Any defensive failure drops the Vec before the charge.
-    let mut textures = Vec::with_capacity(count);
+    Ok((count, record_bytes))
+}
+
+fn requested_backing_bytes(count: usize, path_capacity: usize) -> Result<u64, JobError> {
+    let records = Layout::array::<ClosedTexture>(count)
+        .map_err(|_| fixed_error("model_texture_limit"))?
+        .size() as u64;
+    let files = Layout::array::<File>(count)
+        .map_err(|_| fixed_error("model_texture_limit"))?
+        .size() as u64;
+    let path = Layout::array::<u8>(path_capacity)
+        .map_err(|_| fixed_error("model_texture_limit"))?
+        .size() as u64;
+    records
+        .checked_add(files)
+        .and_then(|total| total.checked_add(path))
+        .ok_or_else(|| fixed_error("model_texture_limit"))
+}
+
+pub(super) fn build(
+    root: &Path,
+    package_hash: &str,
+    images: &[ModelImage],
+    entries: &[VerifiedEntry],
+    budget: &Arc<budget::BudgetCoordinator>,
+    cancel: &AtomicBool,
+) -> Result<ModelTextureClosure, JobError> {
+    let (count, _) = validate_records(
+        images,
+        entries,
+        MAX_MODEL_IMAGE_RECORDS,
+        MAX_MODEL_TEXTURE_SOURCE_BYTES,
+    )?;
+    if count == 0 {
+        return Ok(ModelTextureClosure {
+            textures: Vec::new(),
+            files: Vec::new(),
+            path: PathBuf::new(),
+            unique_entries: 0,
+            unique_source_bytes: 0,
+            charge: None,
+        });
+    }
+    let path_capacity = root
+        .as_os_str()
+        .as_encoded_bytes()
+        .len()
+        .checked_add(PACKAGE_PATH_PREFIX_BYTES)
+        .ok_or_else(|| fixed_error("model_texture_limit"))?;
+    // Prior admission: the exact record Vec, File pin Vec and retained path
+    // backing request is checked and booked before any of them is allocated.
+    let requested = requested_backing_bytes(count, path_capacity)?;
+    let charge = Some(
+        budget
+            .admit_model_texture_closure(requested)
+            .map_err(|_| fixed_error("budget_busy"))?,
+    );
+    let mut path = PathBuf::with_capacity(path_capacity);
+    let mut files: Vec<File> = Vec::with_capacity(count);
+    let mut textures: Vec<ClosedTexture> = Vec::with_capacity(count);
+    // Second pass repeats the deterministic tuple validation, pins each unique
+    // installed projection File and re-verifies its actual length/full SHA-256.
     for (image_index, image) in images.iter().enumerate() {
         if matches!(image, ModelImage::Embedded { .. }) {
             continue;
         }
         let (entry_index, entry, sha256, references) = resolve(image, entries)?;
+        let existing = textures
+            .iter()
+            .find(|texture| texture.entry_index == entry_index)
+            .map(|texture| texture.file_index);
+        let file_index = match existing {
+            Some(index) => index,
+            None => {
+                source_pin_cancelled(cancel)?;
+                reset_path(&mut path, root, path_capacity)?;
+                for segment in ["packages", package_hash, "files"] {
+                    append_segment(&mut path, segment, path_capacity)?;
+                }
+                for segment in entry.path.split('/') {
+                    append_segment(&mut path, segment, path_capacity)?;
+                }
+                match path.try_exists() {
+                    Ok(true) => {}
+                    Ok(false) => return Err(fixed_error("model_texture_missing")),
+                    Err(error) => {
+                        return Err(source_scalar_io_error("metadata texture", 0, &error))
+                    }
+                }
+                let mut file = open_file(&path, "open texture")?;
+                let metadata = file
+                    .metadata()
+                    .map_err(|error| source_scalar_io_error("metadata texture", 0, &error))?;
+                if metadata.len() != entry.bytes {
+                    return Err(fixed_error("model_texture_mismatch"));
+                }
+                let (bytes, hash) = read_source_sha256(&mut file, cancel)?;
+                if bytes != entry.bytes || hash != entry.sha256 {
+                    return Err(fixed_error("model_texture_mismatch"));
+                }
+                drop(hash);
+                file.seek(SeekFrom::Start(0))
+                    .map_err(|error| source_scalar_io_error("seek texture", 0, &error))?;
+                files.push(file);
+                u32::try_from(files.len() - 1).map_err(|_| fixed_error("model_texture_limit"))?
+            }
+        };
         let image_index =
             u32::try_from(image_index).map_err(|_| fixed_error("model_texture_limit"))?;
         textures.push(ClosedTexture {
@@ -188,6 +302,7 @@ fn build_with_limits(
             bytes: entry.bytes,
             sha256,
             references,
+            file_index,
         });
     }
     let mut unique_entries = 0u32;
@@ -206,24 +321,12 @@ fn build_with_limits(
     }
     Ok(ModelTextureClosure {
         textures,
+        files,
+        path,
         unique_entries,
         unique_source_bytes,
         charge,
     })
-}
-
-pub(super) fn build(
-    images: &[ModelImage],
-    entries: &[VerifiedEntry],
-    budget: &Arc<budget::BudgetCoordinator>,
-) -> Result<ModelTextureClosure, JobError> {
-    build_with_limits(
-        images,
-        entries,
-        budget,
-        MAX_MODEL_IMAGE_RECORDS,
-        MAX_MODEL_TEXTURE_SOURCE_BYTES,
-    )
 }
 
 #[cfg(test)]

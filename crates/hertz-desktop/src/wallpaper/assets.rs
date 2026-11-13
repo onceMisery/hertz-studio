@@ -30,6 +30,9 @@ pub(crate) use model_source::tests::{
     probe as model_source_test_probe, writable as model_source_writable,
 };
 pub(crate) use model_source::CanonicalModelSource;
+/// Shared bounded canonical-path/File helpers for the source factory and the
+/// texture closure. They never expose a raw File or unbounded path.
+pub(crate) use model_source::{append_segment, open_file, reset_path};
 
 impl AssetStore {
     pub(super) fn pin_model_input_source(
@@ -825,7 +828,7 @@ impl AssetStore {
     }
 }
 
-fn source_pin_cancelled(cancel: &AtomicBool) -> Result<()> {
+pub(crate) fn source_pin_cancelled(cancel: &AtomicBool) -> Result<()> {
     if cancel.load(Ordering::Acquire) {
         Err(JobError::new("cancelled", "固定资源准备已取消并退出"))
     } else {
@@ -834,7 +837,10 @@ fn source_pin_cancelled(cancel: &AtomicBool) -> Result<()> {
 }
 
 /// Cancellation is observed after the in-flight synchronous read has returned.
-fn read_source_sha256(reader: &mut impl Read, cancel: &AtomicBool) -> Result<(u64, String)> {
+pub(crate) fn read_source_sha256(
+    reader: &mut impl Read,
+    cancel: &AtomicBool,
+) -> Result<(u64, String)> {
     let mut chunk = [0_u8; 64 * 1024];
     let mut digest = Sha256::new();
     let mut bytes = 0_u64;
@@ -864,7 +870,7 @@ fn read_source_sha256(reader: &mut impl Read, cancel: &AtomicBool) -> Result<(u6
 
 /// Only built-in scalar formatting runs; external Error Display/Debug/Source
 /// may own or allocate unbounded diagnostics and must never be invoked here.
-fn source_scalar_io_error(
+pub(crate) fn source_scalar_io_error(
     operation: &'static str,
     offset: u64,
     error: &std::io::Error,
