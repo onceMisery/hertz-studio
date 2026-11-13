@@ -3914,3 +3914,158 @@ fn persisted_job_rejects_legacy_oversize_text_and_bounds_restored_errors() {
     assert_eq!(restored.error.as_deref().map(str::len), Some(1024));
     assert!(restored.error.as_ref().unwrap().capacity() <= 1024);
 }
+
+// r39: compose every live import control owner with a source/model grant at
+// explicit pipeline stages, and report the per-quota maximum. The live
+// source/input/font/SVG/import regressions run separately in the full suite.
+#[test]
+fn composed_control_and_source_model_stages_stay_within_original_quotas() {
+    use crate::wallpaper::budget::{
+        BudgetRequest, ControlRequest, OwnerKind, MAX_ASSET_CPU_BYTES, MAX_CPU_DECODED_BYTES,
+        MAX_GPU_TRACKED_BYTES, MAX_PREPARE_CPU_BYTES, MAX_ROOT_OWNER_BYTES, MAX_SQLX_POOL_BYTES,
+        MAX_STATUS_BYTES,
+    };
+
+    let env = env("job-stage-composition");
+    let budget = Arc::clone(&env.jobs.budget);
+    wait_for_inline_control_records(&budget, 2);
+    let baseline = budget.usage();
+    let mut stages: Vec<(&'static str, crate::wallpaper::budget::BudgetUsage)> =
+        vec![("startup+frame", baseline.clone())];
+
+    // Stage: reserved request controls (job id + status/cancel Arcs).
+    let job_id = new_job_id();
+    let request = ControlRequest {
+        job_id_copy_bytes: u64::try_from(job_id.len()).unwrap(),
+        status_arc_bytes: arc_requested_bytes_for_test::<Mutex<JobStatus>>(),
+        cancel_arc_bytes: arc_requested_bytes_for_test::<AtomicBool>(),
+    };
+    let control = budget.admit_controls(request).unwrap();
+    stages.push(("queued request", budget.usage()));
+
+    // Stage: source/model workspace and device fees granted by the probe owner.
+    let source = BudgetRequest {
+        owner: OwnerKind::Probe,
+        session: "stage-source".into(),
+        generation: 1,
+        task_id: "stage-source".into(),
+        targets: 0,
+        contexts: 0,
+        decoders: 1,
+        transcode_slots: 0,
+        decode_pixel_rate: 4_000_000,
+        output_pixel_rate: 0,
+        texture_upload_bytes_per_second: 0,
+        cpu_bytes: 4 * 1024 * 1024,
+        prepare_cpu_bytes: 8 * 1024 * 1024,
+        asset_cpu_bytes: 16 * 1024 * 1024,
+        gpu_bytes: 8 * 1024 * 1024,
+        prepare_tasks: 0,
+    };
+    let token = budget.grant(&source).unwrap();
+    stages.push(("source+model", budget.usage()));
+
+    // Stage: typed reply lease owned by the request until the worker exits.
+    let reply = budget.admit_working_bytes(4096).unwrap();
+    stages.push(("typed reply", budget.usage()));
+
+    // Stage: full 32-element status history with maximum-size errors.
+    let mut sample_status = None;
+    {
+        let mut inner = env.jobs.inner.lock().expect("job inner");
+        for index in 0..32 {
+            let status = JobStatus {
+                job_id: format!("stage{index:04}"),
+                state: JobState::Failed,
+                error: Some("x".repeat(1024)),
+                package_hash: Some("a".repeat(64)),
+                staged_bytes: 0,
+                generation: 1,
+            };
+            sample_status = Some(status.clone());
+            inner.remember(status).unwrap();
+        }
+    }
+    stages.push(("history 32", budget.usage()));
+
+    // Stage: JSON/owned DB copy admission for one terminal write.
+    let (json, write_charge) = status_json(&budget, sample_status.as_ref().unwrap()).unwrap();
+    assert!(!json.is_empty());
+    stages.push(("terminal write", budget.usage()));
+
+    let mut max_prepare = 0;
+    let mut max_asset = 0;
+    let mut max_cpu = 0;
+    let mut max_gpu = 0;
+    let mut max_status = 0;
+    for (stage, usage) in &stages {
+        assert!(
+            usage.prepare_cpu_bytes <= MAX_PREPARE_CPU_BYTES,
+            "{stage}: prepare_cpu_bytes {} > cap",
+            usage.prepare_cpu_bytes
+        );
+        assert!(
+            usage.asset_cpu_bytes <= MAX_ASSET_CPU_BYTES,
+            "{stage}: asset"
+        );
+        assert!(usage.cpu_bytes <= MAX_CPU_DECODED_BYTES, "{stage}: cpu");
+        assert!(usage.gpu_bytes <= MAX_GPU_TRACKED_BYTES, "{stage}: gpu");
+        assert!(usage.status_bytes <= MAX_STATUS_BYTES, "{stage}: status");
+        assert!(
+            usage.root_owner_bytes <= MAX_ROOT_OWNER_BYTES,
+            "{stage}: root"
+        );
+        assert!(
+            usage.sqlx_pool_bytes <= MAX_SQLX_POOL_BYTES,
+            "{stage}: sqlx"
+        );
+        max_prepare = max_prepare.max(usage.prepare_cpu_bytes);
+        max_asset = max_asset.max(usage.asset_cpu_bytes);
+        max_cpu = max_cpu.max(usage.cpu_bytes);
+        max_gpu = max_gpu.max(usage.gpu_bytes);
+        max_status = max_status.max(usage.status_bytes);
+    }
+    let peak = &stages.last().unwrap().1;
+    // Exact composition: startup/frame + request control + reply, source/model
+    // workspace on the prepare quota, and 32 x 4096 status bytes + write bound.
+    assert_eq!(
+        peak.control_prepare_cpu_bytes,
+        baseline.control_prepare_cpu_bytes + control_requested_bytes_for_test(&job_id) + 4096
+    );
+    assert_eq!(
+        peak.prepare_cpu_bytes,
+        peak.control_prepare_cpu_bytes + source.prepare_cpu_bytes
+    );
+    assert_eq!(
+        peak.asset_cpu_bytes,
+        baseline.asset_cpu_bytes + source.asset_cpu_bytes
+    );
+    assert_eq!(
+        peak.status_bytes,
+        baseline.status_bytes
+            + 32 * 4096
+            + status_write_bytes_for_test(sample_status.as_ref().unwrap())
+    );
+    assert_eq!(
+        budget.remaining_prepare_cpu_bytes(),
+        MAX_PREPARE_CPU_BYTES - peak.prepare_cpu_bytes
+    );
+    println!(
+        "stage composition max_prepare={max_prepare} max_asset={max_asset} max_cpu={max_cpu} max_gpu={max_gpu} max_status={max_status} remaining_prepare={}",
+        budget.remaining_prepare_cpu_bytes()
+    );
+
+    // Unwind every owner in reverse stage order.
+    drop(write_charge);
+    env.jobs.inner.lock().expect("job inner").history.clear();
+    drop(reply);
+    budget.release(token, &source.session, 1).unwrap();
+    budget.confirm_exit(token, &source.session, 1).unwrap();
+    assert!(budget.forget_released(token, &source.session, 1).unwrap());
+    drop(control);
+    drop(env);
+    assert_eq!(budget.usage().prepare_cpu_bytes, 0);
+    assert_eq!(budget.usage().status_bytes, 0);
+    assert_eq!(budget.usage().asset_cpu_bytes, 0);
+    assert_eq!(budget.record_count_for_test(), 0);
+}
