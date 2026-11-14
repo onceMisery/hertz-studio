@@ -63,7 +63,18 @@ export function compilePlan(projection, registry = null, identity = null) {
       || !Array.isArray(resolvedAssets)) throw new Error('composition-preparation-projection-required');
   const values = projectValues(ir, finalPublicValues);
   if (projection.semanticKey !== ir.semanticKey) throw new Error('composition-semantic-identity-mismatch');
-  if (ir.effects.length) throw new Error('composition-adapter-unavailable:effects');
+  const outputEffects = [];
+  for (const effect of ir.effects) {
+    if (effect.type !== 'colorAdjust' || effect.target.kind !== 'output')
+      throw new Error(`composition-adapter-unavailable:effect:${effect.type}:${effect.target.kind}`);
+    const properties = effect.properties || {};
+    if (Object.keys(properties).length !== 4
+      || !['brightness', 'contrast', 'saturation', 'hueDegrees'].every(name => Number.isFinite(properties[name])))
+      throw new Error('composition-effect-properties-invalid');
+    outputEffects.push({ brightness: properties.brightness, contrast: properties.contrast,
+      saturation: properties.saturation, hueDegrees: properties.hueDegrees });
+  }
+  if (outputEffects.length > 1) throw new Error('composition-adapter-unavailable:effect-chain');
   for (const binding of ir.bindings) {
     const invalid = validateBinding(binding, ir.numericSlots, ir.inputs.length);
     if (invalid) throw new Error(invalid);
@@ -241,5 +252,5 @@ export function compilePlan(projection, registry = null, identity = null) {
         || limits.drawingBufferPixels !== resources.drawingBufferPixels+pixels || limits.gpuContexts !== 1)
       throw new Error('composition-builtin-page-projection-mismatch:output');
   }
-  return { projection, ir, values, nodePlans, requirements: [...unique.values()], textRasters, resources, pixels, builtin, primitives, bindingParameters };
+  return { projection, ir, values, nodePlans, requirements: [...unique.values()], textRasters, resources, pixels, builtin, primitives, bindingParameters, outputEffects };
 }

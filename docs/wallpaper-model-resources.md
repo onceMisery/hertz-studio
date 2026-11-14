@@ -1012,3 +1012,15 @@ sceneTime .2/.6 像素 218/255；公共 gain=0 覆盖后 188；纯求值 map=15�
 smoothstep=.5、abs/sin/cos 组合通过。三处变异（sceneTime 输入恒 0、map 公式、
 忽略 binding parameter 覆盖）均变红后还原；34 项 composition 检查与前端聚合
 通过。效果图、GPU 时间/首帧与真实音频设备校准继续开放。
+
+2026-11-14 r64 output colorAdjust 续接：`plan.js` 接受 target=output 的 colorAdjust，
+校验 brightness/contrast/saturation/hueDegrees 四项有限，返回 `outputEffects`；
+节点效果、其它效果类型与链式多效果继续 fail-closed。`runtime.js` 最终输出
+shader 增加四项 uniform：线性空间加亮度、绕 0.5 对比度、Rec.709 亮度饱和度
+混合、hue 旋转矩阵，再走既有 `colorspace_fragment`；无效果时恒等参数，plan
+替换时更新输出 uniform。
+
+真实 Rust IR + Chrome 像素：红色底图 saturation=0 得到 127/127/127；
+brightness=0.2 得到 255/124/124。三处变异（忽略 saturation、忽略 brightness、
+plan 丢弃 outputEffects）均变红后还原；35 项 composition 检查与前端聚合通过。
+ripple/wind/mask/glow、节点离屏后处理、效果图 surface 预算与 GPU 时间继续开放。
