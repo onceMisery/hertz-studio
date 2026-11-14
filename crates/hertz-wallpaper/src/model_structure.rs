@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+﻿// SPDX-License-Identifier: MIT
 //! Bounded glTF structure and package dependency checks, after the sole GLB
 //! container inspector. These facts do not establish binary or GPU validity.
 
@@ -53,6 +53,167 @@ pub enum ModelImage {
         range: BinaryChunk,
         mime: String,
     },
+}
+
+/// Default sampler values required by the core glTF schema when the field or
+/// sampler object is omitted. The loader representation is always concrete.
+pub const MODEL_SAMPLER_MAG_FILTER: u32 = 9_729;
+pub const MODEL_SAMPLER_MIN_FILTER: u32 = 9_987;
+pub const MODEL_SAMPLER_WRAP: u32 = 10_497;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModelSampler {
+    pub mag_filter: u32,
+    pub min_filter: u32,
+    pub wrap_s: u32,
+    pub wrap_t: u32,
+}
+
+impl Default for ModelSampler {
+    fn default() -> Self {
+        Self {
+            mag_filter: MODEL_SAMPLER_MAG_FILTER,
+            min_filter: MODEL_SAMPLER_MIN_FILTER,
+            wrap_s: MODEL_SAMPLER_WRAP,
+            wrap_t: MODEL_SAMPLER_WRAP,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModelTexture {
+    pub source: usize,
+    pub sampler: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModelTextureInfo {
+    pub texture: usize,
+    pub tex_coord: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ModelNormalTexture {
+    pub texture: usize,
+    pub tex_coord: u32,
+    pub scale: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ModelOcclusionTexture {
+    pub texture: usize,
+    pub tex_coord: u32,
+    pub strength: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ModelPbr {
+    pub base_color_factor: [f64; 4],
+    pub base_color_texture: Option<ModelTextureInfo>,
+    pub metallic_factor: f64,
+    pub roughness_factor: f64,
+    pub metallic_roughness_texture: Option<ModelTextureInfo>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelAlphaMode {
+    Opaque,
+    Mask,
+    Blend,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ModelMaterial {
+    pub pbr: Option<ModelPbr>,
+    pub normal_texture: Option<ModelNormalTexture>,
+    pub occlusion_texture: Option<ModelOcclusionTexture>,
+    pub emissive_texture: Option<ModelTextureInfo>,
+    pub emissive_factor: [f64; 3],
+    pub alpha_mode: ModelAlphaMode,
+    pub alpha_cutoff: f64,
+    pub double_sided: bool,
+}
+
+/// Core metallic-roughness texture slots in the loader's fixed binding order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelTextureRole {
+    BaseColor,
+    MetallicRoughness,
+    Normal,
+    Occlusion,
+    Emissive,
+}
+
+/// One resolved loader-facing material texture slot. `image` is the glTF image
+/// index whose Package/Embedded availability stays with the existing image
+/// facts and texture resources.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModelTextureBinding {
+    pub role: ModelTextureRole,
+    pub texture: usize,
+    pub image: usize,
+    pub sampler: ModelSampler,
+    pub tex_coord: u32,
+}
+
+pub struct ModelMaterialTextureBindings<'a> {
+    structure: &'a ModelStructure,
+    material: Option<&'a ModelMaterial>,
+    slot: u8,
+}
+
+impl Iterator for ModelMaterialTextureBindings<'_> {
+    type Item = ModelTextureBinding;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let material = self.material?;
+        while self.slot < 5 {
+            let slot = self.slot;
+            self.slot += 1;
+            let (role, info) = match slot {
+                0 => (
+                    ModelTextureRole::BaseColor,
+                    material.pbr.and_then(|pbr| pbr.base_color_texture),
+                ),
+                1 => (
+                    ModelTextureRole::MetallicRoughness,
+                    material.pbr.and_then(|pbr| pbr.metallic_roughness_texture),
+                ),
+                2 => (
+                    ModelTextureRole::Normal,
+                    material.normal_texture.map(|info| ModelTextureInfo {
+                        texture: info.texture,
+                        tex_coord: info.tex_coord,
+                    }),
+                ),
+                3 => (
+                    ModelTextureRole::Occlusion,
+                    material.occlusion_texture.map(|info| ModelTextureInfo {
+                        texture: info.texture,
+                        tex_coord: info.tex_coord,
+                    }),
+                ),
+                _ => (ModelTextureRole::Emissive, material.emissive_texture),
+            };
+            let Some(info) = info else { continue };
+            let Some(texture) = self.structure.textures.get(info.texture) else {
+                continue;
+            };
+            let sampler = texture
+                .sampler
+                .and_then(|index| self.structure.samplers.get(index))
+                .copied()
+                .unwrap_or_default();
+            return Some(ModelTextureBinding {
+                role,
+                texture: info.texture,
+                image: texture.source,
+                sampler,
+                tex_coord: info.tex_coord,
+            });
+        }
+        None
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -188,6 +349,9 @@ pub struct ModelStructure {
     pub material_count: usize,
     pub texture_count: usize,
     pub sampler_count: usize,
+    pub materials: Vec<ModelMaterial>,
+    pub textures: Vec<ModelTexture>,
+    pub samplers: Vec<ModelSampler>,
     pub camera_count: usize,
     pub static_loader_fields: ModelStaticLoaderFields,
     /// Aligned with original node indices; None inherits the mesh defaults.
@@ -204,6 +368,21 @@ pub struct ModelStructure {
 pub struct GlbResource {
     pub container: GlbContainer,
     pub structure: ModelStructure,
+}
+
+impl ModelStructure {
+    /// Loader-facing representation conversion for one material. Unknown
+    /// material indices yield an empty iterator; slots are always resolved in
+    /// BaseColor→MetallicRoughness→Normal→Occlusion→Emissive order and never
+    /// allocate. Texture indices were closed against the same document during
+    /// inspection.
+    pub fn material_texture_bindings(&self, material: usize) -> ModelMaterialTextureBindings<'_> {
+        ModelMaterialTextureBindings {
+            structure: self,
+            material: self.materials.get(material),
+            slot: 0,
+        }
+    }
 }
 
 pub fn inspect_glb_resource<R: Read>(
@@ -344,7 +523,7 @@ fn inspect_structure(
         accessors.push(inspect_accessor(accessor, &buffer_views)?);
     }
     let images = inspect_images(&document.images.0, &buffer_views, manifest, path)?;
-    inspect_materials(&document)?;
+    let (materials, textures, samplers) = inspect_materials(&document)?;
     inspect_view_roles(&document, &accessors, &buffer_views)?;
     let mut meshes = Vec::with_capacity(document.meshes.0.len());
     let mut mesh_triangles_upper_bound = 0;
@@ -438,6 +617,9 @@ fn inspect_structure(
         material_count: document.materials.0.len(),
         texture_count: document.textures.0.len(),
         sampler_count: document.samplers.0.len(),
+        materials,
+        textures,
+        samplers,
         camera_count: document.cameras.0.len(),
         static_loader_fields,
         node_morph_weights: nodes.morph_weights,
@@ -1656,7 +1838,9 @@ fn unit(values: &[f64], role: &str) -> Result<()> {
     }
     Ok(())
 }
-fn inspect_materials(document: &Schema) -> Result<()> {
+fn inspect_materials(
+    document: &Schema,
+) -> Result<(Vec<ModelMaterial>, Vec<ModelTexture>, Vec<ModelSampler>)> {
     for texture in &document.textures.0 {
         let source = texture
             .source
@@ -1712,7 +1896,69 @@ fn inspect_materials(document: &Schema) -> Result<()> {
             unit(&[info.strength], "occlusion strength")?;
         }
     }
-    Ok(())
+    let texture_info = |info: &TextureInfo| ModelTextureInfo {
+        texture: info.index,
+        tex_coord: info.tex_coord,
+    };
+    let mut materials = Vec::with_capacity(document.materials.0.len());
+    for material in &document.materials.0 {
+        materials.push(ModelMaterial {
+            pbr: material
+                .pbr_metallic_roughness
+                .as_ref()
+                .map(|pbr| ModelPbr {
+                    base_color_factor: pbr.base_color_factor,
+                    base_color_texture: pbr.base_color_texture.as_ref().map(texture_info),
+                    metallic_factor: pbr.metallic_factor,
+                    roughness_factor: pbr.roughness_factor,
+                    metallic_roughness_texture: pbr
+                        .metallic_roughness_texture
+                        .as_ref()
+                        .map(texture_info),
+                }),
+            normal_texture: material
+                .normal_texture
+                .as_ref()
+                .map(|info| ModelNormalTexture {
+                    texture: info.index,
+                    tex_coord: info.tex_coord,
+                    scale: info.scale,
+                }),
+            occlusion_texture: material.occlusion_texture.as_ref().map(|info| {
+                ModelOcclusionTexture {
+                    texture: info.index,
+                    tex_coord: info.tex_coord,
+                    strength: info.strength,
+                }
+            }),
+            emissive_texture: material.emissive_texture.as_ref().map(texture_info),
+            emissive_factor: material.emissive_factor,
+            alpha_mode: match material.alpha_mode {
+                AlphaMode::Opaque => ModelAlphaMode::Opaque,
+                AlphaMode::Mask => ModelAlphaMode::Mask,
+                AlphaMode::Blend => ModelAlphaMode::Blend,
+            },
+            alpha_cutoff: material.alpha_cutoff,
+            double_sided: material.double_sided,
+        });
+    }
+    let mut textures = Vec::with_capacity(document.textures.0.len());
+    for texture in &document.textures.0 {
+        textures.push(ModelTexture {
+            source: texture.source.expect("validated texture source"),
+            sampler: texture.sampler,
+        });
+    }
+    let mut samplers = Vec::with_capacity(document.samplers.0.len());
+    for sampler in &document.samplers.0 {
+        samplers.push(ModelSampler {
+            mag_filter: sampler.mag_filter.unwrap_or(MODEL_SAMPLER_MAG_FILTER),
+            min_filter: sampler.min_filter.unwrap_or(MODEL_SAMPLER_MIN_FILTER),
+            wrap_s: sampler.wrap_s,
+            wrap_t: sampler.wrap_t,
+        });
+    }
+    Ok((materials, textures, samplers))
 }
 fn inspect_camera(camera: &Camera) -> Result<()> {
     match (&camera.kind, &camera.perspective, &camera.orthographic) {
@@ -2034,9 +2280,9 @@ named_schema!(Material {
     #[serde(default)] occlusion_texture:Option<OcclusionTexture>,
     #[serde(default)] emissive_texture:Option<TextureInfo>,
     #[serde(default)] emissive_factor:[f64;3],
-    #[serde(default,rename="alphaMode")] _alpha_mode:AlphaMode,
+    #[serde(default,rename="alphaMode")] alpha_mode:AlphaMode,
     #[serde(default="half")] alpha_cutoff:f64,
-    #[serde(default,rename="doubleSided")] _double_sided:bool,
+    #[serde(default,rename="doubleSided")] double_sided:bool,
 });
 #[derive(Default, Deserialize)]
 enum AlphaMode {

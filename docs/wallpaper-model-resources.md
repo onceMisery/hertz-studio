@@ -919,3 +919,22 @@ DFD 事实新增 `has_alpha`（任一 sample channel 低 4 位为 15）。
 全目标链、sRGB、两 mip rgba_bytes=80。三处变异（忽略 capability、transcode
 恒 RGBA8、rgba 只算 level0）均按预期变红后还原。本批不探测 GPU、不运行转码
 worker、不上传纹理、不产生首帧；Direct/Transcode 只是策略结果。
+
+2026-11-14 r59 loader 材质事实续接：`ModelStructure` 在原有校验通过后保留三组
+固定容量事实（≤4096）：`materials`（PBR baseColorFactor、五类纹理引用、normal
+scale、occlusion strength、emissiveFactor、alphaMode/alphaCutoff、doubleSided）、
+`textures`（source/sampler）、`samplers`（缺省字段落成 glTF 默认 mag 9729、
+min 9987、wrap 10497）。新增 `material_texture_bindings(material)` 零分配槽位
+表示转换：固定 BaseColor→MetallicRoughness→Normal→Occlusion→Emissive 顺序，
+逐项解析 texture→image、sampler（无 sampler 用默认）、texCoord；未知 material
+为空迭代，不拼接路径、不读文件、不借出 File。
+
+真实 fixture 证据：两材质文档保留 PBR factors、normal scale 0.5、occlusion
+strength 0.5、MASK/0.25/doubleSided 与默认材质；三纹理分别使用显式 sampler0、
+只声明 wrapS 的 sampler1 与无 sampler，槽位得到 9728/9729/33071/33648、
+9729/9987/33071/10497 与全默认 9729/9987/10497/10497；texCoord 0/1/0/0/2 与
+image 0 全部匹配。桌面 complete-facts 测试解构新增三组字段并逐项比对 native
+投影与纯 crate 槽位。`fact_roots()` 与 compact retained 计入三个固定容量 Vec。
+三处变异（调换槽位角色、minFilter 默认写错、用 texture 索引冒充 image）均按
+预期变红后还原。本批不创建 decoder/renderer/GPU，不发起浏览器请求，不接
+WebView2；loader 实际 Three 表示转换与 GPU 首帧继续开放。

@@ -50,6 +50,9 @@ fn assert_complete_facts(
             material_count,
             texture_count,
             sampler_count,
+            materials,
+            textures,
+            samplers,
             camera_count,
             static_loader_fields,
             node_morph_weights,
@@ -71,6 +74,23 @@ fn assert_complete_facts(
         assert_eq!(s.material_count, *material_count);
         assert_eq!(s.texture_count, *texture_count);
         assert_eq!(s.sampler_count, *sampler_count);
+        assert_eq!(s.materials, materials.as_slice());
+        assert_eq!(s.textures, textures.as_slice());
+        assert_eq!(s.samplers, samplers.as_slice());
+        for index in 0..materials.len() {
+            let mut native = f.material_texture_bindings(index);
+            let mut pure = original
+                .resource()
+                .structure
+                .material_texture_bindings(index);
+            loop {
+                match (native.next(), pure.next()) {
+                    (None, None) => break,
+                    (Some(native), Some(pure)) => assert_eq!(native, pure),
+                    _ => panic!("material binding conversion changed"),
+                }
+            }
+        }
         assert_eq!(s.camera_count, *camera_count);
         assert_eq!(s.static_loader_fields, *static_loader_fields);
         assert_eq!(s.node_morph_weights, node_morph_weights);
