@@ -63,16 +63,40 @@ export function compilePlan(projection, registry = null, identity = null) {
       || !Array.isArray(resolvedAssets)) throw new Error('composition-preparation-projection-required');
   const values = projectValues(ir, finalPublicValues);
   if (projection.semanticKey !== ir.semanticKey) throw new Error('composition-semantic-identity-mismatch');
-  const outputEffects = [];
+  const outputEffects = [], nodeEffects = new Map();
+  const nodeIndices = new Map(ir.nodes.map((node, index) => [node.id, index]));
   for (const effect of ir.effects) {
-    if (effect.type !== 'colorAdjust' || effect.target.kind !== 'output')
-      throw new Error(`composition-adapter-unavailable:effect:${effect.type}:${effect.target.kind}`);
-    const properties = effect.properties || {};
-    if (Object.keys(properties).length !== 4
-      || !['brightness', 'contrast', 'saturation', 'hueDegrees'].every(name => Number.isFinite(properties[name])))
+    const target = effect.target;
+    if (effect.type === 'colorAdjust') {
+      if (target.kind !== 'output')
+        throw new Error(`composition-adapter-unavailable:effect:${effect.type}:${target.kind}`);
+      const properties = effect.properties || {};
+      if (Object.keys(properties).length !== 4
+        || !['brightness', 'contrast', 'saturation', 'hueDegrees'].every(name => Number.isFinite(properties[name])))
+        throw new Error('composition-effect-properties-invalid');
+      outputEffects.push({ brightness: properties.brightness, contrast: properties.contrast,
+        saturation: properties.saturation, hueDegrees: properties.hueDegrees });
+      continue;
+    }
+    if (effect.type !== 'ripple' && effect.type !== 'wind')
+      throw new Error(`composition-adapter-unavailable:effect:${effect.type}:${target.kind}`);
+    if (target.kind !== 'node')
+      throw new Error(`composition-adapter-unavailable:effect:${effect.type}:${target.kind}`);
+    const index = nodeIndices.get(target.nodeId);
+    if (index === undefined) throw new Error('composition-effect-target-invalid');
+    if (!['image', 'video', 'text', 'particles'].includes(ir.nodes[index].nodeType))
+      throw new Error(`composition-adapter-unavailable:effect-target:${ir.nodes[index].nodeType}`);
+    if (effect.assets && Object.keys(effect.assets).length) throw new Error('composition-effect-assets-invalid');
+    const properties = effect.properties || {}, names = effect.type === 'ripple'
+      ? ['amplitude', 'frequency', 'speed'] : ['strength', 'speed', 'directionDegrees'];
+    if (Object.keys(properties).length !== names.length || !names.every(name => Number.isFinite(properties[name])))
       throw new Error('composition-effect-properties-invalid');
-    outputEffects.push({ brightness: properties.brightness, contrast: properties.contrast,
-      saturation: properties.saturation, hueDegrees: properties.hueDegrees });
+    const effects = nodeEffects.get(index) || {};
+    if (effects[effect.type]) throw new Error('composition-adapter-unavailable:effect-chain');
+    effects[effect.type] = effect.type === 'ripple'
+      ? { amplitude: properties.amplitude, frequency: properties.frequency, speed: properties.speed }
+      : { strength: properties.strength, speed: properties.speed, directionDegrees: properties.directionDegrees };
+    nodeEffects.set(index, effects);
   }
   if (outputEffects.length > 1) throw new Error('composition-adapter-unavailable:effect-chain');
   for (const binding of ir.bindings) {
@@ -190,6 +214,7 @@ export function compilePlan(projection, registry = null, identity = null) {
     }
     return result;
   });
+  for (const [index, effects] of nodeEffects) nodePlans[index].effects = effects;
   const textRasters = [], coveredNodes = new Set(), rasterKeys = new Set();
   const rasterFacts = projection.textRasters || [];
   if (!Array.isArray(rasterFacts) || rasterFacts.length > ir.nodes.length)
