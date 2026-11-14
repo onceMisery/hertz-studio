@@ -13,8 +13,11 @@ use std::sync::atomic::AtomicUsize;
 
 const WORK_ID: &str = "c17ed10a-5c55-4a52-85dc-7509f9e88aae";
 fn document(nodes: Value) -> Value {
+    document_with_effects(nodes, json!([]))
+}
+fn document_with_effects(nodes: Value, effects: Value) -> Value {
     json!({"documentVersion":1,"canvas":{"width":64,"height":64,"colorSpace":"srgb","background":"#000000"},
-    "nodes":nodes,"timeline":{"durationSeconds":4,"loop":true,"tracks":[]},"bindings":[],"effects":[]})
+    "nodes":nodes,"timeline":{"durationSeconds":4,"loop":true,"tracks":[]},"bindings":[],"effects":effects})
 }
 fn target() -> ImageTarget {
     ImageTarget {
@@ -31,6 +34,16 @@ async fn install(
     properties: Value,
     video: bool,
 ) -> (Arc<ImportJobs>, String, Arc<AtomicUsize>) {
+    install_with_effects(root, nodes, json!([]), properties, video).await
+}
+
+async fn install_with_effects(
+    root: &std::path::Path,
+    nodes: Value,
+    effects: Value,
+    properties: Value,
+    video: bool,
+) -> (Arc<ImportJobs>, String, Arc<AtomicUsize>) {
     let probes = Arc::new(AtomicUsize::new(0));
     let counted = Arc::clone(&probes);
     let jobs = Arc::new(ImportJobs::start(
@@ -43,7 +56,7 @@ async fn install(
     ));
     let mut entries = vec![(
         "composition.json",
-        serde_json::to_vec(&document(nodes)).unwrap(),
+        serde_json::to_vec(&document_with_effects(nodes, effects)).unwrap(),
         "application/json",
     )];
     let mut assets = vec![];
@@ -647,6 +660,84 @@ async fn final_video_range_uses_true_duration_and_single_preparation_owner() {
         )
         .unwrap();
         std::fs::write(output.join("uri.txt"), admission.composition_url().unwrap()).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn native_glow_fixture_projects_two_half_resolution_surfaces_into_the_original_page_budget() {
+    let root = tempfileish::temp_dir("composition-native-glow");
+    let (jobs, hash, probes) = install_with_effects(
+        root.path(),
+        json!([{"id":"video","type":"video","stateVersion":1,"assets":{"asset":"movie"},
+            "properties":{"width":1234,"height":3456,"loopStartMs":0,"loopEndMs":1000}}]),
+        json!([{"id":"bloom","type":"glow","stateVersion":1,"target":{"kind":"output"},
+            "properties":{"strength":1.0,"radius":8.0,"threshold":0.5}}]),
+        json!([]),
+        true,
+    )
+    .await;
+    let plan = selected(jobs, hash, Default::default()).await.unwrap();
+    assert_eq!(probes.load(Ordering::Acquire), 1);
+    let package_hash = plan.assets["movie"]
+        .as_media()
+        .unwrap()
+        .reference()
+        .package_hash
+        .clone();
+    let gl = plan
+        .gl_plan(OwnerKind::Preview, "glow-owner".into(), 1, 60, 15)
+        .unwrap();
+    let projection = plan
+        .projection("same-fixed-session-glow", 1, 5, &gl.limits)
+        .unwrap();
+    let effects = projection["ir"]["effects"].as_array().unwrap();
+    assert_eq!(effects.len(), 1);
+    assert_eq!(effects[0]["type"], "glow");
+    assert_eq!(projection["ir"]["effectSurfaces"][0], 2);
+    let requirement = projection["ir"]["staticRequirements"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["kind"] == "effectSurfaces")
+        .unwrap();
+    assert_eq!(requirement["count"], 2);
+    assert_eq!(requirement["sampleScale"], 0.5);
+    assert_eq!(requirement["cost"]["surfaces"], 2);
+    assert_eq!(requirement["cost"]["drawPasses"], 3);
+    // The original page allowance stays pixels*(16+depth) plus the declared
+    // effect surfaces. The scene target reserves 8 B/px and two half-resolution
+    // RGBA8 glow surfaces reserve 2*ceil(w/2)*ceil(h/2)*4.
+    let page = &projection["pageLimits"];
+    assert_eq!(
+        page["renderTargetDeclaredBytes"],
+        64 * 64 * 16 + 2 * 32 * 32 * 4
+    );
+    assert!(64 * 64 * 8 + 2 * 32 * 32 * 4 <= page["renderTargetDeclaredBytes"].as_u64().unwrap());
+    assert_eq!(page["programs"], 4);
+    if let Some(output) = std::env::var_os("HERTZ_COMPOSITION_NATIVE_FIXTURE") {
+        let output = std::path::PathBuf::from(output).join("glow");
+        std::fs::create_dir_all(&output).unwrap();
+        let binding = super::super::page_events::PageBinding::new(1).unwrap();
+        let access = super::super::access::MediaAccess::new();
+        let mut admission =
+            super::super::gl_plan::GlAdmission::new(gl, Arc::new(BudgetCoordinator::new())).unwrap();
+        admission
+            .bind_composition(plan, &access, binding.session_id())
+            .unwrap();
+        let uri = admission.composition_url().unwrap();
+        let path = uri.split("/files/").nth(1).unwrap();
+        let projection_reader = access.permit(&package_hash, path).unwrap();
+        std::fs::write(output.join("projection.json"), projection_reader.payload().unwrap()).unwrap();
+        std::fs::write(output.join("uri.txt"), uri).unwrap();
+        std::fs::write(
+            output.join("native-init.js"),
+            format!(
+                "{}\n{}",
+                binding.initialization_script(),
+                admission.initialization_script()
+            ),
+        )
+        .unwrap();
     }
 }
 

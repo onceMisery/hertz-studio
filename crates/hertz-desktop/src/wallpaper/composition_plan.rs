@@ -9,7 +9,8 @@ use std::sync::{
 };
 
 use hertz_wallpaper::document::{
-    CompiledDocument, FinalPublicValues, PublicTarget, ResolvedAssetIdentity, TargetIdentity,
+    CompiledDocument, EffectTarget, FinalPublicValues, PublicTarget, ResolvedAssetIdentity,
+    StaticRequirement, TargetIdentity,
 };
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -674,15 +675,36 @@ fn validate_adapters(compiled: &CompiledDocument) -> Result<()> {
 
 fn validate_structure(compiled: &CompiledDocument) -> Result<()> {
     let document = compiled.document();
-    if !document.effects.is_empty()
-        || !compiled.ir().tracks().is_empty()
+    if !compiled.ir().tracks().is_empty()
         || !compiled.ir().bindings().is_empty()
         || document.canvas.scene3d.is_some()
     {
         return Err(JobError::new(
             "adapter_unavailable",
-            "P2-02 尚未准备效果、轨道、绑定或 3D adapter",
+            "P2-02 尚未准备轨道、绑定或 3D adapter",
         ));
+    }
+    for effect in &document.effects {
+        if !effect.assets.is_empty() {
+            return Err(JobError::new(
+                "adapter_unavailable",
+                format!("P2-02 effect 资源尚未准备：{}", effect.effect_type),
+            ));
+        }
+        let supported = matches!(
+            (&effect.target, effect.effect_type.as_str()),
+            (EffectTarget::Output, "colorAdjust" | "glow")
+                | (
+                    EffectTarget::Node { .. },
+                    "colorAdjust" | "ripple" | "wind"
+                )
+        );
+        if !supported {
+            return Err(JobError::new(
+                "adapter_unavailable",
+                format!("P2-02 effect adapter 尚未准备：{}", effect.effect_type),
+            ));
+        }
     }
     for node in compiled.ir().nodes() {
         if node.node_type == "builtinScene" {
@@ -724,6 +746,7 @@ struct Costs {
     draw_calls: u64,
     points: u64,
     triangles: u64,
+    effect_surface_bytes: u64,
 }
 
 fn final_number(
@@ -810,6 +833,30 @@ fn geometry_costs(compiled: &CompiledDocument, final_values: &FinalPublicValues)
             "builtinScene 整组合 primitive 成本超出 source low profile",
         ));
     }
+    // Output effects own real passes/programs in the shipped runtime: glow is a
+    // threshold plus one shared two-axis blur program, node effects reuse the
+    // node program and only change uniforms.
+    for requirement in compiled.ir().static_requirements() {
+        let StaticRequirement::EffectSurfaces {
+            effect_index,
+            count,
+            cost,
+            ..
+        } = requirement
+        else {
+            continue;
+        };
+        if *count == 0 {
+            continue;
+        }
+        let effect = &compiled.document().effects[*effect_index];
+        let passes = u64::from(cost.draw_passes);
+        costs.draw_calls = checked_sum(&[costs.draw_calls, passes])?;
+        costs.triangles = checked_sum(&[costs.triangles, checked_product(passes, 2)?])?;
+        if effect.effect_type == "glow" {
+            costs.programs = checked_sum(&[costs.programs, 2])?;
+        }
+    }
     Ok(costs)
 }
 
@@ -845,6 +892,30 @@ fn complete_costs(
     costs.semantic_bytes = checked_sum(&[checked_product(bytes, 3)?, 4096, closure_bytes])?;
     costs.font_cpu_bytes = rasters.font_cpu_bytes();
     costs.raster_bytes = rasters.raster_rgba_bytes();
+    let mut effect_surface_bytes = 0_u64;
+    for requirement in compiled.ir().static_requirements() {
+        let StaticRequirement::EffectSurfaces {
+            count,
+            sample_scale,
+            cost,
+            ..
+        } = requirement
+        else {
+            continue;
+        };
+        if *count == 0 {
+            continue;
+        }
+        let width = (f64::from(target.width) * sample_scale).ceil().max(1.0) as u64;
+        let height = (f64::from(target.height) * sample_scale).ceil().max(1.0) as u64;
+        let surface = checked_product(width, height)?;
+        let surfaces = checked_product(surface, u64::from(*count))?;
+        effect_surface_bytes = checked_sum(&[
+            effect_surface_bytes,
+            checked_product(surfaces, u64::from(cost.bytes_per_pixel))?,
+        ])?;
+    }
+    costs.effect_surface_bytes = effect_surface_bytes;
     costs.cpu = checked_sum(&[
         costs.decode_bytes,
         costs.private_cpu_bytes,
@@ -854,7 +925,8 @@ fn complete_costs(
         costs.raster_bytes,
     ])?;
     // Original RGBA8/depth buffer (8P), linear RGBA16F target (8P),
-    // actual textures/private geometry and unfinished video/bootstrap peaks.
+    // actual textures/private geometry, effect surfaces and unfinished
+    // video/bootstrap peaks.
     costs.gpu = checked_sum(&[
         checked_product(
             checked_product(u64::from(target.width), u64::from(target.height))?,
@@ -864,6 +936,7 @@ fn complete_costs(
         costs.raster_bytes,
         costs.buffer_bytes,
         costs.video_upload_peak_bytes,
+        costs.effect_surface_bytes,
         super::gl_plan::THREE_BOOTSTRAP_GPU_PEAK_BYTES,
     ])?;
     if super::builtin_plan::source_costs(compiled, final_values)?
@@ -1304,7 +1377,7 @@ impl PreparedComposition {
             "resolvedAssets":resolved_assets,"resolvedUses":self.final_values.resource_uses().iter().map(|usage|if self.assets.contains_key(&usage.asset_id){usage.asset_id.clone()}else{svg_use_id(usage)}).collect::<Vec<_>>(),"textRasters":self.text_rasters.text_rasters(),"target":{"width":self.target.width,"height":self.target.height,"fit":self.output_fit,
                 "budgetFps":identity.effective_budget_fps,"budgetAllocationRevision":allocation_revision},"sessionId":session_id,"generation":generation,
             "pageLimits":{"gpuContexts":1,"drawingBufferPixels":checked_sum(&[pixels,self.text_rasters.raster_pixels()])?,
-                "renderTargetDeclaredBytes":checked_product(pixels,16 + cost.depth_bytes_per_pixel)?,"textureDeclaredBytes":checked_sum(&[cost.texture_bytes,cost.raster_bytes])?,
+                "renderTargetDeclaredBytes":checked_sum(&[checked_product(pixels,16 + cost.depth_bytes_per_pixel)?,cost.effect_surface_bytes])?,"textureDeclaredBytes":checked_sum(&[cost.texture_bytes,cost.raster_bytes])?,
                 "bufferDeclaredBytes":cost.buffer_bytes,"ownedCpuBytes":checked_sum(&[cost.private_cpu_bytes,cost.input_bytes,cost.font_cpu_bytes,cost.raster_bytes])?,"decodeReservedBytes":cost.decode_bytes,
                 "decoderLeases":cost.decoders,"programs":cost.programs,"canvases":self.text_rasters.unique_raster_count()}});
         // Match the existing MediaAccess payload ceiling before granting the
