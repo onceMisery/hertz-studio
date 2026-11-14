@@ -12,6 +12,7 @@ pub mod archive;
 pub mod catalog;
 pub mod document;
 pub mod json;
+pub mod ktx2_upload;
 pub mod manifest;
 pub mod media;
 pub mod model_binary;

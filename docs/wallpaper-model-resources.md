@@ -903,3 +903,19 @@ generation None；fail 撤销后 None。三处变异（url 恒 None、session �
 generation、URL 只返回 path）均按预期变红后还原。本批不发起浏览器请求、不接
 WebView2、不创建 decoder/renderer/GPU；URL 是可服务性绑定，不是实际 HTTP
 响应或 GPU 首帧证据。
+
+2026-11-14 r55 KTX2 上传选择续接：新增纯策略模块 `ktx2_upload`，输入已验证
+container 与调用方声明的 `Ktx2UploadCapabilities { astc, etc1, etc2, dxt,
+bptc }`（对应 Three KTX2Loader 探测的 WebGL 扩展），输出
+`Direct { vk_format }` 或 `Transcode { target, srgb, rgba_bytes }`。RGBA8_UNORM
+总是 Direct；BC1–3/BC6H–7/ETC2/ASTC LDR 分别要求 dxt/bptc/etc2/astc；
+BC4/5、EAC、未知格式与非 Basis 超压缩 fail-closed。ETC1S/UASTC 目标优先级
+ASTC4x4 > UASTC BC7 > BC3/BC1（alpha 决定）> ETC2 RGBA/RGB >
+ETC1S 非 alpha 非 sRGB 的 ETC1 > RGBA8；rgba_bytes 按全部已声明 mip 求和。
+DFD 事实新增 `has_alpha`（任一 sample channel 低 4 位为 15）。
+
+真实证据：basislz fixture（ETC1S、无 alpha）全能力 → Astc4x4/64B；Zlib fixture
+（vk37/sc3）→ unavailable。合成矩阵覆盖各 family 有无 capability、ETC1S/UASTC
+全目标链、sRGB、两 mip rgba_bytes=80。三处变异（忽略 capability、transcode
+恒 RGBA8、rgba 只算 level0）均按预期变红后还原。本批不探测 GPU、不运行转码
+worker、不上传纹理、不产生首帧；Direct/Transcode 只是策略结果。
