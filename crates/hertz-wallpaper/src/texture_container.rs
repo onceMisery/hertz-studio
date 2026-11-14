@@ -22,6 +22,7 @@ const BASISLZ_MAX_ENDPOINTS: u16 = 16_128;
 const BASISLZ_MAX_SELECTORS: u16 = 16_128;
 const BASISLZ_HEADER_BYTES: u64 = 20;
 const BASISLZ_IMAGE_DESC_BYTES: u64 = 20;
+const KHR_DF_CHANNEL_RGBSDA_ALPHA: u8 = 15;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ktx2Level {
@@ -42,6 +43,8 @@ pub struct Ktx2DataFormat {
     pub texel_block: [u8; 4],
     pub bytes_plane: [u8; 8],
     pub sample_count: u16,
+    /// True when any sample declares the RGBSDA alpha channel.
+    pub has_alpha: bool,
 }
 
 /// BasisLZ supercompression global data framing. The ETC1S payload and Huffman
@@ -333,10 +336,12 @@ fn parse_data_format<R: Read>(
         ));
     }
     let texel_bits = u32::from(bytes_plane[0]) * 8;
+    let mut has_alpha = false;
     for _ in 0..sample_count {
         let sample = reader.fixed::<16>()?;
         let offset = u32::from(u16::from_le_bytes([sample[0], sample[1]]));
         let length = u32::from(sample[2]);
+        has_alpha |= sample[3] & 0x0F == KHR_DF_CHANNEL_RGBSDA_ALPHA;
         if length == 0
             || offset
                 .checked_add(length)
@@ -376,6 +381,7 @@ fn parse_data_format<R: Read>(
         texel_block,
         bytes_plane,
         sample_count: u16::try_from(sample_count).expect("bounded KTX2 DFD sample count"),
+        has_alpha,
     })
 }
 

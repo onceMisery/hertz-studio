@@ -282,6 +282,7 @@ fn ktx2_exposes_rgba8_basic_descriptor_and_rejects_unsupported_variants() {
             texel_block: [1, 1, 1, 1],
             bytes_plane: [4, 0, 0, 0, 0, 0, 0, 0],
             sample_count: 4,
+            has_alpha: true,
         }
     );
     for (offset, value) in [(108, 1), (112, 1), (116, 0), (122, 1), (123, 1), (125, 1)] {
