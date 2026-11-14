@@ -1114,3 +1114,18 @@ budget.error=null、contexts 1→0。
 （native 拒绝 tracks、runtime 不执行 applyTimeline、binding sceneTime 恒 0）
 均变红后还原；composition 41 项与前端聚合 86 步通过。mask 原生资源准入、
 3D/model adapter、GPU 设备矩阵与 A01/A05–A10 外部验收继续开放。
+
+2026-11-14 r71 native mask effect 续接：`validate_structure` 允许 node mask
+（唯一带 assets 的效果）；`validate_resource_uses` 对 effect use 改用效果 schema
+校验 kind；`media_costs` 新增 `usage_node_index`，由 effect target nodeId 解析
+目标节点，mask 纹理计入 texture_bytes（program/RT 不变）。新增 Rust fixture：
+64×64 红底图 + 64×64 mask（左白右黑）invert=false，投影含 mask effect 与两张
+prepared image，textureDeclaredBytes=32768，并发射 `mask/`（含 prepared PNG 与
+files.json）。原生页面加载后左像素 [255,0,0]、右像素 [0,0,0]，budget.error=null、
+contexts 1→0。
+
+验证：两工具链串行全量各 855 passed / 0 failed / 2 ignored，clippy 双工具链
+通过；原生页面检查连续 3 次通过并写 mask 截图/evidence；三处变异（native 拒绝
+mask、资源 schema 校验忽略 effect、runtime plan 拒绝 effect use）均变红后还原；
+composition 41 项与前端聚合 86 步通过。3D/model adapter、GPU 设备矩阵与
+A01/A05–A10 外部验收继续开放。

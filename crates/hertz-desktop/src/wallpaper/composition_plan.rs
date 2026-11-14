@@ -10,7 +10,7 @@ use std::sync::{
 
 use hertz_wallpaper::document::{
     CompiledDocument, EffectTarget, FinalPublicValues, PublicTarget, ResolvedAssetIdentity,
-    StaticRequirement, TargetIdentity,
+    ResourceUse, StaticRequirement, TargetIdentity,
 };
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -244,17 +244,31 @@ fn validate_resource_uses(
             .iter()
             .find(|asset| asset.id == usage.asset_id)
             .ok_or_else(|| JobError::new("asset_not_found", "最终资源槽不属于固定包"))?;
-        let node = usage
-            .node_index
-            .and_then(|index| compiled.ir().nodes().get(index))
-            .ok_or_else(|| JobError::new("adapter_unavailable", "效果资源未准备"))?;
-        let schema = catalog
-            .definitions
-            .nodes
-            .iter()
-            .find(|schema| schema.node_type == node.node_type)
-            .and_then(|schema| schema.assets.get(&usage.field))
-            .ok_or_else(|| JobError::invalid_input("最终资源槽未在合同中声明"))?;
+        let schema = if let Some(effect_index) = usage.effect_index {
+            let effect = compiled
+                .document()
+                .effects
+                .get(effect_index)
+                .ok_or_else(|| JobError::invalid_input("效果资源索引无效"))?;
+            catalog
+                .definitions
+                .effects
+                .iter()
+                .find(|schema| schema.effect_type == effect.effect_type)
+                .and_then(|schema| schema.assets.get(&usage.field))
+        } else {
+            let node = usage
+                .node_index
+                .and_then(|index| compiled.ir().nodes().get(index))
+                .ok_or_else(|| JobError::new("adapter_unavailable", "效果资源未准备"))?;
+            catalog
+                .definitions
+                .nodes
+                .iter()
+                .find(|schema| schema.node_type == node.node_type)
+                .and_then(|schema| schema.assets.get(&usage.field))
+        }
+        .ok_or_else(|| JobError::invalid_input("最终资源槽未在合同中声明"))?;
         if !schema.kinds.contains(&asset.kind) {
             return Err(JobError::new(
                 "format_unsupported",
@@ -667,6 +681,23 @@ fn svg_use_id(usage: &hertz_wallpaper::document::ResourceUse) -> String {
     )
 }
 
+/// Effect-owned resources (currently only the mask texture) have no direct
+/// node index; their sampler still belongs to the effect target node.
+fn usage_node_index(compiled: &CompiledDocument, usage: &ResourceUse) -> Option<usize> {
+    if let Some(index) = usage.node_index {
+        return Some(index);
+    }
+    let effect = compiled.document().effects.get(usage.effect_index?)?;
+    match &effect.target {
+        EffectTarget::Node { node_id } => compiled
+            .ir()
+            .nodes()
+            .iter()
+            .position(|node| &node.id == node_id),
+        EffectTarget::Output => None,
+    }
+}
+
 fn validate_adapters(compiled: &CompiledDocument) -> Result<()> {
     // A declaration grants no access: text still needs sealed glyph coverage,
     // native FontFace qualification, complete admission and real first submit.
@@ -711,24 +742,26 @@ fn validate_structure(compiled: &CompiledDocument) -> Result<()> {
         }
     }
     for effect in &document.effects {
-        if !effect.assets.is_empty() {
-            return Err(JobError::new(
-                "adapter_unavailable",
-                format!("P2-02 effect 资源尚未准备：{}", effect.effect_type),
-            ));
-        }
         let supported = matches!(
             (&effect.target, effect.effect_type.as_str()),
             (EffectTarget::Output, "colorAdjust" | "glow")
                 | (
                     EffectTarget::Node { .. },
-                    "colorAdjust" | "ripple" | "wind"
+                    "colorAdjust" | "ripple" | "wind" | "mask"
                 )
         );
         if !supported {
             return Err(JobError::new(
                 "adapter_unavailable",
                 format!("P2-02 effect adapter 尚未准备：{}", effect.effect_type),
+            ));
+        }
+        // The mask effect is the only effect with one prepared mask texture;
+        // every other effect must stay asset-free until its own adapter lands.
+        if !effect.assets.is_empty() && effect.effect_type != "mask" {
+            return Err(JobError::new(
+                "adapter_unavailable",
+                format!("P2-02 effect 资源尚未准备：{}", effect.effect_type),
             ));
         }
     }
@@ -1069,8 +1102,7 @@ impl PreparedComposition {
                 return Err(JobError::new("asset_not_found", "最终资源闭包未准备"));
             };
             let metadata = &media.input().metadata;
-            let index = usage
-                .node_index
+            let index = usage_node_index(&self.compiled, usage)
                 .ok_or_else(|| JobError::new("adapter_unavailable", "效果资源未准备"))?;
             let is_video = metadata.container != Container::Image;
             if is_video

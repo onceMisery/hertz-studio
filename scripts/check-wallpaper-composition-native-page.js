@@ -249,7 +249,45 @@ if(diagnostic){
     assert.equal((await tracksPage.evaluate(()=>HertzGlBudget.stats())).contexts,0);
     await tracksPage.close();
   }
-  fs.writeFileSync(path.join(output,'native-page-evidence.json'),JSON.stringify({source:'actual Rust production selector + GlAdmission + original native page',qualification:'browser integration; copied scheduler metadata matches measured headless rAF; native resource caps unchanged; controlled visibility event/state; Windows/GPU qualification pending',cadence:{intervals:cadence,refreshHz,running:runningCadence},state,blockedBefore,blockedAfter,hiddenBefore,hiddenAfter,visibilityResumed,fits,glow,tracks,paused,retired,errors},null,2));
-  console.log('PASS native composition page: real Rust projection, one context, complete frame, pause and retirement'+(glow?', glow surfaces admitted':'')+(tracks?', tracks/bindings applied':''));
+  const maskDir=path.join(output,'mask');
+  let mask=null;
+  if(fs.existsSync(path.join(maskDir,'projection.json'))){
+    const maskProjection=JSON.parse(fs.readFileSync(path.join(maskDir,'projection.json'),'utf8'));
+    const maskUri=fs.readFileSync(path.join(maskDir,'uri.txt'),'utf8');
+    const maskInit=bindCadence(fs.readFileSync(path.join(maskDir,'native-init.js'),'utf8'));
+    const maskFiles=JSON.parse(fs.readFileSync(path.join(maskDir,'files.json'),'utf8'));
+    const maskPage=await browser.newPage({viewport:{width:64,height:64}}),maskErrors=[];
+    maskPage.on('pageerror',error=>maskErrors.push(error.message));
+    maskPage.on('console',message=>{if(message.type()==='error')maskErrors.push(message.text());});
+    await maskPage.addInitScript(maskInit+'\nwindow.nativeEvents=[];window.ipc={postMessage:message=>nativeEvents.push(message)};');
+    await maskPage.route('https://**.wallpaper.invalid/**',route=>{
+      if(route.request().url()===maskUri)return route.fulfill({status:200,contentType:'application/json',body:JSON.stringify(maskProjection)});
+      const asset=maskFiles.find(entry=>entry.url===route.request().url());
+      if(asset)return route.fulfill({status:200,contentType:'image/png',body:fs.readFileSync(path.join(maskDir,asset.file))});
+      return route.fulfill({status:404,body:''});
+    });
+    await maskPage.route('http://hertz.localhost/',route=>route.fulfill({status:200,contentType:'text/html',body:html}));
+    await maskPage.goto('http://hertz.localhost/');
+    assert.equal(await maskPage.evaluate(async url=>{hertzWallpaper.applyConfig({source:'fixed',audioInput:{kind:'none'},motion:1,quality:'low'});
+      const prepared=hertzWallpaper.applyComposition(url);hertzWallpaper.start(15);return await prepared;},maskUri),true);
+    await maskPage.waitForFunction(()=>nativeEvents.some(event=>event.includes('firstFrame')),null,{timeout:10000});
+    await maskPage.waitForFunction(()=>hertzWallpaper.debug().draws>=2,null,{timeout:10000});
+    const masked=await maskPage.evaluate(()=>{
+      const gl=document.querySelector('#host canvas').getContext('webgl2');
+      const sample=(x,y)=>{const pixel=new Uint8Array(4);gl.readPixels(x,63-y,1,1,gl.RGBA,gl.UNSIGNED_BYTE,pixel);return [...pixel];};
+      return {left:sample(16,32),right:sample(48,32),stats:hertzWallpaper.debug(),budget:HertzGlBudget.stats()};
+    });
+    assert(masked.left[0]>200&&masked.left[1]<20&&masked.left[2]<20,'mask keeps the left red half');
+    assert(Math.max(...masked.right.slice(0,3))<=8,'mask hides the right half');
+    assert.equal(masked.budget.contexts,1);assert.equal(masked.budget.error,null);assert.deepEqual(maskErrors,[]);
+    mask={pixels:{left:masked.left,right:masked.right},budget:masked.budget,ir:{effects:maskProjection.ir.effects.length,textures:maskFiles.length}};
+    await maskPage.evaluate(()=>hertzWallpaper.reveal());
+    await maskPage.screenshot({path:path.join(maskDir,'native-page-mask.png')});
+    await maskPage.evaluate(()=>hertzWallpaper.unmount());await maskPage.waitForTimeout(50);
+    assert.equal((await maskPage.evaluate(()=>HertzGlBudget.stats())).contexts,0);
+    await maskPage.close();
+  }
+  fs.writeFileSync(path.join(output,'native-page-evidence.json'),JSON.stringify({source:'actual Rust production selector + GlAdmission + original native page',qualification:'browser integration; copied scheduler metadata matches measured headless rAF; native resource caps unchanged; controlled visibility event/state; Windows/GPU qualification pending',cadence:{intervals:cadence,refreshHz,running:runningCadence},state,blockedBefore,blockedAfter,hiddenBefore,hiddenAfter,visibilityResumed,fits,glow,tracks,mask,paused,retired,errors},null,2));
+  console.log('PASS native composition page: real Rust projection, one context, complete frame, pause and retirement'+(glow?', glow surfaces admitted':'')+(tracks?', tracks/bindings applied':'')+(mask?', mask texture applied':''));
  }finally{await browser.close();}
 })().catch(error=>{console.error(error.stack);process.exitCode=1;});
