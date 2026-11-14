@@ -105,6 +105,27 @@ impl ModelInput {
     pub(crate) fn texture_resources(&self) -> ModelTextureResources<'_> {
         ModelTextureResources { input: self }
     }
+    /// Session/generation-bound lease over the exact texture index. The plan
+    /// owns one input clone, so pins, facts and their charges stay alive until
+    /// the last plan owner drops.
+    pub(crate) fn grant_texture_plan(
+        &self,
+        session: &str,
+        generation: u64,
+    ) -> Option<ModelTexturePlan> {
+        if generation == 0 || session.is_empty() || session.len() > MAX_TEXTURE_PLAN_SESSION_BYTES {
+            return None;
+        }
+        let mut stored = [0u8; MAX_TEXTURE_PLAN_SESSION_BYTES];
+        stored[..session.len()].copy_from_slice(session.as_bytes());
+        Some(ModelTexturePlan {
+            input: self.clone(),
+            session: stored,
+            session_len: session.len() as u8,
+            generation,
+            active: AtomicBool::new(true),
+        })
+    }
     #[cfg(test)]
     pub(crate) fn reservation_identity_for_test(&self) -> (&str, u64, &str) {
         self.inner().retained.as_ref().unwrap().identity_for_test()
@@ -248,6 +269,95 @@ impl TextureResource<'_> {
         cancel: &AtomicBool,
     ) -> Result<(), JobError> {
         self.input
+            .texture_read_permit()
+            .read_into(self.image_index, offset, output, cancel)
+    }
+}
+
+const MAX_TEXTURE_PLAN_SESSION_BYTES: usize = 128;
+const PLAN_REVOKED_DIAGNOSTIC: &str = "canonical model texture plan was revoked";
+
+/// One session/generation-bound texture plan. It owns an input clone, so the
+/// canonical source, facts, File pins and closure charge cannot exit while any
+/// plan owner exists. Revocation denies new permits and existing leases.
+pub(crate) struct ModelTexturePlan {
+    input: ModelInput,
+    session: [u8; MAX_TEXTURE_PLAN_SESSION_BYTES],
+    session_len: u8,
+    generation: u64,
+    active: AtomicBool,
+}
+
+impl ModelTexturePlan {
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub(crate) fn matches(&self, session: &str, generation: u64) -> bool {
+        self.active.load(Ordering::Acquire)
+            && self.generation == generation
+            && &self.session[..self.session_len as usize] == session.as_bytes()
+    }
+
+    pub(crate) fn resources(&self) -> ModelTextureResources<'_> {
+        self.input.texture_resources()
+    }
+
+    /// Exact-path permit, only while this plan generation is active.
+    pub(crate) fn permit(&self, path: &str) -> Option<ModelTextureLease<'_>> {
+        if !self.active.load(Ordering::Acquire) {
+            return None;
+        }
+        let resources = self.input.texture_resources();
+        let resource = resources.authorize(path)?;
+        Some(ModelTextureLease {
+            plan: self,
+            image_index: resource.image_index(),
+            bytes: resource.bytes(),
+        })
+    }
+
+    pub(crate) fn revoke(&self) {
+        self.active.store(false, Ordering::Release);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_active(&self) -> bool {
+        self.active.load(Ordering::Acquire)
+    }
+}
+
+/// One read lease under an active plan. It borrows the plan, so it cannot
+/// outlive it; reads re-check the plan's active flag after revocation.
+pub(crate) struct ModelTextureLease<'a> {
+    plan: &'a ModelTexturePlan,
+    image_index: usize,
+    bytes: u64,
+}
+
+impl ModelTextureLease<'_> {
+    pub(crate) fn image_index(&self) -> usize {
+        self.image_index
+    }
+
+    pub(crate) fn bytes(&self) -> u64 {
+        self.bytes
+    }
+
+    pub(crate) fn read_into(
+        &self,
+        offset: u64,
+        output: &mut [u8],
+        cancel: &AtomicBool,
+    ) -> Result<(), JobError> {
+        if !self.plan.active.load(Ordering::Acquire) {
+            return Err(JobError::new(
+                "model_texture_revoked",
+                PLAN_REVOKED_DIAGNOSTIC,
+            ));
+        }
+        self.plan
+            .input
             .texture_read_permit()
             .read_into(self.image_index, offset, output, cancel)
     }

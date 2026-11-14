@@ -743,6 +743,115 @@ fn texture_resource_index_and_authorize_allocate_nothing() {
 }
 
 #[test]
+fn texture_plan_keeps_pins_and_charge_until_its_last_owner_drops() {
+    let fixture = installed_full_model_fixture("model-input-texture-plan", false);
+    let probe = model_source_test_probe();
+    let preparation = probe.prepare_for_job("texture-plan".into(), 84).unwrap();
+    let baseline = probe.budget_for_test().usage();
+    let input = fixture
+        .store
+        .prepare_canonical_model_input(
+            &fixture.reference,
+            &probe,
+            &preparation,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+    let held = probe.budget_for_test().usage();
+    let plan = input.grant_texture_plan("model-session", 7).unwrap();
+    assert!(plan.is_active());
+    assert_eq!(plan.generation(), 7);
+    assert!(plan.matches("model-session", 7));
+    assert!(!plan.matches("model-session", 8));
+    assert!(!plan.matches("other-session", 7));
+    drop(input);
+    // The plan's input clone keeps the canonical source, facts, File pins and
+    // closure charge alive.
+    assert_eq!(probe.budget_for_test().usage(), held);
+    let cancel = AtomicBool::new(false);
+    let lease = plan.permit("models/a/tex.png").unwrap();
+    assert_eq!(lease.image_index(), 0);
+    assert_eq!(lease.bytes(), 4);
+    let mut bytes = [0u8; 4];
+    lease.read_into(0, &mut bytes, &cancel).unwrap();
+    assert_eq!(bytes, [1, 2, 3, 4]);
+    plan.revoke();
+    assert!(!plan.is_active());
+    assert!(plan.permit("models/a/tex.png").is_none());
+    let error = lease.read_into(0, &mut bytes, &cancel).err().unwrap();
+    assert_eq!(error.code, "model_texture_revoked");
+    assert_eq!(error.message, "canonical model texture plan was revoked");
+    drop(plan);
+    assert_eq!(probe.budget_for_test().usage(), baseline);
+    preparation.finish();
+}
+
+#[test]
+fn texture_plan_rejects_invalid_session_and_generation() {
+    let fixture = installed_full_model_fixture("model-input-texture-plan-identity", false);
+    let probe = model_source_test_probe();
+    let preparation = probe
+        .prepare_for_job("texture-plan-identity".into(), 85)
+        .unwrap();
+    let input = fixture
+        .store
+        .prepare_canonical_model_input(
+            &fixture.reference,
+            &probe,
+            &preparation,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+    assert!(input.grant_texture_plan("", 1).is_none());
+    assert!(input.grant_texture_plan(&"s".repeat(129), 1).is_none());
+    assert!(input.grant_texture_plan("session", 0).is_none());
+    let longest = "s".repeat(128);
+    let plan = input.grant_texture_plan(&longest, u64::MAX).unwrap();
+    assert!(plan.matches(&longest, u64::MAX));
+    assert!(!plan.matches(&longest, u64::MAX - 1));
+    drop(plan);
+    drop(input);
+    preparation.finish();
+}
+
+#[test]
+fn texture_plan_grant_permit_and_read_allocate_nothing() {
+    let fixture = installed_full_model_fixture("model-input-texture-plan-alloc", false);
+    let probe = model_source_test_probe();
+    let preparation = probe
+        .prepare_for_job("texture-plan-alloc".into(), 86)
+        .unwrap();
+    let input = fixture
+        .store
+        .prepare_canonical_model_input(
+            &fixture.reference,
+            &probe,
+            &preparation,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+    let ((bound, bytes, rejected), sample) = budget::measure_requested_heap(|| {
+        let plan = input.grant_texture_plan("plan-session", 1).unwrap();
+        let lease = plan.permit("models/a/other.png").unwrap();
+        let mut output = [0u8; 4];
+        lease
+            .read_into(0, &mut output, &AtomicBool::new(false))
+            .unwrap();
+        let rejected = plan.permit("models/a/other.png/").is_none();
+        (plan.matches("plan-session", 1), output, rejected)
+    });
+    assert!(bound);
+    assert_eq!(bytes, [1, 2, 3, 4]);
+    assert!(rejected);
+    assert_eq!(
+        (sample.peak, sample.retained, sample.overflow),
+        (0, 0, false)
+    );
+    drop(input);
+    preparation.finish();
+}
+
+#[test]
 fn source_success_then_actual_model_w_rejection_keeps_source_fee_and_pins_until_error_drop() {
     let fixture = installed_full_model_fixture("model-input-W", false);
     let probe = model_source_test_probe();

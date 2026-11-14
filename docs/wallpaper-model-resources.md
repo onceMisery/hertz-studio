@@ -728,3 +728,19 @@ SHA32 与 [1,2,3,4] 一致；索引+迭代+授权整体 measure_requested_heap �
 三处变异（path 前缀匹配、去重移除、descriptor 字节数改错）均按预期变红后还原。
 本批未接 WebView/HTTP/CSP、未改 MediaAccess/SessionPlan、未创建 decoder/
 renderer/GPU；loader 与首帧继续开放。
+
+2026-11-14 r44 纹理计划租约续接：`ModelInput::grant_texture_plan(session,
+generation)` 返回 `ModelTexturePlan`，把 r43 索引绑定到有界 session（≤128B，
+inline 存储、无新堆分配）与非零 generation；plan 持有 input clone，因此 source/
+facts/File pins/闭包 charge 在 plan 存续期间不能退出。`matches` 同时校验 active、
+session 与 generation；`permit(path)` 只在 active 时走 exact-path 授权并返回借用
+lease；`revoke` 原子失活后新 permit 为 None，既有 lease 的 `read_into` 返回固定
+`model_texture_revoked`，否则复用 r42 位置读。
+
+真实 fixture 证据：grant 后 drop 原 input，usage 保持；lease 读 tex.png 得
+[1,2,3,4]；revoke 后拒绝；plan drop 后 usage 回 baseline。空/129B session 与
+generation0 拒绝，128B/u64::MAX 接受；grant+permit+read 的
+measure_requested_heap 为 0。三处变异（permit 忽略 active、lease 读取忽略
+active、matches 忽略 generation）均按预期变红后还原。本批仍未接
+WebView/HTTP/CSP、未改 MediaAccess、未创建 decoder/renderer/GPU；loader 与
+首帧继续开放。
