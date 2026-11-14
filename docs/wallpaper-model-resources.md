@@ -938,3 +938,32 @@ image 0 全部匹配。桌面 complete-facts 测试解构新增三组字段并�
 三处变异（调换槽位角色、minFilter 默认写错、用 texture 索引冒充 image）均按
 预期变红后还原。本批不创建 decoder/renderer/GPU，不发起浏览器请求，不接
 WebView2；loader 实际 Three 表示转换与 GPU 首帧继续开放。
+
+2026-11-14 r60 textured-PBR loader 续接：受控 Three 工厂新增
+`STATIC_TEXTURED_PROFILE='static-pbr-texture-v1'` 与
+`parseTexturedModel(buffer, expectedFacts, { textureUrl, ... })`，不改动既有
+`static-core-pbr-v1` 的 102 项契约。允许 images/textures/samplers/materials，
+材质仅支持 baseColorFactor/baseColorTexture、metallicFactor/roughnessFactor/
+metallicRoughnessTexture、alphaMode/alphaCutoff/doubleSided；normal/occlusion/
+emissive 等其它槽位与扩展明确拒绝。纹理支持 embedded bufferView PNG/JPEG 与
+外部 URI：外部 URI 必须由调用方 `textureUrl(uri)` 映射（同包 broker URL），
+未映射在加载前拒绝且不发起请求。sampler 缺省值落成 glTF 默认；baseColor 与
+MR 不得引用同一 texture index（避免 GLTFLoader 按 source+sampler 缓存导致的
+colorspace 复用）。primitive 必须按槽位 texCoord（0/1）声明 TEXCOORD_n，仅允许
+POSITION/NORMAL/TEXCOORD_0/1，仍要求 packed FLOAT accessor、POSITION bounds
+与三角形上界。
+
+`verifyTexturedActual` 核对真实 MeshStandardMaterial：color/opacity/metalness/
+roughness、alphaMode 的 transparent/alphaTest/depthWrite、doubleSided、map/
+metalnessMap/roughnessMap 身份（texCoord>0 时 GLTFLoader 逐次 clone，按
+image+channel+sampler+colorSpace 核对）、flipY/wrap/filter、UV/UV1 accessor、
+纹理对象数（原图+clone）、材质/几何数量与释放。真实 Chrome 测试
+（`scripts/check-wallpaper-model-textured-browser.js`）：本地 HTTP + import map
+加载锁定 Three 0.186.0，内嵌 2×2 PNG 与外部 PNG（经 textureUrl 映射）均真实
+解码；材质 0.25/0.5/0.75/0.8、metal .4/rough .6、MASK .3、双面、两纹理与
+wrap/filter/colorSpace 精确匹配；释放后纹理 4/材质 2/几何 1 次 dispose，重复
+instantiate 拒绝；负例（缺 TEXCOORD、非法 sampler、normalTexture、未映射 URI）
+均在加载前失败且外部请求仅 1 次。三处变异（TEXCOORD 名称映射、33071 wrap 映射、
+sRGB/linear 期望反转）均按预期变红后还原。本批不创建 WebGL renderer/GPU 上传、
+不产生首帧，也不接 WebView2 broker 响应；normal/occlusion/emissive 槽位与 KTX2
+解码继续开放。
