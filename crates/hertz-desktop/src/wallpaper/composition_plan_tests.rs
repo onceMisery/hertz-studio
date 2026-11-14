@@ -20,6 +20,61 @@ fn document_full(nodes: Value, effects: Value, tracks: Value, bindings: Value) -
     json!({"documentVersion":1,"canvas":{"width":64,"height":64,"colorSpace":"srgb","background":"#000000"},
     "nodes":nodes,"timeline":{"durationSeconds":4,"loop":true,"tracks":tracks},"bindings":bindings,"effects":effects})
 }
+fn document_model(nodes: Value) -> Value {
+    json!({"documentVersion":1,"canvas":{"width":64,"height":64,"colorSpace":"srgb","background":"#000000",
+        "scene3d":{"position":[0,0,3],"target":[0,0,0],"fovDegrees":45,"near":0.1,"far":100}},
+    "nodes":nodes,"timeline":{"durationSeconds":4,"loop":true,"tracks":[]},"bindings":[],"effects":[]})
+}
+fn model_glb() -> Vec<u8> {
+    let mut bin = vec![0_u8; 80];
+    for (index, value) in [0.0_f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+        .iter()
+        .enumerate()
+    {
+        bin[index * 4..index * 4 + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    for (index, value) in [0.0_f32, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0]
+        .iter()
+        .enumerate()
+    {
+        bin[36 + index * 4..36 + index * 4 + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    for (index, value) in [0_u16, 1, 2].iter().enumerate() {
+        bin[72 + index * 2..72 + index * 2 + 2].copy_from_slice(&value.to_le_bytes());
+    }
+    let document = json!({
+        "asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],"nodes":[{"mesh":0}],
+        "meshes":[{"primitives":[{"attributes":{"POSITION":0,"NORMAL":1},"indices":2}]}],
+        "buffers":[{"byteLength":80}],
+        "bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":36},
+            {"buffer":0,"byteOffset":36,"byteLength":36},
+            {"buffer":0,"byteOffset":72,"byteLength":8}],
+        "accessors":[
+            {"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[1,1,0]},
+            {"bufferView":1,"componentType":5126,"count":3,"type":"VEC3"},
+            {"bufferView":2,"componentType":5123,"count":3,"type":"SCALAR"}]});
+    let text = serde_json::to_vec(&document).unwrap();
+    let json_len = text.len().div_ceil(4) * 4;
+    let bin_len = bin.len().div_ceil(4) * 4;
+    let total = 12 + 8 + json_len + 8 + bin_len;
+    let mut bytes = vec![0_u8; total];
+    bytes[0..4].copy_from_slice(b"glTF");
+    bytes[4..8].copy_from_slice(&2_u32.to_le_bytes());
+    bytes[8..12].copy_from_slice(&(total as u32).to_le_bytes());
+    bytes[12..16].copy_from_slice(&(json_len as u32).to_le_bytes());
+    bytes[16..20].copy_from_slice(b"JSON");
+    bytes[20..20 + text.len()].copy_from_slice(&text);
+    bytes[20 + text.len()..20 + json_len].fill(0x20);
+    let head = 20 + json_len;
+    bytes[head..head + 4].copy_from_slice(&(bin_len as u32).to_le_bytes());
+    bytes[head + 4..head + 8].copy_from_slice(b"BIN\0");
+    bytes[head + 8..head + 8 + bin.len()].copy_from_slice(&bin);
+    bytes
+}
+fn model_node(id: &str, properties: Value) -> Value {
+    json!({"id":id,"type":"model","stateVersion":1,"assets":{"asset":"model"},
+        "properties":properties})
+}
 fn rgba_png(width: u32, height: u32, pixel: impl Fn(u32, u32) -> [u8; 4]) -> Vec<u8> {
     let mut image = RgbaImage::new(width, height);
     for y in 0..height {
@@ -58,7 +113,16 @@ async fn install_with_effects(
     properties: Value,
     video: bool,
 ) -> (Arc<ImportJobs>, String, Arc<AtomicUsize>) {
-    install_full(root, nodes, effects, json!([]), json!([]), properties, video).await
+    install_full(
+        root,
+        nodes,
+        effects,
+        json!([]),
+        json!([]),
+        properties,
+        video,
+    )
+    .await
 }
 
 async fn install_full(
@@ -755,14 +819,19 @@ async fn native_glow_fixture_projects_two_half_resolution_surfaces_into_the_orig
         let binding = super::super::page_events::PageBinding::new(1).unwrap();
         let access = super::super::access::MediaAccess::new();
         let mut admission =
-            super::super::gl_plan::GlAdmission::new(gl, Arc::new(BudgetCoordinator::new())).unwrap();
+            super::super::gl_plan::GlAdmission::new(gl, Arc::new(BudgetCoordinator::new()))
+                .unwrap();
         admission
             .bind_composition(plan, &access, binding.session_id())
             .unwrap();
         let uri = admission.composition_url().unwrap();
         let path = uri.split("/files/").nth(1).unwrap();
         let projection_reader = access.permit(&package_hash, path).unwrap();
-        std::fs::write(output.join("projection.json"), projection_reader.payload().unwrap()).unwrap();
+        std::fs::write(
+            output.join("projection.json"),
+            projection_reader.payload().unwrap(),
+        )
+        .unwrap();
         std::fs::write(output.join("uri.txt"), uri).unwrap();
         std::fs::write(
             output.join("native-init.js"),
@@ -813,7 +882,13 @@ async fn native_track_binding_fixture_admits_timeline_and_binding_into_the_origi
     assert_eq!(projection["ir"]["tracks"].as_array().unwrap().len(), 1);
     assert_eq!(projection["ir"]["bindings"].as_array().unwrap().len(), 1);
     assert_eq!(projection["ir"]["bindings"][0]["mode"], "multiply");
-    assert_eq!(projection["ir"]["tracks"][0]["keys"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        projection["ir"]["tracks"][0]["keys"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
     let page = &projection["pageLimits"];
     assert_eq!(page["programs"], 2);
     assert_eq!(page["renderTargetDeclaredBytes"], 64 * 64 * 16);
@@ -823,14 +898,19 @@ async fn native_track_binding_fixture_admits_timeline_and_binding_into_the_origi
         let binding = super::super::page_events::PageBinding::new(1).unwrap();
         let access = super::super::access::MediaAccess::new();
         let mut admission =
-            super::super::gl_plan::GlAdmission::new(gl, Arc::new(BudgetCoordinator::new())).unwrap();
+            super::super::gl_plan::GlAdmission::new(gl, Arc::new(BudgetCoordinator::new()))
+                .unwrap();
         admission
             .bind_composition(plan, &access, binding.session_id())
             .unwrap();
         let uri = admission.composition_url().unwrap();
         let path = uri.split("/files/").nth(1).unwrap();
         let projection_reader = access.permit(&package_hash, path).unwrap();
-        std::fs::write(output.join("projection.json"), projection_reader.payload().unwrap()).unwrap();
+        std::fs::write(
+            output.join("projection.json"),
+            projection_reader.payload().unwrap(),
+        )
+        .unwrap();
         std::fs::write(output.join("uri.txt"), uri).unwrap();
         std::fs::write(
             output.join("native-init.js"),
@@ -888,7 +968,10 @@ async fn native_mask_fixture_prepares_effect_texture_and_projects_it_to_the_page
         .projection("same-fixed-session-mask", 1, 7, &gl.limits)
         .unwrap();
     assert_eq!(projection["ir"]["effects"][0]["type"], "mask");
-    assert_eq!(projection["ir"]["effects"][0]["assets"]["maskAsset"], "mask");
+    assert_eq!(
+        projection["ir"]["effects"][0]["assets"]["maskAsset"],
+        "mask"
+    );
     let resolved = projection["resolvedAssets"].as_array().unwrap();
     assert_eq!(resolved.len(), 2);
     assert!(resolved
@@ -913,18 +996,27 @@ async fn native_mask_fixture_prepares_effect_texture_and_projects_it_to_the_page
                 files.push(json!({"url":media.url(),"file":name}));
             }
         }
-        std::fs::write(output.join("files.json"), serde_json::to_vec(&files).unwrap()).unwrap();
+        std::fs::write(
+            output.join("files.json"),
+            serde_json::to_vec(&files).unwrap(),
+        )
+        .unwrap();
         let binding = super::super::page_events::PageBinding::new(1).unwrap();
         let access = super::super::access::MediaAccess::new();
         let mut admission =
-            super::super::gl_plan::GlAdmission::new(gl, Arc::new(BudgetCoordinator::new())).unwrap();
+            super::super::gl_plan::GlAdmission::new(gl, Arc::new(BudgetCoordinator::new()))
+                .unwrap();
         admission
             .bind_composition(plan, &access, binding.session_id())
             .unwrap();
         let uri = admission.composition_url().unwrap();
         let path = uri.split("/files/").nth(1).unwrap();
         let projection_reader = access.permit(&package_hash, path).unwrap();
-        std::fs::write(output.join("projection.json"), projection_reader.payload().unwrap()).unwrap();
+        std::fs::write(
+            output.join("projection.json"),
+            projection_reader.payload().unwrap(),
+        )
+        .unwrap();
         std::fs::write(output.join("uri.txt"), uri).unwrap();
         std::fs::write(
             output.join("native-init.js"),
@@ -936,6 +1028,133 @@ async fn native_mask_fixture_prepares_effect_texture_and_projects_it_to_the_page
         )
         .unwrap();
     }
+}
+
+#[tokio::test]
+async fn native_model_fixture_prepares_core_facts_and_projects_scene3d() {
+    let root = tempfileish::temp_dir("composition-native-model");
+    let glb = model_glb();
+    let entries = vec![
+        (
+            "composition.json",
+            serde_json::to_vec(&document_model(json!([model_node(
+                "mesh",
+                json!({"position":[0,0,0],"rotation":[0,0,0],"scale":[1,1,1]})
+            )])))
+            .unwrap(),
+            "application/json",
+        ),
+        ("assets/model.glb", glb.clone(), "model/gltf-binary"),
+    ];
+    let assets = json!([{"id":"model","kind":"model","source":"assets/model.glb","variants":[]}]);
+    let (jobs, hash, _) = install_document(root.path(), entries, assets, json!([])).await;
+    let plan = selected(jobs, hash, Default::default()).await.unwrap();
+    let model = plan.assets["model"].as_model().unwrap();
+    assert_eq!(model.content_key().len(), 64);
+    assert!(model.url().contains("/files/assets/model.glb"));
+    let gl = plan
+        .gl_plan(OwnerKind::Preview, "model-owner".into(), 1, 60, 15)
+        .unwrap();
+    let projection = plan
+        .projection("same-fixed-session-model", 1, 9, &gl.limits)
+        .unwrap();
+    let resolved = projection["resolvedAssets"].as_array().unwrap();
+    let asset = resolved
+        .iter()
+        .find(|asset| asset["kind"] == "model")
+        .unwrap();
+    assert_eq!(asset["adapterId"], "three-gltf-loader");
+    assert_eq!(asset["decodeOptions"]["profile"], "static-core-pbr-v1");
+    assert_eq!(asset["modelFacts"]["profile"], "static-core-pbr-v1");
+    assert_eq!(asset["modelFacts"]["scene"]["drawCalls"], 1);
+    assert_eq!(asset["modelFacts"]["scene"]["triangles"], 1);
+    assert_eq!(asset["byteLength"], glb.len() as u64);
+    let page = &projection["pageLimits"];
+    assert_eq!(page["programs"], 3);
+    assert_eq!(page["bufferDeclaredBytes"], 170);
+    assert_eq!(page["renderTargetDeclaredBytes"], 64 * 64 * 20);
+    if let Some(output) = std::env::var_os("HERTZ_COMPOSITION_NATIVE_FIXTURE") {
+        let output = std::path::PathBuf::from(output).join("model");
+        std::fs::create_dir_all(&output).unwrap();
+        std::fs::write(output.join("model.glb"), &glb).unwrap();
+        let model_url = model.url().to_owned();
+        let package_hash = model.reference().package_hash.clone();
+        std::fs::write(
+            output.join("files.json"),
+            serde_json::to_vec(&json!([{"url":model_url,"file":"model.glb"}])).unwrap(),
+        )
+        .unwrap();
+        let binding = super::super::page_events::PageBinding::new(1).unwrap();
+        let access = super::super::access::MediaAccess::new();
+        let mut admission =
+            super::super::gl_plan::GlAdmission::new(gl, Arc::new(BudgetCoordinator::new()))
+                .unwrap();
+        admission
+            .bind_composition(plan, &access, binding.session_id())
+            .unwrap();
+        let uri = admission.composition_url().unwrap();
+        let path = uri.split("/files/").nth(1).unwrap();
+        let reader = access.permit(&package_hash, path).unwrap();
+        std::fs::write(output.join("projection.json"), reader.payload().unwrap()).unwrap();
+        std::fs::write(output.join("uri.txt"), uri).unwrap();
+        std::fs::write(
+            output.join("native-init.js"),
+            format!(
+                "{}\n{}",
+                binding.initialization_script(),
+                admission.initialization_script()
+            ),
+        )
+        .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn native_model_rejects_cross_space_order_opacity_and_animation() {
+    let glb = model_glb();
+    async fn attempt(name: &str, nodes: Value, glb: &[u8]) -> String {
+        let root = tempfileish::temp_dir(name);
+        let entries = vec![
+            (
+                "composition.json",
+                serde_json::to_vec(&document_model(nodes)).unwrap(),
+                "application/json",
+            ),
+            ("assets/model.glb", glb.to_vec(), "model/gltf-binary"),
+        ];
+        let assets =
+            json!([{"id":"model","kind":"model","source":"assets/model.glb","variants":[]}]);
+        let (jobs, hash, _) = install_document(root.path(), entries, assets, json!([])).await;
+        selected(jobs, hash, Default::default())
+            .await
+            .unwrap_err()
+            .error
+            .code
+            .to_owned()
+    }
+    let group = json!({"id":"g","type":"group","stateVersion":1,"assets":{},"children":[],
+        "properties":{"x":0,"y":0,"width":64,"height":64}});
+    let cross_order = attempt(
+        "composition-native-model-order",
+        json!([group, model_node("mesh", json!({}))]),
+        &glb,
+    )
+    .await;
+    assert_eq!(cross_order, "adapter_unavailable");
+    let opacity = attempt(
+        "composition-native-model-opacity",
+        json!([model_node("mesh", json!({"opacity":0.5}))]),
+        &glb,
+    )
+    .await;
+    assert_eq!(opacity, "adapter_unavailable");
+    let animation = attempt(
+        "composition-native-model-animation",
+        json!([model_node("mesh", json!({"animationClip":"Walk"}))]),
+        &glb,
+    )
+    .await;
+    assert_eq!(animation, "adapter_unavailable");
 }
 
 #[tokio::test]

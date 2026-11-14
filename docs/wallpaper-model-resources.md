@@ -1212,3 +1212,31 @@ loader 实际事实逐字段一致。
 仍未闭合：把该 facts 接入桌面 `composition_plan.rs` 的 model 资源准备
 （GLB pin/读取、URL 与纹理闭包、成本/pageLimits）与 scene3d 准入、原生页面
 像素；KTX2、GLB 动画、GPU 设备矩阵与 A01/A05–A10 外部验收继续开放。
+
+2026-11-14 r75 桌面 model 投影与原生页面续接：`composition_plan.rs` 新增
+`PreparedModel`/`CompositionAsset::Model`，对 `AssetKind::Model` 通过
+`pin_verified_media` 固定 GLB、以 64KiB 有界读与 `inspect_glb_resource_content`
+完整 SHA/数值检查后调用 `model_profile::static_core_profile_facts`，生成
+`resolvedAssets{kinds:model, url, byteLength, contentKey, decodeOptions,
+modelFacts}`；成本按 facts 计 buffer/CPU/1 program/drawCalls/triangles，3D 节点
+增加 depth 4B/px 与 4KiB 页面兜底纹理预算；`validate_structure` 移除 scene3d
+一刀切拒绝，改为：3D 必须有合法相机、3D 节点必须是 painterOrder 前缀、opacity
+必须 1、model animationClip 必须为空，3D 节点拒绝 effect/track/binding，其余
+adapter 语义与 JS plan 一致。
+
+新增 2 项桌面测试：真实安装包 + model.glb 的 selected/projection/pageLimits
+断言（programs=3、bufferDeclaredBytes=170、renderTarget=64×64×20、
+modelFacts.profile/ drawCalls），以及跨空间顺序/opacity/animation 拒绝。
+原生 fixture 发射 `model/`（projection、GLB、files.json、native-init.js、
+uri.txt）；`check-wallpaper-composition-native-page.js` 增加 model 阶段：真实
+Rust 选择/GlAdmission + 原生页面加载真实 GLB，三角形内像素 >200、外部 <8，
+budget.error=null、contexts 1→0，并写 native-page-model.png。
+
+验证：两工具链 hertz-desktop 857 passed / 0 failed / 2 ignored；两工具链
+clippy --all-targets -D warnings 与 fmt 通过；原生页面检查连续 3 次通过（glow/
+tracks/mask/model 四阶段）；组合浏览器 47 项与前端聚合 86 步通过。三处变异
+（跨空间前缀检查、model buffer 字节、3D depth 字节）均变红后还原。
+
+仍未闭合：原生 textured/KTX2 model（当前 `static_core_profile_facts` 对纹理/
+材质 fail-closed）、外部纹理 broker/CSP、GLB 动画、逐实例材质透明度、真实 GPU
+设备矩阵与 A01/A05–A10 外部验收。
