@@ -333,7 +333,52 @@ if(diagnostic){
     assert.equal((await modelPage.evaluate(()=>HertzGlBudget.stats())).contexts,0);
     await modelPage.close();
   }
-  fs.writeFileSync(path.join(output,'native-page-evidence.json'),JSON.stringify({source:'actual Rust production selector + GlAdmission + original native page',qualification:'browser integration; copied scheduler metadata matches measured headless rAF; native resource caps unchanged; controlled visibility event/state; Windows/GPU qualification pending',cadence:{intervals:cadence,refreshHz,running:runningCadence},state,blockedBefore,blockedAfter,hiddenBefore,hiddenAfter,visibilityResumed,fits,glow,tracks,mask,model,paused,retired,errors},null,2));
-  console.log('PASS native composition page: real Rust projection, one context, complete frame, pause and retirement'+(glow?', glow surfaces admitted':'')+(tracks?', tracks/bindings applied':'')+(mask?', mask texture applied':'')+(model?', scene3d model rendered':''));
+  const texturedModelDir=path.join(output,'model-textured');
+  let texturedModel=null;
+  if(fs.existsSync(path.join(texturedModelDir,'projection.json'))){
+    const texturedProjection=JSON.parse(fs.readFileSync(path.join(texturedModelDir,'projection.json'),'utf8'));
+    const texturedUri=fs.readFileSync(path.join(texturedModelDir,'uri.txt'),'utf8');
+    const texturedInit=bindCadence(fs.readFileSync(path.join(texturedModelDir,'native-init.js'),'utf8'));
+    const texturedFiles=JSON.parse(fs.readFileSync(path.join(texturedModelDir,'files.json'),'utf8'));
+    const texturedPage=await browser.newPage({viewport:{width:64,height:64}}),texturedErrors=[];
+    texturedPage.on('pageerror',error=>texturedErrors.push(error.message));
+    texturedPage.on('console',message=>{if(message.type()==='error')texturedErrors.push(message.text());});
+    await texturedPage.addInitScript(texturedInit+'\nwindow.nativeEvents=[];window.ipc={postMessage:message=>nativeEvents.push(message)};');
+    await texturedPage.route('https://**.wallpaper.invalid/**',route=>{
+      if(route.request().url()===texturedUri)return route.fulfill({status:200,contentType:'application/json',body:JSON.stringify(texturedProjection)});
+      const asset=texturedFiles.find(entry=>entry.url===route.request().url());
+      if(asset)return route.fulfill({status:200,contentType:'model/gltf-binary',body:fs.readFileSync(path.join(texturedModelDir,asset.file))});
+      return route.fulfill({status:404,body:''});
+    });
+    await texturedPage.route('http://hertz.localhost/',route=>route.fulfill({status:200,contentType:'text/html',body:html}));
+    await texturedPage.goto('http://hertz.localhost/');
+    assert.equal(await texturedPage.evaluate(async url=>{hertzWallpaper.applyConfig({source:'fixed',audioInput:{kind:'none'},motion:1,quality:'low'});
+      const prepared=hertzWallpaper.applyComposition(url);hertzWallpaper.start(15);return await prepared;},texturedUri),true);
+    await texturedPage.waitForFunction(()=>nativeEvents.some(event=>event.includes('firstFrame')),null,{timeout:10000}).catch(async failure=>{
+      throw new Error(failure.message+'\n'+JSON.stringify(await texturedPage.evaluate(()=>({events:nativeEvents,stats:hertzWallpaper.debug(),budget:HertzGlBudget.stats()}))));
+    });
+    await texturedPage.waitForFunction(()=>hertzWallpaper.debug().draws>=2,null,{timeout:10000});
+    const textured=await texturedPage.evaluate(()=>{
+      const gl=document.querySelector('#host canvas').getContext('webgl2');
+      const sample=(x,y)=>{const pixel=new Uint8Array(4);gl.readPixels(x,y,1,1,gl.RGBA,gl.UNSIGNED_BYTE,pixel);return [...pixel];};
+      return {red:sample(36,40),green:sample(46,40),budget:HertzGlBudget.stats()};
+    });
+    assert(textured.red[0]>200&&textured.red[1]<20&&textured.red[2]<20,'embedded texture keeps the left red half');
+    assert(textured.green[1]>200&&textured.green[0]<20&&textured.green[2]<20,'embedded texture keeps the right green half');
+    assert.equal(textured.budget.contexts,1);assert.equal(textured.budget.error,null);assert.deepEqual(texturedErrors,[]);
+    assert.equal(texturedProjection.resolvedAssets[0].modelFacts.profile,'static-pbr-texture-v1');
+    assert.equal(texturedProjection.pageLimits.textureDeclaredBytes,32+4096);
+    assert.equal(texturedProjection.pageLimits.bufferDeclaredBytes,194);
+    texturedModel={pixels:{red:textured.red,green:textured.green},budget:textured.budget,
+      facts:{profile:texturedProjection.resolvedAssets[0].modelFacts.profile,
+        textureUploadBytes:texturedProjection.resolvedAssets[0].textureUploadBytes}};
+    await texturedPage.evaluate(()=>hertzWallpaper.reveal());
+    await texturedPage.screenshot({path:path.join(texturedModelDir,'native-page-model-textured.png')});
+    await texturedPage.evaluate(()=>hertzWallpaper.unmount());await texturedPage.waitForTimeout(50);
+    assert.equal((await texturedPage.evaluate(()=>HertzGlBudget.stats())).contexts,0);
+    await texturedPage.close();
+  }
+  fs.writeFileSync(path.join(output,'native-page-evidence.json'),JSON.stringify({source:'actual Rust production selector + GlAdmission + original native page',qualification:'browser integration; copied scheduler metadata matches measured headless rAF; native resource caps unchanged; controlled visibility event/state; Windows/GPU qualification pending',cadence:{intervals:cadence,refreshHz,running:runningCadence},state,blockedBefore,blockedAfter,hiddenBefore,hiddenAfter,visibilityResumed,fits,glow,tracks,mask,model,texturedModel,paused,retired,errors},null,2));
+  console.log('PASS native composition page: real Rust projection, one context, complete frame, pause and retirement'+(glow?', glow surfaces admitted':'')+(tracks?', tracks/bindings applied':'')+(mask?', mask texture applied':'')+(model?', scene3d model rendered':'')+(texturedModel?', textured model pixels':''));
  }finally{await browser.close();}
 })().catch(error=>{console.error(error.stack);process.exitCode=1;});

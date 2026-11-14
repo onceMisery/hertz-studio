@@ -75,6 +75,72 @@ fn model_node(id: &str, properties: Value) -> Value {
     json!({"id":id,"type":"model","stateVersion":1,"assets":{"asset":"model"},
         "properties":properties})
 }
+const TEXTURED_PNG: &[u8] = &[
+    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 2, 0, 0, 0, 2, 8, 6, 0,
+    0, 0, 114, 182, 13, 36, 0, 0, 0, 16, 73, 68, 65, 84, 120, 156, 99, 248, 207, 192, 240, 31, 10,
+    33, 20, 0, 69, 204, 7, 249, 102, 203, 255, 57, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+];
+fn textured_model_glb() -> Vec<u8> {
+    let mut bin = vec![0_u8; 104 + TEXTURED_PNG.len()];
+    for (index, value) in [0.0_f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+        .iter()
+        .enumerate()
+    {
+        bin[index * 4..index * 4 + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    for (index, value) in [0.0_f32, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0]
+        .iter()
+        .enumerate()
+    {
+        bin[36 + index * 4..36 + index * 4 + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    for (index, value) in [0.0_f32, 0.0, 1.0, 0.0, 0.0, 1.0].iter().enumerate() {
+        bin[72 + index * 4..72 + index * 4 + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    for (index, value) in [0_u16, 1, 2].iter().enumerate() {
+        bin[96 + index * 2..96 + index * 2 + 2].copy_from_slice(&value.to_le_bytes());
+    }
+    bin[104..].copy_from_slice(TEXTURED_PNG);
+    let document = json!({
+        "asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],"nodes":[{"mesh":0}],
+        "meshes":[{"primitives":[{"attributes":{"POSITION":0,"NORMAL":1,"TEXCOORD_0":3},
+            "indices":2,"material":0}]}],
+        "buffers":[{"byteLength":bin.len()}],
+        "bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":36},
+            {"buffer":0,"byteOffset":36,"byteLength":36},
+            {"buffer":0,"byteOffset":72,"byteLength":24},
+            {"buffer":0,"byteOffset":96,"byteLength":8},
+            {"buffer":0,"byteOffset":104,"byteLength":TEXTURED_PNG.len()}],
+        "accessors":[
+            {"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[1,1,0]},
+            {"bufferView":1,"componentType":5126,"count":3,"type":"VEC3"},
+            {"bufferView":3,"componentType":5123,"count":3,"type":"SCALAR"},
+            {"bufferView":2,"componentType":5126,"count":3,"type":"VEC2"}],
+        "images":[{"bufferView":4,"mimeType":"image/png"}],
+        "samplers":[{"magFilter":9728,"minFilter":9728,"wrapS":33071,"wrapT":33071}],
+        "textures":[{"source":0,"sampler":0}],
+        "materials":[{"pbrMetallicRoughness":{"baseColorFactor":[1,1,1,1],
+            "baseColorTexture":{"index":0,"texCoord":0},"metallicFactor":0,"roughnessFactor":1},
+            "alphaMode":"OPAQUE"}]
+    });
+    let text = serde_json::to_vec(&document).unwrap();
+    let json_len = text.len().div_ceil(4) * 4;
+    let bin_len = bin.len().div_ceil(4) * 4;
+    let total = 12 + 8 + json_len + 8 + bin_len;
+    let mut bytes = vec![0_u8; total];
+    bytes[0..4].copy_from_slice(b"glTF");
+    bytes[4..8].copy_from_slice(&2_u32.to_le_bytes());
+    bytes[8..12].copy_from_slice(&(total as u32).to_le_bytes());
+    bytes[12..16].copy_from_slice(&(json_len as u32).to_le_bytes());
+    bytes[16..20].copy_from_slice(b"JSON");
+    bytes[20..20 + text.len()].copy_from_slice(&text);
+    bytes[20 + text.len()..20 + json_len].fill(0x20);
+    let head = 20 + json_len;
+    bytes[head..head + 4].copy_from_slice(&(bin_len as u32).to_le_bytes());
+    bytes[head + 4..head + 8].copy_from_slice(b"BIN\0");
+    bytes[head + 8..head + 8 + bin.len()].copy_from_slice(&bin);
+    bytes
+}
 fn rgba_png(width: u32, height: u32, pixel: impl Fn(u32, u32) -> [u8; 4]) -> Vec<u8> {
     let mut image = RgbaImage::new(width, height);
     for y in 0..height {
@@ -1075,6 +1141,81 @@ async fn native_model_fixture_prepares_core_facts_and_projects_scene3d() {
     assert_eq!(page["renderTargetDeclaredBytes"], 64 * 64 * 20);
     if let Some(output) = std::env::var_os("HERTZ_COMPOSITION_NATIVE_FIXTURE") {
         let output = std::path::PathBuf::from(output).join("model");
+        std::fs::create_dir_all(&output).unwrap();
+        std::fs::write(output.join("model.glb"), &glb).unwrap();
+        let model_url = model.url().to_owned();
+        let package_hash = model.reference().package_hash.clone();
+        std::fs::write(
+            output.join("files.json"),
+            serde_json::to_vec(&json!([{"url":model_url,"file":"model.glb"}])).unwrap(),
+        )
+        .unwrap();
+        let binding = super::super::page_events::PageBinding::new(1).unwrap();
+        let access = super::super::access::MediaAccess::new();
+        let mut admission =
+            super::super::gl_plan::GlAdmission::new(gl, Arc::new(BudgetCoordinator::new()))
+                .unwrap();
+        admission
+            .bind_composition(plan, &access, binding.session_id())
+            .unwrap();
+        let uri = admission.composition_url().unwrap();
+        let path = uri.split("/files/").nth(1).unwrap();
+        let reader = access.permit(&package_hash, path).unwrap();
+        std::fs::write(output.join("projection.json"), reader.payload().unwrap()).unwrap();
+        std::fs::write(output.join("uri.txt"), uri).unwrap();
+        std::fs::write(
+            output.join("native-init.js"),
+            format!(
+                "{}\n{}",
+                binding.initialization_script(),
+                admission.initialization_script()
+            ),
+        )
+        .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn native_model_textured_fixture_projects_texture_facts_and_uploads() {
+    let root = tempfileish::temp_dir("composition-native-model-textured");
+    let glb = textured_model_glb();
+    let entries = vec![
+        (
+            "composition.json",
+            serde_json::to_vec(&document_model(json!([model_node("mesh", json!({}))]))).unwrap(),
+            "application/json",
+        ),
+        ("assets/model.glb", glb.clone(), "model/gltf-binary"),
+    ];
+    let assets = json!([{"id":"model","kind":"model","source":"assets/model.glb","variants":[]}]);
+    let (jobs, hash, _) = install_document(root.path(), entries, assets, json!([])).await;
+    let plan = selected(jobs, hash, Default::default()).await.unwrap();
+    let model = plan.assets["model"].as_model().unwrap();
+    assert_eq!(model.profile(), "static-pbr-texture-v1");
+    assert_eq!(model.texture_upload_bytes(), 32);
+    let gl = plan
+        .gl_plan(OwnerKind::Preview, "model-textured-owner".into(), 1, 60, 15)
+        .unwrap();
+    let projection = plan
+        .projection("same-fixed-session-model-textured", 1, 11, &gl.limits)
+        .unwrap();
+    let resolved = projection["resolvedAssets"].as_array().unwrap();
+    let asset = resolved
+        .iter()
+        .find(|asset| asset["kind"] == "model")
+        .unwrap();
+    assert_eq!(asset["decodeOptions"]["profile"], "static-pbr-texture-v1");
+    assert_eq!(asset["modelFacts"]["profile"], "static-pbr-texture-v1");
+    assert_eq!(asset["modelFacts"]["materials"][0]["metallicFactor"], 0.0);
+    assert_eq!(asset["textureUploadBytes"], 32);
+    assert_eq!(asset["textureUrls"], json!({}));
+    let page = &projection["pageLimits"];
+    assert_eq!(page["programs"], 3);
+    assert_eq!(page["bufferDeclaredBytes"], 194);
+    assert_eq!(page["textureDeclaredBytes"], 32 + 4096);
+    assert_eq!(page["renderTargetDeclaredBytes"], 64 * 64 * 20);
+    if let Some(output) = std::env::var_os("HERTZ_COMPOSITION_NATIVE_FIXTURE") {
+        let output = std::path::PathBuf::from(output).join("model-textured");
         std::fs::create_dir_all(&output).unwrap();
         std::fs::write(output.join("model.glb"), &glb).unwrap();
         let model_url = model.url().to_owned();
