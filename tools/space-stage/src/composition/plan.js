@@ -30,6 +30,7 @@ function checkSvg(asset) {
 
 const digest = value => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
 const MODEL_PROFILE = 'static-core-pbr-v1';
+const MODEL_TEXTURED_PROFILE = 'static-pbr-texture-v1';
 const MODEL_LOADER_VERSION = 'three-0.186.0-gltfloader';
 function planCamera(camera) {
   if (!camera || !Array.isArray(camera.position) || !Array.isArray(camera.target)
@@ -45,21 +46,40 @@ function planCamera(camera) {
 }
 function checkModel(asset) {
   const facts = asset.modelFacts, input = facts?.input, resources = facts?.resources, scene = facts?.scene;
+  const textured = facts?.profile === MODEL_TEXTURED_PROFILE;
   if (asset.adapterId !== 'three-gltf-loader' || asset.adapterVersion !== 1
-      || asset.decodeOptions?.profile !== MODEL_PROFILE
+      || asset.decodeOptions?.profile !== facts?.profile
+      || ![MODEL_PROFILE, MODEL_TEXTURED_PROFILE].includes(facts?.profile)
       || !Number.isSafeInteger(asset.byteLength) || asset.byteLength < 1
       || typeof asset.url !== 'string' || !asset.url
-      || facts?.profile !== MODEL_PROFILE || facts.loaderVersion !== MODEL_LOADER_VERSION
+      || facts.loaderVersion !== MODEL_LOADER_VERSION
       || !input || input.encodedBytes !== asset.byteLength
       || !Number.isSafeInteger(input.jsonBytes) || input.jsonBytes < 1
       || !Number.isSafeInteger(input.binBytes) || input.binBytes < 1
       || !Number.isSafeInteger(resources?.gpuBufferBytes) || resources.gpuBufferBytes < 1
       || !Number.isSafeInteger(resources?.cpuBackingBytes) || resources.cpuBackingBytes < 1
       || !Number.isSafeInteger(scene?.drawCalls) || scene.drawCalls < 1
-      || !Number.isSafeInteger(scene?.triangles) || scene.triangles < 1
-      || facts.materials !== undefined || facts.textures !== undefined || facts.images !== undefined
-      || facts.declared?.materials || facts.declared?.textures || facts.declared?.images)
+      || !Number.isSafeInteger(scene?.triangles) || scene.triangles < 1)
     throw new Error('composition-model-preparation-required');
+  if (!textured) {
+    if (facts.materials !== undefined || facts.textures !== undefined || facts.images !== undefined
+        || facts.declared?.materials || facts.declared?.textures || facts.declared?.images
+        || asset.textureUploadBytes !== undefined || asset.textureUrls !== undefined)
+      throw new Error('composition-model-preparation-required');
+    return;
+  }
+  const images = facts.images, materials = facts.materials, textures = facts.textures;
+  if (!Array.isArray(images) || !images.length || !Array.isArray(materials) || !materials.length
+      || !Array.isArray(textures) || !textures.length
+      || resources.textureCount !== textures.length || resources.imageCount !== images.length
+      || !Number.isSafeInteger(asset.textureUploadBytes) || asset.textureUploadBytes < images.length * 4)
+    throw new Error('composition-model-preparation-required');
+  const external = images.filter(image => image?.source === 'external');
+  const urls = asset.textureUrls;
+  if (!urls || typeof urls !== 'object' || Array.isArray(urls)
+      || Object.keys(urls).length !== external.length
+      || external.some(image => typeof image.uri !== 'string' || typeof urls[image.uri] !== 'string' || !urls[image.uri]))
+    throw new Error('composition-model-texture-url-required');
 }
 function modelConstructionBytes(facts) {
   return facts.input.encodedBytes + facts.input.binBytes + facts.input.jsonBytes * 2;
@@ -303,7 +323,6 @@ export function compilePlan(projection, registry = null, identity = null) {
   if (graphic3d) resources.renderTargetDeclaredBytes += pixels * 4;
   const primitives = {drawCalls:1,points:0,triangles:2};
   if (outputGlow) { primitives.drawCalls += 3; primitives.triangles += 6; }
-  if (graphic3d) resources.programs += 1;
   if (builtin) {
     const source=builtin.profile.sourceResources;
     resources.renderTargetDeclaredBytes += pixels*4;
@@ -315,9 +334,14 @@ export function compilePlan(projection, registry = null, identity = null) {
   for (const requirement of unique.values()) {
     if (requirement.kind === 'font') { resources.ownedCpuBytes += fontCpuBytes(requirement); continue; }
     if (requirement.kind === 'model') {
-      const facts = requirement.modelFacts;
+      const facts = requirement.modelFacts, textured = facts.profile === MODEL_TEXTURED_PROFILE;
       resources.bufferDeclaredBytes += facts.resources.gpuBufferBytes;
       resources.ownedCpuBytes += modelConstructionBytes(facts) + facts.resources.cpuBackingBytes;
+      resources.programs += Math.max(1, textured ? facts.materials.length : 1);
+      if (textured) {
+        resources.textureDeclaredBytes += requirement.textureUploadBytes;
+        resources.decodeReservedBytes += requirement.textureUploadBytes;
+      }
       primitives.drawCalls += facts.scene.drawCalls;
       primitives.triangles += facts.scene.triangles;
       continue;

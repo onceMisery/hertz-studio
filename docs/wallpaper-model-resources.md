@@ -1162,3 +1162,27 @@ textured profile 三种负例均在预留前拒绝且 ledger 持平。三处变�
 材质透明度、多材质 program 精确计数，以及原生 `composition_plan.rs` 的
 scene3d/model 资源准备/准入仍未实施，GPU 设备矩阵与 A01/A05–A10 外部验收
 继续开放。
+
+2026-11-14 r73 JS 组合 textured-PBR 续接：`plan.js` 的 model 资源增加
+`static-pbr-texture-v1`：`decodeOptions.profile` 必须与 `modelFacts.profile`
+一致，facts 需含 materials/textures/images 且计数与 `resources.textureCount/
+imageCount` 相符；投影必须携带整数 `textureUploadBytes`（≥ images×4）与
+`textureUrls` 映射，外部图片 URI 必须逐个映射，未映射或多映射 fail-closed；
+预算增加 `textureDeclaredBytes/decodeReservedBytes` 与按材质数的 program。
+`model-node.js` 按 profile 选择 `parseTexturedModel`，把 `textureUrl` 绑定到
+投影映射；成功后提交 upload 票、释放 decode 票，失败路径释放全部构造/解码/
+上传票（同时修复 r72 失败加载的票泄漏）。纹理材质保留作者 PBR 参数，仅 core
+默认材质继续 metalness=0；3D 场景改为仅 AmbientLight，避免未发布的定向光
+镜面项污染 authored 纹理像素。
+
+真实证据：core 与 textured 两套真实 GLB 均由 Rust 编译器 IR + 本地 HTTP
+加载。2×2 红/绿嵌入 PNG（NEAREST/CLAMP、metallic=0）在三角形 UV 上得到
+左红 [255,0,0]、右绿 [0,255,0]；`ledger.live.textureDeclaredBytes=64`、
+decode=0。负例：缺失 `textureUploadBytes` → preparation-required；facts 中
+新增未映射外部 URI → texture-url-required，两者均未预留配额。三处变异
+（plan 不校验上传字节、textured 改用 core parser、upload 票不 commit）均变红
+后还原；组合检查 47 项连续 3 次通过，文本布局 9 项与前端聚合 86 步通过。
+
+仍未闭合：KTX2/Basis 转码与 GPU 格式、外部纹理真实 broker/CSP、GLB 动画、
+逐实例材质透明度、多材质 program 精确计数，以及原生 scene3d/model 资源准入、
+GPU 设备矩阵与 A01/A05–A10 外部验收。
