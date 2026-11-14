@@ -35,12 +35,29 @@ async function main() {
     await page.evaluate(() => {
       window.VMusicTransport = { post: function (route, body) { return window.dbxCommand(body); } };
       window.Stage = {
+        hidden: false,
+        isDocumentHidden: function () { return this.hidden; },
         resources: function () {
           return { port: function () { return { require: function () { return { commit: function () {}, release: function () {} }; } }; } };
         }
       };
+      window.__resetVideo = function () {
+        const video = document.getElementById('v');
+        video.pause();
+        video.removeAttribute('src');
+        video.load();
+        return new Promise(resolve => {
+          if (video.readyState === 0) { resolve(); return; }
+          video.addEventListener('emptied', () => resolve(), { once: true });
+          setTimeout(resolve, 1000);
+        });
+      };
     });
     await page.addScriptTag({ path: path.join(__dirname, '..', 'plugin', 'ui', 'stage-media.js') });
+    async function waitReads(count) {
+      const deadline = Date.now() + 10000;
+      while (reads.length < count && Date.now() < deadline) await page.waitForTimeout(50);
+    }
 
     const handle = await page.evaluate(async () => {
       const value = await StageMedia.acquire({ assetRef: { storeId: 's', assetId: 'a'.repeat(64) } }, {});
@@ -65,6 +82,7 @@ async function main() {
       return { width: video.videoWidth, height: video.videoHeight, duration: video.duration };
     });
     assert.ok(facts.width > 0 && facts.height > 0, JSON.stringify(facts));
+    await waitReads(5);
     assert.deepEqual(reads.map(read => read.offset), [0, 1000, 2000, 3000, 4000]);
     assert.equal(reads.at(-1).count, bytes.length - 4000);
 
@@ -150,8 +168,7 @@ async function main() {
       };
       const value = await StageMedia.acquire({ assetRef: { storeId: 's', assetId: 'b'.repeat(64) } }, {});
       const video = document.getElementById('v');
-      video.removeAttribute('src');
-      video.load();
+      await window.__resetVideo();
       video.src = value.url;
       await new Promise((resolve, reject) => {
         const timeout = setTimeout(() => reject(new Error('mp4 setup timeout')), 15000);
@@ -178,8 +195,66 @@ async function main() {
       assert.equal(mp4Result.reads[index].offset, mp4Result.reads[index - 1].offset + mp4Result.reads[index - 1].count);
     }
 
+    // An inactive (visible) surface must not pull chunks until setActive(true).
+    await page.evaluate(() => {
+      window.VMusicTransport = { post: function (route, body) { return window.dbxCommand(body); } };
+    });
+    reads.length = 0;
+    releases.length = 0;
+    mode = 'stream';
+    await page.evaluate(async () => {
+      Stage.hidden = false;
+      const value = await StageMedia.acquire({ assetRef: { storeId: 's', assetId: 'c'.repeat(64) } }, {});
+      window.__visibilityHandle = value;
+      await value.setActive(false);
+      const video = document.getElementById('v');
+      await window.__resetVideo();
+      video.src = value.url;
+    });
+    await page.waitForTimeout(700);
+    assert.equal(reads.length, 0, 'inactive surface pulls no chunks');
+    await page.evaluate(async () => { await window.__visibilityHandle.setActive(true); });
+    await page.waitForFunction(() => {
+      const video = document.getElementById('v');
+      return video.readyState >= 2 && Number.isFinite(video.duration) && video.duration > 0;
+    }, null, { timeout: 15000 });
+    await waitReads(5);
+    assert.equal(reads.length, 5, 'activated surface reads all chunks');
+    await page.evaluate(async () => { await window.__visibilityHandle.release(); });
+    assert.deepEqual(releases, ['dbx']);
+
+    // A hidden but active surface also pauses; unhiding resumes from the same
+    // offset without a lease renewal requirement.
+    reads.length = 0;
+    releases.length = 0;
+    await page.evaluate(async () => {
+      Stage.hidden = true;
+      const value = await StageMedia.acquire({ assetRef: { storeId: 's', assetId: 'd'.repeat(64) } }, {});
+      window.__visibilityHandle = value;
+      const video = document.getElementById('v');
+      await window.__resetVideo();
+      video.src = value.url;
+    });
+    await page.waitForTimeout(700);
+    assert.equal(reads.length, 0, 'hidden surface pulls no chunks');
+    await page.evaluate(() => { Stage.hidden = false; });
+    await page.waitForFunction(() => {
+      const video = document.getElementById('v');
+      return video.readyState >= 2 && Number.isFinite(video.duration) && video.duration > 0;
+    }, null, { timeout: 15000 });
+    await waitReads(5);
+    assert.equal(reads.length, 5, 'unhidden surface reads all chunks');
+    const resumed = await page.evaluate(() => {
+      const video = document.getElementById('v');
+      return { width: video.videoWidth, height: video.videoHeight, duration: video.duration };
+    });
+    assert.equal(resumed.width, 64);
+    assert.equal(resumed.height, 48);
+    await page.evaluate(async () => { await window.__visibilityHandle.release(); });
+    assert.deepEqual(releases, ['dbx']);
+
     assert.deepEqual(errors, []);
-    console.log(`stage media DBX video: WebM ${bytes.length}B in ${reads.length} reads, ${facts.width}x${facts.height}, duration=${facts.duration.toFixed(2)}s; MP4 ${mp4.bytes.length}B ${mp4.codecString} ${mp4Result.facts.width}x${mp4Result.facts.height} in ${mp4Result.reads.length} reads; release+unsupported codec passed`);
+    console.log(`stage media DBX video: WebM ${bytes.length}B in ${reads.length} reads, ${facts.width}x${facts.height}, duration=${facts.duration.toFixed(2)}s; MP4 ${mp4.bytes.length}B ${mp4.codecString} ${mp4Result.facts.width}x${mp4Result.facts.height} in ${mp4Result.reads.length} reads; hidden/resume+release+unsupported codec passed`);
   } finally {
     if (browser) await browser.close();
   }

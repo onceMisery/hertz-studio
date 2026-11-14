@@ -82,4 +82,10 @@
 - `node scripts/check-stage-media-dbx-video-browser.js`：真实 Chrome MediaSource。WebM：4165B VP8 按 1000B 短读分 5 块喂入，解码为 64×48、2.00s，读 offset 严格 0/1000/2000/3000/4000。MP4：页面本地录制 H.264（测试专用 `--enable-features=MediaRecorderUseMP4`），从产物 avcC 推导 `avc1.42C015`，约 18–22KB 按 1000B 分 19–22 块喂入，解码为 320×240；释放后无新读；MP4 无 codecString 的旧路径被拒绝且租约释放。
 - `node scripts/check-stage-media.js` 原有独立版路径与租约时钟继续通过；`node scripts/check-frontend.js` 86 步通过。
 
+### 2026-11-14 可见性暂停与续传
+
+`pumpVideo` 在每次 `lease.read` 前等待活动/可见：`setActive(false)`、`lost` 或页面（含原生父窗口）隐藏时暂停拉流，每 250ms 轮询；恢复后从原 offset 续传，不重建租约、不重复读取已消费块。`documentHidden()` 优先使用 `Stage.isDocumentHidden()`（原生父窗口挂起），独立浏览器回退 `document.hidden`。
+
+浏览器测试新增两阶段：inactive-visible（`setActive(false)` 后 700ms 内 0 读，激活后 5 块读完并解码 64×48）、hidden-active（`Stage.hidden=true` 后 0 读，解除后 5 块读完并解码）；释放后均无新读且租约释放。三处变异（删除门控调用、移除 `!activeLease`、移除 `documentHidden()`）均使对应断言变红后还原。
+
 上述证据不包含真实 DBX 宿主、真实设备/硬件解码或安装包人工旅程；DBX 视频流仍未取得宿主发布资格。
