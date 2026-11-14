@@ -1041,3 +1041,15 @@ speed=0 时第 2 行与第 6 行发生相反位移（右上翻红、左下翻绿
 ripple 位移、wind 忽略 direction、runtime 不更新 effectTime）均变红后还原；
 38 项 composition 检查连续 3 次通过，前端聚合 86 步通过。mask/glow、节点离屏
 后处理、效果图 surface 预算与 GPU 时间继续开放。
+
+2026-11-14 r66 节点 mask 续接：`plan.js` 接受 target.kind==='node' 的 mask，
+校验 `invert` 布尔与 `maskAsset` 字符串，写入 `nodePlans[index].effects.mask`；
+资源闭包把 effect 的 maskAsset 资源 use（nodeIndex=null）解析到目标节点的
+`resources.maskAsset`，同一节点 schema mask 与 mask effect 并存时 fail-closed。
+`nodes.js` shader 增加 `maskInvert` uniform，alpha 按
+`mix(mask, 1-mask, invert)` 采样。
+
+真实 Rust IR + Chrome 像素：cutout 遮罩（左白右黑）普通 mask 左红右黑，invert
+后左黑右红。三处变异（plan 丢 invert、资源闭包拒绝 effect use、shader 忽略
+invert）均变红后还原；39 项 composition 检查连续 3 次通过。glow（output
+surfaces=2/drawPasses=3）与效果图预算、离屏后处理、GPU 时间继续开放。

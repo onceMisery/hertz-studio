@@ -20,6 +20,7 @@ const sourceAssets=[
  {assetId:'soft',kind:'image',file:'soft.png',mime:'image/png',width:8,height:8,bytes:png(8,8,()=>[255,0,0,128])},
  {assetId:'green',kind:'image',file:'green.png',mime:'image/png',width:8,height:8,bytes:png(8,8,()=>[0,255,0,255])},
  {assetId:'mask',kind:'image',file:'mask.png',mime:'image/png',width:8,height:8,bytes:png(8,8,()=>[128,128,128,255])},
+ {assetId:'cutout',kind:'image',file:'cutout.png',mime:'image/png',width:16,height:8,bytes:png(16,8,x=>x<8?[255,255,255,255]:[0,0,0,255])},
  {assetId:'wide',kind:'image',file:'wide.png',mime:'image/png',width:16,height:8,bytes:png(16,8,(x)=>x<8?[255,0,0,255]:[0,255,0,255])},
  {assetId:'video',kind:'video',file:'video.webm',mime:'video/webm',bytes:fs.readFileSync(path.join(root,'scripts/fixtures/wallpaper-vp8.webm'))},
  {assetId:'font',kind:'font',file:fontFixture.file,mime:fontFixture.mime,bytes:fontFixture.bytes}
@@ -94,6 +95,9 @@ const windVertical=compile([image('back','wide')],undefined,[],undefined,undefin
  nodeEffect('wind',{strength:1,speed:0,directionDegrees:90}));
 const windMoving=compile([image('back','wide')],undefined,[],undefined,undefined,
  nodeEffect('wind',{strength:1,speed:1,directionDegrees:0}));
+const maskEffect=invert=>compile([image('back','red')],undefined,[],undefined,undefined,
+ [{id:'clip',type:'mask',stateVersion:1,target:{kind:'node',nodeId:'back'},assets:{maskAsset:'cutout'},properties:{invert}}]);
+const masked=maskEffect(false), maskedInverted=maskEffect(true);
 const dirtyFixture=compile([image('back','blue'),image('child','red',{width:16,height:16}),
  {id:'parent',type:'group',stateVersion:1,children:['child'],properties:{x:8,y:8,width:64,height:64,anchorX:0,anchorY:0}},
  image('unrelated','green',{x:48,y:48,width:16,height:16}),
@@ -263,6 +267,13 @@ const results=[];
   const windMoved=await page.evaluate(()=>pixel(10,20));
   near(windStart,[0,255,0]);near(windMoved,[255,0,0]);
   results.push({case:'node wind honors direction axis and timeline speed',x:windX,y:windY,at0:windStart,at25:windMoved});
+  await select(masked);
+  const maskNormal=await page.evaluate(()=>({inside:pixel(10,20),outside:pixel(54,20)}));
+  near(maskNormal.inside,[255,0,0]);near(maskNormal.outside,[0,0,0]);
+  await select(maskedInverted);
+  const maskInverted=await page.evaluate(()=>({inside:pixel(10,20),outside:pixel(54,20)}));
+  near(maskInverted.inside,[0,0,0]);near(maskInverted.outside,[255,0,0]);
+  results.push({case:'node mask effect samples its mask asset and honors invert',normal:maskNormal,inverted:maskInverted});
   near(effectGray,[127,127,127]);near(effectBright,[255,124,124]);
   results.push({case:'compiler output colorAdjust saturation and brightness',effectGray,effectBright});
   await select(video);try{await page.waitForFunction(()=>host.frame({sceneTime:.1,paused:true,seek:true}),null,{timeout:8000});}

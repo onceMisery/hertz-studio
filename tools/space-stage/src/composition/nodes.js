@@ -78,7 +78,7 @@ const vertexShader = `varying vec2 vUv;
 void main(){ vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }`;
 const fragmentShader = `uniform sampler2D colorMap; uniform sampler2D maskMap;
 uniform bool hasMap; uniform bool hasMask; uniform bool isVideo; uniform bool isCircle;
-uniform float opacity; uniform vec2 uvScale; uniform vec2 uvOffset;
+uniform float opacity; uniform vec2 uvScale; uniform vec2 uvOffset; uniform bool maskInvert;
 uniform bool hasRipple; uniform vec3 ripple; uniform bool hasWind; uniform vec3 wind; uniform float effectTime;
 varying vec2 vUv;
 vec3 videoLinear(vec3 c){return mix(pow(c*0.9478672986+vec3(0.0521327014),vec3(2.4)),c*0.0773993808,lessThanEqual(c,vec3(0.04045)));}
@@ -92,7 +92,8 @@ void main(){ vec2 uv=effectUv(vUv*uvScale+uvOffset,vUv);
   vec4 color=hasMap?texture2D(colorMap,uv):vec4(1.0);
   if(isVideo)color.rgb=videoLinear(color.rgb);
   if(isCircle && length(vUv-0.5)>0.5)discard;
-  float alpha=color.a*opacity*(hasMask?texture2D(maskMap,vUv).r:1.0);
+  float alpha=color.a*opacity;
+  if(hasMask){float mask=texture2D(maskMap,vUv).r;alpha*=mix(mask,1.0-mask,maskInvert);}
   gl_FragColor=vec4(color.rgb*alpha,alpha);
 }`;
 function material(THREE, spec, texture, mask) {
@@ -105,6 +106,7 @@ function material(THREE, spec, texture, mask) {
     uniforms: { colorMap: { value: texture }, maskMap: { value: mask }, hasMap: { value: !!texture }, hasMask: { value: !!mask },
       isVideo: { value: !!texture?.isVideoTexture }, isCircle: { value: !texture && spec.node.nodeType === 'particles' },
       opacity: { value: 1 }, uvScale: { value: new THREE.Vector2(1, 1) }, uvOffset: { value: new THREE.Vector2(0, 0) },
+      maskInvert: { value: false },
       hasRipple: { value: false }, ripple: { value: new THREE.Vector3() },
       hasWind: { value: false }, wind: { value: new THREE.Vector3() }, effectTime: { value: 0 } } });
 }
@@ -126,6 +128,7 @@ export function updateNodeMaterial(THREE, node, assets) {
     mat.uniforms.spread.value=spec.number('spread');
   }
   const effects=spec.effects||{};
+  mat.uniforms.maskInvert.value=!!effects.mask?.invert;
   mat.uniforms.hasRipple.value=!!effects.ripple;
   if(effects.ripple)mat.uniforms.ripple.value.set(effects.ripple.amplitude,effects.ripple.frequency,effects.ripple.speed);
   mat.uniforms.hasWind.value=!!effects.wind;
