@@ -1326,3 +1326,37 @@ pageLimits.textureDeclaredBytes=16+4096、buffer=194）。
 仍未闭合：Basis ETC1S/UASTC 转码与 transcoder 资源/Worker/CSP、GPU 压缩格式
 （BC/ETC2/ASTC）设备矩阵、GLB 动画、逐实例材质透明度、多材质 program 精确计数、
 真实 GPU 显存/首帧与 A01/A05–A10 外部验收。
+
+2026-11-15 r79 GLB 动画续接：`model_profile` 新增共享 `animation_projection`，
+core/textured/ktx2 facts 均输出 `animations`（clip 名称/时长/逐 channel 的
+node/path/interpolation/input/output accessor/times/values/components）以及
+`resources.animationAccessors/animationBufferViews/animationCount/
+animationChannelCount/animationCpuBytes`。要求 channel 目标在可达场景内、TRS
+路径、times 为 packed FLOAT SCALAR、输出按 path 为 VEC3/VEC4 且 count 与
+CUBICSPLINE 布局一致、clip 名称唯一、声明 duration 为正；动画 accessor 视图并入
+CPU backing，CPU 预算另加每 channel 512B mixer 绑定余量。`check_textured_accessor`
+与 core accessor 允许动画所需的 FLOAT SCALAR / VEC4，同时 primitive 仍强制
+POSITION/NORMAL 为 FLOAT VEC3、索引为无符号 SCALAR。
+
+JS facts 同步投影动画并纳入 CPU 预算；`verifyAnimations` 用 parser accessor 身份
+核对 `track.times/values` 指针、长度、插值、clip 名称/时长与轨道数，要求被动画
+节点有唯一名称、在场景内且 track 名精确为 `<name>.<position|quaternion|scale>`；
+`createModelResource` 保留真实 AnimationClip。`nodes.js` 为选中 clip 的模型实例
+创建 AnimationMixer；`runtime.js` 在时间变化时 `setTime(time % duration)` 并更新
+矩阵。`plan.js` 接受非空 `animationClip`（≤128B）且必须命中 facts clip 名称，
+未知 clip 在预留前 fail-closed；模型构造 CPU 票加入 `animationCpuBytes`。
+
+桌面 `validate_structure` 允许 3D model 的有界 clip 名称，`media_costs` 在资源
+已准备后校验名称存在于该模型 facts，成本加入 `animationCpuBytes`；未知 clip 仍
+返回 adapter_unavailable。
+
+真实证据：Rust 新增 core/textured 动画 facts 测试（translation 时长/accessor/
+预算、未命名 clip 解析、单关键帧拒绝）；桌面 `model-animated` fixture 断言
+projection 动画 facts 与 pageLimits；Chrome 组合检查 51 项（triangle 平移像素、
+在 clip duration 内循环、未知 clip 零配额）；原生页面新增 `model-animated` 阶段
+（真实 Rust 投影 + GlAdmission，早期/后期像素位移、budget.error=null、
+contexts 1→0）。
+
+仍未闭合：Basis ETC1S/UASTC 转码与 transcoder 资源/Worker/CSP、GPU 压缩格式
+设备矩阵、GLB 蒙皮/形变动画、动画混合与多 clip、逐实例材质透明度、多材质
+program 精确计数、真实 GPU 显存/首帧与 A01/A05–A10 外部验收。

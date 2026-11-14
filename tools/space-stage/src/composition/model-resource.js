@@ -2,7 +2,8 @@
 // Consumption only. The prepared package, pool, scope and renderer retain their
 // existing ownership; this factory neither admits a source nor proves a frame.
 import {
-  ClampToEdgeWrapping, DoubleSide, FrontSide, LinearFilter, LinearMipmapLinearFilter,
+  ClampToEdgeWrapping, DoubleSide, FrontSide, InterpolateDiscrete, InterpolateLinear,
+  InterpolateSmooth, LinearFilter, LinearMipmapLinearFilter,
   LinearMipmapNearestFilter, LoadingManager, Matrix4, MeshStandardMaterial,
   MirroredRepeatWrapping, NearestFilter, NearestMipmapLinearFilter, NearestMipmapNearestFilter,
   NoColorSpace, Quaternion, RepeatWrapping, REVISION, RGBAFormat, SRGBColorSpace,
@@ -18,6 +19,9 @@ export const STATIC_TEXTURED_PROFILE = 'static-pbr-texture-v1';
 export const STATIC_KTX2_PROFILE = 'static-ktx2-texture-v1';
 const KTX2_MIME = 'image/ktx2';
 const KTX2_EXTENSION = 'KHR_texture_basisu';
+const ANIMATION_INTERPOLATION = {
+  STEP: InterpolateDiscrete, LINEAR: InterpolateLinear, CUBICSPLINE: InterpolateSmooth
+};
 const MAX_INPUT = 256 * 1024 * 1024, MAX_JSON = 4 * 1024 * 1024;
 const MAX_ITEMS = 16384, MAX_NODES = 5000, MAX_TRIANGLES = 1000000;
 const own = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
@@ -67,7 +71,7 @@ function extrasExposeLoaderPivot(extras) {
 }
 
 function rejectDelegates(json) {
-  for (const key of ['images', 'textures', 'materials', 'cameras', 'animations', 'skins', 'samplers']) {
+  for (const key of ['images', 'textures', 'materials', 'cameras', 'skins', 'samplers']) {
     assert(json[key] === undefined || (Array.isArray(json[key]) && !json[key].length), key + '-unsupported');
   }
   // _markDefs runs before beforeRoot and would mark skinned meshes/bones.
@@ -108,6 +112,65 @@ export function compareStaticModelFacts(expected, actual) {
   compare(expected, actual, 'facts'); return true;
 }
 
+function animationFacts(json, accessors, layouts, views, reachable, nodeCount) {
+  const animations = json.animations ?? [];
+  if (!animations.length) return null;
+  const names = new Set(), clips = [], accessorFacts = new Map(), viewFacts = new Map();
+  let channelCount = 0, accessorBytes = 0;
+  animations.forEach((animation, clipIndex) => {
+    const name = typeof animation?.name === 'string' && animation.name ? animation.name : 'animation_' + clipIndex;
+    assert(animation && typeof animation === 'object' && name.length <= 128 && !names.has(name), 'animation-name');
+    names.add(name);
+    const samplers = array(animation.samplers, 'animation-samplers');
+    const channels = array(animation.channels, 'animation-channels');
+    assert(channels.length > 0 && channels.length <= MAX_ITEMS, 'animation-channels');
+    let duration = 0;
+    const channelFacts = channels.map(channel => {
+      assert(channel && typeof channel === 'object', 'animation-channel');
+      const target = channel.target;
+      assert(target && integer(target.node) && target.node < nodeCount && reachable.has(target.node), 'animation-node');
+      assert(['translation', 'rotation', 'scale'].includes(target.path), 'animation-path');
+      const sampler = index(channel.sampler, samplers, 'animation-sampler');
+      const input = index(sampler.input, layouts, 'animation-input');
+      const output = index(sampler.output, layouts, 'animation-output');
+      assert(input.type === 'SCALAR' && input.componentType === 5126 && input.count >= 1, 'animation-times');
+      const components = target.path === 'rotation' ? 4 : 3;
+      assert(output.type === (components === 4 ? 'VEC4' : 'VEC3')
+        && output.componentType === 5126, 'animation-output');
+      const interpolation = sampler.interpolation ?? 'LINEAR';
+      assert(['STEP', 'LINEAR', 'CUBICSPLINE'].includes(interpolation), 'animation-interpolation');
+      const multiplier = interpolation === 'CUBICSPLINE' ? 3 : 1;
+      assert(output.count === input.count * multiplier, 'animation-output-count');
+      const inputDef = accessors[input.index];
+      assert(Array.isArray(inputDef.max) && Number.isFinite(inputDef.max[0]), 'animation-bounds');
+      duration = Math.max(duration, Math.fround(inputDef.max[0]));
+      for (const layout of [input, output]) {
+        if (!accessorFacts.has(layout.index)) {
+          accessorFacts.set(layout.index, { index: layout.index, viewIndex: layout.viewIndex,
+            componentType: layout.componentType, type: layout.type, count: layout.count,
+            byteOffset: layout.byteOffset, byteLength: layout.byteLength });
+          accessorBytes += layout.byteLength;
+        }
+        if (!viewFacts.has(layout.viewIndex)) {
+          const view = views[layout.viewIndex];
+          viewFacts.set(layout.viewIndex, { index: layout.viewIndex,
+            byteOffset: view.byteOffset ?? 0, byteLength: view.byteLength });
+        }
+      }
+      channelCount += 1;
+      return { node: target.node, path: target.path, interpolation,
+        inputAccessor: input.index, outputAccessor: output.index,
+        times: input.count, values: output.count, components };
+    });
+    assert(duration > 0, 'animation-duration');
+    clips.push({ index: clipIndex, name, duration, channels: channelFacts });
+  });
+  const viewsList = [...viewFacts.values()].sort((a, b) => a.index - b.index);
+  return { clips, accessors: [...accessorFacts.values()].sort((a, b) => a.index - b.index),
+    views: viewsList, viewIndices: viewsList.map(view => view.index),
+    channelCount, cpuBytes: accessorBytes + channelCount * 512 };
+}
+
 function profileFacts(json, input) {
   rejectDelegates(json);
   const scenes = array(json.scenes, 'scene-required'), nodes = array(json.nodes, 'nodes-required');
@@ -127,11 +190,13 @@ function profileFacts(json, input) {
   const layouts = accessors.map((accessor, accessorIndex) => {
     assert(accessor && !own(accessor, 'sparse') && own(accessor, 'bufferView') && accessor.normalized !== true, 'packed-accessor-required');
     const view = index(accessor.bufferView, views, 'accessor-bufferView');
-    const vector = accessor.componentType === 5126 && accessor.type === 'VEC3';
+    const vector3 = accessor.componentType === 5126 && accessor.type === 'VEC3';
+    const vector4 = accessor.componentType === 5126 && accessor.type === 'VEC4';
     const scalar = [5121, 5123, 5125].includes(accessor.componentType) && accessor.type === 'SCALAR';
-    assert(vector || scalar, 'accessor-type');
-    const elementBytes = vector || accessor.componentType === 5125 ? 4 : accessor.componentType === 5123 ? 2 : 1;
-    const itemBytes = vector ? 12 : elementBytes, byteOffset = accessor.byteOffset ?? 0;
+    const floatScalar = accessor.componentType === 5126 && accessor.type === 'SCALAR';
+    assert(vector3 || vector4 || scalar || floatScalar, 'accessor-type');
+    const elementBytes = accessor.componentType === 5126 || accessor.componentType === 5125 ? 4 : accessor.componentType === 5123 ? 2 : 1;
+    const itemBytes = vector4 ? 16 : vector3 ? 12 : elementBytes, byteOffset = accessor.byteOffset ?? 0;
     assert(integer(accessor.count) && accessor.count > 0 && integer(byteOffset) && byteOffset % elementBytes === 0
       && (view.byteOffset ?? 0) % elementBytes === 0 && byteOffset + accessor.count * itemBytes <= view.byteLength, 'packed-accessor-range');
     assert(view.byteStride === undefined || view.byteStride === itemBytes, 'interleaved-unsupported');
@@ -149,12 +214,13 @@ function profileFacts(json, input) {
       const attributes = primitive.attributes;
       assert(attributes && Object.keys(attributes).sort().join(',') === 'NORMAL,POSITION', 'POSITION-NORMAL-only');
       const position = index(attributes.POSITION, layouts, 'POSITION-accessor'), normal = index(attributes.NORMAL, layouts, 'NORMAL-accessor');
-      assert(position.type === 'VEC3' && normal.type === 'VEC3' && position.count === normal.count, 'FLOAT-POSITION-NORMAL-required');
+      assert(position.type === 'VEC3' && normal.type === 'VEC3' && position.count === normal.count
+        && position.componentType === 5126 && normal.componentType === 5126, 'FLOAT-POSITION-NORMAL-required');
       const positionDef = accessors[position.index];
       assert(Array.isArray(positionDef.min) && positionDef.min.length === 3 && positionDef.min.every(Number.isFinite)
         && Array.isArray(positionDef.max) && positionDef.max.length === 3 && positionDef.max.every(Number.isFinite), 'POSITION-declared-bounds-required');
       const indices = primitive.indices === undefined ? null : index(primitive.indices, layouts, 'indices-accessor');
-      assert(indices === null || indices.type === 'SCALAR', 'unsigned-indices-required');
+      assert(indices === null || (indices.type === 'SCALAR' && [5121, 5123, 5125].includes(indices.componentType)), 'unsigned-indices-required');
       const count = indices?.count ?? position.count; assert(count % 3 === 0, 'triangle-count');
       declaredTriangles += count / 3; assert(declaredTriangles <= MAX_TRIANGLES, 'triangle-limit');
       const mode = primitive.mode ?? null, indexAccessor = indices?.index ?? null;
@@ -224,17 +290,30 @@ function profileFacts(json, input) {
   let allocatedObjectCount = objectCount;
   for (const mesh of usedMeshes) if (meshReferences.get(mesh) > 1) allocatedObjectCount += primitives[mesh].length + (primitives[mesh].length > 1 ? 1 : 0);
   const usedLayouts = [...usedAccessors].sort((a, b) => a - b).map(i => layouts[i]);
+  const animation = animationFacts(json, accessors, layouts, views, reachable, nodes.length);
   const usedViews = [...new Set(usedLayouts.map(layout => layout.viewIndex))].sort((a, b) => a - b)
     .map(i => ({ index: i, byteOffset: views[i].byteOffset ?? 0, byteLength: views[i].byteLength }));
-  return {
+  const cpuViewIndices = [...new Set([...usedViews.map(view => view.index), ...(animation?.viewIndices ?? [])])]
+    .sort((a, b) => a - b);
+  const facts = {
     profile: STATIC_MODEL_PROFILE, loaderVersion: STATIC_MODEL_LOADER_VERSION, input,
     declared: { nodes: nodes.length, meshes: meshes.length, primitives: primitiveCount, accessors: accessors.length, bufferViews: views.length },
     scene: { index: 0, roots: [...roots], nodes: sceneNodes, maxDepth, objectCount, allocatedObjectCount, drawCalls, triangles },
     resources: { geometries: [...geometries.values()].sort((a, b) => a.key < b.key ? -1 : a.key > b.key ? 1 : 0), accessors: usedLayouts, bufferViews: usedViews,
       geometryCount: geometries.size, attributeCount: usedLayouts.length, backingCount: usedViews.length,
       gpuBufferBytes: usedLayouts.reduce((sum, layout) => sum + layout.byteLength, 0),
-      cpuBackingBytes: usedViews.reduce((sum, view) => sum + view.byteLength, 0), allocatedMaterialCount: 2, retainedMaterialCount: 1 }
+      cpuBackingBytes: cpuViewIndices.reduce((sum, index) => sum + views[index].byteLength, 0),
+      allocatedMaterialCount: 2, retainedMaterialCount: 1 }
   };
+  if (animation) {
+    facts.animations = animation.clips;
+    facts.resources.animationAccessors = animation.accessors;
+    facts.resources.animationBufferViews = animation.views;
+    facts.resources.animationCount = animation.clips.length;
+    facts.resources.animationChannelCount = animation.channelCount;
+    facts.resources.animationCpuBytes = animation.cpuBytes;
+  }
+  return facts;
 }
 
 function allocationTracker(parser) {
@@ -279,8 +358,41 @@ function defaultPbr(material) {
     && material.side === FrontSide && material.alphaTest === 0 && !Object.values(material).some(value => value?.isTexture);
 }
 
+async function verifyAnimations(result, parser, facts) {
+  const expected = facts.animations ?? [];
+  if (result.animations.length !== expected.length) throw mismatch('animation-count');
+  const nodeNames = new Map(), clips = [];
+  for (const [index, clipFacts] of expected.entries()) {
+    const clip = result.animations[index];
+    if (!clip || clip.name !== clipFacts.name || Math.abs(clip.duration - clipFacts.duration) > 1e-12
+      || clip.tracks.length !== clipFacts.channels.length) throw mismatch('animation-clip');
+    for (const [trackIndex, channel] of clipFacts.channels.entries()) {
+      const track = clip.tracks[trackIndex];
+      const [input, output, node] = await Promise.all([
+        parser.getDependency('accessor', channel.inputAccessor),
+        parser.getDependency('accessor', channel.outputAccessor),
+        parser.getDependency('node', channel.node)
+      ]);
+      if (track.times !== input.array || track.values !== output.array
+        || track.times.length !== channel.times || track.values.length !== channel.values * channel.components
+        || track.getInterpolation() !== ANIMATION_INTERPOLATION[channel.interpolation]) throw mismatch('animation-track');
+      if (!node || typeof node.name !== 'string' || !node.name) throw mismatch('animation-node-name');
+      if (nodeNames.has(node.name) && nodeNames.get(node.name) !== node) throw mismatch('animation-node-name');
+      nodeNames.set(node.name, node);
+      if (result.scene.getObjectByName(node.name) !== node) throw mismatch('animation-node-name');
+      let inScene = false;
+      for (let parent = node; parent; parent = parent.parent) if (parent === result.scene) { inScene = true; break; }
+      if (!inScene) throw mismatch('animation-node-unreachable');
+      const property = { translation: 'position', rotation: 'quaternion', scale: 'scale' }[channel.path];
+      if (track.name !== node.name + '.' + property) throw mismatch('animation-binding');
+    }
+    clips.push(clip);
+  }
+  return clips;
+}
+
 async function verifyActual(result, parser, facts, tracker) {
-  if (result.scenes.length !== 1 || result.scene !== result.scenes[0] || result.animations.length || result.cameras.length) throw mismatch('result');
+  if (result.scenes.length !== 1 || result.scene !== result.scenes[0] || result.cameras.length) throw mismatch('result');
   const objects = [], meshes = [], nodeObjects = new Map(), retainedMaterials = new Set(), geometryObjects = new Map(); let actualTriangles = 0;
   result.scene.traverse(object => {
     objects.push(object);
@@ -341,16 +453,31 @@ async function verifyActual(result, parser, facts, tracker) {
     backings.set(layout.viewIndex, backing); backingIdentities.add(backing);
   }
   for (const view of facts.resources.bufferViews) if (backings.get(view.index)?.byteLength !== view.byteLength) throw mismatch('backing-size');
+  for (const layout of facts.resources.animationAccessors ?? []) {
+    const attribute = await parser.getDependency('accessor', layout.index);
+    const ArrayType = layout.componentType === 5126 ? Float32Array : layout.componentType === 5121 ? Uint8Array : layout.componentType === 5123 ? Uint16Array : Uint32Array;
+    const size = layout.type === 'VEC3' ? 3 : layout.type === 'VEC4' ? 4 : 1;
+    if (!attribute.isBufferAttribute || attribute.isInterleavedBufferAttribute || !(attribute.array instanceof ArrayType)
+      || attribute.itemSize !== size || attribute.count !== layout.count || attribute.normalized
+      || attribute.array.byteOffset !== layout.byteOffset || attribute.array.byteLength !== layout.byteLength) throw mismatch('animation-accessor-layout');
+    const backing = attribute.array.buffer;
+    if (backings.has(layout.viewIndex) && backings.get(layout.viewIndex) !== backing) throw mismatch('backing-alias');
+    backings.set(layout.viewIndex, backing);
+  }
+  for (const view of facts.resources.animationBufferViews ?? []) {
+    if (backings.get(view.index)?.byteLength !== view.byteLength) throw mismatch('animation-backing-size');
+  }
   for (const geometry of facts.resources.geometries) {
     const actual = geometryObjects.get(geometry.key);
     if (!actual || actual.attributes.position !== attributes.get(geometry.positionAccessor) || actual.attributes.normal !== attributes.get(geometry.normalAccessor)
       || actual.index !== (geometry.indexAccessor === null ? null : attributes.get(geometry.indexAccessor))) throw mismatch('primitive-accessors');
     compareStaticModelFacts(geometry.positionMin, actual.boundingBox?.min.toArray()); compareStaticModelFacts(geometry.positionMax, actual.boundingBox?.max.toArray());
   }
+  const cpuBackingBytes = [...backings.keys()].reduce((sum, index) => sum + backings.get(index).byteLength, 0);
   if (attributeIdentities.size !== facts.resources.attributeCount || backingIdentities.size !== facts.resources.backingCount
     || [...attributeIdentities].reduce((sum, attribute) => sum + attribute.array.byteLength, 0) !== facts.resources.gpuBufferBytes
-    || [...backingIdentities].reduce((sum, backing) => sum + backing.byteLength, 0) !== facts.resources.cpuBackingBytes) throw mismatch('actual-bytes');
-  return attributeIdentities;
+    || cpuBackingBytes !== facts.resources.cpuBackingBytes) throw mismatch('actual-bytes');
+  return { attributes: attributeIdentities, clips: await verifyAnimations(result, parser, facts) };
 }
 
 function disposeResources(tracker) {
@@ -362,12 +489,13 @@ function disposeResources(tracker) {
   if (errors.length) throw new AggregateError(errors, 'composition-model-cleanup-failed');
 }
 
-function createModelResource(template, facts, tracker) {
+function createModelResource(template, facts, tracker, clips = []) {
   const instances = new Set(); let retired = false;
   for (const resource of [...tracker.geometries, ...tracker.materials]) Object.defineProperty(resource, 'poolOwned', { value: true });
   function finish() { if (retired && !instances.size && template) { template.clear(); template = null; disposeResources(tracker); } }
   return Object.freeze({
     facts,
+    clips: Object.freeze(clips),
     instantiate() {
       if (retired) throw new Error('composition-model-resource-disposed');
       const root = template.clone(true); let released = false;
@@ -402,7 +530,7 @@ export async function parseStaticModel(buffer, expectedFacts, { signal, admissio
   }
   checkAdmission();
   const manager = new LoadingManager(); manager.setURLModifier(() => { throw unavailable('URI-unsupported'); });
-  const loader = new GLTFLoader(manager); let parser, tracker, completed, facts;
+  const loader = new GLTFLoader(manager); let parser, tracker, completed, facts, clips = [];
   loader.register(candidate => {
     parser = candidate;
     // Runs before GLTFLoader initializes extension delegates (e.g. Draco).
@@ -421,10 +549,10 @@ export async function parseStaticModel(buffer, expectedFacts, { signal, admissio
           if (node?.transform.kind === 'matrix') { object.matrix.fromArray(node.transform.matrix); object.matrixAutoUpdate = false; }
         });
         result.scene.updateMatrixWorld(true);
-        const attributes = await verifyActual(result, parser, facts, tracker); alive(signal);
+        const verification = await verifyActual(result, parser, facts, tracker); alive(signal);
         await bufferPlan.cpuReady(facts.resources.cpuBackingBytes); alive(signal);
-        for (const attribute of attributes) { await bufferPlan.upload(attribute); alive(signal); }
-        await verifyActual(result, parser, facts, tracker); alive(signal);
+        for (const attribute of verification.attributes) { await bufferPlan.upload(attribute); alive(signal); }
+        clips = (await verifyActual(result, parser, facts, tracker)).clips; alive(signal);
       }
     };
   });
@@ -436,7 +564,7 @@ export async function parseStaticModel(buffer, expectedFacts, { signal, admissio
     // Never retain tracker closures: they close over the parser, JSON, BIN,
     // caches and completed dependency promises. The factory owns only these
     // shared resources and its private scene template after consumption.
-    return createModelResource(result.scene, facts, { geometries: tracker.geometries, materials: tracker.materials, textures: tracker.textures });
+    return createModelResource(result.scene, facts, { geometries: tracker.geometries, materials: tracker.materials, textures: tracker.textures }, clips);
   } catch (error) {
     if (tracker) { await tracker.settle(); completed?.scenes.forEach(scene => scene.clear()); disposeResources(tracker); }
     throw error;
@@ -462,7 +590,7 @@ export function inspectModelInputFacts(buffer) {
 }
 
 function rejectTexturedDelegates(json, ktx2 = false) {
-  for (const key of ['animations', 'skins', 'cameras']) {
+  for (const key of ['skins', 'cameras']) {
     assert(json[key] === undefined || (Array.isArray(json[key]) && !json[key].length), key + '-unsupported');
   }
   // KHR_texture_basisu is the only qualified extension; its payload may appear
@@ -676,10 +804,12 @@ function texturedProfileFacts(json, input, ktx2) {
     const view = index(accessor.bufferView, views, 'accessor-bufferView');
     const vector3 = accessor.componentType === 5126 && accessor.type === 'VEC3';
     const vector2 = accessor.componentType === 5126 && accessor.type === 'VEC2';
+    const vector4 = accessor.componentType === 5126 && accessor.type === 'VEC4';
     const scalar = [5121, 5123, 5125].includes(accessor.componentType) && accessor.type === 'SCALAR';
-    assert(vector3 || vector2 || scalar, 'accessor-type');
-    const elementBytes = vector3 ? 4 : vector2 ? 4 : accessor.componentType === 5125 ? 4 : accessor.componentType === 5123 ? 2 : 1;
-    const components = vector3 ? 3 : vector2 ? 2 : 1;
+    const floatScalar = accessor.componentType === 5126 && accessor.type === 'SCALAR';
+    assert(vector3 || vector2 || vector4 || scalar || floatScalar, 'accessor-type');
+    const elementBytes = accessor.componentType === 5126 || accessor.componentType === 5125 ? 4 : accessor.componentType === 5123 ? 2 : 1;
+    const components = vector4 ? 4 : vector3 ? 3 : vector2 ? 2 : 1;
     const itemBytes = elementBytes * components, byteOffset = accessor.byteOffset ?? 0;
     assert(integer(accessor.count) && accessor.count > 0 && integer(byteOffset) && byteOffset % elementBytes === 0
       && (view.byteOffset ?? 0) % elementBytes === 0 && byteOffset + accessor.count * itemBytes <= view.byteLength, 'packed-accessor-range');
@@ -804,9 +934,12 @@ function texturedProfileFacts(json, input, ktx2) {
   let allocatedObjectCount = objectCount;
   for (const mesh of usedMeshes) if (meshReferences.get(mesh) > 1) allocatedObjectCount += primitives[mesh].length + (primitives[mesh].length > 1 ? 1 : 0);
   const usedLayouts = [...usedAccessors].sort((a, b) => a - b).map(i => layouts[i]);
+  const animation = animationFacts(json, accessors, layouts, views, reachable, nodes.length);
   const usedViews = [...new Set(usedLayouts.map(layout => layout.viewIndex))].sort((a, b) => a - b)
     .map(i => ({ index: i, byteOffset: views[i].byteOffset ?? 0, byteLength: views[i].byteLength }));
-  return {
+  const cpuViewIndices = [...new Set([...usedViews.map(view => view.index), ...(animation?.viewIndices ?? [])])]
+    .sort((a, b) => a - b);
+  const facts = {
     profile: ktx2 ? STATIC_KTX2_PROFILE : STATIC_TEXTURED_PROFILE, loaderVersion: STATIC_MODEL_LOADER_VERSION, input,
     declared: { nodes: nodes.length, meshes: meshes.length, primitives: primitiveCount, accessors: accessors.length,
       bufferViews: views.length, materials: materials.length, textures: textures.length, images: images.length },
@@ -819,11 +952,20 @@ function texturedProfileFacts(json, input, ktx2) {
       accessors: usedLayouts, bufferViews: usedViews,
       geometryCount: geometries.size, attributeCount: usedLayouts.length, backingCount: usedViews.length,
       gpuBufferBytes: usedLayouts.reduce((sum, layout) => sum + layout.byteLength, 0),
-      cpuBackingBytes: usedViews.reduce((sum, view) => sum + view.byteLength, 0),
+      cpuBackingBytes: cpuViewIndices.reduce((sum, index) => sum + views[index].byteLength, 0),
       materialCount: usedMaterials.size, allocatedMaterialCount: usedMaterials.size * 2,
       textureCount: usedTextures.size, imageCount: usedImages.size
     }
   };
+  if (animation) {
+    facts.animations = animation.clips;
+    facts.resources.animationAccessors = animation.accessors;
+    facts.resources.animationBufferViews = animation.views;
+    facts.resources.animationCount = animation.clips.length;
+    facts.resources.animationChannelCount = animation.channelCount;
+    facts.resources.animationCpuBytes = animation.cpuBytes;
+  }
+  return facts;
 }
 
 function approx(value, expected) {
@@ -836,7 +978,7 @@ function texturedPrimitiveKey(primitive) {
 }
 
 async function verifyTexturedActual(result, parser, facts, tracker, ktx2, containerFacts) {
-  if (result.scenes.length !== 1 || result.scene !== result.scenes[0] || result.animations.length || result.cameras.length) throw mismatch('result');
+  if (result.scenes.length !== 1 || result.scene !== result.scenes[0] || result.cameras.length) throw mismatch('result');
   const materials = new Map(facts.materials.map(material => [material.index, material]));
   const textures = new Map(facts.textures.map(texture => [texture.index, texture]));
   const ktx2Images = new Map((containerFacts ?? []).map(image => [image.index, image]));
@@ -1019,7 +1161,7 @@ async function verifyTexturedActual(result, parser, facts, tracker, ktx2, contai
     compareStaticModelFacts(geometry.positionMin, actual.boundingBox?.min.toArray());
     compareStaticModelFacts(geometry.positionMax, actual.boundingBox?.max.toArray());
   }
-  return accessors;
+  return { accessors, clips: await verifyAnimations(result, parser, facts) };
 }
 
 function compareTexturedFacts(expected, actual, ktx2) {
@@ -1066,7 +1208,7 @@ async function parseTexturedProfile(buffer, expectedFacts, { signal, admissions,
     if (!mapped) throw unavailable('URI-unsupported');
     return mapped;
   });
-  const loader = new GLTFLoader(manager); let parser, tracker, completed, facts;
+  const loader = new GLTFLoader(manager); let parser, tracker, completed, facts, clips = [];
   if (ktx2) {
     // Direct RGBA8 KTX2 uses the loader's raw path. Basis transcode assets are
     // not shipped; supercompressed containers are rejected by profile facts.
@@ -1096,10 +1238,10 @@ async function parseTexturedProfile(buffer, expectedFacts, { signal, admissions,
           if (node?.transform.kind === 'matrix') { object.matrix.fromArray(node.transform.matrix); object.matrixAutoUpdate = false; }
         });
         result.scene.updateMatrixWorld(true);
-        const accessors = await verifyTexturedActual(result, parser, facts, tracker, ktx2, expectedFacts.images); alive(signal);
+        const verification = await verifyTexturedActual(result, parser, facts, tracker, ktx2, expectedFacts.images); alive(signal);
         await bufferPlan.cpuReady(facts.resources.cpuBackingBytes); alive(signal);
-        for (const accessor of accessors.values()) { await bufferPlan.upload(accessor); alive(signal); }
-        await verifyTexturedActual(result, parser, facts, tracker, ktx2, expectedFacts.images); alive(signal);
+        for (const accessor of verification.accessors.values()) { await bufferPlan.upload(accessor); alive(signal); }
+        clips = (await verifyTexturedActual(result, parser, facts, tracker, ktx2, expectedFacts.images)).clips; alive(signal);
       }
     };
   });
@@ -1108,7 +1250,7 @@ async function parseTexturedProfile(buffer, expectedFacts, { signal, admissions,
     await tracker.settle(); alive(signal);
     const retainedMaterials = new Set(); result.scene.traverse(object => { if (object.material) retainedMaterials.add(object.material); });
     for (const material of [...tracker.materials]) if (!retainedMaterials.has(material)) { tracker.materials.delete(material); material.dispose(); }
-    return createModelResource(result.scene, facts, { geometries: tracker.geometries, materials: tracker.materials, textures: tracker.textures });
+    return createModelResource(result.scene, facts, { geometries: tracker.geometries, materials: tracker.materials, textures: tracker.textures }, clips);
   } catch (error) {
     if (tracker) { await tracker.settle(); completed?.scenes.forEach(scene => scene.clear()); disposeResources(tracker); }
     throw error;

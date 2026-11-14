@@ -45,6 +45,43 @@ function planCamera(camera) {
   return { position: [...camera.position], target: [...camera.target],
     fovDegrees: camera.fovDegrees, near: camera.near, far: camera.far };
 }
+function checkModelAnimations(facts) {
+  const animations = facts.animations, resources = facts.resources, nodes = facts.scene?.nodes;
+  if (animations === undefined) {
+    if (resources?.animationCount !== undefined || resources?.animationCpuBytes !== undefined)
+      throw new Error('composition-model-preparation-required');
+    return;
+  }
+  if (!Array.isArray(animations) || !animations.length || animations.length > 1024
+      || resources.animationCount !== animations.length
+      || !Number.isSafeInteger(resources.animationCpuBytes) || resources.animationCpuBytes < 1
+      || !Array.isArray(resources.animationAccessors) || !resources.animationAccessors.length
+      || !Array.isArray(resources.animationBufferViews) || !resources.animationBufferViews.length)
+    throw new Error('composition-model-preparation-required');
+  const clipNames = new Set();
+  let channelCount = 0;
+  for (const clip of animations) {
+    if (!clip || typeof clip.name !== 'string' || !clip.name || clip.name.length > 128
+        || clipNames.has(clip.name) || !Number.isFinite(clip.duration) || clip.duration <= 0
+        || !Array.isArray(clip.channels) || !clip.channels.length)
+      throw new Error('composition-model-preparation-required');
+    clipNames.add(clip.name);
+    for (const channel of clip.channels) {
+      if (!channel || !Number.isSafeInteger(channel.node) || channel.node < 0 || channel.node >= nodes.length
+          || !['translation', 'rotation', 'scale'].includes(channel.path)
+          || !['STEP', 'LINEAR', 'CUBICSPLINE'].includes(channel.interpolation)
+          || !Number.isSafeInteger(channel.inputAccessor) || channel.inputAccessor < 0
+          || !Number.isSafeInteger(channel.outputAccessor) || channel.outputAccessor < 0
+          || !Number.isSafeInteger(channel.times) || channel.times < 1
+          || !Number.isSafeInteger(channel.values) || channel.values < 1
+          || ![3, 4].includes(channel.components))
+        throw new Error('composition-model-preparation-required');
+      channelCount += 1;
+    }
+  }
+  if (resources.animationChannelCount !== channelCount)
+    throw new Error('composition-model-preparation-required');
+}
 function checkModel(asset) {
   const facts = asset.modelFacts, input = facts?.input, resources = facts?.resources, scene = facts?.scene;
   const ktx2 = facts?.profile === MODEL_KTX2_PROFILE;
@@ -68,6 +105,7 @@ function checkModel(asset) {
         || facts.declared?.materials || facts.declared?.textures || facts.declared?.images
         || asset.textureUploadBytes !== undefined || asset.textureUrls !== undefined)
       throw new Error('composition-model-preparation-required');
+    checkModelAnimations(facts);
     return;
   }
   const images = facts.images, materials = facts.materials, textures = facts.textures;
@@ -101,9 +139,11 @@ function checkModel(asset) {
       || Object.keys(urls).length !== external.length
       || external.some(image => typeof image.uri !== 'string' || typeof urls[image.uri] !== 'string' || !urls[image.uri]))
     throw new Error('composition-model-texture-url-required');
+  checkModelAnimations(facts);
 }
 function modelConstructionBytes(facts) {
-  return facts.input.encodedBytes + facts.input.binBytes + facts.input.jsonBytes * 2;
+  return facts.input.encodedBytes + facts.input.binBytes + facts.input.jsonBytes * 2
+    + (facts.resources.animationCpuBytes || 0);
 }
 function fontCpuBytes(asset) {
   const facts = asset.fontMetadata;
@@ -382,8 +422,15 @@ export function compilePlan(projection, registry = null, identity = null) {
       throw new Error('composition-adapter-unavailable:3d-opacity');
     if (node.nodeType === 'model') {
       if (!result.resources.asset) throw new Error('composition-model-preparation-required');
-      if (constant(node, 'animationClip') !== '')
+      const clip = constant(node, 'animationClip');
+      if (typeof clip !== 'string' || clip.length > 128)
         throw new Error('composition-adapter-unavailable:model-animation');
+      if (clip !== '') {
+        const animations = result.resources.asset.modelFacts.animations;
+        if (!Array.isArray(animations) || !animations.some(item => item.name === clip))
+          throw new Error('composition-adapter-unavailable:model-animation');
+        result.animation = clip;
+      }
       result.model = true;
     }
     if (node.nodeType === 'text') {

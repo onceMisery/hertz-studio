@@ -247,6 +247,15 @@ export function buildNode(THREE, context, scope, spec, assets, generation) {
     if (!resource) throw new Error('composition-model-preparation-required');
     const instance = resource.instantiate(), object = new THREE.Group();
     object.add(instance.root);
+    let animation = null;
+    if (spec.animation) {
+      const clip = resource.clips?.find(item => item.name === spec.animation);
+      if (!clip) throw new Error('composition-model-animation-missing');
+      const mixer = new THREE.AnimationMixer(instance.root);
+      mixer.clipAction(clip).play();
+      animation = { mixer, clip, duration: clip.duration };
+      scope.defer(() => { mixer.stopAllAction(); mixer.uncacheRoot(instance.root); });
+    }
     const materials = new Set();
     const profile = spec.resources.asset?.decodeOptions?.profile;
     object.traverse(child => {
@@ -260,7 +269,7 @@ export function buildNode(THREE, context, scope, spec, assets, generation) {
       if (child.material) materials.add(child.material);
     });
     scope.defer(() => instance.release());
-    return { object, spec, model: true, opacity: 1, materials: [...materials] };
+    return { object, spec, model: true, opacity: 1, materials: [...materials], animation };
   }
   let texture = assets.asset?.texture || assets.spriteAsset?.texture || null;
   if (spec.node.nodeType === 'text') {
