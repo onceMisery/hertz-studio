@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: MIT
 //! Actual resource container and ZIP entry checks. These fixtures establish
-//! framing/bounds only; no GLTF/DFD decoder or renderer qualification is claimed.
+//! framing/bounds and KTX2 BASIC descriptor facts; no GLTF/DFD decoder or
+//! renderer qualification is claimed.
 
 use hertz_wallpaper::{
-    model_container::inspect_glb, texture_container::inspect_ktx2, validate_archive,
-    validate_package, Manifest,
+    model_container::inspect_glb,
+    texture_container::{inspect_ktx2, Ktx2DataFormat},
+    validate_archive, validate_package, Manifest,
 };
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -43,7 +45,8 @@ fn put64(bytes: &mut [u8], offset: usize, value: u64) {
     bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
 }
 fn ktx2() -> Vec<u8> {
-    let mut bytes = vec![0; 196];
+    // 80-byte header, 24-byte level index, 92-byte RGBA8 BASIC DFD, 64-byte level.
+    let mut bytes = vec![0; 260];
     bytes[..12].copy_from_slice(&[
         0xab, b'K', b'T', b'X', b' ', b'2', b'0', 0xbb, 13, 10, 26, 10,
     ]);
@@ -55,14 +58,25 @@ fn ktx2() -> Vec<u8> {
         (36, 1),
         (40, 1),
         (48, 104),
-        (52, 28),
-        (104, 28),
+        (52, 92),
+        (104, 92),
     ] {
         put32(&mut bytes, offset, value);
     }
-    put64(&mut bytes, 80, 132);
+    put64(&mut bytes, 80, 196);
     put64(&mut bytes, 88, 64);
     put64(&mut bytes, 96, 64);
+    bytes[112..114].copy_from_slice(&2u16.to_le_bytes());
+    bytes[114..116].copy_from_slice(&88u16.to_le_bytes());
+    bytes[116..120].copy_from_slice(&[1, 1, 1, 0]);
+    bytes[124] = 4;
+    for (index, channel) in [0u8, 1, 2, 15].into_iter().enumerate() {
+        let sample = 132 + index * 16;
+        bytes[sample..sample + 2].copy_from_slice(&((index as u16) * 8).to_le_bytes());
+        bytes[sample + 2] = 8;
+        bytes[sample + 3] = channel;
+        bytes[sample + 12..sample + 16].copy_from_slice(&0xffu32.to_le_bytes());
+    }
     bytes
 }
 fn model_error(bytes: &[u8]) -> &'static str {
@@ -243,7 +257,7 @@ fn ktx2_returns_declared_facts_and_accepts_zero_level_count_generation_flag() {
         (4, 4, 37, 1, 0)
     );
     assert_eq!(facts.levels.len(), 1);
-    assert_eq!((facts.levels[0].offset, facts.levels[0].bytes), (132, 64));
+    assert_eq!((facts.levels[0].offset, facts.levels[0].bytes), (196, 64));
     assert!(!facts.generate_mipmaps);
     let mut bytes = bytes;
     put32(&mut bytes, 40, 0);
@@ -252,6 +266,95 @@ fn ktx2_returns_declared_facts_and_accepts_zero_level_count_generation_flag() {
             .unwrap()
             .generate_mipmaps
     );
+}
+
+#[test]
+fn ktx2_exposes_rgba8_basic_descriptor_and_rejects_unsupported_variants() {
+    let base = ktx2();
+    let facts = inspect_ktx2(Cursor::new(&base), base.len() as u64).unwrap();
+    assert_eq!(
+        facts.data_format,
+        Ktx2DataFormat {
+            color_model: 1,
+            primaries: 1,
+            transfer: 1,
+            flags: 0,
+            texel_block: [1, 1, 1, 1],
+            bytes_plane: [4, 0, 0, 0, 0, 0, 0, 0],
+            sample_count: 4,
+        }
+    );
+    for (offset, value) in [(108, 1), (112, 1), (116, 0), (122, 1), (123, 1), (125, 1)] {
+        let mut bytes = base.clone();
+        put32(&mut bytes, offset, value);
+        assert_eq!(
+            texture_error(&bytes),
+            "texture_container_unavailable",
+            "offset {offset}"
+        );
+    }
+    for (offset, value) in [(119, 2), (120, 32)] {
+        let mut bytes = base.clone();
+        bytes[offset] = value;
+        assert_eq!(texture_error(&bytes), "invalid_texture_container");
+    }
+}
+
+#[test]
+fn ktx2_rejects_descriptor_framing_sample_and_uncompressed_level_mismatches() {
+    let base = ktx2();
+    for (offset, value) in [(104, 91), (114, 87), (124, 0)] {
+        let mut bytes = base.clone();
+        put32(&mut bytes, offset, value);
+        assert_eq!(texture_error(&bytes), "invalid_texture_container");
+    }
+    let mut bytes = base.clone();
+    bytes[134] = 0;
+    assert_eq!(texture_error(&bytes), "invalid_texture_container");
+    let mut bytes = base.clone();
+    bytes[132..134].copy_from_slice(&u16::MAX.to_le_bytes());
+    assert_eq!(texture_error(&bytes), "invalid_texture_container");
+    let mut bytes = base.clone();
+    bytes[136] = 1;
+    assert_eq!(texture_error(&bytes), "invalid_texture_container");
+    let mut bytes = base.clone();
+    put64(&mut bytes, 88, 63);
+    put64(&mut bytes, 96, 63);
+    assert_eq!(texture_error(&bytes), "invalid_texture_container");
+    let mut bytes = base.clone();
+    put32(&mut bytes, 16, 2);
+    bytes[124] = 3;
+    let error = inspect_ktx2(Cursor::new(&bytes), bytes.len() as u64).unwrap_err();
+    assert_eq!(error.code, "invalid_texture_container");
+    assert!(error.message.contains("bytesPlane"), "{}", error.message);
+}
+
+#[test]
+fn ktx2_checks_uncompressed_levels_against_the_mip_dimensions() {
+    // Two levels: 4x4 and 2x2, with the same 92-byte RGBA8 descriptor.
+    let mut bytes = vec![0; 300];
+    bytes[..80].copy_from_slice(&ktx2()[..80]);
+    put32(&mut bytes, 128, 92);
+    bytes[128..220].copy_from_slice(&ktx2()[104..196]);
+    put32(&mut bytes, 40, 2);
+    put32(&mut bytes, 48, 128);
+    put32(&mut bytes, 52, 92);
+    for (offset, value) in [
+        (80, 220),
+        (88, 64),
+        (96, 64),
+        (104, 284),
+        (112, 16),
+        (120, 16),
+    ] {
+        put64(&mut bytes, offset, value);
+    }
+    let facts = inspect_ktx2(Cursor::new(&bytes), bytes.len() as u64).unwrap();
+    assert_eq!(facts.levels.len(), 2);
+    let mut damaged = bytes;
+    put64(&mut damaged, 112, 15);
+    put64(&mut damaged, 120, 15);
+    assert_eq!(texture_error(&damaged), "invalid_texture_container");
 }
 
 #[test]
@@ -324,20 +427,21 @@ fn ktx2_supercompressed_mips_need_no_padding_and_basis_lengths_are_zero() {
     // KTX specification: supercompressed levels have no mipPadding; BasisLZ
     // carries zero uncompressedByteLength, unlike Zstd/Zlib.
     for scheme in [1, 2, 3] {
-        let mut bytes = vec![0; 176];
+        let mut bytes = vec![0; 242];
         bytes[..80].copy_from_slice(&ktx2()[..80]);
         put32(&mut bytes, 40, 2);
         put32(&mut bytes, 44, scheme);
         put32(&mut bytes, 48, 128);
-        put32(&mut bytes, 128, 28);
-        for (offset, value) in [(80, 165), (88, 11), (104, 156), (112, 9)] {
+        put32(&mut bytes, 52, 92);
+        bytes[128..220].copy_from_slice(&ktx2()[104..196]);
+        for (offset, value) in [(80, 233), (88, 9), (104, 221), (112, 11)] {
             put64(&mut bytes, offset, value);
         }
         let lengths = if scheme == 1 { [0, 0] } else { [64, 16] };
         put64(&mut bytes, 96, lengths[0]);
         put64(&mut bytes, 120, lengths[1]);
         let facts = inspect_ktx2(Cursor::new(&bytes), bytes.len() as u64).unwrap();
-        assert_eq!(facts.levels[0].offset, 165);
+        assert_eq!(facts.levels[0].offset, 233);
         if scheme == 1 {
             put64(&mut bytes, 96, 64);
             assert_eq!(texture_error(&bytes), "invalid_texture_container");

@@ -1040,7 +1040,7 @@ mod tests {
         glb.extend((glb_json.len() as u32).to_le_bytes());
         glb.extend(b"JSON");
         glb.extend(glb_json);
-        let mut ktx2 = vec![0_u8; 196];
+        let mut ktx2 = vec![0_u8; 260];
         ktx2[..12].copy_from_slice(&[
             0xab, b'K', b'T', b'X', b' ', b'2', b'0', 0xbb, 13, 10, 26, 10,
         ]);
@@ -1052,13 +1052,24 @@ mod tests {
             (36, 1),
             (40, 1),
             (48, 104),
-            (52, 28),
-            (104, 28),
+            (52, 92),
+            (104, 92),
         ] {
             ktx2[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
         }
-        for (offset, value) in [(80, 132_u64), (88, 64), (96, 64)] {
+        for (offset, value) in [(80, 196_u64), (88, 64), (96, 64)] {
             ktx2[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+        }
+        ktx2[112..114].copy_from_slice(&2u16.to_le_bytes());
+        ktx2[114..116].copy_from_slice(&88u16.to_le_bytes());
+        ktx2[116..120].copy_from_slice(&[1, 1, 1, 0]);
+        ktx2[124] = 4;
+        for (index, channel) in [0u8, 1, 2, 15].into_iter().enumerate() {
+            let sample = 132 + index * 16;
+            ktx2[sample..sample + 2].copy_from_slice(&((index as u16) * 8).to_le_bytes());
+            ktx2[sample + 2] = 8;
+            ktx2[sample + 3] = channel;
+            ktx2[sample + 12..sample + 16].copy_from_slice(&0xffu32.to_le_bytes());
         }
         for (kind, mime, body, error_code) in [
             ("model", "model/gltf-binary", glb, "invalid_model_container"),
