@@ -794,3 +794,20 @@ cancelled；reader 创建+读取零分配。三处变异（offset 不前进、�
 revoked None 当成功）均按预期变红后还原。本批未接 WebView2/HTTP Range/CSP、
 未改 MediaAccess、未创建 decoder/renderer/GPU；loader 表示转换与 GPU 首帧继续
 开放。
+
+2026-11-14 r48 Broker 形响应计划续接：`WallpaperSession::plan_texture_response`
+复用 `media_stream::parse_range_header/plan_response`，对当前 session 纹理给出
+HEAD/GET/Range 计划与窗口 reader：HEAD 200 无 body、GET 200 全量、可满足范围
+206 + `bytes a-b/N`、不可满足 416 + `bytes */N`、多范围/非数字 400；未知/伪
+路径返回 None。body 窗口由 `ModelTextureChunkReader` 从 range start 起按
+≤1 MiB 读取；`chunk_reader_range` 用 checked start+length 限制在 canonical
+字节内；body=true 但窗口 reader 缺失时整体 fail-closed。
+
+真实 fixture 证据：HEAD (200,4,false,None)；GET 200 读 [1,2,3,4]；
+`bytes=1-2` → 206/2/`bytes 1-2/4` body [2,3]；`bytes=-2` → `bytes 2-3/4`
+body [3,4]；`bytes=9-` → 416/0/`bytes */4` 无 reader；多范围与非数字 → 400；
+glb/空串 None。1 MiB+1 纹理全量响应两块读完，末字节范围
+`bytes=1048576-1048576/1048577` 正确；fail() 后重新计划 None。三处变异
+（忽略 Range、body 总从 0 开始、HEAD 当 GET）均按预期变红后还原。本批未接
+WebView2 WebResourceRequested/CSP/crossOrigin、未改 MediaAccess、未创建
+decoder/renderer/GPU；真实 HTTP 响应与 GPU 首帧继续开放。

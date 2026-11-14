@@ -1277,6 +1277,172 @@ fn controller_chunk_reader_stops_mid_iteration_after_revoke() {
     preparation.finish();
 }
 
+fn attaching_session(input: &ModelInput) -> (WallpaperSession, u64) {
+    let recovery = RecoveryLedger::new();
+    let mut session = WallpaperSession::new();
+    let generation = session.apply(1, &recovery).unwrap();
+    assert!(session.resolved(generation));
+    assert!(session.prepared(generation));
+    assert!(session.admit_textures(generation, input, "model-session"));
+    (session, generation)
+}
+
+#[test]
+fn session_texture_response_plans_head_get_and_ranges() {
+    let fixture = installed_full_model_fixture("model-input-texture-response", false);
+    let probe = model_source_test_probe();
+    let preparation = probe
+        .prepare_for_job("texture-response".into(), 96)
+        .unwrap();
+    let input = fixture
+        .store
+        .prepare_canonical_model_input(
+            &fixture.reference,
+            &probe,
+            &preparation,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+    let (session, _generation) = attaching_session(&input);
+    let cancel = AtomicBool::new(false);
+    let path = "models/a/tex.png";
+    let head = session.plan_texture_response(path, true, None).unwrap();
+    assert_eq!(
+        (
+            head.plan.status,
+            head.plan.content_length,
+            head.plan.body,
+            head.plan.content_range.as_deref()
+        ),
+        (200, 4, false, None)
+    );
+    assert!(head.reader.is_none());
+    let mut full = session.plan_texture_response(path, false, None).unwrap();
+    assert_eq!(
+        (full.plan.status, full.plan.content_length, full.plan.body),
+        (200, 4, true)
+    );
+    let mut reader = full.reader.take().unwrap();
+    let mut bytes = [0u8; 4];
+    assert_eq!(reader.next_chunk(&mut bytes, &cancel).unwrap(), 4);
+    assert_eq!(bytes, [1, 2, 3, 4]);
+    assert_eq!(reader.next_chunk(&mut bytes, &cancel).unwrap(), 0);
+    let mut range = session
+        .plan_texture_response(path, false, Some("bytes=1-2"))
+        .unwrap();
+    assert_eq!(
+        (
+            range.plan.status,
+            range.plan.content_length,
+            range.plan.content_range.as_deref()
+        ),
+        (206, 2, Some("bytes 1-2/4"))
+    );
+    let mut reader = range.reader.take().unwrap();
+    let mut two = [0u8; 2];
+    assert_eq!(reader.next_chunk(&mut two, &cancel).unwrap(), 2);
+    assert_eq!(two, [2, 3]);
+    assert_eq!(reader.next_chunk(&mut two, &cancel).unwrap(), 0);
+    let mut suffix = session
+        .plan_texture_response(path, false, Some("bytes=-2"))
+        .unwrap();
+    assert_eq!(suffix.plan.content_range.as_deref(), Some("bytes 2-3/4"));
+    let mut reader = suffix.reader.take().unwrap();
+    assert_eq!(reader.next_chunk(&mut two, &cancel).unwrap(), 2);
+    assert_eq!(two, [3, 4]);
+    let unsat = session
+        .plan_texture_response(path, false, Some("bytes=9-"))
+        .unwrap();
+    assert_eq!(
+        (
+            unsat.plan.status,
+            unsat.plan.content_length,
+            unsat.plan.content_range.as_deref(),
+            unsat.plan.body,
+            unsat.reader.is_some()
+        ),
+        (416, 0, Some("bytes */4"), false, false)
+    );
+    for bad in ["bytes=0-1,3-4", "bytes=x-y"] {
+        let response = session
+            .plan_texture_response(path, false, Some(bad))
+            .unwrap();
+        assert_eq!(
+            (
+                response.plan.status,
+                response.plan.content_length,
+                response.plan.body
+            ),
+            (400, 0, false)
+        );
+        assert!(response.reader.is_none());
+    }
+    assert!(session
+        .plan_texture_response("models/a/source.glb", false, None)
+        .is_none());
+    assert!(session.plan_texture_response("", false, None).is_none());
+    drop(input);
+    preparation.finish();
+}
+
+#[test]
+fn session_texture_response_window_caps_large_texture_and_stops_after_fail() {
+    let mut state = 0x4528_21e6_38d0_1377u64;
+    let image: Vec<u8> = (0..1024 * 1024 + 1)
+        .map(|_| {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (state >> 56) as u8
+        })
+        .collect();
+    let fixture = installed_full_model_fixture_with_texture(
+        "model-input-texture-response-large",
+        false,
+        &image,
+    );
+    let probe = model_source_test_probe();
+    let preparation = probe
+        .prepare_for_job("texture-response-large".into(), 97)
+        .unwrap();
+    let input = fixture
+        .store
+        .prepare_canonical_model_input(
+            &fixture.reference,
+            &probe,
+            &preparation,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+    let (mut session, generation) = attaching_session(&input);
+    let path = "models/a/tex.png";
+    let mut full = session.plan_texture_response(path, false, None).unwrap();
+    assert_eq!(full.plan.content_length, 1024 * 1024 + 1);
+    let mut reader = full.reader.take().unwrap();
+    let cancel = AtomicBool::new(false);
+    let mut first = vec![0u8; 2 * 1024 * 1024];
+    assert_eq!(reader.next_chunk(&mut first, &cancel).unwrap(), 1024 * 1024);
+    let mut second = [0u8; 2];
+    assert_eq!(reader.next_chunk(&mut second, &cancel).unwrap(), 1);
+    assert_eq!(second[0], image[1024 * 1024]);
+    let range = session
+        .plan_texture_response(path, false, Some("bytes=1048576-1048576"))
+        .unwrap();
+    assert_eq!(
+        (
+            range.plan.status,
+            range.plan.content_length,
+            range.plan.content_range.as_deref()
+        ),
+        (206, 1, Some("bytes 1048576-1048576/1048577"))
+    );
+    // fail() revokes the plan; a new response plan is refused.
+    assert!(session.fail(generation, "test_failure", "failure", true));
+    assert!(session.plan_texture_response(path, false, None).is_none());
+    drop(input);
+    preparation.finish();
+}
+
 #[test]
 fn source_success_then_actual_model_w_rejection_keeps_source_fee_and_pins_until_error_drop() {
     let fixture = installed_full_model_fixture("model-input-W", false);
