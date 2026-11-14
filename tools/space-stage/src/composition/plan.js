@@ -29,6 +29,41 @@ function checkSvg(asset) {
 }
 
 const digest = value => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
+const MODEL_PROFILE = 'static-core-pbr-v1';
+const MODEL_LOADER_VERSION = 'three-0.186.0-gltfloader';
+function planCamera(camera) {
+  if (!camera || !Array.isArray(camera.position) || !Array.isArray(camera.target)
+      || camera.position.length !== 3 || camera.target.length !== 3
+      || ![...camera.position, ...camera.target].every(value => Number.isFinite(value) && Math.abs(value) <= 10000)
+      || !Number.isFinite(camera.fovDegrees) || camera.fovDegrees < 1 || camera.fovDegrees > 120
+      || !Number.isFinite(camera.near) || !Number.isFinite(camera.far)
+      || camera.near <= 0 || camera.far <= camera.near || camera.far > 1000000
+      || camera.position.every((value, index) => value === camera.target[index]))
+    throw new Error('composition-scene3d-camera-invalid');
+  return { position: [...camera.position], target: [...camera.target],
+    fovDegrees: camera.fovDegrees, near: camera.near, far: camera.far };
+}
+function checkModel(asset) {
+  const facts = asset.modelFacts, input = facts?.input, resources = facts?.resources, scene = facts?.scene;
+  if (asset.adapterId !== 'three-gltf-loader' || asset.adapterVersion !== 1
+      || asset.decodeOptions?.profile !== MODEL_PROFILE
+      || !Number.isSafeInteger(asset.byteLength) || asset.byteLength < 1
+      || typeof asset.url !== 'string' || !asset.url
+      || facts?.profile !== MODEL_PROFILE || facts.loaderVersion !== MODEL_LOADER_VERSION
+      || !input || input.encodedBytes !== asset.byteLength
+      || !Number.isSafeInteger(input.jsonBytes) || input.jsonBytes < 1
+      || !Number.isSafeInteger(input.binBytes) || input.binBytes < 1
+      || !Number.isSafeInteger(resources?.gpuBufferBytes) || resources.gpuBufferBytes < 1
+      || !Number.isSafeInteger(resources?.cpuBackingBytes) || resources.cpuBackingBytes < 1
+      || !Number.isSafeInteger(scene?.drawCalls) || scene.drawCalls < 1
+      || !Number.isSafeInteger(scene?.triangles) || scene.triangles < 1
+      || facts.materials !== undefined || facts.textures !== undefined || facts.images !== undefined
+      || facts.declared?.materials || facts.declared?.textures || facts.declared?.images)
+    throw new Error('composition-model-preparation-required');
+}
+function modelConstructionBytes(facts) {
+  return facts.input.encodedBytes + facts.input.binBytes + facts.input.jsonBytes * 2;
+}
 function fontCpuBytes(asset) {
   const facts = asset.fontMetadata;
   if (asset.adapterId !== 'prepared-sfnt-font' || asset.adapterVersion !== 1
@@ -66,6 +101,18 @@ export function compilePlan(projection, registry = null, identity = null) {
   const outputEffects = [], nodeEffects = new Map(), effectNodes = new Map();
   let outputGlow = null;
   const nodeIndices = new Map(ir.nodes.map((node, index) => [node.id, index]));
+  const graphic3d = ir.nodes.some(node => node.nodeType !== 'builtinScene' && node.space === '3d');
+  if (graphic3d && !canvas.scene3d) throw new Error('composition-adapter-unavailable:scene3d-required');
+  const camera = graphic3d ? planCamera(canvas.scene3d) : null;
+  if (graphic3d) {
+    let seen2d = false;
+    for (const index of ir.painterOrder) {
+      const node = ir.nodes[index];
+      if (node.nodeType === 'builtinScene') continue;
+      if (node.space === '3d') { if (seen2d) throw new Error('composition-adapter-unavailable:cross-space-order'); }
+      else seen2d = true;
+    }
+  }
   for (const [effectIndex, effect] of ir.effects.entries()) {
     const target = effect.target;
     if (effect.type === 'colorAdjust') {
@@ -144,6 +191,9 @@ export function compilePlan(projection, registry = null, identity = null) {
   for (const binding of ir.bindings) {
     const invalid = validateBinding(binding, ir.numericSlots, ir.inputs.length);
     if (invalid) throw new Error(invalid);
+    const slot = ir.numericSlots[binding.targetSlot];
+    if (slot && ir.nodes[slot.nodeIndex]?.space === '3d')
+      throw new Error('composition-adapter-unavailable:binding-3d');
   }
   const bindingParameters = ir.bindings.map(binding => binding.parameters.map(pair => pair[1]));
   for (const property of ir.publicProperties) {
@@ -163,15 +213,20 @@ export function compilePlan(projection, registry = null, identity = null) {
     const node = ir.nodes[slot.nodeIndex];
     if (!node) throw new Error('composition-track-target-invalid');
     if (node.nodeType === 'builtinScene') throw new Error('composition-adapter-unavailable:track-builtin');
+    if (node.space === '3d') throw new Error('composition-adapter-unavailable:track-3d');
     if ((node.nodeType === 'text' && ['width', 'height', 'fontSize', 'lineHeight'].includes(slot.property))
       || (node.nodeType === 'particles' && ['count', 'seed'].includes(slot.property)))
       throw new Error('composition-adapter-unavailable:track-rebuild');
   }
   if (!['contain', 'cover', 'stretch'].includes(target.fit || 'cover')) throw new Error('composition-target-fit-invalid');
   const builtin = planBuiltin(projection,values,registry,identity);
-  const supported = new Set(['image', 'video', 'text', 'group', 'particles']);
-  for (const node of ir.nodes) if (node.nodeType !== 'builtinScene' && (!supported.has(node.nodeType) || node.space !== '2d'))
-    throw new Error(`composition-adapter-unavailable:${node.nodeType}:${node.space}`);
+  const supported = new Set(['image', 'video', 'text', 'group', 'particles', 'model']);
+  for (const node of ir.nodes) {
+    if (node.nodeType === 'builtinScene') continue;
+    if (!supported.has(node.nodeType)
+        || (node.space !== '2d' && (node.space !== '3d' || !['group', 'model'].includes(node.nodeType))))
+      throw new Error(`composition-adapter-unavailable:${node.nodeType}:${node.space}`);
+  }
   const number = (node, name) => values.numeric[node.propertySlots[name]?.[0]];
   const constant = (node, name) => values.constants[node.constantSlots[name]];
   const assets = new Map();
@@ -184,10 +239,11 @@ export function compilePlan(projection, registry = null, identity = null) {
     if (assets.has(representation)) throw new Error('composition-resource-closure-duplicate');
     checkSvg(asset);
     if (asset.kind === 'font') fontCpuBytes(asset);
+    if (asset.kind === 'model') checkModel(asset);
     assets.set(representation, asset);
   }
   const uses = finalPublicValues.resourceUses, nodeResources = ir.nodes.map(() => ({}));
-  const unique = new Map();
+  const unique = new Map(), modelUses = new Map();
   if (projection.resolvedUses && (!Array.isArray(projection.resolvedUses) || projection.resolvedUses.length !== uses.length)) throw new Error('composition-resource-closure-mismatch');
   for (const [useIndex, use] of uses.entries()) {
     const asset = assets.get(projection.resolvedUses?.[useIndex] || use.assetId);
@@ -197,15 +253,21 @@ export function compilePlan(projection, registry = null, identity = null) {
     if (!asset || !Number.isSafeInteger(targetIndex)
         || (effectTarget !== null && (use.nodeIndex !== null || use.field !== 'maskAsset')))
       throw new Error('composition-resource-closure-mismatch');
-    if (['vector', 'model', 'texture'].includes(asset.kind) || /glb|ktx/i.test(asset.adapterId))
+    if (['vector', 'texture'].includes(asset.kind) || /glb|ktx/i.test(asset.adapterId))
       throw new Error(`composition-adapter-unavailable:${asset.kind}:${asset.adapterId}`);
-    if (!['image', 'video', 'font'].includes(asset.kind)) throw new Error(`composition-adapter-unavailable:${asset.kind}`);
-    if (asset.kind !== 'font' && (!Number.isSafeInteger(asset.width) || asset.width < 1 || !Number.isSafeInteger(asset.height) || asset.height < 1))
+    if (!['image', 'video', 'font', 'model'].includes(asset.kind)) throw new Error(`composition-adapter-unavailable:${asset.kind}`);
+    if (asset.kind !== 'font' && asset.kind !== 'model'
+        && (!Number.isSafeInteger(asset.width) || asset.width < 1 || !Number.isSafeInteger(asset.height) || asset.height < 1))
       throw new Error('composition-real-dimensions-required');
-    if (asset.logicalKind === 'vector' && (asset.adapterId !== 'prepared-svg-png' || !['color','sprite'].includes(use.usage)
-        || JSON.parse(asset.decodeOptions.svgCanonicalOptions).usage !== use.usage)) throw new Error('composition-svg-preparation-required');
     const node = ir.nodes[targetIndex];
     if (!node) throw new Error('composition-resource-node-invalid');
+    if (asset.kind === 'model') {
+      if (effectTarget !== null || use.field !== 'asset' || use.usage !== 'model' || node.nodeType !== 'model')
+        throw new Error('composition-model-preparation-required');
+      modelUses.set(asset.assetId, (modelUses.get(asset.assetId) || 0) + 1);
+    }
+    if (asset.logicalKind === 'vector' && (asset.adapterId !== 'prepared-svg-png' || !['color','sprite'].includes(use.usage)
+        || JSON.parse(asset.decodeOptions.svgCanonicalOptions).usage !== use.usage)) throw new Error('composition-svg-preparation-required');
     let clock = null;
     if (asset.kind === 'video') {
       const start = number(node, 'loopStartMs'), end = number(node, 'loopEndMs');
@@ -223,6 +285,10 @@ export function compilePlan(projection, registry = null, identity = null) {
       throw new Error('composition-adapter-unavailable:effect-chain');
     unique.set(key, requirement); nodeResources[targetIndex][use.field] = requirement;
   }
+  // One GLB resource owns one construction and one buffer plan. Shared model
+  // nodes would upload through only the first node scope, so fail closed.
+  if ([...modelUses.values()].some(count => count > 1))
+    throw new Error('composition-adapter-unavailable:model-sharing');
   const pixels = target.width * target.height;
   if (!Number.isSafeInteger(pixels) || pixels < 1 || !Number.isSafeInteger(canvas.width * canvas.height)
       || canvas.width < 1 || canvas.height < 1) throw new Error('composition-output-plan-invalid');
@@ -234,8 +300,10 @@ export function compilePlan(projection, registry = null, identity = null) {
     textureDeclaredBytes: 0, bufferDeclaredBytes: 92,
     ownedCpuBytes: 92, decodeReservedBytes: 0, decoderLeases: 0, canvases: 0, drawingBufferPixels: 0,
     programs: outputGlow ? 4 : 2 };
+  if (graphic3d) resources.renderTargetDeclaredBytes += pixels * 4;
   const primitives = {drawCalls:1,points:0,triangles:2};
   if (outputGlow) { primitives.drawCalls += 3; primitives.triangles += 6; }
+  if (graphic3d) resources.programs += 1;
   if (builtin) {
     const source=builtin.profile.sourceResources;
     resources.renderTargetDeclaredBytes += pixels*4;
@@ -246,6 +314,14 @@ export function compilePlan(projection, registry = null, identity = null) {
   }
   for (const requirement of unique.values()) {
     if (requirement.kind === 'font') { resources.ownedCpuBytes += fontCpuBytes(requirement); continue; }
+    if (requirement.kind === 'model') {
+      const facts = requirement.modelFacts;
+      resources.bufferDeclaredBytes += facts.resources.gpuBufferBytes;
+      resources.ownedCpuBytes += modelConstructionBytes(facts) + facts.resources.cpuBackingBytes;
+      primitives.drawCalls += facts.scene.drawCalls;
+      primitives.triangles += facts.scene.triangles;
+      continue;
+    }
     const bytes = requirement.width * requirement.height * 4;
     resources.textureDeclaredBytes += bytes;
     resources.decodeReservedBytes += bytes;
@@ -253,8 +329,16 @@ export function compilePlan(projection, registry = null, identity = null) {
   }
   const nodePlans = ir.nodes.map((node, index) => {
     const result = { index, node, resources: nodeResources[index], number: name => number(node, name), constant: name => constant(node, name) };
-    if (node.nodeType !== 'group' && node.nodeType !== 'particles' && node.nodeType !== 'builtinScene') {
+    if (node.nodeType !== 'group' && node.nodeType !== 'particles' && node.nodeType !== 'builtinScene' && node.nodeType !== 'model') {
       resources.bufferDeclaredBytes += 92; resources.ownedCpuBytes += 92; primitives.drawCalls++;primitives.triangles+=2;
+    }
+    if (node.space === '3d' && number(node, 'opacity') !== 1)
+      throw new Error('composition-adapter-unavailable:3d-opacity');
+    if (node.nodeType === 'model') {
+      if (!result.resources.asset) throw new Error('composition-model-preparation-required');
+      if (constant(node, 'animationClip') !== '')
+        throw new Error('composition-adapter-unavailable:model-animation');
+      result.model = true;
     }
     if (node.nodeType === 'text') {
       if (!result.resources.fontAsset) throw new Error('composition-font-preparation-required');
@@ -334,5 +418,5 @@ export function compilePlan(projection, registry = null, identity = null) {
         || limits.drawingBufferPixels !== resources.drawingBufferPixels+pixels || limits.gpuContexts !== 1)
       throw new Error('composition-builtin-page-projection-mismatch:output');
   }
-  return { projection, ir, values, nodePlans, requirements: [...unique.values()], textRasters, resources, pixels, builtin, primitives, bindingParameters, outputEffects, outputGlow };
+  return { projection, ir, values, nodePlans, requirements: [...unique.values()], textRasters, resources, pixels, builtin, primitives, bindingParameters, outputEffects, outputGlow, camera, has3d: graphic3d };
 }

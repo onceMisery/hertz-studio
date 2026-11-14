@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Concrete bounded adapters and node builders. No node owns a frame scheduler.
-const releaseTicket = ticket => ticket?.release({ apiReleased: true, allocationEnded: true });
+const releaseTicket = ticket => typeof ticket?.release === 'function'
+  ? ticket.release({ apiReleased: true, allocationEnded: true }) : undefined;
 const cancelled = () => new DOMException('Composition cancelled', 'AbortError');
 function assertAlive(signal) { if (signal.aborted) throw cancelled(); }
 function waitMedia(element, event, signal, ready) {
@@ -241,6 +242,24 @@ function seedValues(seed, count) {
 }
 export function buildNode(THREE, context, scope, spec, assets, generation) {
   if (spec.node.nodeType === 'group') return { object: new THREE.Group(), spec, opacity: 1 };
+  if (spec.node.nodeType === 'model') {
+    const resource = assets.asset?.model;
+    if (!resource) throw new Error('composition-model-preparation-required');
+    const instance = resource.instantiate(), object = new THREE.Group();
+    object.add(instance.root);
+    const materials = new Set();
+    object.traverse(child => {
+      if (!child.isMesh) return;
+      child.frustumCulled = false;
+      // The core profile has no authored material. The composition's fixed
+      // ambient/directional rig cannot light a fully metallic default, so this
+      // untextured slice uses the dielectric response.
+      if (child.material?.isMeshStandardMaterial) child.material.metalness = 0;
+      if (child.material) materials.add(child.material);
+    });
+    scope.defer(() => instance.release());
+    return { object, spec, model: true, opacity: 1, materials: [...materials] };
+  }
   let texture = assets.asset?.texture || assets.spriteAsset?.texture || null;
   if (spec.node.nodeType === 'text') {
     texture = spec.textRasterLease?.texture;

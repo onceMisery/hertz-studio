@@ -1129,3 +1129,36 @@ contexts 1→0。
 mask、资源 schema 校验忽略 effect、runtime plan 拒绝 effect use）均变红后还原；
 composition 41 项与前端聚合 86 步通过。3D/model adapter、GPU 设备矩阵与
 A01/A05–A10 外部验收继续开放。
+
+2026-11-14 r72 JS 组合静态 GLB / scene3d 续接：`plan.js` 接受 `model` 节点与
+space=3d 的 group，要求合法 `canvas.scene3d`（position/target/米制坐标、fov
+1–120、near>0、far>near），3D 节点必须是 painterOrder 前缀（3D 层在 2D 覆盖层
+之前，交错 fail-closed）；3D 节点拒绝 effect/track/binding，opacity 必须为 1。
+model 资源仅接受 `adapterId=three-gltf-loader`、`decodeOptions.profile=
+static-core-pbr-v1`、`modelFacts.profile/loaderVersion` 一致、且无
+images/textures/materials 的 core profile；预算按 facts 计
+`bufferDeclaredBytes=gpuBufferBytes`、`ownedCpuBytes=encoded+bin+json*2+
+cpuBackingBytes`、真实 drawCalls/triangles、depth `pixels*4` 与 +1 program，
+同一 GLB 多节点共享 fail-closed。
+
+`runtime.js` 新增 `modelScene`、固定 AmbientLight+DirectionalLight 与
+`PerspectiveCamera`（aspect=canvas 宽高比），target 在 3D 时开启深度；render
+顺序为 background → 3D → 2D，3D pass 后 clearDepth；resize 更新相机；
+`reserveAll`/`reserveDelta` 为 model 建构造 CPU ticket 与
+`bufferPlan(cpuBackingBytes,gpuBufferBytes)`；diff 在 model 资源变化时重建节点。
+`model-node.js` 用 fetch + `parseStaticModel` 消费真实 GLB，`nodes.js` 保持无
+顶层 import（文本布局 VM 检查不变），默认 PBR 材质在本切片以 metalness=0 接受
+固定灯光。
+
+真实证据：`check-wallpaper-composition-browser.js` 用 Rust 编译器产出带
+scene3d 的真实 IR，manifest/HTTP 提供真实 core GLB（80B BIN、3 accessor）；
+相机 [0,0,3]→原点时 45° 视角三角形真实像素命中右上、左下保持黑；节点
+position=[.5,.5,0] 后亮区移动；2D 图层覆盖 3D；跨空间顺序、opacity 0.5、
+textured profile 三种负例均在预留前拒绝且 ledger 持平。三处变异（plan 忽略
+跨空间顺序、3D pass 改用正交相机、绕过 model 加载）均变红后还原；组合检查
+45 项连续 3 次通过，前端聚合 86 步通过。
+
+本批只闭合 JS 端无纹理静态 GLB 与固定相机；纹理/KTX2、GLB 动画、逐实例
+材质透明度、多材质 program 精确计数，以及原生 `composition_plan.rs` 的
+scene3d/model 资源准备/准入仍未实施，GPU 设备矩阵与 A01/A05–A10 外部验收
+继续开放。
