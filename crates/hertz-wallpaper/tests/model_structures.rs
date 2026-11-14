@@ -854,11 +854,12 @@ fn package_images_reject_external_ambiguous_untyped_and_wrong_mime_references() 
         inspect_image(&document, &wrong).unwrap_err().code,
         "invalid_model_structure"
     );
-    let wrong = image_manifest("assets/models/albedo.png", "image/ktx2", "texture", false);
-    assert_eq!(
-        inspect_image(&document, &wrong).unwrap_err().code,
-        "model_resource_unavailable"
-    );
+    let ktx2 = image_manifest("assets/models/albedo.png", "image/ktx2", "texture", false);
+    let structure = inspect_image(&document, &ktx2).unwrap();
+    assert!(matches!(
+        &structure.structure.images[0],
+        ModelImage::Package { mime, .. } if mime == "image/ktx2"
+    ));
     document["images"] = json!([{"uri":"albedo.png","bufferView":0}]);
     assert_eq!(
         inspect_image(&document, &manifest).unwrap_err().code,
@@ -1163,6 +1164,78 @@ fn every_used_core_material_texture_requires_its_selected_uv_set() {
         json!({"index":0,"texCoord":7})
     )]);
     inspect(&document, Some(&[0; 4]));
+}
+
+#[test]
+fn khr_texture_basisu_sources_are_admitted_and_unknown_extensions_stay_closed() {
+    let mut document = empty();
+    document["buffers"] = json!([{"byteLength":4}]);
+    document["bufferViews"] = json!([{"buffer":0,"byteLength":4}]);
+    document["images"] = json!([{"bufferView":0,"mimeType":"image/ktx2"}]);
+    document["textures"] = json!([{"extensions":{"KHR_texture_basisu":{"source":0}}}]);
+    document["extensionsUsed"] = json!(["KHR_texture_basisu"]);
+    assert_eq!(
+        inspect(&document, Some(&[0; 4])).structure.textures[0].source,
+        0
+    );
+    // A declared fallback remains validated; the extension source stays effective.
+    document["buffers"] = json!([{"byteLength":8}]);
+    document["bufferViews"] =
+        json!([{"buffer":0,"byteLength":4},{"buffer":0,"byteOffset":4,"byteLength":4}]);
+    document["images"] = json!([
+        {"bufferView":0,"mimeType":"image/png"},
+        {"bufferView":1,"mimeType":"image/ktx2"}
+    ]);
+    document["textures"] = json!([{"source":0,"extensions":{"KHR_texture_basisu":{"source":1}}}]);
+    document["extensionsRequired"] = json!(["KHR_texture_basisu"]);
+    let structure = inspect(&document, Some(&[0; 8]));
+    assert_eq!(structure.structure.textures[0].source, 1);
+    for (field, value) in [
+        (
+            "extensionsUsed",
+            json!(["KHR_texture_basisu", "KHR_texture_basisu"]),
+        ),
+        ("extensionsUsed", json!(["KHR_materials_unlit"])),
+        ("extensionsRequired", json!(["KHR_materials_unlit"])),
+    ] {
+        let mut invalid = document.clone();
+        invalid[field] = value;
+        if field == "extensionsRequired" {
+            invalid["extensionsUsed"] = json!(["KHR_texture_basisu"]);
+        }
+        assert_eq!(
+            error(&invalid, Some(&[0; 8])),
+            "model_resource_unavailable",
+            "{field}"
+        );
+    }
+    for extensions in [
+        json!({"KHR_materials_unlit":{}}),
+        json!({"KHR_texture_basisu":{"source":0,"texCoord":0}}),
+        json!({"KHR_texture_basisu":{}}),
+    ] {
+        let mut invalid = document.clone();
+        invalid["textures"] = json!([{"extensions":extensions}]);
+        assert_eq!(
+            error(&invalid, Some(&[0; 8])),
+            "invalid_model_structure",
+            "{extensions}"
+        );
+    }
+    let mut missing = document.clone();
+    missing["extensionsUsed"] = json!([]);
+    missing["extensionsRequired"] = json!([]);
+    assert_eq!(error(&missing, Some(&[0; 8])), "model_resource_unavailable");
+    let mut dangling = document.clone();
+    dangling["textures"] = json!([{"extensions":{"KHR_texture_basisu":{"source":9}}}]);
+    assert_eq!(error(&dangling, Some(&[0; 8])), "invalid_model_structure");
+    // A core source pointing at KTX2 would bypass the qualified extension path.
+    let mut core_ktx2 = document.clone();
+    core_ktx2["textures"] = json!([{"source":1}]);
+    assert_eq!(
+        error(&core_ktx2, Some(&[0; 8])),
+        "model_resource_unavailable"
+    );
 }
 
 #[test]

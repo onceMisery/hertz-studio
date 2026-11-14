@@ -31,6 +31,7 @@ function checkSvg(asset) {
 const digest = value => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
 const MODEL_PROFILE = 'static-core-pbr-v1';
 const MODEL_TEXTURED_PROFILE = 'static-pbr-texture-v1';
+const MODEL_KTX2_PROFILE = 'static-ktx2-texture-v1';
 const MODEL_LOADER_VERSION = 'three-0.186.0-gltfloader';
 function planCamera(camera) {
   if (!camera || !Array.isArray(camera.position) || !Array.isArray(camera.target)
@@ -46,10 +47,11 @@ function planCamera(camera) {
 }
 function checkModel(asset) {
   const facts = asset.modelFacts, input = facts?.input, resources = facts?.resources, scene = facts?.scene;
+  const ktx2 = facts?.profile === MODEL_KTX2_PROFILE;
   const textured = facts?.profile === MODEL_TEXTURED_PROFILE;
   if (asset.adapterId !== 'three-gltf-loader' || asset.adapterVersion !== 1
       || asset.decodeOptions?.profile !== facts?.profile
-      || ![MODEL_PROFILE, MODEL_TEXTURED_PROFILE].includes(facts?.profile)
+      || ![MODEL_PROFILE, MODEL_TEXTURED_PROFILE, MODEL_KTX2_PROFILE].includes(facts?.profile)
       || !Number.isSafeInteger(asset.byteLength) || asset.byteLength < 1
       || typeof asset.url !== 'string' || !asset.url
       || facts.loaderVersion !== MODEL_LOADER_VERSION
@@ -61,7 +63,7 @@ function checkModel(asset) {
       || !Number.isSafeInteger(scene?.drawCalls) || scene.drawCalls < 1
       || !Number.isSafeInteger(scene?.triangles) || scene.triangles < 1)
     throw new Error('composition-model-preparation-required');
-  if (!textured) {
+  if (!textured && !ktx2) {
     if (facts.materials !== undefined || facts.textures !== undefined || facts.images !== undefined
         || facts.declared?.materials || facts.declared?.textures || facts.declared?.images
         || asset.textureUploadBytes !== undefined || asset.textureUrls !== undefined)
@@ -71,9 +73,28 @@ function checkModel(asset) {
   const images = facts.images, materials = facts.materials, textures = facts.textures;
   if (!Array.isArray(images) || !images.length || !Array.isArray(materials) || !materials.length
       || !Array.isArray(textures) || !textures.length
-      || resources.textureCount !== textures.length || resources.imageCount !== images.length
-      || !Number.isSafeInteger(asset.textureUploadBytes) || asset.textureUploadBytes < images.length * 4)
+      || resources.textureCount !== textures.length || resources.imageCount !== images.length)
     throw new Error('composition-model-preparation-required');
+  if (ktx2) {
+    for (const image of images) {
+      if (image?.mime !== 'image/ktx2'
+          || !Number.isSafeInteger(image.width) || image.width < 1 || image.width > 16384
+          || !Number.isSafeInteger(image.height) || image.height < 1 || image.height > 16384
+          || ![37, 43].includes(image.vkFormat) || typeof image.srgb !== 'boolean'
+          || !Number.isSafeInteger(image.levelCount) || image.levelCount < 1 || image.levelCount > 15
+          || !Array.isArray(image.levelByteLengths) || image.levelByteLengths.length !== image.levelCount
+          || image.levelByteLengths.some(bytes => !Number.isSafeInteger(bytes) || bytes < 1)
+          || !Number.isSafeInteger(image.uploadBytes)
+          || image.uploadBytes !== image.levelByteLengths.reduce((sum, bytes) => sum + bytes, 0))
+        throw new Error('composition-model-preparation-required');
+    }
+    if (!Number.isSafeInteger(resources.imageUploadBytes)
+        || resources.imageUploadBytes !== images.reduce((sum, image) => sum + image.uploadBytes, 0)
+        || asset.textureUploadBytes !== resources.imageUploadBytes)
+      throw new Error('composition-model-preparation-required');
+  } else if (!Number.isSafeInteger(asset.textureUploadBytes) || asset.textureUploadBytes < images.length * 4) {
+    throw new Error('composition-model-preparation-required');
+  }
   const external = images.filter(image => image?.source === 'external');
   const urls = asset.textureUrls;
   if (!urls || typeof urls !== 'object' || Array.isArray(urls)
@@ -334,7 +355,8 @@ export function compilePlan(projection, registry = null, identity = null) {
   for (const requirement of unique.values()) {
     if (requirement.kind === 'font') { resources.ownedCpuBytes += fontCpuBytes(requirement); continue; }
     if (requirement.kind === 'model') {
-      const facts = requirement.modelFacts, textured = facts.profile === MODEL_TEXTURED_PROFILE;
+      const facts = requirement.modelFacts;
+      const textured = facts.profile === MODEL_TEXTURED_PROFILE || facts.profile === MODEL_KTX2_PROFILE;
       resources.bufferDeclaredBytes += facts.resources.gpuBufferBytes;
       resources.ownedCpuBytes += modelConstructionBytes(facts) + facts.resources.cpuBackingBytes;
       resources.programs += Math.max(1, textured ? facts.materials.length : 1);

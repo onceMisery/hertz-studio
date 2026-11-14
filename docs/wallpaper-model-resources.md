@@ -1287,3 +1287,42 @@ URI 用完整包路径、纹理 pin 不发布、textureUrls 不写入）均变�
 
 仍未闭合：KTX2/Basis、GLB 动画、逐实例材质透明度、多材质 program 精确计数、
 真实 GPU 设备矩阵与 A01/A05–A10 外部验收。
+
+2026-11-14 r78 直读格式 KTX2 model 续接：`model_structure` 把 extensions 白名单
+限定为 `KHR_texture_basisu`（名称精确匹配、去重、required 必须在 used 中），纹理
+可声明 `textures[i].extensions.KHR_texture_basisu.source`；有效 source 取扩展值，
+核心 fallback 仍校验。`image_mime` 接受 `image/ktx2`；核心 source 指向 KTX2 图片
+而无扩展时 fail-closed。`model_profile` 抽出共享纹理投影并新增
+`static_ktx2_profile_facts(glb, resource, encodedBytes, modelPath, external)`：
+Embedded 从完整 GLB 切片、Package 由调用方提供已 pin 文件字节，经既有
+`inspect_ktx2` 校验 2D/DFD/level，要求 `supercompression=0`、vkFormat 37/43、
+至少一层，facts 输出 width/height/vkFormat/srgb/levelCount/levelByteLengths/
+uploadBytes 与 `resources.imageUploadBytes`；`plan_ktx2_upload` 将 RGBA8 SRGB(43)
+纳入 always-direct。example 增加 `ktx2` 参数。
+
+桌面按图片 mime 选择 ktx2 profile；declared basisu 纹理的 Package 图片先
+`pin_verified_media`/核对 tuple/有界读取，作为容器 facts 与上传字节来源；仅
+used external 图片发布 `textureUrls` 与 `texture_pins`，投影写
+`textureUploadBytes`，成本沿用纹理上传/解码字节与按材质 program。
+
+JS `parseKtx2Model` 复用 textured 场景/材质/几何校验，`KTX2Loader` 仅调用
+`detectSupport(renderer)` 走 raw DataTexture 路径（Basis 转码资源不随 bundle
+发布，构建期把 `import.meta.url` 的 transcoder URL 置空，Basis 在 facts 前
+fail-closed）。实际纹理校验 DataTexture/RGBAFormat/UnsignedByteType、宽高、
+每层 byteLength 与尺寸；容器字段在 `beforeRoot` 仅做结构比较、由实际纹理核对。
+`plan.js` 接受 ktx2 profile 并要求 `textureUploadBytes === resources.imageUploadBytes
+=== Σ levelByteLengths`，外部 URI 必须全部映射；`model-node`/`runtime` 透传
+renderer 与纹理票。
+
+真实证据：`scripts/composition-model-fixture.js` 生成 2×2 RGBA8 SRGB KTX2
+（左红右绿）并嵌入 GLB；Rust `export_model_profile_facts ktx2` 作为唯一 oracle；
+Chrome 组合检查 49 项通过（KTX2 左红/右绿、ledger textureDeclaredBytes=16、
+decode=0；vkFormat=0 与上传字节 15 两处负例在预留前拒绝且 ledger 持平）。
+原生页面新增 `model-ktx2` 阶段：真实 Rust 选择/GlAdmission 投影，左红/右绿、
+budget.error=null、contexts 1→0，并写出 `native-page-model-ktx2.png`。桌面新增
+embedded/external KTX2 投影测试（profile、16B 上传、textureUrls/pins、
+pageLimits.textureDeclaredBytes=16+4096、buffer=194）。
+
+仍未闭合：Basis ETC1S/UASTC 转码与 transcoder 资源/Worker/CSP、GPU 压缩格式
+（BC/ETC2/ASTC）设备矩阵、GLB 动画、逐实例材质透明度、多材质 program 精确计数、
+真实 GPU 显存/首帧与 A01/A05–A10 外部验收。

@@ -1,4 +1,4 @@
-﻿// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: MIT
 //! Bounded glTF structure and package dependency checks, after the sole GLB
 //! container inspector. These facts do not establish binary or GPU validity.
 
@@ -463,9 +463,33 @@ fn inspect_structure(
 ) -> Result<ModelStructure> {
     inspect_morph_totals(&document)?;
     let skin_author = inspect_skin_author(&document)?;
-    if !document.extensions_used.0.is_empty() || !document.extensions_required.0.is_empty() {
+    // KHR_texture_basisu is the only qualified extension adapter. Names are
+    // matched exactly; requirements must also be listed as used.
+    let mut used_extensions = std::collections::BTreeSet::new();
+    for name in &document.extensions_used.0 {
+        if name != "KHR_texture_basisu" || !used_extensions.insert(name.as_str()) {
+            return Err(unavailable(
+                "model extensions require a qualified content adapter",
+            ));
+        }
+    }
+    let mut required_extensions = std::collections::BTreeSet::new();
+    for name in &document.extensions_required.0 {
+        if !used_extensions.contains(name.as_str()) || !required_extensions.insert(name.as_str()) {
+            return Err(unavailable(
+                "model extension requirements must be declared used exactly once",
+            ));
+        }
+    }
+    if document.textures.0.iter().any(|texture| {
+        texture
+            .extensions
+            .as_ref()
+            .is_some_and(|extensions| extensions.basisu.is_some())
+    }) && !used_extensions.contains("KHR_texture_basisu")
+    {
         return Err(unavailable(
-            "model extensions require a qualified content adapter",
+            "KHR_texture_basisu textures must be declared in extensionsUsed",
         ));
     }
     for buffer in &document.buffers.0 {
@@ -1821,9 +1845,9 @@ fn inspect_images(
     Ok(result)
 }
 fn image_mime(mime: &str) -> Result<()> {
-    if !["image/png", "image/jpeg"].contains(&mime) {
+    if !["image/png", "image/jpeg", "image/ktx2"].contains(&mime) {
         return Err(unavailable(
-            "core glTF images require JPEG/PNG; other codecs require qualified extensions",
+            "glTF images require JPEG/PNG or KHR_texture_basisu KTX2",
         ));
     }
     Ok(())
@@ -1842,12 +1866,43 @@ fn inspect_materials(
     document: &Schema,
 ) -> Result<(Vec<ModelMaterial>, Vec<ModelTexture>, Vec<ModelSampler>)> {
     for texture in &document.textures.0 {
-        let source = texture
-            .source
-            .ok_or_else(|| invalid("texture requires a core image source"))?;
-        at(&document.images.0, source, "texture.source")?;
+        let basisu = texture
+            .extensions
+            .as_ref()
+            .and_then(|extensions| extensions.basisu.as_ref());
+        if let Some(extension) = basisu {
+            at(
+                &document.images.0,
+                extension.source,
+                "texture.KHR_texture_basisu.source",
+            )?;
+            if let Some(fallback) = texture.source {
+                at(&document.images.0, fallback, "texture.source")?;
+            }
+        } else {
+            let source = texture
+                .source
+                .ok_or_else(|| invalid("texture requires a core image source"))?;
+            at(&document.images.0, source, "texture.source")?;
+        }
         if let Some(sampler) = texture.sampler {
             at(&document.samplers.0, sampler, "texture.sampler")?;
+        }
+        // A KTX2 image reached through the core source would make the shipped
+        // loader use its PNG/JPEG path; require the qualified extension instead.
+        let effective = basisu
+            .map(|extension| extension.source)
+            .or(texture.source)
+            .expect("validated texture source");
+        if at(&document.images.0, effective, "texture.source")?
+            .mime_type
+            .as_deref()
+            == Some("image/ktx2")
+            && basisu.is_none()
+        {
+            return Err(unavailable(
+                "image/ktx2 textures require KHR_texture_basisu",
+            ));
         }
     }
     for sampler in &document.samplers.0 {
@@ -1944,8 +1999,17 @@ fn inspect_materials(
     }
     let mut textures = Vec::with_capacity(document.textures.0.len());
     for texture in &document.textures.0 {
+        // Clients that support KHR_texture_basisu ignore the fallback source.
+        let source = texture
+            .extensions
+            .as_ref()
+            .and_then(|extensions| extensions.basisu.as_ref())
+            .map_or_else(
+                || texture.source.expect("validated texture source"),
+                |extension| extension.source,
+            );
         textures.push(ModelTexture {
-            source: texture.source.expect("validated texture source"),
+            source,
             sampler: texture.sampler,
         });
     }
@@ -2266,7 +2330,33 @@ named_schema!(Image {
     #[serde(default)] uri:Option<String>, #[serde(default)] buffer_view:Option<usize>,
     #[serde(default)] mime_type:Option<String>,
 });
-named_schema!(Texture { #[serde(default)] source:Option<usize>, #[serde(default)] sampler:Option<usize>, });
+// KHR_texture_basisu is the only extension with a typed schema; every other
+// object still rejects any authored extension payload through `Pending`.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct Texture {
+    #[serde(default)]
+    source: Option<usize>,
+    #[serde(default)]
+    sampler: Option<usize>,
+    #[serde(default, rename = "name")]
+    _name: Option<String>,
+    #[serde(default)]
+    extensions: Option<TextureExtensions>,
+    #[serde(default, rename = "extras")]
+    _extras: metadata::Extras,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TextureExtensions {
+    #[serde(default, rename = "KHR_texture_basisu")]
+    basisu: Option<BasisuTexture>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct BasisuTexture {
+    source: usize,
+}
 named_schema!(Sampler {
     #[serde(default)] mag_filter:Option<u32>, #[serde(default)] min_filter:Option<u32>,
     #[serde(default="repeat_wrap")] wrap_s:u32, #[serde(default="repeat_wrap")] wrap_t:u32,

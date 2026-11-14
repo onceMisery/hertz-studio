@@ -66,6 +66,10 @@ fn rgba8_direct_is_capability_free_and_other_uncompressed_formats_are_refused() 
         Ktx2UploadPlan::Direct { vk_format: 37 }
     );
     assert_eq!(
+        plan_ktx2_upload(&texture(43, 1, 2, true, 0, 1), NONE).unwrap(),
+        Ktx2UploadPlan::Direct { vk_format: 43 }
+    );
+    assert_eq!(
         plan_ktx2_upload(&texture(9, 1, 1, false, 0, 1), ALL)
             .unwrap_err()
             .code,

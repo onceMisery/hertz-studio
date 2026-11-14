@@ -402,8 +402,9 @@ if(diagnostic){
     });
     await externalPage.route('http://hertz.localhost/',route=>route.fulfill({status:200,contentType:'text/html',body:html}));
     await externalPage.goto('http://hertz.localhost/');
-    assert.equal(await externalPage.evaluate(async url=>{hertzWallpaper.applyConfig({source:'fixed',audioInput:{kind:'none'},motion:1,quality:'low'});
-      const prepared=hertzWallpaper.applyComposition(url);hertzWallpaper.start(15);return await prepared;},externalUri),true);
+    const externalPrepared=await externalPage.evaluate(async url=>{hertzWallpaper.applyConfig({source:'fixed',audioInput:{kind:'none'},motion:1,quality:'low'});
+      const prepared=hertzWallpaper.applyComposition(url);hertzWallpaper.start(15);return await prepared;},externalUri);
+    assert.equal(externalPrepared,true,JSON.stringify(await externalPage.evaluate(()=>nativeEvents)));
     await externalPage.waitForFunction(()=>nativeEvents.some(event=>event.includes('firstFrame')),null,{timeout:10000}).catch(async failure=>{
       throw new Error(failure.message+'\n'+JSON.stringify(await externalPage.evaluate(()=>({events:nativeEvents,stats:hertzWallpaper.debug(),budget:HertzGlBudget.stats()}))));
     });
@@ -426,7 +427,53 @@ if(diagnostic){
     assert.equal((await externalPage.evaluate(()=>HertzGlBudget.stats())).contexts,0);
     await externalPage.close();
   }
-  fs.writeFileSync(path.join(output,'native-page-evidence.json'),JSON.stringify({source:'actual Rust production selector + GlAdmission + original native page',qualification:'browser integration; copied scheduler metadata matches measured headless rAF; native resource caps unchanged; controlled visibility event/state; Windows/GPU qualification pending',cadence:{intervals:cadence,refreshHz,running:runningCadence},state,blockedBefore,blockedAfter,hiddenBefore,hiddenAfter,visibilityResumed,fits,glow,tracks,mask,model,texturedModel,externalTexture,paused,retired,errors},null,2));
-  console.log('PASS native composition page: real Rust projection, one context, complete frame, pause and retirement'+(glow?', glow surfaces admitted':'')+(tracks?', tracks/bindings applied':'')+(mask?', mask texture applied':'')+(model?', scene3d model rendered':'')+(texturedModel?', textured model pixels':'')+(externalTexture?', external texture route':''));
+  const ktx2Dir=path.join(output,'model-ktx2');
+  let ktx2Model=null;
+  if(fs.existsSync(path.join(ktx2Dir,'projection.json'))){
+    const ktx2Projection=JSON.parse(fs.readFileSync(path.join(ktx2Dir,'projection.json'),'utf8'));
+    const ktx2Uri=fs.readFileSync(path.join(ktx2Dir,'uri.txt'),'utf8');
+    const ktx2Init=bindCadence(fs.readFileSync(path.join(ktx2Dir,'native-init.js'),'utf8'));
+    const ktx2Files=JSON.parse(fs.readFileSync(path.join(ktx2Dir,'files.json'),'utf8'));
+    const ktx2Page=await browser.newPage({viewport:{width:64,height:64}}),ktx2Errors=[];
+    ktx2Page.on('pageerror',error=>ktx2Errors.push(error.message));
+    ktx2Page.on('console',message=>{if(message.type()==='error'){ktx2Errors.push(message.text());console.error('browser:',message.text());}});
+    await ktx2Page.addInitScript(ktx2Init+'\nwindow.nativeEvents=[];window.ipc={postMessage:message=>nativeEvents.push(message)};');
+    await ktx2Page.route('https://**.wallpaper.invalid/**',route=>{
+      if(route.request().url()===ktx2Uri)return route.fulfill({status:200,contentType:'application/json',body:JSON.stringify(ktx2Projection)});
+      const asset=ktx2Files.find(entry=>entry.url===route.request().url());
+      if(asset)return route.fulfill({status:200,contentType:'model/gltf-binary',body:fs.readFileSync(path.join(ktx2Dir,asset.file))});
+      return route.fulfill({status:404,body:''});
+    });
+    await ktx2Page.route('http://hertz.localhost/',route=>route.fulfill({status:200,contentType:'text/html',body:html}));
+    await ktx2Page.goto('http://hertz.localhost/');
+    assert.equal(await ktx2Page.evaluate(async url=>{hertzWallpaper.applyConfig({source:'fixed',audioInput:{kind:'none'},motion:1,quality:'low'});
+      const prepared=hertzWallpaper.applyComposition(url);hertzWallpaper.start(15);return await prepared;},ktx2Uri),true);
+    await ktx2Page.waitForFunction(()=>nativeEvents.some(event=>event.includes('firstFrame')),null,{timeout:10000}).catch(async failure=>{
+      throw new Error(failure.message+'\n'+JSON.stringify(await ktx2Page.evaluate(()=>({events:nativeEvents,stats:hertzWallpaper.debug(),budget:HertzGlBudget.stats()}))));
+    });
+    await ktx2Page.waitForFunction(()=>hertzWallpaper.debug().draws>=2,null,{timeout:10000});
+    const ktx2=await ktx2Page.evaluate(()=>{
+      const gl=document.querySelector('#host canvas').getContext('webgl2');
+      const sample=(x,y)=>{const pixel=new Uint8Array(4);gl.readPixels(x,y,1,1,gl.RGBA,gl.UNSIGNED_BYTE,pixel);return [...pixel];};
+      return {red:sample(36,40),green:sample(46,40),budget:HertzGlBudget.stats()};
+    });
+    assert(ktx2.red[0]>200&&ktx2.red[1]<20&&ktx2.red[2]<20,'KTX2 baseColor keeps the left red half');
+    assert(ktx2.green[1]>200&&ktx2.green[0]<20&&ktx2.green[2]<20,'KTX2 baseColor keeps the right green half');
+    assert.equal(ktx2.budget.contexts,1);assert.equal(ktx2.budget.error,null);assert.deepEqual(ktx2Errors,[]);
+    assert.equal(ktx2Projection.resolvedAssets[0].modelFacts.profile,'static-ktx2-texture-v1');
+    assert.equal(ktx2Projection.resolvedAssets[0].modelFacts.images[0].vkFormat,43);
+    assert.equal(ktx2Projection.pageLimits.textureDeclaredBytes,16+4096);
+    assert.equal(ktx2Projection.pageLimits.bufferDeclaredBytes,194);
+    ktx2Model={pixels:{red:ktx2.red,green:ktx2.green},budget:ktx2.budget,
+      facts:{profile:ktx2Projection.resolvedAssets[0].modelFacts.profile,
+        textureUploadBytes:ktx2Projection.resolvedAssets[0].textureUploadBytes}};
+    await ktx2Page.evaluate(()=>hertzWallpaper.reveal());
+    await ktx2Page.screenshot({path:path.join(ktx2Dir,'native-page-model-ktx2.png')});
+    await ktx2Page.evaluate(()=>hertzWallpaper.unmount());await ktx2Page.waitForTimeout(50);
+    assert.equal((await ktx2Page.evaluate(()=>HertzGlBudget.stats())).contexts,0);
+    await ktx2Page.close();
+  }
+  fs.writeFileSync(path.join(output,'native-page-evidence.json'),JSON.stringify({source:'actual Rust production selector + GlAdmission + original native page',qualification:'browser integration; copied scheduler metadata matches measured headless rAF; native resource caps unchanged; controlled visibility event/state; Windows/GPU qualification pending',cadence:{intervals:cadence,refreshHz,running:runningCadence},state,blockedBefore,blockedAfter,hiddenBefore,hiddenAfter,visibilityResumed,fits,glow,tracks,mask,model,texturedModel,externalTexture,ktx2Model,paused,retired,errors},null,2));
+  console.log('PASS native composition page: real Rust projection, one context, complete frame, pause and retirement'+(glow?', glow surfaces admitted':'')+(tracks?', tracks/bindings applied':'')+(mask?', mask texture applied':'')+(model?', scene3d model rendered':'')+(texturedModel?', textured model pixels':'')+(externalTexture?', external texture route':'')+(ktx2Model?', KTX2 model pixels':''));
  }finally{await browser.close();}
 })().catch(error=>{console.error(error.stack);process.exitCode=1;});

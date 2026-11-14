@@ -14,9 +14,23 @@ use crate::{PackageError, Result};
 
 const PROFILE: &str = "static-core-pbr-v1";
 const TEXTURED_PROFILE: &str = "static-pbr-texture-v1";
+const KTX2_PROFILE: &str = "static-ktx2-texture-v1";
 const LOADER_VERSION: &str = "three-0.186.0-gltfloader";
 const MAX_NODES: usize = 5000;
 const MAX_ITEMS: usize = 16384;
+const VK_FORMAT_RGBA8_UNORM: u32 = 37;
+const VK_FORMAT_RGBA8_SRGB: u32 = 43;
+
+/// Image payload policy for the shared textured scene/material projection.
+enum ImageProjection<'a> {
+    /// PNG/JPEG sizes are read from the authored bytes by the caller.
+    Raster,
+    /// KTX2 containers are inspected here; package images are pinned by the caller.
+    Ktx2 {
+        glb: &'a [u8],
+        external: &'a std::collections::BTreeMap<usize, Vec<u8>>,
+    },
+}
 
 fn unavailable(message: &str) -> PackageError {
     PackageError::new("model_profile_unavailable", message)
@@ -491,7 +505,23 @@ fn material_facts(index: usize, material: &ModelMaterial) -> Value {
     })
 }
 
-fn image_facts(index: usize, image: &ModelImage, model_path: &str) -> Result<Value> {
+fn image_facts(
+    index: usize,
+    image: &ModelImage,
+    model_path: &str,
+    projection: &ImageProjection<'_>,
+) -> Result<(Value, Option<u64>)> {
+    match projection {
+        ImageProjection::Raster => {
+            raster_image_facts(index, image, model_path).map(|facts| (facts, None))
+        }
+        ImageProjection::Ktx2 { glb, external } => {
+            ktx2_image_facts(index, image, model_path, glb, external)
+        }
+    }
+}
+
+fn raster_image_facts(index: usize, image: &ModelImage, model_path: &str) -> Result<Value> {
     match image {
         ModelImage::Embedded { range, mime, .. } => {
             if mime != "image/png" && mime != "image/jpeg" {
@@ -519,6 +549,94 @@ fn image_facts(index: usize, image: &ModelImage, model_path: &str) -> Result<Val
     }
 }
 
+fn ktx2_image_facts(
+    index: usize,
+    image: &ModelImage,
+    model_path: &str,
+    glb: &[u8],
+    external: &std::collections::BTreeMap<usize, Vec<u8>>,
+) -> Result<(Value, Option<u64>)> {
+    let (source, bytes): (Value, &[u8]) = match image {
+        ModelImage::Embedded { range, mime, .. } => {
+            if mime != "image/ktx2" {
+                return Err(unavailable(
+                    "KTX2 profile requires image/ktx2 embedded images",
+                ));
+            }
+            let start =
+                usize::try_from(range.offset).map_err(|_| unavailable("KTX2 model image range"))?;
+            let length =
+                usize::try_from(range.bytes).map_err(|_| unavailable("KTX2 model image range"))?;
+            let bytes = glb
+                .get(start..start.saturating_add(length))
+                .ok_or_else(|| unavailable("KTX2 model image range"))?;
+            (
+                json!({"index": index, "source": "embedded", "mime": mime, "bytes": range.bytes}),
+                bytes,
+            )
+        }
+        ModelImage::Package { path, mime, .. } => {
+            if mime != "image/ktx2" {
+                return Err(unavailable(
+                    "KTX2 profile requires image/ktx2 package images",
+                ));
+            }
+            let uri = model_path
+                .rsplit_once('/')
+                .map(|(directory, _)| directory)
+                .and_then(|directory| path.strip_prefix(directory))
+                .and_then(|rest| rest.strip_prefix('/'))
+                .unwrap_or(path);
+            let bytes = external
+                .get(&index)
+                .ok_or_else(|| unavailable("external KTX2 model images require pinned bytes"))?;
+            (
+                json!({"index": index, "source": "external", "mime": mime, "uri": uri}),
+                bytes.as_slice(),
+            )
+        }
+    };
+    let container = crate::texture_container::inspect_ktx2(bytes, bytes.len() as u64)?;
+    if container.supercompression != 0 {
+        return Err(unavailable(
+            "KTX2 profile requires uncompressed texture levels",
+        ));
+    }
+    if !matches!(
+        container.vk_format,
+        VK_FORMAT_RGBA8_UNORM | VK_FORMAT_RGBA8_SRGB
+    ) {
+        return Err(unavailable(
+            "KTX2 profile requires RGBA8 UNORM/SRGB textures",
+        ));
+    }
+    if container.levels.is_empty() || container.generate_mipmaps {
+        return Err(unavailable("KTX2 profile requires declared texture levels"));
+    }
+    if !matches!(
+        crate::ktx2_upload::plan_ktx2_upload(
+            &container,
+            crate::ktx2_upload::Ktx2UploadCapabilities::default()
+        )?,
+        crate::ktx2_upload::Ktx2UploadPlan::Direct { .. }
+    ) {
+        return Err(unavailable(
+            "KTX2 profile requires a direct GPU upload format",
+        ));
+    }
+    let level_byte_lengths: Vec<u64> = container.levels.iter().map(|level| level.bytes).collect();
+    let upload_bytes = checked_sum(level_byte_lengths.iter().copied())?;
+    let mut facts = source;
+    facts["width"] = json!(container.width);
+    facts["height"] = json!(container.height);
+    facts["vkFormat"] = json!(container.vk_format);
+    facts["srgb"] = json!(container.vk_format == VK_FORMAT_RGBA8_SRGB);
+    facts["levelCount"] = json!(level_byte_lengths.len());
+    facts["levelByteLengths"] = json!(level_byte_lengths);
+    facts["uploadBytes"] = json!(upload_bytes);
+    Ok((facts, Some(upload_bytes)))
+}
+
 fn sampler_for(
     structure: &crate::model_structure::ModelStructure,
     sampler: Option<usize>,
@@ -541,6 +659,38 @@ pub fn static_textured_profile_facts(
     resource: &GlbResource,
     encoded_bytes: u64,
     model_path: &str,
+) -> Result<Value> {
+    textured_profile_facts(
+        resource,
+        encoded_bytes,
+        model_path,
+        &ImageProjection::Raster,
+    )
+}
+
+/// Direct-format KTX2 facts for the shipped profile. Embedded containers are
+/// inspected from the complete GLB stream; package containers must be supplied
+/// as bytes read from the caller's pinned package files.
+pub fn static_ktx2_profile_facts(
+    glb: &[u8],
+    resource: &GlbResource,
+    encoded_bytes: u64,
+    model_path: &str,
+    external: &std::collections::BTreeMap<usize, Vec<u8>>,
+) -> Result<Value> {
+    textured_profile_facts(
+        resource,
+        encoded_bytes,
+        model_path,
+        &ImageProjection::Ktx2 { glb, external },
+    )
+}
+
+fn textured_profile_facts(
+    resource: &GlbResource,
+    encoded_bytes: u64,
+    model_path: &str,
+    projection: &ImageProjection<'_>,
 ) -> Result<Value> {
     let structure = &resource.structure;
     let binary = resource
@@ -835,17 +985,23 @@ pub fn static_textured_profile_facts(
             }))
         })
         .collect::<Result<Vec<_>>>()?;
+    let mut image_upload_bytes = 0_u64;
     let image_facts_used: Vec<Value> = used_images
         .iter()
         .map(|&index| {
-            image_facts(
+            let (facts, upload) = image_facts(
                 index,
                 structure
                     .images
                     .get(index)
                     .ok_or_else(|| unavailable("textured profile image index"))?,
                 model_path,
-            )
+                projection,
+            )?;
+            if let Some(upload) = upload {
+                image_upload_bytes = checked_sum([image_upload_bytes, upload])?;
+            }
+            Ok(facts)
         })
         .collect::<Result<Vec<_>>>()?;
     let texture_facts: Vec<Value> = used_textures
@@ -855,13 +1011,14 @@ pub fn static_textured_profile_facts(
                 .textures
                 .get(index)
                 .ok_or_else(|| unavailable("textured profile texture index"))?;
-            let source = image_facts(
+            let (source, _) = image_facts(
                 texture.source,
                 structure
                     .images
                     .get(texture.source)
                     .ok_or_else(|| unavailable("textured profile texture image"))?,
                 model_path,
+                projection,
             )?;
             let sampler = sampler_for(structure, texture.sampler);
             Ok(json!({
@@ -888,8 +1045,12 @@ pub fn static_textured_profile_facts(
     )?;
     let geometry_count = geometries.len();
     let geometry_facts: Vec<Value> = geometries.into_values().collect();
-    Ok(json!({
-        "profile": TEXTURED_PROFILE,
+    let profile = match projection {
+        ImageProjection::Raster => TEXTURED_PROFILE,
+        ImageProjection::Ktx2 { .. } => KTX2_PROFILE,
+    };
+    let mut facts = json!({
+        "profile": profile,
         "loaderVersion": LOADER_VERSION,
         "input": {
             "encodedBytes": encoded_bytes,
@@ -933,7 +1094,11 @@ pub fn static_textured_profile_facts(
             "textureCount": used_textures.len(),
             "imageCount": used_images.len()
         }
-    }))
+    });
+    if matches!(projection, ImageProjection::Ktx2 { .. }) {
+        facts["resources"]["imageUploadBytes"] = json!(image_upload_bytes);
+    }
+    Ok(facts)
 }
 
 fn material_texture_infos(material: &ModelMaterial) -> Vec<ModelTextureInfo> {
@@ -1267,6 +1432,229 @@ mod tests {
         assert_eq!(
             embedded_image_upload_bytes(&bytes, content.resource(), 0).unwrap(),
             32
+        );
+    }
+
+    fn ktx2_rgba8(vk_format: u32, supercompression: u32) -> Vec<u8> {
+        const EDGE: usize = 2;
+        const LEVEL_BYTES: usize = EDGE * EDGE * 4;
+        let mut bytes = vec![0_u8; 196 + LEVEL_BYTES];
+        bytes[..12].copy_from_slice(&[
+            0xab, b'K', b'T', b'X', b' ', b'2', b'0', 0xbb, 13, 10, 26, 10,
+        ]);
+        for (offset, value) in [
+            (12, vk_format),
+            (16, 1),
+            (20, EDGE as u32),
+            (24, EDGE as u32),
+            (28, 0),
+            (32, 0),
+            (36, 1),
+            (40, 1),
+            (44, supercompression),
+            (48, 104),
+            (52, 92),
+            (104, 92),
+        ] {
+            bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        for (offset, value) in [
+            (80, 196_u64),
+            (88, LEVEL_BYTES as u64),
+            (96, LEVEL_BYTES as u64),
+        ] {
+            bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+        }
+        bytes[112..114].copy_from_slice(&2_u16.to_le_bytes());
+        bytes[114..116].copy_from_slice(&88_u16.to_le_bytes());
+        bytes[116..120].copy_from_slice(&[1, 1, 2, 0]);
+        bytes[124] = 4;
+        for (index, channel) in [0_u8, 1, 2, 15].into_iter().enumerate() {
+            let sample = 132 + index * 16;
+            bytes[sample..sample + 2].copy_from_slice(&((index as u16) * 8).to_le_bytes());
+            bytes[sample + 2] = 8;
+            bytes[sample + 3] = channel;
+            bytes[sample + 12..sample + 16].copy_from_slice(&0xff_u32.to_le_bytes());
+        }
+        let pixels = [
+            255_u8, 0, 0, 255, 0, 255, 0, 255, 255, 0, 0, 255, 0, 255, 0, 255,
+        ];
+        bytes[196..].copy_from_slice(&pixels);
+        bytes
+    }
+
+    fn ktx2_triangle(vk_format: u32, supercompression: u32, external: bool) -> Vec<u8> {
+        let ktx2 = ktx2_rgba8(vk_format, supercompression);
+        let mut bin = vec![0_u8; if external { 104 } else { 104 + ktx2.len() }];
+        for (index, value) in [0.0_f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+            .iter()
+            .enumerate()
+        {
+            bin[index * 4..index * 4 + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        for (index, value) in [0.0_f32, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0]
+            .iter()
+            .enumerate()
+        {
+            bin[36 + index * 4..36 + index * 4 + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        for (index, value) in [0.0_f32, 0.0, 1.0, 0.0, 0.0, 1.0].iter().enumerate() {
+            bin[72 + index * 4..72 + index * 4 + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        for (index, value) in [0_u16, 1, 2].iter().enumerate() {
+            bin[96 + index * 2..96 + index * 2 + 2].copy_from_slice(&value.to_le_bytes());
+        }
+        if !external {
+            bin[104..].copy_from_slice(&ktx2);
+        }
+        let mut views = vec![
+            json!({"buffer":0,"byteOffset":0,"byteLength":36}),
+            json!({"buffer":0,"byteOffset":36,"byteLength":36}),
+            json!({"buffer":0,"byteOffset":72,"byteLength":24}),
+            json!({"buffer":0,"byteOffset":96,"byteLength":8}),
+        ];
+        let image = if external {
+            json!({"uri":"textures/red.ktx2","mimeType":"image/ktx2"})
+        } else {
+            views.push(json!({"buffer":0,"byteOffset":104,"byteLength":ktx2.len()}));
+            json!({"bufferView":4,"mimeType":"image/ktx2"})
+        };
+        let document = json!({
+            "asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],"nodes":[{"mesh":0}],
+            "extensionsUsed":["KHR_texture_basisu"],"extensionsRequired":["KHR_texture_basisu"],
+            "meshes":[{"primitives":[{"attributes":{"POSITION":0,"NORMAL":1,"TEXCOORD_0":3},
+                "indices":2,"material":0}]}],
+            "buffers":[{"byteLength":bin.len()}],
+            "bufferViews":views,
+            "accessors":[
+                {"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[1,1,0]},
+                {"bufferView":1,"componentType":5126,"count":3,"type":"VEC3"},
+                {"bufferView":3,"componentType":5123,"count":3,"type":"SCALAR"},
+                {"bufferView":2,"componentType":5126,"count":3,"type":"VEC2"}],
+            "images":[image],
+            "samplers":[{"magFilter":9728,"minFilter":9728,"wrapS":33071,"wrapT":33071}],
+            "textures":[{"sampler":0,"extensions":{"KHR_texture_basisu":{"source":0}}}],
+            "materials":[{"pbrMetallicRoughness":{"baseColorFactor":[1,1,1,1],
+                "baseColorTexture":{"index":0,"texCoord":0},"metallicFactor":0,"roughnessFactor":1},
+                "alphaMode":"OPAQUE"}]
+        });
+        glb(document, &bin)
+    }
+
+    fn ktx2_facts(bytes: &[u8]) -> Result<Value> {
+        let content = inspect_glb_resource_content(
+            Cursor::new(bytes),
+            bytes.len() as u64,
+            &manifest(),
+            "assets/model.glb",
+        )
+        .unwrap();
+        static_ktx2_profile_facts(
+            bytes,
+            content.resource(),
+            content.bytes(),
+            "assets/model.glb",
+            &std::collections::BTreeMap::new(),
+        )
+    }
+
+    #[test]
+    fn static_ktx2_facts_project_direct_rgba8_containers() {
+        let bytes = ktx2_triangle(43, 0, false);
+        let facts = ktx2_facts(&bytes).unwrap();
+        assert_eq!(facts["profile"], KTX2_PROFILE);
+        assert_eq!(facts["declared"]["images"], 1);
+        assert_eq!(facts["declared"]["textures"], 1);
+        assert_eq!(facts["textures"][0]["source"]["source"], "embedded");
+        assert_eq!(facts["images"][0]["mime"], "image/ktx2");
+        assert_eq!(facts["images"][0]["width"], 2);
+        assert_eq!(facts["images"][0]["height"], 2);
+        assert_eq!(facts["images"][0]["vkFormat"], 43);
+        assert_eq!(facts["images"][0]["srgb"], true);
+        assert_eq!(facts["images"][0]["levelCount"], 1);
+        assert_eq!(facts["images"][0]["levelByteLengths"], json!([16]));
+        assert_eq!(facts["images"][0]["uploadBytes"], 16);
+        assert_eq!(facts["resources"]["imageUploadBytes"], 16);
+        assert_eq!(facts["resources"]["textureCount"], 1);
+        assert_eq!(
+            facts["resources"]["geometries"][0]["key"],
+            "2:NORMAL:1;POSITION:0;TEXCOORD_0:3;:undefined"
+        );
+        // The raster profile still rejects KTX2 images.
+        let content = inspect_glb_resource_content(
+            Cursor::new(&bytes),
+            bytes.len() as u64,
+            &manifest(),
+            "assets/model.glb",
+        )
+        .unwrap();
+        assert_eq!(
+            static_textured_profile_facts(content.resource(), content.bytes(), "assets/model.glb")
+                .unwrap_err()
+                .code,
+            "model_profile_unavailable"
+        );
+    }
+
+    #[test]
+    fn static_ktx2_facts_reject_non_direct_and_compressed_containers() {
+        for bytes in [
+            ktx2_triangle(9, 0, false),
+            ktx2_triangle(43, 3, false),
+            ktx2_triangle(43, 1, false),
+        ] {
+            let code = ktx2_facts(&bytes).unwrap_err().code;
+            assert!(
+                code == "model_profile_unavailable" || code == "invalid_texture_container",
+                "{code}"
+            );
+        }
+    }
+
+    #[test]
+    fn static_ktx2_facts_consume_pinned_package_bytes() {
+        let bytes = ktx2_triangle(37, 0, true);
+        let mut manifest = manifest();
+        manifest.files = serde_json::from_value(json!([{
+            "path":"assets/textures/red.ktx2","bytes":212,"sha256":"ab".repeat(32),"mime":"image/ktx2"
+        }]))
+        .unwrap();
+        manifest.assets = serde_json::from_value(json!([{
+            "id":"red","kind":"texture","source":"assets/textures/red.ktx2","variants":[]
+        }]))
+        .unwrap();
+        let content = inspect_glb_resource_content(
+            Cursor::new(&bytes),
+            bytes.len() as u64,
+            &manifest,
+            "assets/model.glb",
+        )
+        .unwrap();
+        let external = std::collections::BTreeMap::from([(0, ktx2_rgba8(37, 0))]);
+        let facts = static_ktx2_profile_facts(
+            &bytes,
+            content.resource(),
+            content.bytes(),
+            "assets/model.glb",
+            &external,
+        )
+        .unwrap();
+        assert_eq!(facts["images"][0]["source"], "external");
+        assert_eq!(facts["images"][0]["uri"], "textures/red.ktx2");
+        assert_eq!(facts["images"][0]["vkFormat"], 37);
+        assert_eq!(facts["images"][0]["srgb"], false);
+        assert_eq!(facts["resources"]["imageUploadBytes"], 16);
+        assert_eq!(
+            static_ktx2_profile_facts(
+                &bytes,
+                content.resource(),
+                content.bytes(),
+                "assets/model.glb",
+                &std::collections::BTreeMap::new()
+            )
+            .unwrap_err()
+            .code,
+            "model_profile_unavailable"
         );
     }
 

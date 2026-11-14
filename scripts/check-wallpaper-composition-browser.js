@@ -4,10 +4,10 @@
 const assert=require('node:assert/strict'), fs=require('node:fs'), path=require('node:path');
 const {execFileSync}=require('node:child_process'), {createHash}=require('node:crypto'), zlib=require('node:zlib');
 const {loadCompositionFontFixture}=require('./composition-font-fixture.js');
-const {coreGlb,texturedGlb}=require('./composition-model-fixture.js');
+const {coreGlb,texturedGlb,ktx2Glb}=require('./composition-model-fixture.js');
 const {chromium}=require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const root=path.resolve(__dirname,'..'), output=path.join(root,'output/a04-p2-20261108/composition-browser');
-const fontFixture=loadCompositionFontFixture(), modelFixture=coreGlb(), texturedFixture=texturedGlb();
+const fontFixture=loadCompositionFontFixture(), modelFixture=coreGlb(), texturedFixture=texturedGlb(), ktx2Fixture=ktx2Glb();
 fs.mkdirSync(output,{recursive:true});
 function hash(bytes){return createHash('sha256').update(bytes).digest('hex');}
 function crc(bytes){let c=0xffffffff;for(const b of bytes){c^=b;for(let i=0;i<8;i++)c=(c>>>1)^((c&1)?0xedb88320:0);}return (c^0xffffffff)>>>0;}
@@ -28,7 +28,9 @@ const sourceAssets=[
  {assetId:'font',kind:'font',file:fontFixture.file,mime:fontFixture.mime,bytes:fontFixture.bytes},
  {assetId:'mesh',kind:'model',file:'mesh.glb',mime:'model/gltf-binary',bytes:modelFixture.glb,modelInput:modelFixture.input},
  {assetId:'textured',kind:'model',file:'textured.glb',mime:'model/gltf-binary',bytes:texturedFixture.glb,
-  modelInput:texturedFixture.input,textured:true,imageBytes:texturedFixture.imageBytes}
+  modelInput:texturedFixture.input,textured:true,uploadBytes:64,imageBytes:texturedFixture.imageBytes},
+ {assetId:'ktx2',kind:'model',file:'ktx2.glb',mime:'model/gltf-binary',bytes:ktx2Fixture.glb,
+  modelInput:ktx2Fixture.input,ktx2:true,uploadBytes:16,imageBytes:ktx2Fixture.imageBytes}
 ];
 for(const a of sourceAssets)fs.writeFileSync(path.join(output,a.file),a.bytes);
 for(const file of fontFixture.packageFiles){fs.mkdirSync(path.dirname(path.join(output,file.file)),{recursive:true});fs.writeFileSync(path.join(output,file.file),file.bytes);}
@@ -78,6 +80,8 @@ const model=compile([modelNode()],modelCanvas);
 const coreRustFacts=JSON.parse(execFileSync(factsExecutable,[path.join(output,'mesh.glb'),compilerInputs.get(model)[0],'assets/mesh.glb'],{cwd:root,encoding:'utf8'}));
 const texturedModel=compile([modelNode('mesh',{},'textured')],modelCanvas);
 const texturedRustFacts=JSON.parse(execFileSync(factsExecutable,[path.join(output,'textured.glb'),compilerInputs.get(texturedModel)[0],'assets/textured.glb','textured'],{cwd:root,encoding:'utf8'}));
+const ktx2Model=compile([modelNode('mesh',{},'ktx2')],modelCanvas);
+const ktx2RustFacts=JSON.parse(execFileSync(factsExecutable,[path.join(output,'ktx2.glb'),compilerInputs.get(ktx2Model)[0],'assets/ktx2.glb','ktx2'],{cwd:root,encoding:'utf8'}));
 const movedModel=compile([modelNode('mesh',{position:[.5,.5,0]})],modelCanvas);
 const modelOverlay=compile([modelNode(),image('back','blue')],modelCanvas);
 const modelBehind=compile([image('back','blue'),modelNode()],modelCanvas);
@@ -197,9 +201,9 @@ const results=[];
   const resolved=sourceAssets.map(a=>a.kind==='font'?{...nativeFont,url:'http://composition.test/'+a.file}
    :a.kind==='model'?({assetId:a.assetId,kind:'model',contentKey:hash(a.bytes),byteLength:a.bytes.length,
     url:'http://composition.test/'+a.file,adapterId:'three-gltf-loader',adapterVersion:1,
-    decodeOptions:{profile:a.textured?'static-pbr-texture-v1':'static-core-pbr-v1'},
-    modelFacts:a.textured?texturedRustFacts:coreRustFacts,
-    ...(a.textured?{textureUploadBytes:64,textureUrls:{}}:{})})
+    decodeOptions:{profile:a.ktx2?'static-ktx2-texture-v1':a.textured?'static-pbr-texture-v1':'static-core-pbr-v1'},
+    modelFacts:a.ktx2?ktx2RustFacts:a.textured?texturedRustFacts:coreRustFacts,
+    ...(a.textured||a.ktx2?{textureUploadBytes:a.uploadBytes,textureUrls:{}}:{})})
    :({assetId:a.assetId,kind:a.kind,width:a.width,height:a.height,...(a.kind==='video'?actualVideo:{}),
     contentKey:hash(a.bytes),byteLength:a.bytes.length,url:'http://composition.test/'+a.file,decodeOptions:{colorSpace:a.kind==='font'?'none':'srgb',alphaMode:'straight'},adapterId:a.kind==='font'?'fontface-v1':a.kind==='video'?'video-element-v1':'image-element-v1',adapterVersion:1}));
   const setup=await page.evaluate(()=>{window.counts={contexts:0,loads:0};let original=HTMLCanvasElement.prototype.getContext;
@@ -263,6 +267,22 @@ const results=[];
   assert.match(missingUrl.error,/composition-model-texture-url-required/);
   assert.deepEqual(missingUrl.after.held,missingUrl.before.held);
   results.push({case:'textured model rejects missing upload bytes and unmapped external URIs without quota',missingUpload,missingUrl});
+  await select(ktx2Model);
+  const ktx2Pixels=await page.evaluate(()=>({red:pixel(36,23),green:pixel(46,23),live:ledger.snapshot().live,
+   models:host.stats().sceneStats.models}));
+  near(ktx2Pixels.red,[255,0,0]);near(ktx2Pixels.green,[0,255,0]);
+  assert.equal(ktx2Pixels.live.textureDeclaredBytes,16);assert.equal(ktx2Pixels.live.decodeReservedBytes,0);
+  assert.equal(ktx2Pixels.models,1);
+  results.push({case:'direct RGBA8 KTX2 baseColor renders through KTX2Loader raw path',ktx2Pixels});
+  const ktx2FormatRejection=await reject(ktx2Model,p=>{p.resolvedAssets.find(asset=>
+   asset.kind==='model'&&asset.assetId==='ktx2').modelFacts.images[0].vkFormat=0;});
+  assert.match(ktx2FormatRejection.error,/composition-model-preparation-required/);
+  assert.deepEqual(ktx2FormatRejection.after.held,ktx2FormatRejection.before.held);
+  const ktx2UploadRejection=await reject(ktx2Model,p=>{p.resolvedAssets.find(asset=>
+   asset.kind==='model'&&asset.assetId==='ktx2').textureUploadBytes=15;});
+  assert.match(ktx2UploadRejection.error,/composition-model-preparation-required/);
+  assert.deepEqual(ktx2UploadRejection.after.held,ktx2UploadRejection.before.held);
+  results.push({case:'KTX2 format and upload bytes fail closed without quota',ktx2FormatRejection,ktx2UploadRejection});
   await select(modelOverlay);near(await page.evaluate(()=>pixel(40,23)),[0,0,255]);
   results.push({case:'2D painter order composites over the 3D layer'});
   const orderRejection=await reject(modelBehind);assert.match(orderRejection.error,/cross-space-order/);

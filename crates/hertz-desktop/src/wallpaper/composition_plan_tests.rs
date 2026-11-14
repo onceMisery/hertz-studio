@@ -157,6 +157,123 @@ fn textured_model_glb(external: bool) -> Vec<u8> {
     bytes[head + 8..head + 8 + bin.len()].copy_from_slice(&bin);
     bytes
 }
+fn ktx2_rgba8() -> Vec<u8> {
+    const EDGE: usize = 2;
+    const LEVEL_BYTES: usize = EDGE * EDGE * 4;
+    let mut bytes = vec![0_u8; 196 + LEVEL_BYTES];
+    bytes[..12].copy_from_slice(&[
+        0xab, b'K', b'T', b'X', b' ', b'2', b'0', 0xbb, 13, 10, 26, 10,
+    ]);
+    for (offset, value) in [
+        (12, 43_u32),
+        (16, 1),
+        (20, EDGE as u32),
+        (24, EDGE as u32),
+        (36, 1),
+        (40, 1),
+        (48, 104),
+        (52, 92),
+        (104, 92),
+    ] {
+        bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    for (offset, value) in [
+        (80, 196_u64),
+        (88, LEVEL_BYTES as u64),
+        (96, LEVEL_BYTES as u64),
+    ] {
+        bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+    }
+    bytes[112..114].copy_from_slice(&2_u16.to_le_bytes());
+    bytes[114..116].copy_from_slice(&88_u16.to_le_bytes());
+    bytes[116..120].copy_from_slice(&[1, 1, 2, 0]);
+    bytes[124] = 4;
+    for (index, channel) in [0_u8, 1, 2, 15].into_iter().enumerate() {
+        let sample = 132 + index * 16;
+        bytes[sample..sample + 2].copy_from_slice(&((index as u16) * 8).to_le_bytes());
+        bytes[sample + 2] = 8;
+        bytes[sample + 3] = channel;
+        bytes[sample + 12..sample + 16].copy_from_slice(&0xff_u32.to_le_bytes());
+    }
+    bytes[196..].copy_from_slice(&[
+        255, 0, 0, 255, 0, 255, 0, 255, 255, 0, 0, 255, 0, 255, 0, 255,
+    ]);
+    bytes
+}
+fn ktx2_model_glb(external: bool) -> Vec<u8> {
+    let ktx2 = ktx2_rgba8();
+    let mut bin = vec![0_u8; if external { 104 } else { 104 + ktx2.len() }];
+    for (index, value) in [0.0_f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+        .iter()
+        .enumerate()
+    {
+        bin[index * 4..index * 4 + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    for (index, value) in [0.0_f32, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0]
+        .iter()
+        .enumerate()
+    {
+        bin[36 + index * 4..36 + index * 4 + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    for (index, value) in [0.0_f32, 0.0, 1.0, 0.0, 0.0, 1.0].iter().enumerate() {
+        bin[72 + index * 4..72 + index * 4 + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    for (index, value) in [0_u16, 1, 2].iter().enumerate() {
+        bin[96 + index * 2..96 + index * 2 + 2].copy_from_slice(&value.to_le_bytes());
+    }
+    if !external {
+        bin[104..].copy_from_slice(&ktx2);
+    }
+    let views = if external {
+        json!([{"buffer":0,"byteOffset":0,"byteLength":36},
+            {"buffer":0,"byteOffset":36,"byteLength":36},
+            {"buffer":0,"byteOffset":72,"byteLength":24},
+            {"buffer":0,"byteOffset":96,"byteLength":8}])
+    } else {
+        json!([{"buffer":0,"byteOffset":0,"byteLength":36},
+            {"buffer":0,"byteOffset":36,"byteLength":36},
+            {"buffer":0,"byteOffset":72,"byteLength":24},
+            {"buffer":0,"byteOffset":96,"byteLength":8},
+            {"buffer":0,"byteOffset":104,"byteLength":ktx2.len()}])
+    };
+    let document = json!({
+        "asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],"nodes":[{"mesh":0}],
+        "extensionsUsed":["KHR_texture_basisu"],"extensionsRequired":["KHR_texture_basisu"],
+        "meshes":[{"primitives":[{"attributes":{"POSITION":0,"NORMAL":1,"TEXCOORD_0":3},
+            "indices":2,"material":0}]}],
+        "buffers":[{"byteLength":bin.len()}],
+        "bufferViews":views,
+        "accessors":[
+            {"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[1,1,0]},
+            {"bufferView":1,"componentType":5126,"count":3,"type":"VEC3"},
+            {"bufferView":3,"componentType":5123,"count":3,"type":"SCALAR"},
+            {"bufferView":2,"componentType":5126,"count":3,"type":"VEC2"}],
+        "images":[if external {json!({"uri":"textures/red.ktx2","mimeType":"image/ktx2"})}
+            else {json!({"bufferView":4,"mimeType":"image/ktx2"})}],
+        "samplers":[{"magFilter":9728,"minFilter":9728,"wrapS":33071,"wrapT":33071}],
+        "textures":[{"sampler":0,"extensions":{"KHR_texture_basisu":{"source":0}}}],
+        "materials":[{"pbrMetallicRoughness":{"baseColorFactor":[1,1,1,1],
+            "baseColorTexture":{"index":0,"texCoord":0},"metallicFactor":0,"roughnessFactor":1},
+            "alphaMode":"OPAQUE"}]
+    });
+    let text = serde_json::to_vec(&document).unwrap();
+    let json_len = text.len().div_ceil(4) * 4;
+    let bin_len = bin.len().div_ceil(4) * 4;
+    let total = 12 + 8 + json_len + 8 + bin_len;
+    let mut bytes = vec![0_u8; total];
+    bytes[0..4].copy_from_slice(b"glTF");
+    bytes[4..8].copy_from_slice(&2_u32.to_le_bytes());
+    bytes[8..12].copy_from_slice(&(total as u32).to_le_bytes());
+    bytes[12..16].copy_from_slice(&(json_len as u32).to_le_bytes());
+    bytes[16..20].copy_from_slice(b"JSON");
+    bytes[20..20 + text.len()].copy_from_slice(&text);
+    bytes[20 + text.len()..20 + json_len].fill(0x20);
+    let head = 20 + json_len;
+    bytes[head..head + 4].copy_from_slice(&(bin_len as u32).to_le_bytes());
+    bytes[head + 4..head + 8].copy_from_slice(b"BIN\0");
+    bytes[head + 8..head + 8 + bin.len()].copy_from_slice(&bin);
+    bytes
+}
 fn rgba_png(width: u32, height: u32, pixel: impl Fn(u32, u32) -> [u8; 4]) -> Vec<u8> {
     let mut image = RgbaImage::new(width, height);
     for y in 0..height {
@@ -1207,7 +1324,7 @@ async fn native_model_textured_fixture_projects_texture_facts_and_uploads() {
     let (jobs, hash, _) = install_document(root.path(), entries, assets, json!([])).await;
     let plan = selected(jobs, hash, Default::default()).await.unwrap();
     let model = plan.assets["model"].as_model().unwrap();
-    assert_eq!(model.profile(), "static-pbr-texture-v1");
+    assert_eq!(model.facts()["profile"], "static-pbr-texture-v1");
     assert_eq!(model.texture_upload_bytes(), 32);
     let gl = plan
         .gl_plan(OwnerKind::Preview, "model-textured-owner".into(), 1, 60, 15)
@@ -1290,7 +1407,7 @@ async fn native_model_external_texture_pins_and_publishes_broker_url() {
     let (jobs, hash, _) = install_document(root.path(), entries, assets, json!([])).await;
     let plan = selected(jobs, hash, Default::default()).await.unwrap();
     let model = plan.assets["model"].as_model().unwrap();
-    assert_eq!(model.profile(), "static-pbr-texture-v1");
+    assert_eq!(model.facts()["profile"], "static-pbr-texture-v1");
     assert_eq!(model.texture_upload_bytes(), 32);
     assert!(model
         .texture_urls()
@@ -1367,6 +1484,141 @@ async fn native_model_external_texture_pins_and_publishes_broker_url() {
         )
         .unwrap();
     }
+}
+
+#[tokio::test]
+async fn native_model_ktx2_fixture_projects_container_facts_and_uploads() {
+    let root = tempfileish::temp_dir("composition-native-model-ktx2");
+    let glb = ktx2_model_glb(false);
+    let entries = vec![
+        (
+            "composition.json",
+            serde_json::to_vec(&document_model(json!([model_node("mesh", json!({}))]))).unwrap(),
+            "application/json",
+        ),
+        ("assets/model.glb", glb.clone(), "model/gltf-binary"),
+    ];
+    let assets = json!([{"id":"model","kind":"model","source":"assets/model.glb","variants":[]}]);
+    let (jobs, hash, _) = install_document(root.path(), entries, assets, json!([])).await;
+    let plan = selected(jobs, hash, Default::default()).await.unwrap();
+    let model = plan.assets["model"].as_model().unwrap();
+    assert_eq!(model.facts()["profile"], "static-ktx2-texture-v1");
+    assert_eq!(model.texture_upload_bytes(), 16);
+    let gl = plan
+        .gl_plan(OwnerKind::Preview, "model-ktx2-owner".into(), 1, 60, 15)
+        .unwrap();
+    let projection = plan
+        .projection("same-fixed-session-model-ktx2", 1, 13, &gl.limits)
+        .unwrap();
+    let asset = projection["resolvedAssets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|asset| asset["kind"] == "model")
+        .unwrap();
+    assert_eq!(asset["decodeOptions"]["profile"], "static-ktx2-texture-v1");
+    assert_eq!(asset["modelFacts"]["images"][0]["mime"], "image/ktx2");
+    assert_eq!(asset["modelFacts"]["images"][0]["vkFormat"], 43);
+    assert_eq!(asset["modelFacts"]["images"][0]["srgb"], true);
+    assert_eq!(asset["modelFacts"]["resources"]["imageUploadBytes"], 16);
+    assert_eq!(asset["textureUploadBytes"], 16);
+    assert_eq!(asset["textureUrls"], json!({}));
+    let page = &projection["pageLimits"];
+    assert_eq!(page["programs"], 3);
+    assert_eq!(page["bufferDeclaredBytes"], 194);
+    assert_eq!(page["textureDeclaredBytes"], 16 + 4096);
+    assert_eq!(page["renderTargetDeclaredBytes"], 64 * 64 * 20);
+    if let Some(output) = std::env::var_os("HERTZ_COMPOSITION_NATIVE_FIXTURE") {
+        let output = std::path::PathBuf::from(output).join("model-ktx2");
+        std::fs::create_dir_all(&output).unwrap();
+        std::fs::write(output.join("model.glb"), &glb).unwrap();
+        let model_url = model.url().to_owned();
+        let package_hash = model.reference().package_hash.clone();
+        std::fs::write(
+            output.join("files.json"),
+            serde_json::to_vec(&json!([{"url":model_url,"file":"model.glb"}])).unwrap(),
+        )
+        .unwrap();
+        let binding = super::super::page_events::PageBinding::new(1).unwrap();
+        let access = super::super::access::MediaAccess::new();
+        let mut admission =
+            super::super::gl_plan::GlAdmission::new(gl, Arc::new(BudgetCoordinator::new()))
+                .unwrap();
+        admission
+            .bind_composition(plan, &access, binding.session_id())
+            .unwrap();
+        let uri = admission.composition_url().unwrap();
+        let path = uri.split("/files/").nth(1).unwrap();
+        let reader = access.permit(&package_hash, path).unwrap();
+        std::fs::write(output.join("projection.json"), reader.payload().unwrap()).unwrap();
+        std::fs::write(output.join("uri.txt"), uri).unwrap();
+        std::fs::write(
+            output.join("native-init.js"),
+            format!(
+                "{}\n{}",
+                binding.initialization_script(),
+                admission.initialization_script()
+            ),
+        )
+        .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn native_model_external_ktx2_pins_and_publishes_broker_url() {
+    let root = tempfileish::temp_dir("composition-native-model-ktx2-external");
+    let glb = ktx2_model_glb(true);
+    let ktx2 = ktx2_rgba8();
+    let entries = vec![
+        (
+            "composition.json",
+            serde_json::to_vec(&document_model(json!([model_node("mesh", json!({}))]))).unwrap(),
+            "application/json",
+        ),
+        ("assets/model.glb", glb.clone(), "model/gltf-binary"),
+        ("assets/textures/red.ktx2", ktx2.clone(), "image/ktx2"),
+    ];
+    let assets = json!([
+        {"id":"model","kind":"model","source":"assets/model.glb","variants":[]},
+        {"id":"tex","kind":"texture","source":"assets/textures/red.ktx2","variants":[]}
+    ]);
+    let (jobs, hash, _) = install_document(root.path(), entries, assets, json!([])).await;
+    let plan = selected(jobs, hash, Default::default()).await.unwrap();
+    let model = plan.assets["model"].as_model().unwrap();
+    assert_eq!(model.facts()["profile"], "static-ktx2-texture-v1");
+    assert_eq!(model.texture_upload_bytes(), 16);
+    assert!(model
+        .texture_urls()
+        .get("textures/red.ktx2")
+        .is_some_and(|url| url.contains("/files/assets/textures/red.ktx2")));
+    assert!(plan
+        .pins()
+        .iter()
+        .any(|(_, pin)| pin.entry.path == "assets/textures/red.ktx2"));
+    let gl = plan
+        .gl_plan(
+            OwnerKind::Preview,
+            "model-ktx2-external-owner".into(),
+            1,
+            60,
+            15,
+        )
+        .unwrap();
+    let projection = plan
+        .projection("same-fixed-session-model-ktx2-external", 1, 14, &gl.limits)
+        .unwrap();
+    let asset = projection["resolvedAssets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|asset| asset["kind"] == "model")
+        .unwrap();
+    assert_eq!(asset["textureUploadBytes"], 16);
+    assert_eq!(asset["modelFacts"]["images"][0]["source"], "external");
+    assert_eq!(asset["modelFacts"]["images"][0]["uri"], "textures/red.ktx2");
+    assert_eq!(asset["modelFacts"]["images"][0]["vkFormat"], 43);
+    let texture_url = asset["textureUrls"]["textures/red.ktx2"].as_str().unwrap();
+    assert!(texture_url.contains("/files/assets/textures/red.ktx2"));
 }
 
 #[tokio::test]
