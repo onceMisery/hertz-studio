@@ -69,14 +69,24 @@ export function compilePlan(projection, registry = null, identity = null) {
   for (const [effectIndex, effect] of ir.effects.entries()) {
     const target = effect.target;
     if (effect.type === 'colorAdjust') {
-      if (target.kind !== 'output')
+      if (target.kind !== 'output' && target.kind !== 'node')
         throw new Error(`composition-adapter-unavailable:effect:${effect.type}:${target.kind}`);
       const properties = effect.properties || {};
       if (Object.keys(properties).length !== 4
         || !['brightness', 'contrast', 'saturation', 'hueDegrees'].every(name => Number.isFinite(properties[name])))
         throw new Error('composition-effect-properties-invalid');
-      outputEffects.push({ brightness: properties.brightness, contrast: properties.contrast,
-        saturation: properties.saturation, hueDegrees: properties.hueDegrees });
+      if (effect.assets && Object.keys(effect.assets).length) throw new Error('composition-effect-assets-invalid');
+      const grade = { brightness: properties.brightness, contrast: properties.contrast,
+        saturation: properties.saturation, hueDegrees: properties.hueDegrees };
+      if (target.kind === 'output') { outputEffects.push(grade); continue; }
+      const index = nodeIndices.get(target.nodeId);
+      if (index === undefined) throw new Error('composition-effect-target-invalid');
+      if (!['image', 'video', 'text', 'particles'].includes(ir.nodes[index].nodeType))
+        throw new Error(`composition-adapter-unavailable:effect-target:${ir.nodes[index].nodeType}`);
+      const effects = nodeEffects.get(index) || {};
+      if (effects.colorAdjust) throw new Error('composition-adapter-unavailable:effect-chain');
+      effects.colorAdjust = grade;
+      nodeEffects.set(index, effects);
       continue;
     }
     if (effect.type === 'glow') {

@@ -107,6 +107,11 @@ const glowOn=compile(spot(),undefined,[],undefined,undefined,glowEffect(1,16,.5)
 const glowOff=compile(spot(),undefined,[],undefined,undefined,glowEffect(0,16,.5));
 const glowTight=compile(spot(),undefined,[],undefined,undefined,glowEffect(1,0,.5));
 const glowHigh=compile(spot(),undefined,[],undefined,undefined,glowEffect(1,16,1));
+const nodeGrade=properties=>compile([image('graded','red',{width:32}),image('plain','green',{x:32,width:32})],
+ undefined,[],undefined,undefined,
+ [{id:'tone',type:'colorAdjust',stateVersion:1,target:{kind:'node',nodeId:'graded'},properties}]);
+const gradedGray=nodeGrade({brightness:0,contrast:1,saturation:0,hueDegrees:0});
+const gradedBright=nodeGrade({brightness:.2,contrast:1,saturation:1,hueDegrees:0});
 const dirtyFixture=compile([image('back','blue'),image('child','red',{width:16,height:16}),
  {id:'parent',type:'group',stateVersion:1,children:['child'],properties:{x:8,y:8,width:64,height:64,anchorX:0,anchorY:0}},
  image('unrelated','green',{x:48,y:48,width:16,height:16}),
@@ -298,6 +303,13 @@ const results=[];
   await select(glowHigh);const glowCut=await page.evaluate(()=>pixel(16,32));
   near(glowZero,[0,0,0]);near(glowSharp,[0,0,0]);near(glowCut,[0,0,0]);
   results.push({case:'output glow threshold/blur surfaces spread a bright spot, then honor strength, radius and threshold',base:spotBase,glow:glowPixels,zero:glowZero,sharp:glowSharp,cut:glowCut});
+  await select(gradedGray);
+  const gradeGray=await page.evaluate(()=>({graded:pixel(16,32),plain:pixel(48,32)}));
+  near(gradeGray.graded,[127,127,127]);near(gradeGray.plain,[0,255,0]);
+  await select(gradedBright);
+  const gradeBright=await page.evaluate(()=>pixel(16,32));
+  near(gradeBright,[255,124,124]);
+  results.push({case:'node colorAdjust grades only its target node',gray:gradeGray,bright:gradeBright});
   near(effectGray,[127,127,127]);near(effectBright,[255,124,124]);
   results.push({case:'compiler output colorAdjust saturation and brightness',effectGray,effectBright});
   await select(video);try{await page.waitForFunction(()=>host.frame({sceneTime:.1,paused:true,seek:true}),null,{timeout:8000});}
