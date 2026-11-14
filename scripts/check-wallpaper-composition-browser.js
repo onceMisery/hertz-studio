@@ -308,13 +308,16 @@ const results=[];
   results.push({case:'2D painter order composites over the 3D layer'});
   const orderRejection=await reject(modelBehind);assert.match(orderRejection.error,/cross-space-order/);
   assert.deepEqual(orderRejection.after.held,orderRejection.before.held);
-  const opacityRejection=await reject(modelOpacity);assert.match(opacityRejection.error,/3d-opacity/);
-  assert.deepEqual(opacityRejection.after.held,opacityRejection.before.held);
   const texturedRejection=await reject(model,p=>{p.resolvedAssets=p.resolvedAssets.map(asset=>
    asset.kind==='model'?{...asset,decodeOptions:{profile:'static-pbr-texture-v1'}}:asset);});
   assert.match(texturedRejection.error,/composition-model-preparation-required/);
   assert.deepEqual(texturedRejection.after.held,texturedRejection.before.held);
-  results.push({case:'cross-space order, model opacity and textured profiles fail closed without quota',orderRejection,opacityRejection,texturedRejection});
+  results.push({case:'cross-space order and textured profiles fail closed without quota',orderRejection,texturedRejection});
+  await select(modelOpacity);
+  const opacityPixels=await page.evaluate(()=>({inside:pixel(40,23),outside:pixel(16,48),
+   live:ledger.snapshot().live}));
+  near(opacityPixels.inside,[188,188,188]);near(opacityPixels.outside,[0,0,0]);
+  results.push({case:'3D model per-instance material opacity blends over the background',opacityPixels});
   await select(text);const textPixels=await page.evaluate(()=>({pixels:snapshot(),fonts:document.fonts.size}));assert.ok(textPixels.pixels.some((value,index)=>index%4!==3&&value>200));assert.equal(textPixels.fonts,1);results.push({case:'actual prepared FontFace and text pixels'});
   await select(particles);const first=await page.evaluate(()=>{host.frame({sceneTime:.5,paused:true});return snapshot();});
   await page.evaluate(()=>host.frame({sceneTime:1.4,paused:true}));const backwards=await page.evaluate(()=>{host.frame({sceneTime:.5,paused:true});return snapshot();});assert.deepEqual(backwards,first);assert.ok(first.some((value,index)=>index%4!==3&&value>0));results.push({case:'preallocated particles absolute phase and reverse seek'});

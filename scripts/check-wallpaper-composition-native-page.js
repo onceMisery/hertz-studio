@@ -524,7 +524,51 @@ if(diagnostic){
     assert.equal((await animatedPage.evaluate(()=>HertzGlBudget.stats())).contexts,0);
     await animatedPage.close();
   }
-  fs.writeFileSync(path.join(output,'native-page-evidence.json'),JSON.stringify({source:'actual Rust production selector + GlAdmission + original native page',qualification:'browser integration; copied scheduler metadata matches measured headless rAF; native resource caps unchanged; controlled visibility event/state; Windows/GPU qualification pending',cadence:{intervals:cadence,refreshHz,running:runningCadence},state,blockedBefore,blockedAfter,hiddenBefore,hiddenAfter,visibilityResumed,fits,glow,tracks,mask,model,texturedModel,externalTexture,ktx2Model,animatedModel,paused,retired,errors},null,2));
-  console.log('PASS native composition page: real Rust projection, one context, complete frame, pause and retirement'+(glow?', glow surfaces admitted':'')+(tracks?', tracks/bindings applied':'')+(mask?', mask texture applied':'')+(model?', scene3d model rendered':'')+(texturedModel?', textured model pixels':'')+(externalTexture?', external texture route':'')+(ktx2Model?', KTX2 model pixels':'')+(animatedModel?', animated clip pixels':''));
+  const opacityDir=path.join(output,'model-opacity');
+  let opacityModel=null;
+  if(fs.existsSync(path.join(opacityDir,'projection.json'))){
+    const opacityProjection=JSON.parse(fs.readFileSync(path.join(opacityDir,'projection.json'),'utf8'));
+    const opacityUri=fs.readFileSync(path.join(opacityDir,'uri.txt'),'utf8');
+    const opacityInit=bindCadence(fs.readFileSync(path.join(opacityDir,'native-init.js'),'utf8'));
+    const opacityFiles=JSON.parse(fs.readFileSync(path.join(opacityDir,'files.json'),'utf8'));
+    const opacityPage=await browser.newPage({viewport:{width:64,height:64}}),opacityErrors=[];
+    opacityPage.on('pageerror',error=>opacityErrors.push(error.message));
+    opacityPage.on('console',message=>{if(message.type()==='error'){opacityErrors.push(message.text());console.error('browser:',message.text());}});
+    await opacityPage.addInitScript(opacityInit+'\nwindow.nativeEvents=[];window.ipc={postMessage:message=>nativeEvents.push(message)};');
+    await opacityPage.route('https://**.wallpaper.invalid/**',route=>{
+      if(route.request().url()===opacityUri)return route.fulfill({status:200,contentType:'application/json',body:JSON.stringify(opacityProjection)});
+      const asset=opacityFiles.find(entry=>entry.url===route.request().url());
+      if(asset)return route.fulfill({status:200,contentType:'model/gltf-binary',body:fs.readFileSync(path.join(opacityDir,asset.file))});
+      return route.fulfill({status:404,body:''});
+    });
+    await opacityPage.route('http://hertz.localhost/',route=>route.fulfill({status:200,contentType:'text/html',body:html}));
+    await opacityPage.goto('http://hertz.localhost/');
+    assert.equal(await opacityPage.evaluate(async url=>{hertzWallpaper.applyConfig({source:'fixed',audioInput:{kind:'none'},motion:1,quality:'low'});
+      const prepared=hertzWallpaper.applyComposition(url);hertzWallpaper.start(15);return await prepared;},opacityUri),true);
+    await opacityPage.waitForFunction(()=>nativeEvents.some(event=>event.includes('firstFrame')),null,{timeout:10000}).catch(async failure=>{
+      throw new Error(failure.message+'\n'+JSON.stringify(await opacityPage.evaluate(()=>({events:nativeEvents,stats:hertzWallpaper.debug(),budget:HertzGlBudget.stats()}))));
+    });
+    await opacityPage.waitForFunction(()=>hertzWallpaper.debug().draws>=2,null,{timeout:10000});
+    const opacity=await opacityPage.evaluate(()=>{
+      const gl=document.querySelector('#host canvas').getContext('webgl2');
+      const sample=(x,y)=>{const pixel=new Uint8Array(4);gl.readPixels(x,y,1,1,gl.RGBA,gl.UNSIGNED_BYTE,pixel);return [...pixel];};
+      return {inside:sample(40,40),outside:sample(8,8),budget:HertzGlBudget.stats()};
+    });
+    assert(opacity.inside[0]>175&&opacity.inside[0]<200,'per-instance opacity blends the white triangle over black');
+    assert(opacity.inside[0]===opacity.inside[1]&&opacity.inside[1]===opacity.inside[2]);
+    assert(Math.max(...opacity.outside.slice(0,3))<=8);
+    assert.equal(opacity.budget.contexts,1);assert.equal(opacity.budget.error,null);assert.deepEqual(opacityErrors,[]);
+    assert.equal(opacityProjection.pageLimits.programs,3);
+    assert.equal(opacityProjection.pageLimits.bufferDeclaredBytes,170);
+    assert(opacityProjection.pageLimits.ownedCpuBytes>=1024);
+    opacityModel={pixels:{inside:opacity.inside,outside:opacity.outside},budget:opacity.budget};
+    await opacityPage.evaluate(()=>hertzWallpaper.reveal());
+    await opacityPage.screenshot({path:path.join(opacityDir,'native-page-model-opacity.png')});
+    await opacityPage.evaluate(()=>hertzWallpaper.unmount());await opacityPage.waitForTimeout(50);
+    assert.equal((await opacityPage.evaluate(()=>HertzGlBudget.stats())).contexts,0);
+    await opacityPage.close();
+  }
+  fs.writeFileSync(path.join(output,'native-page-evidence.json'),JSON.stringify({source:'actual Rust production selector + GlAdmission + original native page',qualification:'browser integration; copied scheduler metadata matches measured headless rAF; native resource caps unchanged; controlled visibility event/state; Windows/GPU qualification pending',cadence:{intervals:cadence,refreshHz,running:runningCadence},state,blockedBefore,blockedAfter,hiddenBefore,hiddenAfter,visibilityResumed,fits,glow,tracks,mask,model,texturedModel,externalTexture,ktx2Model,animatedModel,opacityModel,paused,retired,errors},null,2));
+  console.log('PASS native composition page: real Rust projection, one context, complete frame, pause and retirement'+(glow?', glow surfaces admitted':'')+(tracks?', tracks/bindings applied':'')+(mask?', mask texture applied':'')+(model?', scene3d model rendered':'')+(texturedModel?', textured model pixels':'')+(externalTexture?', external texture route':'')+(ktx2Model?', KTX2 model pixels':'')+(animatedModel?', animated clip pixels':'')+(opacityModel?', model opacity pixels':''));
  }finally{await browser.close();}
 })().catch(error=>{console.error(error.stack);process.exitCode=1;});

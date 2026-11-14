@@ -1775,6 +1775,83 @@ async fn native_model_animated_fixture_projects_clip_facts_and_costs() {
 }
 
 #[tokio::test]
+async fn native_model_opacity_projects_material_clone_budget() {
+    let root = tempfileish::temp_dir("composition-native-model-opacity");
+    let glb = model_glb();
+    let entries = vec![
+        (
+            "composition.json",
+            serde_json::to_vec(&document_model(json!([model_node(
+                "mesh",
+                json!({"opacity":0.5})
+            )])))
+            .unwrap(),
+            "application/json",
+        ),
+        ("assets/model.glb", glb.clone(), "model/gltf-binary"),
+    ];
+    let assets = json!([{"id":"model","kind":"model","source":"assets/model.glb","variants":[]}]);
+    let (jobs, hash, _) = install_document(root.path(), entries, assets, json!([])).await;
+    let plan = selected(jobs, hash, Default::default()).await.unwrap();
+    let gl = plan
+        .gl_plan(OwnerKind::Preview, "model-opacity-owner".into(), 1, 60, 15)
+        .unwrap();
+    let projection = plan
+        .projection("same-fixed-session-model-opacity", 1, 16, &gl.limits)
+        .unwrap();
+    let asset = projection["resolvedAssets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|asset| asset["kind"] == "model")
+        .unwrap();
+    assert_eq!(asset["decodeOptions"]["profile"], "static-core-pbr-v1");
+    let page = &projection["pageLimits"];
+    assert_eq!(page["programs"], 3);
+    assert_eq!(page["bufferDeclaredBytes"], 170);
+    assert_eq!(page["ownedCpuBytes"], 3112);
+    if let Some(output) = std::env::var_os("HERTZ_COMPOSITION_NATIVE_FIXTURE") {
+        let output = std::path::PathBuf::from(output).join("model-opacity");
+        std::fs::create_dir_all(&output).unwrap();
+        std::fs::write(output.join("model.glb"), &glb).unwrap();
+        let model_url = plan.assets["model"].as_model().unwrap().url().to_owned();
+        let package_hash = plan.assets["model"]
+            .as_model()
+            .unwrap()
+            .reference()
+            .package_hash
+            .clone();
+        std::fs::write(
+            output.join("files.json"),
+            serde_json::to_vec(&json!([{"url":model_url,"file":"model.glb"}])).unwrap(),
+        )
+        .unwrap();
+        let binding = super::super::page_events::PageBinding::new(1).unwrap();
+        let access = super::super::access::MediaAccess::new();
+        let mut admission =
+            super::super::gl_plan::GlAdmission::new(gl, Arc::new(BudgetCoordinator::new()))
+                .unwrap();
+        admission
+            .bind_composition(plan, &access, binding.session_id())
+            .unwrap();
+        let uri = admission.composition_url().unwrap();
+        let path = uri.split("/files/").nth(1).unwrap();
+        let reader = access.permit(&package_hash, path).unwrap();
+        std::fs::write(output.join("projection.json"), reader.payload().unwrap()).unwrap();
+        std::fs::write(output.join("uri.txt"), uri).unwrap();
+        std::fs::write(
+            output.join("native-init.js"),
+            format!(
+                "{}\n{}",
+                binding.initialization_script(),
+                admission.initialization_script()
+            ),
+        )
+        .unwrap();
+    }
+}
+
+#[tokio::test]
 async fn native_model_rejects_cross_space_order_opacity_and_animation() {
     let glb = model_glb();
     async fn attempt(name: &str, nodes: Value, glb: &[u8]) -> String {
@@ -1806,13 +1883,6 @@ async fn native_model_rejects_cross_space_order_opacity_and_animation() {
     )
     .await;
     assert_eq!(cross_order, "adapter_unavailable");
-    let opacity = attempt(
-        "composition-native-model-opacity",
-        json!([model_node("mesh", json!({"opacity":0.5}))]),
-        &glb,
-    )
-    .await;
-    assert_eq!(opacity, "adapter_unavailable");
     let animation = attempt(
         "composition-native-model-animation",
         json!([model_node("mesh", json!({"animationClip":"Walk"}))]),
