@@ -41,8 +41,8 @@ function rememberFontProjection(compiled,inputs,overrides={}){
   files:manifest.files.filter(entry=>entry.path!=='document.json').map(entry=>({path:entry.path,mime:entry.mime,
    source:path.join(output,entry.path.startsWith('assets/')?entry.path.slice(7):entry.path)}))});
 }
-function compile(nodes,canvas={width:64,height:64,colorSpace:'srgb',background:'#000000'},properties=[],timeline={durationSeconds:2,loop:true,tracks:[]}){
- const document={documentVersion:1,canvas,nodes,timeline,bindings:[]};
+function compile(nodes,canvas={width:64,height:64,colorSpace:'srgb',background:'#000000'},properties=[],timeline={durationSeconds:2,loop:true,tracks:[]},bindings=[]){
+ const document={documentVersion:1,canvas,nodes,timeline,bindings};
  const bytes=Buffer.from(JSON.stringify(document)), id=++number, documentPath=path.join(output,`document-${id}.json`), manifestPath=path.join(output,`manifest-${id}.json`);
  fs.writeFileSync(documentPath,bytes);
  fs.writeFileSync(manifestPath,JSON.stringify({formatVersion:1,workId:'8bc16f98-a0ef-4df9-a9a4-aecdb4c3f772',version:1,title:'Composition browser verification',
@@ -70,6 +70,13 @@ const timelineFixture=compile([image('back','blue')],undefined,[],{durationSecon
  {id:'fade',target:{nodeId:'back',property:'opacity',component:null},keys:[
   {timeSeconds:0,value:0.2,easing:'linear'},{timeSeconds:1,value:0.6,easing:'step'},
   {timeSeconds:2,value:1,easing:'linear'}]}]});
+const bindingFixture=compile([image('back','blue')],undefined,[
+ {id:'pulse-gain',label:'pulse-gain',type:'number',default:1,constraints:{min:0,max:4},
+  target:{kind:'binding',bindingId:'pulse',parameter:'gain'}}],
+ {durationSeconds:2,loop:true,tracks:[]},[
+ {id:'pulse',target:{nodeId:'back',property:'opacity',component:null},mode:'multiply',parameters:{gain:1},program:[
+  {op:'input',name:'sceneTime'},{op:'parameter',name:'gain'},{op:'mul'},
+  {op:'const',value:.5},{op:'add'},{op:'clamp',min:0,max:1}]}]);
 const dirtyFixture=compile([image('back','blue'),image('child','red',{width:16,height:16}),
  {id:'parent',type:'group',stateVersion:1,children:['child'],properties:{x:8,y:8,width:64,height:64,anchorX:0,anchorY:0}},
  image('unrelated','green',{x:48,y:48,width:16,height:16}),
@@ -182,12 +189,33 @@ const results=[];
   results.push({case:'compiler timeline tracks linear/step/loop/reverse seek',timeline0,timeline05,timeline15,timelineReverse,timelineLoop});
   const animationChecks=await page.evaluate(async()=>{const m=await import('/src/composition/animation.js');
    const keys=[{timeSeconds:0,value:.2,easing:'easeInOut'},{timeSeconds:1,value:.6,easing:'linear'}];
+   const mapProgram={program:[{opcode:2,index:0,operands:[.5,0,0,0]},{opcode:1,index:0,operands:[0,0,0,0]},
+     {opcode:4,index:0,operands:[0,0,0,0]},{opcode:9,index:0,operands:[0,2,10,20]}]};
+   const smoothProgram={program:[{opcode:2,index:0,operands:[.5,0,0,0]},{opcode:10,index:0,operands:[0,1,0,0]}]};
+   const trigProgram={program:[{opcode:2,index:0,operands:[-1,0,0,0]},{opcode:7,index:0,operands:[0,0,0,0]},
+     {opcode:5,index:0,operands:[0,0,0,0]},{opcode:6,index:0,operands:[0,0,0,0]}]};
    return {linear:m.evaluateTrack([{timeSeconds:0,value:.2,easing:'linear'},{timeSeconds:2,value:1,easing:'linear'}],.5),
     ease:m.evaluateTrack(keys,.25),step:m.evaluateTrack([{timeSeconds:0,value:.2,easing:'step'},{timeSeconds:1,value:1,easing:'linear'}],.5),
-    before:m.evaluateTrack(keys,-1),after:m.evaluateTrack(keys,3)};});
+    before:m.evaluateTrack(keys,-1),after:m.evaluateTrack(keys,3),
+    mapped:m.evaluateBinding({...mapProgram,maxStack:4},new Float64Array(0),[2],new Float64Array(5)),
+    smooth:m.evaluateBinding({...smoothProgram,maxStack:2},new Float64Array(0),[0],new Float64Array(3)),
+    trig:m.evaluateBinding({...trigProgram,maxStack:2},new Float64Array(0),[0],new Float64Array(3))};});
   assert.ok(Math.abs(animationChecks.linear-.4)<1e-12);
   assert.ok(Math.abs(animationChecks.ease-.2625)<1e-12);
   assert.equal(animationChecks.step,.2);assert.equal(animationChecks.before,.2);assert.equal(animationChecks.after,.6);
+  assert.ok(Math.abs(animationChecks.mapped-15)<1e-12);
+  assert.ok(Math.abs(animationChecks.smooth-.5)<1e-12);
+  assert.ok(Math.abs(animationChecks.trig-Math.cos(Math.sin(1)))<1e-12);
+  await select(bindingFixture);
+  await page.evaluate(()=>host.frame({sceneTime:.2,paused:true}));
+  const bindingLow=await page.evaluate(()=>pixel(20,20));
+  await page.evaluate(()=>host.frame({sceneTime:.6,paused:true}));
+  const bindingHigh=await page.evaluate(()=>pixel(20,20));
+  await select(publicValues(bindingFixture,{'pulse-gain':0}));
+  await page.evaluate(()=>host.frame({sceneTime:.2,paused:true}));
+  const bindingOverride=await page.evaluate(()=>pixel(20,20));
+  near(bindingLow,[0,0,218]);near(bindingHigh,[0,0,255]);near(bindingOverride,[0,0,188]);
+  results.push({case:'compiler binding stack input/parameter/mul/add/clamp/multiply and public gain override',bindingLow,bindingHigh,bindingOverride});
   await select(video);try{await page.waitForFunction(()=>host.frame({sceneTime:.1,paused:true,seek:true}),null,{timeout:8000});}
   catch(error){console.error(JSON.stringify(await page.evaluate(()=>host.stats())));throw error;}
   const videoStats=await page.evaluate(()=>({stats:host.stats(),ledger:ledger.snapshot(),fonts:document.fonts.size,pixels:snapshot()}));assert.equal(videoStats.ledger.held.decoderLeases,1);assert.equal(videoStats.fonts,0);assert.ok(videoStats.pixels.some((value,index)=>index%4!==3&&value>0));results.push({case:'actual silent video texture, seek completion and obsolete font exit',videoStats});
