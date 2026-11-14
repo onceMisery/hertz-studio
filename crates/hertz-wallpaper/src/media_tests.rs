@@ -183,6 +183,7 @@ fn mp4_cfr_reports_source_fps_and_dimensions() {
     assert_eq!(probe.container, Container::Mp4);
     assert_eq!(probe.codec, "avc1");
     assert_eq!(probe.profile.as_deref(), Some("profile-100-level-40"));
+    assert_eq!(probe.codec_string.as_deref(), Some("avc1.640028"));
     assert_eq!(probe.encoded_width, 1920);
     assert_eq!(probe.encoded_height, 1080);
     assert_eq!(probe.display_width, 1920);
@@ -347,6 +348,7 @@ fn webm_reports_codec_dimensions_and_vfr_upper_bound() {
     let probe = probe(&mut cursor(&bytes)).unwrap();
     assert_eq!(probe.container, Container::Webm);
     assert_eq!(probe.codec, "V_VP9");
+    assert_eq!(probe.codec_string.as_deref(), Some("vp9"));
     assert_eq!(probe.encoded_width, 1920);
     assert_eq!(probe.encoded_height, 1080);
     assert_eq!(probe.duration_ms, Some(4000));

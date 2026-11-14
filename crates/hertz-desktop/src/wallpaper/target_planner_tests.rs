@@ -19,6 +19,7 @@ fn metadata(width: u32, height: u32) -> MediaProbe {
         container: Container::Image,
         codec: "png".into(),
         profile: None,
+        codec_string: None,
         encoded_width: width,
         encoded_height: height,
         display_width: width,

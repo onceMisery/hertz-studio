@@ -93,11 +93,16 @@
     active.cancelled = true;
     if (active.importId) await command('import.cancel', { importId: active.importId });
   }
-  function mseType(mime, codec) {
-    if (mime !== 'video/webm') return null;
-    var value = String(codec || '').toLowerCase();
-    if (value === 'v_vp8') return 'video/webm; codecs="vp8"';
-    if (value === 'v_vp9') return 'video/webm; codecs="vp9"';
+  function mseType(mime, codec, codecString) {
+    var value = String(codecString || '').toLowerCase();
+    if (mime === 'video/webm') {
+      if (value === 'vp8' || value === 'vp9') return 'video/webm; codecs="' + value + '"';
+      var raw = String(codec || '').toLowerCase();
+      if (raw === 'v_vp8') return 'video/webm; codecs="vp8"';
+      if (raw === 'v_vp9') return 'video/webm; codecs="vp9"';
+      return null;
+    }
+    if (mime === 'video/mp4' && /^avc1\.[0-9a-f]{6}$/.test(value)) return 'video/mp4; codecs="' + codecString + '"';
     return null;
   }
   async function acquire(spec, options) {
@@ -211,7 +216,7 @@
         if (reply.media === 'video') {
           if (!Number.isSafeInteger(reply.length) || reply.length <= 0 || reply.length > 512 * 1024 * 1024)
             throw new Error('无效视频长度');
-          var type = mseType(reply.mime, reply.codec);
+          var type = mseType(reply.mime, reply.codec, reply.codecString);
           if (!type || typeof MediaSource === 'undefined' || !MediaSource.isTypeSupported(type))
             throw new Error('当前 DBX 宿主尚不支持该视频编码的流播放');
           mediaSource = new MediaSource();

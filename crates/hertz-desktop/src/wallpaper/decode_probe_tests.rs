@@ -561,6 +561,7 @@ fn metadata() -> MediaProbe {
         container: Container::Webm,
         codec: "vp8".into(),
         profile: None,
+        codec_string: Some("vp8".into()),
         encoded_width: 1920,
         encoded_height: 1080,
         display_width: 1920,

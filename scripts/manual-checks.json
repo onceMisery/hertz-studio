@@ -932,7 +932,7 @@
     },
     {
       "script": "check-stage-media-dbx-video-browser.js",
-      "purpose": "Real Chrome MediaSource: DBX stage video lease chunks (1000B short reads) feed an MSE SourceBuffer and decode the VP8 WebM fixture (64x48, 2s); exact sequential offsets, no reads after release, unsupported codec releases the lease. Uses a fake transport and local fixture; no service, DBX host or native host is involved. Real DBX/device acceptance remains separate."
+      "purpose": "Real Chrome MediaSource: DBX stage video lease chunks (1000B short reads) feed an MSE SourceBuffer; the VP8 WebM fixture decodes (64x48, 2s) and a locally recorded MP4/H.264 stream whose avcC codec string is derived from its bytes also decodes (320x240), with exact sequential offsets, no reads after release and unsupported-codec lease release. Uses a fake transport and local media; no service, DBX host or native host is involved. Real DBX/device acceptance remains separate."
     }
   ],
   "retiredLayouts": [
