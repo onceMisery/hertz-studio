@@ -42,7 +42,7 @@
 | `POST /v1/stage/media/import/chunk` | 二进制块；查询参数为 importId、uploadToken、offset、hash |
 | `GET / HEAD /v1/stage/media/resource/<lease>` | 仅凭素材专用随机短期租约，支持单 Range、准确长度和 MIME；64 KiB 块流式读取，不压缩、不输出管理 token 或系统路径 |
 
-除资源读取外，入口均在原完整管理认证后。DBX 沿既有方法路径/信封映射相同操作，上传先检查 base64 长度再解码。DBX 图片每次读取最多 256 KiB，完整准备图最多 32 MiB，组装一个受管 Blob URL。DBX 视频直接拒绝获取租约，不以宿主旧 `mediaUrl` 标志、整段 base64、整视频 Blob 或新 listener 代替流协议；已导入视频仍保存在库中，可在独立版使用。
+除资源读取外，入口均在原完整管理认证后。DBX 沿既有方法路径/信封映射相同操作，上传先检查 base64 长度再解码。DBX 图片每次读取最多 256 KiB，完整准备图最多 32 MiB，组装一个受管 Blob URL。DBX 视频现在返回无 URL 租约，`lease.read` 以同样的 ≤256 KiB 块读取原文件；客户端只对 WebM VP8/VP9 建立 MediaSource，按块 append 并即时释放块副本，不再组装整视频 Blob。MP4 或未知编码在客户端明确拒绝并在失败路径释放租约；真实 DBX 宿主与设备解码资格仍属独立验收。
 
 ## 验证证据与边界
 
@@ -69,3 +69,17 @@
 - 当前源码 `node scripts/check-frontend.js` **72 步通过**，`cargo test -p hertz-studio stage_media --lib` **6 项通过**；独立服务与 DBX 插件重新构建通过。本次没有改动原生存储/容器算法，前节 82 项存储与解析结果仍属于首轮证据。
 
 真实硬件解码、整机峰值与 8 小时稳定性、实际安装 DBX 的人工旅程及 DBX 视频流依赖仍未取得新增资格证据。本次结果不表示已发布安装包，也不宣称 §8.5 全部性能和宿主出口完成。
+
+## 2026-11-14 DBX 有界视频流
+
+宿主 `StageMediaStore` 不再拒绝 DBX 视频租约：`lease.acquire` 对图片/视频返回同一租约形状（`url: null`、`media`、`mime`、`codec`、`length`、`chunkBytes`）；`lease.read` 统一为 `read_chunk`，每块 ≤256 KiB，按 offset 读取原文件，不组装整段视频。图片仍走完整准备图 + Blob URL；视频仅返回元数据，客户端按 `codec` 选择 MSE 类型。
+
+客户端 `stage-media.js` 对 DBX 视频创建 MediaSource，按 `lease.read` 顺序拉取 256 KiB 块并等待 `updateend` 后再取下一块，结束时 `endOfStream`；只保留单块 base64/typed 副本（资源账本固定 `CHUNK*8` 上界），释放会 abort/remove SourceBuffer、撤销 URL 并释放租约。当前只映射 WebM `V_VP8`/`V_VP9` 到 MSE；MP4/AV1 等编码在客户端明确拒绝并释放租约，等待后续 codec 字符串与设备资格。
+
+新增验证：
+
+- `cargo test -p hertz-studio stage_media --lib`：视频 DBX acquire 成功、`codec=V_VP8`、首块内容与 fixture 字节一致、越界/零块拒绝、释放后 `stage_lease_expired`；图片/取消路径保持。
+- `node scripts/check-stage-media-dbx-video-browser.js`：真实 Chrome MediaSource，4165B VP8 WebM 按 1000B 短读分 5 块喂入，解码为 64×48、2.00s；读 offset 严格 0/1000/2000/3000/4000，释放后无新读；MP4 编码被拒绝且租约释放。
+- `node scripts/check-stage-media.js` 原有独立版路径与租约时钟继续通过；`node scripts/check-frontend.js` 86 步通过。
+
+上述证据不包含真实 DBX 宿主、真实设备/硬件解码或安装包人工旅程；DBX 视频流仍未取得宿主发布资格。

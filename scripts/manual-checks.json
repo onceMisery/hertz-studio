@@ -929,6 +929,10 @@
     {
       "script": "check-recovery-hotkey-native.js",
       "purpose": "隔离原生宿主的快捷键验收：真实注册占用、注入按键与定向消息到解锁定位、退出释放、重启持久与启动冲突。需要 Windows WebView2 与已构建的原生二进制。"
+    },
+    {
+      "script": "check-stage-media-dbx-video-browser.js",
+      "purpose": "Real Chrome MediaSource: DBX stage video lease chunks (1000B short reads) feed an MSE SourceBuffer and decode the VP8 WebM fixture (64x48, 2s); exact sequential offsets, no reads after release, unsupported codec releases the lease. Uses a fake transport and local fixture; no service, DBX host or native host is involved. Real DBX/device acceptance remains separate."
     }
   ],
   "retiredLayouts": [

@@ -148,7 +148,7 @@ pub(crate) async fn rpc(
                     lease,
                     offset,
                     count,
-                } => owner.read_image(&lease, offset, count).await,
+                } => owner.read_chunk(&lease, offset, count).await,
                 Command::Delete { asset } => owner.delete(&asset).await,
             }
         }
