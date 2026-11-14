@@ -1186,3 +1186,29 @@ decode=0。负例：缺失 `textureUploadBytes` → preparation-required；facts
 仍未闭合：KTX2/Basis 转码与 GPU 格式、外部纹理真实 broker/CSP、GLB 动画、
 逐实例材质透明度、多材质 program 精确计数，以及原生 scene3d/model 资源准入、
 GPU 设备矩阵与 A01/A05–A10 外部验收。
+
+2026-11-14 r74 原生 static-core facts 续接：`hertz-wallpaper` 新增
+`model_profile::static_core_profile_facts(&GlbResource, encodedBytes)`，把已
+检查的 GLB 结构转换为 shipped `static-core-pbr-v1` 运行时 facts：input 三长度、
+declared 计数、可达 scene nodes/transform、object/allocated 计数、used
+accessor/view 布局、geometry key、gpu/cpu 字节与固定材质计数。该函数对
+images/materials/textures/samplers/animations/skins/cameras/morph、非
+TRIANGLES、非默认材质、非 packed、非 FLOAT VEC3 / 无符号 SCALAR 全部返回
+`model_profile_unavailable`；bufferView byteOffset 转为相对 BIN 起点。
+
+新增 example `export_model_profile_facts <glb> <manifest> <path>`，复用
+`inspect_glb_resource_content` 的完整 SHA/数值检查后输出 facts JSON。组合浏览器
+测试不再使用 JS oracle：mesh.glb 的 `modelFacts` 直接取 Rust 导出结果，再交给
+真实 Three GLTFLoader 的 `parseStaticModel` 严格比较与渲染。47 项检查（含真实
+三角形像素、平移、2D 覆盖、textured 纹理像素）连续通过，证明 Rust facts 与
+loader 实际事实逐字段一致。
+
+验证：新增 2 项 lib 测试（facts 形状/字节与材质拒绝）；两工具链
+`hertz-wallpaper` 60/60、`hertz-desktop` 855 passed / 0 failed / 2 ignored；
+两工具链 clippy `--all-targets -D warnings` 与 fmt 通过；组合检查 47 项连续
+3 次通过、前端聚合 86 步通过。三处变异（bufferView 用绝对偏移、材质分配数
+1、objectCount 少算根节点）均使 GLTFLoader facts 比较变红后还原。
+
+仍未闭合：把该 facts 接入桌面 `composition_plan.rs` 的 model 资源准备
+（GLB pin/读取、URL 与纹理闭包、成本/pageLimits）与 scene3d 准入、原生页面
+像素；KTX2、GLB 动画、GPU 设备矩阵与 A01/A05–A10 外部验收继续开放。

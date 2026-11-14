@@ -36,34 +36,7 @@ function coreGlb() {
   return { glb, input: { encodedBytes, jsonBytes, binBytes } };
 }
 
-function coreModelFacts(input) {
-  const key = '2:NORMAL:1;POSITION:0;:undefined';
-  return {
-    profile: 'static-core-pbr-v1', loaderVersion: 'three-0.186.0-gltfloader', input,
-    declared: { nodes: 1, meshes: 1, primitives: 1, accessors: 3, bufferViews: 3 },
-    scene: {
-      index: 0, roots: [0],
-      nodes: [{ index: 0, parentIndex: null, meshIndex: 0, children: [],
-        transform: { kind: 'trs', translation: [0, 0, 0], rotation: [0, 0, 0, 1], scale: [1, 1, 1] } }],
-      maxDepth: 1, objectCount: 2, allocatedObjectCount: 2, drawCalls: 1, triangles: 1
-    },
-    resources: {
-      geometries: [{ key, positionAccessor: 0, normalAccessor: 1, indexAccessor: 2, mode: null, triangles: 1,
-        positionMin: [0, 0, 0], positionMax: [1, 1, 0] }],
-      accessors: [
-        { index: 0, viewIndex: 0, componentType: 5126, type: 'VEC3', count: 3, byteOffset: 0, byteLength: 36 },
-        { index: 1, viewIndex: 1, componentType: 5126, type: 'VEC3', count: 3, byteOffset: 0, byteLength: 36 },
-        { index: 2, viewIndex: 2, componentType: 5123, type: 'SCALAR', count: 3, byteOffset: 0, byteLength: 6 }
-      ],
-      bufferViews: [{ index: 0, byteOffset: 0, byteLength: 36 }, { index: 1, byteOffset: 36, byteLength: 36 },
-        { index: 2, byteOffset: 72, byteLength: 8 }],
-      geometryCount: 1, attributeCount: 3, backingCount: 3, gpuBufferBytes: 78, cpuBackingBytes: 80,
-      allocatedMaterialCount: 2, retainedMaterialCount: 1
-    }
-  };
-}
-
-module.exports = { coreGlb, coreModelFacts, texturedGlb, texturedModelFacts };
+module.exports = { coreGlb, texturedGlb, texturedModelFacts };
 
 function crc32(bytes) {
   let value = -1;

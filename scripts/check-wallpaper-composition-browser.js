@@ -4,7 +4,7 @@
 const assert=require('node:assert/strict'), fs=require('node:fs'), path=require('node:path');
 const {execFileSync}=require('node:child_process'), {createHash}=require('node:crypto'), zlib=require('node:zlib');
 const {loadCompositionFontFixture}=require('./composition-font-fixture.js');
-const {coreGlb,coreModelFacts,texturedGlb,texturedModelFacts}=require('./composition-model-fixture.js');
+const {coreGlb,texturedGlb,texturedModelFacts}=require('./composition-model-fixture.js');
 const {chromium}=require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const root=path.resolve(__dirname,'..'), output=path.join(root,'output/a04-p2-20261108/composition-browser');
 const fontFixture=loadCompositionFontFixture(), modelFixture=coreGlb(), texturedFixture=texturedGlb();
@@ -33,10 +33,11 @@ const sourceAssets=[
 for(const a of sourceAssets)fs.writeFileSync(path.join(output,a.file),a.bytes);
 for(const file of fontFixture.packageFiles){fs.mkdirSync(path.dirname(path.join(output,file.file)),{recursive:true});fs.writeFileSync(path.join(output,file.file),file.bytes);}
 const compilerTarget=process.env.HERTZ_COMPOSITION_COMPILER_TARGET_DIR?path.resolve(process.env.HERTZ_COMPOSITION_COMPILER_TARGET_DIR):path.join(root,'target');
-const compilerArgs=['build','-p','hertz-wallpaper','--example','export_composition_ir'];
+const compilerArgs=['build','-p','hertz-wallpaper','--example','export_composition_ir','--example','export_model_profile_facts'];
 if(process.env.HERTZ_COMPOSITION_COMPILER_TARGET_DIR)compilerArgs.push('--target-dir',compilerTarget);
 execFileSync('cargo',compilerArgs,{cwd:root,stdio:'inherit'});
 const executable=path.join(compilerTarget,'debug/examples/export_composition_ir'+(process.platform==='win32'?'.exe':''));
+const factsExecutable=path.join(compilerTarget,'debug/examples/export_model_profile_facts'+(process.platform==='win32'?'.exe':''));
 let number=0;const compilerInputs=new WeakMap(),nativeFontRequests=[];
 const fontProjectionKey=compiled=>hash(Buffer.from(JSON.stringify([compiled.ir.semanticKey,compiled.finalPublicValues])));
 function rememberFontProjection(compiled,inputs,overrides={}){
@@ -74,6 +75,7 @@ const modelCanvas={width:64,height:64,colorSpace:'srgb',background:'#000000',
 const modelNode=(id='mesh',properties={},asset='mesh')=>({id,type:'model',stateVersion:1,assets:{asset},
  properties:{position:[0,0,0],rotation:[0,0,0],scale:[1,1,1],...properties}});
 const model=compile([modelNode()],modelCanvas);
+const coreRustFacts=JSON.parse(execFileSync(factsExecutable,[path.join(output,'mesh.glb'),compilerInputs.get(model)[0],'assets/mesh.glb'],{cwd:root,encoding:'utf8'}));
 const texturedModel=compile([modelNode('mesh',{},'textured')],modelCanvas);
 const movedModel=compile([modelNode('mesh',{position:[.5,.5,0]})],modelCanvas);
 const modelOverlay=compile([modelNode(),image('back','blue')],modelCanvas);
@@ -195,7 +197,7 @@ const results=[];
    :a.kind==='model'?({assetId:a.assetId,kind:'model',contentKey:hash(a.bytes),byteLength:a.bytes.length,
     url:'http://composition.test/'+a.file,adapterId:'three-gltf-loader',adapterVersion:1,
     decodeOptions:{profile:a.textured?'static-pbr-texture-v1':'static-core-pbr-v1'},
-    modelFacts:a.textured?texturedModelFacts(a.modelInput,a.imageBytes):coreModelFacts(a.modelInput),
+    modelFacts:a.textured?texturedModelFacts(a.modelInput,a.imageBytes):coreRustFacts,
     ...(a.textured?{textureUploadBytes:64,textureUrls:{}}:{})})
    :({assetId:a.assetId,kind:a.kind,width:a.width,height:a.height,...(a.kind==='video'?actualVideo:{}),
     contentKey:hash(a.bytes),byteLength:a.bytes.length,url:'http://composition.test/'+a.file,decodeOptions:{colorSpace:a.kind==='font'?'none':'srgb',alphaMode:'straight'},adapterId:a.kind==='font'?'fontface-v1':a.kind==='video'?'video-element-v1':'image-element-v1',adapterVersion:1}));
