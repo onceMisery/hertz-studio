@@ -1623,6 +1623,61 @@ fn resolve_texture_response_distinguishes_not_found_from_unavailable() {
 }
 
 #[test]
+fn texture_url_binds_unique_image_indices_to_canonical_broker_urls() {
+    let fixture =
+        installed_full_model_fixture_with_texture("model-input-texture-url", false, &[1, 2, 3, 4]);
+    let probe = model_source_test_probe();
+    let preparation = probe.prepare_for_job("texture-url".into(), 103).unwrap();
+    let input = fixture
+        .store
+        .prepare_canonical_model_input(
+            &fixture.reference,
+            &probe,
+            &preparation,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+    let hash = input.reference().package_hash.clone();
+    let url = |path: &str| {
+        format!(
+            "https://{}.{}.wallpaper.invalid/files/{path}",
+            &hash[..32],
+            &hash[32..]
+        )
+    };
+    let resources = input.texture_resources();
+    assert_eq!(
+        resources.url(0).as_deref(),
+        Some(url("models/a/tex.png").as_str())
+    );
+    assert_eq!(
+        resources.url(1),
+        None,
+        "aliased image is not a unique record"
+    );
+    assert_eq!(
+        resources.url(2).as_deref(),
+        Some(url("models/a/other.png").as_str())
+    );
+    assert_eq!(resources.url(3), None, "embedded image has no broker URL");
+    assert_eq!(resources.url(4), None);
+    let (mut session, generation) = attaching_session(&input);
+    assert_eq!(
+        session.texture_url(generation, 0).as_deref(),
+        Some(url("models/a/tex.png").as_str())
+    );
+    assert_eq!(
+        session.texture_url(generation, 2).as_deref(),
+        Some(url("models/a/other.png").as_str())
+    );
+    assert_eq!(session.texture_url(generation + 1, 0), None);
+    assert!(session.fail(generation, "test_failure", "failure", true));
+    assert_eq!(session.texture_url(generation, 0), None);
+    drop(input);
+    preparation.finish();
+}
+
+#[test]
 fn published_texture_keys_reach_the_existing_pinned_media_path() {
     let fixture = installed_full_model_fixture("model-input-texture-pinned", false);
     let probe = model_source_test_probe();

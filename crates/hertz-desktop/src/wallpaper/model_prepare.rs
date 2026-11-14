@@ -229,6 +229,20 @@ impl ModelTextureResources<'_> {
             })
     }
 
+    /// Canonical broker URL for one live Package image index. Embedded images
+    /// and unknown indices yield None; the URL is built from the input's pinned
+    /// package hash and the exact installed entry path.
+    pub(crate) fn url(&self, image_index: usize) -> Option<String> {
+        let resources = self.input.inner().resources.as_ref()?;
+        let entries = resources.source.entries();
+        let view = resources
+            .textures
+            .unique_textures()
+            .find(|view| view.image_index as usize == image_index)?;
+        let entry = entries.get(view.entry_index as usize)?;
+        super::webresource::files_url(&self.input.reference().package_hash, &entry.path)
+    }
+
     /// Exact package-relative path match against the unique closure entries.
     /// Any suffix, `..`, query, case fold or model-relative alias is not found.
     pub(crate) fn authorize(&self, path: &str) -> Option<TextureResource<'_>> {
@@ -317,6 +331,14 @@ impl ModelTexturePlan {
             image_index: resource.image_index(),
             bytes: resource.bytes(),
         })
+    }
+
+    /// Canonical URL for one image index while this plan is active.
+    pub(crate) fn texture_url(&self, image_index: usize) -> Option<String> {
+        if !self.active.load(Ordering::Acquire) {
+            return None;
+        }
+        self.input.texture_resources().url(image_index)
     }
 
     pub(crate) fn revoke(&self) {
@@ -452,6 +474,15 @@ impl ModelTextureController {
             count += 1;
         }
         count
+    }
+
+    /// Canonical URL for one image index under the current active plan.
+    pub(crate) fn texture_url(&self, image_index: usize) -> Option<String> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+            .and_then(|plan| plan.texture_url(image_index))
     }
 
     /// Chunked loader reader over the current plan. Unknown paths and revoked

@@ -887,3 +887,19 @@ SGD 长度 55、endpoints 字节数 12、endpoint count 0、rgb slice 9 > level 
 均 `invalid_texture_container`。三处变异（跳过 SGD 校验、跳过总长校验、
 跳过 slice bounds）均按预期变红后还原。本批不做 ETC1S 解码、GPU 格式选择、
 转码 worker 或 GPU 上传/首帧；UASTC 仍只做容器/DFD 结构校验。
+
+2026-11-14 r54 纹理 URL 绑定续接：`ModelTextureResources::url(image_index)`
+在唯一 closure 记录中按 image index 查找，用已安装 entry path 与 input 的
+package hash 调用既有 `webresource::files_url`，产出
+`https://<hash前32>.<hash后32>.wallpaper.invalid/files/<path>`；
+`ModelTexturePlan::texture_url` 要求 plan 仍 active，
+`ModelTextureController::texture_url` 锁内委托，
+`WallpaperSession::texture_url(generation, image_index)` 先要求 generation
+等于当前代际，stale/撤销后一律 None。未新增 File 所有者或响应路径。
+
+真实 fixture 证据：index 0/2 精确得到 tex.png/other.png URL；index 1 是同路径
+别名的非唯一记录、index 3 是 Embedded、index 4 未知，三者均 None；stale
+generation None；fail 撤销后 None。三处变异（url 恒 None、session 忽略
+generation、URL 只返回 path）均按预期变红后还原。本批不发起浏览器请求、不接
+WebView2、不创建 decoder/renderer/GPU；URL 是可服务性绑定，不是实际 HTTP
+响应或 GPU 首帧证据。
