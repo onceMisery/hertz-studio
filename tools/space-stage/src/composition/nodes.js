@@ -248,13 +248,15 @@ export function buildNode(THREE, context, scope, spec, assets, generation) {
     const instance = resource.instantiate(), object = new THREE.Group();
     object.add(instance.root);
     const materials = new Set();
+    const profile = spec.resources.asset?.decodeOptions?.profile;
     object.traverse(child => {
       if (!child.isMesh) return;
       child.frustumCulled = false;
       // The core profile has no authored material. The composition's fixed
       // ambient/directional rig cannot light a fully metallic default, so this
-      // untextured slice uses the dielectric response.
-      if (child.material?.isMeshStandardMaterial) child.material.metalness = 0;
+      // untextured slice uses the dielectric response. Textured materials keep
+      // their authored PBR factors.
+      if (profile === 'static-core-pbr-v1' && child.material?.isMeshStandardMaterial) child.material.metalness = 0;
       if (child.material) materials.add(child.material);
     });
     scope.defer(() => instance.release());

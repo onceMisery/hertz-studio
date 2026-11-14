@@ -84,7 +84,11 @@ function reserveAll(context, scope, plan, generation) {
       if (requirement.kind === 'font') admissions={cpu:require({ownedCpuBytes:requirement.fontMetadata.cpuBudgetBytes},'Composition prepared same-package font')};
       else if (requirement.kind === 'model') {
         const spec = plan.nodePlans.find(item => item.resources.asset === requirement);
+        const textured = requirement.modelFacts.profile === 'static-pbr-texture-v1';
         admissions={cpu:require({ownedCpuBytes:modelConstructionBytes(requirement.modelFacts)},'Composition static model construction'),
+          ...(textured ? {
+            decode:require({decodeReservedBytes:requirement.textureUploadBytes},'Composition model texture decode window'),
+            upload:require({textureDeclaredBytes:requirement.textureUploadBytes},'Composition model texture upload')} : {}),
           bufferPlan:spec.bufferPlan};
       } else {
         const bytes=requirement.width*requirement.height*4;
@@ -143,10 +147,9 @@ export async function createCompositionRuntime(THREE, context, scope, plan, opti
     modelCamera.position.fromArray(plan.camera.position);
     modelCamera.lookAt(new THREE.Vector3().fromArray(plan.camera.target));
     modelCamera.updateMatrixWorld(true);
+    // Ambient-only avoids an unquantified directional specular addition on
+    // authored PBR textures; the compiler does not publish a light rig yet.
     modelScene.add(new THREE.AmbientLight(0xffffff, Math.PI));
-    const sun = new THREE.DirectionalLight(0xffffff, 1);
-    sun.position.fromArray(plan.camera.position);
-    modelScene.add(sun);
   }
   const allocation = reserveAll(context,scope,plan,generation);
   let background = null, inputSampler = null;
@@ -410,18 +413,25 @@ export async function createCompositionRuntime(THREE, context, scope, plan, opti
     const newScopes=new Map(), sourceTickets=new Map(), unclaimedSources=new Set(), unusedPrivate=new Set(), programTickets=[];
     const reserved=[];const require=(amount,label)=>{const ticket=context.pagePort.require(amount,label,generation,'bounded-estimate');reserved.push(ticket);return ticket;};
     const amount={programs:0,ownedCpuBytes:0,bufferDeclaredBytes:0,textureDeclaredBytes:0,decodeReservedBytes:0,decoderLeases:0,canvases:0,drawingBufferPixels:0};
-    const variants=new Set();
+    const variants=new Set();let modelPrograms=0;
     for(const index of changes.rebuilds){const spec=next.nodePlans[index];
-      if(spec.node.nodeType==='model'){variants.add('model');continue;}
+      if(spec.node.nodeType==='model'){
+        modelPrograms+=Math.max(1,spec.resources.asset.modelFacts.materials?.length||1);
+        variants.add('model');continue;
+      }
       const bytes=spec.node.nodeType==='particles'?spec.count*20:92;
       amount.ownedCpuBytes+=bytes;amount.bufferDeclaredBytes+=bytes;variants.add(spec.node.nodeType==='particles'?'particles':'planar');
     }
-    amount.programs=Math.max(0,variants.size-allocation.programTickets.length);
+    amount.programs=Math.max(0,variants.size-allocation.programTickets.length,modelPrograms);
     for(const requirement of next.requirements)if(!leases.has(requirement.key)&&!context.pool.has(requirement.identity)){
       if(requirement.kind==='font')amount.ownedCpuBytes+=requirement.fontMetadata.cpuBudgetBytes;
       else if(requirement.kind==='model'){
         amount.ownedCpuBytes+=modelConstructionBytes(requirement.modelFacts)+requirement.modelFacts.resources.cpuBackingBytes;
         amount.bufferDeclaredBytes+=requirement.modelFacts.resources.gpuBufferBytes;
+        if(requirement.modelFacts.profile==='static-pbr-texture-v1'){
+          amount.textureDeclaredBytes+=requirement.textureUploadBytes;
+          amount.decodeReservedBytes+=requirement.textureUploadBytes;
+        }
       }
       else{const bytes=requirement.width*requirement.height*4;amount.textureDeclaredBytes+=bytes;amount.decodeReservedBytes+=bytes*(requirement.kind==='video'?3:1);if(requirement.kind==='video')amount.decoderLeases++;}
     }
@@ -459,7 +469,11 @@ export async function createCompositionRuntime(THREE, context, scope, plan, opti
         if(requirement.kind==='font')tickets={cpu:require({ownedCpuBytes:requirement.fontMetadata.cpuBudgetBytes},'Composition changed prepared same-package font')};
         else if(requirement.kind==='model'){
           const spec=next.nodePlans.find(item=>item.resources.asset===requirement);
+          const textured=requirement.modelFacts.profile==='static-pbr-texture-v1';
           tickets={cpu:require({ownedCpuBytes:modelConstructionBytes(requirement.modelFacts)},'Composition changed static model construction'),
+            ...(textured?{
+              decode:require({decodeReservedBytes:requirement.textureUploadBytes},'Composition changed model texture decode window'),
+              upload:require({textureDeclaredBytes:requirement.textureUploadBytes},'Composition changed model texture upload')}:{}),
             bufferPlan:spec.bufferPlan};
         }
         else{const bytes=requirement.width*requirement.height*4;tickets={decode:require({decodeReservedBytes:bytes*(requirement.kind==='video'?3:1),...(requirement.kind==='video'?{decoderLeases:1}:{})},'Composition changed actual-media decoder'),upload:require({textureDeclaredBytes:bytes},'Composition changed per-context texture')};}
