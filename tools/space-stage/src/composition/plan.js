@@ -64,6 +64,7 @@ export function compilePlan(projection, registry = null, identity = null) {
   const values = projectValues(ir, finalPublicValues);
   if (projection.semanticKey !== ir.semanticKey) throw new Error('composition-semantic-identity-mismatch');
   const outputEffects = [], nodeEffects = new Map(), effectNodes = new Map();
+  let outputGlow = null;
   const nodeIndices = new Map(ir.nodes.map((node, index) => [node.id, index]));
   for (const [effectIndex, effect] of ir.effects.entries()) {
     const target = effect.target;
@@ -76,6 +77,27 @@ export function compilePlan(projection, registry = null, identity = null) {
         throw new Error('composition-effect-properties-invalid');
       outputEffects.push({ brightness: properties.brightness, contrast: properties.contrast,
         saturation: properties.saturation, hueDegrees: properties.hueDegrees });
+      continue;
+    }
+    if (effect.type === 'glow') {
+      if (target.kind !== 'output')
+        throw new Error(`composition-adapter-unavailable:effect:${effect.type}:${target.kind}`);
+      const properties = effect.properties || {};
+      if (Object.keys(properties).length !== 3
+        || !['strength', 'radius', 'threshold'].every(name => Number.isFinite(properties[name])))
+        throw new Error('composition-effect-properties-invalid');
+      if (effect.assets && Object.keys(effect.assets).length) throw new Error('composition-effect-assets-invalid');
+      if (outputGlow) throw new Error('composition-adapter-unavailable:effect-chain');
+      const surfaces = ir.effectSurfaces?.[effectIndex];
+      const requirement = ir.staticRequirements?.find(item =>
+        item.kind === 'effectSurfaces' && item.effectIndex === effectIndex), cost = requirement?.cost;
+      if (surfaces !== 2 || !requirement || requirement.count !== 2 || requirement.inputTextures !== 1
+          || requirement.outputFormat !== 'rgba8'
+          || !Number.isFinite(requirement.sampleScale) || requirement.sampleScale <= 0 || requirement.sampleScale > 1
+          || !cost || cost.surfaces !== 2 || cost.drawPasses !== 3 || cost.bytesPerPixel !== 4)
+        throw new Error('composition-effect-surface-plan-invalid');
+      outputGlow = { strength: properties.strength, radius: properties.radius,
+        threshold: properties.threshold, sampleScale: requirement.sampleScale };
       continue;
     }
     if (!['ripple', 'wind', 'mask'].includes(effect.type))
@@ -194,9 +216,16 @@ export function compilePlan(projection, registry = null, identity = null) {
   const pixels = target.width * target.height;
   if (!Number.isSafeInteger(pixels) || pixels < 1 || !Number.isSafeInteger(canvas.width * canvas.height)
       || canvas.width < 1 || canvas.height < 1) throw new Error('composition-output-plan-invalid');
-  const resources = { renderTargetDeclaredBytes: pixels * 8, textureDeclaredBytes: 0, bufferDeclaredBytes: 92,
-    ownedCpuBytes: 92, decodeReservedBytes: 0, decoderLeases: 0, canvases: 0, drawingBufferPixels: 0, programs: 2 };
+  if (outputGlow) {
+    outputGlow.width = Math.max(1, Math.ceil(target.width * outputGlow.sampleScale));
+    outputGlow.height = Math.max(1, Math.ceil(target.height * outputGlow.sampleScale));
+  }
+  const resources = { renderTargetDeclaredBytes: pixels * 8 + (outputGlow ? outputGlow.width * outputGlow.height * 8 : 0),
+    textureDeclaredBytes: 0, bufferDeclaredBytes: 92,
+    ownedCpuBytes: 92, decodeReservedBytes: 0, decoderLeases: 0, canvases: 0, drawingBufferPixels: 0,
+    programs: outputGlow ? 4 : 2 };
   const primitives = {drawCalls:1,points:0,triangles:2};
+  if (outputGlow) { primitives.drawCalls += 3; primitives.triangles += 6; }
   if (builtin) {
     const source=builtin.profile.sourceResources;
     resources.renderTargetDeclaredBytes += pixels*4;
@@ -295,5 +324,5 @@ export function compilePlan(projection, registry = null, identity = null) {
         || limits.drawingBufferPixels !== resources.drawingBufferPixels+pixels || limits.gpuContexts !== 1)
       throw new Error('composition-builtin-page-projection-mismatch:output');
   }
-  return { projection, ir, values, nodePlans, requirements: [...unique.values()], textRasters, resources, pixels, builtin, primitives, bindingParameters, outputEffects };
+  return { projection, ir, values, nodePlans, requirements: [...unique.values()], textRasters, resources, pixels, builtin, primitives, bindingParameters, outputEffects, outputGlow };
 }

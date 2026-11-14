@@ -6,7 +6,8 @@ import { evaluateBinding, evaluateTrack } from './animation.js';
 const MATRIX=1, LAYOUT=2, MATERIAL=4, VISIBILITY=8, RESOURCE=16, GEOMETRY=32, ALL=63;
 const outputVertex = `varying vec2 vUv;void main(){vUv=uv;gl_Position=vec4(position.xy,0.0,1.0);}`;
 const outputFragment = `uniform sampler2D inputMap;uniform float brightness;uniform float contrast;
-  uniform float saturation;uniform float hue;varying vec2 vUv;
+  uniform float saturation;uniform float hue;uniform sampler2D glowMap;uniform bool hasGlow;uniform float glowStrength;
+  varying vec2 vUv;
   vec3 hueRotate(vec3 c,float a){float s=sin(a),v=cos(a);
     return clamp(vec3(
       dot(c,vec3(0.213+v*0.787-s*0.213,0.715-v*0.715-s*0.715,0.072-v*0.072+s*0.928)),
@@ -14,6 +15,7 @@ const outputFragment = `uniform sampler2D inputMap;uniform float brightness;unif
       dot(c,vec3(0.213-v*0.213-s*0.787,0.715-v*0.715+s*0.715,0.072+v*0.928+s*0.072))),0.0,1.0);}
   void main(){
     vec3 color=texture2D(inputMap,vUv).rgb;
+    if(hasGlow)color+=texture2D(glowMap,vUv).rgb*glowStrength;
     color+=brightness;
     color=(color-0.5)*contrast+0.5;
     color=mix(vec3(dot(color,vec3(0.2126,0.7152,0.0722))),color,saturation);
@@ -21,6 +23,18 @@ const outputFragment = `uniform sampler2D inputMap;uniform float brightness;unif
     gl_FragColor=vec4(clamp(color,0.0,1.0),1.0);
   #include <colorspace_fragment>
   }`;
+const thresholdFragment = `uniform sampler2D inputMap;uniform float threshold;varying vec2 vUv;
+  void main(){vec3 color=texture2D(inputMap,vUv).rgb;
+    float luma=dot(color,vec3(0.2126,0.7152,0.0722));
+    float weight=clamp((luma-threshold)/max(1.0-threshold,0.001),0.0,1.0);
+    gl_FragColor=vec4(color*weight,1.0);}`;
+const blurFragment = `uniform sampler2D inputMap;uniform vec2 blurStep;varying vec2 vUv;
+  void main(){vec3 color=texture2D(inputMap,vUv).rgb*0.2270270270;
+    color+=texture2D(inputMap,vUv+blurStep*1.3846153846).rgb*0.3162162162;
+    color+=texture2D(inputMap,vUv-blurStep*1.3846153846).rgb*0.3162162162;
+    color+=texture2D(inputMap,vUv+blurStep*3.2307692308).rgb*0.0702702703;
+    color+=texture2D(inputMap,vUv-blurStep*3.2307692308).rgb*0.0702702703;
+    gl_FragColor=vec4(color,1.0);}`;
 function validateTextTextureSize(context, plan) {
   if (!plan.textRasters.length) return;
   const maximum = context.renderer.capabilities.maxTextureSize;
@@ -41,6 +55,10 @@ function reserveAll(context, scope, plan, generation) {
   try {
     const targetTicket = require({ renderTargetDeclaredBytes: plan.pixels * (plan.builtin?12:8) }, 'Composition planned linear RGBA16F/depth target');
     if (targetTicket) unclaimedPrivate.add(targetTicket);
+    const glowTicket = plan.outputGlow
+      ? require({ renderTargetDeclaredBytes: plan.outputGlow.width * plan.outputGlow.height * 8 }, 'Composition glow half-resolution RGBA8 surfaces')
+      : null;
+    if (glowTicket) unclaimedPrivate.add(glowTicket);
     for (let index=0; index<plan.resources.programs; index++) programTickets.push(require({programs:1}, 'Composition bounded shader program cache miss'));
     const outputPlan = scope.bufferPlan(92,92,'Composition final output quad');
     const inputTicket = plan.builtin ? require({ownedCpuBytes:plan.builtin.clock.inputBytes},'Composition pending/committed input arrays') : null;
@@ -79,7 +97,7 @@ function reserveAll(context, scope, plan, generation) {
       for (const ticket of programTickets) ticket?.release({apiReleased:true,allocationEnded:true});
       for (const ticket of unclaimedPrivate) ticket.release({apiReleased:true,allocationEnded:true});
     });
-    return { sources, unclaimed, unclaimedPrivate, targetTicket, inputTicket, outputPlan, programTickets, nodeScopes };
+    return { sources, unclaimed, unclaimedPrivate, targetTicket, glowTicket, inputTicket, outputPlan, programTickets, nodeScopes };
   } catch (error) {
     nodeScopes.forEach(nodeScope=>nodeScope.dispose());
     for (const ticket of reserved) ticket.release({apiReleased:true,allocationEnded:true});
@@ -88,7 +106,7 @@ function reserveAll(context, scope, plan, generation) {
 }
 export async function createCompositionRuntime(THREE, context, scope, plan, options = {}) {
   const signal = scope.signal, generation = options.generation, leases = new Map(), values = new Map();
-  let disposed = false, target = null, targetTicket = null, sceneTime = 0, frameReady = false, outputDirty=true;
+  let disposed = false, target = null, targetTicket = null, glowA = null, glowB = null, sceneTime = 0, frameReady = false, outputDirty=true;
   let timelineBase = null, bindingStacks = [], inputValues = null;
   let bindingErrors = 0;
   let updateGeneration=0, pendingController=null, visualTime=null, mediaShouldPlay=false;
@@ -162,6 +180,7 @@ export async function createCompositionRuntime(THREE, context, scope, plan, opti
   outputPlan.cpuReady(92);
   const outputMaterial = scope.track(new THREE.ShaderMaterial({ vertexShader: outputVertex, fragmentShader: outputFragment,
     depthTest: false, depthWrite: false, toneMapped: false, uniforms: { inputMap: { value: null },
+      glowMap: { value: null }, hasGlow: { value: false }, glowStrength: { value: 0 },
       brightness: { value: 0 }, contrast: { value: 1 }, saturation: { value: 1 }, hue: { value: 0 } } }));
   function applyOutputEffects() {
     const effect = plan.outputEffects?.[0];
@@ -170,8 +189,22 @@ export async function createCompositionRuntime(THREE, context, scope, plan, opti
     uniforms.contrast.value = effect?.contrast ?? 1;
     uniforms.saturation.value = effect?.saturation ?? 1;
     uniforms.hue.value = (effect?.hueDegrees ?? 0) * Math.PI / 180;
+    uniforms.hasGlow.value = !!plan.outputGlow;
+    uniforms.glowStrength.value = plan.outputGlow?.strength ?? 0;
+    if (plan.outputGlow) {
+      thresholdMaterial.uniforms.threshold.value = plan.outputGlow.threshold;
+      blurMaterial.uniforms.radius.value = plan.outputGlow.radius;
+    }
     outputDirty = true;
   }
+  const glowScene = new THREE.Scene(), glowMesh = new THREE.Mesh(outputGeometry, null);
+  glowScene.add(glowMesh);
+  const thresholdMaterial = scope.track(new THREE.ShaderMaterial({ vertexShader: outputVertex, fragmentShader: thresholdFragment,
+    depthTest: false, depthWrite: false, toneMapped: false,
+    uniforms: { inputMap: { value: null }, threshold: { value: 0.8 } } }));
+  const blurMaterial = scope.track(new THREE.ShaderMaterial({ vertexShader: outputVertex, fragmentShader: blurFragment,
+    depthTest: false, depthWrite: false, toneMapped: false,
+    uniforms: { inputMap: { value: null }, blurStep: { value: new THREE.Vector2() }, radius: { value: 8 } } }));
   applyOutputEffects();
   outputScene.add(new THREE.Mesh(outputGeometry, outputMaterial));
   const clearColor = new THREE.Color(plan.projection.canvas.background), viewport = new THREE.Vector2(), canvasClip=new THREE.Vector4();
@@ -471,6 +504,29 @@ export async function createCompositionRuntime(THREE, context, scope, plan, opti
       allocation.unclaimedPrivate.delete(ticket);
       outputMaterial.uniforms.inputMap.value = target.texture;
     }
+    if (plan.outputGlow && (!glowA || glowA.width !== plan.outputGlow.width || glowA.height !== plan.outputGlow.height)) {
+      const ticket = allocation.glowTicket;
+      let nextA, nextB;
+      try {
+        const options = { type: THREE.UnsignedByteType, format: THREE.RGBAFormat, depthBuffer: false,
+          stencilBuffer: false, generateMipmaps: false };
+        nextA = new THREE.WebGLRenderTarget(plan.outputGlow.width, plan.outputGlow.height, options);
+        nextB = new THREE.WebGLRenderTarget(plan.outputGlow.width, plan.outputGlow.height, options);
+        for (const surface of [nextA, nextB]) {
+          surface.texture.colorSpace = THREE.LinearSRGBColorSpace;
+          surface.texture.minFilter = THREE.LinearFilter; surface.texture.magFilter = THREE.LinearFilter;
+          surface.texture.generateMipmaps = false;
+          renderer.initRenderTarget(surface);
+        }
+        ticket?.commit();
+      } catch (error) {
+        nextA?.dispose(); nextB?.dispose();
+        ticket?.release({ apiReleased: true, allocationEnded: true }); throw error;
+      }
+      glowA?.dispose(); glowB?.dispose(); glowA = nextA; glowB = nextB;
+      allocation.unclaimedPrivate.delete(ticket);
+      outputMaterial.uniforms.glowMap.value = glowA.texture;
+    }
     const canvas = plan.projection.canvas, fit = plan.projection.target.fit || 'cover';
     const sx = width / canvas.width, sy = height / canvas.height;
     const scaleX = fit === 'stretch' ? sx : fit === 'contain' ? Math.min(sx,sy) : Math.max(sx,sy);
@@ -558,6 +614,18 @@ export async function createCompositionRuntime(THREE, context, scope, plan, opti
       target.scissorTest=true;renderer.setRenderTarget(target);
       if(background){renderer.render(background.scene,background.camera);renderer.clearDepth();}
       renderer.render(scene,camera);
+      if(glowA){
+        const glow=plan.outputGlow;
+        renderer.setScissorTest(false);renderer.setClearColor(0x000000,1);
+        thresholdMaterial.uniforms.inputMap.value=target.texture;glowMesh.material=thresholdMaterial;
+        renderer.setRenderTarget(glowA);renderer.clear();renderer.render(glowScene,outputCamera);
+        blurMaterial.uniforms.inputMap.value=glowA.texture;
+        blurMaterial.uniforms.blurStep.value.set(glow.radius/8/glowA.width,0);glowMesh.material=blurMaterial;
+        renderer.setRenderTarget(glowB);renderer.clear();renderer.render(glowScene,outputCamera);
+        blurMaterial.uniforms.inputMap.value=glowB.texture;
+        blurMaterial.uniforms.blurStep.value.set(0,glow.radius/8/glowA.height);
+        renderer.setRenderTarget(glowA);renderer.clear();renderer.render(glowScene,outputCamera);
+      }
       renderer.setRenderTarget(null);renderer.setScissorTest(false);renderer.outputColorSpace=THREE.SRGBColorSpace;renderer.render(outputScene,outputCamera);
       dirty.fill(0);localDirty.fill(0);worldDirty.fill(0);outputDirty=false;work.renders++;
     } finally {renderer.hertzProgramResources=previousPrograms;renderer.setRenderTarget(previousTarget);renderer.setScissor(previousScissor);renderer.setScissorTest(previousScissorTest);renderer.outputColorSpace=previousOutput;renderer.setClearColor(previousClear,previousAlpha);renderer.autoClear=autoClear;}
@@ -565,7 +633,10 @@ export async function createCompositionRuntime(THREE, context, scope, plan, opti
   }
   function dispose() {
     if (disposed) return; disposed=true;cancelPreparation(); pause(); target?.dispose(); target=null;
-    targetTicket?.release({ apiReleased: true, allocationEnded: true }); targetTicket=null; scene.clear(); outputScene.clear();
+    glowA?.dispose(); glowB?.dispose(); glowA=glowB=null;
+    targetTicket?.release({ apiReleased: true, allocationEnded: true }); targetTicket=null;
+    allocation.glowTicket?.release({ apiReleased: true, allocationEnded: true });
+    scene.clear(); outputScene.clear();
     inputSampler=null;background=null;
   }
   scope.defer(dispose);
@@ -583,6 +654,7 @@ export async function createCompositionRuntime(THREE, context, scope, plan, opti
       // original Three cache entry. Only that complete set forecasts its quota.
       for(const [program,count] of programUses)if(count===program.usedTimes&&program.hertzProgramResourceId)ids.push(program.hertzProgramResourceId);
       if(targetTicket)ids.push(targetTicket.resourceId);
+      if(allocation.glowTicket)ids.push(allocation.glowTicket.resourceId);
       for(const ticket of allocation.programTickets)if(ticket)ids.push(ticket.resourceId);
       ids.push(...context.pool.retirementCandidates([...leases.values(),
         ...nodes.filter(node=>node.spec.node.nodeType==='text').map(node=>node.spec.textRasterLease)]));
