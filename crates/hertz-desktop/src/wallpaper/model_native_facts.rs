@@ -6,8 +6,9 @@ use hertz_wallpaper::{
     model_binary::CompactCheckedGlbResource,
     model_container::BinaryChunk,
     model_structure::{
-        ModelAccessor, ModelAnimation, ModelBufferView, ModelImage, ModelMesh, ModelNode,
-        ModelScene, ModelSkin, ModelSkinBinding, ModelStaticLoaderFields, PackageImageRef,
+        ModelAccessor, ModelAnimation, ModelBufferView, ModelImage, ModelMaterial, ModelMesh,
+        ModelNode, ModelSampler, ModelScene, ModelSkin, ModelSkinBinding, ModelStaticLoaderFields,
+        ModelTexture, ModelTextureBinding, PackageImageRef,
     },
 };
 
@@ -53,6 +54,9 @@ impl<'a> NativeModelFacts<'a> {
             accessors: &s.accessors,
             meshes: &s.meshes,
             images: NativeModelImages(s.images.iter()),
+            materials: &s.materials,
+            textures: &s.textures,
+            samplers: &s.samplers,
             animations: &s.animations,
             skins: &s.skins,
             skin_bindings: &s.skin_bindings,
@@ -72,6 +76,14 @@ impl<'a> NativeModelFacts<'a> {
             binary_content_validated: s.binary_content_validated,
         }
     }
+    /// Loader-facing slot conversion over the same checked facts. Borrowed,
+    /// zero-allocation and independent of any plan/generation.
+    pub(crate) fn material_texture_bindings(
+        self,
+        material: usize,
+    ) -> impl Iterator<Item = ModelTextureBinding> + 'a {
+        self.owner.structure().material_texture_bindings(material)
+    }
 }
 
 #[derive(Clone)]
@@ -80,6 +92,9 @@ pub(crate) struct NativeModelStructure<'a> {
     pub(crate) accessors: &'a [ModelAccessor],
     pub(crate) meshes: &'a [ModelMesh],
     pub(crate) images: NativeModelImages<'a>,
+    pub(crate) materials: &'a [ModelMaterial],
+    pub(crate) textures: &'a [ModelTexture],
+    pub(crate) samplers: &'a [ModelSampler],
     pub(crate) animations: &'a [ModelAnimation],
     pub(crate) skins: &'a [ModelSkin],
     pub(crate) skin_bindings: &'a [ModelSkinBinding],

@@ -134,6 +134,9 @@ impl CompactCheckedGlbResource {
         count!(vector(&s.accessors));
         count!(vector(&s.meshes));
         count!(vector(&s.images));
+        count!(vector(&s.materials));
+        count!(vector(&s.textures));
+        count!(vector(&s.samplers));
         count!(vector(&s.animations));
         count!(vector(&s.skins));
         count!(vector(&s.skin_bindings));

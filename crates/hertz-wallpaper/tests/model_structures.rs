@@ -938,6 +938,168 @@ fn texture_sampler_and_every_core_material_texture_reference_are_closed() {
     assert_eq!(error(&invalid, Some(&[0; 4])), "invalid_model_structure");
 }
 
+#[test]
+fn loader_material_facts_and_texture_slots_resolve_in_fixed_order() {
+    use hertz_wallpaper::model_structure::{
+        ModelAlphaMode, ModelSampler, ModelTexture, ModelTextureBinding, ModelTextureRole,
+    };
+    let mut document = empty();
+    document["buffers"] = json!([{"byteLength":4}]);
+    document["bufferViews"] = json!([{"buffer":0,"byteLength":4}]);
+    document["images"] = json!([{"bufferView":0,"mimeType":"image/png"}]);
+    document["samplers"] = json!([
+        {"magFilter":9728,"minFilter":9729,"wrapS":33071,"wrapT":33648},
+        {"wrapS":33071}
+    ]);
+    document["textures"] = json!([
+        {"source":0,"sampler":0},
+        {"source":0,"sampler":1},
+        {"source":0}
+    ]);
+    document["materials"] = json!([
+        {"pbrMetallicRoughness":{"baseColorFactor":[0.25,0.5,0.75,1.0],"baseColorTexture":{"index":0},
+            "metallicFactor":0.5,"roughnessFactor":0.25,"metallicRoughnessTexture":{"index":1,"texCoord":1}},
+         "normalTexture":{"index":0,"scale":0.5},"occlusionTexture":{"index":1,"strength":0.5},
+         "emissiveTexture":{"index":2,"texCoord":2},"emissiveFactor":[0.1,0.2,0.3],
+         "alphaMode":"MASK","alphaCutoff":0.25,"doubleSided":true},
+        {}
+    ]);
+    let structure = inspect(&document, Some(&[0; 4])).structure;
+    assert_eq!(structure.material_count, 2);
+    assert_eq!(structure.materials.len(), 2);
+    assert_eq!(
+        structure.textures,
+        vec![
+            ModelTexture {
+                source: 0,
+                sampler: Some(0)
+            },
+            ModelTexture {
+                source: 0,
+                sampler: Some(1)
+            },
+            ModelTexture {
+                source: 0,
+                sampler: None
+            }
+        ]
+    );
+    assert_eq!(
+        structure.samplers,
+        vec![
+            ModelSampler {
+                mag_filter: 9728,
+                min_filter: 9729,
+                wrap_s: 33071,
+                wrap_t: 33648
+            },
+            ModelSampler {
+                wrap_s: 33071,
+                ..ModelSampler {
+                    mag_filter: 9729,
+                    min_filter: 9987,
+                    wrap_s: 10497,
+                    wrap_t: 10497
+                }
+            }
+        ]
+    );
+    let material = structure.materials[0];
+    let pbr = material.pbr.unwrap();
+    assert_eq!(pbr.base_color_factor, [0.25, 0.5, 0.75, 1.0]);
+    assert_eq!(pbr.metallic_factor, 0.5);
+    assert_eq!(pbr.roughness_factor, 0.25);
+    assert_eq!(pbr.base_color_texture.unwrap().texture, 0);
+    assert_eq!(pbr.metallic_roughness_texture.unwrap().tex_coord, 1);
+    assert_eq!(material.normal_texture.unwrap().scale, 0.5);
+    assert_eq!(material.occlusion_texture.unwrap().strength, 0.5);
+    assert_eq!(material.emissive_factor, [0.1, 0.2, 0.3]);
+    assert_eq!(material.alpha_mode, ModelAlphaMode::Mask);
+    assert_eq!(material.alpha_cutoff, 0.25);
+    assert!(material.double_sided);
+    let textual = ModelSampler {
+        mag_filter: 9728,
+        min_filter: 9729,
+        wrap_s: 33071,
+        wrap_t: 33648,
+    };
+    let sampler_one = ModelSampler {
+        mag_filter: 9729,
+        min_filter: 9987,
+        wrap_s: 33071,
+        wrap_t: 10497,
+    };
+    let fallback = ModelSampler {
+        mag_filter: 9729,
+        min_filter: 9987,
+        wrap_s: 10497,
+        wrap_t: 10497,
+    };
+    assert_eq!(
+        structure.material_texture_bindings(0).collect::<Vec<_>>(),
+        vec![
+            ModelTextureBinding {
+                role: ModelTextureRole::BaseColor,
+                texture: 0,
+                image: 0,
+                sampler: textual,
+                tex_coord: 0
+            },
+            ModelTextureBinding {
+                role: ModelTextureRole::MetallicRoughness,
+                texture: 1,
+                image: 0,
+                sampler: sampler_one,
+                tex_coord: 1
+            },
+            ModelTextureBinding {
+                role: ModelTextureRole::Normal,
+                texture: 0,
+                image: 0,
+                sampler: textual,
+                tex_coord: 0
+            },
+            ModelTextureBinding {
+                role: ModelTextureRole::Occlusion,
+                texture: 1,
+                image: 0,
+                sampler: sampler_one,
+                tex_coord: 0
+            },
+            ModelTextureBinding {
+                role: ModelTextureRole::Emissive,
+                texture: 2,
+                image: 0,
+                sampler: fallback,
+                tex_coord: 2
+            }
+        ]
+    );
+    assert_eq!(
+        structure
+            .material_texture_bindings(0)
+            .next()
+            .unwrap()
+            .sampler,
+        textual
+    );
+    assert!(structure.material_texture_bindings(1).next().is_none());
+    assert!(structure.material_texture_bindings(2).next().is_none());
+    assert_eq!(
+        structure.materials[1],
+        hertz_wallpaper::model_structure::ModelMaterial {
+            pbr: None,
+            normal_texture: None,
+            occlusion_texture: None,
+            emissive_texture: None,
+            emissive_factor: [0.0; 3],
+            alpha_mode: ModelAlphaMode::Opaque,
+            alpha_cutoff: 0.5,
+            double_sided: false,
+        }
+    );
+}
+
 fn material_texture(role: &str, info: Value) -> Value {
     if ["baseColorTexture", "metallicRoughnessTexture"].contains(&role) {
         let mut pbr = json!({});

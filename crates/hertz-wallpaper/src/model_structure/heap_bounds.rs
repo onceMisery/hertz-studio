@@ -41,7 +41,9 @@
 //!   Each usize/f64 array value owns a digit and preceding '['/',' (>=2
 //!   bytes): Schema+exact copy <=24 bytes. Children/scene roots move their
 //!   original allocation. Inline root records are the fixed size_of terms.
-//!   Extras, fixed arrays and nested material/camera structs retain no heap.
+//!   Extras, fixed arrays and nested material/camera structs retain no heap;
+//!   the retained material/texture/sampler facts are three fixed-capacity
+//!   Copy-record Vecs charged in fact_roots().
 //!
 //! These spans are disjoint; whitespace, longer numbers and field names only
 //! add slack. Therefore the joint nested+strings+decoder bound is 64J, not
@@ -259,6 +261,9 @@ fn fact_roots() -> Result<u64> {
         array::<ModelSkin>(MAX_MODEL_RECORDS)?,
         array::<ModelSkinBinding>(MAX_MODEL_RECORDS)?,
         array::<ModelImage>(MAX_MODEL_IMAGE_RECORDS)?,
+        array::<ModelMaterial>(MAX_MODEL_IMAGE_RECORDS)?,
+        array::<ModelTexture>(MAX_MODEL_IMAGE_RECORDS)?,
+        array::<ModelSampler>(MAX_MODEL_IMAGE_RECORDS)?,
         array::<ModelAnimation>(MAX_MODEL_ANIMATIONS)?,
         array::<Option<Vec<f64>>>(MAX_MODEL_NODES)?,
     ])
