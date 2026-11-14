@@ -4,6 +4,7 @@ use crate::wallpaper::assets::{
     installed_full_model_fixture, installed_full_model_fixture_with_texture,
     model_source_test_probe, model_source_writable,
 };
+use crate::wallpaper::session::{RecoveryLedger, SessionState, WallpaperSession};
 use sha2::{Digest, Sha256};
 use std::{
     fs::File,
@@ -995,6 +996,67 @@ fn controller_install_and_read_allocate_nothing() {
         (0, 0, false)
     );
     drop(input);
+    preparation.finish();
+}
+
+#[test]
+fn session_generation_change_revokes_texture_plan_and_releases_charge() {
+    let fixture = installed_full_model_fixture("model-input-texture-session", false);
+    let probe = model_source_test_probe();
+    let preparation = probe.prepare_for_job("texture-session".into(), 90).unwrap();
+    let baseline = probe.budget_for_test().usage();
+    let input = fixture
+        .store
+        .prepare_canonical_model_input(
+            &fixture.reference,
+            &probe,
+            &preparation,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+    let held = probe.budget_for_test().usage();
+    let recovery = RecoveryLedger::new();
+    let mut session = WallpaperSession::new();
+    let generation = session.apply(1, &recovery).unwrap();
+    // Only an attaching current generation may install texture resources.
+    assert!(!session.admit_textures(generation, &input, "model-session"));
+    assert!(session.resolved(generation));
+    assert!(session.prepared(generation));
+    assert_eq!(session.state(), SessionState::Attaching);
+    assert!(!session.admit_textures(generation + 1, &input, "model-session"));
+    assert!(!session.admit_textures(generation, &input, ""));
+    assert!(session.admit_textures(generation, &input, "model-session"));
+    let cancel = AtomicBool::new(false);
+    let mut bytes = [0u8; 4];
+    assert!(session
+        .read_texture("models/a/tex.png", 0, &mut bytes, &cancel)
+        .unwrap()
+        .is_some());
+    assert_eq!(bytes, [1, 2, 3, 4]);
+    // A new intent retires the previous plan before the new generation is used.
+    let next = session.apply(2, &recovery).unwrap();
+    assert_eq!(next, generation + 1);
+    assert!(session
+        .read_texture("models/a/tex.png", 0, &mut bytes, &cancel)
+        .unwrap()
+        .is_none());
+    assert_eq!(probe.budget_for_test().usage(), held);
+    // The new generation can install its own plan; disable revokes it.
+    assert!(session.resolved(next));
+    assert!(session.prepared(next));
+    assert!(session.admit_textures(next, &input, "model-session"));
+    assert!(session
+        .read_texture("models/a/tex.png", 0, &mut bytes, &cancel)
+        .unwrap()
+        .is_some());
+    session.disable();
+    assert_eq!(session.state(), SessionState::Disabled);
+    assert!(session
+        .read_texture("models/a/tex.png", 0, &mut bytes, &cancel)
+        .unwrap()
+        .is_none());
+    drop(input);
+    assert_eq!(probe.budget_for_test().usage(), baseline);
     preparation.finish();
 }
 

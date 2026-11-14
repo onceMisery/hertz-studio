@@ -458,6 +458,15 @@ impl Default for ModelTextureController {
     }
 }
 
+impl std::fmt::Debug for ModelTextureController {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ModelTextureController")
+            .field("generation", &self.generation())
+            .finish_non_exhaustive()
+    }
+}
+
 // No Clone or public extraction: the returned diagnostic and its charged
 // owner have exactly one owned transfer through the original worker/reply.
 pub(crate) struct ModelPreparationError {
