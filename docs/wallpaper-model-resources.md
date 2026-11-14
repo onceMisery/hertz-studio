@@ -825,3 +825,16 @@ glb 与错误 hash None，同代重复 replace false；fail() 后键集为空。
 （去重移除、混入 model glb、path 置空）均按预期变红后还原。本批只把键集交给
 broker access；webresource 真正服务 model 纹理、MIME/Origin 与解码/GPU 仍未
 接线。
+
+2026-11-14 r50 授权发布续接：`MediaAccess::replace_owned(generation, Vec<..>)`
+避免 replace 的二次 clone，保留 512 上限与代际递增规则；`replace` 委托
+`to_vec`。`WallpaperSession::publish_texture_access(access, generation)` 要求
+generation 等于 session 当前代际，用 with_texture_keys 收集键并发布；空/撤销
+plan 也发布空集，从而清除上一代际的纹理键；stale generation 在触碰 access 前
+拒绝。
+
+真实 fixture 证据：g1 发布后 broker permit tex/other 均为 Some、glb None；
+stale g+1 发布 false；fail 后 apply 新代际再发布空集，旧 permit 变 None；旧
+代际再发布 false。三处变异（发布空键集、跳过空集清除、key 写成 model glb）均
+按预期变红后还原。>512 纹理模型沿用 MediaAccess 既有上限 fail-closed，本批未
+扩展；WebView 实测与 GPU 首帧继续开放。

@@ -65,8 +65,8 @@ pub(crate) mod media;
 #[allow(dead_code)]
 pub(crate) mod media_stream;
 #[allow(dead_code)]
-// Closure, permit, index, plan, session binding, chunked read, Broker-shaped
-// response plan and broker access keys are bound; WebView HTTP/crossOrigin and runtime await qualification.
+// Closure, permit, index, plan, session binding, chunked read, response plan and
+// broker access publication are bound; WebView HTTP/crossOrigin and runtime await qualification.
 pub(crate) mod model_prepare;
 pub(crate) mod output_tokens;
 pub(crate) mod page_events;
