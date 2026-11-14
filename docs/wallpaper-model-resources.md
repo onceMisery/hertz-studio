@@ -1053,3 +1053,19 @@ ripple 位移、wind 忽略 direction、runtime 不更新 effectTime）均变红
 后左黑右红。三处变异（plan 丢 invert、资源闭包拒绝 effect use、shader 忽略
 invert）均变红后还原；39 项 composition 检查连续 3 次通过。glow（output
 surfaces=2/drawPasses=3）与效果图预算、离屏后处理、GPU 时间继续开放。
+
+2026-11-14 r67 output glow 续接：`plan.js` 接受 target=output 的 glow，校验
+strength/radius/threshold 与 IR `effectSurfaces`/`staticRequirements` 的
+count/inputTextures/rgba8/sampleScale/cost（surfaces=2、drawPasses=3、
+bytesPerPixel=4）；按 `ceil(target*sampleScale)` 计算两半分辨率 surface，
+resources 增加 `2*w*h*4` render target 字节、2 program、3 draw call/6 triangle。
+`runtime.js` 新增 threshold 与 5-tap 线性采样高斯 blur 材质，render 在场景
+target 后执行 threshold→blurH→blurV 到两个 RGBA8 surface，最终输出先加
+`glow*strength` 再走 colorAdjust；resize 提交 glowTicket，dispose/retirement
+释放 surface 与 ticket。
+
+真实 Rust IR + Chrome 像素：16×16 白块中心 255，块外 8px 由 0 变为 69；
+strength=0、radius=0、threshold=1 三种对照块外均 0；renderTarget 持有字节相对
+无 glow 增加 32×32×8=8192。三处变异（忽略 threshold、blurStep 恒 0、不预留
+glowTicket）均变红后还原；40 项 composition 检查连续 3 次通过。GPU 时间/首帧、
+真实设备矩阵与 A01/A05–A10 剩余验收继续开放。

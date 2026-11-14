@@ -21,6 +21,7 @@ const sourceAssets=[
  {assetId:'green',kind:'image',file:'green.png',mime:'image/png',width:8,height:8,bytes:png(8,8,()=>[0,255,0,255])},
  {assetId:'mask',kind:'image',file:'mask.png',mime:'image/png',width:8,height:8,bytes:png(8,8,()=>[128,128,128,255])},
  {assetId:'cutout',kind:'image',file:'cutout.png',mime:'image/png',width:16,height:8,bytes:png(16,8,x=>x<8?[255,255,255,255]:[0,0,0,255])},
+ {assetId:'white',kind:'image',file:'white.png',mime:'image/png',width:8,height:8,bytes:png(8,8,()=>[255,255,255,255])},
  {assetId:'wide',kind:'image',file:'wide.png',mime:'image/png',width:16,height:8,bytes:png(16,8,(x)=>x<8?[255,0,0,255]:[0,255,0,255])},
  {assetId:'video',kind:'video',file:'video.webm',mime:'video/webm',bytes:fs.readFileSync(path.join(root,'scripts/fixtures/wallpaper-vp8.webm'))},
  {assetId:'font',kind:'font',file:fontFixture.file,mime:fontFixture.mime,bytes:fontFixture.bytes}
@@ -98,6 +99,14 @@ const windMoving=compile([image('back','wide')],undefined,[],undefined,undefined
 const maskEffect=invert=>compile([image('back','red')],undefined,[],undefined,undefined,
  [{id:'clip',type:'mask',stateVersion:1,target:{kind:'node',nodeId:'back'},assets:{maskAsset:'cutout'},properties:{invert}}]);
 const masked=maskEffect(false), maskedInverted=maskEffect(true);
+const spot=()=>[image('back','white',{x:24,y:24,width:16,height:16})];
+const glowEffect=(strength,radius,threshold)=>[{id:'bloom',type:'glow',stateVersion:1,target:{kind:'output'},
+ properties:{strength,radius,threshold}}];
+const spotPlain=compile(spot());
+const glowOn=compile(spot(),undefined,[],undefined,undefined,glowEffect(1,16,.5));
+const glowOff=compile(spot(),undefined,[],undefined,undefined,glowEffect(0,16,.5));
+const glowTight=compile(spot(),undefined,[],undefined,undefined,glowEffect(1,0,.5));
+const glowHigh=compile(spot(),undefined,[],undefined,undefined,glowEffect(1,16,1));
 const dirtyFixture=compile([image('back','blue'),image('child','red',{width:16,height:16}),
  {id:'parent',type:'group',stateVersion:1,children:['child'],properties:{x:8,y:8,width:64,height:64,anchorX:0,anchorY:0}},
  image('unrelated','green',{x:48,y:48,width:16,height:16}),
@@ -274,6 +283,21 @@ const results=[];
   const maskInverted=await page.evaluate(()=>({inside:pixel(10,20),outside:pixel(54,20)}));
   near(maskInverted.inside,[0,0,0]);near(maskInverted.outside,[255,0,0]);
   results.push({case:'node mask effect samples its mask asset and honors invert',normal:maskNormal,inverted:maskInverted});
+  await select(spotPlain);
+  const spotBase=await page.evaluate(()=>({center:pixel(32,32),edge:pixel(16,32),
+    renderTargetDeclaredBytes:ledger.snapshot().held.renderTargetDeclaredBytes}));
+  near(spotBase.center,[255,255,255]);near(spotBase.edge,[0,0,0]);
+  await select(glowOn);
+  const glowPixels=await page.evaluate(()=>({center:pixel(32,32),edge:pixel(16,32),
+    renderTargetDeclaredBytes:ledger.snapshot().held.renderTargetDeclaredBytes}));
+  near(glowPixels.center,[255,255,255]);assert.ok(glowPixels.edge[0]>8&&glowPixels.edge[1]>8&&glowPixels.edge[2]>8,
+    `glow edge ${glowPixels.edge}`);
+  assert.equal(glowPixels.renderTargetDeclaredBytes-spotBase.renderTargetDeclaredBytes,32*32*8);
+  await select(glowOff);const glowZero=await page.evaluate(()=>pixel(16,32));
+  await select(glowTight);const glowSharp=await page.evaluate(()=>pixel(16,32));
+  await select(glowHigh);const glowCut=await page.evaluate(()=>pixel(16,32));
+  near(glowZero,[0,0,0]);near(glowSharp,[0,0,0]);near(glowCut,[0,0,0]);
+  results.push({case:'output glow threshold/blur surfaces spread a bright spot, then honor strength, radius and threshold',base:spotBase,glow:glowPixels,zero:glowZero,sharp:glowSharp,cut:glowCut});
   near(effectGray,[127,127,127]);near(effectBright,[255,124,124]);
   results.push({case:'compiler output colorAdjust saturation and brightness',effectGray,effectBright});
   await select(video);try{await page.waitForFunction(()=>host.frame({sceneTime:.1,paused:true,seek:true}),null,{timeout:8000});}
