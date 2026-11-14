@@ -838,3 +838,36 @@ stale g+1 发布 false；fail 后 apply 新代际再发布空集，旧 permit �
 代际再发布 false。三处变异（发布空键集、跳过空集清除、key 写成 model glb）均
 按预期变红后还原。>512 纹理模型沿用 MediaAccess 既有上限 fail-closed，本批未
 扩展；WebView 实测与 GPU 首帧继续开放。
+
+2026-11-14 r51 响应状态语义续接：`ModelTextureController::has_plan` 只在锁内
+判断当前 plan 是否存在；`WallpaperSession::resolve_texture_response` 返回
+`ModelTextureResolution::{Response,NotFound,Unavailable}`：有当前 plan 且路径
+命中 → Response，有 plan 但路径未知 → NotFound，无 plan/撤销 → Unavailable。
+`plan_texture_response` 保持原 Option 语义不变。broker 证据使用真实已安装投影：
+发布键集后 `pin_verified_media` 对 tex.png 返回 4 字节/`image/png`，重读文件为
+[1,2,3,4] 且 SHA 与闭包一致；未知路径返回 Err(io)，与 webresource 404 映射
+一致。三处变异（无 plan→NotFound、未知路径→Unavailable、命中→NotFound）均
+按预期变红后还原。本批未接 WebView2 响应头与 app 生命周期；GPU 首帧继续开放。
+
+2026-11-14 r52 KTX2 DFD 续接：`inspect_ktx2` 在既有 header/level 范围检查之后
+解析唯一的 Khronos BASIC descriptor block：totalSize 必须等于 header 的 DFD
+长度；vendor/descriptorType word 必须为 0、version 必须为 2、blockSize 必须
+等于 DFD 长度减 4 且为 24+16×n；colorModel 不得为 UNSPECIFIED，flags 只允许
+bit0；texel block 必须是单平面 2D（dim2/dim3 解码后为 1）、每边 ≤32；
+bytesPlane[0] 必须非零且能被 typeSize 整除，bytesPlane[1..8] 必须为 0；
+每个 sample 的 position 必须落在 texel block 内、bitOffset+bitLength 不得超出
+texel 平面。supercompression=0 时按 mip 递减尺寸
+`ceil(w/blockW)×ceil(h/blockH)×bytesPlane[0]` 逐 level 校验 uncompressed
+长度；supercompressed 不猜测解压后布局。DFD 通过既有 ContainerReader 前向
+skip 到 offset 后以 4+8+16B 固定块与 16B/sample 流式读取，不保留 sample 表。
+
+真实证据：最小 RGBA8 fixture DFD 92B（colorModel 1、primaries/transfer 1、
+texel block [1,1,1,1]、bytesPlane [4,0..]、4 samples）被接受并暴露
+`Ktx2DataFormat`；真实 KTX-Parse writer + Zlib fixture 继续通过。反例：非零
+vendor/type、version 1、colorModel 0、dim2/dim3 非 1、bytesPlane 多平面均
+`texture_container_unavailable`；totalSize/blockSize 不符、level 字节数与 DFD
+布局不符、sample bit/position 越界、bytesPlane 与 typeSize 不符均
+`invalid_texture_container`；两 mip（4×4/2×2）逐 level 尺寸校验，破坏 mip1
+即拒绝。三处变异（跳过 level 尺寸校验、接受 UNSPECIFIED colorModel、跳过
+sample position）均按预期变红后还原。本批不实现 BasisLZ/UASTC 解压、KTX2→GPU
+格式选择、转码 worker 或真实 GPU 上传/首帧；多 block/vendor DFD fail-closed。

@@ -1014,7 +1014,7 @@ fn morph_nonseekable_stream_keeps_window_hash_and_metadata_boundary() {
 }
 
 fn ktx2() -> Vec<u8> {
-    let mut bytes = vec![0; 196];
+    let mut bytes = vec![0; 260];
     bytes[..12].copy_from_slice(&[
         0xab, b'K', b'T', b'X', b' ', b'2', b'0', 0xbb, 13, 10, 26, 10,
     ]);
@@ -1026,13 +1026,24 @@ fn ktx2() -> Vec<u8> {
         (36, 1),
         (40, 1),
         (48, 104),
-        (52, 28),
-        (104, 28),
+        (52, 92),
+        (104, 92),
     ] {
         bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
     }
-    for (offset, value) in [(80, 132_u64), (88, 64), (96, 64)] {
+    for (offset, value) in [(80, 196_u64), (88, 64), (96, 64)] {
         bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+    }
+    bytes[112..114].copy_from_slice(&2u16.to_le_bytes());
+    bytes[114..116].copy_from_slice(&88u16.to_le_bytes());
+    bytes[116..120].copy_from_slice(&[1, 1, 1, 0]);
+    bytes[124] = 4;
+    for (index, channel) in [0u8, 1, 2, 15].into_iter().enumerate() {
+        let sample = 132 + index * 16;
+        bytes[sample..sample + 2].copy_from_slice(&((index as u16) * 8).to_le_bytes());
+        bytes[sample + 2] = 8;
+        bytes[sample + 3] = channel;
+        bytes[sample + 12..sample + 16].copy_from_slice(&0xffu32.to_le_bytes());
     }
     bytes
 }
