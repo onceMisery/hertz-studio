@@ -7,6 +7,10 @@
       "purpose": "Real GLB consumption and cleanup with the pinned Three 0.186.0 GLTFLoader, exact prepared facts, shared backing identities, private instances, early profile refusal, cancellation and partial failure. Run npm ci --prefix tools/space-stage first, then node scripts/check-wallpaper-model-loader.mjs. Requires the installed locked Three modules; no browser, service or network requests during checks. Consumption evidence keeps native ModelInput, complete costs and GPU admission separate."
     },
     {
+      "script": "check-wallpaper-model-textured-browser.js",
+      "purpose": "Real Chrome decode of the textured PBR loader profile: an embedded 2x2 PNG and a declared external PNG URI mapped through the caller's textureUrl callback, actual MeshStandardMaterial factors/alpha/side, baseColor/metalness/roughness map identities, flipY/colorSpace/wraps/filters, UV/UV1 attributes, disposal and reinstantiate refusal. Negative profiles (missing TEXCOORD, illegal sampler, unsupported material slot, unmapped URI) fail before fetch. Requires the pinned Three 0.186.0 modules and Playwright Chrome; no renderer, GPU upload or first frame is claimed."
+    },
+    {
       "script": "check-shell-layout-browser.js",
       "purpose": "Actual current Hertz shell: exclusive layout leases, failed-move rollback, exact node/order restoration, desktop/mobile theme button interactions. Requires built HERTZ_BIN and Playwright; retains legacy skin retirement."
     },
