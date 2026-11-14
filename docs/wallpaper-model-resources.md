@@ -760,3 +760,19 @@ glb 路径全部 None。install+read 的 measure_requested_heap 为 0。三处�
 （install 允许同代、read 忽略 path、revoke 不清 plan）均按预期变红后还原。
 本批未接 WebView2/HTTP Range/CSP、未改 MediaAccess、未创建 decoder/renderer/
 GPU；loader 与首帧继续开放。
+
+2026-11-14 r46 会话生命周期续接：`WallpaperSession` 增加
+`ModelTextureController` 字段。`admit_textures(generation, input, session)` 只在
+当前 generation 且状态为 Attaching 时调用 controller install；非当前代际、
+非 Attaching 或非法 session 身份不改变已有 plan。`read_texture` 委托 controller
+锁内 exact-path 同步读。`retire_current_resources` 在 apply/disable/fail 路径
+先 revoke 纹理 plan；由于是同步 pins、没有 controller-close 屏障，撤销立即释放
+plan 的 input clone 与闭包 charge。`WallpaperSession` 的 Debug 通过 controller
+自定义 Debug 保持。
+
+真实 fixture 证据：会话 g1 在 Resolving 时 admit 拒绝，Attaching 后接受并读到
+[1,2,3,4]；generation+1 与空 session 拒绝；apply 新意图后旧 plan 读取 None 且
+usage 仍由原 input 持有；g2 重新 admit 后读取成功，disable 后读取 None；最后
+drop input 回到 baseline。三处变异（retire 不 revoke、admit 忽略 Attaching、
+admit 忽略 generation）均按预期变红后还原。本批未接 WebView2/HTTP Range/CSP、
+未改 MediaAccess、未创建 decoder/renderer/GPU；loader 与首帧继续开放。

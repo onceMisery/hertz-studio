@@ -36,6 +36,7 @@ use super::budget::{Allocation, AllocationSnapshot, BudgetCoordinator, BudgetReq
 use super::gl_plan::GlAdmission;
 use super::jobs::JobError;
 use super::media::Container;
+use super::model_prepare::{ModelInput, ModelTextureController};
 use super::target_planner::ResolvedMedia;
 
 /// 恢复预算窗口与次数（§13.3）。
@@ -259,6 +260,7 @@ pub(crate) struct WallpaperSession {
     last_media_generation: Option<u64>,
     gl: Option<GlAdmission>,
     retiring_gl: Vec<GlAdmission>,
+    textures: ModelTextureController,
 }
 
 impl Default for WallpaperSession {
@@ -284,6 +286,7 @@ impl WallpaperSession {
             last_media_generation: None,
             gl: None,
             retiring_gl: Vec::new(),
+            textures: ModelTextureController::new(),
         }
     }
 
@@ -485,6 +488,33 @@ impl WallpaperSession {
         self.gl.as_ref()
     }
 
+    /// Install the canonical texture plan for the current attaching generation.
+    /// A non-current generation, a non-attaching state or an invalid session
+    /// identity leaves the previous plan untouched.
+    pub(crate) fn admit_textures(
+        &mut self,
+        generation: u64,
+        input: &ModelInput,
+        session: &str,
+    ) -> bool {
+        if generation != self.generation || self.state != SessionState::Attaching {
+            return false;
+        }
+        self.textures.install(input, session, generation)
+    }
+
+    /// Exact-path synchronous texture read under the session's current plan.
+    /// A generation change, failure or disable revokes the plan first.
+    pub(crate) fn read_texture(
+        &self,
+        path: &str,
+        offset: u64,
+        output: &mut [u8],
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<Option<()>, JobError> {
+        self.textures.read_into(path, offset, output, cancel)
+    }
+
     /// 页面加载描述只读借用当前已准入计划，不能替换目标或资源。
     pub(crate) fn media(&self) -> Option<&ResolvedMedia> {
         self.media.as_ref()?.media.as_ref()
@@ -585,6 +615,9 @@ impl WallpaperSession {
     }
 
     fn retire_current_resources(&mut self) {
+        // Texture plans are synchronous pins, so revocation can release them
+        // immediately; no controller-close barrier exists yet.
+        self.textures.revoke();
         if let Some(mut gl) = self.gl.take() {
             gl.retire();
             self.retiring_gl.push(gl);
