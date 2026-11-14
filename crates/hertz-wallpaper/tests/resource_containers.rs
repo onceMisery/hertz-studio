@@ -5,7 +5,7 @@
 
 use hertz_wallpaper::{
     model_container::inspect_glb,
-    texture_container::{inspect_ktx2, Ktx2DataFormat},
+    texture_container::{inspect_ktx2, Ktx2DataFormat, Ktx2GlobalData},
     validate_archive, validate_package, Manifest,
 };
 use serde_json::{json, Value};
@@ -427,7 +427,7 @@ fn ktx2_supercompressed_mips_need_no_padding_and_basis_lengths_are_zero() {
     // KTX specification: supercompressed levels have no mipPadding; BasisLZ
     // carries zero uncompressedByteLength, unlike Zstd/Zlib.
     for scheme in [1, 2, 3] {
-        let mut bytes = vec![0; 242];
+        let mut bytes = vec![0; 320];
         bytes[..80].copy_from_slice(&ktx2()[..80]);
         put32(&mut bytes, 40, 2);
         put32(&mut bytes, 44, scheme);
@@ -440,13 +440,84 @@ fn ktx2_supercompressed_mips_need_no_padding_and_basis_lengths_are_zero() {
         let lengths = if scheme == 1 { [0, 0] } else { [64, 16] };
         put64(&mut bytes, 96, lengths[0]);
         put64(&mut bytes, 120, lengths[1]);
+        if scheme == 1 {
+            put64(&mut bytes, 64, 248);
+            put64(&mut bytes, 72, 72);
+            bytes[248..250].copy_from_slice(&1u16.to_le_bytes());
+            bytes[250..252].copy_from_slice(&1u16.to_le_bytes());
+            for (offset, value) in [(252, 4u32), (256, 4), (260, 4), (264, 0)] {
+                bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+            }
+            bytes[276..280].copy_from_slice(&9u32.to_le_bytes());
+            bytes[296..300].copy_from_slice(&11u32.to_le_bytes());
+        }
         let facts = inspect_ktx2(Cursor::new(&bytes), bytes.len() as u64).unwrap();
         assert_eq!(facts.levels[0].offset, 233);
         if scheme == 1 {
+            assert_eq!(
+                facts.global_data,
+                Some(Ktx2GlobalData {
+                    endpoint_count: 1,
+                    selector_count: 1,
+                    endpoints_bytes: 4,
+                    selectors_bytes: 4,
+                    tables_bytes: 4,
+                    extended_bytes: 0,
+                })
+            );
             put64(&mut bytes, 96, 64);
             assert_eq!(texture_error(&bytes), "invalid_texture_container");
+        } else {
+            assert_eq!(facts.global_data, None);
         }
     }
+}
+
+#[test]
+fn ktx2_accepts_reference_writer_basislz_global_data() {
+    let bytes = include_bytes!("fixtures/resource-containers/basislz.ktx2");
+    assert_eq!(
+        format!("{:x}", Sha256::digest(bytes)),
+        "ca653a8f6c759573787716f90dc0a5873fb9aa23da28586742ebce988d7b4340"
+    );
+    let facts = inspect_ktx2(Cursor::new(bytes), bytes.len() as u64).unwrap();
+    assert_eq!(
+        (
+            facts.width,
+            facts.height,
+            facts.vk_format,
+            facts.supercompression
+        ),
+        (4, 4, 0, 1)
+    );
+    assert!(facts.generate_mipmaps);
+    assert_eq!(facts.data_format.color_model, 163);
+    assert_eq!((facts.levels[0].offset, facts.levels[0].bytes), (240, 8));
+    assert_eq!(
+        facts.global_data,
+        Some(Ktx2GlobalData {
+            endpoint_count: 2,
+            selector_count: 1,
+            endpoints_bytes: 8,
+            selectors_bytes: 4,
+            tables_bytes: 4,
+            extended_bytes: 0,
+        })
+    );
+    for (offset, value) in [(188, 12u32), (212, 9u32)] {
+        let mut damaged = bytes.to_vec();
+        damaged[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        assert_eq!(texture_error(&damaged), "invalid_texture_container");
+    }
+    let mut damaged = bytes.to_vec();
+    damaged[64..80].fill(0);
+    assert_eq!(texture_error(&damaged), "invalid_texture_container");
+    let mut damaged = bytes.to_vec();
+    damaged[184..186].fill(0);
+    assert_eq!(texture_error(&damaged), "invalid_texture_container");
+    let mut damaged = bytes.to_vec();
+    damaged[72..80].copy_from_slice(&55u64.to_le_bytes());
+    assert_eq!(texture_error(&damaged), "invalid_texture_container");
 }
 
 #[test]

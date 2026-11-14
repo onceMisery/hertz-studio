@@ -18,6 +18,10 @@ const MAX_BLOCK_EDGE: u8 = 32;
 const DFD_BLOCK_HEADER: u64 = 24;
 const DFD_SAMPLE_BYTES: u64 = 16;
 const DFD_VERSION: u16 = 2;
+const BASISLZ_MAX_ENDPOINTS: u16 = 16_128;
+const BASISLZ_MAX_SELECTORS: u16 = 16_128;
+const BASISLZ_HEADER_BYTES: u64 = 20;
+const BASISLZ_IMAGE_DESC_BYTES: u64 = 20;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ktx2Level {
@@ -40,6 +44,18 @@ pub struct Ktx2DataFormat {
     pub sample_count: u16,
 }
 
+/// BasisLZ supercompression global data framing. The ETC1S payload and Huffman
+/// tables stay in the container; this records only validated scalar facts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ktx2GlobalData {
+    pub endpoint_count: u16,
+    pub selector_count: u16,
+    pub endpoints_bytes: u32,
+    pub selectors_bytes: u32,
+    pub tables_bytes: u32,
+    pub extended_bytes: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ktx2Container {
     pub width: u32,
@@ -50,6 +66,7 @@ pub struct Ktx2Container {
     pub generate_mipmaps: bool,
     pub levels: Vec<Ktx2Level>,
     pub data_format: Ktx2DataFormat,
+    pub global_data: Option<Ktx2GlobalData>,
 }
 
 fn u32_at(bytes: &[u8], offset: usize) -> u32 {
@@ -118,7 +135,8 @@ pub fn inspect_ktx2<R: Read>(input: R, declared_bytes: u64) -> Result<Ktx2Contai
     }
     let mut ranges = Vec::with_capacity(level_count as usize + 3);
     let mut dfd_range = None;
-    for (offset, bytes, alignment, required) in [
+    let mut sgd_range = None;
+    for (index, (offset, bytes, alignment, required)) in [
         (
             u64::from(u32_at(&header, 48)),
             u64::from(u32_at(&header, 52)),
@@ -132,7 +150,10 @@ pub fn inspect_ktx2<R: Read>(input: R, declared_bytes: u64) -> Result<Ktx2Contai
             false,
         ),
         (u64_at(&header, 64), u64_at(&header, 72), 8, false),
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
         if bytes == 0 {
             if required || offset != 0 {
                 return Err(reader.error("missing or inconsistent KTX2 metadata range"));
@@ -152,6 +173,9 @@ pub fn inspect_ktx2<R: Read>(input: R, declared_bytes: u64) -> Result<Ktx2Contai
         }
         if required {
             dfd_range = Some((offset, bytes));
+        }
+        if index == 2 {
+            sgd_range = Some((offset, bytes));
         }
         ranges.push((offset, end));
     }
@@ -202,6 +226,26 @@ pub fn inspect_ktx2<R: Read>(input: R, declared_bytes: u64) -> Result<Ktx2Contai
         supercompression,
         &levels,
     )?;
+    let global_data = if supercompression == 1 {
+        let (sgd_offset, sgd_bytes) = sgd_range
+            .ok_or_else(|| reader.error("BasisLZ KTX2 requires supercompression global data"))?;
+        let dfd_end = dfd_offset
+            .checked_add(dfd_bytes)
+            .ok_or_else(|| reader.error("KTX2 metadata range overflow"))?;
+        if sgd_offset < dfd_end {
+            return Err(reader.error("KTX2 metadata order puts global data before the descriptor"));
+        }
+        let position = reader.offset();
+        reader.skip(sgd_offset - position)?;
+        Some(parse_global_data(
+            &mut reader,
+            sgd_bytes,
+            level_count,
+            &levels,
+        )?)
+    } else {
+        None
+    };
     let remaining = reader.remaining();
     reader.skip(remaining)?;
     reader.finish()?;
@@ -214,6 +258,7 @@ pub fn inspect_ktx2<R: Read>(input: R, declared_bytes: u64) -> Result<Ktx2Contai
         generate_mipmaps: declared_levels == 0,
         levels,
         data_format,
+        global_data,
     })
 }
 
@@ -331,5 +376,84 @@ fn parse_data_format<R: Read>(
         texel_block,
         bytes_plane,
         sample_count: u16::try_from(sample_count).expect("bounded KTX2 DFD sample count"),
+    })
+}
+
+/// Validates the BasisLZ supercompression global data framing: endpoint and
+/// selector tables, per-level RGB/alpha slices, and exact section consumption.
+fn parse_global_data<R: Read>(
+    reader: &mut ContainerReader<'_, R>,
+    sgd_bytes: u64,
+    level_count: u32,
+    levels: &[Ktx2Level],
+) -> Result<Ktx2GlobalData> {
+    let header = reader.fixed::<20>()?;
+    let endpoint_count = u16::from_le_bytes([header[0], header[1]]);
+    let selector_count = u16::from_le_bytes([header[2], header[3]]);
+    if endpoint_count == 0
+        || endpoint_count > BASISLZ_MAX_ENDPOINTS
+        || selector_count == 0
+        || selector_count > BASISLZ_MAX_SELECTORS
+    {
+        return Err(reader.error("BasisLZ endpoint/selector count is outside the ETC1S limit"));
+    }
+    let endpoints_bytes = u32_at(&header, 4);
+    let selectors_bytes = u32_at(&header, 8);
+    let tables_bytes = u32_at(&header, 12);
+    let extended_bytes = u32_at(&header, 16);
+    if u64::from(endpoints_bytes) != u64::from(endpoint_count) * 4
+        || u64::from(selectors_bytes) != u64::from(selector_count) * 4
+    {
+        return Err(reader.error("BasisLZ endpoint/selector byte counts contradict their tables"));
+    }
+    let declared = [
+        endpoints_bytes,
+        selectors_bytes,
+        tables_bytes,
+        extended_bytes,
+    ];
+    let data_bytes = declared.iter().try_fold(0u64, |sum, bytes| {
+        sum.checked_add(u64::from(*bytes))
+            .ok_or_else(|| reader.error("BasisLZ global data size overflow"))
+    })?;
+    let expected = u64::from(level_count)
+        .checked_mul(BASISLZ_IMAGE_DESC_BYTES)
+        .and_then(|descs| BASISLZ_HEADER_BYTES.checked_add(descs))
+        .and_then(|frames| frames.checked_add(data_bytes))
+        .ok_or_else(|| reader.error("BasisLZ global data size overflow"))?;
+    if expected != sgd_bytes {
+        return Err(reader.error("BasisLZ global data size contradicts its declared sections"));
+    }
+    for level in levels {
+        let desc = reader.fixed::<20>()?;
+        let rgb_offset = u64::from(u32_at(&desc, 4));
+        let rgb_bytes = u64::from(u32_at(&desc, 8));
+        let alpha_offset = u64::from(u32_at(&desc, 12));
+        let alpha_bytes = u64::from(u32_at(&desc, 16));
+        if rgb_bytes == 0
+            || rgb_offset
+                .checked_add(rgb_bytes)
+                .is_none_or(|end| end > level.bytes)
+            || alpha_offset
+                .checked_add(alpha_bytes)
+                .is_none_or(|end| end > level.bytes)
+        {
+            return Err(reader.error("BasisLZ image slice exceeds its level payload"));
+        }
+        if alpha_bytes > 0
+            && rgb_offset < alpha_offset + alpha_bytes
+            && alpha_offset < rgb_offset + rgb_bytes
+        {
+            return Err(reader.error("BasisLZ RGB and alpha slices overlap"));
+        }
+    }
+    reader.skip(data_bytes)?;
+    Ok(Ktx2GlobalData {
+        endpoint_count,
+        selector_count,
+        endpoints_bytes,
+        selectors_bytes,
+        tables_bytes,
+        extended_bytes,
     })
 }
