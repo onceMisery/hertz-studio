@@ -520,6 +520,15 @@ impl WallpaperSession {
         self.textures.texture_len(path)
     }
 
+    /// Canonical broker URL for one texture image index in the current
+    /// generation. Stale generations and revoked plans yield None.
+    pub(crate) fn texture_url(&self, generation: u64, image_index: usize) -> Option<String> {
+        if generation != self.generation {
+            return None;
+        }
+        self.textures.texture_url(image_index)
+    }
+
     /// Visit the unique broker keys of the current texture plan. The caller may
     /// feed them to `MediaAccess::replace` for the same generation.
     pub(crate) fn with_texture_keys(&self, visit: impl FnMut(&str, &str)) -> usize {
