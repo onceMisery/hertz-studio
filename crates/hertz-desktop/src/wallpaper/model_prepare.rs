@@ -509,6 +509,16 @@ impl ModelTextureController {
             .unwrap_or_else(|error| error.into_inner())
             .is_none()
     }
+
+    /// Whether an active plan is installed. Used by callers that must
+    /// distinguish an unknown path from an unavailable/revoked plan.
+    pub(crate) fn has_plan(&self) -> bool {
+        self.inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+            .is_some_and(|plan| plan.active.load(Ordering::Acquire))
+    }
 }
 
 impl Default for ModelTextureController {

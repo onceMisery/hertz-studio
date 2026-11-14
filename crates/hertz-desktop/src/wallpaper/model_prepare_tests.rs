@@ -5,7 +5,9 @@ use crate::wallpaper::assets::{
     installed_full_model_fixture, installed_full_model_fixture_with_texture,
     model_source_test_probe, model_source_writable,
 };
-use crate::wallpaper::session::{RecoveryLedger, SessionState, WallpaperSession};
+use crate::wallpaper::session::{
+    ModelTextureResolution, RecoveryLedger, SessionState, WallpaperSession,
+};
 use sha2::{Digest, Sha256};
 use std::{
     fs::File,
@@ -1560,6 +1562,110 @@ fn session_publishes_texture_access_and_clears_on_new_generation() {
     assert!(session.publish_texture_access(&access, next));
     assert!(access.permit(&hash, "models/a/tex.png").is_none());
     assert!(!session.publish_texture_access(&access, generation));
+    drop(input);
+    preparation.finish();
+}
+
+#[test]
+fn resolve_texture_response_distinguishes_not_found_from_unavailable() {
+    let fixture = installed_full_model_fixture("model-input-texture-resolve", false);
+    let probe = model_source_test_probe();
+    let preparation = probe
+        .prepare_for_job("texture-resolve".into(), 101)
+        .unwrap();
+    let input = fixture
+        .store
+        .prepare_canonical_model_input(
+            &fixture.reference,
+            &probe,
+            &preparation,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+    let mut session = WallpaperSession::new();
+    assert!(matches!(
+        session.resolve_texture_response("models/a/tex.png", false, None),
+        ModelTextureResolution::Unavailable
+    ));
+    let recovery = RecoveryLedger::new();
+    let generation = session.apply(1, &recovery).unwrap();
+    assert!(session.resolved(generation));
+    assert!(session.prepared(generation));
+    assert!(session.admit_textures(generation, &input, "model-session"));
+    match session.resolve_texture_response("models/a/tex.png", false, None) {
+        ModelTextureResolution::Response(response) => assert_eq!(
+            (
+                response.plan.status,
+                response.plan.content_length,
+                response.plan.body
+            ),
+            (200, 4, true)
+        ),
+        _ => panic!("expected a served texture response"),
+    }
+    assert!(matches!(
+        session.resolve_texture_response("models/a/source.glb", false, None),
+        ModelTextureResolution::NotFound
+    ));
+    assert!(matches!(
+        session.resolve_texture_response("", false, None),
+        ModelTextureResolution::NotFound
+    ));
+    assert!(session.fail(generation, "test_failure", "failure", true));
+    let next = session.apply(2, &recovery).unwrap();
+    assert_eq!(next, generation + 1);
+    assert!(matches!(
+        session.resolve_texture_response("models/a/tex.png", false, None),
+        ModelTextureResolution::Unavailable
+    ));
+    drop(input);
+    preparation.finish();
+}
+
+#[test]
+fn published_texture_keys_reach_the_existing_pinned_media_path() {
+    let fixture = installed_full_model_fixture("model-input-texture-pinned", false);
+    let probe = model_source_test_probe();
+    let preparation = probe.prepare_for_job("texture-pinned".into(), 102).unwrap();
+    let input = fixture
+        .store
+        .prepare_canonical_model_input(
+            &fixture.reference,
+            &probe,
+            &preparation,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+    let (session, generation) = attaching_session(&input);
+    let hash = input.reference().package_hash.clone();
+    let access = MediaAccess::new();
+    assert!(session.publish_texture_access(&access, generation));
+    let permit = access.permit(&hash, "models/a/tex.png").unwrap();
+    assert_eq!(permit.generation, generation);
+    let pinned = fixture
+        .store
+        .pin_verified_media(&hash, "models/a/tex.png")
+        .unwrap()
+        .unwrap();
+    assert_eq!(pinned.entry.bytes, 4);
+    assert_eq!(pinned.entry.path, "models/a/tex.png");
+    assert_eq!(pinned.entry.mime.as_deref(), Some("image/png"));
+    assert_eq!(
+        pinned.entry.sha256,
+        format!("{:x}", Sha256::digest([1u8, 2, 3, 4]))
+    );
+    let mut bytes = Vec::new();
+    std::fs::File::open(&pinned.path)
+        .unwrap()
+        .read_to_end(&mut bytes)
+        .unwrap();
+    assert_eq!(bytes, [1, 2, 3, 4]);
+    assert!(fixture
+        .store
+        .pin_verified_media(&hash, "models/a/missing.png")
+        .is_err());
+    drop(permit);
+    drop(pinned);
     drop(input);
     preparation.finish();
 }

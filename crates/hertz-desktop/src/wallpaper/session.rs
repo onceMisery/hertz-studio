@@ -578,6 +578,22 @@ impl WallpaperSession {
         Some(ModelTextureResponse { plan, reader })
     }
 
+    /// Stable response resolution: an active plan with an unknown path is
+    /// NotFound; no/revoked plan is Unavailable. The broker maps these to
+    /// 404/410 without guessing from a single Option.
+    pub(crate) fn resolve_texture_response<'a>(
+        &'a self,
+        path: &'a str,
+        method_head: bool,
+        range_header: Option<&str>,
+    ) -> ModelTextureResolution<'a> {
+        match self.plan_texture_response(path, method_head, range_header) {
+            Some(response) => ModelTextureResolution::Response(response),
+            None if self.textures.has_plan() => ModelTextureResolution::NotFound,
+            None => ModelTextureResolution::Unavailable,
+        }
+    }
+
     /// 页面加载描述只读借用当前已准入计划，不能替换目标或资源。
     pub(crate) fn media(&self) -> Option<&ResolvedMedia> {
         self.media.as_ref()?.media.as_ref()
@@ -964,6 +980,14 @@ pub(crate) enum FaultDomain {
 pub(crate) struct ModelTextureResponse<'a> {
     pub(crate) plan: StreamPlan,
     pub(crate) reader: Option<ModelTextureChunkReader<'a>>,
+}
+
+/// Three-way result for a texture request: served response, an indexed plan
+/// that does not contain the path, or no active plan at all.
+pub(crate) enum ModelTextureResolution<'a> {
+    Response(ModelTextureResponse<'a>),
+    NotFound,
+    Unavailable,
 }
 
 /// 恢复预算账本：窗口内最多 `MAX_RECOVERY_ATTEMPTS` 次；超额进入终态，
