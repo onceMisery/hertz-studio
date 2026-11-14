@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 use super::*;
+use crate::wallpaper::access::MediaAccess;
 use crate::wallpaper::assets::{
     installed_full_model_fixture, installed_full_model_fixture_with_texture,
     model_source_test_probe, model_source_writable,
@@ -1439,6 +1440,88 @@ fn session_texture_response_window_caps_large_texture_and_stops_after_fail() {
     // fail() revokes the plan; a new response plan is refused.
     assert!(session.fail(generation, "test_failure", "failure", true));
     assert!(session.plan_texture_response(path, false, None).is_none());
+    drop(input);
+    preparation.finish();
+}
+
+#[test]
+fn session_texture_keys_fill_broker_access_and_stop_after_fail() {
+    let fixture = installed_full_model_fixture("model-input-texture-access", false);
+    let probe = model_source_test_probe();
+    let preparation = probe.prepare_for_job("texture-access".into(), 98).unwrap();
+    let input = fixture
+        .store
+        .prepare_canonical_model_input(
+            &fixture.reference,
+            &probe,
+            &preparation,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+    let (mut session, generation) = attaching_session(&input);
+    let hash = input.reference().package_hash.clone();
+    let mut keys = Vec::new();
+    let count =
+        session.with_texture_keys(|hash, path| keys.push((hash.to_owned(), path.to_owned())));
+    assert_eq!(count, 2);
+    assert_eq!(
+        keys,
+        vec![
+            (hash.clone(), "models/a/tex.png".to_owned()),
+            (hash.clone(), "models/a/other.png".to_owned()),
+        ]
+    );
+    let access = MediaAccess::new();
+    assert!(access.replace(generation, &keys));
+    assert!(access.permit(&hash, "models/a/tex.png").is_some());
+    assert!(access.permit(&hash, "models/a/other.png").is_some());
+    assert!(access.permit(&hash, "models/a/source.glb").is_none());
+    assert!(access.permit(&"0".repeat(64), "models/a/tex.png").is_none());
+    assert!(!access.replace(generation, &keys));
+    assert!(session.fail(generation, "test_failure", "failure", true));
+    let mut after = Vec::new();
+    assert_eq!(
+        session.with_texture_keys(|hash, path| after.push((hash.to_owned(), path.to_owned()))),
+        0
+    );
+    assert!(after.is_empty());
+    drop(input);
+    preparation.finish();
+}
+
+#[test]
+fn session_texture_key_visit_allocates_nothing() {
+    let fixture = installed_full_model_fixture("model-input-texture-access-alloc", false);
+    let probe = model_source_test_probe();
+    let preparation = probe
+        .prepare_for_job("texture-access-alloc".into(), 99)
+        .unwrap();
+    let input = fixture
+        .store
+        .prepare_canonical_model_input(
+            &fixture.reference,
+            &probe,
+            &preparation,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+    let (session, _generation) = attaching_session(&input);
+    let ((count, length), sample) = budget::measure_requested_heap(|| {
+        let mut count = 0usize;
+        let mut length = 0usize;
+        session.with_texture_keys(|hash, path| {
+            count += 1;
+            length += hash.len() + path.len();
+        });
+        (count, length)
+    });
+    assert_eq!(count, 2);
+    // 2 * 64-byte package hash + 16 + 18 bytes of canonical paths.
+    assert_eq!(length, 162);
+    assert_eq!(
+        (sample.peak, sample.retained, sample.overflow),
+        (0, 0, false)
+    );
     drop(input);
     preparation.finish();
 }

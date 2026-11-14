@@ -520,6 +520,12 @@ impl WallpaperSession {
         self.textures.texture_len(path)
     }
 
+    /// Visit the unique broker keys of the current texture plan. The caller may
+    /// feed them to `MediaAccess::replace` for the same generation.
+    pub(crate) fn with_texture_keys(&self, visit: impl FnMut(&str, &str)) -> usize {
+        self.textures.with_resource_keys(visit)
+    }
+
     /// Chunked loader reader over the current generation's pinned texture.
     /// Unknown paths and non-current plans yield no reader.
     pub(crate) fn texture_chunk_reader<'a>(
