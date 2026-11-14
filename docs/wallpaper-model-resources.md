@@ -871,3 +871,19 @@ vendor/type、version 1、colorModel 0、dim2/dim3 非 1、bytesPlane 多平面�
 即拒绝。三处变异（跳过 level 尺寸校验、接受 UNSPECIFIED colorModel、跳过
 sample position）均按预期变红后还原。本批不实现 BasisLZ/UASTC 解压、KTX2→GPU
 格式选择、转码 worker 或真实 GPU 上传/首帧；多 block/vendor DFD fail-closed。
+
+2026-11-14 r53 BasisLZ SGD 续接：supercompression=1 时要求 SGD 存在且位于 DFD
+之后，解析 20B 头（endpoint/selector 计数与四段字节数）、逐 level 20B
+imageDesc（RGB/alpha slice）与数据段：计数必须在 1..=16128，endpoints 字节数
+必须等于 count×4、selectors 同理；总长必须等于
+20+20×level_count+四段数据和；RGB slice 非空且 offset+length 落在该 level
+payload 内，alpha 同理，alpha>0 时两者不得重叠。validated 事实以
+`Ktx2GlobalData` 暴露，非 BasisLZ 为 None；数据段只 skip，不解释 ETC1S/Huffman。
+
+真实证据：pinned KTX-Parse writer 生成并用其 reader 回读的 `basislz.ktx2`
+（4×4、ETC1S DFD、1 level/8B、SGD 56B：2 endpoints/1 selector/1 imageDesc，
+SHA ca653a8f…）被接受，DFD/level/SGD facts 精确匹配；反例：zero SGD、
+SGD 长度 55、endpoints 字节数 12、endpoint count 0、rgb slice 9 > level 8
+均 `invalid_texture_container`。三处变异（跳过 SGD 校验、跳过总长校验、
+跳过 slice bounds）均按预期变红后还原。本批不做 ETC1S 解码、GPU 格式选择、
+转码 worker 或 GPU 上传/首帧；UASTC 仍只做容器/DFD 结构校验。
