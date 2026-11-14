@@ -852,6 +852,153 @@ fn texture_plan_grant_permit_and_read_allocate_nothing() {
 }
 
 #[test]
+fn controller_replaces_only_forward_generations_and_revokes() {
+    let fixture = installed_full_model_fixture("model-input-texture-controller", false);
+    let probe = model_source_test_probe();
+    let preparation = probe
+        .prepare_for_job("texture-controller".into(), 87)
+        .unwrap();
+    let baseline = probe.budget_for_test().usage();
+    let input = fixture
+        .store
+        .prepare_canonical_model_input(
+            &fixture.reference,
+            &probe,
+            &preparation,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+    let held = probe.budget_for_test().usage();
+    let input2 = input.clone();
+    let controller = ModelTextureController::new();
+    assert!(controller.is_empty());
+    assert_eq!(controller.generation(), 0);
+    assert!(!controller.matches("model-session", 1));
+    assert!(controller.install(&input, "model-session", 1));
+    assert_eq!(controller.generation(), 1);
+    assert!(controller.matches("model-session", 1));
+    assert!(!controller.matches("model-session", 2));
+    let cancel = AtomicBool::new(false);
+    let mut bytes = [0u8; 4];
+    assert!(controller
+        .read_into("models/a/tex.png", 0, &mut bytes, &cancel)
+        .unwrap()
+        .is_some());
+    assert_eq!(bytes, [1, 2, 3, 4]);
+    // Same or older generation never replaces the current plan.
+    assert!(!controller.install(&input, "model-session", 1));
+    assert!(!controller.install(&input, "model-session", 0));
+    assert!(controller.install(&input, "model-session", 2));
+    assert_eq!(controller.generation(), 2);
+    drop(input);
+    // The controller's plan clone keeps pins, facts and the closure charge.
+    assert_eq!(probe.budget_for_test().usage(), held);
+    assert!(controller
+        .read_into("models/a/tex.png", 0, &mut bytes, &cancel)
+        .unwrap()
+        .is_some());
+    assert!(controller.revoke());
+    assert!(!controller.revoke());
+    assert!(controller.is_empty());
+    assert_eq!(controller.generation(), 0);
+    assert!(controller
+        .read_into("models/a/tex.png", 0, &mut bytes, &cancel)
+        .unwrap()
+        .is_none());
+    assert!(controller.install(&input2, "model-session", 3));
+    drop(input2);
+    assert!(controller.revoke());
+    assert_eq!(probe.budget_for_test().usage(), baseline);
+    preparation.finish();
+}
+
+#[test]
+fn controller_rejects_invalid_identity_and_unknown_paths() {
+    let fixture = installed_full_model_fixture("model-input-texture-controller-paths", false);
+    let probe = model_source_test_probe();
+    let preparation = probe
+        .prepare_for_job("texture-controller-paths".into(), 88)
+        .unwrap();
+    let input = fixture
+        .store
+        .prepare_canonical_model_input(
+            &fixture.reference,
+            &probe,
+            &preparation,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+    let controller = ModelTextureController::new();
+    assert!(!controller.install(&input, "", 1));
+    assert!(!controller.install(&input, &"s".repeat(129), 1));
+    assert!(!controller.install(&input, "session", 0));
+    assert!(controller.is_empty());
+    assert_eq!(controller.generation(), 0);
+    assert!(controller.install(&input, "session", 1));
+    let cancel = AtomicBool::new(false);
+    let mut output = [0u8; 4];
+    for path in [
+        "",
+        "models/a/tex.png/",
+        "models/a/../models/a/tex.png",
+        "models/a/TEX.PNG",
+        "models/a/tex.png?x=1",
+        "models/a/source.glb",
+    ] {
+        assert!(
+            controller
+                .read_into(path, 0, &mut output, &cancel)
+                .unwrap()
+                .is_none(),
+            "unexpected read for {path:?}"
+        );
+    }
+    assert!(controller
+        .read_into("models/a/other.png", 0, &mut output, &cancel)
+        .unwrap()
+        .is_some());
+    assert_eq!(output, [1, 2, 3, 4]);
+    drop(input);
+    preparation.finish();
+}
+
+#[test]
+fn controller_install_and_read_allocate_nothing() {
+    let fixture = installed_full_model_fixture("model-input-texture-controller-alloc", false);
+    let probe = model_source_test_probe();
+    let preparation = probe
+        .prepare_for_job("texture-controller-alloc".into(), 89)
+        .unwrap();
+    let input = fixture
+        .store
+        .prepare_canonical_model_input(
+            &fixture.reference,
+            &probe,
+            &preparation,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+    let controller = ModelTextureController::new();
+    let ((ok, bytes), sample) = budget::measure_requested_heap(|| {
+        let installed = controller.install(&input, "session", 1);
+        let mut output = [0u8; 4];
+        let read = controller
+            .read_into("models/a/tex.png", 0, &mut output, &AtomicBool::new(false))
+            .unwrap()
+            .is_some();
+        (installed && read, output)
+    });
+    assert!(ok);
+    assert_eq!(bytes, [1, 2, 3, 4]);
+    assert_eq!(
+        (sample.peak, sample.retained, sample.overflow),
+        (0, 0, false)
+    );
+    drop(input);
+    preparation.finish();
+}
+
+#[test]
 fn source_success_then_actual_model_w_rejection_keeps_source_fee_and_pins_until_error_drop() {
     let fixture = installed_full_model_fixture("model-input-W", false);
     let probe = model_source_test_probe();

@@ -13,7 +13,7 @@ use crate::root_owner::arc_allocation_bytes;
 use hertz_wallpaper::{model_binary::CompactCheckedGlbResource, model_structure::ModelHeapBounds};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc,
+    Arc, Mutex,
 };
 
 #[path = "model_texture_closure.rs"]
@@ -360,6 +360,101 @@ impl ModelTextureLease<'_> {
             .input
             .texture_read_permit()
             .read_into(self.image_index, offset, output, cancel)
+    }
+}
+
+/// Controller-owned current texture plan. A strictly newer generation replaces
+/// the old plan and drops it outside the lock; revocation clears it. Reads are
+/// synchronous under the lock, so no lease or File escapes to the caller.
+pub(crate) struct ModelTextureController {
+    inner: Mutex<Option<ModelTexturePlan>>,
+}
+
+impl ModelTextureController {
+    pub(crate) fn new() -> Self {
+        Self {
+            inner: Mutex::new(None),
+        }
+    }
+
+    pub(crate) fn install(&self, input: &ModelInput, session: &str, generation: u64) -> bool {
+        let Some(plan) = input.grant_texture_plan(session, generation) else {
+            return false;
+        };
+        let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        if inner
+            .as_ref()
+            .is_some_and(|current| generation <= current.generation())
+        {
+            return false;
+        }
+        let old = inner.replace(plan);
+        drop(inner);
+        drop(old);
+        true
+    }
+
+    /// Clear the current plan and release its input clone/charge. Returns
+    /// whether a plan was installed.
+    pub(crate) fn revoke(&self) -> bool {
+        let old = self
+            .inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
+        let installed = old.is_some();
+        drop(old);
+        installed
+    }
+
+    pub(crate) fn generation(&self) -> u64 {
+        self.inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+            .map_or(0, ModelTexturePlan::generation)
+    }
+
+    pub(crate) fn matches(&self, session: &str, generation: u64) -> bool {
+        self.inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+            .is_some_and(|plan| plan.matches(session, generation))
+    }
+
+    /// Exact-path synchronous read under the current plan. `None` means there
+    /// is no plan or the path is not one of its indexed entries.
+    pub(crate) fn read_into(
+        &self,
+        path: &str,
+        offset: u64,
+        output: &mut [u8],
+        cancel: &AtomicBool,
+    ) -> Result<Option<()>, JobError> {
+        let inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        let Some(plan) = inner.as_ref() else {
+            return Ok(None);
+        };
+        let Some(lease) = plan.permit(path) else {
+            return Ok(None);
+        };
+        lease.read_into(offset, output, cancel)?;
+        Ok(Some(()))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .is_none()
+    }
+}
+
+impl Default for ModelTextureController {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
