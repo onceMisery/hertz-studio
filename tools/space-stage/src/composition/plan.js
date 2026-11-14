@@ -63,9 +63,9 @@ export function compilePlan(projection, registry = null, identity = null) {
       || !Array.isArray(resolvedAssets)) throw new Error('composition-preparation-projection-required');
   const values = projectValues(ir, finalPublicValues);
   if (projection.semanticKey !== ir.semanticKey) throw new Error('composition-semantic-identity-mismatch');
-  const outputEffects = [], nodeEffects = new Map();
+  const outputEffects = [], nodeEffects = new Map(), effectNodes = new Map();
   const nodeIndices = new Map(ir.nodes.map((node, index) => [node.id, index]));
-  for (const effect of ir.effects) {
+  for (const [effectIndex, effect] of ir.effects.entries()) {
     const target = effect.target;
     if (effect.type === 'colorAdjust') {
       if (target.kind !== 'output')
@@ -78,7 +78,7 @@ export function compilePlan(projection, registry = null, identity = null) {
         saturation: properties.saturation, hueDegrees: properties.hueDegrees });
       continue;
     }
-    if (effect.type !== 'ripple' && effect.type !== 'wind')
+    if (!['ripple', 'wind', 'mask'].includes(effect.type))
       throw new Error(`composition-adapter-unavailable:effect:${effect.type}:${target.kind}`);
     if (target.kind !== 'node')
       throw new Error(`composition-adapter-unavailable:effect:${effect.type}:${target.kind}`);
@@ -86,17 +86,27 @@ export function compilePlan(projection, registry = null, identity = null) {
     if (index === undefined) throw new Error('composition-effect-target-invalid');
     if (!['image', 'video', 'text', 'particles'].includes(ir.nodes[index].nodeType))
       throw new Error(`composition-adapter-unavailable:effect-target:${ir.nodes[index].nodeType}`);
-    if (effect.assets && Object.keys(effect.assets).length) throw new Error('composition-effect-assets-invalid');
-    const properties = effect.properties || {}, names = effect.type === 'ripple'
-      ? ['amplitude', 'frequency', 'speed'] : ['strength', 'speed', 'directionDegrees'];
-    if (Object.keys(properties).length !== names.length || !names.every(name => Number.isFinite(properties[name])))
-      throw new Error('composition-effect-properties-invalid');
-    const effects = nodeEffects.get(index) || {};
+    const properties = effect.properties || {}, effects = nodeEffects.get(index) || {};
     if (effects[effect.type]) throw new Error('composition-adapter-unavailable:effect-chain');
-    effects[effect.type] = effect.type === 'ripple'
-      ? { amplitude: properties.amplitude, frequency: properties.frequency, speed: properties.speed }
-      : { strength: properties.strength, speed: properties.speed, directionDegrees: properties.directionDegrees };
+    if (effect.type === 'mask') {
+      const assets = effect.assets || {};
+      if (Object.keys(properties).length !== 1 || typeof properties.invert !== 'boolean')
+        throw new Error('composition-effect-properties-invalid');
+      if (Object.keys(assets).length !== 1 || typeof assets.maskAsset !== 'string')
+        throw new Error('composition-effect-assets-invalid');
+      effects.mask = { invert: properties.invert };
+    } else {
+      if (effect.assets && Object.keys(effect.assets).length) throw new Error('composition-effect-assets-invalid');
+      const names = effect.type === 'ripple'
+        ? ['amplitude', 'frequency', 'speed'] : ['strength', 'speed', 'directionDegrees'];
+      if (Object.keys(properties).length !== names.length || !names.every(name => Number.isFinite(properties[name])))
+        throw new Error('composition-effect-properties-invalid');
+      effects[effect.type] = effect.type === 'ripple'
+        ? { amplitude: properties.amplitude, frequency: properties.frequency, speed: properties.speed }
+        : { strength: properties.strength, speed: properties.speed, directionDegrees: properties.directionDegrees };
+    }
     nodeEffects.set(index, effects);
+    effectNodes.set(effectIndex, index);
   }
   if (outputEffects.length > 1) throw new Error('composition-adapter-unavailable:effect-chain');
   for (const binding of ir.bindings) {
@@ -150,7 +160,11 @@ export function compilePlan(projection, registry = null, identity = null) {
   for (const [useIndex, use] of uses.entries()) {
     const asset = assets.get(projection.resolvedUses?.[useIndex] || use.assetId);
     if (asset?.assetId !== use.assetId) throw new Error('composition-resource-logical-identity-mismatch');
-    if (!asset || use.effectIndex !== null || !Number.isSafeInteger(use.nodeIndex)) throw new Error('composition-resource-closure-mismatch');
+    const effectTarget = use.effectIndex == null ? null : effectNodes.get(use.effectIndex);
+    const targetIndex = effectTarget ?? use.nodeIndex;
+    if (!asset || !Number.isSafeInteger(targetIndex)
+        || (effectTarget !== null && (use.nodeIndex !== null || use.field !== 'maskAsset')))
+      throw new Error('composition-resource-closure-mismatch');
     if (['vector', 'model', 'texture'].includes(asset.kind) || /glb|ktx/i.test(asset.adapterId))
       throw new Error(`composition-adapter-unavailable:${asset.kind}:${asset.adapterId}`);
     if (!['image', 'video', 'font'].includes(asset.kind)) throw new Error(`composition-adapter-unavailable:${asset.kind}`);
@@ -158,7 +172,7 @@ export function compilePlan(projection, registry = null, identity = null) {
       throw new Error('composition-real-dimensions-required');
     if (asset.logicalKind === 'vector' && (asset.adapterId !== 'prepared-svg-png' || !['color','sprite'].includes(use.usage)
         || JSON.parse(asset.decodeOptions.svgCanonicalOptions).usage !== use.usage)) throw new Error('composition-svg-preparation-required');
-    const node = ir.nodes[use.nodeIndex];
+    const node = ir.nodes[targetIndex];
     if (!node) throw new Error('composition-resource-node-invalid');
     let clock = null;
     if (asset.kind === 'video') {
@@ -171,7 +185,11 @@ export function compilePlan(projection, registry = null, identity = null) {
     const identity = { contentKey: asset.contentKey, decodeOptions, adapterId: asset.adapterId, adapterVersion: asset.adapterVersion };
     const key = resourceKey(identity,'target-plan');
     const requirement = unique.get(key) || { ...asset, key, identity, usage: use.usage, clock };
-    unique.set(key, requirement); nodeResources[use.nodeIndex][use.field] = requirement;
+    // A node schema mask and a mask effect would compete for the same sampling
+    // slot; accept only one source until their composition semantics are fixed.
+    if (effectTarget !== null && nodeResources[targetIndex].maskAsset)
+      throw new Error('composition-adapter-unavailable:effect-chain');
+    unique.set(key, requirement); nodeResources[targetIndex][use.field] = requirement;
   }
   const pixels = target.width * target.height;
   if (!Number.isSafeInteger(pixels) || pixels < 1 || !Number.isSafeInteger(canvas.width * canvas.height)
