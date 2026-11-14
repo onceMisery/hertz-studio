@@ -526,6 +526,19 @@ impl WallpaperSession {
         self.textures.with_resource_keys(visit)
     }
 
+    /// Publish the current texture keys into the broker access set for this
+    /// controller generation. An empty/revoked plan publishes an empty set,
+    /// clearing keys from the previous generation; stale generations are
+    /// refused before touching the access set.
+    pub(crate) fn publish_texture_access(&self, access: &MediaAccess, generation: u64) -> bool {
+        if generation != self.generation {
+            return false;
+        }
+        let mut keys: Vec<(String, String)> = Vec::new();
+        self.with_texture_keys(|hash, path| keys.push((hash.to_owned(), path.to_owned())));
+        access.replace_owned(generation, keys)
+    }
+
     /// Chunked loader reader over the current generation's pinned texture.
     /// Unknown paths and non-current plans yield no reader.
     pub(crate) fn texture_chunk_reader<'a>(

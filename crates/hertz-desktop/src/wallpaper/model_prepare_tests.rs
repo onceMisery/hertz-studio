@@ -1527,6 +1527,44 @@ fn session_texture_key_visit_allocates_nothing() {
 }
 
 #[test]
+fn session_publishes_texture_access_and_clears_on_new_generation() {
+    let fixture = installed_full_model_fixture("model-input-texture-publish", false);
+    let probe = model_source_test_probe();
+    let preparation = probe
+        .prepare_for_job("texture-publish".into(), 100)
+        .unwrap();
+    let input = fixture
+        .store
+        .prepare_canonical_model_input(
+            &fixture.reference,
+            &probe,
+            &preparation,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+    let (mut session, generation) = attaching_session(&input);
+    let hash = input.reference().package_hash.clone();
+    let access = MediaAccess::new();
+    assert!(session.publish_texture_access(&access, generation));
+    assert!(access.permit(&hash, "models/a/tex.png").is_some());
+    assert!(access.permit(&hash, "models/a/other.png").is_some());
+    assert!(access.permit(&hash, "models/a/source.glb").is_none());
+    // Stale/unknown generations never touch the access set.
+    assert!(!session.publish_texture_access(&access, generation + 1));
+    assert!(session.fail(generation, "test_failure", "failure", true));
+    let recovery = RecoveryLedger::new();
+    let next = session.apply(2, &recovery).unwrap();
+    assert_eq!(next, generation + 1);
+    // The revoked plan publishes an empty set for the new generation, clearing
+    // the previous textures.
+    assert!(session.publish_texture_access(&access, next));
+    assert!(access.permit(&hash, "models/a/tex.png").is_none());
+    assert!(!session.publish_texture_access(&access, generation));
+    drop(input);
+    preparation.finish();
+}
+
+#[test]
 fn source_success_then_actual_model_w_rejection_keeps_source_fee_and_pins_until_error_drop() {
     let fixture = installed_full_model_fixture("model-input-W", false);
     let probe = model_source_test_probe();

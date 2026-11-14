@@ -230,14 +230,19 @@ impl MediaAccess {
     /// 只由原生 TargetPlanner 在准入后调用；同代际、旧代际和畸形集合不改授权。
     /// 现阶段生产只使用内置场景，集合保持为空；媒体选择随 P1-05 接入。
     pub(crate) fn replace(&self, generation: u64, resources: &[(String, String)]) -> bool {
+        self.replace_owned(generation, resources.to_vec())
+    }
+
+    /// Owned variant used by native publishers that already built the bounded
+    /// key list; avoids cloning every package hash and path a second time.
+    pub(crate) fn replace_owned(&self, generation: u64, resources: Vec<(String, String)>) -> bool {
         if resources.len() > 512 {
             return false;
         }
         self.replace_resources(
             generation,
             resources
-                .iter()
-                .cloned()
+                .into_iter()
                 .map(|key| (key, Resource::default()))
                 .collect(),
         )
