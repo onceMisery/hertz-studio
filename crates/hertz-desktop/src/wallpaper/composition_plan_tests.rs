@@ -80,8 +80,15 @@ const TEXTURED_PNG: &[u8] = &[
     0, 0, 114, 182, 13, 36, 0, 0, 0, 16, 73, 68, 65, 84, 120, 156, 99, 248, 207, 192, 240, 31, 10,
     33, 20, 0, 69, 204, 7, 249, 102, 203, 255, 57, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
 ];
-fn textured_model_glb() -> Vec<u8> {
-    let mut bin = vec![0_u8; 104 + TEXTURED_PNG.len()];
+fn textured_model_glb(external: bool) -> Vec<u8> {
+    let mut bin = vec![
+        0_u8;
+        if external {
+            104
+        } else {
+            104 + TEXTURED_PNG.len()
+        }
+    ];
     for (index, value) in [0.0_f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
         .iter()
         .enumerate()
@@ -100,23 +107,32 @@ fn textured_model_glb() -> Vec<u8> {
     for (index, value) in [0_u16, 1, 2].iter().enumerate() {
         bin[96 + index * 2..96 + index * 2 + 2].copy_from_slice(&value.to_le_bytes());
     }
-    bin[104..].copy_from_slice(TEXTURED_PNG);
+    bin[104..].copy_from_slice(if external { &[] } else { TEXTURED_PNG });
+    let views = if external {
+        json!([{"buffer":0,"byteOffset":0,"byteLength":36},
+            {"buffer":0,"byteOffset":36,"byteLength":36},
+            {"buffer":0,"byteOffset":72,"byteLength":24},
+            {"buffer":0,"byteOffset":96,"byteLength":8}])
+    } else {
+        json!([{"buffer":0,"byteOffset":0,"byteLength":36},
+            {"buffer":0,"byteOffset":36,"byteLength":36},
+            {"buffer":0,"byteOffset":72,"byteLength":24},
+            {"buffer":0,"byteOffset":96,"byteLength":8},
+            {"buffer":0,"byteOffset":104,"byteLength":TEXTURED_PNG.len()}])
+    };
     let document = json!({
         "asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],"nodes":[{"mesh":0}],
         "meshes":[{"primitives":[{"attributes":{"POSITION":0,"NORMAL":1,"TEXCOORD_0":3},
             "indices":2,"material":0}]}],
         "buffers":[{"byteLength":bin.len()}],
-        "bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":36},
-            {"buffer":0,"byteOffset":36,"byteLength":36},
-            {"buffer":0,"byteOffset":72,"byteLength":24},
-            {"buffer":0,"byteOffset":96,"byteLength":8},
-            {"buffer":0,"byteOffset":104,"byteLength":TEXTURED_PNG.len()}],
+        "bufferViews":views,
         "accessors":[
             {"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[1,1,0]},
             {"bufferView":1,"componentType":5126,"count":3,"type":"VEC3"},
             {"bufferView":3,"componentType":5123,"count":3,"type":"SCALAR"},
             {"bufferView":2,"componentType":5126,"count":3,"type":"VEC2"}],
-        "images":[{"bufferView":4,"mimeType":"image/png"}],
+        "images":[if external {json!({"uri":"textures/red.png","mimeType":"image/png"})}
+            else {json!({"bufferView":4,"mimeType":"image/png"})}],
         "samplers":[{"magFilter":9728,"minFilter":9728,"wrapS":33071,"wrapT":33071}],
         "textures":[{"source":0,"sampler":0}],
         "materials":[{"pbrMetallicRoughness":{"baseColorFactor":[1,1,1,1],
@@ -1178,7 +1194,7 @@ async fn native_model_fixture_prepares_core_facts_and_projects_scene3d() {
 #[tokio::test]
 async fn native_model_textured_fixture_projects_texture_facts_and_uploads() {
     let root = tempfileish::temp_dir("composition-native-model-textured");
-    let glb = textured_model_glb();
+    let glb = textured_model_glb(false);
     let entries = vec![
         (
             "composition.json",
@@ -1233,6 +1249,109 @@ async fn native_model_textured_fixture_projects_texture_facts_and_uploads() {
         admission
             .bind_composition(plan, &access, binding.session_id())
             .unwrap();
+        let uri = admission.composition_url().unwrap();
+        let path = uri.split("/files/").nth(1).unwrap();
+        let reader = access.permit(&package_hash, path).unwrap();
+        std::fs::write(output.join("projection.json"), reader.payload().unwrap()).unwrap();
+        std::fs::write(output.join("uri.txt"), uri).unwrap();
+        std::fs::write(
+            output.join("native-init.js"),
+            format!(
+                "{}\n{}",
+                binding.initialization_script(),
+                admission.initialization_script()
+            ),
+        )
+        .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn native_model_external_texture_pins_and_publishes_broker_url() {
+    let root = tempfileish::temp_dir("composition-native-model-texture-external");
+    let glb = textured_model_glb(true);
+    let entries = vec![
+        (
+            "composition.json",
+            serde_json::to_vec(&document_model(json!([model_node("mesh", json!({}))]))).unwrap(),
+            "application/json",
+        ),
+        ("assets/model.glb", glb.clone(), "model/gltf-binary"),
+        (
+            "assets/textures/red.png",
+            TEXTURED_PNG.to_vec(),
+            "image/png",
+        ),
+    ];
+    let assets = json!([
+        {"id":"model","kind":"model","source":"assets/model.glb","variants":[]},
+        {"id":"tex","kind":"image","source":"assets/textures/red.png","variants":[]}
+    ]);
+    let (jobs, hash, _) = install_document(root.path(), entries, assets, json!([])).await;
+    let plan = selected(jobs, hash, Default::default()).await.unwrap();
+    let model = plan.assets["model"].as_model().unwrap();
+    assert_eq!(model.profile(), "static-pbr-texture-v1");
+    assert_eq!(model.texture_upload_bytes(), 32);
+    assert!(model
+        .texture_urls()
+        .get("textures/red.png")
+        .is_some_and(|url| url.contains("/files/assets/textures/red.png")));
+    assert!(plan
+        .pins()
+        .iter()
+        .any(|(_, pin)| pin.entry.path == "assets/textures/red.png"));
+    let gl = plan
+        .gl_plan(OwnerKind::Preview, "model-external-owner".into(), 1, 60, 15)
+        .unwrap();
+    let projection = plan
+        .projection("same-fixed-session-model-external", 1, 12, &gl.limits)
+        .unwrap();
+    let asset = projection["resolvedAssets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|asset| asset["kind"] == "model")
+        .unwrap();
+    assert_eq!(asset["textureUploadBytes"], 32);
+    assert_eq!(asset["modelFacts"]["images"][0]["source"], "external");
+    assert_eq!(asset["modelFacts"]["images"][0]["uri"], "textures/red.png");
+    let texture_url = asset["textureUrls"]["textures/red.png"].as_str().unwrap();
+    assert!(texture_url.contains("/files/assets/textures/red.png"));
+    if let Some(output) = std::env::var_os("HERTZ_COMPOSITION_NATIVE_FIXTURE") {
+        let output = std::path::PathBuf::from(output).join("model-textured-external");
+        std::fs::create_dir_all(&output).unwrap();
+        std::fs::write(output.join("model.glb"), &glb).unwrap();
+        std::fs::write(output.join("red.png"), TEXTURED_PNG).unwrap();
+        let package_hash = model.reference().package_hash.clone();
+        std::fs::write(
+            output.join("files.json"),
+            serde_json::to_vec(&json!([
+                {"url":model.url(),"file":"model.glb"},
+                {"url":texture_url,"file":"red.png"}
+            ]))
+            .unwrap(),
+        )
+        .unwrap();
+        let binding = super::super::page_events::PageBinding::new(1).unwrap();
+        let access = super::super::access::MediaAccess::new();
+        let permitted = access
+            .permit(&package_hash, "assets/textures/red.png")
+            .is_some();
+        let mut admission =
+            super::super::gl_plan::GlAdmission::new(gl, Arc::new(BudgetCoordinator::new()))
+                .unwrap();
+        admission
+            .bind_composition(plan, &access, binding.session_id())
+            .unwrap();
+        let permit = access
+            .permit(&package_hash, "assets/textures/red.png")
+            .unwrap();
+        let pinned = permit
+            .pinned()
+            .expect("external model textures are published as pinned files");
+        assert_eq!(pinned.entry.path, "assets/textures/red.png");
+        assert_eq!(pinned.entry.bytes, TEXTURED_PNG.len() as u64);
+        assert!(!permitted, "texture access is published by binding");
         let uri = admission.composition_url().unwrap();
         let path = uri.split("/files/").nth(1).unwrap();
         let reader = access.permit(&package_hash, path).unwrap();

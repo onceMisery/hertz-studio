@@ -149,6 +149,8 @@ pub(crate) struct PreparedModel {
     content_key: String,
     profile: String,
     texture_upload_bytes: u64,
+    texture_urls: BTreeMap<String, String>,
+    texture_pins: Vec<Arc<PinnedMedia>>,
     facts: Value,
 }
 
@@ -170,6 +172,12 @@ impl PreparedModel {
     }
     fn texture_upload_bytes(&self) -> u64 {
         self.texture_upload_bytes
+    }
+    fn texture_urls(&self) -> &BTreeMap<String, String> {
+        &self.texture_urls
+    }
+    fn texture_pins(&self) -> &[Arc<PinnedMedia>] {
+        &self.texture_pins
     }
     fn facts(&self) -> &Value {
         &self.facts
@@ -743,6 +751,7 @@ async fn prepare_assets(
                         hertz_wallpaper::model_profile::static_textured_profile_facts(
                             checked.resource(),
                             checked.bytes(),
+                            &asset.source,
                         )
                         .map_err(package_error)?
                     } else {
@@ -754,23 +763,92 @@ async fn prepare_assets(
                     }
                 };
                 let mut texture_upload_bytes = 0_u64;
+                let mut texture_urls = BTreeMap::new();
+                let mut texture_pins: Vec<Arc<PinnedMedia>> = Vec::new();
                 if facts["profile"] == "static-pbr-texture-v1" {
                     let images = facts["images"]
                         .as_array()
                         .ok_or_else(|| JobError::new("adapter_unavailable", "model images 缺失"))?;
+                    let structure = &checked.resource().structure;
                     for image in images {
                         let index = image["index"].as_u64().ok_or_else(|| {
                             JobError::new("adapter_unavailable", "model image 索引无效")
                         })? as usize;
-                        texture_upload_bytes = checked_sum(&[
-                            texture_upload_bytes,
-                            hertz_wallpaper::model_profile::embedded_image_upload_bytes(
-                                &bytes,
-                                checked.resource(),
-                                index,
-                            )
-                            .map_err(package_error)?,
-                        ])?;
+                        let fact = structure.images.get(index).ok_or_else(|| {
+                            JobError::new("adapter_unavailable", "model image 索引无效")
+                        })?;
+                        let upload = match fact {
+                            hertz_wallpaper::model_structure::ModelImage::Embedded { .. } => {
+                                hertz_wallpaper::model_profile::embedded_image_upload_bytes(
+                                    &bytes,
+                                    checked.resource(),
+                                    index,
+                                )
+                                .map_err(package_error)?
+                            }
+                            hertz_wallpaper::model_structure::ModelImage::Package {
+                                path,
+                                mime,
+                                bytes: entry_bytes,
+                                sha256,
+                                ..
+                            } => {
+                                let uri = image["uri"].as_str().ok_or_else(|| {
+                                    JobError::new("adapter_unavailable", "model texture URI 无效")
+                                })?;
+                                let media = Arc::new(
+                                    jobs.assets()
+                                        .pin_verified_media(&package.package_hash, path)?
+                                        .ok_or_else(|| {
+                                            JobError::new("hash_mismatch", "model 纹理未通过核验")
+                                        })?,
+                                );
+                                if media.entry.bytes != *entry_bytes
+                                    || media.entry.sha256 != *sha256
+                                    || media.entry.mime.as_deref() != Some(mime.as_str())
+                                {
+                                    return Err(JobError::new(
+                                        "hash_mismatch",
+                                        "model 纹理条目不一致",
+                                    ));
+                                }
+                                let mut texture_bytes = Vec::with_capacity(
+                                    usize::try_from(media.entry.bytes)
+                                        .unwrap_or(usize::MAX)
+                                        .saturating_add(1),
+                                );
+                                super::assets::open_immutable(&media.path)?
+                                    .take(hertz_wallpaper::MAX_MODEL_BYTES + 1)
+                                    .read_to_end(&mut texture_bytes)
+                                    .map_err(|error| {
+                                        JobError::io(format!("读取固定模型纹理失败：{error}"))
+                                    })?;
+                                if texture_bytes.len() as u64 != media.entry.bytes {
+                                    return Err(JobError::new(
+                                        "hash_mismatch",
+                                        "model 纹理长度变化",
+                                    ));
+                                }
+                                let url =
+                                    super::webresource::files_url(&package.package_hash, path)
+                                        .ok_or_else(|| {
+                                            JobError::new(
+                                                "adapter_unavailable",
+                                                "model 纹理 URL 无效",
+                                            )
+                                        })?;
+                                texture_urls.insert(uri.to_owned(), url);
+                                if !texture_pins.iter().any(|pinned| pinned.path == media.path) {
+                                    texture_pins.push(Arc::clone(&media));
+                                }
+                                hertz_wallpaper::model_profile::image_upload_bytes(
+                                    &texture_bytes,
+                                    mime,
+                                )
+                                .map_err(package_error)?
+                            }
+                        };
+                        texture_upload_bytes = checked_sum(&[texture_upload_bytes, upload])?;
                     }
                     if texture_upload_bytes == 0 {
                         return Err(JobError::new(
@@ -796,6 +874,8 @@ async fn prepare_assets(
                     content_key: checked.sha256_hex(),
                     profile,
                     texture_upload_bytes,
+                    texture_urls,
+                    texture_pins,
                     facts,
                 }))
             }
@@ -1600,7 +1680,8 @@ impl PreparedComposition {
         &self.package_hash
     }
     pub(crate) fn pins(&self) -> Vec<(String, Arc<PinnedMedia>)> {
-        self.assets
+        let mut pins: Vec<(String, Arc<PinnedMedia>)> = self
+            .assets
             .values()
             .map(|asset| {
                 (
@@ -1608,7 +1689,17 @@ impl PreparedComposition {
                     Arc::clone(asset.pin()),
                 )
             })
-            .collect()
+            .collect();
+        // External model textures are package entries outside the asset map;
+        // their broker keys must stay pinned for the whole composition lifetime.
+        for asset in self.assets.values() {
+            if let Some(model) = asset.as_model() {
+                for pin in model.texture_pins() {
+                    pins.push((model.reference().package_hash.clone(), Arc::clone(pin)));
+                }
+            }
+        }
+        pins
     }
     pub(crate) fn projection(
         &self,
@@ -1637,7 +1728,7 @@ impl PreparedComposition {
                     "decodeOptions":self.asset_decode_options(asset),"modelFacts":model.facts()});
                 if model.profile() == "static-pbr-texture-v1" {
                     value["textureUploadBytes"] = json!(model.texture_upload_bytes());
-                    value["textureUrls"] = json!({});
+                    value["textureUrls"] = json!(model.texture_urls());
                 }
                 value
             }

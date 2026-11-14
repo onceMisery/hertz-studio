@@ -18,6 +18,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         hertz_wallpaper::model_profile::static_textured_profile_facts(
             checked.resource(),
             checked.bytes(),
+            &args[3],
         )?
     } else {
         hertz_wallpaper::model_profile::static_core_profile_facts(
