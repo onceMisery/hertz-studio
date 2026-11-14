@@ -811,3 +811,17 @@ glb/空串 None。1 MiB+1 纹理全量响应两块读完，末字节范围
 （忽略 Range、body 总从 0 开始、HEAD 当 GET）均按预期变红后还原。本批未接
 WebView2 WebResourceRequested/CSP/crossOrigin、未改 MediaAccess、未创建
 decoder/renderer/GPU；真实 HTTP 响应与 GPU 首帧继续开放。
+
+2026-11-14 r49 授权键集续接：`ModelTextureController::with_resource_keys` 在
+controller 锁内取 active plan，遍历 r43 唯一资源索引，回调
+`(package_hash, canonical path)` 并返回条数；无 plan/撤销时返回 0，不分配、
+不借出 File。`WallpaperSession::with_texture_keys` 直接委托，调用方可用同一
+session generation 填充既有 `MediaAccess::replace`。
+
+真实 fixture 证据：键集恰为 tex.png/other.png 两条、hash 为 package hash；
+`MediaAccess::replace(generation, &keys)` 成功，permit 两条纹理路径 Some，
+glb 与错误 hash None，同代重复 replace false；fail() 后键集为空。键遍历
+`measure_requested_heap` 为 0（2×64 hash + 16/18 路径字节 = 162）。三处变异
+（去重移除、混入 model glb、path 置空）均按预期变红后还原。本批只把键集交给
+broker access；webresource 真正服务 model 纹理、MIME/Origin 与解码/GPU 仍未
+接线。

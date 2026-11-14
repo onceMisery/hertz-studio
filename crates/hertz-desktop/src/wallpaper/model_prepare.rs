@@ -433,6 +433,27 @@ impl ModelTextureController {
         resources.authorize(path).map(|resource| resource.bytes())
     }
 
+    /// Visit the unique `(package_hash, canonical path)` broker keys of the
+    /// current active plan under the controller lock. Absent or revoked plans
+    /// visit nothing; no File, descriptor owner or allocation escapes.
+    pub(crate) fn with_resource_keys(&self, mut visit: impl FnMut(&str, &str)) -> usize {
+        let inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        let Some(plan) = inner.as_ref() else {
+            return 0;
+        };
+        if !plan.active.load(Ordering::Acquire) {
+            return 0;
+        }
+        let resources = plan.input.texture_resources();
+        let hash = plan.input.reference().package_hash.as_str();
+        let mut count = 0;
+        for descriptor in resources.iter() {
+            visit(hash, descriptor.path);
+            count += 1;
+        }
+        count
+    }
+
     /// Chunked loader reader over the current plan. Unknown paths and revoked
     /// plans yield no reader.
     pub(crate) fn chunk_reader<'a>(&'a self, path: &'a str) -> Option<ModelTextureChunkReader<'a>> {
