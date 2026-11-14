@@ -5,14 +5,19 @@ import {
   ClampToEdgeWrapping, DoubleSide, FrontSide, LinearFilter, LinearMipmapLinearFilter,
   LinearMipmapNearestFilter, LoadingManager, Matrix4, MeshStandardMaterial,
   MirroredRepeatWrapping, NearestFilter, NearestMipmapLinearFilter, NearestMipmapNearestFilter,
-  NoColorSpace, Quaternion, RepeatWrapping, REVISION, SRGBColorSpace, Vector3
+  NoColorSpace, Quaternion, RepeatWrapping, REVISION, RGBAFormat, SRGBColorSpace,
+  UnsignedByteType, Vector3
 } from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { KTX2Loader } from 'three/addons/loaders/KTX2Loader.js';
 
 export const STATIC_MODEL_PROFILE = 'static-core-pbr-v1';
 export const STATIC_MODEL_LOADER_VERSION = 'three-0.186.0-gltfloader';
 export const STATIC_MODEL_MAX_DEPTH = 128;
 export const STATIC_TEXTURED_PROFILE = 'static-pbr-texture-v1';
+export const STATIC_KTX2_PROFILE = 'static-ktx2-texture-v1';
+const KTX2_MIME = 'image/ktx2';
+const KTX2_EXTENSION = 'KHR_texture_basisu';
 const MAX_INPUT = 256 * 1024 * 1024, MAX_JSON = 4 * 1024 * 1024;
 const MAX_ITEMS = 16384, MAX_NODES = 5000, MAX_TRIANGLES = 1000000;
 const own = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
@@ -456,9 +461,32 @@ export function inspectModelInputFacts(buffer) {
   return inputFacts(buffer);
 }
 
-function rejectTexturedDelegates(json) {
+function rejectTexturedDelegates(json, ktx2 = false) {
   for (const key of ['animations', 'skins', 'cameras']) {
     assert(json[key] === undefined || (Array.isArray(json[key]) && !json[key].length), key + '-unsupported');
+  }
+  // KHR_texture_basisu is the only qualified extension; its payload may appear
+  // only on texture objects and must be declared in extensionsUsed.
+  const allowedExtensions = new Set();
+  if (ktx2) {
+    const used = json.extensionsUsed;
+    assert(Array.isArray(used) && used.length === 1 && used[0] === KTX2_EXTENSION, 'extensions-used');
+    const required = json.extensionsRequired;
+    assert(required === undefined || (Array.isArray(required) && required.length === 1
+      && required[0] === KTX2_EXTENSION), 'extensions-required');
+    for (const texture of json.textures ?? []) {
+      if (!texture || texture.extensions === undefined) continue;
+      assert(texture.extensions && typeof texture.extensions === 'object' && !Array.isArray(texture.extensions)
+        && Object.keys(texture.extensions).length === 1 && own(texture.extensions, KTX2_EXTENSION), 'texture-extension');
+      const extension = texture.extensions[KTX2_EXTENSION];
+      assert(extension && typeof extension === 'object' && Object.keys(extension).length === 1
+        && integer(extension.source) && extension.source < (json.images ?? []).length, 'texture-extension-source');
+      allowedExtensions.add(texture.extensions);
+    }
+  } else {
+    for (const key of ['extensionsUsed', 'extensionsRequired']) {
+      assert(json[key] === undefined || (Array.isArray(json[key]) && !json[key].length), 'extensions-unsupported');
+    }
   }
   for (const buffer of json.buffers ?? []) assert(buffer && !own(buffer, 'uri'), 'buffer-uri-unsupported');
   for (const node of json.nodes ?? []) {
@@ -483,27 +511,30 @@ function rejectTexturedDelegates(json) {
     if (!value || typeof value !== 'object') continue;
     for (const [key, child] of Object.entries(value)) {
       if (key === 'extras') continue;
-      assert(key !== 'extensions' && key !== 'sparse', key + '-unsupported');
-      if (key === 'extensionsUsed' || key === 'extensionsRequired') assert(Array.isArray(child) && !child.length, 'extensions-unsupported');
-      else if (child && typeof child === 'object') stack.push(child);
+      if (key === 'extensions') { assert(allowedExtensions.has(child), 'extensions-unsupported'); continue; }
+      assert(key !== 'sparse', key + '-unsupported');
+      if (key === 'extensionsUsed' || key === 'extensionsRequired') continue;
+      if (child && typeof child === 'object') stack.push(child);
     }
   }
 }
 
-function texturedImageFacts(json, views) {
+function texturedImageFacts(json, views, ktx2) {
   const images = array(json.images ?? [], 'images-required');
   assert(images.length <= MAX_ITEMS, 'item-limit');
   return images.map((image, imageIndex) => {
     assert(image && typeof image === 'object', 'image-required');
-    assert(image.mimeType === 'image/png' || image.mimeType === 'image/jpeg', 'image-mime');
     if (own(image, 'bufferView')) {
       assert(!own(image, 'uri'), 'image-source-ambiguous');
+      assert(ktx2 ? image.mimeType === KTX2_MIME
+        : image.mimeType === 'image/png' || image.mimeType === 'image/jpeg', 'image-mime');
       const view = index(image.bufferView, views, 'image-bufferView');
       assert(view.byteLength > 0, 'image-range');
       return { index: imageIndex, source: 'embedded', mime: image.mimeType, bytes: view.byteLength };
     }
     assert(typeof image.uri === 'string' && image.uri.length > 0 && image.uri.length <= 1024, 'image-uri');
     assert(!image.uri.startsWith('data:'), 'data-uri-unsupported');
+    if (ktx2) assert(image.mimeType === KTX2_MIME, 'image-mime');
     return { index: imageIndex, source: 'external', mime: image.mimeType, uri: image.uri };
   });
 }
@@ -524,12 +555,20 @@ function texturedSamplerFacts(json) {
   });
 }
 
-function texturedTextureFacts(json, images, samplers) {
+function texturedTextureFacts(json, images, samplers, ktx2) {
   const textures = array(json.textures ?? [], 'textures-required');
   assert(textures.length <= MAX_ITEMS, 'item-limit');
   return textures.map((texture, textureIndex) => {
-    assert(texture && own(texture, 'source'), 'texture-source-required');
-    const source = index(texture.source, images, 'texture-source');
+    assert(texture && typeof texture === 'object', 'texture-required');
+    let source;
+    if (ktx2 && texture.extensions?.[KTX2_EXTENSION]) {
+      if (texture.source !== undefined) index(texture.source, images, 'texture-source');
+      source = index(texture.extensions[KTX2_EXTENSION].source, images, 'texture-source');
+    } else {
+      assert(own(texture, 'source'), 'texture-source-required');
+      source = index(texture.source, images, 'texture-source');
+      if (ktx2) assert(images[source].mime !== KTX2_MIME, 'texture-extension-required');
+    }
     const sampler = texture.sampler === undefined
       ? { ...TEXTURED_DEFAULT_SAMPLER }
       : (() => { const { index: _index, ...value } = index(texture.sampler, samplers, 'texture-sampler'); return value; })();
@@ -612,8 +651,8 @@ function texturedMaterialFacts(json, textures) {
   });
 }
 
-function texturedProfileFacts(json, input) {
-  rejectTexturedDelegates(json);
+function texturedProfileFacts(json, input, ktx2) {
+  rejectTexturedDelegates(json, ktx2);
   const scenes = array(json.scenes, 'scene-required'), nodes = array(json.nodes, 'nodes-required');
   const meshes = array(json.meshes, 'meshes-required'), accessors = array(json.accessors, 'accessors-required');
   const views = array(json.bufferViews, 'bufferViews-required'), buffers = array(json.buffers, 'buffers-required');
@@ -628,9 +667,9 @@ function texturedProfileFacts(json, input) {
       && (view.byteOffset ?? 0) + view.byteLength <= buffers[0].byteLength, 'bufferView-range');
     assert(view.byteStride === undefined || (integer(view.byteStride) && view.byteStride > 0), 'bufferView-stride');
   }
-  const images = texturedImageFacts(json, views);
+  const images = texturedImageFacts(json, views, ktx2);
   const samplers = texturedSamplerFacts(json);
-  const textures = texturedTextureFacts(json, images, samplers);
+  const textures = texturedTextureFacts(json, images, samplers, ktx2);
   const materials = texturedMaterialFacts(json, textures);
   const layouts = accessors.map((accessor, accessorIndex) => {
     assert(accessor && !own(accessor, 'sparse') && own(accessor, 'bufferView') && accessor.normalized !== true, 'packed-accessor-required');
@@ -768,7 +807,7 @@ function texturedProfileFacts(json, input) {
   const usedViews = [...new Set(usedLayouts.map(layout => layout.viewIndex))].sort((a, b) => a - b)
     .map(i => ({ index: i, byteOffset: views[i].byteOffset ?? 0, byteLength: views[i].byteLength }));
   return {
-    profile: STATIC_TEXTURED_PROFILE, loaderVersion: STATIC_MODEL_LOADER_VERSION, input,
+    profile: ktx2 ? STATIC_KTX2_PROFILE : STATIC_TEXTURED_PROFILE, loaderVersion: STATIC_MODEL_LOADER_VERSION, input,
     declared: { nodes: nodes.length, meshes: meshes.length, primitives: primitiveCount, accessors: accessors.length,
       bufferViews: views.length, materials: materials.length, textures: textures.length, images: images.length },
     scene: { index: 0, roots: [...roots], nodes: sceneNodes, maxDepth, objectCount, allocatedObjectCount, drawCalls, triangles },
@@ -796,10 +835,27 @@ function texturedPrimitiveKey(primitive) {
   return `${primitive.indices ?? 'undefined'}:${attributes}:${primitive.mode ?? 'undefined'}`;
 }
 
-async function verifyTexturedActual(result, parser, facts, tracker) {
+async function verifyTexturedActual(result, parser, facts, tracker, ktx2, containerFacts) {
   if (result.scenes.length !== 1 || result.scene !== result.scenes[0] || result.animations.length || result.cameras.length) throw mismatch('result');
   const materials = new Map(facts.materials.map(material => [material.index, material]));
   const textures = new Map(facts.textures.map(texture => [texture.index, texture]));
+  const ktx2Images = new Map((containerFacts ?? []).map(image => [image.index, image]));
+  const checkKtx2 = (map, info) => {
+    if (!info) return;
+    const image = ktx2Images.get(textures.get(info.index).source.index);
+    if (!image) throw mismatch('ktx2-image-facts');
+    if (!map || !map.isDataTexture || map.isCompressedTexture) throw mismatch('ktx2-texture-type');
+    if (map.image.width !== image.width || map.image.height !== image.height) throw mismatch('ktx2-dimensions');
+    if (map.format !== RGBAFormat || map.type !== UnsignedByteType) throw mismatch('ktx2-format');
+    if (!Array.isArray(map.mipmaps) || map.mipmaps.length !== image.levelCount) throw mismatch('ktx2-levels');
+    for (let level = 0; level < image.levelCount; level++) {
+      const actual = map.mipmaps[level];
+      if (!actual || !(actual.data instanceof Uint8Array) || actual.data.byteLength !== image.levelByteLengths[level]
+        || actual.width !== Math.max(1, image.width >> level) || actual.height !== Math.max(1, image.height >> level)) {
+        throw mismatch('ktx2-level');
+      }
+    }
+  };
   const textureObjects = new Map();
   for (const index of textures.keys()) textureObjects.set(index, await parser.getDependency('texture', index));
   const accessors = new Map();
@@ -876,6 +932,12 @@ async function verifyTexturedActual(result, parser, facts, tracker) {
       clonedTextureCount += checkSlot(material.normalMap, normal, normal ? textureObjects.get(normal.index) : null, false);
       clonedTextureCount += checkSlot(material.aoMap, occlusion, occlusion ? textureObjects.get(occlusion.index) : null, false);
       clonedTextureCount += checkSlot(material.emissiveMap, emissive, emissive ? textureObjects.get(emissive.index) : null, true);
+      if (ktx2) {
+        for (const [info, map] of [[base, material.map], [rough, material.roughnessMap],
+          [normal, material.normalMap], [occlusion, material.aoMap], [emissive, material.emissiveMap]]) {
+          checkKtx2(map, info);
+        }
+      }
       // No TANGENT attribute: GLTFLoader clones the final material and negates
       // normalScale.y for derivative tangents, even without a normal texture.
       const normalScale = normal?.scale ?? 1;
@@ -960,16 +1022,36 @@ async function verifyTexturedActual(result, parser, facts, tracker) {
   return accessors;
 }
 
+function compareTexturedFacts(expected, actual, ktx2) {
+  if (!ktx2) { compareStaticModelFacts(expected, actual); return; }
+  // KTX2 container fields are verified against the actual parsed texture; the
+  // authored JSON only carries source/mime/bytes/uri before dependencies load.
+  const structural = value => {
+    const copy = JSON.parse(JSON.stringify(value));
+    const keys = ['index', 'source', 'mime', 'bytes', 'uri'];
+    for (const image of copy.images ?? []) {
+      for (const key of Object.keys(image)) if (!keys.includes(key)) delete image[key];
+    }
+    for (const texture of copy.textures ?? []) {
+      for (const key of Object.keys(texture.source ?? {})) if (!keys.includes(key)) delete texture.source[key];
+    }
+    delete copy.resources?.imageUploadBytes;
+    return copy;
+  };
+  compareStaticModelFacts(structural(expected), actual);
+}
+
 /**
  * Textured PBR profile consumption. `textureUrl` maps a declared external
  * image URI to a same-package broker URL; unmapped URIs fail before any fetch.
  */
-export async function parseTexturedModel(buffer, expectedFacts, { signal, admissions, bufferPlan, textureUrl } = {}) {
+async function parseTexturedProfile(buffer, expectedFacts, { signal, admissions, bufferPlan, textureUrl, renderer } = {}, ktx2) {
   alive(signal);
   assert(REVISION === '186', 'loader-version');
   if (!admissions?.cpu || typeof admissions.cpu.state !== 'function' || !bufferPlan
     || typeof bufferPlan.cpuReady !== 'function' || typeof bufferPlan.upload !== 'function') throw new Error('composition-model-admission-required');
   if (typeof textureUrl !== 'function') throw new Error('composition-model-texture-url-required');
+  if (ktx2 && (!renderer || typeof renderer.extensions?.has !== 'function')) throw new Error('composition-model-renderer-required');
   const input = inputFacts(buffer);
   function checkAdmission() {
     const state = admissions.cpu.state();
@@ -985,18 +1067,25 @@ export async function parseTexturedModel(buffer, expectedFacts, { signal, admiss
     return mapped;
   });
   const loader = new GLTFLoader(manager); let parser, tracker, completed, facts;
+  if (ktx2) {
+    // Direct RGBA8 KTX2 uses the loader's raw path. Basis transcode assets are
+    // not shipped; supercompressed containers are rejected by profile facts.
+    const ktx2Loader = new KTX2Loader(manager);
+    ktx2Loader.detectSupport(renderer);
+    loader.setKTX2Loader(ktx2Loader);
+  }
   loader.register(candidate => {
     parser = candidate;
-    rejectTexturedDelegates(parser.json);
+    rejectTexturedDelegates(parser.json, ktx2);
     tracker = allocationTracker(parser);
-    return { name: 'HERTZ_textured_model_profile',
+    return { name: ktx2 ? 'HERTZ_ktx2_model_profile' : 'HERTZ_textured_model_profile',
       beforeRoot() {
         alive(signal); checkAdmission(); alive(signal);
-        facts = texturedProfileFacts(parser.json, input);
+        facts = texturedProfileFacts(parser.json, input, ktx2);
         for (const image of facts.images) {
           if (image.source === 'external' && !textureUrl(image.uri)) throw unavailable('URI-unsupported');
         }
-        compareStaticModelFacts(expectedFacts, facts); freeze(facts);
+        compareTexturedFacts(expectedFacts, facts, ktx2); freeze(facts);
       },
       async afterRoot(result) {
         completed = result; tracker.capture(result.scenes); alive(signal);
@@ -1007,10 +1096,10 @@ export async function parseTexturedModel(buffer, expectedFacts, { signal, admiss
           if (node?.transform.kind === 'matrix') { object.matrix.fromArray(node.transform.matrix); object.matrixAutoUpdate = false; }
         });
         result.scene.updateMatrixWorld(true);
-        const accessors = await verifyTexturedActual(result, parser, facts, tracker); alive(signal);
+        const accessors = await verifyTexturedActual(result, parser, facts, tracker, ktx2, expectedFacts.images); alive(signal);
         await bufferPlan.cpuReady(facts.resources.cpuBackingBytes); alive(signal);
         for (const accessor of accessors.values()) { await bufferPlan.upload(accessor); alive(signal); }
-        await verifyTexturedActual(result, parser, facts, tracker); alive(signal);
+        await verifyTexturedActual(result, parser, facts, tracker, ktx2, expectedFacts.images); alive(signal);
       }
     };
   });
@@ -1024,4 +1113,12 @@ export async function parseTexturedModel(buffer, expectedFacts, { signal, admiss
     if (tracker) { await tracker.settle(); completed?.scenes.forEach(scene => scene.clear()); disposeResources(tracker); }
     throw error;
   }
+}
+
+export async function parseTexturedModel(buffer, expectedFacts, options = {}) {
+  return parseTexturedProfile(buffer, expectedFacts, options, false);
+}
+
+export async function parseKtx2Model(buffer, expectedFacts, options = {}) {
+  return parseTexturedProfile(buffer, expectedFacts, options, true);
 }

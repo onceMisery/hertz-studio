@@ -84,12 +84,13 @@ function reserveAll(context, scope, plan, generation) {
       if (requirement.kind === 'font') admissions={cpu:require({ownedCpuBytes:requirement.fontMetadata.cpuBudgetBytes},'Composition prepared same-package font')};
       else if (requirement.kind === 'model') {
         const spec = plan.nodePlans.find(item => item.resources.asset === requirement);
-        const textured = requirement.modelFacts.profile === 'static-pbr-texture-v1';
+        const textured = requirement.modelFacts.profile === 'static-pbr-texture-v1'
+          || requirement.modelFacts.profile === 'static-ktx2-texture-v1';
         admissions={cpu:require({ownedCpuBytes:modelConstructionBytes(requirement.modelFacts)},'Composition static model construction'),
           ...(textured ? {
             decode:require({decodeReservedBytes:requirement.textureUploadBytes},'Composition model texture decode window'),
             upload:require({textureDeclaredBytes:requirement.textureUploadBytes},'Composition model texture upload')} : {}),
-          bufferPlan:spec.bufferPlan};
+          bufferPlan:spec.bufferPlan, renderer:context.renderer};
       } else {
         const bytes=requirement.width*requirement.height*4;
         admissions={decode:require({decodeReservedBytes:requirement.kind==='video'?bytes*3:bytes,
@@ -469,12 +470,12 @@ export async function createCompositionRuntime(THREE, context, scope, plan, opti
         if(requirement.kind==='font')tickets={cpu:require({ownedCpuBytes:requirement.fontMetadata.cpuBudgetBytes},'Composition changed prepared same-package font')};
         else if(requirement.kind==='model'){
           const spec=next.nodePlans.find(item=>item.resources.asset===requirement);
-          const textured=requirement.modelFacts.profile==='static-pbr-texture-v1';
+          const textured=requirement.modelFacts.profile==='static-pbr-texture-v1'||requirement.modelFacts.profile==='static-ktx2-texture-v1';
           tickets={cpu:require({ownedCpuBytes:modelConstructionBytes(requirement.modelFacts)},'Composition changed static model construction'),
             ...(textured?{
               decode:require({decodeReservedBytes:requirement.textureUploadBytes},'Composition changed model texture decode window'),
               upload:require({textureDeclaredBytes:requirement.textureUploadBytes},'Composition changed model texture upload')}:{}),
-            bufferPlan:spec.bufferPlan};
+            bufferPlan:spec.bufferPlan, renderer:context.renderer};
         }
         else{const bytes=requirement.width*requirement.height*4;tickets={decode:require({decodeReservedBytes:bytes*(requirement.kind==='video'?3:1),...(requirement.kind==='video'?{decoderLeases:1}:{})},'Composition changed actual-media decoder'),upload:require({textureDeclaredBytes:bytes},'Composition changed per-context texture')};}
         sourceTickets.set(requirement.key,tickets);unclaimedSources.add(requirement.key);

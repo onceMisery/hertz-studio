@@ -12,6 +12,7 @@ const KHR_DF_MODEL_UASTC: u8 = 166;
 const KHR_DF_TRANSFER_SRGB: u8 = 2;
 
 const VK_FORMAT_R8G8B8A8_UNORM: u32 = 37;
+const VK_FORMAT_R8G8B8A8_SRGB: u32 = 43;
 
 /// Declared capabilities, matching the WebGL extensions Three's KTX2 loader
 /// probes. The caller owns the probe; this crate never touches a GPU.
@@ -74,7 +75,7 @@ pub fn plan_ktx2_upload(
         ));
     }
     let supported = match container.vk_format {
-        VK_FORMAT_R8G8B8A8_UNORM => true,
+        VK_FORMAT_R8G8B8A8_UNORM | VK_FORMAT_R8G8B8A8_SRGB => true,
         131..=138 => capabilities.dxt,
         143..=146 => capabilities.bptc,
         147..=152 => capabilities.etc2,

@@ -28,7 +28,18 @@ const result = await build({
   stdin: { contents: Object.entries(stages).map(([id, api]) => `export * as ${api} from './${id}-stage/src/main.js';`).join('\n'), resolveDir: resolve(root, 'tools'), sourcefile: 'stage-entrypoints.js' },
   bundle: true, format: 'iife', globalName: 'HertzStageRuntime', minify: !process.argv.includes('--dev'),
   target: 'es2020', legalComments: 'eof', write: false, metafile: true,
-  plugins: [{ name: 'single-three-version', setup(builder) {
+  plugins: [{ name: 'ktx2-transcoder-urls', setup(builder) {
+    // The IIFE bundle has no import.meta. Direct-format KTX2 never loads the
+    // Basis transcoder, and Basis payloads are rejected before upload.
+    builder.onLoad({ filter: /[\\/]loaders[\\/]KTX2Loader\.js$/ }, args => {
+      const source = readFileSync(args.path, 'utf8');
+      const contents = source.replace(
+        /const WASM_BIN_URL = new URL\([^;]+;\s*const WASM_JS_URL = new URL\([^;]+;/,
+        "const WASM_BIN_URL = '';\nconst WASM_JS_URL = '';");
+      if (contents === source) throw new Error('KTX2Loader transcoder URL layout changed');
+      return { contents, loader: 'js', resolveDir: dirname(args.path) };
+    });
+  } }, { name: 'single-three-version', setup(builder) {
     builder.onResolve({ filter: /^three(?:\/|$)/ }, args => ({ path: args.path === 'three' ? resolve(here, 'node_modules/three/build/three.module.js') : stageRequire.resolve(args.path) }));
     builder.onLoad({ filter: /three[\\/]build[\\/]three\.module\.js$/ }, args => ({
       contents: withBufferAdmission(withProgramAdmission(readFileSync(args.path, 'utf8'))), loader: 'js', resolveDir: dirname(args.path)

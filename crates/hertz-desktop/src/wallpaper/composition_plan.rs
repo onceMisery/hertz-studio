@@ -147,7 +147,6 @@ pub(crate) struct PreparedModel {
     media: Arc<PinnedMedia>,
     url: String,
     content_key: String,
-    profile: String,
     texture_upload_bytes: u64,
     texture_urls: BTreeMap<String, String>,
     texture_pins: Vec<Arc<PinnedMedia>>,
@@ -166,9 +165,6 @@ impl PreparedModel {
     }
     fn content_key(&self) -> &str {
         &self.content_key
-    }
-    fn profile(&self) -> &str {
-        &self.profile
     }
     fn texture_upload_bytes(&self) -> u64 {
         self.texture_upload_bytes
@@ -565,6 +561,42 @@ pub(crate) async fn resolve_with_target_facts(
     result.finish()
 }
 
+/// Pins one model texture entry, verifies its tuple and reads it for container
+/// facts or upload-size parsing. The returned Arc is published only for used images.
+fn pin_model_texture(
+    jobs: &Arc<ImportJobs>,
+    package_hash: &str,
+    path: &str,
+    entry_bytes: u64,
+    sha256: &str,
+    mime: &str,
+) -> Result<(Arc<PinnedMedia>, Vec<u8>)> {
+    let media = Arc::new(
+        jobs.assets()
+            .pin_verified_media(package_hash, path)?
+            .ok_or_else(|| JobError::new("hash_mismatch", "model 纹理未通过核验"))?,
+    );
+    if media.entry.bytes != entry_bytes
+        || media.entry.sha256 != sha256
+        || media.entry.mime.as_deref() != Some(mime)
+    {
+        return Err(JobError::new("hash_mismatch", "model 纹理条目不一致"));
+    }
+    let mut texture_bytes = Vec::with_capacity(
+        usize::try_from(media.entry.bytes)
+            .unwrap_or(usize::MAX)
+            .saturating_add(1),
+    );
+    super::assets::open_immutable(&media.path)?
+        .take(hertz_wallpaper::MAX_MODEL_BYTES + 1)
+        .read_to_end(&mut texture_bytes)
+        .map_err(|error| JobError::io(format!("读取固定模型纹理失败：{error}")))?;
+    if texture_bytes.len() as u64 != media.entry.bytes {
+        return Err(JobError::new("hash_mismatch", "model 纹理长度变化"));
+    }
+    Ok((media, texture_bytes))
+}
+
 /// Shared final-use closure preparation. Every final font is inspected and
 /// qualified before any final media asset can enter its original preparation.
 async fn prepare_assets(
@@ -742,30 +774,81 @@ async fn prepare_assets(
                         Some(cancel),
                     )
                     .map_err(package_error)?;
-                let facts = {
-                    let structure = &checked.resource().structure;
-                    let textured = !structure.images.is_empty()
-                        || !structure.materials.is_empty()
-                        || !structure.textures.is_empty();
-                    if textured {
-                        hertz_wallpaper::model_profile::static_textured_profile_facts(
-                            checked.resource(),
-                            checked.bytes(),
-                            &asset.source,
-                        )
-                        .map_err(package_error)?
-                    } else {
-                        hertz_wallpaper::model_profile::static_core_profile_facts(
-                            checked.resource(),
-                            checked.bytes(),
-                        )
-                        .map_err(package_error)?
+                let structure = &checked.resource().structure;
+                let ktx2 = structure.images.iter().any(|image| {
+                    matches!(
+                        image,
+                        hertz_wallpaper::model_structure::ModelImage::Embedded { mime, .. }
+                            | hertz_wallpaper::model_structure::ModelImage::Package { mime, .. }
+                            if mime == "image/ktx2"
+                    )
+                });
+                let textured = !structure.images.is_empty()
+                    || !structure.materials.is_empty()
+                    || !structure.textures.is_empty();
+                // KTX2 container facts consume the same pinned bytes an external
+                // URL serves. Only declared basisu texture images are read here;
+                // publication below stays limited to used images.
+                let mut pinned_textures: BTreeMap<usize, Arc<PinnedMedia>> = BTreeMap::new();
+                let mut external_textures = BTreeMap::new();
+                if ktx2 {
+                    for texture in &structure.textures {
+                        let Some(hertz_wallpaper::model_structure::ModelImage::Package {
+                            path,
+                            mime,
+                            bytes: entry_bytes,
+                            sha256,
+                            ..
+                        }) = structure.images.get(texture.source)
+                        else {
+                            continue;
+                        };
+                        if mime != "image/ktx2" || external_textures.contains_key(&texture.source) {
+                            continue;
+                        }
+                        let (pinned, texture_bytes) = pin_model_texture(
+                            jobs,
+                            &package.package_hash,
+                            path,
+                            *entry_bytes,
+                            sha256,
+                            mime,
+                        )?;
+                        pinned_textures.insert(texture.source, pinned);
+                        external_textures.insert(texture.source, texture_bytes);
                     }
+                }
+                let facts = if ktx2 {
+                    hertz_wallpaper::model_profile::static_ktx2_profile_facts(
+                        &bytes,
+                        checked.resource(),
+                        checked.bytes(),
+                        &asset.source,
+                        &external_textures,
+                    )
+                    .map_err(package_error)?
+                } else if textured {
+                    hertz_wallpaper::model_profile::static_textured_profile_facts(
+                        checked.resource(),
+                        checked.bytes(),
+                        &asset.source,
+                    )
+                    .map_err(package_error)?
+                } else {
+                    hertz_wallpaper::model_profile::static_core_profile_facts(
+                        checked.resource(),
+                        checked.bytes(),
+                    )
+                    .map_err(package_error)?
                 };
+                let profile = facts["profile"]
+                    .as_str()
+                    .ok_or_else(|| JobError::new("adapter_unavailable", "model profile 无效"))?
+                    .to_owned();
                 let mut texture_upload_bytes = 0_u64;
                 let mut texture_urls = BTreeMap::new();
                 let mut texture_pins: Vec<Arc<PinnedMedia>> = Vec::new();
-                if facts["profile"] == "static-pbr-texture-v1" {
+                if profile == "static-pbr-texture-v1" {
                     let images = facts["images"]
                         .as_array()
                         .ok_or_else(|| JobError::new("adapter_unavailable", "model images 缺失"))?;
@@ -796,39 +879,14 @@ async fn prepare_assets(
                                 let uri = image["uri"].as_str().ok_or_else(|| {
                                     JobError::new("adapter_unavailable", "model texture URI 无效")
                                 })?;
-                                let media = Arc::new(
-                                    jobs.assets()
-                                        .pin_verified_media(&package.package_hash, path)?
-                                        .ok_or_else(|| {
-                                            JobError::new("hash_mismatch", "model 纹理未通过核验")
-                                        })?,
-                                );
-                                if media.entry.bytes != *entry_bytes
-                                    || media.entry.sha256 != *sha256
-                                    || media.entry.mime.as_deref() != Some(mime.as_str())
-                                {
-                                    return Err(JobError::new(
-                                        "hash_mismatch",
-                                        "model 纹理条目不一致",
-                                    ));
-                                }
-                                let mut texture_bytes = Vec::with_capacity(
-                                    usize::try_from(media.entry.bytes)
-                                        .unwrap_or(usize::MAX)
-                                        .saturating_add(1),
-                                );
-                                super::assets::open_immutable(&media.path)?
-                                    .take(hertz_wallpaper::MAX_MODEL_BYTES + 1)
-                                    .read_to_end(&mut texture_bytes)
-                                    .map_err(|error| {
-                                        JobError::io(format!("读取固定模型纹理失败：{error}"))
-                                    })?;
-                                if texture_bytes.len() as u64 != media.entry.bytes {
-                                    return Err(JobError::new(
-                                        "hash_mismatch",
-                                        "model 纹理长度变化",
-                                    ));
-                                }
+                                let (media, texture_bytes) = pin_model_texture(
+                                    jobs,
+                                    &package.package_hash,
+                                    path,
+                                    *entry_bytes,
+                                    sha256,
+                                    mime,
+                                )?;
                                 let url =
                                     super::webresource::files_url(&package.package_hash, path)
                                         .ok_or_else(|| {
@@ -856,11 +914,46 @@ async fn prepare_assets(
                             "model textures 未准备",
                         ));
                     }
+                } else if profile == "static-ktx2-texture-v1" {
+                    let images = facts["images"]
+                        .as_array()
+                        .ok_or_else(|| JobError::new("adapter_unavailable", "model images 缺失"))?;
+                    for image in images {
+                        let index = image["index"].as_u64().ok_or_else(|| {
+                            JobError::new("adapter_unavailable", "model image 索引无效")
+                        })? as usize;
+                        let upload = image["uploadBytes"].as_u64().ok_or_else(|| {
+                            JobError::new("adapter_unavailable", "KTX2 上传字节无效")
+                        })?;
+                        texture_upload_bytes = checked_sum(&[texture_upload_bytes, upload])?;
+                        if image["source"] != "external" {
+                            continue;
+                        }
+                        let uri = image["uri"].as_str().ok_or_else(|| {
+                            JobError::new("adapter_unavailable", "KTX2 纹理 URI 无效")
+                        })?;
+                        let pinned = pinned_textures
+                            .get(&index)
+                            .ok_or_else(|| JobError::new("hash_mismatch", "KTX2 纹理未固定"))?;
+                        let url = super::webresource::files_url(
+                            &package.package_hash,
+                            &pinned.entry.path,
+                        )
+                        .ok_or_else(|| {
+                            JobError::new("adapter_unavailable", "KTX2 纹理 URL 无效")
+                        })?;
+                        texture_urls.insert(uri.to_owned(), url);
+                        if !texture_pins.iter().any(|item| item.path == pinned.path) {
+                            texture_pins.push(Arc::clone(pinned));
+                        }
+                    }
+                    if texture_upload_bytes == 0 {
+                        return Err(JobError::new(
+                            "adapter_unavailable",
+                            "KTX2 model textures 未准备",
+                        ));
+                    }
                 }
-                let profile = facts["profile"]
-                    .as_str()
-                    .ok_or_else(|| JobError::new("adapter_unavailable", "model profile 无效"))?
-                    .to_owned();
                 let url = super::webresource::files_url(&package.package_hash, &asset.source)
                     .ok_or_else(|| JobError::new("adapter_unavailable", "model URL 无效"))?;
                 CompositionAsset::Model(Box::new(PreparedModel {
@@ -872,7 +965,6 @@ async fn prepare_assets(
                     media,
                     url,
                     content_key: checked.sha256_hex(),
-                    profile,
                     texture_upload_bytes,
                     texture_urls,
                     texture_pins,
@@ -1400,7 +1492,7 @@ impl PreparedComposition {
             CompositionAsset::Font(font) => {
                 json!({"colorSpace":"none","fontAdapterVersion":font.adapter_version()})
             }
-            CompositionAsset::Model(model) => json!({"profile": model.profile()}),
+            CompositionAsset::Model(model) => json!({"profile": model.facts()["profile"]}),
         }
     }
     fn media_costs(&self) -> Result<Costs> {
@@ -1726,7 +1818,7 @@ impl PreparedComposition {
                     "contentKey":model.content_key(),"byteLength":model.pin().entry.bytes,"url":model.url(),
                     "adapterId":"three-gltf-loader","adapterVersion":1,
                     "decodeOptions":self.asset_decode_options(asset),"modelFacts":model.facts()});
-                if model.profile() == "static-pbr-texture-v1" {
+                if model.texture_upload_bytes() > 0 {
                     value["textureUploadBytes"] = json!(model.texture_upload_bytes());
                     value["textureUrls"] = json!(model.texture_urls());
                 }

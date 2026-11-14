@@ -36,7 +36,7 @@ function coreGlb() {
   return { glb, input: { encodedBytes, jsonBytes, binBytes } };
 }
 
-module.exports = { coreGlb, texturedGlb, texturedModelFacts };
+module.exports = { coreGlb, texturedGlb, ktx2Glb, texturedModelFacts };
 
 function crc32(bytes) {
   let value = -1;
@@ -89,6 +89,66 @@ function texturedGlb() {
     images: [{ bufferView: 4, mimeType: 'image/png' }],
     samplers: [{ magFilter: 9728, minFilter: 9728, wrapS: 33071, wrapT: 33071 }],
     textures: [{ source: 0, sampler: 0 }],
+    materials: [{
+      pbrMetallicRoughness: { baseColorFactor: [1, 1, 1, 1], baseColorTexture: { index: 0, texCoord: 0 },
+        metallicFactor: 0, roughnessFactor: 1 },
+      alphaMode: 'OPAQUE'
+    }]
+  };
+  const text = Buffer.from(JSON.stringify(json));
+  const jsonBytes = Math.ceil(text.length / 4) * 4, binBytes = Math.ceil(binary.length / 4) * 4;
+  const encodedBytes = 12 + 8 + jsonBytes + 8 + binBytes, glb = Buffer.alloc(encodedBytes);
+  glb.write('glTF', 0, 'ascii'); glb.writeUInt32LE(2, 4); glb.writeUInt32LE(encodedBytes, 8);
+  glb.writeUInt32LE(jsonBytes, 12); glb.write('JSON', 16, 'ascii');
+  glb.fill(0x20, 20, 20 + jsonBytes); text.copy(glb, 20);
+  glb.writeUInt32LE(binBytes, 20 + jsonBytes); glb.write('BIN\0', 24 + jsonBytes, 'ascii');
+  binary.copy(glb, 28 + jsonBytes);
+  return { glb, input: { encodedBytes, jsonBytes, binBytes }, imageBytes: image.length };
+}
+
+function ktx2Rgba8() {
+  const edge = 2, levelBytes = edge * edge * 4, bytes = Buffer.alloc(196 + levelBytes);
+  Buffer.from([0xab, 0x4b, 0x54, 0x58, 0x20, 0x32, 0x30, 0xbb, 13, 10, 26, 10]).copy(bytes);
+  for (const [offset, value] of [[12, 43], [16, 1], [20, edge], [24, edge], [36, 1], [40, 1],
+    [48, 104], [52, 92], [104, 92]]) bytes.writeUInt32LE(value, offset);
+  for (const [offset, value] of [[80, 196], [88, levelBytes], [96, levelBytes]]) bytes.writeBigUInt64LE(BigInt(value), offset);
+  bytes.writeUInt16LE(2, 112); bytes.writeUInt16LE(88, 114);
+  Buffer.from([1, 1, 2, 0]).copy(bytes, 116); bytes[124] = 4;
+  [0, 1, 2, 15].forEach((channel, index) => {
+    const sample = 132 + index * 16;
+    bytes.writeUInt16LE(index * 8, sample); bytes[sample + 2] = 8; bytes[sample + 3] = channel;
+    bytes.writeUInt32LE(0xff, sample + 12);
+  });
+  Buffer.from([255, 0, 0, 255, 0, 255, 0, 255, 255, 0, 0, 255, 0, 255, 0, 255]).copy(bytes, 196);
+  return bytes;
+}
+
+function ktx2Glb() {
+  const image = ktx2Rgba8(), binary = Buffer.alloc(104 + image.length);
+  positions.forEach((value, index) => binary.writeFloatLE(value, index * 4));
+  normals.forEach((value, index) => binary.writeFloatLE(value, 36 + index * 4));
+  [0, 0, 1, 0, 0, 1].forEach((value, index) => binary.writeFloatLE(value, 72 + index * 4));
+  binary.writeUInt16LE(0, 96); binary.writeUInt16LE(1, 98); binary.writeUInt16LE(2, 100);
+  image.copy(binary, 104);
+  const json = {
+    asset: { version: '2.0' }, scene: 0, scenes: [{ nodes: [0] }], nodes: [{ mesh: 0 }],
+    extensionsUsed: ['KHR_texture_basisu'], extensionsRequired: ['KHR_texture_basisu'],
+    meshes: [{ primitives: [{ attributes: { POSITION: 0, NORMAL: 1, TEXCOORD_0: 3 }, indices: 2, material: 0 }] }],
+    buffers: [{ byteLength: binary.length }],
+    bufferViews: [
+      { buffer: 0, byteOffset: 0, byteLength: 36 }, { buffer: 0, byteOffset: 36, byteLength: 36 },
+      { buffer: 0, byteOffset: 72, byteLength: 24 }, { buffer: 0, byteOffset: 96, byteLength: 8 },
+      { buffer: 0, byteOffset: 104, byteLength: image.length }
+    ],
+    accessors: [
+      { bufferView: 0, componentType: 5126, count: 3, type: 'VEC3', min: [0, 0, 0], max: [1, 1, 0] },
+      { bufferView: 1, componentType: 5126, count: 3, type: 'VEC3' },
+      { bufferView: 3, componentType: 5123, count: 3, type: 'SCALAR' },
+      { bufferView: 2, componentType: 5126, count: 3, type: 'VEC2' }
+    ],
+    images: [{ bufferView: 4, mimeType: 'image/ktx2' }],
+    samplers: [{ magFilter: 9728, minFilter: 9728, wrapS: 33071, wrapT: 33071 }],
+    textures: [{ sampler: 0, extensions: { KHR_texture_basisu: { source: 0 } } }],
     materials: [{
       pbrMetallicRoughness: { baseColorFactor: [1, 1, 1, 1], baseColorTexture: { index: 0, texCoord: 0 },
         metallicFactor: 0, roughnessFactor: 1 },
