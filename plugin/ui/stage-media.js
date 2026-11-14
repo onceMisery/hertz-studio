@@ -93,12 +93,20 @@
     active.cancelled = true;
     if (active.importId) await command('import.cancel', { importId: active.importId });
   }
+  function mseType(mime, codec) {
+    if (mime !== 'video/webm') return null;
+    var value = String(codec || '').toLowerCase();
+    if (value === 'v_vp8') return 'video/webm; codecs="vp8"';
+    if (value === 'v_vp9') return 'video/webm; codecs="vp9"';
+    return null;
+  }
   async function acquire(spec, options) {
     options = options || {};
     if (options.signal && options.signal.aborted) throw cancelled();
     var reply = await command('lease.acquire', Object.assign({ assetRef: spec.assetRef }, target()));
     var blobUrl = null, timer = 0, released = false, activeLease = true, renewing = null, lost = false;
     var readTicket = null, blobTicket = null, assembling = false, parts = [], raw = null, bytes = null;
+    var mediaSource = null, mediaUrl = null, sourceBuffer = null, streamTicket = null;
     var interval = Math.max(1000, Math.min(30000, (reply.ttlMs || 120000) / 4));
     function stopTimer() { clearTimeout(timer); timer = 0; }
     function schedule() {
@@ -130,13 +138,68 @@
       if (changed) return renew();
       return renewing;
     }
+    function stopStream() {
+      if (sourceBuffer) {
+        try { if (sourceBuffer.updating) sourceBuffer.abort(); } catch (_) {}
+        try { if (mediaSource && mediaSource.readyState === 'open') mediaSource.removeSourceBuffer(sourceBuffer); } catch (_) {}
+        sourceBuffer = null;
+      }
+      if (mediaSource) { try { if (mediaSource.readyState === 'open') mediaSource.endOfStream(); } catch (_) {} mediaSource = null; }
+      if (mediaUrl) { URL.revokeObjectURL(mediaUrl); mediaUrl = null; }
+      releaseTicket(streamTicket); streamTicket = null;
+    }
     async function release() {
       if (released) return; released = true; stopTimer();
       if (options.signal) options.signal.removeEventListener('abort', release);
+      stopStream();
       if (blobUrl) URL.revokeObjectURL(blobUrl);
       blobUrl = null;
       if (!assembling) { releaseTicket(blobTicket); blobTicket = null; }
       await command('lease.release', { leaseId: reply.leaseId }).catch(function () {});
+    }
+    function appendChunk(chunk) {
+      return new Promise(function (resolve, reject) {
+        var buffer = sourceBuffer;
+        if (released || !buffer) { resolve(); return; }
+        var settled = false;
+        function finish(ok, error) {
+          if (settled) return; settled = true;
+          buffer.removeEventListener('updateend', updated);
+          buffer.removeEventListener('error', failed);
+          if (ok) resolve(); else reject(error || new Error('媒体流写入失败'));
+        }
+        function updated() { finish(true); }
+        function failed() { finish(false); }
+        buffer.addEventListener('updateend', updated);
+        buffer.addEventListener('error', failed);
+        try { buffer.appendBuffer(chunk); } catch (error) { finish(false, error); }
+      });
+    }
+    async function pumpVideo() {
+      var offset = 0;
+      try {
+        while (!released && offset < reply.length) {
+          var block = await command('lease.read', { leaseId: reply.leaseId, offset: offset, count: CHUNK });
+          if (released) return;
+          if (block.offset !== offset || block.length !== reply.length || block.contentKey !== reply.contentKey) throw new Error('素材读取版本发生变化，请重试');
+          if (typeof block.dataBase64 !== 'string' || block.dataBase64.length > Math.ceil(CHUNK / 3) * 4)
+            throw new Error('素材读取块编码长度无效');
+          var encoded = atob(block.dataBase64), chunk = new Uint8Array(encoded.length);
+          if (!encoded.length || encoded.length > CHUNK || offset + encoded.length > reply.length) throw new Error('素材读取长度无效');
+          for (var i = 0; i < encoded.length; i++) chunk[i] = encoded.charCodeAt(i);
+          await appendChunk(chunk);
+          offset += encoded.length;
+          encoded = chunk = null;
+        }
+        if (!released && mediaSource && mediaSource.readyState === 'open') mediaSource.endOfStream();
+      } catch (error) {
+        if (!released) {
+          if (options.onLost) options.onLost(error);
+          try { if (mediaSource && mediaSource.readyState === 'open') mediaSource.endOfStream('network'); } catch (_) {}
+        }
+      } finally {
+        releaseTicket(streamTicket); streamTicket = null;
+      }
     }
     schedule();
     try {
@@ -145,30 +208,53 @@
         if (options.signal.aborted) { await release(); throw cancelled(); }
       }
       if (!reply.url) {
-        if (reply.media !== 'image' || !Number.isSafeInteger(reply.length) || reply.length <= 0 || reply.length > 32 * 1024 * 1024)
-          throw new Error('当前 DBX 宿主不支持视频流或无效图片长度');
-        assembling = true;
-        readTicket = resources().require({ ownedCpuBytes: reply.length + CHUNK * 8 },
-          'StageMedia DBX retained typed parts plus bounded JSON base64/atob/block copies', 0, 'bounded-estimate');
-        blobTicket = resources().require({ ownedCpuBytes: reply.length }, 'StageMedia DBX encoded Blob source', 0, 'bounded-estimate');
-        for (var offset = 0; offset < reply.length;) {
-          if (released) throw cancelled();
-          var block = await command('lease.read', { leaseId: reply.leaseId, offset: offset, count: CHUNK });
-          if (released) throw cancelled();
-          if (block.offset !== offset || block.length !== reply.length || block.contentKey !== reply.contentKey) throw new Error('素材读取版本发生变化，请重试');
-          if (typeof block.dataBase64 !== 'string' || block.dataBase64.length > Math.ceil(CHUNK / 3) * 4)
-            throw new Error('素材读取块编码长度无效');
-          raw = atob(block.dataBase64); bytes = new Uint8Array(raw.length);
-          if (!raw.length || raw.length > CHUNK || offset + raw.length > reply.length) throw new Error('素材读取长度无效');
-          for (var i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
-          parts.push(bytes); offset += bytes.length;
+        if (reply.media === 'video') {
+          if (!Number.isSafeInteger(reply.length) || reply.length <= 0 || reply.length > 512 * 1024 * 1024)
+            throw new Error('无效视频长度');
+          var type = mseType(reply.mime, reply.codec);
+          if (!type || typeof MediaSource === 'undefined' || !MediaSource.isTypeSupported(type))
+            throw new Error('当前 DBX 宿主尚不支持该视频编码的流播放');
+          mediaSource = new MediaSource();
+          mediaUrl = URL.createObjectURL(mediaSource);
+          streamTicket = resources().require({ ownedCpuBytes: CHUNK * 8 },
+            'StageMedia DBX MSE bounded chunk transport', 0, 'bounded-estimate');
+          var source = mediaSource;
+          source.addEventListener('sourceopen', function () {
+            if (released || source !== mediaSource) return;
+            try {
+              sourceBuffer = source.addSourceBuffer(type);
+              pumpVideo();
+            } catch (error) { if (options.onLost) options.onLost(error); }
+          }, { once: true });
+          source.addEventListener('error', function () {
+            if (!released && options.onLost) options.onLost(new Error('媒体流初始化失败'));
+          }, { once: true });
+        } else {
+          if (reply.media !== 'image' || !Number.isSafeInteger(reply.length) || reply.length <= 0 || reply.length > 32 * 1024 * 1024)
+            throw new Error('当前 DBX 宿主不支持视频流或无效图片长度');
+          assembling = true;
+          readTicket = resources().require({ ownedCpuBytes: reply.length + CHUNK * 8 },
+            'StageMedia DBX retained typed parts plus bounded JSON base64/atob/block copies', 0, 'bounded-estimate');
+          blobTicket = resources().require({ ownedCpuBytes: reply.length }, 'StageMedia DBX encoded Blob source', 0, 'bounded-estimate');
+          for (var offset = 0; offset < reply.length;) {
+            if (released) throw cancelled();
+            var block = await command('lease.read', { leaseId: reply.leaseId, offset: offset, count: CHUNK });
+            if (released) throw cancelled();
+            if (block.offset !== offset || block.length !== reply.length || block.contentKey !== reply.contentKey) throw new Error('素材读取版本发生变化，请重试');
+            if (typeof block.dataBase64 !== 'string' || block.dataBase64.length > Math.ceil(CHUNK / 3) * 4)
+              throw new Error('素材读取块编码长度无效');
+            raw = atob(block.dataBase64); bytes = new Uint8Array(raw.length);
+            if (!raw.length || raw.length > CHUNK || offset + raw.length > reply.length) throw new Error('素材读取长度无效');
+            for (var i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+            parts.push(bytes); offset += bytes.length;
+          }
+          blobUrl = URL.createObjectURL(new Blob(parts, { type: reply.mime }));
+          blobTicket.commit();
+          parts.length = 0; raw = bytes = null; releaseTicket(readTicket); readTicket = null; assembling = false;
         }
-        blobUrl = URL.createObjectURL(new Blob(parts, { type: reply.mime }));
-        blobTicket.commit();
-        parts.length = 0; raw = bytes = null; releaseTicket(readTicket); readTicket = null; assembling = false;
       }
       if (options.signal) options.signal.removeEventListener('abort', release);
-      return { url: blobUrl || reply.url, release: release, assetRef: spec.assetRef,
+      return { url: mediaUrl || blobUrl || reply.url, release: release, assetRef: spec.assetRef,
         media: reply.media, length: reply.length,
         // Native prepare::image uses cover scaling, so target width*height is not an upper bound.
         // Its independent 16MP/8192-side guard is the source contract for every derived image.

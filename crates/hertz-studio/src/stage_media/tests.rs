@@ -330,13 +330,13 @@ async fn stage_media_preset_cas_backup_and_reference_protection() {
         .unwrap();
     let token = lease["leaseId"].as_str().unwrap();
     assert!(lease["url"].is_null());
-    let block = owner.read_image(token, 0, CHUNK_BYTES).await.unwrap();
+    let block = owner.read_chunk(token, 0, CHUNK_BYTES).await.unwrap();
     assert!(
         !crate::rpc::decode_base64(block["dataBase64"].as_str().unwrap())
             .unwrap()
             .is_empty()
     );
-    assert!(owner.read_image(token, 0, CHUNK_BYTES + 1).await.is_err());
+    assert!(owner.read_chunk(token, 0, CHUNK_BYTES + 1).await.is_err());
     assert_eq!(
         owner.delete(asset).await.unwrap_err().code,
         "stage_asset_in_use"
@@ -503,17 +503,38 @@ async fn stage_media_video_gate_invalid_images_and_cancel() {
         width: 1280,
         height: 720,
     };
+    let dbx_lease = owner.acquire(acquire(), true).await.unwrap();
+    assert!(dbx_lease["url"].is_null());
+    assert_eq!(dbx_lease["media"], "video");
+    assert_eq!(dbx_lease["mime"], "video/webm");
+    assert_eq!(dbx_lease["codec"], "V_VP8");
+    let dbx_token = dbx_lease["leaseId"].as_str().unwrap();
+    let block = owner.read_chunk(dbx_token, 0, CHUNK_BYTES).await.unwrap();
+    assert_eq!(block["offset"], 0);
+    assert_eq!(block["length"], bytes.len());
+    assert_eq!(block["contentKey"], dbx_lease["contentKey"]);
     assert_eq!(
-        owner.acquire(acquire(), true).await.unwrap_err().code,
-        "stage_video_stream_unavailable"
+        crate::rpc::decode_base64(block["dataBase64"].as_str().unwrap()).unwrap(),
+        bytes
+    );
+    assert!(owner
+        .read_chunk(dbx_token, bytes.len() as u64, CHUNK_BYTES)
+        .await
+        .is_err());
+    assert!(owner.read_chunk(dbx_token, 0, 0).await.is_err());
+    owner.release(dbx_token);
+    assert_eq!(
+        owner
+            .read_chunk(dbx_token, 0, CHUNK_BYTES)
+            .await
+            .unwrap_err()
+            .code,
+        "stage_lease_expired"
     );
     let lease = owner.acquire(acquire(), false).await.unwrap();
     assert_eq!(lease["length"], bytes.len());
     assert_eq!(lease["mime"], "video/webm");
-    assert!(owner
-        .read_image(lease["leaseId"].as_str().unwrap(), 0, CHUNK_BYTES)
-        .await
-        .is_err());
+    assert!(lease["url"].is_string());
     owner.release(lease["leaseId"].as_str().unwrap());
     let invalid = b"this is not actually an image file";
     let rejected = finish(&owner, &upload(&owner, invalid).await).await;

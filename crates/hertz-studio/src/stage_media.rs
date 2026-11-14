@@ -139,7 +139,6 @@ pub(crate) struct Lease {
     asset_id: String,
     path: PathBuf,
     content_key: String,
-    media: String,
     mime: &'static str,
     length: u64,
     expires: AtomicI64,
@@ -730,12 +729,6 @@ impl StageMediaStore {
                 "素材不可用，请重新导入修复",
             ));
         }
-        if dbx && media == "video" {
-            return Err(error(
-                "stage_video_stream_unavailable",
-                "当前 DBX 宿主尚不支持有界视频流；素材已保留，可在独立版中使用",
-            ));
-        }
         let source = self.original(&asset);
         if !source.is_file() {
             sqlx::query("UPDATE stage_media_assets SET state='missing' WHERE asset_id=?")
@@ -746,6 +739,18 @@ impl StageMediaStore {
             return Err(error("stage_asset_missing", "素材文件缺失，请重新导入修复"));
         }
         let metadata: Value = serde_json::from_str(&metadata).map_err(io)?;
+        let codec = if media == "video" {
+            let codec = metadata["codec"].as_str().unwrap_or_default();
+            if codec.is_empty() || codec.len() > 32 || !codec.is_ascii() {
+                return Err(error(
+                    "stage_video_stream_unavailable",
+                    "视频编码元数据无效，请重新导入",
+                ));
+            }
+            codec.to_owned()
+        } else {
+            String::new()
+        };
         let (path, mime) = if media == "image" {
             let target = self.derived(&asset, request.width, request.height);
             if !target.is_file() {
@@ -815,7 +820,6 @@ impl StageMediaStore {
                 asset_id: asset,
                 path,
                 content_key: content_key.clone(),
-                media: media.clone(),
                 mime,
                 length,
                 expires: AtomicI64::new(now() + LEASE_MS),
@@ -823,7 +827,7 @@ impl StageMediaStore {
         );
         Ok(
             json!({"leaseId":lease_token,"url":if dbx {Value::Null}else{json!(format!("/v1/stage/media/resource/{lease_token}"))},
-            "contentKey":content_key,"length":length,"mime":mime,"media":media,"ttlMs":LEASE_MS,"chunkBytes":CHUNK_BYTES}),
+            "contentKey":content_key,"length":length,"mime":mime,"media":media,"codec":codec,"ttlMs":LEASE_MS,"chunkBytes":CHUNK_BYTES}),
         )
     }
     fn lease(&self, token: &str) -> ApiResult<Arc<Lease>> {
@@ -854,24 +858,18 @@ impl StageMediaStore {
         }
         json!({"ok":true})
     }
-    pub(crate) async fn read_image(
+    pub(crate) async fn read_chunk(
         &self,
         token: &str,
         offset: u64,
         count: usize,
     ) -> ApiResult<Value> {
         if count == 0 || count > CHUNK_BYTES {
-            return Err(bad_request("图片读取块最多 256 KiB"));
+            return Err(bad_request("素材读取块最多 256 KiB"));
         }
         let lease = self.lease(token)?;
-        if lease.media != "image" || lease.length > IMAGE_BYTES {
-            return Err(error(
-                "stage_video_stream_unavailable",
-                "DBX 块读取仅支持准备后的静态图片",
-            ));
-        }
         if offset >= lease.length {
-            return Err(bad_request("图片偏移超出边界"));
+            return Err(bad_request("素材偏移超出边界"));
         }
         let mut file = tokio::fs::File::open(&lease.path).await.map_err(io)?;
         file.seek(std::io::SeekFrom::Start(offset))
