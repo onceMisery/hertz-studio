@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // This accepts the native compiler/planner projection, never author JSON.
 import { resourceKey } from '../resources/pool.js';
+import { validateTrack } from './animation.js';
 import { planBuiltin } from './builtin.js';
 const FONT_ADAPTER_VERSION = 'sfnt-ttf-parser-0.25.1-static-v3';
 const RASTER_ADAPTER_VERSION = 'text-raster-v2';
@@ -63,8 +64,18 @@ export function compilePlan(projection, registry = null, identity = null) {
   const values = projectValues(ir, finalPublicValues);
   if (projection.semanticKey !== ir.semanticKey) throw new Error('composition-semantic-identity-mismatch');
   if (ir.effects.length) throw new Error('composition-adapter-unavailable:effects');
-  if (ir.tracks.length) throw new Error('composition-adapter-unavailable:tracks');
   if (ir.bindings.length) throw new Error('composition-adapter-unavailable:bindings');
+  for (const track of ir.tracks) {
+    const invalid = validateTrack(track, ir.numericSlots);
+    if (invalid) throw new Error(invalid);
+    const slot = ir.numericSlots[track.targetSlot];
+    const node = ir.nodes[slot.nodeIndex];
+    if (!node) throw new Error('composition-track-target-invalid');
+    if (node.nodeType === 'builtinScene') throw new Error('composition-adapter-unavailable:track-builtin');
+    if ((node.nodeType === 'text' && ['width', 'height', 'fontSize', 'lineHeight'].includes(slot.property))
+      || (node.nodeType === 'particles' && ['count', 'seed'].includes(slot.property)))
+      throw new Error('composition-adapter-unavailable:track-rebuild');
+  }
   if (!['contain', 'cover', 'stretch'].includes(target.fit || 'cover')) throw new Error('composition-target-fit-invalid');
   const builtin = planBuiltin(projection,values,registry,identity);
   const supported = new Set(['image', 'video', 'text', 'group', 'particles']);

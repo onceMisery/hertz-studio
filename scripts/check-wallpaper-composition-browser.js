@@ -41,8 +41,8 @@ function rememberFontProjection(compiled,inputs,overrides={}){
   files:manifest.files.filter(entry=>entry.path!=='document.json').map(entry=>({path:entry.path,mime:entry.mime,
    source:path.join(output,entry.path.startsWith('assets/')?entry.path.slice(7):entry.path)}))});
 }
-function compile(nodes,canvas={width:64,height:64,colorSpace:'srgb',background:'#000000'},properties=[]){
- const document={documentVersion:1,canvas,nodes,timeline:{durationSeconds:2,loop:true,tracks:[]},bindings:[]};
+function compile(nodes,canvas={width:64,height:64,colorSpace:'srgb',background:'#000000'},properties=[],timeline={durationSeconds:2,loop:true,tracks:[]}){
+ const document={documentVersion:1,canvas,nodes,timeline,bindings:[]};
  const bytes=Buffer.from(JSON.stringify(document)), id=++number, documentPath=path.join(output,`document-${id}.json`), manifestPath=path.join(output,`manifest-${id}.json`);
  fs.writeFileSync(documentPath,bytes);
  fs.writeFileSync(manifestPath,JSON.stringify({formatVersion:1,workId:'8bc16f98-a0ef-4df9-a9a4-aecdb4c3f772',version:1,title:'Composition browser verification',
@@ -66,6 +66,10 @@ const fit=compile([image('wide-layer','wide',{width:64,height:64,fit:'contain'})
 const text=compile([{id:'label',type:'text',stateVersion:1,assets:{fontAsset:'font'},properties:{x:0,y:0,width:64,height:64,anchorX:0,anchorY:0,text:'Hertz',fontSize:32,color:'#ffffff'}}]);
 const particles=compile([{id:'field',type:'particles',stateVersion:1,properties:{x:32,y:0,width:64,height:64,anchorX:0,anchorY:0,count:24,seed:19,lifetimeSeconds:2,speed:24,spread:50}}]);
 const video=compile([{id:'movie',type:'video',stateVersion:1,assets:{asset:'video'},properties:{x:0,y:0,width:64,height:64,anchorX:0,anchorY:0,loopStartMs:0,loopEndMs:200}}]);
+const timelineFixture=compile([image('back','blue')],undefined,[],{durationSeconds:2,loop:true,tracks:[
+ {id:'fade',target:{nodeId:'back',property:'opacity',component:null},keys:[
+  {timeSeconds:0,value:0.2,easing:'linear'},{timeSeconds:1,value:0.6,easing:'step'},
+  {timeSeconds:2,value:1,easing:'linear'}]}]});
 const dirtyFixture=compile([image('back','blue'),image('child','red',{width:16,height:16}),
  {id:'parent',type:'group',stateVersion:1,children:['child'],properties:{x:8,y:8,width:64,height:64,anchorX:0,anchorY:0}},
  image('unrelated','green',{x:48,y:48,width:16,height:16}),
@@ -163,6 +167,27 @@ const results=[];
   await select(text);const textPixels=await page.evaluate(()=>({pixels:snapshot(),fonts:document.fonts.size}));assert.ok(textPixels.pixels.some((value,index)=>index%4!==3&&value>200));assert.equal(textPixels.fonts,1);results.push({case:'actual prepared FontFace and text pixels'});
   await select(particles);const first=await page.evaluate(()=>{host.frame({sceneTime:.5,paused:true});return snapshot();});
   await page.evaluate(()=>host.frame({sceneTime:1.4,paused:true}));const backwards=await page.evaluate(()=>{host.frame({sceneTime:.5,paused:true});return snapshot();});assert.deepEqual(backwards,first);assert.ok(first.some((value,index)=>index%4!==3&&value>0));results.push({case:'preallocated particles absolute phase and reverse seek'});
+  await select(timelineFixture);
+  const timeline0=await page.evaluate(()=>pixel(20,20));
+  await page.evaluate(()=>host.frame({sceneTime:.5,paused:true}));
+  const timeline05=await page.evaluate(()=>pixel(20,20));
+  await page.evaluate(()=>host.frame({sceneTime:1.5,paused:true}));
+  const timeline15=await page.evaluate(()=>pixel(20,20));
+  await page.evaluate(()=>host.frame({sceneTime:.5,paused:true}));
+  const timelineReverse=await page.evaluate(()=>pixel(20,20));
+  await page.evaluate(()=>host.frame({sceneTime:2,paused:true}));
+  const timelineLoop=await page.evaluate(()=>pixel(20,20));
+  near(timeline0,[0,0,124]);near(timeline05,[0,0,170]);near(timeline15,[0,0,203]);
+  near(timelineReverse,[0,0,170]);near(timelineLoop,[0,0,124]);
+  results.push({case:'compiler timeline tracks linear/step/loop/reverse seek',timeline0,timeline05,timeline15,timelineReverse,timelineLoop});
+  const animationChecks=await page.evaluate(async()=>{const m=await import('/src/composition/animation.js');
+   const keys=[{timeSeconds:0,value:.2,easing:'easeInOut'},{timeSeconds:1,value:.6,easing:'linear'}];
+   return {linear:m.evaluateTrack([{timeSeconds:0,value:.2,easing:'linear'},{timeSeconds:2,value:1,easing:'linear'}],.5),
+    ease:m.evaluateTrack(keys,.25),step:m.evaluateTrack([{timeSeconds:0,value:.2,easing:'step'},{timeSeconds:1,value:1,easing:'linear'}],.5),
+    before:m.evaluateTrack(keys,-1),after:m.evaluateTrack(keys,3)};});
+  assert.ok(Math.abs(animationChecks.linear-.4)<1e-12);
+  assert.ok(Math.abs(animationChecks.ease-.2625)<1e-12);
+  assert.equal(animationChecks.step,.2);assert.equal(animationChecks.before,.2);assert.equal(animationChecks.after,.6);
   await select(video);try{await page.waitForFunction(()=>host.frame({sceneTime:.1,paused:true,seek:true}),null,{timeout:8000});}
   catch(error){console.error(JSON.stringify(await page.evaluate(()=>host.stats())));throw error;}
   const videoStats=await page.evaluate(()=>({stats:host.stats(),ledger:ledger.snapshot(),fonts:document.fonts.size,pixels:snapshot()}));assert.equal(videoStats.ledger.held.decoderLeases,1);assert.equal(videoStats.fonts,0);assert.ok(videoStats.pixels.some((value,index)=>index%4!==3&&value>0));results.push({case:'actual silent video texture, seek completion and obsolete font exit',videoStats});
