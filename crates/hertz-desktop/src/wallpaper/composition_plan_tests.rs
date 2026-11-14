@@ -8,6 +8,7 @@ use crate::wallpaper::{
     library::{tempfileish, InstallWork, Library, LOCAL_SOURCE},
     selection_plan::{self, ResolvedSelection},
 };
+use image::{ImageFormat, Rgba, RgbaImage};
 use std::io::{Cursor, Write};
 use std::sync::atomic::AtomicUsize;
 
@@ -18,6 +19,19 @@ fn document(nodes: Value) -> Value {
 fn document_full(nodes: Value, effects: Value, tracks: Value, bindings: Value) -> Value {
     json!({"documentVersion":1,"canvas":{"width":64,"height":64,"colorSpace":"srgb","background":"#000000"},
     "nodes":nodes,"timeline":{"durationSeconds":4,"loop":true,"tracks":tracks},"bindings":bindings,"effects":effects})
+}
+fn rgba_png(width: u32, height: u32, pixel: impl Fn(u32, u32) -> [u8; 4]) -> Vec<u8> {
+    let mut image = RgbaImage::new(width, height);
+    for y in 0..height {
+        for x in 0..width {
+            image.put_pixel(x, y, Rgba(pixel(x, y)));
+        }
+    }
+    let mut bytes = Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(image)
+        .write_to(&mut bytes, ImageFormat::Png)
+        .unwrap();
+    bytes.into_inner()
 }
 fn target() -> ImageTarget {
     ImageTarget {
@@ -56,16 +70,6 @@ async fn install_full(
     properties: Value,
     video: bool,
 ) -> (Arc<ImportJobs>, String, Arc<AtomicUsize>) {
-    let probes = Arc::new(AtomicUsize::new(0));
-    let counted = Arc::clone(&probes);
-    let jobs = Arc::new(ImportJobs::start(
-        Library::open(root).await.unwrap(),
-        AssetStore::new(root).unwrap(),
-        ProbeClient::testing(move |_, _| {
-            counted.fetch_add(1, Ordering::AcqRel);
-            Box::pin(async { Ok(()) })
-        }),
-    ));
     let mut entries = vec![(
         "composition.json",
         serde_json::to_vec(&document_full(nodes, effects, tracks, bindings)).unwrap(),
@@ -81,11 +85,30 @@ async fn install_full(
         assets
             .push(json!({"id":"movie","kind":"video","source":"assets/movie.webm","variants":[]}));
     }
+    install_document(root, entries, json!(assets), properties).await
+}
+
+async fn install_document(
+    root: &std::path::Path,
+    entries: Vec<(&str, Vec<u8>, &str)>,
+    assets: Value,
+    properties: Value,
+) -> (Arc<ImportJobs>, String, Arc<AtomicUsize>) {
+    let probes = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&probes);
+    let jobs = Arc::new(ImportJobs::start(
+        Library::open(root).await.unwrap(),
+        AssetStore::new(root).unwrap(),
+        ProbeClient::testing(move |_, _| {
+            counted.fetch_add(1, Ordering::AcqRel);
+            Box::pin(async { Ok(()) })
+        }),
+    ));
     let hash = install_package(
         &jobs,
         root,
         entries,
-        json!(assets),
+        assets,
         properties,
         json!({"code":"none","assets":"none","attribution":""}),
         zip::CompressionMethod::Deflated,
@@ -797,6 +820,100 @@ async fn native_track_binding_fixture_admits_timeline_and_binding_into_the_origi
     if let Some(output) = std::env::var_os("HERTZ_COMPOSITION_NATIVE_FIXTURE") {
         let output = std::path::PathBuf::from(output).join("tracks");
         std::fs::create_dir_all(&output).unwrap();
+        let binding = super::super::page_events::PageBinding::new(1).unwrap();
+        let access = super::super::access::MediaAccess::new();
+        let mut admission =
+            super::super::gl_plan::GlAdmission::new(gl, Arc::new(BudgetCoordinator::new())).unwrap();
+        admission
+            .bind_composition(plan, &access, binding.session_id())
+            .unwrap();
+        let uri = admission.composition_url().unwrap();
+        let path = uri.split("/files/").nth(1).unwrap();
+        let projection_reader = access.permit(&package_hash, path).unwrap();
+        std::fs::write(output.join("projection.json"), projection_reader.payload().unwrap()).unwrap();
+        std::fs::write(output.join("uri.txt"), uri).unwrap();
+        std::fs::write(
+            output.join("native-init.js"),
+            format!(
+                "{}\n{}",
+                binding.initialization_script(),
+                admission.initialization_script()
+            ),
+        )
+        .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn native_mask_fixture_prepares_effect_texture_and_projects_it_to_the_page() {
+    let root = tempfileish::temp_dir("composition-native-mask");
+    let base = rgba_png(64, 64, |_, _| [255, 0, 0, 255]);
+    let mask = rgba_png(64, 64, |x, _| {
+        if x < 32 {
+            [255, 255, 255, 255]
+        } else {
+            [0, 0, 0, 255]
+        }
+    });
+    let entries = vec![
+        (
+            "composition.json",
+            serde_json::to_vec(&document_full(
+                json!([{"id":"back","type":"image","stateVersion":1,"assets":{"asset":"base"},
+                    "properties":{"x":0,"y":0,"width":64,"height":64,
+                        "anchorX":0,"anchorY":0,"fit":"stretch"}}]),
+                json!([{"id":"clip","type":"mask","stateVersion":1,
+                    "target":{"kind":"node","nodeId":"back"},
+                    "assets":{"maskAsset":"mask"},"properties":{"invert":false}}]),
+                json!([]),
+                json!([]),
+            ))
+            .unwrap(),
+            "application/json",
+        ),
+        ("assets/base.png", base, "image/png"),
+        ("assets/mask.png", mask, "image/png"),
+    ];
+    let assets = json!([
+        {"id":"base","kind":"image","source":"assets/base.png","variants":[]},
+        {"id":"mask","kind":"image","source":"assets/mask.png","variants":[]}
+    ]);
+    let (jobs, hash, probes) = install_document(root.path(), entries, assets, json!([])).await;
+    let plan = selected(jobs, hash, Default::default()).await.unwrap();
+    assert_eq!(probes.load(Ordering::Acquire), 2);
+    let gl = plan
+        .gl_plan(OwnerKind::Preview, "mask-owner".into(), 1, 60, 15)
+        .unwrap();
+    let projection = plan
+        .projection("same-fixed-session-mask", 1, 7, &gl.limits)
+        .unwrap();
+    assert_eq!(projection["ir"]["effects"][0]["type"], "mask");
+    assert_eq!(projection["ir"]["effects"][0]["assets"]["maskAsset"], "mask");
+    let resolved = projection["resolvedAssets"].as_array().unwrap();
+    assert_eq!(resolved.len(), 2);
+    assert!(resolved
+        .iter()
+        .any(|asset| asset["assetId"] == "mask" && asset["kind"] == "image"));
+    let page = &projection["pageLimits"];
+    assert_eq!(page["programs"], 2);
+    assert_eq!(page["renderTargetDeclaredBytes"], 64 * 64 * 16);
+    assert_eq!(page["textureDeclaredBytes"], 2 * 64 * 64 * 4);
+    if let Some(output) = std::env::var_os("HERTZ_COMPOSITION_NATIVE_FIXTURE") {
+        let output = std::path::PathBuf::from(output).join("mask");
+        std::fs::create_dir_all(&output).unwrap();
+        let mut files = Vec::new();
+        let mut package_hash = String::new();
+        for asset in plan.assets.values() {
+            if let Some(media) = asset.as_media() {
+                if package_hash.is_empty() {
+                    package_hash = media.reference().package_hash.clone();
+                }
+                let name = format!("asset-{}.png", files.len());
+                std::fs::copy(&media.input().media.path, output.join(&name)).unwrap();
+                files.push(json!({"url":media.url(),"file":name}));
+            }
+        }
+        std::fs::write(output.join("files.json"), serde_json::to_vec(&files).unwrap()).unwrap();
         let binding = super::super::page_events::PageBinding::new(1).unwrap();
         let access = super::super::access::MediaAccess::new();
         let mut admission =
