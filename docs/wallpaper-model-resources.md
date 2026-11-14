@@ -967,3 +967,22 @@ instantiate 拒绝；负例（缺 TEXCOORD、非法 sampler、normalTexture、�
 sRGB/linear 期望反转）均按预期变红后还原。本批不创建 WebGL renderer/GPU 上传、
 不产生首帧，也不接 WebView2 broker 响应；normal/occlusion/emissive 槽位与 KTX2
 解码继续开放。
+
+2026-11-14 r61 材质槽位续接：textured-PBR profile 新增 normalTexture（scale）、
+occlusionTexture（strength）、emissiveTexture 与 emissiveFactor；五个槽位统一
+要求 texCoord 0/1 的 TEXCOORD_n，且被使用的 texture index 必须互不相同，
+否则 `texture-slot-sharing` fail-closed（避免 GLTFLoader 按 source+sampler
+缓存把 colorspace/channel 泄漏到其它角色）。验证新增 normalMap/normalScale、
+aoMap/aoMapIntensity、emissiveMap/emissive（linear）；无 TANGENT 时 GLTFLoader
+会克隆最终材质并把 normalScale.y 取反，按该真实行为核对。材质分配事实改为
+每个使用中材质 2 份（原材质 + derivative-tangent clone）。
+
+真实 Chrome 证据：5 张 2×2 PNG（4 内嵌 + 1 外部 emissive），base0/MR1/clone、
+normal1/clone、ao0、emissive0；normalScale 0.75/-0.75、aoMapIntensity 0.6、
+emissive 0.1/0.2/0.3、各槽 wrap/filter/channel/colorSpace 精确匹配；释放
+纹理 8（5 原图 + 3 clone）/材质 2/几何 1，重复 instantiate 拒绝；外部请求
+恰好 1 次。负例（缺 TEXCOORD、非法 sampler、共享 texture index、PBR 未知字段、
+未映射 URI）均在加载前失败。三处变异（normalScale.y 符号、aoMapIntensity、
+emissive colorSpace）均按预期变红后还原；旧 loader 102 项与前端聚合 86 步保持
+通过。本批仍不创建 renderer/GPU/首帧、不接 WebView2；KTX2 与真实设备能力
+继续开放。

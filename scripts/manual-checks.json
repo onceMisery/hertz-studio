@@ -8,7 +8,7 @@
     },
     {
       "script": "check-wallpaper-model-textured-browser.js",
-      "purpose": "Real Chrome decode of the textured PBR loader profile: an embedded 2x2 PNG and a declared external PNG URI mapped through the caller's textureUrl callback, actual MeshStandardMaterial factors/alpha/side, baseColor/metalness/roughness map identities, flipY/colorSpace/wraps/filters, UV/UV1 attributes, disposal and reinstantiate refusal. Negative profiles (missing TEXCOORD, illegal sampler, unsupported material slot, unmapped URI) fail before fetch. Requires the pinned Three 0.186.0 modules and Playwright Chrome; no renderer, GPU upload or first frame is claimed."
+      "purpose": "Real Chrome decode of the textured PBR loader profile: five embedded/external 2x2 PNGs mapped through the caller's textureUrl callback, actual MeshStandardMaterial factors/alpha/side/normalScale/aoMapIntensity/emissive, baseColor/metalness/roughness/normal/ao/emissive map identities or texCoord clones, flipY/colorSpace/wraps/filters, UV/UV1 attributes, disposal and reinstantiate refusal. Negative profiles (missing TEXCOORD, illegal sampler, shared texture slot, unsupported PBR field, unmapped URI) fail before fetch. Requires the pinned Three 0.186.0 modules and Playwright Chrome; no renderer, GPU upload or first frame is claimed."
     },
     {
       "script": "check-shell-layout-browser.js",

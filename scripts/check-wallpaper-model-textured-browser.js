@@ -49,7 +49,7 @@ function floats(values) {
   return bytes;
 }
 
-function fixture({ embeddedOnly = false, missingUv1 = false, badSampler = false, normalTexture = false, unmapped = false } = {}) {
+function fixture({ missingUv1 = false, badSampler = false, sharedTexture = false, unmapped = false, pbrField = false } = {}) {
   const image = png(2, 2), binary = [];
   let offset = 0;
   const view = (bytes) => {
@@ -81,14 +81,22 @@ function fixture({ embeddedOnly = false, missingUv1 = false, badSampler = false,
       { bufferView: 3, componentType: 5126, count: 3, type: 'VEC2' },
       { bufferView: 4, componentType: 5123, count: 3, type: 'SCALAR' }
     ],
-    images: embeddedOnly
-      ? [{ bufferView: 5, mimeType: 'image/png' }, { bufferView: 5, mimeType: 'image/png' }]
-      : [{ bufferView: 5, mimeType: 'image/png' }, { uri: unmapped ? 'textures/unmapped.png' : 'textures/external.png', mimeType: 'image/png' }],
+    images: [
+      { bufferView: 5, mimeType: 'image/png' }, { bufferView: 5, mimeType: 'image/png' },
+      { bufferView: 5, mimeType: 'image/png' }, { bufferView: 5, mimeType: 'image/png' },
+      { uri: unmapped ? 'textures/unmapped.png' : 'textures/emissive.png', mimeType: 'image/png' }
+    ],
     samplers: [
       { magFilter: 9729, minFilter: 9987, wrapS: 33071, wrapT: 33648 },
-      { magFilter: 9728, minFilter: 9728, wrapS: 10497, wrapT: 33071 }
+      { magFilter: 9728, minFilter: 9728, wrapS: 10497, wrapT: 33071 },
+      { magFilter: 9729, minFilter: 9728, wrapS: 33648, wrapT: 10497 },
+      { magFilter: 9728, minFilter: 9987, wrapS: 33071, wrapT: 10497 },
+      { magFilter: 9729, minFilter: 9987, wrapS: 10497, wrapT: 10497 }
     ],
-    textures: [{ source: 0, sampler: 0 }, { source: 1, sampler: 1 }],
+    textures: [
+      { source: 0, sampler: 0 }, { source: 1, sampler: 1 }, { source: 2, sampler: 2 },
+      { source: 3, sampler: 3 }, { source: 4, sampler: 4 }
+    ],
     materials: [{
       pbrMetallicRoughness: {
         baseColorFactor: [0.25, 0.5, 0.75, 0.8],
@@ -97,12 +105,17 @@ function fixture({ embeddedOnly = false, missingUv1 = false, badSampler = false,
         roughnessFactor: 0.6,
         metallicRoughnessTexture: { index: 1, texCoord: 1 }
       },
+      normalTexture: { index: 2, texCoord: 1, scale: 0.75 },
+      occlusionTexture: { index: 3, texCoord: 0, strength: 0.6 },
+      emissiveTexture: { index: 4, texCoord: 0 },
+      emissiveFactor: [0.1, 0.2, 0.3],
       alphaMode: 'MASK', alphaCutoff: 0.3, doubleSided: true
     }]
   };
   if (missingUv1) delete json.meshes[0].primitives[0].attributes.TEXCOORD_1;
   if (badSampler) json.samplers[0].wrapS = 1;
-  if (normalTexture) json.materials[0].normalTexture = { index: 0 };
+  if (sharedTexture) json.materials[0].normalTexture.index = 0;
+  if (pbrField) json.materials[0].pbrMetallicRoughness.clearcoat = {};
   while (binary.length % 4 !== 0) binary.push(0);
   json.buffers[0].byteLength = binary.length;
   const text = Buffer.from(JSON.stringify(json));
@@ -113,27 +126,34 @@ function fixture({ embeddedOnly = false, missingUv1 = false, badSampler = false,
   header.setUint32(12, padded.length, true); glb.write('JSON', 16, 'ascii'); padded.copy(glb, 20);
   header.setUint32(20 + padded.length, bin.length, true); glb.write('BIN\0', 24 + padded.length, 'ascii');
   bin.copy(glb, 28 + padded.length);
-  return { glb, embeddedImageBytes: image.length, embeddedOnly };
+  return { glb, embeddedImageBytes: image.length };
 }
 
-function expectedFacts(input, embeddedImageBytes, embeddedOnly = false) {
+function expectedFacts(input, embeddedImageBytes) {
   const key = '4:NORMAL:1;POSITION:0;TEXCOORD_0:2;TEXCOORD_1:3;:undefined';
-  const secondImage = embeddedOnly
-    ? { index: 1, source: 'embedded', mime: 'image/png', bytes: embeddedImageBytes }
-    : { index: 1, source: 'external', mime: 'image/png', uri: 'textures/external.png' };
+  const embedded = index => ({ index, source: 'embedded', mime: 'image/png', bytes: embeddedImageBytes });
+  const external = { index: 4, source: 'external', mime: 'image/png', uri: 'textures/emissive.png' };
+  const samplers = [
+    { magFilter: 9729, minFilter: 9987, wrapS: 33071, wrapT: 33648 },
+    { magFilter: 9728, minFilter: 9728, wrapS: 10497, wrapT: 33071 },
+    { magFilter: 9729, minFilter: 9728, wrapS: 33648, wrapT: 10497 },
+    { magFilter: 9728, minFilter: 9987, wrapS: 33071, wrapT: 10497 },
+    { magFilter: 9729, minFilter: 9987, wrapS: 10497, wrapT: 10497 }
+  ];
   return {
     profile: 'static-pbr-texture-v1', loaderVersion: 'three-0.186.0-gltfloader', input,
-    declared: { nodes: 1, meshes: 1, primitives: 1, accessors: 5, bufferViews: 6, materials: 1, textures: 2, images: 2 },
+    declared: { nodes: 1, meshes: 1, primitives: 1, accessors: 5, bufferViews: 6, materials: 1, textures: 5, images: 5 },
     scene: { index: 0, roots: [0], nodes: [{ index: 0, parentIndex: null, meshIndex: 0, children: [], transform: { kind: 'trs', translation: [0, 0, 0], rotation: [0, 0, 0, 1], scale: [1, 1, 1] } }], maxDepth: 1, objectCount: 2, allocatedObjectCount: 2, drawCalls: 1, triangles: 1 },
-    materials: [{ index: 0, baseColorFactor: [0.25, 0.5, 0.75, 0.8], metallicFactor: 0.4, roughnessFactor: 0.6, baseColorTexture: { index: 0, texCoord: 0 }, metallicRoughnessTexture: { index: 1, texCoord: 1 }, alphaMode: 'MASK', alphaCutoff: 0.3, doubleSided: true }],
-    textures: [
-      { index: 0, source: { index: 0, source: 'embedded', mime: 'image/png', bytes: embeddedImageBytes }, sampler: { magFilter: 9729, minFilter: 9987, wrapS: 33071, wrapT: 33648 } },
-      { index: 1, source: secondImage, sampler: { magFilter: 9728, minFilter: 9728, wrapS: 10497, wrapT: 33071 } }
-    ],
-    images: [
-      { index: 0, source: 'embedded', mime: 'image/png', bytes: embeddedImageBytes },
-      secondImage
-    ],
+    materials: [{
+      index: 0, baseColorFactor: [0.25, 0.5, 0.75, 0.8], metallicFactor: 0.4, roughnessFactor: 0.6,
+      baseColorTexture: { index: 0, texCoord: 0 }, metallicRoughnessTexture: { index: 1, texCoord: 1 },
+      normalTexture: { index: 2, texCoord: 1, scale: 0.75 },
+      occlusionTexture: { index: 3, texCoord: 0, strength: 0.6 },
+      emissiveTexture: { index: 4, texCoord: 0 }, emissiveFactor: [0.1, 0.2, 0.3],
+      alphaMode: 'MASK', alphaCutoff: 0.3, doubleSided: true
+    }],
+    textures: [0, 1, 2, 3, 4].map(index => ({ index, source: index === 4 ? external : embedded(index), sampler: samplers[index] })),
+    images: [embedded(0), embedded(1), embedded(2), embedded(3), external],
     resources: {
       geometries: [{ key, material: 0, positionAccessor: 0, normalAccessor: 1, uvAccessors: [{ set: 0, accessor: 2 }, { set: 1, accessor: 3 }], indexAccessor: 4, mode: null, triangles: 1, positionMin: [0, 0, 0], positionMax: [1, 1, 0] }],
       accessors: [
@@ -149,7 +169,7 @@ function expectedFacts(input, embeddedImageBytes, embeddedOnly = false) {
         { index: 4, byteOffset: 120, byteLength: 8 }
       ],
       geometryCount: 1, attributeCount: 5, backingCount: 5, gpuBufferBytes: 126, cpuBackingBytes: 128,
-      materialCount: 1, allocatedMaterialCount: 2, textureCount: 2, imageCount: 2
+      materialCount: 1, allocatedMaterialCount: 2, textureCount: 5, imageCount: 5
     }
   };
 }
@@ -166,15 +186,16 @@ function inputFactsOf(glb) {
   return { encodedBytes: glb.length, jsonBytes, binBytes };
 }
 function expectedPayload({ buffer, ...source }) {
-  return { ...source, expected: expectedFacts(inputFactsOf(buffer), source.embeddedImageBytes, source.embeddedOnly === true) };
+  return { ...source, expected: expectedFacts(inputFactsOf(buffer), source.embeddedImageBytes) };
 }
 
 async function main() {
   const image = png(2, 2);
-  const main = fixture(), only = fixture({ embeddedOnly: true });
+  const main = fixture();
   const variants = {
     missingUv1: fixture({ missingUv1: true }), badSampler: fixture({ badSampler: true }),
-    normalTexture: fixture({ normalTexture: true }), unmapped: fixture({ unmapped: true })
+    sharedTexture: fixture({ sharedTexture: true }), unmapped: fixture({ unmapped: true }),
+    pbrField: fixture({ pbrField: true })
   };
   let externalRequests = 0;
   const server = http.createServer((request, response) => {
@@ -185,7 +206,7 @@ async function main() {
       }) + '</script>';
       response.writeHead(200, { 'content-type': 'text/html' }); response.end(html); return;
     }
-    if (url.pathname === '/tex/external.png') {
+    if (url.pathname === '/tex/emissive.png') {
       externalRequests++;
       response.writeHead(200, { 'content-type': 'image/png' }); response.end(image); return;
     }
@@ -219,7 +240,7 @@ async function main() {
         return { uploads, options: {
           admissions: { cpu: { state: () => state, commit() {}, release() {}, settle() {} } },
           bufferPlan: { cpuReady() {}, upload(attribute) { uploads.push(attribute); return attribute; } },
-          textureUrl: uri => uri === 'textures/external.png' ? '/tex/external.png' : null
+          textureUrl: uri => uri === 'textures/emissive.png' ? '/tex/emissive.png' : null
         } };
       }
       async function attempt(source) {
@@ -233,6 +254,7 @@ async function main() {
       const rootObject = instance.root;
       const mesh = []; rootObject.traverse(object => { if (object.isMesh) mesh.push(object); });
       const material = mesh[0].material, map = material.map, metal = material.metalnessMap, roughness = material.roughnessMap;
+      const normal = material.normalMap, ao = material.aoMap, emissive = material.emissiveMap;
       const textureFacts = texture => texture && {
         width: texture.image.width, height: texture.image.height, channel: texture.channel,
         wrapS: texture.wrapS, wrapT: texture.wrapT, magFilter: texture.magFilter, minFilter: texture.minFilter,
@@ -245,19 +267,22 @@ async function main() {
         material: {
           color: material.color.toArray(), opacity: material.opacity, metalness: material.metalness, roughness: material.roughness,
           side: material.side, transparent: material.transparent, alphaTest: material.alphaTest, depthWrite: material.depthWrite,
-          metalIsRoughness: metal === roughness, hasRoughnessMap: !!roughness, hasMetalnessMap: !!metal
+          metalIsRoughness: metal === roughness, hasRoughnessMap: !!roughness, hasMetalnessMap: !!metal,
+          normalScale: material.normalScale.toArray(), aoMapIntensity: material.aoMapIntensity,
+          emissive: material.emissive.toArray(), hasNormalMap: !!normal, hasAoMap: !!ao, hasEmissiveMap: !!emissive
         },
         map: textureFacts(map),
         metal: textureFacts(metal),
         roughness: textureFacts(roughness),
+        normal: textureFacts(normal),
+        ao: textureFacts(ao),
+        emissive: textureFacts(emissive),
         attributes: Object.keys(mesh[0].geometry.attributes).sort(),
         uv: Array.from(mesh[0].geometry.attributes.uv.array), uv1: Array.from(mesh[0].geometry.attributes.uv1.array)
       };
       rootObject.removeFromParent(); rootObject.clear(); instance.release(); passed.resource.dispose();
       summary.disposed = { ...disposed };
       try { passed.resource.instantiate(); summary.reinstantiated = true; } catch { summary.reinstantiated = false; }
-      const accepted = await attempt(payload.only);
-      summary.embeddedOnly = accepted.error ? { error: accepted.error } : { materialCount: accepted.resource.facts.resources.materialCount, textureCount: accepted.resource.facts.resources.textureCount };
       const negative = {};
       for (const [name, source] of Object.entries(payload.variants)) {
         const value = await attempt(source);
@@ -266,7 +291,6 @@ async function main() {
       return { summary, negative };
     }, {
       main: expectedPayload({ buffer: main.glb, glb: main.glb.toString('base64'), embeddedImageBytes: main.embeddedImageBytes }),
-      only: expectedPayload({ buffer: only.glb, glb: only.glb.toString('base64'), embeddedImageBytes: only.embeddedImageBytes, embeddedOnly: true }),
       variants: Object.fromEntries(Object.entries(variants).map(([name, value]) =>
         [name, expectedPayload({ buffer: value.glb, glb: value.glb.toString('base64'), embeddedImageBytes: value.embeddedImageBytes })]))
     });
@@ -288,20 +312,29 @@ async function main() {
     assert.equal(result.summary.material.hasRoughnessMap, true);
     assert.equal(result.summary.material.hasMetalnessMap, true);
     assert.equal(result.summary.material.metalIsRoughness, false);
+    assert.deepEqual(result.summary.material.normalScale, [0.75, -0.75]);
+    assert.equal(result.summary.material.aoMapIntensity, 0.6);
+    assert.deepEqual(result.summary.material.emissive.map(value => Math.round(value * 1000) / 1000), [0.1, 0.2, 0.3]);
+    assert.equal(result.summary.material.hasNormalMap, true);
+    assert.equal(result.summary.material.hasAoMap, true);
+    assert.equal(result.summary.material.hasEmissiveMap, true);
     assert.deepEqual(result.summary.map, { width: 2, height: 2, channel: 0, wrapS: 1001, wrapT: 1002, magFilter: 1006, minFilter: 1008, flipY: false, colorSpace: 'srgb' });
     assert.deepEqual(result.summary.metal, { width: 2, height: 2, channel: 1, wrapS: 1000, wrapT: 1001, magFilter: 1003, minFilter: 1003, flipY: false, colorSpace: '' });
     assert.deepEqual(result.summary.roughness, result.summary.metal);
-    assert.deepEqual(result.summary.disposed, { textures: 4, materials: 2, geometries: 1 });
+    assert.deepEqual(result.summary.normal, { width: 2, height: 2, channel: 1, wrapS: 1002, wrapT: 1000, magFilter: 1006, minFilter: 1003, flipY: false, colorSpace: '' });
+    assert.deepEqual(result.summary.ao, { width: 2, height: 2, channel: 0, wrapS: 1001, wrapT: 1000, magFilter: 1003, minFilter: 1008, flipY: false, colorSpace: '' });
+    assert.deepEqual(result.summary.emissive, { width: 2, height: 2, channel: 0, wrapS: 1000, wrapT: 1000, magFilter: 1006, minFilter: 1008, flipY: false, colorSpace: 'srgb' });
+    assert.deepEqual(result.summary.disposed, { textures: 8, materials: 2, geometries: 1 });
     assert.equal(result.summary.reinstantiated, false);
-    assert.equal(result.summary.embeddedOnly.textureCount, 2);
     assert.equal(externalRequests, 1, 'external texture fetched once');
     assert.match(result.negative.missingUv1, /TEXCOORD-required/);
     assert.match(result.negative.badSampler, /sampler-wrap/);
-    assert.match(result.negative.normalTexture, /material-field-unsupported/);
+    assert.match(result.negative.sharedTexture, /texture-slot-sharing/);
     assert.match(result.negative.unmapped, /URI-unsupported/);
+    assert.match(result.negative.pbrField, /pbr-field-unsupported/);
     assert.equal(externalRequests, 1, 'unmapped URI never fetched');
     assert.deepEqual(errors, []);
-    console.log(`textured loader: 2x2 PNG embedded+external, material PBR 0.25/0.5/0.75 alpha MASK 0.3, 2 textures, 5 accessors, ${externalRequests} external request; negative profile/sampler/URI passed`);
+    console.log(`textured loader: 2x2 PNG x5, PBR 0.25/0.5/0.75 alpha MASK 0.3, normal .75/ao .6/emissive .1/.2/.3, 5 accessors, ${externalRequests} external request; negative profile/sampler/sharing/URI passed`);
   } finally {
     await browser.close();
     await new Promise(resolve => server.close(resolve));
