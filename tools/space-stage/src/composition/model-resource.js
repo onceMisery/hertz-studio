@@ -552,7 +552,8 @@ function texturedMaterialFacts(json, textures) {
   return materials.map((material, materialIndex) => {
     assert(material && typeof material === 'object', 'material-required');
     for (const key of Object.keys(material)) {
-      assert(['name', 'extras', 'pbrMetallicRoughness', 'alphaMode', 'alphaCutoff', 'doubleSided'].includes(key), 'material-field-unsupported');
+      assert(['name', 'extras', 'pbrMetallicRoughness', 'normalTexture', 'occlusionTexture',
+        'emissiveTexture', 'emissiveFactor', 'alphaMode', 'alphaCutoff', 'doubleSided'].includes(key), 'material-field-unsupported');
     }
     const pbr = material.pbrMetallicRoughness ?? {};
     assert(pbr && typeof pbr === 'object', 'pbr-required');
@@ -567,17 +568,45 @@ function texturedMaterialFacts(json, textures) {
     assert(Number.isFinite(roughnessFactor) && roughnessFactor >= 0 && roughnessFactor <= 1, 'roughnessFactor');
     const baseColorTexture = slot(pbr.baseColorTexture, 'baseColorTexture');
     const metallicRoughnessTexture = slot(pbr.metallicRoughnessTexture, 'metallicRoughnessTexture');
-    // GLTFLoader caches textures by source+sampler, so sharing one index between
-    // sRGB base color and linear metal/rough would reuse one colorSpace.
-    assert(!(baseColorTexture && metallicRoughnessTexture
-      && baseColorTexture.index === metallicRoughnessTexture.index), 'texture-colorspace-ambiguous');
+    const normalTexture = (info => {
+      if (info === undefined) return null;
+      assert(info && typeof info === 'object', 'normal-texture-required');
+      for (const key of Object.keys(info)) assert(['index', 'texCoord', 'scale'].includes(key), 'normal-texture-field-unsupported');
+      const texture = index(info.index, textures, 'normalTexture');
+      const texCoord = info.texCoord ?? 0;
+      assert(integer(texCoord) && texCoord <= 1, 'texCoord-unsupported');
+      const scale = info.scale ?? 1;
+      assert(Number.isFinite(scale), 'normal-scale');
+      return { index: texture.index, texCoord, scale };
+    })(material.normalTexture);
+    const occlusionTexture = (info => {
+      if (info === undefined) return null;
+      assert(info && typeof info === 'object', 'occlusion-texture-required');
+      for (const key of Object.keys(info)) assert(['index', 'texCoord', 'strength'].includes(key), 'occlusion-texture-field-unsupported');
+      const texture = index(info.index, textures, 'occlusionTexture');
+      const texCoord = info.texCoord ?? 0;
+      assert(integer(texCoord) && texCoord <= 1, 'texCoord-unsupported');
+      const strength = info.strength ?? 1;
+      assert(Number.isFinite(strength) && strength >= 0 && strength <= 1, 'occlusion-strength');
+      return { index: texture.index, texCoord, strength };
+    })(material.occlusionTexture);
+    const emissiveTexture = slot(material.emissiveTexture, 'emissiveTexture');
+    const emissiveFactor = material.emissiveFactor ?? [0, 0, 0];
+    assert(Array.isArray(emissiveFactor) && emissiveFactor.length === 3
+      && emissiveFactor.every(value => Number.isFinite(value) && value >= 0 && value <= 1), 'emissiveFactor');
+    // GLTFLoader caches one texture per source+sampler; a shared index across
+    // sRGB and linear roles would leak one colorSpace/channel into the other.
+    const used = [baseColorTexture, metallicRoughnessTexture, normalTexture, occlusionTexture, emissiveTexture]
+      .filter(Boolean).map(info => info.index);
+    assert(new Set(used).size === used.length, 'texture-slot-sharing');
     const alphaMode = material.alphaMode ?? 'OPAQUE';
     assert(['OPAQUE', 'MASK', 'BLEND'].includes(alphaMode), 'alphaMode');
     const alphaCutoff = material.alphaCutoff ?? 0.5;
     assert(Number.isFinite(alphaCutoff) && alphaCutoff >= 0, 'alphaCutoff');
     return {
       index: materialIndex, baseColorFactor: [...baseColorFactor], metallicFactor, roughnessFactor,
-      baseColorTexture, metallicRoughnessTexture, alphaMode, alphaCutoff,
+      baseColorTexture, metallicRoughnessTexture, normalTexture, occlusionTexture,
+      emissiveTexture, emissiveFactor: [...emissiveFactor], alphaMode, alphaCutoff,
       doubleSided: material.doubleSided === true
     };
   });
@@ -639,7 +668,8 @@ function texturedProfileFacts(json, input) {
         assert(Object.keys(attributes).every(key => key === 'POSITION' || key === 'NORMAL'), 'uv-without-material');
       } else {
         const facts = materials[material];
-        for (const info of [facts.baseColorTexture, facts.metallicRoughnessTexture]) {
+        for (const info of [facts.baseColorTexture, facts.metallicRoughnessTexture,
+          facts.normalTexture, facts.occlusionTexture, facts.emissiveTexture]) {
           if (info) texCoords.push(info.texCoord);
         }
         for (const texCoord of new Set(texCoords)) assert(own(attributes, 'TEXCOORD_' + texCoord), 'TEXCOORD-required');
@@ -711,7 +741,8 @@ function texturedProfileFacts(json, input) {
       if (primitive.material !== null) {
         const facts = materials[primitive.material];
         usedMaterials.add(facts.index);
-        for (const info of [facts.baseColorTexture, facts.metallicRoughnessTexture]) {
+        for (const info of [facts.baseColorTexture, facts.metallicRoughnessTexture,
+          facts.normalTexture, facts.occlusionTexture, facts.emissiveTexture]) {
           if (!info) continue;
           usedTextures.add(info.index);
           usedImages.add(textures[info.index].source.index);
@@ -750,7 +781,7 @@ function texturedProfileFacts(json, input) {
       geometryCount: geometries.size, attributeCount: usedLayouts.length, backingCount: usedViews.length,
       gpuBufferBytes: usedLayouts.reduce((sum, layout) => sum + layout.byteLength, 0),
       cpuBackingBytes: usedViews.reduce((sum, view) => sum + view.byteLength, 0),
-      materialCount: usedMaterials.size, allocatedMaterialCount: usedMaterials.size + 1,
+      materialCount: usedMaterials.size, allocatedMaterialCount: usedMaterials.size * 2,
       textureCount: usedTextures.size, imageCount: usedImages.size
     }
   };
@@ -841,6 +872,20 @@ async function verifyTexturedActual(result, parser, facts, tracker) {
         clonedTextureCount += checkSlot(material.metalnessMap, rough, roughOriginal, false);
         clonedTextureCount += checkSlot(material.roughnessMap, rough, roughOriginal, false);
       }
+      const normal = expected.normalTexture, occlusion = expected.occlusionTexture, emissive = expected.emissiveTexture;
+      clonedTextureCount += checkSlot(material.normalMap, normal, normal ? textureObjects.get(normal.index) : null, false);
+      clonedTextureCount += checkSlot(material.aoMap, occlusion, occlusion ? textureObjects.get(occlusion.index) : null, false);
+      clonedTextureCount += checkSlot(material.emissiveMap, emissive, emissive ? textureObjects.get(emissive.index) : null, true);
+      // No TANGENT attribute: GLTFLoader clones the final material and negates
+      // normalScale.y for derivative tangents, even without a normal texture.
+      const normalScale = normal?.scale ?? 1;
+      if (!approx(material.normalScale.x, normalScale) || !approx(material.normalScale.y, -normalScale)) {
+        throw mismatch('normal-scale');
+      }
+      if (!approx(material.aoMapIntensity, occlusion?.strength ?? 1)) throw mismatch('occlusion-strength');
+      if (!approx(material.emissive.r, expected.emissiveFactor[0])
+        || !approx(material.emissive.g, expected.emissiveFactor[1])
+        || !approx(material.emissive.b, expected.emissiveFactor[2])) throw mismatch('emissive-factor');
       const expectedAttributes = ['normal', 'position'];
       for (const key of Object.keys(primitive.attributes)) {
         if (key === 'TEXCOORD_0') expectedAttributes.push('uv');
