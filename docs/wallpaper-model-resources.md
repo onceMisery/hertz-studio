@@ -997,3 +997,18 @@ loop 0.2 得到 124/170/203/170/124；纯求值 linear/ease/step/clamp 通过。
 变异（step 取右键、easeInOut 公式、paused 跳过轨道）均变红后还原；33 项
 composition 检查、前端聚合 86 步通过。bindings 栈程序、效果图与 GPU 时间继续，
 组合运行门不变。
+
+2026-11-14 r63 组合 binding 续接：`animation.js` 新增 `validateBinding` 与
+`evaluateBinding`，实现编译器 0–10 opcode（input/parameter/const/add/mul/sin/
+cos/abs/clamp/map/smoothstep）与调用方预分配 scratch stack；非有限中间值返回
+null。`plan.js` 接受 bindings、构建 bindingParameters 并按公共
+`BindingParameter` target 覆盖（越界/非有限 fail-closed）；`runtime.js` 每帧在
+轨道后执行 bindings（input 白名单映射 energy/bass/mid/high/pointerX/pointerY/
+sceneTime/spectrumN，缺省 0），按 add/multiply/replace 组合，动画目标槽每帧
+重新 applyNode，binding parameter 变化纳入 plan diff。
+
+真实 Rust IR + Chrome 证据：multiply 绑定 `clamp(sceneTime*gain+0.5,0,1)` 在
+sceneTime .2/.6 像素 218/255；公共 gain=0 覆盖后 188；纯求值 map=15、
+smoothstep=.5、abs/sin/cos 组合通过。三处变异（sceneTime 输入恒 0、map 公式、
+忽略 binding parameter 覆盖）均变红后还原；34 项 composition 检查与前端聚合
+通过。效果图、GPU 时间/首帧与真实音频设备校准继续开放。

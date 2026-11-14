@@ -2,7 +2,7 @@
 import { buildNode, loadResource, loadTextRaster, updateNodeMaterial } from './nodes.js';
 import { createScope } from '../scope.js';
 import { createBackground, createInputSampler } from './builtin.js';
-import { evaluateTrack } from './animation.js';
+import { evaluateBinding, evaluateTrack } from './animation.js';
 const MATRIX=1, LAYOUT=2, MATERIAL=4, VISIBILITY=8, RESOURCE=16, GEOMETRY=32, ALL=63;
 const outputVertex = `varying vec2 vUv;void main(){vUv=uv;gl_Position=vec4(position.xy,0.0,1.0);}`;
 const outputFragment = `uniform sampler2D inputMap;varying vec2 vUv;
@@ -77,7 +77,8 @@ function reserveAll(context, scope, plan, generation) {
 export async function createCompositionRuntime(THREE, context, scope, plan, options = {}) {
   const signal = scope.signal, generation = options.generation, leases = new Map(), values = new Map();
   let disposed = false, target = null, targetTicket = null, sceneTime = 0, frameReady = false, outputDirty=true;
-  let timelineBase = null;
+  let timelineBase = null, bindingStacks = [], inputValues = null;
+  let bindingErrors = 0;
   let updateGeneration=0, pendingController=null, visualTime=null, mediaShouldPlay=false;
   const dirty=new Uint32Array(plan.ir.nodes.length), localDirty=new Uint8Array(plan.ir.nodes.length), worldDirty=new Uint8Array(plan.ir.nodes.length);
   const work={slotChanges:0,constantChanges:0,resourceChanges:0,outputInvalidations:0,renders:0,
@@ -194,14 +195,49 @@ export async function createCompositionRuntime(THREE, context, scope, plan, opti
   }
   plan.ir.painterOrder.forEach(index => applyNode(nodes[index]));
   function refreshTimeline() {
-    timelineBase = plan.ir.tracks.length ? Float64Array.from(plan.values.numeric) : null;
+    const animated = plan.ir.tracks.length || plan.ir.bindings.length;
+    timelineBase = animated ? Float64Array.from(plan.values.numeric) : null;
+    bindingStacks = plan.ir.bindings.map(binding => new Float64Array(binding.maxStack + 1));
+    inputValues = new Float64Array(plan.ir.inputs.length);
   }
-  function applyTimeline(time) {
+  function inputAt(name, frame, time) {
+    if (name.startsWith('spectrum')) {
+      const spectrum = frame.spectrum ?? frame.bands?.spectrum, index = Number(name.slice(8));
+      const value = (Array.isArray(spectrum) || ArrayBuffer.isView(spectrum)) ? spectrum[index] : undefined;
+      return Number.isFinite(value) ? value : 0;
+    }
+    let value;
+    if (name === 'energy') value = frame.level ?? frame.energy;
+    else if (name === 'bass') value = frame.bands?.bass ?? frame.bass;
+    else if (name === 'mid') value = frame.bands?.mid ?? frame.mid;
+    else if (name === 'high') value = frame.bands?.treble ?? frame.high;
+    else if (name === 'pointerX') value = frame.pointer?.x ?? frame.pointerX;
+    else if (name === 'pointerY') value = frame.pointer?.y ?? frame.pointerY;
+    else if (name === 'sceneTime') value = time;
+    else value = frame[name];
+    return Number.isFinite(value) ? value : 0;
+  }
+  function applyTimeline(time, frame) {
     const numeric = plan.values.numeric, changed = [];
     for (const track of plan.ir.tracks) {
-      const value = evaluateTrack(track.keys, time);
-      if (numeric[track.targetSlot] !== value) changed.push(track.targetSlot);
-      numeric[track.targetSlot] = value;
+      numeric[track.targetSlot] = evaluateTrack(track.keys, time);
+      // Always re-apply: the previous frame may hold a different sampled value.
+      changed.push(track.targetSlot);
+    }
+    if (plan.ir.bindings.length) {
+      for (let index = 0; index < plan.ir.inputs.length; index++) {
+        inputValues[index] = inputAt(plan.ir.inputs[index], frame, time);
+      }
+      for (const [index, binding] of plan.ir.bindings.entries()) {
+        const value = evaluateBinding(binding, inputValues, plan.bindingParameters[index], bindingStacks[index]);
+        if (value === null || !Number.isFinite(value)) { bindingErrors++; continue; }
+        const current = numeric[binding.targetSlot];
+        const next = binding.mode === 'add' ? current + value
+          : binding.mode === 'multiply' ? current * value : value;
+        if (!Number.isFinite(next)) continue;
+        numeric[binding.targetSlot] = next;
+        changed.push(binding.targetSlot);
+      }
     }
     for (const slot of changed) {
       const dependency = plan.ir.slotDependencies[slot];
@@ -231,6 +267,11 @@ export async function createCompositionRuntime(THREE, context, scope, plan, opti
     function matrix(index){
       locals[index]=1;worlds[index]=1;
       for(const descendant of plan.ir.matrixDependents[index])worlds[descendant]=1;
+    }
+    if (JSON.stringify(plan.bindingParameters) !== JSON.stringify(next.bindingParameters)) {
+      for (const binding of plan.ir.bindings) {
+        dependency(plan.ir.slotDependencies[binding.targetSlot]); slots++;
+      }
     }
     for(let index=0;index<plan.values.numeric.length;index++)if(plan.values.numeric[index]!==next.values.numeric[index]){
       slots++;const slot=plan.ir.numericSlots[index],type=plan.ir.nodes[slot.nodeIndex].nodeType,dep=plan.ir.slotDependencies[index];dependency(dep);
@@ -433,7 +474,7 @@ export async function createCompositionRuntime(THREE, context, scope, plan, opti
     const timeline = plan.projection.timeline;
     const time = timeline.loop ? sceneTime % timeline.durationSeconds : Math.min(sceneTime,timeline.durationSeconds);
     const timeChanged=visualTime!==time;visualTime=time;
-    if (timelineBase && timeChanged) applyTimeline(time);
+    if (timelineBase) applyTimeline(time, frame);
     frameReady = true;
     for (const value of videos) {
       const video = value.video, clock = value.requirement.clock;

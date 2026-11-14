@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // This accepts the native compiler/planner projection, never author JSON.
 import { resourceKey } from '../resources/pool.js';
-import { validateTrack } from './animation.js';
+import { validateBinding, validateTrack } from './animation.js';
 import { planBuiltin } from './builtin.js';
 const FONT_ADAPTER_VERSION = 'sfnt-ttf-parser-0.25.1-static-v3';
 const RASTER_ADAPTER_VERSION = 'text-raster-v2';
@@ -64,7 +64,21 @@ export function compilePlan(projection, registry = null, identity = null) {
   const values = projectValues(ir, finalPublicValues);
   if (projection.semanticKey !== ir.semanticKey) throw new Error('composition-semantic-identity-mismatch');
   if (ir.effects.length) throw new Error('composition-adapter-unavailable:effects');
-  if (ir.bindings.length) throw new Error('composition-adapter-unavailable:bindings');
+  for (const binding of ir.bindings) {
+    const invalid = validateBinding(binding, ir.numericSlots, ir.inputs.length);
+    if (invalid) throw new Error(invalid);
+  }
+  const bindingParameters = ir.bindings.map(binding => binding.parameters.map(pair => pair[1]));
+  for (const property of ir.publicProperties) {
+    const target = property.target;
+    if (target.kind !== 'bindingParameter') continue;
+    const parameters = bindingParameters[target.bindingIndex];
+    if (!parameters || !Number.isSafeInteger(target.parameterIndex) || target.parameterIndex < 0
+      || target.parameterIndex >= parameters.length) throw new Error('composition-binding-target-invalid');
+    const value = finalPublicValues.values[property.descriptor.id];
+    if (!Number.isFinite(value)) throw new Error('composition-final-values-required');
+    parameters[target.parameterIndex] = value;
+  }
   for (const track of ir.tracks) {
     const invalid = validateTrack(track, ir.numericSlots);
     if (invalid) throw new Error(invalid);
@@ -227,5 +241,5 @@ export function compilePlan(projection, registry = null, identity = null) {
         || limits.drawingBufferPixels !== resources.drawingBufferPixels+pixels || limits.gpuContexts !== 1)
       throw new Error('composition-builtin-page-projection-mismatch:output');
   }
-  return { projection, ir, values, nodePlans, requirements: [...unique.values()], textRasters, resources, pixels, builtin, primitives };
+  return { projection, ir, values, nodePlans, requirements: [...unique.values()], textRasters, resources, pixels, builtin, primitives, bindingParameters };
 }
