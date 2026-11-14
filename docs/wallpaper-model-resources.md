@@ -1024,3 +1024,20 @@ shader 增加四项 uniform：线性空间加亮度、绕 0.5 对比度、Rec.70
 brightness=0.2 得到 255/124/124。三处变异（忽略 saturation、忽略 brightness、
 plan 丢弃 outputEffects）均变红后还原；35 项 composition 检查与前端聚合通过。
 ripple/wind/mask/glow、节点离屏后处理、效果图 surface 预算与 GPU 时间继续开放。
+
+2026-11-14 r65 节点 ripple/wind 续接：`plan.js` 接受 target.kind==='node' 的
+ripple/wind，按 nodeId 解析索引并限定 image/video/text/particles，校验
+amplitude/frequency/speed 与 strength/speed/directionDegrees 有限、assets 为空，
+同节点重复同类型 fail-closed；效果写入 `nodePlans[index].effects`，不增加
+surface/program/primitive 预算。`nodes.js` 节点片元 shader 增加
+`effectUv(uv, base)`：ripple 以 base.y 正弦横向位移，wind 沿 direction 正弦位移；
+粒子路径改用 `gl_PointCoord` 求值。`runtime.js` 在 timeChanged 时把时间线采样
+时间写入 `effectTime` uniform 并标记输出。
+
+真实 Rust IR + Chrome 像素：wide 半红半绿图 ripple amplitude=1/frequency=8/
+speed=0 时第 2 行与第 6 行发生相反位移（右上翻红、左下翻绿），t=1 快照与 t=0
+一致；speed=1 时 t=.25 由红翻绿。wind direction=0 时左绿右红，direction=90 时
+恢复左红右绿（只作用于另一轴），speed=1 时 t=.25 左列翻红。三处变异（去掉
+ripple 位移、wind 忽略 direction、runtime 不更新 effectTime）均变红后还原；
+38 项 composition 检查连续 3 次通过，前端聚合 86 步通过。mask/glow、节点离屏
+后处理、效果图 surface 预算与 GPU 时间继续开放。

@@ -83,6 +83,17 @@ const colorEffect=compile([image('back','red')],undefined,[],{durationSeconds:2,
 const brightEffect=compile([image('back','red')],undefined,[],{durationSeconds:2,loop:true,tracks:[]},[],
  [{id:'grade',type:'colorAdjust',stateVersion:1,target:{kind:'output'},
   properties:{brightness:.2,contrast:1,saturation:1,hueDegrees:0}}]);
+const nodeEffect=(type,properties)=>[{id:'motion',type,stateVersion:1,target:{kind:'node',nodeId:'back'},properties}];
+const rippleStatic=compile([image('back','wide')],undefined,[],undefined,undefined,
+ nodeEffect('ripple',{amplitude:1,frequency:8,speed:0}));
+const rippleMoving=compile([image('back','wide')],undefined,[],undefined,undefined,
+ nodeEffect('ripple',{amplitude:1,frequency:8,speed:1}));
+const windAxial=compile([image('back','wide')],undefined,[],undefined,undefined,
+ nodeEffect('wind',{strength:1,speed:0,directionDegrees:0}));
+const windVertical=compile([image('back','wide')],undefined,[],undefined,undefined,
+ nodeEffect('wind',{strength:1,speed:0,directionDegrees:90}));
+const windMoving=compile([image('back','wide')],undefined,[],undefined,undefined,
+ nodeEffect('wind',{strength:1,speed:1,directionDegrees:0}));
 const dirtyFixture=compile([image('back','blue'),image('child','red',{width:16,height:16}),
  {id:'parent',type:'group',stateVersion:1,children:['child'],properties:{x:8,y:8,width:64,height:64,anchorX:0,anchorY:0}},
  image('unrelated','green',{x:48,y:48,width:16,height:16}),
@@ -226,6 +237,32 @@ const results=[];
   const effectGray=await page.evaluate(()=>pixel(20,20));
   await select(brightEffect);
   const effectBright=await page.evaluate(()=>pixel(20,20));
+  await select(rippleStatic);
+  const rippleRows=await page.evaluate(()=>({topLeft:pixel(20,2),topRight:pixel(44,2),
+    bottomLeft:pixel(20,6),bottomRight:pixel(44,6)}));
+  near(rippleRows.topLeft,[255,0,0]);near(rippleRows.topRight,[255,0,0]);
+  near(rippleRows.bottomLeft,[0,255,0]);near(rippleRows.bottomRight,[0,255,0]);
+  const rippleSame=await page.evaluate(()=>{const before=snapshot();host.frame({sceneTime:1,paused:true});return {before,after:snapshot()};});
+  assert.deepEqual(rippleSame.after,rippleSame.before);
+  results.push({case:'node ripple displaces rows in opposite directions and keeps speed=0 static',rippleRows});
+  await select(rippleMoving);
+  const rippleRed=await page.evaluate(()=>pixel(20,2));
+  await page.evaluate(()=>host.frame({sceneTime:.25,paused:true}));
+  const rippleGreen=await page.evaluate(()=>pixel(20,2));
+  near(rippleRed,[255,0,0]);near(rippleGreen,[0,255,0]);
+  results.push({case:'node ripple advances with timeline speed',at0:rippleRed,at25:rippleGreen});
+  await select(windAxial);
+  const windX=await page.evaluate(()=>({left:pixel(10,20),right:pixel(44,20)}));
+  near(windX.left,[0,255,0]);near(windX.right,[255,0,0]);
+  await select(windVertical);
+  const windY=await page.evaluate(()=>({left:pixel(10,20),right:pixel(44,20)}));
+  near(windY.left,[255,0,0]);near(windY.right,[0,255,0]);
+  await select(windMoving);
+  const windStart=await page.evaluate(()=>pixel(10,20));
+  await page.evaluate(()=>host.frame({sceneTime:.25,paused:true}));
+  const windMoved=await page.evaluate(()=>pixel(10,20));
+  near(windStart,[0,255,0]);near(windMoved,[255,0,0]);
+  results.push({case:'node wind honors direction axis and timeline speed',x:windX,y:windY,at0:windStart,at25:windMoved});
   near(effectGray,[127,127,127]);near(effectBright,[255,124,124]);
   results.push({case:'compiler output colorAdjust saturation and brightness',effectGray,effectBright});
   await select(video);try{await page.waitForFunction(()=>host.frame({sceneTime:.1,paused:true,seek:true}),null,{timeout:8000});}

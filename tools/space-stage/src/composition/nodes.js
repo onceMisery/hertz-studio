@@ -78,9 +78,17 @@ const vertexShader = `varying vec2 vUv;
 void main(){ vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }`;
 const fragmentShader = `uniform sampler2D colorMap; uniform sampler2D maskMap;
 uniform bool hasMap; uniform bool hasMask; uniform bool isVideo; uniform bool isCircle;
-uniform float opacity; uniform vec2 uvScale; uniform vec2 uvOffset; varying vec2 vUv;
+uniform float opacity; uniform vec2 uvScale; uniform vec2 uvOffset;
+uniform bool hasRipple; uniform vec3 ripple; uniform bool hasWind; uniform vec3 wind; uniform float effectTime;
+varying vec2 vUv;
 vec3 videoLinear(vec3 c){return mix(pow(c*0.9478672986+vec3(0.0521327014),vec3(2.4)),c*0.0773993808,lessThanEqual(c,vec3(0.04045)));}
-void main(){ vec2 uv=vUv*uvScale+uvOffset;
+vec2 effectUv(vec2 uv, vec2 base){
+  if(hasRipple)uv.x+=sin(base.y*ripple.y*6.2831853-effectTime*ripple.z*6.2831853)*ripple.x;
+  if(hasWind){vec2 direction=vec2(cos(wind.z),sin(wind.z));
+    uv+=direction*sin(dot(base,direction)*6.2831853-effectTime*wind.y*6.2831853)*wind.x;}
+  return uv;
+}
+void main(){ vec2 uv=effectUv(vUv*uvScale+uvOffset,vUv);
   vec4 color=hasMap?texture2D(colorMap,uv):vec4(1.0);
   if(isVideo)color.rgb=videoLinear(color.rgb);
   if(isCircle && length(vUv-0.5)>0.5)discard;
@@ -96,7 +104,9 @@ function material(THREE, spec, texture, mask) {
     blendSrcAlpha: THREE.OneFactor, blendDstAlpha: THREE.OneMinusSrcAlphaFactor,
     uniforms: { colorMap: { value: texture }, maskMap: { value: mask }, hasMap: { value: !!texture }, hasMask: { value: !!mask },
       isVideo: { value: !!texture?.isVideoTexture }, isCircle: { value: !texture && spec.node.nodeType === 'particles' },
-      opacity: { value: 1 }, uvScale: { value: new THREE.Vector2(1, 1) }, uvOffset: { value: new THREE.Vector2(0, 0) } } });
+      opacity: { value: 1 }, uvScale: { value: new THREE.Vector2(1, 1) }, uvOffset: { value: new THREE.Vector2(0, 0) },
+      hasRipple: { value: false }, ripple: { value: new THREE.Vector3() },
+      hasWind: { value: false }, wind: { value: new THREE.Vector3() }, effectTime: { value: 0 } } });
 }
 export function updateNodeMaterial(THREE, node, assets) {
   const mat=node.material, spec=node.spec;
@@ -115,6 +125,12 @@ export function updateNodeMaterial(THREE, node, assets) {
     mat.uniforms.lifetime.value=spec.number('lifetimeSeconds'); mat.uniforms.speed.value=spec.number('speed');
     mat.uniforms.spread.value=spec.number('spread');
   }
+  const effects=spec.effects||{};
+  mat.uniforms.hasRipple.value=!!effects.ripple;
+  if(effects.ripple)mat.uniforms.ripple.value.set(effects.ripple.amplitude,effects.ripple.frequency,effects.ripple.speed);
+  mat.uniforms.hasWind.value=!!effects.wind;
+  if(effects.wind)mat.uniforms.wind.value.set(effects.wind.strength,effects.wind.speed,
+    effects.wind.directionDegrees*Math.PI/180);
 }
 function rectangle(THREE, scope, plan) {
   const geometry = scope.track(new THREE.BufferGeometry());
@@ -223,7 +239,7 @@ export function buildNode(THREE, context, scope, spec, assets, generation) {
       void main(){float age=mod(sceneTime+seed.x*lifetime,lifetime);
         vec3 p=vec3((seed.y-0.5)*spread,age*speed,0.0);
         gl_Position=projectionMatrix*modelViewMatrix*vec4(p,1.0);gl_PointSize=4.0;vUv=vec2(0.5);}`;
-    mat.fragmentShader = mat.fragmentShader.replace('vec2 uv=vUv*uvScale+uvOffset;', 'vec2 uv=gl_PointCoord;')
+    mat.fragmentShader = mat.fragmentShader.replace('vUv*uvScale+uvOffset,vUv', 'gl_PointCoord,gl_PointCoord')
       .replace('length(vUv-0.5)', 'length(gl_PointCoord-0.5)');
     Object.assign(mat.uniforms, { sceneTime: { value: 0 }, lifetime: { value: spec.number('lifetimeSeconds') },
       speed: { value: spec.number('speed') }, spread: { value: spec.number('spread') } });

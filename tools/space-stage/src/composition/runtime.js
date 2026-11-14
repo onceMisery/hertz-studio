@@ -524,6 +524,7 @@ export async function createCompositionRuntime(THREE, context, scope, plan, opti
     mediaShouldPlay=frameReady&&!frame.paused&&!document.hidden&&!frame.seek;
     if(!mediaShouldPlay)pause();
     if(timeChanged)for(const node of nodes)if(node.particles){node.material.uniforms.sceneTime.value=time;outputDirty=true;}
+    if(timeChanged)for(const node of nodes)if(node.material&&node.spec.effects){node.material.uniforms.effectTime.value=time;outputDirty=true;}
     if(background) {background.instance.update(frame);outputDirty=true;}
     return frameReady;
   }
