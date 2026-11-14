@@ -36,7 +36,7 @@ use super::budget::{Allocation, AllocationSnapshot, BudgetCoordinator, BudgetReq
 use super::gl_plan::GlAdmission;
 use super::jobs::JobError;
 use super::media::Container;
-use super::model_prepare::{ModelInput, ModelTextureController};
+use super::model_prepare::{ModelInput, ModelTextureChunkReader, ModelTextureController};
 use super::target_planner::ResolvedMedia;
 
 /// 恢复预算窗口与次数（§13.3）。
@@ -513,6 +513,19 @@ impl WallpaperSession {
         cancel: &std::sync::atomic::AtomicBool,
     ) -> Result<Option<()>, JobError> {
         self.textures.read_into(path, offset, output, cancel)
+    }
+
+    pub(crate) fn texture_len(&self, path: &str) -> Option<u64> {
+        self.textures.texture_len(path)
+    }
+
+    /// Chunked loader reader over the current generation's pinned texture.
+    /// Unknown paths and non-current plans yield no reader.
+    pub(crate) fn texture_chunk_reader<'a>(
+        &'a self,
+        path: &'a str,
+    ) -> Option<ModelTextureChunkReader<'a>> {
+        self.textures.chunk_reader(path)
     }
 
     /// 页面加载描述只读借用当前已准入计划，不能替换目标或资源。

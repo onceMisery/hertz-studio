@@ -1061,6 +1061,223 @@ fn session_generation_change_revokes_texture_plan_and_releases_charge() {
 }
 
 #[test]
+fn session_texture_chunk_reader_serves_bounded_chunks_and_eof() {
+    let fixture = installed_full_model_fixture("model-input-texture-chunks", false);
+    let probe = model_source_test_probe();
+    let preparation = probe.prepare_for_job("texture-chunks".into(), 91).unwrap();
+    let input = fixture
+        .store
+        .prepare_canonical_model_input(
+            &fixture.reference,
+            &probe,
+            &preparation,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+    let recovery = RecoveryLedger::new();
+    let mut session = WallpaperSession::new();
+    let generation = session.apply(1, &recovery).unwrap();
+    assert!(session.resolved(generation));
+    assert!(session.prepared(generation));
+    assert!(session.admit_textures(generation, &input, "model-session"));
+    let mut reader = session.texture_chunk_reader("models/a/tex.png").unwrap();
+    assert_eq!(
+        (reader.total(), reader.offset(), reader.remaining()),
+        (4, 0, 4)
+    );
+    let cancel = AtomicBool::new(false);
+    let mut first = [0u8; 3];
+    assert_eq!(reader.next_chunk(&mut first, &cancel).unwrap(), 3);
+    assert_eq!(first, [1, 2, 3]);
+    assert_eq!(reader.remaining(), 1);
+    let mut second = [0u8; 3];
+    assert_eq!(reader.next_chunk(&mut second, &cancel).unwrap(), 1);
+    assert_eq!(second[0], 4);
+    assert_eq!(reader.remaining(), 0);
+    assert_eq!(reader.next_chunk(&mut second, &cancel).unwrap(), 0);
+    let mut empty = [0u8; 0];
+    assert_eq!(reader.next_chunk(&mut empty, &cancel).unwrap(), 0);
+    assert!(session.texture_chunk_reader("").is_none());
+    assert!(session.texture_chunk_reader("models/a/tex.png/").is_none());
+    assert!(session
+        .texture_chunk_reader("models/a/source.glb")
+        .is_none());
+    drop(input);
+    preparation.finish();
+}
+
+#[test]
+fn session_texture_chunk_reader_caps_large_texture_at_one_mib() {
+    let mut state = 0x243f_6a88_85a3_08d3u64;
+    let image: Vec<u8> = (0..1024 * 1024 + 1)
+        .map(|_| {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (state >> 56) as u8
+        })
+        .collect();
+    let fixture = installed_full_model_fixture_with_texture(
+        "model-input-texture-chunks-large",
+        false,
+        &image,
+    );
+    let probe = model_source_test_probe();
+    let preparation = probe
+        .prepare_for_job("texture-chunks-large".into(), 92)
+        .unwrap();
+    let input = fixture
+        .store
+        .prepare_canonical_model_input(
+            &fixture.reference,
+            &probe,
+            &preparation,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+    let recovery = RecoveryLedger::new();
+    let mut session = WallpaperSession::new();
+    let generation = session.apply(1, &recovery).unwrap();
+    assert!(session.resolved(generation));
+    assert!(session.prepared(generation));
+    assert!(session.admit_textures(generation, &input, "model-session"));
+    let mut reader = session.texture_chunk_reader("models/a/tex.png").unwrap();
+    assert_eq!(reader.total(), 1024 * 1024 + 1);
+    let cancel = AtomicBool::new(false);
+    let mut first = vec![0u8; 2 * 1024 * 1024];
+    assert_eq!(reader.next_chunk(&mut first, &cancel).unwrap(), 1024 * 1024);
+    assert_eq!(&first[..1024 * 1024], &image[..1024 * 1024]);
+    let mut second = [0u8; 2];
+    assert_eq!(reader.next_chunk(&mut second, &cancel).unwrap(), 1);
+    assert_eq!(second[0], image[1024 * 1024]);
+    assert_eq!(reader.remaining(), 0);
+    drop(input);
+    preparation.finish();
+}
+
+#[test]
+fn session_texture_chunk_reader_stops_after_failure_revocation_or_cancel() {
+    let fixture = installed_full_model_fixture("model-input-texture-chunks-revoke", false);
+    let probe = model_source_test_probe();
+    let preparation = probe
+        .prepare_for_job("texture-chunks-revoke".into(), 93)
+        .unwrap();
+    let input = fixture
+        .store
+        .prepare_canonical_model_input(
+            &fixture.reference,
+            &probe,
+            &preparation,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+    let recovery = RecoveryLedger::new();
+    let mut session = WallpaperSession::new();
+    let generation = session.apply(1, &recovery).unwrap();
+    assert!(session.resolved(generation));
+    assert!(session.prepared(generation));
+    assert!(session.admit_textures(generation, &input, "model-session"));
+    let mut reader = session.texture_chunk_reader("models/a/tex.png").unwrap();
+    let cancel = AtomicBool::new(false);
+    let mut first = [0u8; 2];
+    assert_eq!(reader.next_chunk(&mut first, &cancel).unwrap(), 2);
+    // fail() retires the current plan; a new reader is refused.
+    assert!(session.fail(generation, "test_failure", "failure", true));
+    assert!(session.texture_chunk_reader("models/a/tex.png").is_none());
+    assert!(session
+        .read_texture("models/a/tex.png", 0, &mut first, &cancel)
+        .unwrap()
+        .is_none());
+    // A fresh generation admits again; a cancelled token stops before I/O.
+    let next = session.apply(2, &recovery).unwrap();
+    assert!(session.resolved(next));
+    assert!(session.prepared(next));
+    assert!(session.admit_textures(next, &input, "model-session"));
+    let mut reader = session.texture_chunk_reader("models/a/tex.png").unwrap();
+    let cancelled = AtomicBool::new(true);
+    assert_eq!(
+        reader
+            .next_chunk(&mut first, &cancelled)
+            .err()
+            .unwrap()
+            .code,
+        "cancelled"
+    );
+    drop(input);
+    preparation.finish();
+}
+
+#[test]
+fn session_texture_chunk_reader_allocates_nothing() {
+    let fixture = installed_full_model_fixture("model-input-texture-chunks-alloc", false);
+    let probe = model_source_test_probe();
+    let preparation = probe
+        .prepare_for_job("texture-chunks-alloc".into(), 94)
+        .unwrap();
+    let input = fixture
+        .store
+        .prepare_canonical_model_input(
+            &fixture.reference,
+            &probe,
+            &preparation,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+    let recovery = RecoveryLedger::new();
+    let mut session = WallpaperSession::new();
+    let generation = session.apply(1, &recovery).unwrap();
+    assert!(session.resolved(generation));
+    assert!(session.prepared(generation));
+    assert!(session.admit_textures(generation, &input, "model-session"));
+    let ((total, read), sample) = budget::measure_requested_heap(|| {
+        let mut reader = session.texture_chunk_reader("models/a/tex.png").unwrap();
+        let mut output = [0u8; 4];
+        let read = reader
+            .next_chunk(&mut output, &AtomicBool::new(false))
+            .unwrap();
+        (reader.total(), read)
+    });
+    assert_eq!((total, read), (4, 4));
+    assert_eq!(
+        (sample.peak, sample.retained, sample.overflow),
+        (0, 0, false)
+    );
+    drop(input);
+    preparation.finish();
+}
+
+#[test]
+fn controller_chunk_reader_stops_mid_iteration_after_revoke() {
+    let fixture = installed_full_model_fixture("model-input-texture-chunks-controller", false);
+    let probe = model_source_test_probe();
+    let preparation = probe
+        .prepare_for_job("texture-chunks-controller".into(), 95)
+        .unwrap();
+    let input = fixture
+        .store
+        .prepare_canonical_model_input(
+            &fixture.reference,
+            &probe,
+            &preparation,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+    let controller = ModelTextureController::new();
+    assert!(controller.install(&input, "model-session", 1));
+    let mut reader = controller.chunk_reader("models/a/tex.png").unwrap();
+    let cancel = AtomicBool::new(false);
+    let mut first = [0u8; 2];
+    assert_eq!(reader.next_chunk(&mut first, &cancel).unwrap(), 2);
+    controller.revoke();
+    assert!(controller.chunk_reader("models/a/tex.png").is_none());
+    let error = reader.next_chunk(&mut first, &cancel).err().unwrap();
+    assert_eq!(error.code, "model_texture_revoked");
+    assert_eq!(error.message, "model texture plan is no longer current");
+    drop(input);
+    preparation.finish();
+}
+
+#[test]
 fn source_success_then_actual_model_w_rejection_keeps_source_fee_and_pins_until_error_drop() {
     let fixture = installed_full_model_fixture("model-input-W", false);
     let probe = model_source_test_probe();

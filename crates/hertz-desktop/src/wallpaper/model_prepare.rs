@@ -26,6 +26,8 @@ use texture_closure::ModelTextureClosure;
 const MODEL_DIAGNOSTIC: &str = "canonical model preparation failed";
 const MODEL_QUERY_DIAGNOSTIC: u64 = 59;
 const MODEL_REQUEST_STRINGS: u64 = 2 * (128 + 64);
+/// Existing Broker read contract: one texture response/chunk is at most 1 MiB.
+pub(crate) const MAX_MODEL_TEXTURE_READ_BYTES: usize = 1024 * 1024;
 
 #[path = "model_native_facts.rs"]
 mod native_facts;
@@ -423,6 +425,26 @@ impl ModelTextureController {
             .is_some_and(|plan| plan.matches(session, generation))
     }
 
+    /// Exact-path byte length under the current plan. No file read occurs.
+    pub(crate) fn texture_len(&self, path: &str) -> Option<u64> {
+        let inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        let plan = inner.as_ref()?;
+        let resources = plan.input.texture_resources();
+        resources.authorize(path).map(|resource| resource.bytes())
+    }
+
+    /// Chunked loader reader over the current plan. Unknown paths and revoked
+    /// plans yield no reader.
+    pub(crate) fn chunk_reader<'a>(&'a self, path: &'a str) -> Option<ModelTextureChunkReader<'a>> {
+        let total = self.texture_len(path)?;
+        Some(ModelTextureChunkReader {
+            controller: self,
+            path,
+            offset: 0,
+            total,
+        })
+    }
+
     /// Exact-path synchronous read under the current plan. `None` means there
     /// is no plan or the path is not one of its indexed entries.
     pub(crate) fn read_into(
@@ -455,6 +477,57 @@ impl ModelTextureController {
 impl Default for ModelTextureController {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Chunked loader reader over one authorized texture. Every chunk re-enters the
+/// controller, so revocation mid-iteration stops the next read and no File,
+/// path or closure owner escapes.
+pub(crate) struct ModelTextureChunkReader<'a> {
+    controller: &'a ModelTextureController,
+    path: &'a str,
+    offset: u64,
+    total: u64,
+}
+
+impl ModelTextureChunkReader<'_> {
+    pub(crate) fn total(&self) -> u64 {
+        self.total
+    }
+
+    pub(crate) fn offset(&self) -> u64 {
+        self.offset
+    }
+
+    pub(crate) fn remaining(&self) -> u64 {
+        self.total - self.offset
+    }
+
+    /// Fill at most one Broker read (≤1 MiB) and advance the cursor. `0` means
+    /// EOF or an empty output; revocation after creation returns a fixed error.
+    pub(crate) fn next_chunk(
+        &mut self,
+        output: &mut [u8],
+        cancel: &AtomicBool,
+    ) -> Result<usize, JobError> {
+        let limit = output.len().min(MAX_MODEL_TEXTURE_READ_BYTES);
+        if limit == 0 || self.remaining() == 0 {
+            return Ok(0);
+        }
+        let want = self.remaining().min(limit as u64) as usize;
+        match self
+            .controller
+            .read_into(self.path, self.offset, &mut output[..want], cancel)?
+        {
+            Some(()) => {
+                self.offset += want as u64;
+                Ok(want)
+            }
+            None => Err(JobError::new(
+                "model_texture_revoked",
+                "model texture plan is no longer current",
+            )),
+        }
     }
 }
 
