@@ -1069,3 +1069,16 @@ strength=0、radius=0、threshold=1 三种对照块外均 0；renderTarget 持�
 无 glow 增加 32×32×8=8192。三处变异（忽略 threshold、blurStep 恒 0、不预留
 glowTicket）均变红后还原；40 项 composition 检查连续 3 次通过。GPU 时间/首帧、
 真实设备矩阵与 A01/A05–A10 剩余验收继续开放。
+
+2026-11-14 r68 节点 colorAdjust 续接：`plan.js` colorAdjust 分支同时接受
+target.kind==='node'，限定 image/video/text/particles、校验四项属性有限与空
+assets，写入 `nodePlans[index].effects.colorAdjust`；同节点重复 fail-closed。
+`nodes.js` shader 增加 hasGrade/gradeBrightness/gradeContrast/gradeSaturation/
+gradeHue 与 gradeColor（线性空间加亮度、绕 0.5 对比度、Rec.709 饱和度、色相
+旋转），在 video 传递后、alpha 前 clamp 应用；updateNodeMaterial 写入参数。
+
+真实 Rust IR + Chrome 像素：红色节点 saturation=0 得 127/127/127，相邻绿色
+节点保持 0/255/0；brightness=0.2 得 255/124/124。三处变异（shader 忽略饱和度、
+plan 丢弃节点效果、updateNodeMaterial 不写 hasGrade）均变红后还原；41 项
+composition 检查连续 3 次通过。GPU 时间/首帧、真实设备矩阵与 A01/A05–A10
+剩余验收继续开放。

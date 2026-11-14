@@ -79,9 +79,19 @@ void main(){ vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,
 const fragmentShader = `uniform sampler2D colorMap; uniform sampler2D maskMap;
 uniform bool hasMap; uniform bool hasMask; uniform bool isVideo; uniform bool isCircle;
 uniform float opacity; uniform vec2 uvScale; uniform vec2 uvOffset; uniform bool maskInvert;
+uniform bool hasGrade; uniform float gradeBrightness; uniform float gradeContrast;
+uniform float gradeSaturation; uniform float gradeHue;
 uniform bool hasRipple; uniform vec3 ripple; uniform bool hasWind; uniform vec3 wind; uniform float effectTime;
 varying vec2 vUv;
 vec3 videoLinear(vec3 c){return mix(pow(c*0.9478672986+vec3(0.0521327014),vec3(2.4)),c*0.0773993808,lessThanEqual(c,vec3(0.04045)));}
+vec3 gradeColor(vec3 color){
+  float s=sin(gradeHue),v=cos(gradeHue);
+  color+=gradeBrightness;color=(color-0.5)*gradeContrast+0.5;
+  color=mix(vec3(dot(color,vec3(0.2126,0.7152,0.0722))),color,gradeSaturation);
+  return clamp(vec3(
+    dot(color,vec3(0.213+v*0.787-s*0.213,0.715-v*0.715-s*0.715,0.072-v*0.072+s*0.928)),
+    dot(color,vec3(0.213-v*0.213+s*0.143,0.715+v*0.285+s*0.140,0.072-v*0.072-s*0.283)),
+    dot(color,vec3(0.213-v*0.213-s*0.787,0.715-v*0.715+s*0.715,0.072+v*0.928+s*0.072))),0.0,1.0);}
 vec2 effectUv(vec2 uv, vec2 base){
   if(hasRipple)uv.x+=sin(base.y*ripple.y*6.2831853-effectTime*ripple.z*6.2831853)*ripple.x;
   if(hasWind){vec2 direction=vec2(cos(wind.z),sin(wind.z));
@@ -91,6 +101,7 @@ vec2 effectUv(vec2 uv, vec2 base){
 void main(){ vec2 uv=effectUv(vUv*uvScale+uvOffset,vUv);
   vec4 color=hasMap?texture2D(colorMap,uv):vec4(1.0);
   if(isVideo)color.rgb=videoLinear(color.rgb);
+  if(hasGrade)color.rgb=gradeColor(color.rgb);
   if(isCircle && length(vUv-0.5)>0.5)discard;
   float alpha=color.a*opacity;
   if(hasMask){float mask=texture2D(maskMap,vUv).r;alpha*=mix(mask,1.0-mask,maskInvert);}
@@ -107,6 +118,8 @@ function material(THREE, spec, texture, mask) {
       isVideo: { value: !!texture?.isVideoTexture }, isCircle: { value: !texture && spec.node.nodeType === 'particles' },
       opacity: { value: 1 }, uvScale: { value: new THREE.Vector2(1, 1) }, uvOffset: { value: new THREE.Vector2(0, 0) },
       maskInvert: { value: false },
+      hasGrade: { value: false }, gradeBrightness: { value: 0 }, gradeContrast: { value: 1 },
+      gradeSaturation: { value: 1 }, gradeHue: { value: 0 },
       hasRipple: { value: false }, ripple: { value: new THREE.Vector3() },
       hasWind: { value: false }, wind: { value: new THREE.Vector3() }, effectTime: { value: 0 } } });
 }
@@ -127,8 +140,11 @@ export function updateNodeMaterial(THREE, node, assets) {
     mat.uniforms.lifetime.value=spec.number('lifetimeSeconds'); mat.uniforms.speed.value=spec.number('speed');
     mat.uniforms.spread.value=spec.number('spread');
   }
-  const effects=spec.effects||{};
+  const effects=spec.effects||{}, grade=effects.colorAdjust;
   mat.uniforms.maskInvert.value=!!effects.mask?.invert;
+  mat.uniforms.hasGrade.value=!!grade;
+  if(grade){mat.uniforms.gradeBrightness.value=grade.brightness;mat.uniforms.gradeContrast.value=grade.contrast;
+    mat.uniforms.gradeSaturation.value=grade.saturation;mat.uniforms.gradeHue.value=grade.hueDegrees*Math.PI/180;}
   mat.uniforms.hasRipple.value=!!effects.ripple;
   if(effects.ripple)mat.uniforms.ripple.value.set(effects.ripple.amplitude,effects.ripple.frequency,effects.ripple.speed);
   mat.uniforms.hasWind.value=!!effects.wind;
