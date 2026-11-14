@@ -72,14 +72,14 @@
 
 ## 2026-11-14 DBX 有界视频流
 
-宿主 `StageMediaStore` 不再拒绝 DBX 视频租约：`lease.acquire` 对图片/视频返回同一租约形状（`url: null`、`media`、`mime`、`codec`、`length`、`chunkBytes`）；`lease.read` 统一为 `read_chunk`，每块 ≤256 KiB，按 offset 读取原文件，不组装整段视频。图片仍走完整准备图 + Blob URL；视频仅返回元数据，客户端按 `codec` 选择 MSE 类型。
+宿主 `StageMediaStore` 不再拒绝 DBX 视频租约：`lease.acquire` 对图片/视频返回同一租约形状（`url: null`、`media`、`mime`、`codec`、`codecString`、`length`、`chunkBytes`）；`lease.read` 统一为 `read_chunk`，每块 ≤256 KiB，按 offset 读取原文件，不组装整段视频。图片仍走完整准备图 + Blob URL；视频返回元数据，客户端按 `codecString` 选择 MSE 类型。
 
-客户端 `stage-media.js` 对 DBX 视频创建 MediaSource，按 `lease.read` 顺序拉取 256 KiB 块并等待 `updateend` 后再取下一块，结束时 `endOfStream`；只保留单块 base64/typed 副本（资源账本固定 `CHUNK*8` 上界），释放会 abort/remove SourceBuffer、撤销 URL 并释放租约。当前只映射 WebM `V_VP8`/`V_VP9` 到 MSE；MP4/AV1 等编码在客户端明确拒绝并释放租约，等待后续 codec 字符串与设备资格。
+客户端 `stage-media.js` 对 DBX 视频创建 MediaSource，按 `lease.read` 顺序拉取 256 KiB 块并等待 `updateend` 后再取下一块，结束时 `endOfStream`；只保留单块 base64/typed 副本（资源账本固定 `CHUNK*8` 上界），释放会 abort/remove SourceBuffer、撤销 URL 并释放租约。MSE 类型来自导入 probe 的 `codecString`：WebM `vp8`/`vp9`，MP4 `avc1.PPCCLL`（由 avcC 的 profile/profile-compatibility/level 生成）；AV1/HEVC 等未映射编码在客户端明确拒绝并释放租约。
 
 新增验证：
 
-- `cargo test -p hertz-studio stage_media --lib`：视频 DBX acquire 成功、`codec=V_VP8`、首块内容与 fixture 字节一致、越界/零块拒绝、释放后 `stage_lease_expired`；图片/取消路径保持。
-- `node scripts/check-stage-media-dbx-video-browser.js`：真实 Chrome MediaSource，4165B VP8 WebM 按 1000B 短读分 5 块喂入，解码为 64×48、2.00s；读 offset 严格 0/1000/2000/3000/4000，释放后无新读；MP4 编码被拒绝且租约释放。
+- `cargo test -p hertz-studio stage_media --lib`：视频 DBX acquire 成功、`codec=V_VP8`/`codecString=vp8`、首块内容与 fixture 字节一致、越界/零块拒绝、释放后 `stage_lease_expired`；图片/取消路径保持。
+- `node scripts/check-stage-media-dbx-video-browser.js`：真实 Chrome MediaSource。WebM：4165B VP8 按 1000B 短读分 5 块喂入，解码为 64×48、2.00s，读 offset 严格 0/1000/2000/3000/4000。MP4：页面本地录制 H.264（测试专用 `--enable-features=MediaRecorderUseMP4`），从产物 avcC 推导 `avc1.42C015`，约 18–22KB 按 1000B 分 19–22 块喂入，解码为 320×240；释放后无新读；MP4 无 codecString 的旧路径被拒绝且租约释放。
 - `node scripts/check-stage-media.js` 原有独立版路径与租约时钟继续通过；`node scripts/check-frontend.js` 86 步通过。
 
 上述证据不包含真实 DBX 宿主、真实设备/硬件解码或安装包人工旅程；DBX 视频流仍未取得宿主发布资格。

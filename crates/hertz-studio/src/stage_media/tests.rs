@@ -508,6 +508,7 @@ async fn stage_media_video_gate_invalid_images_and_cancel() {
     assert_eq!(dbx_lease["media"], "video");
     assert_eq!(dbx_lease["mime"], "video/webm");
     assert_eq!(dbx_lease["codec"], "V_VP8");
+    assert_eq!(dbx_lease["codecString"], "vp8");
     let dbx_token = dbx_lease["leaseId"].as_str().unwrap();
     let block = owner.read_chunk(dbx_token, 0, CHUNK_BYTES).await.unwrap();
     assert_eq!(block["offset"], 0);

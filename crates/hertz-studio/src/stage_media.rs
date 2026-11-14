@@ -751,6 +751,14 @@ impl StageMediaStore {
         } else {
             String::new()
         };
+        let codec_string = metadata["codecString"].as_str().unwrap_or_default();
+        if codec_string.len() > 64 || !codec_string.is_ascii() {
+            return Err(error(
+                "stage_video_stream_unavailable",
+                "视频 MSE 编码元数据无效，请重新导入",
+            ));
+        }
+        let codec_string = codec_string.to_owned();
         let (path, mime) = if media == "image" {
             let target = self.derived(&asset, request.width, request.height);
             if !target.is_file() {
@@ -827,7 +835,7 @@ impl StageMediaStore {
         );
         Ok(
             json!({"leaseId":lease_token,"url":if dbx {Value::Null}else{json!(format!("/v1/stage/media/resource/{lease_token}"))},
-            "contentKey":content_key,"length":length,"mime":mime,"media":media,"codec":codec,"ttlMs":LEASE_MS,"chunkBytes":CHUNK_BYTES}),
+            "contentKey":content_key,"length":length,"mime":mime,"media":media,"codec":codec,"codecString":codec_string,"ttlMs":LEASE_MS,"chunkBytes":CHUNK_BYTES}),
         )
     }
     fn lease(&self, token: &str) -> ApiResult<Arc<Lease>> {

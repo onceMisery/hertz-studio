@@ -39,6 +39,7 @@ fn metadata(codec: &str, width: u32, height: u32, rotation: u32) -> ProbeResult<
         container: Container::Image,
         codec: codec.into(),
         profile: None,
+        codec_string: None,
         encoded_width: width,
         encoded_height: height,
         display_width,

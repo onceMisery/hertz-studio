@@ -28,6 +28,7 @@ fn identity_binds_actual_bytes_metadata_and_environment() {
         container: Container::Image,
         codec: "png".into(),
         profile: None,
+        codec_string: None,
         encoded_width: 1,
         encoded_height: 1,
         display_width: 1,

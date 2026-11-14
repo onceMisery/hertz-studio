@@ -58,6 +58,9 @@ pub struct MediaProbe {
     pub codec: String,
     /// codec/profile 细节（如 H.264 的 profile_idc/level_idc）。
     pub profile: Option<String>,
+    /// MSE codec parameter for the container/codec pair; None is not playable
+    /// through the page MediaSource path without further qualification.
+    pub codec_string: Option<String>,
     /// 编码像素尺寸（§8.1：解码预算按编码尺寸计，旋转/CSS 不降低它）。
     pub encoded_width: u32,
     pub encoded_height: u32,
@@ -527,6 +530,12 @@ pub(crate) mod mp4 {
                             if payload.len() >= 4 {
                                 video.profile =
                                     Some(format!("profile-{}-level-{}", payload[1], payload[3]));
+                                if video.codec == "avc1" {
+                                    video.codec_string = Some(format!(
+                                        "avc1.{:02X}{:02X}{:02X}",
+                                        payload[1], payload[2], payload[3]
+                                    ));
+                                }
                             }
                         }
                         b"pasp" => {
@@ -607,6 +616,7 @@ pub(crate) mod mp4 {
         found_codec: bool,
         codec: String,
         profile: Option<String>,
+        codec_string: Option<String>,
         encoded_width: u32,
         encoded_height: u32,
         display_width: u32,
@@ -675,6 +685,7 @@ pub(crate) mod mp4 {
                 container: Container::Mp4,
                 codec: self.codec,
                 profile: self.profile,
+                codec_string: self.codec_string,
                 encoded_width: self.encoded_width,
                 encoded_height: self.encoded_height,
                 display_width: if self.display_width == 0 {
@@ -770,10 +781,16 @@ pub(crate) mod webm {
                 }
             }
             let fps_upper_bound = min_delta_ns.map(|delta_ns| 1_000_000_000f64 / delta_ns as f64);
+            let codec_string = match codec.as_str() {
+                "V_VP8" => Some("vp8".to_string()),
+                "V_VP9" => Some("vp9".to_string()),
+                _ => None,
+            };
             Ok(MediaProbe {
                 container: Container::Webm,
                 codec,
                 profile: None,
+                codec_string,
                 encoded_width: self.encoded_width,
                 encoded_height: self.encoded_height,
                 display_width: self.encoded_width,

@@ -1267,6 +1267,7 @@ mod playback_tests {
             container: Container::Webm,
             codec: "vp8".into(),
             profile: None,
+            codec_string: Some("vp8".into()),
             encoded_width: 64,
             encoded_height: 48,
             display_width: 64,
