@@ -712,3 +712,19 @@ path/closure owner）。permit 提供 `texture_bytes(image_index)` 与
 permit 位置读互不影响。三处变异（去越界检查、去取消检查、去 1 MiB 上限）均按
 预期变红后还原。本批未创建 decoder/renderer/GPU；Broker HTTP/CSP、
 SessionPlan、loader、首帧与 A04 其余矩阵继续开放。
+
+2026-11-14 r43 纹理资源索引续接：`ModelInput::texture_resources` 返回借用型
+`ModelTextureResources<'a>`，为未来 loader/Broker 提供只读清单：`len()` 为唯一
+Package entry 数；`iter()` 逐项给出 path/MIME/bytes/解码后的 SHA32/references/
+代表性 image_index；`authorize(path)` 只对 canonical identity entry 的完整路径
+做精确相等匹配，后缀斜杠、`..`、双斜杠、大小写变化、查询串、模型相对别名和
+非纹理 entry 全部返回 None。索引与授权不拼路径、不重开文件、不新增分配；
+授权句柄 `TextureResource<'a>` 只借用 input，并复用 r42 的 `read_into` 位置读。
+
+闭包内新增零分配 `UniqueTextures` 迭代器，按 entry_index 去除同路径别名
+（O(n²) 有界，n≤4096）；不向父模块暴露 ClosedTexture/File。真实 fixture 清单
+为 tex.png（references=2、image 0）与 other.png（references=1、image 2），
+SHA32 与 [1,2,3,4] 一致；索引+迭代+授权整体 measure_requested_heap 为 0。
+三处变异（path 前缀匹配、去重移除、descriptor 字节数改错）均按预期变红后还原。
+本批未接 WebView/HTTP/CSP、未改 MediaAccess/SessionPlan、未创建 decoder/
+renderer/GPU；loader 与首帧继续开放。

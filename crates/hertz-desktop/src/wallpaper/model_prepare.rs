@@ -100,6 +100,11 @@ impl ModelInput {
     pub(crate) fn texture_read_permit(&self) -> TextureReadPermit<'_> {
         TextureReadPermit { input: self }
     }
+    /// Borrowed read-only index of the unique Package texture entries. This is
+    /// the future loader/Broker resource list; it grants no decoder or GPU.
+    pub(crate) fn texture_resources(&self) -> ModelTextureResources<'_> {
+        ModelTextureResources { input: self }
+    }
     #[cfg(test)]
     pub(crate) fn reservation_identity_for_test(&self) -> (&str, u64, &str) {
         self.inner().retained.as_ref().unwrap().identity_for_test()
@@ -151,6 +156,100 @@ impl TextureReadPermit<'_> {
             .expect("live model input")
             .textures
             .read_into(image_index, offset, output, cancel)
+    }
+}
+
+/// Borrowed-only resource index. Exact canonical package paths only; there is
+/// no URL parsing, path joining, prefix match or File escape here.
+pub(crate) struct ModelTextureResources<'a> {
+    input: &'a ModelInput,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct TextureResourceDescriptor<'a> {
+    pub(crate) path: &'a str,
+    pub(crate) mime: &'a str,
+    pub(crate) bytes: u64,
+    pub(crate) sha256: [u8; 32],
+    pub(crate) references: u32,
+    pub(crate) image_index: usize,
+}
+
+impl ModelTextureResources<'_> {
+    pub(crate) fn len(&self) -> usize {
+        self.input
+            .inner()
+            .resources
+            .as_ref()
+            .expect("live model input")
+            .textures
+            .unique_entries() as usize
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = TextureResourceDescriptor<'_>> + '_ {
+        let input = self.input;
+        let resources = input.inner().resources.as_ref().expect("live model input");
+        let entries = resources.source.entries();
+        resources
+            .textures
+            .unique_textures()
+            .filter_map(move |view| {
+                let entry = entries.get(view.entry_index as usize)?;
+                Some(TextureResourceDescriptor {
+                    path: &entry.path,
+                    mime: entry.mime.as_deref().unwrap_or_default(),
+                    bytes: view.bytes,
+                    sha256: view.sha256,
+                    references: view.references,
+                    image_index: view.image_index as usize,
+                })
+            })
+    }
+
+    /// Exact package-relative path match against the unique closure entries.
+    /// Any suffix, `..`, query, case fold or model-relative alias is not found.
+    pub(crate) fn authorize(&self, path: &str) -> Option<TextureResource<'_>> {
+        let resources = self.input.inner().resources.as_ref()?;
+        let entries = resources.source.entries();
+        let view = resources.textures.unique_textures().find(|view| {
+            entries
+                .get(view.entry_index as usize)
+                .is_some_and(|entry| entry.path == path)
+        })?;
+        Some(TextureResource {
+            input: self.input,
+            image_index: view.image_index as usize,
+            bytes: view.bytes,
+        })
+    }
+}
+
+/// One authorized texture resource. Borrowed from the input and read through
+/// the existing positional permit; no new File/path owner exists.
+pub(crate) struct TextureResource<'a> {
+    input: &'a ModelInput,
+    image_index: usize,
+    bytes: u64,
+}
+
+impl TextureResource<'_> {
+    pub(crate) fn image_index(&self) -> usize {
+        self.image_index
+    }
+
+    pub(crate) fn bytes(&self) -> u64 {
+        self.bytes
+    }
+
+    pub(crate) fn read_into(
+        &self,
+        offset: u64,
+        output: &mut [u8],
+        cancel: &AtomicBool,
+    ) -> Result<(), JobError> {
+        self.input
+            .texture_read_permit()
+            .read_into(self.image_index, offset, output, cancel)
     }
 }
 
