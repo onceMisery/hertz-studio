@@ -209,7 +209,47 @@ if(diagnostic){
     assert.equal((await glowPage.evaluate(()=>HertzGlBudget.stats())).contexts,0);
     await glowPage.close();
   }
-  fs.writeFileSync(path.join(output,'native-page-evidence.json'),JSON.stringify({source:'actual Rust production selector + GlAdmission + original native page',qualification:'browser integration; copied scheduler metadata matches measured headless rAF; native resource caps unchanged; controlled visibility event/state; Windows/GPU qualification pending',cadence:{intervals:cadence,refreshHz,running:runningCadence},state,blockedBefore,blockedAfter,hiddenBefore,hiddenAfter,visibilityResumed,fits,glow,paused,retired,errors},null,2));
-  console.log('PASS native composition page: real Rust projection, one context, complete frame, pause and retirement'+(glow?', glow surfaces admitted':''));
+  const tracksDir=path.join(output,'tracks');
+  let tracks=null;
+  if(fs.existsSync(path.join(tracksDir,'projection.json'))){
+    const tracksProjection=JSON.parse(fs.readFileSync(path.join(tracksDir,'projection.json'),'utf8'));
+    const tracksUri=fs.readFileSync(path.join(tracksDir,'uri.txt'),'utf8');
+    const tracksInit=bindCadence(fs.readFileSync(path.join(tracksDir,'native-init.js'),'utf8'));
+    const tracksPage=await browser.newPage({viewport:{width:64,height:64}}),tracksErrors=[];
+    tracksPage.on('pageerror',error=>tracksErrors.push(error.message));
+    tracksPage.on('console',message=>{if(message.type()==='error')tracksErrors.push(message.text());});
+    await tracksPage.addInitScript(tracksInit+'\nwindow.nativeEvents=[];window.ipc={postMessage:message=>nativeEvents.push(message)};');
+    await tracksPage.route('https://**.wallpaper.invalid/**',route=>{
+      if(route.request().url()===tracksUri)return route.fulfill({status:200,contentType:'application/json',body:JSON.stringify(tracksProjection)});
+      if(route.request().url()===tracksProjection.resolvedAssets[0].url)return routeMovie(route);
+      return route.fulfill({status:404,body:''});
+    });
+    await tracksPage.route('http://hertz.localhost/',route=>route.fulfill({status:200,contentType:'text/html',body:html}));
+    await tracksPage.goto('http://hertz.localhost/');
+    assert.equal(await tracksPage.evaluate(async url=>{hertzWallpaper.applyConfig({source:'fixed',audioInput:{kind:'none'},motion:1,quality:'low'});
+      const prepared=hertzWallpaper.applyComposition(url);hertzWallpaper.start(15);return await prepared;},tracksUri),true);
+    await tracksPage.waitForFunction(()=>nativeEvents.some(event=>event.includes('firstFrame')),null,{timeout:10000});
+    await tracksPage.waitForFunction(()=>hertzWallpaper.debug().draws>=2,null,{timeout:10000});
+    const sample=()=>tracksPage.evaluate(()=>{
+      const gl=document.querySelector('#host canvas').getContext('webgl2'),pixel=new Uint8Array(4);
+      gl.readPixels(32,32,1,1,gl.RGBA,gl.UNSIGNED_BYTE,pixel);
+      return {pixel:[...pixel],stats:hertzWallpaper.debug(),budget:HertzGlBudget.stats()};
+    });
+    const early=await sample();
+    assert(early.stats.sceneTime<2500,'gated binding needs an early frame');
+    assert(Math.max(...early.pixel.slice(0,3))<=8,'binding keeps the early composition output black');
+    await tracksPage.waitForFunction(()=>hertzWallpaper.debug().sceneTime>=3200,null,{timeout:10000});
+    const late=await sample();
+    assert(Math.max(...late.pixel.slice(0,3))>10,'binding reaches full opacity after the gate');
+    assert.equal(late.budget.contexts,1);assert.equal(late.budget.error,null);assert.deepEqual(tracksErrors,[]);
+    tracks={early,late,ir:{tracks:tracksProjection.ir.tracks.length,bindings:tracksProjection.ir.bindings.length}};
+    await tracksPage.evaluate(()=>hertzWallpaper.reveal());
+    await tracksPage.screenshot({path:path.join(tracksDir,'native-page-tracks.png')});
+    await tracksPage.evaluate(()=>hertzWallpaper.unmount());await tracksPage.waitForTimeout(50);
+    assert.equal((await tracksPage.evaluate(()=>HertzGlBudget.stats())).contexts,0);
+    await tracksPage.close();
+  }
+  fs.writeFileSync(path.join(output,'native-page-evidence.json'),JSON.stringify({source:'actual Rust production selector + GlAdmission + original native page',qualification:'browser integration; copied scheduler metadata matches measured headless rAF; native resource caps unchanged; controlled visibility event/state; Windows/GPU qualification pending',cadence:{intervals:cadence,refreshHz,running:runningCadence},state,blockedBefore,blockedAfter,hiddenBefore,hiddenAfter,visibilityResumed,fits,glow,tracks,paused,retired,errors},null,2));
+  console.log('PASS native composition page: real Rust projection, one context, complete frame, pause and retirement'+(glow?', glow surfaces admitted':'')+(tracks?', tracks/bindings applied':''));
  }finally{await browser.close();}
 })().catch(error=>{console.error(error.stack);process.exitCode=1;});

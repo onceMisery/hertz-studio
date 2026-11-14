@@ -13,11 +13,11 @@ use std::sync::atomic::AtomicUsize;
 
 const WORK_ID: &str = "c17ed10a-5c55-4a52-85dc-7509f9e88aae";
 fn document(nodes: Value) -> Value {
-    document_with_effects(nodes, json!([]))
+    document_full(nodes, json!([]), json!([]), json!([]))
 }
-fn document_with_effects(nodes: Value, effects: Value) -> Value {
+fn document_full(nodes: Value, effects: Value, tracks: Value, bindings: Value) -> Value {
     json!({"documentVersion":1,"canvas":{"width":64,"height":64,"colorSpace":"srgb","background":"#000000"},
-    "nodes":nodes,"timeline":{"durationSeconds":4,"loop":true,"tracks":[]},"bindings":[],"effects":effects})
+    "nodes":nodes,"timeline":{"durationSeconds":4,"loop":true,"tracks":tracks},"bindings":bindings,"effects":effects})
 }
 fn target() -> ImageTarget {
     ImageTarget {
@@ -44,6 +44,18 @@ async fn install_with_effects(
     properties: Value,
     video: bool,
 ) -> (Arc<ImportJobs>, String, Arc<AtomicUsize>) {
+    install_full(root, nodes, effects, json!([]), json!([]), properties, video).await
+}
+
+async fn install_full(
+    root: &std::path::Path,
+    nodes: Value,
+    effects: Value,
+    tracks: Value,
+    bindings: Value,
+    properties: Value,
+    video: bool,
+) -> (Arc<ImportJobs>, String, Arc<AtomicUsize>) {
     let probes = Arc::new(AtomicUsize::new(0));
     let counted = Arc::clone(&probes);
     let jobs = Arc::new(ImportJobs::start(
@@ -56,7 +68,7 @@ async fn install_with_effects(
     ));
     let mut entries = vec![(
         "composition.json",
-        serde_json::to_vec(&document_with_effects(nodes, effects)).unwrap(),
+        serde_json::to_vec(&document_full(nodes, effects, tracks, bindings)).unwrap(),
         "application/json",
     )];
     let mut assets = vec![];
@@ -716,6 +728,74 @@ async fn native_glow_fixture_projects_two_half_resolution_surfaces_into_the_orig
     assert_eq!(page["programs"], 4);
     if let Some(output) = std::env::var_os("HERTZ_COMPOSITION_NATIVE_FIXTURE") {
         let output = std::path::PathBuf::from(output).join("glow");
+        std::fs::create_dir_all(&output).unwrap();
+        let binding = super::super::page_events::PageBinding::new(1).unwrap();
+        let access = super::super::access::MediaAccess::new();
+        let mut admission =
+            super::super::gl_plan::GlAdmission::new(gl, Arc::new(BudgetCoordinator::new())).unwrap();
+        admission
+            .bind_composition(plan, &access, binding.session_id())
+            .unwrap();
+        let uri = admission.composition_url().unwrap();
+        let path = uri.split("/files/").nth(1).unwrap();
+        let projection_reader = access.permit(&package_hash, path).unwrap();
+        std::fs::write(output.join("projection.json"), projection_reader.payload().unwrap()).unwrap();
+        std::fs::write(output.join("uri.txt"), uri).unwrap();
+        std::fs::write(
+            output.join("native-init.js"),
+            format!(
+                "{}\n{}",
+                binding.initialization_script(),
+                admission.initialization_script()
+            ),
+        )
+        .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn native_track_binding_fixture_admits_timeline_and_binding_into_the_original_page_budget() {
+    let root = tempfileish::temp_dir("composition-native-tracks");
+    let (jobs, hash, probes) = install_full(
+        root.path(),
+        json!([{"id":"video","type":"video","stateVersion":1,"assets":{"asset":"movie"},
+            "properties":{"width":1234,"height":3456,"loopStartMs":0,"loopEndMs":1000}}]),
+        json!([]),
+        json!([{"id":"move","target":{"nodeId":"video","property":"x","component":null},
+            "keys":[{"timeSeconds":0,"value":0,"easing":"linear"},
+                {"timeSeconds":4,"value":1,"easing":"linear"}]}]),
+        json!([{"id":"fade","target":{"nodeId":"video","property":"opacity","component":null},
+            "mode":"multiply","parameters":{},
+            "program":[{"op":"input","name":"sceneTime"},
+                {"op":"const","value":-2.5},{"op":"add"},
+                {"op":"const","value":4},{"op":"mul"},{"op":"clamp","min":0,"max":1}]}]),
+        json!([]),
+        true,
+    )
+    .await;
+    let plan = selected(jobs, hash, Default::default()).await.unwrap();
+    assert_eq!(probes.load(Ordering::Acquire), 1);
+    let package_hash = plan.assets["movie"]
+        .as_media()
+        .unwrap()
+        .reference()
+        .package_hash
+        .clone();
+    let gl = plan
+        .gl_plan(OwnerKind::Preview, "track-owner".into(), 1, 60, 15)
+        .unwrap();
+    let projection = plan
+        .projection("same-fixed-session-tracks", 1, 6, &gl.limits)
+        .unwrap();
+    assert_eq!(projection["ir"]["tracks"].as_array().unwrap().len(), 1);
+    assert_eq!(projection["ir"]["bindings"].as_array().unwrap().len(), 1);
+    assert_eq!(projection["ir"]["bindings"][0]["mode"], "multiply");
+    assert_eq!(projection["ir"]["tracks"][0]["keys"].as_array().unwrap().len(), 2);
+    let page = &projection["pageLimits"];
+    assert_eq!(page["programs"], 2);
+    assert_eq!(page["renderTargetDeclaredBytes"], 64 * 64 * 16);
+    if let Some(output) = std::env::var_os("HERTZ_COMPOSITION_NATIVE_FIXTURE") {
+        let output = std::path::PathBuf::from(output).join("tracks");
         std::fs::create_dir_all(&output).unwrap();
         let binding = super::super::page_events::PageBinding::new(1).unwrap();
         let access = super::super::access::MediaAccess::new();
