@@ -56,6 +56,47 @@ struct ClosedTexture {
     file_index: u32,
 }
 
+/// Borrowed, data-only view of one unique texture record. No File, path or
+/// closure owner is exposed to the resource index.
+pub(super) struct TextureRecordView {
+    pub(super) entry_index: u32,
+    pub(super) image_index: u32,
+    pub(super) bytes: u64,
+    pub(super) sha256: [u8; 32],
+    pub(super) references: u32,
+}
+
+pub(super) struct UniqueTextures<'a> {
+    textures: &'a [ClosedTexture],
+    index: usize,
+}
+
+impl Iterator for UniqueTextures<'_> {
+    type Item = TextureRecordView;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while self.index < self.textures.len() {
+            let index = self.index;
+            self.index += 1;
+            let texture = &self.textures[index];
+            if self.textures[..index]
+                .iter()
+                .any(|previous| previous.entry_index == texture.entry_index)
+            {
+                continue;
+            }
+            return Some(TextureRecordView {
+                entry_index: texture.entry_index,
+                image_index: texture.image_index,
+                bytes: texture.bytes,
+                sha256: texture.sha256,
+                references: texture.references,
+            });
+        }
+        None
+    }
+}
+
 /// One closure owns the fixed record Vec, its unique File pins and the retained
 /// canonical path buffer. Field order is deliberate: every backing physically
 /// releases before `charge` refunds.
@@ -71,6 +112,16 @@ pub(super) struct ModelTextureClosure {
 impl ModelTextureClosure {
     pub(super) fn len(&self) -> usize {
         self.textures.len()
+    }
+
+    /// Borrowed unique-entry view for the resource index. One record per
+    /// installed entry; duplicate image aliases are skipped without scratch
+    /// allocation.
+    pub(super) fn unique_textures(&self) -> UniqueTextures<'_> {
+        UniqueTextures {
+            textures: &self.textures,
+            index: 0,
+        }
     }
 
     pub(super) fn unique_entries(&self) -> u32 {

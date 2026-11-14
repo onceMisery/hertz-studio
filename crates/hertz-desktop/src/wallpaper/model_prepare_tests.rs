@@ -4,6 +4,7 @@ use crate::wallpaper::assets::{
     installed_full_model_fixture, installed_full_model_fixture_with_texture,
     model_source_test_probe, model_source_writable,
 };
+use sha2::{Digest, Sha256};
 use std::{
     fs::File,
     io::{Cursor, Read},
@@ -585,6 +586,157 @@ fn texture_read_permit_enforces_one_mib_boundary_on_real_pinned_bytes() {
             .unwrap()
             .code,
         "model_texture_bounds"
+    );
+    drop(input);
+    preparation.finish();
+}
+
+#[test]
+fn texture_resource_index_lists_unique_package_entries_exactly() {
+    let fixture = installed_full_model_fixture("model-input-texture-index", false);
+    let probe = model_source_test_probe();
+    let preparation = probe.prepare_for_job("texture-index".into(), 81).unwrap();
+    let input = fixture
+        .store
+        .prepare_canonical_model_input(
+            &fixture.reference,
+            &probe,
+            &preparation,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+    let resources = input.texture_resources();
+    assert_eq!(resources.len(), 2);
+    let expected_sha: [u8; 32] = Sha256::digest([1u8, 2, 3, 4]).into();
+    let mut seen = Vec::new();
+    for descriptor in resources.iter() {
+        seen.push((
+            descriptor.path.to_owned(),
+            descriptor.mime.to_owned(),
+            descriptor.bytes,
+            descriptor.sha256,
+            descriptor.references,
+            descriptor.image_index,
+        ));
+    }
+    assert_eq!(seen.len(), 2);
+    assert_eq!(seen[0].0, "models/a/tex.png");
+    assert_eq!(seen[0].1, "image/png");
+    assert_eq!(seen[0].2, 4);
+    assert_eq!(seen[0].3, expected_sha);
+    assert_eq!(seen[0].4, 2);
+    assert_eq!(seen[0].5, 0);
+    assert_eq!(seen[1].0, "models/a/other.png");
+    assert_eq!(seen[1].2, 4);
+    assert_eq!(seen[1].3, expected_sha);
+    assert_eq!(seen[1].4, 1);
+    assert_eq!(seen[1].5, 2);
+    // The model entry and the embedded image are not Package texture resources.
+    assert!(resources.authorize("models/a/source.glb").is_none());
+    assert!(resources.authorize("models/a/low.glb").is_none());
+    drop(input);
+    preparation.finish();
+}
+
+#[test]
+fn texture_resource_authorize_requires_exact_indexed_path() {
+    let fixture = installed_full_model_fixture("model-input-texture-authorize", false);
+    let probe = model_source_test_probe();
+    let preparation = probe
+        .prepare_for_job("texture-authorize".into(), 82)
+        .unwrap();
+    let input = fixture
+        .store
+        .prepare_canonical_model_input(
+            &fixture.reference,
+            &probe,
+            &preparation,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+    let resources = input.texture_resources();
+    let cancel = AtomicBool::new(false);
+    let tex = resources.authorize("models/a/tex.png").unwrap();
+    assert_eq!(tex.bytes(), 4);
+    assert_eq!(tex.image_index(), 0);
+    let mut bytes = [0u8; 4];
+    tex.read_into(0, &mut bytes, &cancel).unwrap();
+    assert_eq!(bytes, [1, 2, 3, 4]);
+    assert_eq!(
+        resources
+            .authorize("models/a/tex.png")
+            .unwrap()
+            .read_into(4, &mut [0u8; 1], &cancel)
+            .err()
+            .unwrap()
+            .code,
+        "model_texture_bounds"
+    );
+    assert_eq!(
+        resources
+            .authorize("models/a/other.png")
+            .unwrap()
+            .image_index(),
+        2
+    );
+    for rejected in [
+        "models/a/tex.png/",
+        "models/a/tex.png/..",
+        "models/a/../models/a/tex.png",
+        "models/a/TEX.PNG",
+        "models/a//tex.png",
+        "models/a/tex.png?x=1",
+        "tex.png",
+        "",
+        "models/a/tex.pn",
+        "models/a/source.glb",
+    ] {
+        assert!(
+            resources.authorize(rejected).is_none(),
+            "unexpected authorization for {rejected:?}"
+        );
+    }
+    drop(input);
+    preparation.finish();
+}
+
+#[test]
+fn texture_resource_index_and_authorize_allocate_nothing() {
+    let fixture = installed_full_model_fixture("model-input-texture-index-alloc", false);
+    let probe = model_source_test_probe();
+    let preparation = probe
+        .prepare_for_job("texture-index-alloc".into(), 83)
+        .unwrap();
+    let input = fixture
+        .store
+        .prepare_canonical_model_input(
+            &fixture.reference,
+            &probe,
+            &preparation,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+    let ((count, totals, authorized), sample) = budget::measure_requested_heap(|| {
+        let resources = input.texture_resources();
+        let count = resources.len();
+        let totals = resources.iter().fold((0usize, 0u64, 0u64), |totals, item| {
+            (
+                totals.0 + 1,
+                totals.1 + item.bytes,
+                totals.2 + u64::from(item.references),
+            )
+        });
+        let authorized = resources
+            .authorize("models/a/other.png")
+            .map_or(0, |resource| resource.bytes());
+        (count, totals, authorized)
+    });
+    assert_eq!(count, 2);
+    assert_eq!(totals, (2, 8, 3));
+    assert_eq!(authorized, 4);
+    assert_eq!(
+        (sample.peak, sample.retained, sample.overflow),
+        (0, 0, false)
     );
     drop(input);
     preparation.finish();
