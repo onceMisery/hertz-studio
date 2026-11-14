@@ -26,10 +26,16 @@ use hertz_wallpaper::{
 use std::alloc::Layout;
 use std::fs::File;
 use std::io::{Seek, SeekFrom};
+use std::os::windows::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::{atomic::AtomicBool, Arc};
 
 const CLOSURE_DIAGNOSTIC: &str = "canonical model texture closure failed";
+
+/// One read at a time from the pinned canonical bytes: the existing Broker
+/// `read` contract caps a single response at 1 MiB. No File, path or closure
+/// owner escapes this module.
+const MAX_TEXTURE_READ_BYTES: usize = 1024 * 1024;
 
 /// Aggregate upper bound over the model's Package image records. Duplicate
 /// same-path records are counted conservatively; aliases share one installed
@@ -73,6 +79,62 @@ impl ModelTextureClosure {
 
     pub(super) fn unique_source_bytes(&self) -> u64 {
         self.unique_source_bytes
+    }
+
+    /// Canonical byte length for one Package image record. Embedded images and
+    /// unknown indices have no closure bytes.
+    pub(super) fn texture_bytes(&self, image_index: usize) -> Option<u64> {
+        let image_index = u32::try_from(image_index).ok()?;
+        self.textures
+            .iter()
+            .find(|texture| texture.image_index == image_index)
+            .map(|texture| texture.bytes)
+    }
+
+    /// Bounded positional read from the retained read-only pin. The shared
+    /// cursor is never used or moved, so independent readers cannot disturb
+    /// each other. Success allocates nothing; only real I/O failures build the
+    /// existing bounded scalar diagnostic.
+    pub(super) fn read_into(
+        &self,
+        image_index: usize,
+        offset: u64,
+        output: &mut [u8],
+        cancel: &AtomicBool,
+    ) -> Result<(), JobError> {
+        if output.len() > MAX_TEXTURE_READ_BYTES {
+            return Err(fixed_error("model_texture_bounds"));
+        }
+        let Ok(image_index) = u32::try_from(image_index) else {
+            return Err(fixed_error("model_texture_missing"));
+        };
+        let texture = self
+            .textures
+            .iter()
+            .find(|texture| texture.image_index == image_index)
+            .ok_or_else(|| fixed_error("model_texture_missing"))?;
+        let end = offset
+            .checked_add(output.len() as u64)
+            .ok_or_else(|| fixed_error("model_texture_bounds"))?;
+        if end > texture.bytes {
+            return Err(fixed_error("model_texture_bounds"));
+        }
+        let file = self
+            .files
+            .get(texture.file_index as usize)
+            .ok_or_else(|| fixed_error("model_texture_missing"))?;
+        let mut filled = 0usize;
+        while filled < output.len() {
+            source_pin_cancelled(cancel)?;
+            let position = offset + filled as u64;
+            match file.seek_read(&mut output[filled..], position) {
+                Ok(0) => return Err(fixed_error("model_texture_mismatch")),
+                Ok(read) => filled += read,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(source_scalar_io_error("read texture", position, &error)),
+            }
+        }
+        Ok(())
     }
 
     #[cfg(test)]

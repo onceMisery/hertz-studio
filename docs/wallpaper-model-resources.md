@@ -696,3 +696,19 @@ System.dealloc 全部返回后才退款。真实 rich fixture 入账 168+24+path
 
 本批仍不创建 decoder/renderer/GPU：Broker/SessionPlan/loader、同 renderer
 首帧、KTX2 转码与 A04 其余矩阵继续开放。
+
+2026-11-14 r42 纹理只读接口续接：`ModelInput::texture_read_permit` 返回借用型
+`TextureReadPermit<'a>`（无 Clone/owned 提取，不能活过 input，也不暴露 File/
+path/closure owner）。permit 提供 `texture_bytes(image_index)` 与
+`read_into(image_index, offset, &mut [u8], cancel)`：按 image 索引找固定记录，
+`offset+len` checked 不得越过 entry bytes，单次输出 ≤1 MiB；使用 Windows
+`seek_read` 位置读，不消费/移动共享 File 游标，多个 permit/克隆可交错读取；
+循环填满、Interrupted 重试、读取间隙检查取消，提前 EOF 映射 mismatch。错误码
+固定为 `model_texture_bounds`/`model_texture_missing`/`model_texture_mismatch`/
+`cancelled`；成功路径零堆分配（measure_requested_heap 峰值 0）。
+
+真实 fixture 覆盖整段/偏移/尾部/零长读取、Embedded 与未知索引、u64::MAX 偏移、
+越界、取消，以及用 1 MiB+1 不可压缩纹理证明 1 MiB 单次上限；同 Arc 的两个
+permit 位置读互不影响。三处变异（去越界检查、去取消检查、去 1 MiB 上限）均按
+预期变红后还原。本批未创建 decoder/renderer/GPU；Broker HTTP/CSP、
+SessionPlan、loader、首帧与 A04 其余矩阵继续开放。
