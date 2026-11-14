@@ -13,7 +13,7 @@
 //! No decoder, renderer or GPU owner is created here; Broker, loader, runtime
 //! and GPU first-frame gates remain closed.
 
-use super::{budget, JobError};
+use super::{budget, JobError, MAX_MODEL_TEXTURE_READ_BYTES};
 use crate::wallpaper::assets::{
     append_segment, open_file, read_source_sha256, reset_path, source_pin_cancelled,
     source_scalar_io_error,
@@ -31,11 +31,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{atomic::AtomicBool, Arc};
 
 const CLOSURE_DIAGNOSTIC: &str = "canonical model texture closure failed";
-
-/// One read at a time from the pinned canonical bytes: the existing Broker
-/// `read` contract caps a single response at 1 MiB. No File, path or closure
-/// owner escapes this module.
-const MAX_TEXTURE_READ_BYTES: usize = 1024 * 1024;
 
 /// Aggregate upper bound over the model's Package image records. Duplicate
 /// same-path records are counted conservatively; aliases share one installed
@@ -153,7 +148,7 @@ impl ModelTextureClosure {
         output: &mut [u8],
         cancel: &AtomicBool,
     ) -> Result<(), JobError> {
-        if output.len() > MAX_TEXTURE_READ_BYTES {
+        if output.len() > MAX_MODEL_TEXTURE_READ_BYTES {
             return Err(fixed_error("model_texture_bounds"));
         }
         let Ok(image_index) = u32::try_from(image_index) else {

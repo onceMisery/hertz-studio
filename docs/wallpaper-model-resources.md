@@ -776,3 +776,21 @@ usage 仍由原 input 持有；g2 重新 admit 后读取成功，disable 后读�
 drop input 回到 baseline。三处变异（retire 不 revoke、admit 忽略 Attaching、
 admit 忽略 generation）均按预期变红后还原。本批未接 WebView2/HTTP Range/CSP、
 未改 MediaAccess、未创建 decoder/renderer/GPU；loader 与首帧继续开放。
+
+2026-11-14 r47 分块 loader 读取续接：1 MiB 单次读取上限提升为
+`MAX_MODEL_TEXTURE_READ_BYTES`（model_prepare），闭包与 session 共用。
+`ModelTextureController::chunk_reader(path)` 返回借用型
+`ModelTextureChunkReader`；`WallpaperSession::texture_chunk_reader` 直接委托。
+reader 记录 total/offset，`next_chunk(&mut [u8], cancel)` 每次最多填 1 MiB 并
+前进；EOF/空输出返回 0；path 在创建时 exact-path 授权；每次读取重新进入
+controller，revoke 后返回固定 `model_texture_revoked`，取消透传；不复制整文件、
+不分配。
+
+真实 fixture 证据：4B 纹理按 3+1+0 分块且字节为 [1,2,3,4]；空串/尾斜杠/glb
+无 reader；1 MiB+1 不可压缩纹理按 1 MiB+1B 两块读取并逐字节一致；会话 fail()
+撤销后新 reader 为 None、read_texture None，新代际可重新准入；controller 级
+reader 在 revoke 后下一块返回 `model_texture_revoked`；cancel=true 返回
+cancelled；reader 创建+读取零分配。三处变异（offset 不前进、忽略 EOF、把
+revoked None 当成功）均按预期变红后还原。本批未接 WebView2/HTTP Range/CSP、
+未改 MediaAccess、未创建 decoder/renderer/GPU；loader 表示转换与 GPU 首帧继续
+开放。
