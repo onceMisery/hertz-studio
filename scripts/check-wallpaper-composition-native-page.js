@@ -378,7 +378,55 @@ if(diagnostic){
     assert.equal((await texturedPage.evaluate(()=>HertzGlBudget.stats())).contexts,0);
     await texturedPage.close();
   }
-  fs.writeFileSync(path.join(output,'native-page-evidence.json'),JSON.stringify({source:'actual Rust production selector + GlAdmission + original native page',qualification:'browser integration; copied scheduler metadata matches measured headless rAF; native resource caps unchanged; controlled visibility event/state; Windows/GPU qualification pending',cadence:{intervals:cadence,refreshHz,running:runningCadence},state,blockedBefore,blockedAfter,hiddenBefore,hiddenAfter,visibilityResumed,fits,glow,tracks,mask,model,texturedModel,paused,retired,errors},null,2));
-  console.log('PASS native composition page: real Rust projection, one context, complete frame, pause and retirement'+(glow?', glow surfaces admitted':'')+(tracks?', tracks/bindings applied':'')+(mask?', mask texture applied':'')+(model?', scene3d model rendered':'')+(texturedModel?', textured model pixels':''));
+  const externalDir=path.join(output,'model-textured-external');
+  let externalTexture=null;
+  if(fs.existsSync(path.join(externalDir,'projection.json'))){
+    const externalProjection=JSON.parse(fs.readFileSync(path.join(externalDir,'projection.json'),'utf8'));
+    const externalUri=fs.readFileSync(path.join(externalDir,'uri.txt'),'utf8');
+    const externalInit=bindCadence(fs.readFileSync(path.join(externalDir,'native-init.js'),'utf8'));
+    const externalFiles=JSON.parse(fs.readFileSync(path.join(externalDir,'files.json'),'utf8'));
+    const externalPage=await browser.newPage({viewport:{width:64,height:64}}),externalErrors=[];
+    let textureRequests=0;
+    externalPage.on('pageerror',error=>externalErrors.push(error.message));
+    externalPage.on('console',message=>{if(message.type()==='error')externalErrors.push(message.text());});
+    await externalPage.addInitScript(externalInit+'\nwindow.nativeEvents=[];window.ipc={postMessage:message=>nativeEvents.push(message)};');
+    await externalPage.route('https://**.wallpaper.invalid/**',route=>{
+      if(route.request().url()===externalUri)return route.fulfill({status:200,contentType:'application/json',body:JSON.stringify(externalProjection)});
+      const asset=externalFiles.find(entry=>entry.url===route.request().url());
+      if(asset){
+        if(asset.file.endsWith('.png'))textureRequests++;
+        return route.fulfill({status:200,contentType:asset.file.endsWith('.png')?'image/png':'model/gltf-binary',
+          body:fs.readFileSync(path.join(externalDir,asset.file))});
+      }
+      return route.fulfill({status:404,body:''});
+    });
+    await externalPage.route('http://hertz.localhost/',route=>route.fulfill({status:200,contentType:'text/html',body:html}));
+    await externalPage.goto('http://hertz.localhost/');
+    assert.equal(await externalPage.evaluate(async url=>{hertzWallpaper.applyConfig({source:'fixed',audioInput:{kind:'none'},motion:1,quality:'low'});
+      const prepared=hertzWallpaper.applyComposition(url);hertzWallpaper.start(15);return await prepared;},externalUri),true);
+    await externalPage.waitForFunction(()=>nativeEvents.some(event=>event.includes('firstFrame')),null,{timeout:10000}).catch(async failure=>{
+      throw new Error(failure.message+'\n'+JSON.stringify(await externalPage.evaluate(()=>({events:nativeEvents,stats:hertzWallpaper.debug(),budget:HertzGlBudget.stats()}))));
+    });
+    await externalPage.waitForFunction(()=>hertzWallpaper.debug().draws>=2,null,{timeout:10000});
+    const external=await externalPage.evaluate(()=>{
+      const gl=document.querySelector('#host canvas').getContext('webgl2');
+      const sample=(x,y)=>{const pixel=new Uint8Array(4);gl.readPixels(x,y,1,1,gl.RGBA,gl.UNSIGNED_BYTE,pixel);return [...pixel];};
+      return {red:sample(36,40),green:sample(46,40),budget:HertzGlBudget.stats()};
+    });
+    assert(textureRequests>=1,'external texture URL is fetched by the real GLTFLoader');
+    assert(external.red[0]>200&&external.red[1]<20&&external.red[2]<20,'external texture keeps the left red half');
+    assert(external.green[1]>200&&external.green[0]<20&&external.green[2]<20,'external texture keeps the right green half');
+    assert.equal(external.budget.contexts,1);assert.equal(external.budget.error,null);assert.deepEqual(externalErrors,[]);
+    assert.equal(externalProjection.resolvedAssets[0].modelFacts.images[0].source,'external');
+    assert(externalProjection.resolvedAssets[0].textureUrls['textures/red.png'].includes('/files/assets/textures/red.png'));
+    externalTexture={pixels:{red:external.red,green:external.green},budget:external.budget,requests:textureRequests};
+    await externalPage.evaluate(()=>hertzWallpaper.reveal());
+    await externalPage.screenshot({path:path.join(externalDir,'native-page-model-textured-external.png')});
+    await externalPage.evaluate(()=>hertzWallpaper.unmount());await externalPage.waitForTimeout(50);
+    assert.equal((await externalPage.evaluate(()=>HertzGlBudget.stats())).contexts,0);
+    await externalPage.close();
+  }
+  fs.writeFileSync(path.join(output,'native-page-evidence.json'),JSON.stringify({source:'actual Rust production selector + GlAdmission + original native page',qualification:'browser integration; copied scheduler metadata matches measured headless rAF; native resource caps unchanged; controlled visibility event/state; Windows/GPU qualification pending',cadence:{intervals:cadence,refreshHz,running:runningCadence},state,blockedBefore,blockedAfter,hiddenBefore,hiddenAfter,visibilityResumed,fits,glow,tracks,mask,model,texturedModel,externalTexture,paused,retired,errors},null,2));
+  console.log('PASS native composition page: real Rust projection, one context, complete frame, pause and retirement'+(glow?', glow surfaces admitted':'')+(tracks?', tracks/bindings applied':'')+(mask?', mask texture applied':'')+(model?', scene3d model rendered':'')+(texturedModel?', textured model pixels':'')+(externalTexture?', external texture route':''));
  }finally{await browser.close();}
 })().catch(error=>{console.error(error.stack);process.exitCode=1;});

@@ -491,7 +491,7 @@ fn material_facts(index: usize, material: &ModelMaterial) -> Value {
     })
 }
 
-fn image_facts(index: usize, image: &ModelImage) -> Result<Value> {
+fn image_facts(index: usize, image: &ModelImage, model_path: &str) -> Result<Value> {
     match image {
         ModelImage::Embedded { range, mime, .. } => {
             if mime != "image/png" && mime != "image/jpeg" {
@@ -501,8 +501,21 @@ fn image_facts(index: usize, image: &ModelImage) -> Result<Value> {
             }
             Ok(json!({"index": index, "source": "embedded", "mime": mime, "bytes": range.bytes}))
         }
-        // External image broker URLs are a separate native preparation slice.
-        ModelImage::Package { .. } => Err(unavailable("external model textures are not prepared")),
+        ModelImage::Package { path, mime, .. } => {
+            if mime != "image/png" && mime != "image/jpeg" {
+                return Err(unavailable(
+                    "textured profile requires PNG/JPEG package images",
+                ));
+            }
+            // The loader profile keeps the authored model-relative URI.
+            let uri = model_path
+                .rsplit_once('/')
+                .map(|(directory, _)| directory)
+                .and_then(|directory| path.strip_prefix(directory))
+                .and_then(|rest| rest.strip_prefix('/'))
+                .unwrap_or(path);
+            Ok(json!({"index": index, "source": "external", "mime": mime, "uri": uri}))
+        }
     }
 }
 
@@ -521,10 +534,14 @@ fn sampler_for(
         })
 }
 
-/// Textured PBR facts for the shipped profile. Only embedded PNG/JPEG images
-/// are projected in this slice; external package textures stay unavailable until
-/// their broker closure is admitted separately.
-pub fn static_textured_profile_facts(resource: &GlbResource, encoded_bytes: u64) -> Result<Value> {
+/// Textured PBR facts for the shipped profile. Embedded images and package
+/// images (authored model-relative URI) are both projected; the caller owns
+/// texture URL publication and pinning.
+pub fn static_textured_profile_facts(
+    resource: &GlbResource,
+    encoded_bytes: u64,
+    model_path: &str,
+) -> Result<Value> {
     let structure = &resource.structure;
     let binary = resource
         .container
@@ -827,6 +844,7 @@ pub fn static_textured_profile_facts(resource: &GlbResource, encoded_bytes: u64)
                     .images
                     .get(index)
                     .ok_or_else(|| unavailable("textured profile image index"))?,
+                model_path,
             )
         })
         .collect::<Result<Vec<_>>>()?;
@@ -843,6 +861,7 @@ pub fn static_textured_profile_facts(resource: &GlbResource, encoded_bytes: u64)
                     .images
                     .get(texture.source)
                     .ok_or_else(|| unavailable("textured profile texture image"))?,
+                model_path,
             )?;
             let sampler = sampler_for(structure, texture.sampler);
             Ok(json!({
@@ -966,7 +985,13 @@ pub fn embedded_image_upload_bytes(
     let bytes = glb
         .get(start..start + length)
         .ok_or_else(|| unavailable("model image range"))?;
-    let (width, height) = match mime.as_str() {
+    image_upload_bytes(bytes, mime)
+}
+
+/// Declared upload bound for one PNG/JPEG texture: `2 × w × h × 4` covers the
+/// base level and a conservative full mip chain.
+pub fn image_upload_bytes(bytes: &[u8], mime: &str) -> Result<u64> {
+    let (width, height) = match mime {
         "image/png" => png_dimensions(bytes)?,
         "image/jpeg" => jpeg_dimensions(bytes)?,
         _ => return Err(unavailable("unsupported model image mime")),
@@ -1220,7 +1245,9 @@ mod tests {
             "assets/model.glb",
         )
         .unwrap();
-        let facts = static_textured_profile_facts(content.resource(), content.bytes()).unwrap();
+        let facts =
+            static_textured_profile_facts(content.resource(), content.bytes(), "assets/model.glb")
+                .unwrap();
         assert_eq!(facts["profile"], TEXTURED_PROFILE);
         assert_eq!(facts["declared"]["materials"], 1);
         assert_eq!(facts["scene"]["drawCalls"], 1);

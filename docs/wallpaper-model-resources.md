@@ -1265,3 +1265,25 @@ budget.error=null、contexts 1→0）；组合浏览器 47 项与前端聚合 86
 
 仍未闭合：原生外部纹理 URL/broker 发布、KTX2/Basis、GLB 动画、逐实例材质
 透明度、多材质 program 精确计数、真实 GPU 设备矩阵与 A01/A05–A10 外部验收。
+
+2026-11-14 r77 原生外部纹理续接：`static_textured_profile_facts` 增加
+`model_path` 参数并接受 `ModelImage::Package`：由包内路径去除模型目录得到
+作者 model-relative URI，facts.images 输出 `source:external/mime/uri`；
+`image_upload_bytes` 独立公开，供嵌入与外部文件共用（PNG/JPEG 尺寸 ×2 上界）。
+
+桌面 `prepare_assets` 对 Package 图片逐个 `pin_verified_media`、核对
+path/bytes/SHA/MIME、有界读取并计算上传字节，生成 `textureUrls`（URI→
+files URL）与 `texture_pins`；`PreparedComposition::pins()` 将纹理条目与普通
+assets 一并交给 `MediaAccess::grant_composition`，绑定后外部纹理路径以
+pinned file 形式可读（测试验证绑定前不可读、绑定后可读）。新增
+`model-textured-external/` fixture；原生页面阶段由真实 GLTFLoader 请求纹理
+URL，左红/右绿像素、budget.error=null、contexts 1→0，并断言至少一次纹理
+HTTP 路由。
+
+验证：两工具链 hertz-wallpaper 61/61、hertz-desktop 859 passed / 0 failed /
+2 ignored；双工具链 clippy 与 fmt 通过；原生页面连续 3 次通过（含 external
+texture route）；组合浏览器 47 项与前端聚合 86 步通过。三处变异（external
+URI 用完整包路径、纹理 pin 不发布、textureUrls 不写入）均变红后还原。
+
+仍未闭合：KTX2/Basis、GLB 动画、逐实例材质透明度、多材质 program 精确计数、
+真实 GPU 设备矩阵与 A01/A05–A10 外部验收。
