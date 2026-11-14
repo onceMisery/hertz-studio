@@ -4,9 +4,10 @@
 const assert=require('node:assert/strict'), fs=require('node:fs'), path=require('node:path');
 const {execFileSync}=require('node:child_process'), {createHash}=require('node:crypto'), zlib=require('node:zlib');
 const {loadCompositionFontFixture}=require('./composition-font-fixture.js');
+const {coreGlb,coreModelFacts}=require('./composition-model-fixture.js');
 const {chromium}=require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const root=path.resolve(__dirname,'..'), output=path.join(root,'output/a04-p2-20261108/composition-browser');
-const fontFixture=loadCompositionFontFixture();
+const fontFixture=loadCompositionFontFixture(), modelFixture=coreGlb();
 fs.mkdirSync(output,{recursive:true});
 function hash(bytes){return createHash('sha256').update(bytes).digest('hex');}
 function crc(bytes){let c=0xffffffff;for(const b of bytes){c^=b;for(let i=0;i<8;i++)c=(c>>>1)^((c&1)?0xedb88320:0);}return (c^0xffffffff)>>>0;}
@@ -24,7 +25,8 @@ const sourceAssets=[
  {assetId:'white',kind:'image',file:'white.png',mime:'image/png',width:8,height:8,bytes:png(8,8,()=>[255,255,255,255])},
  {assetId:'wide',kind:'image',file:'wide.png',mime:'image/png',width:16,height:8,bytes:png(16,8,(x)=>x<8?[255,0,0,255]:[0,255,0,255])},
  {assetId:'video',kind:'video',file:'video.webm',mime:'video/webm',bytes:fs.readFileSync(path.join(root,'scripts/fixtures/wallpaper-vp8.webm'))},
- {assetId:'font',kind:'font',file:fontFixture.file,mime:fontFixture.mime,bytes:fontFixture.bytes}
+ {assetId:'font',kind:'font',file:fontFixture.file,mime:fontFixture.mime,bytes:fontFixture.bytes},
+ {assetId:'mesh',kind:'model',file:'mesh.glb',mime:'model/gltf-binary',bytes:modelFixture.glb,modelInput:modelFixture.input}
 ];
 for(const a of sourceAssets)fs.writeFileSync(path.join(output,a.file),a.bytes);
 for(const file of fontFixture.packageFiles){fs.mkdirSync(path.dirname(path.join(output,file.file)),{recursive:true});fs.writeFileSync(path.join(output,file.file),file.bytes);}
@@ -65,6 +67,15 @@ const alpha=compile([image('back','blue'),image('red-layer','red',{width:32,heig
  image('front','green',{x:32,y:16,width:16,height:32,opacity:.5})]);
 const mask=compile([image('back','blue'),image('front','soft',{}, {maskAsset:'mask'})]);
 const fit=compile([image('wide-layer','wide',{width:64,height:64,fit:'contain'})]);
+const modelCanvas={width:64,height:64,colorSpace:'srgb',background:'#000000',
+ scene3d:{position:[0,0,3],target:[0,0,0],fovDegrees:45,near:0.1,far:100}};
+const modelNode=(id='mesh',properties={})=>({id,type:'model',stateVersion:1,assets:{asset:'mesh'},
+ properties:{position:[0,0,0],rotation:[0,0,0],scale:[1,1,1],...properties}});
+const model=compile([modelNode()],modelCanvas);
+const movedModel=compile([modelNode('mesh',{position:[.5,.5,0]})],modelCanvas);
+const modelOverlay=compile([modelNode(),image('back','blue')],modelCanvas);
+const modelBehind=compile([image('back','blue'),modelNode()],modelCanvas);
+const modelOpacity=compile([modelNode('mesh',{opacity:.5})],modelCanvas);
 const text=compile([{id:'label',type:'text',stateVersion:1,assets:{fontAsset:'font'},properties:{x:0,y:0,width:64,height:64,anchorX:0,anchorY:0,text:'Hertz',fontSize:32,color:'#ffffff'}}]);
 const particles=compile([{id:'field',type:'particles',stateVersion:1,properties:{x:32,y:0,width:64,height:64,anchorX:0,anchorY:0,count:24,seed:19,lifetimeSeconds:2,speed:24,spread:50}}]);
 const video=compile([{id:'movie',type:'video',stateVersion:1,assets:{asset:'video'},properties:{x:0,y:0,width:64,height:64,anchorX:0,anchorY:0,loopStartMs:0,loopEndMs:200}}]);
@@ -177,7 +188,11 @@ const results=[];
   await page.addScriptTag({path:path.join(root,'plugin/ui/vendor/space-stage.js')});
   const actualVideo=await page.evaluate(async()=>{const v=document.createElement('video');v.muted=true;v.src='/video.webm';await new Promise((r,j)=>{v.onloadedmetadata=r;v.onerror=j;});const m={width:v.videoWidth,height:v.videoHeight,durationMs:v.duration*1000};v.removeAttribute('src');v.load();return m;});
   const nativeFont=Object.values(nativeFontProjections)[0].projection.resolvedAssets.find(asset=>asset.kind==='font');
-  const resolved=sourceAssets.map(a=>a.kind==='font'?{...nativeFont,url:'http://composition.test/'+a.file}:({assetId:a.assetId,kind:a.kind,width:a.width,height:a.height,...(a.kind==='video'?actualVideo:{}),
+  const resolved=sourceAssets.map(a=>a.kind==='font'?{...nativeFont,url:'http://composition.test/'+a.file}
+   :a.kind==='model'?({assetId:a.assetId,kind:'model',contentKey:hash(a.bytes),byteLength:a.bytes.length,
+    url:'http://composition.test/'+a.file,adapterId:'three-gltf-loader',adapterVersion:1,
+    decodeOptions:{profile:'static-core-pbr-v1'},modelFacts:coreModelFacts(a.modelInput)})
+   :({assetId:a.assetId,kind:a.kind,width:a.width,height:a.height,...(a.kind==='video'?actualVideo:{}),
     contentKey:hash(a.bytes),byteLength:a.bytes.length,url:'http://composition.test/'+a.file,decodeOptions:{colorSpace:a.kind==='font'?'none':'srgb',alphaMode:'straight'},adapterId:a.kind==='font'?'fontface-v1':a.kind==='video'?'video-element-v1':'image-element-v1',adapterVersion:1}));
   const setup=await page.evaluate(()=>{window.counts={contexts:0,loads:0};let original=HTMLCanvasElement.prototype.getContext;
    const seen=new WeakSet();HTMLCanvasElement.prototype.getContext=function(type,...args){const ctx=original.call(this,type,...args);if(ctx&&type==='webgl2'&&!seen.has(ctx)){seen.add(ctx);counts.contexts++;window.gl=ctx;}return ctx;};
@@ -206,6 +221,33 @@ const results=[];
   results.push({case:'linear alpha, fixed child/root painter order, inherited matrix, unique renderer',pixels});
   await select(mask);near(await page.evaluate(()=>pixel(32,32)),[137,0,225]);results.push({case:'linear numeric mask and real straight-alpha source premultiplication'});
   await select(fit);near(await page.evaluate(()=>pixel(8,8)),[0,0,0]);near(await page.evaluate(()=>pixel(8,32)),[255,0,0]);near(await page.evaluate(()=>pixel(56,32)),[0,255,0]);results.push({case:'decoded dimensions contain-fit without canvas refit'});
+  async function reject(compiled,mutate){
+   const p=projection(compiled);if(mutate)mutate(p);
+   return page.evaluate(async p=>{const before={held:ledger.snapshot().held,state:host.stats().state};let error;
+     try{await host.selectComposition(p);host.frame({sceneTime:0,paused:true});}catch(reason){error=reason.message;}
+     return {before,error,after:{held:ledger.snapshot().held,state:host.stats().state}};},p);
+  }
+  const modelStats=await select(model);
+  const modelPixels=await page.evaluate(()=>({inside:pixel(40,23),outside:pixel(16,48),held:ledger.snapshot().held,
+   models:host.stats().sceneStats.models,has3d:host.stats().sceneStats.has3d}));
+  near(modelPixels.inside,[255,255,255]);near(modelPixels.outside,[0,0,0]);
+  assert.equal(modelPixels.models,1);assert.equal(modelPixels.has3d,true);assert.equal(modelPixels.held.bufferDeclaredBytes,170);
+  assert.equal(modelStats.state,'ready');results.push({case:'real Rust IR static GLB renders through the scene3d perspective camera',modelPixels});
+  await select(movedModel);
+  const movedModelPixels=await page.evaluate(()=>({inside:pixel(50,13),outside:pixel(20,20)}));
+  near(movedModelPixels.inside,[255,255,255]);near(movedModelPixels.outside,[0,0,0]);
+  results.push({case:'authored model position moves the 3D-only pixels',movedModelPixels});
+  await select(modelOverlay);near(await page.evaluate(()=>pixel(40,23)),[0,0,255]);
+  results.push({case:'2D painter order composites over the 3D layer'});
+  const orderRejection=await reject(modelBehind);assert.match(orderRejection.error,/cross-space-order/);
+  assert.deepEqual(orderRejection.after.held,orderRejection.before.held);
+  const opacityRejection=await reject(modelOpacity);assert.match(opacityRejection.error,/3d-opacity/);
+  assert.deepEqual(opacityRejection.after.held,opacityRejection.before.held);
+  const texturedRejection=await reject(model,p=>{p.resolvedAssets=p.resolvedAssets.map(asset=>
+   asset.kind==='model'?{...asset,decodeOptions:{profile:'static-pbr-texture-v1'}}:asset);});
+  assert.match(texturedRejection.error,/composition-model-preparation-required/);
+  assert.deepEqual(texturedRejection.after.held,texturedRejection.before.held);
+  results.push({case:'cross-space order, model opacity and textured profiles fail closed without quota',orderRejection,opacityRejection,texturedRejection});
   await select(text);const textPixels=await page.evaluate(()=>({pixels:snapshot(),fonts:document.fonts.size}));assert.ok(textPixels.pixels.some((value,index)=>index%4!==3&&value>200));assert.equal(textPixels.fonts,1);results.push({case:'actual prepared FontFace and text pixels'});
   await select(particles);const first=await page.evaluate(()=>{host.frame({sceneTime:.5,paused:true});return snapshot();});
   await page.evaluate(()=>host.frame({sceneTime:1.4,paused:true}));const backwards=await page.evaluate(()=>{host.frame({sceneTime:.5,paused:true});return snapshot();});assert.deepEqual(backwards,first);assert.ok(first.some((value,index)=>index%4!==3&&value>0));results.push({case:'preallocated particles absolute phase and reverse seek'});

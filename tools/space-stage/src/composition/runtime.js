@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: MIT
 import { buildNode, loadResource, loadTextRaster, updateNodeMaterial } from './nodes.js';
+import { loadModelResource } from './model-node.js';
 import { createScope } from '../scope.js';
 import { createBackground, createInputSampler } from './builtin.js';
 import { evaluateBinding, evaluateTrack } from './animation.js';
 const MATRIX=1, LAYOUT=2, MATERIAL=4, VISIBILITY=8, RESOURCE=16, GEOMETRY=32, ALL=63;
+const modelConstructionBytes = facts => facts.input.encodedBytes + facts.input.binBytes + facts.input.jsonBytes * 2;
 const outputVertex = `varying vec2 vUv;void main(){vUv=uv;gl_Position=vec4(position.xy,0.0,1.0);}`;
 const outputFragment = `uniform sampler2D inputMap;uniform float brightness;uniform float contrast;
   uniform float saturation;uniform float hue;uniform sampler2D glowMap;uniform bool hasGlow;uniform float glowStrength;
@@ -53,7 +55,7 @@ function reserveAll(context, scope, plan, generation) {
     if (ticket) reserved.push(ticket); return ticket;
   };
   try {
-    const targetTicket = require({ renderTargetDeclaredBytes: plan.pixels * (plan.builtin?12:8) }, 'Composition planned linear RGBA16F/depth target');
+    const targetTicket = require({ renderTargetDeclaredBytes: plan.pixels * (plan.builtin || plan.has3d ? 12 : 8) }, 'Composition planned linear RGBA16F/depth target');
     if (targetTicket) unclaimedPrivate.add(targetTicket);
     const glowTicket = plan.outputGlow
       ? require({ renderTargetDeclaredBytes: plan.outputGlow.width * plan.outputGlow.height * 8 }, 'Composition glow half-resolution RGBA8 surfaces')
@@ -67,6 +69,10 @@ function reserveAll(context, scope, plan, generation) {
       if (spec.node.nodeType === 'builtinScene') {
         for(const buffer of plan.builtin.profile.sourceResources.buffers)
           nodeScopes[spec.index].prepareBufferPlan(buffer.id,buffer.cpuPeakBytes,buffer.bufferBytes);
+      } else if (spec.node.nodeType === 'model') {
+        const facts = spec.resources.asset.modelFacts;
+        spec.bufferPlan = nodeScopes[spec.index].bufferPlan(facts.resources.cpuBackingBytes,
+          facts.resources.gpuBufferBytes,'Composition static model buffers');
       } else if (spec.node.nodeType !== 'group') {
         const bytes = spec.node.nodeType === 'particles' ? spec.count * 20 : 92;
         spec.bufferPlan = nodeScopes[spec.index].bufferPlan(bytes,bytes,'Composition fixed node buffers');
@@ -76,7 +82,11 @@ function reserveAll(context, scope, plan, generation) {
       if (context.pool.has(requirement.identity)) continue;
       let admissions;
       if (requirement.kind === 'font') admissions={cpu:require({ownedCpuBytes:requirement.fontMetadata.cpuBudgetBytes},'Composition prepared same-package font')};
-      else {
+      else if (requirement.kind === 'model') {
+        const spec = plan.nodePlans.find(item => item.resources.asset === requirement);
+        admissions={cpu:require({ownedCpuBytes:modelConstructionBytes(requirement.modelFacts)},'Composition static model construction'),
+          bufferPlan:spec.bufferPlan};
+      } else {
         const bytes=requirement.width*requirement.height*4;
         admissions={decode:require({decodeReservedBytes:requirement.kind==='video'?bytes*3:bytes,
           ...(requirement.kind==='video'?{decoderLeases:1}:{})},'Composition actual media decode reservation'),
@@ -93,7 +103,8 @@ function reserveAll(context, scope, plan, generation) {
     // can start. Source tickets transfer to the pool adapter at acquisition.
     const unclaimed = new Set(sources.keys());
     scope.defer(() => {
-      for (const requirement of unclaimed) for (const ticket of Object.values(sources.get(requirement))) ticket?.release({apiReleased:true,allocationEnded:true});
+      for (const requirement of unclaimed) for (const ticket of Object.values(sources.get(requirement)))
+        if (typeof ticket?.release === 'function') ticket.release({apiReleased:true,allocationEnded:true});
       for (const ticket of programTickets) ticket?.release({apiReleased:true,allocationEnded:true});
       for (const ticket of unclaimedPrivate) ticket.release({apiReleased:true,allocationEnded:true});
     });
@@ -122,6 +133,21 @@ export async function createCompositionRuntime(THREE, context, scope, plan, opti
   // matrix through Scene.updateMatrixWorld on a static supplemental frame.
   scene.matrixAutoUpdate=false; scene.matrixWorldAutoUpdate=false;
   const camera = new THREE.OrthographicCamera(0, 1, 0, 1, -1, 1); camera.position.z = 1;
+  // A composition has one fixed 3D layer below the 2D painter order. The
+  // compiler still owns the camera; the runtime only binds it to this context.
+  const modelScene = plan.has3d ? new THREE.Scene() : null;
+  const modelCamera = plan.has3d
+    ? new THREE.PerspectiveCamera(plan.camera.fovDegrees, plan.projection.canvas.width / plan.projection.canvas.height,
+      plan.camera.near, plan.camera.far) : null;
+  if (modelCamera) {
+    modelCamera.position.fromArray(plan.camera.position);
+    modelCamera.lookAt(new THREE.Vector3().fromArray(plan.camera.target));
+    modelCamera.updateMatrixWorld(true);
+    modelScene.add(new THREE.AmbientLight(0xffffff, Math.PI));
+    const sun = new THREE.DirectionalLight(0xffffff, 1);
+    sun.position.fromArray(plan.camera.position);
+    modelScene.add(sun);
+  }
   const allocation = reserveAll(context,scope,plan,generation);
   let background = null, inputSampler = null;
   // This owner must exist before the first loader/factory can throw.
@@ -136,7 +162,9 @@ export async function createCompositionRuntime(THREE, context, scope, plan, opti
   const loading = [];
   for (const requirement of plan.requirements) {
     const lease = context.pool.acquire(requirement.identity, { signal, generation, isCurrent: options.isCurrent,
-      load: ({ signal, generation }) => loadResource(THREE, context, requirement, signal, generation, invalidate, allocation.sources.get(requirement)),
+      load: ({ signal, generation }) => requirement.kind === 'model'
+        ? loadModelResource(requirement, signal, allocation.sources.get(requirement))
+        : loadResource(THREE, context, requirement, signal, generation, invalidate, allocation.sources.get(requirement)),
       releaseValue: value => value.release() });
     if (!lease) throw new Error('composition-resource-pool-exhausted');
     allocation.unclaimed.delete(requirement);
@@ -167,7 +195,8 @@ export async function createCompositionRuntime(THREE, context, scope, plan, opti
   for (const index of plan.ir.painterOrder) {
     const node = nodes[index], parent = node.spec.node.parentIndex;
     if(node.background)continue;
-    (parent < 0 ? root : nodes[parent].object).add(node.object);
+    const spaceRoot = node.spec.node.space === '3d' ? modelScene : root;
+    (parent < 0 ? spaceRoot : nodes[parent].object).add(node.object);
   }
   // renderOrder follows compiled painter order, including non-index child order.
   plan.ir.painterOrder.forEach((index, order) => { nodes[index].object.renderOrder = nodes[index].spec.node.nodeType === 'group' ? 0 : order + 1; });
@@ -223,6 +252,18 @@ export async function createCompositionRuntime(THREE, context, scope, plan, opti
       work.materialUpdates[spec.index]++;
     }
     if (!changeLocal) return;
+    if (spec.node.space === '3d') {
+      const vector = name => spec.node.propertySlots[name].map(slot => plan.values.numeric[slot]);
+      const position = vector('position'), rotation = vector('rotation'), scale = vector('scale');
+      const euler = new THREE.Euler(rotation[0] * Math.PI / 180, rotation[1] * Math.PI / 180,
+        rotation[2] * Math.PI / 180, 'XYZ');
+      node.object.matrixAutoUpdate = false;
+      node.object.matrix.compose(new THREE.Vector3(position[0], position[1], position[2]),
+        new THREE.Quaternion().setFromEuler(euler), new THREE.Vector3(scale[0], scale[1], scale[2]));
+      node.object.matrixWorldNeedsUpdate = true;
+      work.matrixUpdates[spec.index]++;
+      return;
+    }
     const width = n('width'), height = n('height');
     const angle = n('rotation') * Math.PI / 180, cosine = Math.cos(angle), sine = Math.sin(angle), sx = n('scaleX'), sy = n('scaleY');
     const x = n('x') - cosine * sx * width * n('anchorX') + sine * sy * height * n('anchorY');
@@ -354,6 +395,7 @@ export async function createCompositionRuntime(THREE, context, scope, plan, opti
           masks[index]|=RESOURCE|MATERIAL|(current?.usage==='font'?LAYOUT:0);output=true;
         }
         if(plan.ir.nodes[index].nodeType==='text')rebuilds.add(index);
+        if(plan.ir.nodes[index].nodeType==='model')rebuilds.add(index);
         if(plan.ir.nodes[index].nodeType==='image')matrix(index);
       }
       if (plan.ir.nodes[index].nodeType === 'text'
@@ -369,12 +411,18 @@ export async function createCompositionRuntime(THREE, context, scope, plan, opti
     const reserved=[];const require=(amount,label)=>{const ticket=context.pagePort.require(amount,label,generation,'bounded-estimate');reserved.push(ticket);return ticket;};
     const amount={programs:0,ownedCpuBytes:0,bufferDeclaredBytes:0,textureDeclaredBytes:0,decodeReservedBytes:0,decoderLeases:0,canvases:0,drawingBufferPixels:0};
     const variants=new Set();
-    for(const index of changes.rebuilds){const spec=next.nodePlans[index],bytes=spec.node.nodeType==='particles'?spec.count*20:92;
+    for(const index of changes.rebuilds){const spec=next.nodePlans[index];
+      if(spec.node.nodeType==='model'){variants.add('model');continue;}
+      const bytes=spec.node.nodeType==='particles'?spec.count*20:92;
       amount.ownedCpuBytes+=bytes;amount.bufferDeclaredBytes+=bytes;variants.add(spec.node.nodeType==='particles'?'particles':'planar');
     }
     amount.programs=Math.max(0,variants.size-allocation.programTickets.length);
     for(const requirement of next.requirements)if(!leases.has(requirement.key)&&!context.pool.has(requirement.identity)){
       if(requirement.kind==='font')amount.ownedCpuBytes+=requirement.fontMetadata.cpuBudgetBytes;
+      else if(requirement.kind==='model'){
+        amount.ownedCpuBytes+=modelConstructionBytes(requirement.modelFacts)+requirement.modelFacts.resources.cpuBackingBytes;
+        amount.bufferDeclaredBytes+=requirement.modelFacts.resources.gpuBufferBytes;
+      }
       else{const bytes=requirement.width*requirement.height*4;amount.textureDeclaredBytes+=bytes;amount.decodeReservedBytes+=bytes*(requirement.kind==='video'?3:1);if(requirement.kind==='video')amount.decoderLeases++;}
     }
     const newRasters = new Map();
@@ -390,18 +438,30 @@ export async function createCompositionRuntime(THREE, context, scope, plan, opti
     const forecast=context.pagePort.preflight(amount,[]);if(!forecast.ok)throw new Error(forecast.reason);
     function cleanup(){
       for(const nodeScope of newScopes.values())nodeScope.dispose();
-      for(const key of unclaimedSources)for(const ticket of Object.values(sourceTickets.get(key)))ticket.release({apiReleased:true,allocationEnded:true});
+      for(const key of unclaimedSources)for(const ticket of Object.values(sourceTickets.get(key)))
+        if(typeof ticket?.release==='function')ticket.release({apiReleased:true,allocationEnded:true});
       for(const ticket of unusedPrivate)ticket.release({apiReleased:true,allocationEnded:true});
       for(const ticket of programTickets)ticket.release({apiReleased:true,allocationEnded:true});
     }
     try{
       for(let index=0;index<amount.programs;index++)programTickets.push(require({programs:1},'Composition changed-node shader cache miss'));
       for(const index of changes.rebuilds){const spec=next.nodePlans[index],nodeScope=createScope({resources:context.pagePort,generation});newScopes.set(index,nodeScope);
-        const bytes=spec.node.nodeType==='particles'?spec.count*20:92;spec.bufferPlan=nodeScope.bufferPlan(bytes,bytes,'Composition changed-node fixed buffers');
+        if(spec.node.nodeType==='model'){
+          const facts=spec.resources.asset.modelFacts;
+          spec.bufferPlan=nodeScope.bufferPlan(facts.resources.cpuBackingBytes,facts.resources.gpuBufferBytes,'Composition changed static model buffers');
+        } else {
+          const bytes=spec.node.nodeType==='particles'?spec.count*20:92;
+          spec.bufferPlan=nodeScope.bufferPlan(bytes,bytes,'Composition changed-node fixed buffers');
+        }
       }
       for(const requirement of next.requirements)if(!leases.has(requirement.key)&&!context.pool.has(requirement.identity)){
         let tickets;
         if(requirement.kind==='font')tickets={cpu:require({ownedCpuBytes:requirement.fontMetadata.cpuBudgetBytes},'Composition changed prepared same-package font')};
+        else if(requirement.kind==='model'){
+          const spec=next.nodePlans.find(item=>item.resources.asset===requirement);
+          tickets={cpu:require({ownedCpuBytes:modelConstructionBytes(requirement.modelFacts)},'Composition changed static model construction'),
+            bufferPlan:spec.bufferPlan};
+        }
         else{const bytes=requirement.width*requirement.height*4;tickets={decode:require({decodeReservedBytes:bytes*(requirement.kind==='video'?3:1),...(requirement.kind==='video'?{decoderLeases:1}:{})},'Composition changed actual-media decoder'),upload:require({textureDeclaredBytes:bytes},'Composition changed per-context texture')};}
         sourceTickets.set(requirement.key,tickets);unclaimedSources.add(requirement.key);
       }
@@ -429,7 +489,10 @@ export async function createCompositionRuntime(THREE, context, scope, plan, opti
       for(const requirement of next.requirements)if(!leases.has(requirement.key)){
         const lease=context.pool.acquire(requirement.identity,{signal:controller.signal,generation:updateTicket,
           isCurrent:value=>!disposed&&!signal.aborted&&value===updateGeneration,
-          load:({signal,generation})=>loadResource(THREE,context,requirement,signal,generation,invalidate,delta.sourceTickets.get(requirement.key)),releaseValue:value=>value.release()});
+          load:({signal,generation})=>requirement.kind==='model'
+            ? loadModelResource(requirement,signal,delta.sourceTickets.get(requirement.key))
+            : loadResource(THREE,context,requirement,signal,generation,invalidate,delta.sourceTickets.get(requirement.key)),
+          releaseValue:value=>value.release()});
         if(!lease)throw new Error('composition-resource-pool-exhausted');
         delta.unclaimedSources.delete(requirement.key);additions.set(requirement.key,lease);
         const task=lease.ready.then(value=>nextValues.set(requirement.key,value));task.catch(()=>{});tasks.push(task);
@@ -496,7 +559,7 @@ export async function createCompositionRuntime(THREE, context, scope, plan, opti
       let next;
       try {
         next = new THREE.WebGLRenderTarget(viewport.x, viewport.y, { type: THREE.HalfFloatType, format: THREE.RGBAFormat,
-          depthBuffer: !!plan.builtin, stencilBuffer: false, generateMipmaps: false });
+          depthBuffer: !!(plan.builtin || plan.has3d), stencilBuffer: false, generateMipmaps: false });
         next.texture.colorSpace = THREE.LinearSRGBColorSpace;
         renderer.initRenderTarget(next); ticket?.commit();
       } catch (error) { next?.dispose(); ticket?.release({ apiReleased: true, allocationEnded: true }); throw error; }
@@ -543,6 +606,7 @@ export async function createCompositionRuntime(THREE, context, scope, plan, opti
     target.scissor.copy(canvasClip);
     background?.resize(width,height,left,top,canvas.width*scaleX,canvas.height*scaleY);
     camera.left=0; camera.right=width; camera.top=0; camera.bottom=height; camera.updateProjectionMatrix();
+    if (modelCamera) { modelCamera.aspect = canvas.width / canvas.height; modelCamera.updateProjectionMatrix(); }
     scene.updateMatrixWorld(true);outputDirty=true;
   }
   function update(frame = {}) {
@@ -613,6 +677,7 @@ export async function createCompositionRuntime(THREE, context, scope, plan, opti
       target.scissorTest=false;renderer.setRenderTarget(target);renderer.setClearColor(clearColor,1);renderer.clear();
       target.scissorTest=true;renderer.setRenderTarget(target);
       if(background){renderer.render(background.scene,background.camera);renderer.clearDepth();}
+      if(modelCamera){modelScene.updateMatrixWorld(true);renderer.render(modelScene,modelCamera);renderer.clearDepth();}
       renderer.render(scene,camera);
       if(glowA){
         const glow=plan.outputGlow;
@@ -636,7 +701,7 @@ export async function createCompositionRuntime(THREE, context, scope, plan, opti
     glowA?.dispose(); glowB?.dispose(); glowA=glowB=null;
     targetTicket?.release({ apiReleased: true, allocationEnded: true }); targetTicket=null;
     allocation.glowTicket?.release({ apiReleased: true, allocationEnded: true });
-    scene.clear(); outputScene.clear();
+    scene.clear(); outputScene.clear(); modelScene?.clear();
     inputSampler=null;background=null;
   }
   scope.defer(dispose);
@@ -649,7 +714,8 @@ export async function createCompositionRuntime(THREE, context, scope, plan, opti
     retirementCandidates(){
       if(pendingController||disposed)return [];
       const ids=allocation.nodeScopes.flatMap(nodeScope=>nodeScope.retirementCandidates(renderer)),programUses=new Map();
-      for(const node of nodes)if(node.material)renderer.properties.get(node.material).programs?.forEach(program=>programUses.set(program,(programUses.get(program)||0)+1));
+      for(const node of nodes)for(const material of node.materials||(node.material?[node.material]:[]))
+        renderer.properties.get(material).programs?.forEach(program=>programUses.set(program,(programUses.get(program)||0)+1));
       // Multiple retiring node scopes can be the complete set of users of one
       // original Three cache entry. Only that complete set forecasts its quota.
       for(const [program,count] of programUses)if(count===program.usedTimes&&program.hertzProgramResourceId)ids.push(program.hertzProgramResourceId);
@@ -665,6 +731,7 @@ export async function createCompositionRuntime(THREE, context, scope, plan, opti
       && Math.abs(cssWidth*deviceScale-plan.builtin.facts.targetFacts.physicalWidth)<=deviceScale
       && Math.abs(cssHeight*deviceScale-plan.builtin.facts.targetFacts.physicalHeight)<=deviceScale,
     stats: () => ({ composition: true, semanticKey: plan.ir.semanticKey, nodes: nodes.length, resourceLeases: leases.size,
+      models: nodes.filter(node => node.model).length, has3d: !!modelCamera,
       sessionId:plan.projection.sessionId, generation:plan.projection.generation,
       budgetAllocationRevision:plan.projection.target.budgetAllocationRevision,
       videoClocks:videos.map(value=>({currentTime:value.video.currentTime,readyState:value.video.readyState,
