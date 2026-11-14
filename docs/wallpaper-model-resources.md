@@ -1240,3 +1240,28 @@ tracks/mask/model 四阶段）；组合浏览器 47 项与前端聚合 86 步通
 仍未闭合：原生 textured/KTX2 model（当前 `static_core_profile_facts` 对纹理/
 材质 fail-closed）、外部纹理 broker/CSP、GLB 动画、逐实例材质透明度、真实 GPU
 设备矩阵与 A01/A05–A10 外部验收。
+
+2026-11-14 r76 原生 textured model 续接：`model_profile` 新增
+`static_textured_profile_facts`，按 shipped `static-pbr-texture-v1` 输出
+materials/textures/images/scene/resources facts：PBR factors 与五类槽位、
+texCoord、normal scale/occlusion strength、alphaMode/alphaCutoff/doubleSided、
+sampler 默认值、texCoord↔TEXCOORD_n 一一对应（未用/缺失/共享纹理均
+fail-closed）。仅接受 Embedded PNG/JPEG；Package 外部图片继续
+`model_profile_unavailable`。新增 `embedded_image_upload_bytes`：从完整 GLB
+字节解析 PNG IHDR / JPEG SOF 尺寸，按 `2 × w × h × 4` 声明含 mip 的上传上界。
+
+桌面 `prepare_assets` 按结构选择 core/textured facts，汇总
+`textureUploadBytes` 并写入投影（`textureUrls:{}`）；成本增加纹理上传/解码
+字节与按材质数的 program。新增桌面 textured 测试（`textureUploadBytes=32`、
+programs=3、buffer=194、textureDeclaredBytes=4128）与 `model-textured/` 原生
+fixture；浏览器组合测试的 textured GLB 也改用 Rust facts 作为唯一 oracle。
+
+验证：两工具链 hertz-wallpaper 61/61、hertz-desktop 858 passed / 0 failed /
+2 ignored；双工具链 clippy 与 fmt 通过；原生页面连续 3 次通过（新增
+model-textured 阶段：左红 [>200,<20,<20]、右绿 [<20,>200,<20]，
+budget.error=null、contexts 1→0）；组合浏览器 47 项与前端聚合 86 步通过。
+三处变异（sampler magFilter、跳过纹理上传字节、textured 误用 core facts）均
+变红后还原。
+
+仍未闭合：原生外部纹理 URL/broker 发布、KTX2/Basis、GLB 动画、逐实例材质
+透明度、多材质 program 精确计数、真实 GPU 设备矩阵与 A01/A05–A10 外部验收。

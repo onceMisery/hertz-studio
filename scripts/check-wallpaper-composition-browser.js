@@ -4,7 +4,7 @@
 const assert=require('node:assert/strict'), fs=require('node:fs'), path=require('node:path');
 const {execFileSync}=require('node:child_process'), {createHash}=require('node:crypto'), zlib=require('node:zlib');
 const {loadCompositionFontFixture}=require('./composition-font-fixture.js');
-const {coreGlb,texturedGlb,texturedModelFacts}=require('./composition-model-fixture.js');
+const {coreGlb,texturedGlb}=require('./composition-model-fixture.js');
 const {chromium}=require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const root=path.resolve(__dirname,'..'), output=path.join(root,'output/a04-p2-20261108/composition-browser');
 const fontFixture=loadCompositionFontFixture(), modelFixture=coreGlb(), texturedFixture=texturedGlb();
@@ -77,6 +77,7 @@ const modelNode=(id='mesh',properties={},asset='mesh')=>({id,type:'model',stateV
 const model=compile([modelNode()],modelCanvas);
 const coreRustFacts=JSON.parse(execFileSync(factsExecutable,[path.join(output,'mesh.glb'),compilerInputs.get(model)[0],'assets/mesh.glb'],{cwd:root,encoding:'utf8'}));
 const texturedModel=compile([modelNode('mesh',{},'textured')],modelCanvas);
+const texturedRustFacts=JSON.parse(execFileSync(factsExecutable,[path.join(output,'textured.glb'),compilerInputs.get(texturedModel)[0],'assets/textured.glb','textured'],{cwd:root,encoding:'utf8'}));
 const movedModel=compile([modelNode('mesh',{position:[.5,.5,0]})],modelCanvas);
 const modelOverlay=compile([modelNode(),image('back','blue')],modelCanvas);
 const modelBehind=compile([image('back','blue'),modelNode()],modelCanvas);
@@ -197,7 +198,7 @@ const results=[];
    :a.kind==='model'?({assetId:a.assetId,kind:'model',contentKey:hash(a.bytes),byteLength:a.bytes.length,
     url:'http://composition.test/'+a.file,adapterId:'three-gltf-loader',adapterVersion:1,
     decodeOptions:{profile:a.textured?'static-pbr-texture-v1':'static-core-pbr-v1'},
-    modelFacts:a.textured?texturedModelFacts(a.modelInput,a.imageBytes):coreRustFacts,
+    modelFacts:a.textured?texturedRustFacts:coreRustFacts,
     ...(a.textured?{textureUploadBytes:64,textureUrls:{}}:{})})
    :({assetId:a.assetId,kind:a.kind,width:a.width,height:a.height,...(a.kind==='video'?actualVideo:{}),
     contentKey:hash(a.bytes),byteLength:a.bytes.length,url:'http://composition.test/'+a.file,decodeOptions:{colorSpace:a.kind==='font'?'none':'srgb',alphaMode:'straight'},adapterId:a.kind==='font'?'fontface-v1':a.kind==='video'?'video-element-v1':'image-element-v1',adapterVersion:1}));

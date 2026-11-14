@@ -147,6 +147,8 @@ pub(crate) struct PreparedModel {
     media: Arc<PinnedMedia>,
     url: String,
     content_key: String,
+    profile: String,
+    texture_upload_bytes: u64,
     facts: Value,
 }
 
@@ -162,6 +164,12 @@ impl PreparedModel {
     }
     fn content_key(&self) -> &str {
         &self.content_key
+    }
+    fn profile(&self) -> &str {
+        &self.profile
+    }
+    fn texture_upload_bytes(&self) -> u64 {
+        self.texture_upload_bytes
     }
     fn facts(&self) -> &Value {
         &self.facts
@@ -726,11 +734,55 @@ async fn prepare_assets(
                         Some(cancel),
                     )
                     .map_err(package_error)?;
-                let facts = hertz_wallpaper::model_profile::static_core_profile_facts(
-                    checked.resource(),
-                    checked.bytes(),
-                )
-                .map_err(package_error)?;
+                let facts = {
+                    let structure = &checked.resource().structure;
+                    let textured = !structure.images.is_empty()
+                        || !structure.materials.is_empty()
+                        || !structure.textures.is_empty();
+                    if textured {
+                        hertz_wallpaper::model_profile::static_textured_profile_facts(
+                            checked.resource(),
+                            checked.bytes(),
+                        )
+                        .map_err(package_error)?
+                    } else {
+                        hertz_wallpaper::model_profile::static_core_profile_facts(
+                            checked.resource(),
+                            checked.bytes(),
+                        )
+                        .map_err(package_error)?
+                    }
+                };
+                let mut texture_upload_bytes = 0_u64;
+                if facts["profile"] == "static-pbr-texture-v1" {
+                    let images = facts["images"]
+                        .as_array()
+                        .ok_or_else(|| JobError::new("adapter_unavailable", "model images 缺失"))?;
+                    for image in images {
+                        let index = image["index"].as_u64().ok_or_else(|| {
+                            JobError::new("adapter_unavailable", "model image 索引无效")
+                        })? as usize;
+                        texture_upload_bytes = checked_sum(&[
+                            texture_upload_bytes,
+                            hertz_wallpaper::model_profile::embedded_image_upload_bytes(
+                                &bytes,
+                                checked.resource(),
+                                index,
+                            )
+                            .map_err(package_error)?,
+                        ])?;
+                    }
+                    if texture_upload_bytes == 0 {
+                        return Err(JobError::new(
+                            "adapter_unavailable",
+                            "model textures 未准备",
+                        ));
+                    }
+                }
+                let profile = facts["profile"]
+                    .as_str()
+                    .ok_or_else(|| JobError::new("adapter_unavailable", "model profile 无效"))?
+                    .to_owned();
                 let url = super::webresource::files_url(&package.package_hash, &asset.source)
                     .ok_or_else(|| JobError::new("adapter_unavailable", "model URL 无效"))?;
                 CompositionAsset::Model(Box::new(PreparedModel {
@@ -742,6 +794,8 @@ async fn prepare_assets(
                     media,
                     url,
                     content_key: checked.sha256_hex(),
+                    profile,
+                    texture_upload_bytes,
                     facts,
                 }))
             }
@@ -1266,7 +1320,7 @@ impl PreparedComposition {
             CompositionAsset::Font(font) => {
                 json!({"colorSpace":"none","fontAdapterVersion":font.adapter_version()})
             }
-            CompositionAsset::Model(_) => json!({"profile":"static-core-pbr-v1"}),
+            CompositionAsset::Model(model) => json!({"profile": model.profile()}),
         }
     }
     fn media_costs(&self) -> Result<Costs> {
@@ -1390,7 +1444,16 @@ impl PreparedComposition {
                 checked_product(json, 2)?,
                 resources["cpuBackingBytes"].as_u64().ok_or_else(invalid)?,
             ])?;
-            cost.programs = checked_sum(&[cost.programs, 1])?;
+            cost.programs = checked_sum(&[
+                cost.programs,
+                std::cmp::max(1, resources["materialCount"].as_u64().unwrap_or(1)),
+            ])?;
+            if model.texture_upload_bytes() > 0 {
+                cost.texture_bytes =
+                    checked_sum(&[cost.texture_bytes, model.texture_upload_bytes()])?;
+                cost.decode_bytes =
+                    checked_sum(&[cost.decode_bytes, model.texture_upload_bytes()])?;
+            }
             // The original native page binds one fixed small fallback texture
             // even for a texture-free composition; declare bounded headroom so
             // the page GL reservation can cover it without touching caps.
@@ -1566,11 +1629,18 @@ impl PreparedComposition {
             CompositionAsset::Font(font) => json!({"assetId":id,"representationId":id,"kind":"font","contentKey":font.content_key(),
                 "byteLength":font.input().media.entry.bytes,"url":font.url(),"adapterId":font.adapter_id(),
                 "adapterVersion":1,"decodeOptions":self.asset_decode_options(asset),"fontMetadata":font.input().metadata}),
-            CompositionAsset::Model(model) => json!({"assetId":id,"representationId":id,"kind":"model",
-                "logicalKind":"model","representationKind":"model","mime":"model/gltf-binary",
-                "contentKey":model.content_key(),"byteLength":model.pin().entry.bytes,"url":model.url(),
-                "adapterId":"three-gltf-loader","adapterVersion":1,
-                "decodeOptions":self.asset_decode_options(asset),"modelFacts":model.facts()}),
+            CompositionAsset::Model(model) => {
+                let mut value = json!({"assetId":id,"representationId":id,"kind":"model",
+                    "logicalKind":"model","representationKind":"model","mime":"model/gltf-binary",
+                    "contentKey":model.content_key(),"byteLength":model.pin().entry.bytes,"url":model.url(),
+                    "adapterId":"three-gltf-loader","adapterVersion":1,
+                    "decodeOptions":self.asset_decode_options(asset),"modelFacts":model.facts()});
+                if model.profile() == "static-pbr-texture-v1" {
+                    value["textureUploadBytes"] = json!(model.texture_upload_bytes());
+                    value["textureUrls"] = json!({});
+                }
+                value
+            }
         }).collect();
         let mut identities = BTreeMap::new();
         let mut grouped: BTreeMap<String, Vec<(String, ResolvedAssetIdentity)>> = BTreeMap::new();
