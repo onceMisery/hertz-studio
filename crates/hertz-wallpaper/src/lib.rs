@@ -17,6 +17,7 @@ pub mod manifest;
 pub mod media;
 pub mod model_binary;
 pub mod model_container;
+pub mod model_profile;
 pub mod model_structure;
 pub mod paths;
 pub mod properties;
