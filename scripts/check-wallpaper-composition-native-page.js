@@ -175,7 +175,41 @@ if(diagnostic){
   assert.equal(colored(fits.contain.side),false);assert.equal(colored(fits.stretch.side),false);assert.equal(colored(fits.cover.side),true);
   assert.equal(colored(fits.contain.upper),false);assert.equal(colored(fits.stretch.upper),true);assert.equal(colored(fits.cover.upper),true);
   for(const fit of Object.values(fits))assert.equal(colored(fit.center),true);
-  fs.writeFileSync(path.join(output,'native-page-evidence.json'),JSON.stringify({source:'actual Rust production selector + GlAdmission + original native page',qualification:'browser integration; copied scheduler metadata matches measured headless rAF; native resource caps unchanged; controlled visibility event/state; Windows/GPU qualification pending',cadence:{intervals:cadence,refreshHz,running:runningCadence},state,blockedBefore,blockedAfter,hiddenBefore,hiddenAfter,visibilityResumed,fits,paused,retired,errors},null,2));
-  console.log('PASS native composition page: real Rust projection, one context, complete frame, pause and retirement');
+  const glowDir=path.join(output,'glow');
+  let glow=null;
+  if(fs.existsSync(path.join(glowDir,'projection.json'))){
+    const glowProjection=JSON.parse(fs.readFileSync(path.join(glowDir,'projection.json'),'utf8'));
+    const glowUri=fs.readFileSync(path.join(glowDir,'uri.txt'),'utf8');
+    const glowInit=bindCadence(fs.readFileSync(path.join(glowDir,'native-init.js'),'utf8'));
+    const glowPage=await browser.newPage({viewport:{width:64,height:64}}),glowErrors=[];
+    glowPage.on('pageerror',error=>glowErrors.push(error.message));
+    glowPage.on('console',message=>{if(message.type()==='error')glowErrors.push(message.text());});
+    await glowPage.addInitScript(glowInit+'\nwindow.nativeEvents=[];window.ipc={postMessage:message=>nativeEvents.push(message)};');
+    await glowPage.route('https://**.wallpaper.invalid/**',route=>{
+      if(route.request().url()===glowUri)return route.fulfill({status:200,contentType:'application/json',body:JSON.stringify(glowProjection)});
+      if(route.request().url()===glowProjection.resolvedAssets[0].url)return routeMovie(route);
+      return route.fulfill({status:404,body:''});
+    });
+    await glowPage.route('http://hertz.localhost/',route=>route.fulfill({status:200,contentType:'text/html',body:html}));
+    await glowPage.goto('http://hertz.localhost/');
+    assert.equal(await glowPage.evaluate(async url=>{hertzWallpaper.applyConfig({source:'fixed',audioInput:{kind:'none'},motion:1,quality:'low'});
+      const prepared=hertzWallpaper.applyComposition(url);hertzWallpaper.start(15);return await prepared;},glowUri),true);
+    await glowPage.waitForFunction(()=>nativeEvents.some(event=>event.includes('firstFrame')),null,{timeout:10000});
+    await glowPage.waitForFunction(()=>hertzWallpaper.debug().draws>=3,null,{timeout:10000});
+    glow=await glowPage.evaluate(()=>({stats:hertzWallpaper.debug(),budget:HertzGlBudget.stats(),events:nativeEvents}));
+    assert.equal(glowProjection.ir.effects[0].type,'glow');
+    assert.deepEqual(glowProjection.ir.effectSurfaces,[2]);
+    assert.equal(glowProjection.pageLimits.renderTargetDeclaredBytes,64*64*16+2*32*32*4);
+    assert.equal(glowProjection.pageLimits.programs,4);
+    assert.equal(glow.budget.contexts,1);assert.equal(glow.budget.error,null);assert.deepEqual(glowErrors,[]);
+    assert.equal(glow.budget.bytes-state.budget.bytes,2*32*32*4,'native glow adds two half-resolution RGBA8 surfaces');
+    await glowPage.evaluate(()=>hertzWallpaper.reveal());
+    await glowPage.screenshot({path:path.join(glowDir,'native-page-glow.png')});
+    await glowPage.evaluate(()=>hertzWallpaper.unmount());await glowPage.waitForTimeout(50);
+    assert.equal((await glowPage.evaluate(()=>HertzGlBudget.stats())).contexts,0);
+    await glowPage.close();
+  }
+  fs.writeFileSync(path.join(output,'native-page-evidence.json'),JSON.stringify({source:'actual Rust production selector + GlAdmission + original native page',qualification:'browser integration; copied scheduler metadata matches measured headless rAF; native resource caps unchanged; controlled visibility event/state; Windows/GPU qualification pending',cadence:{intervals:cadence,refreshHz,running:runningCadence},state,blockedBefore,blockedAfter,hiddenBefore,hiddenAfter,visibilityResumed,fits,glow,paused,retired,errors},null,2));
+  console.log('PASS native composition page: real Rust projection, one context, complete frame, pause and retirement'+(glow?', glow surfaces admitted':''));
  }finally{await browser.close();}
 })().catch(error=>{console.error(error.stack);process.exitCode=1;});

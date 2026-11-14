@@ -1082,3 +1082,20 @@ gradeHue 与 gradeColor（线性空间加亮度、绕 0.5 对比度、Rec.709 �
 plan 丢弃节点效果、updateNodeMaterial 不写 hasGrade）均变红后还原；41 项
 composition 检查连续 3 次通过。GPU 时间/首帧、真实设备矩阵与 A01/A05–A10
 剩余验收继续开放。
+
+2026-11-14 r69 native glow 准入续接：`composition_plan.rs` 的
+`validate_structure` 改为效果 allowlist（output: colorAdjust/glow；node:
+colorAdjust/ripple/wind；带 assets 的 mask 与 tracks/bindings/3D 继续
+fail-closed）；`Costs` 按 IR `EffectSurfaces` 的 count/sampleScale/cost 计入
+surface 字节、glow 2 个 program 与 drawPasses 个 draw call，并同步进 `gpu`、
+`pageLimits.renderTargetDeclaredBytes` 与 `programs`。新增 Rust fixture 测试
+发射 video+glow 的真实选择/GlAdmission 投影（effectSurfaces=2、sampleScale=.5、
+cost 2/3/4、RT=64*64*16+2*32*32*4、programs=4），`check-wallpaper-composition-
+native-page.js` 在真实原生页面加载该投影并断言 firstFrame、budget.error=null、
+HertzGlBudget 字节相对基线 +8192、卸载后 contexts=0。
+
+验证：两工具链串行全量各 853 passed / 0 failed / 2 ignored，clippy 双工具链
+通过；原生页面检查连续 3 次通过并写出 glow 截图/evidence；三处变异（pageLimits
+丢 effect 字节、glow 不记 program、runtime 不创建 glow surface）均变红后还原；
+composition 41 项与前端聚合 86 步通过。mask 原生资源准入、tracks/bindings/3D
+原生 adapter、GPU 设备矩阵与 A01/A05–A10 外部验收继续开放。
