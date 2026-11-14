@@ -2,6 +2,7 @@
 import { buildNode, loadResource, loadTextRaster, updateNodeMaterial } from './nodes.js';
 import { createScope } from '../scope.js';
 import { createBackground, createInputSampler } from './builtin.js';
+import { evaluateTrack } from './animation.js';
 const MATRIX=1, LAYOUT=2, MATERIAL=4, VISIBILITY=8, RESOURCE=16, GEOMETRY=32, ALL=63;
 const outputVertex = `varying vec2 vUv;void main(){vUv=uv;gl_Position=vec4(position.xy,0.0,1.0);}`;
 const outputFragment = `uniform sampler2D inputMap;varying vec2 vUv;
@@ -76,6 +77,7 @@ function reserveAll(context, scope, plan, generation) {
 export async function createCompositionRuntime(THREE, context, scope, plan, options = {}) {
   const signal = scope.signal, generation = options.generation, leases = new Map(), values = new Map();
   let disposed = false, target = null, targetTicket = null, sceneTime = 0, frameReady = false, outputDirty=true;
+  let timelineBase = null;
   let updateGeneration=0, pendingController=null, visualTime=null, mediaShouldPlay=false;
   const dirty=new Uint32Array(plan.ir.nodes.length), localDirty=new Uint8Array(plan.ir.nodes.length), worldDirty=new Uint8Array(plan.ir.nodes.length);
   const work={slotChanges:0,constantChanges:0,resourceChanges:0,outputInvalidations:0,renders:0,
@@ -191,6 +193,25 @@ export async function createCompositionRuntime(THREE, context, scope, plan, opti
     }
   }
   plan.ir.painterOrder.forEach(index => applyNode(nodes[index]));
+  function refreshTimeline() {
+    timelineBase = plan.ir.tracks.length ? Float64Array.from(plan.values.numeric) : null;
+  }
+  function applyTimeline(time) {
+    const numeric = plan.values.numeric, changed = [];
+    for (const track of plan.ir.tracks) {
+      const value = evaluateTrack(track.keys, time);
+      if (numeric[track.targetSlot] !== value) changed.push(track.targetSlot);
+      numeric[track.targetSlot] = value;
+    }
+    for (const slot of changed) {
+      const dependency = plan.ir.slotDependencies[slot];
+      for (const affected of dependency.nodes) applyNode(nodes[affected.nodeIndex], affected.mask);
+      if (dependency.output) outputDirty = true;
+    }
+    // Plan diffs compare authored/public values, not the sampled track frame.
+    numeric.set(timelineBase);
+  }
+  refreshTimeline();
   function canApplyPlan(next){
     if(plan.builtin||next.builtin)return false;
     const old=plan.projection, candidate=next.projection, a=old.target,b=candidate.target;
@@ -344,6 +365,8 @@ export async function createCompositionRuntime(THREE, context, scope, plan, opti
       for(const [key,lease] of additions){scope.lease(lease);leases.set(key,lease);values.set(key,nextValues.get(key));}
       const needed=new Set(next.requirements.map(requirement=>requirement.key));
       plan=next;
+      refreshTimeline();
+      visualTime=null;
       for(let index=0;index<nodes.length;index++){
         if (nodes[index].spec.node.nodeType === 'text' && !changes.rebuilds.has(index))
           plan.nodePlans[index].textRasterLease = nodes[index].spec.textRasterLease;
@@ -410,6 +433,7 @@ export async function createCompositionRuntime(THREE, context, scope, plan, opti
     const timeline = plan.projection.timeline;
     const time = timeline.loop ? sceneTime % timeline.durationSeconds : Math.min(sceneTime,timeline.durationSeconds);
     const timeChanged=visualTime!==time;visualTime=time;
+    if (timelineBase && timeChanged) applyTimeline(time);
     frameReady = true;
     for (const value of videos) {
       const video = value.video, clock = value.requirement.clock;

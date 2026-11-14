@@ -986,3 +986,14 @@ emissive 0.1/0.2/0.3、各槽 wrap/filter/channel/colorSpace 精确匹配；释�
 emissive colorSpace）均按预期变红后还原；旧 loader 102 项与前端聚合 86 步保持
 通过。本批仍不创建 renderer/GPU/首帧、不接 WebView2；KTX2 与真实设备能力
 继续开放。
+
+2026-11-14 r62 组合时间线轨道续接：新增纯 `composition/animation.js`（区间二分、
+linear/easeInOut `j*t²(3-2t)`/step 取左键、首末键 clamp），`plan.js` 校验 target
+slot/keys/easing/范围，并对文本重排与粒子 count/seed 轨道 fail-closed；
+`runtime.js` 在 timeChanged 时将轨道值写入 numeric、按 slotDependencies 的 node
+mask 更新受影响节点并恢复 base（plan diff 仍比较作者/公开值，plan 替换时重置
+visualTime）。真实 Rust IR + Chrome 像素：opacity 0.2→0.4→0.6→reverse 0.4→
+loop 0.2 得到 124/170/203/170/124；纯求值 linear/ease/step/clamp 通过。三处
+变异（step 取右键、easeInOut 公式、paused 跳过轨道）均变红后还原；33 项
+composition 检查、前端聚合 86 步通过。bindings 栈程序、效果图与 GPU 时间继续，
+组合运行门不变。
