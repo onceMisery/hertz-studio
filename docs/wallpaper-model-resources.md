@@ -1099,3 +1099,18 @@ HertzGlBudget 字节相对基线 +8192、卸载后 contexts=0。
 丢 effect 字节、glow 不记 program、runtime 不创建 glow surface）均变红后还原；
 composition 41 项与前端聚合 86 步通过。mask 原生资源准入、tracks/bindings/3D
 原生 adapter、GPU 设备矩阵与 A01/A05–A10 外部验收继续开放。
+
+2026-11-14 r70 native tracks/bindings 续接：`validate_structure` 移除 tracks/
+bindings 拒绝，保留 3D fail-closed；按 JS adapter 语义拒绝 builtinScene 轨道、
+text 布局轨道与 particles count/seed 轨道。新增 Rust fixture：video + x 轨道
+（0..4s → 0..1）+ opacity binding `clamp((sceneTime-2.5)*4,0,1)` multiply；
+投影断言 tracks/bindings 各 1、programs=2、RT 不变，并发射 `tracks/`。
+`check-wallpaper-composition-native-page.js` 加载该投影：sceneTime 109ms 时
+输出 [0,0,0]（binding 门未开），3187ms 时 [2,0,63]（轨道/绑定已应用），
+budget.error=null、contexts 1→0。
+
+验证：两工具链串行全量各 854 passed / 0 failed / 2 ignored，clippy 双工具链
+通过；原生页面检查连续 3 次通过并写 tracks 截图/evidence；三处变异
+（native 拒绝 tracks、runtime 不执行 applyTimeline、binding sceneTime 恒 0）
+均变红后还原；composition 41 项与前端聚合 86 步通过。mask 原生资源准入、
+3D/model adapter、GPU 设备矩阵与 A01/A05–A10 外部验收继续开放。

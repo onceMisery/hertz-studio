@@ -675,14 +675,40 @@ fn validate_adapters(compiled: &CompiledDocument) -> Result<()> {
 
 fn validate_structure(compiled: &CompiledDocument) -> Result<()> {
     let document = compiled.document();
-    if !compiled.ir().tracks().is_empty()
-        || !compiled.ir().bindings().is_empty()
-        || document.canvas.scene3d.is_some()
-    {
+    if document.canvas.scene3d.is_some() {
         return Err(JobError::new(
             "adapter_unavailable",
-            "P2-02 尚未准备轨道、绑定或 3D adapter",
+            "P2-02 尚未准备 3D adapter",
         ));
+    }
+    // Tracks are evaluated by the shipped runtime only for plain numeric
+    // properties; layout rebuilds and particle instance changes would need a
+    // new static plan, so the native projection rejects them here.
+    for track in compiled.ir().tracks() {
+        let slot = compiled
+            .ir()
+            .numeric_slots()
+            .get(track.target_slot)
+            .ok_or_else(|| JobError::new("adapter_unavailable", "P2-02 track target 无效"))?;
+        let node = compiled
+            .ir()
+            .nodes()
+            .get(slot.node_index)
+            .ok_or_else(|| JobError::new("adapter_unavailable", "P2-02 track target 无效"))?;
+        let rebuild = node.node_type == "builtinScene"
+            || (node.node_type == "text"
+                && ["width", "height", "fontSize", "lineHeight"].contains(&slot.property.as_str()))
+            || (node.node_type == "particles"
+                && ["count", "seed"].contains(&slot.property.as_str()));
+        if rebuild {
+            return Err(JobError::new(
+                "adapter_unavailable",
+                format!(
+                    "P2-02 track adapter 尚未准备：{}:{}",
+                    node.node_type, slot.property
+                ),
+            ));
+        }
     }
     for effect in &document.effects {
         if !effect.assets.is_empty() {
