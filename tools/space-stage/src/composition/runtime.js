@@ -5,8 +5,20 @@ import { createBackground, createInputSampler } from './builtin.js';
 import { evaluateBinding, evaluateTrack } from './animation.js';
 const MATRIX=1, LAYOUT=2, MATERIAL=4, VISIBILITY=8, RESOURCE=16, GEOMETRY=32, ALL=63;
 const outputVertex = `varying vec2 vUv;void main(){vUv=uv;gl_Position=vec4(position.xy,0.0,1.0);}`;
-const outputFragment = `uniform sampler2D inputMap;varying vec2 vUv;
-  void main(){gl_FragColor=texture2D(inputMap,vUv);
+const outputFragment = `uniform sampler2D inputMap;uniform float brightness;uniform float contrast;
+  uniform float saturation;uniform float hue;varying vec2 vUv;
+  vec3 hueRotate(vec3 c,float a){float s=sin(a),v=cos(a);
+    return clamp(vec3(
+      dot(c,vec3(0.213+v*0.787-s*0.213,0.715-v*0.715-s*0.715,0.072-v*0.072+s*0.928)),
+      dot(c,vec3(0.213-v*0.213+s*0.143,0.715+v*0.285+s*0.140,0.072-v*0.072-s*0.283)),
+      dot(c,vec3(0.213-v*0.213-s*0.787,0.715-v*0.715+s*0.715,0.072+v*0.928+s*0.072))),0.0,1.0);}
+  void main(){
+    vec3 color=texture2D(inputMap,vUv).rgb;
+    color+=brightness;
+    color=(color-0.5)*contrast+0.5;
+    color=mix(vec3(dot(color,vec3(0.2126,0.7152,0.0722))),color,saturation);
+    color=hueRotate(color,hue);
+    gl_FragColor=vec4(clamp(color,0.0,1.0),1.0);
   #include <colorspace_fragment>
   }`;
 function validateTextTextureSize(context, plan) {
@@ -149,7 +161,18 @@ export async function createCompositionRuntime(THREE, context, scope, plan, opti
   outputGeometry.setIndex(outputIndex);
   outputPlan.cpuReady(92);
   const outputMaterial = scope.track(new THREE.ShaderMaterial({ vertexShader: outputVertex, fragmentShader: outputFragment,
-    depthTest: false, depthWrite: false, toneMapped: false, uniforms: { inputMap: { value: null } } }));
+    depthTest: false, depthWrite: false, toneMapped: false, uniforms: { inputMap: { value: null },
+      brightness: { value: 0 }, contrast: { value: 1 }, saturation: { value: 1 }, hue: { value: 0 } } }));
+  function applyOutputEffects() {
+    const effect = plan.outputEffects?.[0];
+    const uniforms = outputMaterial.uniforms;
+    uniforms.brightness.value = effect?.brightness ?? 0;
+    uniforms.contrast.value = effect?.contrast ?? 1;
+    uniforms.saturation.value = effect?.saturation ?? 1;
+    uniforms.hue.value = (effect?.hueDegrees ?? 0) * Math.PI / 180;
+    outputDirty = true;
+  }
+  applyOutputEffects();
   outputScene.add(new THREE.Mesh(outputGeometry, outputMaterial));
   const clearColor = new THREE.Color(plan.projection.canvas.background), viewport = new THREE.Vector2(), canvasClip=new THREE.Vector4();
   const savedScissor=new THREE.Vector4(), savedClear=new THREE.Color();
@@ -407,6 +430,7 @@ export async function createCompositionRuntime(THREE, context, scope, plan, opti
       const needed=new Set(next.requirements.map(requirement=>requirement.key));
       plan=next;
       refreshTimeline();
+      applyOutputEffects();
       visualTime=null;
       for(let index=0;index<nodes.length;index++){
         if (nodes[index].spec.node.nodeType === 'text' && !changes.rebuilds.has(index))

@@ -41,8 +41,8 @@ function rememberFontProjection(compiled,inputs,overrides={}){
   files:manifest.files.filter(entry=>entry.path!=='document.json').map(entry=>({path:entry.path,mime:entry.mime,
    source:path.join(output,entry.path.startsWith('assets/')?entry.path.slice(7):entry.path)}))});
 }
-function compile(nodes,canvas={width:64,height:64,colorSpace:'srgb',background:'#000000'},properties=[],timeline={durationSeconds:2,loop:true,tracks:[]},bindings=[]){
- const document={documentVersion:1,canvas,nodes,timeline,bindings};
+function compile(nodes,canvas={width:64,height:64,colorSpace:'srgb',background:'#000000'},properties=[],timeline={durationSeconds:2,loop:true,tracks:[]},bindings=[],effects=[]){
+ const document={documentVersion:1,canvas,nodes,timeline,bindings,effects};
  const bytes=Buffer.from(JSON.stringify(document)), id=++number, documentPath=path.join(output,`document-${id}.json`), manifestPath=path.join(output,`manifest-${id}.json`);
  fs.writeFileSync(documentPath,bytes);
  fs.writeFileSync(manifestPath,JSON.stringify({formatVersion:1,workId:'8bc16f98-a0ef-4df9-a9a4-aecdb4c3f772',version:1,title:'Composition browser verification',
@@ -77,6 +77,12 @@ const bindingFixture=compile([image('back','blue')],undefined,[
  {id:'pulse',target:{nodeId:'back',property:'opacity',component:null},mode:'multiply',parameters:{gain:1},program:[
   {op:'input',name:'sceneTime'},{op:'parameter',name:'gain'},{op:'mul'},
   {op:'const',value:.5},{op:'add'},{op:'clamp',min:0,max:1}]}]);
+const colorEffect=compile([image('back','red')],undefined,[],{durationSeconds:2,loop:true,tracks:[]},[],
+ [{id:'grade',type:'colorAdjust',stateVersion:1,target:{kind:'output'},
+  properties:{brightness:0,contrast:1,saturation:0,hueDegrees:0}}]);
+const brightEffect=compile([image('back','red')],undefined,[],{durationSeconds:2,loop:true,tracks:[]},[],
+ [{id:'grade',type:'colorAdjust',stateVersion:1,target:{kind:'output'},
+  properties:{brightness:.2,contrast:1,saturation:1,hueDegrees:0}}]);
 const dirtyFixture=compile([image('back','blue'),image('child','red',{width:16,height:16}),
  {id:'parent',type:'group',stateVersion:1,children:['child'],properties:{x:8,y:8,width:64,height:64,anchorX:0,anchorY:0}},
  image('unrelated','green',{x:48,y:48,width:16,height:16}),
@@ -216,6 +222,12 @@ const results=[];
   const bindingOverride=await page.evaluate(()=>pixel(20,20));
   near(bindingLow,[0,0,218]);near(bindingHigh,[0,0,255]);near(bindingOverride,[0,0,188]);
   results.push({case:'compiler binding stack input/parameter/mul/add/clamp/multiply and public gain override',bindingLow,bindingHigh,bindingOverride});
+  await select(colorEffect);
+  const effectGray=await page.evaluate(()=>pixel(20,20));
+  await select(brightEffect);
+  const effectBright=await page.evaluate(()=>pixel(20,20));
+  near(effectGray,[127,127,127]);near(effectBright,[255,124,124]);
+  results.push({case:'compiler output colorAdjust saturation and brightness',effectGray,effectBright});
   await select(video);try{await page.waitForFunction(()=>host.frame({sceneTime:.1,paused:true,seek:true}),null,{timeout:8000});}
   catch(error){console.error(JSON.stringify(await page.evaluate(()=>host.stats())));throw error;}
   const videoStats=await page.evaluate(()=>({stats:host.stats(),ledger:ledger.snapshot(),fonts:document.fonts.size,pixels:snapshot()}));assert.equal(videoStats.ledger.held.decoderLeases,1);assert.equal(videoStats.fonts,0);assert.ok(videoStats.pixels.some((value,index)=>index%4!==3&&value>0));results.push({case:'actual silent video texture, seek completion and obsolete font exit',videoStats});
