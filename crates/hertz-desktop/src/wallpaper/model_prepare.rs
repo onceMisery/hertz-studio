@@ -95,6 +95,11 @@ impl ModelInput {
             .source
             .reference()
     }
+    /// Borrowed read lease over the pinned canonical texture bytes. The permit
+    /// cannot outlive this input and exposes no File, path or closure owner.
+    pub(crate) fn texture_read_permit(&self) -> TextureReadPermit<'_> {
+        TextureReadPermit { input: self }
+    }
     #[cfg(test)]
     pub(crate) fn reservation_identity_for_test(&self) -> (&str, u64, &str) {
         self.inner().retained.as_ref().unwrap().identity_for_test()
@@ -112,6 +117,40 @@ impl ModelInput {
             textures.unique_entries(),
             textures.unique_source_bytes(),
         )
+    }
+}
+
+/// Borrowed-only read lease. No Clone, owned extraction or mutable access to
+/// the closure; the loader/Broker may read while the original input is alive.
+pub(crate) struct TextureReadPermit<'a> {
+    input: &'a ModelInput,
+}
+
+impl TextureReadPermit<'_> {
+    pub(crate) fn texture_bytes(&self, image_index: usize) -> Option<u64> {
+        self.input
+            .inner()
+            .resources
+            .as_ref()
+            .expect("live model input")
+            .textures
+            .texture_bytes(image_index)
+    }
+
+    pub(crate) fn read_into(
+        &self,
+        image_index: usize,
+        offset: u64,
+        output: &mut [u8],
+        cancel: &AtomicBool,
+    ) -> Result<(), JobError> {
+        self.input
+            .inner()
+            .resources
+            .as_ref()
+            .expect("live model input")
+            .textures
+            .read_into(image_index, offset, output, cancel)
     }
 }
 

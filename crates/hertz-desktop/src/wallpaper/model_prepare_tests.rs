@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
 use super::*;
 use crate::wallpaper::assets::{
-    installed_full_model_fixture, model_source_test_probe, model_source_writable,
+    installed_full_model_fixture, installed_full_model_fixture_with_texture,
+    model_source_test_probe, model_source_writable,
 };
 use std::{
     fs::File,
@@ -432,6 +433,160 @@ fn missing_installed_texture_fails_closed() {
         probe.budget_for_test().usage().model_texture_closure_bytes,
         0
     );
+    preparation.finish();
+}
+
+#[test]
+fn texture_read_permit_reads_pinned_bytes_without_allocation() {
+    let fixture = installed_full_model_fixture("model-input-texture-read", false);
+    let probe = model_source_test_probe();
+    let preparation = probe.prepare_for_job("texture-read".into(), 78).unwrap();
+    let input = fixture
+        .store
+        .prepare_canonical_model_input(
+            &fixture.reference,
+            &probe,
+            &preparation,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+    let permit = input.texture_read_permit();
+    assert_eq!(permit.texture_bytes(0), Some(4));
+    assert_eq!(permit.texture_bytes(1), Some(4));
+    assert_eq!(permit.texture_bytes(2), Some(4));
+    assert_eq!(permit.texture_bytes(3), None); // embedded image
+    assert_eq!(permit.texture_bytes(usize::MAX), None);
+    let cancel = AtomicBool::new(false);
+    let mut bytes = [0u8; 4];
+    let ((), sample) =
+        budget::measure_requested_heap(|| permit.read_into(0, 0, &mut bytes, &cancel).unwrap());
+    assert_eq!(
+        (sample.peak, sample.retained, sample.overflow),
+        (0, 0, false)
+    );
+    assert_eq!(bytes, [1, 2, 3, 4]);
+    let mut tail = [0u8; 2];
+    permit.read_into(0, 2, &mut tail, &cancel).unwrap();
+    assert_eq!(tail, [3, 4]);
+    let mut empty = [0u8; 0];
+    permit.read_into(0, 4, &mut empty, &cancel).unwrap();
+    // Two permits share the same Arc input; positional reads never move a
+    // shared file cursor.
+    let clone = input.clone();
+    let other = clone.texture_read_permit();
+    let mut first = [0u8; 1];
+    let mut second = [0u8; 1];
+    permit.read_into(0, 0, &mut first, &cancel).unwrap();
+    other.read_into(0, 3, &mut second, &cancel).unwrap();
+    assert_eq!((first[0], second[0]), (1, 4));
+    let mut again = [0u8; 4];
+    permit.read_into(0, 0, &mut again, &cancel).unwrap();
+    assert_eq!(again, [1, 2, 3, 4]);
+    drop(clone);
+    drop(input);
+    preparation.finish();
+}
+
+#[test]
+fn texture_read_permit_rejects_bounds_embedded_and_cancelled() {
+    let fixture = installed_full_model_fixture("model-input-texture-read-bounds", false);
+    let probe = model_source_test_probe();
+    let preparation = probe
+        .prepare_for_job("texture-read-bounds".into(), 79)
+        .unwrap();
+    let input = fixture
+        .store
+        .prepare_canonical_model_input(
+            &fixture.reference,
+            &probe,
+            &preparation,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+    let permit = input.texture_read_permit();
+    let cancel = AtomicBool::new(false);
+    for (offset, length) in [(5u64, 1usize), (4, 1), (u64::MAX, 1), (5, 0)] {
+        let mut output = vec![0u8; length];
+        let error = permit
+            .read_into(0, offset, &mut output, &cancel)
+            .err()
+            .unwrap();
+        assert_eq!(error.code, "model_texture_bounds");
+        assert_eq!(error.message, "canonical model texture closure failed");
+    }
+    let mut output = [0u8; 1];
+    assert_eq!(
+        permit
+            .read_into(3, 0, &mut output, &cancel)
+            .err()
+            .unwrap()
+            .code,
+        "model_texture_missing"
+    );
+    assert_eq!(
+        permit
+            .read_into(99, 0, &mut output, &cancel)
+            .err()
+            .unwrap()
+            .code,
+        "model_texture_missing"
+    );
+    let cancelled = AtomicBool::new(true);
+    assert_eq!(
+        permit
+            .read_into(0, 0, &mut output, &cancelled)
+            .err()
+            .unwrap()
+            .code,
+        "cancelled"
+    );
+    drop(input);
+    preparation.finish();
+}
+
+#[test]
+fn texture_read_permit_enforces_one_mib_boundary_on_real_pinned_bytes() {
+    // Incompressible bytes keep the package ZIP below the 100:1 ratio gate.
+    let mut state = 0x9e37_79b9_7f4a_7c15u64;
+    let image: Vec<u8> = (0..1024 * 1024 + 1)
+        .map(|_| {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (state >> 56) as u8
+        })
+        .collect();
+    let fixture =
+        installed_full_model_fixture_with_texture("model-input-texture-read-large", false, &image);
+    let probe = model_source_test_probe();
+    let preparation = probe
+        .prepare_for_job("texture-read-large".into(), 80)
+        .unwrap();
+    let input = fixture
+        .store
+        .prepare_canonical_model_input(
+            &fixture.reference,
+            &probe,
+            &preparation,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+    let permit = input.texture_read_permit();
+    assert_eq!(permit.texture_bytes(0), Some(1024 * 1024 + 1));
+    let cancel = AtomicBool::new(false);
+    let mut one_mib = vec![0u8; 1024 * 1024];
+    permit.read_into(0, 1, &mut one_mib, &cancel).unwrap();
+    assert_eq!(one_mib.as_slice(), &image[1..]);
+    let mut over = vec![0u8; 1024 * 1024 + 1];
+    assert_eq!(
+        permit
+            .read_into(0, 0, &mut over, &cancel)
+            .err()
+            .unwrap()
+            .code,
+        "model_texture_bounds"
+    );
+    drop(input);
     preparation.finish();
 }
 

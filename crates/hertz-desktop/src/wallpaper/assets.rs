@@ -27,6 +27,7 @@ mod model_source;
 #[cfg(test)]
 pub(crate) use model_source::tests::{
     installed as installed_model_fixture, installed_full as installed_full_model_fixture,
+    installed_full_with_texture as installed_full_model_fixture_with_texture,
     probe as model_source_test_probe, writable as model_source_writable,
 };
 pub(crate) use model_source::CanonicalModelSource;

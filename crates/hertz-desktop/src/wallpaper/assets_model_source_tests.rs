@@ -763,17 +763,26 @@ pub(crate) fn rich_glb(doc: &Value, bin: &[u8]) -> Vec<u8> {
 /// invalid_resource installs identity-valid bytes intentionally without full
 /// package/resource validation, to reach the original model diagnostic owner.
 pub(crate) fn installed_full(tag: &str, invalid_resource: bool) -> Fixture {
+    installed_full_with_texture(tag, invalid_resource, &[1, 2, 3, 4])
+}
+
+/// Same canonical fixture with caller-chosen texture bytes, used by the real
+/// 1 MiB read-boundary proof. The package validator/identity path is unchanged.
+pub(crate) fn installed_full_with_texture(
+    tag: &str,
+    invalid_resource: bool,
+    image: &[u8],
+) -> Fixture {
     let (mut doc, bin) = rich_document("installed-rich");
     if invalid_resource {
         doc["accessors"][0]["type"] = json!("\0".repeat(20000));
     }
     let model = rich_glb(&doc, &bin);
-    let image = [1, 2, 3, 4];
     let files = [
         ("models/a/source.glb", model.as_slice(), "model/gltf-binary"),
         ("models/a/low.glb", model.as_slice(), "model/gltf-binary"),
-        ("models/a/tex.png", image.as_slice(), "image/png"),
-        ("models/a/other.png", image.as_slice(), "image/png"),
+        ("models/a/tex.png", image, "image/png"),
+        ("models/a/other.png", image, "image/png"),
     ];
     let manifest = json!({"formatVersion":1,"workId":"c17ed10a-5c55-4a52-85dc-7509f9e88aae","version":1,"title":"Rich canonical model","description":"Whole original metadata survives",
         "content":{"kind":"builtin","sceneId":"zodiac","stateVersion":1,"params":{}},
