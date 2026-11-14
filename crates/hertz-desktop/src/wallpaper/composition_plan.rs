@@ -1147,17 +1147,18 @@ fn validate_structure(compiled: &CompiledDocument) -> Result<()> {
                 format!("P2-02 adapter 尚未准备：{}:{}", node.node_type, node.space),
             ));
         }
-        if node.space == "3d"
-            && node
-                .constant_slots
-                .get("animationClip")
-                .and_then(|slot| compiled.ir().constant_slots()[*slot].value.as_str())
-                .is_some_and(|clip| !clip.is_empty())
+        if let Some(clip) = node
+            .constant_slots
+            .get("animationClip")
+            .and_then(|slot| compiled.ir().constant_slots()[*slot].value.as_str())
+            .filter(|clip| !clip.is_empty())
         {
-            return Err(JobError::new(
-                "adapter_unavailable",
-                "model animation adapter 尚未准备",
-            ));
+            if node.node_type != "model" || node.space != "3d" || clip.len() > 128 {
+                return Err(JobError::new(
+                    "adapter_unavailable",
+                    "model animation 仅支持 3D model 节点的有界 clip 名称",
+                ));
+            }
         }
     }
     Ok(())
@@ -1216,6 +1217,40 @@ fn final_number(
         .unwrap_or(compiled.ir().numeric_slots()[slot].value))
 }
 
+fn final_constant(
+    compiled: &CompiledDocument,
+    final_values: &FinalPublicValues,
+    index: usize,
+    property: &str,
+) -> Result<String> {
+    let node = &compiled.ir().nodes()[index];
+    let slot = *node
+        .constant_slots
+        .get(property)
+        .ok_or_else(|| JobError::invalid_input("组合常量槽缺失"))?;
+    Ok(compiled
+        .ir()
+        .public_properties()
+        .iter()
+        .find_map(|public| {
+            if matches!(public.target, PublicTarget::Constant { slot: target } if target == slot) {
+                final_values
+                    .values()
+                    .get(&public.descriptor.id)
+                    .and_then(Value::as_str)
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| {
+            compiled.ir().constant_slots()[slot]
+                .value
+                .as_str()
+                .unwrap_or("")
+        })
+        .to_owned())
+}
+
 fn geometry_costs(compiled: &CompiledDocument, final_values: &FinalPublicValues) -> Result<Costs> {
     validate_structure(compiled)?;
     let mut costs = Costs {
@@ -1251,34 +1286,6 @@ fn geometry_costs(compiled: &CompiledDocument, final_values: &FinalPublicValues)
                 ));
             }
             costs.depth_bytes_per_pixel = 4;
-            if node.node_type == "model" {
-                let slot = node.constant_slots.get("animationClip").ok_or_else(|| {
-                    JobError::new("adapter_unavailable", "model animationClip 槽缺失")
-                })?;
-                let clip = compiled
-                    .ir()
-                    .public_properties()
-                    .iter()
-                    .find_map(|public| {
-                        if matches!(public.target, PublicTarget::Constant { slot: target } if target == *slot) {
-                            final_values.values().get(&public.descriptor.id).and_then(Value::as_str)
-                        } else {
-                            None
-                        }
-                    })
-                    .unwrap_or_else(|| {
-                        compiled.ir().constant_slots()[*slot]
-                            .value
-                            .as_str()
-                            .unwrap_or("")
-                    });
-                if !clip.is_empty() {
-                    return Err(JobError::new(
-                        "adapter_unavailable",
-                        "model animation adapter 尚未准备",
-                    ));
-                }
-            }
         }
         let bytes = match node.node_type.as_str() {
             "group" | "builtinScene" | "model" => 0,
@@ -1500,6 +1507,51 @@ impl PreparedComposition {
     }
     fn media_costs_with_unprepared_vectors(&self, allow_unprepared: bool) -> Result<Costs> {
         let mut cost = geometry_costs(&self.compiled, &self.final_values)?;
+        for (index, node) in self.compiled.ir().nodes().iter().enumerate() {
+            if self.assets.is_empty() {
+                break;
+            }
+            if node.node_type != "model" {
+                continue;
+            }
+            let clip = final_constant(&self.compiled, &self.final_values, index, "animationClip")?;
+            if clip.is_empty() {
+                continue;
+            }
+            let usage = self
+                .final_values
+                .resource_uses()
+                .iter()
+                .find(|usage| {
+                    usage.node_index == Some(index)
+                        && usage.field == "asset"
+                        && usage.usage == "model"
+                })
+                .ok_or_else(|| {
+                    JobError::new("adapter_unavailable", "model animation 资源未准备")
+                })?;
+            let available = self
+                .assets
+                .get(&usage.asset_id)
+                .and_then(CompositionAsset::as_model);
+            let names: Vec<String> = available
+                .iter()
+                .flat_map(|model| {
+                    model.facts()["animations"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|animation| animation["name"].as_str().map(str::to_owned))
+                        .collect::<Vec<_>>()
+                })
+                .collect();
+            if !names.iter().any(|name| name == &clip) {
+                return Err(JobError::new(
+                    "adapter_unavailable",
+                    "model animation clip 未准备",
+                ));
+            }
+        }
         let mut identities = BTreeSet::new();
         for usage in self.final_values.resource_uses() {
             // Font preparation has its own typed receipt; model preparation is
@@ -1605,6 +1657,17 @@ impl PreparedComposition {
             let resources = facts.get("resources").ok_or_else(invalid)?;
             let scene = facts.get("scene").ok_or_else(invalid)?;
             let json = input["jsonBytes"].as_u64().ok_or_else(invalid)?;
+            let animation_cpu = if facts
+                .get("animations")
+                .and_then(Value::as_array)
+                .is_some_and(|animations| !animations.is_empty())
+            {
+                resources["animationCpuBytes"]
+                    .as_u64()
+                    .ok_or_else(invalid)?
+            } else {
+                0
+            };
             cost.buffer_bytes = checked_sum(&[
                 cost.buffer_bytes,
                 resources["gpuBufferBytes"].as_u64().ok_or_else(invalid)?,
@@ -1615,6 +1678,7 @@ impl PreparedComposition {
                 input["binBytes"].as_u64().ok_or_else(invalid)?,
                 checked_product(json, 2)?,
                 resources["cpuBackingBytes"].as_u64().ok_or_else(invalid)?,
+                animation_cpu,
             ])?;
             cost.programs = checked_sum(&[
                 cost.programs,

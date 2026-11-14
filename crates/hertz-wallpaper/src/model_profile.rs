@@ -6,9 +6,10 @@ use serde_json::{json, Value};
 
 use crate::model_container::BinaryChunk;
 use crate::model_structure::{
-    AccessorShape, GlbResource, ModelAccessor, ModelAlphaMode, ModelImage, ModelMaterial,
-    ModelNodeTransform, ModelNormalTexture, ModelOcclusionTexture, ModelPrimitive, ModelSampler,
-    ModelTextureInfo, MODEL_SAMPLER_MAG_FILTER, MODEL_SAMPLER_MIN_FILTER, MODEL_SAMPLER_WRAP,
+    AccessorShape, AnimationInterpolation, AnimationPath, GlbResource, ModelAccessor,
+    ModelAlphaMode, ModelImage, ModelMaterial, ModelNodeTransform, ModelNormalTexture,
+    ModelOcclusionTexture, ModelPrimitive, ModelSampler, ModelStructure, ModelTextureInfo,
+    MODEL_SAMPLER_MAG_FILTER, MODEL_SAMPLER_MIN_FILTER, MODEL_SAMPLER_WRAP,
 };
 use crate::{PackageError, Result};
 
@@ -70,19 +71,25 @@ fn transform(node: &ModelNodeTransform) -> Value {
 
 fn check_accessor(accessor: &ModelAccessor) -> Result<()> {
     match accessor.shape {
-        AccessorShape::Vec3 => {
+        AccessorShape::Vec3 | AccessorShape::Vec4 => {
             if accessor.component_type != 5126 {
-                return Err(unavailable("core profile requires FLOAT VEC3 accessors"));
+                return Err(unavailable(
+                    "core profile requires FLOAT VEC3/VEC4 accessors",
+                ));
             }
         }
         AccessorShape::Scalar => {
-            if ![5121, 5123, 5125].contains(&accessor.component_type) {
-                return Err(unavailable("core profile requires unsigned SCALAR indices"));
+            if accessor.component_type != 5126
+                && ![5121, 5123, 5125].contains(&accessor.component_type)
+            {
+                return Err(unavailable(
+                    "core profile requires FLOAT SCALAR or unsigned SCALAR accessors",
+                ));
             }
         }
         _ => {
             return Err(unavailable(
-                "core profile allows only VEC3 and SCALAR accessors",
+                "core profile allows only VEC3/VEC4 and SCALAR accessors",
             ))
         }
     }
@@ -142,7 +149,6 @@ pub fn static_core_profile_facts(resource: &GlbResource, encoded_bytes: u64) -> 
         || !structure.materials.is_empty()
         || !structure.textures.is_empty()
         || !structure.samplers.is_empty()
-        || !structure.animations.is_empty()
         || !structure.skins.is_empty()
         || structure.camera_count != 0
     {
@@ -196,6 +202,22 @@ pub fn static_core_profile_facts(resource: &GlbResource, encoded_bytes: u64) -> 
                     "core profile requires POSITION and NORMAL only",
                 ));
             }
+            for semantic in ["POSITION", "NORMAL"] {
+                let accessor = &structure.accessors[primitive.attributes[semantic]];
+                if accessor.shape != AccessorShape::Vec3 || accessor.component_type != 5126 {
+                    return Err(unavailable(
+                        "core profile requires FLOAT VEC3 POSITION/NORMAL",
+                    ));
+                }
+            }
+            if let Some(indices) = primitive.indices {
+                let accessor = &structure.accessors[indices];
+                if accessor.shape != AccessorShape::Scalar
+                    || ![5121, 5123, 5125].contains(&accessor.component_type)
+                {
+                    return Err(unavailable("core profile requires unsigned SCALAR indices"));
+                }
+            }
         }
     }
     let mut parents = vec![None; structure.nodes.len()];
@@ -231,6 +253,7 @@ pub fn static_core_profile_facts(resource: &GlbResource, encoded_bytes: u64) -> 
             stack.push((child, depth + 1));
         }
     }
+    let animation = animation_projection(structure, binary, &reachable)?;
     let mut used_meshes = std::collections::BTreeSet::new();
     let mut used_accessors = std::collections::BTreeSet::new();
     let mut geometries: std::collections::BTreeMap<String, Value> =
@@ -362,13 +385,22 @@ pub fn static_core_profile_facts(resource: &GlbResource, encoded_bytes: u64) -> 
     let cpu_backing_bytes = checked_sum(
         used_views
             .iter()
+            .copied()
+            .chain(
+                animation
+                    .as_ref()
+                    .into_iter()
+                    .flat_map(|animation| animation.view_indices.iter().copied()),
+            )
+            .collect::<std::collections::BTreeSet<_>>()
+            .iter()
             .map(|&index| structure.buffer_views[index].range.bytes),
     )?;
     let geometry_count = geometries.len();
     let attribute_count = used_layouts.len();
     let backing_count = used_views.len();
     let geometry_facts: Vec<Value> = geometries.into_values().collect();
-    Ok(json!({
+    let mut facts = json!({
         "profile": PROFILE,
         "loaderVersion": LOADER_VERSION,
         "input": {
@@ -405,7 +437,17 @@ pub fn static_core_profile_facts(resource: &GlbResource, encoded_bytes: u64) -> 
             "allocatedMaterialCount": 2,
             "retainedMaterialCount": 1
         }
-    }))
+    });
+    if let Some(animation) = animation {
+        let clip_count = animation.clips.len();
+        facts["animations"] = json!(animation.clips);
+        facts["resources"]["animationAccessors"] = json!(animation.accessors);
+        facts["resources"]["animationBufferViews"] = json!(animation.views);
+        facts["resources"]["animationCount"] = json!(clip_count);
+        facts["resources"]["animationChannelCount"] = json!(animation.channel_count);
+        facts["resources"]["animationCpuBytes"] = json!(animation.cpu_bytes);
+    }
+    Ok(facts)
 }
 
 fn textured_shape(shape: AccessorShape) -> Option<&'static str> {
@@ -419,23 +461,25 @@ fn textured_shape(shape: AccessorShape) -> Option<&'static str> {
 
 fn check_textured_accessor(accessor: &ModelAccessor) -> Result<()> {
     match accessor.shape {
-        AccessorShape::Vec2 | AccessorShape::Vec3 => {
+        AccessorShape::Vec2 | AccessorShape::Vec3 | AccessorShape::Vec4 => {
             if accessor.component_type != 5126 {
                 return Err(unavailable(
-                    "textured profile requires FLOAT UV/VEC3 accessors",
+                    "textured profile requires FLOAT UV/VEC3/VEC4 accessors",
                 ));
             }
         }
         AccessorShape::Scalar => {
-            if ![5121, 5123, 5125].contains(&accessor.component_type) {
+            if accessor.component_type != 5126
+                && ![5121, 5123, 5125].contains(&accessor.component_type)
+            {
                 return Err(unavailable(
-                    "textured profile requires unsigned SCALAR indices",
+                    "textured profile requires FLOAT SCALAR or unsigned SCALAR accessors",
                 ));
             }
         }
         _ => {
             return Err(unavailable(
-                "textured profile allows VEC2/VEC3/SCALAR accessors",
+                "textured profile allows VEC2/VEC3/VEC4/SCALAR accessors",
             ))
         }
     }
@@ -637,6 +681,223 @@ fn ktx2_image_facts(
     Ok((facts, Some(upload_bytes)))
 }
 
+struct AnimationProjection {
+    clips: Vec<Value>,
+    accessors: Vec<Value>,
+    views: Vec<Value>,
+    view_indices: std::collections::BTreeSet<usize>,
+    cpu_bytes: u64,
+    channel_count: u64,
+}
+
+fn animation_shape(shape: AccessorShape) -> Option<&'static str> {
+    match shape {
+        AccessorShape::Scalar => Some("SCALAR"),
+        AccessorShape::Vec3 => Some("VEC3"),
+        AccessorShape::Vec4 => Some("VEC4"),
+        _ => None,
+    }
+}
+
+fn record_animation_accessor(
+    structure: &ModelStructure,
+    binary: &BinaryChunk,
+    index: usize,
+    accessors: &mut std::collections::BTreeMap<usize, Value>,
+    views: &mut std::collections::BTreeMap<usize, Value>,
+    view_indices: &mut std::collections::BTreeSet<usize>,
+    accessor_bytes: &mut u64,
+) -> Result<()> {
+    if accessors.contains_key(&index) {
+        return Ok(());
+    }
+    let accessor = structure
+        .accessors
+        .get(index)
+        .ok_or_else(|| unavailable("animation accessor index"))?;
+    if accessor.normalized || accessor.stride != accessor.element_bytes {
+        return Err(unavailable(
+            "animation profile requires packed unnormalized accessors",
+        ));
+    }
+    let view = structure
+        .buffer_views
+        .get(accessor.buffer_view)
+        .ok_or_else(|| unavailable("animation accessor bufferView"))?;
+    let item_bytes = accessor
+        .count
+        .checked_mul(accessor.element_bytes)
+        .ok_or_else(|| unavailable("animation accessor bytes overflow"))?;
+    accessors.insert(
+        index,
+        json!({
+            "index": index,
+            "viewIndex": accessor.buffer_view,
+            "componentType": accessor.component_type,
+            "type": animation_shape(accessor.shape).expect("checked animation shape"),
+            "count": accessor.count,
+            "byteOffset": accessor.byte_offset,
+            "byteLength": item_bytes
+        }),
+    );
+    views.entry(accessor.buffer_view).or_insert_with(|| {
+        json!({
+            "index": accessor.buffer_view,
+            "byteOffset": view_offset(&view.range, binary).expect("checked animation view"),
+            "byteLength": view.range.bytes
+        })
+    });
+    view_indices.insert(accessor.buffer_view);
+    *accessor_bytes = checked_sum([*accessor_bytes, item_bytes])?;
+    Ok(())
+}
+
+fn animation_projection(
+    structure: &ModelStructure,
+    binary: &BinaryChunk,
+    reachable: &std::collections::BTreeSet<usize>,
+) -> Result<Option<AnimationProjection>> {
+    if structure.animations.is_empty() {
+        return Ok(None);
+    }
+    let mut names = std::collections::BTreeSet::new();
+    let mut clips = Vec::with_capacity(structure.animations.len());
+    let mut accessors = std::collections::BTreeMap::new();
+    let mut views = std::collections::BTreeMap::new();
+    let mut view_indices = std::collections::BTreeSet::new();
+    let mut accessor_bytes = 0_u64;
+    let mut channel_count = 0_u64;
+    for (clip_index, animation) in structure.animations.iter().enumerate() {
+        let name = animation
+            .name
+            .clone()
+            .unwrap_or_else(|| format!("animation_{clip_index}"));
+        if name.is_empty() || name.len() > 128 || !names.insert(name.clone()) {
+            return Err(unavailable("animation names must be unique and bounded"));
+        }
+        if !animation.duration_upper_bound.is_finite() || animation.duration_upper_bound <= 0.0 {
+            return Err(unavailable(
+                "animation clips require a positive declared duration",
+            ));
+        }
+        let mut channels = Vec::with_capacity(animation.channels.len());
+        for channel in &animation.channels {
+            let node = channel
+                .target_node
+                .ok_or_else(|| unavailable("animation channels require a target node"))?;
+            if node >= structure.nodes.len() || !reachable.contains(&node) {
+                return Err(unavailable("animation target node is not reachable"));
+            }
+            let path = match channel.path {
+                AnimationPath::Translation => "translation",
+                AnimationPath::Rotation => "rotation",
+                AnimationPath::Scale => "scale",
+                AnimationPath::Weights => {
+                    return Err(unavailable("animation weights are unsupported"))
+                }
+            };
+            let sampler = animation
+                .samplers
+                .get(channel.sampler)
+                .ok_or_else(|| unavailable("animation sampler index"))?;
+            let input = structure
+                .accessors
+                .get(sampler.input)
+                .ok_or_else(|| unavailable("animation input accessor"))?;
+            let output = structure
+                .accessors
+                .get(sampler.output)
+                .ok_or_else(|| unavailable("animation output accessor"))?;
+            if input.normalized
+                || input.component_type != 5126
+                || input.shape != AccessorShape::Scalar
+                || input.count == 0
+            {
+                return Err(unavailable(
+                    "animation times require packed FLOAT SCALAR accessors",
+                ));
+            }
+            let (shape, components) = if path == "rotation" {
+                (AccessorShape::Vec4, 4_u64)
+            } else {
+                (AccessorShape::Vec3, 3_u64)
+            };
+            let required_values = if sampler.interpolation == AnimationInterpolation::CubicSpline {
+                input
+                    .count
+                    .checked_mul(3)
+                    .ok_or_else(|| unavailable("animation output count overflow"))?
+            } else {
+                input.count
+            };
+            if output.normalized
+                || output.component_type != 5126
+                || output.shape != shape
+                || output.count != required_values
+            {
+                return Err(unavailable("animation output accessor shape or count"));
+            }
+            record_animation_accessor(
+                structure,
+                binary,
+                sampler.input,
+                &mut accessors,
+                &mut views,
+                &mut view_indices,
+                &mut accessor_bytes,
+            )?;
+            record_animation_accessor(
+                structure,
+                binary,
+                sampler.output,
+                &mut accessors,
+                &mut views,
+                &mut view_indices,
+                &mut accessor_bytes,
+            )?;
+            let interpolation = match sampler.interpolation {
+                AnimationInterpolation::Step => "STEP",
+                AnimationInterpolation::Linear => "LINEAR",
+                AnimationInterpolation::CubicSpline => "CUBICSPLINE",
+            };
+            channels.push(json!({
+                "node": node,
+                "path": path,
+                "interpolation": interpolation,
+                "inputAccessor": sampler.input,
+                "outputAccessor": sampler.output,
+                "times": input.count,
+                "values": output.count,
+                "components": components
+            }));
+            channel_count = checked_sum([channel_count, 1])?;
+        }
+        if channels.is_empty() {
+            return Err(unavailable("animation clips require target channels"));
+        }
+        clips.push(json!({
+            "index": clip_index,
+            "name": name,
+            "duration": animation.duration_upper_bound,
+            "channels": channels
+        }));
+        if clips.len() > MAX_ITEMS {
+            return Err(unavailable("animation clip limit"));
+        }
+    }
+    // Conservative mixer binding allowance per resolved channel; track arrays
+    // are BIN views already counted by the caller's CPU backing bytes.
+    let cpu_bytes = checked_sum([accessor_bytes, channel_count.saturating_mul(512)])?;
+    Ok(Some(AnimationProjection {
+        clips,
+        accessors: accessors.into_values().collect(),
+        views: views.into_values().collect(),
+        view_indices,
+        cpu_bytes,
+        channel_count,
+    }))
+}
+
 fn sampler_for(
     structure: &crate::model_structure::ModelStructure,
     sampler: Option<usize>,
@@ -718,8 +979,7 @@ fn textured_profile_facts(
     {
         return Err(unavailable("textured profile item limits"));
     }
-    if !structure.animations.is_empty()
-        || !structure.skins.is_empty()
+    if !structure.skins.is_empty()
         || structure.camera_count != 0
         || structure
             .node_morph_weights
@@ -793,6 +1053,7 @@ fn textured_profile_facts(
             stack.push((child, depth + 1));
         }
     }
+    let animation = animation_projection(structure, binary, &reachable)?;
     let mut used_materials = std::collections::BTreeSet::new();
     let mut used_views = std::collections::BTreeSet::new();
     let mut used_accessors = std::collections::BTreeSet::new();
@@ -1041,6 +1302,15 @@ fn textured_profile_facts(
     let cpu_backing_bytes = checked_sum(
         used_views
             .iter()
+            .copied()
+            .chain(
+                animation
+                    .as_ref()
+                    .into_iter()
+                    .flat_map(|animation| animation.view_indices.iter().copied()),
+            )
+            .collect::<std::collections::BTreeSet<_>>()
+            .iter()
             .map(|&index| structure.buffer_views[index].range.bytes),
     )?;
     let geometry_count = geometries.len();
@@ -1097,6 +1367,15 @@ fn textured_profile_facts(
     });
     if matches!(projection, ImageProjection::Ktx2 { .. }) {
         facts["resources"]["imageUploadBytes"] = json!(image_upload_bytes);
+    }
+    if let Some(animation) = animation {
+        let clip_count = animation.clips.len();
+        facts["animations"] = json!(animation.clips);
+        facts["resources"]["animationAccessors"] = json!(animation.accessors);
+        facts["resources"]["animationBufferViews"] = json!(animation.views);
+        facts["resources"]["animationCount"] = json!(clip_count);
+        facts["resources"]["animationChannelCount"] = json!(animation.channel_count);
+        facts["resources"]["animationCpuBytes"] = json!(animation.cpu_bytes);
     }
     Ok(facts)
 }
@@ -1347,6 +1626,143 @@ mod tests {
         assert_eq!(error.code, "model_profile_unavailable");
     }
 
+    fn animated_triangle(name: Option<&str>, path: &str, interpolation: &str) -> Vec<u8> {
+        let mut bin = vec![0_u8; 112];
+        for (index, value) in [0.0_f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+            .iter()
+            .enumerate()
+        {
+            bin[index * 4..index * 4 + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        for (index, value) in [0.0_f32, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0]
+            .iter()
+            .enumerate()
+        {
+            bin[36 + index * 4..36 + index * 4 + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        for (index, value) in [0_u16, 1, 2].iter().enumerate() {
+            bin[72 + index * 2..72 + index * 2 + 2].copy_from_slice(&value.to_le_bytes());
+        }
+        for (index, value) in [0.0_f32, 1.0].iter().enumerate() {
+            bin[80 + index * 4..80 + index * 4 + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        for (index, value) in [0.0_f32, 0.0, 0.0, 0.5, 0.0, 0.0].iter().enumerate() {
+            bin[88 + index * 4..88 + index * 4 + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        let mut animation = json!({
+            "samplers":[{"input":3,"output":4,"interpolation":interpolation}],
+            "channels":[{"sampler":0,"target":{"node":0,"path":path}}]
+        });
+        if let Some(name) = name {
+            animation["name"] = json!(name);
+        }
+        let document = json!({
+            "asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],
+            "nodes":[{"mesh":0,"name":"mesh"}],
+            "meshes":[{"primitives":[{"attributes":{"POSITION":0,"NORMAL":1},"indices":2}]}],
+            "buffers":[{"byteLength":bin.len()}],
+            "bufferViews":[
+                {"buffer":0,"byteOffset":0,"byteLength":36},
+                {"buffer":0,"byteOffset":36,"byteLength":36},
+                {"buffer":0,"byteOffset":72,"byteLength":8},
+                {"buffer":0,"byteOffset":80,"byteLength":8},
+                {"buffer":0,"byteOffset":88,"byteLength":24}],
+            "accessors":[
+                {"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[1,1,0]},
+                {"bufferView":1,"componentType":5126,"count":3,"type":"VEC3"},
+                {"bufferView":2,"componentType":5123,"count":3,"type":"SCALAR"},
+                {"bufferView":3,"componentType":5126,"count":2,"type":"SCALAR","min":[0],"max":[1]},
+                {"bufferView":4,"componentType":5126,"count":2,"type":"VEC3"}],
+            "animations":[animation]
+        });
+        glb(document, &bin)
+    }
+
+    fn single_key_animation() -> Vec<u8> {
+        let mut bin = vec![0_u8; 96];
+        for (index, value) in [0.0_f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+            .iter()
+            .enumerate()
+        {
+            bin[index * 4..index * 4 + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        for (index, value) in [0.0_f32, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0]
+            .iter()
+            .enumerate()
+        {
+            bin[36 + index * 4..36 + index * 4 + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        for (index, value) in [0_u16, 1, 2].iter().enumerate() {
+            bin[72 + index * 2..72 + index * 2 + 2].copy_from_slice(&value.to_le_bytes());
+        }
+        let document = json!({
+            "asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],
+            "nodes":[{"mesh":0,"name":"mesh"}],
+            "meshes":[{"primitives":[{"attributes":{"POSITION":0,"NORMAL":1},"indices":2}]}],
+            "buffers":[{"byteLength":bin.len()}],
+            "bufferViews":[
+                {"buffer":0,"byteOffset":0,"byteLength":36},
+                {"buffer":0,"byteOffset":36,"byteLength":36},
+                {"buffer":0,"byteOffset":72,"byteLength":8},
+                {"buffer":0,"byteOffset":80,"byteLength":4},
+                {"buffer":0,"byteOffset":84,"byteLength":12}],
+            "accessors":[
+                {"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[1,1,0]},
+                {"bufferView":1,"componentType":5126,"count":3,"type":"VEC3"},
+                {"bufferView":2,"componentType":5123,"count":3,"type":"SCALAR"},
+                {"bufferView":3,"componentType":5126,"count":1,"type":"SCALAR","min":[0],"max":[0]},
+                {"bufferView":4,"componentType":5126,"count":1,"type":"VEC3"}],
+            "animations":[{"name":"still","samplers":[{"input":3,"output":4,"interpolation":"STEP"}],
+                "channels":[{"sampler":0,"target":{"node":0,"path":"translation"}}]}]
+        });
+        glb(document, &bin)
+    }
+
+    #[test]
+    fn static_core_facts_project_animation_clips_and_cpu_bytes() {
+        let projected = facts(animated_triangle(Some("move"), "translation", "LINEAR")).unwrap();
+        assert_eq!(projected["animations"][0]["name"], "move");
+        assert_eq!(projected["animations"][0]["duration"], json!(1.0));
+        let channel = &projected["animations"][0]["channels"][0];
+        assert_eq!(channel["node"], 0);
+        assert_eq!(channel["path"], "translation");
+        assert_eq!(channel["interpolation"], "LINEAR");
+        assert_eq!(channel["inputAccessor"], 3);
+        assert_eq!(channel["outputAccessor"], 4);
+        assert_eq!(channel["times"], 2);
+        assert_eq!(channel["values"], 2);
+        assert_eq!(channel["components"], 3);
+        assert_eq!(projected["resources"]["animationCount"], 1);
+        assert_eq!(projected["resources"]["animationChannelCount"], 1);
+        assert_eq!(
+            projected["resources"]["animationAccessors"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            projected["resources"]["animationBufferViews"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(projected["resources"]["animationCpuBytes"], 8 + 24 + 512);
+        assert_eq!(projected["resources"]["cpuBackingBytes"], 80 + 32);
+        assert_eq!(projected["resources"]["gpuBufferBytes"], 78);
+        let unnamed = facts(animated_triangle(None, "scale", "STEP")).unwrap();
+        assert_eq!(unnamed["animations"][0]["name"], "animation_0");
+        assert_eq!(
+            unnamed["animations"][0]["channels"][0]["interpolation"],
+            "STEP"
+        );
+        assert_eq!(
+            facts(single_key_animation()).unwrap_err().code,
+            "model_profile_unavailable"
+        );
+    }
+
     const TEXTURED_PNG: &[u8] = &[
         137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 2, 0, 0, 0, 2, 8, 6,
         0, 0, 0, 114, 182, 13, 36, 0, 0, 0, 16, 73, 68, 65, 84, 120, 156, 99, 248, 207, 192, 240,
@@ -1398,6 +1814,92 @@ mod tests {
                 "alphaMode":"OPAQUE"}]
         });
         glb(document, &bin)
+    }
+
+    fn textured_animated_triangle() -> Vec<u8> {
+        let times_offset = (104 + TEXTURED_PNG.len() + 3) & !3;
+        let values_offset = times_offset + 8;
+        let mut bin = vec![0_u8; values_offset + 24];
+        for (index, value) in [0.0_f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+            .iter()
+            .enumerate()
+        {
+            bin[index * 4..index * 4 + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        for (index, value) in [0.0_f32, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0]
+            .iter()
+            .enumerate()
+        {
+            bin[36 + index * 4..36 + index * 4 + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        for (index, value) in [0.0_f32, 0.0, 1.0, 0.0, 0.0, 1.0].iter().enumerate() {
+            bin[72 + index * 4..72 + index * 4 + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        for (index, value) in [0_u16, 1, 2].iter().enumerate() {
+            bin[96 + index * 2..96 + index * 2 + 2].copy_from_slice(&value.to_le_bytes());
+        }
+        bin[104..104 + TEXTURED_PNG.len()].copy_from_slice(TEXTURED_PNG);
+        for (index, value) in [0.0_f32, 1.0].iter().enumerate() {
+            bin[times_offset + index * 4..times_offset + index * 4 + 4]
+                .copy_from_slice(&value.to_le_bytes());
+        }
+        for (index, value) in [0.0_f32, 0.0, 0.0, 1.0, 0.0, 0.0].iter().enumerate() {
+            bin[values_offset + index * 4..values_offset + index * 4 + 4]
+                .copy_from_slice(&value.to_le_bytes());
+        }
+        let document = json!({
+            "asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],
+            "nodes":[{"mesh":0,"name":"mesh"}],
+            "meshes":[{"primitives":[{"attributes":{"POSITION":0,"NORMAL":1,"TEXCOORD_0":3},
+                "indices":2,"material":0}]}],
+            "buffers":[{"byteLength":bin.len()}],
+            "bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":36},
+                {"buffer":0,"byteOffset":36,"byteLength":36},
+                {"buffer":0,"byteOffset":72,"byteLength":24},
+                {"buffer":0,"byteOffset":96,"byteLength":8},
+                {"buffer":0,"byteOffset":104,"byteLength":TEXTURED_PNG.len()},
+                {"buffer":0,"byteOffset":times_offset,"byteLength":8},
+                {"buffer":0,"byteOffset":values_offset,"byteLength":24}],
+            "accessors":[
+                {"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[1,1,0]},
+                {"bufferView":1,"componentType":5126,"count":3,"type":"VEC3"},
+                {"bufferView":3,"componentType":5123,"count":3,"type":"SCALAR"},
+                {"bufferView":2,"componentType":5126,"count":3,"type":"VEC2"},
+                {"bufferView":5,"componentType":5126,"count":2,"type":"SCALAR","min":[0],"max":[1]},
+                {"bufferView":6,"componentType":5126,"count":2,"type":"VEC3"}],
+            "images":[{"bufferView":4,"mimeType":"image/png"}],
+            "samplers":[{"magFilter":9728,"minFilter":9728,"wrapS":33071,"wrapT":33071}],
+            "textures":[{"source":0,"sampler":0}],
+            "materials":[{"pbrMetallicRoughness":{"baseColorFactor":[1,1,1,1],
+                "baseColorTexture":{"index":0,"texCoord":0},"metallicFactor":0,"roughnessFactor":1},
+                "alphaMode":"OPAQUE"}],
+            "animations":[{"name":"move",
+                "samplers":[{"input":4,"output":5,"interpolation":"LINEAR"}],
+                "channels":[{"sampler":0,"target":{"node":0,"path":"translation"}}]}]
+        });
+        glb(document, &bin)
+    }
+
+    #[test]
+    fn static_textured_facts_share_the_animation_projection() {
+        let bytes = textured_animated_triangle();
+        let content = inspect_glb_resource_content(
+            Cursor::new(&bytes),
+            bytes.len() as u64,
+            &manifest(),
+            "assets/model.glb",
+        )
+        .unwrap();
+        let facts =
+            static_textured_profile_facts(content.resource(), content.bytes(), "assets/model.glb")
+                .unwrap();
+        assert_eq!(facts["profile"], TEXTURED_PROFILE);
+        assert_eq!(facts["animations"][0]["name"], "move");
+        assert_eq!(facts["animations"][0]["duration"], json!(1.0));
+        assert_eq!(facts["animations"][0]["channels"][0]["path"], "translation");
+        assert_eq!(facts["resources"]["animationCpuBytes"], 8 + 24 + 512);
+        assert_eq!(facts["resources"]["animationChannelCount"], 1);
+        assert_eq!(facts["resources"]["cpuBackingBytes"], 104 + 32);
     }
 
     #[test]

@@ -473,7 +473,58 @@ if(diagnostic){
     assert.equal((await ktx2Page.evaluate(()=>HertzGlBudget.stats())).contexts,0);
     await ktx2Page.close();
   }
-  fs.writeFileSync(path.join(output,'native-page-evidence.json'),JSON.stringify({source:'actual Rust production selector + GlAdmission + original native page',qualification:'browser integration; copied scheduler metadata matches measured headless rAF; native resource caps unchanged; controlled visibility event/state; Windows/GPU qualification pending',cadence:{intervals:cadence,refreshHz,running:runningCadence},state,blockedBefore,blockedAfter,hiddenBefore,hiddenAfter,visibilityResumed,fits,glow,tracks,mask,model,texturedModel,externalTexture,ktx2Model,paused,retired,errors},null,2));
-  console.log('PASS native composition page: real Rust projection, one context, complete frame, pause and retirement'+(glow?', glow surfaces admitted':'')+(tracks?', tracks/bindings applied':'')+(mask?', mask texture applied':'')+(model?', scene3d model rendered':'')+(texturedModel?', textured model pixels':'')+(externalTexture?', external texture route':'')+(ktx2Model?', KTX2 model pixels':''));
+  const animatedDir=path.join(output,'model-animated');
+  let animatedModel=null;
+  if(fs.existsSync(path.join(animatedDir,'projection.json'))){
+    const animatedProjection=JSON.parse(fs.readFileSync(path.join(animatedDir,'projection.json'),'utf8'));
+    const animatedUri=fs.readFileSync(path.join(animatedDir,'uri.txt'),'utf8');
+    const animatedInit=bindCadence(fs.readFileSync(path.join(animatedDir,'native-init.js'),'utf8'));
+    const animatedFiles=JSON.parse(fs.readFileSync(path.join(animatedDir,'files.json'),'utf8'));
+    const animatedPage=await browser.newPage({viewport:{width:64,height:64}}),animatedErrors=[];
+    animatedPage.on('pageerror',error=>animatedErrors.push(error.message));
+    animatedPage.on('console',message=>{if(message.type()==='error'){animatedErrors.push(message.text());console.error('browser:',message.text());}});
+    await animatedPage.addInitScript(animatedInit+'\nwindow.nativeEvents=[];window.ipc={postMessage:message=>nativeEvents.push(message)};');
+    await animatedPage.route('https://**.wallpaper.invalid/**',route=>{
+      if(route.request().url()===animatedUri)return route.fulfill({status:200,contentType:'application/json',body:JSON.stringify(animatedProjection)});
+      const asset=animatedFiles.find(entry=>entry.url===route.request().url());
+      if(asset)return route.fulfill({status:200,contentType:'model/gltf-binary',body:fs.readFileSync(path.join(animatedDir,asset.file))});
+      return route.fulfill({status:404,body:''});
+    });
+    await animatedPage.route('http://hertz.localhost/',route=>route.fulfill({status:200,contentType:'text/html',body:html}));
+    await animatedPage.goto('http://hertz.localhost/');
+    assert.equal(await animatedPage.evaluate(async url=>{hertzWallpaper.applyConfig({source:'fixed',audioInput:{kind:'none'},motion:1,quality:'low'});
+      const prepared=hertzWallpaper.applyComposition(url);hertzWallpaper.start(15);return await prepared;},animatedUri),true);
+    await animatedPage.waitForFunction(()=>nativeEvents.some(event=>event.includes('firstFrame')),null,{timeout:10000}).catch(async failure=>{
+      throw new Error(failure.message+'\n'+JSON.stringify(await animatedPage.evaluate(()=>({events:nativeEvents,stats:hertzWallpaper.debug(),budget:HertzGlBudget.stats()}))));
+    });
+    await animatedPage.waitForFunction(()=>hertzWallpaper.debug().draws>=2,null,{timeout:10000});
+    const animatedSample=()=>animatedPage.evaluate(()=>{
+      const gl=document.querySelector('#host canvas').getContext('webgl2');
+      const sample=(x,y)=>{const pixel=new Uint8Array(4);gl.readPixels(x,y,1,1,gl.RGBA,gl.UNSIGNED_BYTE,pixel);return [...pixel];};
+      return {left:sample(36,40),right:sample(52,40),sceneTime:hertzWallpaper.debug().sceneTime,budget:HertzGlBudget.stats()};
+    });
+    const animatedEarly=await animatedSample();
+    assert(animatedEarly.left[0]>200&&animatedEarly.left[1]>200,'animation starts with the authored base translation');
+    assert(Math.max(...animatedEarly.right.slice(0,3))<=8,'unshifted triangle stays left of the right sample');
+    await animatedPage.waitForFunction(()=>hertzWallpaper.debug().sceneTime>=900,null,{timeout:10000});
+    const animatedLate=await animatedSample();
+    assert(Math.max(...animatedLate.left.slice(0,3))<=8,'translated triangle leaves the left sample');
+    assert(animatedLate.right[0]>200&&animatedLate.right[1]>200,'translated triangle covers the right sample');
+    assert.equal(animatedLate.budget.contexts,1);assert.equal(animatedLate.budget.error,null);assert.deepEqual(animatedErrors,[]);
+    assert.equal(animatedProjection.resolvedAssets[0].modelFacts.animations[0].name,'move');
+    assert.equal(animatedProjection.resolvedAssets[0].modelFacts.animations[0].channels[0].path,'translation');
+    assert.equal(animatedProjection.pageLimits.bufferDeclaredBytes,170);
+    assert.equal(animatedProjection.pageLimits.programs,3);
+    animatedModel={early:animatedEarly,late:animatedLate,
+      facts:{clip:animatedProjection.resolvedAssets[0].modelFacts.animations[0].name,
+        duration:animatedProjection.resolvedAssets[0].modelFacts.animations[0].duration}};
+    await animatedPage.evaluate(()=>hertzWallpaper.reveal());
+    await animatedPage.screenshot({path:path.join(animatedDir,'native-page-model-animated.png')});
+    await animatedPage.evaluate(()=>hertzWallpaper.unmount());await animatedPage.waitForTimeout(50);
+    assert.equal((await animatedPage.evaluate(()=>HertzGlBudget.stats())).contexts,0);
+    await animatedPage.close();
+  }
+  fs.writeFileSync(path.join(output,'native-page-evidence.json'),JSON.stringify({source:'actual Rust production selector + GlAdmission + original native page',qualification:'browser integration; copied scheduler metadata matches measured headless rAF; native resource caps unchanged; controlled visibility event/state; Windows/GPU qualification pending',cadence:{intervals:cadence,refreshHz,running:runningCadence},state,blockedBefore,blockedAfter,hiddenBefore,hiddenAfter,visibilityResumed,fits,glow,tracks,mask,model,texturedModel,externalTexture,ktx2Model,animatedModel,paused,retired,errors},null,2));
+  console.log('PASS native composition page: real Rust projection, one context, complete frame, pause and retirement'+(glow?', glow surfaces admitted':'')+(tracks?', tracks/bindings applied':'')+(mask?', mask texture applied':'')+(model?', scene3d model rendered':'')+(texturedModel?', textured model pixels':'')+(externalTexture?', external texture route':'')+(ktx2Model?', KTX2 model pixels':'')+(animatedModel?', animated clip pixels':''));
  }finally{await browser.close();}
 })().catch(error=>{console.error(error.stack);process.exitCode=1;});

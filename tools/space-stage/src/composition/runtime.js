@@ -5,7 +5,8 @@ import { createScope } from '../scope.js';
 import { createBackground, createInputSampler } from './builtin.js';
 import { evaluateBinding, evaluateTrack } from './animation.js';
 const MATRIX=1, LAYOUT=2, MATERIAL=4, VISIBILITY=8, RESOURCE=16, GEOMETRY=32, ALL=63;
-const modelConstructionBytes = facts => facts.input.encodedBytes + facts.input.binBytes + facts.input.jsonBytes * 2;
+const modelConstructionBytes = facts => facts.input.encodedBytes + facts.input.binBytes + facts.input.jsonBytes * 2
+  + (facts.resources.animationCpuBytes || 0);
 const outputVertex = `varying vec2 vUv;void main(){vUv=uv;gl_Position=vec4(position.xy,0.0,1.0);}`;
 const outputFragment = `uniform sampler2D inputMap;uniform float brightness;uniform float contrast;
   uniform float saturation;uniform float hue;uniform sampler2D glowMap;uniform bool hasGlow;uniform float glowStrength;
@@ -660,6 +661,12 @@ export async function createCompositionRuntime(THREE, context, scope, plan, opti
     if(!mediaShouldPlay)pause();
     if(timeChanged)for(const node of nodes)if(node.particles){node.material.uniforms.sceneTime.value=time;outputDirty=true;}
     if(timeChanged)for(const node of nodes)if(node.material&&node.spec.effects){node.material.uniforms.effectTime.value=time;outputDirty=true;}
+    if(timeChanged)for(const node of nodes)if(node.animation){
+      const animation=node.animation;
+      animation.mixer.setTime(animation.duration>0?time%animation.duration:0);
+      node.object.updateMatrixWorld(true);
+      outputDirty=true;
+    }
     if(background) {background.instance.update(frame);outputDirty=true;}
     return frameReady;
   }

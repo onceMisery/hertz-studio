@@ -4,10 +4,10 @@
 const assert=require('node:assert/strict'), fs=require('node:fs'), path=require('node:path');
 const {execFileSync}=require('node:child_process'), {createHash}=require('node:crypto'), zlib=require('node:zlib');
 const {loadCompositionFontFixture}=require('./composition-font-fixture.js');
-const {coreGlb,texturedGlb,ktx2Glb}=require('./composition-model-fixture.js');
+const {coreGlb,animatedGlb,texturedGlb,ktx2Glb}=require('./composition-model-fixture.js');
 const {chromium}=require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const root=path.resolve(__dirname,'..'), output=path.join(root,'output/a04-p2-20261108/composition-browser');
-const fontFixture=loadCompositionFontFixture(), modelFixture=coreGlb(), texturedFixture=texturedGlb(), ktx2Fixture=ktx2Glb();
+const fontFixture=loadCompositionFontFixture(), modelFixture=coreGlb(), animatedFixture=animatedGlb(), texturedFixture=texturedGlb(), ktx2Fixture=ktx2Glb();
 fs.mkdirSync(output,{recursive:true});
 function hash(bytes){return createHash('sha256').update(bytes).digest('hex');}
 function crc(bytes){let c=0xffffffff;for(const b of bytes){c^=b;for(let i=0;i<8;i++)c=(c>>>1)^((c&1)?0xedb88320:0);}return (c^0xffffffff)>>>0;}
@@ -27,6 +27,8 @@ const sourceAssets=[
  {assetId:'video',kind:'video',file:'video.webm',mime:'video/webm',bytes:fs.readFileSync(path.join(root,'scripts/fixtures/wallpaper-vp8.webm'))},
  {assetId:'font',kind:'font',file:fontFixture.file,mime:fontFixture.mime,bytes:fontFixture.bytes},
  {assetId:'mesh',kind:'model',file:'mesh.glb',mime:'model/gltf-binary',bytes:modelFixture.glb,modelInput:modelFixture.input},
+ {assetId:'animated',kind:'model',file:'animated.glb',mime:'model/gltf-binary',bytes:animatedFixture.glb,
+  modelInput:animatedFixture.input},
  {assetId:'textured',kind:'model',file:'textured.glb',mime:'model/gltf-binary',bytes:texturedFixture.glb,
   modelInput:texturedFixture.input,textured:true,uploadBytes:64,imageBytes:texturedFixture.imageBytes},
  {assetId:'ktx2',kind:'model',file:'ktx2.glb',mime:'model/gltf-binary',bytes:ktx2Fixture.glb,
@@ -78,6 +80,8 @@ const modelNode=(id='mesh',properties={},asset='mesh')=>({id,type:'model',stateV
  properties:{position:[0,0,0],rotation:[0,0,0],scale:[1,1,1],...properties}});
 const model=compile([modelNode()],modelCanvas);
 const coreRustFacts=JSON.parse(execFileSync(factsExecutable,[path.join(output,'mesh.glb'),compilerInputs.get(model)[0],'assets/mesh.glb'],{cwd:root,encoding:'utf8'}));
+const animatedModel=compile([modelNode('mesh',{animationClip:'move'},'animated')],modelCanvas);
+const animatedRustFacts=JSON.parse(execFileSync(factsExecutable,[path.join(output,'animated.glb'),compilerInputs.get(animatedModel)[0],'assets/animated.glb'],{cwd:root,encoding:'utf8'}));
 const texturedModel=compile([modelNode('mesh',{},'textured')],modelCanvas);
 const texturedRustFacts=JSON.parse(execFileSync(factsExecutable,[path.join(output,'textured.glb'),compilerInputs.get(texturedModel)[0],'assets/textured.glb','textured'],{cwd:root,encoding:'utf8'}));
 const ktx2Model=compile([modelNode('mesh',{},'ktx2')],modelCanvas);
@@ -202,7 +206,7 @@ const results=[];
    :a.kind==='model'?({assetId:a.assetId,kind:'model',contentKey:hash(a.bytes),byteLength:a.bytes.length,
     url:'http://composition.test/'+a.file,adapterId:'three-gltf-loader',adapterVersion:1,
     decodeOptions:{profile:a.ktx2?'static-ktx2-texture-v1':a.textured?'static-pbr-texture-v1':'static-core-pbr-v1'},
-    modelFacts:a.ktx2?ktx2RustFacts:a.textured?texturedRustFacts:coreRustFacts,
+    modelFacts:a.ktx2?ktx2RustFacts:a.textured?texturedRustFacts:a.assetId==='animated'?animatedRustFacts:coreRustFacts,
     ...(a.textured||a.ktx2?{textureUploadBytes:a.uploadBytes,textureUrls:{}}:{})})
    :({assetId:a.assetId,kind:a.kind,width:a.width,height:a.height,...(a.kind==='video'?actualVideo:{}),
     contentKey:hash(a.bytes),byteLength:a.bytes.length,url:'http://composition.test/'+a.file,decodeOptions:{colorSpace:a.kind==='font'?'none':'srgb',alphaMode:'straight'},adapterId:a.kind==='font'?'fontface-v1':a.kind==='video'?'video-element-v1':'image-element-v1',adapterVersion:1}));
@@ -249,6 +253,23 @@ const results=[];
   const movedModelPixels=await page.evaluate(()=>({inside:pixel(50,13),outside:pixel(20,20)}));
   near(movedModelPixels.inside,[255,255,255]);near(movedModelPixels.outside,[0,0,0]);
   results.push({case:'authored model position moves the 3D-only pixels',movedModelPixels});
+  await select(animatedModel);
+  const animationStart=await page.evaluate(()=>({inside:pixel(36,23),right:pixel(52,23),
+   live:ledger.snapshot().live}));
+  near(animationStart.inside,[255,255,255]);near(animationStart.right,[0,0,0]);
+  await page.evaluate(()=>host.frame({sceneTime:.5,paused:true}));
+  const animationHalf=await page.evaluate(()=>({inside:pixel(36,23),right:pixel(52,23)}));
+  near(animationHalf.inside,[0,0,0]);near(animationHalf.right,[255,255,255]);
+  await page.evaluate(()=>host.frame({sceneTime:1,paused:true}));
+  const animationLoop=await page.evaluate(()=>pixel(36,23));
+  near(animationLoop,[255,255,255]);
+  assert(animationStart.live.ownedCpuBytes>0);
+  results.push({case:'GLB translation clip moves the triangle and loops on its duration',animationStart,animationHalf,animationLoop});
+  const missingClip=await reject(animatedModel,p=>{p.resolvedAssets.find(asset=>
+   asset.kind==='model'&&asset.assetId==='animated').modelFacts.animations[0].name='other';});
+  assert.match(missingClip.error,/model-animation/);
+  assert.deepEqual(missingClip.after.held,missingClip.before.held);
+  results.push({case:'unknown animation clip fails closed without quota',missingClip});
   await select(texturedModel);
   const texturedPixels=await page.evaluate(()=>({red:pixel(36,23),green:pixel(46,23),live:ledger.snapshot().live,
    models:host.stats().sceneStats.models}));
