@@ -182,8 +182,15 @@
     }
     async function pumpVideo() {
       var offset = 0;
+      async function waitActive() {
+        while (!released && (lost || !activeLease || documentHidden())) {
+          await new Promise(function (resolve) { setTimeout(resolve, 250); });
+        }
+      }
       try {
         while (!released && offset < reply.length) {
+          await waitActive();
+          if (released) return;
           var block = await command('lease.read', { leaseId: reply.leaseId, offset: offset, count: CHUNK });
           if (released) return;
           if (block.offset !== offset || block.length !== reply.length || block.contentKey !== reply.contentKey) throw new Error('素材读取版本发生变化，请重试');
