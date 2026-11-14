@@ -65,7 +65,7 @@ pub(crate) mod media;
 #[allow(dead_code)]
 pub(crate) mod media_stream;
 #[allow(dead_code)]
-// Closure, read permit, exact-path index and lease plan are bound; Broker/loader/runtime await qualification.
+// Closure, permit, index, plan and generation controller are bound; Broker HTTP/loader/runtime await qualification.
 pub(crate) mod model_prepare;
 pub(crate) mod output_tokens;
 pub(crate) mod page_events;

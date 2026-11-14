@@ -744,3 +744,19 @@ measure_requested_heap 为 0。三处变异（permit 忽略 active、lease 读�
 active、matches 忽略 generation）均按预期变红后还原。本批仍未接
 WebView/HTTP/CSP、未改 MediaAccess、未创建 decoder/renderer/GPU；loader 与
 首帧继续开放。
+
+2026-11-14 r45 纹理 controller 续接：`ModelTextureController` 持有唯一当前
+`ModelTexturePlan`（`Mutex<Option<..>>`）。`install(input, session, generation)`
+要求严格更大的 generation；同代/回退/非法身份拒绝且不改当前 plan。换代时锁内
+replace、锁外 drop 旧 plan，旧 plan 的 input clone/闭包 charge 随之实际退出。
+`revoke` 清空 plan 并返回是否存在；`read_into(path, offset, &mut out, cancel)`
+在锁内通过 exact-path `plan.permit` 同步读取，无 plan/伪路径返回 None，读错误
+透传；lease 不逃逸，controller drop 自然释放最后 plan。
+
+真实 fixture 证据：g1 安装后读取，g1/0 回退拒绝、g2 接受；drop 原 input 后
+usage 保持，controller revoke 后归零；revoke 后读取 None，再安装 g3 成功。
+空/129B session 与 generation0 不改变空状态；空串/尾斜杠/`..`/大小写/查询串/
+glb 路径全部 None。install+read 的 measure_requested_heap 为 0。三处变异
+（install 允许同代、read 忽略 path、revoke 不清 plan）均按预期变红后还原。
+本批未接 WebView2/HTTP Range/CSP、未改 MediaAccess、未创建 decoder/renderer/
+GPU；loader 与首帧继续开放。
