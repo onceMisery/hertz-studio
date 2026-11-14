@@ -287,7 +287,53 @@ if(diagnostic){
     assert.equal((await maskPage.evaluate(()=>HertzGlBudget.stats())).contexts,0);
     await maskPage.close();
   }
-  fs.writeFileSync(path.join(output,'native-page-evidence.json'),JSON.stringify({source:'actual Rust production selector + GlAdmission + original native page',qualification:'browser integration; copied scheduler metadata matches measured headless rAF; native resource caps unchanged; controlled visibility event/state; Windows/GPU qualification pending',cadence:{intervals:cadence,refreshHz,running:runningCadence},state,blockedBefore,blockedAfter,hiddenBefore,hiddenAfter,visibilityResumed,fits,glow,tracks,mask,paused,retired,errors},null,2));
-  console.log('PASS native composition page: real Rust projection, one context, complete frame, pause and retirement'+(glow?', glow surfaces admitted':'')+(tracks?', tracks/bindings applied':'')+(mask?', mask texture applied':''));
+  const modelDir=path.join(output,'model');
+  let model=null;
+  if(fs.existsSync(path.join(modelDir,'projection.json'))){
+    const modelProjection=JSON.parse(fs.readFileSync(path.join(modelDir,'projection.json'),'utf8'));
+    const modelUri=fs.readFileSync(path.join(modelDir,'uri.txt'),'utf8');
+    const modelInit=bindCadence(fs.readFileSync(path.join(modelDir,'native-init.js'),'utf8'));
+    const modelFiles=JSON.parse(fs.readFileSync(path.join(modelDir,'files.json'),'utf8'));
+    const modelPage=await browser.newPage({viewport:{width:64,height:64}}),modelErrors=[];
+    modelPage.on('pageerror',error=>modelErrors.push(error.message));
+    modelPage.on('console',message=>{if(message.type()==='error')modelErrors.push(message.text());});
+    await modelPage.addInitScript(modelInit+'\nwindow.nativeEvents=[];window.ipc={postMessage:message=>nativeEvents.push(message)};');
+    await modelPage.route('https://**.wallpaper.invalid/**',route=>{
+      if(route.request().url()===modelUri)return route.fulfill({status:200,contentType:'application/json',body:JSON.stringify(modelProjection)});
+      const asset=modelFiles.find(entry=>entry.url===route.request().url());
+      if(asset)return route.fulfill({status:200,contentType:'model/gltf-binary',body:fs.readFileSync(path.join(modelDir,asset.file))});
+      return route.fulfill({status:404,body:''});
+    });
+    await modelPage.route('http://hertz.localhost/',route=>route.fulfill({status:200,contentType:'text/html',body:html}));
+    await modelPage.goto('http://hertz.localhost/');
+    assert.equal(await modelPage.evaluate(async url=>{hertzWallpaper.applyConfig({source:'fixed',audioInput:{kind:'none'},motion:1,quality:'low'});
+      const prepared=hertzWallpaper.applyComposition(url);hertzWallpaper.start(15);return await prepared;},modelUri),true);
+    await modelPage.waitForFunction(()=>nativeEvents.some(event=>event.includes('firstFrame')),null,{timeout:10000}).catch(async failure=>{
+      throw new Error(failure.message+'\n'+JSON.stringify(await modelPage.evaluate(()=>({events:nativeEvents,stats:hertzWallpaper.debug(),budget:HertzGlBudget.stats()}))));
+    });
+    await modelPage.waitForFunction(()=>hertzWallpaper.debug().draws>=2,null,{timeout:10000});
+    const modeled=await modelPage.evaluate(()=>{
+      const gl=document.querySelector('#host canvas').getContext('webgl2');
+      const sample=(x,y)=>{const pixel=new Uint8Array(4);gl.readPixels(x,y,1,1,gl.RGBA,gl.UNSIGNED_BYTE,pixel);return [...pixel];};
+      return {inside:sample(40,40),outside:sample(8,8),stats:hertzWallpaper.debug(),budget:HertzGlBudget.stats()};
+    });
+    assert(Math.min(...modeled.inside.slice(0,3))>200,'static GLB triangle renders through the scene3d camera');
+    assert(Math.max(...modeled.outside.slice(0,3))<=8,'background stays black outside the model');
+    assert.equal(modeled.budget.contexts,1);assert.equal(modeled.budget.error,null);assert.deepEqual(modelErrors,[]);
+    assert.equal(modelProjection.resolvedAssets[0].kind,'model');
+    assert.equal(modelProjection.resolvedAssets[0].modelFacts.profile,'static-core-pbr-v1');
+    assert.equal(modelProjection.pageLimits.programs,3);
+    assert.equal(modelProjection.pageLimits.bufferDeclaredBytes,170);
+    model={pixels:{inside:modeled.inside,outside:modeled.outside},budget:modeled.budget,
+      facts:{profile:modelProjection.resolvedAssets[0].modelFacts.profile,
+        drawCalls:modelProjection.resolvedAssets[0].modelFacts.scene.drawCalls}};
+    await modelPage.evaluate(()=>hertzWallpaper.reveal());
+    await modelPage.screenshot({path:path.join(modelDir,'native-page-model.png')});
+    await modelPage.evaluate(()=>hertzWallpaper.unmount());await modelPage.waitForTimeout(50);
+    assert.equal((await modelPage.evaluate(()=>HertzGlBudget.stats())).contexts,0);
+    await modelPage.close();
+  }
+  fs.writeFileSync(path.join(output,'native-page-evidence.json'),JSON.stringify({source:'actual Rust production selector + GlAdmission + original native page',qualification:'browser integration; copied scheduler metadata matches measured headless rAF; native resource caps unchanged; controlled visibility event/state; Windows/GPU qualification pending',cadence:{intervals:cadence,refreshHz,running:runningCadence},state,blockedBefore,blockedAfter,hiddenBefore,hiddenAfter,visibilityResumed,fits,glow,tracks,mask,model,paused,retired,errors},null,2));
+  console.log('PASS native composition page: real Rust projection, one context, complete frame, pause and retirement'+(glow?', glow surfaces admitted':'')+(tracks?', tracks/bindings applied':'')+(mask?', mask texture applied':'')+(model?', scene3d model rendered':''));
  }finally{await browser.close();}
 })().catch(error=>{console.error(error.stack);process.exitCode=1;});

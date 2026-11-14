@@ -136,43 +136,83 @@ impl FontTextPreflightContext {
 enum CompositionAsset {
     Media(ResolvedMedia),
     Font(Box<PreparedFont>),
+    Model(Box<PreparedModel>),
+}
+
+/// One installed GLB whose checked structure was projected into the shipped
+/// static-core runtime facts. The pin and facts describe the same package entry.
+#[derive(Clone)]
+pub(crate) struct PreparedModel {
+    reference: AssetRef,
+    media: Arc<PinnedMedia>,
+    url: String,
+    content_key: String,
+    facts: Value,
+}
+
+impl PreparedModel {
+    fn reference(&self) -> &AssetRef {
+        &self.reference
+    }
+    fn pin(&self) -> &Arc<PinnedMedia> {
+        &self.media
+    }
+    fn url(&self) -> &str {
+        &self.url
+    }
+    fn content_key(&self) -> &str {
+        &self.content_key
+    }
+    fn facts(&self) -> &Value {
+        &self.facts
+    }
 }
 
 impl CompositionAsset {
     fn as_media(&self) -> Option<&ResolvedMedia> {
         match self {
             Self::Media(media) => Some(media),
-            Self::Font(_) => None,
+            Self::Font(_) | Self::Model(_) => None,
         }
     }
     fn as_font(&self) -> Option<&PreparedFont> {
         match self {
             Self::Font(font) => Some(font),
-            Self::Media(_) => None,
+            Self::Media(_) | Self::Model(_) => None,
+        }
+    }
+    fn as_model(&self) -> Option<&PreparedModel> {
+        match self {
+            Self::Model(model) => Some(model),
+            Self::Media(_) | Self::Font(_) => None,
         }
     }
     fn reference(&self) -> &AssetRef {
         match self {
             Self::Media(media) => media.reference(),
             Self::Font(font) => font.reference(),
+            Self::Model(model) => model.reference(),
         }
     }
     fn pin(&self) -> &Arc<PinnedMedia> {
         match self {
             Self::Media(media) => &media.input().media,
             Self::Font(font) => &font.input().media,
+            Self::Model(model) => model.pin(),
         }
     }
     fn content_key(&self) -> &str {
         match self {
             Self::Media(media) => media.content_key(),
             Self::Font(font) => font.content_key(),
+            Self::Model(model) => model.content_key(),
         }
     }
     fn url(&self) -> &str {
         match self {
             Self::Media(media) => media.url(),
             Self::Font(font) => font.url(),
+            Self::Model(model) => model.url(),
         }
     }
 }
@@ -656,6 +696,55 @@ async fn prepare_assets(
             hertz_wallpaper::AssetKind::Font => {
                 return Err(JobError::new("font_not_prepared", "最终字体没有文字集合"));
             }
+            hertz_wallpaper::AssetKind::Model => {
+                let media = Arc::new(
+                    jobs.assets()
+                        .pin_verified_media(&package.package_hash, &asset.source)?
+                        .ok_or_else(|| {
+                            JobError::new("hash_mismatch", "model 条目未通过不可变包核验")
+                        })?,
+                );
+                if media.entry.path != asset.source {
+                    return Err(JobError::new("hash_mismatch", "model 条目路径不一致"));
+                }
+                check_cancel(cancel)?;
+                let mut bytes = Vec::with_capacity(media.entry.bytes as usize + 1);
+                super::assets::open_immutable(&media.path)?
+                    .take(hertz_wallpaper::MAX_MODEL_BYTES + 1)
+                    .read_to_end(&mut bytes)
+                    .map_err(|error| JobError::io(format!("读取固定模型失败：{error}")))?;
+                check_cancel(cancel)?;
+                if bytes.len() as u64 != media.entry.bytes {
+                    return Err(JobError::new("hash_mismatch", "model 条目长度变化"));
+                }
+                let checked =
+                    hertz_wallpaper::model_binary::inspect_glb_resource_content_with_cancel(
+                        &bytes[..],
+                        media.entry.bytes,
+                        &package.manifest,
+                        &asset.source,
+                        Some(cancel),
+                    )
+                    .map_err(package_error)?;
+                let facts = hertz_wallpaper::model_profile::static_core_profile_facts(
+                    checked.resource(),
+                    checked.bytes(),
+                )
+                .map_err(package_error)?;
+                let url = super::webresource::files_url(&package.package_hash, &asset.source)
+                    .ok_or_else(|| JobError::new("adapter_unavailable", "model URL 无效"))?;
+                CompositionAsset::Model(Box::new(PreparedModel {
+                    reference: AssetRef {
+                        package_hash: package.package_hash.clone(),
+                        asset_id: asset.id.clone(),
+                        variant_id: None,
+                    },
+                    media,
+                    url,
+                    content_key: checked.sha256_hex(),
+                    facts,
+                }))
+            }
             _ => {
                 return Err(JobError::new(
                     "adapter_unavailable",
@@ -706,15 +795,39 @@ fn validate_adapters(compiled: &CompiledDocument) -> Result<()> {
 
 fn validate_structure(compiled: &CompiledDocument) -> Result<()> {
     let document = compiled.document();
-    if document.canvas.scene3d.is_some() {
+    let graphic3d = compiled
+        .ir()
+        .nodes()
+        .iter()
+        .any(|node| node.node_type != "builtinScene" && node.space == "3d");
+    if graphic3d && document.canvas.scene3d.is_none() {
         return Err(JobError::new(
             "adapter_unavailable",
-            "P2-02 尚未准备 3D adapter",
+            "3D 节点必须声明 canvas.scene3d 相机",
         ));
     }
+    if graphic3d {
+        let mut seen2d = false;
+        for &index in compiled.ir().painter_order() {
+            let node = &compiled.ir().nodes()[index];
+            if node.node_type == "builtinScene" {
+                continue;
+            }
+            if node.space == "3d" {
+                if seen2d {
+                    return Err(JobError::new(
+                        "adapter_unavailable",
+                        "3D 节点必须是 painterOrder 前缀",
+                    ));
+                }
+            } else {
+                seen2d = true;
+            }
+        }
+    }
     // Tracks are evaluated by the shipped runtime only for plain numeric
-    // properties; layout rebuilds and particle instance changes would need a
-    // new static plan, so the native projection rejects them here.
+    // properties; layout rebuilds, particle instance changes and 3D transforms
+    // would need a new static plan, so the native projection rejects them here.
     for track in compiled.ir().tracks() {
         let slot = compiled
             .ir()
@@ -726,7 +839,8 @@ fn validate_structure(compiled: &CompiledDocument) -> Result<()> {
             .nodes()
             .get(slot.node_index)
             .ok_or_else(|| JobError::new("adapter_unavailable", "P2-02 track target 无效"))?;
-        let rebuild = node.node_type == "builtinScene"
+        let rebuild = node.space == "3d"
+            || node.node_type == "builtinScene"
             || (node.node_type == "text"
                 && ["width", "height", "fontSize", "lineHeight"].contains(&slot.property.as_str()))
             || (node.node_type == "particles"
@@ -738,6 +852,19 @@ fn validate_structure(compiled: &CompiledDocument) -> Result<()> {
                     "P2-02 track adapter 尚未准备：{}:{}",
                     node.node_type, slot.property
                 ),
+            ));
+        }
+    }
+    for binding in compiled.ir().bindings() {
+        let node = compiled
+            .ir()
+            .numeric_slots()
+            .get(binding.target_slot)
+            .and_then(|slot| compiled.ir().nodes().get(slot.node_index));
+        if node.is_some_and(|node| node.space == "3d") {
+            return Err(JobError::new(
+                "adapter_unavailable",
+                "3D binding adapter 尚未准备",
             ));
         }
     }
@@ -756,6 +883,20 @@ fn validate_structure(compiled: &CompiledDocument) -> Result<()> {
                 format!("P2-02 effect adapter 尚未准备：{}", effect.effect_type),
             ));
         }
+        if let EffectTarget::Node { node_id } = &effect.target {
+            let node = compiled
+                .ir()
+                .nodes()
+                .iter()
+                .find(|node| &node.id == node_id)
+                .ok_or_else(|| JobError::new("adapter_unavailable", "effect target 无效"))?;
+            if node.space == "3d" {
+                return Err(JobError::new(
+                    "adapter_unavailable",
+                    "3D 节点 effect adapter 尚未准备",
+                ));
+            }
+        }
         // The mask effect is the only effect with one prepared mask texture;
         // every other effect must stay asset-free until its own adapter lands.
         if !effect.assets.is_empty() && effect.effect_type != "mask" {
@@ -769,15 +910,27 @@ fn validate_structure(compiled: &CompiledDocument) -> Result<()> {
         if node.node_type == "builtinScene" {
             continue;
         }
-        if node.space != "2d"
-            || !matches!(
-                node.node_type.as_str(),
-                "image" | "video" | "group" | "particles" | "text"
-            )
+        if !matches!(
+            node.node_type.as_str(),
+            "image" | "video" | "group" | "particles" | "text" | "model"
+        ) || (node.space != "2d"
+            && (node.space != "3d" || !matches!(node.node_type.as_str(), "group" | "model")))
         {
             return Err(JobError::new(
                 "adapter_unavailable",
                 format!("P2-02 adapter 尚未准备：{}:{}", node.node_type, node.space),
+            ));
+        }
+        if node.space == "3d"
+            && node
+                .constant_slots
+                .get("animationClip")
+                .and_then(|slot| compiled.ir().constant_slots()[*slot].value.as_str())
+                .is_some_and(|clip| !clip.is_empty())
+        {
+            return Err(JobError::new(
+                "adapter_unavailable",
+                "model animation adapter 尚未准备",
             ));
         }
     }
@@ -864,8 +1017,45 @@ fn geometry_costs(compiled: &CompiledDocument, final_values: &FinalPublicValues)
         costs.triangles += profile.source_primitives.triangles;
     }
     for (index, node) in compiled.ir().nodes().iter().enumerate() {
+        if node.space == "3d" && node.node_type != "builtinScene" {
+            if final_number(compiled, final_values, index, "opacity")? != 1.0 {
+                return Err(JobError::new(
+                    "adapter_unavailable",
+                    "3D 节点 opacity 必须为 1",
+                ));
+            }
+            costs.depth_bytes_per_pixel = 4;
+            if node.node_type == "model" {
+                let slot = node.constant_slots.get("animationClip").ok_or_else(|| {
+                    JobError::new("adapter_unavailable", "model animationClip 槽缺失")
+                })?;
+                let clip = compiled
+                    .ir()
+                    .public_properties()
+                    .iter()
+                    .find_map(|public| {
+                        if matches!(public.target, PublicTarget::Constant { slot: target } if target == *slot) {
+                            final_values.values().get(&public.descriptor.id).and_then(Value::as_str)
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_else(|| {
+                        compiled.ir().constant_slots()[*slot]
+                            .value
+                            .as_str()
+                            .unwrap_or("")
+                    });
+                if !clip.is_empty() {
+                    return Err(JobError::new(
+                        "adapter_unavailable",
+                        "model animation adapter 尚未准备",
+                    ));
+                }
+            }
+        }
         let bytes = match node.node_type.as_str() {
-            "group" | "builtinScene" => 0,
+            "group" | "builtinScene" | "model" => 0,
             "particles" => {
                 costs.programs = costs.programs.max(if source.is_some() { 7 } else { 3 });
                 let count = final_number(compiled, final_values, index, "count")? as u64;
@@ -1076,6 +1266,7 @@ impl PreparedComposition {
             CompositionAsset::Font(font) => {
                 json!({"colorSpace":"none","fontAdapterVersion":font.adapter_version()})
             }
+            CompositionAsset::Model(_) => json!({"profile":"static-core-pbr-v1"}),
         }
     }
     fn media_costs(&self) -> Result<Costs> {
@@ -1085,9 +1276,9 @@ impl PreparedComposition {
         let mut cost = geometry_costs(&self.compiled, &self.final_values)?;
         let mut identities = BTreeSet::new();
         for usage in self.final_values.resource_uses() {
-            // Font preparation has its own typed receipt; preliminary media
-            // range checks still run before any decoder/native qualification.
-            if usage.usage == "font" {
+            // Font preparation has its own typed receipt; model preparation is
+            // a checked GLB projection with its own facts-based costs below.
+            if usage.usage == "font" || usage.usage == "model" {
                 continue;
             }
             let media = self
@@ -1177,6 +1368,41 @@ impl PreparedComposition {
                 }
                 cost.decode_rate = checked_sum(&[cost.decode_rate, rate as u64])?;
             }
+        }
+        for asset in self.assets.values() {
+            let Some(model) = asset.as_model() else {
+                continue;
+            };
+            let facts = model.facts();
+            let invalid = || JobError::new("adapter_unavailable", "model facts 无效");
+            let input = facts.get("input").ok_or_else(invalid)?;
+            let resources = facts.get("resources").ok_or_else(invalid)?;
+            let scene = facts.get("scene").ok_or_else(invalid)?;
+            let json = input["jsonBytes"].as_u64().ok_or_else(invalid)?;
+            cost.buffer_bytes = checked_sum(&[
+                cost.buffer_bytes,
+                resources["gpuBufferBytes"].as_u64().ok_or_else(invalid)?,
+            ])?;
+            cost.private_cpu_bytes = checked_sum(&[
+                cost.private_cpu_bytes,
+                input["encodedBytes"].as_u64().ok_or_else(invalid)?,
+                input["binBytes"].as_u64().ok_or_else(invalid)?,
+                checked_product(json, 2)?,
+                resources["cpuBackingBytes"].as_u64().ok_or_else(invalid)?,
+            ])?;
+            cost.programs = checked_sum(&[cost.programs, 1])?;
+            // The original native page binds one fixed small fallback texture
+            // even for a texture-free composition; declare bounded headroom so
+            // the page GL reservation can cover it without touching caps.
+            cost.texture_bytes = checked_sum(&[cost.texture_bytes, 4096])?;
+            cost.draw_calls = checked_sum(&[
+                cost.draw_calls,
+                scene["drawCalls"].as_u64().ok_or_else(invalid)?,
+            ])?;
+            cost.triangles = checked_sum(&[
+                cost.triangles,
+                scene["triangles"].as_u64().ok_or_else(invalid)?,
+            ])?;
         }
         Ok(cost)
     }
@@ -1340,6 +1566,11 @@ impl PreparedComposition {
             CompositionAsset::Font(font) => json!({"assetId":id,"representationId":id,"kind":"font","contentKey":font.content_key(),
                 "byteLength":font.input().media.entry.bytes,"url":font.url(),"adapterId":font.adapter_id(),
                 "adapterVersion":1,"decodeOptions":self.asset_decode_options(asset),"fontMetadata":font.input().metadata}),
+            CompositionAsset::Model(model) => json!({"assetId":id,"representationId":id,"kind":"model",
+                "logicalKind":"model","representationKind":"model","mime":"model/gltf-binary",
+                "contentKey":model.content_key(),"byteLength":model.pin().entry.bytes,"url":model.url(),
+                "adapterId":"three-gltf-loader","adapterVersion":1,
+                "decodeOptions":self.asset_decode_options(asset),"modelFacts":model.facts()}),
         }).collect();
         let mut identities = BTreeMap::new();
         let mut grouped: BTreeMap<String, Vec<(String, ResolvedAssetIdentity)>> = BTreeMap::new();
@@ -1361,6 +1592,10 @@ impl PreparedComposition {
                         "fontAdapterVersion".into(),
                         digest(&font.adapter_version())?,
                     ),
+                ]),
+                CompositionAsset::Model(_) => BTreeMap::from([
+                    ("adapter".into(), digest(&"three-gltf-loader")?),
+                    ("modelProfile".into(), digest(&"static-core-pbr-v1")?),
                 ]),
             };
             grouped
