@@ -1279,10 +1279,11 @@ fn geometry_costs(compiled: &CompiledDocument, final_values: &FinalPublicValues)
     }
     for (index, node) in compiled.ir().nodes().iter().enumerate() {
         if node.space == "3d" && node.node_type != "builtinScene" {
-            if final_number(compiled, final_values, index, "opacity")? != 1.0 {
+            let opacity = final_number(compiled, final_values, index, "opacity")?;
+            if !(0.0..=1.0).contains(&opacity) {
                 return Err(JobError::new(
                     "adapter_unavailable",
-                    "3D 节点 opacity 必须为 1",
+                    "3D 节点 opacity 必须是 0..1 内的有限值",
                 ));
             }
             costs.depth_bytes_per_pixel = 4;
@@ -1668,6 +1669,10 @@ impl PreparedComposition {
             } else {
                 0
             };
+            let material_clone_bytes = checked_product(
+                std::cmp::max(1, resources["materialCount"].as_u64().unwrap_or(1)),
+                1024,
+            )?;
             cost.buffer_bytes = checked_sum(&[
                 cost.buffer_bytes,
                 resources["gpuBufferBytes"].as_u64().ok_or_else(invalid)?,
@@ -1679,6 +1684,7 @@ impl PreparedComposition {
                 checked_product(json, 2)?,
                 resources["cpuBackingBytes"].as_u64().ok_or_else(invalid)?,
                 animation_cpu,
+                material_clone_bytes,
             ])?;
             cost.programs = checked_sum(&[
                 cost.programs,

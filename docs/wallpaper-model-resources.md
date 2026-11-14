@@ -1360,3 +1360,23 @@ contexts 1→0）。
 仍未闭合：Basis ETC1S/UASTC 转码与 transcoder 资源/Worker/CSP、GPU 压缩格式
 设备矩阵、GLB 蒙皮/形变动画、动画混合与多 clip、逐实例材质透明度、多材质
 program 精确计数、真实 GPU 显存/首帧与 A01/A05–A10 外部验收。
+
+2026-11-15 r80 逐实例材质透明度续接：JS `nodes.js` 为每个 3D model 实例克隆
+全部 mesh 材质（共享贴图，记录 authored opacity/transparent/depthWrite），
+`runtime.js` 在 MATERIAL 同步时按 `baseOpacity × node.opacity` 更新 clone：
+透明度 <1 时 `transparent=true`、`depthWrite=false`，恢复 1 时还原 authored
+状态；model opacity 数值变化计入 rebuild 差分。`plan.js` 移除 3D opacity 必须
+为 1 的拒绝，改为有限且 0..1；每个 model 节点计入 `materialCount × 1024B`
+clone CPU 预算，runtime 构造票与 delta 重建票同步包含该预算。桌面
+`geometry_costs` 接受 0..1 的 3D opacity，`media_costs` 为模型加入相同 clone
+字节，`pageLimits` 同步；未知/非有限范围仍在规划期拒绝。
+
+真实证据：组合浏览器 52 项通过（新增 opacity=0.5 白色三角形叠加黑色背景得到
+[188,188,188]）；桌面新增 `model-opacity` fixture 与投影测试（programs=3、
+buffer=170、ownedCpu≥1024）；原生页面新增 `model-opacity` 阶段（真实 Rust
+投影 + GlAdmission，中心像素约为 188、外部黑、budget.error=null、contexts 1→0）。
+现有 model 原生 fixture 因 pageLimits 增加 clone 预算重新发射并通过。
+
+仍未闭合：Basis ETC1S/UASTC 转码与 transcoder 资源/Worker/CSP、GPU 压缩格式
+设备矩阵、GLB 蒙皮/形变动画、动画混合与多 clip、多材质 program 精确计数、
+真实 GPU 显存/首帧与 A01/A05–A10 外部验收。

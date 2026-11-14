@@ -87,7 +87,7 @@ function reserveAll(context, scope, plan, generation) {
         const spec = plan.nodePlans.find(item => item.resources.asset === requirement);
         const textured = requirement.modelFacts.profile === 'static-pbr-texture-v1'
           || requirement.modelFacts.profile === 'static-ktx2-texture-v1';
-        admissions={cpu:require({ownedCpuBytes:modelConstructionBytes(requirement.modelFacts)},'Composition static model construction'),
+        admissions={cpu:require({ownedCpuBytes:modelConstructionBytes(requirement.modelFacts)+(spec.materialBytes||0)},'Composition static model construction'),
           ...(textured ? {
             decode:require({decodeReservedBytes:requirement.textureUploadBytes},'Composition model texture decode window'),
             upload:require({textureDeclaredBytes:requirement.textureUploadBytes},'Composition model texture upload')} : {}),
@@ -254,6 +254,16 @@ export async function createCompositionRuntime(THREE, context, scope, plan, opti
       node.opacity = (parent?.opacity ?? 1) * n('opacity');
       node.object.visible = (parent?.object.visible ?? true) && spec.constant('visible');
       if(node.material){node.material.uniforms.opacity.value=node.opacity;updateNodeMaterial(THREE,node,nodeAssets(spec));}
+      if(node.modelMaterials){
+        for(const material of node.modelMaterials){
+          const base=material.userData.modelBaseOpacity??1,next=base*node.opacity;
+          if(material.opacity!==next)material.opacity=next;
+          const transparent=next<1||!!material.userData.modelAuthoredTransparent;
+          if(material.transparent!==transparent){material.transparent=transparent;material.needsUpdate=true;}
+          const depthWrite=next<1?false:material.userData.modelAuthoredDepthWrite!==false;
+          if(material.depthWrite!==depthWrite)material.depthWrite=depthWrite;
+        }
+      }
       work.materialUpdates[spec.index]++;
     }
     if (!changeLocal) return;
@@ -379,7 +389,8 @@ export async function createCompositionRuntime(THREE, context, scope, plan, opti
       slots++;const slot=plan.ir.numericSlots[index],type=plan.ir.nodes[slot.nodeIndex].nodeType,dep=plan.ir.slotDependencies[index];dependency(dep);
       if(dep.nodes.some(node=>node.nodeIndex===slot.nodeIndex&&(node.mask&MATRIX)))matrix(slot.nodeIndex);
       if(type==='text'&&['width','height','fontSize','lineHeight'].includes(slot.property)
-        ||type==='particles'&&['count','seed'].includes(slot.property))rebuilds.add(slot.nodeIndex);
+        ||type==='particles'&&['count','seed'].includes(slot.property)
+        ||type==='model'&&slot.property==='opacity')rebuilds.add(slot.nodeIndex);
     }
     for(let index=0;index<plan.values.constants.length;index++)if(plan.values.constants[index]!==next.values.constants[index]){
       constants++;const slot=plan.ir.constantSlots[index],type=plan.ir.nodes[slot.nodeIndex].nodeType,dep=constantDependencies[index];dependency(dep);
@@ -419,6 +430,7 @@ export async function createCompositionRuntime(THREE, context, scope, plan, opti
     for(const index of changes.rebuilds){const spec=next.nodePlans[index];
       if(spec.node.nodeType==='model'){
         modelPrograms+=Math.max(1,spec.resources.asset.modelFacts.materials?.length||1);
+        amount.ownedCpuBytes+=spec.materialBytes||0;
         variants.add('model');continue;
       }
       const bytes=spec.node.nodeType==='particles'?spec.count*20:92;
@@ -472,7 +484,7 @@ export async function createCompositionRuntime(THREE, context, scope, plan, opti
         else if(requirement.kind==='model'){
           const spec=next.nodePlans.find(item=>item.resources.asset===requirement);
           const textured=requirement.modelFacts.profile==='static-pbr-texture-v1'||requirement.modelFacts.profile==='static-ktx2-texture-v1';
-          tickets={cpu:require({ownedCpuBytes:modelConstructionBytes(requirement.modelFacts)},'Composition changed static model construction'),
+          tickets={cpu:require({ownedCpuBytes:modelConstructionBytes(requirement.modelFacts)+(spec.materialBytes||0)},'Composition changed static model construction'),
             ...(textured?{
               decode:require({decodeReservedBytes:requirement.textureUploadBytes},'Composition changed model texture decode window'),
               upload:require({textureDeclaredBytes:requirement.textureUploadBytes},'Composition changed model texture upload')}:{}),

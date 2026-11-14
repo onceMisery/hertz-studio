@@ -256,7 +256,7 @@ export function buildNode(THREE, context, scope, spec, assets, generation) {
       animation = { mixer, clip, duration: clip.duration };
       scope.defer(() => { mixer.stopAllAction(); mixer.uncacheRoot(instance.root); });
     }
-    const materials = new Set();
+    const materials = new Set(), modelMaterials = [], materialClones = new Map();
     const profile = spec.resources.asset?.decodeOptions?.profile;
     object.traverse(child => {
       if (!child.isMesh) return;
@@ -266,10 +266,20 @@ export function buildNode(THREE, context, scope, spec, assets, generation) {
       // untextured slice uses the dielectric response. Textured materials keep
       // their authored PBR factors.
       if (profile === 'static-core-pbr-v1' && child.material?.isMeshStandardMaterial) child.material.metalness = 0;
-      if (child.material) materials.add(child.material);
+      if (!child.material) return;
+      let clone = materialClones.get(child.material);
+      if (!clone) {
+        clone = child.material.clone();
+        clone.userData = { ...clone.userData, modelBaseOpacity: clone.opacity,
+          modelAuthoredTransparent: clone.transparent, modelAuthoredDepthWrite: clone.depthWrite };
+        materialClones.set(child.material, clone); modelMaterials.push(clone);
+        scope.defer(() => clone.dispose());
+      }
+      child.material = clone;
+      materials.add(clone);
     });
     scope.defer(() => instance.release());
-    return { object, spec, model: true, opacity: 1, materials: [...materials], animation };
+    return { object, spec, model: true, opacity: 1, materials: [...materials], modelMaterials, animation };
   }
   let texture = assets.asset?.texture || assets.spriteAsset?.texture || null;
   if (spec.node.nodeType === 'text') {

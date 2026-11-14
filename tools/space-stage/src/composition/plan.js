@@ -418,8 +418,11 @@ export function compilePlan(projection, registry = null, identity = null) {
     if (node.nodeType !== 'group' && node.nodeType !== 'particles' && node.nodeType !== 'builtinScene' && node.nodeType !== 'model') {
       resources.bufferDeclaredBytes += 92; resources.ownedCpuBytes += 92; primitives.drawCalls++;primitives.triangles+=2;
     }
-    if (node.space === '3d' && number(node, 'opacity') !== 1)
-      throw new Error('composition-adapter-unavailable:3d-opacity');
+    if (node.space === '3d') {
+      const opacity = number(node, 'opacity');
+      if (!Number.isFinite(opacity) || opacity < 0 || opacity > 1)
+        throw new Error('composition-adapter-unavailable:3d-opacity');
+    }
     if (node.nodeType === 'model') {
       if (!result.resources.asset) throw new Error('composition-model-preparation-required');
       const clip = constant(node, 'animationClip');
@@ -431,6 +434,8 @@ export function compilePlan(projection, registry = null, identity = null) {
           throw new Error('composition-adapter-unavailable:model-animation');
         result.animation = clip;
       }
+      result.materialBytes = Math.max(1, result.resources.asset.modelFacts.resources.materialCount || 1) * 1024;
+      resources.ownedCpuBytes += result.materialBytes;
       result.model = true;
     }
     if (node.nodeType === 'text') {
