@@ -437,11 +437,27 @@ impl ModelTextureController {
     /// plans yield no reader.
     pub(crate) fn chunk_reader<'a>(&'a self, path: &'a str) -> Option<ModelTextureChunkReader<'a>> {
         let total = self.texture_len(path)?;
+        self.chunk_reader_range(path, 0, total)
+    }
+
+    /// Windowed reader for one exact path. `total` in the reader is the window
+    /// end, so request ranges never escape the canonical byte length.
+    pub(crate) fn chunk_reader_range<'a>(
+        &'a self,
+        path: &'a str,
+        start: u64,
+        length: u64,
+    ) -> Option<ModelTextureChunkReader<'a>> {
+        let total = self.texture_len(path)?;
+        let end = start.checked_add(length)?;
+        if end > total {
+            return None;
+        }
         Some(ModelTextureChunkReader {
             controller: self,
             path,
-            offset: 0,
-            total,
+            offset: start,
+            total: end,
         })
     }
 

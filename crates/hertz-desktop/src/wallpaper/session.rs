@@ -36,6 +36,7 @@ use super::budget::{Allocation, AllocationSnapshot, BudgetCoordinator, BudgetReq
 use super::gl_plan::GlAdmission;
 use super::jobs::JobError;
 use super::media::Container;
+use super::media_stream::{parse_range_header, plan_response, RangeRequest, StreamPlan};
 use super::model_prepare::{ModelInput, ModelTextureChunkReader, ModelTextureController};
 use super::target_planner::ResolvedMedia;
 
@@ -528,6 +529,36 @@ impl WallpaperSession {
         self.textures.chunk_reader(path)
     }
 
+    /// Broker-shaped HEAD/GET/Range plan over the current texture plan. Unknown
+    /// paths yield None (caller maps 404); a body without a reader fails closed.
+    pub(crate) fn plan_texture_response<'a>(
+        &'a self,
+        path: &'a str,
+        method_head: bool,
+        range_header: Option<&str>,
+    ) -> Option<ModelTextureResponse<'a>> {
+        let total = self.texture_len(path)?;
+        let request = parse_range_header(range_header, total);
+        let plan = plan_response(method_head, request, total);
+        let reader = if plan.body {
+            match request {
+                RangeRequest::Satisfied {
+                    start,
+                    end_inclusive,
+                } => self
+                    .textures
+                    .chunk_reader_range(path, start, end_inclusive - start + 1),
+                _ => self.textures.chunk_reader_range(path, 0, total),
+            }
+        } else {
+            None
+        };
+        if plan.body && reader.is_none() {
+            return None;
+        }
+        Some(ModelTextureResponse { plan, reader })
+    }
+
     /// 页面加载描述只读借用当前已准入计划，不能替换目标或资源。
     pub(crate) fn media(&self) -> Option<&ResolvedMedia> {
         self.media.as_ref()?.media.as_ref()
@@ -907,6 +938,13 @@ pub(crate) enum FaultDomain {
     Session,
     /// Explorer 全局重挂：整机一份，不按屏幕数消耗。
     Global,
+}
+
+/// Broker-shaped response plan plus its bounded body reader. The reader is
+/// absent for HEAD/416/400; no File or path owner escapes.
+pub(crate) struct ModelTextureResponse<'a> {
+    pub(crate) plan: StreamPlan,
+    pub(crate) reader: Option<ModelTextureChunkReader<'a>>,
 }
 
 /// 恢复预算账本：窗口内最多 `MAX_RECOVERY_ATTEMPTS` 次；超额进入终态，
