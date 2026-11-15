@@ -11,6 +11,7 @@ pub mod ai;
 pub mod archive;
 pub mod catalog;
 pub mod document;
+pub mod generation;
 pub mod json;
 pub mod ktx2_upload;
 pub mod manifest;
