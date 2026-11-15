@@ -4,10 +4,10 @@
 const assert=require('node:assert/strict'), fs=require('node:fs'), path=require('node:path');
 const {execFileSync}=require('node:child_process'), {createHash}=require('node:crypto'), zlib=require('node:zlib');
 const {loadCompositionFontFixture}=require('./composition-font-fixture.js');
-const {coreGlb,animatedGlb,texturedGlb,ktx2Glb,basisGlb,basisUastcGlb,multiMaterialGlb}=require('./composition-model-fixture.js');
+const {coreGlb,animatedGlb,twoClipGlb,texturedGlb,ktx2Glb,basisGlb,basisUastcGlb,multiMaterialGlb}=require('./composition-model-fixture.js');
 const {chromium}=require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const root=path.resolve(__dirname,'..'), output=path.join(root,'output/a04-p2-20261108/composition-browser');
-const fontFixture=loadCompositionFontFixture(), modelFixture=coreGlb(), animatedFixture=animatedGlb(), texturedFixture=texturedGlb(), ktx2Fixture=ktx2Glb(), basisFixture=basisGlb(), basisUastcFixture=basisUastcGlb(), multiFixture=multiMaterialGlb(), multiMaskFixture=multiMaterialGlb(true);
+const fontFixture=loadCompositionFontFixture(), modelFixture=coreGlb(), animatedFixture=animatedGlb(), twoClipFixture=twoClipGlb(), texturedFixture=texturedGlb(), ktx2Fixture=ktx2Glb(), basisFixture=basisGlb(), basisUastcFixture=basisUastcGlb(), multiFixture=multiMaterialGlb(), multiMaskFixture=multiMaterialGlb(true);
 fs.mkdirSync(output,{recursive:true});
 function hash(bytes){return createHash('sha256').update(bytes).digest('hex');}
 function crc(bytes){let c=0xffffffff;for(const b of bytes){c^=b;for(let i=0;i<8;i++)c=(c>>>1)^((c&1)?0xedb88320:0);}return (c^0xffffffff)>>>0;}
@@ -29,6 +29,8 @@ const sourceAssets=[
  {assetId:'mesh',kind:'model',file:'mesh.glb',mime:'model/gltf-binary',bytes:modelFixture.glb,modelInput:modelFixture.input},
  {assetId:'animated',kind:'model',file:'animated.glb',mime:'model/gltf-binary',bytes:animatedFixture.glb,
   modelInput:animatedFixture.input},
+ {assetId:'two-clip',kind:'model',file:'two-clip.glb',mime:'model/gltf-binary',bytes:twoClipFixture.glb,
+  modelInput:twoClipFixture.input},
  {assetId:'textured',kind:'model',file:'textured.glb',mime:'model/gltf-binary',bytes:texturedFixture.glb,
   modelInput:texturedFixture.input,textured:true,uploadBytes:64,imageBytes:texturedFixture.imageBytes},
  {assetId:'ktx2',kind:'model',file:'ktx2.glb',mime:'model/gltf-binary',bytes:ktx2Fixture.glb,
@@ -90,6 +92,9 @@ const model=compile([modelNode()],modelCanvas);
 const coreRustFacts=JSON.parse(execFileSync(factsExecutable,[path.join(output,'mesh.glb'),compilerInputs.get(model)[0],'assets/mesh.glb'],{cwd:root,encoding:'utf8'}));
 const animatedModel=compile([modelNode('mesh',{animationClip:'move'},'animated')],modelCanvas);
 const animatedRustFacts=JSON.parse(execFileSync(factsExecutable,[path.join(output,'animated.glb'),compilerInputs.get(animatedModel)[0],'assets/animated.glb'],{cwd:root,encoding:'utf8'}));
+const twoClipModel=compile([modelNode('mesh',{animationClip:'slide'},'two-clip')],modelCanvas,
+ [property('clip','text','mesh','animationClip','slide',{maxLength:128})]);
+const twoClipRustFacts=JSON.parse(execFileSync(factsExecutable,[path.join(output,'two-clip.glb'),compilerInputs.get(twoClipModel)[0],'assets/two-clip.glb'],{cwd:root,encoding:'utf8'}));
 const texturedModel=compile([modelNode('mesh',{},'textured')],modelCanvas);
 const texturedRustFacts=JSON.parse(execFileSync(factsExecutable,[path.join(output,'textured.glb'),compilerInputs.get(texturedModel)[0],'assets/textured.glb','textured'],{cwd:root,encoding:'utf8'}));
 const ktx2Model=compile([modelNode('mesh',{},'ktx2')],modelCanvas);
@@ -224,7 +229,8 @@ const results=[];
     decodeOptions:{profile:a.ktx2?'static-ktx2-texture-v1':a.textured?'static-pbr-texture-v1':'static-core-pbr-v1'},
     modelFacts:a.assetId==='basis'?basisRustFacts:a.assetId==='basis-uastc'?basisUastcRustFacts
      :a.assetId==='multi'?multiRustFacts:a.assetId==='multi-mask'?multiMaskRustFacts
-     :a.ktx2?ktx2RustFacts:a.textured?texturedRustFacts:a.assetId==='animated'?animatedRustFacts:coreRustFacts,
+     :a.ktx2?ktx2RustFacts:a.textured?texturedRustFacts:a.assetId==='animated'?animatedRustFacts
+     :a.assetId==='two-clip'?twoClipRustFacts:coreRustFacts,
     ...(a.textured?{textureUploadBytes:a.uploadBytes,textureUrls:{}}
      :a.ktx2?{textureUploadBytes:a.transcode
        ?(a.assetId==='basis'?basisRustFacts.resources.imageUploadBytes:basisUastcRustFacts.resources.imageUploadBytes)
@@ -286,6 +292,20 @@ const results=[];
   near(animationLoop,[255,255,255]);
   assert(animationStart.live.ownedCpuBytes>0);
   results.push({case:'GLB translation clip moves the triangle and loops on its duration',animationStart,animationHalf,animationLoop});
+  await select(twoClipModel);
+  await page.evaluate(()=>host.frame({sceneTime:.5,paused:true}));
+  const slideClip=await page.evaluate(()=>({right:pixel(52,23),low:pixel(40,35),live:ledger.snapshot().live}));
+  near(slideClip.right,[255,255,255]);near(slideClip.low,[0,0,0]);
+  const clipSwitchStats=await select(publicValues(twoClipModel,{'clip':'fall'}));
+  assert.equal(clipSwitchStats.state,'ready');
+  await page.evaluate(()=>host.frame({sceneTime:.5,paused:true}));
+  const fallClip=await page.evaluate(()=>({right:pixel(52,23),low:pixel(40,35),
+   live:ledger.snapshot().live,work:host.stats().sceneStats.work}));
+  near(fallClip.right,[0,0,0]);near(fallClip.low,[255,255,255]);
+  assert.equal(fallClip.work.nodeRebuilds[0],0);
+  assert.equal(fallClip.live.programs,2);
+  assert.equal(fallClip.live.bufferDeclaredBytes,170);
+  results.push({case:'public clip switch swaps the mixer in place and keeps one program',slideClip,fallClip});
   const missingClip=await reject(animatedModel,p=>{p.resolvedAssets.find(asset=>
    asset.kind==='model'&&asset.assetId==='animated').modelFacts.animations[0].name='other';});
   assert.match(missingClip.error,/model-animation/);

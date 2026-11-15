@@ -38,7 +38,7 @@ function coreGlb() {
   return { glb, input: { encodedBytes, jsonBytes, binBytes } };
 }
 
-module.exports = { coreGlb, animatedGlb, texturedGlb, ktx2Glb, basisGlb, basisUastcGlb, multiMaterialGlb, texturedModelFacts };
+module.exports = { coreGlb, animatedGlb, twoClipGlb, texturedGlb, ktx2Glb, basisGlb, basisUastcGlb, multiMaterialGlb, texturedModelFacts };
 
 function crc32(bytes) {
   let value = -1;
@@ -180,6 +180,52 @@ function ktx2TexturedGlb(image) {
 
 function basisGlb() {
   return ktx2TexturedGlb(fs.readFileSync(path.join(__dirname, 'fixtures/basis-etc1s-mip.ktx2')));
+}
+
+// One node with two translation clips over the same time accessor: `slide`
+// moves +X and `fall` moves -Y. The selected clip is a text constant.
+function twoClipGlb() {
+  const binary = Buffer.alloc(136);
+  positions.forEach((value, index) => binary.writeFloatLE(value, index * 4));
+  normals.forEach((value, index) => binary.writeFloatLE(value, 36 + index * 4));
+  binary.writeUInt16LE(0, 72); binary.writeUInt16LE(1, 74); binary.writeUInt16LE(2, 76);
+  binary.writeFloatLE(0, 80); binary.writeFloatLE(1, 84);
+  [0, 0, 0, 1, 0, 0].forEach((value, index) => binary.writeFloatLE(value, 88 + index * 4));
+  [0, 0, 0, 0, -1, 0].forEach((value, index) => binary.writeFloatLE(value, 112 + index * 4));
+  const json = {
+    asset: { version: '2.0' }, scene: 0, scenes: [{ nodes: [0] }],
+    nodes: [{ mesh: 0, name: 'mesh' }],
+    meshes: [{ primitives: [{ attributes: { POSITION: 0, NORMAL: 1 }, indices: 2 }] }],
+    buffers: [{ byteLength: binary.length }],
+    bufferViews: [
+      { buffer: 0, byteOffset: 0, byteLength: 36 }, { buffer: 0, byteOffset: 36, byteLength: 36 },
+      { buffer: 0, byteOffset: 72, byteLength: 8 }, { buffer: 0, byteOffset: 80, byteLength: 8 },
+      { buffer: 0, byteOffset: 88, byteLength: 24 }, { buffer: 0, byteOffset: 112, byteLength: 24 }
+    ],
+    accessors: [
+      { bufferView: 0, componentType: 5126, count: 3, type: 'VEC3', min: [0, 0, 0], max: [1, 1, 0] },
+      { bufferView: 1, componentType: 5126, count: 3, type: 'VEC3' },
+      { bufferView: 2, componentType: 5123, count: 3, type: 'SCALAR' },
+      { bufferView: 3, componentType: 5126, count: 2, type: 'SCALAR', min: [0], max: [1] },
+      { bufferView: 4, componentType: 5126, count: 2, type: 'VEC3' },
+      { bufferView: 5, componentType: 5126, count: 2, type: 'VEC3' }
+    ],
+    animations: [
+      { name: 'slide', samplers: [{ input: 3, output: 4, interpolation: 'LINEAR' }],
+        channels: [{ sampler: 0, target: { node: 0, path: 'translation' } }] },
+      { name: 'fall', samplers: [{ input: 3, output: 5, interpolation: 'LINEAR' }],
+        channels: [{ sampler: 0, target: { node: 0, path: 'translation' } }] }
+    ]
+  };
+  const text = Buffer.from(JSON.stringify(json));
+  const jsonBytes = Math.ceil(text.length / 4) * 4, binBytes = Math.ceil(binary.length / 4) * 4;
+  const encodedBytes = 12 + 8 + jsonBytes + 8 + binBytes, glb = Buffer.alloc(encodedBytes);
+  glb.write('glTF', 0, 'ascii'); glb.writeUInt32LE(2, 4); glb.writeUInt32LE(encodedBytes, 8);
+  glb.writeUInt32LE(jsonBytes, 12); glb.write('JSON', 16, 'ascii');
+  glb.fill(0x20, 20, 20 + jsonBytes); text.copy(glb, 20);
+  glb.writeUInt32LE(binBytes, 20 + jsonBytes); glb.write('BIN\0', 24 + jsonBytes, 'ascii');
+  binary.copy(glb, 28 + jsonBytes);
+  return { glb, input: { encodedBytes, jsonBytes, binBytes } };
 }
 
 function basisUastcGlb() {

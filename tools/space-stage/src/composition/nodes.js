@@ -248,13 +248,15 @@ export function buildNode(THREE, context, scope, spec, assets, generation) {
     const instance = resource.instantiate(), object = new THREE.Group();
     object.add(instance.root);
     let animation = null;
+    const animationHolder = { stop: null };
+    scope.defer(() => animationHolder.stop?.());
     if (spec.animation) {
       const clip = resource.clips?.find(item => item.name === spec.animation);
       if (!clip) throw new Error('composition-model-animation-missing');
       const mixer = new THREE.AnimationMixer(instance.root);
       mixer.clipAction(clip).play();
       animation = { mixer, clip, duration: clip.duration };
-      scope.defer(() => { mixer.stopAllAction(); mixer.uncacheRoot(instance.root); });
+      animationHolder.stop = () => { mixer.stopAllAction(); mixer.uncacheRoot(instance.root); };
     }
     const materials = new Set(), modelMaterials = [], materialClones = new Map();
     const profile = spec.resources.asset?.decodeOptions?.profile;
@@ -279,7 +281,8 @@ export function buildNode(THREE, context, scope, spec, assets, generation) {
       materials.add(clone);
     });
     scope.defer(() => instance.release());
-    return { object, spec, model: true, opacity: 1, materials: [...materials], modelMaterials, animation };
+    return { object, spec, model: true, opacity: 1, materials: [...materials], modelMaterials, animation,
+      animationHolder, animationRoot: instance.root };
   }
   let texture = assets.asset?.texture || assets.spriteAsset?.texture || null;
   if (spec.node.nodeType === 'text') {

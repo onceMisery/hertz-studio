@@ -1442,3 +1442,23 @@ pageLimits.programs=3、MASK 变体=4，buffer=194、texture=32+4096，并发射
 
 仍未闭合：真实 GPU 压缩格式设备矩阵（当前仅 SwiftShader ETC2）、GLB 蒙皮/
 形变动画、动画混合与多 clip、真实 GPU 显存/首帧与 A01/A05–A10 外部验收。
+
+2026-11-15 r83 多 clip 切换：`runtime.js` 不再把 model 的 `animationClip` 文本
+常量变化当作节点 rebuild，而是记录为 clip 更新：提交前用已租用的 model
+resource 校验新 clip 存在（缺失则 `composition-model-animation-missing`
+fail-closed），提交后在同一实例上停止旧 mixer、创建新 AnimationMixer 并挂到
+节点的动态 animation holder；node scope 的清理闭包只调用 holder 当前 stop，
+因此后续切换与最终 dispose 都不会泄漏 mixer。切换会置 masks=ALL、
+visualTime=null 与 outputDirty，使同一 paused sceneTime 的下一帧也重新
+`setTime`。同时 delta 重建模型的 program 预留改用 facts.resources.programCount，
+与初始规划的精确变体数一致。
+
+真实证据：新增单节点双 translation clip fixture（`slide` +X、`fall` -Y）与
+`animationClip` 公共文本属性。Chrome 组合检查 59 项：t=0.5 时 slide 右移
+（右侧白）且 fall 位置黑；切换到 fall 后同一 t=0.5 右移位置变黑、下方变白；
+`nodeRebuilds[0]=0`、`live.programs=2`、`bufferDeclaredBytes` 保持 170，
+证明切换没有重建节点、没有新增 program、没有释放共享缓冲。
+
+仍未闭合：真实 GPU 压缩格式设备矩阵（当前仅 SwiftShader ETC2）、GLB 蒙皮/
+形变动画、动画混合（多 clip 同时播放/权重）、真实 GPU 显存/首帧与
+A01/A05–A10 外部验收。
