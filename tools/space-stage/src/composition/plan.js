@@ -111,7 +111,9 @@ function checkModel(asset) {
   const images = facts.images, materials = facts.materials, textures = facts.textures;
   if (!Array.isArray(images) || !images.length || !Array.isArray(materials) || !materials.length
       || !Array.isArray(textures) || !textures.length
-      || resources.textureCount !== textures.length || resources.imageCount !== images.length)
+      || resources.textureCount !== textures.length || resources.imageCount !== images.length
+      || !Number.isSafeInteger(resources.programCount) || resources.programCount < 1
+      || resources.programCount > materials.length)
     throw new Error('composition-model-preparation-required');
   if (ktx2) {
     for (const image of images) {
@@ -403,7 +405,7 @@ export function compilePlan(projection, registry = null, identity = null) {
       const textured = facts.profile === MODEL_TEXTURED_PROFILE || facts.profile === MODEL_KTX2_PROFILE;
       resources.bufferDeclaredBytes += facts.resources.gpuBufferBytes;
       resources.ownedCpuBytes += modelConstructionBytes(facts) + facts.resources.cpuBackingBytes;
-      resources.programs += Math.max(1, textured ? facts.materials.length : 1);
+      resources.programs += Math.max(1, textured ? facts.resources.programCount : 1);
       if (textured) {
         resources.textureDeclaredBytes += requirement.textureUploadBytes;
         resources.decodeReservedBytes += requirement.textureUploadBytes;
