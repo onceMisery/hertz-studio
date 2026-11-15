@@ -370,7 +370,7 @@ export async function createCompositionRuntime(THREE, context, scope, plan, opti
       && JSON.stringify(next.ir)===irBytes&&JSON.stringify(candidate.canvas)===canvasBytes&&JSON.stringify(candidate.timeline)===timelineBytes;
   }
   function diff(next){
-    const masks=new Uint32Array(nodes.length), locals=new Uint8Array(nodes.length), worlds=new Uint8Array(nodes.length), rebuilds=new Set();
+    const masks=new Uint32Array(nodes.length), locals=new Uint8Array(nodes.length), worlds=new Uint8Array(nodes.length), rebuilds=new Set(), clips=new Set();
     let slots=0,constants=0,resources=0,output=false;
     function dependency(dep){
       for(const affected of dep.nodes)masks[affected.nodeIndex]|=affected.mask;
@@ -396,6 +396,7 @@ export async function createCompositionRuntime(THREE, context, scope, plan, opti
       constants++;const slot=plan.ir.constantSlots[index],type=plan.ir.nodes[slot.nodeIndex].nodeType,dep=constantDependencies[index];dependency(dep);
       if(dep.nodes.some(node=>node.nodeIndex===slot.nodeIndex&&(node.mask&MATRIX))||type==='image'&&slot.property==='fit')matrix(slot.nodeIndex);
       if(type==='text'&&['text','color','align'].includes(slot.property))rebuilds.add(slot.nodeIndex);
+      else if(type==='model'&&slot.property==='animationClip')clips.add(slot.nodeIndex);
     }
     for(let index=0;index<nodes.length;index++){
       const previous=plan.nodePlans[index].resources,replacement=next.nodePlans[index].resources;
@@ -419,7 +420,7 @@ export async function createCompositionRuntime(THREE, context, scope, plan, opti
         rebuilds.add(index); masks[index] |= LAYOUT | MATERIAL; output = true;
       }
     }
-    return {masks,locals,worlds,rebuilds,slots,constants,resources,output,changed:!!(slots||constants||resources||rebuilds.size)};
+    return {masks,locals,worlds,rebuilds,clips,slots,constants,resources,output,changed:!!(slots||constants||resources||rebuilds.size||clips.size)};
   }
   function reserveDelta(next,changes){
     validateTextTextureSize(context, next);
@@ -429,7 +430,8 @@ export async function createCompositionRuntime(THREE, context, scope, plan, opti
     const variants=new Set();let modelPrograms=0;
     for(const index of changes.rebuilds){const spec=next.nodePlans[index];
       if(spec.node.nodeType==='model'){
-        modelPrograms+=Math.max(1,spec.resources.asset.modelFacts.materials?.length||1);
+        const facts=spec.resources.asset.modelFacts;
+        modelPrograms+=Math.max(1, facts.resources?.programCount||facts.materials?.length||1);
         amount.ownedCpuBytes+=spec.materialBytes||0;
         variants.add('model');continue;
       }
@@ -542,6 +544,14 @@ export async function createCompositionRuntime(THREE, context, scope, plan, opti
       await Promise.all(textTasks);
       if(controller.signal.aborted||updateTicket!==updateGeneration||disposed)throw new DOMException('Composition update cancelled','AbortError');
       for(const index of changes.rebuilds){const spec=next.nodePlans[index];newNodes.set(index,buildNode(THREE,context,delta.newScopes.get(index),spec,nodeAssets(spec,nextValues),generation));}
+      const clipUpdates=[];
+      for(const index of changes.clips){
+        if(changes.rebuilds.has(index))continue;
+        const spec=next.nodePlans[index],resource=values.get(spec.resources.asset.key)?.model,name=spec.animation;
+        let clip=null;
+        if(name){clip=resource?.clips?.find(item=>item.name===name);if(!clip)throw new Error('composition-model-animation-missing');}
+        clipUpdates.push({index,clip});
+      }
       // Everything that can fail in preparation has finished. The fixed graph
       // keeps its painter order; only changed leaves/resources now retire.
       for(const [index,replacement] of newNodes){const old=nodes[index],parent=old.object.parent;
@@ -560,6 +570,18 @@ export async function createCompositionRuntime(THREE, context, scope, plan, opti
         if (nodes[index].spec.node.nodeType === 'text' && !changes.rebuilds.has(index))
           plan.nodePlans[index].textRasterLease = nodes[index].spec.textRasterLease;
         nodes[index].spec=plan.nodePlans[index];
+      }
+      for(const {index,clip} of clipUpdates){
+        const node=nodes[index];
+        node.animationHolder.stop?.();
+        node.animation=null;
+        if(clip){
+          const mixer=new THREE.AnimationMixer(node.animationRoot);
+          mixer.clipAction(clip).play();
+          node.animation={mixer,clip,duration:clip.duration};
+          node.animationHolder.stop=()=>{mixer.stopAllAction();mixer.uncacheRoot(node.animationRoot);};
+        }
+        changes.masks[index]|=ALL;changes.locals[index]=changes.worlds[index]=1;outputDirty=true;
       }
       dirty.set(changes.masks);localDirty.set(changes.locals);worldDirty.set(changes.worlds);
       for(const index of plan.ir.painterOrder)if(dirty[index])applyNode(nodes[index],dirty[index],!!localDirty[index]);
