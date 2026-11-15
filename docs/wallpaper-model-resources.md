@@ -1530,3 +1530,25 @@ budget.error=null。
 
 仍未闭合：动画混合（多 clip 同时播放/权重）、真实 GPU 设备矩阵/首帧与
 A01/A05–A10 外部验收。
+
+2026-11-15 r84+r85 合并后全量门：本地 master（r85 合并 `25a9e88`，另含 fmt 修复
+`2441ef6` 与 builtinScene 豁免修复 `a90449d`）双工具链复验。`cargo fmt --all
+-- --check` 在 stable 与 1.88.0 rustfmt 下全绿；期间修复
+`plugin/vendor/dbx-plugin-sdk` 自 2026-10-02 入库就携带的既有格式漂移（`2441ef6`，
+纯格式单文件）。clippy `-p hertz-desktop -p hertz-wallpaper --all-targets
+-D warnings` 双工具链零告警。测试全部串行（`--test-threads=1`）：桌面 lib 867
+通过/0 失败/2 忽略、wallpaper 352 通过/0 失败，两工具链一致；`a90449d` 重编
+vendor bundle（app.rs `include_str!` 内嵌，二进制随之重链）后按同一口径复跑一轮，
+数字不变。契约与前端：ADR 414、builtin contract 10、builtin plan 18、
+composition browser 63（含 r84 morph/r85 skin 真实 Rust IR 与 GL 像素）、
+builtin browser 12、space-stage registry/29 scenes/manifest 通过。期间发现既有
+问题：JS 组合 plan.js 的 3D opacity fail-closed 守卫（r80 定形）要求所有
+space=3d 节点携带 0..1 opacity，而 Rust owner composition_plan.rs 自 r75 起对
+builtinScene 豁免（场景 owner 自渲染，不消费组合层 opacity），两侧不对称令
+builtin browser/plan 链在 r83 及更早已变红——本次复跑既有门发现，非 r84/r85
+回归（两轮未触及守卫或 builtinScene IR，r83 与当前守卫逐字相同）。`a90449d`
+将 JS 侧对齐 Rust 豁免并重编 bundle 后，builtin 12/18、composition 63 与
+space-stage 复跑全绿。r84/r85 自身三端证据随各自提交（`30e4f72`/`732f0f1`）
+记录，合并对这些路径的 diff 为空已核对；原生宿主页证据在验证点 `732f0f1` 于
+开发工作树取得，其模型路径不受 `a90449d` 影响。日志存
+`output/master-gate-r85-20261115/`。
