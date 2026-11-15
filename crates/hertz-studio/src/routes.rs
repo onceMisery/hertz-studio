@@ -102,6 +102,17 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
             post(ai_reject_proposal),
         )
         .route("/v1/ai/budget-guard/reset", post(ai_budget_guard_reset))
+        // 壁纸生成（AI-02 切片 2）：官方 UI 入口，全权 token 后面，固定
+        // local-owner；quote 只做本地计价，submit 消费 quote 走既有受理。
+        .route(
+            "/v1/ai/wallpaper/capabilities",
+            get(ai_wallpaper_capabilities),
+        )
+        .route(
+            "/v1/ai/wallpaper/quote",
+            post(ai_wallpaper_quote).layer(axum::extract::DefaultBodyLimit::max(64 * 1024)),
+        )
+        .route("/v1/ai/wallpaper/jobs", post(ai_wallpaper_submit_job))
         .route("/v1/state", get(get_state))
         .route(
             "/v1/room",
@@ -1181,6 +1192,49 @@ async fn ai_create_job(
         &state,
         crate::idempotency::LOCAL_OWNER,
         &body.brief,
+        body.idempotency_key.as_deref(),
+    )
+    .await?;
+    Ok(Json(
+        serde_json::to_value(outcome).map_err(|e| internal(e.to_string()))?,
+    ))
+}
+
+async fn ai_wallpaper_capabilities(
+    State(state): State<Arc<AppState>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let snapshot = crate::ai::jobs::wallpaper_capabilities(&state).await?;
+    Ok(Json(
+        serde_json::to_value(snapshot).map_err(|e| internal(e.to_string()))?,
+    ))
+}
+
+async fn ai_wallpaper_quote(
+    State(state): State<Arc<AppState>>,
+    bytes: axum::body::Bytes,
+) -> ApiResult<Json<serde_json::Value>> {
+    let quote =
+        crate::ai::jobs::wallpaper_quote(&state, crate::idempotency::LOCAL_OWNER, &bytes).await?;
+    Ok(Json(quote))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AiWallpaperSubmitRequest {
+    quote_id: String,
+    request_id: String,
+    idempotency_key: Option<String>,
+}
+
+async fn ai_wallpaper_submit_job(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<AiWallpaperSubmitRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let outcome = crate::ai::jobs::wallpaper_submit(
+        &state,
+        crate::idempotency::LOCAL_OWNER,
+        &body.quote_id,
+        &body.request_id,
         body.idempotency_key.as_deref(),
     )
     .await?;
@@ -3663,7 +3717,7 @@ async fn favorite_membership(
     }
     // 上限与曲库分页对齐：超出就是前端构造错了，不该让 SQL 参数无限膨胀。
     if body.ids.len() > FAV_PAGE_MAX as usize {
-        return Err(bad_request(format!("ids 数量超过上限 {}", FAV_PAGE_MAX)));
+        return Err(bad_request(format!("ids 数量超过上限 {FAV_PAGE_MAX}")));
     }
     let ids: Vec<String> = body
         .ids

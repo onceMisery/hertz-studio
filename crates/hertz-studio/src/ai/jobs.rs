@@ -113,6 +113,28 @@ pub(crate) trait StageIntentProvider: Send + Sync {
     {
         Box::pin(async { Err("provider does not support generic completion".to_string()) })
     }
+
+    /// 结构化壁纸输出模式（§19.5）：一次调用返回待校验的 builtin 输出 JSON，
+    /// 校验由 [`hertz_wallpaper::generation::BuiltinSceneOutput`] 的合同层
+    /// 负责。未实现结构化模式的 provider 沿用安全默认拒绝，不假装支持。
+    fn supports_wallpaper_builtin(&self) -> bool {
+        false
+    }
+
+    fn generate_wallpaper_builtin(
+        &self,
+        _request: &hertz_wallpaper::generation::WallpaperGenerateRequest,
+        _pricing: PricingSnapshot,
+        _credential: Option<crate::ai::credential::ProviderCredential>,
+        _cancellation: ProviderCancellation,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = WallpaperReply> + Send>> {
+        Box::pin(async {
+            WallpaperReply {
+                output: Err("provider does not support wallpaper generation".to_string()),
+                usage: None,
+            }
+        })
+    }
 }
 
 /// Generation validity and billing are independent: even a rejected candidate
@@ -125,6 +147,70 @@ pub(crate) struct ProviderReply {
 pub(crate) struct CompletionReply {
     pub text: Result<String, String>,
     pub usage: Option<TrustedUsage>,
+}
+
+/// 壁纸结构化输出的 provider 回复：raw JSON 由合同层校验，校验失败按
+/// invalid_output 结算，与舞台 intent 的失败语义一致。
+pub(crate) struct WallpaperReply {
+    pub output: Result<Value, String>,
+    pub usage: Option<TrustedUsage>,
+}
+
+/// 生成能力注册项（§19.3）：队列/执行期限、输入上界与计费预留按能力
+/// 注册；舞台继续使用 60/30 秒与原上界。
+pub(crate) struct GenerationCapability {
+    pub input_max_bytes: usize,
+    pub queue_deadline_ms: i64,
+    pub run_deadline_ms: i64,
+    pub reservation_micro_usd: i64,
+}
+
+pub(crate) const WALLPAPER_CAPABILITY: &str = "wallpaper.generate";
+
+pub(crate) fn generation_capability(name: &str) -> Option<&'static GenerationCapability> {
+    const STAGE: GenerationCapability = GenerationCapability {
+        input_max_bytes: MAX_INPUT_BYTES,
+        queue_deadline_ms: QUEUE_DEADLINE_MS,
+        run_deadline_ms: RUN_DEADLINE_MS,
+        reservation_micro_usd: RESERVATION_MICRO_USD,
+    };
+    const WALLPAPER: GenerationCapability = GenerationCapability {
+        input_max_bytes: hertz_wallpaper::generation::MAX_REQUEST_BYTES,
+        queue_deadline_ms: QUEUE_DEADLINE_MS,
+        run_deadline_ms: RUN_DEADLINE_MS,
+        reservation_micro_usd: RESERVATION_MICRO_USD,
+    };
+    match name {
+        CAPABILITY => Some(&STAGE),
+        WALLPAPER_CAPABILITY => Some(&WALLPAPER),
+        _ => None,
+    }
+}
+
+/// 有界内存输入（§7.1 不持久化）：job_id → 输入 + 取消信号。舞台是 brief
+/// 文本，壁纸是已通过合同层验证的结构化请求；重启即丢。
+#[derive(Debug, Clone)]
+pub(crate) enum GenerationInput {
+    Stage(String),
+    Wallpaper(hertz_wallpaper::generation::WallpaperGenerateRequest),
+}
+
+impl GenerationInput {
+    /// 计费引用文本：舞台用 brief，壁纸用请求内的 brief。
+    fn pricing_brief(&self) -> &str {
+        match self {
+            GenerationInput::Stage(brief) => brief,
+            GenerationInput::Wallpaper(request) => &request.brief,
+        }
+    }
+
+    /// 幂等输入指纹：舞台是 brief 字节，壁纸是规范化请求字节。
+    fn input_bytes(&self) -> Vec<u8> {
+        match self {
+            GenerationInput::Stage(brief) => brief.clone().into_bytes(),
+            GenerationInput::Wallpaper(request) => serde_json::to_vec(request).unwrap_or_default(),
+        }
+    }
 }
 
 struct RegisteredEvaluation {
@@ -212,6 +298,44 @@ impl StageIntentProvider for FakeProvider {
             }
         })
     }
+
+    fn supports_wallpaper_builtin(&self) -> bool {
+        true
+    }
+
+    /// 确定性壁纸输出：从 brief 哈希选资格目录中的真实场景，参数走目录默认
+    /// （空 params 合法）；产物必然通过自家合同校验，供本地联调与回归。
+    fn generate_wallpaper_builtin(
+        &self,
+        request: &hertz_wallpaper::generation::WallpaperGenerateRequest,
+        _pricing: PricingSnapshot,
+        _credential: Option<crate::ai::credential::ProviderCredential>,
+        _cancellation: ProviderCancellation,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = WallpaperReply> + Send>> {
+        let brief = request.brief.clone();
+        Box::pin(async move {
+            let hash = Sha256::digest(brief.as_bytes());
+            let seed = u32::from_be_bytes([hash[0], hash[1], hash[2], hash[3]]);
+            let catalog = hertz_wallpaper::catalog();
+            let ids = catalog.scene_ids();
+            let scene_id = ids[(seed % ids.len() as u32) as usize].to_string();
+            let state_version = catalog
+                .scene(&scene_id)
+                .and_then(|scene| scene.get("stateVersion"))
+                .and_then(|value| value.as_u64())
+                .unwrap_or(1) as u32;
+            let output = json!({
+                "kind": "builtin",
+                "sceneId": scene_id,
+                "stateVersion": state_version,
+                "params": {},
+            });
+            WallpaperReply {
+                output: Ok(output),
+                usage: Some(TrustedUsage::free()),
+            }
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -220,9 +344,9 @@ impl StageIntentProvider for FakeProvider {
 
 pub(crate) struct AiRuntime {
     pub(crate) credentials: Arc<super::credential::Service>,
-    /// 有界内存输入：job_id → brief。容量受排队容量上限约束（≤9 条），
-    /// 不落盘；提交后由服务端持有，HTTP waiter 消失不影响。
-    inputs: Mutex<HashMap<String, (String, tokio::sync::watch::Sender<()>)>>,
+    /// 有界内存输入：job_id → [`GenerationInput`]。容量受排队容量上限约束
+    /// （≤9 条），不落盘；提交后由服务端持有，HTTP waiter 消失不影响。
+    inputs: Mutex<HashMap<String, (GenerationInput, tokio::sync::watch::Sender<()>)>>,
     /// Ephemeral evaluator calls share the model slot and consent cancellation
     /// path without becoming durable jobs or retaining briefs.
     evaluations: Mutex<HashMap<String, RegisteredEvaluation>>,
@@ -230,6 +354,8 @@ pub(crate) struct AiRuntime {
     /// 模型执行槽（§8.3）：每 DataDir 1 个受管执行——worker 先拿槽再
     /// accepted→running，等满 8 个停在 accepted。清理中的调用仍占槽。
     execution_slots: Arc<tokio::sync::Semaphore>,
+    /// 壁纸生成 quote 内存态（§19.4）：重启即丢，不写任何持久层。
+    wallpaper_quotes: Mutex<super::wallpaper_jobs::QuoteStore>,
 }
 
 impl AiRuntime {
@@ -250,6 +376,7 @@ impl AiRuntime {
             evaluations: Mutex::new(HashMap::new()),
             provider: RwLock::new(super::provider::configured(config)),
             execution_slots: Arc::new(tokio::sync::Semaphore::new(1)),
+            wallpaper_quotes: Mutex::new(super::wallpaper_jobs::QuoteStore::default()),
         }
     }
 
@@ -445,8 +572,8 @@ pub(crate) fn utc_month_key(now_ms: i64) -> String {
     format!("{y:04}-{m:02}")
 }
 
-fn input_hash(brief: &str) -> String {
-    let digest = Sha256::digest(brief.as_bytes());
+fn input_hash(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
     digest.iter().map(|b| format!("{b:02x}")).collect()
 }
 
@@ -717,11 +844,13 @@ pub(crate) async fn submit(
 ) -> ApiResult<SubmitOutcome> {
     let state = state.clone();
     let principal = principal.to_string();
-    let brief = brief.to_string();
+    let input = GenerationInput::Stage(brief.trim().to_string());
     let key = idempotency_key.map(str::to_string);
-    tokio::spawn(async move { submit_owned(&state, &principal, &brief, key.as_deref()).await })
-        .await
-        .map_err(|e| internal(format!("AI acceptance failed: {e}")))?
+    tokio::spawn(async move {
+        submit_owned(&state, &principal, input, CAPABILITY, key.as_deref()).await
+    })
+    .await
+    .map_err(|e| internal(format!("AI acceptance failed: {e}")))?
 }
 
 async fn check_generation(conn: &mut sqlx::SqliteConnection, now: i64) -> ApiResult<()> {
@@ -822,22 +951,42 @@ pub(crate) async fn retain_history(db: &sqlx::SqlitePool, now: i64) -> ApiResult
 async fn submit_owned(
     state: &Arc<AppState>,
     principal: &str,
-    brief: &str,
+    input: GenerationInput,
+    capability: &'static str,
     idempotency_key: Option<&str>,
 ) -> ApiResult<SubmitOutcome> {
-    let brief = brief.trim();
-    if brief.is_empty() {
-        return Err(bad_request("brief 不能为空"));
-    }
-    if brief.len() > MAX_INPUT_BYTES {
-        return Err(bad_request("brief 超过 16 KiB 上限"));
+    let cap = generation_capability(capability).ok_or_else(|| bad_request("未注册的生成能力"))?;
+    // 输入验证按 capability 走注册上界：舞台 brief 有界文本，壁纸请求已在
+    // 合同层 parse 时全量校验，这里复验一次保持防御对称。
+    match &input {
+        GenerationInput::Stage(brief) => {
+            let brief = brief.trim();
+            if brief.is_empty() {
+                return Err(bad_request("brief 不能为空"));
+            }
+            if brief.len() > cap.input_max_bytes {
+                return Err(bad_request("brief 超过 16 KiB 上限"));
+            }
+        }
+        GenerationInput::Wallpaper(request) => {
+            if request.brief.len() > cap.input_max_bytes {
+                return Err(bad_request("生成请求超过能力输入上限"));
+            }
+            request.validate().map_err(|error| {
+                ApiError::new(
+                    axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                    error.code,
+                    error.message,
+                )
+            })?;
+        }
     }
     let now = now_ms();
     let key = normalize_key(idempotency_key, now)?;
-    let hash = input_hash(brief);
+    let hash = input_hash(&input.input_bytes());
     // 幂等回放先于 provider 就绪检查（§7.1 顺序）：已存在任务的合法回放
     // 不依赖当前 provider——删除或更换模型后旧事实仍可查。
-    if let Some(existing) = store::find_job_by_key(&state.db, principal, CAPABILITY, &key)
+    if let Some(existing) = store::find_job_by_key(&state.db, principal, capability, &key)
         .await
         .map_err(store_error)?
     {
@@ -872,7 +1021,7 @@ async fn submit_owned(
         ));
     }
 
-    let quote = provider.quote(brief).map_err(|reason| {
+    let quote = provider.quote(input.pricing_brief()).map_err(|reason| {
         ApiError::new(
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
             "pricing_unavailable",
@@ -897,6 +1046,14 @@ async fn submit_owned(
         quote,
         credential: credential.as_ref().map(super::credential::Lease::identity),
     };
+    // 计费预留上界按 capability 注册项收紧（§19.3）。
+    if pricing.quote.reservation_micro_usd > cap.reservation_micro_usd {
+        return Err(ApiError::new(
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "pricing_over_bound",
+            "quote 预留超出能力计费上界",
+        ));
+    }
 
     // 过期清扫先于容量检查：让可回收的名额先回来。
     sweep(state).await?;
@@ -905,7 +1062,7 @@ async fn submit_owned(
         .await
         .map_err(store_error)?;
     // 并发同键在唯一索引上兜底：查无此键的两个提交只有一个能插入。
-    if let Some(existing) = store::find_job_by_key(&mut *tx, principal, CAPABILITY, &key)
+    if let Some(existing) = store::find_job_by_key(&mut *tx, principal, capability, &key)
         .await
         .map_err(store_error)?
     {
@@ -969,7 +1126,7 @@ async fn submit_owned(
         job_id: uuid::Uuid::new_v4().to_string(),
         owner_instance_id: owner.clone(),
         principal: principal.to_string(),
-        capability: CAPABILITY.into(),
+        capability: capability.to_string(),
         key,
         input_hash: hash,
         state: "accepted".into(),
@@ -990,7 +1147,7 @@ async fn submit_owned(
         // 并发同键撞唯一索引：按回放/冲突如实收口，而不是 500。
         if matches!(&e, StoreError::Database(detail) if detail.contains("UNIQUE")) {
             if let Some(existing) =
-                store::find_job_by_key(&mut *tx, principal, CAPABILITY, &job.key)
+                store::find_job_by_key(&mut *tx, principal, capability, &job.key)
                     .await
                     .map_err(store_error)?
             {
@@ -1007,11 +1164,11 @@ async fn submit_owned(
     let mut inputs = state.ai_runtime.inputs.lock().await;
     tx.commit().await.map_err(sql_error)?;
     let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(());
-    inputs.insert(job.job_id.clone(), (brief.to_string(), cancel_tx));
+    inputs.insert(job.job_id.clone(), (input, cancel_tx));
     drop(inputs);
     publish_task(state);
-    let queue_deadline =
-        tokio::time::Instant::now() + std::time::Duration::from_millis(QUEUE_DEADLINE_MS as u64);
+    let queue_deadline = tokio::time::Instant::now()
+        + std::time::Duration::from_millis(cap.queue_deadline_ms as u64);
     tokio::spawn(run_job(
         state.clone(),
         job.job_id.clone(),
@@ -1128,6 +1285,14 @@ async fn run_job_inner(
         state.ai_runtime.inputs.lock().await.remove(&job_id);
         return;
     }
+    // 运行期限按 capability 注册项：上面的重载仍用原 deadline，调用段从这里
+    // 重新起算。
+    let run_deadline = tokio::time::Instant::now()
+        + std::time::Duration::from_millis(
+            generation_capability(&job.capability)
+                .map(|capability| capability.run_deadline_ms)
+                .unwrap_or(RUN_DEADLINE_MS) as u64,
+        );
     publish_task(&state);
     let pricing: PricingSnapshot =
         match serde_json::from_str::<PricingSnapshot>(&job.pricing_snapshot) {
@@ -1233,25 +1398,25 @@ async fn run_job_inner(
     }
     job.dispatch_state = "may_have_been_sent".into();
     job.attempt_id = Some(attempt_id.clone());
-    let brief = match tokio::time::timeout_at(run_deadline, async {
+    let input = match tokio::time::timeout_at(run_deadline, async {
         state
             .ai_runtime
             .inputs
             .lock()
             .await
             .get(&job_id)
-            .map(|input| input.0.clone())
+            .map(|entry| entry.0.clone())
     })
     .await
     {
-        Ok(brief) => brief,
+        Ok(input) => input,
         Err(_) => {
             finish_running(state.clone(), &job_id, "expired").await;
             state.ai_runtime.inputs.lock().await.remove(&job_id);
             return;
         }
     };
-    let Some(brief) = brief else {
+    let Some(input) = input else {
         // 输入丢失（不应发生）：如实失败，按 unknown 结算。
         finish_running(state.clone(), &job_id, "failed").await;
         return;
@@ -1267,18 +1432,61 @@ async fn run_job_inner(
 
     // 一次调用；不自动修复、不自动重试。将终态信号交给 adapter 协作取消，
     // 不在外层 select 丢掉它；已完成 usage 的观察与资源结束仍由本任务负责。
-    // 执行期限（§8.3：30s）到点终止卡住的 future，按 expired 收敛。
-    let outcome = match tokio::time::timeout_at(
-        run_deadline,
-        provider.generate(
-            brief,
-            pricing,
-            credential,
-            ProviderCancellation::from_receiver(cancelled.clone()),
-        ),
-    )
-    .await
-    {
+    // 执行期限按 capability 注册项到点终止卡住的 future，按 expired 收敛。
+    // §19.5：壁纸走结构化输出模式，不复用返回 StageIntent 的 generate()。
+    enum ProviderCall {
+        Stage(ProviderReply),
+        Wallpaper(WallpaperReply),
+    }
+    let call: std::pin::Pin<Box<dyn std::future::Future<Output = ProviderCall> + Send>> =
+        match (&input, job.capability.as_str()) {
+            (GenerationInput::Stage(brief), CAPABILITY) => {
+                let brief = brief.clone();
+                let cancelled = cancelled.clone();
+                Box::pin(async move {
+                    ProviderCall::Stage(
+                        provider
+                            .generate(
+                                brief,
+                                pricing,
+                                credential,
+                                ProviderCancellation::from_receiver(cancelled),
+                            )
+                            .await,
+                    )
+                })
+            }
+            (GenerationInput::Wallpaper(request), WALLPAPER_CAPABILITY) => {
+                let request = request.clone();
+                let cancelled = cancelled.clone();
+                Box::pin(async move {
+                    ProviderCall::Wallpaper(
+                        provider
+                            .generate_wallpaper_builtin(
+                                &request,
+                                pricing,
+                                credential,
+                                ProviderCancellation::from_receiver(cancelled),
+                            )
+                            .await,
+                    )
+                })
+            }
+            _ => {
+                // 能力与输入不匹配（不应发生）：如实失败，按 unknown 结算。
+                finish_running_with_failure_code(
+                    state.clone(),
+                    &job_id,
+                    "failed",
+                    None,
+                    "invalid_input",
+                )
+                .await;
+                state.ai_runtime.inputs.lock().await.remove(&job_id);
+                return;
+            }
+        };
+    let outcome = match tokio::time::timeout_at(run_deadline, call).await {
         Ok(outcome) => outcome,
         Err(_) => {
             tracing::warn!("AI provider 调用超过执行期限，已终止");
@@ -1287,7 +1495,10 @@ async fn run_job_inner(
             return;
         }
     };
-    let trusted_usage = outcome.usage;
+    let (raw_output, trusted_usage) = match outcome {
+        ProviderCall::Stage(reply) => (reply.intent, reply.usage),
+        ProviderCall::Wallpaper(reply) => (reply.output, reply.usage),
+    };
     if let Some(usage) = trusted_usage.as_ref() {
         if let Err(error) = usage::persist_pending_usage(&state.db, &job, usage).await {
             tracing::warn!(
@@ -1303,100 +1514,128 @@ async fn run_job_inner(
         state.ai_runtime.inputs.lock().await.remove(&job_id);
         return;
     }
-    match outcome.intent {
-        Ok(intent) => match validate_intent(&intent)
-            .and_then(|_| contract::validate_artifact(&contract::artifact(&intent)).map(|_| ()))
-        {
-            Ok(()) => {
-                // 事务顺序即事实顺序：先 CAS 终态，赢了才落提案——否则
-                // 「已取消的任务留下可读提案」。CAS 输掉时只处理独立的
-                // 迟到 usage；不能复活任务或创建提案。
-                let result = async {
-                    let proposal_id = uuid::Uuid::new_v4().to_string();
-                    let now = now_ms();
-                    let mut tx = vmusic_store::begin_immediate(&state.db)
-                        .await
-                        .map_err(store_error)?;
-                    if let Err(error) = check_generation(&mut tx, now).await {
-                        if error.code != "generation_disabled" {
-                            return Err(error);
+    match raw_output {
+        Ok(value) => {
+            // 输出校验按 capability 走合同层：舞台沿 intent/artifact 合同，
+            // 壁纸输出经 generation.rs 的 BuiltinSceneOutput 全量校验后再落
+            // proposal，两类都不 clamp。
+            let validated: Result<(&'static str, String), String> =
+                match (&input, job.capability.as_str()) {
+                    (GenerationInput::Stage(_), CAPABILITY) => validate_intent(&value)
+                        .and_then(|_| {
+                            contract::validate_artifact(&contract::artifact(&value)).map(|_| ())
+                        })
+                        .map(|_| ("artifact:1", contract::artifact(&value).to_string())),
+                    (GenerationInput::Wallpaper(_), WALLPAPER_CAPABILITY) => {
+                        match serde_json::to_vec(&value) {
+                            Ok(bytes) => {
+                                match hertz_wallpaper::generation::BuiltinSceneOutput::parse(&bytes)
+                                {
+                                    Ok(output) => match serde_json::to_string(&output) {
+                                        Ok(payload) => Ok(("wallpaper.builtin:1", payload)),
+                                        Err(error) => Err(format!("输出序列化失败: {error}")),
+                                    },
+                                    Err(error) => Err(error.message),
+                                }
+                            }
+                            Err(error) => Err(format!("输出序列化失败: {error}")),
                         }
-                        let cancelled = store::cas_job_state(
+                    }
+                    _ => Err("capability 与输入不匹配".to_string()),
+                };
+            match validated {
+                Ok((proposal_schema, proposal_payload)) => {
+                    // 事务顺序即事实顺序：先 CAS 终态，赢了才落提案——否则
+                    // 「已取消的任务留下可读提案」。CAS 输掉时只处理独立的
+                    // 迟到 usage；不能复活任务或创建提案。
+                    let result = async {
+                        let proposal_id = uuid::Uuid::new_v4().to_string();
+                        let now = now_ms();
+                        let mut tx = vmusic_store::begin_immediate(&state.db)
+                            .await
+                            .map_err(store_error)?;
+                        if let Err(error) = check_generation(&mut tx, now).await {
+                            if error.code != "generation_disabled" {
+                                return Err(error);
+                            }
+                            let cancelled = store::cas_job_state(
+                                &mut *tx,
+                                &job.job_id,
+                                "running",
+                                job.state_revision,
+                                "cancelled",
+                                now,
+                            )
+                            .await
+                            .map_err(store_error)?;
+                            tx.commit().await.map_err(sql_error)?;
+                            if cancelled {
+                                publish_task(&state);
+                            }
+                            return Ok::<(), ApiError>(());
+                        }
+                        let won = store::cas_job_state(
                             &mut *tx,
                             &job.job_id,
                             "running",
                             job.state_revision,
-                            "cancelled",
+                            "succeeded",
                             now,
                         )
                         .await
                         .map_err(store_error)?;
-                        tx.commit().await.map_err(sql_error)?;
-                        if cancelled {
-                            publish_task(&state);
+                        if !won {
+                            tx.commit().await.map_err(sql_error)?;
+                            return Ok::<(), ApiError>(());
                         }
-                        return Ok::<(), ApiError>(());
-                    }
-                    let won = store::cas_job_state(
-                        &mut *tx,
-                        &job.job_id,
-                        "running",
-                        job.state_revision,
-                        "succeeded",
-                        now,
-                    )
-                    .await
-                    .map_err(store_error)?;
-                    if !won {
+                        let proposal = store::ProposalRow {
+                            proposal_id: proposal_id.clone(),
+                            job_id: job.job_id.clone(),
+                            validated_intent: proposal_payload,
+                            schema_version: proposal_schema.into(),
+                            state: "pending".into(),
+                            revision: 1,
+                            created_at: now,
+                            expires_at: now + PROPOSAL_TTL_MS,
+                        };
+                        store::insert_proposal(&mut *tx, &proposal)
+                            .await
+                            .map_err(store_error)?;
+                        store::attach_proposal(&mut *tx, &job.job_id, &proposal_id)
+                            .await
+                            .map_err(store_error)?;
                         tx.commit().await.map_err(sql_error)?;
-                        return Ok::<(), ApiError>(());
+                        publish_task(&state);
+                        Ok(())
                     }
-                    let proposal = store::ProposalRow {
-                        proposal_id: proposal_id.clone(),
-                        job_id: job.job_id.clone(),
-                        validated_intent: contract::artifact(&intent).to_string(),
-                        schema_version: "artifact:1".into(),
-                        state: "pending".into(),
-                        revision: 1,
-                        created_at: now,
-                        expires_at: now + PROPOSAL_TTL_MS,
-                    };
-                    store::insert_proposal(&mut *tx, &proposal)
-                        .await
-                        .map_err(store_error)?;
-                    store::attach_proposal(&mut *tx, &job.job_id, &proposal_id)
-                        .await
-                        .map_err(store_error)?;
-                    tx.commit().await.map_err(sql_error)?;
-                    publish_task(&state);
-                    Ok(())
+                    .await;
+                    if let Err(error) = result {
+                        tracing::error!("AI result transaction failed: {error:?}");
+                        finish_running_with_usage(
+                            state.clone(),
+                            &job_id,
+                            "failed",
+                            trusted_usage.as_ref(),
+                        )
+                        .await;
+                    } else {
+                        settle_terminal_after_commit(&state, &job.job_id, trusted_usage.as_ref())
+                            .await;
+                    }
                 }
-                .await;
-                if let Err(error) = result {
-                    tracing::error!("AI result transaction failed: {error:?}");
-                    finish_running_with_usage(
+                Err(reason) => {
+                    tracing::warn!("AI 输出校验失败: {reason}");
+                    finish_running_with_failure_code(
                         state.clone(),
                         &job_id,
                         "failed",
                         trusted_usage.as_ref(),
+                        "invalid_output",
                     )
                     .await;
-                } else {
-                    settle_terminal_after_commit(&state, &job.job_id, trusted_usage.as_ref()).await;
                 }
             }
-            Err(reason) => {
-                tracing::warn!("AI 输出校验失败: {reason}");
-                finish_running_with_failure_code(
-                    state.clone(),
-                    &job.job_id,
-                    "failed",
-                    trusted_usage.as_ref(),
-                    "invalid_output",
-                )
-                .await;
-            }
-        },
+        }
         Err(reason) => {
             tracing::warn!("AI provider 调用失败: {reason}");
             finish_running_with_provider_error(
@@ -2401,6 +2640,240 @@ pub(crate) async fn instance_owner(state: &Arc<AppState>) -> ApiResult<String> {
         .await
         .map_err(store_error)?
         .owner_instance_id)
+}
+
+// ---------------------------------------------------------------------------
+// 壁纸生成（AI-02 切片 2）：capability snapshot、quote 与 submit
+// （§19.3/§19.4）。短会话配对（§19.2）属后续切片，当前走官方 UI 的
+// local-owner 直连路径。
+// ---------------------------------------------------------------------------
+
+pub(crate) async fn wallpaper_capabilities(
+    state: &Arc<AppState>,
+) -> ApiResult<super::wallpaper_jobs::CapabilitySnapshot> {
+    Ok(super::wallpaper_jobs::capability_snapshot(state).await)
+}
+
+/// 本地编码/计价（§19.4）：不发 provider 网络请求。schema 哈希、能力快照与
+/// builtin 的场景目录哈希都必须与当前服务版本一致，不做静默降级。
+pub(crate) async fn wallpaper_quote(
+    state: &Arc<AppState>,
+    principal: &str,
+    bytes: &[u8],
+) -> ApiResult<serde_json::Value> {
+    let request =
+        hertz_wallpaper::generation::WallpaperGenerateRequest::parse(bytes).map_err(|error| {
+            ApiError::new(
+                axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                error.code,
+                error.message,
+            )
+        })?;
+    let snapshot = super::wallpaper_jobs::capability_snapshot(state).await;
+    if request.generation_schema_hash != snapshot.generation_schema_hash {
+        return Err(ApiError::new(
+            axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+            "generation_schema_mismatch",
+            "生成合同 schema 与当前服务版本不一致",
+        ));
+    }
+    if request.capability_snapshot_id != snapshot.snapshot_id {
+        return Err(ApiError::new(
+            axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+            "capability_snapshot_stale",
+            "能力快照已过期，请重新读取能力目录",
+        ));
+    }
+    if request.output.kind == hertz_wallpaper::generation::WallpaperGenerationKind::Builtin
+        && request.registry_hash != snapshot.registry_hash
+    {
+        return Err(ApiError::new(
+            axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+            "registry_mismatch",
+            "场景目录注册哈希与当前服务不一致",
+        ));
+    }
+    let provider = state.ai_runtime.provider().await;
+    if !provider.ready() || !provider.supports_wallpaper_builtin() {
+        return Err(ApiError::new(
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "provider_unavailable",
+            "壁纸生成 provider 当前不可用",
+        ));
+    }
+    let quote = provider.quote(&request.brief).map_err(|reason| {
+        ApiError::new(
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "pricing_unavailable",
+            reason,
+        )
+    })?;
+    quote.validate().map_err(|reason| {
+        ApiError::new(
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "pricing_unavailable",
+            reason,
+        )
+    })?;
+    let owner = instance_owner(state).await?;
+    let credential = if provider.requires_credential() {
+        Some(state.ai_runtime.credentials.snapshot(&owner).await?)
+    } else {
+        None
+    };
+    let pricing = PricingSnapshot {
+        provider: provider.id().to_string(),
+        model: provider.model().to_string(),
+        quote,
+        credential: credential.as_ref().map(super::credential::Lease::identity),
+    };
+    let now = now_ms();
+    let request_digest = input_hash(&GenerationInput::Wallpaper(request.clone()).input_bytes());
+    let quote_id = uuid::Uuid::new_v4().to_string();
+    let expires_at = state.ai_runtime.wallpaper_quotes.lock().await.insert(
+        principal,
+        quote_id.clone(),
+        request,
+        request_digest,
+        pricing.clone(),
+        now,
+    )?;
+    Ok(json!({
+        "quoteId": quote_id,
+        "expiresAt": expires_at,
+        "snapshotId": snapshot.snapshot_id,
+        "provider": pricing.provider,
+        "model": pricing.model,
+        "reservationMicroUsd": pricing.quote.reservation_micro_usd,
+        "pricingKnown": pricing.pricing_known(),
+    }))
+}
+
+/// quote 消费与幂等（§19.4）：submit 只引用 quoteId 与 requestId。未消费
+/// quote 先乐观标记（并发同 quote 只有一个受理），受理失败还原为未消费；
+/// 已消费 quote 仅允许同键同载荷回放原 job，不能创建第二个任务。
+pub(crate) async fn wallpaper_submit(
+    state: &Arc<AppState>,
+    principal: &str,
+    quote_id: &str,
+    request_id: &str,
+    idempotency_key: Option<&str>,
+) -> ApiResult<SubmitOutcome> {
+    let now = now_ms();
+    let key = normalize_key(idempotency_key, now)?;
+    let lookup = {
+        let quotes = state.ai_runtime.wallpaper_quotes.lock().await;
+        quotes.lookup(principal, quote_id, now).map(|quote| {
+            (
+                quote.request_digest.clone(),
+                quote.consumed,
+                quote.request.request_id.clone(),
+                quote.pricing.provider.clone(),
+                quote.pricing.model.clone(),
+            )
+        })
+    };
+    let Some((digest, consumed, quote_request_id, quote_provider, quote_model)) = lookup else {
+        return Err(ApiError::new(
+            axum::http::StatusCode::NOT_FOUND,
+            "quote_unknown",
+            "quote 不存在或已过期",
+        ));
+    };
+    if quote_request_id != request_id {
+        return Err(ApiError::new(
+            axum::http::StatusCode::CONFLICT,
+            "quote_request_mismatch",
+            "quote 与 requestId 不匹配",
+        ));
+    }
+    if consumed {
+        let existing = store::find_job_by_key(&state.db, principal, WALLPAPER_CAPABILITY, &key)
+            .await
+            .map_err(store_error)?;
+        if let Some(job) = existing {
+            if job.input_hash == digest {
+                return Ok(SubmitOutcome::Replayed {
+                    job: JobView::with_usage(&job, &state.db).await?,
+                });
+            }
+            return Err(ApiError::new(
+                axum::http::StatusCode::CONFLICT,
+                "idempotency_conflict",
+                "同一 idempotencyKey 携带了不同输入",
+            ));
+        }
+        return Err(ApiError::new(
+            axum::http::StatusCode::CONFLICT,
+            "quote_consumed",
+            "quote 已消费，不能创建第二个任务",
+        ));
+    }
+    // quote 绑定 provider/model：确认后模型或 provider 被换即拒绝重试，
+    // 不把旧报价落到新 adapter 上（§19.4）。
+    let provider = state.ai_runtime.provider().await;
+    if provider.id() != quote_provider || provider.model() != quote_model {
+        return Err(ApiError::new(
+            axum::http::StatusCode::CONFLICT,
+            "quote_provider_changed",
+            "quote 绑定的 provider/model 已变更",
+        ));
+    }
+    state
+        .ai_runtime
+        .wallpaper_quotes
+        .lock()
+        .await
+        .mark_consumed(principal, quote_id);
+    let request = {
+        let quotes = state.ai_runtime.wallpaper_quotes.lock().await;
+        quotes
+            .lookup(principal, quote_id, now)
+            .map(|quote| quote.request.clone())
+    };
+    let Some(request) = request else {
+        return Err(ApiError::new(
+            axum::http::StatusCode::NOT_FOUND,
+            "quote_unknown",
+            "quote 不存在或已过期",
+        ));
+    };
+    let state_clone = state.clone();
+    let principal_owned = principal.to_string();
+    let input = GenerationInput::Wallpaper(request);
+    let key_owned = key.clone();
+    let outcome = tokio::spawn(async move {
+        submit_owned(
+            &state_clone,
+            &principal_owned,
+            input,
+            WALLPAPER_CAPABILITY,
+            Some(key_owned.as_str()),
+        )
+        .await
+    })
+    .await
+    .map_err(|e| internal(format!("AI acceptance failed: {e}")))?;
+    match &outcome {
+        Ok(_) => {
+            state
+                .ai_runtime
+                .wallpaper_quotes
+                .lock()
+                .await
+                .mark_consumed(principal, quote_id);
+        }
+        Err(_) => {
+            // 受理失败还原为未消费，用户修正后可重试同一 quote。
+            state
+                .ai_runtime
+                .wallpaper_quotes
+                .lock()
+                .await
+                .restore(principal, quote_id);
+        }
+    }
+    outcome
 }
 
 #[cfg(test)]

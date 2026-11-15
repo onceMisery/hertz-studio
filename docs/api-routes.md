@@ -48,6 +48,9 @@ REST 路由表共 202 个「方法 + 路径」（`crates/hertz-studio/src/routes
 | PUT | `/v1/ai/provider-credential` |
 | DELETE | `/v1/ai/provider-credential` |
 | GET | `/v1/ai/status` |
+| GET | `/v1/ai/wallpaper/capabilities` |
+| POST | `/v1/ai/wallpaper/jobs` |
+| POST | `/v1/ai/wallpaper/quote` |
 | GET | `/v1/auth/overlay-key` |
 | POST | `/v1/auth/ticket` |
 | GET | `/v1/backup` |

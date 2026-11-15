@@ -4966,3 +4966,173 @@ async fn token_only_generation_ignores_legacy_accounting_guards() {
     state.audio.shutdown();
     handle.join().unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// AI-02 切片 2：壁纸生成 capability snapshot、quote 与 submit（§19.3/§19.4）
+// ---------------------------------------------------------------------------
+
+async fn wallpaper_snapshot(state: &Arc<AppState>) -> serde_json::Value {
+    serde_json::to_value(super::wallpaper_capabilities(state).await.unwrap()).unwrap()
+}
+
+fn wallpaper_request(snapshot: &serde_json::Value, scene_id: &str) -> serde_json::Value {
+    json!({
+        "version":1,
+        "requestId":"wreq-1",
+        "brief":"夜色频谱",
+        "output":{"kind":"builtin","sceneId":scene_id},
+        "registryHash":snapshot["registryHash"],
+        "generationSchemaHash":snapshot["generationSchemaHash"],
+        "capabilitySnapshotId":snapshot["snapshotId"],
+    })
+}
+
+fn client_key() -> String {
+    format!("v1.{}.{}", super::now_ms(), uuid::Uuid::new_v4().simple())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wallpaper_capabilities_snapshot_is_deterministic_and_self_bound() {
+    let (state, handle) = jobs_state().await;
+    let first = wallpaper_snapshot(&state).await;
+    let second = wallpaper_snapshot(&state).await;
+    assert_eq!(first["snapshotId"], second["snapshotId"]);
+    assert_eq!(
+        first["registryHash"],
+        json!(hertz_wallpaper::catalog().registry_hash)
+    );
+    assert_eq!(
+        first["generationSchemaHash"],
+        json!(super::super::wallpaper_jobs::generation_schema_hash())
+    );
+    assert_eq!(first["outputs"][0]["kind"], json!("builtin"));
+    assert_eq!(first["outputs"][0]["ready"], json!(true));
+    state.audio.shutdown();
+    handle.join().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wallpaper_quote_rejects_stale_schema_snapshot_and_registry() {
+    let (state, handle) = jobs_state().await;
+    let snapshot = wallpaper_snapshot(&state).await;
+    let request = wallpaper_request(&snapshot, "coast");
+    let mut mutated = request.clone();
+    mutated["generationSchemaHash"] = json!("3".repeat(64));
+    let error = super::wallpaper_quote(
+        &state,
+        crate::idempotency::LOCAL_OWNER,
+        &serde_json::to_vec(&mutated).unwrap(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, "generation_schema_mismatch");
+
+    let mut mutated = request.clone();
+    mutated["capabilitySnapshotId"] = json!("4".repeat(64));
+    let error = super::wallpaper_quote(
+        &state,
+        crate::idempotency::LOCAL_OWNER,
+        &serde_json::to_vec(&mutated).unwrap(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, "capability_snapshot_stale");
+
+    let mut mutated = request;
+    mutated["registryHash"] = json!("5".repeat(64));
+    let error = super::wallpaper_quote(
+        &state,
+        crate::idempotency::LOCAL_OWNER,
+        &serde_json::to_vec(&mutated).unwrap(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, "registry_mismatch");
+    state.audio.shutdown();
+    handle.join().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wallpaper_quote_submit_completes_and_replays_idempotently() {
+    let (state, handle) = jobs_state().await;
+    let snapshot = wallpaper_snapshot(&state).await;
+    let request = wallpaper_request(&snapshot, "coast");
+    let quote = super::wallpaper_quote(
+        &state,
+        crate::idempotency::LOCAL_OWNER,
+        &serde_json::to_vec(&request).unwrap(),
+    )
+    .await
+    .unwrap();
+    let quote_id = quote["quoteId"].as_str().unwrap().to_string();
+    let ttl = quote["expiresAt"].as_i64().unwrap() - super::now_ms();
+    assert!(
+        ttl > super::super::wallpaper_jobs::QUOTE_TTL_MS - 1_000
+            && ttl <= super::super::wallpaper_jobs::QUOTE_TTL_MS,
+        "quote 有效期为 5 分钟"
+    );
+    assert_eq!(quote["provider"], json!("fake"));
+    let key = client_key();
+    let outcome = super::wallpaper_submit(
+        &state,
+        crate::idempotency::LOCAL_OWNER,
+        &quote_id,
+        "wreq-1",
+        Some(&key),
+    )
+    .await
+    .unwrap();
+    let job = match &outcome {
+        super::SubmitOutcome::Accepted { job } => job,
+        super::SubmitOutcome::Replayed { .. } => panic!("首次提交必须受理为新任务"),
+    };
+    assert_eq!(job.capability, "wallpaper.generate");
+    let row = await_terminal(&state, &job.job_id.clone()).await;
+    assert_eq!(row.state, "succeeded");
+    let proposal_id = row
+        .result_proposal_id
+        .expect("succeeded job carries a proposal");
+    let proposal = store::find_proposal(&state.db, &proposal_id)
+        .await
+        .unwrap()
+        .expect("proposal exists");
+    assert_eq!(proposal.schema_version, "wallpaper.builtin:1");
+    let output: hertz_wallpaper::generation::BuiltinSceneOutput =
+        serde_json::from_str(&proposal.validated_intent).unwrap();
+    assert_eq!(
+        output.kind,
+        hertz_wallpaper::generation::WallpaperGenerationKind::Builtin
+    );
+    assert!(
+        hertz_wallpaper::catalog().scene(&output.scene_id).is_some(),
+        "fake 输出必须落在资格目录内"
+    );
+
+    // 同键同载荷重试查原 job（§19.4：submit 幂等）。
+    let replay = super::wallpaper_submit(
+        &state,
+        crate::idempotency::LOCAL_OWNER,
+        &quote_id,
+        "wreq-1",
+        Some(&key),
+    )
+    .await
+    .unwrap();
+    match replay {
+        super::SubmitOutcome::Replayed { job } => assert_eq!(job.job_id, row.job_id),
+        super::SubmitOutcome::Accepted { .. } => panic!("重试不得创建第二个任务"),
+    }
+    // 已消费 quote 换新键 → 拒绝（一个 quote 只能有一个任务）。
+    let error = super::wallpaper_submit(
+        &state,
+        crate::idempotency::LOCAL_OWNER,
+        &quote_id,
+        "wreq-1",
+        Some(&client_key()),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, "quote_consumed");
+    state.audio.shutdown();
+    handle.join().unwrap();
+}

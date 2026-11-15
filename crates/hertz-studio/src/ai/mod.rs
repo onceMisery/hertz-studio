@@ -35,3 +35,4 @@ pub(crate) mod provider;
 pub(crate) mod stepfun;
 mod strict_json;
 pub(crate) mod usage;
+pub(crate) mod wallpaper_jobs;
