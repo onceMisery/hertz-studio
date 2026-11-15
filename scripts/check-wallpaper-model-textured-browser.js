@@ -143,7 +143,7 @@ function expectedFacts(input, embeddedImageBytes) {
   return {
     profile: 'static-pbr-texture-v1', loaderVersion: 'three-0.186.0-gltfloader', input,
     declared: { nodes: 1, meshes: 1, primitives: 1, accessors: 5, bufferViews: 6, materials: 1, textures: 5, images: 5 },
-    scene: { index: 0, roots: [0], nodes: [{ index: 0, parentIndex: null, meshIndex: 0, children: [], transform: { kind: 'trs', translation: [0, 0, 0], rotation: [0, 0, 0, 1], scale: [1, 1, 1] } }], maxDepth: 1, objectCount: 2, allocatedObjectCount: 2, drawCalls: 1, triangles: 1 },
+    scene: { index: 0, roots: [0], nodes: [{ index: 0, parentIndex: null, meshIndex: 0, morphTargetCount: 0, morphWeights: null, children: [], transform: { kind: 'trs', translation: [0, 0, 0], rotation: [0, 0, 0, 1], scale: [1, 1, 1] } }], maxDepth: 1, objectCount: 2, allocatedObjectCount: 2, drawCalls: 1, triangles: 1 },
     materials: [{
       index: 0, baseColorFactor: [0.25, 0.5, 0.75, 0.8], metallicFactor: 0.4, roughnessFactor: 0.6,
       baseColorTexture: { index: 0, texCoord: 0 }, metallicRoughnessTexture: { index: 1, texCoord: 1 },
@@ -152,10 +152,12 @@ function expectedFacts(input, embeddedImageBytes) {
       emissiveTexture: { index: 4, texCoord: 0 }, emissiveFactor: [0.1, 0.2, 0.3],
       alphaMode: 'MASK', alphaCutoff: 0.3, doubleSided: true
     }],
+    meshes: [{ index: 0, morphTargetCount: 0, defaultWeights: null }],
     textures: [0, 1, 2, 3, 4].map(index => ({ index, source: index === 4 ? external : embedded(index), sampler: samplers[index] })),
     images: [embedded(0), embedded(1), embedded(2), embedded(3), external],
     resources: {
-      geometries: [{ key, material: 0, positionAccessor: 0, normalAccessor: 1, uvAccessors: [{ set: 0, accessor: 2 }, { set: 1, accessor: 3 }], indexAccessor: 4, mode: null, triangles: 1, positionMin: [0, 0, 0], positionMax: [1, 1, 0] }],
+      geometries: [{ key, material: 0, positionAccessor: 0, normalAccessor: 1, uvAccessors: [{ set: 0, accessor: 2 }, { set: 1, accessor: 3 }],
+        morphTargets: [], indexAccessor: 4, mode: null, triangles: 1, positionMin: [0, 0, 0], positionMax: [1, 1, 0] }],
       accessors: [
         { index: 0, viewIndex: 0, componentType: 5126, type: 'VEC3', count: 3, byteOffset: 0, byteLength: 36 },
         { index: 1, viewIndex: 1, componentType: 5126, type: 'VEC3', count: 3, byteOffset: 0, byteLength: 36 },
@@ -169,7 +171,7 @@ function expectedFacts(input, embeddedImageBytes) {
         { index: 4, byteOffset: 120, byteLength: 8 }
       ],
       geometryCount: 1, attributeCount: 5, backingCount: 5, gpuBufferBytes: 126, cpuBackingBytes: 128,
-      materialCount: 1, allocatedMaterialCount: 2, textureCount: 5, imageCount: 5
+      materialCount: 1, allocatedMaterialCount: 2, programCount: 1, textureCount: 5, imageCount: 5
     }
   };
 }

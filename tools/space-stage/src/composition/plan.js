@@ -68,14 +68,24 @@ function checkModelAnimations(facts) {
     clipNames.add(clip.name);
     for (const channel of clip.channels) {
       if (!channel || !Number.isSafeInteger(channel.node) || channel.node < 0 || channel.node >= nodes.length
-          || !['translation', 'rotation', 'scale'].includes(channel.path)
+          || !['translation', 'rotation', 'scale', 'weights'].includes(channel.path)
           || !['STEP', 'LINEAR', 'CUBICSPLINE'].includes(channel.interpolation)
           || !Number.isSafeInteger(channel.inputAccessor) || channel.inputAccessor < 0
           || !Number.isSafeInteger(channel.outputAccessor) || channel.outputAccessor < 0
           || !Number.isSafeInteger(channel.times) || channel.times < 1
           || !Number.isSafeInteger(channel.values) || channel.values < 1
-          || ![3, 4].includes(channel.components))
+          || !Number.isSafeInteger(channel.components) || channel.components < 1)
         throw new Error('composition-model-preparation-required');
+      if (channel.path === 'weights') {
+        const morphTargets = nodes[channel.node].morphTargetCount;
+        if (!Number.isSafeInteger(morphTargets) || morphTargets !== channel.components
+            || channel.values !== channel.times * channel.components
+              * (channel.interpolation === 'CUBICSPLINE' ? 3 : 1))
+          throw new Error('composition-model-preparation-required');
+      } else if (![3, 4].includes(channel.components)
+          || channel.components !== (channel.path === 'rotation' ? 4 : 3)) {
+        throw new Error('composition-model-preparation-required');
+      }
       channelCount += 1;
     }
   }
@@ -109,11 +119,15 @@ function checkModel(asset) {
     return;
   }
   const images = facts.images, materials = facts.materials, textures = facts.textures;
+  const morphTextureBytes = resources.morphTextureBytes ?? 0;
   if (!Array.isArray(images) || !images.length || !Array.isArray(materials) || !materials.length
       || !Array.isArray(textures) || !textures.length
       || resources.textureCount !== textures.length || resources.imageCount !== images.length
       || !Number.isSafeInteger(resources.programCount) || resources.programCount < 1
-      || resources.programCount > materials.length)
+      || resources.programCount > scene.drawCalls
+      || !Number.isSafeInteger(morphTextureBytes) || morphTextureBytes < 0
+      || (resources.morphAccessors !== undefined && (!Array.isArray(resources.morphAccessors)
+        || !resources.morphAccessors.length)))
     throw new Error('composition-model-preparation-required');
   if (ktx2) {
     for (const image of images) {
@@ -134,9 +148,10 @@ function checkModel(asset) {
     }
     if (!Number.isSafeInteger(resources.imageUploadBytes)
         || resources.imageUploadBytes !== images.reduce((sum, image) => sum + image.uploadBytes, 0)
-        || asset.textureUploadBytes !== resources.imageUploadBytes)
+        || asset.textureUploadBytes !== resources.imageUploadBytes + morphTextureBytes)
       throw new Error('composition-model-preparation-required');
-  } else if (!Number.isSafeInteger(asset.textureUploadBytes) || asset.textureUploadBytes < images.length * 4) {
+  } else if (!Number.isSafeInteger(asset.textureUploadBytes)
+      || asset.textureUploadBytes < images.length * 4 + morphTextureBytes) {
     throw new Error('composition-model-preparation-required');
   }
   const external = images.filter(image => image?.source === 'external');
