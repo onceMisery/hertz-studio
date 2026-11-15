@@ -115,15 +115,19 @@ function checkModel(asset) {
     throw new Error('composition-model-preparation-required');
   if (ktx2) {
     for (const image of images) {
+      const transcoded = image?.transcode === true;
       if (image?.mime !== 'image/ktx2'
           || !Number.isSafeInteger(image.width) || image.width < 1 || image.width > 16384
           || !Number.isSafeInteger(image.height) || image.height < 1 || image.height > 16384
-          || ![37, 43].includes(image.vkFormat) || typeof image.srgb !== 'boolean'
+          || (transcoded ? image.vkFormat !== 0 || !Number.isSafeInteger(image.rgbaBytes)
+            || image.rgbaBytes < image.levelCount * 4 : ![37, 43].includes(image.vkFormat))
+          || typeof image.srgb !== 'boolean'
           || !Number.isSafeInteger(image.levelCount) || image.levelCount < 1 || image.levelCount > 15
           || !Array.isArray(image.levelByteLengths) || image.levelByteLengths.length !== image.levelCount
           || image.levelByteLengths.some(bytes => !Number.isSafeInteger(bytes) || bytes < 1)
           || !Number.isSafeInteger(image.uploadBytes)
-          || image.uploadBytes !== image.levelByteLengths.reduce((sum, bytes) => sum + bytes, 0))
+          || image.uploadBytes !== (transcoded ? image.rgbaBytes
+            : image.levelByteLengths.reduce((sum, bytes) => sum + bytes, 0)))
         throw new Error('composition-model-preparation-required');
     }
     if (!Number.isSafeInteger(resources.imageUploadBytes)

@@ -29,13 +29,17 @@ const result = await build({
   bundle: true, format: 'iife', globalName: 'HertzStageRuntime', minify: !process.argv.includes('--dev'),
   target: 'es2020', legalComments: 'eof', write: false, metafile: true,
   plugins: [{ name: 'ktx2-transcoder-urls', setup(builder) {
-    // The IIFE bundle has no import.meta. Direct-format KTX2 never loads the
-    // Basis transcoder, and Basis payloads are rejected before upload.
+    // The IIFE bundle has no import.meta. Inline the pinned Basis transcoder as
+    // data URLs so KTX2Loader can build its worker without extra served files.
+    const basis = resolve(here, 'node_modules/three/examples/jsm/libs/basis');
+    const transcoderJS = readFileSync(resolve(basis, 'basis_transcoder.js')).toString('base64');
+    const transcoderWasm = readFileSync(resolve(basis, 'basis_transcoder.wasm')).toString('base64');
     builder.onLoad({ filter: /[\\/]loaders[\\/]KTX2Loader\.js$/ }, args => {
       const source = readFileSync(args.path, 'utf8');
       const contents = source.replace(
         /const WASM_BIN_URL = new URL\([^;]+;\s*const WASM_JS_URL = new URL\([^;]+;/,
-        "const WASM_BIN_URL = '';\nconst WASM_JS_URL = '';");
+        `const WASM_BIN_URL = 'data:application/wasm;base64,${transcoderWasm}';\n`
+        + `const WASM_JS_URL = 'data:text/javascript;base64,${transcoderJS}';`);
       if (contents === source) throw new Error('KTX2Loader transcoder URL layout changed');
       return { contents, loader: 'js', resolveDir: dirname(args.path) };
     });

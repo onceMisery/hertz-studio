@@ -85,6 +85,26 @@
     if (!channels || !component) fail('unplanned texture or renderbuffer format');
     return channels * component;
   }
+  // Planned compressed upload formats: bytes per 4x4 block. Only the formats
+  // the pinned KTX2 Basis transcoder targets are admitted; every other
+  // compressed format still fails closed. sRGB variants share the same sizes.
+  var compressedBlockBytes = new Map([
+    [33776,8],[33777,8],[33778,16],[33779,16],
+    [35916,8],[35917,8],[35918,16],[35919,16],
+    [36196,8],
+    [37492,8],[37493,8],[37494,8],[37495,8],[37496,16],[37497,16],
+    [37808,16],[37809,16],
+    [36492,16],[36493,16]
+  ]);
+  function storageFormat(gl, internal, format, type) {
+    var bytes = compressedBlockBytes.get(internal);
+    return bytes === undefined
+      ? { bpp: formatBytes(gl, internal, format, type), edge: 1 }
+      : { bpp: bytes, edge: 4 };
+  }
+  function textureBytes(width, height, depth, bpp, edge) {
+    return bytesProduct(Math.ceil(width / edge), Math.ceil(height / edge), depth, bpp);
+  }
   function guard(gl, canvas) {
     var state = { gl:gl,canvas:canvas,objects:new Map(),
       bytes:0,pendingBytes:0,pending:[],batches:[],closed:false };
@@ -107,11 +127,12 @@
       if(binding===undefined)fail('unplanned texture target');
       return gl.getParameter(binding);
     }
-    function level(target, mip, width, height, depth, bpp, run) {
+    function level(target, mip, width, height, depth, bpp, run, edge) {
       mip=Math.trunc(mip);
       if(!integer(mip)||mip>31)fail('invalid texture level');
       var value = texture(target), entry = object(value), levels = new Map(entry.levels);
-      levels.set(target+':'+mip,{width:width,height:height,depth:depth,bpp:bpp,bytes:bytesProduct(width,height,depth,bpp)});
+      levels.set(target+':'+mip,{width:width,height:height,depth:depth,bpp:bpp,edge:edge,
+        bytes:textureBytes(width,height,depth,bpp,edge)});
       var bytes = Array.from(levels.values()).reduce((sum,item)=>sum+item.bytes,0);
       var result = replace(value,bytes,run); entry.levels = levels; return result;
     }
@@ -147,11 +168,11 @@
       var width,height,format,type;
       if(args.length>=9) {width=args[3];height=args[4];format=args[6];type=args[7];}
       else {var image=args[5];width=image&&(image.videoWidth||image.naturalWidth||image.width);height=image&&(image.videoHeight||image.naturalHeight||image.height);format=args[3];type=args[4];}
-      return level(args[0],args[1],width,height,1,formatBytes(gl,args[2],format,type),()=>run.apply(gl,args));
+      return level(args[0],args[1],width,height,1,formatBytes(gl,args[2],format,type),()=>run.apply(gl,args),1);
     });
-    wrap('texImage3D',function(run,args){return level(args[0],args[1],args[3],args[4],args[5],formatBytes(gl,args[2],args[7],args[8]),()=>run.apply(gl,args));});
+    wrap('texImage3D',function(run,args){return level(args[0],args[1],args[3],args[4],args[5],formatBytes(gl,args[2],args[7],args[8]),()=>run.apply(gl,args),1);});
     ['texStorage2D','texStorage3D'].forEach(function(name){wrap(name,function(run,args){
-      var value=texture(args[0]),entry=object(value),levels=new Map(),bpp=formatBytes(gl,args[2],null,null),bytes=0;
+      var value=texture(args[0]),entry=object(value),levels=new Map(),spec=storageFormat(gl,args[2],null,null),bytes=0;
       var faces=args[0]===gl.TEXTURE_CUBE_MAP?6:1,depth=name==='texStorage3D'?args[5]:1;
       // Three computes log2(size)+1 for non-power-of-two textures. Match WebIDL's
       // integer conversion before planning the levels actually passed to GL.
@@ -160,7 +181,7 @@
       for(var face=0;face<faces;face++)for(var mip=0;mip<mipCount;mip++) {
         var w=Math.max(1,Math.floor(args[3]/2**mip)),h=Math.max(1,Math.floor(args[4]/2**mip));
         var d=args[0]===gl.TEXTURE_3D?Math.max(1,Math.floor(depth/2**mip)):depth;
-        var item={width:w,height:h,depth:d,bpp:bpp,bytes:bytesProduct(w,h,d,bpp)};
+        var item={width:w,height:h,depth:d,bpp:spec.bpp,edge:spec.edge,bytes:textureBytes(w,h,d,spec.bpp,spec.edge)};
         levels.set((faces===6?gl.TEXTURE_CUBE_MAP_POSITIVE_X+face:args[0])+':'+mip,item);bytes+=item.bytes;
       }
       var result=replace(value,bytes,()=>run.apply(gl,args));entry.levels=levels;return result;
@@ -171,14 +192,46 @@
         var item=pair[1],target=pair[0].slice(0,-2),mip=0,w=item.width,h=item.height,d=item.depth;
         while(w>1||h>1||(args[0]===gl.TEXTURE_3D&&d>1)) {
           mip++;w=Math.max(1,Math.floor(w/2));h=Math.max(1,Math.floor(h/2));if(args[0]===gl.TEXTURE_3D)d=Math.max(1,Math.floor(d/2));
-          levels.set(target+':'+mip,{width:w,height:h,depth:d,bpp:item.bpp,bytes:bytesProduct(w,h,d,item.bpp)});
+          levels.set(target+':'+mip,{width:w,height:h,depth:d,bpp:item.bpp,edge:item.edge,bytes:textureBytes(w,h,d,item.bpp,item.edge)});
         }
       }
       var bytes=Array.from(levels.values()).reduce((sum,item)=>sum+item.bytes,0);
       var result=replace(value,bytes,()=>run.apply(gl,args));entry.levels=levels;return result;
     });
-    wrap('copyTexImage2D',function(run,args){return level(args[0],args[1],args[5],args[6],1,formatBytes(gl,args[2],args[2],gl.UNSIGNED_BYTE),()=>run.apply(gl,args));});
-    ['compressedTexImage2D','compressedTexImage3D','compressedTexSubImage2D','compressedTexSubImage3D'].forEach(function(name){wrap(name,function(){fail('compressed textures require a planned format adapter');});});
+    wrap('copyTexImage2D',function(run,args){return level(args[0],args[1],args[5],args[6],1,formatBytes(gl,args[2],args[2],gl.UNSIGNED_BYTE),()=>run.apply(gl,args),1);});
+    function compressedBytes(format) {
+      var bytes=compressedBlockBytes.get(format);
+      if(bytes===undefined)fail('compressed texture format is not in the native plan');
+      return bytes;
+    }
+    function plannedLevel(target,mip) {
+      var entry=object(texture(target));
+      if(!entry.levels.has(target+':'+Math.trunc(mip)))fail('compressed texture level was not planned');
+    }
+    function compressedMismatch(format,width,height,data,expected) {
+      fail('compressed texture bytes do not match the plan (format '+format+' '+width+'x'+height
+        +' got '+(data&&data.byteLength)+' want '+expected+')');
+    }
+    wrap('compressedTexImage2D',function(run,args){
+      var bytes=compressedBytes(args[2]),expected=textureBytes(args[3],args[4],1,bytes,4);
+      if(!args[6]||args[6].byteLength!==expected)compressedMismatch(args[2],args[3],args[4],args[6],expected);
+      return level(args[0],args[1],args[3],args[4],1,bytes,()=>run.apply(gl,args),4);
+    });
+    wrap('compressedTexImage3D',function(run,args){
+      var bytes=compressedBytes(args[2]),expected=textureBytes(args[3],args[4],args[5],bytes,4);
+      if(!args[7]||args[7].byteLength!==expected)compressedMismatch(args[2],args[3],args[4],args[7],expected);
+      return level(args[0],args[1],args[3],args[4],args[5],bytes,()=>run.apply(gl,args),4);
+    });
+    wrap('compressedTexSubImage2D',function(run,args){
+      var bytes=compressedBytes(args[6]),expected=textureBytes(args[4],args[5],1,bytes,4);
+      if(!args[7]||args[7].byteLength!==expected)compressedMismatch(args[6],args[4],args[5],args[7],expected);
+      plannedLevel(args[0],args[1]);return run.apply(gl,args);
+    });
+    wrap('compressedTexSubImage3D',function(run,args){
+      var bytes=compressedBytes(args[7]),expected=textureBytes(args[5],args[6],args[8],bytes,4);
+      if(!args[9]||args[9].byteLength!==expected)compressedMismatch(args[7],args[5],args[6],args[9],expected);
+      plannedLevel(args[0],args[1]);return run.apply(gl,args);
+    });
     wrap('renderbufferStorage',function(run,args){return replace(gl.getParameter(gl.RENDERBUFFER_BINDING),bytesProduct(args[2],args[3],formatBytes(gl,args[1],null,null)),()=>run.apply(gl,args));});
     wrap('renderbufferStorageMultisample',function(run,args){return replace(gl.getParameter(gl.RENDERBUFFER_BINDING),bytesProduct(args[3],args[4],Math.max(1,args[1]),formatBytes(gl,args[2],null,null)),()=>run.apply(gl,args));});
     function backbuffer(width,height,run) {

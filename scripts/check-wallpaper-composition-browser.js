@@ -4,10 +4,10 @@
 const assert=require('node:assert/strict'), fs=require('node:fs'), path=require('node:path');
 const {execFileSync}=require('node:child_process'), {createHash}=require('node:crypto'), zlib=require('node:zlib');
 const {loadCompositionFontFixture}=require('./composition-font-fixture.js');
-const {coreGlb,animatedGlb,texturedGlb,ktx2Glb}=require('./composition-model-fixture.js');
+const {coreGlb,animatedGlb,texturedGlb,ktx2Glb,basisGlb,basisUastcGlb}=require('./composition-model-fixture.js');
 const {chromium}=require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const root=path.resolve(__dirname,'..'), output=path.join(root,'output/a04-p2-20261108/composition-browser');
-const fontFixture=loadCompositionFontFixture(), modelFixture=coreGlb(), animatedFixture=animatedGlb(), texturedFixture=texturedGlb(), ktx2Fixture=ktx2Glb();
+const fontFixture=loadCompositionFontFixture(), modelFixture=coreGlb(), animatedFixture=animatedGlb(), texturedFixture=texturedGlb(), ktx2Fixture=ktx2Glb(), basisFixture=basisGlb(), basisUastcFixture=basisUastcGlb();
 fs.mkdirSync(output,{recursive:true});
 function hash(bytes){return createHash('sha256').update(bytes).digest('hex');}
 function crc(bytes){let c=0xffffffff;for(const b of bytes){c^=b;for(let i=0;i<8;i++)c=(c>>>1)^((c&1)?0xedb88320:0);}return (c^0xffffffff)>>>0;}
@@ -32,7 +32,11 @@ const sourceAssets=[
  {assetId:'textured',kind:'model',file:'textured.glb',mime:'model/gltf-binary',bytes:texturedFixture.glb,
   modelInput:texturedFixture.input,textured:true,uploadBytes:64,imageBytes:texturedFixture.imageBytes},
  {assetId:'ktx2',kind:'model',file:'ktx2.glb',mime:'model/gltf-binary',bytes:ktx2Fixture.glb,
-  modelInput:ktx2Fixture.input,ktx2:true,uploadBytes:16,imageBytes:ktx2Fixture.imageBytes}
+  modelInput:ktx2Fixture.input,ktx2:true,uploadBytes:16,imageBytes:ktx2Fixture.imageBytes},
+ {assetId:'basis',kind:'model',file:'basis.glb',mime:'model/gltf-binary',bytes:basisFixture.glb,
+  modelInput:basisFixture.input,ktx2:true,transcode:true,imageBytes:basisFixture.imageBytes},
+ {assetId:'basis-uastc',kind:'model',file:'basis-uastc.glb',mime:'model/gltf-binary',bytes:basisUastcFixture.glb,
+  modelInput:basisUastcFixture.input,ktx2:true,transcode:true,imageBytes:basisUastcFixture.imageBytes}
 ];
 for(const a of sourceAssets)fs.writeFileSync(path.join(output,a.file),a.bytes);
 for(const file of fontFixture.packageFiles){fs.mkdirSync(path.dirname(path.join(output,file.file)),{recursive:true});fs.writeFileSync(path.join(output,file.file),file.bytes);}
@@ -86,6 +90,10 @@ const texturedModel=compile([modelNode('mesh',{},'textured')],modelCanvas);
 const texturedRustFacts=JSON.parse(execFileSync(factsExecutable,[path.join(output,'textured.glb'),compilerInputs.get(texturedModel)[0],'assets/textured.glb','textured'],{cwd:root,encoding:'utf8'}));
 const ktx2Model=compile([modelNode('mesh',{},'ktx2')],modelCanvas);
 const ktx2RustFacts=JSON.parse(execFileSync(factsExecutable,[path.join(output,'ktx2.glb'),compilerInputs.get(ktx2Model)[0],'assets/ktx2.glb','ktx2'],{cwd:root,encoding:'utf8'}));
+const basisModel=compile([modelNode('mesh',{},'basis')],modelCanvas);
+const basisRustFacts=JSON.parse(execFileSync(factsExecutable,[path.join(output,'basis.glb'),compilerInputs.get(basisModel)[0],'assets/basis.glb','ktx2'],{cwd:root,encoding:'utf8'}));
+const basisUastcModel=compile([modelNode('mesh',{},'basis-uastc')],modelCanvas);
+const basisUastcRustFacts=JSON.parse(execFileSync(factsExecutable,[path.join(output,'basis-uastc.glb'),compilerInputs.get(basisUastcModel)[0],'assets/basis-uastc.glb','ktx2'],{cwd:root,encoding:'utf8'}));
 const movedModel=compile([modelNode('mesh',{position:[.5,.5,0]})],modelCanvas);
 const modelOverlay=compile([modelNode(),image('back','blue')],modelCanvas);
 const modelBehind=compile([image('back','blue'),modelNode()],modelCanvas);
@@ -206,8 +214,12 @@ const results=[];
    :a.kind==='model'?({assetId:a.assetId,kind:'model',contentKey:hash(a.bytes),byteLength:a.bytes.length,
     url:'http://composition.test/'+a.file,adapterId:'three-gltf-loader',adapterVersion:1,
     decodeOptions:{profile:a.ktx2?'static-ktx2-texture-v1':a.textured?'static-pbr-texture-v1':'static-core-pbr-v1'},
-    modelFacts:a.ktx2?ktx2RustFacts:a.textured?texturedRustFacts:a.assetId==='animated'?animatedRustFacts:coreRustFacts,
-    ...(a.textured||a.ktx2?{textureUploadBytes:a.uploadBytes,textureUrls:{}}:{})})
+    modelFacts:a.assetId==='basis'?basisRustFacts:a.assetId==='basis-uastc'?basisUastcRustFacts
+     :a.ktx2?ktx2RustFacts:a.textured?texturedRustFacts:a.assetId==='animated'?animatedRustFacts:coreRustFacts,
+    ...(a.textured?{textureUploadBytes:a.uploadBytes,textureUrls:{}}
+     :a.ktx2?{textureUploadBytes:a.transcode
+       ?(a.assetId==='basis'?basisRustFacts.resources.imageUploadBytes:basisUastcRustFacts.resources.imageUploadBytes)
+       :a.uploadBytes,textureUrls:{}}:{})})
    :({assetId:a.assetId,kind:a.kind,width:a.width,height:a.height,...(a.kind==='video'?actualVideo:{}),
     contentKey:hash(a.bytes),byteLength:a.bytes.length,url:'http://composition.test/'+a.file,decodeOptions:{colorSpace:a.kind==='font'?'none':'srgb',alphaMode:'straight'},adapterId:a.kind==='font'?'fontface-v1':a.kind==='video'?'video-element-v1':'image-element-v1',adapterVersion:1}));
   const setup=await page.evaluate(()=>{window.counts={contexts:0,loads:0};let original=HTMLCanvasElement.prototype.getContext;
@@ -304,6 +316,38 @@ const results=[];
   assert.match(ktx2UploadRejection.error,/composition-model-preparation-required/);
   assert.deepEqual(ktx2UploadRejection.after.held,ktx2UploadRejection.before.held);
   results.push({case:'KTX2 format and upload bytes fail closed without quota',ktx2FormatRejection,ktx2UploadRejection});
+  await select(basisModel);
+  const basisPixels=await page.evaluate(()=>({inside:pixel(40,23),outside:pixel(16,48),live:ledger.snapshot().live,
+   models:host.stats().sceneStats.models}));
+  near(basisPixels.inside,[253,0,0]);near(basisPixels.outside,[0,0,0]);
+  assert.equal(basisPixels.live.textureDeclaredBytes,basisRustFacts.resources.imageUploadBytes);
+  assert.equal(basisPixels.models,1);
+  results.push({case:'Basis ETC1S KTX2 transcodes through the pinned worker and renders its level-0 color',basisPixels});
+  const basisNoRgba=await reject(basisModel,p=>{delete p.resolvedAssets.find(asset=>
+   asset.kind==='model'&&asset.assetId==='basis').modelFacts.images[0].rgbaBytes;});
+  assert.match(basisNoRgba.error,/composition-model-preparation-required/);
+  assert.deepEqual(basisNoRgba.after.held,basisNoRgba.before.held);
+  const basisDirectFlag=await reject(basisModel,p=>{delete p.resolvedAssets.find(asset=>
+   asset.kind==='model'&&asset.assetId==='basis').modelFacts.images[0].transcode;});
+  assert.match(basisDirectFlag.error,/composition-model-preparation-required/);
+  assert.deepEqual(basisDirectFlag.after.held,basisDirectFlag.before.held);
+  const basisUpload=await reject(basisModel,p=>{p.resolvedAssets.find(asset=>
+   asset.kind==='model'&&asset.assetId==='basis').textureUploadBytes-=4;});
+  assert.match(basisUpload.error,/composition-model-preparation-required/);
+  assert.deepEqual(basisUpload.after.held,basisUpload.before.held);
+  const basisImageUpload=await reject(basisModel,p=>{const image=p.resolvedAssets.find(asset=>
+   asset.kind==='model'&&asset.assetId==='basis').modelFacts.images[0];
+   image.uploadBytes=image.rgbaBytes-4;});
+  assert.match(basisImageUpload.error,/composition-model-preparation-required/);
+  assert.deepEqual(basisImageUpload.after.held,basisImageUpload.before.held);
+  results.push({case:'transcoded KTX2 facts require rgbaBytes, the transcode flag and exact upload accounting',basisNoRgba,basisDirectFlag,basisUpload,basisImageUpload});
+  await select(basisUastcModel);
+  const basisUastcPixels=await page.evaluate(()=>({inside:pixel(40,23),outside:pixel(16,48),live:ledger.snapshot().live,
+   models:host.stats().sceneStats.models}));
+  near(basisUastcPixels.inside,[255,0,0]);near(basisUastcPixels.outside,[0,0,0]);
+  assert.equal(basisUastcPixels.live.textureDeclaredBytes,basisUastcRustFacts.resources.imageUploadBytes);
+  assert.equal(basisUastcPixels.models,1);
+  results.push({case:'Basis UASTC storage transcodes a solid-color block and renders it',basisUastcPixels});
   await select(modelOverlay);near(await page.evaluate(()=>pixel(40,23)),[0,0,255]);
   results.push({case:'2D painter order composites over the 3D layer'});
   const orderRejection=await reject(modelBehind);assert.match(orderRejection.error,/cross-space-order/);
