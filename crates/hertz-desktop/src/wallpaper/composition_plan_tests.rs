@@ -515,6 +515,17 @@ fn ktx2_model_glb_with(ktx2: &[u8], external: bool) -> Vec<u8> {
     bytes
 }
 fn animated_model_glb() -> Vec<u8> {
+    animated_model_glb_document(json!([]))
+}
+
+/// Second animation reuses the first sampler accessors, so no extra BIN bytes.
+fn two_animation_model_glb() -> Vec<u8> {
+    animated_model_glb_document(json!([{"name":"turn",
+        "samplers":[{"input":3,"output":4,"interpolation":"LINEAR"}],
+        "channels":[{"sampler":0,"target":{"node":0,"path":"translation"}}]}]))
+}
+
+fn animated_model_glb_document(extra_animations: Value) -> Vec<u8> {
     let mut bin = vec![0_u8; 112];
     for (index, value) in [0.0_f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
         .iter()
@@ -537,6 +548,10 @@ fn animated_model_glb() -> Vec<u8> {
     for (index, value) in [0.0_f32, 0.0, 0.0, 1.0, 0.0, 0.0].iter().enumerate() {
         bin[88 + index * 4..88 + index * 4 + 4].copy_from_slice(&value.to_le_bytes());
     }
+    let mut animations = vec![json!({"name":"move",
+        "samplers":[{"input":3,"output":4,"interpolation":"LINEAR"}],
+        "channels":[{"sampler":0,"target":{"node":0,"path":"translation"}}]})];
+    animations.extend(extra_animations.as_array().cloned().unwrap_or_default());
     let document = json!({
         "asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],
         "nodes":[{"mesh":0,"name":"mesh"}],
@@ -554,9 +569,7 @@ fn animated_model_glb() -> Vec<u8> {
             {"bufferView":2,"componentType":5123,"count":3,"type":"SCALAR"},
             {"bufferView":3,"componentType":5126,"count":2,"type":"SCALAR","min":[0],"max":[2]},
             {"bufferView":4,"componentType":5126,"count":2,"type":"VEC3"}],
-        "animations":[{"name":"move",
-            "samplers":[{"input":3,"output":4,"interpolation":"LINEAR"}],
-            "channels":[{"sampler":0,"target":{"node":0,"path":"translation"}}]}]
+        "animations": animations
     });
     let text = serde_json::to_vec(&document).unwrap();
     let json_len = text.len().div_ceil(4) * 4;
@@ -2368,6 +2381,116 @@ async fn native_model_animated_fixture_projects_clip_facts_and_costs() {
         )
         .unwrap();
     }
+}
+
+#[tokio::test]
+async fn native_model_blend_fixture_projects_second_clip_and_weight() {
+    let root = tempfileish::temp_dir("composition-native-model-blend");
+    let glb = two_animation_model_glb();
+    let entries = vec![
+        (
+            "composition.json",
+            serde_json::to_vec(&document_model(json!([model_node(
+                "mesh",
+                json!({"animationClip":"move","animationClipB":"turn","animationWeight":0.5})
+            )])))
+            .unwrap(),
+            "application/json",
+        ),
+        ("assets/model.glb", glb.clone(), "model/gltf-binary"),
+    ];
+    let assets = json!([{"id":"model","kind":"model","source":"assets/model.glb","variants":[]}]);
+    let (jobs, hash, _) = install_document(root.path(), entries, assets, json!([])).await;
+    let plan = selected(jobs, hash, Default::default()).await.unwrap();
+    let model = plan.assets["model"].as_model().unwrap();
+    assert_eq!(model.facts()["animations"][0]["name"], "move");
+    assert_eq!(model.facts()["animations"][1]["name"], "turn");
+    let gl = plan
+        .gl_plan(OwnerKind::Preview, "model-blend-owner".into(), 1, 60, 15)
+        .unwrap();
+    let projection = plan
+        .projection("same-fixed-session-model-blend", 1, 15, &gl.limits)
+        .unwrap();
+    let slot = projection["ir"]["nodes"][0]["constantSlots"]["animationClipB"]
+        .as_u64()
+        .unwrap();
+    assert_eq!(
+        projection["ir"]["constantSlots"][slot as usize]["value"],
+        "turn"
+    );
+    let weights = projection["ir"]["numericSlots"].as_array().unwrap();
+    assert!(weights.iter().any(|slot| {
+        slot["property"] == "animationWeight"
+            && (slot["value"].as_f64().unwrap() - 0.5).abs() < f64::EPSILON
+    }));
+    let page = &projection["pageLimits"];
+    assert_eq!(page["bufferDeclaredBytes"], 170);
+    if let Some(output) = std::env::var_os("HERTZ_COMPOSITION_NATIVE_FIXTURE") {
+        let output = std::path::PathBuf::from(output).join("model-blend");
+        std::fs::create_dir_all(&output).unwrap();
+        std::fs::write(output.join("model.glb"), &glb).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn model_blend_validation_refuses_missing_duplicate_and_overweight_clips() {
+    let glb = two_animation_model_glb();
+    async fn attempt(name: &str, glb: &[u8], properties: Value) -> String {
+        let root = tempfileish::temp_dir(name);
+        let entries = vec![
+            (
+                "composition.json",
+                serde_json::to_vec(&document_model(json!([model_node("mesh", properties)])))
+                    .unwrap(),
+                "application/json",
+            ),
+            ("assets/model.glb", glb.to_vec(), "model/gltf-binary"),
+        ];
+        let assets =
+            json!([{"id":"model","kind":"model","source":"assets/model.glb","variants":[]}]);
+        let (jobs, hash, _) = install_document(root.path(), entries, assets, json!([])).await;
+        selected(jobs, hash, Default::default())
+            .await
+            .unwrap_err()
+            .error
+            .code
+            .to_owned()
+    }
+    let missing = attempt(
+        "composition-native-model-blend-missing",
+        &glb,
+        json!({"animationClip":"move","animationClipB":"other"}),
+    )
+    .await;
+    assert_eq!(missing, "adapter_unavailable");
+    let duplicate = attempt(
+        "composition-native-model-blend-duplicate",
+        &glb,
+        json!({"animationClip":"move","animationClipB":"move"}),
+    )
+    .await;
+    assert_eq!(duplicate, "adapter_unavailable");
+    // The generic public-property range guard rejects an out-of-range weight
+    // at document compile, before adapter validation or any quota.
+    let manifest: hertz_wallpaper::Manifest = serde_json::from_value(json!({
+        "formatVersion":1,"workId":WORK_ID,"version":1,"title":"blend","description":"",
+        "content":{"kind":"composition","document":"composition.json"},
+        "assets":[{"id":"model","kind":"model","source":"assets/model.glb"}],
+        "files":[{"path":"composition.json","bytes":1,"sha256":"a".repeat(64),"mime":"application/json"},
+                 {"path":"assets/model.glb","bytes":1,"sha256":"c".repeat(64),"mime":"model/gltf-binary"}],
+        "properties":[],"permissions":{"audioSpectrum":false,"pointer":false},
+        "license":{"code":"none","assets":"none","attribution":""}})).unwrap();
+    let overweight = hertz_wallpaper::document::compile_document(
+        &serde_json::to_vec(&document_model(json!([model_node(
+            "mesh",
+            json!({"animationClip":"move","animationClipB":"turn","animationWeight":1.5})
+        )])))
+        .unwrap(),
+        &manifest,
+    )
+    .unwrap_err();
+    assert_eq!(overweight.code, "invalid_composition");
+    assert!(overweight.message.contains("animationWeight"));
 }
 
 #[tokio::test]

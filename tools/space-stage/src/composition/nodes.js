@@ -240,6 +240,21 @@ function seedValues(seed, count) {
   }
   return result;
 }
+export function createModelAnimation(THREE, root, clips, weight) {
+  const [clipA, clipB] = clips;
+  if (!clipA && !clipB) return null;
+  const mixer = new THREE.AnimationMixer(root);
+  const actionA = clipA ? mixer.clipAction(clipA).play() : null;
+  const actionB = clipB ? mixer.clipAction(clipB).play() : null;
+  if (actionA) actionA.setEffectiveWeight(actionB ? 1 - weight : 1);
+  if (actionB) actionB.setEffectiveWeight(actionA ? weight : 1);
+  return {
+    animation: { mixer, actionA, actionB, weight: actionA && actionB ? weight : 0,
+      duration: Math.max(clipA?.duration || 0, clipB?.duration || 0) },
+    stop() { mixer.stopAllAction(); mixer.uncacheRoot(root); }
+  };
+}
+
 export function buildNode(THREE, context, scope, spec, assets, generation) {
   if (spec.node.nodeType === 'group') return { object: new THREE.Group(), spec, opacity: 1 };
   if (spec.node.nodeType === 'model') {
@@ -251,12 +266,14 @@ export function buildNode(THREE, context, scope, spec, assets, generation) {
     const animationHolder = { stop: null };
     scope.defer(() => animationHolder.stop?.());
     if (spec.animation) {
-      const clip = resource.clips?.find(item => item.name === spec.animation);
-      if (!clip) throw new Error('composition-model-animation-missing');
-      const mixer = new THREE.AnimationMixer(instance.root);
-      mixer.clipAction(clip).play();
-      animation = { mixer, clip, duration: clip.duration };
-      animationHolder.stop = () => { mixer.stopAllAction(); mixer.uncacheRoot(instance.root); };
+      const clipA = resource.clips?.find(item => item.name === spec.animation);
+      if (!clipA) throw new Error('composition-model-animation-missing');
+      const clipB = spec.animationB
+        ? resource.clips?.find(item => item.name === spec.animationB) : null;
+      if (spec.animationB && !clipB) throw new Error('composition-model-animation-missing');
+      const created = createModelAnimation(THREE, instance.root, [clipA, clipB], spec.animationWeight || 0);
+      animation = created.animation;
+      animationHolder.stop = created.stop;
     }
     const materials = new Set(), modelMaterials = [], materialClones = new Map();
     const profile = spec.resources.asset?.decodeOptions?.profile;

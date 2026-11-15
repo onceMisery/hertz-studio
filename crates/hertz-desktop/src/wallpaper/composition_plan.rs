@@ -1156,18 +1156,28 @@ fn validate_structure(compiled: &CompiledDocument) -> Result<()> {
                 format!("P2-02 adapter 尚未准备：{}:{}", node.node_type, node.space),
             ));
         }
-        if let Some(clip) = node
-            .constant_slots
-            .get("animationClip")
-            .and_then(|slot| compiled.ir().constant_slots()[*slot].value.as_str())
-            .filter(|clip| !clip.is_empty())
-        {
-            if node.node_type != "model" || node.space != "3d" || clip.len() > 128 {
-                return Err(JobError::new(
-                    "adapter_unavailable",
-                    "model animation 仅支持 3D model 节点的有界 clip 名称",
-                ));
+        let mut clip_names: Vec<&str> = Vec::new();
+        for property in ["animationClip", "animationClipB"] {
+            if let Some(clip) = node
+                .constant_slots
+                .get(property)
+                .and_then(|slot| compiled.ir().constant_slots()[*slot].value.as_str())
+                .filter(|clip| !clip.is_empty())
+            {
+                if node.node_type != "model" || node.space != "3d" || clip.len() > 128 {
+                    return Err(JobError::new(
+                        "adapter_unavailable",
+                        "model animation 仅支持 3D model 节点的有界 clip 名称",
+                    ));
+                }
+                clip_names.push(clip);
             }
+        }
+        if clip_names.len() == 2 && clip_names[0] == clip_names[1] {
+            return Err(JobError::new(
+                "adapter_unavailable",
+                "model animation 混合两侧不能使用同一 clip",
+            ));
         }
     }
     Ok(())
@@ -1296,6 +1306,15 @@ fn geometry_costs(compiled: &CompiledDocument, final_values: &FinalPublicValues)
                 ));
             }
             costs.depth_bytes_per_pixel = 4;
+        }
+        if node.node_type == "model" {
+            let weight = final_number(compiled, final_values, index, "animationWeight")?;
+            if !(0.0..=1.0).contains(&weight) {
+                return Err(JobError::new(
+                    "adapter_unavailable",
+                    "model animationWeight 必须是 0..1 内的有限值",
+                ));
+            }
         }
         let bytes = match node.node_type.as_str() {
             "group" | "builtinScene" | "model" => 0,
@@ -1556,6 +1575,14 @@ impl PreparedComposition {
                 })
                 .collect();
             if !names.iter().any(|name| name == &clip) {
+                return Err(JobError::new(
+                    "adapter_unavailable",
+                    "model animation clip 未准备",
+                ));
+            }
+            let clip_b =
+                final_constant(&self.compiled, &self.final_values, index, "animationClipB")?;
+            if !clip_b.is_empty() && !names.iter().any(|name| name == &clip_b) {
                 return Err(JobError::new(
                     "adapter_unavailable",
                     "model animation clip 未准备",

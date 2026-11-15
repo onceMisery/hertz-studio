@@ -8,14 +8,14 @@
 //! audited build evidence. Equal sizes do not detect arbitrary source changes;
 //! changing those sources requires another review of these equations.
 //!
-//! Fixed JSON has 14314 bytes, no escapes. ContractFile -> Contract only moves.
-//! 509 owned Strings request 3396 bytes; 208 String Vecs retain 516 slots.
+//! Fixed JSON has 14523 bytes, no escapes. ContractFile -> Contract only moves.
+//! Owned Strings request 3451 bytes; 210 String Vecs retain 524 slots.
 //! nodes/effects each reserve 8; six Value arrays reserve 4; seven AssetKind
 //! Vecs reserve 8 byte slots each. Thirteen nonempty Field maps have eighteen
 //! leaves/five internals (five first splits only); assets/quality/cost have
 //! six/five/five leaves. Empty Value objects allocate nothing. Thus
-//! R=8*Node+8*Effect+516*String+24*Value+56+18*LField+5*IField
-//!   +6*LAsset+5*LQuality+5*LCost+3396=91820.
+//! R=8*Node+8*Effect+524*String+24*Value+56+18*LField+5*IField
+//!   +6*LAsset+5*LQuality+5*LCost+3451=92067.
 //! The duplicate scanner's actual recursive live frontier has
 //! S=max(6*LSet+ISet+207,7*LSet+210)=2263, and exits before typed parsing.
 //! All empty-start Vec growth uses doubling/min capacity 8/4/1; the largest
@@ -25,7 +25,7 @@
 //! its stack64 once to an initially empty String, requesting64. Fixed float
 //! mantissas <=4294967295 and decimal exponents [-4,0] use lexical fast path;
 //! no scratch or Bigint. Borrowing validation neither clones nor shrinks.
-//! W=max(S,R+G,R+13,R+64)=93356 is the COMPLETE cold bound, not W-R.
+//! W=max(S,R+G,R+13,R+64)=93603 is the COMPLETE cold bound, not W-R.
 //! Prepare W and permanent asset R are independent conservative reservations;
 //! their sum is not a physical peak.
 
@@ -41,8 +41,8 @@ use super::{AssetField, Definitions, EffectCost, EffectSchema, Field, NodeSchema
 use crate::AssetKind;
 
 const CATALOG_SHA: [u8; 32] = [
-    0x91, 0x87, 0x08, 0x45, 0x31, 0x8a, 0x90, 0x54, 0x53, 0xf0, 0xc8, 0xab, 0x2e, 0xce, 0x26, 0xc7,
-    0x15, 0x1c, 0x40, 0xff, 0x51, 0xfe, 0xf2, 0x42, 0x49, 0xdd, 0x86, 0x2d, 0x4b, 0xe5, 0xaf, 0xb0,
+    0x85, 0x42, 0x04, 0x49, 0x50, 0xfe, 0x83, 0x19, 0xfd, 0xe6, 0x8d, 0xe8, 0xe3, 0xd8, 0xa9, 0xc6,
+    0x46, 0x38, 0x9e, 0x95, 0x30, 0xbf, 0x92, 0x75, 0xb6, 0x78, 0x1c, 0x93, 0xd4, 0x02, 0xec, 0xda,
 ];
 
 // These compile-time identities bind the original allocation semantics and
@@ -99,7 +99,7 @@ impl CompositionCatalogHeapBounds {
         layout: bool,
     ) -> Option<Self> {
         if !layout
-            || bytes.len() != 14_314
+            || bytes.len() != 14_523
             || !matches_sha(bytes, &CATALOG_SHA)
             || !matches_text_sha(catalog, &CATALOG_SOURCE_SHA)
             || !matches_text_sha(json, &JSON_SOURCE_SHA)
@@ -110,7 +110,7 @@ impl CompositionCatalogHeapBounds {
         let retained = sum(&[
             mul(8, size_of::<NodeSchema>() as u64)?,
             mul(8, size_of::<EffectSchema>() as u64)?,
-            mul(516, size_of::<String>() as u64)?,
+            mul(524, size_of::<String>() as u64)?,
             mul(24, size_of::<Value>() as u64)?,
             mul(56, size_of::<AssetKind>() as u64)?,
             mul(18, size_of::<Leaf<String, Field>>() as u64)?,
@@ -118,7 +118,7 @@ impl CompositionCatalogHeapBounds {
             mul(6, size_of::<Leaf<String, AssetField>>() as u64)?,
             mul(5, size_of::<Leaf<String, QualityVariant>>() as u64)?,
             mul(5, size_of::<Leaf<String, EffectCost>>() as u64)?,
-            3396,
+            3451,
         ])?;
         let scanner = sum(&[
             mul(6, size_of::<Leaf<String, ()>>() as u64)?,
@@ -279,7 +279,7 @@ mod tests {
             true
         )
         .is_some());
-        let mut changed_bytes = [0u8; 14_314];
+        let mut changed_bytes = [0u8; 14_523];
         changed_bytes.copy_from_slice(super::super::COMPOSITION_CATALOG_BYTES);
         changed_bytes[0] ^= 1;
         assert_eq!(

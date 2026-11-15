@@ -99,6 +99,8 @@ const animatedRustFacts=JSON.parse(execFileSync(factsExecutable,[path.join(outpu
 const twoClipModel=compile([modelNode('mesh',{animationClip:'slide'},'two-clip')],modelCanvas,
  [property('clip','text','mesh','animationClip','slide',{maxLength:128})]);
 const twoClipRustFacts=JSON.parse(execFileSync(factsExecutable,[path.join(output,'two-clip.glb'),compilerInputs.get(twoClipModel)[0],'assets/two-clip.glb'],{cwd:root,encoding:'utf8'}));
+const blendModel=compile([modelNode('mesh',{animationClip:'slide',animationClipB:'fall',animationWeight:1},'two-clip')],modelCanvas,
+ [property('blend-clip','text','mesh','animationClipB','fall',{maxLength:128}),property('blend-weight','number','mesh','animationWeight',1,{min:0,max:1})]);
 const texturedModel=compile([modelNode('mesh',{},'textured')],modelCanvas);
 const texturedRustFacts=JSON.parse(execFileSync(factsExecutable,[path.join(output,'textured.glb'),compilerInputs.get(texturedModel)[0],'assets/textured.glb','textured'],{cwd:root,encoding:'utf8'}));
 const morphModel=compile([modelNode('mesh',{animationClip:'warp'},'morph')],modelCanvas);
@@ -317,6 +319,41 @@ const results=[];
   assert.equal(fallClip.live.programs,2);
   assert.equal(fallClip.live.bufferDeclaredBytes,170);
   results.push({case:'public clip switch swaps the mixer in place and keeps one program',slideClip,fallClip});
+  await select(blendModel);
+  await page.evaluate(()=>host.frame({sceneTime:.5,paused:true}));
+  const blendFall=await page.evaluate(()=>({right:pixel(52,23),low:pixel(40,35),snapshot:snapshot(),live:ledger.snapshot().live,
+    work:host.stats().sceneStats.work}));
+  await select(publicValues(blendModel,{'blend-clip':'fall','blend-weight':0}));
+  await page.evaluate(()=>host.frame({sceneTime:.5,paused:true}));
+  const blendSlide=await page.evaluate(()=>({right:pixel(52,23),low:pixel(40,35),snapshot:snapshot(),
+    work:host.stats().sceneStats.work}));
+  await select(publicValues(blendModel,{'blend-clip':'fall','blend-weight':.5}));
+  await page.evaluate(()=>host.frame({sceneTime:.5,paused:true}));
+  const blendHalf=await page.evaluate(()=>({snapshot:snapshot(),live:ledger.snapshot().live,
+    work:host.stats().sceneStats.work}));
+  near(blendFall.right,[0,0,0]);near(blendFall.low,[255,255,255]);
+  near(blendSlide.right,[255,255,255]);near(blendSlide.low,[0,0,0]);
+  const framesEqual=(left,right)=>left.length===right.length&&left.every((value,index)=>value===right[index]);
+  assert(!framesEqual(blendFall.snapshot,blendSlide.snapshot));
+  assert(!framesEqual(blendHalf.snapshot,blendFall.snapshot));
+  assert(!framesEqual(blendHalf.snapshot,blendSlide.snapshot));
+  const black=frame=>index=>Math.max(frame[index],frame[index+1],frame[index+2])<=8;
+  const white=frame=>index=>Math.max(frame[index],frame[index+1],frame[index+2])>200;
+  const fallBlack=black(blendFall.snapshot),slideBlack=black(blendSlide.snapshot),halfWhite=white(blendHalf.snapshot);
+  let independent=0;
+  for(let index=0;index<blendHalf.snapshot.length;index+=4)if(fallBlack(index)&&slideBlack(index)&&halfWhite(index))independent++;
+  assert(independent>0,'blend weight produces pixels outside both single-clip results');
+  assert.equal(blendFall.work.nodeRebuilds[0],0);
+  assert.equal(blendHalf.work.nodeRebuilds[0],0);
+  assert.equal(blendHalf.live.programs,2);
+  assert.equal(blendHalf.live.bufferDeclaredBytes,170);
+  results.push({case:'two model clips blend by public weight without a node rebuild',blendFall:{right:blendFall.right,low:blendFall.low},
+    blendSlide:{right:blendSlide.right,low:blendSlide.low},independent});
+  const missingBlendClip=await reject(blendModel,p=>{p.resolvedAssets.find(asset=>
+   asset.kind==='model'&&asset.assetId==='two-clip').modelFacts.animations[1].name='other';});
+  assert.match(missingBlendClip.error,/model-animation/);
+  assert.deepEqual(missingBlendClip.after.held,missingBlendClip.before.held);
+  results.push({case:'missing blend clip fails closed without quota',missingBlendClip});
   const missingClip=await reject(animatedModel,p=>{p.resolvedAssets.find(asset=>
    asset.kind==='model'&&asset.assetId==='animated').modelFacts.animations[0].name='other';});
   assert.match(missingClip.error,/model-animation/);

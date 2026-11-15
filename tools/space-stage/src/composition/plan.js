@@ -456,15 +456,23 @@ export function compilePlan(projection, registry = null, identity = null) {
     }
     if (node.nodeType === 'model') {
       if (!result.resources.asset) throw new Error('composition-model-preparation-required');
-      const clip = constant(node, 'animationClip');
-      if (typeof clip !== 'string' || clip.length > 128)
+      const clip = constant(node, 'animationClip'), clipB = constant(node, 'animationClipB');
+      if (typeof clip !== 'string' || clip.length > 128
+          || typeof clipB !== 'string' || clipB.length > 128
+          || (clip !== '' && clip === clipB))
+        throw new Error('composition-adapter-unavailable:model-animation');
+      const animations = result.resources.asset.modelFacts.animations;
+      for (const name of [clip, clipB]) {
+        if (name !== '' && (!Array.isArray(animations) || !animations.some(item => item.name === name)))
+          throw new Error('composition-adapter-unavailable:model-animation');
+      }
+      const weight = number(node, 'animationWeight');
+      if (!Number.isFinite(weight) || weight < 0 || weight > 1)
         throw new Error('composition-adapter-unavailable:model-animation');
       if (clip !== '') {
-        const animations = result.resources.asset.modelFacts.animations;
-        if (!Array.isArray(animations) || !animations.some(item => item.name === clip))
-          throw new Error('composition-adapter-unavailable:model-animation');
         result.animation = clip;
-      }
+        if (clipB !== '') { result.animationB = clipB; result.animationWeight = weight; }
+      } else if (clipB !== '') result.animation = clipB;
       result.materialBytes = Math.max(1, result.resources.asset.modelFacts.resources.materialCount || 1) * 1024;
       resources.ownedCpuBytes += result.materialBytes;
       result.model = true;

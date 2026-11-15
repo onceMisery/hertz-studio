@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-import { buildNode, loadResource, loadTextRaster, updateNodeMaterial } from './nodes.js';
+import { buildNode, createModelAnimation, loadResource, loadTextRaster, updateNodeMaterial } from './nodes.js';
 import { loadModelResource } from './model-node.js';
 import { createScope } from '../scope.js';
 import { createBackground, createInputSampler } from './builtin.js';
@@ -396,7 +396,7 @@ export async function createCompositionRuntime(THREE, context, scope, plan, opti
       constants++;const slot=plan.ir.constantSlots[index],type=plan.ir.nodes[slot.nodeIndex].nodeType,dep=constantDependencies[index];dependency(dep);
       if(dep.nodes.some(node=>node.nodeIndex===slot.nodeIndex&&(node.mask&MATRIX))||type==='image'&&slot.property==='fit')matrix(slot.nodeIndex);
       if(type==='text'&&['text','color','align'].includes(slot.property))rebuilds.add(slot.nodeIndex);
-      else if(type==='model'&&slot.property==='animationClip')clips.add(slot.nodeIndex);
+      else if(type==='model'&&(slot.property==='animationClip'||slot.property==='animationClipB'))clips.add(slot.nodeIndex);
     }
     for(let index=0;index<nodes.length;index++){
       const previous=plan.nodePlans[index].resources,replacement=next.nodePlans[index].resources;
@@ -548,9 +548,10 @@ export async function createCompositionRuntime(THREE, context, scope, plan, opti
       for(const index of changes.clips){
         if(changes.rebuilds.has(index))continue;
         const spec=next.nodePlans[index],resource=values.get(spec.resources.asset.key)?.model,name=spec.animation;
-        let clip=null;
-        if(name){clip=resource?.clips?.find(item=>item.name===name);if(!clip)throw new Error('composition-model-animation-missing');}
-        clipUpdates.push({index,clip});
+        let clipA=null,clipB=null;
+        if(name){clipA=resource?.clips?.find(item=>item.name===name);if(!clipA)throw new Error('composition-model-animation-missing');}
+        if(spec.animationB){clipB=resource?.clips?.find(item=>item.name===spec.animationB);if(!clipB)throw new Error('composition-model-animation-missing');}
+        clipUpdates.push({index,clips:[clipA,clipB],weight:spec.animationWeight||0});
       }
       // Everything that can fail in preparation has finished. The fixed graph
       // keeps its painter order; only changed leaves/resources now retire.
@@ -571,16 +572,11 @@ export async function createCompositionRuntime(THREE, context, scope, plan, opti
           plan.nodePlans[index].textRasterLease = nodes[index].spec.textRasterLease;
         nodes[index].spec=plan.nodePlans[index];
       }
-      for(const {index,clip} of clipUpdates){
+      for(const {index,clips,weight} of clipUpdates){
         const node=nodes[index];
-        node.animationHolder.stop?.();
-        node.animation=null;
-        if(clip){
-          const mixer=new THREE.AnimationMixer(node.animationRoot);
-          mixer.clipAction(clip).play();
-          node.animation={mixer,clip,duration:clip.duration};
-          node.animationHolder.stop=()=>{mixer.stopAllAction();mixer.uncacheRoot(node.animationRoot);};
-        }
+        node.animationHolder.stop?.();node.animation=null;node.animationHolder.stop=null;
+        const created=createModelAnimation(THREE,node.animationRoot,clips,weight);
+        if(created){node.animation=created.animation;node.animationHolder.stop=created.stop;}
         changes.masks[index]|=ALL;changes.locals[index]=changes.worlds[index]=1;outputDirty=true;
       }
       dirty.set(changes.masks);localDirty.set(changes.locals);worldDirty.set(changes.worlds);
@@ -695,11 +691,17 @@ export async function createCompositionRuntime(THREE, context, scope, plan, opti
     if(!mediaShouldPlay)pause();
     if(timeChanged)for(const node of nodes)if(node.particles){node.material.uniforms.sceneTime.value=time;outputDirty=true;}
     if(timeChanged)for(const node of nodes)if(node.material&&node.spec.effects){node.material.uniforms.effectTime.value=time;outputDirty=true;}
-    if(timeChanged)for(const node of nodes)if(node.animation){
-      const animation=node.animation;
-      animation.mixer.setTime(animation.duration>0?time%animation.duration:0);
-      node.object.updateMatrixWorld(true);
-      outputDirty=true;
+    for(const node of nodes)if(node.animation){
+      const animation=node.animation,weight=animation.actionB?Number(node.spec.number('animationWeight')):0;
+      if(!Number.isFinite(weight)||weight<0||weight>1)throw new Error('composition-model-animation-missing');
+      if(animation.actionA)animation.actionA.setEffectiveWeight(animation.actionB?1-weight:1);
+      if(animation.actionB)animation.actionB.setEffectiveWeight(animation.actionA?weight:1);
+      if(timeChanged||animation.weight!==weight){
+        animation.weight=weight;
+        animation.mixer.setTime(animation.duration>0?time%animation.duration:0);
+        node.object.updateMatrixWorld(true);
+        outputDirty=true;
+      }
     }
     if(background) {background.instance.update(frame);outputDirty=true;}
     return frameReady;

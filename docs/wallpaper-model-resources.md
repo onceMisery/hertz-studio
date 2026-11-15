@@ -1552,3 +1552,32 @@ space-stage 复跑全绿。r84/r85 自身三端证据随各自提交（`30e4f72`
 记录，合并对这些路径的 diff 为空已核对；原生宿主页证据在验证点 `732f0f1` 于
 开发工作树取得，其模型路径不受 `a90449d` 影响。日志存
 `output/master-gate-r85-20261115/`。
+
+2026-11-15 r86 双 clip 权重混合（接替 Codex 停止时的 r86 WIP）：model 节点新增
+公共文本 `animationClipB`（≤128，非空时不得与 `animationClip` 相同）与可动画数值
+`animationWeight`（0..1）。JS plan 编译要求两 clip 名称均存在于
+facts.animations；r83 的原地换装路径推广为 `createModelAnimation`：双 action
+mixer 按 1−weight/weight 分配 effectiveWeight，clip 切换仍走 masks=ALL 的原地
+更新且 nodeRebuilds=0；权重是 numeric slot，帧循环逐帧读取，weight 变化即重摆
+并 outputDirty，单 clip 退化为原语义；旧 mixer 释放时补上 stop 置空避免重复调用。
+Rust `validate_structure` 对两 clip 属性同样要求 3D model 有界名称并拒绝两侧
+同名；`geometry_costs` 校验 model 的 animationWeight ∈ 0..1（越界请求在
+compile_document 即被通用发布范围校验以 invalid_composition 拒绝，此站与其余
+3D 校验同位防御）；提交路径对 clipB 复用 clipA 的 names 包含检查。混合不新增
+buffer/program，materialBytes 语义不变。
+
+真实证据：Rust 新增 `native_model_blend_fixture_projects_second_clip_and_weight`
+（双动画 GLB 复用首 clip 采样器，无额外 BIN；constantSlots.animationClipB=turn、
+numericSlots 含 animationWeight=0.5、bufferDeclaredBytes=170）与
+`model_blend_validation_refuses_missing_duplicate_and_overweight_clips`
+（missing/duplicate=adapter_unavailable，overweight=invalid_composition）。
+Chrome 组合检查 65 项（+2）：weight=1 呈 fall 位形、0 呈 slide 位形、0.5 产生
+两单 clip 之外的独立像素，混合与两次权重切换 nodeRebuilds=0、programs=2、
+buffer=170；删除 blend clip 名 fail-closed 零配额。契约 composition.json 哈希
+`9ececd7e…`（14523 字节）；catalog 堆账本随字节/SHA/实测计数同步（210 个 String
+Vec 保留 524 槽、retained 92067、cold 93603，heap bounds 3 项与 mutation 负例
+绿，scanner set leaves 179/5）。桌面 lib 869/0/2、wallpaper 352/0 串行双工具链
+通过；clippy `-D warnings` 与 `fmt --all --check` 双工具链干净；ADR 414、
+builtin contract 10、builtin browser 12、builtin plan 18、space-stage 29 scenes
+全绿。日志存 `output/master-gate-r86-20261115/`。仍未闭合：真实 GPU 设备矩阵/
+首帧与 A01/A05–A10 外部验收。

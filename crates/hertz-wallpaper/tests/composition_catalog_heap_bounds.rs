@@ -160,8 +160,8 @@ fn inline_query_zero_heap_and_original_parse_requested_peak_retention_drop() {
     let query = stop();
     assert_eq!(query.requests, 0);
     assert_eq!(query.live, 0);
-    assert_eq!(bounds.cold_requested_bytes(), 93_356);
-    assert_eq!(bounds.retained_requested_bytes(), 91_820);
+    assert_eq!(bounds.cold_requested_bytes(), 93_603);
+    assert_eq!(bounds.retained_requested_bytes(), 92_067);
     assert_eq!(std::mem::size_of::<CompositionCatalogHeapBounds>(), 16);
     start();
     let contract = parse_catalog(BYTES).unwrap();
@@ -170,7 +170,7 @@ fn inline_query_zero_heap_and_original_parse_requested_peak_retention_drop() {
     let observed = stop();
     assert_eq!(observed.live, 0);
     assert_eq!(
-        retained, 91_820,
+        retained, 92_067,
         "canonical original byte parser capacities"
     );
     assert!(
@@ -186,9 +186,9 @@ fn inline_query_zero_heap_and_original_parse_requested_peak_retention_drop() {
         ),
         (6, 5, 5)
     );
-    // 179 scanner objects include seven empty sets; five split once. Each
+    // 181 scanner objects include seven empty sets; five split once. Each
     // split reuses its old leaf and allocates one new leaf plus one internal.
-    assert_eq!((observed.set_leaves, observed.set_internals), (177, 5));
+    assert_eq!((observed.set_leaves, observed.set_internals), (179, 5));
     println!("original parse retained={retained}, requested={observed:?}");
 }
 
@@ -207,7 +207,7 @@ fn cold_original_once_lock_query_does_not_initialize_and_permanent_identity_is_s
     let contract = composition_catalog();
     let observed = stop();
     // A preceding query must leave the actual OnceLock truly cold.
-    assert_eq!(observed.live, 91_820);
+    assert_eq!(observed.live, 92_067);
     assert!(
         observed.peak <= bounds.cold_requested_bytes() as usize,
         "{observed:?}"
@@ -272,7 +272,7 @@ fn assert_capacities(contract: &Contract) {
             kinds_slots += asset.kinds.capacity();
         }
     }
-    assert_eq!((string_slots, value_slots, kinds_slots), (516, 24, 56));
+    assert_eq!((string_slots, value_slots, kinds_slots), (524, 24, 56));
     println!("real retained capacities String/Value/AssetKind slots={string_slots}/{value_slots}/{kinds_slots}");
 }
 
@@ -281,7 +281,7 @@ fn original_public_parser_preserves_literal_null_default_and_hash_error() {
     let original = parse_catalog(BYTES).unwrap();
     assert_eq!(
         original.registry_hash,
-        "e9fbe594981bd83d9f9e09267f6b888cde36360bfc527d6a298e3346e6288efa"
+        "9ececd7e227a6392b3ec1b077fcba7a9bb16bfbffa1bfbe0b32d2fc7f8926d67"
     );
     let mut source: serde_json::Value = serde_json::from_slice(BYTES).unwrap();
     source["registryHash"] = serde_json::Value::String("0".repeat(64));
