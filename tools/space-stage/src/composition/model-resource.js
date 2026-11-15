@@ -11,6 +11,7 @@ import {
 } from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { KTX2Loader } from 'three/addons/loaders/KTX2Loader.js';
+import { clone as cloneSkeleton } from 'three/addons/utils/SkeletonUtils.js';
 
 export const STATIC_MODEL_PROFILE = 'static-core-pbr-v1';
 export const STATIC_MODEL_LOADER_VERSION = 'three-0.186.0-gltfloader';
@@ -501,9 +502,14 @@ function createModelResource(template, facts, tracker, clips = []) {
     clips: Object.freeze(clips),
     instantiate() {
       if (retired) throw new Error('composition-model-resource-disposed');
-      const root = template.clone(true); let released = false;
+      // Object3D.clone keeps a SkinnedMesh's original skeleton; SkeletonUtils
+      // clones the bone hierarchy and rebinds each skinned mesh to its clone.
+      const root = facts.skins?.length ? cloneSkeleton(template) : template.clone(true);
+      let released = false;
       const instance = Object.freeze({ root, detach() { root.removeFromParent(); }, release() {
-        if (released) return; released = true; root.removeFromParent(); root.clear(); instances.delete(instance); finish();
+        if (released) return; released = true; root.removeFromParent();
+        root.traverse(object => { if (object.isSkinnedMesh) object.skeleton?.dispose(); });
+        root.clear(); instances.delete(instance); finish();
       } });
       instances.add(instance); return instance;
     },
@@ -593,7 +599,7 @@ export function inspectModelInputFacts(buffer) {
 }
 
 function rejectTexturedDelegates(json, ktx2 = false) {
-  for (const key of ['skins', 'cameras']) {
+  for (const key of ['cameras']) {
     assert(json[key] === undefined || (Array.isArray(json[key]) && !json[key].length), key + '-unsupported');
   }
   // KHR_texture_basisu is the only qualified extension; its payload may appear
@@ -621,8 +627,8 @@ function rejectTexturedDelegates(json, ktx2 = false) {
   }
   for (const buffer of json.buffers ?? []) assert(buffer && !own(buffer, 'uri'), 'buffer-uri-unsupported');
   for (const node of json.nodes ?? []) {
-    assert(node && !own(node, 'skin') && !own(node, 'camera')
-      && !own(node, 'isBone') && !own(node, 'isSkinnedMesh'), 'static-node-required');
+    // GLTFLoader's _markDefs injects isBone/isSkinnedMesh before beforeRoot.
+    assert(node && !own(node, 'camera'), 'static-node-required');
     assert(!extrasExposeLoaderPivot(node.extras), 'loader-pivot-unsupported');
   }
   for (const mesh of json.meshes ?? []) {
@@ -632,7 +638,7 @@ function rejectTexturedDelegates(json, ktx2 = false) {
       assert(primitive && typeof primitive === 'object', 'primitive-required');
       assert(primitive.mode === undefined || primitive.mode === 4, 'triangle-mode-required');
       for (const key of Object.keys(primitive.attributes ?? {})) {
-        assert(['POSITION', 'NORMAL', 'TEXCOORD_0', 'TEXCOORD_1'].includes(key), 'attribute-unsupported');
+        assert(['POSITION', 'NORMAL', 'TEXCOORD_0', 'TEXCOORD_1', 'JOINTS_0', 'WEIGHTS_0'].includes(key), 'attribute-unsupported');
       }
     }
   }
@@ -808,11 +814,13 @@ function texturedProfileFacts(json, input, ktx2) {
     const vector3 = accessor.componentType === 5126 && accessor.type === 'VEC3';
     const vector2 = accessor.componentType === 5126 && accessor.type === 'VEC2';
     const vector4 = accessor.componentType === 5126 && accessor.type === 'VEC4';
+    const joints4 = [5121, 5123].includes(accessor.componentType) && accessor.type === 'VEC4';
+    const matrix4 = accessor.componentType === 5126 && accessor.type === 'MAT4';
     const scalar = [5121, 5123, 5125].includes(accessor.componentType) && accessor.type === 'SCALAR';
     const floatScalar = accessor.componentType === 5126 && accessor.type === 'SCALAR';
-    assert(vector3 || vector2 || vector4 || scalar || floatScalar, 'accessor-type');
+    assert(vector3 || vector2 || vector4 || joints4 || matrix4 || scalar || floatScalar, 'accessor-type');
     const elementBytes = accessor.componentType === 5126 || accessor.componentType === 5125 ? 4 : accessor.componentType === 5123 ? 2 : 1;
-    const components = vector4 ? 4 : vector3 ? 3 : vector2 ? 2 : 1;
+    const components = matrix4 ? 16 : vector4 || joints4 ? 4 : vector3 ? 3 : vector2 ? 2 : 1;
     const itemBytes = elementBytes * components, byteOffset = accessor.byteOffset ?? 0;
     assert(integer(accessor.count) && accessor.count > 0 && integer(byteOffset) && byteOffset % elementBytes === 0
       && (view.byteOffset ?? 0) % elementBytes === 0 && byteOffset + accessor.count * itemBytes <= view.byteLength, 'packed-accessor-range');
@@ -849,6 +857,15 @@ function texturedProfileFacts(json, input, ktx2) {
           && morphPosition.count === position.count && morphNormal.count === position.count, 'morph-target-accessors');
         return { positionAccessor: morphPosition.index, normalAccessor: morphNormal.index };
       });
+      const jointsAccessor = attributes.JOINTS_0 === undefined ? null : index(attributes.JOINTS_0, layouts, 'JOINTS_0-accessor');
+      const weightsAccessor = attributes.WEIGHTS_0 === undefined ? null : index(attributes.WEIGHTS_0, layouts, 'WEIGHTS_0-accessor');
+      if ((jointsAccessor === null) !== (weightsAccessor === null)) throw unavailable('JOINTS_0-and-WEIGHTS_0-required');
+      if (jointsAccessor !== null) {
+        assert(jointsAccessor.type === 'VEC4' && [5121, 5123].includes(jointsAccessor.componentType)
+          && jointsAccessor.count === position.count, 'JOINTS_0-unsigned-VEC4');
+        assert(weightsAccessor.type === 'VEC4' && weightsAccessor.componentType === 5126
+          && weightsAccessor.count === position.count, 'WEIGHTS_0-FLOAT-VEC4');
+      }
       let boundingBox = null;
       if (morphTargets.length) {
         const displacement = [0, 0, 0];
@@ -894,20 +911,26 @@ function texturedProfileFacts(json, input, ktx2) {
         uvAccessors: Object.keys(attributes).filter(key => key.startsWith('TEXCOORD_')).sort()
           .map(key => ({ set: Number(key.slice(9)), accessor: attributes[key] })),
         morphTargets, ...(boundingBox ? { boundingBoxMin: boundingBox.min, boundingBoxMax: boundingBox.max } : {}),
+        jointsAccessor: jointsAccessor?.index ?? null, weightsAccessor: weightsAccessor?.index ?? null,
         indexAccessor: indices?.index ?? null, mode: primitive.mode ?? null, triangles: count / 3,
         positionMin: [...positionDef.min], positionMax: [...positionDef.max] };
     });
   });
   const meshMorphCounts = primitives.map(list => list.length ? list[0].morphTargets.length : 0);
+  const skinDefs = array(json.skins ?? [], 'skins-required');
+  assert(skinDefs.length <= MAX_ITEMS, 'skin-limit');
   const parents = new Array(nodes.length).fill(null), meshReferences = new Map();
   for (let nodeIndex = 0; nodeIndex < nodes.length; nodeIndex++) {
     const node = nodes[nodeIndex];
-    assert(node && !own(node, 'skin') && !own(node, 'camera')
-      && !own(node, 'isBone') && !own(node, 'isSkinnedMesh'), 'static-node-required');
+    assert(node && !own(node, 'camera'), 'static-node-required');
     if (node.weights !== undefined) {
       const count = node.mesh === undefined ? 0 : meshMorphCounts[node.mesh];
       assert(Array.isArray(node.weights) && node.weights.length === count
         && node.weights.every(Number.isFinite), 'node-weights');
+    }
+    if (node.skin !== undefined) {
+      index(node.skin, skinDefs, 'node-skin');
+      assert(node.mesh !== undefined, 'skin-node-mesh-required');
     }
     if (node.mesh !== undefined) { index(node.mesh, meshes, 'node-mesh'); meshReferences.set(node.mesh, (meshReferences.get(node.mesh) ?? 0) + 1); }
     for (const child of array(node.children ?? [], 'node-children')) {
@@ -933,6 +956,49 @@ function texturedProfileFacts(json, input, ktx2) {
     reachable.add(current); maxDepth = Math.max(maxDepth, depth);
     for (const child of nodes[current].children ?? []) stack.push([child, depth + 1]);
   }
+  const skinnedMeshes = new Set(), usedSkins = new Set(), skinAccessors = new Set();
+  let skinTextureBytes = 0, skinCpuBytes = 0;
+  for (const nodeIndex of [...reachable].sort((a, b) => a - b)) {
+    const node = nodes[nodeIndex];
+    if (node.skin === undefined) continue;
+    usedSkins.add(node.skin);
+    if (meshReferences.get(node.mesh) > 1) throw unavailable('reused-skinned-mesh');
+    skinnedMeshes.add(node.mesh);
+    for (const primitive of primitives[node.mesh]) {
+      if (primitive.jointsAccessor === null || primitive.weightsAccessor === null) {
+        throw unavailable('skinned-primitive-requires-JOINTS_0-and-WEIGHTS_0');
+      }
+    }
+  }
+  for (let meshIndex = 0; meshIndex < primitives.length; meshIndex++) {
+    const hasSkin = primitives[meshIndex].some(primitive => primitive.jointsAccessor !== null);
+    if (hasSkin && !skinnedMeshes.has(meshIndex)) throw unavailable('skin-attributes-require-a-skin-node');
+  }
+  for (const skinIndex of usedSkins) {
+    const skin = skinDefs[skinIndex];
+    assert(skin && typeof skin === 'object', 'skin-required');
+    const joints = array(skin.joints, 'skin-joints');
+    assert(joints.length > 0 && joints.length <= MAX_NODES, 'skin-joints');
+    for (const joint of joints) {
+      index(joint, nodes, 'skin-joint');
+      assert(reachable.has(joint), 'skin-joint-unreachable');
+      assert(nodes[joint].mesh === undefined && nodes[joint].skin === undefined, 'joint-node-static');
+    }
+    if (skin.inverseBindMatrices !== undefined) {
+      const layout = index(skin.inverseBindMatrices, layouts, 'skin-inverseBindMatrices');
+      assert(layout.type === 'MAT4' && layout.componentType === 5126 && layout.count >= joints.length, 'skin-inverseBindMatrices-layout');
+      skinAccessors.add(layout.index);
+    }
+  }
+  for (const nodeIndex of [...reachable].sort((a, b) => a - b)) {
+    const node = nodes[nodeIndex];
+    if (node.skin === undefined) continue;
+    const joints = skinDefs[node.skin].joints.length;
+    const size = Math.max(4, Math.ceil(Math.sqrt(joints * 4) / 4) * 4);
+    const textureBytes = size * size * 16;
+    skinTextureBytes += textureBytes;
+    skinCpuBytes += joints * 64 + textureBytes;
+  }
   const usedAccessors = new Set(), morphAccessors = new Set(), usedMeshes = new Set(), geometries = new Map();
   const usedMaterials = new Set(), usedTextures = new Set(), usedImages = new Set();
   const programKeys = new Set();
@@ -949,8 +1015,10 @@ function texturedProfileFacts(json, input, ktx2) {
       for (const target of primitive.morphTargets) {
         morphAccessors.add(target.positionAccessor); morphAccessors.add(target.normalAccessor);
       }
+      if (primitive.jointsAccessor !== null) usedAccessors.add(primitive.jointsAccessor);
+      if (primitive.weightsAccessor !== null) usedAccessors.add(primitive.weightsAccessor);
       programKeys.add(texturedProgramKey(primitive.material === null ? null : materials[primitive.material],
-        primitive.morphTargets.length));
+        primitive.morphTargets.length, node.skin !== undefined));
       if (!geometries.has(primitive.key)) {
         const { meshIndex: _mesh, primitiveIndex: _primitive, ...geometry } = primitive;
         geometries.set(primitive.key, geometry);
@@ -976,6 +1044,7 @@ function texturedProfileFacts(json, input, ktx2) {
       transform = { kind: 'matrix', matrix: [...node.matrix] };
     } else transform = { kind: 'trs', translation: [...translation], rotation: [...rotation], scale: [...scale] };
     return { index: nodeIndex, parentIndex: parents[nodeIndex], meshIndex: node.mesh ?? null,
+      skinIndex: node.skin ?? null,
       morphTargetCount: node.mesh === undefined ? 0 : meshMorphCounts[node.mesh],
       morphWeights: node.weights === undefined ? null : [...node.weights],
       children: [...(node.children ?? [])], transform };
@@ -985,13 +1054,19 @@ function texturedProfileFacts(json, input, ktx2) {
   for (const mesh of usedMeshes) if (meshReferences.get(mesh) > 1) allocatedObjectCount += primitives[mesh].length + (primitives[mesh].length > 1 ? 1 : 0);
   const usedLayouts = [...usedAccessors].sort((a, b) => a - b).map(i => layouts[i]);
   const morphLayouts = [...morphAccessors].sort((a, b) => a - b).map(i => layouts[i]);
+  const skinLayouts = [...skinAccessors].sort((a, b) => a - b).map(i => layouts[i]);
+  const skins = [...usedSkins].sort((a, b) => a - b).map(index => {
+    const skin = skinDefs[index];
+    return { index, joints: [...skin.joints], skeleton: skin.skeleton ?? null,
+      inverseBindAccessor: skin.inverseBindMatrices ?? null };
+  });
   const nodeMorphCounts = nodes.map(node => node.mesh === undefined ? 0 : meshMorphCounts[node.mesh]);
   const animation = animationFacts(json, accessors, layouts, views, reachable, nodes.length, nodeMorphCounts);
   const meshFacts = [...usedMeshes].sort((a, b) => a - b).map(index => ({
     index, morphTargetCount: meshMorphCounts[index],
     defaultWeights: meshes[index].weights === undefined ? null : [...meshes[index].weights]
   }));
-  const usedViews = [...new Set([...usedLayouts, ...morphLayouts].map(layout => layout.viewIndex))]
+  const usedViews = [...new Set([...usedLayouts, ...morphLayouts, ...skinLayouts].map(layout => layout.viewIndex))]
     .sort((a, b) => a - b)
     .map(i => ({ index: i, byteOffset: views[i].byteOffset ?? 0, byteLength: views[i].byteLength }));
   const cpuViewIndices = [...new Set([...usedViews.map(view => view.index), ...(animation?.viewIndices ?? [])])]
@@ -1009,6 +1084,7 @@ function texturedProfileFacts(json, input, ktx2) {
     scene: { index: 0, roots: [...roots], nodes: sceneNodes, maxDepth, objectCount, allocatedObjectCount, drawCalls, triangles },
     materials: usedMaterialFacts,
     meshes: meshFacts,
+    skins,
     textures: textures.filter(texture => usedTextures.has(texture.index)),
     images: images.filter(image => usedImages.has(image.index)),
     resources: {
@@ -1025,6 +1101,11 @@ function texturedProfileFacts(json, input, ktx2) {
   if (morphLayouts.length) {
     facts.resources.morphAccessors = morphLayouts;
     facts.resources.morphTextureBytes = morphTextureBytes;
+  }
+  if (skinLayouts.length || skins.length) {
+    facts.resources.skinAccessors = skinLayouts;
+    facts.resources.skinTextureBytes = skinTextureBytes;
+    facts.resources.skinCpuBytes = skinCpuBytes;
   }
   if (animation) {
     facts.animations = animation.clips;
@@ -1066,6 +1147,9 @@ async function verifyTexturedActual(result, parser, facts, tracker, ktx2, contai
   const textures = new Map(facts.textures.map(texture => [texture.index, texture]));
   const meshFacts = new Map(facts.meshes.map(mesh => [mesh.index, mesh]));
   const nodeFacts = new Map(facts.scene.nodes.map(node => [node.index, node]));
+  const skins = new Map((facts.skins ?? []).map(skin => [skin.index, skin]));
+  const jointNodes = new Set();
+  for (const skin of skins.values()) for (const joint of skin.joints) jointNodes.add(joint);
   const ktx2Images = new Map((containerFacts ?? []).map(image => [image.index, image]));
   const checkKtx2 = (map, info) => {
     if (!info) return;
@@ -1101,14 +1185,15 @@ async function verifyTexturedActual(result, parser, facts, tracker, ktx2, contai
   const textureObjects = new Map();
   for (const index of textures.keys()) textureObjects.set(index, await parser.getDependency('texture', index));
   const accessors = new Map();
-  for (const layout of [...facts.resources.accessors, ...(facts.resources.morphAccessors ?? [])]) {
+  for (const layout of [...facts.resources.accessors, ...(facts.resources.morphAccessors ?? []),
+    ...(facts.resources.skinAccessors ?? [])]) {
     accessors.set(layout.index, await parser.getDependency('accessor', layout.index));
   }
   const objects = [], meshes = [], nodeObjects = new Map(), retainedMaterials = new Set(), geometryObjects = new Map();
   let actualTriangles = 0, clonedTextureCount = 0;
   result.scene.traverse(object => {
     objects.push(object);
-    if (object.isCamera || object.isLight || object.isBone || object.isSkinnedMesh || object.isInstancedMesh
+    if (object.isCamera || object.isLight || object.isInstancedMesh
       || object.isLine || object.isPoints) throw mismatch('object-type');
     const association = parser.associations.get(object);
     if (association?.nodes !== undefined) {
@@ -1196,15 +1281,22 @@ async function verifyTexturedActual(result, parser, facts, tracker, ktx2, contai
       for (const key of Object.keys(primitive.attributes)) {
         if (key === 'TEXCOORD_0') expectedAttributes.push('uv');
         if (key === 'TEXCOORD_1') expectedAttributes.push('uv1');
+        if (key === 'JOINTS_0') expectedAttributes.push('skinIndex', 'skinWeight');
       }
       expectedAttributes.sort();
       if (Object.keys(object.geometry.attributes).sort().join(',') !== expectedAttributes.join(',')) throw mismatch('geometry-attributes');
       if (object.geometry.attributes.position !== accessors.get(primitive.attributes.POSITION)
         || object.geometry.attributes.normal !== accessors.get(primitive.attributes.NORMAL)) throw mismatch('primitive-accessors');
       for (const key of Object.keys(primitive.attributes)) {
-        if (!key.startsWith('TEXCOORD_')) continue;
-        const name = key === 'TEXCOORD_0' ? 'uv' : 'uv1';
-        if (object.geometry.attributes[name] !== accessors.get(primitive.attributes[key])) throw mismatch('uv-accessor');
+        if (key.startsWith('TEXCOORD_')) {
+          const name = key === 'TEXCOORD_0' ? 'uv' : 'uv1';
+          if (object.geometry.attributes[name] !== accessors.get(primitive.attributes[key])) throw mismatch('uv-accessor');
+        }
+        if (key === 'JOINTS_0'
+          && (object.geometry.attributes.skinIndex !== accessors.get(primitive.attributes.JOINTS_0)
+            || object.geometry.attributes.skinWeight !== accessors.get(primitive.attributes.WEIGHTS_0))) {
+          throw mismatch('skin-accessors');
+        }
       }
       if (object.geometry.index !== (primitive.indices === undefined ? null : accessors.get(primitive.indices))) throw mismatch('index-accessor');
       const targets = primitive.targets ?? [];
@@ -1257,12 +1349,46 @@ async function verifyTexturedActual(result, parser, facts, tracker, ktx2, contai
     compareStaticModelFacts(node.children, object.children.map(child => parser.associations.get(child)?.nodes).filter(value => value !== undefined));
   }
   compareStaticModelFacts(facts.scene.roots, result.scene.children.map(object => parser.associations.get(object)?.nodes));
-  const allLayouts = [...facts.resources.accessors, ...(facts.resources.morphAccessors ?? [])];
+  const identity = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+  const matrixClose = (actual, expected) => actual.every((value, index) =>
+    Math.abs(value - expected[index]) <= 1e-6 * Math.max(1, Math.abs(expected[index])));
+  for (const node of facts.scene.nodes) {
+    const object = nodeObjects.get(node.index);
+    const joint = jointNodes.has(node.index);
+    if (joint && (object.isBone !== true || object.isMesh || object.isSkinnedMesh)) throw mismatch('joint-object');
+    if (node.skinIndex === null) {
+      if (object.isSkinnedMesh) throw mismatch('unexpected-skinned-mesh');
+      continue;
+    }
+    const skin = skins.get(node.skinIndex);
+    if (!skin) throw mismatch('skin-facts');
+    const jointObjects = skin.joints.map(index => nodeObjects.get(index));
+    if (jointObjects.some(value => !value)) throw mismatch('skin-joint-object');
+    const ibm = skin.inverseBindAccessor === null ? null : accessors.get(skin.inverseBindAccessor);
+    const skinned = object.isSkinnedMesh ? [object] : object.children.filter(child =>
+      child.isSkinnedMesh && parser.associations.get(child)?.nodes === undefined);
+    if (!skinned.length) throw mismatch('skinned-mesh-missing');
+    for (const mesh of skinned) {
+      const skeleton = mesh.skeleton;
+      if (!skeleton || skeleton.bones.length !== skin.joints.length
+        || skeleton.boneInverses.length !== skin.joints.length) throw mismatch('skeleton');
+      if (skeleton.bones.some((bone, index) => bone !== jointObjects[index])) throw mismatch('skeleton-bones');
+      if (!matrixClose(mesh.bindMatrix.elements, identity)
+        || !matrixClose(mesh.bindMatrixInverse.elements, identity)) throw mismatch('bind-matrix');
+      for (let index = 0; index < skeleton.boneInverses.length; index++) {
+        const expected = ibm ? ibm.array.subarray(index * 16, index * 16 + 16) : identity;
+        if (!matrixClose(skeleton.boneInverses[index].elements, expected)) throw mismatch('bone-inverses');
+      }
+    }
+  }
+  const allLayouts = [...facts.resources.accessors, ...(facts.resources.morphAccessors ?? []),
+    ...(facts.resources.skinAccessors ?? [])];
   const backings = new Map();
   for (const layout of allLayouts) {
     const attribute = accessors.get(layout.index);
+    const itemSize = { MAT4: 16, VEC4: 4, VEC3: 3, VEC2: 2 }[layout.type] ?? 1;
     if (!attribute || !attribute.isBufferAttribute || attribute.isInterleavedBufferAttribute || attribute.normalized
-      || attribute.itemSize !== (layout.type === 'VEC4' ? 4 : layout.type === 'VEC3' ? 3 : layout.type === 'VEC2' ? 2 : 1)
+      || attribute.itemSize !== itemSize
       || attribute.count !== layout.count || attribute.array.byteOffset !== layout.byteOffset
       || attribute.array.byteLength !== layout.byteLength) throw mismatch('accessor-layout-or-identity');
     if (!backings.has(layout.viewIndex)) backings.set(layout.viewIndex, attribute.array.buffer);

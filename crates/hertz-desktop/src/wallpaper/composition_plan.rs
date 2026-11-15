@@ -961,6 +961,7 @@ async fn prepare_assets(
                     facts["resources"]["morphTextureBytes"]
                         .as_u64()
                         .unwrap_or(0),
+                    facts["resources"]["skinTextureBytes"].as_u64().unwrap_or(0),
                 ])?;
                 let url = super::webresource::files_url(&package.package_hash, &asset.source)
                     .ok_or_else(|| JobError::new("adapter_unavailable", "model URL 无效"))?;
@@ -1677,6 +1678,7 @@ impl PreparedComposition {
             } else {
                 0
             };
+            let skin_cpu = resources["skinCpuBytes"].as_u64().unwrap_or(0);
             let material_clone_bytes = checked_product(
                 std::cmp::max(1, resources["materialCount"].as_u64().unwrap_or(1)),
                 1024,
@@ -1692,6 +1694,7 @@ impl PreparedComposition {
                 checked_product(json, 2)?,
                 resources["cpuBackingBytes"].as_u64().ok_or_else(invalid)?,
                 animation_cpu,
+                skin_cpu,
                 material_clone_bytes,
             ])?;
             let program_count = resources["programCount"]

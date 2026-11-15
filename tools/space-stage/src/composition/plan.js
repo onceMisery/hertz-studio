@@ -120,14 +120,22 @@ function checkModel(asset) {
   }
   const images = facts.images, materials = facts.materials, textures = facts.textures;
   const morphTextureBytes = resources.morphTextureBytes ?? 0;
+  const skinTextureBytes = resources.skinTextureBytes ?? 0;
+  const extraTextureBytes = morphTextureBytes + skinTextureBytes;
   if (!Array.isArray(images) || !images.length || !Array.isArray(materials) || !materials.length
       || !Array.isArray(textures) || !textures.length
       || resources.textureCount !== textures.length || resources.imageCount !== images.length
       || !Number.isSafeInteger(resources.programCount) || resources.programCount < 1
       || resources.programCount > scene.drawCalls
       || !Number.isSafeInteger(morphTextureBytes) || morphTextureBytes < 0
+      || !Number.isSafeInteger(skinTextureBytes) || skinTextureBytes < 0
+      || !Number.isSafeInteger(resources.skinCpuBytes ?? 0) || (resources.skinCpuBytes ?? 0) < 0
       || (resources.morphAccessors !== undefined && (!Array.isArray(resources.morphAccessors)
-        || !resources.morphAccessors.length)))
+        || !resources.morphAccessors.length))
+      || (resources.skinAccessors !== undefined && (!Array.isArray(resources.skinAccessors)
+        || !resources.skinAccessors.length))
+      || !Array.isArray(facts.skins)
+      || facts.skins.some(skin => !skin || !Array.isArray(skin.joints) || !skin.joints.length))
     throw new Error('composition-model-preparation-required');
   if (ktx2) {
     for (const image of images) {
@@ -148,10 +156,10 @@ function checkModel(asset) {
     }
     if (!Number.isSafeInteger(resources.imageUploadBytes)
         || resources.imageUploadBytes !== images.reduce((sum, image) => sum + image.uploadBytes, 0)
-        || asset.textureUploadBytes !== resources.imageUploadBytes + morphTextureBytes)
+        || asset.textureUploadBytes !== resources.imageUploadBytes + extraTextureBytes)
       throw new Error('composition-model-preparation-required');
   } else if (!Number.isSafeInteger(asset.textureUploadBytes)
-      || asset.textureUploadBytes < images.length * 4 + morphTextureBytes) {
+      || asset.textureUploadBytes < images.length * 4 + extraTextureBytes) {
     throw new Error('composition-model-preparation-required');
   }
   const external = images.filter(image => image?.source === 'external');
@@ -164,7 +172,7 @@ function checkModel(asset) {
 }
 function modelConstructionBytes(facts) {
   return facts.input.encodedBytes + facts.input.binBytes + facts.input.jsonBytes * 2
-    + (facts.resources.animationCpuBytes || 0);
+    + (facts.resources.animationCpuBytes || 0) + (facts.resources.skinCpuBytes || 0);
 }
 function fontCpuBytes(asset) {
   const facts = asset.fontMetadata;

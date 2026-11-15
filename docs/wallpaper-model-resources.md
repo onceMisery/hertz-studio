@@ -1498,3 +1498,35 @@ texture=32+96+4096、programs=3）并发射 `model-morph` fixture；桌面 lib 8
 
 仍未闭合：GLB 蒙皮（skins/JOINTS_0/WEIGHTS_0/IBM 与骨骼 TRS 动画）、动画混合
 （多 clip 同时播放/权重）、真实 GPU 设备矩阵/首帧与 A01/A05–A10 外部验收。
+
+2026-11-15 r85 GLB 蒙皮：textured/ktx2 profile 退役 skins blanket 拒绝，限定为
+单套 JOINTS_0/WEIGHTS_0：JOINTS_0 为 packed、unnormalized UBYTE/USHORT VEC4，
+WEIGHTS_0 为 packed FLOAT VEC4，count 等于 base POSITION；更高 set、无 skin
+node 的 skin 属性、重复引用同一 skinned mesh、joint 自带 mesh/skin 均拒绝。
+skin 节点必须有 mesh，joints 必须可达；inverseBindMatrices 可省略（单位矩阵），
+存在时必须为 packed FLOAT MAT4 且 count ≥ joints。facts 新增顶层
+skins[]（joints/skeleton/inverseBindAccessor）、scene.nodes[].skinIndex、
+geometry.jointsAccessor/weightsAccessor；IBM accessor 只进
+resources.skinAccessors 与 cpuBackingBytes，不上传 vertex buffer。
+skinTextureBytes 按 Three Skeleton.computeBoneTexture 的
+size=max(4,ceil(sqrt(joints×4)/4)×4)、bytes=size²×16 逐 skin 实例计量，
+skinCpuBytes=joints×64+boneTexture 字节；二者分别进入桌面 texture_upload_bytes、
+private_cpu_bytes、plan.js construction/texture 总量。program key 的 skinning
+标志参与变体计数。JS verify 在加载期核对 Bone/SkinnedMesh 类型、skeleton.bones
+顺序与节点身份、bindMatrix/bindMatrixInverse 单位矩阵、boneInverses 与 IBM 或
+单位矩阵一致；模板实例化改用 SkeletonUtils.clone 克隆骨骼并重新绑定，release
+时对每个 SkinnedMesh 调用 skeleton.dispose()。
+
+真实证据：Rust 新增 `static_textured_skin_facts_cover_joints_ibm_and_program`
+（skinIndex、joints/IBM、geometry 两个 accessor、gpu=162、skinTextureBytes=256、
+skinCpuBytes=320、cpuBacking=268、program=1）。Chrome 组合检查 63 项：
+skin 早期基形白、远端黑；t=0.999 骨骼 +1X 后基位置黑、远端白；t=1 回绕；
+live.programs=2、buffer=254、texture=64+256；删除 skins facts 负例零配额拒绝。
+桌面新增 `native_model_skin_fixture_projects_bones_and_texture_budget`
+（textureUploadBytes=288、page buffers=254、texture=32+256+4096、programs=3）
+并发射 `model-skin`；桌面 lib 869 项通过，原生页面新阶段以真实 Rust 投影 +
+GlAdmission 渲染：早期基样本可见、≥900ms 后基样本黑/远端可见、contexts 1→0、
+budget.error=null。
+
+仍未闭合：动画混合（多 clip 同时播放/权重）、真实 GPU 设备矩阵/首帧与
+A01/A05–A10 外部验收。

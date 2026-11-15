@@ -457,16 +457,22 @@ fn textured_shape(shape: AccessorShape) -> Option<&'static str> {
         AccessorShape::Scalar => Some("SCALAR"),
         AccessorShape::Vec2 => Some("VEC2"),
         AccessorShape::Vec3 => Some("VEC3"),
+        AccessorShape::Vec4 => Some("VEC4"),
+        AccessorShape::Mat4 => Some("MAT4"),
         _ => None,
     }
 }
 
 fn check_textured_accessor(accessor: &ModelAccessor) -> Result<()> {
     match accessor.shape {
-        AccessorShape::Vec2 | AccessorShape::Vec3 | AccessorShape::Vec4 => {
-            if accessor.component_type != 5126 {
+        AccessorShape::Vec2 | AccessorShape::Vec3 | AccessorShape::Vec4 | AccessorShape::Mat4 => {
+            // JOINTS_0 is the only unsigned vector role in this profile.
+            let unsigned_joints = accessor.shape == AccessorShape::Vec4
+                && [5121, 5123].contains(&accessor.component_type)
+                && !accessor.normalized;
+            if accessor.component_type != 5126 && !unsigned_joints {
                 return Err(unavailable(
-                    "textured profile requires FLOAT UV/VEC3/VEC4 accessors",
+                    "textured profile requires FLOAT UV/VEC3/VEC4/MAT4 accessors",
                 ));
             }
         }
@@ -1089,8 +1095,8 @@ fn textured_profile_facts(
     {
         return Err(unavailable("textured profile item limits"));
     }
-    if !structure.skins.is_empty() || structure.camera_count != 0 {
-        return Err(unavailable("textured profile rejects cameras and skins"));
+    if structure.camera_count != 0 {
+        return Err(unavailable("textured profile rejects cameras"));
     }
     let buffer_bytes = structure
         .buffer_byte_length
@@ -1113,6 +1119,14 @@ fn textured_profile_facts(
         for primitive in &mesh.primitives {
             if !matches!(primitive.authored_mode, None | Some(4)) {
                 return Err(unavailable("textured profile requires TRIANGLES"));
+            }
+            if primitive.attributes.keys().any(|name| {
+                name.starts_with("JOINTS_") && name != "JOINTS_0"
+                    || name.starts_with("WEIGHTS_") && name != "WEIGHTS_0"
+            }) {
+                return Err(unavailable(
+                    "textured profile supports only JOINTS_0 and WEIGHTS_0",
+                ));
             }
             let position = *primitive
                 .attributes
@@ -1160,8 +1174,13 @@ fn textured_profile_facts(
     let mut parents = vec![None; structure.nodes.len()];
     let mut mesh_references = vec![0_u64; structure.meshes.len()];
     for (index, node) in structure.nodes.iter().enumerate() {
-        if node.camera.is_some() || node.skin.is_some() {
-            return Err(unavailable("textured profile rejects cameras and skins"));
+        if node.camera.is_some() {
+            return Err(unavailable("textured profile rejects cameras"));
+        }
+        if let Some(skin) = node.skin {
+            if skin >= structure.skins.len() || node.mesh.is_none() {
+                return Err(unavailable("textured profile skin node requires a mesh"));
+            }
         }
         if let Some(mesh) = node.mesh {
             if mesh >= structure.meshes.len() {
@@ -1189,6 +1208,119 @@ fn textured_profile_facts(
         for &child in &structure.nodes[index].children {
             stack.push((child, depth + 1));
         }
+    }
+    let mut skinned_meshes = std::collections::BTreeSet::new();
+    let mut used_skins = std::collections::BTreeSet::new();
+    for &index in &reachable {
+        let node = &structure.nodes[index];
+        let Some(skin_index) = node.skin else {
+            continue;
+        };
+        used_skins.insert(skin_index);
+        let mesh_index = node.mesh.expect("checked skin mesh");
+        if mesh_references[mesh_index] > 1 {
+            return Err(unavailable(
+                "textured profile rejects reused skinned meshes",
+            ));
+        }
+        skinned_meshes.insert(mesh_index);
+        for primitive in &structure.meshes[mesh_index].primitives {
+            let Some(&joints) = primitive.attributes.get("JOINTS_0") else {
+                return Err(unavailable(
+                    "textured profile skinned primitives require JOINTS_0",
+                ));
+            };
+            let Some(&weights) = primitive.attributes.get("WEIGHTS_0") else {
+                return Err(unavailable(
+                    "textured profile skinned primitives require WEIGHTS_0",
+                ));
+            };
+            let vertex_count = structure.accessors[primitive.attributes["POSITION"]].count;
+            let joint_accessor = &structure.accessors[joints];
+            let weight_accessor = &structure.accessors[weights];
+            if joint_accessor.shape != AccessorShape::Vec4
+                || ![5121, 5123].contains(&joint_accessor.component_type)
+                || joint_accessor.normalized
+                || joint_accessor.stride != joint_accessor.element_bytes
+                || joint_accessor.count != vertex_count
+            {
+                return Err(unavailable(
+                    "textured profile JOINTS_0 requires packed unnormalized unsigned VEC4",
+                ));
+            }
+            if weight_accessor.shape != AccessorShape::Vec4
+                || weight_accessor.component_type != 5126
+                || weight_accessor.normalized
+                || weight_accessor.stride != weight_accessor.element_bytes
+                || weight_accessor.count != vertex_count
+            {
+                return Err(unavailable(
+                    "textured profile WEIGHTS_0 requires packed FLOAT VEC4",
+                ));
+            }
+        }
+    }
+    for (mesh_index, mesh) in structure.meshes.iter().enumerate() {
+        let has_skin = mesh.primitives.iter().any(|primitive| {
+            primitive.attributes.contains_key("JOINTS_0")
+                || primitive.attributes.contains_key("WEIGHTS_0")
+        });
+        if has_skin && !skinned_meshes.contains(&mesh_index) {
+            return Err(unavailable(
+                "textured profile skin attributes require a skin node",
+            ));
+        }
+    }
+    let mut skin_accessors = std::collections::BTreeSet::new();
+    let mut skin_texture_bytes = 0_u64;
+    let mut skin_cpu_bytes = 0_u64;
+    for &skin_index in &used_skins {
+        let skin = &structure.skins[skin_index];
+        for &joint in &skin.joints {
+            if !reachable.contains(&joint) {
+                return Err(unavailable("textured profile skin joint is not reachable"));
+            }
+            let node = &structure.nodes[joint];
+            if node.mesh.is_some() || node.skin.is_some() {
+                return Err(unavailable(
+                    "textured profile joint nodes cannot own meshes or skins",
+                ));
+            }
+        }
+        if let Some(ibm) = skin.inverse_bind_matrices {
+            let accessor = &structure.accessors[ibm];
+            if accessor.shape != AccessorShape::Mat4
+                || accessor.component_type != 5126
+                || accessor.normalized
+                || accessor.stride != accessor.element_bytes
+                || accessor.count < skin.joints.len() as u64
+            {
+                return Err(unavailable(
+                    "textured profile inverse bind matrices require packed FLOAT MAT4",
+                ));
+            }
+            skin_accessors.insert(ibm);
+        }
+    }
+    for &index in &reachable {
+        let Some(skin_index) = structure.nodes[index].skin else {
+            continue;
+        };
+        let joints = structure.skins[skin_index].joints.len() as u64;
+        let raw = (joints as f64 * 4.0).sqrt();
+        let size = ((raw / 4.0).ceil() * 4.0).max(4.0) as u64;
+        let texture_bytes = size
+            .checked_mul(size)
+            .and_then(|value| value.checked_mul(16))
+            .ok_or_else(|| unavailable("textured profile skin texture bytes overflow"))?;
+        skin_texture_bytes = checked_sum([skin_texture_bytes, texture_bytes])?;
+        skin_cpu_bytes = checked_sum([
+            skin_cpu_bytes,
+            joints
+                .checked_mul(64)
+                .ok_or_else(|| unavailable("textured profile skin CPU bytes overflow"))?,
+            texture_bytes,
+        ])?;
     }
     let animation = animation_projection(structure, binary, &reachable)?;
     let mut used_materials = std::collections::BTreeSet::new();
@@ -1269,6 +1401,14 @@ fn textured_profile_facts(
             if let Some(indices) = primitive.indices {
                 used_accessors.insert(indices);
             }
+            let joints = primitive.attributes.get("JOINTS_0").copied();
+            let weights = primitive.attributes.get("WEIGHTS_0").copied();
+            if let Some(joints) = joints {
+                used_accessors.insert(joints);
+            }
+            if let Some(weights) = weights {
+                used_accessors.insert(weights);
+            }
             let mut uv_facts = Vec::new();
             let mut morph_facts = Vec::new();
             for target in &primitive.targets {
@@ -1318,7 +1458,7 @@ fn textured_profile_facts(
                     .map(|material| material_facts(material, &structure.materials[material]))
                     .as_ref(),
                 primitive.targets.len(),
-                false,
+                node.skin.is_some(),
             ));
             let attributes = primitive
                 .attributes
@@ -1363,6 +1503,8 @@ fn textured_profile_facts(
                     "normalAccessor": normal,
                     "uvAccessors": uv_facts,
                     "morphTargets": morph_facts,
+                    "jointsAccessor": joints,
+                    "weightsAccessor": weights,
                     "indexAccessor": primitive.indices,
                     "mode": primitive.authored_mode,
                     "triangles": primitive.triangles_upper_bound,
@@ -1382,6 +1524,7 @@ fn textured_profile_facts(
             "index": index,
             "parentIndex": parents[index],
             "meshIndex": node.mesh,
+            "skinIndex": node.skin,
             "morphTargetCount": node.mesh.map_or(0, |mesh| structure.meshes[mesh].morph_target_count),
             "morphWeights": structure.node_morph_weights[index],
             "children": &node.children,
@@ -1407,6 +1550,7 @@ fn textured_profile_facts(
     for accessor in used_accessors
         .iter()
         .chain(morph_accessors.iter())
+        .chain(skin_accessors.iter())
         .map(|&index| &structure.accessors[index])
     {
         used_views.insert(accessor.buffer_view);
@@ -1419,6 +1563,22 @@ fn textured_profile_facts(
         .iter()
         .map(|&index| accessor_facts_for(structure, index))
         .collect::<Result<Vec<_>>>()?;
+    let skin_accessor_facts: Vec<Value> = skin_accessors
+        .iter()
+        .map(|&index| accessor_facts_for(structure, index))
+        .collect::<Result<Vec<_>>>()?;
+    let skin_facts: Vec<Value> = used_skins
+        .iter()
+        .map(|&index| {
+            let skin = &structure.skins[index];
+            json!({
+                "index": index,
+                "joints": &skin.joints,
+                "skeleton": skin.skeleton,
+                "inverseBindAccessor": skin.inverse_bind_matrices
+            })
+        })
+        .collect();
     let view_facts: Vec<Value> = used_views
         .iter()
         .map(|&index| {
@@ -1564,6 +1724,7 @@ fn textured_profile_facts(
         },
         "materials": material_facts_used,
         "meshes": mesh_facts,
+        "skins": skin_facts,
         "textures": texture_facts,
         "images": image_facts_used,
         "resources": {
@@ -1588,6 +1749,11 @@ fn textured_profile_facts(
     if !morph_accessor_facts.is_empty() {
         facts["resources"]["morphAccessors"] = json!(morph_accessor_facts);
         facts["resources"]["morphTextureBytes"] = json!(morph_texture_bytes);
+    }
+    if !skin_accessor_facts.is_empty() || !used_skins.is_empty() {
+        facts["resources"]["skinAccessors"] = json!(skin_accessor_facts);
+        facts["resources"]["skinTextureBytes"] = json!(skin_texture_bytes);
+        facts["resources"]["skinCpuBytes"] = json!(skin_cpu_bytes);
     }
     if let Some(animation) = animation {
         let clip_count = animation.clips.len();
@@ -2233,6 +2399,153 @@ mod tests {
         assert_eq!(channel["values"], 2);
         assert_eq!(facts["resources"]["animationCpuBytes"], 8 + 8 + 512);
         assert_eq!(facts["resources"]["cpuBackingBytes"], 104 + 36 + 36 + 8 + 8);
+    }
+
+    fn textured_skinned_triangle() -> Vec<u8> {
+        let image_end = 104 + TEXTURED_PNG.len();
+        let joints_offset = image_end;
+        let weights_offset = (joints_offset + 12 + 3) & !3;
+        let times_offset = weights_offset + 48;
+        let rotations_offset = times_offset + 8;
+        let ibm_offset = rotations_offset + 32;
+        let mut bin = vec![0_u8; ibm_offset + 64];
+        for (index, value) in [0.0_f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+            .iter()
+            .enumerate()
+        {
+            bin[index * 4..index * 4 + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        for (index, value) in [0.0_f32, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0]
+            .iter()
+            .enumerate()
+        {
+            bin[36 + index * 4..36 + index * 4 + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        for (index, value) in [0.0_f32, 0.0, 1.0, 0.0, 0.0, 1.0].iter().enumerate() {
+            bin[72 + index * 4..72 + index * 4 + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        for (index, value) in [0_u16, 1, 2].iter().enumerate() {
+            bin[96 + index * 2..96 + index * 2 + 2].copy_from_slice(&value.to_le_bytes());
+        }
+        bin[104..104 + TEXTURED_PNG.len()].copy_from_slice(TEXTURED_PNG);
+        for index in 0..12 {
+            bin[joints_offset + index] = 0;
+        }
+        for index in 0..3 {
+            bin[weights_offset + index * 16..weights_offset + index * 16 + 4]
+                .copy_from_slice(&1.0_f32.to_le_bytes());
+        }
+        for (index, value) in [0.0_f32, 1.0].iter().enumerate() {
+            bin[times_offset + index * 4..times_offset + index * 4 + 4]
+                .copy_from_slice(&value.to_le_bytes());
+        }
+        let half = std::f32::consts::FRAC_1_SQRT_2;
+        for (index, value) in [0.0_f32, 0.0, 0.0, 1.0, 0.0, 0.0, half, half]
+            .iter()
+            .enumerate()
+        {
+            bin[rotations_offset + index * 4..rotations_offset + index * 4 + 4]
+                .copy_from_slice(&value.to_le_bytes());
+        }
+        for (index, value) in [
+            1.0_f32, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+        ]
+        .iter()
+        .enumerate()
+        {
+            bin[ibm_offset + index * 4..ibm_offset + index * 4 + 4]
+                .copy_from_slice(&value.to_le_bytes());
+        }
+        let document = json!({
+            "asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],
+            "nodes":[
+                {"mesh":0,"name":"mesh","skin":0,"children":[1]},
+                {"name":"bone"}
+            ],
+            "skins":[{"joints":[1],"inverseBindMatrices":8}],
+            "meshes":[{"primitives":[
+                {"attributes":{"POSITION":0,"NORMAL":1,"TEXCOORD_0":3,"JOINTS_0":4,"WEIGHTS_0":5},
+                 "indices":2,"material":0}]}],
+            "buffers":[{"byteLength":bin.len()}],
+            "bufferViews":[
+                {"buffer":0,"byteOffset":0,"byteLength":36},
+                {"buffer":0,"byteOffset":36,"byteLength":36},
+                {"buffer":0,"byteOffset":72,"byteLength":24},
+                {"buffer":0,"byteOffset":96,"byteLength":8},
+                {"buffer":0,"byteOffset":104,"byteLength":TEXTURED_PNG.len()},
+                {"buffer":0,"byteOffset":joints_offset,"byteLength":12,"byteStride":4},
+                {"buffer":0,"byteOffset":weights_offset,"byteLength":48},
+                {"buffer":0,"byteOffset":times_offset,"byteLength":8},
+                {"buffer":0,"byteOffset":rotations_offset,"byteLength":32},
+                {"buffer":0,"byteOffset":ibm_offset,"byteLength":64}],
+            "accessors":[
+                {"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[1,1,0]},
+                {"bufferView":1,"componentType":5126,"count":3,"type":"VEC3"},
+                {"bufferView":3,"componentType":5123,"count":3,"type":"SCALAR"},
+                {"bufferView":2,"componentType":5126,"count":3,"type":"VEC2"},
+                {"bufferView":5,"componentType":5121,"count":3,"type":"VEC4"},
+                {"bufferView":6,"componentType":5126,"count":3,"type":"VEC4"},
+                {"bufferView":7,"componentType":5126,"count":2,"type":"SCALAR","min":[0],"max":[1]},
+                {"bufferView":8,"componentType":5126,"count":2,"type":"VEC4"},
+                {"bufferView":9,"componentType":5126,"count":1,"type":"MAT4"}],
+            "images":[{"bufferView":4,"mimeType":"image/png"}],
+            "samplers":[{"magFilter":9728,"minFilter":9728,"wrapS":33071,"wrapT":33071}],
+            "textures":[{"source":0,"sampler":0}],
+            "materials":[{"pbrMetallicRoughness":{"baseColorFactor":[1,1,1,1],
+                "baseColorTexture":{"index":0,"texCoord":0},"metallicFactor":0,"roughnessFactor":1},
+                "alphaMode":"OPAQUE"}],
+            "animations":[{"name":"swing",
+                "samplers":[{"input":6,"output":7,"interpolation":"LINEAR"}],
+                "channels":[{"sampler":0,"target":{"node":1,"path":"rotation"}}]}]
+        });
+        glb(document, &bin)
+    }
+
+    #[test]
+    fn static_textured_skin_facts_cover_joints_ibm_and_program() {
+        let bytes = textured_skinned_triangle();
+        let content = inspect_glb_resource_content(
+            Cursor::new(&bytes),
+            bytes.len() as u64,
+            &manifest(),
+            "assets/model.glb",
+        )
+        .unwrap();
+        let facts =
+            static_textured_profile_facts(content.resource(), content.bytes(), "assets/model.glb")
+                .unwrap();
+        assert_eq!(facts["profile"], TEXTURED_PROFILE);
+        assert_eq!(facts["skins"][0]["joints"], json!([1]));
+        assert_eq!(facts["skins"][0]["skeleton"], Value::Null);
+        assert_eq!(facts["skins"][0]["inverseBindAccessor"], 8);
+        assert_eq!(facts["scene"]["nodes"][0]["skinIndex"], 0);
+        assert_eq!(facts["scene"]["nodes"][1]["skinIndex"], Value::Null);
+        let geometry = &facts["resources"]["geometries"][0];
+        assert_eq!(geometry["jointsAccessor"], 4);
+        assert_eq!(geometry["weightsAccessor"], 5);
+        assert_eq!(
+            geometry["key"],
+            "2:JOINTS_0:4;NORMAL:1;POSITION:0;TEXCOORD_0:3;WEIGHTS_0:5;:undefined"
+        );
+        assert_eq!(facts["resources"]["gpuBufferBytes"], 102 + 12 + 48);
+        assert_eq!(facts["resources"]["attributeCount"], 6);
+        assert_eq!(facts["resources"]["backingCount"], 7);
+        assert_eq!(
+            facts["resources"]["cpuBackingBytes"],
+            104 + 12 + 48 + 40 + 64
+        );
+        assert_eq!(
+            facts["resources"]["skinAccessors"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(facts["resources"]["skinTextureBytes"], 256);
+        assert_eq!(facts["resources"]["skinCpuBytes"], 64 + 256);
+        assert_eq!(facts["resources"]["programCount"], 1);
+        assert_eq!(facts["animations"][0]["channels"][0]["path"], "rotation");
+        assert_eq!(facts["animations"][0]["channels"][0]["components"], 4);
     }
 
     #[test]

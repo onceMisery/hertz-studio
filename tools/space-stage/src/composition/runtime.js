@@ -6,7 +6,7 @@ import { createBackground, createInputSampler } from './builtin.js';
 import { evaluateBinding, evaluateTrack } from './animation.js';
 const MATRIX=1, LAYOUT=2, MATERIAL=4, VISIBILITY=8, RESOURCE=16, GEOMETRY=32, ALL=63;
 const modelConstructionBytes = facts => facts.input.encodedBytes + facts.input.binBytes + facts.input.jsonBytes * 2
-  + (facts.resources.animationCpuBytes || 0);
+  + (facts.resources.animationCpuBytes || 0) + (facts.resources.skinCpuBytes || 0);
 const outputVertex = `varying vec2 vUv;void main(){vUv=uv;gl_Position=vec4(position.xy,0.0,1.0);}`;
 const outputFragment = `uniform sampler2D inputMap;uniform float brightness;uniform float contrast;
   uniform float saturation;uniform float hue;uniform sampler2D glowMap;uniform bool hasGlow;uniform float glowStrength;
