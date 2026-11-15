@@ -21,6 +21,8 @@ const MAX_NODES: usize = 5000;
 const MAX_ITEMS: usize = 16384;
 const VK_FORMAT_RGBA8_UNORM: u32 = 37;
 const VK_FORMAT_RGBA8_SRGB: u32 = 43;
+const KHR_DF_MODEL_ETC1S: u8 = 163;
+const KHR_DF_MODEL_UASTC: u8 = 166;
 
 /// Image payload policy for the shared textured scene/material projection.
 enum ImageProjection<'a> {
@@ -641,43 +643,72 @@ fn ktx2_image_facts(
         }
     };
     let container = crate::texture_container::inspect_ktx2(bytes, bytes.len() as u64)?;
-    if container.supercompression != 0 {
-        return Err(unavailable(
-            "KTX2 profile requires uncompressed texture levels",
-        ));
-    }
-    if !matches!(
-        container.vk_format,
-        VK_FORMAT_RGBA8_UNORM | VK_FORMAT_RGBA8_SRGB
-    ) {
-        return Err(unavailable(
-            "KTX2 profile requires RGBA8 UNORM/SRGB textures",
-        ));
-    }
     if container.levels.is_empty() || container.generate_mipmaps {
         return Err(unavailable("KTX2 profile requires declared texture levels"));
     }
-    if !matches!(
-        crate::ktx2_upload::plan_ktx2_upload(
-            &container,
-            crate::ktx2_upload::Ktx2UploadCapabilities::default()
-        )?,
-        crate::ktx2_upload::Ktx2UploadPlan::Direct { .. }
-    ) {
-        return Err(unavailable(
-            "KTX2 profile requires a direct GPU upload format",
-        ));
-    }
+    let basis = matches!(
+        container.data_format.color_model,
+        KHR_DF_MODEL_ETC1S | KHR_DF_MODEL_UASTC
+    );
     let level_byte_lengths: Vec<u64> = container.levels.iter().map(|level| level.bytes).collect();
-    let upload_bytes = checked_sum(level_byte_lengths.iter().copied())?;
+    let (upload_bytes, basis_srgb) = if basis {
+        match container.data_format.color_model {
+            KHR_DF_MODEL_ETC1S if container.supercompression == 1 => {}
+            KHR_DF_MODEL_UASTC if container.supercompression == 0 => {}
+            _ => {
+                return Err(unavailable(
+                    "KTX2 Basis requires ETC1S+BasisLZ or UASTC storage",
+                ))
+            }
+        }
+        match crate::ktx2_upload::plan_ktx2_upload(
+            &container,
+            crate::ktx2_upload::Ktx2UploadCapabilities::default(),
+        )? {
+            crate::ktx2_upload::Ktx2UploadPlan::Transcode {
+                rgba_bytes, srgb, ..
+            } => (rgba_bytes, Some(srgb)),
+            _ => return Err(unavailable("KTX2 Basis requires transcoding")),
+        }
+    } else {
+        if container.supercompression != 0 {
+            return Err(unavailable(
+                "KTX2 profile requires uncompressed texture levels",
+            ));
+        }
+        if !matches!(
+            container.vk_format,
+            VK_FORMAT_RGBA8_UNORM | VK_FORMAT_RGBA8_SRGB
+        ) {
+            return Err(unavailable(
+                "KTX2 profile requires RGBA8 UNORM/SRGB textures",
+            ));
+        }
+        if !matches!(
+            crate::ktx2_upload::plan_ktx2_upload(
+                &container,
+                crate::ktx2_upload::Ktx2UploadCapabilities::default()
+            )?,
+            crate::ktx2_upload::Ktx2UploadPlan::Direct { .. }
+        ) {
+            return Err(unavailable(
+                "KTX2 profile requires a direct GPU upload format",
+            ));
+        }
+        (checked_sum(level_byte_lengths.iter().copied())?, None)
+    };
     let mut facts = source;
     facts["width"] = json!(container.width);
     facts["height"] = json!(container.height);
     facts["vkFormat"] = json!(container.vk_format);
-    facts["srgb"] = json!(container.vk_format == VK_FORMAT_RGBA8_SRGB);
+    facts["srgb"] = json!(basis_srgb.unwrap_or(container.vk_format == VK_FORMAT_RGBA8_SRGB));
     facts["levelCount"] = json!(level_byte_lengths.len());
     facts["levelByteLengths"] = json!(level_byte_lengths);
     facts["uploadBytes"] = json!(upload_bytes);
+    if basis_srgb.is_some() {
+        facts["transcode"] = json!(true);
+        facts["rgbaBytes"] = json!(upload_bytes);
+    }
     Ok((facts, Some(upload_bytes)))
 }
 
@@ -1986,7 +2017,10 @@ mod tests {
     }
 
     fn ktx2_triangle(vk_format: u32, supercompression: u32, external: bool) -> Vec<u8> {
-        let ktx2 = ktx2_rgba8(vk_format, supercompression);
+        ktx2_triangle_image(&ktx2_rgba8(vk_format, supercompression), external)
+    }
+
+    fn ktx2_triangle_image(ktx2: &[u8], external: bool) -> Vec<u8> {
         let mut bin = vec![0_u8; if external { 104 } else { 104 + ktx2.len() }];
         for (index, value) in [0.0_f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
             .iter()
@@ -2007,7 +2041,7 @@ mod tests {
             bin[96 + index * 2..96 + index * 2 + 2].copy_from_slice(&value.to_le_bytes());
         }
         if !external {
-            bin[104..].copy_from_slice(&ktx2);
+            bin[104..].copy_from_slice(ktx2);
         }
         let mut views = vec![
             json!({"buffer":0,"byteOffset":0,"byteLength":36}),
@@ -2111,6 +2145,108 @@ mod tests {
                 "{code}"
             );
         }
+    }
+
+    fn uastc_red_container() -> Vec<u8> {
+        // 4x4 UASTC solid-color (mode 8) block: opaque red, 16-byte block.
+        let block = [
+            0xf7_u8, 0x1f, 0x00, 0xe0, 0x1f, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ];
+        let dfd_bytes = 44_u32;
+        let dfd_offset = 80 + 24;
+        let level_offset = dfd_offset + dfd_bytes as usize;
+        let mut bytes = vec![0_u8; level_offset + block.len()];
+        bytes[..12].copy_from_slice(&[
+            0xab, b'K', b'T', b'X', b' ', b'2', b'0', 0xbb, 13, 10, 26, 10,
+        ]);
+        for (offset, value) in [
+            (12, 0_u32),
+            (16, 1),
+            (20, 4),
+            (24, 4),
+            (28, 0),
+            (32, 0),
+            (36, 1),
+            (40, 1),
+            (44, 0),
+            (48, dfd_offset as u32),
+            (52, dfd_bytes),
+            (56, 0),
+            (60, 0),
+        ] {
+            bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        for (offset, value) in [
+            (64, 0_u64),
+            (72, 0),
+            (80, level_offset as u64),
+            (88, block.len() as u64),
+            (96, block.len() as u64),
+        ] {
+            bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+        }
+        bytes[dfd_offset..dfd_offset + 4].copy_from_slice(&dfd_bytes.to_le_bytes());
+        bytes[dfd_offset + 8..dfd_offset + 10].copy_from_slice(&2_u16.to_le_bytes());
+        bytes[dfd_offset + 10..dfd_offset + 12].copy_from_slice(&40_u16.to_le_bytes());
+        bytes[dfd_offset + 12] = 166;
+        bytes[dfd_offset + 13] = 1;
+        bytes[dfd_offset + 14] = 2;
+        bytes[dfd_offset + 16] = 3;
+        bytes[dfd_offset + 17] = 3;
+        bytes[dfd_offset + 20] = 16;
+        bytes[dfd_offset + 30] = 128;
+        bytes[dfd_offset + 40..dfd_offset + 44].copy_from_slice(&0xffff_ffff_u32.to_le_bytes());
+        bytes[level_offset..].copy_from_slice(&block);
+        bytes
+    }
+
+    #[test]
+    fn static_ktx2_facts_project_basis_transcode_uploads() {
+        // Real 64x64 ETC1S+BasisLZ mip chain (Khronos KTX-Software test asset).
+        let etc1s = include_bytes!("../../../scripts/fixtures/basis-etc1s-mip.ktx2");
+        let facts = ktx2_facts(&ktx2_triangle_image(etc1s, false)).unwrap();
+        assert_eq!(facts["profile"], KTX2_PROFILE);
+        let image = &facts["images"][0];
+        assert_eq!(image["mime"], "image/ktx2");
+        assert_eq!(
+            (image["width"].as_u64(), image["height"].as_u64()),
+            (Some(64), Some(64))
+        );
+        assert_eq!(image["vkFormat"], 0);
+        assert_eq!(image["srgb"], true);
+        assert_eq!(image["levelCount"], 7);
+        assert_eq!(image["transcode"], true);
+        assert_eq!(image["rgbaBytes"], 21_844);
+        assert_eq!(image["uploadBytes"], 21_844);
+        assert_eq!(facts["resources"]["imageUploadBytes"], 21_844);
+        assert_eq!(facts["resources"]["textureCount"], 1);
+        // UASTC is stored without supercompression and still transcodes.
+        let facts = ktx2_facts(&ktx2_triangle_image(&uastc_red_container(), false)).unwrap();
+        let image = &facts["images"][0];
+        assert_eq!(
+            (image["width"].as_u64(), image["height"].as_u64()),
+            (Some(4), Some(4))
+        );
+        assert_eq!(image["levelCount"], 1);
+        assert_eq!(image["transcode"], true);
+        assert_eq!(image["rgbaBytes"], 64);
+        assert_eq!(image["uploadBytes"], 64);
+        assert_eq!(facts["resources"]["imageUploadBytes"], 64);
+    }
+
+    #[test]
+    fn static_ktx2_facts_require_basis_storage_schemes() {
+        let mut zstd = include_bytes!("../../../scripts/fixtures/basis-etc1s-mip.ktx2").to_vec();
+        zstd[44..48].copy_from_slice(&2_u32.to_le_bytes());
+        for level in 0..7 {
+            let offset = 80 + level * 24 + 16;
+            zstd[offset..offset + 8].copy_from_slice(&64_u64.to_le_bytes());
+        }
+        // ETC1S payloads must use BasisLZ, UASTC must be stored directly.
+        let code = ktx2_facts(&ktx2_triangle_image(&zstd, false))
+            .unwrap_err()
+            .code;
+        assert_eq!(code, "model_profile_unavailable");
     }
 
     #[test]

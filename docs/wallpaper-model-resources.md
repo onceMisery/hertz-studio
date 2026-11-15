@@ -1380,3 +1380,43 @@ buffer=170、ownedCpu≥1024）；原生页面新增 `model-opacity` 阶段（�
 仍未闭合：Basis ETC1S/UASTC 转码与 transcoder 资源/Worker/CSP、GPU 压缩格式
 设备矩阵、GLB 蒙皮/形变动画、动画混合与多 clip、多材质 program 精确计数、
 真实 GPU 显存/首帧与 A01/A05–A10 外部验收。
+
+2026-11-15 r81 Basis ETC1S/UASTC 转码续接：`model_profile` 对 KTX2 DFD
+color model 163/166 走 Basis 分支：ETC1S 必须 supercompression=1（BasisLZ），
+UASTC 必须 supercompression=0；facts 仍输出 width/height/vkFormat=0/srgb/
+levelCount/levelByteLengths，并新增 `transcode:true` 与 `rgbaBytes`；
+`uploadBytes` 与 `resources.imageUploadBytes` 取 RGBA fallback 全 mip 链字节
+（解码/上传预算上界，而非实际压缩格式）。`texture_container` 修正 BasisLZ
+global data 校验：endpoint/selector palette 是 Huffman 编码，字节数不再强制
+等于 count×4，只要求三张表非空，保留 SGD framing 与逐级 RGB/alpha slice 越界/
+重叠拒绝（真实 Khronos fixture 首次暴露该错误假设）。
+
+JS `plan.js` 接受 `transcode` image facts：要求 vkFormat=0、rgbaBytes 为整数
+且不小于 levelCount×4、uploadBytes=rgbaBytes，且 `textureUploadBytes` 与
+`imageUploadBytes` 精确相等；缺失 transcode/rgbaBytes 或上传字节不符时仍
+fail-closed。`model-resource.js` 对 Basis 结果校验 `CompressedTexture`（非
+DataTexture）、尺寸、非空 format、UnsignedByte 与逐层 mipmap 宽高；direct
+RGBA8 分支保持 DataTexture/RGBAFormat/逐层字节长度校验。`build-stages.mjs`
+把 Three 的 Basis transcoder JS/WASM 以 base64 data URL 内联进 IIFE bundle，
+KTX2Loader 的 worker 无需额外静态路由或 CSP 改动；bundle 约 2.74MB。
+
+原生 `wallpaper-gl-budget.js` 新增受信压缩上传适配器：仅允许 KTX2 Basis
+transcoder 可能选择的格式（S3TC/ETC1/ETC2/ASTC 4x4/BPTC 及其 sRGB 变体），
+按 4x4 block 的 8/16B 规划 texStorage2D 各层字节，compressedTex(Sub)Image
+要求数据长度与规划完全一致且对应层已规划，其余压缩格式仍 fail-closed。
+真实 SwiftShader 选择 ETC2 sRGB RGB8（8B/block），7 层共 2744B。
+
+真实证据：新增 64×64 七层 ETC1S+BasisLZ fixture（Khronos KTX-Software
+`tests/resources/ktx2/r8g8b8a8_srgb_mip_blze.ktx2`，Apache-2.0）与手工
+4×4 UASTC solid-color block。Rust 单测断言 ETC1S rgba/upload=21844、UASTC
+rgba/upload=64，以及 ETC1S 使用非 BasisLZ 超压缩时拒绝；桌面新增
+`model-ktx2-basis` fixture（投影 transcode facts、textureUploadBytes=21844、
+pageLimits.textureDeclaredBytes=21844+4096）；Chrome 组合检查 55 项
+（ETC1S 像素 [251,0,0]、UASTC [253,0,0]、textureDeclaredBytes 21844/64、
+4 个 transcoded facts 负例零配额）；原生页面新增 `model-ktx2-basis` 阶段
+（真实 Rust 投影 + GlAdmission + KTX2 worker，像素 [251,0,0]、外部黑、
+firstFrame、budget.error=null、contexts 1→0）。
+
+仍未闭合：真实 GPU 压缩格式设备矩阵（当前仅 SwiftShader ETC2）、GLB 蒙皮/
+形变动画、动画混合与多 clip、多材质 program 精确计数、真实 GPU 显存/首帧与
+A01/A05–A10 外部验收。

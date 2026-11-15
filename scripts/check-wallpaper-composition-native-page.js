@@ -473,6 +473,55 @@ if(diagnostic){
     assert.equal((await ktx2Page.evaluate(()=>HertzGlBudget.stats())).contexts,0);
     await ktx2Page.close();
   }
+  const basisDir=path.join(output,'model-ktx2-basis');
+  let basisModel=null;
+  if(fs.existsSync(path.join(basisDir,'projection.json'))){
+    const basisProjection=JSON.parse(fs.readFileSync(path.join(basisDir,'projection.json'),'utf8'));
+    const basisUri=fs.readFileSync(path.join(basisDir,'uri.txt'),'utf8');
+    const basisInit=bindCadence(fs.readFileSync(path.join(basisDir,'native-init.js'),'utf8'));
+    const basisFiles=JSON.parse(fs.readFileSync(path.join(basisDir,'files.json'),'utf8'));
+    const basisPage=await browser.newPage({viewport:{width:64,height:64}}),basisErrors=[];
+    basisPage.on('pageerror',error=>basisErrors.push(error.message));
+    basisPage.on('console',message=>{if(message.type()==='error'){basisErrors.push(message.text());console.error('browser:',message.text());}});
+    await basisPage.addInitScript(basisInit+'\nwindow.nativeEvents=[];window.ipc={postMessage:message=>nativeEvents.push(message)};');
+    await basisPage.route('https://**.wallpaper.invalid/**',route=>{
+      if(route.request().url()===basisUri)return route.fulfill({status:200,contentType:'application/json',body:JSON.stringify(basisProjection)});
+      const asset=basisFiles.find(entry=>entry.url===route.request().url());
+      if(asset)return route.fulfill({status:200,contentType:'model/gltf-binary',body:fs.readFileSync(path.join(basisDir,asset.file))});
+      return route.fulfill({status:404,body:''});
+    });
+    await basisPage.route('http://hertz.localhost/',route=>route.fulfill({status:200,contentType:'text/html',body:html}));
+    await basisPage.goto('http://hertz.localhost/');
+    assert.equal(await basisPage.evaluate(async url=>{hertzWallpaper.applyConfig({source:'fixed',audioInput:{kind:'none'},motion:1,quality:'low'});
+      const prepared=hertzWallpaper.applyComposition(url);hertzWallpaper.start(15);return await prepared;},basisUri),true);
+    await basisPage.waitForFunction(()=>nativeEvents.some(event=>event.includes('firstFrame')),null,{timeout:10000}).catch(async failure=>{
+      throw new Error(failure.message+'\n'+JSON.stringify(await basisPage.evaluate(()=>({events:nativeEvents,stats:hertzWallpaper.debug(),budget:HertzGlBudget.stats()}))));
+    });
+    await basisPage.waitForFunction(()=>hertzWallpaper.debug().draws>=2,null,{timeout:10000});
+    const basis=await basisPage.evaluate(()=>{
+      const gl=document.querySelector('#host canvas').getContext('webgl2');
+      const sample=(x,y)=>{const pixel=new Uint8Array(4);gl.readPixels(x,y,1,1,gl.RGBA,gl.UNSIGNED_BYTE,pixel);return [...pixel];};
+      return {inside:sample(36,40),outside:sample(8,8),budget:HertzGlBudget.stats()};
+    });
+    assert(basis.inside[0]>200&&basis.inside[1]<20&&basis.inside[2]<20,'Basis ETC1S baseColor decodes to its red level-0 color');
+    assert(Math.max(...basis.outside.slice(0,3))<=8,'Basis model leaves the background black');
+    assert.equal(basis.budget.contexts,1);assert.equal(basis.budget.error,null);assert.deepEqual(basisErrors,[]);
+    assert.equal(basisProjection.resolvedAssets[0].modelFacts.profile,'static-ktx2-texture-v1');
+    assert.equal(basisProjection.resolvedAssets[0].modelFacts.images[0].transcode,true);
+    assert.equal(basisProjection.resolvedAssets[0].modelFacts.images[0].vkFormat,0);
+    assert.equal(basisProjection.resolvedAssets[0].textureUploadBytes,21844);
+    assert.equal(basisProjection.pageLimits.textureDeclaredBytes,21844+4096);
+    assert.equal(basisProjection.pageLimits.bufferDeclaredBytes,194);
+    basisModel={pixels:{inside:basis.inside,outside:basis.outside},budget:basis.budget,
+      facts:{profile:basisProjection.resolvedAssets[0].modelFacts.profile,
+        rgbaBytes:basisProjection.resolvedAssets[0].modelFacts.images[0].rgbaBytes,
+        textureUploadBytes:basisProjection.resolvedAssets[0].textureUploadBytes}};
+    await basisPage.evaluate(()=>hertzWallpaper.reveal());
+    await basisPage.screenshot({path:path.join(basisDir,'native-page-model-ktx2-basis.png')});
+    await basisPage.evaluate(()=>hertzWallpaper.unmount());await basisPage.waitForTimeout(50);
+    assert.equal((await basisPage.evaluate(()=>HertzGlBudget.stats())).contexts,0);
+    await basisPage.close();
+  }
   const animatedDir=path.join(output,'model-animated');
   let animatedModel=null;
   if(fs.existsSync(path.join(animatedDir,'projection.json'))){
@@ -568,7 +617,7 @@ if(diagnostic){
     assert.equal((await opacityPage.evaluate(()=>HertzGlBudget.stats())).contexts,0);
     await opacityPage.close();
   }
-  fs.writeFileSync(path.join(output,'native-page-evidence.json'),JSON.stringify({source:'actual Rust production selector + GlAdmission + original native page',qualification:'browser integration; copied scheduler metadata matches measured headless rAF; native resource caps unchanged; controlled visibility event/state; Windows/GPU qualification pending',cadence:{intervals:cadence,refreshHz,running:runningCadence},state,blockedBefore,blockedAfter,hiddenBefore,hiddenAfter,visibilityResumed,fits,glow,tracks,mask,model,texturedModel,externalTexture,ktx2Model,animatedModel,opacityModel,paused,retired,errors},null,2));
-  console.log('PASS native composition page: real Rust projection, one context, complete frame, pause and retirement'+(glow?', glow surfaces admitted':'')+(tracks?', tracks/bindings applied':'')+(mask?', mask texture applied':'')+(model?', scene3d model rendered':'')+(texturedModel?', textured model pixels':'')+(externalTexture?', external texture route':'')+(ktx2Model?', KTX2 model pixels':'')+(animatedModel?', animated clip pixels':'')+(opacityModel?', model opacity pixels':''));
+  fs.writeFileSync(path.join(output,'native-page-evidence.json'),JSON.stringify({source:'actual Rust production selector + GlAdmission + original native page',qualification:'browser integration; copied scheduler metadata matches measured headless rAF; native resource caps unchanged; controlled visibility event/state; Windows/GPU qualification pending',cadence:{intervals:cadence,refreshHz,running:runningCadence},state,blockedBefore,blockedAfter,hiddenBefore,hiddenAfter,visibilityResumed,fits,glow,tracks,mask,model,texturedModel,externalTexture,ktx2Model,basisModel,animatedModel,opacityModel,paused,retired,errors},null,2));
+  console.log('PASS native composition page: real Rust projection, one context, complete frame, pause and retirement'+(glow?', glow surfaces admitted':'')+(tracks?', tracks/bindings applied':'')+(mask?', mask texture applied':'')+(model?', scene3d model rendered':'')+(texturedModel?', textured model pixels':'')+(externalTexture?', external texture route':'')+(ktx2Model?', KTX2 model pixels':'')+(basisModel?', Basis KTX2 model pixels':'')+(animatedModel?', animated clip pixels':'')+(opacityModel?', model opacity pixels':''));
  }finally{await browser.close();}
 })().catch(error=>{console.error(error.stack);process.exitCode=1;});

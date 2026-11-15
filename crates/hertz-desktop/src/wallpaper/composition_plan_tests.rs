@@ -201,7 +201,9 @@ fn ktx2_rgba8() -> Vec<u8> {
     bytes
 }
 fn ktx2_model_glb(external: bool) -> Vec<u8> {
-    let ktx2 = ktx2_rgba8();
+    ktx2_model_glb_with(&ktx2_rgba8(), external)
+}
+fn ktx2_model_glb_with(ktx2: &[u8], external: bool) -> Vec<u8> {
     let mut bin = vec![0_u8; if external { 104 } else { 104 + ktx2.len() }];
     for (index, value) in [0.0_f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
         .iter()
@@ -222,7 +224,7 @@ fn ktx2_model_glb(external: bool) -> Vec<u8> {
         bin[96 + index * 2..96 + index * 2 + 2].copy_from_slice(&value.to_le_bytes());
     }
     if !external {
-        bin[104..].copy_from_slice(&ktx2);
+        bin[104..].copy_from_slice(ktx2);
     }
     let views = if external {
         json!([{"buffer":0,"byteOffset":0,"byteLength":36},
@@ -1592,6 +1594,92 @@ async fn native_model_ktx2_fixture_projects_container_facts_and_uploads() {
     assert_eq!(page["renderTargetDeclaredBytes"], 64 * 64 * 20);
     if let Some(output) = std::env::var_os("HERTZ_COMPOSITION_NATIVE_FIXTURE") {
         let output = std::path::PathBuf::from(output).join("model-ktx2");
+        std::fs::create_dir_all(&output).unwrap();
+        std::fs::write(output.join("model.glb"), &glb).unwrap();
+        let model_url = model.url().to_owned();
+        let package_hash = model.reference().package_hash.clone();
+        std::fs::write(
+            output.join("files.json"),
+            serde_json::to_vec(&json!([{"url":model_url,"file":"model.glb"}])).unwrap(),
+        )
+        .unwrap();
+        let binding = super::super::page_events::PageBinding::new(1).unwrap();
+        let access = super::super::access::MediaAccess::new();
+        let mut admission =
+            super::super::gl_plan::GlAdmission::new(gl, Arc::new(BudgetCoordinator::new()))
+                .unwrap();
+        admission
+            .bind_composition(plan, &access, binding.session_id())
+            .unwrap();
+        let uri = admission.composition_url().unwrap();
+        let path = uri.split("/files/").nth(1).unwrap();
+        let reader = access.permit(&package_hash, path).unwrap();
+        std::fs::write(output.join("projection.json"), reader.payload().unwrap()).unwrap();
+        std::fs::write(output.join("uri.txt"), uri).unwrap();
+        std::fs::write(
+            output.join("native-init.js"),
+            format!(
+                "{}\n{}",
+                binding.initialization_script(),
+                admission.initialization_script()
+            ),
+        )
+        .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn native_model_basis_ktx2_projects_transcode_and_rgba_upload() {
+    let root = tempfileish::temp_dir("composition-native-model-basis");
+    let image = include_bytes!("../../../../scripts/fixtures/basis-etc1s-mip.ktx2").to_vec();
+    let glb = ktx2_model_glb_with(&image, false);
+    let entries = vec![
+        (
+            "composition.json",
+            serde_json::to_vec(&document_model(json!([model_node("mesh", json!({}))]))).unwrap(),
+            "application/json",
+        ),
+        ("assets/model.glb", glb.clone(), "model/gltf-binary"),
+    ];
+    let assets = json!([{"id":"model","kind":"model","source":"assets/model.glb","variants":[]}]);
+    let (jobs, hash, _) = install_document(root.path(), entries, assets, json!([])).await;
+    let plan = selected(jobs, hash, Default::default()).await.unwrap();
+    let model = plan.assets["model"].as_model().unwrap();
+    assert_eq!(model.facts()["profile"], "static-ktx2-texture-v1");
+    assert_eq!(model.facts()["images"][0]["transcode"], true);
+    assert_eq!(model.facts()["images"][0]["vkFormat"], 0);
+    assert_eq!(model.facts()["images"][0]["rgbaBytes"], 21_844);
+    assert_eq!(model.texture_upload_bytes(), 21_844);
+    let gl = plan
+        .gl_plan(OwnerKind::Preview, "model-basis-owner".into(), 1, 60, 15)
+        .unwrap();
+    let projection = plan
+        .projection("same-fixed-session-model-basis", 1, 130, &gl.limits)
+        .unwrap();
+    let asset = projection["resolvedAssets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|asset| asset["kind"] == "model")
+        .unwrap();
+    assert_eq!(asset["decodeOptions"]["profile"], "static-ktx2-texture-v1");
+    let facts = &asset["modelFacts"]["images"][0];
+    assert_eq!(facts["mime"], "image/ktx2");
+    assert_eq!(facts["width"], 64);
+    assert_eq!(facts["height"], 64);
+    assert_eq!(facts["levelCount"], 7);
+    assert_eq!(facts["srgb"], true);
+    assert_eq!(facts["uploadBytes"], 21_844);
+    assert_eq!(asset["modelFacts"]["resources"]["imageUploadBytes"], 21_844);
+    assert_eq!(asset["textureUploadBytes"], 21_844);
+    assert_eq!(asset["textureUrls"], json!({}));
+    let page = &projection["pageLimits"];
+    assert_eq!(page["programs"], 3);
+    assert_eq!(page["bufferDeclaredBytes"], 194);
+    assert_eq!(page["textureDeclaredBytes"], 21_844 + 4096);
+    assert_eq!(page["renderTargetDeclaredBytes"], 64 * 64 * 20);
+    if let Some(output) = std::env::var_os("HERTZ_COMPOSITION_NATIVE_FIXTURE") {
+        let output = std::path::PathBuf::from(output).join("model-ktx2-basis");
         std::fs::create_dir_all(&output).unwrap();
         std::fs::write(output.join("model.glb"), &glb).unwrap();
         let model_url = model.url().to_owned();

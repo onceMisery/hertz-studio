@@ -407,10 +407,11 @@ fn parse_global_data<R: Read>(
     let selectors_bytes = u32_at(&header, 8);
     let tables_bytes = u32_at(&header, 12);
     let extended_bytes = u32_at(&header, 16);
-    if u64::from(endpoints_bytes) != u64::from(endpoint_count) * 4
-        || u64::from(selectors_bytes) != u64::from(selector_count) * 4
-    {
-        return Err(reader.error("BasisLZ endpoint/selector byte counts contradict their tables"));
+    // Endpoint and selector palettes are Huffman-coded, so their byte lengths
+    // are not a fixed multiple of their counts. The transcoder only requires
+    // all three tables to be non-empty.
+    if endpoints_bytes == 0 || selectors_bytes == 0 || tables_bytes == 0 {
+        return Err(reader.error("BasisLZ global data sections must be non-empty"));
     }
     let declared = [
         endpoints_bytes,

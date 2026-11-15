@@ -3,6 +3,8 @@
 // composition browser check. This mirrors the installed Three 0.186.0 core
 // profile; it is a fixture oracle, not a second loader.
 'use strict';
+const fs = require('node:fs');
+const path = require('node:path');
 const zlib = require('node:zlib');
 const positions = [0, 0, 0, 1, 0, 0, 0, 1, 0];
 const normals = [0, 0, 1, 0, 0, 1, 0, 0, 1];
@@ -36,7 +38,7 @@ function coreGlb() {
   return { glb, input: { encodedBytes, jsonBytes, binBytes } };
 }
 
-module.exports = { coreGlb, animatedGlb, texturedGlb, ktx2Glb, texturedModelFacts };
+module.exports = { coreGlb, animatedGlb, texturedGlb, ktx2Glb, basisGlb, basisUastcGlb, texturedModelFacts };
 
 function crc32(bytes) {
   let value = -1;
@@ -103,6 +105,85 @@ function animatedGlb() {
   glb.writeUInt32LE(binBytes, 20 + jsonBytes); glb.write('BIN\0', 24 + jsonBytes, 'ascii');
   binary.copy(glb, 28 + jsonBytes);
   return { glb, input: { encodedBytes, jsonBytes, binBytes } };
+}
+
+// 4x4 Basis UASTC solid-color block. Mode 8 (huffman code 0x17/5 bits) is
+// followed by R,G,B,A at 8 bits each; this one is opaque red.
+function uastcRed() {
+  const block = Buffer.from([0xf7, 0x1f, 0x00, 0xe0, 0x1f, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+  const dfdBytes = 44, dfdOffset = 80 + 24, levelOffset = dfdOffset + dfdBytes;
+  const bytes = Buffer.alloc(levelOffset + block.length);
+  Buffer.from([0xab, 0x4b, 0x54, 0x58, 0x20, 0x32, 0x30, 0xbb, 13, 10, 26, 10]).copy(bytes);
+  for (const [offset, value] of [[12, 0], [16, 1], [20, 4], [24, 4], [28, 0], [32, 0], [36, 1], [40, 1], [44, 0],
+    [48, dfdOffset], [52, dfdBytes], [56, 0], [60, 0]]) bytes.writeUInt32LE(value, offset);
+  for (const [offset, value] of [[64, 0], [72, 0], [80, levelOffset], [88, block.length], [96, block.length]]) {
+    bytes.writeBigUInt64LE(BigInt(value), offset);
+  }
+  bytes.writeUInt32LE(dfdBytes, dfdOffset);
+  bytes.writeUInt16LE(2, dfdOffset + 8); bytes.writeUInt16LE(40, dfdOffset + 10);
+  bytes[dfdOffset + 12] = 166; bytes[dfdOffset + 13] = 1; bytes[dfdOffset + 14] = 2;
+  bytes[dfdOffset + 16] = 3; bytes[dfdOffset + 17] = 3;
+  bytes[dfdOffset + 20] = 16;
+  const sample = dfdOffset + 28;
+  bytes[sample + 2] = 128; bytes.writeUInt32LE(0xffffffff, sample + 12);
+  block.copy(bytes, levelOffset);
+  return bytes;
+}
+
+// Shared GLB framing for a single embedded KTX2 baseColor texture. The
+// ETC1S fixture is the Khronos KTX-Software test resource
+// tests/resources/ktx2/r8g8b8a8_srgb_mip_blze.ktx2 (Apache-2.0): one solid
+// color per mip level, 64x64 and seven levels, decoded through the pinned
+// Basis transcoder rather than a second decoder here.
+function ktx2TexturedGlb(image) {
+  const binary = Buffer.alloc(104 + image.length);
+  positions.forEach((value, index) => binary.writeFloatLE(value, index * 4));
+  normals.forEach((value, index) => binary.writeFloatLE(value, 36 + index * 4));
+  [0, 0, 1, 0, 0, 1].forEach((value, index) => binary.writeFloatLE(value, 72 + index * 4));
+  binary.writeUInt16LE(0, 96); binary.writeUInt16LE(1, 98); binary.writeUInt16LE(2, 100);
+  image.copy(binary, 104);
+  const json = {
+    asset: { version: '2.0' }, scene: 0, scenes: [{ nodes: [0] }], nodes: [{ mesh: 0 }],
+    extensionsUsed: ['KHR_texture_basisu'], extensionsRequired: ['KHR_texture_basisu'],
+    meshes: [{ primitives: [{ attributes: { POSITION: 0, NORMAL: 1, TEXCOORD_0: 3 }, indices: 2, material: 0 }] }],
+    buffers: [{ byteLength: binary.length }],
+    bufferViews: [
+      { buffer: 0, byteOffset: 0, byteLength: 36 }, { buffer: 0, byteOffset: 36, byteLength: 36 },
+      { buffer: 0, byteOffset: 72, byteLength: 24 }, { buffer: 0, byteOffset: 96, byteLength: 8 },
+      { buffer: 0, byteOffset: 104, byteLength: image.length }
+    ],
+    accessors: [
+      { bufferView: 0, componentType: 5126, count: 3, type: 'VEC3', min: [0, 0, 0], max: [1, 1, 0] },
+      { bufferView: 1, componentType: 5126, count: 3, type: 'VEC3' },
+      { bufferView: 3, componentType: 5123, count: 3, type: 'SCALAR' },
+      { bufferView: 2, componentType: 5126, count: 3, type: 'VEC2' }
+    ],
+    images: [{ bufferView: 4, mimeType: 'image/ktx2' }],
+    samplers: [{ magFilter: 9728, minFilter: 9728, wrapS: 33071, wrapT: 33071 }],
+    textures: [{ sampler: 0, extensions: { KHR_texture_basisu: { source: 0 } } }],
+    materials: [{
+      pbrMetallicRoughness: { baseColorFactor: [1, 1, 1, 1], baseColorTexture: { index: 0, texCoord: 0 },
+        metallicFactor: 0, roughnessFactor: 1 },
+      alphaMode: 'OPAQUE'
+    }]
+  };
+  const text = Buffer.from(JSON.stringify(json));
+  const jsonBytes = Math.ceil(text.length / 4) * 4, binBytes = Math.ceil(binary.length / 4) * 4;
+  const encodedBytes = 12 + 8 + jsonBytes + 8 + binBytes, glb = Buffer.alloc(encodedBytes);
+  glb.write('glTF', 0, 'ascii'); glb.writeUInt32LE(2, 4); glb.writeUInt32LE(encodedBytes, 8);
+  glb.writeUInt32LE(jsonBytes, 12); glb.write('JSON', 16, 'ascii');
+  glb.fill(0x20, 20, 20 + jsonBytes); text.copy(glb, 20);
+  glb.writeUInt32LE(binBytes, 20 + jsonBytes); glb.write('BIN\0', 24 + jsonBytes, 'ascii');
+  binary.copy(glb, 28 + jsonBytes);
+  return { glb, input: { encodedBytes, jsonBytes, binBytes }, imageBytes: image.length };
+}
+
+function basisGlb() {
+  return ktx2TexturedGlb(fs.readFileSync(path.join(__dirname, 'fixtures/basis-etc1s-mip.ktx2')));
+}
+
+function basisUastcGlb() {
+  return ktx2TexturedGlb(uastcRed());
 }
 
 function texturedGlb() {

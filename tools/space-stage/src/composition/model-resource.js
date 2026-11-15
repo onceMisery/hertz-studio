@@ -986,7 +986,22 @@ async function verifyTexturedActual(result, parser, facts, tracker, ktx2, contai
     if (!info) return;
     const image = ktx2Images.get(textures.get(info.index).source.index);
     if (!image) throw mismatch('ktx2-image-facts');
-    if (!map || !map.isDataTexture || map.isCompressedTexture) throw mismatch('ktx2-texture-type');
+    if (!map || !map.image) throw mismatch('ktx2-texture-type');
+    if (image.transcode) {
+      if (!map.isCompressedTexture || map.isDataTexture) throw mismatch('ktx2-texture-type');
+      if (map.image.width !== image.width || map.image.height !== image.height) throw mismatch('ktx2-dimensions');
+      if (!map.format || map.type !== UnsignedByteType) throw mismatch('ktx2-format');
+      if (!Array.isArray(map.mipmaps) || map.mipmaps.length !== image.levelCount) throw mismatch('ktx2-levels');
+      for (let level = 0; level < image.levelCount; level++) {
+        const actual = map.mipmaps[level];
+        if (!actual || !(actual.data instanceof Uint8Array) || !(actual.data.byteLength > 0)
+          || actual.width !== Math.max(1, image.width >> level) || actual.height !== Math.max(1, image.height >> level)) {
+          throw mismatch('ktx2-level');
+        }
+      }
+      return;
+    }
+    if (!map.isDataTexture || map.isCompressedTexture) throw mismatch('ktx2-texture-type');
     if (map.image.width !== image.width || map.image.height !== image.height) throw mismatch('ktx2-dimensions');
     if (map.format !== RGBAFormat || map.type !== UnsignedByteType) throw mismatch('ktx2-format');
     if (!Array.isArray(map.mipmaps) || map.mipmaps.length !== image.levelCount) throw mismatch('ktx2-levels');

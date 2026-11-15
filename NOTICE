@@ -39,6 +39,10 @@ vendor/zip/LICENSE; published-source checksums and the pinned upstream
 revision are in vendor/zip/UPSTREAM.json. The patch and supported allocation
 bounds are documented in vendor/zip/PATCH.md.
 
+`scripts/fixtures/basis-etc1s-mip.ktx2` is a Khronos KTX-Software test
+resource (`tests/resources/ktx2/r8g8b8a8_srgb_mip_blze.ktx2`), used only to
+verify the Basis ETC1S transcode path. KTX-Software is Apache-2.0.
+
 Native restricted SVG preparation dependencies (exact versions):
 
   - resvg-0.49.0 (Apache-2.0 OR MIT)
