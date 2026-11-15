@@ -236,6 +236,94 @@ fn morph_model_glb() -> Vec<u8> {
     glb_bytes(document, bin)
 }
 
+fn skin_model_glb() -> Vec<u8> {
+    let joints_offset = 104 + TEXTURED_PNG.len();
+    let weights_offset = (joints_offset + 12 + 3) & !3;
+    let times_offset = weights_offset + 48;
+    let translations_offset = times_offset + 8;
+    let ibm_offset = translations_offset + 24;
+    let mut bin = vec![0_u8; ibm_offset + 64];
+    for (index, value) in [0.0_f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+        .iter()
+        .enumerate()
+    {
+        bin[index * 4..index * 4 + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    for (index, value) in [0.0_f32, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0]
+        .iter()
+        .enumerate()
+    {
+        bin[36 + index * 4..36 + index * 4 + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    for (index, value) in [0.0_f32, 0.0, 1.0, 0.0, 0.0, 1.0].iter().enumerate() {
+        bin[72 + index * 4..72 + index * 4 + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    for (index, value) in [0_u16, 1, 2].iter().enumerate() {
+        bin[96 + index * 2..96 + index * 2 + 2].copy_from_slice(&value.to_le_bytes());
+    }
+    bin[104..104 + TEXTURED_PNG.len()].copy_from_slice(TEXTURED_PNG);
+    for index in 0..3 {
+        bin[weights_offset + index * 16..weights_offset + index * 16 + 4]
+            .copy_from_slice(&1.0_f32.to_le_bytes());
+    }
+    for (index, value) in [0.0_f32, 1.0].iter().enumerate() {
+        bin[times_offset + index * 4..times_offset + index * 4 + 4]
+            .copy_from_slice(&value.to_le_bytes());
+    }
+    for (index, value) in [0.0_f32, 0.0, 0.0, 1.0, 0.0, 0.0].iter().enumerate() {
+        bin[translations_offset + index * 4..translations_offset + index * 4 + 4]
+            .copy_from_slice(&value.to_le_bytes());
+    }
+    for (index, value) in [
+        1.0_f32, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+    ]
+    .iter()
+    .enumerate()
+    {
+        bin[ibm_offset + index * 4..ibm_offset + index * 4 + 4]
+            .copy_from_slice(&value.to_le_bytes());
+    }
+    let document = json!({
+        "asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],
+        "nodes":[{"mesh":0,"name":"mesh","skin":0,"children":[1]},{"name":"bone"}],
+        "skins":[{"joints":[1],"inverseBindMatrices":8}],
+        "meshes":[{"primitives":[{"attributes":{"POSITION":0,"NORMAL":1,"TEXCOORD_0":3,"JOINTS_0":4,"WEIGHTS_0":5},
+            "indices":2,"material":0}]}],
+        "buffers":[{"byteLength":bin.len()}],
+        "bufferViews":[
+            {"buffer":0,"byteOffset":0,"byteLength":36},
+            {"buffer":0,"byteOffset":36,"byteLength":36},
+            {"buffer":0,"byteOffset":72,"byteLength":24},
+            {"buffer":0,"byteOffset":96,"byteLength":8},
+            {"buffer":0,"byteOffset":104,"byteLength":TEXTURED_PNG.len()},
+            {"buffer":0,"byteOffset":joints_offset,"byteLength":12,"byteStride":4},
+            {"buffer":0,"byteOffset":weights_offset,"byteLength":48},
+            {"buffer":0,"byteOffset":times_offset,"byteLength":8},
+            {"buffer":0,"byteOffset":translations_offset,"byteLength":24},
+            {"buffer":0,"byteOffset":ibm_offset,"byteLength":64}],
+        "accessors":[
+            {"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[1,1,0]},
+            {"bufferView":1,"componentType":5126,"count":3,"type":"VEC3"},
+            {"bufferView":3,"componentType":5123,"count":3,"type":"SCALAR"},
+            {"bufferView":2,"componentType":5126,"count":3,"type":"VEC2"},
+            {"bufferView":5,"componentType":5121,"count":3,"type":"VEC4"},
+            {"bufferView":6,"componentType":5126,"count":3,"type":"VEC4"},
+            {"bufferView":7,"componentType":5126,"count":2,"type":"SCALAR","min":[0],"max":[1]},
+            {"bufferView":8,"componentType":5126,"count":2,"type":"VEC3"},
+            {"bufferView":9,"componentType":5126,"count":1,"type":"MAT4"}],
+        "images":[{"bufferView":4,"mimeType":"image/png"}],
+        "samplers":[{"magFilter":9728,"minFilter":9728,"wrapS":33071,"wrapT":33071}],
+        "textures":[{"source":0,"sampler":0}],
+        "materials":[{"pbrMetallicRoughness":{"baseColorFactor":[1,1,1,1],
+            "baseColorTexture":{"index":0,"texCoord":0},"metallicFactor":0,"roughnessFactor":1},
+            "alphaMode":"OPAQUE"}],
+        "animations":[{"name":"swing",
+            "samplers":[{"input":6,"output":7,"interpolation":"LINEAR"}],
+            "channels":[{"sampler":0,"target":{"node":1,"path":"translation"}}]}]
+    });
+    glb_bytes(document, bin)
+}
+
 fn glb_bytes(document: Value, bin: Vec<u8>) -> Vec<u8> {
     let text = serde_json::to_vec(&document).unwrap();
     let json_len = text.len().div_ceil(4) * 4;
@@ -1653,6 +1741,92 @@ async fn native_model_morph_fixture_projects_weights_and_texture_budget() {
     assert_eq!(page["textureDeclaredBytes"], 32 + 96 + 4096);
     if let Some(output) = std::env::var_os("HERTZ_COMPOSITION_NATIVE_FIXTURE") {
         let output = std::path::PathBuf::from(output).join("model-morph");
+        std::fs::create_dir_all(&output).unwrap();
+        std::fs::write(output.join("model.glb"), &glb).unwrap();
+        let model_url = model.url().to_owned();
+        let package_hash = model.reference().package_hash.clone();
+        std::fs::write(
+            output.join("files.json"),
+            serde_json::to_vec(&json!([{"url":model_url,"file":"model.glb"}])).unwrap(),
+        )
+        .unwrap();
+        let binding = super::super::page_events::PageBinding::new(1).unwrap();
+        let access = super::super::access::MediaAccess::new();
+        let mut admission =
+            super::super::gl_plan::GlAdmission::new(gl, Arc::new(BudgetCoordinator::new()))
+                .unwrap();
+        admission
+            .bind_composition(plan, &access, binding.session_id())
+            .unwrap();
+        let uri = admission.composition_url().unwrap();
+        let path = uri.split("/files/").nth(1).unwrap();
+        let reader = access.permit(&package_hash, path).unwrap();
+        std::fs::write(output.join("projection.json"), reader.payload().unwrap()).unwrap();
+        std::fs::write(output.join("uri.txt"), uri).unwrap();
+        std::fs::write(
+            output.join("native-init.js"),
+            format!(
+                "{}\n{}",
+                binding.initialization_script(),
+                admission.initialization_script()
+            ),
+        )
+        .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn native_model_skin_fixture_projects_bones_and_texture_budget() {
+    let root = tempfileish::temp_dir("composition-native-model-skin");
+    let glb = skin_model_glb();
+    let entries = vec![
+        (
+            "composition.json",
+            serde_json::to_vec(&document_model(json!([model_node(
+                "mesh",
+                json!({"animationClip":"swing"})
+            )])))
+            .unwrap(),
+            "application/json",
+        ),
+        ("assets/model.glb", glb.clone(), "model/gltf-binary"),
+    ];
+    let assets = json!([{"id":"model","kind":"model","source":"assets/model.glb","variants":[]}]);
+    let (jobs, hash, _) = install_document(root.path(), entries, assets, json!([])).await;
+    let plan = selected(jobs, hash, Default::default()).await.unwrap();
+    let model = plan.assets["model"].as_model().unwrap();
+    let facts = model.facts();
+    assert_eq!(facts["profile"], "static-pbr-texture-v1");
+    assert_eq!(facts["skins"][0]["joints"], json!([1]));
+    assert_eq!(facts["skins"][0]["inverseBindAccessor"], 8);
+    assert_eq!(facts["scene"]["nodes"][0]["skinIndex"], 0);
+    assert_eq!(facts["resources"]["geometries"][0]["jointsAccessor"], 4);
+    assert_eq!(facts["resources"]["geometries"][0]["weightsAccessor"], 5);
+    assert_eq!(facts["resources"]["gpuBufferBytes"], 162);
+    assert_eq!(facts["resources"]["skinTextureBytes"], 256);
+    assert_eq!(facts["resources"]["skinCpuBytes"], 320);
+    assert_eq!(facts["resources"]["programCount"], 1);
+    assert_eq!(model.texture_upload_bytes(), 32 + 256);
+    let gl = plan
+        .gl_plan(OwnerKind::Preview, "model-skin-owner".into(), 1, 60, 15)
+        .unwrap();
+    let projection = plan
+        .projection("same-fixed-session-model-skin", 1, 151, &gl.limits)
+        .unwrap();
+    let asset = projection["resolvedAssets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|asset| asset["kind"] == "model")
+        .unwrap();
+    assert_eq!(asset["modelFacts"]["resources"]["skinTextureBytes"], 256);
+    assert_eq!(asset["textureUploadBytes"], 32 + 256);
+    let page = &projection["pageLimits"];
+    assert_eq!(page["programs"], 3);
+    assert_eq!(page["bufferDeclaredBytes"], 254);
+    assert_eq!(page["textureDeclaredBytes"], 32 + 256 + 4096);
+    if let Some(output) = std::env::var_os("HERTZ_COMPOSITION_NATIVE_FIXTURE") {
+        let output = std::path::PathBuf::from(output).join("model-skin");
         std::fs::create_dir_all(&output).unwrap();
         std::fs::write(output.join("model.glb"), &glb).unwrap();
         let model_url = model.url().to_owned();

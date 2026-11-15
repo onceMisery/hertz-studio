@@ -4,10 +4,10 @@
 const assert=require('node:assert/strict'), fs=require('node:fs'), path=require('node:path');
 const {execFileSync}=require('node:child_process'), {createHash}=require('node:crypto'), zlib=require('node:zlib');
 const {loadCompositionFontFixture}=require('./composition-font-fixture.js');
-const {coreGlb,animatedGlb,twoClipGlb,texturedGlb,morphGlb,ktx2Glb,basisGlb,basisUastcGlb,multiMaterialGlb}=require('./composition-model-fixture.js');
+const {coreGlb,animatedGlb,twoClipGlb,texturedGlb,morphGlb,skinGlb,ktx2Glb,basisGlb,basisUastcGlb,multiMaterialGlb}=require('./composition-model-fixture.js');
 const {chromium}=require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const root=path.resolve(__dirname,'..'), output=path.join(root,'output/a04-p2-20261108/composition-browser');
-const fontFixture=loadCompositionFontFixture(), modelFixture=coreGlb(), animatedFixture=animatedGlb(), twoClipFixture=twoClipGlb(), texturedFixture=texturedGlb(), morphFixture=morphGlb(), ktx2Fixture=ktx2Glb(), basisFixture=basisGlb(), basisUastcFixture=basisUastcGlb(), multiFixture=multiMaterialGlb(), multiMaskFixture=multiMaterialGlb(true);
+const fontFixture=loadCompositionFontFixture(), modelFixture=coreGlb(), animatedFixture=animatedGlb(), twoClipFixture=twoClipGlb(), texturedFixture=texturedGlb(), morphFixture=morphGlb(), skinFixture=skinGlb(), ktx2Fixture=ktx2Glb(), basisFixture=basisGlb(), basisUastcFixture=basisUastcGlb(), multiFixture=multiMaterialGlb(), multiMaskFixture=multiMaterialGlb(true);
 fs.mkdirSync(output,{recursive:true});
 function hash(bytes){return createHash('sha256').update(bytes).digest('hex');}
 function crc(bytes){let c=0xffffffff;for(const b of bytes){c^=b;for(let i=0;i<8;i++)c=(c>>>1)^((c&1)?0xedb88320:0);}return (c^0xffffffff)>>>0;}
@@ -35,6 +35,8 @@ const sourceAssets=[
   modelInput:texturedFixture.input,textured:true,uploadBytes:64,imageBytes:texturedFixture.imageBytes},
  {assetId:'morph',kind:'model',file:'morph.glb',mime:'model/gltf-binary',bytes:morphFixture.glb,
   modelInput:morphFixture.input,textured:true,uploadBytes:64,imageBytes:morphFixture.imageBytes},
+ {assetId:'skin',kind:'model',file:'skin.glb',mime:'model/gltf-binary',bytes:skinFixture.glb,
+  modelInput:skinFixture.input,textured:true,uploadBytes:64,imageBytes:skinFixture.imageBytes},
  {assetId:'ktx2',kind:'model',file:'ktx2.glb',mime:'model/gltf-binary',bytes:ktx2Fixture.glb,
   modelInput:ktx2Fixture.input,ktx2:true,uploadBytes:16,imageBytes:ktx2Fixture.imageBytes},
  {assetId:'basis',kind:'model',file:'basis.glb',mime:'model/gltf-binary',bytes:basisFixture.glb,
@@ -101,6 +103,8 @@ const texturedModel=compile([modelNode('mesh',{},'textured')],modelCanvas);
 const texturedRustFacts=JSON.parse(execFileSync(factsExecutable,[path.join(output,'textured.glb'),compilerInputs.get(texturedModel)[0],'assets/textured.glb','textured'],{cwd:root,encoding:'utf8'}));
 const morphModel=compile([modelNode('mesh',{animationClip:'warp'},'morph')],modelCanvas);
 const morphRustFacts=JSON.parse(execFileSync(factsExecutable,[path.join(output,'morph.glb'),compilerInputs.get(morphModel)[0],'assets/morph.glb','textured'],{cwd:root,encoding:'utf8'}));
+const skinModel=compile([modelNode('mesh',{animationClip:'swing'},'skin')],modelCanvas);
+const skinRustFacts=JSON.parse(execFileSync(factsExecutable,[path.join(output,'skin.glb'),compilerInputs.get(skinModel)[0],'assets/skin.glb','textured'],{cwd:root,encoding:'utf8'}));
 const ktx2Model=compile([modelNode('mesh',{},'ktx2')],modelCanvas);
 const ktx2RustFacts=JSON.parse(execFileSync(factsExecutable,[path.join(output,'ktx2.glb'),compilerInputs.get(ktx2Model)[0],'assets/ktx2.glb','ktx2'],{cwd:root,encoding:'utf8'}));
 const basisModel=compile([modelNode('mesh',{},'basis')],modelCanvas);
@@ -233,9 +237,12 @@ const results=[];
     decodeOptions:{profile:a.ktx2?'static-ktx2-texture-v1':a.textured?'static-pbr-texture-v1':'static-core-pbr-v1'},
     modelFacts:a.assetId==='basis'?basisRustFacts:a.assetId==='basis-uastc'?basisUastcRustFacts
      :a.assetId==='multi'?multiRustFacts:a.assetId==='multi-mask'?multiMaskRustFacts
-     :a.ktx2?ktx2RustFacts:a.assetId==='morph'?morphRustFacts:a.textured?texturedRustFacts
+     :a.ktx2?ktx2RustFacts:a.assetId==='morph'?morphRustFacts:a.assetId==='skin'?skinRustFacts
+     :a.textured?texturedRustFacts
      :a.assetId==='animated'?animatedRustFacts:a.assetId==='two-clip'?twoClipRustFacts:coreRustFacts,
-    ...(a.textured?{textureUploadBytes:a.uploadBytes+(a.assetId==='morph'?morphRustFacts.resources.morphTextureBytes:0),textureUrls:{}}
+    ...(a.textured?{textureUploadBytes:a.uploadBytes
+       +(a.assetId==='morph'?morphRustFacts.resources.morphTextureBytes:0)
+       +(a.assetId==='skin'?skinRustFacts.resources.skinTextureBytes:0),textureUrls:{}}
      :a.ktx2?{textureUploadBytes:a.transcode
        ?(a.assetId==='basis'?basisRustFacts.resources.imageUploadBytes:basisUastcRustFacts.resources.imageUploadBytes)
        :a.uploadBytes,textureUrls:{}}:{})})
@@ -339,6 +346,28 @@ const results=[];
   assert.match(morphFactsRejection.error,/composition-model-preparation-required/);
   assert.deepEqual(morphFactsRejection.after.held,morphFactsRejection.before.held);
   results.push({case:'mismatched morph facts fail closed without quota',morphFactsRejection});
+  await select(skinModel);
+  const skinStart=await page.evaluate(()=>({inside:pixel(40,23),right:pixel(60,23),live:ledger.snapshot().live}));
+  near(skinStart.inside,[255,255,255]);near(skinStart.right,[0,0,0]);
+  await page.evaluate(()=>host.frame({sceneTime:.999,paused:true}));
+  const skinLate=await page.evaluate(()=>({inside:pixel(40,23),right:pixel(60,23)}));
+  near(skinLate.inside,[0,0,0]);near(skinLate.right,[255,255,255]);
+  await page.evaluate(()=>host.frame({sceneTime:1,paused:true}));
+  const skinLoop=await page.evaluate(()=>pixel(40,23));
+  near(skinLoop,[255,255,255]);
+  assert.equal(skinRustFacts.skins[0].joints[0],1);
+  assert.equal(skinRustFacts.resources.skinTextureBytes,256);
+  assert.equal(skinRustFacts.resources.gpuBufferBytes,162);
+  assert.equal(skinRustFacts.resources.programCount,1);
+  assert.equal(skinStart.live.programs,2);
+  assert.equal(skinStart.live.bufferDeclaredBytes,254);
+  assert.equal(skinStart.live.textureDeclaredBytes,64+256);
+  results.push({case:'GLB skinned mesh follows the bone rotation clip and loops',skinStart,skinLate,skinLoop});
+  const skinFactsRejection=await reject(skinModel,p=>{delete p.resolvedAssets.find(asset=>
+   asset.kind==='model'&&asset.assetId==='skin').modelFacts.skins;});
+  assert.match(skinFactsRejection.error,/composition-model-preparation-required/);
+  assert.deepEqual(skinFactsRejection.after.held,skinFactsRejection.before.held);
+  results.push({case:'missing skin facts fail closed without quota',skinFactsRejection});
   await select(texturedModel);
   const texturedPixels=await page.evaluate(()=>({red:pixel(36,23),green:pixel(46,23),live:ledger.snapshot().live,
    models:host.stats().sceneStats.models}));

@@ -684,6 +684,62 @@ if(diagnostic){
     assert.equal((await morphPage.evaluate(()=>HertzGlBudget.stats())).contexts,0);
     await morphPage.close();
   }
+  const skinDir=path.join(output,'model-skin');
+  let skinModel=null;
+  if(fs.existsSync(path.join(skinDir,'projection.json'))){
+    const skinProjection=JSON.parse(fs.readFileSync(path.join(skinDir,'projection.json'),'utf8'));
+    const skinUri=fs.readFileSync(path.join(skinDir,'uri.txt'),'utf8');
+    const skinInit=bindCadence(fs.readFileSync(path.join(skinDir,'native-init.js'),'utf8'));
+    const skinFiles=JSON.parse(fs.readFileSync(path.join(skinDir,'files.json'),'utf8'));
+    const skinPage=await browser.newPage({viewport:{width:64,height:64}}),skinErrors=[];
+    skinPage.on('pageerror',error=>skinErrors.push(error.message));
+    skinPage.on('console',message=>{if(message.type()==='error'){skinErrors.push(message.text());console.error('browser:',message.text());}});
+    await skinPage.addInitScript(skinInit+'\nwindow.nativeEvents=[];window.ipc={postMessage:message=>nativeEvents.push(message)};');
+    await skinPage.route('https://**.wallpaper.invalid/**',route=>{
+      if(route.request().url()===skinUri)return route.fulfill({status:200,contentType:'application/json',body:JSON.stringify(skinProjection)});
+      const asset=skinFiles.find(entry=>entry.url===route.request().url());
+      if(asset)return route.fulfill({status:200,contentType:'model/gltf-binary',body:fs.readFileSync(path.join(skinDir,asset.file))});
+      return route.fulfill({status:404,body:''});
+    });
+    await skinPage.route('http://hertz.localhost/',route=>route.fulfill({status:200,contentType:'text/html',body:html}));
+    await skinPage.goto('http://hertz.localhost/');
+    assert.equal(await skinPage.evaluate(async url=>{hertzWallpaper.applyConfig({source:'fixed',audioInput:{kind:'none'},motion:1,quality:'low'});
+      const prepared=hertzWallpaper.applyComposition(url);hertzWallpaper.start(15);return await prepared;},skinUri),true);
+    await skinPage.waitForFunction(()=>nativeEvents.some(event=>event.includes('firstFrame')),null,{timeout:10000}).catch(async failure=>{
+      throw new Error(failure.message+'\n'+JSON.stringify(await skinPage.evaluate(()=>({events:nativeEvents,stats:hertzWallpaper.debug(),budget:HertzGlBudget.stats()}))));
+    });
+    await skinPage.waitForFunction(()=>hertzWallpaper.debug().draws>=2,null,{timeout:10000});
+    const skinSample=()=>skinPage.evaluate(()=>{
+      const gl=document.querySelector('#host canvas').getContext('webgl2');
+      const sample=(x,y)=>{const pixel=new Uint8Array(4);gl.readPixels(x,y,1,1,gl.RGBA,gl.UNSIGNED_BYTE,pixel);return [...pixel];};
+      return {inside:sample(40,40),far:sample(62,40),sceneTime:hertzWallpaper.debug().sceneTime,budget:HertzGlBudget.stats()};
+    });
+    const skinVisible = value => Math.max(...value.slice(0, 3)) > 200;
+    const skinEarly=await skinSample();
+    assert(skinVisible(skinEarly.inside),'skinned mesh starts at the authored base position: '+JSON.stringify(skinEarly));
+    assert(Math.max(...skinEarly.far.slice(0,3))<=8,'skinned mesh starts left of the far sample: '+JSON.stringify(skinEarly));
+    await skinPage.waitForFunction(()=>hertzWallpaper.debug().sceneTime>=900,null,{timeout:10000});
+    const skinLate=await skinSample();
+    assert(Math.max(...skinLate.inside.slice(0,3))<=8,'bone translation moves the skinned mesh off the base sample: '+JSON.stringify(skinLate));
+    assert(skinVisible(skinLate.far),'bone translation moves the skinned mesh onto the far sample: '+JSON.stringify(skinLate));
+    assert.equal(skinLate.budget.contexts,1);assert.equal(skinLate.budget.error,null);assert.deepEqual(skinErrors,[]);
+    assert.equal(skinProjection.resolvedAssets[0].modelFacts.skins[0].joints[0],1);
+    assert.equal(skinProjection.resolvedAssets[0].modelFacts.resources.skinTextureBytes,256);
+    assert.equal(skinProjection.resolvedAssets[0].modelFacts.resources.gpuBufferBytes,162);
+    assert.equal(skinProjection.pageLimits.bufferDeclaredBytes,254);
+    assert.equal(skinProjection.pageLimits.textureDeclaredBytes,32+256+4096);
+    assert.equal(skinProjection.pageLimits.programs,3);
+    skinModel={early:skinEarly,late:skinLate,
+      facts:{joints:skinProjection.resolvedAssets[0].modelFacts.skins[0].joints.length,
+        skinTextureBytes:skinProjection.resolvedAssets[0].modelFacts.resources.skinTextureBytes,
+        gpuBufferBytes:skinProjection.resolvedAssets[0].modelFacts.resources.gpuBufferBytes,
+        pagePrograms:skinProjection.pageLimits.programs}};
+    await skinPage.evaluate(()=>hertzWallpaper.reveal());
+    await skinPage.screenshot({path:path.join(skinDir,'native-page-model-skin.png')});
+    await skinPage.evaluate(()=>hertzWallpaper.unmount());await skinPage.waitForTimeout(50);
+    assert.equal((await skinPage.evaluate(()=>HertzGlBudget.stats())).contexts,0);
+    await skinPage.close();
+  }
   const opacityDir=path.join(output,'model-opacity');
   let opacityModel=null;
   if(fs.existsSync(path.join(opacityDir,'projection.json'))){
@@ -728,7 +784,7 @@ if(diagnostic){
     assert.equal((await opacityPage.evaluate(()=>HertzGlBudget.stats())).contexts,0);
     await opacityPage.close();
   }
-  fs.writeFileSync(path.join(output,'native-page-evidence.json'),JSON.stringify({source:'actual Rust production selector + GlAdmission + original native page',qualification:'browser integration; copied scheduler metadata matches measured headless rAF; native resource caps unchanged; controlled visibility event/state; Windows/GPU qualification pending',cadence:{intervals:cadence,refreshHz,running:runningCadence},state,blockedBefore,blockedAfter,hiddenBefore,hiddenAfter,visibilityResumed,fits,glow,tracks,mask,model,texturedModel,externalTexture,ktx2Model,basisModel,multiModel,animatedModel,morphModel,opacityModel,paused,retired,errors},null,2));
-  console.log('PASS native composition page: real Rust projection, one context, complete frame, pause and retirement'+(glow?', glow surfaces admitted':'')+(tracks?', tracks/bindings applied':'')+(mask?', mask texture applied':'')+(model?', scene3d model rendered':'')+(texturedModel?', textured model pixels':'')+(externalTexture?', external texture route':'')+(ktx2Model?', KTX2 model pixels':'')+(basisModel?', Basis KTX2 model pixels':'')+(multiModel?', multi-material shared program':'')+(animatedModel?', animated clip pixels':'')+(morphModel?', morph weights pixels':'')+(opacityModel?', model opacity pixels':''));
+  fs.writeFileSync(path.join(output,'native-page-evidence.json'),JSON.stringify({source:'actual Rust production selector + GlAdmission + original native page',qualification:'browser integration; copied scheduler metadata matches measured headless rAF; native resource caps unchanged; controlled visibility event/state; Windows/GPU qualification pending',cadence:{intervals:cadence,refreshHz,running:runningCadence},state,blockedBefore,blockedAfter,hiddenBefore,hiddenAfter,visibilityResumed,fits,glow,tracks,mask,model,texturedModel,externalTexture,ktx2Model,basisModel,multiModel,animatedModel,morphModel,skinModel,opacityModel,paused,retired,errors},null,2));
+  console.log('PASS native composition page: real Rust projection, one context, complete frame, pause and retirement'+(glow?', glow surfaces admitted':'')+(tracks?', tracks/bindings applied':'')+(mask?', mask texture applied':'')+(model?', scene3d model rendered':'')+(texturedModel?', textured model pixels':'')+(externalTexture?', external texture route':'')+(ktx2Model?', KTX2 model pixels':'')+(basisModel?', Basis KTX2 model pixels':'')+(multiModel?', multi-material shared program':'')+(animatedModel?', animated clip pixels':'')+(morphModel?', morph weights pixels':'')+(skinModel?', skinned bone pixels':'')+(opacityModel?', model opacity pixels':''));
  }finally{await browser.close();}
 })().catch(error=>{console.error(error.stack);process.exitCode=1;});
