@@ -1686,10 +1686,11 @@ impl PreparedComposition {
                 animation_cpu,
                 material_clone_bytes,
             ])?;
-            cost.programs = checked_sum(&[
-                cost.programs,
-                std::cmp::max(1, resources["materialCount"].as_u64().unwrap_or(1)),
-            ])?;
+            let program_count = resources["programCount"]
+                .as_u64()
+                .or_else(|| resources["materialCount"].as_u64())
+                .unwrap_or(1);
+            cost.programs = checked_sum(&[cost.programs, std::cmp::max(1, program_count)])?;
             if model.texture_upload_bytes() > 0 {
                 cost.texture_bytes =
                     checked_sum(&[cost.texture_bytes, model.texture_upload_bytes()])?;

@@ -551,6 +551,36 @@ fn material_facts(index: usize, material: &ModelMaterial) -> Value {
     })
 }
 
+/// Three's program cache key for this qualified profile reduces to the texture
+/// channel of each present slot, whether alpha test is active, and sidedness:
+/// base factors, opacity and blending are uniforms/state, not shader variants.
+fn material_program_key(facts: &Value) -> String {
+    let channel = |slot: &str| {
+        facts[slot]
+            .get("texCoord")
+            .and_then(Value::as_u64)
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".to_owned())
+    };
+    let alpha_test = facts["alphaMode"] == "MASK"
+        && facts["alphaCutoff"]
+            .as_f64()
+            .is_some_and(|cutoff| cutoff > 0.0);
+    // Three keys `opaque` (transparent false + normal blending) into the cache.
+    let opaque = facts["alphaMode"] != "BLEND";
+    [
+        channel("baseColorTexture"),
+        channel("metallicRoughnessTexture"),
+        channel("normalTexture"),
+        channel("occlusionTexture"),
+        channel("emissiveTexture"),
+        alpha_test.to_string(),
+        opaque.to_string(),
+        facts["doubleSided"].to_string(),
+    ]
+    .join(":")
+}
+
 fn image_facts(
     index: usize,
     image: &ModelImage,
@@ -1325,6 +1355,11 @@ fn textured_profile_facts(
         .iter()
         .map(|&index| material_facts(index, &structure.materials[index]))
         .collect();
+    let program_count = material_facts_used
+        .iter()
+        .map(material_program_key)
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
     let gpu_buffer_bytes = checked_sum(
         accessor_facts
             .iter()
@@ -1392,6 +1427,7 @@ fn textured_profile_facts(
             "cpuBackingBytes": cpu_backing_bytes,
             "materialCount": used_materials.len(),
             "allocatedMaterialCount": used_materials.len() * 2,
+            "programCount": program_count,
             "textureCount": used_textures.len(),
             "imageCount": used_images.len()
         }

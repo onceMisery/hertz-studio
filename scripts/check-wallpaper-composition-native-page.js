@@ -522,6 +522,58 @@ if(diagnostic){
     assert.equal((await basisPage.evaluate(()=>HertzGlBudget.stats())).contexts,0);
     await basisPage.close();
   }
+  const multiDir=path.join(output,'model-multimaterial');
+  let multiModel=null;
+  if(fs.existsSync(path.join(multiDir,'projection.json'))){
+    const multiProjection=JSON.parse(fs.readFileSync(path.join(multiDir,'projection.json'),'utf8'));
+    const multiUri=fs.readFileSync(path.join(multiDir,'uri.txt'),'utf8');
+    const multiInit=bindCadence(fs.readFileSync(path.join(multiDir,'native-init.js'),'utf8'));
+    const multiFiles=JSON.parse(fs.readFileSync(path.join(multiDir,'files.json'),'utf8'));
+    const multiPage=await browser.newPage({viewport:{width:64,height:64}}),multiErrors=[];
+    multiPage.on('pageerror',error=>multiErrors.push(error.message));
+    multiPage.on('console',message=>{if(message.type()==='error'){multiErrors.push(message.text());console.error('browser:',message.text());}});
+    await multiPage.addInitScript(multiInit+'\nwindow.nativeEvents=[];window.ipc={postMessage:message=>nativeEvents.push(message)};');
+    await multiPage.route('https://**.wallpaper.invalid/**',route=>{
+      if(route.request().url()===multiUri)return route.fulfill({status:200,contentType:'application/json',body:JSON.stringify(multiProjection)});
+      const asset=multiFiles.find(entry=>entry.url===route.request().url());
+      if(asset)return route.fulfill({status:200,contentType:'model/gltf-binary',body:fs.readFileSync(path.join(multiDir,asset.file))});
+      return route.fulfill({status:404,body:''});
+    });
+    await multiPage.route('http://hertz.localhost/',route=>route.fulfill({status:200,contentType:'text/html',body:html}));
+    await multiPage.goto('http://hertz.localhost/');
+    assert.equal(await multiPage.evaluate(async url=>{hertzWallpaper.applyConfig({source:'fixed',audioInput:{kind:'none'},motion:1,quality:'low'});
+      const prepared=hertzWallpaper.applyComposition(url);hertzWallpaper.start(15);return await prepared;},multiUri),true);
+    await multiPage.waitForFunction(()=>nativeEvents.some(event=>event.includes('firstFrame')),null,{timeout:10000}).catch(async failure=>{
+      throw new Error(failure.message+'\n'+JSON.stringify(await multiPage.evaluate(()=>({events:nativeEvents,stats:hertzWallpaper.debug(),budget:HertzGlBudget.stats()}))));
+    });
+    await multiPage.waitForFunction(()=>hertzWallpaper.debug().draws>=2,null,{timeout:10000});
+    const multi=await multiPage.evaluate(()=>{
+      const gl=document.querySelector('#host canvas').getContext('webgl2');
+      const sample=(x,y)=>{const pixel=new Uint8Array(4);gl.readPixels(x,y,1,1,gl.RGBA,gl.UNSIGNED_BYTE,pixel);return [...pixel];};
+      return {left:sample(20,40),right:sample(51,40),outside:sample(8,8),budget:HertzGlBudget.stats(),
+        stats:hertzWallpaper.debug().stats};
+    });
+    assert(multi.left[0]>200&&multi.left[1]<20&&multi.left[2]<20,'first material keeps its red factor');
+    assert(multi.right[1]>200&&multi.right[0]<20&&multi.right[2]<20,'second material keeps its green factor');
+    assert(Math.max(...multi.outside.slice(0,3))<=8,'multi-material model leaves the background black');
+    assert.equal(multi.budget.contexts,1);assert.equal(multi.budget.error,null);assert.deepEqual(multiErrors,[]);
+    assert.equal(multiProjection.resolvedAssets[0].modelFacts.resources.materialCount,2);
+    assert.equal(multiProjection.resolvedAssets[0].modelFacts.resources.programCount,1);
+    assert.equal(multiProjection.pageLimits.programs,3);
+    assert.equal(multiProjection.pageLimits.bufferDeclaredBytes,194);
+    assert.equal(multiProjection.pageLimits.textureDeclaredBytes,32+4096);
+    assert.equal(multi.stats.programs,2,'shared variant compiles one model program beside the output program');
+    multiModel={pixels:{left:multi.left,right:multi.right,outside:multi.outside},budget:multi.budget,
+      programs:multi.stats.programs,
+      facts:{materials:multiProjection.resolvedAssets[0].modelFacts.resources.materialCount,
+        programs:multiProjection.resolvedAssets[0].modelFacts.resources.programCount,
+        pagePrograms:multiProjection.pageLimits.programs}};
+    await multiPage.evaluate(()=>hertzWallpaper.reveal());
+    await multiPage.screenshot({path:path.join(multiDir,'native-page-model-multimaterial.png')});
+    await multiPage.evaluate(()=>hertzWallpaper.unmount());await multiPage.waitForTimeout(50);
+    assert.equal((await multiPage.evaluate(()=>HertzGlBudget.stats())).contexts,0);
+    await multiPage.close();
+  }
   const animatedDir=path.join(output,'model-animated');
   let animatedModel=null;
   if(fs.existsSync(path.join(animatedDir,'projection.json'))){
@@ -617,7 +669,7 @@ if(diagnostic){
     assert.equal((await opacityPage.evaluate(()=>HertzGlBudget.stats())).contexts,0);
     await opacityPage.close();
   }
-  fs.writeFileSync(path.join(output,'native-page-evidence.json'),JSON.stringify({source:'actual Rust production selector + GlAdmission + original native page',qualification:'browser integration; copied scheduler metadata matches measured headless rAF; native resource caps unchanged; controlled visibility event/state; Windows/GPU qualification pending',cadence:{intervals:cadence,refreshHz,running:runningCadence},state,blockedBefore,blockedAfter,hiddenBefore,hiddenAfter,visibilityResumed,fits,glow,tracks,mask,model,texturedModel,externalTexture,ktx2Model,basisModel,animatedModel,opacityModel,paused,retired,errors},null,2));
-  console.log('PASS native composition page: real Rust projection, one context, complete frame, pause and retirement'+(glow?', glow surfaces admitted':'')+(tracks?', tracks/bindings applied':'')+(mask?', mask texture applied':'')+(model?', scene3d model rendered':'')+(texturedModel?', textured model pixels':'')+(externalTexture?', external texture route':'')+(ktx2Model?', KTX2 model pixels':'')+(basisModel?', Basis KTX2 model pixels':'')+(animatedModel?', animated clip pixels':'')+(opacityModel?', model opacity pixels':''));
+  fs.writeFileSync(path.join(output,'native-page-evidence.json'),JSON.stringify({source:'actual Rust production selector + GlAdmission + original native page',qualification:'browser integration; copied scheduler metadata matches measured headless rAF; native resource caps unchanged; controlled visibility event/state; Windows/GPU qualification pending',cadence:{intervals:cadence,refreshHz,running:runningCadence},state,blockedBefore,blockedAfter,hiddenBefore,hiddenAfter,visibilityResumed,fits,glow,tracks,mask,model,texturedModel,externalTexture,ktx2Model,basisModel,multiModel,animatedModel,opacityModel,paused,retired,errors},null,2));
+  console.log('PASS native composition page: real Rust projection, one context, complete frame, pause and retirement'+(glow?', glow surfaces admitted':'')+(tracks?', tracks/bindings applied':'')+(mask?', mask texture applied':'')+(model?', scene3d model rendered':'')+(texturedModel?', textured model pixels':'')+(externalTexture?', external texture route':'')+(ktx2Model?', KTX2 model pixels':'')+(basisModel?', Basis KTX2 model pixels':'')+(multiModel?', multi-material shared program':'')+(animatedModel?', animated clip pixels':'')+(opacityModel?', model opacity pixels':''));
  }finally{await browser.close();}
 })().catch(error=>{console.error(error.stack);process.exitCode=1;});

@@ -157,6 +157,77 @@ fn textured_model_glb(external: bool) -> Vec<u8> {
     bytes[head + 8..head + 8 + bin.len()].copy_from_slice(&bin);
     bytes
 }
+fn glb_bytes(document: Value, bin: Vec<u8>) -> Vec<u8> {
+    let text = serde_json::to_vec(&document).unwrap();
+    let json_len = text.len().div_ceil(4) * 4;
+    let bin_len = bin.len().div_ceil(4) * 4;
+    let total = 12 + 8 + json_len + 8 + bin_len;
+    let mut bytes = vec![0_u8; total];
+    bytes[0..4].copy_from_slice(b"glTF");
+    bytes[4..8].copy_from_slice(&2_u32.to_le_bytes());
+    bytes[8..12].copy_from_slice(&(total as u32).to_le_bytes());
+    bytes[12..16].copy_from_slice(&(json_len as u32).to_le_bytes());
+    bytes[16..20].copy_from_slice(b"JSON");
+    bytes[20..20 + text.len()].copy_from_slice(&text);
+    bytes[20 + text.len()..20 + json_len].fill(0x20);
+    let head = 20 + json_len;
+    bytes[head..head + 4].copy_from_slice(&(bin_len as u32).to_le_bytes());
+    bytes[head + 4..head + 8].copy_from_slice(b"BIN\0");
+    bytes[head + 8..head + 8 + bin.len()].copy_from_slice(&bin);
+    bytes
+}
+fn multi_material_glb(masked: bool) -> Vec<u8> {
+    let mut bin = vec![0_u8; 104 + TEXTURED_PNG.len()];
+    for (index, value) in [0.0_f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+        .iter()
+        .enumerate()
+    {
+        bin[index * 4..index * 4 + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    for (index, value) in [0.0_f32, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0]
+        .iter()
+        .enumerate()
+    {
+        bin[36 + index * 4..36 + index * 4 + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    for (index, value) in [0.0_f32, 0.0, 1.0, 0.0, 0.0, 1.0].iter().enumerate() {
+        bin[72 + index * 4..72 + index * 4 + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    for (index, value) in [0_u16, 1, 2].iter().enumerate() {
+        bin[96 + index * 2..96 + index * 2 + 2].copy_from_slice(&value.to_le_bytes());
+    }
+    bin[104..].copy_from_slice(TEXTURED_PNG);
+    let material = |factor: [f32; 4], alpha_mode: &str| {
+        json!({"pbrMetallicRoughness":{"baseColorFactor":factor,
+            "baseColorTexture":{"index":0,"texCoord":0},"metallicFactor":0,"roughnessFactor":1},
+            "alphaMode":alpha_mode,"alphaCutoff":0.5})
+    };
+    let primitive = |material: u32| json!({"attributes":{"POSITION":0,"NORMAL":1,"TEXCOORD_0":3},"indices":2,"material":material});
+    let document = json!({
+        "asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0,1]}],
+        "nodes":[{"mesh":0,"name":"left","translation":[-0.6,0,0]},
+            {"mesh":1,"name":"right","translation":[0.2,0,0]}],
+        "meshes":[{"primitives":[primitive(0)]},{"primitives":[primitive(1)]}],
+        "buffers":[{"byteLength":bin.len()}],
+        "bufferViews":[
+            {"buffer":0,"byteOffset":0,"byteLength":36},
+            {"buffer":0,"byteOffset":36,"byteLength":36},
+            {"buffer":0,"byteOffset":72,"byteLength":24},
+            {"buffer":0,"byteOffset":96,"byteLength":8},
+            {"buffer":0,"byteOffset":104,"byteLength":TEXTURED_PNG.len()}],
+        "accessors":[
+            {"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[1,1,0]},
+            {"bufferView":1,"componentType":5126,"count":3,"type":"VEC3"},
+            {"bufferView":3,"componentType":5123,"count":3,"type":"SCALAR"},
+            {"bufferView":2,"componentType":5126,"count":3,"type":"VEC2"}],
+        "images":[{"bufferView":4,"mimeType":"image/png"}],
+        "samplers":[{"magFilter":9728,"minFilter":9728,"wrapS":33071,"wrapT":33071}],
+        "textures":[{"source":0,"sampler":0}],
+        "materials":[material([1.0,0.0,0.0,1.0], "OPAQUE"),
+            material([0.0,1.0,0.0,1.0], if masked { "MASK" } else { "OPAQUE" })]
+    });
+    glb_bytes(document, bin)
+}
 fn ktx2_rgba8() -> Vec<u8> {
     const EDGE: usize = 2;
     const LEVEL_BYTES: usize = EDGE * EDGE * 4;
@@ -1444,6 +1515,100 @@ async fn native_model_textured_fixture_projects_texture_facts_and_uploads() {
             ),
         )
         .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn native_model_multi_material_program_count_is_exact() {
+    for masked in [false, true] {
+        let root = tempfileish::temp_dir(if masked {
+            "composition-native-model-programs-mask"
+        } else {
+            "composition-native-model-programs"
+        });
+        let glb = multi_material_glb(masked);
+        let entries = vec![
+            (
+                "composition.json",
+                serde_json::to_vec(&document_model(json!([model_node("mesh", json!({}))])))
+                    .unwrap(),
+                "application/json",
+            ),
+            ("assets/model.glb", glb.clone(), "model/gltf-binary"),
+        ];
+        let assets =
+            json!([{"id":"model","kind":"model","source":"assets/model.glb","variants":[]}]);
+        let (jobs, hash, _) = install_document(root.path(), entries, assets, json!([])).await;
+        let plan = selected(jobs, hash, Default::default()).await.unwrap();
+        let model = plan.assets["model"].as_model().unwrap();
+        assert_eq!(model.facts()["resources"]["materialCount"], 2);
+        assert_eq!(
+            model.facts()["resources"]["programCount"],
+            if masked { 2 } else { 1 }
+        );
+        assert_eq!(model.texture_upload_bytes(), 32);
+        let gl = plan
+            .gl_plan(OwnerKind::Preview, "model-programs-owner".into(), 1, 60, 15)
+            .unwrap();
+        let projection = plan
+            .projection(
+                &format!("same-fixed-session-model-programs-{masked}"),
+                1,
+                131,
+                &gl.limits,
+            )
+            .unwrap();
+        let asset = projection["resolvedAssets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|asset| asset["kind"] == "model")
+            .unwrap();
+        assert_eq!(
+            asset["modelFacts"]["resources"]["programCount"],
+            if masked { 2 } else { 1 }
+        );
+        assert_eq!(asset["textureUploadBytes"], 32);
+        let page = &projection["pageLimits"];
+        assert_eq!(page["programs"], if masked { 4 } else { 3 });
+        assert_eq!(page["bufferDeclaredBytes"], 194);
+        assert_eq!(page["textureDeclaredBytes"], 32 + 4096);
+        if !masked {
+            if let Some(output) = std::env::var_os("HERTZ_COMPOSITION_NATIVE_FIXTURE") {
+                let output = std::path::PathBuf::from(output).join("model-multimaterial");
+                std::fs::create_dir_all(&output).unwrap();
+                std::fs::write(output.join("model.glb"), &glb).unwrap();
+                let model_url = model.url().to_owned();
+                let package_hash = model.reference().package_hash.clone();
+                std::fs::write(
+                    output.join("files.json"),
+                    serde_json::to_vec(&json!([{"url":model_url,"file":"model.glb"}])).unwrap(),
+                )
+                .unwrap();
+                let binding = super::super::page_events::PageBinding::new(1).unwrap();
+                let access = super::super::access::MediaAccess::new();
+                let mut admission =
+                    super::super::gl_plan::GlAdmission::new(gl, Arc::new(BudgetCoordinator::new()))
+                        .unwrap();
+                admission
+                    .bind_composition(plan, &access, binding.session_id())
+                    .unwrap();
+                let uri = admission.composition_url().unwrap();
+                let path = uri.split("/files/").nth(1).unwrap();
+                let reader = access.permit(&package_hash, path).unwrap();
+                std::fs::write(output.join("projection.json"), reader.payload().unwrap()).unwrap();
+                std::fs::write(output.join("uri.txt"), uri).unwrap();
+                std::fs::write(
+                    output.join("native-init.js"),
+                    format!(
+                        "{}\n{}",
+                        binding.initialization_script(),
+                        admission.initialization_script()
+                    ),
+                )
+                .unwrap();
+            }
+        }
     }
 }
 

@@ -38,7 +38,7 @@ function coreGlb() {
   return { glb, input: { encodedBytes, jsonBytes, binBytes } };
 }
 
-module.exports = { coreGlb, animatedGlb, texturedGlb, ktx2Glb, basisGlb, basisUastcGlb, texturedModelFacts };
+module.exports = { coreGlb, animatedGlb, texturedGlb, ktx2Glb, basisGlb, basisUastcGlb, multiMaterialGlb, texturedModelFacts };
 
 function crc32(bytes) {
   let value = -1;
@@ -184,6 +184,68 @@ function basisGlb() {
 
 function basisUastcGlb() {
   return ktx2TexturedGlb(uastcRed());
+}
+
+function whitePng() {
+  const width = 2, height = 2, header = Buffer.alloc(13), row = width * 4 + 1;
+  header.writeUInt32BE(width); header.writeUInt32BE(height, 4); header[8] = 8; header[9] = 6;
+  const raw = Buffer.alloc(row * height);
+  for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
+    const at = y * row + 1 + x * 4;
+    raw[at] = 255; raw[at + 1] = 255; raw[at + 2] = 255; raw[at + 3] = 255;
+  }
+  return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    pngChunk('IHDR', header), pngChunk('IDAT', zlib.deflateSync(raw)), pngChunk('IEND', Buffer.alloc(0))]);
+}
+
+// Two nodes with distinct materials over one shared white texture. Both
+// materials are OPAQUE by default (one program variant); `masked` makes the
+// second MASK so active alpha test adds a second variant.
+function multiMaterialGlb(masked = false) {
+  const image = whitePng(), binary = Buffer.alloc(104 + image.length);
+  positions.forEach((value, index) => binary.writeFloatLE(value, index * 4));
+  normals.forEach((value, index) => binary.writeFloatLE(value, 36 + index * 4));
+  [0, 0, 1, 0, 0, 1].forEach((value, index) => binary.writeFloatLE(value, 72 + index * 4));
+  binary.writeUInt16LE(0, 96); binary.writeUInt16LE(1, 98); binary.writeUInt16LE(2, 100);
+  image.copy(binary, 104);
+  const primitive = material => ({ attributes: { POSITION: 0, NORMAL: 1, TEXCOORD_0: 3 }, indices: 2, material });
+  const material = (factor, alphaMode) => ({
+    pbrMetallicRoughness: { baseColorFactor: factor, baseColorTexture: { index: 0, texCoord: 0 },
+      metallicFactor: 0, roughnessFactor: 1 },
+    alphaMode,
+    ...(alphaMode === 'MASK' ? { alphaCutoff: 0.5 } : {})
+  });
+  const json = {
+    asset: { version: '2.0' }, scene: 0, scenes: [{ nodes: [0, 1] }],
+    nodes: [{ mesh: 0, name: 'left', translation: [-0.6, 0, 0] },
+      { mesh: 1, name: 'right', translation: [0.2, 0, 0] }],
+    meshes: [{ primitives: [primitive(0)] }, { primitives: [primitive(1)] }],
+    buffers: [{ byteLength: binary.length }],
+    bufferViews: [
+      { buffer: 0, byteOffset: 0, byteLength: 36 }, { buffer: 0, byteOffset: 36, byteLength: 36 },
+      { buffer: 0, byteOffset: 72, byteLength: 24 }, { buffer: 0, byteOffset: 96, byteLength: 8 },
+      { buffer: 0, byteOffset: 104, byteLength: image.length }
+    ],
+    accessors: [
+      { bufferView: 0, componentType: 5126, count: 3, type: 'VEC3', min: [0, 0, 0], max: [1, 1, 0] },
+      { bufferView: 1, componentType: 5126, count: 3, type: 'VEC3' },
+      { bufferView: 3, componentType: 5123, count: 3, type: 'SCALAR' },
+      { bufferView: 2, componentType: 5126, count: 3, type: 'VEC2' }
+    ],
+    images: [{ bufferView: 4, mimeType: 'image/png' }],
+    samplers: [{ magFilter: 9728, minFilter: 9728, wrapS: 33071, wrapT: 33071 }],
+    textures: [{ source: 0, sampler: 0 }],
+    materials: [material([1, 0, 0, 1], 'OPAQUE'), material([0, 1, 0, 1], masked ? 'MASK' : 'OPAQUE')]
+  };
+  const text = Buffer.from(JSON.stringify(json));
+  const jsonBytes = Math.ceil(text.length / 4) * 4, binBytes = Math.ceil(binary.length / 4) * 4;
+  const encodedBytes = 12 + 8 + jsonBytes + 8 + binBytes, glb = Buffer.alloc(encodedBytes);
+  glb.write('glTF', 0, 'ascii'); glb.writeUInt32LE(2, 4); glb.writeUInt32LE(encodedBytes, 8);
+  glb.writeUInt32LE(jsonBytes, 12); glb.write('JSON', 16, 'ascii');
+  glb.fill(0x20, 20, 20 + jsonBytes); text.copy(glb, 20);
+  glb.writeUInt32LE(binBytes, 20 + jsonBytes); glb.write('BIN\0', 24 + jsonBytes, 'ascii');
+  binary.copy(glb, 28 + jsonBytes);
+  return { glb, input: { encodedBytes, jsonBytes, binBytes }, masked };
 }
 
 function texturedGlb() {

@@ -1420,3 +1420,25 @@ firstFrame、budget.error=null、contexts 1→0）。
 仍未闭合：真实 GPU 压缩格式设备矩阵（当前仅 SwiftShader ETC2）、GLB 蒙皮/
 形变动画、动画混合与多 clip、多材质 program 精确计数、真实 GPU 显存/首帧与
 A01/A05–A10 外部验收。
+
+2026-11-15 r82 多材质 program 精确计数：textured/ktx2 facts 新增
+`resources.programCount`。按已限定的 MeshStandardMaterial 子集复刻 Three
+`getProgramCacheKey` 的实际变体维度：每个存在贴图槽的 UV channel（baseColor/
+metallicRoughness/normal/occlusion/emissive）、是否启用 alphaTest
+（MASK 且 cutoff>0）、`opaque`（非 BLEND）与 doubleSided；baseColorFactor、
+metallic/roughness 因子、opacity、BLEND 与 OPAQUE 的混合状态、MASK cutoff 数值
+都只是 uniform/state，不产生新 program。Rust 与 JS facts 必须生成相同计数，
+`plan.js` 与桌面 `media_costs` 用 programCount 取代 materialCount，缺失/越界
+（<1 或 >materials.length）在预留前 fail-closed。
+
+真实证据：新增双节点/双材质共享一张 2×2 白色贴图 fixture（红/绿 factor）。
+Chrome 组合检查 58 项：共享变体 materialCount=2、programCount=1，实际编译
+program 数（ledger live.programs）为 2（输出 + 单一模型 program）；第二个材质
+改为 MASK 时 programCount=2、实际编译 3；programCount=0 负例零配额拒绝。
+桌面新增 `native_model_multi_material_program_count_is_exact`：共享变体
+pageLimits.programs=3、MASK 变体=4，buffer=194、texture=32+4096，并发射
+`model-multimaterial` fixture；原生页面新阶段渲染红/绿两个三角形，实际
+`stats.programs=2`、pageLimits.programs=3、budget.error=null、contexts 1→0。
+
+仍未闭合：真实 GPU 压缩格式设备矩阵（当前仅 SwiftShader ETC2）、GLB 蒙皮/
+形变动画、动画混合与多 clip、真实 GPU 显存/首帧与 A01/A05–A10 外部验收。

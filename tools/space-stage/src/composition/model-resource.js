@@ -939,12 +939,25 @@ function texturedProfileFacts(json, input, ktx2) {
     .map(i => ({ index: i, byteOffset: views[i].byteOffset ?? 0, byteLength: views[i].byteLength }));
   const cpuViewIndices = [...new Set([...usedViews.map(view => view.index), ...(animation?.viewIndices ?? [])])]
     .sort((a, b) => a - b);
+  const usedMaterialFacts = materials.filter(material => usedMaterials.has(material.index));
+  // Three's program cache key for this profile: per-slot texture channels,
+  // active alpha test and sidedness. Factors/opacity/blending are state.
+  const programKeys = new Set(usedMaterialFacts.map(material => [
+    material.baseColorTexture ? material.baseColorTexture.texCoord : '-',
+    material.metallicRoughnessTexture ? material.metallicRoughnessTexture.texCoord : '-',
+    material.normalTexture ? material.normalTexture.texCoord : '-',
+    material.occlusionTexture ? material.occlusionTexture.texCoord : '-',
+    material.emissiveTexture ? material.emissiveTexture.texCoord : '-',
+    material.alphaMode === 'MASK' && material.alphaCutoff > 0,
+    material.alphaMode !== 'BLEND',
+    material.doubleSided
+  ].join(':')));
   const facts = {
     profile: ktx2 ? STATIC_KTX2_PROFILE : STATIC_TEXTURED_PROFILE, loaderVersion: STATIC_MODEL_LOADER_VERSION, input,
     declared: { nodes: nodes.length, meshes: meshes.length, primitives: primitiveCount, accessors: accessors.length,
       bufferViews: views.length, materials: materials.length, textures: textures.length, images: images.length },
     scene: { index: 0, roots: [...roots], nodes: sceneNodes, maxDepth, objectCount, allocatedObjectCount, drawCalls, triangles },
-    materials: materials.filter(material => usedMaterials.has(material.index)),
+    materials: usedMaterialFacts,
     textures: textures.filter(texture => usedTextures.has(texture.index)),
     images: images.filter(image => usedImages.has(image.index)),
     resources: {
@@ -954,6 +967,7 @@ function texturedProfileFacts(json, input, ktx2) {
       gpuBufferBytes: usedLayouts.reduce((sum, layout) => sum + layout.byteLength, 0),
       cpuBackingBytes: cpuViewIndices.reduce((sum, index) => sum + views[index].byteLength, 0),
       materialCount: usedMaterials.size, allocatedMaterialCount: usedMaterials.size * 2,
+      programCount: programKeys.size,
       textureCount: usedTextures.size, imageCount: usedImages.size
     }
   };

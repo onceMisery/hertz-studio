@@ -4,10 +4,10 @@
 const assert=require('node:assert/strict'), fs=require('node:fs'), path=require('node:path');
 const {execFileSync}=require('node:child_process'), {createHash}=require('node:crypto'), zlib=require('node:zlib');
 const {loadCompositionFontFixture}=require('./composition-font-fixture.js');
-const {coreGlb,animatedGlb,texturedGlb,ktx2Glb,basisGlb,basisUastcGlb}=require('./composition-model-fixture.js');
+const {coreGlb,animatedGlb,texturedGlb,ktx2Glb,basisGlb,basisUastcGlb,multiMaterialGlb}=require('./composition-model-fixture.js');
 const {chromium}=require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const root=path.resolve(__dirname,'..'), output=path.join(root,'output/a04-p2-20261108/composition-browser');
-const fontFixture=loadCompositionFontFixture(), modelFixture=coreGlb(), animatedFixture=animatedGlb(), texturedFixture=texturedGlb(), ktx2Fixture=ktx2Glb(), basisFixture=basisGlb(), basisUastcFixture=basisUastcGlb();
+const fontFixture=loadCompositionFontFixture(), modelFixture=coreGlb(), animatedFixture=animatedGlb(), texturedFixture=texturedGlb(), ktx2Fixture=ktx2Glb(), basisFixture=basisGlb(), basisUastcFixture=basisUastcGlb(), multiFixture=multiMaterialGlb(), multiMaskFixture=multiMaterialGlb(true);
 fs.mkdirSync(output,{recursive:true});
 function hash(bytes){return createHash('sha256').update(bytes).digest('hex');}
 function crc(bytes){let c=0xffffffff;for(const b of bytes){c^=b;for(let i=0;i<8;i++)c=(c>>>1)^((c&1)?0xedb88320:0);}return (c^0xffffffff)>>>0;}
@@ -36,7 +36,11 @@ const sourceAssets=[
  {assetId:'basis',kind:'model',file:'basis.glb',mime:'model/gltf-binary',bytes:basisFixture.glb,
   modelInput:basisFixture.input,ktx2:true,transcode:true,imageBytes:basisFixture.imageBytes},
  {assetId:'basis-uastc',kind:'model',file:'basis-uastc.glb',mime:'model/gltf-binary',bytes:basisUastcFixture.glb,
-  modelInput:basisUastcFixture.input,ktx2:true,transcode:true,imageBytes:basisUastcFixture.imageBytes}
+  modelInput:basisUastcFixture.input,ktx2:true,transcode:true,imageBytes:basisUastcFixture.imageBytes},
+ {assetId:'multi',kind:'model',file:'multi.glb',mime:'model/gltf-binary',bytes:multiFixture.glb,
+  modelInput:multiFixture.input,textured:true,uploadBytes:64},
+ {assetId:'multi-mask',kind:'model',file:'multi-mask.glb',mime:'model/gltf-binary',bytes:multiMaskFixture.glb,
+  modelInput:multiMaskFixture.input,textured:true,uploadBytes:64}
 ];
 for(const a of sourceAssets)fs.writeFileSync(path.join(output,a.file),a.bytes);
 for(const file of fontFixture.packageFiles){fs.mkdirSync(path.dirname(path.join(output,file.file)),{recursive:true});fs.writeFileSync(path.join(output,file.file),file.bytes);}
@@ -94,6 +98,10 @@ const basisModel=compile([modelNode('mesh',{},'basis')],modelCanvas);
 const basisRustFacts=JSON.parse(execFileSync(factsExecutable,[path.join(output,'basis.glb'),compilerInputs.get(basisModel)[0],'assets/basis.glb','ktx2'],{cwd:root,encoding:'utf8'}));
 const basisUastcModel=compile([modelNode('mesh',{},'basis-uastc')],modelCanvas);
 const basisUastcRustFacts=JSON.parse(execFileSync(factsExecutable,[path.join(output,'basis-uastc.glb'),compilerInputs.get(basisUastcModel)[0],'assets/basis-uastc.glb','ktx2'],{cwd:root,encoding:'utf8'}));
+const multiModel=compile([modelNode('mesh',{},'multi')],modelCanvas);
+const multiRustFacts=JSON.parse(execFileSync(factsExecutable,[path.join(output,'multi.glb'),compilerInputs.get(multiModel)[0],'assets/multi.glb','textured'],{cwd:root,encoding:'utf8'}));
+const multiMaskModel=compile([modelNode('mesh',{},'multi-mask')],modelCanvas);
+const multiMaskRustFacts=JSON.parse(execFileSync(factsExecutable,[path.join(output,'multi-mask.glb'),compilerInputs.get(multiMaskModel)[0],'assets/multi-mask.glb','textured'],{cwd:root,encoding:'utf8'}));
 const movedModel=compile([modelNode('mesh',{position:[.5,.5,0]})],modelCanvas);
 const modelOverlay=compile([modelNode(),image('back','blue')],modelCanvas);
 const modelBehind=compile([image('back','blue'),modelNode()],modelCanvas);
@@ -215,6 +223,7 @@ const results=[];
     url:'http://composition.test/'+a.file,adapterId:'three-gltf-loader',adapterVersion:1,
     decodeOptions:{profile:a.ktx2?'static-ktx2-texture-v1':a.textured?'static-pbr-texture-v1':'static-core-pbr-v1'},
     modelFacts:a.assetId==='basis'?basisRustFacts:a.assetId==='basis-uastc'?basisUastcRustFacts
+     :a.assetId==='multi'?multiRustFacts:a.assetId==='multi-mask'?multiMaskRustFacts
      :a.ktx2?ktx2RustFacts:a.textured?texturedRustFacts:a.assetId==='animated'?animatedRustFacts:coreRustFacts,
     ...(a.textured?{textureUploadBytes:a.uploadBytes,textureUrls:{}}
      :a.ktx2?{textureUploadBytes:a.transcode
@@ -348,6 +357,27 @@ const results=[];
   assert.equal(basisUastcPixels.live.textureDeclaredBytes,basisUastcRustFacts.resources.imageUploadBytes);
   assert.equal(basisUastcPixels.models,1);
   results.push({case:'Basis UASTC storage transcodes a solid-color block and renders it',basisUastcPixels});
+  await select(multiModel);
+  const multiPixels=await page.evaluate(()=>({left:pixel(24,23),right:pixel(45,23),outside:pixel(8,8),
+   live:ledger.snapshot().live,models:host.stats().sceneStats.models}));
+  near(multiPixels.left,[255,0,0]);near(multiPixels.right,[0,255,0]);near(multiPixels.outside,[0,0,0]);
+  assert.equal(multiRustFacts.resources.materialCount,2);
+  assert.equal(multiRustFacts.resources.programCount,1);
+  assert.equal(multiPixels.live.programs,2);
+  results.push({case:'two materials sharing one program variant compile one shader',multiPixels});
+  await select(multiMaskModel);
+  const multiMaskPixels=await page.evaluate(()=>({left:pixel(24,23),right:pixel(45,23),outside:pixel(8,8),
+   live:ledger.snapshot().live,models:host.stats().sceneStats.models}));
+  near(multiMaskPixels.left,[255,0,0]);near(multiMaskPixels.right,[0,255,0]);near(multiMaskPixels.outside,[0,0,0]);
+  assert.equal(multiMaskRustFacts.resources.materialCount,2);
+  assert.equal(multiMaskRustFacts.resources.programCount,2);
+  assert.equal(multiMaskPixels.live.programs,3);
+  results.push({case:'alpha-test material adds exactly one shader variant',multiMaskPixels});
+  const multiProgramRejection=await reject(multiModel,p=>{p.resolvedAssets.find(asset=>
+   asset.kind==='model'&&asset.assetId==='multi').modelFacts.resources.programCount=0;});
+  assert.match(multiProgramRejection.error,/composition-model-preparation-required/);
+  assert.deepEqual(multiProgramRejection.after.held,multiProgramRejection.before.held);
+  results.push({case:'missing programCount fails closed without quota',multiProgramRejection});
   await select(modelOverlay);near(await page.evaluate(()=>pixel(40,23)),[0,0,255]);
   results.push({case:'2D painter order composites over the 3D layer'});
   const orderRejection=await reject(modelBehind);assert.match(orderRejection.error,/cross-space-order/);
