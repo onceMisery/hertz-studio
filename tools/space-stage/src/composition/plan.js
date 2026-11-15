@@ -447,7 +447,9 @@ export function compilePlan(projection, registry = null, identity = null) {
     if (node.nodeType !== 'group' && node.nodeType !== 'particles' && node.nodeType !== 'builtinScene' && node.nodeType !== 'model') {
       resources.bufferDeclaredBytes += 92; resources.ownedCpuBytes += 92; primitives.drawCalls++;primitives.triangles+=2;
     }
-    if (node.space === '3d') {
+    // builtinScene 由场景 owner 自己渲染，不消费组合层 opacity；
+    // 与 composition_plan.rs 的 3D opacity 校验保持同一豁免。
+    if (node.space === '3d' && node.nodeType !== 'builtinScene') {
       const opacity = number(node, 'opacity');
       if (!Number.isFinite(opacity) || opacity < 0 || opacity > 1)
         throw new Error('composition-adapter-unavailable:3d-opacity');
