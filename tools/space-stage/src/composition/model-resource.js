@@ -112,7 +112,7 @@ export function compareStaticModelFacts(expected, actual) {
   compare(expected, actual, 'facts'); return true;
 }
 
-function animationFacts(json, accessors, layouts, views, reachable, nodeCount) {
+function animationFacts(json, accessors, layouts, views, reachable, nodeCount, morphCounts) {
   const animations = json.animations ?? [];
   if (!animations.length) return null;
   const names = new Set(), clips = [], accessorFacts = new Map(), viewFacts = new Map();
@@ -129,18 +129,20 @@ function animationFacts(json, accessors, layouts, views, reachable, nodeCount) {
       assert(channel && typeof channel === 'object', 'animation-channel');
       const target = channel.target;
       assert(target && integer(target.node) && target.node < nodeCount && reachable.has(target.node), 'animation-node');
-      assert(['translation', 'rotation', 'scale'].includes(target.path), 'animation-path');
+      assert(['translation', 'rotation', 'scale', 'weights'].includes(target.path), 'animation-path');
       const sampler = index(channel.sampler, samplers, 'animation-sampler');
       const input = index(sampler.input, layouts, 'animation-input');
       const output = index(sampler.output, layouts, 'animation-output');
       assert(input.type === 'SCALAR' && input.componentType === 5126 && input.count >= 1, 'animation-times');
-      const components = target.path === 'rotation' ? 4 : 3;
-      assert(output.type === (components === 4 ? 'VEC4' : 'VEC3')
-        && output.componentType === 5126, 'animation-output');
+      const weights = target.path === 'weights';
+      const components = weights ? morphCounts[target.node] : target.path === 'rotation' ? 4 : 3;
+      assert(!weights || components > 0, 'animation-weights-mesh');
+      const shape = weights ? 'SCALAR' : components === 4 ? 'VEC4' : 'VEC3';
+      assert(output.type === shape && output.componentType === 5126, 'animation-output');
       const interpolation = sampler.interpolation ?? 'LINEAR';
       assert(['STEP', 'LINEAR', 'CUBICSPLINE'].includes(interpolation), 'animation-interpolation');
       const multiplier = interpolation === 'CUBICSPLINE' ? 3 : 1;
-      assert(output.count === input.count * multiplier, 'animation-output-count');
+      assert(output.count === input.count * multiplier * (weights ? components : 1), 'animation-output-count');
       const inputDef = accessors[input.index];
       assert(Array.isArray(inputDef.max) && Number.isFinite(inputDef.max[0]), 'animation-bounds');
       duration = Math.max(duration, Math.fround(inputDef.max[0]));
@@ -373,8 +375,9 @@ async function verifyAnimations(result, parser, facts) {
         parser.getDependency('accessor', channel.outputAccessor),
         parser.getDependency('node', channel.node)
       ]);
+      const values = channel.path === 'weights' ? channel.values : channel.values * channel.components;
       if (track.times !== input.array || track.values !== output.array
-        || track.times.length !== channel.times || track.values.length !== channel.values * channel.components
+        || track.times.length !== channel.times || track.values.length !== values
         || track.getInterpolation() !== ANIMATION_INTERPOLATION[channel.interpolation]) throw mismatch('animation-track');
       if (!node || typeof node.name !== 'string' || !node.name) throw mismatch('animation-node-name');
       if (nodeNames.has(node.name) && nodeNames.get(node.name) !== node) throw mismatch('animation-node-name');
@@ -383,7 +386,7 @@ async function verifyAnimations(result, parser, facts) {
       let inScene = false;
       for (let parent = node; parent; parent = parent.parent) if (parent === result.scene) { inScene = true; break; }
       if (!inScene) throw mismatch('animation-node-unreachable');
-      const property = { translation: 'position', rotation: 'quaternion', scale: 'scale' }[channel.path];
+      const property = { translation: 'position', rotation: 'quaternion', scale: 'scale', weights: 'morphTargetInfluences' }[channel.path];
       if (track.name !== node.name + '.' + property) throw mismatch('animation-binding');
     }
     clips.push(clip);
@@ -618,15 +621,15 @@ function rejectTexturedDelegates(json, ktx2 = false) {
   }
   for (const buffer of json.buffers ?? []) assert(buffer && !own(buffer, 'uri'), 'buffer-uri-unsupported');
   for (const node of json.nodes ?? []) {
-    assert(node && !own(node, 'skin') && !own(node, 'weights') && !own(node, 'camera')
+    assert(node && !own(node, 'skin') && !own(node, 'camera')
       && !own(node, 'isBone') && !own(node, 'isSkinnedMesh'), 'static-node-required');
     assert(!extrasExposeLoaderPivot(node.extras), 'loader-pivot-unsupported');
   }
   for (const mesh of json.meshes ?? []) {
-    assert(mesh && !own(mesh, 'weights'), 'mesh-weights-unsupported');
+    assert(mesh && typeof mesh === 'object', 'mesh-required');
     assert(!extrasExposeLoaderPivot(mesh.extras), 'loader-pivot-unsupported');
     for (const primitive of mesh.primitives ?? []) {
-      assert(primitive && !own(primitive, 'targets'), 'morph-targets-unsupported');
+      assert(primitive && typeof primitive === 'object', 'primitive-required');
       assert(primitive.mode === undefined || primitive.mode === 4, 'triangle-mode-required');
       for (const key of Object.keys(primitive.attributes ?? {})) {
         assert(['POSITION', 'NORMAL', 'TEXCOORD_0', 'TEXCOORD_1'].includes(key), 'attribute-unsupported');
@@ -819,11 +822,17 @@ function texturedProfileFacts(json, input, ktx2) {
   });
   let primitiveCount = 0, declaredTriangles = 0;
   const primitives = meshes.map((mesh, meshIndex) => {
-    assert(mesh && !own(mesh, 'weights'), 'mesh-weights-unsupported');
+    assert(mesh && typeof mesh === 'object', 'mesh-required');
     const list = array(mesh.primitives, 'primitives-required'); assert(list.length > 0, 'primitives-required');
+    assert(list[0] && typeof list[0] === 'object', 'primitive-required');
+    const morphTargetCount = list[0].targets === undefined ? 0 : array(list[0].targets, 'morph-targets').length;
+    assert(mesh.weights === undefined || (Array.isArray(mesh.weights) && mesh.weights.length > 0
+      && mesh.weights.length === morphTargetCount && mesh.weights.every(Number.isFinite)), 'mesh-weights');
     primitiveCount += list.length; assert(primitiveCount <= MAX_ITEMS, 'primitive-limit');
     return list.map((primitive, primitiveIndex) => {
-      assert(primitive && !own(primitive, 'targets'), 'morph-targets-unsupported');
+      assert(primitive && typeof primitive === 'object', 'primitive-required');
+      const targets = primitive.targets === undefined ? [] : array(primitive.targets, 'morph-targets');
+      assert(targets.length === morphTargetCount, 'morph-target-count');
       const attributes = primitive.attributes;
       assert(attributes && own(attributes, 'POSITION') && own(attributes, 'NORMAL'), 'POSITION-NORMAL-required');
       const position = index(attributes.POSITION, layouts, 'POSITION-accessor'), normal = index(attributes.NORMAL, layouts, 'NORMAL-accessor');
@@ -831,6 +840,29 @@ function texturedProfileFacts(json, input, ktx2) {
       const positionDef = accessors[position.index];
       assert(Array.isArray(positionDef.min) && positionDef.min.length === 3 && positionDef.min.every(Number.isFinite)
         && Array.isArray(positionDef.max) && positionDef.max.length === 3 && positionDef.max.every(Number.isFinite), 'POSITION-declared-bounds-required');
+      const morphTargets = targets.map(target => {
+        assert(target && typeof target === 'object' && Object.keys(target).sort().join(',') === 'NORMAL,POSITION', 'morph-target-semantics');
+        const morphPosition = index(target.POSITION, layouts, 'morph-POSITION');
+        const morphNormal = index(target.NORMAL, layouts, 'morph-NORMAL');
+        assert(morphPosition.type === 'VEC3' && morphNormal.type === 'VEC3'
+          && morphPosition.componentType === 5126 && morphNormal.componentType === 5126
+          && morphPosition.count === position.count && morphNormal.count === position.count, 'morph-target-accessors');
+        return { positionAccessor: morphPosition.index, normalAccessor: morphNormal.index };
+      });
+      let boundingBox = null;
+      if (morphTargets.length) {
+        const displacement = [0, 0, 0];
+        for (const target of targets) {
+          const def = accessors[target.POSITION];
+          if (Array.isArray(def.min) && Array.isArray(def.max)) {
+            for (let axis = 0; axis < 3; axis++) {
+              displacement[axis] = Math.max(displacement[axis], Math.abs(def.min[axis]), Math.abs(def.max[axis]));
+            }
+          }
+        }
+        boundingBox = { min: positionDef.min.map((value, axis) => value - displacement[axis]),
+          max: positionDef.max.map((value, axis) => value + displacement[axis]) };
+      }
       const material = primitive.material === undefined ? null : index(primitive.material, materials, 'primitive-material').index;
       const texCoords = [];
       if (material === null) {
@@ -854,19 +886,29 @@ function texturedProfileFacts(json, input, ktx2) {
       assert(indices === null || indices.type === 'SCALAR', 'unsigned-indices-required');
       const count = indices?.count ?? position.count; assert(count % 3 === 0, 'triangle-count');
       declaredTriangles += count / 3; assert(declaredTriangles <= MAX_TRIANGLES, 'triangle-limit');
-      const key = `${indices?.index ?? 'undefined'}:${Object.keys(attributes).sort().map(k => k + ':' + attributes[k] + ';').join('')}:${primitive.mode ?? 'undefined'}`;
+      // GLTFLoader appends each target attribute map to its primitive cache key.
+      const targetKey = targets.map(target => ':' + Object.keys(target).sort()
+        .map(k => k + ':' + target[k] + ';').join('')).join('');
+      const key = `${indices?.index ?? 'undefined'}:${Object.keys(attributes).sort().map(k => k + ':' + attributes[k] + ';').join('')}:${primitive.mode ?? 'undefined'}${targetKey}`;
       return { meshIndex, primitiveIndex, key, material, positionAccessor: position.index, normalAccessor: normal.index,
         uvAccessors: Object.keys(attributes).filter(key => key.startsWith('TEXCOORD_')).sort()
           .map(key => ({ set: Number(key.slice(9)), accessor: attributes[key] })),
+        morphTargets, ...(boundingBox ? { boundingBoxMin: boundingBox.min, boundingBoxMax: boundingBox.max } : {}),
         indexAccessor: indices?.index ?? null, mode: primitive.mode ?? null, triangles: count / 3,
         positionMin: [...positionDef.min], positionMax: [...positionDef.max] };
     });
   });
+  const meshMorphCounts = primitives.map(list => list.length ? list[0].morphTargets.length : 0);
   const parents = new Array(nodes.length).fill(null), meshReferences = new Map();
   for (let nodeIndex = 0; nodeIndex < nodes.length; nodeIndex++) {
     const node = nodes[nodeIndex];
-    assert(node && !own(node, 'skin') && !own(node, 'weights') && !own(node, 'camera')
+    assert(node && !own(node, 'skin') && !own(node, 'camera')
       && !own(node, 'isBone') && !own(node, 'isSkinnedMesh'), 'static-node-required');
+    if (node.weights !== undefined) {
+      const count = node.mesh === undefined ? 0 : meshMorphCounts[node.mesh];
+      assert(Array.isArray(node.weights) && node.weights.length === count
+        && node.weights.every(Number.isFinite), 'node-weights');
+    }
     if (node.mesh !== undefined) { index(node.mesh, meshes, 'node-mesh'); meshReferences.set(node.mesh, (meshReferences.get(node.mesh) ?? 0) + 1); }
     for (const child of array(node.children ?? [], 'node-children')) {
       index(child, nodes, 'node-child'); assert(parents[child] === null, 'node-multiple-parent'); parents[child] = nodeIndex;
@@ -891,8 +933,9 @@ function texturedProfileFacts(json, input, ktx2) {
     reachable.add(current); maxDepth = Math.max(maxDepth, depth);
     for (const child of nodes[current].children ?? []) stack.push([child, depth + 1]);
   }
-  const usedAccessors = new Set(), usedMeshes = new Set(), geometries = new Map();
+  const usedAccessors = new Set(), morphAccessors = new Set(), usedMeshes = new Set(), geometries = new Map();
   const usedMaterials = new Set(), usedTextures = new Set(), usedImages = new Set();
+  const programKeys = new Set();
   let drawCalls = 0, triangles = 0, objectCount = 1;
   const sceneNodes = [...reachable].sort((a, b) => a - b).map(nodeIndex => {
     const node = nodes[nodeIndex], meshPrimitives = node.mesh === undefined ? [] : primitives[node.mesh];
@@ -903,6 +946,11 @@ function texturedProfileFacts(json, input, ktx2) {
       usedAccessors.add(primitive.positionAccessor); usedAccessors.add(primitive.normalAccessor);
       if (primitive.indexAccessor !== null) usedAccessors.add(primitive.indexAccessor);
       for (const uv of primitive.uvAccessors) usedAccessors.add(uv.accessor);
+      for (const target of primitive.morphTargets) {
+        morphAccessors.add(target.positionAccessor); morphAccessors.add(target.normalAccessor);
+      }
+      programKeys.add(texturedProgramKey(primitive.material === null ? null : materials[primitive.material],
+        primitive.morphTargets.length));
       if (!geometries.has(primitive.key)) {
         const { meshIndex: _mesh, primitiveIndex: _primitive, ...geometry } = primitive;
         geometries.set(primitive.key, geometry);
@@ -928,42 +976,45 @@ function texturedProfileFacts(json, input, ktx2) {
       transform = { kind: 'matrix', matrix: [...node.matrix] };
     } else transform = { kind: 'trs', translation: [...translation], rotation: [...rotation], scale: [...scale] };
     return { index: nodeIndex, parentIndex: parents[nodeIndex], meshIndex: node.mesh ?? null,
+      morphTargetCount: node.mesh === undefined ? 0 : meshMorphCounts[node.mesh],
+      morphWeights: node.weights === undefined ? null : [...node.weights],
       children: [...(node.children ?? [])], transform };
   });
   assert(drawCalls > 0 && triangles <= MAX_TRIANGLES, 'visible-triangle-limit');
   let allocatedObjectCount = objectCount;
   for (const mesh of usedMeshes) if (meshReferences.get(mesh) > 1) allocatedObjectCount += primitives[mesh].length + (primitives[mesh].length > 1 ? 1 : 0);
   const usedLayouts = [...usedAccessors].sort((a, b) => a - b).map(i => layouts[i]);
-  const animation = animationFacts(json, accessors, layouts, views, reachable, nodes.length);
-  const usedViews = [...new Set(usedLayouts.map(layout => layout.viewIndex))].sort((a, b) => a - b)
+  const morphLayouts = [...morphAccessors].sort((a, b) => a - b).map(i => layouts[i]);
+  const nodeMorphCounts = nodes.map(node => node.mesh === undefined ? 0 : meshMorphCounts[node.mesh]);
+  const animation = animationFacts(json, accessors, layouts, views, reachable, nodes.length, nodeMorphCounts);
+  const meshFacts = [...usedMeshes].sort((a, b) => a - b).map(index => ({
+    index, morphTargetCount: meshMorphCounts[index],
+    defaultWeights: meshes[index].weights === undefined ? null : [...meshes[index].weights]
+  }));
+  const usedViews = [...new Set([...usedLayouts, ...morphLayouts].map(layout => layout.viewIndex))]
+    .sort((a, b) => a - b)
     .map(i => ({ index: i, byteOffset: views[i].byteOffset ?? 0, byteLength: views[i].byteLength }));
   const cpuViewIndices = [...new Set([...usedViews.map(view => view.index), ...(animation?.viewIndices ?? [])])]
     .sort((a, b) => a - b);
+  let morphTextureBytes = 0;
+  for (const geometry of geometries.values()) {
+    if (!geometry.morphTargets.length) continue;
+    morphTextureBytes += layouts[geometry.positionAccessor].count * 2 * 4 * 4 * geometry.morphTargets.length;
+  }
   const usedMaterialFacts = materials.filter(material => usedMaterials.has(material.index));
-  // Three's program cache key for this profile: per-slot texture channels,
-  // active alpha test and sidedness. Factors/opacity/blending are state.
-  const programKeys = new Set(usedMaterialFacts.map(material => [
-    material.baseColorTexture ? material.baseColorTexture.texCoord : '-',
-    material.metallicRoughnessTexture ? material.metallicRoughnessTexture.texCoord : '-',
-    material.normalTexture ? material.normalTexture.texCoord : '-',
-    material.occlusionTexture ? material.occlusionTexture.texCoord : '-',
-    material.emissiveTexture ? material.emissiveTexture.texCoord : '-',
-    material.alphaMode === 'MASK' && material.alphaCutoff > 0,
-    material.alphaMode !== 'BLEND',
-    material.doubleSided
-  ].join(':')));
   const facts = {
     profile: ktx2 ? STATIC_KTX2_PROFILE : STATIC_TEXTURED_PROFILE, loaderVersion: STATIC_MODEL_LOADER_VERSION, input,
     declared: { nodes: nodes.length, meshes: meshes.length, primitives: primitiveCount, accessors: accessors.length,
       bufferViews: views.length, materials: materials.length, textures: textures.length, images: images.length },
     scene: { index: 0, roots: [...roots], nodes: sceneNodes, maxDepth, objectCount, allocatedObjectCount, drawCalls, triangles },
     materials: usedMaterialFacts,
+    meshes: meshFacts,
     textures: textures.filter(texture => usedTextures.has(texture.index)),
     images: images.filter(image => usedImages.has(image.index)),
     resources: {
       geometries: [...geometries.values()].sort((a, b) => a.key < b.key ? -1 : a.key > b.key ? 1 : 0),
       accessors: usedLayouts, bufferViews: usedViews,
-      geometryCount: geometries.size, attributeCount: usedLayouts.length, backingCount: usedViews.length,
+      geometryCount: geometries.size, attributeCount: usedLayouts.length + morphLayouts.length, backingCount: usedViews.length,
       gpuBufferBytes: usedLayouts.reduce((sum, layout) => sum + layout.byteLength, 0),
       cpuBackingBytes: cpuViewIndices.reduce((sum, index) => sum + views[index].byteLength, 0),
       materialCount: usedMaterials.size, allocatedMaterialCount: usedMaterials.size * 2,
@@ -971,6 +1022,10 @@ function texturedProfileFacts(json, input, ktx2) {
       textureCount: usedTextures.size, imageCount: usedImages.size
     }
   };
+  if (morphLayouts.length) {
+    facts.resources.morphAccessors = morphLayouts;
+    facts.resources.morphTextureBytes = morphTextureBytes;
+  }
   if (animation) {
     facts.animations = animation.clips;
     facts.resources.animationAccessors = animation.accessors;
@@ -988,13 +1043,29 @@ function approx(value, expected) {
 
 function texturedPrimitiveKey(primitive) {
   const attributes = Object.keys(primitive.attributes).sort().map(key => key + ':' + primitive.attributes[key] + ';').join('');
-  return `${primitive.indices ?? 'undefined'}:${attributes}:${primitive.mode ?? 'undefined'}`;
+  const targets = (primitive.targets ?? []).map(target => ':' + Object.keys(target).sort()
+    .map(key => key + ':' + target[key] + ';').join('')).join('');
+  return `${primitive.indices ?? 'undefined'}:${attributes}:${primitive.mode ?? 'undefined'}${targets}`;
+}
+
+// Mirrors Three's program cache key for this qualified profile, including the
+// geometry morph target count and (later) skinning.
+function texturedProgramKey(material, morphTargets, skinning = false) {
+  const channel = slot => material?.[slot] ? material[slot].texCoord : '-';
+  const alphaTest = material ? material.alphaMode === 'MASK' && material.alphaCutoff > 0 : false;
+  const opaque = material ? material.alphaMode !== 'BLEND' : true;
+  const doubleSided = material ? material.doubleSided : false;
+  return [channel('baseColorTexture'), channel('metallicRoughnessTexture'), channel('normalTexture'),
+    channel('occlusionTexture'), channel('emissiveTexture'), String(alphaTest), String(opaque),
+    String(doubleSided), 'morph:' + morphTargets, 'skin:' + skinning].join(':');
 }
 
 async function verifyTexturedActual(result, parser, facts, tracker, ktx2, containerFacts) {
   if (result.scenes.length !== 1 || result.scene !== result.scenes[0] || result.cameras.length) throw mismatch('result');
   const materials = new Map(facts.materials.map(material => [material.index, material]));
   const textures = new Map(facts.textures.map(texture => [texture.index, texture]));
+  const meshFacts = new Map(facts.meshes.map(mesh => [mesh.index, mesh]));
+  const nodeFacts = new Map(facts.scene.nodes.map(node => [node.index, node]));
   const ktx2Images = new Map((containerFacts ?? []).map(image => [image.index, image]));
   const checkKtx2 = (map, info) => {
     if (!info) return;
@@ -1030,7 +1101,9 @@ async function verifyTexturedActual(result, parser, facts, tracker, ktx2, contai
   const textureObjects = new Map();
   for (const index of textures.keys()) textureObjects.set(index, await parser.getDependency('texture', index));
   const accessors = new Map();
-  for (const layout of facts.resources.accessors) accessors.set(layout.index, await parser.getDependency('accessor', layout.index));
+  for (const layout of [...facts.resources.accessors, ...(facts.resources.morphAccessors ?? [])]) {
+    accessors.set(layout.index, await parser.getDependency('accessor', layout.index));
+  }
   const objects = [], meshes = [], nodeObjects = new Map(), retainedMaterials = new Set(), geometryObjects = new Map();
   let actualTriangles = 0, clonedTextureCount = 0;
   result.scene.traverse(object => {
@@ -1134,7 +1207,24 @@ async function verifyTexturedActual(result, parser, facts, tracker, ktx2, contai
         if (object.geometry.attributes[name] !== accessors.get(primitive.attributes[key])) throw mismatch('uv-accessor');
       }
       if (object.geometry.index !== (primitive.indices === undefined ? null : accessors.get(primitive.indices))) throw mismatch('index-accessor');
-      if (Object.keys(object.geometry.morphAttributes).length || object.geometry.groups.length
+      const targets = primitive.targets ?? [];
+      const morph = object.geometry.morphAttributes;
+      if (targets.length) {
+        const positions = morph.position, normals = morph.normal;
+        if (object.geometry.morphTargetsRelative !== true || Object.keys(morph).sort().join(',') !== 'normal,position'
+          || !Array.isArray(positions) || positions.length !== targets.length
+          || !Array.isArray(normals) || normals.length !== targets.length) throw mismatch('morph-attributes');
+        for (let index = 0; index < targets.length; index++) {
+          if (positions[index] !== accessors.get(targets[index].POSITION)
+            || normals[index] !== accessors.get(targets[index].NORMAL)) throw mismatch('morph-accessors');
+        }
+        const nodeIndex = association?.nodes ?? parser.associations.get(object.parent)?.nodes;
+        const node = nodeFacts.get(nodeIndex), mesh = meshFacts.get(association?.meshes);
+        const expected = node?.morphWeights ?? mesh?.defaultWeights ?? new Array(targets.length).fill(0);
+        if (!Array.isArray(object.morphTargetInfluences) || object.morphTargetInfluences.length !== targets.length
+          || object.morphTargetInfluences.some((value, index) => !approx(value, expected[index]))) throw mismatch('morph-influences');
+      } else if (Object.keys(morph).length) throw mismatch('unexpected-morph');
+      if (object.geometry.groups.length
         || object.geometry.drawRange.start !== 0 || object.geometry.drawRange.count !== Infinity) throw mismatch('geometry-state');
       actualTriangles += (object.geometry.index?.count ?? object.geometry.attributes.position.count) / 3;
     } else if (object.geometry || object.material) throw mismatch('unexpected-resource');
@@ -1167,11 +1257,12 @@ async function verifyTexturedActual(result, parser, facts, tracker, ktx2, contai
     compareStaticModelFacts(node.children, object.children.map(child => parser.associations.get(child)?.nodes).filter(value => value !== undefined));
   }
   compareStaticModelFacts(facts.scene.roots, result.scene.children.map(object => parser.associations.get(object)?.nodes));
+  const allLayouts = [...facts.resources.accessors, ...(facts.resources.morphAccessors ?? [])];
   const backings = new Map();
-  for (const layout of facts.resources.accessors) {
+  for (const layout of allLayouts) {
     const attribute = accessors.get(layout.index);
     if (!attribute || !attribute.isBufferAttribute || attribute.isInterleavedBufferAttribute || attribute.normalized
-      || attribute.itemSize !== (layout.type === 'VEC3' ? 3 : layout.type === 'VEC2' ? 2 : 1)
+      || attribute.itemSize !== (layout.type === 'VEC4' ? 4 : layout.type === 'VEC3' ? 3 : layout.type === 'VEC2' ? 2 : 1)
       || attribute.count !== layout.count || attribute.array.byteOffset !== layout.byteOffset
       || attribute.array.byteLength !== layout.byteLength) throw mismatch('accessor-layout-or-identity');
     if (!backings.has(layout.viewIndex)) backings.set(layout.viewIndex, attribute.array.buffer);
@@ -1187,10 +1278,18 @@ async function verifyTexturedActual(result, parser, facts, tracker, ktx2, contai
       if (actual.attributes[name] !== accessors.get(uv.accessor)) throw mismatch('uv-accessors');
     }
     if (actual.index !== (geometry.indexAccessor === null ? null : accessors.get(geometry.indexAccessor))) throw mismatch('primitive-indices');
-    compareStaticModelFacts(geometry.positionMin, actual.boundingBox?.min.toArray());
-    compareStaticModelFacts(geometry.positionMax, actual.boundingBox?.max.toArray());
+    const morphPositions = actual.morphAttributes.position, morphNormals = actual.morphAttributes.normal;
+    if (geometry.morphTargets.length !== (morphPositions?.length ?? 0)
+      || geometry.morphTargets.length !== (morphNormals?.length ?? 0)) throw mismatch('morph-geometry-count');
+    for (let index = 0; index < geometry.morphTargets.length; index++) {
+      if (morphPositions[index] !== accessors.get(geometry.morphTargets[index].positionAccessor)
+        || morphNormals[index] !== accessors.get(geometry.morphTargets[index].normalAccessor)) throw mismatch('morph-geometry-accessors');
+    }
+    compareStaticModelFacts(geometry.boundingBoxMin ?? geometry.positionMin, actual.boundingBox?.min.toArray());
+    compareStaticModelFacts(geometry.boundingBoxMax ?? geometry.positionMax, actual.boundingBox?.max.toArray());
   }
-  return { accessors, clips: await verifyAnimations(result, parser, facts) };
+  return { accessors: new Map(facts.resources.accessors.map(layout => [layout.index, accessors.get(layout.index)])),
+    clips: await verifyAnimations(result, parser, facts) };
 }
 
 function compareTexturedFacts(expected, actual, ktx2) {

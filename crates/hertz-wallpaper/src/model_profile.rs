@@ -552,22 +552,27 @@ fn material_facts(index: usize, material: &ModelMaterial) -> Value {
 }
 
 /// Three's program cache key for this qualified profile reduces to the texture
-/// channel of each present slot, whether alpha test is active, and sidedness:
-/// base factors, opacity and blending are uniforms/state, not shader variants.
-fn material_program_key(facts: &Value) -> String {
+/// channel of each present slot, whether alpha test is active, sidedness, the
+/// geometry's morph target count and whether the draw is skinned. Base factors,
+/// opacity and blending are uniforms/state, not shader variants. `None` is the
+/// loader's default PBR material.
+fn material_program_key(facts: Option<&Value>, morph_targets: usize, skinning: bool) -> String {
     let channel = |slot: &str| {
-        facts[slot]
-            .get("texCoord")
+        facts
+            .and_then(|facts| facts[slot].get("texCoord"))
             .and_then(Value::as_u64)
             .map(|value| value.to_string())
             .unwrap_or_else(|| "-".to_owned())
     };
-    let alpha_test = facts["alphaMode"] == "MASK"
-        && facts["alphaCutoff"]
-            .as_f64()
-            .is_some_and(|cutoff| cutoff > 0.0);
+    let alpha_test = facts.is_some_and(|facts| {
+        facts["alphaMode"] == "MASK"
+            && facts["alphaCutoff"]
+                .as_f64()
+                .is_some_and(|cutoff| cutoff > 0.0)
+    });
     // Three keys `opaque` (transparent false + normal blending) into the cache.
-    let opaque = facts["alphaMode"] != "BLEND";
+    let opaque = facts.is_none_or(|facts| facts["alphaMode"] != "BLEND");
+    let double_sided = facts.is_some_and(|facts| facts["doubleSided"] == true);
     [
         channel("baseColorTexture"),
         channel("metallicRoughnessTexture"),
@@ -576,7 +581,9 @@ fn material_program_key(facts: &Value) -> String {
         channel("emissiveTexture"),
         alpha_test.to_string(),
         opaque.to_string(),
-        facts["doubleSided"].to_string(),
+        double_sided.to_string(),
+        format!("morph:{morph_targets}"),
+        format!("skin:{skinning}"),
     ]
     .join(":")
 }
@@ -813,6 +820,26 @@ fn record_animation_accessor(
     Ok(())
 }
 
+fn accessor_facts_for(structure: &ModelStructure, index: usize) -> Result<Value> {
+    let accessor = structure
+        .accessors
+        .get(index)
+        .ok_or_else(|| unavailable("textured profile accessor index"))?;
+    let item_bytes = accessor
+        .count
+        .checked_mul(accessor.element_bytes)
+        .ok_or_else(|| unavailable("textured profile accessor bytes overflow"))?;
+    Ok(json!({
+        "index": index,
+        "viewIndex": accessor.buffer_view,
+        "componentType": accessor.component_type,
+        "type": textured_shape(accessor.shape).expect("checked shape"),
+        "count": accessor.count,
+        "byteOffset": accessor.byte_offset,
+        "byteLength": item_bytes
+    }))
+}
+
 fn animation_projection(
     structure: &ModelStructure,
     binary: &BinaryChunk,
@@ -849,12 +876,25 @@ fn animation_projection(
             if node >= structure.nodes.len() || !reachable.contains(&node) {
                 return Err(unavailable("animation target node is not reachable"));
             }
-            let path = match channel.path {
-                AnimationPath::Translation => "translation",
-                AnimationPath::Rotation => "rotation",
-                AnimationPath::Scale => "scale",
+            let (path, components) = match channel.path {
+                AnimationPath::Translation => ("translation", 3_u64),
+                AnimationPath::Rotation => ("rotation", 4_u64),
+                AnimationPath::Scale => ("scale", 3_u64),
                 AnimationPath::Weights => {
-                    return Err(unavailable("animation weights are unsupported"))
+                    let mesh = structure.nodes[node]
+                        .mesh
+                        .ok_or_else(|| unavailable("weights animation requires a mesh"))?;
+                    let count = structure
+                        .meshes
+                        .get(mesh)
+                        .ok_or_else(|| unavailable("weights animation mesh index"))?
+                        .morph_target_count;
+                    if count == 0 {
+                        return Err(unavailable(
+                            "weights animation requires a morph target mesh",
+                        ));
+                    }
+                    ("weights", count as u64)
                 }
             };
             let sampler = animation
@@ -878,18 +918,27 @@ fn animation_projection(
                     "animation times require packed FLOAT SCALAR accessors",
                 ));
             }
-            let (shape, components) = if path == "rotation" {
-                (AccessorShape::Vec4, 4_u64)
-            } else {
-                (AccessorShape::Vec3, 3_u64)
+            let shape = match path {
+                "rotation" => AccessorShape::Vec4,
+                "weights" => AccessorShape::Scalar,
+                _ => AccessorShape::Vec3,
             };
-            let required_values = if sampler.interpolation == AnimationInterpolation::CubicSpline {
+            let multiplier = if sampler.interpolation == AnimationInterpolation::CubicSpline {
+                3_u64
+            } else {
+                1_u64
+            };
+            let required_values = if path == "weights" {
                 input
                     .count
-                    .checked_mul(3)
+                    .checked_mul(components)
+                    .and_then(|count| count.checked_mul(multiplier))
                     .ok_or_else(|| unavailable("animation output count overflow"))?
             } else {
-                input.count
+                input
+                    .count
+                    .checked_mul(multiplier)
+                    .ok_or_else(|| unavailable("animation output count overflow"))?
             };
             if output.normalized
                 || output.component_type != 5126
@@ -1040,20 +1089,8 @@ fn textured_profile_facts(
     {
         return Err(unavailable("textured profile item limits"));
     }
-    if !structure.skins.is_empty()
-        || structure.camera_count != 0
-        || structure
-            .node_morph_weights
-            .iter()
-            .any(|weights| weights.is_some())
-        || structure
-            .meshes
-            .iter()
-            .any(|mesh| mesh.morph_target_count != 0)
-    {
-        return Err(unavailable(
-            "textured profile rejects skins, morphs and delegates",
-        ));
+    if !structure.skins.is_empty() || structure.camera_count != 0 {
+        return Err(unavailable("textured profile rejects cameras and skins"));
     }
     let buffer_bytes = structure
         .buffer_byte_length
@@ -1074,10 +1111,49 @@ fn textured_profile_facts(
             return Err(unavailable("textured profile primitive limit"));
         }
         for primitive in &mesh.primitives {
-            if !primitive.targets.is_empty() || !matches!(primitive.authored_mode, None | Some(4)) {
+            if !matches!(primitive.authored_mode, None | Some(4)) {
+                return Err(unavailable("textured profile requires TRIANGLES"));
+            }
+            let position = *primitive
+                .attributes
+                .get("POSITION")
+                .ok_or_else(|| unavailable("textured profile requires POSITION"))?;
+            let vertex_count = structure
+                .accessors
+                .get(position)
+                .ok_or_else(|| unavailable("textured profile position accessor"))?
+                .count;
+            if primitive.targets.len() != mesh.morph_target_count {
                 return Err(unavailable(
-                    "textured profile requires TRIANGLES without morphs",
+                    "textured profile requires every primitive to author the mesh morph target count",
                 ));
+            }
+            for target in &primitive.targets {
+                if target.len() != 2
+                    || !target.contains_key("POSITION")
+                    || !target.contains_key("NORMAL")
+                {
+                    return Err(unavailable(
+                        "textured profile morph targets require POSITION and NORMAL only",
+                    ));
+                }
+                for semantic in ["POSITION", "NORMAL"] {
+                    let accessor = structure
+                        .accessors
+                        .get(target[semantic])
+                        .ok_or_else(|| unavailable("textured profile morph accessor"))?;
+                    if accessor.shape != AccessorShape::Vec3
+                        || accessor.component_type != 5126
+                        || accessor.normalized
+                        || accessor.stride != accessor.element_bytes
+                        || accessor.count != vertex_count
+                        || accessor.count > 8192
+                    {
+                        return Err(unavailable(
+                            "textured profile morph targets require packed FLOAT VEC3 vertex deltas within the morph texture width",
+                        ));
+                    }
+                }
             }
         }
     }
@@ -1116,10 +1192,13 @@ fn textured_profile_facts(
     }
     let animation = animation_projection(structure, binary, &reachable)?;
     let mut used_materials = std::collections::BTreeSet::new();
+    let mut used_meshes = std::collections::BTreeSet::new();
     let mut used_views = std::collections::BTreeSet::new();
     let mut used_accessors = std::collections::BTreeSet::new();
+    let mut morph_accessors = std::collections::BTreeSet::new();
     let mut used_textures = std::collections::BTreeSet::new();
     let mut used_images = std::collections::BTreeSet::new();
+    let mut program_keys = std::collections::BTreeSet::new();
     let mut geometries: std::collections::BTreeMap<String, Value> =
         std::collections::BTreeMap::new();
     let mut scene_nodes = Vec::with_capacity(reachable.len());
@@ -1128,6 +1207,9 @@ fn textured_profile_facts(
     let mut object_count = 1u64;
     for &index in &reachable {
         let node = &structure.nodes[index];
+        if let Some(mesh) = node.mesh {
+            used_meshes.insert(mesh);
+        }
         let primitives: &[ModelPrimitive] = node
             .mesh
             .map(|mesh| &structure.meshes[mesh].primitives[..])
@@ -1188,6 +1270,17 @@ fn textured_profile_facts(
                 used_accessors.insert(indices);
             }
             let mut uv_facts = Vec::new();
+            let mut morph_facts = Vec::new();
+            for target in &primitive.targets {
+                let target_position = target["POSITION"];
+                let target_normal = target["NORMAL"];
+                morph_accessors.insert(target_position);
+                morph_accessors.insert(target_normal);
+                morph_facts.push(json!({
+                    "positionAccessor": target_position,
+                    "normalAccessor": target_normal
+                }));
+            }
             for (semantic, accessor_index) in &primitive.attributes {
                 if let Some(set) = semantic.strip_prefix("TEXCOORD_") {
                     let set: u32 = set
@@ -1220,6 +1313,13 @@ fn textured_profile_facts(
                     used_images.insert(texture.source);
                 }
             }
+            program_keys.insert(material_program_key(
+                material
+                    .map(|material| material_facts(material, &structure.materials[material]))
+                    .as_ref(),
+                primitive.targets.len(),
+                false,
+            ));
             let attributes = primitive
                 .attributes
                 .iter()
@@ -1231,26 +1331,59 @@ fn textured_profile_facts(
             let mode = primitive
                 .authored_mode
                 .map_or_else(|| "undefined".to_owned(), |value| value.to_string());
-            let key = format!("{index_part}:{attributes}:{mode}");
-            geometries.entry(key.clone()).or_insert_with(|| {
-                json!({
-                    "key": key,
+            let mut key = format!("{index_part}:{attributes}:{mode}");
+            // GLTFLoader's primitive cache appends each target's attribute map.
+            for target in &primitive.targets {
+                key.push(':');
+                for (semantic, accessor) in target {
+                    key.push_str(&format!("{semantic}:{accessor};"));
+                }
+            }
+            let geometry_key = key.clone();
+            geometries.entry(key).or_insert_with(|| {
+                let mut bounding_min = accessor.min.clone().expect("checked bounds");
+                let mut bounding_max = accessor.max.clone().expect("checked bounds");
+                let mut displacement = [0.0_f64; 3];
+                for target in &primitive.targets {
+                    let target = &structure.accessors[target["POSITION"]];
+                    if let (Some(min), Some(max)) = (&target.min, &target.max) {
+                        for (axis, value) in displacement.iter_mut().enumerate() {
+                            *value = value.max(min[axis].abs().max(max[axis].abs()));
+                        }
+                    }
+                }
+                for (axis, value) in displacement.iter().enumerate() {
+                    bounding_min[axis] -= value;
+                    bounding_max[axis] += value;
+                }
+                let mut geometry = json!({
+                    "key": geometry_key,
                     "material": material,
                     "positionAccessor": position,
                     "normalAccessor": normal,
                     "uvAccessors": uv_facts,
+                    "morphTargets": morph_facts,
                     "indexAccessor": primitive.indices,
                     "mode": primitive.authored_mode,
                     "triangles": primitive.triangles_upper_bound,
                     "positionMin": array(accessor.min.as_ref().expect("checked bounds")),
                     "positionMax": array(accessor.max.as_ref().expect("checked bounds"))
-                })
+                });
+                // GLTFLoader expands the base accessor bounds by the largest
+                // per-axis absolute morph POSITION delta before instancing.
+                if !primitive.targets.is_empty() {
+                    geometry["boundingBoxMin"] = array(&bounding_min);
+                    geometry["boundingBoxMax"] = array(&bounding_max);
+                }
+                geometry
             });
         }
         scene_nodes.push(json!({
             "index": index,
             "parentIndex": parents[index],
             "meshIndex": node.mesh,
+            "morphTargetCount": node.mesh.map_or(0, |mesh| structure.meshes[mesh].morph_target_count),
+            "morphWeights": structure.node_morph_weights[index],
             "children": &node.children,
             "transform": transform(&node.transform)
         }));
@@ -1273,28 +1406,18 @@ fn textured_profile_facts(
     }
     for accessor in used_accessors
         .iter()
+        .chain(morph_accessors.iter())
         .map(|&index| &structure.accessors[index])
     {
         used_views.insert(accessor.buffer_view);
     }
     let accessor_facts: Vec<Value> = used_accessors
         .iter()
-        .map(|&index| {
-            let accessor = &structure.accessors[index];
-            let item_bytes = accessor
-                .count
-                .checked_mul(accessor.element_bytes)
-                .ok_or_else(|| unavailable("textured profile accessor bytes overflow"))?;
-            Ok(json!({
-                "index": index,
-                "viewIndex": accessor.buffer_view,
-                "componentType": accessor.component_type,
-                "type": textured_shape(accessor.shape).expect("checked shape"),
-                "count": accessor.count,
-                "byteOffset": accessor.byte_offset,
-                "byteLength": item_bytes
-            }))
-        })
+        .map(|&index| accessor_facts_for(structure, index))
+        .collect::<Result<Vec<_>>>()?;
+    let morph_accessor_facts: Vec<Value> = morph_accessors
+        .iter()
+        .map(|&index| accessor_facts_for(structure, index))
         .collect::<Result<Vec<_>>>()?;
     let view_facts: Vec<Value> = used_views
         .iter()
@@ -1355,11 +1478,18 @@ fn textured_profile_facts(
         .iter()
         .map(|&index| material_facts(index, &structure.materials[index]))
         .collect();
-    let program_count = material_facts_used
+    let mesh_facts: Vec<Value> = used_meshes
         .iter()
-        .map(material_program_key)
-        .collect::<std::collections::BTreeSet<_>>()
-        .len();
+        .map(|&index| {
+            let mesh = &structure.meshes[index];
+            json!({
+                "index": index,
+                "morphTargetCount": mesh.morph_target_count,
+                "defaultWeights": mesh.default_weights
+            })
+        })
+        .collect();
+    let program_count = program_keys.len();
     let gpu_buffer_bytes = checked_sum(
         accessor_facts
             .iter()
@@ -1381,6 +1511,25 @@ fn textured_profile_facts(
     )?;
     let geometry_count = geometries.len();
     let geometry_facts: Vec<Value> = geometries.into_values().collect();
+    let mut morph_texture_bytes = 0_u64;
+    for geometry in &geometry_facts {
+        let targets = geometry["morphTargets"]
+            .as_array()
+            .map_or(0, std::vec::Vec::len);
+        if targets == 0 {
+            continue;
+        }
+        let vertices = structure.accessors[geometry["positionAccessor"]
+            .as_u64()
+            .expect("checked position") as usize]
+            .count;
+        let bytes = vertices
+            .checked_mul(2)
+            .and_then(|value| value.checked_mul(4 * 4))
+            .and_then(|value| value.checked_mul(targets as u64))
+            .ok_or_else(|| unavailable("textured profile morph texture bytes overflow"))?;
+        morph_texture_bytes = checked_sum([morph_texture_bytes, bytes])?;
+    }
     let profile = match projection {
         ImageProjection::Raster => TEXTURED_PROFILE,
         ImageProjection::Ktx2 { .. } => KTX2_PROFILE,
@@ -1414,6 +1563,7 @@ fn textured_profile_facts(
             "triangles": triangles
         },
         "materials": material_facts_used,
+        "meshes": mesh_facts,
         "textures": texture_facts,
         "images": image_facts_used,
         "resources": {
@@ -1421,7 +1571,7 @@ fn textured_profile_facts(
             "accessors": accessor_facts,
             "bufferViews": view_facts,
             "geometryCount": geometry_count,
-            "attributeCount": used_accessors.len(),
+            "attributeCount": used_accessors.len() + morph_accessors.len(),
             "backingCount": used_views.len(),
             "gpuBufferBytes": gpu_buffer_bytes,
             "cpuBackingBytes": cpu_backing_bytes,
@@ -1434,6 +1584,10 @@ fn textured_profile_facts(
     });
     if matches!(projection, ImageProjection::Ktx2 { .. }) {
         facts["resources"]["imageUploadBytes"] = json!(image_upload_bytes);
+    }
+    if !morph_accessor_facts.is_empty() {
+        facts["resources"]["morphAccessors"] = json!(morph_accessor_facts);
+        facts["resources"]["morphTextureBytes"] = json!(morph_texture_bytes);
     }
     if let Some(animation) = animation {
         let clip_count = animation.clips.len();
@@ -1945,6 +2099,140 @@ mod tests {
                 "channels":[{"sampler":0,"target":{"node":0,"path":"translation"}}]}]
         });
         glb(document, &bin)
+    }
+
+    fn textured_morph_triangle() -> Vec<u8> {
+        let morph_offset = (104 + TEXTURED_PNG.len() + 3) & !3;
+        let normal_offset = morph_offset + 36;
+        let times_offset = normal_offset + 36;
+        let weights_offset = times_offset + 8;
+        let mut bin = vec![0_u8; weights_offset + 8];
+        for (index, value) in [0.0_f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+            .iter()
+            .enumerate()
+        {
+            bin[index * 4..index * 4 + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        for (index, value) in [0.0_f32, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0]
+            .iter()
+            .enumerate()
+        {
+            bin[36 + index * 4..36 + index * 4 + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        for (index, value) in [0.0_f32, 0.0, 1.0, 0.0, 0.0, 1.0].iter().enumerate() {
+            bin[72 + index * 4..72 + index * 4 + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        for (index, value) in [0_u16, 1, 2].iter().enumerate() {
+            bin[96 + index * 2..96 + index * 2 + 2].copy_from_slice(&value.to_le_bytes());
+        }
+        bin[104..104 + TEXTURED_PNG.len()].copy_from_slice(TEXTURED_PNG);
+        for (index, value) in [1.0_f32, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0]
+            .iter()
+            .enumerate()
+        {
+            bin[morph_offset + index * 4..morph_offset + index * 4 + 4]
+                .copy_from_slice(&value.to_le_bytes());
+        }
+        for (index, value) in [0.0_f32, 1.0].iter().enumerate() {
+            bin[times_offset + index * 4..times_offset + index * 4 + 4]
+                .copy_from_slice(&value.to_le_bytes());
+        }
+        for (index, value) in [0.0_f32, 1.0].iter().enumerate() {
+            bin[weights_offset + index * 4..weights_offset + index * 4 + 4]
+                .copy_from_slice(&value.to_le_bytes());
+        }
+        let document = json!({
+            "asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],
+            "nodes":[{"mesh":0,"name":"mesh","weights":[0.5]}],
+            "meshes":[{"weights":[0.25],"primitives":[
+                {"attributes":{"POSITION":0,"NORMAL":1,"TEXCOORD_0":3},"indices":2,"material":0,
+                 "targets":[{"POSITION":4,"NORMAL":5}]}]}],
+            "buffers":[{"byteLength":bin.len()}],
+            "bufferViews":[
+                {"buffer":0,"byteOffset":0,"byteLength":36},
+                {"buffer":0,"byteOffset":36,"byteLength":36},
+                {"buffer":0,"byteOffset":72,"byteLength":24},
+                {"buffer":0,"byteOffset":96,"byteLength":8},
+                {"buffer":0,"byteOffset":104,"byteLength":TEXTURED_PNG.len()},
+                {"buffer":0,"byteOffset":morph_offset,"byteLength":36},
+                {"buffer":0,"byteOffset":normal_offset,"byteLength":36},
+                {"buffer":0,"byteOffset":times_offset,"byteLength":8},
+                {"buffer":0,"byteOffset":weights_offset,"byteLength":8}],
+            "accessors":[
+                {"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[1,1,0]},
+                {"bufferView":1,"componentType":5126,"count":3,"type":"VEC3"},
+                {"bufferView":3,"componentType":5123,"count":3,"type":"SCALAR"},
+                {"bufferView":2,"componentType":5126,"count":3,"type":"VEC2"},
+                {"bufferView":5,"componentType":5126,"count":3,"type":"VEC3","min":[1,0,0],"max":[1,0,0]},
+                {"bufferView":6,"componentType":5126,"count":3,"type":"VEC3"},
+                {"bufferView":7,"componentType":5126,"count":2,"type":"SCALAR","min":[0],"max":[1]},
+                {"bufferView":8,"componentType":5126,"count":2,"type":"SCALAR"}],
+            "images":[{"bufferView":4,"mimeType":"image/png"}],
+            "samplers":[{"magFilter":9728,"minFilter":9728,"wrapS":33071,"wrapT":33071}],
+            "textures":[{"source":0,"sampler":0}],
+            "materials":[{"pbrMetallicRoughness":{"baseColorFactor":[1,1,1,1],
+                "baseColorTexture":{"index":0,"texCoord":0},"metallicFactor":0,"roughnessFactor":1},
+                "alphaMode":"OPAQUE"}],
+            "animations":[{"name":"warp",
+                "samplers":[{"input":6,"output":7,"interpolation":"LINEAR"}],
+                "channels":[{"sampler":0,"target":{"node":0,"path":"weights"}}]}]
+        });
+        glb(document, &bin)
+    }
+
+    #[test]
+    fn static_textured_morph_facts_cover_targets_weights_and_animation() {
+        let bytes = textured_morph_triangle();
+        let content = inspect_glb_resource_content(
+            Cursor::new(&bytes),
+            bytes.len() as u64,
+            &manifest(),
+            "assets/model.glb",
+        )
+        .unwrap();
+        let facts =
+            static_textured_profile_facts(content.resource(), content.bytes(), "assets/model.glb")
+                .unwrap();
+        assert_eq!(facts["profile"], TEXTURED_PROFILE);
+        assert_eq!(facts["scene"]["nodes"][0]["morphTargetCount"], 1);
+        assert_eq!(facts["scene"]["nodes"][0]["morphWeights"], json!([0.5]));
+        assert_eq!(facts["meshes"][0]["morphTargetCount"], 1);
+        assert_eq!(facts["meshes"][0]["defaultWeights"], json!([0.25]));
+        let geometry = &facts["resources"]["geometries"][0];
+        assert_eq!(
+            geometry["key"],
+            "2:NORMAL:1;POSITION:0;TEXCOORD_0:3;:undefined:NORMAL:5;POSITION:4;"
+        );
+        assert_eq!(geometry["morphTargets"][0]["positionAccessor"], 4);
+        assert_eq!(geometry["morphTargets"][0]["normalAccessor"], 5);
+        assert_eq!(geometry["boundingBoxMin"], json!([-1.0, 0.0, 0.0]));
+        assert_eq!(geometry["boundingBoxMax"], json!([2.0, 1.0, 0.0]));
+        assert_eq!(
+            facts["resources"]["geometries"][0]["morphTargets"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(facts["resources"]["gpuBufferBytes"], 102);
+        assert_eq!(
+            facts["resources"]["morphAccessors"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(facts["resources"]["morphTextureBytes"], 3 * 2 * 4 * 4);
+        assert_eq!(facts["resources"]["attributeCount"], 6);
+        assert_eq!(facts["resources"]["backingCount"], 6);
+        assert_eq!(facts["resources"]["programCount"], 1);
+        let channel = &facts["animations"][0]["channels"][0];
+        assert_eq!(channel["path"], "weights");
+        assert_eq!(channel["components"], 1);
+        assert_eq!(channel["times"], 2);
+        assert_eq!(channel["values"], 2);
+        assert_eq!(facts["resources"]["animationCpuBytes"], 8 + 8 + 512);
+        assert_eq!(facts["resources"]["cpuBackingBytes"], 104 + 36 + 36 + 8 + 8);
     }
 
     #[test]

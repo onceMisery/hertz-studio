@@ -1462,3 +1462,39 @@ visualTime=null 与 outputDirty，使同一 paused sceneTime 的下一帧也重�
 仍未闭合：真实 GPU 压缩格式设备矩阵（当前仅 SwiftShader ETC2）、GLB 蒙皮/
 形变动画、动画混合（多 clip 同时播放/权重）、真实 GPU 显存/首帧与
 A01/A05–A10 外部验收。
+
+2026-11-15 r84 GLB 形变目标与 weights 动画：textured/ktx2 profile 退役 morph
+blanket 拒绝，改为限定子集：每个 mesh 的所有 primitive 必须 author 相同 target
+数量；每个 target 只允许 POSITION+NORMAL，且为 packed、unnormalized FLOAT
+VEC3、count 与 base POSITION 相同；单 geometry morph 顶点数 ≤8192（Three 的
+morph DataArrayTexture 宽度恰为 count×2）。mesh/node 默认 weights 仍保留作者
+f64 值，省略不物化；facts 新增 scene.nodes[].morphTargetCount/morphWeights、
+顶层 meshes[]（morphTargetCount/defaultWeights）与 geometry.morphTargets[]，
+并按 GLTFLoader `computeBounds` 规则把 base POSITION min/max 扩为
+boundingBoxMin/Max（每个 target 各轴绝对值的最大值）。weights 动画轨道按
+`components = mesh.morphTargetCount` 投影，output 必须 FLOAT SCALAR 且
+count = times×M×(cubic?3:1)，Three 轨道名为 `.morphTargetInfluences`。
+
+预算语义：morph accessor 只作为 CPU backing 与对象身份校验，不进入
+gpuBufferBytes；Three 在首次绘制时把 POSITION+NORMAL target 打包成每个
+geometry 一张 DataArrayTexture，facts 以 `resources.morphAccessors` +
+`resources.morphTextureBytes`（count×2×4×4×M）单独计量，桌面
+`texture_upload_bytes` 与 `plan.js`/KTX2 的 textureUploadBytes 精确包含它。
+program key 追加 morph target 数与 skinning 标志，默认材质 primitive 也计入；
+`plan.js` 的上界改为 programCount ≤ scene.drawCalls。morph accessor 现在在
+scene traversal 前装入同一 accessor map，避免身份校验时序缺口。
+
+真实证据：Rust 新增 `static_textured_morph_facts_cover_targets_weights_and_animation`
+（key 尾部 target、boundingBox [-1,0,0]/[2,1,0]、gpu=102、morphTextureBytes=96、
+weights channel components=1、cpu=192）。Chrome 组合检查 61 项：t=0 基形白色，
+t=0.5 半程把 right 样本变白，t=0.999 基位置/right 均黑而远处样本变白，t=1
+回绕基形；programCount=1、实际 programs=2、buffer=194、texture=64+96；
+`scene.nodes[0].morphTargetCount=0` 负例零配额拒绝。桌面新增
+`native_model_morph_fixture_projects_weights_and_texture_budget`（facts/投影
+morphTextureBytes=96、textureUploadBytes=128、page buffers=194、
+texture=32+96+4096、programs=3）并发射 `model-morph` fixture；桌面 lib 868 项
+通过，原生页面新阶段以真实 Rust 投影渲染：早期绿色半面、≥900ms 后基样本黑、
+移位样本红、contexts 1→0、budget.error=null。
+
+仍未闭合：GLB 蒙皮（skins/JOINTS_0/WEIGHTS_0/IBM 与骨骼 TRS 动画）、动画混合
+（多 clip 同时播放/权重）、真实 GPU 设备矩阵/首帧与 A01/A05–A10 外部验收。

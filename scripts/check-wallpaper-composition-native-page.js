@@ -625,6 +625,65 @@ if(diagnostic){
     assert.equal((await animatedPage.evaluate(()=>HertzGlBudget.stats())).contexts,0);
     await animatedPage.close();
   }
+  const morphDir=path.join(output,'model-morph');
+  let morphModel=null;
+  if(fs.existsSync(path.join(morphDir,'projection.json'))){
+    const morphProjection=JSON.parse(fs.readFileSync(path.join(morphDir,'projection.json'),'utf8'));
+    const morphUri=fs.readFileSync(path.join(morphDir,'uri.txt'),'utf8');
+    const morphInit=bindCadence(fs.readFileSync(path.join(morphDir,'native-init.js'),'utf8'));
+    const morphFiles=JSON.parse(fs.readFileSync(path.join(morphDir,'files.json'),'utf8'));
+    const morphPage=await browser.newPage({viewport:{width:64,height:64}}),morphErrors=[];
+    morphPage.on('pageerror',error=>morphErrors.push(error.message));
+    morphPage.on('console',message=>{if(message.type()==='error'){morphErrors.push(message.text());console.error('browser:',message.text());}});
+    await morphPage.addInitScript(morphInit+'\nwindow.nativeEvents=[];window.ipc={postMessage:message=>nativeEvents.push(message)};');
+    await morphPage.route('https://**.wallpaper.invalid/**',route=>{
+      if(route.request().url()===morphUri)return route.fulfill({status:200,contentType:'application/json',body:JSON.stringify(morphProjection)});
+      const asset=morphFiles.find(entry=>entry.url===route.request().url());
+      if(asset)return route.fulfill({status:200,contentType:'model/gltf-binary',body:fs.readFileSync(path.join(morphDir,asset.file))});
+      return route.fulfill({status:404,body:''});
+    });
+    await morphPage.route('http://hertz.localhost/',route=>route.fulfill({status:200,contentType:'text/html',body:html}));
+    await morphPage.goto('http://hertz.localhost/');
+    assert.equal(await morphPage.evaluate(async url=>{hertzWallpaper.applyConfig({source:'fixed',audioInput:{kind:'none'},motion:1,quality:'low'});
+      const prepared=hertzWallpaper.applyComposition(url);hertzWallpaper.start(15);return await prepared;},morphUri),true);
+    await morphPage.waitForFunction(()=>nativeEvents.some(event=>event.includes('firstFrame')),null,{timeout:10000}).catch(async failure=>{
+      throw new Error(failure.message+'\n'+JSON.stringify(await morphPage.evaluate(()=>({events:nativeEvents,stats:hertzWallpaper.debug(),budget:HertzGlBudget.stats()}))));
+    });
+    await morphPage.waitForFunction(()=>hertzWallpaper.debug().draws>=2,null,{timeout:10000});
+    const morphSample=()=>morphPage.evaluate(()=>{
+      const gl=document.querySelector('#host canvas').getContext('webgl2');
+      const sample=(x,y)=>{const pixel=new Uint8Array(4);gl.readPixels(x,y,1,1,gl.RGBA,gl.UNSIGNED_BYTE,pixel);return [...pixel];};
+      return {inside:sample(47,40),far:sample(60,40),
+        sceneTime:hertzWallpaper.debug().sceneTime,budget:HertzGlBudget.stats()};
+    });
+    const visible = value => Math.max(...value.slice(0, 3)) > 200;
+    const morphEarly=await morphSample();
+    assert(visible(morphEarly.inside),
+      'morph clip starts inside the authored base triangle: '+JSON.stringify(morphEarly));
+    assert(Math.max(...morphEarly.far.slice(0,3))<=8,
+      'morph clip starts outside the shifted sample: '+JSON.stringify(morphEarly));
+    await morphPage.waitForFunction(()=>hertzWallpaper.debug().sceneTime>=900,null,{timeout:10000});
+    const morphLate=await morphSample();
+    assert(Math.max(...morphLate.inside.slice(0,3))<=8,'morphed triangle leaves the base sample: '+JSON.stringify(morphLate));
+    assert(visible(morphLate.far),'morphed triangle covers the shifted sample: '+JSON.stringify(morphLate));
+    assert.equal(morphLate.budget.contexts,1);assert.equal(morphLate.budget.error,null);assert.deepEqual(morphErrors,[]);
+    assert.equal(morphProjection.resolvedAssets[0].modelFacts.meshes[0].morphTargetCount,1);
+    assert.equal(morphProjection.resolvedAssets[0].modelFacts.resources.morphTextureBytes,96);
+    assert.equal(morphProjection.resolvedAssets[0].modelFacts.resources.gpuBufferBytes,102);
+    assert.equal(morphProjection.pageLimits.bufferDeclaredBytes,194);
+    assert.equal(morphProjection.pageLimits.textureDeclaredBytes,32+96+4096);
+    assert.equal(morphProjection.pageLimits.programs,3);
+    morphModel={early:morphEarly,late:morphLate,
+      facts:{morphTargets:morphProjection.resolvedAssets[0].modelFacts.meshes[0].morphTargetCount,
+        morphTextureBytes:morphProjection.resolvedAssets[0].modelFacts.resources.morphTextureBytes,
+        gpuBufferBytes:morphProjection.resolvedAssets[0].modelFacts.resources.gpuBufferBytes,
+        pagePrograms:morphProjection.pageLimits.programs}};
+    await morphPage.evaluate(()=>hertzWallpaper.reveal());
+    await morphPage.screenshot({path:path.join(morphDir,'native-page-model-morph.png')});
+    await morphPage.evaluate(()=>hertzWallpaper.unmount());await morphPage.waitForTimeout(50);
+    assert.equal((await morphPage.evaluate(()=>HertzGlBudget.stats())).contexts,0);
+    await morphPage.close();
+  }
   const opacityDir=path.join(output,'model-opacity');
   let opacityModel=null;
   if(fs.existsSync(path.join(opacityDir,'projection.json'))){
@@ -669,7 +728,7 @@ if(diagnostic){
     assert.equal((await opacityPage.evaluate(()=>HertzGlBudget.stats())).contexts,0);
     await opacityPage.close();
   }
-  fs.writeFileSync(path.join(output,'native-page-evidence.json'),JSON.stringify({source:'actual Rust production selector + GlAdmission + original native page',qualification:'browser integration; copied scheduler metadata matches measured headless rAF; native resource caps unchanged; controlled visibility event/state; Windows/GPU qualification pending',cadence:{intervals:cadence,refreshHz,running:runningCadence},state,blockedBefore,blockedAfter,hiddenBefore,hiddenAfter,visibilityResumed,fits,glow,tracks,mask,model,texturedModel,externalTexture,ktx2Model,basisModel,multiModel,animatedModel,opacityModel,paused,retired,errors},null,2));
-  console.log('PASS native composition page: real Rust projection, one context, complete frame, pause and retirement'+(glow?', glow surfaces admitted':'')+(tracks?', tracks/bindings applied':'')+(mask?', mask texture applied':'')+(model?', scene3d model rendered':'')+(texturedModel?', textured model pixels':'')+(externalTexture?', external texture route':'')+(ktx2Model?', KTX2 model pixels':'')+(basisModel?', Basis KTX2 model pixels':'')+(multiModel?', multi-material shared program':'')+(animatedModel?', animated clip pixels':'')+(opacityModel?', model opacity pixels':''));
+  fs.writeFileSync(path.join(output,'native-page-evidence.json'),JSON.stringify({source:'actual Rust production selector + GlAdmission + original native page',qualification:'browser integration; copied scheduler metadata matches measured headless rAF; native resource caps unchanged; controlled visibility event/state; Windows/GPU qualification pending',cadence:{intervals:cadence,refreshHz,running:runningCadence},state,blockedBefore,blockedAfter,hiddenBefore,hiddenAfter,visibilityResumed,fits,glow,tracks,mask,model,texturedModel,externalTexture,ktx2Model,basisModel,multiModel,animatedModel,morphModel,opacityModel,paused,retired,errors},null,2));
+  console.log('PASS native composition page: real Rust projection, one context, complete frame, pause and retirement'+(glow?', glow surfaces admitted':'')+(tracks?', tracks/bindings applied':'')+(mask?', mask texture applied':'')+(model?', scene3d model rendered':'')+(texturedModel?', textured model pixels':'')+(externalTexture?', external texture route':'')+(ktx2Model?', KTX2 model pixels':'')+(basisModel?', Basis KTX2 model pixels':'')+(multiModel?', multi-material shared program':'')+(animatedModel?', animated clip pixels':'')+(morphModel?', morph weights pixels':'')+(opacityModel?', model opacity pixels':''));
  }finally{await browser.close();}
 })().catch(error=>{console.error(error.stack);process.exitCode=1;});

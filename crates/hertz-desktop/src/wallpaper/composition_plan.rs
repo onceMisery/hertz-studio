@@ -954,6 +954,14 @@ async fn prepare_assets(
                         ));
                     }
                 }
+                // Three packs morph POSITION/NORMAL targets into a per-geometry
+                // DataArrayTexture; its upload is a texture cost, not a vertex buffer.
+                texture_upload_bytes = checked_sum(&[
+                    texture_upload_bytes,
+                    facts["resources"]["morphTextureBytes"]
+                        .as_u64()
+                        .unwrap_or(0),
+                ])?;
                 let url = super::webresource::files_url(&package.package_hash, &asset.source)
                     .ok_or_else(|| JobError::new("adapter_unavailable", "model URL 无效"))?;
                 CompositionAsset::Model(Box::new(PreparedModel {
