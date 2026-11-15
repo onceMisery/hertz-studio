@@ -673,7 +673,7 @@ impl ReceiverGate {
                 reason: CommitIgnoreReason::NotPreparing,
             }];
         };
-        if p.epoch != epoch || !p.plan.is_some_and(|plan| plan.plan_id == plan_id) {
+        if p.epoch != epoch || p.plan.is_none_or(|plan| plan.plan_id != plan_id) {
             return vec![GateAction::CommitIgnored {
                 reason: CommitIgnoreReason::PlanMismatch,
             }];

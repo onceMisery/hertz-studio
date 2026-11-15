@@ -146,7 +146,7 @@ mod tests {
         // 空序号不产生一个光秃秃的 `_=`，否则又会被 CDN 合并回去。
         // 查参数名而不是查字符：`max_length` 里本来就带下划线。
         let bare = quote_url("i", Some("   ")).unwrap();
-        assert!(bare.query_pairs().find(|(key, _)| key == "_").is_none());
+        assert!(!bare.query_pairs().any(|(key, _)| key == "_"));
     }
 
     #[test]

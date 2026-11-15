@@ -1787,8 +1787,8 @@ impl LyricsCalibration {
             {
                 return Err(error("receiver-unavailable"));
             }
-            if !c.handoff.is_empty()
-                && !(o.dbx
+            if !(c.handoff.is_empty()
+                || o.dbx
                     && c.kind == "full"
                     && c.workbench
                     && o.pending.as_ref().is_some_and(|p| {

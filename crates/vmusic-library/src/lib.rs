@@ -507,7 +507,7 @@ mod bounded_metadata {
             let page_seq = u32::from_le_bytes(h[18..22].try_into().unwrap());
             if serial.is_some_and(|s| s != page_serial)
                 || page_seq != sequence
-                || (h[5] & 1 != 0) != !packet.is_empty()
+                || (h[5] & 1 != 0) == packet.is_empty()
             {
                 return Err(invalid());
             }

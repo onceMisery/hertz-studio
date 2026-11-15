@@ -1414,7 +1414,7 @@ mod tests {
             .map(|i| Line {
                 index: i as u32,
                 start_ms: i as i64 * 1000,
-                text: format!("第{}行", i),
+                text: format!("第{i}行"),
             })
             .collect()
     }

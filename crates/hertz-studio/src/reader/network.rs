@@ -80,8 +80,7 @@ pub(super) async fn read_bounded(
     match public_net::read_bounded(response, limit).await {
         Ok(bytes) => Ok(bytes),
         Err(BoundedReadError::Status(status)) => Err(ApiError::upstream_rejected(format!(
-            "阅读源返回 HTTP {}",
-            status
+            "阅读源返回 HTTP {status}"
         ))
         .with_source("reader")),
         Err(BoundedReadError::TooLarge) => Err(too_large()),

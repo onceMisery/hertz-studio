@@ -483,7 +483,7 @@ pub async fn favorite_membership(state: &Arc<AppState>, body: &Value) -> RpcResu
     }
     // 上限与曲库分页对齐：超出就是前端构造错了，不该让 SQL 参数无限膨胀。
     if request.ids.len() > FAV_PAGE_MAX as usize {
-        return Err(bad_request(format!("ids 数量超过上限 {}", FAV_PAGE_MAX)));
+        return Err(bad_request(format!("ids 数量超过上限 {FAV_PAGE_MAX}")));
     }
     let ids: Vec<String> = request
         .ids

@@ -76,10 +76,10 @@ impl MixerTimeline {
         }
     }
     pub fn take_due(&mut self, now: u64) -> Option<MixSettings> {
-        if !self
+        if self
             .pending
             .as_ref()
-            .is_some_and(|p| p.effective_at.is_some_and(|at| at <= now))
+            .is_none_or(|p| p.effective_at.is_none_or(|at| at > now))
         {
             return None;
         }

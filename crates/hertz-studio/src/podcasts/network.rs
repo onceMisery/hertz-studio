@@ -37,7 +37,7 @@ pub(super) async fn read_bounded(
     match public_net::read_bounded(response, limit).await {
         Ok(bytes) => Ok(bytes),
         Err(public_net::BoundedReadError::Status(status)) => Err(ApiError::upstream_rejected(
-            format!("播客服务返回 HTTP {}", status),
+            format!("播客服务返回 HTTP {status}"),
         )
         .with_source("podcast")),
         Err(public_net::BoundedReadError::TooLarge) => Err(too_large()),

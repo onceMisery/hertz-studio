@@ -297,10 +297,8 @@ impl Desktop {
             self.validate_current(epoch, cancel, completion.authority.as_ref())?;
             protocol::validate(&response, &request_id, &target)?;
             completion.center_opened = true;
-        } else {
-            if let Some(generation) = bridge.capture_generation() {
-                completion.authority = Some(Authority::Authorized(generation));
-            }
+        } else if let Some(generation) = bridge.capture_generation() {
+            completion.authority = Some(Authority::Authorized(generation));
         }
         self.validate_current(epoch, cancel, completion.authority.as_ref())?;
         let (request_id, payload) = protocol::envelope(&target, "status", Value::Null);

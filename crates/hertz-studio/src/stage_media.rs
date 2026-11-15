@@ -516,10 +516,8 @@ impl StageMediaStore {
                 if let Err(e) = owner.terminal(&import, state, Some(&e.message)).await {
                     tracing::warn!(error=?e,"stage import cleanup failed");
                 }
-            } else {
-                if let Err(e) = owner.terminal(&import, "committed", None).await {
-                    tracing::warn!(error=?e,"stage import staging cleanup failed");
-                }
+            } else if let Err(e) = owner.terminal(&import, "committed", None).await {
+                tracing::warn!(error=?e,"stage import staging cleanup failed");
             }
         });
         Ok(json!({"importId":row.import_id,"jobId":row.import_id,"status":"preparing"}))

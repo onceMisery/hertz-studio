@@ -1338,11 +1338,10 @@ mod tests {
         ] {
             let warning = exposure_warning(ip, 7899).expect("非回环必须告警");
             assert!(warning.contains("警告"), "{}", warning);
-            assert!(warning.contains("7899"), "告警要带端口：{}", warning);
+            assert!(warning.contains("7899"), "告警要带端口：{warning}");
             assert!(
                 warning.contains("127.0.0.1"),
-                "要给可操作的替代方案：{}",
-                warning
+                "要给可操作的替代方案：{warning}"
             );
         }
     }

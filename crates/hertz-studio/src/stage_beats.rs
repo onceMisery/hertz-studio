@@ -1324,7 +1324,7 @@ mod tests {
             let mut table = state.stage_beats.lock().await;
             for i in 0..crate::state::STAGE_BEATS_CAP {
                 // 键取满 8 个字符：面板上留的是键的前 8 位，短于此才不会被截。
-                table.insert(format!("k{:07}", i), TaskState::NotPersisted);
+                table.insert(format!("k{i:07}"), TaskState::NotPersisted);
             }
         }
         let v = status(&state, None).await;

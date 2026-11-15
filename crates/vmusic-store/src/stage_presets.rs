@@ -154,7 +154,7 @@ pub fn validate(target: &str, value: &Value) -> Result<(), Error> {
         }
         for (field, limit) in [("cues", 64), ("bindings", 32)] {
             if p.get(field)
-                .is_some_and(|v| !v.as_array().is_some_and(|a| a.len() <= limit))
+                .is_some_and(|v| v.as_array().is_none_or(|a| a.len() > limit))
             {
                 return Err(invalid("编排或绑定数量超限"));
             }
@@ -190,9 +190,9 @@ pub fn validate(target: &str, value: &Value) -> Result<(), Error> {
                     .ok_or_else(|| invalid("媒体背景需要持久素材引用"))?;
                 if r.len() != 2
                     || !bg["assetRef"]["assetId"].as_str().is_some_and(valid_id)
-                    || !bg["assetRef"]["storeId"]
+                    || bg["assetRef"]["storeId"]
                         .as_str()
-                        .is_some_and(|s| uuid::Uuid::parse_str(s).is_ok())
+                        .is_none_or(|s| uuid::Uuid::parse_str(s).is_err())
                     || !matches!(bg["media"].as_str(), Some("image" | "video"))
                 {
                     return Err(invalid("无效素材引用"));
