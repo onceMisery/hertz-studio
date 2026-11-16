@@ -153,6 +153,30 @@ impl App {
         };
         if matches!(
             request.command.as_str(),
+            "wallpaper.ai.receive"
+                | "wallpaper.ai.candidates"
+                | "wallpaper.ai.candidate.save"
+                | "wallpaper.ai.candidate.delete"
+        ) {
+            let proxy = self.proxy.clone();
+            let receiver = reply.clone();
+            if let Err(error) = self.wallpaper_library.submit_ai(
+                request,
+                owner,
+                self.wallpaper_ai.generation.clone(),
+                move |value| {
+                    let _ = proxy.send_event(UserEvent::WallpaperManagement(receiver, value));
+                },
+            ) {
+                self.send_wallpaper_management(
+                    reply,
+                    api::response(id.as_deref(), Err(error), None),
+                );
+            }
+            return;
+        }
+        if matches!(
+            request.command.as_str(),
             "wallpaper.ai.connect"
                 | "wallpaper.ai.disconnect"
                 | "wallpaper.ai.status"

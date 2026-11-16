@@ -360,9 +360,14 @@ pub(crate) struct AiRuntime {
     wallpaper_quotes: Mutex<super::wallpaper_jobs::QuoteStore>,
     pub(super) wallpaper_pairings: Mutex<super::wallpaper_pairing::PendingStore>,
     pub(super) wallpaper_session_deadlines: Mutex<HashMap<String, std::time::Instant>>,
+    pub(super) wallpaper_artifacts: Arc<super::wallpaper_artifacts::Runtime>,
 }
 
 impl AiRuntime {
+    #[cfg(test)]
+    pub(super) async fn has_input(&self, id: &str) -> bool {
+        self.inputs.lock().await.contains_key(id)
+    }
     #[cfg(test)]
     pub(super) fn with_test_provider(provider: Arc<dyn StageIntentProvider>) -> Self {
         let mut runtime = Self::new();
@@ -389,6 +394,7 @@ impl AiRuntime {
             wallpaper_quotes: Mutex::new(super::wallpaper_jobs::QuoteStore::default()),
             wallpaper_pairings: Mutex::new(super::wallpaper_pairing::PendingStore::default()),
             wallpaper_session_deadlines: Mutex::new(HashMap::new()),
+            wallpaper_artifacts: Arc::new(super::wallpaper_artifacts::Runtime::default()),
         }
     }
 
@@ -704,6 +710,8 @@ pub(crate) async fn recover(state: &Arc<AppState>) -> ApiResult<usize> {
     if let Some(error) = first_error {
         return Err(error);
     }
+    super::wallpaper_artifacts::cleanup(state).await?;
+    super::wallpaper_artifacts::maintain_retention(state);
     if recovered > 0 {
         tracing::warn!("AI 恢复：{recovered} 个未完结任务收敛为 interrupted");
     }
@@ -1219,6 +1227,9 @@ async fn submit_owned(
         .await
         .map_err(sql_error)?;
     }
+    if let GenerationInput::Wallpaper(request) = &input {
+        super::wallpaper_artifacts::reserve(state, &mut tx, &job, request).await?;
+    }
     // Serialize input handoff with cancellation cleanup, including the commit boundary.
     let mut inputs = state.ai_runtime.inputs.lock().await;
     if capability == WALLPAPER_CAPABILITY && principal != crate::idempotency::LOCAL_OWNER {
@@ -1275,6 +1286,12 @@ async fn run_job(
     if result.is_err() {
         tracing::error!("AI worker panicked; converging task to interrupted");
         interrupt_worker_failure(&state, &job_id).await;
+    }
+    // All worker exits, including artifact I/O failure, retire ephemeral input.
+    state.ai_runtime.inputs.lock().await.remove(&job_id);
+    super::wallpaper_artifacts::maintain_retention(&state);
+    if let Err(error) = super::wallpaper_artifacts::cleanup(&state).await {
+        tracing::warn!(code=%error.code, "wallpaper result cleanup is deferred");
     }
 }
 
@@ -1629,6 +1646,32 @@ async fn run_job_inner(
                 };
             match validated {
                 Ok((proposal_schema, proposal_payload)) => {
+                    let prepared = if job.capability == WALLPAPER_CAPABILITY {
+                        match super::wallpaper_artifacts::prepare(
+                            &state,
+                            &job_id,
+                            proposal_payload.clone(),
+                        )
+                        .await
+                        {
+                            Ok(prepared) => Some(prepared),
+                            Err(error) => {
+                                super::wallpaper_artifacts::reject(&state, &job_id, error.code)
+                                    .await;
+                                finish_running_with_failure_code(
+                                    state.clone(),
+                                    &job_id,
+                                    "failed",
+                                    trusted_usage.as_ref(),
+                                    "internal_error",
+                                )
+                                .await;
+                                return;
+                            }
+                        }
+                    } else {
+                        None
+                    };
                     // 事务顺序即事实顺序：先 CAS 终态，赢了才落提案——否则
                     // 「已取消的任务留下可读提案」。CAS 输掉时只处理独立的
                     // 迟到 usage；不能复活任务或创建提案。
@@ -1672,22 +1715,27 @@ async fn run_job_inner(
                             tx.commit().await.map_err(sql_error)?;
                             return Ok::<(), ApiError>(());
                         }
-                        let proposal = store::ProposalRow {
-                            proposal_id: proposal_id.clone(),
-                            job_id: job.job_id.clone(),
-                            validated_intent: proposal_payload,
-                            schema_version: proposal_schema.into(),
-                            state: "pending".into(),
-                            revision: 1,
-                            created_at: now,
-                            expires_at: now + PROPOSAL_TTL_MS,
-                        };
-                        store::insert_proposal(&mut *tx, &proposal)
-                            .await
-                            .map_err(store_error)?;
-                        store::attach_proposal(&mut *tx, &job.job_id, &proposal_id)
-                            .await
-                            .map_err(store_error)?;
+                        if let Some(prepared) = &prepared {
+                            super::wallpaper_artifacts::make_available(&mut tx, prepared, now)
+                                .await?;
+                        } else {
+                            let proposal = store::ProposalRow {
+                                proposal_id: proposal_id.clone(),
+                                job_id: job.job_id.clone(),
+                                validated_intent: proposal_payload,
+                                schema_version: proposal_schema.into(),
+                                state: "pending".into(),
+                                revision: 1,
+                                created_at: now,
+                                expires_at: now + PROPOSAL_TTL_MS,
+                            };
+                            store::insert_proposal(&mut *tx, &proposal)
+                                .await
+                                .map_err(store_error)?;
+                            store::attach_proposal(&mut *tx, &job.job_id, &proposal_id)
+                                .await
+                                .map_err(store_error)?;
+                        }
                         tx.commit().await.map_err(sql_error)?;
                         publish_task(&state);
                         Ok(())
@@ -2322,6 +2370,7 @@ pub(super) async fn sweep(state: &Arc<AppState>) -> ApiResult<()> {
     if !state.ai_runner_held() {
         return Ok(());
     }
+    super::wallpaper_artifacts::cleanup(state).await?;
     let now = now_ms();
     let queue_cutoff = now - QUEUE_DEADLINE_MS;
     let run_cutoff = now - RUN_DEADLINE_MS;
@@ -2935,6 +2984,7 @@ async fn wallpaper_submit_owned(
             .ok_or_else(crate::error::unauthorized)?;
         super::wallpaper_pairing::validate_grant(state, &row).await?;
     }
+    super::wallpaper_artifacts::cleanup(state).await?;
     let now = now_ms();
     let key = normalize_key(idempotency_key, now)?;
     // An accepted receipt outlives its quote. Recover only the exact submission

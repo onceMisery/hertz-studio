@@ -281,7 +281,7 @@ mod tests {
         restore(&fixture.0, &rescue, &["stage-media/objects"], true)
             .await
             .unwrap();
-        assert_eq!(inspect(&fixture.0).await.unwrap().current, 29);
+        assert_eq!(inspect(&fixture.0).await.unwrap().current, current_schema());
         assert_eq!(
             std::fs::read(fixture.0.join("stage-media/objects/later/source")).unwrap(),
             b"later media"

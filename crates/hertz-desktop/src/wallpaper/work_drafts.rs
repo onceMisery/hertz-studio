@@ -353,6 +353,14 @@ impl<'a> WorkDrafts<'a> {
     }
 
     pub(crate) async fn create(&self, document: Document) -> Result<Draft> {
+        self.create_owned(document, None).await
+    }
+
+    pub(crate) async fn create_ai(&self, document: Document, receipt: &str) -> Result<Draft> {
+        self.create_owned(document, Some(receipt)).await
+    }
+
+    async fn create_owned(&self, document: Document, receipt: Option<&str>) -> Result<Draft> {
         let mut token = super::file_tokens::random_token()?;
         token.replace_range(12..13, "4");
         token.replace_range(16..17, "8");
@@ -364,7 +372,7 @@ impl<'a> WorkDrafts<'a> {
             &token[16..20],
             &token[20..]
         );
-        self.insert(document, format!("local-{work_id}"), work_id, None)
+        self.insert_owned(document, format!("local-{work_id}"), work_id, None, receipt)
             .await
     }
 
@@ -436,10 +444,22 @@ impl<'a> WorkDrafts<'a> {
 
     async fn insert(
         &self,
+        document: Document,
+        work_key: String,
+        work_id: String,
+        base: Option<&str>,
+    ) -> Result<Draft> {
+        self.insert_owned(document, work_key, work_id, base, None)
+            .await
+    }
+
+    async fn insert_owned(
+        &self,
         mut document: Document,
         work_key: String,
         work_id: String,
         base: Option<&str>,
+        receipt: Option<&str>,
     ) -> Result<Draft> {
         let json = document.normalize()?;
         let id = format!("work-{}", super::file_tokens::random_token()?);
@@ -471,6 +491,9 @@ impl<'a> WorkDrafts<'a> {
         sqlx::query("INSERT INTO drafts(draft_id,work_key,work_id,revision,document_json,base_package_hash,created_at,updated_at) VALUES(?1,?2,?3,1,?4,?5,?6,?6)")
             .bind(&id).bind(&work_key).bind(&work_id).bind(json).bind(base).bind(now_secs())
             .execute(&mut *tx).await.map_err(database)?;
+        if let Some(receipt) = receipt {
+            super::ai_receipts::AiReceipts::attach_draft(&mut tx, receipt, &id).await?;
+        }
         tx.commit().await.map_err(database)?;
         self.get(&id).await
     }
@@ -691,17 +714,27 @@ impl<'a> WorkDrafts<'a> {
         let draft = self.get(id).await?;
         draft.check_revision(revision)?;
         self.check_not_publishing(id).await?;
+        let mut tx = self
+            .library
+            .pool()
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(database)?;
+        sqlx::query("UPDATE ai_receipts SET state='expired',document_json=NULL WHERE draft_id=? AND state='saving' AND EXISTS(SELECT 1 FROM drafts WHERE draft_id=? AND revision=? AND NOT EXISTS(SELECT 1 FROM draft_publications WHERE draft_id=?))")
+            .bind(id).bind(id).bind(as_revision(revision)?).bind(id).execute(&mut *tx).await.map_err(database)?;
         let changed = sqlx::query("DELETE FROM drafts WHERE draft_id=?1 AND revision=?2 AND NOT EXISTS(SELECT 1 FROM draft_publications WHERE draft_id=?1)")
             .bind(id)
             .bind(as_revision(revision)?)
-            .execute(self.library.pool())
+            .execute(&mut *tx)
             .await
             .map_err(database)?
             .rows_affected();
         if changed != 1 {
+            tx.rollback().await.map_err(database)?;
             self.check_not_publishing(id).await?;
             return Err(conflict());
         }
+        tx.commit().await.map_err(database)?;
         Ok(())
     }
 
@@ -845,6 +878,7 @@ impl<'a> WorkDrafts<'a> {
                 .execute(&mut *tx).await.map_err(database)?;
             sqlx::query("DELETE FROM draft_publications WHERE draft_id=?1")
                 .bind(id).execute(&mut *tx).await.map_err(database)?;
+            super::ai_receipts::AiReceipts::finish_publication(&mut tx, id, &draft.work_key, version, &package.package_hash).await?;
             tx.commit().await.map_err(database)?;
             Ok(Published { draft_id: id.to_owned(), draft_revision: revision, work_key: draft.work_key.clone(), version, package_hash: package.package_hash })
         }.await;

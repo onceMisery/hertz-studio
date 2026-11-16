@@ -45,6 +45,39 @@ fn connection() -> Connection {
         expires: None,
     }
 }
+
+#[test]
+fn receive_commit_permit_fences_profile_retirement_and_cancellation() {
+    let native = NativeGeneration::new();
+    let mut connected = connection();
+    connected.bearer = Some("c".repeat(64));
+    connected.expires = Some(Instant::now() + Duration::from_secs(60));
+    lock(&native.state).connection = Some(connected);
+    let cancel = AtomicBool::new(false);
+    let permit = native.receive_permit(0, &cancel).unwrap();
+    let retiring = native.clone();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let thread = std::thread::spawn(move || {
+        let mut state = lock(&retiring.state);
+        state.epoch += 1;
+        state.connection = None;
+        sender.send(()).unwrap();
+    });
+    assert!(
+        receiver.recv_timeout(Duration::from_millis(25)).is_err(),
+        "profile retirement must wait for the commit permit"
+    );
+    drop(permit);
+    receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+    thread.join().unwrap();
+    assert!(native.receive_permit(0, &cancel).is_err());
+    let mut connected = connection();
+    connected.bearer = Some("c".repeat(64));
+    connected.expires = Some(Instant::now() + Duration::from_secs(60));
+    lock(&native.state).connection = Some(connected);
+    cancel.store(true, Ordering::Release);
+    assert!(native.receive_permit(1, &cancel).is_err());
+}
 fn envelope(c: &Connection, phase: &str) -> Value {
     let mut value = json!({"phase":phase,"challenge":c.challenge,"binding":c.binding});
     if phase == "deliver" {

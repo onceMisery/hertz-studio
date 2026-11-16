@@ -8519,15 +8519,14 @@ mod tests {
 
     #[test]
     fn inlined_pages_stay_inside_the_navigate_to_string_limit() {
-        // 只有这两个页面还整页走 NavigateToString（WebView2 上限约 2 MB，壁纸页已改走自定义协议）；
-        // 谁把 MB 级资源内联进来就会在这里失败，而不是让 surface 静默挂不上。
-        for (name, page) in [("lyrics", page_html()), ("settings", settings_html())] {
-            assert!(
-                page.len() < 256 * 1024,
-                "{name} 页面 {} 字节，逼近 NavigateToString 上限",
-                page.len()
-            );
-        }
+        // 只有歌词页整页走 NavigateToString；设置页和壁纸页使用受控自定义协议。
+        // 保留歌词页的容量保护，避免内联大资源导致 surface 静默挂不上。
+        let page = page_html();
+        assert!(
+            page.len() < 256 * 1024,
+            "lyrics 页面 {} 字节，逼近 NavigateToString 上限",
+            page.len()
+        );
     }
 
     #[test]

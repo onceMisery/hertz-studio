@@ -794,3 +794,6 @@ fn read_response(
 #[cfg(test)]
 #[path = "generation_tests.rs"]
 mod tests;
+
+#[path = "generation_receive.rs"]
+pub(crate) mod receive;

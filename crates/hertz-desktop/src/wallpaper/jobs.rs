@@ -480,6 +480,10 @@ struct JobRequest {
 }
 
 enum JobSource {
+    AiReceive {
+        native: Arc<super::generation::NativeGeneration>,
+        service_job: String,
+    },
     Import(ImportSource),
     Prepare(super::target_planner::PrepareRequest),
     PrepareFont(FontPrepareRequest),
@@ -610,6 +614,7 @@ impl<T> std::future::Future for LeasedReceiver<T> {
 }
 
 enum FontPrepareReply {
+    AiReceipt(ReplySender<Result<serde_json::Value, JobError>>),
     ModelInput(
         ReplySender<
             Result<super::model_prepare::ModelInput, super::model_prepare::ModelPreparationError>,
@@ -656,6 +661,12 @@ impl FontPrepareReply {
             "model error guard belongs to model input reply"
         );
         match (self, outcome) {
+            (Self::AiReceipt(reply), Ok(JobOutput::AiReceipt(value))) => {
+                let _ = reply.send(Ok(value));
+            }
+            (Self::AiReceipt(reply), Err(error)) => {
+                let _ = reply.send(Err(error));
+            }
             (Self::ModelSource(reply), Ok(JobOutput::ModelSource(source))) => {
                 let _ = reply.send(Ok(source));
             }
@@ -686,6 +697,7 @@ impl FontPrepareReply {
 }
 
 enum JobOutput {
+    AiReceipt(serde_json::Value),
     ModelInput(super::model_prepare::ModelInput),
     ModelSource(super::assets::CanonicalModelSource),
     Svg(Box<super::target_planner::ResolvedMedia>),
@@ -915,6 +927,29 @@ impl ImportJobs {
         super::image_prepare::validate_target(Some(request.target))?;
         let target = request.target;
         self.enqueue(job_id, JobSource::Prepare(request), Some(target))
+    }
+
+    pub(crate) fn receive_ai(
+        &self,
+        native: Arc<super::generation::NativeGeneration>,
+        service_job: String,
+    ) -> Result<FontPrepareCompletion<serde_json::Value>, JobError> {
+        if !super::api::valid_id(&service_job) {
+            return Err(JobError::invalid_input("生成任务标识无效"));
+        }
+        let mut request = self.reserve(
+            new_job_id(),
+            JobSource::AiReceive {
+                native,
+                service_job,
+            },
+            None,
+            reply_lease_bytes::<Result<serde_json::Value, JobError>>()
+                .saturating_add(2 * 1024 * 1024),
+        )?;
+        let (reply, receive) = self.reply_channel(&mut request);
+        request.font_reply = Some(FontPrepareReply::AiReceipt(reply));
+        self.dispatch(request).map(|id| (id, receive))
     }
 
     /// 字体与导入/图片准备共用单槽；类型化回执只在原 worker 完整退出后发送。
@@ -1265,6 +1300,18 @@ async fn worker_loop(
                 };
                 let outcome = match preparation.as_ref() {
                     Ok(_) => match &request.source {
+                        JobSource::AiReceive {
+                            native,
+                            service_job,
+                        } => run_receive_ai(
+                            &request,
+                            native.clone(),
+                            service_job.clone(),
+                            &library,
+                            &assets,
+                        )
+                        .await
+                        .map(JobOutput::AiReceipt),
                         JobSource::Import(source) => {
                             run_import(&request, source, &library, &assets, &probe, &writer)
                                 .await
@@ -1336,7 +1383,10 @@ async fn worker_loop(
         // 源能力与读取句柄也须在终态发布前退出。
         drop(request.source);
         loop {
-            if request.font_reply.is_some() && outcome.is_ok() {
+            if request.font_reply.is_some()
+                && outcome.is_ok()
+                && !matches!(outcome, Ok(JobOutput::AiReceipt(_)))
+            {
                 if let Err(error) = cancelled(&request.cancel) {
                     outcome = Err(error);
                 }
@@ -1345,20 +1395,27 @@ async fn worker_loop(
             match &outcome {
                 Ok(output) => {
                     status.state = JobState::Done;
-                    status.package_hash = Some(match output {
-                        JobOutput::Package(hash) => hash.clone(),
-                        JobOutput::ModelSource(source) => source.reference().package_hash.clone(),
-                        JobOutput::ModelInput(input) => input.reference().package_hash.clone(),
-                        JobOutput::Svg(media) => media.reference().package_hash.clone(),
-                        JobOutput::Font(font) => font.reference().package_hash.clone(),
-                        JobOutput::Fonts(fonts) => fonts
-                            .values()
-                            .next()
-                            .expect("nonempty font group")
-                            .reference()
-                            .package_hash
-                            .clone(),
-                    });
+                    status.package_hash = if matches!(output, JobOutput::AiReceipt(_)) {
+                        None
+                    } else {
+                        Some(match output {
+                            JobOutput::AiReceipt(_) => unreachable!(),
+                            JobOutput::Package(hash) => hash.clone(),
+                            JobOutput::ModelSource(source) => {
+                                source.reference().package_hash.clone()
+                            }
+                            JobOutput::ModelInput(input) => input.reference().package_hash.clone(),
+                            JobOutput::Svg(media) => media.reference().package_hash.clone(),
+                            JobOutput::Font(font) => font.reference().package_hash.clone(),
+                            JobOutput::Fonts(fonts) => fonts
+                                .values()
+                                .next()
+                                .expect("nonempty font group")
+                                .reference()
+                                .package_hash
+                                .clone(),
+                        })
+                    };
                 }
                 Err(error) if error.code == "cancelled" => {
                     status.state = JobState::Cancelled;
@@ -1417,6 +1474,7 @@ async fn worker_loop(
             // cancel 与归还原槽共用锁：DB 回执期间收到的取消也不能发成功字体证明。
             if request.font_reply.is_some()
                 && outcome.is_ok()
+                && !matches!(outcome, Ok(JobOutput::AiReceipt(_)))
                 && request.cancel.load(Ordering::Acquire)
             {
                 outcome = Err(JobError::new("cancelled", "字体准备已取消并退出"));
@@ -1468,6 +1526,45 @@ fn cancelled(cancel: &AtomicBool) -> Result<(), JobError> {
 
 /// §7.1 导入管线：固定快照 → 包校验/解包 → 容器/像素及真实首帧/seek →
 /// controller 与流物理退出 → 原子发布 → DB 事务。重复导入也复核当前解码环境。
+async fn run_receive_ai(
+    request: &JobRequest,
+    native: Arc<super::generation::NativeGeneration>,
+    service_job: String,
+    library: &Arc<Library>,
+    assets: &Arc<AssetStore>,
+) -> Result<serde_json::Value, JobError> {
+    let cancel = request.cancel.clone();
+    let library = library.clone();
+    let assets = assets.clone();
+    let job_id = request.job_id.clone();
+    let runtime = tokio::runtime::Handle::current();
+    tokio::task::spawn_blocking(move || {
+        let received = native.receive_builtin(&service_job, &cancel)?;
+        cancelled(&cancel)?;
+        assets.check_disk_space(received.bytes.len() as u64 + 64 * 1024)?;
+        let staging = assets.staging_dir(&job_id);
+        std::fs::create_dir(&staging).map_err(|e| JobError::io(e.to_string()))?;
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(staging.join("ai-payload"))
+            .map_err(|e| JobError::io(e.to_string()))?;
+        file.write_all(&received.bytes)
+            .and_then(|_| file.sync_all())
+            .map_err(|e| JobError::io(e.to_string()))?;
+        drop(file);
+        cancelled(&cancel)?;
+        let epoch = received.epoch;
+        runtime.block_on(
+            super::ai_receipts::AiReceipts::new(&library)
+                .receive(received, || native.receive_permit(epoch, &cancel)),
+        )
+    })
+    .await
+    .map_err(|e| JobError::io(e.to_string()))?
+}
+
 async fn run_import(
     request: &JobRequest,
     source: &ImportSource,

@@ -17,6 +17,9 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+#[path = "service_ai.rs"]
+mod ai_operations;
+
 const REQUEST_CAP: usize = 4;
 const HISTORY_CAP: usize = 256;
 const HISTORY_TTL: Duration = Duration::from_secs(600);
@@ -26,6 +29,13 @@ const LAYOUT_CACHE_TTL: Duration = Duration::from_secs(30);
 type Initialization = Option<Result<(), Arc<JobError>>>;
 type Reply = Box<dyn FnOnce(Value) + Send>;
 enum Work {
+    AiCommand {
+        request: Request,
+        owner: u64,
+        native: Arc<super::generation::NativeGeneration>,
+        reply: Reply,
+        slot: Slot,
+    },
     Command(Call),
     AiCatalog {
         brief: String,
@@ -366,16 +376,37 @@ impl LibraryService {
             let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("wallpaper management runtime");
             tokio::task::LocalSet::new().block_on(&runtime, async move {
                 let mut tasks = tokio::task::JoinSet::new();
+                let expiry_slot = Arc::new(tokio::sync::Semaphore::new(1));
+                let mut expiry_wake: Option<Instant> = None;
+                let mut expiry_requested = false;
                 loop {
                     worker.tokens.prune(Instant::now());
                     worker.output_tokens.prune(Instant::now());
-                    let wake = worker.tokens.next_expiry().into_iter().chain(worker.output_tokens.next_expiry()).min().unwrap_or_else(|| Instant::now()+Duration::from_secs(3600));
+                    // The original maintenance wake reclaims expired temporary
+                    // candidate documents even while the settings UI is closed.
+                    if let Some(jobs) = worker.jobs.get().filter(|_| expiry_requested || expiry_wake.is_some_and(|wake| Instant::now() >= wake)) {
+                        if let Ok(permit) = Arc::clone(&expiry_slot).try_acquire_owned() {
+                            expiry_requested = false;
+                            expiry_wake = None;
+                            let jobs = Arc::clone(jobs);
+                            tasks.spawn_local(async move {
+                                // Keep the single slot through scheduler readback,
+                                // so an old deadline cannot enter a newer sweep.
+                                Some((super::ai_receipts::AiReceipts::new(jobs.library()).maintenance().await, permit))
+                            });
+                        }
+                    }
+                    let wake = worker.tokens.next_expiry().into_iter().chain(worker.output_tokens.next_expiry())
+                        .chain(expiry_wake).min().unwrap_or_else(|| Instant::now()+Duration::from_secs(3600));
                     tokio::select! {
                         call = rx.recv() => {
                             let Some(call) = call else { break; };
                             let state = Arc::clone(&worker);
                             tasks.spawn_local(async move {
                                 match call {
+                                    Work::AiCommand {request,owner,native,reply,slot} => {
+                                        let _slot=slot; reply(ai_operations::handle(&state,&request,owner,native).await);
+                                    }
                                     Work::Command(call) => { let _slot = call._slot; let value = state.handle(&call.request, call.owner, call.hwnd, &call.playlist_properties, &call.references).await; (call.reply)(value); }
                                     Work::AiCatalog {brief, context, reply, slot} => {
                                         let _slot = slot;
@@ -386,6 +417,10 @@ impl LibraryService {
                                         let _slot = slot;
                                         let result = async {
                                             let jobs = state.jobs().await?;
+                                            state.check_owner(owner)?;
+                                            if id.starts_with("work-ai-") {
+                                                return super::ai_receipts::AiReceipts::new(jobs.library()).document(&id,revision).await;
+                                            }
                                             let draft = super::work_drafts::WorkDrafts::new(jobs.library()).get(&id).await?;
                                             state.check_owner(owner)?;
                                             if draft.revision != revision { return Err(JobError::new("draft_conflict", "作品草稿已变化，请重新预览")); }
@@ -430,9 +465,27 @@ impl LibraryService {
                                         (call.reply)(result);
                                     }
                                 }
+                                None
                             });
                         }
-                        _ = tasks.join_next(), if !tasks.is_empty() => {}
+                        completion = tasks.join_next(), if !tasks.is_empty() => {
+                            if let Some(Ok(Some((result, _permit)))) = completion {
+                                expiry_wake = match result {
+                                    Ok(expiry) => expiry.map(|expiry| Instant::now()+Duration::from_secs(expiry.saturating_sub(super::library::now_secs()).max(0) as u64)),
+                                    Err(error) => {
+                                        crate::app::log(&format!("AI candidate expiry deferred: {error}"));
+                                        Some(Instant::now()+Duration::from_secs(60))
+                                    }
+                                };
+                            }
+                        }
+                        _ = async {
+                            if let Some(jobs) = worker.jobs.get() {
+                                jobs.library().ai_receipts_changed.notified().await;
+                            } else {
+                                std::future::pending::<()>().await;
+                            }
+                        } => { expiry_requested = true; }
                         _ = tokio::time::sleep_until(wake.into()) => {}
                     }
                 }
@@ -613,6 +666,24 @@ impl LibraryService {
         self.tx
             .try_send(Work::Command(call))
             .map_err(|_| JobError::new("budget_busy", "壁纸管理正在退出或暂不可用"))
+    }
+    pub(crate) fn submit_ai(
+        &self,
+        request: Request,
+        owner: u64,
+        native: Arc<super::generation::NativeGeneration>,
+        reply: impl FnOnce(Value) + Send + 'static,
+    ) -> Result<(), JobError> {
+        let slot = self.reserve()?;
+        self.tx
+            .try_send(Work::AiCommand {
+                request,
+                owner,
+                native,
+                reply: Box::new(reply),
+                slot,
+            })
+            .map_err(|_| JobError::new("budget_busy", "作品管理正在退出或暂不可用"))
     }
     /// A bounded native-only task, sharing admission and the canonical ImportJobs worker.
     pub(crate) fn resolve_selection(

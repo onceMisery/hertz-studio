@@ -10,7 +10,7 @@
 | AI-02 切片 1：生成合同纯数据层 | 2026-11-16 已实施（见下） | 本文档 + `crates/hertz-wallpaper/src/generation.rs` 测试 |
 | AI-02 切片 2：capability snapshot、quote/submit、ai/jobs 注册与路由 | 2026-11-16 已实施（见下） | 本文档 + `crates/hertz-studio/src/ai/{jobs.rs,wallpaper_jobs.rs}` 测试 |
 | AI-02 切片 3：短会话配对（§19.2）与桌面接线 | 2026-11-16 已实施，Windows 内嵌/独立候选各五组真实验收通过 | 下文实现与验证边界 |
-| AI-03 结果交付与入库 | 未实施 | 设计 §19.6 |
+| AI-03 结果交付与入库 | 2026-11-16 builtin 候选链路已完成，Windows 内嵌/独立各九项真实验收通过 | 下文实现与验证边界 |
 | AI-04 图像 adapter 与计费 | 未实施 | 设计 §19.5、§20.5 |
 | AI-05 声明式组合 | 未实施 | 设计 §19.3 |
 | AI-06 外部助手申请 | 未实施 | 设计 §19.2 |
@@ -121,3 +121,44 @@ desktop SHA-256 `e8dc2781d793d91d2ba614754344e8dd2cd50eb17bb55fd1789b73aba5b373b
 
 真实文本 provider 尚未提供壁纸模式，仅免费 fake fixture 可用。这不构成生产
 provider 资格，也不代表 AI-03 的 artifact 接收、预览或保存已经完成。
+
+## 2026-11-16 AI-03：不可变候选、预览与明确保存
+
+服务生成结果接入 `ai/wallpaper_artifacts.rs` 与迁移 0032；wallpaper 不再新建
+Stage proposal，旧 proposal 保留历史语义。原 jobs/usage/grants 继续拥有执行、
+费用与授权，artifact 不成为第二份任务状态或活动配置。
+
+- 受理事务先预留结果容量，每 service owner 最多八份、256 MiB、24 小时。
+  固定目录的文件 flush/rename 后，available 与 job succeeded 在同一事务
+  提交。文件或结果事务失败不能返回可导入结果，已发生的 usage 仍结算；
+  恢复只收敛原任务与文件，不重新调用 provider。
+- `GET /v1/ai/wallpaper/jobs/{jobId}` 返回安全 descriptor；固定二进制
+  `/v1/ai/wallpaper/artifacts/{artifactId}` 使用 `wallpaper:read_artifact`
+  scope，并复核当前绑定、service owner 和期限。最多两个活动读者，最长
+  180 秒；实际文件句柄退出后才回收容量。官方全权入口可用 claimRevision
+  明确认领到新配对会话；旧 jobId 本身不授予新会话读取权限。
+- 原生复用 PID/进程代际已验证的本机连接及 Jobs 接收/准备槽。当前只接收
+  ≤64 KiB 的 builtin 数据，按长度、SHA-256、目录和 schema 核验；接收额度
+  纳入原内容预算。取消、来源变化、断流或迟到结果不建立新候选；重试只取
+  同一 artifact。image/composition adapter 继续保持不可用。
+- 迁移 0007 的 `ai_receipts` 将未保存候选留在候选域，接收和预览不创建普通
+  work 草稿。明确保存时才转交原 WorkDrafts save/publish；安装、来源和 saved
+  回执同事务提交。重复接收或保存回读原 receipt/workKey/packageHash；发布
+  失败保留原已保存草稿供重试。`ai_origins` 只记录 provider/model、时间、
+  输出 hash 和 AI 标记，不记录描述、费用或秘密。
+- 候选面板展示静态场景参考、接收/取消、原唯一预览、作品名、保存及删除。
+  关闭/隐藏释放预览并停止查询，重开恢复回执。保存后通过原“本地作品”入口
+  独立选择和应用，生成与保存不会更改桌面配置。
+- 服务到期回收使用单 deadline waiter；原生到期清理进入原管理 JoinSet，
+  最多一个后台清理任务，候选变更通知和最早候选期限安排下一次唤醒，空库
+  不新增常驻轮询；等待 SQLite 连接时仍可处理其它控制和布局查询。
+  恢复桌面备份会使未保存候选 expired，已保存作品、工程和来源保持原引用。
+
+本切片使用免费 fake fixture。Windows 内嵌/独立各九项实际验收通过，覆盖
+生成、重复接收、真实 GL 首帧与预览关闭、明确保存和重开，并核对桌面设置
+版本与当前场景保持原值。服务 AI 回归 199 项、desktop 串行回归 884 项、
+store 回归 67 项及设置页浏览器检查通过；关闭按钮统一为右上角 X，键盘
+关闭仍保留未保存修改确认。验证记录见
+`docs/aegis/work/2026-11-16-ai02-generation-contract/90-evidence.md`。
+真实文本模型、图像、组合及外部助手的资格继续属于 AI-02 后续 adapter
+资格与 AI-04～06，fake 验收不能代替这些资格。

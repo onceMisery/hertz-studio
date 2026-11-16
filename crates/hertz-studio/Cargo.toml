@@ -62,6 +62,7 @@ time = { workspace = true }
 unicode-normalization = "0.1"
 rmcp = { workspace = true }
 fslock = { workspace = true }
+fs2 = "=0.4.3"
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 dirs = { workspace = true }
 notify = { workspace = true }

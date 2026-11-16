@@ -119,6 +119,17 @@
   if (!panel || !settings) return;
   const el = id => document.getElementById('generation-' + id);
   let epoch = 0, timer = null, busy = false, connected = false, ready = false, quote = null, job = null, submissionPending = false;
+  let candidates = [], candidateKey = '', receiving = null, previewing = null;
+  let generationContext = JSON.stringify(settings.currentAiContext());
+  function node(tag, text, id) { const value = document.createElement(tag); if (text) value.textContent = text; if (id) value.id = 'generation-' + id; return value; }
+  const body = panel.querySelector('.ai-body');
+  const receive = node('button', '接收生成候选', 'receive'); receive.type = 'button';
+  const receiveCancel = node('button', '取消接收', 'receive-cancel'); receiveCancel.type = 'button';
+  const receiveState = node('p', '', 'receive-state'); receiveState.className = 'hint'; receiveState.setAttribute('role', 'status');
+  const stopPreview = node('button', '结束候选预览', 'stop-preview'); stopPreview.type = 'button';
+  const list = node('ul', '', 'candidates'); list.className = 'generation-candidates'; list.setAttribute('aria-label', '生成候选与保存回执');
+  body.lastElementChild.textContent = '接收后可预览并明确保存作品。保存后从“本地作品”选择，再应用到桌面。';
+  body.append(receive, receiveCancel, receiveState, node('h3', '候选与保存回执'), stopPreview, list);
   const phases = { accepted: '已受理，等待生成。', running: '正在生成候选。', succeeded: '候选已生成，尚未保存或应用。',
     cancelled: '任务已取消。费用以实际派发与结算为准。', failed: '生成失败。', interrupted: '生成已中断。' };
   function visible() { return panel.open && !document.hidden && !panel.closest('[role="tabpanel"]').hidden; }
@@ -133,6 +144,10 @@
     el('recover').hidden = !submissionPending; el('recover').disabled = busy || !connected;
     el('price').hidden = !quote; el('confirm').disabled = busy || !quote || quote.expiresAt <= Date.now();
     el('cancel').hidden = !job || !['accepted', 'running'].includes(job.state); el('cancel').disabled = busy;
+    receive.hidden = !job || job.state !== 'succeeded'; receive.disabled = busy || !connected || !!receiving;
+    receiveCancel.hidden = !receiving; receiveCancel.disabled = busy;
+    stopPreview.hidden = !previewing; stopPreview.disabled = busy;
+    list.querySelectorAll('button,input').forEach(control => { control.disabled = busy; });
   }
   function stop() { clearTimeout(timer); timer = null; }
   function invalidateQuote() {
@@ -149,12 +164,67 @@
     stop(); const current = epoch; busy = true; controls();
     try {
       const result = await request(command, payload);
-      if (current === epoch && visible()) success(result);
+      if (current === epoch && visible()) await success(result);
     } catch (error) {
       if (current === epoch && visible()) status(error.message || '操作未完成，请重试原操作。');
     } finally {
       busy = false; controls(); schedule();
     }
+  }
+  function stopCandidatePreview() { if (previewing) settings.releasePreview(); previewing = null; controls(); }
+  function renderCandidates(result) {
+    const next = result.candidates || [], key = JSON.stringify(next);
+    candidates = next;
+    if (key === candidateKey) return;
+    candidateKey = key; list.replaceChildren();
+    if (!next.length) { list.append(node('li', '尚未接收候选。生成完成后点击“接收生成候选”。')); return; }
+    for (const item of next) {
+      const row = node('li'); row.dataset.receiptId = item.receiptId;
+      const title = node('strong', '内置场景候选 · ' + item.artifact.sha256.slice(0, 12));
+      const detail = node('p', item.state === 'saved' ? '已保存作品，可从本地作品入口选择。' : item.state === 'saving' ? '已转交作品保存，重试将继续原保存。' : '已接收，尚未保存。候选到期时间：' + new Date(Number(item.artifact.expiresAt)).toLocaleString()); detail.className = 'hint';
+      row.append(title, detail);
+      if (item.sceneId) {
+        const reference = node('figure'), image = node('img');
+        image.src = '/scene-thumbnails/' + encodeURIComponent(item.sceneId) + '.jpg';
+        image.alt = ''; image.width = 320; image.height = 180; image.loading = 'lazy'; image.decoding = 'async';
+        reference.append(image, node('figcaption', '场景静态参考；生成参数的效果请点击“预览候选”查看。'));
+        row.append(reference);
+      }
+      if (item.state !== 'saved') {
+        const form = node('form'); form.setAttribute('aria-label', '保存候选 ' + item.artifact.sha256.slice(0, 12));
+        const label = node('label', '作品名'), input = node('input'); input.name = 'title'; input.maxLength = 128; input.required = true; input.value = 'AI 内置场景'; label.append(input);
+        const save = node('button', item.state === 'saving' ? '继续保存原作品' : '保存作品'); save.type = 'submit'; form.append(label, save);
+        form.addEventListener('submit', event => {
+          event.preventDefault();
+          action('candidate.save', { receiptId: item.receiptId, title: input.value }, async saved => {
+            stopCandidatePreview(); status('作品已保存。请在本地作品中选择，再应用到桌面。');
+            window.dispatchEvent(new Event('wallpaper-library-changed'));
+            renderCandidates(await request('candidates'));
+          });
+        });
+        row.append(form);
+      }
+      if (item.state === 'previewReady') {
+        const tools = node('div'); tools.className = 'ai-toolbar';
+        const preview = node('button', '预览候选'); preview.type = 'button'; preview.dataset.candidatePreview = item.receiptId;
+        preview.addEventListener('click', async () => {
+          if (busy || !visible()) return;
+          busy = true; const current = epoch; controls(); stop();
+          try {
+            await settings.previewWork({ draftId: item.draftId, draftRevision: item.draftRevision });
+            if (current !== epoch || !visible()) settings.releasePreview();
+            else { previewing = item.receiptId; status('正在预览候选，尚未保存或应用。'); }
+          } catch (error) { if (current === epoch) status(error.message); }
+          finally { busy = false; controls(); schedule(); }
+        });
+        const remove = node('button', '删除未保存候选'); remove.type = 'button'; remove.dataset.candidateDelete = item.receiptId;
+        remove.addEventListener('click', () => action('candidate.delete', { receiptId: item.receiptId }, async () => { if (previewing === item.receiptId) stopCandidatePreview(); renderCandidates(await request('candidates')); status('未保存候选已删除。'); }));
+        tools.append(preview, remove); row.append(tools);
+      }
+      if (item.packageHash) { const hash = node('p', '保存内容标识 · ' + item.packageHash.slice(0, 12)); hash.className = 'ai-content-id'; hash.title = item.packageHash; row.append(hash); }
+      list.append(row);
+    }
+    controls();
   }
   async function refresh() {
     if (!visible() || busy) return;
@@ -185,10 +255,26 @@
         if (current === epoch && visible()) { job = result; el('job').textContent = phases[job.state] || '任务状态未知。'; }
       }
       if (quote && quote.expiresAt <= Date.now()) { quote = null; status('报价已到期，请重新查看报价。'); }
+      if (receiving) {
+        const receipt = await settings.requestManagement('wallpaper.jobs.get', { jobId: receiving });
+        if (current !== epoch || !visible()) return;
+        const local = receipt.result;
+        receiveState.textContent = ({ queued: '等待接收候选…', preparing: '正在接收并核验候选…', done: '同一候选已接收，可预览或保存。', cancelled: '接收已取消，可重新接收同一候选。', failed: '接收失败：' + (local.error || '可重新接收同一候选。') })[local.state] || '正在接收候选…';
+        if (['done', 'cancelled', 'failed'].includes(local.state)) receiving = null;
+      }
+      const localCandidates = await request('candidates');
+      if (current === epoch && visible()) renderCandidates(localCandidates);
     } catch (error) {
       if (current === epoch && visible()) { ready = false; status(error.message || '连接不可用，请重新连接或重试原操作。'); }
     } finally { busy = false; controls(); schedule(); }
   }
+  receive.addEventListener('click', () => action('receive', { jobId: job.jobId }, result => { receiving = result.jobId; receiveState.textContent = '正在接收同一候选…'; }));
+  receiveCancel.addEventListener('click', async () => {
+    if (!receiving || busy) return;
+    try { await settings.requestManagement('wallpaper.jobs.cancel', { jobId: receiving }); receiveState.textContent = '正在取消，等待接收退出…'; }
+    catch (error) { status(error.message); }
+  });
+  stopPreview.addEventListener('click', () => { stopCandidatePreview(); status('候选预览已结束。'); });
   el('connect').addEventListener('click', () => action('connect', {}, () => { ready = false; status('请在播放器设置 → 连接 → AI 与外部连接中确认连接。'); }));
   el('disconnect').addEventListener('click', () => action('disconnect', {}, () => { connected = false; ready = false; quote = null; job = null; el('job').textContent = ''; status('生成连接已断开。'); }));
   el('quote').addEventListener('click', () => action('generate.quote', { brief: el('brief').value, sceneId: el('scene').value }, result => {
@@ -209,11 +295,15 @@
     job = result.job; submissionPending = false; el('job').textContent = phases[job.state] || '原任务已受理。'; status('已找回原请求回执。');
   }));
   for (const name of ['brief', 'scene']) el(name).addEventListener('input', () => { invalidateQuote(); controls(); });
-  panel.addEventListener('toggle', () => { ++epoch; stop(); invalidateQuote(); if (visible()) { ready = false; refresh(); } });
-  new MutationObserver(() => { ++epoch; stop(); invalidateQuote(); if (visible()) refresh(); })
+  panel.addEventListener('toggle', () => { ++epoch; stop(); if (!visible()) stopCandidatePreview(); invalidateQuote(); if (visible()) { ready = false; refresh(); } });
+  new MutationObserver(() => { ++epoch; stop(); if (!visible()) stopCandidatePreview(); invalidateQuote(); if (visible()) refresh(); })
     .observe(panel.closest('[role="tabpanel"]'), { attributes: true, attributeFilter: ['hidden'] });
-  document.addEventListener('visibilitychange', () => { ++epoch; stop(); invalidateQuote(); if (visible()) refresh(); });
-  window.addEventListener('wallpaper-ai-context', () => { ++epoch; stop(); ready = false; quote = null; if (visible()) refresh(); });
-  window.addEventListener('pagehide', stop);
+  document.addEventListener('visibilitychange', () => { ++epoch; stop(); if (!visible()) stopCandidatePreview(); invalidateQuote(); if (visible()) refresh(); });
+  window.addEventListener('wallpaper-ai-context', () => {
+    const next = JSON.stringify(settings.currentAiContext());
+    if (next === generationContext) return;
+    generationContext = next; ++epoch; stop(); stopCandidatePreview(); ready = false; quote = null; if (visible()) refresh();
+  });
+  window.addEventListener('pagehide', () => { stop(); stopCandidatePreview(); });
   controls();
 })();

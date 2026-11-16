@@ -101,6 +101,7 @@ pub(crate) struct Deletion {
 
 pub struct Library {
     pool: crate::wallpaper_upgrade::AdmittedPool,
+    pub(crate) ai_receipts_changed: tokio::sync::Notify,
     #[allow(dead_code)]
     path: PathBuf,
 }
@@ -112,7 +113,15 @@ impl Library {
         let pool = crate::wallpaper_upgrade::open_library(dir)
             .await
             .map_err(|error| JobError::database(format!("{error:#}")))?;
-        Ok(Self { pool, path })
+        let ai_receipts_changed = tokio::sync::Notify::new();
+        // One initial sweep discovers restored candidates; an empty library
+        // has no recurring AI maintenance timer.
+        ai_receipts_changed.notify_one();
+        Ok(Self {
+            pool,
+            path,
+            ai_receipts_changed,
+        })
     }
 
     /// Pool 句柄仅供同类内部的库间操作（崩溃恢复）使用。

@@ -313,6 +313,13 @@ async fn reset_external_recovery(root: &Path, pool: &SqlitePool) -> Result<()> {
     }
     sqlx::query("UPDATE export_jobs SET state='failed',error='database_restored: 资料升级或恢复后，请重新选择输出位置；外部文件保持原样',target_path=NULL,temporary_path=NULL,file_identity=NULL WHERE target_path IS NOT NULL")
         .execute(pool).await?;
+    // Restored temporary candidates cannot become new save authority. Explicitly
+    // saved drafts and installed versions retain their independent ownership.
+    sqlx::query(
+        "UPDATE ai_receipts SET state='expired',document_json=NULL WHERE state='previewReady'",
+    )
+    .execute(pool)
+    .await?;
     // The DB commit precedes barrier removal; an interruption repeats only
     // this bounded DB update, never a file operation outside the desktop root.
     std::fs::remove_file(path)?;

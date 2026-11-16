@@ -12,6 +12,7 @@ pub const SCOPES: &[&str] = &[
     "wallpaper:quote",
     "wallpaper:submit",
     "wallpaper:own_job",
+    "wallpaper:read_artifact",
     "wallpaper:cancel",
 ];
 

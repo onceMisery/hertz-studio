@@ -189,7 +189,8 @@ impl StageIntentProvider for BlockedProvider {
 async fn jobs_state() -> (Arc<AppState>, std::thread::JoinHandle<()>) {
     let dir = std::env::temp_dir().join(format!("vmusic-aijobs-{}", uuid::Uuid::new_v4()));
     let db = vmusic_store::open(&dir).await.unwrap();
-    let (state, handle) = crate::state::tests::playback_state_with_db(db).await;
+    let (mut state, handle) = crate::state::tests::playback_state_with_db(db).await;
+    state.data_dir = dir;
     // 测试进程模拟「持锁服务」：生成受理的门禁打开。
     state
         .ai_runner_held
@@ -5138,16 +5139,31 @@ async fn wallpaper_quote_submit_completes_and_replays_idempotently() {
     assert_eq!(job.capability, "wallpaper.generate");
     let row = await_terminal(&state, &job.job_id.clone()).await;
     assert_eq!(row.state, "succeeded");
-    let proposal_id = row
-        .result_proposal_id
-        .expect("succeeded job carries a proposal");
-    let proposal = store::find_proposal(&state.db, &proposal_id)
+    assert!(
+        row.result_proposal_id.is_none(),
+        "壁纸结果由artifact store交付"
+    );
+    let (artifact_id, bytes, sha256, artifact_state): (String, i64, String, String) =
+        sqlx::query_as(
+            "SELECT artifact_id,bytes,sha256,state FROM ai_wallpaper_artifacts WHERE job_id=?",
+        )
+        .bind(&row.job_id)
+        .fetch_one(&state.db)
         .await
-        .unwrap()
-        .expect("proposal exists");
-    assert_eq!(proposal.schema_version, "wallpaper.builtin:1");
+        .unwrap();
+    assert_eq!(artifact_state, "available");
+    let payload = std::fs::read(
+        state
+            .data_dir
+            .join("ai/wallpaper-artifacts")
+            .join(artifact_id)
+            .join("payload"),
+    )
+    .unwrap();
+    assert_eq!(payload.len() as i64, bytes);
+    assert_eq!(super::input_hash(&payload), sha256);
     let output: hertz_wallpaper::generation::BuiltinSceneOutput =
-        serde_json::from_str(&proposal.validated_intent).unwrap();
+        serde_json::from_slice(&payload).unwrap();
     assert_eq!(
         output.kind,
         hertz_wallpaper::generation::WallpaperGenerationKind::Builtin

@@ -98,6 +98,8 @@ ConvertTo-Json -Compress -InputObject @([GenerationConsent]::ReadAndClick($windo
     page.on('pageerror', error => errors.push(error.message)); await page.waitForSelector('#generation-connect', { state: 'attached' });
     await page.evaluate(() => {
       window.generationTrace = [];
+      const apply = hertzWallpaperSettings.applyStatus;
+      hertzWallpaperSettings.applyStatus = function (payload) { window.generationMediaPreview = payload.mediaPreview; return apply.call(this, payload); };
       document.addEventListener('visibilitychange', () => window.generationTrace.push({ visibility:document.visibilityState }));
       const request = hertzWallpaperSettings.requestManagement;
       hertzWallpaperSettings.requestManagement = async function(command, ...args) {
@@ -116,6 +118,14 @@ ConvertTo-Json -Compress -InputObject @([GenerationConsent]::ReadAndClick($windo
       assert.equal(receipt.ok, true, JSON.stringify(receipt.error));
       return receipt.result;
     }, 'native status snapshot');
+    await page.waitForFunction(() => {
+      const context = hertzWallpaperSettings.currentAiContext();
+      return context.revision != null && !!context.groupId;
+    });
+    const desktopBefore = await page.evaluate(() => ({
+      context: hertzWallpaperSettings.currentAiContext(),
+      builtin: hertzWallpaperSettings.currentBuiltin(),
+    }));
     await page.locator('#wallpaper-generation > summary').click();
     await page.locator('#generation-connect').click();
     const pairing = await until(async () => (await api('/v1/ai/wallpaper/pairings')).pending[0], 'pending pairing');
@@ -184,6 +194,47 @@ ConvertTo-Json -Compress -InputObject @([GenerationConsent]::ReadAndClick($windo
     await until(async () => /候选已生成/.test(await page.locator('#generation-job').innerText()), 'retained submitted task');
     const status = await nativeStatus(); assert.ok(status.job.jobId); assert.equal(status.submissionPending, false);
     assert.ok(!JSON.stringify(status).includes('bearer')); pass('close during submitted receipt and reopen retains native job');
+    await page.locator('#generation-receive').click();
+    await until(async () => (await native('candidates')).result?.candidates?.some(item => item.state === 'previewReady'), 'received immutable candidate');
+    await page.waitForSelector('[data-candidate-preview]');
+    const candidates = (await native('candidates')).result.candidates;
+    const candidate = candidates.find(item => item.state === 'previewReady'); assert.ok(candidate);
+    assert.ok(candidate.sceneId);
+    await page.locator('#generation-candidates figure img').scrollIntoViewIfNeeded();
+    await page.waitForFunction(() => {
+      const image = document.querySelector('#generation-candidates figure img');
+      return image?.complete && image.naturalWidth > 0;
+    });
+    const receivedAgain = await native('receive', { jobId: status.job.jobId }); assert.ok(receivedAgain.result.jobId);
+    await until(async () => {
+      const result = await page.evaluate(async jobId => (await hertzWallpaperSettings.requestManagement('wallpaper.jobs.get', { jobId })).result, receivedAgain.result.jobId);
+      return result.state === 'done';
+    }, 'idempotent local receive');
+    assert.equal((await native('candidates')).result.candidates.filter(item => item.receiptId === candidate.receiptId).length, 1);
+    pass('receive and repeated receive retain one artifact identity');
+    await page.locator('[data-candidate-preview]').click();
+    await page.waitForSelector('#generation-stop-preview', { state: 'visible' });
+    await until(async () => /正在预览候选/.test(await page.locator('#generation-status').innerText()), 'candidate preview');
+    await until(() => page.evaluate(() => window.generationMediaPreview?.firstFrameReady), 'real candidate GL first frame');
+    await page.locator('#generation-stop-preview').click();
+    await page.waitForSelector('#generation-stop-preview', { state: 'hidden' });
+    await until(() => page.evaluate(() => !window.generationMediaPreview), 'real preview controller exit'); pass('candidate uses original preview and explicit close');
+    const form = page.locator('#generation-candidates form').first();
+    await form.locator('input').fill('AI 海岸 · 交付验收'); await form.locator('button[type=submit]').click();
+    await until(async () => (await native('candidates')).result?.candidates?.some(item => item.receiptId === candidate.receiptId && item.state === 'saved'), 'saved immutable package');
+    const saved = (await native('candidates')).result.candidates.find(item => item.receiptId === candidate.receiptId);
+    assert.ok(saved.workKey); assert.match(saved.packageHash, /^[a-f0-9]{64}$/);
+    assert.equal((await native('candidate.save', { receiptId: candidate.receiptId, title: 'repeat' })).result.packageHash, saved.packageHash);
+    assert.deepEqual(await page.evaluate(() => ({
+      context: hertzWallpaperSettings.currentAiContext(),
+      builtin: hertzWallpaperSettings.currentBuiltin(),
+    })), desktopBefore);
+    assert.equal(await page.evaluate(() => generationTrace.some(entry => entry.command === 'wallpaper.apply')), false);
+    pass('generation, preview and saving preserve the desktop settings');
+    await page.reload(); await page.waitForSelector('#generation-connect', { state: 'attached' });
+    await page.locator('#wallpaper-generation > summary').click();
+    await until(async () => (await page.locator('#generation-candidates').innerText()).includes(saved.packageHash.slice(0, 12)), 'saved receipt after reopening native page');
+    pass('explicit save and reopen retain the original real package');
     let polling = 0;
     await page.exposeFunction('generationPollObserved', () => { polling++; });
     await page.evaluate(() => { const request = hertzWallpaperSettings.requestManagement; hertzWallpaperSettings.requestManagement = function (command, ...args) {

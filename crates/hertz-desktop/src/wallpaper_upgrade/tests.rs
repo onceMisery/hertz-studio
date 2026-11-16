@@ -80,7 +80,7 @@ async fn production_upgrade_covers_resources_history_rescue_and_export_revocatio
             .await
             .unwrap()
             .current,
-        6
+        MIGRATOR.iter().last().unwrap().version
     );
     let backup = lifecycle::list(dir.path(), &layout())
         .await
@@ -257,6 +257,125 @@ async fn fresh_app_is_lazy_and_first_library_open_serializes_with_config_gate() 
 }
 
 #[tokio::test]
+async fn restoring_ai_receipts_expires_candidates_and_preserves_saved_work_and_drafts() {
+    use crate::wallpaper::{
+        ai_receipts::AiReceipts, generation::receive::ReceivedBuiltin, library::now_secs,
+        work_drafts::WorkDrafts,
+    };
+    use hertz_wallpaper::generation::{WallpaperArtifact, WallpaperGenerationKind};
+    use sha2::{Digest, Sha256};
+    let root = tempfileish::temp_dir("upgrade-ai-receipts");
+    let library = Library::open(root.path()).await.unwrap();
+    let assets = AssetStore::new(root.path()).unwrap();
+    let receipts = AiReceipts::new(&library);
+    let input = |index| {
+        let bytes = serde_json::to_vec(
+            &serde_json::json!({"kind":"builtin","sceneId":"coast","stateVersion":1,"params":{}}),
+        )
+        .unwrap();
+        ReceivedBuiltin {
+            artifact: WallpaperArtifact {
+                artifact_id: uuid::Uuid::new_v4().to_string(),
+                job_id: format!("restore-{index}"),
+                kind: WallpaperGenerationKind::Builtin,
+                bytes: bytes.len() as u64,
+                sha256: format!("{:x}", Sha256::digest(&bytes)),
+                mime: "application/json".into(),
+                registry_hash: hertz_wallpaper::catalog().registry_hash.clone(),
+                generation_schema_hash: "b".repeat(64),
+                expires_at: ((now_secs() + 3600) * 1000).to_string(),
+            },
+            service_owner: "restore-owner".into(),
+            provider: "fake".into(),
+            model: "fixture".into(),
+            bytes,
+            epoch: 0,
+        }
+    };
+    let saved = receipts.receive(input(0), || Ok(())).await.unwrap();
+    let saved_id = saved["receiptId"].as_str().unwrap().to_owned();
+    let saved = receipts
+        .save(&saved_id, "已保存海岸".into(), &assets)
+        .await
+        .unwrap();
+    let candidate = receipts.receive(input(1), || Ok(())).await.unwrap();
+    let candidate_id = candidate["receiptId"].as_str().unwrap().to_owned();
+    let saving = receipts.receive(input(2), || Ok(())).await.unwrap();
+    let saving_id = saving["receiptId"].as_str().unwrap().to_owned();
+    let drafts = WorkDrafts::new(&library);
+    let draft = drafts
+        .create_ai(receipts.document(&saving_id, 1).await.unwrap(), &saving_id)
+        .await
+        .unwrap();
+    drafts.save(&draft.id, 1).await.unwrap();
+    library.pool().close().await;
+    drop(assets);
+    drop(library);
+    release(root.path()).await;
+    let writer = RootOwner::exclusive(root.path()).unwrap();
+    let snapshot = lifecycle::create_snapshot(writer.root(), "ai-receipt-fixture", &layout())
+        .await
+        .unwrap();
+    drop(writer);
+    let current = Library::open(root.path()).await.unwrap();
+    AiReceipts::new(&current)
+        .delete(&candidate_id)
+        .await
+        .unwrap();
+    current.pool().close().await;
+    drop(current);
+    release(root.path()).await;
+    let restore_root = root.path().to_string_lossy().into_owned();
+    tokio::task::spawn_blocking(move || {
+        maintenance(&[
+            "--wallpaper-restore-upgrade-backup".into(),
+            snapshot.id,
+            "--accept-data-loss".into(),
+            "--desktop-root".into(),
+            restore_root,
+        ])
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    let restored = Library::open(root.path()).await.unwrap();
+    let receipts = AiReceipts::new(&restored);
+    assert_eq!(
+        receipts.get(&candidate_id).await.unwrap()["state"],
+        "expired"
+    );
+    assert!(receipts.document(&candidate_id, 1).await.is_err());
+    let retained: Option<String> =
+        sqlx::query_scalar("SELECT document_json FROM ai_receipts WHERE receipt_id=?")
+            .bind(&candidate_id)
+            .fetch_one(restored.pool())
+            .await
+            .unwrap();
+    assert!(retained.is_none());
+    assert_eq!(receipts.get(&saved_id).await.unwrap(), saved);
+    assert_eq!(receipts.get(&saving_id).await.unwrap()["state"], "saving");
+    assert_eq!(
+        WorkDrafts::new(&restored)
+            .get(&draft.id)
+            .await
+            .unwrap()
+            .saved_revision,
+        Some(1)
+    );
+    let assets = AssetStore::new(root.path()).unwrap();
+    assert!(assets
+        .verify_installed(saved["packageHash"].as_str().unwrap())
+        .unwrap()
+        .is_some());
+    let origins: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM ai_origins")
+        .fetch_one(restored.pool())
+        .await
+        .unwrap();
+    assert_eq!(origins, 1);
+    restored.pool().close().await;
+}
+
+#[tokio::test]
 async fn simultaneous_first_library_opens_never_observe_a_partial_schema() {
     let dir = tempfileish::temp_dir("upgrade-concurrent-first");
     let (first, second) = tokio::join!(Library::open(dir.path()), Library::open(dir.path()));
@@ -267,13 +386,13 @@ async fn simultaneous_first_library_opens_never_observe_a_partial_schema() {
                 .await
                 .unwrap()
                 .current,
-            6
+            MIGRATOR.iter().last().unwrap().version
         );
         let count: i64 = sqlx::query_scalar("SELECT count(*) FROM _sqlx_migrations")
             .fetch_one(library.pool())
             .await
             .unwrap();
-        assert_eq!(count, 6);
+        assert_eq!(count, MIGRATOR.iter().count() as i64);
         library.pool().close().await;
     }
     release(dir.path()).await;
@@ -309,7 +428,7 @@ async fn idle_legacy_sqlite_pool_and_content_writer_are_rejected_before_snapshot
             .await
             .unwrap()
             .current,
-        6
+        MIGRATOR.iter().last().unwrap().version
     );
     drop(app);
 }

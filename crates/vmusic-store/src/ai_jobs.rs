@@ -904,11 +904,18 @@ pub async fn retain_ai_history(
         "DELETE FROM ai_proposals WHERE job_id IN (
             SELECT j.job_id FROM ai_jobs j JOIN ai_usage_entries u ON j.job_id = u.job_id
             WHERE j.created_at < ?1 AND j.updated_at < ?1 AND j.state NOT IN ('accepted', 'running'))",
+        "DELETE FROM ai_wallpaper_artifacts WHERE state='deleted' AND job_id IN (
+            SELECT j.job_id FROM ai_jobs j WHERE j.created_at < ?1 AND j.updated_at < ?1
+            AND j.state NOT IN ('accepted','running')
+            AND EXISTS(SELECT 1 FROM ai_usage_entries u WHERE u.job_id=j.job_id)
+            AND NOT EXISTS(SELECT 1 FROM ai_pending_usage p WHERE p.job_id=j.job_id))",
         "DELETE FROM ai_jobs WHERE created_at < ?1 AND updated_at < ?1
             AND state NOT IN ('accepted', 'running') AND EXISTS (
                 SELECT 1 FROM ai_usage_entries u WHERE u.job_id = ai_jobs.job_id)
             AND NOT EXISTS (
-                SELECT 1 FROM ai_pending_usage p WHERE p.job_id = ai_jobs.job_id)",
+                SELECT 1 FROM ai_pending_usage p WHERE p.job_id = ai_jobs.job_id)
+            AND NOT EXISTS (
+                SELECT 1 FROM ai_wallpaper_artifacts a WHERE a.job_id = ai_jobs.job_id)",
         "DELETE FROM ai_usage_entries WHERE accepted_month < ?1 AND accepted_month != ''
             AND usage_state != 'unknown' AND NOT EXISTS (
                 SELECT 1 FROM ai_jobs j WHERE j.job_id = ai_usage_entries.job_id)
@@ -921,7 +928,7 @@ pub async fn retain_ai_history(
         let query = sqlx::query(statement);
         let query = match index {
             0 | 1 => query.bind(now),
-            2 | 3 => query.bind(job_cutoff),
+            2..=4 => query.bind(job_cutoff),
             _ => query.bind(ledger_month_cutoff),
         };
         query
@@ -958,6 +965,7 @@ pub async fn ai_history_capacity(
         "ai_budget_guard",
         "ai_pending_usage",
         "ai_wallpaper_submissions",
+        "ai_wallpaper_artifacts",
     ] {
         let columns: Vec<ColumnInfo> = sqlx::query_as(&format!("PRAGMA table_info({table})"))
             .fetch_all(&mut *conn)

@@ -9,7 +9,15 @@ const http = require('node:http');
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const root = path.resolve(__dirname, '..');
 const assets = path.join(root, 'crates/hertz-desktop/assets');
-const html = fs.readFileSync(path.join(assets, 'wallpaper-settings.html'), 'utf8').replace('__SETTINGS__', fs.readFileSync(path.join(assets, 'wallpaper-settings.js'), 'utf8')).replace('__LIBRARY__', fs.readFileSync(path.join(assets, 'wallpaper-library.js'), 'utf8'));
+const html = fs.readFileSync(path.join(assets, 'wallpaper-settings.html'), 'utf8')
+  .replace('__DISPLAYS__', fs.readFileSync(path.join(assets, 'wallpaper-displays.js'), 'utf8'))
+  .replace('__DISPLAYS_CSS__', fs.readFileSync(path.join(assets, 'wallpaper-displays.css'), 'utf8'))
+  .replace('__SETTINGS__', fs.readFileSync(path.join(assets, 'wallpaper-settings.js'), 'utf8'))
+  .replace('__LIBRARY__', fs.readFileSync(path.join(assets, 'wallpaper-library.js'), 'utf8'))
+  // Work, playlist and AI controllers have separate browser/native fixtures.
+  .replace('__WORKS__', '')
+  .replace('__PLAYLIST__', '')
+  .replace('__AI__', '');
 const sceneHtml = fs.readFileSync(path.join(assets, 'wallpaper-scene.html'), 'utf8')
   .replace('__GL_BUDGET__', () => fs.readFileSync(path.join(assets, 'wallpaper-gl-budget.js'), 'utf8'))
   .replace('__RUNTIME__', () => fs.readFileSync(path.join(root, 'plugin/ui/vendor/stage-runtime.js'), 'utf8'))
@@ -182,7 +190,9 @@ async function main() {
     await page.locator('#discard').click();
     await page.evaluate(payload => window.hertzWallpaperSettings.applyStatus(payload), missing);
     await page.locator('#tab-wallpaper').click();
-    assert.equal(await page.locator('#monitor').inputValue(), 'DISPLAY9');
+    const unresolved = page.locator('#wallpaper-displays .hd-member select');
+    assert.match(await unresolved.locator('option:checked').innerText(), /旧显示器.*需重新选择/);
+    assert.equal(await unresolved.getAttribute('aria-invalid'), 'true');
     assert.match(await page.locator('#wallpaper-state').innerText(), /未连接/);
     await page.setViewportSize({ width: 390, height: 700 });
     for (const tab of ['wallpaper', 'lyrics', 'runtime']) {
@@ -253,7 +263,8 @@ async function main() {
     assert.equal(await page.locator('#scene-fixed').locator('..').isVisible(),false);
     assert.equal(await page.locator('#scene-static').isVisible(),false);
     assert.match(await page.locator('#preview-placeholder-text').innerText(),/媒体实时预览尚未提供/);
-    for(const id of ['fps','quality','music','motion','preview'])assert.equal(await page.locator('#'+id).isDisabled(),true,id+' is honest for static media');
+    for(const id of ['fps','quality','motion','preview'])assert.equal(await page.locator('#'+id).isDisabled(),true,id+' is honest for static media');
+    assert.equal(await page.locator('#music').isEnabled(),true,'shared audio input remains editable across display groups');
     await page.locator('#pointer').check();
     assert.equal(await page.locator('#motion').isEnabled(),true,'image ripple motion can be resumed after a frozen scene');
     await page.locator('#pointer').uncheck();
@@ -326,7 +337,7 @@ async function main() {
     const mediaUpdate=await page.evaluate(()=>desktopRequests.filter(request=>request.command==='wallpaper.draft.update').at(-1));
     const mediaDraft=mediaUpdate.payload.operations[0].wallpaper;
     assert.deepEqual(mediaDraft.groups[0].selection,{kind:'package',workKey:'video-work',packageHash:'b'.repeat(64)});
-    assert.equal(mediaDraft.groups[0].presentation.fit,'stretch');assert.deepEqual(mediaDraft.audioInput,{kind:'none'});
+    assert.equal(mediaDraft.groups[0].presentation.fit,'stretch');assert.deepEqual(mediaDraft.audioInput,initial.config.audioInput,'selecting local media preserves the shared audio input');
     for(const button of await page.locator('[data-library-select]').all())assert.equal(await button.isDisabled(),true,'pending Apply locks every version choice');
     assert.equal(await page.evaluate(()=>hertzWallpaperSettings.chooseLibraryVersion(nativeLibraryWorks[0],{state:'installed',packageHash:'a'.repeat(64),version:3})),false,'the draft guard also rejects programmatic changes during Apply');
     await page.locator('#library-refresh').click();await imageWork.getByRole('button',{name:'查看版本',exact:true}).click();

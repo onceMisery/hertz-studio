@@ -104,6 +104,10 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/v1/ai/budget-guard/reset", post(ai_budget_guard_reset))
         .route("/v1/ai/wallpaper/pairings", get(ai_wallpaper_pending))
         .route(
+            "/v1/ai/wallpaper/artifacts/{artifactId}/claim",
+            post(ai_wallpaper_artifact_claim),
+        )
+        .route(
             "/v1/ai/wallpaper/pairings/{pairingId}/confirm",
             post(ai_wallpaper_pair_confirm),
         )
@@ -395,6 +399,10 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/v1/ai/wallpaper/quote", post(ai_wallpaper_quote))
         .route("/v1/ai/wallpaper/jobs", post(ai_wallpaper_submit_job))
         .route("/v1/ai/wallpaper/jobs/{jobId}", get(ai_wallpaper_job))
+        .route(
+            "/v1/ai/wallpaper/artifacts/{artifactId}",
+            get(ai_wallpaper_artifact_read).delete(ai_wallpaper_artifact_delete),
+        )
         .route(
             "/v1/ai/wallpaper/jobs/{jobId}/cancel",
             post(ai_wallpaper_cancel),
@@ -1267,7 +1275,9 @@ async fn require_wallpaper_ai(
             Err(error) => return error.into_response(),
         };
         let path = request.uri().path();
-        let scope = if path.ends_with("/capabilities") {
+        let scope = if path.starts_with("/v1/ai/wallpaper/artifacts/") {
+            "wallpaper:read_artifact"
+        } else if path.ends_with("/capabilities") {
             "wallpaper:capabilities"
         } else if path.ends_with("/quote") {
             "wallpaper:quote"
@@ -1334,9 +1344,45 @@ async fn ai_wallpaper_job(
     axum::Extension(principal): axum::Extension<WallpaperPrincipal>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let job = crate::ai::jobs::get_job(&state, &principal.id, &id).await?;
     Ok(Json(
-        serde_json::to_value(job).map_err(|e| internal(e.to_string()))?,
+        crate::ai::wallpaper_artifacts::job(&state, &principal.id, &id).await?,
+    ))
+}
+async fn ai_wallpaper_artifact_read(
+    State(state): State<Arc<AppState>>,
+    axum::Extension(principal): axum::Extension<WallpaperPrincipal>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> ApiResult<Response> {
+    crate::ai::wallpaper_artifacts::read(&state, &principal.id, &id).await
+}
+async fn ai_wallpaper_artifact_delete(
+    State(state): State<Arc<AppState>>,
+    axum::Extension(principal): axum::Extension<WallpaperPrincipal>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(
+        crate::ai::wallpaper_artifacts::delete(&state, &principal.id, &id).await?,
+    ))
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ArtifactClaim {
+    grant_id: String,
+    expected_claim_revision: i64,
+}
+async fn ai_wallpaper_artifact_claim(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(body): Json<ArtifactClaim>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(
+        crate::ai::wallpaper_artifacts::claim(
+            &state,
+            &id,
+            &body.grant_id,
+            body.expected_claim_revision,
+        )
+        .await?,
     ))
 }
 #[derive(Deserialize)]
