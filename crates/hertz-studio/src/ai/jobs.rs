@@ -121,6 +121,34 @@ pub(crate) trait StageIntentProvider: Send + Sync {
         false
     }
 
+    fn supports_wallpaper_composition(&self) -> bool {
+        false
+    }
+
+    fn quote_wallpaper_composition(
+        &self,
+        request: &hertz_wallpaper::generation::WallpaperGenerateRequest,
+        _assets: &hertz_wallpaper::generation::composition::AssetSet,
+    ) -> Result<PriceQuote, String> {
+        self.quote(&request.brief)
+    }
+
+    fn generate_wallpaper_composition(
+        &self,
+        _request: &hertz_wallpaper::generation::WallpaperGenerateRequest,
+        _assets: &hertz_wallpaper::generation::composition::AssetSet,
+        _pricing: PricingSnapshot,
+        _credential: Option<crate::ai::credential::ProviderCredential>,
+        _cancellation: ProviderCancellation,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = WallpaperReply> + Send>> {
+        Box::pin(async {
+            WallpaperReply {
+                output: Err("provider does not support composition generation".into()),
+                usage: None,
+            }
+        })
+    }
+
     /// Quote the complete wallpaper request with its own output bounds.
     /// Existing zero-cost fixtures can keep their original quote.
     fn quote_wallpaper_builtin(
@@ -232,9 +260,34 @@ pub(crate) fn generation_capability(name: &str) -> Option<&'static GenerationCap
 pub(crate) enum GenerationInput {
     Stage(String),
     Wallpaper(hertz_wallpaper::generation::WallpaperGenerateRequest),
+    Composition {
+        request: hertz_wallpaper::generation::WallpaperGenerateRequest,
+        assets: hertz_wallpaper::generation::composition::AssetSet,
+        lease: Option<Arc<()>>,
+    },
 }
 
 impl GenerationInput {
+    fn wallpaper(
+        request: hertz_wallpaper::generation::WallpaperGenerateRequest,
+        assets: Option<hertz_wallpaper::generation::composition::AssetSet>,
+    ) -> Self {
+        match assets {
+            Some(assets) => Self::Composition {
+                request,
+                assets,
+                lease: None,
+            },
+            None => Self::Wallpaper(request),
+        }
+    }
+
+    fn wallpaper_request(&self) -> Option<&hertz_wallpaper::generation::WallpaperGenerateRequest> {
+        match self {
+            Self::Wallpaper(request) | Self::Composition { request, .. } => Some(request),
+            Self::Stage(_) => None,
+        }
+    }
     fn policy(&self, capability: &str) -> Option<&'static GenerationCapability> {
         if capability == WALLPAPER_CAPABILITY && self.is_image() {
             Some(&IMAGE_GENERATION)
@@ -260,6 +313,12 @@ impl GenerationInput {
         match self {
             GenerationInput::Stage(brief) => brief.clone().into_bytes(),
             GenerationInput::Wallpaper(request) => serde_json::to_vec(request).unwrap_or_default(),
+            GenerationInput::Composition {
+                request, assets, ..
+            } => serde_json::to_vec(
+                &json!({"request":request,"assetSet":assets.digest().expect("validated metadata")}),
+            )
+            .unwrap_or_default(),
         }
     }
 }
@@ -352,6 +411,46 @@ impl StageIntentProvider for FakeProvider {
 
     fn supports_wallpaper_builtin(&self) -> bool {
         true
+    }
+
+    fn supports_wallpaper_composition(&self) -> bool {
+        true
+    }
+
+    fn generate_wallpaper_composition(
+        &self,
+        _request: &hertz_wallpaper::generation::WallpaperGenerateRequest,
+        assets: &hertz_wallpaper::generation::composition::AssetSet,
+        _pricing: PricingSnapshot,
+        _credential: Option<crate::ai::credential::ProviderCredential>,
+        _cancellation: ProviderCancellation,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = WallpaperReply> + Send>> {
+        let asset = assets
+            .assets
+            .iter()
+            .find(|asset| {
+                matches!(
+                    asset.kind,
+                    hertz_wallpaper::AssetKind::Image | hertz_wallpaper::AssetKind::Vector
+                )
+            })
+            .cloned();
+        Box::pin(async move {
+            let Some(asset) = asset else {
+                return WallpaperReply {
+                    output: Err(WallpaperOutputError::Rejected),
+                    usage: Some(TrustedUsage::free()),
+                };
+            };
+            WallpaperReply {
+                output: Ok(json!({"kind":"composition","document":{
+                    "documentVersion":1,"canvas":{"width":1920,"height":1080,"colorSpace":"srgb","background":"#101014"},
+                    "nodes":[{"id":"image-1","type":"image","stateVersion":1,"assets":{"asset":asset.alias},"properties":{"width":1920,"height":1080,"fit":"cover"}}],
+                    "effects":[],"timeline":{"durationSeconds":10,"loop":true,"tracks":[]},"bindings":[]
+                }})),
+                usage: Some(TrustedUsage::free()),
+            }
+        })
     }
 
     /// 确定性壁纸输出：使用用户选定的资格目录场景，参数走目录默认
@@ -1073,7 +1172,7 @@ async fn submit_owned(
                 return Err(bad_request("brief 超过 16 KiB 上限"));
             }
         }
-        GenerationInput::Wallpaper(request) => {
+        GenerationInput::Wallpaper(request) | GenerationInput::Composition { request, .. } => {
             if request.brief.len() > cap.input_max_bytes {
                 return Err(bad_request("生成请求超过能力输入上限"));
             }
@@ -1084,6 +1183,15 @@ async fn submit_owned(
                     error.message,
                 )
             })?;
+            if let GenerationInput::Composition { assets, .. } = &input {
+                assets.validate().map_err(|error| {
+                    ApiError::new(
+                        axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                        error.code,
+                        error.message,
+                    )
+                })?;
+            }
         }
     }
     let now = now_ms();
@@ -1303,7 +1411,7 @@ async fn submit_owned(
         .await
         .map_err(sql_error)?;
     }
-    if let GenerationInput::Wallpaper(request) = &input {
+    if let Some(request) = input.wallpaper_request() {
         super::wallpaper_artifacts::reserve(state, &mut tx, &job, request).await?;
     }
     // Serialize input handoff with cancellation cleanup, including the commit boundary.
@@ -1692,6 +1800,31 @@ async fn run_job_inner(
                     )
                 })
             }
+            (
+                GenerationInput::Composition {
+                    request, assets, ..
+                },
+                WALLPAPER_CAPABILITY,
+                super::generation_provider::Provider::Text(provider),
+            ) => {
+                let provider = provider.clone();
+                let request = request.clone();
+                let assets = assets.clone();
+                let cancelled = cancelled.clone();
+                Box::pin(async move {
+                    ProviderCall::Wallpaper(
+                        provider
+                            .generate_wallpaper_composition(
+                                &request,
+                                &assets,
+                                pricing,
+                                credential,
+                                ProviderCancellation::from_receiver(cancelled),
+                            )
+                            .await,
+                    )
+                })
+            }
             _ => {
                 // 能力与输入不匹配（不应发生）：如实失败，按 unknown 结算。
                 finish_running_with_failure_code(
@@ -1819,6 +1952,21 @@ async fn run_job_inner(
                             }
                             Err(error) => Err(format!("输出序列化失败: {error}")),
                         }
+                    }
+                    (GenerationInput::Composition { assets, .. }, WALLPAPER_CAPABILITY) => {
+                        serde_json::to_vec(&value)
+                            .map_err(|error| error.to_string())
+                            .and_then(|bytes| {
+                                hertz_wallpaper::generation::composition::CompositionOutput::parse(
+                                    &bytes, assets,
+                                )
+                                .map_err(|error| error.message)
+                            })
+                            .and_then(|_| {
+                                serde_json::to_string(&value)
+                                    .map(|payload| ("wallpaper.composition:1", payload))
+                                    .map_err(|error| error.to_string())
+                            })
                     }
                     _ => Err("capability 与输入不匹配".to_string()),
                 };
@@ -3088,8 +3236,11 @@ pub(crate) async fn wallpaper_quote(
             "能力快照已过期，请重新读取能力目录",
         ));
     }
-    if request.output.kind == hertz_wallpaper::generation::WallpaperGenerationKind::Builtin
-        && request.registry_hash != snapshot.registry_hash
+    if matches!(
+        request.output.kind,
+        hertz_wallpaper::generation::WallpaperGenerationKind::Builtin
+            | hertz_wallpaper::generation::WallpaperGenerationKind::Composition
+    ) && request.registry_hash != snapshot.registry_hash
     {
         return Err(ApiError::new(
             axum::http::StatusCode::UNPROCESSABLE_ENTITY,
@@ -3097,7 +3248,30 @@ pub(crate) async fn wallpaper_quote(
             "场景目录注册哈希与当前服务不一致",
         ));
     }
-    let input = GenerationInput::Wallpaper(request.clone());
+    let asset_set = if request.output.kind
+        == hertz_wallpaper::generation::WallpaperGenerationKind::Composition
+    {
+        Some(
+            state
+                .ai_runtime
+                .wallpaper_quotes
+                .lock()
+                .await
+                .asset_sets
+                .lookup(
+                    principal,
+                    request
+                        .output
+                        .asset_set_id
+                        .as_deref()
+                        .expect("validated composition request"),
+                    now_ms(),
+                )?,
+        )
+    } else {
+        None
+    };
+    let input = GenerationInput::wallpaper(request.clone(), asset_set.clone());
     let provider = state.ai_runtime.generation_provider(&input).await;
     if !provider.ready() || !provider.supports_wallpaper(&input) {
         return Err(ApiError::new(
@@ -3133,7 +3307,11 @@ pub(crate) async fn wallpaper_quote(
         credential: credential.as_ref().map(super::credential::Lease::identity),
     };
     let now = now_ms();
-    let request_digest = input_hash(&GenerationInput::Wallpaper(request.clone()).input_bytes());
+    let request_digest = input_hash(&input.input_bytes());
+    let asset_set_digest = asset_set
+        .as_ref()
+        .map(|assets| assets.digest().expect("validated metadata"));
+    let asset_count = asset_set.as_ref().map(|assets| assets.assets.len());
     let quote_id = uuid::Uuid::new_v4().to_string();
     let expires_at = state.ai_runtime.wallpaper_quotes.lock().await.insert(
         principal,
@@ -3143,6 +3321,7 @@ pub(crate) async fn wallpaper_quote(
         super::wallpaper_jobs::ProviderQuote {
             pricing: pricing.clone(),
             endpoint_identity: provider.endpoint_identity().map(str::to_owned),
+            asset_set,
         },
         now,
     )?;
@@ -3159,7 +3338,9 @@ pub(crate) async fn wallpaper_quote(
         "maxInputTokens": pricing.quote.max_input_tokens,
         "maxOutputTokens": pricing.quote.max_output_tokens,
         "endpointLabel": provider.endpoint_identity().and_then(|endpoint|reqwest::Url::parse(endpoint).ok()).map(|url|format!("{}://{}:{}",url.scheme(),url.host_str().unwrap_or(""),url.port_or_known_default().unwrap_or(0))).unwrap_or_else(||"本地离线 fixture".into()),
-        "dataScope": if input.is_image() {"仅本次描述与所选图像规格"} else {"仅本次描述与所选内置场景的参数合同"},
+        "dataScope": if input.is_image() {"仅本次描述与所选图像规格"} else if matches!(input,GenerationInput::Composition {..}) {"仅本次描述、素材别名、类型与必要尺寸/时长；不发送文件名、路径或素材字节"} else {"仅本次描述与所选内置场景的参数合同"},
+        "assetSetDigest":asset_set_digest,
+        "assetCount":asset_count,
         "maximumWaitSeconds": if input.is_image() {240} else {90},
         "executionSeconds": if input.is_image() {180} else {30},
         "dimensions": pricing.quote.metering,
@@ -3246,7 +3427,7 @@ async fn wallpaper_submit_owned(
                 quote.pricing.provider.clone(),
                 quote.pricing.model.clone(),
                 quote.endpoint_identity.clone(),
-                GenerationInput::Wallpaper(quote.request.clone()),
+                GenerationInput::wallpaper(quote.request.clone(), quote.asset_set.clone()),
             )
         })
     };
@@ -3327,7 +3508,30 @@ async fn wallpaper_submit_owned(
             "quote 不存在或已过期",
         ));
     };
-    let input = GenerationInput::Wallpaper(request);
+    let mut input = quoted_input;
+    if let GenerationInput::Composition { request, lease, .. } = &mut input {
+        *lease = Some(
+            state
+                .ai_runtime
+                .wallpaper_quotes
+                .lock()
+                .await
+                .asset_sets
+                .pin(
+                    principal,
+                    request
+                        .output
+                        .asset_set_id
+                        .as_deref()
+                        .expect("validated composition request"),
+                    now,
+                )?,
+        );
+    }
+    debug_assert_eq!(
+        input.wallpaper_request().map(|r| r.request_id.as_str()),
+        Some(request.request_id.as_str())
+    );
     let outcome = submit_owned(
         state,
         principal,
@@ -3346,6 +3550,12 @@ async fn wallpaper_submit_owned(
                 .lock()
                 .await
                 .mark_consumed(principal, quote_id);
+            state
+                .ai_runtime
+                .wallpaper_quotes
+                .lock()
+                .await
+                .handoff_assets(principal, quote_id);
         }
         Err(_) => {
             // 受理失败还原为未消费，用户修正后可重试同一 quote。
@@ -3358,6 +3568,41 @@ async fn wallpaper_submit_owned(
         }
     }
     outcome
+}
+
+/// Native selection sends only a strictly bounded, public metadata snapshot.
+pub(crate) async fn wallpaper_asset_set(
+    state: &Arc<AppState>,
+    principal: &str,
+    bytes: &[u8],
+) -> ApiResult<Value> {
+    let _grant = super::facade::grant_lifecycle().lock().await;
+    if principal != crate::idempotency::LOCAL_OWNER {
+        let row = vmusic_store::ai::find_grant_by_id(&state.db, principal)
+            .await
+            .map_err(store_error)?
+            .ok_or_else(crate::error::unauthorized)?;
+        super::wallpaper_pairing::validate_grant(state, &row).await?;
+        let scopes: Vec<String> = serde_json::from_str(&row.scopes).unwrap_or_default();
+        if !scopes.iter().any(|scope| scope == "wallpaper:quote") {
+            return Err(crate::error::unauthorized());
+        }
+    }
+    let assets =
+        hertz_wallpaper::generation::composition::AssetSet::parse(bytes).map_err(|error| {
+            ApiError::new(
+                axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                error.code,
+                error.message,
+            )
+        })?;
+    state
+        .ai_runtime
+        .wallpaper_quotes
+        .lock()
+        .await
+        .asset_sets
+        .insert(principal, assets, now_ms())
 }
 
 #[cfg(test)]

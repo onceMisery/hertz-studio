@@ -20,10 +20,12 @@
   const title = node('input', '', 'work-title'); title.maxLength = 120; title.required = true;
   const description = node('textarea', '', 'work-description'); description.maxLength = 4000; description.rows = 2;
   const params = node('div', '', 'work-params');
+  const compositionFields = node('div', '', 'work-composition'); compositionFields.hidden = true;
+  let compositionView = null;
   const publicHelp = node('p', '勾选“公开参数”后，使用此作品的人可以调整该参数。当前参数值是发布版本的默认值。'); publicHelp.className = 'hint';
   const actions = node('div'); actions.className = 'library-toolbar';
   actions.append(button('保存作品', 'work-save', () => flush()), button('生成版本', 'work-publish', publish), button('预览作品', 'work-preview', preview), button('重新读取', 'work-reload', reload), button('删除草稿', 'work-discard', discard));
-  editor.append(field('作品名称', title), field('作品说明', description), publicHelp, params, actions);
+  editor.append(field('作品名称', title), field('作品说明', description), publicHelp, params, compositionFields, actions);
   section.append(toolbar, status, editor);
   document.getElementById('local-library').after(section);
   let draft = null, documentValue = null, savedLocal = '', queue = Promise.resolve(), timer = 0, epoch = 0;
@@ -31,10 +33,11 @@
   function message(text, error) { status.textContent = text; status.classList.toggle('error', !!error); }
   function ref() { return { draftId: draft.draftId, draftRevision: draft.draftRevision }; }
   function serial(action) { const task = queue.catch(() => {}).then(action); queue = task; return task; }
-  function validForm() { return !draft || !documentValue || title.checkValidity() && Array.from(params.querySelectorAll('input,select')).every(input => input.checkValidity()); }
+  function validForm() { return !draft || !documentValue || title.checkValidity() && Array.from((documentValue.composition ? compositionFields : params).querySelectorAll('input,select,textarea')).every(input => input.checkValidity()); }
   function syncBusy() {
     section.setAttribute('aria-busy', String(busy));
     section.querySelectorAll('button, input, textarea, select').forEach(control => { control.disabled = busy; });
+    if (compositionView) compositionView.setBusy(busy);
   }
   function exclusive(action) {
     if (busy) return Promise.reject(new Error('请等待当前作品操作完成。'));
@@ -64,7 +67,31 @@
     let cursor = null; const values = {}, properties = [];
     do { const page = await request('wallpaper.draft.parameters', { draftId: receipt.draftId, draftRevision: receipt.draftRevision, limit: 30, cursor }); Object.assign(values, page.params); cursor = page.nextCursor; } while (cursor);
     do { const page = await request('wallpaper.draft.properties', { draftId: receipt.draftId, draftRevision: receipt.draftRevision, limit: 30, cursor }); properties.push(...page.properties); cursor = page.nextCursor; } while (cursor);
-    return { title: receipt.title, description: receipt.description, sceneId: receipt.sceneId, stateVersion: receipt.stateVersion, params: values, properties };
+    const value = { title: receipt.title, description: receipt.description, sceneId: receipt.sceneId, stateVersion: receipt.stateVersion, params: values, properties };
+    if (receipt.contentKind === 'composition') {
+      const parts = {};
+      let timeline = null;
+      for (const part of ['canvas', 'nodes', 'effects', 'tracks', 'bindings', 'resources']) {
+        cursor = null; parts[part] = [];
+        do {
+          const page = await request('wallpaper.draft.composition', { draftId: receipt.draftId, draftRevision: receipt.draftRevision, section: part, limit: 16, cursor });
+          parts[part].push(...page.items); cursor = page.nextCursor;
+          timeline = { durationSeconds: page.durationSeconds, loop: page.loop };
+        } while (cursor);
+      }
+      value.composition = { documentVersion: 1, canvas: parts.canvas[0], nodes: parts.nodes, effects: parts.effects, timeline: { ...timeline, tracks: parts.tracks }, bindings: parts.bindings };
+      for (const track of value.composition.timeline.tracks) {
+        if (!track.keysPaged) continue;
+        track.keys = []; cursor = null;
+        do {
+          const page = await request('wallpaper.draft.track.keys', { draftId: receipt.draftId, draftRevision: receipt.draftRevision, trackId: track.id, limit: 32, cursor });
+          track.keys.push(...page.keys); cursor = page.nextCursor;
+        } while (cursor);
+        delete track.keysPaged; delete track.keyCount;
+      }
+      value.resources = parts.resources;
+    }
+    return value;
   }
   function propertyFor(id) { return documentValue.properties.find(property => property.target.kind === 'node' && property.target.nodeId === 'content' && property.target.property === id && property.target.component == null); }
   function propertyDefinition(id, spec, label) {
@@ -75,10 +102,18 @@
   async function show(receipt) {
     const current = ++epoch;
     const value = await readDocument(receipt);
-    const schema = await request('wallpaper.draft.schema', { sceneId: value.sceneId });
+    const schema = value.composition ? await request('wallpaper.draft.catalog', {}) : await request('wallpaper.draft.schema', { sceneId: value.sceneId });
     if (current !== epoch) return;
     draft = receipt; documentValue = value; savedLocal = serialize(value);
     title.value = value.title; description.value = value.description; params.replaceChildren();
+    compositionFields.hidden = !value.composition; params.hidden = !!value.composition; publicHelp.hidden = !!value.composition;
+    if (value.composition) {
+      if (!compositionView) compositionView = window.hertzWallpaperCompositionView.create(compositionFields, { edited, message });
+      compositionView.show(value, schema.composition.definitions);
+      syncBusy(); editor.hidden = false; section.open = true;
+      message('组合作品已打开。编辑会保存草稿，生成版本后可从本地作品中选择或导出。', false);
+      return;
+    }
     Object.entries(schema.params).forEach(([id, spec]) => {
       const exposed = propertyFor(id), initialValue = exposed ? exposed.default : value.params[id];
       const input = node(spec.type === 'select' ? 'select' : 'input'); input.dataset.workParam = id;
@@ -147,6 +182,32 @@
     previous.properties.filter(property => !next.properties.some(item => item.id === property.id)).forEach(property => operations.push({ kind: 'removeProperty', id: property.id }));
     Object.entries(next.params).forEach(([id, value]) => { if (serialize(value) !== serialize(previous.params[id])) operations.push({ kind: 'setParam', id, value }); });
     next.properties.forEach(property => { if (serialize(property) !== serialize(previous.properties.find(item => item.id === property.id))) operations.push({ kind: 'setProperty', property }); });
+    if (next.composition) {
+      const before = previous.composition, after = next.composition;
+      const groups = [['tracks', 'Track'], ['bindings', 'Binding'], ['effects', 'Effect'], ['nodes', 'Node']];
+      const items = (value, section) => section === 'tracks' ? value.timeline.tracks : value[section];
+      for (const [part, name] of groups) items(before, part).filter(item => !items(after, part).some(next => next.id === item.id)).forEach(item => operations.push({ kind: 'remove' + name, id: item.id }));
+      if (serialize(before.canvas) !== serialize(after.canvas)) operations.push({ kind: 'replaceCanvas', canvas: after.canvas });
+      for (const [part, name] of groups.slice().reverse()) for (const item of items(after, part)) {
+        const old = items(before, part).find(previous => previous.id === item.id);
+        if (serialize(item) === serialize(old)) continue;
+        if (name === 'Track' && old) {
+          if (serialize(old.target) !== serialize(item.target)) operations.push({ kind: 'setTrackTarget', trackId: item.id, target: item.target });
+          if (old.keys.length === item.keys.length) {
+            item.keys.forEach((key, index) => { if (serialize(key) !== serialize(old.keys[index])) operations.push({ kind: 'setTrackKey', trackId: item.id, index, key }); });
+          } else {
+            let first = 0, tail = 0;
+            while (first < Math.min(old.keys.length, item.keys.length) && serialize(old.keys[first]) === serialize(item.keys[first])) first++;
+            while (tail < Math.min(old.keys.length, item.keys.length) - first && serialize(old.keys.at(-1 - tail)) === serialize(item.keys.at(-1 - tail))) tail++;
+            for (let index = old.keys.length - tail - 1; index >= first; index--) operations.push({ kind: 'removeTrackKey', trackId: item.id, index });
+            for (let index = first; index < item.keys.length - tail; index++) operations.push({ kind: 'insertTrackKey', trackId: item.id, index, key: item.keys[index] });
+          }
+        } else if (name === 'Node' && old && serialize({ ...old, properties: {} }) === serialize({ ...item, properties: {} }) && Object.keys(old.properties).every(key => Object.hasOwn(item.properties, key))) {
+          for (const [property, value] of Object.entries(item.properties)) if (serialize(value) !== serialize(old.properties[property])) operations.push({ kind: 'setNodeProperty', nodeId: item.id, property, value });
+        } else operations.push({ kind: 'set' + name, [name.toLowerCase()]: item });
+      }
+      if (before.timeline.durationSeconds !== after.timeline.durationSeconds || before.timeline.loop !== after.timeline.loop) operations.push({ kind: 'replaceTimeline', durationSeconds: after.timeline.durationSeconds, loop: after.timeline.loop });
+    }
     return operations;
   }
   function applyOperations(value, operations) {
@@ -156,6 +217,25 @@
       else if (operation.kind === 'setParam') next.params[operation.id] = clone(operation.value);
       else if (operation.kind === 'removeProperty') next.properties = next.properties.filter(property => property.id !== operation.id);
       else if (operation.kind === 'setProperty') { next.properties = next.properties.filter(property => property.id !== operation.property.id); next.properties.push(clone(operation.property)); }
+      else if (operation.kind === 'replaceCanvas') next.composition.canvas = clone(operation.canvas);
+      else if (operation.kind === 'replaceTimeline') Object.assign(next.composition.timeline, { durationSeconds: operation.durationSeconds, loop: operation.loop });
+      else if (operation.kind === 'setNodeProperty') next.composition.nodes.find(node => node.id === operation.nodeId).properties[operation.property] = clone(operation.value);
+      else if (operation.kind === 'setTrackTarget') next.composition.timeline.tracks.find(track => track.id === operation.trackId).target = clone(operation.target);
+      else if (['setTrackKey', 'insertTrackKey', 'removeTrackKey'].includes(operation.kind)) {
+        const keys = next.composition.timeline.tracks.find(track => track.id === operation.trackId).keys;
+        if (operation.kind === 'removeTrackKey') keys.splice(operation.index, 1);
+        else if (operation.kind === 'insertTrackKey') keys.splice(operation.index, 0, clone(operation.key));
+        else keys[operation.index] = clone(operation.key);
+      }
+      else {
+        const match = /^(set|remove)(Node|Effect|Track|Binding)$/.exec(operation.kind);
+        if (!match) throw new Error('无法保存该组合修改。');
+        const name = match[2].toLowerCase(), part = name === 'track' ? next.composition.timeline.tracks : next.composition[name + 's'];
+        const item = operation[name], id = item ? item.id : operation.id, index = part.findIndex(value => value.id === id);
+        if (match[1] === 'remove') { if (index >= 0) part.splice(index, 1); }
+        else if (index >= 0) part[index] = clone(item);
+        else part.push(clone(item));
+      }
     });
     next.properties.sort((left, right) => left.id < right.id ? -1 : left.id > right.id ? 1 : 0);
     return next;
@@ -245,5 +325,6 @@
   }); }
   section.addEventListener('toggle', () => { if (section.open && !busy) refresh().catch(error => message(error.message, true)); });
   window.addEventListener('pagehide', () => clearTimeout(timer));
-  window.hertzWallpaperWork = { flush, openVersion };
+  async function openDraft(id) { await load(id); if (draft?.draftId === id) { title.focus(); section.scrollIntoView({ block: 'nearest' }); } }
+  window.hertzWallpaperWork = { flush, openVersion, openDraft };
 })();

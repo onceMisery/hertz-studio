@@ -42,6 +42,7 @@ struct Quote {
     expires: Instant,
     description: String,
     specification: String,
+    asset_set_id: Option<String>,
 }
 #[derive(Default)]
 struct State {
@@ -52,17 +53,56 @@ struct State {
     last_poll: Option<Instant>,
     job: Option<Value>,
     submission: Option<Value>,
+    submission_asset_set: Option<String>,
 }
 pub(crate) struct NativeGeneration {
     state: Mutex<State>,
     busy: AtomicBool,
+    jobs: Mutex<Option<Arc<super::jobs::ImportJobs>>>,
 }
 impl NativeGeneration {
     pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
             state: Mutex::new(State::default()),
             busy: AtomicBool::new(false),
+            jobs: Mutex::new(None),
         })
+    }
+    pub(crate) fn bind_jobs(&self, jobs: Arc<super::jobs::ImportJobs>) {
+        *lock(&self.jobs) = Some(jobs);
+    }
+    pub(crate) fn service_identity(&self) -> Result<String> {
+        let state = lock(&self.state);
+        let c = state
+            .connection
+            .as_ref()
+            .filter(|c| c.bearer.is_some() && c.expires.is_some_and(|t| Instant::now() < t))
+            .ok_or_else(|| error("ai_not_connected", "请先连接生成服务"))?;
+        Ok(connection_identity(c))
+    }
+    pub(crate) fn upload_asset_set(
+        &self,
+        snapshot: &super::ai_asset_sets::Snapshot,
+    ) -> Result<(String, Value, u64)> {
+        let (epoch, c) = {
+            let s = lock(&self.state);
+            let c = s
+                .connection
+                .clone()
+                .filter(|c| c.bearer.is_some() && c.expires.is_some_and(|t| Instant::now() < t))
+                .ok_or_else(|| error("ai_not_connected", "请先连接生成服务"))?;
+            (s.epoch, c)
+        };
+        let response = http(
+            &c,
+            "POST",
+            "/v1/ai/wallpaper/asset-sets",
+            Some(
+                serde_json::to_value(&snapshot.metadata)
+                    .map_err(|_| error("invalid_input", "素材metadata无法编码"))?,
+            ),
+        )?;
+        Ok((connection_identity(&c), response, epoch))
     }
     pub(crate) fn invalidate_quote(&self) {
         let mut state = lock(&self.state);
@@ -245,26 +285,6 @@ impl NativeGeneration {
             .name("wallpaper-ai-request".into())
             .spawn(move || {
                 let result = service.perform(profile, owner, &command, payload);
-                if matches!(
-                    command.as_str(),
-                    "wallpaper.ai.generate.confirm" | "wallpaper.ai.generate.recover"
-                ) && result.as_ref().is_err_and(|e| {
-                    e.details.as_ref().is_some_and(|d| {
-                        matches!(
-                            d["serviceCode"].as_str(),
-                            Some(
-                                "quote_unknown"
-                                    | "quote_expired"
-                                    | "quote_request_mismatch"
-                                    | "quote_provider_changed"
-                                    | "quote_consumed"
-                                    | "idempotency_conflict"
-                            )
-                        )
-                    })
-                }) {
-                    lock(&service.state).submission = None;
-                }
                 if result.as_ref().is_err_and(|e| {
                     matches!(
                         e.code,
@@ -283,6 +303,73 @@ impl NativeGeneration {
         }
         Ok(())
     }
+    fn submit_generation(
+        &self,
+        epoch: u64,
+        connection: &Connection,
+        body: Value,
+        asset_set: Option<String>,
+    ) -> Result<Value> {
+        // The service receipt belongs to this frozen submission even when the
+        // settings/profile authority changes while HTTP is in flight.
+        let result = http(
+            connection,
+            "POST",
+            "/v1/ai/wallpaper/jobs",
+            Some(body.clone()),
+        );
+        let quote = body["quoteId"].as_str().unwrap_or("");
+        let request = body["requestId"].as_str().unwrap_or("");
+        if result.as_ref().is_err_and(|e| {
+            e.details.as_ref().is_some_and(|details| {
+                matches!(
+                    details["serviceCode"].as_str(),
+                    Some(
+                        "quote_unknown"
+                            | "quote_expired"
+                            | "quote_request_mismatch"
+                            | "quote_provider_changed"
+                            | "quote_consumed"
+                            | "idempotency_conflict"
+                    )
+                )
+            })
+        }) {
+            {
+                let mut state = lock(&self.state);
+                if state.epoch == epoch && state.submission.as_ref() == Some(&body) {
+                    state.submission = None;
+                    state.submission_asset_set = None;
+                }
+            }
+            if let (Some(id), Some(jobs)) = (asset_set, lock(&self.jobs).clone()) {
+                if local_database(
+                    super::ai_asset_sets::AiAssetSets(jobs.library()).release_pending(
+                        &id,
+                        &connection_identity(connection),
+                        quote,
+                        request,
+                    ),
+                )
+                .is_err()
+                {
+                    crate::app::log("rejected composition submission pin could not be released");
+                }
+            }
+        } else if let (Ok(response), Some(_), Some(jobs)) =
+            (&result, asset_set, lock(&self.jobs).clone())
+        {
+            let job = response["job"]["jobId"]
+                .as_str()
+                .filter(|id| super::api::valid_id(id))
+                .ok_or_else(|| error("invalid_response", "任务回执无效，请查询原请求"))?;
+            local_database(
+                super::ai_asset_sets::AiAssetSets(jobs.library()).bind_job(quote, request, job),
+            )?;
+        }
+        result
+    }
+
     fn perform(
         &self,
         profile: crate::config::Profile,
@@ -421,7 +508,17 @@ impl NativeGeneration {
                         parsed.output.height.unwrap_or(0),
                         parsed.output.quality_id.as_deref().unwrap_or("")
                     ),
-                    _ => return Err(error("unsupported_output", "此版本尚未提供组合生成")),
+                    hertz_wallpaper::generation::WallpaperGenerationKind::Composition => {
+                        let jobs = lock(&self.jobs)
+                            .clone()
+                            .ok_or_else(|| error("asset_set_unavailable", "请先选择本机素材"))?;
+                        let id = parsed.output.asset_set_id.as_deref().unwrap_or("");
+                        local_database(
+                            super::ai_asset_sets::AiAssetSets(jobs.library())
+                                .digest(id, &connection_identity(&connection)),
+                        )?;
+                        "声明式组合，仅发送已选素材的必要metadata".into()
+                    }
                 };
                 let mut summary = http(&connection, "POST", "/v1/ai/wallpaper/quote", Some(body))?;
                 let quote_id = summary["quoteId"]
@@ -429,6 +526,26 @@ impl NativeGeneration {
                     .filter(|id| super::api::valid_id(id))
                     .ok_or_else(|| error("invalid_response", "报价标识无效"))?
                     .to_owned();
+                if parsed.output.kind
+                    == hertz_wallpaper::generation::WallpaperGenerationKind::Composition
+                {
+                    let jobs = lock(&self.jobs)
+                        .clone()
+                        .ok_or_else(|| error("asset_set_unavailable", "本机素材映射不可用"))?;
+                    let id = parsed.output.asset_set_id.as_deref().unwrap_or("");
+                    let digest = summary["assetSetDigest"]
+                        .as_str()
+                        .ok_or_else(|| error("invalid_response", "组合报价缺少素材摘要"))?;
+                    local_database(
+                        super::ai_asset_sets::AiAssetSets(jobs.library()).bind_quote(
+                            id,
+                            &connection_identity(&connection),
+                            digest,
+                            &quote_id,
+                            &request_id,
+                        ),
+                    )?;
+                }
                 let remaining = summary["expiresAt"].as_i64().unwrap_or(0) - now_ms();
                 if remaining <= 0 || remaining > 300_000 {
                     return Err(error("quote_expired", "报价期限无效"));
@@ -447,6 +564,7 @@ impl NativeGeneration {
                     summary: summary.clone(),
                     description: input.brief,
                     specification,
+                    asset_set_id: parsed.output.asset_set_id.clone(),
                     expires: Instant::now() + Duration::from_millis(remaining as u64),
                 });
                 summary["confirmationToken"] = token.into();
@@ -461,8 +579,8 @@ impl NativeGeneration {
                 let input: Confirm = serde_json::from_value(payload)
                     .map_err(|_| error("invalid_input", "确认参数无效"))?;
                 let token = input.confirmation_token.as_str();
-                let body = {
-                    let mut state = lock(&self.state);
+                let (body, asset_set_id, quote_revision) = {
+                    let state = lock(&self.state);
                     let q = state
                         .quote
                         .as_ref()
@@ -471,18 +589,72 @@ impl NativeGeneration {
                         })
                         .ok_or_else(|| error("quote_expired", "先重新报价并确认"))?;
                     let body = json!({"quoteId":q.quote_id,"requestId":q.request_id,"idempotencyKey":q.idempotency_key});
-                    state.submission = Some(body.clone());
-                    state.quote = None;
-                    body
+                    (body, q.asset_set_id.clone(), state.quote_revision)
                 };
-                http(&connection, "POST", "/v1/ai/wallpaper/jobs", Some(body))?
+                if let Some(id) = &asset_set_id {
+                    let jobs = lock(&self.jobs)
+                        .clone()
+                        .ok_or_else(|| error("asset_set_unavailable", "本机素材映射不可用"))?;
+                    local_database(
+                        super::ai_asset_sets::AiAssetSets(jobs.library()).begin_submission(
+                            id,
+                            &connection_identity(&connection),
+                            body["quoteId"].as_str().unwrap_or(""),
+                            body["requestId"].as_str().unwrap_or(""),
+                        ),
+                    )?;
+                }
+                // Receipt publication takes SQL before native authority. Never
+                // retain native state while waiting for that same SQL writer.
+                let accepted = {
+                    let mut state = lock(&self.state);
+                    let valid = state.epoch == epoch
+                        && state.quote_revision == quote_revision
+                        && state.connection.as_ref().is_some_and(|c| {
+                            c.bearer.is_some() && c.expires.is_some_and(|t| Instant::now() < t)
+                        })
+                        && state.quote.as_ref().is_some_and(|q| {
+                            q.owner == owner
+                                && q.token == token
+                                && Instant::now() < q.expires
+                                && body["quoteId"] == q.quote_id
+                                && body["requestId"] == q.request_id
+                        });
+                    if valid {
+                        state.submission_asset_set = asset_set_id.clone();
+                        state.submission = Some(body.clone());
+                        state.quote = None;
+                    }
+                    valid
+                };
+                if !accepted {
+                    if let (Some(id), Some(jobs)) = (asset_set_id, lock(&self.jobs).clone()) {
+                        local_database(
+                            super::ai_asset_sets::AiAssetSets(jobs.library()).release_pending(
+                                &id,
+                                &connection_identity(&connection),
+                                body["quoteId"].as_str().unwrap_or(""),
+                                body["requestId"].as_str().unwrap_or(""),
+                            ),
+                        )?;
+                    }
+                    return Err(error(
+                        "ai_superseded",
+                        "连接或报价已变化，请重新选择素材并报价",
+                    ));
+                }
+                self.submit_generation(epoch, &connection, body, asset_set_id)?
             }
             "wallpaper.ai.generate.recover" => {
-                let body = lock(&self.state)
-                    .submission
-                    .clone()
-                    .ok_or_else(|| error("submission_unknown", "没有待查询的确认请求"))?;
-                http(&connection, "POST", "/v1/ai/wallpaper/jobs", Some(body))?
+                let (body, asset_set) = {
+                    let state = lock(&self.state);
+                    let body = state
+                        .submission
+                        .clone()
+                        .ok_or_else(|| error("submission_unknown", "没有待查询的确认请求"))?;
+                    (body, state.submission_asset_set.clone())
+                };
+                self.submit_generation(epoch, &connection, body, asset_set)?
             }
             "wallpaper.ai.generate.job" | "wallpaper.ai.generate.cancel" => {
                 #[derive(Deserialize)]
@@ -530,6 +702,25 @@ impl NativeGeneration {
             }
             _ => return Err(error("unsupported_command", "不支持的生成操作")),
         };
+        let job = if matches!(
+            command,
+            "wallpaper.ai.generate.confirm" | "wallpaper.ai.generate.recover"
+        ) {
+            &result["job"]
+        } else {
+            &result
+        };
+        if matches!(
+            job["state"].as_str(),
+            Some("cancelled" | "failed" | "interrupted" | "expired")
+        ) {
+            if let (Some(jobs), Some(id)) = (lock(&self.jobs).clone(), job["jobId"].as_str()) {
+                local_database(
+                    super::ai_asset_sets::AiAssetSets(jobs.library())
+                        .release_terminal(&connection_identity(&connection), id),
+                )?;
+            }
+        }
         let mut state = lock(&self.state);
         if state.epoch != epoch {
             return Err(error("ai_superseded", "连接已变化"));
@@ -546,6 +737,7 @@ impl NativeGeneration {
             }
             state.job = Some(result["job"].clone());
             state.submission = None;
+            state.submission_asset_set = None;
         } else if matches!(
             command,
             "wallpaper.ai.generate.job" | "wallpaper.ai.generate.cancel"
@@ -646,6 +838,20 @@ impl NativeGeneration {
         }
         result
     }
+}
+fn local_database<T>(future: impl std::future::Future<Output = Result<T>>) -> Result<T> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|_| error("database_error", "本机素材记录读取失败"))?
+        .block_on(future)
+}
+fn connection_identity(c: &Connection) -> String {
+    use sha2::{Digest, Sha256};
+    format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(&json!({"profile":c.profile})).expect("identity"))
+    )
 }
 fn now_ms() -> i64 {
     std::time::SystemTime::now()

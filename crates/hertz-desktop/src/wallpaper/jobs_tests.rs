@@ -219,6 +219,7 @@ fn font_env(
     )
     .unwrap();
     let request = FontPrepareRequest {
+        source: None,
         reference: AssetRef {
             package_hash: package.package_hash,
             asset_id: "brand-font".into(),
@@ -404,6 +405,7 @@ fn font_preparation_holds_original_slot_until_callback_and_worker_cleanup_comple
         "budget_busy"
     );
     let image_request = super::super::target_planner::PrepareRequest {
+        source: None,
         reference: AssetRef {
             asset_id: "background".into(),
             ..request.reference.clone()
@@ -3002,10 +3004,12 @@ fn every_sync_reservation_entry_rejects_busy_with_the_original_diagnostic() {
     occupy_r31_slot(&env);
     let reference = font_request.reference.clone();
     let asset_request = super::super::target_planner::PrepareRequest {
+        source: None,
         reference: reference.clone(),
         target: session_target(),
     };
     let svg_request = SvgPrepareRequest {
+        source: None,
         reference: reference.clone(),
         target: session_target(),
         usage: "color".into(),
@@ -3329,10 +3333,12 @@ fn every_sync_entry_rejects_a_saturated_prepare_quota_before_controls() {
     let (token, session) = saturate_prepare_quota(&budget);
     let reference = font_request.reference.clone();
     let asset_request = super::super::target_planner::PrepareRequest {
+        source: None,
         reference: reference.clone(),
         target: session_target(),
     };
     let svg_request = SvgPrepareRequest {
+        source: None,
         reference: reference.clone(),
         target: session_target(),
         usage: "color".into(),

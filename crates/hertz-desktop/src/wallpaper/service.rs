@@ -29,6 +29,16 @@ const LAYOUT_CACHE_TTL: Duration = Duration::from_secs(30);
 type Initialization = Option<Result<(), Arc<JobError>>>;
 type Reply = Box<dyn FnOnce(Value) + Send>;
 enum Work {
+    CompositionDraftPreview {
+        document: super::work_drafts::Document,
+        target: super::image_prepare::ImageTarget,
+        fit: super::config::Fit,
+        facts: Option<super::builtin_plan::TargetFacts>,
+        cancel: Arc<AtomicBool>,
+        reply:
+            Box<dyn FnOnce(Result<super::composition_plan::PreparedComposition, JobError>) + Send>,
+        slot: Slot,
+    },
     AiCommand {
         request: Request,
         owner: u64,
@@ -111,6 +121,7 @@ struct Record {
 }
 
 struct State {
+    composition_preparing: Mutex<std::collections::HashSet<String>>,
     base: PathBuf,
     probe: ProbeClient,
     jobs: tokio::sync::OnceCell<Arc<ImportJobs>>,
@@ -365,6 +376,7 @@ impl LibraryService {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<Work>(REQUEST_CAP);
         let pending = Arc::new(AtomicUsize::new(0));
         let state = Arc::new(State {
+            composition_preparing: Mutex::new(Default::default()),
             base,
             probe,
             jobs: tokio::sync::OnceCell::new(),
@@ -414,6 +426,15 @@ impl LibraryService {
                             let state = Arc::clone(&worker);
                             tasks.spawn_local(async move {
                                 match call {
+                                    Work::CompositionDraftPreview{document,target,fit,facts,cancel,reply,slot}=>{
+                                        let _slot=slot;let result=async{let jobs=Arc::clone(state.jobs().await?);let runtime=tokio::runtime::Handle::current();tokio::task::spawn_blocking(move||runtime.block_on(async{
+                                            let job=format!("work-preview-{}",super::file_tokens::random_token()?);let source=async{
+                                                let writer=jobs.assets().content_writer()?;let build=super::work_drafts::PackageBuild::resolve(&document,"00000000-0000-4000-8000-000000000000",1,jobs.assets(),&cancel)?;let maximum=build.maximum_bytes()?;writer.preflight_growth(maximum.saturating_mul(2))?;jobs.assets().check_disk_space(maximum.saturating_mul(2))?;std::fs::create_dir(jobs.assets().staging_dir(&job)).map_err(|e|JobError::io(e.to_string()))?;build.write(&jobs.assets().staging_dir(&job).join("original.hwpkg"),&cancel)?;drop(build);let package=jobs.assets().validate_staged(&job)?;jobs.assets().unpack_projection(&job,&package)?;jobs.assets().read_preview_source(&job,&package.package_hash)
+                                            }.await;
+                                            let package=match source{Ok(p)=>p,Err(e)=>{jobs.assets().cleanup_staging(&job);return Err(e)}};
+                                            super::composition_plan::resolve_source(jobs,package,Default::default(),target,fit,facts,cancel).await
+                                        })).await.map_err(|e|JobError::io(e.to_string()))?}.await;reply(result);
+                                    }
                                     Work::AiCommand {request,owner,native,reply,slot} => {
                                         let _slot=slot; reply(ai_operations::handle(&state,&request,owner,native).await);
                                     }
@@ -434,7 +455,7 @@ impl LibraryService {
                                             let draft = super::work_drafts::WorkDrafts::new(jobs.library()).get(&id).await?;
                                             state.check_owner(owner)?;
                                             if draft.revision != revision { return Err(JobError::new("draft_conflict", "作品草稿已变化，请重新预览")); }
-                                            Ok(super::ai_receipts::PreviewSource::Builtin(draft.document))
+                                            Ok(if draft.document.composition.is_some(){super::ai_receipts::PreviewSource::Composition(draft.document)}else{super::ai_receipts::PreviewSource::Builtin(draft.document)})
                                         }.await;
                                         reply(result);
                                     }
@@ -595,6 +616,31 @@ impl LibraryService {
                 reply: Box::new(reply),
             })
             .map_err(|_| JobError::new("budget_busy", "作品管理正在退出或暂不可用"))
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn preview_composition_draft(
+        &self,
+        document: super::work_drafts::Document,
+        target: super::image_prepare::ImageTarget,
+        fit: super::config::Fit,
+        facts: Option<super::builtin_plan::TargetFacts>,
+        cancel: Arc<AtomicBool>,
+        slot: Slot,
+        reply: impl FnOnce(Result<super::composition_plan::PreparedComposition, JobError>)
+            + Send
+            + 'static,
+    ) -> Result<(), JobError> {
+        self.tx
+            .try_send(Work::CompositionDraftPreview {
+                document,
+                target,
+                fit,
+                facts,
+                cancel,
+                slot,
+                reply: Box::new(reply),
+            })
+            .map_err(|_| JobError::new("budget_busy", "组合预览准备暂不可用"))
     }
     pub(crate) fn resolve_desktop_selection(
         &self,
@@ -1150,7 +1196,7 @@ impl State {
                 self.check_owner(owner)?;
                 json!(
                     super::work_drafts::WorkDrafts::new(self.jobs().await?.library())
-                        .create(document)
+                        .create(*document)
                         .await?
                         .receipt()
                 )
@@ -1226,7 +1272,7 @@ impl State {
                 let jobs = self.jobs().await?;
                 let _writer = jobs.assets().content_writer()?;
                 json!(super::work_drafts::WorkDrafts::new(jobs.library())
-                    .create_from_version(&work_key, &package_hash)
+                    .create_from_version(&work_key, &package_hash, self.jobs().await?.assets())
                     .await?
                     .receipt())
             }
@@ -1255,6 +1301,64 @@ impl State {
                     .scene(&scene_id)
                     .cloned()
                     .ok_or_else(|| JobError::invalid_input("场景不存在"))?
+            }
+            Command::WorkDraftCatalog => json!({"composition":composition_catalog_response()}),
+            Command::WorkCompositionSchema {
+                node_type,
+                effect_type,
+            } => {
+                let catalog = composition_catalog_response();
+                let (section, key) = if let Some(node) = node_type {
+                    ("nodes", node)
+                } else {
+                    (
+                        "effects",
+                        effect_type.ok_or_else(|| JobError::invalid_input("缺少schema类型"))?,
+                    )
+                };
+                catalog["definitions"][section]
+                    .as_array()
+                    .and_then(|items| items.iter().find(|item| item["type"] == key))
+                    .cloned()
+                    .ok_or_else(|| JobError::invalid_input("节点或效果schema不存在"))?
+            }
+            Command::WorkDraftComposition {
+                draft_id,
+                draft_revision,
+                section,
+                cursor,
+                limit,
+            } => {
+                self.check_owner(owner)?;
+                json!(
+                    super::work_drafts::WorkDrafts::new(self.jobs().await?.library())
+                        .composition_page(
+                            &draft_id,
+                            draft_revision,
+                            section,
+                            cursor.as_deref(),
+                            limit
+                        )
+                        .await?
+                )
+            }
+            Command::WorkDraftTrackKeys {
+                draft_id,
+                draft_revision,
+                track_id,
+                cursor,
+                limit,
+            } => {
+                self.check_owner(owner)?;
+                super::work_drafts::WorkDrafts::new(self.jobs().await?.library())
+                    .track_keys(
+                        &draft_id,
+                        draft_revision,
+                        &track_id,
+                        cursor.as_deref(),
+                        limit,
+                    )
+                    .await?
             }
             Command::WorkDraftParameters {
                 draft_id,
@@ -1726,6 +1830,13 @@ impl State {
         }
     }
 }
+fn composition_catalog_response() -> Value {
+    // Serialize the shared owner's exact embedded contract for bounded UI reads.
+    serde_json::from_slice(include_bytes!(
+        "../../../hertz-wallpaper/contracts/composition.json"
+    ))
+    .expect("qualified shared composition catalog")
+}
 
 #[cfg(test)]
 mod tests {
@@ -1743,6 +1854,8 @@ mod tests {
         let drafts = super::super::work_drafts::WorkDrafts::new(jobs.library());
         let draft = runtime
             .block_on(drafts.create(super::super::work_drafts::Document {
+                composition: None,
+                resources: vec![],
                 title: "引用详情作品".into(),
                 description: String::new(),
                 scene_id: "coast".into(),
@@ -2241,6 +2354,8 @@ mod tests {
         let jobs = runtime.block_on(service.state.jobs()).unwrap();
         let bytes = crate::wallpaper::work_drafts::builtin_package(
             &crate::wallpaper::work_drafts::Document {
+                composition: None,
+                resources: vec![],
                 title: "布局快照".into(),
                 description: String::new(),
                 scene_id: "coast".into(),

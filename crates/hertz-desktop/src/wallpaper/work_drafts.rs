@@ -20,19 +20,36 @@ pub(crate) const MAX_DOCUMENT_BYTES: usize = 1024 * 1024;
 const MAX_DRAFTS: i64 = 50;
 const PARAM_PAGE_BYTES: usize = 12 * 1024;
 const PARAM_VALUE_BYTES: usize = 8 * 1024;
+#[path = "work_drafts_composition.rs"]
+mod composition;
+#[cfg(test)]
+pub(crate) use composition::tests::install_source as install_composition_test_source;
+pub(crate) use composition::PackageBuild;
+pub(crate) use composition::{Resource, Section};
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Document {
     pub title: String,
     #[serde(default)]
     pub description: String,
+    #[serde(default)]
     pub scene_id: String,
+    #[serde(default)]
     pub state_version: u32,
     #[serde(default)]
     pub params: Map<String, Value>,
     #[serde(default)]
     pub properties: Vec<hertz_wallpaper::PropertyDescriptor>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub composition: Option<hertz_wallpaper::document::Document>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resources: Vec<Resource>,
+}
+impl PartialEq for Document {
+    fn eq(&self, other: &Self) -> bool {
+        serde_json::to_value(self).ok() == serde_json::to_value(other).ok()
+    }
 }
 
 impl Document {
@@ -49,6 +66,13 @@ impl Document {
             return Err(JobError::invalid_input(
                 "作品标题需为 1–120 字符，描述最多 4000 字符",
             ));
+        }
+        if self.composition.is_some() {
+            composition::validate(self)?;
+            return bounded_json(self);
+        }
+        if !self.resources.is_empty() {
+            return Err(invalid("内置场景不能含组合资源"));
         }
         super::config::normalize_builtin(&self.scene_id, self.state_version, &mut self.params)
             .map_err(|error| JobError::invalid_input(error.to_string()))?;
@@ -72,6 +96,9 @@ impl Document {
     }
 
     fn manifest(&self, work_id: &str, version: u32) -> Result<hertz_wallpaper::Manifest> {
+        if self.composition.is_some() {
+            return Err(invalid("组合必须从已核验的资源能力生成真实包"));
+        }
         Ok(hertz_wallpaper::Manifest {
             format_version: 1,
             work_id: work_id.to_owned(),
@@ -123,6 +150,13 @@ impl Document {
             params,
         })
     }
+    pub(crate) fn content_kind(&self) -> &'static str {
+        if self.composition.is_some() {
+            "composition"
+        } else {
+            "builtin"
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -154,6 +188,60 @@ pub(crate) enum Update {
     },
     RemoveProperty {
         id: String,
+    },
+    ReplaceCanvas {
+        canvas: hertz_wallpaper::document::Canvas,
+    },
+    SetNode {
+        node: hertz_wallpaper::document::Node,
+    },
+    RemoveNode {
+        id: String,
+    },
+    SetEffect {
+        effect: hertz_wallpaper::document::Effect,
+    },
+    RemoveEffect {
+        id: String,
+    },
+    SetTrack {
+        track: hertz_wallpaper::document::Track,
+    },
+    RemoveTrack {
+        id: String,
+    },
+    ReplaceTimeline {
+        duration_seconds: f64,
+        r#loop: bool,
+    },
+    SetBinding {
+        binding: hertz_wallpaper::document::Binding,
+    },
+    RemoveBinding {
+        id: String,
+    },
+    SetNodeProperty {
+        node_id: String,
+        property: String,
+        value: Value,
+    },
+    SetTrackKey {
+        track_id: String,
+        index: usize,
+        key: hertz_wallpaper::document::Key,
+    },
+    InsertTrackKey {
+        track_id: String,
+        index: usize,
+        key: hertz_wallpaper::document::Key,
+    },
+    RemoveTrackKey {
+        track_id: String,
+        index: usize,
+    },
+    SetTrackTarget {
+        track_id: String,
+        target: hertz_wallpaper::document::NodeTarget,
     },
 }
 
@@ -189,6 +277,12 @@ pub(crate) struct Receipt<'a> {
     pub property_count: usize,
     pub version: Option<u32>,
     pub package_hash: Option<&'a str>,
+    pub content_kind: &'static str,
+    pub node_count: usize,
+    pub effect_count: usize,
+    pub track_count: usize,
+    pub binding_count: usize,
+    pub resource_count: usize,
 }
 
 impl Draft {
@@ -207,6 +301,28 @@ impl Draft {
             property_count: self.document.properties.len(),
             version: self.version,
             package_hash: self.package_hash.as_deref(),
+            content_kind: self.document.content_kind(),
+            node_count: self
+                .document
+                .composition
+                .as_ref()
+                .map_or(0, |v| v.nodes.len()),
+            effect_count: self
+                .document
+                .composition
+                .as_ref()
+                .map_or(0, |v| v.effects.len()),
+            track_count: self
+                .document
+                .composition
+                .as_ref()
+                .map_or(0, |v| v.timeline.tracks.len()),
+            binding_count: self
+                .document
+                .composition
+                .as_ref()
+                .map_or(0, |v| v.bindings.len()),
+            resource_count: self.document.resources.len(),
         }
     }
 
@@ -353,14 +469,31 @@ impl<'a> WorkDrafts<'a> {
     }
 
     pub(crate) async fn create(&self, document: Document) -> Result<Draft> {
-        self.create_owned(document, None).await
+        if !document.resources.is_empty() {
+            return Err(invalid("请通过已确认的素材快照或本机作品重开加入资源"));
+        }
+        self.create_owned(document, None, None).await
     }
 
     pub(crate) async fn create_ai(&self, document: Document, receipt: &str) -> Result<Draft> {
-        self.create_owned(document, Some(receipt)).await
+        self.create_owned(document, Some(receipt), None).await
     }
-
-    async fn create_owned(&self, document: Document, receipt: Option<&str>) -> Result<Draft> {
+    pub(crate) async fn create_prepared_ai(
+        &self,
+        document: Document,
+        receipt: &str,
+        state: &str,
+        diagnostics: Option<&str>,
+    ) -> Result<Draft> {
+        self.create_owned(document, Some(receipt), Some((state, diagnostics)))
+            .await
+    }
+    async fn create_owned(
+        &self,
+        document: Document,
+        receipt: Option<&str>,
+        preparation: Option<(&str, Option<&str>)>,
+    ) -> Result<Draft> {
         let mut token = super::file_tokens::random_token()?;
         token.replace_range(12..13, "4");
         token.replace_range(16..17, "8");
@@ -372,8 +505,15 @@ impl<'a> WorkDrafts<'a> {
             &token[16..20],
             &token[20..]
         );
-        self.insert_owned(document, format!("local-{work_id}"), work_id, None, receipt)
-            .await
+        self.insert_owned(
+            document,
+            format!("local-{work_id}"),
+            work_id,
+            None,
+            receipt,
+            preparation,
+        )
+        .await
     }
 
     /// Only the user's local builtin work can be reopened. Import sources and
@@ -382,6 +522,7 @@ impl<'a> WorkDrafts<'a> {
         &self,
         work_key: &str,
         package_hash: &str,
+        assets: &AssetStore,
     ) -> Result<Draft> {
         if !self
             .library
@@ -397,13 +538,62 @@ impl<'a> WorkDrafts<'a> {
             .ok_or_else(|| JobError::new("work_not_found", "作品不存在"))?;
         let authored: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM authored_versions a JOIN versions v ON v.version_key=a.version_key WHERE v.work_key=?1 AND v.package_hash=?2)")
             .bind(work_key).bind(package_hash).fetch_one(self.library.pool()).await.map_err(database)?;
-        if work.source_id != "local" || work.kind != "builtin" || !authored {
+        if work.source_id != "local"
+            || !matches!(work.kind.as_str(), "builtin" | "composition")
+            || !authored
+        {
             return Err(JobError::new(
                 "work_not_editable",
                 "仅可重开本机内置场景作品",
             ));
         }
-        let manifest = self.library.cover_manifest(work_key, package_hash).await?;
+        let package = assets.read_installed_manifest(package_hash)?;
+        let manifest = package.manifest.clone();
+        if let hertz_wallpaper::Content::Composition { document: path } = &manifest.content {
+            let pin = assets.pin_package_entry(
+                &package,
+                path,
+                &std::sync::atomic::AtomicBool::new(false),
+            )?;
+            use std::io::Read;
+            let mut bytes = Vec::new();
+            super::assets::open_immutable(&pin.path)?
+                .take(MAX_DOCUMENT_BYTES as u64 + 1)
+                .read_to_end(&mut bytes)
+                .map_err(io)?;
+            let compiled =
+                hertz_wallpaper::document::compile_document(&bytes, &manifest).map_err(invalid)?;
+            let document = Document {
+                title: manifest.title.clone(),
+                description: manifest.description.clone(),
+                scene_id: String::new(),
+                state_version: 0,
+                params: Map::new(),
+                properties: hertz_wallpaper::properties::validate_properties(&manifest)
+                    .map_err(invalid)?,
+                composition: Some(compiled.document().clone()),
+                resources: manifest
+                    .assets
+                    .iter()
+                    .map(|a| Resource {
+                        asset_id: a.id.clone(),
+                        kind: a.kind,
+                        work_key: work_key.into(),
+                        package_hash: package_hash.into(),
+                        source_asset_id: a.id.clone(),
+                        candidate_id: None,
+                    })
+                    .collect(),
+            };
+            return self
+                .insert(
+                    document,
+                    work_key.into(),
+                    manifest.work_id,
+                    Some(package_hash),
+                )
+                .await;
+        }
         if work.remote_work_id.as_deref() != Some(manifest.work_id.as_str())
             || !manifest.files.is_empty()
             || !manifest.assets.is_empty()
@@ -434,6 +624,8 @@ impl<'a> WorkDrafts<'a> {
                 state_version,
                 params,
                 properties,
+                composition: None,
+                resources: vec![],
             },
             work_key.to_owned(),
             manifest.work_id,
@@ -449,7 +641,7 @@ impl<'a> WorkDrafts<'a> {
         work_id: String,
         base: Option<&str>,
     ) -> Result<Draft> {
-        self.insert_owned(document, work_key, work_id, base, None)
+        self.insert_owned(document, work_key, work_id, base, None, None)
             .await
     }
 
@@ -460,6 +652,7 @@ impl<'a> WorkDrafts<'a> {
         work_id: String,
         base: Option<&str>,
         receipt: Option<&str>,
+        preparation: Option<(&str, Option<&str>)>,
     ) -> Result<Draft> {
         let json = document.normalize()?;
         let id = format!("work-{}", super::file_tokens::random_token()?);
@@ -491,8 +684,20 @@ impl<'a> WorkDrafts<'a> {
         sqlx::query("INSERT INTO drafts(draft_id,work_key,work_id,revision,document_json,base_package_hash,created_at,updated_at) VALUES(?1,?2,?3,1,?4,?5,?6,?6)")
             .bind(&id).bind(&work_key).bind(&work_id).bind(json).bind(base).bind(now_secs())
             .execute(&mut *tx).await.map_err(database)?;
+        sync_resource_references(&mut tx, &id, &document).await?;
         if let Some(receipt) = receipt {
-            super::ai_receipts::AiReceipts::attach_draft(&mut tx, receipt, &id).await?;
+            if let Some((state, diagnostics)) = preparation {
+                super::ai_receipts::AiReceipts::attach_prepared_draft(
+                    &mut tx,
+                    receipt,
+                    &id,
+                    state,
+                    diagnostics,
+                )
+                .await?;
+            } else {
+                super::ai_receipts::AiReceipts::attach_draft(&mut tx, receipt, &id).await?;
+            }
         }
         tx.commit().await.map_err(database)?;
         self.get(&id).await
@@ -671,10 +876,13 @@ impl<'a> WorkDrafts<'a> {
                     };
                     draft.document.properties.remove(index);
                 }
+                operation => composition::update(&mut draft.document, operation)?,
             }
             // Every typed operation must be valid. Normalization restores the
             // registry default for RemoveParam instead of inventing a fallback.
-            draft.document.normalize()?;
+            if draft.document.composition.is_none() {
+                draft.document.normalize()?;
+            }
         }
         let json = draft.document.normalize()?;
         if revision >= i64::MAX as u64 {
@@ -691,6 +899,54 @@ impl<'a> WorkDrafts<'a> {
         Ok(draft)
     }
 
+    pub(crate) async fn composition_page(
+        &self,
+        id: &str,
+        revision: u64,
+        section: Section,
+        cursor: Option<&str>,
+        limit: u32,
+    ) -> Result<composition::Page> {
+        let draft = self.get(id).await?;
+        draft.check_revision(revision)?;
+        composition::page(&draft, section, cursor, limit)
+    }
+    pub(crate) async fn track_keys(
+        &self,
+        id: &str,
+        revision: u64,
+        track_id: &str,
+        cursor: Option<&str>,
+        limit: u32,
+    ) -> Result<Value> {
+        let draft = self.get(id).await?;
+        draft.check_revision(revision)?;
+        let value = draft
+            .document
+            .composition
+            .as_ref()
+            .ok_or_else(|| invalid("需要组合草稿"))?;
+        let track = value
+            .timeline
+            .tracks
+            .iter()
+            .find(|v| v.id == track_id)
+            .ok_or_else(|| invalid("轨道不存在"))?;
+        let start = cursor
+            .map(|v| v.parse::<usize>().map_err(invalid))
+            .transpose()?
+            .unwrap_or(0);
+        if start > track.keys.len() {
+            return Err(invalid("关键帧游标不属于当前修订"));
+        }
+        let end = start
+            .saturating_add(limit.clamp(1, 128) as usize)
+            .min(track.keys.len());
+        Ok(
+            serde_json::json!({"keys":&track.keys[start..end],"nextCursor":(end<track.keys.len()).then(||end.to_string()),"draftRevision":revision}),
+        )
+    }
+
     /// Commit the current project snapshot only. It neither creates a library
     /// work/version nor changes the desktop selection or configuration revision.
     pub(crate) async fn save(&self, id: &str, revision: u64) -> Result<Draft> {
@@ -698,13 +954,36 @@ impl<'a> WorkDrafts<'a> {
         draft.check_revision(revision)?;
         self.check_not_publishing(id).await?;
         let json = draft.document.normalize()?;
+        let mut tx = self
+            .library
+            .pool()
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(database)?;
+        let candidate: Option<(String, i64)> = sqlx::query_as(
+            "SELECT state,expires_at FROM ai_receipts WHERE draft_id=? AND kind='composition'",
+        )
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(database)?;
+        if candidate.is_some_and(|(state, expiry)| {
+            !matches!(state.as_str(), "saving" | "saved")
+                && (!matches!(state.as_str(), "previewReady" | "failed") || expiry <= now_secs())
+        }) {
+            return Err(JobError::new("candidate_changed", "组合候选已删除或到期"));
+        }
         let changed = sqlx::query("UPDATE drafts SET committed_revision=revision,committed_document_json=?1,updated_at=?2 WHERE draft_id=?3 AND revision=?4 AND NOT EXISTS(SELECT 1 FROM draft_publications WHERE draft_id=?3)")
             .bind(json).bind(now_secs()).bind(id).bind(as_revision(revision)?)
-            .execute(self.library.pool()).await.map_err(database)?.rows_affected();
+            .execute(&mut *tx).await.map_err(database)?.rows_affected();
         if changed != 1 {
             self.check_not_publishing(id).await?;
             return Err(conflict());
         }
+        if draft.document.composition.is_some() {
+            sqlx::query("UPDATE ai_receipts SET state='saving',save_title=? WHERE draft_id=? AND kind='composition' AND state IN ('previewReady','failed')").bind(&draft.document.title).bind(id).execute(&mut *tx).await.map_err(database)?;
+        }
+        tx.commit().await.map_err(database)?;
         draft.saved_revision = Some(revision);
         draft.committed_document = Some(draft.document.clone());
         Ok(draft)
@@ -720,7 +999,7 @@ impl<'a> WorkDrafts<'a> {
             .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(database)?;
-        sqlx::query("UPDATE ai_receipts SET state='expired',document_json=NULL WHERE draft_id=? AND state='saving' AND EXISTS(SELECT 1 FROM drafts WHERE draft_id=? AND revision=? AND NOT EXISTS(SELECT 1 FROM draft_publications WHERE draft_id=?))")
+        sqlx::query("UPDATE ai_receipts SET state='expired',document_json=NULL WHERE draft_id=? AND state IN ('preparing','failed','previewReady','saving') AND EXISTS(SELECT 1 FROM drafts WHERE draft_id=? AND revision=? AND NOT EXISTS(SELECT 1 FROM draft_publications WHERE draft_id=?))")
             .bind(id).bind(id).bind(as_revision(revision)?).bind(id).execute(&mut *tx).await.map_err(database)?;
         let changed = sqlx::query("DELETE FROM drafts WHERE draft_id=?1 AND revision=?2 AND NOT EXISTS(SELECT 1 FROM draft_publications WHERE draft_id=?1)")
             .bind(id)
@@ -734,6 +1013,7 @@ impl<'a> WorkDrafts<'a> {
             self.check_not_publishing(id).await?;
             return Err(conflict());
         }
+        super::ai_receipts::AiReceipts::cleanup_revoked(&mut tx).await?;
         tx.commit().await.map_err(database)?;
         Ok(())
     }
@@ -794,17 +1074,27 @@ impl<'a> WorkDrafts<'a> {
         // This durable request precedes all filesystem publication. A restart
         // may index the directory as an ordinary import; retries still use the
         // original version/hash and never infer authorship from workId alone.
-        let (publication, bytes) = self.reserve_publication(&draft).await?;
-        let version = publication.version as u32;
         let job_id = format!("work-{}", super::file_tokens::random_token()?);
+        let (publication, bytes) = match self
+            .reserve_publication(&draft, assets, &writer, &job_id)
+            .await
+        {
+            Ok(publication) => publication,
+            Err(error) => {
+                assets.cleanup_staging(&job_id);
+                return Err(error);
+            }
+        };
+        let version = publication.version as u32;
+        let package_bytes = publication.package_bytes as u64;
         let staging = assets.staging_dir(&job_id);
         let outcome = async {
-            assets.check_disk_space(bytes.len() as u64 + 4096)?;
-            std::fs::create_dir(&staging).map_err(io)?;
-            let mut file = std::fs::OpenOptions::new().write(true).create_new(true)
-                .open(staging.join("original.hwpkg")).map_err(io)?;
-            file.write_all(&bytes).and_then(|_| file.sync_all()).map_err(io)?;
-            drop(file);
+            if document.composition.is_none() {
+                assets.check_disk_space(package_bytes + 4096)?;
+                std::fs::create_dir(&staging).map_err(io)?;
+                let mut file=std::fs::OpenOptions::new().write(true).create_new(true).open(staging.join("original.hwpkg")).map_err(io)?;
+                file.write_all(&bytes).and_then(|_|file.sync_all()).map_err(io)?;
+            }
             let package = assets.validate_staged(&job_id)?;
             writer.preflight(&job_id, &package)?;
             assets.unpack_projection(&job_id, &package)?;
@@ -831,7 +1121,7 @@ impl<'a> WorkDrafts<'a> {
             }
             let matches_intent: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM draft_publications WHERE draft_id=?1 AND draft_revision=?2 AND work_key=?3 AND work_id=?4 AND version=?5 AND package_hash=?6 AND manifest_json=?7 AND package_bytes=?8)")
                 .bind(id).bind(revision as i64).bind(&draft.work_key).bind(&draft.work_id)
-                .bind(publication.version).bind(&package.package_hash).bind(&package.manifest_json).bind(bytes.len() as i64)
+                .bind(publication.version).bind(&package.package_hash).bind(&package.manifest_json).bind(package_bytes as i64)
                 .fetch_one(&mut *tx).await.map_err(database)?;
             if !matches_intent { return Err(conflict()); }
             let existing_version: Option<String> = sqlx::query_scalar("SELECT package_hash FROM versions WHERE work_key=?1 AND version=?2")
@@ -841,7 +1131,7 @@ impl<'a> WorkDrafts<'a> {
             }
             let existing: Option<(String, Option<String>, String)> = sqlx::query_as("SELECT source_id,remote_work_id,kind FROM works WHERE work_key=?1")
                 .bind(&draft.work_key).fetch_optional(&mut *tx).await.map_err(database)?;
-            if existing.as_ref().is_some_and(|(source, work_id, kind)| source != "local" || work_id.as_deref() != Some(draft.work_id.as_str()) || kind != "builtin") {
+            if existing.as_ref().is_some_and(|(source, work_id, kind)| source != "local" || work_id.as_deref() != Some(draft.work_id.as_str()) || kind != document.content_kind()) {
                 return Err(JobError::new("work_not_editable", "本机作品身份已变化"));
             }
             if existing.is_some() {
@@ -856,17 +1146,17 @@ impl<'a> WorkDrafts<'a> {
             }
             let now = now_secs();
             sqlx::query("INSERT INTO packages(package_hash,manifest_json,installed_at,bytes,state) VALUES(?1,?2,?3,?4,'installed') ON CONFLICT(package_hash) DO NOTHING")
-                .bind(&package.package_hash).bind(&package.manifest_json).bind(now).bind(bytes.len() as i64)
+                .bind(&package.package_hash).bind(&package.manifest_json).bind(now).bind(package_bytes as i64)
                 .execute(&mut *tx).await.map_err(database)?;
             let existing_package: (String, i64, String) = sqlx::query_as("SELECT manifest_json,bytes,state FROM packages WHERE package_hash=?1")
                 .bind(&package.package_hash).fetch_one(&mut *tx).await.map_err(database)?;
-            if existing_package.0 != package.manifest_json || existing_package.1 != bytes.len() as i64 || existing_package.2 == "quarantined" {
+            if existing_package.0 != package.manifest_json || existing_package.1 != package_bytes as i64 || existing_package.2 == "quarantined" {
                 return Err(JobError::hash_conflict("包身份已绑定其它内容或被隔离"));
             }
             sqlx::query("UPDATE packages SET state='installed' WHERE package_hash=?1")
                 .bind(&package.package_hash).execute(&mut *tx).await.map_err(database)?;
-            sqlx::query("INSERT INTO works(work_key,source_id,remote_work_id,title,description,kind,created_at,updated_at) VALUES(?1,'local',?2,?3,?4,'builtin',?5,?5) ON CONFLICT(work_key) DO UPDATE SET title=excluded.title,description=excluded.description,updated_at=excluded.updated_at")
-                .bind(&draft.work_key).bind(&draft.work_id).bind(&document.title).bind(&document.description).bind(now)
+            sqlx::query("INSERT INTO works(work_key,source_id,remote_work_id,title,description,kind,created_at,updated_at) VALUES(?1,'local',?2,?3,?4,?6,?5,?5) ON CONFLICT(work_key) DO UPDATE SET title=excluded.title,description=excluded.description,updated_at=excluded.updated_at")
+                .bind(&draft.work_key).bind(&draft.work_id).bind(&document.title).bind(&document.description).bind(now).bind(document.content_kind())
                 .execute(&mut *tx).await.map_err(database)?;
             sqlx::query("INSERT INTO versions(version_key,work_key,version,package_hash,created_at) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(work_key,version) DO NOTHING")
                 .bind(format!("{}@{version}", draft.work_key)).bind(&draft.work_key).bind(i64::from(version)).bind(&package.package_hash).bind(now)
@@ -878,6 +1168,13 @@ impl<'a> WorkDrafts<'a> {
                 .execute(&mut *tx).await.map_err(database)?;
             sqlx::query("DELETE FROM draft_publications WHERE draft_id=?1")
                 .bind(id).execute(&mut *tx).await.map_err(database)?;
+            if document.composition.is_some() {
+                let mut rebound=document.clone();
+                for r in &mut rebound.resources {r.work_key=draft.work_key.clone();r.package_hash=package.package_hash.clone();r.source_asset_id=r.asset_id.clone();r.candidate_id=None;}
+                let json=rebound.normalize()?;
+                sqlx::query("UPDATE drafts SET document_json=?,committed_document_json=?,base_package_hash=? WHERE draft_id=?").bind(&json).bind(&json).bind(&package.package_hash).bind(id).execute(&mut *tx).await.map_err(database)?;
+                sync_resource_references(&mut tx,id,&rebound).await?;
+            }
             super::ai_receipts::AiReceipts::finish_publication(&mut tx, id, &draft.work_key, version, &package.package_hash).await?;
             tx.commit().await.map_err(database)?;
             Ok(Published { draft_id: id.to_owned(), draft_revision: revision, work_key: draft.work_key.clone(), version, package_hash: package.package_hash })
@@ -899,7 +1196,13 @@ impl<'a> WorkDrafts<'a> {
         outcome
     }
 
-    async fn reserve_publication(&self, draft: &Draft) -> Result<(Publication, Vec<u8>)> {
+    async fn reserve_publication(
+        &self,
+        draft: &Draft,
+        assets: &AssetStore,
+        writer: &super::content_quota::Writer<'_>,
+        job: &str,
+    ) -> Result<(Publication, Vec<u8>)> {
         let mut tx = self
             .library
             .pool()
@@ -950,10 +1253,60 @@ impl<'a> WorkDrafts<'a> {
             .committed_document
             .as_ref()
             .ok_or_else(|| JobError::database("已保存工程缺失"))?;
-        let bytes = builtin_package(document, &draft.work_id, version_u32)?;
-        let hash = format!("{:x}", Sha256::digest(&bytes));
-        let manifest = hertz_wallpaper::validate_package(Cursor::new(&bytes))?.manifest;
-        let manifest_json = serde_json::to_string(&manifest).map_err(invalid)?;
+        let (bytes, hash, manifest_json, package_bytes) = if document.composition.is_some() {
+            drop(tx);
+            let cancel = std::sync::atomic::AtomicBool::new(false);
+            let build = composition::PackageBuild::resolve(
+                document,
+                &draft.work_id,
+                version_u32,
+                assets,
+                &cancel,
+            )?;
+            let maximum = build.maximum_bytes()?;
+            writer.preflight_growth(
+                maximum
+                    .checked_mul(2)
+                    .ok_or_else(|| invalid("包大小溢出"))?,
+            )?;
+            assets.check_disk_space(
+                maximum
+                    .checked_mul(2)
+                    .ok_or_else(|| invalid("包大小溢出"))?,
+            )?;
+            std::fs::create_dir(assets.staging_dir(job)).map_err(io)?;
+            let length = build.write(&assets.staging_dir(job).join("original.hwpkg"), &cancel)?;
+            drop(build);
+            let package = assets.validate_staged(job)?;
+            tx = self
+                .library
+                .pool()
+                .begin_with("BEGIN IMMEDIATE")
+                .await
+                .map_err(database)?;
+            let current: Option<(i64, Option<i64>)> =
+                sqlx::query_as("SELECT revision,committed_revision FROM drafts WHERE draft_id=?")
+                    .bind(&draft.id)
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(database)?;
+            if current != Some((draft.revision as i64, Some(draft.revision as i64))) {
+                return Err(conflict());
+            }
+            (
+                vec![],
+                package.package_hash,
+                package.manifest_json,
+                length as i64,
+            )
+        } else {
+            let bytes = builtin_package(document, &draft.work_id, version_u32)?;
+            let hash = format!("{:x}", Sha256::digest(&bytes));
+            let manifest = hertz_wallpaper::validate_package(Cursor::new(&bytes))?.manifest;
+            let manifest_json = serde_json::to_string(&manifest).map_err(invalid)?;
+            let length = bytes.len() as i64;
+            (bytes, hash, manifest_json, length)
+        };
         let publication = if let Some(publication) = existing {
             if publication.draft_id != draft.id
                 || publication.draft_revision != draft.revision as i64
@@ -961,7 +1314,7 @@ impl<'a> WorkDrafts<'a> {
                 || publication.work_id != draft.work_id
                 || publication.package_hash != hash
                 || publication.manifest_json != manifest_json
-                || publication.package_bytes != bytes.len() as i64
+                || publication.package_bytes != package_bytes
             {
                 return Err(JobError::new(
                     "publication_conflict",
@@ -972,7 +1325,7 @@ impl<'a> WorkDrafts<'a> {
         } else {
             sqlx::query("INSERT INTO draft_publications(draft_id,draft_revision,work_key,work_id,version,package_hash,manifest_json,package_bytes,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)")
                 .bind(&draft.id).bind(draft.revision as i64).bind(&draft.work_key).bind(&draft.work_id)
-                .bind(version).bind(&hash).bind(&manifest_json).bind(bytes.len() as i64).bind(now_secs())
+                .bind(version).bind(&hash).bind(&manifest_json).bind(package_bytes).bind(now_secs())
                 .execute(&mut *tx).await.map_err(database)?;
             Publication {
                 draft_id: draft.id.clone(),
@@ -982,7 +1335,7 @@ impl<'a> WorkDrafts<'a> {
                 version,
                 package_hash: hash,
                 manifest_json,
-                package_bytes: bytes.len() as i64,
+                package_bytes,
             }
         };
         tx.commit().await.map_err(database)?;
@@ -1015,6 +1368,30 @@ fn bounded_json(document: &Document) -> Result<String> {
         return Err(JobError::invalid_input("作品草稿超过 1 MiB"));
     }
     Ok(json)
+}
+async fn sync_resource_references(
+    conn: &mut sqlx::SqliteConnection,
+    id: &str,
+    document: &Document,
+) -> Result<()> {
+    sqlx::query("DELETE FROM draft_resource_references WHERE draft_id=?")
+        .bind(id)
+        .execute(&mut *conn)
+        .await
+        .map_err(database)?;
+    for r in &document.resources {
+        if r.candidate_id.is_none() {
+            let exists:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM versions v JOIN packages p ON p.package_hash=v.package_hash WHERE v.work_key=? AND v.package_hash=? AND p.state='installed')").bind(&r.work_key).bind(&r.package_hash).fetch_one(&mut *conn).await.map_err(database)?;
+            if !exists {
+                return Err(JobError::new(
+                    "version_not_found",
+                    "组合资源在写入草稿前已被移除",
+                ));
+            }
+        }
+        sqlx::query("INSERT OR IGNORE INTO draft_resource_references(draft_id,work_key,package_hash,candidate_id) VALUES(?,?,?,?)").bind(id).bind(&r.work_key).bind(&r.package_hash).bind(&r.candidate_id).execute(&mut *conn).await.map_err(database)?;
+    }
+    Ok(())
 }
 fn validate_id(id: &str) -> Result<()> {
     if id.len() != 37
@@ -1052,6 +1429,18 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    #[test]
+    fn composition_draft_accepts_native_document_and_rejects_builtin_contradiction() {
+        let value = json!({"title":"Composition","composition":{"documentVersion":1,"canvas":{"width":640,"height":360,"colorSpace":"srgb","background":"#000000"},"nodes":[],"effects":[],"timeline":{"durationSeconds":1.0,"loop":true,"tracks":[]},"bindings":[]},"resources":[]});
+        let document: Document = serde_json::from_value(value.clone()).unwrap();
+        assert!(document.effective_builtin().is_err());
+        let mut mixed = value;
+        mixed["sceneId"] = json!("coast");
+        mixed["stateVersion"] = json!(1);
+        let document: Document = serde_json::from_value(mixed).unwrap();
+        assert!(document.clone().normalize().is_err());
+    }
+
     fn document() -> Document {
         Document {
             title: "海岸练习".into(),
@@ -1060,6 +1449,8 @@ mod tests {
             state_version: 1,
             params: Map::new(),
             properties: vec![],
+            composition: None,
+            resources: vec![],
         }
     }
 
@@ -1119,7 +1510,7 @@ mod tests {
         assert_eq!(restored.document.properties, vec![property.clone()]);
         assert_eq!(restored.saved_revision, Some(edited.revision));
         let reopened = drafts
-            .create_from_version(&published.work_key, &published.package_hash)
+            .create_from_version(&published.work_key, &published.package_hash, &assets)
             .await
             .unwrap();
         assert_eq!(reopened.document.properties, vec![property]);
@@ -1502,7 +1893,7 @@ mod tests {
         };
         assert_eq!(params["tod"], json!(0.25));
         let old = drafts
-            .create_from_version(&first.work_key, &first.package_hash)
+            .create_from_version(&first.work_key, &first.package_hash, &assets)
             .await
             .unwrap();
         assert_eq!(
@@ -1664,7 +2055,7 @@ mod tests {
             "retry must not allocate MAX(version)+1"
         );
         assert!(drafts
-            .create_from_version(&recovered.work_key, &recovered.package_hash)
+            .create_from_version(&recovered.work_key, &recovered.package_hash, &assets)
             .await
             .is_ok());
         library.pool().close().await;
@@ -1694,7 +2085,15 @@ mod tests {
         let drafts = WorkDrafts::new(&library);
         let draft = drafts.create(document()).await.unwrap();
         let saved = drafts.save(&draft.id, 1).await.unwrap();
-        let (intent, _) = drafts.reserve_publication(&saved).await.unwrap();
+        let (intent, _) = drafts
+            .reserve_publication(
+                &saved,
+                &assets,
+                &assets.content_writer().unwrap(),
+                "reserve-test",
+            )
+            .await
+            .unwrap();
         let mut foreign = document();
         foreign.title = "同 UUID 的第三方版本".into();
         let bytes = builtin_package(&foreign, &draft.work_id, 1).unwrap();
@@ -1734,7 +2133,7 @@ mod tests {
         );
         assert_eq!(
             drafts
-                .create_from_version(&draft.work_key, &foreign_hash)
+                .create_from_version(&draft.work_key, &foreign_hash, &assets)
                 .await
                 .unwrap_err()
                 .code,
@@ -1753,7 +2152,7 @@ mod tests {
         drafts.save(&draft.id, 1).await.unwrap();
         let original = drafts.publish(&draft.id, 1, &assets).await.unwrap();
         let branch = drafts
-            .create_from_version(&original.work_key, &original.package_hash)
+            .create_from_version(&original.work_key, &original.package_hash, &assets)
             .await
             .unwrap();
         drafts
@@ -1761,7 +2160,15 @@ mod tests {
             .await
             .unwrap();
         let saved = drafts.save(&draft.id, 2).await.unwrap();
-        drafts.reserve_publication(&saved).await.unwrap();
+        drafts
+            .reserve_publication(
+                &saved,
+                &assets,
+                &assets.content_writer().unwrap(),
+                "reserve-test",
+            )
+            .await
+            .unwrap();
         drafts
             .update(&branch.id, 1, vec![title("后申请的第三版")])
             .await
@@ -1834,7 +2241,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             drafts
-                .create_from_version(&draft.work_key, &imported_hash)
+                .create_from_version(&draft.work_key, &imported_hash, &assets)
                 .await
                 .unwrap_err()
                 .code,
@@ -1842,7 +2249,7 @@ mod tests {
         );
         drafts.discard(&draft.id, 1).await.unwrap();
         let reopened = drafts
-            .create_from_version(&original.work_key, &original.package_hash)
+            .create_from_version(&original.work_key, &original.package_hash, &assets)
             .await
             .unwrap();
         assert_eq!(

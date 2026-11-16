@@ -544,15 +544,25 @@ async fn resolve_target(
     target: ImageTarget,
     cancel: Arc<AtomicBool>,
 ) -> Result<Resolution> {
+    resolve_target_source(jobs, reference, target, cancel, None).await
+}
+async fn resolve_target_source(
+    jobs: Arc<ImportJobs>,
+    reference: AssetRef,
+    target: ImageTarget,
+    cancel: Arc<AtomicBool>,
+    source: Option<Arc<super::assets::VerifiedPackageSource>>,
+) -> Result<Resolution> {
     let runtime = tokio::runtime::Handle::current();
     tokio::task::spawn_blocking(move || {
-        runtime.block_on(target_planner::resolve(
+        runtime.block_on(target_planner::resolve_source(
             jobs.assets(),
             jobs.library(),
             &reference,
             target,
             &["image/png".into(), "video/mp4".into(), "video/webm".into()],
             &cancel,
+            source,
         ))
     })
     .await
@@ -757,15 +767,26 @@ pub(crate) async fn prepare_target(
     target: ImageTarget,
     cancel: Arc<AtomicBool>,
 ) -> Result<ResolvedMedia> {
-    let preparation = match resolve_target(
+    prepare_target_source(jobs, reference, target, cancel, None).await
+}
+pub(crate) async fn prepare_target_source(
+    jobs: Arc<ImportJobs>,
+    reference: AssetRef,
+    target: ImageTarget,
+    cancel: Arc<AtomicBool>,
+    source: Option<Arc<super::assets::VerifiedPackageSource>>,
+) -> Result<ResolvedMedia> {
+    let preparation = match resolve_target_source(
         Arc::clone(&jobs),
         reference.clone(),
         target,
         Arc::clone(&cancel),
+        source.clone(),
     )
     .await?
     {
         Resolution::Ready(media) => super::target_planner::PrepareRequest {
+            source: source.clone(),
             reference: media.reference().clone(),
             target: media.target(),
         },
@@ -804,7 +825,15 @@ pub(crate) async fn prepare_target(
                 _ => tokio::time::sleep(Duration::from_millis(50)).await,
             }
         }
-        match resolve_target(Arc::clone(&jobs), reference, target, Arc::clone(&cancel)).await? {
+        match resolve_target_source(
+            Arc::clone(&jobs),
+            reference,
+            target,
+            Arc::clone(&cancel),
+            source,
+        )
+        .await?
+        {
             Resolution::Ready(media) => {
                 cancelled(&cancel)?;
                 Ok(media)
@@ -839,6 +868,8 @@ mod tests {
         if kind == "builtin" {
             return crate::wallpaper::work_drafts::builtin_package(
                 &crate::wallpaper::work_drafts::Document {
+                    composition: None,
+                    resources: vec![],
                     title: "内置场景固定版本".into(),
                     description: String::new(),
                     scene_id: "coast".into(),

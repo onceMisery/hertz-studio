@@ -266,6 +266,17 @@ pub(crate) fn pin_input(
     workspace: &Reservation,
     cancel: &AtomicBool,
 ) -> Result<FontInput> {
+    pin_input_source(assets, reference, expected, texts, workspace, cancel, None)
+}
+pub(crate) fn pin_input_source(
+    assets: &AssetStore,
+    reference: &AssetRef,
+    expected: &hertz_wallpaper::VerifiedEntry,
+    texts: &[RequiredText],
+    workspace: &Reservation,
+    cancel: &AtomicBool,
+    source: Option<&super::assets::VerifiedPackageSource>,
+) -> Result<FontInput> {
     cancelled(cancel)?;
     reference.validate()?;
     if reference.variant_id.is_some() {
@@ -275,7 +286,10 @@ pub(crate) fn pin_input(
         ));
     }
     workspace.ensure_prepare_cpu_bytes(prepare_workspace_bytes(expected.bytes)?)?;
-    let package = assets.read_installed_manifest(&reference.package_hash)?;
+    let package = match source {
+        Some(s) => assets.read_source(s)?,
+        None => assets.read_installed_manifest(&reference.package_hash)?,
+    };
     let asset = package
         .manifest
         .assets
@@ -294,11 +308,7 @@ pub(crate) fn pin_input(
             "字体准备请求与固定资源路径不一致",
         ));
     }
-    let media = Arc::new(
-        assets
-            .pin_verified_media(&reference.package_hash, &asset.source)?
-            .ok_or_else(|| JobError::new("hash_mismatch", "字体条目未通过不可变包核验"))?,
-    );
+    let media = assets.pin_package_entry(&package, &asset.source, cancel)?;
     if media.entry.path != expected.path
         || media.entry.bytes != expected.bytes
         || media.entry.sha256 != expected.sha256

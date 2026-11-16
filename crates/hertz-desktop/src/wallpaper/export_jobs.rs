@@ -940,6 +940,8 @@ mod tests {
         let drafts = WorkDrafts::new(&library);
         let draft = drafts
             .create(Document {
+                composition: None,
+                resources: vec![],
                 title: "导出测试".into(),
                 description: String::new(),
                 scene_id: "coast".into(),

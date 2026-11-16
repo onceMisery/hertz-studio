@@ -175,12 +175,14 @@ pub(super) async fn reserve(
         hertz_wallpaper::generation::WallpaperGenerationKind::Builtin => {
             (MAX_OUTPUT_BYTES as i64, "builtin", "application/json")
         }
+        hertz_wallpaper::generation::WallpaperGenerationKind::Composition => {
+            (MAX_OUTPUT_BYTES as i64, "composition", "application/json")
+        }
         hertz_wallpaper::generation::WallpaperGenerationKind::Image => (
             hertz_wallpaper::generation::MAX_ARTIFACT_BYTES as i64,
             "image",
             "image/png",
         ),
-        _ => return Err(failure("provider_unavailable", "组合生成尚未就绪")),
     };
     if count >= MAX_RESULTS || reserved.saturating_add(bound) > MAX_BYTES {
         return Err(failure(

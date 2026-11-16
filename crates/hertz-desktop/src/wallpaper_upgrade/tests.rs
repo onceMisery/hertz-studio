@@ -7,6 +7,76 @@ use crate::wallpaper::{
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode};
 use std::borrow::Cow;
 
+#[tokio::test]
+async fn schema_eight_receipt_rebuild_preserves_all_fields_indexes_and_foreign_keys() {
+    let root = tempfileish::temp_dir("receipt-schema-eight-preservation");
+    let pool = old(root.path(), 8).await;
+    sqlx::query("INSERT INTO drafts(draft_id,work_key,work_id,revision,document_json,created_at,updated_at) VALUES('work-draft-fixture','fixture','fixture',1,'{}',1,1)").execute(&pool).await.unwrap();
+    for (index, kind) in ["builtin", "image"].iter().enumerate() {
+        sqlx::query("INSERT INTO ai_receipts(receipt_id,service_owner,job_id,artifact_id,output_hash,state,metadata_json,document_json,provider,model,received_at,expires_at,draft_id,work_key,package_hash,kind,image_work_id,candidate_package_hash,candidate_bytes,save_title,pending_package_hash,thumbnail_json) VALUES(?,'owner',?,?,?,'saving','{\"old\":true}','{\"title\":\"unchanged\"}','provider','model',123,456,'work-draft-fixture','fixture',?,?,?, ?,70,'Exact title',?,'{\"width\":96}')")
+            .bind(format!("receipt-{index}")).bind(format!("job-{index}")).bind(format!("artifact-{index}")).bind("a".repeat(64)).bind("b".repeat(64)).bind(kind).bind(format!("image-{index}")).bind("c".repeat(64)).bind(format!("{index:064x}")).execute(&pool).await.unwrap();
+    }
+    const SNAPSHOT: &str = "SELECT json_group_array(json_object('receipt',receipt_id,'owner',service_owner,'job',job_id,'artifact',artifact_id,'output',output_hash,'state',state,'metadata',metadata_json,'document',document_json,'provider',provider,'model',model,'received',received_at,'expiry',expires_at,'draft',draft_id,'work',work_key,'package',package_hash,'kind',kind,'imageWork',image_work_id,'candidateHash',candidate_package_hash,'candidateBytes',candidate_bytes,'title',save_title,'pending',pending_package_hash,'thumbnail',thumbnail_json)) FROM (SELECT * FROM ai_receipts ORDER BY receipt_id)";
+    let before: String = sqlx::query_scalar(SNAPSHOT).fetch_one(&pool).await.unwrap();
+    let mut interrupted = pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
+    sqlx::raw_sql(include_str!(
+        "../../migrations/wallpaper/0009_ai_composition.sql"
+    ))
+    .execute(&mut *interrupted)
+    .await
+    .unwrap();
+    interrupted.rollback().await.unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(SNAPSHOT)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        before
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM sqlite_schema WHERE name='ai_asset_sets'"
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        0
+    );
+    MIGRATOR.run(&pool).await.unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(SNAPSHOT)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        before
+    );
+    let indexes: Vec<String> = sqlx::query_scalar(
+        "SELECT name FROM sqlite_schema WHERE type='index' AND tbl_name='ai_receipts'",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert!(indexes.iter().any(|name| name == "idx_ai_pending_package"));
+    assert!(indexes.iter().any(|name| name == "idx_ai_receipt_expiry"));
+    assert!(sqlx::query("PRAGMA foreign_key_check")
+        .fetch_all(&pool)
+        .await
+        .unwrap()
+        .is_empty());
+    sqlx::query("DELETE FROM drafts WHERE draft_id='work-draft-fixture'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM ai_receipts WHERE draft_id IS NOT NULL")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        0
+    );
+    pool.close().await;
+}
+
 async fn old(root: &Path, count: usize) -> SqlitePool {
     let mut prefix = sqlx::migrate!("migrations/wallpaper");
     prefix.migrations = Cow::Owned(prefix.iter().take(count).cloned().collect());

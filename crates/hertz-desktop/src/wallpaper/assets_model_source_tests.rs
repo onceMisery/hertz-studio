@@ -818,6 +818,7 @@ pub(crate) fn installed_full_with_texture(
             .read_to_string(&mut stored_manifest)
             .unwrap();
         StagedPackage {
+            source: None,
             package_hash: snapshot.sha256.clone(),
             manifest: identity.manifest().clone(),
             manifest_json: stored_manifest,

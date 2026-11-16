@@ -217,6 +217,24 @@ pub(crate) async fn stored(
     for (id, title) in publications {
         report.push("publication", &id, &title, "作品版本正在生成或等待提交");
     }
+    let selected:Vec<String>=sqlx::query_scalar("SELECT DISTINCT r.asset_set_id FROM ai_asset_references r JOIN ai_asset_sets s ON s.asset_set_id=r.asset_set_id WHERE s.expires_at>?3 AND ((?2 IS NULL AND r.work_key=?1) OR (?2 IS NOT NULL AND r.package_hash=?2)) ORDER BY r.asset_set_id LIMIT 33").bind(work_key).bind(package_hash).bind(super::library::now_secs()).fetch_all(&mut *tx).await.map_err(database)?;
+    for id in selected {
+        report.push(
+            "aiAssetSet",
+            &id,
+            "生成素材快照",
+            "报价或生成任务固定了此素材版本",
+        )
+    }
+    let resources:Vec<String>=sqlx::query_scalar("SELECT DISTINCT draft_id FROM draft_resource_references WHERE (?2 IS NULL AND work_key=?1) OR (?2 IS NOT NULL AND package_hash=?2) ORDER BY draft_id LIMIT 33").bind(work_key).bind(package_hash).fetch_all(&mut *tx).await.map_err(database)?;
+    for id in resources {
+        report.push(
+            "workDraftResource",
+            &id,
+            "组合草稿",
+            "组合草稿保留此固定资源版本",
+        )
+    }
 
     tx.commit().await.map_err(database)?;
     Ok(report)

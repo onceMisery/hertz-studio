@@ -3,6 +3,10 @@
   "note": "check-* scripts that are deliberate manual/browser/diagnostic entry points. New unregistered check-* files fail scripts/check-scripts.js until they are either registered in check-frontend.js / a workflow or added here.",
   "scripts": [
     {
+      "script": "check-wallpaper-composition-ui-browser.js",
+      "purpose": "Real browser interaction checks for the shipped AI composition material selection and original work editor: bounded selected metadata, named controls, preparing/failure/retry states, paginated nodes/effects/tracks/bindings and single-key edits without oversized envelopes. Requires PLAYWRIGHT_MODULE; uses isolated local fixtures. Native resource preparation, immutable package publication and Windows rendering use check-wallpaper-generation-native.js with HERTZ_GENERATION_COMPOSITION_FIXTURE=1."
+    },
+    {
       "script": "check-wallpaper-generation-native.js",
       "purpose": "Owned Windows/WebView2 fixtures for embedded HostHandle and standalone pipe pairing, default-No native consent, original confirmed task recovery, repeated artifact receive, original GL preview and close, explicit immutable package save/reopen, hidden-tab polling and session revocation. Requires freshly built HERTZ_BIN and HERTZ_DESKTOP_BIN plus PLAYWRIGHT_MODULE; set HERTZ_GENERATION_STANDALONE=1 for the standalone case. Uses only free fake generation and isolated fixture data, refuses an existing desktop host. Real provider qualification, paid calls and additional image/composition adapters remain separate."
     },

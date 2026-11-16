@@ -29,11 +29,15 @@ struct Row {
     save_title: Option<String>,
     pending_package_hash: Option<String>,
     thumbnail_json: Option<String>,
+    diagnostics_json: Option<String>,
 }
 pub(crate) enum PreviewSource {
     Builtin(Document),
+    Composition(Document),
     Image(String),
 }
+#[path = "ai_receipts_composition.rs"]
+mod composition;
 #[path = "ai_receipts_image.rs"]
 mod image;
 pub(crate) use image::ImageReception;
@@ -55,18 +59,38 @@ impl<'a> AiReceipts<'a> {
     }
     pub(crate) async fn list(&self) -> Result<Value> {
         self.expire().await?;
-        let rows:Vec<Row>=sqlx::query_as("SELECT * FROM ai_receipts WHERE state IN ('previewReady','saving','saved') ORDER BY state='saved',received_at DESC LIMIT 16")
+        let rows:Vec<Row>=sqlx::query_as("SELECT * FROM ai_receipts WHERE state IN ('preparing','failed','previewReady','saving','saved') ORDER BY state='saved',received_at DESC LIMIT 16")
             .fetch_all(self.0.pool()).await.map_err(database)?;
         Ok(json!({"candidates":rows.iter().map(view).collect::<Vec<_>>()}))
     }
     pub(crate) async fn expire(&self) -> Result<()> {
-        sqlx::query("UPDATE ai_receipts SET state='expired',document_json=NULL WHERE state='previewReady' AND expires_at<=?")
-            .bind(now_secs()).execute(self.0.pool()).await.map_err(database)?;
+        let mut tx = self
+            .0
+            .pool()
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(database)?;
+        Self::expire_in(&mut tx).await?;
+        tx.commit().await.map_err(database)?;
+        Ok(())
+    }
+    async fn expire_in(conn: &mut sqlx::SqliteConnection) -> Result<()> {
+        sqlx::query("UPDATE ai_receipts SET state='expired',document_json=NULL WHERE state IN ('preparing','failed','previewReady') AND expires_at<=?")
+            .bind(now_secs()).execute(&mut *conn).await.map_err(database)?;
+        Self::cleanup_revoked(conn).await
+    }
+    pub(crate) async fn cleanup_revoked(conn: &mut sqlx::SqliteConnection) -> Result<()> {
+        // Only temporary candidate-owned drafts are revoked. An explicit save
+        // and a durable publication keep their independent work ownership.
+        sqlx::query("DELETE FROM drafts WHERE committed_revision IS NULL AND draft_id IN (SELECT draft_id FROM ai_receipts WHERE state IN ('expired','deleted')) AND NOT EXISTS(SELECT 1 FROM draft_publications WHERE draft_publications.draft_id=drafts.draft_id)")
+            .execute(&mut *conn).await.map_err(database)?;
+        sqlx::query("DELETE FROM ai_asset_sets WHERE job_id IN (SELECT job_id FROM ai_receipts WHERE state IN ('expired','deleted'))")
+            .execute(conn).await.map_err(database)?;
         Ok(())
     }
     pub(crate) async fn maintenance(&self) -> Result<Option<i64>> {
         self.expire().await?;
-        sqlx::query_scalar("SELECT MIN(expires_at) FROM ai_receipts WHERE state='previewReady'")
+        sqlx::query_scalar("SELECT MIN(expires_at) FROM ai_receipts WHERE state IN ('preparing','failed','previewReady')")
             .fetch_one(self.0.pool())
             .await
             .map_err(database)
@@ -108,6 +132,8 @@ impl<'a> AiReceipts<'a> {
             state_version: output.state_version,
             params: output.params,
             properties: vec![],
+            composition: None,
+            resources: vec![],
         };
         // Reuse the exact work-document validation before permitting preview.
         document.effective_builtin()?;
@@ -145,9 +171,8 @@ impl<'a> AiReceipts<'a> {
                 "候选历史已达上限",
             ));
         }
-        sqlx::query("UPDATE ai_receipts SET state='expired',document_json=NULL WHERE state='previewReady' AND expires_at<=?")
-            .bind(now_secs()).execute(&mut *tx).await.map_err(database)?;
-        let (count,size):(i64,i64)=sqlx::query_as("SELECT COALESCE(SUM(state IN ('previewReady','saving')),0),COALESCE(SUM(candidate_bytes+CASE WHEN state IN ('previewReady','saving') THEN COALESCE(length(CAST(document_json AS BLOB)),0) ELSE 0 END),0) FROM ai_receipts")
+        Self::expire_in(&mut tx).await?;
+        let (count,size):(i64,i64)=sqlx::query_as("SELECT COALESCE(SUM(state IN ('preparing','failed','previewReady','saving')),0),COALESCE(SUM(candidate_bytes+CASE WHEN state IN ('preparing','failed','previewReady','saving') THEN COALESCE(length(CAST(document_json AS BLOB)),0) ELSE 0 END),0) FROM ai_receipts")
             .fetch_one(&mut *tx).await.map_err(database)?;
         let document_json =
             serde_json::to_string(&document).map_err(|e| JobError::invalid_input(e.to_string()))?;
@@ -174,7 +199,7 @@ impl<'a> AiReceipts<'a> {
     }
     pub(crate) async fn document(&self, id: &str, revision: u64) -> Result<Document> {
         let row = self.row(id).await?;
-        if row.kind != "builtin"
+        if !matches!(row.kind.as_str(), "builtin" | "composition")
             || revision != 1
             || row.state != "previewReady"
             || row.expires_at <= now_secs()
@@ -194,6 +219,10 @@ impl<'a> AiReceipts<'a> {
         }
         if row.kind == "image" {
             Ok(PreviewSource::Image(row.receipt_id))
+        } else if row.kind == "composition" {
+            self.document(id, revision)
+                .await
+                .map(PreviewSource::Composition)
         } else {
             self.document(id, revision)
                 .await
@@ -208,14 +237,22 @@ impl<'a> AiReceipts<'a> {
                 "候选已转交作品保存，请在作品库管理",
             ));
         }
-        let changed = sqlx::query("UPDATE ai_receipts SET state='deleted',document_json=NULL WHERE receipt_id=? AND state IN ('previewReady','expired','deleted')")
-            .bind(id).execute(self.0.pool()).await.map_err(database)?.rows_affected();
+        let mut tx = self
+            .0
+            .pool()
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(database)?;
+        let changed = sqlx::query("UPDATE ai_receipts SET state='deleted',document_json=NULL WHERE receipt_id=? AND state IN ('preparing','failed','previewReady','expired','deleted')")
+            .bind(id).execute(&mut *tx).await.map_err(database)?.rows_affected();
         if changed != 1 {
             return Err(JobError::new(
                 "candidate_changed",
                 "候选正在保存，请重新读取回执",
             ));
         }
+        Self::cleanup_revoked(&mut tx).await?;
+        tx.commit().await.map_err(database)?;
         self.0.ai_receipts_changed.notify_one();
         Ok(json!({"deleted":true}))
     }
@@ -230,24 +267,46 @@ impl<'a> AiReceipts<'a> {
             return Ok(view(&row));
         }
         let drafts = WorkDrafts::new(self.0);
-        let draft = if let Some(draft) = row.draft_id {
+        let mut draft = if let Some(draft) = row.draft_id {
             drafts.get(&draft).await?
         } else {
             let mut document = self.document(id, 1).await?;
-            document.title = title;
+            document.title = title.clone();
             drafts.create_ai(document, id).await?
         };
+        if row.kind == "composition" {
+            let title = row.save_title.unwrap_or(title).trim().to_owned();
+            if title.is_empty()
+                || title.chars().count() > 120
+                || title.chars().any(char::is_control)
+            {
+                return Err(JobError::invalid_input("作品标题需为1–120字符"));
+            }
+            sqlx::query("UPDATE ai_receipts SET state='saving',save_title=? WHERE receipt_id=? AND draft_id=? AND state IN ('previewReady','failed') AND expires_at>?").bind(&title).bind(id).bind(&draft.id).bind(now_secs()).execute(self.0.pool()).await.map_err(database)?;
+            if draft.document.title != title {
+                draft = drafts
+                    .update(
+                        &draft.id,
+                        draft.revision,
+                        vec![super::work_drafts::Update::ReplaceMetadata {
+                            title,
+                            description: draft.document.description.clone(),
+                        }],
+                    )
+                    .await?;
+            }
+        }
         self.0.ai_receipts_changed.notify_one();
-        if draft.revision != 1 {
+        if row.kind != "composition" && draft.revision != 1 {
             return Err(JobError::new(
                 "draft_conflict",
                 "已保存草稿被修改，请从作品编辑器继续",
             ));
         }
-        if draft.saved_revision != Some(1) {
-            drafts.save(&draft.id, 1).await?;
+        if draft.saved_revision != Some(draft.revision) {
+            drafts.save(&draft.id, draft.revision).await?;
         }
-        drafts.publish(&draft.id, 1, assets).await?;
+        drafts.publish(&draft.id, draft.revision, assets).await?;
         self.get(id).await
     }
     pub(crate) async fn attach_draft(
@@ -255,12 +314,32 @@ impl<'a> AiReceipts<'a> {
         id: &str,
         draft: &str,
     ) -> Result<()> {
-        let n=sqlx::query("UPDATE ai_receipts SET state='saving',draft_id=? WHERE receipt_id=? AND state='previewReady' AND expires_at>?")
+        let n=sqlx::query("UPDATE ai_receipts SET state=CASE WHEN kind='composition' THEN state ELSE 'saving' END,draft_id=? WHERE receipt_id=? AND draft_id IS NULL AND (state='previewReady' OR (kind='composition' AND state='failed')) AND expires_at>?")
             .bind(draft).bind(id).bind(now_secs()).execute(conn).await.map_err(database)?.rows_affected();
         if n != 1 {
             return Err(JobError::new(
                 "candidate_changed",
                 "候选已变化，请重读原保存回执",
+            ));
+        }
+        Ok(())
+    }
+    pub(crate) async fn attach_prepared_draft(
+        conn: &mut sqlx::SqliteConnection,
+        id: &str,
+        draft: &str,
+        state: &str,
+        diagnostics: Option<&str>,
+    ) -> Result<()> {
+        if !matches!(state, "previewReady" | "failed") {
+            return Err(JobError::invalid_input("组合准备结果无效"));
+        }
+        let changed = sqlx::query("UPDATE ai_receipts SET state=?,diagnostics_json=?,draft_id=? WHERE receipt_id=? AND kind='composition' AND state='preparing' AND draft_id IS NULL AND expires_at>?")
+            .bind(state).bind(diagnostics).bind(draft).bind(id).bind(now_secs()).execute(conn).await.map_err(database)?.rows_affected();
+        if changed != 1 {
+            return Err(JobError::new(
+                "candidate_changed",
+                "组合候选已删除、到期或完成准备",
             ));
         }
         Ok(())
@@ -278,13 +357,16 @@ impl<'a> AiReceipts<'a> {
             sqlx::query("INSERT INTO ai_origins(version_key,provider,model,generated_at,output_hash) VALUES(?,?,?,?,?)")
                 .bind(format!("{work}@{version}")).bind(provider).bind(model).bind(time).bind(output).execute(&mut *conn).await.map_err(database)?;
             sqlx::query("UPDATE ai_receipts SET state='saved',work_key=?,package_hash=?,document_json=NULL WHERE receipt_id=?")
-                .bind(work).bind(hash).bind(id).execute(conn).await.map_err(database)?;
+                .bind(work).bind(hash).bind(&id).execute(&mut *conn).await.map_err(database)?;
+            sqlx::query("DELETE FROM ai_asset_sets WHERE job_id=(SELECT job_id FROM ai_receipts WHERE receipt_id=?)").bind(id).execute(conn).await.map_err(database)?;
         }
         Ok(())
     }
 }
 fn view(row: &Row) -> Value {
-    let state = if row.state == "previewReady" && row.expires_at <= now_secs() {
+    let state = if matches!(row.state.as_str(), "preparing" | "failed" | "previewReady")
+        && row.expires_at <= now_secs()
+    {
         "expired"
     } else {
         row.state.as_str()
@@ -296,7 +378,7 @@ fn view(row: &Row) -> Value {
         .map(|document| document.scene_id);
     json!({"receiptId":row.receipt_id,"state":state,"kind":row.kind,"title":row.save_title,"candidateBytes":row.candidate_bytes,"sceneId":scene,"draftId":row.receipt_id,"savedDraftId":row.draft_id,"draftRevision":1,
         "artifact":serde_json::from_str::<Value>(&row.metadata_json).unwrap_or(Value::Null),"workKey":row.work_key,"packageHash":row.package_hash,
-        "saved":row.state=="saved"})
+        "saved":row.state=="saved","diagnostics":row.diagnostics_json.as_deref().and_then(|s|serde_json::from_str::<Value>(s).ok())})
 }
 
 #[cfg(test)]

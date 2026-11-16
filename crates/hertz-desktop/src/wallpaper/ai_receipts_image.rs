@@ -28,7 +28,7 @@ impl AiReceipts<'_> {
     pub(crate) async fn maintenance_files(&self, assets: &AssetStore) -> Result<Option<i64>> {
         let expiry = self.maintenance().await?;
         let _writer = assets.content_writer()?;
-        let live: Vec<String> = sqlx::query_scalar("SELECT receipt_id FROM ai_receipts WHERE kind='image' AND state IN ('previewReady','saving')")
+        let live: Vec<String> = sqlx::query_scalar("SELECT receipt_id FROM ai_receipts WHERE kind IN ('image','composition') AND state IN ('preparing','failed','previewReady','saving') UNION SELECT candidate_id FROM draft_resource_references WHERE candidate_id IS NOT NULL")
             .fetch_all(self.0.pool()).await.map_err(database)?;
         let root = assets.root().join("ai-candidates");
         let mut retry = false;
@@ -55,7 +55,7 @@ impl AiReceipts<'_> {
             // Fixed package/source handles deny deletion until the real preview readers exit.
             match std::fs::remove_dir_all(&path) {
                 Ok(()) => {
-                    sqlx::query("UPDATE ai_receipts SET candidate_bytes=0 WHERE receipt_id=? AND state NOT IN ('previewReady','saving')")
+                    sqlx::query("UPDATE ai_receipts SET candidate_bytes=0 WHERE receipt_id=? AND state NOT IN ('preparing','failed','previewReady','saving')")
                     .bind(&id).execute(self.0.pool()).await.map_err(database)?;
                 }
                 Err(e) if matches!(e.raw_os_error(), Some(32 | 33)) => retry = true,
@@ -63,7 +63,7 @@ impl AiReceipts<'_> {
             }
         }
         // Repair a crash after physical deletion and before the byte receipt update.
-        let rows: Vec<String> = sqlx::query_scalar("SELECT receipt_id FROM ai_receipts WHERE kind='image' AND candidate_bytes>0 AND state NOT IN ('previewReady','saving')")
+        let rows: Vec<String> = sqlx::query_scalar("SELECT receipt_id FROM ai_receipts WHERE kind IN ('image','composition') AND candidate_bytes>0 AND state NOT IN ('preparing','failed','previewReady','saving')")
             .fetch_all(self.0.pool()).await.map_err(database)?;
         for id in rows {
             if !assets
@@ -71,7 +71,7 @@ impl AiReceipts<'_> {
                 .try_exists()
                 .map_err(|e| JobError::io(e.to_string()))?
             {
-                sqlx::query("UPDATE ai_receipts SET candidate_bytes=0 WHERE receipt_id=? AND state NOT IN ('previewReady','saving')")
+                sqlx::query("UPDATE ai_receipts SET candidate_bytes=0 WHERE receipt_id=? AND state NOT IN ('preparing','failed','previewReady','saving')")
                     .bind(id).execute(self.0.pool()).await.map_err(database)?;
             }
         }
@@ -157,9 +157,8 @@ impl AiReceipts<'_> {
         if expiry <= now_secs() || expiry > now_secs() + 86400 {
             return Err(JobError::new("ai_artifact_expired", "候选已到期或期限无效"));
         }
-        sqlx::query("UPDATE ai_receipts SET state='expired',document_json=NULL WHERE state='previewReady' AND expires_at<=?")
-            .bind(now_secs()).execute(&mut *tx).await.map_err(database)?;
-        let (records, count, held): (i64,i64,i64) = sqlx::query_as("SELECT COUNT(*),COALESCE(SUM(state IN ('previewReady','saving')),0),COALESCE(SUM(candidate_bytes+CASE WHEN state IN ('previewReady','saving') THEN COALESCE(length(CAST(document_json AS BLOB)),0) ELSE 0 END),0) FROM ai_receipts")
+        Self::expire_in(&mut tx).await?;
+        let (records, count, held): (i64,i64,i64) = sqlx::query_as("SELECT COUNT(*),COALESCE(SUM(state IN ('preparing','failed','previewReady','saving')),0),COALESCE(SUM(candidate_bytes+CASE WHEN state IN ('preparing','failed','previewReady','saving') THEN COALESCE(length(CAST(document_json AS BLOB)),0) ELSE 0 END),0) FROM ai_receipts")
             .fetch_one(&mut *tx).await.map_err(database)?;
         if records >= 500 || count >= 8 || held.saturating_add(bytes as i64) > 256 * 1024 * 1024 {
             return Err(JobError::new(

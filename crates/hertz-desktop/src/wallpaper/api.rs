@@ -24,7 +24,7 @@ pub(crate) struct Request {
 pub(crate) enum Command {
     DraftCreate,
     WorkDraftCreate {
-        document: super::work_drafts::Document,
+        document: Box<super::work_drafts::Document>,
     },
     WorkDraftOpen {
         work_key: String,
@@ -39,6 +39,25 @@ pub(crate) enum Command {
     },
     WorkDraftSchema {
         scene_id: String,
+    },
+    WorkDraftCatalog,
+    WorkCompositionSchema {
+        node_type: Option<String>,
+        effect_type: Option<String>,
+    },
+    WorkDraftComposition {
+        draft_id: String,
+        draft_revision: u64,
+        section: super::work_drafts::Section,
+        cursor: Option<String>,
+        limit: u32,
+    },
+    WorkDraftTrackKeys {
+        draft_id: String,
+        draft_revision: u64,
+        track_id: String,
+        cursor: Option<String>,
+        limit: u32,
     },
     WorkDraftParameters {
         draft_id: String,
@@ -392,11 +411,6 @@ impl Request {
         }
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase", deny_unknown_fields)]
-        struct Scene {
-            scene_id: String,
-        }
-        #[derive(Deserialize)]
-        #[serde(rename_all = "camelCase", deny_unknown_fields)]
         struct DraftParameters {
             draft_id: String,
             draft_revision: u64,
@@ -464,7 +478,9 @@ impl Request {
                     value.package_hash,
                 ) {
                     ("settings", None, None, None) => Command::DraftCreate,
-                    ("work", Some(document), None, None) => Command::WorkDraftCreate { document },
+                    ("work", Some(document), None, None) => Command::WorkDraftCreate {
+                        document: Box::new(document),
+                    },
                     ("work", None, Some(work_key), Some(hash)) => Command::WorkDraftOpen {
                         work_key: id(work_key)?,
                         package_hash: package_hash(hash)?,
@@ -491,9 +507,94 @@ impl Request {
                 }
             }
             "wallpaper.draft.schema" => {
-                let value: Scene = decode(&self.payload)?;
-                Command::WorkDraftSchema {
-                    scene_id: id(value.scene_id)?,
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase", deny_unknown_fields)]
+                struct Schema {
+                    #[serde(default)]
+                    scene_id: Option<String>,
+                    #[serde(default)]
+                    node_type: Option<String>,
+                    #[serde(default)]
+                    effect_type: Option<String>,
+                }
+                let value: Schema = decode(&self.payload)?;
+                match (value.scene_id, value.node_type, value.effect_type) {
+                    (Some(scene), None, None) => Command::WorkDraftSchema {
+                        scene_id: id(scene)?,
+                    },
+                    (None, Some(node), None) => Command::WorkCompositionSchema {
+                        node_type: Some(id(node)?),
+                        effect_type: None,
+                    },
+                    (None, None, Some(effect)) => Command::WorkCompositionSchema {
+                        node_type: None,
+                        effect_type: Some(id(effect)?),
+                    },
+                    _ => return Err(JobError::invalid_input("请指定一份场景、节点或效果schema")),
+                }
+            }
+            "wallpaper.draft.catalog" => {
+                let _: Empty = decode(&self.payload)?;
+                Command::WorkDraftCatalog
+            }
+            "wallpaper.draft.composition" => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase", deny_unknown_fields)]
+                struct Page {
+                    draft_id: String,
+                    draft_revision: u64,
+                    section: super::work_drafts::Section,
+                    #[serde(default)]
+                    cursor: Option<String>,
+                    #[serde(default = "small_limit")]
+                    limit: u32,
+                }
+                let value: Page = decode(&self.payload)?;
+                let d = draft(Draft {
+                    draft_id: value.draft_id,
+                    draft_revision: value.draft_revision,
+                })?;
+                if value.limit == 0
+                    || value.limit > 32
+                    || value.cursor.as_ref().is_some_and(|c| c.len() > 16)
+                {
+                    return Err(JobError::invalid_input("组合分页无效"));
+                }
+                Command::WorkDraftComposition {
+                    draft_id: d.draft_id,
+                    draft_revision: d.draft_revision,
+                    section: value.section,
+                    cursor: value.cursor,
+                    limit: value.limit,
+                }
+            }
+            "wallpaper.draft.track.keys" => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase", deny_unknown_fields)]
+                struct Keys {
+                    draft_id: String,
+                    draft_revision: u64,
+                    track_id: String,
+                    #[serde(default)]
+                    cursor: Option<String>,
+                    #[serde(default = "small_limit")]
+                    limit: u32,
+                }
+                let v: Keys = decode(&self.payload)?;
+                let d = draft(Draft {
+                    draft_id: v.draft_id,
+                    draft_revision: v.draft_revision,
+                })?;
+                if v.limit == 0 || v.limit > 128 || v.cursor.as_ref().is_some_and(|c| c.len() > 16)
+                {
+                    return Err(JobError::invalid_input("关键帧分页无效"));
+                }
+                Command::WorkDraftTrackKeys {
+                    draft_id: d.draft_id,
+                    draft_revision: d.draft_revision,
+                    track_id: id(v.track_id)?,
+                    cursor: v.cursor,
+                    limit: v.limit,
                 }
             }
             "wallpaper.draft.parameters" | "wallpaper.draft.properties" => {

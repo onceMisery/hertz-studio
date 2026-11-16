@@ -397,6 +397,10 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
             get(ai_wallpaper_capabilities),
         )
         .route("/v1/ai/wallpaper/quote", post(ai_wallpaper_quote))
+        .route(
+            "/v1/ai/wallpaper/asset-sets",
+            post(ai_wallpaper_asset_set).layer(axum::extract::DefaultBodyLimit::max(8 * 1024)),
+        )
         .route("/v1/ai/wallpaper/jobs", post(ai_wallpaper_submit_job))
         .route("/v1/ai/wallpaper/jobs/{jobId}", get(ai_wallpaper_job))
         .route(
@@ -1279,7 +1283,7 @@ async fn require_wallpaper_ai(
             "wallpaper:read_artifact"
         } else if path.ends_with("/capabilities") {
             "wallpaper:capabilities"
-        } else if path.ends_with("/quote") {
+        } else if path.ends_with("/quote") || path.ends_with("/asset-sets") {
             "wallpaper:quote"
         } else if path.ends_with("/cancel") || path.ends_with("/session") {
             "wallpaper:cancel"
@@ -1410,6 +1414,16 @@ async fn ai_wallpaper_quote(
 ) -> ApiResult<Json<serde_json::Value>> {
     let quote = crate::ai::jobs::wallpaper_quote(&state, &principal.id, &bytes).await?;
     Ok(Json(quote))
+}
+
+async fn ai_wallpaper_asset_set(
+    State(state): State<Arc<AppState>>,
+    axum::Extension(principal): axum::Extension<WallpaperPrincipal>,
+    bytes: axum::body::Bytes,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(
+        crate::ai::jobs::wallpaper_asset_set(&state, &principal.id, &bytes).await?,
+    ))
 }
 
 #[derive(Deserialize)]

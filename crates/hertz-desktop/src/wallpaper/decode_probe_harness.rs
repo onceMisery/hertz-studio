@@ -502,6 +502,7 @@ pub(crate) fn command(body: &str, proxy: EventLoopProxy<UserEvent>) {
                         let entry = package.entries.iter().find(|entry| entry.path == asset.source)
                             .ok_or_else(|| JobError::invalid_input("字体条目不存在"))?;
                         Some(super::super::jobs::FontPrepareRequest {
+                                                        source: None,
                             reference: reference.clone(), expected_entry: entry.clone(),
                             required_texts: vec![super::super::font_prepare::RequiredText { node_id: "probe-text".into(), text: text.clone() }],
                         })
@@ -512,6 +513,7 @@ pub(crate) fn command(body: &str, proxy: EventLoopProxy<UserEvent>) {
                         Some(jobs.prepare_font(command.name.clone(), request)?.1)
                     } else if command.action == "prepare" {
                         jobs.prepare_asset(command.name.clone(), super::super::target_planner::PrepareRequest {
+                                                        source: None,
                             reference: command.reference.ok_or_else(|| JobError::invalid_input("缺少 AssetRef"))?,
                             target: command.image_target.ok_or_else(|| JobError::invalid_input("缺少目标"))?,
                         })?;

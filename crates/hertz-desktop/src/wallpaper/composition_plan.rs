@@ -349,6 +349,7 @@ fn font_prepare_request(
         .ok_or_else(|| JobError::new("asset_unavailable", "字体条目未通过固定包核验"))?
         .clone();
     Ok(FontPrepareRequest {
+        source: package.source.clone(),
         reference: AssetRef {
             package_hash: package.package_hash.clone(),
             asset_id: asset_id.to_owned(),
@@ -397,11 +398,7 @@ fn read_document(
     let hertz_wallpaper::Content::Composition { document } = &package.manifest.content else {
         return Err(JobError::invalid_input("组合规划要求固定 composition 包"));
     };
-    let pin = Arc::new(
-        store
-            .pin_verified_media(&package.package_hash, document)?
-            .ok_or_else(|| JobError::new("asset_unavailable", "组合文档未通过固定包核验"))?,
-    );
+    let pin = store.pin_package_entry(package, document, &AtomicBool::new(false))?;
     let mut bytes = Vec::new();
     super::assets::open_immutable(&pin.path)?
         .take(hertz_wallpaper::document::MAX_DOCUMENT_BYTES as u64 + 1)
@@ -466,6 +463,28 @@ pub(crate) async fn resolve_with_target_facts(
 ) -> Result<PreparedComposition> {
     check_cancel(&cancel)?;
     let package = jobs.assets().read_installed_manifest(&package_hash)?;
+    resolve_source(
+        jobs,
+        package,
+        properties,
+        target,
+        output_fit,
+        target_facts,
+        cancel,
+    )
+    .await
+}
+pub(crate) async fn resolve_source(
+    jobs: Arc<ImportJobs>,
+    package: super::assets::StagedPackage,
+    properties: serde_json::Map<String, Value>,
+    target: ImageTarget,
+    output_fit: super::config::Fit,
+    target_facts: Option<super::builtin_plan::TargetFacts>,
+    cancel: Arc<AtomicBool>,
+) -> Result<PreparedComposition> {
+    let package_hash = package.package_hash.clone();
+    check_cancel(&cancel)?;
     let (compiled, final_values, document_pin) =
         read_document(jobs.assets(), &package, &properties)?;
     let builtin_target = super::builtin_plan::plan(
@@ -482,7 +501,7 @@ pub(crate) async fn resolve_with_target_facts(
     // Execution stays closed until costs, projection and the renderer qualify.
     validate_adapters(&compiled)?;
     validate_resource_uses(&compiled, &final_values, &package)?;
-    let inputs = jobs.assets().probe_installed_media(&package, &cancel)?;
+    let inputs = jobs.assets().probe_source_media(&package, &cancel)?;
     // Validate true container/range facts before any decode qualification. The
     // same fixed input is then qualified through the original preparation slot.
     let preliminary = PreparedComposition {
@@ -565,17 +584,15 @@ pub(crate) async fn resolve_with_target_facts(
 /// facts or upload-size parsing. The returned Arc is published only for used images.
 fn pin_model_texture(
     jobs: &Arc<ImportJobs>,
-    package_hash: &str,
+    package: &super::assets::StagedPackage,
     path: &str,
     entry_bytes: u64,
     sha256: &str,
     mime: &str,
 ) -> Result<(Arc<PinnedMedia>, Vec<u8>)> {
-    let media = Arc::new(
-        jobs.assets()
-            .pin_verified_media(package_hash, path)?
-            .ok_or_else(|| JobError::new("hash_mismatch", "model 纹理未通过核验"))?,
-    );
+    let media = jobs
+        .assets()
+        .pin_package_entry(package, path, &AtomicBool::new(false))?;
     if media.entry.bytes != entry_bytes
         || media.entry.sha256 != sha256
         || media.entry.mime.as_deref() != Some(mime)
@@ -660,7 +677,7 @@ async fn prepare_assets(
         let prepared = match asset.kind {
             hertz_wallpaper::AssetKind::Image | hertz_wallpaper::AssetKind::Video => {
                 CompositionAsset::Media(
-                    super::selection_plan::prepare_target(
+                    super::selection_plan::prepare_target_source(
                         Arc::clone(jobs),
                         AssetRef {
                             package_hash: package.package_hash.clone(),
@@ -669,6 +686,7 @@ async fn prepare_assets(
                         },
                         target,
                         Arc::clone(cancel),
+                        package.source.clone(),
                     )
                     .await?,
                 )
@@ -730,6 +748,7 @@ async fn prepare_assets(
                 let (job_id, receive) = jobs.prepare_svg(
                     super::jobs::new_job_id(),
                     super::jobs::SvgPrepareRequest {
+                        source: package.source.clone(),
                         reference: AssetRef {
                             package_hash: package.package_hash.clone(),
                             asset_id: asset.id.clone(),
@@ -745,13 +764,9 @@ async fn prepare_assets(
                 return Err(JobError::new("font_not_prepared", "最终字体没有文字集合"));
             }
             hertz_wallpaper::AssetKind::Model => {
-                let media = Arc::new(
-                    jobs.assets()
-                        .pin_verified_media(&package.package_hash, &asset.source)?
-                        .ok_or_else(|| {
-                            JobError::new("hash_mismatch", "model 条目未通过不可变包核验")
-                        })?,
-                );
+                let media = jobs
+                    .assets()
+                    .pin_package_entry(package, &asset.source, cancel)?;
                 if media.entry.path != asset.source {
                     return Err(JobError::new("hash_mismatch", "model 条目路径不一致"));
                 }
@@ -806,14 +821,8 @@ async fn prepare_assets(
                         if mime != "image/ktx2" || external_textures.contains_key(&texture.source) {
                             continue;
                         }
-                        let (pinned, texture_bytes) = pin_model_texture(
-                            jobs,
-                            &package.package_hash,
-                            path,
-                            *entry_bytes,
-                            sha256,
-                            mime,
-                        )?;
+                        let (pinned, texture_bytes) =
+                            pin_model_texture(jobs, package, path, *entry_bytes, sha256, mime)?;
                         pinned_textures.insert(texture.source, pinned);
                         external_textures.insert(texture.source, texture_bytes);
                     }
@@ -881,7 +890,7 @@ async fn prepare_assets(
                                 })?;
                                 let (media, texture_bytes) = pin_model_texture(
                                     jobs,
-                                    &package.package_hash,
+                                    package,
                                     path,
                                     *entry_bytes,
                                     sha256,

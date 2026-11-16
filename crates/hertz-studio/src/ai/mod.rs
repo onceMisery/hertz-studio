@@ -22,6 +22,7 @@
 //! 路径别名实测（§13 留待 R2-G/R4-J）、并发槽位（§8.3）。
 
 pub(crate) mod capability;
+mod composition_provider;
 pub(crate) mod contract;
 pub(crate) mod credential;
 pub(crate) mod emotion;

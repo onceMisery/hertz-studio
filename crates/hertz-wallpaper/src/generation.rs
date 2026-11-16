@@ -16,6 +16,8 @@ use crate::ai::MAX_BRIEF_BYTES;
 use crate::json::check_bounded_json;
 use crate::{valid_sha256_hex, PackageError, Result};
 
+pub mod composition;
+
 /// 完整控制 JSON 上界（设计 §19.3：含 brief 最多 4 KiB，控制 JSON 最多 12 KiB，
 /// 连同 §14 信封不超过 16 KiB）。
 pub const MAX_REQUEST_BYTES: usize = 12 * 1024;

@@ -146,6 +146,15 @@ pub(crate) enum UserEvent {
         ApiReply,
         Box<Result<crate::wallpaper::ai_receipts::PreviewSource, crate::wallpaper::jobs::JobError>>,
     ),
+    CompositionDraftPreview(
+        u64,
+        Box<
+            Result<
+                crate::wallpaper::composition_plan::PreparedComposition,
+                crate::wallpaper::jobs::JobError,
+            >,
+        >,
+    ),
     PlaylistWriteFinished(Option<String>),
     LibraryDeleteFinished(String),
     /// 小窗快照轮询的一拍（含可能的封面字节）。
@@ -6553,6 +6562,9 @@ pub(crate) fn run_with(run_config: RunConfig) -> Result<()> {
             Event::UserEvent(UserEvent::WorkPreviewReady(request, owner, epoch, reply, document)) => {
                 app.finish_work_preview(request, owner, epoch, reply, *document, target);
             }
+            Event::UserEvent(UserEvent::CompositionDraftPreview(id, result)) => {
+                app.finish_composition_draft_preview(id, *result, target);
+            }
             Event::UserEvent(UserEvent::PlaylistWriteFinished(id)) => {
                 app.playlist_writes -= 1;
                 if let Some(id) = id { app.playlist_changed(&id); }
@@ -7487,7 +7499,14 @@ fn settings_html() -> String {
             "__LIBRARY__",
             include_str!("../assets/wallpaper-library.js"),
         )
-        .replace("__WORKS__", include_str!("../assets/wallpaper-work.js"))
+        .replace(
+            "__WORKS__",
+            &format!(
+                "{}\n{}",
+                include_str!("../assets/wallpaper-work-composition.js"),
+                include_str!("../assets/wallpaper-work.js")
+            ),
+        )
         .replace("__AI_CSS__", include_str!("../assets/wallpaper-ai.css"))
         .replace("__AI__", include_str!("../assets/wallpaper-ai.js"))
         .replace(

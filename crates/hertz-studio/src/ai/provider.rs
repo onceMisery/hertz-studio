@@ -298,6 +298,33 @@ impl StageIntentProvider for Ollama {
     fn supports_wallpaper_builtin(&self) -> bool {
         true
     }
+    fn supports_wallpaper_composition(&self) -> bool {
+        true
+    }
+    fn quote_wallpaper_composition(
+        &self,
+        request: &hertz_wallpaper::generation::WallpaperGenerateRequest,
+        assets: &hertz_wallpaper::generation::composition::AssetSet,
+    ) -> Result<PriceQuote, String> {
+        super::composition_provider::quote(self, request, assets)
+    }
+    fn generate_wallpaper_composition(
+        &self,
+        request: &hertz_wallpaper::generation::WallpaperGenerateRequest,
+        assets: &hertz_wallpaper::generation::composition::AssetSet,
+        pricing: PricingSnapshot,
+        _credential: Option<super::credential::ProviderCredential>,
+        cancellation: super::jobs::ProviderCancellation,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = super::jobs::WallpaperReply> + Send>>
+    {
+        Box::pin(super::composition_provider::generate(
+            self.clone(),
+            request.clone(),
+            assets.clone(),
+            pricing,
+            cancellation,
+        ))
+    }
     fn quote_wallpaper_builtin(
         &self,
         request: &hertz_wallpaper::generation::WallpaperGenerateRequest,

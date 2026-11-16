@@ -138,6 +138,9 @@ impl<'a> Writer<'a> {
         }
         Ok(())
     }
+    pub(crate) fn preflight_growth(&self, required: u64) -> Result<()> {
+        self.check_growth(required)
+    }
 
     pub(crate) fn publish_candidate(&self, job: &str, id: &str) -> Result<u64> {
         let target = self.store.candidate_dir(id)?;

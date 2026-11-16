@@ -268,6 +268,7 @@ async fn exact_same_package_ttf_is_used_and_missing_family_fails() {
         .prepare_svg(
             new_job_id(),
             crate::wallpaper::jobs::SvgPrepareRequest {
+                source: None,
                 reference: crate::wallpaper::target_planner::AssetRef {
                     package_hash: hash.clone(),
                     asset_id: "source".into(),
@@ -371,6 +372,7 @@ async fn clipped_group_opacity_keeps_straight_alpha_and_surface_budget() {
         .prepare_svg(
             new_job_id(),
             crate::wallpaper::jobs::SvgPrepareRequest {
+                source: None,
                 reference: crate::wallpaper::target_planner::AssetRef {
                     package_hash: hash,
                     asset_id: "background".into(),
@@ -459,6 +461,7 @@ async fn clip_use_references_reject_hidden_clips_and_keep_flat_clips() {
             .prepare_svg(
                 new_job_id(),
                 crate::wallpaper::jobs::SvgPrepareRequest {
+                    source: None,
                     reference: crate::wallpaper::target_planner::AssetRef {
                         package_hash,
                         asset_id: "background".into(),
@@ -571,6 +574,7 @@ async fn clip_child_admission_preserves_normal_group_use() {
         .prepare_svg(
             new_job_id(),
             crate::wallpaper::jobs::SvgPrepareRequest {
+                source: None,
                 reference: crate::wallpaper::target_planner::AssetRef {
                     package_hash,
                     asset_id: "background".into(),
@@ -990,6 +994,7 @@ async fn raw_vector_keeps_original_png_alpha_and_cache_rebuild() {
         variant_id: None,
     };
     let prepare = crate::wallpaper::jobs::SvgPrepareRequest {
+        source: None,
         reference,
         target: target(64, 64),
         usage: "color".into(),

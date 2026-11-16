@@ -557,6 +557,7 @@ impl AssetStore {
                     retained: Some(retained),
                 };
                 let media = PinnedMedia {
+                    _source: None,
                     entry: entry.clone(),
                     path,
                     _package_pin: Some(original),

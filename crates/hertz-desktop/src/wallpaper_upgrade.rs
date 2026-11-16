@@ -312,15 +312,21 @@ async fn reset_external_recovery(root: &Path, pool: &SqlitePool) -> Result<()> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error.into()),
     }
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     sqlx::query("UPDATE export_jobs SET state='failed',error='database_restored: 资料升级或恢复后，请重新选择输出位置；外部文件保持原样',target_path=NULL,temporary_path=NULL,file_identity=NULL WHERE target_path IS NOT NULL")
-        .execute(pool).await?;
+        .execute(&mut *tx).await?;
     // Restored temporary candidates cannot become new save authority. Explicitly
     // saved drafts and installed versions retain their independent ownership.
     sqlx::query(
-        "UPDATE ai_receipts SET state='expired',document_json=NULL WHERE state='previewReady'",
+        "UPDATE ai_receipts SET state='expired',document_json=NULL WHERE state IN ('preparing','failed','previewReady')",
     )
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
+    crate::wallpaper::ai_receipts::AiReceipts::cleanup_revoked(&mut tx).await?;
+    sqlx::query("DELETE FROM ai_asset_sets")
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
     // The DB commit precedes barrier removal; an interruption repeats only
     // this bounded DB update, never a file operation outside the desktop root.
     std::fs::remove_file(path)?;

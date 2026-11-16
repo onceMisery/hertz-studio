@@ -45,6 +45,8 @@ impl AssetRef {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct PrepareRequest {
+    #[serde(skip)]
+    pub(crate) source: Option<Arc<super::assets::VerifiedPackageSource>>,
     pub reference: AssetRef,
     pub target: ImageTarget,
 }
@@ -336,20 +338,40 @@ pub(crate) async fn resolve(
     supported: &[String],
     cancel: &AtomicBool,
 ) -> Result<Resolution> {
+    resolve_source(store, library, reference, target, supported, cancel, None).await
+}
+
+pub(crate) async fn resolve_source(
+    store: &AssetStore,
+    library: &Library,
+    reference: &AssetRef,
+    target: ImageTarget,
+    supported: &[String],
+    cancel: &AtomicBool,
+    source: Option<Arc<super::assets::VerifiedPackageSource>>,
+) -> Result<Resolution> {
     reference.validate()?;
     let target = image_prepare::normalize_target(target)?;
     cancelled(cancel)?;
-    if !library.is_installed(&reference.package_hash).await? {
+    if source
+        .as_ref()
+        .is_none_or(|s| matches!(s.location(), super::assets::PackageLocation::Installed))
+        && !library.is_installed(&reference.package_hash).await?
+    {
         return Err(JobError::new("asset_not_found", "作品尚未安装或不可用"));
     }
-    let package = store.read_installed_manifest(&reference.package_hash)?;
-    let inputs = store.probe_installed_media(&package, cancel)?;
+    let package = match source.as_ref() {
+        Some(s) => store.read_source(s)?,
+        None => store.read_installed_manifest(&reference.package_hash)?,
+    };
+    let inputs = store.probe_source_media(&package, cancel)?;
     let (reference, source) = select_input(&package, &inputs, reference, target, supported)?;
     let (input, content_key) = if source.metadata.container == Container::Image {
         let Some(prepared) =
             image_prepare::cached(store, library, &source, Some(target), cancel).await?
         else {
             return Ok(Resolution::PrepareRequired(PrepareRequest {
+                source: package.source.clone(),
                 reference,
                 target,
             }));

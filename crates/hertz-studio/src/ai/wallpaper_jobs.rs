@@ -21,6 +21,9 @@ use crate::ai::usage::PricingSnapshot;
 use crate::error::ApiError;
 use crate::state::AppState;
 
+#[path = "wallpaper_asset_sets.rs"]
+mod asset_sets;
+
 /// quote 有效期（§19.4）：5 分钟，不静默续期。
 pub(crate) const QUOTE_TTL_MS: i64 = 5 * 60_000;
 /// 每 owner 未消费 quote 上限（§19.4：最多 8 个）。
@@ -54,7 +57,7 @@ mod output_tests {
         }))
         .unwrap();
         for id in hertz_wallpaper::catalog().scene_ids() {
-            let scene = hertz_wallpaper::catalog().scene(&id).unwrap();
+            let scene = hertz_wallpaper::catalog().scene(id).unwrap();
             let bytes = serde_json::to_vec(&serde_json::json!({
                 "kind":"builtin","sceneId":id,"stateVersion":scene["stateVersion"],"params":{}
             }))
@@ -86,6 +89,8 @@ pub(crate) fn generation_schema_hash() -> String {
         },
         "artifactBytesMax": hertz_wallpaper::generation::MAX_ARTIFACT_BYTES,
         "sceneRegistryHash": hertz_wallpaper::catalog().registry_hash,
+        "compositionRegistryHash": hertz_wallpaper::document::catalog::composition_catalog().registry_hash,
+        "composition": {"assetsMax":32,"metadataBytesMax":8192,"nodesMax":32,"effectsMax":8,"tracksMax":16,"bindingsMax":16,"depthMax":16},
     });
     sha256_hex(&serde_json::to_vec(&descriptor).expect("generation schema descriptor serializes"))
 }
@@ -145,6 +150,15 @@ pub(crate) async fn capability_snapshot(state: &AppState) -> CapabilitySnapshot 
                 .ready()
                 .then(|| vec![super::image_provider::FIXTURE_QUALITY]),
         },
+        OutputCapability {
+            kind: "composition",
+            provider: provider.id().into(),
+            model: provider.model().into(),
+            ready: provider.ready() && provider.supports_wallpaper_composition(),
+            diagnostic: None,
+            sizes: None,
+            quality_ids: None,
+        },
     ];
     let registry_hash = hertz_wallpaper::catalog().registry_hash.clone();
     let schema_hash = generation_schema_hash();
@@ -174,21 +188,25 @@ pub(crate) struct StoredQuote {
     pub endpoint_identity: Option<String>,
     pub consumed: bool,
     pub expires_at: i64,
+    pub asset_set: Option<hertz_wallpaper::generation::composition::AssetSet>,
 }
 
 pub(crate) struct ProviderQuote {
     pub pricing: PricingSnapshot,
     pub endpoint_identity: Option<String>,
+    pub asset_set: Option<hertz_wallpaper::generation::composition::AssetSet>,
 }
 
 #[derive(Default)]
 pub(crate) struct QuoteStore {
     quotes: Vec<StoredQuote>,
+    pub(super) asset_sets: asset_sets::Store,
 }
 
 impl QuoteStore {
     pub(crate) fn discard(&mut self, owner: &str) {
         self.quotes.retain(|q| q.owner != owner);
+        self.asset_sets.discard(owner);
     }
     fn sweep(&mut self, now: i64) {
         self.quotes.retain(|quote| quote.expires_at > now);
@@ -215,7 +233,17 @@ impl QuoteStore {
         self.sweep(now);
         let request_bytes = serde_json::to_vec(&request)
             .map(|bytes| bytes.len())
-            .unwrap_or(0);
+            .unwrap_or(0)
+            + provider
+                .asset_set
+                .as_ref()
+                .map(|assets| {
+                    assets
+                        .canonical_bytes()
+                        .map(|bytes| bytes.len())
+                        .unwrap_or(0)
+                })
+                .unwrap_or(0);
         let owner_count = self.quotes.iter().filter(|q| q.owner == owner).count();
         if owner_count >= MAX_QUOTES_PER_OWNER {
             return Err(ApiError::new(
@@ -232,6 +260,17 @@ impl QuoteStore {
             ));
         }
         let expires_at = now + QUOTE_TTL_MS;
+        if let Some(assets) = provider.asset_set.as_ref() {
+            let id = request.output.asset_set_id.as_deref().ok_or_else(|| {
+                ApiError::new(
+                    axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                    "asset_set_unknown",
+                    "组合报价缺少本地素材快照",
+                )
+            })?;
+            self.asset_sets
+                .bind_quote(owner, id, assets, now, expires_at)?;
+        }
         self.quotes.push(StoredQuote {
             quote_id,
             owner: owner.to_string(),
@@ -242,6 +281,7 @@ impl QuoteStore {
             endpoint_identity: provider.endpoint_identity,
             consumed: false,
             expires_at,
+            asset_set: provider.asset_set,
         });
         Ok(expires_at)
     }
@@ -272,6 +312,30 @@ impl QuoteStore {
             .find(|quote| quote.owner == owner && quote.quote_id == quote_id)
         {
             quote.consumed = false;
+        }
+    }
+
+    /// The original job input now holds metadata until terminal; quote replay
+    /// uses the committed submission receipt and cannot dispatch a second job.
+    pub(crate) fn handoff_assets(&mut self, owner: &str, quote_id: &str) {
+        let id = if let Some(quote) = self
+            .quotes
+            .iter_mut()
+            .find(|quote| quote.owner == owner && quote.quote_id == quote_id)
+        {
+            quote.asset_set = None;
+            quote.request.output.asset_set_id.clone()
+        } else {
+            None
+        };
+        if let Some(id) = id {
+            if !self.quotes.iter().any(|quote| {
+                quote.owner == owner
+                    && quote.asset_set.is_some()
+                    && quote.request.output.asset_set_id.as_deref() == Some(id.as_str())
+            }) {
+                self.asset_sets.remove(owner, &id);
+            }
         }
     }
 }

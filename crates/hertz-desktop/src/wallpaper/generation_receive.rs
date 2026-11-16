@@ -22,6 +22,7 @@ pub(crate) struct ReceivedImage {
 }
 pub(crate) enum ReceivedArtifact {
     Builtin(ReceivedBuiltin),
+    Composition(ReceivedBuiltin),
     Image(ReceivedImage),
 }
 pub(crate) struct ReceivePermit<'a> {
@@ -91,9 +92,11 @@ impl NativeGeneration {
             || job["state"] != "succeeded"
             || !matches!(
                 artifact.kind,
-                WallpaperGenerationKind::Builtin | WallpaperGenerationKind::Image
+                WallpaperGenerationKind::Builtin
+                    | WallpaperGenerationKind::Composition
+                    | WallpaperGenerationKind::Image
             )
-            || (artifact.kind == WallpaperGenerationKind::Builtin
+            || (artifact.kind != WallpaperGenerationKind::Image
                 && artifact.bytes > MAX_OUTPUT_BYTES as u64)
             || uuid::Uuid::parse_str(&artifact.artifact_id).is_err()
         {
@@ -147,7 +150,7 @@ impl NativeGeneration {
             bytes
         };
         check_cancel(cancel)?;
-        if artifact.kind == WallpaperGenerationKind::Builtin
+        if artifact.kind != WallpaperGenerationKind::Image
             && (bytes.len() as u64 != artifact.bytes
                 || format!("{:x}", Sha256::digest(&bytes)) != artifact.sha256)
         {
@@ -176,6 +179,15 @@ impl NativeGeneration {
                 provider,
                 model,
                 file: target.to_owned(),
+                epoch,
+            })
+        } else if artifact.kind == WallpaperGenerationKind::Composition {
+            ReceivedArtifact::Composition(ReceivedBuiltin {
+                artifact,
+                service_owner,
+                provider,
+                model,
+                bytes,
                 epoch,
             })
         } else {

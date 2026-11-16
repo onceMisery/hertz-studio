@@ -207,6 +207,12 @@ fn identity(error: LedgerError) -> JobError {
 }
 
 impl BudgetCoordinator {
+    pub(crate) fn check_session_plan(
+        &self,
+        plan: &SessionPlan,
+    ) -> std::result::Result<(), BudgetRejection> {
+        self.check_requests(std::slice::from_ref(&plan.request))
+    }
     pub(crate) fn grant_session(&self, plan: &SessionPlan) -> Result<u64> {
         let mut ledger = self
             .ledger

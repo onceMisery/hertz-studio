@@ -70,6 +70,43 @@ pub struct StagedPackage {
     pub manifest: hertz_wallpaper::manifest::Manifest,
     pub manifest_json: String,
     pub entries: Vec<hertz_wallpaper::VerifiedEntry>,
+    pub(crate) source: Option<Arc<VerifiedPackageSource>>,
+}
+
+/// Native capability for a verified immutable archive. IPC never constructs it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PackageLocation {
+    Installed,
+    Candidate(String),
+    Staging(String),
+}
+
+#[derive(Debug)]
+pub(crate) struct VerifiedPackageSource {
+    location: PackageLocation,
+    package_hash: String,
+    _original: Option<std::fs::File>,
+    temporary: Option<Arc<TemporarySourceDirectory>>,
+}
+impl Drop for VerifiedPackageSource {
+    fn drop(&mut self) {
+        drop(self._original.take());
+    }
+}
+#[derive(Debug)]
+struct TemporarySourceDirectory(PathBuf);
+impl Drop for TemporarySourceDirectory {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+impl VerifiedPackageSource {
+    pub(crate) fn location(&self) -> &PackageLocation {
+        &self.location
+    }
+    pub(crate) fn package_hash(&self) -> &str {
+        &self.package_hash
+    }
 }
 
 /// 已安装包的可核验事实（receipt.json + original.hwpkg 快速核对）。
@@ -96,6 +133,7 @@ pub(crate) struct PinnedMedia {
     // 派生输入的目录租约随所有 Broker/流持有者退出，不能随准备描述符提前归还。
     _derived_lease: Option<Arc<std::fs::File>>,
     _root_owner: crate::root_owner::RootOwner,
+    _source: Option<Arc<VerifiedPackageSource>>,
 }
 
 /// 结构与摘要已复核，真实解码期间持续固定这份字节。
@@ -229,6 +267,7 @@ impl AssetStore {
             path,
             entry,
             lease,
+            input.media._source.clone(),
         )
     }
 
@@ -241,10 +280,11 @@ impl AssetStore {
         cancel: &AtomicBool,
     ) -> Result<Arc<PinnedMedia>> {
         source_pin_cancelled(cancel)?;
-        let directory = staging_job.map_or_else(
-            || self.package_dir(&package.package_hash),
-            |job| self.staging_dir(job),
-        );
+        let directory = if let Some(job) = staging_job {
+            self.staging_dir(job)
+        } else {
+            self.source_directory(&package.package_hash, package.source.as_deref())?
+        };
         let mut original = open_immutable(&directory.join("original.hwpkg"))?;
         let (_, original_sha256) = read_source_sha256(&mut original, cancel)?;
         if original_sha256 != package.package_hash {
@@ -274,6 +314,7 @@ impl AssetStore {
         }
         source_pin_cancelled(cancel)?;
         Ok(Arc::new(PinnedMedia {
+            _source: package.source.clone(),
             entry: entry.clone(),
             path,
             _package_pin: Some(original),
@@ -302,6 +343,7 @@ impl AssetStore {
             path,
             entry,
             lease,
+            source._source.clone(),
         )
     }
 
@@ -319,7 +361,7 @@ impl AssetStore {
         {
             return Err(JobError::invalid_input("静态封面身份或大小无效"));
         }
-        self.pin_derived(package_hash, None, path, entry, Some(lease))
+        self.pin_derived(package_hash, None, path, entry, Some(lease), None)
     }
 
     fn pin_derived(
@@ -329,6 +371,7 @@ impl AssetStore {
         path: PathBuf,
         entry: hertz_wallpaper::VerifiedEntry,
         lease: Option<Arc<std::fs::File>>,
+        source: Option<Arc<VerifiedPackageSource>>,
     ) -> Result<DecodeInput> {
         let file = open_immutable(&path)?;
         if file
@@ -360,6 +403,7 @@ impl AssetStore {
             package_hash: package_hash.to_string(),
             metadata,
             media: Arc::new(PinnedMedia {
+                _source: source,
                 _root_owner: self._root_owner.clone(),
                 entry,
                 path,
@@ -481,6 +525,7 @@ impl AssetStore {
         let manifest_json = serde_json::to_string(&package.manifest)
             .map_err(|error| JobError::io(format!("manifest 再序列化失败：{error}")))?;
         Ok(StagedPackage {
+            source: None,
             package_hash,
             manifest: package.manifest,
             manifest_json,
@@ -610,6 +655,7 @@ impl AssetStore {
                     package_hash: package.package_hash.clone(),
                     metadata,
                     media: Arc::new(PinnedMedia {
+                        _source: package.source.clone(),
                         _root_owner: self._root_owner.clone(),
                         entry: entry.clone(),
                         path: files.join(path),
@@ -777,6 +823,7 @@ impl AssetStore {
             return Ok(None);
         };
         Ok(Some(PinnedMedia {
+            _source: None,
             _root_owner: self._root_owner.clone(),
             entry,
             path: path_buf,
@@ -811,7 +858,7 @@ impl AssetStore {
     /// 读取已安装包的 manifest（启动恢复入库用）。
     pub fn read_installed_manifest(&self, package_hash: &str) -> Result<StagedPackage> {
         let original = self.package_dir(package_hash).join("original.hwpkg");
-        self.read_manifest_at(&original, package_hash)
+        self.read_manifest_at(&original, package_hash, PackageLocation::Installed)
     }
 
     pub(crate) fn candidate_dir(&self, id: &str) -> Result<PathBuf> {
@@ -828,11 +875,35 @@ impl AssetStore {
         if !hertz_wallpaper::valid_sha256_hex(hash) {
             return Err(JobError::invalid_input("候选包标识无效"));
         }
-        self.read_manifest_at(&self.candidate_dir(id)?.join("original.hwpkg"), hash)
+        self.read_manifest_at(
+            &self.candidate_dir(id)?.join("original.hwpkg"),
+            hash,
+            PackageLocation::Candidate(id.into()),
+        )
     }
 
-    fn read_manifest_at(&self, original: &Path, package_hash: &str) -> Result<StagedPackage> {
-        let package = hertz_wallpaper::validate_package(open_immutable(original)?)?;
+    fn read_manifest_at(
+        &self,
+        original: &Path,
+        package_hash: &str,
+        location: PackageLocation,
+    ) -> Result<StagedPackage> {
+        if !hertz_wallpaper::valid_sha256_hex(package_hash) {
+            return Err(JobError::invalid_input("包哈希无效"));
+        }
+        let mut original = open_immutable(original)?;
+        let (_, actual) = read_source_sha256(&mut original, &AtomicBool::new(false))?;
+        if actual != package_hash {
+            return Err(JobError::new("hash_mismatch", "原包实际哈希与固定身份不符"));
+        }
+        original
+            .seek(SeekFrom::Start(0))
+            .map_err(|e| JobError::io(e.to_string()))?;
+        let package = hertz_wallpaper::validate_package(
+            original
+                .try_clone()
+                .map_err(|e| JobError::io(e.to_string()))?,
+        )?;
         let manifest_json = serde_json::to_string(&package.manifest)
             .map_err(|error| JobError::io(format!("manifest 再序列化失败：{error}")))?;
         Ok(StagedPackage {
@@ -840,7 +911,94 @@ impl AssetStore {
             manifest: package.manifest,
             manifest_json,
             entries: package.entries,
+            source: Some(Arc::new(VerifiedPackageSource {
+                location,
+                package_hash: package_hash.into(),
+                _original: Some(original),
+                temporary: None,
+            })),
         })
+    }
+
+    pub(crate) fn source_directory(
+        &self,
+        hash: &str,
+        source: Option<&VerifiedPackageSource>,
+    ) -> Result<PathBuf> {
+        if !hertz_wallpaper::valid_sha256_hex(hash) {
+            return Err(JobError::invalid_input("包哈希无效"));
+        }
+        Ok(match source {
+            None => self.package_dir(hash),
+            Some(source) if source.package_hash != hash => {
+                return Err(JobError::new("hash_mismatch", "资源能力不属于固定包"))
+            }
+            Some(source) => match &source.location {
+                PackageLocation::Installed => self.package_dir(hash),
+                PackageLocation::Candidate(id) => self.candidate_dir(id)?,
+                PackageLocation::Staging(job) if super::api::valid_id(job) => self.staging_dir(job),
+                _ => return Err(JobError::invalid_input("暂存身份无效")),
+            },
+        })
+    }
+
+    pub(crate) fn read_source(&self, source: &VerifiedPackageSource) -> Result<StagedPackage> {
+        let mut package = self.read_manifest_at(
+            &self
+                .source_directory(&source.package_hash, Some(source))?
+                .join("original.hwpkg"),
+            &source.package_hash,
+            source.location.clone(),
+        )?;
+        Arc::get_mut(package.source.as_mut().expect("verified source"))
+            .expect("new source")
+            .temporary = source.temporary.clone();
+        Ok(package)
+    }
+    pub(crate) fn read_staging_source(&self, job: &str, hash: &str) -> Result<StagedPackage> {
+        if !super::api::valid_id(job) {
+            return Err(JobError::invalid_input("暂存标识无效"));
+        }
+        self.read_manifest_at(
+            &self.staging_dir(job).join("original.hwpkg"),
+            hash,
+            PackageLocation::Staging(job.into()),
+        )
+    }
+    pub(crate) fn read_preview_source(&self, job: &str, hash: &str) -> Result<StagedPackage> {
+        let mut package = self.read_staging_source(job, hash)?;
+        Arc::get_mut(package.source.as_mut().expect("native source"))
+            .expect("new source")
+            .temporary = Some(Arc::new(TemporarySourceDirectory(self.staging_dir(job))));
+        Ok(package)
+    }
+
+    pub(crate) fn pin_package_entry(
+        &self,
+        package: &StagedPackage,
+        path: &str,
+        cancel: &AtomicBool,
+    ) -> Result<Arc<PinnedMedia>> {
+        let entry = package
+            .entries
+            .iter()
+            .find(|e| e.path == path)
+            .ok_or_else(|| JobError::new("asset_unavailable", "固定包不含此条目"))?;
+        self.pin_source_entry(package, entry, None, cancel)
+    }
+
+    pub(crate) fn probe_source_media(
+        &self,
+        package: &StagedPackage,
+        cancel: &AtomicBool,
+    ) -> Result<Vec<DecodeInput>> {
+        self.probe_media_at(
+            &self
+                .source_directory(&package.package_hash, package.source.as_deref())?
+                .join("files"),
+            package,
+            cancel,
+        )
     }
 
     /// 已安装包的 original.hwpkg 字节数。
@@ -956,6 +1114,20 @@ mod source_pin_tests;
 mod tests {
     use super::*;
     use crate::wallpaper::library::tempfileish;
+
+    #[test]
+    fn candidate_manifest_rejects_claimed_archive_hash() {
+        let (store, _root) = store("candidate-real-hash");
+        let id = format!("work-ai-{}", uuid::Uuid::new_v4());
+        let directory = store.candidate_dir(&id).unwrap();
+        std::fs::create_dir(&directory).unwrap();
+        let bytes = sample_package();
+        std::fs::write(directory.join("original.hwpkg"), &bytes).unwrap();
+        assert!(store.read_candidate(&id, &"a".repeat(64)).is_err());
+        assert!(store
+            .read_candidate(&id, &format!("{:x}", Sha256::digest(&bytes)))
+            .is_ok());
+    }
 
     fn sample_package() -> Vec<u8> {
         // §6.1 文档 fixture：1×1 PNG（70 字节，哈希固定）。

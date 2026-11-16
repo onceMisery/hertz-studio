@@ -4194,6 +4194,7 @@ async fn composition_font_cancellation_waits_for_original_typed_terminal_receipt
         jobs.prepare_font(
             super::super::jobs::new_job_id(),
             FontPrepareRequest {
+                source: None,
                 reference: AssetRef {
                     package_hash: hash,
                     asset_id: "font".into(),

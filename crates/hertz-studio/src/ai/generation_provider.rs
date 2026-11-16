@@ -51,6 +51,9 @@ impl Provider {
                 request.output.kind == WallpaperGenerationKind::Builtin
                     && p.supports_wallpaper_builtin()
             }
+            (Self::Text(p), GenerationInput::Composition { .. }) => {
+                p.supports_wallpaper_composition()
+            }
             (Self::Image(p), GenerationInput::Wallpaper(request)) => {
                 request.output.kind == WallpaperGenerationKind::Image && p.ready()
             }
@@ -63,6 +66,12 @@ impl Provider {
             (Self::Text(p), GenerationInput::Wallpaper(request)) if !input.is_image() => {
                 p.quote_wallpaper_builtin(request)
             }
+            (
+                Self::Text(p),
+                GenerationInput::Composition {
+                    request, assets, ..
+                },
+            ) => p.quote_wallpaper_composition(request, assets),
             (Self::Image(p), GenerationInput::Wallpaper(request)) if input.is_image() => {
                 p.quote(&super::image_provider::Input::from_request(request)?)
             }

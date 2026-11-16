@@ -67,6 +67,8 @@ async fn install(
     work_id: &str,
 ) -> (String, String) {
     let document = Document {
+        composition: None,
+        resources: vec![],
         title: title.into(),
         description: "安静 海岸".into(),
         scene_id: "coast".into(),

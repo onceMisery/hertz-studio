@@ -288,6 +288,8 @@ mod tests {
         let drafts = WorkDrafts::new(jobs.library());
         let draft = drafts
             .create(Document {
+                composition: None,
+                resources: vec![],
                 title: title.into(),
                 description: String::new(),
                 scene_id: "coast".into(),

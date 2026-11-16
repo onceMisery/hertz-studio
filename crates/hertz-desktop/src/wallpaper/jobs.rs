@@ -498,6 +498,7 @@ enum JobSource {
 /// 固定字体条目和最终文字由原准备 worker 核验；解析事实本身不授予本机资格。
 #[derive(Clone)]
 pub(crate) struct FontPrepareRequest {
+    pub(crate) source: Option<Arc<super::assets::VerifiedPackageSource>>,
     pub(crate) reference: AssetRef,
     pub(crate) expected_entry: hertz_wallpaper::VerifiedEntry,
     pub(crate) required_texts: Vec<RequiredText>,
@@ -561,6 +562,7 @@ impl FontGroupPrepareRequest {
 
 #[derive(Clone)]
 pub(crate) struct SvgPrepareRequest {
+    pub(crate) source: Option<Arc<super::assets::VerifiedPackageSource>>,
     pub reference: AssetRef,
     pub target: super::image_prepare::ImageTarget,
     pub usage: String,
@@ -1589,6 +1591,12 @@ async fn run_receive_ai(
     writer: &super::content_quota::Writer<'_>,
 ) -> Result<serde_json::Value, JobError> {
     cancelled(&request.cancel)?;
+    if let Some(existing) = super::ai_receipts::AiReceipts::new(library)
+        .existing_job(&service_job)
+        .await?
+    {
+        return Ok(existing);
+    }
     assets.check_disk_space(hertz_wallpaper::MAX_IMAGE_BYTES + 64 * 1024)?;
     let staging = assets.staging_dir(&request.job_id);
     std::fs::create_dir(&staging).map_err(|e| JobError::io(e.to_string()))?;
@@ -1635,9 +1643,14 @@ async fn run_receive_ai(
             .await
             .map_err(|e| JobError::io(e.to_string()))?
         }
+        super::generation::receive::ReceivedArtifact::Composition(received) => {
+            ai_compositions::receive(request, received, &native, library, assets, writer).await
+        }
     }
 }
 
+#[path = "jobs_ai_compositions.rs"]
+mod ai_compositions;
 #[path = "jobs_ai_images.rs"]
 mod ai_images;
 
@@ -1809,14 +1822,14 @@ async fn run_prepare(
 ) -> Result<String, JobError> {
     set_state(&request.status, JobState::Preparing);
     cancelled(&request.cancel)?;
-    if !library
-        .is_installed(&prepare.reference.package_hash)
-        .await?
-    {
-        return Err(JobError::new("asset_not_found", "准备目标尚未安装或不可用"));
-    }
-    let package = assets.read_installed_manifest(&prepare.reference.package_hash)?;
-    let inputs = assets.probe_installed_media(&package, &request.cancel)?;
+    let package = read_prepare_source(
+        library,
+        assets,
+        &prepare.reference.package_hash,
+        prepare.source.as_deref(),
+    )
+    .await?;
+    let inputs = assets.probe_source_media(&package, &request.cancel)?;
     let (_, input) = super::target_planner::select_input(
         &package,
         &inputs,
@@ -1873,13 +1886,13 @@ async fn run_prepare_svg(
 ) -> Result<super::target_planner::ResolvedMedia, JobError> {
     set_state(&request.status, JobState::Preparing);
     cancelled(&request.cancel)?;
-    if !library
-        .is_installed(&prepare.reference.package_hash)
-        .await?
-    {
-        return Err(JobError::new("asset_not_found", "SVG 原包尚未安装"));
-    }
-    let package = assets.read_installed_manifest(&prepare.reference.package_hash)?;
+    let package = read_prepare_source(
+        library,
+        assets,
+        &prepare.reference.package_hash,
+        prepare.source.as_deref(),
+    )
+    .await?;
     let input = super::svg_prepare::pin_input(
         assets,
         &package,
@@ -2055,12 +2068,13 @@ async fn inspect_font(
     probe: &ProbeClient,
 ) -> Result<FontInput, JobError> {
     cancelled(&request.cancel)?;
-    if !library
-        .is_installed(&prepare.reference.package_hash)
-        .await?
-    {
-        return Err(JobError::new("asset_not_found", "准备字体尚未安装或不可用"));
-    }
+    read_prepare_source(
+        library,
+        assets,
+        &prepare.reference.package_hash,
+        prepare.source.as_deref(),
+    )
+    .await?;
     // 原准备槽/写门已持有；字体读取、目录核验和解析先取得完整 CPU 工作区。
     let workspace = probe.image_workspace(super::font_prepare::prepare_workspace_bytes(
         prepare.expected_entry.bytes,
@@ -2069,17 +2083,35 @@ async fn inspect_font(
     if let Some(checkpoint) = request.inspection_checkpoint {
         checkpoint(&request.cancel);
     }
-    let input = super::font_prepare::pin_input(
+    let input = super::font_prepare::pin_input_source(
         assets,
         &prepare.reference,
         &prepare.expected_entry,
         &prepare.required_texts,
         &workspace,
         &request.cancel,
+        prepare.source.as_deref(),
     );
     // pin_input 同步读取与解析已实际退出，所有成功/错误路径均确认归还工作区。
     workspace.finish();
     input
+}
+
+async fn read_prepare_source(
+    library: &Library,
+    assets: &AssetStore,
+    hash: &str,
+    source: Option<&super::assets::VerifiedPackageSource>,
+) -> Result<super::assets::StagedPackage, JobError> {
+    if source.is_none_or(|s| matches!(s.location(), super::assets::PackageLocation::Installed))
+        && !library.is_installed(hash).await?
+    {
+        return Err(JobError::new("asset_not_found", "准备资源已被移除"));
+    }
+    match source {
+        Some(s) => assets.read_source(s),
+        None => assets.read_installed_manifest(hash),
+    }
 }
 
 async fn qualify_inspected_font(

@@ -415,6 +415,13 @@ fn staged_and_reopened_installed_source_pins_preserve_identity_and_last_drop_unl
         assert_eq!(exclusive_write(path).unwrap_err().raw_os_error(), Some(32));
     }
     drop(last_pin);
+    drop(exclusive_write(&projection).unwrap());
+    // The verified package still owns the original archive after its media pin exits.
+    assert_eq!(
+        exclusive_write(&original_path).unwrap_err().raw_os_error(),
+        Some(32)
+    );
+    drop(installed);
     assert_writable(&reopened.package_dir(&package_hash));
 }
 

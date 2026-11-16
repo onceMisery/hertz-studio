@@ -18,6 +18,7 @@ type JobResult<T> = std::result::Result<T, JobError>;
 struct PreviewRequest {
     configuration: config::WallpaperConfig,
     image_candidate: Option<String>,
+    composition: Option<crate::wallpaper::work_drafts::Document>,
 }
 
 enum PreviewContent {
@@ -237,7 +238,7 @@ impl App {
             };
             let mut configuration =
                 preview_configuration(&self.config.wallpaper, group_id.as_deref())?;
-            let candidate = match document {
+            let (candidate, composition) = match document {
                 crate::wallpaper::ai_receipts::PreviewSource::Builtin(document) => {
                     let builtin = document.effective_builtin()?;
                     configuration.main_mut().selection = Selection::Builtin {
@@ -245,9 +246,12 @@ impl App {
                         state_version: builtin.state_version,
                         params: builtin.params,
                     };
-                    None
+                    (None, None)
                 }
-                crate::wallpaper::ai_receipts::PreviewSource::Image(id) => Some(id),
+                crate::wallpaper::ai_receipts::PreviewSource::Image(id) => (Some(id), None),
+                crate::wallpaper::ai_receipts::PreviewSource::Composition(document) => {
+                    (None, Some(document))
+                }
             };
             configuration.main_mut().properties.clear();
             let slot = self.wallpaper_library.reserve()?;
@@ -255,6 +259,7 @@ impl App {
                 PreviewRequest {
                     configuration,
                     image_candidate: candidate,
+                    composition,
                 },
                 Some((id, revision)),
                 lease,
@@ -357,6 +362,7 @@ impl App {
             PreviewRequest {
                 configuration,
                 image_candidate: None,
+                composition: None,
             },
             draft,
             lease_id,
@@ -376,9 +382,11 @@ impl App {
         let PreviewRequest {
             mut configuration,
             image_candidate: candidate,
+            composition,
         } = source;
-        let image_candidate = candidate.is_some();
-        if image_candidate {
+        let image_candidate = candidate.is_some() || composition.is_some();
+        let is_composition = composition.is_some();
+        if candidate.is_some() {
             configuration.audio_input = crate::wallpaper::config::AudioInput::None;
             configuration.main_mut().presentation.pointer = false;
         }
@@ -441,14 +449,40 @@ impl App {
         let id = self.wallpaper_generation;
         let cancel = Arc::new(AtomicBool::new(false));
         let media = selection.is_some() || image_candidate;
-        let composition_target_facts = selection.is_some().then(|| {
+        let composition_target_facts = (selection.is_some() || is_composition).then(|| {
             crate::wallpaper::builtin_plan::TargetFacts::from_monitor(
                 &monitor,
                 &configuration,
                 ImagePurpose::Preview,
             )
         });
-        if let Some(candidate) = candidate {
+        if let Some(document) = composition {
+            let proxy = self.proxy.clone();
+            self.wallpaper_library.preview_composition_draft(
+                document,
+                ImageTarget {
+                    width: monitor.width as u32,
+                    height: monitor.height as u32,
+                    purpose: ImagePurpose::Preview,
+                    fit: if matches!(
+                        configuration.presentation().fit,
+                        crate::wallpaper::config::Fit::Contain
+                    ) {
+                        ImageFit::Contain
+                    } else {
+                        ImageFit::Cover
+                    },
+                },
+                configuration.presentation().fit,
+                composition_target_facts.clone(),
+                Arc::clone(&cancel),
+                slot,
+                move |result| {
+                    let _ =
+                        proxy.send_event(UserEvent::CompositionDraftPreview(id, Box::new(result)));
+                },
+            )?;
+        } else if let Some(candidate) = candidate {
             let proxy = self.proxy.clone();
             let image_target = ImageTarget {
                 width: monitor.width as u32,
@@ -543,7 +577,7 @@ impl App {
         }
         self.send_settings_status(None, None);
         Ok(
-            serde_json::json!({"leaseId":lease_id,"generation":id,"expiresInMs":15000,"kind":if media {"media"} else {"builtin"}}),
+            serde_json::json!({"leaseId":lease_id,"generation":id,"expiresInMs":15000,"kind":if is_composition {"composition"} else if media {"media"} else {"builtin"}}),
         )
     }
 
@@ -733,6 +767,33 @@ impl App {
             Ok(media) => preview.prepared = Some(PreviewContent::Media(media)),
             Err(error) => {
                 self.fail_preview(format!("图片预览未能呈现：{error}"));
+                return;
+            }
+        }
+        self.tick_preview(target);
+    }
+    pub(super) fn finish_composition_draft_preview(
+        &mut self,
+        id: u64,
+        result: JobResult<crate::wallpaper::composition_plan::PreparedComposition>,
+        target: &EventLoopWindowTarget<()>,
+    ) {
+        let Some(preview) = self
+            .preview
+            .as_mut()
+            .filter(|p| p.id == id && p.image_candidate)
+        else {
+            return;
+        };
+        match result {
+            Ok(plan) => {
+                preview.composition_target_facts =
+                    plan.builtin_target().map(|p| p.target_facts.clone());
+                preview.configuration.main_mut().presentation.fps = preview.configured_fps.min(15);
+                preview.prepared = Some(PreviewContent::Composition(plan));
+            }
+            Err(e) => {
+                self.fail_preview(format!("组合预览未能呈现：{e}"));
                 return;
             }
         }

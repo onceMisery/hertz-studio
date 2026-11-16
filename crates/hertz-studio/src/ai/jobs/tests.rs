@@ -5286,3 +5286,5 @@ async fn wallpaper_quote_submit_completes_and_replays_idempotently() {
     state.audio.shutdown();
     handle.join().unwrap();
 }
+#[path = "composition_tests.rs"]
+mod composition_tests;

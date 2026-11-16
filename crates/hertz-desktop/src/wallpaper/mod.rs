@@ -14,6 +14,7 @@
 #[allow(dead_code)] // replace 由 P1-05 TargetPlanner 接入；当前生产默认空集合。
 pub(crate) mod access;
 pub(crate) mod ai;
+pub(crate) mod ai_asset_sets;
 pub(crate) mod ai_receipts;
 pub(crate) mod generation;
 

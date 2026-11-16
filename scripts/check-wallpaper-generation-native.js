@@ -5,6 +5,8 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const net = require('node:net');
+const crypto = require('node:crypto');
+const { buildZip } = require('./check-wallpaper-media-native');
 const { spawn, execFile } = require('node:child_process');
 const { promisify } = require('node:util');
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
@@ -17,12 +19,14 @@ const desktopBinary = path.resolve(process.env.HERTZ_DESKTOP_BIN || path.join(ro
 const standalone = process.env.HERTZ_GENERATION_STANDALONE === '1';
 const ollamaFixture = process.env.HERTZ_GENERATION_OLLAMA_FIXTURE === '1';
 const imageFixture = process.env.HERTZ_GENERATION_IMAGE_FIXTURE === '1';
+const compositionFixture = process.env.HERTZ_GENERATION_COMPOSITION_FIXTURE === '1';
+const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const checks = [], errors = [];
 let child, desktopChild, browser, mainBrowser, officialBrowser, page, providerFixture;
-async function until(read, label, timeout = 30000) {
+async function until(read, label, timeout = 30000, interval = 100) {
   const end = Date.now() + timeout;
-  while (Date.now() < end) { const value = await read(); if (value) return value; await delay(100); }
+  while (Date.now() < end) { const value = await read(); if (value) return value; await delay(interval); }
   throw new Error('Timed out: ' + label);
 }
 async function freePort() {
@@ -92,6 +96,32 @@ ConvertTo-Json -Compress -InputObject @([GenerationConsent]::ReadAndClick($windo
       const response = await fetch(base + route, { method, headers: { Authorization: 'Bearer ' + discovery.token, 'Content-Type': 'application/json' },
         body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(40000) });
       const result = await response.json(); assert.equal(response.status, 200, route + ': ' + JSON.stringify(result)); return result;
+    }
+    const management = (command, payload = {}) => page.evaluate(async ({ command, payload }) => (await hertzWallpaperSettings.requestManagement(command, payload)).result, { command, payload });
+    async function chooseFile(command, payload, filePath) {
+      const pending = management(command, payload); pending.catch(() => {});
+      const ownerPid = standalone ? desktopChild.pid : child.pid;
+      const dialog = async (action = 'read', handle, file) => JSON.parse((await execute('powershell.exe', ['-NoProfile', '-NonInteractive', '-File', path.join(root, 'scripts/main-window-files-dialog-fixture.ps1'),
+        '-OwnerPid', String(ownerPid), '-Action', action, ...(handle ? ['-Handle', String(handle)] : []), ...(file ? ['-SavePath', file] : [])], { windowsHide: true, timeout: 15000, encoding: 'utf8' })).stdout.trim());
+      let selected;
+      try {
+        selected = await until(async () => (await dialog()).find(window => window.visible && window.kind === '#32770' && window.controls.some(control => control.kind === 'Edit')), 'owned native file selection', 20000);
+        await dialog('fill', selected.handle, filePath); await dialog('save', selected.handle);
+        return await pending;
+      } catch (error) { if (selected) await dialog('cancel', selected.handle).catch(() => {}); throw error; }
+    }
+    async function waitJob(jobId) {
+      return until(async () => {
+        const job = await management('wallpaper.jobs.get', { jobId });
+        if (['failed', 'cancelled'].includes(job.state)) throw new Error(JSON.stringify(job));
+        return job.state === 'done' && job;
+      }, 'native file job', 60000, 2100);
+    }
+    async function importFile(file) {
+      const selected = await chooseFile('wallpaper.file.pick', {}, file);
+      assert.match(selected.fileToken, /^[0-9a-f]{32}$/);
+      const accepted = await management('wallpaper.import.begin', { fileToken: selected.fileToken });
+      return waitJob(accepted.jobId);
     }
     assert.equal((await api('/v1/health')).backend, 'null');
     await api('/v1/settings', 'PUT', { ai_generation_consent: true });
@@ -165,6 +195,25 @@ ConvertTo-Json -Compress -InputObject @([GenerationConsent]::ReadAndClick($windo
     await consent;
     await page.waitForSelector('#generation-brief:enabled');
     pass((standalone ? 'independent pipe' : 'embedded HostHandle') + ' real pairing and restricted generation connection');
+    let sourcePackage;
+    if (compositionFixture) {
+      assert.equal(imageFixture || ollamaFixture, false);
+      const png = Buffer.from(await page.evaluate(() => { const canvas = document.createElement('canvas'); canvas.width = 320; canvas.height = 180;
+        const context = canvas.getContext('2d'); context.fillStyle = '#4b6d73'; context.fillRect(0, 0, 320, 180); return canvas.toDataURL().split(',')[1]; }), 'base64');
+      const workId = crypto.randomUUID(), manifest = { formatVersion: 1, workId, version: 1, title: '组合素材 · 署名验收', description: '',
+        content: { kind: 'image', asset: 'background' }, assets: [{ id: 'background', kind: 'image', source: 'assets/background.png', variants: [] }],
+        files: [{ path: 'assets/background.png', bytes: png.length, sha256: hash(png), mime: 'image/png' }], properties: [],
+        permissions: { audioSpectrum: false, pointer: false }, license: { code: 'none', assets: 'CC-BY-4.0', attribution: 'Hertz composition fixture author' } };
+      const bytes = buildZip([['manifest.json', Buffer.from(JSON.stringify(manifest))], ['assets/background.png', png]]);
+      const file = path.join(output, 'selected-source.hwpkg'); fs.writeFileSync(file, bytes);
+      const imported = await importFile(file); assert.equal(imported.packageHash, hash(bytes));
+      sourcePackage = { workKey: 'local-' + workId, packageHash: imported.packageHash, pngSha256: hash(png), attribution: manifest.license.attribution };
+      await page.locator('#generation-kind-composition').check();
+      await page.waitForSelector('[data-generation-asset]');
+      await page.locator('[data-generation-asset]').first().check(); await page.locator('#generation-rights').check();
+      const unchangedJobs = await api('/v1/ai/jobs'); assert.equal((unchangedJobs.jobs || []).length, 0);
+      pass('native file import and explicit licensed material selection do not generate a job');
+    }
     if (imageFixture) {
       const beforeChoice = await api('/v1/ai/jobs');
       await page.locator('#generation-kind-image').check();
@@ -206,7 +255,7 @@ ConvertTo-Json -Compress -InputObject @([GenerationConsent]::ReadAndClick($windo
     });
     await page.locator('#generation-confirm').click();
     const denied = JSON.parse((await execute('powershell.exe', ['-NoProfile', '-NonInteractive', '-File', probe, '-TargetPid', String(standalone ? desktopChild.pid : child.pid), '-Button', '7'], { windowsHide: true, timeout: 25000, encoding: 'utf8' })).stdout.trim());
-    assert.ok(denied.some(text => text.includes('default=7'))); assert.ok(denied.some(text => imageFixture ? text.includes('1536') && text.includes('1024') : text.includes('coast') || text.includes('内置场景')));
+    assert.ok(denied.some(text => text.includes('default=7'))); assert.ok(denied.some(text => imageFixture ? text.includes('1536') && text.includes('1024') : compositionFixture ? text.includes('组合') : text.includes('coast') || text.includes('内置场景')));
     assert.ok(denied.some(text => text.includes(ollamaFixture || imageFixture ? '0 micro-USD' : '免费') && text.includes(imageFixture ? '240 秒' : '90 秒')));
     await page.waitForFunction(() => window.generationConfirmationReceipt?.error?.code === 'generation_cancelled');
     assert.deepEqual(await api('/v1/ai/jobs'), before); pass('real native confirmation defaults to No and refusal creates no task');
@@ -235,11 +284,11 @@ ConvertTo-Json -Compress -InputObject @([GenerationConsent]::ReadAndClick($windo
     const status = await nativeStatus(); assert.ok(status.job.jobId); assert.equal(status.submissionPending, false);
     assert.ok(!JSON.stringify(status).includes('bearer')); pass('close during submitted receipt and reopen retains native job');
     await page.locator('#generation-receive').click();
-    await until(async () => (await native('candidates')).result?.candidates?.some(item => item.state === 'previewReady'), 'received immutable candidate');
+    await until(async () => (await native('candidates')).result?.candidates?.some(item => item.state === 'previewReady'), 'received immutable candidate', 60000, 2100);
     await page.waitForSelector('[data-candidate-preview]');
     const candidates = (await native('candidates')).result.candidates;
     const candidate = candidates.find(item => item.state === 'previewReady'); assert.ok(candidate);
-    assert.equal(candidate.kind, imageFixture ? 'image' : 'builtin');
+    assert.equal(candidate.kind, compositionFixture ? 'composition' : imageFixture ? 'image' : 'builtin');
     if (imageFixture) {
       assert.equal(candidate.sceneId, null); assert.equal(candidate.artifact.mime, 'image/png');
       assert.ok(candidate.candidateBytes >= candidate.artifact.bytes);
@@ -249,7 +298,7 @@ ConvertTo-Json -Compress -InputObject @([GenerationConsent]::ReadAndClick($windo
         return image?.complete && image.naturalWidth > 0 && image.src.startsWith('data:image/png;base64,');
       });
       await page.screenshot({ path: path.join(output, 'image-candidate.png'), fullPage: true });
-    } else {
+    } else if (!compositionFixture) {
       assert.ok(candidate.sceneId);
       await page.locator('#generation-candidates figure img').scrollIntoViewIfNeeded();
       await page.waitForFunction(() => {
@@ -261,35 +310,46 @@ ConvertTo-Json -Compress -InputObject @([GenerationConsent]::ReadAndClick($windo
     await until(async () => {
       const result = await page.evaluate(async jobId => (await hertzWallpaperSettings.requestManagement('wallpaper.jobs.get', { jobId })).result, receivedAgain.result.jobId);
       return result.state === 'done';
-    }, 'idempotent local receive');
+    }, 'idempotent local receive', 30000, 2100);
     assert.equal((await native('candidates')).result.candidates.filter(item => item.receiptId === candidate.receiptId).length, 1);
     pass('receive and repeated receive retain one artifact identity');
     await page.locator('[data-candidate-preview]').click();
     await page.waitForSelector('#generation-stop-preview', { state: 'visible' });
     await until(async () => /正在预览候选/.test(await page.locator('#generation-status').innerText()), 'candidate preview');
     await until(() => page.evaluate(() => window.generationMediaPreview?.firstFrameReady), 'real candidate first frame');
-    if (imageFixture) {
+    if (imageFixture || compositionFixture) {
       const first = await page.evaluate(() => window.generationMediaPreview);
       await delay(1500);
       const settled = await page.evaluate(() => window.generationMediaPreview);
-      fs.writeFileSync(path.join(output, 'image-preview.json'), JSON.stringify({ first, settled }, null, 2));
+      fs.writeFileSync(path.join(output, compositionFixture ? 'composition-preview.json' : 'image-preview.json'), JSON.stringify({ first, settled }, null, 2));
       assert.equal(settled?.firstFrameReady, true, 'image remains visible after native follow ticks');
       assert.equal(settled.kind, 'media', 'native diagnostics report the actual image content');
       assert.equal(settled.generation, first.generation, 'follow state cannot replace the image candidate');
       assert.equal(settled.runtimeBuiltin, null, 'image candidate keeps the media renderer');
-      assert.ok(settled.mediaAllocation, 'image candidate retains its native media allocation');
-      assert.equal(settled.glAllocation, null, 'image candidate does not allocate a builtin scene');
+      if (compositionFixture) assert.ok(settled.glAllocation, 'composition uses its original renderer and GL allocation');
+      else { assert.ok(settled.mediaAllocation, 'image candidate retains its native media allocation'); assert.equal(settled.glAllocation, null, 'image candidate does not allocate a builtin scene'); }
     }
     await page.locator('#generation-stop-preview').click();
     await page.waitForSelector('#generation-stop-preview', { state: 'hidden' });
     await until(() => page.evaluate(() => !window.generationMediaPreview), 'real preview controller exit'); pass('candidate uses original preview and explicit close');
     const form = page.locator('#generation-candidates form').first();
-    const savedTitle = imageFixture ? 'AI 图片 · 交付验收' : 'AI 海岸 · 交付验收';
+    const savedTitle = compositionFixture ? 'AI 组合 · 交付验收' : imageFixture ? 'AI 图片 · 交付验收' : 'AI 海岸 · 交付验收';
     await form.locator('input').fill(savedTitle); await form.locator('button[type=submit]').click();
-    await until(async () => (await native('candidates')).result?.candidates?.some(item => item.receiptId === candidate.receiptId && item.state === 'saved'), 'saved immutable package');
+    const saveRetries = [];
+    await until(async () => {
+      const current = (await native('candidates')).result?.candidates?.find(item => item.receiptId === candidate.receiptId);
+      if (current?.state === 'saved') return true;
+      if (current?.state === 'saving') {
+        const resumed = await native('candidate.save', { receiptId: candidate.receiptId, title: savedTitle });
+        saveRetries.push({ state: resumed.result?.state, error: resumed.error });
+        if (!resumed.ok && !['budget_busy', 'draft_busy', 'operation_pending'].includes(resumed.error?.code)) throw new Error(JSON.stringify(resumed));
+      }
+      return false;
+    }, 'saved immutable package', 60000, 2100);
+    fs.writeFileSync(path.join(output, 'save-retries.json'), JSON.stringify(saveRetries, null, 2));
     const saved = (await native('candidates')).result.candidates.find(item => item.receiptId === candidate.receiptId);
     assert.ok(saved.workKey); assert.match(saved.packageHash, /^[a-f0-9]{64}$/);
-    if (imageFixture) {
+    if (imageFixture || compositionFixture) {
       assert.equal(saved.title, savedTitle);
       fs.writeFileSync(path.join(output, 'saved-candidate.json'), JSON.stringify(saved, null, 2));
     }
@@ -315,6 +375,79 @@ ConvertTo-Json -Compress -InputObject @([GenerationConsent]::ReadAndClick($windo
       assert.equal(params.reduced, true);
     }
     pass('explicit save and reopen retain the original real package');
+    if (compositionFixture) {
+      await page.locator('[data-candidate-edit]').click();
+      await page.locator('[data-composition-property="opacity"]').fill('0.6');
+      await until(async () => /作品已保存/.test(await page.locator('#work-message').innerText()), 'composition edit saved');
+      await page.locator('#work-undo').click();
+      await page.locator('#work-save').click();
+      await until(async () => /作品已保存/.test(await page.locator('#work-message').innerText()), 'composition undo saved');
+      const draft = await management('wallpaper.draft.get', { draftId: saved.savedDraftId });
+      assert.equal(draft.contentKind, 'composition'); assert.equal(draft.savedRevision, draft.draftRevision);
+      const published = await management('wallpaper.draft.publish', { draftId: draft.draftId, draftRevision: draft.draftRevision });
+      const destination = path.join(output, 'composition-export.hwpkg');
+      const selected = await chooseFile('wallpaper.export.pick', { packageHash: published.packageHash }, destination);
+      const started = await management('wallpaper.export.begin', { packageHash: published.packageHash, outputToken: selected.outputToken }); await waitJob(started.jobId);
+      const bytes = fs.readFileSync(destination); assert.equal(hash(bytes), published.packageHash);
+      const sourceArchive = path.join(output, 'selected-source.hwpkg');
+      assert.equal(hash(fs.readFileSync(sourceArchive)), sourcePackage.packageHash);
+      const inspectArchive = [
+        'import json,zipfile,hashlib,sys',
+        'with zipfile.ZipFile(sys.argv[1]) as z:',
+        ' manifest=json.loads(z.read("manifest.json"))',
+        ' pointer=manifest["license"]["attribution"]',
+        ' prefix="Attribution and asset licenses: "',
+        ' assert pointer.startswith(prefix), "Composition attribution must declare its inventory path"',
+        ' inventory_path=pointer[len(prefix):]',
+        ' assert inventory_path in {entry["path"] for entry in manifest["files"]}, "Inventory must be declared by the manifest"',
+        ' files={name:z.read(name) for name in z.namelist() if name!="manifest.json"}',
+        ' facts={"manifest":manifest,"files":{name:hashlib.sha256(raw).hexdigest() for name,raw in files.items()},"fileBytes":{name:len(raw) for name,raw in files.items()},"inventoryPath":inventory_path,"inventory":json.loads(files[inventory_path])}',
+        'with zipfile.ZipFile(sys.argv[2]) as z:',
+        ' facts["sourceManifest"]=json.loads(z.read("manifest.json"))',
+        'print(json.dumps(facts))',
+      ].join('\n');
+      const archiveFacts = JSON.parse((await execute('C:/Users/miracle/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/python.exe', ['-c',
+        inspectArchive, destination, sourceArchive], { windowsHide: true, timeout: 15000, encoding: 'utf8' })).stdout);
+      assert.equal(archiveFacts.manifest.content.kind, 'composition');
+      assert.deepEqual(Object.keys(archiveFacts.files).sort(), archiveFacts.manifest.files.map(entry => entry.path).sort());
+      for (const entry of archiveFacts.manifest.files) {
+        assert.equal(archiveFacts.files[entry.path], entry.sha256, 'exported file retains its exact manifest hash: ' + entry.path);
+        assert.equal(archiveFacts.fileBytes[entry.path], entry.bytes, 'exported file retains its exact manifest length: ' + entry.path);
+      }
+      assert.ok(Object.values(archiveFacts.files).includes(sourcePackage.pngSha256), 'saved package contains the selected original bytes');
+      assert.equal(archiveFacts.sourceManifest.license.attribution, sourcePackage.attribution);
+      assert.equal(archiveFacts.manifest.license.attribution, 'Attribution and asset licenses: ' + archiveFacts.inventoryPath);
+      const inventory = archiveFacts.inventory;
+      assert.equal(inventory.kind, 'hertzAttribution'); assert.equal(inventory.formatVersion, 2);
+      assert.ok(Array.isArray(inventory.sources)); assert.ok(Array.isArray(inventory.inventories));
+      const originals = inventory.sources.filter(source => source.sourcePackageHash === sourcePackage.packageHash);
+      assert.ok(originals.length > 0, 'saved inventory retains the selected immutable source package');
+      for (const source of originals) {
+        assert.equal(source.license, archiveFacts.sourceManifest.license.assets, 'saved inventory preserves the exact original asset license');
+        assert.equal(source.attribution, sourcePackage.attribution, 'saved inventory preserves the exact original attribution');
+      }
+      const byId = new Map();
+      for (const item of inventory.inventories) {
+        assert.match(item.id, /^[a-f0-9]{64}$/); assert.match(item.rawSha256, /^[a-f0-9]{64}$/); assert.match(item.sourcePackageHash, /^[a-f0-9]{64}$/);
+        assert.equal(typeof item.originalPath, 'string'); assert.equal(typeof item.raw, 'string'); assert.ok(Array.isArray(item.references));
+        assert.equal(hash(Buffer.from(item.raw, 'utf8')), item.rawSha256, 'inventory preserves its exact raw attribution JSON');
+        assert.equal(hash(Buffer.from(JSON.stringify(['hertz-attribution-v2', item.sourcePackageHash, item.originalPath, item.rawSha256]), 'utf8')), item.id, 'inventory identity binds its original package, path and raw bytes');
+        assert.equal(byId.has(item.id), false, 'inventory identities must be unique');
+        JSON.parse(item.raw); byId.set(item.id, item);
+      }
+      for (const item of inventory.inventories) for (const reference of item.references) {
+        const target = byId.get(reference.id); assert.ok(target, 'inventory retains every closure reference');
+        assert.equal(target.originalPath, reference.path); assert.equal(target.sourcePackageHash, item.sourcePackageHash);
+      }
+      for (const source of inventory.sources) {
+        assert.match(source.sourcePackageHash, /^[a-f0-9]{64}$/);
+        assert.equal(typeof source.license, 'string'); assert.equal(typeof source.attribution, 'string');
+        if (source.priorInventory !== null) assert.ok(byId.has(source.priorInventory), 'source retains its original attribution inventory');
+      }
+      const imported = await importFile(destination); assert.equal(imported.packageHash, published.packageHash);
+      fs.writeFileSync(path.join(output, 'composition-roundtrip.json'), JSON.stringify({ sourcePackage, saved, draft, published, archiveFacts, exportedSha256: hash(bytes), imported }, null, 2));
+      pass('composition edits, undo, native export and reimport preserve the real immutable package');
+    }
     let polling = 0;
     await page.exposeFunction('generationPollObserved', () => { polling++; });
     await page.evaluate(() => { const request = hertzWallpaperSettings.requestManagement; hertzWallpaperSettings.requestManagement = function (command, ...args) {
@@ -333,7 +466,7 @@ ConvertTo-Json -Compress -InputObject @([GenerationConsent]::ReadAndClick($windo
       pass('local Ollama schema, independent output limit and one confirmed provider request');
     }
     assert.deepEqual(errors, []); await page.screenshot({ path: path.join(output, 'generation.png'), fullPage: true });
-    fs.writeFileSync(path.join(output, 'result.json'), JSON.stringify({ passed: true, mode: standalone ? 'standalone' : 'embedded', provider: imageFixture ? 'fake-image' : ollamaFixture ? 'ollama-fixture' : 'fake', checks, errors }, null, 2));
+    fs.writeFileSync(path.join(output, 'result.json'), JSON.stringify({ passed: true, mode: standalone ? 'standalone' : 'embedded', provider: compositionFixture ? 'fake-composition' : imageFixture ? 'fake-image' : ollamaFixture ? 'ollama-fixture' : 'fake', checks, errors }, null, 2));
   } catch (error) {
     if (page && !page.isClosed()) await page.screenshot({ path: path.join(output, 'failure.png'), fullPage: true }).catch(() => {});
     const diagnostic = page && !page.isClosed() ? await page.evaluate(() => ({ visibility:document.visibilityState, trace:window.generationTrace,
