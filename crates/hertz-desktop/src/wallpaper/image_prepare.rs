@@ -494,6 +494,51 @@ fn verify(
 }
 
 impl PreparedImage {
+    /// Small static candidate image, made only in the original preparation slot.
+    pub(crate) fn candidate_thumbnail(
+        &self,
+        store: &AssetStore,
+        probe: &ProbeClient,
+        job: &str,
+        cancel: &AtomicBool,
+    ) -> Result<Output> {
+        let reservation = probe.image_workspace(16 * 1024 * 1024)?;
+        let result = (|| {
+            let source = &self.receipt.thumbnail;
+            if source.width == 0
+                || source.height == 0
+                || source.width.max(source.height) > 512
+                || source.bytes > 2 * 1024 * 1024
+            {
+                return Err(invalid("源缩略图超限"));
+            }
+            let path = self.directory.join("thumbnail.png");
+            let source_pin = super::assets::open_immutable(&path)?;
+            if source_pin.metadata().map_err(invalid)?.len() != source.bytes
+                || hash(&path)? != (source.bytes, source.sha256.clone())
+            {
+                return Err(invalid("源缩略图与准备回执不符"));
+            }
+            let (pixels, orientation) = hertz_wallpaper::image_prepare::decode(
+                &path,
+                "png",
+                source.width,
+                source.height,
+                8 * 1024 * 1024,
+                cancel,
+            )
+            .map_err(pixel_error)?;
+            let (width, height) = fit(source.width, source.height, 96, 96 * 96);
+            write_png(
+                &store.staging_dir(job).join("ai-thumbnail.png"),
+                &resample(&pixels, orientation, width, height, cancel)?,
+                cancel,
+            )
+        })();
+        reservation.finish();
+        result
+    }
+
     pub(crate) fn content_key(&self) -> String {
         format!("{}:{}", self.receipt.cache_key, self.receipt.render.sha256)
     }

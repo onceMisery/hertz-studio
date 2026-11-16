@@ -120,9 +120,57 @@
   const el = id => document.getElementById('generation-' + id);
   let epoch = 0, timer = null, busy = false, connected = false, ready = false, quote = null, job = null, submissionPending = false;
   let candidates = [], candidateKey = '', receiving = null, previewing = null;
+  let thumbnailQueue = Promise.resolve();
   let generationContext = JSON.stringify(settings.currentAiContext());
   function node(tag, text, id) { const value = document.createElement(tag); if (text) value.textContent = text; if (id) value.id = 'generation-' + id; return value; }
   const body = panel.querySelector('.ai-body');
+  const quoteForm = node('form', '', 'form'); quoteForm.setAttribute('aria-label', '壁纸生成报价');
+  const sceneLabel = el('scene').closest('label'), briefLabel = el('brief').closest('label'), quoteTools = el('quote').closest('.ai-toolbar');
+  sceneLabel.before(quoteForm); quoteForm.append(sceneLabel, briefLabel, quoteTools);
+  el('scene').name = 'scene'; el('brief').name = 'brief'; el('brief').required = true; el('quote').type = 'submit';
+  el('brief').setAttribute('aria-describedby', 'generation-type-info');
+  let capability = null;
+  const kindField = node('fieldset'), kindLegend = node('legend', '生成类型'); kindField.id = 'generation-kinds'; kindField.className = 'generation-options'; kindField.append(kindLegend);
+  for (const [value, text] of [['builtin', '内置场景'], ['image', '图片']]) {
+    const input = node('input', '', 'kind-' + value); input.type = 'radio'; input.name = 'generation-kind'; input.value = value; input.checked = value === 'builtin'; input.disabled = true;
+    const label = node('label', text); label.htmlFor = input.id;
+    const option = node('div'); option.className = 'generation-option'; option.append(input, label); kindField.append(option);
+  }
+  const imageFields = node('div', '', 'image-fields'); imageFields.hidden = true;
+  const sizeField = node('fieldset', '', 'sizes'); sizeField.className = 'generation-options'; sizeField.append(node('legend', '图片尺寸'));
+  const qualityField = node('fieldset', '', 'qualities'); qualityField.className = 'generation-options'; qualityField.append(node('legend', '图片质量'));
+  const typeInfo = node('p', '', 'type-info'); typeInfo.className = 'hint';
+  imageFields.append(sizeField, qualityField); el('scene').closest('label').before(kindField, imageFields, typeInfo);
+  function chosen(name) { return panel.querySelector('input[name="generation-' + name + '"]:checked')?.value || ''; }
+  function outputSpec() {
+    if (chosen('kind') !== 'image') return { kind: 'builtin', sceneId: el('scene').value };
+    const [width, height] = chosen('size').split('x').map(Number);
+    return { kind: 'image', width, height, qualityId: chosen('quality') };
+  }
+  function choices(field, name, values) {
+    const selected = chosen(name); field.querySelectorAll('.generation-option').forEach(item => item.remove());
+    values.forEach(([value, text], index) => {
+      const input = node('input', '', name + '-' + index); input.type = 'radio'; input.name = 'generation-' + name; input.value = value;
+      input.checked = value === selected || (!values.some(item => item[0] === selected) && index === 0);
+      const label = node('label', text); label.htmlFor = input.id;
+      const option = node('div'); option.className = 'generation-option'; option.append(input, label); field.append(option);
+      input.addEventListener('change', () => { invalidateQuote(); controls(); });
+    });
+  }
+  function typeControls() {
+    const kind = chosen('kind'), output = (capability?.outputs || []).find(item => item.kind === kind);
+    ready = !!output?.ready;
+    el('scene').closest('label').hidden = kind === 'image'; imageFields.hidden = kind !== 'image';
+    for (const value of ['builtin', 'image']) {
+      const item = (capability?.outputs || []).find(item => item.kind === value);
+      el('kind-' + value).disabled = busy || !connected || !item?.ready;
+    }
+    imageFields.querySelectorAll('input').forEach(input => { input.disabled = busy || !ready || !connected; });
+    typeInfo.textContent = kind === 'image'
+      ? ready ? '离线图片测试 · 诊断网格，不调用模型。正式图像模型与价格尚未启用。' : '图片生成尚未启用。请在播放器配置独立图像能力。'
+      : '内置场景生成公开参数。' + (!(capability?.outputs || []).some(item => item.kind === 'image' && item.ready) ? ' 图片生成尚未启用。' : '');
+  }
+  for (const value of ['builtin', 'image']) el('kind-' + value).addEventListener('change', () => { invalidateQuote(); controls(); });
   const receive = node('button', '接收生成候选', 'receive'); receive.type = 'button';
   const receiveCancel = node('button', '取消接收', 'receive-cancel'); receiveCancel.type = 'button';
   const receiveState = node('p', '', 'receive-state'); receiveState.className = 'hint'; receiveState.setAttribute('role', 'status');
@@ -135,12 +183,13 @@
   function visible() { return panel.open && !document.hidden && !panel.closest('[role="tabpanel"]').hidden; }
   function status(text) { el('status').textContent = text; }
   function controls() {
+    typeControls();
     panel.setAttribute('aria-busy', String(busy));
     el('connect').hidden = connected; el('connect').disabled = busy;
     el('disconnect').hidden = !connected; el('disconnect').disabled = busy;
     el('scene').disabled = busy || !connected || !ready;
     el('brief').disabled = busy || !connected || !ready;
-    el('quote').disabled = busy || submissionPending || !ready || !connected || !el('brief').value.trim();
+    el('quote').disabled = busy || submissionPending || !ready || !connected;
     el('recover').hidden = !submissionPending; el('recover').disabled = busy || !connected;
     el('price').hidden = !quote; el('confirm').disabled = busy || !quote || quote.expiresAt <= Date.now();
     el('cancel').hidden = !job || !['accepted', 'running'].includes(job.state); el('cancel').disabled = busy;
@@ -175,12 +224,12 @@
   function renderCandidates(result) {
     const next = result.candidates || [], key = JSON.stringify(next);
     candidates = next;
-    if (key === candidateKey) return;
+    if (key === candidateKey) { list.querySelectorAll('li').forEach(row => row.loadThumbnail?.()); return; }
     candidateKey = key; list.replaceChildren();
     if (!next.length) { list.append(node('li', '尚未接收候选。生成完成后点击“接收生成候选”。')); return; }
     for (const item of next) {
       const row = node('li'); row.dataset.receiptId = item.receiptId;
-      const title = node('strong', '内置场景候选 · ' + item.artifact.sha256.slice(0, 12));
+      const title = node('strong', (item.kind === 'image' ? '图片候选' : '内置场景候选') + ' · ' + item.artifact.sha256.slice(0, 12));
       const detail = node('p', item.state === 'saved' ? '已保存作品，可从本地作品入口选择。' : item.state === 'saving' ? '已转交作品保存，重试将继续原保存。' : '已接收，尚未保存。候选到期时间：' + new Date(Number(item.artifact.expiresAt)).toLocaleString()); detail.className = 'hint';
       row.append(title, detail);
       if (item.sceneId) {
@@ -189,10 +238,33 @@
         image.alt = ''; image.width = 320; image.height = 180; image.loading = 'lazy'; image.decoding = 'async';
         reference.append(image, node('figcaption', '场景静态参考；生成参数的效果请点击“预览候选”查看。'));
         row.append(reference);
+      } else if (item.kind === 'image' && item.state !== 'saved') {
+        const reference = node('figure'), image = node('img'), caption = node('figcaption', '正在读取图片缩略图…');
+        image.alt = '生成图片的静态缩略图'; image.decoding = 'async'; image.hidden = true;
+        reference.append(image, caption); row.append(reference);
+        let thumbnailState = 'idle';
+        row.loadThumbnail = () => {
+          if (thumbnailState !== 'idle') return;
+          thumbnailState = 'pending';
+          thumbnailQueue = thumbnailQueue.then(async () => {
+          if (!visible() || !row.isConnected) { thumbnailState = 'idle'; return; }
+          try {
+            const thumbnail = await request('candidate.thumbnail', { receiptId: item.receiptId });
+            if (!visible() || !row.isConnected) { thumbnailState = 'idle'; return; }
+            if (!Number.isInteger(thumbnail.width) || !Number.isInteger(thumbnail.height) || thumbnail.width < 1 || thumbnail.height < 1 || Math.max(thumbnail.width, thumbnail.height) > 96 || typeof thumbnail.data !== 'string' || thumbnail.data.length > 55 * 1024 || !/^[A-Za-z0-9+/]+={0,2}$/.test(thumbnail.data)) throw new Error('缩略图回执无效');
+            image.width = thumbnail.width; image.height = thumbnail.height; image.style.aspectRatio = thumbnail.width + ' / ' + thumbnail.height;
+            image.src = 'data:image/png;base64,' + thumbnail.data; image.hidden = false;
+            caption.textContent = '图片静态缩略图；完整效果请点击“预览候选”查看。';
+            thumbnailState = 'ready';
+          } catch (error) { thumbnailState = 'failed'; if (row.isConnected) caption.textContent = '缩略图不可用，请预览候选或重新打开面板。'; }
+          });
+        };
+        row.retryThumbnail = () => { if (thumbnailState === 'failed') thumbnailState = 'idle'; row.loadThumbnail(); };
+        row.loadThumbnail();
       }
       if (item.state !== 'saved') {
         const form = node('form'); form.setAttribute('aria-label', '保存候选 ' + item.artifact.sha256.slice(0, 12));
-        const label = node('label', '作品名'), input = node('input'); input.name = 'title'; input.maxLength = 128; input.required = true; input.value = 'AI 内置场景'; label.append(input);
+        const label = node('label', '作品名'), input = node('input'); input.name = 'title'; input.maxLength = 120; input.required = true; input.value = item.title || (item.kind === 'image' ? 'AI 图片' : 'AI 内置场景'); label.append(input);
         const save = node('button', item.state === 'saving' ? '继续保存原作品' : '保存作品'); save.type = 'submit'; form.append(label, save);
         form.addEventListener('submit', event => {
           event.preventDefault();
@@ -232,17 +304,20 @@
     try {
       const state = await request('status');
       if (current !== epoch || !visible()) return;
-      connected = !!state.connected;
+      connected = !!state.connected; if (!connected) capability = null;
       job = state.job || null; submissionPending = !!state.submissionPending;
       el('job').textContent = job ? phases[job.state] || '任务状态未知。' : '';
       if (!connected) {
         ready = false; quote = null;
         status(state.pending ? '请在播放器设置 → 连接 → AI 与外部连接中确认此连接。配对 60 秒后到期。' : '尚未连接。请先启动已选来源的播放器，再连接生成服务。');
-      } else if (!ready) {
-        const capability = await request('capabilities');
+      } else if (!capability) {
+        capability = await request('capabilities');
         if (current !== epoch || !visible()) return;
-        const output = (capability.outputs || []).find(item => item.kind === 'builtin' && item.ready);
+        const output = (capability.outputs || []).find(item => item.kind === chosen('kind') && item.ready);
         ready = !!output; el('scene').replaceChildren();
+        const image = (capability.outputs || []).find(item => item.kind === 'image');
+        choices(sizeField, 'size', (image?.sizes || []).map(([width, height]) => [width + 'x' + height, width + '×' + height]));
+        choices(qualityField, 'quality', (image?.qualityIds || []).map(value => [value, value === 'fixture' ? '离线测试' : value]));
         for (const scene of capability.scenes || []) {
           const option = document.createElement('option'); option.value = scene.id; option.textContent = scene.label || scene.id;
           el('scene').appendChild(option);
@@ -275,16 +350,23 @@
     catch (error) { status(error.message); }
   });
   stopPreview.addEventListener('click', () => { stopCandidatePreview(); status('候选预览已结束。'); });
-  el('connect').addEventListener('click', () => action('connect', {}, () => { ready = false; status('请在播放器设置 → 连接 → AI 与外部连接中确认连接。'); }));
-  el('disconnect').addEventListener('click', () => action('disconnect', {}, () => { connected = false; ready = false; quote = null; job = null; el('job').textContent = ''; status('生成连接已断开。'); }));
-  el('quote').addEventListener('click', () => action('generate.quote', { brief: el('brief').value, sceneId: el('scene').value }, result => {
+  el('connect').addEventListener('click', () => action('connect', {}, () => { ready = false; capability = null; status('请在播放器设置 → 连接 → AI 与外部连接中确认连接。'); }));
+  el('disconnect').addEventListener('click', () => action('disconnect', {}, () => { connected = false; ready = false; capability = null; quote = null; job = null; el('job').textContent = ''; status('生成连接已断开。'); }));
+  quoteForm.addEventListener('submit', event => {
+    event.preventDefault();
+    el('brief').setCustomValidity(el('brief').value.trim() ? '' : '请描述你想要的画面。');
+    if (!quoteForm.reportValidity()) return;
+    action('generate.quote', { brief: el('brief').value, output: outputSpec() }, result => {
     quote = result;
     const price = result.pricingMode === 'free' ? '本地离线 fixture，免费' : result.pricingMode === 'token-only'
       ? '费用未知 · 最多 ' + result.maxInputTokens + ' 输入 / ' + result.maxOutputTokens + ' 输出 token'
       : '费用预留上界 ' + result.maximumCostMicroUsd + ' micro-USD';
-    el('price-text').textContent = result.provider + ' / ' + result.model + ' · ' + price;
+    const labels = { inputTokens: '输入 token', outputTokens: '输出 token', imageOutput: '图片张数' };
+    const metering = Array.isArray(result.dimensions) ? result.dimensions.map(item => (labels[item.dimension] || item.dimension) + '最多 ' + item.quantityLimit + '，每 ' + item.unitScale + ' 单位 ' + item.unitPriceMicroUsd + ' micro-USD').join('；') : '';
+    el('price-text').textContent = result.provider + ' / ' + result.model + ' · ' + price + (metering ? ' · ' + metering : '') + ' · 执行最多 ' + result.executionSeconds + ' 秒，含排队最多 ' + result.maximumWaitSeconds + ' 秒';
     status('报价有效期 5 分钟。确认时将再次显示原生生成许可。');
-  }));
+    });
+  });
   el('confirm').addEventListener('click', () => action('generate.confirm', { confirmationToken: quote && quote.confirmationToken }, result => {
     job = result.job || result; quote = null; el('job').textContent = phases[job.state] || '任务已受理。'; status('本次请求已提交。');
   }));
@@ -294,15 +376,15 @@
   el('recover').addEventListener('click', () => action('generate.recover', {}, result => {
     job = result.job; submissionPending = false; el('job').textContent = phases[job.state] || '原任务已受理。'; status('已找回原请求回执。');
   }));
-  for (const name of ['brief', 'scene']) el(name).addEventListener('input', () => { invalidateQuote(); controls(); });
-  panel.addEventListener('toggle', () => { ++epoch; stop(); if (!visible()) stopCandidatePreview(); invalidateQuote(); if (visible()) { ready = false; refresh(); } });
+  for (const name of ['brief', 'scene']) el(name).addEventListener('input', () => { if (name === 'brief') el(name).setCustomValidity(''); invalidateQuote(); controls(); });
+  panel.addEventListener('toggle', () => { ++epoch; stop(); if (!visible()) stopCandidatePreview(); invalidateQuote(); if (visible()) { ready = false; capability = null; list.querySelectorAll('li').forEach(row => row.retryThumbnail?.()); refresh(); } });
   new MutationObserver(() => { ++epoch; stop(); if (!visible()) stopCandidatePreview(); invalidateQuote(); if (visible()) refresh(); })
     .observe(panel.closest('[role="tabpanel"]'), { attributes: true, attributeFilter: ['hidden'] });
   document.addEventListener('visibilitychange', () => { ++epoch; stop(); if (!visible()) stopCandidatePreview(); invalidateQuote(); if (visible()) refresh(); });
   window.addEventListener('wallpaper-ai-context', () => {
     const next = JSON.stringify(settings.currentAiContext());
     if (next === generationContext) return;
-    generationContext = next; ++epoch; stop(); stopCandidatePreview(); ready = false; quote = null; if (visible()) refresh();
+    generationContext = next; ++epoch; stop(); stopCandidatePreview(); ready = false; capability = null; quote = null; if (visible()) refresh();
   });
   window.addEventListener('pagehide', () => { stop(); stopCandidatePreview(); });
   controls();

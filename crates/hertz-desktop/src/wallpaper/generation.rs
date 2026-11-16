@@ -5,7 +5,6 @@ use hertz_wallpaper::pairing::{self, Binding};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{
-    io::{Read, Write},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
@@ -42,7 +41,7 @@ struct Quote {
     summary: Value,
     expires: Instant,
     description: String,
-    scene_id: String,
+    specification: String,
 }
 #[derive(Default)]
 struct State {
@@ -108,10 +107,22 @@ impl NativeGeneration {
             max_input_tokens: u64,
             max_output_tokens: u64,
             maximum_wait_seconds: u64,
+            #[serde(default)]
+            execution_seconds: Option<u64>,
+            #[serde(default)]
+            dimensions: Option<Vec<Meter>>,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Meter {
+            dimension: String,
+            quantity_limit: u64,
+            unit_price_micro_usd: u64,
+            unit_scale: u64,
         }
         let summary: Summary = serde_json::from_value(quote.summary.clone())
             .map_err(|_| error("invalid_response", "报价确认信息不完整"))?;
-        let price = match (
+        let mut price = match (
             summary.pricing_mode.as_str(),
             summary.maximum_cost_micro_usd,
         ) {
@@ -123,8 +134,30 @@ impl NativeGeneration {
             ),
             _ => return Err(error("invalid_response", "报价价格模式无效")),
         };
-        Ok(format!("允许本次壁纸生成？\n\n模型：{} / {}\n地址：{}\n发送范围：{}\n规格：内置场景 {}，仅生成公开参数\n描述：{}\n最长等待：{} 秒\n{}\n\n仅生成候选，不保存或切换桌面。",
-            summary.provider,summary.model,summary.endpoint_label,summary.data_scope,quote.scene_id,quote.description,summary.maximum_wait_seconds,price))
+        if let Some(items) = summary.dimensions {
+            if items.len() != 3
+                || items.iter().map(|i| i.dimension.as_str()).ne([
+                    "inputTokens",
+                    "outputTokens",
+                    "imageOutput",
+                ])
+                || items.iter().any(|i| i.unit_scale == 0)
+            {
+                return Err(error("invalid_response", "图像计费维度不完整"));
+            }
+            let labels = ["输入 token", "输出 token", "图片张数"];
+            for (item, label) in items.iter().zip(labels) {
+                price.push_str(&format!(
+                    "\n{label}：最多 {}；每 {} 单位 {} micro-USD",
+                    item.quantity_limit, item.unit_scale, item.unit_price_micro_usd
+                ));
+            }
+        }
+        if let Some(seconds) = summary.execution_seconds {
+            price.push_str(&format!("\n本地执行期限：{seconds} 秒（排队另计）"));
+        }
+        Ok(format!("允许本次壁纸生成？\n\n模型：{} / {}\n地址：{}\n发送范围：{}\n规格：{}\n描述：{}\n最长等待：{} 秒\n{}\n\n仅生成候选，不保存或切换桌面。",
+            summary.provider,summary.model,summary.endpoint_label,summary.data_scope,quote.specification,quote.description,summary.maximum_wait_seconds,price))
     }
     pub(crate) fn verify(
         &self,
@@ -348,7 +381,10 @@ impl NativeGeneration {
                 #[serde(rename_all = "camelCase", deny_unknown_fields)]
                 struct Input {
                     brief: String,
-                    scene_id: String,
+                    #[serde(default)]
+                    scene_id: Option<String>,
+                    #[serde(default)]
+                    output: Option<hertz_wallpaper::generation::WallpaperGeneration>,
                 }
                 let input: Input = serde_json::from_value(payload)
                     .map_err(|_| error("invalid_input", "描述或场景无效"))?;
@@ -359,15 +395,34 @@ impl NativeGeneration {
                         "播放器与桌面组件目录不一致，请同步更新",
                     ));
                 }
+                let output = match (input.scene_id, input.output) {
+                    (Some(scene), None) => json!({"kind":"builtin","sceneId":scene}),
+                    (None, Some(output)) => serde_json::to_value(output)
+                        .map_err(|_| error("invalid_input", "生成规格无效"))?,
+                    _ => return Err(error("invalid_input", "请明确选择一份生成规格")),
+                };
                 let request_id = uuid::Uuid::new_v4().to_string();
                 let body = json!({"version":1,"requestId":request_id,"brief":input.brief,
-                    "output":{"kind":"builtin","sceneId":input.scene_id},
+                    "output":output,
                     "registryHash":snapshot["registryHash"],"generationSchemaHash":snapshot["generationSchemaHash"],
                     "capabilitySnapshotId":snapshot["snapshotId"]});
-                hertz_wallpaper::generation::WallpaperGenerateRequest::parse(
+                let parsed = hertz_wallpaper::generation::WallpaperGenerateRequest::parse(
                     &serde_json::to_vec(&body).expect("request"),
                 )
                 .map_err(|e| error(e.code, &e.message))?;
+                let specification = match parsed.output.kind {
+                    hertz_wallpaper::generation::WallpaperGenerationKind::Builtin => format!(
+                        "内置场景 {}，仅生成公开参数",
+                        parsed.output.scene_id.as_deref().unwrap_or("")
+                    ),
+                    hertz_wallpaper::generation::WallpaperGenerationKind::Image => format!(
+                        "单张图片 {}×{}，质量 {}",
+                        parsed.output.width.unwrap_or(0),
+                        parsed.output.height.unwrap_or(0),
+                        parsed.output.quality_id.as_deref().unwrap_or("")
+                    ),
+                    _ => return Err(error("unsupported_output", "此版本尚未提供组合生成")),
+                };
                 let mut summary = http(&connection, "POST", "/v1/ai/wallpaper/quote", Some(body))?;
                 let quote_id = summary["quoteId"]
                     .as_str()
@@ -391,7 +446,7 @@ impl NativeGeneration {
                     idempotency_key: format!("v1.{}.{}", now_ms(), uuid::Uuid::new_v4().simple()),
                     summary: summary.clone(),
                     description: input.brief,
-                    scene_id: input.scene_id,
+                    specification,
                     expires: Instant::now() + Duration::from_millis(remaining as u64),
                 });
                 summary["confirmationToken"] = token.into();
@@ -659,9 +714,7 @@ fn http(connection: &Connection, method: &str, path: &str, body: Option<Value>) 
     Ok(value)
 }
 
-/// This fixed-origin HTTP/1.1 JSON transport verifies the connected Windows
-/// endpoint before writing headers. The service returns bounded, sized JSON;
-/// redirects, proxies, chunked bodies and unrelated origins have no path here.
+/// All requests retain the original paired transport and response limits.
 fn local_request(
     connection: &Connection,
     port: u16,
@@ -669,127 +722,11 @@ fn local_request(
     path: &str,
     body: Option<Value>,
 ) -> Result<(bool, Vec<u8>)> {
-    if !matches!(method, "GET" | "POST" | "DELETE") || path.bytes().any(|b| b <= b' ' || b == 127) {
-        return Err(error("invalid_input", "请求无效"));
-    }
-    let bytes = body
-        .map(|body| serde_json::to_vec(&body))
-        .transpose()
-        .map_err(|_| error("invalid_input", "请求无法编码"))?
-        .unwrap_or_default();
-    if bytes.len() > 16 * 1024 {
-        return Err(error("invalid_input", "请求超过16 KiB"));
-    }
-    let deadline = Instant::now() + Duration::from_secs(2);
-    let address = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-    let mut stream = std::net::TcpStream::connect_timeout(&address, Duration::from_secs(1))
-        .map_err(|_| error("service_unavailable", "本机连接未完成"))?;
-    hertz_desktop_ipc::windows::verify_loopback_peer(
-        &stream,
-        connection.binding.service_pid,
-        &connection.service_generation,
-    )
-    .map_err(|_| error("service_identity_mismatch", "连接不属于已配对的播放器"))?;
-    stream
-        .set_write_timeout(Some(
-            deadline
-                .saturating_duration_since(Instant::now())
-                .max(Duration::from_millis(1)),
-        ))
-        .map_err(|_| error("service_unavailable", "无法设置请求期限"))?;
-    let auth = connection
-        .bearer
-        .as_ref()
-        .map(|token| format!("Authorization: Bearer {token}\r\n"))
-        .unwrap_or_default();
-    let headers=format!("{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{auth}\r\n",bytes.len());
-    stream
-        .write_all(headers.as_bytes())
-        .and_then(|_| stream.write_all(&bytes))
-        .map_err(|_| error("service_unavailable", "请求回执未完成，请查询原请求"))?;
-    let mut received = Vec::new();
-    let mut buffer = [0u8; 4096];
-    let header_end = loop {
-        read_response(&mut stream, &mut received, &mut buffer, deadline)?;
-        if let Some(index) = received.windows(4).position(|w| w == b"\r\n\r\n") {
-            if index > 8192 {
-                return Err(error("invalid_response", "响应头过大"));
-            }
-            break index + 4;
-        }
-        if received.len() > 8192 {
-            return Err(error("invalid_response", "响应头过大"));
-        }
-    };
-    let header = std::str::from_utf8(&received[..header_end])
-        .map_err(|_| error("invalid_response", "响应头无效"))?;
-    let mut lines = header.split("\r\n");
-    let mut status = lines.next().unwrap_or("").split(' ');
-    if status.next() != Some("HTTP/1.1") {
-        return Err(error("invalid_response", "响应协议无效"));
-    }
-    let code = status
-        .next()
-        .and_then(|s| s.parse::<u16>().ok())
-        .filter(|n| (200..=599).contains(n))
-        .ok_or_else(|| error("invalid_response", "响应状态无效"))?;
-    let mut length = None;
-    for line in lines.filter(|line| !line.is_empty()) {
-        let (name, value) = line
-            .split_once(':')
-            .ok_or_else(|| error("invalid_response", "响应头无效"))?;
-        if name.eq_ignore_ascii_case("transfer-encoding") {
-            return Err(error("invalid_response", "本机响应必须提供明确长度"));
-        }
-        if name.eq_ignore_ascii_case("content-length") {
-            if length.is_some() {
-                return Err(error("invalid_response", "响应长度重复"));
-            }
-            length = Some(
-                value
-                    .trim()
-                    .parse::<usize>()
-                    .map_err(|_| error("invalid_response", "响应长度无效"))?,
-            );
-        }
-    }
-    let length = length.ok_or_else(|| error("invalid_response", "响应缺少长度"))?;
-    if length > 64 * 1024 {
-        return Err(error("response_too_large", "响应超过64 KiB"));
-    }
-    while received.len() < header_end + length {
-        read_response(&mut stream, &mut received, &mut buffer, deadline)?;
-    }
-    if received.len() != header_end + length {
-        return Err(error("invalid_response", "响应长度不匹配"));
-    }
-    Ok(((200..300).contains(&code), received.split_off(header_end)))
+    transport::request(connection, port, method, path, body)
 }
-fn read_response(
-    stream: &mut std::net::TcpStream,
-    received: &mut Vec<u8>,
-    buffer: &mut [u8],
-    deadline: Instant,
-) -> Result<()> {
-    let remaining = deadline
-        .checked_duration_since(Instant::now())
-        .filter(|d| !d.is_zero())
-        .ok_or_else(|| error("service_unavailable", "读取响应已超时"))?;
-    stream
-        .set_read_timeout(Some(remaining))
-        .map_err(|_| error("service_unavailable", "无法设置响应期限"))?;
-    let count = stream
-        .read(buffer)
-        .map_err(|_| error("service_unavailable", "读取响应未完成，请查询原请求"))?;
-    if count == 0 {
-        return Err(error("invalid_response", "响应提前结束"));
-    }
-    if received.len() + count > 64 * 1024 + 8192 {
-        return Err(error("response_too_large", "响应超过上限"));
-    }
-    received.extend_from_slice(&buffer[..count]);
-    Ok(())
-}
+
+#[path = "generation_http.rs"]
+mod transport;
 
 #[cfg(test)]
 #[path = "generation_tests.rs"]

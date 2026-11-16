@@ -50,6 +50,7 @@ impl ResourceKind {
 pub struct ResourceSpec {
     pub path: String,
     pub kind: ResourceKind,
+    introduced_at: Option<i64>,
 }
 
 /// Caller-owned durable barrier, invoked after complete restore staging and
@@ -61,13 +62,21 @@ impl ResourceSpec {
         Self {
             path: path.into(),
             kind: ResourceKind::Directory,
+            introduced_at: None,
         }
     }
     pub fn file(path: impl Into<String>) -> Self {
         Self {
             path: path.into(),
             kind: ResourceKind::File,
+            introduced_at: None,
         }
+    }
+
+    /// Older snapshots may omit this resource only before the named migration.
+    pub fn introduced_at(mut self, version: i64) -> Self {
+        self.introduced_at = Some(version);
+        self
     }
 }
 
@@ -86,6 +95,14 @@ impl Layout<'_> {
             "database_layout: invalid store identity or connection limit"
         );
         for (index, resource) in self.resources.iter().enumerate() {
+            ensure!(
+                resource.introduced_at.is_none_or(|version| version > 0
+                    && self
+                        .migrator
+                        .iter()
+                        .any(|migration| migration.version == version)),
+                "database_layout: resource introduction must name a supported migration"
+            );
             relative(&resource.path)?;
             let first = resource.path.split('/').next().unwrap();
             let comparison = if cfg!(windows) {
@@ -695,14 +712,27 @@ async fn validate_snapshot(data: &Path, id: &str, layout: &Layout<'_>) -> Result
             && snapshot.source_dir == data,
         "database_backup_profile: 快照不属于此资料目录或协议不支持"
     );
+    let schema = snapshot
+        .applied
+        .last()
+        .map_or(0, |migration| migration.version);
+    let mut resources = snapshot.resources.iter().peekable();
+    for expected in roots {
+        if resources.peek().is_some_and(|resource| {
+            resource.original == expected.path && resource.kind == expected.kind
+        }) {
+            resources.next();
+        } else {
+            ensure!(
+                expected
+                    .introduced_at
+                    .is_some_and(|version| schema < version),
+                "database_backup_roots: 快照资源范围不匹配"
+            );
+        }
+    }
     ensure!(
-        snapshot.resources.len() == roots.len()
-            && snapshot
-                .resources
-                .iter()
-                .zip(roots)
-                .all(|(resource, expected)| resource.original == expected.path
-                    && resource.kind == expected.kind),
+        resources.next().is_none(),
         "database_backup_roots: 快照资源范围不匹配"
     );
     let expected: Vec<_> = migrator.iter().collect();
@@ -852,7 +882,22 @@ async fn apply_snapshot(
     before_replace: Option<BeforeRestore>,
 ) -> Result<()> {
     layout.validate()?;
-    let snapshot = validate_snapshot(data, id, layout).await?;
+    let mut snapshot = validate_snapshot(data, id, layout).await?;
+    // Missing historical resources are absent at that snapshot, not retained
+    // current state. Displace them into the same recoverable restore journal.
+    for resource in &layout.resources {
+        if !snapshot
+            .resources
+            .iter()
+            .any(|item| item.original == resource.path)
+        {
+            snapshot.resources.push(Resource {
+                original: resource.path.clone(),
+                kind: resource.kind,
+                existed: false,
+            });
+        }
+    }
     let source = backup_path(data, id)?;
     let data_copy = data.to_owned();
     let staged_snapshot = snapshot.clone();

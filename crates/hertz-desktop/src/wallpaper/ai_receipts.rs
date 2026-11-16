@@ -22,7 +22,21 @@ struct Row {
     draft_id: Option<String>,
     work_key: Option<String>,
     package_hash: Option<String>,
+    kind: String,
+    image_work_id: Option<String>,
+    candidate_package_hash: Option<String>,
+    candidate_bytes: i64,
+    save_title: Option<String>,
+    pending_package_hash: Option<String>,
+    thumbnail_json: Option<String>,
 }
+pub(crate) enum PreviewSource {
+    Builtin(Document),
+    Image(String),
+}
+#[path = "ai_receipts_image.rs"]
+mod image;
+pub(crate) use image::ImageReception;
 pub(crate) struct AiReceipts<'a>(&'a Library);
 impl<'a> AiReceipts<'a> {
     pub(crate) fn new(library: &'a Library) -> Self {
@@ -133,7 +147,7 @@ impl<'a> AiReceipts<'a> {
         }
         sqlx::query("UPDATE ai_receipts SET state='expired',document_json=NULL WHERE state='previewReady' AND expires_at<=?")
             .bind(now_secs()).execute(&mut *tx).await.map_err(database)?;
-        let (count,size):(i64,i64)=sqlx::query_as("SELECT COUNT(*),COALESCE(SUM(length(CAST(document_json AS BLOB))),0) FROM ai_receipts WHERE state IN ('previewReady','saving')")
+        let (count,size):(i64,i64)=sqlx::query_as("SELECT COALESCE(SUM(state IN ('previewReady','saving')),0),COALESCE(SUM(candidate_bytes+CASE WHEN state IN ('previewReady','saving') THEN COALESCE(length(CAST(document_json AS BLOB)),0) ELSE 0 END),0) FROM ai_receipts")
             .fetch_one(&mut *tx).await.map_err(database)?;
         let document_json =
             serde_json::to_string(&document).map_err(|e| JobError::invalid_input(e.to_string()))?;
@@ -160,7 +174,11 @@ impl<'a> AiReceipts<'a> {
     }
     pub(crate) async fn document(&self, id: &str, revision: u64) -> Result<Document> {
         let row = self.row(id).await?;
-        if revision != 1 || row.state != "previewReady" || row.expires_at <= now_secs() {
+        if row.kind != "builtin"
+            || revision != 1
+            || row.state != "previewReady"
+            || row.expires_at <= now_secs()
+        {
             return Err(JobError::new(
                 "ai_artifact_expired",
                 "候选已保存、删除或到期，请从作品库打开已保存作品",
@@ -168,6 +186,19 @@ impl<'a> AiReceipts<'a> {
         }
         serde_json::from_str(row.document_json.as_deref().unwrap_or(""))
             .map_err(|_| JobError::new("ai_output_rejected", "候选文档无效"))
+    }
+    pub(crate) async fn preview_source(&self, id: &str, revision: u64) -> Result<PreviewSource> {
+        let row = self.row(id).await?;
+        if revision != 1 || row.state != "previewReady" || row.expires_at <= now_secs() {
+            return Err(JobError::new("ai_artifact_expired", "候选已变化或到期"));
+        }
+        if row.kind == "image" {
+            Ok(PreviewSource::Image(row.receipt_id))
+        } else {
+            self.document(id, revision)
+                .await
+                .map(PreviewSource::Builtin)
+        }
     }
     pub(crate) async fn delete(&self, id: &str) -> Result<Value> {
         let row = self.row(id).await?;
@@ -263,7 +294,7 @@ fn view(row: &Row) -> Value {
         .as_deref()
         .and_then(|document| serde_json::from_str::<Document>(document).ok())
         .map(|document| document.scene_id);
-    json!({"receiptId":row.receipt_id,"state":state,"sceneId":scene,"draftId":row.receipt_id,"savedDraftId":row.draft_id,"draftRevision":1,
+    json!({"receiptId":row.receipt_id,"state":state,"kind":row.kind,"title":row.save_title,"candidateBytes":row.candidate_bytes,"sceneId":scene,"draftId":row.receipt_id,"savedDraftId":row.draft_id,"draftRevision":1,
         "artifact":serde_json::from_str::<Value>(&row.metadata_json).unwrap_or(Value::Null),"workKey":row.work_key,"packageHash":row.package_hash,
         "saved":row.state=="saved"})
 }

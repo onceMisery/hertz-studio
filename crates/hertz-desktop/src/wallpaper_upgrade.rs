@@ -158,6 +158,7 @@ pub(crate) fn layout() -> Layout<'static> {
             ResourceSpec::directory("derived"),
             ResourceSpec::file("config.json"),
             ResourceSpec::directory("operations"),
+            ResourceSpec::directory("ai-candidates").introduced_at(8),
         ],
         max_connections: 2,
     }

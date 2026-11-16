@@ -484,6 +484,8 @@ enum JobSource {
         native: Arc<super::generation::NativeGeneration>,
         service_job: String,
     },
+    ImagePreview(String, super::image_prepare::ImageTarget),
+    ImageSave(String, String),
     Import(ImportSource),
     Prepare(super::target_planner::PrepareRequest),
     PrepareFont(FontPrepareRequest),
@@ -621,7 +623,7 @@ enum FontPrepareReply {
         >,
     ),
     ModelSource(ReplySender<Result<super::assets::CanonicalModelSource, JobError>>),
-    Svg(ReplySender<Result<super::target_planner::ResolvedMedia, JobError>>),
+    Media(ReplySender<Result<super::target_planner::ResolvedMedia, JobError>>),
     Single(ReplySender<Result<PreparedFont, JobError>>),
     Group(ReplySender<Result<BTreeMap<String, PreparedFont>, JobError>>),
 }
@@ -673,10 +675,10 @@ impl FontPrepareReply {
             (Self::ModelSource(reply), Err(error)) => {
                 let _ = reply.send(Err(error));
             }
-            (Self::Svg(reply), Ok(JobOutput::Svg(media))) => {
+            (Self::Media(reply), Ok(JobOutput::Media(media))) => {
                 let _ = reply.send(Ok(*media));
             }
-            (Self::Svg(reply), Err(error)) => {
+            (Self::Media(reply), Err(error)) => {
                 let _ = reply.send(Err(error));
             }
             (Self::Single(reply), Ok(JobOutput::Font(font))) => {
@@ -700,7 +702,7 @@ enum JobOutput {
     AiReceipt(serde_json::Value),
     ModelInput(super::model_prepare::ModelInput),
     ModelSource(super::assets::CanonicalModelSource),
-    Svg(Box<super::target_planner::ResolvedMedia>),
+    Media(Box<super::target_planner::ResolvedMedia>),
     Package(String),
     Font(Box<PreparedFont>),
     Fonts(BTreeMap<String, PreparedFont>),
@@ -952,6 +954,45 @@ impl ImportJobs {
         self.dispatch(request).map(|id| (id, receive))
     }
 
+    pub(crate) fn preview_ai_image(
+        &self,
+        id: String,
+        target: super::image_prepare::ImageTarget,
+    ) -> Result<FontPrepareCompletion<super::target_planner::ResolvedMedia>, JobError> {
+        self.assets.candidate_dir(&id)?;
+        super::image_prepare::validate_target(Some(target))?;
+        let mut request = self.reserve(
+            new_job_id(),
+            JobSource::ImagePreview(id, target),
+            Some(target),
+            reply_lease_bytes::<Result<super::target_planner::ResolvedMedia, JobError>>(),
+        )?;
+        let (reply, receive) = self.reply_channel(&mut request);
+        request.font_reply = Some(FontPrepareReply::Media(reply));
+        self.dispatch(request).map(|id| (id, receive))
+    }
+
+    pub(crate) fn save_ai_image(
+        &self,
+        id: String,
+        title: String,
+    ) -> Result<FontPrepareCompletion<serde_json::Value>, JobError> {
+        self.assets.candidate_dir(&id)?;
+        if title.is_empty() || title.chars().count() > 120 || title.chars().any(char::is_control) {
+            return Err(JobError::invalid_input("作品名需为1–120个字符"));
+        }
+        let mut request = self.reserve(
+            new_job_id(),
+            JobSource::ImageSave(id, title),
+            None,
+            reply_lease_bytes::<Result<serde_json::Value, JobError>>()
+                .saturating_add(2 * 1024 * 1024),
+        )?;
+        let (reply, receive) = self.reply_channel(&mut request);
+        request.font_reply = Some(FontPrepareReply::AiReceipt(reply));
+        self.dispatch(request).map(|id| (id, receive))
+    }
+
     /// 字体与导入/图片准备共用单槽；类型化回执只在原 worker 完整退出后发送。
     pub(crate) fn prepare_svg(
         &self,
@@ -972,7 +1013,7 @@ impl ImportJobs {
             reply_lease_bytes::<Result<super::target_planner::ResolvedMedia, JobError>>(),
         )?;
         let (reply, receive) = self.reply_channel(&mut request);
-        request.font_reply = Some(FontPrepareReply::Svg(reply));
+        request.font_reply = Some(FontPrepareReply::Media(reply));
         self.dispatch(request).map(|id| (id, receive))
     }
     pub(crate) fn prepare_font(
@@ -1309,9 +1350,21 @@ async fn worker_loop(
                             service_job.clone(),
                             &library,
                             &assets,
+                            &probe,
+                            &writer,
                         )
                         .await
                         .map(JobOutput::AiReceipt),
+                        JobSource::ImagePreview(id, target) => {
+                            ai_images::preview(&request, id, *target, &library, &assets, &probe)
+                                .await
+                                .map(|m| JobOutput::Media(Box::new(m)))
+                        }
+                        JobSource::ImageSave(id, title) => {
+                            ai_images::save(&request, id, title, &library, &assets, &probe, &writer)
+                                .await
+                                .map(JobOutput::AiReceipt)
+                        }
                         JobSource::Import(source) => {
                             run_import(&request, source, &library, &assets, &probe, &writer)
                                 .await
@@ -1325,7 +1378,7 @@ async fn worker_loop(
                         JobSource::PrepareSvg(prepare) => {
                             run_prepare_svg(&request, prepare, &library, &assets, &probe)
                                 .await
-                                .map(|media| JobOutput::Svg(Box::new(media)))
+                                .map(|media| JobOutput::Media(Box::new(media)))
                         }
                         JobSource::PrepareFont(prepare) => {
                             run_prepare_font(&request, prepare, &library, &assets, &probe)
@@ -1405,7 +1458,7 @@ async fn worker_loop(
                                 source.reference().package_hash.clone()
                             }
                             JobOutput::ModelInput(input) => input.reference().package_hash.clone(),
-                            JobOutput::Svg(media) => media.reference().package_hash.clone(),
+                            JobOutput::Media(media) => media.reference().package_hash.clone(),
                             JobOutput::Font(font) => font.reference().package_hash.clone(),
                             JobOutput::Fonts(fonts) => fonts
                                 .values()
@@ -1532,38 +1585,61 @@ async fn run_receive_ai(
     service_job: String,
     library: &Arc<Library>,
     assets: &Arc<AssetStore>,
+    probe: &ProbeClient,
+    writer: &super::content_quota::Writer<'_>,
 ) -> Result<serde_json::Value, JobError> {
+    cancelled(&request.cancel)?;
+    assets.check_disk_space(hertz_wallpaper::MAX_IMAGE_BYTES + 64 * 1024)?;
+    let staging = assets.staging_dir(&request.job_id);
+    std::fs::create_dir(&staging).map_err(|e| JobError::io(e.to_string()))?;
+    let source = staging.join("original.hwpkg");
     let cancel = request.cancel.clone();
-    let library = library.clone();
-    let assets = assets.clone();
-    let job_id = request.job_id.clone();
-    let runtime = tokio::runtime::Handle::current();
-    tokio::task::spawn_blocking(move || {
-        let received = native.receive_builtin(&service_job, &cancel)?;
-        cancelled(&cancel)?;
-        assets.check_disk_space(received.bytes.len() as u64 + 64 * 1024)?;
-        let staging = assets.staging_dir(&job_id);
-        std::fs::create_dir(&staging).map_err(|e| JobError::io(e.to_string()))?;
-        use std::io::Write;
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(staging.join("ai-payload"))
-            .map_err(|e| JobError::io(e.to_string()))?;
-        file.write_all(&received.bytes)
-            .and_then(|_| file.sync_all())
-            .map_err(|e| JobError::io(e.to_string()))?;
-        drop(file);
-        cancelled(&cancel)?;
-        let epoch = received.epoch;
-        runtime.block_on(
-            super::ai_receipts::AiReceipts::new(&library)
-                .receive(received, || native.receive_permit(epoch, &cancel)),
-        )
+    let connection = native.clone();
+    let received = tokio::task::spawn_blocking(move || {
+        connection.receive_artifact(&service_job, &source, &cancel)
     })
     .await
-    .map_err(|e| JobError::io(e.to_string()))?
+    .map_err(|e| JobError::io(e.to_string()))??;
+    cancelled(&request.cancel)?;
+    let runtime = tokio::runtime::Handle::current();
+    match received {
+        super::generation::receive::ReceivedArtifact::Builtin(received) => {
+            let epoch = received.epoch;
+            let library = Arc::clone(library);
+            let cancel = Arc::clone(&request.cancel);
+            tokio::task::spawn_blocking(move || {
+                runtime.block_on(
+                    super::ai_receipts::AiReceipts::new(&library)
+                        .receive(received, || native.receive_permit(epoch, &cancel)),
+                )
+            })
+            .await
+            .map_err(|e| JobError::io(e.to_string()))?
+        }
+        super::generation::receive::ReceivedArtifact::Image(received) => {
+            let packet = ai_images::receive(request, received, library, assets, probe).await?;
+            let bytes = writer.publish_candidate(&request.job_id, &packet.id)?;
+            library.ai_receipts_changed.notify_one();
+            let library = Arc::clone(library);
+            let assets = Arc::clone(assets);
+            let cancel = Arc::clone(&request.cancel);
+            tokio::task::spawn_blocking(move || {
+                let epoch = packet.received.epoch;
+                runtime.block_on(super::ai_receipts::AiReceipts::new(&library).receive_image(
+                    packet,
+                    bytes,
+                    &assets,
+                    || native.receive_permit(epoch, &cancel),
+                ))
+            })
+            .await
+            .map_err(|e| JobError::io(e.to_string()))?
+        }
+    }
 }
+
+#[path = "jobs_ai_images.rs"]
+mod ai_images;
 
 async fn run_import(
     request: &JobRequest,
@@ -1604,6 +1680,17 @@ async fn run_import(
         super::raw_import::ensure_package(assets, library, receipt, name, &request.cancel).await;
     wrapping_workspace.finish();
     let receipt = wrapped?;
+    install_snapshot(request, receipt, library, assets, probe, writer).await
+}
+
+async fn install_snapshot(
+    request: &JobRequest,
+    receipt: super::assets::SnapshotReceipt,
+    library: &Library,
+    assets: &AssetStore,
+    probe: &ProbeClient,
+    writer: &super::content_quota::Writer<'_>,
+) -> Result<String, JobError> {
     set_stage_bytes(&request.status, receipt.bytes);
     cancelled(&request.cancel)?;
     // ② Prepare：对固定快照做包校验（结构/路径/哈希），取 manifest 事实。

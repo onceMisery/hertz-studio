@@ -20,6 +20,36 @@ pub(crate) async fn ensure_package(
     name: &str,
     cancel: &AtomicBool,
 ) -> Result<SnapshotReceipt> {
+    wrap(assets, library, receipt, name, None, cancel).await
+}
+
+pub(crate) async fn ensure_ai_image_package(
+    assets: &AssetStore,
+    library: &Library,
+    receipt: SnapshotReceipt,
+    work_id: &str,
+    title: &str,
+    cancel: &AtomicBool,
+) -> Result<SnapshotReceipt> {
+    let title = title.trim();
+    if uuid::Uuid::parse_str(work_id).is_err()
+        || title.is_empty()
+        || title.chars().count() > 120
+        || title.chars().any(char::is_control)
+    {
+        return Err(JobError::invalid_input("AI 作品身份或标题无效"));
+    }
+    wrap(assets, library, receipt, title, Some(work_id), cancel).await
+}
+
+async fn wrap(
+    assets: &AssetStore,
+    library: &Library,
+    receipt: SnapshotReceipt,
+    name: &str,
+    ai_work_id: Option<&str>,
+    cancel: &AtomicBool,
+) -> Result<SnapshotReceipt> {
     let mut input = super::assets::open_immutable(&receipt.original)?;
     let mut magic = [0; 4];
     input
@@ -29,6 +59,9 @@ pub(crate) async fn ensure_package(
         .seek(SeekFrom::Start(0))
         .map_err(|error| JobError::io(error.to_string()))?;
     if magic[..2] == *b"PK" {
+        if ai_work_id.is_some() {
+            return Err(JobError::new("ai_output_rejected", "AI 图片不能携带作品包"));
+        }
         return Ok(receipt);
     }
     let mut sniff = [0u8; 256];
@@ -85,6 +118,9 @@ pub(crate) async fn ensure_package(
     } else {
         hertz_wallpaper::MAX_VIDEO_BYTES
     };
+    if ai_work_id.is_some() && kind != "image" {
+        return Err(JobError::new("ai_output_rejected", "AI 图片必须是单帧图片"));
+    }
     if receipt.bytes > kind_limit {
         return Err(JobError::new(
             "asset_too_large",
@@ -109,6 +145,7 @@ pub(crate) async fn ensure_package(
         &id[16..20],
         &id[20..]
     );
+    let work_id = ai_work_id.unwrap_or(&work_id).to_owned();
     let path = format!("assets/background.{extension}");
     let document=svg.as_ref().map(|facts| {
         let ratio=(4096.0/facts.width.max(facts.height)).min(1.0);
@@ -122,7 +159,12 @@ pub(crate) async fn ensure_package(
     if let Some(bytes) = &document {
         files.push(serde_json::json!({"path":"document.json","bytes":bytes.len(),"sha256":format!("{:x}",Sha256::digest(bytes)),"mime":"application/json"}));
     }
-    let manifest = if let Some(previous) = library.local_manifest(&work_id).await? {
+    let previous = if ai_work_id.is_none() {
+        library.local_manifest(&work_id).await?
+    } else {
+        None
+    };
+    let manifest = if let Some(previous) = previous {
         let parsed: hertz_wallpaper::Manifest = serde_json::from_str(&previous)
             .map_err(|error| JobError::database(error.to_string()))?;
         if serde_json::to_value(&parsed.files).map_err(|e| JobError::database(e.to_string()))?
@@ -132,14 +174,18 @@ pub(crate) async fn ensure_package(
         }
         previous
     } else {
-        let title: String = std::path::Path::new(name)
-            .file_stem()
-            .and_then(|name| name.to_str())
-            .unwrap_or("本地壁纸")
-            .chars()
-            .filter(|ch| !ch.is_control())
-            .take(120)
-            .collect();
+        let title: String = if ai_work_id.is_some() {
+            name.to_owned()
+        } else {
+            std::path::Path::new(name)
+                .file_stem()
+                .and_then(|name| name.to_str())
+                .unwrap_or("本地壁纸")
+                .chars()
+                .filter(|ch| !ch.is_control())
+                .take(120)
+                .collect()
+        };
         let title = if title.trim().is_empty() {
             "本地壁纸"
         } else {

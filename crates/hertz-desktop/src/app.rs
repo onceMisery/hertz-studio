@@ -110,6 +110,15 @@ pub(crate) enum UserEvent {
             crate::wallpaper::selection_plan::Failure,
         >,
     ),
+    ImageCandidatePreview(
+        u64,
+        Box<
+            Result<
+                crate::wallpaper::target_planner::ResolvedMedia,
+                crate::wallpaper::jobs::JobError,
+            >,
+        >,
+    ),
     MediaPreviewSelection(
         u64,
         Result<
@@ -135,7 +144,7 @@ pub(crate) enum UserEvent {
         u64,
         u64,
         ApiReply,
-        Box<Result<crate::wallpaper::work_drafts::Document, crate::wallpaper::jobs::JobError>>,
+        Box<Result<crate::wallpaper::ai_receipts::PreviewSource, crate::wallpaper::jobs::JobError>>,
     ),
     PlaylistWriteFinished(Option<String>),
     LibraryDeleteFinished(String),
@@ -250,8 +259,14 @@ impl PageClock {
 }
 
 enum PresentationWindow {
-    Desktop { candidate: bool },
-    Preview { owner: HWND, embedded: bool },
+    Desktop {
+        candidate: bool,
+    },
+    Preview {
+        owner: HWND,
+        embedded: bool,
+        image_candidate: bool,
+    },
 }
 
 struct WallpaperSurface {
@@ -6489,6 +6504,9 @@ pub(crate) fn run_with(run_config: RunConfig) -> Result<()> {
                     ));
                 }
             }
+            Event::UserEvent(UserEvent::ImageCandidatePreview(id,result)) => {
+                app.finish_image_candidate_preview(id,*result,target);
+            }
             Event::UserEvent(UserEvent::MediaPreviewSelection(id, result)) => {
                 app.finish_preview_selection(id, result.map(|media| *media), target);
             }
@@ -7116,6 +7134,13 @@ fn create_presentation(
 ) -> Result<WallpaperSurface> {
     use crate::wallpaper::session::{RecoveryLedger, WallpaperSession};
     let is_preview = matches!(presentation, PresentationWindow::Preview { .. });
+    let image_candidate = matches!(
+        presentation,
+        PresentationWindow::Preview {
+            image_candidate: true,
+            ..
+        }
+    );
     let mut session = if is_preview {
         WallpaperSession::preview_after_generation(generation.saturating_sub(1))
     } else {
@@ -7130,7 +7155,7 @@ fn create_presentation(
     let binding = crate::wallpaper::page_events::PageBinding::new(generation)
         .map_err(|error| anyhow::anyhow!(error.message))?;
     let media_access = crate::wallpaper::access::MediaAccess::new();
-    let gl = if configuration.builtin().is_some() || composition.is_some() {
+    let gl = if (!image_candidate && configuration.builtin().is_some()) || composition.is_some() {
         use crate::wallpaper::{
             budget,
             gl_plan::{GlAdmission, GlPlan},
@@ -7215,7 +7240,10 @@ fn create_presentation(
         .with_focused(false)
         .with_skip_taskbar(true)
         .with_undecorated_shadow(false);
-    if let PresentationWindow::Preview { owner, embedded } = presentation {
+    if let PresentationWindow::Preview {
+        owner, embedded, ..
+    } = presentation
+    {
         builder = if embedded {
             builder
                 .with_parent_window(owner as _)
@@ -7299,7 +7327,11 @@ fn create_presentation(
         created_at: Instant::now(),
         frame_wait_since: None,
         static_poster: false,
-        runtime_builtin: configuration.builtin(),
+        runtime_builtin: if image_candidate {
+            None
+        } else {
+            configuration.builtin()
+        },
         runtime_reference: None,
         playlist_token: None,
         mirror_source_generation: None,

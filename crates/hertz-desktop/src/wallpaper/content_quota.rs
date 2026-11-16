@@ -44,7 +44,7 @@ fn pin_directory(path: &Path) -> Result<File> {
 }
 
 /// 有界枚举，目录句柄随栈保留；未知普通文件也计量，不跟随链接或信任 DB bytes。
-fn directory_bytes(root: &Path) -> Result<u64> {
+pub(crate) fn directory_bytes(root: &Path) -> Result<u64> {
     let pin = pin_directory(root)?;
     let mut stack = vec![(std::fs::read_dir(root).map_err(io)?, pin)];
     let mut count = 0;
@@ -83,7 +83,7 @@ fn directory_bytes(root: &Path) -> Result<u64> {
 pub(crate) struct Writer<'a> {
     store: &'a AssetStore,
     _gate: File,
-    _directories: [File; 3],
+    _directories: [File; 4],
 }
 
 /// Shared carrier for content writers and exclusive offline desktop maintenance.
@@ -115,6 +115,7 @@ impl<'a> Writer<'a> {
             pin_directory(store.root())?,
             pin_directory(&store.root().join("packages"))?,
             pin_directory(&store.root().join("staging"))?,
+            pin_directory(&store.root().join("ai-candidates"))?,
         ];
         let gate = acquire_gate(store.root())?;
         Ok(Self {
@@ -125,7 +126,9 @@ impl<'a> Writer<'a> {
     }
 
     fn check_growth(&self, required: u64) -> Result<()> {
-        let held = directory_bytes(&self.store.root().join("packages"))?;
+        let held = directory_bytes(&self.store.root().join("packages"))?
+            .checked_add(directory_bytes(&self.store.root().join("ai-candidates"))?)
+            .ok_or_else(|| io("大小溢出"))?;
         let cap = self.store.content_capacity();
         if required > cap || held > cap - required {
             return Err(JobError::new(
@@ -134,6 +137,25 @@ impl<'a> Writer<'a> {
             ));
         }
         Ok(())
+    }
+
+    pub(crate) fn publish_candidate(&self, job: &str, id: &str) -> Result<u64> {
+        let target = self.store.candidate_dir(id)?;
+        if target.try_exists().map_err(io)? {
+            return Err(JobError::new("target_exists", "候选目录已存在"));
+        }
+        let staging = self.store.staging_dir(job);
+        let bytes = directory_bytes(&staging)?;
+        let held = directory_bytes(&self.store.root().join("ai-candidates"))?;
+        if bytes > 256 * 1024 * 1024 || held > 256 * 1024 * 1024 - bytes {
+            return Err(JobError::new(
+                "candidate_capacity_exceeded",
+                "候选实际文件容量已达256 MiB，请结束预览并保存或删除候选",
+            ));
+        }
+        self.check_growth(bytes)?;
+        std::fs::rename(staging, target).map_err(io)?;
+        Ok(bytes)
     }
 
     /// 解包/解码前预检最终新增内容；已存在的同 hash 目录不会再发布第二份。

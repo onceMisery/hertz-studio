@@ -12,6 +12,18 @@ pub(crate) struct ReceivedBuiltin {
     pub bytes: Vec<u8>,
     pub epoch: u64,
 }
+pub(crate) struct ReceivedImage {
+    pub artifact: WallpaperArtifact,
+    pub service_owner: String,
+    pub provider: String,
+    pub model: String,
+    pub file: std::path::PathBuf,
+    pub epoch: u64,
+}
+pub(crate) enum ReceivedArtifact {
+    Builtin(ReceivedBuiltin),
+    Image(ReceivedImage),
+}
 pub(crate) struct ReceivePermit<'a> {
     _state: std::sync::MutexGuard<'a, State>,
 }
@@ -41,11 +53,12 @@ impl NativeGeneration {
         }
         Ok(ReceivePermit { _state: state })
     }
-    pub(crate) fn receive_builtin(
+    pub(crate) fn receive_artifact(
         &self,
         job_id: &str,
+        target: &std::path::Path,
         cancel: &AtomicBool,
-    ) -> Result<ReceivedBuiltin> {
+    ) -> Result<ReceivedArtifact> {
         if !super::super::api::valid_id(job_id) {
             return Err(error("invalid_input", "任务标识无效"));
         }
@@ -76,13 +89,17 @@ impl NativeGeneration {
         .map_err(|e| error(e.code, &e.message))?;
         if artifact.job_id != job_id
             || job["state"] != "succeeded"
-            || artifact.kind != WallpaperGenerationKind::Builtin
-            || artifact.bytes > MAX_OUTPUT_BYTES as u64
+            || !matches!(
+                artifact.kind,
+                WallpaperGenerationKind::Builtin | WallpaperGenerationKind::Image
+            )
+            || (artifact.kind == WallpaperGenerationKind::Builtin
+                && artifact.bytes > MAX_OUTPUT_BYTES as u64)
             || uuid::Uuid::parse_str(&artifact.artifact_id).is_err()
         {
             return Err(error(
                 "ai_output_rejected",
-                "此版本只接收已完成的内置场景候选",
+                "只接收已完成的内置场景或图片候选",
             ));
         }
         let expiry = artifact
@@ -110,24 +127,29 @@ impl NativeGeneration {
         let model = label("model")?;
         let discovery = current_discovery(&connection)?;
         check_cancel(cancel)?;
-        // Builtin output is bounded to 64 KiB, so the existing bounded raw-body
-        // reader is sufficient. Image/composition adapters never enter this path.
-        let (success, bytes) = local_request(
-            &connection,
-            discovery.port,
-            "GET",
-            &format!("/v1/ai/wallpaper/artifacts/{}", artifact.artifact_id),
-            None,
-        )?;
+        let bytes = if artifact.kind == WallpaperGenerationKind::Image {
+            transport::artifact(&connection, discovery.port, &artifact, target, cancel)?;
+            Vec::new()
+        } else {
+            let (success, bytes) = local_request(
+                &connection,
+                discovery.port,
+                "GET",
+                &format!("/v1/ai/wallpaper/artifacts/{}", artifact.artifact_id),
+                None,
+            )?;
+            if !success {
+                return Err(error(
+                    "ai_artifact_unavailable",
+                    "候选接收失败，可重取同一候选",
+                ));
+            }
+            bytes
+        };
         check_cancel(cancel)?;
-        if !success {
-            return Err(error(
-                "ai_artifact_unavailable",
-                "候选接收失败，可重取同一候选",
-            ));
-        }
-        if bytes.len() as u64 != artifact.bytes
-            || format!("{:x}", Sha256::digest(&bytes)) != artifact.sha256
+        if artifact.kind == WallpaperGenerationKind::Builtin
+            && (bytes.len() as u64 != artifact.bytes
+                || format!("{:x}", Sha256::digest(&bytes)) != artifact.sha256)
         {
             return Err(error(
                 "ai_output_rejected",
@@ -147,13 +169,24 @@ impl NativeGeneration {
         )?;
         check_cancel(cancel)?;
         let _permit = self.receive_permit(epoch, cancel)?;
-        Ok(ReceivedBuiltin {
-            artifact,
-            service_owner,
-            provider,
-            model,
-            bytes,
-            epoch,
+        Ok(if artifact.kind == WallpaperGenerationKind::Image {
+            ReceivedArtifact::Image(ReceivedImage {
+                artifact,
+                service_owner,
+                provider,
+                model,
+                file: target.to_owned(),
+                epoch,
+            })
+        } else {
+            ReceivedArtifact::Builtin(ReceivedBuiltin {
+                artifact,
+                service_owner,
+                provider,
+                model,
+                bytes,
+                epoch,
+            })
         })
     }
 }

@@ -31,6 +31,7 @@ fn resources(root: &Path) {
         "packages/original/empty",
         "staging/unfinished",
         "derived/generation",
+        "ai-candidates/unfinished",
         "operations",
     ] {
         std::fs::create_dir_all(root.join(directory)).unwrap();
@@ -39,6 +40,7 @@ fn resources(root: &Path) {
         "packages/original/original.hwpkg",
         "staging/unfinished/original.hwpkg",
         "derived/generation/image",
+        "ai-candidates/unfinished/original.hwpkg",
         "operations/receipt.json",
     ] {
         std::fs::write(root.join(file), file.as_bytes()).unwrap();
@@ -131,6 +133,11 @@ async fn production_upgrade_covers_resources_history_rescue_and_export_revocatio
     )
     .unwrap();
     std::fs::remove_file(dir.path().join("staging/unfinished/original.hwpkg")).unwrap();
+    std::fs::write(
+        dir.path().join("ai-candidates/unfinished/original.hwpkg"),
+        b"later candidate",
+    )
+    .unwrap();
     let restored = maintenance(&args).unwrap();
     assert!(restored["rescueSnapshotId"].as_str().is_some());
     assert_eq!(
@@ -142,6 +149,10 @@ async fn production_upgrade_covers_resources_history_rescue_and_export_revocatio
         b"derived/generation/image"
     );
     assert!(dir.path().join("packages/original/empty").is_dir());
+    assert_eq!(
+        std::fs::read(dir.path().join("ai-candidates/unfinished/original.hwpkg")).unwrap(),
+        b"ai-candidates/unfinished/original.hwpkg"
+    );
     assert!(dir
         .path()
         .join("staging/unfinished/original.hwpkg")

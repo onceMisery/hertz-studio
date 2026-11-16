@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 use super::*;
+use std::io::{Read, Write};
 
 fn connection() -> Connection {
     let root = std::env::temp_dir().join(format!("hertz-native-pairing-{}", uuid::Uuid::new_v4()));
@@ -227,7 +228,7 @@ fn invalidating_displayed_quote_retains_confirmed_task_and_replay_authority() {
             summary,
             expires: Instant::now() + Duration::from_secs(60),
             description: "柔和夜色".into(),
-            scene_id: "coast".into(),
+            specification: "内置场景 coast，仅生成公开参数".into(),
         });
     }
     assert!(service.confirmation(10, "displayed-token").is_err());

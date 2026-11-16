@@ -16,6 +16,7 @@ const binary = path.resolve(process.env.HERTZ_BIN || path.join(root, 'target/deb
 const desktopBinary = path.resolve(process.env.HERTZ_DESKTOP_BIN || path.join(root, 'target/debug/hertz-desktop.exe'));
 const standalone = process.env.HERTZ_GENERATION_STANDALONE === '1';
 const ollamaFixture = process.env.HERTZ_GENERATION_OLLAMA_FIXTURE === '1';
+const imageFixture = process.env.HERTZ_GENERATION_IMAGE_FIXTURE === '1';
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const checks = [], errors = [];
 let child, desktopChild, browser, mainBrowser, officialBrowser, page, providerFixture;
@@ -73,6 +74,11 @@ ConvertTo-Json -Compress -InputObject @([GenerationConsent]::ReadAndClick($windo
     providerFixture = await require('./wallpaper-ollama-fixture')();
     fs.mkdirSync(data, { recursive: true });
     fs.writeFileSync(path.join(data, 'config.toml'), '[ai]\nprovider = "ollama"\nmodel = "test-local"\norigin = "' + providerFixture.origin + '"\n');
+  }
+  if (imageFixture) {
+    assert.equal(ollamaFixture, false, 'image fixture has an independent provider configuration');
+    fs.mkdirSync(data, { recursive: true });
+    fs.writeFileSync(path.join(data, 'config.toml'), '[ai.image]\nprovider = "fake"\nmodel = "fixture-image-v1"\n');
   }
   child = spawn(binary, [...(standalone ? [] : ['--window']), '--bind', '127.0.0.1', '--port', '0', '--data-dir', data], {
     cwd: root, windowsHide: true, stdio: 'ignore', env,
@@ -159,8 +165,30 @@ ConvertTo-Json -Compress -InputObject @([GenerationConsent]::ReadAndClick($windo
     await consent;
     await page.waitForSelector('#generation-brief:enabled');
     pass((standalone ? 'independent pipe' : 'embedded HostHandle') + ' real pairing and restricted generation connection');
+    if (imageFixture) {
+      const beforeChoice = await api('/v1/ai/jobs');
+      await page.locator('#generation-kind-image').check();
+      await page.locator('#generation-size-1').check();
+      await page.waitForFunction(() => !document.querySelector('#generation-image-fields').hidden);
+      assert.equal(await page.locator('#generation-scene').isVisible(), false);
+      assert.match(await page.locator('#generation-type-info').innerText(), /离线图片测试/);
+      assert.deepEqual(await api('/v1/ai/jobs'), beforeChoice, 'choosing type and dimensions cannot submit a job');
+      for (const width of [1120, 800, 390]) {
+        await page.setViewportSize({ width, height: 900 });
+        const controls = await page.locator('#generation-kinds,#generation-sizes,#generation-qualities').evaluateAll(fields => fields.map(field => ({
+          legend: field.querySelector('legend')?.textContent,
+          clipped: field.scrollWidth > field.clientWidth + 1,
+          labels: [...field.querySelectorAll('input')].every(input => input.labels?.length === 1),
+        })));
+        assert.ok(controls.every(field => field.legend && field.labels && !field.clipped), JSON.stringify(controls));
+      }
+      await page.setViewportSize({ width: 1120, height: 900 });
+      await page.screenshot({ path: path.join(output, 'image-options.png'), fullPage: true });
+      pass('image options are labelled, responsive and require explicit quotation');
+    }
     await page.locator('#generation-brief').fill('柔和夜色，宁静频谱'); await page.locator('#generation-quote').click();
-    await page.waitForSelector('#generation-confirm:enabled'); assert.match(await page.locator('#generation-price-text').innerText(), ollamaFixture ? /0 micro-USD/ : /免费/);
+    await page.waitForSelector('#generation-confirm:enabled'); assert.match(await page.locator('#generation-price-text').innerText(), ollamaFixture || imageFixture ? /0 micro-USD/ : /免费/);
+    if (imageFixture) assert.match(await page.locator('#generation-price-text').innerText(), /图片张数最多 1.*执行最多 180 秒.*最多 240 秒/);
     if (providerFixture) assert.equal(providerFixture.calls(), 0, 'quotation must not call Ollama');
     const before = await api('/v1/ai/jobs');
     await page.evaluate(() => {
@@ -178,8 +206,8 @@ ConvertTo-Json -Compress -InputObject @([GenerationConsent]::ReadAndClick($windo
     });
     await page.locator('#generation-confirm').click();
     const denied = JSON.parse((await execute('powershell.exe', ['-NoProfile', '-NonInteractive', '-File', probe, '-TargetPid', String(standalone ? desktopChild.pid : child.pid), '-Button', '7'], { windowsHide: true, timeout: 25000, encoding: 'utf8' })).stdout.trim());
-    assert.ok(denied.some(text => text.includes('default=7'))); assert.ok(denied.some(text => text.includes('coast') || text.includes('内置场景')));
-    assert.ok(denied.some(text => text.includes(ollamaFixture ? '0 micro-USD' : '免费') && text.includes('90 秒')));
+    assert.ok(denied.some(text => text.includes('default=7'))); assert.ok(denied.some(text => imageFixture ? text.includes('1536') && text.includes('1024') : text.includes('coast') || text.includes('内置场景')));
+    assert.ok(denied.some(text => text.includes(ollamaFixture || imageFixture ? '0 micro-USD' : '免费') && text.includes(imageFixture ? '240 秒' : '90 秒')));
     await page.waitForFunction(() => window.generationConfirmationReceipt?.error?.code === 'generation_cancelled');
     assert.deepEqual(await api('/v1/ai/jobs'), before); pass('real native confirmation defaults to No and refusal creates no task');
     if (providerFixture) assert.equal(providerFixture.calls(), 0, 'refusal must not call Ollama');
@@ -211,12 +239,24 @@ ConvertTo-Json -Compress -InputObject @([GenerationConsent]::ReadAndClick($windo
     await page.waitForSelector('[data-candidate-preview]');
     const candidates = (await native('candidates')).result.candidates;
     const candidate = candidates.find(item => item.state === 'previewReady'); assert.ok(candidate);
-    assert.ok(candidate.sceneId);
-    await page.locator('#generation-candidates figure img').scrollIntoViewIfNeeded();
-    await page.waitForFunction(() => {
-      const image = document.querySelector('#generation-candidates figure img');
-      return image?.complete && image.naturalWidth > 0;
-    });
+    assert.equal(candidate.kind, imageFixture ? 'image' : 'builtin');
+    if (imageFixture) {
+      assert.equal(candidate.sceneId, null); assert.equal(candidate.artifact.mime, 'image/png');
+      assert.ok(candidate.candidateBytes >= candidate.artifact.bytes);
+      await page.locator('#generation-candidates figure img').scrollIntoViewIfNeeded();
+      await page.waitForFunction(() => {
+        const image = document.querySelector('#generation-candidates figure img');
+        return image?.complete && image.naturalWidth > 0 && image.src.startsWith('data:image/png;base64,');
+      });
+      await page.screenshot({ path: path.join(output, 'image-candidate.png'), fullPage: true });
+    } else {
+      assert.ok(candidate.sceneId);
+      await page.locator('#generation-candidates figure img').scrollIntoViewIfNeeded();
+      await page.waitForFunction(() => {
+        const image = document.querySelector('#generation-candidates figure img');
+        return image?.complete && image.naturalWidth > 0;
+      });
+    }
     const receivedAgain = await native('receive', { jobId: status.job.jobId }); assert.ok(receivedAgain.result.jobId);
     await until(async () => {
       const result = await page.evaluate(async jobId => (await hertzWallpaperSettings.requestManagement('wallpaper.jobs.get', { jobId })).result, receivedAgain.result.jobId);
@@ -227,15 +267,32 @@ ConvertTo-Json -Compress -InputObject @([GenerationConsent]::ReadAndClick($windo
     await page.locator('[data-candidate-preview]').click();
     await page.waitForSelector('#generation-stop-preview', { state: 'visible' });
     await until(async () => /正在预览候选/.test(await page.locator('#generation-status').innerText()), 'candidate preview');
-    await until(() => page.evaluate(() => window.generationMediaPreview?.firstFrameReady), 'real candidate GL first frame');
+    await until(() => page.evaluate(() => window.generationMediaPreview?.firstFrameReady), 'real candidate first frame');
+    if (imageFixture) {
+      const first = await page.evaluate(() => window.generationMediaPreview);
+      await delay(1500);
+      const settled = await page.evaluate(() => window.generationMediaPreview);
+      fs.writeFileSync(path.join(output, 'image-preview.json'), JSON.stringify({ first, settled }, null, 2));
+      assert.equal(settled?.firstFrameReady, true, 'image remains visible after native follow ticks');
+      assert.equal(settled.kind, 'media', 'native diagnostics report the actual image content');
+      assert.equal(settled.generation, first.generation, 'follow state cannot replace the image candidate');
+      assert.equal(settled.runtimeBuiltin, null, 'image candidate keeps the media renderer');
+      assert.ok(settled.mediaAllocation, 'image candidate retains its native media allocation');
+      assert.equal(settled.glAllocation, null, 'image candidate does not allocate a builtin scene');
+    }
     await page.locator('#generation-stop-preview').click();
     await page.waitForSelector('#generation-stop-preview', { state: 'hidden' });
     await until(() => page.evaluate(() => !window.generationMediaPreview), 'real preview controller exit'); pass('candidate uses original preview and explicit close');
     const form = page.locator('#generation-candidates form').first();
-    await form.locator('input').fill('AI 海岸 · 交付验收'); await form.locator('button[type=submit]').click();
+    const savedTitle = imageFixture ? 'AI 图片 · 交付验收' : 'AI 海岸 · 交付验收';
+    await form.locator('input').fill(savedTitle); await form.locator('button[type=submit]').click();
     await until(async () => (await native('candidates')).result?.candidates?.some(item => item.receiptId === candidate.receiptId && item.state === 'saved'), 'saved immutable package');
     const saved = (await native('candidates')).result.candidates.find(item => item.receiptId === candidate.receiptId);
     assert.ok(saved.workKey); assert.match(saved.packageHash, /^[a-f0-9]{64}$/);
+    if (imageFixture) {
+      assert.equal(saved.title, savedTitle);
+      fs.writeFileSync(path.join(output, 'saved-candidate.json'), JSON.stringify(saved, null, 2));
+    }
     if (providerFixture) {
       const params = await savedParameters(saved.savedDraftId);
       assert.equal(params.tod, 0.72);
@@ -276,11 +333,12 @@ ConvertTo-Json -Compress -InputObject @([GenerationConsent]::ReadAndClick($windo
       pass('local Ollama schema, independent output limit and one confirmed provider request');
     }
     assert.deepEqual(errors, []); await page.screenshot({ path: path.join(output, 'generation.png'), fullPage: true });
-    fs.writeFileSync(path.join(output, 'result.json'), JSON.stringify({ passed: true, mode: standalone ? 'standalone' : 'embedded', provider: ollamaFixture ? 'ollama-fixture' : 'fake', checks, errors }, null, 2));
+    fs.writeFileSync(path.join(output, 'result.json'), JSON.stringify({ passed: true, mode: standalone ? 'standalone' : 'embedded', provider: imageFixture ? 'fake-image' : ollamaFixture ? 'ollama-fixture' : 'fake', checks, errors }, null, 2));
   } catch (error) {
     if (page && !page.isClosed()) await page.screenshot({ path: path.join(output, 'failure.png'), fullPage: true }).catch(() => {});
     const diagnostic = page && !page.isClosed() ? await page.evaluate(() => ({ visibility:document.visibilityState, trace:window.generationTrace,
-      status:document.querySelector('#generation-status')?.textContent, busy:document.querySelector('#wallpaper-generation')?.getAttribute('aria-busy') })).catch(() => null) : null;
+      status:document.querySelector('#generation-status')?.textContent, busy:document.querySelector('#wallpaper-generation')?.getAttribute('aria-busy'),
+      mediaPreview:window.generationMediaPreview })).catch(() => null) : null;
     fs.writeFileSync(path.join(output, 'result.json'), JSON.stringify({ passed:false, mode:standalone?'standalone':'embedded', checks, errors, diagnostic, failure:String(error.message) }, null, 2));
     throw error;
   } finally {

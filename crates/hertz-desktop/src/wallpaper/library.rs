@@ -238,6 +238,7 @@ impl Library {
                 .map_err(|error| JobError::database(error.to_string()))?;
             }
         }
+        super::ai_receipts::AiReceipts::finish_image_install(&mut tx, work, &work_key).await?;
         tx.commit()
             .await
             .map_err(|error| JobError::database(error.to_string()))?;

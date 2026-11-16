@@ -66,8 +66,33 @@ async fn execute(
                 .delete(&value.receipt_id)
                 .await
         }
+        "wallpaper.ai.candidate.thumbnail" => {
+            let value: Candidate =
+                serde_json::from_value(request.payload.clone()).map_err(decode)?;
+            let runtime = tokio::runtime::Handle::current();
+            tokio::task::spawn_blocking(move || {
+                runtime.block_on(
+                    AiReceipts::new(jobs.library())
+                        .image_thumbnail(&value.receipt_id, jobs.assets()),
+                )
+            })
+            .await
+            .map_err(|e| JobError::io(e.to_string()))?
+        }
         "wallpaper.ai.candidate.save" => {
             let value: Save = serde_json::from_value(request.payload.clone()).map_err(decode)?;
+            let current = AiReceipts::new(jobs.library())
+                .get(&value.receipt_id)
+                .await?;
+            if current["kind"] == "image" {
+                if current["state"] == "saved" {
+                    return Ok(current);
+                }
+                let (_, completion) = jobs.save_ai_image(value.receipt_id, value.title)?;
+                return completion
+                    .await
+                    .map_err(|_| JobError::new("worker_unavailable", "图片保存线程已退出"))?;
+            }
             let runtime = tokio::runtime::Handle::current();
             tokio::task::spawn_blocking(move || {
                 runtime.block_on(AiReceipts::new(jobs.library()).save(

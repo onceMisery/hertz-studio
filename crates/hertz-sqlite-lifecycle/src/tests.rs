@@ -68,6 +68,60 @@ fn assets(data: &Path) {
 }
 
 #[tokio::test]
+async fn historical_roots_restore_and_recover_but_current_snapshots_cannot_omit_new_resources() {
+    let fixture = tempfile::tempdir().unwrap();
+    let data = std::fs::canonicalize(fixture.path()).unwrap();
+    old(&data, 7).await.close().await;
+    assets(&data);
+    let historical = wallpaper(&WALLPAPER);
+    let original = make_snapshot(&data, "before image resources", &historical)
+        .await
+        .unwrap();
+    let mut current = wallpaper(&WALLPAPER);
+    current
+        .resources
+        .push(ResourceSpec::directory("ai-candidates").introduced_at(8));
+    assert!(list(&data, &current)
+        .await
+        .unwrap()
+        .iter()
+        .any(|item| item.id == original.id
+            && item.current_schema == 7
+            && item.verification_error.is_none()));
+    std::fs::create_dir(data.join("ai-candidates")).unwrap();
+    std::fs::write(data.join("ai-candidates/image"), b"new candidate").unwrap();
+    let rescue = restore(&data, &original.id, &current, true).await.unwrap();
+    assert!(!data.join("ai-candidates").exists());
+    restore(&data, &rescue, &current, true).await.unwrap();
+    assert_eq!(
+        std::fs::read(data.join("ai-candidates/image")).unwrap(),
+        b"new candidate"
+    );
+    publish(
+        &data,
+        &Journal {
+            schema_version: 1,
+            backup: original.id.clone(),
+            target: 8,
+            purpose: "migration".into(),
+        },
+    )
+    .unwrap();
+    assert_eq!(recover(&data, &current).await.unwrap(), original.id);
+    assert!(!data.join("ai-candidates").exists());
+    let pool = open(&data, &current).await.unwrap();
+    pool.close().await;
+    let incomplete = make_snapshot(&data, "missing required current root", &historical)
+        .await
+        .unwrap();
+    assert!(validate_snapshot(&data, &incomplete.id, &current)
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("database_backup_roots"));
+}
+
+#[tokio::test]
 async fn file_and_directory_resources_upgrade_restore_and_rescue_with_real_wallpaper_schema() {
     let fixture = tempfile::tempdir().unwrap();
     let data = std::fs::canonicalize(fixture.path()).unwrap();
@@ -112,7 +166,10 @@ async fn file_and_directory_resources_upgrade_restore_and_rescue_with_real_wallp
     );
     connection.close().await.unwrap();
     restore(&data, &rescue, &layout, true).await.unwrap();
-    assert_eq!(inspect(&data, &layout).await.unwrap().current, 6);
+    assert_eq!(
+        inspect(&data, &layout).await.unwrap().current,
+        current_schema(&WALLPAPER)
+    );
     assert_eq!(
         std::fs::read(data.join("config.json")).unwrap(),
         b"later configuration"
@@ -137,7 +194,7 @@ async fn failed_migration_restores_configuration_and_resources() {
     let mut failing = sqlx::migrate!("../hertz-desktop/migrations/wallpaper");
     let mut migrations = failing.iter().cloned().collect::<Vec<_>>();
     migrations.push(sqlx::migrate::Migration::new(
-        7,
+        current_schema(&WALLPAPER) + 1,
         "fixture failure".into(),
         sqlx::migrate::MigrationType::Simple,
         "INSERT INTO nonexistent_table VALUES (1);".into(),

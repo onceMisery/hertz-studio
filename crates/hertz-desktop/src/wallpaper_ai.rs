@@ -157,6 +157,7 @@ impl App {
                 | "wallpaper.ai.candidates"
                 | "wallpaper.ai.candidate.save"
                 | "wallpaper.ai.candidate.delete"
+                | "wallpaper.ai.candidate.thumbnail"
         ) {
             let proxy = self.proxy.clone();
             let receiver = reply.clone();

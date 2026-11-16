@@ -12,6 +12,63 @@ fn target(width: u32, height: u32, fit: ImageFit, purpose: ImagePurpose) -> Imag
 }
 
 #[test]
+fn candidate_thumbnail_rejects_substituted_same_dimension_source_before_output() {
+    let root = super::super::library::tempfileish::temp_dir("ai-thumbnail-source");
+    let store = AssetStore::new(root.path()).unwrap();
+    let directory = root.path().join("prepared");
+    std::fs::create_dir(&directory).unwrap();
+    std::fs::create_dir(store.staging_dir("thumbnail")).unwrap();
+    let cancel = AtomicBool::new(false);
+    let source = write_png(
+        &directory.join("thumbnail.png"),
+        &image::RgbaImage::from_pixel(16, 16, image::Rgba([255, 0, 0, 255])),
+        &cancel,
+    )
+    .unwrap();
+    let prepared = PreparedImage {
+        receipt: Receipt {
+            cache_key: "a".repeat(64),
+            input_hash: "b".repeat(64),
+            pipeline: PIPELINE.into(),
+            options: Options::new(None).unwrap().canonical(),
+            source_width: 16,
+            source_height: 16,
+            orientation: 1,
+            render: source.clone(),
+            thumbnail: source,
+        },
+        directory: directory.clone(),
+        relative: PathBuf::new(),
+        staged: false,
+        lease: None,
+    };
+    let probe = ProbeClient::testing(|_, _| {
+        unreachable!("static thumbnail needs no qualification decoder")
+    });
+    let _preparation = probe.prepare("ai-thumbnail-source".into()).unwrap();
+    let output = prepared
+        .candidate_thumbnail(&store, &probe, "thumbnail", &cancel)
+        .unwrap();
+    write_png(
+        &directory.join("thumbnail.png"),
+        &image::RgbaImage::from_pixel(16, 16, image::Rgba([0, 0, 255, 255])),
+        &cancel,
+    )
+    .unwrap();
+    assert_eq!(
+        prepared
+            .candidate_thumbnail(&store, &probe, "thumbnail", &cancel)
+            .unwrap_err()
+            .code,
+        "decode_failed"
+    );
+    assert_eq!(
+        hash(&store.staging_dir("thumbnail").join("ai-thumbnail.png")).unwrap(),
+        (output.bytes, output.sha256)
+    );
+}
+
+#[test]
 fn target_sizing_preserves_aspect_and_obeys_fit_and_preview_caps() {
     let cover = Options::new(Some(target(100, 100, ImageFit::Cover, ImagePurpose::Low))).unwrap();
     let contain =

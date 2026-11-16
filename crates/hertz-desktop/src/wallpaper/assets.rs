@@ -115,6 +115,7 @@ impl AssetStore {
         let root_owner = crate::wallpaper_upgrade::admit_config(root)
             .map_err(|error| JobError::database(format!("{error:#}")))?;
         std::fs::create_dir_all(root.join("packages"))
+            .and_then(|_| std::fs::create_dir_all(root.join("ai-candidates")))
             .and_then(|_| std::fs::create_dir_all(root.join("staging")))
             .and_then(|_| std::fs::create_dir_all(root.join("derived")))
             .map_err(|error| JobError::io(format!("创建资产目录失败：{error}")))?;
@@ -509,7 +510,7 @@ impl AssetStore {
         )
     }
 
-    fn probe_media_at(
+    pub(crate) fn probe_media_at(
         &self,
         files: &Path,
         package: &StagedPackage,
@@ -810,7 +811,28 @@ impl AssetStore {
     /// 读取已安装包的 manifest（启动恢复入库用）。
     pub fn read_installed_manifest(&self, package_hash: &str) -> Result<StagedPackage> {
         let original = self.package_dir(package_hash).join("original.hwpkg");
-        let package = hertz_wallpaper::validate_package(open_immutable(&original)?)?;
+        self.read_manifest_at(&original, package_hash)
+    }
+
+    pub(crate) fn candidate_dir(&self, id: &str) -> Result<PathBuf> {
+        let valid = id
+            .strip_prefix("work-ai-")
+            .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok());
+        if !valid {
+            return Err(JobError::invalid_input("候选标识无效"));
+        }
+        Ok(self.root.join("ai-candidates").join(id))
+    }
+
+    pub(crate) fn read_candidate(&self, id: &str, hash: &str) -> Result<StagedPackage> {
+        if !hertz_wallpaper::valid_sha256_hex(hash) {
+            return Err(JobError::invalid_input("候选包标识无效"));
+        }
+        self.read_manifest_at(&self.candidate_dir(id)?.join("original.hwpkg"), hash)
+    }
+
+    fn read_manifest_at(&self, original: &Path, package_hash: &str) -> Result<StagedPackage> {
+        let package = hertz_wallpaper::validate_package(open_immutable(original)?)?;
         let manifest_json = serde_json::to_string(&package.manifest)
             .map_err(|error| JobError::io(format!("manifest 再序列化失败：{error}")))?;
         Ok(StagedPackage {

@@ -48,7 +48,14 @@ enum Work {
         id: String,
         revision: u64,
         owner: u64,
-        reply: Box<dyn FnOnce(Result<super::work_drafts::Document, JobError>) + Send>,
+        reply: Box<dyn FnOnce(Result<super::ai_receipts::PreviewSource, JobError>) + Send>,
+        slot: Slot,
+    },
+    ImageCandidatePreview {
+        id: String,
+        target: super::image_prepare::ImageTarget,
+        cancel: Arc<AtomicBool>,
+        reply: Box<dyn FnOnce(Result<super::target_planner::ResolvedMedia, JobError>) + Send>,
         slot: Slot,
     },
     PlaylistSelection {
@@ -392,7 +399,10 @@ impl LibraryService {
                             tasks.spawn_local(async move {
                                 // Keep the single slot through scheduler readback,
                                 // so an old deadline cannot enter a newer sweep.
-                                Some((super::ai_receipts::AiReceipts::new(jobs.library()).maintenance().await, permit))
+                                let runtime=tokio::runtime::Handle::current();
+                                let result=tokio::task::spawn_blocking(move || runtime.block_on(super::ai_receipts::AiReceipts::new(jobs.library()).maintenance_files(jobs.assets())))
+                                    .await.unwrap_or_else(|e|Err(JobError::io(e.to_string())));
+                                Some((result, permit))
                             });
                         }
                     }
@@ -419,12 +429,26 @@ impl LibraryService {
                                             let jobs = state.jobs().await?;
                                             state.check_owner(owner)?;
                                             if id.starts_with("work-ai-") {
-                                                return super::ai_receipts::AiReceipts::new(jobs.library()).document(&id,revision).await;
+                                                return super::ai_receipts::AiReceipts::new(jobs.library()).preview_source(&id,revision).await;
                                             }
                                             let draft = super::work_drafts::WorkDrafts::new(jobs.library()).get(&id).await?;
                                             state.check_owner(owner)?;
                                             if draft.revision != revision { return Err(JobError::new("draft_conflict", "作品草稿已变化，请重新预览")); }
-                                            Ok(draft.document)
+                                            Ok(super::ai_receipts::PreviewSource::Builtin(draft.document))
+                                        }.await;
+                                        reply(result);
+                                    }
+                                    Work::ImageCandidatePreview { id, target, cancel, reply, slot } => {
+                                        let _slot=slot;
+                                        let result=async {
+                                            let jobs=state.jobs().await?;
+                                            let (job, completion)=jobs.preview_ai_image(id,target)?;
+                                            tokio::select! {
+                                                result=completion => result.map_err(|_|JobError::new("worker_unavailable","图片准备退出"))?,
+                                                _=async { while !cancel.load(Ordering::Acquire) { tokio::time::sleep(Duration::from_millis(100)).await; } } => {
+                                                    jobs.cancel(&job); Err(JobError::new("cancelled","候选预览已取消"))
+                                                }
+                                            }
                                         }.await;
                                         reply(result);
                                     }
@@ -542,7 +566,7 @@ impl LibraryService {
         revision: u64,
         owner: u64,
         slot: Slot,
-        reply: impl FnOnce(Result<super::work_drafts::Document, JobError>) + Send + 'static,
+        reply: impl FnOnce(Result<super::ai_receipts::PreviewSource, JobError>) + Send + 'static,
     ) -> Result<(), JobError> {
         self.tx
             .try_send(Work::DraftDocument {
@@ -551,6 +575,24 @@ impl LibraryService {
                 owner,
                 reply: Box::new(reply),
                 slot,
+            })
+            .map_err(|_| JobError::new("budget_busy", "作品管理正在退出或暂不可用"))
+    }
+    pub(crate) fn preview_image_candidate(
+        &self,
+        id: String,
+        target: super::image_prepare::ImageTarget,
+        cancel: Arc<AtomicBool>,
+        slot: Slot,
+        reply: impl FnOnce(Result<super::target_planner::ResolvedMedia, JobError>) + Send + 'static,
+    ) -> Result<(), JobError> {
+        self.tx
+            .try_send(Work::ImageCandidatePreview {
+                id,
+                target,
+                cancel,
+                slot,
+                reply: Box::new(reply),
             })
             .map_err(|_| JobError::new("budget_busy", "作品管理正在退出或暂不可用"))
     }

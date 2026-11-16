@@ -15,6 +15,11 @@ use crate::wallpaper::{
 
 type JobResult<T> = std::result::Result<T, JobError>;
 
+struct PreviewRequest {
+    configuration: config::WallpaperConfig,
+    image_candidate: Option<String>,
+}
+
 enum PreviewContent {
     Builtin(Option<crate::wallpaper::config::BuiltinState>),
     Media(ResolvedMedia),
@@ -30,6 +35,7 @@ pub(super) struct PreviewOwner {
     cancel: Arc<AtomicBool>,
     configuration: config::WallpaperConfig,
     reference: Option<crate::wallpaper::playlist::FixedVersion>,
+    image_candidate: bool,
     configured_fps: u8,
     pub(super) monitor: native::WallpaperMonitor,
     // Request facts belong to the lease, including while selection is pending
@@ -188,7 +194,7 @@ impl App {
         owner: u64,
         epoch: u64,
         reply: ApiReply,
-        document: JobResult<crate::wallpaper::work_drafts::Document>,
+        document: JobResult<crate::wallpaper::ai_receipts::PreviewSource>,
         target: &EventLoopWindowTarget<()>,
     ) {
         let result = (|| {
@@ -231,15 +237,30 @@ impl App {
             };
             let mut configuration =
                 preview_configuration(&self.config.wallpaper, group_id.as_deref())?;
-            let builtin = document.effective_builtin()?;
-            configuration.main_mut().selection = Selection::Builtin {
-                scene_id: builtin.scene_id,
-                state_version: builtin.state_version,
-                params: builtin.params,
+            let candidate = match document {
+                crate::wallpaper::ai_receipts::PreviewSource::Builtin(document) => {
+                    let builtin = document.effective_builtin()?;
+                    configuration.main_mut().selection = Selection::Builtin {
+                        scene_id: builtin.scene_id,
+                        state_version: builtin.state_version,
+                        params: builtin.params,
+                    };
+                    None
+                }
+                crate::wallpaper::ai_receipts::PreviewSource::Image(id) => Some(id),
             };
             configuration.main_mut().properties.clear();
             let slot = self.wallpaper_library.reserve()?;
-            self.prepare_preview(configuration, Some((id, revision)), lease, slot, target)
+            self.prepare_preview_source(
+                PreviewRequest {
+                    configuration,
+                    image_candidate: candidate,
+                },
+                Some((id, revision)),
+                lease,
+                slot,
+                target,
+            )
         })();
         let receipt = api::response(Some(&request.request_id), result, None);
         self.wallpaper_library.finish_local(&request, &receipt);
@@ -326,12 +347,41 @@ impl App {
 
     fn prepare_preview(
         &mut self,
-        mut configuration: config::WallpaperConfig,
+        configuration: config::WallpaperConfig,
         draft: Option<(String, u64)>,
         lease_id: String,
         slot: crate::wallpaper::service::Slot,
         target: &EventLoopWindowTarget<()>,
     ) -> JobResult<serde_json::Value> {
+        self.prepare_preview_source(
+            PreviewRequest {
+                configuration,
+                image_candidate: None,
+            },
+            draft,
+            lease_id,
+            slot,
+            target,
+        )
+    }
+
+    fn prepare_preview_source(
+        &mut self,
+        source: PreviewRequest,
+        draft: Option<(String, u64)>,
+        lease_id: String,
+        slot: crate::wallpaper::service::Slot,
+        target: &EventLoopWindowTarget<()>,
+    ) -> JobResult<serde_json::Value> {
+        let PreviewRequest {
+            mut configuration,
+            image_candidate: candidate,
+        } = source;
+        let image_candidate = candidate.is_some();
+        if image_candidate {
+            configuration.audio_input = crate::wallpaper::config::AudioInput::None;
+            configuration.main_mut().presentation.pointer = false;
+        }
         validate_configured_presentation(&configuration).map_err(JobError::invalid_input)?;
         self.validate_preview_audio(&configuration)
             .map_err(|error| JobError::new("audio_busy", error))?;
@@ -373,28 +423,57 @@ impl App {
             monitor.height = bounds.height as i32;
         }
         let configured_fps = configuration.presentation().fps;
-        let selection = match &configuration.main().selection {
-            Selection::Package { .. } | Selection::Playlist { .. } => {
-                Some(configuration.main().selection.clone())
-            }
-            _ => {
-                configuration.main_mut().presentation.fps = configured_fps.min(15);
-                None
+        let selection = if image_candidate {
+            None
+        } else {
+            match &configuration.main().selection {
+                Selection::Package { .. } | Selection::Playlist { .. } => {
+                    Some(configuration.main().selection.clone())
+                }
+                _ => {
+                    configuration.main_mut().presentation.fps = configured_fps.min(15);
+                    None
+                }
             }
         };
         self.wallpaper_audio_dispatch.invalidate();
         self.wallpaper_generation += 1;
         let id = self.wallpaper_generation;
         let cancel = Arc::new(AtomicBool::new(false));
-        let media = selection.is_some();
-        let composition_target_facts = media.then(|| {
+        let media = selection.is_some() || image_candidate;
+        let composition_target_facts = selection.is_some().then(|| {
             crate::wallpaper::builtin_plan::TargetFacts::from_monitor(
                 &monitor,
                 &configuration,
                 ImagePurpose::Preview,
             )
         });
-        if let Some(selection) = selection {
+        if let Some(candidate) = candidate {
+            let proxy = self.proxy.clone();
+            let image_target = ImageTarget {
+                width: monitor.width as u32,
+                height: monitor.height as u32,
+                purpose: ImagePurpose::Preview,
+                fit: if matches!(
+                    configuration.presentation().fit,
+                    crate::wallpaper::config::Fit::Contain
+                ) {
+                    ImageFit::Contain
+                } else {
+                    ImageFit::Cover
+                },
+            };
+            self.wallpaper_library.preview_image_candidate(
+                candidate,
+                image_target,
+                Arc::clone(&cancel),
+                slot,
+                move |result| {
+                    let _ =
+                        proxy.send_event(UserEvent::ImageCandidatePreview(id, Box::new(result)));
+                },
+            )?;
+        } else if let Some(selection) = selection {
             let proxy = self.proxy.clone();
             self.wallpaper_library.resolve_desktop_selection(
                 selection,
@@ -448,6 +527,7 @@ impl App {
             cancel,
             configuration,
             reference: None,
+            image_candidate,
             configured_fps,
             monitor,
             composition_target_facts,
@@ -591,13 +671,16 @@ impl App {
             preview.monitor.clone(),
             PresentationWindow::Preview {
                 owner,
+                image_candidate: preview.image_candidate,
                 embedded: self
                     .settings
                     .as_ref()
                     .is_some_and(|settings| settings.placement.is_some()),
             },
         )?;
-        if surface.runtime_builtin.is_none() || surface.configuration.follows_hertz() {
+        if !preview.image_candidate
+            && (surface.runtime_builtin.is_none() || surface.configuration.follows_hertz())
+        {
             surface.runtime_builtin = crate::wallpaper::follow::resolve(
                 &surface.configuration,
                 self.wallpaper_last.as_ref(),
@@ -631,6 +714,29 @@ impl App {
         preview.heartbeat_at = Instant::now();
         self.sync_embedded_preview();
         Ok(())
+    }
+
+    pub(super) fn finish_image_candidate_preview(
+        &mut self,
+        id: u64,
+        result: JobResult<ResolvedMedia>,
+        target: &EventLoopWindowTarget<()>,
+    ) {
+        let Some(preview) = self
+            .preview
+            .as_mut()
+            .filter(|p| p.id == id && p.image_candidate)
+        else {
+            return;
+        };
+        match result {
+            Ok(media) => preview.prepared = Some(PreviewContent::Media(media)),
+            Err(error) => {
+                self.fail_preview(format!("图片预览未能呈现：{error}"));
+                return;
+            }
+        }
+        self.tick_preview(target);
     }
 
     pub(super) fn finish_preview_selection(
@@ -905,7 +1011,10 @@ impl App {
         if preview.error.is_some() {
             return;
         }
-        if preview.configuration.follows_hertz() && preview.prepared.is_none() {
+        if !preview.image_candidate
+            && preview.configuration.follows_hertz()
+            && preview.prepared.is_none()
+        {
             let desired = crate::wallpaper::follow::resolve(
                 &preview.configuration,
                 self.wallpaper_last.as_ref(),
@@ -974,7 +1083,7 @@ impl App {
             return serde_json::Value::Null;
         };
         let surface = preview.surface.as_ref();
-        serde_json::json!({"kind":if preview.configuration.builtin().is_some() {"builtin"} else {"media"},
+        serde_json::json!({"kind":if !preview.image_candidate && preview.configuration.builtin().is_some() {"builtin"} else {"media"},
             "preparing":surface.is_none(),"leaseId":preview.lease_id,"generation":preview.id,
             "firstFrameReady":surface.is_some_and(|surface| surface.binding.generation() == preview.id && surface.first_frame_ready()),"binding":surface.map(|surface| &surface.binding),
             "handoff":preview.frame.as_ref().map(Handoff::diagnostics),"error":preview.error,
