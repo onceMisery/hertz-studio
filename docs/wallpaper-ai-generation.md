@@ -203,3 +203,33 @@ Standard/Full 构建和 Clippy、前端 86 步、API214、ADR414 通过。
 本轮 HTTP 回环响应为无费用 fixture，不连接实际 Ollama 推理进程。实际
 Ollama 版本/型号的单次输出、模型质量/时长、OpenAI/StepFun 壁纸模式与
 AI-04～06 仍未验收；这些边界不由 fixture 通过替代。
+
+## 2026-11-16 AI-04：图像计费与冻结执行策略
+
+计费数据类型在 `ai/pricing.rs`，原 `usage.rs` 继续拥有结算、pending 收据、
+迟到用量 CAS 和同一 DataDir 月预算。旧 token 价格/usage JSON 保持原字段，
+旧价格标签仍为不透明的冻结费率标识，不强制新增版本后缀；历史缺价格依据
+仍是未验证记录，不按今天的价格补算。
+
+新 `metered-v2` quote/usage 使用 inputTokens、outputTokens、imageOutput 三项
+完整向量。每项报价明确 quantityLimit、unitPriceMicroUsd、unitScale；图像
+SKU 固定宽高/qualityId，必须按完整单张价格计价。金额使用 u128 checked
+乘法并逐项向上取整求和，图像预留上限 500,000 micro-USD；文本保持 50,000，
+共用原 5,000,000 月预算。新 JSON 不输出旧 token 零值占位字段，版本混用、
+维度缺失/重复、SKU 不符、零 scale 或金额溢出不会被当作免费结果。
+
+取消后的已派发图像缺收据时按冻结预留记 unknown；可信收据可在原任务清理后
+按原 attempt/owner/月份幂等校正。超预留用量完整计费并触发原 guard。
+token-only 模式的金额始终为 null；错误类型的收据不能把它改成已核价零。
+官方只读账本保留各项 quantity/rate 的十进制字符串，展示图像张数与 SKU，
+不会把缺失图像维度默认为零 token。
+
+迁移 0033 为原 jobs 新增冻结队列/执行期限及受理费用上限，历史记录维持
+60/30 秒与 50,000，图像策略为 60/180 秒与 500,000。SQLite 守策略与向量
+结构，完整价格计算归 Rust。worker 从取得原执行槽起使用一次单调期限，
+重载、凭据及 provider 调用不会重新获得完整预算；sweep 读取任务冻结期限。
+
+该切片只交付计费与执行策略。ImageProvider、受限图片接收/准备、原生图像
+候选与生产 OpenAI Images 资格仍待后续实现；图像当前不进入可用目录。
+官方资料访问返回 HTTP403/超时，未猜测型号/费率，未发真实模型或付费请求。
+步骤与验收见 `docs/aegis/plans/2026-11-16-ai04-image-generation.md`。

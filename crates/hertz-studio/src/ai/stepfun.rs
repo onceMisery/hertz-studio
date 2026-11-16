@@ -75,6 +75,7 @@ fn token_only_quote() -> PriceQuote {
         output_micro_usd_per_million: 0,
         max_input_tokens: 20_000,
         max_output_tokens: COMPLETION_OUTPUT_TOKENS,
+        metering: None,
     }
 }
 
@@ -405,6 +406,7 @@ mod tests {
             output_micro_usd_per_million: 2_000,
             max_input_tokens: REQUEST_BYTES as u64,
             max_output_tokens: COMPLETION_OUTPUT_TOKENS,
+            metering: None,
         }
     }
 
@@ -502,6 +504,7 @@ mod tests {
             Some(super::super::usage::TrustedUsage {
                 input_tokens: 33,
                 output_tokens: 3,
+                metering: None,
             })
         );
     }

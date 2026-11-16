@@ -185,14 +185,36 @@ fn project(row: store::LedgerRow) -> Value {
     let pricing_known = snapshot
         .as_ref()
         .is_some_and(PricingSnapshot::pricing_known);
-    let pricing = snapshot.as_ref().filter(|_| pricing_known).map(|price| json!({
+    let pricing = snapshot.as_ref().filter(|_| pricing_known).map(|price| {
+        if let Some(dimensions) = &price.quote.metering {
+            return json!({
+                "provider":price.provider,"model":price.model,"pricingVersion":price.quote.pricing_version,
+                "dimensions": dimensions.iter().map(|dimension| json!({
+                    "dimension": dimension.dimension,
+                    "quantityLimit": dimension.quantity_limit.to_string(),
+                    "unitPriceMicroUsd": dimension.unit_price_micro_usd.to_string(),
+                    "unitScale": dimension.unit_scale.to_string(),
+                    "imageSku": dimension.image_sku,
+                })).collect::<Vec<_>>(),
+            });
+        }
+        json!({
         "provider":price.provider,"model":price.model,"pricingVersion":price.quote.pricing_version,
         "inputMicroUsdPerMillion":price.quote.input_micro_usd_per_million.to_string(),
         "outputMicroUsdPerMillion":price.quote.output_micro_usd_per_million.to_string(),
         "maxInputTokens":price.quote.max_input_tokens.to_string(),"maxOutputTokens":price.quote.max_output_tokens.to_string(),
-    }));
+    })});
     let reported = row.reported_usage.as_deref().and_then(|value| serde_json::from_str::<TrustedUsage>(value).ok())
-        .map(|usage|json!({"inputTokens":usage.input_tokens.to_string(),"outputTokens":usage.output_tokens.to_string()}));
+        .filter(|usage| snapshot.as_ref().is_none_or(|snapshot| snapshot.quote.validate_usage(usage).is_ok()))
+        .map(|usage| match usage.metering {
+            Some(dimensions) => json!({"usageVersion":super::pricing::METERED_V2,
+                "dimensions":dimensions.iter().map(|dimension| json!({
+                    "dimension":dimension.dimension,"quantity":dimension.quantity.to_string(),
+                    "imageSku":dimension.image_sku,
+                })).collect::<Vec<_>>()
+            }),
+            None => json!({"inputTokens":usage.input_tokens.to_string(),"outputTokens":usage.output_tokens.to_string()}),
+        });
     json!({
         "jobId":row.job_id,"principal":row.principal,"taskState":row.task_state,
         "taskRetained":row.task_retained,"acceptedAt":row.accepted_at,"sortAt":row.sort_at,
@@ -209,6 +231,76 @@ fn project(row: store::LedgerRow) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn image_row() -> store::LedgerRow {
+        let snapshot = PricingSnapshot {
+            provider: "image-fixture".into(),
+            model: "test-image".into(),
+            quote: crate::ai::pricing::tests::image_quote(),
+            credential: None,
+        };
+        store::LedgerRow {
+            job_id: "image".into(),
+            principal: Some("local-owner".into()),
+            task_state: Some("cancelled".into()),
+            task_retained: false,
+            accepted_at: Some(1),
+            sort_at: 1,
+            recorded_at: 2,
+            attempt_id: Some("attempt".into()),
+            reservation_micro_usd: 200_002,
+            accounted_micro_usd: Some(200_002),
+            usage_state: "reported".into(),
+            revision: 2,
+            pricing_snapshot: serde_json::to_string(&snapshot).unwrap(),
+            reported_usage: Some(
+                serde_json::to_string(&crate::ai::pricing::tests::image_usage()).unwrap(),
+            ),
+        }
+    }
+
+    #[test]
+    fn image_ledger_projects_all_dimensions_and_sku_without_legacy_zero_counters() {
+        let entry = project(image_row());
+        assert_eq!(entry["pricingVerified"], true);
+        assert_eq!(entry["pricingKnown"], true);
+        assert_eq!(entry["accountedMicroUsd"], "200002");
+        assert_eq!(
+            entry["pricing"]["dimensions"][2]["unitPriceMicroUsd"],
+            "200000"
+        );
+        assert_eq!(entry["pricing"]["dimensions"][2]["unitScale"], "1");
+        assert_eq!(entry["reportedUsage"]["dimensions"][2]["quantity"], "1");
+        assert_eq!(
+            entry["reportedUsage"]["dimensions"][2]["imageSku"]["width"],
+            1024
+        );
+        assert!(entry["reportedUsage"].get("inputTokens").is_none());
+        assert!(entry["pricing"].get("inputMicroUsdPerMillion").is_none());
+        assert_eq!(entry["reportedUsageInvalid"], false);
+    }
+
+    #[test]
+    fn image_ledger_rejects_mismatched_or_incomplete_usage_without_repricing_history() {
+        for mutation in 0..3 {
+            let mut row = image_row();
+            let mut usage: Value =
+                serde_json::from_str(row.reported_usage.as_deref().unwrap()).unwrap();
+            match mutation {
+                0 => usage["dimensions"][2]["imageSku"]["qualityId"] = json!("different"),
+                1 => {
+                    usage["dimensions"].as_array_mut().unwrap().pop();
+                }
+                _ => usage = json!({"inputTokens":0,"outputTokens":0}),
+            }
+            row.reported_usage = Some(usage.to_string());
+            let entry = project(row);
+            assert_eq!(entry["reportedUsage"], Value::Null);
+            assert_eq!(entry["reportedUsageInvalid"], true);
+            assert_eq!(entry["accountedMicroUsd"], "200002");
+        }
+    }
+
     #[test]
     fn query_rejects_partial_cursor_invalid_month_status_and_unbounded_page() {
         for value in [
@@ -247,6 +339,7 @@ mod tests {
                 output_micro_usd_per_million: 0,
                 max_input_tokens: 20_000,
                 max_output_tokens: 8_000,
+                metering: None,
             },
             credential: None,
         };

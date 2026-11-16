@@ -33,6 +33,9 @@ pub struct JobRow {
     pub model: String,
     pub reservation_micro_usd: i64,
     pub pricing_snapshot: String,
+    pub queue_deadline_ms: i64,
+    pub run_deadline_ms: i64,
+    pub reservation_limit_micro_usd: i64,
     pub created_at: i64,
     pub updated_at: i64,
     pub result_proposal_id: Option<String>,
@@ -64,7 +67,7 @@ const JOB_COLUMNS: &str =
     "job_id, owner_instance_id, principal, capability, key, input_hash, state,
         state_revision, dispatch_state, attempt_id, provider, model, created_at, updated_at,
         result_proposal_id, reservation_micro_usd, pricing_snapshot, failure_code,
-        provider_http_status";
+        provider_http_status, queue_deadline_ms, run_deadline_ms, reservation_limit_micro_usd";
 
 pub async fn find_job_by_key<'c, E: sqlx::Executor<'c, Database = sqlx::Sqlite>>(
     conn: E,
@@ -106,8 +109,9 @@ pub async fn insert_job<'c, E: sqlx::Executor<'c, Database = sqlx::Sqlite>>(
                               state, state_revision, dispatch_state, attempt_id, provider,
                               model, created_at, updated_at, result_proposal_id,
                               reservation_micro_usd, pricing_snapshot, failure_code,
-                              provider_http_status)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13, ?14, ?15, ?16, ?17, ?18)",
+                              provider_http_status, queue_deadline_ms, run_deadline_ms,
+                              reservation_limit_micro_usd)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
     )
     .bind(&job.job_id)
     .bind(&job.owner_instance_id)
@@ -127,6 +131,9 @@ pub async fn insert_job<'c, E: sqlx::Executor<'c, Database = sqlx::Sqlite>>(
     .bind(&job.pricing_snapshot)
     .bind(&job.failure_code)
     .bind(job.provider_http_status)
+    .bind(job.queue_deadline_ms)
+    .bind(job.run_deadline_ms)
+    .bind(job.reservation_limit_micro_usd)
     .execute(conn)
     .await
     .map_err(|e| StoreError::Database(e.to_string()))?;
@@ -1046,6 +1053,12 @@ mod retention_migration_tests {
         .execute(&mut conn)
         .await
         .unwrap();
+        sqlx::raw_sql(include_str!(
+            "../../../migrations/0033_ai_job_execution_policy.sql"
+        ))
+        .execute(&mut conn)
+        .await
+        .unwrap();
         let entry = find_usage_entry(&mut conn, "legacy")
             .await
             .unwrap()
@@ -1062,6 +1075,9 @@ mod retention_migration_tests {
         let job = find_job_by_id(&mut conn, "legacy").await.unwrap().unwrap();
         assert_eq!(job.reservation_micro_usd, 50000);
         assert_eq!(job.provider_http_status, None);
+        assert_eq!(job.queue_deadline_ms, 60_000);
+        assert_eq!(job.run_deadline_ms, 30_000);
+        assert_eq!(job.reservation_limit_micro_usd, 50_000);
         let snapshot: serde_json::Value = serde_json::from_str(&job.pricing_snapshot).unwrap();
         assert_eq!(snapshot["pricingVersion"], "legacy-unverified");
         assert!(snapshot.get("inputMicroUsdPerMillion").is_none());

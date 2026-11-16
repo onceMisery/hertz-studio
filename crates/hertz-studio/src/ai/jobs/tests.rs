@@ -5,6 +5,8 @@
 
 use super::*;
 
+mod metered;
+
 #[test]
 fn pre_dispatch_cancellation_detects_notified_and_closed_watch_channels() {
     let (sender, receiver) = tokio::sync::watch::channel(());
@@ -84,6 +86,7 @@ impl StageIntentProvider for TokenOnlyProvider {
             output_micro_usd_per_million: 0,
             max_input_tokens: 20_000,
             max_output_tokens: 8_000,
+            metering: None,
         })
     }
     fn generate(
@@ -99,6 +102,7 @@ impl StageIntentProvider for TokenOnlyProvider {
                 usage: Some(TrustedUsage {
                     input_tokens: 345,
                     output_tokens: 67,
+                    metering: None,
                 }),
             }
         })
@@ -123,6 +127,7 @@ impl StageIntentProvider for BlockedTokenOnlyProvider {
             output_micro_usd_per_million: 0,
             max_input_tokens: 20_000,
             max_output_tokens: 8_000,
+            metering: None,
         })
     }
     fn generate(
@@ -144,6 +149,7 @@ impl StageIntentProvider for BlockedTokenOnlyProvider {
                 usage: Some(TrustedUsage {
                     input_tokens: 345,
                     output_tokens: 67,
+                    metering: None,
                 }),
             }
         })
@@ -703,6 +709,7 @@ fn metered_quote() -> PriceQuote {
         output_micro_usd_per_million: 2_000_000,
         max_input_tokens: 10_000,
         max_output_tokens: 10_000,
+        metering: None,
     }
 }
 
@@ -1281,6 +1288,7 @@ async fn trusted_usage_charges_success_invalid_output_and_provider_error() {
             Some(TrustedUsage {
                 input_tokens: 123,
                 output_tokens: 7,
+                metering: None,
             }),
         ),
         (
@@ -1290,6 +1298,7 @@ async fn trusted_usage_charges_success_invalid_output_and_provider_error() {
             Some(TrustedUsage {
                 input_tokens: 123,
                 output_tokens: 7,
+                metering: None,
             }),
         ),
         (
@@ -1299,6 +1308,7 @@ async fn trusted_usage_charges_success_invalid_output_and_provider_error() {
             Some(TrustedUsage {
                 input_tokens: 123,
                 output_tokens: 7,
+                metering: None,
             }),
         ),
         (Ok(valid), "succeeded", None, None),
@@ -1353,6 +1363,7 @@ async fn cancellation_keeps_its_terminal_state_but_late_usage_uses_frozen_prices
         Some(TrustedUsage {
             input_tokens: 123,
             output_tokens: 7,
+            metering: None,
         }),
     );
     let gate = provider.gate.clone();
@@ -1546,6 +1557,9 @@ async fn estimated_entry(state: &Arc<AppState>, id: &str) {
             updated_at: 0,
             result_proposal_id: None,
             failure_code: None,
+            queue_deadline_ms: QUEUE_DEADLINE_MS,
+            run_deadline_ms: RUN_DEADLINE_MS,
+            reservation_limit_micro_usd: RESERVATION_MICRO_USD,
             provider_http_status: None,
         },
     )
@@ -1586,6 +1600,7 @@ async fn late_usage_is_cas_idempotent_in_original_month_without_a_job() {
     let counters = TrustedUsage {
         input_tokens: 123,
         output_tokens: 7,
+        metering: None,
     };
     let mut tx = vmusic_store::begin_immediate(&state.db).await.unwrap();
     store::settle(&mut tx, "2026-10", 0, 42).await.unwrap();
@@ -1598,6 +1613,7 @@ async fn late_usage_is_cas_idempotent_in_original_month_without_a_job() {
         &TrustedUsage {
             input_tokens: 10_001,
             output_tokens: 7,
+            metering: None,
         }
     )
     .await
@@ -1715,7 +1731,8 @@ async fn late_usage_and_month_adjustment_roll_back_together() {
         2,
         &TrustedUsage {
             input_tokens: 1,
-            output_tokens: 1
+            output_tokens: 1,
+            metering: None,
         }
     )
     .await
@@ -1751,6 +1768,7 @@ async fn actual_over_reservation_halts_even_below_month_limit() {
             Some(TrustedUsage {
                 input_tokens: 40_000,
                 output_tokens: 7,
+                metering: None,
             }),
         )))
         .await;
@@ -1827,7 +1845,8 @@ async fn late_usage_can_increase_charges_without_releasing_other_reservations() 
         2,
         &TrustedUsage {
             input_tokens: 40_000,
-            output_tokens: 7
+            output_tokens: 7,
+            metering: None,
         }
     )
     .await
@@ -1874,6 +1893,7 @@ async fn late_usage_month_total_overflow_saturates_and_keeps_estimate() {
         &TrustedUsage {
             input_tokens: 40_000,
             output_tokens: 7,
+            metering: None,
         }
     )
     .await
@@ -1964,6 +1984,7 @@ async fn concurrent_usage_callbacks_adjust_the_month_once() {
             &TrustedUsage {
                 input_tokens: 123,
                 output_tokens: 7,
+                metering: None,
             },
         )
         .await
@@ -2011,6 +2032,7 @@ async fn terminal_month_overflow_retains_estimate_and_persistent_guard() {
             Some(TrustedUsage {
                 input_tokens: i64::MAX as u64,
                 output_tokens: 0,
+                metering: None,
             }),
         )))
         .await;
@@ -2053,6 +2075,7 @@ async fn unrepresentable_month_total_saturates_and_commits_terminal_state() {
         Some(TrustedUsage {
             input_tokens: 123,
             output_tokens: 7,
+            metering: None,
         }),
     );
     let gate = provider.gate.clone();
@@ -2098,6 +2121,7 @@ async fn unrepresentable_month_total_saturates_and_commits_terminal_state() {
         TrustedUsage {
             input_tokens: 123,
             output_tokens: 7,
+            metering: None,
         }
     );
     let task = job_row(&state, &job.job_id).await;
@@ -2151,7 +2175,8 @@ async fn unrepresentable_usage_retains_estimate_and_halts() {
         2,
         &TrustedUsage {
             input_tokens: u64::MAX,
-            output_tokens: u64::MAX
+            output_tokens: u64::MAX,
+            metering: None,
         }
     )
     .await
@@ -2168,6 +2193,7 @@ async fn unrepresentable_usage_retains_estimate_and_halts() {
         TrustedUsage {
             input_tokens: u64::MAX,
             output_tokens: u64::MAX,
+            metering: None,
         }
     );
     let guard = store::budget_guard(&state.db).await.unwrap().unwrap();
@@ -2189,6 +2215,7 @@ async fn terminal_unrepresentable_usage_keeps_estimate_and_halts() {
             Some(TrustedUsage {
                 input_tokens: u64::MAX,
                 output_tokens: 0,
+                metering: None,
             }),
         )))
         .await;
@@ -2215,6 +2242,7 @@ async fn terminal_unrepresentable_usage_keeps_estimate_and_halts() {
         TrustedUsage {
             input_tokens: u64::MAX,
             output_tokens: 0,
+            metering: None,
         }
     );
     let mut conn = state.db.acquire().await.unwrap();
@@ -2292,6 +2320,7 @@ async fn retention_keeps_tasks_with_pending_trusted_usage() {
             usage_json: serde_json::to_string(&TrustedUsage {
                 input_tokens: 345,
                 output_tokens: 67,
+                metering: None,
             })
             .unwrap(),
             created_at: now,
@@ -3680,6 +3709,7 @@ async fn ledger_failure_does_not_block_proposal_and_pending_tokens_reconcile_lat
         TrustedUsage {
             input_tokens: 345,
             output_tokens: 67,
+            metering: None,
         }
     );
     let mut conn = state.db.acquire().await.unwrap();
@@ -3725,6 +3755,7 @@ async fn proposal_failure_preserves_token_only_usage() {
         TrustedUsage {
             input_tokens: 345,
             output_tokens: 67,
+            metering: None,
         }
     );
     let owner = instance_owner(&state).await.unwrap();
@@ -3810,6 +3841,7 @@ async fn terminal_ledger_failure_does_not_undo_token_only_task_success() {
         TrustedUsage {
             input_tokens: 345,
             output_tokens: 67,
+            metering: None,
         }
     );
     assert!(counter.load(std::sync::atomic::Ordering::SeqCst) == 1);
@@ -3902,6 +3934,7 @@ async fn pending_usage_survives_terminal_ledger_failure_until_recovery() {
         TrustedUsage {
             input_tokens: 345,
             output_tokens: 67,
+            metering: None,
         }
     );
 
@@ -3922,6 +3955,7 @@ async fn pending_usage_survives_terminal_ledger_failure_until_recovery() {
         TrustedUsage {
             input_tokens: 345,
             output_tokens: 67,
+            metering: None,
         }
     );
     assert!(store::find_pending_usage(
@@ -3953,6 +3987,7 @@ async fn pending_usage_drain_continues_after_one_settlement_failure() {
             output_micro_usd_per_million: 0,
             max_input_tokens: 20_000,
             max_output_tokens: 8_000,
+            metering: None,
         },
         credential: None,
     })
@@ -3960,6 +3995,7 @@ async fn pending_usage_drain_continues_after_one_settlement_failure() {
     let trusted = TrustedUsage {
         input_tokens: 345,
         output_tokens: 67,
+        metering: None,
     };
 
     for job_id in ["pending-usage-01-fail", "pending-usage-02-healthy"] {
@@ -3985,6 +4021,9 @@ async fn pending_usage_drain_continues_after_one_settlement_failure() {
                 updated_at: now,
                 result_proposal_id: None,
                 failure_code: None,
+                queue_deadline_ms: QUEUE_DEADLINE_MS,
+                run_deadline_ms: RUN_DEADLINE_MS,
+                reservation_limit_micro_usd: RESERVATION_MICRO_USD,
                 provider_http_status: None,
             },
         )
@@ -4805,6 +4844,7 @@ async fn token_only_settlement_records_over_bound_usage_without_claiming_cost() 
             output_micro_usd_per_million: 0,
             max_input_tokens: 20_000,
             max_output_tokens: 8_000,
+            metering: None,
         },
         credential: None,
     };
@@ -4827,15 +4867,20 @@ async fn token_only_settlement_records_over_bound_usage_without_claiming_cost() 
         updated_at: now_ms(),
         result_proposal_id: None,
         failure_code: None,
+        queue_deadline_ms: QUEUE_DEADLINE_MS,
+        run_deadline_ms: RUN_DEADLINE_MS,
+        reservation_limit_micro_usd: RESERVATION_MICRO_USD,
         provider_http_status: None,
     };
     let immediate_usage = TrustedUsage {
         input_tokens: 20_001,
         output_tokens: 321,
+        metering: None,
     };
     let late_usage = TrustedUsage {
         input_tokens: 1_234,
         output_tokens: 8_001,
+        metering: None,
     };
     let first = make_job("token-only-immediate");
     let late = make_job("token-only-late");

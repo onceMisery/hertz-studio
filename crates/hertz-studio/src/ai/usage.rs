@@ -1,76 +1,21 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 hertz-studio contributors
 
-//! R4-B accounting. Only provider adapters construct trusted token counters;
+//! R4-B accounting. Only provider adapters construct trusted usage dimensions;
 //! neither model output nor an HTTP client can submit a bill. All mutations run
 //! inside the caller's BEGIN IMMEDIATE transaction, separate from task state.
 
 use serde::{Deserialize, Serialize};
 use vmusic_store::ai_jobs as store;
 
-use super::jobs::{utc_month_key, MONTHLY_LIMIT_MICRO_USD, RESERVATION_MICRO_USD};
+use super::jobs::{utc_month_key, MONTHLY_LIMIT_MICRO_USD};
+pub(crate) use super::pricing::{PriceQuote, TrustedUsage};
 use crate::error::{internal, ApiResult};
 
 pub(crate) const TOKEN_ONLY_PRICING_VERSION: &str = "token-usage-unpriced-v1";
 
 fn db_error(error: vmusic_core::StoreError) -> crate::error::ApiError {
     crate::error::ApiError::from(vmusic_core::CoreError::Store(error))
-}
-
-/// This two-counter pricing model supports uncached input and total billable
-/// output (including reasoning). Other billing dimensions require an explicit
-/// adapter/contract extension; they must never silently be omitted.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct PriceQuote {
-    pub pricing_version: String,
-    pub reservation_micro_usd: i64,
-    pub input_micro_usd_per_million: u64,
-    pub output_micro_usd_per_million: u64,
-    pub max_input_tokens: u64,
-    pub max_output_tokens: u64,
-}
-
-impl PriceQuote {
-    pub(crate) fn fake() -> Self {
-        Self {
-            pricing_version: "fake-free-v1".into(),
-            reservation_micro_usd: RESERVATION_MICRO_USD,
-            input_micro_usd_per_million: 0,
-            output_micro_usd_per_million: 0,
-            max_input_tokens: 0,
-            max_output_tokens: 0,
-        }
-    }
-
-    pub(crate) fn validate(&self) -> Result<(), &'static str> {
-        if self.pricing_version.is_empty()
-            || self.pricing_version.len() > 128
-            || !(0..=RESERVATION_MICRO_USD).contains(&self.reservation_micro_usd)
-        {
-            return Err("invalid provider price quote");
-        }
-        let upper = self.amount(&TrustedUsage {
-            input_tokens: self.max_input_tokens,
-            output_tokens: self.max_output_tokens,
-        })?;
-        if upper > self.reservation_micro_usd {
-            return Err("provider quote exceeds reservation");
-        }
-        Ok(())
-    }
-
-    fn amount(&self, usage: &TrustedUsage) -> Result<i64, &'static str> {
-        let input = u128::from(usage.input_tokens) * u128::from(self.input_micro_usd_per_million);
-        let output =
-            u128::from(usage.output_tokens) * u128::from(self.output_micro_usd_per_million);
-        // Round each billable component up to an integer micro-USD.
-        let amount = input
-            .div_ceil(1_000_000)
-            .checked_add(output.div_ceil(1_000_000))
-            .ok_or("usage amount overflow")?;
-        i64::try_from(amount).map_err(|_| "usage amount overflow")
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -90,29 +35,12 @@ impl PricingSnapshot {
     }
 }
 
-/// Counters parsed from a managed provider response, never from StageIntent.
-/// Missing or unverifiable usage is None, even on a successful task.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct TrustedUsage {
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-}
-
-impl TrustedUsage {
-    pub(crate) fn free() -> Self {
-        Self {
-            input_tokens: 0,
-            output_tokens: 0,
-        }
-    }
-}
-
 pub(crate) async fn persist_pending_usage(
     db: &sqlx::SqlitePool,
     job: &store::JobRow,
     usage: &TrustedUsage,
 ) -> ApiResult<()> {
+    usage.validate().map_err(internal)?;
     if job.dispatch_state != "may_have_been_sent" {
         return Ok(());
     }
@@ -266,7 +194,7 @@ async fn settle_terminal_inner(
     let pricing = serde_json::from_str::<PricingSnapshot>(&job.pricing_snapshot).ok();
     let token_only = pricing
         .as_ref()
-        .is_some_and(|snapshot| !snapshot.pricing_known());
+        .is_some_and(|snapshot| snapshot.quote.validate().is_ok() && !snapshot.pricing_known());
     let mut charge = if dispatched && !token_only {
         job.reservation_micro_usd
     } else {
@@ -412,8 +340,14 @@ pub(crate) async fn reconcile(
     let snapshot = serde_json::from_str::<PricingSnapshot>(&entry.pricing_snapshot).ok();
     let token_only = snapshot
         .as_ref()
-        .is_some_and(|snapshot| !snapshot.pricing_known());
+        .is_some_and(|snapshot| snapshot.quote.validate().is_ok() && !snapshot.pricing_known());
     if token_only {
+        if snapshot
+            .as_ref()
+            .is_none_or(|snapshot| snapshot.quote.validate_usage(usage).is_err())
+        {
+            return Ok(false);
+        }
         let updated = store::cas_report_usage(
             conn,
             job_id,
@@ -531,6 +465,7 @@ pub(crate) async fn reconcile(
 
 #[cfg(test)]
 mod tests {
+    use super::super::jobs::RESERVATION_MICRO_USD;
     use super::*;
 
     #[test]
@@ -542,12 +477,14 @@ mod tests {
             output_micro_usd_per_million: 1,
             max_input_tokens: 1,
             max_output_tokens: 1,
+            metering: None,
         };
         assert!(quote.validate().is_ok());
         assert_eq!(
             quote.amount(&TrustedUsage {
                 input_tokens: 1,
-                output_tokens: 1
+                output_tokens: 1,
+                metering: None,
             }),
             Ok(2)
         );
@@ -561,7 +498,8 @@ mod tests {
         assert!(quote
             .amount(&TrustedUsage {
                 input_tokens: u64::MAX,
-                output_tokens: u64::MAX
+                output_tokens: u64::MAX,
+                metering: None,
             })
             .is_err());
     }

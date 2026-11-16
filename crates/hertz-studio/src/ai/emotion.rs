@@ -642,6 +642,9 @@ async fn begin_completion_job(
         provider: pricing.provider.clone(),
         model: pricing.model.clone(),
         reservation_micro_usd: pricing.quote.reservation_micro_usd,
+        queue_deadline_ms: super::jobs::QUEUE_DEADLINE_MS,
+        run_deadline_ms: super::jobs::RUN_DEADLINE_MS,
+        reservation_limit_micro_usd: super::jobs::RESERVATION_MICRO_USD,
         pricing_snapshot: serde_json::to_string(pricing)
             .map_err(|error| format!("cannot encode pricing snapshot: {error}"))?,
         created_at: now,
@@ -1683,6 +1686,7 @@ mod tests {
                     output_micro_usd_per_million: 0,
                     max_input_tokens: 20_000,
                     max_output_tokens: 8_000,
+                    metering: None,
                 })
             }
             fn generate(
@@ -2199,6 +2203,7 @@ mod tests {
                     output_micro_usd_per_million: 0,
                     max_input_tokens: 20_000,
                     max_output_tokens: 8_000,
+                    metering: None,
                 })
             }
             fn generate(
@@ -2261,6 +2266,7 @@ mod tests {
                         usage: Some(crate::ai::usage::TrustedUsage {
                             input_tokens: 17,
                             output_tokens: 5,
+                            metering: None,
                         }),
                     })
                 })
@@ -2467,6 +2473,7 @@ mod tests {
                 output_micro_usd_per_million: 0,
                 max_input_tokens: 20_000,
                 max_output_tokens: 8_000,
+                metering: None,
             },
             credential: None,
         };

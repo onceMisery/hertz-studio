@@ -102,8 +102,22 @@
           var usage=entry.reportedUsage;
           var accounting=entry.usageState==='unpriced'?'金额未核价'
             :entry.usageState==='reported'?'费用已按可信用量核算':'费用仍按预留估算';
-          card.appendChild(h('p','sc-note',
-            '输入 '+usage.inputTokens+' tokens · 输出 '+usage.outputTokens+' tokens · '+accounting));
+          if (usage.usageVersion==='metered-v2') {
+            usage.dimensions.forEach(function(dimension){
+              var detail;
+              if (dimension.dimension==='imageOutput') {
+                var sku=dimension.imageSku;
+                detail='图像 '+dimension.quantity+' 张 · '+sku.width+' × '+sku.height+' · '+sku.qualityId;
+              } else {
+                detail=(dimension.dimension==='inputTokens'?'输入 ':'输出 ')+dimension.quantity+' tokens';
+              }
+              card.appendChild(h('p','sc-note',detail));
+            });
+            card.appendChild(h('p','sc-note',accounting));
+          } else {
+            card.appendChild(h('p','sc-note',
+              '输入 '+usage.inputTokens+' tokens · 输出 '+usage.outputTokens+' tokens · '+accounting));
+          }
         }
         if (entry.usageState==='unpriced' && !entry.reportedUsage) {
           card.appendChild(h('p','sc-note','当前尚无可核实的供应商 token 用量，账目未记录 token 数。'));

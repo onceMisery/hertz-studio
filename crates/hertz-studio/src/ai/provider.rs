@@ -329,6 +329,7 @@ impl StageIntentProvider for Ollama {
             output_micro_usd_per_million: 0,
             max_input_tokens: REQUEST_BYTES as u64,
             max_output_tokens: OUTPUT_TOKENS,
+            metering: None,
         })
     }
     fn generate(
@@ -620,6 +621,7 @@ fn openai_token_only_quote() -> PriceQuote {
         output_micro_usd_per_million: 0,
         max_input_tokens: REQUEST_BYTES as u64,
         max_output_tokens: OUTPUT_TOKENS,
+        metering: None,
     }
 }
 
@@ -926,6 +928,7 @@ fn parse_openai_token_usage(value: &Value) -> Option<TrustedUsage> {
     Some(TrustedUsage {
         input_tokens,
         output_tokens,
+        metering: None,
     })
 }
 
@@ -960,6 +963,7 @@ fn parse_openai_usage(value: &Value) -> Option<TrustedUsage> {
     Some(TrustedUsage {
         input_tokens,
         output_tokens,
+        metering: None,
     })
 }
 
@@ -1095,6 +1099,7 @@ fn parse_local_usage(envelope: &Value, model: &str) -> Option<TrustedUsage> {
     Some(TrustedUsage {
         input_tokens,
         output_tokens,
+        metering: None,
     })
 }
 
@@ -1124,6 +1129,7 @@ mod tests {
             output_micro_usd_per_million: 0,
             max_input_tokens: REQUEST_BYTES as u64,
             max_output_tokens: OUTPUT_TOKENS,
+            metering: None,
         }
     }
 

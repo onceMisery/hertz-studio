@@ -31,6 +31,7 @@ pub(crate) mod jobs;
 pub(crate) mod ledger;
 pub mod lock;
 pub mod mcp;
+pub(crate) mod pricing;
 pub(crate) mod provider;
 pub(crate) mod stepfun;
 mod strict_json;

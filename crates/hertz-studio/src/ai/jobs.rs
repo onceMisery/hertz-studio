@@ -199,6 +199,13 @@ pub(crate) struct GenerationCapability {
 
 pub(crate) const WALLPAPER_CAPABILITY: &str = "wallpaper.generate";
 
+const IMAGE_GENERATION: GenerationCapability = GenerationCapability {
+    input_max_bytes: hertz_wallpaper::generation::MAX_REQUEST_BYTES,
+    queue_deadline_ms: QUEUE_DEADLINE_MS,
+    run_deadline_ms: 180_000,
+    reservation_micro_usd: super::pricing::IMAGE_RESERVATION_MICRO_USD,
+};
+
 pub(crate) fn generation_capability(name: &str) -> Option<&'static GenerationCapability> {
     const STAGE: GenerationCapability = GenerationCapability {
         input_max_bytes: MAX_INPUT_BYTES,
@@ -228,6 +235,18 @@ pub(crate) enum GenerationInput {
 }
 
 impl GenerationInput {
+    fn policy(&self, capability: &str) -> Option<&'static GenerationCapability> {
+        if capability == WALLPAPER_CAPABILITY && self.is_image() {
+            Some(&IMAGE_GENERATION)
+        } else {
+            generation_capability(capability)
+        }
+    }
+
+    fn is_image(&self) -> bool {
+        matches!(self, Self::Wallpaper(request) if request.output.kind == hertz_wallpaper::generation::WallpaperGenerationKind::Image)
+    }
+
     /// 按任务类型核价，壁纸使用完整请求及其独立输出预算。
     fn price_quote(&self, provider: &dyn StageIntentProvider) -> Result<PriceQuote, String> {
         match self {
@@ -1022,7 +1041,9 @@ async fn submit_owned(
     quoted_pricing: Option<PricingSnapshot>,
     wallpaper_binding: Option<(&str, &str)>,
 ) -> ApiResult<SubmitOutcome> {
-    let cap = generation_capability(capability).ok_or_else(|| bad_request("未注册的生成能力"))?;
+    let cap = input
+        .policy(capability)
+        .ok_or_else(|| bad_request("未注册的生成能力"))?;
     // 输入验证按 capability 走注册上界：舞台 brief 有界文本，壁纸请求已在
     // 合同层 parse 时全量校验，这里复验一次保持防御对称。
     match &input {
@@ -1124,6 +1145,9 @@ async fn submit_owned(
         ));
     }
     // 计费预留上界按 capability 注册项收紧（§19.3）。
+    if pricing.quote.metering.is_some() != input.is_image() {
+        return Err(bad_request("价格版本与生成类型不匹配"));
+    }
     if pricing.quote.reservation_micro_usd > cap.reservation_micro_usd {
         return Err(ApiError::new(
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
@@ -1224,6 +1248,9 @@ async fn submit_owned(
         provider: provider.id().to_string(),
         model: provider.model().to_string(),
         reservation_micro_usd: pricing.quote.reservation_micro_usd,
+        queue_deadline_ms: cap.queue_deadline_ms,
+        run_deadline_ms: cap.run_deadline_ms,
+        reservation_limit_micro_usd: cap.reservation_micro_usd,
         pricing_snapshot: serde_json::to_string(&pricing).map_err(|e| internal(e.to_string()))?,
         created_at: now,
         updated_at: now,
@@ -1358,8 +1385,9 @@ async fn run_job_inner(
             return;
         }
     };
-    match start_running(&state, &job_id, queue_deadline).await {
-        Ok(Some(_)) => {}
+    let execution_started = tokio::time::Instant::now();
+    let accepted = match start_running(&state, &job_id, queue_deadline).await {
+        Ok(Some(job)) => job,
         Ok(None) => {
             state.ai_runtime.inputs.lock().await.remove(&job_id);
             return;
@@ -1369,9 +1397,10 @@ async fn run_job_inner(
             interrupt_worker_failure(&state, &job_id).await;
             return;
         }
-    }
-    let run_deadline =
-        tokio::time::Instant::now() + std::time::Duration::from_millis(RUN_DEADLINE_MS as u64);
+    };
+    // One monotonic budget covers reload, credential access, transport and
+    // result preparation. It starts when the worker owns the execution slot.
+    let run_deadline = execution_deadline(execution_started, accepted.run_deadline_ms);
     // 重取：running 的 CAS 已把 revision 推进，后续终态 CAS 必须用新值。
     let loaded = match tokio::time::timeout_at(
         run_deadline,
@@ -1403,14 +1432,6 @@ async fn run_job_inner(
         state.ai_runtime.inputs.lock().await.remove(&job_id);
         return;
     }
-    // 运行期限按 capability 注册项：上面的重载仍用原 deadline，调用段从这里
-    // 重新起算。
-    let run_deadline = tokio::time::Instant::now()
-        + std::time::Duration::from_millis(
-            generation_capability(&job.capability)
-                .map(|capability| capability.run_deadline_ms)
-                .unwrap_or(RUN_DEADLINE_MS) as u64,
-        );
     publish_task(&state);
     let pricing: PricingSnapshot =
         match serde_json::from_str::<PricingSnapshot>(&job.pricing_snapshot) {
@@ -1867,6 +1888,10 @@ async fn settle_terminal_after_commit(
             "AI task result was committed; usage settlement exceeded its cleanup deadline"
         ),
     }
+}
+
+fn execution_deadline(started: tokio::time::Instant, run_ms: i64) -> tokio::time::Instant {
+    started + std::time::Duration::from_millis(run_ms as u64)
 }
 
 /// Claim a queued worker without allowing a late slot wakeup to bypass its deadline.
@@ -2417,8 +2442,6 @@ pub(super) async fn sweep(state: &Arc<AppState>) -> ApiResult<()> {
     }
     super::wallpaper_artifacts::cleanup(state).await?;
     let now = now_ms();
-    let queue_cutoff = now - QUEUE_DEADLINE_MS;
-    let run_cutoff = now - RUN_DEADLINE_MS;
     let candidates = store::recovery_candidates(&state.db)
         .await
         .map_err(store_error)?;
@@ -2436,8 +2459,8 @@ pub(super) async fn sweep(state: &Arc<AppState>) -> ApiResult<()> {
                 return Ok(None);
             };
             let is_expired = match job.state.as_str() {
-                "accepted" => job.created_at < queue_cutoff,
-                "running" => job.updated_at < run_cutoff,
+                "accepted" => job.created_at < now.saturating_sub(job.queue_deadline_ms),
+                "running" => job.updated_at < now.saturating_sub(job.run_deadline_ms),
                 _ => return Ok(None),
             };
             // Submission commits the row and inserts the owner while holding

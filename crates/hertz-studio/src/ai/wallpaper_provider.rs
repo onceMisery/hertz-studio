@@ -120,6 +120,7 @@ pub(super) fn quote(
         output_micro_usd_per_million: 0,
         max_input_tokens: REQUEST_BYTES as u64,
         max_output_tokens: OUTPUT_TOKENS,
+        metering: None,
     })
 }
 

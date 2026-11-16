@@ -13,6 +13,8 @@ async function main(){
   await fixture.api('/v1/ai/status');
   const date=new Date();date.setUTCDate(1);date.setUTCMonth(date.getUTCMonth()-1);
   const month=date.toISOString().slice(0,7);
+  date.setUTCMonth(date.getUTCMonth()-1);
+  const imageMonth=date.toISOString().slice(0,7);
   execFileSync(process.env.PYTHON || 'python',['-c',`
 import sqlite3,sys,json,time,datetime
 db=sqlite3.connect(sys.argv[1]); month=sys.argv[2]; now=int(time.time()*1000)
@@ -33,8 +35,15 @@ db.execute('INSERT INTO ai_usage_entries (job_id,accepted_month,reservation_micr
  ('unpriced-interrupted',month,0,0,'unpriced',token_snapshot,2,now,owner,'official-stage-draft','interrupted',accepted+102))
 db.execute('INSERT INTO ai_budget_months (month,charged_micro_usd,reserved_micro_usd,revision) VALUES (?,?,0,2)',(month,9007199254740993+22*137+50000))
 db.execute("UPDATE ai_budget_guard SET halted=1,reason='历史费用超过预留',trigger_job='legacy-orphan',revision=revision+1")
+image_month=sys.argv[3]
+sku=dict(width=1024,height=1024,qualityId='fixture-quality')
+dimensions=[dict(dimension='inputTokens',quantityLimit=7,unitPriceMicroUsd=1,unitScale=1000000),dict(dimension='outputTokens',quantityLimit=11,unitPriceMicroUsd=2,unitScale=1000000),dict(dimension='imageOutput',quantityLimit=1,unitPriceMicroUsd=200000,unitScale=1,imageSku=sku)]
+image_snapshot=json.dumps(dict(provider='image-fixture',model='fixture-image',pricingVersion='metered-v2',reservationMicroUsd=200002,dimensions=dimensions))
+image_usage=json.dumps(dict(usageVersion='metered-v2',dimensions=[dict(dimension='inputTokens',quantity=7),dict(dimension='outputTokens',quantity=11),dict(dimension='imageOutput',quantity=1,imageSku=sku)]))
+db.execute('INSERT INTO ai_usage_entries (job_id,accepted_month,reservation_micro_usd,accounted_micro_usd,usage_state,pricing_snapshot,revision,created_at,owner_instance_id,principal,task_state,accepted_at,reported_usage) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',('image-bill',image_month,200002,200002,'reported',image_snapshot,2,now,owner,'local-owner','cancelled',accepted,image_usage))
+db.execute('INSERT INTO ai_budget_months (month,charged_micro_usd,reserved_micro_usd,revision) VALUES (?,?,0,2)',(image_month,200002))
 db.commit();db.close()
-`,path.join(fixture.dataDir,'vmusic.db'),month],{stdio:'pipe'});
+`,path.join(fixture.dataDir,'vmusic.db'),month,imageMonth],{stdio:'pipe'});
   const browser=await chromium.launch({channel:process.env.PLAYWRIGHT_CHANNEL || 'chrome',headless:true});
   const context=await browser.newContext({viewport:{width:1440,height:960}});await fixture.connect(context);
   const page=await context.newPage(),errors=[],requests=[];
@@ -64,7 +73,8 @@ db.commit();db.close()
     assert.equal(unpricedApi.entries.find(entry=>entry.jobId==='unpriced-interrupted').reportedUsage,null);
 
     await page.goto(uiUrl(fixture.base),{waitUntil:'domcontentloaded'});
-    await page.evaluate(()=>{Workshop.open();Workshop.setTab('ledger');});
+    await page.waitForSelector('#workshop .ws-targets',{state:'attached'});
+    assert.equal(await page.evaluate(()=>{const opened=Workshop.open();Workshop.setTab('ledger');return opened;}),true);
     await page.getByRole('combobox',{name:'已有账本月份',exact:true}).selectOption(month);
     await page.waitForFunction(()=>document.querySelectorAll('.ws-ledger-entry').length===20);
     const legacy=page.locator('.ws-ledger-entry[data-job-id="legacy-orphan"]');
@@ -76,7 +86,8 @@ db.commit();db.close()
     assert.ok(!(await legacy.locator('pre').innerText()).includes('DO-NOT-RETURN'));
     const budgetText=await page.locator('.ws-ledger-budget').innerText();
     await page.getByRole('button',{name:'下一页账本',exact:true}).click();
-    await page.waitForFunction(()=>document.querySelectorAll('.ws-ledger-entry').length===5);
+    await page.waitForFunction(expected=>document.querySelectorAll('.ws-ledger-entry').length===expected,next.entries.length);
+    assert.deepEqual((await page.locator('.ws-ledger-entry').evaluateAll(nodes=>nodes.map(node=>node.dataset.jobId))).sort(),next.entries.map(entry=>entry.jobId).sort());
     assert.equal(await page.getByRole('button',{name:'下一页账本',exact:true}).isDisabled(),true);
     await page.getByRole('button',{name:'上一页账本',exact:true}).click();
     await page.waitForFunction(()=>document.querySelectorAll('.ws-ledger-entry').length===20);
@@ -108,6 +119,26 @@ db.commit();db.close()
       await page.screenshot({path:path.join(output,'ledger-'+width+'.png')});
       assert.equal(await page.locator('.ws-body').evaluate(el=>el.scrollWidth>el.clientWidth+1),false,'ledger does not overflow at '+width);
     }
+    await page.getByRole('combobox',{name:'已有账本月份',exact:true}).selectOption(imageMonth);
+    await page.waitForFunction(()=>document.querySelectorAll('.ws-ledger-entry').length===1);
+    const image=page.locator('.ws-ledger-entry[data-job-id="image-bill"]');
+    const imageText=await image.innerText();
+    assert.match(imageText,/\$0\.200002 USD/);
+    assert.match(imageText,/图像 1 张 · 1024 × 1024 · fixture-quality/);
+    assert.match(imageText,/输入 7 tokens/);
+    assert.match(imageText,/输出 11 tokens/);
+    assert.doesNotMatch(imageText,/undefined|输入 0 tokens|输出 0 tokens/);
+    await image.locator('summary').click();
+    const imageDiagnostic=JSON.parse(await image.locator('pre').innerText());
+    assert.equal(imageDiagnostic.pricing.dimensions.length,3);
+    assert.equal(imageDiagnostic.reportedUsage.dimensions[2].quantity,'1');
+    for(const width of [1440,390,320]){
+      await page.setViewportSize({width,height:960});
+      await page.screenshot({path:path.join(output,'image-ledger-'+width+'.png')});
+      assert.equal(await page.locator('.ws-body').evaluate(el=>el.scrollWidth>el.clientWidth+1),false,'image ledger does not overflow at '+width);
+    }
+    await page.getByRole('combobox',{name:'已有账本月份',exact:true}).selectOption(month);
+    await page.waitForFunction(()=>document.querySelectorAll('.ws-ledger-entry').length===20);
     // A month/scope change wins over an older in-flight read.
     let release,started;
     const began=new Promise(resolve=>{started=resolve;});
@@ -129,7 +160,12 @@ db.commit();db.close()
     assert.equal(requests.length,stopped,'ledger has no background polling after close');
     assert.equal(requests.filter(request=>request.method!=='GET').length,0,'browsing never mutates fees or submits jobs');
     assert.deepEqual(errors,[]);
-    console.log('AI ledger: historical/purged facts, manager authorization, exact amounts, token-only unknown pricing, stable pages, filters, diagnostics/redaction, stale-read isolation, responsive layout and no model calls/polling passed');
+    console.log('AI ledger: historical/purged facts, manager authorization, exact amounts, token-only unknown pricing, image dimensions/SKU, stable pages, filters, diagnostics/redaction, stale-read isolation, responsive layout and no model calls/polling passed');
+  }catch(error){
+    await page.screenshot({path:path.join(output,'failure.png')});
+    fs.writeFileSync(path.join(output,'failure.html'),await page.content());
+    fs.writeFileSync(path.join(output,'failure-errors.json'),JSON.stringify(errors,null,2));
+    throw error;
   }finally{await browser.close();await fixture.close();}
 }
 main().catch(error=>{console.error(error);process.exitCode=1;});
