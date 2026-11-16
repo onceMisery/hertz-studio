@@ -29,6 +29,25 @@ pub struct AiConfig {
     pub provider: String,
     pub origin: String,
     pub model: String,
+    pub image: ImageConfig,
+}
+
+/// Image capability is selected separately from the text provider. A stored
+/// text credential cannot qualify an image model or its price/response contract.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ImageConfig {
+    pub provider: String,
+    pub model: String,
+}
+
+impl Default for ImageConfig {
+    fn default() -> Self {
+        Self {
+            provider: "disabled".into(),
+            model: String::new(),
+        }
+    }
 }
 
 impl Default for AiConfig {
@@ -37,6 +56,7 @@ impl Default for AiConfig {
             provider: "fake".into(),
             origin: "http://127.0.0.1:11434".into(),
             model: String::new(),
+            image: ImageConfig::default(),
         }
     }
 }

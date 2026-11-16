@@ -97,6 +97,12 @@ pub(crate) struct OutputCapability {
     pub provider: String,
     pub model: String,
     pub ready: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sizes: Option<Vec<[u32; 2]>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quality_ids: Option<Vec<&'static str>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -112,12 +118,34 @@ pub(crate) struct CapabilitySnapshot {
 /// 输出）∩ 已就绪 adapter。snapshotId 对内容字节求哈希，同内容同 id。
 pub(crate) async fn capability_snapshot(state: &AppState) -> CapabilitySnapshot {
     let provider = state.ai_runtime.provider().await;
-    let outputs = vec![OutputCapability {
-        kind: "builtin",
-        provider: provider.id().to_string(),
-        model: provider.model().to_string(),
-        ready: provider.ready() && provider.supports_wallpaper_builtin(),
-    }];
+    let image = state.ai_runtime.image_provider();
+    let outputs = vec![
+        OutputCapability {
+            kind: "builtin",
+            provider: provider.id().to_string(),
+            model: provider.model().to_string(),
+            ready: provider.ready() && provider.supports_wallpaper_builtin(),
+            diagnostic: None,
+            sizes: None,
+            quality_ids: None,
+        },
+        OutputCapability {
+            kind: "image",
+            provider: image.id().into(),
+            model: image.model().into(),
+            ready: image.ready(),
+            diagnostic: image.diagnostic(),
+            sizes: image.ready().then(|| {
+                super::image_provider::FIXTURE_SIZES
+                    .iter()
+                    .map(|&(w, h)| [w, h])
+                    .collect()
+            }),
+            quality_ids: image
+                .ready()
+                .then(|| vec![super::image_provider::FIXTURE_QUALITY]),
+        },
+    ];
     let registry_hash = hertz_wallpaper::catalog().registry_hash.clone();
     let schema_hash = generation_schema_hash();
     let content = serde_json::json!({

@@ -525,6 +525,7 @@ mod tests {
                 provider: provider.into(),
                 origin: origin.into(),
                 model: "step-5-preview".into(),
+                ..Default::default()
             }),
             ..Service::new(backend.clone())
         };
@@ -616,6 +617,7 @@ mod tests {
                 provider: "stepfun".into(),
                 origin: "https://api.stepfun.com:9443/v1".into(),
                 model: "step-5-preview".into(),
+                ..Default::default()
             }),
             ..Service::new(Arc::new(MemoryStore::default()))
         };
@@ -646,6 +648,7 @@ mod tests {
             provider: "stepfun".into(),
             origin: "https://api.stepfun.com/step_plan/v1".into(),
             model: "step-5-preview".into(),
+            ..Default::default()
         });
         assert!(Arc::ptr_eq(&openai.slots, &stepfun.slots));
         assert!(Arc::ptr_eq(&openai.lifecycle, &stepfun.lifecycle));

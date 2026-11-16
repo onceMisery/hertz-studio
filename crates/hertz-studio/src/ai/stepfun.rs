@@ -823,6 +823,7 @@ mod tests {
             provider: "stepfun".into(),
             origin: "https://api.stepfun.com/step_plan/v1".into(),
             model: MODEL.into(),
+            ..Default::default()
         };
         state.ai_runtime = jobs::AiRuntime::from_config(&config);
         let configured_provider = state.ai_runtime.provider().await;

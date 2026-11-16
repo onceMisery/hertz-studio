@@ -1736,6 +1736,7 @@ mod tests {
             provider: "stepfun".into(),
             origin: "https://api.stepfun.com/step_plan/v1".into(),
             model: "step-5-preview".into(),
+            ..Default::default()
         };
         let credentials = crate::ai::credential::Service::isolated_for_config(&config);
         state.ai_runtime.credentials = credentials.clone();

@@ -26,7 +26,7 @@ vmusic-audio = { workspace = true }
 vmusic-lan = { workspace = true }
 zeroize = "1"
 vmusic-store = { workspace = true }
-hertz-wallpaper = { path = "../hertz-wallpaper" }
+hertz-wallpaper = { path = "../hertz-wallpaper", features = ["image-prepare"] }
 image = { version = "=0.25.10", default-features = false, features = ["jpeg", "png", "webp"] }
 moxcms = "=0.8.1"
 png = "0.18.1"

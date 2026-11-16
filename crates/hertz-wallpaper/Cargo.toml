@@ -11,6 +11,9 @@ authors.workspace = true
 description = "Hertz wallpaper package contract: HWPK v1 manifest, archive validation and registry catalog"
 
 [dependencies]
+image = { version = "=0.25.10", optional = true, default-features = false, features = ["jpeg", "png", "webp"] }
+moxcms = { version = "=0.8.1", optional = true }
+png = { version = "0.18.1", optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -20,3 +23,6 @@ zip = { workspace = true }
 
 [dev-dependencies]
 base64 = { workspace = true }
+
+[features]
+image-prepare = ["dep:image", "dep:moxcms", "dep:png"]

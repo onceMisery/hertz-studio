@@ -1876,6 +1876,9 @@ name = "hertz-wallpaper"
 version = "0.3.4"
 dependencies = [
  "base64 0.22.1",
+ "image",
+ "moxcms",
+ "png",
  "serde",
  "serde_json",
  "sha2",

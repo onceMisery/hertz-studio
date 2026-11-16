@@ -42,7 +42,77 @@ pub(super) struct Prepared {
     artifact_id: String,
     bytes: i64,
     sha256: String,
-    _pin: WritePin,
+    _pin: Arc<WritePin>,
+}
+pub(super) struct ImageWorkspace {
+    pub(super) directory: PathBuf,
+    pin: Arc<WritePin>,
+    #[cfg(test)]
+    isolated: bool,
+}
+#[cfg(test)]
+impl ImageWorkspace {
+    pub(super) fn isolated() -> std::io::Result<Arc<Self>> {
+        let directory =
+            std::env::temp_dir().join(format!("hertz-test-image-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory)?;
+        Ok(Arc::new(Self {
+            directory,
+            pin: Arc::new(WritePin {
+                runtime: Arc::new(Runtime::default()),
+                artifact_id: uuid::Uuid::new_v4().to_string(),
+            }),
+            isolated: true,
+        }))
+    }
+}
+#[cfg(test)]
+impl Drop for ImageWorkspace {
+    fn drop(&mut self) {
+        if self.isolated {
+            let _ = std::fs::remove_dir(&self.directory);
+        }
+    }
+}
+pub(super) async fn image_workspace(
+    state: &Arc<AppState>,
+    job_id: &str,
+    deadline: tokio::time::Instant,
+) -> ApiResult<Arc<ImageWorkspace>> {
+    let runtime = state.ai_runtime.wallpaper_artifacts.clone();
+    let gate = tokio::time::timeout_at(deadline, runtime.gate.lock())
+        .await
+        .map_err(|_| failure("image_timeout", "图像执行期限已到"))?;
+    let id:Option<String>=tokio::time::timeout_at(deadline,sqlx::query_scalar("SELECT artifact_id FROM ai_wallpaper_artifacts WHERE job_id=? AND state='writing' AND kind='image'")
+        .bind(job_id).fetch_optional(&state.db)).await.map_err(|_|failure("image_timeout","图像执行期限已到"))?.map_err(sql)?;
+    let id = id.ok_or_else(|| failure("artifact_unavailable", "图像预留已失效"))?;
+    if !runtime
+        .writers
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(id.clone())
+    {
+        return Err(failure("artifact_busy", "图像文件正在写入"));
+    }
+    let pin = Arc::new(WritePin {
+        runtime: runtime.clone(),
+        artifact_id: id.clone(),
+    });
+    let directory = directory(&root(state)?, &id)?;
+    drop(gate);
+    tokio::task::spawn_blocking(move || {
+        let workspace = ImageWorkspace {
+            directory,
+            pin,
+            #[cfg(test)]
+            isolated: false,
+        };
+        std::fs::create_dir_all(&workspace.directory)
+            .map_err(|_| failure("artifact_io", "无法建立图像暂存目录"))?;
+        Ok(Arc::new(workspace))
+    })
+    .await
+    .map_err(|_| internal("图像暂存目录未完成"))?
 }
 fn sql(error: sqlx::Error) -> ApiError {
     ApiError::from(vmusic_core::CoreError::Store(
@@ -101,7 +171,17 @@ pub(super) async fn reserve(
          FROM ai_wallpaper_artifacts a JOIN ai_jobs j ON j.job_id=a.job_id
          WHERE j.owner_instance_id=? AND a.state!='deleted'"
     ).bind(&job.owner_instance_id).fetch_one(&mut *conn).await.map_err(sql)?;
-    let bound = MAX_OUTPUT_BYTES as i64;
+    let (bound, kind, mime) = match request.output.kind {
+        hertz_wallpaper::generation::WallpaperGenerationKind::Builtin => {
+            (MAX_OUTPUT_BYTES as i64, "builtin", "application/json")
+        }
+        hertz_wallpaper::generation::WallpaperGenerationKind::Image => (
+            hertz_wallpaper::generation::MAX_ARTIFACT_BYTES as i64,
+            "image",
+            "image/png",
+        ),
+        _ => return Err(failure("provider_unavailable", "组合生成尚未就绪")),
+    };
     if count >= MAX_RESULTS || reserved.saturating_add(bound) > MAX_BYTES {
         return Err(failure(
             "artifact_capacity_exceeded",
@@ -119,15 +199,25 @@ pub(super) async fn reserve(
                 "无法检查生成结果目录的剩余空间",
             )
         })?;
-    if free < pending.saturating_add(bound).saturating_add(64 * 1024) as u64 {
+    let temporary_headroom = if kind == "image" {
+        96 * 1024 * 1024
+    } else {
+        64 * 1024
+    };
+    if free
+        < pending
+            .saturating_add(bound)
+            .saturating_add(temporary_headroom) as u64
+    {
         return Err(failure(
             "artifact_disk_full",
             "磁盘剩余空间不足，未提交生成任务",
         ));
     }
     sqlx::query("INSERT INTO ai_wallpaper_artifacts(artifact_id,job_id,access_principal,state,reserved_bytes,kind,mime,registry_hash,generation_schema_hash,created_at,expires_at)
-        VALUES(?,?,?,'writing',?,'builtin','application/json',?,?,?,?)")
+        VALUES(?,?,?,'writing',?,?,?,?,?,?,?)")
         .bind(uuid::Uuid::new_v4().to_string()).bind(&job.job_id).bind(&job.principal).bind(bound)
+        .bind(kind).bind(mime)
         .bind(&request.registry_hash).bind(&request.generation_schema_hash)
         .bind(job.created_at).bind(job.created_at.saturating_add(RETENTION_MS))
         .execute(&mut *conn).await.map_err(sql)?;
@@ -158,10 +248,10 @@ pub(super) async fn prepare(
     {
         return Err(failure("artifact_busy", "生成结果正在写入"));
     }
-    let pin = WritePin {
+    let pin = Arc::new(WritePin {
         runtime,
         artifact_id: id.clone(),
-    };
+    });
     let destination = directory(&root(state)?, &id)?;
     drop(gate);
     tokio::task::spawn_blocking(move || {
@@ -194,6 +284,77 @@ pub(super) async fn prepare(
     })
     .await
     .map_err(|_| internal("生成结果写入任务未完成"))?
+}
+
+/// The original execution slot owns this preparation. Cancellation/timeout
+/// signals the blocking owner and awaits its exit before returning that slot.
+pub(super) async fn prepare_image(
+    state: &Arc<AppState>,
+    job_id: &str,
+    input: super::image_provider::ImageFile,
+    request: &WallpaperGenerateRequest,
+    deadline: tokio::time::Instant,
+    mut cancellation: super::jobs::ProviderCancellation,
+) -> ApiResult<Prepared> {
+    let gate = tokio::time::timeout_at(deadline, state.ai_runtime.wallpaper_artifacts.gate.lock())
+        .await
+        .map_err(|_| failure("image_timeout", "图像准备期限已到"))?;
+    let row:Option<(String,i64,String)>=tokio::time::timeout_at(deadline,sqlx::query_as("SELECT artifact_id,reserved_bytes,kind FROM ai_wallpaper_artifacts WHERE job_id=? AND state='writing'")
+        .bind(job_id).fetch_optional(&state.db)).await.map_err(|_|failure("image_timeout","图像准备期限已到"))?.map_err(sql)?;
+    let (id, bound, kind) =
+        row.ok_or_else(|| failure("artifact_unavailable", "生成结果预留已失效"))?;
+    if kind != "image"
+        || bound != hertz_wallpaper::generation::MAX_ARTIFACT_BYTES as i64
+        || cancellation.is_cancelled()
+        || tokio::time::Instant::now() >= deadline
+    {
+        return Err(failure("artifact_unavailable", "图像准备资格已失效"));
+    }
+    let destination = directory(&root(state)?, &id)?;
+    if input.workspace.directory != destination {
+        return Err(failure("artifact_unavailable", "图像暂存身份不符"));
+    }
+    let pin = input.workspace.pin.clone();
+    let expected = (
+        request
+            .output
+            .width
+            .ok_or_else(|| failure("invalid_input", "图像缺少宽度"))?,
+        request
+            .output
+            .height
+            .ok_or_else(|| failure("invalid_input", "图像缺少高度"))?,
+    );
+    drop(gate);
+    let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let task_cancel = cancel.clone();
+    let mut task = tokio::task::spawn_blocking(move || {
+        let _pin = pin;
+        let _input = input;
+        std::fs::create_dir_all(&destination)
+            .map_err(|_| failure("artifact_io", "无法建立结果目录"))?;
+        let temporary = destination.join("payload.part");
+        let output =
+            super::image_prepare::prepare(&_input.path(), &temporary, expected, &task_cancel)
+                .map_err(|e| failure(e.code, &e.message))?;
+        if output.bytes > bound as u64 || task_cancel.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(failure("image_cancelled", "图像准备已取消"));
+        }
+        std::fs::rename(temporary, destination.join("payload"))
+            .map_err(|_| failure("artifact_io", "图像文件发布未完成"))?;
+        Ok(Prepared {
+            artifact_id: id,
+            bytes: output.bytes as i64,
+            sha256: output.sha256,
+            _pin,
+        })
+    });
+    let result = tokio::select! {
+        result=&mut task=>result,
+        _=cancellation.cancelled()=> { cancel.store(true,std::sync::atomic::Ordering::Release); task.await },
+        _=tokio::time::sleep_until(deadline)=> { cancel.store(true,std::sync::atomic::Ordering::Release); task.await },
+    };
+    result.map_err(|_| internal("图像准备任务未完成"))?
 }
 
 pub(super) async fn make_available(
@@ -268,7 +429,13 @@ pub(super) async fn cleanup(state: &Arc<AppState>) -> ApiResult<()> {
         }
         let directory = directory(&root(state)?, &id)?;
         let removed = tokio::task::spawn_blocking(move || {
-            for name in ["payload", "payload.part"] {
+            for name in [
+                "payload",
+                "payload.part",
+                "source.part",
+                "wire.part",
+                "image.part",
+            ] {
                 match std::fs::remove_file(directory.join(name)) {
                     Ok(()) => {}
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -694,6 +861,13 @@ mod tests {
         let db = vmusic_store::open(&dir).await.unwrap();
         let (mut state, audio) = crate::state::tests::playback_state_with_db(db).await;
         state.data_dir = dir;
+        state.ai_runtime = jobs::AiRuntime::from_config(&crate::config::AiConfig {
+            image: crate::config::ImageConfig {
+                provider: "fake".into(),
+                model: "fixture-image-v1".into(),
+            },
+            ..Default::default()
+        });
         state
             .ai_runner_held
             .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -734,6 +908,140 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
         panic!("fixture task did not terminate");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn image_sources_use_the_original_recovery_record_and_actual_writer_pin() {
+        let (state, audio) = fixture().await;
+        let jobs::SubmitOutcome::Accepted { job: accepted } = submit(&state, 0).await.unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(terminal(&state, &accepted.job_id).await.state, "succeeded");
+        while state.ai_runtime.has_input(&accepted.job_id).await {
+            tokio::task::yield_now().await;
+        }
+        // Simulate the fixed source files left by a crashed image execution.
+        sqlx::query("UPDATE ai_wallpaper_artifacts SET kind='image',mime='image/png',state='writing',reserved_bytes=33554432 WHERE job_id=?")
+            .bind(&accepted.job_id).execute(&state.db).await.unwrap();
+        let workspace = image_workspace(
+            &state,
+            &accepted.job_id,
+            tokio::time::Instant::now() + std::time::Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+        for name in ["source.part", "wire.part", "image.part"] {
+            std::fs::write(workspace.directory.join(name), b"orphaned source").unwrap();
+        }
+        sqlx::query(
+            "UPDATE ai_jobs SET state='interrupted',state_revision=state_revision+1 WHERE job_id=?",
+        )
+        .bind(&accepted.job_id)
+        .execute(&state.db)
+        .await
+        .unwrap();
+        cleanup(&state).await.unwrap();
+        assert!(
+            workspace.directory.join("source.part").is_file(),
+            "actual I/O pin protects cancellation cleanup"
+        );
+        let path = workspace.directory.clone();
+        drop(workspace);
+        cleanup(&state).await.unwrap();
+        assert!(!path.exists());
+        let capacity: i64 =
+            sqlx::query_scalar("SELECT reserved_bytes FROM ai_wallpaper_artifacts WHERE job_id=?")
+                .bind(&accepted.job_id)
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+        assert_eq!(capacity, 0);
+        state.audio.shutdown();
+        audio.join().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn image_workspace_deadline_covers_database_pool_wait_before_any_file_creation() {
+        let (state, audio) = fixture().await;
+        let mut held = Vec::new();
+        for _ in 0..state.db.options().get_max_connections() {
+            held.push(state.db.acquire().await.unwrap());
+        }
+        let result = image_workspace(
+            &state,
+            "no-job",
+            tokio::time::Instant::now() + std::time::Duration::from_millis(20),
+        )
+        .await;
+        assert_eq!(result.err().unwrap().code, "image_timeout");
+        assert!(!root(&state).unwrap().exists());
+        drop(held);
+        state.audio.shutdown();
+        audio.join().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn image_uses_original_job_and_artifact_transaction_and_full_free_vector() {
+        let (state, audio) = fixture().await;
+        let snapshot = wallpaper_jobs::capability_snapshot(&state).await;
+        let body = json!({"version":1,"requestId":"image-fixture","brief":"离线图片",
+            "output":{"kind":"image","width":1024,"height":1024,"qualityId":"fixture"},
+            "registryHash":snapshot.registry_hash,"generationSchemaHash":snapshot.generation_schema_hash,"capabilitySnapshotId":snapshot.snapshot_id});
+        let principal = crate::idempotency::LOCAL_OWNER;
+        let quote = jobs::wallpaper_quote(&state, principal, &serde_json::to_vec(&body).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(quote["pricingMode"], "free");
+        assert_eq!(quote["executionSeconds"], 180);
+        assert_eq!(quote["dimensions"][2]["dimension"], "imageOutput");
+        let key = format!(
+            "v1.{}.{}",
+            vmusic_store::now_ms(),
+            uuid::Uuid::new_v4().simple()
+        );
+        let jobs::SubmitOutcome::Accepted { job: accepted } = jobs::wallpaper_submit(
+            &state,
+            principal,
+            quote["quoteId"].as_str().unwrap(),
+            "image-fixture",
+            Some(&key),
+        )
+        .await
+        .unwrap() else {
+            panic!()
+        };
+        let row = terminal(&state, &accepted.job_id).await;
+        assert_eq!(row.state, "succeeded");
+        assert_eq!(row.run_deadline_ms, 180_000);
+        assert_eq!(row.reservation_limit_micro_usd, 500_000);
+        let artifact = job(&state, principal, &accepted.job_id).await.unwrap();
+        assert_eq!(artifact["artifact"]["kind"], "image");
+        assert_eq!(artifact["artifact"]["mime"], "image/png");
+        let id = artifact["artifact"]["artifactId"].as_str().unwrap();
+        let path = root(&state).unwrap().join(id).join("payload");
+        let probe =
+            hertz_wallpaper::media::probe(&mut std::fs::File::open(&path).unwrap()).unwrap();
+        assert_eq!((probe.encoded_width, probe.encoded_height), (1024, 1024));
+        let (bytes, hash) = hertz_wallpaper::image_prepare::hash(&path).unwrap();
+        assert_eq!(artifact["artifact"]["bytes"], bytes);
+        assert_eq!(artifact["artifact"]["sha256"], hash);
+        let usage = loop {
+            if let Some(usage) =
+                vmusic_store::ai_jobs::find_usage_entry(&state.db, &accepted.job_id)
+                    .await
+                    .unwrap()
+            {
+                break usage;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        };
+        assert_eq!(usage.accounted_micro_usd, 0);
+        let reported: super::super::usage::TrustedUsage =
+            serde_json::from_str(usage.reported_usage.as_deref().unwrap()).unwrap();
+        assert!(reported.metering.is_some());
+        state.audio.shutdown();
+        audio.join().unwrap();
     }
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn result_quota_is_reserved_before_a_ninth_provider_call_and_expiry_releases_it() {

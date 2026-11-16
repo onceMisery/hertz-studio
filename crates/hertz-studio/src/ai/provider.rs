@@ -1213,6 +1213,7 @@ mod tests {
             provider: "ollama".into(),
             origin: "https://example.com".into(),
             model: "test-local".into(),
+            ..Default::default()
         });
         assert!(!provider.ready());
         assert_eq!(provider.id(), "unavailable");

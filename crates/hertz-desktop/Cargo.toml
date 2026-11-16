@@ -71,7 +71,7 @@ rustfft = { workspace = true }
 num-complex = { workspace = true }
 
 hertz-desktop-ipc = { path = "../hertz-desktop-ipc" }
-hertz-wallpaper = { path = "../hertz-wallpaper" }
+hertz-wallpaper = { path = "../hertz-wallpaper", features = ["image-prepare"] }
 hertz-sqlite-lifecycle = { path = "../hertz-sqlite-lifecycle" }
 sha2 = { workspace = true }
 thiserror = { workspace = true }

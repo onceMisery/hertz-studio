@@ -12,6 +12,8 @@ pub mod archive;
 pub mod catalog;
 pub mod document;
 pub mod generation;
+#[cfg(feature = "image-prepare")]
+pub mod image_prepare;
 pub mod json;
 pub mod ktx2_upload;
 pub mod manifest;

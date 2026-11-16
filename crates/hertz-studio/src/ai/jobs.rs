@@ -243,16 +243,16 @@ impl GenerationInput {
         }
     }
 
-    fn is_image(&self) -> bool {
+    pub(super) fn is_image(&self) -> bool {
         matches!(self, Self::Wallpaper(request) if request.output.kind == hertz_wallpaper::generation::WallpaperGenerationKind::Image)
     }
 
     /// 按任务类型核价，壁纸使用完整请求及其独立输出预算。
-    fn price_quote(&self, provider: &dyn StageIntentProvider) -> Result<PriceQuote, String> {
-        match self {
-            GenerationInput::Stage(brief) => provider.quote(brief),
-            GenerationInput::Wallpaper(request) => provider.quote_wallpaper_builtin(request),
-        }
+    fn price_quote(
+        &self,
+        provider: &super::generation_provider::Provider,
+    ) -> Result<PriceQuote, String> {
+        provider.quote(self)
     }
 
     /// 幂等输入指纹：舞台是 brief 字节，壁纸是规范化请求字节。
@@ -404,6 +404,7 @@ pub(crate) struct AiRuntime {
     /// path without becoming durable jobs or retaining briefs.
     evaluations: Mutex<HashMap<String, RegisteredEvaluation>>,
     provider: RwLock<Arc<dyn StageIntentProvider>>,
+    image_provider: Arc<dyn super::image_provider::ImageProvider>,
     /// 模型执行槽（§8.3）：每 DataDir 1 个受管执行——worker 先拿槽再
     /// accepted→running，等满 8 个停在 accepted。清理中的调用仍占槽。
     execution_slots: Arc<tokio::sync::Semaphore>,
@@ -441,6 +442,7 @@ impl AiRuntime {
             inputs: Mutex::new(HashMap::new()),
             evaluations: Mutex::new(HashMap::new()),
             provider: RwLock::new(super::provider::configured(config)),
+            image_provider: super::image_provider::configured(&config.image),
             execution_slots: Arc::new(tokio::sync::Semaphore::new(1)),
             wallpaper_quotes: Mutex::new(super::wallpaper_jobs::QuoteStore::default()),
             wallpaper_pairings: Mutex::new(super::wallpaper_pairing::PendingStore::default()),
@@ -451,6 +453,21 @@ impl AiRuntime {
 
     pub(crate) async fn provider(&self) -> Arc<dyn StageIntentProvider> {
         self.provider.read().await.clone()
+    }
+
+    pub(super) fn image_provider(&self) -> Arc<dyn super::image_provider::ImageProvider> {
+        self.image_provider.clone()
+    }
+
+    async fn generation_provider(
+        &self,
+        input: &GenerationInput,
+    ) -> super::generation_provider::Provider {
+        if input.is_image() {
+            super::generation_provider::Provider::Image(self.image_provider())
+        } else {
+            super::generation_provider::Provider::Text(self.provider().await)
+        }
     }
 
     pub(crate) fn completion_slots(&self) -> Arc<tokio::sync::Semaphore> {
@@ -1100,7 +1117,7 @@ async fn submit_owned(
     }
     // 实例身份先行（会创建 ai_instance 行），水位检查才有落点。
     let owner = instance_owner(state).await?;
-    let provider = state.ai_runtime.provider().await;
+    let provider = state.ai_runtime.generation_provider(&input).await;
     if !provider.ready() {
         return Err(ApiError::new(
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
@@ -1109,7 +1126,7 @@ async fn submit_owned(
         ));
     }
 
-    let quote = input.price_quote(provider.as_ref()).map_err(|reason| {
+    let quote = input.price_quote(&provider).map_err(|reason| {
         ApiError::new(
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
             "pricing_unavailable",
@@ -1331,7 +1348,7 @@ async fn run_job(
     job_id: String,
     queue_deadline: tokio::time::Instant,
     cancelled: tokio::sync::watch::Receiver<()>,
-    provider: Arc<dyn StageIntentProvider>,
+    provider: super::generation_provider::Provider,
 ) {
     let result = std::panic::AssertUnwindSafe(run_job_inner(
         state.clone(),
@@ -1359,7 +1376,7 @@ async fn run_job_inner(
     job_id: String,
     queue_deadline: tokio::time::Instant,
     mut cancelled: tokio::sync::watch::Receiver<()>,
-    provider: Arc<dyn StageIntentProvider>,
+    provider: super::generation_provider::Provider,
 ) {
     // 运行槽：§7.1 状态图里 accepted→running 的条件就是「worker 获得运行槽」。
     // 取消/过期在槽外赢走终态时，这里拿槽后 CAS 失败即安静退出。
@@ -1590,10 +1607,16 @@ async fn run_job_inner(
     enum ProviderCall {
         Stage(ProviderReply),
         Wallpaper(WallpaperReply),
+        Image(super::image_provider::Reply),
     }
-    let call: std::pin::Pin<Box<dyn std::future::Future<Output = ProviderCall> + Send>> =
-        match (&input, job.capability.as_str()) {
-            (GenerationInput::Stage(brief), CAPABILITY) => {
+    let mut call: std::pin::Pin<Box<dyn std::future::Future<Output = ProviderCall> + Send>> =
+        match (&input, job.capability.as_str(), &provider) {
+            (
+                GenerationInput::Stage(brief),
+                CAPABILITY,
+                super::generation_provider::Provider::Text(provider),
+            ) => {
+                let provider = provider.clone();
                 let brief = brief.clone();
                 let cancelled = cancelled.clone();
                 Box::pin(async move {
@@ -1609,7 +1632,51 @@ async fn run_job_inner(
                     )
                 })
             }
-            (GenerationInput::Wallpaper(request), WALLPAPER_CAPABILITY) => {
+            (
+                GenerationInput::Wallpaper(request),
+                WALLPAPER_CAPABILITY,
+                super::generation_provider::Provider::Image(provider),
+            ) => {
+                let provider = provider.clone();
+                let mut request = super::image_provider::Input::from_request(request)
+                    .expect("validated image request");
+                let cancelled = cancelled.clone();
+                let generation_state = state.clone();
+                let generation_job = job_id.clone();
+                Box::pin(async move {
+                    match super::wallpaper_artifacts::image_workspace(
+                        &generation_state,
+                        &generation_job,
+                        run_deadline,
+                    )
+                    .await
+                    {
+                        Ok(workspace) => request.workspace = Some(workspace),
+                        Err(_) => {
+                            return ProviderCall::Image(super::image_provider::Reply {
+                                output: Err(WallpaperOutputError::Rejected),
+                                usage: None,
+                            })
+                        }
+                    }
+                    ProviderCall::Image(
+                        provider
+                            .generate(
+                                request,
+                                pricing,
+                                credential,
+                                ProviderCancellation::from_receiver(cancelled),
+                            )
+                            .await,
+                    )
+                })
+            }
+            (
+                GenerationInput::Wallpaper(request),
+                WALLPAPER_CAPABILITY,
+                super::generation_provider::Provider::Text(provider),
+            ) => {
+                let provider = provider.clone();
                 let request = request.clone();
                 let cancelled = cancelled.clone();
                 Box::pin(async move {
@@ -1639,21 +1706,40 @@ async fn run_job_inner(
                 return;
             }
         };
-    let outcome = match tokio::time::timeout_at(run_deadline, call).await {
+    let outcome = match tokio::time::timeout_at(run_deadline, &mut call).await {
         Ok(outcome) => outcome,
         Err(_) => {
             tracing::warn!("AI provider 调用超过执行期限，已终止");
-            finish_running(state.clone(), &job.job_id, "expired").await;
+            if input.is_image() {
+                if let Some((_, signal)) = state.ai_runtime.inputs.lock().await.get(&job_id) {
+                    let _ = signal.send(());
+                }
+                // A blocking file owner must actually exit before this slot is returned.
+                let reply = call.await;
+                let usage = match reply {
+                    ProviderCall::Image(reply) => reply.usage,
+                    _ => None,
+                };
+                finish_running_with_usage(state.clone(), &job.job_id, "expired", usage.as_ref())
+                    .await;
+            } else {
+                finish_running(state.clone(), &job.job_id, "expired").await;
+            }
             state.ai_runtime.inputs.lock().await.remove(&job_id);
             return;
         }
     };
-    let (raw_output, trusted_usage) = match outcome {
+    let (mut raw_output, trusted_usage, image_file) = match outcome {
         ProviderCall::Stage(reply) => (
             reply.intent.map_err(WallpaperOutputError::Provider),
             reply.usage,
+            None,
         ),
-        ProviderCall::Wallpaper(reply) => (reply.output, reply.usage),
+        ProviderCall::Wallpaper(reply) => (reply.output, reply.usage, None),
+        ProviderCall::Image(reply) => match reply.output {
+            Ok(file) => (Ok(Value::Null), reply.usage, Some(file)),
+            Err(error) => (Err(error), reply.usage, None),
+        },
     };
     if let Some(usage) = trusted_usage.as_ref() {
         if let Err(error) = usage::persist_pending_usage(&state.db, &job, usage).await {
@@ -1670,6 +1756,37 @@ async fn run_job_inner(
         state.ai_runtime.inputs.lock().await.remove(&job_id);
         return;
     }
+    let mut image_prepared = None;
+    if let Some(file) = image_file {
+        let GenerationInput::Wallpaper(request) = &input else {
+            unreachable!()
+        };
+        match super::wallpaper_artifacts::prepare_image(
+            &state,
+            &job_id,
+            file,
+            request,
+            run_deadline,
+            ProviderCancellation::from_receiver(cancelled.clone()),
+        )
+        .await
+        {
+            Ok(prepared) => image_prepared = Some(prepared),
+            Err(error) => {
+                super::wallpaper_artifacts::reject(&state, &job_id, error.code).await;
+                raw_output = Err(WallpaperOutputError::Rejected);
+            }
+        }
+    }
+    if tokio::time::Instant::now() >= run_deadline {
+        finish_running_with_usage(state.clone(), &job_id, "expired", trusted_usage.as_ref()).await;
+        return;
+    }
+    if cancellation_pending(&cancelled) {
+        finish_running_with_usage(state.clone(), &job_id, "cancelled", trusted_usage.as_ref())
+            .await;
+        return;
+    }
     match raw_output {
         Ok(value) => {
             // 输出校验按 capability 走合同层：舞台沿 intent/artifact 合同，
@@ -1682,6 +1799,11 @@ async fn run_job_inner(
                             contract::validate_artifact(&contract::artifact(&value)).map(|_| ())
                         })
                         .map(|_| ("artifact:1", contract::artifact(&value).to_string())),
+                    (GenerationInput::Wallpaper(_), WALLPAPER_CAPABILITY)
+                        if input.is_image() && image_prepared.is_some() =>
+                    {
+                        Ok(("wallpaper.image:1", String::new()))
+                    }
                     (GenerationInput::Wallpaper(request), WALLPAPER_CAPABILITY) => {
                         match serde_json::to_vec(&value) {
                             Ok(bytes) => {
@@ -1702,7 +1824,9 @@ async fn run_job_inner(
                 };
             match validated {
                 Ok((proposal_schema, proposal_payload)) => {
-                    let prepared = if job.capability == WALLPAPER_CAPABILITY {
+                    let prepared = if input.is_image() {
+                        image_prepared.take()
+                    } else if job.capability == WALLPAPER_CAPABILITY {
                         match super::wallpaper_artifacts::prepare(
                             &state,
                             &job_id,
@@ -1733,10 +1857,19 @@ async fn run_job_inner(
                     // 迟到 usage；不能复活任务或创建提案。
                     let result = async {
                         let proposal_id = uuid::Uuid::new_v4().to_string();
-                        let now = now_ms();
                         let mut tx = vmusic_store::begin_immediate(&state.db)
                             .await
                             .map_err(store_error)?;
+                        // SQLite may have waited behind another writer. The
+                        // image authority must be checked after that wait.
+                        if input.is_image() && tokio::time::Instant::now() >= run_deadline {
+                            return Err(ApiError::new(
+                                axum::http::StatusCode::CONFLICT,
+                                "image_timeout",
+                                "图像执行期限已到",
+                            ));
+                        }
+                        let now = now_ms();
                         if let Err(error) = check_generation(&mut tx, now).await {
                             if error.code != "generation_disabled" {
                                 return Err(error);
@@ -1756,6 +1889,13 @@ async fn run_job_inner(
                                 publish_task(&state);
                             }
                             return Ok::<(), ApiError>(());
+                        }
+                        if input.is_image() && tokio::time::Instant::now() >= run_deadline {
+                            return Err(ApiError::new(
+                                axum::http::StatusCode::CONFLICT,
+                                "image_timeout",
+                                "图像执行期限已到",
+                            ));
                         }
                         let won = store::cas_job_state(
                             &mut *tx,
@@ -1792,6 +1932,13 @@ async fn run_job_inner(
                                 .await
                                 .map_err(store_error)?;
                         }
+                        if input.is_image() && tokio::time::Instant::now() >= run_deadline {
+                            return Err(ApiError::new(
+                                axum::http::StatusCode::CONFLICT,
+                                "image_timeout",
+                                "图像执行期限已到",
+                            ));
+                        }
                         tx.commit().await.map_err(sql_error)?;
                         publish_task(&state);
                         Ok(())
@@ -1802,7 +1949,11 @@ async fn run_job_inner(
                         finish_running_with_usage(
                             state.clone(),
                             &job_id,
-                            "failed",
+                            if error.code == "image_timeout" {
+                                "expired"
+                            } else {
+                                "failed"
+                            },
                             trusted_usage.as_ref(),
                         )
                         .await;
@@ -2946,23 +3097,22 @@ pub(crate) async fn wallpaper_quote(
             "场景目录注册哈希与当前服务不一致",
         ));
     }
-    let provider = state.ai_runtime.provider().await;
-    if !provider.ready() || !provider.supports_wallpaper_builtin() {
+    let input = GenerationInput::Wallpaper(request.clone());
+    let provider = state.ai_runtime.generation_provider(&input).await;
+    if !provider.ready() || !provider.supports_wallpaper(&input) {
         return Err(ApiError::new(
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
             "provider_unavailable",
             "壁纸生成 provider 当前不可用",
         ));
     }
-    let quote = provider
-        .quote_wallpaper_builtin(&request)
-        .map_err(|reason| {
-            ApiError::new(
-                axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                "pricing_unavailable",
-                reason,
-            )
-        })?;
+    let quote = provider.quote(&input).map_err(|reason| {
+        ApiError::new(
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "pricing_unavailable",
+            reason,
+        )
+    })?;
     quote.validate().map_err(|reason| {
         ApiError::new(
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
@@ -3004,13 +3154,15 @@ pub(crate) async fn wallpaper_quote(
         "model": pricing.model,
         "reservationMicroUsd": pricing.quote.reservation_micro_usd,
         "pricingKnown": pricing.pricing_known(),
-        "pricingMode": if pricing.quote.pricing_version=="fake-free-v1" {"free"} else if pricing.pricing_known() {"metered"} else {"token-only"},
-        "maximumCostMicroUsd": if pricing.quote.pricing_version=="fake-free-v1" {Some(0)} else if pricing.pricing_known() {Some(pricing.quote.reservation_micro_usd)} else {None},
+        "pricingMode": if pricing.quote.pricing_version=="fake-free-v1" || pricing.provider=="fake-image" {"free"} else if pricing.pricing_known() {"metered"} else {"token-only"},
+        "maximumCostMicroUsd": if pricing.quote.pricing_version=="fake-free-v1" || pricing.provider=="fake-image" {Some(0)} else if pricing.pricing_known() {Some(pricing.quote.reservation_micro_usd)} else {None},
         "maxInputTokens": pricing.quote.max_input_tokens,
         "maxOutputTokens": pricing.quote.max_output_tokens,
         "endpointLabel": provider.endpoint_identity().and_then(|endpoint|reqwest::Url::parse(endpoint).ok()).map(|url|format!("{}://{}:{}",url.scheme(),url.host_str().unwrap_or(""),url.port_or_known_default().unwrap_or(0))).unwrap_or_else(||"本地离线 fixture".into()),
-        "dataScope": "仅本次描述与所选内置场景的参数合同",
-        "maximumWaitSeconds": 90,
+        "dataScope": if input.is_image() {"仅本次描述与所选图像规格"} else {"仅本次描述与所选内置场景的参数合同"},
+        "maximumWaitSeconds": if input.is_image() {240} else {90},
+        "executionSeconds": if input.is_image() {180} else {30},
+        "dimensions": pricing.quote.metering,
     }))
 }
 
@@ -3094,11 +3246,19 @@ async fn wallpaper_submit_owned(
                 quote.pricing.provider.clone(),
                 quote.pricing.model.clone(),
                 quote.endpoint_identity.clone(),
+                GenerationInput::Wallpaper(quote.request.clone()),
             )
         })
     };
-    let Some((digest, consumed, quote_request_id, quote_provider, quote_model, quote_endpoint)) =
-        lookup
+    let Some((
+        digest,
+        consumed,
+        quote_request_id,
+        quote_provider,
+        quote_model,
+        quote_endpoint,
+        quoted_input,
+    )) = lookup
     else {
         return Err(ApiError::new(
             axum::http::StatusCode::NOT_FOUND,
@@ -3137,7 +3297,7 @@ async fn wallpaper_submit_owned(
     }
     // quote 绑定 provider/model：确认后模型或 provider 被换即拒绝重试，
     // 不把旧报价落到新 adapter 上（§19.4）。
-    let provider = state.ai_runtime.provider().await;
+    let provider = state.ai_runtime.generation_provider(&quoted_input).await;
     if provider.id() != quote_provider
         || provider.model() != quote_model
         || provider.endpoint_identity() != quote_endpoint.as_deref()
