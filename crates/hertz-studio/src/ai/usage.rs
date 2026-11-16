@@ -20,7 +20,7 @@ fn db_error(error: vmusic_core::StoreError) -> crate::error::ApiError {
 /// This two-counter pricing model supports uncached input and total billable
 /// output (including reasoning). Other billing dimensions require an explicit
 /// adapter/contract extension; they must never silently be omitted.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PriceQuote {
     pub pricing_version: String,
@@ -73,7 +73,7 @@ impl PriceQuote {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PricingSnapshot {
     pub provider: String,

@@ -5012,6 +5012,55 @@ async fn wallpaper_capabilities_snapshot_is_deterministic_and_self_bound() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wallpaper_concurrent_same_key_different_quotes_cannot_replay_each_other() {
+    let (state, handle) = jobs_state().await;
+    let snapshot = wallpaper_snapshot(&state).await;
+    let request = serde_json::to_vec(&wallpaper_request(&snapshot, "coast")).unwrap();
+    let principal = crate::idempotency::LOCAL_OWNER;
+    let first = super::wallpaper_quote(&state, principal, &request)
+        .await
+        .unwrap();
+    let second = super::wallpaper_quote(&state, principal, &request)
+        .await
+        .unwrap();
+    let key = client_key();
+    let (first, second) = tokio::join!(
+        super::wallpaper_submit(
+            &state,
+            principal,
+            first["quoteId"].as_str().unwrap(),
+            "wreq-1",
+            Some(&key)
+        ),
+        super::wallpaper_submit(
+            &state,
+            principal,
+            second["quoteId"].as_str().unwrap(),
+            "wreq-1",
+            Some(&key)
+        )
+    );
+    let outcomes = [first, second];
+    assert_eq!(outcomes.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(
+        outcomes
+            .iter()
+            .find_map(|result| result.as_ref().err())
+            .unwrap()
+            .code,
+        "idempotency_conflict"
+    );
+    for outcome in outcomes.into_iter().flatten() {
+        let SubmitOutcome::Accepted { job } = outcome else {
+            panic!("只能新建一个任务");
+        };
+        assert_eq!(await_terminal(&state, &job.job_id).await.state, "succeeded");
+    }
+    state.audio.shutdown();
+    handle.join().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn wallpaper_quote_rejects_stale_schema_snapshot_and_registry() {
     let (state, handle) = jobs_state().await;
     let snapshot = wallpaper_snapshot(&state).await;
@@ -5107,6 +5156,7 @@ async fn wallpaper_quote_submit_completes_and_replays_idempotently() {
         hertz_wallpaper::catalog().scene(&output.scene_id).is_some(),
         "fake 输出必须落在资格目录内"
     );
+    assert_eq!(output.scene_id, "coast", "生成必须遵循已报价的选定场景");
 
     // 同键同载荷重试查原 job（§19.4：submit 幂等）。
     let replay = super::wallpaper_submit(
@@ -5122,6 +5172,45 @@ async fn wallpaper_quote_submit_completes_and_replays_idempotently() {
         super::SubmitOutcome::Replayed { job } => assert_eq!(job.job_id, row.job_id),
         super::SubmitOutcome::Accepted { .. } => panic!("重试不得创建第二个任务"),
     }
+    let consumed = super::wallpaper_submit(
+        &state,
+        crate::idempotency::LOCAL_OWNER,
+        &quote_id,
+        "wreq-1",
+        Some(&client_key()),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(consumed.code, "quote_consumed");
+    state
+        .ai_runtime
+        .wallpaper_quotes
+        .lock()
+        .await
+        .discard(crate::idempotency::LOCAL_OWNER);
+    let recovered = super::wallpaper_submit(
+        &state,
+        crate::idempotency::LOCAL_OWNER,
+        &quote_id,
+        "wreq-1",
+        Some(&key),
+    )
+    .await
+    .unwrap();
+    match recovered {
+        super::SubmitOutcome::Replayed { job } => assert_eq!(job.job_id, row.job_id),
+        _ => panic!("已受理的原请求恢复不能依赖报价仍在内存"),
+    }
+    let mismatch = super::wallpaper_submit(
+        &state,
+        crate::idempotency::LOCAL_OWNER,
+        "different-quote",
+        "wreq-1",
+        Some(&key),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(mismatch.code, "idempotency_conflict");
     // 已消费 quote 换新键 → 拒绝（一个 quote 只能有一个任务）。
     let error = super::wallpaper_submit(
         &state,
@@ -5132,7 +5221,7 @@ async fn wallpaper_quote_submit_completes_and_replays_idempotently() {
     )
     .await
     .unwrap_err();
-    assert_eq!(error.code, "quote_consumed");
+    assert_eq!(error.code, "quote_unknown");
     state.audio.shutdown();
     handle.join().unwrap();
 }

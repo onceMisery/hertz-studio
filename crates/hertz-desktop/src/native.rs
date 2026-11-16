@@ -1604,6 +1604,22 @@ pub(crate) fn dialog_error(message: &str) {
     };
 }
 
+pub(crate) fn confirm_wallpaper_generation(hwnd: HWND, message: &str) -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        MessageBoxW, IDYES, MB_DEFBUTTON2, MB_ICONQUESTION, MB_YESNO,
+    };
+    let text = to_wide(message);
+    let title = to_wide("Hertz 壁纸生成");
+    unsafe {
+        MessageBoxW(
+            hwnd,
+            text.as_ptr(),
+            title.as_ptr(),
+            MB_YESNO | MB_DEFBUTTON2 | MB_ICONQUESTION,
+        ) == IDYES
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

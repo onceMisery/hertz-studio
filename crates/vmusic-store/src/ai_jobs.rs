@@ -957,6 +957,7 @@ pub async fn ai_history_capacity(
         "ai_instance",
         "ai_budget_guard",
         "ai_pending_usage",
+        "ai_wallpaper_submissions",
     ] {
         let columns: Vec<ColumnInfo> = sqlx::query_as(&format!("PRAGMA table_info({table})"))
             .fetch_all(&mut *conn)

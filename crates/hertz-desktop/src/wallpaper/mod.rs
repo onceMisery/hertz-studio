@@ -14,6 +14,7 @@
 #[allow(dead_code)] // replace 由 P1-05 TargetPlanner 接入；当前生产默认空集合。
 pub(crate) mod access;
 pub(crate) mod ai;
+pub(crate) mod generation;
 
 // P1-02/P1-04/P1-06 内核在本包内自测；接线到 app/管理协议属 P1-05（§20.2 依赖链
 // 01→02→03/04→05），接线后移除 dead_code 放行。

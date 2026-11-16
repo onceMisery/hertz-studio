@@ -28,6 +28,45 @@ pub(crate) const MAX_QUOTES_PER_OWNER: usize = 8;
 /// quote 与待提交请求合计字节上限（§19.4：128 KiB）。
 pub(crate) const MAX_QUOTE_TOTAL_BYTES: usize = 128 * 1024;
 
+pub(crate) fn validate_builtin_output(
+    request: &hertz_wallpaper::generation::WallpaperGenerateRequest,
+    bytes: &[u8],
+) -> Result<hertz_wallpaper::generation::BuiltinSceneOutput, String> {
+    let output = hertz_wallpaper::generation::BuiltinSceneOutput::parse(bytes)
+        .map_err(|error| error.message)?;
+    if request.output.scene_id.as_deref() != Some(output.scene_id.as_str()) {
+        return Err("生成结果与已报价的选定场景不一致".into());
+    }
+    Ok(output)
+}
+
+#[cfg(test)]
+mod output_tests {
+    use super::*;
+
+    #[test]
+    fn builtin_output_rejects_a_different_valid_scene() {
+        let request = serde_json::from_value(serde_json::json!({
+            "version":1,"requestId":"scene-binding","brief":"夜色",
+            "output":{"kind":"builtin","sceneId":"coast"},
+            "registryHash":hertz_wallpaper::catalog().registry_hash,
+            "generationSchemaHash":generation_schema_hash(),"capabilitySnapshotId":"fixture"
+        }))
+        .unwrap();
+        for id in hertz_wallpaper::catalog().scene_ids() {
+            let scene = hertz_wallpaper::catalog().scene(&id).unwrap();
+            let bytes = serde_json::to_vec(&serde_json::json!({
+                "kind":"builtin","sceneId":id,"stateVersion":scene["stateVersion"],"params":{}
+            }))
+            .unwrap();
+            assert_eq!(
+                validate_builtin_output(&request, &bytes).is_ok(),
+                id == "coast"
+            );
+        }
+    }
+}
+
 fn sha256_hex(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     digest.iter().map(|b| format!("{b:02x}")).collect()
@@ -104,8 +143,14 @@ pub(crate) struct StoredQuote {
     pub request_digest: String,
     pub request_bytes: usize,
     pub pricing: PricingSnapshot,
+    pub endpoint_identity: Option<String>,
     pub consumed: bool,
     pub expires_at: i64,
+}
+
+pub(crate) struct ProviderQuote {
+    pub pricing: PricingSnapshot,
+    pub endpoint_identity: Option<String>,
 }
 
 #[derive(Default)]
@@ -114,6 +159,9 @@ pub(crate) struct QuoteStore {
 }
 
 impl QuoteStore {
+    pub(crate) fn discard(&mut self, owner: &str) {
+        self.quotes.retain(|q| q.owner != owner);
+    }
     fn sweep(&mut self, now: i64) {
         self.quotes.retain(|quote| quote.expires_at > now);
     }
@@ -133,7 +181,7 @@ impl QuoteStore {
         quote_id: String,
         request: hertz_wallpaper::generation::WallpaperGenerateRequest,
         request_digest: String,
-        pricing: PricingSnapshot,
+        provider: ProviderQuote,
         now: i64,
     ) -> Result<i64, ApiError> {
         self.sweep(now);
@@ -162,7 +210,8 @@ impl QuoteStore {
             request,
             request_digest,
             request_bytes,
-            pricing,
+            pricing: provider.pricing,
+            endpoint_identity: provider.endpoint_identity,
             consumed: false,
             expires_at,
         });

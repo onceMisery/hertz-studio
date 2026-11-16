@@ -41,6 +41,7 @@ pub(crate) struct Discovery {
 
 pub(crate) fn client() -> Result<reqwest::blocking::Client> {
     reqwest::blocking::Client::builder()
+        .no_proxy()
         .connect_timeout(Duration::from_secs(1))
         .timeout(Duration::from_secs(2))
         .redirect(reqwest::redirect::Policy::none())

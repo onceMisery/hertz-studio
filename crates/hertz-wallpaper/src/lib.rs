@@ -20,6 +20,7 @@ pub mod model_binary;
 pub mod model_container;
 pub mod model_profile;
 pub mod model_structure;
+pub mod pairing;
 pub mod paths;
 pub mod properties;
 mod resource_container_io;

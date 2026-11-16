@@ -110,3 +110,110 @@
   document.addEventListener('visibilitychange', () => { if (document.hidden) { ++epoch; retire(); clear(); } else if (panel.open) readTarget(); });
   window.hertzWallpaperAI = { applyProgress };
 })();
+
+// Managed generation shares the native settings bridge; page data contains no bearer.
+(function () {
+  'use strict';
+  const panel = document.getElementById('wallpaper-generation');
+  const settings = window.hertzWallpaperSettings;
+  if (!panel || !settings) return;
+  const el = id => document.getElementById('generation-' + id);
+  let epoch = 0, timer = null, busy = false, connected = false, ready = false, quote = null, job = null, submissionPending = false;
+  const phases = { accepted: '已受理，等待生成。', running: '正在生成候选。', succeeded: '候选已生成，尚未保存或应用。',
+    cancelled: '任务已取消。费用以实际派发与结算为准。', failed: '生成失败。', interrupted: '生成已中断。' };
+  function visible() { return panel.open && !document.hidden && !panel.closest('[role="tabpanel"]').hidden; }
+  function status(text) { el('status').textContent = text; }
+  function controls() {
+    panel.setAttribute('aria-busy', String(busy));
+    el('connect').hidden = connected; el('connect').disabled = busy;
+    el('disconnect').hidden = !connected; el('disconnect').disabled = busy;
+    el('scene').disabled = busy || !connected || !ready;
+    el('brief').disabled = busy || !connected || !ready;
+    el('quote').disabled = busy || submissionPending || !ready || !connected || !el('brief').value.trim();
+    el('recover').hidden = !submissionPending; el('recover').disabled = busy || !connected;
+    el('price').hidden = !quote; el('confirm').disabled = busy || !quote || quote.expiresAt <= Date.now();
+    el('cancel').hidden = !job || !['accepted', 'running'].includes(job.state); el('cancel').disabled = busy;
+  }
+  function stop() { clearTimeout(timer); timer = null; }
+  function invalidateQuote() {
+    quote = null;
+    settings.requestManagement('wallpaper.ai.invalidate', {}).catch(() => {});
+  }
+  function schedule() { stop(); if (visible()) timer = setTimeout(refresh, 2100); }
+  async function request(command, payload) {
+    const receipt = await settings.requestManagement('wallpaper.ai.' + command, payload || {});
+    return receipt.result;
+  }
+  async function action(command, payload, success) {
+    if (busy || !visible()) return;
+    stop(); const current = epoch; busy = true; controls();
+    try {
+      const result = await request(command, payload);
+      if (current === epoch && visible()) success(result);
+    } catch (error) {
+      if (current === epoch && visible()) status(error.message || '操作未完成，请重试原操作。');
+    } finally {
+      busy = false; controls(); schedule();
+    }
+  }
+  async function refresh() {
+    if (!visible() || busy) return;
+    const current = epoch; busy = true; controls();
+    try {
+      const state = await request('status');
+      if (current !== epoch || !visible()) return;
+      connected = !!state.connected;
+      job = state.job || null; submissionPending = !!state.submissionPending;
+      el('job').textContent = job ? phases[job.state] || '任务状态未知。' : '';
+      if (!connected) {
+        ready = false; quote = null;
+        status(state.pending ? '请在播放器设置 → 连接 → AI 与外部连接中确认此连接。配对 60 秒后到期。' : '尚未连接。请先启动已选来源的播放器，再连接生成服务。');
+      } else if (!ready) {
+        const capability = await request('capabilities');
+        if (current !== epoch || !visible()) return;
+        const output = (capability.outputs || []).find(item => item.kind === 'builtin' && item.ready);
+        ready = !!output; el('scene').replaceChildren();
+        for (const scene of capability.scenes || []) {
+          const option = document.createElement('option'); option.value = scene.id; option.textContent = scene.label || scene.id;
+          el('scene').appendChild(option);
+        }
+        status(ready ? '已连接。查看报价不会调用模型。' : '已连接，当前模型尚未提供壁纸生成能力。请在播放器中配置受支持的模型。');
+      }
+      if (submissionPending) status('已确认请求的回执尚未核实。查询原请求会使用同一标识，不会创建第二个生成任务。');
+      if (connected && job && ['accepted', 'running'].includes(job.state)) {
+        const result = await request('generate.job', { jobId: job.jobId });
+        if (current === epoch && visible()) { job = result; el('job').textContent = phases[job.state] || '任务状态未知。'; }
+      }
+      if (quote && quote.expiresAt <= Date.now()) { quote = null; status('报价已到期，请重新查看报价。'); }
+    } catch (error) {
+      if (current === epoch && visible()) { ready = false; status(error.message || '连接不可用，请重新连接或重试原操作。'); }
+    } finally { busy = false; controls(); schedule(); }
+  }
+  el('connect').addEventListener('click', () => action('connect', {}, () => { ready = false; status('请在播放器设置 → 连接 → AI 与外部连接中确认连接。'); }));
+  el('disconnect').addEventListener('click', () => action('disconnect', {}, () => { connected = false; ready = false; quote = null; job = null; el('job').textContent = ''; status('生成连接已断开。'); }));
+  el('quote').addEventListener('click', () => action('generate.quote', { brief: el('brief').value, sceneId: el('scene').value }, result => {
+    quote = result;
+    const price = result.pricingMode === 'free' ? '本地离线 fixture，免费' : result.pricingMode === 'token-only'
+      ? '费用未知 · 最多 ' + result.maxInputTokens + ' 输入 / ' + result.maxOutputTokens + ' 输出 token'
+      : '费用预留上界 ' + result.maximumCostMicroUsd + ' micro-USD';
+    el('price-text').textContent = result.provider + ' / ' + result.model + ' · ' + price;
+    status('报价有效期 5 分钟。确认时将再次显示原生生成许可。');
+  }));
+  el('confirm').addEventListener('click', () => action('generate.confirm', { confirmationToken: quote && quote.confirmationToken }, result => {
+    job = result.job || result; quote = null; el('job').textContent = phases[job.state] || '任务已受理。'; status('本次请求已提交。');
+  }));
+  el('cancel').addEventListener('click', () => action('generate.cancel', { jobId: job.jobId, expectedStateRevision: job.stateRevision }, result => {
+    job = result; el('job').textContent = phases[job.state] || '取消结果已返回。';
+  }));
+  el('recover').addEventListener('click', () => action('generate.recover', {}, result => {
+    job = result.job; submissionPending = false; el('job').textContent = phases[job.state] || '原任务已受理。'; status('已找回原请求回执。');
+  }));
+  for (const name of ['brief', 'scene']) el(name).addEventListener('input', () => { invalidateQuote(); controls(); });
+  panel.addEventListener('toggle', () => { ++epoch; stop(); invalidateQuote(); if (visible()) { ready = false; refresh(); } });
+  new MutationObserver(() => { ++epoch; stop(); invalidateQuote(); if (visible()) refresh(); })
+    .observe(panel.closest('[role="tabpanel"]'), { attributes: true, attributeFilter: ['hidden'] });
+  document.addEventListener('visibilitychange', () => { ++epoch; stop(); invalidateQuote(); if (visible()) refresh(); });
+  window.addEventListener('wallpaper-ai-context', () => { ++epoch; stop(); ready = false; quote = null; if (visible()) refresh(); });
+  window.addEventListener('pagehide', stop);
+  controls();
+})();

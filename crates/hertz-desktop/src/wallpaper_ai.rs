@@ -5,6 +5,22 @@ use crate::wallpaper::{ai, api, jobs::JobError};
 type AiResult<T> = std::result::Result<T, JobError>;
 
 impl App {
+    pub(super) fn handle_ai_pair(
+        &self,
+        payload: serde_json::Value,
+        peer_pid: u32,
+    ) -> serde_json::Value {
+        match self
+            .wallpaper_ai
+            .generation
+            .verify(payload, peer_pid, &self.profile)
+        {
+            Ok(value) => value,
+            Err(error) => {
+                serde_json::json!({"ok":false,"error":{"code":error.code,"message":error.message}})
+            }
+        }
+    }
     pub(super) fn ai_context(&self, owner: u64) -> AiResult<ai::CatalogContext> {
         if self.settings.is_none() || owner == 0 || owner != self.settings_generation {
             return Err(JobError::new(
@@ -135,6 +151,69 @@ impl App {
                 return;
             }
         };
+        if matches!(
+            request.command.as_str(),
+            "wallpaper.ai.connect"
+                | "wallpaper.ai.disconnect"
+                | "wallpaper.ai.status"
+                | "wallpaper.ai.capabilities"
+                | "wallpaper.ai.generate.quote"
+                | "wallpaper.ai.generate.confirm"
+                | "wallpaper.ai.generate.job"
+                | "wallpaper.ai.generate.cancel"
+                | "wallpaper.ai.generate.recover"
+        ) {
+            if request.command == "wallpaper.ai.generate.confirm" {
+                let token = request.payload["confirmationToken"].as_str().unwrap_or("");
+                match self.wallpaper_ai.generation.confirmation(owner, token) {
+                    Ok(text) if crate::native::confirm_wallpaper_generation(self.hwnd(), &text) => {
+                    }
+                    Ok(_) => {
+                        self.send_wallpaper_management(
+                            reply,
+                            api::response(
+                                id.as_deref(),
+                                Err(JobError::new(
+                                    "generation_cancelled",
+                                    "未确认生成，没有创建任务",
+                                )),
+                                None,
+                            ),
+                        );
+                        return;
+                    }
+                    Err(error) => {
+                        self.send_wallpaper_management(
+                            reply,
+                            api::response(id.as_deref(), Err(error), None),
+                        );
+                        return;
+                    }
+                }
+            }
+            let proxy = self.proxy.clone();
+            let receiver = reply.clone();
+            let response_id = id.clone();
+            let result = self.wallpaper_ai.generation.run(
+                self.profile.clone(),
+                owner,
+                request.command,
+                request.payload,
+                move |result| {
+                    let _ = proxy.send_event(UserEvent::WallpaperManagement(
+                        receiver,
+                        api::response(response_id.as_deref(), result, None),
+                    ));
+                },
+            );
+            if let Err(error) = result {
+                self.send_wallpaper_management(
+                    reply,
+                    api::response(id.as_deref(), Err(error), None),
+                );
+            }
+            return;
+        }
         let result: AiResult<Option<serde_json::Value>> = (|| match request.command.as_str() {
             "wallpaper.ai.target" => {
                 let input: ai::TargetInput = serde_json::from_value(request.payload.clone())

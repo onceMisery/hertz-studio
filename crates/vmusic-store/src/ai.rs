@@ -33,6 +33,8 @@ pub struct GrantRow {
     pub revoked: bool,
     pub created_at: i64,
     pub updated_at: i64,
+    pub delivery_mode: String,
+    pub session_binding: Option<String>,
 }
 
 /// 取实例身份行；没有就生成 `owner_instance_id` 并落一行。
@@ -104,7 +106,7 @@ pub async fn insert_grant(
 
 pub async fn list_grants(pool: &SqlitePool) -> Result<Vec<GrantRow>, StoreError> {
     sqlx::query_as(
-        "SELECT grant_id, label, credential_digest, scopes, revoked, created_at, updated_at
+        "SELECT grant_id, label, credential_digest, scopes, revoked, created_at, updated_at, delivery_mode, session_binding
          FROM ai_grants ORDER BY created_at, grant_id",
     )
     .fetch_all(pool)
@@ -119,7 +121,7 @@ pub async fn find_grant_by_digest(
     credential_digest: &str,
 ) -> Result<Option<GrantRow>, StoreError> {
     sqlx::query_as(
-        "SELECT grant_id, label, credential_digest, scopes, revoked, created_at, updated_at
+        "SELECT grant_id, label, credential_digest, scopes, revoked, created_at, updated_at, delivery_mode, session_binding
          FROM ai_grants WHERE credential_digest = ?1",
     )
     .bind(credential_digest)
@@ -128,18 +130,33 @@ pub async fn find_grant_by_digest(
     .map_err(|e| StoreError::Database(e.to_string()))
 }
 
-pub async fn find_grant_by_id(
-    pool: &SqlitePool,
+pub async fn find_grant_by_id<'e, E: sqlx::Executor<'e, Database = sqlx::Sqlite>>(
+    executor: E,
     grant_id: &str,
 ) -> Result<Option<GrantRow>, StoreError> {
     sqlx::query_as(
-        "SELECT grant_id, label, credential_digest, scopes, revoked, created_at, updated_at
+        "SELECT grant_id, label, credential_digest, scopes, revoked, created_at, updated_at, delivery_mode, session_binding
          FROM ai_grants WHERE grant_id = ?1",
     )
     .bind(grant_id)
-    .fetch_optional(pool)
+    .fetch_optional(executor)
     .await
     .map_err(|e| StoreError::Database(e.to_string()))
+}
+
+/// Atomic registration in the original grant table; no credential file is created.
+pub async fn insert_session_grant(
+    pool: &SqlitePool,
+    grant_id: &str,
+    digest: &str,
+    scopes: &str,
+    binding: &str,
+) -> Result<(), StoreError> {
+    sqlx::query("INSERT INTO ai_grants (grant_id,label,credential_digest,scopes,revoked,created_at,updated_at,delivery_mode,session_binding)
+        VALUES (?1,'壁纸生成短会话',?2,?3,0,?4,?4,'native_session',?5)")
+        .bind(grant_id).bind(digest).bind(scopes).bind(now_ms()).bind(binding)
+        .execute(pool).await.map_err(|e| StoreError::Database(e.to_string()))?;
+    Ok(())
 }
 
 /// 轮换凭据：替换摘要。返回是否存在该 grant。

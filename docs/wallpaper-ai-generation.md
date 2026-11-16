@@ -9,7 +9,7 @@
 | AI-01 离线推荐与明确切换 | 2026-11-09 已实施并通过 Windows 开发候选 8 项真实验收 | [主文档条目](desktop-wallpaper.md) |
 | AI-02 切片 1：生成合同纯数据层 | 2026-11-16 已实施（见下） | 本文档 + `crates/hertz-wallpaper/src/generation.rs` 测试 |
 | AI-02 切片 2：capability snapshot、quote/submit、ai/jobs 注册与路由 | 2026-11-16 已实施（见下） | 本文档 + `crates/hertz-studio/src/ai/{jobs.rs,wallpaper_jobs.rs}` 测试 |
-| AI-02 切片 3：短会话配对（§19.2）与桌面接线 | 未实施 | 设计 §19.2 |
+| AI-02 切片 3：短会话配对（§19.2）与桌面接线 | 2026-11-16 已实施，Windows 内嵌/独立候选各五组真实验收通过 | 下文实现与验证边界 |
 | AI-03 结果交付与入库 | 未实施 | 设计 §19.6 |
 | AI-04 图像 adapter 与计费 | 未实施 | 设计 §19.5、§20.5 |
 | AI-05 声明式组合 | 未实施 | 设计 §19.3 |
@@ -60,7 +60,7 @@ runner、派发标记、CAS、取消与结算全复用，无第二个 runner）�
   job.capability 分派 provider 调用与输出校验。
 - **provider 结构化输出模式**（§19.5）：`generate_wallpaper_builtin` 沿
   `complete()` 的默认拒绝先例——未实现的 provider 安全拒绝；fake 提供确定性
-  输出（brief 哈希选资格目录真实场景、参数走目录默认，产物必然通过自家校验）。
+  输出（用户选定的资格目录场景、参数走目录默认；不同场景的结果被拒绝）。
   壁纸输出经 `BuiltinSceneOutput` 全量校验后落 proposal
   （schema `wallpaper.builtin:1`），不 clamp。
 - **capability snapshot**（`ai/wallpaper_jobs.rs`）：服务端对「本版本能力 ∩
@@ -84,3 +84,40 @@ schema/快照/目录三重过期拒绝、quote→submit→worker→BuiltinSceneO
 →proposal→同键回放→换键消费拒绝的端到端）；既有 ai::jobs 75 项回归全绿
 （舞台路径不变）；双工具链 fmt/clippy/三 crate 串行套件全绿；ADR 契约通过。
 日志存 `output/master-gate-ai02-20261116/`。
+
+## 2026-11-16 AI-02 切片 3：短会话配对与原生生成面板
+
+原 `ai_grants` 增加 `native_session` 交付模式（迁移 0030），数据库只存
+256 位 bearer 摘要；60 秒单次 challenge 绑定 SID/PID/进程创建代际、Profile、
+协议/构建和服务实例。内嵌桌面经 HostHandle command，同进程交付；独立 exe
+经原固定管理管道检查真实 PID/SID。会话最长 30 分钟，不静默续期；提交和
+派发事务复核授权及期限，撤权发送实际取消信号。
+
+壁纸路由共用全权或窄会话入口，quote/job 按 grant principal 隔离；原 file
+grant、只读 wallpaper key 和其它窄 key 不能进入本入口。配对登记不需要秘密，
+真正批准仍由全权官方设置完成。原生固定本机发现来源；已连接 TCP 流在发送
+任何 HTTP 字节前经 Windows TCP 表核验服务 PID/创建代际，禁止重定向。
+
+页面仅获得安全状态。原生持报价与默认 No 的真实 MessageBox，展示描述、
+场景、provider/model、地址标签、数据范围、90 秒最长等待及
+free/metered/token-only 费用信息。拒绝不建任务；关闭面板保留已确认回执；
+隐藏页签停止轮询；身份失效停止旧会话查询。迁移 0031 将非秘密 quote/request
+标识与任务同事务保存，报价到期后的原请求恢复只读取原任务；未知服务错误
+保留恢复资格。换 Profile、重启与撤权需要重新配对。
+
+执行证据：1.88 服务 AI 全套 191 passed/1 ignored；其后新增并修复的官方并发
+提交反例连同壁纸回归 25 passed/1 ignored；IPC management 20 项、原生
+generation 6 项（真实 TCP 身份零字节、响应边界、配对生命周期、回执保留、
+身份失效、HTTP500/404 恢复）通过。stable 三 crate lib Clippy、任务 Rust
+格式、API 路由、ADR 414 项及原 UI 回归通过。
+
+Windows 内嵌与独立形态分别五组通过：实际配对、默认 No 原生许可且拒绝不建
+任务、关闭重开保留已确认任务、隐藏页签停止查询、断开撤权。最终候选
+studio SHA-256 `a258bcd907e5bee3ab6c48598b487ba1ebfa636e79910d656f4f81ebeca68293`，
+desktop SHA-256 `e8dc2781d793d91d2ba614754344e8dd2cd50eb17bb55fd1789b73aba5b373b4`。
+脚本 `scripts/check-wallpaper-generation-native.js` 的隔离结果分别位于
+`output/playwright/wallpaper-generation-1794792344202/result.json` 与
+`output/playwright/wallpaper-generation-1794792355677/result.json`。
+
+真实文本 provider 尚未提供壁纸模式，仅免费 fake fixture 可用。这不构成生产
+provider 资格，也不代表 AI-03 的 artifact 接收、预览或保存已经完成。

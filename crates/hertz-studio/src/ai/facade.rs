@@ -49,7 +49,7 @@ const SECRET_BYTES: usize = 32;
 /// 锁，否则轮换可能已过撤销检查、撤销删完文件后再由轮换把凭据装回去。
 ///
 /// 管理面操作稀少，一把进程级锁就够了；按 grant 建锁表只会多一份回收逻辑。
-fn grant_lifecycle() -> &'static tokio::sync::Mutex<()> {
+pub(super) fn grant_lifecycle() -> &'static tokio::sync::Mutex<()> {
     static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
     LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
@@ -113,6 +113,7 @@ pub(crate) struct GrantSummary {
     pub updated_at: i64,
     /// 凭据文件位置（不是凭据本身）。适配器从这里读 opaque 凭据。
     pub credential_path: String,
+    pub delivery_mode: String,
 }
 
 fn grants_dir(state: &AppState) -> PathBuf {
@@ -226,9 +227,14 @@ fn parse_scopes(raw: &str) -> Vec<String> {
 
 fn summary(state: &AppState, row: vmusic_store::ai::GrantRow) -> GrantSummary {
     GrantSummary {
-        credential_path: credential_path(state, &row.grant_id)
-            .to_string_lossy()
-            .into_owned(),
+        credential_path: if row.delivery_mode == "file" {
+            credential_path(state, &row.grant_id)
+                .to_string_lossy()
+                .into_owned()
+        } else {
+            String::new()
+        },
+        delivery_mode: row.delivery_mode,
         grant_id: row.grant_id,
         label: row.label,
         scopes: parse_scopes(&row.scopes),
@@ -314,6 +320,9 @@ pub(crate) async fn rotate_grant(
     if row.revoked {
         return Err(bad_request("已撤销的授权不能轮换，请新建"));
     }
+    if row.delivery_mode != "file" {
+        return Err(bad_request("短会话必须重新配对，不能写入凭据文件"));
+    }
     let previous_digest = row.credential_digest;
     let secret = random_secret()?;
     let path = credential_path(state, grant_id);
@@ -377,6 +386,9 @@ pub(crate) async fn revoke_grant(
         .await
         .map_err(store_error)?
         .ok_or_else(|| internal("grant 撤销后不可见"))?;
+    if row.delivery_mode == "native_session" {
+        super::wallpaper_pairing::cancel_grant_jobs(state, grant_id).await?;
+    }
     Ok(summary(state, row))
 }
 
@@ -385,6 +397,21 @@ pub(crate) async fn revoke_grant(
 pub(crate) async fn authenticate(
     state: &Arc<AppState>,
     presented: &str,
+) -> Result<GrantContext, ApiError> {
+    authenticate_mode(state, presented, "file").await
+}
+
+pub(crate) async fn authenticate_wallpaper(
+    state: &Arc<AppState>,
+    presented: &str,
+) -> Result<GrantContext, ApiError> {
+    authenticate_mode(state, presented, "native_session").await
+}
+
+async fn authenticate_mode(
+    state: &Arc<AppState>,
+    presented: &str,
+    mode: &str,
 ) -> Result<GrantContext, ApiError> {
     let row = vmusic_store::ai::find_grant_by_digest(&state.db, &digest(presented))
         .await
@@ -398,6 +425,12 @@ pub(crate) async fn authenticate(
             "grant_revoked",
             "该授权已被撤销",
         ));
+    }
+    if row.delivery_mode != mode {
+        return Err(unauthorized());
+    }
+    if mode == "native_session" {
+        super::wallpaper_pairing::validate_grant(state, &row).await?;
     }
     let instance = vmusic_store::ai::get_or_create_instance(&state.db)
         .await

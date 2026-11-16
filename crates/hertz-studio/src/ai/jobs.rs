@@ -303,7 +303,7 @@ impl StageIntentProvider for FakeProvider {
         true
     }
 
-    /// 确定性壁纸输出：从 brief 哈希选资格目录中的真实场景，参数走目录默认
+    /// 确定性壁纸输出：使用用户选定的资格目录场景，参数走目录默认
     /// （空 params 合法）；产物必然通过自家合同校验，供本地联调与回归。
     fn generate_wallpaper_builtin(
         &self,
@@ -312,13 +312,15 @@ impl StageIntentProvider for FakeProvider {
         _credential: Option<crate::ai::credential::ProviderCredential>,
         _cancellation: ProviderCancellation,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = WallpaperReply> + Send>> {
-        let brief = request.brief.clone();
+        let scene_id = request.output.scene_id.clone();
         Box::pin(async move {
-            let hash = Sha256::digest(brief.as_bytes());
-            let seed = u32::from_be_bytes([hash[0], hash[1], hash[2], hash[3]]);
             let catalog = hertz_wallpaper::catalog();
-            let ids = catalog.scene_ids();
-            let scene_id = ids[(seed % ids.len() as u32) as usize].to_string();
+            let Some(scene_id) = scene_id.filter(|id| catalog.scene(id).is_some()) else {
+                return WallpaperReply {
+                    output: Err("缺少有效的选定场景".into()),
+                    usage: Some(TrustedUsage::free()),
+                };
+            };
             let state_version = catalog
                 .scene(&scene_id)
                 .and_then(|scene| scene.get("stateVersion"))
@@ -356,9 +358,17 @@ pub(crate) struct AiRuntime {
     execution_slots: Arc<tokio::sync::Semaphore>,
     /// 壁纸生成 quote 内存态（§19.4）：重启即丢，不写任何持久层。
     wallpaper_quotes: Mutex<super::wallpaper_jobs::QuoteStore>,
+    pub(super) wallpaper_pairings: Mutex<super::wallpaper_pairing::PendingStore>,
+    pub(super) wallpaper_session_deadlines: Mutex<HashMap<String, std::time::Instant>>,
 }
 
 impl AiRuntime {
+    #[cfg(test)]
+    pub(super) fn with_test_provider(provider: Arc<dyn StageIntentProvider>) -> Self {
+        let mut runtime = Self::new();
+        runtime.provider = RwLock::new(provider);
+        runtime
+    }
     pub(crate) fn new() -> Self {
         let runtime = Self::from_config(&crate::config::AiConfig::default());
         #[cfg(test)]
@@ -377,6 +387,8 @@ impl AiRuntime {
             provider: RwLock::new(super::provider::configured(config)),
             execution_slots: Arc::new(tokio::sync::Semaphore::new(1)),
             wallpaper_quotes: Mutex::new(super::wallpaper_jobs::QuoteStore::default()),
+            wallpaper_pairings: Mutex::new(super::wallpaper_pairing::PendingStore::default()),
+            wallpaper_session_deadlines: Mutex::new(HashMap::new()),
         }
     }
 
@@ -386,6 +398,10 @@ impl AiRuntime {
 
     pub(crate) fn completion_slots(&self) -> Arc<tokio::sync::Semaphore> {
         self.execution_slots.clone()
+    }
+
+    pub(super) async fn discard_wallpaper_quotes(&self, principal: &str) {
+        self.wallpaper_quotes.lock().await.discard(principal);
     }
 
     pub(crate) fn try_evaluation_slot(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
@@ -847,7 +863,16 @@ pub(crate) async fn submit(
     let input = GenerationInput::Stage(brief.trim().to_string());
     let key = idempotency_key.map(str::to_string);
     tokio::spawn(async move {
-        submit_owned(&state, &principal, input, CAPABILITY, key.as_deref()).await
+        submit_owned(
+            &state,
+            &principal,
+            input,
+            CAPABILITY,
+            key.as_deref(),
+            None,
+            None,
+        )
+        .await
     })
     .await
     .map_err(|e| internal(format!("AI acceptance failed: {e}")))?
@@ -954,6 +979,8 @@ async fn submit_owned(
     input: GenerationInput,
     capability: &'static str,
     idempotency_key: Option<&str>,
+    quoted_pricing: Option<PricingSnapshot>,
+    wallpaper_binding: Option<(&str, &str)>,
 ) -> ApiResult<SubmitOutcome> {
     let cap = generation_capability(capability).ok_or_else(|| bad_request("未注册的生成能力"))?;
     // 输入验证按 capability 走注册上界：舞台 brief 有界文本，壁纸请求已在
@@ -1046,6 +1073,16 @@ async fn submit_owned(
         quote,
         credential: credential.as_ref().map(super::credential::Lease::identity),
     };
+    if quoted_pricing
+        .as_ref()
+        .is_some_and(|quoted| quoted != &pricing)
+    {
+        return Err(ApiError::new(
+            axum::http::StatusCode::CONFLICT,
+            "quote_pricing_changed",
+            "报价或凭据已变化，请重新报价并确认",
+        ));
+    }
     // 计费预留上界按 capability 注册项收紧（§19.3）。
     if pricing.quote.reservation_micro_usd > cap.reservation_micro_usd {
         return Err(ApiError::new(
@@ -1076,6 +1113,17 @@ async fn submit_owned(
             "idempotency_conflict",
             "同一 idempotencyKey 携带了不同输入",
         ));
+    }
+    let now = now_ms();
+    if capability == WALLPAPER_CAPABILITY && principal != crate::idempotency::LOCAL_OWNER {
+        super::wallpaper_pairing::require_transaction_time(
+            state,
+            &mut tx,
+            principal,
+            &owner,
+            hertz_wallpaper::pairing::TASK_MS,
+        )
+        .await?;
     }
     check_generation(&mut tx, now).await?;
     let guard = store::ensure_budget_guard(&mut tx, &owner)
@@ -1160,8 +1208,29 @@ async fn submit_owned(
         }
         return Err(store_error(e));
     }
+    if let Some((quote_id, request_id)) = wallpaper_binding {
+        sqlx::query(
+            "INSERT INTO ai_wallpaper_submissions(job_id,quote_id,request_id) VALUES(?,?,?)",
+        )
+        .bind(&job.job_id)
+        .bind(quote_id)
+        .bind(request_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(sql_error)?;
+    }
     // Serialize input handoff with cancellation cleanup, including the commit boundary.
     let mut inputs = state.ai_runtime.inputs.lock().await;
+    if capability == WALLPAPER_CAPABILITY && principal != crate::idempotency::LOCAL_OWNER {
+        super::wallpaper_pairing::require_transaction_time(
+            state,
+            &mut tx,
+            principal,
+            &owner,
+            hertz_wallpaper::pairing::TASK_MS,
+        )
+        .await?;
+    }
     tx.commit().await.map_err(sql_error)?;
     let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(());
     inputs.insert(job.job_id.clone(), (input, cancel_tx));
@@ -1363,6 +1432,20 @@ async fn run_job_inner(
             tracing::warn!("AI dispatch blocked before send: {}", error.code);
             return Err("failed");
         }
+        if job.capability == WALLPAPER_CAPABILITY
+            && job.principal != crate::idempotency::LOCAL_OWNER
+            && super::wallpaper_pairing::require_transaction_time(
+                &state,
+                &mut tx,
+                &job.principal,
+                &job.owner_instance_id,
+                1,
+            )
+            .await
+            .is_err()
+        {
+            return Err("cancelled");
+        }
         let guard = match store::ensure_budget_guard(&mut tx, &job.owner_instance_id).await {
             Ok(guard) => guard,
             Err(_) => return Err("failed"),
@@ -1526,16 +1609,17 @@ async fn run_job_inner(
                             contract::validate_artifact(&contract::artifact(&value)).map(|_| ())
                         })
                         .map(|_| ("artifact:1", contract::artifact(&value).to_string())),
-                    (GenerationInput::Wallpaper(_), WALLPAPER_CAPABILITY) => {
+                    (GenerationInput::Wallpaper(request), WALLPAPER_CAPABILITY) => {
                         match serde_json::to_vec(&value) {
                             Ok(bytes) => {
-                                match hertz_wallpaper::generation::BuiltinSceneOutput::parse(&bytes)
-                                {
+                                match super::wallpaper_jobs::validate_builtin_output(
+                                    request, &bytes,
+                                ) {
                                     Ok(output) => match serde_json::to_string(&output) {
                                         Ok(payload) => Ok(("wallpaper.builtin:1", payload)),
                                         Err(error) => Err(format!("输出序列化失败: {error}")),
                                     },
-                                    Err(error) => Err(error.message),
+                                    Err(error) => Err(error),
                                 }
                             }
                             Err(error) => Err(format!("输出序列化失败: {error}")),
@@ -2112,7 +2196,7 @@ pub(crate) async fn revoke_generation_consent(state: &Arc<AppState>) -> ApiResul
         .map_err(store_error)?;
     let mut events = Vec::new();
     for job in candidates {
-        if job.owner_instance_id != owner || job.capability != CAPABILITY {
+        if job.owner_instance_id != owner || generation_capability(&job.capability).is_none() {
             continue;
         }
         if store::cas_job_state(
@@ -2134,6 +2218,51 @@ pub(crate) async fn revoke_generation_consent(state: &Arc<AppState>) -> ApiResul
     let mut inputs = state.ai_runtime.inputs.lock().await;
     for id in events {
         inputs.remove(&id);
+        publish_task(state);
+    }
+    Ok(())
+}
+
+/// The lifecycle owner holds admission closed while this transaction reads
+/// fresh revisions, signals workers, and settles all of this principal's jobs.
+pub(super) async fn cancel_principal_jobs(state: &Arc<AppState>, principal: &str) -> ApiResult<()> {
+    let mut tx = vmusic_store::begin_immediate(&state.db)
+        .await
+        .map_err(store_error)?;
+    let candidates = store::recovery_candidates(&mut *tx)
+        .await
+        .map_err(store_error)?;
+    let jobs: Vec<_> = candidates
+        .into_iter()
+        .filter(|job| job.principal == principal && job.capability == WALLPAPER_CAPABILITY)
+        .collect();
+    {
+        let inputs = state.ai_runtime.inputs.lock().await;
+        for job in &jobs {
+            if let Some((_, sender)) = inputs.get(&job.job_id) {
+                let _ = sender.send(());
+            }
+        }
+    }
+    for job in &jobs {
+        if store::cas_job_state(
+            &mut *tx,
+            &job.job_id,
+            &job.state,
+            job.state_revision,
+            "cancelled",
+            now_ms(),
+        )
+        .await
+        .map_err(store_error)?
+        {
+            settle_on_terminal(&mut tx, job, "cancelled").await?;
+        }
+    }
+    tx.commit().await.map_err(sql_error)?;
+    let mut inputs = state.ai_runtime.inputs.lock().await;
+    for job in jobs {
+        inputs.remove(&job.job_id);
         publish_task(state);
     }
     Ok(())
@@ -2661,6 +2790,13 @@ pub(crate) async fn wallpaper_quote(
     principal: &str,
     bytes: &[u8],
 ) -> ApiResult<serde_json::Value> {
+    let _grant = if principal != crate::idempotency::LOCAL_OWNER {
+        let guard = super::facade::grant_lifecycle().lock().await;
+        super::wallpaper_pairing::require_time(state, principal).await?;
+        Some(guard)
+    } else {
+        None
+    };
     let request =
         hertz_wallpaper::generation::WallpaperGenerateRequest::parse(bytes).map_err(|error| {
             ApiError::new(
@@ -2735,7 +2871,10 @@ pub(crate) async fn wallpaper_quote(
         quote_id.clone(),
         request,
         request_digest,
-        pricing.clone(),
+        super::wallpaper_jobs::ProviderQuote {
+            pricing: pricing.clone(),
+            endpoint_identity: provider.endpoint_identity().map(str::to_owned),
+        },
         now,
     )?;
     Ok(json!({
@@ -2746,6 +2885,13 @@ pub(crate) async fn wallpaper_quote(
         "model": pricing.model,
         "reservationMicroUsd": pricing.quote.reservation_micro_usd,
         "pricingKnown": pricing.pricing_known(),
+        "pricingMode": if pricing.quote.pricing_version=="fake-free-v1" {"free"} else if pricing.pricing_known() {"metered"} else {"token-only"},
+        "maximumCostMicroUsd": if pricing.quote.pricing_version=="fake-free-v1" {Some(0)} else if pricing.pricing_known() {Some(pricing.quote.reservation_micro_usd)} else {None},
+        "maxInputTokens": pricing.quote.max_input_tokens,
+        "maxOutputTokens": pricing.quote.max_output_tokens,
+        "endpointLabel": provider.endpoint_identity().and_then(|endpoint|reqwest::Url::parse(endpoint).ok()).map(|url|format!("{}://{}:{}",url.scheme(),url.host_str().unwrap_or(""),url.port_or_known_default().unwrap_or(0))).unwrap_or_else(||"本地离线 fixture".into()),
+        "dataScope": "仅本次描述与所选内置场景的参数合同",
+        "maximumWaitSeconds": 90,
     }))
 }
 
@@ -2759,8 +2905,65 @@ pub(crate) async fn wallpaper_submit(
     request_id: &str,
     idempotency_key: Option<&str>,
 ) -> ApiResult<SubmitOutcome> {
+    let state = state.clone();
+    let principal = principal.to_owned();
+    let quote_id = quote_id.to_owned();
+    let request_id = request_id.to_owned();
+    let key = idempotency_key.map(str::to_owned);
+    // Observer cancellation must not release authority while admission continues.
+    tokio::spawn(async move {
+        wallpaper_submit_owned(&state, &principal, &quote_id, &request_id, key.as_deref()).await
+    })
+    .await
+    .map_err(|e| internal(format!("AI acceptance failed: {e}")))?
+}
+
+async fn wallpaper_submit_owned(
+    state: &Arc<AppState>,
+    principal: &str,
+    quote_id: &str,
+    request_id: &str,
+    idempotency_key: Option<&str>,
+) -> ApiResult<SubmitOutcome> {
+    // Quote consumption and receipt recovery share one lifecycle for both the
+    // official owner and grants; concurrent quotes cannot bypass exact binding.
+    let _grant = super::facade::grant_lifecycle().lock().await;
+    if principal != crate::idempotency::LOCAL_OWNER {
+        let row = vmusic_store::ai::find_grant_by_id(&state.db, principal)
+            .await
+            .map_err(store_error)?
+            .ok_or_else(crate::error::unauthorized)?;
+        super::wallpaper_pairing::validate_grant(state, &row).await?;
+    }
     let now = now_ms();
     let key = normalize_key(idempotency_key, now)?;
+    // An accepted receipt outlives its quote. Recover only the exact submission
+    // in this principal; this path cannot create a job or call a provider.
+    if let Some(job) = store::find_job_by_key(&state.db, principal, WALLPAPER_CAPABILITY, &key)
+        .await
+        .map_err(store_error)?
+    {
+        let binding: Option<(String, String)> = sqlx::query_as(
+            "SELECT quote_id,request_id FROM ai_wallpaper_submissions WHERE job_id=?",
+        )
+        .bind(&job.job_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(sql_error)?;
+        if binding
+            .as_ref()
+            .is_some_and(|(q, r)| q == quote_id && r == request_id)
+        {
+            return Ok(SubmitOutcome::Replayed {
+                job: JobView::with_usage(&job, &state.db).await?,
+            });
+        }
+        return Err(ApiError::new(
+            axum::http::StatusCode::CONFLICT,
+            "idempotency_conflict",
+            "同一 idempotencyKey 携带了不同确认请求",
+        ));
+    }
     let lookup = {
         let quotes = state.ai_runtime.wallpaper_quotes.lock().await;
         quotes.lookup(principal, quote_id, now).map(|quote| {
@@ -2770,10 +2973,13 @@ pub(crate) async fn wallpaper_submit(
                 quote.request.request_id.clone(),
                 quote.pricing.provider.clone(),
                 quote.pricing.model.clone(),
+                quote.endpoint_identity.clone(),
             )
         })
     };
-    let Some((digest, consumed, quote_request_id, quote_provider, quote_model)) = lookup else {
+    let Some((digest, consumed, quote_request_id, quote_provider, quote_model, quote_endpoint)) =
+        lookup
+    else {
         return Err(ApiError::new(
             axum::http::StatusCode::NOT_FOUND,
             "quote_unknown",
@@ -2812,7 +3018,10 @@ pub(crate) async fn wallpaper_submit(
     // quote 绑定 provider/model：确认后模型或 provider 被换即拒绝重试，
     // 不把旧报价落到新 adapter 上（§19.4）。
     let provider = state.ai_runtime.provider().await;
-    if provider.id() != quote_provider || provider.model() != quote_model {
+    if provider.id() != quote_provider
+        || provider.model() != quote_model
+        || provider.endpoint_identity() != quote_endpoint.as_deref()
+    {
         return Err(ApiError::new(
             axum::http::StatusCode::CONFLICT,
             "quote_provider_changed",
@@ -2829,31 +3038,26 @@ pub(crate) async fn wallpaper_submit(
         let quotes = state.ai_runtime.wallpaper_quotes.lock().await;
         quotes
             .lookup(principal, quote_id, now)
-            .map(|quote| quote.request.clone())
+            .map(|quote| (quote.request.clone(), quote.pricing.clone()))
     };
-    let Some(request) = request else {
+    let Some((request, pricing)) = request else {
         return Err(ApiError::new(
             axum::http::StatusCode::NOT_FOUND,
             "quote_unknown",
             "quote 不存在或已过期",
         ));
     };
-    let state_clone = state.clone();
-    let principal_owned = principal.to_string();
     let input = GenerationInput::Wallpaper(request);
-    let key_owned = key.clone();
-    let outcome = tokio::spawn(async move {
-        submit_owned(
-            &state_clone,
-            &principal_owned,
-            input,
-            WALLPAPER_CAPABILITY,
-            Some(key_owned.as_str()),
-        )
-        .await
-    })
-    .await
-    .map_err(|e| internal(format!("AI acceptance failed: {e}")))?;
+    let outcome = submit_owned(
+        state,
+        principal,
+        input,
+        WALLPAPER_CAPABILITY,
+        Some(key.as_str()),
+        Some(pricing),
+        Some((quote_id, request_id)),
+    )
+    .await;
     match &outcome {
         Ok(_) => {
             state

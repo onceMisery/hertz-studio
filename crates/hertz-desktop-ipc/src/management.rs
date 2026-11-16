@@ -54,8 +54,12 @@ fn closed(error: &io::Error) -> bool {
 pub struct Admission {
     cancel: Cancellation,
     deadline: Instant,
+    peer: crate::windows::PeerIdentity,
 }
 impl Admission {
+    pub fn peer(&self) -> &crate::windows::PeerIdentity {
+        &self.peer
+    }
     pub fn is_valid(&self) -> bool {
         !self.cancel.is_cancelled() && Instant::now() < self.deadline
     }
@@ -305,6 +309,7 @@ impl Server {
         let admission = Admission {
             cancel: Cancellation::new(),
             deadline: Instant::now() + REQUEST_TIMEOUT,
+            peer: peer(handle, true, None)?,
         };
         Ok(Connection {
             pipe: self.pipe,
@@ -485,6 +490,17 @@ pub fn request_until(
     cancel: &Cancellation,
     until: Option<Instant>,
 ) -> io::Result<Value> {
+    request_verified(name, payload, cancel, until, None)
+}
+
+/// Verify the kernel's server PID before sending any payload, including secrets.
+pub fn request_verified(
+    name: &str,
+    payload: &Value,
+    cancel: &Cancellation,
+    until: Option<Instant>,
+    expected_pid: Option<u32>,
+) -> io::Result<Value> {
     if !payload.is_object() {
         return Err(invalid("management request must be an object"));
     }
@@ -535,7 +551,7 @@ pub fn request_until(
         || Instant::now() + REQUEST_TIMEOUT,
         |until| until.min(Instant::now() + REQUEST_TIMEOUT),
     );
-    peer(pipe.as_raw_handle(), false, None)?;
+    peer(pipe.as_raw_handle(), false, expected_pid)?;
     let mode = PIPE_READMODE_MESSAGE;
     if unsafe {
         SetNamedPipeHandleState(
@@ -603,6 +619,48 @@ mod tests {
         let (send, receive) = mpsc::channel();
         send.send(value).unwrap();
         receive
+    }
+
+    #[test]
+    fn verified_request_checks_server_pid_before_transmitting_payload() {
+        let (name, worker) = fixture(1, |body, admission| {
+            assert_eq!(admission.peer().pid, std::process::id());
+            assert_eq!(admission.peer().identity, Identity::current().unwrap());
+            assert_eq!(body["challenge"], "fixture-challenge");
+            reply(json!({"ok":true}))
+        });
+        assert_eq!(
+            request_verified(
+                &name,
+                &json!({"challenge":"fixture-challenge"}),
+                &Cancellation::new(),
+                None,
+                Some(std::process::id())
+            )
+            .unwrap()["ok"],
+            true
+        );
+        assert!(worker.join().unwrap().pop().unwrap().is_ok());
+        let observed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let copied = observed.clone();
+        let (name, worker) = fixture(1, move |_, _| {
+            copied.store(true, std::sync::atomic::Ordering::SeqCst);
+            reply(json!({"ok":true}))
+        });
+        assert_eq!(
+            request_verified(
+                &name,
+                &json!({"bearer":"must-never-be-sent"}),
+                &Cancellation::new(),
+                None,
+                Some(std::process::id().wrapping_add(1))
+            )
+            .unwrap_err()
+            .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        let _ = worker.join().unwrap();
+        assert!(!observed.load(std::sync::atomic::Ordering::SeqCst));
     }
     fn raw_client(name: &str, overlapped: bool) -> OwnedPipe<OwnedHandle> {
         let name = name_wide(name).unwrap();

@@ -76,6 +76,7 @@ struct Ticket {
 }
 
 pub(crate) struct NativeAi {
+    pub(crate) generation: Arc<super::generation::NativeGeneration>,
     owner: u64,
     host_generation: String,
     selection_generation: u64,
@@ -87,6 +88,7 @@ pub(crate) struct NativeAi {
 impl NativeAi {
     pub(crate) fn new() -> Self {
         Self {
+            generation: super::generation::NativeGeneration::new(),
             owner: 0,
             host_generation: uuid::Uuid::new_v4().to_string(),
             selection_generation: 1,
@@ -103,6 +105,7 @@ impl NativeAi {
         }
     }
     pub(crate) fn invalidate(&mut self) {
+        self.generation.invalidate_quote();
         self.selection_generation = self.selection_generation.wrapping_add(1);
         self.displayed.clear();
         self.tickets.clear();

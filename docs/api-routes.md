@@ -19,7 +19,7 @@ node scripts/api-routes.js --check  # 只校验，不一致则退出码 1（CI �
 <!-- api-routes:begin -->
 <!-- 由 `node scripts/api-routes.js` 生成，勿手改；`--check` 会校验是否与源码一致。 -->
 
-REST 路由表共 202 个「方法 + 路径」（`crates/hertz-studio/src/routes.rs` 与 `stage_media/api.rs` 的 166 条 `.route()`），另有 `main.rs` 挂的 7 条路由与 161 条内嵌静态资源路由。
+REST 路由表共 211 个「方法 + 路径」（`crates/hertz-studio/src/routes.rs` 与 `stage_media/api.rs` 的 175 条 `.route()`），另有 `main.rs` 挂的 7 条路由与 161 条内嵌静态资源路由。
 
 | 方法 | 路径 |
 | --- | --- |
@@ -50,7 +50,13 @@ REST 路由表共 202 个「方法 + 路径」（`crates/hertz-studio/src/routes
 | GET | `/v1/ai/status` |
 | GET | `/v1/ai/wallpaper/capabilities` |
 | POST | `/v1/ai/wallpaper/jobs` |
+| GET | `/v1/ai/wallpaper/jobs/{jobId}` |
+| POST | `/v1/ai/wallpaper/jobs/{jobId}/cancel` |
+| GET | `/v1/ai/wallpaper/pairings` |
+| POST | `/v1/ai/wallpaper/pairings/register` |
+| POST | `/v1/ai/wallpaper/pairings/{pairingId}/confirm` |
 | POST | `/v1/ai/wallpaper/quote` |
+| DELETE | `/v1/ai/wallpaper/session` |
 | GET | `/v1/auth/overlay-key` |
 | POST | `/v1/auth/ticket` |
 | GET | `/v1/backup` |

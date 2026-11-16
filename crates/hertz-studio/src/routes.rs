@@ -102,17 +102,11 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
             post(ai_reject_proposal),
         )
         .route("/v1/ai/budget-guard/reset", post(ai_budget_guard_reset))
-        // 壁纸生成（AI-02 切片 2）：官方 UI 入口，全权 token 后面，固定
-        // local-owner；quote 只做本地计价，submit 消费 quote 走既有受理。
+        .route("/v1/ai/wallpaper/pairings", get(ai_wallpaper_pending))
         .route(
-            "/v1/ai/wallpaper/capabilities",
-            get(ai_wallpaper_capabilities),
+            "/v1/ai/wallpaper/pairings/{pairingId}/confirm",
+            post(ai_wallpaper_pair_confirm),
         )
-        .route(
-            "/v1/ai/wallpaper/quote",
-            post(ai_wallpaper_quote).layer(axum::extract::DefaultBodyLimit::max(64 * 1024)),
-        )
-        .route("/v1/ai/wallpaper/jobs", post(ai_wallpaper_submit_job))
         .route("/v1/state", get(get_state))
         .route(
             "/v1/room",
@@ -393,6 +387,28 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/v1/ai/capabilities/call", post(ai_capabilities_call))
         .layer(middleware::from_fn_with_state(state.clone(), require_grant));
 
+    let ai_wallpaper = Router::new()
+        .route(
+            "/v1/ai/wallpaper/capabilities",
+            get(ai_wallpaper_capabilities),
+        )
+        .route("/v1/ai/wallpaper/quote", post(ai_wallpaper_quote))
+        .route("/v1/ai/wallpaper/jobs", post(ai_wallpaper_submit_job))
+        .route("/v1/ai/wallpaper/jobs/{jobId}", get(ai_wallpaper_job))
+        .route(
+            "/v1/ai/wallpaper/jobs/{jobId}/cancel",
+            post(ai_wallpaper_cancel),
+        )
+        .route(
+            "/v1/ai/wallpaper/session",
+            axum::routing::delete(ai_wallpaper_disconnect),
+        )
+        .layer(axum::extract::DefaultBodyLimit::max(16 * 1024))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_wallpaper_ai,
+        ));
+
     // 桌面歌词桥：只读数据 + 显式窄播控，够不到主 token 组与受限门面。
     let desktop_lyrics = Router::new()
         .route("/v1/desktop-lyrics/snapshot", get(desktop_lyrics_snapshot))
@@ -448,6 +464,11 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .merge(api)
         .merge(crate::stage_media::resource_router())
         .merge(ai_restricted)
+        .merge(ai_wallpaper)
+        .route(
+            "/v1/ai/wallpaper/pairings/register",
+            post(ai_wallpaper_pair_register).layer(axum::extract::DefaultBodyLimit::max(16 * 1024)),
+        )
         .merge(desktop_lyrics)
         .merge(calibration)
         .merge(wallpaper)
@@ -1209,12 +1230,139 @@ async fn ai_wallpaper_capabilities(
     ))
 }
 
+#[derive(Clone)]
+struct WallpaperPrincipal {
+    id: String,
+    session: bool,
+}
+
+async fn require_wallpaper_ai(
+    State(state): State<Arc<AppState>>,
+    mut request: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    let bearer = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok())
+        .and_then(|h| h.strip_prefix("Bearer "));
+    let official = !state.token.is_empty()
+        && (bearer == Some(state.token.as_str())
+            || request
+                .headers()
+                .get("x-vmusic-token")
+                .and_then(|h| h.to_str().ok())
+                == Some(state.token.as_str()));
+    let principal = if official {
+        WallpaperPrincipal {
+            id: crate::idempotency::LOCAL_OWNER.into(),
+            session: false,
+        }
+    } else {
+        let Some(token) = bearer else {
+            return unauthorized().into_response();
+        };
+        let context = match crate::ai::facade::authenticate_wallpaper(&state, token).await {
+            Ok(context) => context,
+            Err(error) => return error.into_response(),
+        };
+        let path = request.uri().path();
+        let scope = if path.ends_with("/capabilities") {
+            "wallpaper:capabilities"
+        } else if path.ends_with("/quote") {
+            "wallpaper:quote"
+        } else if path.ends_with("/cancel") || path.ends_with("/session") {
+            "wallpaper:cancel"
+        } else if request.method() == axum::http::Method::POST && path.ends_with("/jobs") {
+            "wallpaper:submit"
+        } else {
+            "wallpaper:own_job"
+        };
+        if !context.scopes.contains(scope) {
+            return ApiError::new(
+                axum::http::StatusCode::FORBIDDEN,
+                "scope_required",
+                "该会话未获此壁纸权限",
+            )
+            .into_response();
+        }
+        WallpaperPrincipal {
+            id: context.grant_id,
+            session: true,
+        }
+    };
+    request.extensions_mut().insert(principal);
+    next.run(request).await
+}
+
+async fn ai_wallpaper_pair_register(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<crate::ai::wallpaper_pairing::Registration>,
+) -> ApiResult<Json<serde_json::Value>> {
+    // Native initiation conveys no authority. Browsers cannot register an alleged native instance.
+    if headers.contains_key(header::ORIGIN) || headers.contains_key("sec-fetch-site") {
+        return Err(unauthorized());
+    }
+    Ok(Json(
+        crate::ai::wallpaper_pairing::register(&state, body).await?,
+    ))
+}
+async fn ai_wallpaper_pending(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    Json(crate::ai::wallpaper_pairing::pending(&state).await)
+}
+async fn ai_wallpaper_pair_confirm(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(
+        crate::ai::wallpaper_pairing::confirm(&state, &id).await?,
+    ))
+}
+async fn ai_wallpaper_disconnect(
+    State(state): State<Arc<AppState>>,
+    axum::Extension(principal): axum::Extension<WallpaperPrincipal>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if !principal.session {
+        return Err(bad_request("请在授权管理中断开对应桌面会话"));
+    }
+    crate::ai::facade::revoke_grant(&state, &principal.id).await?;
+    Ok(Json(serde_json::json!({"disconnected":true})))
+}
+async fn ai_wallpaper_job(
+    State(state): State<Arc<AppState>>,
+    axum::Extension(principal): axum::Extension<WallpaperPrincipal>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let job = crate::ai::jobs::get_job(&state, &principal.id, &id).await?;
+    Ok(Json(
+        serde_json::to_value(job).map_err(|e| internal(e.to_string()))?,
+    ))
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct WallpaperCancel {
+    expected_state_revision: i64,
+}
+async fn ai_wallpaper_cancel(
+    State(state): State<Arc<AppState>>,
+    axum::Extension(principal): axum::Extension<WallpaperPrincipal>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(body): Json<WallpaperCancel>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let job =
+        crate::ai::jobs::cancel(&state, &principal.id, &id, body.expected_state_revision).await?;
+    Ok(Json(
+        serde_json::to_value(job).map_err(|e| internal(e.to_string()))?,
+    ))
+}
+
 async fn ai_wallpaper_quote(
     State(state): State<Arc<AppState>>,
+    axum::Extension(principal): axum::Extension<WallpaperPrincipal>,
     bytes: axum::body::Bytes,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let quote =
-        crate::ai::jobs::wallpaper_quote(&state, crate::idempotency::LOCAL_OWNER, &bytes).await?;
+    let quote = crate::ai::jobs::wallpaper_quote(&state, &principal.id, &bytes).await?;
     Ok(Json(quote))
 }
 
@@ -1228,11 +1376,12 @@ struct AiWallpaperSubmitRequest {
 
 async fn ai_wallpaper_submit_job(
     State(state): State<Arc<AppState>>,
+    axum::Extension(principal): axum::Extension<WallpaperPrincipal>,
     Json(body): Json<AiWallpaperSubmitRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let outcome = crate::ai::jobs::wallpaper_submit(
         &state,
-        crate::idempotency::LOCAL_OWNER,
+        &principal.id,
         &body.quote_id,
         &body.request_id,
         body.idempotency_key.as_deref(),

@@ -1158,6 +1158,7 @@ window.AiGrantSettings = (function () {
       created_at: Number.isFinite(row.created_at) ? row.created_at : null,
       updated_at: Number.isFinite(row.updated_at) ? row.updated_at : null,
       credential_path: typeof row.credential_path === 'string' ? row.credential_path : '',
+      delivery_mode: row.delivery_mode === 'native_session' ? 'native_session' : 'file',
     };
   }
 
@@ -1289,6 +1290,16 @@ window.AiGrantSettings = (function () {
       : '无'));
     appendText(item, 'p', 'hint ai-grant-scopes', '创建于 ' + formatDate(grant.created_at) + ' · 更新于 ' + formatDate(grant.updated_at));
 
+    if (grant.delivery_mode === 'native_session') {
+      appendText(item, 'p', 'hint', '壁纸生成短会话 · 最长 30 分钟，仅原生内存持有凭据。');
+      if (!grant.revoked) item.appendChild(makeButton('断开生成连接', 'btn danger', action(async () => {
+        if (!await settings.confirm('断开此壁纸生成连接？该会话尚未完成的任务将取消。')) return;
+        await settings.transport.del('/v1/ai/grants/' + encodeURIComponent(grant.grant_id));
+        await refreshAfterMutation('生成连接已断开。');
+      })));
+      refs.list.appendChild(item);
+      return;
+    }
     const config = configFor(grant);
     if (!grant.revoked && config) {
       const configText = JSON.stringify(config, null, 2);
@@ -1319,6 +1330,49 @@ window.AiGrantSettings = (function () {
       appendText(item, 'p', 'hint set-note', '无法从服务端安全摘要推导 DataDir，不能生成连接配置。');
     }
     refs.list.appendChild(item);
+  }
+
+  function installWallpaperPairings() {
+    const previous = node('ai-wallpaper-pairings');
+    if (previous) previous.remove();
+    const panel = document.createElement('details'); panel.id = 'ai-wallpaper-pairings';
+    appendText(panel, 'summary', '', '壁纸生成连接');
+    appendText(panel, 'p', 'hint', '在桌面壁纸中心发起连接后，在这里明确允许。连接最长 30 分钟，只能生成壁纸候选，不能控制播放或应用桌面。');
+    const message = appendText(panel, 'p', 'hint', '打开后可查看等待确认的桌面组件。'); message.setAttribute('role', 'status');
+    const list = document.createElement('div'); panel.appendChild(list);
+    let pending = false, version = 0;
+    async function read() {
+      if (pending || !panel.open || document.hidden) return;
+      const current = ++version; pending = true; refresh.disabled = true;
+      try {
+        const result = await settings.transport.get('/v1/ai/wallpaper/pairings');
+        if (version !== current || !panel.open) return;
+        list.replaceChildren();
+        const rows = Array.isArray(result.pending) ? result.pending : [];
+        message.textContent = rows.length ? '核对桌面组件，再允许本次连接。' : '没有待配对实例。请先在桌面壁纸中心点击“连接生成服务”。';
+        for (const row of rows) {
+          const item = document.createElement('article'); item.className = 'ai-grant-item';
+          appendText(item, 'strong', '', 'Hertz 桌面组件 · ' + row.edition + ' · PID ' + row.nativePid);
+          appendText(item, 'p', 'hint', '配对剩余 ' + row.expiresInSeconds + ' 秒。');
+          item.appendChild(makeButton('允许本次生成连接', 'btn primary', async () => {
+            if (pending) return;
+            if (!await settings.confirm('允许此桌面组件使用壁纸生成？有效期最长 30 分钟，生成前仍需确认报价。')) return;
+            pending = true; item.querySelector('button').disabled = true;
+            try {
+              await settings.transport.post('/v1/ai/wallpaper/pairings/' + encodeURIComponent(row.pairingId) + '/confirm', {});
+              message.textContent = '已允许生成连接。返回桌面壁纸中心继续。';
+              item.remove(); await loadGrants(); render();
+            } catch (error) { message.textContent = error.message || '配对失败，请在桌面中心重新连接。'; }
+            finally { pending = false; refresh.disabled = false; if (item.isConnected) item.querySelector('button').disabled = false; }
+          }));
+          list.appendChild(item);
+        }
+      } catch (error) { message.textContent = error.message || '连接列表未能读取，请重试。'; }
+      finally { pending = false; refresh.disabled = false; }
+    }
+    const refresh = makeButton('刷新待配对实例', 'btn', read); panel.appendChild(refresh);
+    panel.addEventListener('toggle', () => { ++version; if (panel.open) read(); });
+    refs.root.appendChild(panel);
   }
 
   function render() {
@@ -1396,6 +1450,7 @@ window.AiGrantSettings = (function () {
       status: node('ai-grant-status'),
       list: node('ai-grant-list'),
     };
+    installWallpaperPairings();
     manager.hidden = false;
     unavailable.hidden = true;
     if (presets[refs.preset.value]) setScopes(presets[refs.preset.value]);

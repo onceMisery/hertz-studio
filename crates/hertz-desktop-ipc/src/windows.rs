@@ -136,6 +136,134 @@ impl Identity {
     }
 }
 
+/// Real process creation identity, excluding exited processes and PID reuse.
+pub fn process_generation(pid: u32) -> io::Result<String> {
+    use windows_sys::Win32::{
+        Foundation::FILETIME,
+        System::Threading::{GetExitCodeProcess, GetProcessTimes},
+    };
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if handle.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    let process = unsafe { OwnedHandle::from_raw_handle(handle) };
+    let identity = unsafe { identity_for_process(process.as_raw_handle())? };
+    if identity != Identity::current()? {
+        return Err(denied("process identity mismatch"));
+    }
+    let mut exit = 0;
+    let mut created: FILETIME = unsafe { std::mem::zeroed() };
+    let mut exited: FILETIME = unsafe { std::mem::zeroed() };
+    let mut kernel: FILETIME = unsafe { std::mem::zeroed() };
+    let mut user: FILETIME = unsafe { std::mem::zeroed() };
+    if unsafe { GetExitCodeProcess(process.as_raw_handle(), &mut exit) } == 0
+        || exit != 259
+        || unsafe {
+            GetProcessTimes(
+                process.as_raw_handle(),
+                &mut created,
+                &mut exited,
+                &mut kernel,
+                &mut user,
+            )
+        } == 0
+    {
+        return Err(denied("process is unavailable"));
+    }
+    Ok((((created.dwHighDateTime as u64) << 32) | created.dwLowDateTime as u64).to_string())
+}
+
+/// Verify the server endpoint of an already connected IPv4 loopback socket.
+/// No application bytes may be sent before this succeeds. The socket keeps
+/// that endpoint alive, so another listener cannot take over after the check.
+pub fn verify_loopback_peer(
+    stream: &std::net::TcpStream,
+    pid: u32,
+    generation: &str,
+) -> io::Result<()> {
+    use windows_sys::Win32::{
+        Foundation::ERROR_INSUFFICIENT_BUFFER,
+        NetworkManagement::IpHelper::{
+            GetExtendedTcpTable, MIB_TCPROW_OWNER_PID, MIB_TCP_STATE_ESTAB, TCP_TABLE_OWNER_PID_ALL,
+        },
+    };
+    let local = stream.local_addr()?;
+    let remote = stream.peer_addr()?;
+    if !local.ip().is_loopback()
+        || !remote.ip().is_loopback()
+        || !local.is_ipv4()
+        || !remote.is_ipv4()
+        || process_generation(pid)? != generation
+    {
+        return Err(denied("HTTP peer process mismatch"));
+    }
+    let mut bytes = 0u32;
+    let code = unsafe {
+        GetExtendedTcpTable(
+            std::ptr::null_mut(),
+            &mut bytes,
+            0,
+            2,
+            TCP_TABLE_OWNER_PID_ALL,
+            0,
+        )
+    };
+    if code != ERROR_INSUFFICIENT_BUFFER {
+        return Err(io::Error::from_raw_os_error(code as i32));
+    }
+    // Bounded snapshots; system-wide connection churn may require one retry.
+    for _ in 0..2 {
+        if !(4..=1024 * 1024).contains(&bytes) {
+            return Err(invalid("TCP table too large"));
+        }
+        let capacity = bytes as usize;
+        let mut buffer = vec![0u32; capacity.div_ceil(4)];
+        let code = unsafe {
+            GetExtendedTcpTable(
+                buffer.as_mut_ptr().cast(),
+                &mut bytes,
+                0,
+                2,
+                TCP_TABLE_OWNER_PID_ALL,
+                0,
+            )
+        };
+        if code == ERROR_INSUFFICIENT_BUFFER {
+            continue;
+        }
+        if code != 0 {
+            return Err(io::Error::from_raw_os_error(code as i32));
+        }
+        let count = buffer[0] as usize;
+        let row_size = std::mem::size_of::<MIB_TCPROW_OWNER_PID>();
+        if bytes as usize > capacity || count > (bytes as usize - 4) / row_size {
+            return Err(invalid("invalid TCP table"));
+        }
+        for index in 0..count {
+            let row = unsafe {
+                std::ptr::read_unaligned(
+                    buffer
+                        .as_ptr()
+                        .cast::<u8>()
+                        .add(4 + index * row_size)
+                        .cast::<MIB_TCPROW_OWNER_PID>(),
+                )
+            };
+            if row.dwState == MIB_TCP_STATE_ESTAB as u32
+                && row.dwOwningPid == pid
+                && std::net::Ipv4Addr::from(row.dwLocalAddr.to_ne_bytes()) == remote.ip()
+                && std::net::Ipv4Addr::from(row.dwRemoteAddr.to_ne_bytes()) == local.ip()
+                && u16::from_be(row.dwLocalPort as u16) == remote.port()
+                && u16::from_be(row.dwRemotePort as u16) == local.port()
+            {
+                return Ok(());
+            }
+        }
+        return Err(denied("HTTP connection is not owned by the paired service"));
+    }
+    Err(invalid("TCP table changed during verification"))
+}
+
 unsafe fn sid_text(sid: *mut c_void) -> io::Result<String> {
     let mut pointer = std::ptr::null_mut();
     if unsafe { ConvertSidToStringSidW(sid, &mut pointer) } == 0 {

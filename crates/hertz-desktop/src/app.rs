@@ -2368,6 +2368,7 @@ impl App {
             .map_err(|error| error.to_string())?;
         self.close_preview();
         self.settings_drafts.clear();
+        self.wallpaper_ai.generation.retire_profile();
         self.profile = profile;
         self.source_generation = next_generation;
         self.restart_mini_source(target);
@@ -6604,6 +6605,10 @@ pub(crate) fn run_with(run_config: RunConfig) -> Result<()> {
                 if !request.admission.is_valid() {
                     return;
                 }
+                if request.body["command"]=="wallpaper.ai.pair.verify" {
+                    let response=app.handle_ai_pair(request.body["value"].clone(),request.admission.peer().pid);
+                    let _=request.reply.send(response);return;
+                }
                 if request.body.get("protocol").is_some() || request.body.get("command").and_then(serde_json::Value::as_str).is_some_and(|command| command.starts_with("wallpaper.")) {
                     app.submit_wallpaper_management(request.body.clone(), ApiReply::Pipe(request.reply.clone(), request.admission.clone()), target);
                 } else {
@@ -6617,6 +6622,9 @@ pub(crate) fn run_with(run_config: RunConfig) -> Result<()> {
                     crate::host::HostAction::Settings(placement) => app.place_settings(placement, target),
                     crate::host::HostAction::Menu(id) => app.handle_menu(&id, target),
                     crate::host::HostAction::Command { body, reply } => {
+                        if body["command"]=="wallpaper.ai.pair.verify" {
+                            let _=reply.send(app.handle_ai_pair(body["value"].clone(),std::process::id()));return;
+                        }
                         if let Some(response) = app.handle_embedded_lyrics_request(&body) {
                             let _ = reply.send(response);
                         } else if body.get("protocol").is_some() || body.get("command").and_then(serde_json::Value::as_str).is_some_and(|command| command.starts_with("wallpaper.")) {
